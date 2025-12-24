@@ -17,12 +17,18 @@ mongoose.connection.on('error', (err) => {
 })
 
 export const connectDb = async () => {
+  if (mongoose.connection.readyState === 1) {
+    logger.info('already connected to mongo')
+    return
+  }
+
   if (!env.mongoUri) {
     throw new Error('MONGODB_URI is not set')
   }
 
   await mongoose.connect(env.mongoUri, {
     autoIndex: !env.isProduction,
+    serverSelectionTimeoutMS: 5000,
   })
 }
 
