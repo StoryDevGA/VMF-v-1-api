@@ -12,9 +12,14 @@ const toBoolean = (value, fallback) => {
   return value === '1' || value === 'true'
 }
 
+const normalizeOrigin = (origin) => origin.replace(/\/+$/, '')
+
 const parseCorsOrigins = (value) => {
   if (!value) return []
-  return value.split(',').map((origin) => origin.trim()).filter(Boolean)
+  return value
+    .split(',')
+    .map((origin) => normalizeOrigin(origin.trim()))
+    .filter(Boolean)
 }
 
 const env = {
@@ -29,5 +34,11 @@ const env = {
 }
 
 env.isProduction = env.nodeEnv === 'production'
+env.corsOrigins =
+  env.corsOrigins.length > 0
+    ? env.corsOrigins
+    : env.isProduction
+      ? []
+      : ['http://localhost:5173']
 
 export default env
