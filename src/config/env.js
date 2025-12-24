@@ -25,6 +25,7 @@ const env = {
   rateLimitMax: toNumber(process.env.RATE_LIMIT_MAX, 300),
   logLevel: process.env.LOG_LEVEL || 'info',
   trustProxy: toBoolean(process.env.TRUST_PROXY, false),
+  mongoUri: process.env.MONGODB_URI || '',
 }
 
 env.isProduction = env.nodeEnv === 'production'
