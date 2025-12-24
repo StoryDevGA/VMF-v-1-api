@@ -13,7 +13,7 @@ app.set('trust proxy', env.trustProxy)
 app.disable('x-powered-by')
 
 const corsOptions = {
-  origin: env.corsOrigins.length > 0 ? env.corsOrigins : false,
+  origin: env.corsOrigins,
   credentials: true,
 }
 
