@@ -1,7 +1,10 @@
 import env from '../config/env.js'
 import logger from '../config/logger.js'
 
-const errorHandler = (err, _req, res, _next) => {
+const errorHandler = (err, _req, res, next) => {
+  if (res.headersSent) {
+    return next(err)
+  }
   const status = err.statusCode || err.status || 500
   const payload = {
     error: status >= 500 ? 'Internal Server Error' : err.message,

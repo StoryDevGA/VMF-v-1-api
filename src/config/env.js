@@ -9,7 +9,8 @@ const toNumber = (value, fallback) => {
 
 const toBoolean = (value, fallback) => {
   if (value === undefined) return fallback
-  return value === '1' || value === 'true'
+  const normalized = String(value).toLowerCase()
+  return ['1', 'true', 'yes', 'on'].includes(normalized)
 }
 
 const normalizeOrigin = (origin) => origin.replace(/\/+$/, '')

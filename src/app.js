@@ -14,11 +14,15 @@ app.disable('x-powered-by')
 
 const corsOptions = {
   origin: env.corsOrigins,
-  credentials: true,
+  credentials: false,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  maxAge: 600,
 }
 
 app.use(helmet())
 app.use(cors(corsOptions))
+app.options('*', cors(corsOptions))
 app.use(express.json({ limit: '1mb' }))
 app.use(requestLogger)
 app.use(

@@ -6,6 +6,11 @@ import { connectDb, disconnectDb } from './config/db.js'
 
 const server = http.createServer(app)
 
+server.on('error', (err) => {
+  logger.error({ err }, 'server error')
+  process.exit(1)
+})
+
 const startServer = async () => {
   try {
     await connectDb()
