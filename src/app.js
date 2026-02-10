@@ -11,6 +11,7 @@ import authRoutes from './routes/auth.routes.js'
 import identityPlusRoutes from './routes/identityPlus.routes.js'
 import customerRoutes from './routes/customers.routes.js'
 import { customerTenantRouter, tenantRouter } from './routes/tenants.routes.js'
+import { customerUserRouter, userRouter } from './routes/users.routes.js'
 
 const app = express()
 
@@ -61,9 +62,13 @@ app.get('/', (_req, res) => {
 app.use('/health', healthRoutes)
 app.use('/api/v1/auth', authRoutes)
 app.use('/api/v1/webhooks/identity-plus', identityPlusRoutes)
-app.use('/api/v1/customers', customerRoutes)
+// More specific customer-scoped routes BEFORE the general /customers mount
+// (Express prefix-matches app.use, so /customers would intercept /customers/:id/users)
 app.use('/api/v1/customers/:customerId/tenants', customerTenantRouter)
+app.use('/api/v1/customers/:customerId/users', customerUserRouter)
+app.use('/api/v1/customers', customerRoutes)
 app.use('/api/v1/tenants', tenantRouter)
+app.use('/api/v1/users', userRouter)
 
 app.use((_req, res) => {
   res.status(404).json({ error: 'Not Found' })
