@@ -27,8 +27,8 @@ export const connectRedis = async () => {
       password: env.redisPassword || undefined,
       maxRetriesPerRequest: 3,
       lazyConnect: true,
-      // In non-production: disable automatic reconnection to stop log spam
-      retryStrategy: env.nodeEnv === 'production'
+      // Only enable automatic reconnection when Redis is explicitly required
+      retryStrategy: env.redisRequired
         ? (times) => Math.min(times * 200, 5000)
         : () => null,
     })
@@ -52,9 +52,9 @@ export const connectRedis = async () => {
   } catch (error) {
     connected = false
     redis = null
-    // In production this is fatal; in development we warn and continue
-    if (env.nodeEnv === 'production') {
-      logger.error({ error }, 'Failed to connect to Redis (production — fatal)')
+    // Fatal only when REDIS_REQUIRED=true
+    if (env.redisRequired) {
+      logger.error({ error }, 'Failed to connect to Redis (REDIS_REQUIRED=true — fatal)')
       throw error
     }
     logger.warn('Redis unavailable — running without Redis. Token blacklisting and refresh-token storage are disabled.')

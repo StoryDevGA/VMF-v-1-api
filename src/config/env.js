@@ -44,6 +44,7 @@ const env = {
   // Redis Configuration
   redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',
   redisPassword: process.env.REDIS_PASSWORD || '',
+  redisRequired: toBoolean(process.env.REDIS_REQUIRED, false),
   
   // Identity Plus Configuration
   identityPlusApiUrl: process.env.IDENTITY_PLUS_API_URL || '',
