@@ -71,7 +71,8 @@ export const bulkOperationsRateLimit = rateLimit({
   standardHeaders: 'draft-7',
   legacyHeaders: false,
   handler: standardHandler,
-  keyGenerator: (req) => `${req.ip}:${req.userId || 'anonymous'}`
+  keyGenerator: (req) => `${req.ip}:${req.userId || 'anonymous'}`,
+  skip: () => env.nodeEnv === 'test'
 })
 
 export const generalApiRateLimit = rateLimit({

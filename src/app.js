@@ -14,6 +14,7 @@ import { customerTenantRouter, tenantRouter } from './routes/tenants.routes.js'
 import { customerUserRouter, userRouter } from './routes/users.routes.js'
 import { tenantVmfRouter, vmfRouter } from './routes/vmfs.routes.js'
 import { vmfDealRouter, dealRouter } from './routes/deals.routes.js'
+import { bulkRouter, bulkDisableRouter } from './routes/bulk.routes.js'
 
 const app = express()
 
@@ -68,6 +69,8 @@ app.use('/api/v1/webhooks/identity-plus', identityPlusRoutes)
 // (Express prefix-matches app.use, so /customers would intercept /customers/:id/users)
 app.use('/api/v1/customers/:customerId/tenants/:tenantId/vmfs', tenantVmfRouter)
 app.use('/api/v1/customers/:customerId/tenants', customerTenantRouter)
+app.use('/api/v1/customers/:customerId/users/bulk-disable', bulkDisableRouter)
+app.use('/api/v1/customers/:customerId/users/bulk', bulkRouter)
 app.use('/api/v1/customers/:customerId/users', customerUserRouter)
 app.use('/api/v1/customers', customerRoutes)
 app.use('/api/v1/vmfs/:vmfId/deals', vmfDealRouter)
