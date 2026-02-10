@@ -54,6 +54,9 @@ const env = {
   // Security Configuration
   bcryptRounds: toNumber(process.env.BCRYPT_ROUNDS, 12),
   sessionTimeout: toNumber(process.env.SESSION_TIMEOUT_MINUTES, 30) * 60 * 1000,
+
+  // Audit Configuration
+  auditSignatureSecret: process.env.AUDIT_SIGNATURE_SECRET || 'default-secret-change-in-production',
   
   // Enhanced Rate Limits
   authRateLimit: toNumber(process.env.AUTH_RATE_LIMIT, 5),

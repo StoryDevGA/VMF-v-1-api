@@ -8,8 +8,9 @@
  * Both endpoints update the User document and create an audit log.
  */
 
-import { User, AuditLog } from '../models/index.js'
+import { User } from '../models/index.js'
 import logger from '../config/logger.js'
+import auditService from '../services/auditService.js'
 
 /* ------------------------------------------------------------------ */
 /*  POST /registration-complete                                       */
@@ -60,25 +61,17 @@ export const handleRegistrationComplete = async (req, res, next) => {
     await user.save()
 
     // Audit log
-    try {
-      await AuditLog.createLog({
-        actorUserId: user._id, // self-action via webhook
-        action: 'IDENTITY_PLUS_REGISTRATION_COMPLETE',
-        resourceType: 'User',
-        resourceId: user._id,
-        scope: {},
-        diff: {
-          trustStatus: { from: previousStatus, to: 'TRUSTED' },
-          externalId: { from: null, to: externalId },
-        },
-        ip: req.ip,
-        userAgent: req.get('user-agent'),
-        requestId: req.requestId,
-      })
-    } catch (auditErr) {
-      // Audit failure must not block the webhook response
-      logger.error({ err: auditErr, requestId: req.requestId }, 'audit log failed')
-    }
+    await auditService.logFromRequest(req, {
+      actorUserId: user._id,
+      action: 'IDENTITY_PLUS_REGISTRATION_COMPLETE',
+      resourceType: 'User',
+      resourceId: user._id,
+      scope: {},
+      diff: {
+        trustStatus: { from: previousStatus, to: 'TRUSTED' },
+        externalId: { from: null, to: externalId },
+      },
+    })
 
     logger.info(
       { userId: user._id, email, externalId, requestId: req.requestId },
@@ -155,24 +148,17 @@ export const handleTrustUpdated = async (req, res, next) => {
     await user.save()
 
     // Audit log
-    try {
-      await AuditLog.createLog({
-        actorUserId: user._id, // external action attributed to user
-        action: 'IDENTITY_PLUS_TRUST_UPDATED',
-        resourceType: 'User',
-        resourceId: user._id,
-        scope: {},
-        diff: {
-          trustStatus: { from: previousStatus, to: trustStatus },
-          ...(trustStatus === 'REVOKED' ? { isActive: { from: true, to: false } } : {}),
-        },
-        ip: req.ip,
-        userAgent: req.get('user-agent'),
-        requestId: req.requestId,
-      })
-    } catch (auditErr) {
-      logger.error({ err: auditErr, requestId: req.requestId }, 'audit log failed')
-    }
+    await auditService.logFromRequest(req, {
+      actorUserId: user._id,
+      action: 'IDENTITY_PLUS_TRUST_UPDATED',
+      resourceType: 'User',
+      resourceId: user._id,
+      scope: {},
+      diff: {
+        trustStatus: { from: previousStatus, to: trustStatus },
+        ...(trustStatus === 'REVOKED' ? { isActive: { from: true, to: false } } : {}),
+      },
+    })
 
     logger.info(
       { userId: user._id, from: previousStatus, to: trustStatus, requestId: req.requestId },

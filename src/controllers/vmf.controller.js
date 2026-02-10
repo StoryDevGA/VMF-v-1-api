@@ -15,30 +15,9 @@
  *     DELETE /api/v1/vmfs/:vmfId/grants/:userId   Revoke user access
  */
 
-import { Customer, Tenant, VMF, Deal, User, AuditLog } from '../models/index.js'
+import { Customer, Tenant, VMF, Deal, User } from '../models/index.js'
+import auditService from '../services/auditService.js'
 import logger from '../config/logger.js'
-
-/* ------------------------------------------------------------------ */
-/*  Audit helper                                                      */
-/* ------------------------------------------------------------------ */
-
-const audit = async (actorUserId, action, resourceType, resourceId, scope, diff, req) => {
-  try {
-    await AuditLog.createLog({
-      actorUserId,
-      action,
-      resourceType,
-      resourceId,
-      scope,
-      diff,
-      ip: req?.ip,
-      userAgent: req?.get?.('user-agent'),
-      requestId: req?.requestId,
-    })
-  } catch (err) {
-    logger.error({ err, action, resourceType, resourceId }, 'vmf audit log failed')
-  }
-}
 
 /* ------------------------------------------------------------------ */
 /*  GET /api/v1/customers/:customerId/tenants/:tenantId/vmfs          */
@@ -137,15 +116,13 @@ export const createVmf = async (req, res, next) => {
 
     await vmf.save()
 
-    await audit(
-      actorUserId,
-      'VMF_CREATED',
-      'VMF',
-      vmf._id,
-      { customerId, tenantId, vmfId: vmf._id },
-      { name: req.body.name },
-      req,
-    )
+    await auditService.logFromRequest(req, {
+      action: 'VMF_CREATED',
+      resourceType: 'VMF',
+      resourceId: vmf._id,
+      scope: { customerId, tenantId, vmfId: vmf._id },
+      diff: { name: req.body.name },
+    })
 
     logger.info(
       { customerId, tenantId, vmfId: vmf._id },
@@ -237,15 +214,13 @@ export const updateVmf = async (req, res, next) => {
 
     await vmf.save()
 
-    await audit(
-      actorUserId,
-      'VMF_UPDATED',
-      'VMF',
-      vmf._id,
-      { customerId: vmf.customerId, tenantId: vmf.tenantId, vmfId: vmf._id },
+    await auditService.logFromRequest(req, {
+      action: 'VMF_UPDATED',
+      resourceType: 'VMF',
+      resourceId: vmf._id,
+      scope: { customerId: vmf.customerId, tenantId: vmf.tenantId, vmfId: vmf._id },
       diff,
-      req,
-    )
+    })
 
     return res.status(200).json({
       data: vmf.toJSON(),
@@ -320,15 +295,13 @@ export const deleteVmf = async (req, res, next) => {
 
     await VMF.deleteOne({ _id: vmf._id })
 
-    await audit(
-      actorUserId,
-      'VMF_DELETED',
-      'VMF',
-      vmf._id,
-      { customerId: vmf.customerId, tenantId: vmf.tenantId, vmfId: vmf._id },
-      { name: vmf.name },
-      req,
-    )
+    await auditService.logFromRequest(req, {
+      action: 'VMF_DELETED',
+      resourceType: 'VMF',
+      resourceId: vmf._id,
+      scope: { customerId: vmf.customerId, tenantId: vmf.tenantId, vmfId: vmf._id },
+      diff: { name: vmf.name },
+    })
 
     logger.info(
       { vmfId: vmf._id, customerId: vmf.customerId, tenantId: vmf.tenantId },
@@ -416,16 +389,13 @@ export const grantAccess = async (req, res, next) => {
 
     await targetUser.save()
 
-    const actorUserId = req.context?.userId || req.userId
-    await audit(
-      actorUserId,
-      'VMF_GRANT_CREATED',
-      'User',
-      targetUser._id,
-      { customerId: vmf.customerId, tenantId: vmf.tenantId, vmfId: vmf._id },
-      { userId, permissions },
-      req,
-    )
+    await auditService.logFromRequest(req, {
+      action: 'VMF_GRANT_CREATED',
+      resourceType: 'User',
+      resourceId: targetUser._id,
+      scope: { customerId: vmf.customerId, tenantId: vmf.tenantId, vmfId: vmf._id },
+      diff: { userId, permissions },
+    })
 
     return res.status(200).json({
       data: {
@@ -490,16 +460,13 @@ export const revokeAccess = async (req, res, next) => {
     targetUser.vmfGrants.splice(grantIdx, 1)
     await targetUser.save()
 
-    const actorUserId = req.context?.userId || req.userId
-    await audit(
-      actorUserId,
-      'VMF_GRANT_REVOKED',
-      'User',
-      targetUser._id,
-      { customerId: vmf.customerId, tenantId: vmf.tenantId, vmfId: vmf._id },
-      { userId },
-      req,
-    )
+    await auditService.logFromRequest(req, {
+      action: 'VMF_GRANT_REVOKED',
+      resourceType: 'User',
+      resourceId: targetUser._id,
+      scope: { customerId: vmf.customerId, tenantId: vmf.tenantId, vmfId: vmf._id },
+      diff: { userId },
+    })
 
     return res.status(200).json({
       data: { message: `Access revoked for user '${targetUser.name}' on VMF '${vmf.name}'.` },

@@ -11,8 +11,9 @@
  *   - POST   /api/v1/users/:userId/resend-invitation        Resend invitation
  */
 
-import { Customer, User, Tenant, AuditLog } from '../models/index.js'
+import { Customer, User, Tenant } from '../models/index.js'
 import identityPlusService from '../services/identityPlusService.js'
+import auditService from '../services/auditService.js'
 import logger from '../config/logger.js'
 
 /* ------------------------------------------------------------------ */
@@ -170,35 +171,22 @@ export const createUser = async (req, res, next) => {
     }
 
     // 6. Audit log
-    const actorUserId = req.context?.userId || req.userId
-    try {
-      await AuditLog.createLog({
-        actorUserId,
-        action: 'USER_CREATED',
+    await auditService.logFromRequest(req, {
+      action: 'USER_CREATED',
+      resourceType: 'User',
+      resourceId: user._id,
+      scope: { customerId },
+      diff: { name, email, roles, tenantVisibility },
+    })
+
+    if (invitationResult) {
+      await auditService.logFromRequest(req, {
+        action: 'USER_INVITED',
         resourceType: 'User',
         resourceId: user._id,
         scope: { customerId },
-        diff: { name, email, roles, tenantVisibility },
-        ip: req.ip,
-        userAgent: req.get?.('user-agent'),
-        requestId: req.requestId,
+        diff: { email, externalId: invitationResult.externalId },
       })
-
-      if (invitationResult) {
-        await AuditLog.createLog({
-          actorUserId,
-          action: 'USER_INVITED',
-          resourceType: 'User',
-          resourceId: user._id,
-          scope: { customerId },
-          diff: { email, externalId: invitationResult.externalId },
-          ip: req.ip,
-          userAgent: req.get?.('user-agent'),
-          requestId: req.requestId,
-        })
-      }
-    } catch (auditErr) {
-      logger.error({ err: auditErr }, 'user create audit log failed')
     }
 
     return res.status(201).json({
@@ -361,24 +349,15 @@ export const updateUser = async (req, res, next) => {
     await user.save()
 
     // Audit log
-    const actorUserId = req.context?.userId || req.userId
-    try {
-      await AuditLog.createLog({
-        actorUserId,
-        action: 'USER_ROLE_UPDATED',
-        resourceType: 'User',
-        resourceId: user._id,
-        scope: {
-          customerId: user.memberships.find((m) => m.customerId !== null)?.customerId,
-        },
-        diff,
-        ip: req.ip,
-        userAgent: req.get?.('user-agent'),
-        requestId: req.requestId,
-      })
-    } catch (auditErr) {
-      logger.error({ err: auditErr }, 'user update audit log failed')
-    }
+    await auditService.logFromRequest(req, {
+      action: 'USER_ROLE_UPDATED',
+      resourceType: 'User',
+      resourceId: user._id,
+      scope: {
+        customerId: user.memberships.find((m) => m.customerId !== null)?.customerId,
+      },
+      diff,
+    })
 
     return res.status(200).json({
       data: user.toJSON(),
@@ -454,27 +433,18 @@ export const disableUser = async (req, res, next) => {
     }
 
     // 3. Audit log
-    const actorUserId = req.context?.userId || req.userId
-    try {
-      await AuditLog.createLog({
-        actorUserId,
-        action: 'USER_DISABLED',
-        resourceType: 'User',
-        resourceId: user._id,
-        scope: {
-          customerId: user.memberships.find((m) => m.customerId !== null)?.customerId,
-        },
-        diff: {
-          isActive: { from: true, to: false },
-          trustStatus: { from: 'TRUSTED', to: 'REVOKED' },
-        },
-        ip: req.ip,
-        userAgent: req.get?.('user-agent'),
-        requestId: req.requestId,
-      })
-    } catch (auditErr) {
-      logger.error({ err: auditErr }, 'user disable audit log failed')
-    }
+    await auditService.logFromRequest(req, {
+      action: 'USER_DISABLED',
+      resourceType: 'User',
+      resourceId: user._id,
+      scope: {
+        customerId: user.memberships.find((m) => m.customerId !== null)?.customerId,
+      },
+      diff: {
+        isActive: { from: true, to: false },
+        trustStatus: { from: 'TRUSTED', to: 'REVOKED' },
+      },
+    })
 
     return res.status(200).json({
       data: user.toJSON(),
@@ -544,22 +514,13 @@ export const deleteUser = async (req, res, next) => {
     await User.deleteOne({ _id: user._id })
 
     // Audit log
-    const actorUserId = req.context?.userId || req.userId
-    try {
-      await AuditLog.createLog({
-        actorUserId,
-        action: 'USER_DELETED',
-        resourceType: 'User',
-        resourceId: userSnapshot.id,
-        scope: { customerId: userSnapshot.customerId },
-        diff: { email: userSnapshot.email, name: userSnapshot.name },
-        ip: req.ip,
-        userAgent: req.get?.('user-agent'),
-        requestId: req.requestId,
-      })
-    } catch (auditErr) {
-      logger.error({ err: auditErr }, 'user delete audit log failed')
-    }
+    await auditService.logFromRequest(req, {
+      action: 'USER_DELETED',
+      resourceType: 'User',
+      resourceId: userSnapshot.id,
+      scope: { customerId: userSnapshot.customerId },
+      diff: { email: userSnapshot.email, name: userSnapshot.name },
+    })
 
     return res.status(200).json({
       data: { message: 'User permanently deleted.', userId: userSnapshot.id },
@@ -634,22 +595,13 @@ export const resendInvitation = async (req, res, next) => {
     }
 
     // Audit log
-    const actorUserId = req.context?.userId || req.userId
-    try {
-      await AuditLog.createLog({
-        actorUserId,
-        action: 'USER_INVITED',
-        resourceType: 'User',
-        resourceId: user._id,
-        scope: { customerId },
-        diff: { email: user.email, externalId: result?.externalId, resend: true },
-        ip: req.ip,
-        userAgent: req.get?.('user-agent'),
-        requestId: req.requestId,
-      })
-    } catch (auditErr) {
-      logger.error({ err: auditErr }, 'resend invitation audit log failed')
-    }
+    await auditService.logFromRequest(req, {
+      action: 'USER_INVITED',
+      resourceType: 'User',
+      resourceId: user._id,
+      scope: { customerId },
+      diff: { email: user.email, externalId: result?.externalId, resend: true },
+    })
 
     return res.status(200).json({
       data: {

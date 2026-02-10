@@ -11,31 +11,10 @@
  * success/failure details plus an overall summary.
  */
 
-import { Customer, User, Tenant, AuditLog } from '../models/index.js'
+import { Customer, User, Tenant } from '../models/index.js'
 import identityPlusService from '../services/identityPlusService.js'
 import logger from '../config/logger.js'
-
-/* ------------------------------------------------------------------ */
-/*  Helpers                                                           */
-/* ------------------------------------------------------------------ */
-
-const audit = async (req, action, resourceId, scope, diff) => {
-  try {
-    await AuditLog.createLog({
-      actorUserId: req.context?.userId || req.userId,
-      action,
-      resourceType: 'User',
-      resourceId,
-      scope,
-      diff,
-      ip: req.ip,
-      userAgent: req.get?.('user-agent'),
-      requestId: req.requestId,
-    })
-  } catch (err) {
-    logger.error({ err, action, resourceId }, 'bulk operation audit log failed')
-  }
-}
+import auditService from '../services/auditService.js'
 
 /* ------------------------------------------------------------------ */
 /*  POST /api/v1/customers/:customerId/users/bulk                     */
@@ -198,12 +177,18 @@ export const bulkCreateUsers = async (req, res, next) => {
         }
 
         // Audit
-        await audit(req, 'USER_CREATED', user._id, { customerId }, {
-          name: entry.name,
-          email,
-          roles: entry.roles,
-          tenantVisibility: entry.tenantVisibility,
-          bulk: true,
+        await auditService.logFromRequest(req, {
+          action: 'USER_CREATED',
+          resourceType: 'User',
+          resourceId: user._id,
+          scope: { customerId },
+          diff: {
+            name: entry.name,
+            email,
+            roles: entry.roles,
+            tenantVisibility: entry.tenantVisibility,
+            bulk: true,
+          },
         })
 
         successCount++
@@ -227,10 +212,16 @@ export const bulkCreateUsers = async (req, res, next) => {
     }
 
     // Audit the bulk operation itself
-    await audit(req, 'BULK_USERS_CREATED', null, { customerId }, {
-      requested: users.length,
-      succeeded: successCount,
-      failed: failureCount,
+    await auditService.logFromRequest(req, {
+      action: 'BULK_USERS_CREATED',
+      resourceType: 'User',
+      resourceId: req.params.customerId,
+      scope: { customerId },
+      diff: {
+        requested: users.length,
+        succeeded: successCount,
+        failed: failureCount,
+      },
     })
 
     const httpStatus = failureCount === 0 ? 200 : (successCount === 0 ? 422 : 207)
@@ -384,9 +375,15 @@ export const bulkUpdateUsers = async (req, res, next) => {
 
         await user.save()
 
-        await audit(req, 'USER_ROLE_UPDATED', user._id, { customerId }, {
-          ...diff,
-          bulk: true,
+        await auditService.logFromRequest(req, {
+          action: 'USER_ROLE_UPDATED',
+          resourceType: 'User',
+          resourceId: user._id,
+          scope: { customerId },
+          diff: {
+            ...diff,
+            bulk: true,
+          },
         })
 
         successCount++
@@ -408,10 +405,16 @@ export const bulkUpdateUsers = async (req, res, next) => {
     }
 
     // Audit the bulk operation
-    await audit(req, 'BULK_USERS_UPDATED', null, { customerId }, {
-      requested: users.length,
-      succeeded: successCount,
-      failed: failureCount,
+    await auditService.logFromRequest(req, {
+      action: 'BULK_USERS_UPDATED',
+      resourceType: 'User',
+      resourceId: req.params.customerId,
+      scope: { customerId },
+      diff: {
+        requested: users.length,
+        succeeded: successCount,
+        failed: failureCount,
+      },
     })
 
     const httpStatus = failureCount === 0 ? 200 : (successCount === 0 ? 422 : 207)
@@ -525,10 +528,16 @@ export const bulkDisableUsers = async (req, res, next) => {
           )
         }
 
-        await audit(req, 'USER_DISABLED', user._id, { customerId }, {
-          isActive: { from: true, to: false },
-          trustStatus: { from: 'TRUSTED', to: 'REVOKED' },
-          bulk: true,
+        await auditService.logFromRequest(req, {
+          action: 'USER_DISABLED',
+          resourceType: 'User',
+          resourceId: user._id,
+          scope: { customerId },
+          diff: {
+            isActive: { from: true, to: false },
+            trustStatus: { from: 'TRUSTED', to: 'REVOKED' },
+            bulk: true,
+          },
         })
 
         successCount++
@@ -550,10 +559,16 @@ export const bulkDisableUsers = async (req, res, next) => {
     }
 
     // Audit the bulk operation
-    await audit(req, 'BULK_USERS_DISABLED', null, { customerId }, {
-      requested: userIds.length,
-      succeeded: successCount,
-      failed: failureCount,
+    await auditService.logFromRequest(req, {
+      action: 'BULK_USERS_DISABLED',
+      resourceType: 'User',
+      resourceId: req.params.customerId,
+      scope: { customerId },
+      diff: {
+        requested: userIds.length,
+        succeeded: successCount,
+        failed: failureCount,
+      },
     })
 
     const httpStatus = failureCount === 0 ? 200 : (successCount === 0 ? 422 : 207)

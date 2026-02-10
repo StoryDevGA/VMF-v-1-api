@@ -17,31 +17,9 @@
  * Audit records are created for every provisioned entity.
  */
 
-import { Customer, Tenant, VMF, AuditLog } from '../models/index.js'
+import { Customer, Tenant, VMF } from '../models/index.js'
 import logger from '../config/logger.js'
-
-/* ------------------------------------------------------------------ */
-/*  Audit helper                                                      */
-/* ------------------------------------------------------------------ */
-
-const audit = async (actorUserId, action, resourceType, resourceId, scope, diff, req) => {
-  try {
-    await AuditLog.createLog({
-      actorUserId,
-      action,
-      resourceType,
-      resourceId,
-      scope,
-      diff,
-      ip: req?.ip,
-      userAgent: req?.get?.('user-agent'),
-      requestId: req?.requestId,
-    })
-  } catch (err) {
-    // Audit failures must not block the provisioning flow
-    logger.error({ err, action, resourceType, resourceId }, 'provisioning audit log failed')
-  }
-}
+import auditService from './auditService.js'
 
 /* ------------------------------------------------------------------ */
 /*  createCustomerWithDefaults                                        */
@@ -103,8 +81,8 @@ export const createCustomerWithDefaults = async (payload, actorUserId, req) => {
     result.customer = customer
     result.tenant = tenant
 
-    await audit(actorUserId, 'CUSTOMER_CREATED', 'Customer', customer._id, { customerId: customer._id }, null, req)
-    await audit(actorUserId, 'TENANT_CREATED', 'Tenant', tenant._id, { customerId: customer._id, tenantId: tenant._id }, null, req)
+    await auditService.logFromRequest(req, { action: 'CUSTOMER_CREATED', resourceType: 'Customer', resourceId: customer._id, scope: { customerId: customer._id }, diff: null })
+    await auditService.logFromRequest(req, { action: 'TENANT_CREATED', resourceType: 'Tenant', resourceId: tenant._id, scope: { customerId: customer._id, tenantId: tenant._id }, diff: null })
 
     /* ---------- Auto-create VMF 1 ---------- */
     const vmf = new VMF({
@@ -117,7 +95,7 @@ export const createCustomerWithDefaults = async (payload, actorUserId, req) => {
     await vmf.save()
     result.vmf = vmf
 
-    await audit(actorUserId, 'VMF_CREATED', 'VMF', vmf._id, { customerId: customer._id, tenantId: tenant._id, vmfId: vmf._id }, null, req)
+    await auditService.logFromRequest(req, { action: 'VMF_CREATED', resourceType: 'VMF', resourceId: vmf._id, scope: { customerId: customer._id, tenantId: tenant._id, vmfId: vmf._id }, diff: null })
 
     logger.info(
       { customerId: customer._id, tenantId: tenant._id, vmfId: vmf._id },
@@ -130,7 +108,7 @@ export const createCustomerWithDefaults = async (payload, actorUserId, req) => {
     await customer.save()
     result.customer = customer
 
-    await audit(actorUserId, 'CUSTOMER_CREATED', 'Customer', customer._id, { customerId: customer._id }, null, req)
+    await auditService.logFromRequest(req, { action: 'CUSTOMER_CREATED', resourceType: 'Customer', resourceId: customer._id, scope: { customerId: customer._id }, diff: null })
 
     logger.info(
       { customerId: customer._id },
@@ -173,7 +151,7 @@ export const createTenantWithDefaults = async (payload, customer, actorUserId, r
   await tenant.save()
   result.tenant = tenant
 
-  await audit(actorUserId, 'TENANT_CREATED', 'Tenant', tenant._id, { customerId: customer._id, tenantId: tenant._id }, null, req)
+  await auditService.logFromRequest(req, { action: 'TENANT_CREATED', resourceType: 'Tenant', resourceId: tenant._id, scope: { customerId: customer._id, tenantId: tenant._id }, diff: null })
 
   /* ---------- Auto-create VMF if policy requires it ---------- */
   if (['PER_TENANT_SINGLE', 'PER_TENANT_MULTI'].includes(customer.vmfPolicy)) {
@@ -187,7 +165,7 @@ export const createTenantWithDefaults = async (payload, customer, actorUserId, r
     await vmf.save()
     result.vmf = vmf
 
-    await audit(actorUserId, 'VMF_CREATED', 'VMF', vmf._id, { customerId: customer._id, tenantId: tenant._id, vmfId: vmf._id }, null, req)
+    await auditService.logFromRequest(req, { action: 'VMF_CREATED', resourceType: 'VMF', resourceId: vmf._id, scope: { customerId: customer._id, tenantId: tenant._id, vmfId: vmf._id }, diff: null })
   }
 
   logger.info(

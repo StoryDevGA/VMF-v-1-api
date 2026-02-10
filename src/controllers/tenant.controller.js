@@ -9,8 +9,9 @@
  *   - POST  /api/v1/tenants/:tenantId/disable           Disable tenant
  */
 
-import { Customer, Tenant, AuditLog } from '../models/index.js'
+import { Customer, Tenant } from '../models/index.js'
 import { createTenantWithDefaults } from '../services/provisioningService.js'
+import auditService from '../services/auditService.js'
 import logger from '../config/logger.js'
 
 /* ------------------------------------------------------------------ */
@@ -160,22 +161,13 @@ export const updateTenant = async (req, res, next) => {
 
     await tenant.save()
 
-    const actorUserId = req.context?.userId || req.userId
-    try {
-      await AuditLog.createLog({
-        actorUserId,
-        action: 'TENANT_UPDATED',
-        resourceType: 'Tenant',
-        resourceId: tenant._id,
-        scope: { customerId: tenant.customerId, tenantId: tenant._id },
-        diff,
-        ip: req.ip,
-        userAgent: req.get?.('user-agent'),
-        requestId: req.requestId,
-      })
-    } catch (auditErr) {
-      logger.error({ err: auditErr }, 'tenant update audit log failed')
-    }
+    await auditService.logFromRequest(req, {
+      action: 'TENANT_UPDATED',
+      resourceType: 'Tenant',
+      resourceId: tenant._id,
+      scope: { customerId: tenant.customerId, tenantId: tenant._id },
+      diff,
+    })
 
     return res.status(200).json({
       data: tenant.toJSON(),
@@ -238,22 +230,13 @@ export const enableTenant = async (req, res, next) => {
     tenant.status = 'ENABLED'
     await tenant.save()
 
-    const actorUserId = req.context?.userId || req.userId
-    try {
-      await AuditLog.createLog({
-        actorUserId,
-        action: 'TENANT_ENABLED',
-        resourceType: 'Tenant',
-        resourceId: tenant._id,
-        scope: { customerId: tenant.customerId, tenantId: tenant._id },
-        diff: { status: { from: previousStatus, to: 'ENABLED' } },
-        ip: req.ip,
-        userAgent: req.get?.('user-agent'),
-        requestId: req.requestId,
-      })
-    } catch (auditErr) {
-      logger.error({ err: auditErr }, 'tenant enable audit log failed')
-    }
+    await auditService.logFromRequest(req, {
+      action: 'TENANT_ENABLED',
+      resourceType: 'Tenant',
+      resourceId: tenant._id,
+      scope: { customerId: tenant.customerId, tenantId: tenant._id },
+      diff: { status: { from: previousStatus, to: 'ENABLED' } },
+    })
 
     return res.status(200).json({
       data: tenant.toJSON(),
@@ -318,22 +301,13 @@ export const disableTenant = async (req, res, next) => {
     tenant.status = 'DISABLED'
     await tenant.save()
 
-    const actorUserId = req.context?.userId || req.userId
-    try {
-      await AuditLog.createLog({
-        actorUserId,
-        action: 'TENANT_DISABLED',
-        resourceType: 'Tenant',
-        resourceId: tenant._id,
-        scope: { customerId: tenant.customerId, tenantId: tenant._id },
-        diff: { status: { from: previousStatus, to: 'DISABLED' } },
-        ip: req.ip,
-        userAgent: req.get?.('user-agent'),
-        requestId: req.requestId,
-      })
-    } catch (auditErr) {
-      logger.error({ err: auditErr }, 'tenant disable audit log failed')
-    }
+    await auditService.logFromRequest(req, {
+      action: 'TENANT_DISABLED',
+      resourceType: 'Tenant',
+      resourceId: tenant._id,
+      scope: { customerId: tenant.customerId, tenantId: tenant._id },
+      diff: { status: { from: previousStatus, to: 'DISABLED' } },
+    })
 
     return res.status(200).json({
       data: tenant.toJSON(),

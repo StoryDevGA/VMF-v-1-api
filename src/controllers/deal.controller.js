@@ -13,30 +13,9 @@
  *     DELETE /api/v1/deals/:dealId           Soft-delete (archive) deal
  */
 
-import { VMF, Deal, AuditLog } from '../models/index.js'
+import { VMF, Deal } from '../models/index.js'
 import logger from '../config/logger.js'
-
-/* ------------------------------------------------------------------ */
-/*  Audit helper                                                      */
-/* ------------------------------------------------------------------ */
-
-const audit = async (actorUserId, action, resourceType, resourceId, scope, diff, req) => {
-  try {
-    await AuditLog.createLog({
-      actorUserId,
-      action,
-      resourceType,
-      resourceId,
-      scope,
-      diff,
-      ip: req?.ip,
-      userAgent: req?.get?.('user-agent'),
-      requestId: req?.requestId,
-    })
-  } catch (err) {
-    logger.error({ err, action, resourceType, resourceId }, 'deal audit log failed')
-  }
-}
+import auditService from '../services/auditService.js'
 
 /* ------------------------------------------------------------------ */
 /*  GET /api/v1/vmfs/:vmfId/deals                                     */
@@ -142,15 +121,13 @@ export const createDeal = async (req, res, next) => {
 
     await deal.save()
 
-    await audit(
-      actorUserId,
-      'DEAL_CREATED',
-      'Deal',
-      deal._id,
-      { customerId: vmf.customerId, tenantId: vmf.tenantId, vmfId: vmf._id },
-      { title: req.body.title },
-      req,
-    )
+    await auditService.logFromRequest(req, {
+      action: 'DEAL_CREATED',
+      resourceType: 'Deal',
+      resourceId: deal._id,
+      scope: { customerId: vmf.customerId, tenantId: vmf.tenantId, vmfId: vmf._id },
+      diff: { title: req.body.title },
+    })
 
     logger.info(
       { vmfId: vmf._id, dealId: deal._id },
@@ -252,15 +229,13 @@ export const updateDeal = async (req, res, next) => {
 
     await deal.save()
 
-    await audit(
-      actorUserId,
-      'DEAL_UPDATED',
-      'Deal',
-      deal._id,
-      { customerId: deal.customerId, tenantId: deal.tenantId, vmfId: deal.vmfId },
+    await auditService.logFromRequest(req, {
+      action: 'DEAL_UPDATED',
+      resourceType: 'Deal',
+      resourceId: deal._id,
+      scope: { customerId: deal.customerId, tenantId: deal.tenantId, vmfId: deal.vmfId },
       diff,
-      req,
-    )
+    })
 
     return res.status(200).json({
       data: deal.toJSON(),
@@ -306,15 +281,13 @@ export const archiveDeal = async (req, res, next) => {
     deal.status = 'ARCHIVED'
     await deal.save()
 
-    await audit(
-      actorUserId,
-      'DEAL_ARCHIVED',
-      'Deal',
-      deal._id,
-      { customerId: deal.customerId, tenantId: deal.tenantId, vmfId: deal.vmfId },
-      { status: { from: 'ACTIVE', to: 'ARCHIVED' } },
-      req,
-    )
+    await auditService.logFromRequest(req, {
+      action: 'DEAL_ARCHIVED',
+      resourceType: 'Deal',
+      resourceId: deal._id,
+      scope: { customerId: deal.customerId, tenantId: deal.tenantId, vmfId: deal.vmfId },
+      diff: { status: { from: 'ACTIVE', to: 'ARCHIVED' } },
+    })
 
     logger.info(
       { dealId: deal._id, vmfId: deal.vmfId },

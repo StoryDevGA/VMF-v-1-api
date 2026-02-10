@@ -10,8 +10,9 @@
  *   - POST   /api/v1/customers/:customerId/admins  Assign CUSTOMER_ADMIN
  */
 
-import { Customer, User, AuditLog } from '../models/index.js'
+import { Customer, User } from '../models/index.js'
 import { createCustomerWithDefaults } from '../services/provisioningService.js'
+import auditService from '../services/auditService.js'
 import logger from '../config/logger.js'
 
 /* ------------------------------------------------------------------ */
@@ -168,22 +169,13 @@ export const updateCustomer = async (req, res, next) => {
 
     await customer.save()
 
-    const actorUserId = req.context?.userId || req.userId
-    try {
-      await AuditLog.createLog({
-        actorUserId,
-        action: 'CUSTOMER_UPDATED',
-        resourceType: 'Customer',
-        resourceId: customer._id,
-        scope: { customerId: customer._id },
-        diff,
-        ip: req.ip,
-        userAgent: req.get?.('user-agent'),
-        requestId: req.requestId,
-      })
-    } catch (auditErr) {
-      logger.error({ err: auditErr }, 'customer update audit log failed')
-    }
+    await auditService.logFromRequest(req, {
+      action: 'CUSTOMER_UPDATED',
+      resourceType: 'Customer',
+      resourceId: customer._id,
+      scope: { customerId: customer._id },
+      diff,
+    })
 
     return res.status(200).json({
       data: customer.toJSON(),
@@ -228,22 +220,13 @@ export const updateCustomerStatus = async (req, res, next) => {
     customer.status = req.body.status
     await customer.save()
 
-    const actorUserId = req.context?.userId || req.userId
-    try {
-      await AuditLog.createLog({
-        actorUserId,
-        action: 'CUSTOMER_STATUS_CHANGED',
-        resourceType: 'Customer',
-        resourceId: customer._id,
-        scope: { customerId: customer._id },
-        diff: { status: { from: previousStatus, to: req.body.status } },
-        ip: req.ip,
-        userAgent: req.get?.('user-agent'),
-        requestId: req.requestId,
-      })
-    } catch (auditErr) {
-      logger.error({ err: auditErr }, 'customer status audit log failed')
-    }
+    await auditService.logFromRequest(req, {
+      action: 'CUSTOMER_STATUS_CHANGED',
+      resourceType: 'Customer',
+      resourceId: customer._id,
+      scope: { customerId: customer._id },
+      diff: { status: { from: previousStatus, to: req.body.status } },
+    })
 
     return res.status(200).json({
       data: customer.toJSON(),
@@ -318,22 +301,13 @@ export const assignAdmin = async (req, res, next) => {
       await user.save()
     }
 
-    const actorUserId = req.context?.userId || req.userId
-    try {
-      await AuditLog.createLog({
-        actorUserId,
-        action: 'CUSTOMER_ADMIN_ASSIGNED',
-        resourceType: 'Customer',
-        resourceId: customer._id,
-        scope: { customerId: customer._id },
-        diff: { userId, role: 'CUSTOMER_ADMIN' },
-        ip: req.ip,
-        userAgent: req.get?.('user-agent'),
-        requestId: req.requestId,
-      })
-    } catch (auditErr) {
-      logger.error({ err: auditErr }, 'admin assignment audit log failed')
-    }
+    await auditService.logFromRequest(req, {
+      action: 'CUSTOMER_ADMIN_ASSIGNED',
+      resourceType: 'Customer',
+      resourceId: customer._id,
+      scope: { customerId: customer._id },
+      diff: { userId, role: 'CUSTOMER_ADMIN' },
+    })
 
     return res.status(200).json({
       data: { message: 'Admin role assigned successfully.', userId },

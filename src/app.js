@@ -15,6 +15,7 @@ import { customerUserRouter, userRouter } from './routes/users.routes.js'
 import { tenantVmfRouter, vmfRouter } from './routes/vmfs.routes.js'
 import { vmfDealRouter, dealRouter } from './routes/deals.routes.js'
 import { bulkRouter, bulkDisableRouter } from './routes/bulk.routes.js'
+import auditRouter from './routes/audit.routes.js'
 
 const app = express()
 
@@ -78,6 +79,7 @@ app.use('/api/v1/vmfs', vmfRouter)
 app.use('/api/v1/tenants', tenantRouter)
 app.use('/api/v1/users', userRouter)
 app.use('/api/v1/deals', dealRouter)
+app.use('/api/v1/audit-logs', auditRouter)
 
 app.use((_req, res) => {
   res.status(404).json({ error: 'Not Found' })

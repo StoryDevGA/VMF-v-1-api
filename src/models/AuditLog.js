@@ -1,5 +1,6 @@
 import mongoose from 'mongoose'
 import crypto from 'crypto'
+import env from '../config/env.js'
 
 const auditLogSchema = new mongoose.Schema({
   ts: {
@@ -163,7 +164,7 @@ auditLogSchema.methods.generateSignature = function() {
   }
   
   const dataString = JSON.stringify(data, null, 0)
-  const secret = process.env.AUDIT_SIGNATURE_SECRET || 'default-secret-change-in-production'
+  const secret = env.auditSignatureSecret
   
   this.signature = crypto
     .createHmac('sha256', secret)
