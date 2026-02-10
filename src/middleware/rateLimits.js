@@ -26,7 +26,7 @@ export const authRateLimit = rateLimit({
   standardHeaders: 'draft-7',
   legacyHeaders: false,
   handler: standardHandler,
-  skip: (req) => req.ip === '127.0.0.1' && env.nodeEnv === 'development'
+  skip: () => env.nodeEnv === 'test'
 })
 
 export const userManagementRateLimit = rateLimit({

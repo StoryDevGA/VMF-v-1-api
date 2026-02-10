@@ -7,6 +7,7 @@ import requestContext from './middleware/requestContext.js'
 import errorHandler from './middleware/errorHandler.js'
 import { generalApiRateLimit } from './middleware/rateLimits.js'
 import healthRoutes from './routes/health.routes.js'
+import authRoutes from './routes/auth.routes.js'
 
 const app = express()
 
@@ -55,6 +56,7 @@ app.get('/', (_req, res) => {
 })
 
 app.use('/health', healthRoutes)
+app.use('/api/v1/auth', authRoutes)
 
 app.use((_req, res) => {
   res.status(404).json({ error: 'Not Found' })
