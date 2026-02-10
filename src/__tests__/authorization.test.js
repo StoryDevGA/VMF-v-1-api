@@ -153,7 +153,7 @@ beforeAll(async () => {
 beforeEach(() => {
   // Reset model stubs
   User.findById = jest.fn()
-  Customer.findById = jest.fn()
+  Customer.findById = jest.fn().mockResolvedValue(makeFakeCustomer())
   Tenant.findById = jest.fn()
   VMF.findById = jest.fn()
   VMF.countByTenant = jest.fn()

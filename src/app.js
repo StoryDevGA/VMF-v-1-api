@@ -12,6 +12,8 @@ import identityPlusRoutes from './routes/identityPlus.routes.js'
 import customerRoutes from './routes/customers.routes.js'
 import { customerTenantRouter, tenantRouter } from './routes/tenants.routes.js'
 import { customerUserRouter, userRouter } from './routes/users.routes.js'
+import { tenantVmfRouter, vmfRouter } from './routes/vmfs.routes.js'
+import { vmfDealRouter, dealRouter } from './routes/deals.routes.js'
 
 const app = express()
 
@@ -64,11 +66,15 @@ app.use('/api/v1/auth', authRoutes)
 app.use('/api/v1/webhooks/identity-plus', identityPlusRoutes)
 // More specific customer-scoped routes BEFORE the general /customers mount
 // (Express prefix-matches app.use, so /customers would intercept /customers/:id/users)
+app.use('/api/v1/customers/:customerId/tenants/:tenantId/vmfs', tenantVmfRouter)
 app.use('/api/v1/customers/:customerId/tenants', customerTenantRouter)
 app.use('/api/v1/customers/:customerId/users', customerUserRouter)
 app.use('/api/v1/customers', customerRoutes)
+app.use('/api/v1/vmfs/:vmfId/deals', vmfDealRouter)
+app.use('/api/v1/vmfs', vmfRouter)
 app.use('/api/v1/tenants', tenantRouter)
 app.use('/api/v1/users', userRouter)
+app.use('/api/v1/deals', dealRouter)
 
 app.use((_req, res) => {
   res.status(404).json({ error: 'Not Found' })

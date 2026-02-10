@@ -199,6 +199,19 @@ export const requireTenantAccess = (options = {}) => async (req, res, next) => {
     return forbidden(res, req, 'Customer and tenant identifiers are required.')
   }
 
+  // Load customer for downstream middleware (e.g. topologyGuard)
+  const customer = await Customer.findById(customerId)
+  if (!customer) {
+    return res.status(404).json({
+      error: {
+        code: 'NOT_FOUND',
+        message: 'Customer not found.',
+        requestId: req.requestId,
+      },
+    })
+  }
+  req.scopes.customer = customer
+
   // Load tenant and validate it belongs to the customer
   const tenant = await Tenant.findById(tenantId)
   if (!tenant || !idsEqual(tenant.customerId, customerId)) {

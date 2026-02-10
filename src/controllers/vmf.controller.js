@@ -1,0 +1,511 @@
+/**
+ * VMF Controller
+ *
+ * Handles VMF management endpoints:
+ *
+ *   Tenant-scoped (requireTenantAccess):
+ *     GET   /api/v1/customers/:customerId/tenants/:tenantId/vmfs       List VMFs
+ *     POST  /api/v1/customers/:customerId/tenants/:tenantId/vmfs       Create VMF
+ *
+ *   VMF-scoped (requireVmfAccess):
+ *     GET    /api/v1/vmfs/:vmfId                  Get single VMF
+ *     PATCH  /api/v1/vmfs/:vmfId                  Update VMF
+ *     DELETE /api/v1/vmfs/:vmfId                  Delete VMF (no active deals)
+ *     POST   /api/v1/vmfs/:vmfId/grants           Grant user access to VMF
+ *     DELETE /api/v1/vmfs/:vmfId/grants/:userId   Revoke user access
+ */
+
+import { Customer, Tenant, VMF, Deal, User, AuditLog } from '../models/index.js'
+import logger from '../config/logger.js'
+
+/* ------------------------------------------------------------------ */
+/*  Audit helper                                                      */
+/* ------------------------------------------------------------------ */
+
+const audit = async (actorUserId, action, resourceType, resourceId, scope, diff, req) => {
+  try {
+    await AuditLog.createLog({
+      actorUserId,
+      action,
+      resourceType,
+      resourceId,
+      scope,
+      diff,
+      ip: req?.ip,
+      userAgent: req?.get?.('user-agent'),
+      requestId: req?.requestId,
+    })
+  } catch (err) {
+    logger.error({ err, action, resourceType, resourceId }, 'vmf audit log failed')
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  GET /api/v1/customers/:customerId/tenants/:tenantId/vmfs          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * List VMFs for a tenant.
+ *
+ * Query params: status, q (name search), page, pageSize
+ */
+export const listVmfs = async (req, res, next) => {
+  try {
+    const { customerId, tenantId } = req.params
+    const {
+      status,
+      q,
+      page = 1,
+      pageSize = 20,
+    } = req.query
+
+    const filter = { customerId, tenantId }
+    if (status) filter.status = status
+    if (q) filter.name = { $regex: q, $options: 'i' }
+
+    const pageNum = Math.max(1, parseInt(page, 10) || 1)
+    const limit = Math.min(100, Math.max(1, parseInt(pageSize, 10) || 20))
+    const skip = (pageNum - 1) * limit
+
+    const [vmfs, total] = await Promise.all([
+      VMF.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      VMF.countDocuments(filter),
+    ])
+
+    return res.status(200).json({
+      data: vmfs,
+      meta: {
+        page: pageNum,
+        pageSize: limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+        requestId: req.requestId,
+        version: 'v1',
+      },
+    })
+  } catch (err) {
+    next(err)
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  POST /api/v1/customers/:customerId/tenants/:tenantId/vmfs         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Create a VMF under a tenant.
+ * Respects customer vmfPolicy via topologyGuard (run before this handler).
+ */
+export const createVmf = async (req, res, next) => {
+  try {
+    const { customerId, tenantId } = req.params
+    const actorUserId = req.context?.userId || req.userId
+
+    // Verify tenant belongs to customer and is enabled
+    const tenant = req.scopes?.tenant || await Tenant.findById(tenantId)
+    if (!tenant || tenant.customerId.toString() !== customerId) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: 'Tenant not found.',
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    if (tenant.status !== 'ENABLED') {
+      return res.status(403).json({
+        error: {
+          code: 'TENANT_DISABLED',
+          message: 'Cannot create VMFs in a disabled tenant.',
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    const vmf = new VMF({
+      customerId,
+      tenantId,
+      name: req.body.name,
+      status: 'ACTIVE',
+      createdBy: actorUserId,
+    })
+
+    await vmf.save()
+
+    await audit(
+      actorUserId,
+      'VMF_CREATED',
+      'VMF',
+      vmf._id,
+      { customerId, tenantId, vmfId: vmf._id },
+      { name: req.body.name },
+      req,
+    )
+
+    logger.info(
+      { customerId, tenantId, vmfId: vmf._id },
+      'vmf.controller — VMF created',
+    )
+
+    return res.status(201).json({
+      data: vmf.toJSON(),
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    // Mongoose pre-save hook policy violations
+    if (err.message?.includes('policy allows only')) {
+      return res.status(409).json({
+        error: {
+          code: 'CONFLICT',
+          message: err.message,
+          requestId: req.requestId,
+        },
+      })
+    }
+    next(err)
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  GET /api/v1/vmfs/:vmfId                                           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Get a single VMF.  requireVmfAccess already loaded req.scopes.vmf.
+ */
+export const getVmf = async (req, res, next) => {
+  try {
+    const vmf = req.scopes?.vmf || await VMF.findById(req.params.vmfId)
+
+    if (!vmf) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: 'VMF not found.',
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    return res.status(200).json({
+      data: vmf.toJSON ? vmf.toJSON() : vmf,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    next(err)
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  PATCH /api/v1/vmfs/:vmfId                                         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Update VMF (name and/or status).
+ */
+export const updateVmf = async (req, res, next) => {
+  try {
+    const vmf = req.scopes?.vmf || await VMF.findById(req.params.vmfId)
+
+    if (!vmf) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: 'VMF not found.',
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    const actorUserId = req.context?.userId || req.userId
+    const diff = {}
+
+    if (req.body.name !== undefined) {
+      diff.name = { from: vmf.name, to: req.body.name }
+      vmf.name = req.body.name
+    }
+
+    if (req.body.status !== undefined) {
+      diff.status = { from: vmf.status, to: req.body.status }
+      vmf.status = req.body.status
+    }
+
+    await vmf.save()
+
+    await audit(
+      actorUserId,
+      'VMF_UPDATED',
+      'VMF',
+      vmf._id,
+      { customerId: vmf.customerId, tenantId: vmf.tenantId, vmfId: vmf._id },
+      diff,
+      req,
+    )
+
+    return res.status(200).json({
+      data: vmf.toJSON(),
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    next(err)
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  DELETE /api/v1/vmfs/:vmfId                                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Delete a VMF.
+ *
+ * Pre-conditions:
+ *   - VMF must be DISABLED or ARCHIVED (cannot delete active VMFs)
+ *   - VMF must have no active deals (enforced by model pre-hook, but
+ *     we also check here for a friendlier error message)
+ */
+export const deleteVmf = async (req, res, next) => {
+  try {
+    const vmf = req.scopes?.vmf || await VMF.findById(req.params.vmfId)
+
+    if (!vmf) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: 'VMF not found.',
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    if (vmf.status === 'ACTIVE') {
+      return res.status(422).json({
+        error: {
+          code: 'VALIDATION_FAILED',
+          message: 'Cannot delete an active VMF. Disable or archive it first.',
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    // Check for active deals
+    const activeDeals = await Deal.countDocuments({ vmfId: vmf._id, status: 'ACTIVE' })
+    if (activeDeals > 0) {
+      return res.status(422).json({
+        error: {
+          code: 'VALIDATION_FAILED',
+          message: `Cannot delete VMF with ${activeDeals} active deal(s). Archive them first.`,
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    const actorUserId = req.context?.userId || req.userId
+
+    // Archive remaining deals (non-active, e.g. already archived — idempotent)
+    await Deal.updateMany(
+      { vmfId: vmf._id },
+      { $set: { status: 'ARCHIVED' } },
+    )
+
+    // Remove vmfGrants referencing this VMF from all users
+    await User.updateMany(
+      { 'vmfGrants.vmfId': vmf._id },
+      { $pull: { vmfGrants: { vmfId: vmf._id } } },
+    )
+
+    await VMF.deleteOne({ _id: vmf._id })
+
+    await audit(
+      actorUserId,
+      'VMF_DELETED',
+      'VMF',
+      vmf._id,
+      { customerId: vmf.customerId, tenantId: vmf.tenantId, vmfId: vmf._id },
+      { name: vmf.name },
+      req,
+    )
+
+    logger.info(
+      { vmfId: vmf._id, customerId: vmf.customerId, tenantId: vmf.tenantId },
+      'vmf.controller — VMF deleted',
+    )
+
+    return res.status(200).json({
+      data: { message: `VMF '${vmf.name}' has been deleted.` },
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    next(err)
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  POST /api/v1/vmfs/:vmfId/grants                                   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Grant a user access to a VMF with specified permissions.
+ *
+ * Body: { userId, permissions: ['READ', 'WRITE', ...] }
+ *
+ * If the user already has a grant for this VMF, permissions are replaced.
+ */
+export const grantAccess = async (req, res, next) => {
+  try {
+    const vmf = req.scopes?.vmf || await VMF.findById(req.params.vmfId)
+
+    if (!vmf) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: 'VMF not found.',
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    const { userId, permissions } = req.body
+    const targetUser = await User.findById(userId)
+
+    if (!targetUser) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: 'User not found.',
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    // Verify user has a membership for the VMF's customer
+    const hasMembership = targetUser.memberships.some(
+      (m) => m.customerId?.toString() === vmf.customerId.toString(),
+    )
+    if (!hasMembership) {
+      return res.status(422).json({
+        error: {
+          code: 'VALIDATION_FAILED',
+          message: 'User does not belong to this VMF\'s customer.',
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    // Upsert the grant
+    const existingIdx = targetUser.vmfGrants.findIndex(
+      (g) => g.vmfId?.toString() === vmf._id.toString(),
+    )
+
+    const grantData = {
+      customerId: vmf.customerId,
+      tenantId: vmf.tenantId,
+      vmfId: vmf._id,
+      permissions,
+    }
+
+    if (existingIdx >= 0) {
+      targetUser.vmfGrants[existingIdx] = grantData
+    } else {
+      targetUser.vmfGrants.push(grantData)
+    }
+
+    await targetUser.save()
+
+    const actorUserId = req.context?.userId || req.userId
+    await audit(
+      actorUserId,
+      'VMF_GRANT_CREATED',
+      'User',
+      targetUser._id,
+      { customerId: vmf.customerId, tenantId: vmf.tenantId, vmfId: vmf._id },
+      { userId, permissions },
+      req,
+    )
+
+    return res.status(200).json({
+      data: {
+        message: `Access granted to user '${targetUser.name}' on VMF '${vmf.name}'.`,
+        grant: grantData,
+      },
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    next(err)
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  DELETE /api/v1/vmfs/:vmfId/grants/:userId                         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Revoke a user's access to a VMF.
+ */
+export const revokeAccess = async (req, res, next) => {
+  try {
+    const vmf = req.scopes?.vmf || await VMF.findById(req.params.vmfId)
+
+    if (!vmf) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: 'VMF not found.',
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    const { userId } = req.params
+    const targetUser = await User.findById(userId)
+
+    if (!targetUser) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: 'User not found.',
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    const grantIdx = targetUser.vmfGrants.findIndex(
+      (g) => g.vmfId?.toString() === vmf._id.toString(),
+    )
+
+    if (grantIdx < 0) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: 'User does not have a grant for this VMF.',
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    targetUser.vmfGrants.splice(grantIdx, 1)
+    await targetUser.save()
+
+    const actorUserId = req.context?.userId || req.userId
+    await audit(
+      actorUserId,
+      'VMF_GRANT_REVOKED',
+      'User',
+      targetUser._id,
+      { customerId: vmf.customerId, tenantId: vmf.tenantId, vmfId: vmf._id },
+      { userId },
+      req,
+    )
+
+    return res.status(200).json({
+      data: { message: `Access revoked for user '${targetUser.name}' on VMF '${vmf.name}'.` },
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    next(err)
+  }
+}
