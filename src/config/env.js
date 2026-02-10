@@ -1,6 +1,8 @@
 import dotenv from 'dotenv'
 
-dotenv.config()
+// Load appropriate environment file
+const envFile = process.env.NODE_ENV === 'test' ? '.env.test' : '.env'
+dotenv.config({ path: envFile })
 
 const toNumber = (value, fallback) => {
   const parsed = Number.parseInt(value, 10)
@@ -32,6 +34,30 @@ const env = {
   logLevel: process.env.LOG_LEVEL || 'info',
   trustProxy: toBoolean(process.env.TRUST_PROXY, false),
   mongoUri: process.env.MONGODB_URI || '',
+  
+  // JWT Configuration
+  jwtSecret: process.env.JWT_SECRET || '',
+  jwtRefreshSecret: process.env.JWT_REFRESH_SECRET || '',
+  jwtExpiry: process.env.JWT_EXPIRY || '15m',
+  jwtRefreshExpiry: process.env.JWT_REFRESH_EXPIRY || '7d',
+  
+  // Redis Configuration
+  redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',
+  redisPassword: process.env.REDIS_PASSWORD || '',
+  
+  // Identity Plus Configuration
+  identityPlusApiUrl: process.env.IDENTITY_PLUS_API_URL || '',
+  identityPlusApiKey: process.env.IDENTITY_PLUS_API_KEY || '',
+  
+  // Security Configuration
+  bcryptRounds: toNumber(process.env.BCRYPT_ROUNDS, 12),
+  sessionTimeout: toNumber(process.env.SESSION_TIMEOUT_MINUTES, 30) * 60 * 1000,
+  
+  // Enhanced Rate Limits
+  authRateLimit: toNumber(process.env.AUTH_RATE_LIMIT, 5),
+  userMgmtRateLimit: toNumber(process.env.USER_MGMT_RATE_LIMIT, 100),
+  tenantRateLimit: toNumber(process.env.TENANT_RATE_LIMIT, 50),
+  bulkRateLimit: toNumber(process.env.BULK_RATE_LIMIT, 10),
 }
 
 env.isProduction = env.nodeEnv === 'production'

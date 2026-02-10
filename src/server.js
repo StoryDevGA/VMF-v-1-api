@@ -3,6 +3,8 @@ import app from './app.js'
 import env from './config/env.js'
 import logger from './config/logger.js'
 import { connectDb, disconnectDb } from './config/db.js'
+import { connectRedis, disconnectRedis } from './config/redis.js'
+import { runSeeds } from './seeds/index.js'
 
 const server = http.createServer(app)
 
@@ -13,7 +15,22 @@ server.on('error', (err) => {
 
 const startServer = async () => {
   try {
+    // Connect to MongoDB (required)
     await connectDb()
+
+    // Connect to Redis (optional in development)
+    await connectRedis()
+    
+    // Run database seeds if needed
+    if (env.nodeEnv === 'development') {
+      try {
+        logger.info('Running database seeds...')
+        await runSeeds()
+      } catch (seedErr) {
+        logger.warn({ err: seedErr }, 'Database seeding failed (non-fatal in development)')
+      }
+    }
+    
     server.listen(env.port, () => {
       logger.info({ port: env.port }, 'server listening')
     })
@@ -45,6 +62,7 @@ const shutdown = async (signal) => {
   try {
     await closeServer()
     await disconnectDb()
+    await disconnectRedis()
     logger.info('graceful shutdown complete')
     process.exit(0)
   } catch (err) {
