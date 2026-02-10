@@ -49,6 +49,7 @@ const env = {
   // Identity Plus Configuration
   identityPlusApiUrl: process.env.IDENTITY_PLUS_API_URL || '',
   identityPlusApiKey: process.env.IDENTITY_PLUS_API_KEY || '',
+  identityPlusWebhookSecret: process.env.IDENTITY_PLUS_WEBHOOK_SECRET || '',
   
   // Security Configuration
   bcryptRounds: toNumber(process.env.BCRYPT_ROUNDS, 12),

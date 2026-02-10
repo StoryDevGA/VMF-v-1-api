@@ -8,6 +8,7 @@ import errorHandler from './middleware/errorHandler.js'
 import { generalApiRateLimit } from './middleware/rateLimits.js'
 import healthRoutes from './routes/health.routes.js'
 import authRoutes from './routes/auth.routes.js'
+import identityPlusRoutes from './routes/identityPlus.routes.js'
 
 const app = express()
 
@@ -57,6 +58,7 @@ app.get('/', (_req, res) => {
 
 app.use('/health', healthRoutes)
 app.use('/api/v1/auth', authRoutes)
+app.use('/api/v1/webhooks/identity-plus', identityPlusRoutes)
 
 app.use((_req, res) => {
   res.status(404).json({ error: 'Not Found' })
