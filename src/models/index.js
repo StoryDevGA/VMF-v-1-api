@@ -6,6 +6,7 @@ import VMF from './VMF.js'
 import Deal from './Deal.js'
 import Role from './Role.js'
 import AuditLog from './AuditLog.js'
+import DataDeletionRequest from './DataDeletionRequest.js'
 
 // Export all models
 export {
@@ -15,7 +16,8 @@ export {
   VMF,
   Deal,
   Role,
-  AuditLog
+  AuditLog,
+  DataDeletionRequest,
 }
 
 // Default export with all models
@@ -26,5 +28,6 @@ export default {
   VMF,
   Deal,
   Role,
-  AuditLog
+  AuditLog,
+  DataDeletionRequest,
 }

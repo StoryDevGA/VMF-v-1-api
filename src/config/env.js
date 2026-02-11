@@ -98,6 +98,12 @@ const env = {
     process.env.MONITORING_HEAP_USAGE_THRESHOLD_PCT,
     85,
   ),
+
+  // GDPR Compliance
+  gdprExportAuditLimit: toNumber(process.env.GDPR_EXPORT_AUDIT_LIMIT, 5000),
+  gdprRetentionDays: toNumber(process.env.GDPR_RETENTION_DAYS, 2555), // 7 years
+  gdprCleanupIntervalMs: toNumber(process.env.GDPR_CLEANUP_INTERVAL_MS, 24 * 60 * 60 * 1000),
+  gdprCleanupEnabled: toBoolean(process.env.GDPR_CLEANUP_ENABLED, true),
 }
 
 env.isProduction = env.nodeEnv === 'production'

@@ -5,6 +5,7 @@ import logger from './config/logger.js'
 import { connectDb, disconnectDb } from './config/db.js'
 import { connectRedis, disconnectRedis } from './config/redis.js'
 import { runSeeds } from './seeds/index.js'
+import { startRetentionScheduler, stopRetentionScheduler } from './services/retentionSchedulerService.js'
 
 const server = http.createServer(app)
 
@@ -33,6 +34,7 @@ const startServer = async () => {
     
     server.listen(env.port, () => {
       logger.info({ port: env.port }, 'server listening')
+      startRetentionScheduler()
     })
   } catch (err) {
     logger.error({ err }, 'failed to start server')
@@ -61,6 +63,7 @@ const shutdown = async (signal) => {
 
   try {
     await closeServer()
+    stopRetentionScheduler()
     await disconnectDb()
     await disconnectRedis()
     logger.info('graceful shutdown complete')
