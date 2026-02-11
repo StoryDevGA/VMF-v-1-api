@@ -12,7 +12,7 @@
  */
 
 import { Router } from 'express'
-import { authRateLimit } from '../middleware/rateLimits.js'
+import { authRateLimit, authHourlyRateLimit } from '../middleware/rateLimits.js'
 import authJwt from '../middleware/authJwt.js'
 import { validateLogin, validateRefresh } from '../validators/auth.validator.js'
 import {
@@ -29,8 +29,8 @@ const router = Router()
 /*  Public (rate-limited) routes                                      */
 /* ------------------------------------------------------------------ */
 
-router.post('/login', authRateLimit, validateLogin, login)
-router.post('/super-admin/login', authRateLimit, validateLogin, superAdminLogin)
+router.post('/login', authRateLimit, authHourlyRateLimit, validateLogin, login)
+router.post('/super-admin/login', authRateLimit, authHourlyRateLimit, validateLogin, superAdminLogin)
 router.post('/refresh', authRateLimit, validateRefresh, refresh)
 
 /* ------------------------------------------------------------------ */

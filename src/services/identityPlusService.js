@@ -11,92 +11,34 @@
  * deterministic stub data.  This allows local development and testing
  * without a live Identity Plus instance.
  *
- * A lightweight circuit-breaker protects against cascading failures
- * when the external API is unreachable.
+ * Uses the generic {@link CircuitBreaker} to protect against cascading
+ * failures when the external API is unreachable.
  */
 
 import crypto from 'crypto'
 import env from '../config/env.js'
 import logger from '../config/logger.js'
+import { CircuitBreaker } from './circuitBreaker.js'
 
 /* ------------------------------------------------------------------ */
-/*  Circuit-breaker (lightweight, in-process)                         */
+/*  Circuit breaker instance (via generic CircuitBreaker)             */
 /* ------------------------------------------------------------------ */
 
-/**
- * @typedef {Object} CircuitBreakerState
- * @property {'CLOSED'|'OPEN'|'HALF_OPEN'} state
- * @property {number} failures     - consecutive failure count
- * @property {number} threshold    - failures before opening
- * @property {number} resetTimeout - ms before transitioning to HALF_OPEN
- * @property {number|null} openedAt - timestamp when breaker opened
- */
-
-/** @type {CircuitBreakerState} */
-const breaker = {
-  state: 'CLOSED',
-  failures: 0,
+const breaker = new CircuitBreaker('identity-plus', {
   threshold: 5,
   resetTimeout: 30_000, // 30 seconds
-  openedAt: null,
-}
-
-/**
- * Record a successful external call — reset breaker.
- */
-const recordSuccess = () => {
-  breaker.failures = 0
-  breaker.state = 'CLOSED'
-  breaker.openedAt = null
-}
-
-/**
- * Record a failed external call — potentially open breaker.
- */
-const recordFailure = () => {
-  breaker.failures += 1
-  if (breaker.failures >= breaker.threshold) {
-    breaker.state = 'OPEN'
-    breaker.openedAt = Date.now()
-    logger.warn(
-      { failures: breaker.failures },
-      'Identity Plus circuit breaker OPEN',
-    )
-  }
-}
-
-/**
- * Check whether the breaker allows a request through.
- * @returns {boolean}
- */
-const canAttempt = () => {
-  if (breaker.state === 'CLOSED') return true
-  if (breaker.state === 'OPEN') {
-    const elapsed = Date.now() - breaker.openedAt
-    if (elapsed >= breaker.resetTimeout) {
-      breaker.state = 'HALF_OPEN'
-      logger.info('Identity Plus circuit breaker HALF_OPEN — allowing probe')
-      return true
-    }
-    return false
-  }
-  // HALF_OPEN — allow exactly one probe request
-  return true
-}
+})
 
 /**
  * Expose breaker state for observability / tests.
+ * Backward-compatible: returns { state, failures, threshold, resetTimeout, openedAt }.
  */
-export const getCircuitBreakerState = () => ({ ...breaker })
+export const getCircuitBreakerState = () => breaker.getState()
 
 /**
  * Reset the breaker (useful in tests).
  */
-export const resetCircuitBreaker = () => {
-  breaker.state = 'CLOSED'
-  breaker.failures = 0
-  breaker.openedAt = null
-}
+export const resetCircuitBreaker = () => breaker.reset()
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                           */
@@ -187,21 +129,15 @@ class IdentityPlusService {
       return { externalId, invitedAt: new Date() }
     }
 
-    /* ---------- circuit breaker ---------- */
-    if (!canAttempt()) {
-      const err = new Error('Identity Plus service is temporarily unavailable')
-      err.code = 'IDENTITY_PLUS_CIRCUIT_OPEN'
-      throw err
-    }
-
-    /* ---------- real call ---------- */
+    /* ---------- real call (circuit-breaker protected) ---------- */
     try {
-      const result = await callApi('/invitations', {
-        email,
-        customerId,
-        redirectUrl: redirectUrl || undefined,
-      })
-      recordSuccess()
+      const result = await breaker.execute(() =>
+        callApi('/invitations', {
+          email,
+          customerId,
+          redirectUrl: redirectUrl || undefined,
+        }),
+      )
       logger.info(
         { email, customerId, externalId: result.externalId },
         'Identity Plus invitation sent',
@@ -211,7 +147,6 @@ class IdentityPlusService {
         invitedAt: new Date(result.invitedAt || Date.now()),
       }
     } catch (err) {
-      recordFailure()
       logger.error(
         { err, email, customerId },
         'Identity Plus sendInvitation failed',
@@ -246,20 +181,14 @@ class IdentityPlusService {
       return { revokedAt: new Date() }
     }
 
-    /* ---------- circuit breaker ---------- */
-    if (!canAttempt()) {
-      const err = new Error('Identity Plus service is temporarily unavailable')
-      err.code = 'IDENTITY_PLUS_CIRCUIT_OPEN'
-      throw err
-    }
-
-    /* ---------- real call ---------- */
+    /* ---------- real call (circuit-breaker protected) ---------- */
     try {
-      const result = await callApi('/trust/revoke', {
-        externalId: externalId || undefined,
-        email: email || undefined,
-      })
-      recordSuccess()
+      const result = await breaker.execute(() =>
+        callApi('/trust/revoke', {
+          externalId: externalId || undefined,
+          email: email || undefined,
+        }),
+      )
       logger.info(
         { externalId, email },
         'Identity Plus trust revoked',
@@ -268,7 +197,6 @@ class IdentityPlusService {
         revokedAt: new Date(result.revokedAt || Date.now()),
       }
     } catch (err) {
-      recordFailure()
       logger.error(
         { err, externalId, email },
         'Identity Plus revokeTrust failed',
@@ -303,27 +231,20 @@ class IdentityPlusService {
       return { status: 'PENDING', registeredAt: null }
     }
 
-    /* ---------- circuit breaker ---------- */
-    if (!canAttempt()) {
-      const err = new Error('Identity Plus service is temporarily unavailable')
-      err.code = 'IDENTITY_PLUS_CIRCUIT_OPEN'
-      throw err
-    }
-
-    /* ---------- real call ---------- */
+    /* ---------- real call (circuit-breaker protected) ---------- */
     try {
-      const result = await callApi(
-        '/registration/status',
-        { externalId: externalId || undefined, email: email || undefined },
-        { method: 'POST' },
+      const result = await breaker.execute(() =>
+        callApi(
+          '/registration/status',
+          { externalId: externalId || undefined, email: email || undefined },
+          { method: 'POST' },
+        ),
       )
-      recordSuccess()
       return {
         status: result.status || 'PENDING',
         registeredAt: result.registeredAt ? new Date(result.registeredAt) : null,
       }
     } catch (err) {
-      recordFailure()
       logger.error(
         { err, externalId, email },
         'Identity Plus checkRegistrationStatus failed',

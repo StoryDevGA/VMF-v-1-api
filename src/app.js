@@ -4,6 +4,7 @@ import helmet from 'helmet'
 import env from './config/env.js'
 import requestLogger from './middleware/requestLogger.js'
 import requestContext from './middleware/requestContext.js'
+import correlationEnricher from './middleware/correlationEnricher.js'
 import errorHandler from './middleware/errorHandler.js'
 import { generalApiRateLimit } from './middleware/rateLimits.js'
 import healthRoutes from './routes/health.routes.js'
@@ -56,6 +57,7 @@ app.use(cors(corsOptions))
 app.options('*', cors(corsOptions))
 app.use(express.json({ limit: '1mb' }))
 app.use(requestContext) // Add request context before logger
+app.use(correlationEnricher) // Enrich responses with requestId
 app.use(requestLogger)
 app.use(generalApiRateLimit)
 

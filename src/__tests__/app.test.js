@@ -51,9 +51,12 @@ describe('Phase 1 Core Setup', () => {
     expect(authJwt).toBeDefined()
     expect(typeof authJwt).toBe('function')
     expect(rateLimits.authRateLimit).toBeDefined()
+    expect(rateLimits.authHourlyRateLimit).toBeDefined()
     expect(rateLimits.userManagementRateLimit).toBeDefined()
     expect(rateLimits.tenantManagementRateLimit).toBeDefined()
     expect(rateLimits.bulkOperationsRateLimit).toBeDefined()
+    expect(rateLimits.auditRateLimit).toBeDefined()
+    expect(rateLimits.generalApiRateLimit).toBeDefined()
   })
 
   test('Seeds configuration', async () => {

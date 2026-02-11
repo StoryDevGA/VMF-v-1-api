@@ -57,12 +57,18 @@ const env = {
 
   // Audit Configuration
   auditSignatureSecret: process.env.AUDIT_SIGNATURE_SECRET || 'default-secret-change-in-production',
+
+  // Field-Level Encryption
+  fieldEncryptionKey: process.env.FIELD_ENCRYPTION_KEY || '',
+  fieldEncryptionEnabled: toBoolean(process.env.FIELD_ENCRYPTION_ENABLED, false),
   
   // Enhanced Rate Limits
   authRateLimit: toNumber(process.env.AUTH_RATE_LIMIT, 5),
+  authHourlyRateLimit: toNumber(process.env.AUTH_HOURLY_RATE_LIMIT, 10),
   userMgmtRateLimit: toNumber(process.env.USER_MGMT_RATE_LIMIT, 100),
   tenantRateLimit: toNumber(process.env.TENANT_RATE_LIMIT, 50),
   bulkRateLimit: toNumber(process.env.BULK_RATE_LIMIT, 10),
+  auditRateLimit: toNumber(process.env.AUDIT_RATE_LIMIT, 30),
 }
 
 env.isProduction = env.nodeEnv === 'production'
