@@ -11,6 +11,7 @@
 import { User } from '../models/index.js'
 import logger from '../config/logger.js'
 import auditService from '../services/auditService.js'
+import performanceCacheService from '../services/performanceCacheService.js'
 
 /* ------------------------------------------------------------------ */
 /*  POST /registration-complete                                       */
@@ -59,6 +60,7 @@ export const handleRegistrationComplete = async (req, res, next) => {
     user.identityPlus.trustStatus = 'TRUSTED'
     user.identityPlus.trustedAt = registeredAt ? new Date(registeredAt) : new Date()
     await user.save()
+    await performanceCacheService.invalidateUserPermissions(user._id)
 
     // Audit log
     await auditService.logFromRequest(req, {
@@ -146,6 +148,7 @@ export const handleTrustUpdated = async (req, res, next) => {
       user.isActive = false
     }
     await user.save()
+    await performanceCacheService.invalidateUserPermissions(user._id)
 
     // Audit log
     await auditService.logFromRequest(req, {

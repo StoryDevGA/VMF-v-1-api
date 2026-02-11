@@ -110,6 +110,7 @@ const userSchema = new mongoose.Schema({
 
 // Indexes for performance
 userSchema.index({ 'memberships.customerId': 1 })
+userSchema.index({ 'memberships.customerId': 1, isActive: 1, createdAt: -1 })
 userSchema.index({ 'tenantMemberships.customerId': 1 })
 userSchema.index({ 'tenantMemberships.tenantId': 1 })
 userSchema.index({ isActive: 1, 'identityPlus.trustStatus': 1 })

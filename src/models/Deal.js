@@ -56,6 +56,7 @@ const dealSchema = new mongoose.Schema({
 
 // Indexes for performance
 dealSchema.index({ vmfId: 1, updatedAt: -1 })
+dealSchema.index({ vmfId: 1, status: 1, updatedAt: -1 })
 dealSchema.index({ tenantId: 1, vmfId: 1 })
 dealSchema.index({ customerId: 1, status: 1 })
 dealSchema.index({ createdBy: 1, status: 1 })

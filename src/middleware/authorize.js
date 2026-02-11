@@ -29,6 +29,10 @@
 
 import { Customer, Tenant, VMF } from '../models/index.js'
 import logger from '../config/logger.js'
+import performanceCacheService, {
+  buildCustomerTopologySnapshot,
+  buildTenantStatusSnapshot,
+} from '../services/performanceCacheService.js'
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                           */
@@ -69,6 +73,33 @@ const ensureScopes = (req, res) => {
     return false
   }
   return true
+}
+
+const loadCustomerContext = async (customerId) => {
+  const cachedCustomer = await performanceCacheService.getCustomerTopology(customerId)
+  if (cachedCustomer) return cachedCustomer
+
+  const customer = await Customer.findById(customerId)
+  if (!customer) return null
+
+  await performanceCacheService.setCustomerTopology(
+    customer._id,
+    buildCustomerTopologySnapshot(customer),
+  )
+
+  return customer
+}
+
+const loadTenantContext = async (tenantId) => {
+  const cachedTenant = await performanceCacheService.getTenantStatus(tenantId)
+  if (cachedTenant) return cachedTenant
+
+  const tenant = await Tenant.findById(tenantId)
+  if (!tenant) return null
+
+  await performanceCacheService.setTenantStatus(tenant._id, buildTenantStatusSnapshot(tenant))
+
+  return tenant
 }
 
 /* ------------------------------------------------------------------ */
@@ -122,7 +153,7 @@ export const requireCustomerAccess = (options = {}) => async (req, res, next) =>
   // Super Admin bypass
   if (allowPlatform && platformRoles.includes('SUPER_ADMIN')) {
     // Validate that the customer exists
-    const customer = await Customer.findById(customerId)
+    const customer = await loadCustomerContext(customerId)
     if (!customer) {
       return res.status(404).json({
         error: {
@@ -160,7 +191,7 @@ export const requireCustomerAccess = (options = {}) => async (req, res, next) =>
   }
 
   // Attach customer document for downstream use
-  const customer = await Customer.findById(customerId)
+  const customer = await loadCustomerContext(customerId)
   if (!customer) {
     return res.status(404).json({
       error: {
@@ -200,7 +231,7 @@ export const requireTenantAccess = (options = {}) => async (req, res, next) => {
   }
 
   // Load customer for downstream middleware (e.g. topologyGuard)
-  const customer = await Customer.findById(customerId)
+  const customer = await loadCustomerContext(customerId)
   if (!customer) {
     return res.status(404).json({
       error: {
@@ -213,7 +244,7 @@ export const requireTenantAccess = (options = {}) => async (req, res, next) => {
   req.scopes.customer = customer
 
   // Load tenant and validate it belongs to the customer
-  const tenant = await Tenant.findById(tenantId)
+  const tenant = await loadTenantContext(tenantId)
   if (!tenant || !idsEqual(tenant.customerId, customerId)) {
     return res.status(404).json({
       error: {

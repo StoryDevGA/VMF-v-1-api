@@ -1,22 +1,14 @@
 /**
  * loadScopes Middleware
  *
- * Runs after authJwt. Loads the authenticated user's full membership
- * data from the database and attaches a structured `req.scopes` object
- * that downstream authorization middleware can inspect.
- *
- * req.scopes = {
- *   user           – Mongoose user document (with memberships populated)
- *   platformRoles  – string[] of platform-level roles (e.g. ['SUPER_ADMIN'])
- *   memberships    – raw memberships array from user doc
- *   tenantMemberships – raw tenantMemberships array from user doc
- *   vmfGrants      – raw vmfGrants array from user doc
- *   isPlatformUser – boolean shortcut
- * }
+ * Runs after authJwt. Loads authorization scopes for the authenticated user.
  */
 
 import { User } from '../models/index.js'
 import logger from '../config/logger.js'
+import performanceCacheService, {
+  buildUserPermissionsSnapshot,
+} from '../services/performanceCacheService.js'
 
 const loadScopes = async (req, res, next) => {
   try {
@@ -32,10 +24,35 @@ const loadScopes = async (req, res, next) => {
       })
     }
 
+    const cachedScopeSnapshot = await performanceCacheService.getUserPermissions(userId)
+    if (cachedScopeSnapshot) {
+      if (!cachedScopeSnapshot.isActive) {
+        logger.warn({ userId, requestId: req.requestId }, 'loadScopes - cached user disabled')
+        return res.status(401).json({
+          error: {
+            code: 'AUTH_ACCOUNT_DISABLED',
+            message: 'Your account has been disabled. Contact your administrator.',
+            requestId: req.requestId,
+          },
+        })
+      }
+
+      req.scopes = {
+        user: cachedScopeSnapshot.user,
+        platformRoles: cachedScopeSnapshot.platformRoles || [],
+        memberships: cachedScopeSnapshot.memberships || [],
+        tenantMemberships: cachedScopeSnapshot.tenantMemberships || [],
+        vmfGrants: cachedScopeSnapshot.vmfGrants || [],
+        isPlatformUser: Boolean(cachedScopeSnapshot.isPlatformUser),
+      }
+
+      return next()
+    }
+
     const user = await User.findById(userId)
 
     if (!user) {
-      logger.warn({ userId, requestId: req.requestId }, 'loadScopes — user not found')
+      logger.warn({ userId, requestId: req.requestId }, 'loadScopes - user not found')
       return res.status(401).json({
         error: {
           code: 'UNAUTHENTICATED',
@@ -46,7 +63,7 @@ const loadScopes = async (req, res, next) => {
     }
 
     if (!user.isActive) {
-      logger.warn({ userId, requestId: req.requestId }, 'loadScopes — user disabled')
+      logger.warn({ userId, requestId: req.requestId }, 'loadScopes - user disabled')
       return res.status(401).json({
         error: {
           code: 'AUTH_ACCOUNT_DISABLED',
@@ -56,23 +73,22 @@ const loadScopes = async (req, res, next) => {
       })
     }
 
-    // Extract platform-level roles (memberships where customerId is null)
-    const platformRoles = user.memberships
-      .filter((m) => m.customerId === null || m.customerId === undefined)
-      .flatMap((m) => m.roles)
+    const scopeSnapshot = buildUserPermissionsSnapshot(user)
 
     req.scopes = {
       user,
-      platformRoles,
-      memberships: user.memberships,
-      tenantMemberships: user.tenantMemberships,
-      vmfGrants: user.vmfGrants,
-      isPlatformUser: platformRoles.length > 0,
+      platformRoles: scopeSnapshot.platformRoles,
+      memberships: scopeSnapshot.memberships,
+      tenantMemberships: scopeSnapshot.tenantMemberships,
+      vmfGrants: scopeSnapshot.vmfGrants,
+      isPlatformUser: scopeSnapshot.isPlatformUser,
     }
 
-    next()
+    await performanceCacheService.setUserPermissions(userId, scopeSnapshot)
+
+    return next()
   } catch (err) {
-    logger.error({ err, requestId: req.requestId }, 'loadScopes — unexpected error')
+    logger.error({ err, requestId: req.requestId }, 'loadScopes - unexpected error')
     next(err)
   }
 }

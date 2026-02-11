@@ -85,6 +85,8 @@ const customerSchema = new mongoose.Schema({
 // Indexes for performance
 customerSchema.index({ name: 1 })
 customerSchema.index({ status: 1, topology: 1 })
+customerSchema.index({ status: 1, topology: 1, createdAt: -1 })
+customerSchema.index({ createdAt: -1 })
 customerSchema.index({ createdBy: 1 })
 
 // Validation middleware

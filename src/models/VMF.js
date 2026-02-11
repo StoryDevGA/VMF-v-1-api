@@ -44,6 +44,8 @@ const vmfSchema = new mongoose.Schema({
 vmfSchema.index({ tenantId: 1, name: 1 })
 vmfSchema.index({ customerId: 1, tenantId: 1 })
 vmfSchema.index({ tenantId: 1, status: 1 })
+vmfSchema.index({ customerId: 1, tenantId: 1, status: 1, createdAt: -1 })
+vmfSchema.index({ customerId: 1, tenantId: 1, createdAt: -1 })
 vmfSchema.index({ createdBy: 1 })
 
 // Static methods

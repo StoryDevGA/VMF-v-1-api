@@ -18,6 +18,7 @@
 import { Customer, Tenant, VMF, Deal, User } from '../models/index.js'
 import auditService from '../services/auditService.js'
 import logger from '../config/logger.js'
+import performanceCacheService from '../services/performanceCacheService.js'
 
 /* ------------------------------------------------------------------ */
 /*  GET /api/v1/customers/:customerId/tenants/:tenantId/vmfs          */
@@ -292,6 +293,7 @@ export const deleteVmf = async (req, res, next) => {
       { 'vmfGrants.vmfId': vmf._id },
       { $pull: { vmfGrants: { vmfId: vmf._id } } },
     )
+    await performanceCacheService.invalidateAllUserPermissions()
 
     await VMF.deleteOne({ _id: vmf._id })
 
@@ -388,6 +390,7 @@ export const grantAccess = async (req, res, next) => {
     }
 
     await targetUser.save()
+    await performanceCacheService.invalidateUserPermissions(targetUser._id)
 
     await auditService.logFromRequest(req, {
       action: 'VMF_GRANT_CREATED',
@@ -459,6 +462,7 @@ export const revokeAccess = async (req, res, next) => {
 
     targetUser.vmfGrants.splice(grantIdx, 1)
     await targetUser.save()
+    await performanceCacheService.invalidateUserPermissions(targetUser._id)
 
     await auditService.logFromRequest(req, {
       action: 'VMF_GRANT_REVOKED',

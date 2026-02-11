@@ -14,6 +14,7 @@ import { Customer, User } from '../models/index.js'
 import { createCustomerWithDefaults } from '../services/provisioningService.js'
 import auditService from '../services/auditService.js'
 import logger from '../config/logger.js'
+import performanceCacheService from '../services/performanceCacheService.js'
 
 /* ------------------------------------------------------------------ */
 /*  GET /api/v1/customers                                             */
@@ -168,6 +169,7 @@ export const updateCustomer = async (req, res, next) => {
     }
 
     await customer.save()
+    await performanceCacheService.invalidateCustomerTopology(customer._id)
 
     await auditService.logFromRequest(req, {
       action: 'CUSTOMER_UPDATED',
@@ -219,6 +221,7 @@ export const updateCustomerStatus = async (req, res, next) => {
     const previousStatus = customer.status
     customer.status = req.body.status
     await customer.save()
+    await performanceCacheService.invalidateCustomerTopology(customer._id)
 
     await auditService.logFromRequest(req, {
       action: 'CUSTOMER_STATUS_CHANGED',
@@ -291,6 +294,7 @@ export const assignAdmin = async (req, res, next) => {
       if (!existing.roles.includes('CUSTOMER_ADMIN')) {
         existing.roles.push('CUSTOMER_ADMIN')
         await user.save()
+        await performanceCacheService.invalidateUserPermissions(user._id)
       }
     } else {
       // Create new membership
@@ -299,6 +303,7 @@ export const assignAdmin = async (req, res, next) => {
         roles: ['CUSTOMER_ADMIN'],
       })
       await user.save()
+      await performanceCacheService.invalidateUserPermissions(user._id)
     }
 
     await auditService.logFromRequest(req, {

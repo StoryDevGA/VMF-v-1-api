@@ -15,6 +15,7 @@ import { Customer, User, Tenant } from '../models/index.js'
 import identityPlusService from '../services/identityPlusService.js'
 import auditService from '../services/auditService.js'
 import logger from '../config/logger.js'
+import performanceCacheService from '../services/performanceCacheService.js'
 
 /* ------------------------------------------------------------------ */
 /*  GET /api/v1/customers/:customerId/users                           */
@@ -147,6 +148,7 @@ export const createUser = async (req, res, next) => {
     })
 
     await user.save()
+    await performanceCacheService.invalidateUserPermissions(user._id)
 
     // 5. Send Identity Plus invitation
     let invitationResult = null
@@ -161,6 +163,7 @@ export const createUser = async (req, res, next) => {
         user.identityPlus.externalId = invitationResult.externalId
         user.identityPlus.invitedAt = invitationResult.invitedAt || new Date()
         await user.save()
+        await performanceCacheService.invalidateUserPermissions(user._id)
       }
     } catch (invErr) {
       // Invitation failure is non-fatal — user is still created
@@ -169,6 +172,7 @@ export const createUser = async (req, res, next) => {
         'Identity Plus invitation failed; user created without invitation',
       )
     }
+    await performanceCacheService.invalidateUserPermissions(user._id)
 
     // 6. Audit log
     await auditService.logFromRequest(req, {
@@ -347,6 +351,7 @@ export const updateUser = async (req, res, next) => {
     }
 
     await user.save()
+    await performanceCacheService.invalidateUserPermissions(user._id)
 
     // Audit log
     await auditService.logFromRequest(req, {
@@ -418,6 +423,7 @@ export const disableUser = async (req, res, next) => {
     user.isActive = false
     user.identityPlus.trustStatus = 'REVOKED'
     await user.save()
+    await performanceCacheService.invalidateUserPermissions(user._id)
 
     // 2. Call Identity Plus to revoke trust
     try {
@@ -511,6 +517,7 @@ export const deleteUser = async (req, res, next) => {
     }
 
     // Delete user document
+    await performanceCacheService.invalidateUserPermissions(user._id)
     await User.deleteOne({ _id: user._id })
 
     // Audit log
@@ -592,6 +599,7 @@ export const resendInvitation = async (req, res, next) => {
       user.identityPlus.externalId = result.externalId
       user.identityPlus.invitedAt = result.invitedAt || new Date()
       await user.save()
+      await performanceCacheService.invalidateUserPermissions(user._id)
     }
 
     // Audit log
@@ -625,3 +633,4 @@ export const resendInvitation = async (req, res, next) => {
     next(err)
   }
 }
+

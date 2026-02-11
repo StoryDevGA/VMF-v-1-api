@@ -50,6 +50,8 @@ const tenantSchema = new mongoose.Schema({
 tenantSchema.index({ customerId: 1, name: 1 })
 tenantSchema.index({ customerId: 1, status: 1 })
 tenantSchema.index({ customerId: 1, isDefault: 1 })
+tenantSchema.index({ customerId: 1, status: 1, isDefault: -1, createdAt: -1 })
+tenantSchema.index({ customerId: 1, isDefault: -1, createdAt: -1 })
 tenantSchema.index({ tenantAdminUserIds: 1 })
 
 // Static methods

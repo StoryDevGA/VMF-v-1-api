@@ -28,8 +28,24 @@ export const connectDb = async () => {
 
   await mongoose.connect(env.mongoUri, {
     autoIndex: !env.isProduction,
-    serverSelectionTimeoutMS: 5000,
+    serverSelectionTimeoutMS: env.mongoServerSelectionTimeoutMs,
+    connectTimeoutMS: env.mongoConnectTimeoutMs,
+    socketTimeoutMS: env.mongoSocketTimeoutMs,
+    heartbeatFrequencyMS: env.mongoHeartbeatFrequencyMs,
+    minPoolSize: env.mongoMinPoolSize,
+    maxPoolSize: env.mongoMaxPoolSize,
+    maxIdleTimeMS: env.mongoMaxIdleTimeMs,
   })
+
+  logger.info(
+    {
+      minPoolSize: env.mongoMinPoolSize,
+      maxPoolSize: env.mongoMaxPoolSize,
+      connectTimeoutMs: env.mongoConnectTimeoutMs,
+      socketTimeoutMs: env.mongoSocketTimeoutMs,
+    },
+    'mongo connection pool configured',
+  )
 }
 
 export const disconnectDb = async () => {

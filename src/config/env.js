@@ -14,6 +14,11 @@ const toFloat = (value, fallback) => {
   return Number.isNaN(parsed) ? fallback : parsed
 }
 
+const toPositiveNumber = (value, fallback, min = 1) => {
+  const parsed = toNumber(value, fallback)
+  return parsed < min ? fallback : parsed
+}
+
 const toBoolean = (value, fallback) => {
   if (value === undefined) return fallback
   const normalized = String(value).toLowerCase()
@@ -46,6 +51,13 @@ const env = {
   logLevel: process.env.LOG_LEVEL || 'info',
   trustProxy: toBoolean(process.env.TRUST_PROXY, false),
   mongoUri: process.env.MONGODB_URI || '',
+  mongoServerSelectionTimeoutMs: toPositiveNumber(process.env.MONGO_SERVER_SELECTION_TIMEOUT_MS, 5000),
+  mongoConnectTimeoutMs: toPositiveNumber(process.env.MONGO_CONNECT_TIMEOUT_MS, 10000),
+  mongoSocketTimeoutMs: toPositiveNumber(process.env.MONGO_SOCKET_TIMEOUT_MS, 45000),
+  mongoHeartbeatFrequencyMs: toPositiveNumber(process.env.MONGO_HEARTBEAT_FREQUENCY_MS, 10000),
+  mongoMinPoolSize: toPositiveNumber(process.env.MONGO_MIN_POOL_SIZE, 10),
+  mongoMaxPoolSize: toPositiveNumber(process.env.MONGO_MAX_POOL_SIZE, 100),
+  mongoMaxIdleTimeMs: toPositiveNumber(process.env.MONGO_MAX_IDLE_TIME_MS, 30000),
   
   // JWT Configuration
   jwtSecret: process.env.JWT_SECRET || '',
@@ -99,6 +111,30 @@ const env = {
     85,
   ),
 
+  // Performance Optimization
+  perfCacheEnabled: toBoolean(process.env.PERF_CACHE_ENABLED, process.env.NODE_ENV !== 'test'),
+  userPermissionsCacheTtlSec: toPositiveNumber(process.env.USER_PERMISSIONS_CACHE_TTL_SEC, 300),
+  tenantStatusCacheTtlSec: toPositiveNumber(process.env.TENANT_STATUS_CACHE_TTL_SEC, 60),
+  customerTopologyCacheTtlSec: toPositiveNumber(process.env.CUSTOMER_TOPOLOGY_CACHE_TTL_SEC, 900),
+  cacheWarmUserLimit: toPositiveNumber(process.env.CACHE_WARM_USER_LIMIT, 200),
+  cacheWarmTenantLimit: toPositiveNumber(process.env.CACHE_WARM_TENANT_LIMIT, 200),
+  cacheWarmCustomerLimit: toPositiveNumber(process.env.CACHE_WARM_CUSTOMER_LIMIT, 100),
+  backgroundJobsEnabled: toBoolean(process.env.BACKGROUND_JOBS_ENABLED, true),
+  backgroundJobConcurrency: toPositiveNumber(process.env.BACKGROUND_JOB_CONCURRENCY, 2),
+  identityPlusReconciliationIntervalMs: toPositiveNumber(
+    process.env.IDENTITY_PLUS_RECONCILIATION_INTERVAL_MS,
+    5 * 60 * 1000,
+  ),
+  identityPlusReconciliationBatchSize: toPositiveNumber(
+    process.env.IDENTITY_PLUS_RECONCILIATION_BATCH_SIZE,
+    50,
+  ),
+  auditArchivalIntervalMs: toPositiveNumber(
+    process.env.AUDIT_ARCHIVAL_INTERVAL_MS,
+    6 * 60 * 60 * 1000,
+  ),
+  cacheWarmingIntervalMs: toPositiveNumber(process.env.CACHE_WARMING_INTERVAL_MS, 10 * 60 * 1000),
+
   // GDPR Compliance
   gdprExportAuditLimit: toNumber(process.env.GDPR_EXPORT_AUDIT_LIMIT, 5000),
   gdprRetentionDays: toNumber(process.env.GDPR_RETENTION_DAYS, 2555), // 7 years
@@ -107,6 +143,9 @@ const env = {
 }
 
 env.isProduction = env.nodeEnv === 'production'
+env.mongoMinPoolSize = Math.max(1, env.mongoMinPoolSize)
+env.mongoMaxPoolSize = Math.max(env.mongoMinPoolSize, env.mongoMaxPoolSize)
+env.backgroundJobConcurrency = Math.max(1, env.backgroundJobConcurrency)
 env.corsOrigins =
   env.corsOrigins.length > 0
     ? env.corsOrigins

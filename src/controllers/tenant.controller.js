@@ -13,6 +13,9 @@ import { Customer, Tenant } from '../models/index.js'
 import { createTenantWithDefaults } from '../services/provisioningService.js'
 import auditService from '../services/auditService.js'
 import logger from '../config/logger.js'
+import performanceCacheService, {
+  buildTenantStatusSnapshot,
+} from '../services/performanceCacheService.js'
 
 /* ------------------------------------------------------------------ */
 /*  GET /api/v1/customers/:customerId/tenants                         */
@@ -104,6 +107,10 @@ export const createTenant = async (req, res, next) => {
 
     const actorUserId = req.context?.userId || req.userId
     const result = await createTenantWithDefaults(req.body, customer, actorUserId, req)
+    await performanceCacheService.setTenantStatus(
+      result.tenant._id,
+      buildTenantStatusSnapshot(result.tenant),
+    )
 
     const responseData = {
       tenant: result.tenant.toJSON(),
@@ -160,6 +167,7 @@ export const updateTenant = async (req, res, next) => {
     }
 
     await tenant.save()
+    await performanceCacheService.invalidateTenantStatus(tenant._id)
 
     await auditService.logFromRequest(req, {
       action: 'TENANT_UPDATED',
@@ -229,6 +237,7 @@ export const enableTenant = async (req, res, next) => {
     const previousStatus = tenant.status
     tenant.status = 'ENABLED'
     await tenant.save()
+    await performanceCacheService.invalidateTenantStatus(tenant._id)
 
     await auditService.logFromRequest(req, {
       action: 'TENANT_ENABLED',
@@ -300,6 +309,7 @@ export const disableTenant = async (req, res, next) => {
     const previousStatus = tenant.status
     tenant.status = 'DISABLED'
     await tenant.save()
+    await performanceCacheService.invalidateTenantStatus(tenant._id)
 
     await auditService.logFromRequest(req, {
       action: 'TENANT_DISABLED',

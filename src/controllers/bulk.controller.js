@@ -15,6 +15,7 @@ import { Customer, User, Tenant } from '../models/index.js'
 import identityPlusService from '../services/identityPlusService.js'
 import logger from '../config/logger.js'
 import auditService from '../services/auditService.js'
+import performanceCacheService from '../services/performanceCacheService.js'
 
 /* ------------------------------------------------------------------ */
 /*  POST /api/v1/customers/:customerId/users/bulk                     */
@@ -150,6 +151,7 @@ export const bulkCreateUsers = async (req, res, next) => {
         })
 
         await user.save()
+        await performanceCacheService.invalidateUserPermissions(user._id)
 
         // Track email as now existing (for subsequent intra-batch duplicate checks)
         existingEmailSet.add(email)
@@ -166,6 +168,7 @@ export const bulkCreateUsers = async (req, res, next) => {
               user.identityPlus.externalId = invResult.externalId
               user.identityPlus.invitedAt = invResult.invitedAt || new Date()
               await user.save()
+              await performanceCacheService.invalidateUserPermissions(user._id)
             }
             invitationSent = true
           } catch (invErr) {
@@ -374,6 +377,7 @@ export const bulkUpdateUsers = async (req, res, next) => {
         }
 
         await user.save()
+        await performanceCacheService.invalidateUserPermissions(user._id)
 
         await auditService.logFromRequest(req, {
           action: 'USER_ROLE_UPDATED',
@@ -514,6 +518,7 @@ export const bulkDisableUsers = async (req, res, next) => {
         user.isActive = false
         user.identityPlus.trustStatus = 'REVOKED'
         await user.save()
+        await performanceCacheService.invalidateUserPermissions(user._id)
 
         // Revoke trust externally (non-fatal)
         try {
