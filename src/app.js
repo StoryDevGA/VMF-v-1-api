@@ -5,9 +5,11 @@ import env from './config/env.js'
 import requestLogger from './middleware/requestLogger.js'
 import requestContext from './middleware/requestContext.js'
 import correlationEnricher from './middleware/correlationEnricher.js'
+import performanceMonitor from './middleware/performanceMonitor.js'
 import errorHandler from './middleware/errorHandler.js'
 import { generalApiRateLimit } from './middleware/rateLimits.js'
 import healthRoutes from './routes/health.routes.js'
+import monitoringRoutes from './routes/monitoring.routes.js'
 import authRoutes from './routes/auth.routes.js'
 import identityPlusRoutes from './routes/identityPlus.routes.js'
 import customerRoutes from './routes/customers.routes.js'
@@ -59,6 +61,7 @@ app.use(express.json({ limit: '1mb' }))
 app.use(requestContext) // Add request context before logger
 app.use(correlationEnricher) // Enrich responses with requestId
 app.use(requestLogger)
+app.use(performanceMonitor)
 app.use(generalApiRateLimit)
 
 app.get('/', (_req, res) => {
@@ -66,6 +69,7 @@ app.get('/', (_req, res) => {
 })
 
 app.use('/health', healthRoutes)
+app.use('/metrics', monitoringRoutes)
 app.use('/api/v1/auth', authRoutes)
 app.use('/api/v1/webhooks/identity-plus', identityPlusRoutes)
 // More specific customer-scoped routes BEFORE the general /customers mount

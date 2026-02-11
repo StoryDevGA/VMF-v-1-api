@@ -9,6 +9,11 @@ const toNumber = (value, fallback) => {
   return Number.isNaN(parsed) ? fallback : parsed
 }
 
+const toFloat = (value, fallback) => {
+  const parsed = Number.parseFloat(value)
+  return Number.isNaN(parsed) ? fallback : parsed
+}
+
 const toBoolean = (value, fallback) => {
   if (value === undefined) return fallback
   const normalized = String(value).toLowerCase()
@@ -25,9 +30,16 @@ const parseCorsOrigins = (value) => {
     .filter(Boolean)
 }
 
+const normalizeMetricsPrefix = (value) => {
+  const prefix = (value || 'vmf_api_').trim()
+  if (!prefix) return 'vmf_api_'
+  return prefix.endsWith('_') ? prefix : `${prefix}_`
+}
+
 const env = {
   nodeEnv: process.env.NODE_ENV || 'development',
   port: toNumber(process.env.PORT, 8000),
+  appVersion: process.env.APP_VERSION || '0.1.0',
   corsOrigins: parseCorsOrigins(process.env.CORS_ORIGIN),
   rateLimitWindowMs: toNumber(process.env.RATE_LIMIT_WINDOW_MS, 15 * 60 * 1000),
   rateLimitMax: toNumber(process.env.RATE_LIMIT_MAX, 300),
@@ -69,6 +81,23 @@ const env = {
   tenantRateLimit: toNumber(process.env.TENANT_RATE_LIMIT, 50),
   bulkRateLimit: toNumber(process.env.BULK_RATE_LIMIT, 10),
   auditRateLimit: toNumber(process.env.AUDIT_RATE_LIMIT, 30),
+
+  // Monitoring and Alerting
+  metricsPrefix: normalizeMetricsPrefix(process.env.METRICS_PREFIX),
+  monitoringWindowMs: toNumber(process.env.MONITORING_WINDOW_MS, 5 * 60 * 1000),
+  monitoringLatencyP95ThresholdMs: toNumber(
+    process.env.MONITORING_LATENCY_P95_THRESHOLD_MS,
+    200,
+  ),
+  monitoringErrorRateThreshold: toFloat(process.env.MONITORING_ERROR_RATE_THRESHOLD, 0.05),
+  monitoringEventLoopLagThresholdMs: toNumber(
+    process.env.MONITORING_EVENT_LOOP_LAG_THRESHOLD_MS,
+    100,
+  ),
+  monitoringHeapUsageThresholdPct: toNumber(
+    process.env.MONITORING_HEAP_USAGE_THRESHOLD_PCT,
+    85,
+  ),
 }
 
 env.isProduction = env.nodeEnv === 'production'
