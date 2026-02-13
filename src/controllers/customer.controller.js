@@ -16,6 +16,57 @@ import auditService from '../services/auditService.js'
 import logger from '../config/logger.js'
 import performanceCacheService from '../services/performanceCacheService.js'
 
+const DUPLICATE_CUSTOMER_NAME_MESSAGE = 'A customer with this name already exists.'
+
+const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+const normalizeCustomerName = (value) =>
+  String(value || '')
+    .normalize('NFKC')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase()
+
+const buildCustomerNameRegex = (name) => {
+  const normalized = normalizeCustomerName(name)
+  const escapedTokens = normalized
+    .split(' ')
+    .filter(Boolean)
+    .map((token) => escapeRegex(token))
+
+  return `^${escapedTokens.join('\\s+')}$`
+}
+
+const buildCustomerNameFilter = (name, excludeCustomerId = null) => {
+  const normalizedName = normalizeCustomerName(name)
+  const filter = {
+    $or: [
+      { nameNormalized: normalizedName },
+      { name: { $regex: buildCustomerNameRegex(name), $options: 'i' } },
+    ],
+  }
+
+  if (excludeCustomerId) {
+    filter._id = { $ne: excludeCustomerId }
+  }
+
+  return filter
+}
+
+const findConflictingCustomerByName = (name, excludeCustomerId = null) => {
+  if (!normalizeCustomerName(name)) {
+    return Promise.resolve(null)
+  }
+
+  return Customer.findOne(buildCustomerNameFilter(String(name), excludeCustomerId))
+}
+
+const isCustomerNameDuplicateKeyError = (err) =>
+  err?.code === 11000 && (err?.keyPattern?.name || err?.keyPattern?.nameNormalized)
+
+const isCustomerNameDuplicateError = (err) =>
+  err?.code === 'DUPLICATE_CUSTOMER_NAME' || isCustomerNameDuplicateKeyError(err)
+
 /* ------------------------------------------------------------------ */
 /*  GET /api/v1/customers                                             */
 /* ------------------------------------------------------------------ */
@@ -78,6 +129,17 @@ export const listCustomers = async (req, res, next) => {
  */
 export const createCustomer = async (req, res, next) => {
   try {
+    const conflict = await findConflictingCustomerByName(req.body.name)
+    if (conflict) {
+      return res.status(409).json({
+        error: {
+          code: 'CONFLICT',
+          message: DUPLICATE_CUSTOMER_NAME_MESSAGE,
+          requestId: req.requestId,
+        },
+      })
+    }
+
     const actorUserId = req.context?.userId || req.userId
     const result = await createCustomerWithDefaults(req.body, actorUserId, req)
 
@@ -92,7 +154,17 @@ export const createCustomer = async (req, res, next) => {
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
-    // Mongoose validation errors → 422
+    if (isCustomerNameDuplicateError(err)) {
+      return res.status(409).json({
+        error: {
+          code: 'CONFLICT',
+          message: DUPLICATE_CUSTOMER_NAME_MESSAGE,
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    // Mongoose validation errors -> 422
     if (err.name === 'ValidationError' || err.message?.includes('policy')) {
       return res.status(422).json({
         error: {
@@ -158,6 +230,19 @@ export const updateCustomer = async (req, res, next) => {
       })
     }
 
+    if (req.body.name !== undefined) {
+      const conflict = await findConflictingCustomerByName(req.body.name, customer._id)
+      if (conflict) {
+        return res.status(409).json({
+          error: {
+            code: 'CONFLICT',
+            message: DUPLICATE_CUSTOMER_NAME_MESSAGE,
+            requestId: req.requestId,
+          },
+        })
+      }
+    }
+
     const allowedFields = ['name', 'isServiceProvider', 'entitlements', 'billing', 'trial']
     const diff = {}
 
@@ -184,6 +269,16 @@ export const updateCustomer = async (req, res, next) => {
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
+    if (isCustomerNameDuplicateError(err)) {
+      return res.status(409).json({
+        error: {
+          code: 'CONFLICT',
+          message: DUPLICATE_CUSTOMER_NAME_MESSAGE,
+          requestId: req.requestId,
+        },
+      })
+    }
+
     if (err.name === 'ValidationError') {
       return res.status(422).json({
         error: {

@@ -199,6 +199,7 @@ beforeEach(() => {
   User.findById = jest.fn()
   User.findByEmail = jest.fn()
   Customer.findById = jest.fn()
+  Customer.findOne = jest.fn()
   Customer.find = jest.fn()
   Customer.countDocuments = jest.fn()
   Tenant.findById = jest.fn()
@@ -207,6 +208,8 @@ beforeEach(() => {
   VMF.findById = jest.fn()
   VMF.countByTenant = jest.fn()
   AuditLog.createLog = jest.fn(async () => ({}))
+
+  Customer.findOne.mockResolvedValue(null)
 
   // Default: loadScopes finds a SUPER_ADMIN user
   User.findById.mockImplementation((id) => {
@@ -502,6 +505,32 @@ describe('GET /api/v1/customers', () => {
 })
 
 describe('POST /api/v1/customers', () => {
+  test('returns 409 when customer name already exists (case-insensitive)', async () => {
+    const token = await getSuperAdminToken()
+    Customer.findOne.mockResolvedValue(makeFakeCustomer({ name: 'Acme Corp' }))
+
+    const res = await request
+      .post('/api/v1/customers')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        name: '  ACME CORP  ',
+        topology: 'MULTI_TENANT',
+        vmfPolicy: 'PER_TENANT_MULTI',
+        billing: { planCode: 'PRO', cycle: 'MONTHLY' },
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.message).toContain('already exists')
+    expect(Customer.findOne).toHaveBeenCalledWith(
+      expect.objectContaining({
+        $or: expect.arrayContaining([
+          expect.objectContaining({ nameNormalized: 'acme corp' }),
+        ]),
+      }),
+    )
+  })
+
   test('creates a multi-tenant customer successfully', async () => {
     const token = await getSuperAdminToken()
 
@@ -662,6 +691,33 @@ describe('PATCH /api/v1/customers/:customerId', () => {
     expect(res.status).toBe(200)
     expect(customer.save).toHaveBeenCalled()
     expect(AuditLog.createLog).toHaveBeenCalled()
+  })
+
+  test('returns 409 when renaming to an existing customer name (case-insensitive)', async () => {
+    const token = await getSuperAdminToken()
+    const customer = makeFakeCustomer({ _id: CUSTOMER_ID, id: CUSTOMER_ID, name: 'Current Corp' })
+    Customer.findById.mockResolvedValue(customer)
+    Customer.findOne.mockResolvedValue(
+      makeFakeCustomer({ _id: '607f1f77bcf86cd799439088', id: '607f1f77bcf86cd799439088', name: 'Acme Corp' }),
+    )
+
+    const res = await request
+      .patch(`/api/v1/customers/${CUSTOMER_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: '  ACME corp  ' })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.message).toContain('already exists')
+    expect(customer.save).not.toHaveBeenCalled()
+    expect(Customer.findOne).toHaveBeenCalledWith(
+      expect.objectContaining({
+        _id: { $ne: CUSTOMER_ID },
+        $or: expect.arrayContaining([
+          expect.objectContaining({ nameNormalized: 'acme corp' }),
+        ]),
+      }),
+    )
   })
 })
 
