@@ -7,6 +7,7 @@
  */
 
 import { z } from 'zod'
+import { createBodyValidator } from './shared.js'
 
 /* ------------------------------------------------------------------ */
 /*  Schemas                                                           */
@@ -14,17 +15,19 @@ import { z } from 'zod'
 
 const objectIdRegex = /^[a-f\d]{24}$/i
 
+const websiteSchema = z
+  .string({ required_error: 'Website is required' })
+  .trim()
+  .url('Website must be a valid URL')
+  .max(500, 'Website must be 500 characters or fewer')
+
 const createTenantSchema = z.object({
   name: z
     .string({ required_error: 'Name is required' })
     .trim()
     .min(1, 'Name is required')
     .max(255, 'Name must be 255 characters or fewer'),
-  website: z
-    .string({ required_error: 'Website is required' })
-    .trim()
-    .url('Website must be a valid URL')
-    .max(500, 'Website must be 500 characters or fewer'),
+  website: websiteSchema,
   tenantAdminUserIds: z
     .array(
       z.string().regex(objectIdRegex, 'Each tenantAdminUserId must be a valid ObjectId'),
@@ -40,12 +43,7 @@ const updateTenantSchema = z.object({
     .min(1, 'Name must not be empty')
     .max(255, 'Name must be 255 characters or fewer')
     .optional(),
-  website: z
-    .string()
-    .trim()
-    .url('Website must be a valid URL')
-    .max(500, 'Website must be 500 characters or fewer')
-    .optional(),
+  website: websiteSchema.optional(),
   tenantAdminUserIds: z
     .array(
       z.string().regex(objectIdRegex, 'Each tenantAdminUserId must be a valid ObjectId'),
@@ -55,36 +53,8 @@ const updateTenantSchema = z.object({
 })
 
 /* ------------------------------------------------------------------ */
-/*  Middleware factory                                                 */
-/* ------------------------------------------------------------------ */
-
-const validate = (schema) => (req, res, next) => {
-  const result = schema.safeParse(req.body)
-
-  if (!result.success) {
-    const details = {}
-    for (const issue of result.error.issues) {
-      const key = issue.path.join('.')
-      details[key] = issue.message
-    }
-
-    return res.status(422).json({
-      error: {
-        code: 'VALIDATION_FAILED',
-        message: 'Please check the form for errors.',
-        details,
-        requestId: req.requestId,
-      },
-    })
-  }
-
-  req.body = result.data
-  next()
-}
-
-/* ------------------------------------------------------------------ */
 /*  Exports                                                           */
 /* ------------------------------------------------------------------ */
 
-export const validateCreateTenant = validate(createTenantSchema)
-export const validateUpdateTenant = validate(updateTenantSchema)
+export const validateCreateTenant = createBodyValidator(createTenantSchema)
+export const validateUpdateTenant = createBodyValidator(updateTenantSchema)

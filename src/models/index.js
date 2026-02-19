@@ -7,6 +7,8 @@ import Deal from './Deal.js'
 import Role from './Role.js'
 import AuditLog from './AuditLog.js'
 import DataDeletionRequest from './DataDeletionRequest.js'
+import Invitation from './Invitation.js'
+import SystemVersioningPolicy from './SystemVersioningPolicy.js'
 
 // Export all models
 export {
@@ -18,6 +20,8 @@ export {
   Role,
   AuditLog,
   DataDeletionRequest,
+  Invitation,
+  SystemVersioningPolicy,
 }
 
 // Default export with all models
@@ -30,4 +34,6 @@ export default {
   Role,
   AuditLog,
   DataDeletionRequest,
+  Invitation,
+  SystemVersioningPolicy,
 }

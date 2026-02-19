@@ -9,6 +9,7 @@
  */
 
 import { z } from 'zod'
+import { createBodyValidator } from './shared.js'
 
 /* ------------------------------------------------------------------ */
 /*  Shared helpers                                                    */
@@ -58,34 +59,18 @@ const grantAccessSchema = z.object({
 })
 
 /* ------------------------------------------------------------------ */
-/*  Middleware factory                                                 */
-/* ------------------------------------------------------------------ */
-
-const validate = (schema) => (req, res, next) => {
-  const result = schema.safeParse(req.body)
-  if (!result.success) {
-    const details = {}
-    for (const issue of result.error.issues) {
-      const key = issue.path.join('.') || '_root'
-      details[key] = issue.message
-    }
-    return res.status(422).json({
-      error: {
-        code: 'VALIDATION_FAILED',
-        message: 'Request validation failed.',
-        details,
-        requestId: req.requestId,
-      },
-    })
-  }
-  req.body = result.data
-  next()
-}
-
-/* ------------------------------------------------------------------ */
 /*  Exports                                                           */
 /* ------------------------------------------------------------------ */
 
-export const validateCreateVmf = validate(createVmfSchema)
-export const validateUpdateVmf = validate(updateVmfSchema)
-export const validateGrantAccess = validate(grantAccessSchema)
+export const validateCreateVmf = createBodyValidator(createVmfSchema, {
+  message: 'Request validation failed.',
+  rootIssueKey: '_root',
+})
+export const validateUpdateVmf = createBodyValidator(updateVmfSchema, {
+  message: 'Request validation failed.',
+  rootIssueKey: '_root',
+})
+export const validateGrantAccess = createBodyValidator(grantAccessSchema, {
+  message: 'Request validation failed.',
+  rootIssueKey: '_root',
+})

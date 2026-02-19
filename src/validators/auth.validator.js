@@ -7,6 +7,7 @@
  */
 
 import { z } from 'zod'
+import { createBodyValidator } from './shared.js'
 
 /* ------------------------------------------------------------------ */
 /*  Schemas                                                           */
@@ -30,42 +31,16 @@ const refreshSchema = z.object({
     .min(1, 'Refresh token is required'),
 })
 
-/* ------------------------------------------------------------------ */
-/*  Middleware factory                                                 */
-/* ------------------------------------------------------------------ */
-
-/**
- * Create an Express middleware that validates `req.body` against a Zod schema.
- * On success, `req.body` is replaced with the parsed (coerced/trimmed) output.
- * On failure, responds 422 with structured field errors.
- */
-const validate = (schema) => (req, res, next) => {
-  const result = schema.safeParse(req.body)
-
-  if (!result.success) {
-    const details = {}
-    for (const issue of result.error.issues) {
-      const key = issue.path.join('.')
-      details[key] = issue.message
-    }
-
-    return res.status(422).json({
-      error: {
-        code: 'VALIDATION_FAILED',
-        message: 'Please check the form for errors.',
-        details,
-        requestId: req.requestId,
-      },
-    })
-  }
-
-  req.body = result.data
-  next()
-}
+const stepUpSchema = z.object({
+  password: z
+    .string({ required_error: 'Password is required' })
+    .min(1, 'Password is required'),
+})
 
 /* ------------------------------------------------------------------ */
 /*  Exports                                                           */
 /* ------------------------------------------------------------------ */
 
-export const validateLogin = validate(loginSchema)
-export const validateRefresh = validate(refreshSchema)
+export const validateLogin = createBodyValidator(loginSchema)
+export const validateRefresh = createBodyValidator(refreshSchema)
+export const validateStepUp = createBodyValidator(stepUpSchema)

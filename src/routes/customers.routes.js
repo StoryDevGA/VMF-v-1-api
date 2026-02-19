@@ -5,12 +5,13 @@
  * All routes require SUPER_ADMIN platform role.
  *
  * Route map:
- *   GET    /                      – List customers
- *   POST   /                      – Create customer + provision defaults
- *   GET    /:customerId           – Get single customer
- *   PATCH  /:customerId           – Update customer
- *   PATCH  /:customerId/status    – Update customer status
- *   POST   /:customerId/admins    – Assign CUSTOMER_ADMIN
+ *   GET    /                              – List customers
+ *   POST   /                              – Create customer + provision defaults
+ *   GET    /:customerId                   – Get single customer
+ *   PATCH  /:customerId                   – Update customer
+ *   PATCH  /:customerId/status            – Update customer status
+ *   POST   /:customerId/admins            – Assign CUSTOMER_ADMIN
+ *   POST   /:customerId/admins/replace    – Replace CUSTOMER_ADMIN (step-up required)
  */
 
 import { Router } from 'express'
@@ -18,11 +19,13 @@ import authJwt from '../middleware/authJwt.js'
 import loadScopes from '../middleware/loadScopes.js'
 import { requirePlatformRole } from '../middleware/authorize.js'
 import { tenantManagementRateLimit } from '../middleware/rateLimits.js'
+import requireStepUp from '../middleware/requireStepUp.js'
 import {
   validateCreateCustomer,
   validateUpdateCustomer,
   validateUpdateStatus,
   validateAssignAdmin,
+  validateReplaceAdmin,
 } from '../validators/customer.validator.js'
 import {
   listCustomers,
@@ -31,6 +34,7 @@ import {
   updateCustomer,
   updateCustomerStatus,
   assignAdmin,
+  replaceAdmin,
 } from '../controllers/customer.controller.js'
 
 const router = Router()
@@ -51,5 +55,12 @@ router.get('/:customerId', getCustomer)
 router.patch('/:customerId', tenantManagementRateLimit, validateUpdateCustomer, updateCustomer)
 router.patch('/:customerId/status', tenantManagementRateLimit, validateUpdateStatus, updateCustomerStatus)
 router.post('/:customerId/admins', tenantManagementRateLimit, validateAssignAdmin, assignAdmin)
+router.post(
+  '/:customerId/admins/replace',
+  tenantManagementRateLimit,
+  requireStepUp,
+  validateReplaceAdmin,
+  replaceAdmin,
+)
 
 export default router

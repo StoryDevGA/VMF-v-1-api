@@ -7,6 +7,7 @@
  */
 
 import { z } from 'zod'
+import { createBodyValidator } from './shared.js'
 
 /* ------------------------------------------------------------------ */
 /*  Schemas                                                           */
@@ -58,33 +59,14 @@ const updateDealSchema = z.object({
 )
 
 /* ------------------------------------------------------------------ */
-/*  Middleware factory                                                 */
-/* ------------------------------------------------------------------ */
-
-const validate = (schema) => (req, res, next) => {
-  const result = schema.safeParse(req.body)
-  if (!result.success) {
-    const details = {}
-    for (const issue of result.error.issues) {
-      const key = issue.path.join('.') || '_root'
-      details[key] = issue.message
-    }
-    return res.status(422).json({
-      error: {
-        code: 'VALIDATION_FAILED',
-        message: 'Request validation failed.',
-        details,
-        requestId: req.requestId,
-      },
-    })
-  }
-  req.body = result.data
-  next()
-}
-
-/* ------------------------------------------------------------------ */
 /*  Exports                                                           */
 /* ------------------------------------------------------------------ */
 
-export const validateCreateDeal = validate(createDealSchema)
-export const validateUpdateDeal = validate(updateDealSchema)
+export const validateCreateDeal = createBodyValidator(createDealSchema, {
+  message: 'Request validation failed.',
+  rootIssueKey: '_root',
+})
+export const validateUpdateDeal = createBodyValidator(updateDealSchema, {
+  message: 'Request validation failed.',
+  rootIssueKey: '_root',
+})

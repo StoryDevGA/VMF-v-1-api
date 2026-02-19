@@ -89,6 +89,7 @@ const makeFakeCustomer = (overrides = {}) => ({
   _id: CUSTOMER_ID,
   id: CUSTOMER_ID,
   name: 'Acme Corp',
+  website: null,
   topology: 'MULTI_TENANT',
   vmfPolicy: 'PER_TENANT_MULTI',
   defaultTenantId: null,
@@ -104,6 +105,7 @@ const makeFakeCustomer = (overrides = {}) => ({
     return {
       id: this._id,
       name: this.name,
+      website: this.website,
       topology: this.topology,
       vmfPolicy: this.vmfPolicy,
       defaultTenantId: this.defaultTenantId,
@@ -564,6 +566,37 @@ describe('POST /api/v1/customers', () => {
     Customer.prototype.save = origPrototypeSave
   })
 
+  test('creates a customer with optional website', async () => {
+    const token = await getSuperAdminToken()
+
+    const savedCustomer = makeFakeCustomer({
+      name: 'Acme Corp',
+      website: 'https://acme.example',
+    })
+    const origPrototypeSave = Customer.prototype.save
+    Customer.prototype.save = jest.fn(async function () {
+      Object.assign(this, savedCustomer)
+      this.toJSON = savedCustomer.toJSON.bind(savedCustomer)
+      return this
+    })
+
+    const res = await request
+      .post('/api/v1/customers')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        name: 'Acme Corp',
+        website: 'https://acme.example',
+        topology: 'MULTI_TENANT',
+        vmfPolicy: 'PER_TENANT_MULTI',
+        billing: { planCode: 'PRO', cycle: 'MONTHLY' },
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data.customer.website).toBe('https://acme.example')
+
+    Customer.prototype.save = origPrototypeSave
+  })
+
   test('creates a single-tenant customer with default tenant + VMF', async () => {
     const token = await getSuperAdminToken()
 
@@ -691,6 +724,21 @@ describe('PATCH /api/v1/customers/:customerId', () => {
     expect(res.status).toBe(200)
     expect(customer.save).toHaveBeenCalled()
     expect(AuditLog.createLog).toHaveBeenCalled()
+  })
+
+  test('updates customer website', async () => {
+    const token = await getSuperAdminToken()
+    const customer = makeFakeCustomer()
+    Customer.findById.mockResolvedValue(customer)
+
+    const res = await request
+      .patch(`/api/v1/customers/${CUSTOMER_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ website: 'https://updated-company.example' })
+
+    expect(res.status).toBe(200)
+    expect(customer.website).toBe('https://updated-company.example')
+    expect(customer.save).toHaveBeenCalled()
   })
 
   test('returns 409 when renaming to an existing customer name (case-insensitive)', async () => {

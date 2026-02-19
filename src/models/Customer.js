@@ -32,6 +32,12 @@ const customerSchema = new mongoose.Schema({
     maxlength: 255,
     select: false,
   },
+  website: {
+    type: String,
+    trim: true,
+    maxlength: 500,
+    match: [/^https?:\/\/.+/, 'Must be a valid URL starting with http:// or https://'],
+  },
   topology: {
     type: String,
     required: true,

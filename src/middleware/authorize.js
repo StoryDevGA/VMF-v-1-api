@@ -28,7 +28,9 @@
  */
 
 import { Customer, Tenant, VMF } from '../models/index.js'
+import env from '../config/env.js'
 import logger from '../config/logger.js'
+import auditService from '../services/auditService.js'
 import performanceCacheService, {
   buildCustomerTopologySnapshot,
   buildTenantStatusSnapshot,
@@ -124,6 +126,29 @@ export const requirePlatformRole = (role) => (req, res, next) => {
     { userId: req.userId, requiredRole: role, requestId: req.requestId },
     'requirePlatformRole — access denied',
   )
+  if (req.userId && env.nodeEnv !== 'test') {
+    const scope = {}
+    if (req.params?.customerId) scope.customerId = req.params.customerId
+    if (req.params?.tenantId) scope.tenantId = req.params.tenantId
+    if (req.params?.vmfId) scope.vmfId = req.params.vmfId
+
+    void auditService.log({
+      actorUserId: req.userId,
+      action: auditService.AUDIT_ACTIONS.ACCESS_DENIED,
+      resourceType: auditService.RESOURCE_TYPES.User,
+      resourceId: req.userId,
+      scope,
+      diff: {
+        requiredRole: role,
+        path: req.originalUrl,
+        method: req.method,
+      },
+      ip: req.ip,
+      userAgent: req.get?.('user-agent'),
+      requestId: req.requestId,
+    })
+  }
+
   return forbidden(res, req, `Platform role '${role}' is required.`)
 }
 

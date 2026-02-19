@@ -7,6 +7,7 @@
  */
 
 import { z } from 'zod'
+import { createBodyValidator } from './shared.js'
 
 /* ------------------------------------------------------------------ */
 /*  Schemas                                                           */
@@ -25,6 +26,12 @@ const vmfPolicyEnum = z.enum(
       'VMF policy must be SINGLE, MULTI, PER_TENANT_SINGLE, or PER_TENANT_MULTI',
   },
 )
+
+const websiteSchema = z
+  .string()
+  .trim()
+  .url('Website must be a valid URL')
+  .max(500, 'Website must be 500 characters or fewer')
 
 const billingSchema = z.object({
   planCode: z
@@ -56,6 +63,7 @@ const createCustomerSchema = z
       .trim()
       .min(1, 'Name is required')
       .max(255, 'Name must be 255 characters or fewer'),
+    website: websiteSchema.optional(),
     topology: topologyEnum,
     vmfPolicy: vmfPolicyEnum,
     isServiceProvider: z.boolean().default(false),
@@ -84,6 +92,7 @@ const updateCustomerSchema = z.object({
     .min(1, 'Name must not be empty')
     .max(255, 'Name must be 255 characters or fewer')
     .optional(),
+  website: websiteSchema.optional(),
   isServiceProvider: z.boolean().optional(),
   entitlements: z.array(z.string().trim()).optional(),
   billing: billingSchema.optional(),
@@ -105,44 +114,23 @@ const assignAdminSchema = z.object({
     .regex(objectIdRegex, 'userId must be a valid ObjectId'),
 })
 
-/* ------------------------------------------------------------------ */
-/*  Middleware factory                                                 */
-/* ------------------------------------------------------------------ */
-
-/**
- * Create an Express middleware that validates `req.body` against a Zod schema.
- * On success, `req.body` is replaced with the parsed (coerced/trimmed) output.
- * On failure, responds 422 with structured field errors.
- */
-const validate = (schema) => (req, res, next) => {
-  const result = schema.safeParse(req.body)
-
-  if (!result.success) {
-    const details = {}
-    for (const issue of result.error.issues) {
-      const key = issue.path.join('.')
-      details[key] = issue.message
-    }
-
-    return res.status(422).json({
-      error: {
-        code: 'VALIDATION_FAILED',
-        message: 'Please check the form for errors.',
-        details,
-        requestId: req.requestId,
-      },
-    })
-  }
-
-  req.body = result.data
-  next()
-}
+const replaceAdminSchema = z.object({
+  newUserId: z
+    .string({ required_error: 'newUserId is required' })
+    .regex(objectIdRegex, 'newUserId must be a valid ObjectId'),
+  reason: z
+    .string({ required_error: 'reason is required' })
+    .trim()
+    .min(1, 'reason is required')
+    .max(500, 'reason must be 500 characters or fewer'),
+})
 
 /* ------------------------------------------------------------------ */
 /*  Exports                                                           */
 /* ------------------------------------------------------------------ */
 
-export const validateCreateCustomer = validate(createCustomerSchema)
-export const validateUpdateCustomer = validate(updateCustomerSchema)
-export const validateUpdateStatus = validate(updateStatusSchema)
-export const validateAssignAdmin = validate(assignAdminSchema)
+export const validateCreateCustomer = createBodyValidator(createCustomerSchema)
+export const validateUpdateCustomer = createBodyValidator(updateCustomerSchema)
+export const validateUpdateStatus = createBodyValidator(updateStatusSchema)
+export const validateAssignAdmin = createBodyValidator(assignAdminSchema)
+export const validateReplaceAdmin = createBodyValidator(replaceAdminSchema)

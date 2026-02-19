@@ -91,6 +91,7 @@ let request
 let identityPlusService
 let User
 let AuditLog
+let Invitation
 
 beforeAll(async () => {
   const supertest = (await import('supertest')).default
@@ -100,6 +101,7 @@ beforeAll(async () => {
   const models = await import('../models/index.js')
   User = models.User
   AuditLog = models.AuditLog
+  Invitation = models.Invitation
 
   const svc = await import('../services/identityPlusService.js')
   identityPlusService = svc.default
@@ -110,6 +112,9 @@ beforeEach(async () => {
   User.findOne = jest.fn()
   User.findById = jest.fn()
   AuditLog.createLog = jest.fn(async () => ({}))
+  Invitation.findOne = jest.fn(() => ({
+    sort: jest.fn().mockResolvedValue(null),
+  }))
 
   // Reset circuit breaker
   const { resetCircuitBreaker } = await import('../services/identityPlusService.js')

@@ -14,11 +14,12 @@
 import { Router } from 'express'
 import { authRateLimit, authHourlyRateLimit } from '../middleware/rateLimits.js'
 import authJwt from '../middleware/authJwt.js'
-import { validateLogin, validateRefresh } from '../validators/auth.validator.js'
+import { validateLogin, validateRefresh, validateStepUp } from '../validators/auth.validator.js'
 import {
   login,
   superAdminLogin,
   refresh,
+  stepUp,
   logout,
   getMe,
 } from '../controllers/auth.controller.js'
@@ -39,5 +40,6 @@ router.post('/refresh', authRateLimit, validateRefresh, refresh)
 
 router.post('/logout', authJwt, logout)
 router.get('/me', authJwt, getMe)
+router.post('/step-up', authJwt, validateStepUp, stepUp)
 
 export default router

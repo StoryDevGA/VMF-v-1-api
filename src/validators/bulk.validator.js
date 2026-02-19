@@ -8,6 +8,7 @@
  */
 
 import { z } from 'zod'
+import { createBodyValidator } from './shared.js'
 
 /* ------------------------------------------------------------------ */
 /*  Shared patterns                                                   */
@@ -112,37 +113,18 @@ const bulkDisableUsersSchema = z.object({
 })
 
 /* ------------------------------------------------------------------ */
-/*  Middleware factory                                                 */
-/* ------------------------------------------------------------------ */
-
-const validate = (schema) => (req, res, next) => {
-  const result = schema.safeParse(req.body)
-
-  if (!result.success) {
-    const details = {}
-    for (const issue of result.error.issues) {
-      const key = issue.path.join('.') || '_root'
-      details[key] = issue.message
-    }
-
-    return res.status(422).json({
-      error: {
-        code: 'VALIDATION_FAILED',
-        message: 'Request validation failed.',
-        details,
-        requestId: req.requestId,
-      },
-    })
-  }
-
-  req.body = result.data
-  next()
-}
-
-/* ------------------------------------------------------------------ */
 /*  Exports                                                           */
 /* ------------------------------------------------------------------ */
 
-export const validateBulkCreateUsers = validate(bulkCreateUsersSchema)
-export const validateBulkUpdateUsers = validate(bulkUpdateUsersSchema)
-export const validateBulkDisableUsers = validate(bulkDisableUsersSchema)
+export const validateBulkCreateUsers = createBodyValidator(bulkCreateUsersSchema, {
+  message: 'Request validation failed.',
+  rootIssueKey: '_root',
+})
+export const validateBulkUpdateUsers = createBodyValidator(bulkUpdateUsersSchema, {
+  message: 'Request validation failed.',
+  rootIssueKey: '_root',
+})
+export const validateBulkDisableUsers = createBodyValidator(bulkDisableUsersSchema, {
+  message: 'Request validation failed.',
+  rootIssueKey: '_root',
+})

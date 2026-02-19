@@ -175,6 +175,38 @@ export const auditRateLimit = rateLimit({
 /*  General API — per-user, per-hour                                  */
 /* ------------------------------------------------------------------ */
 
+export const superAdminInvitationRateLimit = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  limit: env.superAdminInvRateLimit, // default 10
+  message: {
+    error: {
+      code: 'SUPER_ADMIN_INVITATION_RATE_LIMIT_EXCEEDED',
+      message: 'Too many invitation management requests',
+    },
+  },
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  handler: standardHandler,
+  keyGenerator: (req) => `super-admin-inv:${req.ip}:${req.userId || 'anonymous'}`,
+  skip: () => env.nodeEnv === 'test',
+})
+
+export const superAdminInvitationAuthRateLimit = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  limit: env.superAdminInvRateLimit, // default 10
+  message: {
+    error: {
+      code: 'SUPER_ADMIN_INVITATION_AUTH_RATE_LIMIT_EXCEEDED',
+      message: 'Too many invitation auth link requests',
+    },
+  },
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  handler: standardHandler,
+  keyGenerator: (req) => `super-admin-inv-auth:${req.ip}`,
+  skip: () => env.nodeEnv === 'test',
+})
+
 export const generalApiRateLimit = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
   limit: 1000, // 1000 requests per hour per authenticated user

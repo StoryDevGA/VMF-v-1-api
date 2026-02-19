@@ -46,6 +46,7 @@ export const createCustomerWithDefaults = async (payload, actorUserId, req) => {
   /* ---------- 1. Create customer ---------- */
   const customer = new Customer({
     name: payload.name,
+    website: payload.website,
     topology: payload.topology,
     vmfPolicy: payload.vmfPolicy,
     isServiceProvider: payload.isServiceProvider ?? false,

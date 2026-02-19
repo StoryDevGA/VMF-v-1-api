@@ -7,6 +7,7 @@
  */
 
 import { z } from 'zod'
+import { createBodyValidator } from './shared.js'
 
 /* ------------------------------------------------------------------ */
 /*  Shared patterns                                                   */
@@ -79,42 +80,9 @@ const resendInvitationSchema = z.object({
 })
 
 /* ------------------------------------------------------------------ */
-/*  Middleware factory                                                 */
-/* ------------------------------------------------------------------ */
-
-/**
- * Create an Express middleware that validates `req.body` against a Zod schema.
- * On success, `req.body` is replaced with the parsed (coerced/trimmed) output.
- * On failure, responds 422 with structured field errors.
- */
-const validate = (schema) => (req, res, next) => {
-  const result = schema.safeParse(req.body)
-
-  if (!result.success) {
-    const details = {}
-    for (const issue of result.error.issues) {
-      const key = issue.path.join('.')
-      details[key] = issue.message
-    }
-
-    return res.status(422).json({
-      error: {
-        code: 'VALIDATION_FAILED',
-        message: 'Please check the form for errors.',
-        details,
-        requestId: req.requestId,
-      },
-    })
-  }
-
-  req.body = result.data
-  next()
-}
-
-/* ------------------------------------------------------------------ */
 /*  Exports                                                           */
 /* ------------------------------------------------------------------ */
 
-export const validateCreateUser = validate(createUserSchema)
-export const validateUpdateUser = validate(updateUserSchema)
-export const validateResendInvitation = validate(resendInvitationSchema)
+export const validateCreateUser = createBodyValidator(createUserSchema)
+export const validateUpdateUser = createBodyValidator(updateUserSchema)
+export const validateResendInvitation = createBodyValidator(resendInvitationSchema)

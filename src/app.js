@@ -12,6 +12,10 @@ import healthRoutes from './routes/health.routes.js'
 import monitoringRoutes from './routes/monitoring.routes.js'
 import authRoutes from './routes/auth.routes.js'
 import identityPlusRoutes from './routes/identityPlus.routes.js'
+import invitationAuthRoutes from './routes/invitationAuth.routes.js'
+import invitationRoutes from './routes/invitations.routes.js'
+import systemVersioningPolicyRoutes from './routes/systemVersioningPolicy.routes.js'
+import superAdminAuditRoutes from './routes/superAdminAudit.routes.js'
 import customerRoutes from './routes/customers.routes.js'
 import { customerTenantRouter, tenantRouter } from './routes/tenants.routes.js'
 import { customerUserRouter, userRouter } from './routes/users.routes.js'
@@ -30,7 +34,7 @@ const corsOptions = {
   origin: env.corsOrigins,
   credentials: false,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-ID', 'API-Version'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-ID', 'API-Version', 'X-Step-Up-Token'],
   maxAge: 600,
 }
 
@@ -73,6 +77,10 @@ app.use('/health', healthRoutes)
 app.use('/metrics', monitoringRoutes)
 app.use('/api/v1/auth', authRoutes)
 app.use('/api/v1/webhooks/identity-plus', identityPlusRoutes)
+app.use('/api/v1/super-admin/invitations', invitationAuthRoutes)
+app.use('/api/v1/super-admin/invitations', invitationRoutes)
+app.use('/api/v1/super-admin/system-versioning-policy', systemVersioningPolicyRoutes)
+app.use('/api/v1/super-admin/denied-access-logs', superAdminAuditRoutes)
 // More specific customer-scoped routes BEFORE the general /customers mount
 // (Express prefix-matches app.use, so /customers would intercept /customers/:id/users)
 app.use('/api/v1/customers/:customerId/tenants/:tenantId/vmfs', tenantVmfRouter)

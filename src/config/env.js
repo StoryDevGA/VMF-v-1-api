@@ -74,6 +74,23 @@ const env = {
   identityPlusApiUrl: process.env.IDENTITY_PLUS_API_URL || '',
   identityPlusApiKey: process.env.IDENTITY_PLUS_API_KEY || '',
   identityPlusWebhookSecret: process.env.IDENTITY_PLUS_WEBHOOK_SECRET || '',
+  identityPlusAuthUrl: process.env.IDENTITY_PLUS_AUTH_URL || '',
+
+  // Invitation and Step-Up Configuration
+  invitationExpiryHours: toPositiveNumber(process.env.INVITATION_EXPIRY_HOURS, 168),
+  appBaseUrl: process.env.APP_BASE_URL || 'http://localhost:8000',
+  superAdminInvRateLimit: toPositiveNumber(process.env.SUPER_ADMIN_INV_RATE_LIMIT, 10),
+  systemActorUserId: process.env.SYSTEM_ACTOR_USER_ID || null,
+
+  // Email Transport
+  emailTransportEnabled: toBoolean(process.env.EMAIL_TRANSPORT_ENABLED, false),
+  emailTransportHost: process.env.EMAIL_TRANSPORT_HOST || '',
+  emailTransportPort: toNumber(process.env.EMAIL_TRANSPORT_PORT, 587),
+  emailTransportSecure: toBoolean(process.env.EMAIL_TRANSPORT_SECURE, false),
+  emailTransportUser: process.env.EMAIL_TRANSPORT_USER || '',
+  emailTransportPass: process.env.EMAIL_TRANSPORT_PASS || '',
+  emailFromAddress: process.env.EMAIL_FROM_ADDRESS || 'noreply@storylineos.com',
+  emailFromName: process.env.EMAIL_FROM_NAME || 'StoryLineOS',
   
   // Security Configuration
   bcryptRounds: toNumber(process.env.BCRYPT_ROUNDS, 12),

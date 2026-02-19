@@ -7,6 +7,7 @@
  */
 
 import { z } from 'zod'
+import { createBodyValidator } from './shared.js'
 
 /* ------------------------------------------------------------------ */
 /*  Schemas                                                           */
@@ -61,41 +62,12 @@ const trustUpdatedSchema = z.object({
 })
 
 /* ------------------------------------------------------------------ */
-/*  Middleware factory                                                 */
-/* ------------------------------------------------------------------ */
-
-/**
- * Create an Express middleware that validates `req.body` against a Zod schema.
- * On success, `req.body` is replaced with the parsed (coerced/trimmed) output.
- * On failure, responds 422 with structured field errors.
- */
-const validate = (schema) => (req, res, next) => {
-  const result = schema.safeParse(req.body)
-
-  if (!result.success) {
-    const details = {}
-    for (const issue of result.error.issues) {
-      const key = issue.path.join('.')
-      details[key] = issue.message
-    }
-
-    return res.status(422).json({
-      error: {
-        code: 'VALIDATION_FAILED',
-        message: 'Invalid webhook payload.',
-        details,
-        requestId: req.requestId,
-      },
-    })
-  }
-
-  req.body = result.data
-  next()
-}
-
-/* ------------------------------------------------------------------ */
 /*  Exports                                                           */
 /* ------------------------------------------------------------------ */
 
-export const validateRegistrationComplete = validate(registrationCompleteSchema)
-export const validateTrustUpdated = validate(trustUpdatedSchema)
+export const validateRegistrationComplete = createBodyValidator(registrationCompleteSchema, {
+  message: 'Invalid webhook payload.',
+})
+export const validateTrustUpdated = createBodyValidator(trustUpdatedSchema, {
+  message: 'Invalid webhook payload.',
+})

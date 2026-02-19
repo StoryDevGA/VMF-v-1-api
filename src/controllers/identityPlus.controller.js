@@ -8,7 +8,7 @@
  * Both endpoints update the User document and create an audit log.
  */
 
-import { User } from '../models/index.js'
+import { Invitation, User } from '../models/index.js'
 import logger from '../config/logger.js'
 import auditService from '../services/auditService.js'
 import performanceCacheService from '../services/performanceCacheService.js'
@@ -61,6 +61,30 @@ export const handleRegistrationComplete = async (req, res, next) => {
     user.identityPlus.trustedAt = registeredAt ? new Date(registeredAt) : new Date()
     await user.save()
     await performanceCacheService.invalidateUserPermissions(user._id)
+
+    const invitation = await Invitation.findOne({
+      recipientEmail: email.toLowerCase(),
+      status: 'accessed',
+    }).sort({ accessedAt: -1 })
+
+    if (invitation) {
+      invitation.status = 'authenticated'
+      invitation.authenticatedAt = registeredAt ? new Date(registeredAt) : new Date()
+      invitation.identityPlusSubjectId = externalId
+      await invitation.save()
+
+      await auditService.logFromRequest(req, {
+        actorUserId: user._id,
+        action: 'INVITATION_AUTHENTICATION_SUCCEEDED',
+        resourceType: 'Invitation',
+        resourceId: invitation._id,
+        scope: {},
+        diff: {
+          status: { from: 'accessed', to: 'authenticated' },
+          identityPlusSubjectId: externalId,
+        },
+      })
+    }
 
     // Audit log
     await auditService.logFromRequest(req, {
@@ -146,6 +170,24 @@ export const handleTrustUpdated = async (req, res, next) => {
     if (trustStatus === 'REVOKED') {
       // Disable the user account when trust is revoked externally
       user.isActive = false
+
+      const invitation = await Invitation.findOne({
+        recipientEmail: user.email,
+        status: 'accessed',
+      }).sort({ accessedAt: -1 })
+
+      if (invitation) {
+        await auditService.logFromRequest(req, {
+          actorUserId: user._id,
+          action: 'INVITATION_AUTHENTICATION_FAILED',
+          resourceType: 'Invitation',
+          resourceId: invitation._id,
+          scope: {},
+          diff: {
+            trustStatus: { from: previousStatus, to: trustStatus },
+          },
+        })
+      }
     }
     await user.save()
     await performanceCacheService.invalidateUserPermissions(user._id)

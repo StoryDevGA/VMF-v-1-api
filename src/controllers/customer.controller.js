@@ -8,6 +8,7 @@
  *   - PATCH  /api/v1/customers/:customerId Update customer
  *   - PATCH  /api/v1/customers/:customerId/status  Update customer status
  *   - POST   /api/v1/customers/:customerId/admins  Assign CUSTOMER_ADMIN
+ *   - POST   /api/v1/customers/:customerId/admins/replace  Replace CUSTOMER_ADMIN
  */
 
 import { Customer, User } from '../models/index.js'
@@ -243,7 +244,7 @@ export const updateCustomer = async (req, res, next) => {
       }
     }
 
-    const allowedFields = ['name', 'isServiceProvider', 'entitlements', 'billing', 'trial']
+    const allowedFields = ['name', 'website', 'isServiceProvider', 'entitlements', 'billing', 'trial']
     const diff = {}
 
     for (const field of allowedFields) {
@@ -411,6 +412,143 @@ export const assignAdmin = async (req, res, next) => {
 
     return res.status(200).json({
       data: { message: 'Admin role assigned successfully.', userId },
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    next(err)
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  POST /api/v1/customers/:customerId/admins/replace                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Replace the current CUSTOMER_ADMIN membership for a customer.
+ */
+export const replaceAdmin = async (req, res, next) => {
+  try {
+    const { customerId } = req.params
+    const { newUserId, reason } = req.body
+
+    const customer = await Customer.findById(customerId)
+    if (!customer) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: 'Customer not found.',
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    const newUser = await User.findById(newUserId)
+    if (!newUser) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: 'User not found.',
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    if (!newUser.isActive) {
+      return res.status(422).json({
+        error: {
+          code: 'USER_NOT_ACTIVE',
+          message: 'Cannot assign customer admin role to an inactive user.',
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    const oldAdmin = await User.findOne({
+      memberships: {
+        $elemMatch: {
+          customerId: customer._id,
+          roles: 'CUSTOMER_ADMIN',
+        },
+      },
+    })
+
+    if (!oldAdmin) {
+      return res.status(422).json({
+        error: {
+          code: 'NO_EXISTING_ADMIN',
+          message: 'Customer has no existing customer admin to replace.',
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    const oldUserId = oldAdmin._id.toString()
+    const newUserIdStr = newUser._id.toString()
+
+    if (oldUserId !== newUserIdStr) {
+      const oldMembership = oldAdmin.memberships.find(
+        (membership) =>
+          membership.customerId &&
+          membership.customerId.toString() === customerId &&
+          membership.roles.includes('CUSTOMER_ADMIN'),
+      )
+
+      if (oldMembership) {
+        oldMembership.roles = oldMembership.roles.filter((role) => role !== 'CUSTOMER_ADMIN')
+        if (oldMembership.roles.length === 0) {
+          oldAdmin.memberships = oldAdmin.memberships.filter(
+            (membership) =>
+              !(
+                membership.customerId &&
+                membership.customerId.toString() === customerId
+              ),
+          )
+        }
+      }
+
+      const newMembership = newUser.memberships.find(
+        (membership) =>
+          membership.customerId && membership.customerId.toString() === customerId,
+      )
+
+      if (newMembership) {
+        if (!newMembership.roles.includes('CUSTOMER_ADMIN')) {
+          newMembership.roles.push('CUSTOMER_ADMIN')
+        }
+      } else {
+        newUser.memberships.push({
+          customerId,
+          roles: ['CUSTOMER_ADMIN'],
+        })
+      }
+
+      await oldAdmin.save()
+      await newUser.save()
+      await Promise.all([
+        performanceCacheService.invalidateUserPermissions(oldAdmin._id),
+        performanceCacheService.invalidateUserPermissions(newUser._id),
+      ])
+    }
+
+    await auditService.logFromRequest(req, {
+      action: 'CUSTOMER_ADMIN_REPLACED',
+      resourceType: 'Customer',
+      resourceId: customer._id,
+      scope: { customerId: customer._id },
+      diff: {
+        oldUserId,
+        newUserId: newUserIdStr,
+        reason,
+      },
+    })
+
+    return res.status(200).json({
+      data: {
+        message: 'Customer admin replaced successfully.',
+        customerId: customer._id,
+        oldUserId,
+        newUserId: newUserIdStr,
+      },
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {

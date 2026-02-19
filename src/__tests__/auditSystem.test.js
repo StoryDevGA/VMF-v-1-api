@@ -1331,16 +1331,26 @@ describe('AUDIT_ACTIONS & RESOURCE_TYPES constants', () => {
     RESOURCE_TYPES = mod.RESOURCE_TYPES
   })
 
-  test('AUDIT_ACTIONS contains all 26 actions', () => {
-    expect(Object.keys(AUDIT_ACTIONS)).toHaveLength(26)
+  test('AUDIT_ACTIONS contains required baseline actions', () => {
+    expect(Object.keys(AUDIT_ACTIONS).length).toBeGreaterThanOrEqual(26)
+    expect(AUDIT_ACTIONS.CUSTOMER_CREATED).toBe('CUSTOMER_CREATED')
+    expect(AUDIT_ACTIONS.CUSTOMER_UPDATED).toBe('CUSTOMER_UPDATED')
+    expect(AUDIT_ACTIONS.TENANT_CREATED).toBe('TENANT_CREATED')
+    expect(AUDIT_ACTIONS.USER_CREATED).toBe('USER_CREATED')
+    expect(AUDIT_ACTIONS.BULK_USERS_CREATED).toBe('BULK_USERS_CREATED')
+    expect(AUDIT_ACTIONS.VMF_CREATED).toBe('VMF_CREATED')
+    expect(AUDIT_ACTIONS.DEAL_CREATED).toBe('DEAL_CREATED')
+    expect(AUDIT_ACTIONS.IDENTITY_PLUS_REGISTRATION_COMPLETE).toBe(
+      'IDENTITY_PLUS_REGISTRATION_COMPLETE',
+    )
   })
 
   test('AUDIT_ACTIONS is frozen', () => {
     expect(Object.isFrozen(AUDIT_ACTIONS)).toBe(true)
   })
 
-  test('RESOURCE_TYPES contains all 5 types', () => {
-    expect(Object.keys(RESOURCE_TYPES)).toHaveLength(5)
+  test('RESOURCE_TYPES contains required baseline resource types', () => {
+    expect(Object.keys(RESOURCE_TYPES).length).toBeGreaterThanOrEqual(5)
     expect(RESOURCE_TYPES.Customer).toBe('Customer')
     expect(RESOURCE_TYPES.Tenant).toBe('Tenant')
     expect(RESOURCE_TYPES.User).toBe('User')

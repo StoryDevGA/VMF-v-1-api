@@ -51,9 +51,24 @@ const validActions = [
   'VMF_CREATED', 'VMF_UPDATED', 'VMF_DELETED', 'VMF_GRANT_CREATED', 'VMF_GRANT_REVOKED',
   'DEAL_CREATED', 'DEAL_UPDATED', 'DEAL_ARCHIVED',
   'IDENTITY_PLUS_REGISTRATION_COMPLETE', 'IDENTITY_PLUS_TRUST_UPDATED',
+  'SYSTEM_VERSIONING_POLICY_UPDATED', 'GOVERNANCE_OVERRIDE_APPLIED', 'GOVERNANCE_OVERRIDE_DENIED',
+  'ACCESS_DENIED',
+  'INVITATION_CREATED', 'INVITATION_SENT', 'INVITATION_SEND_FAILED', 'INVITATION_RESENT',
+  'INVITATION_REVOKED', 'INVITATION_EXPIRED', 'INVITATION_AUTHENTICATION_SUCCEEDED',
+  'INVITATION_AUTHENTICATION_FAILED', 'INVITATION_AUTH_LINK_ACCESSED',
+  'CUSTOMER_ADMIN_REPLACED', 'AUDIT_LOG_VIEWED', 'DENIED_ACCESS_LOG_VIEWED',
 ]
 
-const validResourceTypes = ['Customer', 'Tenant', 'User', 'VMF', 'Deal']
+const validResourceTypes = [
+  'Customer',
+  'Tenant',
+  'User',
+  'VMF',
+  'Deal',
+  'Invitation',
+  'SystemVersioningPolicy',
+  'AuditLog',
+]
 
 /* ------------------------------------------------------------------ */
 /*  Schemas                                                           */

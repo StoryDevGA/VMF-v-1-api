@@ -5,12 +5,15 @@
  *   - POST /login            Customer user login
  *   - POST /super-admin/login  Super Admin login
  *   - POST /refresh          Token refresh
+ *   - POST /step-up          Step-up token issuance
  *   - POST /logout           Token revocation
  *   - GET  /me               Authenticated user profile
  */
 
+import crypto from 'crypto'
 import { User } from '../models/index.js'
 import tokenService from '../services/tokenService.js'
+import { getRedis } from '../config/redis.js'
 import logger from '../config/logger.js'
 
 /* ------------------------------------------------------------------ */
@@ -194,6 +197,65 @@ export const logout = async (req, res, next) => {
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
+    next(err)
+  }
+}
+
+/**
+ * POST /api/v1/auth/step-up
+ * Re-verify the current password and issue a short-lived step-up token.
+ */
+export const stepUp = async (req, res, next) => {
+  try {
+    const userId = req.context?.userId || req.userId
+    const { password } = req.body
+
+    const user = await User.findById(userId).select('+passwordHash')
+    if (!user || !user.isActive) {
+      return res.status(401).json({
+        error: {
+          code: 'UNAUTHENTICATED',
+          message: 'Unable to verify session. Please sign in again.',
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    const passwordValid = await user.comparePassword(password)
+    if (!passwordValid) {
+      return res.status(401).json({
+        error: {
+          code: 'STEP_UP_INVALID_CREDENTIALS',
+          message: 'Password is incorrect.',
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    const redis = getRedis()
+    if (!redis) {
+      return res.status(503).json({
+        error: {
+          code: 'STEP_UP_UNAVAILABLE',
+          message: 'Step-up verification service unavailable.',
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    const raw = crypto.randomBytes(32).toString('hex')
+    const hash = crypto.createHash('sha256').update(raw).digest('hex')
+    const expiresIn = 900
+    const key = `stepup:${userId}:${hash}`
+
+    await redis.set(key, '1', 'EX', expiresIn)
+
+    return res.status(200).json({
+      data: { stepUpToken: raw, expiresIn },
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    logger.error({ err, requestId: req.requestId }, 'step-up issuance failed')
     next(err)
   }
 }
