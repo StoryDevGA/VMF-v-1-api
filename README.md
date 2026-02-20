@@ -22,7 +22,30 @@ Copy `.env.example` to `.env` and adjust values as needed:
 - `RATE_LIMIT_WINDOW_MS` and `RATE_LIMIT_MAX` control throttling.
 - `LOG_LEVEL` controls pino output.
 - `TRUST_PROXY` should be set to `1` behind a proxy (e.g., load balancer).
+- `MONGODB_URI`, `JWT_SECRET`, and `JWT_REFRESH_SECRET` are required.
+- Redis is optional in local dev (`REDIS_REQUIRED=false`) but recommended for full auth/session behavior.
 
 ## Verification
 - Start the server: `npm run dev`.
 - Check health: `curl http://localhost:8000/health`.
+
+## Render Deployment (Web + Redis)
+This repo includes a Render Blueprint at `render.yaml` that provisions:
+- Web service: `vmf-v-1-api`
+- Key Value (Redis-compatible): `vmf-v-1-api-redis`
+
+Deploy steps:
+1. In Render, create a new Blueprint deployment from this repo.
+2. Set required env vars when prompted:
+   - `MONGODB_URI`
+   - `CORS_ORIGIN`
+3. Confirm `REDIS_REQUIRED=true` for production.
+4. Deploy.
+
+Post-deploy checks:
+1. `GET /health` should return `200`.
+2. `GET /health/detailed` as `SUPER_ADMIN` should include `services.redis.status = healthy`.
+
+Notes:
+- This API uses Redis for refresh token storage, token blacklisting, step-up tokens, and performance cache.
+- With Redis unavailable and `REDIS_REQUIRED=false`, the API can start but auth security features degrade.

@@ -1,0 +1,41 @@
+services:
+  - type: web
+    name: vmf-v-1-api
+    runtime: node
+    plan: starter
+    region: ohio
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: TRUST_PROXY
+        value: "1"
+      - key: REDIS_REQUIRED
+        value: "true"
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: vmf-v-1-api-redis
+          property: connectionString
+      - key: MONGODB_URI
+        sync: false
+      - key: CORS_ORIGIN
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_REFRESH_SECRET
+        generateValue: true
+      - key: AUDIT_SIGNATURE_SECRET
+        generateValue: true
+      - key: LOG_LEVEL
+        value: info
+
+  - type: keyvalue
+    name: vmf-v-1-api-redis
+    plan: starter
+    region: ohio
+    ipAllowList: []
+    maxmemoryPolicy: allkeys-lru
