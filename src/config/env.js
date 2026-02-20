@@ -127,6 +127,26 @@ const env = {
     process.env.MONITORING_HEAP_USAGE_THRESHOLD_PCT,
     85,
   ),
+  monitoringHistoryRetentionMs: toPositiveNumber(
+    process.env.MONITORING_HISTORY_RETENTION_MS,
+    24 * 60 * 60 * 1000,
+  ),
+  monitoringHistoryMaxSamples: toPositiveNumber(
+    process.env.MONITORING_HISTORY_MAX_SAMPLES,
+    50000,
+  ),
+  monitoringTrendDefaultWindowMs: toPositiveNumber(
+    process.env.MONITORING_TREND_DEFAULT_WINDOW_MS,
+    60 * 60 * 1000,
+  ),
+  monitoringTrendDefaultBucketMs: toPositiveNumber(
+    process.env.MONITORING_TREND_DEFAULT_BUCKET_MS,
+    60 * 1000,
+  ),
+  monitoringAlertRetentionMs: toPositiveNumber(
+    process.env.MONITORING_ALERT_RETENTION_MS,
+    7 * 24 * 60 * 60 * 1000,
+  ),
 
   // Performance Optimization
   perfCacheEnabled: toBoolean(process.env.PERF_CACHE_ENABLED, process.env.NODE_ENV !== 'test'),
@@ -163,6 +183,15 @@ env.isProduction = env.nodeEnv === 'production'
 env.mongoMinPoolSize = Math.max(1, env.mongoMinPoolSize)
 env.mongoMaxPoolSize = Math.max(env.mongoMinPoolSize, env.mongoMaxPoolSize)
 env.backgroundJobConcurrency = Math.max(1, env.backgroundJobConcurrency)
+env.monitoringWindowMs = Math.min(env.monitoringWindowMs, env.monitoringHistoryRetentionMs)
+env.monitoringTrendDefaultWindowMs = Math.min(
+  env.monitoringTrendDefaultWindowMs,
+  env.monitoringHistoryRetentionMs,
+)
+env.monitoringTrendDefaultBucketMs = Math.min(
+  env.monitoringTrendDefaultBucketMs,
+  env.monitoringTrendDefaultWindowMs,
+)
 env.corsOrigins =
   env.corsOrigins.length > 0
     ? env.corsOrigins

@@ -173,10 +173,132 @@ describe('GET /metrics', () => {
 })
 
 /* ------------------------------------------------------------------ */
-/*  monitoringService — Unit Tests                                    */
+/*  monitoringService - Unit Tests                                    */
 /* ------------------------------------------------------------------ */
 
-describe('monitoringService — Unit', () => {
+describe('GET /health/trends', () => {
+  test('returns 401 when unauthenticated', async () => {
+    const res = await request.get('/health/trends')
+    expect(res.status).toBe(401)
+    expect(res.body.error.code).toBe('UNAUTHENTICATED')
+  })
+
+  test('returns trends payload for super admin', async () => {
+    const user = makeUser({
+      _id: '507f1f77bcf86cd799439031',
+      id: '507f1f77bcf86cd799439031',
+      email: 'trends-admin@example.com',
+    })
+    User.findById.mockResolvedValue(user)
+    const tokens = await tokenService.generateTokens(user)
+
+    for (let i = 0; i < 5; i++) {
+      await request.get('/health')
+    }
+
+    const res = await request
+      .get('/health/trends?window=15m&bucket=1m')
+      .set('Authorization', `Bearer ${tokens.accessToken}`)
+
+    expect(res.status).toBe(200)
+    expect(typeof res.body.generatedAt).toBe('string')
+    expect(res.body.windowMs).toBe(15 * 60 * 1000)
+    expect(res.body.bucketMs).toBe(60 * 1000)
+    expect(Array.isArray(res.body.points)).toBe(true)
+    expect(res.body.points.length).toBeGreaterThan(0)
+    expect(res.body.points[0]).toEqual(
+      expect.objectContaining({
+        timestamp: expect.any(String),
+        requestCount: expect.any(Number),
+        errorRate: expect.any(Number),
+        avgResponseTimeMs: expect.any(Number),
+        p95ResponseTimeMs: expect.any(Number),
+      }),
+    )
+  })
+
+  test('returns 422 on invalid query parameters', async () => {
+    const user = makeUser({
+      _id: '507f1f77bcf86cd799439032',
+      id: '507f1f77bcf86cd799439032',
+      email: 'trends-validation@example.com',
+    })
+    User.findById.mockResolvedValue(user)
+    const tokens = await tokenService.generateTokens(user)
+
+    const res = await request
+      .get('/health/trends?window=abc&bucket=1m')
+      .set('Authorization', `Bearer ${tokens.accessToken}`)
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_ERROR')
+  })
+})
+
+describe('GET /health/alerts', () => {
+  test('returns 401 when unauthenticated', async () => {
+    const res = await request.get('/health/alerts')
+    expect(res.status).toBe(401)
+    expect(res.body.error.code).toBe('UNAUTHENTICATED')
+  })
+
+  test('returns alert lifecycle payload for super admin', async () => {
+    const user = makeUser({
+      _id: '507f1f77bcf86cd799439033',
+      id: '507f1f77bcf86cd799439033',
+      email: 'alerts-admin@example.com',
+    })
+    User.findById.mockResolvedValue(user)
+    const tokens = await tokenService.generateTokens(user)
+
+    for (let i = 0; i < 10; i++) {
+      monitoringService.onRequestStart()
+      monitoringService.onRequestComplete({
+        method: 'GET',
+        route: '/failing',
+        statusCode: 500,
+        durationMs: 10,
+      })
+    }
+    await monitoringService.getDetailedHealth()
+
+    const res = await request
+      .get('/health/alerts?status=active&limit=25')
+      .set('Authorization', `Bearer ${tokens.accessToken}`)
+
+    expect(res.status).toBe(200)
+    expect(typeof res.body.generatedAt).toBe('string')
+    expect(res.body.summary).toBeDefined()
+    expect(Array.isArray(res.body.items)).toBe(true)
+    expect(res.body.items.length).toBeGreaterThan(0)
+    expect(res.body.items[0]).toEqual(
+      expect.objectContaining({
+        code: expect.any(String),
+        status: 'active',
+        firstSeenAt: expect.any(String),
+        lastSeenAt: expect.any(String),
+      }),
+    )
+  })
+
+  test('returns 422 on invalid status query parameter', async () => {
+    const user = makeUser({
+      _id: '507f1f77bcf86cd799439034',
+      id: '507f1f77bcf86cd799439034',
+      email: 'alerts-validation@example.com',
+    })
+    User.findById.mockResolvedValue(user)
+    const tokens = await tokenService.generateTokens(user)
+
+    const res = await request
+      .get('/health/alerts?status=invalid')
+      .set('Authorization', `Bearer ${tokens.accessToken}`)
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_ERROR')
+  })
+})
+describe('monitoringService - Unit', () => {
   test('getPublicHealth returns correct shape', () => {
     const health = monitoringService.getPublicHealth()
 
@@ -292,6 +414,79 @@ describe('monitoringService — Unit', () => {
     expect(ct).toContain('text/plain')
   })
 
+  test('getTrends returns bucketed historical points', () => {
+    monitoringService.resetForTests()
+
+    for (let i = 0; i < 20; i++) {
+      monitoringService.onRequestStart()
+      monitoringService.onRequestComplete({
+        method: 'GET',
+        route: '/trend',
+        statusCode: i % 5 === 0 ? 500 : 200,
+        durationMs: 15 + i,
+      })
+    }
+
+    const trends = monitoringService.getTrends({
+      windowMs: 5 * 60 * 1000,
+      bucketMs: 60 * 1000,
+    })
+
+    expect(typeof trends.generatedAt).toBe('string')
+    expect(trends.windowMs).toBe(5 * 60 * 1000)
+    expect(trends.bucketMs).toBe(60 * 1000)
+    expect(Array.isArray(trends.points)).toBe(true)
+    expect(trends.points.length).toBeGreaterThan(0)
+    expect(trends.points[trends.points.length - 1]).toEqual(
+      expect.objectContaining({
+        timestamp: expect.any(String),
+        requestCount: expect.any(Number),
+        errorRate: expect.any(Number),
+        avgResponseTimeMs: expect.any(Number),
+        p95ResponseTimeMs: expect.any(Number),
+      }),
+    )
+  })
+
+  test('getAlertLifecycle exposes active and resolved alert states', async () => {
+    monitoringService.resetForTests()
+
+    for (let i = 0; i < 20; i++) {
+      monitoringService.onRequestStart()
+      monitoringService.onRequestComplete({
+        method: 'GET',
+        route: '/alert',
+        statusCode: 500,
+        durationMs: 10,
+      })
+    }
+
+    await monitoringService.getDetailedHealth()
+    const activeSnapshot = monitoringService.getAlertLifecycle({ status: 'active', limit: 10 })
+    const activeErrorAlert = activeSnapshot.items.find((item) => item.code === 'HIGH_ERROR_RATE')
+
+    expect(activeErrorAlert).toBeDefined()
+    expect(activeErrorAlert.status).toBe('active')
+
+    for (let i = 0; i < 500; i++) {
+      monitoringService.onRequestStart()
+      monitoringService.onRequestComplete({
+        method: 'GET',
+        route: '/healthy',
+        statusCode: 200,
+        durationMs: 5,
+      })
+    }
+
+    await monitoringService.getDetailedHealth()
+    const resolvedSnapshot = monitoringService.getAlertLifecycle({ status: 'resolved', limit: 10 })
+    const resolvedErrorAlert = resolvedSnapshot.items.find((item) => item.code === 'HIGH_ERROR_RATE')
+
+    expect(resolvedErrorAlert).toBeDefined()
+    expect(resolvedErrorAlert.status).toBe('resolved')
+    expect(typeof resolvedErrorAlert.resolvedAt).toBe('string')
+  })
+
   test('resetForTests clears accumulated samples', () => {
     // Accumulate some data
     monitoringService.onRequestStart()
@@ -314,14 +509,14 @@ describe('monitoringService — Unit', () => {
 /*  Alert evaluation                                                  */
 /* ------------------------------------------------------------------ */
 
-describe('monitoringService — Alert evaluation', () => {
+describe('monitoringService - Alert evaluation', () => {
   test('no alerts when all metrics are within thresholds', async () => {
     monitoringService.resetForTests()
 
-    // Fresh state with no requests → all zeros → within thresholds
+    // Fresh state with no requests -> all zeros -> within thresholds
     const health = await monitoringService.getDetailedHealth()
 
-    // Error rate is 0, p95 is 0 — should not trigger latency or error alerts
+    // Error rate is 0, p95 is 0 - should not trigger latency or error alerts
     const latencyAlert = health.alerts.find((a) => a.code === 'HIGH_P95_LATENCY')
     const errorAlert = health.alerts.find((a) => a.code === 'HIGH_ERROR_RATE')
     expect(latencyAlert).toBeUndefined()
@@ -331,7 +526,7 @@ describe('monitoringService — Alert evaluation', () => {
   test('HIGH_ERROR_RATE alert when error rate exceeds threshold', async () => {
     monitoringService.resetForTests()
 
-    // Simulate 10 requests where ALL return 500 → error rate = 1.0
+    // Simulate 10 requests where ALL return 500 -> error rate = 1.0
     for (let i = 0; i < 10; i++) {
       monitoringService.onRequestStart()
       monitoringService.onRequestComplete({
@@ -403,10 +598,10 @@ describe('monitoringService — Alert evaluation', () => {
 })
 
 /* ------------------------------------------------------------------ */
-/*  performanceMonitor middleware — Unit                               */
+/*  performanceMonitor middleware - Unit                               */
 /* ------------------------------------------------------------------ */
 
-describe('performanceMonitor — Unit', () => {
+describe('performanceMonitor - Unit', () => {
   let performanceMonitor
 
   beforeAll(async () => {
@@ -434,10 +629,10 @@ describe('performanceMonitor — Unit', () => {
 })
 
 /* ------------------------------------------------------------------ */
-/*  env.js monitoring config — Unit                                   */
+/*  env.js monitoring config - Unit                                   */
 /* ------------------------------------------------------------------ */
 
-describe('env.js — Monitoring configuration', () => {
+describe('env.js - Monitoring configuration', () => {
   test('metricsPrefix ends with underscore', () => {
     expect(env.metricsPrefix).toBeDefined()
     expect(typeof env.metricsPrefix).toBe('string')

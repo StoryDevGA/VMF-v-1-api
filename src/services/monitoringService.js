@@ -69,6 +69,7 @@ const eventLoopMonitor = monitorEventLoopDelay({ resolution: 20 })
 eventLoopMonitor.enable()
 
 const requestSamples = []
+const alertLifecycle = new Map()
 let inFlightRequests = 0
 
 const HEALTH_VALUE = {
@@ -85,9 +86,13 @@ const round = (value, digits = 2) => {
 }
 
 const pruneSamples = (now = Date.now()) => {
-  const floor = now - env.monitoringWindowMs
+  const floor = now - env.monitoringHistoryRetentionMs
   while (requestSamples.length > 0 && requestSamples[0].ts < floor) {
     requestSamples.shift()
+  }
+  const overflow = requestSamples.length - env.monitoringHistoryMaxSamples
+  if (overflow > 0) {
+    requestSamples.splice(0, overflow)
   }
 }
 
@@ -122,13 +127,16 @@ const getPerformanceSnapshot = () => {
   const now = Date.now()
   pruneSamples(now)
 
-  const total = requestSamples.length
+  const windowFloor = now - env.monitoringWindowMs
   const oneMinuteAgo = now - 60_000
   let requestsPerMinute = 0
   let errorCount = 0
+  let total = 0
   const durations = []
 
   for (const sample of requestSamples) {
+    if (sample.ts < windowFloor) continue
+    total += 1
     if (sample.ts >= oneMinuteAgo) requestsPerMinute += 1
     if (sample.statusCode >= 500) errorCount += 1
     durations.push(sample.durationMs)
@@ -204,6 +212,66 @@ const evaluateAlerts = (metrics) => {
   }
 
   return alerts
+}
+
+const reconcileAlertLifecycle = (alerts, nowIso) => {
+  const activeCodes = new Set(alerts.map((alert) => alert.code))
+
+  for (const alert of alerts) {
+    const existing = alertLifecycle.get(alert.code)
+    const base = {
+      code: alert.code,
+      severity: alert.severity,
+      metric: alert.metric,
+      threshold: alert.threshold,
+      message: alert.message,
+      value: alert.value,
+    }
+
+    if (!existing || existing.status === 'resolved') {
+      alertLifecycle.set(alert.code, {
+        ...base,
+        status: 'active',
+        firstSeenAt: nowIso,
+        lastSeenAt: nowIso,
+        resolvedAt: null,
+        timesTriggered: 1,
+      })
+      continue
+    }
+
+    alertLifecycle.set(alert.code, {
+      ...existing,
+      ...base,
+      status: 'active',
+      lastSeenAt: nowIso,
+      resolvedAt: null,
+      timesTriggered: (existing.timesTriggered || 0) + 1,
+    })
+  }
+
+  for (const [code, state] of alertLifecycle.entries()) {
+    if (state.status === 'active' && !activeCodes.has(code)) {
+      alertLifecycle.set(code, {
+        ...state,
+        status: 'resolved',
+        resolvedAt: nowIso,
+        lastSeenAt: nowIso,
+      })
+    }
+  }
+}
+
+const pruneAlertLifecycle = (now = Date.now()) => {
+  const floor = now - env.monitoringAlertRetentionMs
+  for (const [code, state] of alertLifecycle.entries()) {
+    if (state.status !== 'resolved' || !state.resolvedAt) continue
+    const resolvedAtMs = Date.parse(state.resolvedAt)
+    if (Number.isNaN(resolvedAtMs)) continue
+    if (resolvedAtMs < floor) {
+      alertLifecycle.delete(code)
+    }
+  }
 }
 
 const checkDatabase = async () => {
@@ -318,6 +386,62 @@ const computeOverallStatus = (services, alerts) => {
   return 'healthy'
 }
 
+const buildTrends = ({ windowMs, bucketMs }) => {
+  const now = Date.now()
+  pruneSamples(now)
+
+  const floor = now - windowMs
+  const bucketMap = new Map()
+
+  for (const sample of requestSamples) {
+    if (sample.ts < floor) continue
+    const bucketStartMs = Math.floor(sample.ts / bucketMs) * bucketMs
+    const bucket = bucketMap.get(bucketStartMs) || {
+      requestCount: 0,
+      errorCount: 0,
+      totalDurationMs: 0,
+      durations: [],
+    }
+
+    bucket.requestCount += 1
+    if (sample.statusCode >= 500) bucket.errorCount += 1
+    bucket.totalDurationMs += sample.durationMs
+    bucket.durations.push(sample.durationMs)
+    bucketMap.set(bucketStartMs, bucket)
+  }
+
+  const points = []
+  const startBucketMs = Math.floor(floor / bucketMs) * bucketMs
+  const endBucketMs = Math.floor(now / bucketMs) * bucketMs
+
+  for (let ts = startBucketMs; ts <= endBucketMs; ts += bucketMs) {
+    const bucket = bucketMap.get(ts)
+    if (!bucket) {
+      points.push({
+        timestamp: new Date(ts).toISOString(),
+        requestCount: 0,
+        errorRate: 0,
+        avgResponseTimeMs: 0,
+        p95ResponseTimeMs: 0,
+      })
+      continue
+    }
+
+    const avgResponseTimeMs =
+      bucket.requestCount === 0 ? 0 : bucket.totalDurationMs / bucket.requestCount
+
+    points.push({
+      timestamp: new Date(ts).toISOString(),
+      requestCount: bucket.requestCount,
+      errorRate: round(bucket.errorCount / bucket.requestCount, 4),
+      avgResponseTimeMs: round(avgResponseTimeMs),
+      p95ResponseTimeMs: round(percentile(bucket.durations, 95)),
+    })
+  }
+
+  return points
+}
+
 const monitoringService = {
   onRequestStart() {
     inFlightRequests += 1
@@ -365,6 +489,9 @@ const monitoringService = {
     const services = { database, redis, identityPlus }
     const metrics = getPerformanceSnapshot()
     const alerts = evaluateAlerts(metrics)
+    const timestamp = safeNowIso()
+    reconcileAlertLifecycle(alerts, timestamp)
+    pruneAlertLifecycle()
     const status = computeOverallStatus(services, alerts)
 
     healthStatusGauge.set(HEALTH_VALUE[status] ?? 0)
@@ -372,18 +499,81 @@ const monitoringService = {
 
     return {
       status,
-      timestamp: safeNowIso(),
+      timestamp,
       version: env.appVersion,
       uptime: round(process.uptime()),
       services,
       metrics,
       alerts,
+      alertSummary: {
+        activeCount: [...alertLifecycle.values()].filter((alert) => alert.status === 'active').length,
+        resolvedCount: [...alertLifecycle.values()].filter((alert) => alert.status === 'resolved').length,
+      },
       thresholds: {
         p95ResponseTimeMs: env.monitoringLatencyP95ThresholdMs,
         errorRate: env.monitoringErrorRateThreshold,
         eventLoopLagMs: env.monitoringEventLoopLagThresholdMs,
         heapUsagePercent: env.monitoringHeapUsageThresholdPct,
       },
+    }
+  },
+
+  getTrends({ windowMs = env.monitoringTrendDefaultWindowMs, bucketMs = env.monitoringTrendDefaultBucketMs } = {}) {
+    const points = buildTrends({ windowMs, bucketMs })
+    return {
+      generatedAt: safeNowIso(),
+      windowMs,
+      bucketMs,
+      points,
+    }
+  },
+
+  getAlertLifecycle({ status = 'all', limit = 100 } = {}) {
+    const metrics = getPerformanceSnapshot()
+    const currentAlerts = evaluateAlerts(metrics)
+    reconcileAlertLifecycle(currentAlerts, safeNowIso())
+    pruneAlertLifecycle()
+
+    const activeItems = [...alertLifecycle.values()]
+      .filter((alert) => alert.status === 'active')
+      .sort((a, b) => Date.parse(b.lastSeenAt) - Date.parse(a.lastSeenAt))
+
+    const resolvedItems = [...alertLifecycle.values()]
+      .filter((alert) => alert.status === 'resolved')
+      .sort((a, b) => Date.parse(b.resolvedAt || b.lastSeenAt) - Date.parse(a.resolvedAt || a.lastSeenAt))
+
+    if (status === 'active') {
+      return {
+        generatedAt: safeNowIso(),
+        summary: {
+          activeCount: activeItems.length,
+          resolvedCount: resolvedItems.length,
+          total: activeItems.length + resolvedItems.length,
+        },
+        items: activeItems.slice(0, limit),
+      }
+    }
+
+    if (status === 'resolved') {
+      return {
+        generatedAt: safeNowIso(),
+        summary: {
+          activeCount: activeItems.length,
+          resolvedCount: resolvedItems.length,
+          total: activeItems.length + resolvedItems.length,
+        },
+        items: resolvedItems.slice(0, limit),
+      }
+    }
+
+    return {
+      generatedAt: safeNowIso(),
+      summary: {
+        activeCount: activeItems.length,
+        resolvedCount: resolvedItems.length,
+        total: activeItems.length + resolvedItems.length,
+      },
+      items: [...activeItems, ...resolvedItems].slice(0, limit),
     }
   },
 
@@ -397,6 +587,7 @@ const monitoringService = {
 
   resetForTests() {
     requestSamples.length = 0
+    alertLifecycle.clear()
     inFlightRequests = 0
     httpInFlightRequests.set(0)
     eventLoopMonitor.reset()
