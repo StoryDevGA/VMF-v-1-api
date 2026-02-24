@@ -91,6 +91,12 @@ const env = {
   emailTransportPass: process.env.EMAIL_TRANSPORT_PASS || '',
   emailFromAddress: process.env.EMAIL_FROM_ADDRESS || 'noreply@storylineos.com',
   emailFromName: process.env.EMAIL_FROM_NAME || 'StoryLineOS',
+
+  // Fake Auth (dev/testing only)
+  fakeAuthEnabled: toBoolean(process.env.FAKE_AUTH_ENABLED, false),
+
+  // Client base URL (React dev server)
+  clientBaseUrl: process.env.CLIENT_BASE_URL || process.env.APP_BASE_URL || 'http://localhost:5173',
   
   // Security Configuration
   bcryptRounds: toNumber(process.env.BCRYPT_ROUNDS, 12),
@@ -180,6 +186,7 @@ const env = {
 }
 
 env.isProduction = env.nodeEnv === 'production'
+env.fakeAuthAllowed = env.fakeAuthEnabled && !env.isProduction
 env.mongoMinPoolSize = Math.max(1, env.mongoMinPoolSize)
 env.mongoMaxPoolSize = Math.max(env.mongoMinPoolSize, env.mongoMaxPoolSize)
 env.backgroundJobConcurrency = Math.max(1, env.backgroundJobConcurrency)

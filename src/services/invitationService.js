@@ -13,7 +13,7 @@ const computeExpiryDate = () => {
 }
 
 const buildIdentityPlusRedirectUrl = (invitationId) => {
-  const fallback = `${trimTrailingSlash(env.appBaseUrl || 'http://localhost:8000')}/invitation-auth`
+  const fallback = `${trimTrailingSlash(env.clientBaseUrl || 'http://localhost:5173')}/invitation-auth`
   const base = env.identityPlusAuthUrl || fallback
 
   try {
@@ -26,7 +26,7 @@ const buildIdentityPlusRedirectUrl = (invitationId) => {
 }
 
 const buildInvitationErrorUrl = (reason) => {
-  const base = trimTrailingSlash(env.appBaseUrl || 'http://localhost:8000')
+  const base = trimTrailingSlash(env.clientBaseUrl || 'http://localhost:5173')
   return `${base}/invitation-error?reason=${encodeURIComponent(reason)}`
 }
 

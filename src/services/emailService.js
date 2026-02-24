@@ -7,6 +7,7 @@ class EmailService {
       logger.info(
         {
           to,
+          authLink,
           expiresAt,
           mock: true,
         },

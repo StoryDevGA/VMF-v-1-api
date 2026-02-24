@@ -24,8 +24,14 @@ import { vmfDealRouter, dealRouter } from './routes/deals.routes.js'
 import { bulkRouter, bulkDisableRouter } from './routes/bulk.routes.js'
 import auditRouter from './routes/audit.routes.js'
 import gdprRouter from './routes/gdpr.routes.js'
+import fakeAuthRoutes from './routes/fakeAuth.routes.js'
+import logger from './config/logger.js'
 
 const app = express()
+
+if (env.fakeAuthAllowed) {
+  logger.warn('FAKE AUTH IS ENABLED — Identity Plus verification is bypassed. Do not use in production.')
+}
 
 app.set('trust proxy', env.trustProxy)
 app.disable('x-powered-by')
@@ -96,6 +102,7 @@ app.use('/api/v1/users', userRouter)
 app.use('/api/v1/deals', dealRouter)
 app.use('/api/v1/audit-logs', auditRouter)
 app.use('/api/v1/gdpr', gdprRouter)
+app.use('/api/v1/fake-auth/invitations', fakeAuthRoutes)
 
 app.use((_req, res) => {
   res.status(404).json({ error: 'Not Found' })

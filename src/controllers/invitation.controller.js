@@ -1,4 +1,5 @@
-import { Invitation } from '../models/index.js'
+import { Customer, Invitation, User } from '../models/index.js'
+import { createCustomerWithDefaults } from '../services/provisioningService.js'
 import env from '../config/env.js'
 import logger from '../config/logger.js'
 import auditService from '../services/auditService.js'
@@ -7,9 +8,10 @@ import invitationService from '../services/invitationService.js'
 
 const ACTIVE_INVITATION_STATUSES = ['created', 'sent', 'send_failed', 'accessed']
 
-const respondWithInvitation = (res, status, invitation, requestId) =>
+const respondWithInvitation = (res, status, invitation, requestId, { authLink } = {}) =>
   res.status(status).json({
     data: invitation.toJSON(),
+    ...(authLink ? { authLink } : {}),
     meta: { requestId, version: 'v1' },
   })
 
@@ -78,11 +80,100 @@ export const createInvitation = async (req, res, next) => {
       },
     })
 
+    // Auto-provision Customer + User at invitation time (dev-only).
+    // Sets provisionedCustomerId / provisionedUserId in memory — persisted
+    // by the invitation.save() in the email-send block below to avoid
+    // extra round-trips.
+    if (env.fakeAuthAllowed) {
+      try {
+        const existingUser = await User.findOne({ email: invitation.recipientEmail })
+        if (existingUser) {
+          logger.info(
+            { email: invitation.recipientEmail, userId: existingUser._id },
+            'invitation — user already exists, skipping auto-provision',
+          )
+          invitation.provisionedUserId = existingUser._id
+          const custId = existingUser.memberships?.[0]?.customerId
+          if (custId) invitation.provisionedCustomerId = custId
+        } else {
+          // Check for existing customer with the same name to avoid duplicates
+          const normalizedName = invitation.company.name.trim().toLowerCase()
+          let customer = await Customer.findOne({ nameNormalized: normalizedName })
+
+          if (customer) {
+            logger.info(
+              { customerId: customer._id, name: customer.name },
+              'invitation — customer already exists, reusing',
+            )
+          } else {
+            const result = await createCustomerWithDefaults(
+              {
+                name: invitation.company.name,
+                website: invitation.company.website,
+                topology: 'SINGLE_TENANT',
+                vmfPolicy: 'SINGLE',
+                billing: { planCode: 'DEV_FREE', cycle: 'MONTHLY' },
+              },
+              req.userId,
+              req,
+            )
+            customer = result.customer
+          }
+
+          let user
+          try {
+            user = new User({
+              email: invitation.recipientEmail,
+              name: invitation.recipientName,
+              isActive: true,
+              identityPlus: { trustStatus: 'UNTRUSTED' },
+              memberships: [{ customerId: customer._id, roles: ['CUSTOMER_ADMIN'] }],
+            })
+            await user.save()
+          } catch (saveErr) {
+            if (saveErr.code === 11000) {
+              logger.info(
+                { email: invitation.recipientEmail },
+                'invitation — user created concurrently, fetching existing',
+              )
+              user = await User.findOne({ email: invitation.recipientEmail })
+            } else {
+              throw saveErr
+            }
+          }
+
+          invitation.provisionedCustomerId = customer._id
+          invitation.provisionedUserId = user._id
+
+          await auditService.logFromRequest(req, {
+            action: auditService.AUDIT_ACTIONS.USER_CREATED,
+            resourceType: auditService.RESOURCE_TYPES.User,
+            resourceId: user._id,
+            scope: { customerId: customer._id },
+            diff: { autoProvisioned: true, fakeAuth: true },
+          })
+
+          logger.info(
+            { userId: user._id, customerId: customer._id, invitationId: invitation._id },
+            'invitation — auto-provisioned Customer + User (fakeAuth dev mode)',
+          )
+        }
+      } catch (provisionErr) {
+        logger.error(
+          { err: provisionErr, invitationId: invitation._id, requestId: req.requestId },
+          'invitation — auto-provisioning failed, continuing with invitation send',
+        )
+      }
+    }
+
+    const authLink = invitationService.buildAuthLink(raw)
+    const fakeAuthExtra = env.fakeAuthAllowed ? { authLink } : undefined
+
     try {
       await emailService.sendInvitationEmail({
         to: invitation.recipientEmail,
         name: invitation.recipientName,
-        authLink: invitationService.buildAuthLink(raw),
+        authLink,
         expiresAt: invitation.expiresAt,
       })
       invitation.status = 'sent'
@@ -97,7 +188,7 @@ export const createInvitation = async (req, res, next) => {
         diff: { status: { from: 'created', to: 'sent' } },
       })
 
-      return respondWithInvitation(res, 201, invitation, req.requestId)
+      return respondWithInvitation(res, 201, invitation, req.requestId, fakeAuthExtra)
     } catch (sendErr) {
       invitation.status = 'send_failed'
       invitation.sendFailedAt = new Date()
@@ -115,7 +206,7 @@ export const createInvitation = async (req, res, next) => {
         },
       })
 
-      return respondWithInvitation(res, 202, invitation, req.requestId)
+      return respondWithInvitation(res, 202, invitation, req.requestId, fakeAuthExtra)
     }
   } catch (err) {
     next(err)
@@ -141,7 +232,12 @@ export const listInvitations = async (req, res, next) => {
     const skip = (pageNum - 1) * limit
 
     const [invitations, total] = await Promise.all([
-      Invitation.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit),
+      Invitation.find(filter)
+        .sort({ createdAt: -1 })
+        .populate('provisionedCustomerId', 'name status')
+        .populate('provisionedUserId', 'identityPlus.trustStatus')
+        .skip(skip)
+        .limit(limit),
       Invitation.countDocuments(filter),
     ])
 
@@ -164,6 +260,8 @@ export const listInvitations = async (req, res, next) => {
 export const getInvitation = async (req, res, next) => {
   try {
     const invitation = await Invitation.findById(req.params.invitationId)
+      .populate('provisionedCustomerId', 'name status')
+      .populate('provisionedUserId', 'identityPlus.trustStatus')
     if (!invitation) {
       return res.status(404).json({
         error: {
@@ -214,11 +312,14 @@ export const resendInvitation = async (req, res, next) => {
     invitation.sendFailureReason = undefined
     invitation.sendFailedAt = undefined
 
+    const authLink = invitationService.buildAuthLink(raw)
+    const fakeAuthExtra = env.fakeAuthAllowed ? { authLink } : undefined
+
     try {
       await emailService.sendInvitationEmail({
         to: invitation.recipientEmail,
         name: invitation.recipientName,
-        authLink: invitationService.buildAuthLink(raw),
+        authLink,
         expiresAt: invitation.expiresAt,
       })
 
@@ -234,7 +335,7 @@ export const resendInvitation = async (req, res, next) => {
         },
       })
 
-      return respondWithInvitation(res, 200, invitation, req.requestId)
+      return respondWithInvitation(res, 200, invitation, req.requestId, fakeAuthExtra)
     } catch (sendErr) {
       invitation.status = 'send_failed'
       invitation.sendFailedAt = new Date()
@@ -252,7 +353,7 @@ export const resendInvitation = async (req, res, next) => {
         },
       })
 
-      return respondWithInvitation(res, 202, invitation, req.requestId)
+      return respondWithInvitation(res, 202, invitation, req.requestId, fakeAuthExtra)
     }
   } catch (err) {
     next(err)
