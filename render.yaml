@@ -11,6 +11,8 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      - key: APP_ENV
+        value: production
       - key: TRUST_PROXY
         value: "1"
       - key: REDIS_REQUIRED

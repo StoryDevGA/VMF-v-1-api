@@ -22,8 +22,10 @@ Copy `.env.example` to `.env` and adjust values as needed:
 - `RATE_LIMIT_WINDOW_MS` and `RATE_LIMIT_MAX` control throttling.
 - `LOG_LEVEL` controls pino output.
 - `TRUST_PROXY` should be set to `1` behind a proxy (e.g., load balancer).
+- `APP_ENV` controls deployment-stage behavior (`development`, `staging`, `production`).
 - `MONGODB_URI`, `JWT_SECRET`, and `JWT_REFRESH_SECRET` are required.
 - Redis is optional in local dev (`REDIS_REQUIRED=false`) but recommended for full auth/session behavior.
+- `FAKE_AUTH_ENABLED` only takes effect when `APP_ENV` is not `production`.
 
 ## Verification
 - Start the server: `npm run dev`.
@@ -40,7 +42,8 @@ Deploy steps:
    - `MONGODB_URI`
    - `CORS_ORIGIN`
 3. Confirm `REDIS_REQUIRED=true` for production.
-4. Deploy.
+4. Set `APP_ENV=production` for prod deployments.
+5. Deploy.
 
 Post-deploy checks:
 1. `GET /health` should return `200`.
@@ -49,3 +52,4 @@ Post-deploy checks:
 Notes:
 - This API uses Redis for refresh token storage, token blacklisting, step-up tokens, and performance cache.
 - With Redis unavailable and `REDIS_REQUIRED=false`, the API can start but auth security features degrade.
+- For non-prod preview/dev environments, keep `NODE_ENV=production` and set `APP_ENV=development` (or `staging`) to allow dev-only features such as fake auth when explicitly enabled.

@@ -41,8 +41,16 @@ const normalizeMetricsPrefix = (value) => {
   return prefix.endsWith('_') ? prefix : `${prefix}_`
 }
 
+const normalizeAppEnv = (value, fallback = 'development') => {
+  const normalized = String(value || fallback)
+    .trim()
+    .toLowerCase()
+  return normalized || fallback
+}
+
 const env = {
   nodeEnv: process.env.NODE_ENV || 'development',
+  appEnv: normalizeAppEnv(process.env.APP_ENV, process.env.NODE_ENV || 'development'),
   port: toNumber(process.env.PORT, 8000),
   appVersion: process.env.APP_VERSION || '0.1.0',
   corsOrigins: parseCorsOrigins(process.env.CORS_ORIGIN),
@@ -92,7 +100,7 @@ const env = {
   emailFromAddress: process.env.EMAIL_FROM_ADDRESS || 'noreply@storylineos.com',
   emailFromName: process.env.EMAIL_FROM_NAME || 'StoryLineOS',
 
-  // Fake Auth (dev/testing only)
+  // Fake Auth (non-production app environments only)
   fakeAuthEnabled: toBoolean(process.env.FAKE_AUTH_ENABLED, false),
 
   // Client base URL (React dev server)
@@ -186,7 +194,8 @@ const env = {
 }
 
 env.isProduction = env.nodeEnv === 'production'
-env.fakeAuthAllowed = env.fakeAuthEnabled && !env.isProduction
+env.isAppProduction = env.appEnv === 'production'
+env.fakeAuthAllowed = env.fakeAuthEnabled && !env.isAppProduction
 env.mongoMinPoolSize = Math.max(1, env.mongoMinPoolSize)
 env.mongoMaxPoolSize = Math.max(env.mongoMinPoolSize, env.mongoMaxPoolSize)
 env.backgroundJobConcurrency = Math.max(1, env.backgroundJobConcurrency)
