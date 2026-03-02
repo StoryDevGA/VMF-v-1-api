@@ -56,6 +56,48 @@ const trialSchema = z
     { message: 'endsAt is required when isTrial is true', path: ['endsAt'] },
   )
 
+const objectIdRegex = /^[a-f\d]{24}$/i
+
+const objectIdString = z
+  .string()
+  .regex(objectIdRegex, 'Must be a valid ObjectId')
+
+const governanceSchema = z
+  .object({
+    maxTenants: z
+      .number({ invalid_type_error: 'maxTenants must be a number' })
+      .int('maxTenants must be an integer')
+      .min(1, 'maxTenants must be at least 1')
+      .max(10000, 'maxTenants must be 10000 or fewer')
+      .optional(),
+    maxVmfsPerTenant: z
+      .number({ invalid_type_error: 'maxVmfsPerTenant must be a number' })
+      .int('maxVmfsPerTenant must be an integer')
+      .min(1, 'maxVmfsPerTenant must be at least 1')
+      .max(10000, 'maxVmfsPerTenant must be 10000 or fewer')
+      .optional(),
+    customerAdminUserId: objectIdString.optional(),
+  })
+  .optional()
+
+const governanceUpdateSchema = z
+  .object({
+    maxTenants: z
+      .number({ invalid_type_error: 'maxTenants must be a number' })
+      .int('maxTenants must be an integer')
+      .min(1, 'maxTenants must be at least 1')
+      .max(10000, 'maxTenants must be 10000 or fewer')
+      .optional(),
+    maxVmfsPerTenant: z
+      .number({ invalid_type_error: 'maxVmfsPerTenant must be a number' })
+      .int('maxVmfsPerTenant must be an integer')
+      .min(1, 'maxVmfsPerTenant must be at least 1')
+      .max(10000, 'maxVmfsPerTenant must be 10000 or fewer')
+      .optional(),
+  })
+  .strict()
+  .optional()
+
 const createCustomerSchema = z
   .object({
     name: z
@@ -67,6 +109,8 @@ const createCustomerSchema = z
     topology: topologyEnum,
     vmfPolicy: vmfPolicyEnum,
     isServiceProvider: z.boolean().default(false),
+    licenseLevelId: objectIdString.optional(),
+    governance: governanceSchema,
     entitlements: z.array(z.string().trim()).default([]),
     billing: billingSchema,
     trial: trialSchema.optional(),
@@ -94,19 +138,19 @@ const updateCustomerSchema = z.object({
     .optional(),
   website: websiteSchema.optional(),
   isServiceProvider: z.boolean().optional(),
+  licenseLevelId: objectIdString.optional(),
+  governance: governanceUpdateSchema,
   entitlements: z.array(z.string().trim()).optional(),
   billing: billingSchema.optional(),
   trial: trialSchema.optional(),
 })
 
 const updateStatusSchema = z.object({
-  status: z.enum(['ACTIVE', 'DISABLED', 'ARCHIVED'], {
+  status: z.enum(['ACTIVE', 'INACTIVE', 'DISABLED', 'ARCHIVED'], {
     required_error: 'Status is required',
-    invalid_type_error: 'Status must be ACTIVE, DISABLED, or ARCHIVED',
+    invalid_type_error: 'Status must be ACTIVE, INACTIVE, DISABLED, or ARCHIVED',
   }),
 })
-
-const objectIdRegex = /^[a-f\d]{24}$/i
 
 const assignAdminSchema = z.object({
   userId: z

@@ -212,7 +212,7 @@ export const buildTenantStatusSnapshot = (tenant) => ({
 /**
  * Build a cacheable topology snapshot from a Customer document.
  * @param {import('../models/Customer.js').default} customer - Mongoose Customer document
- * @returns {{ _id: string, topology: string, vmfPolicy: string, defaultTenantId: string|null, status: string, isServiceProvider: boolean }}
+ * @returns {{ _id: string, topology: string, vmfPolicy: string, defaultTenantId: string|null, status: string, isServiceProvider: boolean, licenseLevelId: string|null, governance: { maxTenants: number, maxVmfsPerTenant: number, customerAdminUserId: string|null } }}
  */
 export const buildCustomerTopologySnapshot = (customer) => ({
   _id: customer._id,
@@ -222,6 +222,12 @@ export const buildCustomerTopologySnapshot = (customer) => ({
   defaultTenantId: customer.defaultTenantId,
   status: customer.status,
   isServiceProvider: Boolean(customer.isServiceProvider),
+  licenseLevelId: customer.licenseLevelId || null,
+  governance: {
+    maxTenants: customer.governance?.maxTenants ?? 1,
+    maxVmfsPerTenant: customer.governance?.maxVmfsPerTenant ?? 1,
+    customerAdminUserId: customer.governance?.customerAdminUserId || null,
+  },
 })
 
 /* ------------------------------------------------------------------ */
@@ -305,7 +311,7 @@ const warmAuthorizationCaches = async (options = {}) => {
     Customer.find({})
       .sort({ updatedAt: -1 })
       .limit(customerLimit)
-      .select('_id topology vmfPolicy defaultTenantId status isServiceProvider')
+      .select('_id topology vmfPolicy defaultTenantId status isServiceProvider licenseLevelId governance')
       .lean(),
   ])
 

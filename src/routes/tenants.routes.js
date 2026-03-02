@@ -17,6 +17,7 @@ import { Router } from 'express'
 import authJwt from '../middleware/authJwt.js'
 import loadScopes from '../middleware/loadScopes.js'
 import { requirePlatformRole, requireCustomerAccess } from '../middleware/authorize.js'
+import requireCustomerActive from '../middleware/customerStatus.js'
 import { tenantManagementRateLimit } from '../middleware/rateLimits.js'
 import { validateCreateTenant, validateUpdateTenant } from '../validators/tenant.validator.js'
 import {
@@ -34,6 +35,7 @@ import {
 export const customerTenantRouter = Router({ mergeParams: true })
 
 customerTenantRouter.use(authJwt, loadScopes, requireCustomerAccess({ roles: ['CUSTOMER_ADMIN'] }))
+customerTenantRouter.use(requireCustomerActive())
 
 customerTenantRouter.get('/', listTenants)
 customerTenantRouter.post('/', tenantManagementRateLimit, validateCreateTenant, createTenant)
@@ -44,7 +46,7 @@ customerTenantRouter.post('/', tenantManagementRateLimit, validateCreateTenant, 
 
 export const tenantRouter = Router()
 
-tenantRouter.use(authJwt, loadScopes, requirePlatformRole('SUPER_ADMIN'))
+tenantRouter.use(authJwt, loadScopes, requirePlatformRole('SUPER_ADMIN'), requireCustomerActive())
 
 tenantRouter.patch('/:tenantId', tenantManagementRateLimit, validateUpdateTenant, updateTenant)
 tenantRouter.post('/:tenantId/enable', tenantManagementRateLimit, enableTenant)

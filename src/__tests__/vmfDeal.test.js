@@ -164,6 +164,11 @@ const makeFakeCustomer = (overrides = {}) => ({
   name: 'Acme Corp',
   topology: 'MULTI_TENANT',
   vmfPolicy: 'PER_TENANT_MULTI',
+  governance: {
+    maxTenants: 10,
+    maxVmfsPerTenant: 10,
+    customerAdminUserId: null,
+  },
   defaultTenantId: null,
   isServiceProvider: false,
   status: 'ACTIVE',
@@ -629,6 +634,33 @@ describe('POST /api/v1/customers/:customerId/tenants/:tenantId/vmfs', () => {
 
     expect(res.status).toBe(409)
     expect(res.body.error.code).toBe('CONFLICT')
+  })
+
+  test('returns 409 when governance maxVmfsPerTenant limit is reached (boundary plus one)', async () => {
+    const token = await getSuperAdminToken()
+    const customer = makeFakeCustomer({
+      vmfPolicy: 'PER_TENANT_MULTI',
+      governance: {
+        maxTenants: 10,
+        maxVmfsPerTenant: 1,
+        customerAdminUserId: null,
+      },
+    })
+    Customer.findById.mockResolvedValue(customer)
+    Tenant.findById.mockResolvedValue(makeFakeTenant())
+    VMF.countByTenant.mockResolvedValue(1)
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/tenants/${TENANT_ID}/vmfs`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: 'Second VMF' })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.details.limitType).toBe('MAX_VMFS_PER_TENANT')
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'VMF_LIMIT_REJECTED',
+    }))
   })
 })
 

@@ -65,12 +65,38 @@ const activeAlertsGauge = new client.Gauge({
   registers: [register],
 })
 
+const governanceInactiveCustomerBlocksTotal = new client.Counter({
+  name: `${env.metricsPrefix}governance_inactive_customer_blocks_total`,
+  help: 'Total inactive-customer enforcement blocks.',
+  labelNames: ['surface'],
+  registers: [register],
+})
+
+const governanceLimitRejectionsTotal = new client.Counter({
+  name: `${env.metricsPrefix}governance_limit_rejections_total`,
+  help: 'Total tenant/vmf governance limit rejections.',
+  labelNames: ['limit_type', 'surface'],
+  registers: [register],
+})
+
+const governanceOnboardingTransactionFailuresTotal = new client.Counter({
+  name: `${env.metricsPrefix}governance_onboarding_transaction_failures_total`,
+  help: 'Total onboarding transaction failures.',
+  labelNames: ['failure_type'],
+  registers: [register],
+})
+
 const eventLoopMonitor = monitorEventLoopDelay({ resolution: 20 })
 eventLoopMonitor.enable()
 
 const requestSamples = []
 const alertLifecycle = new Map()
 let inFlightRequests = 0
+const governanceEventTotals = {
+  inactiveCustomerBlocks: 0,
+  limitRejections: 0,
+  onboardingTransactionFailures: 0,
+}
 
 const HEALTH_VALUE = {
   healthy: 1,
@@ -83,6 +109,16 @@ const safeNowIso = () => new Date().toISOString()
 const round = (value, digits = 2) => {
   if (!Number.isFinite(value)) return 0
   return Number(value.toFixed(digits))
+}
+
+const normalizeMetricLabel = (value, fallback = 'unknown') => {
+  const normalized = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+
+  return normalized || fallback
 }
 
 const pruneSamples = (now = Date.now()) => {
@@ -161,6 +197,9 @@ const getPerformanceSnapshot = () => {
     p95ResponseTimeMs: round(p95ResponseTimeMs),
     eventLoopLagMs: round(eventLoopLagMs),
     heapUsagePercent: round(heapUsagePercent),
+    inactiveCustomerBlocks: governanceEventTotals.inactiveCustomerBlocks,
+    governanceLimitRejections: governanceEventTotals.limitRejections,
+    onboardingTransactionFailures: governanceEventTotals.onboardingTransactionFailures,
   }
 }
 
@@ -470,6 +509,29 @@ const monitoringService = {
     pruneSamples()
   },
 
+  recordInactiveCustomerBlock({ surface = 'unknown' } = {}) {
+    const normalizedSurface = normalizeMetricLabel(surface)
+    governanceInactiveCustomerBlocksTotal.labels(normalizedSurface).inc()
+    governanceEventTotals.inactiveCustomerBlocks += 1
+  },
+
+  recordLimitRejection({ limitType = 'unknown', surface = 'unknown' } = {}) {
+    const normalizedLimitType = normalizeMetricLabel(limitType)
+    const normalizedSurface = normalizeMetricLabel(surface)
+    governanceLimitRejectionsTotal
+      .labels(normalizedLimitType, normalizedSurface)
+      .inc()
+    governanceEventTotals.limitRejections += 1
+  },
+
+  recordOnboardingTransactionFailure({ failureType = 'unknown' } = {}) {
+    const normalizedFailureType = normalizeMetricLabel(failureType)
+    governanceOnboardingTransactionFailuresTotal
+      .labels(normalizedFailureType)
+      .inc()
+    governanceEventTotals.onboardingTransactionFailures += 1
+  },
+
   getPublicHealth() {
     return {
       status: 'healthy',
@@ -589,6 +651,16 @@ const monitoringService = {
     requestSamples.length = 0
     alertLifecycle.clear()
     inFlightRequests = 0
+    governanceEventTotals.inactiveCustomerBlocks = 0
+    governanceEventTotals.limitRejections = 0
+    governanceEventTotals.onboardingTransactionFailures = 0
+
+    httpRequestsTotal.reset()
+    httpRequestDurationSeconds.reset()
+    governanceInactiveCustomerBlocksTotal.reset()
+    governanceLimitRejectionsTotal.reset()
+    governanceOnboardingTransactionFailuresTotal.reset()
+
     httpInFlightRequests.set(0)
     eventLoopMonitor.reset()
     healthStatusGauge.set(0)

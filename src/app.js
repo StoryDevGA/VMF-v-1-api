@@ -16,6 +16,8 @@ import invitationAuthRoutes from './routes/invitationAuth.routes.js'
 import invitationRoutes from './routes/invitations.routes.js'
 import systemVersioningPolicyRoutes from './routes/systemVersioningPolicy.routes.js'
 import superAdminAuditRoutes from './routes/superAdminAudit.routes.js'
+import licenseLevelRoutes from './routes/licenseLevels.routes.js'
+import onboardingRoutes from './routes/onboarding.routes.js'
 import customerRoutes from './routes/customers.routes.js'
 import { customerTenantRouter, tenantRouter } from './routes/tenants.routes.js'
 import { customerUserRouter, userRouter } from './routes/users.routes.js'
@@ -87,6 +89,17 @@ app.use('/api/v1/super-admin/invitations', invitationAuthRoutes)
 app.use('/api/v1/super-admin/invitations', invitationRoutes)
 app.use('/api/v1/super-admin/system-versioning-policy', systemVersioningPolicyRoutes)
 app.use('/api/v1/super-admin/denied-access-logs', superAdminAuditRoutes)
+if (env.governanceLicenseLevelsEnabled) {
+  app.use('/api/v1/super-admin/licence-levels', licenseLevelRoutes)
+} else {
+  logger.warn('GOVERNANCE_LICENSE_LEVELS_ENABLED=false - licence level routes are disabled')
+}
+
+if (env.governanceExternalOnboardingEnabled) {
+  app.use('/api/v1/super-admin/customers', onboardingRoutes)
+} else {
+  logger.warn('GOVERNANCE_EXTERNAL_ONBOARDING_ENABLED=false - external onboarding route is disabled')
+}
 // More specific customer-scoped routes BEFORE the general /customers mount
 // (Express prefix-matches app.use, so /customers would intercept /customers/:id/users)
 app.use('/api/v1/customers/:customerId/tenants/:tenantId/vmfs', tenantVmfRouter)

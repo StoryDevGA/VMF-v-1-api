@@ -17,6 +17,7 @@ import { Router } from 'express'
 import authJwt from '../middleware/authJwt.js'
 import loadScopes from '../middleware/loadScopes.js'
 import { requireVmfAccess, requirePlatformRole } from '../middleware/authorize.js'
+import requireCustomerActive from '../middleware/customerStatus.js'
 import { tenantManagementRateLimit } from '../middleware/rateLimits.js'
 import {
   validateCreateDeal,
@@ -37,7 +38,7 @@ import {
 
 export const vmfDealRouter = Router({ mergeParams: true })
 
-vmfDealRouter.use(authJwt, loadScopes, requireVmfAccess('READ'))
+vmfDealRouter.use(authJwt, loadScopes, requireVmfAccess('READ'), requireCustomerActive())
 
 vmfDealRouter.get('/', listDeals)
 vmfDealRouter.post('/', tenantManagementRateLimit, validateCreateDeal, createDeal)
@@ -49,7 +50,7 @@ vmfDealRouter.post('/', tenantManagementRateLimit, validateCreateDeal, createDea
 
 export const dealRouter = Router()
 
-dealRouter.use(authJwt, loadScopes, requirePlatformRole('SUPER_ADMIN'))
+dealRouter.use(authJwt, loadScopes, requirePlatformRole('SUPER_ADMIN'), requireCustomerActive())
 
 dealRouter.get('/:dealId', getDeal)
 dealRouter.patch('/:dealId', tenantManagementRateLimit, validateUpdateDeal, updateDeal)

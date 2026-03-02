@@ -20,6 +20,8 @@ beforeAll(() => {
     'test-jwt-refresh-secret-for-unit-tests-should-be-long-and-complex-in-production'
   process.env.MONGODB_URI = 'mongodb://localhost:27017/vmf_test'
   process.env.REDIS_URL = 'redis://localhost:6379'
+  process.env.AUTH_RATE_LIMIT = '10000'
+  process.env.AUTH_HOURLY_RATE_LIMIT = '10000'
 })
 
 /* ------------------------------------------------------------------ */
@@ -87,16 +89,22 @@ beforeAll(async () => {
 // We cannot jest.mock() an ESM module at the top level in --experimental-vm-modules,
 // so we monkey-patch the model's static methods before each test instead.
 
-let User
+let User, Customer
 beforeAll(async () => {
   const models = await import('../models/index.js')
   User = models.User
+  Customer = models.Customer
 })
 
 beforeEach(() => {
   // Reset stubs
   User.findByEmail = jest.fn()
   User.findById = jest.fn()
+  Customer.find = jest.fn().mockReturnValue({
+    select: jest.fn().mockReturnValue({
+      lean: jest.fn().mockResolvedValue([]),
+    }),
+  })
 })
 
 /* ================================================================== */
@@ -158,6 +166,28 @@ describe('POST /api/v1/auth/login', () => {
 
     expect(res.status).toBe(401)
     expect(res.body.error.code).toBe('AUTH_ACCOUNT_DISABLED')
+  })
+
+  test('returns 403 when all customer memberships are inactive', async () => {
+    const customerUser = makeFakeUser({
+      memberships: [{ customerId: '607f1f77bcf86cd799439022', roles: ['USER'] }],
+    })
+    User.findByEmail.mockResolvedValue(customerUser)
+
+    Customer.find.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue([
+          { _id: '607f1f77bcf86cd799439022', status: 'DISABLED' },
+        ]),
+      }),
+    })
+
+    const res = await request
+      .post('/api/v1/auth/login')
+      .send({ email: 'admin@storylineos.com', password: 'CorrectPassword1!' })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('AUTH_CUSTOMER_INACTIVE')
   })
 
   test('returns 200 with tokens on success', async () => {

@@ -11,11 +11,13 @@
  *   - POST   /api/v1/customers/:customerId/admins/replace  Replace CUSTOMER_ADMIN
  */
 
-import { Customer, User } from '../models/index.js'
+import { Customer, LicenseLevel, Tenant, User } from '../models/index.js'
 import { createCustomerWithDefaults } from '../services/provisioningService.js'
 import auditService from '../services/auditService.js'
-import logger from '../config/logger.js'
 import performanceCacheService from '../services/performanceCacheService.js'
+import customerGovernanceService from '../services/customerGovernanceService.js'
+import monitoringService from '../services/monitoringService.js'
+import logger from '../config/logger.js'
 
 const DUPLICATE_CUSTOMER_NAME_MESSAGE = 'A customer with this name already exists.'
 
@@ -68,6 +70,21 @@ const isCustomerNameDuplicateKeyError = (err) =>
 const isCustomerNameDuplicateError = (err) =>
   err?.code === 'DUPLICATE_CUSTOMER_NAME' || isCustomerNameDuplicateKeyError(err)
 
+const validateLicenseLevelExists = async (licenseLevelId) => {
+  if (!licenseLevelId) return true
+  const licenseLevel = await LicenseLevel.findById(licenseLevelId).select('_id')
+  return Boolean(licenseLevel)
+}
+
+const buildGovernanceErrorResponse = (req, err) => ({
+  error: {
+    code: err.code || (err.status === 409 ? 'CONFLICT' : 'VALIDATION_FAILED'),
+    message: err.message,
+    ...(err.details ? { details: err.details } : {}),
+    requestId: req.requestId,
+  },
+})
+
 /* ------------------------------------------------------------------ */
 /*  GET /api/v1/customers                                             */
 /* ------------------------------------------------------------------ */
@@ -88,7 +105,9 @@ export const listCustomers = async (req, res, next) => {
     } = req.query
 
     const filter = {}
-    if (status) filter.status = status
+    if (status) {
+      filter.status = status === 'INACTIVE' ? 'DISABLED' : status
+    }
     if (topology) filter.topology = topology
     if (q) filter.name = { $regex: q, $options: 'i' }
 
@@ -130,6 +149,19 @@ export const listCustomers = async (req, res, next) => {
  */
 export const createCustomer = async (req, res, next) => {
   try {
+    if (req.body.licenseLevelId !== undefined) {
+      const licenseLevelExists = await validateLicenseLevelExists(req.body.licenseLevelId)
+      if (!licenseLevelExists) {
+        return res.status(422).json({
+          error: {
+            code: 'VALIDATION_FAILED',
+            message: 'licenseLevelId must reference an existing licence level.',
+            requestId: req.requestId,
+          },
+        })
+      }
+    }
+
     const conflict = await findConflictingCustomerByName(req.body.name)
     if (conflict) {
       return res.status(409).json({
@@ -244,14 +276,60 @@ export const updateCustomer = async (req, res, next) => {
       }
     }
 
-    const allowedFields = ['name', 'website', 'isServiceProvider', 'entitlements', 'billing', 'trial']
+    if (req.body.licenseLevelId !== undefined) {
+      const licenseLevelExists = await validateLicenseLevelExists(req.body.licenseLevelId)
+      if (!licenseLevelExists) {
+        return res.status(422).json({
+          error: {
+            code: 'VALIDATION_FAILED',
+            message: 'licenseLevelId must reference an existing licence level.',
+            requestId: req.requestId,
+          },
+        })
+      }
+    }
+
+    if (req.body.governance?.customerAdminUserId !== undefined) {
+      return res.status(422).json({
+        error: {
+          code: 'VALIDATION_FAILED',
+          message: 'governance.customerAdminUserId is managed by admin assignment and replacement endpoints.',
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    const allowedFields = [
+      'name',
+      'website',
+      'isServiceProvider',
+      'licenseLevelId',
+      'governance',
+      'entitlements',
+      'billing',
+      'trial',
+    ]
     const diff = {}
 
     for (const field of allowedFields) {
-      if (req.body[field] !== undefined) {
-        diff[field] = { from: customer[field], to: req.body[field] }
-        customer[field] = req.body[field]
+      if (req.body[field] === undefined) continue
+
+      if (field === 'governance') {
+        const currentGovernance = customer.governance?.toObject
+          ? customer.governance.toObject()
+          : (customer.governance || {})
+        const nextGovernance = {
+          ...currentGovernance,
+          ...req.body.governance,
+        }
+
+        diff.governance = { from: currentGovernance, to: nextGovernance }
+        customer.governance = nextGovernance
+        continue
       }
+
+      diff[field] = { from: customer[field], to: req.body[field] }
+      customer[field] = req.body[field]
     }
 
     await customer.save()
@@ -264,6 +342,44 @@ export const updateCustomer = async (req, res, next) => {
       scope: { customerId: customer._id },
       diff,
     })
+
+    if (diff.governance) {
+      const previousGovernance = diff.governance.from || {}
+      const nextGovernance = diff.governance.to || {}
+      const limitsChanged = previousGovernance.maxTenants !== nextGovernance.maxTenants ||
+        previousGovernance.maxVmfsPerTenant !== nextGovernance.maxVmfsPerTenant
+
+      if (limitsChanged) {
+        await auditService.logFromRequest(req, {
+          action: 'CUSTOMER_LIMITS_CHANGED',
+          resourceType: 'Customer',
+          resourceId: customer._id,
+          scope: { customerId: customer._id },
+          diff: {
+            from: {
+              maxTenants: previousGovernance.maxTenants,
+              maxVmfsPerTenant: previousGovernance.maxVmfsPerTenant,
+            },
+            to: {
+              maxTenants: nextGovernance.maxTenants,
+              maxVmfsPerTenant: nextGovernance.maxVmfsPerTenant,
+            },
+          },
+        })
+      }
+    }
+
+    if (diff.licenseLevelId) {
+      await auditService.logFromRequest(req, {
+        action: 'CUSTOMER_LICENSE_CHANGED',
+        resourceType: 'Customer',
+        resourceId: customer._id,
+        scope: { customerId: customer._id },
+        diff: {
+          licenseLevelId: diff.licenseLevelId,
+        },
+      })
+    }
 
     return res.status(200).json({
       data: customer.toJSON(),
@@ -314,17 +430,61 @@ export const updateCustomerStatus = async (req, res, next) => {
       })
     }
 
+    const nextStatus = req.body.status === 'INACTIVE' ? 'DISABLED' : req.body.status
     const previousStatus = customer.status
-    customer.status = req.body.status
+    customer.status = nextStatus
     await customer.save()
     await performanceCacheService.invalidateCustomerTopology(customer._id)
+
+    /* -------------------------------------------------------------- */
+    /*  Cascade: disable tenants and deactivate users when INACTIVE   */
+    /* -------------------------------------------------------------- */
+
+    let cascadeSummary = null
+
+    if (nextStatus === 'DISABLED' || nextStatus === 'ARCHIVED') {
+      const tenantResult = await Tenant.updateMany(
+        { customerId: customer._id, status: { $nin: ['DISABLED', 'ARCHIVED'] } },
+        { status: 'DISABLED' },
+      )
+
+      const affectedUsers = await User.find(
+        { 'memberships.customerId': customer._id, isActive: true },
+        { _id: 1 },
+      ).lean()
+
+      const userResult = await User.updateMany(
+        { 'memberships.customerId': customer._id, isActive: true },
+        { isActive: false },
+      )
+
+      // Invalidate permission caches for all affected users
+      await Promise.all(
+        affectedUsers.map((u) => performanceCacheService.invalidateUserPermissions(u._id)),
+      )
+
+      monitoringService.recordInactiveCustomerBlock({ surface: 'customer_status_cascade' })
+
+      cascadeSummary = {
+        tenantsDisabled: tenantResult.modifiedCount,
+        usersDeactivated: userResult.modifiedCount,
+      }
+
+      logger.info(
+        { customerId: customer._id, ...cascadeSummary, requestId: req.requestId },
+        'customer status cascade — tenants disabled and users deactivated',
+      )
+    }
 
     await auditService.logFromRequest(req, {
       action: 'CUSTOMER_STATUS_CHANGED',
       resourceType: 'Customer',
       resourceId: customer._id,
       scope: { customerId: customer._id },
-      diff: { status: { from: previousStatus, to: req.body.status } },
+      diff: {
+        status: { from: previousStatus, to: nextStatus },
+        ...(cascadeSummary && { cascade: cascadeSummary }),
+      },
     })
 
     return res.status(200).json({
@@ -380,41 +540,68 @@ export const assignAdmin = async (req, res, next) => {
       })
     }
 
-    // Check if user already has a membership for this customer
-    const existing = user.memberships.find(
-      (m) => m.customerId && m.customerId.toString() === customerId,
-    )
+    const assignment = await customerGovernanceService.applyCustomerAdminAssignment({
+      customer,
+      user,
+    })
 
-    if (existing) {
-      // Add CUSTOMER_ADMIN if not already present
-      if (!existing.roles.includes('CUSTOMER_ADMIN')) {
-        existing.roles.push('CUSTOMER_ADMIN')
-        await user.save()
-        await performanceCacheService.invalidateUserPermissions(user._id)
-      }
-    } else {
-      // Create new membership
-      user.memberships.push({
-        customerId,
-        roles: ['CUSTOMER_ADMIN'],
-      })
-      await user.save()
-      await performanceCacheService.invalidateUserPermissions(user._id)
-    }
+    await Promise.all([
+      performanceCacheService.invalidateUserPermissions(user._id),
+      performanceCacheService.invalidateCustomerTopology(customer._id),
+    ])
 
     await auditService.logFromRequest(req, {
       action: 'CUSTOMER_ADMIN_ASSIGNED',
       resourceType: 'Customer',
       resourceId: customer._id,
       scope: { customerId: customer._id },
-      diff: { userId, role: 'CUSTOMER_ADMIN' },
+      diff: {
+        userId,
+        role: 'CUSTOMER_ADMIN',
+        canonicalAdminUserId: assignment.canonicalAdminUserId,
+        previousCanonicalAdminUserId: assignment.previousCanonicalAdminUserId,
+      },
     })
 
+    if (assignment.customerChanged) {
+      await auditService.logFromRequest(req, {
+        action: 'CUSTOMER_ADMIN_CANONICAL_SET',
+        resourceType: 'Customer',
+        resourceId: customer._id,
+        scope: { customerId: customer._id },
+        diff: {
+          from: assignment.previousCanonicalAdminUserId,
+          to: assignment.canonicalAdminUserId,
+          source: 'assign_admin',
+        },
+      })
+    }
+
     return res.status(200).json({
-      data: { message: 'Admin role assigned successfully.', userId },
+      data: {
+        message: 'Admin role assigned successfully.',
+        userId,
+        canonicalAdminUserId: assignment.canonicalAdminUserId,
+      },
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
+    if (customerGovernanceService.isGovernanceError(err)) {
+      await auditService.logFromRequest(req, {
+        action: 'CUSTOMER_ADMIN_MUTATION_BLOCKED',
+        resourceType: 'Customer',
+        resourceId: req.params.customerId,
+        scope: { customerId: req.params.customerId },
+        diff: {
+          endpoint: 'assign_admin',
+          reason: err.message,
+          details: err.details || null,
+        },
+      })
+      return res
+        .status(err.status || 422)
+        .json(buildGovernanceErrorResponse(req, err))
+    }
     next(err)
   }
 }
@@ -456,79 +643,23 @@ export const replaceAdmin = async (req, res, next) => {
     if (!newUser.isActive) {
       return res.status(422).json({
         error: {
-          code: 'USER_NOT_ACTIVE',
+          code: 'VALIDATION_FAILED',
           message: 'Cannot assign customer admin role to an inactive user.',
           requestId: req.requestId,
         },
       })
     }
 
-    const oldAdmin = await User.findOne({
-      memberships: {
-        $elemMatch: {
-          customerId: customer._id,
-          roles: 'CUSTOMER_ADMIN',
-        },
-      },
+    const replacement = await customerGovernanceService.replaceCustomerAdmin({
+      customer,
+      newUser,
     })
 
-    if (!oldAdmin) {
-      return res.status(422).json({
-        error: {
-          code: 'NO_EXISTING_ADMIN',
-          message: 'Customer has no existing customer admin to replace.',
-          requestId: req.requestId,
-        },
-      })
-    }
-
-    const oldUserId = oldAdmin._id.toString()
-    const newUserIdStr = newUser._id.toString()
-
-    if (oldUserId !== newUserIdStr) {
-      const oldMembership = oldAdmin.memberships.find(
-        (membership) =>
-          membership.customerId &&
-          membership.customerId.toString() === customerId &&
-          membership.roles.includes('CUSTOMER_ADMIN'),
-      )
-
-      if (oldMembership) {
-        oldMembership.roles = oldMembership.roles.filter((role) => role !== 'CUSTOMER_ADMIN')
-        if (oldMembership.roles.length === 0) {
-          oldAdmin.memberships = oldAdmin.memberships.filter(
-            (membership) =>
-              !(
-                membership.customerId &&
-                membership.customerId.toString() === customerId
-              ),
-          )
-        }
-      }
-
-      const newMembership = newUser.memberships.find(
-        (membership) =>
-          membership.customerId && membership.customerId.toString() === customerId,
-      )
-
-      if (newMembership) {
-        if (!newMembership.roles.includes('CUSTOMER_ADMIN')) {
-          newMembership.roles.push('CUSTOMER_ADMIN')
-        }
-      } else {
-        newUser.memberships.push({
-          customerId,
-          roles: ['CUSTOMER_ADMIN'],
-        })
-      }
-
-      await oldAdmin.save()
-      await newUser.save()
-      await Promise.all([
-        performanceCacheService.invalidateUserPermissions(oldAdmin._id),
-        performanceCacheService.invalidateUserPermissions(newUser._id),
-      ])
-    }
+    await Promise.all([
+      performanceCacheService.invalidateUserPermissions(replacement.oldUserId),
+      performanceCacheService.invalidateUserPermissions(replacement.newUserId),
+      performanceCacheService.invalidateCustomerTopology(customer._id),
+    ])
 
     await auditService.logFromRequest(req, {
       action: 'CUSTOMER_ADMIN_REPLACED',
@@ -536,8 +667,23 @@ export const replaceAdmin = async (req, res, next) => {
       resourceId: customer._id,
       scope: { customerId: customer._id },
       diff: {
-        oldUserId,
-        newUserId: newUserIdStr,
+        oldUserId: replacement.oldUserId,
+        newUserId: replacement.newUserId,
+        previousCanonicalAdminUserId: replacement.oldUserId,
+        canonicalAdminUserId: replacement.newUserId,
+        reason,
+      },
+    })
+
+    await auditService.logFromRequest(req, {
+      action: 'CUSTOMER_ADMIN_CANONICAL_SET',
+      resourceType: 'Customer',
+      resourceId: customer._id,
+      scope: { customerId: customer._id },
+      diff: {
+        from: replacement.oldUserId,
+        to: replacement.newUserId,
+        source: 'replace_admin',
         reason,
       },
     })
@@ -546,12 +692,30 @@ export const replaceAdmin = async (req, res, next) => {
       data: {
         message: 'Customer admin replaced successfully.',
         customerId: customer._id,
-        oldUserId,
-        newUserId: newUserIdStr,
+        oldUserId: replacement.oldUserId,
+        newUserId: replacement.newUserId,
+        canonicalAdminUserId: replacement.newUserId,
       },
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
+    if (customerGovernanceService.isGovernanceError(err)) {
+      await auditService.logFromRequest(req, {
+        action: 'CUSTOMER_ADMIN_MUTATION_BLOCKED',
+        resourceType: 'Customer',
+        resourceId: req.params.customerId,
+        scope: { customerId: req.params.customerId },
+        diff: {
+          endpoint: 'replace_admin',
+          reason: err.message,
+          details: err.details || null,
+          attemptedNewUserId: req.body?.newUserId || null,
+        },
+      })
+      return res
+        .status(err.status || 422)
+        .json(buildGovernanceErrorResponse(req, err))
+    }
     next(err)
   }
 }

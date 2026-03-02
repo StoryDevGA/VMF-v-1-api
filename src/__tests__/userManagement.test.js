@@ -34,6 +34,8 @@ beforeAll(() => {
     'test-jwt-refresh-secret-for-unit-tests-should-be-long-and-complex-in-production'
   process.env.MONGODB_URI = 'mongodb://localhost:27017/vmf_test'
   process.env.REDIS_URL = 'redis://localhost:6379'
+  process.env.USER_MGMT_RATE_LIMIT = '10000'
+  process.env.TENANT_RATE_LIMIT = '10000'
 })
 
 /* ------------------------------------------------------------------ */
@@ -208,9 +210,15 @@ beforeEach(() => {
   User.countDocuments = jest.fn()
   User.deleteOne = jest.fn()
   Customer.findById = jest.fn()
+  Customer.findOne = jest.fn()
   Tenant.countDocuments = jest.fn()
   Tenant.updateMany = jest.fn(async () => ({ modifiedCount: 0 }))
   AuditLog.createLog = jest.fn(async () => ({}))
+  Customer.findOne.mockResolvedValue(null)
+  Customer.findById.mockImplementation((id) => {
+    if (id === CUSTOMER_ID) return Promise.resolve(makeFakeCustomer())
+    return Promise.resolve(null)
+  })
 
   // Default: loadScopes resolves correct user by ID
   User.findById.mockImplementation((id) => {
@@ -753,6 +761,58 @@ describe('PATCH /api/v1/users/:userId', () => {
     expect(user.save).toHaveBeenCalled()
   })
 
+  test('returns 409 when removing CUSTOMER_ADMIN from canonical active customer admin', async () => {
+    const token = await getSuperAdminToken()
+    const user = makeRegularUser({
+      memberships: [{ customerId: CUSTOMER_ID, roles: ['CUSTOMER_ADMIN', 'USER'] }],
+    })
+
+    User.findById.mockImplementation((id) => {
+      if (id === SUPER_ADMIN_ID) return Promise.resolve(makeSuperAdmin())
+      if (id === REGULAR_USER_ID) return Promise.resolve(user)
+      return Promise.resolve(null)
+    })
+    Customer.findById.mockResolvedValue(
+      makeFakeCustomer({
+        governance: { customerAdminUserId: REGULAR_USER_ID },
+        status: 'ACTIVE',
+      }),
+    )
+
+    const res = await request
+      .patch(`/api/v1/users/${REGULAR_USER_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ roles: ['USER'] })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+  })
+
+  test('returns 409 when assigning second CUSTOMER_ADMIN while canonical admin exists', async () => {
+    const token = await getSuperAdminToken()
+    const user = makeRegularUser()
+
+    User.findById.mockImplementation((id) => {
+      if (id === SUPER_ADMIN_ID) return Promise.resolve(makeSuperAdmin())
+      if (id === REGULAR_USER_ID) return Promise.resolve(user)
+      return Promise.resolve(null)
+    })
+    Customer.findById.mockResolvedValue(
+      makeFakeCustomer({
+        governance: { customerAdminUserId: CUSTOMER_ADMIN_ID },
+        status: 'ACTIVE',
+      }),
+    )
+
+    const res = await request
+      .patch(`/api/v1/users/${REGULAR_USER_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ roles: ['CUSTOMER_ADMIN', 'USER'] })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+  })
+
   test('updates tenant visibility', async () => {
     const token = await getSuperAdminToken()
     const user = makeRegularUser()
@@ -868,6 +928,30 @@ describe('POST /api/v1/users/:userId/disable', () => {
 
     expect(res.status).toBe(404)
   })
+
+  test('returns 409 when disabling canonical customer admin of active customer', async () => {
+    const token = await getSuperAdminToken()
+    const user = makeRegularUser({
+      memberships: [{ customerId: CUSTOMER_ID, roles: ['CUSTOMER_ADMIN'] }],
+    })
+
+    User.findById.mockImplementation((id) => {
+      if (id === SUPER_ADMIN_ID) return Promise.resolve(makeSuperAdmin())
+      if (id === REGULAR_USER_ID) return Promise.resolve(user)
+      return Promise.resolve(null)
+    })
+    Customer.findOne.mockResolvedValue({
+      _id: CUSTOMER_ID,
+      governance: { customerAdminUserId: REGULAR_USER_ID },
+    })
+
+    const res = await request
+      .post(`/api/v1/users/${REGULAR_USER_ID}/disable`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+  })
 })
 
 /* ================================================================== */
@@ -932,6 +1016,32 @@ describe('DELETE /api/v1/users/:userId', () => {
       .set('Authorization', `Bearer ${token}`)
 
     expect(res.status).toBe(404)
+  })
+
+  test('returns 409 when deleting canonical customer admin of active customer', async () => {
+    const token = await getSuperAdminToken()
+    const disabledCanonicalUser = makeRegularUser({
+      isActive: false,
+      identityPlus: { trustStatus: 'REVOKED' },
+      memberships: [{ customerId: CUSTOMER_ID, roles: ['CUSTOMER_ADMIN'] }],
+    })
+
+    User.findById.mockImplementation((id) => {
+      if (id === SUPER_ADMIN_ID) return Promise.resolve(makeSuperAdmin())
+      if (id === REGULAR_USER_ID) return Promise.resolve(disabledCanonicalUser)
+      return Promise.resolve(null)
+    })
+    Customer.findOne.mockResolvedValue({
+      _id: CUSTOMER_ID,
+      governance: { customerAdminUserId: REGULAR_USER_ID },
+    })
+
+    const res = await request
+      .delete(`/api/v1/users/${REGULAR_USER_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
   })
 })
 
@@ -1074,5 +1184,37 @@ describe('Role assignment during user create', () => {
     expect(res.status).toBe(201)
 
     User.prototype.save = origSave
+  })
+
+  test('rejects CUSTOMER_ADMIN create when active canonical admin already exists', async () => {
+    const token = await getCustomerAdminToken()
+    Customer.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ID) {
+        return Promise.resolve(
+          makeFakeCustomer({
+            governance: { customerAdminUserId: CUSTOMER_ADMIN_ID },
+            status: 'ACTIVE',
+          }),
+        )
+      }
+      return Promise.resolve(null)
+    })
+    User.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ADMIN_ID) return Promise.resolve(makeCustomerAdmin())
+      return Promise.resolve(null)
+    })
+    User.findOne.mockResolvedValue(null)
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/users`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        name: 'Second Admin User',
+        email: 'second-admin@example.com',
+        roles: ['CUSTOMER_ADMIN', 'USER'],
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
   })
 })

@@ -161,7 +161,7 @@ const makeAuditLogList = () => [
 /* ------------------------------------------------------------------ */
 
 let app, request, tokenService
-let User, AuditLog
+let User, Customer, AuditLog
 
 beforeAll(async () => {
   const supertest = (await import('supertest')).default
@@ -171,6 +171,7 @@ beforeAll(async () => {
 
   const models = await import('../models/index.js')
   User = models.User
+  Customer = models.Customer
   AuditLog = models.AuditLog
 })
 
@@ -208,6 +209,7 @@ const getRegularUserToken = async () => {
 beforeEach(() => {
   User.findById = jest.fn()
   User.findOne = jest.fn()
+  Customer.findById = jest.fn()
   AuditLog.createLog = jest.fn(async () => ({}))
   AuditLog.find = jest.fn()
   AuditLog.findOne = jest.fn()
@@ -220,6 +222,21 @@ beforeEach(() => {
     if (id === CUSTOMER_ADMIN_ID) return Promise.resolve(makeCustomerAdmin())
     if (id === REGULAR_USER_ID) return Promise.resolve(makeRegularUser())
     return Promise.resolve(null)
+  })
+
+  Customer.findById.mockResolvedValue({
+    _id: CUSTOMER_ID,
+    id: CUSTOMER_ID,
+    topology: 'MULTI_TENANT',
+    vmfPolicy: 'PER_TENANT_MULTI',
+    defaultTenantId: null,
+    status: 'ACTIVE',
+    isServiceProvider: false,
+    governance: {
+      maxTenants: 1,
+      maxVmfsPerTenant: 1,
+      customerAdminUserId: null,
+    },
   })
 })
 

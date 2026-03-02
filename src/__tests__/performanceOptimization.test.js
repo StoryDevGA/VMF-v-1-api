@@ -25,6 +25,7 @@ let performanceCacheService
 let jobQueueService
 let loadScopes
 let requireTenantEnabled
+let monitoringService
 
 const USER_ID = '507f1f77bcf86cd799439011'
 const CUSTOMER_ID = '607f1f77bcf86cd799439022'
@@ -55,6 +56,19 @@ const makeRes = () => {
   return res
 }
 
+const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+const getLabeledCounterValue = (metricsText, metricName, labels = []) => {
+  const labelPattern = labels.length > 0
+    ? labels.map((label) => `(?=.*${escapeRegex(label)})`).join('')
+    : ''
+  const regex = new RegExp(
+    `${escapeRegex(metricName)}\\{${labelPattern}[^\\n]*\\}\\s+([0-9]+(?:\\.[0-9]+)?)`,
+  )
+  const match = metricsText.match(regex)
+  return match ? Number.parseFloat(match[1]) : 0
+}
+
 beforeAll(async () => {
   env = (await import('../config/env.js')).default
   const models = await import('../models/index.js')
@@ -64,11 +78,13 @@ beforeAll(async () => {
   jobQueueService = (await import('../services/jobQueueService.js')).default
   loadScopes = (await import('../middleware/loadScopes.js')).default
   requireTenantEnabled = (await import('../middleware/tenantStatus.js')).default
+  monitoringService = (await import('../services/monitoringService.js')).default
 })
 
 beforeEach(async () => {
   await performanceCacheService.resetForTests()
   jobQueueService.resetForTests()
+  monitoringService.resetForTests()
   User.findById = jest.fn()
   Tenant.findById = jest.fn()
 })
@@ -420,6 +436,46 @@ describe('jobQueueService', () => {
     await jobQueueService.stop({ drain: false })
     const state = jobQueueService.getState()
     expect(state.isRunning).toBe(false)
+  })
+
+  test('handles high-volume governance counter increments without dropping events', async () => {
+    const burstSize = 250
+    await Promise.all(
+      Array.from({ length: burstSize }, () =>
+        Promise.resolve().then(() => {
+          monitoringService.recordInactiveCustomerBlock({ surface: 'auth_login' })
+          monitoringService.recordLimitRejection({
+            limitType: 'MAX_TENANTS',
+            surface: 'tenant_controller',
+          })
+          monitoringService.recordOnboardingTransactionFailure({ failureType: 'internal' })
+        }),
+      ),
+    )
+
+    const metricsText = await monitoringService.getMetrics()
+
+    expect(
+      getLabeledCounterValue(
+        metricsText,
+        `${env.metricsPrefix}governance_inactive_customer_blocks_total`,
+        ['surface="auth_login"'],
+      ),
+    ).toBe(burstSize)
+    expect(
+      getLabeledCounterValue(
+        metricsText,
+        `${env.metricsPrefix}governance_limit_rejections_total`,
+        ['limit_type="max_tenants"', 'surface="tenant_controller"'],
+      ),
+    ).toBe(burstSize)
+    expect(
+      getLabeledCounterValue(
+        metricsText,
+        `${env.metricsPrefix}governance_onboarding_transaction_failures_total`,
+        ['failure_type="internal"'],
+      ),
+    ).toBe(burstSize)
   })
 })
 

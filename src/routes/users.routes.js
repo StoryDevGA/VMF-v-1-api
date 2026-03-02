@@ -19,6 +19,7 @@ import { Router } from 'express'
 import authJwt from '../middleware/authJwt.js'
 import loadScopes from '../middleware/loadScopes.js'
 import { requireCustomerAccess, requirePlatformRole } from '../middleware/authorize.js'
+import requireCustomerActive from '../middleware/customerStatus.js'
 import { userManagementRateLimit } from '../middleware/rateLimits.js'
 import {
   validateCreateUser,
@@ -45,6 +46,7 @@ customerUserRouter.use(
   authJwt,
   loadScopes,
   requireCustomerAccess({ roles: ['CUSTOMER_ADMIN'] }),
+  requireCustomerActive(),
 )
 
 customerUserRouter.get('/', listUsers)

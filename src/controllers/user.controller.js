@@ -16,6 +16,16 @@ import identityPlusService from '../services/identityPlusService.js'
 import auditService from '../services/auditService.js'
 import logger from '../config/logger.js'
 import performanceCacheService from '../services/performanceCacheService.js'
+import customerGovernanceService from '../services/customerGovernanceService.js'
+
+const buildGovernanceErrorResponse = (req, err) => ({
+  error: {
+    code: err.code || (err.status === 409 ? 'CONFLICT' : 'VALIDATION_FAILED'),
+    message: err.message,
+    ...(err.details ? { details: err.details } : {}),
+    requestId: req.requestId,
+  },
+})
 
 /* ------------------------------------------------------------------ */
 /*  GET /api/v1/customers/:customerId/users                           */
@@ -147,7 +157,21 @@ export const createUser = async (req, res, next) => {
       })),
     })
 
-    await user.save()
+    const requestsCustomerAdminRole = Array.isArray(roles) &&
+      roles.includes(customerGovernanceService.CUSTOMER_ADMIN_ROLE)
+
+    let canonicalAdminUserId = null
+    if (requestsCustomerAdminRole) {
+      const assignment = await customerGovernanceService.applyCustomerAdminAssignment({
+        customer,
+        user,
+      })
+      canonicalAdminUserId = assignment.canonicalAdminUserId
+      await performanceCacheService.invalidateCustomerTopology(customer._id)
+    } else {
+      await user.save()
+    }
+
     await performanceCacheService.invalidateUserPermissions(user._id)
 
     // 5. Send Identity Plus invitation
@@ -180,8 +204,28 @@ export const createUser = async (req, res, next) => {
       resourceType: 'User',
       resourceId: user._id,
       scope: { customerId },
-      diff: { name, email, roles, tenantVisibility },
+      diff: {
+        name,
+        email,
+        roles,
+        tenantVisibility,
+        ...(canonicalAdminUserId ? { canonicalAdminUserId } : {}),
+      },
     })
+
+    if (canonicalAdminUserId) {
+      await auditService.logFromRequest(req, {
+        action: 'CUSTOMER_ADMIN_CANONICAL_SET',
+        resourceType: 'Customer',
+        resourceId: customerId,
+        scope: { customerId },
+        diff: {
+          from: null,
+          to: canonicalAdminUserId,
+          source: 'create_user',
+        },
+      })
+    }
 
     if (invitationResult) {
       await auditService.logFromRequest(req, {
@@ -198,6 +242,23 @@ export const createUser = async (req, res, next) => {
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
+    if (customerGovernanceService.isGovernanceError(err)) {
+      await auditService.logFromRequest(req, {
+        action: 'CUSTOMER_ADMIN_MUTATION_BLOCKED',
+        resourceType: 'Customer',
+        resourceId: req.params.customerId,
+        scope: { customerId: req.params.customerId },
+        diff: {
+          endpoint: 'create_user',
+          reason: err.message,
+          details: err.details || null,
+          requestedRoles: req.body?.roles || [],
+        },
+      })
+      return res
+        .status(err.status || 422)
+        .json(buildGovernanceErrorResponse(req, err))
+    }
     if (err.name === 'ValidationError') {
       return res.status(422).json({
         error: {
@@ -286,6 +347,8 @@ export const updateUser = async (req, res, next) => {
     }
 
     const diff = {}
+    let customerForRoleUpdate = null
+    let customerGovernanceChanged = false
 
     // Update name
     if (name !== undefined) {
@@ -298,8 +361,51 @@ export const updateUser = async (req, res, next) => {
       // Find the first non-platform membership to update roles on
       const membership = user.memberships.find((m) => m.customerId !== null)
       if (membership) {
+        customerForRoleUpdate = await Customer.findById(membership.customerId)
+        if (!customerForRoleUpdate) {
+          return res.status(422).json({
+            error: {
+              code: 'VALIDATION_FAILED',
+              message: 'User has an invalid customer membership reference.',
+              requestId: req.requestId,
+            },
+          })
+        }
+
+        const governanceDecision = customerGovernanceService.validateUserRoleUpdate({
+          customer: customerForRoleUpdate,
+          user,
+          nextRoles: roles,
+        })
+
         diff.roles = { from: [...membership.roles], to: roles }
         membership.roles = roles
+
+        if (governanceDecision.shouldSetCanonicalAdminUserId) {
+          const previousCanonicalAdminUserId = customerForRoleUpdate.governance?.customerAdminUserId || null
+          customerForRoleUpdate.governance = {
+            ...(customerForRoleUpdate.governance || {}),
+            customerAdminUserId: user._id,
+          }
+          customerGovernanceChanged = true
+          diff.customerAdminUserId = {
+            from: previousCanonicalAdminUserId,
+            to: user._id,
+          }
+        }
+
+        if (governanceDecision.shouldClearCanonicalAdminUserId) {
+          const previousCanonicalAdminUserId = customerForRoleUpdate.governance?.customerAdminUserId || null
+          customerForRoleUpdate.governance = {
+            ...(customerForRoleUpdate.governance || {}),
+            customerAdminUserId: null,
+          }
+          customerGovernanceChanged = true
+          diff.customerAdminUserId = {
+            from: previousCanonicalAdminUserId,
+            to: null,
+          }
+        }
       }
     }
 
@@ -352,6 +458,10 @@ export const updateUser = async (req, res, next) => {
 
     await user.save()
     await performanceCacheService.invalidateUserPermissions(user._id)
+    if (customerGovernanceChanged && customerForRoleUpdate) {
+      await customerForRoleUpdate.save()
+      await performanceCacheService.invalidateCustomerTopology(customerForRoleUpdate._id)
+    }
 
     // Audit log
     await auditService.logFromRequest(req, {
@@ -364,11 +474,41 @@ export const updateUser = async (req, res, next) => {
       diff,
     })
 
+    if (diff.customerAdminUserId && customerForRoleUpdate) {
+      await auditService.logFromRequest(req, {
+        action: 'CUSTOMER_ADMIN_CANONICAL_SET',
+        resourceType: 'Customer',
+        resourceId: customerForRoleUpdate._id,
+        scope: { customerId: customerForRoleUpdate._id },
+        diff: {
+          ...diff.customerAdminUserId,
+          source: 'update_user_roles',
+        },
+      })
+    }
+
     return res.status(200).json({
       data: user.toJSON(),
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
+    if (customerGovernanceService.isGovernanceError(err)) {
+      await auditService.logFromRequest(req, {
+        action: 'CUSTOMER_ADMIN_MUTATION_BLOCKED',
+        resourceType: 'User',
+        resourceId: req.params.userId,
+        scope: {},
+        diff: {
+          endpoint: 'update_user',
+          reason: err.message,
+          details: err.details || null,
+          requestedRoles: req.body?.roles || null,
+        },
+      })
+      return res
+        .status(err.status || 422)
+        .json(buildGovernanceErrorResponse(req, err))
+    }
     if (err.name === 'ValidationError') {
       return res.status(422).json({
         error: {
@@ -419,6 +559,11 @@ export const disableUser = async (req, res, next) => {
       })
     }
 
+    await customerGovernanceService.assertUserCanBeDisabledOrDeleted({
+      user,
+      operation: 'disable',
+    })
+
     // 1. Disable user + revoke trust
     user.isActive = false
     user.identityPlus.trustStatus = 'REVOKED'
@@ -457,6 +602,22 @@ export const disableUser = async (req, res, next) => {
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
+    if (customerGovernanceService.isGovernanceError(err)) {
+      await auditService.logFromRequest(req, {
+        action: 'CUSTOMER_ADMIN_MUTATION_BLOCKED',
+        resourceType: 'User',
+        resourceId: req.params.userId,
+        scope: {},
+        diff: {
+          endpoint: 'disable_user',
+          reason: err.message,
+          details: err.details || null,
+        },
+      })
+      return res
+        .status(err.status || 422)
+        .json(buildGovernanceErrorResponse(req, err))
+    }
     next(err)
   }
 }
@@ -494,6 +655,11 @@ export const deleteUser = async (req, res, next) => {
         },
       })
     }
+
+    await customerGovernanceService.assertUserCanBeDisabledOrDeleted({
+      user,
+      operation: 'delete',
+    })
 
     // Capture info before deletion for audit
     const userSnapshot = {
@@ -534,6 +700,22 @@ export const deleteUser = async (req, res, next) => {
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
+    if (customerGovernanceService.isGovernanceError(err)) {
+      await auditService.logFromRequest(req, {
+        action: 'CUSTOMER_ADMIN_MUTATION_BLOCKED',
+        resourceType: 'User',
+        resourceId: req.params.userId,
+        scope: {},
+        diff: {
+          endpoint: 'delete_user',
+          reason: err.message,
+          details: err.details || null,
+        },
+      })
+      return res
+        .status(err.status || 422)
+        .json(buildGovernanceErrorResponse(req, err))
+    }
     next(err)
   }
 }

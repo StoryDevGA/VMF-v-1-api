@@ -19,6 +19,7 @@ import { Router } from 'express'
 import authJwt from '../middleware/authJwt.js'
 import loadScopes from '../middleware/loadScopes.js'
 import { requireTenantAccess, requireVmfAccess } from '../middleware/authorize.js'
+import requireCustomerActive from '../middleware/customerStatus.js'
 import topologyGuard from '../middleware/topologyGuard.js'
 import requireTenantEnabled from '../middleware/tenantStatus.js'
 import { tenantManagementRateLimit } from '../middleware/rateLimits.js'
@@ -48,6 +49,7 @@ tenantVmfRouter.use(
   authJwt,
   loadScopes,
   requireTenantAccess({ roles: ['TENANT_ADMIN'], allowCustomerAdmin: true }),
+  requireCustomerActive(),
   requireTenantEnabled,
   topologyGuard,
 )
@@ -65,8 +67,8 @@ export const vmfRouter = Router()
 vmfRouter.use(authJwt, loadScopes)
 
 // All VMF-scoped routes need requireVmfAccess (loads VMF, checks hierarchy)
-vmfRouter.get('/:vmfId', requireVmfAccess('READ'), getVmf)
-vmfRouter.patch('/:vmfId', requireVmfAccess('WRITE'), tenantManagementRateLimit, validateUpdateVmf, updateVmf)
-vmfRouter.delete('/:vmfId', requireVmfAccess('WRITE'), tenantManagementRateLimit, deleteVmf)
-vmfRouter.post('/:vmfId/grants', requireVmfAccess('WRITE'), tenantManagementRateLimit, validateGrantAccess, grantAccess)
-vmfRouter.delete('/:vmfId/grants/:userId', requireVmfAccess('WRITE'), tenantManagementRateLimit, revokeAccess)
+vmfRouter.get('/:vmfId', requireVmfAccess('READ'), requireCustomerActive(), getVmf)
+vmfRouter.patch('/:vmfId', requireVmfAccess('WRITE'), requireCustomerActive(), tenantManagementRateLimit, validateUpdateVmf, updateVmf)
+vmfRouter.delete('/:vmfId', requireVmfAccess('WRITE'), requireCustomerActive(), tenantManagementRateLimit, deleteVmf)
+vmfRouter.post('/:vmfId/grants', requireVmfAccess('WRITE'), requireCustomerActive(), tenantManagementRateLimit, validateGrantAccess, grantAccess)
+vmfRouter.delete('/:vmfId/grants/:userId', requireVmfAccess('WRITE'), requireCustomerActive(), tenantManagementRateLimit, revokeAccess)

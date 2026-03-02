@@ -43,6 +43,8 @@ beforeAll(() => {
     'test-jwt-refresh-secret-for-unit-tests-should-be-long-and-complex-in-production'
   process.env.MONGODB_URI = 'mongodb://localhost:27017/vmf_test'
   process.env.REDIS_URL = 'redis://localhost:6379'
+  process.env.TENANT_RATE_LIMIT = '10000'
+  process.env.USER_MGMT_RATE_LIMIT = '10000'
 })
 
 /* ------------------------------------------------------------------ */
@@ -55,6 +57,7 @@ const CUSTOMER_ID = '607f1f77bcf86cd799439022'
 const TENANT_ID = '707f1f77bcf86cd799439033'
 const TENANT_ID_2 = '707f1f77bcf86cd799439044'
 const VMF_ID = '807f1f77bcf86cd799439055'
+const LICENSE_LEVEL_ID = '907f1f77bcf86cd799439066'
 
 /* ------------------------------------------------------------------ */
 /*  Factories                                                         */
@@ -94,6 +97,12 @@ const makeFakeCustomer = (overrides = {}) => ({
   vmfPolicy: 'PER_TENANT_MULTI',
   defaultTenantId: null,
   isServiceProvider: false,
+  licenseLevelId: null,
+  governance: {
+    maxTenants: 1,
+    maxVmfsPerTenant: 1,
+    customerAdminUserId: null,
+  },
   status: 'ACTIVE',
   entitlements: [],
   billing: { planCode: 'PRO', cycle: 'MONTHLY' },
@@ -110,6 +119,8 @@ const makeFakeCustomer = (overrides = {}) => ({
       vmfPolicy: this.vmfPolicy,
       defaultTenantId: this.defaultTenantId,
       isServiceProvider: this.isServiceProvider,
+      licenseLevelId: this.licenseLevelId,
+      governance: this.governance,
       status: this.status,
       entitlements: this.entitlements,
       billing: this.billing,
@@ -151,7 +162,7 @@ const makeFakeTenant = (overrides = {}) => ({
 /* ------------------------------------------------------------------ */
 
 let app, request, tokenService
-let User, Customer, Tenant, VMF, AuditLog
+let User, Customer, Tenant, VMF, AuditLog, LicenseLevel
 
 beforeAll(async () => {
   const supertest = (await import('supertest')).default
@@ -165,6 +176,7 @@ beforeAll(async () => {
   Tenant = models.Tenant
   VMF = models.VMF
   AuditLog = models.AuditLog
+  LicenseLevel = models.LicenseLevel
 })
 
 /* ------------------------------------------------------------------ */
@@ -193,12 +205,19 @@ const getNonAdminToken = async () => {
   return tokens.accessToken
 }
 
+const mockLicenseLevelLookup = (value) => {
+  const select = jest.fn().mockResolvedValue(value)
+  LicenseLevel.findById.mockReturnValue({ select })
+  return select
+}
+
 /* ------------------------------------------------------------------ */
 /*  Reset stubs before each test                                      */
 /* ------------------------------------------------------------------ */
 
 beforeEach(() => {
   User.findById = jest.fn()
+  User.findOne = jest.fn()
   User.findByEmail = jest.fn()
   Customer.findById = jest.fn()
   Customer.findOne = jest.fn()
@@ -209,8 +228,14 @@ beforeEach(() => {
   Tenant.countDocuments = jest.fn()
   VMF.findById = jest.fn()
   VMF.countByTenant = jest.fn()
+  LicenseLevel.findById = jest.fn()
   AuditLog.createLog = jest.fn(async () => ({}))
 
+  Tenant.updateMany = jest.fn().mockResolvedValue({ modifiedCount: 0 })
+  User.updateMany = jest.fn().mockResolvedValue({ modifiedCount: 0 })
+  User.find = jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue([]) })
+
+  User.findOne.mockResolvedValue(null)
   Customer.findOne.mockResolvedValue(null)
 
   // Default: loadScopes finds a SUPER_ADMIN user
@@ -318,6 +343,24 @@ describe('Customer Validators', () => {
       expect(res.status).toBe(422)
       expect(res.body.error.code).toBe('VALIDATION_FAILED')
     })
+
+    test('returns 422 when governance.maxTenants is less than 1', async () => {
+      const token = await getSuperAdminToken()
+      const res = await request
+        .post('/api/v1/customers')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          name: 'Governance Corp',
+          topology: 'MULTI_TENANT',
+          vmfPolicy: 'PER_TENANT_MULTI',
+          billing: { planCode: 'FREE' },
+          governance: { maxTenants: 0, maxVmfsPerTenant: 1 },
+        })
+
+      expect(res.status).toBe(422)
+      expect(res.body.error.code).toBe('VALIDATION_FAILED')
+      expect(res.body.error.details['governance.maxTenants']).toBeDefined()
+    })
   })
 
   describe('PATCH /api/v1/customers/:customerId — validation', () => {
@@ -344,6 +387,20 @@ describe('Customer Validators', () => {
       expect(res.status).toBe(422)
       expect(res.body.error.code).toBe('VALIDATION_FAILED')
       expect(res.body.error.details).toHaveProperty('status')
+    })
+
+    test('accepts INACTIVE as a valid status payload', async () => {
+      const token = await getSuperAdminToken()
+      const customer = makeFakeCustomer({ status: 'ACTIVE' })
+      Customer.findById.mockResolvedValue(customer)
+
+      const res = await request
+        .patch(`/api/v1/customers/${CUSTOMER_ID}/status`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ status: 'INACTIVE' })
+
+      expect(res.status).toBe(200)
+      expect(customer.status).toBe('DISABLED')
     })
   })
 
@@ -669,6 +726,72 @@ describe('POST /api/v1/customers', () => {
     Tenant.prototype.save = origTenantSave
     VMF.prototype.save = origVmfSave
   })
+
+  test('returns 422 when licenseLevelId does not exist', async () => {
+    const token = await getSuperAdminToken()
+    mockLicenseLevelLookup(null)
+
+    const res = await request
+      .post('/api/v1/customers')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        name: 'Acme Corp',
+        topology: 'MULTI_TENANT',
+        vmfPolicy: 'PER_TENANT_MULTI',
+        billing: { planCode: 'PRO', cycle: 'MONTHLY' },
+        licenseLevelId: LICENSE_LEVEL_ID,
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.message).toContain('licenseLevelId')
+  })
+
+  test('creates customer with governance and licenseLevelId', async () => {
+    const token = await getSuperAdminToken()
+    mockLicenseLevelLookup({ _id: LICENSE_LEVEL_ID })
+
+    const savedCustomer = makeFakeCustomer({
+      licenseLevelId: LICENSE_LEVEL_ID,
+      governance: {
+        maxTenants: 5,
+        maxVmfsPerTenant: 3,
+        customerAdminUserId: USER_ID_2,
+      },
+    })
+    const origPrototypeSave = Customer.prototype.save
+    Customer.prototype.save = jest.fn(async function () {
+      Object.assign(this, savedCustomer)
+      this.toJSON = savedCustomer.toJSON.bind(savedCustomer)
+      return this
+    })
+
+    const res = await request
+      .post('/api/v1/customers')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        name: 'Governed Corp',
+        topology: 'MULTI_TENANT',
+        vmfPolicy: 'PER_TENANT_MULTI',
+        billing: { planCode: 'PRO', cycle: 'MONTHLY' },
+        licenseLevelId: LICENSE_LEVEL_ID,
+        governance: {
+          maxTenants: 5,
+          maxVmfsPerTenant: 3,
+          customerAdminUserId: USER_ID_2,
+        },
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data.customer.licenseLevelId).toBe(LICENSE_LEVEL_ID)
+    expect(res.body.data.customer.governance).toEqual({
+      maxTenants: 5,
+      maxVmfsPerTenant: 3,
+      customerAdminUserId: USER_ID_2,
+    })
+
+    Customer.prototype.save = origPrototypeSave
+  })
 })
 
 describe('GET /api/v1/customers/:customerId', () => {
@@ -767,6 +890,94 @@ describe('PATCH /api/v1/customers/:customerId', () => {
       }),
     )
   })
+
+  test('updates governance and licenseLevelId', async () => {
+    const token = await getSuperAdminToken()
+    const customer = makeFakeCustomer()
+    Customer.findById.mockResolvedValue(customer)
+    mockLicenseLevelLookup({ _id: LICENSE_LEVEL_ID })
+
+    const res = await request
+      .patch(`/api/v1/customers/${CUSTOMER_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        licenseLevelId: LICENSE_LEVEL_ID,
+        governance: {
+          maxTenants: 7,
+          maxVmfsPerTenant: 4,
+        },
+      })
+
+    expect(res.status).toBe(200)
+    expect(customer.licenseLevelId).toBe(LICENSE_LEVEL_ID)
+    expect(customer.governance).toEqual({
+      maxTenants: 7,
+      maxVmfsPerTenant: 4,
+      customerAdminUserId: null,
+    })
+    expect(customer.save).toHaveBeenCalled()
+  })
+
+  test('returns 422 when patching governance.customerAdminUserId directly', async () => {
+    const token = await getSuperAdminToken()
+    const customer = makeFakeCustomer()
+    Customer.findById.mockResolvedValue(customer)
+
+    const res = await request
+      .patch(`/api/v1/customers/${CUSTOMER_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        governance: {
+          customerAdminUserId: USER_ID_2,
+        },
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+  })
+
+  test('partially updates governance while preserving unspecified fields', async () => {
+    const token = await getSuperAdminToken()
+    const customer = makeFakeCustomer({
+      governance: {
+        maxTenants: 5,
+        maxVmfsPerTenant: 3,
+        customerAdminUserId: USER_ID,
+      },
+    })
+    Customer.findById.mockResolvedValue(customer)
+
+    const res = await request
+      .patch(`/api/v1/customers/${CUSTOMER_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        governance: {
+          maxTenants: 8,
+        },
+      })
+
+    expect(res.status).toBe(200)
+    expect(customer.governance).toEqual({
+      maxTenants: 8,
+      maxVmfsPerTenant: 3,
+      customerAdminUserId: USER_ID,
+    })
+  })
+
+  test('returns 422 when updating licenseLevelId to a non-existent record', async () => {
+    const token = await getSuperAdminToken()
+    const customer = makeFakeCustomer()
+    Customer.findById.mockResolvedValue(customer)
+    mockLicenseLevelLookup(null)
+
+    const res = await request
+      .patch(`/api/v1/customers/${CUSTOMER_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ licenseLevelId: LICENSE_LEVEL_ID })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+  })
 })
 
 describe('PATCH /api/v1/customers/:customerId/status', () => {
@@ -796,6 +1007,20 @@ describe('PATCH /api/v1/customers/:customerId/status', () => {
     expect(customer.status).toBe('DISABLED')
     expect(customer.save).toHaveBeenCalled()
     expect(AuditLog.createLog).toHaveBeenCalled()
+  })
+
+  test('maps INACTIVE to DISABLED', async () => {
+    const token = await getSuperAdminToken()
+    const customer = makeFakeCustomer()
+    Customer.findById.mockResolvedValue(customer)
+
+    const res = await request
+      .patch(`/api/v1/customers/${CUSTOMER_ID}/status`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ status: 'INACTIVE' })
+
+    expect(res.status).toBe(200)
+    expect(customer.status).toBe('DISABLED')
   })
 
   test('updates customer status to ARCHIVED', async () => {
@@ -864,6 +1089,40 @@ describe('POST /api/v1/customers/:customerId/admins', () => {
 
     expect(res.status).toBe(422)
     expect(res.body.error.code).toBe('VALIDATION_FAILED')
+  })
+
+  test('returns 409 when another canonical admin already exists', async () => {
+    const token = await getSuperAdminToken()
+    Customer.findById.mockResolvedValue(
+      makeFakeCustomer({
+        governance: {
+          maxTenants: 1,
+          maxVmfsPerTenant: 1,
+          customerAdminUserId: USER_ID,
+        },
+      }),
+    )
+
+    const targetUser = makeFakeUser({
+      _id: USER_ID_2,
+      id: USER_ID_2,
+      memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+    })
+
+    User.findById.mockImplementation((id) => {
+      if (id === USER_ID) return Promise.resolve(makeFakeUser())
+      if (id === USER_ID_2) return Promise.resolve(targetUser)
+      return Promise.resolve(null)
+    })
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/admins`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ userId: USER_ID_2 })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.message).toContain('replace')
   })
 
   test('assigns CUSTOMER_ADMIN to user with no existing membership', async () => {
@@ -971,6 +1230,7 @@ describe('POST /api/v1/customers/:customerId/tenants', () => {
   test('creates tenant for multi-tenant customer', async () => {
     const token = await getSuperAdminToken()
     Customer.findById.mockResolvedValue(makeFakeCustomer())
+    Tenant.countDocuments.mockResolvedValue(0)
 
     const savedTenant = makeFakeTenant({ name: 'New Tenant' })
     const savedVmf = {
@@ -1014,6 +1274,74 @@ describe('POST /api/v1/customers/:customerId/tenants', () => {
 
     Tenant.prototype.save = origTenantSave
     VMF.prototype.save = origVmfSave
+  })
+
+  test('returns 409 when governance.maxTenants limit is reached (boundary plus one)', async () => {
+    const token = await getSuperAdminToken()
+    Customer.findById.mockResolvedValue(
+      makeFakeCustomer({
+        governance: {
+          maxTenants: 1,
+          maxVmfsPerTenant: 5,
+          customerAdminUserId: null,
+        },
+      }),
+    )
+    Tenant.countDocuments.mockResolvedValue(1)
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/tenants`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        name: 'Second Tenant',
+        website: 'https://second.example',
+        tenantAdminUserIds: [USER_ID],
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.message).toContain('Tenant limit reached')
+    expect(res.body.error.details.limitType).toBe('MAX_TENANTS')
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'TENANT_LIMIT_REJECTED',
+    }))
+  })
+
+  test('applies updated tenant limit immediately after customer governance update', async () => {
+    const token = await getSuperAdminToken()
+    const customer = makeFakeCustomer({
+      governance: {
+        maxTenants: 2,
+        maxVmfsPerTenant: 2,
+        customerAdminUserId: null,
+      },
+    })
+
+    Customer.findById.mockImplementation(async () => customer)
+    Tenant.countDocuments.mockResolvedValue(1)
+
+    const updateRes = await request
+      .patch(`/api/v1/customers/${CUSTOMER_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        governance: { maxTenants: 1 },
+      })
+
+    expect(updateRes.status).toBe(200)
+    expect(updateRes.body.data.governance.maxTenants).toBe(1)
+
+    const createRes = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/tenants`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        name: 'Blocked Tenant',
+        website: 'https://blocked.example',
+        tenantAdminUserIds: [USER_ID],
+      })
+
+    expect(createRes.status).toBe(409)
+    expect(createRes.body.error.code).toBe('CONFLICT')
+    expect(createRes.body.error.details.limit).toBe(1)
   })
 })
 

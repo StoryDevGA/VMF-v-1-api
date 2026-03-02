@@ -17,8 +17,19 @@
 
 import { Customer, Tenant, VMF, Deal, User } from '../models/index.js'
 import auditService from '../services/auditService.js'
+import customerGovernanceService from '../services/customerGovernanceService.js'
 import logger from '../config/logger.js'
 import performanceCacheService from '../services/performanceCacheService.js'
+import monitoringService from '../services/monitoringService.js'
+
+const buildGovernanceErrorResponse = (req, err) => ({
+  error: {
+    code: err.code || 'CONFLICT',
+    message: err.message,
+    ...(err.details ? { details: err.details } : {}),
+    requestId: req.requestId,
+  },
+})
 
 /* ------------------------------------------------------------------ */
 /*  GET /api/v1/customers/:customerId/tenants/:tenantId/vmfs          */
@@ -107,6 +118,24 @@ export const createVmf = async (req, res, next) => {
       })
     }
 
+    const customer = req.scopes?.customer || await Customer.findById(customerId)
+    if (!customer) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: 'Customer not found.',
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    const currentVmfCount = await VMF.countByTenant(tenantId, 'ACTIVE')
+    customerGovernanceService.assertVmfCreationWithinLimit({
+      customer,
+      tenantId,
+      currentVmfCount,
+    })
+
     const vmf = new VMF({
       customerId,
       tenantId,
@@ -135,6 +164,29 @@ export const createVmf = async (req, res, next) => {
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
+    if (customerGovernanceService.isGovernanceError(err)) {
+      monitoringService.recordLimitRejection({
+        limitType: err?.details?.limitType || 'unknown',
+        surface: 'vmf_controller',
+      })
+
+      await auditService.logFromRequest(req, {
+        action: auditService.AUDIT_ACTIONS.VMF_LIMIT_REJECTED,
+        resourceType: 'Tenant',
+        resourceId: req.params.tenantId,
+        scope: { customerId: req.params.customerId, tenantId: req.params.tenantId },
+        diff: {
+          endpoint: 'create_vmf',
+          reason: err.message,
+          details: err.details || null,
+        },
+      })
+
+      return res
+        .status(err.status || 409)
+        .json(buildGovernanceErrorResponse(req, err))
+    }
+
     // Mongoose pre-save hook policy violations
     if (err.message?.includes('policy allows only')) {
       return res.status(409).json({

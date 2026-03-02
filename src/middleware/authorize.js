@@ -31,6 +31,7 @@ import { Customer, Tenant, VMF } from '../models/index.js'
 import env from '../config/env.js'
 import logger from '../config/logger.js'
 import auditService from '../services/auditService.js'
+import monitoringService from '../services/monitoringService.js'
 import performanceCacheService, {
   buildCustomerTopologySnapshot,
   buildTenantStatusSnapshot,
@@ -59,6 +60,25 @@ const forbidden = (res, req, detail) =>
       requestId: req.requestId,
     },
   })
+
+const customerInactive = (res, req, customerStatus, surface = 'authorize') => {
+  monitoringService.recordInactiveCustomerBlock({ surface })
+  return (
+  res.status(403).json({
+    error: {
+      code: 'CUSTOMER_INACTIVE',
+      message: 'This customer is inactive. Contact your administrator.',
+      details: { customerStatus },
+      requestId: req.requestId,
+    },
+  })
+  )
+}
+
+const isCustomerInactive = (customer) =>
+  env.governanceInactiveEnforcementEnabled &&
+  customer?.status &&
+  customer.status !== 'ACTIVE'
 
 /**
  * Verify that req.scopes has been populated.
@@ -167,7 +187,11 @@ export const requirePlatformRole = (role) => (req, res, next) => {
 export const requireCustomerAccess = (options = {}) => async (req, res, next) => {
   if (!ensureScopes(req, res)) return
 
-  const { roles = [], allowPlatform = true } = options
+  const {
+    roles = [],
+    allowPlatform = true,
+    allowInactiveCustomer = false,
+  } = options
   const { memberships, platformRoles } = req.scopes
   const customerId = req.params.customerId
 
@@ -189,6 +213,20 @@ export const requireCustomerAccess = (options = {}) => async (req, res, next) =>
       })
     }
     req.scopes.customer = customer
+
+    if (isCustomerInactive(customer) && !allowInactiveCustomer) {
+      logger.warn(
+        {
+          userId: req.userId,
+          customerId,
+          customerStatus: customer.status,
+          requestId: req.requestId,
+        },
+        'requireCustomerAccess - customer inactive',
+      )
+      return customerInactive(res, req, customer.status, 'require_customer_access')
+    }
+
     return next()
   }
 
@@ -228,6 +266,19 @@ export const requireCustomerAccess = (options = {}) => async (req, res, next) =>
   }
   req.scopes.customer = customer
 
+  if (isCustomerInactive(customer) && !allowInactiveCustomer) {
+    logger.warn(
+      {
+        userId: req.userId,
+        customerId,
+        customerStatus: customer.status,
+        requestId: req.requestId,
+      },
+      'requireCustomerAccess - customer inactive',
+    )
+    return customerInactive(res, req, customer.status, 'require_customer_access')
+  }
+
   next()
 }
 
@@ -246,7 +297,12 @@ export const requireCustomerAccess = (options = {}) => async (req, res, next) =>
 export const requireTenantAccess = (options = {}) => async (req, res, next) => {
   if (!ensureScopes(req, res)) return
 
-  const { roles = [], allowPlatform = true, allowCustomerAdmin = true } = options
+  const {
+    roles = [],
+    allowPlatform = true,
+    allowCustomerAdmin = true,
+    allowInactiveCustomer = false,
+  } = options
   const { memberships, tenantMemberships, platformRoles } = req.scopes
   const customerId = req.params.customerId
   const tenantId = req.params.tenantId
@@ -267,6 +323,20 @@ export const requireTenantAccess = (options = {}) => async (req, res, next) => {
     })
   }
   req.scopes.customer = customer
+
+  if (isCustomerInactive(customer) && !allowInactiveCustomer) {
+    logger.warn(
+      {
+        userId: req.userId,
+        customerId,
+        tenantId,
+        customerStatus: customer.status,
+        requestId: req.requestId,
+      },
+      'requireTenantAccess - customer inactive',
+    )
+    return customerInactive(res, req, customer.status, 'require_tenant_access')
+  }
 
   // Load tenant and validate it belongs to the customer
   const tenant = await loadTenantContext(tenantId)
@@ -342,6 +412,7 @@ export const requireVmfAccess = (permission, options = {}) => async (req, res, n
     allowPlatform = true,
     allowCustomerAdmin = true,
     allowTenantAdmin = true,
+    allowInactiveCustomer = false,
   } = options
   const { memberships, tenantMemberships, vmfGrants, platformRoles } = req.scopes
   const customerId = req.params.customerId
@@ -379,6 +450,33 @@ export const requireVmfAccess = (permission, options = {}) => async (req, res, n
   }
 
   req.scopes.vmf = vmf
+
+  const customer = await loadCustomerContext(effectiveCustomerId)
+  if (!customer) {
+    return res.status(404).json({
+      error: {
+        code: 'NOT_FOUND',
+        message: 'Customer not found.',
+        requestId: req.requestId,
+      },
+    })
+  }
+  req.scopes.customer = customer
+
+  if (isCustomerInactive(customer) && !allowInactiveCustomer) {
+    logger.warn(
+      {
+        userId: req.userId,
+        customerId: effectiveCustomerId,
+        tenantId: effectiveTenantId,
+        vmfId,
+        customerStatus: customer.status,
+        requestId: req.requestId,
+      },
+      'requireVmfAccess - customer inactive',
+    )
+    return customerInactive(res, req, customer.status, 'require_vmf_access')
+  }
 
   // Super Admin bypass
   if (allowPlatform && platformRoles.includes('SUPER_ADMIN')) {

@@ -95,3 +95,34 @@ Tracking status against `VMF-v-1-api/docs/STORYLINEOS_BACKEND_BUILD_GUIDE.md`.
 - [ ] Strict query scoping (`customerId + tenantId`)
 - [ ] `X-Request-Id` and audit more actions
 - [ ] Test harness (Jest + supertest or Vitest + supertest)
+
+## Governance Rollout and Hardening (PR1-PR8)
+
+### Release Readiness Gates
+- [ ] `npm run test -- src/__tests__/licenseLevels.test.js src/__tests__/customerTenant.test.js src/__tests__/customerGovernanceService.test.js src/__tests__/onboarding.test.js src/__tests__/authorization.test.js src/__tests__/auth.routes.test.js src/__tests__/healthMonitoring.test.js src/__tests__/performanceOptimization.test.js`
+- [ ] `npm run governance:report-admin-invariants -- --json` reviewed and remediation plan approved.
+- [ ] `npm run governance:backfill -- --json` dry-run output archived.
+- [ ] `npm run governance:backfill -- --apply` executed in staging and validated.
+- [ ] Governance flags staged in rollout order (inactive enforcement, strict admin invariant, external onboarding).
+
+### Operational Metrics to Validate
+- [ ] `${METRICS_PREFIX}governance_inactive_customer_blocks_total`
+- [ ] `${METRICS_PREFIX}governance_limit_rejections_total`
+- [ ] `${METRICS_PREFIX}governance_onboarding_transaction_failures_total`
+- [ ] Alert thresholds reviewed on `/health/detailed` and `/health/alerts`.
+
+### Production Rollout Sequence
+1. Deploy with governance flags enabled only for non-disruptive paths.
+2. Run invariant report and resolve active-customer admin violations.
+3. Run backfill apply; verify no unresolved violations remain.
+4. Enable `GOVERNANCE_INACTIVE_ENFORCEMENT_ENABLED`.
+5. Enable `GOVERNANCE_STRICT_ADMIN_INVARIANT_ENABLED`.
+6. Enable `GOVERNANCE_EXTERNAL_ONBOARDING_ENABLED`.
+7. Monitor governance counters and audit stream for 24 hours.
+
+### Rollback Sequence
+1. Set `GOVERNANCE_EXTERNAL_ONBOARDING_ENABLED=false`.
+2. Set `GOVERNANCE_STRICT_ADMIN_INVARIANT_ENABLED=false`.
+3. Set `GOVERNANCE_INACTIVE_ENFORCEMENT_ENABLED=false` only if access-impact incident persists.
+4. Re-run `npm run governance:report-admin-invariants -- --json` and document remediation actions.
+5. Re-enable flags progressively after root-cause fix and staging verification.

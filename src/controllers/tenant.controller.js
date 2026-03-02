@@ -12,10 +12,21 @@
 import { Customer, Tenant } from '../models/index.js'
 import { createTenantWithDefaults } from '../services/provisioningService.js'
 import auditService from '../services/auditService.js'
+import customerGovernanceService from '../services/customerGovernanceService.js'
 import logger from '../config/logger.js'
+import monitoringService from '../services/monitoringService.js'
 import performanceCacheService, {
   buildTenantStatusSnapshot,
 } from '../services/performanceCacheService.js'
+
+const buildGovernanceErrorResponse = (req, err) => ({
+  error: {
+    code: err.code || 'CONFLICT',
+    message: err.message,
+    ...(err.details ? { details: err.details } : {}),
+    requestId: req.requestId,
+  },
+})
 
 /* ------------------------------------------------------------------ */
 /*  GET /api/v1/customers/:customerId/tenants                         */
@@ -105,6 +116,16 @@ export const createTenant = async (req, res, next) => {
       })
     }
 
+    const currentTenantCount = await Tenant.countDocuments({
+      customerId: customer._id,
+      status: { $ne: 'ARCHIVED' },
+    })
+
+    customerGovernanceService.assertTenantCreationWithinLimit({
+      customer,
+      currentTenantCount,
+    })
+
     const actorUserId = req.context?.userId || req.userId
     const result = await createTenantWithDefaults(req.body, customer, actorUserId, req)
     await performanceCacheService.setTenantStatus(
@@ -122,6 +143,29 @@ export const createTenant = async (req, res, next) => {
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
+    if (customerGovernanceService.isGovernanceError(err)) {
+      monitoringService.recordLimitRejection({
+        limitType: err?.details?.limitType || 'unknown',
+        surface: 'tenant_controller',
+      })
+
+      await auditService.logFromRequest(req, {
+        action: auditService.AUDIT_ACTIONS.TENANT_LIMIT_REJECTED,
+        resourceType: 'Customer',
+        resourceId: req.params.customerId,
+        scope: { customerId: req.params.customerId },
+        diff: {
+          endpoint: 'create_tenant',
+          reason: err.message,
+          details: err.details || null,
+        },
+      })
+
+      return res
+        .status(err.status || 409)
+        .json(buildGovernanceErrorResponse(req, err))
+    }
+
     if (err.name === 'ValidationError') {
       return res.status(422).json({
         error: {

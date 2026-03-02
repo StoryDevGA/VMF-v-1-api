@@ -11,10 +11,12 @@
  */
 
 import crypto from 'crypto'
-import { User } from '../models/index.js'
+import { Customer, User } from '../models/index.js'
 import tokenService from '../services/tokenService.js'
 import { getRedis } from '../config/redis.js'
+import env from '../config/env.js'
 import logger from '../config/logger.js'
+import monitoringService from '../services/monitoringService.js'
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                           */
@@ -87,6 +89,49 @@ const performLogin = async (req, res, { requiredRole } = {}) => {
           requestId: req.requestId,
         },
       })
+    }
+  }
+
+  if (!requiredRole && env.governanceInactiveEnforcementEnabled) {
+    const customerMembershipIds = Array.from(
+      new Set(
+        user.memberships
+          .filter((membership) => membership.customerId !== null && membership.customerId !== undefined)
+          .map((membership) => membership.customerId.toString()),
+      ),
+    )
+
+    if (customerMembershipIds.length > 0) {
+      const customers = await Customer.find({
+        _id: { $in: customerMembershipIds },
+      })
+        .select('_id status')
+        .lean()
+
+      const activeCustomerIds = new Set(
+        customers
+          .filter((customer) => customer.status === 'ACTIVE')
+          .map((customer) => customer._id.toString()),
+      )
+
+      if (activeCustomerIds.size === 0) {
+        monitoringService.recordInactiveCustomerBlock({ surface: 'auth_login' })
+        logger.warn(
+          {
+            userId: user._id,
+            customerMembershipIds,
+            requestId: req.requestId,
+          },
+          'login failed - user customer memberships are inactive',
+        )
+        return res.status(403).json({
+          error: {
+            code: 'AUTH_CUSTOMER_INACTIVE',
+            message: 'Your customer account is inactive. Contact your administrator.',
+            requestId: req.requestId,
+          },
+        })
+      }
     }
   }
 

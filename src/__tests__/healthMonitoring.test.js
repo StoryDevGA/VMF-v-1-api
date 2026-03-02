@@ -62,6 +62,19 @@ const makeUser = (overrides = {}) => ({
   ...overrides,
 })
 
+const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+const getLabeledCounterValue = (metricsText, metricName, labels = []) => {
+  const labelPattern = labels.length > 0
+    ? labels.map((label) => `(?=.*${escapeRegex(label)})`).join('')
+    : ''
+  const regex = new RegExp(
+    `${escapeRegex(metricName)}\\{${labelPattern}[^\\n]*\\}\\s+([0-9]+(?:\\.[0-9]+)?)`,
+  )
+  const match = metricsText.match(regex)
+  return match ? Number.parseFloat(match[1]) : 0
+}
+
 beforeAll(async () => {
   const supertest = (await import('supertest')).default
   app = (await import('../app.js')).default
@@ -502,6 +515,45 @@ describe('monitoringService - Unit', () => {
     // After reset, public health should still return 'healthy'
     const health = monitoringService.getPublicHealth()
     expect(health.status).toBe('healthy')
+  })
+
+  test('records governance counters and exposes them in health metrics + Prometheus', async () => {
+    monitoringService.resetForTests()
+
+    monitoringService.recordInactiveCustomerBlock({ surface: 'auth_login' })
+    monitoringService.recordLimitRejection({
+      limitType: 'MAX_VMFS_PER_TENANT',
+      surface: 'vmf_controller',
+    })
+    monitoringService.recordOnboardingTransactionFailure({ failureType: 'internal' })
+
+    const health = await monitoringService.getDetailedHealth()
+    expect(health.metrics.inactiveCustomerBlocks).toBe(1)
+    expect(health.metrics.governanceLimitRejections).toBe(1)
+    expect(health.metrics.onboardingTransactionFailures).toBe(1)
+
+    const metricsText = await monitoringService.getMetrics()
+    expect(
+      getLabeledCounterValue(
+        metricsText,
+        `${env.metricsPrefix}governance_inactive_customer_blocks_total`,
+        ['surface="auth_login"'],
+      ),
+    ).toBeGreaterThanOrEqual(1)
+    expect(
+      getLabeledCounterValue(
+        metricsText,
+        `${env.metricsPrefix}governance_limit_rejections_total`,
+        ['limit_type="max_vmfs_per_tenant"', 'surface="vmf_controller"'],
+      ),
+    ).toBeGreaterThanOrEqual(1)
+    expect(
+      getLabeledCounterValue(
+        metricsText,
+        `${env.metricsPrefix}governance_onboarding_transaction_failures_total`,
+        ['failure_type="internal"'],
+      ),
+    ).toBeGreaterThanOrEqual(1)
   })
 })
 

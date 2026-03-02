@@ -61,6 +61,30 @@ const customerSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
+  licenseLevelId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'LicenseLevel',
+    default: null,
+  },
+  governance: {
+    maxTenants: {
+      type: Number,
+      min: 1,
+      max: 10000,
+      default: 1,
+    },
+    maxVmfsPerTenant: {
+      type: Number,
+      min: 1,
+      max: 10000,
+      default: 1,
+    },
+    customerAdminUserId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
+  },
   status: {
     type: String,
     required: true,
@@ -121,6 +145,8 @@ customerSchema.index({ status: 1, topology: 1 })
 customerSchema.index({ status: 1, topology: 1, createdAt: -1 })
 customerSchema.index({ createdAt: -1 })
 customerSchema.index({ createdBy: 1 })
+customerSchema.index({ licenseLevelId: 1 })
+customerSchema.index({ 'governance.customerAdminUserId': 1 })
 
 customerSchema.pre('validate', function(next) {
   if (this.isNew || this.isModified('name') || !this.nameNormalized) {

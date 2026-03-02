@@ -1,21 +1,23 @@
 import { connectDb } from '../config/db.js'
 import { seedSystemRoles } from './systemRoles.js'
 import { seedSuperAdmin } from './superAdmin.js'
+import { seedDefaultLicenseLevel } from './licenseLevels.js'
 
 export const runSeeds = async () => {
-  console.log('🌱 Starting database seeding...')
-  
+  console.log('[seed] Starting database seeding...')
+
   try {
     // Ensure DB connection (no-op if already connected)
     await connectDb()
-    
+
     // Run seeds in order
     await seedSystemRoles()
-    await seedSuperAdmin()
-    
-    console.log('✅ Database seeding completed successfully!')
+    const superAdmin = await seedSuperAdmin()
+    await seedDefaultLicenseLevel({ actorUserId: superAdmin?._id })
+
+    console.log('[seed] Database seeding completed successfully.')
   } catch (error) {
-    console.error('❌ Database seeding failed:', error.message)
+    console.error('[seed] Database seeding failed:', error.message)
     throw error
   }
 }

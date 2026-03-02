@@ -60,6 +60,11 @@ const makeFakeCustomer = (overrides = {}) => ({
   name: 'Acme Corp',
   topology: 'MULTI_TENANT',
   vmfPolicy: 'PER_TENANT_MULTI',
+  governance: {
+    maxTenants: 10,
+    maxVmfsPerTenant: 10,
+    customerAdminUserId: null,
+  },
   defaultTenantId: null,
   isServiceProvider: false,
   status: 'ACTIVE',
@@ -121,11 +126,24 @@ const makeRes = () => {
   return res
 }
 
+const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+const getLabeledCounterValue = (metricsText, metricName, labels = []) => {
+  const labelPattern = labels.length > 0
+    ? labels.map((label) => `(?=.*${escapeRegex(label)})`).join('')
+    : ''
+  const regex = new RegExp(
+    `${escapeRegex(metricName)}\\{${labelPattern}[^\\n]*\\}\\s+([0-9]+(?:\\.[0-9]+)?)`,
+  )
+  const match = metricsText.match(regex)
+  return match ? Number.parseFloat(match[1]) : 0
+}
+
 /* ------------------------------------------------------------------ */
 /*  Dynamic imports                                                   */
 /* ------------------------------------------------------------------ */
 
-let User, Customer, Tenant, VMF
+let User, Customer, Tenant, VMF, AuditLog, monitoringService, env
 let loadScopes
 let requirePlatformRole, requireCustomerAccess, requireTenantAccess, requireVmfAccess
 let topologyGuard
@@ -137,6 +155,9 @@ beforeAll(async () => {
   Customer = models.Customer
   Tenant = models.Tenant
   VMF = models.VMF
+  AuditLog = models.AuditLog
+  monitoringService = (await import('../services/monitoringService.js')).default
+  env = (await import('../config/env.js')).default
 
   loadScopes = (await import('../middleware/loadScopes.js')).default
 
@@ -157,6 +178,8 @@ beforeEach(() => {
   Tenant.findById = jest.fn()
   VMF.findById = jest.fn()
   VMF.countByTenant = jest.fn()
+  AuditLog.createLog = jest.fn(async () => ({}))
+  monitoringService.resetForTests()
 })
 
 /* ================================================================== */
@@ -231,6 +254,8 @@ describe('loadScopes', () => {
     expect(req.scopes.memberships).toHaveLength(2)
     expect(req.scopes.tenantMemberships).toHaveLength(1)
     expect(req.scopes.vmfGrants).toHaveLength(1)
+    expect(req.scopes.activeCustomerIds).toEqual([])
+    expect(req.scopes.inactiveCustomerIds).toEqual([])
   })
 
   test('sets isPlatformUser to false for non-platform users', async () => {
@@ -248,6 +273,38 @@ describe('loadScopes', () => {
     expect(next).toHaveBeenCalled()
     expect(req.scopes.platformRoles).toEqual([])
     expect(req.scopes.isPlatformUser).toBe(false)
+    expect(req.scopes.activeCustomerIds).toEqual([CUSTOMER_ID])
+    expect(req.scopes.inactiveCustomerIds).toEqual([])
+  })
+
+  test('returns 403 when all customer memberships are inactive', async () => {
+    User.findById.mockResolvedValue(
+      makeFakeUser({
+        memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+      }),
+    )
+    Customer.findById.mockResolvedValue(
+      makeFakeCustomer({ status: 'DISABLED' }),
+    )
+
+    const req = makeReq()
+    const res = makeRes()
+    const next = jest.fn()
+
+    await loadScopes(req, res, next)
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body.error.code).toBe('CUSTOMER_INACTIVE')
+    expect(next).not.toHaveBeenCalled()
+
+    const metrics = await monitoringService.getMetrics()
+    expect(
+      getLabeledCounterValue(
+        metrics,
+        `${env.metricsPrefix}governance_inactive_customer_blocks_total`,
+        ['surface="load_scopes"'],
+      ),
+    ).toBeGreaterThanOrEqual(1)
   })
 })
 
@@ -468,6 +525,39 @@ describe('requireCustomerAccess', () => {
 
     expect(next).toHaveBeenCalled()
   })
+
+  test('returns 403 when customer is inactive', async () => {
+    Customer.findById.mockResolvedValue(
+      makeFakeCustomer({ status: 'DISABLED' }),
+    )
+
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID },
+      scopes: {
+        platformRoles: [],
+        memberships: [{ customerId: CUSTOMER_ID, roles: ['CUSTOMER_ADMIN'] }],
+        tenantMemberships: [],
+        vmfGrants: [],
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireCustomerAccess({ roles: ['CUSTOMER_ADMIN'] })(req, res, next)
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body.error.code).toBe('CUSTOMER_INACTIVE')
+    expect(next).not.toHaveBeenCalled()
+
+    const metrics = await monitoringService.getMetrics()
+    expect(
+      getLabeledCounterValue(
+        metrics,
+        `${env.metricsPrefix}governance_inactive_customer_blocks_total`,
+        ['surface="require_customer_access"'],
+      ),
+    ).toBeGreaterThanOrEqual(1)
+  })
 })
 
 /* ================================================================== */
@@ -643,6 +733,31 @@ describe('requireTenantAccess', () => {
     await requireTenantAccess({ roles: ['TENANT_ADMIN'] })(req, res, next)
 
     expect(res.statusCode).toBe(403)
+    expect(next).not.toHaveBeenCalled()
+  })
+
+  test('returns 403 when parent customer is inactive', async () => {
+    Customer.findById.mockResolvedValue(
+      makeFakeCustomer({ status: 'DISABLED' }),
+    )
+    Tenant.findById.mockResolvedValue(makeFakeTenant())
+
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID, tenantId: TENANT_ID },
+      scopes: {
+        platformRoles: [],
+        memberships: [{ customerId: CUSTOMER_ID, roles: ['CUSTOMER_ADMIN'] }],
+        tenantMemberships: [],
+        vmfGrants: [],
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireTenantAccess()(req, res, next)
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body.error.code).toBe('CUSTOMER_INACTIVE')
     expect(next).not.toHaveBeenCalled()
   })
 })
@@ -876,6 +991,31 @@ describe('requireVmfAccess', () => {
     expect(res.statusCode).toBe(403)
     expect(next).not.toHaveBeenCalled()
   })
+
+  test('returns 403 when VMF customer is inactive', async () => {
+    VMF.findById.mockResolvedValue(makeFakeVmf())
+    Customer.findById.mockResolvedValue(
+      makeFakeCustomer({ status: 'DISABLED' }),
+    )
+
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID, tenantId: TENANT_ID, vmfId: VMF_ID },
+      scopes: {
+        platformRoles: [],
+        memberships: [{ customerId: CUSTOMER_ID, roles: ['CUSTOMER_ADMIN'] }],
+        tenantMemberships: [],
+        vmfGrants: [],
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireVmfAccess('READ')(req, res, next)
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body.error.code).toBe('CUSTOMER_INACTIVE')
+    expect(next).not.toHaveBeenCalled()
+  })
 })
 
 /* ================================================================== */
@@ -1017,6 +1157,37 @@ describe('topologyGuard', () => {
     await topologyGuard(req, res, next)
 
     expect(next).toHaveBeenCalled()
+  })
+
+  test('blocks VMF creation when governance maxVmfsPerTenant limit is reached', async () => {
+    VMF.countByTenant.mockResolvedValue(1)
+
+    const req = makeReq({
+      method: 'POST',
+      params: { tenantId: TENANT_ID },
+      baseUrl: '/api/v1/tenants/456',
+      path: '/vmfs',
+      scopes: {
+        customer: makeFakeCustomer({
+          topology: 'MULTI_TENANT',
+          vmfPolicy: 'PER_TENANT_MULTI',
+          governance: {
+            maxTenants: 10,
+            maxVmfsPerTenant: 1,
+            customerAdminUserId: null,
+          },
+        }),
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await topologyGuard(req, res, next)
+
+    expect(res.statusCode).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.details.limitType).toBe('MAX_VMFS_PER_TENANT')
+    expect(next).not.toHaveBeenCalled()
   })
 
   test('blocks cross-tenant VMF access', async () => {

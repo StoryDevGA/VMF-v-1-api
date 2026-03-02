@@ -103,6 +103,21 @@ const env = {
   // Fake Auth (non-production app environments only)
   fakeAuthEnabled: toBoolean(process.env.FAKE_AUTH_ENABLED, false),
 
+  // Governance rollout controls
+  governanceLicenseLevelsEnabled: toBoolean(process.env.GOVERNANCE_LICENSE_LEVELS_ENABLED, true),
+  governanceStrictAdminInvariantEnabled: toBoolean(
+    process.env.GOVERNANCE_STRICT_ADMIN_INVARIANT_ENABLED,
+    true,
+  ),
+  governanceInactiveEnforcementEnabled: toBoolean(
+    process.env.GOVERNANCE_INACTIVE_ENFORCEMENT_ENABLED,
+    true,
+  ),
+  governanceExternalOnboardingEnabled: toBoolean(
+    process.env.GOVERNANCE_EXTERNAL_ONBOARDING_ENABLED,
+    true,
+  ),
+
   // Client base URL (React dev server)
   clientBaseUrl: process.env.CLIENT_BASE_URL || process.env.APP_BASE_URL || 'http://localhost:5173',
   

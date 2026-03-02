@@ -1,7 +1,7 @@
 /**
  * Topology Guard Middleware
  *
- * Enforces topology-level constraints for the Customer → Tenant → VMF
+ * Enforces topology-level constraints for the Customer -> Tenant -> VMF
  * hierarchy:
  *
  * 1. Single-tenant customers: validates that the tenantId in the URL
@@ -9,7 +9,8 @@
  *    hidden from the UI for single-tenant customers, so any mismatch
  *    is a programming error or an attack.
  *
- * 2. VMF creation constraints: respects the customer's vmfPolicy
+ * 2. VMF creation constraints: respects both governance limit
+ *    (maxVmfsPerTenant) and the customer's vmfPolicy
  *    (SINGLE, MULTI, PER_TENANT_SINGLE, PER_TENANT_MULTI) when the
  *    request is a VMF-creating POST.
  *
@@ -26,6 +27,18 @@
 
 import { VMF } from '../models/index.js'
 import logger from '../config/logger.js'
+import auditService from '../services/auditService.js'
+import customerGovernanceService from '../services/customerGovernanceService.js'
+import monitoringService from '../services/monitoringService.js'
+
+const buildGovernanceErrorResponse = (req, err) => ({
+  error: {
+    code: err.code || 'CONFLICT',
+    message: err.message,
+    ...(err.details ? { details: err.details } : {}),
+    requestId: req.requestId,
+  },
+})
 
 const topologyGuard = async (req, res, next) => {
   try {
@@ -51,7 +64,7 @@ const topologyGuard = async (req, res, next) => {
       if (!defaultTenantId) {
         logger.error(
           { customerId: customer._id, requestId: req.requestId },
-          'topologyGuard — single-tenant customer missing defaultTenantId',
+          'topologyGuard - single-tenant customer missing defaultTenantId',
         )
         return res.status(500).json({
           error: {
@@ -65,7 +78,7 @@ const topologyGuard = async (req, res, next) => {
       if (tenantId !== defaultTenantId) {
         logger.warn(
           { customerId: customer._id, tenantId, defaultTenantId, requestId: req.requestId },
-          'topologyGuard — tenant mismatch for single-tenant customer',
+          'topologyGuard - tenant mismatch for single-tenant customer',
         )
         return res.status(403).json({
           error: {
@@ -83,6 +96,12 @@ const topologyGuard = async (req, res, next) => {
     if (req.method === 'POST' && tenantId && isVmfCreationRoute(req)) {
       const vmfPolicy = customer.vmfPolicy
       const existingCount = await VMF.countByTenant(tenantId, 'ACTIVE')
+
+      customerGovernanceService.assertVmfCreationWithinLimit({
+        customer,
+        tenantId,
+        currentVmfCount: existingCount,
+      })
 
       if (vmfPolicy === 'SINGLE' && existingCount >= 1) {
         return res.status(409).json({
@@ -113,7 +132,7 @@ const topologyGuard = async (req, res, next) => {
       if (vmf.tenantId.toString() !== tenantId) {
         logger.warn(
           { vmfId: vmf._id, vmfTenantId: vmf.tenantId, routeTenantId: tenantId, requestId: req.requestId },
-          'topologyGuard — cross-tenant VMF access attempt',
+          'topologyGuard - cross-tenant VMF access attempt',
         )
         return res.status(403).json({
           error: {
@@ -127,7 +146,33 @@ const topologyGuard = async (req, res, next) => {
 
     next()
   } catch (err) {
-    logger.error({ err, requestId: req.requestId }, 'topologyGuard — unexpected error')
+    if (customerGovernanceService.isGovernanceError(err)) {
+      monitoringService.recordLimitRejection({
+        limitType: err?.details?.limitType || 'unknown',
+        surface: 'topology_guard',
+      })
+
+      void auditService.logFromRequest(req, {
+        action: auditService.AUDIT_ACTIONS.VMF_LIMIT_REJECTED,
+        resourceType: 'Tenant',
+        resourceId: req.params.tenantId,
+        scope: {
+          customerId: req.scopes?.customer?._id || req.params.customerId,
+          tenantId: req.params.tenantId,
+        },
+        diff: {
+          endpoint: 'topology_guard_vmf_create',
+          reason: err.message,
+          details: err.details || null,
+        },
+      })
+
+      return res
+        .status(err.status || 409)
+        .json(buildGovernanceErrorResponse(req, err))
+    }
+
+    logger.error({ err, requestId: req.requestId }, 'topologyGuard - unexpected error')
     next(err)
   }
 }

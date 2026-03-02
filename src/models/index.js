@@ -9,6 +9,7 @@ import AuditLog from './AuditLog.js'
 import DataDeletionRequest from './DataDeletionRequest.js'
 import Invitation from './Invitation.js'
 import SystemVersioningPolicy from './SystemVersioningPolicy.js'
+import LicenseLevel from './LicenseLevel.js'
 
 // Export all models
 export {
@@ -22,6 +23,7 @@ export {
   DataDeletionRequest,
   Invitation,
   SystemVersioningPolicy,
+  LicenseLevel,
 }
 
 // Default export with all models
@@ -36,4 +38,5 @@ export default {
   DataDeletionRequest,
   Invitation,
   SystemVersioningPolicy,
+  LicenseLevel,
 }

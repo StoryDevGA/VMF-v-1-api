@@ -14,6 +14,10 @@ This folder contains the production-ready Node/Express API server. It defaults t
 Run from `VMF-v-1-api/`:
 - `npm run dev` starts the server with nodemon.
 - `npm run start` runs the production server.
+- `npm run seed` runs baseline seeds (roles, super admin, `LEGACY_DEFAULT` licence level).
+- `npm run governance:report-admin-invariants` reports active-customer admin invariant violations.
+- `npm run governance:backfill` runs governance/license backfill in dry-run mode.
+- `npm run governance:backfill -- --apply` applies backfill updates.
 
 ## Configuration
 Copy `.env.example` to `.env` and adjust values as needed:
@@ -26,6 +30,19 @@ Copy `.env.example` to `.env` and adjust values as needed:
 - `MONGODB_URI`, `JWT_SECRET`, and `JWT_REFRESH_SECRET` are required.
 - Redis is optional in local dev (`REDIS_REQUIRED=false`) but recommended for full auth/session behavior.
 - `FAKE_AUTH_ENABLED` only takes effect when `APP_ENV` is not `production`.
+- Governance rollout flags:
+  - `GOVERNANCE_LICENSE_LEVELS_ENABLED`
+  - `GOVERNANCE_STRICT_ADMIN_INVARIANT_ENABLED`
+  - `GOVERNANCE_INACTIVE_ENFORCEMENT_ENABLED`
+  - `GOVERNANCE_EXTERNAL_ONBOARDING_ENABLED`
+- `SYSTEM_ACTOR_USER_ID` can be set for deterministic seed/backfill actor attribution.
+
+## Governance Rollout
+- Dry-run invariant report: `npm run governance:report-admin-invariants`
+- Dry-run backfill: `npm run governance:backfill`
+- Apply backfill: `npm run governance:backfill -- --apply`
+- Optional JSON output for automation: add `-- --json` to both commands.
+- To fail CI/deployment checks when violations remain: `npm run governance:report-admin-invariants -- --fail-on-violations`
 
 ## Verification
 - Start the server: `npm run dev`.
