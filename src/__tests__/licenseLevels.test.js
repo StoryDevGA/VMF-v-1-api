@@ -70,6 +70,7 @@ let request
 let tokenService
 let User
 let LicenseLevel
+let Customer
 let AuditLog
 let originalLicenseLevelSave
 
@@ -93,6 +94,7 @@ beforeAll(async () => {
   const models = await import('../models/index.js')
   User = models.User
   LicenseLevel = models.LicenseLevel
+  Customer = models.Customer
   AuditLog = models.AuditLog
 
   originalLicenseLevelSave = LicenseLevel.prototype.save
@@ -129,6 +131,7 @@ beforeEach(() => {
   LicenseLevel.prototype.save = jest.fn(async function save() {
     return this
   })
+  Customer.aggregate = jest.fn().mockResolvedValue([])
 
   AuditLog.createLog = jest.fn(async () => ({}))
 })
@@ -234,6 +237,7 @@ describe('Licence Level Routes', () => {
       }),
     })
     LicenseLevel.countDocuments.mockResolvedValue(1)
+    Customer.aggregate.mockResolvedValue([{ _id: LICENSE_LEVEL_ID, count: 1 }])
 
     const res = await request
       .get('/api/v1/super-admin/licence-levels?page=1&pageSize=20')

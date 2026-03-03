@@ -11,15 +11,18 @@
  *   - POST   /api/v1/customers/:customerId/admins/replace  Replace CUSTOMER_ADMIN
  */
 
-import { Customer, LicenseLevel, Tenant, User } from '../models/index.js'
+import { Customer, Invitation, LicenseLevel, Tenant, User } from '../models/index.js'
 import { createCustomerWithDefaults } from '../services/provisioningService.js'
 import auditService from '../services/auditService.js'
 import performanceCacheService from '../services/performanceCacheService.js'
 import customerGovernanceService from '../services/customerGovernanceService.js'
 import monitoringService from '../services/monitoringService.js'
+import emailService from '../services/emailService.js'
+import invitationService from '../services/invitationService.js'
 import logger from '../config/logger.js'
 
 const DUPLICATE_CUSTOMER_NAME_MESSAGE = 'A customer with this name already exists.'
+const ACTIVE_INVITATION_STATUSES = ['created', 'sent', 'send_failed', 'accessed']
 
 const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
@@ -84,6 +87,234 @@ const buildGovernanceErrorResponse = (req, err) => ({
     requestId: req.requestId,
   },
 })
+
+const buildInvitationErrorResponse = (req, err) => ({
+  error: {
+    code: err.code || 'INVITATION_ALREADY_ACTIVE',
+    message: err.message,
+    ...(err.details ? { details: err.details } : {}),
+    requestId: req.requestId,
+  },
+})
+
+const toIdString = (value) => {
+  if (!value) return null
+  if (typeof value === 'string') return value
+  if (typeof value.toString === 'function') return value.toString()
+  return String(value)
+}
+
+const normalizeEmail = (value) => String(value || '').trim().toLowerCase()
+
+const isDuplicateEmailKeyError = (err) =>
+  err?.code === 11000 && (err?.keyPattern?.email || err?.keyValue?.email)
+
+const createInvitationConflictError = ({ message, details }) => {
+  const err = new Error(message)
+  err.status = 409
+  err.code = 'INVITATION_ALREADY_ACTIVE'
+  err.details = details
+  err.isInvitationConflict = true
+  return err
+}
+
+const isInvitationConflictError = (err) => Boolean(err?.isInvitationConflict)
+
+const markInvitationExpiredForAssign = async ({ invitation, req, customerId }) => {
+  if (!invitation?.isExpired?.() || invitation.status === 'expired') return false
+  const previousStatus = invitation.status
+  invitation.status = 'expired'
+  await invitation.save()
+
+  await auditService.logFromRequest(req, {
+    action: auditService.AUDIT_ACTIONS.INVITATION_EXPIRED,
+    resourceType: auditService.RESOURCE_TYPES.Invitation,
+    resourceId: invitation._id,
+    scope: { customerId },
+    diff: {
+      status: { from: previousStatus, to: 'expired' },
+      source: 'assign_admin',
+    },
+  })
+
+  return true
+}
+
+const findActiveInvitationForAssign = async ({
+  req,
+  customer,
+  user,
+  recipientEmail,
+  enforceUserMatch,
+}) => {
+  const normalizedEmail = normalizeEmail(recipientEmail)
+  const existing = await Invitation.findOne({
+    recipientEmail: normalizedEmail,
+    status: { $in: ACTIVE_INVITATION_STATUSES },
+  })
+  if (!existing) return null
+
+  const expired = await markInvitationExpiredForAssign({
+    invitation: existing,
+    req,
+    customerId: customer._id,
+  })
+  if (expired) return null
+
+  const targetCustomerId = toIdString(customer._id)
+  const targetUserId = toIdString(user?._id)
+  const linkedCustomerId = toIdString(existing.provisionedCustomerId)
+  const linkedUserId = toIdString(existing.provisionedUserId)
+
+  if (linkedCustomerId && linkedCustomerId !== targetCustomerId) {
+    throw createInvitationConflictError({
+      message: 'An active invitation already exists for this email address in another customer.',
+      details: {
+        recipientEmail: normalizedEmail,
+        linkedCustomerId,
+        targetCustomerId,
+      },
+    })
+  }
+
+  if (enforceUserMatch && linkedUserId && linkedUserId !== targetUserId) {
+    throw createInvitationConflictError({
+      message: 'An active invitation already exists for this email address and another user.',
+      details: {
+        recipientEmail: normalizedEmail,
+        linkedUserId,
+        targetUserId,
+      },
+    })
+  }
+
+  return existing
+}
+
+const createOrLinkAssignInvitation = async ({
+  req,
+  customer,
+  user,
+  recipientEmail,
+  recipientName,
+  existingActiveInvitation = null,
+}) => {
+  const normalizedEmail = normalizeEmail(recipientEmail)
+  const normalizedName = String(recipientName || user?.name || '').trim()
+
+  const existing = existingActiveInvitation
+
+  if (existing) {
+    let changed = false
+    if (!existing.provisionedCustomerId) {
+      existing.provisionedCustomerId = customer._id
+      changed = true
+    }
+    if (!existing.provisionedUserId) {
+      existing.provisionedUserId = user._id
+      changed = true
+    }
+    if (changed) {
+      await existing.save()
+    }
+
+    return { outcome: 'linked_existing', invitation: existing }
+  }
+
+  const { raw, hash } = Invitation.generateToken()
+  const invitation = await Invitation.create({
+    recipientEmail: normalizedEmail,
+    recipientName: normalizedName,
+    company: {
+      name: customer.name,
+      ...(customer.website ? { website: customer.website } : {}),
+    },
+    status: 'created',
+    tokenHash: hash,
+    expiresAt: invitationService.computeExpiryDate(),
+    createdBy: req.userId,
+    provisionedCustomerId: customer._id,
+    provisionedUserId: user._id,
+  })
+
+  await auditService.logFromRequest(req, {
+    action: auditService.AUDIT_ACTIONS.INVITATION_CREATED,
+    resourceType: auditService.RESOURCE_TYPES.Invitation,
+    resourceId: invitation._id,
+    scope: { customerId: customer._id },
+    diff: {
+      status: { from: null, to: 'created' },
+      recipientEmail: invitation.recipientEmail,
+      company: invitation.company?.name,
+      provisionedUserId: user._id,
+      source: 'assign_admin',
+    },
+  })
+
+  const authLink = invitationService.buildAuthLink(raw)
+
+  try {
+    await emailService.sendInvitationEmail({
+      to: invitation.recipientEmail,
+      name: invitation.recipientName,
+      authLink,
+      expiresAt: invitation.expiresAt,
+    })
+    invitation.status = 'sent'
+    invitation.sentAt = new Date()
+    await invitation.save()
+
+    await auditService.logFromRequest(req, {
+      action: auditService.AUDIT_ACTIONS.INVITATION_SENT,
+      resourceType: auditService.RESOURCE_TYPES.Invitation,
+      resourceId: invitation._id,
+      scope: { customerId: customer._id },
+      diff: {
+        status: { from: 'created', to: 'sent' },
+        source: 'assign_admin',
+      },
+    })
+
+    return { outcome: 'created', invitation }
+  } catch (sendErr) {
+    invitation.status = 'send_failed'
+    invitation.sendFailedAt = new Date()
+    invitation.sendFailureReason = sendErr.message
+    await invitation.save()
+
+    await auditService.logFromRequest(req, {
+      action: auditService.AUDIT_ACTIONS.INVITATION_SEND_FAILED,
+      resourceType: auditService.RESOURCE_TYPES.Invitation,
+      resourceId: invitation._id,
+      scope: { customerId: customer._id },
+      diff: {
+        status: { from: 'created', to: 'send_failed' },
+        reason: sendErr.message,
+        source: 'assign_admin',
+      },
+    })
+
+    return { outcome: 'send_failed', invitation }
+  }
+}
+
+const buildAssignInvitationResponse = (invitationResult) => {
+  if (!invitationResult) return null
+
+  if (invitationResult.invitation) {
+    return {
+      outcome: invitationResult.outcome,
+      invitationId: toIdString(invitationResult.invitation._id),
+      status: invitationResult.invitation.status,
+      visibility: 'immediate',
+    }
+  }
+
+  return {
+    outcome: invitationResult.outcome,
+    error: invitationResult.error,
+  }
+}
 
 /* ------------------------------------------------------------------ */
 /*  GET /api/v1/customers                                             */
@@ -506,9 +737,9 @@ export const updateCustomerStatus = async (req, res, next) => {
 export const assignAdmin = async (req, res, next) => {
   try {
     const { customerId } = req.params
-    const { userId } = req.body
+    const { userId, recipientEmail, recipientName } = req.body
 
-    const customer = await Customer.findById(customerId)
+    let customer = await Customer.findById(customerId)
     if (!customer) {
       return res.status(404).json({
         error: {
@@ -519,12 +750,47 @@ export const assignAdmin = async (req, res, next) => {
       })
     }
 
-    const user = await User.findById(userId)
-    if (!user) {
-      return res.status(404).json({
+    const normalizedRecipientEmail = recipientEmail ? normalizeEmail(recipientEmail) : null
+    const shouldCreateOrLinkInvitation = Boolean(normalizedRecipientEmail)
+
+    let user = null
+    let userCreatedForAssignment = false
+    let existingActiveInvitation = null
+
+    if (userId) {
+      user = await User.findById(userId)
+      if (!user) {
+        return res.status(404).json({
+          error: {
+            code: 'NOT_FOUND',
+            message: 'User not found.',
+            requestId: req.requestId,
+          },
+        })
+      }
+    } else {
+      user = await User.findOne({ email: normalizedRecipientEmail })
+      if (!user) {
+        user = new User({
+          email: normalizedRecipientEmail,
+          name: recipientName,
+          isActive: true,
+          identityPlus: { trustStatus: 'UNTRUSTED' },
+          memberships: [],
+        })
+        userCreatedForAssignment = true
+      }
+    }
+
+    if (
+      userId &&
+      normalizedRecipientEmail &&
+      normalizeEmail(user.email) !== normalizedRecipientEmail
+    ) {
+      return res.status(422).json({
         error: {
-          code: 'NOT_FOUND',
-          message: 'User not found.',
+          code: 'VALIDATION_FAILED',
+          message: 'recipientEmail must match the selected user.',
           requestId: req.requestId,
         },
       })
@@ -540,15 +806,109 @@ export const assignAdmin = async (req, res, next) => {
       })
     }
 
-    const assignment = await customerGovernanceService.applyCustomerAdminAssignment({
-      customer,
-      user,
-    })
+    if (shouldCreateOrLinkInvitation) {
+      existingActiveInvitation = await findActiveInvitationForAssign({
+        req,
+        customer,
+        user,
+        recipientEmail: normalizedRecipientEmail,
+        enforceUserMatch: Boolean(userId),
+      })
+    }
+
+    let assignment
+    try {
+      assignment = await customerGovernanceService.applyCustomerAdminAssignment({
+        customer,
+        user,
+      })
+    } catch (assignmentErr) {
+      const canRecoverDuplicateEmailRace = Boolean(
+        shouldCreateOrLinkInvitation &&
+          userCreatedForAssignment &&
+          isDuplicateEmailKeyError(assignmentErr),
+      )
+
+      if (!canRecoverDuplicateEmailRace) {
+        throw assignmentErr
+      }
+
+      const recoveredUser = await User.findOne({ email: normalizedRecipientEmail })
+      if (!recoveredUser) {
+        throw assignmentErr
+      }
+
+      if (!recoveredUser.isActive) {
+        return res.status(422).json({
+          error: {
+            code: 'VALIDATION_FAILED',
+            message: 'Cannot assign admin role to a disabled user.',
+            requestId: req.requestId,
+          },
+        })
+      }
+
+      const refreshedCustomer = await Customer.findById(customerId)
+      if (!refreshedCustomer) {
+        return res.status(404).json({
+          error: {
+            code: 'NOT_FOUND',
+            message: 'Customer not found.',
+            requestId: req.requestId,
+          },
+        })
+      }
+
+      customer = refreshedCustomer
+      user = recoveredUser
+      userCreatedForAssignment = false
+
+      assignment = await customerGovernanceService.applyCustomerAdminAssignment({
+        customer,
+        user,
+      })
+    }
 
     await Promise.all([
       performanceCacheService.invalidateUserPermissions(user._id),
       performanceCacheService.invalidateCustomerTopology(customer._id),
     ])
+
+    let invitationResult = null
+    if (shouldCreateOrLinkInvitation) {
+      try {
+        invitationResult = await createOrLinkAssignInvitation({
+          req,
+          customer,
+          user,
+          recipientEmail: normalizedRecipientEmail,
+          recipientName: recipientName || user.name,
+          existingActiveInvitation,
+        })
+      } catch (invitationErr) {
+        logger.error(
+          {
+            err: invitationErr,
+            customerId: customer._id,
+            assignedUserId: user._id,
+            recipientEmail: normalizedRecipientEmail,
+            requestId: req.requestId,
+          },
+          'assign admin - invitation processing failed after assignment',
+        )
+        invitationResult = {
+          outcome: 'error',
+          error: {
+            code: 'INVITATION_ASSIGNMENT_FAILED',
+            message:
+              'Admin role was assigned, but invitation creation/linking failed. Retry from Invitations.',
+          },
+        }
+      }
+    }
+
+    const assignedUserId = toIdString(user._id)
+    const invitationSummary = buildAssignInvitationResponse(invitationResult)
 
     await auditService.logFromRequest(req, {
       action: 'CUSTOMER_ADMIN_ASSIGNED',
@@ -556,10 +916,19 @@ export const assignAdmin = async (req, res, next) => {
       resourceId: customer._id,
       scope: { customerId: customer._id },
       diff: {
-        userId,
+        userId: assignedUserId,
         role: 'CUSTOMER_ADMIN',
         canonicalAdminUserId: assignment.canonicalAdminUserId,
         previousCanonicalAdminUserId: assignment.previousCanonicalAdminUserId,
+        ...(userCreatedForAssignment ? { userCreatedForAssignment: true } : {}),
+        ...(invitationSummary
+          ? {
+              invitationOutcome: invitationSummary.outcome,
+              invitationStatus: invitationSummary.status || null,
+              invitationId: invitationSummary.invitationId || null,
+              invitationError: invitationSummary.error?.code || null,
+            }
+          : {}),
       },
     })
 
@@ -580,12 +949,19 @@ export const assignAdmin = async (req, res, next) => {
     return res.status(200).json({
       data: {
         message: 'Admin role assigned successfully.',
-        userId,
+        userId: assignedUserId,
         canonicalAdminUserId: assignment.canonicalAdminUserId,
+        ...(userCreatedForAssignment ? { userCreatedForAssignment: true } : {}),
+        ...(invitationSummary ? { invitation: invitationSummary } : {}),
       },
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
+    if (isInvitationConflictError(err)) {
+      return res
+        .status(err.status || 409)
+        .json(buildInvitationErrorResponse(req, err))
+    }
     if (customerGovernanceService.isGovernanceError(err)) {
       await auditService.logFromRequest(req, {
         action: 'CUSTOMER_ADMIN_MUTATION_BLOCKED',

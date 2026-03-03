@@ -38,6 +38,7 @@ const CUSTOMER_ID = '507f1f77bcf86cd799439044'
 let request
 let tokenService
 let User
+let Customer
 let Tenant
 let AuditLog
 let DataDeletionRequest
@@ -107,6 +108,7 @@ beforeAll(async () => {
   tokenService = (await import('../services/tokenService.js')).default
   const models = await import('../models/index.js')
   User = models.User
+  Customer = models.Customer
   Tenant = models.Tenant
   AuditLog = models.AuditLog
   DataDeletionRequest = models.DataDeletionRequest
@@ -117,6 +119,12 @@ beforeEach(() => {
   User.findById = jest.fn()
   User.updateOne = jest.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 1 })
   User.deleteOne = jest.fn().mockResolvedValue({ acknowledged: true, deletedCount: 1 })
+  Customer.findById = jest.fn().mockImplementation((id) => {
+    if (id === CUSTOMER_ID) {
+      return Promise.resolve({ _id: CUSTOMER_ID, status: 'ACTIVE' })
+    }
+    return Promise.resolve(null)
+  })
 
   Tenant.updateMany = jest.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 0 })
 

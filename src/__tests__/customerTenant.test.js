@@ -54,10 +54,12 @@ beforeAll(() => {
 const USER_ID = '507f1f77bcf86cd799439011'
 const USER_ID_2 = '507f1f77bcf86cd799439099'
 const CUSTOMER_ID = '607f1f77bcf86cd799439022'
+const OTHER_CUSTOMER_ID = '607f1f77bcf86cd799439088'
 const TENANT_ID = '707f1f77bcf86cd799439033'
 const TENANT_ID_2 = '707f1f77bcf86cd799439044'
 const VMF_ID = '807f1f77bcf86cd799439055'
 const LICENSE_LEVEL_ID = '907f1f77bcf86cd799439066'
+const INVITATION_ID = 'a07f1f77bcf86cd7994390aa'
 
 /* ------------------------------------------------------------------ */
 /*  Factories                                                         */
@@ -157,12 +159,38 @@ const makeFakeTenant = (overrides = {}) => ({
   ...overrides,
 })
 
+const makeFakeInvitation = (overrides = {}) => ({
+  _id: INVITATION_ID,
+  id: INVITATION_ID,
+  recipientEmail: 'new.admin@acme.example',
+  recipientName: 'New Admin',
+  company: { name: 'Acme Corp' },
+  status: 'created',
+  expiresAt: new Date(Date.now() + (24 * 60 * 60 * 1000)),
+  provisionedCustomerId: CUSTOMER_ID,
+  provisionedUserId: USER_ID_2,
+  isExpired: jest.fn(() => false),
+  save: jest.fn(async function () { return this }),
+  toJSON: function () {
+    return {
+      id: this._id,
+      recipientEmail: this.recipientEmail,
+      recipientName: this.recipientName,
+      company: this.company,
+      status: this.status,
+      provisionedCustomerId: this.provisionedCustomerId,
+      provisionedUserId: this.provisionedUserId,
+    }
+  },
+  ...overrides,
+})
+
 /* ------------------------------------------------------------------ */
 /*  Dynamic imports                                                   */
 /* ------------------------------------------------------------------ */
 
 let app, request, tokenService
-let User, Customer, Tenant, VMF, AuditLog, LicenseLevel
+let User, Customer, Tenant, VMF, AuditLog, Invitation, LicenseLevel
 
 beforeAll(async () => {
   const supertest = (await import('supertest')).default
@@ -176,6 +204,7 @@ beforeAll(async () => {
   Tenant = models.Tenant
   VMF = models.VMF
   AuditLog = models.AuditLog
+  Invitation = models.Invitation
   LicenseLevel = models.LicenseLevel
 })
 
@@ -228,6 +257,9 @@ beforeEach(() => {
   Tenant.countDocuments = jest.fn()
   VMF.findById = jest.fn()
   VMF.countByTenant = jest.fn()
+  Invitation.findOne = jest.fn().mockResolvedValue(null)
+  Invitation.create = jest.fn()
+  Invitation.generateToken = jest.fn(() => ({ raw: 'raw-token', hash: 'hash-token' }))
   LicenseLevel.findById = jest.fn()
   AuditLog.createLog = jest.fn(async () => ({}))
 
@@ -415,6 +447,63 @@ describe('Customer Validators', () => {
       expect(res.status).toBe(422)
       expect(res.body.error.code).toBe('VALIDATION_FAILED')
       expect(res.body.error.details).toHaveProperty('userId')
+    })
+
+    test('returns 422 when neither userId nor recipientEmail is provided', async () => {
+      const token = await getSuperAdminToken()
+      const res = await request
+        .post(`/api/v1/customers/${CUSTOMER_ID}/admins`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({})
+
+      expect(res.status).toBe(422)
+      expect(res.body.error.code).toBe('VALIDATION_FAILED')
+      expect(res.body.error.details).toHaveProperty('userId')
+      expect(res.body.error.details).toHaveProperty('recipientEmail')
+    })
+
+    test('returns 422 when recipientEmail is provided without recipientName', async () => {
+      const token = await getSuperAdminToken()
+      const res = await request
+        .post(`/api/v1/customers/${CUSTOMER_ID}/admins`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ recipientEmail: 'new.admin@acme.example' })
+
+      expect(res.status).toBe(422)
+      expect(res.body.error.code).toBe('VALIDATION_FAILED')
+      expect(res.body.error.details).toHaveProperty('recipientName')
+    })
+
+    test('accepts recipientEmail without recipientName when userId is provided', async () => {
+      const token = await getSuperAdminToken()
+      Customer.findById.mockResolvedValue(makeFakeCustomer())
+      User.findById.mockImplementation((id) => {
+        if (id === USER_ID) return Promise.resolve(makeFakeUser())
+        if (id === USER_ID_2) {
+          return Promise.resolve(
+            makeFakeUser({
+              _id: USER_ID_2,
+              id: USER_ID_2,
+              email: 'new.admin@acme.example',
+              name: 'New Admin',
+              memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+            }),
+          )
+        }
+        return Promise.resolve(null)
+      })
+
+      Invitation.findOne.mockResolvedValue(null)
+      Invitation.create.mockResolvedValue(makeFakeInvitation())
+
+      const res = await request
+        .post(`/api/v1/customers/${CUSTOMER_ID}/admins`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ userId: USER_ID_2, recipientEmail: 'new.admin@acme.example' })
+
+      expect(res.status).toBe(200)
+      expect(res.body.data.userId).toBe(USER_ID_2)
+      expect(res.body.data.invitation.outcome).toBe('created')
     })
   })
 })
@@ -1171,6 +1260,236 @@ describe('POST /api/v1/customers/:customerId/admins', () => {
 
     expect(res.status).toBe(200)
     expect(targetUser.memberships[0].roles).toContain('CUSTOMER_ADMIN')
+  })
+
+  test('assigns admin via recipientEmail and returns invitation creation outcome', async () => {
+    const token = await getSuperAdminToken()
+    Customer.findById.mockResolvedValue(makeFakeCustomer())
+
+    const targetUser = makeFakeUser({
+      _id: USER_ID_2,
+      id: USER_ID_2,
+      email: 'new.admin@acme.example',
+      memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+    })
+
+    User.findOne.mockImplementation((query) => {
+      if (query?.email) return Promise.resolve(targetUser)
+      return Promise.resolve(null)
+    })
+
+    const createdInvitation = makeFakeInvitation({
+      recipientEmail: targetUser.email,
+      recipientName: 'New Admin',
+      provisionedCustomerId: CUSTOMER_ID,
+      provisionedUserId: USER_ID_2,
+    })
+    Invitation.findOne.mockResolvedValue(null)
+    Invitation.create.mockResolvedValue(createdInvitation)
+    Invitation.generateToken.mockReturnValue({ raw: 'raw-token', hash: 'hash-token' })
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/admins`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        recipientEmail: targetUser.email,
+        recipientName: 'New Admin',
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.userId).toBe(USER_ID_2)
+    expect(res.body.data.invitation).toBeDefined()
+    expect(res.body.data.invitation.outcome).toBe('created')
+    expect(res.body.data.invitation.visibility).toBe('immediate')
+    expect(Invitation.create).toHaveBeenCalled()
+  })
+
+  test('links existing active invitation during recipientEmail assign flow', async () => {
+    const token = await getSuperAdminToken()
+    Customer.findById.mockResolvedValue(makeFakeCustomer())
+
+    const targetUser = makeFakeUser({
+      _id: USER_ID_2,
+      id: USER_ID_2,
+      email: 'new.admin@acme.example',
+      memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+    })
+
+    User.findOne.mockImplementation((query) => {
+      if (query?.email) return Promise.resolve(targetUser)
+      return Promise.resolve(null)
+    })
+
+    const existingInvitation = makeFakeInvitation({
+      _id: 'b07f1f77bcf86cd7994390bb',
+      id: 'b07f1f77bcf86cd7994390bb',
+      status: 'sent',
+      provisionedCustomerId: null,
+      provisionedUserId: null,
+      isExpired: jest.fn(() => false),
+    })
+    Invitation.findOne.mockResolvedValue(existingInvitation)
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/admins`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        recipientEmail: targetUser.email,
+        recipientName: 'New Admin',
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.invitation).toBeDefined()
+    expect(res.body.data.invitation.outcome).toBe('linked_existing')
+    expect(res.body.data.invitation.invitationId).toBe('b07f1f77bcf86cd7994390bb')
+    expect(existingInvitation.save).toHaveBeenCalled()
+    expect(Invitation.create).not.toHaveBeenCalled()
+  })
+
+  test('returns 409 when active invitation is linked to another customer', async () => {
+    const token = await getSuperAdminToken()
+    Customer.findById.mockResolvedValue(makeFakeCustomer())
+
+    const targetUser = makeFakeUser({
+      _id: USER_ID_2,
+      id: USER_ID_2,
+      email: 'new.admin@acme.example',
+      memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+    })
+    User.findOne.mockImplementation((query) => {
+      if (query?.email) return Promise.resolve(targetUser)
+      return Promise.resolve(null)
+    })
+
+    const conflictingInvitation = makeFakeInvitation({
+      _id: 'c07f1f77bcf86cd7994390cc',
+      id: 'c07f1f77bcf86cd7994390cc',
+      status: 'sent',
+      provisionedCustomerId: OTHER_CUSTOMER_ID,
+      provisionedUserId: USER_ID_2,
+      isExpired: jest.fn(() => false),
+    })
+    Invitation.findOne.mockResolvedValue(conflictingInvitation)
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/admins`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        recipientEmail: targetUser.email,
+        recipientName: 'New Admin',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('INVITATION_ALREADY_ACTIVE')
+    expect(targetUser.save).not.toHaveBeenCalled()
+    expect(Invitation.create).not.toHaveBeenCalled()
+  })
+
+  test('returns 422 when provided recipientEmail does not match selected user', async () => {
+    const token = await getSuperAdminToken()
+    Customer.findById.mockResolvedValue(makeFakeCustomer())
+    User.findById.mockImplementation((id) => {
+      if (id === USER_ID) return Promise.resolve(makeFakeUser())
+      if (id === USER_ID_2) {
+        return Promise.resolve(
+          makeFakeUser({
+            _id: USER_ID_2,
+            id: USER_ID_2,
+            email: 'selected.user@acme.example',
+            memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+          }),
+        )
+      }
+      return Promise.resolve(null)
+    })
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/admins`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        userId: USER_ID_2,
+        recipientEmail: 'different.user@acme.example',
+        recipientName: 'Different User',
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.message).toContain('recipientEmail must match')
+  })
+
+  test('recovers from duplicate email race when assigning via recipientEmail', async () => {
+    const token = await getSuperAdminToken()
+
+    let customerLoadCount = 0
+    Customer.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ID) {
+        customerLoadCount += 1
+        return Promise.resolve(makeFakeCustomer())
+      }
+      return Promise.resolve(null)
+    })
+
+    const raceEmail = 'race.admin@acme.example'
+    const recoveredUser = makeFakeUser({
+      _id: USER_ID_2,
+      id: USER_ID_2,
+      email: raceEmail,
+      name: 'Race Admin',
+      memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+    })
+
+    let userLookupCount = 0
+    User.findOne.mockImplementation((query) => {
+      if (query?.email === raceEmail) {
+        userLookupCount += 1
+        return Promise.resolve(userLookupCount === 1 ? null : recoveredUser)
+      }
+      return Promise.resolve(null)
+    })
+
+    const duplicateErr = Object.assign(new Error('duplicate email'), {
+      code: 11000,
+      keyPattern: { email: 1 },
+      keyValue: { email: raceEmail },
+    })
+
+    const originalUserPrototypeSave = User.prototype.save
+    let userPrototypeSaveCalls = 0
+    User.prototype.save = jest.fn(async function () {
+      if (this.email === raceEmail && userPrototypeSaveCalls === 0) {
+        userPrototypeSaveCalls += 1
+        throw duplicateErr
+      }
+      userPrototypeSaveCalls += 1
+      return this
+    })
+
+    try {
+      Invitation.findOne.mockResolvedValue(null)
+      Invitation.create.mockResolvedValue(
+        makeFakeInvitation({
+          recipientEmail: raceEmail,
+          recipientName: 'Race Admin',
+          provisionedUserId: USER_ID_2,
+        }),
+      )
+
+      const res = await request
+        .post(`/api/v1/customers/${CUSTOMER_ID}/admins`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          recipientEmail: raceEmail,
+          recipientName: 'Race Admin',
+        })
+
+      expect(res.status).toBe(200)
+      expect(res.body.data.userId).toBe(USER_ID_2)
+      expect(res.body.data.userCreatedForAssignment).toBeUndefined()
+      expect(userLookupCount).toBe(2)
+      expect(customerLoadCount).toBeGreaterThanOrEqual(2)
+    } finally {
+      User.prototype.save = originalUserPrototypeSave
+    }
   })
 })
 

@@ -152,11 +152,60 @@ const updateStatusSchema = z.object({
   }),
 })
 
-const assignAdminSchema = z.object({
-  userId: z
-    .string({ required_error: 'userId is required' })
-    .regex(objectIdRegex, 'userId must be a valid ObjectId'),
-})
+const assignAdminSchema = z
+  .object({
+    userId: z
+      .string()
+      .regex(objectIdRegex, 'userId must be a valid ObjectId')
+      .optional(),
+    recipientEmail: z
+      .string()
+      .trim()
+      .toLowerCase()
+      .email('recipientEmail must be a valid email')
+      .max(255, 'recipientEmail must be 255 characters or fewer')
+      .optional(),
+    recipientName: z
+      .string()
+      .trim()
+      .min(1, 'recipientName is required')
+      .max(255, 'recipientName must be 255 characters or fewer')
+      .optional(),
+  })
+  .superRefine((val, ctx) => {
+    const hasUserId = Boolean(val.userId)
+    const hasRecipientEmail = Boolean(val.recipientEmail)
+    const hasRecipientName = Boolean(val.recipientName)
+
+    if (!hasUserId && !hasRecipientEmail) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['userId'],
+        message: 'userId is required when recipientEmail is not provided',
+      })
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['recipientEmail'],
+        message: 'recipientEmail is required when userId is not provided',
+      })
+    }
+
+    if (!hasUserId && hasRecipientEmail && !hasRecipientName) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['recipientName'],
+        message: 'recipientName is required when recipientEmail is provided without userId',
+      })
+    }
+
+    if (hasRecipientName && !hasRecipientEmail) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['recipientEmail'],
+        message: 'recipientEmail is required when recipientName is provided',
+      })
+    }
+  })
 
 const replaceAdminSchema = z.object({
   newUserId: z
