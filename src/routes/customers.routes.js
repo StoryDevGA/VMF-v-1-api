@@ -11,6 +11,7 @@
  *   PATCH  /:customerId                   – Update customer
  *   PATCH  /:customerId/status            – Update customer status
  *   POST   /:customerId/admins            – Assign CUSTOMER_ADMIN
+ *   POST   /:customerId/admin-invitations – Create customer-admin invitation
  *   POST   /:customerId/admins/replace    – Replace CUSTOMER_ADMIN (step-up required)
  */
 
@@ -25,6 +26,7 @@ import {
   validateUpdateCustomer,
   validateUpdateStatus,
   validateAssignAdmin,
+  validateCreateAdminInvitation,
   validateReplaceAdmin,
 } from '../validators/customer.validator.js'
 import {
@@ -34,6 +36,7 @@ import {
   updateCustomer,
   updateCustomerStatus,
   assignAdmin,
+  createAdminInvitation,
   replaceAdmin,
 } from '../controllers/customer.controller.js'
 
@@ -55,6 +58,12 @@ router.get('/:customerId', getCustomer)
 router.patch('/:customerId', tenantManagementRateLimit, validateUpdateCustomer, updateCustomer)
 router.patch('/:customerId/status', tenantManagementRateLimit, validateUpdateStatus, updateCustomerStatus)
 router.post('/:customerId/admins', tenantManagementRateLimit, validateAssignAdmin, assignAdmin)
+router.post(
+  '/:customerId/admin-invitations',
+  tenantManagementRateLimit,
+  validateCreateAdminInvitation,
+  createAdminInvitation,
+)
 router.post(
   '/:customerId/admins/replace',
   tenantManagementRateLimit,

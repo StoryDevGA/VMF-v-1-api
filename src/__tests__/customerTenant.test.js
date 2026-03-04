@@ -13,6 +13,7 @@
  *     - GET    /api/v1/customers/:customerId
  *     - PATCH  /api/v1/customers/:customerId
  *     - PATCH  /api/v1/customers/:customerId/status
+ *     - POST   /api/v1/customers/:customerId/admin-invitations
  *     - POST   /api/v1/customers/:customerId/admins
  *
  *   Tenant Routes:
@@ -506,6 +507,32 @@ describe('Customer Validators', () => {
       expect(res.body.data.invitation.outcome).toBe('created')
     })
   })
+
+  describe('POST /api/v1/customers/:customerId/admin-invitations — validation', () => {
+    test('returns 422 when recipientEmail is missing', async () => {
+      const token = await getSuperAdminToken()
+      const res = await request
+        .post(`/api/v1/customers/${CUSTOMER_ID}/admin-invitations`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ recipientName: 'New Admin' })
+
+      expect(res.status).toBe(422)
+      expect(res.body.error.code).toBe('VALIDATION_FAILED')
+      expect(res.body.error.details).toHaveProperty('recipientEmail')
+    })
+
+    test('returns 422 when recipientName is missing', async () => {
+      const token = await getSuperAdminToken()
+      const res = await request
+        .post(`/api/v1/customers/${CUSTOMER_ID}/admin-invitations`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ recipientEmail: 'new.admin@acme.example' })
+
+      expect(res.status).toBe(422)
+      expect(res.body.error.code).toBe('VALIDATION_FAILED')
+      expect(res.body.error.details).toHaveProperty('recipientName')
+    })
+  })
 })
 
 /* ================================================================== */
@@ -584,6 +611,29 @@ describe('Authorization guards', () => {
     const res = await request
       .get('/api/v1/customers')
       .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(403)
+  })
+
+  test('customer admin-invitation route returns 401 without auth token', async () => {
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/admin-invitations`)
+      .send({
+        recipientEmail: 'new.admin@acme.example',
+        recipientName: 'New Admin',
+      })
+    expect(res.status).toBe(401)
+  })
+
+  test('customer admin-invitation route returns 403 for non-SUPER_ADMIN', async () => {
+    const token = await getNonAdminToken()
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/admin-invitations`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        recipientEmail: 'new.admin@acme.example',
+        recipientName: 'New Admin',
+      })
 
     expect(res.status).toBe(403)
   })
@@ -1489,6 +1539,283 @@ describe('POST /api/v1/customers/:customerId/admins', () => {
       expect(customerLoadCount).toBeGreaterThanOrEqual(2)
     } finally {
       User.prototype.save = originalUserPrototypeSave
+    }
+  })
+})
+
+describe('POST /api/v1/customers/:customerId/admin-invitations', () => {
+  test('returns 404 when customer does not exist', async () => {
+    const token = await getSuperAdminToken()
+    Customer.findById.mockResolvedValue(null)
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/admin-invitations`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        recipientEmail: 'new.admin@acme.example',
+        recipientName: 'New Admin',
+      })
+
+    expect(res.status).toBe(404)
+    expect(res.body.error.code).toBe('NOT_FOUND')
+  })
+
+  test('creates customer-scoped invitation without assigning customer admin role', async () => {
+    const token = await getSuperAdminToken()
+    const customer = makeFakeCustomer({
+      governance: {
+        maxTenants: 1,
+        maxVmfsPerTenant: 1,
+        customerAdminUserId: USER_ID,
+      },
+    })
+    Customer.findById.mockResolvedValue(customer)
+    Invitation.findOne.mockResolvedValue(null)
+
+    const createdInvitation = makeFakeInvitation({
+      recipientEmail: 'new.admin@acme.example',
+      recipientName: 'New Admin',
+      provisionedCustomerId: CUSTOMER_ID,
+      provisionedUserId: null,
+    })
+    Invitation.create.mockResolvedValue(createdInvitation)
+    const env = (await import('../config/env.js')).default
+    const previousFakeAuthAllowed = env.fakeAuthAllowed
+    env.fakeAuthAllowed = true
+
+    try {
+      const res = await request
+        .post(`/api/v1/customers/${CUSTOMER_ID}/admin-invitations`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          recipientEmail: 'new.admin@acme.example',
+          recipientName: 'New Admin',
+        })
+
+      expect(res.status).toBe(201)
+      expect(res.body.authLink).toContain('/api/v1/super-admin/invitations/auth/')
+      expect(res.body.data.invitation).toBeDefined()
+      expect(res.body.data.invitation.outcome).toBe('created')
+      expect(res.body.data.invitation.visibility).toBe('immediate')
+      expect(customer.save).not.toHaveBeenCalled()
+
+      const createPayload = Invitation.create.mock.calls[0][0]
+      expect(createPayload.provisionedCustomerId).toBe(CUSTOMER_ID)
+      expect(createPayload.provisionedUserId).toBeUndefined()
+    } finally {
+      env.fakeAuthAllowed = previousFakeAuthAllowed
+    }
+  })
+
+  test('links existing active invitation to customer', async () => {
+    const token = await getSuperAdminToken()
+    Customer.findById.mockResolvedValue(makeFakeCustomer())
+
+    const existingInvitation = makeFakeInvitation({
+      _id: 'd07f1f77bcf86cd7994390dd',
+      id: 'd07f1f77bcf86cd7994390dd',
+      status: 'sent',
+      provisionedCustomerId: null,
+      provisionedUserId: null,
+      isExpired: jest.fn(() => false),
+    })
+    Invitation.findOne.mockResolvedValue(existingInvitation)
+    const env = (await import('../config/env.js')).default
+    const previousFakeAuthAllowed = env.fakeAuthAllowed
+    env.fakeAuthAllowed = true
+
+    try {
+      const res = await request
+        .post(`/api/v1/customers/${CUSTOMER_ID}/admin-invitations`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          recipientEmail: 'new.admin@acme.example',
+          recipientName: 'New Admin',
+        })
+
+      expect(res.status).toBe(200)
+      expect(res.body.authLink).toContain('/api/v1/super-admin/invitations/auth/')
+      expect(res.body.data.invitation.outcome).toBe('linked_existing')
+      expect(res.body.data.invitation.invitationId).toBe('d07f1f77bcf86cd7994390dd')
+      expect(existingInvitation.provisionedCustomerId).toBe(CUSTOMER_ID)
+      expect(existingInvitation.status).toBe('sent')
+      expect(existingInvitation.save).toHaveBeenCalled()
+      expect(Invitation.create).not.toHaveBeenCalled()
+    } finally {
+      env.fakeAuthAllowed = previousFakeAuthAllowed
+    }
+  })
+
+  test('returns 202 when invitation is created but email dispatch fails', async () => {
+    const token = await getSuperAdminToken()
+    Customer.findById.mockResolvedValue(makeFakeCustomer())
+    Invitation.findOne.mockResolvedValue(null)
+
+    const createdInvitation = makeFakeInvitation({
+      recipientEmail: 'new.admin@acme.example',
+      recipientName: 'New Admin',
+      status: 'created',
+      provisionedCustomerId: CUSTOMER_ID,
+      provisionedUserId: null,
+    })
+    Invitation.create.mockResolvedValue(createdInvitation)
+
+    const emailService = (await import('../services/emailService.js')).default
+    const env = (await import('../config/env.js')).default
+    const previousFakeAuthAllowed = env.fakeAuthAllowed
+    env.fakeAuthAllowed = true
+    const sendSpy = jest
+      .spyOn(emailService, 'sendInvitationEmail')
+      .mockRejectedValueOnce(new Error('smtp down'))
+
+    try {
+      const res = await request
+        .post(`/api/v1/customers/${CUSTOMER_ID}/admin-invitations`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          recipientEmail: 'new.admin@acme.example',
+          recipientName: 'New Admin',
+        })
+
+      expect(res.status).toBe(202)
+      expect(res.body.authLink).toContain('/api/v1/super-admin/invitations/auth/')
+      expect(res.body.data.invitation.outcome).toBe('send_failed')
+      expect(res.body.data.invitation.status).toBe('send_failed')
+      expect(createdInvitation.status).toBe('send_failed')
+      expect(createdInvitation.save).toHaveBeenCalled()
+    } finally {
+      env.fakeAuthAllowed = previousFakeAuthAllowed
+      sendSpy.mockRestore()
+    }
+  })
+
+  test('returns 409 when active invitation is linked to another customer', async () => {
+    const token = await getSuperAdminToken()
+    Customer.findById.mockResolvedValue(makeFakeCustomer())
+
+    const conflictingInvitation = makeFakeInvitation({
+      _id: 'e07f1f77bcf86cd7994390ee',
+      id: 'e07f1f77bcf86cd7994390ee',
+      status: 'sent',
+      provisionedCustomerId: OTHER_CUSTOMER_ID,
+      provisionedUserId: null,
+      isExpired: jest.fn(() => false),
+    })
+    Invitation.findOne.mockResolvedValue(conflictingInvitation)
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/admin-invitations`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        recipientEmail: 'new.admin@acme.example',
+        recipientName: 'New Admin',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('INVITATION_ALREADY_ACTIVE')
+    expect(res.body.error.details.reason).toBe('other-customer')
+    expect(Invitation.create).not.toHaveBeenCalled()
+  })
+
+  test('returns 409 when existing invitation is linked to a user but no customer', async () => {
+    const token = await getSuperAdminToken()
+    Customer.findById.mockResolvedValue(makeFakeCustomer())
+
+    const conflictingInvitation = makeFakeInvitation({
+      _id: 'f07f1f77bcf86cd7994390ff',
+      id: 'f07f1f77bcf86cd7994390ff',
+      status: 'sent',
+      provisionedCustomerId: null,
+      provisionedUserId: USER_ID_2,
+      isExpired: jest.fn(() => false),
+    })
+    Invitation.findOne.mockResolvedValue(conflictingInvitation)
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/admin-invitations`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        recipientEmail: 'new.admin@acme.example',
+        recipientName: 'New Admin',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('INVITATION_ALREADY_ACTIVE')
+    expect(res.body.error.details.reason).toBe('different-user')
+    expect(res.body.error.message).toContain('another user')
+    expect(Invitation.create).not.toHaveBeenCalled()
+  })
+})
+
+describe('POST /api/v1/fake-auth/invitations/:invitationId/complete', () => {
+  test('auto-provisions and links a missing invitation user when customer context exists', async () => {
+    const env = (await import('../config/env.js')).default
+    const previousFakeAuthAllowed = env.fakeAuthAllowed
+    env.fakeAuthAllowed = true
+
+    const invitation = makeFakeInvitation({
+      status: 'accessed',
+      recipientEmail: 'Missing.Admin@acme.example',
+      recipientName: 'Missing Admin',
+      provisionedCustomerId: CUSTOMER_ID,
+      provisionedUserId: null,
+      isExpired: jest.fn(() => false),
+    })
+    Invitation.findById = jest.fn().mockResolvedValue(invitation)
+    User.findOne.mockResolvedValue(null)
+
+    const originalUserPrototypeSave = User.prototype.save
+    User.prototype.save = jest.fn(async function () {
+      return this
+    })
+
+    try {
+      const res = await request
+        .post(`/api/v1/fake-auth/invitations/${INVITATION_ID}/complete`)
+        .send({})
+
+      expect(res.status).toBe(200)
+      expect(res.body.data.action).toBe('trusted')
+      expect(String(invitation.provisionedUserId)).toBe(String(res.body.data.userId))
+      expect(invitation.status).toBe('authenticated')
+      expect(invitation.save).toHaveBeenCalled()
+      expect(User.findOne).toHaveBeenCalledWith({ email: 'missing.admin@acme.example' })
+
+      const provisionedUser = User.prototype.save.mock.instances[0]
+      expect(provisionedUser.email).toBe('missing.admin@acme.example')
+      expect(provisionedUser.memberships[0].roles).toContain('CUSTOMER_ADMIN')
+      expect(String(provisionedUser.memberships[0].customerId)).toBe(CUSTOMER_ID)
+    } finally {
+      User.prototype.save = originalUserPrototypeSave
+      env.fakeAuthAllowed = previousFakeAuthAllowed
+    }
+  })
+
+  test('returns USER_NOT_FOUND when invitation has no customer link and no existing user', async () => {
+    const env = (await import('../config/env.js')).default
+    const previousFakeAuthAllowed = env.fakeAuthAllowed
+    env.fakeAuthAllowed = true
+
+    const invitation = makeFakeInvitation({
+      status: 'accessed',
+      recipientEmail: 'orphan@acme.example',
+      provisionedCustomerId: null,
+      provisionedUserId: null,
+      isExpired: jest.fn(() => false),
+    })
+    Invitation.findById = jest.fn().mockResolvedValue(invitation)
+    User.findOne.mockResolvedValue(null)
+
+    try {
+      const res = await request
+        .post(`/api/v1/fake-auth/invitations/${INVITATION_ID}/complete`)
+        .send({})
+
+      expect(res.status).toBe(404)
+      expect(res.body.error.code).toBe('USER_NOT_FOUND')
+      expect(invitation.save).not.toHaveBeenCalled()
+    } finally {
+      env.fakeAuthAllowed = previousFakeAuthAllowed
     }
   })
 })

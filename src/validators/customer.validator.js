@@ -207,6 +207,20 @@ const assignAdminSchema = z
     }
   })
 
+const createAdminInvitationSchema = z.object({
+  recipientEmail: z
+    .string({ required_error: 'recipientEmail is required' })
+    .trim()
+    .toLowerCase()
+    .email('recipientEmail must be a valid email')
+    .max(255, 'recipientEmail must be 255 characters or fewer'),
+  recipientName: z
+    .string({ required_error: 'recipientName is required' })
+    .trim()
+    .min(1, 'recipientName is required')
+    .max(255, 'recipientName must be 255 characters or fewer'),
+})
+
 const replaceAdminSchema = z.object({
   newUserId: z
     .string({ required_error: 'newUserId is required' })
@@ -226,4 +240,5 @@ export const validateCreateCustomer = createBodyValidator(createCustomerSchema)
 export const validateUpdateCustomer = createBodyValidator(updateCustomerSchema)
 export const validateUpdateStatus = createBodyValidator(updateStatusSchema)
 export const validateAssignAdmin = createBodyValidator(assignAdminSchema)
+export const validateCreateAdminInvitation = createBodyValidator(createAdminInvitationSchema)
 export const validateReplaceAdmin = createBodyValidator(replaceAdminSchema)
