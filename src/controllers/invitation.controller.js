@@ -35,6 +35,19 @@ const markExpiredIfNeeded = async (invitation, req) => {
   return true
 }
 
+export const createInvitationDeprecated = async (req, res) => {
+  return res.status(410).json({
+    error: {
+      code: 'LEGACY_INVITATION_CREATE_DEPRECATED',
+      message: 'Legacy invitation create endpoint is deprecated. Use customer-scoped admin invitations.',
+      details: {
+        replacementEndpoint: '/api/v1/customers/:customerId/admin-invitations',
+      },
+      requestId: req.requestId,
+    },
+  })
+}
+
 export const createInvitation = async (req, res, next) => {
   try {
     const recipientEmail = req.body.recipientEmail.toLowerCase()
