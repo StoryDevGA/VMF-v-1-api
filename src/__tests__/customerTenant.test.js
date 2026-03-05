@@ -649,6 +649,42 @@ describe('Authorization guards', () => {
   })
 })
 
+describe('POST /api/v1/super-admin/invitations (legacy create)', () => {
+  test('returns 401 without auth token', async () => {
+    const res = await request
+      .post('/api/v1/super-admin/invitations')
+      .send({})
+
+    expect(res.status).toBe(401)
+  })
+
+  test('returns 403 for non-SUPER_ADMIN', async () => {
+    const token = await getNonAdminToken()
+    const res = await request
+      .post('/api/v1/super-admin/invitations')
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(403)
+  })
+
+  test('returns 410 deprecation response for SUPER_ADMIN', async () => {
+    const token = await getSuperAdminToken()
+    const res = await request
+      .post('/api/v1/super-admin/invitations')
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(410)
+    expect(res.body.error.code).toBe('LEGACY_INVITATION_CREATE_DEPRECATED')
+    expect(res.body.error.details?.replacementEndpoint).toBe(
+      '/api/v1/customers/:customerId/admin-invitations',
+    )
+    expect(res.body.error.requestId).toBeDefined()
+    expect(Invitation.create).not.toHaveBeenCalled()
+  })
+})
+
 /* ================================================================== */
 /*  CUSTOMER CRUD                                                     */
 /* ================================================================== */
