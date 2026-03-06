@@ -7,7 +7,7 @@
  */
 
 import { z } from 'zod'
-import { createBodyValidator } from './shared.js'
+import { createBodyValidator, createQueryValidator } from './shared.js'
 
 /* ------------------------------------------------------------------ */
 /*  Shared patterns                                                   */
@@ -79,6 +79,53 @@ const resendInvitationSchema = z.object({
     .optional(),
 })
 
+const normalizeOptionalQueryString = (value) => {
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'string') return value
+  const trimmed = value.trim()
+  return trimmed.length === 0 ? undefined : trimmed
+}
+
+const listUsersQuerySchema = z.object({
+  q: z.preprocess(
+    normalizeOptionalQueryString,
+    z
+      .string()
+      .max(255, 'q must be 255 characters or fewer')
+      .optional(),
+  ),
+  status: z.preprocess(
+    (value) => {
+      const normalized = normalizeOptionalQueryString(value)
+      if (normalized === undefined) return undefined
+      if (typeof normalized !== 'string') return normalized
+      return normalized.toUpperCase()
+    },
+    z
+      .enum(['ACTIVE', 'INACTIVE', 'DISABLED'])
+      .transform((value) => (value === 'DISABLED' ? 'INACTIVE' : value))
+      .optional(),
+  ),
+  role: z.preprocess(
+    normalizeOptionalQueryString,
+    z
+      .string()
+      .max(100, 'role must be 100 characters or fewer')
+      .optional(),
+  ),
+  page: z.coerce
+    .number()
+    .int('page must be an integer')
+    .min(1, 'page must be at least 1')
+    .default(1),
+  pageSize: z.coerce
+    .number()
+    .int('pageSize must be an integer')
+    .min(1, 'pageSize must be at least 1')
+    .max(100, 'pageSize must be 100 or fewer')
+    .default(20),
+})
+
 /* ------------------------------------------------------------------ */
 /*  Exports                                                           */
 /* ------------------------------------------------------------------ */
@@ -86,3 +133,4 @@ const resendInvitationSchema = z.object({
 export const validateCreateUser = createBodyValidator(createUserSchema)
 export const validateUpdateUser = createBodyValidator(updateUserSchema)
 export const validateResendInvitation = createBodyValidator(resendInvitationSchema)
+export const validateListUsersQuery = createQueryValidator(listUsersQuerySchema)

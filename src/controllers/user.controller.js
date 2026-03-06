@@ -18,6 +18,41 @@ import logger from '../config/logger.js'
 import performanceCacheService from '../services/performanceCacheService.js'
 import customerGovernanceService from '../services/customerGovernanceService.js'
 
+const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+const toIdString = (value) => {
+  if (!value) return null
+  if (typeof value === 'string') return value
+  if (typeof value.toString === 'function') return value.toString()
+  return String(value)
+}
+
+const normalizeStatusFilter = (value) => {
+  if (!value) return null
+  if (value === 'ACTIVE') return true
+  if (value === 'INACTIVE' || value === 'DISABLED') return false
+  return null
+}
+
+const resolveCustomerMembership = (user, customerId) =>
+  (user?.memberships || []).find(
+    (membership) => toIdString(membership?.customerId) === customerId,
+  ) || null
+
+const mapUserListRow = ({ user, customerId, canonicalAdminUserId }) => {
+  const membership = resolveCustomerMembership(user, customerId)
+  const userId = toIdString(user?._id)
+
+  return {
+    ...user,
+    id: userId,
+    status: user?.isActive ? 'ACTIVE' : 'INACTIVE',
+    trustStatus: user?.identityPlus?.trustStatus || 'UNTRUSTED',
+    customerRoles: membership?.roles || [],
+    isCanonicalAdmin: Boolean(canonicalAdminUserId && canonicalAdminUserId === userId),
+  }
+}
+
 const buildGovernanceErrorResponse = (req, err) => ({
   error: {
     code: err.code || (err.status === 409 ? 'CONFLICT' : 'VALIDATION_FAILED'),
@@ -34,33 +69,36 @@ const buildGovernanceErrorResponse = (req, err) => ({
 /**
  * List users belonging to a customer.
  *
- * Query params: q (search name/email), status (active/disabled),
- *               page, pageSize
+ * Query params: q (search name/email), role, status, page, pageSize
  */
 export const listUsers = async (req, res, next) => {
   try {
     const { customerId } = req.params
     const {
       q,
+      role,
       status,
       page = 1,
       pageSize = 20,
     } = req.query
 
-    const filter = { 'memberships.customerId': customerId }
+    const filter = role
+      ? { memberships: { $elemMatch: { customerId, roles: role } } }
+      : { 'memberships.customerId': customerId }
 
-    if (status === 'active') filter.isActive = true
-    if (status === 'disabled') filter.isActive = false
+    const activeFilter = normalizeStatusFilter(status)
+    if (activeFilter !== null) filter.isActive = activeFilter
 
     if (q) {
+      const escaped = escapeRegex(q)
       filter.$or = [
-        { name: { $regex: q, $options: 'i' } },
-        { email: { $regex: q, $options: 'i' } },
+        { name: { $regex: escaped, $options: 'i' } },
+        { email: { $regex: escaped, $options: 'i' } },
       ]
     }
 
-    const pageNum = Math.max(1, parseInt(page, 10) || 1)
-    const limit = Math.min(100, Math.max(1, parseInt(pageSize, 10) || 20))
+    const pageNum = Math.max(1, Number(page) || 1)
+    const limit = Math.min(100, Math.max(1, Number(pageSize) || 20))
     const skip = (pageNum - 1) * limit
 
     const [users, total] = await Promise.all([
@@ -72,13 +110,21 @@ export const listUsers = async (req, res, next) => {
       User.countDocuments(filter),
     ])
 
+    const canonicalAdminUserId = toIdString(req.scopes?.customer?.governance?.customerAdminUserId)
+    const data = users.map((user) => mapUserListRow({ user, customerId, canonicalAdminUserId }))
+
     return res.status(200).json({
-      data: users,
+      data,
       meta: {
         page: pageNum,
         pageSize: limit,
         total,
         totalPages: Math.ceil(total / limit),
+        filters: {
+          q: q || null,
+          role: role || null,
+          status: status || null,
+        },
         requestId: req.requestId,
         version: 'v1',
       },
