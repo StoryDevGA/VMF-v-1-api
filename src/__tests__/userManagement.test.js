@@ -350,6 +350,25 @@ describe('User Validators', () => {
       expect(res.body.error.code).toBe('VALIDATION_FAILED')
     })
   })
+
+  describe('GET /api/v1/customers/:customerId/users — validation', () => {
+    test('returns 422 when status query is invalid', async () => {
+      const token = await getCustomerAdminToken()
+      Customer.findById.mockResolvedValue(makeFakeCustomer())
+      User.findById.mockImplementation((id) => {
+        if (id === CUSTOMER_ADMIN_ID) return Promise.resolve(makeCustomerAdmin())
+        return Promise.resolve(null)
+      })
+
+      const res = await request
+        .get(`/api/v1/customers/${CUSTOMER_ID}/users?status=paused`)
+        .set('Authorization', `Bearer ${token}`)
+
+      expect(res.status).toBe(422)
+      expect(res.body.error.code).toBe('VALIDATION_FAILED')
+      expect(res.body.error.details).toHaveProperty('status')
+    })
+  })
 })
 
 /* ================================================================== */
@@ -412,7 +431,10 @@ describe('GET /api/v1/customers/:customerId/users', () => {
       return Promise.resolve(null)
     })
 
-    const users = [makeRegularUser()]
+    const regularUserLean = { ...makeRegularUser() }
+    delete regularUserLean.toJSON
+    delete regularUserLean.save
+    const users = [regularUserLean]
     User.find.mockReturnValue({
       sort: jest.fn().mockReturnValue({
         skip: jest.fn().mockReturnValue({
@@ -430,6 +452,9 @@ describe('GET /api/v1/customers/:customerId/users', () => {
 
     expect(res.status).toBe(200)
     expect(res.body.data).toHaveLength(1)
+    expect(res.body.data[0].customerRoles).toEqual(['USER'])
+    expect(res.body.data[0].status).toBe('ACTIVE')
+    expect(res.body.data[0].isCanonicalAdmin).toBe(false)
     expect(res.body.meta.total).toBe(1)
     expect(res.body.meta.page).toBe(1)
   })
@@ -457,11 +482,16 @@ describe('GET /api/v1/customers/:customerId/users', () => {
     User.countDocuments.mockResolvedValue(0)
 
     const res = await request
-      .get(`/api/v1/customers/${CUSTOMER_ID}/users?q=jane`)
+      .get(`/api/v1/customers/${CUSTOMER_ID}/users?q=jane%2Bdemo`)
       .set('Authorization', `Bearer ${token}`)
 
     expect(res.status).toBe(200)
-    expect(User.find).toHaveBeenCalled()
+    expect(User.find).toHaveBeenCalledWith(expect.objectContaining({
+      $or: [
+        { name: { $regex: 'jane\\+demo', $options: 'i' } },
+        { email: { $regex: 'jane\\+demo', $options: 'i' } },
+      ],
+    }))
   })
 
   test('supports status filter', async () => {
@@ -491,6 +521,113 @@ describe('GET /api/v1/customers/:customerId/users', () => {
       .set('Authorization', `Bearer ${token}`)
 
     expect(res.status).toBe(200)
+    expect(User.find).toHaveBeenCalledWith(expect.objectContaining({ isActive: true }))
+  })
+
+  test('treats empty q as unset filter', async () => {
+    const token = await getCustomerAdminToken()
+    Customer.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ID) return Promise.resolve(makeFakeCustomer())
+      return Promise.resolve(null)
+    })
+    User.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ADMIN_ID) return Promise.resolve(makeCustomerAdmin())
+      return Promise.resolve(null)
+    })
+
+    User.find.mockReturnValue({
+      sort: jest.fn().mockReturnValue({
+        skip: jest.fn().mockReturnValue({
+          limit: jest.fn().mockReturnValue({
+            lean: jest.fn().mockResolvedValue([]),
+          }),
+        }),
+      }),
+    })
+    User.countDocuments.mockResolvedValue(0)
+
+    const res = await request
+      .get(`/api/v1/customers/${CUSTOMER_ID}/users?q=`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(User.find).toHaveBeenCalledWith({ 'memberships.customerId': CUSTOMER_ID })
+    expect(res.body.meta.filters.q).toBe(null)
+  })
+
+  test('treats empty role as unset filter', async () => {
+    const token = await getCustomerAdminToken()
+    Customer.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ID) return Promise.resolve(makeFakeCustomer())
+      return Promise.resolve(null)
+    })
+    User.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ADMIN_ID) return Promise.resolve(makeCustomerAdmin())
+      return Promise.resolve(null)
+    })
+
+    User.find.mockReturnValue({
+      sort: jest.fn().mockReturnValue({
+        skip: jest.fn().mockReturnValue({
+          limit: jest.fn().mockReturnValue({
+            lean: jest.fn().mockResolvedValue([]),
+          }),
+        }),
+      }),
+    })
+    User.countDocuments.mockResolvedValue(0)
+
+    const res = await request
+      .get(`/api/v1/customers/${CUSTOMER_ID}/users?role=`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(User.find).toHaveBeenCalledWith({ 'memberships.customerId': CUSTOMER_ID })
+    expect(res.body.meta.filters.role).toBe(null)
+  })
+
+  test('supports role filter and marks canonical admin rows', async () => {
+    const token = await getSuperAdminToken()
+    Customer.findById.mockResolvedValue(
+      makeFakeCustomer({
+        governance: { customerAdminUserId: REGULAR_USER_ID },
+      }),
+    )
+    User.findById.mockImplementation((id) => {
+      if (id === SUPER_ADMIN_ID) return Promise.resolve(makeSuperAdmin())
+      return Promise.resolve(null)
+    })
+
+    const canonicalUserLean = {
+      ...makeRegularUser({
+        memberships: [{ customerId: CUSTOMER_ID, roles: ['CUSTOMER_ADMIN', 'USER'] }],
+      }),
+    }
+    delete canonicalUserLean.toJSON
+    delete canonicalUserLean.save
+    const users = [canonicalUserLean]
+    User.find.mockReturnValue({
+      sort: jest.fn().mockReturnValue({
+        skip: jest.fn().mockReturnValue({
+          limit: jest.fn().mockReturnValue({
+            lean: jest.fn().mockResolvedValue(users),
+          }),
+        }),
+      }),
+    })
+    User.countDocuments.mockResolvedValue(1)
+
+    const res = await request
+      .get(`/api/v1/customers/${CUSTOMER_ID}/users?role=CUSTOMER_ADMIN&status=ACTIVE`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(User.find).toHaveBeenCalledWith(expect.objectContaining({
+      memberships: { $elemMatch: { customerId: CUSTOMER_ID, roles: 'CUSTOMER_ADMIN' } },
+      isActive: true,
+    }))
+    expect(res.body.data[0].customerRoles).toEqual(['CUSTOMER_ADMIN', 'USER'])
+    expect(res.body.data[0].isCanonicalAdmin).toBe(true)
   })
 })
 

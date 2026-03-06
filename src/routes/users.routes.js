@@ -22,6 +22,7 @@ import { requireCustomerAccess, requirePlatformRole } from '../middleware/author
 import requireCustomerActive from '../middleware/customerStatus.js'
 import { userManagementRateLimit } from '../middleware/rateLimits.js'
 import {
+  validateListUsersQuery,
   validateCreateUser,
   validateUpdateUser,
   validateResendInvitation,
@@ -49,7 +50,7 @@ customerUserRouter.use(
   requireCustomerActive(),
 )
 
-customerUserRouter.get('/', listUsers)
+customerUserRouter.get('/', validateListUsersQuery, listUsers)
 customerUserRouter.post('/', userManagementRateLimit, validateCreateUser, createUser)
 customerUserRouter.get('/:userId', getUser)
 
