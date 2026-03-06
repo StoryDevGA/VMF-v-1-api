@@ -40,18 +40,42 @@ const tenantVisibilitySchema = z
     z.string().regex(objectIdRegex, 'Each tenant ID must be a valid ObjectId'),
   )
   .optional()
-  .default([])
 
 /* ------------------------------------------------------------------ */
 /*  Schemas                                                           */
 /* ------------------------------------------------------------------ */
 
-const createUserSchema = z.object({
-  name: nameSchema,
-  email: emailSchema,
-  roles: rolesSchema,
-  tenantVisibility: tenantVisibilitySchema,
-})
+const createUserSchema = z
+  .object({
+    existingUserId: z
+      .string()
+      .regex(objectIdRegex, 'existingUserId must be a valid ObjectId')
+      .optional(),
+    name: nameSchema.optional(),
+    email: emailSchema.optional(),
+    roles: rolesSchema,
+    tenantVisibility: tenantVisibilitySchema,
+  })
+  .superRefine((val, ctx) => {
+    const isExistingUserPath = Boolean(val.existingUserId)
+    if (isExistingUserPath) return
+
+    if (!val.name) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['name'],
+        message: 'name is required when existingUserId is not provided',
+      })
+    }
+
+    if (!val.email) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['email'],
+        message: 'email is required when existingUserId is not provided',
+      })
+    }
+  })
 
 const updateUserSchema = z.object({
   name: z

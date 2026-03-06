@@ -695,7 +695,102 @@ describe('POST /api/v1/customers/:customerId/users', () => {
       })
 
     expect(res.status).toBe(409)
-    expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.code).toBe('USER_ALREADY_EXISTS')
+    expect(res.body.error.details?.reason).toBe('already-in-customer')
+  })
+
+  test('returns 409 USER_ALREADY_EXISTS with other-customer reason for duplicate email in another customer', async () => {
+    const token = await getCustomerAdminToken()
+    const externalCustomerUser = makeRegularUser({
+      memberships: [{ customerId: '607f1f77bcf86cd799439099', roles: ['USER'] }],
+    })
+
+    Customer.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ID) return Promise.resolve(makeFakeCustomer())
+      return Promise.resolve(null)
+    })
+    User.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ADMIN_ID) return Promise.resolve(makeCustomerAdmin())
+      return Promise.resolve(null)
+    })
+    User.findOne.mockResolvedValue(externalCustomerUser)
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/users`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        name: 'External User',
+        email: 'external@acme.com',
+        roles: ['USER'],
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('USER_ALREADY_EXISTS')
+    expect(res.body.error.details?.reason).toBe('other-customer')
+    expect(res.body.error.details?.targetCustomerId).toBe(CUSTOMER_ID)
+  })
+
+  test('assigns roles to existing user without dispatching invitation', async () => {
+    const token = await getCustomerAdminToken()
+    const existingUser = makeRegularUser({
+      memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+    })
+    const sendInvitationSpy = jest.spyOn(identityPlusService, 'sendInvitation')
+
+    Customer.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ID) return Promise.resolve(makeFakeCustomer())
+      return Promise.resolve(null)
+    })
+    User.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ADMIN_ID) return Promise.resolve(makeCustomerAdmin())
+      if (id === REGULAR_USER_ID) return Promise.resolve(existingUser)
+      return Promise.resolve(null)
+    })
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/users`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        existingUserId: REGULAR_USER_ID,
+        roles: ['TENANT_ADMIN'],
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.outcome).toBe('assigned_existing')
+    expect(res.body.data.invitationDispatched).toBe(false)
+    expect(sendInvitationSpy).not.toHaveBeenCalled()
+    expect(existingUser.memberships[0].roles).toEqual(['TENANT_ADMIN'])
+
+    sendInvitationSpy.mockRestore()
+  })
+
+  test('returns 409 when selected existing user belongs to another customer', async () => {
+    const token = await getCustomerAdminToken()
+    const externalCustomerUser = makeRegularUser({
+      memberships: [{ customerId: '607f1f77bcf86cd799439099', roles: ['USER'] }],
+    })
+
+    Customer.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ID) return Promise.resolve(makeFakeCustomer())
+      return Promise.resolve(null)
+    })
+    User.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ADMIN_ID) return Promise.resolve(makeCustomerAdmin())
+      if (id === REGULAR_USER_ID) return Promise.resolve(externalCustomerUser)
+      return Promise.resolve(null)
+    })
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/users`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        existingUserId: REGULAR_USER_ID,
+        roles: ['USER'],
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('USER_CUSTOMER_CONFLICT')
+    expect(res.body.error.details?.reason).toBe('other-customer')
   })
 
   test('returns 422 when tenantVisibility IDs do not belong to customer', async () => {

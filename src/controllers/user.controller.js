@@ -53,6 +53,90 @@ const mapUserListRow = ({ user, customerId, canonicalAdminUserId }) => {
   }
 }
 
+const normalizeEmail = (value) => String(value || '').trim().toLowerCase()
+
+const normalizeRoleList = (roles) =>
+  Array.from(
+    new Set(
+      (Array.isArray(roles) ? roles : [])
+        .map((role) => String(role || '').trim())
+        .filter(Boolean),
+    ),
+  )
+
+const listCustomerMembershipIds = (user) =>
+  Array.from(
+    new Set(
+      (user?.memberships || [])
+        .filter((membership) => membership?.customerId)
+        .map((membership) => toIdString(membership.customerId))
+        .filter(Boolean),
+    ),
+  )
+
+const arraysEqual = (left = [], right = []) =>
+  left.length === right.length && left.every((value, index) => value === right[index])
+
+const buildUserAlreadyExistsDetails = ({ existingUser, customerId }) => {
+  const existingCustomerIds = listCustomerMembershipIds(existingUser)
+  const inTargetCustomer = existingCustomerIds.includes(customerId)
+  const hasOtherCustomerMembership = existingCustomerIds.some((id) => id !== customerId)
+
+  let reason = 'existing-identity'
+  if (inTargetCustomer) reason = 'already-in-customer'
+  else if (hasOtherCustomerMembership) reason = 'other-customer'
+
+  return {
+    reason,
+    existingUserId: toIdString(existingUser?._id),
+    existingCustomerIds,
+    targetCustomerId: customerId,
+  }
+}
+
+const upsertCustomerTenantVisibility = ({ user, customerId, tenantVisibility }) => {
+  if (tenantVisibility === undefined) {
+    return null
+  }
+
+  const targetCustomerId = toIdString(customerId)
+  const existingTenantMemberships = (user?.tenantMemberships || []).filter(
+    (membership) => toIdString(membership?.customerId) === targetCustomerId,
+  )
+  const previousTenantVisibility = existingTenantMemberships
+    .map((membership) => toIdString(membership?.tenantId))
+    .filter(Boolean)
+  const nextTenantVisibility = tenantVisibility
+    .map((tenantId) => toIdString(tenantId))
+    .filter(Boolean)
+
+  if (arraysEqual(previousTenantVisibility, nextTenantVisibility)) {
+    return {
+      changed: false,
+      previousTenantVisibility,
+      nextTenantVisibility,
+    }
+  }
+
+  user.tenantMemberships = (user.tenantMemberships || []).filter(
+    (membership) => toIdString(membership?.customerId) !== targetCustomerId,
+  )
+
+  nextTenantVisibility.forEach((tenantId) => {
+    user.tenantMemberships.push({
+      customerId: targetCustomerId,
+      tenantId,
+      roles: ['USER'],
+    })
+  })
+
+  return {
+    changed: true,
+    previousTenantVisibility,
+    nextTenantVisibility,
+  }
+}
+
 const buildGovernanceErrorResponse = (req, err) => ({
   error: {
     code: err.code || (err.status === 409 ? 'CONFLICT' : 'VALIDATION_FAILED'),
@@ -139,13 +223,19 @@ export const listUsers = async (req, res, next) => {
 /* ------------------------------------------------------------------ */
 
 /**
- * Create a new user, assign roles + tenant visibility,
- * and trigger an Identity Plus invitation.
+ * Create/invite a new user or assign roles to an existing user.
  */
 export const createUser = async (req, res, next) => {
   try {
     const { customerId } = req.params
-    const { name, email, roles, tenantVisibility } = req.body
+    const {
+      existingUserId,
+      name,
+      email,
+      roles,
+      tenantVisibility,
+    } = req.body
+    const normalizedRoles = normalizeRoleList(roles)
 
     // 1. Verify customer exists
     const customer = req.scopes?.customer || await Customer.findById(customerId)
@@ -159,19 +249,7 @@ export const createUser = async (req, res, next) => {
       })
     }
 
-    // 2. Check for duplicate email
-    const existing = await User.findOne({ email })
-    if (existing) {
-      return res.status(409).json({
-        error: {
-          code: 'CONFLICT',
-          message: 'A user with this email already exists.',
-          requestId: req.requestId,
-        },
-      })
-    }
-
-    // 3. Validate tenant visibility IDs belong to this customer
+    // 2. Validate tenant visibility IDs belong to this customer
     if (tenantVisibility && tenantVisibility.length > 0) {
       const validTenants = await Tenant.countDocuments({
         _id: { $in: tenantVisibility },
@@ -189,13 +267,207 @@ export const createUser = async (req, res, next) => {
       }
     }
 
+    // Existing-user assignment path (no invitation dispatch)
+    if (existingUserId) {
+      const user = await User.findById(existingUserId)
+      if (!user) {
+        return res.status(404).json({
+          error: {
+            code: 'NOT_FOUND',
+            message: 'User not found.',
+            requestId: req.requestId,
+          },
+        })
+      }
+
+      if (!user.isActive) {
+        return res.status(422).json({
+          error: {
+            code: 'VALIDATION_FAILED',
+            message: 'Cannot assign roles to an inactive user.',
+            requestId: req.requestId,
+          },
+        })
+      }
+
+      const membershipCustomerIds = listCustomerMembershipIds(user)
+      const hasTargetMembership = membershipCustomerIds.includes(customerId)
+      const conflictingCustomerIds = membershipCustomerIds.filter((id) => id !== customerId)
+
+      if (!hasTargetMembership && conflictingCustomerIds.length > 0) {
+        return res.status(409).json({
+          error: {
+            code: 'USER_CUSTOMER_CONFLICT',
+            message: 'Selected user belongs to another customer and cannot be assigned here.',
+            details: {
+              reason: 'other-customer',
+              existingUserId: toIdString(user._id),
+              existingCustomerIds: conflictingCustomerIds,
+              targetCustomerId: customerId,
+            },
+            requestId: req.requestId,
+          },
+        })
+      }
+
+      const previousCanonicalAdminUserId = toIdString(customer.governance?.customerAdminUserId)
+      let membership = resolveCustomerMembership(user, customerId)
+      const previousRoles = normalizeRoleList(membership?.roles || [])
+      let userChanged = false
+      let customerGovernanceChanged = false
+      let createdMembership = false
+
+      if (membership) {
+        const governanceDecision = customerGovernanceService.validateUserRoleUpdate({
+          customer,
+          user,
+          nextRoles: normalizedRoles,
+        })
+
+        if (!arraysEqual(previousRoles, normalizedRoles)) {
+          membership.roles = normalizedRoles
+          userChanged = true
+        }
+
+        if (governanceDecision.shouldSetCanonicalAdminUserId) {
+          customer.governance = {
+            ...(customer.governance || {}),
+            customerAdminUserId: user._id,
+          }
+          customerGovernanceChanged = true
+        }
+
+        if (governanceDecision.shouldClearCanonicalAdminUserId) {
+          customer.governance = {
+            ...(customer.governance || {}),
+            customerAdminUserId: null,
+          }
+          customerGovernanceChanged = true
+        }
+      } else if (normalizedRoles.includes(customerGovernanceService.CUSTOMER_ADMIN_ROLE)) {
+        await customerGovernanceService.applyCustomerAdminAssignment({
+          customer,
+          user,
+        })
+        membership = resolveCustomerMembership(user, customerId)
+        createdMembership = true
+        if (membership && !arraysEqual(normalizeRoleList(membership.roles || []), normalizedRoles)) {
+          membership.roles = normalizedRoles
+          userChanged = true
+        }
+      } else {
+        user.memberships.push({
+          customerId,
+          roles: normalizedRoles,
+        })
+        createdMembership = true
+        userChanged = true
+      }
+
+      const tenantVisibilityResult = upsertCustomerTenantVisibility({
+        user,
+        customerId,
+        tenantVisibility,
+      })
+      if (tenantVisibilityResult?.changed) {
+        userChanged = true
+      }
+
+      if (userChanged) {
+        await user.save()
+      }
+
+      const nextCanonicalAdminUserId = toIdString(customer.governance?.customerAdminUserId)
+      if (nextCanonicalAdminUserId !== previousCanonicalAdminUserId) {
+        customerGovernanceChanged = true
+      }
+
+      if (customerGovernanceChanged) {
+        await customer.save()
+      }
+
+      await Promise.all([
+        performanceCacheService.invalidateUserPermissions(user._id),
+        ...(customerGovernanceChanged
+          ? [performanceCacheService.invalidateCustomerTopology(customer._id)]
+          : []),
+      ])
+
+      await auditService.logFromRequest(req, {
+        action: 'USER_ROLE_UPDATED',
+        resourceType: 'User',
+        resourceId: user._id,
+        scope: { customerId },
+        diff: {
+          source: 'existing_user_assignment',
+          existingUserId: toIdString(user._id),
+          createdMembership,
+          roles: {
+            from: previousRoles,
+            to: normalizedRoles,
+          },
+          ...(tenantVisibilityResult
+            ? {
+                tenantVisibility: {
+                  from: tenantVisibilityResult.previousTenantVisibility,
+                  to: tenantVisibilityResult.nextTenantVisibility,
+                },
+              }
+            : {}),
+          ...(nextCanonicalAdminUserId
+            ? { canonicalAdminUserId: nextCanonicalAdminUserId }
+            : {}),
+        },
+      })
+
+      if (customerGovernanceChanged) {
+        await auditService.logFromRequest(req, {
+          action: 'CUSTOMER_ADMIN_CANONICAL_SET',
+          resourceType: 'Customer',
+          resourceId: customer._id,
+          scope: { customerId },
+          diff: {
+            from: previousCanonicalAdminUserId,
+            to: nextCanonicalAdminUserId,
+            source: 'existing_user_assignment',
+          },
+        })
+      }
+
+      return res.status(200).json({
+        data: {
+          ...user.toJSON(),
+          outcome: 'assigned_existing',
+          invitationDispatched: false,
+          invitationOutcome: 'none',
+          customerId,
+          canonicalAdminUserId: nextCanonicalAdminUserId,
+        },
+        meta: { requestId: req.requestId, version: 'v1' },
+      })
+    }
+
+    // 3. Check for duplicate identity on create/invite path
+    const normalizedEmail = normalizeEmail(email)
+    const existing = await User.findOne({ email: normalizedEmail })
+    if (existing) {
+      return res.status(409).json({
+        error: {
+          code: 'USER_ALREADY_EXISTS',
+          message: 'A user with this email already exists. Use existing-user assignment path.',
+          details: buildUserAlreadyExistsDetails({ existingUser: existing, customerId }),
+          requestId: req.requestId,
+        },
+      })
+    }
+
     // 4. Create user with customer membership
     const user = new User({
       name,
-      email,
+      email: normalizedEmail,
       isActive: true,
       identityPlus: { trustStatus: 'UNTRUSTED' },
-      memberships: [{ customerId, roles }],
+      memberships: [{ customerId, roles: normalizedRoles }],
       tenantMemberships: (tenantVisibility || []).map((tenantId) => ({
         customerId,
         tenantId,
@@ -203,8 +475,9 @@ export const createUser = async (req, res, next) => {
       })),
     })
 
-    const requestsCustomerAdminRole = Array.isArray(roles) &&
-      roles.includes(customerGovernanceService.CUSTOMER_ADMIN_ROLE)
+    const requestsCustomerAdminRole = normalizedRoles.includes(
+      customerGovernanceService.CUSTOMER_ADMIN_ROLE,
+    )
 
     let canonicalAdminUserId = null
     if (requestsCustomerAdminRole) {
@@ -222,9 +495,10 @@ export const createUser = async (req, res, next) => {
 
     // 5. Send Identity Plus invitation
     let invitationResult = null
+    let invitationOutcome = 'sent'
     try {
       invitationResult = await identityPlusService.sendInvitation({
-        email,
+        email: normalizedEmail,
         customerId,
       })
 
@@ -239,8 +513,9 @@ export const createUser = async (req, res, next) => {
       // Invitation failure is non-fatal — user is still created
       logger.warn(
         { err: invErr, email, customerId },
-        'Identity Plus invitation failed; user created without invitation',
-      )
+          'Identity Plus invitation failed; user created without invitation',
+        )
+      invitationOutcome = 'send_failed'
     }
     await performanceCacheService.invalidateUserPermissions(user._id)
 
@@ -252,9 +527,11 @@ export const createUser = async (req, res, next) => {
       scope: { customerId },
       diff: {
         name,
-        email,
-        roles,
+        email: normalizedEmail,
+        roles: normalizedRoles,
         tenantVisibility,
+        outcome: 'invited_new',
+        invitationOutcome,
         ...(canonicalAdminUserId ? { canonicalAdminUserId } : {}),
       },
     })
@@ -279,12 +556,20 @@ export const createUser = async (req, res, next) => {
         resourceType: 'User',
         resourceId: user._id,
         scope: { customerId },
-        diff: { email, externalId: invitationResult.externalId },
+        diff: { email: normalizedEmail, externalId: invitationResult.externalId },
       })
     }
 
+    const nextCanonicalAdminUserId = toIdString(customer.governance?.customerAdminUserId)
     return res.status(201).json({
-      data: user.toJSON(),
+      data: {
+        ...user.toJSON(),
+        outcome: 'invited_new',
+        invitationDispatched: invitationOutcome === 'sent',
+        invitationOutcome,
+        customerId,
+        canonicalAdminUserId: nextCanonicalAdminUserId,
+      },
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
