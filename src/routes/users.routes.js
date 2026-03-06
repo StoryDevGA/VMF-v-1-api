@@ -32,6 +32,7 @@ import {
   createUser,
   getUser,
   updateUser,
+  enableUser,
   disableUser,
   deleteUser,
   resendInvitation,
@@ -63,6 +64,7 @@ export const userRouter = Router()
 userRouter.use(authJwt, loadScopes, requirePlatformRole('SUPER_ADMIN'))
 
 userRouter.patch('/:userId', userManagementRateLimit, validateUpdateUser, updateUser)
+userRouter.post('/:userId/enable', userManagementRateLimit, enableUser)
 userRouter.post('/:userId/disable', userManagementRateLimit, disableUser)
 userRouter.delete('/:userId', userManagementRateLimit, deleteUser)
 userRouter.post(

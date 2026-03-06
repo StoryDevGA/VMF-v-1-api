@@ -6,6 +6,7 @@
  *   - POST   /api/v1/customers/:customerId/users           Create user + invitation
  *   - GET    /api/v1/customers/:customerId/users/:userId   Get single user
  *   - PATCH  /api/v1/users/:userId                          Update user
+ *   - POST   /api/v1/users/:userId/enable                   Reactivate user
  *   - POST   /api/v1/users/:userId/disable                  Disable user
  *   - DELETE /api/v1/users/:userId                          Delete disabled user
  *   - POST   /api/v1/users/:userId/resend-invitation        Resend invitation
@@ -849,6 +850,79 @@ export const updateUser = async (req, res, next) => {
         },
       })
     }
+    next(err)
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  POST /api/v1/users/:userId/enable                                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Reactivate a disabled user.
+ * If trust has been revoked, move to UNTRUSTED so invitation resend flow can recover access.
+ */
+export const enableUser = async (req, res, next) => {
+  try {
+    const { userId } = req.params
+
+    const user = await User.findById(userId)
+
+    if (!user) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: 'User not found.',
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    if (user.isActive) {
+      return res.status(422).json({
+        error: {
+          code: 'VALIDATION_FAILED',
+          message: 'User is already active.',
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    const previousTrustStatus = user.identityPlus?.trustStatus || null
+
+    user.isActive = true
+    if (!user.identityPlus || typeof user.identityPlus !== 'object') {
+      user.identityPlus = {}
+    }
+    if (user.identityPlus.trustStatus === 'REVOKED') {
+      user.identityPlus.trustStatus = 'UNTRUSTED'
+    }
+
+    const nextTrustStatus = user.identityPlus?.trustStatus || null
+
+    await user.save()
+    await performanceCacheService.invalidateUserPermissions(user._id)
+
+    await auditService.logFromRequest(req, {
+      action: 'USER_ENABLED',
+      resourceType: 'User',
+      resourceId: user._id,
+      scope: {
+        customerId: user.memberships.find((m) => m.customerId !== null)?.customerId,
+      },
+      diff: {
+        isActive: { from: false, to: true },
+        ...(previousTrustStatus !== nextTrustStatus
+          ? { trustStatus: { from: previousTrustStatus, to: nextTrustStatus } }
+          : {}),
+      },
+    })
+
+    return res.status(200).json({
+      data: user.toJSON(),
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
     next(err)
   }
 }

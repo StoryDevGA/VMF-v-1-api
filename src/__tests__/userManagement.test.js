@@ -255,6 +255,7 @@ describe('User Validators', () => {
       expect(res.status).toBe(422)
       expect(res.body.error.code).toBe('VALIDATION_FAILED')
       expect(res.body.error.details).toHaveProperty('name')
+      expect(Object.keys(res.body.error.details).sort()).toEqual(['name'])
     })
 
     test('returns 422 when email is invalid', async () => {
@@ -276,6 +277,7 @@ describe('User Validators', () => {
       expect(res.status).toBe(422)
       expect(res.body.error.code).toBe('VALIDATION_FAILED')
       expect(res.body.error.details).toHaveProperty('email')
+      expect(Object.keys(res.body.error.details).sort()).toEqual(['email'])
     })
 
     test('returns 422 when roles is empty array', async () => {
@@ -297,6 +299,7 @@ describe('User Validators', () => {
       expect(res.status).toBe(422)
       expect(res.body.error.code).toBe('VALIDATION_FAILED')
       expect(res.body.error.details).toHaveProperty('roles')
+      expect(Object.keys(res.body.error.details).sort()).toEqual(['roles'])
     })
 
     test('returns 422 when tenantVisibility contains invalid ObjectId', async () => {
@@ -322,6 +325,53 @@ describe('User Validators', () => {
 
       expect(res.status).toBe(422)
       expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    })
+
+    test('returns 422 with assign-mode field key existingUserId when existingUserId is invalid', async () => {
+      const token = await getCustomerAdminToken()
+      Customer.findById.mockImplementation((id) => {
+        if (id === CUSTOMER_ID) return Promise.resolve(makeFakeCustomer())
+        return Promise.resolve(null)
+      })
+      User.findById.mockImplementation((id) => {
+        if (id === CUSTOMER_ADMIN_ID) return Promise.resolve(makeCustomerAdmin())
+        return Promise.resolve(null)
+      })
+
+      const res = await request
+        .post(`/api/v1/customers/${CUSTOMER_ID}/users`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          existingUserId: 'not-an-id',
+          roles: ['USER'],
+        })
+
+      expect(res.status).toBe(422)
+      expect(res.body.error.code).toBe('VALIDATION_FAILED')
+      expect(Object.keys(res.body.error.details).sort()).toEqual(['existingUserId'])
+    })
+
+    test('returns 422 with assign-mode field key roles when roles are missing', async () => {
+      const token = await getCustomerAdminToken()
+      Customer.findById.mockImplementation((id) => {
+        if (id === CUSTOMER_ID) return Promise.resolve(makeFakeCustomer())
+        return Promise.resolve(null)
+      })
+      User.findById.mockImplementation((id) => {
+        if (id === CUSTOMER_ADMIN_ID) return Promise.resolve(makeCustomerAdmin())
+        return Promise.resolve(null)
+      })
+
+      const res = await request
+        .post(`/api/v1/customers/${CUSTOMER_ID}/users`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          existingUserId: REGULAR_USER_ID,
+        })
+
+      expect(res.status).toBe(422)
+      expect(res.body.error.code).toBe('VALIDATION_FAILED')
+      expect(Object.keys(res.body.error.details).sort()).toEqual(['roles'])
     })
   })
 
@@ -668,9 +718,54 @@ describe('POST /api/v1/customers/:customerId/users', () => {
     expect(res.status).toBe(201)
     expect(res.body.data).toBeDefined()
     expect(res.body.data.email).toBe('jane@example.com')
+    expect(res.body.data.outcome).toBe('invited_new')
+    expect(res.body.data.invitationDispatched).toBe(true)
+    expect(res.body.data.invitationOutcome).toBe('sent')
     expect(AuditLog.createLog).toHaveBeenCalled()
 
     User.prototype.save = origSave
+  })
+
+  test('returns invited_new with send_failed when invitation dispatch fails', async () => {
+    const token = await getCustomerAdminToken()
+    Customer.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ID) return Promise.resolve(makeFakeCustomer())
+      return Promise.resolve(null)
+    })
+    User.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ADMIN_ID) return Promise.resolve(makeCustomerAdmin())
+      return Promise.resolve(null)
+    })
+    User.findOne.mockResolvedValue(null) // no duplicate
+    const sendInvitationSpy = jest
+      .spyOn(identityPlusService, 'sendInvitation')
+      .mockRejectedValueOnce(new Error('identity plus unavailable'))
+
+    // Mock User constructor .save()
+    const origSave = User.prototype.save
+    User.prototype.save = jest.fn(async function () {
+      this._id = NEW_USER_ID
+      this.id = NEW_USER_ID
+      return this
+    })
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/users`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        name: 'Jane User',
+        email: 'jane@example.com',
+        roles: ['USER'],
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data).toBeDefined()
+    expect(res.body.data.outcome).toBe('invited_new')
+    expect(res.body.data.invitationDispatched).toBe(false)
+    expect(res.body.data.invitationOutcome).toBe('send_failed')
+
+    User.prototype.save = origSave
+    sendInvitationSpy.mockRestore()
   })
 
   test('returns 409 when email already exists', async () => {
@@ -758,6 +853,7 @@ describe('POST /api/v1/customers/:customerId/users', () => {
     expect(res.status).toBe(200)
     expect(res.body.data.outcome).toBe('assigned_existing')
     expect(res.body.data.invitationDispatched).toBe(false)
+    expect(res.body.data.invitationOutcome).toBe('none')
     expect(sendInvitationSpy).not.toHaveBeenCalled()
     expect(existingUser.memberships[0].roles).toEqual(['TENANT_ADMIN'])
 
@@ -1099,6 +1195,69 @@ describe('PATCH /api/v1/users/:userId', () => {
 
     expect(res.status).toBe(422)
     expect(res.body.error.code).toBe('VALIDATION_FAILED')
+  })
+})
+
+/* ================================================================== */
+/*  ENABLE USER                                                       */
+/* ================================================================== */
+
+describe('POST /api/v1/users/:userId/enable', () => {
+  test('reactivates a disabled user and resets revoked trust to UNTRUSTED', async () => {
+    const token = await getSuperAdminToken()
+    const user = makeRegularUser({
+      isActive: false,
+      identityPlus: { trustStatus: 'REVOKED', externalId: 'ext_1' },
+    })
+
+    User.findById.mockImplementation((id) => {
+      if (id === SUPER_ADMIN_ID) return Promise.resolve(makeSuperAdmin())
+      if (id === REGULAR_USER_ID) return Promise.resolve(user)
+      return Promise.resolve(null)
+    })
+
+    const res = await request
+      .post(`/api/v1/users/${REGULAR_USER_ID}/enable`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(user.isActive).toBe(true)
+    expect(user.identityPlus.trustStatus).toBe('UNTRUSTED')
+    expect(user.save).toHaveBeenCalled()
+    expect(AuditLog.createLog).toHaveBeenCalled()
+  })
+
+  test('returns 422 when user is already active', async () => {
+    const token = await getSuperAdminToken()
+    const user = makeRegularUser({ isActive: true })
+
+    User.findById.mockImplementation((id) => {
+      if (id === SUPER_ADMIN_ID) return Promise.resolve(makeSuperAdmin())
+      if (id === REGULAR_USER_ID) return Promise.resolve(user)
+      return Promise.resolve(null)
+    })
+
+    const res = await request
+      .post(`/api/v1/users/${REGULAR_USER_ID}/enable`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+  })
+
+  test('returns 404 when user does not exist', async () => {
+    const token = await getSuperAdminToken()
+
+    User.findById.mockImplementation((id) => {
+      if (id === SUPER_ADMIN_ID) return Promise.resolve(makeSuperAdmin())
+      return Promise.resolve(null)
+    })
+
+    const res = await request
+      .post(`/api/v1/users/${NEW_USER_ID}/enable`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(404)
   })
 })
 
