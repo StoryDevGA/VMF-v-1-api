@@ -386,6 +386,8 @@ describe('User Validators', () => {
 
       expect(res.status).toBe(422)
       expect(res.body.error.code).toBe('VALIDATION_FAILED')
+      expect(res.body.error.details).toHaveProperty('name')
+      expect(Object.keys(res.body.error.details).sort()).toEqual(['name'])
     })
 
     test('returns 422 when roles is empty array', async () => {
@@ -398,6 +400,21 @@ describe('User Validators', () => {
 
       expect(res.status).toBe(422)
       expect(res.body.error.code).toBe('VALIDATION_FAILED')
+      expect(res.body.error.details).toHaveProperty('roles')
+      expect(Object.keys(res.body.error.details).sort()).toEqual(['roles'])
+    })
+
+    test('returns 422 with field keys name and roles when both are invalid', async () => {
+      const token = await getSuperAdminToken()
+
+      const res = await request
+        .patch(`/api/v1/users/${REGULAR_USER_ID}`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ name: '', roles: [] })
+
+      expect(res.status).toBe(422)
+      expect(res.body.error.code).toBe('VALIDATION_FAILED')
+      expect(Object.keys(res.body.error.details).sort()).toEqual(['name', 'roles'])
     })
   })
 
@@ -1139,6 +1156,7 @@ describe('PATCH /api/v1/users/:userId', () => {
 
     expect(res.status).toBe(409)
     expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.details?.canonicalAdminUserId).toBe(CUSTOMER_ADMIN_ID)
   })
 
   test('updates tenant visibility', async () => {
