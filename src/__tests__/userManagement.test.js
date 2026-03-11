@@ -480,6 +480,29 @@ describe('User authorization guards', () => {
 
     expect(res.status).toBe(403)
   })
+
+  test('customer user routes return stable inactive-customer payload when membership is inactive', async () => {
+    const token = await getCustomerAdminToken()
+
+    Customer.findById.mockResolvedValue(
+      makeFakeCustomer({ status: 'DISABLED' }),
+    )
+    User.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ADMIN_ID) return Promise.resolve(makeCustomerAdmin())
+      return Promise.resolve(null)
+    })
+
+    const res = await request
+      .get(`/api/v1/customers/${CUSTOMER_ID}/users`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('CUSTOMER_INACTIVE')
+    expect(res.body.error.message).toBe('This customer is inactive. Contact your administrator.')
+    expect(res.body.error.details?.reason).toBe('CUSTOMER_INACTIVE')
+    expect(res.body.error.details?.inactiveCustomerIds).toEqual([CUSTOMER_ID])
+    expect(res.body.error.requestId).toBeDefined()
+  })
 })
 
 /* ================================================================== */
@@ -520,6 +543,7 @@ describe('GET /api/v1/customers/:customerId/users', () => {
     expect(res.status).toBe(200)
     expect(res.body.data).toHaveLength(1)
     expect(res.body.data[0].customerRoles).toEqual(['USER'])
+    expect(res.body.data[0].tenantVisibility).toEqual([TENANT_ID])
     expect(res.body.data[0].status).toBe('ACTIVE')
     expect(res.body.data[0].isCanonicalAdmin).toBe(false)
     expect(res.body.meta.total).toBe(1)
@@ -931,6 +955,7 @@ describe('POST /api/v1/customers/:customerId/users', () => {
 
     expect(res.status).toBe(422)
     expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details?.reason).toBe('TENANT_VISIBILITY_INVALID_TENANT_IDS')
   })
 
   test('creates user with tenant visibility when valid', async () => {
@@ -964,8 +989,45 @@ describe('POST /api/v1/customers/:customerId/users', () => {
       })
 
     expect(res.status).toBe(201)
+    expect(res.body.data.tenantVisibility).toEqual([TENANT_ID])
 
     User.prototype.save = origSave
+  })
+
+  test('returns 422 when tenant visibility is sent for a single-tenant customer', async () => {
+    const token = await getCustomerAdminToken()
+    Customer.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ID) {
+        return Promise.resolve(
+          makeFakeCustomer({
+            topology: 'SINGLE_TENANT',
+            vmfPolicy: 'SINGLE',
+          }),
+        )
+      }
+      return Promise.resolve(null)
+    })
+    User.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ADMIN_ID) return Promise.resolve(makeCustomerAdmin())
+      return Promise.resolve(null)
+    })
+    User.findOne.mockResolvedValue(null)
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/users`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        name: 'Jane User',
+        email: 'jane@example.com',
+        roles: ['USER'],
+        tenantVisibility: [TENANT_ID],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details?.reason).toBe('TENANT_VISIBILITY_NOT_ALLOWED')
+    expect(res.body.error.details?.tenantVisibility).toMatch(/not allowed in this mode/i)
+    expect(res.body.error.details?.tenantVisibilityMode).toBe('DISALLOWED')
   })
 
   test('returns 404 when customer does not exist', async () => {
@@ -1017,6 +1079,10 @@ describe('GET /api/v1/customers/:customerId/users/:userId', () => {
 
     expect(res.status).toBe(200)
     expect(res.body.data.email).toBe('user@acme.com')
+    expect(res.body.data.status).toBe('ACTIVE')
+    expect(res.body.data.customerRoles).toEqual(['USER'])
+    expect(res.body.data.tenantVisibility).toEqual([TENANT_ID])
+    expect(res.body.data.isCanonicalAdmin).toBe(false)
   })
 
   test('returns 404 when user does not exist', async () => {
@@ -1067,6 +1133,31 @@ describe('GET /api/v1/customers/:customerId/users/:userId', () => {
 /* ================================================================== */
 
 describe('PATCH /api/v1/users/:userId', () => {
+  test('returns 403 when target user belongs to an inactive customer', async () => {
+    const token = await getSuperAdminToken()
+
+    Customer.findById.mockResolvedValue(
+      makeFakeCustomer({ status: 'DISABLED' }),
+    )
+    User.findById.mockImplementation((id) => {
+      if (id === SUPER_ADMIN_ID) return Promise.resolve(makeSuperAdmin())
+      if (id === REGULAR_USER_ID) return Promise.resolve(makeRegularUser())
+      return Promise.resolve(null)
+    })
+
+    const res = await request
+      .patch(`/api/v1/users/${REGULAR_USER_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: 'Blocked Update' })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('CUSTOMER_INACTIVE')
+    expect(res.body.error.message).toBe('This customer is inactive. Contact your administrator.')
+    expect(res.body.error.details?.reason).toBe('CUSTOMER_INACTIVE')
+    expect(res.body.error.details?.customerStatus).toBe('DISABLED')
+    expect(res.body.error.requestId).toBeDefined()
+  })
+
   test('updates user name', async () => {
     const token = await getSuperAdminToken()
     const user = makeRegularUser()
@@ -1131,6 +1222,7 @@ describe('PATCH /api/v1/users/:userId', () => {
 
     expect(res.status).toBe(409)
     expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.details?.reason).toBe('CANONICAL_ADMIN_ROLE_REMOVAL_BLOCKED')
   })
 
   test('returns 409 when assigning second CUSTOMER_ADMIN while canonical admin exists', async () => {
@@ -1156,6 +1248,7 @@ describe('PATCH /api/v1/users/:userId', () => {
 
     expect(res.status).toBe(409)
     expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.details?.reason).toBe('SECOND_CUSTOMER_ADMIN_BLOCKED')
     expect(res.body.error.details?.canonicalAdminUserId).toBe(CUSTOMER_ADMIN_ID)
   })
 
@@ -1177,6 +1270,7 @@ describe('PATCH /api/v1/users/:userId', () => {
 
     expect(res.status).toBe(200)
     expect(user.save).toHaveBeenCalled()
+    expect(res.body.data.tenantVisibility).toEqual([TENANT_ID, TENANT_ID_2])
   })
 
   test('returns 404 when user does not exist', async () => {
@@ -1213,6 +1307,34 @@ describe('PATCH /api/v1/users/:userId', () => {
 
     expect(res.status).toBe(422)
     expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details?.reason).toBe('TENANT_VISIBILITY_INVALID_TENANT_IDS')
+  })
+
+  test('returns 422 when tenant visibility is updated for a single-tenant customer', async () => {
+    const token = await getSuperAdminToken()
+    const user = makeRegularUser()
+
+    User.findById.mockImplementation((id) => {
+      if (id === SUPER_ADMIN_ID) return Promise.resolve(makeSuperAdmin())
+      if (id === REGULAR_USER_ID) return Promise.resolve(user)
+      return Promise.resolve(null)
+    })
+    Customer.findById.mockResolvedValue(
+      makeFakeCustomer({
+        topology: 'SINGLE_TENANT',
+        vmfPolicy: 'SINGLE',
+      }),
+    )
+
+    const res = await request
+      .patch(`/api/v1/users/${REGULAR_USER_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ tenantVisibility: [TENANT_ID] })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details?.reason).toBe('TENANT_VISIBILITY_NOT_ALLOWED')
+    expect(res.body.error.details?.tenantVisibilityMode).toBe('DISALLOWED')
   })
 })
 
@@ -1360,6 +1482,8 @@ describe('POST /api/v1/users/:userId/disable', () => {
 
     expect(res.status).toBe(409)
     expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.details?.reason).toBe('CANONICAL_ADMIN_PROTECTED')
+    expect(res.body.error.details?.operation).toBe('disable')
   })
 })
 
@@ -1451,6 +1575,8 @@ describe('DELETE /api/v1/users/:userId', () => {
 
     expect(res.status).toBe(409)
     expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.details?.reason).toBe('CANONICAL_ADMIN_PROTECTED')
+    expect(res.body.error.details?.operation).toBe('delete')
   })
 })
 
@@ -1625,5 +1751,6 @@ describe('Role assignment during user create', () => {
 
     expect(res.status).toBe(409)
     expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.details?.reason).toBe('CANONICAL_ADMIN_EXISTS')
   })
 })

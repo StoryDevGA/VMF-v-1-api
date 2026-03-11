@@ -1,13 +1,16 @@
-import { Customer, Deal, Tenant, VMF } from '../models/index.js'
+import { Customer, Deal, Tenant, User, VMF } from '../models/index.js'
 import logger from '../config/logger.js'
 import env from '../config/env.js'
 import monitoringService from '../services/monitoringService.js'
 import performanceCacheService, {
   buildCustomerTopologySnapshot,
   buildTenantStatusSnapshot,
+  buildUserPermissionsSnapshot,
 } from '../services/performanceCacheService.js'
 
 const ACTIVE_CUSTOMER_STATUS = 'ACTIVE'
+export const INACTIVE_CUSTOMER_REASON = 'CUSTOMER_INACTIVE'
+export const INACTIVE_CUSTOMER_MESSAGE = 'This customer is inactive. Contact your administrator.'
 
 const toIdString = (value) => {
   if (!value) return null
@@ -53,6 +56,53 @@ const loadTenant = async (tenantId) => {
   )
 
   return tenant
+}
+
+const loadUser = async (userId) => {
+  if (!userId) return null
+
+  const cachedUserPermissions = await performanceCacheService.getUserPermissions(userId)
+  if (cachedUserPermissions?.user) return cachedUserPermissions.user
+
+  const user = await User.findById(userId)
+  if (!user) return null
+
+  await performanceCacheService.setUserPermissions(
+    user._id,
+    buildUserPermissionsSnapshot(user),
+  )
+
+  return user
+}
+
+const resolvePrimaryCustomerIdFromUser = (user) =>
+  (user?.memberships || []).find((membership) => membership?.customerId)?.customerId || null
+
+export const buildInactiveCustomerErrorResponse = ({
+  requestId,
+  customerStatus = null,
+  inactiveCustomerIds = [],
+} = {}) => {
+  const details = {
+    reason: INACTIVE_CUSTOMER_REASON,
+  }
+
+  if (customerStatus) {
+    details.customerStatus = customerStatus
+  }
+
+  if (Array.isArray(inactiveCustomerIds) && inactiveCustomerIds.length > 0) {
+    details.inactiveCustomerIds = inactiveCustomerIds
+  }
+
+  return {
+    error: {
+      code: INACTIVE_CUSTOMER_REASON,
+      message: INACTIVE_CUSTOMER_MESSAGE,
+      details,
+      requestId,
+    },
+  }
 }
 
 const resolveCustomerForRequest = async (req) => {
@@ -109,6 +159,16 @@ const resolveCustomerForRequest = async (req) => {
     }
   }
 
+  if (req.params?.userId) {
+    const user = await loadUser(req.params.userId)
+    const customerId = resolvePrimaryCustomerIdFromUser(user)
+    if (customerId) {
+      const customer = await loadCustomer(customerId)
+      if (customer) scopes.customer = customer
+      return customer
+    }
+  }
+
   return null
 }
 
@@ -144,14 +204,10 @@ export const requireCustomerActive = (options = {}) => async (req, res, next) =>
         },
         'requireCustomerActive - customer inactive',
       )
-      return res.status(403).json({
-        error: {
-          code: 'CUSTOMER_INACTIVE',
-          message: 'This customer is inactive. Contact your administrator.',
-          details: { customerStatus: customer.status },
-          requestId: req.requestId,
-        },
-      })
+      return res.status(403).json(buildInactiveCustomerErrorResponse({
+        requestId: req.requestId,
+        customerStatus: customer.status,
+      }))
     }
 
     return next()

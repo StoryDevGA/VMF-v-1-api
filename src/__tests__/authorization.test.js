@@ -295,6 +295,10 @@ describe('loadScopes', () => {
 
     expect(res.statusCode).toBe(403)
     expect(res.body.error.code).toBe('CUSTOMER_INACTIVE')
+    expect(res.body.error.message).toBe('This customer is inactive. Contact your administrator.')
+    expect(res.body.error.details?.reason).toBe('CUSTOMER_INACTIVE')
+    expect(res.body.error.details?.inactiveCustomerIds).toEqual([CUSTOMER_ID])
+    expect(res.body.error.requestId).toBe('req-test-001')
     expect(next).not.toHaveBeenCalled()
 
     const metrics = await monitoringService.getMetrics()
@@ -547,6 +551,10 @@ describe('requireCustomerAccess', () => {
 
     expect(res.statusCode).toBe(403)
     expect(res.body.error.code).toBe('CUSTOMER_INACTIVE')
+    expect(res.body.error.message).toBe('This customer is inactive. Contact your administrator.')
+    expect(res.body.error.details?.reason).toBe('CUSTOMER_INACTIVE')
+    expect(res.body.error.details?.customerStatus).toBe('DISABLED')
+    expect(res.body.error.requestId).toBe('req-test-001')
     expect(next).not.toHaveBeenCalled()
 
     const metrics = await monitoringService.getMetrics()
@@ -758,6 +766,8 @@ describe('requireTenantAccess', () => {
 
     expect(res.statusCode).toBe(403)
     expect(res.body.error.code).toBe('CUSTOMER_INACTIVE')
+    expect(res.body.error.details?.reason).toBe('CUSTOMER_INACTIVE')
+    expect(res.body.error.details?.customerStatus).toBe('DISABLED')
     expect(next).not.toHaveBeenCalled()
   })
 })
@@ -1014,6 +1024,8 @@ describe('requireVmfAccess', () => {
 
     expect(res.statusCode).toBe(403)
     expect(res.body.error.code).toBe('CUSTOMER_INACTIVE')
+    expect(res.body.error.details?.reason).toBe('CUSTOMER_INACTIVE')
+    expect(res.body.error.details?.customerStatus).toBe('DISABLED')
     expect(next).not.toHaveBeenCalled()
   })
 })

@@ -1297,6 +1297,7 @@ describe('POST /api/v1/customers/:customerId/admins', () => {
 
     expect(res.status).toBe(409)
     expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.details?.reason).toBe('CANONICAL_ADMIN_EXISTS')
     expect(res.body.error.message).toContain('replace')
   })
 
@@ -1887,6 +1888,25 @@ describe('GET /api/v1/customers/:customerId/tenants', () => {
     expect(res.body.data).toHaveLength(1)
     expect(res.body.meta.total).toBe(1)
   })
+
+  test('returns stable inactive-customer payload when customer is inactive', async () => {
+    const token = await getSuperAdminToken()
+
+    Customer.findById.mockResolvedValue(
+      makeFakeCustomer({ status: 'DISABLED' }),
+    )
+
+    const res = await request
+      .get(`/api/v1/customers/${CUSTOMER_ID}/tenants`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('CUSTOMER_INACTIVE')
+    expect(res.body.error.message).toBe('This customer is inactive. Contact your administrator.')
+    expect(res.body.error.details?.reason).toBe('CUSTOMER_INACTIVE')
+    expect(res.body.error.details?.customerStatus).toBe('DISABLED')
+    expect(res.body.error.requestId).toBeDefined()
+  })
 })
 
 describe('POST /api/v1/customers/:customerId/tenants', () => {
@@ -2028,6 +2048,27 @@ describe('POST /api/v1/customers/:customerId/tenants', () => {
 })
 
 describe('PATCH /api/v1/tenants/:tenantId', () => {
+  test('returns 403 when tenant belongs to an inactive customer', async () => {
+    const token = await getSuperAdminToken()
+
+    Tenant.findById.mockResolvedValue(makeFakeTenant())
+    Customer.findById.mockResolvedValue(
+      makeFakeCustomer({ status: 'DISABLED' }),
+    )
+
+    const res = await request
+      .patch(`/api/v1/tenants/${TENANT_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: 'Blocked Tenant Update' })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('CUSTOMER_INACTIVE')
+    expect(res.body.error.message).toBe('This customer is inactive. Contact your administrator.')
+    expect(res.body.error.details?.reason).toBe('CUSTOMER_INACTIVE')
+    expect(res.body.error.details?.customerStatus).toBe('DISABLED')
+    expect(res.body.error.requestId).toBeDefined()
+  })
+
   test('returns 404 when tenant does not exist', async () => {
     const token = await getSuperAdminToken()
     Tenant.findById.mockResolvedValue(null)

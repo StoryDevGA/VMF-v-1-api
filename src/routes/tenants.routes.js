@@ -46,8 +46,8 @@ customerTenantRouter.post('/', tenantManagementRateLimit, validateCreateTenant, 
 
 export const tenantRouter = Router()
 
-tenantRouter.use(authJwt, loadScopes, requirePlatformRole('SUPER_ADMIN'), requireCustomerActive())
+tenantRouter.use(authJwt, loadScopes, requirePlatformRole('SUPER_ADMIN'))
 
-tenantRouter.patch('/:tenantId', tenantManagementRateLimit, validateUpdateTenant, updateTenant)
-tenantRouter.post('/:tenantId/enable', tenantManagementRateLimit, enableTenant)
-tenantRouter.post('/:tenantId/disable', tenantManagementRateLimit, disableTenant)
+tenantRouter.patch('/:tenantId', requireCustomerActive(), tenantManagementRateLimit, validateUpdateTenant, updateTenant)
+tenantRouter.post('/:tenantId/enable', requireCustomerActive(), tenantManagementRateLimit, enableTenant)
+tenantRouter.post('/:tenantId/disable', requireCustomerActive(), tenantManagementRateLimit, disableTenant)

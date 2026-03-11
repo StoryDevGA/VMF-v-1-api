@@ -6,6 +6,18 @@ const CUSTOMER_ADMIN_ROLE = 'CUSTOMER_ADMIN'
 const ACTIVE_CUSTOMER_STATUS = 'ACTIVE'
 const DEFAULT_MAX_TENANTS = 1
 const DEFAULT_MAX_VMFS_PER_TENANT = 1
+const GOVERNANCE_REASONS = Object.freeze({
+  INACTIVE_TARGET_USER: 'INACTIVE_TARGET_USER',
+  CANONICAL_ADMIN_EXISTS: 'CANONICAL_ADMIN_EXISTS',
+  ACTIVE_ADMIN_EXISTS: 'ACTIVE_ADMIN_EXISTS',
+  NO_CANONICAL_ADMIN: 'NO_CANONICAL_ADMIN',
+  CANONICAL_ADMIN_REFERENCE_INVALID: 'CANONICAL_ADMIN_REFERENCE_INVALID',
+  CANONICAL_ADMIN_ROLE_MISSING: 'CANONICAL_ADMIN_ROLE_MISSING',
+  REPLACEMENT_ROLLED_BACK: 'REPLACEMENT_ROLLED_BACK',
+  CANONICAL_ADMIN_ROLE_REMOVAL_BLOCKED: 'CANONICAL_ADMIN_ROLE_REMOVAL_BLOCKED',
+  SECOND_CUSTOMER_ADMIN_BLOCKED: 'SECOND_CUSTOMER_ADMIN_BLOCKED',
+  CANONICAL_ADMIN_PROTECTED: 'CANONICAL_ADMIN_PROTECTED',
+})
 
 const toIdString = (value) => {
   if (!value) return null
@@ -27,6 +39,11 @@ const createGovernanceError = ({ status, code, message, details }) => {
   err.isGovernanceError = true
   return err
 }
+
+const withGovernanceReason = (reason, details = {}) => ({
+  reason,
+  ...(details || {}),
+})
 
 const isGovernanceError = (err) => Boolean(err?.isGovernanceError)
 
@@ -155,6 +172,7 @@ const applyCustomerAdminAssignment = async ({ customer, user }) => {
       status: 422,
       code: 'VALIDATION_FAILED',
       message: 'Cannot assign customer admin role to an inactive user.',
+      details: withGovernanceReason(GOVERNANCE_REASONS.INACTIVE_TARGET_USER),
     })
   }
 
@@ -172,10 +190,10 @@ const applyCustomerAdminAssignment = async ({ customer, user }) => {
       status: 409,
       code: 'CONFLICT',
       message: 'Customer already has an active canonical customer admin. Use replace admin endpoint.',
-      details: {
+      details: withGovernanceReason(GOVERNANCE_REASONS.CANONICAL_ADMIN_EXISTS, {
         customerId,
         canonicalAdminUserId,
-      },
+      }),
     })
   }
 
@@ -193,10 +211,10 @@ const applyCustomerAdminAssignment = async ({ customer, user }) => {
         status: 409,
         code: 'CONFLICT',
         message: 'Customer already has an active customer admin. Use replace admin endpoint.',
-        details: {
+        details: withGovernanceReason(GOVERNANCE_REASONS.ACTIVE_ADMIN_EXISTS, {
           customerId,
           conflictingAdminUserId: toIdString(conflictingAdmin._id),
-        },
+        }),
       })
     }
   }
@@ -226,6 +244,7 @@ const replaceCustomerAdmin = async ({ customer, newUser }) => {
       status: 422,
       code: 'VALIDATION_FAILED',
       message: 'Cannot assign customer admin role to an inactive user.',
+      details: withGovernanceReason(GOVERNANCE_REASONS.INACTIVE_TARGET_USER),
     })
   }
 
@@ -238,7 +257,9 @@ const replaceCustomerAdmin = async ({ customer, newUser }) => {
       status: 422,
       code: 'VALIDATION_FAILED',
       message: 'Customer has no existing customer admin to replace.',
-      details: { customerId },
+      details: withGovernanceReason(GOVERNANCE_REASONS.NO_CANONICAL_ADMIN, {
+        customerId,
+      }),
     })
   }
 
@@ -251,7 +272,10 @@ const replaceCustomerAdmin = async ({ customer, newUser }) => {
       status: 409,
       code: 'CONFLICT',
       message: 'Customer canonical admin reference is invalid. Remediate governance data before replacement.',
-      details: { customerId, oldUserId },
+      details: withGovernanceReason(
+        GOVERNANCE_REASONS.CANONICAL_ADMIN_REFERENCE_INVALID,
+        { customerId, oldUserId },
+      ),
     })
   }
 
@@ -260,7 +284,10 @@ const replaceCustomerAdmin = async ({ customer, newUser }) => {
       status: 409,
       code: 'CONFLICT',
       message: 'Customer canonical admin does not hold CUSTOMER_ADMIN role. Remediate governance data before replacement.',
-      details: { customerId, oldUserId },
+      details: withGovernanceReason(
+        GOVERNANCE_REASONS.CANONICAL_ADMIN_ROLE_MISSING,
+        { customerId, oldUserId },
+      ),
     })
   }
 
@@ -336,7 +363,11 @@ const replaceCustomerAdmin = async ({ customer, newUser }) => {
       status: 409,
       code: 'CONFLICT',
       message: 'Customer admin replacement failed and was rolled back.',
-      details: { customerId, oldUserId, newUserId },
+      details: withGovernanceReason(GOVERNANCE_REASONS.REPLACEMENT_ROLLED_BACK, {
+        customerId,
+        oldUserId,
+        newUserId,
+      }),
     })
     replacementError.cause = err
     throw replacementError
@@ -377,7 +408,10 @@ const validateUserRoleUpdate = ({ customer, user, nextRoles }) => {
       status: 422,
       code: 'VALIDATION_FAILED',
       message: 'Cannot assign customer admin role to an inactive user.',
-      details: { customerId, userId },
+      details: withGovernanceReason(GOVERNANCE_REASONS.INACTIVE_TARGET_USER, {
+        customerId,
+        userId,
+      }),
     })
   }
 
@@ -390,7 +424,10 @@ const validateUserRoleUpdate = ({ customer, user, nextRoles }) => {
       status: 409,
       code: 'CONFLICT',
       message: 'Cannot remove CUSTOMER_ADMIN role from the canonical active customer admin. Replace admin first.',
-      details: { customerId, userId },
+      details: withGovernanceReason(
+        GOVERNANCE_REASONS.CANONICAL_ADMIN_ROLE_REMOVAL_BLOCKED,
+        { customerId, userId, canonicalAdminUserId },
+      ),
     })
   }
 
@@ -404,7 +441,10 @@ const validateUserRoleUpdate = ({ customer, user, nextRoles }) => {
       status: 409,
       code: 'CONFLICT',
       message: 'Cannot assign a second CUSTOMER_ADMIN while an active canonical admin exists. Use replace admin endpoint.',
-      details: { customerId, userId, canonicalAdminUserId },
+      details: withGovernanceReason(
+        GOVERNANCE_REASONS.SECOND_CUSTOMER_ADMIN_BLOCKED,
+        { customerId, userId, canonicalAdminUserId },
+      ),
     })
   }
 
@@ -435,10 +475,11 @@ const assertUserCanBeDisabledOrDeleted = async ({ user, operation }) => {
     status: 409,
     code: 'CONFLICT',
     message: `Cannot ${operation} the canonical customer admin of an active customer. Replace admin first.`,
-    details: {
+    details: withGovernanceReason(GOVERNANCE_REASONS.CANONICAL_ADMIN_PROTECTED, {
       customerId: toIdString(blockingCustomer._id),
       canonicalAdminUserId: toIdString(blockingCustomer?.governance?.customerAdminUserId),
-    },
+      operation,
+    }),
   })
 }
 
@@ -506,6 +547,7 @@ const customerGovernanceService = {
   CUSTOMER_ADMIN_ROLE,
   DEFAULT_MAX_TENANTS,
   DEFAULT_MAX_VMFS_PER_TENANT,
+  GOVERNANCE_REASONS,
   createGovernanceError,
   isGovernanceError,
   isCustomerActive,

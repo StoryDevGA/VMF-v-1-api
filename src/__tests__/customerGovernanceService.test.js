@@ -86,6 +86,9 @@ describe('customerGovernanceService.applyCustomerAdminAssignment', () => {
       isGovernanceError: true,
       status: 409,
       code: 'CONFLICT',
+      details: {
+        reason: customerGovernanceService.GOVERNANCE_REASONS.CANONICAL_ADMIN_EXISTS,
+      },
     })
   })
 })
@@ -175,6 +178,18 @@ describe('customerGovernanceService.validateUserRoleUpdate', () => {
         nextRoles: ['USER'],
       }),
     ).toThrow('Cannot remove CUSTOMER_ADMIN role')
+
+    try {
+      customerGovernanceService.validateUserRoleUpdate({
+        customer,
+        user: canonicalUser,
+        nextRoles: ['USER'],
+      })
+    } catch (err) {
+      expect(err.details.reason).toBe(
+        customerGovernanceService.GOVERNANCE_REASONS.CANONICAL_ADMIN_ROLE_REMOVAL_BLOCKED,
+      )
+    }
   })
 })
 
@@ -199,6 +214,10 @@ describe('customerGovernanceService.assertUserCanBeDisabledOrDeleted', () => {
       isGovernanceError: true,
       status: 409,
       code: 'CONFLICT',
+      details: {
+        reason: customerGovernanceService.GOVERNANCE_REASONS.CANONICAL_ADMIN_PROTECTED,
+        operation: 'disable',
+      },
     })
   })
 })

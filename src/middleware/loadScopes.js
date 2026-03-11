@@ -8,6 +8,7 @@ import { Customer, User } from '../models/index.js'
 import env from '../config/env.js'
 import logger from '../config/logger.js'
 import monitoringService from '../services/monitoringService.js'
+import { buildInactiveCustomerErrorResponse } from './customerStatus.js'
 import performanceCacheService, {
   buildCustomerTopologySnapshot,
   buildUserPermissionsSnapshot,
@@ -172,13 +173,10 @@ const loadScopes = async (req, res, next) => {
           },
           'loadScopes - user blocked due to inactive customer membership',
         )
-        return res.status(403).json({
-          error: {
-            code: 'CUSTOMER_INACTIVE',
-            message: 'Your customer account is inactive. Contact your administrator.',
-            requestId: req.requestId,
-          },
-        })
+        return res.status(403).json(buildInactiveCustomerErrorResponse({
+          requestId: req.requestId,
+          inactiveCustomerIds: customerAccess.inactiveCustomerIds,
+        }))
       }
 
       return next()
@@ -240,13 +238,10 @@ const loadScopes = async (req, res, next) => {
         },
         'loadScopes - user blocked due to inactive customer membership',
       )
-      return res.status(403).json({
-        error: {
-          code: 'CUSTOMER_INACTIVE',
-          message: 'Your customer account is inactive. Contact your administrator.',
-          requestId: req.requestId,
-        },
-      })
+      return res.status(403).json(buildInactiveCustomerErrorResponse({
+        requestId: req.requestId,
+        inactiveCustomerIds: customerAccess.inactiveCustomerIds,
+      }))
     }
 
     await performanceCacheService.setUserPermissions(userId, scopeSnapshot)

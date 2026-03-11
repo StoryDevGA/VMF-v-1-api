@@ -63,12 +63,13 @@ export const userRouter = Router()
 
 userRouter.use(authJwt, loadScopes, requirePlatformRole('SUPER_ADMIN'))
 
-userRouter.patch('/:userId', userManagementRateLimit, validateUpdateUser, updateUser)
-userRouter.post('/:userId/enable', userManagementRateLimit, enableUser)
-userRouter.post('/:userId/disable', userManagementRateLimit, disableUser)
-userRouter.delete('/:userId', userManagementRateLimit, deleteUser)
+userRouter.patch('/:userId', requireCustomerActive(), userManagementRateLimit, validateUpdateUser, updateUser)
+userRouter.post('/:userId/enable', requireCustomerActive(), userManagementRateLimit, enableUser)
+userRouter.post('/:userId/disable', requireCustomerActive(), userManagementRateLimit, disableUser)
+userRouter.delete('/:userId', requireCustomerActive(), userManagementRateLimit, deleteUser)
 userRouter.post(
   '/:userId/resend-invitation',
+  requireCustomerActive(),
   userManagementRateLimit,
   validateResendInvitation,
   resendInvitation,

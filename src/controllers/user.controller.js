@@ -35,21 +35,47 @@ const normalizeStatusFilter = (value) => {
   return null
 }
 
+const MULTI_TENANT_TOPOLOGY = 'MULTI_TENANT'
+const TENANT_VISIBILITY_REASONS = Object.freeze({
+  NOT_ALLOWED: 'TENANT_VISIBILITY_NOT_ALLOWED',
+  INVALID_TENANT_IDS: 'TENANT_VISIBILITY_INVALID_TENANT_IDS',
+})
+
 const resolveCustomerMembership = (user, customerId) =>
   (user?.memberships || []).find(
     (membership) => toIdString(membership?.customerId) === customerId,
   ) || null
 
-const mapUserListRow = ({ user, customerId, canonicalAdminUserId }) => {
-  const membership = resolveCustomerMembership(user, customerId)
-  const userId = toIdString(user?._id)
+const listCustomerTenantVisibility = ({ user, customerId }) => {
+  const targetCustomerId = toIdString(customerId)
+  if (!targetCustomerId) return []
+
+  return Array.from(
+    new Set(
+      (user?.tenantMemberships || [])
+        .filter((membership) => toIdString(membership?.customerId) === targetCustomerId)
+        .map((membership) => toIdString(membership?.tenantId))
+        .filter(Boolean),
+    ),
+  )
+}
+
+const serializeUser = (user) =>
+  (user && typeof user.toJSON === 'function' ? user.toJSON() : user) || {}
+
+const mapCustomerScopedUser = ({ user, customerId, canonicalAdminUserId }) => {
+  const serializedUser = serializeUser(user)
+  const membership = resolveCustomerMembership(serializedUser, customerId)
+  const userId = toIdString(serializedUser?._id || user?._id)
+  const tenantVisibility = listCustomerTenantVisibility({ user: serializedUser, customerId })
 
   return {
-    ...user,
+    ...serializedUser,
     id: userId,
-    status: user?.isActive ? 'ACTIVE' : 'INACTIVE',
-    trustStatus: user?.identityPlus?.trustStatus || 'UNTRUSTED',
+    status: serializedUser?.isActive ? 'ACTIVE' : 'INACTIVE',
+    trustStatus: serializedUser?.identityPlus?.trustStatus || 'UNTRUSTED',
     customerRoles: membership?.roles || [],
+    tenantVisibility,
     isCanonicalAdmin: Boolean(canonicalAdminUserId && canonicalAdminUserId === userId),
   }
 }
@@ -138,6 +164,63 @@ const upsertCustomerTenantVisibility = ({ user, customerId, tenantVisibility }) 
   }
 }
 
+const getTenantVisibilityMode = (customer) =>
+  customer?.topology === MULTI_TENANT_TOPOLOGY ? 'OPTIONAL' : 'DISALLOWED'
+
+const isTenantVisibilityAllowed = (customer) =>
+  getTenantVisibilityMode(customer) === 'OPTIONAL'
+
+const buildTenantVisibilityErrorResponse = ({ req, customer, message, reason }) => ({
+  error: {
+    code: 'VALIDATION_FAILED',
+    message,
+    details: {
+      tenantVisibility: message,
+      reason,
+      tenantVisibilityMode: getTenantVisibilityMode(customer),
+      topology: customer?.topology || null,
+      isServiceProvider: Boolean(customer?.isServiceProvider),
+    },
+    requestId: req.requestId,
+  },
+})
+
+const validateTenantVisibilityPayload = async ({
+  req,
+  customer,
+  customerId,
+  tenantVisibility,
+}) => {
+  if (tenantVisibility === undefined) return null
+
+  if (!isTenantVisibilityAllowed(customer)) {
+    return buildTenantVisibilityErrorResponse({
+      req,
+      customer,
+      message: 'Tenant visibility is not allowed in this mode.',
+      reason: TENANT_VISIBILITY_REASONS.NOT_ALLOWED,
+    })
+  }
+
+  if (tenantVisibility.length === 0) return null
+
+  const validTenants = await Tenant.countDocuments({
+    _id: { $in: tenantVisibility },
+    customerId,
+  })
+
+  if (validTenants !== tenantVisibility.length) {
+    return buildTenantVisibilityErrorResponse({
+      req,
+      customer,
+      message: 'One or more tenant IDs are invalid or do not belong to this customer.',
+      reason: TENANT_VISIBILITY_REASONS.INVALID_TENANT_IDS,
+    })
+  }
+
+  return null
+}
+
 const buildGovernanceErrorResponse = (req, err) => ({
   error: {
     code: err.code || (err.status === 409 ? 'CONFLICT' : 'VALIDATION_FAILED'),
@@ -196,7 +279,7 @@ export const listUsers = async (req, res, next) => {
     ])
 
     const canonicalAdminUserId = toIdString(req.scopes?.customer?.governance?.customerAdminUserId)
-    const data = users.map((user) => mapUserListRow({ user, customerId, canonicalAdminUserId }))
+    const data = users.map((user) => mapCustomerScopedUser({ user, customerId, canonicalAdminUserId }))
 
     return res.status(200).json({
       data,
@@ -251,21 +334,14 @@ export const createUser = async (req, res, next) => {
     }
 
     // 2. Validate tenant visibility IDs belong to this customer
-    if (tenantVisibility && tenantVisibility.length > 0) {
-      const validTenants = await Tenant.countDocuments({
-        _id: { $in: tenantVisibility },
-        customerId,
-      })
-      if (validTenants !== tenantVisibility.length) {
-        return res.status(422).json({
-          error: {
-            code: 'VALIDATION_FAILED',
-            message: 'One or more tenant IDs are invalid or do not belong to this customer.',
-            details: { tenantVisibility: 'Invalid tenant ID(s)' },
-            requestId: req.requestId,
-          },
-        })
-      }
+    const tenantVisibilityValidation = await validateTenantVisibilityPayload({
+      req,
+      customer,
+      customerId,
+      tenantVisibility,
+    })
+    if (tenantVisibilityValidation) {
+      return res.status(422).json(tenantVisibilityValidation)
     }
 
     // Existing-user assignment path (no invitation dispatch)
@@ -437,7 +513,11 @@ export const createUser = async (req, res, next) => {
 
       return res.status(200).json({
         data: {
-          ...user.toJSON(),
+          ...mapCustomerScopedUser({
+            user,
+            customerId,
+            canonicalAdminUserId: nextCanonicalAdminUserId,
+          }),
           outcome: 'assigned_existing',
           invitationDispatched: false,
           invitationOutcome: 'none',
@@ -564,7 +644,11 @@ export const createUser = async (req, res, next) => {
     const nextCanonicalAdminUserId = toIdString(customer.governance?.customerAdminUserId)
     return res.status(201).json({
       data: {
-        ...user.toJSON(),
+        ...mapCustomerScopedUser({
+          user,
+          customerId,
+          canonicalAdminUserId: nextCanonicalAdminUserId,
+        }),
         outcome: 'invited_new',
         invitationDispatched: invitationOutcome === 'sent',
         invitationOutcome,
@@ -642,8 +726,10 @@ export const getUser = async (req, res, next) => {
       })
     }
 
+    const canonicalAdminUserId = toIdString(req.scopes?.customer?.governance?.customerAdminUserId)
+
     return res.status(200).json({
-      data: user.toJSON(),
+      data: mapCustomerScopedUser({ user, customerId, canonicalAdminUserId }),
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
@@ -681,6 +767,8 @@ export const updateUser = async (req, res, next) => {
     const diff = {}
     let customerForRoleUpdate = null
     let customerGovernanceChanged = false
+    const primaryMembership = user.memberships.find((m) => m.customerId !== null)
+    const responseCustomerId = toIdString(primaryMembership?.customerId)
 
     // Update name
     if (name !== undefined) {
@@ -743,28 +831,33 @@ export const updateUser = async (req, res, next) => {
 
     // Update tenant visibility (tenantMemberships)
     if (tenantVisibility !== undefined) {
-      const membership = user.memberships.find((m) => m.customerId !== null)
-      const customerId = membership?.customerId
+      const customerId = primaryMembership?.customerId
 
       if (customerId) {
-        // Validate tenant IDs belong to this customer
-        if (tenantVisibility.length > 0) {
-          const validTenants = await Tenant.countDocuments({
-            _id: { $in: tenantVisibility },
-            customerId,
+        const customerForTenantVisibility = customerForRoleUpdate || await Customer.findById(customerId)
+        if (!customerForTenantVisibility) {
+          return res.status(422).json({
+            error: {
+              code: 'VALIDATION_FAILED',
+              message: 'User has an invalid customer membership reference.',
+              requestId: req.requestId,
+            },
           })
-          if (validTenants !== tenantVisibility.length) {
-            return res.status(422).json({
-              error: {
-                code: 'VALIDATION_FAILED',
-                message: 'One or more tenant IDs are invalid or do not belong to this customer.',
-                details: { tenantVisibility: 'Invalid tenant ID(s)' },
-                requestId: req.requestId,
-              },
-            })
-          }
         }
 
+        const tenantVisibilityValidation = await validateTenantVisibilityPayload({
+          req,
+          customer: customerForTenantVisibility,
+          customerId,
+          tenantVisibility,
+        })
+        if (tenantVisibilityValidation) {
+          return res.status(422).json(tenantVisibilityValidation)
+        }
+
+        customerForRoleUpdate = customerForRoleUpdate || customerForTenantVisibility
+
+        // Validate tenant IDs belong to this customer
         diff.tenantVisibility = {
           from: user.tenantMemberships
             .filter((tm) => tm.customerId.toString() === customerId.toString())
@@ -819,8 +912,18 @@ export const updateUser = async (req, res, next) => {
       })
     }
 
+    const responseCustomer = responseCustomerId && !customerForRoleUpdate
+      ? await Customer.findById(responseCustomerId)
+      : customerForRoleUpdate
+
     return res.status(200).json({
-      data: user.toJSON(),
+      data: responseCustomerId
+        ? mapCustomerScopedUser({
+            user,
+            customerId: responseCustomerId,
+            canonicalAdminUserId: toIdString(responseCustomer?.governance?.customerAdminUserId),
+          })
+        : user.toJSON(),
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {

@@ -32,6 +32,7 @@ import env from '../config/env.js'
 import logger from '../config/logger.js'
 import auditService from '../services/auditService.js'
 import monitoringService from '../services/monitoringService.js'
+import { buildInactiveCustomerErrorResponse } from './customerStatus.js'
 import performanceCacheService, {
   buildCustomerTopologySnapshot,
   buildTenantStatusSnapshot,
@@ -63,16 +64,10 @@ const forbidden = (res, req, detail) =>
 
 const customerInactive = (res, req, customerStatus, surface = 'authorize') => {
   monitoringService.recordInactiveCustomerBlock({ surface })
-  return (
-  res.status(403).json({
-    error: {
-      code: 'CUSTOMER_INACTIVE',
-      message: 'This customer is inactive. Contact your administrator.',
-      details: { customerStatus },
-      requestId: req.requestId,
-    },
-  })
-  )
+  return res.status(403).json(buildInactiveCustomerErrorResponse({
+    requestId: req.requestId,
+    customerStatus,
+  }))
 }
 
 const isCustomerInactive = (customer) =>
