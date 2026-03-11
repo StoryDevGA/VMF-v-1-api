@@ -390,6 +390,20 @@ describe('User Validators', () => {
       expect(Object.keys(res.body.error.details).sort()).toEqual(['name'])
     })
 
+    test('returns 422 when email is invalid', async () => {
+      const token = await getSuperAdminToken()
+
+      const res = await request
+        .patch(`/api/v1/users/${REGULAR_USER_ID}`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ email: 'not-an-email' })
+
+      expect(res.status).toBe(422)
+      expect(res.body.error.code).toBe('VALIDATION_FAILED')
+      expect(res.body.error.details).toHaveProperty('email')
+      expect(Object.keys(res.body.error.details).sort()).toEqual(['email'])
+    })
+
     test('returns 422 when roles is empty array', async () => {
       const token = await getSuperAdminToken()
 
@@ -1178,6 +1192,47 @@ describe('PATCH /api/v1/users/:userId', () => {
     expect(AuditLog.createLog).toHaveBeenCalled()
   })
 
+  test('updates user email, normalizes it, and resets identity trust state', async () => {
+    const token = await getSuperAdminToken()
+    const user = makeRegularUser({
+      email: 'old-email@acme.com',
+      identityPlus: {
+        trustStatus: 'TRUSTED',
+        externalId: 'ext_old_123',
+        invitedAt: new Date('2026-01-15'),
+        trustedAt: new Date('2026-02-20'),
+      },
+    })
+    const revokeTrustSpy = jest.spyOn(identityPlusService, 'revokeTrust')
+
+    User.findById.mockImplementation((id) => {
+      if (id === SUPER_ADMIN_ID) return Promise.resolve(makeSuperAdmin())
+      if (id === REGULAR_USER_ID) return Promise.resolve(user)
+      return Promise.resolve(null)
+    })
+    User.findOne.mockResolvedValue(null)
+
+    const res = await request
+      .patch(`/api/v1/users/${REGULAR_USER_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ email: 'Updated.Email@Acme.com ' })
+
+    expect(res.status).toBe(200)
+    expect(user.email).toBe('updated.email@acme.com')
+    expect(user.identityPlus.trustStatus).toBe('UNTRUSTED')
+    expect(user.identityPlus.externalId).toBeNull()
+    expect(user.identityPlus.invitedAt).toBeNull()
+    expect(user.identityPlus.trustedAt).toBeNull()
+    expect(res.body.data.email).toBe('updated.email@acme.com')
+    expect(res.body.data.trustStatus).toBe('UNTRUSTED')
+    expect(revokeTrustSpy).toHaveBeenCalledWith({
+      email: 'old-email@acme.com',
+      externalId: 'ext_old_123',
+    })
+
+    revokeTrustSpy.mockRestore()
+  })
+
   test('updates user roles', async () => {
     const token = await getSuperAdminToken()
     const user = makeRegularUser()
@@ -1250,6 +1305,34 @@ describe('PATCH /api/v1/users/:userId', () => {
     expect(res.body.error.code).toBe('CONFLICT')
     expect(res.body.error.details?.reason).toBe('SECOND_CUSTOMER_ADMIN_BLOCKED')
     expect(res.body.error.details?.canonicalAdminUserId).toBe(CUSTOMER_ADMIN_ID)
+  })
+
+  test('returns 409 USER_ALREADY_EXISTS when updating email to an existing user in another customer', async () => {
+    const token = await getSuperAdminToken()
+    const user = makeRegularUser()
+    const existingUser = makeRegularUser({
+      _id: NEW_USER_ID,
+      id: NEW_USER_ID,
+      email: 'duplicate@example.com',
+      memberships: [{ customerId: '607f1f77bcf86cd799439099', roles: ['USER'] }],
+    })
+
+    User.findById.mockImplementation((id) => {
+      if (id === SUPER_ADMIN_ID) return Promise.resolve(makeSuperAdmin())
+      if (id === REGULAR_USER_ID) return Promise.resolve(user)
+      return Promise.resolve(null)
+    })
+    User.findOne.mockResolvedValue(existingUser)
+
+    const res = await request
+      .patch(`/api/v1/users/${REGULAR_USER_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ email: 'duplicate@example.com' })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('USER_ALREADY_EXISTS')
+    expect(res.body.error.details?.reason).toBe('other-customer')
+    expect(res.body.error.details?.targetCustomerId).toBe(CUSTOMER_ID)
   })
 
   test('updates tenant visibility', async () => {
@@ -1383,6 +1466,8 @@ describe('POST /api/v1/users/:userId/enable', () => {
 
     expect(res.status).toBe(422)
     expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details?.reason).toBe('USER_ALREADY_ACTIVE')
+    expect(res.body.error.details?.status).toBe('ACTIVE')
   })
 
   test('returns 404 when user does not exist', async () => {
@@ -1398,6 +1483,35 @@ describe('POST /api/v1/users/:userId/enable', () => {
       .set('Authorization', `Bearer ${token}`)
 
     expect(res.status).toBe(404)
+  })
+
+  test('allows resend invitation after reactivation resets revoked trust', async () => {
+    const token = await getSuperAdminToken()
+    const user = makeRegularUser({
+      isActive: false,
+      identityPlus: { trustStatus: 'REVOKED', externalId: 'ext_old_1' },
+    })
+
+    User.findById.mockImplementation((id) => {
+      if (id === SUPER_ADMIN_ID) return Promise.resolve(makeSuperAdmin())
+      if (id === REGULAR_USER_ID) return Promise.resolve(user)
+      return Promise.resolve(null)
+    })
+
+    const enableRes = await request
+      .post(`/api/v1/users/${REGULAR_USER_ID}/enable`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(enableRes.status).toBe(200)
+    expect(user.identityPlus.trustStatus).toBe('UNTRUSTED')
+
+    const resendRes = await request
+      .post(`/api/v1/users/${REGULAR_USER_ID}/resend-invitation`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(resendRes.status).toBe(200)
+    expect(resendRes.body.data.message).toContain('resent')
   })
 })
 
@@ -1443,6 +1557,8 @@ describe('POST /api/v1/users/:userId/disable', () => {
 
     expect(res.status).toBe(422)
     expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details?.reason).toBe('USER_ALREADY_DISABLED')
+    expect(res.body.error.details?.status).toBe('INACTIVE')
   })
 
   test('returns 404 when user does not exist', async () => {
@@ -1534,6 +1650,8 @@ describe('DELETE /api/v1/users/:userId', () => {
     expect(res.status).toBe(422)
     expect(res.body.error.code).toBe('VALIDATION_FAILED')
     expect(res.body.error.message).toContain('disabled')
+    expect(res.body.error.details?.reason).toBe('USER_DELETE_REQUIRES_DISABLED')
+    expect(res.body.error.details?.status).toBe('ACTIVE')
   })
 
   test('returns 404 when user does not exist', async () => {
@@ -1623,6 +1741,8 @@ describe('POST /api/v1/users/:userId/resend-invitation', () => {
 
     expect(res.status).toBe(422)
     expect(res.body.error.message).toContain('disabled')
+    expect(res.body.error.details?.reason).toBe('INVITATION_RESEND_REQUIRES_ACTIVE_USER')
+    expect(res.body.error.details?.status).toBe('INACTIVE')
   })
 
   test('returns 422 when trust status is TRUSTED', async () => {
@@ -1644,6 +1764,8 @@ describe('POST /api/v1/users/:userId/resend-invitation', () => {
 
     expect(res.status).toBe(422)
     expect(res.body.error.message).toContain('UNTRUSTED')
+    expect(res.body.error.details?.reason).toBe('INVITATION_RESEND_REQUIRES_UNTRUSTED')
+    expect(res.body.error.details?.trustStatus).toBe('TRUSTED')
   })
 
   test('returns 422 when trust status is REVOKED', async () => {
@@ -1664,6 +1786,8 @@ describe('POST /api/v1/users/:userId/resend-invitation', () => {
       .send({})
 
     expect(res.status).toBe(422)
+    expect(res.body.error.details?.reason).toBe('INVITATION_RESEND_REQUIRES_UNTRUSTED')
+    expect(res.body.error.details?.trustStatus).toBe('REVOKED')
   })
 
   test('returns 404 when user does not exist', async () => {

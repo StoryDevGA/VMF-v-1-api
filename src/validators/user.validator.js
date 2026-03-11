@@ -84,6 +84,7 @@ const updateUserSchema = z.object({
     .min(1, 'Name must not be empty')
     .max(255, 'Name must be 255 characters or fewer')
     .optional(),
+  email: emailSchema.optional(),
   roles: z
     .array(z.string().trim().min(1, 'Role must not be empty'))
     .min(1, 'At least one role is required')

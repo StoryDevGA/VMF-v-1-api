@@ -40,6 +40,14 @@ const TENANT_VISIBILITY_REASONS = Object.freeze({
   NOT_ALLOWED: 'TENANT_VISIBILITY_NOT_ALLOWED',
   INVALID_TENANT_IDS: 'TENANT_VISIBILITY_INVALID_TENANT_IDS',
 })
+const USER_LIFECYCLE_REASONS = Object.freeze({
+  INVALID_CUSTOMER_MEMBERSHIP: 'USER_INVALID_CUSTOMER_MEMBERSHIP',
+  ALREADY_ACTIVE: 'USER_ALREADY_ACTIVE',
+  ALREADY_DISABLED: 'USER_ALREADY_DISABLED',
+  DELETE_REQUIRES_DISABLED: 'USER_DELETE_REQUIRES_DISABLED',
+  INVITATION_REQUIRES_ACTIVE_USER: 'INVITATION_RESEND_REQUIRES_ACTIVE_USER',
+  INVITATION_REQUIRES_UNTRUSTED: 'INVITATION_RESEND_REQUIRES_UNTRUSTED',
+})
 
 const resolveCustomerMembership = (user, customerId) =>
   (user?.memberships || []).find(
@@ -118,6 +126,62 @@ const buildUserAlreadyExistsDetails = ({ existingUser, customerId }) => {
     existingUserId: toIdString(existingUser?._id),
     existingCustomerIds,
     targetCustomerId: customerId,
+  }
+}
+
+const buildValidationErrorResponse = ({ req, message, details }) => ({
+  error: {
+    code: 'VALIDATION_FAILED',
+    message,
+    ...(details ? { details } : {}),
+    requestId: req.requestId,
+  },
+})
+
+const buildInvalidCustomerMembershipResponse = (req) =>
+  buildValidationErrorResponse({
+    req,
+    message: 'User has an invalid customer membership reference.',
+    details: {
+      reason: USER_LIFECYCLE_REASONS.INVALID_CUSTOMER_MEMBERSHIP,
+    },
+  })
+
+const buildUserAlreadyExistsResponse = ({ req, existingUser, customerId }) => ({
+  error: {
+    code: 'USER_ALREADY_EXISTS',
+    message: 'A user with this email already exists. Use existing-user assignment path.',
+    details: buildUserAlreadyExistsDetails({ existingUser, customerId }),
+    requestId: req.requestId,
+  },
+})
+
+const resetIdentityPlusForEmailChange = (user) => {
+  if (!user.identityPlus || typeof user.identityPlus !== 'object') {
+    user.identityPlus = {}
+  }
+
+  const previousIdentityPlus = {
+    trustStatus: user.identityPlus.trustStatus || null,
+    externalId: user.identityPlus.externalId || null,
+    invitedAt: user.identityPlus.invitedAt || null,
+    trustedAt: user.identityPlus.trustedAt || null,
+  }
+  const nextTrustStatus = user.isActive ? 'UNTRUSTED' : 'REVOKED'
+
+  user.identityPlus.trustStatus = nextTrustStatus
+  user.identityPlus.externalId = null
+  user.identityPlus.invitedAt = null
+  user.identityPlus.trustedAt = null
+
+  return {
+    previousIdentityPlus,
+    nextIdentityPlus: {
+      trustStatus: nextTrustStatus,
+      externalId: null,
+      invitedAt: null,
+      trustedAt: null,
+    },
   }
 }
 
@@ -742,7 +806,7 @@ export const getUser = async (req, res, next) => {
 /* ------------------------------------------------------------------ */
 
 /**
- * Update user — name, roles, tenant visibility.
+ * Update user — name, email, roles, tenant visibility.
  *
  * The caller must have Customer Admin access to the customer the user
  * belongs to.  The customerId is resolved from the user's memberships.
@@ -750,7 +814,7 @@ export const getUser = async (req, res, next) => {
 export const updateUser = async (req, res, next) => {
   try {
     const { userId } = req.params
-    const { name, roles, tenantVisibility } = req.body
+    const { name, email, roles, tenantVisibility } = req.body
 
     const user = await User.findById(userId)
 
@@ -767,6 +831,7 @@ export const updateUser = async (req, res, next) => {
     const diff = {}
     let customerForRoleUpdate = null
     let customerGovernanceChanged = false
+    let staleIdentityToRevoke = null
     const primaryMembership = user.memberships.find((m) => m.customerId !== null)
     const responseCustomerId = toIdString(primaryMembership?.customerId)
 
@@ -776,6 +841,41 @@ export const updateUser = async (req, res, next) => {
       user.name = name
     }
 
+    // Update email and invalidate the previous identity binding.
+    if (email !== undefined) {
+      const normalizedEmail = normalizeEmail(email)
+      const currentEmail = normalizeEmail(user.email)
+
+      if (normalizedEmail !== currentEmail) {
+        const existing = await User.findOne({ email: normalizedEmail })
+        if (existing && toIdString(existing._id) !== toIdString(user._id)) {
+          return res.status(409).json(
+            buildUserAlreadyExistsResponse({
+              req,
+              existingUser: existing,
+              customerId: responseCustomerId,
+            }),
+          )
+        }
+
+        const previousEmail = user.email
+        const identityReset = resetIdentityPlusForEmailChange(user)
+
+        user.email = normalizedEmail
+        staleIdentityToRevoke = {
+          email: previousEmail,
+          externalId: identityReset.previousIdentityPlus.externalId,
+        }
+
+        diff.email = { from: previousEmail, to: normalizedEmail }
+        diff.identityPlus = {
+          from: identityReset.previousIdentityPlus,
+          to: identityReset.nextIdentityPlus,
+          reason: 'EMAIL_CHANGED',
+        }
+      }
+    }
+
     // Update roles on customer memberships
     if (roles !== undefined) {
       // Find the first non-platform membership to update roles on
@@ -783,13 +883,7 @@ export const updateUser = async (req, res, next) => {
       if (membership) {
         customerForRoleUpdate = await Customer.findById(membership.customerId)
         if (!customerForRoleUpdate) {
-          return res.status(422).json({
-            error: {
-              code: 'VALIDATION_FAILED',
-              message: 'User has an invalid customer membership reference.',
-              requestId: req.requestId,
-            },
-          })
+          return res.status(422).json(buildInvalidCustomerMembershipResponse(req))
         }
 
         const governanceDecision = customerGovernanceService.validateUserRoleUpdate({
@@ -836,13 +930,7 @@ export const updateUser = async (req, res, next) => {
       if (customerId) {
         const customerForTenantVisibility = customerForRoleUpdate || await Customer.findById(customerId)
         if (!customerForTenantVisibility) {
-          return res.status(422).json({
-            error: {
-              code: 'VALIDATION_FAILED',
-              message: 'User has an invalid customer membership reference.',
-              requestId: req.requestId,
-            },
-          })
+          return res.status(422).json(buildInvalidCustomerMembershipResponse(req))
         }
 
         const tenantVisibilityValidation = await validateTenantVisibilityPayload({
@@ -883,6 +971,16 @@ export const updateUser = async (req, res, next) => {
 
     await user.save()
     await performanceCacheService.invalidateUserPermissions(user._id)
+    if (staleIdentityToRevoke?.externalId || staleIdentityToRevoke?.email) {
+      try {
+        await identityPlusService.revokeTrust(staleIdentityToRevoke)
+      } catch (revokeErr) {
+        logger.warn(
+          { err: revokeErr, userId, staleIdentityToRevoke },
+          'Identity Plus revokeTrust failed after user email change; local identity reset preserved',
+        )
+      }
+    }
     if (customerGovernanceChanged && customerForRoleUpdate) {
       await customerForRoleUpdate.save()
       await performanceCacheService.invalidateCustomerTopology(customerForRoleUpdate._id)
@@ -982,13 +1080,17 @@ export const enableUser = async (req, res, next) => {
     }
 
     if (user.isActive) {
-      return res.status(422).json({
-        error: {
-          code: 'VALIDATION_FAILED',
+      return res.status(422).json(
+        buildValidationErrorResponse({
+          req,
           message: 'User is already active.',
-          requestId: req.requestId,
-        },
-      })
+          details: {
+            reason: USER_LIFECYCLE_REASONS.ALREADY_ACTIVE,
+            status: 'ACTIVE',
+            trustStatus: user.identityPlus?.trustStatus || null,
+          },
+        }),
+      )
     }
 
     const previousTrustStatus = user.identityPlus?.trustStatus || null
@@ -1058,13 +1160,17 @@ export const disableUser = async (req, res, next) => {
     }
 
     if (!user.isActive) {
-      return res.status(422).json({
-        error: {
-          code: 'VALIDATION_FAILED',
+      return res.status(422).json(
+        buildValidationErrorResponse({
+          req,
           message: 'User is already disabled.',
-          requestId: req.requestId,
-        },
-      })
+          details: {
+            reason: USER_LIFECYCLE_REASONS.ALREADY_DISABLED,
+            status: 'INACTIVE',
+            trustStatus: user.identityPlus?.trustStatus || null,
+          },
+        }),
+      )
     }
 
     await customerGovernanceService.assertUserCanBeDisabledOrDeleted({
@@ -1155,13 +1261,17 @@ export const deleteUser = async (req, res, next) => {
     }
 
     if (user.isActive) {
-      return res.status(422).json({
-        error: {
-          code: 'VALIDATION_FAILED',
+      return res.status(422).json(
+        buildValidationErrorResponse({
+          req,
           message: 'Only disabled users can be deleted. Disable the user first.',
-          requestId: req.requestId,
-        },
-      })
+          details: {
+            reason: USER_LIFECYCLE_REASONS.DELETE_REQUIRES_DISABLED,
+            status: 'ACTIVE',
+            trustStatus: user.identityPlus?.trustStatus || null,
+          },
+        }),
+      )
     }
 
     await customerGovernanceService.assertUserCanBeDisabledOrDeleted({
@@ -1254,23 +1364,31 @@ export const resendInvitation = async (req, res, next) => {
     }
 
     if (!user.isActive) {
-      return res.status(422).json({
-        error: {
-          code: 'VALIDATION_FAILED',
+      return res.status(422).json(
+        buildValidationErrorResponse({
+          req,
           message: 'Cannot resend invitation to a disabled user.',
-          requestId: req.requestId,
-        },
-      })
+          details: {
+            reason: USER_LIFECYCLE_REASONS.INVITATION_REQUIRES_ACTIVE_USER,
+            status: 'INACTIVE',
+            trustStatus: user.identityPlus?.trustStatus || null,
+          },
+        }),
+      )
     }
 
     if (user.identityPlus.trustStatus !== 'UNTRUSTED') {
-      return res.status(422).json({
-        error: {
-          code: 'VALIDATION_FAILED',
+      return res.status(422).json(
+        buildValidationErrorResponse({
+          req,
           message: 'Invitation can only be resent for users with UNTRUSTED trust status.',
-          requestId: req.requestId,
-        },
-      })
+          details: {
+            reason: USER_LIFECYCLE_REASONS.INVITATION_REQUIRES_UNTRUSTED,
+            status: user.isActive ? 'ACTIVE' : 'INACTIVE',
+            trustStatus: user.identityPlus?.trustStatus || null,
+          },
+        }),
+      )
     }
 
     const customerId = user.memberships.find(
