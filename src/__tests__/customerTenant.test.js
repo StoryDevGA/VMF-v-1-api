@@ -1784,6 +1784,24 @@ describe('POST /api/v1/customers/:customerId/admin-invitations', () => {
   })
 })
 
+describe('POST /api/v1/customers/:customerId/admins/replace', () => {
+  test('returns 403 when step-up token is missing', async () => {
+    const token = await getSuperAdminToken()
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/admins/replace`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        newUserId: USER_ID_2,
+        reason: 'Ownership transfer requested by platform operations.',
+      })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('STEP_UP_REQUIRED')
+    expect(res.body.error.requestId).toBeDefined()
+  })
+})
+
 describe('POST /api/v1/fake-auth/invitations/:invitationId/complete', () => {
   test('auto-provisions and links a missing invitation user when customer context exists', async () => {
     const env = (await import('../config/env.js')).default
