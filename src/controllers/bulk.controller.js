@@ -16,6 +16,29 @@ import identityPlusService from '../services/identityPlusService.js'
 import logger from '../config/logger.js'
 import auditService from '../services/auditService.js'
 import performanceCacheService from '../services/performanceCacheService.js'
+import {
+  buildTenantVisibilityErrorPayload,
+  isTenantVisibilityAllowed,
+  TENANT_VISIBILITY_REASONS,
+} from '../services/tenantVisibilityContractService.js'
+
+const buildBulkTenantVisibilityFailure = ({
+  customer,
+  reason,
+  invalidTenantIds,
+}) => {
+  const payload = buildTenantVisibilityErrorPayload({
+    customer,
+    reason,
+    invalidTenantIds,
+  })
+
+  return {
+    error: payload.message,
+    errorCode: payload.code,
+    errorDetails: payload.details,
+  }
+}
 
 /* ------------------------------------------------------------------ */
 /*  POST /api/v1/customers/:customerId/users/bulk                     */
@@ -43,6 +66,7 @@ export const bulkCreateUsers = async (req, res, next) => {
         },
       })
     }
+    const tenantVisibilityAllowed = isTenantVisibilityAllowed(customer)
 
     // 2. Pre-validate: collect all emails to detect duplicates in batch
     const emailSet = new Set()
@@ -72,7 +96,7 @@ export const bulkCreateUsers = async (req, res, next) => {
     }
 
     let validTenantIds = new Set()
-    if (allTenantIds.size > 0) {
+    if (tenantVisibilityAllowed && allTenantIds.size > 0) {
       const validTenants = await Tenant.find({
         _id: { $in: [...allTenantIds] },
         customerId,
@@ -120,17 +144,39 @@ export const bulkCreateUsers = async (req, res, next) => {
         }
 
         // Validate tenant visibility
-        if (entry.tenantVisibility?.length) {
-          const invalidTenants = entry.tenantVisibility.filter(
-            (tid) => !validTenantIds.has(tid),
-          )
-          if (invalidTenants.length > 0) {
+        if (entry.tenantVisibility !== undefined) {
+          if (!tenantVisibilityAllowed) {
+            const failure = buildBulkTenantVisibilityFailure({
+              customer,
+              reason: TENANT_VISIBILITY_REASONS.NOT_ALLOWED,
+            })
+
             failureCount++
             results.push({
               index: i,
               email,
               status: 'failed',
-              error: `Invalid tenant ID(s): ${invalidTenants.join(', ')}`,
+              ...failure,
+            })
+            continue
+          }
+
+          const invalidTenants = (entry.tenantVisibility || []).filter(
+            (tid) => !validTenantIds.has(tid),
+          )
+          if (invalidTenants.length > 0) {
+            const failure = buildBulkTenantVisibilityFailure({
+              customer,
+              reason: TENANT_VISIBILITY_REASONS.INVALID_TENANT_IDS,
+              invalidTenantIds: invalidTenants,
+            })
+
+            failureCount++
+            results.push({
+              index: i,
+              email,
+              status: 'failed',
+              ...failure,
             })
             continue
           }
@@ -270,6 +316,7 @@ export const bulkUpdateUsers = async (req, res, next) => {
         },
       })
     }
+    const tenantVisibilityAllowed = isTenantVisibilityAllowed(customer)
 
     // 2. Pre-validate tenant visibility IDs
     const allTenantIds = new Set()
@@ -282,7 +329,7 @@ export const bulkUpdateUsers = async (req, res, next) => {
     }
 
     let validTenantIds = new Set()
-    if (allTenantIds.size > 0) {
+    if (tenantVisibilityAllowed && allTenantIds.size > 0) {
       const validTenants = await Tenant.find({
         _id: { $in: [...allTenantIds] },
         customerId,
@@ -337,21 +384,40 @@ export const bulkUpdateUsers = async (req, res, next) => {
 
         // Update tenant visibility
         if (entry.tenantVisibility !== undefined) {
-          // Validate tenant IDs
-          if (entry.tenantVisibility.length > 0) {
-            const invalidTenants = entry.tenantVisibility.filter(
-              (tid) => !validTenantIds.has(tid),
-            )
-            if (invalidTenants.length > 0) {
-              failureCount++
-              results.push({
-                index: i,
-                userId: entry.userId,
-                status: 'failed',
-                error: `Invalid tenant ID(s): ${invalidTenants.join(', ')}`,
-              })
-              continue
-            }
+          if (!tenantVisibilityAllowed) {
+            const failure = buildBulkTenantVisibilityFailure({
+              customer,
+              reason: TENANT_VISIBILITY_REASONS.NOT_ALLOWED,
+            })
+
+            failureCount++
+            results.push({
+              index: i,
+              userId: entry.userId,
+              status: 'failed',
+              ...failure,
+            })
+            continue
+          }
+
+          const invalidTenants = entry.tenantVisibility.filter(
+            (tid) => !validTenantIds.has(tid),
+          )
+          if (invalidTenants.length > 0) {
+            const failure = buildBulkTenantVisibilityFailure({
+              customer,
+              reason: TENANT_VISIBILITY_REASONS.INVALID_TENANT_IDS,
+              invalidTenantIds: invalidTenants,
+            })
+
+            failureCount++
+            results.push({
+              index: i,
+              userId: entry.userId,
+              status: 'failed',
+              ...failure,
+            })
+            continue
           }
 
           diff.tenantVisibility = {

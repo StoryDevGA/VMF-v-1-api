@@ -18,6 +18,15 @@ import monitoringService from '../services/monitoringService.js'
 import performanceCacheService, {
   buildTenantStatusSnapshot,
 } from '../services/performanceCacheService.js'
+import {
+  buildTenantVisibilityCatalogMeta,
+  mapTenantVisibilityCatalogEntry,
+} from '../services/tenantVisibilityContractService.js'
+import {
+  buildTenantAdminAssignmentErrorResponse,
+  buildTenantCapacityMeta,
+  validateTenantAdminAssignments,
+} from '../services/tenantManagementContractService.js'
 
 const buildGovernanceErrorResponse = (req, err) => ({
   error: {
@@ -40,12 +49,23 @@ const buildGovernanceErrorResponse = (req, err) => ({
 export const listTenants = async (req, res, next) => {
   try {
     const { customerId } = req.params
+    const customer = req.scopes?.customer || await Customer.findById(customerId)
     const {
       status,
       q,
       page = 1,
       pageSize = 20,
     } = req.query
+
+    if (!customer) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: 'Customer not found.',
+          requestId: req.requestId,
+        },
+      })
+    }
 
     const filter = { customerId }
     if (status) filter.status = status
@@ -55,22 +75,32 @@ export const listTenants = async (req, res, next) => {
     const limit = Math.min(100, Math.max(1, parseInt(pageSize, 10) || 20))
     const skip = (pageNum - 1) * limit
 
-    const [tenants, total] = await Promise.all([
+    const [tenants, total, currentTenantCount] = await Promise.all([
       Tenant.find(filter)
         .sort({ isDefault: -1, createdAt: -1 })
         .skip(skip)
         .limit(limit)
         .lean(),
       Tenant.countDocuments(filter),
+      Tenant.countDocuments({
+        customerId,
+        status: { $ne: 'ARCHIVED' },
+      }),
     ])
+    const tenantRows = tenants.map(mapTenantVisibilityCatalogEntry)
 
     return res.status(200).json({
-      data: tenants,
+      data: tenantRows,
       meta: {
         page: pageNum,
         pageSize: limit,
         total,
         totalPages: Math.ceil(total / limit),
+        tenantCapacity: buildTenantCapacityMeta({
+          customer,
+          currentTenantCount,
+        }),
+        tenantVisibility: buildTenantVisibilityCatalogMeta({ customer }),
         requestId: req.requestId,
         version: 'v1',
       },
@@ -125,6 +155,20 @@ export const createTenant = async (req, res, next) => {
       customer,
       currentTenantCount,
     })
+
+    const tenantAdminAssignmentValidation = await validateTenantAdminAssignments({
+      customerId: customer._id,
+      tenantAdminUserIds: req.body.tenantAdminUserIds,
+    })
+    if (tenantAdminAssignmentValidation) {
+      return res.status(422).json(
+        buildTenantAdminAssignmentErrorResponse({
+          req,
+          customerId: customer._id,
+          validation: tenantAdminAssignmentValidation,
+        }),
+      )
+    }
 
     const actorUserId = req.context?.userId || req.userId
     const result = await createTenantWithDefaults(req.body, customer, actorUserId, req)
@@ -202,6 +246,22 @@ export const updateTenant = async (req, res, next) => {
 
     const allowedFields = ['name', 'website', 'tenantAdminUserIds']
     const diff = {}
+
+    if (req.body.tenantAdminUserIds !== undefined) {
+      const tenantAdminAssignmentValidation = await validateTenantAdminAssignments({
+        customerId: tenant.customerId,
+        tenantAdminUserIds: req.body.tenantAdminUserIds,
+      })
+      if (tenantAdminAssignmentValidation) {
+        return res.status(422).json(
+          buildTenantAdminAssignmentErrorResponse({
+            req,
+            customerId: tenant.customerId,
+            validation: tenantAdminAssignmentValidation,
+          }),
+        )
+      }
+    }
 
     for (const field of allowedFields) {
       if (req.body[field] !== undefined) {

@@ -521,7 +521,40 @@ describe('POST /api/v1/customers/:customerId/users/bulk', () => {
     expect(res.status).toBe(207)
     expect(res.body.data.summary.succeeded).toBe(1)
     expect(res.body.data.summary.failed).toBe(1)
-    expect(res.body.data.results[1].error).toContain('Invalid tenant ID')
+    expect(res.body.data.results[1].error).toContain('invalid or do not belong')
+    expect(res.body.data.results[1].errorCode).toBe('VALIDATION_FAILED')
+    expect(res.body.data.results[1].errorDetails?.reason).toBe('TENANT_VISIBILITY_INVALID_TENANT_IDS')
+    expect(res.body.data.results[1].errorDetails?.invalidTenantIds).toEqual([INVALID_TENANT_ID])
+  })
+
+  test('rejects tenant visibility entries for single-tenant customers during bulk create', async () => {
+    const token = await getCustomerAdminToken()
+
+    Customer.findById.mockResolvedValue(
+      makeFakeCustomer({ topology: 'SINGLE_TENANT', vmfPolicy: 'SINGLE' }),
+    )
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/users/bulk`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        users: [
+          {
+            name: 'Blocked',
+            email: 'blocked@acme.com',
+            roles: ['USER'],
+            tenantVisibility: [TENANT_ID],
+          },
+        ],
+        sendInvitations: false,
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.data.summary.succeeded).toBe(0)
+    expect(res.body.data.summary.failed).toBe(1)
+    expect(res.body.data.results[0].errorCode).toBe('VALIDATION_FAILED')
+    expect(res.body.data.results[0].errorDetails?.reason).toBe('TENANT_VISIBILITY_NOT_ALLOWED')
+    expect(res.body.data.results[0].errorDetails?.tenantVisibilityMode).toBe('DISALLOWED')
   })
 
   test('returns 422 when all users fail', async () => {
@@ -715,7 +748,34 @@ describe('PATCH /api/v1/customers/:customerId/users/bulk', () => {
       })
 
     expect(res.status).toBe(422)
-    expect(res.body.data.results[0].error).toContain('Invalid tenant ID')
+    expect(res.body.data.results[0].error).toContain('invalid or do not belong')
+    expect(res.body.data.results[0].errorCode).toBe('VALIDATION_FAILED')
+    expect(res.body.data.results[0].errorDetails?.reason).toBe('TENANT_VISIBILITY_INVALID_TENANT_IDS')
+    expect(res.body.data.results[0].errorDetails?.invalidTenantIds).toEqual([INVALID_TENANT_ID])
+  })
+
+  test('rejects tenant visibility entries for single-tenant customers during bulk update', async () => {
+    const token = await getCustomerAdminToken()
+
+    Customer.findById.mockResolvedValue(
+      makeFakeCustomer({ topology: 'SINGLE_TENANT', vmfPolicy: 'SINGLE' }),
+    )
+
+    const res = await request
+      .patch(`/api/v1/customers/${CUSTOMER_ID}/users/bulk`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        users: [
+          { userId: USER_A_ID, tenantVisibility: [TENANT_ID] },
+        ],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.data.summary.succeeded).toBe(0)
+    expect(res.body.data.summary.failed).toBe(1)
+    expect(res.body.data.results[0].errorCode).toBe('VALIDATION_FAILED')
+    expect(res.body.data.results[0].errorDetails?.reason).toBe('TENANT_VISIBILITY_NOT_ALLOWED')
+    expect(res.body.data.results[0].errorDetails?.tenantVisibilityMode).toBe('DISALLOWED')
   })
 })
 

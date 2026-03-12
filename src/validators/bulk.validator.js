@@ -41,7 +41,6 @@ const tenantVisibilitySchema = z
     z.string().regex(objectIdRegex, 'Each tenant ID must be a valid ObjectId'),
   )
   .optional()
-  .default([])
 
 /* ------------------------------------------------------------------ */
 /*  Schemas                                                           */

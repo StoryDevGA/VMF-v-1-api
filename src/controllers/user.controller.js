@@ -18,6 +18,7 @@ import auditService from '../services/auditService.js'
 import logger from '../config/logger.js'
 import performanceCacheService from '../services/performanceCacheService.js'
 import customerGovernanceService from '../services/customerGovernanceService.js'
+import { validateTenantVisibilityPayload } from '../services/tenantVisibilityContractService.js'
 
 const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
@@ -35,11 +36,6 @@ const normalizeStatusFilter = (value) => {
   return null
 }
 
-const MULTI_TENANT_TOPOLOGY = 'MULTI_TENANT'
-const TENANT_VISIBILITY_REASONS = Object.freeze({
-  NOT_ALLOWED: 'TENANT_VISIBILITY_NOT_ALLOWED',
-  INVALID_TENANT_IDS: 'TENANT_VISIBILITY_INVALID_TENANT_IDS',
-})
 const USER_LIFECYCLE_REASONS = Object.freeze({
   INVALID_CUSTOMER_MEMBERSHIP: 'USER_INVALID_CUSTOMER_MEMBERSHIP',
   ALREADY_ACTIVE: 'USER_ALREADY_ACTIVE',
@@ -226,63 +222,6 @@ const upsertCustomerTenantVisibility = ({ user, customerId, tenantVisibility }) 
     previousTenantVisibility,
     nextTenantVisibility,
   }
-}
-
-const getTenantVisibilityMode = (customer) =>
-  customer?.topology === MULTI_TENANT_TOPOLOGY ? 'OPTIONAL' : 'DISALLOWED'
-
-const isTenantVisibilityAllowed = (customer) =>
-  getTenantVisibilityMode(customer) === 'OPTIONAL'
-
-const buildTenantVisibilityErrorResponse = ({ req, customer, message, reason }) => ({
-  error: {
-    code: 'VALIDATION_FAILED',
-    message,
-    details: {
-      tenantVisibility: message,
-      reason,
-      tenantVisibilityMode: getTenantVisibilityMode(customer),
-      topology: customer?.topology || null,
-      isServiceProvider: Boolean(customer?.isServiceProvider),
-    },
-    requestId: req.requestId,
-  },
-})
-
-const validateTenantVisibilityPayload = async ({
-  req,
-  customer,
-  customerId,
-  tenantVisibility,
-}) => {
-  if (tenantVisibility === undefined) return null
-
-  if (!isTenantVisibilityAllowed(customer)) {
-    return buildTenantVisibilityErrorResponse({
-      req,
-      customer,
-      message: 'Tenant visibility is not allowed in this mode.',
-      reason: TENANT_VISIBILITY_REASONS.NOT_ALLOWED,
-    })
-  }
-
-  if (tenantVisibility.length === 0) return null
-
-  const validTenants = await Tenant.countDocuments({
-    _id: { $in: tenantVisibility },
-    customerId,
-  })
-
-  if (validTenants !== tenantVisibility.length) {
-    return buildTenantVisibilityErrorResponse({
-      req,
-      customer,
-      message: 'One or more tenant IDs are invalid or do not belong to this customer.',
-      reason: TENANT_VISIBILITY_REASONS.INVALID_TENANT_IDS,
-    })
-  }
-
-  return null
 }
 
 const buildGovernanceErrorResponse = (req, err) => ({
