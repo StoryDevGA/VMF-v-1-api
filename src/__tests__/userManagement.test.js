@@ -1189,7 +1189,12 @@ describe('PATCH /api/v1/users/:userId', () => {
 
     expect(res.status).toBe(200)
     expect(user.save).toHaveBeenCalled()
-    expect(AuditLog.createLog).toHaveBeenCalled()
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'USER_ROLE_UPDATED',
+      requestId: res.body.meta.requestId,
+      resourceType: 'User',
+      resourceId: REGULAR_USER_ID,
+    }))
   })
 
   test('updates user email, normalizes it, and resets identity trust state', async () => {
@@ -1447,7 +1452,12 @@ describe('POST /api/v1/users/:userId/enable', () => {
     expect(user.isActive).toBe(true)
     expect(user.identityPlus.trustStatus).toBe('UNTRUSTED')
     expect(user.save).toHaveBeenCalled()
-    expect(AuditLog.createLog).toHaveBeenCalled()
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'USER_ENABLED',
+      requestId: res.body.meta.requestId,
+      resourceType: 'User',
+      resourceId: REGULAR_USER_ID,
+    }))
   })
 
   test('returns 422 when user is already active', async () => {
@@ -1538,7 +1548,12 @@ describe('POST /api/v1/users/:userId/disable', () => {
     expect(user.isActive).toBe(false)
     expect(user.identityPlus.trustStatus).toBe('REVOKED')
     expect(user.save).toHaveBeenCalled()
-    expect(AuditLog.createLog).toHaveBeenCalled()
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'USER_DISABLED',
+      requestId: res.body.meta.requestId,
+      resourceType: 'User',
+      resourceId: REGULAR_USER_ID,
+    }))
   })
 
   test('returns 422 when user is already disabled', async () => {
@@ -1630,7 +1645,12 @@ describe('DELETE /api/v1/users/:userId', () => {
     expect(res.body.data.message).toContain('deleted')
     expect(User.deleteOne).toHaveBeenCalled()
     expect(Tenant.updateMany).toHaveBeenCalled()
-    expect(AuditLog.createLog).toHaveBeenCalled()
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'USER_DELETED',
+      requestId: res.body.meta.requestId,
+      resourceType: 'User',
+      resourceId: REGULAR_USER_ID,
+    }))
   })
 
   test('returns 422 when user is still active', async () => {

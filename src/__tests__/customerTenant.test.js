@@ -2014,6 +2014,18 @@ describe('POST /api/v1/customers/:customerId/tenants', () => {
     expect(res.body.data.tenant).toBeDefined()
     // PER_TENANT_MULTI → auto-create VMF
     expect(res.body.data.vmf).toBeDefined()
+    expect(AuditLog.createLog.mock.calls).toEqual(expect.arrayContaining([
+      [expect.objectContaining({
+        action: 'TENANT_CREATED',
+        requestId: res.body.meta.requestId,
+        resourceType: 'Tenant',
+      })],
+      [expect.objectContaining({
+        action: 'VMF_CREATED',
+        requestId: res.body.meta.requestId,
+        resourceType: 'VMF',
+      })],
+    ]))
 
     Tenant.prototype.save = origTenantSave
     VMF.prototype.save = origVmfSave
@@ -2180,7 +2192,12 @@ describe('PATCH /api/v1/tenants/:tenantId', () => {
 
     expect(res.status).toBe(200)
     expect(tenant.save).toHaveBeenCalled()
-    expect(AuditLog.createLog).toHaveBeenCalled()
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'TENANT_UPDATED',
+      requestId: res.body.meta.requestId,
+      resourceType: 'Tenant',
+      resourceId: TENANT_ID,
+    }))
   })
 
   test('updates tenant website', async () => {
@@ -2271,7 +2288,12 @@ describe('POST /api/v1/tenants/:tenantId/enable', () => {
     expect(res.status).toBe(200)
     expect(tenant.status).toBe('ENABLED')
     expect(tenant.save).toHaveBeenCalled()
-    expect(AuditLog.createLog).toHaveBeenCalled()
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'TENANT_ENABLED',
+      requestId: res.body.meta.requestId,
+      resourceType: 'Tenant',
+      resourceId: TENANT_ID,
+    }))
   })
 })
 
@@ -2335,7 +2357,12 @@ describe('POST /api/v1/tenants/:tenantId/disable', () => {
     expect(res.status).toBe(200)
     expect(tenant.status).toBe('DISABLED')
     expect(tenant.save).toHaveBeenCalled()
-    expect(AuditLog.createLog).toHaveBeenCalled()
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'TENANT_DISABLED',
+      requestId: res.body.meta.requestId,
+      resourceType: 'Tenant',
+      resourceId: TENANT_ID,
+    }))
   })
 })
 

@@ -1354,6 +1354,7 @@ describe('AUDIT_ACTIONS & RESOURCE_TYPES constants', () => {
     expect(AUDIT_ACTIONS.CUSTOMER_UPDATED).toBe('CUSTOMER_UPDATED')
     expect(AUDIT_ACTIONS.TENANT_CREATED).toBe('TENANT_CREATED')
     expect(AUDIT_ACTIONS.USER_CREATED).toBe('USER_CREATED')
+    expect(AUDIT_ACTIONS.USER_ENABLED).toBe('USER_ENABLED')
     expect(AUDIT_ACTIONS.BULK_USERS_CREATED).toBe('BULK_USERS_CREATED')
     expect(AUDIT_ACTIONS.VMF_CREATED).toBe('VMF_CREATED')
     expect(AUDIT_ACTIONS.DEAL_CREATED).toBe('DEAL_CREATED')
@@ -1469,16 +1470,13 @@ describe('Combined filter scenarios', () => {
 /*  13. ALL AUDIT ACTIONS accepted by validator                       */
 /* ================================================================== */
 
-describe('All 26 audit actions accepted by query validator', () => {
-  const allActions = [
-    'CUSTOMER_CREATED', 'CUSTOMER_UPDATED', 'CUSTOMER_STATUS_CHANGED', 'CUSTOMER_ADMIN_ASSIGNED',
-    'TENANT_CREATED', 'TENANT_UPDATED', 'TENANT_ENABLED', 'TENANT_DISABLED',
-    'USER_CREATED', 'USER_INVITED', 'USER_ROLE_UPDATED', 'USER_DISABLED', 'USER_DELETED',
-    'BULK_USERS_CREATED', 'BULK_USERS_UPDATED', 'BULK_USERS_DISABLED',
-    'VMF_CREATED', 'VMF_UPDATED', 'VMF_DELETED', 'VMF_GRANT_CREATED', 'VMF_GRANT_REVOKED',
-    'DEAL_CREATED', 'DEAL_UPDATED', 'DEAL_ARCHIVED',
-    'IDENTITY_PLUS_REGISTRATION_COMPLETE', 'IDENTITY_PLUS_TRUST_UPDATED',
-  ]
+describe('All published audit actions are accepted by query validator', () => {
+  let allActions = []
+
+  beforeAll(async () => {
+    const mod = await import('../services/auditService.js')
+    allActions = Object.values(mod.AUDIT_ACTIONS)
+  })
 
   const stubQueryChain = () => {
     AuditLog.find.mockReturnValue({
@@ -1495,16 +1493,19 @@ describe('All 26 audit actions accepted by query validator', () => {
     AuditLog.countDocuments.mockResolvedValue(0)
   }
 
-  test.each(allActions)('accepts action "%s"', async (action) => {
+  test('accepts every published audit action', async () => {
     const token = await getSuperAdminToken()
-    stubQueryChain()
 
-    const res = await request
-      .get('/api/v1/audit-logs')
-      .query({ action })
-      .set('Authorization', `Bearer ${token}`)
+    for (const action of allActions) {
+      stubQueryChain()
 
-    expect(res.status).toBe(200)
+      const res = await request
+        .get('/api/v1/audit-logs')
+        .query({ action })
+        .set('Authorization', `Bearer ${token}`)
+
+      expect(res.status).toBe(200)
+    }
   })
 })
 

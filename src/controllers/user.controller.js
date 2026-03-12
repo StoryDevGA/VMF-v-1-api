@@ -1048,7 +1048,7 @@ export const enableUser = async (req, res, next) => {
     await performanceCacheService.invalidateUserPermissions(user._id)
 
     await auditService.logFromRequest(req, {
-      action: 'USER_ENABLED',
+      action: auditService.AUDIT_ACTIONS.USER_ENABLED,
       resourceType: 'User',
       resourceId: user._id,
       scope: {

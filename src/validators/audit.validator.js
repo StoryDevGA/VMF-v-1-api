@@ -10,6 +10,7 @@
  */
 
 import { z } from 'zod'
+import { AUDIT_ACTIONS, RESOURCE_TYPES } from '../services/auditService.js'
 
 /* ------------------------------------------------------------------ */
 /*  Shared patterns                                                   */
@@ -43,35 +44,9 @@ const pageSizeParam = z.coerce
 /*  Audit actions & resource types for enum validation                */
 /* ------------------------------------------------------------------ */
 
-const validActions = [
-  'CUSTOMER_CREATED', 'CUSTOMER_UPDATED', 'CUSTOMER_STATUS_CHANGED', 'CUSTOMER_ADMIN_ASSIGNED', 'CUSTOMER_LIMITS_CHANGED',
-  'LICENSE_LEVEL_CREATED', 'LICENSE_LEVEL_UPDATED',
-  'TENANT_CREATED', 'TENANT_UPDATED', 'TENANT_ENABLED', 'TENANT_DISABLED', 'TENANT_LIMIT_REJECTED',
-  'USER_CREATED', 'USER_INVITED', 'USER_ROLE_UPDATED', 'USER_DISABLED', 'USER_DELETED',
-  'BULK_USERS_CREATED', 'BULK_USERS_UPDATED', 'BULK_USERS_DISABLED',
-  'VMF_CREATED', 'VMF_UPDATED', 'VMF_DELETED', 'VMF_GRANT_CREATED', 'VMF_GRANT_REVOKED', 'VMF_LIMIT_REJECTED',
-  'DEAL_CREATED', 'DEAL_UPDATED', 'DEAL_ARCHIVED',
-  'IDENTITY_PLUS_REGISTRATION_COMPLETE', 'IDENTITY_PLUS_TRUST_UPDATED',
-  'SYSTEM_VERSIONING_POLICY_UPDATED', 'GOVERNANCE_OVERRIDE_APPLIED', 'GOVERNANCE_OVERRIDE_DENIED',
-  'ACCESS_DENIED',
-  'INVITATION_CREATED', 'INVITATION_SENT', 'INVITATION_SEND_FAILED', 'INVITATION_RESENT',
-  'INVITATION_REVOKED', 'INVITATION_EXPIRED', 'INVITATION_AUTHENTICATION_SUCCEEDED',
-  'INVITATION_AUTHENTICATION_FAILED', 'INVITATION_AUTH_LINK_ACCESSED', 'ONBOARDING_TRANSACTION_FAILED',
-  'CUSTOMER_ADMIN_REPLACED', 'CUSTOMER_ADMIN_CANONICAL_SET', 'CUSTOMER_ADMIN_MUTATION_BLOCKED',
-  'AUDIT_LOG_VIEWED', 'DENIED_ACCESS_LOG_VIEWED',
-]
+const validActions = Object.values(AUDIT_ACTIONS)
 
-const validResourceTypes = [
-  'Customer',
-  'Tenant',
-  'User',
-  'VMF',
-  'Deal',
-  'Invitation',
-  'SystemVersioningPolicy',
-  'AuditLog',
-  'LicenseLevel',
-]
+const validResourceTypes = Object.values(RESOURCE_TYPES)
 
 /* ------------------------------------------------------------------ */
 /*  Schemas                                                           */
