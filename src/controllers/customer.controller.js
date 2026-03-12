@@ -20,6 +20,7 @@ import customerGovernanceService from '../services/customerGovernanceService.js'
 import monitoringService from '../services/monitoringService.js'
 import emailService from '../services/emailService.js'
 import invitationService from '../services/invitationService.js'
+import { applyManualTestPasswordBootstrap } from '../services/manualTestPasswordBootstrapService.js'
 import logger from '../config/logger.js'
 import env from '../config/env.js'
 
@@ -919,6 +920,10 @@ export const assignAdmin = async (req, res, next) => {
           memberships: [],
         })
         userCreatedForAssignment = true
+        await applyManualTestPasswordBootstrap({
+          user,
+          source: 'super_admin_assign_customer_admin',
+        })
       }
     }
 

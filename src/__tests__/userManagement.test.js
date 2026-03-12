@@ -781,6 +781,59 @@ describe('POST /api/v1/customers/:customerId/users', () => {
     User.prototype.save = origSave
   })
 
+  test('seeds the shared manual-test password for targeted created users when enabled', async () => {
+    const token = await getCustomerAdminToken()
+    const env = (await import('../config/env.js')).default
+    const previousFakeAuthAllowed = env.fakeAuthAllowed
+    const previousPassword = env.manualTestPasswordBootstrapPassword
+    env.fakeAuthAllowed = true
+    env.manualTestPasswordBootstrapPassword = 'Vmf!Test123'
+
+    Customer.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ID) return Promise.resolve(makeFakeCustomer())
+      return Promise.resolve(null)
+    })
+    User.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ADMIN_ID) return Promise.resolve(makeCustomerAdmin())
+      return Promise.resolve(null)
+    })
+    User.findOne.mockResolvedValue(null)
+
+    const sendInvitationSpy = jest
+      .spyOn(identityPlusService, 'sendInvitation')
+      .mockResolvedValueOnce({ invitedAt: new Date('2026-03-12T09:00:00.000Z') })
+
+    const originalSave = User.prototype.save
+    const savedUsers = []
+    User.prototype.save = jest.fn(async function () {
+      this._id = this._id || NEW_USER_ID
+      this.id = this.id || NEW_USER_ID
+      savedUsers.push(this)
+      return this
+    })
+
+    try {
+      const res = await request
+        .post(`/api/v1/customers/${CUSTOMER_ID}/users`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          name: 'Any QA User',
+          email: 'qa.user+1@example.test',
+          roles: ['USER'],
+        })
+
+      expect(res.status).toBe(201)
+      expect(savedUsers[0]).toBeDefined()
+      expect(savedUsers[0].passwordHash).toBeDefined()
+      await expect(savedUsers[0].comparePassword('Vmf!Test123')).resolves.toBe(true)
+    } finally {
+      User.prototype.save = originalSave
+      env.fakeAuthAllowed = previousFakeAuthAllowed
+      env.manualTestPasswordBootstrapPassword = previousPassword
+      sendInvitationSpy.mockRestore()
+    }
+  })
+
   test('returns invited_new with send_failed when invitation dispatch fails', async () => {
     const token = await getCustomerAdminToken()
     Customer.findById.mockImplementation((id) => {

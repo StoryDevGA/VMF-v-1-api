@@ -12,6 +12,7 @@ import { Invitation, User } from '../models/index.js'
 import logger from '../config/logger.js'
 import auditService from '../services/auditService.js'
 import performanceCacheService from '../services/performanceCacheService.js'
+import { applyManualTestPasswordBootstrap } from '../services/manualTestPasswordBootstrapService.js'
 
 const normalizeEmail = (value) => String(value || '').trim().toLowerCase()
 
@@ -73,6 +74,10 @@ const provisionUserFromInvitation = async ({ invitation, normalizedEmail, req })
 
   let created = false
   try {
+    await applyManualTestPasswordBootstrap({
+      user,
+      source: 'fake_auth_provision_user',
+    })
     await user.save()
     created = true
   } catch (saveErr) {
@@ -225,9 +230,14 @@ export const completeFakeAuth = async (req, res, next) => {
       invitationLinkUpdated = true
     }
 
+    const passwordBootstrap = await applyManualTestPasswordBootstrap({
+      user,
+      source: 'fake_auth_complete',
+    })
+
     // Idempotency: already trusted - mirrors real webhook behavior
     if (user.identityPlus.trustStatus === 'TRUSTED') {
-      if (membershipUpdated) {
+      if (membershipUpdated || passwordBootstrap.applied) {
         await user.save()
         await performanceCacheService.invalidateUserPermissions(user._id)
       }

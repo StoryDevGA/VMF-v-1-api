@@ -18,6 +18,7 @@ import auditService from '../services/auditService.js'
 import logger from '../config/logger.js'
 import performanceCacheService from '../services/performanceCacheService.js'
 import customerGovernanceService from '../services/customerGovernanceService.js'
+import { applyManualTestPasswordBootstrap } from '../services/manualTestPasswordBootstrapService.js'
 import { validateTenantVisibilityPayload } from '../services/tenantVisibilityContractService.js'
 
 const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -557,6 +558,11 @@ export const createUser = async (req, res, next) => {
         tenantId,
         roles: ['USER'],
       })),
+    })
+
+    await applyManualTestPasswordBootstrap({
+      user,
+      source: 'customer_admin_create_user',
     })
 
     const requestsCustomerAdminRole = normalizedRoles.includes(

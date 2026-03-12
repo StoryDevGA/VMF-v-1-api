@@ -1391,6 +1391,58 @@ describe('POST /api/v1/customers/:customerId/admins', () => {
     expect(Invitation.create).toHaveBeenCalled()
   })
 
+  test('seeds the shared manual-test password when assigning a customer admin by any email in fake-auth UAT mode', async () => {
+    const token = await getSuperAdminToken()
+    const env = (await import('../config/env.js')).default
+    const previousFakeAuthAllowed = env.fakeAuthAllowed
+    const previousPassword = env.manualTestPasswordBootstrapPassword
+    env.fakeAuthAllowed = true
+    env.manualTestPasswordBootstrapPassword = 'Vmf!Test123'
+
+    Customer.findById.mockResolvedValue(makeFakeCustomer())
+    User.findOne.mockImplementation((query) => {
+      if (query?.email) return Promise.resolve(null)
+      return Promise.resolve(null)
+    })
+
+    const createdInvitation = makeFakeInvitation({
+      recipientEmail: 'custom.admin@demo.example',
+      recipientName: 'Custom Admin',
+      provisionedCustomerId: CUSTOMER_ID,
+      provisionedUserId: USER_ID_2,
+    })
+    Invitation.findOne.mockResolvedValue(null)
+    Invitation.create.mockResolvedValue(createdInvitation)
+    Invitation.generateToken.mockReturnValue({ raw: 'raw-token', hash: 'hash-token' })
+
+    const originalSave = User.prototype.save
+    const savedUsers = []
+    User.prototype.save = jest.fn(async function () {
+      this._id = this._id || USER_ID_2
+      this.id = this.id || USER_ID_2
+      savedUsers.push(this)
+      return this
+    })
+
+    try {
+      const res = await request
+        .post(`/api/v1/customers/${CUSTOMER_ID}/admins`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          recipientEmail: 'custom.admin@demo.example',
+          recipientName: 'Custom Admin',
+        })
+
+      expect(res.status).toBe(200)
+      expect(savedUsers[0]).toBeDefined()
+      await expect(savedUsers[0].comparePassword('Vmf!Test123')).resolves.toBe(true)
+    } finally {
+      User.prototype.save = originalSave
+      env.fakeAuthAllowed = previousFakeAuthAllowed
+      env.manualTestPasswordBootstrapPassword = previousPassword
+    }
+  })
+
   test('links existing active invitation during recipientEmail assign flow', async () => {
     const token = await getSuperAdminToken()
     Customer.findById.mockResolvedValue(makeFakeCustomer())
@@ -1843,6 +1895,49 @@ describe('POST /api/v1/fake-auth/invitations/:invitationId/complete', () => {
     } finally {
       User.prototype.save = originalUserPrototypeSave
       env.fakeAuthAllowed = previousFakeAuthAllowed
+    }
+  })
+
+  test('applies the shared manual-test password during fake-auth completion for any invited email', async () => {
+    const env = (await import('../config/env.js')).default
+    const previousFakeAuthAllowed = env.fakeAuthAllowed
+    const previousPassword = env.manualTestPasswordBootstrapPassword
+    env.fakeAuthAllowed = true
+    env.manualTestPasswordBootstrapPassword = 'Vmf!Test123'
+
+    const invitation = makeFakeInvitation({
+      status: 'accessed',
+      recipientEmail: 'Who.Ever@demo.example',
+      recipientName: 'Who Ever',
+      provisionedCustomerId: CUSTOMER_ID,
+      provisionedUserId: null,
+      isExpired: jest.fn(() => false),
+    })
+    Invitation.findById = jest.fn().mockResolvedValue(invitation)
+    User.findOne.mockResolvedValue(null)
+
+    const originalSave = User.prototype.save
+    const savedUsers = []
+    User.prototype.save = jest.fn(async function () {
+      this._id = this._id || USER_ID_2
+      this.id = this.id || USER_ID_2
+      savedUsers.push(this)
+      return this
+    })
+
+    try {
+      const res = await request
+        .post(`/api/v1/fake-auth/invitations/${INVITATION_ID}/complete`)
+        .send({})
+
+      expect(res.status).toBe(200)
+      expect(savedUsers[0]).toBeDefined()
+      expect(savedUsers[0].identityPlus.trustStatus).toBe('TRUSTED')
+      await expect(savedUsers[0].comparePassword('Vmf!Test123')).resolves.toBe(true)
+    } finally {
+      User.prototype.save = originalSave
+      env.fakeAuthAllowed = previousFakeAuthAllowed
+      env.manualTestPasswordBootstrapPassword = previousPassword
     }
   })
 

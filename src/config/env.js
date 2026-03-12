@@ -103,6 +103,10 @@ const env = {
   // Fake Auth (non-production app environments only)
   fakeAuthEnabled: toBoolean(process.env.FAKE_AUTH_ENABLED, false),
 
+  // Manual test password bootstrap settings (follows fake auth availability)
+  manualTestPasswordBootstrapPassword:
+    process.env.MANUAL_TEST_PASSWORD_BOOTSTRAP_PASSWORD || '',
+
   // Governance rollout controls
   governanceLicenseLevelsEnabled: toBoolean(process.env.GOVERNANCE_LICENSE_LEVELS_ENABLED, true),
   governanceStrictAdminInvariantEnabled: toBoolean(
