@@ -54,6 +54,16 @@ customerUserRouter.use(
 customerUserRouter.get('/', validateListUsersQuery, listUsers)
 customerUserRouter.post('/', userManagementRateLimit, validateCreateUser, createUser)
 customerUserRouter.get('/:userId', getUser)
+customerUserRouter.patch('/:userId', userManagementRateLimit, validateUpdateUser, updateUser)
+customerUserRouter.post('/:userId/enable', userManagementRateLimit, enableUser)
+customerUserRouter.post('/:userId/disable', userManagementRateLimit, disableUser)
+customerUserRouter.delete('/:userId', userManagementRateLimit, deleteUser)
+customerUserRouter.post(
+  '/:userId/resend-invitation',
+  userManagementRateLimit,
+  validateResendInvitation,
+  resendInvitation,
+)
 
 /* ------------------------------------------------------------------ */
 /*  User-scoped router: /api/v1/users                                 */

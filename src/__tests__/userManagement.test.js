@@ -1199,6 +1199,51 @@ describe('GET /api/v1/customers/:customerId/users/:userId', () => {
 /*  UPDATE USER                                                       */
 /* ================================================================== */
 
+describe('PATCH /api/v1/customers/:customerId/users/:userId', () => {
+  test('updates a user for a customer admin without requiring SUPER_ADMIN', async () => {
+    const token = await getCustomerAdminToken()
+    const user = makeRegularUser()
+
+    User.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ADMIN_ID) return Promise.resolve(makeCustomerAdmin())
+      if (id === REGULAR_USER_ID) return Promise.resolve(user)
+      return Promise.resolve(null)
+    })
+
+    const res = await request
+      .patch(`/api/v1/customers/${CUSTOMER_ID}/users/${REGULAR_USER_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: 'Updated Name' })
+
+    expect(res.status).toBe(200)
+    expect(user.save).toHaveBeenCalled()
+    expect(res.body.data.name).toBe('Updated Name')
+    expect(res.body.data.customerRoles).toEqual(['USER'])
+    expect(res.body.data.tenantVisibility).toEqual([TENANT_ID])
+  })
+
+  test('returns 404 when the target user is outside the customer scope', async () => {
+    const token = await getCustomerAdminToken()
+    const differentCustomerUser = makeRegularUser({
+      memberships: [{ customerId: '607f1f77bcf86cd799439099', roles: ['USER'] }],
+    })
+
+    User.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ADMIN_ID) return Promise.resolve(makeCustomerAdmin())
+      if (id === REGULAR_USER_ID) return Promise.resolve(differentCustomerUser)
+      return Promise.resolve(null)
+    })
+
+    const res = await request
+      .patch(`/api/v1/customers/${CUSTOMER_ID}/users/${REGULAR_USER_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: 'Updated Name' })
+
+    expect(res.status).toBe(404)
+    expect(differentCustomerUser.save).not.toHaveBeenCalled()
+  })
+})
+
 describe('PATCH /api/v1/users/:userId', () => {
   test('returns 403 when target user belongs to an inactive customer', async () => {
     const token = await getSuperAdminToken()
@@ -1581,6 +1626,52 @@ describe('POST /api/v1/users/:userId/enable', () => {
 /* ================================================================== */
 /*  DISABLE USER                                                      */
 /* ================================================================== */
+
+describe('POST /api/v1/customers/:customerId/users/:userId/disable', () => {
+  test('disables an in-scope user for a customer admin', async () => {
+    const token = await getCustomerAdminToken()
+    const user = makeRegularUser({
+      identityPlus: { trustStatus: 'TRUSTED', externalId: 'ext_1' },
+    })
+
+    User.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ADMIN_ID) return Promise.resolve(makeCustomerAdmin())
+      if (id === REGULAR_USER_ID) return Promise.resolve(user)
+      return Promise.resolve(null)
+    })
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/users/${REGULAR_USER_ID}/disable`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(user.isActive).toBe(false)
+    expect(user.identityPlus.trustStatus).toBe('REVOKED')
+    expect(res.body.data.status).toBe('INACTIVE')
+    expect(res.body.data.trustStatus).toBe('REVOKED')
+  })
+
+  test('returns 404 when the target user is outside the customer scope', async () => {
+    const token = await getCustomerAdminToken()
+    const differentCustomerUser = makeRegularUser({
+      identityPlus: { trustStatus: 'TRUSTED', externalId: 'ext_1' },
+      memberships: [{ customerId: '607f1f77bcf86cd799439099', roles: ['USER'] }],
+    })
+
+    User.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ADMIN_ID) return Promise.resolve(makeCustomerAdmin())
+      if (id === REGULAR_USER_ID) return Promise.resolve(differentCustomerUser)
+      return Promise.resolve(null)
+    })
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/users/${REGULAR_USER_ID}/disable`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(404)
+    expect(differentCustomerUser.save).not.toHaveBeenCalled()
+  })
+})
 
 describe('POST /api/v1/users/:userId/disable', () => {
   test('disables an active user and revokes trust', async () => {

@@ -144,6 +144,40 @@ const buildInvalidCustomerMembershipResponse = (req) =>
     },
   })
 
+const buildUserNotFoundResponse = (req) => ({
+  error: {
+    code: 'NOT_FOUND',
+    message: 'User not found.',
+    requestId: req.requestId,
+  },
+})
+
+const resolveUserCustomerContext = ({ req, user }) => {
+  const scopedCustomerId = toIdString(req.params?.customerId)
+
+  if (scopedCustomerId) {
+    const membership = resolveCustomerMembership(user, scopedCustomerId)
+    if (!membership) return null
+
+    return {
+      customerId: scopedCustomerId,
+      rawCustomerId: membership.customerId || scopedCustomerId,
+      membership,
+      isCustomerScoped: true,
+    }
+  }
+
+  const membership =
+    (user?.memberships || []).find((candidate) => candidate?.customerId !== null) || null
+
+  return {
+    customerId: toIdString(membership?.customerId),
+    rawCustomerId: membership?.customerId || null,
+    membership,
+    isCustomerScoped: false,
+  }
+}
+
 const buildUserAlreadyExistsResponse = ({ req, existingUser, customerId }) => ({
   error: {
     code: 'USER_ALREADY_EXISTS',
@@ -711,13 +745,13 @@ export const getUser = async (req, res, next) => {
     const user = await User.findById(userId)
 
     if (!user) {
-      return res.status(404).json({
-        error: {
-          code: 'NOT_FOUND',
-          message: 'User not found.',
-          requestId: req.requestId,
-        },
-      })
+      return res.status(404).json(buildUserNotFoundResponse(req))
+    }
+
+    const customerContext = resolveUserCustomerContext({ req, user })
+
+    if (req.params.customerId && !customerContext) {
+      return res.status(404).json(buildUserNotFoundResponse(req))
     }
 
     // Ensure user belongs to this customer
@@ -764,21 +798,21 @@ export const updateUser = async (req, res, next) => {
     const user = await User.findById(userId)
 
     if (!user) {
-      return res.status(404).json({
-        error: {
-          code: 'NOT_FOUND',
-          message: 'User not found.',
-          requestId: req.requestId,
-        },
-      })
+      return res.status(404).json(buildUserNotFoundResponse(req))
     }
 
     const diff = {}
     let customerForRoleUpdate = null
     let customerGovernanceChanged = false
     let staleIdentityToRevoke = null
+    const customerContext = resolveUserCustomerContext({ req, user })
+
+    if (req.params.customerId && !customerContext) {
+      return res.status(404).json(buildUserNotFoundResponse(req))
+    }
+
     const primaryMembership = user.memberships.find((m) => m.customerId !== null)
-    const responseCustomerId = toIdString(primaryMembership?.customerId)
+    const responseCustomerId = customerContext?.customerId || toIdString(primaryMembership?.customerId)
 
     // Update name
     if (name !== undefined) {
@@ -823,8 +857,9 @@ export const updateUser = async (req, res, next) => {
 
     // Update roles on customer memberships
     if (roles !== undefined) {
-      // Find the first non-platform membership to update roles on
-      const membership = user.memberships.find((m) => m.customerId !== null)
+      const membership =
+        customerContext?.membership ||
+        user.memberships.find((m) => m.customerId !== null)
       if (membership) {
         customerForRoleUpdate = await Customer.findById(membership.customerId)
         if (!customerForRoleUpdate) {
@@ -870,7 +905,7 @@ export const updateUser = async (req, res, next) => {
 
     // Update tenant visibility (tenantMemberships)
     if (tenantVisibility !== undefined) {
-      const customerId = primaryMembership?.customerId
+      const customerId = customerContext?.rawCustomerId || primaryMembership?.customerId
 
       if (customerId) {
         const customerForTenantVisibility = customerForRoleUpdate || await Customer.findById(customerId)
@@ -893,14 +928,14 @@ export const updateUser = async (req, res, next) => {
         // Validate tenant IDs belong to this customer
         diff.tenantVisibility = {
           from: user.tenantMemberships
-            .filter((tm) => tm.customerId.toString() === customerId.toString())
+            .filter((tm) => toIdString(tm.customerId) === toIdString(customerId))
             .map((tm) => tm.tenantId.toString()),
           to: tenantVisibility,
         }
 
         // Remove existing tenantMemberships for this customer
         user.tenantMemberships = user.tenantMemberships.filter(
-          (tm) => tm.customerId.toString() !== customerId.toString(),
+          (tm) => toIdString(tm.customerId) !== toIdString(customerId),
         )
 
         // Add new tenantMemberships
@@ -937,7 +972,9 @@ export const updateUser = async (req, res, next) => {
       resourceType: 'User',
       resourceId: user._id,
       scope: {
-        customerId: user.memberships.find((m) => m.customerId !== null)?.customerId,
+        customerId:
+          customerContext?.rawCustomerId ||
+          user.memberships.find((m) => m.customerId !== null)?.customerId,
       },
       diff,
     })
@@ -1015,13 +1052,13 @@ export const enableUser = async (req, res, next) => {
     const user = await User.findById(userId)
 
     if (!user) {
-      return res.status(404).json({
-        error: {
-          code: 'NOT_FOUND',
-          message: 'User not found.',
-          requestId: req.requestId,
-        },
-      })
+      return res.status(404).json(buildUserNotFoundResponse(req))
+    }
+
+    const customerContext = resolveUserCustomerContext({ req, user })
+
+    if (req.params.customerId && !customerContext) {
+      return res.status(404).json(buildUserNotFoundResponse(req))
     }
 
     if (user.isActive) {
@@ -1058,7 +1095,9 @@ export const enableUser = async (req, res, next) => {
       resourceType: 'User',
       resourceId: user._id,
       scope: {
-        customerId: user.memberships.find((m) => m.customerId !== null)?.customerId,
+        customerId:
+          customerContext?.rawCustomerId ||
+          user.memberships.find((m) => m.customerId !== null)?.customerId,
       },
       diff: {
         isActive: { from: false, to: true },
@@ -1069,7 +1108,13 @@ export const enableUser = async (req, res, next) => {
     })
 
     return res.status(200).json({
-      data: user.toJSON(),
+      data: customerContext?.isCustomerScoped
+        ? mapCustomerScopedUser({
+            user,
+            customerId: customerContext.customerId,
+            canonicalAdminUserId: toIdString(req.scopes?.customer?.governance?.customerAdminUserId),
+          })
+        : user.toJSON(),
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
@@ -1095,13 +1140,13 @@ export const disableUser = async (req, res, next) => {
     const user = await User.findById(userId)
 
     if (!user) {
-      return res.status(404).json({
-        error: {
-          code: 'NOT_FOUND',
-          message: 'User not found.',
-          requestId: req.requestId,
-        },
-      })
+      return res.status(404).json(buildUserNotFoundResponse(req))
+    }
+
+    const customerContext = resolveUserCustomerContext({ req, user })
+
+    if (req.params.customerId && !customerContext) {
+      return res.status(404).json(buildUserNotFoundResponse(req))
     }
 
     if (!user.isActive) {
@@ -1148,7 +1193,9 @@ export const disableUser = async (req, res, next) => {
       resourceType: 'User',
       resourceId: user._id,
       scope: {
-        customerId: user.memberships.find((m) => m.customerId !== null)?.customerId,
+        customerId:
+          customerContext?.rawCustomerId ||
+          user.memberships.find((m) => m.customerId !== null)?.customerId,
       },
       diff: {
         isActive: { from: true, to: false },
@@ -1157,7 +1204,13 @@ export const disableUser = async (req, res, next) => {
     })
 
     return res.status(200).json({
-      data: user.toJSON(),
+      data: customerContext?.isCustomerScoped
+        ? mapCustomerScopedUser({
+            user,
+            customerId: customerContext.customerId,
+            canonicalAdminUserId: toIdString(req.scopes?.customer?.governance?.customerAdminUserId),
+          })
+        : user.toJSON(),
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
@@ -1196,13 +1249,13 @@ export const deleteUser = async (req, res, next) => {
     const user = await User.findById(userId)
 
     if (!user) {
-      return res.status(404).json({
-        error: {
-          code: 'NOT_FOUND',
-          message: 'User not found.',
-          requestId: req.requestId,
-        },
-      })
+      return res.status(404).json(buildUserNotFoundResponse(req))
+    }
+
+    const customerContext = resolveUserCustomerContext({ req, user })
+
+    if (req.params.customerId && !customerContext) {
+      return res.status(404).json(buildUserNotFoundResponse(req))
     }
 
     if (user.isActive) {
@@ -1229,7 +1282,9 @@ export const deleteUser = async (req, res, next) => {
       id: user._id,
       email: user.email,
       name: user.name,
-      customerId: user.memberships.find((m) => m.customerId !== null)?.customerId,
+      customerId:
+        customerContext?.rawCustomerId ||
+        user.memberships.find((m) => m.customerId !== null)?.customerId,
     }
 
     // Remove user from tenant admin arrays
@@ -1299,13 +1354,13 @@ export const resendInvitation = async (req, res, next) => {
     const user = await User.findById(userId)
 
     if (!user) {
-      return res.status(404).json({
-        error: {
-          code: 'NOT_FOUND',
-          message: 'User not found.',
-          requestId: req.requestId,
-        },
-      })
+      return res.status(404).json(buildUserNotFoundResponse(req))
+    }
+
+    const customerContext = resolveUserCustomerContext({ req, user })
+
+    if (req.params.customerId && !customerContext) {
+      return res.status(404).json(buildUserNotFoundResponse(req))
     }
 
     if (!user.isActive) {
@@ -1336,9 +1391,9 @@ export const resendInvitation = async (req, res, next) => {
       )
     }
 
-    const customerId = user.memberships.find(
-      (m) => m.customerId !== null,
-    )?.customerId
+    const customerId =
+      customerContext?.rawCustomerId ||
+      user.memberships.find((m) => m.customerId !== null)?.customerId
 
     // Send invitation
     const result = await identityPlusService.sendInvitation({

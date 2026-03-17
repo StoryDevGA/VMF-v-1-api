@@ -37,6 +37,27 @@ const buildGovernanceErrorResponse = (req, err) => ({
   },
 })
 
+const toIdString = (value) => {
+  if (!value) return null
+  if (typeof value === 'string') return value
+  if (typeof value.toString === 'function') return value.toString()
+  return String(value)
+}
+
+const buildTenantNotFoundResponse = (req) => ({
+  error: {
+    code: 'NOT_FOUND',
+    message: 'Tenant not found.',
+    requestId: req.requestId,
+  },
+})
+
+const tenantMatchesCustomerScope = (req, tenant) => {
+  const customerId = toIdString(req.params?.customerId)
+  if (!customerId) return true
+  return toIdString(tenant?.customerId) === customerId
+}
+
 /* ------------------------------------------------------------------ */
 /*  GET /api/v1/customers/:customerId/tenants                         */
 /* ------------------------------------------------------------------ */
@@ -235,13 +256,11 @@ export const updateTenant = async (req, res, next) => {
     const tenant = await Tenant.findById(req.params.tenantId)
 
     if (!tenant) {
-      return res.status(404).json({
-        error: {
-          code: 'NOT_FOUND',
-          message: 'Tenant not found.',
-          requestId: req.requestId,
-        },
-      })
+      return res.status(404).json(buildTenantNotFoundResponse(req))
+    }
+
+    if (!tenantMatchesCustomerScope(req, tenant)) {
+      return res.status(404).json(buildTenantNotFoundResponse(req))
     }
 
     const allowedFields = ['name', 'website', 'tenantAdminUserIds']
@@ -312,13 +331,11 @@ export const enableTenant = async (req, res, next) => {
     const tenant = await Tenant.findById(req.params.tenantId)
 
     if (!tenant) {
-      return res.status(404).json({
-        error: {
-          code: 'NOT_FOUND',
-          message: 'Tenant not found.',
-          requestId: req.requestId,
-        },
-      })
+      return res.status(404).json(buildTenantNotFoundResponse(req))
+    }
+
+    if (!tenantMatchesCustomerScope(req, tenant)) {
+      return res.status(404).json(buildTenantNotFoundResponse(req))
     }
 
     if (tenant.status === 'ENABLED') {
@@ -373,13 +390,11 @@ export const disableTenant = async (req, res, next) => {
     const tenant = await Tenant.findById(req.params.tenantId)
 
     if (!tenant) {
-      return res.status(404).json({
-        error: {
-          code: 'NOT_FOUND',
-          message: 'Tenant not found.',
-          requestId: req.requestId,
-        },
-      })
+      return res.status(404).json(buildTenantNotFoundResponse(req))
+    }
+
+    if (!tenantMatchesCustomerScope(req, tenant)) {
+      return res.status(404).json(buildTenantNotFoundResponse(req))
     }
 
     // Prevent disabling default tenants

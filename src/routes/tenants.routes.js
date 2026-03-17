@@ -39,6 +39,9 @@ customerTenantRouter.use(requireCustomerActive())
 
 customerTenantRouter.get('/', listTenants)
 customerTenantRouter.post('/', tenantManagementRateLimit, validateCreateTenant, createTenant)
+customerTenantRouter.patch('/:tenantId', tenantManagementRateLimit, validateUpdateTenant, updateTenant)
+customerTenantRouter.post('/:tenantId/enable', tenantManagementRateLimit, enableTenant)
+customerTenantRouter.post('/:tenantId/disable', tenantManagementRateLimit, disableTenant)
 
 /* ------------------------------------------------------------------ */
 /*  Tenant-scoped router: /api/v1/tenants                             */
