@@ -14,6 +14,7 @@ import { createBodyValidator } from './shared.js'
 /* ------------------------------------------------------------------ */
 
 const objectIdRegex = /^[a-f\d]{24}$/i
+const singleTenantAdminMessage = 'Only one tenant admin is allowed'
 
 const websiteSchema = z
   .string({ required_error: 'Website is required' })
@@ -33,7 +34,8 @@ const createTenantSchema = z.object({
       z.string().regex(objectIdRegex, 'Each tenantAdminUserId must be a valid ObjectId'),
       { required_error: 'tenantAdminUserIds is required' },
     )
-    .min(1, 'At least one tenant admin is required'),
+    .min(1, 'At least one tenant admin is required')
+    .max(1, singleTenantAdminMessage),
 })
 
 const updateTenantSchema = z.object({
@@ -49,6 +51,7 @@ const updateTenantSchema = z.object({
       z.string().regex(objectIdRegex, 'Each tenantAdminUserId must be a valid ObjectId'),
     )
     .min(1, 'At least one tenant admin is required')
+    .max(1, singleTenantAdminMessage)
     .optional(),
 })
 

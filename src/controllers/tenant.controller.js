@@ -9,7 +9,7 @@
  *   - POST  /api/v1/tenants/:tenantId/disable           Disable tenant
  */
 
-import { Customer, Tenant } from '../models/index.js'
+import { Customer, Tenant, User } from '../models/index.js'
 import { createTenantWithDefaults } from '../services/provisioningService.js'
 import auditService from '../services/auditService.js'
 import customerGovernanceService from '../services/customerGovernanceService.js'
@@ -56,6 +56,88 @@ const tenantMatchesCustomerScope = (req, tenant) => {
   const customerId = toIdString(req.params?.customerId)
   if (!customerId) return true
   return toIdString(tenant?.customerId) === customerId
+}
+
+const normalizeTenantAdminRef = (value) => {
+  if (!value) return null
+
+  if (typeof value === 'object') {
+    const id = toIdString(value._id || value.id)
+    if (!id) return null
+
+    return {
+      id,
+      name: typeof value.name === 'string' ? value.name : null,
+    }
+  }
+
+  const id = toIdString(value)
+  if (!id) return null
+
+  return { id, name: null }
+}
+
+const getTenantAdminRefs = (tenant) =>
+  Array.isArray(tenant?.tenantAdminUserIds)
+    ? tenant.tenantAdminUserIds
+      .map((value) => normalizeTenantAdminRef(value))
+      .filter(Boolean)
+    : []
+
+const collectTenantAdminIds = (tenants) => {
+  const tenantList = Array.isArray(tenants) ? tenants : [tenants]
+
+  return [...new Set(
+    tenantList
+      .flatMap((tenant) => getTenantAdminRefs(tenant).map((admin) => admin.id))
+      .filter(Boolean),
+  )]
+}
+
+const loadTenantAdminUsersById = async (tenants) => {
+  const tenantAdminIds = collectTenantAdminIds(tenants)
+  if (tenantAdminIds.length === 0) return new Map()
+
+  const users = await User.find({ _id: { $in: tenantAdminIds } }).lean()
+  return new Map((Array.isArray(users) ? users : []).map((user) => [toIdString(user?._id), user]))
+}
+
+const buildTenantAdminSummary = (tenant, tenantAdminUsersById = new Map()) => {
+  const [tenantAdmin] = getTenantAdminRefs(tenant)
+  if (!tenantAdmin) return null
+
+  const user = tenantAdminUsersById.get(tenantAdmin.id)
+
+  return {
+    id: tenantAdmin.id,
+    name: user?.name || tenantAdmin.name || null,
+  }
+}
+
+const buildTenantResponseBase = (tenant) => {
+  const baseTenant = tenant && typeof tenant.toJSON === 'function'
+    ? tenant.toJSON()
+    : { ...(tenant || {}) }
+
+  return {
+    ...baseTenant,
+    id: toIdString(baseTenant?._id || baseTenant?.id || tenant?._id || tenant?.id),
+  }
+}
+
+const serializeTenantResponse = ({
+  tenant,
+  tenantAdminUsersById,
+  includeSelectionState = false,
+}) => {
+  const baseTenant = includeSelectionState
+    ? mapTenantVisibilityCatalogEntry(tenant)
+    : buildTenantResponseBase(tenant)
+
+  return {
+    ...baseTenant,
+    tenantAdmin: buildTenantAdminSummary(tenant, tenantAdminUsersById),
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -108,7 +190,12 @@ export const listTenants = async (req, res, next) => {
         status: { $ne: 'ARCHIVED' },
       }),
     ])
-    const tenantRows = tenants.map(mapTenantVisibilityCatalogEntry)
+    const tenantAdminUsersById = await loadTenantAdminUsersById(tenants)
+    const tenantRows = tenants.map((tenant) => serializeTenantResponse({
+      tenant,
+      tenantAdminUsersById,
+      includeSelectionState: true,
+    }))
 
     return res.status(200).json({
       data: tenantRows,
@@ -198,8 +285,12 @@ export const createTenant = async (req, res, next) => {
       buildTenantStatusSnapshot(result.tenant),
     )
 
+    const tenantAdminUsersById = await loadTenantAdminUsersById([result.tenant])
     const responseData = {
-      tenant: result.tenant.toJSON(),
+      tenant: serializeTenantResponse({
+        tenant: result.tenant,
+        tenantAdminUsersById,
+      }),
     }
     if (result.vmf) responseData.vmf = result.vmf.toJSON()
 
@@ -300,8 +391,13 @@ export const updateTenant = async (req, res, next) => {
       diff,
     })
 
+    const tenantAdminUsersById = await loadTenantAdminUsersById([tenant])
+
     return res.status(200).json({
-      data: tenant.toJSON(),
+      data: serializeTenantResponse({
+        tenant,
+        tenantAdminUsersById,
+      }),
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
@@ -339,8 +435,13 @@ export const enableTenant = async (req, res, next) => {
     }
 
     if (tenant.status === 'ENABLED') {
+      const tenantAdminUsersById = await loadTenantAdminUsersById([tenant])
+
       return res.status(200).json({
-        data: tenant.toJSON(),
+        data: serializeTenantResponse({
+          tenant,
+          tenantAdminUsersById,
+        }),
         meta: { requestId: req.requestId, version: 'v1', message: 'Tenant is already enabled.' },
       })
     }
@@ -368,8 +469,13 @@ export const enableTenant = async (req, res, next) => {
       diff: { status: { from: previousStatus, to: 'ENABLED' } },
     })
 
+    const tenantAdminUsersById = await loadTenantAdminUsersById([tenant])
+
     return res.status(200).json({
-      data: tenant.toJSON(),
+      data: serializeTenantResponse({
+        tenant,
+        tenantAdminUsersById,
+      }),
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
@@ -409,8 +515,13 @@ export const disableTenant = async (req, res, next) => {
     }
 
     if (tenant.status === 'DISABLED') {
+      const tenantAdminUsersById = await loadTenantAdminUsersById([tenant])
+
       return res.status(200).json({
-        data: tenant.toJSON(),
+        data: serializeTenantResponse({
+          tenant,
+          tenantAdminUsersById,
+        }),
         meta: { requestId: req.requestId, version: 'v1', message: 'Tenant is already disabled.' },
       })
     }
@@ -438,8 +549,13 @@ export const disableTenant = async (req, res, next) => {
       diff: { status: { from: previousStatus, to: 'DISABLED' } },
     })
 
+    const tenantAdminUsersById = await loadTenantAdminUsersById([tenant])
+
     return res.status(200).json({
-      data: tenant.toJSON(),
+      data: serializeTenantResponse({
+        tenant,
+        tenantAdminUsersById,
+      }),
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {

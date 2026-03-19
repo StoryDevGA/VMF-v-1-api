@@ -191,13 +191,14 @@ const makeFakeInvitation = (overrides = {}) => ({
 /*  Dynamic imports                                                   */
 /* ------------------------------------------------------------------ */
 
-let app, request, tokenService
+let app, request, tokenService, validateTenantAdminAssignments
 let User, Customer, Tenant, VMF, AuditLog, Invitation, LicenseLevel
 
 beforeAll(async () => {
   const supertest = (await import('supertest')).default
   app = (await import('../app.js')).default
   tokenService = (await import('../services/tokenService.js')).default
+  ;({ validateTenantAdminAssignments } = await import('../services/tenantManagementContractService.js'))
   request = supertest(app)
 
   const models = await import('../models/index.js')
@@ -608,6 +609,47 @@ describe('Tenant Validators', () => {
       expect(res.status).toBe(422)
       expect(res.body.error.code).toBe('VALIDATION_FAILED')
     })
+
+    test('returns 422 when more than one tenant admin is supplied', async () => {
+      const token = await getSuperAdminToken()
+      Customer.findById.mockResolvedValue(makeFakeCustomer())
+
+      const res = await request
+        .post(`/api/v1/customers/${CUSTOMER_ID}/tenants`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          name: 'Tenant 2',
+          website: 'https://t.example',
+          tenantAdminUserIds: [USER_ID, USER_ID_2],
+        })
+
+      expect(res.status).toBe(422)
+      expect(res.body.error.code).toBe('VALIDATION_FAILED')
+      expect(res.body.error.details?.tenantAdminUserIds).toBe('Only one tenant admin is allowed')
+    })
+  })
+})
+
+describe('validateTenantAdminAssignments', () => {
+  test('returns a limit-exceeded validation payload when more than one tenant admin is supplied', async () => {
+    const findUsers = jest.fn()
+
+    const validation = await validateTenantAdminAssignments({
+      customerId: CUSTOMER_ID,
+      tenantAdminUserIds: [USER_ID, USER_ID_2],
+      findUsers,
+    })
+
+    expect(validation).toEqual({
+      reason: 'TENANT_ADMIN_LIMIT_EXCEEDED',
+      message: 'Only one tenant admin is allowed.',
+      invalidTenantAdminUserIds: [USER_ID, USER_ID_2],
+      tooManyTenantAdminUserIds: [USER_ID, USER_ID_2],
+      missingTenantAdminUserIds: [],
+      inactiveTenantAdminUserIds: [],
+      outOfCustomerTenantAdminUserIds: [],
+    })
+    expect(findUsers).not.toHaveBeenCalled()
   })
 })
 
@@ -1997,6 +2039,16 @@ describe('GET /api/v1/customers/:customerId/tenants', () => {
     Customer.findById.mockResolvedValue(makeFakeCustomer())
 
     const tenants = [makeFakeTenant()]
+    User.find.mockReturnValueOnce({
+      lean: jest.fn().mockResolvedValue([
+        makeFakeUser({
+          _id: USER_ID,
+          id: USER_ID,
+          name: 'Mary Poppins',
+          memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+        }),
+      ]),
+    })
     Tenant.find.mockReturnValue({
       sort: jest.fn().mockReturnValue({
         skip: jest.fn().mockReturnValue({
@@ -2019,6 +2071,10 @@ describe('GET /api/v1/customers/:customerId/tenants', () => {
     expect(res.body.data[0].id).toBe(TENANT_ID)
     expect(res.body.data[0].isSelectable).toBe(true)
     expect(res.body.data[0].selectionState).toBe('SELECTABLE')
+    expect(res.body.data[0].tenantAdmin).toEqual({
+      id: USER_ID,
+      name: 'Mary Poppins',
+    })
     expect(res.body.meta.total).toBe(1)
     expect(res.body.meta.tenantCapacity).toEqual({
       maxTenants: 1,
@@ -2075,15 +2131,27 @@ describe('POST /api/v1/customers/:customerId/tenants', () => {
     const token = await getSuperAdminToken()
     Customer.findById.mockResolvedValue(makeFakeCustomer())
     Tenant.countDocuments.mockResolvedValue(0)
-    User.find.mockReturnValueOnce({
-      lean: jest.fn().mockResolvedValue([
-        makeFakeUser({
-          _id: USER_ID,
-          id: USER_ID,
-          memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
-        }),
-      ]),
-    })
+    User.find
+      .mockReturnValueOnce({
+        lean: jest.fn().mockResolvedValue([
+          makeFakeUser({
+            _id: USER_ID,
+            id: USER_ID,
+            name: 'Assigned Admin',
+            memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+          }),
+        ]),
+      })
+      .mockReturnValueOnce({
+        lean: jest.fn().mockResolvedValue([
+          makeFakeUser({
+            _id: USER_ID,
+            id: USER_ID,
+            name: 'Assigned Admin',
+            memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+          }),
+        ]),
+      })
 
     const savedTenant = makeFakeTenant({ name: 'New Tenant' })
     const savedVmf = {
@@ -2122,6 +2190,10 @@ describe('POST /api/v1/customers/:customerId/tenants', () => {
 
     expect(res.status).toBe(201)
     expect(res.body.data.tenant).toBeDefined()
+    expect(res.body.data.tenant.tenantAdmin).toEqual({
+      id: USER_ID,
+      name: 'Assigned Admin',
+    })
     // PER_TENANT_MULTI → auto-create VMF
     expect(res.body.data.vmf).toBeDefined()
     expect(AuditLog.createLog.mock.calls).toEqual(expect.arrayContaining([
@@ -2228,11 +2300,6 @@ describe('POST /api/v1/customers/:customerId/tenants', () => {
           memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
           isActive: false,
         }),
-        makeFakeUser({
-          _id: USER_ID_2,
-          id: USER_ID_2,
-          memberships: [{ customerId: OTHER_CUSTOMER_ID, roles: ['USER'] }],
-        }),
       ]),
     })
 
@@ -2242,16 +2309,14 @@ describe('POST /api/v1/customers/:customerId/tenants', () => {
       .send({
         name: 'Tenant With Bad Admins',
         website: 'https://bad-admins.example',
-        tenantAdminUserIds: [USER_ID, USER_ID_2, TENANT_ID_2],
+        tenantAdminUserIds: [USER_ID],
       })
 
     expect(res.status).toBe(422)
     expect(res.body.error.code).toBe('VALIDATION_FAILED')
     expect(res.body.error.details?.reason).toBe('TENANT_ADMIN_ASSIGNMENTS_INVALID')
-    expect(res.body.error.details?.invalidTenantAdminUserIds).toEqual([USER_ID, USER_ID_2, TENANT_ID_2])
+    expect(res.body.error.details?.invalidTenantAdminUserIds).toEqual([USER_ID])
     expect(res.body.error.details?.inactiveTenantAdminUserIds).toEqual([USER_ID])
-    expect(res.body.error.details?.outOfCustomerTenantAdminUserIds).toEqual([USER_ID_2])
-    expect(res.body.error.details?.missingTenantAdminUserIds).toEqual([TENANT_ID_2])
   })
 })
 
@@ -2259,6 +2324,16 @@ describe('PATCH /api/v1/customers/:customerId/tenants/:tenantId', () => {
   test('updates a tenant for a customer admin without requiring SUPER_ADMIN', async () => {
     const token = await getCustomerAdminToken()
     const tenant = makeFakeTenant()
+    User.find.mockReturnValueOnce({
+      lean: jest.fn().mockResolvedValue([
+        makeFakeUser({
+          _id: USER_ID,
+          id: USER_ID,
+          name: 'Mary Poppins',
+          memberships: [{ customerId: CUSTOMER_ID, roles: ['TENANT_ADMIN', 'USER'] }],
+        }),
+      ]),
+    })
 
     User.findById.mockImplementation((id) => {
       if (id === CUSTOMER_ADMIN_ID) {
@@ -2286,6 +2361,10 @@ describe('PATCH /api/v1/customers/:customerId/tenants/:tenantId', () => {
     expect(res.status).toBe(200)
     expect(tenant.save).toHaveBeenCalled()
     expect(res.body.data.name).toBe('Updated Tenant')
+    expect(res.body.data.tenantAdmin).toEqual({
+      id: USER_ID,
+      name: 'Mary Poppins',
+    })
   })
 
   test('returns 404 when the tenant is outside the customer scope', async () => {
@@ -2317,6 +2396,36 @@ describe('PATCH /api/v1/customers/:customerId/tenants/:tenantId', () => {
 
     expect(res.status).toBe(404)
     expect(tenant.save).not.toHaveBeenCalled()
+  })
+
+  test('returns 422 when more than one tenant admin is supplied', async () => {
+    const token = await getCustomerAdminToken()
+
+    User.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ADMIN_ID) {
+        return Promise.resolve(makeFakeUser({
+          _id: CUSTOMER_ADMIN_ID,
+          id: CUSTOMER_ADMIN_ID,
+          email: 'custadmin@acme.com',
+          name: 'Customer Admin',
+          memberships: [{ customerId: CUSTOMER_ID, roles: ['CUSTOMER_ADMIN'] }],
+        }))
+      }
+      return Promise.resolve(null)
+    })
+    Customer.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ID) return Promise.resolve(makeFakeCustomer())
+      return Promise.resolve(null)
+    })
+
+    const res = await request
+      .patch(`/api/v1/customers/${CUSTOMER_ID}/tenants/${TENANT_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ tenantAdminUserIds: [USER_ID, USER_ID_2] })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details?.tenantAdminUserIds).toBe('Only one tenant admin is allowed')
   })
 })
 

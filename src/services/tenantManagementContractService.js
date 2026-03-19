@@ -6,7 +6,10 @@ const NON_ARCHIVED_COUNT_MODE = 'NON_ARCHIVED'
 export const TENANT_MANAGEMENT_REASONS = Object.freeze({
   LIMIT_REACHED: 'TENANT_LIMIT_REACHED',
   INVALID_TENANT_ADMIN_ASSIGNMENTS: 'TENANT_ADMIN_ASSIGNMENTS_INVALID',
+  TENANT_ADMIN_LIMIT_EXCEEDED: 'TENANT_ADMIN_LIMIT_EXCEEDED',
 })
+
+const SINGLE_TENANT_ADMIN_LIMIT = 1
 
 const toIdString = (value) => {
   if (!value) return null
@@ -57,16 +60,20 @@ export const buildTenantAdminAssignmentErrorPayload = ({
   validation,
   requestId,
 }) => {
-  const message = 'One or more tenant admin assignments are invalid.'
+  const message = validation.message || 'One or more tenant admin assignments are invalid.'
+  const reason = validation.reason || TENANT_MANAGEMENT_REASONS.INVALID_TENANT_ADMIN_ASSIGNMENTS
 
   return {
     code: 'VALIDATION_FAILED',
     message,
     details: {
       tenantAdminUserIds: message,
-      reason: TENANT_MANAGEMENT_REASONS.INVALID_TENANT_ADMIN_ASSIGNMENTS,
+      reason,
       customerId: toIdString(customerId),
       invalidTenantAdminUserIds: validation.invalidTenantAdminUserIds,
+      ...(validation.tooManyTenantAdminUserIds?.length > 0
+        ? { tooManyTenantAdminUserIds: validation.tooManyTenantAdminUserIds }
+        : {}),
       ...(validation.missingTenantAdminUserIds.length > 0
         ? { missingTenantAdminUserIds: validation.missingTenantAdminUserIds }
         : {}),
@@ -100,6 +107,23 @@ export const validateTenantAdminAssignments = async ({
 }) => {
   if (tenantAdminUserIds === undefined) return null
   if (!Array.isArray(tenantAdminUserIds) || tenantAdminUserIds.length === 0) return null
+
+  const normalizedIds = tenantAdminUserIds
+    .map((userId) => toIdString(userId))
+    .filter(Boolean)
+  if (normalizedIds.length > SINGLE_TENANT_ADMIN_LIMIT) {
+    const invalidTenantAdminUserIds = [...new Set(normalizedIds)]
+
+    return {
+      reason: TENANT_MANAGEMENT_REASONS.TENANT_ADMIN_LIMIT_EXCEEDED,
+      message: 'Only one tenant admin is allowed.',
+      invalidTenantAdminUserIds,
+      tooManyTenantAdminUserIds: invalidTenantAdminUserIds,
+      missingTenantAdminUserIds: [],
+      inactiveTenantAdminUserIds: [],
+      outOfCustomerTenantAdminUserIds: [],
+    }
+  }
 
   const uniqueIds = uniqueTenantAdminIds(tenantAdminUserIds)
   if (uniqueIds.length === 0) return null

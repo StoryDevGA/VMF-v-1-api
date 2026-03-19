@@ -1,5 +1,7 @@
 import mongoose from 'mongoose'
 
+const SINGLE_TENANT_ADMIN_LIMIT = 1
+
 const tenantSchema = new mongoose.Schema({
   customerId: {
     type: mongoose.Schema.Types.ObjectId,
@@ -29,11 +31,23 @@ const tenantSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
-  tenantAdminUserIds: [{
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User',
-    required: true
-  }]
+  tenantAdminUserIds: {
+    type: [{
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      required: true
+    }],
+    validate: [
+      {
+        validator: (value) => Array.isArray(value) && value.length > 0,
+        message: 'Tenant must have at least one admin user'
+      },
+      {
+        validator: (value) => !Array.isArray(value) || value.length <= SINGLE_TENANT_ADMIN_LIMIT,
+        message: 'Tenant can only have one admin user'
+      },
+    ]
+  }
 }, {
   timestamps: true,
   toJSON: {
@@ -85,11 +99,6 @@ tenantSchema.pre('save', function(next) {
   // Ensure default tenants are always enabled initially
   if (this.isDefault && this.isNew && this.status !== 'ENABLED') {
     return next(new Error('Default tenants must be enabled'))
-  }
-  
-  // Ensure tenant admin requirements
-  if (this.tenantAdminUserIds.length === 0) {
-    return next(new Error('Tenant must have at least one admin user'))
   }
   
   next()
