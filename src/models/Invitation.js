@@ -58,6 +58,12 @@ const invitationSchema = new mongoose.Schema(
     identityPlusSubjectId: { type: String, trim: true },
     provisionedCustomerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer' },
     provisionedUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    assignCustomerAdminOnComplete: {
+      type: Boolean,
+      required: true,
+      default: true,
+      select: false,
+    },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     resendCount: { type: Number, required: true, default: 0 },
     lastResentAt: { type: Date },

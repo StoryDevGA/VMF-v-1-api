@@ -12,12 +12,14 @@
  *   - POST   /api/v1/users/:userId/resend-invitation        Resend invitation
  */
 
-import { Customer, User, Tenant } from '../models/index.js'
+import { Customer, User, Tenant, Invitation } from '../models/index.js'
 import identityPlusService from '../services/identityPlusService.js'
 import auditService from '../services/auditService.js'
 import logger from '../config/logger.js'
+import env from '../config/env.js'
 import performanceCacheService from '../services/performanceCacheService.js'
 import customerGovernanceService from '../services/customerGovernanceService.js'
+import invitationService from '../services/invitationService.js'
 import { applyManualTestPasswordBootstrap } from '../services/manualTestPasswordBootstrapService.js'
 import { validateTenantVisibilityPayload } from '../services/tenantVisibilityContractService.js'
 
@@ -45,6 +47,8 @@ const USER_LIFECYCLE_REASONS = Object.freeze({
   INVITATION_REQUIRES_ACTIVE_USER: 'INVITATION_RESEND_REQUIRES_ACTIVE_USER',
   INVITATION_REQUIRES_UNTRUSTED: 'INVITATION_RESEND_REQUIRES_UNTRUSTED',
 })
+
+const ACTIVE_INVITATION_STATUSES = ['created', 'sent', 'send_failed', 'accessed']
 
 const resolveCustomerMembership = (user, customerId) =>
   (user?.memberships || []).find(
@@ -108,6 +112,117 @@ const listCustomerMembershipIds = (user) =>
 
 const arraysEqual = (left = [], right = []) =>
   left.length === right.length && left.every((value, index) => value === right[index])
+
+const upsertFakeAuthInvitationForCustomerUser = async ({
+  req,
+  customer,
+  customerId,
+  user,
+  source,
+}) => {
+  if (!env.fakeAuthAllowed || !customerId || !user?._id) {
+    return null
+  }
+
+  const normalizedEmail = normalizeEmail(user.email)
+  if (!normalizedEmail) return null
+
+  const invitationQuery = {
+    recipientEmail: normalizedEmail,
+    provisionedCustomerId: customerId,
+    provisionedUserId: user._id,
+    assignCustomerAdminOnComplete: false,
+    status: { $in: ACTIVE_INVITATION_STATUSES },
+  }
+
+  const existingInvitation = await Invitation.findOne(invitationQuery)
+    .select('+tokenHash +assignCustomerAdminOnComplete')
+    .sort({ createdAt: -1 })
+
+  const { raw, hash } = Invitation.generateToken()
+  const authLink = invitationService.buildAuthLink(raw)
+  const now = new Date()
+
+  if (existingInvitation) {
+    const previousStatus = existingInvitation.status
+    const resendCount = Number(existingInvitation.resendCount) || 0
+
+    existingInvitation.tokenHash = hash
+    existingInvitation.status = 'sent'
+    existingInvitation.sentAt = now
+    existingInvitation.resendCount = resendCount + 1
+    existingInvitation.lastResentAt = now
+    existingInvitation.expiresAt = invitationService.computeExpiryDate()
+    existingInvitation.accessedAt = undefined
+    existingInvitation.sendFailureReason = undefined
+    existingInvitation.sendFailedAt = undefined
+    existingInvitation.assignCustomerAdminOnComplete = false
+
+    if (!existingInvitation.provisionedCustomerId) {
+      existingInvitation.provisionedCustomerId = customerId
+    }
+    if (!existingInvitation.provisionedUserId) {
+      existingInvitation.provisionedUserId = user._id
+    }
+
+    await existingInvitation.save()
+
+    await auditService.logFromRequest(req, {
+      action: auditService.AUDIT_ACTIONS.INVITATION_RESENT,
+      resourceType: auditService.RESOURCE_TYPES.Invitation,
+      resourceId: existingInvitation._id,
+      scope: { customerId },
+      diff: {
+        status: { from: previousStatus, to: existingInvitation.status },
+        resendCount: existingInvitation.resendCount,
+        source,
+      },
+    })
+
+    return {
+      invitationId: toIdString(existingInvitation._id),
+      authLink,
+      status: existingInvitation.status,
+    }
+  }
+
+  const resolvedCustomer = customer || (customerId ? await Customer.findById(customerId) : null)
+  const fallbackName = normalizedEmail.split('@')[0] || 'Invited User'
+  const invitation = await Invitation.create({
+    recipientEmail: normalizedEmail,
+    recipientName: String(user.name || fallbackName).trim(),
+    company: {
+      name: String(resolvedCustomer?.name || 'Customer Workspace').trim(),
+      ...(resolvedCustomer?.website ? { website: resolvedCustomer.website } : {}),
+    },
+    status: 'sent',
+    tokenHash: hash,
+    expiresAt: invitationService.computeExpiryDate(),
+    sentAt: now,
+    createdBy: req.userId || user._id,
+    provisionedCustomerId: customerId,
+    provisionedUserId: user._id,
+    assignCustomerAdminOnComplete: false,
+  })
+
+  await auditService.logFromRequest(req, {
+    action: auditService.AUDIT_ACTIONS.INVITATION_CREATED,
+    resourceType: auditService.RESOURCE_TYPES.Invitation,
+    resourceId: invitation._id,
+    scope: { customerId },
+    diff: {
+      status: { from: null, to: invitation.status },
+      recipientEmail: invitation.recipientEmail,
+      source,
+    },
+  })
+
+  return {
+    invitationId: toIdString(invitation._id),
+    authLink,
+    status: invitation.status,
+  }
+}
 
 const buildUserAlreadyExistsDetails = ({ existingUser, customerId }) => {
   const existingCustomerIds = listCustomerMembershipIds(existingUser)
@@ -620,6 +735,7 @@ export const createUser = async (req, res, next) => {
     // 5. Send Identity Plus invitation
     let invitationResult = null
     let invitationOutcome = 'sent'
+    let fakeAuthInvitation = null
     try {
       invitationResult = await identityPlusService.sendInvitation({
         email: normalizedEmail,
@@ -643,6 +759,23 @@ export const createUser = async (req, res, next) => {
     }
     await performanceCacheService.invalidateUserPermissions(user._id)
 
+    if (env.fakeAuthAllowed) {
+      try {
+        fakeAuthInvitation = await upsertFakeAuthInvitationForCustomerUser({
+          req,
+          customer,
+          customerId,
+          user,
+          source: 'customer_admin_create_user',
+        })
+      } catch (fakeAuthErr) {
+        logger.warn(
+          { err: fakeAuthErr, userId: user._id, customerId, email: normalizedEmail },
+          'fake auth invitation setup failed for customer-admin user create',
+        )
+      }
+    }
+
     // 6. Audit log
     await auditService.logFromRequest(req, {
       action: 'USER_CREATED',
@@ -656,6 +789,9 @@ export const createUser = async (req, res, next) => {
         tenantVisibility,
         outcome: 'invited_new',
         invitationOutcome,
+        ...(fakeAuthInvitation?.invitationId
+          ? { fakeAuthInvitationId: fakeAuthInvitation.invitationId }
+          : {}),
         ...(canonicalAdminUserId ? { canonicalAdminUserId } : {}),
       },
     })
@@ -697,6 +833,12 @@ export const createUser = async (req, res, next) => {
         invitationOutcome,
         customerId,
         canonicalAdminUserId: nextCanonicalAdminUserId,
+        ...(fakeAuthInvitation?.authLink
+          ? {
+              authLink: fakeAuthInvitation.authLink,
+              invitationId: fakeAuthInvitation.invitationId,
+            }
+          : {}),
       },
       meta: { requestId: req.requestId, version: 'v1' },
     })
@@ -1402,6 +1544,35 @@ export const resendInvitation = async (req, res, next) => {
       redirectUrl,
     })
 
+    let fakeAuthInvitation = null
+    if (env.fakeAuthAllowed) {
+      try {
+        const scopedCustomerId = customerId ? toIdString(customerId) : null
+        let scopedCustomer = null
+        if (scopedCustomerId) {
+          const scopedFromRequest = req.scopes?.customer
+          if (scopedFromRequest && toIdString(scopedFromRequest._id) === scopedCustomerId) {
+            scopedCustomer = scopedFromRequest
+          } else {
+            scopedCustomer = await Customer.findById(scopedCustomerId)
+          }
+        }
+
+        fakeAuthInvitation = await upsertFakeAuthInvitationForCustomerUser({
+          req,
+          customer: scopedCustomer,
+          customerId: scopedCustomerId,
+          user,
+          source: 'customer_admin_resend_invitation',
+        })
+      } catch (fakeAuthErr) {
+        logger.warn(
+          { err: fakeAuthErr, userId: user._id, customerId },
+          'fake auth invitation setup failed for customer-admin resend invitation',
+        )
+      }
+    }
+
     // Update external ID if new one returned
     if (result?.externalId) {
       user.identityPlus.externalId = result.externalId
@@ -1416,7 +1587,14 @@ export const resendInvitation = async (req, res, next) => {
       resourceType: 'User',
       resourceId: user._id,
       scope: { customerId },
-      diff: { email: user.email, externalId: result?.externalId, resend: true },
+      diff: {
+        email: user.email,
+        externalId: result?.externalId,
+        resend: true,
+        ...(fakeAuthInvitation?.invitationId
+          ? { fakeAuthInvitationId: fakeAuthInvitation.invitationId }
+          : {}),
+      },
     })
 
     return res.status(200).json({
@@ -1424,6 +1602,12 @@ export const resendInvitation = async (req, res, next) => {
         message: 'Invitation resent successfully.',
         userId: user._id,
         externalId: result?.externalId,
+        ...(fakeAuthInvitation?.authLink
+          ? {
+              authLink: fakeAuthInvitation.authLink,
+              invitationId: fakeAuthInvitation.invitationId,
+            }
+          : {}),
       },
       meta: { requestId: req.requestId, version: 'v1' },
     })

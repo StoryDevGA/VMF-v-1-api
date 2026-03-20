@@ -150,12 +150,36 @@ const makeFakeCustomer = (overrides = {}) => ({
   ...overrides,
 })
 
+const makeFakeInvitation = (overrides = {}) => ({
+  _id: '807f1f77bcf86cd799439099',
+  id: '807f1f77bcf86cd799439099',
+  recipientEmail: 'invitee@example.com',
+  recipientName: 'Invitee User',
+  status: 'sent',
+  resendCount: 0,
+  provisionedCustomerId: CUSTOMER_ID,
+  provisionedUserId: NEW_USER_ID,
+  assignCustomerAdminOnComplete: false,
+  save: jest.fn(async function () { return this }),
+  toJSON: function () {
+    return {
+      id: this._id,
+      recipientEmail: this.recipientEmail,
+      recipientName: this.recipientName,
+      status: this.status,
+      provisionedCustomerId: this.provisionedCustomerId,
+      provisionedUserId: this.provisionedUserId,
+    }
+  },
+  ...overrides,
+})
+
 /* ------------------------------------------------------------------ */
 /*  Dynamic imports                                                   */
 /* ------------------------------------------------------------------ */
 
 let app, request, tokenService
-let User, Customer, Tenant, AuditLog
+let User, Customer, Tenant, AuditLog, Invitation
 let identityPlusService
 
 beforeAll(async () => {
@@ -170,6 +194,7 @@ beforeAll(async () => {
   Customer = models.Customer
   Tenant = models.Tenant
   AuditLog = models.AuditLog
+  Invitation = models.Invitation
 })
 
 /* ------------------------------------------------------------------ */
@@ -214,6 +239,13 @@ beforeEach(() => {
   Tenant.countDocuments = jest.fn()
   Tenant.updateMany = jest.fn(async () => ({ modifiedCount: 0 }))
   AuditLog.createLog = jest.fn(async () => ({}))
+  Invitation.findOne = jest.fn(() => ({
+    select: jest.fn(() => ({
+      sort: jest.fn().mockResolvedValue(null),
+    })),
+  }))
+  Invitation.create = jest.fn(async (payload) => makeFakeInvitation(payload))
+  Invitation.generateToken = jest.fn(() => ({ raw: 'raw-token', hash: 'hash-token' }))
   Customer.findOne.mockResolvedValue(null)
   Customer.findById.mockImplementation((id) => {
     if (id === CUSTOMER_ID) return Promise.resolve(makeFakeCustomer())
@@ -830,6 +862,72 @@ describe('POST /api/v1/customers/:customerId/users', () => {
       User.prototype.save = originalSave
       env.fakeAuthAllowed = previousFakeAuthAllowed
       env.manualTestPasswordBootstrapPassword = previousPassword
+      sendInvitationSpy.mockRestore()
+    }
+  })
+
+  test('returns fake-auth authLink for customer-admin user invitations without customer-admin escalation flag', async () => {
+    const token = await getCustomerAdminToken()
+    const env = (await import('../config/env.js')).default
+    const previousFakeAuthAllowed = env.fakeAuthAllowed
+    env.fakeAuthAllowed = true
+
+    Customer.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ID) return Promise.resolve(makeFakeCustomer())
+      return Promise.resolve(null)
+    })
+    User.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ADMIN_ID) return Promise.resolve(makeCustomerAdmin())
+      return Promise.resolve(null)
+    })
+    User.findOne.mockResolvedValue(null)
+
+    Invitation.findOne.mockReturnValue({
+      select: jest.fn(() => ({
+        sort: jest.fn().mockResolvedValue(null),
+      })),
+    })
+
+    const fakeInvitation = makeFakeInvitation({
+      _id: '807f1f77bcf86cd7994390aa',
+      provisionedUserId: NEW_USER_ID,
+    })
+    Invitation.create.mockResolvedValue(fakeInvitation)
+    Invitation.generateToken.mockReturnValue({
+      raw: 'raw-customer-user-token',
+      hash: 'hash-customer-user-token',
+    })
+
+    const sendInvitationSpy = jest
+      .spyOn(identityPlusService, 'sendInvitation')
+      .mockResolvedValueOnce({ externalId: 'mock_ext_fake_auth', invitedAt: new Date() })
+
+    const originalSave = User.prototype.save
+    User.prototype.save = jest.fn(async function () {
+      this._id = this._id || NEW_USER_ID
+      this.id = this.id || NEW_USER_ID
+      return this
+    })
+
+    try {
+      const res = await request
+        .post(`/api/v1/customers/${CUSTOMER_ID}/users`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          name: 'Fake Auth User',
+          email: 'fake.auth.user@example.com',
+          roles: ['USER'],
+        })
+
+      expect(res.status).toBe(201)
+      expect(res.body.data.authLink).toContain('/api/v1/super-admin/invitations/auth/raw-customer-user-token')
+      expect(res.body.data.invitationId).toBe(fakeInvitation._id)
+      expect(Invitation.create).toHaveBeenCalled()
+      expect(Invitation.create.mock.calls[0][0].assignCustomerAdminOnComplete).toBe(false)
+      expect(Invitation.create.mock.calls[0][0].status).toBe('sent')
+    } finally {
+      User.prototype.save = originalSave
+      env.fakeAuthAllowed = previousFakeAuthAllowed
       sendInvitationSpy.mockRestore()
     }
   })
@@ -1886,6 +1984,62 @@ describe('POST /api/v1/users/:userId/resend-invitation', () => {
     expect(res.body.data.message).toContain('resent')
     expect(user.save).toHaveBeenCalled()
     expect(AuditLog.createLog).toHaveBeenCalled()
+  })
+
+  test('returns fake-auth authLink on customer-scoped resend when fake auth is enabled', async () => {
+    const token = await getCustomerAdminToken()
+    const env = (await import('../config/env.js')).default
+    const previousFakeAuthAllowed = env.fakeAuthAllowed
+    env.fakeAuthAllowed = true
+
+    const user = makeRegularUser({
+      _id: REGULAR_USER_ID,
+      identityPlus: { trustStatus: 'UNTRUSTED', externalId: null },
+      memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+    })
+
+    User.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ADMIN_ID) return Promise.resolve(makeCustomerAdmin())
+      if (id === REGULAR_USER_ID) return Promise.resolve(user)
+      return Promise.resolve(null)
+    })
+
+    Invitation.findOne.mockReturnValue({
+      select: jest.fn(() => ({
+        sort: jest.fn().mockResolvedValue(
+          makeFakeInvitation({
+            _id: '807f1f77bcf86cd7994390ab',
+            status: 'accessed',
+            resendCount: 1,
+            provisionedUserId: REGULAR_USER_ID,
+            save: jest.fn(async function () { return this }),
+          }),
+        ),
+      })),
+    })
+    Invitation.generateToken.mockReturnValue({
+      raw: 'raw-resend-token',
+      hash: 'hash-resend-token',
+    })
+
+    const sendInvitationSpy = jest
+      .spyOn(identityPlusService, 'sendInvitation')
+      .mockResolvedValueOnce({ externalId: 'mock_ext_resend', invitedAt: new Date() })
+
+    try {
+      const res = await request
+        .post(`/api/v1/customers/${CUSTOMER_ID}/users/${REGULAR_USER_ID}/resend-invitation`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({})
+
+      expect(res.status).toBe(200)
+      expect(res.body.data.authLink).toContain('/api/v1/super-admin/invitations/auth/raw-resend-token')
+      expect(res.body.data.invitationId).toBe('807f1f77bcf86cd7994390ab')
+      expect(res.body.data.message).toContain('resent')
+    } finally {
+      env.fakeAuthAllowed = previousFakeAuthAllowed
+      sendInvitationSpy.mockRestore()
+    }
   })
 
   test('returns 422 when user is disabled', async () => {

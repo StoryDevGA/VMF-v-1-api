@@ -29,6 +29,9 @@ const getFirstCustomerMembershipId = (user) => {
   return membershipWithCustomer?.customerId || null
 }
 
+const shouldAssignCustomerAdminOnComplete = (invitation) =>
+  invitation?.assignCustomerAdminOnComplete !== false
+
 const ensureCustomerAdminMembership = (user, customerId) => {
   if (!customerId) return false
 
@@ -58,18 +61,24 @@ const ensureCustomerAdminMembership = (user, customerId) => {
   return false
 }
 
-const provisionUserFromInvitation = async ({ invitation, normalizedEmail, req }) => {
+const provisionUserFromInvitation = async ({
+  invitation,
+  normalizedEmail,
+  req,
+  assignCustomerAdminOnComplete = true,
+}) => {
   if (!invitation.provisionedCustomerId) {
     return null
   }
 
   const nameFallback = normalizedEmail.split('@')[0] || 'Invited User'
+  const defaultRoles = assignCustomerAdminOnComplete ? ['CUSTOMER_ADMIN'] : ['USER']
   let user = new User({
     email: normalizedEmail,
     name: invitation.recipientName || nameFallback,
     isActive: true,
     identityPlus: { trustStatus: 'UNTRUSTED' },
-    memberships: [{ customerId: invitation.provisionedCustomerId, roles: ['CUSTOMER_ADMIN'] }],
+    memberships: [{ customerId: invitation.provisionedCustomerId, roles: defaultRoles }],
   })
 
   let created = false
@@ -155,7 +164,9 @@ export const getFakeAuthInvitation = async (req, res, next) => {
 
 export const completeFakeAuth = async (req, res, next) => {
   try {
-    const invitation = await Invitation.findById(req.params.invitationId)
+    const invitation = await Invitation.findById(req.params.invitationId).select(
+      '+assignCustomerAdminOnComplete',
+    )
     if (!invitation) {
       return res.status(404).json({
         error: {
@@ -187,6 +198,7 @@ export const completeFakeAuth = async (req, res, next) => {
     }
 
     const normalizedRecipientEmail = normalizeEmail(invitation.recipientEmail)
+    const assignCustomerAdminOnComplete = shouldAssignCustomerAdminOnComplete(invitation)
 
     let user = null
     if (invitation.provisionedUserId) {
@@ -200,6 +212,7 @@ export const completeFakeAuth = async (req, res, next) => {
         invitation,
         normalizedEmail: normalizedRecipientEmail,
         req,
+        assignCustomerAdminOnComplete,
       })
     }
 
@@ -218,7 +231,9 @@ export const completeFakeAuth = async (req, res, next) => {
     }
 
     const resolvedCustomerId = invitation.provisionedCustomerId || getFirstCustomerMembershipId(user)
-    const membershipUpdated = ensureCustomerAdminMembership(user, resolvedCustomerId)
+    const membershipUpdated = assignCustomerAdminOnComplete
+      ? ensureCustomerAdminMembership(user, resolvedCustomerId)
+      : false
 
     let invitationLinkUpdated = false
     if (resolvedCustomerId && !invitation.provisionedCustomerId) {

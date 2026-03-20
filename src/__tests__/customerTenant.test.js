@@ -171,6 +171,7 @@ const makeFakeInvitation = (overrides = {}) => ({
   expiresAt: new Date(Date.now() + (24 * 60 * 60 * 1000)),
   provisionedCustomerId: CUSTOMER_ID,
   provisionedUserId: USER_ID_2,
+  assignCustomerAdminOnComplete: true,
   isExpired: jest.fn(() => false),
   save: jest.fn(async function () { return this }),
   toJSON: function () {
@@ -1925,7 +1926,9 @@ describe('POST /api/v1/fake-auth/invitations/:invitationId/complete', () => {
       provisionedUserId: null,
       isExpired: jest.fn(() => false),
     })
-    Invitation.findById = jest.fn().mockResolvedValue(invitation)
+    Invitation.findById = jest.fn().mockReturnValue({
+      select: jest.fn().mockResolvedValue(invitation),
+    })
     User.findOne.mockResolvedValue(null)
 
     const originalUserPrototypeSave = User.prototype.save
@@ -1970,7 +1973,9 @@ describe('POST /api/v1/fake-auth/invitations/:invitationId/complete', () => {
       provisionedUserId: null,
       isExpired: jest.fn(() => false),
     })
-    Invitation.findById = jest.fn().mockResolvedValue(invitation)
+    Invitation.findById = jest.fn().mockReturnValue({
+      select: jest.fn().mockResolvedValue(invitation),
+    })
     User.findOne.mockResolvedValue(null)
 
     const originalSave = User.prototype.save
@@ -1998,6 +2003,57 @@ describe('POST /api/v1/fake-auth/invitations/:invitationId/complete', () => {
     }
   })
 
+  test('does not grant CUSTOMER_ADMIN when invitation completion is marked as non-admin', async () => {
+    const env = (await import('../config/env.js')).default
+    const previousFakeAuthAllowed = env.fakeAuthAllowed
+    env.fakeAuthAllowed = true
+
+    const invitation = makeFakeInvitation({
+      status: 'accessed',
+      recipientEmail: 'member.user@acme.example',
+      recipientName: 'Member User',
+      provisionedCustomerId: CUSTOMER_ID,
+      provisionedUserId: USER_ID,
+      assignCustomerAdminOnComplete: false,
+      isExpired: jest.fn(() => false),
+    })
+
+    const existingUser = makeFakeUser({
+      _id: USER_ID,
+      id: USER_ID,
+      email: 'member.user@acme.example',
+      identityPlus: {
+        trustStatus: 'UNTRUSTED',
+        externalId: null,
+        invitedAt: new Date('2026-03-01T10:00:00.000Z'),
+      },
+      memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+      setPassword: jest.fn(async function () { return this }),
+    })
+
+    Invitation.findById = jest.fn().mockReturnValue({
+      select: jest.fn().mockResolvedValue(invitation),
+    })
+    User.findById = jest.fn().mockImplementation((id) => {
+      if (id === USER_ID) return Promise.resolve(existingUser)
+      return Promise.resolve(null)
+    })
+    User.findOne.mockResolvedValue(existingUser)
+
+    try {
+      const res = await request
+        .post(`/api/v1/fake-auth/invitations/${INVITATION_ID}/complete`)
+        .send({})
+
+      expect(res.status).toBe(200)
+      expect(res.body.data.action).toBe('trusted')
+      expect(existingUser.memberships[0].roles).toEqual(['USER'])
+      expect(existingUser.memberships[0].roles).not.toContain('CUSTOMER_ADMIN')
+    } finally {
+      env.fakeAuthAllowed = previousFakeAuthAllowed
+    }
+  })
+
   test('returns USER_NOT_FOUND when invitation has no customer link and no existing user', async () => {
     const env = (await import('../config/env.js')).default
     const previousFakeAuthAllowed = env.fakeAuthAllowed
@@ -2010,7 +2066,9 @@ describe('POST /api/v1/fake-auth/invitations/:invitationId/complete', () => {
       provisionedUserId: null,
       isExpired: jest.fn(() => false),
     })
-    Invitation.findById = jest.fn().mockResolvedValue(invitation)
+    Invitation.findById = jest.fn().mockReturnValue({
+      select: jest.fn().mockResolvedValue(invitation),
+    })
     User.findOne.mockResolvedValue(null)
 
     try {
