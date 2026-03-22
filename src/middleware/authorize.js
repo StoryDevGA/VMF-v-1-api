@@ -92,6 +92,35 @@ const ensureScopes = (req, res) => {
   return true
 }
 
+const resolveCustomerRoleContext = ({ memberships = [], tenantMemberships = [], customerId }) => {
+  const membership = memberships.find((candidate) => idsEqual(candidate?.customerId, customerId)) || null
+  const membershipRoles = Array.isArray(membership?.roles) ? membership.roles : []
+  const tenantAdminMemberships = Array.isArray(tenantMemberships)
+    ? tenantMemberships.filter(
+      (tenantMembership) =>
+        idsEqual(tenantMembership?.customerId, customerId)
+        && (tenantMembership?.roles || []).includes('TENANT_ADMIN'),
+    )
+    : []
+
+  const hasCustomerAdmin = membershipRoles.includes('CUSTOMER_ADMIN')
+  const hasCustomerScopedTenantAdmin = membershipRoles.includes('TENANT_ADMIN')
+  const hasTenantMembershipTenantAdmin = tenantAdminMemberships.length > 0
+
+  return {
+    membership,
+    membershipRoles,
+    hasCustomerAdmin,
+    hasCustomerScopedTenantAdmin,
+    hasTenantMembershipTenantAdmin,
+    isTenantAdmin: hasCustomerScopedTenantAdmin || hasTenantMembershipTenantAdmin,
+    tenantAdminTenantIds: tenantAdminMemberships
+      .map((tenantMembership) => tenantMembership?.tenantId)
+      .filter(Boolean)
+      .map((tenantId) => tenantId.toString()),
+  }
+}
+
 const loadCustomerContext = async (customerId) => {
   const cachedCustomer = await performanceCacheService.getCustomerTopology(customerId)
   if (cachedCustomer) return cachedCustomer
@@ -185,9 +214,10 @@ export const requireCustomerAccess = (options = {}) => async (req, res, next) =>
   const {
     roles = [],
     allowPlatform = true,
+    allowTenantAdmin = false,
     allowInactiveCustomer = false,
   } = options
-  const { memberships, platformRoles } = req.scopes
+  const { memberships, tenantMemberships, platformRoles } = req.scopes
   const customerId = req.params.customerId
 
   if (!customerId) {
@@ -208,6 +238,14 @@ export const requireCustomerAccess = (options = {}) => async (req, res, next) =>
       })
     }
     req.scopes.customer = customer
+    req.scopes.customerAccess = {
+      customerId: customer._id?.toString?.() || customerId.toString(),
+      via: 'platform',
+      isSuperAdmin: true,
+      isCustomerAdmin: true,
+      isTenantAdmin: true,
+      tenantAdminTenantIds: [],
+    }
 
     if (isCustomerInactive(customer) && !allowInactiveCustomer) {
       logger.warn(
@@ -226,9 +264,14 @@ export const requireCustomerAccess = (options = {}) => async (req, res, next) =>
   }
 
   // Find user's membership for this customer
-  const membership = memberships.find((m) => idsEqual(m.customerId, customerId))
+  const roleContext = resolveCustomerRoleContext({
+    memberships,
+    tenantMemberships,
+    customerId,
+  })
+  const hasTenantAdminBypass = allowTenantAdmin && roleContext.isTenantAdmin
 
-  if (!membership) {
+  if (!roleContext.membership && !hasTenantAdminBypass) {
     logger.warn(
       { userId: req.userId, customerId, requestId: req.requestId },
       'requireCustomerAccess — no membership',
@@ -238,13 +281,20 @@ export const requireCustomerAccess = (options = {}) => async (req, res, next) =>
 
   // If specific roles are required, check them
   if (roles.length > 0) {
-    const hasRole = roles.some((r) => membership.roles.includes(r))
-    if (!hasRole) {
+    const hasRole = roles.some((role) => roleContext.membershipRoles.includes(role))
+    if (!hasRole && !hasTenantAdminBypass) {
       logger.warn(
         { userId: req.userId, customerId, requiredRoles: roles, requestId: req.requestId },
         'requireCustomerAccess — missing required role',
       )
       return forbidden(res, req, 'You do not have the required role for this customer.')
+    }
+
+    if (!hasRole && hasTenantAdminBypass) {
+      logger.warn(
+        { userId: req.userId, customerId, requiredRoles: roles, requestId: req.requestId },
+        'requireCustomerAccess - tenant-admin bypass used',
+      )
     }
   }
 
@@ -260,6 +310,14 @@ export const requireCustomerAccess = (options = {}) => async (req, res, next) =>
     })
   }
   req.scopes.customer = customer
+  req.scopes.customerAccess = {
+    customerId: customer._id?.toString?.() || customerId.toString(),
+    via: roleContext.hasCustomerAdmin ? 'customer_admin' : 'tenant_admin',
+    isSuperAdmin: false,
+    isCustomerAdmin: roleContext.hasCustomerAdmin,
+    isTenantAdmin: roleContext.isTenantAdmin,
+    tenantAdminTenantIds: roleContext.tenantAdminTenantIds,
+  }
 
   if (isCustomerInactive(customer) && !allowInactiveCustomer) {
     logger.warn(

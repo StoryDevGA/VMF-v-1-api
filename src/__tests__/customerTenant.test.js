@@ -54,6 +54,7 @@ beforeAll(() => {
 
 const USER_ID = '507f1f77bcf86cd799439011'
 const CUSTOMER_ADMIN_ID = '507f1f77bcf86cd799439012'
+const TENANT_ADMIN_ID = '507f1f77bcf86cd799439013'
 const USER_ID_2 = '507f1f77bcf86cd799439099'
 const CUSTOMER_ID = '607f1f77bcf86cd799439022'
 const OTHER_CUSTOMER_ID = '607f1f77bcf86cd799439088'
@@ -216,7 +217,7 @@ beforeAll(async () => {
 /*  Auth helper                                                       */
 /* ------------------------------------------------------------------ */
 
-let superAdminToken, customerAdminToken
+let superAdminToken, customerAdminToken, tenantAdminToken
 
 const getSuperAdminToken = async () => {
   if (superAdminToken) return superAdminToken
@@ -238,6 +239,21 @@ const getCustomerAdminToken = async () => {
   const tokens = await tokenService.generateTokens(user)
   customerAdminToken = tokens.accessToken
   return customerAdminToken
+}
+
+const getTenantAdminToken = async () => {
+  if (tenantAdminToken) return tenantAdminToken
+  const user = makeFakeUser({
+    _id: TENANT_ADMIN_ID,
+    id: TENANT_ADMIN_ID,
+    email: 'tenantadmin@acme.com',
+    name: 'Tenant Admin',
+    memberships: [{ customerId: CUSTOMER_ID, roles: ['TENANT_ADMIN', 'USER'] }],
+    tenantMemberships: [{ customerId: CUSTOMER_ID, tenantId: TENANT_ID, roles: ['USER'] }],
+  })
+  const tokens = await tokenService.generateTokens(user)
+  tenantAdminToken = tokens.accessToken
+  return tenantAdminToken
 }
 
 const getNonAdminToken = async () => {
@@ -292,6 +308,18 @@ beforeEach(() => {
   User.findById.mockImplementation((id) => {
     if (id === USER_ID || id === superAdminToken) {
       return Promise.resolve(makeFakeUser())
+    }
+    if (id === TENANT_ADMIN_ID || id === tenantAdminToken) {
+      return Promise.resolve(
+        makeFakeUser({
+          _id: TENANT_ADMIN_ID,
+          id: TENANT_ADMIN_ID,
+          email: 'tenantadmin@acme.com',
+          name: 'Tenant Admin',
+          memberships: [{ customerId: CUSTOMER_ID, roles: ['TENANT_ADMIN', 'USER'] }],
+          tenantMemberships: [{ customerId: CUSTOMER_ID, tenantId: TENANT_ID, roles: ['USER'] }],
+        }),
+      )
     }
     if (id === USER_ID_2) {
       return Promise.resolve(
@@ -2145,6 +2173,46 @@ describe('GET /api/v1/customers/:customerId/tenants', () => {
     expect(res.body.meta.tenantVisibility?.mode).toBe('OPTIONAL')
   })
 
+  test('returns only administered tenants for tenant-admin scoped access', async () => {
+    const token = await getTenantAdminToken()
+
+    Customer.findById.mockResolvedValue(makeFakeCustomer())
+
+    const tenants = [makeFakeTenant({ tenantAdminUserIds: [TENANT_ADMIN_ID] })]
+    Tenant.find.mockReturnValue({
+      sort: jest.fn().mockReturnValue({
+        skip: jest.fn().mockReturnValue({
+          limit: jest.fn().mockReturnValue({
+            lean: jest.fn().mockResolvedValue(tenants),
+          }),
+        }),
+      }),
+    })
+    Tenant.countDocuments
+      .mockResolvedValueOnce(1)
+      .mockResolvedValueOnce(1)
+
+    const res = await request
+      .get(`/api/v1/customers/${CUSTOMER_ID}/tenants`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toHaveLength(1)
+    expect(Tenant.find).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: CUSTOMER_ID,
+      tenantAdminUserIds: TENANT_ADMIN_ID,
+    }))
+    expect(Tenant.countDocuments).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      customerId: CUSTOMER_ID,
+      tenantAdminUserIds: TENANT_ADMIN_ID,
+    }))
+    expect(Tenant.countDocuments).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      customerId: CUSTOMER_ID,
+      status: { $ne: 'ARCHIVED' },
+      tenantAdminUserIds: TENANT_ADMIN_ID,
+    }))
+  })
+
   test('returns stable inactive-customer payload when customer is inactive', async () => {
     const token = await getSuperAdminToken()
 
@@ -2456,6 +2524,45 @@ describe('PATCH /api/v1/customers/:customerId/tenants/:tenantId', () => {
     expect(tenant.save).not.toHaveBeenCalled()
   })
 
+  test('allows tenant admin to update an in-scope tenant', async () => {
+    const token = await getTenantAdminToken()
+    const tenant = makeFakeTenant({ tenantAdminUserIds: [TENANT_ADMIN_ID] })
+
+    Customer.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ID) return Promise.resolve(makeFakeCustomer())
+      return Promise.resolve(null)
+    })
+    Tenant.findById.mockResolvedValue(tenant)
+
+    const res = await request
+      .patch(`/api/v1/customers/${CUSTOMER_ID}/tenants/${TENANT_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: 'Tenant Admin Updated Tenant' })
+
+    expect(res.status).toBe(200)
+    expect(tenant.save).toHaveBeenCalled()
+    expect(res.body.data.name).toBe('Tenant Admin Updated Tenant')
+  })
+
+  test('returns 404 when tenant admin targets an out-of-scope tenant', async () => {
+    const token = await getTenantAdminToken()
+    const tenant = makeFakeTenant({ tenantAdminUserIds: [USER_ID] })
+
+    Customer.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ID) return Promise.resolve(makeFakeCustomer())
+      return Promise.resolve(null)
+    })
+    Tenant.findById.mockResolvedValue(tenant)
+
+    const res = await request
+      .patch(`/api/v1/customers/${CUSTOMER_ID}/tenants/${TENANT_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: 'Blocked Tenant Admin Update' })
+
+    expect(res.status).toBe(404)
+    expect(tenant.save).not.toHaveBeenCalled()
+  })
+
   test('returns 422 when more than one tenant admin is supplied', async () => {
     const token = await getCustomerAdminToken()
 
@@ -2484,6 +2591,23 @@ describe('PATCH /api/v1/customers/:customerId/tenants/:tenantId', () => {
     expect(res.status).toBe(422)
     expect(res.body.error.code).toBe('VALIDATION_FAILED')
     expect(res.body.error.details?.tenantAdminUserIds).toBe('Only one tenant admin is allowed')
+  })
+
+  test('returns 403 when tenant admin attempts tenant-admin reassignment', async () => {
+    const token = await getTenantAdminToken()
+    const tenant = makeFakeTenant({ tenantAdminUserIds: [TENANT_ADMIN_ID] })
+
+    Customer.findById.mockResolvedValue(makeFakeCustomer())
+    Tenant.findById.mockResolvedValue(tenant)
+
+    const res = await request
+      .patch(`/api/v1/customers/${CUSTOMER_ID}/tenants/${TENANT_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ tenantAdminUserIds: [USER_ID] })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('FORBIDDEN')
+    expect(res.body.error.details?.reason).toBe('TENANT_ADMIN_ASSIGNMENT_FORBIDDEN')
   })
 })
 
@@ -2639,6 +2763,45 @@ describe('POST /api/v1/tenants/:tenantId/enable', () => {
   })
 })
 
+describe('POST /api/v1/customers/:customerId/tenants/:tenantId/enable', () => {
+  test('enables an in-scope tenant for a tenant admin', async () => {
+    const token = await getTenantAdminToken()
+    const tenant = makeFakeTenant({
+      status: 'DISABLED',
+      tenantAdminUserIds: [TENANT_ADMIN_ID],
+    })
+
+    Customer.findById.mockResolvedValue(makeFakeCustomer())
+    Tenant.findById.mockResolvedValue(tenant)
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/tenants/${TENANT_ID}/enable`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(tenant.status).toBe('ENABLED')
+    expect(tenant.save).toHaveBeenCalled()
+  })
+
+  test('returns 404 when tenant admin enables an out-of-scope tenant', async () => {
+    const token = await getTenantAdminToken()
+    const tenant = makeFakeTenant({
+      status: 'DISABLED',
+      tenantAdminUserIds: [USER_ID],
+    })
+
+    Customer.findById.mockResolvedValue(makeFakeCustomer())
+    Tenant.findById.mockResolvedValue(tenant)
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/tenants/${TENANT_ID}/enable`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(404)
+    expect(tenant.save).not.toHaveBeenCalled()
+  })
+})
+
 describe('POST /api/v1/customers/:customerId/tenants/:tenantId/disable', () => {
   test('disables an in-scope tenant for a customer admin', async () => {
     const token = await getCustomerAdminToken()
@@ -2699,6 +2862,22 @@ describe('POST /api/v1/customers/:customerId/tenants/:tenantId/disable', () => {
 
     expect(res.status).toBe(404)
     expect(tenant.save).not.toHaveBeenCalled()
+  })
+
+  test('disables an in-scope tenant for a tenant admin', async () => {
+    const token = await getTenantAdminToken()
+    const tenant = makeFakeTenant({ status: 'ENABLED', tenantAdminUserIds: [TENANT_ADMIN_ID] })
+
+    Customer.findById.mockResolvedValue(makeFakeCustomer())
+    Tenant.findById.mockResolvedValue(tenant)
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/tenants/${TENANT_ID}/disable`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(tenant.status).toBe('DISABLED')
+    expect(tenant.save).toHaveBeenCalled()
   })
 })
 

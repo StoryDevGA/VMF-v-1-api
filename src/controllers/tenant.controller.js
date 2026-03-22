@@ -58,6 +58,33 @@ const tenantMatchesCustomerScope = (req, tenant) => {
   return toIdString(tenant?.customerId) === customerId
 }
 
+const buildForbiddenResponse = (req, message, details) => ({
+  error: {
+    code: 'FORBIDDEN',
+    message,
+    ...(details ? { details } : {}),
+    requestId: req.requestId,
+  },
+})
+
+const isTenantAdminOnlyRequest = (req) => {
+  const customerAccess = req.scopes?.customerAccess
+  return Boolean(
+    customerAccess?.isTenantAdmin
+      && !customerAccess?.isCustomerAdmin
+      && !customerAccess?.isSuperAdmin,
+  )
+}
+
+const resolveTenantAdminScopedTenantIds = (req) =>
+  Array.from(
+    new Set(
+      (req.scopes?.customerAccess?.tenantAdminTenantIds || [])
+        .map((tenantId) => toIdString(tenantId))
+        .filter(Boolean),
+    ),
+  )
+
 const normalizeTenantAdminRef = (value) => {
   if (!value) return null
 
@@ -140,6 +167,23 @@ const serializeTenantResponse = ({
   }
 }
 
+const isTenantInActorScope = ({ req, tenant }) => {
+  if (!isTenantAdminOnlyRequest(req)) return true
+
+  const scopedTenantIds = resolveTenantAdminScopedTenantIds(req)
+  const tenantId = toIdString(tenant?._id || tenant?.id)
+  if (!tenantId) return false
+
+  if (scopedTenantIds.length > 0) {
+    return scopedTenantIds.includes(tenantId)
+  }
+
+  const actorUserId = toIdString(req.context?.userId || req.userId)
+  if (!actorUserId) return false
+
+  return getTenantAdminRefs(tenant).some((tenantAdmin) => tenantAdmin.id === actorUserId)
+}
+
 /* ------------------------------------------------------------------ */
 /*  GET /api/v1/customers/:customerId/tenants                         */
 /* ------------------------------------------------------------------ */
@@ -171,6 +215,20 @@ export const listTenants = async (req, res, next) => {
     }
 
     const filter = { customerId }
+    const tenantAdminOnly = isTenantAdminOnlyRequest(req)
+    const scopedTenantIds = resolveTenantAdminScopedTenantIds(req)
+    const actorUserId = toIdString(req.context?.userId || req.userId)
+
+    if (tenantAdminOnly) {
+      if (scopedTenantIds.length > 0) {
+        filter._id = { $in: scopedTenantIds }
+      } else if (actorUserId) {
+        filter.tenantAdminUserIds = actorUserId
+      } else {
+        filter._id = { $in: [] }
+      }
+    }
+
     if (status) filter.status = status
     if (q) filter.name = { $regex: q, $options: 'i' }
 
@@ -188,6 +246,13 @@ export const listTenants = async (req, res, next) => {
       Tenant.countDocuments({
         customerId,
         status: { $ne: 'ARCHIVED' },
+        ...(tenantAdminOnly
+          ? (scopedTenantIds.length > 0
+            ? { _id: { $in: scopedTenantIds } }
+            : actorUserId
+              ? { tenantAdminUserIds: actorUserId }
+              : { _id: { $in: [] } })
+          : {}),
       }),
     ])
     const tenantAdminUsersById = await loadTenantAdminUsersById(tenants)
@@ -354,6 +419,20 @@ export const updateTenant = async (req, res, next) => {
       return res.status(404).json(buildTenantNotFoundResponse(req))
     }
 
+    if (!isTenantInActorScope({ req, tenant })) {
+      return res.status(404).json(buildTenantNotFoundResponse(req))
+    }
+
+    if (isTenantAdminOnlyRequest(req) && req.body.tenantAdminUserIds !== undefined) {
+      return res.status(403).json(
+        buildForbiddenResponse(
+          req,
+          'Tenant admins cannot reassign tenant admin ownership.',
+          { reason: 'TENANT_ADMIN_ASSIGNMENT_FORBIDDEN' },
+        ),
+      )
+    }
+
     const allowedFields = ['name', 'website', 'tenantAdminUserIds']
     const diff = {}
 
@@ -434,6 +513,10 @@ export const enableTenant = async (req, res, next) => {
       return res.status(404).json(buildTenantNotFoundResponse(req))
     }
 
+    if (!isTenantInActorScope({ req, tenant })) {
+      return res.status(404).json(buildTenantNotFoundResponse(req))
+    }
+
     if (tenant.status === 'ENABLED') {
       const tenantAdminUsersById = await loadTenantAdminUsersById([tenant])
 
@@ -500,6 +583,10 @@ export const disableTenant = async (req, res, next) => {
     }
 
     if (!tenantMatchesCustomerScope(req, tenant)) {
+      return res.status(404).json(buildTenantNotFoundResponse(req))
+    }
+
+    if (!isTenantInActorScope({ req, tenant })) {
       return res.status(404).json(buildTenantNotFoundResponse(req))
     }
 

@@ -21,7 +21,11 @@ import performanceCacheService from '../services/performanceCacheService.js'
 import customerGovernanceService from '../services/customerGovernanceService.js'
 import invitationService from '../services/invitationService.js'
 import { applyManualTestPasswordBootstrap } from '../services/manualTestPasswordBootstrapService.js'
-import { validateTenantVisibilityPayload } from '../services/tenantVisibilityContractService.js'
+import {
+  buildTenantVisibilityErrorResponse,
+  TENANT_VISIBILITY_REASONS,
+  validateTenantVisibilityPayload,
+} from '../services/tenantVisibilityContractService.js'
 
 const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
@@ -291,6 +295,50 @@ const resolveUserCustomerContext = ({ req, user }) => {
     membership,
     isCustomerScoped: false,
   }
+}
+
+const buildForbiddenResponse = ({ req, message, details }) => ({
+  error: {
+    code: 'FORBIDDEN',
+    message,
+    ...(details ? { details } : {}),
+    requestId: req.requestId,
+  },
+})
+
+const isTenantAdminOnlyCustomerAccess = (req) => {
+  const customerAccess = req.scopes?.customerAccess
+  return Boolean(
+    customerAccess?.isTenantAdmin
+      && !customerAccess?.isCustomerAdmin
+      && !customerAccess?.isSuperAdmin,
+  )
+}
+
+const resolveTenantAdminManagedTenantIds = ({ req, customerId }) => {
+  const scopedTenantIds = Array.from(
+    new Set(
+      (req.scopes?.customerAccess?.tenantAdminTenantIds || [])
+        .map((tenantId) => toIdString(tenantId))
+        .filter(Boolean),
+    ),
+  )
+  if (scopedTenantIds.length > 0) return scopedTenantIds
+
+  if (!customerId) return []
+
+  return Array.from(
+    new Set(
+      (req.scopes?.tenantMemberships || [])
+        .filter((membership) =>
+          toIdString(membership?.customerId) === toIdString(customerId)
+          && Array.isArray(membership?.roles)
+          && membership.roles.includes('TENANT_ADMIN'),
+        )
+        .map((membership) => toIdString(membership?.tenantId))
+        .filter(Boolean),
+    ),
+  )
 }
 
 const buildUserAlreadyExistsResponse = ({ req, existingUser, customerId }) => ({
@@ -955,6 +1003,27 @@ export const updateUser = async (req, res, next) => {
 
     const primaryMembership = user.memberships.find((m) => m.customerId !== null)
     const responseCustomerId = customerContext?.customerId || toIdString(primaryMembership?.customerId)
+    const tenantAdminOnly = isTenantAdminOnlyCustomerAccess(req)
+
+    if (tenantAdminOnly) {
+      const disallowedFields = ['name', 'email', 'roles'].filter(
+        (field) => req.body[field] !== undefined,
+      )
+
+      if (disallowedFields.length > 0 || tenantVisibility === undefined) {
+        return res.status(403).json(
+          buildForbiddenResponse({
+            req,
+            message: 'Tenant admins can only update tenant visibility in this workspace.',
+            details: {
+              reason: 'TENANT_ADMIN_UPDATE_SCOPE_RESTRICTED',
+              allowedFields: ['tenantVisibility'],
+              ...(disallowedFields.length > 0 ? { disallowedFields } : {}),
+            },
+          }),
+        )
+      }
+    }
 
     // Update name
     if (name !== undefined) {
@@ -1050,9 +1119,82 @@ export const updateUser = async (req, res, next) => {
       const customerId = customerContext?.rawCustomerId || primaryMembership?.customerId
 
       if (customerId) {
+        const normalizedCustomerId = toIdString(customerId)
         const customerForTenantVisibility = customerForRoleUpdate || await Customer.findById(customerId)
         if (!customerForTenantVisibility) {
           return res.status(422).json(buildInvalidCustomerMembershipResponse(req))
+        }
+
+        const normalizedRequestedTenantVisibility = Array.from(
+          new Set(
+            (tenantVisibility || [])
+              .map((tenantId) => toIdString(tenantId))
+              .filter(Boolean),
+          ),
+        )
+
+        if (tenantAdminOnly) {
+          const managedTenantIds = Array.from(
+            new Set(
+              (await Tenant.find({
+                customerId,
+                tenantAdminUserIds: req.context?.userId || req.userId,
+              }).select('_id').lean())
+                .map((tenant) => toIdString(tenant?._id || tenant?.id))
+                .filter(Boolean),
+            ),
+          )
+
+          const managedTenantIdSet = new Set([
+            ...resolveTenantAdminManagedTenantIds({ req, customerId }),
+            ...managedTenantIds,
+          ])
+
+          if (managedTenantIdSet.size === 0) {
+            return res.status(403).json(
+              buildForbiddenResponse({
+                req,
+                message: 'Tenant admin scope is not configured for this customer.',
+                details: {
+                  reason: 'TENANT_ADMIN_SCOPE_EMPTY',
+                },
+              }),
+            )
+          }
+
+          const outOfScopeTenantIds = normalizedRequestedTenantVisibility.filter(
+            (tenantId) => !managedTenantIdSet.has(tenantId),
+          )
+
+          if (outOfScopeTenantIds.length > 0) {
+            return res.status(422).json(buildTenantVisibilityErrorResponse({
+              req,
+              customer: customerForTenantVisibility,
+              reason: TENANT_VISIBILITY_REASONS.INVALID_TENANT_IDS,
+              invalidTenantIds: outOfScopeTenantIds,
+              message: 'One or more tenant IDs are outside your tenant-admin scope.',
+            }))
+          }
+
+          const existingTenantVisibility = (user.tenantMemberships || [])
+            .filter((tm) => toIdString(tm.customerId) === normalizedCustomerId)
+            .map((tm) => toIdString(tm.tenantId))
+            .filter(Boolean)
+
+          const preservedOutOfScopeTenantIds = existingTenantVisibility.filter(
+            (tenantId) => !managedTenantIdSet.has(tenantId),
+          )
+
+          tenantVisibility.splice(
+            0,
+            tenantVisibility.length,
+            ...Array.from(
+              new Set([
+                ...preservedOutOfScopeTenantIds,
+                ...normalizedRequestedTenantVisibility,
+              ]),
+            ),
+          )
         }
 
         const tenantVisibilityValidation = await validateTenantVisibilityPayload({
@@ -1070,14 +1212,15 @@ export const updateUser = async (req, res, next) => {
         // Validate tenant IDs belong to this customer
         diff.tenantVisibility = {
           from: user.tenantMemberships
-            .filter((tm) => toIdString(tm.customerId) === toIdString(customerId))
-            .map((tm) => tm.tenantId.toString()),
-          to: tenantVisibility,
+            .filter((tm) => toIdString(tm.customerId) === normalizedCustomerId)
+            .map((tm) => toIdString(tm.tenantId))
+            .filter(Boolean),
+          to: tenantVisibility.map((tenantId) => toIdString(tenantId)).filter(Boolean),
         }
 
         // Remove existing tenantMemberships for this customer
         user.tenantMemberships = user.tenantMemberships.filter(
-          (tm) => toIdString(tm.customerId) !== toIdString(customerId),
+          (tm) => toIdString(tm.customerId) !== normalizedCustomerId,
         )
 
         // Add new tenantMemberships

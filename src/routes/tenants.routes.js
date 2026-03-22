@@ -34,14 +34,44 @@ import {
 
 export const customerTenantRouter = Router({ mergeParams: true })
 
-customerTenantRouter.use(authJwt, loadScopes, requireCustomerAccess({ roles: ['CUSTOMER_ADMIN'] }))
-customerTenantRouter.use(requireCustomerActive())
+customerTenantRouter.use(authJwt, loadScopes)
 
-customerTenantRouter.get('/', listTenants)
-customerTenantRouter.post('/', tenantManagementRateLimit, validateCreateTenant, createTenant)
-customerTenantRouter.patch('/:tenantId', tenantManagementRateLimit, validateUpdateTenant, updateTenant)
-customerTenantRouter.post('/:tenantId/enable', tenantManagementRateLimit, enableTenant)
-customerTenantRouter.post('/:tenantId/disable', tenantManagementRateLimit, disableTenant)
+customerTenantRouter.get(
+  '/',
+  requireCustomerAccess({ roles: ['CUSTOMER_ADMIN'], allowTenantAdmin: true }),
+  requireCustomerActive(),
+  listTenants,
+)
+customerTenantRouter.post(
+  '/',
+  requireCustomerAccess({ roles: ['CUSTOMER_ADMIN'] }),
+  requireCustomerActive(),
+  tenantManagementRateLimit,
+  validateCreateTenant,
+  createTenant,
+)
+customerTenantRouter.patch(
+  '/:tenantId',
+  requireCustomerAccess({ roles: ['CUSTOMER_ADMIN'], allowTenantAdmin: true }),
+  requireCustomerActive(),
+  tenantManagementRateLimit,
+  validateUpdateTenant,
+  updateTenant,
+)
+customerTenantRouter.post(
+  '/:tenantId/enable',
+  requireCustomerAccess({ roles: ['CUSTOMER_ADMIN'], allowTenantAdmin: true }),
+  requireCustomerActive(),
+  tenantManagementRateLimit,
+  enableTenant,
+)
+customerTenantRouter.post(
+  '/:tenantId/disable',
+  requireCustomerAccess({ roles: ['CUSTOMER_ADMIN'], allowTenantAdmin: true }),
+  requireCustomerActive(),
+  tenantManagementRateLimit,
+  disableTenant,
+)
 
 /* ------------------------------------------------------------------ */
 /*  Tenant-scoped router: /api/v1/tenants                             */

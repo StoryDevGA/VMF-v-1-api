@@ -47,19 +47,62 @@ export const customerUserRouter = Router({ mergeParams: true })
 customerUserRouter.use(
   authJwt,
   loadScopes,
-  requireCustomerAccess({ roles: ['CUSTOMER_ADMIN'] }),
-  requireCustomerActive(),
 )
 
-customerUserRouter.get('/', validateListUsersQuery, listUsers)
-customerUserRouter.post('/', userManagementRateLimit, validateCreateUser, createUser)
-customerUserRouter.get('/:userId', getUser)
-customerUserRouter.patch('/:userId', userManagementRateLimit, validateUpdateUser, updateUser)
-customerUserRouter.post('/:userId/enable', userManagementRateLimit, enableUser)
-customerUserRouter.post('/:userId/disable', userManagementRateLimit, disableUser)
-customerUserRouter.delete('/:userId', userManagementRateLimit, deleteUser)
+customerUserRouter.get(
+  '/',
+  requireCustomerAccess({ roles: ['CUSTOMER_ADMIN'], allowTenantAdmin: true }),
+  requireCustomerActive(),
+  validateListUsersQuery,
+  listUsers,
+)
+customerUserRouter.post(
+  '/',
+  requireCustomerAccess({ roles: ['CUSTOMER_ADMIN'] }),
+  requireCustomerActive(),
+  userManagementRateLimit,
+  validateCreateUser,
+  createUser,
+)
+customerUserRouter.get(
+  '/:userId',
+  requireCustomerAccess({ roles: ['CUSTOMER_ADMIN'] }),
+  requireCustomerActive(),
+  getUser,
+)
+customerUserRouter.patch(
+  '/:userId',
+  requireCustomerAccess({ roles: ['CUSTOMER_ADMIN'], allowTenantAdmin: true }),
+  requireCustomerActive(),
+  userManagementRateLimit,
+  validateUpdateUser,
+  updateUser,
+)
+customerUserRouter.post(
+  '/:userId/enable',
+  requireCustomerAccess({ roles: ['CUSTOMER_ADMIN'] }),
+  requireCustomerActive(),
+  userManagementRateLimit,
+  enableUser,
+)
+customerUserRouter.post(
+  '/:userId/disable',
+  requireCustomerAccess({ roles: ['CUSTOMER_ADMIN'] }),
+  requireCustomerActive(),
+  userManagementRateLimit,
+  disableUser,
+)
+customerUserRouter.delete(
+  '/:userId',
+  requireCustomerAccess({ roles: ['CUSTOMER_ADMIN'] }),
+  requireCustomerActive(),
+  userManagementRateLimit,
+  deleteUser,
+)
 customerUserRouter.post(
   '/:userId/resend-invitation',
+  requireCustomerAccess({ roles: ['CUSTOMER_ADMIN'] }),
+  requireCustomerActive(),
   userManagementRateLimit,
   validateResendInvitation,
   resendInvitation,

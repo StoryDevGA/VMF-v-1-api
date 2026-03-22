@@ -45,6 +45,7 @@ beforeAll(() => {
 const SUPER_ADMIN_ID = '507f1f77bcf86cd799439011'
 const CUSTOMER_ADMIN_ID = '507f1f77bcf86cd799439012'
 const REGULAR_USER_ID = '507f1f77bcf86cd799439013'
+const TENANT_ADMIN_ID = '507f1f77bcf86cd799439015'
 const NEW_USER_ID = '507f1f77bcf86cd799439014'
 const CUSTOMER_ID = '607f1f77bcf86cd799439022'
 const TENANT_ID = '707f1f77bcf86cd799439033'
@@ -150,6 +151,31 @@ const makeFakeCustomer = (overrides = {}) => ({
   ...overrides,
 })
 
+const makeTenantAdmin = (overrides = {}) => ({
+  _id: TENANT_ADMIN_ID,
+  id: TENANT_ADMIN_ID,
+  email: 'tenant.admin@acme.com',
+  name: 'Tenant Admin',
+  isActive: true,
+  identityPlus: { trustStatus: 'TRUSTED' },
+  memberships: [{ customerId: CUSTOMER_ID, roles: ['TENANT_ADMIN', 'USER'] }],
+  tenantMemberships: [{ customerId: CUSTOMER_ID, tenantId: TENANT_ID, roles: ['USER'] }],
+  vmfGrants: [],
+  save: jest.fn(async function () { return this }),
+  toJSON: function () {
+    return {
+      id: this._id,
+      email: this.email,
+      name: this.name,
+      isActive: this.isActive,
+      identityPlus: this.identityPlus,
+      memberships: this.memberships,
+      tenantMemberships: this.tenantMemberships,
+    }
+  },
+  ...overrides,
+})
+
 const makeFakeInvitation = (overrides = {}) => ({
   _id: '807f1f77bcf86cd799439099',
   id: '807f1f77bcf86cd799439099',
@@ -201,7 +227,7 @@ beforeAll(async () => {
 /*  Auth helpers                                                      */
 /* ------------------------------------------------------------------ */
 
-let superAdminToken, customerAdminToken, regularUserToken
+let superAdminToken, customerAdminToken, regularUserToken, tenantAdminToken
 
 const getSuperAdminToken = async () => {
   if (superAdminToken) return superAdminToken
@@ -224,6 +250,13 @@ const getRegularUserToken = async () => {
   return regularUserToken
 }
 
+const getTenantAdminToken = async () => {
+  if (tenantAdminToken) return tenantAdminToken
+  const tokens = await tokenService.generateTokens(makeTenantAdmin())
+  tenantAdminToken = tokens.accessToken
+  return tenantAdminToken
+}
+
 /* ------------------------------------------------------------------ */
 /*  Reset stubs before each test                                      */
 /* ------------------------------------------------------------------ */
@@ -236,6 +269,7 @@ beforeEach(() => {
   User.deleteOne = jest.fn()
   Customer.findById = jest.fn()
   Customer.findOne = jest.fn()
+  Tenant.find = jest.fn()
   Tenant.countDocuments = jest.fn()
   Tenant.updateMany = jest.fn(async () => ({ modifiedCount: 0 }))
   AuditLog.createLog = jest.fn(async () => ({}))
@@ -256,6 +290,7 @@ beforeEach(() => {
   User.findById.mockImplementation((id) => {
     if (id === SUPER_ADMIN_ID) return Promise.resolve(makeSuperAdmin())
     if (id === CUSTOMER_ADMIN_ID) return Promise.resolve(makeCustomerAdmin())
+    if (id === TENANT_ADMIN_ID) return Promise.resolve(makeTenantAdmin())
     if (id === REGULAR_USER_ID) return Promise.resolve(makeRegularUser())
     return Promise.resolve(null)
   })
@@ -594,6 +629,41 @@ describe('GET /api/v1/customers/:customerId/users', () => {
     expect(res.body.data[0].isCanonicalAdmin).toBe(false)
     expect(res.body.meta.total).toBe(1)
     expect(res.body.meta.page).toBe(1)
+  })
+
+  test('allows tenant admin to list customer users via customer-scoped route', async () => {
+    const token = await getTenantAdminToken()
+
+    Customer.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ID) return Promise.resolve(makeFakeCustomer())
+      return Promise.resolve(null)
+    })
+    User.findById.mockImplementation((id) => {
+      if (id === TENANT_ADMIN_ID) return Promise.resolve(makeTenantAdmin())
+      return Promise.resolve(null)
+    })
+
+    const regularUserLean = { ...makeRegularUser() }
+    delete regularUserLean.toJSON
+    delete regularUserLean.save
+    User.find.mockReturnValue({
+      sort: jest.fn().mockReturnValue({
+        skip: jest.fn().mockReturnValue({
+          limit: jest.fn().mockReturnValue({
+            lean: jest.fn().mockResolvedValue([regularUserLean]),
+          }),
+        }),
+      }),
+    })
+    User.countDocuments.mockResolvedValue(1)
+
+    const res = await request
+      .get(`/api/v1/customers/${CUSTOMER_ID}/users`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toHaveLength(1)
+    expect(res.body.data[0].id).toBe(REGULAR_USER_ID)
   })
 
   test('supports search by query param q', async () => {
@@ -1339,6 +1409,90 @@ describe('PATCH /api/v1/customers/:customerId/users/:userId', () => {
 
     expect(res.status).toBe(404)
     expect(differentCustomerUser.save).not.toHaveBeenCalled()
+  })
+
+  test('allows tenant admin to update tenant visibility within managed scope', async () => {
+    const token = await getTenantAdminToken()
+    const user = makeRegularUser({
+      tenantMemberships: [
+        { customerId: CUSTOMER_ID, tenantId: TENANT_ID, roles: ['USER'] },
+        { customerId: CUSTOMER_ID, tenantId: TENANT_ID_2, roles: ['USER'] },
+      ],
+    })
+
+    Customer.findById.mockResolvedValue(makeFakeCustomer())
+    User.findById.mockImplementation((id) => {
+      if (id === TENANT_ADMIN_ID) return Promise.resolve(makeTenantAdmin())
+      if (id === REGULAR_USER_ID) return Promise.resolve(user)
+      return Promise.resolve(null)
+    })
+    Tenant.find.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue([{ _id: TENANT_ID }]),
+      }),
+    })
+    Tenant.countDocuments.mockResolvedValue(2)
+
+    const res = await request
+      .patch(`/api/v1/customers/${CUSTOMER_ID}/users/${REGULAR_USER_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ tenantVisibility: [TENANT_ID] })
+
+    expect(res.status).toBe(200)
+    expect(user.save).toHaveBeenCalled()
+    expect(res.body.data.tenantVisibility).toEqual(expect.arrayContaining([TENANT_ID, TENANT_ID_2]))
+    expect(Tenant.find).toHaveBeenCalledWith({
+      customerId: CUSTOMER_ID,
+      tenantAdminUserIds: TENANT_ADMIN_ID,
+    })
+  })
+
+  test('returns 403 when tenant admin attempts non-tenant-visibility fields', async () => {
+    const token = await getTenantAdminToken()
+    const user = makeRegularUser()
+
+    Customer.findById.mockResolvedValue(makeFakeCustomer())
+    User.findById.mockImplementation((id) => {
+      if (id === TENANT_ADMIN_ID) return Promise.resolve(makeTenantAdmin())
+      if (id === REGULAR_USER_ID) return Promise.resolve(user)
+      return Promise.resolve(null)
+    })
+
+    const res = await request
+      .patch(`/api/v1/customers/${CUSTOMER_ID}/users/${REGULAR_USER_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: 'Not Allowed' })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('FORBIDDEN')
+    expect(res.body.error.details?.reason).toBe('TENANT_ADMIN_UPDATE_SCOPE_RESTRICTED')
+  })
+
+  test('returns 422 when tenant admin submits out-of-scope tenant visibility', async () => {
+    const token = await getTenantAdminToken()
+    const user = makeRegularUser()
+
+    Customer.findById.mockResolvedValue(makeFakeCustomer())
+    User.findById.mockImplementation((id) => {
+      if (id === TENANT_ADMIN_ID) return Promise.resolve(makeTenantAdmin())
+      if (id === REGULAR_USER_ID) return Promise.resolve(user)
+      return Promise.resolve(null)
+    })
+    Tenant.find.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue([{ _id: TENANT_ID }]),
+      }),
+    })
+
+    const res = await request
+      .patch(`/api/v1/customers/${CUSTOMER_ID}/users/${REGULAR_USER_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ tenantVisibility: [TENANT_ID_2] })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details?.reason).toBe('TENANT_VISIBILITY_INVALID_TENANT_IDS')
+    expect(res.body.error.details?.invalidTenantIds).toEqual([TENANT_ID_2])
   })
 })
 
