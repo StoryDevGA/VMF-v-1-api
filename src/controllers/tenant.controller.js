@@ -10,7 +10,6 @@
  */
 
 import { Customer, Tenant, User } from '../models/index.js'
-import { createTenantWithDefaults } from '../services/provisioningService.js'
 import auditService from '../services/auditService.js'
 import customerGovernanceService from '../services/customerGovernanceService.js'
 import logger from '../config/logger.js'
@@ -27,6 +26,11 @@ import {
   buildTenantCapacityMeta,
   validateTenantAdminAssignments,
 } from '../services/tenantManagementContractService.js'
+import {
+  createTenantWithAdminRoleCoupling,
+  isHttpResponseError,
+  updateTenantWithAdminRoleCoupling,
+} from '../services/tenantAdminRoleCouplingService.js'
 
 const buildGovernanceErrorResponse = (req, err) => ({
   error: {
@@ -138,6 +142,43 @@ const buildTenantAdminSummary = (tenant, tenantAdminUsersById = new Map()) => {
   return {
     id: tenantAdmin.id,
     name: user?.name || tenantAdmin.name || null,
+  }
+}
+
+const resolveCustomerMembership = (user, customerId) =>
+  (user?.memberships || []).find(
+    (membership) => toIdString(membership?.customerId) === toIdString(customerId),
+  ) || null
+
+const buildTenantAdminUserResponse = ({
+  tenant,
+  customerId,
+  tenantAdminUsersById = new Map(),
+}) => {
+  const [tenantAdmin] = getTenantAdminRefs(tenant)
+  if (!tenantAdmin) return null
+
+  const user = tenantAdminUsersById.get(tenantAdmin.id)
+  if (!user) {
+    return {
+      id: tenantAdmin.id,
+      name: tenantAdmin.name || null,
+      email: null,
+      status: null,
+      trustStatus: null,
+      customerRoles: [],
+    }
+  }
+
+  const membership = resolveCustomerMembership(user, customerId)
+
+  return {
+    id: toIdString(user?._id || user?.id),
+    name: user?.name || tenantAdmin.name || null,
+    email: user?.email || null,
+    status: user?.isActive === false ? 'INACTIVE' : 'ACTIVE',
+    trustStatus: user?.identityPlus?.trustStatus || 'UNTRUSTED',
+    customerRoles: Array.isArray(membership?.roles) ? membership.roles : [],
   }
 }
 
@@ -344,16 +385,69 @@ export const createTenant = async (req, res, next) => {
     }
 
     const actorUserId = req.context?.userId || req.userId
-    const result = await createTenantWithDefaults(req.body, customer, actorUserId, req)
+    const result = await createTenantWithAdminRoleCoupling({
+      customerId,
+      payload: req.body,
+      actorUserId,
+      req,
+    })
+    const createdTenantAdminUserId = toIdString(
+      result.tenantAdminUser?._id || result.tenantAdminUser?.id,
+    )
     await performanceCacheService.setTenantStatus(
       result.tenant._id,
       buildTenantStatusSnapshot(result.tenant),
     )
+    if (result.tenantAdminRoleChange?.changed && createdTenantAdminUserId) {
+      await performanceCacheService.invalidateUserPermissions(createdTenantAdminUserId)
+    }
 
-    const tenantAdminUsersById = await loadTenantAdminUsersById([result.tenant])
+    await auditService.logFromRequest(req, {
+      action: 'TENANT_CREATED',
+      resourceType: 'Tenant',
+      resourceId: result.tenant._id,
+      scope: { customerId: result.customer._id, tenantId: result.tenant._id },
+      diff: null,
+    })
+    if (result.vmf) {
+      await auditService.logFromRequest(req, {
+        action: 'VMF_CREATED',
+        resourceType: 'VMF',
+        resourceId: result.vmf._id,
+        scope: { customerId: result.customer._id, tenantId: result.tenant._id, vmfId: result.vmf._id },
+        diff: null,
+      })
+    }
+    if (result.tenantAdminRoleChange?.changed && createdTenantAdminUserId) {
+      await auditService.logFromRequest(req, {
+        action: auditService.AUDIT_ACTIONS.USER_ROLE_UPDATED,
+        resourceType: 'User',
+        resourceId: createdTenantAdminUserId,
+        scope: { customerId: result.customer._id, tenantId: result.tenant._id },
+        diff: {
+          customerRoles: {
+            from: result.tenantAdminRoleChange.previousRoles,
+            to: result.tenantAdminRoleChange.nextRoles,
+          },
+          source: 'tenant_admin_assignment_coupling',
+        },
+      })
+    }
+
+    const tenantAdminUsersById = result.tenantAdminUser
+      ? new Map([[
+          toIdString(result.tenantAdminUser._id || result.tenantAdminUser.id),
+          result.tenantAdminUser,
+        ]])
+      : await loadTenantAdminUsersById([result.tenant])
     const responseData = {
       tenant: serializeTenantResponse({
         tenant: result.tenant,
+        tenantAdminUsersById,
+      }),
+      tenantAdminUser: buildTenantAdminUserResponse({
+        tenant: result.tenant,
+        customerId: result.customer._id,
         tenantAdminUsersById,
       }),
     }
@@ -385,6 +479,9 @@ export const createTenant = async (req, res, next) => {
       return res
         .status(err.status || 409)
         .json(buildGovernanceErrorResponse(req, err))
+    }
+    if (isHttpResponseError(err)) {
+      return res.status(err.status || 422).json(err.response)
     }
 
     if (err.name === 'ValidationError') {
@@ -452,6 +549,67 @@ export const updateTenant = async (req, res, next) => {
       }
     }
 
+    if (req.body.tenantAdminUserIds !== undefined) {
+      const mutation = await updateTenantWithAdminRoleCoupling({
+        tenantId: req.params.tenantId,
+        updates: req.body,
+        req,
+      })
+      const updatedTenantAdminUserId = toIdString(
+        mutation.tenantAdminUser?._id || mutation.tenantAdminUser?.id,
+      )
+
+      await performanceCacheService.invalidateTenantStatus(mutation.tenant._id)
+      if (mutation.tenantAdminRoleChange?.changed && updatedTenantAdminUserId) {
+        await performanceCacheService.invalidateUserPermissions(updatedTenantAdminUserId)
+      }
+
+      await auditService.logFromRequest(req, {
+        action: 'TENANT_UPDATED',
+        resourceType: 'Tenant',
+        resourceId: mutation.tenant._id,
+        scope: { customerId: mutation.tenant.customerId, tenantId: mutation.tenant._id },
+        diff: mutation.diff,
+      })
+      if (mutation.tenantAdminRoleChange?.changed && updatedTenantAdminUserId) {
+        await auditService.logFromRequest(req, {
+          action: auditService.AUDIT_ACTIONS.USER_ROLE_UPDATED,
+          resourceType: 'User',
+          resourceId: updatedTenantAdminUserId,
+          scope: { customerId: mutation.tenant.customerId, tenantId: mutation.tenant._id },
+          diff: {
+            customerRoles: {
+              from: mutation.tenantAdminRoleChange.previousRoles,
+              to: mutation.tenantAdminRoleChange.nextRoles,
+            },
+            source: 'tenant_admin_assignment_coupling',
+          },
+        })
+      }
+
+      const tenantAdminUsersById = mutation.tenantAdminUser
+        ? new Map([[
+            toIdString(mutation.tenantAdminUser._id || mutation.tenantAdminUser.id),
+            mutation.tenantAdminUser,
+          ]])
+        : await loadTenantAdminUsersById([mutation.tenant])
+
+      return res.status(200).json({
+        data: {
+          ...serializeTenantResponse({
+            tenant: mutation.tenant,
+            tenantAdminUsersById,
+          }),
+          tenantAdminUser: buildTenantAdminUserResponse({
+            tenant: mutation.tenant,
+            customerId: mutation.tenant.customerId,
+            tenantAdminUsersById,
+          }),
+        },
+        meta: { requestId: req.requestId, version: 'v1' },
+      })
+    }
+
     for (const field of allowedFields) {
       if (req.body[field] !== undefined) {
         diff[field] = { from: tenant[field], to: req.body[field] }
@@ -473,13 +631,23 @@ export const updateTenant = async (req, res, next) => {
     const tenantAdminUsersById = await loadTenantAdminUsersById([tenant])
 
     return res.status(200).json({
-      data: serializeTenantResponse({
-        tenant,
-        tenantAdminUsersById,
-      }),
+      data: {
+        ...serializeTenantResponse({
+          tenant,
+          tenantAdminUsersById,
+        }),
+        tenantAdminUser: buildTenantAdminUserResponse({
+          tenant,
+          customerId: tenant.customerId,
+          tenantAdminUsersById,
+        }),
+      },
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
+    if (isHttpResponseError(err)) {
+      return res.status(err.status || 422).json(err.response)
+    }
     if (err.name === 'ValidationError') {
       return res.status(422).json({
         error: {

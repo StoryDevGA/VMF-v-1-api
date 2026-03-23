@@ -30,7 +30,8 @@
  * All Mongoose model statics are monkey-patched; no real database required.
  */
 
-import { describe, test, expect, beforeAll, beforeEach, jest } from '@jest/globals'
+import mongoose from 'mongoose'
+import { describe, test, expect, beforeAll, beforeEach, afterAll, jest } from '@jest/globals'
 
 /* ------------------------------------------------------------------ */
 /*  Environment setup (must run before any app imports)               */
@@ -193,15 +194,23 @@ const makeFakeInvitation = (overrides = {}) => ({
 /*  Dynamic imports                                                   */
 /* ------------------------------------------------------------------ */
 
-let app, request, tokenService, validateTenantAdminAssignments
+let app, request, tokenService, validateTenantAdminAssignments, ensureTenantAdminCustomerRole
 let User, Customer, Tenant, VMF, AuditLog, Invitation, LicenseLevel
+let startSessionSpy
+
+const buildSession = () => ({
+  withTransaction: jest.fn(async (callback) => callback()),
+  endSession: jest.fn(async () => {}),
+})
 
 beforeAll(async () => {
   const supertest = (await import('supertest')).default
   app = (await import('../app.js')).default
   tokenService = (await import('../services/tokenService.js')).default
   ;({ validateTenantAdminAssignments } = await import('../services/tenantManagementContractService.js'))
+  ;({ ensureTenantAdminCustomerRole } = await import('../services/tenantAdminRoleCouplingService.js'))
   request = supertest(app)
+  startSessionSpy = jest.spyOn(mongoose, 'startSession')
 
   const models = await import('../models/index.js')
   User = models.User
@@ -211,6 +220,10 @@ beforeAll(async () => {
   AuditLog = models.AuditLog
   Invitation = models.Invitation
   LicenseLevel = models.LicenseLevel
+})
+
+afterAll(() => {
+  startSessionSpy?.mockRestore()
 })
 
 /* ------------------------------------------------------------------ */
@@ -279,6 +292,7 @@ const mockLicenseLevelLookup = (value) => {
 /* ------------------------------------------------------------------ */
 
 beforeEach(() => {
+  startSessionSpy.mockResolvedValue(buildSession())
   User.findById = jest.fn()
   User.findOne = jest.fn()
   User.findByEmail = jest.fn()
@@ -679,6 +693,42 @@ describe('validateTenantAdminAssignments', () => {
       outOfCustomerTenantAdminUserIds: [],
     })
     expect(findUsers).not.toHaveBeenCalled()
+  })
+})
+
+describe('ensureTenantAdminCustomerRole', () => {
+  test('adds TENANT_ADMIN to the existing customer membership when missing', () => {
+    const user = makeFakeUser({
+      _id: USER_ID,
+      id: USER_ID,
+      memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+    })
+
+    const result = ensureTenantAdminCustomerRole({ user, customerId: CUSTOMER_ID })
+
+    expect(result).toEqual({
+      changed: true,
+      previousRoles: ['USER'],
+      nextRoles: ['USER', 'TENANT_ADMIN'],
+    })
+    expect(user.memberships[0].roles).toEqual(['USER', 'TENANT_ADMIN'])
+  })
+
+  test('is a no-op when TENANT_ADMIN is already present', () => {
+    const user = makeFakeUser({
+      _id: USER_ID,
+      id: USER_ID,
+      memberships: [{ customerId: CUSTOMER_ID, roles: ['USER', 'TENANT_ADMIN'] }],
+    })
+
+    const result = ensureTenantAdminCustomerRole({ user, customerId: CUSTOMER_ID })
+
+    expect(result).toEqual({
+      changed: false,
+      previousRoles: ['USER', 'TENANT_ADMIN'],
+      nextRoles: ['USER', 'TENANT_ADMIN'],
+    })
+    expect(user.memberships[0].roles).toEqual(['USER', 'TENANT_ADMIN'])
   })
 })
 
@@ -2048,7 +2098,7 @@ describe('POST /api/v1/fake-auth/invitations/:invitationId/complete', () => {
 
     const existingUser = makeFakeUser({
       _id: USER_ID,
-      id: USER_ID,
+      id: USER_ID_2,
       email: 'member.user@acme.example',
       identityPlus: {
         trustStatus: 'UNTRUSTED',
@@ -2257,6 +2307,13 @@ describe('POST /api/v1/customers/:customerId/tenants', () => {
     const token = await getSuperAdminToken()
     Customer.findById.mockResolvedValue(makeFakeCustomer())
     Tenant.countDocuments.mockResolvedValue(0)
+    const assignedAdmin = makeFakeUser({
+      _id: USER_ID,
+      id: USER_ID,
+      email: 'assigned.admin@acme.com',
+      name: 'Assigned Admin',
+      memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+    })
     User.find
       .mockReturnValueOnce({
         lean: jest.fn().mockResolvedValue([
@@ -2278,8 +2335,9 @@ describe('POST /api/v1/customers/:customerId/tenants', () => {
           }),
         ]),
       })
+    User.findOne.mockResolvedValue(assignedAdmin)
 
-    const savedTenant = makeFakeTenant({ name: 'New Tenant' })
+    const savedTenant = makeFakeTenant({ name: 'New Tenant', tenantAdminUserIds: [USER_ID] })
     const savedVmf = {
       _id: VMF_ID,
       name: 'VMF 1',
@@ -2289,7 +2347,6 @@ describe('POST /api/v1/customers/:customerId/tenants', () => {
       },
     }
 
-    let saveIdx = 0
     const origTenantSave = Tenant.prototype.save
     const origVmfSave = VMF.prototype.save
 
@@ -2320,6 +2377,12 @@ describe('POST /api/v1/customers/:customerId/tenants', () => {
       id: USER_ID,
       name: 'Assigned Admin',
     })
+    expect(res.body.data.tenantAdminUser).toEqual(expect.objectContaining({
+      id: USER_ID,
+      name: 'Assigned Admin',
+      customerRoles: ['USER', 'TENANT_ADMIN'],
+    }))
+    expect(assignedAdmin.save).toHaveBeenCalled()
     // PER_TENANT_MULTI → auto-create VMF
     expect(res.body.data.vmf).toBeDefined()
     expect(AuditLog.createLog.mock.calls).toEqual(expect.arrayContaining([
@@ -2333,10 +2396,70 @@ describe('POST /api/v1/customers/:customerId/tenants', () => {
         requestId: res.body.meta.requestId,
         resourceType: 'VMF',
       })],
+      [expect.objectContaining({
+        action: 'USER_ROLE_UPDATED',
+        requestId: res.body.meta.requestId,
+        resourceType: 'User',
+      })],
     ]))
 
     Tenant.prototype.save = origTenantSave
     VMF.prototype.save = origVmfSave
+  })
+
+  test('returns 500 without creating a tenant when tenant-admin role coupling fails', async () => {
+    const token = await getSuperAdminToken()
+    Customer.findById.mockResolvedValue(makeFakeCustomer())
+    Tenant.countDocuments.mockResolvedValue(0)
+    User.find
+      .mockReturnValueOnce({
+        lean: jest.fn().mockResolvedValue([
+          makeFakeUser({
+            _id: USER_ID_2,
+            id: USER_ID_2,
+            memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+          }),
+        ]),
+      })
+      .mockReturnValueOnce({
+        lean: jest.fn().mockResolvedValue([
+          makeFakeUser({
+            _id: USER_ID_2,
+            id: USER_ID_2,
+            memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+          }),
+        ]),
+      })
+
+    const failingTenantAdmin = makeFakeUser({
+      _id: USER_ID_2,
+      id: USER_ID_2,
+      memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+      save: jest.fn(async () => {
+        throw new Error('role save failed')
+      }),
+    })
+    User.findOne.mockResolvedValue(failingTenantAdmin)
+
+    const origTenantSave = Tenant.prototype.save
+    Tenant.prototype.save = jest.fn(async function () { return this })
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/tenants`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        name: 'Broken Tenant',
+        website: 'https://broken.example',
+        tenantAdminUserIds: [USER_ID_2],
+      })
+
+    expect(res.status).toBe(500)
+    expect(Tenant.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+      action: 'TENANT_CREATED',
+    }))
+
+    Tenant.prototype.save = origTenantSave
   })
 
   test('returns 409 when governance.maxTenants limit is reached (boundary plus one)', async () => {
@@ -2491,6 +2614,141 @@ describe('PATCH /api/v1/customers/:customerId/tenants/:tenantId', () => {
       id: USER_ID,
       name: 'Mary Poppins',
     })
+  })
+
+  test('reassigns tenant admin and automatically grants TENANT_ADMIN', async () => {
+    const token = await getCustomerAdminToken()
+    const tenant = makeFakeTenant({ tenantAdminUserIds: [USER_ID] })
+    const assignedAdmin = makeFakeUser({
+      _id: USER_ID_2,
+      id: USER_ID_2,
+      email: 'mary.poppins@acme.com',
+      name: 'Mary Poppins',
+      memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+    })
+    User.find
+      .mockReturnValueOnce({
+        lean: jest.fn().mockResolvedValue([
+          makeFakeUser({
+            _id: USER_ID_2,
+            id: USER_ID_2,
+            name: 'Mary Poppins',
+            memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+          }),
+        ]),
+      })
+      .mockReturnValueOnce({
+        lean: jest.fn().mockResolvedValue([
+          makeFakeUser({
+            _id: USER_ID_2,
+            id: USER_ID_2,
+            name: 'Mary Poppins',
+            memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+          }),
+        ]),
+      })
+    User.findOne.mockResolvedValue(assignedAdmin)
+
+    User.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ADMIN_ID) {
+        return Promise.resolve(makeFakeUser({
+          _id: CUSTOMER_ADMIN_ID,
+          id: CUSTOMER_ADMIN_ID,
+          email: 'custadmin@acme.com',
+          name: 'Customer Admin',
+          memberships: [{ customerId: CUSTOMER_ID, roles: ['CUSTOMER_ADMIN'] }],
+        }))
+      }
+      return Promise.resolve(null)
+    })
+    Customer.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ID) return Promise.resolve(makeFakeCustomer())
+      return Promise.resolve(null)
+    })
+    Tenant.findById.mockResolvedValue(tenant)
+
+    const res = await request
+      .patch(`/api/v1/customers/${CUSTOMER_ID}/tenants/${TENANT_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ tenantAdminUserIds: [USER_ID_2] })
+
+    expect(res.status).toBe(200)
+    expect(tenant.save).toHaveBeenCalled()
+    expect(assignedAdmin.save).toHaveBeenCalled()
+    expect(res.body.data.tenantAdmin).toEqual({
+      id: USER_ID_2,
+      name: 'Mary Poppins',
+    })
+    expect(res.body.data.tenantAdminUser).toEqual(expect.objectContaining({
+      id: USER_ID_2,
+      name: 'Mary Poppins',
+      customerRoles: ['USER', 'TENANT_ADMIN'],
+    }))
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'USER_ROLE_UPDATED',
+      requestId: res.body.meta.requestId,
+      resourceType: 'User',
+    }))
+  })
+
+  test('returns 500 without saving tenant changes when tenant-admin role coupling fails', async () => {
+    const token = await getCustomerAdminToken()
+    const tenant = makeFakeTenant({ tenantAdminUserIds: [USER_ID] })
+    User.find
+      .mockReturnValueOnce({
+        lean: jest.fn().mockResolvedValue([
+          makeFakeUser({
+            _id: USER_ID_2,
+            id: USER_ID_2,
+            memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+          }),
+        ]),
+      })
+      .mockReturnValueOnce({
+        lean: jest.fn().mockResolvedValue([
+          makeFakeUser({
+            _id: USER_ID_2,
+            id: USER_ID_2,
+            memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+          }),
+        ]),
+      })
+
+    const failingTenantAdmin = makeFakeUser({
+      _id: USER_ID_2,
+      id: USER_ID_2,
+      memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+      save: jest.fn(async () => {
+        throw new Error('role save failed')
+      }),
+    })
+    User.findOne.mockResolvedValue(failingTenantAdmin)
+
+    User.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ADMIN_ID) {
+        return Promise.resolve(makeFakeUser({
+          _id: CUSTOMER_ADMIN_ID,
+          id: CUSTOMER_ADMIN_ID,
+          email: 'custadmin@acme.com',
+          name: 'Customer Admin',
+          memberships: [{ customerId: CUSTOMER_ID, roles: ['CUSTOMER_ADMIN'] }],
+        }))
+      }
+      return Promise.resolve(null)
+    })
+    Customer.findById.mockImplementation((id) => {
+      if (id === CUSTOMER_ID) return Promise.resolve(makeFakeCustomer())
+      return Promise.resolve(null)
+    })
+    Tenant.findById.mockResolvedValue(tenant)
+
+    const res = await request
+      .patch(`/api/v1/customers/${CUSTOMER_ID}/tenants/${TENANT_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ tenantAdminUserIds: [USER_ID_2] })
+
+    expect(res.status).toBe(500)
+    expect(tenant.save).not.toHaveBeenCalled()
   })
 
   test('returns 404 when the tenant is outside the customer scope', async () => {
