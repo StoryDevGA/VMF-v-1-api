@@ -17,6 +17,7 @@ import { getRedis } from '../config/redis.js'
 import env from '../config/env.js'
 import logger from '../config/logger.js'
 import monitoringService from '../services/monitoringService.js'
+import { listUserCustomerFeatureScopes } from '../services/licenseEntitlementService.js'
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                           */
@@ -140,12 +141,14 @@ const performLogin = async (req, res, { requiredRole } = {}) => {
 
   // Build safe user profile (passwordHash excluded via toJSON transform)
   const profile = user.toJSON()
+  const customerScopes = await listUserCustomerFeatureScopes(user)
 
   logger.info({ userId: user._id, requestId: req.requestId }, 'login succeeded')
 
   return res.status(200).json({
     data: {
       user: profile,
+      customerScopes,
       ...tokens,
     },
     meta: { requestId: req.requestId, version: 'v1' },
@@ -323,8 +326,10 @@ export const getMe = async (req, res, next) => {
       })
     }
 
+    const customerScopes = await listUserCustomerFeatureScopes(user)
+
     return res.status(200).json({
-      data: { user: user.toJSON() },
+      data: { user: user.toJSON(), customerScopes },
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {

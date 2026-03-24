@@ -89,11 +89,12 @@ beforeAll(async () => {
 // We cannot jest.mock() an ESM module at the top level in --experimental-vm-modules,
 // so we monkey-patch the model's static methods before each test instead.
 
-let User, Customer
+let User, Customer, LicenseLevel
 beforeAll(async () => {
   const models = await import('../models/index.js')
   User = models.User
   Customer = models.Customer
+  LicenseLevel = models.LicenseLevel
 })
 
 beforeEach(() => {
@@ -104,6 +105,12 @@ beforeEach(() => {
     select: jest.fn().mockReturnValue({
       lean: jest.fn().mockResolvedValue([]),
     }),
+  })
+  Customer.findById = jest.fn().mockReturnValue({
+    select: jest.fn().mockResolvedValue(null),
+  })
+  LicenseLevel.findById = jest.fn().mockReturnValue({
+    select: jest.fn().mockResolvedValue(null),
   })
 })
 
@@ -203,7 +210,51 @@ describe('POST /api/v1/auth/login', () => {
     expect(res.body.data.refreshToken).toBeDefined()
     expect(res.body.data.tokenType).toBe('Bearer')
     expect(res.body.data.user.email).toBe('admin@storylineos.com')
+    expect(res.body.data.customerScopes).toEqual([])
     expect(res.body.meta.requestId).toBeDefined()
+  })
+
+  test('returns customerScopes with featureEntitlements when customer memberships exist', async () => {
+    const user = makeFakeUser({
+      memberships: [{ customerId: '607f1f77bcf86cd799439022', roles: ['USER'] }],
+    })
+    User.findByEmail.mockResolvedValue(user)
+    Customer.find.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue([
+          { _id: '607f1f77bcf86cd799439022', status: 'ACTIVE' },
+        ]),
+      }),
+    })
+
+    Customer.findById.mockReturnValue({
+      select: jest.fn().mockResolvedValue({
+        _id: '607f1f77bcf86cd799439022',
+        licenseLevelId: '607f1f77bcf86cd799439033',
+        entitlements: [],
+      }),
+    })
+    LicenseLevel.findById.mockReturnValue({
+      select: jest.fn().mockResolvedValue({
+        _id: '607f1f77bcf86cd799439033',
+        isActive: true,
+        featureEntitlements: ['vmf', 'deals'],
+      }),
+    })
+
+    const res = await request
+      .post('/api/v1/auth/login')
+      .send({ email: 'admin@storylineos.com', password: 'CorrectPassword1!' })
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.customerScopes).toEqual([
+      {
+        customerId: '607f1f77bcf86cd799439022',
+        licenseLevelId: '607f1f77bcf86cd799439033',
+        featureEntitlements: ['VMF', 'DEALS'],
+        entitlementSource: 'LICENSE_LEVEL',
+      },
+    ])
   })
 })
 
@@ -322,6 +373,7 @@ describe('GET /api/v1/auth/me', () => {
     expect(res.status).toBe(200)
     expect(res.body.data.user.email).toBe('admin@storylineos.com')
     expect(res.body.data.user.memberships).toBeDefined()
+    expect(res.body.data.customerScopes).toEqual([])
     // passwordHash must never be returned
     expect(res.body.data.user.passwordHash).toBeUndefined()
   })

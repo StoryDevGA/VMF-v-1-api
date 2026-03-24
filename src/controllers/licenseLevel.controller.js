@@ -1,5 +1,6 @@
 import { Customer, LicenseLevel } from '../models/index.js'
 import auditService from '../services/auditService.js'
+import performanceCacheService from '../services/performanceCacheService.js'
 
 const DUPLICATE_LICENSE_LEVEL_NAME_MESSAGE = 'A licence level with this name already exists.'
 
@@ -103,6 +104,7 @@ export const createLicenseLevel = async (req, res, next) => {
     })
 
     await licenseLevel.save()
+    await performanceCacheService.invalidateLicenseLevelEntitlements(licenseLevel._id)
 
     await auditService.logFromRequest(req, {
       action: auditService.AUDIT_ACTIONS.LICENSE_LEVEL_CREATED,
@@ -216,6 +218,7 @@ export const updateLicenseLevel = async (req, res, next) => {
     }
 
     await licenseLevel.save()
+    await performanceCacheService.invalidateLicenseLevelEntitlements(licenseLevel._id)
 
     await auditService.logFromRequest(req, {
       action: auditService.AUDIT_ACTIONS.LICENSE_LEVEL_UPDATED,

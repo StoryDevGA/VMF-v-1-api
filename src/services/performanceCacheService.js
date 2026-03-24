@@ -5,6 +5,7 @@
  *   - User permissions   — 5-minute TTL (platform roles, memberships, grants)
  *   - Tenant status      — 1-minute TTL (status, isDefault, admins)
  *   - Customer topology  — 15-minute TTL (topology, vmfPolicy, service provider flag)
+ *   - License entitlements — 15-minute TTL (featureEntitlements by license level)
  *
  * Provides:
  *   - get / set / invalidate per namespace
@@ -19,7 +20,7 @@
 import env from '../config/env.js'
 import logger from '../config/logger.js'
 import { getRedis } from '../config/redis.js'
-import { Customer, Tenant, User } from '../models/index.js'
+import { Customer, LicenseLevel, Tenant, User } from '../models/index.js'
 
 /* ------------------------------------------------------------------ */
 /*  Constants & helpers                                               */
@@ -37,6 +38,15 @@ const normalizeId = (id) => {
 
 const buildKey = (namespace, id) => `${CACHE_PREFIX}:${namespace}:${normalizeId(id)}`
 const now = () => Date.now()
+const normalizeFeatureEntitlements = (values) => {
+  if (!Array.isArray(values)) return []
+
+  const normalized = values
+    .map((value) => String(value || '').trim().toUpperCase())
+    .filter(Boolean)
+
+  return [...new Set(normalized)]
+}
 
 const readLocalCache = (key) => {
   const entry = LOCAL_CACHE.get(key)
@@ -212,7 +222,7 @@ export const buildTenantStatusSnapshot = (tenant) => ({
 /**
  * Build a cacheable topology snapshot from a Customer document.
  * @param {import('../models/Customer.js').default} customer - Mongoose Customer document
- * @returns {{ _id: string, topology: string, vmfPolicy: string, defaultTenantId: string|null, status: string, isServiceProvider: boolean, licenseLevelId: string|null, governance: { maxTenants: number, maxVmfsPerTenant: number, customerAdminUserId: string|null } }}
+ * @returns {{ _id: string, topology: string, vmfPolicy: string, defaultTenantId: string|null, status: string, isServiceProvider: boolean, licenseLevelId: string|null, entitlements: string[], governance: { maxTenants: number, maxVmfsPerTenant: number, customerAdminUserId: string|null } }}
  */
 export const buildCustomerTopologySnapshot = (customer) => ({
   _id: customer._id,
@@ -223,11 +233,24 @@ export const buildCustomerTopologySnapshot = (customer) => ({
   status: customer.status,
   isServiceProvider: Boolean(customer.isServiceProvider),
   licenseLevelId: customer.licenseLevelId || null,
+  entitlements: normalizeFeatureEntitlements(customer.entitlements),
   governance: {
     maxTenants: customer.governance?.maxTenants ?? 1,
     maxVmfsPerTenant: customer.governance?.maxVmfsPerTenant ?? 1,
     customerAdminUserId: customer.governance?.customerAdminUserId || null,
   },
+})
+
+/**
+ * Build a cacheable entitlement snapshot from a LicenseLevel document.
+ * @param {import('../models/LicenseLevel.js').default} licenseLevel - Mongoose LicenseLevel document
+ * @returns {{ _id: string, isActive: boolean, featureEntitlements: string[] }}
+ */
+export const buildLicenseLevelEntitlementSnapshot = (licenseLevel) => ({
+  _id: licenseLevel._id,
+  id: licenseLevel.id || normalizeId(licenseLevel._id),
+  isActive: Boolean(licenseLevel.isActive),
+  featureEntitlements: normalizeFeatureEntitlements(licenseLevel.featureEntitlements),
 })
 
 /* ------------------------------------------------------------------ */
@@ -237,6 +260,7 @@ export const buildCustomerTopologySnapshot = (customer) => ({
 const USER_PERMISSIONS_NAMESPACE = 'user-permissions'
 const TENANT_STATUS_NAMESPACE = 'tenant-status'
 const CUSTOMER_TOPOLOGY_NAMESPACE = 'customer-topology'
+const LICENSE_LEVEL_ENTITLEMENTS_NAMESPACE = 'license-level-entitlements'
 
 const getUserPermissions = async (userId) =>
   getCachedValue(buildKey(USER_PERMISSIONS_NAMESPACE, userId))
@@ -279,6 +303,19 @@ const setCustomerTopology = async (customerId, snapshot) =>
 const invalidateCustomerTopology = async (customerId) =>
   invalidateCachedValue(buildKey(CUSTOMER_TOPOLOGY_NAMESPACE, customerId))
 
+const getLicenseLevelEntitlements = async (licenseLevelId) =>
+  getCachedValue(buildKey(LICENSE_LEVEL_ENTITLEMENTS_NAMESPACE, licenseLevelId))
+
+const setLicenseLevelEntitlements = async (licenseLevelId, snapshot) =>
+  setCachedValue(
+    buildKey(LICENSE_LEVEL_ENTITLEMENTS_NAMESPACE, licenseLevelId),
+    snapshot,
+    env.customerTopologyCacheTtlSec,
+  )
+
+const invalidateLicenseLevelEntitlements = async (licenseLevelId) =>
+  invalidateCachedValue(buildKey(LICENSE_LEVEL_ENTITLEMENTS_NAMESPACE, licenseLevelId))
+
 /* ------------------------------------------------------------------ */
 /*  Cache warming                                                     */
 /* ------------------------------------------------------------------ */
@@ -297,7 +334,7 @@ const warmAuthorizationCaches = async (options = {}) => {
   const tenantLimit = Math.max(1, options.tenantLimit || env.cacheWarmTenantLimit)
   const customerLimit = Math.max(1, options.customerLimit || env.cacheWarmCustomerLimit)
 
-  const [users, tenants, customers] = await Promise.all([
+  const [users, tenants, customers, licenseLevels] = await Promise.all([
     User.find({ isActive: true })
       .sort({ updatedAt: -1 })
       .limit(userLimit)
@@ -311,7 +348,12 @@ const warmAuthorizationCaches = async (options = {}) => {
     Customer.find({})
       .sort({ updatedAt: -1 })
       .limit(customerLimit)
-      .select('_id topology vmfPolicy defaultTenantId status isServiceProvider licenseLevelId governance')
+      .select('_id topology vmfPolicy defaultTenantId status isServiceProvider licenseLevelId entitlements governance')
+      .lean(),
+    LicenseLevel.find({ isActive: true })
+      .sort({ updatedAt: -1 })
+      .limit(customerLimit)
+      .select('_id isActive featureEntitlements')
       .lean(),
   ])
 
@@ -321,6 +363,11 @@ const warmAuthorizationCaches = async (options = {}) => {
     ...customers.map((customer) =>
       setCustomerTopology(customer._id, buildCustomerTopologySnapshot(customer)),
     ),
+    ...licenseLevels.map((licenseLevel) =>
+      setLicenseLevelEntitlements(
+        licenseLevel._id,
+        buildLicenseLevelEntitlementSnapshot(licenseLevel),
+      )),
   ])
 
   return {
@@ -328,6 +375,7 @@ const warmAuthorizationCaches = async (options = {}) => {
     warmedUsers: users.length,
     warmedTenants: tenants.length,
     warmedCustomers: customers.length,
+    warmedLicenseLevels: licenseLevels.length,
   }
 }
 
@@ -351,6 +399,9 @@ const performanceCacheService = {
   getCustomerTopology,
   setCustomerTopology,
   invalidateCustomerTopology,
+  getLicenseLevelEntitlements,
+  setLicenseLevelEntitlements,
+  invalidateLicenseLevelEntitlements,
   warmAuthorizationCaches,
   resetForTests,
 }

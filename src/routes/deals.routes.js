@@ -18,6 +18,7 @@ import authJwt from '../middleware/authJwt.js'
 import loadScopes from '../middleware/loadScopes.js'
 import { requireVmfAccess, requirePlatformRole } from '../middleware/authorize.js'
 import requireCustomerActive from '../middleware/customerStatus.js'
+import requireFeatureEntitlement from '../middleware/featureEntitlements.js'
 import { tenantManagementRateLimit } from '../middleware/rateLimits.js'
 import {
   validateCreateDeal,
@@ -38,7 +39,13 @@ import {
 
 export const vmfDealRouter = Router({ mergeParams: true })
 
-vmfDealRouter.use(authJwt, loadScopes, requireVmfAccess('READ'), requireCustomerActive())
+vmfDealRouter.use(
+  authJwt,
+  loadScopes,
+  requireVmfAccess('READ'),
+  requireFeatureEntitlement('DEALS'),
+  requireCustomerActive(),
+)
 
 vmfDealRouter.get('/', listDeals)
 vmfDealRouter.post('/', tenantManagementRateLimit, validateCreateDeal, createDeal)

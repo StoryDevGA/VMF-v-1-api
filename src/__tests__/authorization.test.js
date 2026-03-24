@@ -93,6 +93,14 @@ const makeFakeVmf = (overrides = {}) => ({
   ...overrides,
 })
 
+const makeFakeLicenseLevel = (overrides = {}) => ({
+  _id: '907f1f77bcf86cd799439066',
+  id: '907f1f77bcf86cd799439066',
+  isActive: true,
+  featureEntitlements: ['VMF', 'DEALS'],
+  ...overrides,
+})
+
 /* ------------------------------------------------------------------ */
 /*  Mock helpers: req / res / next                                    */
 /* ------------------------------------------------------------------ */
@@ -143,9 +151,10 @@ const getLabeledCounterValue = (metricsText, metricName, labels = []) => {
 /*  Dynamic imports                                                   */
 /* ------------------------------------------------------------------ */
 
-let User, Customer, Tenant, VMF, AuditLog, monitoringService, env
+let User, Customer, Tenant, VMF, AuditLog, LicenseLevel, monitoringService, env
 let loadScopes
 let requirePlatformRole, requireCustomerAccess, requireTenantAccess, requireVmfAccess
+let requireFeatureEntitlement
 let topologyGuard
 let requireTenantEnabled
 
@@ -156,10 +165,12 @@ beforeAll(async () => {
   Tenant = models.Tenant
   VMF = models.VMF
   AuditLog = models.AuditLog
+  LicenseLevel = models.LicenseLevel
   monitoringService = (await import('../services/monitoringService.js')).default
   env = (await import('../config/env.js')).default
 
   loadScopes = (await import('../middleware/loadScopes.js')).default
+  requireFeatureEntitlement = (await import('../middleware/featureEntitlements.js')).default
 
   const authorize = await import('../middleware/authorize.js')
   requirePlatformRole = authorize.requirePlatformRole
@@ -178,6 +189,9 @@ beforeEach(() => {
   Tenant.findById = jest.fn()
   VMF.findById = jest.fn()
   VMF.countByTenant = jest.fn()
+  LicenseLevel.findById = jest.fn().mockReturnValue({
+    select: jest.fn().mockResolvedValue(makeFakeLicenseLevel()),
+  })
   AuditLog.createLog = jest.fn(async () => ({}))
   monitoringService.resetForTests()
 })
@@ -1027,6 +1041,119 @@ describe('requireVmfAccess', () => {
     expect(res.body.error.details?.reason).toBe('CUSTOMER_INACTIVE')
     expect(res.body.error.details?.customerStatus).toBe('DISABLED')
     expect(next).not.toHaveBeenCalled()
+  })
+})
+
+/* ================================================================== */
+/*  requireFeatureEntitlement                                         */
+/* ================================================================== */
+
+describe('requireFeatureEntitlement', () => {
+  test('returns 500 when scopes are missing', async () => {
+    const req = makeReq({ scopes: undefined })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireFeatureEntitlement('VMF')(req, res, next)
+
+    expect(res.statusCode).toBe(500)
+    expect(res.body.error.code).toBe('SERVER_ERROR')
+    expect(next).not.toHaveBeenCalled()
+  })
+
+  test('bypasses entitlement checks for SUPER_ADMIN by default', async () => {
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID },
+      scopes: {
+        platformRoles: ['SUPER_ADMIN'],
+        memberships: [],
+        tenantMemberships: [],
+        vmfGrants: [],
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireFeatureEntitlement('VMF')(req, res, next)
+
+    expect(next).toHaveBeenCalled()
+  })
+
+  test('grants access when customer licence includes feature', async () => {
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID },
+      scopes: {
+        platformRoles: [],
+        memberships: [{ customerId: CUSTOMER_ID, roles: ['CUSTOMER_ADMIN'] }],
+        tenantMemberships: [],
+        vmfGrants: [],
+        customer: makeFakeCustomer({ licenseLevelId: '907f1f77bcf86cd799439066', entitlements: [] }),
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireFeatureEntitlement('VMF')(req, res, next)
+
+    expect(next).toHaveBeenCalled()
+    expect(req.scopes.customerFeatureEntitlements).toEqual(['VMF', 'DEALS'])
+    expect(req.scopes.customerEntitlementSource).toBe('LICENSE_LEVEL')
+  })
+
+  test('returns 403 when customer licence does not include feature', async () => {
+    LicenseLevel.findById.mockReturnValue({
+      select: jest.fn().mockResolvedValue(
+        makeFakeLicenseLevel({ featureEntitlements: ['VMF'] }),
+      ),
+    })
+
+    const req = makeReq({
+      method: 'GET',
+      originalUrl: '/api/v1/vmfs/807f1f77bcf86cd799439055/deals',
+      params: { customerId: CUSTOMER_ID, tenantId: TENANT_ID, vmfId: VMF_ID },
+      scopes: {
+        platformRoles: [],
+        memberships: [{ customerId: CUSTOMER_ID, roles: ['CUSTOMER_ADMIN'] }],
+        tenantMemberships: [],
+        vmfGrants: [],
+        customer: makeFakeCustomer({ licenseLevelId: '907f1f77bcf86cd799439066', entitlements: [] }),
+        vmf: makeFakeVmf(),
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireFeatureEntitlement('DEALS')(req, res, next)
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body.error.code).toBe('LICENSE_FEATURE_NOT_ENABLED')
+    expect(res.body.error.details.feature).toBe('DEALS')
+    expect(AuditLog.createLog).toHaveBeenCalled()
+    expect(next).not.toHaveBeenCalled()
+  })
+
+  test('falls back to legacy unrestricted feature set when no entitlements are configured', async () => {
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID },
+      scopes: {
+        platformRoles: [],
+        memberships: [{ customerId: CUSTOMER_ID, roles: ['CUSTOMER_ADMIN'] }],
+        tenantMemberships: [],
+        vmfGrants: [],
+        customer: makeFakeCustomer({
+          licenseLevelId: null,
+          entitlements: [],
+        }),
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireFeatureEntitlement('DEALS')(req, res, next)
+
+    expect(next).toHaveBeenCalled()
+    expect(req.scopes.customerFeatureEntitlements).toEqual(['VMF', 'DEALS', 'VIEWS'])
+    expect(req.scopes.customerEntitlementSource).toBe('LEGACY_UNRESTRICTED')
   })
 })
 
