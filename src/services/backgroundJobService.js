@@ -22,6 +22,7 @@ import auditRetentionService from './auditRetentionService.js'
 import identityPlusService from './identityPlusService.js'
 import jobQueueService from './jobQueueService.js'
 import performanceCacheService from './performanceCacheService.js'
+import vmfRetentionService from './vmfRetentionService.js'
 
 const timers = new Map()
 let started = false
@@ -122,6 +123,11 @@ const runCacheWarmingJob = async () => {
   logger.info(result, 'authorization cache warming job completed')
 }
 
+const runVmfRetentionPurgeJob = async () => {
+  const result = await vmfRetentionService.purgeExpiredSoftDeletedVmfs()
+  logger.info(result, 'vmf retention purge job completed')
+}
+
 export const startBackgroundJobs = () => {
   if (!env.backgroundJobsEnabled) {
     logger.info('background jobs disabled via BACKGROUND_JOBS_ENABLED=false')
@@ -138,6 +144,7 @@ export const startBackgroundJobs = () => {
   )
   scheduleRecurring('audit-archival', env.auditArchivalIntervalMs, runAuditArchivalJob)
   scheduleRecurring('cache-warming', env.cacheWarmingIntervalMs, runCacheWarmingJob)
+  scheduleRecurring('vmf-retention-purge', env.vmfRetentionPurgeIntervalMs, runVmfRetentionPurgeJob)
 
   jobQueueService.enqueue('cache-warming-initial', runCacheWarmingJob).catch(() => {
     // Errors are logged by the queue service.
@@ -150,6 +157,7 @@ export const startBackgroundJobs = () => {
       identityPlusIntervalMs: env.identityPlusReconciliationIntervalMs,
       auditArchivalIntervalMs: env.auditArchivalIntervalMs,
       cacheWarmingIntervalMs: env.cacheWarmingIntervalMs,
+      vmfRetentionPurgeIntervalMs: env.vmfRetentionPurgeIntervalMs,
     },
     'background jobs started',
   )
@@ -177,6 +185,9 @@ export const runBackgroundJobNow = async (jobName) => {
   }
   if (jobName === 'cache-warming') {
     return jobQueueService.enqueue(jobName, runCacheWarmingJob)
+  }
+  if (jobName === 'vmf-retention-purge') {
+    return jobQueueService.enqueue(jobName, runVmfRetentionPurgeJob)
   }
   throw new Error(`Unknown background job: ${jobName}`)
 }

@@ -10,7 +10,7 @@
  * VMF-scoped routes (under /api/v1/vmfs):
  *   GET    /:vmfId                – Get single VMF
  *   PATCH  /:vmfId                – Update VMF
- *   DELETE /:vmfId                – Delete VMF (disabled/archived only)
+ *   DELETE /:vmfId                – Soft-delete VMF (disabled/archived only)
  *   POST   /:vmfId/grants         – Grant user access to VMF
  *   DELETE /:vmfId/grants/:userId – Revoke user access
  */

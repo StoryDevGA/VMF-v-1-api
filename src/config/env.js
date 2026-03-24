@@ -189,6 +189,11 @@ const env = {
   cacheWarmUserLimit: toPositiveNumber(process.env.CACHE_WARM_USER_LIMIT, 200),
   cacheWarmTenantLimit: toPositiveNumber(process.env.CACHE_WARM_TENANT_LIMIT, 200),
   cacheWarmCustomerLimit: toPositiveNumber(process.env.CACHE_WARM_CUSTOMER_LIMIT, 100),
+  vmfSoftDeleteRetentionDays: toPositiveNumber(process.env.VMF_SOFT_DELETE_RETENTION_DAYS, 30),
+  vmfRetentionPurgeIntervalMs: toPositiveNumber(
+    process.env.VMF_RETENTION_PURGE_INTERVAL_MS,
+    6 * 60 * 60 * 1000,
+  ),
   backgroundJobsEnabled: toBoolean(process.env.BACKGROUND_JOBS_ENABLED, true),
   backgroundJobConcurrency: toPositiveNumber(process.env.BACKGROUND_JOB_CONCURRENCY, 2),
   identityPlusReconciliationIntervalMs: toPositiveNumber(

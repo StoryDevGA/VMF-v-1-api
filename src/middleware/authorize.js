@@ -514,6 +514,16 @@ export const requireVmfAccess = (permission, options = {}) => async (req, res, n
       },
     })
   }
+
+  if (vmf.deletedAt) {
+    return res.status(404).json({
+      error: {
+        code: 'NOT_FOUND',
+        message: 'VMF not found.',
+        requestId: req.requestId,
+      },
+    })
+  }
   req.scopes.customer = customer
 
   if (isCustomerInactive(customer) && !allowInactiveCustomer) {

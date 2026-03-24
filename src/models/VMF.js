@@ -1,5 +1,7 @@
 import mongoose from 'mongoose'
 
+const LIFECYCLE_STATUSES = ['DRAFT', 'CANONISED', 'PUBLISHED']
+
 const vmfSchema = new mongoose.Schema({
   customerId: {
     type: mongoose.Schema.Types.ObjectId,
@@ -17,11 +19,47 @@ const vmfSchema = new mongoose.Schema({
     trim: true,
     maxlength: 255
   },
+  description: {
+    type: String,
+    trim: true,
+    maxlength: 1000,
+    default: '',
+  },
   status: {
     type: String,
     required: true,
     enum: ['ACTIVE', 'DISABLED', 'ARCHIVED'],
     default: 'ACTIVE'
+  },
+  lifecycleStatus: {
+    type: String,
+    required: true,
+    enum: LIFECYCLE_STATUSES,
+    default: 'DRAFT',
+  },
+  frameworkVersion: {
+    type: String,
+    trim: true,
+    maxlength: 100,
+    default: null,
+  },
+  versionPolicyId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'SystemVersioningPolicy',
+    default: null,
+  },
+  deletedAt: {
+    type: Date,
+    default: null,
+  },
+  purgeAfter: {
+    type: Date,
+    default: null,
+  },
+  deletedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null,
   },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
@@ -46,28 +84,38 @@ vmfSchema.index({ customerId: 1, tenantId: 1 })
 vmfSchema.index({ tenantId: 1, status: 1 })
 vmfSchema.index({ customerId: 1, tenantId: 1, status: 1, createdAt: -1 })
 vmfSchema.index({ customerId: 1, tenantId: 1, createdAt: -1 })
+vmfSchema.index({ customerId: 1, tenantId: 1, deletedAt: 1, createdAt: -1 })
+vmfSchema.index({ purgeAfter: 1, deletedAt: 1 })
 vmfSchema.index({ createdBy: 1 })
 
 // Static methods
-vmfSchema.statics.findByTenant = function(tenantId, status = null) {
+vmfSchema.statics.findByTenant = function(tenantId, status = null, options = {}) {
+  const { includeDeleted = false } = options
   const query = { tenantId }
   if (status) query.status = status
+  if (!includeDeleted) query.deletedAt = null
   return this.find(query).populate('createdBy', 'name email')
 }
 
-vmfSchema.statics.findByCustomer = function(customerId, status = null) {
+vmfSchema.statics.findByCustomer = function(customerId, status = null, options = {}) {
+  const { includeDeleted = false } = options
   const query = { customerId }
   if (status) query.status = status
+  if (!includeDeleted) query.deletedAt = null
   return this.find(query).populate('tenantId', 'name').populate('createdBy', 'name email')
 }
 
 vmfSchema.statics.countByTenant = function(tenantId, status = 'ACTIVE') {
-  return this.countDocuments({ tenantId, status })
+  return this.countDocuments({ tenantId, status, deletedAt: null })
 }
 
 // Instance methods
 vmfSchema.methods.isActive = function() {
-  return this.status === 'ACTIVE'
+  return this.status === 'ACTIVE' && !this.deletedAt
+}
+
+vmfSchema.methods.isDeleted = function() {
+  return Boolean(this.deletedAt)
 }
 
 // Pre-save validation

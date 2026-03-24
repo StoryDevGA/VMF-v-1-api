@@ -59,6 +59,7 @@ const TENANT_ID = '707f1f77bcf86cd799439033'
 const VMF_ID = '807f1f77bcf86cd799439055'
 const VMF_ID_2 = '807f1f77bcf86cd799439066'
 const DEAL_ID = '907f1f77bcf86cd799439077'
+const POLICY_ID = '917f1f77bcf86cd799439088'
 
 /* ------------------------------------------------------------------ */
 /*  Factories                                                         */
@@ -203,7 +204,13 @@ const makeFakeVmf = (overrides = {}) => ({
   customerId: CUSTOMER_ID,
   tenantId: TENANT_ID,
   name: 'VMF 1',
+  description: 'Default VMF description',
   status: 'ACTIVE',
+  lifecycleStatus: 'DRAFT',
+  frameworkVersion: '2.2',
+  versionPolicyId: POLICY_ID,
+  deletedAt: null,
+  purgeAfter: null,
   createdBy: SUPER_ADMIN_ID,
   toJSON: function () {
     return {
@@ -211,10 +218,27 @@ const makeFakeVmf = (overrides = {}) => ({
       customerId: this.customerId,
       tenantId: this.tenantId,
       name: this.name,
+      description: this.description,
       status: this.status,
+      lifecycleStatus: this.lifecycleStatus,
+      frameworkVersion: this.frameworkVersion,
+      versionPolicyId: this.versionPolicyId,
+      deletedAt: this.deletedAt,
+      purgeAfter: this.purgeAfter,
     }
   },
   save: jest.fn(async function () { return this }),
+  ...overrides,
+})
+
+const makeActivePolicy = (overrides = {}) => ({
+  _id: POLICY_ID,
+  id: POLICY_ID,
+  version: 5,
+  rules: {
+    frameworkVersion: '2.2',
+  },
+  isActive: true,
   ...overrides,
 })
 
@@ -248,7 +272,7 @@ const makeFakeDeal = (overrides = {}) => ({
 /* ------------------------------------------------------------------ */
 
 let app, request, tokenService
-let User, Customer, Tenant, VMF, Deal, AuditLog
+let User, Customer, Tenant, VMF, Deal, AuditLog, SystemVersioningPolicy
 
 beforeAll(async () => {
   const supertest = (await import('supertest')).default
@@ -263,6 +287,7 @@ beforeAll(async () => {
   VMF = models.VMF
   Deal = models.Deal
   AuditLog = models.AuditLog
+  SystemVersioningPolicy = models.SystemVersioningPolicy
 })
 
 /* ------------------------------------------------------------------ */
@@ -308,6 +333,7 @@ beforeEach(() => {
   VMF.countDocuments = jest.fn()
   VMF.countByTenant = jest.fn()
   VMF.deleteOne = jest.fn(async () => ({ deletedCount: 1 }))
+  SystemVersioningPolicy.findActive = jest.fn().mockResolvedValue(null)
   Deal.findById = jest.fn()
   Deal.find = jest.fn()
   Deal.countDocuments = jest.fn()
@@ -383,6 +409,19 @@ describe('VMF Validators', () => {
         .patch(`/api/v1/vmfs/${VMF_ID}`)
         .set('Authorization', `Bearer ${token}`)
         .send({ status: 'BOGUS' })
+
+      expect(res.status).toBe(422)
+      expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    })
+
+    test('returns 422 when lifecycleStatus is invalid', async () => {
+      const token = await getSuperAdminToken()
+      VMF.findById.mockResolvedValue(makeFakeVmf())
+
+      const res = await request
+        .patch(`/api/v1/vmfs/${VMF_ID}`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ lifecycleStatus: 'READY' })
 
       expect(res.status).toBe(422)
       expect(res.body.error.code).toBe('VALIDATION_FAILED')
@@ -585,6 +624,7 @@ describe('POST /api/v1/customers/:customerId/tenants/:tenantId/vmfs', () => {
     const token = await getSuperAdminToken()
     Tenant.findById.mockResolvedValue(makeFakeTenant())
     VMF.countByTenant.mockResolvedValue(0) // topologyGuard allows
+    SystemVersioningPolicy.findActive.mockResolvedValue(makeActivePolicy())
 
     const origSave = VMF.prototype.save
     VMF.prototype.save = jest.fn(async function () {
@@ -596,11 +636,18 @@ describe('POST /api/v1/customers/:customerId/tenants/:tenantId/vmfs', () => {
     const res = await request
       .post(`/api/v1/customers/${CUSTOMER_ID}/tenants/${TENANT_ID}/vmfs`)
       .set('Authorization', `Bearer ${token}`)
-      .send({ name: 'New VMF' })
+      .send({
+        name: 'New VMF',
+        description: 'Lifecycle-ready VMF',
+      })
 
     expect(res.status).toBe(201)
     expect(res.body.data).toBeDefined()
     expect(res.body.data.name).toBe('New VMF')
+    expect(res.body.data.description).toBe('Lifecycle-ready VMF')
+    expect(res.body.data.lifecycleStatus).toBe('DRAFT')
+    expect(res.body.data.frameworkVersion).toBe('2.2')
+    expect(res.body.data.versionPolicyId).toBe(POLICY_ID)
     expect(AuditLog.createLog).toHaveBeenCalled()
 
     VMF.prototype.save = origSave
@@ -691,6 +738,22 @@ describe('GET /api/v1/vmfs/:vmfId', () => {
 
     expect(res.status).toBe(404)
   })
+
+  test('returns 404 when VMF is soft-deleted', async () => {
+    const token = await getSuperAdminToken()
+    VMF.findById.mockResolvedValue(
+      makeFakeVmf({
+        status: 'ARCHIVED',
+        deletedAt: new Date('2026-03-01T00:00:00.000Z'),
+      }),
+    )
+
+    const res = await request
+      .get(`/api/v1/vmfs/${VMF_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(404)
+  })
 })
 
 /* ================================================================== */
@@ -728,6 +791,36 @@ describe('PATCH /api/v1/vmfs/:vmfId', () => {
     expect(vmf.save).toHaveBeenCalled()
   })
 
+  test('updates VMF lifecycle status from DRAFT to CANONISED', async () => {
+    const token = await getSuperAdminToken()
+    const vmf = makeFakeVmf({ lifecycleStatus: 'DRAFT' })
+    VMF.findById.mockResolvedValue(vmf)
+
+    const res = await request
+      .patch(`/api/v1/vmfs/${VMF_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ lifecycleStatus: 'CANONISED' })
+
+    expect(res.status).toBe(200)
+    expect(vmf.lifecycleStatus).toBe('CANONISED')
+    expect(vmf.save).toHaveBeenCalled()
+  })
+
+  test('returns 422 for invalid lifecycle regression transition', async () => {
+    const token = await getSuperAdminToken()
+    const vmf = makeFakeVmf({ lifecycleStatus: 'PUBLISHED' })
+    VMF.findById.mockResolvedValue(vmf)
+
+    const res = await request
+      .patch(`/api/v1/vmfs/${VMF_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ lifecycleStatus: 'DRAFT' })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.reason).toBe('INVALID_LIFECYCLE_TRANSITION')
+    expect(vmf.save).not.toHaveBeenCalled()
+  })
+
   test('returns 404 when VMF does not exist', async () => {
     const token = await getSuperAdminToken()
     VMF.findById.mockResolvedValue(null)
@@ -746,7 +839,7 @@ describe('PATCH /api/v1/vmfs/:vmfId', () => {
 /* ================================================================== */
 
 describe('DELETE /api/v1/vmfs/:vmfId', () => {
-  test('deletes a disabled VMF with no active deals', async () => {
+  test('soft-deletes a disabled VMF with no active deals', async () => {
     const token = await getSuperAdminToken()
     const vmf = makeFakeVmf({ status: 'DISABLED' })
     VMF.findById.mockResolvedValue(vmf)
@@ -758,7 +851,9 @@ describe('DELETE /api/v1/vmfs/:vmfId', () => {
 
     expect(res.status).toBe(200)
     expect(res.body.data.message).toContain('deleted')
-    expect(VMF.deleteOne).toHaveBeenCalled()
+    expect(vmf.save).toHaveBeenCalled()
+    expect(vmf.deletedAt).toBeDefined()
+    expect(vmf.purgeAfter).toBeDefined()
     expect(User.updateMany).toHaveBeenCalled()
     expect(AuditLog.createLog).toHaveBeenCalled()
   })
@@ -786,6 +881,24 @@ describe('DELETE /api/v1/vmfs/:vmfId', () => {
 
     expect(res.status).toBe(422)
     expect(res.body.error.message).toContain('active deal')
+  })
+
+  test('returns 404 when VMF is already soft-deleted', async () => {
+    const token = await getSuperAdminToken()
+    VMF.findById.mockResolvedValue(
+      makeFakeVmf({
+        status: 'ARCHIVED',
+        deletedAt: new Date('2026-03-01T00:00:00.000Z'),
+        purgeAfter: new Date('2026-03-31T00:00:00.000Z'),
+      }),
+    )
+
+    const res = await request
+      .delete(`/api/v1/vmfs/${VMF_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(404)
+    expect(res.body.error.code).toBe('NOT_FOUND')
   })
 
   test('returns 404 when VMF does not exist', async () => {

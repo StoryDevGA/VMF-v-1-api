@@ -27,6 +27,11 @@ const createVmfSchema = z.object({
     .trim()
     .min(1, 'Name must not be empty')
     .max(255, 'Name must be 255 characters or fewer'),
+  description: z
+    .string()
+    .trim()
+    .max(1000, 'Description must be 1000 characters or fewer')
+    .optional(),
 })
 
 const updateVmfSchema = z.object({
@@ -36,9 +41,19 @@ const updateVmfSchema = z.object({
     .min(1, 'Name must not be empty')
     .max(255, 'Name must be 255 characters or fewer')
     .optional(),
+  description: z
+    .string()
+    .trim()
+    .max(1000, 'Description must be 1000 characters or fewer')
+    .optional(),
   status: z
     .enum(['ACTIVE', 'DISABLED', 'ARCHIVED'], {
       invalid_type_error: 'Status must be ACTIVE, DISABLED, or ARCHIVED',
+    })
+    .optional(),
+  lifecycleStatus: z
+    .enum(['DRAFT', 'CANONISED', 'PUBLISHED'], {
+      invalid_type_error: 'lifecycleStatus must be DRAFT, CANONISED, or PUBLISHED',
     })
     .optional(),
 }).refine(

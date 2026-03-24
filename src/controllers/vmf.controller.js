@@ -10,17 +10,18 @@
  *   VMF-scoped (requireVmfAccess):
  *     GET    /api/v1/vmfs/:vmfId                  Get single VMF
  *     PATCH  /api/v1/vmfs/:vmfId                  Update VMF
- *     DELETE /api/v1/vmfs/:vmfId                  Delete VMF (no active deals)
+ *     DELETE /api/v1/vmfs/:vmfId                  Soft-delete VMF (30-day retention)
  *     POST   /api/v1/vmfs/:vmfId/grants           Grant user access to VMF
  *     DELETE /api/v1/vmfs/:vmfId/grants/:userId   Revoke user access
  */
 
-import { Customer, Tenant, VMF, Deal, User } from '../models/index.js'
+import { Customer, Tenant, VMF, Deal, User, SystemVersioningPolicy } from '../models/index.js'
 import auditService from '../services/auditService.js'
 import customerGovernanceService from '../services/customerGovernanceService.js'
 import logger from '../config/logger.js'
 import performanceCacheService from '../services/performanceCacheService.js'
 import monitoringService from '../services/monitoringService.js'
+import env from '../config/env.js'
 
 const buildGovernanceErrorResponse = (req, err) => ({
   error: {
@@ -30,6 +31,73 @@ const buildGovernanceErrorResponse = (req, err) => ({
     requestId: req.requestId,
   },
 })
+
+const VMF_LIFECYCLE_TRANSITIONS = Object.freeze({
+  DRAFT: ['DRAFT', 'CANONISED'],
+  CANONISED: ['CANONISED', 'PUBLISHED'],
+  PUBLISHED: ['PUBLISHED'],
+})
+
+const resolveFrameworkVersionFromPolicy = (policy) => {
+  if (!policy) return null
+
+  const rules = policy.rules || {}
+  const candidate =
+    rules.frameworkVersion
+    || rules.vmfFrameworkVersion
+    || rules.defaultFrameworkVersion
+    || rules.version
+
+  if (candidate !== undefined && candidate !== null && String(candidate).trim()) {
+    return String(candidate).trim()
+  }
+
+  if (policy.version !== undefined && policy.version !== null) {
+    return String(policy.version)
+  }
+
+  return null
+}
+
+const resolveVmfVersionSnapshot = async () => {
+  if (typeof SystemVersioningPolicy.findActive !== 'function') {
+    return {
+      frameworkVersion: null,
+      versionPolicyId: null,
+    }
+  }
+
+  try {
+    const activePolicy = await SystemVersioningPolicy.findActive()
+    if (!activePolicy) {
+      return {
+        frameworkVersion: null,
+        versionPolicyId: null,
+      }
+    }
+
+    return {
+      frameworkVersion: resolveFrameworkVersionFromPolicy(activePolicy),
+      versionPolicyId: activePolicy._id,
+    }
+  } catch (err) {
+    logger.warn({ err }, 'vmf.controller - failed to resolve active versioning policy')
+    return {
+      frameworkVersion: null,
+      versionPolicyId: null,
+    }
+  }
+}
+
+const isLifecycleTransitionAllowed = (from, to) =>
+  (VMF_LIFECYCLE_TRANSITIONS[from] || []).includes(to)
+
+const buildVmfDeletionWindow = () => {
+  const deletedAt = new Date()
+  const retentionDays = Math.max(1, Number(env.vmfSoftDeleteRetentionDays || 30))
+  const purgeAfter = new Date(deletedAt.getTime() + retentionDays * 24 * 60 * 60 * 1000)
+  return { deletedAt, purgeAfter, retentionDays }
+}
 
 /* ------------------------------------------------------------------ */
 /*  GET /api/v1/customers/:customerId/tenants/:tenantId/vmfs          */
@@ -45,14 +113,28 @@ export const listVmfs = async (req, res, next) => {
     const { customerId, tenantId } = req.params
     const {
       status,
+      lifecycleStatus,
       q,
+      includeDeleted,
       page = 1,
       pageSize = 20,
     } = req.query
 
     const filter = { customerId, tenantId }
     if (status) filter.status = status
-    if (q) filter.name = { $regex: q, $options: 'i' }
+    if (lifecycleStatus) filter.lifecycleStatus = lifecycleStatus
+
+    const includeDeletedRows = includeDeleted === true || includeDeleted === 'true'
+    if (!includeDeletedRows) {
+      filter.deletedAt = null
+    }
+
+    if (q) {
+      filter.$or = [
+        { name: { $regex: q, $options: 'i' } },
+        { description: { $regex: q, $options: 'i' } },
+      ]
+    }
 
     const pageNum = Math.max(1, parseInt(page, 10) || 1)
     const limit = Math.min(100, Math.max(1, parseInt(pageSize, 10) || 20))
@@ -136,11 +218,17 @@ export const createVmf = async (req, res, next) => {
       currentVmfCount,
     })
 
+    const { frameworkVersion, versionPolicyId } = await resolveVmfVersionSnapshot()
+
     const vmf = new VMF({
       customerId,
       tenantId,
       name: req.body.name,
+      description: req.body.description || '',
       status: 'ACTIVE',
+      lifecycleStatus: 'DRAFT',
+      frameworkVersion,
+      versionPolicyId,
       createdBy: actorUserId,
     })
 
@@ -151,7 +239,13 @@ export const createVmf = async (req, res, next) => {
       resourceType: 'VMF',
       resourceId: vmf._id,
       scope: { customerId, tenantId, vmfId: vmf._id },
-      diff: { name: req.body.name },
+      diff: {
+        name: req.body.name,
+        description: vmf.description,
+        lifecycleStatus: vmf.lifecycleStatus,
+        frameworkVersion: vmf.frameworkVersion,
+        versionPolicyId: vmf.versionPolicyId,
+      },
     })
 
     logger.info(
@@ -222,6 +316,16 @@ export const getVmf = async (req, res, next) => {
       })
     }
 
+    if (vmf.deletedAt) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: 'VMF not found.',
+          requestId: req.requestId,
+        },
+      })
+    }
+
     return res.status(200).json({
       data: vmf.toJSON ? vmf.toJSON() : vmf,
       meta: { requestId: req.requestId, version: 'v1' },
@@ -252,7 +356,16 @@ export const updateVmf = async (req, res, next) => {
       })
     }
 
-    const actorUserId = req.context?.userId || req.userId
+    if (vmf.deletedAt) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: 'VMF not found.',
+          requestId: req.requestId,
+        },
+      })
+    }
+
     const diff = {}
 
     if (req.body.name !== undefined) {
@@ -260,9 +373,37 @@ export const updateVmf = async (req, res, next) => {
       vmf.name = req.body.name
     }
 
+    if (req.body.description !== undefined) {
+      diff.description = { from: vmf.description || '', to: req.body.description }
+      vmf.description = req.body.description
+    }
+
     if (req.body.status !== undefined) {
       diff.status = { from: vmf.status, to: req.body.status }
       vmf.status = req.body.status
+    }
+
+    if (req.body.lifecycleStatus !== undefined) {
+      const currentLifecycle = vmf.lifecycleStatus || 'DRAFT'
+      const nextLifecycle = req.body.lifecycleStatus
+
+      if (!isLifecycleTransitionAllowed(currentLifecycle, nextLifecycle)) {
+        return res.status(422).json({
+          error: {
+            code: 'VALIDATION_FAILED',
+            message: `Invalid lifecycle transition from '${currentLifecycle}' to '${nextLifecycle}'.`,
+            details: {
+              reason: 'INVALID_LIFECYCLE_TRANSITION',
+              from: currentLifecycle,
+              to: nextLifecycle,
+            },
+            requestId: req.requestId,
+          },
+        })
+      }
+
+      diff.lifecycleStatus = { from: currentLifecycle, to: nextLifecycle }
+      vmf.lifecycleStatus = nextLifecycle
     }
 
     await vmf.save()
@@ -289,12 +430,12 @@ export const updateVmf = async (req, res, next) => {
 /* ------------------------------------------------------------------ */
 
 /**
- * Delete a VMF.
+ * Soft-delete a VMF.
  *
  * Pre-conditions:
  *   - VMF must be DISABLED or ARCHIVED (cannot delete active VMFs)
- *   - VMF must have no active deals (enforced by model pre-hook, but
- *     we also check here for a friendlier error message)
+ *   - VMF must have no active deals
+ *   - VMF is retained for a fixed retention window before purge
  */
 export const deleteVmf = async (req, res, next) => {
   try {
@@ -305,6 +446,21 @@ export const deleteVmf = async (req, res, next) => {
         error: {
           code: 'NOT_FOUND',
           message: 'VMF not found.',
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    if (vmf.deletedAt) {
+      return res.status(422).json({
+        error: {
+          code: 'VALIDATION_FAILED',
+          message: 'VMF is already scheduled for deletion.',
+          details: {
+            reason: 'VMF_ALREADY_SOFT_DELETED',
+            deletedAt: vmf.deletedAt,
+            purgeAfter: vmf.purgeAfter,
+          },
           requestId: req.requestId,
         },
       })
@@ -333,8 +489,9 @@ export const deleteVmf = async (req, res, next) => {
     }
 
     const actorUserId = req.context?.userId || req.userId
+    const { deletedAt, purgeAfter, retentionDays } = buildVmfDeletionWindow()
 
-    // Archive remaining deals (non-active, e.g. already archived — idempotent)
+    // Archive all deals for this VMF.
     await Deal.updateMany(
       { vmfId: vmf._id },
       { $set: { status: 'ARCHIVED' } },
@@ -347,23 +504,43 @@ export const deleteVmf = async (req, res, next) => {
     )
     await performanceCacheService.invalidateAllUserPermissions()
 
-    await VMF.deleteOne({ _id: vmf._id })
+    vmf.status = 'ARCHIVED'
+    vmf.deletedAt = deletedAt
+    vmf.purgeAfter = purgeAfter
+    vmf.deletedBy = actorUserId || null
+    await vmf.save()
 
     await auditService.logFromRequest(req, {
       action: 'VMF_DELETED',
       resourceType: 'VMF',
       resourceId: vmf._id,
       scope: { customerId: vmf.customerId, tenantId: vmf.tenantId, vmfId: vmf._id },
-      diff: { name: vmf.name },
+      diff: {
+        name: vmf.name,
+        deletedAt,
+        purgeAfter,
+        retentionDays,
+        mode: 'SOFT_DELETE',
+      },
     })
 
     logger.info(
-      { vmfId: vmf._id, customerId: vmf.customerId, tenantId: vmf.tenantId },
-      'vmf.controller — VMF deleted',
+      {
+        vmfId: vmf._id,
+        customerId: vmf.customerId,
+        tenantId: vmf.tenantId,
+        purgeAfter,
+      },
+      'vmf.controller — VMF soft-deleted and scheduled for purge',
     )
 
     return res.status(200).json({
-      data: { message: `VMF '${vmf.name}' has been deleted.` },
+      data: {
+        message: `VMF '${vmf.name}' has been deleted and scheduled for purge.`,
+        deletedAt,
+        purgeAfter,
+        retentionDays,
+      },
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
