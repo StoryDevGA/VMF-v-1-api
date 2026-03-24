@@ -33,6 +33,11 @@ export const AUDIT_ACTIONS = Object.freeze({
   // License level
   LICENSE_LEVEL_CREATED: 'LICENSE_LEVEL_CREATED',
   LICENSE_LEVEL_UPDATED: 'LICENSE_LEVEL_UPDATED',
+  // Role
+  ROLE_CREATED: 'ROLE_CREATED',
+  ROLE_UPDATED: 'ROLE_UPDATED',
+  ROLE_DELETED: 'ROLE_DELETED',
+  ROLE_MUTATION_BLOCKED: 'ROLE_MUTATION_BLOCKED',
   // Tenant
   TENANT_CREATED: 'TENANT_CREATED',
   TENANT_UPDATED: 'TENANT_UPDATED',
@@ -100,6 +105,7 @@ export const RESOURCE_TYPES = Object.freeze({
   SystemVersioningPolicy: 'SystemVersioningPolicy',
   AuditLog: 'AuditLog',
   LicenseLevel: 'LicenseLevel',
+  Role: 'Role',
 })
 
 /* ------------------------------------------------------------------ */

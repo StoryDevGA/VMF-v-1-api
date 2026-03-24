@@ -1,0 +1,357 @@
+import { Role, User } from '../models/index.js'
+import auditService from '../services/auditService.js'
+
+const DUPLICATE_ROLE_KEY_MESSAGE = 'A role with this key already exists.'
+const SYSTEM_ROLE_MUTATION_MESSAGE = 'System roles are protected and cannot be modified.'
+const ROLE_IN_USE_MESSAGE = 'Role cannot be deleted while assigned to users.'
+
+const normalizeRoleKey = (value) =>
+  String(value || '')
+    .normalize('NFKC')
+    .trim()
+    .toUpperCase()
+
+const isDuplicateRoleKeyError = (err) =>
+  err?.code === 11000 && err?.keyPattern?.key
+
+const arrayEquals = (left = [], right = []) => (
+  Array.isArray(left)
+  && Array.isArray(right)
+  && left.length === right.length
+  && left.every((value, index) => value === right[index])
+)
+
+const logBlockedSystemMutation = async (req, role, operation, attemptedFields = []) => {
+  await auditService.logFromRequest(req, {
+    action: auditService.AUDIT_ACTIONS.ROLE_MUTATION_BLOCKED,
+    resourceType: auditService.RESOURCE_TYPES.Role,
+    resourceId: role._id,
+    scope: {},
+    diff: {
+      reason: 'SYSTEM_ROLE_PROTECTED',
+      operation,
+      attemptedFields,
+      roleKey: role.key,
+    },
+  })
+}
+
+export const listRoles = async (req, res, next) => {
+  try {
+    const {
+      q,
+      scope,
+      isSystem,
+      isActive,
+      page = 1,
+      pageSize = 20,
+    } = req.query
+
+    const filter = {}
+
+    if (q) {
+      filter.$or = [
+        { key: { $regex: q, $options: 'i' } },
+        { name: { $regex: q, $options: 'i' } },
+        { description: { $regex: q, $options: 'i' } },
+      ]
+    }
+
+    if (scope) {
+      filter.scope = scope
+    }
+    if (typeof isSystem === 'boolean') {
+      filter.isSystem = isSystem
+    }
+    if (typeof isActive === 'boolean') {
+      filter.isActive = isActive
+    }
+
+    const pageNum = Math.max(1, Number(page) || 1)
+    const limit = Math.min(100, Math.max(1, Number(pageSize) || 20))
+    const skip = (pageNum - 1) * limit
+
+    const [items, total] = await Promise.all([
+      Role.find(filter)
+        .sort({ isSystem: -1, scope: 1, name: 1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Role.countDocuments(filter),
+    ])
+
+    const normalizedItems = items.map((item) => {
+      const { _id, __v, ...rest } = item
+      return {
+        id: _id?.toString?.() || _id,
+        ...rest,
+      }
+    })
+
+    return res.status(200).json({
+      data: normalizedItems,
+      meta: {
+        page: pageNum,
+        pageSize: limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+        requestId: req.requestId,
+        version: 'v1',
+      },
+    })
+  } catch (err) {
+    next(err)
+  }
+}
+
+export const createRole = async (req, res, next) => {
+  try {
+    const key = normalizeRoleKey(req.body.key)
+    const existingRole = await Role.findOne({ key }).select('_id')
+
+    if (existingRole) {
+      return res.status(409).json({
+        error: {
+          code: 'CONFLICT',
+          message: DUPLICATE_ROLE_KEY_MESSAGE,
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    const role = new Role({
+      ...req.body,
+      key,
+      isSystem: false,
+    })
+
+    await role.save()
+
+    await auditService.logFromRequest(req, {
+      action: auditService.AUDIT_ACTIONS.ROLE_CREATED,
+      resourceType: auditService.RESOURCE_TYPES.Role,
+      resourceId: role._id,
+      scope: {},
+      diff: {
+        key: role.key,
+        name: role.name,
+        description: role.description,
+        scope: role.scope,
+        permissions: role.permissions,
+        isSystem: role.isSystem,
+        isActive: role.isActive,
+      },
+    })
+
+    return res.status(201).json({
+      data: role.toJSON(),
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (isDuplicateRoleKeyError(err)) {
+      return res.status(409).json({
+        error: {
+          code: 'CONFLICT',
+          message: DUPLICATE_ROLE_KEY_MESSAGE,
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    if (err?.name === 'ValidationError') {
+      return res.status(422).json({
+        error: {
+          code: 'VALIDATION_FAILED',
+          message: err.message,
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    next(err)
+  }
+}
+
+export const getRole = async (req, res, next) => {
+  try {
+    const role = await Role.findById(req.params.roleId)
+
+    if (!role) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: 'Role not found.',
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    return res.status(200).json({
+      data: role.toJSON(),
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    next(err)
+  }
+}
+
+export const updateRole = async (req, res, next) => {
+  try {
+    const role = await Role.findById(req.params.roleId)
+
+    if (!role) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: 'Role not found.',
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    if (role.isSystem) {
+      await logBlockedSystemMutation(req, role, 'update', Object.keys(req.body))
+      return res.status(403).json({
+        error: {
+          code: 'FORBIDDEN',
+          message: SYSTEM_ROLE_MUTATION_MESSAGE,
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    const diff = {}
+    const fields = ['name', 'description', 'scope', 'permissions', 'isActive']
+    for (const field of fields) {
+      if (req.body[field] === undefined) continue
+
+      const previousValue = role[field]
+      const nextValue = req.body[field]
+
+      if (Array.isArray(previousValue) && Array.isArray(nextValue)) {
+        if (arrayEquals(previousValue, nextValue)) continue
+      } else if (previousValue === nextValue) {
+        continue
+      }
+
+      diff[field] = { from: previousValue, to: nextValue }
+      role[field] = nextValue
+    }
+
+    await role.save()
+
+    await auditService.logFromRequest(req, {
+      action: auditService.AUDIT_ACTIONS.ROLE_UPDATED,
+      resourceType: auditService.RESOURCE_TYPES.Role,
+      resourceId: role._id,
+      scope: {},
+      diff,
+    })
+
+    return res.status(200).json({
+      data: role.toJSON(),
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.name === 'ValidationError') {
+      return res.status(422).json({
+        error: {
+          code: 'VALIDATION_FAILED',
+          message: err.message,
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    next(err)
+  }
+}
+
+export const deleteRole = async (req, res, next) => {
+  try {
+    const role = await Role.findById(req.params.roleId)
+
+    if (!role) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: 'Role not found.',
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    if (role.isSystem) {
+      await logBlockedSystemMutation(req, role, 'delete')
+      return res.status(403).json({
+        error: {
+          code: 'FORBIDDEN',
+          message: SYSTEM_ROLE_MUTATION_MESSAGE,
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    const assignedUserCount = await User.countDocuments({
+      $or: [
+        { memberships: { $elemMatch: { roles: role.key } } },
+        { tenantMemberships: { $elemMatch: { roles: role.key } } },
+      ],
+    })
+
+    if (assignedUserCount > 0) {
+      await auditService.logFromRequest(req, {
+        action: auditService.AUDIT_ACTIONS.ROLE_MUTATION_BLOCKED,
+        resourceType: auditService.RESOURCE_TYPES.Role,
+        resourceId: role._id,
+        scope: {},
+        diff: {
+          reason: 'ROLE_IN_USE',
+          operation: 'delete',
+          roleKey: role.key,
+          assignedUserCount,
+        },
+      })
+
+      return res.status(409).json({
+        error: {
+          code: 'CONFLICT',
+          message: ROLE_IN_USE_MESSAGE,
+          details: {
+            reason: 'ROLE_IN_USE',
+            roleKey: role.key,
+            assignedUserCount,
+          },
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    await Role.deleteOne({ _id: role._id })
+
+    await auditService.logFromRequest(req, {
+      action: auditService.AUDIT_ACTIONS.ROLE_DELETED,
+      resourceType: auditService.RESOURCE_TYPES.Role,
+      resourceId: role._id,
+      scope: {},
+      diff: {
+        key: role.key,
+        name: role.name,
+        description: role.description,
+        scope: role.scope,
+        permissions: role.permissions,
+      },
+    })
+
+    return res.status(200).json({
+      data: {
+        id: role.id || role._id.toString(),
+        key: role.key,
+        message: 'Role deleted successfully.',
+      },
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    next(err)
+  }
+}

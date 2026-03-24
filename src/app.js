@@ -17,6 +17,7 @@ import invitationRoutes from './routes/invitations.routes.js'
 import systemVersioningPolicyRoutes from './routes/systemVersioningPolicy.routes.js'
 import superAdminAuditRoutes from './routes/superAdminAudit.routes.js'
 import licenseLevelRoutes from './routes/licenseLevels.routes.js'
+import roleRoutes from './routes/roles.routes.js'
 import onboardingRoutes from './routes/onboarding.routes.js'
 import customerRoutes from './routes/customers.routes.js'
 import { customerTenantRouter, tenantRouter } from './routes/tenants.routes.js'
@@ -94,6 +95,7 @@ if (env.governanceLicenseLevelsEnabled) {
 } else {
   logger.warn('GOVERNANCE_LICENSE_LEVELS_ENABLED=false - licence level routes are disabled')
 }
+app.use('/api/v1/super-admin/roles', roleRoutes)
 
 if (env.governanceExternalOnboardingEnabled) {
   app.use('/api/v1/super-admin/customers', onboardingRoutes)

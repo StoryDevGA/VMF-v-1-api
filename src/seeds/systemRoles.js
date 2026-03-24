@@ -4,6 +4,7 @@ export const systemRoles = [
   {
     key: 'SUPER_ADMIN',
     name: 'Super Administrator',
+    description: 'Platform-level administrator with full customer and governance control.',
     scope: 'PLATFORM',
     permissions: [
       'PLATFORM_MANAGE',
@@ -20,6 +21,7 @@ export const systemRoles = [
   {
     key: 'CUSTOMER_ADMIN',
     name: 'Customer Administrator', 
+    description: 'Customer-scoped administrator for users, tenants, VMFs, and audits.',
     scope: 'CUSTOMER',
     permissions: [
       'CUSTOMER_VIEW',
@@ -41,6 +43,7 @@ export const systemRoles = [
   {
     key: 'TENANT_ADMIN',
     name: 'Tenant Administrator',
+    description: 'Tenant-scoped administrator for VMF and Deal operations.',
     scope: 'TENANT', 
     permissions: [
       'TENANT_VIEW',
@@ -58,6 +61,7 @@ export const systemRoles = [
   {
     key: 'USER',
     name: 'Standard User',
+    description: 'Standard VMF participant with deal collaboration permissions.',
     scope: 'VMF',
     permissions: [
       'VMF_VIEW',

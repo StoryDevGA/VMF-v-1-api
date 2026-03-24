@@ -16,6 +16,12 @@ const roleSchema = new mongoose.Schema({
     trim: true,
     maxlength: 255
   },
+  description: {
+    type: String,
+    trim: true,
+    maxlength: 1000,
+    default: ''
+  },
   scope: {
     type: String,
     required: true,
@@ -108,7 +114,7 @@ roleSchema.pre('save', function(next) {
   }
   
   // Ensure permissions are uppercase
-  this.permissions = this.permissions.map(p => p.toUpperCase())
+  this.permissions = [...new Set(this.permissions.map(p => p.toUpperCase()))]
   
   next()
 })
