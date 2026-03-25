@@ -37,6 +37,7 @@ import {
   deleteUser,
   resendInvitation,
 } from '../controllers/user.controller.js'
+import { listAssignableRoles } from '../controllers/role.controller.js'
 
 /* ------------------------------------------------------------------ */
 /*  Customer-scoped router: /api/v1/customers/:customerId/users       */
@@ -63,6 +64,12 @@ customerUserRouter.post(
   userManagementRateLimit,
   validateCreateUser,
   createUser,
+)
+customerUserRouter.get(
+  '/assignable-roles',
+  requireCustomerAccess({ roles: ['CUSTOMER_ADMIN'] }),
+  requireCustomerActive(),
+  listAssignableRoles,
 )
 customerUserRouter.get(
   '/:userId',

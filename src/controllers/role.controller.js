@@ -4,6 +4,7 @@ import auditService from '../services/auditService.js'
 const DUPLICATE_ROLE_KEY_MESSAGE = 'A role with this key already exists.'
 const SYSTEM_ROLE_MUTATION_MESSAGE = 'System roles are protected and cannot be modified.'
 const ROLE_IN_USE_MESSAGE = 'Role cannot be deleted while assigned to users.'
+const RESERVED_ASSIGNABLE_ROLE_KEYS = Object.freeze(['CUSTOMER_ADMIN', 'SUPER_ADMIN'])
 
 const normalizeRoleKey = (value) =>
   String(value || '')
@@ -20,6 +21,13 @@ const arrayEquals = (left = [], right = []) => (
   && left.length === right.length
   && left.every((value, index) => value === right[index])
 )
+
+const mapAssignableRole = (role) => ({
+  key: role.key,
+  name: role.name,
+  isActive: Boolean(role.isActive),
+  isSystem: Boolean(role.isSystem),
+})
 
 const logBlockedSystemMutation = async (req, role, operation, attemptedFields = []) => {
   await auditService.logFromRequest(req, {
@@ -95,6 +103,29 @@ export const listRoles = async (req, res, next) => {
         pageSize: limit,
         total,
         totalPages: Math.ceil(total / limit),
+        requestId: req.requestId,
+        version: 'v1',
+      },
+    })
+  } catch (err) {
+    next(err)
+  }
+}
+
+export const listAssignableRoles = async (req, res, next) => {
+  try {
+    const roles = await Role.find({
+      isActive: true,
+      key: { $nin: RESERVED_ASSIGNABLE_ROLE_KEYS },
+    })
+      .sort({ isSystem: -1, name: 1, key: 1 })
+      .lean()
+
+    return res.status(200).json({
+      data: roles.map(mapAssignableRole),
+      meta: {
+        customerId: req.params.customerId,
+        total: roles.length,
         requestId: req.requestId,
         version: 'v1',
       },

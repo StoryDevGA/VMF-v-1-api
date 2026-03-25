@@ -205,7 +205,7 @@ const makeFakeInvitation = (overrides = {}) => ({
 /* ------------------------------------------------------------------ */
 
 let app, request, tokenService
-let User, Customer, Tenant, AuditLog, Invitation
+let User, Customer, Tenant, Role, AuditLog, Invitation
 let identityPlusService
 
 beforeAll(async () => {
@@ -219,6 +219,7 @@ beforeAll(async () => {
   User = models.User
   Customer = models.Customer
   Tenant = models.Tenant
+  Role = models.Role
   AuditLog = models.AuditLog
   Invitation = models.Invitation
 })
@@ -272,6 +273,7 @@ beforeEach(() => {
   Tenant.find = jest.fn()
   Tenant.countDocuments = jest.fn()
   Tenant.updateMany = jest.fn(async () => ({ modifiedCount: 0 }))
+  Role.find = jest.fn()
   AuditLog.createLog = jest.fn(async () => ({}))
   Invitation.findOne = jest.fn(() => ({
     select: jest.fn(() => ({
@@ -2348,5 +2350,96 @@ describe('Role assignment during user create', () => {
     expect(res.status).toBe(409)
     expect(res.body.error.code).toBe('CONFLICT')
     expect(res.body.error.details?.reason).toBe('CANONICAL_ADMIN_EXISTS')
+  })
+})
+
+describe('Assignable role catalogue', () => {
+  const buildRoleFindChain = (rows) => ({
+    sort: jest.fn().mockReturnValue({
+      lean: jest.fn().mockResolvedValue(rows),
+    }),
+  })
+
+  test('returns active non-reserved roles for a customer admin', async () => {
+    const token = await getCustomerAdminToken()
+    Role.find.mockReturnValue(buildRoleFindChain([
+      { key: 'TENANT_ADMIN', name: 'Tenant Administrator', isActive: true, isSystem: true },
+      { key: 'USER', name: 'Standard User', isActive: true, isSystem: true },
+      { key: 'VMF_CREATOR', name: 'VMF Creator', isActive: true, isSystem: false },
+    ]))
+
+    const res = await request
+      .get(`/api/v1/customers/${CUSTOMER_ID}/users/assignable-roles`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(Role.find).toHaveBeenCalledWith({
+      isActive: true,
+      key: { $nin: ['CUSTOMER_ADMIN', 'SUPER_ADMIN'] },
+    })
+    expect(res.body.data).toEqual([
+      { key: 'TENANT_ADMIN', name: 'Tenant Administrator', isActive: true, isSystem: true },
+      { key: 'USER', name: 'Standard User', isActive: true, isSystem: true },
+      { key: 'VMF_CREATOR', name: 'VMF Creator', isActive: true, isSystem: false },
+    ])
+    expect(res.body.meta.customerId).toBe(CUSTOMER_ID)
+    expect(res.body.meta.total).toBe(3)
+  })
+
+  test('allows a super admin to read the customer-scoped assignable role catalogue', async () => {
+    const token = await getSuperAdminToken()
+    Role.find.mockReturnValue(buildRoleFindChain([
+      { key: 'USER', name: 'Standard User', isActive: true, isSystem: true },
+    ]))
+
+    const res = await request
+      .get(`/api/v1/customers/${CUSTOMER_ID}/users/assignable-roles`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toEqual([
+      { key: 'USER', name: 'Standard User', isActive: true, isSystem: true },
+    ])
+  })
+
+  test('rejects a non-admin user from reading the assignable role catalogue', async () => {
+    const token = await getRegularUserToken()
+
+    const res = await request
+      .get(`/api/v1/customers/${CUSTOMER_ID}/users/assignable-roles`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('FORBIDDEN')
+    expect(Role.find).not.toHaveBeenCalled()
+  })
+
+  test('rejects a customer admin from another customer', async () => {
+    const otherCustomerAdminId = '507f1f77bcf86cd799439016'
+    const otherCustomerId = '607f1f77bcf86cd799439023'
+    const otherCustomerAdmin = makeCustomerAdmin({
+      _id: otherCustomerAdminId,
+      id: otherCustomerAdminId,
+      email: 'other.admin@acme.com',
+      memberships: [{ customerId: otherCustomerId, roles: ['CUSTOMER_ADMIN'] }],
+    })
+    const tokens = await tokenService.generateTokens(otherCustomerAdmin)
+
+    User.findById.mockImplementation((id) => {
+      if (id === otherCustomerAdminId) return Promise.resolve(otherCustomerAdmin)
+      if (id === SUPER_ADMIN_ID) return Promise.resolve(makeSuperAdmin())
+      if (id === CUSTOMER_ADMIN_ID) return Promise.resolve(makeCustomerAdmin())
+      if (id === TENANT_ADMIN_ID) return Promise.resolve(makeTenantAdmin())
+      if (id === REGULAR_USER_ID) return Promise.resolve(makeRegularUser())
+      return Promise.resolve(null)
+    })
+
+    const res = await request
+      .get(`/api/v1/customers/${CUSTOMER_ID}/users/assignable-roles`)
+      .set('Authorization', `Bearer ${tokens.accessToken}`)
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('FORBIDDEN')
+    expect(Role.find).not.toHaveBeenCalled()
   })
 })
