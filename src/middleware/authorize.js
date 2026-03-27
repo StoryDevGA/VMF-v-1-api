@@ -250,6 +250,10 @@ export const requirePlatformRole = (role) => (req, res, next) => {
  *   Allow any customer membership when the resolved customer topology is
  *   `SINGLE_TENANT`. Intended for read-only customer-scoped routes that
  *   need the default single-tenant context.
+ * @param {boolean}  [options.allowTenantMember]
+ *   Allow any user who has at least one tenantMembership for the customer
+ *   (i.e. accessibleTenantIds.length > 0). Intended for read-only
+ *   customer-scoped routes where tenant members need catalogue access.
  */
 export const requireCustomerAccess = (options = {}) => async (req, res, next) => {
   if (!ensureScopes(req, res)) return
@@ -258,6 +262,7 @@ export const requireCustomerAccess = (options = {}) => async (req, res, next) =>
     roles = [],
     allowPlatform = true,
     allowTenantAdmin = false,
+    allowTenantMember = false,
     allowCustomerMembershipWhenSingleTenant = false,
     allowInactiveCustomer = false,
   } = options
@@ -315,8 +320,9 @@ export const requireCustomerAccess = (options = {}) => async (req, res, next) =>
     customerId,
   })
   const hasTenantAdminBypass = allowTenantAdmin && roleContext.isTenantAdmin
+  const hasTenantMemberBypass = allowTenantMember && roleContext.accessibleTenantIds.length > 0
 
-  if (!roleContext.membership && !hasTenantAdminBypass) {
+  if (!roleContext.membership && !hasTenantAdminBypass && !hasTenantMemberBypass) {
     logger.warn(
       { userId: req.userId, customerId, requestId: req.requestId },
       'requireCustomerAccess — no membership',
@@ -344,7 +350,7 @@ export const requireCustomerAccess = (options = {}) => async (req, res, next) =>
   // If specific roles are required, check them
   if (roles.length > 0) {
     const hasRole = roles.some((role) => roleContext.membershipRoles.includes(role))
-    if (!hasRole && !hasTenantAdminBypass && !hasSingleTenantCustomerMembershipBypass) {
+    if (!hasRole && !hasTenantAdminBypass && !hasSingleTenantCustomerMembershipBypass && !hasTenantMemberBypass) {
       logger.warn(
         { userId: req.userId, customerId, requiredRoles: roles, requestId: req.requestId },
         'requireCustomerAccess — missing required role',
@@ -367,7 +373,9 @@ export const requireCustomerAccess = (options = {}) => async (req, res, next) =>
       ? 'customer_admin'
       : hasSingleTenantCustomerMembershipBypass
         ? 'single_tenant_membership'
-        : 'tenant_admin',
+        : hasTenantMemberBypass && !hasTenantAdminBypass
+          ? 'tenant_member'
+          : 'tenant_admin',
     isSuperAdmin: false,
     isCustomerAdmin: roleContext.hasCustomerAdmin,
     isTenantAdmin: roleContext.isTenantAdmin,

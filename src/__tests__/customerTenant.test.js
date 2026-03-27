@@ -56,6 +56,7 @@ beforeAll(() => {
 const USER_ID = '507f1f77bcf86cd799439011'
 const CUSTOMER_ADMIN_ID = '507f1f77bcf86cd799439012'
 const TENANT_ADMIN_ID = '507f1f77bcf86cd799439013'
+const TENANT_MEMBER_ID = '507f1f77bcf86cd799439014'
 const USER_ID_2 = '507f1f77bcf86cd799439099'
 const CUSTOMER_ID = '607f1f77bcf86cd799439022'
 const OTHER_CUSTOMER_ID = '607f1f77bcf86cd799439088'
@@ -281,6 +282,19 @@ const getNonAdminToken = async () => {
   return tokens.accessToken
 }
 
+const getTenantMemberToken = async () => {
+  const user = makeFakeUser({
+    _id: TENANT_MEMBER_ID,
+    id: TENANT_MEMBER_ID,
+    email: 'gus.g@acme.com',
+    name: 'Gus G',
+    memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+    tenantMemberships: [{ customerId: CUSTOMER_ID, tenantId: TENANT_ID, roles: ['USER'] }],
+  })
+  const tokens = await tokenService.generateTokens(user)
+  return tokens.accessToken
+}
+
 const mockLicenseLevelLookup = (value) => {
   const select = jest.fn().mockResolvedValue(value)
   LicenseLevel.findById.mockReturnValue({ select })
@@ -331,6 +345,18 @@ beforeEach(() => {
           email: 'tenantadmin@acme.com',
           name: 'Tenant Admin',
           memberships: [{ customerId: CUSTOMER_ID, roles: ['TENANT_ADMIN', 'USER'] }],
+          tenantMemberships: [{ customerId: CUSTOMER_ID, tenantId: TENANT_ID, roles: ['USER'] }],
+        }),
+      )
+    }
+    if (id === TENANT_MEMBER_ID) {
+      return Promise.resolve(
+        makeFakeUser({
+          _id: TENANT_MEMBER_ID,
+          id: TENANT_MEMBER_ID,
+          email: 'gus.g@acme.com',
+          name: 'Gus G',
+          memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
           tenantMemberships: [{ customerId: CUSTOMER_ID, tenantId: TENANT_ID, roles: ['USER'] }],
         }),
       )
@@ -2328,6 +2354,60 @@ describe('GET /api/v1/customers/:customerId/tenants', () => {
     expect(res.body.error.details?.reason).toBe('CUSTOMER_INACTIVE')
     expect(res.body.error.details?.customerStatus).toBe('DISABLED')
     expect(res.body.error.requestId).toBeDefined()
+  })
+
+  test('allows standard USER with tenantMemberships to list tenants (tenant member bypass)', async () => {
+    const token = await getTenantMemberToken()
+
+    Customer.findById.mockResolvedValue(makeFakeCustomer())
+
+    const tenants = [makeFakeTenant({ tenantAdminUserIds: [USER_ID] })]
+    User.find.mockReturnValueOnce({
+      lean: jest.fn().mockResolvedValue([
+        makeFakeUser({
+          _id: USER_ID,
+          id: USER_ID,
+          name: 'Mary Poppins',
+          memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+        }),
+      ]),
+    })
+    Tenant.find.mockReturnValue({
+      sort: jest.fn().mockReturnValue({
+        skip: jest.fn().mockReturnValue({
+          limit: jest.fn().mockReturnValue({
+            lean: jest.fn().mockResolvedValue(tenants),
+          }),
+        }),
+      }),
+    })
+    Tenant.countDocuments
+      .mockResolvedValueOnce(1)
+      .mockResolvedValueOnce(1)
+
+    const res = await request
+      .get(`/api/v1/customers/${CUSTOMER_ID}/tenants`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toHaveLength(1)
+    expect(res.body.data[0].id).toBe(TENANT_ID)
+    expect(res.body.meta.customerName).toBe('Acme Corp')
+    expect(res.body.meta.tenantVisibility).toBeDefined()
+    expect(res.body.meta.tenantVisibility.allowed).toBe(true)
+  })
+
+  test('denies standard USER with no tenantMemberships in a multi-tenant customer', async () => {
+    const token = await getNonAdminToken()
+
+    Customer.findById.mockResolvedValue(makeFakeCustomer())
+
+    const res = await request
+      .get(`/api/v1/customers/${CUSTOMER_ID}/tenants`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('FORBIDDEN')
   })
 })
 

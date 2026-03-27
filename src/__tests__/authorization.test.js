@@ -609,6 +609,105 @@ describe('requireCustomerAccess', () => {
       ),
     ).toBeGreaterThanOrEqual(1)
   })
+
+  test('allows tenant member bypass when user has tenantMemberships for the customer', async () => {
+    Customer.findById.mockResolvedValue(makeFakeCustomer())
+
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID },
+      scopes: {
+        platformRoles: [],
+        memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+        tenantMemberships: [
+          { customerId: CUSTOMER_ID, tenantId: TENANT_ID, roles: ['USER'] },
+        ],
+        vmfGrants: [],
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireCustomerAccess({
+      roles: ['CUSTOMER_ADMIN'],
+      allowTenantMember: true,
+    })(req, res, next)
+
+    expect(next).toHaveBeenCalled()
+    expect(req.scopes.customerAccess).toBeDefined()
+    expect(req.scopes.customerAccess.via).toBe('tenant_member')
+    expect(req.scopes.customerAccess.accessibleTenantIds).toEqual([TENANT_ID])
+  })
+
+  test('allows tenant member bypass even without customer membership when user has tenantMemberships', async () => {
+    Customer.findById.mockResolvedValue(makeFakeCustomer())
+
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID },
+      scopes: {
+        platformRoles: [],
+        memberships: [],
+        tenantMemberships: [
+          { customerId: CUSTOMER_ID, tenantId: TENANT_ID, roles: ['USER'] },
+        ],
+        vmfGrants: [],
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireCustomerAccess({
+      roles: ['CUSTOMER_ADMIN'],
+      allowTenantMember: true,
+    })(req, res, next)
+
+    expect(next).toHaveBeenCalled()
+    expect(req.scopes.customerAccess.via).toBe('tenant_member')
+  })
+
+  test('denies tenant member bypass when user has no tenantMemberships for the customer', async () => {
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID },
+      scopes: {
+        platformRoles: [],
+        memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+        tenantMemberships: [],
+        vmfGrants: [],
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireCustomerAccess({
+      roles: ['CUSTOMER_ADMIN'],
+      allowTenantMember: true,
+    })(req, res, next)
+
+    expect(res.statusCode).toBe(403)
+    expect(next).not.toHaveBeenCalled()
+  })
+
+  test('denies tenant member bypass when allowTenantMember is not set', async () => {
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID },
+      scopes: {
+        platformRoles: [],
+        memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+        tenantMemberships: [
+          { customerId: CUSTOMER_ID, tenantId: TENANT_ID, roles: ['USER'] },
+        ],
+        vmfGrants: [],
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireCustomerAccess({
+      roles: ['CUSTOMER_ADMIN'],
+    })(req, res, next)
+
+    expect(res.statusCode).toBe(403)
+    expect(next).not.toHaveBeenCalled()
+  })
 })
 
 /* ================================================================== */

@@ -42,6 +42,7 @@ customerTenantRouter.get(
     roles: ['CUSTOMER_ADMIN'],
     allowTenantAdmin: true,
     allowCustomerMembershipWhenSingleTenant: true,
+    allowTenantMember: true,
   }),
   requireCustomerActive(),
   listTenants,
