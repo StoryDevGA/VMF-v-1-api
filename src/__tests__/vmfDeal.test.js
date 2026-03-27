@@ -135,6 +135,15 @@ const makeTenantAdmin = (overrides = {}) => ({
   ...overrides,
 })
 
+const makeCustomerScopedTenantAdmin = (overrides = {}) => ({
+  ...makeTenantAdmin(),
+  memberships: [{ customerId: CUSTOMER_ID, roles: ['TENANT_ADMIN', 'USER'] }],
+  tenantMemberships: [
+    { customerId: CUSTOMER_ID, tenantId: TENANT_ID, roles: ['USER'] },
+  ],
+  ...overrides,
+})
+
 const makeRegularUser = (overrides = {}) => ({
   _id: REGULAR_USER_ID,
   id: REGULAR_USER_ID,
@@ -791,6 +800,41 @@ describe('POST /api/v1/customers/:customerId/tenants/:tenantId/vmfs', () => {
       action: 'VMF_LIMIT_REJECTED',
     }))
   })
+
+  test('allows customer-scoped tenant admin to create a VMF for an associated tenant', async () => {
+    const scopedTenantAdmin = makeCustomerScopedTenantAdmin()
+    const tokens = await tokenService.generateTokens(scopedTenantAdmin)
+
+    User.findById.mockImplementation((id) => {
+      if (id === TENANT_ADMIN_ID) return Promise.resolve(makeCustomerScopedTenantAdmin())
+      if (id === SUPER_ADMIN_ID) return Promise.resolve(makeSuperAdmin())
+      if (id === CUSTOMER_ADMIN_ID) return Promise.resolve(makeCustomerAdmin())
+      if (id === REGULAR_USER_ID) return Promise.resolve(makeRegularUser())
+      return Promise.resolve(null)
+    })
+    Tenant.findById.mockResolvedValue(makeFakeTenant({ tenantAdminUserIds: [] }))
+    VMF.countByTenant.mockResolvedValue(0)
+    SystemVersioningPolicy.findActive.mockResolvedValue(makeActivePolicy())
+
+    const origSave = VMF.prototype.save
+    VMF.prototype.save = jest.fn(async function () {
+      this._id = VMF_ID
+      this.id = VMF_ID
+      return this
+    })
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/tenants/${TENANT_ID}/vmfs`)
+      .set('Authorization', `Bearer ${tokens.accessToken}`)
+      .send({
+        name: 'Scoped Tenant Admin VMF',
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data?.name).toBe('Scoped Tenant Admin VMF')
+
+    VMF.prototype.save = origSave
+  })
 })
 
 /* ================================================================== */
@@ -913,6 +957,31 @@ describe('PATCH /api/v1/vmfs/:vmfId', () => {
       .send({ name: 'X' })
 
     expect(res.status).toBe(404)
+  })
+
+  test('allows customer-scoped tenant admin to update a VMF within associated tenant scope', async () => {
+    const scopedTenantAdmin = makeCustomerScopedTenantAdmin()
+    const tokens = await tokenService.generateTokens(scopedTenantAdmin)
+    const vmf = makeFakeVmf()
+
+    User.findById.mockImplementation((id) => {
+      if (id === TENANT_ADMIN_ID) return Promise.resolve(makeCustomerScopedTenantAdmin())
+      if (id === SUPER_ADMIN_ID) return Promise.resolve(makeSuperAdmin())
+      if (id === CUSTOMER_ADMIN_ID) return Promise.resolve(makeCustomerAdmin())
+      if (id === REGULAR_USER_ID) return Promise.resolve(makeRegularUser())
+      return Promise.resolve(null)
+    })
+    VMF.findById.mockResolvedValue(vmf)
+    Tenant.findById.mockResolvedValue(makeFakeTenant({ tenantAdminUserIds: [] }))
+
+    const res = await request
+      .patch(`/api/v1/vmfs/${VMF_ID}`)
+      .set('Authorization', `Bearer ${tokens.accessToken}`)
+      .send({ name: 'Updated By Scoped Tenant Admin' })
+
+    expect(res.status).toBe(200)
+    expect(vmf.name).toBe('Updated By Scoped Tenant Admin')
+    expect(vmf.save).toHaveBeenCalled()
   })
 })
 

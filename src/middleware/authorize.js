@@ -128,6 +128,46 @@ const resolveCustomerRoleContext = ({ memberships = [], tenantMemberships = [], 
   }
 }
 
+const hasCustomerScopedTenantAdminAccessToTenant = ({
+  memberships = [],
+  tenantMemberships = [],
+  customerId,
+  tenantId,
+  customer = null,
+  tenant = null,
+  actorUserId = null,
+}) => {
+  if (!customerId || !tenantId) return false
+
+  const roleContext = resolveCustomerRoleContext({
+    memberships,
+    tenantMemberships,
+    customerId,
+  })
+
+  if (!roleContext.hasCustomerScopedTenantAdmin) return false
+
+  const normalizedTenantId = tenantId.toString()
+
+  if (roleContext.accessibleTenantIds.includes(normalizedTenantId)) {
+    return true
+  }
+
+  if (
+    customer?.topology === 'SINGLE_TENANT'
+    && customer?.defaultTenantId
+    && idsEqual(customer.defaultTenantId, tenantId)
+  ) {
+    return true
+  }
+
+  if (actorUserId && Array.isArray(tenant?.tenantAdminUserIds)) {
+    return tenant.tenantAdminUserIds.some((tenantAdminUserId) => idsEqual(tenantAdminUserId, actorUserId))
+  }
+
+  return false
+}
+
 const loadCustomerContext = async (customerId) => {
   const cachedCustomer = await performanceCacheService.getCustomerTopology(customerId)
   if (cachedCustomer && cachedCustomer.name) return cachedCustomer
@@ -447,6 +487,21 @@ export const requireTenantAccess = (options = {}) => async (req, res, next) => {
   }
 
   if (
+    roles.includes('TENANT_ADMIN')
+    && hasCustomerScopedTenantAdminAccessToTenant({
+      memberships,
+      tenantMemberships,
+      customerId,
+      tenantId,
+      customer,
+      tenant,
+      actorUserId: req.userId,
+    })
+  ) {
+    return next()
+  }
+
+  if (
     allowCustomerMembershipWhenSingleTenant
     && customer?.topology === 'SINGLE_TENANT'
     && customerMembership
@@ -565,6 +620,11 @@ export const requireVmfAccess = (permission, options = {}) => async (req, res, n
   }
   req.scopes.customer = customer
 
+  const tenant = await loadTenantContext(effectiveTenantId)
+  if (tenant) {
+    req.scopes.tenant = tenant
+  }
+
   if (isCustomerInactive(customer) && !allowInactiveCustomer) {
     logger.warn(
       {
@@ -603,6 +663,18 @@ export const requireVmfAccess = (permission, options = {}) => async (req, res, n
         idsEqual(tm.tenantId, effectiveTenantId),
     )
     if (tenantMembership && tenantMembership.roles.includes('TENANT_ADMIN')) {
+      return next()
+    }
+
+    if (hasCustomerScopedTenantAdminAccessToTenant({
+      memberships,
+      tenantMemberships,
+      customerId: effectiveCustomerId,
+      tenantId: effectiveTenantId,
+      customer,
+      tenant,
+      actorUserId: req.userId,
+    })) {
       return next()
     }
   }
