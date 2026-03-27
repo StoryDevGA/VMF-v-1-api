@@ -38,7 +38,11 @@ customerTenantRouter.use(authJwt, loadScopes)
 
 customerTenantRouter.get(
   '/',
-  requireCustomerAccess({ roles: ['CUSTOMER_ADMIN'], allowTenantAdmin: true }),
+  requireCustomerAccess({
+    roles: ['CUSTOMER_ADMIN'],
+    allowTenantAdmin: true,
+    allowCustomerMembershipWhenSingleTenant: true,
+  }),
   requireCustomerActive(),
   listTenants,
 )

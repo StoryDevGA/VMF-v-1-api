@@ -294,7 +294,7 @@ beforeAll(async () => {
 /*  Auth helpers                                                      */
 /* ------------------------------------------------------------------ */
 
-let superAdminToken, customerAdminToken, tenantAdminToken
+let superAdminToken, customerAdminToken, tenantAdminToken, regularUserToken
 
 const getSuperAdminToken = async () => {
   if (superAdminToken) return superAdminToken
@@ -315,6 +315,13 @@ const getTenantAdminToken = async () => {
   const tokens = await tokenService.generateTokens(makeTenantAdmin())
   tenantAdminToken = tokens.accessToken
   return tenantAdminToken
+}
+
+const getRegularUserToken = async () => {
+  if (regularUserToken) return regularUserToken
+  const tokens = await tokenService.generateTokens(makeRegularUser())
+  regularUserToken = tokens.accessToken
+  return regularUserToken
 }
 
 /* ------------------------------------------------------------------ */
@@ -543,7 +550,7 @@ describe('GET /api/v1/customers/:customerId/tenants/:tenantId/vmfs', () => {
   test('returns paginated VMF list for Super Admin', async () => {
     const token = await getSuperAdminToken()
     Tenant.findById.mockResolvedValue(makeFakeTenant())
-    VMF.countByTenant.mockResolvedValue(0) // topologyGuard
+    VMF.countByTenant.mockResolvedValue(0) // topologyGuard + vmfCapacity
 
     const vmfs = [makeFakeVmf()]
     VMF.find.mockReturnValue({
@@ -564,6 +571,13 @@ describe('GET /api/v1/customers/:customerId/tenants/:tenantId/vmfs', () => {
     expect(res.status).toBe(200)
     expect(res.body.data).toHaveLength(1)
     expect(res.body.meta.total).toBe(1)
+    expect(res.body.meta.vmfCapacity).toEqual({
+      maxVmfs: 10,
+      currentCount: 0,
+      remainingCount: 10,
+      isAtCapacity: false,
+      countMode: 'ACTIVE',
+    })
   })
 
   test('returns VMF list for Tenant Admin', async () => {
@@ -585,6 +599,74 @@ describe('GET /api/v1/customers/:customerId/tenants/:tenantId/vmfs', () => {
     const res = await request
       .get(`/api/v1/customers/${CUSTOMER_ID}/tenants/${TENANT_ID}/vmfs`)
       .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toHaveLength(0)
+    expect(res.body.meta.vmfCapacity?.maxVmfs).toBe(10)
+  })
+
+  test('returns VMF list for a regular user with tenant access', async () => {
+    const token = await getRegularUserToken()
+    Tenant.findById.mockResolvedValue(makeFakeTenant())
+    VMF.countByTenant.mockResolvedValue(0)
+
+    VMF.find.mockReturnValue({
+      sort: jest.fn().mockReturnValue({
+        skip: jest.fn().mockReturnValue({
+          limit: jest.fn().mockReturnValue({
+            lean: jest.fn().mockResolvedValue([]),
+          }),
+        }),
+      }),
+    })
+    VMF.countDocuments.mockResolvedValue(0)
+
+    const res = await request
+      .get(`/api/v1/customers/${CUSTOMER_ID}/tenants/${TENANT_ID}/vmfs`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toHaveLength(0)
+  })
+
+  test('returns VMF list for a single-tenant customer user without tenant membership', async () => {
+    const tokens = await tokenService.generateTokens(
+      makeRegularUser({ tenantMemberships: [] }),
+    )
+
+    User.findById.mockImplementation((id) => {
+      if (id === REGULAR_USER_ID) {
+        return Promise.resolve(makeRegularUser({ tenantMemberships: [] }))
+      }
+      if (id === SUPER_ADMIN_ID) return Promise.resolve(makeSuperAdmin())
+      if (id === CUSTOMER_ADMIN_ID) return Promise.resolve(makeCustomerAdmin())
+      if (id === TENANT_ADMIN_ID) return Promise.resolve(makeTenantAdmin())
+      return Promise.resolve(null)
+    })
+    Customer.findById.mockResolvedValue(
+      makeFakeCustomer({
+        topology: 'SINGLE_TENANT',
+        vmfPolicy: 'SINGLE',
+        defaultTenantId: TENANT_ID,
+      }),
+    )
+    Tenant.findById.mockResolvedValue(makeFakeTenant())
+    VMF.countByTenant.mockResolvedValue(0)
+
+    VMF.find.mockReturnValue({
+      sort: jest.fn().mockReturnValue({
+        skip: jest.fn().mockReturnValue({
+          limit: jest.fn().mockReturnValue({
+            lean: jest.fn().mockResolvedValue([]),
+          }),
+        }),
+      }),
+    })
+    VMF.countDocuments.mockResolvedValue(0)
+
+    const res = await request
+      .get(`/api/v1/customers/${CUSTOMER_ID}/tenants/${TENANT_ID}/vmfs`)
+      .set('Authorization', `Bearer ${tokens.accessToken}`)
 
     expect(res.status).toBe(200)
     expect(res.body.data).toHaveLength(0)

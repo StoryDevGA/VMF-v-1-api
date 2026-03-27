@@ -95,13 +95,14 @@ const ensureScopes = (req, res) => {
 const resolveCustomerRoleContext = ({ memberships = [], tenantMemberships = [], customerId }) => {
   const membership = memberships.find((candidate) => idsEqual(candidate?.customerId, customerId)) || null
   const membershipRoles = Array.isArray(membership?.roles) ? membership.roles : []
-  const tenantAdminMemberships = Array.isArray(tenantMemberships)
+  const customerTenantMemberships = Array.isArray(tenantMemberships)
     ? tenantMemberships.filter(
-      (tenantMembership) =>
-        idsEqual(tenantMembership?.customerId, customerId)
-        && (tenantMembership?.roles || []).includes('TENANT_ADMIN'),
+      (tenantMembership) => idsEqual(tenantMembership?.customerId, customerId),
     )
     : []
+  const tenantAdminMemberships = customerTenantMemberships.filter(
+    (tenantMembership) => (tenantMembership?.roles || []).includes('TENANT_ADMIN'),
+  )
 
   const hasCustomerAdmin = membershipRoles.includes('CUSTOMER_ADMIN')
   const hasCustomerScopedTenantAdmin = membershipRoles.includes('TENANT_ADMIN')
@@ -118,22 +119,28 @@ const resolveCustomerRoleContext = ({ memberships = [], tenantMemberships = [], 
       .map((tenantMembership) => tenantMembership?.tenantId)
       .filter(Boolean)
       .map((tenantId) => tenantId.toString()),
+    accessibleTenantIds: [...new Set(
+      customerTenantMemberships
+        .map((tenantMembership) => tenantMembership?.tenantId)
+        .filter(Boolean)
+        .map((tenantId) => tenantId.toString()),
+    )],
   }
 }
 
 const loadCustomerContext = async (customerId) => {
   const cachedCustomer = await performanceCacheService.getCustomerTopology(customerId)
-  if (cachedCustomer) return cachedCustomer
+  if (cachedCustomer && cachedCustomer.name) return cachedCustomer
 
   const customer = await Customer.findById(customerId)
-  if (!customer) return null
+  if (!customer) return cachedCustomer || null
 
   await performanceCacheService.setCustomerTopology(
     customer._id,
     buildCustomerTopologySnapshot(customer),
   )
 
-  return customer
+  return buildCustomerTopologySnapshot(customer)
 }
 
 const loadTenantContext = async (tenantId) => {
@@ -207,6 +214,10 @@ export const requirePlatformRole = (role) => (req, res, next) => {
  * @param {string[]} [options.roles]          – Required customer-level roles
  *                                              (empty = any membership)
  * @param {boolean}  [options.allowPlatform]  – Allow Super Admins (default true)
+ * @param {boolean}  [options.allowCustomerMembershipWhenSingleTenant]
+ *   Allow any customer membership when the resolved customer topology is
+ *   `SINGLE_TENANT`. Intended for read-only customer-scoped routes that
+ *   need the default single-tenant context.
  */
 export const requireCustomerAccess = (options = {}) => async (req, res, next) => {
   if (!ensureScopes(req, res)) return
@@ -215,6 +226,7 @@ export const requireCustomerAccess = (options = {}) => async (req, res, next) =>
     roles = [],
     allowPlatform = true,
     allowTenantAdmin = false,
+    allowCustomerMembershipWhenSingleTenant = false,
     allowInactiveCustomer = false,
   } = options
   const { memberships, tenantMemberships, platformRoles } = req.scopes
@@ -245,6 +257,7 @@ export const requireCustomerAccess = (options = {}) => async (req, res, next) =>
       isCustomerAdmin: true,
       isTenantAdmin: true,
       tenantAdminTenantIds: [],
+      accessibleTenantIds: [],
     }
 
     if (isCustomerInactive(customer) && !allowInactiveCustomer) {
@@ -279,10 +292,27 @@ export const requireCustomerAccess = (options = {}) => async (req, res, next) =>
     return forbidden(res, req, 'You do not have access to this customer.')
   }
 
+  const customer = await loadCustomerContext(customerId)
+  if (!customer) {
+    return res.status(404).json({
+      error: {
+        code: 'NOT_FOUND',
+        message: 'Customer not found.',
+        requestId: req.requestId,
+      },
+    })
+  }
+  const hasSingleTenantCustomerMembershipBypass = Boolean(
+    allowCustomerMembershipWhenSingleTenant
+      && customer?.topology === 'SINGLE_TENANT'
+      && roleContext.membership
+      && roleContext.membershipRoles.length > 0,
+  )
+
   // If specific roles are required, check them
   if (roles.length > 0) {
     const hasRole = roles.some((role) => roleContext.membershipRoles.includes(role))
-    if (!hasRole && !hasTenantAdminBypass) {
+    if (!hasRole && !hasTenantAdminBypass && !hasSingleTenantCustomerMembershipBypass) {
       logger.warn(
         { userId: req.userId, customerId, requiredRoles: roles, requestId: req.requestId },
         'requireCustomerAccess — missing required role',
@@ -298,25 +328,19 @@ export const requireCustomerAccess = (options = {}) => async (req, res, next) =>
     }
   }
 
-  // Attach customer document for downstream use
-  const customer = await loadCustomerContext(customerId)
-  if (!customer) {
-    return res.status(404).json({
-      error: {
-        code: 'NOT_FOUND',
-        message: 'Customer not found.',
-        requestId: req.requestId,
-      },
-    })
-  }
   req.scopes.customer = customer
   req.scopes.customerAccess = {
     customerId: customer._id?.toString?.() || customerId.toString(),
-    via: roleContext.hasCustomerAdmin ? 'customer_admin' : 'tenant_admin',
+    via: roleContext.hasCustomerAdmin
+      ? 'customer_admin'
+      : hasSingleTenantCustomerMembershipBypass
+        ? 'single_tenant_membership'
+        : 'tenant_admin',
     isSuperAdmin: false,
     isCustomerAdmin: roleContext.hasCustomerAdmin,
     isTenantAdmin: roleContext.isTenantAdmin,
     tenantAdminTenantIds: roleContext.tenantAdminTenantIds,
+    accessibleTenantIds: roleContext.accessibleTenantIds,
   }
 
   if (isCustomerInactive(customer) && !allowInactiveCustomer) {
@@ -346,6 +370,9 @@ export const requireCustomerAccess = (options = {}) => async (req, res, next) =>
  * @param {string[]} [options.roles]              – Required tenant-level roles
  * @param {boolean}  [options.allowPlatform]      – Allow Super Admins (default true)
  * @param {boolean}  [options.allowCustomerAdmin] – Allow Customer Admins (default true)
+ * @param {boolean}  [options.allowCustomerMembershipWhenSingleTenant]
+ *   Allow any customer membership when the resolved customer topology is
+ *   `SINGLE_TENANT`. Intended for read-only tenant-scoped routes.
  */
 export const requireTenantAccess = (options = {}) => async (req, res, next) => {
   if (!ensureScopes(req, res)) return
@@ -354,6 +381,7 @@ export const requireTenantAccess = (options = {}) => async (req, res, next) => {
     roles = [],
     allowPlatform = true,
     allowCustomerAdmin = true,
+    allowCustomerMembershipWhenSingleTenant = false,
     allowInactiveCustomer = false,
   } = options
   const { memberships, tenantMemberships, platformRoles } = req.scopes
@@ -409,12 +437,23 @@ export const requireTenantAccess = (options = {}) => async (req, res, next) => {
     return next()
   }
 
+  const customerMembership = memberships.find((m) => idsEqual(m.customerId, customerId)) || null
+
   // Customer Admin bypass
   if (allowCustomerAdmin) {
-    const customerMembership = memberships.find((m) => idsEqual(m.customerId, customerId))
     if (customerMembership && customerMembership.roles.includes('CUSTOMER_ADMIN')) {
       return next()
     }
+  }
+
+  if (
+    allowCustomerMembershipWhenSingleTenant
+    && customer?.topology === 'SINGLE_TENANT'
+    && customerMembership
+    && Array.isArray(customerMembership.roles)
+    && customerMembership.roles.length > 0
+  ) {
+    return next()
   }
 
   // Tenant-level membership check

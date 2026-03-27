@@ -256,6 +256,46 @@ describe('POST /api/v1/auth/login', () => {
       },
     ])
   })
+
+  test('returns single-tenant defaultTenantId in customerScopes when available', async () => {
+    const user = makeFakeUser({
+      memberships: [{ customerId: '607f1f77bcf86cd799439022', roles: ['USER'] }],
+    })
+    User.findByEmail.mockResolvedValue(user)
+    Customer.find.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue([
+          { _id: '607f1f77bcf86cd799439022', status: 'ACTIVE' },
+        ]),
+      }),
+    })
+
+    Customer.findById.mockReturnValue({
+      select: jest.fn().mockResolvedValue({
+        _id: '607f1f77bcf86cd799439022',
+        topology: 'SINGLE_TENANT',
+        defaultTenantId: '707f1f77bcf86cd799439044',
+        licenseLevelId: null,
+        entitlements: [],
+      }),
+    })
+
+    const res = await request
+      .post('/api/v1/auth/login')
+      .send({ email: 'admin@storylineos.com', password: 'CorrectPassword1!' })
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.customerScopes).toEqual([
+      {
+        customerId: '607f1f77bcf86cd799439022',
+        licenseLevelId: null,
+        featureEntitlements: ['VMF', 'DEALS', 'VIEWS'],
+        entitlementSource: 'LEGACY_UNRESTRICTED',
+        topology: 'SINGLE_TENANT',
+        defaultTenantId: '707f1f77bcf86cd799439044',
+      },
+    ])
+  })
 })
 
 /* ------------------------------------------------------------------ */

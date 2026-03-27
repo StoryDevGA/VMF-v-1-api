@@ -89,6 +89,15 @@ const resolveTenantAdminScopedTenantIds = (req) =>
     ),
   )
 
+const resolveAccessibleTenantIds = (req) =>
+  Array.from(
+    new Set(
+      (req.scopes?.customerAccess?.accessibleTenantIds || [])
+        .map((tenantId) => toIdString(tenantId))
+        .filter(Boolean),
+    ),
+  )
+
 const normalizeTenantAdminRef = (value) => {
   if (!value) return null
 
@@ -219,6 +228,11 @@ const isTenantInActorScope = ({ req, tenant }) => {
     return scopedTenantIds.includes(tenantId)
   }
 
+  const accessibleTenantIds = resolveAccessibleTenantIds(req)
+  if (accessibleTenantIds.length > 0) {
+    return accessibleTenantIds.includes(tenantId)
+  }
+
   const actorUserId = toIdString(req.context?.userId || req.userId)
   if (!actorUserId) return false
 
@@ -258,11 +272,14 @@ export const listTenants = async (req, res, next) => {
     const filter = { customerId }
     const tenantAdminOnly = isTenantAdminOnlyRequest(req)
     const scopedTenantIds = resolveTenantAdminScopedTenantIds(req)
+    const accessibleTenantIds = resolveAccessibleTenantIds(req)
     const actorUserId = toIdString(req.context?.userId || req.userId)
 
     if (tenantAdminOnly) {
       if (scopedTenantIds.length > 0) {
         filter._id = { $in: scopedTenantIds }
+      } else if (accessibleTenantIds.length > 0) {
+        filter._id = { $in: accessibleTenantIds }
       } else if (actorUserId) {
         filter.tenantAdminUserIds = actorUserId
       } else {
@@ -290,9 +307,11 @@ export const listTenants = async (req, res, next) => {
         ...(tenantAdminOnly
           ? (scopedTenantIds.length > 0
             ? { _id: { $in: scopedTenantIds } }
-            : actorUserId
-              ? { tenantAdminUserIds: actorUserId }
-              : { _id: { $in: [] } })
+            : accessibleTenantIds.length > 0
+              ? { _id: { $in: accessibleTenantIds } }
+              : actorUserId
+                ? { tenantAdminUserIds: actorUserId }
+                : { _id: { $in: [] } })
           : {}),
       }),
     ])
@@ -310,6 +329,7 @@ export const listTenants = async (req, res, next) => {
         pageSize: limit,
         total,
         totalPages: Math.ceil(total / limit),
+        customerName: customer?.name || null,
         tenantCapacity: buildTenantCapacityMeta({
           customer,
           currentTenantCount,

@@ -222,11 +222,12 @@ export const buildTenantStatusSnapshot = (tenant) => ({
 /**
  * Build a cacheable topology snapshot from a Customer document.
  * @param {import('../models/Customer.js').default} customer - Mongoose Customer document
- * @returns {{ _id: string, topology: string, vmfPolicy: string, defaultTenantId: string|null, status: string, isServiceProvider: boolean, licenseLevelId: string|null, entitlements: string[], governance: { maxTenants: number, maxVmfsPerTenant: number, customerAdminUserId: string|null } }}
+ * @returns {{ _id: string, name: string|null, topology: string, vmfPolicy: string, defaultTenantId: string|null, status: string, isServiceProvider: boolean, licenseLevelId: string|null, entitlements: string[], governance: { maxTenants: number, maxVmfsPerTenant: number, customerAdminUserId: string|null } }}
  */
 export const buildCustomerTopologySnapshot = (customer) => ({
   _id: customer._id,
   id: customer.id || normalizeId(customer._id),
+  name: customer.name || null,
   topology: customer.topology,
   vmfPolicy: customer.vmfPolicy,
   defaultTenantId: customer.defaultTenantId,

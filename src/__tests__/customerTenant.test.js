@@ -2223,6 +2223,54 @@ describe('GET /api/v1/customers/:customerId/tenants', () => {
     expect(res.body.meta.tenantVisibility?.mode).toBe('OPTIONAL')
   })
 
+  test('allows single-tenant customer members to resolve the default tenant catalogue', async () => {
+    const token = await getNonAdminToken()
+
+    Customer.findById.mockResolvedValue(
+      makeFakeCustomer({
+        topology: 'SINGLE_TENANT',
+        vmfPolicy: 'SINGLE',
+        defaultTenantId: TENANT_ID,
+        governance: {
+          maxTenants: 1,
+          maxVmfsPerTenant: 1,
+          customerAdminUserId: null,
+        },
+      }),
+    )
+
+    Tenant.find.mockReturnValue({
+      sort: jest.fn().mockReturnValue({
+        skip: jest.fn().mockReturnValue({
+          limit: jest.fn().mockReturnValue({
+            lean: jest.fn().mockResolvedValue([
+              makeFakeTenant({
+                _id: TENANT_ID,
+                id: TENANT_ID,
+                customerId: CUSTOMER_ID,
+                isDefault: true,
+              }),
+            ]),
+          }),
+        }),
+      }),
+    })
+    Tenant.countDocuments
+      .mockResolvedValueOnce(1)
+      .mockResolvedValueOnce(1)
+
+    const res = await request
+      .get(`/api/v1/customers/${CUSTOMER_ID}/tenants`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toHaveLength(1)
+    expect(res.body.data[0].id).toBe(TENANT_ID)
+    expect(res.body.data[0].isSelectable).toBe(true)
+    expect(res.body.meta.tenantVisibility?.topology).toBe('SINGLE_TENANT')
+    expect(res.body.meta.tenantVisibility?.allowed).toBe(false)
+  })
+
   test('returns only administered tenants for tenant-admin scoped access', async () => {
     const token = await getTenantAdminToken()
 

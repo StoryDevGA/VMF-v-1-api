@@ -139,14 +139,17 @@ export const listVmfs = async (req, res, next) => {
     const pageNum = Math.max(1, parseInt(page, 10) || 1)
     const limit = Math.min(100, Math.max(1, parseInt(pageSize, 10) || 20))
     const skip = (pageNum - 1) * limit
+    const customer = req.scopes?.customer || await Customer.findById(customerId)
+    const { maxVmfsPerTenant } = customerGovernanceService.getGovernanceLimits(customer)
 
-    const [vmfs, total] = await Promise.all([
+    const [vmfs, total, activeCount] = await Promise.all([
       VMF.find(filter)
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
         .lean(),
       VMF.countDocuments(filter),
+      VMF.countByTenant(tenantId, 'ACTIVE'),
     ])
 
     return res.status(200).json({
@@ -156,6 +159,13 @@ export const listVmfs = async (req, res, next) => {
         pageSize: limit,
         total,
         totalPages: Math.ceil(total / limit),
+        vmfCapacity: {
+          maxVmfs: maxVmfsPerTenant,
+          currentCount: activeCount,
+          remainingCount: Math.max(maxVmfsPerTenant - activeCount, 0),
+          isAtCapacity: activeCount >= maxVmfsPerTenant,
+          countMode: 'ACTIVE',
+        },
         requestId: req.requestId,
         version: 'v1',
       },

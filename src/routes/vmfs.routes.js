@@ -46,18 +46,32 @@ import {
 
 export const tenantVmfRouter = Router({ mergeParams: true })
 
-tenantVmfRouter.use(
-  authJwt,
-  loadScopes,
+tenantVmfRouter.use(authJwt, loadScopes)
+
+tenantVmfRouter.get(
+  '/',
+  requireTenantAccess({
+    allowCustomerAdmin: true,
+    allowCustomerMembershipWhenSingleTenant: true,
+  }),
+  requireFeatureEntitlement('VMF'),
+  requireCustomerActive(),
+  requireTenantEnabled,
+  topologyGuard,
+  listVmfs,
+)
+
+tenantVmfRouter.post(
+  '/',
   requireTenantAccess({ roles: ['TENANT_ADMIN'], allowCustomerAdmin: true }),
   requireFeatureEntitlement('VMF'),
   requireCustomerActive(),
   requireTenantEnabled,
   topologyGuard,
+  tenantManagementRateLimit,
+  validateCreateVmf,
+  createVmf,
 )
-
-tenantVmfRouter.get('/', listVmfs)
-tenantVmfRouter.post('/', tenantManagementRateLimit, validateCreateVmf, createVmf)
 
 /* ------------------------------------------------------------------ */
 /*  VMF-scoped router                                                 */

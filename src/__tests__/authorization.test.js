@@ -544,6 +544,35 @@ describe('requireCustomerAccess', () => {
     expect(next).toHaveBeenCalled()
   })
 
+  test('allows single-tenant customer members when explicitly enabled for the route', async () => {
+    Customer.findById.mockResolvedValue(
+      makeFakeCustomer({
+        topology: 'SINGLE_TENANT',
+        vmfPolicy: 'SINGLE',
+      }),
+    )
+
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID },
+      scopes: {
+        platformRoles: [],
+        memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+        tenantMemberships: [],
+        vmfGrants: [],
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireCustomerAccess({
+      roles: ['CUSTOMER_ADMIN'],
+      allowCustomerMembershipWhenSingleTenant: true,
+    })(req, res, next)
+
+    expect(next).toHaveBeenCalled()
+    expect(req.scopes.customerAccess?.via).toBe('single_tenant_membership')
+  })
+
   test('returns 403 when customer is inactive', async () => {
     Customer.findById.mockResolvedValue(
       makeFakeCustomer({ status: 'DISABLED' }),
@@ -733,6 +762,32 @@ describe('requireTenantAccess', () => {
 
     expect(res.statusCode).toBe(403)
     expect(next).not.toHaveBeenCalled()
+  })
+
+  test('allows single-tenant customer members when explicitly enabled for the route', async () => {
+    Customer.findById.mockResolvedValue(
+      makeFakeCustomer({
+        topology: 'SINGLE_TENANT',
+        vmfPolicy: 'SINGLE',
+      }),
+    )
+    Tenant.findById.mockResolvedValue(makeFakeTenant())
+
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID, tenantId: TENANT_ID },
+      scopes: {
+        platformRoles: [],
+        memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+        tenantMemberships: [],
+        vmfGrants: [],
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireTenantAccess({ allowCustomerMembershipWhenSingleTenant: true })(req, res, next)
+
+    expect(next).toHaveBeenCalled()
   })
 
   test('denies access when user lacks required tenant role', async () => {

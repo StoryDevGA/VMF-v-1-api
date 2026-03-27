@@ -23,6 +23,16 @@ export const normalizeFeatureEntitlements = (values) => {
   return [...new Set(normalized)]
 }
 
+const normalizeCustomerTopology = (value) => {
+  const normalized = String(value ?? '')
+    .trim()
+    .toUpperCase()
+
+  return normalized === 'SINGLE_TENANT' || normalized === 'MULTI_TENANT'
+    ? normalized
+    : null
+}
+
 const resolveCustomerContext = async ({ customerId, customer = null } = {}) => {
   const normalizedCustomerId = toIdString(customerId || customer?._id || customer?.id)
   if (!normalizedCustomerId) return null
@@ -32,6 +42,8 @@ const resolveCustomerContext = async ({ customerId, customer = null } = {}) => {
       customerId: normalizedCustomerId,
       licenseLevelId: toIdString(customer.licenseLevelId),
       customerEntitlements: normalizeFeatureEntitlements(customer.entitlements),
+      topology: normalizeCustomerTopology(customer.topology),
+      defaultTenantId: toIdString(customer.defaultTenantId),
     }
   }
 
@@ -41,6 +53,8 @@ const resolveCustomerContext = async ({ customerId, customer = null } = {}) => {
       customerId: normalizedCustomerId,
       licenseLevelId: toIdString(cachedCustomer.licenseLevelId),
       customerEntitlements: normalizeFeatureEntitlements(cachedCustomer.entitlements),
+      topology: normalizeCustomerTopology(cachedCustomer.topology),
+      defaultTenantId: toIdString(cachedCustomer.defaultTenantId),
     }
   }
 
@@ -59,6 +73,8 @@ const resolveCustomerContext = async ({ customerId, customer = null } = {}) => {
     customerId: normalizedCustomerId,
     licenseLevelId: toIdString(customerDoc.licenseLevelId),
     customerEntitlements: normalizeFeatureEntitlements(customerDoc.entitlements),
+    topology: normalizeCustomerTopology(customerDoc.topology),
+    defaultTenantId: toIdString(customerDoc.defaultTenantId),
   }
 }
 
@@ -120,6 +136,8 @@ export const resolveCustomerFeatureEntitlements = async ({ customerId, customer 
       featureEntitlements: licenseEntitlements,
       entitlementSource: 'LICENSE_LEVEL',
       licenseLevelActive: licenseContext.licenseLevelActive,
+      topology: customerContext.topology,
+      defaultTenantId: customerContext.defaultTenantId,
     }
   }
 
@@ -130,6 +148,8 @@ export const resolveCustomerFeatureEntitlements = async ({ customerId, customer 
       featureEntitlements: customerContext.customerEntitlements,
       entitlementSource: 'CUSTOMER_OVERRIDE',
       licenseLevelActive: licenseContext.licenseLevelActive,
+      topology: customerContext.topology,
+      defaultTenantId: customerContext.defaultTenantId,
     }
   }
 
@@ -139,16 +159,22 @@ export const resolveCustomerFeatureEntitlements = async ({ customerId, customer 
     featureEntitlements: [...KNOWN_FEATURE_ENTITLEMENTS],
     entitlementSource: 'LEGACY_UNRESTRICTED',
     licenseLevelActive: licenseContext.licenseLevelActive,
+    topology: customerContext.topology,
+    defaultTenantId: customerContext.defaultTenantId,
   }
 }
 
 export const listUserCustomerFeatureScopes = async (user) => {
   const memberships = Array.isArray(user?.memberships) ? user.memberships : []
-  const customerIds = [...new Set(
-    memberships
+  const tenantMemberships = Array.isArray(user?.tenantMemberships) ? user.tenantMemberships : []
+  const customerIds = [...new Set([
+    ...memberships
       .map((membership) => toIdString(membership?.customerId))
       .filter(Boolean),
-  )]
+    ...tenantMemberships
+      .map((tm) => toIdString(tm?.customerId))
+      .filter(Boolean),
+  ])]
 
   if (customerIds.length === 0) return []
 
@@ -163,6 +189,7 @@ export const listUserCustomerFeatureScopes = async (user) => {
       licenseLevelId: scope.licenseLevelId || null,
       featureEntitlements: scope.featureEntitlements,
       entitlementSource: scope.entitlementSource,
+      ...(scope.topology ? { topology: scope.topology } : {}),
+      ...(scope.defaultTenantId ? { defaultTenantId: scope.defaultTenantId } : {}),
     }))
 }
-
