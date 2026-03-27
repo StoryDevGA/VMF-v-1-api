@@ -149,15 +149,7 @@ const hasCustomerScopedTenantAdminAccessToTenant = ({
 
   const normalizedTenantId = tenantId.toString()
 
-  if (roleContext.accessibleTenantIds.includes(normalizedTenantId)) {
-    return true
-  }
-
-  if (
-    customer?.topology === 'SINGLE_TENANT'
-    && customer?.defaultTenantId
-    && idsEqual(customer.defaultTenantId, tenantId)
-  ) {
+  if (roleContext.tenantAdminTenantIds.includes(normalizedTenantId)) {
     return true
   }
 

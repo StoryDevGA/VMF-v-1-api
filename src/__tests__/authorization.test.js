@@ -743,8 +743,8 @@ describe('requireTenantAccess', () => {
     expect(next).toHaveBeenCalled()
   })
 
-  test('grants TENANT_ADMIN role requirement for customer-scoped tenant admin within associated tenant scope', async () => {
-    Tenant.findById.mockResolvedValue(makeFakeTenant({ tenantAdminUserIds: [] }))
+  test('grants TENANT_ADMIN role requirement for customer-scoped tenant admin when assigned to the tenant', async () => {
+    Tenant.findById.mockResolvedValue(makeFakeTenant({ tenantAdminUserIds: [USER_ID] }))
 
     const req = makeReq({
       params: { customerId: CUSTOMER_ID, tenantId: TENANT_ID },
@@ -763,6 +763,29 @@ describe('requireTenantAccess', () => {
     await requireTenantAccess({ roles: ['TENANT_ADMIN'] })(req, res, next)
 
     expect(next).toHaveBeenCalled()
+  })
+
+  test('denies TENANT_ADMIN role requirement for customer-scoped tenant admin when only linked as a user', async () => {
+    Tenant.findById.mockResolvedValue(makeFakeTenant({ tenantAdminUserIds: [] }))
+
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID, tenantId: TENANT_ID },
+      scopes: {
+        platformRoles: [],
+        memberships: [{ customerId: CUSTOMER_ID, roles: ['TENANT_ADMIN', 'USER'] }],
+        tenantMemberships: [
+          { customerId: CUSTOMER_ID, tenantId: TENANT_ID, roles: ['USER'] },
+        ],
+        vmfGrants: [],
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireTenantAccess({ roles: ['TENANT_ADMIN'] })(req, res, next)
+
+    expect(res.statusCode).toBe(403)
+    expect(next).not.toHaveBeenCalled()
   })
 
   test('denies customer-scoped tenant admin outside associated tenant scope when no fallback ownership exists', async () => {
@@ -1023,7 +1046,30 @@ describe('requireVmfAccess', () => {
     expect(next).toHaveBeenCalled()
   })
 
-  test('grants customer-scoped Tenant Admin access within associated tenant scope', async () => {
+  test('grants customer-scoped Tenant Admin access when assigned to the VMF tenant', async () => {
+    VMF.findById.mockResolvedValue(makeFakeVmf())
+    Tenant.findById.mockResolvedValue(makeFakeTenant({ tenantAdminUserIds: [USER_ID] }))
+
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID, tenantId: TENANT_ID, vmfId: VMF_ID },
+      scopes: {
+        platformRoles: [],
+        memberships: [{ customerId: CUSTOMER_ID, roles: ['TENANT_ADMIN', 'USER'] }],
+        tenantMemberships: [
+          { customerId: CUSTOMER_ID, tenantId: TENANT_ID, roles: ['USER'] },
+        ],
+        vmfGrants: [],
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireVmfAccess('WRITE')(req, res, next)
+
+    expect(next).toHaveBeenCalled()
+  })
+
+  test('denies customer-scoped Tenant Admin access when only linked to the VMF tenant as a user', async () => {
     VMF.findById.mockResolvedValue(makeFakeVmf())
     Tenant.findById.mockResolvedValue(makeFakeTenant({ tenantAdminUserIds: [] }))
 
@@ -1043,7 +1089,8 @@ describe('requireVmfAccess', () => {
 
     await requireVmfAccess('WRITE')(req, res, next)
 
-    expect(next).toHaveBeenCalled()
+    expect(res.statusCode).toBe(403)
+    expect(next).not.toHaveBeenCalled()
   })
 
   test('denies customer-scoped Tenant Admin access outside associated tenant scope when no fallback ownership exists', async () => {

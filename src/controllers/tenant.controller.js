@@ -228,11 +228,6 @@ const isTenantInActorScope = ({ req, tenant }) => {
     return scopedTenantIds.includes(tenantId)
   }
 
-  const accessibleTenantIds = resolveAccessibleTenantIds(req)
-  if (accessibleTenantIds.length > 0) {
-    return accessibleTenantIds.includes(tenantId)
-  }
-
   const actorUserId = toIdString(req.context?.userId || req.userId)
   if (!actorUserId) return false
 

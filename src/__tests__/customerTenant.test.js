@@ -2298,16 +2298,16 @@ describe('GET /api/v1/customers/:customerId/tenants', () => {
     expect(res.body.data).toHaveLength(1)
     expect(Tenant.find).toHaveBeenCalledWith(expect.objectContaining({
       customerId: CUSTOMER_ID,
-      tenantAdminUserIds: TENANT_ADMIN_ID,
+      _id: { $in: [TENANT_ID] },
     }))
     expect(Tenant.countDocuments).toHaveBeenNthCalledWith(1, expect.objectContaining({
       customerId: CUSTOMER_ID,
-      tenantAdminUserIds: TENANT_ADMIN_ID,
+      _id: { $in: [TENANT_ID] },
     }))
     expect(Tenant.countDocuments).toHaveBeenNthCalledWith(2, expect.objectContaining({
       customerId: CUSTOMER_ID,
       status: { $ne: 'ARCHIVED' },
-      tenantAdminUserIds: TENANT_ADMIN_ID,
+      _id: { $in: [TENANT_ID] },
     }))
   })
 

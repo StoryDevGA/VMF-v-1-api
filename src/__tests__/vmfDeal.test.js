@@ -801,7 +801,7 @@ describe('POST /api/v1/customers/:customerId/tenants/:tenantId/vmfs', () => {
     }))
   })
 
-  test('allows customer-scoped tenant admin to create a VMF for an associated tenant', async () => {
+  test('allows customer-scoped tenant admin to create a VMF for a tenant they administer', async () => {
     const scopedTenantAdmin = makeCustomerScopedTenantAdmin()
     const tokens = await tokenService.generateTokens(scopedTenantAdmin)
 
@@ -812,7 +812,7 @@ describe('POST /api/v1/customers/:customerId/tenants/:tenantId/vmfs', () => {
       if (id === REGULAR_USER_ID) return Promise.resolve(makeRegularUser())
       return Promise.resolve(null)
     })
-    Tenant.findById.mockResolvedValue(makeFakeTenant({ tenantAdminUserIds: [] }))
+    Tenant.findById.mockResolvedValue(makeFakeTenant({ tenantAdminUserIds: [TENANT_ADMIN_ID] }))
     VMF.countByTenant.mockResolvedValue(0)
     SystemVersioningPolicy.findActive.mockResolvedValue(makeActivePolicy())
 
@@ -834,6 +834,32 @@ describe('POST /api/v1/customers/:customerId/tenants/:tenantId/vmfs', () => {
     expect(res.body.data?.name).toBe('Scoped Tenant Admin VMF')
 
     VMF.prototype.save = origSave
+  })
+
+  test('denies customer-scoped tenant admin VMF creation when they are only linked to the tenant as a user', async () => {
+    const scopedTenantAdmin = makeCustomerScopedTenantAdmin()
+    const tokens = await tokenService.generateTokens(scopedTenantAdmin)
+
+    User.findById.mockImplementation((id) => {
+      if (id === TENANT_ADMIN_ID) return Promise.resolve(makeCustomerScopedTenantAdmin())
+      if (id === SUPER_ADMIN_ID) return Promise.resolve(makeSuperAdmin())
+      if (id === CUSTOMER_ADMIN_ID) return Promise.resolve(makeCustomerAdmin())
+      if (id === REGULAR_USER_ID) return Promise.resolve(makeRegularUser())
+      return Promise.resolve(null)
+    })
+    Tenant.findById.mockResolvedValue(makeFakeTenant({ tenantAdminUserIds: [] }))
+    VMF.countByTenant.mockResolvedValue(0)
+    SystemVersioningPolicy.findActive.mockResolvedValue(makeActivePolicy())
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/tenants/${TENANT_ID}/vmfs`)
+      .set('Authorization', `Bearer ${tokens.accessToken}`)
+      .send({
+        name: 'Blocked Scoped Tenant Admin VMF',
+      })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.message).toBe('You do not have the required role for this tenant.')
   })
 })
 
@@ -959,7 +985,32 @@ describe('PATCH /api/v1/vmfs/:vmfId', () => {
     expect(res.status).toBe(404)
   })
 
-  test('allows customer-scoped tenant admin to update a VMF within associated tenant scope', async () => {
+  test('allows customer-scoped tenant admin to update a VMF for a tenant they administer', async () => {
+    const scopedTenantAdmin = makeCustomerScopedTenantAdmin()
+    const tokens = await tokenService.generateTokens(scopedTenantAdmin)
+    const vmf = makeFakeVmf()
+
+    User.findById.mockImplementation((id) => {
+      if (id === TENANT_ADMIN_ID) return Promise.resolve(makeCustomerScopedTenantAdmin())
+      if (id === SUPER_ADMIN_ID) return Promise.resolve(makeSuperAdmin())
+      if (id === CUSTOMER_ADMIN_ID) return Promise.resolve(makeCustomerAdmin())
+      if (id === REGULAR_USER_ID) return Promise.resolve(makeRegularUser())
+      return Promise.resolve(null)
+    })
+    VMF.findById.mockResolvedValue(vmf)
+    Tenant.findById.mockResolvedValue(makeFakeTenant({ tenantAdminUserIds: [TENANT_ADMIN_ID] }))
+
+    const res = await request
+      .patch(`/api/v1/vmfs/${VMF_ID}`)
+      .set('Authorization', `Bearer ${tokens.accessToken}`)
+      .send({ name: 'Updated By Scoped Tenant Admin' })
+
+    expect(res.status).toBe(200)
+    expect(vmf.name).toBe('Updated By Scoped Tenant Admin')
+    expect(vmf.save).toHaveBeenCalled()
+  })
+
+  test('denies customer-scoped tenant admin VMF update when they are only linked to the tenant as a user', async () => {
     const scopedTenantAdmin = makeCustomerScopedTenantAdmin()
     const tokens = await tokenService.generateTokens(scopedTenantAdmin)
     const vmf = makeFakeVmf()
@@ -977,11 +1028,11 @@ describe('PATCH /api/v1/vmfs/:vmfId', () => {
     const res = await request
       .patch(`/api/v1/vmfs/${VMF_ID}`)
       .set('Authorization', `Bearer ${tokens.accessToken}`)
-      .send({ name: 'Updated By Scoped Tenant Admin' })
+      .send({ name: 'Blocked Update By Scoped Tenant Admin' })
 
-    expect(res.status).toBe(200)
-    expect(vmf.name).toBe('Updated By Scoped Tenant Admin')
-    expect(vmf.save).toHaveBeenCalled()
+    expect(res.status).toBe(403)
+    expect(res.body.error.message).toBe('You do not have access to this VMF.')
+    expect(vmf.save).not.toHaveBeenCalled()
   })
 })
 
