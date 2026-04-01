@@ -1,4 +1,8 @@
 import { describe, test, expect, beforeAll, beforeEach, afterAll, jest } from '@jest/globals'
+import {
+  PERMISSION_CATALOGUE,
+  SUPER_ADMIN_LOCKED_PERMISSION_KEYS,
+} from '../constants/permissionCatalogue.js'
 
 beforeAll(() => {
   process.env.NODE_ENV = 'test'
@@ -75,7 +79,19 @@ const makeSystemRole = (overrides = {}) => makeCustomRole({
   name: 'Super Administrator',
   description: 'System platform administrator',
   scope: 'PLATFORM',
-  permissions: ['PLATFORM_MANAGE', 'ROLE_MANAGE'],
+  permissions: [...SUPER_ADMIN_LOCKED_PERMISSION_KEYS],
+  isSystem: true,
+  ...overrides,
+})
+
+const makeEditableSystemRole = (overrides = {}) => makeCustomRole({
+  _id: SYSTEM_ROLE_ID,
+  id: SYSTEM_ROLE_ID,
+  key: 'CUSTOMER_ADMIN',
+  name: 'Customer Administrator',
+  description: 'System customer administrator',
+  scope: 'CUSTOMER',
+  permissions: ['CUSTOMER_VIEW', 'USER_VIEW'],
   isSystem: true,
   ...overrides,
 })
@@ -219,6 +235,45 @@ describe('Role Management Routes', () => {
     }))
   })
 
+  test('POST /api/v1/super-admin/roles creates a custom role with empty permissions', async () => {
+    const token = await getAccessTokenForUser(makeSuperAdmin())
+    mockFindOneSelect(null)
+
+    const res = await request
+      .post('/api/v1/super-admin/roles')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        key: 'vmf_viewer',
+        name: 'VMF Viewer',
+        scope: 'VMF',
+        permissions: [],
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data.key).toBe('VMF_VIEWER')
+    expect(res.body.data.permissions).toEqual([])
+    expect(Role.prototype.save).toHaveBeenCalled()
+  })
+
+  test('POST /api/v1/super-admin/roles returns 422 for unknown permissions', async () => {
+    const token = await getAccessTokenForUser(makeSuperAdmin())
+
+    const res = await request
+      .post('/api/v1/super-admin/roles')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        key: 'vmf_viewer',
+        name: 'VMF Viewer',
+        scope: 'VMF',
+        permissions: ['fake_perm'],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details.permissions).toBe('Unknown permissions: FAKE_PERM')
+    expect(Role.findOne).not.toHaveBeenCalled()
+  })
+
   test('POST /api/v1/super-admin/roles returns 409 for duplicate key', async () => {
     const token = await getAccessTokenForUser(makeSuperAdmin())
     mockFindOneSelect({ _id: '607f1f77bcf86cd799439088' })
@@ -274,6 +329,19 @@ describe('Role Management Routes', () => {
     expect(res.body.meta.page).toBe(1)
   })
 
+  test('GET /api/v1/super-admin/roles/permissions/catalogue returns grouped permission metadata', async () => {
+    const token = await getAccessTokenForUser(makeSuperAdmin())
+
+    const res = await request
+      .get('/api/v1/super-admin/roles/permissions/catalogue')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toEqual(PERMISSION_CATALOGUE)
+    expect(res.body.meta.version).toBe('v1')
+    expect(res.body.meta.requestId).toBeDefined()
+  })
+
   test('GET /api/v1/super-admin/roles/:roleId returns 404 when not found', async () => {
     const token = await getAccessTokenForUser(makeSuperAdmin())
     Role.findById.mockResolvedValue(null)
@@ -310,22 +378,177 @@ describe('Role Management Routes', () => {
     }))
   })
 
-  test('PATCH /api/v1/super-admin/roles/:roleId blocks updates for system roles', async () => {
+  test('PATCH /api/v1/super-admin/roles/:roleId updates an editable system role permissions', async () => {
     const token = await getAccessTokenForUser(makeSuperAdmin())
-    Role.findById.mockResolvedValue(makeSystemRole())
+    const role = makeEditableSystemRole()
+    Role.findById.mockResolvedValue(role)
 
     const res = await request
       .patch(`/api/v1/super-admin/roles/${SYSTEM_ROLE_ID}`)
       .set('Authorization', `Bearer ${token}`)
-      .send({ isActive: false })
+      .send({ permissions: ['CUSTOMER_VIEW'] })
+
+    expect(res.status).toBe(200)
+    expect(role.save).toHaveBeenCalled()
+    expect(res.body.data.permissions).toEqual(['CUSTOMER_VIEW'])
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'ROLE_UPDATED',
+      resourceType: 'Role',
+      resourceId: SYSTEM_ROLE_ID,
+    }))
+  })
+
+  test('PATCH /api/v1/super-admin/roles/:roleId allows clearing all permissions for editable system roles', async () => {
+    const token = await getAccessTokenForUser(makeSuperAdmin())
+    const role = makeEditableSystemRole()
+    Role.findById.mockResolvedValue(role)
+
+    const res = await request
+      .patch(`/api/v1/super-admin/roles/${SYSTEM_ROLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ permissions: [] })
+
+    expect(res.status).toBe(200)
+    expect(role.save).toHaveBeenCalled()
+    expect(res.body.data.permissions).toEqual([])
+  })
+
+  test('PATCH /api/v1/super-admin/roles/:roleId returns 422 for unknown permissions', async () => {
+    const token = await getAccessTokenForUser(makeSuperAdmin())
+
+    const res = await request
+      .patch(`/api/v1/super-admin/roles/${SYSTEM_ROLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ permissions: ['fake_perm'] })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details.permissions).toBe('Unknown permissions: FAKE_PERM')
+  })
+
+  test('PATCH /api/v1/super-admin/roles/:roleId returns 403 when the model guard rejects the save', async () => {
+    const token = await getAccessTokenForUser(makeSuperAdmin())
+    const role = makeEditableSystemRole({
+      save: jest.fn(async () => {
+        throw new Error('System roles can only have their permissions and activation status modified')
+      }),
+    })
+    Role.findById.mockResolvedValue(role)
+
+    const res = await request
+      .patch(`/api/v1/super-admin/roles/${SYSTEM_ROLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ permissions: ['CUSTOMER_VIEW'] })
 
     expect(res.status).toBe(403)
     expect(res.body.error.code).toBe('FORBIDDEN')
+    expect(res.body.error.message).toBe(
+      'System roles can only have their permissions and activation status modified',
+    )
+  })
+
+  test('PATCH /api/v1/super-admin/roles/:roleId rejects disallowed fields for editable system roles', async () => {
+    const token = await getAccessTokenForUser(makeSuperAdmin())
+    const role = makeEditableSystemRole()
+    Role.findById.mockResolvedValue(role)
+
+    const res = await request
+      .patch(`/api/v1/super-admin/roles/${SYSTEM_ROLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: 'New Name' })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('FORBIDDEN')
+    expect(res.body.error.message).toContain('permissions, isActive')
+    expect(role.save).not.toHaveBeenCalled()
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'ROLE_MUTATION_BLOCKED',
       resourceType: 'Role',
       resourceId: SYSTEM_ROLE_ID,
     }))
+  })
+
+  test('PATCH /api/v1/super-admin/roles/:roleId rejects mixed allowed and disallowed fields for editable system roles', async () => {
+    const token = await getAccessTokenForUser(makeSuperAdmin())
+    const role = makeEditableSystemRole()
+    Role.findById.mockResolvedValue(role)
+
+    const res = await request
+      .patch(`/api/v1/super-admin/roles/${SYSTEM_ROLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        permissions: [],
+        name: 'New Name',
+      })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('FORBIDDEN')
+    expect(res.body.error.message).toContain('Disallowed fields: name')
+    expect(role.save).not.toHaveBeenCalled()
+  })
+
+  test('PATCH /api/v1/super-admin/roles/:roleId allows adding extra permissions to SUPER_ADMIN', async () => {
+    const token = await getAccessTokenForUser(makeSuperAdmin())
+    const role = makeSystemRole()
+    Role.findById.mockResolvedValue(role)
+
+    const res = await request
+      .patch(`/api/v1/super-admin/roles/${SYSTEM_ROLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ permissions: [...SUPER_ADMIN_LOCKED_PERMISSION_KEYS, 'VMF_CREATE'] })
+
+    expect(res.status).toBe(200)
+    expect(role.save).toHaveBeenCalled()
+    expect(res.body.data.permissions).toEqual([...SUPER_ADMIN_LOCKED_PERMISSION_KEYS, 'VMF_CREATE'])
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'ROLE_UPDATED',
+      resourceType: 'Role',
+      resourceId: SYSTEM_ROLE_ID,
+    }))
+  })
+
+  test('PATCH /api/v1/super-admin/roles/:roleId rejects removing locked baseline permissions from SUPER_ADMIN', async () => {
+    const token = await getAccessTokenForUser(makeSuperAdmin())
+    const role = makeSystemRole()
+    Role.findById.mockResolvedValue(role)
+
+    const res = await request
+      .patch(`/api/v1/super-admin/roles/${SYSTEM_ROLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        permissions: SUPER_ADMIN_LOCKED_PERMISSION_KEYS.filter(
+          (permissionKey) => permissionKey !== 'ROLE_MANAGE',
+        ),
+      })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('FORBIDDEN')
+    expect(res.body.error.message).toContain('ROLE_MANAGE')
+    expect(role.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'ROLE_MUTATION_BLOCKED',
+      resourceType: 'Role',
+      resourceId: SYSTEM_ROLE_ID,
+    }))
+  })
+
+  test('PATCH /api/v1/super-admin/roles/:roleId rejects name and scope changes for SUPER_ADMIN', async () => {
+    const token = await getAccessTokenForUser(makeSuperAdmin())
+    const role = makeSystemRole()
+    Role.findById.mockResolvedValue(role)
+
+    const res = await request
+      .patch(`/api/v1/super-admin/roles/${SYSTEM_ROLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        name: 'Updated Super Administrator',
+        scope: 'CUSTOMER',
+      })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('FORBIDDEN')
+    expect(res.body.error.message).toContain('Disallowed fields: name, scope')
+    expect(role.save).not.toHaveBeenCalled()
   })
 
   test('DELETE /api/v1/super-admin/roles/:roleId blocks delete for system roles', async () => {

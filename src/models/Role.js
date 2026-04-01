@@ -1,4 +1,5 @@
 import mongoose from 'mongoose'
+import { SUPER_ADMIN_LOCKED_PERMISSION_KEYS } from '../constants/permissionCatalogue.js'
 
 const roleSchema = new mongoose.Schema({
   key: {
@@ -54,6 +55,11 @@ const roleSchema = new mongoose.Schema({
   }
 })
 
+const SYSTEM_ROLE_MUTATION_ERROR =
+  'System roles can only have their permissions and activation status modified'
+const SUPER_ADMIN_LOCKED_PERMISSION_ERROR_PREFIX =
+  'SUPER_ADMIN must retain locked baseline permissions'
+
 // Indexes for performance
 roleSchema.index({ scope: 1, isActive: 1 })
 roleSchema.index({ isSystem: 1, isActive: 1 })
@@ -100,16 +106,33 @@ roleSchema.methods.removePermission = function(permission) {
 
 // Pre-save middleware
 roleSchema.pre('save', function(next) {
+  if (this.key === 'SUPER_ADMIN' && (this.isNew || this.isModified('permissions'))) {
+    const normalizedPermissionKeySet = new Set(
+      (this.permissions || []).map((permission) => String(permission || '').trim().toUpperCase()),
+    )
+    const missingLockedPermissions = SUPER_ADMIN_LOCKED_PERMISSION_KEYS.filter(
+      (permissionKey) => !normalizedPermissionKeySet.has(permissionKey),
+    )
+
+    if (missingLockedPermissions.length > 0) {
+      return next(
+        new Error(
+          `${SUPER_ADMIN_LOCKED_PERMISSION_ERROR_PREFIX}: ${missingLockedPermissions.join(', ')}`,
+        ),
+      )
+    }
+  }
+
   // Prevent modification of system roles
   if (this.isSystem && !this.isNew) {
-    const changes = this.getChanges()
-    const allowedChanges = ['isActive', 'updatedAt']
-    const hasDisallowedChanges = Object.keys(changes.$set || {}).some(
-      key => !allowedChanges.includes(key)
+    const allowedChanges = ['isActive', 'permissions', 'updatedAt']
+    const modifiedRootPaths = [...new Set(this.modifiedPaths().map((path) => path.split('.')[0]))]
+    const hasDisallowedChanges = modifiedRootPaths.some(
+      (path) => !allowedChanges.includes(path),
     )
     
     if (hasDisallowedChanges) {
-      return next(new Error('System roles cannot be modified except for activation status'))
+      return next(new Error(SYSTEM_ROLE_MUTATION_ERROR))
     }
   }
   

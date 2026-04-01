@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { ALL_PERMISSION_KEYS } from '../constants/permissionCatalogue.js'
 import {
   createBodyValidator,
   createParamsValidator,
@@ -9,6 +10,7 @@ const objectIdRegex = /^[a-f\d]{24}$/i
 const roleKeyRegex = /^[A-Z_]+$/
 const permissionKeyRegex = /^[A-Z][A-Z0-9_]*$/
 const roleScopes = ['PLATFORM', 'CUSTOMER', 'TENANT', 'VMF']
+const allPermissionKeysSet = new Set(ALL_PERMISSION_KEYS)
 
 const roleKeySchema = z
   .string({ required_error: 'Role key is required' })
@@ -32,6 +34,27 @@ const permissionSchema = z
     'Permission key must use uppercase letters, numbers, and underscores',
   )
 
+const permissionArraySchema = z
+  .array(permissionSchema)
+  .min(0)
+  .max(500, 'Permission list must contain 500 items or fewer')
+  .refine(
+    (permissions) => new Set(permissions).size === permissions.length,
+    'Permission keys must be unique',
+  )
+  .superRefine((permissions, ctx) => {
+    const unknownPermissions = permissions.filter(
+      (permission) => !allPermissionKeysSet.has(permission),
+    )
+
+    if (unknownPermissions.length > 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Unknown permissions: ${unknownPermissions.join(', ')}`,
+      })
+    }
+  })
+
 const createRoleSchema = z.object({
   key: roleKeySchema,
   name: z
@@ -47,14 +70,7 @@ const createRoleSchema = z.object({
   scope: z
     .enum(roleScopes, { errorMap: () => ({ message: 'Role scope is invalid' }) })
     .default('VMF'),
-  permissions: z
-    .array(permissionSchema)
-    .min(1, 'At least one permission is required')
-    .max(500, 'Permission list must contain 500 items or fewer')
-    .refine(
-      (permissions) => new Set(permissions).size === permissions.length,
-      'Permission keys must be unique',
-    ),
+  permissions: permissionArraySchema.default([]),
   isActive: z.boolean().default(true),
 })
 
@@ -74,15 +90,7 @@ const updateRoleSchema = z
     scope: z
       .enum(roleScopes, { errorMap: () => ({ message: 'Role scope is invalid' }) })
       .optional(),
-    permissions: z
-      .array(permissionSchema)
-      .min(1, 'At least one permission is required')
-      .max(500, 'Permission list must contain 500 items or fewer')
-      .refine(
-        (permissions) => new Set(permissions).size === permissions.length,
-        'Permission keys must be unique',
-      )
-      .optional(),
+    permissions: permissionArraySchema.optional(),
     isActive: z.boolean().optional(),
   })
   .refine(

@@ -1,14 +1,29 @@
+import {
+  PERMISSION_CATALOGUE,
+  SUPER_ADMIN_LOCKED_PERMISSION_KEYS,
+} from '../constants/permissionCatalogue.js'
 import { Role, User } from '../models/index.js'
 import auditService from '../services/auditService.js'
 
 const DUPLICATE_ROLE_KEY_MESSAGE = 'A role with this key already exists.'
 const SYSTEM_ROLE_MUTATION_MESSAGE = 'System roles are protected and cannot be modified.'
+const SYSTEM_ROLE_SAVE_RESTRICTION_MESSAGE =
+  'System roles can only have their permissions and activation status modified'
+const SUPER_ADMIN_LOCKED_PERMISSION_MESSAGE_PREFIX =
+  'SUPER_ADMIN must retain locked baseline permissions'
 const ROLE_IN_USE_MESSAGE = 'Role cannot be deleted while assigned to users.'
 const RESERVED_ASSIGNABLE_ROLE_KEYS = Object.freeze(['CUSTOMER_ADMIN', 'SUPER_ADMIN'])
+const EDITABLE_SYSTEM_ROLE_FIELDS = Object.freeze(['permissions', 'isActive'])
+const SUPER_ADMIN_EDITABLE_FIELDS = Object.freeze(['permissions'])
 
 const normalizeRoleKey = (value) =>
   String(value || '')
     .normalize('NFKC')
+    .trim()
+    .toUpperCase()
+
+const normalizePermissionKey = (value) =>
+  String(value || '')
     .trim()
     .toUpperCase()
 
@@ -29,17 +44,53 @@ const mapAssignableRole = (role) => ({
   isSystem: Boolean(role.isSystem),
 })
 
-const logBlockedSystemMutation = async (req, role, operation, attemptedFields = []) => {
+const buildSystemRoleFieldRestrictionMessage = (
+  allowedFields = EDITABLE_SYSTEM_ROLE_FIELDS,
+  disallowedFields = [],
+) => {
+  const allowedFieldList = allowedFields.join(', ')
+
+  if (disallowedFields.length === 0) {
+    return `System roles can only update: ${allowedFieldList}.`
+  }
+
+  return `System roles can only update: ${allowedFieldList}. Disallowed fields: ${disallowedFields.join(', ')}.`
+}
+
+const getMissingSuperAdminLockedPermissions = (permissionKeys = []) => {
+  const normalizedPermissionKeySet = new Set(
+    Array.isArray(permissionKeys)
+      ? permissionKeys.map(normalizePermissionKey).filter(Boolean)
+      : [],
+  )
+
+  return SUPER_ADMIN_LOCKED_PERMISSION_KEYS.filter(
+    (permissionKey) => !normalizedPermissionKeySet.has(permissionKey),
+  )
+}
+
+const buildSuperAdminLockedPermissionMessage = (missingPermissionKeys = []) =>
+  `${SUPER_ADMIN_LOCKED_PERMISSION_MESSAGE_PREFIX}: ${missingPermissionKeys.join(', ')}.`
+
+const logBlockedSystemMutation = async (
+  req,
+  role,
+  operation,
+  attemptedFields = [],
+  reason = 'SYSTEM_ROLE_PROTECTED',
+  extraDiff = {},
+) => {
   await auditService.logFromRequest(req, {
     action: auditService.AUDIT_ACTIONS.ROLE_MUTATION_BLOCKED,
     resourceType: auditService.RESOURCE_TYPES.Role,
     resourceId: role._id,
     scope: {},
     diff: {
-      reason: 'SYSTEM_ROLE_PROTECTED',
+      reason,
       operation,
       attemptedFields,
       roleKey: role.key,
+      ...extraDiff,
     },
   })
 }
@@ -126,6 +177,20 @@ export const listAssignableRoles = async (req, res, next) => {
       meta: {
         customerId: req.params.customerId,
         total: roles.length,
+        requestId: req.requestId,
+        version: 'v1',
+      },
+    })
+  } catch (err) {
+    next(err)
+  }
+}
+
+export const getPermissionCatalogue = async (req, res, next) => {
+  try {
+    return res.status(200).json({
+      data: PERMISSION_CATALOGUE,
+      meta: {
         requestId: req.requestId,
         version: 'v1',
       },
@@ -240,19 +305,63 @@ export const updateRole = async (req, res, next) => {
       })
     }
 
+    let fields = ['name', 'description', 'scope', 'permissions', 'isActive']
+
     if (role.isSystem) {
-      await logBlockedSystemMutation(req, role, 'update', Object.keys(req.body))
-      return res.status(403).json({
-        error: {
-          code: 'FORBIDDEN',
-          message: SYSTEM_ROLE_MUTATION_MESSAGE,
-          requestId: req.requestId,
-        },
-      })
+      const attemptedFields = Object.keys(req.body)
+      const allowedFields = role.key === 'SUPER_ADMIN'
+        ? SUPER_ADMIN_EDITABLE_FIELDS
+        : EDITABLE_SYSTEM_ROLE_FIELDS
+
+      const disallowedFields = attemptedFields.filter(
+        (field) => !allowedFields.includes(field),
+      )
+
+      if (disallowedFields.length > 0) {
+        await logBlockedSystemMutation(
+          req,
+          role,
+          'update',
+          attemptedFields,
+          'SYSTEM_ROLE_FIELD_RESTRICTED',
+        )
+
+        return res.status(403).json({
+          error: {
+            code: 'FORBIDDEN',
+            message: buildSystemRoleFieldRestrictionMessage(allowedFields, disallowedFields),
+            requestId: req.requestId,
+          },
+        })
+      }
+
+      if (role.key === 'SUPER_ADMIN' && req.body.permissions !== undefined) {
+        const missingPermissionKeys = getMissingSuperAdminLockedPermissions(req.body.permissions)
+
+        if (missingPermissionKeys.length > 0) {
+          await logBlockedSystemMutation(
+            req,
+            role,
+            'update',
+            attemptedFields,
+            'SUPER_ADMIN_LOCKED_PERMISSIONS_REQUIRED',
+            { missingPermissionKeys },
+          )
+
+          return res.status(403).json({
+            error: {
+              code: 'FORBIDDEN',
+              message: buildSuperAdminLockedPermissionMessage(missingPermissionKeys),
+              requestId: req.requestId,
+            },
+          })
+        }
+      }
+
+      fields = [...allowedFields]
     }
 
     const diff = {}
-    const fields = ['name', 'description', 'scope', 'permissions', 'isActive']
     for (const field of fields) {
       if (req.body[field] === undefined) continue
 
@@ -284,6 +393,26 @@ export const updateRole = async (req, res, next) => {
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
+    if (err?.message?.startsWith(SUPER_ADMIN_LOCKED_PERMISSION_MESSAGE_PREFIX)) {
+      return res.status(403).json({
+        error: {
+          code: 'FORBIDDEN',
+          message: err.message,
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    if (err?.message === SYSTEM_ROLE_SAVE_RESTRICTION_MESSAGE) {
+      return res.status(403).json({
+        error: {
+          code: 'FORBIDDEN',
+          message: SYSTEM_ROLE_SAVE_RESTRICTION_MESSAGE,
+          requestId: req.requestId,
+        },
+      })
+    }
+
     if (err?.name === 'ValidationError') {
       return res.status(422).json({
         error: {

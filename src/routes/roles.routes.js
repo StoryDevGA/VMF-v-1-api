@@ -11,6 +11,7 @@ import {
 import {
   createRole,
   deleteRole,
+  getPermissionCatalogue,
   getRole,
   listRoles,
   updateRole,
@@ -21,6 +22,7 @@ const router = Router()
 router.use(authJwt, loadScopes, requirePlatformRole('SUPER_ADMIN'))
 
 router.get('/', validateListRoles, listRoles)
+router.get('/permissions/catalogue', getPermissionCatalogue)
 router.post('/', validateCreateRole, createRole)
 router.get('/:roleId', validateRoleId, getRole)
 router.patch('/:roleId', validateRoleId, validateUpdateRole, updateRole)
