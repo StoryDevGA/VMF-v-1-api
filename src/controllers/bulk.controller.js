@@ -17,6 +17,14 @@ import logger from '../config/logger.js'
 import auditService from '../services/auditService.js'
 import performanceCacheService from '../services/performanceCacheService.js'
 import {
+  CUSTOMER_USER_ASSIGNABLE_ROLE_SCOPES,
+  IMPLICIT_TENANT_MEMBERSHIP_ROLE_KEYS,
+  TENANT_MEMBERSHIP_ASSIGNABLE_ROLE_SCOPES,
+  isRoleAssignmentValidationError,
+  loadRoleDefinitionsByKey,
+  validateRoleAssignments,
+} from '../services/roleAssignmentValidationService.js'
+import {
   buildTenantVisibilityErrorPayload,
   isTenantVisibilityAllowed,
   TENANT_VISIBILITY_REASONS,
@@ -39,6 +47,12 @@ const buildBulkTenantVisibilityFailure = ({
     errorDetails: payload.details,
   }
 }
+
+const buildBulkRoleAssignmentFailure = (err) => ({
+  error: err.message,
+  errorCode: err.code || 'VALIDATION_FAILED',
+  errorDetails: err.details || {},
+})
 
 /* ------------------------------------------------------------------ */
 /*  POST /api/v1/customers/:customerId/users/bulk                     */
@@ -67,6 +81,13 @@ export const bulkCreateUsers = async (req, res, next) => {
       })
     }
     const tenantVisibilityAllowed = isTenantVisibilityAllowed(customer)
+    const needsTenantMembershipRoleValidation = users.some(
+      (entry) => Array.isArray(entry.tenantVisibility) && entry.tenantVisibility.length > 0,
+    )
+    const roleDefinitionsByKey = await loadRoleDefinitionsByKey([
+      ...users.flatMap((entry) => entry.roles || []),
+      ...(needsTenantMembershipRoleValidation ? IMPLICIT_TENANT_MEMBERSHIP_ROLE_KEYS : []),
+    ])
 
     // 2. Pre-validate: collect all emails to detect duplicates in batch
     const emailSet = new Set()
@@ -114,6 +135,14 @@ export const bulkCreateUsers = async (req, res, next) => {
       const email = entry.email.toLowerCase()
 
       try {
+        const normalizedRoles = validateRoleAssignments({
+          roleKeys: entry.roles,
+          roleDefinitionsByKey,
+          allowedScopes: CUSTOMER_USER_ASSIGNABLE_ROLE_SCOPES,
+          field: 'roles',
+          assignmentLabel: 'bulk customer user role assignment',
+        })
+
         // Check internal duplicates
         if (internalDuplicates.has(email)) {
           const isDuplicate = results.some(
@@ -180,6 +209,16 @@ export const bulkCreateUsers = async (req, res, next) => {
             })
             continue
           }
+
+          if (entry.tenantVisibility.length > 0) {
+            validateRoleAssignments({
+              roleKeys: IMPLICIT_TENANT_MEMBERSHIP_ROLE_KEYS,
+              roleDefinitionsByKey,
+              allowedScopes: TENANT_MEMBERSHIP_ASSIGNABLE_ROLE_SCOPES,
+              field: 'tenantVisibility',
+              assignmentLabel: 'bulk tenant visibility assignment',
+            })
+          }
         }
 
         // Create user
@@ -188,7 +227,7 @@ export const bulkCreateUsers = async (req, res, next) => {
           email,
           isActive: true,
           identityPlus: { trustStatus: 'UNTRUSTED' },
-          memberships: [{ customerId, roles: entry.roles }],
+          memberships: [{ customerId, roles: normalizedRoles }],
           tenantMemberships: (entry.tenantVisibility || []).map((tenantId) => ({
             customerId,
             tenantId,
@@ -234,7 +273,7 @@ export const bulkCreateUsers = async (req, res, next) => {
           diff: {
             name: entry.name,
             email,
-            roles: entry.roles,
+            roles: normalizedRoles,
             tenantVisibility: entry.tenantVisibility,
             bulk: true,
           },
@@ -250,6 +289,15 @@ export const bulkCreateUsers = async (req, res, next) => {
         })
       } catch (err) {
         failureCount++
+        if (isRoleAssignmentValidationError(err)) {
+          results.push({
+            index: i,
+            email,
+            status: 'failed',
+            ...buildBulkRoleAssignmentFailure(err),
+          })
+          continue
+        }
         logger.error({ err, email, index: i }, 'bulk create user failed')
         results.push({
           index: i,
@@ -317,6 +365,13 @@ export const bulkUpdateUsers = async (req, res, next) => {
       })
     }
     const tenantVisibilityAllowed = isTenantVisibilityAllowed(customer)
+    const needsTenantMembershipRoleValidation = users.some(
+      (entry) => Array.isArray(entry.tenantVisibility) && entry.tenantVisibility.length > 0,
+    )
+    const roleDefinitionsByKey = await loadRoleDefinitionsByKey([
+      ...users.flatMap((entry) => entry.roles || []),
+      ...(needsTenantMembershipRoleValidation ? IMPLICIT_TENANT_MEMBERSHIP_ROLE_KEYS : []),
+    ])
 
     // 2. Pre-validate tenant visibility IDs
     const allTenantIds = new Set()
@@ -375,11 +430,20 @@ export const bulkUpdateUsers = async (req, res, next) => {
         }
 
         const diff = {}
+        const normalizedRoles = entry.roles !== undefined
+          ? validateRoleAssignments({
+              roleKeys: entry.roles,
+              roleDefinitionsByKey,
+              allowedScopes: CUSTOMER_USER_ASSIGNABLE_ROLE_SCOPES,
+              field: 'roles',
+              assignmentLabel: 'bulk customer user role assignment',
+            })
+          : undefined
 
         // Update roles
-        if (entry.roles !== undefined) {
-          diff.roles = { from: [...membership.roles], to: entry.roles }
-          membership.roles = entry.roles
+        if (normalizedRoles !== undefined) {
+          diff.roles = { from: [...membership.roles], to: normalizedRoles }
+          membership.roles = normalizedRoles
         }
 
         // Update tenant visibility
@@ -418,6 +482,16 @@ export const bulkUpdateUsers = async (req, res, next) => {
               ...failure,
             })
             continue
+          }
+
+          if (entry.tenantVisibility.length > 0) {
+            validateRoleAssignments({
+              roleKeys: IMPLICIT_TENANT_MEMBERSHIP_ROLE_KEYS,
+              roleDefinitionsByKey,
+              allowedScopes: TENANT_MEMBERSHIP_ASSIGNABLE_ROLE_SCOPES,
+              field: 'tenantVisibility',
+              assignmentLabel: 'bulk tenant visibility assignment',
+            })
           }
 
           diff.tenantVisibility = {
@@ -464,6 +538,15 @@ export const bulkUpdateUsers = async (req, res, next) => {
         })
       } catch (err) {
         failureCount++
+        if (isRoleAssignmentValidationError(err)) {
+          results.push({
+            index: i,
+            userId: entry.userId,
+            status: 'failed',
+            ...buildBulkRoleAssignmentFailure(err),
+          })
+          continue
+        }
         logger.error({ err, userId: entry.userId, index: i }, 'bulk update user failed')
         results.push({
           index: i,

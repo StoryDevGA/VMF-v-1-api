@@ -7,7 +7,7 @@
  *     GET   /api/v1/vmfs/:vmfId/deals       List deals
  *     POST  /api/v1/vmfs/:vmfId/deals       Create deal
  *
- *   Deal-scoped (SUPER_ADMIN):
+ *   Deal-scoped (hybrid capability + VMF grant access):
  *     GET    /api/v1/deals/:dealId           Get single deal
  *     PATCH  /api/v1/deals/:dealId           Update deal
  *     DELETE /api/v1/deals/:dealId           Soft-delete (archive) deal
@@ -162,7 +162,7 @@ export const createDeal = async (req, res, next) => {
  */
 export const getDeal = async (req, res, next) => {
   try {
-    const deal = await Deal.findById(req.params.dealId)
+    const deal = req.scopes?.deal || await Deal.findById(req.params.dealId)
 
     if (!deal) {
       return res.status(404).json({
@@ -192,7 +192,7 @@ export const getDeal = async (req, res, next) => {
  */
 export const updateDeal = async (req, res, next) => {
   try {
-    const deal = await Deal.findById(req.params.dealId)
+    const deal = req.scopes?.deal || await Deal.findById(req.params.dealId)
 
     if (!deal) {
       return res.status(404).json({
@@ -255,7 +255,7 @@ export const updateDeal = async (req, res, next) => {
  */
 export const archiveDeal = async (req, res, next) => {
   try {
-    const deal = await Deal.findById(req.params.dealId)
+    const deal = req.scopes?.deal || await Deal.findById(req.params.dealId)
 
     if (!deal) {
       return res.status(404).json({

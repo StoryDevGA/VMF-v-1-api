@@ -29,12 +29,19 @@ const nameSchema = z
   .min(1, 'Name is required')
   .max(255, 'Name must be 255 characters or fewer')
 
+const roleKeySchema = z
+  .string()
+  .trim()
+  .min(1, 'Role must not be empty')
+  .transform((value) => value.toUpperCase())
+
 const rolesSchema = z
   .array(
-    z.string().trim().min(1, 'Role must not be empty'),
+    roleKeySchema,
     { required_error: 'Roles are required' },
   )
   .min(1, 'At least one role is required')
+  .transform((roles) => [...new Set(roles)])
 
 const tenantVisibilitySchema = z
   .array(
@@ -79,10 +86,7 @@ const bulkUpdateUsersSchema = z.object({
         userId: z
           .string({ required_error: 'userId is required' })
           .regex(objectIdRegex, 'userId must be a valid ObjectId'),
-        roles: z
-          .array(z.string().trim().min(1, 'Role must not be empty'))
-          .min(1, 'At least one role is required')
-          .optional(),
+        roles: rolesSchema.optional(),
         tenantVisibility: z
           .array(
             z.string().regex(objectIdRegex, 'Each tenant ID must be a valid ObjectId'),

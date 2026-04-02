@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import authJwt from '../middleware/authJwt.js'
 import loadScopes from '../middleware/loadScopes.js'
-import { requirePlatformRole } from '../middleware/authorize.js'
+import { requirePlatformPermission } from '../middleware/authorize.js'
 import {
   validateCreateRole,
   validateListRoles,
@@ -19,7 +19,7 @@ import {
 
 const router = Router()
 
-router.use(authJwt, loadScopes, requirePlatformRole('SUPER_ADMIN'))
+router.use(authJwt, loadScopes, requirePlatformPermission('ROLE_MANAGE'))
 
 router.get('/', validateListRoles, listRoles)
 router.get('/permissions/catalogue', getPermissionCatalogue)

@@ -2,7 +2,7 @@
  * Customer Routes
  *
  * Mounts customer management endpoints under `/api/v1/customers`.
- * All routes require SUPER_ADMIN platform role.
+ * All routes require explicit platform customer-management permissions.
  *
  * Route map:
  *   GET    /                              – List customers
@@ -18,7 +18,7 @@
 import { Router } from 'express'
 import authJwt from '../middleware/authJwt.js'
 import loadScopes from '../middleware/loadScopes.js'
-import { requirePlatformRole } from '../middleware/authorize.js'
+import { requirePlatformPermission } from '../middleware/authorize.js'
 import { tenantManagementRateLimit } from '../middleware/rateLimits.js'
 import requireStepUp from '../middleware/requireStepUp.js'
 import {
@@ -43,29 +43,55 @@ import {
 const router = Router()
 
 /* ------------------------------------------------------------------ */
-/*  Common middleware: auth + scopes + SUPER_ADMIN                    */
+/*  Common middleware: auth + scopes                                  */
 /* ------------------------------------------------------------------ */
 
-router.use(authJwt, loadScopes, requirePlatformRole('SUPER_ADMIN'))
+router.use(authJwt, loadScopes)
 
 /* ------------------------------------------------------------------ */
 /*  Routes                                                            */
 /* ------------------------------------------------------------------ */
 
-router.get('/', listCustomers)
-router.post('/', tenantManagementRateLimit, validateCreateCustomer, createCustomer)
-router.get('/:customerId', getCustomer)
-router.patch('/:customerId', tenantManagementRateLimit, validateUpdateCustomer, updateCustomer)
-router.patch('/:customerId/status', tenantManagementRateLimit, validateUpdateStatus, updateCustomerStatus)
-router.post('/:customerId/admins', tenantManagementRateLimit, validateAssignAdmin, assignAdmin)
+router.get('/', requirePlatformPermission('CUSTOMER_VIEW'), listCustomers)
+router.post(
+  '/',
+  requirePlatformPermission('CUSTOMER_CREATE'),
+  tenantManagementRateLimit,
+  validateCreateCustomer,
+  createCustomer,
+)
+router.get('/:customerId', requirePlatformPermission('CUSTOMER_VIEW'), getCustomer)
+router.patch(
+  '/:customerId',
+  requirePlatformPermission('CUSTOMER_UPDATE'),
+  tenantManagementRateLimit,
+  validateUpdateCustomer,
+  updateCustomer,
+)
+router.patch(
+  '/:customerId/status',
+  requirePlatformPermission('CUSTOMER_UPDATE'),
+  tenantManagementRateLimit,
+  validateUpdateStatus,
+  updateCustomerStatus,
+)
+router.post(
+  '/:customerId/admins',
+  requirePlatformPermission('CUSTOMER_UPDATE'),
+  tenantManagementRateLimit,
+  validateAssignAdmin,
+  assignAdmin,
+)
 router.post(
   '/:customerId/admin-invitations',
+  requirePlatformPermission('CUSTOMER_UPDATE'),
   tenantManagementRateLimit,
   validateCreateAdminInvitation,
   createAdminInvitation,
 )
 router.post(
   '/:customerId/admins/replace',
+  requirePlatformPermission('CUSTOMER_UPDATE'),
   tenantManagementRateLimit,
   requireStepUp,
   validateReplaceAdmin,

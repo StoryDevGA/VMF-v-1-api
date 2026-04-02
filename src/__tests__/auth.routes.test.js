@@ -31,6 +31,10 @@ beforeAll(() => {
 let app
 let request // supertest bound to app
 let tokenService
+let performanceCacheService
+
+const CUSTOMER_ID = '607f1f77bcf86cd799439022'
+const TENANT_ID = '707f1f77bcf86cd799439033'
 
 /**
  * Build a fake User document that behaves like a Mongoose model instance.
@@ -79,6 +83,7 @@ beforeAll(async () => {
   const supertest = (await import('supertest')).default
   app = (await import('../app.js')).default
   tokenService = (await import('../services/tokenService.js')).default
+  performanceCacheService = (await import('../services/performanceCacheService.js')).default
   request = supertest(app)
 })
 
@@ -89,12 +94,13 @@ beforeAll(async () => {
 // We cannot jest.mock() an ESM module at the top level in --experimental-vm-modules,
 // so we monkey-patch the model's static methods before each test instead.
 
-let User, Customer, LicenseLevel
+let User, Customer, LicenseLevel, Role
 beforeAll(async () => {
   const models = await import('../models/index.js')
   User = models.User
   Customer = models.Customer
   LicenseLevel = models.LicenseLevel
+  Role = models.Role
 })
 
 beforeEach(() => {
@@ -112,6 +118,21 @@ beforeEach(() => {
   LicenseLevel.findById = jest.fn().mockReturnValue({
     select: jest.fn().mockResolvedValue(null),
   })
+  Role.find = jest.fn().mockResolvedValue([
+    {
+      key: 'SUPER_ADMIN',
+      scope: 'PLATFORM',
+      permissions: ['PLATFORM_MANAGE', 'SYSTEM_HEALTH_VIEW'],
+      isActive: true,
+    },
+    {
+      key: 'USER',
+      scope: 'TENANT',
+      permissions: ['VMF_VIEW'],
+      isActive: true,
+    },
+  ])
+  performanceCacheService.setUserPermissions = jest.fn(async () => {})
 })
 
 /* ================================================================== */
@@ -211,7 +232,61 @@ describe('POST /api/v1/auth/login', () => {
     expect(res.body.data.tokenType).toBe('Bearer')
     expect(res.body.data.user.email).toBe('admin@storylineos.com')
     expect(res.body.data.customerScopes).toEqual([])
+    expect(res.body.data.resolvedPermissions).toEqual({
+      platform: {
+        roleKeys: ['SUPER_ADMIN'],
+        permissions: ['PLATFORM_MANAGE', 'SYSTEM_HEALTH_VIEW'],
+      },
+      customers: [],
+      tenants: [],
+    })
+    expect(performanceCacheService.setUserPermissions).toHaveBeenCalledWith(
+      user._id,
+      expect.objectContaining({
+        resolvedPermissions: {
+          platform: {
+            roleKeys: ['SUPER_ADMIN'],
+            permissions: ['PLATFORM_MANAGE', 'SYSTEM_HEALTH_VIEW'],
+          },
+          customers: [],
+          tenants: [],
+        },
+      }),
+    )
     expect(res.body.meta.requestId).toBeDefined()
+  })
+
+  test('returns 200 with empty resolvedPermissions when role resolution fails', async () => {
+    const user = makeFakeUser()
+    User.findByEmail.mockResolvedValue(user)
+    Role.find.mockRejectedValue(new Error('role lookup failed'))
+
+    const res = await request
+      .post('/api/v1/auth/login')
+      .send({ email: 'admin@storylineos.com', password: 'CorrectPassword1!' })
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.resolvedPermissions).toEqual({
+      platform: {
+        roleKeys: [],
+        permissions: [],
+      },
+      customers: [],
+      tenants: [],
+    })
+    expect(performanceCacheService.setUserPermissions).toHaveBeenCalledWith(
+      user._id,
+      expect.objectContaining({
+        resolvedPermissions: {
+          platform: {
+            roleKeys: [],
+            permissions: [],
+          },
+          customers: [],
+          tenants: [],
+        },
+      }),
+    )
   })
 
   test('returns customerScopes with featureEntitlements when customer memberships exist', async () => {
@@ -255,6 +330,71 @@ describe('POST /api/v1/auth/login', () => {
         entitlementSource: 'LICENSE_LEVEL',
       },
     ])
+    expect(res.body.data.resolvedPermissions).toEqual({
+      platform: {
+        roleKeys: [],
+        permissions: [],
+      },
+      customers: [
+        {
+          customerId: '607f1f77bcf86cd799439022',
+          roleKeys: ['USER'],
+          permissions: ['VMF_VIEW'],
+        },
+      ],
+      tenants: [],
+    })
+  })
+
+  test('returns tenant-scoped resolvedPermissions when tenant memberships exist', async () => {
+    const user = makeFakeUser({
+      memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+      tenantMemberships: [{ customerId: CUSTOMER_ID, tenantId: TENANT_ID, roles: ['USER'] }],
+    })
+    User.findByEmail.mockResolvedValue(user)
+    Customer.find.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue([
+          { _id: CUSTOMER_ID, status: 'ACTIVE' },
+        ]),
+      }),
+    })
+    Customer.findById.mockReturnValue({
+      select: jest.fn().mockResolvedValue({
+        _id: CUSTOMER_ID,
+        topology: 'MULTI_TENANT',
+        defaultTenantId: null,
+        licenseLevelId: null,
+        entitlements: [],
+      }),
+    })
+
+    const res = await request
+      .post('/api/v1/auth/login')
+      .send({ email: 'admin@storylineos.com', password: 'CorrectPassword1!' })
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.resolvedPermissions).toEqual({
+      platform: {
+        roleKeys: [],
+        permissions: [],
+      },
+      customers: [
+        {
+          customerId: CUSTOMER_ID,
+          roleKeys: ['USER'],
+          permissions: ['VMF_VIEW'],
+        },
+      ],
+      tenants: [
+        {
+          customerId: CUSTOMER_ID,
+          tenantId: TENANT_ID,
+          roleKeys: ['USER'],
+          permissions: ['VMF_VIEW'],
+        },
+      ],
+    })
   })
 
   test('returns single-tenant defaultTenantId in customerScopes when available', async () => {
@@ -325,6 +465,14 @@ describe('POST /api/v1/auth/super-admin/login', () => {
 
     expect(res.status).toBe(200)
     expect(res.body.data.accessToken).toBeDefined()
+    expect(res.body.data.resolvedPermissions).toEqual({
+      platform: {
+        roleKeys: ['SUPER_ADMIN'],
+        permissions: ['PLATFORM_MANAGE', 'SYSTEM_HEALTH_VIEW'],
+      },
+      customers: [],
+      tenants: [],
+    })
   })
 })
 
@@ -414,8 +562,95 @@ describe('GET /api/v1/auth/me', () => {
     expect(res.body.data.user.email).toBe('admin@storylineos.com')
     expect(res.body.data.user.memberships).toBeDefined()
     expect(res.body.data.customerScopes).toEqual([])
+    expect(res.body.data.resolvedPermissions).toEqual({
+      platform: {
+        roleKeys: ['SUPER_ADMIN'],
+        permissions: ['PLATFORM_MANAGE', 'SYSTEM_HEALTH_VIEW'],
+      },
+      customers: [],
+      tenants: [],
+    })
+    expect(performanceCacheService.setUserPermissions).toHaveBeenCalledWith(
+      user._id,
+      expect.objectContaining({
+        resolvedPermissions: {
+          platform: {
+            roleKeys: ['SUPER_ADMIN'],
+            permissions: ['PLATFORM_MANAGE', 'SYSTEM_HEALTH_VIEW'],
+          },
+          customers: [],
+          tenants: [],
+        },
+      }),
+    )
     // passwordHash must never be returned
     expect(res.body.data.user.passwordHash).toBeUndefined()
+  })
+
+  test('returns customer-scoped resolvedPermissions when authenticated user has customer memberships', async () => {
+    const user = makeFakeUser({
+      memberships: [{ customerId: '607f1f77bcf86cd799439022', roles: ['USER'] }],
+    })
+    const tokens = await getAccessTokenForUser(user)
+
+    User.findById.mockResolvedValue(user)
+    Customer.findById.mockReturnValue({
+      select: jest.fn().mockResolvedValue({
+        _id: '607f1f77bcf86cd799439022',
+        topology: 'MULTI_TENANT',
+        defaultTenantId: null,
+        licenseLevelId: null,
+        entitlements: [],
+      }),
+    })
+
+    const res = await request
+      .get('/api/v1/auth/me')
+      .set('Authorization', `Bearer ${tokens.accessToken}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.resolvedPermissions).toEqual({
+      platform: {
+        roleKeys: [],
+        permissions: [],
+      },
+      customers: [
+        {
+          customerId: '607f1f77bcf86cd799439022',
+          roleKeys: ['USER'],
+          permissions: ['VMF_VIEW'],
+        },
+      ],
+      tenants: [],
+    })
+    expect(res.body.data.customerScopes).toEqual([
+      {
+        customerId: '607f1f77bcf86cd799439022',
+        licenseLevelId: null,
+        featureEntitlements: ['VMF', 'DEALS', 'VIEWS'],
+        entitlementSource: 'LEGACY_UNRESTRICTED',
+        topology: 'MULTI_TENANT',
+      },
+    ])
+    expect(performanceCacheService.setUserPermissions).toHaveBeenCalledWith(
+      user._id,
+      expect.objectContaining({
+        resolvedPermissions: {
+          platform: {
+            roleKeys: [],
+            permissions: [],
+          },
+          customers: [
+            {
+              customerId: '607f1f77bcf86cd799439022',
+              roleKeys: ['USER'],
+              permissions: ['VMF_VIEW'],
+            },
+          ],
+          tenants: [],
+        },
+      }),
+    )
   })
 
   test('returns 401 when user no longer exists', async () => {

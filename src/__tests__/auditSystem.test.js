@@ -161,7 +161,39 @@ const makeAuditLogList = () => [
 /* ------------------------------------------------------------------ */
 
 let app, request, tokenService
-let User, Customer, AuditLog
+let User, Customer, AuditLog, Role
+
+const buildRoleQueryChain = (rows) => {
+  const chain = {
+    lean: jest.fn().mockResolvedValue(rows),
+  }
+  chain.select = jest.fn().mockReturnValue(chain)
+  chain.sort = jest.fn().mockReturnValue(chain)
+  chain.skip = jest.fn().mockReturnValue(chain)
+  chain.limit = jest.fn().mockReturnValue(chain)
+  return chain
+}
+
+const buildDefaultRoleRows = () => ([
+  {
+    key: 'SUPER_ADMIN',
+    scope: 'PLATFORM',
+    permissions: ['PLATFORM_MANAGE', 'SYSTEM_HEALTH_VIEW', 'CUSTOMER_CREATE', 'CUSTOMER_UPDATE', 'CUSTOMER_VIEW', 'ROLE_MANAGE', 'AUDIT_VIEW_ALL'],
+    isActive: true,
+  },
+  {
+    key: 'CUSTOMER_ADMIN',
+    scope: 'CUSTOMER',
+    permissions: ['CUSTOMER_VIEW', 'USER_CREATE', 'USER_UPDATE', 'USER_DELETE', 'USER_VIEW', 'TENANT_CREATE', 'TENANT_UPDATE', 'TENANT_VIEW', 'VMF_CREATE', 'VMF_UPDATE', 'VMF_VIEW', 'AUDIT_VIEW_CUSTOMER'],
+    isActive: true,
+  },
+  {
+    key: 'USER',
+    scope: 'VMF',
+    permissions: ['VMF_VIEW', 'DEAL_CREATE', 'DEAL_UPDATE', 'DEAL_VIEW'],
+    isActive: true,
+  },
+])
 
 beforeAll(async () => {
   const supertest = (await import('supertest')).default
@@ -173,6 +205,7 @@ beforeAll(async () => {
   User = models.User
   Customer = models.Customer
   AuditLog = models.AuditLog
+  Role = models.Role
 })
 
 /* ------------------------------------------------------------------ */
@@ -210,6 +243,7 @@ beforeEach(() => {
   User.findById = jest.fn()
   User.findOne = jest.fn()
   Customer.findById = jest.fn()
+  Role.find = jest.fn().mockImplementation(() => buildRoleQueryChain(buildDefaultRoleRows()))
   AuditLog.createLog = jest.fn(async () => ({}))
   AuditLog.find = jest.fn()
   AuditLog.findOne = jest.fn()
@@ -1182,6 +1216,37 @@ describe('GET /api/v1/audit-logs/retention — Info', () => {
 /* ================================================================== */
 
 describe('POST /api/v1/audit-logs/retention/cleanup — Cleanup', () => {
+  test('rejects audit-view-only platform users from cleanup', async () => {
+    const auditViewer = makeSuperAdmin({
+      _id: '507f1f77bcf86cd799439099',
+      id: '507f1f77bcf86cd799439099',
+      email: 'audit-viewer@example.com',
+      memberships: [{ customerId: null, roles: ['AUDIT_VIEWER'] }],
+    })
+    const tokens = await tokenService.generateTokens(auditViewer)
+
+    User.findById.mockImplementation((id) => {
+      if (id === auditViewer._id) return Promise.resolve(auditViewer)
+      return Promise.resolve(null)
+    })
+    Role.find.mockImplementation(() => buildRoleQueryChain([
+      ...buildDefaultRoleRows(),
+      {
+        key: 'AUDIT_VIEWER',
+        scope: 'PLATFORM',
+        permissions: ['AUDIT_VIEW_ALL'],
+        isActive: true,
+      },
+    ]))
+
+    const res = await request
+      .post('/api/v1/audit-logs/retention/cleanup')
+      .set('Authorization', `Bearer ${tokens.accessToken}`)
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('FORBIDDEN')
+  })
+
   test('runs cleanup and returns result', async () => {
     const token = await getSuperAdminToken()
 

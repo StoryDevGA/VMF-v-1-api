@@ -3,7 +3,9 @@ import {
   SUPER_ADMIN_LOCKED_PERMISSION_KEYS,
 } from '../constants/permissionCatalogue.js'
 import { Role, User } from '../models/index.js'
+import logger from '../config/logger.js'
 import auditService from '../services/auditService.js'
+import performanceCacheService from '../services/performanceCacheService.js'
 
 const DUPLICATE_ROLE_KEY_MESSAGE = 'A role with this key already exists.'
 const SYSTEM_ROLE_MUTATION_MESSAGE = 'System roles are protected and cannot be modified.'
@@ -11,16 +13,32 @@ const SYSTEM_ROLE_SAVE_RESTRICTION_MESSAGE =
   'System roles can only have their permissions and activation status modified'
 const SUPER_ADMIN_LOCKED_PERMISSION_MESSAGE_PREFIX =
   'SUPER_ADMIN must retain locked baseline permissions'
+const USER_ROLE_ACTIVE_REQUIRED_MESSAGE =
+  'USER role must remain active because tenant visibility assignments depend on it.'
 const ROLE_IN_USE_MESSAGE = 'Role cannot be deleted while assigned to users.'
 const RESERVED_ASSIGNABLE_ROLE_KEYS = Object.freeze(['CUSTOMER_ADMIN', 'SUPER_ADMIN'])
 const EDITABLE_SYSTEM_ROLE_FIELDS = Object.freeze(['permissions', 'isActive'])
 const SUPER_ADMIN_EDITABLE_FIELDS = Object.freeze(['permissions'])
+const AUTHORIZATION_IMPACT_FIELDS = Object.freeze(['permissions', 'scope', 'isActive'])
 
 const normalizeRoleKey = (value) =>
   String(value || '')
     .normalize('NFKC')
     .trim()
     .toUpperCase()
+
+const escapeRegexForRoleKey = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+const buildAssignedRoleUsageQuery = (roleKey) => {
+  const normalized = normalizeRoleKey(roleKey)
+  const pattern = `^${escapeRegexForRoleKey(normalized)}$`
+  return {
+    $or: [
+      { 'memberships.roles': { $regex: pattern, $options: 'i' } },
+      { 'tenantMemberships.roles': { $regex: pattern, $options: 'i' } },
+    ],
+  }
+}
 
 const normalizePermissionKey = (value) =>
   String(value || '')
@@ -36,6 +54,9 @@ const arrayEquals = (left = [], right = []) => (
   && left.length === right.length
   && left.every((value, index) => value === right[index])
 )
+
+const getAuthorizationImpactFields = (diff = {}) =>
+  AUTHORIZATION_IMPACT_FIELDS.filter((field) => diff[field] !== undefined)
 
 const mapAssignableRole = (role) => ({
   key: role.key,
@@ -358,6 +379,24 @@ export const updateRole = async (req, res, next) => {
         }
       }
 
+      if (role.key === 'USER' && req.body.isActive === false) {
+        await logBlockedSystemMutation(
+          req,
+          role,
+          'update',
+          attemptedFields,
+          'USER_ROLE_ACTIVE_REQUIRED',
+        )
+
+        return res.status(403).json({
+          error: {
+            code: 'FORBIDDEN',
+            message: USER_ROLE_ACTIVE_REQUIRED_MESSAGE,
+            requestId: req.requestId,
+          },
+        })
+      }
+
       fields = [...allowedFields]
     }
 
@@ -378,6 +417,11 @@ export const updateRole = async (req, res, next) => {
       role[field] = nextValue
     }
 
+    const authorizationImpactFields = getAuthorizationImpactFields(diff)
+    const invalidationPlan = authorizationImpactFields.length > 0
+      ? await performanceCacheService.planUserPermissionInvalidationForRoleKey(role.key)
+      : null
+
     await role.save()
 
     await auditService.logFromRequest(req, {
@@ -387,6 +431,33 @@ export const updateRole = async (req, res, next) => {
       scope: {},
       diff,
     })
+
+    if (authorizationImpactFields.length > 0) {
+      const invalidationSummary = await performanceCacheService.invalidateUserPermissionsForRoleKey(
+        role.key,
+        {
+          affectedUserIds: invalidationPlan?.affectedUserIds,
+          affectedUserCount: invalidationPlan?.affectedUserCount,
+          invalidationPlan,
+        },
+      )
+
+      logger.info(
+        {
+          requestId: req.requestId,
+          roleId: role._id,
+          roleKey: role.key,
+          changedFields: authorizationImpactFields,
+          affectedUserCount: invalidationPlan?.affectedUserCount ?? invalidationSummary.affectedUserCount,
+          invalidatedUserCount: invalidationSummary.invalidatedUserCount,
+          globalInvalidation: Boolean(invalidationSummary.globalInvalidation),
+          globalInvalidationReason: invalidationSummary.globalInvalidationReason,
+          redisFailureCount: invalidationSummary.redisFailureCount,
+          skipped: Boolean(invalidationSummary.skipped),
+        },
+        'role authorization cache invalidation completed',
+      )
+    }
 
     return res.status(200).json({
       data: role.toJSON(),
@@ -408,6 +479,16 @@ export const updateRole = async (req, res, next) => {
         error: {
           code: 'FORBIDDEN',
           message: SYSTEM_ROLE_SAVE_RESTRICTION_MESSAGE,
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    if (err?.message === USER_ROLE_ACTIVE_REQUIRED_MESSAGE) {
+      return res.status(403).json({
+        error: {
+          code: 'FORBIDDEN',
+          message: USER_ROLE_ACTIVE_REQUIRED_MESSAGE,
           requestId: req.requestId,
         },
       })
@@ -452,12 +533,7 @@ export const deleteRole = async (req, res, next) => {
       })
     }
 
-    const assignedUserCount = await User.countDocuments({
-      $or: [
-        { memberships: { $elemMatch: { roles: role.key } } },
-        { tenantMemberships: { $elemMatch: { roles: role.key } } },
-      ],
-    })
+    const assignedUserCount = await User.countDocuments(buildAssignedRoleUsageQuery(role.key))
 
     if (assignedUserCount > 0) {
       await auditService.logFromRequest(req, {

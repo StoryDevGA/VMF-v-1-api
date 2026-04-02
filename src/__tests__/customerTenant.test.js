@@ -196,8 +196,78 @@ const makeFakeInvitation = (overrides = {}) => ({
 /* ------------------------------------------------------------------ */
 
 let app, request, tokenService, validateTenantAdminAssignments, ensureTenantAdminCustomerRole
-let User, Customer, Tenant, VMF, AuditLog, Invitation, LicenseLevel
+let User, Customer, Tenant, VMF, AuditLog, Invitation, LicenseLevel, Role
 let startSessionSpy
+
+const buildRoleQueryChain = (rows) => {
+  const chain = {
+    lean: jest.fn().mockResolvedValue(rows),
+  }
+  chain.select = jest.fn().mockReturnValue(chain)
+  chain.sort = jest.fn().mockReturnValue(chain)
+  chain.skip = jest.fn().mockReturnValue(chain)
+  chain.limit = jest.fn().mockReturnValue(chain)
+  return chain
+}
+
+const buildDefaultRoleRows = () => ([
+  {
+    key: 'SUPER_ADMIN',
+    scope: 'PLATFORM',
+    permissions: [
+      'PLATFORM_MANAGE',
+      'SYSTEM_HEALTH_VIEW',
+      'CUSTOMER_CREATE',
+      'CUSTOMER_UPDATE',
+      'CUSTOMER_VIEW',
+      'ROLE_MANAGE',
+      'AUDIT_VIEW_ALL',
+    ],
+    isActive: true,
+  },
+  {
+    key: 'CUSTOMER_ADMIN',
+    scope: 'CUSTOMER',
+    permissions: [
+      'CUSTOMER_VIEW',
+      'USER_CREATE',
+      'USER_UPDATE',
+      'USER_DELETE',
+      'USER_VIEW',
+      'TENANT_CREATE',
+      'TENANT_UPDATE',
+      'TENANT_VIEW',
+      'VMF_CREATE',
+      'VMF_UPDATE',
+      'VMF_VIEW',
+      'AUDIT_VIEW_CUSTOMER',
+    ],
+    isActive: true,
+  },
+  {
+    key: 'TENANT_ADMIN',
+    scope: 'TENANT',
+    permissions: [
+      'TENANT_VIEW',
+      'TENANT_UPDATE',
+      'USER_VIEW_TENANT',
+      'VMF_CREATE',
+      'VMF_UPDATE',
+      'VMF_VIEW',
+      'DEAL_CREATE',
+      'DEAL_UPDATE',
+      'DEAL_DELETE',
+      'DEAL_VIEW',
+    ],
+    isActive: true,
+  },
+  {
+    key: 'USER',
+    scope: 'VMF',
+    permissions: ['VMF_VIEW', 'DEAL_CREATE', 'DEAL_UPDATE', 'DEAL_VIEW'],
+    isActive: true,
+  },
+])
 
 const buildSession = () => ({
   withTransaction: jest.fn(async (callback) => callback()),
@@ -221,6 +291,7 @@ beforeAll(async () => {
   AuditLog = models.AuditLog
   Invitation = models.Invitation
   LicenseLevel = models.LicenseLevel
+  Role = models.Role
 })
 
 afterAll(() => {
@@ -323,6 +394,7 @@ beforeEach(() => {
   Invitation.create = jest.fn()
   Invitation.generateToken = jest.fn(() => ({ raw: 'raw-token', hash: 'hash-token' }))
   LicenseLevel.findById = jest.fn()
+  Role.find = jest.fn().mockImplementation(() => buildRoleQueryChain(buildDefaultRoleRows()))
   AuditLog.createLog = jest.fn(async () => ({}))
 
   Tenant.updateMany = jest.fn().mockResolvedValue({ modifiedCount: 0 })
@@ -2249,7 +2321,7 @@ describe('GET /api/v1/customers/:customerId/tenants', () => {
     expect(res.body.meta.tenantVisibility?.mode).toBe('OPTIONAL')
   })
 
-  test('allows single-tenant customer members to resolve the default tenant catalogue', async () => {
+  test('denies single-tenant customer members when TENANT_VIEW is absent', async () => {
     const token = await getNonAdminToken()
 
     Customer.findById.mockResolvedValue(
@@ -2265,36 +2337,13 @@ describe('GET /api/v1/customers/:customerId/tenants', () => {
       }),
     )
 
-    Tenant.find.mockReturnValue({
-      sort: jest.fn().mockReturnValue({
-        skip: jest.fn().mockReturnValue({
-          limit: jest.fn().mockReturnValue({
-            lean: jest.fn().mockResolvedValue([
-              makeFakeTenant({
-                _id: TENANT_ID,
-                id: TENANT_ID,
-                customerId: CUSTOMER_ID,
-                isDefault: true,
-              }),
-            ]),
-          }),
-        }),
-      }),
-    })
-    Tenant.countDocuments
-      .mockResolvedValueOnce(1)
-      .mockResolvedValueOnce(1)
-
     const res = await request
       .get(`/api/v1/customers/${CUSTOMER_ID}/tenants`)
       .set('Authorization', `Bearer ${token}`)
 
-    expect(res.status).toBe(200)
-    expect(res.body.data).toHaveLength(1)
-    expect(res.body.data[0].id).toBe(TENANT_ID)
-    expect(res.body.data[0].isSelectable).toBe(true)
-    expect(res.body.meta.tenantVisibility?.topology).toBe('SINGLE_TENANT')
-    expect(res.body.meta.tenantVisibility?.allowed).toBe(false)
+    expect(res.status).toBe(403)
+    expect(res.body.error.message).toBe("Customer permission 'TENANT_VIEW' is required.")
+    expect(Tenant.find).not.toHaveBeenCalled()
   })
 
   test('returns only administered tenants for tenant-admin scoped access', async () => {
@@ -2356,45 +2405,18 @@ describe('GET /api/v1/customers/:customerId/tenants', () => {
     expect(res.body.error.requestId).toBeDefined()
   })
 
-  test('allows standard USER with tenantMemberships to list tenants (tenant member bypass)', async () => {
+  test('denies standard USER tenant members when TENANT_VIEW is absent', async () => {
     const token = await getTenantMemberToken()
 
     Customer.findById.mockResolvedValue(makeFakeCustomer())
-
-    const tenants = [makeFakeTenant({ tenantAdminUserIds: [USER_ID] })]
-    User.find.mockReturnValueOnce({
-      lean: jest.fn().mockResolvedValue([
-        makeFakeUser({
-          _id: USER_ID,
-          id: USER_ID,
-          name: 'Mary Poppins',
-          memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
-        }),
-      ]),
-    })
-    Tenant.find.mockReturnValue({
-      sort: jest.fn().mockReturnValue({
-        skip: jest.fn().mockReturnValue({
-          limit: jest.fn().mockReturnValue({
-            lean: jest.fn().mockResolvedValue(tenants),
-          }),
-        }),
-      }),
-    })
-    Tenant.countDocuments
-      .mockResolvedValueOnce(1)
-      .mockResolvedValueOnce(1)
 
     const res = await request
       .get(`/api/v1/customers/${CUSTOMER_ID}/tenants`)
       .set('Authorization', `Bearer ${token}`)
 
-    expect(res.status).toBe(200)
-    expect(res.body.data).toHaveLength(1)
-    expect(res.body.data[0].id).toBe(TENANT_ID)
-    expect(res.body.meta.customerName).toBe('Acme Corp')
-    expect(res.body.meta.tenantVisibility).toBeDefined()
-    expect(res.body.meta.tenantVisibility.allowed).toBe(true)
+    expect(res.status).toBe(403)
+    expect(res.body.error.message).toBe("Customer permission 'TENANT_VIEW' is required.")
+    expect(Tenant.find).not.toHaveBeenCalled()
   })
 
   test('denies standard USER with no tenantMemberships in a multi-tenant customer', async () => {

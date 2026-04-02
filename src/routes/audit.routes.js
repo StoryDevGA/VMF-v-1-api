@@ -12,13 +12,14 @@
  *   GET    /api/v1/audit-logs/retention                                — Retention info
  *   POST   /api/v1/audit-logs/retention/cleanup                        — Manual cleanup
  *
- * All routes are protected by authJwt + loadScopes + requirePlatformRole('SUPER_ADMIN').
+ * All routes are protected by authJwt + loadScopes + requirePlatformPermission('AUDIT_VIEW_ALL').
+ * Manual retention cleanup also requires requirePlatformPermission('PLATFORM_MANAGE').
  */
 
 import { Router } from 'express'
 import authJwt from '../middleware/authJwt.js'
 import loadScopes from '../middleware/loadScopes.js'
-import { requirePlatformRole } from '../middleware/authorize.js'
+import { requirePlatformPermission } from '../middleware/authorize.js'
 import {
   validateQueryAuditLogs,
   validateAuditStats,
@@ -42,7 +43,7 @@ const auditRouter = Router()
 /*  Common middleware for all audit routes                             */
 /* ------------------------------------------------------------------ */
 
-auditRouter.use(authJwt, loadScopes, requirePlatformRole('SUPER_ADMIN'))
+auditRouter.use(authJwt, loadScopes, requirePlatformPermission('AUDIT_VIEW_ALL'))
 
 /* ------------------------------------------------------------------ */
 /*  Routes                                                            */
@@ -69,6 +70,6 @@ auditRouter.post('/verify', validateVerifyIntegrity, verifyIntegrity)
 
 // Retention info & manual cleanup
 auditRouter.get('/retention', getRetentionInfo)
-auditRouter.post('/retention/cleanup', runRetentionCleanup)
+auditRouter.post('/retention/cleanup', requirePlatformPermission('PLATFORM_MANAGE'), runRetentionCleanup)
 
 export default auditRouter

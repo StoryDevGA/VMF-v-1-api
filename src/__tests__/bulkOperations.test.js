@@ -183,8 +183,96 @@ const makeFakeCustomer = (overrides = {}) => ({
 /* ------------------------------------------------------------------ */
 
 let app, request, tokenService
-let User, Customer, Tenant, AuditLog
+let User, Customer, Tenant, Role, AuditLog
 let identityPlusService
+
+const buildDefaultRoleRows = () => ([
+  {
+    key: 'SUPER_ADMIN',
+    scope: 'PLATFORM',
+    isActive: true,
+    isSystem: true,
+    permissions: [
+      'PLATFORM_MANAGE',
+      'SYSTEM_HEALTH_VIEW',
+      'CUSTOMER_CREATE',
+      'CUSTOMER_UPDATE',
+      'CUSTOMER_VIEW',
+      'ROLE_MANAGE',
+      'AUDIT_VIEW_ALL',
+    ],
+  },
+  {
+    key: 'CUSTOMER_ADMIN',
+    scope: 'CUSTOMER',
+    isActive: true,
+    isSystem: true,
+    permissions: [
+      'CUSTOMER_VIEW',
+      'USER_CREATE',
+      'USER_UPDATE',
+      'USER_DELETE',
+      'USER_VIEW',
+      'TENANT_CREATE',
+      'TENANT_UPDATE',
+      'TENANT_VIEW',
+      'VMF_CREATE',
+      'VMF_UPDATE',
+      'VMF_VIEW',
+      'AUDIT_VIEW_CUSTOMER',
+    ],
+  },
+  {
+    key: 'TENANT_ADMIN',
+    scope: 'TENANT',
+    isActive: true,
+    isSystem: true,
+    permissions: [
+      'TENANT_VIEW',
+      'TENANT_UPDATE',
+      'USER_VIEW_TENANT',
+      'VMF_CREATE',
+      'VMF_UPDATE',
+      'VMF_VIEW',
+      'DEAL_CREATE',
+      'DEAL_UPDATE',
+      'DEAL_DELETE',
+      'DEAL_VIEW',
+    ],
+  },
+  {
+    key: 'USER',
+    scope: 'VMF',
+    isActive: true,
+    isSystem: true,
+    permissions: ['VMF_VIEW', 'DEAL_CREATE', 'DEAL_UPDATE', 'DEAL_VIEW'],
+  },
+])
+
+const buildRoleRows = (rows = []) => {
+  const rowsByKey = new Map(
+    buildDefaultRoleRows().map((row) => [row.key, row]),
+  )
+
+  rows.forEach((row) => {
+    const roleKey = String(row?.key || '').trim().toUpperCase()
+    const existingRow = rowsByKey.get(roleKey) || {}
+    rowsByKey.set(roleKey, { ...existingRow, ...row, key: roleKey })
+  })
+
+  return [...rowsByKey.values()]
+}
+
+const buildRoleQueryChain = (rows = []) => {
+  const resolvedRows = buildRoleRows(rows)
+
+  return {
+    lean: jest.fn().mockResolvedValue(resolvedRows),
+    sort: jest.fn().mockReturnValue({
+      lean: jest.fn().mockResolvedValue(resolvedRows),
+    }),
+  }
+}
 
 beforeAll(async () => {
   const supertest = (await import('supertest')).default
@@ -197,6 +285,7 @@ beforeAll(async () => {
   User = models.User
   Customer = models.Customer
   Tenant = models.Tenant
+  Role = models.Role
   AuditLog = models.AuditLog
 })
 
@@ -228,6 +317,7 @@ beforeEach(() => {
   User.findById = jest.fn()
   User.findOne = jest.fn()
   User.find = jest.fn()
+  Role.find = jest.fn().mockImplementation(() => buildRoleQueryChain())
   User.countDocuments = jest.fn()
   User.prototype.save = jest.fn(async function () {
     if (!this._id) {
@@ -618,6 +708,82 @@ describe('POST /api/v1/customers/:customerId/users/bulk', () => {
     expect(res.body.data.results[0].invitationSent).toBe(false)
   })
 
+  test('reports unknown role keys as per-item failures', async () => {
+    const token = await getCustomerAdminToken()
+    Role.find.mockImplementation(() => buildRoleQueryChain([
+      { key: 'USER', scope: 'VMF', isActive: true, isSystem: true },
+    ]))
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/users/bulk`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        users: [
+          { name: 'Good', email: 'good-role@acme.com', roles: ['USER'] },
+          { name: 'Bad', email: 'bad-role@acme.com', roles: ['UNKNOWN_ROLE'] },
+        ],
+        sendInvitations: false,
+      })
+
+    expect(res.status).toBe(207)
+    expect(res.body.data.summary.succeeded).toBe(1)
+    expect(res.body.data.summary.failed).toBe(1)
+    expect(res.body.data.results[1].errorCode).toBe('VALIDATION_FAILED')
+    expect(res.body.data.results[1].errorDetails?.missingRoleKeys).toEqual(['UNKNOWN_ROLE'])
+  })
+
+  test('reports inactive implicit tenant role as per-item failure', async () => {
+    const token = await getCustomerAdminToken()
+    Role.find.mockImplementation(() => buildRoleQueryChain([
+      { key: 'CUSTOMER_ADMIN', scope: 'CUSTOMER', isActive: true, isSystem: true },
+      { key: 'USER', scope: 'VMF', isActive: false, isSystem: true },
+    ]))
+    Tenant.find.mockReturnValue({
+      lean: jest.fn().mockResolvedValue([{ _id: TENANT_ID }]),
+    })
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/users/bulk`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        users: [
+          {
+            name: 'Tenant User',
+            email: 'tenant-user@acme.com',
+            roles: ['CUSTOMER_ADMIN'],
+            tenantVisibility: [TENANT_ID],
+          },
+        ],
+        sendInvitations: false,
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.data.results[0].errorCode).toBe('VALIDATION_FAILED')
+    expect(res.body.data.results[0].errorDetails?.inactiveRoleKeys).toEqual(['USER'])
+    expect(res.body.data.results[0].errorDetails?.tenantVisibility).toContain('Inactive role keys: USER')
+  })
+
+  test('reports platform-scoped explicit roles as per-item failures during bulk create', async () => {
+    const token = await getCustomerAdminToken()
+    Role.find.mockImplementation(() => buildRoleQueryChain([
+      { key: 'PLATFORM_OBSERVER', scope: 'PLATFORM', isActive: true, isSystem: false },
+    ]))
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/users/bulk`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        users: [
+          { name: 'Platform User', email: 'platform-user@acme.com', roles: ['PLATFORM_OBSERVER'] },
+        ],
+        sendInvitations: false,
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.data.results[0].errorCode).toBe('VALIDATION_FAILED')
+    expect(res.body.data.results[0].errorDetails?.scopeIncompatibleRoleKeys).toEqual(['PLATFORM_OBSERVER'])
+  })
+
   test('returns 404 when customer does not exist', async () => {
     const token = await getCustomerAdminToken()
     Customer.findById.mockResolvedValue(null)
@@ -752,6 +918,90 @@ describe('PATCH /api/v1/customers/:customerId/users/bulk', () => {
     expect(res.body.data.results[0].errorCode).toBe('VALIDATION_FAILED')
     expect(res.body.data.results[0].errorDetails?.reason).toBe('TENANT_VISIBILITY_INVALID_TENANT_IDS')
     expect(res.body.data.results[0].errorDetails?.invalidTenantIds).toEqual([INVALID_TENANT_ID])
+  })
+
+  test('reports platform-scoped roles as per-item failure during bulk update', async () => {
+    const token = await getCustomerAdminToken()
+    Role.find.mockImplementation(() => buildRoleQueryChain([
+      { key: 'PLATFORM_OBSERVER', scope: 'PLATFORM', isActive: true, isSystem: false },
+    ]))
+
+    const res = await request
+      .patch(`/api/v1/customers/${CUSTOMER_ID}/users/bulk`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        users: [
+          { userId: USER_A_ID, roles: ['PLATFORM_OBSERVER'] },
+        ],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.data.results[0].errorCode).toBe('VALIDATION_FAILED')
+    expect(res.body.data.results[0].errorDetails?.scopeIncompatibleRoleKeys).toEqual(['PLATFORM_OBSERVER'])
+  })
+
+  test('reports unknown role keys as per-item failure during bulk update', async () => {
+    const token = await getCustomerAdminToken()
+    Role.find.mockImplementation(() => buildRoleQueryChain([
+      { key: 'USER', scope: 'VMF', isActive: true, isSystem: true },
+    ]))
+
+    const res = await request
+      .patch(`/api/v1/customers/${CUSTOMER_ID}/users/bulk`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        users: [
+          { userId: USER_A_ID, roles: ['UNKNOWN_ROLE'] },
+        ],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.data.results[0].errorCode).toBe('VALIDATION_FAILED')
+    expect(res.body.data.results[0].errorDetails?.missingRoleKeys).toEqual(['UNKNOWN_ROLE'])
+  })
+
+  test('reports inactive role keys as per-item failure during bulk update', async () => {
+    const token = await getCustomerAdminToken()
+    Role.find.mockImplementation(() => buildRoleQueryChain([
+      { key: 'USER', scope: 'VMF', isActive: false, isSystem: true },
+    ]))
+
+    const res = await request
+      .patch(`/api/v1/customers/${CUSTOMER_ID}/users/bulk`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        users: [
+          { userId: USER_A_ID, roles: ['USER'] },
+        ],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.data.results[0].errorCode).toBe('VALIDATION_FAILED')
+    expect(res.body.data.results[0].errorDetails?.inactiveRoleKeys).toEqual(['USER'])
+  })
+
+  test('reports inactive implicit USER role during bulk tenant-visibility update', async () => {
+    const token = await getCustomerAdminToken()
+    Role.find.mockImplementation(() => buildRoleQueryChain([
+      { key: 'USER', scope: 'VMF', isActive: false, isSystem: true },
+    ]))
+    Tenant.find.mockReturnValue({
+      lean: jest.fn().mockResolvedValue([{ _id: TENANT_ID }]),
+    })
+
+    const res = await request
+      .patch(`/api/v1/customers/${CUSTOMER_ID}/users/bulk`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        users: [
+          { userId: USER_A_ID, tenantVisibility: [TENANT_ID] },
+        ],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.data.results[0].errorCode).toBe('VALIDATION_FAILED')
+    expect(res.body.data.results[0].errorDetails?.inactiveRoleKeys).toEqual(['USER'])
+    expect(res.body.data.results[0].errorDetails?.tenantVisibility).toContain('Inactive role keys: USER')
   })
 
   test('rejects tenant visibility entries for single-tenant customers during bulk update', async () => {

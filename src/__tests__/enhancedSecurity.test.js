@@ -491,6 +491,10 @@ describe('Rate limiting exports', () => {
     expect(typeof rateLimits.tenantManagementRateLimit).toBe('function')
   })
 
+  test('vmfManagementRateLimit is a function', () => {
+    expect(typeof rateLimits.vmfManagementRateLimit).toBe('function')
+  })
+
   test('bulkOperationsRateLimit is a function', () => {
     expect(typeof rateLimits.bulkOperationsRateLimit).toBe('function')
   })

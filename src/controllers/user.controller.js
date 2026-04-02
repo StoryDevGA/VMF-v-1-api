@@ -22,6 +22,15 @@ import customerGovernanceService from '../services/customerGovernanceService.js'
 import invitationService from '../services/invitationService.js'
 import { applyManualTestPasswordBootstrap } from '../services/manualTestPasswordBootstrapService.js'
 import {
+  CUSTOMER_USER_ASSIGNABLE_ROLE_SCOPES,
+  IMPLICIT_TENANT_MEMBERSHIP_ROLE_KEYS,
+  TENANT_MEMBERSHIP_ASSIGNABLE_ROLE_SCOPES,
+  isRoleAssignmentValidationError,
+  loadRoleDefinitionsByKey,
+  normalizeRoleAssignmentKeys,
+  validateRoleAssignments,
+} from '../services/roleAssignmentValidationService.js'
+import {
   buildTenantVisibilityErrorResponse,
   TENANT_VISIBILITY_REASONS,
   validateTenantVisibilityPayload,
@@ -94,15 +103,6 @@ const mapCustomerScopedUser = ({ user, customerId, canonicalAdminUserId }) => {
 }
 
 const normalizeEmail = (value) => String(value || '').trim().toLowerCase()
-
-const normalizeRoleList = (roles) =>
-  Array.from(
-    new Set(
-      (Array.isArray(roles) ? roles : [])
-        .map((role) => String(role || '').trim())
-        .filter(Boolean),
-    ),
-  )
 
 const listCustomerMembershipIds = (user) =>
   Array.from(
@@ -254,6 +254,38 @@ const buildValidationErrorResponse = ({ req, message, details }) => ({
   },
 })
 
+const validateRequestedRoleAssignments = async ({
+  roleKeys = [],
+  tenantVisibility = [],
+}) => {
+  const normalizedRoleKeys = normalizeRoleAssignmentKeys(roleKeys)
+  const needsTenantMembershipRoles = Array.isArray(tenantVisibility) && tenantVisibility.length > 0
+  const roleDefinitionKeys = needsTenantMembershipRoles
+    ? [...normalizedRoleKeys, ...IMPLICIT_TENANT_MEMBERSHIP_ROLE_KEYS]
+    : normalizedRoleKeys
+  const roleDefinitionsByKey = await loadRoleDefinitionsByKey(roleDefinitionKeys)
+
+  validateRoleAssignments({
+    roleKeys: normalizedRoleKeys,
+    roleDefinitionsByKey,
+    allowedScopes: CUSTOMER_USER_ASSIGNABLE_ROLE_SCOPES,
+    field: 'roles',
+    assignmentLabel: 'customer user role assignment',
+  })
+
+  if (needsTenantMembershipRoles) {
+    validateRoleAssignments({
+      roleKeys: IMPLICIT_TENANT_MEMBERSHIP_ROLE_KEYS,
+      roleDefinitionsByKey,
+      allowedScopes: TENANT_MEMBERSHIP_ASSIGNABLE_ROLE_SCOPES,
+      field: 'tenantVisibility',
+      assignmentLabel: 'tenant visibility assignment',
+    })
+  }
+
+  return normalizedRoleKeys
+}
+
 const buildInvalidCustomerMembershipResponse = (req) =>
   buildValidationErrorResponse({
     req,
@@ -314,6 +346,24 @@ const isTenantAdminOnlyCustomerAccess = (req) => {
       && !customerAccess?.isSuperAdmin,
   )
 }
+
+const isTenantScopedCustomerAccess = (req) => {
+  const customerAccess = req.scopes?.customerAccess
+  return Boolean(
+    customerAccess?.via === 'tenant_permission'
+      && !customerAccess?.isCustomerAdmin
+      && !customerAccess?.isSuperAdmin,
+  )
+}
+
+const resolveTenantScopedAccessibleTenantIds = (req) =>
+  Array.from(
+    new Set(
+      (req.scopes?.customerAccess?.accessibleTenantIds || [])
+        .map((tenantId) => toIdString(tenantId))
+        .filter(Boolean),
+    ),
+  )
 
 const resolveTenantAdminManagedTenantIds = ({ req, customerId }) => {
   const scopedTenantIds = Array.from(
@@ -454,6 +504,19 @@ export const listUsers = async (req, res, next) => {
     const filter = role
       ? { memberships: { $elemMatch: { customerId, roles: role } } }
       : { 'memberships.customerId': customerId }
+    const tenantScopedViewer = isTenantScopedCustomerAccess(req)
+    const accessibleTenantIds = resolveTenantScopedAccessibleTenantIds(req)
+
+    if (tenantScopedViewer) {
+      filter.tenantMemberships = accessibleTenantIds.length > 0
+        ? {
+            $elemMatch: {
+              customerId,
+              tenantId: { $in: accessibleTenantIds },
+            },
+          }
+        : { $elemMatch: { customerId, tenantId: { $in: [] } } }
+    }
 
     const activeFilter = normalizeStatusFilter(status)
     if (activeFilter !== null) filter.isActive = activeFilter
@@ -520,10 +583,15 @@ export const createUser = async (req, res, next) => {
       roles,
       tenantVisibility,
     } = req.body
-    const normalizedRoles = normalizeRoleList(roles)
+    const normalizedRoles = await validateRequestedRoleAssignments({
+      roleKeys: roles,
+      tenantVisibility,
+    })
 
     // 1. Verify customer exists
-    const customer = req.scopes?.customer || await Customer.findById(customerId)
+    const customer = req.scopes?.customer && typeof req.scopes.customer.save === 'function'
+      ? req.scopes.customer
+      : await Customer.findById(customerId)
     if (!customer) {
       return res.status(404).json({
         error: {
@@ -590,7 +658,7 @@ export const createUser = async (req, res, next) => {
 
       const previousCanonicalAdminUserId = toIdString(customer.governance?.customerAdminUserId)
       let membership = resolveCustomerMembership(user, customerId)
-      const previousRoles = normalizeRoleList(membership?.roles || [])
+      const previousRoles = normalizeRoleAssignmentKeys(membership?.roles || [])
       let userChanged = false
       let customerGovernanceChanged = false
       let createdMembership = false
@@ -629,7 +697,7 @@ export const createUser = async (req, res, next) => {
         })
         membership = resolveCustomerMembership(user, customerId)
         createdMembership = true
-        if (membership && !arraysEqual(normalizeRoleList(membership.roles || []), normalizedRoles)) {
+        if (membership && !arraysEqual(normalizeRoleAssignmentKeys(membership.roles || []), normalizedRoles)) {
           membership.roles = normalizedRoles
           userChanged = true
         }
@@ -891,6 +959,13 @@ export const createUser = async (req, res, next) => {
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
+    if (isRoleAssignmentValidationError(err)) {
+      return res.status(err.status || 422).json(buildValidationErrorResponse({
+        req,
+        message: err.message,
+        details: err.details,
+      }))
+    }
     if (customerGovernanceService.isGovernanceError(err)) {
       await auditService.logFromRequest(req, {
         action: 'CUSTOMER_ADMIN_MUTATION_BLOCKED',
@@ -984,6 +1059,9 @@ export const updateUser = async (req, res, next) => {
   try {
     const { userId } = req.params
     const { name, email, roles, tenantVisibility } = req.body
+    const normalizedRoles = roles !== undefined
+      ? normalizeRoleAssignmentKeys(roles)
+      : undefined
 
     const user = await User.findById(userId)
 
@@ -1067,7 +1145,12 @@ export const updateUser = async (req, res, next) => {
     }
 
     // Update roles on customer memberships
-    if (roles !== undefined) {
+    if (normalizedRoles !== undefined) {
+      await validateRequestedRoleAssignments({
+        roleKeys: normalizedRoles,
+        tenantVisibility: [],
+      })
+
       const membership =
         customerContext?.membership ||
         user.memberships.find((m) => m.customerId !== null)
@@ -1080,11 +1163,11 @@ export const updateUser = async (req, res, next) => {
         const governanceDecision = customerGovernanceService.validateUserRoleUpdate({
           customer: customerForRoleUpdate,
           user,
-          nextRoles: roles,
+          nextRoles: normalizedRoles,
         })
 
-        diff.roles = { from: [...membership.roles], to: roles }
-        membership.roles = roles
+        diff.roles = { from: [...membership.roles], to: normalizedRoles }
+        membership.roles = normalizedRoles
 
         if (governanceDecision.shouldSetCanonicalAdminUserId) {
           const previousCanonicalAdminUserId = customerForRoleUpdate.governance?.customerAdminUserId || null
@@ -1207,6 +1290,13 @@ export const updateUser = async (req, res, next) => {
           return res.status(422).json(tenantVisibilityValidation)
         }
 
+        if (tenantVisibility.length > 0) {
+          await validateRequestedRoleAssignments({
+            roleKeys: [],
+            tenantVisibility,
+          })
+        }
+
         customerForRoleUpdate = customerForRoleUpdate || customerForTenantVisibility
 
         // Validate tenant IDs belong to this customer
@@ -1292,6 +1382,13 @@ export const updateUser = async (req, res, next) => {
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
+    if (isRoleAssignmentValidationError(err)) {
+      return res.status(err.status || 422).json(buildValidationErrorResponse({
+        req,
+        message: err.message,
+        details: err.details,
+      }))
+    }
     if (customerGovernanceService.isGovernanceError(err)) {
       await auditService.logFromRequest(req, {
         action: 'CUSTOMER_ADMIN_MUTATION_BLOCKED',

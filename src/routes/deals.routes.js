@@ -16,7 +16,7 @@
 import { Router } from 'express'
 import authJwt from '../middleware/authJwt.js'
 import loadScopes from '../middleware/loadScopes.js'
-import { requireVmfAccess, requirePlatformRole } from '../middleware/authorize.js'
+import { requireDealAccess, requireVmfAccess } from '../middleware/authorize.js'
 import requireCustomerActive from '../middleware/customerStatus.js'
 import requireFeatureEntitlement from '../middleware/featureEntitlements.js'
 import { tenantManagementRateLimit } from '../middleware/rateLimits.js'
@@ -39,16 +39,24 @@ import {
 
 export const vmfDealRouter = Router({ mergeParams: true })
 
-vmfDealRouter.use(
-  authJwt,
-  loadScopes,
-  requireVmfAccess('READ'),
+vmfDealRouter.use(authJwt, loadScopes)
+
+vmfDealRouter.get(
+  '/',
+  requireVmfAccess('READ', { requiredPermission: 'DEAL_VIEW' }),
   requireFeatureEntitlement('DEALS'),
   requireCustomerActive(),
+  listDeals,
 )
-
-vmfDealRouter.get('/', listDeals)
-vmfDealRouter.post('/', tenantManagementRateLimit, validateCreateDeal, createDeal)
+vmfDealRouter.post(
+  '/',
+  requireVmfAccess('WRITE', { requiredPermission: 'DEAL_CREATE' }),
+  requireFeatureEntitlement('DEALS'),
+  requireCustomerActive(),
+  tenantManagementRateLimit,
+  validateCreateDeal,
+  createDeal,
+)
 
 /* ------------------------------------------------------------------ */
 /*  Deal-scoped router                                                */
@@ -57,8 +65,21 @@ vmfDealRouter.post('/', tenantManagementRateLimit, validateCreateDeal, createDea
 
 export const dealRouter = Router()
 
-dealRouter.use(authJwt, loadScopes, requirePlatformRole('SUPER_ADMIN'), requireCustomerActive())
+dealRouter.use(authJwt, loadScopes)
 
-dealRouter.get('/:dealId', getDeal)
-dealRouter.patch('/:dealId', tenantManagementRateLimit, validateUpdateDeal, updateDeal)
-dealRouter.delete('/:dealId', tenantManagementRateLimit, archiveDeal)
+dealRouter.get('/:dealId', requireDealAccess('DEAL_VIEW', 'READ'), requireCustomerActive(), getDeal)
+dealRouter.patch(
+  '/:dealId',
+  requireDealAccess('DEAL_UPDATE', 'WRITE'),
+  requireCustomerActive(),
+  tenantManagementRateLimit,
+  validateUpdateDeal,
+  updateDeal,
+)
+dealRouter.delete(
+  '/:dealId',
+  requireDealAccess('DEAL_DELETE', 'WRITE'),
+  requireCustomerActive(),
+  tenantManagementRateLimit,
+  archiveDeal,
+)

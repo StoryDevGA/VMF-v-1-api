@@ -18,10 +18,58 @@ import env from '../config/env.js'
 import logger from '../config/logger.js'
 import monitoringService from '../services/monitoringService.js'
 import { listUserCustomerFeatureScopes } from '../services/licenseEntitlementService.js'
+import performanceCacheService, {
+  buildUserPermissionsSnapshot,
+} from '../services/performanceCacheService.js'
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                           */
 /* ------------------------------------------------------------------ */
+
+const buildAuthenticatedUserResponseData = async (user) => {
+  const [scopeSnapshotResult, customerScopesResult] = await Promise.allSettled([
+    buildUserPermissionsSnapshot(user),
+    listUserCustomerFeatureScopes(user),
+  ])
+
+  if (scopeSnapshotResult.status !== 'fulfilled') {
+    throw scopeSnapshotResult.reason
+  }
+
+  const scopeSnapshot = scopeSnapshotResult.value
+  let customerScopes = []
+
+  if (customerScopesResult.status === 'fulfilled') {
+    customerScopes = customerScopesResult.value
+  } else {
+    logger.error(
+      {
+        err: customerScopesResult.reason,
+        userId: user._id,
+        email: user.email,
+      },
+      'auth customer scope enrichment failed; continuing with empty customerScopes',
+    )
+  }
+
+  try {
+    await performanceCacheService.setUserPermissions(user._id, scopeSnapshot)
+  } catch (err) {
+    logger.error(
+      {
+        err,
+        userId: user._id,
+      },
+      'auth snapshot cache write failed; continuing with response payload',
+    )
+  }
+
+  return {
+    user: user.toJSON(),
+    customerScopes,
+    resolvedPermissions: scopeSnapshot.resolvedPermissions,
+  }
+}
 
 /**
  * Shared login logic used by both customer and super-admin endpoints.
@@ -94,13 +142,13 @@ const performLogin = async (req, res, { requiredRole } = {}) => {
   }
 
   if (!requiredRole && env.governanceInactiveEnforcementEnabled) {
-    const customerMembershipIds = Array.from(
-      new Set(
-        user.memberships
-          .filter((membership) => membership.customerId !== null && membership.customerId !== undefined)
-          .map((membership) => membership.customerId.toString()),
-      ),
-    )
+    const membershipCustomerIds = (user.memberships || [])
+      .filter((m) => m.customerId !== null && m.customerId !== undefined)
+      .map((m) => String(m.customerId))
+    const tenantMembershipCustomerIds = (user.tenantMemberships || [])
+      .filter((m) => m.customerId !== null && m.customerId !== undefined)
+      .map((m) => String(m.customerId))
+    const customerMembershipIds = [...new Set([...membershipCustomerIds, ...tenantMembershipCustomerIds])]
 
     if (customerMembershipIds.length > 0) {
       const customers = await Customer.find({
@@ -123,7 +171,7 @@ const performLogin = async (req, res, { requiredRole } = {}) => {
             customerMembershipIds,
             requestId: req.requestId,
           },
-          'login failed - user customer memberships are inactive',
+          'login failed - user customer access is inactive',
         )
         return res.status(403).json({
           error: {
@@ -136,19 +184,14 @@ const performLogin = async (req, res, { requiredRole } = {}) => {
     }
   }
 
-  // Issue tokens
+  const responseData = await buildAuthenticatedUserResponseData(user)
   const tokens = await tokenService.generateTokens(user)
-
-  // Build safe user profile (passwordHash excluded via toJSON transform)
-  const profile = user.toJSON()
-  const customerScopes = await listUserCustomerFeatureScopes(user)
 
   logger.info({ userId: user._id, requestId: req.requestId }, 'login succeeded')
 
   return res.status(200).json({
     data: {
-      user: profile,
-      customerScopes,
+      ...responseData,
       ...tokens,
     },
     meta: { requestId: req.requestId, version: 'v1' },
@@ -326,10 +369,10 @@ export const getMe = async (req, res, next) => {
       })
     }
 
-    const customerScopes = await listUserCustomerFeatureScopes(user)
+    const responseData = await buildAuthenticatedUserResponseData(user)
 
     return res.status(200).json({
-      data: { user: user.toJSON(), customerScopes },
+      data: responseData,
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {

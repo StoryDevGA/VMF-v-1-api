@@ -5,7 +5,7 @@ import monitoringService from '../services/monitoringService.js'
 import performanceCacheService, {
   buildCustomerTopologySnapshot,
   buildTenantStatusSnapshot,
-  buildUserPermissionsSnapshot,
+  buildLegacyUserPermissionsSnapshot,
 } from '../services/performanceCacheService.js'
 
 const ACTIVE_CUSTOMER_STATUS = 'ACTIVE'
@@ -69,14 +69,16 @@ const loadUser = async (userId) => {
 
   await performanceCacheService.setUserPermissions(
     user._id,
-    buildUserPermissionsSnapshot(user),
+    buildLegacyUserPermissionsSnapshot(user),
   )
 
   return user
 }
 
 const resolvePrimaryCustomerIdFromUser = (user) =>
-  (user?.memberships || []).find((membership) => membership?.customerId)?.customerId || null
+  (user?.memberships || []).find((membership) => membership?.customerId)?.customerId
+  || (user?.tenantMemberships || []).find((membership) => membership?.customerId)?.customerId
+  || null
 
 export const buildInactiveCustomerErrorResponse = ({
   requestId,

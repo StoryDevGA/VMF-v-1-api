@@ -3,8 +3,10 @@
  *
  * Unit-style tests for the Phase 2.2 authorization middleware:
  *   - loadScopes
- *   - authorize (requirePlatformRole, requireCustomerAccess,
- *                requireTenantAccess, requireVmfAccess)
+ *   - authorize (requirePlatformRole, requirePlatformPermission,
+ *                requireCustomerAccess, requireCustomerPermission,
+ *                requireTenantAccess, requireTenantPermission,
+ *                requireVmfAccess)
  *   - topologyGuard
  *   - requireTenantEnabled (tenantStatus)
  *
@@ -101,6 +103,16 @@ const makeFakeLicenseLevel = (overrides = {}) => ({
   ...overrides,
 })
 
+const makeResolvedPermissions = (overrides = {}) => ({
+  platform: {
+    roleKeys: [],
+    permissions: [],
+    ...(overrides.platform || {}),
+  },
+  customers: overrides.customers ? [...overrides.customers] : [],
+  tenants: overrides.tenants ? [...overrides.tenants] : [],
+})
+
 /* ------------------------------------------------------------------ */
 /*  Mock helpers: req / res / next                                    */
 /* ------------------------------------------------------------------ */
@@ -151,9 +163,15 @@ const getLabeledCounterValue = (metricsText, metricName, labels = []) => {
 /*  Dynamic imports                                                   */
 /* ------------------------------------------------------------------ */
 
-let User, Customer, Tenant, VMF, AuditLog, LicenseLevel, monitoringService, env
+let User, Customer, Tenant, VMF, AuditLog, LicenseLevel, Role, monitoringService, env
 let loadScopes
-let requirePlatformRole, requireCustomerAccess, requireTenantAccess, requireVmfAccess
+let requirePlatformRole
+let requirePlatformPermission
+let requireCustomerAccess
+let requireCustomerPermission
+let requireTenantAccess
+let requireTenantPermission
+let requireVmfAccess
 let requireFeatureEntitlement
 let topologyGuard
 let requireTenantEnabled
@@ -166,6 +184,7 @@ beforeAll(async () => {
   VMF = models.VMF
   AuditLog = models.AuditLog
   LicenseLevel = models.LicenseLevel
+  Role = models.Role
   monitoringService = (await import('../services/monitoringService.js')).default
   env = (await import('../config/env.js')).default
 
@@ -174,8 +193,11 @@ beforeAll(async () => {
 
   const authorize = await import('../middleware/authorize.js')
   requirePlatformRole = authorize.requirePlatformRole
+  requirePlatformPermission = authorize.requirePlatformPermission
   requireCustomerAccess = authorize.requireCustomerAccess
+  requireCustomerPermission = authorize.requireCustomerPermission
   requireTenantAccess = authorize.requireTenantAccess
+  requireTenantPermission = authorize.requireTenantPermission
   requireVmfAccess = authorize.requireVmfAccess
 
   topologyGuard = (await import('../middleware/topologyGuard.js')).default
@@ -192,6 +214,32 @@ beforeEach(() => {
   LicenseLevel.findById = jest.fn().mockReturnValue({
     select: jest.fn().mockResolvedValue(makeFakeLicenseLevel()),
   })
+  Role.find = jest.fn().mockResolvedValue([
+    {
+      key: 'SUPER_ADMIN',
+      scope: 'PLATFORM',
+      permissions: ['PLATFORM_MANAGE', 'SYSTEM_HEALTH_VIEW'],
+      isActive: true,
+    },
+    {
+      key: 'CUSTOMER_ADMIN',
+      scope: 'CUSTOMER',
+      permissions: ['CUSTOMER_VIEW', 'USER_VIEW'],
+      isActive: true,
+    },
+    {
+      key: 'TENANT_ADMIN',
+      scope: 'TENANT',
+      permissions: ['TENANT_VIEW', 'TENANT_UPDATE'],
+      isActive: true,
+    },
+    {
+      key: 'USER',
+      scope: 'TENANT',
+      permissions: ['VMF_VIEW'],
+      isActive: true,
+    },
+  ])
   AuditLog.createLog = jest.fn(async () => ({}))
   monitoringService.resetForTests()
 })
@@ -264,6 +312,27 @@ describe('loadScopes', () => {
     expect(req.scopes).toBeDefined()
     expect(req.scopes.user).toBe(user)
     expect(req.scopes.platformRoles).toEqual(['SUPER_ADMIN'])
+    expect(req.scopes.resolvedPermissions).toEqual({
+      platform: {
+        roleKeys: ['SUPER_ADMIN'],
+        permissions: ['PLATFORM_MANAGE', 'SYSTEM_HEALTH_VIEW'],
+      },
+      customers: [
+        {
+          customerId: CUSTOMER_ID,
+          roleKeys: ['CUSTOMER_ADMIN'],
+          permissions: ['CUSTOMER_VIEW', 'USER_VIEW'],
+        },
+      ],
+      tenants: [
+        {
+          customerId: CUSTOMER_ID,
+          tenantId: TENANT_ID,
+          roleKeys: ['TENANT_ADMIN'],
+          permissions: ['TENANT_UPDATE', 'TENANT_VIEW'],
+        },
+      ],
+    })
     expect(req.scopes.isPlatformUser).toBe(true)
     expect(req.scopes.memberships).toHaveLength(2)
     expect(req.scopes.tenantMemberships).toHaveLength(1)
@@ -286,6 +355,20 @@ describe('loadScopes', () => {
 
     expect(next).toHaveBeenCalled()
     expect(req.scopes.platformRoles).toEqual([])
+    expect(req.scopes.resolvedPermissions).toEqual({
+      platform: {
+        roleKeys: [],
+        permissions: [],
+      },
+      customers: [
+        {
+          customerId: CUSTOMER_ID,
+          roleKeys: ['USER'],
+          permissions: ['VMF_VIEW'],
+        },
+      ],
+      tenants: [],
+    })
     expect(req.scopes.isPlatformUser).toBe(false)
     expect(req.scopes.activeCustomerIds).toEqual([CUSTOMER_ID])
     expect(req.scopes.inactiveCustomerIds).toEqual([])
@@ -374,6 +457,90 @@ describe('requirePlatformRole', () => {
     const next = jest.fn()
 
     requirePlatformRole('SUPER_ADMIN')(req, res, next)
+
+    expect(next).toHaveBeenCalled()
+  })
+})
+
+describe('requirePlatformPermission', () => {
+  test('returns 500 when scopes not loaded', () => {
+    const req = makeReq()
+    const res = makeRes()
+    const next = jest.fn()
+
+    requirePlatformPermission('SYSTEM_HEALTH_VIEW')(req, res, next)
+
+    expect(res.statusCode).toBe(500)
+    expect(next).not.toHaveBeenCalled()
+  })
+
+  test('returns 403 when user lacks the required platform permission', () => {
+    const req = makeReq({
+      scopes: {
+        platformRoles: ['SUPER_ADMIN'],
+        memberships: [],
+        tenantMemberships: [],
+        vmfGrants: [],
+        resolvedPermissions: makeResolvedPermissions({
+          platform: {
+            roleKeys: [],
+            permissions: ['PLATFORM_MANAGE'],
+          },
+        }),
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    requirePlatformPermission('SYSTEM_HEALTH_VIEW')(req, res, next)
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body.error.code).toBe('FORBIDDEN')
+    expect(next).not.toHaveBeenCalled()
+  })
+
+  test('calls next() when the resolved platform permission exists', () => {
+    const req = makeReq({
+      scopes: {
+        platformRoles: [],
+        memberships: [],
+        tenantMemberships: [],
+        vmfGrants: [],
+        resolvedPermissions: makeResolvedPermissions({
+          platform: {
+            roleKeys: [],
+            permissions: ['SYSTEM_HEALTH_VIEW'],
+          },
+        }),
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    requirePlatformPermission('SYSTEM_HEALTH_VIEW')(req, res, next)
+
+    expect(next).toHaveBeenCalled()
+  })
+
+  test('uses active SUPER_ADMIN from resolvedPermissions as a bypass', () => {
+    const req = makeReq({
+      scopes: {
+        platformRoles: [],
+        memberships: [],
+        tenantMemberships: [],
+        vmfGrants: [],
+        resolvedPermissions: makeResolvedPermissions({
+          platform: {
+            roleKeys: ['SUPER_ADMIN'],
+            permissions: [],
+          },
+        }),
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    requirePlatformPermission('ROLE_MANAGE')(req, res, next)
 
     expect(next).toHaveBeenCalled()
   })
@@ -710,6 +877,367 @@ describe('requireCustomerAccess', () => {
   })
 })
 
+describe('requireCustomerPermission', () => {
+  test('returns 403 when customerId param is missing', async () => {
+    const req = makeReq({
+      params: {},
+      scopes: {
+        platformRoles: [],
+        memberships: [],
+        tenantMemberships: [],
+        vmfGrants: [],
+        resolvedPermissions: makeResolvedPermissions(),
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireCustomerPermission('CUSTOMER_VIEW')(req, res, next)
+
+    expect(res.statusCode).toBe(403)
+    expect(next).not.toHaveBeenCalled()
+  })
+
+  test('grants access when the customer bucket contains the required permission', async () => {
+    Customer.findById.mockResolvedValue(makeFakeCustomer())
+
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID },
+      scopes: {
+        platformRoles: [],
+        memberships: [{ customerId: CUSTOMER_ID, roles: ['CUSTOMER_ADMIN'] }],
+        tenantMemberships: [],
+        vmfGrants: [],
+        resolvedPermissions: makeResolvedPermissions({
+          customers: [
+            {
+              customerId: CUSTOMER_ID,
+              roleKeys: ['CUSTOMER_ADMIN'],
+              permissions: ['CUSTOMER_VIEW'],
+            },
+          ],
+        }),
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireCustomerPermission('CUSTOMER_VIEW')(req, res, next)
+
+    expect(next).toHaveBeenCalled()
+    expect(req.scopes.customerAccess?.via).toBe('customer_permission')
+    expect(req.scopes.customerAccess?.permission).toBe('CUSTOMER_VIEW')
+  })
+
+  test('classifies tenant-scope permissions resolved into the customer bucket as tenant access', async () => {
+    Customer.findById.mockResolvedValue(makeFakeCustomer())
+    Role.find.mockResolvedValue([
+      {
+        key: 'TENANT_ADMIN',
+        scope: 'TENANT',
+        permissions: ['TENANT_VIEW', 'USER_VIEW_TENANT'],
+        isActive: true,
+      },
+    ])
+
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID },
+      scopes: {
+        platformRoles: [],
+        memberships: [{ customerId: CUSTOMER_ID, roles: ['TENANT_ADMIN'] }],
+        tenantMemberships: [{ customerId: CUSTOMER_ID, tenantId: TENANT_ID, roles: ['USER'] }],
+        vmfGrants: [],
+        resolvedPermissions: makeResolvedPermissions({
+          customers: [
+            {
+              customerId: CUSTOMER_ID,
+              roleKeys: ['TENANT_ADMIN'],
+              permissions: ['TENANT_VIEW', 'USER_VIEW_TENANT'],
+            },
+          ],
+        }),
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireCustomerPermission('TENANT_VIEW', {
+      allowTenantPermission: true,
+      allowCustomerScopedTenantPermission: true,
+    })(req, res, next)
+
+    expect(next).toHaveBeenCalled()
+    expect(req.scopes.customerAccess).toEqual(expect.objectContaining({
+      via: 'tenant_permission',
+      isCustomerAdmin: false,
+      isTenantAdmin: true,
+      accessibleTenantIds: [TENANT_ID],
+    }))
+  })
+
+  test('allows alternate tenant permission keys for customer-scoped tenant-admin exceptions', async () => {
+    Customer.findById.mockResolvedValue(makeFakeCustomer())
+    Role.find.mockResolvedValue([
+      {
+        key: 'TENANT_ADMIN',
+        scope: 'TENANT',
+        permissions: ['USER_VIEW_TENANT'],
+        isActive: true,
+      },
+    ])
+
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID },
+      scopes: {
+        platformRoles: [],
+        memberships: [{ customerId: CUSTOMER_ID, roles: ['TENANT_ADMIN'] }],
+        tenantMemberships: [{ customerId: CUSTOMER_ID, tenantId: TENANT_ID, roles: ['USER'] }],
+        vmfGrants: [],
+        resolvedPermissions: makeResolvedPermissions({
+          customers: [
+            {
+              customerId: CUSTOMER_ID,
+              roleKeys: ['TENANT_ADMIN'],
+              permissions: ['USER_VIEW_TENANT'],
+            },
+          ],
+        }),
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireCustomerPermission('USER_UPDATE', {
+      allowTenantPermission: true,
+      tenantPermissions: ['USER_VIEW_TENANT'],
+      allowCustomerScopedTenantPermission: true,
+    })(req, res, next)
+
+    expect(next).toHaveBeenCalled()
+    expect(req.scopes.customerAccess).toEqual(expect.objectContaining({
+      via: 'tenant_permission',
+      isCustomerAdmin: false,
+      isTenantAdmin: true,
+      accessibleTenantIds: [TENANT_ID],
+      permission: 'USER_UPDATE',
+    }))
+  })
+
+  test('uses resolved SUPER_ADMIN as the only platform bypass source', async () => {
+    Customer.findById.mockResolvedValue(makeFakeCustomer())
+
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID },
+      scopes: {
+        platformRoles: [],
+        memberships: [],
+        tenantMemberships: [],
+        vmfGrants: [],
+        resolvedPermissions: makeResolvedPermissions({
+          platform: {
+            roleKeys: ['SUPER_ADMIN'],
+            permissions: [],
+          },
+        }),
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireCustomerPermission('CUSTOMER_VIEW')(req, res, next)
+
+    expect(next).toHaveBeenCalled()
+    expect(req.scopes.customerAccess?.isSuperAdmin).toBe(true)
+    expect(req.scopes.customerAccess?.via).toBe('platform')
+  })
+
+  test('does not bypass from raw platformRoles when resolved SUPER_ADMIN is absent', async () => {
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID },
+      scopes: {
+        platformRoles: ['SUPER_ADMIN'],
+        memberships: [],
+        tenantMemberships: [],
+        vmfGrants: [],
+        resolvedPermissions: makeResolvedPermissions(),
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireCustomerPermission('CUSTOMER_VIEW')(req, res, next)
+
+    expect(res.statusCode).toBe(403)
+    expect(next).not.toHaveBeenCalled()
+  })
+
+  test('allows tenant-scoped permission fallback only when enabled', async () => {
+    Customer.findById.mockResolvedValue(makeFakeCustomer())
+
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID },
+      scopes: {
+        platformRoles: [],
+        memberships: [],
+        tenantMemberships: [{ customerId: CUSTOMER_ID, tenantId: TENANT_ID, roles: ['USER'] }],
+        vmfGrants: [],
+        resolvedPermissions: makeResolvedPermissions({
+          tenants: [
+            {
+              customerId: CUSTOMER_ID,
+              tenantId: TENANT_ID,
+              roleKeys: ['USER'],
+              permissions: ['USER_VIEW_TENANT'],
+            },
+          ],
+        }),
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireCustomerPermission('USER_VIEW_TENANT', { allowTenantPermission: true })(req, res, next)
+
+    expect(next).toHaveBeenCalled()
+    expect(req.scopes.customerAccess?.via).toBe('tenant_permission')
+    expect(req.scopes.customerAccess?.accessibleTenantIds).toEqual([TENANT_ID])
+  })
+
+  test('derives tenant-scoped customerAccess metadata from permitted tenant buckets only', async () => {
+    Customer.findById.mockResolvedValue(makeFakeCustomer())
+
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID },
+      scopes: {
+        platformRoles: [],
+        memberships: [{ customerId: CUSTOMER_ID, roles: ['CUSTOMER_ADMIN', 'TENANT_ADMIN'] }],
+        tenantMemberships: [
+          { customerId: CUSTOMER_ID, tenantId: TENANT_ID, roles: ['TENANT_ADMIN'] },
+          { customerId: CUSTOMER_ID, tenantId: TENANT_ID_2, roles: ['TENANT_ADMIN'] },
+        ],
+        vmfGrants: [],
+        resolvedPermissions: makeResolvedPermissions({
+          tenants: [
+            {
+              customerId: CUSTOMER_ID,
+              tenantId: TENANT_ID,
+              roleKeys: ['USER'],
+              permissions: ['USER_VIEW_TENANT'],
+            },
+          ],
+        }),
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireCustomerPermission('USER_VIEW_TENANT', { allowTenantPermission: true })(req, res, next)
+
+    expect(next).toHaveBeenCalled()
+    expect(req.scopes.customerAccess).toEqual(expect.objectContaining({
+      via: 'tenant_permission',
+      isSuperAdmin: false,
+      isCustomerAdmin: false,
+      isTenantAdmin: true,
+      tenantAdminTenantIds: [TENANT_ID],
+      accessibleTenantIds: [TENANT_ID],
+    }))
+  })
+
+  test('denies tenant-scoped permission fallback when not enabled', async () => {
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID },
+      scopes: {
+        platformRoles: [],
+        memberships: [],
+        tenantMemberships: [{ customerId: CUSTOMER_ID, tenantId: TENANT_ID, roles: ['USER'] }],
+        vmfGrants: [],
+        resolvedPermissions: makeResolvedPermissions({
+          tenants: [
+            {
+              customerId: CUSTOMER_ID,
+              tenantId: TENANT_ID,
+              roleKeys: ['USER'],
+              permissions: ['USER_VIEW_TENANT'],
+            },
+          ],
+        }),
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireCustomerPermission('USER_VIEW_TENANT')(req, res, next)
+
+    expect(res.statusCode).toBe(403)
+    expect(next).not.toHaveBeenCalled()
+  })
+
+  test('denies tenant-scoped fallback when tenant-admin restriction is enabled for a non-admin actor', async () => {
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID },
+      scopes: {
+        platformRoles: [],
+        memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+        tenantMemberships: [{ customerId: CUSTOMER_ID, tenantId: TENANT_ID, roles: ['USER'] }],
+        vmfGrants: [],
+        resolvedPermissions: makeResolvedPermissions({
+          tenants: [
+            {
+              customerId: CUSTOMER_ID,
+              tenantId: TENANT_ID,
+              roleKeys: ['USER'],
+              permissions: ['USER_VIEW_TENANT'],
+            },
+          ],
+        }),
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireCustomerPermission('USER_UPDATE', {
+      allowTenantPermission: true,
+      tenantPermissions: ['USER_VIEW_TENANT'],
+      requireTenantAdminFallback: true,
+    })(req, res, next)
+
+    expect(res.statusCode).toBe(403)
+    expect(next).not.toHaveBeenCalled()
+  })
+
+  test('returns 403 when customer is inactive', async () => {
+    Customer.findById.mockResolvedValue(makeFakeCustomer({ status: 'DISABLED' }))
+
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID },
+      scopes: {
+        platformRoles: [],
+        memberships: [{ customerId: CUSTOMER_ID, roles: ['CUSTOMER_ADMIN'] }],
+        tenantMemberships: [],
+        vmfGrants: [],
+        resolvedPermissions: makeResolvedPermissions({
+          customers: [
+            {
+              customerId: CUSTOMER_ID,
+              roleKeys: ['CUSTOMER_ADMIN'],
+              permissions: ['CUSTOMER_VIEW'],
+            },
+          ],
+        }),
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireCustomerPermission('CUSTOMER_VIEW')(req, res, next)
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body.error.code).toBe('CUSTOMER_INACTIVE')
+    expect(next).not.toHaveBeenCalled()
+  })
+})
+
 /* ================================================================== */
 /*  requireTenantAccess                                               */
 /* ================================================================== */
@@ -1010,6 +1538,400 @@ describe('requireTenantAccess', () => {
     expect(res.body.error.code).toBe('CUSTOMER_INACTIVE')
     expect(res.body.error.details?.reason).toBe('CUSTOMER_INACTIVE')
     expect(res.body.error.details?.customerStatus).toBe('DISABLED')
+    expect(next).not.toHaveBeenCalled()
+  })
+})
+
+describe('requireTenantPermission', () => {
+  test('returns 403 when customerId or tenantId param is missing', async () => {
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID },
+      scopes: {
+        platformRoles: [],
+        memberships: [],
+        tenantMemberships: [],
+        vmfGrants: [],
+        resolvedPermissions: makeResolvedPermissions(),
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireTenantPermission('VMF_VIEW')(req, res, next)
+
+    expect(res.statusCode).toBe(403)
+    expect(next).not.toHaveBeenCalled()
+  })
+
+  test('grants access when the tenant bucket contains the required permission', async () => {
+    Tenant.findById.mockResolvedValue(makeFakeTenant())
+
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID, tenantId: TENANT_ID },
+      scopes: {
+        platformRoles: [],
+        memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+        tenantMemberships: [{ customerId: CUSTOMER_ID, tenantId: TENANT_ID, roles: ['USER'] }],
+        vmfGrants: [],
+        resolvedPermissions: makeResolvedPermissions({
+          tenants: [
+            {
+              customerId: CUSTOMER_ID,
+              tenantId: TENANT_ID,
+              roleKeys: ['USER'],
+              permissions: ['VMF_VIEW'],
+            },
+          ],
+        }),
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireTenantPermission('VMF_VIEW')(req, res, next)
+
+    expect(next).toHaveBeenCalled()
+    expect(req.scopes.tenant).toBeDefined()
+  })
+
+  test('uses resolved SUPER_ADMIN as the only platform bypass source', async () => {
+    Tenant.findById.mockResolvedValue(makeFakeTenant())
+
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID, tenantId: TENANT_ID },
+      scopes: {
+        platformRoles: [],
+        memberships: [],
+        tenantMemberships: [],
+        vmfGrants: [],
+        resolvedPermissions: makeResolvedPermissions({
+          platform: {
+            roleKeys: ['SUPER_ADMIN'],
+            permissions: [],
+          },
+        }),
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireTenantPermission('VMF_CREATE', { allowCustomerPermission: true })(req, res, next)
+
+    expect(next).toHaveBeenCalled()
+  })
+
+  test('does not bypass from raw platformRoles when resolved SUPER_ADMIN is absent', async () => {
+    Tenant.findById.mockResolvedValue(makeFakeTenant())
+
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID, tenantId: TENANT_ID },
+      scopes: {
+        platformRoles: ['SUPER_ADMIN'],
+        memberships: [],
+        tenantMemberships: [],
+        vmfGrants: [],
+        resolvedPermissions: makeResolvedPermissions(),
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireTenantPermission('VMF_CREATE', { allowCustomerPermission: true })(req, res, next)
+
+    expect(res.statusCode).toBe(403)
+    expect(next).not.toHaveBeenCalled()
+  })
+
+  test('allows parent customer permission to satisfy tenant access only when explicitly enabled', async () => {
+    Tenant.findById.mockResolvedValue(makeFakeTenant())
+
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID, tenantId: TENANT_ID },
+      scopes: {
+        platformRoles: [],
+        memberships: [{ customerId: CUSTOMER_ID, roles: ['CUSTOMER_ADMIN'] }],
+        tenantMemberships: [],
+        vmfGrants: [],
+        resolvedPermissions: makeResolvedPermissions({
+          customers: [
+            {
+              customerId: CUSTOMER_ID,
+              roleKeys: ['CUSTOMER_ADMIN'],
+              permissions: ['VMF_CREATE'],
+            },
+          ],
+        }),
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireTenantPermission('VMF_CREATE', { allowCustomerPermission: true })(req, res, next)
+
+    expect(next).toHaveBeenCalled()
+  })
+
+  test('filters customer permission fallback by allowed role scopes when configured', async () => {
+    Role.find.mockResolvedValue([
+      {
+        key: 'TENANT_ADMIN',
+        scope: 'TENANT',
+        permissions: ['TENANT_VIEW', 'TENANT_UPDATE', 'VMF_CREATE'],
+        isActive: true,
+      },
+    ])
+
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID, tenantId: TENANT_ID },
+      scopes: {
+        platformRoles: [],
+        memberships: [{ customerId: CUSTOMER_ID, roles: ['TENANT_ADMIN'] }],
+        tenantMemberships: [],
+        vmfGrants: [],
+        resolvedPermissions: makeResolvedPermissions({
+          customers: [
+            {
+              customerId: CUSTOMER_ID,
+              roleKeys: ['TENANT_ADMIN'],
+              permissions: ['VMF_CREATE'],
+            },
+          ],
+        }),
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireTenantPermission('VMF_CREATE', {
+      allowCustomerPermission: true,
+      allowCustomerPermissionScopes: ['CUSTOMER'],
+    })(req, res, next)
+
+    expect(res.statusCode).toBe(403)
+    expect(next).not.toHaveBeenCalled()
+    expect(Customer.findById).not.toHaveBeenCalled()
+    expect(Tenant.findById).not.toHaveBeenCalled()
+  })
+
+  test('allows single-tenant customer fallback even when permission comes from a VMF-scoped customer role', async () => {
+    Role.find.mockResolvedValue([
+      {
+        key: 'USER',
+        scope: 'VMF',
+        permissions: ['VMF_VIEW'],
+        isActive: true,
+      },
+    ])
+    Customer.findById.mockResolvedValue(makeFakeCustomer({
+      topology: 'SINGLE_TENANT',
+      defaultTenantId: TENANT_ID,
+    }))
+    Tenant.findById.mockResolvedValue(makeFakeTenant())
+
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID, tenantId: TENANT_ID },
+      scopes: {
+        platformRoles: [],
+        memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+        tenantMemberships: [],
+        vmfGrants: [],
+        resolvedPermissions: makeResolvedPermissions({
+          customers: [
+            {
+              customerId: CUSTOMER_ID,
+              roleKeys: ['USER'],
+              permissions: ['VMF_VIEW'],
+            },
+          ],
+        }),
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireTenantPermission('VMF_VIEW', {
+      allowCustomerPermission: true,
+      allowCustomerPermissionScopes: ['CUSTOMER'],
+      allowCustomerPermissionWhenSingleTenant: true,
+    })(req, res, next)
+
+    expect(next).toHaveBeenCalled()
+  })
+
+  test('allows customer-scoped tenant permission for the administered tenant when enabled', async () => {
+    Role.find.mockResolvedValue([
+      {
+        key: 'TENANT_ADMIN',
+        scope: 'TENANT',
+        permissions: ['TENANT_VIEW', 'TENANT_UPDATE', 'VMF_CREATE'],
+        isActive: true,
+      },
+    ])
+    Customer.findById.mockResolvedValue(makeFakeCustomer())
+    Tenant.findById.mockResolvedValue(makeFakeTenant({ tenantAdminUserIds: [USER_ID] }))
+
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID, tenantId: TENANT_ID },
+      scopes: {
+        platformRoles: [],
+        memberships: [{ customerId: CUSTOMER_ID, roles: ['TENANT_ADMIN'] }],
+        tenantMemberships: [{ customerId: CUSTOMER_ID, tenantId: TENANT_ID, roles: ['USER'] }],
+        vmfGrants: [],
+        resolvedPermissions: makeResolvedPermissions({
+          customers: [
+            {
+              customerId: CUSTOMER_ID,
+              roleKeys: ['TENANT_ADMIN'],
+              permissions: ['VMF_CREATE'],
+            },
+          ],
+          tenants: [
+            {
+              customerId: CUSTOMER_ID,
+              tenantId: TENANT_ID,
+              roleKeys: ['USER'],
+              permissions: ['VMF_VIEW'],
+            },
+          ],
+        }),
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireTenantPermission('VMF_CREATE', {
+      allowCustomerPermission: true,
+      allowCustomerPermissionScopes: ['CUSTOMER'],
+      allowCustomerScopedTenantPermission: true,
+    })(req, res, next)
+
+    expect(next).toHaveBeenCalled()
+  })
+
+  test('denies customer-scoped tenant fallback when raw memberships are stale but active resolved roles lack TENANT_ADMIN', async () => {
+    Role.find.mockResolvedValue([
+      {
+        key: 'POWER_USER',
+        scope: 'VMF',
+        permissions: ['VMF_CREATE'],
+        isActive: true,
+      },
+    ])
+    Customer.findById.mockResolvedValue(makeFakeCustomer())
+    Tenant.findById.mockResolvedValue(makeFakeTenant({ tenantAdminUserIds: [USER_ID] }))
+
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID, tenantId: TENANT_ID },
+      scopes: {
+        platformRoles: [],
+        memberships: [{ customerId: CUSTOMER_ID, roles: ['TENANT_ADMIN', 'POWER_USER'] }],
+        tenantMemberships: [{ customerId: CUSTOMER_ID, tenantId: TENANT_ID, roles: ['USER'] }],
+        vmfGrants: [],
+        resolvedPermissions: makeResolvedPermissions({
+          customers: [
+            {
+              customerId: CUSTOMER_ID,
+              roleKeys: ['POWER_USER'],
+              permissions: ['VMF_CREATE'],
+            },
+          ],
+        }),
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireTenantPermission('VMF_CREATE', {
+      allowCustomerPermission: true,
+      allowCustomerPermissionScopes: ['CUSTOMER'],
+      allowCustomerScopedTenantPermission: true,
+    })(req, res, next)
+
+    expect(res.statusCode).toBe(403)
+    expect(next).not.toHaveBeenCalled()
+  })
+
+  test('denies parent customer permission fallback by default', async () => {
+    Tenant.findById.mockResolvedValue(makeFakeTenant())
+
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID, tenantId: TENANT_ID },
+      scopes: {
+        platformRoles: [],
+        memberships: [{ customerId: CUSTOMER_ID, roles: ['CUSTOMER_ADMIN'] }],
+        tenantMemberships: [],
+        vmfGrants: [],
+        resolvedPermissions: makeResolvedPermissions({
+          customers: [
+            {
+              customerId: CUSTOMER_ID,
+              roleKeys: ['CUSTOMER_ADMIN'],
+              permissions: ['VMF_CREATE'],
+            },
+          ],
+        }),
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireTenantPermission('VMF_CREATE')(req, res, next)
+
+    expect(res.statusCode).toBe(403)
+    expect(next).not.toHaveBeenCalled()
+  })
+
+  test('returns forbidden before resource lookups when caller lacks permission', async () => {
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID, tenantId: TENANT_ID },
+      scopes: {
+        platformRoles: [],
+        memberships: [{ customerId: CUSTOMER_ID, roles: ['CUSTOMER_ADMIN'] }],
+        tenantMemberships: [],
+        vmfGrants: [],
+        resolvedPermissions: makeResolvedPermissions(),
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireTenantPermission('VMF_CREATE')(req, res, next)
+
+    expect(res.statusCode).toBe(403)
+    expect(next).not.toHaveBeenCalled()
+    expect(Customer.findById).not.toHaveBeenCalled()
+    expect(Tenant.findById).not.toHaveBeenCalled()
+  })
+
+  test('returns 403 when parent customer is inactive', async () => {
+    Customer.findById.mockResolvedValue(makeFakeCustomer({ status: 'DISABLED' }))
+    Tenant.findById.mockResolvedValue(makeFakeTenant())
+
+    const req = makeReq({
+      params: { customerId: CUSTOMER_ID, tenantId: TENANT_ID },
+      scopes: {
+        platformRoles: [],
+        memberships: [{ customerId: CUSTOMER_ID, roles: ['CUSTOMER_ADMIN'] }],
+        tenantMemberships: [],
+        vmfGrants: [],
+        resolvedPermissions: makeResolvedPermissions({
+          customers: [
+            {
+              customerId: CUSTOMER_ID,
+              roleKeys: ['CUSTOMER_ADMIN'],
+              permissions: ['VMF_CREATE'],
+            },
+          ],
+        }),
+      },
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireTenantPermission('VMF_CREATE', { allowCustomerPermission: true })(req, res, next)
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body.error.code).toBe('CUSTOMER_INACTIVE')
     expect(next).not.toHaveBeenCalled()
   })
 })

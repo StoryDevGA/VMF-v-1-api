@@ -48,7 +48,33 @@ let request
 let tokenService
 let monitoringService
 let env
-let User
+let User, Role
+
+const buildRoleQueryChain = (rows) => {
+  const chain = {
+    lean: jest.fn().mockResolvedValue(rows),
+  }
+  chain.select = jest.fn().mockReturnValue(chain)
+  chain.sort = jest.fn().mockReturnValue(chain)
+  chain.skip = jest.fn().mockReturnValue(chain)
+  chain.limit = jest.fn().mockReturnValue(chain)
+  return chain
+}
+
+const buildDefaultRoleRows = () => ([
+  {
+    key: 'SUPER_ADMIN',
+    scope: 'PLATFORM',
+    permissions: ['PLATFORM_MANAGE', 'SYSTEM_HEALTH_VIEW', 'CUSTOMER_CREATE', 'CUSTOMER_UPDATE', 'CUSTOMER_VIEW', 'ROLE_MANAGE', 'AUDIT_VIEW_ALL'],
+    isActive: true,
+  },
+  {
+    key: 'USER',
+    scope: 'VMF',
+    permissions: ['VMF_VIEW', 'DEAL_CREATE', 'DEAL_UPDATE', 'DEAL_VIEW'],
+    isActive: true,
+  },
+])
 
 const makeUser = (overrides = {}) => ({
   _id: '507f1f77bcf86cd799439011',
@@ -81,12 +107,15 @@ beforeAll(async () => {
   tokenService = (await import('../services/tokenService.js')).default
   monitoringService = (await import('../services/monitoringService.js')).default
   env = (await import('../config/env.js')).default
-  User = (await import('../models/index.js')).User
+  const models = await import('../models/index.js')
+  User = models.User
+  Role = models.Role
   request = supertest(app)
 })
 
 beforeEach(() => {
   User.findById = jest.fn()
+  Role.find = jest.fn().mockImplementation(() => buildRoleQueryChain(buildDefaultRoleRows()))
   monitoringService.resetForTests()
 })
 

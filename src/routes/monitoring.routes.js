@@ -3,21 +3,21 @@
  *
  * Exposes Prometheus metrics for operational monitoring:
  *
- *   GET /metrics   — Prometheus text-format metrics scrape endpoint (SUPER_ADMIN only)
+ *   GET /metrics   — Prometheus text-format metrics scrape endpoint
  *
- * Protected by authJwt + loadScopes + requirePlatformRole('SUPER_ADMIN').
+ * Protected by authJwt + loadScopes + requirePlatformPermission('SYSTEM_HEALTH_VIEW').
  */
 
 import { Router } from 'express'
 import authJwt from '../middleware/authJwt.js'
 import loadScopes from '../middleware/loadScopes.js'
-import { requirePlatformRole } from '../middleware/authorize.js'
+import { requirePlatformPermission } from '../middleware/authorize.js'
 import logger from '../config/logger.js'
 import monitoringService from '../services/monitoringService.js'
 
 const router = Router()
 
-router.get('/', authJwt, loadScopes, requirePlatformRole('SUPER_ADMIN'), async (req, res) => {
+router.get('/', authJwt, loadScopes, requirePlatformPermission('SYSTEM_HEALTH_VIEW'), async (req, res) => {
   try {
     const payload = await monitoringService.getMetrics()
 

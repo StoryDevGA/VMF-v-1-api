@@ -184,6 +184,18 @@ const env = {
   // Performance Optimization
   perfCacheEnabled: toBoolean(process.env.PERF_CACHE_ENABLED, process.env.NODE_ENV !== 'test'),
   userPermissionsCacheTtlSec: toPositiveNumber(process.env.USER_PERMISSIONS_CACHE_TTL_SEC, 300),
+  userPermissionsRoleFanoutThreshold: toPositiveNumber(
+    process.env.USER_PERMISSIONS_ROLE_FANOUT_THRESHOLD,
+    1000,
+  ),
+  userPermissionsRoleQueryTimeoutMs: toPositiveNumber(
+    process.env.USER_PERMISSIONS_ROLE_QUERY_TIMEOUT_MS,
+    3000,
+  ),
+  userPermissionsInvalidationBatchSize: toPositiveNumber(
+    process.env.USER_PERMISSIONS_INVALIDATION_BATCH_SIZE,
+    250,
+  ),
   tenantStatusCacheTtlSec: toPositiveNumber(process.env.TENANT_STATUS_CACHE_TTL_SEC, 60),
   customerTopologyCacheTtlSec: toPositiveNumber(process.env.CUSTOMER_TOPOLOGY_CACHE_TTL_SEC, 900),
   cacheWarmUserLimit: toPositiveNumber(process.env.CACHE_WARM_USER_LIMIT, 200),

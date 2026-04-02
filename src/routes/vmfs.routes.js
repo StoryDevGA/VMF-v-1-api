@@ -18,12 +18,12 @@
 import { Router } from 'express'
 import authJwt from '../middleware/authJwt.js'
 import loadScopes from '../middleware/loadScopes.js'
-import { requireTenantAccess, requireVmfAccess } from '../middleware/authorize.js'
+import { requireTenantPermission, requireVmfAccess } from '../middleware/authorize.js'
 import requireCustomerActive from '../middleware/customerStatus.js'
 import requireFeatureEntitlement from '../middleware/featureEntitlements.js'
 import topologyGuard from '../middleware/topologyGuard.js'
 import requireTenantEnabled from '../middleware/tenantStatus.js'
-import { tenantManagementRateLimit } from '../middleware/rateLimits.js'
+import { vmfManagementRateLimit } from '../middleware/rateLimits.js'
 import {
   validateCreateVmf,
   validateUpdateVmf,
@@ -50,9 +50,11 @@ tenantVmfRouter.use(authJwt, loadScopes)
 
 tenantVmfRouter.get(
   '/',
-  requireTenantAccess({
-    allowCustomerAdmin: true,
-    allowCustomerMembershipWhenSingleTenant: true,
+  requireTenantPermission('VMF_VIEW', {
+    allowCustomerPermission: true,
+    allowCustomerPermissionScopes: ['CUSTOMER'],
+    allowCustomerPermissionWhenSingleTenant: true,
+    allowCustomerScopedTenantPermission: true,
   }),
   requireFeatureEntitlement('VMF'),
   requireCustomerActive(),
@@ -63,12 +65,17 @@ tenantVmfRouter.get(
 
 tenantVmfRouter.post(
   '/',
-  requireTenantAccess({ roles: ['TENANT_ADMIN'], allowCustomerAdmin: true }),
+  requireTenantPermission('VMF_CREATE', {
+    allowCustomerPermission: true,
+    allowCustomerPermissionScopes: ['CUSTOMER'],
+    allowCustomerPermissionWhenSingleTenant: true,
+    allowCustomerScopedTenantPermission: true,
+  }),
   requireFeatureEntitlement('VMF'),
   requireCustomerActive(),
   requireTenantEnabled,
   topologyGuard,
-  tenantManagementRateLimit,
+  vmfManagementRateLimit,
   validateCreateVmf,
   createVmf,
 )
@@ -83,8 +90,50 @@ export const vmfRouter = Router()
 vmfRouter.use(authJwt, loadScopes)
 
 // All VMF-scoped routes need requireVmfAccess (loads VMF, checks hierarchy)
-vmfRouter.get('/:vmfId', requireVmfAccess('READ'), requireFeatureEntitlement('VMF'), requireCustomerActive(), getVmf)
-vmfRouter.patch('/:vmfId', requireVmfAccess('WRITE'), requireFeatureEntitlement('VMF'), requireCustomerActive(), tenantManagementRateLimit, validateUpdateVmf, updateVmf)
-vmfRouter.delete('/:vmfId', requireVmfAccess('WRITE'), requireFeatureEntitlement('VMF'), requireCustomerActive(), tenantManagementRateLimit, deleteVmf)
-vmfRouter.post('/:vmfId/grants', requireVmfAccess('WRITE'), requireFeatureEntitlement('VMF'), requireCustomerActive(), tenantManagementRateLimit, validateGrantAccess, grantAccess)
-vmfRouter.delete('/:vmfId/grants/:userId', requireVmfAccess('WRITE'), requireFeatureEntitlement('VMF'), requireCustomerActive(), tenantManagementRateLimit, revokeAccess)
+vmfRouter.get(
+  '/:vmfId',
+  requireVmfAccess('READ', { requiredPermission: 'VMF_VIEW' }),
+  requireFeatureEntitlement('VMF'),
+  requireCustomerActive(),
+  getVmf,
+)
+vmfRouter.patch(
+  '/:vmfId',
+  requireVmfAccess(null, {
+    requiredPermission: 'VMF_UPDATE',
+    requireVmfGrant: false,
+  }),
+  requireFeatureEntitlement('VMF'),
+  requireCustomerActive(),
+  vmfManagementRateLimit,
+  validateUpdateVmf,
+  updateVmf,
+)
+vmfRouter.delete(
+  '/:vmfId',
+  requireVmfAccess(null, {
+    requiredPermission: 'VMF_UPDATE',
+    requireVmfGrant: false,
+  }),
+  requireFeatureEntitlement('VMF'),
+  requireCustomerActive(),
+  vmfManagementRateLimit,
+  deleteVmf,
+)
+vmfRouter.post(
+  '/:vmfId/grants',
+  requireVmfAccess('WRITE', { requiredPermission: 'VMF_UPDATE' }),
+  requireFeatureEntitlement('VMF'),
+  requireCustomerActive(),
+  vmfManagementRateLimit,
+  validateGrantAccess,
+  grantAccess,
+)
+vmfRouter.delete(
+  '/:vmfId/grants/:userId',
+  requireVmfAccess('WRITE', { requiredPermission: 'VMF_UPDATE' }),
+  requireFeatureEntitlement('VMF'),
+  requireCustomerActive(),
+  vmfManagementRateLimit,
+  revokeAccess,
+)

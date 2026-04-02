@@ -13,7 +13,7 @@
 import { Router } from 'express'
 import authJwt from '../middleware/authJwt.js'
 import loadScopes from '../middleware/loadScopes.js'
-import { requireCustomerAccess } from '../middleware/authorize.js'
+import { requireCustomerPermission } from '../middleware/authorize.js'
 import { bulkOperationsRateLimit } from '../middleware/rateLimits.js'
 import {
   validateBulkCreateUsers,
@@ -36,12 +36,11 @@ export const bulkRouter = Router({ mergeParams: true })
 bulkRouter.use(
   authJwt,
   loadScopes,
-  requireCustomerAccess({ roles: ['CUSTOMER_ADMIN'] }),
   bulkOperationsRateLimit,
 )
 
-bulkRouter.post('/', validateBulkCreateUsers, bulkCreateUsers)
-bulkRouter.patch('/', validateBulkUpdateUsers, bulkUpdateUsers)
+bulkRouter.post('/', requireCustomerPermission('USER_CREATE'), validateBulkCreateUsers, bulkCreateUsers)
+bulkRouter.patch('/', requireCustomerPermission('USER_UPDATE'), validateBulkUpdateUsers, bulkUpdateUsers)
 
 /* ------------------------------------------------------------------ */
 /*  Bulk-disable router (separate path segment)                       */
@@ -53,8 +52,7 @@ export const bulkDisableRouter = Router({ mergeParams: true })
 bulkDisableRouter.use(
   authJwt,
   loadScopes,
-  requireCustomerAccess({ roles: ['CUSTOMER_ADMIN'] }),
   bulkOperationsRateLimit,
 )
 
-bulkDisableRouter.post('/', validateBulkDisableUsers, bulkDisableUsers)
+bulkDisableRouter.post('/', requireCustomerPermission('USER_UPDATE'), validateBulkDisableUsers, bulkDisableUsers)

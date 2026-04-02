@@ -16,7 +16,7 @@
 import { Router } from 'express'
 import authJwt from '../middleware/authJwt.js'
 import loadScopes from '../middleware/loadScopes.js'
-import { requirePlatformRole, requireCustomerAccess } from '../middleware/authorize.js'
+import { requirePlatformPermission, requireCustomerPermission } from '../middleware/authorize.js'
 import requireCustomerActive from '../middleware/customerStatus.js'
 import { tenantManagementRateLimit } from '../middleware/rateLimits.js'
 import { validateCreateTenant, validateUpdateTenant } from '../validators/tenant.validator.js'
@@ -38,18 +38,16 @@ customerTenantRouter.use(authJwt, loadScopes)
 
 customerTenantRouter.get(
   '/',
-  requireCustomerAccess({
-    roles: ['CUSTOMER_ADMIN'],
-    allowTenantAdmin: true,
-    allowCustomerMembershipWhenSingleTenant: true,
-    allowTenantMember: true,
+  requireCustomerPermission('TENANT_VIEW', {
+    allowTenantPermission: true,
+    allowCustomerScopedTenantPermission: true,
   }),
   requireCustomerActive(),
   listTenants,
 )
 customerTenantRouter.post(
   '/',
-  requireCustomerAccess({ roles: ['CUSTOMER_ADMIN'] }),
+  requireCustomerPermission('TENANT_CREATE'),
   requireCustomerActive(),
   tenantManagementRateLimit,
   validateCreateTenant,
@@ -57,7 +55,10 @@ customerTenantRouter.post(
 )
 customerTenantRouter.patch(
   '/:tenantId',
-  requireCustomerAccess({ roles: ['CUSTOMER_ADMIN'], allowTenantAdmin: true }),
+  requireCustomerPermission('TENANT_UPDATE', {
+    allowTenantPermission: true,
+    allowCustomerScopedTenantPermission: true,
+  }),
   requireCustomerActive(),
   tenantManagementRateLimit,
   validateUpdateTenant,
@@ -65,14 +66,20 @@ customerTenantRouter.patch(
 )
 customerTenantRouter.post(
   '/:tenantId/enable',
-  requireCustomerAccess({ roles: ['CUSTOMER_ADMIN'], allowTenantAdmin: true }),
+  requireCustomerPermission('TENANT_UPDATE', {
+    allowTenantPermission: true,
+    allowCustomerScopedTenantPermission: true,
+  }),
   requireCustomerActive(),
   tenantManagementRateLimit,
   enableTenant,
 )
 customerTenantRouter.post(
   '/:tenantId/disable',
-  requireCustomerAccess({ roles: ['CUSTOMER_ADMIN'], allowTenantAdmin: true }),
+  requireCustomerPermission('TENANT_UPDATE', {
+    allowTenantPermission: true,
+    allowCustomerScopedTenantPermission: true,
+  }),
   requireCustomerActive(),
   tenantManagementRateLimit,
   disableTenant,
@@ -84,7 +91,7 @@ customerTenantRouter.post(
 
 export const tenantRouter = Router()
 
-tenantRouter.use(authJwt, loadScopes, requirePlatformRole('SUPER_ADMIN'))
+tenantRouter.use(authJwt, loadScopes, requirePlatformPermission('PLATFORM_MANAGE'))
 
 tenantRouter.patch('/:tenantId', requireCustomerActive(), tenantManagementRateLimit, validateUpdateTenant, updateTenant)
 tenantRouter.post('/:tenantId/enable', requireCustomerActive(), tenantManagementRateLimit, enableTenant)

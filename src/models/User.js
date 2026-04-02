@@ -53,7 +53,8 @@ const userSchema = new mongoose.Schema({
     roles: [{
       type: String,
       required: true,
-      trim: true
+      trim: true,
+      uppercase: true
     }]
   }],
   tenantMemberships: [{
@@ -70,7 +71,8 @@ const userSchema = new mongoose.Schema({
     roles: [{
       type: String,
       required: true,
-      trim: true
+      trim: true,
+      uppercase: true
     }]
   }],
   vmfGrants: [{
@@ -111,8 +113,10 @@ const userSchema = new mongoose.Schema({
 // Indexes for performance
 userSchema.index({ 'memberships.customerId': 1 })
 userSchema.index({ 'memberships.customerId': 1, isActive: 1, createdAt: -1 })
+userSchema.index({ 'memberships.roles': 1 })
 userSchema.index({ 'tenantMemberships.customerId': 1 })
 userSchema.index({ 'tenantMemberships.tenantId': 1 })
+userSchema.index({ 'tenantMemberships.roles': 1 })
 userSchema.index({ isActive: 1, 'identityPlus.trustStatus': 1 })
 
 // Instance methods

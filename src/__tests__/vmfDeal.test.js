@@ -18,7 +18,7 @@
  *     - GET    /api/v1/vmfs/:vmfId/deals
  *     - POST   /api/v1/vmfs/:vmfId/deals
  *
- *   Deal Routes (Deal-scoped — SUPER_ADMIN):
+ *   Deal Routes (Deal-scoped — hybrid capability + VMF grant access):
  *     - GET    /api/v1/deals/:dealId
  *     - PATCH  /api/v1/deals/:dealId
  *     - DELETE /api/v1/deals/:dealId
@@ -251,6 +251,13 @@ const makeActivePolicy = (overrides = {}) => ({
   ...overrides,
 })
 
+const makeRoleDefinition = (key, scope, permissions = []) => ({
+  key,
+  scope,
+  permissions,
+  isActive: true,
+})
+
 const makeFakeDeal = (overrides = {}) => ({
   _id: DEAL_ID,
   id: DEAL_ID,
@@ -280,13 +287,14 @@ const makeFakeDeal = (overrides = {}) => ({
 /*  Dynamic imports                                                   */
 /* ------------------------------------------------------------------ */
 
-let app, request, tokenService
-let User, Customer, Tenant, VMF, Deal, AuditLog, SystemVersioningPolicy
+let app, request, tokenService, performanceCacheService
+let User, Customer, Tenant, VMF, Deal, AuditLog, SystemVersioningPolicy, Role
 
 beforeAll(async () => {
   const supertest = (await import('supertest')).default
   app = (await import('../app.js')).default
   tokenService = (await import('../services/tokenService.js')).default
+  performanceCacheService = (await import('../services/performanceCacheService.js')).default
   request = supertest(app)
 
   const models = await import('../models/index.js')
@@ -297,7 +305,19 @@ beforeAll(async () => {
   Deal = models.Deal
   AuditLog = models.AuditLog
   SystemVersioningPolicy = models.SystemVersioningPolicy
+  Role = models.Role
 })
+
+const makeDefaultRoleDefinitions = () => ([
+  makeRoleDefinition('SUPER_ADMIN', 'PLATFORM', ['PLATFORM_MANAGE']),
+  makeRoleDefinition('CUSTOMER_ADMIN', 'CUSTOMER', ['CUSTOMER_VIEW', 'VMF_VIEW', 'VMF_CREATE']),
+  makeRoleDefinition('TENANT_ADMIN', 'TENANT', ['TENANT_VIEW', 'VMF_VIEW', 'VMF_CREATE']),
+  makeRoleDefinition('USER', 'VMF', ['VMF_VIEW']),
+])
+
+const setRoleDefinitions = (definitions = makeDefaultRoleDefinitions()) => {
+  Role.find = jest.fn().mockResolvedValue(definitions)
+}
 
 /* ------------------------------------------------------------------ */
 /*  Auth helpers                                                      */
@@ -338,6 +358,8 @@ const getRegularUserToken = async () => {
 /* ------------------------------------------------------------------ */
 
 beforeEach(() => {
+  performanceCacheService.resetForTests()
+
   User.findById = jest.fn()
   User.findOne = jest.fn()
   User.updateMany = jest.fn(async () => ({ modifiedCount: 0 }))
@@ -345,6 +367,7 @@ beforeEach(() => {
   Customer.findById.mockResolvedValue(makeFakeCustomer())
   Tenant.findById = jest.fn()
   VMF.findById = jest.fn()
+  VMF.findById.mockResolvedValue(makeFakeVmf())
   VMF.find = jest.fn()
   VMF.countDocuments = jest.fn()
   VMF.countByTenant = jest.fn()
@@ -355,6 +378,7 @@ beforeEach(() => {
   Deal.countDocuments = jest.fn()
   Deal.updateMany = jest.fn(async () => ({ modifiedCount: 0 }))
   AuditLog.createLog = jest.fn(async () => ({}))
+  setRoleDefinitions()
 
   // Default: loadScopes finds the correct user by ID
   User.findById.mockImplementation((id) => {
@@ -497,6 +521,7 @@ describe('Deal Validators', () => {
   describe('PATCH /api/v1/deals/:dealId — validation', () => {
     test('returns 422 when body is empty', async () => {
       const token = await getSuperAdminToken()
+      Deal.findById.mockResolvedValue(makeFakeDeal())
 
       const res = await request
         .patch(`/api/v1/deals/${DEAL_ID}`)
@@ -509,6 +534,7 @@ describe('Deal Validators', () => {
 
     test('returns 422 when status is invalid', async () => {
       const token = await getSuperAdminToken()
+      Deal.findById.mockResolvedValue(makeFakeDeal())
 
       const res = await request
         .patch(`/api/v1/deals/${DEAL_ID}`)
@@ -540,8 +566,10 @@ describe('VMF/Deal authorization guards', () => {
     expect(res.status).toBe(401)
   })
 
-  test('deal-scoped routes return 403 for non-SUPER_ADMIN', async () => {
-    const token = await getCustomerAdminToken()
+  test('deal-scoped routes return 403 for callers without hybrid deal access', async () => {
+    // Regular user has no DEAL_VIEW capability and no VMF grant — should be denied.
+    const token = await getRegularUserToken()
+    Deal.findById.mockResolvedValue(makeFakeDeal())
 
     const res = await request
       .get(`/api/v1/deals/${DEAL_ID}`)
@@ -636,6 +664,57 @@ describe('GET /api/v1/customers/:customerId/tenants/:tenantId/vmfs', () => {
 
     expect(res.status).toBe(200)
     expect(res.body.data).toHaveLength(0)
+  })
+
+  test('returns VMF list for a customer-scoped tenant admin on a tenant they administer', async () => {
+    const scopedTenantAdmin = makeCustomerScopedTenantAdmin()
+    const tokens = await tokenService.generateTokens(scopedTenantAdmin)
+
+    User.findById.mockImplementation((id) => {
+      if (id === TENANT_ADMIN_ID) return Promise.resolve(makeCustomerScopedTenantAdmin())
+      if (id === SUPER_ADMIN_ID) return Promise.resolve(makeSuperAdmin())
+      if (id === CUSTOMER_ADMIN_ID) return Promise.resolve(makeCustomerAdmin())
+      if (id === REGULAR_USER_ID) return Promise.resolve(makeRegularUser())
+      return Promise.resolve(null)
+    })
+    Tenant.findById.mockResolvedValue(makeFakeTenant({ tenantAdminUserIds: [TENANT_ADMIN_ID] }))
+    VMF.countByTenant.mockResolvedValue(0)
+
+    VMF.find.mockReturnValue({
+      sort: jest.fn().mockReturnValue({
+        skip: jest.fn().mockReturnValue({
+          limit: jest.fn().mockReturnValue({
+            lean: jest.fn().mockResolvedValue([]),
+          }),
+        }),
+      }),
+    })
+    VMF.countDocuments.mockResolvedValue(0)
+
+    const res = await request
+      .get(`/api/v1/customers/${CUSTOMER_ID}/tenants/${TENANT_ID}/vmfs`)
+      .set('Authorization', `Bearer ${tokens.accessToken}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toHaveLength(0)
+  })
+
+  test('returns 403 for a regular user when VMF_VIEW is not granted by their resolved tenant roles', async () => {
+    const token = await getRegularUserToken()
+    setRoleDefinitions([
+      makeRoleDefinition('SUPER_ADMIN', 'PLATFORM', ['PLATFORM_MANAGE']),
+      makeRoleDefinition('CUSTOMER_ADMIN', 'CUSTOMER', ['CUSTOMER_VIEW', 'VMF_VIEW', 'VMF_CREATE']),
+      makeRoleDefinition('TENANT_ADMIN', 'TENANT', ['TENANT_VIEW', 'VMF_VIEW', 'VMF_CREATE']),
+      makeRoleDefinition('USER', 'VMF', []),
+    ])
+
+    const res = await request
+      .get(`/api/v1/customers/${CUSTOMER_ID}/tenants/${TENANT_ID}/vmfs`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.message).toBe("Tenant permission 'VMF_VIEW' is required.")
+    expect(Tenant.findById).not.toHaveBeenCalled()
   })
 
   test('returns VMF list for a single-tenant customer user without tenant membership', async () => {
@@ -740,6 +819,90 @@ describe('POST /api/v1/customers/:customerId/tenants/:tenantId/vmfs', () => {
     expect(res.body.data.frameworkVersion).toBe('2.2')
     expect(res.body.data.versionPolicyId).toBe(POLICY_ID)
     expect(AuditLog.createLog).toHaveBeenCalled()
+
+    VMF.prototype.save = origSave
+  })
+
+  test('returns 403 for a regular user without VMF_CREATE permission', async () => {
+    const token = await getRegularUserToken()
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/tenants/${TENANT_ID}/vmfs`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: 'Blocked VMF' })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.message).toBe("Tenant permission 'VMF_CREATE' is required.")
+    expect(Tenant.findById).not.toHaveBeenCalled()
+  })
+
+  test('allows a regular tenant member to create a VMF when VMF_CREATE is granted to their role', async () => {
+    const token = await getRegularUserToken()
+    setRoleDefinitions([
+      makeRoleDefinition('SUPER_ADMIN', 'PLATFORM', ['PLATFORM_MANAGE']),
+      makeRoleDefinition('CUSTOMER_ADMIN', 'CUSTOMER', ['CUSTOMER_VIEW', 'VMF_VIEW', 'VMF_CREATE']),
+      makeRoleDefinition('TENANT_ADMIN', 'TENANT', ['TENANT_VIEW', 'VMF_VIEW', 'VMF_CREATE']),
+      makeRoleDefinition('USER', 'VMF', ['VMF_VIEW', 'VMF_CREATE']),
+    ])
+    Tenant.findById.mockResolvedValue(makeFakeTenant())
+    VMF.countByTenant.mockResolvedValue(0)
+    SystemVersioningPolicy.findActive.mockResolvedValue(makeActivePolicy())
+
+    const origSave = VMF.prototype.save
+    VMF.prototype.save = jest.fn(async function () {
+      this._id = VMF_ID
+      this.id = VMF_ID
+      return this
+    })
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/tenants/${TENANT_ID}/vmfs`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        name: 'Permission Driven VMF',
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data?.name).toBe('Permission Driven VMF')
+
+    VMF.prototype.save = origSave
+  })
+
+  test('re-evaluates VMF_CREATE after auth cache reset when a role gains the permission', async () => {
+    const token = await getRegularUserToken()
+
+    const deniedResponse = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/tenants/${TENANT_ID}/vmfs`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: 'Still Blocked VMF' })
+
+    expect(deniedResponse.status).toBe(403)
+
+    performanceCacheService.resetForTests()
+    setRoleDefinitions([
+      makeRoleDefinition('SUPER_ADMIN', 'PLATFORM', ['PLATFORM_MANAGE']),
+      makeRoleDefinition('CUSTOMER_ADMIN', 'CUSTOMER', ['CUSTOMER_VIEW', 'VMF_VIEW', 'VMF_CREATE']),
+      makeRoleDefinition('TENANT_ADMIN', 'TENANT', ['TENANT_VIEW', 'VMF_VIEW', 'VMF_CREATE']),
+      makeRoleDefinition('USER', 'VMF', ['VMF_VIEW', 'VMF_CREATE']),
+    ])
+    Tenant.findById.mockResolvedValue(makeFakeTenant())
+    VMF.countByTenant.mockResolvedValue(0)
+    SystemVersioningPolicy.findActive.mockResolvedValue(makeActivePolicy())
+
+    const origSave = VMF.prototype.save
+    VMF.prototype.save = jest.fn(async function () {
+      this._id = VMF_ID
+      this.id = VMF_ID
+      return this
+    })
+
+    const allowedResponse = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/tenants/${TENANT_ID}/vmfs`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: 'Permission Refresh VMF' })
+
+    expect(allowedResponse.status).toBe(201)
+    expect(allowedResponse.body.data?.name).toBe('Permission Refresh VMF')
 
     VMF.prototype.save = origSave
   })
@@ -859,7 +1022,7 @@ describe('POST /api/v1/customers/:customerId/tenants/:tenantId/vmfs', () => {
       })
 
     expect(res.status).toBe(403)
-    expect(res.body.error.message).toBe('You do not have the required role for this tenant.')
+    expect(res.body.error.message).toBe("Tenant permission 'VMF_CREATE' is required.")
   })
 })
 
@@ -1010,6 +1173,35 @@ describe('PATCH /api/v1/vmfs/:vmfId', () => {
     expect(vmf.save).toHaveBeenCalled()
   })
 
+  test('allows regular user with scoped VMF_UPDATE to update a VMF without a VMF WRITE grant', async () => {
+    const token = await getRegularUserToken()
+    const vmf = makeFakeVmf()
+    setRoleDefinitions([
+      makeRoleDefinition('SUPER_ADMIN', 'PLATFORM', ['PLATFORM_MANAGE']),
+      makeRoleDefinition('CUSTOMER_ADMIN', 'CUSTOMER', ['CUSTOMER_VIEW', 'VMF_VIEW', 'VMF_CREATE']),
+      makeRoleDefinition('TENANT_ADMIN', 'TENANT', ['TENANT_VIEW', 'VMF_VIEW', 'VMF_CREATE']),
+      makeRoleDefinition('USER', 'VMF', ['VMF_VIEW', 'VMF_UPDATE']),
+    ])
+
+    User.findById.mockImplementation((id) => {
+      if (id === REGULAR_USER_ID) return Promise.resolve(makeRegularUser({ vmfGrants: [] }))
+      if (id === SUPER_ADMIN_ID) return Promise.resolve(makeSuperAdmin())
+      if (id === CUSTOMER_ADMIN_ID) return Promise.resolve(makeCustomerAdmin())
+      if (id === TENANT_ADMIN_ID) return Promise.resolve(makeTenantAdmin())
+      return Promise.resolve(null)
+    })
+    VMF.findById.mockResolvedValue(vmf)
+
+    const res = await request
+      .patch(`/api/v1/vmfs/${VMF_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: 'Scoped Update Without Grant' })
+
+    expect(res.status).toBe(200)
+    expect(vmf.name).toBe('Scoped Update Without Grant')
+    expect(vmf.save).toHaveBeenCalled()
+  })
+
   test('denies customer-scoped tenant admin VMF update when they are only linked to the tenant as a user', async () => {
     const scopedTenantAdmin = makeCustomerScopedTenantAdmin()
     const tokens = await tokenService.generateTokens(scopedTenantAdmin)
@@ -1031,7 +1223,36 @@ describe('PATCH /api/v1/vmfs/:vmfId', () => {
       .send({ name: 'Blocked Update By Scoped Tenant Admin' })
 
     expect(res.status).toBe(403)
-    expect(res.body.error.message).toBe('You do not have access to this VMF.')
+    expect(res.body.error.message).toBe("Tenant permission 'VMF_UPDATE' is required.")
+    expect(vmf.save).not.toHaveBeenCalled()
+  })
+
+  test('denies regular user with WRITE grant when VMF_UPDATE is not granted by role permissions', async () => {
+    const token = await getRegularUserToken()
+    const vmf = makeFakeVmf()
+
+    User.findById.mockImplementation((id) => {
+      if (id === REGULAR_USER_ID) {
+        return Promise.resolve(makeRegularUser({
+          vmfGrants: [
+            { customerId: CUSTOMER_ID, tenantId: TENANT_ID, vmfId: VMF_ID, permissions: ['READ', 'WRITE'] },
+          ],
+        }))
+      }
+      if (id === SUPER_ADMIN_ID) return Promise.resolve(makeSuperAdmin())
+      if (id === CUSTOMER_ADMIN_ID) return Promise.resolve(makeCustomerAdmin())
+      if (id === TENANT_ADMIN_ID) return Promise.resolve(makeTenantAdmin())
+      return Promise.resolve(null)
+    })
+    VMF.findById.mockResolvedValue(vmf)
+
+    const res = await request
+      .patch(`/api/v1/vmfs/${VMF_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: 'Blocked Update' })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.message).toContain("Tenant permission 'VMF_UPDATE' is required.")
     expect(vmf.save).not.toHaveBeenCalled()
   })
 })
@@ -1112,6 +1333,35 @@ describe('DELETE /api/v1/vmfs/:vmfId', () => {
       .set('Authorization', `Bearer ${token}`)
 
     expect(res.status).toBe(404)
+  })
+
+  test('allows regular user with scoped VMF_UPDATE to delete a VMF without a VMF WRITE grant', async () => {
+    const token = await getRegularUserToken()
+    const vmf = makeFakeVmf({ status: 'DISABLED' })
+    setRoleDefinitions([
+      makeRoleDefinition('SUPER_ADMIN', 'PLATFORM', ['PLATFORM_MANAGE']),
+      makeRoleDefinition('CUSTOMER_ADMIN', 'CUSTOMER', ['CUSTOMER_VIEW', 'VMF_VIEW', 'VMF_CREATE']),
+      makeRoleDefinition('TENANT_ADMIN', 'TENANT', ['TENANT_VIEW', 'VMF_VIEW', 'VMF_CREATE']),
+      makeRoleDefinition('USER', 'VMF', ['VMF_VIEW', 'VMF_UPDATE']),
+    ])
+
+    User.findById.mockImplementation((id) => {
+      if (id === REGULAR_USER_ID) return Promise.resolve(makeRegularUser({ vmfGrants: [] }))
+      if (id === SUPER_ADMIN_ID) return Promise.resolve(makeSuperAdmin())
+      if (id === CUSTOMER_ADMIN_ID) return Promise.resolve(makeCustomerAdmin())
+      if (id === TENANT_ADMIN_ID) return Promise.resolve(makeTenantAdmin())
+      return Promise.resolve(null)
+    })
+    VMF.findById.mockResolvedValue(vmf)
+    Deal.countDocuments.mockResolvedValue(0)
+
+    const res = await request
+      .delete(`/api/v1/vmfs/${VMF_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(vmf.save).toHaveBeenCalled()
+    expect(User.updateMany).toHaveBeenCalled()
   })
 })
 
@@ -1206,6 +1456,34 @@ describe('POST /api/v1/vmfs/:vmfId/grants', () => {
 
     expect(res.status).toBe(200)
     expect(userWithGrant.save).toHaveBeenCalled()
+  })
+
+  test('denies regular user with VMF WRITE grant when VMF_UPDATE capability is missing', async () => {
+    const token = await getRegularUserToken()
+    const vmf = makeFakeVmf()
+    const targetUser = makeRegularUser({ _id: '507f1f77bcf86cd799439099', id: '507f1f77bcf86cd799439099' })
+
+    User.findById.mockImplementation((id) => {
+      if (id === REGULAR_USER_ID) {
+        return Promise.resolve(makeRegularUser({
+          vmfGrants: [
+            { customerId: CUSTOMER_ID, tenantId: TENANT_ID, vmfId: VMF_ID, permissions: ['READ', 'WRITE'] },
+          ],
+        }))
+      }
+      if (id === '507f1f77bcf86cd799439099') return Promise.resolve(targetUser)
+      if (id === SUPER_ADMIN_ID) return Promise.resolve(makeSuperAdmin())
+      return Promise.resolve(null)
+    })
+    VMF.findById.mockResolvedValue(vmf)
+
+    const res = await request
+      .post(`/api/v1/vmfs/${VMF_ID}/grants`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ userId: '507f1f77bcf86cd799439099', permissions: ['READ'] })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.message).toContain("Tenant permission 'VMF_UPDATE' is required.")
   })
 })
 
@@ -1325,6 +1603,32 @@ describe('GET /api/v1/vmfs/:vmfId/deals', () => {
 
     expect(res.status).toBe(200)
   })
+
+  test('returns 403 for a regular user with VMF grant when DEAL_VIEW capability is missing', async () => {
+    const token = await getRegularUserToken()
+    VMF.findById.mockResolvedValue(makeFakeVmf())
+
+    User.findById.mockImplementation((id) => {
+      if (id === REGULAR_USER_ID) {
+        return Promise.resolve(makeRegularUser({
+          vmfGrants: [
+            { customerId: CUSTOMER_ID, tenantId: TENANT_ID, vmfId: VMF_ID, permissions: ['READ'] },
+          ],
+        }))
+      }
+      if (id === SUPER_ADMIN_ID) return Promise.resolve(makeSuperAdmin())
+      if (id === CUSTOMER_ADMIN_ID) return Promise.resolve(makeCustomerAdmin())
+      if (id === TENANT_ADMIN_ID) return Promise.resolve(makeTenantAdmin())
+      return Promise.resolve(null)
+    })
+
+    const res = await request
+      .get(`/api/v1/vmfs/${VMF_ID}/deals`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.message).toContain("Tenant permission 'DEAL_VIEW' is required.")
+  })
 })
 
 /* ================================================================== */
@@ -1401,6 +1705,33 @@ describe('POST /api/v1/vmfs/:vmfId/deals', () => {
 
     expect(res.status).toBe(404)
   })
+
+  test('returns 403 for a regular user with VMF WRITE grant when DEAL_CREATE capability is missing', async () => {
+    const token = await getRegularUserToken()
+    VMF.findById.mockResolvedValue(makeFakeVmf())
+
+    User.findById.mockImplementation((id) => {
+      if (id === REGULAR_USER_ID) {
+        return Promise.resolve(makeRegularUser({
+          vmfGrants: [
+            { customerId: CUSTOMER_ID, tenantId: TENANT_ID, vmfId: VMF_ID, permissions: ['READ', 'WRITE'] },
+          ],
+        }))
+      }
+      if (id === SUPER_ADMIN_ID) return Promise.resolve(makeSuperAdmin())
+      if (id === CUSTOMER_ADMIN_ID) return Promise.resolve(makeCustomerAdmin())
+      if (id === TENANT_ADMIN_ID) return Promise.resolve(makeTenantAdmin())
+      return Promise.resolve(null)
+    })
+
+    const res = await request
+      .post(`/api/v1/vmfs/${VMF_ID}/deals`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ title: 'Blocked Deal' })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.message).toContain("Tenant permission 'DEAL_CREATE' is required.")
+  })
 })
 
 /* ================================================================== */
@@ -1429,6 +1760,37 @@ describe('GET /api/v1/deals/:dealId', () => {
       .set('Authorization', `Bearer ${token}`)
 
     expect(res.status).toBe(404)
+  })
+
+  test('returns deal for a regular user with DEAL_VIEW capability and VMF READ grant', async () => {
+    const token = await getRegularUserToken()
+    const roleDefinitions = makeDefaultRoleDefinitions().map((roleDefinition) =>
+      roleDefinition.key === 'USER'
+        ? makeRoleDefinition('USER', 'VMF', ['VMF_VIEW', 'DEAL_VIEW'])
+        : roleDefinition,
+    )
+
+    setRoleDefinitions(roleDefinitions)
+    Deal.findById.mockResolvedValue(makeFakeDeal())
+    VMF.findById.mockResolvedValue(makeFakeVmf())
+    User.findById.mockImplementation((id) => {
+      if (id === REGULAR_USER_ID) {
+        return Promise.resolve(makeRegularUser({
+          vmfGrants: [
+            { customerId: CUSTOMER_ID, tenantId: TENANT_ID, vmfId: VMF_ID, permissions: ['READ'] },
+          ],
+        }))
+      }
+      if (id === SUPER_ADMIN_ID) return Promise.resolve(makeSuperAdmin())
+      return Promise.resolve(null)
+    })
+
+    const res = await request
+      .get(`/api/v1/deals/${DEAL_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.title).toBe('Test Deal')
   })
 })
 
@@ -1491,6 +1853,40 @@ describe('PATCH /api/v1/deals/:dealId', () => {
       .send({ title: 'X' })
 
     expect(res.status).toBe(404)
+  })
+
+  test('updates deal for a regular user with DEAL_UPDATE capability and VMF WRITE grant', async () => {
+    const token = await getRegularUserToken()
+    const roleDefinitions = makeDefaultRoleDefinitions().map((roleDefinition) =>
+      roleDefinition.key === 'USER'
+        ? makeRoleDefinition('USER', 'VMF', ['VMF_VIEW', 'DEAL_UPDATE'])
+        : roleDefinition,
+    )
+    const deal = makeFakeDeal()
+
+    setRoleDefinitions(roleDefinitions)
+    Deal.findById.mockResolvedValue(deal)
+    VMF.findById.mockResolvedValue(makeFakeVmf())
+    User.findById.mockImplementation((id) => {
+      if (id === REGULAR_USER_ID) {
+        return Promise.resolve(makeRegularUser({
+          vmfGrants: [
+            { customerId: CUSTOMER_ID, tenantId: TENANT_ID, vmfId: VMF_ID, permissions: ['READ', 'WRITE'] },
+          ],
+        }))
+      }
+      if (id === SUPER_ADMIN_ID) return Promise.resolve(makeSuperAdmin())
+      return Promise.resolve(null)
+    })
+
+    const res = await request
+      .patch(`/api/v1/deals/${DEAL_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ title: 'Updated By Hybrid Access' })
+
+    expect(res.status).toBe(200)
+    expect(deal.title).toBe('Updated By Hybrid Access')
+    expect(deal.save).toHaveBeenCalled()
   })
 })
 

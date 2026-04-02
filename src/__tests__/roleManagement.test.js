@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeAll, beforeEach, afterAll, jest } from '@jest/globals'
+import { describe, test, expect, beforeAll, beforeEach, afterAll, afterEach, jest } from '@jest/globals'
 import {
   PERMISSION_CATALOGUE,
   SUPER_ADMIN_LOCKED_PERMISSION_KEYS,
@@ -96,12 +96,52 @@ const makeEditableSystemRole = (overrides = {}) => makeCustomRole({
   ...overrides,
 })
 
+const makeUserSystemRole = (overrides = {}) => makeCustomRole({
+  _id: SYSTEM_ROLE_ID,
+  id: SYSTEM_ROLE_ID,
+  key: 'USER',
+  name: 'User',
+  description: 'System tenant and VMF user role',
+  scope: 'VMF',
+  permissions: ['VMF_VIEW'],
+  isSystem: true,
+  ...overrides,
+})
+
 let app
 let request
 let tokenService
 let User
 let Role
 let AuditLog
+
+const buildRoleQueryChain = (rows) => {
+  const chain = {
+    lean: jest.fn().mockResolvedValue(rows),
+  }
+  chain.select = jest.fn().mockReturnValue(chain)
+  chain.sort = jest.fn().mockReturnValue(chain)
+  chain.skip = jest.fn().mockReturnValue(chain)
+  chain.limit = jest.fn().mockReturnValue(chain)
+  return chain
+}
+
+const buildDefaultRoleRows = () => ([
+  {
+    key: 'SUPER_ADMIN',
+    scope: 'PLATFORM',
+    permissions: ['PLATFORM_MANAGE', 'SYSTEM_HEALTH_VIEW', 'CUSTOMER_CREATE', 'CUSTOMER_UPDATE', 'CUSTOMER_VIEW', 'ROLE_MANAGE', 'AUDIT_VIEW_ALL'],
+    isActive: true,
+  },
+  {
+    key: 'USER',
+    scope: 'VMF',
+    permissions: ['VMF_VIEW', 'DEAL_CREATE', 'DEAL_UPDATE', 'DEAL_VIEW'],
+    isActive: true,
+  },
+])
+let logger
+let performanceCacheService
 let originalRoleSave
 
 const mockFindOneSelect = (value) => {
@@ -125,12 +165,18 @@ beforeAll(async () => {
   User = models.User
   Role = models.Role
   AuditLog = models.AuditLog
+  logger = (await import('../config/logger.js')).default
+  performanceCacheService = (await import('../services/performanceCacheService.js')).default
 
   originalRoleSave = Role.prototype.save
 })
 
 afterAll(() => {
   Role.prototype.save = originalRoleSave
+})
+
+afterEach(() => {
+  jest.restoreAllMocks()
 })
 
 beforeEach(() => {
@@ -153,9 +199,22 @@ beforeEach(() => {
     return Promise.resolve(null)
   })
 
+  User.find = jest.fn().mockReturnValue({
+    select() {
+      return this
+    },
+    maxTimeMS() {
+      return this
+    },
+    limit() {
+      return this
+    },
+    lean: jest.fn().mockResolvedValue([]),
+  })
   User.countDocuments = jest.fn().mockResolvedValue(0)
+  User.distinct = jest.fn().mockResolvedValue([])
 
-  Role.find = jest.fn()
+  Role.find = jest.fn().mockImplementation(() => buildRoleQueryChain(buildDefaultRoleRows()))
   Role.countDocuments = jest.fn()
   Role.findOne = jest.fn()
   Role.findById = jest.fn()
@@ -309,6 +368,7 @@ describe('Role Management Routes', () => {
     ]
 
     Role.find.mockReturnValue({
+      lean: jest.fn().mockResolvedValue(buildDefaultRoleRows()),
       sort: jest.fn().mockReturnValue({
         skip: jest.fn().mockReturnValue({
           limit: jest.fn().mockReturnValue({
@@ -357,6 +417,28 @@ describe('Role Management Routes', () => {
   test('PATCH /api/v1/super-admin/roles/:roleId updates custom role', async () => {
     const token = await getAccessTokenForUser(makeSuperAdmin())
     const role = makeCustomRole()
+    const planInvalidation = jest
+      .spyOn(performanceCacheService, 'planUserPermissionInvalidationForRoleKey')
+      .mockResolvedValue({
+        roleKey: 'VMF_CREATOR',
+        affectedUserIds: ['user-1', 'user-2'],
+        affectedUserCount: 2,
+        skipped: false,
+        globalInvalidation: false,
+        globalInvalidationReason: null,
+      })
+    const loggerInfo = jest.spyOn(logger, 'info').mockImplementation(() => undefined)
+    const invalidateRoleCaches = jest
+      .spyOn(performanceCacheService, 'invalidateUserPermissionsForRoleKey')
+      .mockResolvedValue({
+        roleKey: 'VMF_CREATOR',
+        affectedUserCount: 2,
+        invalidatedUserCount: 2,
+        globalInvalidation: false,
+        globalInvalidationReason: null,
+        redisFailureCount: 0,
+        skipped: false,
+      })
     Role.findById.mockResolvedValue(role)
 
     const res = await request
@@ -369,6 +451,30 @@ describe('Role Management Routes', () => {
 
     expect(res.status).toBe(200)
     expect(role.save).toHaveBeenCalled()
+    expect(planInvalidation).toHaveBeenCalledWith('VMF_CREATOR')
+    expect(invalidateRoleCaches).toHaveBeenCalledWith(
+      'VMF_CREATOR',
+      expect.objectContaining({
+        affectedUserIds: ['user-1', 'user-2'],
+        affectedUserCount: 2,
+        invalidationPlan: expect.objectContaining({
+          affectedUserCount: 2,
+          globalInvalidation: false,
+        }),
+      }),
+    )
+    expect(loggerInfo).toHaveBeenCalledWith(expect.objectContaining({
+      requestId: expect.any(String),
+      roleId: ROLE_ID,
+      roleKey: 'VMF_CREATOR',
+      changedFields: ['permissions'],
+      affectedUserCount: 2,
+      invalidatedUserCount: 2,
+      globalInvalidation: false,
+      globalInvalidationReason: null,
+      redisFailureCount: 0,
+      skipped: false,
+    }), 'role authorization cache invalidation completed')
     expect(res.body.data.description).toBe('Can create and update VMFs')
     expect(res.body.data.permissions).toEqual(['VMF_CREATE', 'VMF_UPDATE'])
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
@@ -376,6 +482,93 @@ describe('Role Management Routes', () => {
       resourceType: 'Role',
       resourceId: ROLE_ID,
     }))
+  })
+
+  test('PATCH /api/v1/super-admin/roles/:roleId skips cache invalidation for metadata-only updates', async () => {
+    const token = await getAccessTokenForUser(makeSuperAdmin())
+    const role = makeCustomRole()
+    const invalidateRoleCaches = jest
+      .spyOn(performanceCacheService, 'invalidateUserPermissionsForRoleKey')
+      .mockResolvedValue({
+        roleKey: 'VMF_CREATOR',
+        affectedUserCount: 0,
+        invalidatedUserCount: 0,
+        globalInvalidation: false,
+        globalInvalidationReason: null,
+        redisFailureCount: 0,
+        skipped: false,
+      })
+    Role.findById.mockResolvedValue(role)
+
+    const res = await request
+      .patch(`/api/v1/super-admin/roles/${ROLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ description: 'Updated copy only' })
+
+    expect(res.status).toBe(200)
+    expect(role.save).toHaveBeenCalled()
+    expect(invalidateRoleCaches).not.toHaveBeenCalled()
+    expect(res.body.data.description).toBe('Updated copy only')
+  })
+
+  test('PATCH /api/v1/super-admin/roles/:roleId invalidates caches for scope-only updates', async () => {
+    const token = await getAccessTokenForUser(makeSuperAdmin())
+    const role = makeCustomRole()
+    const invalidateRoleCaches = jest
+      .spyOn(performanceCacheService, 'invalidateUserPermissionsForRoleKey')
+      .mockResolvedValue({
+        roleKey: 'VMF_CREATOR',
+        affectedUserCount: 1,
+        invalidatedUserCount: 1,
+        globalInvalidation: false,
+        globalInvalidationReason: null,
+        redisFailureCount: 0,
+        skipped: false,
+      })
+    Role.findById.mockResolvedValue(role)
+
+    const res = await request
+      .patch(`/api/v1/super-admin/roles/${ROLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ scope: 'TENANT' })
+
+    expect(res.status).toBe(200)
+    expect(role.save).toHaveBeenCalled()
+    expect(invalidateRoleCaches).toHaveBeenCalledWith(
+      'VMF_CREATOR',
+      expect.objectContaining({ affectedUserIds: [] }),
+    )
+    expect(res.body.data.scope).toBe('TENANT')
+  })
+
+  test('PATCH /api/v1/super-admin/roles/:roleId invalidates caches for activation changes', async () => {
+    const token = await getAccessTokenForUser(makeSuperAdmin())
+    const role = makeCustomRole()
+    const invalidateRoleCaches = jest
+      .spyOn(performanceCacheService, 'invalidateUserPermissionsForRoleKey')
+      .mockResolvedValue({
+        roleKey: 'VMF_CREATOR',
+        affectedUserCount: 1,
+        invalidatedUserCount: 1,
+        globalInvalidation: false,
+        globalInvalidationReason: null,
+        redisFailureCount: 0,
+        skipped: false,
+      })
+    Role.findById.mockResolvedValue(role)
+
+    const res = await request
+      .patch(`/api/v1/super-admin/roles/${ROLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ isActive: false })
+
+    expect(res.status).toBe(200)
+    expect(role.save).toHaveBeenCalled()
+    expect(invalidateRoleCaches).toHaveBeenCalledWith(
+      'VMF_CREATOR',
+      expect.objectContaining({ affectedUserIds: [] }),
+    )
+    expect(res.body.data.isActive).toBe(false)
   })
 
   test('PATCH /api/v1/super-admin/roles/:roleId updates an editable system role permissions', async () => {
@@ -411,6 +604,29 @@ describe('Role Management Routes', () => {
     expect(res.status).toBe(200)
     expect(role.save).toHaveBeenCalled()
     expect(res.body.data.permissions).toEqual([])
+  })
+
+  test('PATCH /api/v1/super-admin/roles/:roleId rejects deactivating the USER system role', async () => {
+    const token = await getAccessTokenForUser(makeSuperAdmin())
+    const role = makeUserSystemRole()
+    Role.findById.mockResolvedValue(role)
+
+    const res = await request
+      .patch(`/api/v1/super-admin/roles/${SYSTEM_ROLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ isActive: false })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('FORBIDDEN')
+    expect(res.body.error.message).toBe(
+      'USER role must remain active because tenant visibility assignments depend on it.',
+    )
+    expect(role.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'ROLE_MUTATION_BLOCKED',
+      resourceType: 'Role',
+      resourceId: SYSTEM_ROLE_ID,
+    }))
   })
 
   test('PATCH /api/v1/super-admin/roles/:roleId returns 422 for unknown permissions', async () => {

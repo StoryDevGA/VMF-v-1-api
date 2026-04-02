@@ -20,12 +20,16 @@ beforeAll(() => {
 
 let env
 let User
+let Customer
 let Tenant
+let Role
 let performanceCacheService
 let jobQueueService
 let loadScopes
+let requireCustomerActive
 let requireTenantEnabled
 let monitoringService
+let logger
 
 const USER_ID = '507f1f77bcf86cd799439011'
 const CUSTOMER_ID = '607f1f77bcf86cd799439022'
@@ -69,16 +73,30 @@ const getLabeledCounterValue = (metricsText, metricName, labels = []) => {
   return match ? Number.parseFloat(match[1]) : 0
 }
 
+const buildUserIdFindChain = (rows = []) => {
+  const chain = {
+    lean: jest.fn().mockResolvedValue(rows),
+  }
+  chain.select = jest.fn().mockReturnValue(chain)
+  chain.limit = jest.fn().mockReturnValue(chain)
+  chain.maxTimeMS = jest.fn().mockReturnValue(chain)
+  return chain
+}
+
 beforeAll(async () => {
   env = (await import('../config/env.js')).default
   const models = await import('../models/index.js')
   User = models.User
+  Customer = models.Customer
   Tenant = models.Tenant
+  Role = models.Role
   performanceCacheService = (await import('../services/performanceCacheService.js')).default
   jobQueueService = (await import('../services/jobQueueService.js')).default
   loadScopes = (await import('../middleware/loadScopes.js')).default
+  requireCustomerActive = (await import('../middleware/customerStatus.js')).default
   requireTenantEnabled = (await import('../middleware/tenantStatus.js')).default
   monitoringService = (await import('../services/monitoringService.js')).default
+  logger = (await import('../config/logger.js')).default
 })
 
 beforeEach(async () => {
@@ -86,10 +104,35 @@ beforeEach(async () => {
   jobQueueService.resetForTests()
   monitoringService.resetForTests()
   User.findById = jest.fn()
+  User.find = jest.fn()
+  User.distinct = jest.fn().mockResolvedValue([])
+  User.countDocuments = jest.fn().mockResolvedValue(0)
+  Customer.findById = jest.fn()
   Tenant.findById = jest.fn()
+  Role.find = jest.fn().mockResolvedValue([
+    {
+      key: 'SUPER_ADMIN',
+      scope: 'PLATFORM',
+      permissions: ['PLATFORM_MANAGE', 'SYSTEM_HEALTH_VIEW'],
+      isActive: true,
+    },
+    {
+      key: 'CUSTOMER_ADMIN',
+      scope: 'CUSTOMER',
+      permissions: ['CUSTOMER_VIEW', 'USER_VIEW'],
+      isActive: true,
+    },
+    {
+      key: 'USER',
+      scope: 'TENANT',
+      permissions: ['VMF_CREATE', 'VMF_VIEW'],
+      isActive: true,
+    },
+  ])
 })
 
 afterEach(async () => {
+  jest.restoreAllMocks()
   await jobQueueService.stop({ drain: false })
 })
 
@@ -187,6 +230,85 @@ describe('performanceCacheService', () => {
     expect(await performanceCacheService.getUserPermissions('bbb')).toBeNull()
   })
 
+  test('invalidateUserPermissionsForRoleKey clears assigned user entries only', async () => {
+    const snapshotA = { user: { _id: 'aaa' }, platformRoles: [], isActive: true }
+    const snapshotB = { user: { _id: 'bbb' }, platformRoles: [], isActive: true }
+    const snapshotC = { user: { _id: 'ccc' }, platformRoles: [], isActive: true }
+
+    User.find.mockReturnValue(buildUserIdFindChain([{ _id: 'aaa' }, { _id: 'bbb' }]))
+
+    await performanceCacheService.setUserPermissions('aaa', snapshotA)
+    await performanceCacheService.setUserPermissions('bbb', snapshotB)
+    await performanceCacheService.setUserPermissions('ccc', snapshotC)
+
+    const summary = await performanceCacheService.invalidateUserPermissionsForRoleKey('user')
+
+    expect(User.find).toHaveBeenCalledWith({
+      $or: [
+        {
+          'memberships.roles': {
+            $regex: '^USER$',
+            $options: 'i',
+          },
+        },
+        {
+          'tenantMemberships.roles': {
+            $regex: '^USER$',
+            $options: 'i',
+          },
+        },
+      ],
+    })
+    expect(summary).toEqual({
+      roleKey: 'USER',
+      affectedUserCount: 2,
+      invalidatedUserCount: 2,
+      globalInvalidation: false,
+      globalInvalidationReason: null,
+      redisFailureCount: 0,
+      skipped: false,
+    })
+    expect(await performanceCacheService.getUserPermissions('aaa')).toBeNull()
+    expect(await performanceCacheService.getUserPermissions('bbb')).toBeNull()
+    expect(await performanceCacheService.getUserPermissions('ccc')).toEqual(snapshotC)
+  })
+
+  test('invalidateUserPermissionsForRoleKey falls back to global invalidation when role fan-out exceeds threshold', async () => {
+    const originalThreshold = env.userPermissionsRoleFanoutThreshold
+    const snapshotA = { user: { _id: 'aaa' }, platformRoles: [], isActive: true }
+    const snapshotB = { user: { _id: 'bbb' }, platformRoles: [], isActive: true }
+    const snapshotC = { user: { _id: 'ccc' }, platformRoles: [], isActive: true }
+
+    env.userPermissionsRoleFanoutThreshold = 2
+    User.find.mockReturnValue(buildUserIdFindChain([
+      { _id: 'aaa' },
+      { _id: 'bbb' },
+      { _id: 'ddd' },
+    ]))
+    User.countDocuments.mockResolvedValue(3500)
+
+    await performanceCacheService.setUserPermissions('aaa', snapshotA)
+    await performanceCacheService.setUserPermissions('bbb', snapshotB)
+    await performanceCacheService.setUserPermissions('ccc', snapshotC)
+
+    const summary = await performanceCacheService.invalidateUserPermissionsForRoleKey('user')
+
+    expect(summary).toEqual({
+      roleKey: 'USER',
+      affectedUserCount: 3500,
+      invalidatedUserCount: null,
+      globalInvalidation: true,
+      globalInvalidationReason: 'fanout_threshold_exceeded',
+      redisFailureCount: 0,
+      skipped: false,
+    })
+    expect(await performanceCacheService.getUserPermissions('aaa')).toBeNull()
+    expect(await performanceCacheService.getUserPermissions('bbb')).toBeNull()
+    expect(await performanceCacheService.getUserPermissions('ccc')).toBeNull()
+
+    env.userPermissionsRoleFanoutThreshold = originalThreshold
+  })
+
   test('isEnabled reflects the perfCacheEnabled config', () => {
     expect(typeof performanceCacheService.isEnabled()).toBe('boolean')
   })
@@ -202,7 +324,7 @@ describe('Snapshot builders', () => {
     buildCustomerTopologySnapshot = mod.buildCustomerTopologySnapshot
   })
 
-  test('buildUserPermissionsSnapshot extracts platform roles', () => {
+  test('buildUserPermissionsSnapshot extracts platform roles and resolved permissions', async () => {
     const user = {
       _id: USER_ID,
       email: 'super@test.com',
@@ -216,21 +338,83 @@ describe('Snapshot builders', () => {
       vmfGrants: [],
     }
 
-    const snap = buildUserPermissionsSnapshot(user)
+    const snap = await buildUserPermissionsSnapshot(user)
     expect(snap.platformRoles).toEqual(['SUPER_ADMIN'])
+    expect(snap.resolvedPermissions).toEqual({
+      platform: {
+        roleKeys: ['SUPER_ADMIN'],
+        permissions: ['PLATFORM_MANAGE', 'SYSTEM_HEALTH_VIEW'],
+      },
+      customers: [
+        {
+          customerId: CUSTOMER_ID,
+          roleKeys: ['CUSTOMER_ADMIN'],
+          permissions: ['CUSTOMER_VIEW', 'USER_VIEW'],
+        },
+      ],
+      tenants: [
+        {
+          customerId: CUSTOMER_ID,
+          tenantId: TENANT_ID,
+          roleKeys: ['USER'],
+          permissions: ['VMF_CREATE', 'VMF_VIEW'],
+        },
+      ],
+    })
     expect(snap.isPlatformUser).toBe(true)
     expect(snap.isActive).toBe(true)
     expect(snap.memberships).toHaveLength(2)
     expect(snap.tenantMemberships).toHaveLength(1)
   })
 
-  test('buildUserPermissionsSnapshot handles user with no memberships', () => {
+  test('buildUserPermissionsSnapshot handles user with no memberships', async () => {
     const user = { _id: 'x', email: 'x@test.com', name: 'X', isActive: false }
-    const snap = buildUserPermissionsSnapshot(user)
+    const snap = await buildUserPermissionsSnapshot(user)
     expect(snap.platformRoles).toEqual([])
+    expect(snap.resolvedPermissions).toEqual({
+      platform: {
+        roleKeys: [],
+        permissions: [],
+      },
+      customers: [],
+      tenants: [],
+    })
     expect(snap.isPlatformUser).toBe(false)
     expect(snap.isActive).toBe(false)
     expect(snap.memberships).toEqual([])
+  })
+
+  test('buildUserPermissionsSnapshot falls back to empty resolvedPermissions when role lookup fails', async () => {
+    const loggerError = jest.spyOn(logger, 'error').mockImplementation(() => undefined)
+    const user = {
+      _id: USER_ID,
+      email: 'super@test.com',
+      name: 'Super',
+      isActive: true,
+      memberships: [{ customerId: null, roles: ['SUPER_ADMIN'] }],
+      tenantMemberships: [{ customerId: CUSTOMER_ID, tenantId: TENANT_ID, roles: ['USER'] }],
+      vmfGrants: [],
+    }
+
+    Role.find.mockRejectedValue(new Error('role lookup failed'))
+
+    const snap = await buildUserPermissionsSnapshot(user)
+
+    expect(snap.resolvedPermissions).toEqual({
+      platform: {
+        roleKeys: [],
+        permissions: [],
+      },
+      customers: [],
+      tenants: [],
+    })
+    expect(loggerError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: USER_ID,
+        email: 'super@test.com',
+      }),
+      'resolved permission snapshot build failed; falling back to empty permissions',
+    )
   })
 
   test('buildTenantStatusSnapshot returns correct shape', () => {
@@ -300,6 +484,146 @@ describe('Middleware cache usage', () => {
     await loadScopes(req2, res2, next2)
     expect(next2).toHaveBeenCalled()
     expect(req2.scopes.platformRoles).toEqual(['SUPER_ADMIN'])
+    expect(req2.scopes.resolvedPermissions).toEqual({
+      platform: {
+        roleKeys: ['SUPER_ADMIN'],
+        permissions: ['PLATFORM_MANAGE', 'SYSTEM_HEALTH_VIEW'],
+      },
+      customers: [],
+      tenants: [],
+    })
+  })
+
+  test('loadScopes backfills resolvedPermissions for legacy cached snapshots', async () => {
+    const legacySnapshot = {
+      user: {
+        _id: USER_ID,
+        id: USER_ID,
+        email: 'admin@example.com',
+        name: 'Admin',
+        isActive: true,
+        memberships: [{ customerId: null, roles: ['SUPER_ADMIN'] }],
+        tenantMemberships: [],
+        vmfGrants: [],
+      },
+      memberships: [{ customerId: null, roles: ['SUPER_ADMIN'] }],
+      tenantMemberships: [],
+      vmfGrants: [],
+      platformRoles: ['SUPER_ADMIN'],
+      isPlatformUser: true,
+      isActive: true,
+    }
+
+    await performanceCacheService.setUserPermissions(USER_ID, legacySnapshot)
+
+    const req = makeReq({ scopes: undefined })
+    const res = makeRes()
+    const next = jest.fn()
+    await loadScopes(req, res, next)
+
+    expect(next).toHaveBeenCalled()
+    expect(req.scopes.resolvedPermissions).toEqual({
+      platform: {
+        roleKeys: ['SUPER_ADMIN'],
+        permissions: ['PLATFORM_MANAGE', 'SYSTEM_HEALTH_VIEW'],
+      },
+      customers: [],
+      tenants: [],
+    })
+
+    const cachedSnapshot = await performanceCacheService.getUserPermissions(USER_ID)
+    expect(cachedSnapshot.resolvedPermissions).toEqual(req.scopes.resolvedPermissions)
+  })
+
+  test('requireCustomerActive resolves target-user customer scope without role resolution on cache miss', async () => {
+    User.findById.mockResolvedValue({
+      _id: '507f1f77bcf86cd799439099',
+      id: '507f1f77bcf86cd799439099',
+      email: 'target@example.com',
+      name: 'Target User',
+      isActive: true,
+      memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+      tenantMemberships: [],
+      vmfGrants: [],
+    })
+    Customer.findById.mockResolvedValue({
+      _id: CUSTOMER_ID,
+      id: CUSTOMER_ID,
+      topology: 'MULTI_TENANT',
+      vmfPolicy: 'PER_TENANT_MULTI',
+      defaultTenantId: null,
+      status: 'ACTIVE',
+      isServiceProvider: false,
+      licenseLevelId: null,
+      entitlements: [],
+      governance: {
+        maxTenants: 10,
+        maxVmfsPerTenant: 10,
+        customerAdminUserId: null,
+      },
+    })
+    Role.find.mockImplementation(() => {
+      throw new Error('customerStatus should not resolve roles for target-user lookups')
+    })
+
+    const req = makeReq({
+      params: { userId: '507f1f77bcf86cd799439099' },
+      scopes: {},
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireCustomerActive()(req, res, next)
+
+    expect(next).toHaveBeenCalled()
+    expect(res.statusCode).toBeNull()
+    expect(Customer.findById).toHaveBeenCalledWith(CUSTOMER_ID)
+  })
+
+  test('requireCustomerActive blocks inactive customers for tenant-only target users without role resolution', async () => {
+    User.findById.mockResolvedValue({
+      _id: '507f1f77bcf86cd799439100',
+      id: '507f1f77bcf86cd799439100',
+      email: 'tenant-only@example.com',
+      name: 'Tenant Only User',
+      isActive: true,
+      memberships: [],
+      tenantMemberships: [{ customerId: CUSTOMER_ID, tenantId: TENANT_ID, roles: ['USER'] }],
+      vmfGrants: [],
+    })
+    Customer.findById.mockResolvedValue({
+      _id: CUSTOMER_ID,
+      id: CUSTOMER_ID,
+      topology: 'MULTI_TENANT',
+      vmfPolicy: 'PER_TENANT_MULTI',
+      defaultTenantId: null,
+      status: 'DISABLED',
+      isServiceProvider: false,
+      licenseLevelId: null,
+      entitlements: [],
+      governance: {
+        maxTenants: 10,
+        maxVmfsPerTenant: 10,
+        customerAdminUserId: null,
+      },
+    })
+    Role.find.mockImplementation(() => {
+      throw new Error('customerStatus should not resolve roles for tenant-only target-user lookups')
+    })
+
+    const req = makeReq({
+      params: { userId: '507f1f77bcf86cd799439100' },
+      scopes: {},
+    })
+    const res = makeRes()
+    const next = jest.fn()
+
+    await requireCustomerActive()(req, res, next)
+
+    expect(next).not.toHaveBeenCalled()
+    expect(res.statusCode).toBe(403)
+    expect(res.body.error.code).toBe('CUSTOMER_INACTIVE')
+    expect(Customer.findById).toHaveBeenCalledWith(CUSTOMER_ID)
   })
 
   test('requireTenantEnabled uses cached tenant status after first lookup', async () => {

@@ -13,6 +13,7 @@ import performanceCacheService, {
   buildCustomerTopologySnapshot,
   buildUserPermissionsSnapshot,
 } from '../services/performanceCacheService.js'
+import { createEmptyResolvedPermissions } from '../services/rolePermissionResolutionService.js'
 
 const toIdString = (value) => {
   if (!value) return null
@@ -29,6 +30,48 @@ const getCustomerIdsFromMemberships = (memberships = []) =>
         .filter(Boolean),
     ),
   )
+
+const getCustomerIdsFromAllMemberships = ({ memberships = [], tenantMemberships = [] } = {}) =>
+  Array.from(new Set([
+    ...memberships.map((m) => toIdString(m.customerId)).filter(Boolean),
+    ...tenantMemberships.map((m) => toIdString(m.customerId)).filter(Boolean),
+  ]))
+
+const hasResolvedPermissionsShape = (resolvedPermissions) =>
+  Boolean(
+    resolvedPermissions
+      && typeof resolvedPermissions === 'object'
+      && resolvedPermissions.platform
+      && Array.isArray(resolvedPermissions.platform.roleKeys)
+      && Array.isArray(resolvedPermissions.platform.permissions)
+      && Array.isArray(resolvedPermissions.customers)
+      && Array.isArray(resolvedPermissions.tenants),
+  )
+
+const hydrateResolvedPermissionsSnapshot = async ({ userId, snapshot }) => {
+  if (hasResolvedPermissionsShape(snapshot?.resolvedPermissions)) {
+    return snapshot
+  }
+
+  if (!snapshot?.user) {
+    return {
+      ...snapshot,
+      resolvedPermissions: createEmptyResolvedPermissions(),
+    }
+  }
+
+  const rebuiltSnapshot = await buildUserPermissionsSnapshot({
+    ...snapshot.user,
+    memberships: snapshot.memberships ?? snapshot.user.memberships,
+    tenantMemberships: snapshot.tenantMemberships ?? snapshot.user.tenantMemberships,
+    vmfGrants: snapshot.vmfGrants ?? snapshot.user.vmfGrants,
+    isActive: snapshot.isActive ?? snapshot.user.isActive,
+  })
+
+  await performanceCacheService.setUserPermissions(userId, rebuiltSnapshot)
+
+  return rebuiltSnapshot
+}
 
 const resolveCustomerStatus = async (customerId) => {
   const cachedCustomer = await performanceCacheService.getCustomerTopology(customerId)
@@ -49,6 +92,7 @@ const resolveCustomerStatus = async (customerId) => {
 
 const evaluateActiveCustomerAccess = async ({
   memberships = [],
+  tenantMemberships = [],
   platformRoles = [],
   skipInactiveCheck = false,
 }) => {
@@ -58,7 +102,7 @@ const evaluateActiveCustomerAccess = async ({
       activeCustomerIds: [],
       inactiveCustomerIds: [],
       unknownCustomerIds: [],
-      customerIds: getCustomerIdsFromMemberships(memberships),
+      customerIds: getCustomerIdsFromAllMemberships({ memberships, tenantMemberships }),
     }
   }
 
@@ -72,7 +116,7 @@ const evaluateActiveCustomerAccess = async ({
     }
   }
 
-  const customerIds = getCustomerIdsFromMemberships(memberships)
+  const customerIds = getCustomerIdsFromAllMemberships({ memberships, tenantMemberships })
   if (customerIds.length === 0) {
     return {
       hasActiveCustomerAccess: true,
@@ -143,17 +187,25 @@ const loadScopes = async (req, res, next) => {
         })
       }
 
+      const effectiveScopeSnapshot = await hydrateResolvedPermissionsSnapshot({
+        userId,
+        snapshot: cachedScopeSnapshot,
+      })
+
       req.scopes = {
-        user: cachedScopeSnapshot.user,
-        platformRoles: cachedScopeSnapshot.platformRoles || [],
-        memberships: cachedScopeSnapshot.memberships || [],
-        tenantMemberships: cachedScopeSnapshot.tenantMemberships || [],
-        vmfGrants: cachedScopeSnapshot.vmfGrants || [],
-        isPlatformUser: Boolean(cachedScopeSnapshot.isPlatformUser),
+        user: effectiveScopeSnapshot.user,
+        platformRoles: effectiveScopeSnapshot.platformRoles || [],
+        memberships: effectiveScopeSnapshot.memberships || [],
+        tenantMemberships: effectiveScopeSnapshot.tenantMemberships || [],
+        vmfGrants: effectiveScopeSnapshot.vmfGrants || [],
+        resolvedPermissions:
+          effectiveScopeSnapshot.resolvedPermissions || createEmptyResolvedPermissions(),
+        isPlatformUser: Boolean(effectiveScopeSnapshot.isPlatformUser),
       }
 
       const customerAccess = await evaluateActiveCustomerAccess({
         memberships: req.scopes.memberships,
+        tenantMemberships: req.scopes.tenantMemberships,
         platformRoles: req.scopes.platformRoles,
         skipInactiveCheck: shouldBypassInactiveCustomerEvaluation(req),
       })
@@ -171,7 +223,7 @@ const loadScopes = async (req, res, next) => {
             inactiveCustomerIds: customerAccess.inactiveCustomerIds,
             requestId: req.requestId,
           },
-          'loadScopes - user blocked due to inactive customer membership',
+          'loadScopes - user blocked due to inactive customer access',
         )
         return res.status(403).json(buildInactiveCustomerErrorResponse({
           requestId: req.requestId,
@@ -206,7 +258,7 @@ const loadScopes = async (req, res, next) => {
       })
     }
 
-    const scopeSnapshot = buildUserPermissionsSnapshot(user)
+    const scopeSnapshot = await buildUserPermissionsSnapshot(user)
 
     req.scopes = {
       user,
@@ -214,11 +266,13 @@ const loadScopes = async (req, res, next) => {
       memberships: scopeSnapshot.memberships,
       tenantMemberships: scopeSnapshot.tenantMemberships,
       vmfGrants: scopeSnapshot.vmfGrants,
+      resolvedPermissions: scopeSnapshot.resolvedPermissions,
       isPlatformUser: scopeSnapshot.isPlatformUser,
     }
 
     const customerAccess = await evaluateActiveCustomerAccess({
       memberships: req.scopes.memberships,
+      tenantMemberships: req.scopes.tenantMemberships,
       platformRoles: req.scopes.platformRoles,
       skipInactiveCheck: shouldBypassInactiveCustomerEvaluation(req),
     })
@@ -236,7 +290,7 @@ const loadScopes = async (req, res, next) => {
           inactiveCustomerIds: customerAccess.inactiveCustomerIds,
           requestId: req.requestId,
         },
-        'loadScopes - user blocked due to inactive customer membership',
+        'loadScopes - user blocked due to inactive customer access',
       )
       return res.status(403).json(buildInactiveCustomerErrorResponse({
         requestId: req.requestId,

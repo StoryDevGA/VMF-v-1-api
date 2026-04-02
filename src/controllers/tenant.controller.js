@@ -266,16 +266,17 @@ export const listTenants = async (req, res, next) => {
 
     const filter = { customerId }
     const tenantAdminOnly = isTenantAdminOnlyRequest(req)
+    const tenantMemberOnly = req.scopes?.customerAccess?.via === 'tenant_member'
     const scopedTenantIds = resolveTenantAdminScopedTenantIds(req)
     const accessibleTenantIds = resolveAccessibleTenantIds(req)
     const actorUserId = toIdString(req.context?.userId || req.userId)
 
-    if (tenantAdminOnly) {
+    if (tenantAdminOnly || tenantMemberOnly) {
       if (scopedTenantIds.length > 0) {
         filter._id = { $in: scopedTenantIds }
       } else if (accessibleTenantIds.length > 0) {
         filter._id = { $in: accessibleTenantIds }
-      } else if (actorUserId) {
+      } else if (tenantAdminOnly && actorUserId) {
         filter.tenantAdminUserIds = actorUserId
       } else {
         filter._id = { $in: [] }
@@ -299,12 +300,12 @@ export const listTenants = async (req, res, next) => {
       Tenant.countDocuments({
         customerId,
         status: { $ne: 'ARCHIVED' },
-        ...(tenantAdminOnly
+        ...(tenantAdminOnly || tenantMemberOnly
           ? (scopedTenantIds.length > 0
             ? { _id: { $in: scopedTenantIds } }
             : accessibleTenantIds.length > 0
               ? { _id: { $in: accessibleTenantIds } }
-              : actorUserId
+              : tenantAdminOnly && actorUserId
                 ? { tenantAdminUserIds: actorUserId }
                 : { _id: { $in: [] } })
           : {}),

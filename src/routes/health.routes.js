@@ -4,7 +4,7 @@
  * Public and authenticated health check endpoints:
  *
  *   GET /health           — Public liveness probe (status, version, uptime)
- *   GET /health/detailed   — Authenticated deep health check (SUPER_ADMIN only)
+ *   GET /health/detailed   — Authenticated deep health check
  *                            Includes database, Redis, Identity Plus status,
  *                            performance metrics, active alerts, and thresholds.
  *                            Returns 503 when overall status is 'unhealthy'.
@@ -13,7 +13,7 @@
 import { Router } from 'express'
 import authJwt from '../middleware/authJwt.js'
 import loadScopes from '../middleware/loadScopes.js'
-import { requirePlatformRole } from '../middleware/authorize.js'
+import { requirePlatformPermission } from '../middleware/authorize.js'
 import logger from '../config/logger.js'
 import env from '../config/env.js'
 import monitoringService from '../services/monitoringService.js'
@@ -60,7 +60,7 @@ router.get('/', (_req, res) => {
   res.status(200).json(monitoringService.getPublicHealth())
 })
 
-router.get('/detailed', authJwt, loadScopes, requirePlatformRole('SUPER_ADMIN'), async (req, res) => {
+router.get('/detailed', authJwt, loadScopes, requirePlatformPermission('SYSTEM_HEALTH_VIEW'), async (req, res) => {
   try {
     const health = await monitoringService.getDetailedHealth()
     const statusCode = health.status === 'unhealthy' ? 503 : 200
@@ -79,7 +79,7 @@ router.get('/detailed', authJwt, loadScopes, requirePlatformRole('SUPER_ADMIN'),
   }
 })
 
-router.get('/trends', authJwt, loadScopes, requirePlatformRole('SUPER_ADMIN'), (req, res) => {
+router.get('/trends', authJwt, loadScopes, requirePlatformPermission('SYSTEM_HEALTH_VIEW'), (req, res) => {
   const windowMs = parseDurationMs(req.query.window, env.monitoringTrendDefaultWindowMs)
   const bucketMs = parseDurationMs(req.query.bucket, env.monitoringTrendDefaultBucketMs)
 
@@ -109,7 +109,7 @@ router.get('/trends', authJwt, loadScopes, requirePlatformRole('SUPER_ADMIN'), (
   res.status(200).json(payload)
 })
 
-router.get('/alerts', authJwt, loadScopes, requirePlatformRole('SUPER_ADMIN'), (req, res) => {
+router.get('/alerts', authJwt, loadScopes, requirePlatformPermission('SYSTEM_HEALTH_VIEW'), (req, res) => {
   const status = req.query.status ? String(req.query.status).toLowerCase() : 'all'
   if (!['all', 'active', 'resolved'].includes(status)) {
     return validationError(req, res, "status must be one of: 'all', 'active', 'resolved'.")

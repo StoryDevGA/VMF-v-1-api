@@ -18,7 +18,7 @@
 import { Router } from 'express'
 import authJwt from '../middleware/authJwt.js'
 import loadScopes from '../middleware/loadScopes.js'
-import { requireCustomerAccess, requirePlatformRole } from '../middleware/authorize.js'
+import { requireCustomerPermission, requirePlatformPermission } from '../middleware/authorize.js'
 import requireCustomerActive from '../middleware/customerStatus.js'
 import { userManagementRateLimit } from '../middleware/rateLimits.js'
 import {
@@ -52,14 +52,18 @@ customerUserRouter.use(
 
 customerUserRouter.get(
   '/',
-  requireCustomerAccess({ roles: ['CUSTOMER_ADMIN'], allowTenantAdmin: true }),
+  requireCustomerPermission('USER_VIEW', {
+    allowTenantPermission: true,
+    tenantPermissions: ['USER_VIEW_TENANT'],
+    allowCustomerScopedTenantPermission: true,
+  }),
   requireCustomerActive(),
   validateListUsersQuery,
   listUsers,
 )
 customerUserRouter.post(
   '/',
-  requireCustomerAccess({ roles: ['CUSTOMER_ADMIN'] }),
+  requireCustomerPermission('USER_CREATE'),
   requireCustomerActive(),
   userManagementRateLimit,
   validateCreateUser,
@@ -67,19 +71,24 @@ customerUserRouter.post(
 )
 customerUserRouter.get(
   '/assignable-roles',
-  requireCustomerAccess({ roles: ['CUSTOMER_ADMIN'] }),
+  requireCustomerPermission('USER_VIEW'),
   requireCustomerActive(),
   listAssignableRoles,
 )
 customerUserRouter.get(
   '/:userId',
-  requireCustomerAccess({ roles: ['CUSTOMER_ADMIN'] }),
+  requireCustomerPermission('USER_VIEW'),
   requireCustomerActive(),
   getUser,
 )
 customerUserRouter.patch(
   '/:userId',
-  requireCustomerAccess({ roles: ['CUSTOMER_ADMIN'], allowTenantAdmin: true }),
+  requireCustomerPermission('USER_UPDATE', {
+    allowTenantPermission: true,
+    tenantPermissions: ['USER_VIEW_TENANT'],
+    allowCustomerScopedTenantPermission: true,
+    requireTenantAdminFallback: true,
+  }),
   requireCustomerActive(),
   userManagementRateLimit,
   validateUpdateUser,
@@ -87,28 +96,28 @@ customerUserRouter.patch(
 )
 customerUserRouter.post(
   '/:userId/enable',
-  requireCustomerAccess({ roles: ['CUSTOMER_ADMIN'] }),
+  requireCustomerPermission('USER_UPDATE'),
   requireCustomerActive(),
   userManagementRateLimit,
   enableUser,
 )
 customerUserRouter.post(
   '/:userId/disable',
-  requireCustomerAccess({ roles: ['CUSTOMER_ADMIN'] }),
+  requireCustomerPermission('USER_UPDATE'),
   requireCustomerActive(),
   userManagementRateLimit,
   disableUser,
 )
 customerUserRouter.delete(
   '/:userId',
-  requireCustomerAccess({ roles: ['CUSTOMER_ADMIN'] }),
+  requireCustomerPermission('USER_DELETE'),
   requireCustomerActive(),
   userManagementRateLimit,
   deleteUser,
 )
 customerUserRouter.post(
   '/:userId/resend-invitation',
-  requireCustomerAccess({ roles: ['CUSTOMER_ADMIN'] }),
+  requireCustomerPermission('USER_UPDATE'),
   requireCustomerActive(),
   userManagementRateLimit,
   validateResendInvitation,
@@ -121,7 +130,7 @@ customerUserRouter.post(
 
 export const userRouter = Router()
 
-userRouter.use(authJwt, loadScopes, requirePlatformRole('SUPER_ADMIN'))
+userRouter.use(authJwt, loadScopes, requirePlatformPermission('PLATFORM_MANAGE'))
 
 userRouter.patch('/:userId', requireCustomerActive(), userManagementRateLimit, validateUpdateUser, updateUser)
 userRouter.post('/:userId/enable', requireCustomerActive(), userManagementRateLimit, enableUser)

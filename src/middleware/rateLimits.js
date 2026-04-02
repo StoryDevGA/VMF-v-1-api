@@ -6,6 +6,7 @@
  *   - authHourlyRateLimit:     10 attempts/hour per user (email or IP)
  *   - userManagementRateLimit: 100 requests/minute per admin
  *   - tenantManagementRateLimit: 50 requests/minute per admin
+ *   - vmfManagementRateLimit: 50 requests/minute per admin
  *   - bulkOperationsRateLimit: 10 requests/minute per admin
  *   - auditRateLimit:          30 requests/minute per admin
  *   - generalApiRateLimit:     1000 requests/hour per authenticated user
@@ -129,6 +130,25 @@ export const tenantManagementRateLimit = rateLimit({
   legacyHeaders: false,
   handler: standardHandler,
   keyGenerator: (req) => `tenant-mgmt:${req.ip}:${req.userId || 'anonymous'}`,
+})
+
+/* ------------------------------------------------------------------ */
+/*  VMF management — per-admin, per-minute                            */
+/* ------------------------------------------------------------------ */
+
+export const vmfManagementRateLimit = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  limit: env.tenantRateLimit, // default 50; dedicated bucket for VMF flows
+  message: {
+    error: {
+      code: 'VMF_MGMT_RATE_LIMIT_EXCEEDED',
+      message: 'Too many VMF management requests',
+    },
+  },
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  handler: standardHandler,
+  keyGenerator: (req) => `vmf-mgmt:${req.ip}:${req.userId || 'anonymous'}`,
 })
 
 /* ------------------------------------------------------------------ */
