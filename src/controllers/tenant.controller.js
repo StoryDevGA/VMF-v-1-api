@@ -440,6 +440,7 @@ export const createTenant = async (req, res, next) => {
         resourceType: 'User',
         resourceId: createdTenantAdminUserId,
         scope: { customerId: result.customer._id, tenantId: result.tenant._id },
+        display: { targetLabel: auditService.formatUserAuditLabel(result.tenantAdminUser) },
         diff: {
           customerRoles: {
             from: result.tenantAdminRoleChange.previousRoles,
@@ -593,6 +594,7 @@ export const updateTenant = async (req, res, next) => {
           resourceType: 'User',
           resourceId: updatedTenantAdminUserId,
           scope: { customerId: mutation.tenant.customerId, tenantId: mutation.tenant._id },
+          display: { targetLabel: auditService.formatUserAuditLabel(mutation.tenantAdminUser) },
           diff: {
             customerRoles: {
               from: mutation.tenantAdminRoleChange.previousRoles,

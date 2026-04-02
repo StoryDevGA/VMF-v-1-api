@@ -65,6 +65,16 @@ const mapAssignableRole = (role) => ({
   isSystem: Boolean(role.isSystem),
 })
 
+const formatRoleAuditLabel = (role) => {
+  const roleName = String(role?.name || '').trim()
+  const roleKey = String(role?.key || '').trim()
+
+  if (roleName && roleKey) return `${roleName} (${roleKey})`
+  if (roleName) return roleName
+  if (roleKey) return roleKey
+  return 'Role'
+}
+
 const buildSystemRoleFieldRestrictionMessage = (
   allowedFields = EDITABLE_SYSTEM_ROLE_FIELDS,
   disallowedFields = [],
@@ -106,6 +116,7 @@ const logBlockedSystemMutation = async (
     resourceType: auditService.RESOURCE_TYPES.Role,
     resourceId: role._id,
     scope: {},
+    display: { resourceLabel: formatRoleAuditLabel(role) },
     diff: {
       reason,
       operation,
@@ -249,6 +260,7 @@ export const createRole = async (req, res, next) => {
       resourceType: auditService.RESOURCE_TYPES.Role,
       resourceId: role._id,
       scope: {},
+      display: { resourceLabel: formatRoleAuditLabel(role) },
       diff: {
         key: role.key,
         name: role.name,
@@ -429,6 +441,7 @@ export const updateRole = async (req, res, next) => {
       resourceType: auditService.RESOURCE_TYPES.Role,
       resourceId: role._id,
       scope: {},
+      display: { resourceLabel: formatRoleAuditLabel(role) },
       diff,
     })
 
@@ -541,6 +554,7 @@ export const deleteRole = async (req, res, next) => {
         resourceType: auditService.RESOURCE_TYPES.Role,
         resourceId: role._id,
         scope: {},
+        display: { resourceLabel: formatRoleAuditLabel(role) },
         diff: {
           reason: 'ROLE_IN_USE',
           operation: 'delete',
@@ -570,6 +584,7 @@ export const deleteRole = async (req, res, next) => {
       resourceType: auditService.RESOURCE_TYPES.Role,
       resourceId: role._id,
       scope: {},
+      display: { resourceLabel: formatRoleAuditLabel(role) },
       diff: {
         key: role.key,
         name: role.name,

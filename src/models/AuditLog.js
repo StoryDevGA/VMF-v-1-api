@@ -2,6 +2,37 @@ import mongoose from 'mongoose'
 import crypto from 'crypto'
 import env from '../config/env.js'
 
+const auditDisplaySchema = new mongoose.Schema({
+  actorLabel: {
+    type: String,
+    trim: true,
+    maxlength: 160
+  },
+  targetLabel: {
+    type: String,
+    trim: true,
+    maxlength: 240
+  },
+  resourceLabel: {
+    type: String,
+    trim: true,
+    maxlength: 240
+  },
+  scopeLabel: {
+    type: String,
+    trim: true,
+    maxlength: 240
+  },
+  permissionLabels: [{
+    type: String,
+    trim: true,
+    maxlength: 80
+  }]
+}, {
+  _id: false,
+  id: false
+})
+
 const auditLogSchema = new mongoose.Schema({
   ts: {
     type: Date,
@@ -29,6 +60,12 @@ const auditLogSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     required: true
   },
+  summary: {
+    type: String,
+    trim: true,
+    maxlength: 240
+  },
+  display: auditDisplaySchema,
   scope: {
     customerId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -156,6 +193,8 @@ auditLogSchema.methods.generateSignature = function() {
     action: this.action,
     resourceType: this.resourceType,
     resourceId: this.resourceId,
+    summary: this.summary,
+    display: this.display,
     scope: this.scope,
     diff: this.diff,
     ip: this.ip,
@@ -173,11 +212,30 @@ auditLogSchema.methods.generateSignature = function() {
 }
 
 auditLogSchema.methods.verifySignature = function() {
-  const originalSignature = this.signature
-  this.generateSignature()
-  const valid = originalSignature === this.signature
-  this.signature = originalSignature // Restore original
-  return valid
+  const data = {
+    ts: this.ts,
+    actorUserId: this.actorUserId,
+    action: this.action,
+    resourceType: this.resourceType,
+    resourceId: this.resourceId,
+    summary: this.summary,
+    display: this.display,
+    scope: this.scope,
+    diff: this.diff,
+    ip: this.ip,
+    userAgent: this.userAgent,
+    requestId: this.requestId
+  }
+
+  const dataString = JSON.stringify(data, null, 0)
+  const secret = env.auditSignatureSecret
+
+  const expectedSignature = crypto
+    .createHmac('sha256', secret)
+    .update(dataString)
+    .digest('hex')
+
+  return this.signature === expectedSignature
 }
 
 // Pre-save middleware to ensure integrity

@@ -744,6 +744,7 @@ export const createUser = async (req, res, next) => {
         resourceType: 'User',
         resourceId: user._id,
         scope: { customerId },
+        display: { targetLabel: auditService.formatUserAuditLabel(user) },
         diff: {
           source: 'existing_user_assignment',
           existingUserId: toIdString(user._id),
@@ -898,6 +899,7 @@ export const createUser = async (req, res, next) => {
       resourceType: 'User',
       resourceId: user._id,
       scope: { customerId },
+      display: { targetLabel: auditService.formatUserAuditLabel(user) },
       diff: {
         name,
         email: normalizedEmail,
@@ -932,6 +934,7 @@ export const createUser = async (req, res, next) => {
         resourceType: 'User',
         resourceId: user._id,
         scope: { customerId },
+        display: { targetLabel: auditService.formatUserAuditLabel(user) },
         diff: { email: normalizedEmail, externalId: invitationResult.externalId },
       })
     }
@@ -1351,6 +1354,7 @@ export const updateUser = async (req, res, next) => {
           customerContext?.rawCustomerId ||
           user.memberships.find((m) => m.customerId !== null)?.customerId,
       },
+      display: { targetLabel: auditService.formatUserAuditLabel(user) },
       diff,
     })
 
@@ -1481,6 +1485,7 @@ export const enableUser = async (req, res, next) => {
           customerContext?.rawCustomerId ||
           user.memberships.find((m) => m.customerId !== null)?.customerId,
       },
+      display: { targetLabel: auditService.formatUserAuditLabel(user) },
       diff: {
         isActive: { from: false, to: true },
         ...(previousTrustStatus !== nextTrustStatus
@@ -1579,6 +1584,7 @@ export const disableUser = async (req, res, next) => {
           customerContext?.rawCustomerId ||
           user.memberships.find((m) => m.customerId !== null)?.customerId,
       },
+      display: { targetLabel: auditService.formatUserAuditLabel(user) },
       diff: {
         isActive: { from: true, to: false },
         trustStatus: { from: 'TRUSTED', to: 'REVOKED' },
@@ -1692,6 +1698,7 @@ export const deleteUser = async (req, res, next) => {
       resourceType: 'User',
       resourceId: userSnapshot.id,
       scope: { customerId: userSnapshot.customerId },
+      display: { targetLabel: auditService.formatUserAuditLabel(userSnapshot) },
       diff: { email: userSnapshot.email, name: userSnapshot.name },
     })
 
@@ -1865,4 +1872,3 @@ export const resendInvitation = async (req, res, next) => {
     next(err)
   }
 }
-

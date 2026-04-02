@@ -291,6 +291,10 @@ describe('Role Management Routes', () => {
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'ROLE_CREATED',
       resourceType: 'Role',
+      summary: expect.stringContaining('created role'),
+      display: expect.objectContaining({
+        resourceLabel: expect.any(String),
+      }),
     }))
   })
 
@@ -481,6 +485,10 @@ describe('Role Management Routes', () => {
       action: 'ROLE_UPDATED',
       resourceType: 'Role',
       resourceId: ROLE_ID,
+      summary: expect.stringContaining('updated role'),
+      display: expect.objectContaining({
+        resourceLabel: expect.any(String),
+      }),
     }))
   })
 
@@ -626,6 +634,10 @@ describe('Role Management Routes', () => {
       action: 'ROLE_MUTATION_BLOCKED',
       resourceType: 'Role',
       resourceId: SYSTEM_ROLE_ID,
+      summary: expect.stringContaining('blocked role mutation'),
+      display: expect.objectContaining({
+        resourceLabel: expect.any(String),
+      }),
     }))
   })
 
@@ -681,6 +693,10 @@ describe('Role Management Routes', () => {
       action: 'ROLE_MUTATION_BLOCKED',
       resourceType: 'Role',
       resourceId: SYSTEM_ROLE_ID,
+      summary: expect.stringContaining('blocked role mutation'),
+      display: expect.objectContaining({
+        resourceLabel: expect.any(String),
+      }),
     }))
   })
 
@@ -720,6 +736,10 @@ describe('Role Management Routes', () => {
       action: 'ROLE_UPDATED',
       resourceType: 'Role',
       resourceId: SYSTEM_ROLE_ID,
+      summary: expect.stringContaining('updated role'),
+      display: expect.objectContaining({
+        resourceLabel: expect.any(String),
+      }),
     }))
   })
 
@@ -815,6 +835,10 @@ describe('Role Management Routes', () => {
       action: 'ROLE_DELETED',
       resourceType: 'Role',
       resourceId: ROLE_ID,
+      summary: expect.stringContaining('deleted role'),
+      display: expect.objectContaining({
+        resourceLabel: expect.any(String),
+      }),
     }))
   })
 })

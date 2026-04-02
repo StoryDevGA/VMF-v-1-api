@@ -636,6 +636,11 @@ export const grantAccess = async (req, res, next) => {
       resourceType: 'User',
       resourceId: targetUser._id,
       scope: { customerId: vmf.customerId, tenantId: vmf.tenantId, vmfId: vmf._id },
+      display: {
+        targetLabel: auditService.formatUserAuditLabel(targetUser),
+        scopeLabel: auditService.formatEntityAuditLabel(vmf, { fallbackType: 'VMF', labelKeys: ['name'] }),
+        permissionLabels: permissions,
+      },
       diff: { userId, permissions },
     })
 
@@ -708,6 +713,10 @@ export const revokeAccess = async (req, res, next) => {
       resourceType: 'User',
       resourceId: targetUser._id,
       scope: { customerId: vmf.customerId, tenantId: vmf.tenantId, vmfId: vmf._id },
+      display: {
+        targetLabel: auditService.formatUserAuditLabel(targetUser),
+        scopeLabel: auditService.formatEntityAuditLabel(vmf, { fallbackType: 'VMF', labelKeys: ['name'] }),
+      },
       diff: { userId },
     })
 

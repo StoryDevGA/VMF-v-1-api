@@ -631,8 +631,10 @@ describe('Validators', () => {
       const token = await getSuperAdminToken()
 
       AuditLog.find.mockReturnValue({
-        sort: jest.fn().mockReturnValue({
-          lean: jest.fn().mockResolvedValue([]),
+        populate: jest.fn().mockReturnValue({
+          sort: jest.fn().mockReturnValue({
+            lean: jest.fn().mockResolvedValue([]),
+          }),
         }),
       })
 
@@ -679,6 +681,12 @@ describe('GET /api/v1/audit-logs — Query', () => {
     expect(res.body.meta.totalPages).toBe(1)
     expect(res.body.meta.page).toBe(1)
     expect(res.body.meta.pageSize).toBe(50)
+    expect(res.body.data[0]).toMatchObject({
+      id: AUDIT_LOG_ID_1,
+      action: 'CUSTOMER_CREATED',
+      resourceId: CUSTOMER_ID,
+    })
+    expect(res.body.data[0]).not.toHaveProperty('signature')
   })
 
   test('returns empty array when no logs match', async () => {
@@ -907,8 +915,10 @@ describe('GET /api/v1/audit-logs/request/:requestId — Correlation', () => {
     const docs = makeAuditLogList()
 
     AuditLog.find.mockReturnValue({
-      sort: jest.fn().mockReturnValue({
-        lean: jest.fn().mockResolvedValue(docs),
+      populate: jest.fn().mockReturnValue({
+        sort: jest.fn().mockReturnValue({
+          lean: jest.fn().mockResolvedValue(docs),
+        }),
       }),
     })
 
@@ -925,8 +935,10 @@ describe('GET /api/v1/audit-logs/request/:requestId — Correlation', () => {
     const token = await getSuperAdminToken()
 
     AuditLog.find.mockReturnValue({
-      sort: jest.fn().mockReturnValue({
-        lean: jest.fn().mockResolvedValue([]),
+      populate: jest.fn().mockReturnValue({
+        sort: jest.fn().mockReturnValue({
+          lean: jest.fn().mockResolvedValue([]),
+        }),
       }),
     })
 
@@ -943,8 +955,10 @@ describe('GET /api/v1/audit-logs/request/:requestId — Correlation', () => {
     const token = await getSuperAdminToken()
 
     AuditLog.find.mockReturnValue({
-      sort: jest.fn().mockReturnValue({
-        lean: jest.fn().mockResolvedValue([]),
+      populate: jest.fn().mockReturnValue({
+        sort: jest.fn().mockReturnValue({
+          lean: jest.fn().mockResolvedValue([]),
+        }),
       }),
     })
 
@@ -1313,6 +1327,7 @@ describe('auditService.logFromRequest — Unit', () => {
   test('creates log with request context', async () => {
     const fakeReq = {
       context: { userId: SUPER_ADMIN_ID },
+      scopes: { platformRoles: ['SUPER_ADMIN'] },
       ip: '10.0.0.1',
       get: jest.fn((h) => h === 'user-agent' ? 'Test/1.0' : undefined),
       requestId: 'req-unit-test',
@@ -1334,6 +1349,41 @@ describe('auditService.logFromRequest — Unit', () => {
       ip: '10.0.0.1',
       userAgent: 'Test/1.0',
       requestId: 'req-unit-test',
+      display: { actorLabel: 'Super Admin' },
+      summary: `Super Admin created customer Customer ${CUSTOMER_ID}`,
+    }))
+  })
+
+  test('builds immutable grant summaries from display snapshots', async () => {
+    const fakeReq = {
+      context: { userId: SUPER_ADMIN_ID },
+      scopes: { platformRoles: ['SUPER_ADMIN'] },
+      ip: '10.0.0.1',
+      get: jest.fn(() => 'Test/1.0'),
+      requestId: 'req-grant-summary',
+    }
+
+    await auditService.logFromRequest(fakeReq, {
+      action: 'VMF_GRANT_CREATED',
+      resourceType: 'User',
+      resourceId: REGULAR_USER_ID,
+      scope: { customerId: CUSTOMER_ID, tenantId: TENANT_ID, vmfId: VMF_ID },
+      display: {
+        targetLabel: 'Regular User <user@acme.com>',
+        scopeLabel: 'Alpha VMF',
+        permissionLabels: ['READ'],
+      },
+      diff: { userId: REGULAR_USER_ID, permissions: ['READ'] },
+    })
+
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      summary: 'Super Admin granted Regular User <user@acme.com> READ access to Alpha VMF',
+      display: expect.objectContaining({
+        actorLabel: 'Super Admin',
+        targetLabel: 'Regular User <user@acme.com>',
+        scopeLabel: 'Alpha VMF',
+        permissionLabels: ['READ'],
+      }),
     }))
   })
 

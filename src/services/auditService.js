@@ -93,6 +93,8 @@ export const AUDIT_ACTIONS = Object.freeze({
   // Super Admin - Optional visibility events
   AUDIT_LOG_VIEWED: 'AUDIT_LOG_VIEWED',
   DENIED_ACCESS_LOG_VIEWED: 'DENIED_ACCESS_LOG_VIEWED',
+  // Super Admin - Retention
+  AUDIT_RETENTION_CLEANUP: 'AUDIT_RETENTION_CLEANUP',
 })
 
 export const RESOURCE_TYPES = Object.freeze({
@@ -107,6 +109,296 @@ export const RESOURCE_TYPES = Object.freeze({
   LicenseLevel: 'LicenseLevel',
   Role: 'Role',
 })
+
+/* ------------------------------------------------------------------ */
+/*  Presentation helpers                                              */
+/* ------------------------------------------------------------------ */
+
+const SUMMARY_MAX_LENGTH = 240
+
+const toIdString = (value) => {
+  if (!value) return null
+  if (typeof value === 'string') return value
+  if (typeof value === 'number') return String(value)
+  if (typeof value === 'object') {
+    if (typeof value.id === 'string' && value.id.trim()) return value.id
+    if (typeof value._id === 'string' && value._id.trim()) return value._id
+    if (value._id && typeof value._id.toString === 'function') return value._id.toString()
+  }
+  if (typeof value.toString === 'function') return value.toString()
+  return String(value)
+}
+
+const normalizeText = (value) => {
+  const text = String(value ?? '').trim()
+  return text || null
+}
+
+const clampSummary = (value) => {
+  const text = normalizeText(value)
+  if (!text) return null
+  if (text.length <= SUMMARY_MAX_LENGTH) return text
+  return `${text.slice(0, SUMMARY_MAX_LENGTH - 1).trimEnd()}...`
+}
+
+const humanizeAuditAction = (value) => {
+  const normalized = normalizeText(value)
+  if (!normalized) return 'audit event'
+
+  const acronymMap = {
+    api: 'API',
+    gdpr: 'GDPR',
+    id: 'ID',
+    vmf: 'VMF',
+  }
+
+  return normalized
+    .toLowerCase()
+    .split('_')
+    .filter(Boolean)
+    .map((segment) => acronymMap[segment] || (segment.charAt(0).toUpperCase() + segment.slice(1)))
+    .join(' ')
+}
+
+const formatPermissionLabels = (permissions = []) => {
+  if (!Array.isArray(permissions)) return []
+
+  return Array.from(
+    new Set(
+      permissions
+        .map((permission) => normalizeText(permission))
+        .filter(Boolean),
+    ),
+  )
+}
+
+const formatEntityAuditLabel = (entity, options = {}) => {
+  if (!entity) return null
+  if (typeof entity === 'string') return normalizeText(entity)
+
+  const fallbackType = normalizeText(options.fallbackType) || 'Resource'
+  const labelKeys = Array.isArray(options.labelKeys) && options.labelKeys.length > 0
+    ? options.labelKeys
+    : ['name', 'title', 'label']
+
+  const name = normalizeText(entity.name)
+  const title = normalizeText(entity.title)
+  const email = normalizeText(entity.email)
+
+  if (name && email) return `${name} <${email}>`
+  if (name) return name
+  if (title) return title
+  if (email) return email
+
+  for (const key of labelKeys) {
+    const value = normalizeText(entity?.[key])
+    if (value) return value
+  }
+
+  const id = toIdString(entity.id || entity._id)
+  return id ? `${fallbackType} ${id}` : fallbackType
+}
+
+const formatUserAuditLabel = (user) =>
+  formatEntityAuditLabel(user, {
+    fallbackType: 'User',
+    labelKeys: ['name', 'email'],
+  })
+
+const formatActorAuditLabel = (req) => {
+  if (req?.scopes?.platformRoles?.includes('SUPER_ADMIN')) return 'Super Admin'
+
+  const scopedUserLabel = formatUserAuditLabel(req?.scopes?.user)
+  if (scopedUserLabel) return scopedUserLabel
+
+  const emailLabel = normalizeText(req?.userEmail)
+  if (emailLabel) return emailLabel
+
+  return 'User'
+}
+
+const inferTargetLabel = ({ resourceType, resourceId, diff, display }) => {
+  const displayTarget =
+    normalizeText(display?.targetLabel)
+    || normalizeText(display?.resourceLabel)
+
+  if (displayTarget) return displayTarget
+
+  const diffName = normalizeText(diff?.name)
+  const diffTitle = normalizeText(diff?.title)
+  const diffEmail = normalizeText(diff?.email)
+
+  if (diffName && diffEmail) return `${diffName} <${diffEmail}>`
+  if (diffName) return diffName
+  if (diffTitle) return diffTitle
+  if (diffEmail) return diffEmail
+
+  const id = toIdString(resourceId)
+  if (resourceType && id) return `${resourceType} ${id}`
+  if (resourceType) return resourceType
+
+  return 'resource'
+}
+
+const normalizeDisplay = (display = {}) => {
+  if (!display || typeof display !== 'object' || Array.isArray(display)) return null
+
+  const normalized = {
+    ...(normalizeText(display.actorLabel) ? { actorLabel: normalizeText(display.actorLabel) } : {}),
+    ...(normalizeText(display.targetLabel) ? { targetLabel: normalizeText(display.targetLabel) } : {}),
+    ...(normalizeText(display.resourceLabel) ? { resourceLabel: normalizeText(display.resourceLabel) } : {}),
+    ...(normalizeText(display.scopeLabel) ? { scopeLabel: normalizeText(display.scopeLabel) } : {}),
+  }
+
+  const permissionLabels = formatPermissionLabels(
+    display.permissionLabels || display.permissions || [],
+  )
+
+  if (permissionLabels.length > 0) {
+    normalized.permissionLabels = permissionLabels
+  }
+
+  return Object.keys(normalized).length > 0 ? normalized : null
+}
+
+const buildAuditSummary = ({ action, resourceType, resourceId, diff, display }) => {
+  const actorLabel = normalizeText(display?.actorLabel) || 'User'
+  const targetLabel = inferTargetLabel({ resourceType, resourceId, diff, display })
+  const scopeLabel = normalizeText(display?.scopeLabel)
+  const permissionLabels = formatPermissionLabels(
+    display?.permissionLabels || diff?.permissions || [],
+  )
+  const permissionLabel = permissionLabels.join(', ')
+  const requirement = normalizeText(diff?.requiredPermission || diff?.requiredRole)
+  const path = normalizeText(diff?.path)
+
+  switch (action) {
+    case AUDIT_ACTIONS.VMF_GRANT_CREATED:
+      return clampSummary(
+        `${actorLabel} granted ${targetLabel} ${permissionLabel ? `${permissionLabel} ` : ''}access to ${scopeLabel || 'the VMF'}`,
+      )
+    case AUDIT_ACTIONS.VMF_GRANT_REVOKED:
+      return clampSummary(`${actorLabel} revoked ${targetLabel}'s access to ${scopeLabel || 'the VMF'}`)
+    case AUDIT_ACTIONS.USER_ENABLED:
+      return clampSummary(`${actorLabel} enabled ${targetLabel}`)
+    case AUDIT_ACTIONS.USER_DISABLED:
+      return clampSummary(`${actorLabel} disabled ${targetLabel}`)
+    case AUDIT_ACTIONS.USER_DELETED:
+      return clampSummary(`${actorLabel} deleted ${targetLabel}`)
+    case AUDIT_ACTIONS.USER_CREATED:
+      return clampSummary(`${actorLabel} created ${targetLabel}`)
+    case AUDIT_ACTIONS.USER_INVITED:
+      return clampSummary(`${actorLabel} invited ${targetLabel}`)
+    case AUDIT_ACTIONS.USER_ROLE_UPDATED:
+      if (diff?.tenantVisibility && !diff?.roles && !diff?.customerRoles) {
+        return clampSummary(`${actorLabel} updated tenant visibility for ${targetLabel}`)
+      }
+      return clampSummary(`${actorLabel} updated roles for ${targetLabel}`)
+    case AUDIT_ACTIONS.ROLE_CREATED:
+      return clampSummary(`${actorLabel} created role ${targetLabel}`)
+    case AUDIT_ACTIONS.ROLE_UPDATED:
+      return clampSummary(`${actorLabel} updated role ${targetLabel}`)
+    case AUDIT_ACTIONS.ROLE_DELETED:
+      return clampSummary(`${actorLabel} deleted role ${targetLabel}`)
+    case AUDIT_ACTIONS.ROLE_MUTATION_BLOCKED:
+      return clampSummary(`${actorLabel} blocked role mutation for ${targetLabel}`)
+    case AUDIT_ACTIONS.ACCESS_DENIED:
+      if (requirement && path) {
+        return clampSummary(`Access denied for ${actorLabel}: ${requirement} on ${path}`)
+      }
+      if (requirement) {
+        return clampSummary(`Access denied for ${actorLabel}: missing ${requirement}`)
+      }
+      if (path) {
+        return clampSummary(`Access denied for ${actorLabel} on ${path}`)
+      }
+      return clampSummary(`Access denied for ${actorLabel}`)
+    case AUDIT_ACTIONS.CUSTOMER_CREATED:
+      return clampSummary(`${actorLabel} created customer ${targetLabel}`)
+    case AUDIT_ACTIONS.CUSTOMER_UPDATED:
+      return clampSummary(`${actorLabel} updated customer ${targetLabel}`)
+    case AUDIT_ACTIONS.CUSTOMER_STATUS_CHANGED:
+      return clampSummary(`${actorLabel} changed customer status for ${targetLabel}`)
+    case AUDIT_ACTIONS.TENANT_CREATED:
+      return clampSummary(`${actorLabel} created tenant ${targetLabel}`)
+    case AUDIT_ACTIONS.TENANT_UPDATED:
+      return clampSummary(`${actorLabel} updated tenant ${targetLabel}`)
+    case AUDIT_ACTIONS.TENANT_ENABLED:
+      return clampSummary(`${actorLabel} enabled tenant ${targetLabel}`)
+    case AUDIT_ACTIONS.TENANT_DISABLED:
+      return clampSummary(`${actorLabel} disabled tenant ${targetLabel}`)
+    case AUDIT_ACTIONS.VMF_CREATED:
+      return clampSummary(`${actorLabel} created VMF ${targetLabel}`)
+    case AUDIT_ACTIONS.VMF_UPDATED:
+      return clampSummary(`${actorLabel} updated VMF ${targetLabel}`)
+    case AUDIT_ACTIONS.VMF_DELETED:
+      return clampSummary(`${actorLabel} deleted VMF ${targetLabel}`)
+    case AUDIT_ACTIONS.DEAL_CREATED:
+      return clampSummary(`${actorLabel} created deal ${targetLabel}`)
+    case AUDIT_ACTIONS.DEAL_UPDATED:
+      return clampSummary(`${actorLabel} updated deal ${targetLabel}`)
+    case AUDIT_ACTIONS.DEAL_ARCHIVED:
+      return clampSummary(`${actorLabel} archived deal ${targetLabel}`)
+    default:
+      return clampSummary(`${actorLabel} performed ${humanizeAuditAction(action).toLowerCase()} on ${targetLabel}`)
+  }
+}
+
+const buildAuditPresentation = (data = {}) => {
+  const normalizedDisplay = normalizeDisplay(data.display)
+  const summary = clampSummary(data.summary) || buildAuditSummary({
+    action: data.action,
+    resourceType: data.resourceType,
+    resourceId: data.resourceId,
+    diff: data.diff,
+    display: normalizedDisplay,
+  })
+
+  return {
+    ...(summary ? { summary } : {}),
+    ...(normalizedDisplay ? { display: normalizedDisplay } : {}),
+  }
+}
+
+const normalizeActorReference = (actorUserId) => {
+  if (!actorUserId || typeof actorUserId !== 'object' || Array.isArray(actorUserId)) {
+    return toIdString(actorUserId) || actorUserId
+  }
+
+  const normalizedActor = {
+    ...(toIdString(actorUserId.id || actorUserId._id) ? { id: toIdString(actorUserId.id || actorUserId._id) } : {}),
+    ...(normalizeText(actorUserId.name) ? { name: normalizeText(actorUserId.name) } : {}),
+    ...(normalizeText(actorUserId.email) ? { email: normalizeText(actorUserId.email) } : {}),
+  }
+
+  return Object.keys(normalizedActor).length > 0
+    ? normalizedActor
+    : (toIdString(actorUserId) || actorUserId)
+}
+
+const serializeAuditLog = (entry = {}) => {
+  const plain = typeof entry?.toObject === 'function'
+    ? entry.toObject()
+    : { ...entry }
+
+  const id = toIdString(plain.id || plain._id)
+
+  return {
+    ...(id ? { id } : {}),
+    ts: plain.ts,
+    actorUserId: normalizeActorReference(plain.actorUserId),
+    action: plain.action,
+    resourceType: plain.resourceType,
+    resourceId: toIdString(plain.resourceId),
+    ...(plain.summary ? { summary: plain.summary } : {}),
+    ...(plain.display ? { display: plain.display } : {}),
+    ...(plain.scope ? { scope: plain.scope } : {}),
+    ...(plain.diff !== undefined ? { diff: plain.diff } : {}),
+    ...(plain.ip ? { ip: plain.ip } : {}),
+    ...(plain.userAgent ? { userAgent: plain.userAgent } : {}),
+    ...(plain.requestId ? { requestId: plain.requestId } : {}),
+  }
+}
 
 /* ------------------------------------------------------------------ */
 /*  Core logging                                                      */
@@ -129,7 +421,10 @@ export const RESOURCE_TYPES = Object.freeze({
  */
 const log = async (data) => {
   try {
-    return await AuditLog.createLog(data)
+    return await AuditLog.createLog({
+      ...data,
+      ...buildAuditPresentation(data),
+    })
   } catch (err) {
     logger.error({ err, action: data.action, resourceType: data.resourceType, resourceId: data.resourceId }, 'audit log write failed')
     // Never throw — audit failures must not break business operations
@@ -146,9 +441,15 @@ const log = async (data) => {
  */
 const logFromRequest = async (req, data) => {
   const actorUserId = data.actorUserId || req?.context?.userId || req?.userId
+  const actorLabel = formatActorAuditLabel(req)
+
   return log({
     ...data,
     actorUserId,
+    display: {
+      ...(data.display || {}),
+      ...(!data.display?.actorLabel && actorLabel ? { actorLabel } : {}),
+    },
     ip: req?.ip,
     userAgent: req?.get?.('user-agent'),
     requestId: req?.requestId,
@@ -220,7 +521,7 @@ const query = async (filters = {}) => {
   ])
 
   return {
-    data,
+    data: data.map(serializeAuditLog),
     meta: {
       page,
       pageSize,
@@ -242,8 +543,12 @@ const getByResource = async (resourceType, resourceId, options = {}) => {
  * Get all audit logs correlated by request ID.
  */
 const getByRequestId = async (requestId) => {
-  const data = await AuditLog.find({ requestId }).sort({ ts: 1 }).lean()
-  return { data, meta: { totalCount: data.length } }
+  const data = await AuditLog.find({ requestId })
+    .populate('actorUserId', 'name email')
+    .sort({ ts: 1 })
+    .lean()
+
+  return { data: data.map(serializeAuditLog), meta: { totalCount: data.length } }
 }
 
 /* ------------------------------------------------------------------ */
@@ -374,6 +679,11 @@ const auditService = {
   getByRequestId,
   verifyIntegrity,
   getStats,
+  buildAuditPresentation,
+  formatActorAuditLabel,
+  formatEntityAuditLabel,
+  formatUserAuditLabel,
+  humanizeAuditAction,
   AUDIT_ACTIONS,
   RESOURCE_TYPES,
 }

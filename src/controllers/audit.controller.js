@@ -14,7 +14,7 @@
  * All endpoints require SUPER_ADMIN platform role.
  */
 
-import auditService from '../services/auditService.js'
+import auditService, { AUDIT_ACTIONS } from '../services/auditService.js'
 import auditRetentionService from '../services/auditRetentionService.js'
 import logger from '../config/logger.js'
 
@@ -132,8 +132,7 @@ export const verifyIntegrity = async (req, res) => {
   try {
     const result = await auditService.verifyIntegrity(req.validatedBody)
 
-    const status = result.invalid > 0 ? 200 : 200 // always 200, the body tells the story
-    return res.status(status).json({ data: result })
+    return res.status(200).json({ data: result })
   } catch (err) {
     logger.error({ err, requestId: req.requestId }, 'Failed to verify audit log integrity')
     return res.status(500).json({
@@ -182,7 +181,7 @@ export const runRetentionCleanup = async (req, res) => {
 
     // Audit the cleanup action itself
     await auditService.logFromRequest(req, {
-      action: 'AUDIT_RETENTION_CLEANUP',
+      action: AUDIT_ACTIONS.AUDIT_RETENTION_CLEANUP,
       resourceType: 'AuditLog',
       resourceId: req.context?.userId || req.userId,
       scope: {},
