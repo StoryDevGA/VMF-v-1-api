@@ -1,6 +1,10 @@
 import { isDeepStrictEqual } from 'node:util'
 import RuntimeSkill from '../models/RuntimeSkill.js'
 import auditService from '../services/auditService.js'
+import {
+  buildUnknownFrameworkKeyMessage,
+  resolveKnownFrameworkKeys,
+} from '../services/frameworkRegistryService.js'
 
 const DUPLICATE_RUNTIME_SKILL_KEY_MESSAGE = 'Skill key must be unique.'
 const RUNTIME_SKILL_NOT_FOUND_MESSAGE = 'Skill was not found.'
@@ -104,6 +108,16 @@ const sendConflict = (res, req, message, details = {}) =>
     },
   })
 
+const sendValidationFailed = (res, req, details, message = 'Please check the form for errors.') =>
+  res.status(422).json({
+    error: {
+      code: 'VALIDATION_FAILED',
+      message,
+      details,
+      requestId: req.requestId,
+    },
+  })
+
 const populateRuntimeSkill = async (runtimeSkill) => {
   if (!runtimeSkill || typeof runtimeSkill.populate !== 'function') {
     return runtimeSkill
@@ -143,6 +157,18 @@ const buildListFilter = ({ q, status, frameworkKey }) => {
   return filter
 }
 
+const validateRuntimeSkillFrameworkKeys = async (supportedFrameworkKeys = []) => {
+  const { missingKeys } = await resolveKnownFrameworkKeys(supportedFrameworkKeys)
+
+  if (missingKeys.length === 0) {
+    return {}
+  }
+
+  return {
+    supportedFrameworkKeys: buildUnknownFrameworkKeyMessage(missingKeys),
+  }
+}
+
 export const listRuntimeSkills = async (req, res, next) => {
   try {
     const pageNum = Math.max(1, Number(req.query.page) || 1)
@@ -179,6 +205,11 @@ export const listRuntimeSkills = async (req, res, next) => {
 
 export const createRuntimeSkill = async (req, res, next) => {
   try {
+    const validationDetails = await validateRuntimeSkillFrameworkKeys(req.body.supportedFrameworkKeys)
+    if (Object.keys(validationDetails).length > 0) {
+      return sendValidationFailed(res, req, validationDetails)
+    }
+
     const existingRuntimeSkill = await RuntimeSkill.findOne({
       key: req.body.key,
     }).select('_id')
@@ -288,6 +319,14 @@ export const updateRuntimeSkill = async (req, res, next) => {
     }
 
     const nextKey = req.body.key ?? runtimeSkill.key
+    const nextSupportedFrameworkKeys =
+      req.body.supportedFrameworkKeys ?? runtimeSkill.supportedFrameworkKeys
+
+    const validationDetails = await validateRuntimeSkillFrameworkKeys(nextSupportedFrameworkKeys)
+    if (Object.keys(validationDetails).length > 0) {
+      return sendValidationFailed(res, req, validationDetails)
+    }
+
     const duplicateRuntimeSkill = await RuntimeSkill.findOne({
       _id: { $ne: runtimeSkill._id },
       key: nextKey,

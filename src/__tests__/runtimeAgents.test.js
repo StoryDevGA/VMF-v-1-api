@@ -68,6 +68,12 @@ const buildDefaultRoleRows = () => ([
   },
 ])
 
+const buildFrameworkRegistryLookupChain = (rows) => ({
+  select: jest.fn().mockReturnValue({
+    lean: jest.fn().mockResolvedValue(rows),
+  }),
+})
+
 const buildRuntimeAgentQueryChain = (rows) => ({
   sort: jest.fn().mockReturnThis(),
   skip: jest.fn().mockReturnThis(),
@@ -81,6 +87,7 @@ let request
 let tokenService
 let User
 let Role
+let FrameworkRegistry
 let RuntimeAgent
 let AuditLog
 let originalRuntimeAgentSave
@@ -145,6 +152,7 @@ beforeAll(async () => {
   const models = await import('../models/index.js')
   User = models.User
   Role = models.Role
+  FrameworkRegistry = models.FrameworkRegistry
   RuntimeAgent = models.RuntimeAgent
   AuditLog = models.AuditLog
 
@@ -180,6 +188,7 @@ beforeEach(() => {
   RuntimeAgent.find = jest.fn()
   RuntimeAgent.countDocuments = jest.fn()
   RuntimeAgent.findOne = jest.fn()
+  FrameworkRegistry.find = jest.fn()
   Role.find = jest.fn().mockReturnValue(buildRoleQueryChain(buildDefaultRoleRows()))
 
   RuntimeAgent.prototype.save = jest.fn(async function save() {
@@ -194,6 +203,20 @@ beforeEach(() => {
   RuntimeAgent.findOne.mockReturnValue({
     select: jest.fn().mockResolvedValue(null),
   })
+  FrameworkRegistry.find.mockReturnValue(buildFrameworkRegistryLookupChain([
+    {
+      frameworkKey: 'VMF',
+      name: 'Value Management Framework',
+      supportedWorkflowKeys: ['vmf-baseline', 'vmf-publish'],
+      status: 'ACTIVE',
+    },
+    {
+      frameworkKey: 'RLD',
+      name: 'Revenue Lifecycle Design',
+      supportedWorkflowKeys: ['rld-baseline', 'rld-publish'],
+      status: 'ACTIVE',
+    },
+  ]))
 
   AuditLog.createLog = jest.fn(async () => ({}))
 })
@@ -311,6 +334,26 @@ describe('Runtime Agent Routes', () => {
       field: 'key',
       reason: 'RUNTIME_AGENT_KEY_CONFLICT',
     })
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/agents rejects unknown framework keys', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/agents')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        key: 'planner',
+        name: 'Planner',
+        description: 'Plans a framework-specific workflow.',
+        status: 'ACTIVE',
+        supportedFrameworkKeys: ['QMF'],
+        defaultSkillIds: ['skill-snapshot'],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details.supportedFrameworkKeys).toBe('Unknown framework key "QMF".')
   })
 
   test('POST /api/v1/super-admin/runtime-control/agents creates a runtime agent and writes an audit log', async () => {

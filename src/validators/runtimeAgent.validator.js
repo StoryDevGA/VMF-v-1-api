@@ -4,10 +4,7 @@ import {
   createParamsValidator,
   createQueryValidator,
 } from './shared.js'
-import {
-  RUNTIME_AGENT_STATUSES,
-  SUPPORTED_RUNTIME_FRAMEWORK_KEYS,
-} from '../models/RuntimeAgent.js'
+import { RUNTIME_AGENT_STATUSES } from '../models/RuntimeAgent.js'
 
 const keyRegex = /^[a-z][a-z0-9-]*$/
 const agentIdRegex = /^agent-[a-z][a-z0-9-]*$/
@@ -23,14 +20,6 @@ const frameworkKeySchema = z
     (value) => frameworkKeyRegex.test(value),
     'Framework key must use uppercase letters, numbers, or underscores',
   )
-  .superRefine((value, ctx) => {
-    if (!SUPPORTED_RUNTIME_FRAMEWORK_KEYS.includes(value)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `Unsupported framework key "${value}".`,
-      })
-    }
-  })
 
 const defaultSkillIdSchema = z
   .string()

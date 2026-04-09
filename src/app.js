@@ -15,6 +15,7 @@ import identityPlusRoutes from './routes/identityPlus.routes.js'
 import invitationAuthRoutes from './routes/invitationAuth.routes.js'
 import invitationRoutes from './routes/invitations.routes.js'
 import systemVersioningPolicyRoutes from './routes/systemVersioningPolicy.routes.js'
+import frameworkRegistryRoutes from './routes/frameworkRegistry.routes.js'
 import frameworkPackageRoutes from './routes/frameworkPackages.routes.js'
 import runtimeAgentRoutes from './routes/runtimeAgents.routes.js'
 import runtimeSkillRoutes from './routes/runtimeSkills.routes.js'
@@ -93,6 +94,7 @@ app.use('/api/v1/webhooks/identity-plus', identityPlusRoutes)
 app.use('/api/v1/super-admin/invitations', invitationAuthRoutes)
 app.use('/api/v1/super-admin/invitations', invitationRoutes)
 app.use('/api/v1/super-admin/system-versioning-policy', systemVersioningPolicyRoutes)
+app.use('/api/v1/super-admin/runtime-control/framework-registry', frameworkRegistryRoutes)
 app.use('/api/v1/super-admin/runtime-control/framework-packages', frameworkPackageRoutes)
 app.use('/api/v1/super-admin/runtime-control/agents', runtimeAgentRoutes)
 app.use('/api/v1/super-admin/runtime-control/skills', runtimeSkillRoutes)

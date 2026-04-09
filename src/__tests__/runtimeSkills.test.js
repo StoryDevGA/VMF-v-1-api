@@ -68,6 +68,12 @@ const buildDefaultRoleRows = () => ([
   },
 ])
 
+const buildFrameworkRegistryLookupChain = (rows) => ({
+  select: jest.fn().mockReturnValue({
+    lean: jest.fn().mockResolvedValue(rows),
+  }),
+})
+
 const buildRuntimeSkillQueryChain = (rows) => ({
   sort: jest.fn().mockReturnThis(),
   skip: jest.fn().mockReturnThis(),
@@ -81,6 +87,7 @@ let request
 let tokenService
 let User
 let Role
+let FrameworkRegistry
 let RuntimeSkill
 let AuditLog
 let originalRuntimeSkillSave
@@ -144,6 +151,7 @@ beforeAll(async () => {
   const models = await import('../models/index.js')
   User = models.User
   Role = models.Role
+  FrameworkRegistry = models.FrameworkRegistry
   RuntimeSkill = models.RuntimeSkill
   AuditLog = models.AuditLog
 
@@ -179,6 +187,7 @@ beforeEach(() => {
   RuntimeSkill.find = jest.fn()
   RuntimeSkill.countDocuments = jest.fn()
   RuntimeSkill.findOne = jest.fn()
+  FrameworkRegistry.find = jest.fn()
   Role.find = jest.fn().mockReturnValue(buildRoleQueryChain(buildDefaultRoleRows()))
 
   RuntimeSkill.prototype.save = jest.fn(async function save() {
@@ -193,6 +202,20 @@ beforeEach(() => {
   RuntimeSkill.findOne.mockReturnValue({
     select: jest.fn().mockResolvedValue(null),
   })
+  FrameworkRegistry.find.mockReturnValue(buildFrameworkRegistryLookupChain([
+    {
+      frameworkKey: 'VMF',
+      name: 'Value Management Framework',
+      supportedWorkflowKeys: ['vmf-baseline', 'vmf-publish'],
+      status: 'ACTIVE',
+    },
+    {
+      frameworkKey: 'RLD',
+      name: 'Revenue Lifecycle Design',
+      supportedWorkflowKeys: ['rld-baseline', 'rld-publish'],
+      status: 'ACTIVE',
+    },
+  ]))
 
   AuditLog.createLog = jest.fn(async () => ({}))
 })
@@ -306,6 +329,25 @@ describe('Runtime Skill Routes', () => {
       field: 'key',
       reason: 'RUNTIME_SKILL_KEY_CONFLICT',
     })
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/skills rejects unknown framework keys', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/skills')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        key: 'review-pack',
+        name: 'Review Pack',
+        description: 'Assembles review artifacts.',
+        status: 'ACTIVE',
+        supportedFrameworkKeys: ['QMF'],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details.supportedFrameworkKeys).toBe('Unknown framework key "QMF".')
   })
 
   test('POST /api/v1/super-admin/runtime-control/skills creates a runtime skill and writes an audit log', async () => {

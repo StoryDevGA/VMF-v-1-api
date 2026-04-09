@@ -10,6 +10,7 @@ import DataDeletionRequest from './DataDeletionRequest.js'
 import Invitation from './Invitation.js'
 import SystemVersioningPolicy from './SystemVersioningPolicy.js'
 import LicenseLevel from './LicenseLevel.js'
+import FrameworkRegistry from './FrameworkRegistry.js'
 import FrameworkPackage from './FrameworkPackage.js'
 import RuntimeAgent from './RuntimeAgent.js'
 import RuntimeSkill from './RuntimeSkill.js'
@@ -28,6 +29,7 @@ export {
   Invitation,
   SystemVersioningPolicy,
   LicenseLevel,
+  FrameworkRegistry,
   FrameworkPackage,
   RuntimeAgent,
   RuntimeSkill,
@@ -47,6 +49,7 @@ export default {
   Invitation,
   SystemVersioningPolicy,
   LicenseLevel,
+  FrameworkRegistry,
   FrameworkPackage,
   RuntimeAgent,
   RuntimeSkill,

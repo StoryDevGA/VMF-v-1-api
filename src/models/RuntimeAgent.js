@@ -105,7 +105,6 @@ const runtimeAgentSchema = new mongoose.Schema(
       trim: true,
       uppercase: true,
       maxlength: 100,
-      enum: SUPPORTED_RUNTIME_FRAMEWORK_KEYS,
       match: [frameworkKeyPattern, 'Framework key must use uppercase letters, numbers, or underscores'],
     }],
     defaultSkillIds: [tokenField],

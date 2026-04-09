@@ -4,10 +4,7 @@ import {
   createParamsValidator,
   createQueryValidator,
 } from './shared.js'
-import {
-  RUNTIME_SKILL_STATUSES,
-  SUPPORTED_RUNTIME_SKILL_FRAMEWORK_KEYS,
-} from '../models/RuntimeSkill.js'
+import { RUNTIME_SKILL_STATUSES } from '../models/RuntimeSkill.js'
 
 const keyRegex = /^[a-z][a-z0-9-]*$/
 const skillIdRegex = /^skill-[a-z][a-z0-9-]*$/
@@ -23,14 +20,6 @@ const frameworkKeySchema = z
     (value) => frameworkKeyRegex.test(value),
     'Framework key must use uppercase letters, numbers, or underscores',
   )
-  .superRefine((value, ctx) => {
-    if (!SUPPORTED_RUNTIME_SKILL_FRAMEWORK_KEYS.includes(value)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `Unsupported framework key "${value}".`,
-      })
-    }
-  })
 
 const supportedFrameworkKeysSchema = z
   .array(frameworkKeySchema)

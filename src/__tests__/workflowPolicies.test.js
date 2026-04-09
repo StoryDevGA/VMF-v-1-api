@@ -88,6 +88,7 @@ let request
 let tokenService
 let User
 let Role
+let FrameworkRegistry
 let WorkflowPolicy
 let RuntimeAgent
 let RuntimeSkill
@@ -211,6 +212,7 @@ beforeAll(async () => {
   const models = await import('../models/index.js')
   User = models.User
   Role = models.Role
+  FrameworkRegistry = models.FrameworkRegistry
   WorkflowPolicy = models.WorkflowPolicy
   RuntimeAgent = models.RuntimeAgent
   RuntimeSkill = models.RuntimeSkill
@@ -248,6 +250,7 @@ beforeEach(() => {
   WorkflowPolicy.find = jest.fn()
   WorkflowPolicy.countDocuments = jest.fn()
   WorkflowPolicy.findOne = jest.fn()
+  FrameworkRegistry.find = jest.fn()
   RuntimeAgent.find = jest.fn()
   RuntimeSkill.find = jest.fn()
   Role.find = jest.fn().mockReturnValue(buildRoleQueryChain(buildDefaultRoleRows()))
@@ -264,6 +267,20 @@ beforeEach(() => {
   WorkflowPolicy.findOne.mockReturnValue({
     select: jest.fn().mockResolvedValue(null),
   })
+  FrameworkRegistry.find.mockReturnValue(buildRegistryLookupChain([
+    {
+      frameworkKey: 'VMF',
+      name: 'Value Management Framework',
+      supportedWorkflowKeys: ['vmf-baseline', 'vmf-publish'],
+      status: 'ACTIVE',
+    },
+    {
+      frameworkKey: 'RLD',
+      name: 'Revenue Lifecycle Design',
+      supportedWorkflowKeys: ['rld-baseline', 'rld-publish'],
+      status: 'ACTIVE',
+    },
+  ]))
   RuntimeAgent.find.mockReturnValue(buildRegistryLookupChain([]))
   RuntimeSkill.find.mockReturnValue(buildRegistryLookupChain([]))
 
@@ -422,6 +439,31 @@ describe('Workflow Policy Routes', () => {
       field: 'key',
       reason: 'WORKFLOW_POLICY_KEY_CONFLICT',
     })
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/workflow-policies rejects unknown framework keys', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    mockFindOneSelect(null)
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/workflow-policies')
+      .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', STEP_UP_TOKEN)
+      .send({
+        key: 'qmf-review',
+        name: 'QMF Review Policy',
+        description: 'Controls QMF review sequencing.',
+        status: 'ACTIVE',
+        frameworkKeys: ['QMF'],
+        orderedSteps: ['snapshot', 'review', 'approve'],
+        requiredAgentIds: ['agent-validator'],
+        requiredSkillIds: ['skill-snapshot'],
+        gatingRules: ['framework-package-active'],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details.frameworkKeys).toBe('Unknown framework key "QMF".')
   })
 
   test('POST /api/v1/super-admin/runtime-control/workflow-policies rejects missing agent and skill references', async () => {

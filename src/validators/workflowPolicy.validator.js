@@ -4,10 +4,7 @@ import {
   createParamsValidator,
   createQueryValidator,
 } from './shared.js'
-import {
-  SUPPORTED_WORKFLOW_POLICY_FRAMEWORK_KEYS,
-  WORKFLOW_POLICY_STATUSES,
-} from '../models/WorkflowPolicy.js'
+import { WORKFLOW_POLICY_STATUSES } from '../models/WorkflowPolicy.js'
 
 const keyRegex = /^[a-z][a-z0-9-]*$/
 const policyIdRegex = /^policy-[a-z][a-z0-9-]*$/
@@ -23,14 +20,6 @@ const frameworkKeySchema = z
     (value) => frameworkKeyRegex.test(value),
     'Framework key must use uppercase letters, numbers, or underscores',
   )
-  .superRefine((value, ctx) => {
-    if (!SUPPORTED_WORKFLOW_POLICY_FRAMEWORK_KEYS.includes(value)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `Unsupported framework key "${value}".`,
-      })
-    }
-  })
 
 const tokenSchema = (label) =>
   z

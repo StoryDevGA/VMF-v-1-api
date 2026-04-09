@@ -2,6 +2,10 @@ import mongoose from 'mongoose'
 import { isDeepStrictEqual } from 'node:util'
 import FrameworkPackage, { FRAMEWORK_PACKAGE_STATUSES } from '../models/FrameworkPackage.js'
 import auditService from '../services/auditService.js'
+import {
+  buildUnknownFrameworkKeyMessage,
+  resolveKnownFrameworkKeys,
+} from '../services/frameworkRegistryService.js'
 
 const DUPLICATE_FRAMEWORK_PACKAGE_MESSAGE = 'Framework key and version must be unique.'
 const FRAMEWORK_PACKAGE_NOT_FOUND_MESSAGE = 'Framework package not found.'
@@ -114,6 +118,16 @@ const sendConflict = (res, req, message, details = {}) =>
     },
   })
 
+const sendValidationFailed = (res, req, details, message = 'Please check the form for errors.') =>
+  res.status(422).json({
+    error: {
+      code: 'VALIDATION_FAILED',
+      message,
+      details,
+      requestId: req.requestId,
+    },
+  })
+
 const populateFrameworkPackage = async (frameworkPackage) => {
   if (!frameworkPackage || typeof frameworkPackage.populate !== 'function') {
     return frameworkPackage
@@ -163,6 +177,42 @@ const buildListFilter = ({ q, status, frameworkKey }) => {
   return filter
 }
 
+const buildUnsupportedWorkflowKeyMessage = (frameworkKey, workflowKeys = []) => {
+  if (workflowKeys.length === 1) {
+    return `Workflow key "${workflowKeys[0]}" is not supported by framework "${frameworkKey}".`
+  }
+
+  return `Workflow keys ${workflowKeys.join(', ')} are not supported by framework "${frameworkKey}".`
+}
+
+const validateFrameworkPackageRegistryReferences = async ({
+  frameworkKey,
+  compatibleWorkflowKeys = [],
+}) => {
+  const details = {}
+  const { missingKeys, registryByKey } = await resolveKnownFrameworkKeys([frameworkKey])
+
+  if (missingKeys.length > 0) {
+    details.frameworkKey = buildUnknownFrameworkKeyMessage(missingKeys)
+    return details
+  }
+
+  const registryEntry = registryByKey.get(frameworkKey)
+  const supportedWorkflowKeySet = new Set(registryEntry?.supportedWorkflowKeys || [])
+  const unsupportedWorkflowKeys = compatibleWorkflowKeys.filter(
+    (workflowKey) => !supportedWorkflowKeySet.has(workflowKey),
+  )
+
+  if (unsupportedWorkflowKeys.length > 0) {
+    details.compatibleWorkflowKeys = buildUnsupportedWorkflowKeyMessage(
+      frameworkKey,
+      unsupportedWorkflowKeys,
+    )
+  }
+
+  return details
+}
+
 export const listFrameworkPackages = async (req, res, next) => {
   try {
     const pageNum = Math.max(1, Number(req.query.page) || 1)
@@ -200,6 +250,11 @@ export const listFrameworkPackages = async (req, res, next) => {
 
 export const createFrameworkPackage = async (req, res, next) => {
   try {
+    const validationDetails = await validateFrameworkPackageRegistryReferences(req.body)
+    if (Object.keys(validationDetails).length > 0) {
+      return sendValidationFailed(res, req, validationDetails)
+    }
+
     const existingPackage = await FrameworkPackage.findOne({
       frameworkKey: req.body.frameworkKey,
       version: req.body.version,
@@ -326,6 +381,16 @@ export const updateFrameworkPackage = async (req, res, next) => {
     const nextFrameworkKey = req.body.frameworkKey ?? frameworkPackage.frameworkKey
     const nextVersion = req.body.version ?? frameworkPackage.version
     const nextStatus = req.body.status ?? frameworkPackage.status
+    const nextCompatibleWorkflowKeys =
+      req.body.compatibleWorkflowKeys ?? frameworkPackage.compatibleWorkflowKeys
+
+    const validationDetails = await validateFrameworkPackageRegistryReferences({
+      frameworkKey: nextFrameworkKey,
+      compatibleWorkflowKeys: nextCompatibleWorkflowKeys,
+    })
+    if (Object.keys(validationDetails).length > 0) {
+      return sendValidationFailed(res, req, validationDetails)
+    }
 
     const duplicatePackage = await FrameworkPackage.findOne({
       _id: { $ne: frameworkPackage._id },

@@ -152,7 +152,6 @@ const workflowPolicySchema = new mongoose.Schema(
       trim: true,
       uppercase: true,
       maxlength: 100,
-      enum: SUPPORTED_WORKFLOW_POLICY_FRAMEWORK_KEYS,
       match: [frameworkKeyPattern, 'Framework key must use uppercase letters, numbers, or underscores'],
     }],
     orderedSteps: [tokenField],

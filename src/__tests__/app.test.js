@@ -31,6 +31,7 @@ describe('Phase 1 Core Setup', () => {
     expect(models.Deal).toBeDefined()
     expect(models.Role).toBeDefined()
     expect(models.AuditLog).toBeDefined()
+    expect(models.FrameworkRegistry).toBeDefined()
   })
 
   test('Token service', async () => {
@@ -62,10 +63,14 @@ describe('Phase 1 Core Setup', () => {
   test('Seeds configuration', async () => {
     // Test that seeds are properly configured
     const { systemRoles } = await import('../seeds/systemRoles.js')
+    const { frameworkRegistrySeeds } = await import('../seeds/frameworkRegistry.js')
     
     expect(systemRoles).toBeDefined()
     expect(Array.isArray(systemRoles)).toBe(true)
     expect(systemRoles.length).toBeGreaterThan(0)
+    expect(frameworkRegistrySeeds).toBeDefined()
+    expect(Array.isArray(frameworkRegistrySeeds)).toBe(true)
+    expect(frameworkRegistrySeeds.length).toBeGreaterThan(0)
     
     // Verify required system roles exist
     const roleKeys = systemRoles.map(role => role.key)
@@ -73,5 +78,9 @@ describe('Phase 1 Core Setup', () => {
     expect(roleKeys).toContain('CUSTOMER_ADMIN')
     expect(roleKeys).toContain('TENANT_ADMIN')
     expect(roleKeys).toContain('USER')
+
+    const frameworkKeys = frameworkRegistrySeeds.map(entry => entry.frameworkKey)
+    expect(frameworkKeys).toContain('VMF')
+    expect(frameworkKeys).toContain('RLD')
   })
 })

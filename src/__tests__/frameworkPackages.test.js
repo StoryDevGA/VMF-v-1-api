@@ -66,6 +66,12 @@ const buildRoleQueryChain = (rows) => {
   return chain
 }
 
+const buildFrameworkRegistryLookupChain = (rows) => ({
+  select: jest.fn().mockReturnValue({
+    lean: jest.fn().mockResolvedValue(rows),
+  }),
+})
+
 const buildDefaultRoleRows = () => ([
   {
     key: 'SUPER_ADMIN',
@@ -94,6 +100,7 @@ let request
 let tokenService
 let User
 let Role
+let FrameworkRegistry
 let FrameworkPackage
 let AuditLog
 let mockRedisClient
@@ -173,6 +180,7 @@ beforeAll(async () => {
   const models = await import('../models/index.js')
   User = models.User
   Role = models.Role
+  FrameworkRegistry = models.FrameworkRegistry
   FrameworkPackage = models.FrameworkPackage
   AuditLog = models.AuditLog
 
@@ -211,6 +219,7 @@ beforeEach(() => {
   FrameworkPackage.countDocuments = jest.fn()
   FrameworkPackage.findOne = jest.fn()
   FrameworkPackage.findById = jest.fn()
+  FrameworkRegistry.find = jest.fn()
   Role.find = jest.fn().mockReturnValue(buildRoleQueryChain(buildDefaultRoleRows()))
   FrameworkPackage.prototype.save = jest.fn(async function save() {
     return this
@@ -223,6 +232,20 @@ beforeEach(() => {
   FrameworkPackage.findOne.mockReturnValue({
     select: jest.fn().mockResolvedValue(null),
   })
+  FrameworkRegistry.find.mockReturnValue(buildFrameworkRegistryLookupChain([
+    {
+      frameworkKey: 'VMF',
+      name: 'Value Management Framework',
+      supportedWorkflowKeys: ['vmf-baseline', 'vmf-publish'],
+      status: 'ACTIVE',
+    },
+    {
+      frameworkKey: 'RLD',
+      name: 'Revenue Lifecycle Design',
+      supportedWorkflowKeys: ['rld-baseline', 'rld-publish'],
+      status: 'ACTIVE',
+    },
+  ]))
 
   AuditLog.createLog = jest.fn(async () => ({}))
   startSessionSpy.mockResolvedValue(buildSession())
@@ -349,6 +372,25 @@ describe('Framework Package Routes', () => {
     expect(res.body.error.code).toBe('VALIDATION_FAILED')
     expect(res.body.error.details).toHaveProperty('frameworkName')
     expect(res.body.error.details).toHaveProperty('version')
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages rejects unknown framework keys', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/framework-packages')
+      .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', STEP_UP_TOKEN)
+      .send({
+        frameworkKey: 'QMF',
+        frameworkName: 'Quality Messaging Framework',
+        version: '2.3.1',
+        compatibleWorkflowKeys: ['qmf-release'],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details.frameworkKey).toBe('Unknown framework key "QMF".')
   })
 
   test('POST /api/v1/super-admin/runtime-control/framework-packages creates a framework package', async () => {

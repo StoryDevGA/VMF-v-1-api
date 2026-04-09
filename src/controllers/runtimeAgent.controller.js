@@ -1,6 +1,10 @@
 import { isDeepStrictEqual } from 'node:util'
 import RuntimeAgent from '../models/RuntimeAgent.js'
 import auditService from '../services/auditService.js'
+import {
+  buildUnknownFrameworkKeyMessage,
+  resolveKnownFrameworkKeys,
+} from '../services/frameworkRegistryService.js'
 
 const DUPLICATE_RUNTIME_AGENT_KEY_MESSAGE = 'Agent key must be unique.'
 const RUNTIME_AGENT_NOT_FOUND_MESSAGE = 'Agent was not found.'
@@ -104,6 +108,16 @@ const sendConflict = (res, req, message, details = {}) =>
     },
   })
 
+const sendValidationFailed = (res, req, details, message = 'Please check the form for errors.') =>
+  res.status(422).json({
+    error: {
+      code: 'VALIDATION_FAILED',
+      message,
+      details,
+      requestId: req.requestId,
+    },
+  })
+
 const populateRuntimeAgent = async (runtimeAgent) => {
   if (!runtimeAgent || typeof runtimeAgent.populate !== 'function') {
     return runtimeAgent
@@ -144,6 +158,18 @@ const buildListFilter = ({ q, status, frameworkKey }) => {
   return filter
 }
 
+const validateRuntimeAgentFrameworkKeys = async (supportedFrameworkKeys = []) => {
+  const { missingKeys } = await resolveKnownFrameworkKeys(supportedFrameworkKeys)
+
+  if (missingKeys.length === 0) {
+    return {}
+  }
+
+  return {
+    supportedFrameworkKeys: buildUnknownFrameworkKeyMessage(missingKeys),
+  }
+}
+
 export const listRuntimeAgents = async (req, res, next) => {
   try {
     const pageNum = Math.max(1, Number(req.query.page) || 1)
@@ -180,6 +206,11 @@ export const listRuntimeAgents = async (req, res, next) => {
 
 export const createRuntimeAgent = async (req, res, next) => {
   try {
+    const validationDetails = await validateRuntimeAgentFrameworkKeys(req.body.supportedFrameworkKeys)
+    if (Object.keys(validationDetails).length > 0) {
+      return sendValidationFailed(res, req, validationDetails)
+    }
+
     const existingRuntimeAgent = await RuntimeAgent.findOne({
       key: req.body.key,
     }).select('_id')
@@ -290,6 +321,14 @@ export const updateRuntimeAgent = async (req, res, next) => {
     }
 
     const nextKey = req.body.key ?? runtimeAgent.key
+    const nextSupportedFrameworkKeys =
+      req.body.supportedFrameworkKeys ?? runtimeAgent.supportedFrameworkKeys
+
+    const validationDetails = await validateRuntimeAgentFrameworkKeys(nextSupportedFrameworkKeys)
+    if (Object.keys(validationDetails).length > 0) {
+      return sendValidationFailed(res, req, validationDetails)
+    }
+
     const duplicateRuntimeAgent = await RuntimeAgent.findOne({
       _id: { $ne: runtimeAgent._id },
       key: nextKey,

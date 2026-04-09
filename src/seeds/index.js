@@ -1,5 +1,6 @@
 import { connectDb } from '../config/db.js'
 import { seedSystemRoles } from './systemRoles.js'
+import { seedFrameworkRegistry } from './frameworkRegistry.js'
 import { seedSuperAdmin } from './superAdmin.js'
 import { seedDefaultLicenseLevel } from './licenseLevels.js'
 
@@ -13,6 +14,7 @@ export const runSeeds = async () => {
     // Run seeds in order
     await seedSystemRoles()
     const superAdmin = await seedSuperAdmin()
+    await seedFrameworkRegistry({ actorUserId: superAdmin?._id })
     await seedDefaultLicenseLevel({ actorUserId: superAdmin?._id })
 
     console.log('[seed] Database seeding completed successfully.')

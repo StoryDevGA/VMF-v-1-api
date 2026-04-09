@@ -7,6 +7,11 @@ import WorkflowPolicy, {
 import RuntimeAgent, { RUNTIME_AGENT_STATUSES } from '../models/RuntimeAgent.js'
 import RuntimeSkill, { RUNTIME_SKILL_STATUSES } from '../models/RuntimeSkill.js'
 import auditService from '../services/auditService.js'
+import {
+  buildUnknownFrameworkKeyMessage,
+  normalizeFrameworkKeyList,
+  resolveKnownFrameworkKeys,
+} from '../services/frameworkRegistryService.js'
 
 const DUPLICATE_WORKFLOW_POLICY_KEY_MESSAGE = 'Workflow policy key must be unique.'
 const WORKFLOW_POLICY_NOT_FOUND_MESSAGE = 'Workflow policy was not found.'
@@ -215,7 +220,15 @@ const validateWorkflowPolicyReferences = async ({
   status,
 }) => {
   const details = {}
-  const stepMessage = getWorkflowStepValidationMessage(frameworkKeys, orderedSteps)
+  const normalizedFrameworkKeys = normalizeFrameworkKeyList(frameworkKeys)
+  const { missingKeys } = await resolveKnownFrameworkKeys(normalizedFrameworkKeys)
+
+  if (missingKeys.length > 0) {
+    details.frameworkKeys = buildUnknownFrameworkKeyMessage(missingKeys)
+    return details
+  }
+
+  const stepMessage = getWorkflowStepValidationMessage(normalizedFrameworkKeys, orderedSteps)
 
   if (stepMessage) {
     details.orderedSteps = stepMessage
@@ -244,7 +257,7 @@ const validateWorkflowPolicyReferences = async ({
       const agent = agentById.get(agentId)
       const unsupportedFrameworkKey = findUnsupportedFrameworkKey(
         agent?.supportedFrameworkKeys,
-        frameworkKeys,
+        normalizedFrameworkKeys,
       )
 
       if (unsupportedFrameworkKey) {
@@ -260,7 +273,7 @@ const validateWorkflowPolicyReferences = async ({
       const skill = skillById.get(skillId)
       const unsupportedFrameworkKey = findUnsupportedFrameworkKey(
         skill?.supportedFrameworkKeys,
-        frameworkKeys,
+        normalizedFrameworkKeys,
       )
 
       if (unsupportedFrameworkKey) {
