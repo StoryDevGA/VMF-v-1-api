@@ -76,6 +76,10 @@ export const AUDIT_ACTIONS = Object.freeze({
   FRAMEWORK_PACKAGE_CREATED: 'FRAMEWORK_PACKAGE_CREATED',
   FRAMEWORK_PACKAGE_UPDATED: 'FRAMEWORK_PACKAGE_UPDATED',
   FRAMEWORK_PACKAGE_ACTIVATED: 'FRAMEWORK_PACKAGE_ACTIVATED',
+  RUNTIME_AGENT_CREATED: 'RUNTIME_AGENT_CREATED',
+  RUNTIME_AGENT_UPDATED: 'RUNTIME_AGENT_UPDATED',
+  RUNTIME_SKILL_CREATED: 'RUNTIME_SKILL_CREATED',
+  RUNTIME_SKILL_UPDATED: 'RUNTIME_SKILL_UPDATED',
   // Super Admin - Access denied
   ACCESS_DENIED: 'ACCESS_DENIED',
   // Super Admin - Invitations
@@ -109,6 +113,8 @@ export const RESOURCE_TYPES = Object.freeze({
   Invitation: 'Invitation',
   SystemVersioningPolicy: 'SystemVersioningPolicy',
   FrameworkPackage: 'FrameworkPackage',
+  RuntimeAgent: 'RuntimeAgent',
+  RuntimeSkill: 'RuntimeSkill',
   AuditLog: 'AuditLog',
   LicenseLevel: 'LicenseLevel',
   Role: 'Role',

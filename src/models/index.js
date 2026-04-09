@@ -11,6 +11,8 @@ import Invitation from './Invitation.js'
 import SystemVersioningPolicy from './SystemVersioningPolicy.js'
 import LicenseLevel from './LicenseLevel.js'
 import FrameworkPackage from './FrameworkPackage.js'
+import RuntimeAgent from './RuntimeAgent.js'
+import RuntimeSkill from './RuntimeSkill.js'
 
 // Export all models
 export {
@@ -26,6 +28,8 @@ export {
   SystemVersioningPolicy,
   LicenseLevel,
   FrameworkPackage,
+  RuntimeAgent,
+  RuntimeSkill,
 }
 
 // Default export with all models
@@ -42,4 +46,6 @@ export default {
   SystemVersioningPolicy,
   LicenseLevel,
   FrameworkPackage,
+  RuntimeAgent,
+  RuntimeSkill,
 }

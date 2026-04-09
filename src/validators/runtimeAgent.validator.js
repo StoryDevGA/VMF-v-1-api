@@ -1,0 +1,146 @@
+import { z } from 'zod'
+import {
+  createBodyValidator,
+  createParamsValidator,
+  createQueryValidator,
+} from './shared.js'
+import {
+  RUNTIME_AGENT_STATUSES,
+  SUPPORTED_RUNTIME_FRAMEWORK_KEYS,
+} from '../models/RuntimeAgent.js'
+
+const keyRegex = /^[a-z][a-z0-9-]*$/
+const agentIdRegex = /^agent-[a-z][a-z0-9-]*$/
+const frameworkKeyRegex = /^[A-Z][A-Z0-9_]*$/
+
+const frameworkKeySchema = z
+  .string()
+  .trim()
+  .min(1, 'Framework key is required')
+  .max(100, 'Framework key must be 100 characters or fewer')
+  .transform((value) => value.toUpperCase())
+  .refine(
+    (value) => frameworkKeyRegex.test(value),
+    'Framework key must use uppercase letters, numbers, or underscores',
+  )
+  .superRefine((value, ctx) => {
+    if (!SUPPORTED_RUNTIME_FRAMEWORK_KEYS.includes(value)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Unsupported framework key "${value}".`,
+      })
+    }
+  })
+
+const defaultSkillIdSchema = z
+  .string()
+  .trim()
+  .min(1, 'Default skill id is required')
+  .max(120, 'Default skill id must be 120 characters or fewer')
+  .transform((value) => value.toLowerCase())
+  .refine(
+    (value) => keyRegex.test(value),
+    'Default skill ids must use lowercase letters, numbers, or hyphens',
+  )
+
+const supportedFrameworkKeysSchema = z
+  .array(frameworkKeySchema)
+  .min(1, 'At least one supported framework key is required.')
+  .max(20, 'Supported framework keys must contain 20 items or fewer')
+  .transform((values) => [...new Set(values)])
+
+const defaultSkillIdsSchema = z
+  .array(defaultSkillIdSchema)
+  .max(200, 'Default skill ids must contain 200 items or fewer')
+  .transform((values) => [...new Set(values)])
+
+const createRuntimeAgentSchema = z.object({
+  key: z
+    .string({ required_error: 'Agent key is required' })
+    .trim()
+    .min(1, 'Agent key is required')
+    .max(120, 'Agent key must be 120 characters or fewer')
+    .transform((value) => value.toLowerCase())
+    .refine(
+      (value) => keyRegex.test(value),
+      'Agent key must use lowercase letters, numbers, or hyphens',
+    ),
+  name: z
+    .string({ required_error: 'Agent name is required' })
+    .trim()
+    .min(1, 'Agent name is required')
+    .max(120, 'Agent name must be 120 characters or fewer'),
+  description: z
+    .string()
+    .trim()
+    .max(500, 'Description must be 500 characters or fewer')
+    .default(''),
+  status: z
+    .enum(Object.values(RUNTIME_AGENT_STATUSES))
+    .default(RUNTIME_AGENT_STATUSES.ACTIVE),
+  supportedFrameworkKeys: supportedFrameworkKeysSchema,
+  defaultSkillIds: defaultSkillIdsSchema.default([]),
+})
+
+const updateRuntimeAgentSchema = z.object({
+  key: z
+    .string()
+    .trim()
+    .min(1, 'Agent key must not be empty')
+    .max(120, 'Agent key must be 120 characters or fewer')
+    .transform((value) => value.toLowerCase())
+    .refine(
+      (value) => keyRegex.test(value),
+      'Agent key must use lowercase letters, numbers, or hyphens',
+    )
+    .optional(),
+  name: z
+    .string()
+    .trim()
+    .min(1, 'Agent name must not be empty')
+    .max(120, 'Agent name must be 120 characters or fewer')
+    .optional(),
+  description: z
+    .string()
+    .trim()
+    .max(500, 'Description must be 500 characters or fewer')
+    .optional(),
+  status: z
+    .enum(Object.values(RUNTIME_AGENT_STATUSES))
+    .optional(),
+  supportedFrameworkKeys: supportedFrameworkKeysSchema.optional(),
+  defaultSkillIds: defaultSkillIdsSchema.optional(),
+}).refine(
+  (value) => Object.keys(value).length > 0,
+  { message: 'At least one updatable field is required.', path: ['key'] },
+)
+
+const runtimeAgentIdSchema = z.object({
+  agentId: z
+    .string({ required_error: 'agentId is required' })
+    .trim()
+    .transform((value) => value.toLowerCase())
+    .refine(
+      (value) => agentIdRegex.test(value),
+      'agentId must use the stable agent-<key> format',
+    ),
+})
+
+const listRuntimeAgentsQuerySchema = z.object({
+  q: z
+    .string()
+    .trim()
+    .max(255, 'Search query must be 255 characters or fewer')
+    .optional(),
+  status: z
+    .enum(Object.values(RUNTIME_AGENT_STATUSES))
+    .optional(),
+  frameworkKey: frameworkKeySchema.optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(20),
+})
+
+export const validateCreateRuntimeAgent = createBodyValidator(createRuntimeAgentSchema)
+export const validateUpdateRuntimeAgent = createBodyValidator(updateRuntimeAgentSchema)
+export const validateRuntimeAgentId = createParamsValidator(runtimeAgentIdSchema)
+export const validateListRuntimeAgents = createQueryValidator(listRuntimeAgentsQuerySchema)
