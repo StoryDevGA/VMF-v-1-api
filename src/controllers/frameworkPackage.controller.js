@@ -1,0 +1,538 @@
+import mongoose from 'mongoose'
+import { isDeepStrictEqual } from 'node:util'
+import FrameworkPackage, { FRAMEWORK_PACKAGE_STATUSES } from '../models/FrameworkPackage.js'
+import auditService from '../services/auditService.js'
+
+const DUPLICATE_FRAMEWORK_PACKAGE_MESSAGE = 'Framework key and version must be unique.'
+const FRAMEWORK_PACKAGE_NOT_FOUND_MESSAGE = 'Framework package not found.'
+const ACTIVE_DEFAULT_CONFLICT_MESSAGE = 'Only one active default package is allowed per framework.'
+const ACTIVATION_REQUIRES_VALIDATED_MESSAGE = 'Only validated framework packages can be activated.'
+const ACTIVATION_ENDPOINT_REQUIRED_MESSAGE = 'Use the activation endpoint to mark a framework package active.'
+const ACTIVE_PACKAGE_STATUS_CHANGE_MESSAGE =
+  'Active framework packages cannot change lifecycle in place. Activate another validated package instead.'
+
+const toIdString = (value) => {
+  if (!value) return null
+  if (typeof value === 'string') return value
+  if (typeof value === 'number') return String(value)
+  if (typeof value === 'object') {
+    if (value?._bsontype === 'ObjectId' || value?.constructor?.name === 'ObjectId') {
+      return typeof value.toString === 'function' ? value.toString() : String(value)
+    }
+    if (typeof value.id === 'string' && value.id.trim()) return value.id
+    if (typeof value._id === 'string' && value._id.trim()) return value._id
+    if (value._id && typeof value._id.toString === 'function') return value._id.toString()
+  }
+  if (typeof value.toString === 'function') return value.toString()
+  return String(value)
+}
+
+const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+const cloneAuditValue = (value) => {
+  if (value === undefined) return value
+  if (value === null) return null
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return value
+  }
+  return JSON.parse(JSON.stringify(value))
+}
+
+const buildActorSummary = (req) => {
+  const actor = req.scopes?.user
+  const id = toIdString(actor?.id || actor?._id || req.context?.userId || req.userId)
+
+  if (!id) return null
+
+  return {
+    id,
+    ...(actor?.name ? { name: actor.name } : {}),
+    ...(actor?.email ? { email: actor.email } : {}),
+  }
+}
+
+const serializeUserSummary = (value) => {
+  if (!value) return null
+
+  if (typeof value === 'string') {
+    return { id: value }
+  }
+
+  const id = toIdString(value.id || value._id || value)
+  if (!id) return null
+
+  return {
+    id,
+    ...(value.name ? { name: value.name } : {}),
+    ...(value.email ? { email: value.email } : {}),
+  }
+}
+
+const serializeFrameworkPackage = (frameworkPackage, { fallbackUpdatedBy = null } = {}) => {
+  const plain = typeof frameworkPackage?.toJSON === 'function'
+    ? frameworkPackage.toJSON()
+    : { ...frameworkPackage }
+
+  if (!plain.id && plain._id) {
+    plain.id = toIdString(plain._id)
+  }
+
+  delete plain._id
+  delete plain.__v
+
+  const serializedUpdatedBy = serializeUserSummary(plain.updatedBy)
+  plain.createdBy = serializeUserSummary(plain.createdBy)
+  plain.updatedBy =
+    (serializedUpdatedBy?.name || serializedUpdatedBy?.email)
+      ? serializedUpdatedBy
+      : (fallbackUpdatedBy || serializedUpdatedBy)
+  plain.activatedBy = serializeUserSummary(plain.activatedBy)
+
+  return plain
+}
+
+const buildFrameworkPackageLabel = (frameworkPackage) =>
+  `${frameworkPackage.frameworkKey} ${frameworkPackage.version}`
+
+const isDuplicateFrameworkPackageVersionError = (err) =>
+  err?.code === 11000
+  && err?.keyPattern?.frameworkKey
+  && err?.keyPattern?.version
+
+const isActiveDefaultConflictError = (err) =>
+  err?.code === 11000
+  && err?.keyPattern?.frameworkKey
+  && (err?.keyPattern?.status || err?.keyPattern?.isDefault)
+
+const sendConflict = (res, req, message, details = {}) =>
+  res.status(409).json({
+    error: {
+      code: 'CONFLICT',
+      message,
+      ...(Object.keys(details).length > 0 ? { details } : {}),
+      requestId: req.requestId,
+    },
+  })
+
+const populateFrameworkPackage = async (frameworkPackage) => {
+  if (!frameworkPackage || typeof frameworkPackage.populate !== 'function') {
+    return frameworkPackage
+  }
+
+  await frameworkPackage.populate([
+    { path: 'createdBy', select: 'name email' },
+    { path: 'updatedBy', select: 'name email' },
+    { path: 'activatedBy', select: 'name email' },
+  ])
+
+  return frameworkPackage
+}
+
+const applySession = (queryOrPromise, session) =>
+  queryOrPromise && typeof queryOrPromise.session === 'function'
+    ? queryOrPromise.session(session)
+    : queryOrPromise
+
+const buildListFilter = ({ q, status, frameworkKey }) => {
+  const filter = {}
+
+  if (status) {
+    filter.status = status
+  }
+
+  if (frameworkKey) {
+    filter.frameworkKey = frameworkKey
+  }
+
+  if (q) {
+    const regex = new RegExp(escapeRegex(q), 'i')
+    filter.$or = [
+      { frameworkKey: regex },
+      { frameworkName: regex },
+      { version: regex },
+      { description: regex },
+      { status: regex },
+      { compatibleWorkflowKeys: regex },
+      { defaultAgentIds: regex },
+      { requiredSkillIds: regex },
+      { 'validationRules.requiredSections': regex },
+      { 'validationRules.publishChecks': regex },
+    ]
+  }
+
+  return filter
+}
+
+export const listFrameworkPackages = async (req, res, next) => {
+  try {
+    const pageNum = Math.max(1, Number(req.query.page) || 1)
+    const limit = Math.min(100, Math.max(1, Number(req.query.pageSize) || 20))
+    const filter = buildListFilter(req.query)
+    const total = await FrameworkPackage.countDocuments(filter)
+    const totalPages = Math.max(1, Math.ceil(total / limit))
+    const normalizedPage = Math.min(pageNum, totalPages)
+    const skip = (normalizedPage - 1) * limit
+
+    const items = await FrameworkPackage.find(filter)
+      .sort({ frameworkKey: 1, isDefault: -1, updatedAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .populate('createdBy', 'name email')
+      .populate('updatedBy', 'name email')
+      .populate('activatedBy', 'name email')
+      .lean()
+
+    return res.status(200).json({
+      data: items.map((item) => serializeFrameworkPackage(item)),
+      meta: {
+        page: normalizedPage,
+        pageSize: limit,
+        total,
+        totalPages,
+        requestId: req.requestId,
+        version: 'v1',
+      },
+    })
+  } catch (err) {
+    next(err)
+  }
+}
+
+export const createFrameworkPackage = async (req, res, next) => {
+  try {
+    const existingPackage = await FrameworkPackage.findOne({
+      frameworkKey: req.body.frameworkKey,
+      version: req.body.version,
+    }).select('_id')
+
+    if (existingPackage) {
+      return sendConflict(res, req, DUPLICATE_FRAMEWORK_PACKAGE_MESSAGE, {
+        field: 'version',
+        reason: 'FRAMEWORK_PACKAGE_VERSION_CONFLICT',
+      })
+    }
+
+    const actorUserId = req.context?.userId || req.userId
+    const frameworkPackage = new FrameworkPackage({
+      ...req.body,
+      isDefault: false,
+      createdBy: actorUserId,
+      updatedBy: actorUserId,
+    })
+
+    await frameworkPackage.save()
+    await populateFrameworkPackage(frameworkPackage)
+
+    const serializedPackage = serializeFrameworkPackage(frameworkPackage, {
+      fallbackUpdatedBy: buildActorSummary(req),
+    })
+
+    await auditService.logFromRequest(req, {
+      action: auditService.AUDIT_ACTIONS.FRAMEWORK_PACKAGE_CREATED,
+      resourceType: auditService.RESOURCE_TYPES.FrameworkPackage,
+      resourceId: frameworkPackage._id,
+      scope: {},
+      display: { resourceLabel: buildFrameworkPackageLabel(frameworkPackage) },
+      diff: {
+        frameworkKey: frameworkPackage.frameworkKey,
+        frameworkName: frameworkPackage.frameworkName,
+        version: frameworkPackage.version,
+        description: frameworkPackage.description,
+        status: frameworkPackage.status,
+        isDefault: frameworkPackage.isDefault,
+        compatibleWorkflowKeys: frameworkPackage.compatibleWorkflowKeys,
+        defaultAgentIds: frameworkPackage.defaultAgentIds,
+        requiredSkillIds: frameworkPackage.requiredSkillIds,
+        capabilities: frameworkPackage.capabilities,
+        validationRules: frameworkPackage.validationRules,
+      },
+    })
+
+    return res.status(201).json({
+      data: serializedPackage,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (isDuplicateFrameworkPackageVersionError(err)) {
+      return sendConflict(res, req, DUPLICATE_FRAMEWORK_PACKAGE_MESSAGE, {
+        field: 'version',
+        reason: 'FRAMEWORK_PACKAGE_VERSION_CONFLICT',
+      })
+    }
+
+    if (isActiveDefaultConflictError(err)) {
+      return sendConflict(res, req, ACTIVE_DEFAULT_CONFLICT_MESSAGE, {
+        field: 'status',
+        reason: 'FRAMEWORK_PACKAGE_ACTIVE_DEFAULT_CONFLICT',
+      })
+    }
+
+    if (err?.name === 'ValidationError') {
+      return res.status(422).json({
+        error: {
+          code: 'VALIDATION_FAILED',
+          message: err.message,
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    next(err)
+  }
+}
+
+export const getFrameworkPackage = async (req, res, next) => {
+  try {
+    const frameworkPackage = await FrameworkPackage.findById(req.params.packageId)
+
+    if (!frameworkPackage) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: FRAMEWORK_PACKAGE_NOT_FOUND_MESSAGE,
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    await populateFrameworkPackage(frameworkPackage)
+
+    return res.status(200).json({
+      data: serializeFrameworkPackage(frameworkPackage),
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    next(err)
+  }
+}
+
+export const updateFrameworkPackage = async (req, res, next) => {
+  try {
+    const frameworkPackage = await FrameworkPackage.findById(req.params.packageId)
+
+    if (!frameworkPackage) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: FRAMEWORK_PACKAGE_NOT_FOUND_MESSAGE,
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    const nextFrameworkKey = req.body.frameworkKey ?? frameworkPackage.frameworkKey
+    const nextVersion = req.body.version ?? frameworkPackage.version
+    const nextStatus = req.body.status ?? frameworkPackage.status
+
+    const duplicatePackage = await FrameworkPackage.findOne({
+      _id: { $ne: frameworkPackage._id },
+      frameworkKey: nextFrameworkKey,
+      version: nextVersion,
+    }).select('_id')
+
+    if (duplicatePackage) {
+      return sendConflict(res, req, DUPLICATE_FRAMEWORK_PACKAGE_MESSAGE, {
+        field: 'version',
+        reason: 'FRAMEWORK_PACKAGE_VERSION_CONFLICT',
+      })
+    }
+
+    if (frameworkPackage.status !== FRAMEWORK_PACKAGE_STATUSES.ACTIVE && nextStatus === FRAMEWORK_PACKAGE_STATUSES.ACTIVE) {
+      return sendConflict(res, req, ACTIVATION_ENDPOINT_REQUIRED_MESSAGE, {
+        field: 'status',
+        reason: 'FRAMEWORK_PACKAGE_USE_ACTIVATE_ENDPOINT',
+      })
+    }
+
+    if (frameworkPackage.status === FRAMEWORK_PACKAGE_STATUSES.ACTIVE && nextStatus !== FRAMEWORK_PACKAGE_STATUSES.ACTIVE) {
+      return sendConflict(res, req, ACTIVE_PACKAGE_STATUS_CHANGE_MESSAGE, {
+        field: 'status',
+        reason: 'FRAMEWORK_PACKAGE_ACTIVE_STATUS_LOCKED',
+      })
+    }
+
+    const diff = {}
+    const fields = [
+      'frameworkKey',
+      'frameworkName',
+      'version',
+      'description',
+      'status',
+      'compatibleWorkflowKeys',
+      'defaultAgentIds',
+      'requiredSkillIds',
+      'capabilities',
+      'validationRules',
+    ]
+
+    for (const field of fields) {
+      if (req.body[field] === undefined) continue
+
+      const previousValue = cloneAuditValue(frameworkPackage[field])
+      const nextValue = cloneAuditValue(req.body[field])
+
+      if (isDeepStrictEqual(previousValue, nextValue)) {
+        continue
+      }
+
+      diff[field] = {
+        from: previousValue,
+        to: nextValue,
+      }
+      frameworkPackage[field] = req.body[field]
+    }
+
+    frameworkPackage.updatedBy = req.context?.userId || req.userId
+    await frameworkPackage.save()
+    await populateFrameworkPackage(frameworkPackage)
+
+    if (Object.keys(diff).length > 0) {
+      await auditService.logFromRequest(req, {
+        action: auditService.AUDIT_ACTIONS.FRAMEWORK_PACKAGE_UPDATED,
+        resourceType: auditService.RESOURCE_TYPES.FrameworkPackage,
+        resourceId: frameworkPackage._id,
+        scope: {},
+        display: { resourceLabel: buildFrameworkPackageLabel(frameworkPackage) },
+        diff,
+      })
+    }
+
+    return res.status(200).json({
+      data: serializeFrameworkPackage(frameworkPackage, {
+        fallbackUpdatedBy: buildActorSummary(req),
+      }),
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (isDuplicateFrameworkPackageVersionError(err)) {
+      return sendConflict(res, req, DUPLICATE_FRAMEWORK_PACKAGE_MESSAGE, {
+        field: 'version',
+        reason: 'FRAMEWORK_PACKAGE_VERSION_CONFLICT',
+      })
+    }
+
+    if (isActiveDefaultConflictError(err)) {
+      return sendConflict(res, req, ACTIVE_DEFAULT_CONFLICT_MESSAGE, {
+        field: 'status',
+        reason: 'FRAMEWORK_PACKAGE_ACTIVE_DEFAULT_CONFLICT',
+      })
+    }
+
+    if (err?.name === 'ValidationError') {
+      return res.status(422).json({
+        error: {
+          code: 'VALIDATION_FAILED',
+          message: err.message,
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    next(err)
+  }
+}
+
+export const activateFrameworkPackage = async (req, res, next) => {
+  const session = await mongoose.startSession()
+  try {
+    const frameworkPackage = await FrameworkPackage.findById(req.params.packageId)
+
+    if (!frameworkPackage) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: FRAMEWORK_PACKAGE_NOT_FOUND_MESSAGE,
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    if (frameworkPackage.status !== FRAMEWORK_PACKAGE_STATUSES.VALIDATED) {
+      return sendConflict(res, req, ACTIVATION_REQUIRES_VALIDATED_MESSAGE, {
+        field: 'status',
+        reason: 'FRAMEWORK_PACKAGE_ACTIVATION_REQUIRES_VALIDATED',
+      })
+    }
+
+    const actorUserId = req.context?.userId || req.userId
+    const previousActivePackageIds = []
+
+    await session.withTransaction(async () => {
+      const activationTime = new Date()
+      const relatedPackages = await applySession(
+        FrameworkPackage.find({
+          frameworkKey: frameworkPackage.frameworkKey,
+          _id: { $ne: frameworkPackage._id },
+          $or: [
+            { status: FRAMEWORK_PACKAGE_STATUSES.ACTIVE },
+            { isDefault: true },
+          ],
+        }),
+        session,
+      )
+
+      for (const relatedPackage of relatedPackages) {
+        if (relatedPackage.status === FRAMEWORK_PACKAGE_STATUSES.ACTIVE) {
+          previousActivePackageIds.push(toIdString(relatedPackage._id))
+          relatedPackage.status = FRAMEWORK_PACKAGE_STATUSES.VALIDATED
+        }
+
+        relatedPackage.isDefault = false
+        relatedPackage.updatedBy = actorUserId
+        relatedPackage.updatedAt = activationTime
+        await relatedPackage.save({ session })
+      }
+
+      frameworkPackage.status = FRAMEWORK_PACKAGE_STATUSES.ACTIVE
+      frameworkPackage.isDefault = true
+      frameworkPackage.updatedBy = actorUserId
+      frameworkPackage.activatedAt = activationTime
+      frameworkPackage.activatedBy = actorUserId
+      await frameworkPackage.save({ session })
+    })
+
+    await populateFrameworkPackage(frameworkPackage)
+
+    await auditService.logFromRequest(req, {
+      action: auditService.AUDIT_ACTIONS.FRAMEWORK_PACKAGE_ACTIVATED,
+      resourceType: auditService.RESOURCE_TYPES.FrameworkPackage,
+      resourceId: frameworkPackage._id,
+      scope: {},
+      display: { resourceLabel: buildFrameworkPackageLabel(frameworkPackage) },
+      diff: {
+        frameworkKey: frameworkPackage.frameworkKey,
+        version: frameworkPackage.version,
+        previousActivePackageIds,
+        activatedAt: frameworkPackage.activatedAt,
+      },
+    })
+
+    return res.status(200).json({
+      data: serializeFrameworkPackage(frameworkPackage, {
+        fallbackUpdatedBy: buildActorSummary(req),
+      }),
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (isActiveDefaultConflictError(err)) {
+      return sendConflict(res, req, ACTIVE_DEFAULT_CONFLICT_MESSAGE, {
+        field: 'status',
+        reason: 'FRAMEWORK_PACKAGE_ACTIVE_DEFAULT_CONFLICT',
+      })
+    }
+
+    if (err?.name === 'ValidationError') {
+      return res.status(422).json({
+        error: {
+          code: 'VALIDATION_FAILED',
+          message: err.message,
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    next(err)
+  } finally {
+    await session.endSession()
+  }
+}

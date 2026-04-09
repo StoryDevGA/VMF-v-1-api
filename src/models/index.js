@@ -10,6 +10,7 @@ import DataDeletionRequest from './DataDeletionRequest.js'
 import Invitation from './Invitation.js'
 import SystemVersioningPolicy from './SystemVersioningPolicy.js'
 import LicenseLevel from './LicenseLevel.js'
+import FrameworkPackage from './FrameworkPackage.js'
 
 // Export all models
 export {
@@ -24,6 +25,7 @@ export {
   Invitation,
   SystemVersioningPolicy,
   LicenseLevel,
+  FrameworkPackage,
 }
 
 // Default export with all models
@@ -39,4 +41,5 @@ export default {
   Invitation,
   SystemVersioningPolicy,
   LicenseLevel,
+  FrameworkPackage,
 }

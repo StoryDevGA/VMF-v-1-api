@@ -73,6 +73,9 @@ export const AUDIT_ACTIONS = Object.freeze({
   SYSTEM_VERSIONING_POLICY_UPDATED: 'SYSTEM_VERSIONING_POLICY_UPDATED',
   GOVERNANCE_OVERRIDE_APPLIED: 'GOVERNANCE_OVERRIDE_APPLIED',
   GOVERNANCE_OVERRIDE_DENIED: 'GOVERNANCE_OVERRIDE_DENIED',
+  FRAMEWORK_PACKAGE_CREATED: 'FRAMEWORK_PACKAGE_CREATED',
+  FRAMEWORK_PACKAGE_UPDATED: 'FRAMEWORK_PACKAGE_UPDATED',
+  FRAMEWORK_PACKAGE_ACTIVATED: 'FRAMEWORK_PACKAGE_ACTIVATED',
   // Super Admin - Access denied
   ACCESS_DENIED: 'ACCESS_DENIED',
   // Super Admin - Invitations
@@ -105,6 +108,7 @@ export const RESOURCE_TYPES = Object.freeze({
   Deal: 'Deal',
   Invitation: 'Invitation',
   SystemVersioningPolicy: 'SystemVersioningPolicy',
+  FrameworkPackage: 'FrameworkPackage',
   AuditLog: 'AuditLog',
   LicenseLevel: 'LicenseLevel',
   Role: 'Role',
