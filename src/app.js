@@ -18,6 +18,7 @@ import systemVersioningPolicyRoutes from './routes/systemVersioningPolicy.routes
 import frameworkPackageRoutes from './routes/frameworkPackages.routes.js'
 import runtimeAgentRoutes from './routes/runtimeAgents.routes.js'
 import runtimeSkillRoutes from './routes/runtimeSkills.routes.js'
+import workflowPolicyRoutes from './routes/workflowPolicies.routes.js'
 import superAdminAuditRoutes from './routes/superAdminAudit.routes.js'
 import licenseLevelRoutes from './routes/licenseLevels.routes.js'
 import roleRoutes from './routes/roles.routes.js'
@@ -95,6 +96,7 @@ app.use('/api/v1/super-admin/system-versioning-policy', systemVersioningPolicyRo
 app.use('/api/v1/super-admin/runtime-control/framework-packages', frameworkPackageRoutes)
 app.use('/api/v1/super-admin/runtime-control/agents', runtimeAgentRoutes)
 app.use('/api/v1/super-admin/runtime-control/skills', runtimeSkillRoutes)
+app.use('/api/v1/super-admin/runtime-control/workflow-policies', workflowPolicyRoutes)
 app.use('/api/v1/super-admin/denied-access-logs', superAdminAuditRoutes)
 if (env.governanceLicenseLevelsEnabled) {
   app.use('/api/v1/super-admin/licence-levels', licenseLevelRoutes)

@@ -13,6 +13,7 @@ import LicenseLevel from './LicenseLevel.js'
 import FrameworkPackage from './FrameworkPackage.js'
 import RuntimeAgent from './RuntimeAgent.js'
 import RuntimeSkill from './RuntimeSkill.js'
+import WorkflowPolicy from './WorkflowPolicy.js'
 
 // Export all models
 export {
@@ -30,6 +31,7 @@ export {
   FrameworkPackage,
   RuntimeAgent,
   RuntimeSkill,
+  WorkflowPolicy,
 }
 
 // Default export with all models
@@ -48,4 +50,5 @@ export default {
   FrameworkPackage,
   RuntimeAgent,
   RuntimeSkill,
+  WorkflowPolicy,
 }
