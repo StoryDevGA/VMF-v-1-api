@@ -60,6 +60,8 @@ const VMF_ID = '807f1f77bcf86cd799439055'
 const VMF_ID_2 = '807f1f77bcf86cd799439066'
 const DEAL_ID = '907f1f77bcf86cd799439077'
 const POLICY_ID = '917f1f77bcf86cd799439088'
+const FRAMEWORK_PACKAGE_ID = '927f1f77bcf86cd799439099'
+const FRAMEWORK_PACKAGE_ID_2 = '927f1f77bcf86cd799439100'
 
 /* ------------------------------------------------------------------ */
 /*  Factories                                                         */
@@ -216,6 +218,7 @@ const makeFakeVmf = (overrides = {}) => ({
   description: 'Default VMF description',
   status: 'ACTIVE',
   lifecycleStatus: 'DRAFT',
+  frameworkPackageId: null,
   frameworkVersion: '2.2',
   versionPolicyId: POLICY_ID,
   deletedAt: null,
@@ -230,6 +233,7 @@ const makeFakeVmf = (overrides = {}) => ({
       description: this.description,
       status: this.status,
       lifecycleStatus: this.lifecycleStatus,
+      frameworkPackageId: this.frameworkPackageId,
       frameworkVersion: this.frameworkVersion,
       versionPolicyId: this.versionPolicyId,
       deletedAt: this.deletedAt,
@@ -248,6 +252,30 @@ const makeActivePolicy = (overrides = {}) => ({
     frameworkVersion: '2.2',
   },
   isActive: true,
+  ...overrides,
+})
+
+const makeFrameworkPackage = (overrides = {}) => ({
+  _id: FRAMEWORK_PACKAGE_ID,
+  id: FRAMEWORK_PACKAGE_ID,
+  frameworkKey: 'VMF',
+  frameworkName: 'Value Management Framework',
+  version: '2.3.1',
+  status: 'ACTIVE',
+  isDefault: true,
+  compatibleWorkflowKeys: ['vmf-publish'],
+  defaultAgentIds: ['agent-validator'],
+  requiredSkillIds: ['skill-snapshot'],
+  capabilities: {
+    supportsPreviewMode: true,
+    supportsFullReport: true,
+    requiresValidationBeforePublish: true,
+  },
+  validationRules: {
+    requiredSections: ['overview'],
+    publishChecks: ['validation-pass'],
+  },
+  updatedAt: '2026-04-09T12:00:00.000Z',
   ...overrides,
 })
 
@@ -288,7 +316,7 @@ const makeFakeDeal = (overrides = {}) => ({
 /* ------------------------------------------------------------------ */
 
 let app, request, tokenService, performanceCacheService
-let User, Customer, Tenant, VMF, Deal, AuditLog, SystemVersioningPolicy, Role
+let User, Customer, Tenant, VMF, Deal, AuditLog, SystemVersioningPolicy, Role, FrameworkPackage
 
 beforeAll(async () => {
   const supertest = (await import('supertest')).default
@@ -306,6 +334,7 @@ beforeAll(async () => {
   AuditLog = models.AuditLog
   SystemVersioningPolicy = models.SystemVersioningPolicy
   Role = models.Role
+  FrameworkPackage = models.FrameworkPackage
 })
 
 const makeDefaultRoleDefinitions = () => ([
@@ -373,6 +402,9 @@ beforeEach(() => {
   VMF.countByTenant = jest.fn()
   VMF.deleteOne = jest.fn(async () => ({ deletedCount: 1 }))
   SystemVersioningPolicy.findActive = jest.fn().mockResolvedValue(null)
+  FrameworkPackage.findById = jest.fn().mockResolvedValue(null)
+  FrameworkPackage.find = jest.fn().mockResolvedValue([])
+  FrameworkPackage.findActiveByFrameworkKey = jest.fn().mockResolvedValue(null)
   Deal.findById = jest.fn()
   Deal.find = jest.fn()
   Deal.countDocuments = jest.fn()
@@ -425,6 +457,23 @@ describe('VMF Validators', () => {
       expect(res.status).toBe(422)
       expect(res.body.error.code).toBe('VALIDATION_FAILED')
     })
+
+    test('returns 422 when frameworkPackageId is not a valid ObjectId', async () => {
+      const token = await getSuperAdminToken()
+      Tenant.findById.mockResolvedValue(makeFakeTenant())
+      VMF.countByTenant.mockResolvedValue(0)
+
+      const res = await request
+        .post(`/api/v1/customers/${CUSTOMER_ID}/tenants/${TENANT_ID}/vmfs`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          name: 'New VMF',
+          frameworkPackageId: 'not-an-object-id',
+        })
+
+      expect(res.status).toBe(422)
+      expect(res.body.error.details.frameworkPackageId).toBe('frameworkPackageId must be a valid ObjectId')
+    })
   })
 
   describe('PATCH /api/v1/vmfs/:vmfId — validation', () => {
@@ -462,6 +511,19 @@ describe('VMF Validators', () => {
         .patch(`/api/v1/vmfs/${VMF_ID}`)
         .set('Authorization', `Bearer ${token}`)
         .send({ lifecycleStatus: 'READY' })
+
+      expect(res.status).toBe(422)
+      expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    })
+
+    test('returns 422 when runtime-control fields are sent to PATCH /vmfs/:vmfId', async () => {
+      const token = await getSuperAdminToken()
+      VMF.findById.mockResolvedValue(makeFakeVmf())
+
+      const res = await request
+        .patch(`/api/v1/vmfs/${VMF_ID}`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ frameworkPackageId: FRAMEWORK_PACKAGE_ID })
 
       expect(res.status).toBe(422)
       expect(res.body.error.code).toBe('VALIDATION_FAILED')
@@ -615,6 +677,95 @@ describe('GET /api/v1/customers/:customerId/tenants/:tenantId/vmfs', () => {
       isAtCapacity: false,
       countMode: 'ACTIVE',
     })
+  })
+
+  test('includes bound framework package metadata and runtime-status fields', async () => {
+    const token = await getSuperAdminToken()
+    Tenant.findById.mockResolvedValue(makeFakeTenant())
+    VMF.countByTenant.mockResolvedValue(0)
+
+    const frameworkPackage = makeFrameworkPackage()
+    const vmfs = [
+      makeFakeVmf({
+        frameworkPackageId: FRAMEWORK_PACKAGE_ID,
+        frameworkVersion: '2.3.1',
+        versionPolicyId: null,
+      }),
+    ]
+
+    VMF.find.mockReturnValue({
+      sort: jest.fn().mockReturnValue({
+        skip: jest.fn().mockReturnValue({
+          limit: jest.fn().mockReturnValue({
+            lean: jest.fn().mockResolvedValue(vmfs),
+          }),
+        }),
+      }),
+    })
+    VMF.countDocuments.mockResolvedValue(1)
+    FrameworkPackage.find.mockResolvedValue([frameworkPackage])
+    FrameworkPackage.findActiveByFrameworkKey.mockResolvedValue(frameworkPackage)
+
+    const res = await request
+      .get(`/api/v1/customers/${CUSTOMER_ID}/tenants/${TENANT_ID}/vmfs`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data[0].frameworkPackageId).toBe(FRAMEWORK_PACKAGE_ID)
+    expect(res.body.data[0].frameworkPackage.version).toBe('2.3.1')
+    expect(res.body.data[0].snapshotStatus).toBe('PACKAGE_BOUND')
+    expect(res.body.data[0].completionState).toBe('NOT_TRACKED')
+    expect(res.body.data[0].validationStatus).toBe('NOT_RUN')
+    expect(res.body.data[0].lockStatus).toBe('UNLOCKED')
+    expect(res.body.data[0].migrationAvailable).toBe(false)
+  })
+
+  test('resolves legacy frameworkVersion rows to package metadata and flags migration availability', async () => {
+    const token = await getSuperAdminToken()
+    Tenant.findById.mockResolvedValue(makeFakeTenant())
+    VMF.countByTenant.mockResolvedValue(0)
+
+    const resolvedFrameworkPackage = makeFrameworkPackage({
+      _id: FRAMEWORK_PACKAGE_ID_2,
+      id: FRAMEWORK_PACKAGE_ID_2,
+      version: '2.2',
+      isDefault: false,
+    })
+    const activeFrameworkPackage = makeFrameworkPackage({
+      _id: FRAMEWORK_PACKAGE_ID,
+      id: FRAMEWORK_PACKAGE_ID,
+      version: '2.3.1',
+      isDefault: true,
+    })
+
+    VMF.find.mockReturnValue({
+      sort: jest.fn().mockReturnValue({
+        skip: jest.fn().mockReturnValue({
+          limit: jest.fn().mockReturnValue({
+            lean: jest.fn().mockResolvedValue([
+              makeFakeVmf({
+                frameworkPackageId: null,
+                frameworkVersion: '2.2',
+                versionPolicyId: POLICY_ID,
+              }),
+            ]),
+          }),
+        }),
+      }),
+    })
+    VMF.countDocuments.mockResolvedValue(1)
+    FrameworkPackage.find.mockResolvedValue([resolvedFrameworkPackage])
+    FrameworkPackage.findActiveByFrameworkKey.mockResolvedValue(activeFrameworkPackage)
+
+    const res = await request
+      .get(`/api/v1/customers/${CUSTOMER_ID}/tenants/${TENANT_ID}/vmfs`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data[0].frameworkPackageId).toBe(FRAMEWORK_PACKAGE_ID_2)
+    expect(res.body.data[0].frameworkPackage.version).toBe('2.2')
+    expect(res.body.data[0].snapshotStatus).toBe('PACKAGE_INFERRED_FROM_VERSION')
+    expect(res.body.data[0].migrationAvailable).toBe(true)
   })
 
   test('returns VMF list for Tenant Admin', async () => {
@@ -790,11 +941,16 @@ describe('GET /api/v1/customers/:customerId/tenants/:tenantId/vmfs', () => {
 /* ================================================================== */
 
 describe('POST /api/v1/customers/:customerId/tenants/:tenantId/vmfs', () => {
-  test('creates VMF successfully', async () => {
+  test('creates VMF against the active framework package by default', async () => {
     const token = await getSuperAdminToken()
     Tenant.findById.mockResolvedValue(makeFakeTenant())
     VMF.countByTenant.mockResolvedValue(0) // topologyGuard allows
-    SystemVersioningPolicy.findActive.mockResolvedValue(makeActivePolicy())
+    FrameworkPackage.findActiveByFrameworkKey.mockResolvedValue(makeFrameworkPackage())
+    SystemVersioningPolicy.findActive.mockResolvedValue(
+      makeActivePolicy({
+        rules: { frameworkVersion: '2.3.1' },
+      }),
+    )
 
     const origSave = VMF.prototype.save
     VMF.prototype.save = jest.fn(async function () {
@@ -816,11 +972,99 @@ describe('POST /api/v1/customers/:customerId/tenants/:tenantId/vmfs', () => {
     expect(res.body.data.name).toBe('New VMF')
     expect(res.body.data.description).toBe('Lifecycle-ready VMF')
     expect(res.body.data.lifecycleStatus).toBe('DRAFT')
-    expect(res.body.data.frameworkVersion).toBe('2.2')
+    expect(res.body.data.frameworkPackageId).toBe(FRAMEWORK_PACKAGE_ID)
+    expect(res.body.data.frameworkVersion).toBe('2.3.1')
     expect(res.body.data.versionPolicyId).toBe(POLICY_ID)
+    expect(res.body.data.frameworkPackage.version).toBe('2.3.1')
+    expect(res.body.data.snapshotStatus).toBe('PACKAGE_BOUND')
     expect(AuditLog.createLog).toHaveBeenCalled()
 
     VMF.prototype.save = origSave
+  })
+
+  test('falls back to the legacy system versioning snapshot when no active framework package exists', async () => {
+    const token = await getSuperAdminToken()
+    Tenant.findById.mockResolvedValue(makeFakeTenant())
+    VMF.countByTenant.mockResolvedValue(0)
+    SystemVersioningPolicy.findActive.mockResolvedValue(makeActivePolicy())
+
+    const origSave = VMF.prototype.save
+    VMF.prototype.save = jest.fn(async function () {
+      this._id = VMF_ID
+      this.id = VMF_ID
+      return this
+    })
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/tenants/${TENANT_ID}/vmfs`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        name: 'Legacy Snapshot VMF',
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data.frameworkPackageId).toBeNull()
+    expect(res.body.data.frameworkVersion).toBe('2.2')
+    expect(res.body.data.versionPolicyId).toBe(POLICY_ID)
+    expect(res.body.data.snapshotStatus).toBe('LEGACY_POLICY_ONLY')
+
+    VMF.prototype.save = origSave
+  })
+
+  test('accepts an explicit frameworkPackageId when it references an active VMF package', async () => {
+    const token = await getSuperAdminToken()
+    Tenant.findById.mockResolvedValue(makeFakeTenant())
+    VMF.countByTenant.mockResolvedValue(0)
+    FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackage())
+    SystemVersioningPolicy.findActive.mockResolvedValue(
+      makeActivePolicy({
+        rules: { frameworkVersion: '2.3.1' },
+      }),
+    )
+
+    const origSave = VMF.prototype.save
+    VMF.prototype.save = jest.fn(async function () {
+      this._id = VMF_ID
+      this.id = VMF_ID
+      return this
+    })
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/tenants/${TENANT_ID}/vmfs`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        name: 'Explicit Package VMF',
+        frameworkPackageId: FRAMEWORK_PACKAGE_ID,
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data.frameworkPackageId).toBe(FRAMEWORK_PACKAGE_ID)
+    expect(res.body.data.frameworkVersion).toBe('2.3.1')
+    expect(res.body.data.snapshotStatus).toBe('PACKAGE_BOUND')
+
+    VMF.prototype.save = origSave
+  })
+
+  test('returns 422 when frameworkPackageId targets a non-VMF package', async () => {
+    const token = await getSuperAdminToken()
+    Tenant.findById.mockResolvedValue(makeFakeTenant())
+    VMF.countByTenant.mockResolvedValue(0)
+    FrameworkPackage.findById.mockResolvedValue(
+      makeFrameworkPackage({
+        frameworkKey: 'RLD',
+      }),
+    )
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/tenants/${TENANT_ID}/vmfs`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        name: 'Wrong Framework VMF',
+        frameworkPackageId: FRAMEWORK_PACKAGE_ID,
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.frameworkPackageId).toBe('Framework package must target the VMF framework.')
   })
 
   test('returns 403 for a regular user without VMF_CREATE permission', async () => {
@@ -1031,9 +1275,17 @@ describe('POST /api/v1/customers/:customerId/tenants/:tenantId/vmfs', () => {
 /* ================================================================== */
 
 describe('GET /api/v1/vmfs/:vmfId', () => {
-  test('returns VMF for Super Admin', async () => {
+  test('returns VMF for Super Admin with bound package metadata', async () => {
     const token = await getSuperAdminToken()
-    VMF.findById.mockResolvedValue(makeFakeVmf())
+    VMF.findById.mockResolvedValue(
+      makeFakeVmf({
+        frameworkPackageId: FRAMEWORK_PACKAGE_ID,
+        frameworkVersion: '2.3.1',
+        versionPolicyId: null,
+      }),
+    )
+    FrameworkPackage.find.mockResolvedValue([makeFrameworkPackage()])
+    FrameworkPackage.findActiveByFrameworkKey.mockResolvedValue(makeFrameworkPackage())
 
     const res = await request
       .get(`/api/v1/vmfs/${VMF_ID}`)
@@ -1041,6 +1293,38 @@ describe('GET /api/v1/vmfs/:vmfId', () => {
 
     expect(res.status).toBe(200)
     expect(res.body.data.name).toBe('VMF 1')
+    expect(res.body.data.frameworkPackageId).toBe(FRAMEWORK_PACKAGE_ID)
+    expect(res.body.data.frameworkPackage.version).toBe('2.3.1')
+    expect(res.body.data.snapshotStatus).toBe('PACKAGE_BOUND')
+  })
+
+  test('returns legacy VMF detail with inferred package metadata and migration availability', async () => {
+    const token = await getSuperAdminToken()
+    VMF.findById.mockResolvedValue(
+      makeFakeVmf({
+        frameworkPackageId: null,
+        frameworkVersion: '2.2',
+        versionPolicyId: POLICY_ID,
+      }),
+    )
+    FrameworkPackage.find.mockResolvedValue([
+      makeFrameworkPackage({
+        _id: FRAMEWORK_PACKAGE_ID_2,
+        id: FRAMEWORK_PACKAGE_ID_2,
+        version: '2.2',
+        isDefault: false,
+      }),
+    ])
+    FrameworkPackage.findActiveByFrameworkKey.mockResolvedValue(makeFrameworkPackage())
+
+    const res = await request
+      .get(`/api/v1/vmfs/${VMF_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.frameworkPackageId).toBe(FRAMEWORK_PACKAGE_ID_2)
+    expect(res.body.data.snapshotStatus).toBe('PACKAGE_INFERRED_FROM_VERSION')
+    expect(res.body.data.migrationAvailable).toBe(true)
   })
 
   test('returns 404 when VMF does not exist', async () => {

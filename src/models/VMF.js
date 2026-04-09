@@ -43,6 +43,11 @@ const vmfSchema = new mongoose.Schema({
     maxlength: 100,
     default: null,
   },
+  frameworkPackageId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'FrameworkPackage',
+    default: null,
+  },
   versionPolicyId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'SystemVersioningPolicy',
@@ -87,6 +92,7 @@ vmfSchema.index({ customerId: 1, tenantId: 1, createdAt: -1 })
 vmfSchema.index({ customerId: 1, tenantId: 1, deletedAt: 1, createdAt: -1 })
 vmfSchema.index({ purgeAfter: 1, deletedAt: 1 })
 vmfSchema.index({ createdBy: 1 })
+vmfSchema.index({ frameworkPackageId: 1 })
 
 // Static methods
 vmfSchema.statics.findByTenant = function(tenantId, status = null, options = {}) {

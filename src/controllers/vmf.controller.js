@@ -15,7 +15,15 @@
  *     DELETE /api/v1/vmfs/:vmfId/grants/:userId   Revoke user access
  */
 
-import { Customer, Tenant, VMF, Deal, User, SystemVersioningPolicy } from '../models/index.js'
+import {
+  Customer,
+  Tenant,
+  VMF,
+  Deal,
+  User,
+  SystemVersioningPolicy,
+  FrameworkPackage,
+} from '../models/index.js'
 import auditService from '../services/auditService.js'
 import customerGovernanceService from '../services/customerGovernanceService.js'
 import logger from '../config/logger.js'
@@ -36,6 +44,94 @@ const VMF_LIFECYCLE_TRANSITIONS = Object.freeze({
   DRAFT: ['DRAFT', 'CANONISED'],
   CANONISED: ['CANONISED', 'PUBLISHED'],
   PUBLISHED: ['PUBLISHED'],
+})
+
+const VMF_FRAMEWORK_KEY = 'VMF'
+
+const VMF_RUNTIME_STATUSES = Object.freeze({
+  COMPLETION_STATE: 'NOT_TRACKED',
+  VALIDATION_STATUS_DEFAULT: 'NOT_RUN',
+  VALIDATION_STATUS_NOT_REQUIRED: 'NOT_REQUIRED',
+  LOCK_STATUS: 'UNLOCKED',
+  SNAPSHOT_PACKAGE_BOUND: 'PACKAGE_BOUND',
+  SNAPSHOT_PACKAGE_INFERRED_FROM_VERSION: 'PACKAGE_INFERRED_FROM_VERSION',
+  SNAPSHOT_LEGACY_POLICY_ONLY: 'LEGACY_POLICY_ONLY',
+  SNAPSHOT_UNBOUND: 'UNBOUND',
+})
+
+const toIdString = (value) => {
+  if (!value) return null
+  if (typeof value === 'string') return value
+  if (typeof value === 'number') return String(value)
+  if (typeof value === 'object') {
+    if (typeof value.id === 'string' && value.id.trim()) return value.id
+    if (typeof value._id === 'string' && value._id.trim()) return value._id
+    if (value._id && typeof value._id.toString === 'function') return value._id.toString()
+  }
+  if (typeof value.toString === 'function') return value.toString()
+  return String(value)
+}
+
+const normalizeVmfRecord = (vmf) => {
+  const plain = typeof vmf?.toJSON === 'function'
+    ? vmf.toJSON()
+    : { ...vmf }
+
+  if (!plain.id && plain._id) {
+    plain.id = toIdString(plain._id)
+  }
+
+  if (plain.frameworkPackageId) {
+    plain.frameworkPackageId = toIdString(plain.frameworkPackageId)
+  }
+
+  if (plain.versionPolicyId) {
+    plain.versionPolicyId = toIdString(plain.versionPolicyId)
+  }
+
+  return plain
+}
+
+const serializeFrameworkPackageSummary = (frameworkPackage) => {
+  if (!frameworkPackage) return null
+
+  const plain = typeof frameworkPackage?.toJSON === 'function'
+    ? frameworkPackage.toJSON()
+    : { ...frameworkPackage }
+
+  return {
+    id: toIdString(plain.id || plain._id),
+    frameworkKey: plain.frameworkKey,
+    frameworkName: plain.frameworkName,
+    version: plain.version,
+    status: plain.status,
+    isDefault: plain.isDefault,
+    compatibleWorkflowKeys: plain.compatibleWorkflowKeys || [],
+    defaultAgentIds: plain.defaultAgentIds || [],
+    requiredSkillIds: plain.requiredSkillIds || [],
+    capabilities: plain.capabilities || {},
+    validationRules: plain.validationRules || {
+      requiredSections: [],
+      publishChecks: [],
+    },
+    updatedAt: plain.updatedAt || null,
+  }
+}
+
+const resolveValidationStatus = (frameworkPackage) =>
+  frameworkPackage?.capabilities?.requiresValidationBeforePublish === false
+    ? VMF_RUNTIME_STATUSES.VALIDATION_STATUS_NOT_REQUIRED
+    : VMF_RUNTIME_STATUSES.VALIDATION_STATUS_DEFAULT
+
+const buildFrameworkPackageValidationError = (message) => ({
+  status: 422,
+  error: {
+    code: 'VALIDATION_FAILED',
+    message: 'Request validation failed.',
+    details: {
+      frameworkPackageId: message,
+    },
+  },
 })
 
 const resolveFrameworkVersionFromPolicy = (policy) => {
@@ -59,34 +155,204 @@ const resolveFrameworkVersionFromPolicy = (policy) => {
   return null
 }
 
-const resolveVmfVersionSnapshot = async () => {
+const resolveActiveVersioningPolicy = async () => {
   if (typeof SystemVersioningPolicy.findActive !== 'function') {
-    return {
-      frameworkVersion: null,
-      versionPolicyId: null,
-    }
+    return null
   }
 
   try {
-    const activePolicy = await SystemVersioningPolicy.findActive()
-    if (!activePolicy) {
-      return {
-        frameworkVersion: null,
-        versionPolicyId: null,
-      }
-    }
-
-    return {
-      frameworkVersion: resolveFrameworkVersionFromPolicy(activePolicy),
-      versionPolicyId: activePolicy._id,
-    }
+    return await SystemVersioningPolicy.findActive()
   } catch (err) {
     logger.warn({ err }, 'vmf.controller - failed to resolve active versioning policy')
+    return null
+  }
+}
+
+const resolveVmfVersionSnapshot = async () => {
+  const activePolicy = await resolveActiveVersioningPolicy()
+  if (!activePolicy) {
     return {
       frameworkVersion: null,
       versionPolicyId: null,
     }
   }
+
+  return {
+    frameworkVersion: resolveFrameworkVersionFromPolicy(activePolicy),
+    versionPolicyId: activePolicy._id,
+  }
+}
+
+const resolveActiveFrameworkPackage = async () => {
+  if (typeof FrameworkPackage.findActiveByFrameworkKey !== 'function') {
+    return null
+  }
+
+  try {
+    return await FrameworkPackage.findActiveByFrameworkKey(VMF_FRAMEWORK_KEY)
+  } catch (err) {
+    logger.warn({ err }, 'vmf.controller - failed to resolve active framework package')
+    return null
+  }
+}
+
+const resolveAlignedVersionPolicyId = async (frameworkVersion) => {
+  if (!frameworkVersion) return null
+
+  const activePolicy = await resolveActiveVersioningPolicy()
+  if (!activePolicy) return null
+
+  const policyFrameworkVersion = resolveFrameworkVersionFromPolicy(activePolicy)
+  return policyFrameworkVersion === frameworkVersion
+    ? activePolicy._id
+    : null
+}
+
+const resolveVmfCreateBinding = async ({ frameworkPackageId = null } = {}) => {
+  if (frameworkPackageId) {
+    const frameworkPackage = await FrameworkPackage.findById(frameworkPackageId)
+
+    if (!frameworkPackage) {
+      throw buildFrameworkPackageValidationError('Framework package was not found.')
+    }
+
+    if (frameworkPackage.frameworkKey !== VMF_FRAMEWORK_KEY) {
+      throw buildFrameworkPackageValidationError('Framework package must target the VMF framework.')
+    }
+
+    if (frameworkPackage.status !== 'ACTIVE') {
+      throw buildFrameworkPackageValidationError('Framework package must be active before it can be assigned.')
+    }
+
+    return {
+      frameworkPackage,
+      frameworkPackageId: frameworkPackage._id,
+      frameworkVersion: frameworkPackage.version,
+      versionPolicyId: await resolveAlignedVersionPolicyId(frameworkPackage.version),
+      snapshotStatus: VMF_RUNTIME_STATUSES.SNAPSHOT_PACKAGE_BOUND,
+    }
+  }
+
+  const activeFrameworkPackage = await resolveActiveFrameworkPackage()
+  if (activeFrameworkPackage) {
+    return {
+      frameworkPackage: activeFrameworkPackage,
+      frameworkPackageId: activeFrameworkPackage._id,
+      frameworkVersion: activeFrameworkPackage.version,
+      versionPolicyId: await resolveAlignedVersionPolicyId(activeFrameworkPackage.version),
+      snapshotStatus: VMF_RUNTIME_STATUSES.SNAPSHOT_PACKAGE_BOUND,
+    }
+  }
+
+  const legacySnapshot = await resolveVmfVersionSnapshot()
+  return {
+    frameworkPackage: null,
+    frameworkPackageId: null,
+    frameworkVersion: legacySnapshot.frameworkVersion,
+    versionPolicyId: legacySnapshot.versionPolicyId,
+    snapshotStatus: legacySnapshot.versionPolicyId
+      ? VMF_RUNTIME_STATUSES.SNAPSHOT_LEGACY_POLICY_ONLY
+      : VMF_RUNTIME_STATUSES.SNAPSHOT_UNBOUND,
+  }
+}
+
+const decorateVmfRecord = ({
+  vmf,
+  frameworkPackage = null,
+  activeFrameworkPackage = null,
+  snapshotStatus = VMF_RUNTIME_STATUSES.SNAPSHOT_UNBOUND,
+}) => {
+  const plain = normalizeVmfRecord(vmf)
+  const serializedFrameworkPackage = serializeFrameworkPackageSummary(frameworkPackage)
+  const resolvedFrameworkPackageId =
+    serializedFrameworkPackage?.id
+    || plain.frameworkPackageId
+    || null
+  const activeFrameworkPackageId = toIdString(activeFrameworkPackage?._id || activeFrameworkPackage?.id)
+
+  return {
+    ...plain,
+    frameworkVersion: plain.frameworkVersion || serializedFrameworkPackage?.version || null,
+    frameworkPackageId: resolvedFrameworkPackageId,
+    frameworkPackage: serializedFrameworkPackage,
+    completionState: VMF_RUNTIME_STATUSES.COMPLETION_STATE,
+    validationStatus: resolveValidationStatus(frameworkPackage),
+    lockStatus: VMF_RUNTIME_STATUSES.LOCK_STATUS,
+    snapshotStatus,
+    migrationAvailable: Boolean(
+      activeFrameworkPackageId
+      && (!resolvedFrameworkPackageId || resolvedFrameworkPackageId !== activeFrameworkPackageId),
+    ),
+  }
+}
+
+const enrichVmfsWithRuntimeMetadata = async (vmfs = []) => {
+  if (!Array.isArray(vmfs) || vmfs.length === 0) {
+    return []
+  }
+
+  const normalizedVmfs = vmfs.map(normalizeVmfRecord)
+  const directPackageIds = [...new Set(
+    normalizedVmfs
+      .map((vmf) => vmf.frameworkPackageId)
+      .filter(Boolean),
+  )]
+  const frameworkVersions = [...new Set(
+    normalizedVmfs
+      .map((vmf) => vmf.frameworkVersion)
+      .filter(Boolean),
+  )]
+
+  const [frameworkPackages, activeFrameworkPackage] = await Promise.all([
+    (directPackageIds.length > 0 || frameworkVersions.length > 0)
+      ? FrameworkPackage.find({
+        $or: [
+          ...(directPackageIds.length > 0 ? [{ _id: { $in: directPackageIds } }] : []),
+          ...(frameworkVersions.length > 0
+            ? [{ frameworkKey: VMF_FRAMEWORK_KEY, version: { $in: frameworkVersions } }]
+            : []),
+        ],
+      })
+      : [],
+    resolveActiveFrameworkPackage(),
+  ])
+
+  const frameworkPackagesById = new Map()
+  const frameworkPackagesByVersion = new Map()
+
+  for (const frameworkPackage of frameworkPackages || []) {
+    const packageId = toIdString(frameworkPackage?._id || frameworkPackage?.id)
+    if (packageId) {
+      frameworkPackagesById.set(packageId, frameworkPackage)
+    }
+
+    if (frameworkPackage?.frameworkKey === VMF_FRAMEWORK_KEY && frameworkPackage?.version) {
+      frameworkPackagesByVersion.set(frameworkPackage.version, frameworkPackage)
+    }
+  }
+
+  return normalizedVmfs.map((vmf) => {
+    const directFrameworkPackage = vmf.frameworkPackageId
+      ? frameworkPackagesById.get(vmf.frameworkPackageId)
+      : null
+    const resolvedFrameworkPackage = directFrameworkPackage || frameworkPackagesByVersion.get(vmf.frameworkVersion) || null
+
+    let snapshotStatus = VMF_RUNTIME_STATUSES.SNAPSHOT_UNBOUND
+    if (directFrameworkPackage) {
+      snapshotStatus = VMF_RUNTIME_STATUSES.SNAPSHOT_PACKAGE_BOUND
+    } else if (resolvedFrameworkPackage) {
+      snapshotStatus = VMF_RUNTIME_STATUSES.SNAPSHOT_PACKAGE_INFERRED_FROM_VERSION
+    } else if (vmf.versionPolicyId) {
+      snapshotStatus = VMF_RUNTIME_STATUSES.SNAPSHOT_LEGACY_POLICY_ONLY
+    }
+
+    return decorateVmfRecord({
+      vmf,
+      frameworkPackage: resolvedFrameworkPackage,
+      activeFrameworkPackage,
+      snapshotStatus,
+    })
+  })
 }
 
 const isLifecycleTransitionAllowed = (from, to) =>
@@ -152,8 +418,10 @@ export const listVmfs = async (req, res, next) => {
       VMF.countByTenant(tenantId, 'ACTIVE'),
     ])
 
+    const decoratedVmfs = await enrichVmfsWithRuntimeMetadata(vmfs)
+
     return res.status(200).json({
-      data: vmfs,
+      data: decoratedVmfs,
       meta: {
         page: pageNum,
         pageSize: limit,
@@ -228,7 +496,15 @@ export const createVmf = async (req, res, next) => {
       currentVmfCount,
     })
 
-    const { frameworkVersion, versionPolicyId } = await resolveVmfVersionSnapshot()
+    const {
+      frameworkPackage,
+      frameworkPackageId,
+      frameworkVersion,
+      versionPolicyId,
+      snapshotStatus,
+    } = await resolveVmfCreateBinding({
+      frameworkPackageId: req.body.frameworkPackageId,
+    })
 
     const vmf = new VMF({
       customerId,
@@ -237,6 +513,7 @@ export const createVmf = async (req, res, next) => {
       description: req.body.description || '',
       status: 'ACTIVE',
       lifecycleStatus: 'DRAFT',
+      frameworkPackageId,
       frameworkVersion,
       versionPolicyId,
       createdBy: actorUserId,
@@ -253,8 +530,10 @@ export const createVmf = async (req, res, next) => {
         name: req.body.name,
         description: vmf.description,
         lifecycleStatus: vmf.lifecycleStatus,
+        frameworkPackageId: vmf.frameworkPackageId,
         frameworkVersion: vmf.frameworkVersion,
         versionPolicyId: vmf.versionPolicyId,
+        snapshotStatus,
       },
     })
 
@@ -264,7 +543,12 @@ export const createVmf = async (req, res, next) => {
     )
 
     return res.status(201).json({
-      data: vmf.toJSON(),
+      data: decorateVmfRecord({
+        vmf,
+        frameworkPackage,
+        activeFrameworkPackage: frameworkPackage,
+        snapshotStatus,
+      }),
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
@@ -297,6 +581,15 @@ export const createVmf = async (req, res, next) => {
         error: {
           code: 'CONFLICT',
           message: err.message,
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    if (err?.status && err?.error) {
+      return res.status(err.status).json({
+        error: {
+          ...err.error,
           requestId: req.requestId,
         },
       })
@@ -336,8 +629,10 @@ export const getVmf = async (req, res, next) => {
       })
     }
 
+    const [decoratedVmf] = await enrichVmfsWithRuntimeMetadata([vmf])
+
     return res.status(200).json({
-      data: vmf.toJSON ? vmf.toJSON() : vmf,
+      data: decoratedVmf,
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
@@ -426,8 +721,10 @@ export const updateVmf = async (req, res, next) => {
       diff,
     })
 
+    const [decoratedVmf] = await enrichVmfsWithRuntimeMetadata([vmf])
+
     return res.status(200).json({
-      data: vmf.toJSON(),
+      data: decoratedVmf,
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {

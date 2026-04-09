@@ -32,6 +32,10 @@ const createVmfSchema = z.object({
     .trim()
     .max(1000, 'Description must be 1000 characters or fewer')
     .optional(),
+  frameworkPackageId: z
+    .string()
+    .regex(objectIdRegex, 'frameworkPackageId must be a valid ObjectId')
+    .optional(),
 })
 
 const updateVmfSchema = z.object({
@@ -56,7 +60,7 @@ const updateVmfSchema = z.object({
       invalid_type_error: 'lifecycleStatus must be DRAFT, CANONISED, or PUBLISHED',
     })
     .optional(),
-}).refine(
+}).strict().refine(
   (data) => Object.keys(data).length > 0,
   { message: 'At least one field must be provided' },
 )
