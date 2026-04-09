@@ -352,6 +352,24 @@ const buildAuditSummary = ({ action, resourceType, resourceId, diff, display }) 
       return clampSummary(`${actorLabel} updated deal ${targetLabel}`)
     case AUDIT_ACTIONS.DEAL_ARCHIVED:
       return clampSummary(`${actorLabel} archived deal ${targetLabel}`)
+    case AUDIT_ACTIONS.FRAMEWORK_PACKAGE_CREATED:
+      return clampSummary(`${actorLabel} created framework package ${targetLabel}`)
+    case AUDIT_ACTIONS.FRAMEWORK_PACKAGE_UPDATED:
+      return clampSummary(`${actorLabel} updated framework package ${targetLabel}`)
+    case AUDIT_ACTIONS.FRAMEWORK_PACKAGE_ACTIVATED:
+      return clampSummary(`${actorLabel} activated framework package ${targetLabel}`)
+    case AUDIT_ACTIONS.RUNTIME_AGENT_CREATED:
+      return clampSummary(`${actorLabel} created runtime agent ${targetLabel}`)
+    case AUDIT_ACTIONS.RUNTIME_AGENT_UPDATED:
+      return clampSummary(`${actorLabel} updated runtime agent ${targetLabel}`)
+    case AUDIT_ACTIONS.RUNTIME_SKILL_CREATED:
+      return clampSummary(`${actorLabel} created runtime skill ${targetLabel}`)
+    case AUDIT_ACTIONS.RUNTIME_SKILL_UPDATED:
+      return clampSummary(`${actorLabel} updated runtime skill ${targetLabel}`)
+    case AUDIT_ACTIONS.WORKFLOW_POLICY_CREATED:
+      return clampSummary(`${actorLabel} created workflow policy ${targetLabel}`)
+    case AUDIT_ACTIONS.WORKFLOW_POLICY_UPDATED:
+      return clampSummary(`${actorLabel} updated workflow policy ${targetLabel}`)
     default:
       return clampSummary(`${actorLabel} performed ${humanizeAuditAction(action).toLowerCase()} on ${targetLabel}`)
   }

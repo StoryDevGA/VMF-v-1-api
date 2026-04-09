@@ -14,6 +14,7 @@ const SUPER_ADMIN_ID = '507f1f77bcf86cd799439011'
 const NON_ADMIN_ID = '507f1f77bcf86cd799439012'
 const WORKFLOW_POLICY_DB_ID = '607f1f77bcf86cd799439051'
 const WORKFLOW_POLICY_STABLE_ID = 'policy-vmf-publish'
+const STEP_UP_TOKEN = 'step-up-token'
 
 const makeFakeUser = (overrides = {}) => ({
   _id: SUPER_ADMIN_ID,
@@ -91,6 +92,7 @@ let WorkflowPolicy
 let RuntimeAgent
 let RuntimeSkill
 let AuditLog
+let mockRedisClient
 let originalWorkflowPolicySave
 let originalWorkflowPolicyPopulate
 
@@ -187,7 +189,7 @@ const makeWorkflowPolicyDoc = (overrides = {}) => {
 }
 
 beforeAll(async () => {
-  const mockRedisClient = {
+  mockRedisClient = {
     set: jest.fn(),
     setex: jest.fn(),
     get: jest.fn(),
@@ -266,6 +268,10 @@ beforeEach(() => {
   RuntimeSkill.find.mockReturnValue(buildRegistryLookupChain([]))
 
   AuditLog.createLog = jest.fn(async () => ({}))
+  mockRedisClient.set.mockResolvedValue('OK')
+  mockRedisClient.setex.mockResolvedValue('OK')
+  mockRedisClient.get.mockResolvedValue('1')
+  mockRedisClient.del.mockResolvedValue(1)
 })
 
 describe('Workflow Policy Routes', () => {
@@ -291,6 +297,30 @@ describe('Workflow Policy Routes', () => {
 
     expect(res.status).toBe(403)
     expect(res.body.error.code).toBe('FORBIDDEN')
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/workflow-policies returns 403 when step-up token is missing', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/workflow-policies')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        key: 'vmf-review',
+        name: 'VMF Review Policy',
+        frameworkKeys: ['VMF'],
+        orderedSteps: ['snapshot', 'review', 'approve'],
+        requiredAgentIds: ['agent-validator'],
+        requiredSkillIds: ['skill-snapshot'],
+      })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('STEP_UP_REQUIRED')
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'ACCESS_DENIED',
+      resourceType: 'User',
+      requestId: res.body.error.requestId,
+    }))
   })
 
   test('GET /api/v1/super-admin/runtime-control/workflow-policies returns paginated rows with framework filtering', async () => {
@@ -349,6 +379,7 @@ describe('Workflow Policy Routes', () => {
     const res = await request
       .post('/api/v1/super-admin/runtime-control/workflow-policies')
       .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', STEP_UP_TOKEN)
       .send({
         key: 'Bad Key',
         name: '',
@@ -372,6 +403,7 @@ describe('Workflow Policy Routes', () => {
     const res = await request
       .post('/api/v1/super-admin/runtime-control/workflow-policies')
       .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', STEP_UP_TOKEN)
       .send({
         key: 'vmf-publish',
         name: 'VMF Publish Policy',
@@ -403,6 +435,7 @@ describe('Workflow Policy Routes', () => {
     const res = await request
       .post('/api/v1/super-admin/runtime-control/workflow-policies')
       .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', STEP_UP_TOKEN)
       .send({
         key: 'vmf-review',
         name: 'VMF Review Policy',
@@ -432,6 +465,7 @@ describe('Workflow Policy Routes', () => {
     const res = await request
       .post('/api/v1/super-admin/runtime-control/workflow-policies')
       .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', STEP_UP_TOKEN)
       .send({
         key: 'vmf-report',
         name: 'VMF Report Policy',
@@ -460,6 +494,7 @@ describe('Workflow Policy Routes', () => {
     const res = await request
       .post('/api/v1/super-admin/runtime-control/workflow-policies')
       .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', STEP_UP_TOKEN)
       .send({
         key: 'vmf-out-of-order',
         name: 'VMF Out Of Order Policy',
@@ -489,6 +524,7 @@ describe('Workflow Policy Routes', () => {
     const res = await request
       .post('/api/v1/super-admin/runtime-control/workflow-policies')
       .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', STEP_UP_TOKEN)
       .send({
         key: 'vmf-review',
         name: 'VMF Review Policy',
@@ -513,11 +549,12 @@ describe('Workflow Policy Routes', () => {
       requiredSkillIds: ['skill-snapshot', 'skill-review'],
       gatingRules: ['framework-package-active'],
     })
-    expect(AuditLog.createLog).toHaveBeenCalledTimes(1)
     expect(AuditLog.createLog).toHaveBeenCalledWith(
       expect.objectContaining({
         action: 'WORKFLOW_POLICY_CREATED',
         resourceType: 'WorkflowPolicy',
+        scope: { frameworkKeys: ['VMF'] },
+        summary: 'Super Admin created workflow policy VMF Review Policy (vmf-review)',
       }),
     )
   })
@@ -560,6 +597,7 @@ describe('Workflow Policy Routes', () => {
     const res = await request
       .patch(`/api/v1/super-admin/runtime-control/workflow-policies/${WORKFLOW_POLICY_STABLE_ID}`)
       .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', STEP_UP_TOKEN)
       .send({
         name: 'VMF Approval Policy',
         orderedSteps: ['snapshot', 'review', 'approve'],
@@ -578,11 +616,12 @@ describe('Workflow Policy Routes', () => {
       requiredSkillIds: ['skill-snapshot', 'skill-review'],
       gatingRules: ['framework-package-active'],
     })
-    expect(AuditLog.createLog).toHaveBeenCalledTimes(1)
     expect(AuditLog.createLog).toHaveBeenCalledWith(
       expect.objectContaining({
         action: 'WORKFLOW_POLICY_UPDATED',
         resourceType: 'WorkflowPolicy',
+        scope: { frameworkKeys: ['VMF'] },
+        summary: 'Super Admin updated workflow policy VMF Approval Policy (vmf-publish)',
       }),
     )
   })

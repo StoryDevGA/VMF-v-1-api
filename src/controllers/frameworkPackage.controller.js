@@ -231,7 +231,9 @@ export const createFrameworkPackage = async (req, res, next) => {
       action: auditService.AUDIT_ACTIONS.FRAMEWORK_PACKAGE_CREATED,
       resourceType: auditService.RESOURCE_TYPES.FrameworkPackage,
       resourceId: frameworkPackage._id,
-      scope: {},
+      scope: {
+        frameworkKey: frameworkPackage.frameworkKey,
+      },
       display: { resourceLabel: buildFrameworkPackageLabel(frameworkPackage) },
       diff: {
         frameworkKey: frameworkPackage.frameworkKey,
@@ -245,6 +247,7 @@ export const createFrameworkPackage = async (req, res, next) => {
         requiredSkillIds: frameworkPackage.requiredSkillIds,
         capabilities: frameworkPackage.capabilities,
         validationRules: frameworkPackage.validationRules,
+        stepUpVerified: true,
       },
     })
 
@@ -387,11 +390,14 @@ export const updateFrameworkPackage = async (req, res, next) => {
     await populateFrameworkPackage(frameworkPackage)
 
     if (Object.keys(diff).length > 0) {
+      diff.stepUpVerified = true
       await auditService.logFromRequest(req, {
         action: auditService.AUDIT_ACTIONS.FRAMEWORK_PACKAGE_UPDATED,
         resourceType: auditService.RESOURCE_TYPES.FrameworkPackage,
         resourceId: frameworkPackage._id,
-        scope: {},
+        scope: {
+          frameworkKey: frameworkPackage.frameworkKey,
+        },
         display: { resourceLabel: buildFrameworkPackageLabel(frameworkPackage) },
         diff,
       })
@@ -497,13 +503,16 @@ export const activateFrameworkPackage = async (req, res, next) => {
       action: auditService.AUDIT_ACTIONS.FRAMEWORK_PACKAGE_ACTIVATED,
       resourceType: auditService.RESOURCE_TYPES.FrameworkPackage,
       resourceId: frameworkPackage._id,
-      scope: {},
+      scope: {
+        frameworkKey: frameworkPackage.frameworkKey,
+      },
       display: { resourceLabel: buildFrameworkPackageLabel(frameworkPackage) },
       diff: {
         frameworkKey: frameworkPackage.frameworkKey,
         version: frameworkPackage.version,
         previousActivePackageIds,
         activatedAt: frameworkPackage.activatedAt,
+        stepUpVerified: true,
       },
     })
 

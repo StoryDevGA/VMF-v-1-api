@@ -368,7 +368,9 @@ export const createWorkflowPolicy = async (req, res, next) => {
       action: auditService.AUDIT_ACTIONS.WORKFLOW_POLICY_CREATED,
       resourceType: auditService.RESOURCE_TYPES.WorkflowPolicy,
       resourceId: workflowPolicy._id,
-      scope: {},
+      scope: {
+        frameworkKeys: workflowPolicy.frameworkKeys,
+      },
       display: { resourceLabel: buildWorkflowPolicyLabel(workflowPolicy) },
       diff: {
         id: workflowPolicy.stableId,
@@ -381,6 +383,7 @@ export const createWorkflowPolicy = async (req, res, next) => {
         requiredAgentIds: workflowPolicy.requiredAgentIds,
         requiredSkillIds: workflowPolicy.requiredSkillIds,
         gatingRules: workflowPolicy.gatingRules,
+        stepUpVerified: true,
       },
     })
 
@@ -514,11 +517,14 @@ export const updateWorkflowPolicy = async (req, res, next) => {
     await populateWorkflowPolicy(workflowPolicy)
 
     if (Object.keys(diff).length > 0) {
+      diff.stepUpVerified = true
       await auditService.logFromRequest(req, {
         action: auditService.AUDIT_ACTIONS.WORKFLOW_POLICY_UPDATED,
         resourceType: auditService.RESOURCE_TYPES.WorkflowPolicy,
         resourceId: workflowPolicy._id,
-        scope: {},
+        scope: {
+          frameworkKeys: workflowPolicy.frameworkKeys,
+        },
         display: { resourceLabel: buildWorkflowPolicyLabel(workflowPolicy) },
         diff,
       })

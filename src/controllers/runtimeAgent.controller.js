@@ -209,7 +209,9 @@ export const createRuntimeAgent = async (req, res, next) => {
       action: auditService.AUDIT_ACTIONS.RUNTIME_AGENT_CREATED,
       resourceType: auditService.RESOURCE_TYPES.RuntimeAgent,
       resourceId: runtimeAgent._id,
-      scope: {},
+      scope: {
+        frameworkKeys: runtimeAgent.supportedFrameworkKeys,
+      },
       display: { resourceLabel: buildRuntimeAgentLabel(runtimeAgent) },
       diff: {
         id: runtimeAgent.stableId,
@@ -336,7 +338,9 @@ export const updateRuntimeAgent = async (req, res, next) => {
         action: auditService.AUDIT_ACTIONS.RUNTIME_AGENT_UPDATED,
         resourceType: auditService.RESOURCE_TYPES.RuntimeAgent,
         resourceId: runtimeAgent._id,
-        scope: {},
+        scope: {
+          frameworkKeys: runtimeAgent.supportedFrameworkKeys,
+        },
         display: { resourceLabel: buildRuntimeAgentLabel(runtimeAgent) },
         diff,
       })

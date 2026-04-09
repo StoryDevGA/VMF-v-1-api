@@ -208,7 +208,9 @@ export const createRuntimeSkill = async (req, res, next) => {
       action: auditService.AUDIT_ACTIONS.RUNTIME_SKILL_CREATED,
       resourceType: auditService.RESOURCE_TYPES.RuntimeSkill,
       resourceId: runtimeSkill._id,
-      scope: {},
+      scope: {
+        frameworkKeys: runtimeSkill.supportedFrameworkKeys,
+      },
       display: { resourceLabel: buildRuntimeSkillLabel(runtimeSkill) },
       diff: {
         id: runtimeSkill.stableId,
@@ -333,7 +335,9 @@ export const updateRuntimeSkill = async (req, res, next) => {
         action: auditService.AUDIT_ACTIONS.RUNTIME_SKILL_UPDATED,
         resourceType: auditService.RESOURCE_TYPES.RuntimeSkill,
         resourceId: runtimeSkill._id,
-        scope: {},
+        scope: {
+          frameworkKeys: runtimeSkill.supportedFrameworkKeys,
+        },
         display: { resourceLabel: buildRuntimeSkillLabel(runtimeSkill) },
         diff,
       })

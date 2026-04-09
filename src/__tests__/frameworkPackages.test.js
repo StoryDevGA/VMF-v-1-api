@@ -271,6 +271,65 @@ describe('Framework Package Routes', () => {
 
     expect(res.status).toBe(403)
     expect(res.body.error.code).toBe('STEP_UP_REQUIRED')
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'ACCESS_DENIED',
+      resourceType: 'User',
+      requestId: res.body.error.requestId,
+    }))
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages returns 403 when step-up token is invalid', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const originalGet = mockRedisClient.get
+    mockRedisClient.get = jest.fn().mockResolvedValue(null)
+
+    try {
+      const res = await request
+        .post('/api/v1/super-admin/runtime-control/framework-packages')
+        .set('Authorization', `Bearer ${token}`)
+        .set('X-Step-Up-Token', STEP_UP_TOKEN)
+        .send({
+          frameworkKey: 'VMF',
+          frameworkName: 'Value Management Framework',
+          version: '2.3.1',
+        })
+
+      expect(res.status).toBe(403)
+      expect(res.body.error.code).toBe('STEP_UP_INVALID')
+      expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+        action: 'ACCESS_DENIED',
+        resourceType: 'User',
+      }))
+    } finally {
+      mockRedisClient.get = originalGet
+    }
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages returns 503 when step-up verification is unavailable', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const originalRedisClient = mockRedisClient
+    mockRedisClient = null
+
+    try {
+      const res = await request
+        .post('/api/v1/super-admin/runtime-control/framework-packages')
+        .set('Authorization', `Bearer ${token}`)
+        .set('X-Step-Up-Token', STEP_UP_TOKEN)
+        .send({
+          frameworkKey: 'VMF',
+          frameworkName: 'Value Management Framework',
+          version: '2.3.1',
+        })
+
+      expect(res.status).toBe(503)
+      expect(res.body.error.code).toBe('STEP_UP_UNAVAILABLE')
+      expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+        action: 'ACCESS_DENIED',
+        resourceType: 'User',
+      }))
+    } finally {
+      mockRedisClient = originalRedisClient
+    }
   })
 
   test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 for invalid payload', async () => {
@@ -325,7 +384,12 @@ describe('Framework Package Routes', () => {
     expect(res.body.data.version).toBe('2.3.1')
     expect(res.body.data.updatedBy.id).toBe(SUPER_ADMIN_ID)
     expect(FrameworkPackage.prototype.save).toHaveBeenCalled()
-    expect(AuditLog.createLog).toHaveBeenCalled()
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'FRAMEWORK_PACKAGE_CREATED',
+      resourceType: 'FrameworkPackage',
+      scope: { frameworkKey: 'VMF' },
+      summary: 'Super Admin created framework package VMF 2.3.1',
+    }))
   })
 
   test('POST /api/v1/super-admin/runtime-control/framework-packages returns 409 for duplicate framework/version', async () => {
@@ -437,7 +501,12 @@ describe('Framework Package Routes', () => {
     expect(res.status).toBe(200)
     expect(frameworkPackage.save).toHaveBeenCalled()
     expect(res.body.data.description).toBe('Updated framework package description')
-    expect(AuditLog.createLog).toHaveBeenCalled()
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'FRAMEWORK_PACKAGE_UPDATED',
+      resourceType: 'FrameworkPackage',
+      scope: { frameworkKey: 'VMF' },
+      summary: 'Super Admin updated framework package VMF 2.3.1',
+    }))
   })
 
   test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/activate rejects non-validated packages', async () => {
@@ -484,6 +553,11 @@ describe('Framework Package Routes', () => {
     expect(frameworkPackage.status).toBe('ACTIVE')
     expect(frameworkPackage.isDefault).toBe(true)
     expect(activePackage.isDefault).toBe(false)
-    expect(AuditLog.createLog).toHaveBeenCalled()
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'FRAMEWORK_PACKAGE_ACTIVATED',
+      resourceType: 'FrameworkPackage',
+      scope: { frameworkKey: 'VMF' },
+      summary: 'Super Admin activated framework package VMF 2.3.1',
+    }))
   })
 })

@@ -1387,6 +1387,40 @@ describe('auditService.logFromRequest — Unit', () => {
     }))
   })
 
+  test('builds runtime-control summaries from resource display labels', async () => {
+    const fakeReq = {
+      context: { userId: SUPER_ADMIN_ID },
+      scopes: { platformRoles: ['SUPER_ADMIN'] },
+      ip: '10.0.0.1',
+      get: jest.fn(() => 'Test/1.0'),
+      requestId: 'req-runtime-control-summary',
+    }
+
+    await auditService.logFromRequest(fakeReq, {
+      action: 'FRAMEWORK_PACKAGE_ACTIVATED',
+      resourceType: 'FrameworkPackage',
+      resourceId: VMF_ID,
+      scope: { frameworkKey: 'VMF' },
+      display: {
+        resourceLabel: 'VMF 2.3.1',
+      },
+      diff: {
+        frameworkKey: 'VMF',
+        version: '2.3.1',
+        stepUpVerified: true,
+      },
+    })
+
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      summary: 'Super Admin activated framework package VMF 2.3.1',
+      scope: { frameworkKey: 'VMF' },
+      display: expect.objectContaining({
+        actorLabel: 'Super Admin',
+        resourceLabel: 'VMF 2.3.1',
+      }),
+    }))
+  })
+
   test('falls back to req.userId when context is missing', async () => {
     const fakeReq = {
       userId: SUPER_ADMIN_ID,
@@ -1476,6 +1510,10 @@ describe('AUDIT_ACTIONS & RESOURCE_TYPES constants', () => {
     expect(AUDIT_ACTIONS.IDENTITY_PLUS_REGISTRATION_COMPLETE).toBe(
       'IDENTITY_PLUS_REGISTRATION_COMPLETE',
     )
+    expect(AUDIT_ACTIONS.FRAMEWORK_PACKAGE_ACTIVATED).toBe('FRAMEWORK_PACKAGE_ACTIVATED')
+    expect(AUDIT_ACTIONS.RUNTIME_AGENT_UPDATED).toBe('RUNTIME_AGENT_UPDATED')
+    expect(AUDIT_ACTIONS.RUNTIME_SKILL_UPDATED).toBe('RUNTIME_SKILL_UPDATED')
+    expect(AUDIT_ACTIONS.WORKFLOW_POLICY_UPDATED).toBe('WORKFLOW_POLICY_UPDATED')
   })
 
   test('AUDIT_ACTIONS is frozen', () => {
@@ -1489,6 +1527,10 @@ describe('AUDIT_ACTIONS & RESOURCE_TYPES constants', () => {
     expect(RESOURCE_TYPES.User).toBe('User')
     expect(RESOURCE_TYPES.VMF).toBe('VMF')
     expect(RESOURCE_TYPES.Deal).toBe('Deal')
+    expect(RESOURCE_TYPES.FrameworkPackage).toBe('FrameworkPackage')
+    expect(RESOURCE_TYPES.RuntimeAgent).toBe('RuntimeAgent')
+    expect(RESOURCE_TYPES.RuntimeSkill).toBe('RuntimeSkill')
+    expect(RESOURCE_TYPES.WorkflowPolicy).toBe('WorkflowPolicy')
   })
 
   test('RESOURCE_TYPES is frozen', () => {

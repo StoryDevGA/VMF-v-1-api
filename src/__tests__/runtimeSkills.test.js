@@ -336,6 +336,8 @@ describe('Runtime Skill Routes', () => {
       expect.objectContaining({
         action: 'RUNTIME_SKILL_CREATED',
         resourceType: 'RuntimeSkill',
+        scope: { frameworkKeys: ['VMF', 'RLD'] },
+        summary: 'Super Admin created runtime skill Summary (summary)',
       }),
     )
   })
@@ -391,6 +393,8 @@ describe('Runtime Skill Routes', () => {
       expect.objectContaining({
         action: 'RUNTIME_SKILL_UPDATED',
         resourceType: 'RuntimeSkill',
+        scope: { frameworkKeys: ['VMF'] },
+        summary: 'Super Admin updated runtime skill Runtime Snapshot (snapshot)',
       }),
     )
   })

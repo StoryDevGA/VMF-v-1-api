@@ -343,6 +343,8 @@ describe('Runtime Agent Routes', () => {
       expect.objectContaining({
         action: 'RUNTIME_AGENT_CREATED',
         resourceType: 'RuntimeAgent',
+        scope: { frameworkKeys: ['VMF', 'RLD'] },
+        summary: 'Super Admin created runtime agent Planner (planner)',
       }),
     )
   })
@@ -398,6 +400,8 @@ describe('Runtime Agent Routes', () => {
       expect.objectContaining({
         action: 'RUNTIME_AGENT_UPDATED',
         resourceType: 'RuntimeAgent',
+        scope: { frameworkKeys: ['VMF'] },
+        summary: 'Super Admin updated runtime agent Validation Guard (validator)',
       }),
     )
   })
