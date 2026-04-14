@@ -216,6 +216,12 @@ beforeEach(() => {
       supportedWorkflowKeys: ['rld-baseline', 'rld-publish'],
       status: 'ACTIVE',
     },
+    {
+      frameworkKey: 'CMF',
+      name: 'Customer Messaging Framework',
+      supportedWorkflowKeys: ['cmf-baseline'],
+      status: 'INACTIVE',
+    },
   ]))
 
   AuditLog.createLog = jest.fn(async () => ({}))
@@ -312,6 +318,24 @@ describe('Runtime Agent Routes', () => {
     expect(res.body.error.details.supportedFrameworkKeys).toBe('At least one supported framework key is required.')
   })
 
+  test('POST /api/v1/super-admin/runtime-control/agents returns 422 when contracts are not JSON objects', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/agents')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        key: 'contract-check',
+        name: 'Contract Check',
+        supportedFrameworkKeys: ['VMF'],
+        inputContract: [],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(String(res.body.error.details.inputContract || '')).toMatch(/expected|object|record/i)
+  })
+
   test('POST /api/v1/super-admin/runtime-control/agents returns 409 when the key already exists', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     mockFindOneSelect({ _id: RUNTIME_AGENT_DB_ID })
@@ -356,6 +380,26 @@ describe('Runtime Agent Routes', () => {
     expect(res.body.error.details.supportedFrameworkKeys).toBe('Unknown framework key "QMF".')
   })
 
+  test('POST /api/v1/super-admin/runtime-control/agents rejects inactive framework keys', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/agents')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        key: 'cmf-planner',
+        name: 'CMF Planner',
+        description: 'Plans CMF workflows.',
+        status: 'ACTIVE',
+        supportedFrameworkKeys: ['CMF'],
+        defaultSkillIds: ['skill-snapshot'],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details.supportedFrameworkKeys).toBe('Inactive framework key "CMF".')
+  })
+
   test('POST /api/v1/super-admin/runtime-control/agents creates a runtime agent and writes an audit log', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     mockFindOneSelect(null)
@@ -368,8 +412,16 @@ describe('Runtime Agent Routes', () => {
         name: 'Planner',
         description: 'Coordinates planning transitions.',
         status: 'ACTIVE',
+        agentType: 'validation',
+        supportedWorkflows: ['fresh_build', 'existing_context_update'],
         supportedFrameworkKeys: ['vmf', 'RLD', 'VMF'],
         defaultSkillIds: ['skill-snapshot', 'skill-snapshot', 'skill-summary'],
+        primarySkillIds: ['skill-summary'],
+        optionalSkillIds: ['skill-snapshot'],
+        promptConfig: { base_system_prompt: 'You are governed.' },
+        inputContract: { required_inputs: ['frameworkPackage'] },
+        outputContract: { required_fields: ['execution_trace'] },
+        policies: { max_token_budget: 30000, timeout_seconds: 60 },
       })
 
     expect(res.status).toBe(201)
@@ -378,8 +430,16 @@ describe('Runtime Agent Routes', () => {
       key: 'planner',
       name: 'Planner',
       status: 'ACTIVE',
+      agentType: 'VALIDATION',
+      supportedWorkflows: ['fresh_build', 'existing_context_update'],
       supportedFrameworkKeys: ['VMF', 'RLD'],
       defaultSkillIds: ['skill-snapshot', 'skill-summary'],
+      primarySkillIds: ['skill-summary'],
+      optionalSkillIds: ['skill-snapshot'],
+      promptConfig: { base_system_prompt: 'You are governed.' },
+      inputContract: { required_inputs: ['frameworkPackage'] },
+      outputContract: { required_fields: ['execution_trace'] },
+      policies: { max_token_budget: 30000, timeout_seconds: 60 },
     })
     expect(AuditLog.createLog).toHaveBeenCalledTimes(1)
     expect(AuditLog.createLog).toHaveBeenCalledWith(
@@ -428,6 +488,9 @@ describe('Runtime Agent Routes', () => {
         name: 'Validation Guard',
         status: 'INACTIVE',
         supportedFrameworkKeys: ['VMF'],
+        supportedWorkflows: ['validate_only'],
+        primarySkillIds: ['skill-summary'],
+        promptConfig: { role_prompt: 'Validate.' },
       })
 
     expect(res.status).toBe(200)
@@ -437,6 +500,9 @@ describe('Runtime Agent Routes', () => {
       name: 'Validation Guard',
       status: 'INACTIVE',
       supportedFrameworkKeys: ['VMF'],
+      supportedWorkflows: ['validate_only'],
+      primarySkillIds: ['skill-summary'],
+      promptConfig: { role_prompt: 'Validate.' },
     })
     expect(AuditLog.createLog).toHaveBeenCalledTimes(1)
     expect(AuditLog.createLog).toHaveBeenCalledWith(
@@ -445,6 +511,219 @@ describe('Runtime Agent Routes', () => {
         resourceType: 'RuntimeAgent',
         scope: { frameworkKeys: ['VMF'] },
         summary: 'Super Admin updated runtime agent Validation Guard (validator)',
+      }),
+    )
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/agents/:agentId/validate returns 422 when validation fails', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const runtimeAgent = makeRuntimeAgentDoc({
+      supportedFrameworkKeys: ['QMF'],
+    })
+
+    RuntimeAgent.findOne.mockResolvedValue(runtimeAgent)
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/agents/${RUNTIME_AGENT_STABLE_ID}/validate`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details.supportedFrameworkKeys).toBe('Unknown framework key "QMF".')
+    expect(AuditLog.createLog).toHaveBeenCalledTimes(1)
+    expect(AuditLog.createLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'RUNTIME_AGENT_VALIDATED',
+        resourceType: 'RuntimeAgent',
+        scope: { frameworkKeys: ['QMF'] },
+      }),
+    )
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/agents/:agentId/validate returns 200 when the agent is valid', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const runtimeAgent = makeRuntimeAgentDoc()
+    RuntimeAgent.findOne.mockResolvedValue(runtimeAgent)
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/agents/${RUNTIME_AGENT_STABLE_ID}/validate`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toMatchObject({
+      valid: true,
+    })
+    expect(AuditLog.createLog).toHaveBeenCalledTimes(1)
+    expect(AuditLog.createLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'RUNTIME_AGENT_VALIDATED',
+        resourceType: 'RuntimeAgent',
+        scope: { frameworkKeys: ['VMF', 'RLD'] },
+        summary: 'Super Admin validated runtime agent Validator (validator)',
+      }),
+    )
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/agents/:agentId/test returns 422 when a framework key is not supported', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const runtimeAgent = makeRuntimeAgentDoc({
+      supportedFrameworkKeys: ['VMF'],
+      supportedWorkflows: ['validate_only'],
+    })
+
+    RuntimeAgent.findOne.mockResolvedValue(runtimeAgent)
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/agents/${RUNTIME_AGENT_STABLE_ID}/test`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ frameworkKey: 'RLD' })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details.frameworkKey).toBe('Agent does not support framework key "RLD".')
+    expect(AuditLog.createLog).toHaveBeenCalledTimes(1)
+    expect(AuditLog.createLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'RUNTIME_AGENT_TESTED',
+        resourceType: 'RuntimeAgent',
+        scope: { frameworkKeys: ['VMF'] },
+      }),
+    )
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/agents/:agentId/test returns 200 with a prompt hash and writes an audit log', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const runtimeAgent = makeRuntimeAgentDoc({
+      supportedFrameworkKeys: ['VMF', 'RLD'],
+      supportedWorkflows: ['validate_only'],
+      promptConfig: {
+        baseSystemPrompt: 'You are a governed agent.',
+        rolePrompt: 'Validate.',
+      },
+    })
+
+    RuntimeAgent.findOne.mockResolvedValue(runtimeAgent)
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/agents/${RUNTIME_AGENT_STABLE_ID}/test`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ frameworkKey: 'VMF', workflowKey: 'validate_only', input: { foo: 'bar' } })
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toEqual(
+      expect.objectContaining({
+        ok: true,
+        promptHash: expect.any(String),
+        compiledPromptPreview: expect.stringContaining('Base System Prompt'),
+      }),
+    )
+    expect(AuditLog.createLog).toHaveBeenCalledTimes(1)
+    expect(AuditLog.createLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'RUNTIME_AGENT_TESTED',
+        resourceType: 'RuntimeAgent',
+        scope: { frameworkKeys: ['VMF', 'RLD'] },
+        summary: 'Super Admin tested runtime agent Validator (validator)',
+      }),
+    )
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/agents/:agentId/activate activates the agent and writes an audit log', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const runtimeAgent = makeRuntimeAgentDoc({ status: 'INACTIVE' })
+    RuntimeAgent.findOne.mockResolvedValue(runtimeAgent)
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/agents/${RUNTIME_AGENT_STABLE_ID}/activate`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toMatchObject({
+      id: 'agent-validator',
+      status: 'ACTIVE',
+    })
+    expect(AuditLog.createLog).toHaveBeenCalledTimes(1)
+    expect(AuditLog.createLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'RUNTIME_AGENT_ACTIVATED',
+        resourceType: 'RuntimeAgent',
+        scope: { frameworkKeys: ['VMF', 'RLD'] },
+        summary: 'Super Admin activated runtime agent Validator (validator)',
+      }),
+    )
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/agents/:agentId/activate returns 422 when the agent fails validation', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const runtimeAgent = makeRuntimeAgentDoc({
+      status: 'INACTIVE',
+      supportedFrameworkKeys: ['CMF'],
+    })
+    RuntimeAgent.findOne.mockResolvedValue(runtimeAgent)
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/agents/${RUNTIME_AGENT_STABLE_ID}/activate`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.message).toBe('Agent must pass validation before activation.')
+    expect(res.body.error.details.supportedFrameworkKeys).toBe('Inactive framework key "CMF".')
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/agents/:agentId/disable disables the agent and writes an audit log', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const runtimeAgent = makeRuntimeAgentDoc({ status: 'ACTIVE' })
+    RuntimeAgent.findOne.mockResolvedValue(runtimeAgent)
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/agents/${RUNTIME_AGENT_STABLE_ID}/disable`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toMatchObject({
+      id: 'agent-validator',
+      status: 'INACTIVE',
+    })
+    expect(AuditLog.createLog).toHaveBeenCalledTimes(1)
+    expect(AuditLog.createLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'RUNTIME_AGENT_DISABLED',
+        resourceType: 'RuntimeAgent',
+        scope: { frameworkKeys: ['VMF', 'RLD'] },
+        summary: 'Super Admin disabled runtime agent Validator (validator)',
+      }),
+    )
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/agents/:agentId/deprecate deprecates the agent and writes an audit log', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const runtimeAgent = makeRuntimeAgentDoc({ status: 'ACTIVE' })
+    RuntimeAgent.findOne.mockResolvedValue(runtimeAgent)
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/agents/${RUNTIME_AGENT_STABLE_ID}/deprecate`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toMatchObject({
+      id: 'agent-validator',
+      status: 'DEPRECATED',
+    })
+    expect(AuditLog.createLog).toHaveBeenCalledTimes(1)
+    expect(AuditLog.createLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'RUNTIME_AGENT_DEPRECATED',
+        resourceType: 'RuntimeAgent',
+        scope: { frameworkKeys: ['VMF', 'RLD'] },
+        summary: 'Super Admin deprecated runtime agent Validator (validator)',
       }),
     )
   })

@@ -27,8 +27,25 @@ export const buildUnknownFrameworkKeyMessage = (missingKeys = []) => {
   return `Unknown framework keys: ${missingKeys.join(', ')}.`
 }
 
-export const resolveKnownFrameworkKeys = async (frameworkKeys = [], projection = 'frameworkKey name supportedWorkflowKeys status') => {
+export const buildInactiveFrameworkKeyMessage = (inactiveKeys = []) => {
+  if (!Array.isArray(inactiveKeys) || inactiveKeys.length === 0) {
+    return 'Inactive framework key.'
+  }
+
+  if (inactiveKeys.length === 1) {
+    return `Inactive framework key "${inactiveKeys[0]}".`
+  }
+
+  return `Inactive framework keys: ${inactiveKeys.join(', ')}.`
+}
+
+export const resolveKnownFrameworkKeys = async (
+  frameworkKeys = [],
+  projection = 'frameworkKey name supportedWorkflowKeys status',
+  options = {},
+) => {
   const normalizedKeys = normalizeFrameworkKeyList(frameworkKeys)
+  const requireActive = options?.requireActive === true
 
   if (normalizedKeys.length === 0) {
     return {
@@ -36,6 +53,7 @@ export const resolveKnownFrameworkKeys = async (frameworkKeys = [], projection =
       registryEntries: [],
       registryByKey: new Map(),
       missingKeys: [],
+      inactiveKeys: [],
     }
   }
 
@@ -50,12 +68,19 @@ export const resolveKnownFrameworkKeys = async (frameworkKeys = [], projection =
   )
 
   const missingKeys = normalizedKeys.filter((frameworkKey) => !registryByKey.has(frameworkKey))
+  const inactiveKeys = requireActive
+    ? normalizedKeys.filter((frameworkKey) => {
+        const entry = registryByKey.get(frameworkKey)
+        return entry && normalizeFrameworkKey(entry.status) !== 'ACTIVE'
+      })
+    : []
 
   return {
     normalizedKeys,
     registryEntries,
     registryByKey,
     missingKeys,
+    inactiveKeys,
   }
 }
 

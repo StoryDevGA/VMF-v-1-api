@@ -1,8 +1,10 @@
 import mongoose from 'mongoose'
 
 export const RUNTIME_AGENT_STATUSES = Object.freeze({
+  DRAFT: 'DRAFT',
   ACTIVE: 'ACTIVE',
   INACTIVE: 'INACTIVE',
+  DEPRECATED: 'DEPRECATED',
 })
 
 export const SUPPORTED_RUNTIME_FRAMEWORK_KEYS = Object.freeze([
@@ -12,6 +14,7 @@ export const SUPPORTED_RUNTIME_FRAMEWORK_KEYS = Object.freeze([
 
 const keyPattern = /^[a-z][a-z0-9-]*$/
 const frameworkKeyPattern = /^[A-Z][A-Z0-9_]*$/
+const enumTokenPattern = /^[A-Z][A-Z0-9_]*$/
 const stableIdPattern = /^agent-[a-z][a-z0-9-]*$/
 
 const normalizeKey = (value) =>
@@ -50,6 +53,17 @@ const normalizeTokenList = (values) => {
 }
 
 export const buildRuntimeAgentStableId = (key) => `agent-${normalizeKey(key)}`
+
+const objectField = {
+  type: mongoose.Schema.Types.Mixed,
+  default: {},
+  validate: {
+    validator(value) {
+      return value && typeof value === 'object' && !Array.isArray(value)
+    },
+    message: 'Value must be an object.',
+  },
+}
 
 const tokenField = {
   type: String,
@@ -97,8 +111,23 @@ const runtimeAgentSchema = new mongoose.Schema(
       type: String,
       required: true,
       enum: Object.values(RUNTIME_AGENT_STATUSES),
-      default: RUNTIME_AGENT_STATUSES.ACTIVE,
+      default: RUNTIME_AGENT_STATUSES.DRAFT,
     },
+    agentType: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      maxlength: 100,
+      match: [enumTokenPattern, 'Agent type must use uppercase letters, numbers, or underscores'],
+      default: 'EXECUTION',
+    },
+    supportedWorkflows: [{
+      type: String,
+      trim: true,
+      lowercase: true,
+      maxlength: 120,
+      match: [/^[a-z][a-z0-9_]*$/, 'Workflow key must use lowercase letters, numbers, or underscores'],
+    }],
     supportedFrameworkKeys: [{
       type: String,
       required: true,
@@ -108,6 +137,36 @@ const runtimeAgentSchema = new mongoose.Schema(
       match: [frameworkKeyPattern, 'Framework key must use uppercase letters, numbers, or underscores'],
     }],
     defaultSkillIds: [tokenField],
+    primarySkillIds: [tokenField],
+    optionalSkillIds: [tokenField],
+    promptConfig: {
+      ...objectField,
+      validate: {
+        ...objectField.validate,
+        message: 'Prompt config must be an object.',
+      },
+    },
+    inputContract: {
+      ...objectField,
+      validate: {
+        ...objectField.validate,
+        message: 'Input contract must be an object.',
+      },
+    },
+    outputContract: {
+      ...objectField,
+      validate: {
+        ...objectField.validate,
+        message: 'Output contract must be an object.',
+      },
+    },
+    policies: {
+      ...objectField,
+      validate: {
+        ...objectField.validate,
+        message: 'Policies must be an object.',
+      },
+    },
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
@@ -137,6 +196,8 @@ runtimeAgentSchema.index({ key: 1 }, { unique: true, name: 'unique_runtime_agent
 runtimeAgentSchema.index({ stableId: 1 }, { unique: true, name: 'unique_runtime_agent_stable_id' })
 runtimeAgentSchema.index({ status: 1, updatedAt: -1 })
 runtimeAgentSchema.index({ supportedFrameworkKeys: 1, updatedAt: -1 })
+runtimeAgentSchema.index({ agentType: 1, updatedAt: -1 })
+runtimeAgentSchema.index({ supportedWorkflows: 1, updatedAt: -1 })
 
 runtimeAgentSchema.statics.findByStableId = function findByStableId(stableId) {
   return this.findOne({ stableId: String(stableId || '').trim().toLowerCase() })
@@ -161,6 +222,18 @@ runtimeAgentSchema.pre('validate', function normalizeRuntimeAgent(next) {
 
   if (this.isNew || this.isModified('defaultSkillIds')) {
     this.defaultSkillIds = normalizeTokenList(this.defaultSkillIds)
+  }
+
+  if (this.isNew || this.isModified('primarySkillIds')) {
+    this.primarySkillIds = normalizeTokenList(this.primarySkillIds)
+  }
+
+  if (this.isNew || this.isModified('optionalSkillIds')) {
+    this.optionalSkillIds = normalizeTokenList(this.optionalSkillIds)
+  }
+
+  if (this.isNew || this.isModified('supportedWorkflows')) {
+    this.supportedWorkflows = normalizeTokenList(this.supportedWorkflows).map((value) => value.replace(/-/g, '_'))
   }
 
   if ((this.isNew || !this.stableId) && this.key) {

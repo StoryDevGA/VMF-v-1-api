@@ -9,6 +9,8 @@ import { RUNTIME_AGENT_STATUSES } from '../models/RuntimeAgent.js'
 const keyRegex = /^[a-z][a-z0-9-]*$/
 const agentIdRegex = /^agent-[a-z][a-z0-9-]*$/
 const frameworkKeyRegex = /^[A-Z][A-Z0-9_]*$/
+const enumTokenRegex = /^[A-Z][A-Z0-9_]*$/
+const workflowKeyRegex = /^[a-z][a-z0-9_]*$/
 
 const frameworkKeySchema = z
   .string()
@@ -32,6 +34,28 @@ const defaultSkillIdSchema = z
     'Default skill ids must use lowercase letters, numbers, or hyphens',
   )
 
+const runtimeAgentTypeSchema = z
+  .string()
+  .trim()
+  .min(1, 'Agent type is required')
+  .max(100, 'Agent type must be 100 characters or fewer')
+  .transform((value) => value.toUpperCase())
+  .refine(
+    (value) => enumTokenRegex.test(value),
+    'Agent type must use uppercase letters, numbers, or underscores',
+  )
+
+const workflowKeySchema = z
+  .string()
+  .trim()
+  .min(1, 'Workflow key is required')
+  .max(120, 'Workflow key must be 120 characters or fewer')
+  .transform((value) => String(value).trim().toLowerCase().replace(/-/g, '_'))
+  .refine(
+    (value) => workflowKeyRegex.test(value),
+    'Workflow key must use lowercase letters, numbers, or underscores',
+  )
+
 const supportedFrameworkKeysSchema = z
   .array(frameworkKeySchema)
   .min(1, 'At least one supported framework key is required.')
@@ -42,6 +66,15 @@ const defaultSkillIdsSchema = z
   .array(defaultSkillIdSchema)
   .max(200, 'Default skill ids must contain 200 items or fewer')
   .transform((values) => [...new Set(values)])
+
+const skillIdsSchema = z
+  .array(defaultSkillIdSchema)
+  .max(200, 'Skill ids must contain 200 items or fewer')
+  .transform((values) => [...new Set(values)])
+
+const objectSchema = z
+  .record(z.string(), z.unknown())
+  .default({})
 
 const createRuntimeAgentSchema = z.object({
   key: z
@@ -67,8 +100,20 @@ const createRuntimeAgentSchema = z.object({
   status: z
     .enum(Object.values(RUNTIME_AGENT_STATUSES))
     .default(RUNTIME_AGENT_STATUSES.ACTIVE),
+  agentType: runtimeAgentTypeSchema.default('EXECUTION'),
+  supportedWorkflows: z
+    .array(workflowKeySchema)
+    .max(50, 'Supported workflows must contain 50 items or fewer')
+    .transform((values) => [...new Set(values)])
+    .default([]),
   supportedFrameworkKeys: supportedFrameworkKeysSchema,
   defaultSkillIds: defaultSkillIdsSchema.default([]),
+  primarySkillIds: skillIdsSchema.default([]),
+  optionalSkillIds: skillIdsSchema.default([]),
+  promptConfig: objectSchema,
+  inputContract: objectSchema,
+  outputContract: objectSchema,
+  policies: objectSchema,
 })
 
 const updateRuntimeAgentSchema = z.object({
@@ -97,8 +142,20 @@ const updateRuntimeAgentSchema = z.object({
   status: z
     .enum(Object.values(RUNTIME_AGENT_STATUSES))
     .optional(),
+  agentType: runtimeAgentTypeSchema.optional(),
+  supportedWorkflows: z
+    .array(workflowKeySchema)
+    .max(50, 'Supported workflows must contain 50 items or fewer')
+    .transform((values) => [...new Set(values)])
+    .optional(),
   supportedFrameworkKeys: supportedFrameworkKeysSchema.optional(),
   defaultSkillIds: defaultSkillIdsSchema.optional(),
+  primarySkillIds: skillIdsSchema.optional(),
+  optionalSkillIds: skillIdsSchema.optional(),
+  promptConfig: objectSchema.optional(),
+  inputContract: objectSchema.optional(),
+  outputContract: objectSchema.optional(),
+  policies: objectSchema.optional(),
 }).refine(
   (value) => Object.keys(value).length > 0,
   { message: 'At least one updatable field is required.', path: ['key'] },
@@ -133,3 +190,19 @@ export const validateCreateRuntimeAgent = createBodyValidator(createRuntimeAgent
 export const validateUpdateRuntimeAgent = createBodyValidator(updateRuntimeAgentSchema)
 export const validateRuntimeAgentId = createParamsValidator(runtimeAgentIdSchema)
 export const validateListRuntimeAgents = createQueryValidator(listRuntimeAgentsQuerySchema)
+
+const emptyBodySchema = z.object({}).default({})
+export const validateRuntimeAgentActionBody = createBodyValidator(emptyBodySchema, {
+  message: 'Invalid request body.',
+})
+
+const runtimeAgentTestBodySchema = z.object({
+  frameworkKey: frameworkKeySchema.optional(),
+  workflowKey: workflowKeySchema.optional(),
+  input: objectSchema.optional().default({}),
+  context: objectSchema.optional().default({}),
+}).default({})
+
+export const validateRuntimeAgentTestBody = createBodyValidator(runtimeAgentTestBodySchema, {
+  message: 'Invalid test request body.',
+})

@@ -80,6 +80,11 @@ export const AUDIT_ACTIONS = Object.freeze({
   FRAMEWORK_REGISTRY_UPDATED: 'FRAMEWORK_REGISTRY_UPDATED',
   RUNTIME_AGENT_CREATED: 'RUNTIME_AGENT_CREATED',
   RUNTIME_AGENT_UPDATED: 'RUNTIME_AGENT_UPDATED',
+  RUNTIME_AGENT_VALIDATED: 'RUNTIME_AGENT_VALIDATED',
+  RUNTIME_AGENT_TESTED: 'RUNTIME_AGENT_TESTED',
+  RUNTIME_AGENT_ACTIVATED: 'RUNTIME_AGENT_ACTIVATED',
+  RUNTIME_AGENT_DISABLED: 'RUNTIME_AGENT_DISABLED',
+  RUNTIME_AGENT_DEPRECATED: 'RUNTIME_AGENT_DEPRECATED',
   RUNTIME_SKILL_CREATED: 'RUNTIME_SKILL_CREATED',
   RUNTIME_SKILL_UPDATED: 'RUNTIME_SKILL_UPDATED',
   WORKFLOW_POLICY_CREATED: 'WORKFLOW_POLICY_CREATED',
@@ -365,6 +370,16 @@ const buildAuditSummary = ({ action, resourceType, resourceId, diff, display }) 
       return clampSummary(`${actorLabel} created runtime agent ${targetLabel}`)
     case AUDIT_ACTIONS.RUNTIME_AGENT_UPDATED:
       return clampSummary(`${actorLabel} updated runtime agent ${targetLabel}`)
+    case AUDIT_ACTIONS.RUNTIME_AGENT_VALIDATED:
+      return clampSummary(`${actorLabel} validated runtime agent ${targetLabel}`)
+    case AUDIT_ACTIONS.RUNTIME_AGENT_TESTED:
+      return clampSummary(`${actorLabel} tested runtime agent ${targetLabel}`)
+    case AUDIT_ACTIONS.RUNTIME_AGENT_ACTIVATED:
+      return clampSummary(`${actorLabel} activated runtime agent ${targetLabel}`)
+    case AUDIT_ACTIONS.RUNTIME_AGENT_DISABLED:
+      return clampSummary(`${actorLabel} disabled runtime agent ${targetLabel}`)
+    case AUDIT_ACTIONS.RUNTIME_AGENT_DEPRECATED:
+      return clampSummary(`${actorLabel} deprecated runtime agent ${targetLabel}`)
     case AUDIT_ACTIONS.RUNTIME_SKILL_CREATED:
       return clampSummary(`${actorLabel} created runtime skill ${targetLabel}`)
     case AUDIT_ACTIONS.RUNTIME_SKILL_UPDATED:

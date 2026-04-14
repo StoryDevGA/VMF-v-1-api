@@ -1,7 +1,9 @@
 import { isDeepStrictEqual } from 'node:util'
+import crypto from 'node:crypto'
 import RuntimeAgent from '../models/RuntimeAgent.js'
 import auditService from '../services/auditService.js'
 import {
+  buildInactiveFrameworkKeyMessage,
   buildUnknownFrameworkKeyMessage,
   resolveKnownFrameworkKeys,
 } from '../services/frameworkRegistryService.js'
@@ -159,14 +161,54 @@ const buildListFilter = ({ q, status, frameworkKey }) => {
 }
 
 const validateRuntimeAgentFrameworkKeys = async (supportedFrameworkKeys = []) => {
-  const { missingKeys } = await resolveKnownFrameworkKeys(supportedFrameworkKeys)
+  const { missingKeys, inactiveKeys } = await resolveKnownFrameworkKeys(
+    supportedFrameworkKeys,
+    'frameworkKey name supportedWorkflowKeys status',
+    { requireActive: true },
+  )
 
-  if (missingKeys.length === 0) {
+  if (missingKeys.length === 0 && inactiveKeys.length === 0) {
     return {}
   }
 
+  if (missingKeys.length > 0) {
+    return {
+      supportedFrameworkKeys: buildUnknownFrameworkKeyMessage(missingKeys),
+    }
+  }
+
   return {
-    supportedFrameworkKeys: buildUnknownFrameworkKeyMessage(missingKeys),
+    supportedFrameworkKeys: buildInactiveFrameworkKeyMessage(inactiveKeys),
+  }
+}
+
+const validateRuntimeAgentDocument = async (runtimeAgent) => {
+  const errors = {}
+  const warnings = []
+
+  if (!runtimeAgent?.key) {
+    errors.key = 'Agent key is required.'
+  }
+
+  if (!runtimeAgent?.name) {
+    errors.name = 'Agent name is required.'
+  }
+
+  if (!Array.isArray(runtimeAgent?.supportedFrameworkKeys) || runtimeAgent.supportedFrameworkKeys.length === 0) {
+    errors.supportedFrameworkKeys = 'At least one supported framework key is required.'
+  } else {
+    const validationDetails = await validateRuntimeAgentFrameworkKeys(runtimeAgent.supportedFrameworkKeys)
+    Object.assign(errors, validationDetails)
+  }
+
+  if (runtimeAgent?.status === 'DEPRECATED') {
+    warnings.push('Agent is deprecated and should not be selected as a default for new policies.')
+  }
+
+  return {
+    errors,
+    warnings,
+    isValid: Object.keys(errors).length === 0,
   }
 }
 
@@ -250,8 +292,16 @@ export const createRuntimeAgent = async (req, res, next) => {
         name: runtimeAgent.name,
         description: runtimeAgent.description,
         status: runtimeAgent.status,
+        agentType: runtimeAgent.agentType,
+        supportedWorkflows: runtimeAgent.supportedWorkflows,
         supportedFrameworkKeys: runtimeAgent.supportedFrameworkKeys,
         defaultSkillIds: runtimeAgent.defaultSkillIds,
+        primarySkillIds: runtimeAgent.primarySkillIds,
+        optionalSkillIds: runtimeAgent.optionalSkillIds,
+        promptConfig: runtimeAgent.promptConfig,
+        inputContract: runtimeAgent.inputContract,
+        outputContract: runtimeAgent.outputContract,
+        policies: runtimeAgent.policies,
       },
     })
 
@@ -347,8 +397,16 @@ export const updateRuntimeAgent = async (req, res, next) => {
       'name',
       'description',
       'status',
+      'agentType',
+      'supportedWorkflows',
       'supportedFrameworkKeys',
       'defaultSkillIds',
+      'primarySkillIds',
+      'optionalSkillIds',
+      'promptConfig',
+      'inputContract',
+      'outputContract',
+      'policies',
     ]
 
     for (const field of fields) {
@@ -409,6 +467,317 @@ export const updateRuntimeAgent = async (req, res, next) => {
       })
     }
 
+    next(err)
+  }
+}
+
+const buildLifecycleDiff = (field, fromValue, toValue) => ({
+  [field]: {
+    from: cloneAuditValue(fromValue),
+    to: cloneAuditValue(toValue),
+  },
+})
+
+const compilePromptPreview = (promptConfig = {}) => {
+  const blocks = [
+    { label: 'Base System Prompt', value: String(promptConfig.baseSystemPrompt ?? '').trim() },
+    { label: 'Role Prompt', value: String(promptConfig.rolePrompt ?? '').trim() },
+    { label: 'Developer Instructions', value: String(promptConfig.developerInstructions ?? '').trim() },
+    { label: 'Output Contract Prompt', value: String(promptConfig.outputContractPrompt ?? '').trim() },
+    { label: 'Forbidden Actions Prompt', value: String(promptConfig.forbiddenActionsPrompt ?? '').trim() },
+    { label: 'Handoff Prompt', value: String(promptConfig.handoffPrompt ?? '').trim() },
+  ].filter((block) => block.value)
+
+  if (blocks.length === 0) return ''
+
+  return blocks
+    .map((block) => `## ${block.label}\n\n${block.value}`)
+    .join('\n\n')
+}
+
+const sha256Hex = (value) =>
+  crypto.createHash('sha256').update(String(value ?? '')).digest('hex')
+
+export const validateRuntimeAgent = async (req, res, next) => {
+  try {
+    const runtimeAgent = await RuntimeAgent.findOne({ stableId: req.params.agentId })
+
+    if (!runtimeAgent) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: RUNTIME_AGENT_NOT_FOUND_MESSAGE,
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    await populateRuntimeAgent(runtimeAgent)
+
+    const { errors, warnings } = await validateRuntimeAgentDocument(runtimeAgent)
+    const isValid = Object.keys(errors).length === 0
+
+    await auditService.logFromRequest(req, {
+      action: auditService.AUDIT_ACTIONS.RUNTIME_AGENT_VALIDATED,
+      resourceType: auditService.RESOURCE_TYPES.RuntimeAgent,
+      resourceId: runtimeAgent._id,
+      scope: {
+        frameworkKeys: runtimeAgent.supportedFrameworkKeys,
+      },
+      display: { resourceLabel: buildRuntimeAgentLabel(runtimeAgent) },
+      diff: {
+        id: runtimeAgent.stableId,
+        key: runtimeAgent.key,
+        status: runtimeAgent.status,
+        valid: isValid,
+        ...(warnings.length > 0 ? { warnings } : {}),
+        ...(Object.keys(errors).length > 0 ? { errors } : {}),
+      },
+    })
+
+    if (!isValid) {
+      return sendValidationFailed(res, req, errors, 'Agent validation failed.')
+    }
+
+    return res.status(200).json({
+      data: {
+        valid: true,
+        warnings,
+      },
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    next(err)
+  }
+}
+
+export const testRuntimeAgent = async (req, res, next) => {
+  try {
+    const runtimeAgent = await RuntimeAgent.findOne({ stableId: req.params.agentId })
+
+    if (!runtimeAgent) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: RUNTIME_AGENT_NOT_FOUND_MESSAGE,
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    await populateRuntimeAgent(runtimeAgent)
+
+    const { errors, warnings } = await validateRuntimeAgentDocument(runtimeAgent)
+    const body = req.body && typeof req.body === 'object' ? req.body : {}
+    const frameworkKey = String(body.frameworkKey ?? '').trim().toUpperCase()
+    const workflowKey = String(body.workflowKey ?? '').trim().toLowerCase()
+    const input = body.input && typeof body.input === 'object' && !Array.isArray(body.input) ? body.input : {}
+    const context = body.context && typeof body.context === 'object' && !Array.isArray(body.context) ? body.context : {}
+
+    if (frameworkKey) {
+      const frameworks = Array.isArray(runtimeAgent.supportedFrameworkKeys) ? runtimeAgent.supportedFrameworkKeys : []
+      if (!frameworks.includes(frameworkKey)) {
+        errors.frameworkKey = `Agent does not support framework key "${frameworkKey}".`
+      }
+    }
+
+    if (workflowKey) {
+      const workflows = Array.isArray(runtimeAgent.supportedWorkflows) ? runtimeAgent.supportedWorkflows : []
+      if (!workflows.includes(workflowKey)) {
+        errors.workflowKey = `Agent does not support workflow key "${workflowKey}".`
+      }
+    }
+    const compiledPrompt = compilePromptPreview(runtimeAgent.promptConfig ?? {})
+    const promptHash = sha256Hex(compiledPrompt)
+    const isValid = Object.keys(errors).length === 0
+
+    await auditService.logFromRequest(req, {
+      action: auditService.AUDIT_ACTIONS.RUNTIME_AGENT_TESTED,
+      resourceType: auditService.RESOURCE_TYPES.RuntimeAgent,
+      resourceId: runtimeAgent._id,
+      scope: {
+        frameworkKeys: runtimeAgent.supportedFrameworkKeys,
+      },
+      display: { resourceLabel: buildRuntimeAgentLabel(runtimeAgent) },
+      diff: {
+        id: runtimeAgent.stableId,
+        key: runtimeAgent.key,
+        status: runtimeAgent.status,
+        valid: isValid,
+        ...(frameworkKey ? { frameworkKey } : {}),
+        ...(workflowKey ? { workflowKey } : {}),
+        promptHash,
+        promptLength: compiledPrompt.length,
+        inputKeys: Object.keys(input).length,
+        contextKeys: Object.keys(context).length,
+        ...(warnings.length > 0 ? { warnings } : {}),
+        ...(Object.keys(errors).length > 0 ? { errors } : {}),
+      },
+    })
+
+    if (!isValid) {
+      return sendValidationFailed(res, req, errors, 'Agent test failed.')
+    }
+
+    return res.status(200).json({
+      data: {
+        ok: true,
+        warnings,
+        promptHash,
+        compiledPromptPreview: compiledPrompt,
+      },
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    next(err)
+  }
+}
+
+export const activateRuntimeAgent = async (req, res, next) => {
+  try {
+    const runtimeAgent = await RuntimeAgent.findOne({ stableId: req.params.agentId })
+
+    if (!runtimeAgent) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: RUNTIME_AGENT_NOT_FOUND_MESSAGE,
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    if (runtimeAgent.status === 'DEPRECATED') {
+      return sendConflict(res, req, 'Deprecated agents cannot be activated.', {
+        field: 'status',
+        reason: 'RUNTIME_AGENT_DEPRECATED',
+      })
+    }
+
+    const { errors } = await validateRuntimeAgentDocument(runtimeAgent)
+    if (Object.keys(errors).length > 0) {
+      return sendValidationFailed(
+        res,
+        req,
+        errors,
+        'Agent must pass validation before activation.',
+      )
+    }
+
+    const previousStatus = runtimeAgent.status
+    runtimeAgent.status = 'ACTIVE'
+    runtimeAgent.updatedBy = req.context?.userId || req.userId
+    await runtimeAgent.save()
+    await populateRuntimeAgent(runtimeAgent)
+
+    if (previousStatus !== runtimeAgent.status) {
+      await auditService.logFromRequest(req, {
+        action: auditService.AUDIT_ACTIONS.RUNTIME_AGENT_ACTIVATED,
+        resourceType: auditService.RESOURCE_TYPES.RuntimeAgent,
+        resourceId: runtimeAgent._id,
+        scope: {
+          frameworkKeys: runtimeAgent.supportedFrameworkKeys,
+        },
+        display: { resourceLabel: buildRuntimeAgentLabel(runtimeAgent) },
+        diff: buildLifecycleDiff('status', previousStatus, runtimeAgent.status),
+      })
+    }
+
+    return res.status(200).json({
+      data: serializeRuntimeAgent(runtimeAgent, {
+        fallbackUpdatedBy: buildActorSummary(req),
+      }),
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    next(err)
+  }
+}
+
+export const disableRuntimeAgent = async (req, res, next) => {
+  try {
+    const runtimeAgent = await RuntimeAgent.findOne({ stableId: req.params.agentId })
+
+    if (!runtimeAgent) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: RUNTIME_AGENT_NOT_FOUND_MESSAGE,
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    const previousStatus = runtimeAgent.status
+    runtimeAgent.status = 'INACTIVE'
+    runtimeAgent.updatedBy = req.context?.userId || req.userId
+    await runtimeAgent.save()
+    await populateRuntimeAgent(runtimeAgent)
+
+    if (previousStatus !== runtimeAgent.status) {
+      await auditService.logFromRequest(req, {
+        action: auditService.AUDIT_ACTIONS.RUNTIME_AGENT_DISABLED,
+        resourceType: auditService.RESOURCE_TYPES.RuntimeAgent,
+        resourceId: runtimeAgent._id,
+        scope: {
+          frameworkKeys: runtimeAgent.supportedFrameworkKeys,
+        },
+        display: { resourceLabel: buildRuntimeAgentLabel(runtimeAgent) },
+        diff: buildLifecycleDiff('status', previousStatus, runtimeAgent.status),
+      })
+    }
+
+    return res.status(200).json({
+      data: serializeRuntimeAgent(runtimeAgent, {
+        fallbackUpdatedBy: buildActorSummary(req),
+      }),
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    next(err)
+  }
+}
+
+export const deprecateRuntimeAgent = async (req, res, next) => {
+  try {
+    const runtimeAgent = await RuntimeAgent.findOne({ stableId: req.params.agentId })
+
+    if (!runtimeAgent) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: RUNTIME_AGENT_NOT_FOUND_MESSAGE,
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    const previousStatus = runtimeAgent.status
+    runtimeAgent.status = 'DEPRECATED'
+    runtimeAgent.updatedBy = req.context?.userId || req.userId
+    await runtimeAgent.save()
+    await populateRuntimeAgent(runtimeAgent)
+
+    if (previousStatus !== runtimeAgent.status) {
+      await auditService.logFromRequest(req, {
+        action: auditService.AUDIT_ACTIONS.RUNTIME_AGENT_DEPRECATED,
+        resourceType: auditService.RESOURCE_TYPES.RuntimeAgent,
+        resourceId: runtimeAgent._id,
+        scope: {
+          frameworkKeys: runtimeAgent.supportedFrameworkKeys,
+        },
+        display: { resourceLabel: buildRuntimeAgentLabel(runtimeAgent) },
+        diff: buildLifecycleDiff('status', previousStatus, runtimeAgent.status),
+      })
+    }
+
+    return res.status(200).json({
+      data: serializeRuntimeAgent(runtimeAgent, {
+        fallbackUpdatedBy: buildActorSummary(req),
+      }),
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
     next(err)
   }
 }
