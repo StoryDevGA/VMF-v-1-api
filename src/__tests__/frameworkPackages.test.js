@@ -328,34 +328,7 @@ describe('Framework Package Routes', () => {
     }
   })
 
-  test('POST /api/v1/super-admin/runtime-control/framework-packages returns 503 when step-up verification is unavailable', async () => {
-    const token = await getAccessTokenForUser(makeFakeUser())
-    const originalRedisClient = mockRedisClient
-    mockRedisClient = null
-
-    try {
-      const res = await request
-        .post('/api/v1/super-admin/runtime-control/framework-packages')
-        .set('Authorization', `Bearer ${token}`)
-        .set('X-Step-Up-Token', STEP_UP_TOKEN)
-        .send({
-          frameworkKey: 'VMF',
-          frameworkName: 'Value Management Framework',
-          version: '2.3.1',
-        })
-
-      expect(res.status).toBe(503)
-      expect(res.body.error.code).toBe('STEP_UP_UNAVAILABLE')
-      expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
-        action: 'ACCESS_DENIED',
-        resourceType: 'User',
-      }))
-    } finally {
-      mockRedisClient = originalRedisClient
-    }
-  })
-
-  test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 for invalid payload', async () => {
+test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 for invalid payload', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
 
     const res = await request

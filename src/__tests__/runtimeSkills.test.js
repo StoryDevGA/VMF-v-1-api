@@ -330,7 +330,6 @@ describe('Runtime Skill Routes', () => {
     const res = await request
       .post('/api/v1/super-admin/runtime-control/skills')
       .set('Authorization', `Bearer ${token}`)
-      .set('X-Step-Up-Token', STEP_UP_TOKEN)
       .send({
         key: 'Snapshot',
         name: '',
@@ -350,7 +349,6 @@ describe('Runtime Skill Routes', () => {
     const res = await request
       .post('/api/v1/super-admin/runtime-control/skills')
       .set('Authorization', `Bearer ${token}`)
-      .set('X-Step-Up-Token', STEP_UP_TOKEN)
       .send({
         key: 'snapshot',
         name: 'Snapshot',
@@ -373,7 +371,6 @@ describe('Runtime Skill Routes', () => {
     const res = await request
       .post('/api/v1/super-admin/runtime-control/skills')
       .set('Authorization', `Bearer ${token}`)
-      .set('X-Step-Up-Token', STEP_UP_TOKEN)
       .send({
         key: 'review-pack',
         name: 'Review Pack',
@@ -394,7 +391,6 @@ describe('Runtime Skill Routes', () => {
     const res = await request
       .post('/api/v1/super-admin/runtime-control/skills')
       .set('Authorization', `Bearer ${token}`)
-      .set('X-Step-Up-Token', STEP_UP_TOKEN)
       .send({
         key: 'Summary',
         name: 'Summary',
@@ -545,7 +541,6 @@ describe('Runtime Skill Routes', () => {
     const res = await request
       .patch(`/api/v1/super-admin/runtime-control/skills/${RUNTIME_SKILL_STABLE_ID}`)
       .set('Authorization', `Bearer ${token}`)
-      .set('X-Step-Up-Token', STEP_UP_TOKEN)
       .send({
         name: 'Runtime Snapshot',
         status: 'INACTIVE',
@@ -616,7 +611,6 @@ describe('Runtime Skill Routes', () => {
     const res = await request
       .post('/api/v1/super-admin/runtime-control/skills')
       .set('Authorization', `Bearer ${token}`)
-      .set('X-Step-Up-Token', STEP_UP_TOKEN)
       .send({
         key: 'draft-skill',
         name: 'Draft Skill',
@@ -647,7 +641,6 @@ describe('Runtime Skill Routes', () => {
     const res = await request
       .patch(`/api/v1/super-admin/runtime-control/skills/${RUNTIME_SKILL_STABLE_ID}`)
       .set('Authorization', `Bearer ${token}`)
-      .set('X-Step-Up-Token', STEP_UP_TOKEN)
       .send({
         status: 'DEPRECATED',
       })

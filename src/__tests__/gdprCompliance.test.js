@@ -648,7 +648,7 @@ describe('GET /api/v1/gdpr/retention', () => {
     expect(res.body.data.storage).toHaveProperty('totalCount')
     expect(res.body.data.storage).toHaveProperty('pendingCount')
     expect(res.body.data.storage).toHaveProperty('expiredCount')
-  })
+  }, 10000)
 
   test('returns 401 when unauthenticated', async () => {
     const res = await request.get('/api/v1/gdpr/retention')

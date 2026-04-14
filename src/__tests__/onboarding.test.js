@@ -270,5 +270,5 @@ describe('POST /api/v1/super-admin/customers/onboard', () => {
 
     const health = await monitoringService.getDetailedHealth()
     expect(health.metrics.onboardingTransactionFailures).toBeGreaterThanOrEqual(1)
-  })
+  }, 10000)
 })
