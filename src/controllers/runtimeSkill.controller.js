@@ -1,5 +1,7 @@
 import { isDeepStrictEqual } from 'node:util'
 import RuntimeSkill from '../models/RuntimeSkill.js'
+import RuntimeAgent from '../models/RuntimeAgent.js'
+import WorkflowPolicy from '../models/WorkflowPolicy.js'
 import auditService from '../services/auditService.js'
 import {
   buildUnknownFrameworkKeyMessage,
@@ -66,7 +68,17 @@ const serializeUserSummary = (value) => {
   }
 }
 
-const serializeRuntimeSkill = (runtimeSkill, { fallbackUpdatedBy = null } = {}) => {
+const serializeRuntimeDependencyReference = (value) => ({
+  id: value?.stableId,
+  key: value?.key,
+  name: value?.name,
+  status: value?.status,
+})
+
+const serializeRuntimeSkill = (
+  runtimeSkill,
+  { fallbackUpdatedBy = null, dependencySummary = null } = {},
+) => {
   const plain = typeof runtimeSkill?.toJSON === 'function'
     ? runtimeSkill.toJSON()
     : { ...runtimeSkill }
@@ -79,12 +91,32 @@ const serializeRuntimeSkill = (runtimeSkill, { fallbackUpdatedBy = null } = {}) 
   delete plain.__v
   delete plain.stableId
 
+  plain.category = reqHasValue(plain.category) ? plain.category : 'GENERAL'
+  plain.type = reqHasValue(plain.type) ? plain.type : 'DETERMINISTIC'
+  plain.executionMode = reqHasValue(plain.executionMode) ? plain.executionMode : 'SYSTEM'
+  plain.inputContract =
+    plain.inputContract && typeof plain.inputContract === 'object' && !Array.isArray(plain.inputContract)
+      ? plain.inputContract
+      : {}
+  plain.outputContract =
+    plain.outputContract && typeof plain.outputContract === 'object' && !Array.isArray(plain.outputContract)
+      ? plain.outputContract
+      : {}
+  plain.runtimeConfig =
+    plain.runtimeConfig && typeof plain.runtimeConfig === 'object' && !Array.isArray(plain.runtimeConfig)
+      ? plain.runtimeConfig
+      : {}
+
   const serializedUpdatedBy = serializeUserSummary(plain.updatedBy)
   plain.createdBy = serializeUserSummary(plain.createdBy)
   plain.updatedBy =
     (serializedUpdatedBy?.name || serializedUpdatedBy?.email)
       ? serializedUpdatedBy
       : (fallbackUpdatedBy || serializedUpdatedBy)
+
+  if (dependencySummary) {
+    plain.dependencySummary = dependencySummary
+  }
 
   return plain
 }
@@ -150,8 +182,27 @@ const buildListFilter = ({ q, status, frameworkKey }) => {
       { name: regex },
       { description: regex },
       { status: regex },
+      { category: regex },
+      { type: regex },
+      { executionMode: regex },
       { supportedFrameworkKeys: regex },
     ]
+  }
+
+  return filter
+}
+
+const reqHasValue = (value) => String(value ?? '').trim().length > 0
+
+const buildRuntimeSkillListFilter = ({ q, status, frameworkKey, category, executionMode }) => {
+  const filter = buildListFilter({ q, status, frameworkKey })
+
+  if (reqHasValue(category)) {
+    filter.category = category
+  }
+
+  if (reqHasValue(executionMode)) {
+    filter.executionMode = executionMode
   }
 
   return filter
@@ -169,11 +220,35 @@ const validateRuntimeSkillFrameworkKeys = async (supportedFrameworkKeys = []) =>
   }
 }
 
+const buildDependencySummary = ({ agents = [], workflowPolicies = [] }, { includeEntities = false } = {}) => ({
+  agentIds: agents.map((agent) => agent.stableId),
+  workflowPolicyIds: workflowPolicies.map((policy) => policy.stableId),
+  ...(includeEntities
+    ? {
+        agents: agents.map(serializeRuntimeDependencyReference),
+        workflowPolicies: workflowPolicies.map(serializeRuntimeDependencyReference),
+      }
+    : {}),
+})
+
+const fetchRuntimeSkillDependencies = async (skillId) => {
+  const [agents, workflowPolicies] = await Promise.all([
+    RuntimeAgent.find({ defaultSkillIds: skillId })
+      .select('stableId key name status')
+      .lean(),
+    WorkflowPolicy.find({ requiredSkillIds: skillId })
+      .select('stableId key name status')
+      .lean(),
+  ])
+
+  return { agents, workflowPolicies }
+}
+
 export const listRuntimeSkills = async (req, res, next) => {
   try {
     const pageNum = Math.max(1, Number(req.query.page) || 1)
     const limit = Math.min(100, Math.max(1, Number(req.query.pageSize) || 20))
-    const filter = buildListFilter(req.query)
+    const filter = buildRuntimeSkillListFilter(req.query)
     const total = await RuntimeSkill.countDocuments(filter)
     const totalPages = Math.max(1, Math.ceil(total / limit))
     const normalizedPage = Math.min(pageNum, totalPages)
@@ -230,9 +305,13 @@ export const createRuntimeSkill = async (req, res, next) => {
 
     await runtimeSkill.save()
     await populateRuntimeSkill(runtimeSkill)
+    const dependencies = buildDependencySummary(
+      await fetchRuntimeSkillDependencies(runtimeSkill.stableId),
+    )
 
     const serializedRuntimeSkill = serializeRuntimeSkill(runtimeSkill, {
       fallbackUpdatedBy: buildActorSummary(req),
+      dependencySummary: dependencies,
     })
 
     await auditService.logFromRequest(req, {
@@ -250,6 +329,12 @@ export const createRuntimeSkill = async (req, res, next) => {
         description: runtimeSkill.description,
         status: runtimeSkill.status,
         supportedFrameworkKeys: runtimeSkill.supportedFrameworkKeys,
+        category: runtimeSkill.category,
+        type: runtimeSkill.type,
+        executionMode: runtimeSkill.executionMode,
+        inputContract: runtimeSkill.inputContract,
+        outputContract: runtimeSkill.outputContract,
+        runtimeConfig: runtimeSkill.runtimeConfig,
       },
     })
 
@@ -294,9 +379,49 @@ export const getRuntimeSkill = async (req, res, next) => {
     }
 
     await populateRuntimeSkill(runtimeSkill)
+    const dependencies = buildDependencySummary(
+      await fetchRuntimeSkillDependencies(runtimeSkill.stableId),
+    )
 
     return res.status(200).json({
-      data: serializeRuntimeSkill(runtimeSkill),
+      data: serializeRuntimeSkill(runtimeSkill, {
+        dependencySummary: dependencies,
+      }),
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    next(err)
+  }
+}
+
+export const getRuntimeSkillDependencies = async (req, res, next) => {
+  try {
+    const runtimeSkill = await RuntimeSkill.findOne({ stableId: req.params.skillId })
+      .select('stableId key name')
+      .lean()
+
+    if (!runtimeSkill) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: RUNTIME_SKILL_NOT_FOUND_MESSAGE,
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    const dependencies = buildDependencySummary(
+      await fetchRuntimeSkillDependencies(runtimeSkill.stableId),
+      { includeEntities: true },
+    )
+
+    return res.status(200).json({
+      data: {
+        id: runtimeSkill.stableId,
+        key: runtimeSkill.key,
+        name: runtimeSkill.name,
+        ...dependencies,
+      },
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
@@ -346,6 +471,12 @@ export const updateRuntimeSkill = async (req, res, next) => {
       'description',
       'status',
       'supportedFrameworkKeys',
+      'category',
+      'type',
+      'executionMode',
+      'inputContract',
+      'outputContract',
+      'runtimeConfig',
     ]
 
     for (const field of fields) {
@@ -368,6 +499,9 @@ export const updateRuntimeSkill = async (req, res, next) => {
     runtimeSkill.updatedBy = req.context?.userId || req.userId
     await runtimeSkill.save()
     await populateRuntimeSkill(runtimeSkill)
+    const dependencies = buildDependencySummary(
+      await fetchRuntimeSkillDependencies(runtimeSkill.stableId),
+    )
 
     if (Object.keys(diff).length > 0) {
       await auditService.logFromRequest(req, {
@@ -385,6 +519,7 @@ export const updateRuntimeSkill = async (req, res, next) => {
     return res.status(200).json({
       data: serializeRuntimeSkill(runtimeSkill, {
         fallbackUpdatedBy: buildActorSummary(req),
+        dependencySummary: dependencies,
       }),
       meta: { requestId: req.requestId, version: 'v1' },
     })

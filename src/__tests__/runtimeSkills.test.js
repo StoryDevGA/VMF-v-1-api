@@ -14,7 +14,6 @@ const SUPER_ADMIN_ID = '507f1f77bcf86cd799439011'
 const NON_ADMIN_ID = '507f1f77bcf86cd799439012'
 const RUNTIME_SKILL_DB_ID = '607f1f77bcf86cd799439041'
 const RUNTIME_SKILL_STABLE_ID = 'skill-snapshot'
-
 const makeFakeUser = (overrides = {}) => ({
   _id: SUPER_ADMIN_ID,
   id: SUPER_ADMIN_ID,
@@ -74,6 +73,12 @@ const buildFrameworkRegistryLookupChain = (rows) => ({
   }),
 })
 
+const buildReferenceLookupChain = (rows) => ({
+  select: jest.fn().mockReturnValue({
+    lean: jest.fn().mockResolvedValue(rows),
+  }),
+})
+
 const buildRuntimeSkillQueryChain = (rows) => ({
   sort: jest.fn().mockReturnThis(),
   skip: jest.fn().mockReturnThis(),
@@ -89,7 +94,10 @@ let User
 let Role
 let FrameworkRegistry
 let RuntimeSkill
+let RuntimeAgent
+let WorkflowPolicy
 let AuditLog
+let mockRedisClient
 let originalRuntimeSkillSave
 let originalRuntimeSkillPopulate
 
@@ -113,6 +121,12 @@ const makeRuntimeSkillDoc = (overrides = {}) => {
     description: 'Captures runtime state at workflow checkpoints.',
     status: 'ACTIVE',
     supportedFrameworkKeys: ['VMF', 'RLD'],
+    category: 'SNAPSHOT',
+    type: 'DETERMINISTIC',
+    executionMode: 'SYSTEM',
+    inputContract: { schema: {} },
+    outputContract: { schema: {} },
+    runtimeConfig: { timeoutMs: 5000, retryPolicy: 'NONE' },
     createdBy: SUPER_ADMIN_ID,
     updatedBy: SUPER_ADMIN_ID,
     ...overrides,
@@ -129,7 +143,7 @@ const makeRuntimeSkillDoc = (overrides = {}) => {
 }
 
 beforeAll(async () => {
-  const mockRedisClient = {
+  mockRedisClient = {
     set: jest.fn(),
     setex: jest.fn(),
     get: jest.fn(),
@@ -153,6 +167,8 @@ beforeAll(async () => {
   Role = models.Role
   FrameworkRegistry = models.FrameworkRegistry
   RuntimeSkill = models.RuntimeSkill
+  RuntimeAgent = models.RuntimeAgent
+  WorkflowPolicy = models.WorkflowPolicy
   AuditLog = models.AuditLog
 
   originalRuntimeSkillSave = RuntimeSkill.prototype.save
@@ -187,6 +203,8 @@ beforeEach(() => {
   RuntimeSkill.find = jest.fn()
   RuntimeSkill.countDocuments = jest.fn()
   RuntimeSkill.findOne = jest.fn()
+  RuntimeAgent.find = jest.fn()
+  WorkflowPolicy.find = jest.fn()
   FrameworkRegistry.find = jest.fn()
   Role.find = jest.fn().mockReturnValue(buildRoleQueryChain(buildDefaultRoleRows()))
 
@@ -202,6 +220,8 @@ beforeEach(() => {
   RuntimeSkill.findOne.mockReturnValue({
     select: jest.fn().mockResolvedValue(null),
   })
+  RuntimeAgent.find.mockReturnValue(buildReferenceLookupChain([]))
+  WorkflowPolicy.find.mockReturnValue(buildReferenceLookupChain([]))
   FrameworkRegistry.find.mockReturnValue(buildFrameworkRegistryLookupChain([
     {
       frameworkKey: 'VMF',
@@ -218,6 +238,10 @@ beforeEach(() => {
   ]))
 
   AuditLog.createLog = jest.fn(async () => ({}))
+  mockRedisClient.set.mockResolvedValue('OK')
+  mockRedisClient.setex.mockResolvedValue('OK')
+  mockRedisClient.get.mockResolvedValue('1')
+  mockRedisClient.del.mockResolvedValue(1)
 })
 
 describe('Runtime Skill Routes', () => {
@@ -255,6 +279,12 @@ describe('Runtime Skill Routes', () => {
         description: 'Builds revenue lifecycle mapping outputs.',
         status: 'ACTIVE',
         supportedFrameworkKeys: ['RLD'],
+        category: 'MAPPING',
+        type: 'DETERMINISTIC',
+        executionMode: 'SYSTEM',
+        inputContract: { schema: {} },
+        outputContract: { schema: {} },
+        runtimeConfig: { timeoutMs: 5000 },
         updatedAt: '2026-04-09T09:00:00.000Z',
         updatedBy: { _id: SUPER_ADMIN_ID, name: 'Super Administrator' },
       },
@@ -264,7 +294,7 @@ describe('Runtime Skill Routes', () => {
     RuntimeSkill.find.mockReturnValue(buildRuntimeSkillQueryChain(rows))
 
     const res = await request
-      .get('/api/v1/super-admin/runtime-control/skills?page=1&pageSize=4&frameworkKey=RLD&status=ACTIVE&q=revenue')
+      .get('/api/v1/super-admin/runtime-control/skills?page=1&pageSize=4&frameworkKey=RLD&status=ACTIVE&category=MAPPING&executionMode=SYSTEM&q=revenue')
       .set('Authorization', `Bearer ${token}`)
 
     expect(res.status).toBe(200)
@@ -272,6 +302,8 @@ describe('Runtime Skill Routes', () => {
       expect.objectContaining({
         status: 'ACTIVE',
         supportedFrameworkKeys: 'RLD',
+        category: 'MAPPING',
+        executionMode: 'SYSTEM',
       }),
     )
     expect(res.body.data).toHaveLength(1)
@@ -280,6 +312,8 @@ describe('Runtime Skill Routes', () => {
       key: 'revenue-map',
       status: 'ACTIVE',
       supportedFrameworkKeys: ['RLD'],
+      category: 'MAPPING',
+      executionMode: 'SYSTEM',
     })
     expect(res.body.meta).toMatchObject({
       page: 1,
@@ -296,6 +330,7 @@ describe('Runtime Skill Routes', () => {
     const res = await request
       .post('/api/v1/super-admin/runtime-control/skills')
       .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', STEP_UP_TOKEN)
       .send({
         key: 'Snapshot',
         name: '',
@@ -315,6 +350,7 @@ describe('Runtime Skill Routes', () => {
     const res = await request
       .post('/api/v1/super-admin/runtime-control/skills')
       .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', STEP_UP_TOKEN)
       .send({
         key: 'snapshot',
         name: 'Snapshot',
@@ -337,6 +373,7 @@ describe('Runtime Skill Routes', () => {
     const res = await request
       .post('/api/v1/super-admin/runtime-control/skills')
       .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', STEP_UP_TOKEN)
       .send({
         key: 'review-pack',
         name: 'Review Pack',
@@ -357,6 +394,7 @@ describe('Runtime Skill Routes', () => {
     const res = await request
       .post('/api/v1/super-admin/runtime-control/skills')
       .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', STEP_UP_TOKEN)
       .send({
         key: 'Summary',
         name: 'Summary',
@@ -372,6 +410,16 @@ describe('Runtime Skill Routes', () => {
       name: 'Summary',
       status: 'ACTIVE',
       supportedFrameworkKeys: ['VMF', 'RLD'],
+      category: 'GENERAL',
+      type: 'DETERMINISTIC',
+      executionMode: 'SYSTEM',
+      inputContract: {},
+      outputContract: {},
+      runtimeConfig: {},
+      dependencySummary: {
+        agentIds: [],
+        workflowPolicyIds: [],
+      },
     })
     expect(AuditLog.createLog).toHaveBeenCalledTimes(1)
     expect(AuditLog.createLog).toHaveBeenCalledWith(
@@ -388,6 +436,22 @@ describe('Runtime Skill Routes', () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     const runtimeSkill = makeRuntimeSkillDoc()
     RuntimeSkill.findOne.mockResolvedValue(runtimeSkill)
+    RuntimeAgent.find.mockReturnValue(buildReferenceLookupChain([
+      {
+        stableId: 'agent-validator',
+        key: 'validator',
+        name: 'Validator',
+        status: 'ACTIVE',
+      },
+    ]))
+    WorkflowPolicy.find.mockReturnValue(buildReferenceLookupChain([
+      {
+        stableId: 'policy-vmf-publish',
+        key: 'vmf-publish',
+        name: 'VMF Publish',
+        status: 'ACTIVE',
+      },
+    ]))
 
     const res = await request
       .get(`/api/v1/super-admin/runtime-control/skills/${RUNTIME_SKILL_STABLE_ID}`)
@@ -400,6 +464,71 @@ describe('Runtime Skill Routes', () => {
       name: 'Snapshot',
       status: 'ACTIVE',
       supportedFrameworkKeys: ['VMF', 'RLD'],
+      category: 'SNAPSHOT',
+      type: 'DETERMINISTIC',
+      executionMode: 'SYSTEM',
+      dependencySummary: {
+        agentIds: ['agent-validator'],
+        workflowPolicyIds: ['policy-vmf-publish'],
+      },
+    })
+  })
+
+  test('GET /api/v1/super-admin/runtime-control/skills/:skillId/dependencies returns dependency visibility for the skill', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    RuntimeSkill.findOne.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue({
+          stableId: RUNTIME_SKILL_STABLE_ID,
+          key: 'snapshot',
+          name: 'Snapshot',
+        }),
+      }),
+    })
+    RuntimeAgent.find.mockReturnValue(buildReferenceLookupChain([
+      {
+        stableId: 'agent-validator',
+        key: 'validator',
+        name: 'Validator',
+        status: 'ACTIVE',
+      },
+    ]))
+    WorkflowPolicy.find.mockReturnValue(buildReferenceLookupChain([
+      {
+        stableId: 'policy-vmf-publish',
+        key: 'vmf-publish',
+        name: 'VMF Publish',
+        status: 'ACTIVE',
+      },
+    ]))
+
+    const res = await request
+      .get(`/api/v1/super-admin/runtime-control/skills/${RUNTIME_SKILL_STABLE_ID}/dependencies`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toMatchObject({
+      id: 'skill-snapshot',
+      key: 'snapshot',
+      name: 'Snapshot',
+      agentIds: ['agent-validator'],
+      workflowPolicyIds: ['policy-vmf-publish'],
+      agents: [
+        {
+          id: 'agent-validator',
+          key: 'validator',
+          name: 'Validator',
+          status: 'ACTIVE',
+        },
+      ],
+      workflowPolicies: [
+        {
+          id: 'policy-vmf-publish',
+          key: 'vmf-publish',
+          name: 'VMF Publish',
+          status: 'ACTIVE',
+        },
+      ],
     })
   })
 
@@ -416,10 +545,28 @@ describe('Runtime Skill Routes', () => {
     const res = await request
       .patch(`/api/v1/super-admin/runtime-control/skills/${RUNTIME_SKILL_STABLE_ID}`)
       .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', STEP_UP_TOKEN)
       .send({
         name: 'Runtime Snapshot',
         status: 'INACTIVE',
         supportedFrameworkKeys: ['VMF'],
+        category: 'GOVERNANCE',
+        type: 'HYBRID',
+        executionMode: 'RULE_ENGINE',
+        inputContract: {
+          schema: {
+            vmfId: 'string',
+          },
+        },
+        outputContract: {
+          schema: {
+            snapshotId: 'string',
+          },
+        },
+        runtimeConfig: {
+          timeoutMs: 2500,
+          retryPolicy: 'NONE',
+        },
       })
 
     expect(res.status).toBe(200)
@@ -429,6 +576,27 @@ describe('Runtime Skill Routes', () => {
       name: 'Runtime Snapshot',
       status: 'INACTIVE',
       supportedFrameworkKeys: ['VMF'],
+      category: 'GOVERNANCE',
+      type: 'HYBRID',
+      executionMode: 'RULE_ENGINE',
+      inputContract: {
+        schema: {
+          vmfId: 'string',
+        },
+      },
+      outputContract: {
+        schema: {
+          snapshotId: 'string',
+        },
+      },
+      runtimeConfig: {
+        timeoutMs: 2500,
+        retryPolicy: 'NONE',
+      },
+      dependencySummary: {
+        agentIds: [],
+        workflowPolicyIds: [],
+      },
     })
     expect(AuditLog.createLog).toHaveBeenCalledTimes(1)
     expect(AuditLog.createLog).toHaveBeenCalledWith(
@@ -440,4 +608,55 @@ describe('Runtime Skill Routes', () => {
       }),
     )
   })
+
+  test('POST /api/v1/super-admin/runtime-control/skills creates a skill with DRAFT status', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    mockFindOneSelect(null)
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/skills')
+      .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', STEP_UP_TOKEN)
+      .send({
+        key: 'draft-skill',
+        name: 'Draft Skill',
+        description: 'A skill created in draft status.',
+        status: 'DRAFT',
+        supportedFrameworkKeys: ['VMF'],
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data).toMatchObject({
+      id: 'skill-draft-skill',
+      key: 'draft-skill',
+      name: 'Draft Skill',
+      status: 'DRAFT',
+    })
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/skills/:skillId updates status to DEPRECATED', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const runtimeSkill = makeRuntimeSkillDoc()
+
+    RuntimeSkill.findOne
+      .mockResolvedValueOnce(runtimeSkill)
+      .mockReturnValueOnce({
+        select: jest.fn().mockResolvedValue(null),
+      })
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/skills/${RUNTIME_SKILL_STABLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', STEP_UP_TOKEN)
+      .send({
+        status: 'DEPRECATED',
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toMatchObject({
+      id: 'skill-snapshot',
+      status: 'DEPRECATED',
+    })
+  })
+
 })

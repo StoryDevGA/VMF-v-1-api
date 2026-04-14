@@ -4,11 +4,15 @@ import {
   createParamsValidator,
   createQueryValidator,
 } from './shared.js'
-import { RUNTIME_SKILL_STATUSES } from '../models/RuntimeSkill.js'
+import {
+  RUNTIME_SKILL_EXECUTION_MODES,
+  RUNTIME_SKILL_STATUSES,
+} from '../models/RuntimeSkill.js'
 
 const keyRegex = /^[a-z][a-z0-9-]*$/
 const skillIdRegex = /^skill-[a-z][a-z0-9-]*$/
 const frameworkKeyRegex = /^[A-Z][A-Z0-9_]*$/
+const enumTokenRegex = /^[A-Z][A-Z0-9_]*$/
 
 const frameworkKeySchema = z
   .string()
@@ -26,6 +30,24 @@ const supportedFrameworkKeysSchema = z
   .min(1, 'At least one supported framework key is required.')
   .max(20, 'Supported framework keys must contain 20 items or fewer')
   .transform((values) => [...new Set(values)])
+
+const enumTokenSchema = (fieldLabel) =>
+  z
+    .string()
+    .trim()
+    .min(1, `${fieldLabel} is required`)
+    .max(100, `${fieldLabel} must be 100 characters or fewer`)
+    .transform((value) => value.toUpperCase())
+    .refine(
+      (value) => enumTokenRegex.test(value),
+      `${fieldLabel} must use uppercase letters, numbers, or underscores`,
+    )
+
+const objectSchema = (fieldLabel) =>
+  z.object({}).catchall(z.unknown()).refine(
+    (value) => value && typeof value === 'object' && !Array.isArray(value),
+    `${fieldLabel} must be an object.`,
+  )
 
 const createRuntimeSkillSchema = z.object({
   key: z
@@ -52,6 +74,14 @@ const createRuntimeSkillSchema = z.object({
     .enum(Object.values(RUNTIME_SKILL_STATUSES))
     .default(RUNTIME_SKILL_STATUSES.ACTIVE),
   supportedFrameworkKeys: supportedFrameworkKeysSchema,
+  category: enumTokenSchema('Skill category').default('GENERAL'),
+  type: enumTokenSchema('Skill type').default('DETERMINISTIC'),
+  executionMode: z
+    .enum(Object.values(RUNTIME_SKILL_EXECUTION_MODES))
+    .default(RUNTIME_SKILL_EXECUTION_MODES.SYSTEM),
+  inputContract: objectSchema('Input contract').default({}),
+  outputContract: objectSchema('Output contract').default({}),
+  runtimeConfig: objectSchema('Runtime config').default({}),
 })
 
 const updateRuntimeSkillSchema = z.object({
@@ -81,6 +111,14 @@ const updateRuntimeSkillSchema = z.object({
     .enum(Object.values(RUNTIME_SKILL_STATUSES))
     .optional(),
   supportedFrameworkKeys: supportedFrameworkKeysSchema.optional(),
+  category: enumTokenSchema('Skill category').optional(),
+  type: enumTokenSchema('Skill type').optional(),
+  executionMode: z
+    .enum(Object.values(RUNTIME_SKILL_EXECUTION_MODES))
+    .optional(),
+  inputContract: objectSchema('Input contract').optional(),
+  outputContract: objectSchema('Output contract').optional(),
+  runtimeConfig: objectSchema('Runtime config').optional(),
 }).refine(
   (value) => Object.keys(value).length > 0,
   { message: 'At least one updatable field is required.', path: ['key'] },
@@ -107,6 +145,10 @@ const listRuntimeSkillsQuerySchema = z.object({
     .enum(Object.values(RUNTIME_SKILL_STATUSES))
     .optional(),
   frameworkKey: frameworkKeySchema.optional(),
+  category: enumTokenSchema('Skill category').optional(),
+  executionMode: z
+    .enum(Object.values(RUNTIME_SKILL_EXECUTION_MODES))
+    .optional(),
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(20),
 })
