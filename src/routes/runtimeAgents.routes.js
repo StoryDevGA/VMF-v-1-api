@@ -13,6 +13,7 @@ import {
 import {
   createRuntimeAgent,
   getRuntimeAgent,
+  getRuntimeAgentDependencies,
   listRuntimeAgents,
   updateRuntimeAgent,
   validateRuntimeAgent,
@@ -29,6 +30,7 @@ router.use(authJwt, loadScopes, requirePlatformRole('SUPER_ADMIN'))
 router.get('/', validateListRuntimeAgents, listRuntimeAgents)
 router.post('/', validateCreateRuntimeAgent, createRuntimeAgent)
 router.get('/:agentId', validateRuntimeAgentId, getRuntimeAgent)
+router.get('/:agentId/dependencies', validateRuntimeAgentId, getRuntimeAgentDependencies)
 router.patch('/:agentId', validateRuntimeAgentId, validateUpdateRuntimeAgent, updateRuntimeAgent)
 router.post('/:agentId/validate', validateRuntimeAgentId, validateRuntimeAgentActionBody, validateRuntimeAgent)
 router.post('/:agentId/test', validateRuntimeAgentId, validateRuntimeAgentTestBody, testRuntimeAgent)

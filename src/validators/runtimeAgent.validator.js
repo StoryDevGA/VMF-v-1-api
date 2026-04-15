@@ -10,7 +10,6 @@ const keyRegex = /^[a-z][a-z0-9-]*$/
 const agentIdRegex = /^agent-[a-z][a-z0-9-]*$/
 const frameworkKeyRegex = /^[A-Z][A-Z0-9_]*$/
 const enumTokenRegex = /^[A-Z][A-Z0-9_]*$/
-const workflowKeyRegex = /^[a-z][a-z0-9_]*$/
 
 const frameworkKeySchema = z
   .string()
@@ -45,17 +44,6 @@ const runtimeAgentTypeSchema = z
     'Agent type must use uppercase letters, numbers, or underscores',
   )
 
-const workflowKeySchema = z
-  .string()
-  .trim()
-  .min(1, 'Workflow key is required')
-  .max(120, 'Workflow key must be 120 characters or fewer')
-  .transform((value) => String(value).trim().toLowerCase().replace(/-/g, '_'))
-  .refine(
-    (value) => workflowKeyRegex.test(value),
-    'Workflow key must use lowercase letters, numbers, or underscores',
-  )
-
 const supportedFrameworkKeysSchema = z
   .array(frameworkKeySchema)
   .min(1, 'At least one supported framework key is required.')
@@ -71,6 +59,35 @@ const skillIdsSchema = z
   .array(defaultSkillIdSchema)
   .max(200, 'Skill ids must contain 200 items or fewer')
   .transform((values) => [...new Set(values)])
+
+const executionPlanStepSchema = z.object({
+  skillId: defaultSkillIdSchema,
+  description: z
+    .string()
+    .trim()
+    .max(500, 'Execution step description must be 500 characters or fewer')
+    .optional()
+    .default(''),
+})
+
+const executionPlanSchema = z
+  .array(executionPlanStepSchema)
+  .min(1, 'Execution plan must contain at least one step.')
+  .max(100, 'Execution plan must contain 100 steps or fewer.')
+  .superRefine((steps, ctx) => {
+    const seen = new Set()
+
+    steps.forEach((step, index) => {
+      if (seen.has(step.skillId)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Execution plan steps must be unique.',
+          path: [index, 'skillId'],
+        })
+      }
+      seen.add(step.skillId)
+    })
+  })
 
 const objectSchema = z
   .record(z.string(), z.unknown())
@@ -101,15 +118,11 @@ const createRuntimeAgentSchema = z.object({
     .enum(Object.values(RUNTIME_AGENT_STATUSES))
     .default(RUNTIME_AGENT_STATUSES.ACTIVE),
   agentType: runtimeAgentTypeSchema.default('EXECUTION'),
-  supportedWorkflows: z
-    .array(workflowKeySchema)
-    .max(50, 'Supported workflows must contain 50 items or fewer')
-    .transform((values) => [...new Set(values)])
-    .default([]),
   supportedFrameworkKeys: supportedFrameworkKeysSchema,
   defaultSkillIds: defaultSkillIdsSchema.default([]),
   primarySkillIds: skillIdsSchema.default([]),
   optionalSkillIds: skillIdsSchema.default([]),
+  executionPlan: executionPlanSchema,
   promptConfig: objectSchema,
   inputContract: objectSchema,
   outputContract: objectSchema,
@@ -143,15 +156,11 @@ const updateRuntimeAgentSchema = z.object({
     .enum(Object.values(RUNTIME_AGENT_STATUSES))
     .optional(),
   agentType: runtimeAgentTypeSchema.optional(),
-  supportedWorkflows: z
-    .array(workflowKeySchema)
-    .max(50, 'Supported workflows must contain 50 items or fewer')
-    .transform((values) => [...new Set(values)])
-    .optional(),
   supportedFrameworkKeys: supportedFrameworkKeysSchema.optional(),
   defaultSkillIds: defaultSkillIdsSchema.optional(),
   primarySkillIds: skillIdsSchema.optional(),
   optionalSkillIds: skillIdsSchema.optional(),
+  executionPlan: executionPlanSchema.optional(),
   promptConfig: objectSchema.optional(),
   inputContract: objectSchema.optional(),
   outputContract: objectSchema.optional(),
@@ -198,7 +207,6 @@ export const validateRuntimeAgentActionBody = createBodyValidator(emptyBodySchem
 
 const runtimeAgentTestBodySchema = z.object({
   frameworkKey: frameworkKeySchema.optional(),
-  workflowKey: workflowKeySchema.optional(),
   input: objectSchema.optional().default({}),
   context: objectSchema.optional().default({}),
 }).default({})

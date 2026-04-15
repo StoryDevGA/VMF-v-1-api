@@ -82,6 +82,21 @@ const buildRuntimeAgentQueryChain = (rows) => ({
   lean: jest.fn().mockResolvedValue(rows),
 })
 
+const buildRuntimeSkillLookupChain = (rows) => ({
+  select: jest.fn().mockReturnThis(),
+  lean: jest.fn().mockResolvedValue(rows),
+})
+
+const buildWorkflowPolicyLookupChain = (rows) => ({
+  select: jest.fn().mockReturnThis(),
+  lean: jest.fn().mockResolvedValue(rows),
+})
+
+const buildFrameworkPackageLookupChain = (rows) => ({
+  select: jest.fn().mockReturnThis(),
+  lean: jest.fn().mockResolvedValue(rows),
+})
+
 let app
 let request
 let tokenService
@@ -89,6 +104,9 @@ let User
 let Role
 let FrameworkRegistry
 let RuntimeAgent
+let RuntimeSkill
+let WorkflowPolicy
+let FrameworkPackage
 let AuditLog
 let originalRuntimeAgentSave
 let originalRuntimeAgentPopulate
@@ -114,6 +132,7 @@ const makeRuntimeAgentDoc = (overrides = {}) => {
     status: 'ACTIVE',
     supportedFrameworkKeys: ['VMF', 'RLD'],
     defaultSkillIds: ['skill-snapshot'],
+    executionPlan: [{ skillId: 'skill-snapshot', description: '' }],
     createdBy: SUPER_ADMIN_ID,
     updatedBy: SUPER_ADMIN_ID,
     ...overrides,
@@ -154,6 +173,9 @@ beforeAll(async () => {
   Role = models.Role
   FrameworkRegistry = models.FrameworkRegistry
   RuntimeAgent = models.RuntimeAgent
+  RuntimeSkill = models.RuntimeSkill
+  WorkflowPolicy = models.WorkflowPolicy
+  FrameworkPackage = models.FrameworkPackage
   AuditLog = models.AuditLog
 
   originalRuntimeAgentSave = RuntimeAgent.prototype.save
@@ -188,6 +210,9 @@ beforeEach(() => {
   RuntimeAgent.find = jest.fn()
   RuntimeAgent.countDocuments = jest.fn()
   RuntimeAgent.findOne = jest.fn()
+  RuntimeSkill.find = jest.fn()
+  WorkflowPolicy.find = jest.fn()
+  FrameworkPackage.find = jest.fn()
   FrameworkRegistry.find = jest.fn()
   Role.find = jest.fn().mockReturnValue(buildRoleQueryChain(buildDefaultRoleRows()))
 
@@ -203,6 +228,20 @@ beforeEach(() => {
   RuntimeAgent.findOne.mockReturnValue({
     select: jest.fn().mockResolvedValue(null),
   })
+  RuntimeSkill.find.mockReturnValue(buildRuntimeSkillLookupChain([
+    {
+      stableId: 'skill-snapshot',
+      status: 'ACTIVE',
+      supportedFrameworkKeys: ['VMF', 'RLD'],
+    },
+    {
+      stableId: 'skill-summary',
+      status: 'ACTIVE',
+      supportedFrameworkKeys: ['VMF', 'RLD'],
+    },
+  ]))
+  WorkflowPolicy.find.mockReturnValue(buildWorkflowPolicyLookupChain([]))
+  FrameworkPackage.find.mockReturnValue(buildFrameworkPackageLookupChain([]))
   FrameworkRegistry.find.mockReturnValue(buildFrameworkRegistryLookupChain([
     {
       frameworkKey: 'VMF',
@@ -350,6 +389,7 @@ describe('Runtime Agent Routes', () => {
         status: 'ACTIVE',
         supportedFrameworkKeys: ['VMF'],
         defaultSkillIds: ['skill-snapshot'],
+        executionPlan: [{ skillId: 'skill-snapshot', description: '' }],
       })
 
     expect(res.status).toBe(409)
@@ -373,6 +413,7 @@ describe('Runtime Agent Routes', () => {
         status: 'ACTIVE',
         supportedFrameworkKeys: ['QMF'],
         defaultSkillIds: ['skill-snapshot'],
+        executionPlan: [{ skillId: 'skill-snapshot', description: '' }],
       })
 
     expect(res.status).toBe(422)
@@ -393,6 +434,7 @@ describe('Runtime Agent Routes', () => {
         status: 'ACTIVE',
         supportedFrameworkKeys: ['CMF'],
         defaultSkillIds: ['skill-snapshot'],
+        executionPlan: [{ skillId: 'skill-snapshot', description: '' }],
       })
 
     expect(res.status).toBe(422)
@@ -413,11 +455,14 @@ describe('Runtime Agent Routes', () => {
         description: 'Coordinates planning transitions.',
         status: 'ACTIVE',
         agentType: 'validation',
-        supportedWorkflows: ['fresh_build', 'existing_context_update'],
         supportedFrameworkKeys: ['vmf', 'RLD', 'VMF'],
         defaultSkillIds: ['skill-snapshot', 'skill-snapshot', 'skill-summary'],
         primarySkillIds: ['skill-summary'],
         optionalSkillIds: ['skill-snapshot'],
+        executionPlan: [
+          { skillId: 'skill-snapshot', description: 'Capture state.' },
+          { skillId: 'skill-summary', description: '' },
+        ],
         promptConfig: { base_system_prompt: 'You are governed.' },
         inputContract: { required_inputs: ['frameworkPackage'] },
         outputContract: { required_fields: ['execution_trace'] },
@@ -431,11 +476,14 @@ describe('Runtime Agent Routes', () => {
       name: 'Planner',
       status: 'ACTIVE',
       agentType: 'VALIDATION',
-      supportedWorkflows: ['fresh_build', 'existing_context_update'],
       supportedFrameworkKeys: ['VMF', 'RLD'],
       defaultSkillIds: ['skill-snapshot', 'skill-summary'],
       primarySkillIds: ['skill-summary'],
       optionalSkillIds: ['skill-snapshot'],
+      executionPlan: [
+        { skillId: 'skill-snapshot', description: 'Capture state.' },
+        { skillId: 'skill-summary', description: '' },
+      ],
       promptConfig: { base_system_prompt: 'You are governed.' },
       inputContract: { required_inputs: ['frameworkPackage'] },
       outputContract: { required_fields: ['execution_trace'] },
@@ -471,6 +519,87 @@ describe('Runtime Agent Routes', () => {
     })
   })
 
+  test('GET /api/v1/super-admin/runtime-control/agents/:agentId returns 404 when the agent is missing', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    RuntimeAgent.findOne.mockResolvedValue(null)
+
+    const res = await request
+      .get('/api/v1/super-admin/runtime-control/agents/agent-missing')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(404)
+    expect(res.body.error.code).toBe('NOT_FOUND')
+  })
+
+  test('GET /api/v1/super-admin/runtime-control/agents/:agentId/dependencies returns referencing policies and packages', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    RuntimeAgent.findOne.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue({
+          stableId: RUNTIME_AGENT_STABLE_ID,
+          key: 'validator',
+          name: 'Validator',
+          status: 'ACTIVE',
+          supportedFrameworkKeys: ['VMF'],
+        }),
+      }),
+    })
+
+    WorkflowPolicy.find.mockReturnValue(buildWorkflowPolicyLookupChain([
+      { stableId: 'policy-vmf-review', key: 'vmf-review', name: 'VMF Review Policy', status: 'ACTIVE' },
+    ]))
+    FrameworkPackage.find.mockReturnValue(buildFrameworkPackageLookupChain([
+      {
+        _id: '607f1f77bcf86cd799439099',
+        frameworkKey: 'VMF',
+        frameworkName: 'Value Management Framework',
+        version: '2.3.1',
+        status: 'ACTIVE',
+      },
+    ]))
+
+    const res = await request
+      .get(`/api/v1/super-admin/runtime-control/agents/${RUNTIME_AGENT_STABLE_ID}/dependencies`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toMatchObject({
+      agentId: RUNTIME_AGENT_STABLE_ID,
+      summary: {
+        workflowPolicies: 1,
+        frameworkPackages: 1,
+        activeWorkflowPolicies: 1,
+        activeFrameworkPackages: 1,
+      },
+    })
+    expect(res.body.data.workflowPolicies).toEqual([
+      expect.objectContaining({ id: 'policy-vmf-review', key: 'vmf-review', status: 'ACTIVE' }),
+    ])
+    expect(res.body.data.frameworkPackages).toEqual([
+      expect.objectContaining({ frameworkKey: 'VMF', version: '2.3.1', status: 'ACTIVE' }),
+    ])
+    expect(res.body.data.warnings.length).toBeGreaterThan(0)
+    expect(res.body.data.blocks.length).toBeGreaterThan(0)
+  })
+
+  test('GET /api/v1/super-admin/runtime-control/agents/:agentId/dependencies returns 404 when the agent is missing', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    RuntimeAgent.findOne.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue(null),
+      }),
+    })
+
+    const res = await request
+      .get('/api/v1/super-admin/runtime-control/agents/agent-missing/dependencies')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(404)
+    expect(res.body.error.code).toBe('NOT_FOUND')
+  })
+
   test('PATCH /api/v1/super-admin/runtime-control/agents/:agentId updates the runtime agent and writes an audit log', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     const runtimeAgent = makeRuntimeAgentDoc()
@@ -488,7 +617,6 @@ describe('Runtime Agent Routes', () => {
         name: 'Validation Guard',
         status: 'INACTIVE',
         supportedFrameworkKeys: ['VMF'],
-        supportedWorkflows: ['validate_only'],
         primarySkillIds: ['skill-summary'],
         promptConfig: { role_prompt: 'Validate.' },
       })
@@ -500,7 +628,6 @@ describe('Runtime Agent Routes', () => {
       name: 'Validation Guard',
       status: 'INACTIVE',
       supportedFrameworkKeys: ['VMF'],
-      supportedWorkflows: ['validate_only'],
       primarySkillIds: ['skill-summary'],
       promptConfig: { role_prompt: 'Validate.' },
     })
@@ -513,6 +640,19 @@ describe('Runtime Agent Routes', () => {
         summary: 'Super Admin updated runtime agent Validation Guard (validator)',
       }),
     )
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/agents/:agentId returns 404 when the agent is missing', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    RuntimeAgent.findOne.mockResolvedValue(null)
+
+    const res = await request
+      .patch('/api/v1/super-admin/runtime-control/agents/agent-missing')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: 'Nope' })
+
+    expect(res.status).toBe(404)
+    expect(res.body.error.code).toBe('NOT_FOUND')
   })
 
   test('POST /api/v1/super-admin/runtime-control/agents/:agentId/validate returns 422 when validation fails', async () => {
@@ -570,7 +710,6 @@ describe('Runtime Agent Routes', () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     const runtimeAgent = makeRuntimeAgentDoc({
       supportedFrameworkKeys: ['VMF'],
-      supportedWorkflows: ['validate_only'],
     })
 
     RuntimeAgent.findOne.mockResolvedValue(runtimeAgent)
@@ -597,7 +736,6 @@ describe('Runtime Agent Routes', () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     const runtimeAgent = makeRuntimeAgentDoc({
       supportedFrameworkKeys: ['VMF', 'RLD'],
-      supportedWorkflows: ['validate_only'],
       promptConfig: {
         baseSystemPrompt: 'You are a governed agent.',
         rolePrompt: 'Validate.',
@@ -609,7 +747,7 @@ describe('Runtime Agent Routes', () => {
     const res = await request
       .post(`/api/v1/super-admin/runtime-control/agents/${RUNTIME_AGENT_STABLE_ID}/test`)
       .set('Authorization', `Bearer ${token}`)
-      .send({ frameworkKey: 'VMF', workflowKey: 'validate_only', input: { foo: 'bar' } })
+      .send({ frameworkKey: 'VMF', input: { foo: 'bar' } })
 
     expect(res.status).toBe(200)
     expect(res.body.data).toEqual(
@@ -702,6 +840,27 @@ describe('Runtime Agent Routes', () => {
     )
   })
 
+  test('POST /api/v1/super-admin/runtime-control/agents/:agentId/disable returns 409 when active dependencies exist', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const runtimeAgent = makeRuntimeAgentDoc({ status: 'ACTIVE' })
+    RuntimeAgent.findOne.mockResolvedValue(runtimeAgent)
+
+    WorkflowPolicy.find.mockReturnValue(buildWorkflowPolicyLookupChain([
+      { stableId: 'policy-vmf-review', key: 'vmf-review', name: 'VMF Review Policy', status: 'ACTIVE' },
+    ]))
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/agents/${RUNTIME_AGENT_STABLE_ID}/disable`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.details.field).toBe('status')
+    expect(res.body.error.details.reason).toBe('RUNTIME_AGENT_DEPENDENCIES_ACTIVE')
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
   test('POST /api/v1/super-admin/runtime-control/agents/:agentId/deprecate deprecates the agent and writes an audit log', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     const runtimeAgent = makeRuntimeAgentDoc({ status: 'ACTIVE' })
@@ -726,5 +885,32 @@ describe('Runtime Agent Routes', () => {
         summary: 'Super Admin deprecated runtime agent Validator (validator)',
       }),
     )
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/agents/:agentId/deprecate returns 409 when active dependencies exist', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const runtimeAgent = makeRuntimeAgentDoc({ status: 'ACTIVE' })
+    RuntimeAgent.findOne.mockResolvedValue(runtimeAgent)
+
+    FrameworkPackage.find.mockReturnValue(buildFrameworkPackageLookupChain([
+      {
+        _id: '607f1f77bcf86cd799439099',
+        frameworkKey: 'VMF',
+        frameworkName: 'Value Management Framework',
+        version: '2.3.1',
+        status: 'ACTIVE',
+      },
+    ]))
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/agents/${RUNTIME_AGENT_STABLE_ID}/deprecate`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.details.field).toBe('status')
+    expect(res.body.error.details.reason).toBe('RUNTIME_AGENT_DEPENDENCIES_ACTIVE')
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 })

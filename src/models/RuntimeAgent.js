@@ -7,11 +7,6 @@ export const RUNTIME_AGENT_STATUSES = Object.freeze({
   DEPRECATED: 'DEPRECATED',
 })
 
-export const SUPPORTED_RUNTIME_FRAMEWORK_KEYS = Object.freeze([
-  'VMF',
-  'RLD',
-])
-
 const keyPattern = /^[a-z][a-z0-9-]*$/
 const frameworkKeyPattern = /^[A-Z][A-Z0-9_]*$/
 const enumTokenPattern = /^[A-Z][A-Z0-9_]*$/
@@ -73,6 +68,31 @@ const tokenField = {
   match: [keyPattern, 'Value must use lowercase letters, numbers, or hyphens'],
 }
 
+const executionPlanStepSchema = new mongoose.Schema(
+  {
+    skillId: {
+      ...tokenField,
+      required: true,
+    },
+    description: {
+      type: String,
+      trim: true,
+      maxlength: 500,
+      default: '',
+    },
+  },
+  { _id: false },
+)
+
+const normalizeExecutionPlan = (values) => {
+  if (!Array.isArray(values)) return []
+
+  return values.map((step) => ({
+    skillId: normalizeKey(step?.skillId),
+    description: normalizeDescription(step?.description),
+  }))
+}
+
 const runtimeAgentSchema = new mongoose.Schema(
   {
     stableId: {
@@ -121,13 +141,6 @@ const runtimeAgentSchema = new mongoose.Schema(
       match: [enumTokenPattern, 'Agent type must use uppercase letters, numbers, or underscores'],
       default: 'EXECUTION',
     },
-    supportedWorkflows: [{
-      type: String,
-      trim: true,
-      lowercase: true,
-      maxlength: 120,
-      match: [/^[a-z][a-z0-9_]*$/, 'Workflow key must use lowercase letters, numbers, or underscores'],
-    }],
     supportedFrameworkKeys: [{
       type: String,
       required: true,
@@ -139,6 +152,10 @@ const runtimeAgentSchema = new mongoose.Schema(
     defaultSkillIds: [tokenField],
     primarySkillIds: [tokenField],
     optionalSkillIds: [tokenField],
+    executionPlan: {
+      type: [executionPlanStepSchema],
+      default: [],
+    },
     promptConfig: {
       ...objectField,
       validate: {
@@ -197,7 +214,6 @@ runtimeAgentSchema.index({ stableId: 1 }, { unique: true, name: 'unique_runtime_
 runtimeAgentSchema.index({ status: 1, updatedAt: -1 })
 runtimeAgentSchema.index({ supportedFrameworkKeys: 1, updatedAt: -1 })
 runtimeAgentSchema.index({ agentType: 1, updatedAt: -1 })
-runtimeAgentSchema.index({ supportedWorkflows: 1, updatedAt: -1 })
 
 runtimeAgentSchema.statics.findByStableId = function findByStableId(stableId) {
   return this.findOne({ stableId: String(stableId || '').trim().toLowerCase() })
@@ -232,8 +248,8 @@ runtimeAgentSchema.pre('validate', function normalizeRuntimeAgent(next) {
     this.optionalSkillIds = normalizeTokenList(this.optionalSkillIds)
   }
 
-  if (this.isNew || this.isModified('supportedWorkflows')) {
-    this.supportedWorkflows = normalizeTokenList(this.supportedWorkflows).map((value) => value.replace(/-/g, '_'))
+  if (this.isNew || this.isModified('executionPlan')) {
+    this.executionPlan = normalizeExecutionPlan(this.executionPlan)
   }
 
   if ((this.isNew || !this.stableId) && this.key) {

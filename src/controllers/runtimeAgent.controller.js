@@ -1,6 +1,9 @@
 import { isDeepStrictEqual } from 'node:util'
 import crypto from 'node:crypto'
 import RuntimeAgent from '../models/RuntimeAgent.js'
+import RuntimeSkill from '../models/RuntimeSkill.js'
+import WorkflowPolicy from '../models/WorkflowPolicy.js'
+import FrameworkPackage from '../models/FrameworkPackage.js'
 import auditService from '../services/auditService.js'
 import {
   buildInactiveFrameworkKeyMessage,
@@ -28,6 +31,8 @@ const toIdString = (value) => {
 }
 
 const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+const normalizeToken = (value) => String(value ?? '').trim().toLowerCase()
+const normalizeFrameworkKey = (value) => String(value ?? '').trim().toUpperCase()
 
 const cloneAuditValue = (value) => {
   if (value === undefined) return value
@@ -91,6 +96,21 @@ const serializeRuntimeAgent = (runtimeAgent, { fallbackUpdatedBy = null } = {}) 
   return plain
 }
 
+const serializeRuntimeDependencyReference = (value) => ({
+  id: value?.stableId,
+  key: value?.key,
+  name: value?.name,
+  status: value?.status,
+})
+
+const serializeFrameworkPackageDependencyReference = (value) => ({
+  id: toIdString(value?._id || value?.id),
+  frameworkKey: value?.frameworkKey,
+  frameworkName: value?.frameworkName,
+  version: value?.version,
+  status: value?.status,
+})
+
 const buildRuntimeAgentLabel = (runtimeAgent) =>
   runtimeAgent?.name
     ? `${runtimeAgent.name} (${runtimeAgent.key})`
@@ -119,6 +139,32 @@ const sendValidationFailed = (res, req, details, message = 'Please check the for
       requestId: req.requestId,
     },
   })
+
+const sendNotFound = (res, req, message = RUNTIME_AGENT_NOT_FOUND_MESSAGE) =>
+  res.status(404).json({
+    error: {
+      code: 'NOT_FOUND',
+      message,
+      requestId: req.requestId,
+    },
+  })
+
+const pickRuntimeAgentBody = (body = {}) => ({
+  key: body?.key,
+  name: body?.name,
+  description: body?.description,
+  status: body?.status,
+  agentType: body?.agentType,
+  supportedFrameworkKeys: body?.supportedFrameworkKeys,
+  defaultSkillIds: body?.defaultSkillIds,
+  primarySkillIds: body?.primarySkillIds,
+  optionalSkillIds: body?.optionalSkillIds,
+  executionPlan: body?.executionPlan,
+  promptConfig: body?.promptConfig,
+  inputContract: body?.inputContract,
+  outputContract: body?.outputContract,
+  policies: body?.policies,
+})
 
 const populateRuntimeAgent = async (runtimeAgent) => {
   if (!runtimeAgent || typeof runtimeAgent.populate !== 'function') {
@@ -182,6 +228,140 @@ const validateRuntimeAgentFrameworkKeys = async (supportedFrameworkKeys = []) =>
   }
 }
 
+const fetchRuntimeAgentDependencies = async (agentId) => {
+  const normalizedAgentId = normalizeToken(agentId)
+  if (!normalizedAgentId) return { workflowPolicies: [], frameworkPackages: [] }
+
+  const [workflowPolicies, frameworkPackages] = await Promise.all([
+    WorkflowPolicy.find({ requiredAgentIds: normalizedAgentId })
+      .select('stableId key name status')
+      .lean(),
+    FrameworkPackage.find({ defaultAgentIds: normalizedAgentId })
+      .select('frameworkKey frameworkName version status')
+      .lean(),
+  ])
+
+  return {
+    workflowPolicies: Array.isArray(workflowPolicies) ? workflowPolicies : [],
+    frameworkPackages: Array.isArray(frameworkPackages) ? frameworkPackages : [],
+  }
+}
+
+const buildRuntimeAgentDependencySummary = ({ workflowPolicies = [], frameworkPackages = [] }) => {
+  const activeWorkflowPolicies = workflowPolicies.filter((policy) => policy?.status === 'ACTIVE')
+  const activeFrameworkPackages = frameworkPackages.filter((pkg) => pkg?.status === 'ACTIVE')
+
+  const warnings = []
+  const blocks = []
+
+  if (activeWorkflowPolicies.length > 0) {
+    warnings.push(`This Agent is used by ${activeWorkflowPolicies.length} ACTIVE workflow policies.`)
+  }
+
+  if (activeFrameworkPackages.length > 0) {
+    warnings.push(`This Agent is used by ${activeFrameworkPackages.length} ACTIVE framework packages.`)
+  }
+
+  if (warnings.length > 0) {
+    blocks.push('Deactivation is blocked while this agent is referenced by ACTIVE runtime-control resources.')
+  }
+
+  return {
+    summary: {
+      workflowPolicies: workflowPolicies.length,
+      frameworkPackages: frameworkPackages.length,
+      activeWorkflowPolicies: activeWorkflowPolicies.length,
+      activeFrameworkPackages: activeFrameworkPackages.length,
+    },
+    warnings,
+    blocks,
+  }
+}
+
+const validateRuntimeAgentExecutionPlan = async (runtimeAgent) => {
+  const errors = {}
+  const plan = Array.isArray(runtimeAgent?.executionPlan) ? runtimeAgent.executionPlan : []
+
+  if (plan.length === 0) {
+    errors.executionPlan = 'Execution plan must contain at least one step.'
+    return { errors }
+  }
+
+  const skillIds = plan
+    .map((step) => normalizeToken(step?.skillId))
+    .filter(Boolean)
+
+  if (skillIds.length !== plan.length) {
+    errors.executionPlan = 'Each execution plan step must reference a valid skill id.'
+    return { errors }
+  }
+
+  const skillIdSet = new Set()
+  const duplicateSkillId = skillIds.find((skillId) => {
+    if (skillIdSet.has(skillId)) return true
+    skillIdSet.add(skillId)
+    return false
+  })
+
+  if (duplicateSkillId) {
+    errors.executionPlan = `Duplicate skill "${duplicateSkillId}" is not allowed in the execution plan.`
+    return { errors }
+  }
+
+  const assignedSkillIds = new Set([
+    ...(Array.isArray(runtimeAgent?.defaultSkillIds) ? runtimeAgent.defaultSkillIds : []),
+    ...(Array.isArray(runtimeAgent?.primarySkillIds) ? runtimeAgent.primarySkillIds : []),
+    ...(Array.isArray(runtimeAgent?.optionalSkillIds) ? runtimeAgent.optionalSkillIds : []),
+  ].map(normalizeToken).filter(Boolean))
+
+  const unassignedSkillId = skillIds.find((skillId) => !assignedSkillIds.has(skillId))
+  if (unassignedSkillId) {
+    errors.executionPlan = `Skill "${unassignedSkillId}" must be assigned to the agent before it can be used in the execution plan.`
+    return { errors }
+  }
+
+  const skills = await RuntimeSkill.find({ stableId: { $in: skillIds } })
+    .select('stableId status supportedFrameworkKeys')
+    .lean()
+
+  const skillLookup = new Map(skills.map((skill) => [normalizeToken(skill.stableId), skill]))
+  const unknownSkillId = skillIds.find((skillId) => !skillLookup.has(skillId))
+  if (unknownSkillId) {
+    errors.executionPlan = `Unknown skill id "${unknownSkillId}".`
+    return { errors }
+  }
+
+  const inactiveSkillId = skillIds.find((skillId) => {
+    const skill = skillLookup.get(skillId)
+    return String(skill?.status ?? '').trim().toUpperCase() !== 'ACTIVE'
+  })
+
+  if (inactiveSkillId) {
+    errors.executionPlan = `Skill "${inactiveSkillId}" is not ACTIVE and cannot be used in the execution plan.`
+    return { errors }
+  }
+
+  const agentFrameworks = Array.isArray(runtimeAgent?.supportedFrameworkKeys)
+    ? runtimeAgent.supportedFrameworkKeys.map(normalizeFrameworkKey).filter(Boolean)
+    : []
+  const agentFrameworkSet = new Set(agentFrameworks)
+
+  const incompatibleSkillId = skillIds.find((skillId) => {
+    const skill = skillLookup.get(skillId)
+    const frameworks = Array.isArray(skill?.supportedFrameworkKeys)
+      ? skill.supportedFrameworkKeys.map(normalizeFrameworkKey).filter(Boolean)
+      : []
+    return !frameworks.some((frameworkKey) => agentFrameworkSet.has(frameworkKey))
+  })
+
+  if (incompatibleSkillId) {
+    errors.executionPlan = `Skill "${incompatibleSkillId}" is not compatible with the selected frameworks.`
+    return { errors }
+  }
+
+  return { errors }
+}
+
 const validateRuntimeAgentDocument = async (runtimeAgent) => {
   const errors = {}
   const warnings = []
@@ -199,6 +379,11 @@ const validateRuntimeAgentDocument = async (runtimeAgent) => {
   } else {
     const validationDetails = await validateRuntimeAgentFrameworkKeys(runtimeAgent.supportedFrameworkKeys)
     Object.assign(errors, validationDetails)
+  }
+
+  if (!errors.supportedFrameworkKeys) {
+    const planDetails = await validateRuntimeAgentExecutionPlan(runtimeAgent)
+    Object.assign(errors, planDetails.errors)
   }
 
   if (runtimeAgent?.status === 'DEPRECATED') {
@@ -248,13 +433,20 @@ export const listRuntimeAgents = async (req, res, next) => {
 
 export const createRuntimeAgent = async (req, res, next) => {
   try {
-    const validationDetails = await validateRuntimeAgentFrameworkKeys(req.body.supportedFrameworkKeys)
+    const body = pickRuntimeAgentBody(req.body)
+
+    const validationDetails = await validateRuntimeAgentFrameworkKeys(body.supportedFrameworkKeys)
     if (Object.keys(validationDetails).length > 0) {
       return sendValidationFailed(res, req, validationDetails)
     }
 
+    const planDetails = await validateRuntimeAgentExecutionPlan(body)
+    if (Object.keys(planDetails.errors).length > 0) {
+      return sendValidationFailed(res, req, planDetails.errors)
+    }
+
     const existingRuntimeAgent = await RuntimeAgent.findOne({
-      key: req.body.key,
+      key: body.key,
     }).select('_id')
 
     if (existingRuntimeAgent) {
@@ -266,7 +458,7 @@ export const createRuntimeAgent = async (req, res, next) => {
 
     const actorUserId = req.context?.userId || req.userId
     const runtimeAgent = new RuntimeAgent({
-      ...req.body,
+      ...body,
       createdBy: actorUserId,
       updatedBy: actorUserId,
     })
@@ -293,11 +485,11 @@ export const createRuntimeAgent = async (req, res, next) => {
         description: runtimeAgent.description,
         status: runtimeAgent.status,
         agentType: runtimeAgent.agentType,
-        supportedWorkflows: runtimeAgent.supportedWorkflows,
         supportedFrameworkKeys: runtimeAgent.supportedFrameworkKeys,
         defaultSkillIds: runtimeAgent.defaultSkillIds,
         primarySkillIds: runtimeAgent.primarySkillIds,
         optionalSkillIds: runtimeAgent.optionalSkillIds,
+        executionPlan: runtimeAgent.executionPlan,
         promptConfig: runtimeAgent.promptConfig,
         inputContract: runtimeAgent.inputContract,
         outputContract: runtimeAgent.outputContract,
@@ -336,13 +528,7 @@ export const getRuntimeAgent = async (req, res, next) => {
     const runtimeAgent = await RuntimeAgent.findOne({ stableId: req.params.agentId })
 
     if (!runtimeAgent) {
-      return res.status(404).json({
-        error: {
-          code: 'NOT_FOUND',
-          message: RUNTIME_AGENT_NOT_FOUND_MESSAGE,
-          requestId: req.requestId,
-        },
-      })
+      return sendNotFound(res, req)
     }
 
     await populateRuntimeAgent(runtimeAgent)
@@ -356,18 +542,39 @@ export const getRuntimeAgent = async (req, res, next) => {
   }
 }
 
+export const getRuntimeAgentDependencies = async (req, res, next) => {
+  try {
+    const runtimeAgent = await RuntimeAgent.findOne({ stableId: req.params.agentId })
+      .select('stableId key name status supportedFrameworkKeys')
+      .lean()
+
+    if (!runtimeAgent) {
+      return sendNotFound(res, req)
+    }
+
+    const dependencies = await fetchRuntimeAgentDependencies(runtimeAgent.stableId)
+    const summary = buildRuntimeAgentDependencySummary(dependencies)
+
+    return res.status(200).json({
+      data: {
+        agentId: runtimeAgent.stableId,
+        workflowPolicies: dependencies.workflowPolicies.map(serializeRuntimeDependencyReference),
+        frameworkPackages: dependencies.frameworkPackages.map(serializeFrameworkPackageDependencyReference),
+        ...summary,
+      },
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    next(err)
+  }
+}
+
 export const updateRuntimeAgent = async (req, res, next) => {
   try {
     const runtimeAgent = await RuntimeAgent.findOne({ stableId: req.params.agentId })
 
     if (!runtimeAgent) {
-      return res.status(404).json({
-        error: {
-          code: 'NOT_FOUND',
-          message: RUNTIME_AGENT_NOT_FOUND_MESSAGE,
-          requestId: req.requestId,
-        },
-      })
+      return sendNotFound(res, req)
     }
 
     const nextKey = req.body.key ?? runtimeAgent.key
@@ -377,6 +584,17 @@ export const updateRuntimeAgent = async (req, res, next) => {
     const validationDetails = await validateRuntimeAgentFrameworkKeys(nextSupportedFrameworkKeys)
     if (Object.keys(validationDetails).length > 0) {
       return sendValidationFailed(res, req, validationDetails)
+    }
+
+    const planDetails = await validateRuntimeAgentExecutionPlan({
+      supportedFrameworkKeys: nextSupportedFrameworkKeys,
+      defaultSkillIds: req.body.defaultSkillIds ?? runtimeAgent.defaultSkillIds,
+      primarySkillIds: req.body.primarySkillIds ?? runtimeAgent.primarySkillIds,
+      optionalSkillIds: req.body.optionalSkillIds ?? runtimeAgent.optionalSkillIds,
+      executionPlan: req.body.executionPlan ?? runtimeAgent.executionPlan,
+    })
+    if (Object.keys(planDetails.errors).length > 0) {
+      return sendValidationFailed(res, req, planDetails.errors)
     }
 
     const duplicateRuntimeAgent = await RuntimeAgent.findOne({
@@ -398,11 +616,11 @@ export const updateRuntimeAgent = async (req, res, next) => {
       'description',
       'status',
       'agentType',
-      'supportedWorkflows',
       'supportedFrameworkKeys',
       'defaultSkillIds',
       'primarySkillIds',
       'optionalSkillIds',
+      'executionPlan',
       'promptConfig',
       'inputContract',
       'outputContract',
@@ -503,13 +721,7 @@ export const validateRuntimeAgent = async (req, res, next) => {
     const runtimeAgent = await RuntimeAgent.findOne({ stableId: req.params.agentId })
 
     if (!runtimeAgent) {
-      return res.status(404).json({
-        error: {
-          code: 'NOT_FOUND',
-          message: RUNTIME_AGENT_NOT_FOUND_MESSAGE,
-          requestId: req.requestId,
-        },
-      })
+      return sendNotFound(res, req)
     }
 
     await populateRuntimeAgent(runtimeAgent)
@@ -556,13 +768,7 @@ export const testRuntimeAgent = async (req, res, next) => {
     const runtimeAgent = await RuntimeAgent.findOne({ stableId: req.params.agentId })
 
     if (!runtimeAgent) {
-      return res.status(404).json({
-        error: {
-          code: 'NOT_FOUND',
-          message: RUNTIME_AGENT_NOT_FOUND_MESSAGE,
-          requestId: req.requestId,
-        },
-      })
+      return sendNotFound(res, req)
     }
 
     await populateRuntimeAgent(runtimeAgent)
@@ -570,7 +776,6 @@ export const testRuntimeAgent = async (req, res, next) => {
     const { errors, warnings } = await validateRuntimeAgentDocument(runtimeAgent)
     const body = req.body && typeof req.body === 'object' ? req.body : {}
     const frameworkKey = String(body.frameworkKey ?? '').trim().toUpperCase()
-    const workflowKey = String(body.workflowKey ?? '').trim().toLowerCase()
     const input = body.input && typeof body.input === 'object' && !Array.isArray(body.input) ? body.input : {}
     const context = body.context && typeof body.context === 'object' && !Array.isArray(body.context) ? body.context : {}
 
@@ -578,13 +783,6 @@ export const testRuntimeAgent = async (req, res, next) => {
       const frameworks = Array.isArray(runtimeAgent.supportedFrameworkKeys) ? runtimeAgent.supportedFrameworkKeys : []
       if (!frameworks.includes(frameworkKey)) {
         errors.frameworkKey = `Agent does not support framework key "${frameworkKey}".`
-      }
-    }
-
-    if (workflowKey) {
-      const workflows = Array.isArray(runtimeAgent.supportedWorkflows) ? runtimeAgent.supportedWorkflows : []
-      if (!workflows.includes(workflowKey)) {
-        errors.workflowKey = `Agent does not support workflow key "${workflowKey}".`
       }
     }
     const compiledPrompt = compilePromptPreview(runtimeAgent.promptConfig ?? {})
@@ -605,7 +803,6 @@ export const testRuntimeAgent = async (req, res, next) => {
         status: runtimeAgent.status,
         valid: isValid,
         ...(frameworkKey ? { frameworkKey } : {}),
-        ...(workflowKey ? { workflowKey } : {}),
         promptHash,
         promptLength: compiledPrompt.length,
         inputKeys: Object.keys(input).length,
@@ -638,13 +835,7 @@ export const activateRuntimeAgent = async (req, res, next) => {
     const runtimeAgent = await RuntimeAgent.findOne({ stableId: req.params.agentId })
 
     if (!runtimeAgent) {
-      return res.status(404).json({
-        error: {
-          code: 'NOT_FOUND',
-          message: RUNTIME_AGENT_NOT_FOUND_MESSAGE,
-          requestId: req.requestId,
-        },
-      })
+      return sendNotFound(res, req)
     }
 
     if (runtimeAgent.status === 'DEPRECATED') {
@@ -699,12 +890,17 @@ export const disableRuntimeAgent = async (req, res, next) => {
     const runtimeAgent = await RuntimeAgent.findOne({ stableId: req.params.agentId })
 
     if (!runtimeAgent) {
-      return res.status(404).json({
-        error: {
-          code: 'NOT_FOUND',
-          message: RUNTIME_AGENT_NOT_FOUND_MESSAGE,
-          requestId: req.requestId,
-        },
+      return sendNotFound(res, req)
+    }
+
+    const dependencySummary = buildRuntimeAgentDependencySummary(
+      await fetchRuntimeAgentDependencies(runtimeAgent.stableId),
+    )
+    if (dependencySummary.blocks.length > 0) {
+      return sendConflict(res, req, dependencySummary.blocks[0], {
+        field: 'status',
+        reason: 'RUNTIME_AGENT_DEPENDENCIES_ACTIVE',
+        ...dependencySummary.summary,
       })
     }
 
@@ -743,12 +939,17 @@ export const deprecateRuntimeAgent = async (req, res, next) => {
     const runtimeAgent = await RuntimeAgent.findOne({ stableId: req.params.agentId })
 
     if (!runtimeAgent) {
-      return res.status(404).json({
-        error: {
-          code: 'NOT_FOUND',
-          message: RUNTIME_AGENT_NOT_FOUND_MESSAGE,
-          requestId: req.requestId,
-        },
+      return sendNotFound(res, req)
+    }
+
+    const dependencySummary = buildRuntimeAgentDependencySummary(
+      await fetchRuntimeAgentDependencies(runtimeAgent.stableId),
+    )
+    if (dependencySummary.blocks.length > 0) {
+      return sendConflict(res, req, dependencySummary.blocks[0], {
+        field: 'status',
+        reason: 'RUNTIME_AGENT_DEPENDENCIES_ACTIVE',
+        ...dependencySummary.summary,
       })
     }
 
