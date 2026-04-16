@@ -342,6 +342,64 @@ describe('Runtime Skill Routes', () => {
     expect(res.body.error.details.supportedFrameworkKeys).toBe('At least one supported framework key is required.')
   })
 
+  test('POST /api/v1/super-admin/runtime-control/skills returns 422 when both primaryOutputKey and outputBindings are provided', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/skills')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        key: 'check-required-vmf-sections',
+        name: 'Check Required VMF Sections',
+        supportedFrameworkKeys: ['VMF'],
+        primaryOutputKey: 'validationResult',
+        outputBindings: ['validationResult', 'missingSections'],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details.primaryOutputKey).toBe('Provide either a primary output key or output bindings, not both.')
+    expect(res.body.error.details.outputBindings).toBe('Provide either a primary output key or output bindings, not both.')
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/skills returns 422 when SYSTEM skills include executionConfig', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/skills')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        key: 'snapshot',
+        name: 'Snapshot',
+        supportedFrameworkKeys: ['VMF'],
+        executionMode: 'SYSTEM',
+        executionConfig: { mode: 'unsafe' },
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details.executionConfig).toBe('Execution config is only supported for rule engine or agent-assisted skills.')
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/skills returns 422 when forbiddenWritePaths overlaps allowedWritePaths', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/skills')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        key: 'mutate-snapshot',
+        name: 'Mutate Snapshot',
+        supportedFrameworkKeys: ['VMF'],
+        allowedWritePaths: ['vmf.snapshotId'],
+        forbiddenWritePaths: ['vmf.snapshotId'],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details.forbiddenWritePaths).toBe('Forbidden write paths must not overlap with allowed write paths.')
+  })
+
   test('POST /api/v1/super-admin/runtime-control/skills returns 409 when the key already exists', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     mockFindOneSelect({ _id: RUNTIME_SKILL_DB_ID })
@@ -468,6 +526,18 @@ describe('Runtime Skill Routes', () => {
         workflowPolicyIds: ['policy-vmf-publish'],
       },
     })
+  })
+
+  test('GET /api/v1/super-admin/runtime-control/skills/:skillId returns 404 when the skill does not exist', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    RuntimeSkill.findOne.mockResolvedValue(null)
+
+    const res = await request
+      .get('/api/v1/super-admin/runtime-control/skills/skill-missing')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(404)
+    expect(res.body.error.code).toBe('NOT_FOUND')
   })
 
   test('GET /api/v1/super-admin/runtime-control/skills/:skillId/dependencies returns dependency visibility for the skill', async () => {
@@ -602,6 +672,19 @@ describe('Runtime Skill Routes', () => {
         summary: 'Super Admin updated runtime skill Runtime Snapshot (snapshot)',
       }),
     )
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/skills/:skillId returns 404 when the skill does not exist', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    RuntimeSkill.findOne.mockResolvedValue(null)
+
+    const res = await request
+      .patch('/api/v1/super-admin/runtime-control/skills/skill-missing')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: 'Missing' })
+
+    expect(res.status).toBe(404)
+    expect(res.body.error.code).toBe('NOT_FOUND')
   })
 
   test('POST /api/v1/super-admin/runtime-control/skills creates a skill with DRAFT status', async () => {

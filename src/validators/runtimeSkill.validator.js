@@ -13,6 +13,7 @@ const keyRegex = /^[a-z][a-z0-9-]*$/
 const skillIdRegex = /^skill-[a-z][a-z0-9-]*$/
 const frameworkKeyRegex = /^[A-Z][A-Z0-9_]*$/
 const enumTokenRegex = /^[A-Z][A-Z0-9_]*$/
+const outputBindingRegex = /^[a-zA-Z][a-zA-Z0-9_]*$/
 
 const frameworkKeySchema = z
   .string()
@@ -49,6 +50,33 @@ const objectSchema = (fieldLabel) =>
     `${fieldLabel} must be an object.`,
   )
 
+const outputBindingSchema = z
+  .string()
+  .trim()
+  .min(1, 'Output binding is required')
+  .max(120, 'Output binding must be 120 characters or fewer')
+  .refine(
+    (value) => outputBindingRegex.test(value),
+    'Output binding must start with a letter and only use letters, numbers, or underscores.',
+  )
+
+const optionalOutputBindingSchema = z.preprocess(
+  (value) => (typeof value === 'string' && !value.trim() ? undefined : value),
+  outputBindingSchema.optional(),
+)
+
+const pathSchema = z
+  .string()
+  .trim()
+  .min(1, 'Path is required')
+  .max(200, 'Path must be 200 characters or fewer')
+  .refine(
+    (value) => !/\s/.test(value),
+    'Path must not contain whitespace.',
+  )
+
+const uniqueList = (values) => [...new Set(values)]
+
 const createRuntimeSkillSchema = z.object({
   key: z
     .string({ required_error: 'Skill key is required' })
@@ -82,6 +110,59 @@ const createRuntimeSkillSchema = z.object({
   inputContract: objectSchema('Input contract').default({}),
   outputContract: objectSchema('Output contract').default({}),
   runtimeConfig: objectSchema('Runtime config').default({}),
+  primaryOutputKey: optionalOutputBindingSchema,
+  outputBindings: z
+    .array(outputBindingSchema)
+    .max(50, 'Output bindings must contain 50 items or fewer')
+    .transform(uniqueList)
+    .default([]),
+  allowedReadPaths: z
+    .array(pathSchema)
+    .max(100, 'Allowed read paths must contain 100 items or fewer')
+    .transform(uniqueList)
+    .default([]),
+  allowedWritePaths: z
+    .array(pathSchema)
+    .max(100, 'Allowed write paths must contain 100 items or fewer')
+    .transform(uniqueList)
+    .default([]),
+  forbiddenWritePaths: z
+    .array(pathSchema)
+    .max(100, 'Forbidden write paths must contain 100 items or fewer')
+    .transform(uniqueList)
+    .default([]),
+  executionConfig: objectSchema('Execution config').default({}),
+}).superRefine((value, ctx) => {
+  if (value.primaryOutputKey && value.outputBindings.length > 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['primaryOutputKey'],
+      message: 'Provide either a primary output key or output bindings, not both.',
+    })
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['outputBindings'],
+      message: 'Provide either a primary output key or output bindings, not both.',
+    })
+  }
+
+  const allowedWrite = new Set(value.allowedWritePaths)
+  const overlap = value.forbiddenWritePaths.find((item) => allowedWrite.has(item))
+  if (overlap) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['forbiddenWritePaths'],
+      message: 'Forbidden write paths must not overlap with allowed write paths.',
+    })
+  }
+
+  if (value.executionMode === RUNTIME_SKILL_EXECUTION_MODES.SYSTEM && Object.keys(value.executionConfig || {}).length > 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['executionConfig'],
+      message: 'Execution config is only supported for rule engine or agent-assisted skills.',
+    })
+  }
 })
 
 const updateRuntimeSkillSchema = z.object({
@@ -119,6 +200,56 @@ const updateRuntimeSkillSchema = z.object({
   inputContract: objectSchema('Input contract').optional(),
   outputContract: objectSchema('Output contract').optional(),
   runtimeConfig: objectSchema('Runtime config').optional(),
+  primaryOutputKey: optionalOutputBindingSchema.optional(),
+  outputBindings: z
+    .array(outputBindingSchema)
+    .max(50, 'Output bindings must contain 50 items or fewer')
+    .transform(uniqueList)
+    .optional(),
+  allowedReadPaths: z
+    .array(pathSchema)
+    .max(100, 'Allowed read paths must contain 100 items or fewer')
+    .transform(uniqueList)
+    .optional(),
+  allowedWritePaths: z
+    .array(pathSchema)
+    .max(100, 'Allowed write paths must contain 100 items or fewer')
+    .transform(uniqueList)
+    .optional(),
+  forbiddenWritePaths: z
+    .array(pathSchema)
+    .max(100, 'Forbidden write paths must contain 100 items or fewer')
+    .transform(uniqueList)
+    .optional(),
+  executionConfig: objectSchema('Execution config').optional(),
+}).superRefine((value, ctx) => {
+  if (value.primaryOutputKey && Array.isArray(value.outputBindings) && value.outputBindings.length > 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['primaryOutputKey'],
+      message: 'Provide either a primary output key or output bindings, not both.',
+    })
+  }
+
+  if (Array.isArray(value.allowedWritePaths) && Array.isArray(value.forbiddenWritePaths)) {
+    const allowedWrite = new Set(value.allowedWritePaths)
+    const overlap = value.forbiddenWritePaths.find((item) => allowedWrite.has(item))
+    if (overlap) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['forbiddenWritePaths'],
+        message: 'Forbidden write paths must not overlap with allowed write paths.',
+      })
+    }
+  }
+
+  if (value.executionMode === RUNTIME_SKILL_EXECUTION_MODES.SYSTEM && value.executionConfig && Object.keys(value.executionConfig).length > 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['executionConfig'],
+      message: 'Execution config is only supported for rule engine or agent-assisted skills.',
+    })
+  }
 }).refine(
   (value) => Object.keys(value).length > 0,
   { message: 'At least one updatable field is required.', path: ['key'] },

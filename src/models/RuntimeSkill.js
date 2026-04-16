@@ -13,15 +13,11 @@ export const RUNTIME_SKILL_EXECUTION_MODES = Object.freeze({
   AGENT: 'AGENT',
 })
 
-export const SUPPORTED_RUNTIME_SKILL_FRAMEWORK_KEYS = Object.freeze([
-  'VMF',
-  'RLD',
-])
-
 const keyPattern = /^[a-z][a-z0-9-]*$/
 const frameworkKeyPattern = /^[A-Z][A-Z0-9_]*$/
 const enumTokenPattern = /^[A-Z][A-Z0-9_]*$/
 const stableIdPattern = /^skill-[a-z][a-z0-9-]*$/
+const outputBindingPattern = /^[a-zA-Z][a-zA-Z0-9_]*$/
 
 const normalizeKey = (value) =>
   String(value || '')
@@ -48,6 +44,20 @@ const normalizeFrameworkKeyList = (values) => {
   return [...new Set(normalized)]
 }
 
+const normalizeStringList = (values) => {
+  if (!Array.isArray(values)) return []
+
+  const normalized = values
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)
+
+  return [...new Set(normalized)]
+}
+
+const normalizeOutputBindingList = (values) =>
+  normalizeStringList(values)
+    .filter((value) => outputBindingPattern.test(value))
+
 const normalizeEnumToken = (value, fallback) => {
   const normalized = String(value || '')
     .trim()
@@ -67,6 +77,11 @@ const objectField = {
     },
     message: 'Value must be an object.',
   },
+}
+
+const stringListField = {
+  type: [String],
+  default: [],
 }
 
 const runtimeSkillSchema = new mongoose.Schema(
@@ -162,6 +177,45 @@ const runtimeSkillSchema = new mongoose.Schema(
         message: 'Runtime config must be an object.',
       },
     },
+    primaryOutputKey: {
+      type: String,
+      trim: true,
+      maxlength: 120,
+      validate: {
+        validator(value) {
+          if (!value) return true
+          return outputBindingPattern.test(String(value))
+        },
+        message: 'Primary output key must start with a letter and only use letters, numbers, or underscores.',
+      },
+      default: '',
+    },
+    outputBindings: {
+      ...stringListField,
+      validate: {
+        validator(values) {
+          if (!Array.isArray(values)) return false
+          return values.every((value) => outputBindingPattern.test(String(value)))
+        },
+        message: 'Output bindings must start with a letter and only use letters, numbers, or underscores.',
+      },
+    },
+    allowedReadPaths: {
+      ...stringListField,
+    },
+    allowedWritePaths: {
+      ...stringListField,
+    },
+    forbiddenWritePaths: {
+      ...stringListField,
+    },
+    executionConfig: {
+      ...objectField,
+      validate: {
+        ...objectField.validate,
+        message: 'Execution config must be an object.',
+      },
+    },
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
@@ -228,6 +282,49 @@ runtimeSkillSchema.pre('validate', function normalizeRuntimeSkill(next) {
       this.executionMode,
       RUNTIME_SKILL_EXECUTION_MODES.SYSTEM,
     )
+  }
+
+  if (this.isNew || this.isModified('primaryOutputKey')) {
+    this.primaryOutputKey = String(this.primaryOutputKey || '').trim()
+  }
+
+  if (this.isNew || this.isModified('outputBindings')) {
+    this.outputBindings = normalizeOutputBindingList(this.outputBindings)
+  }
+
+  if (this.isNew || this.isModified('allowedReadPaths')) {
+    this.allowedReadPaths = normalizeStringList(this.allowedReadPaths)
+  }
+
+  if (this.isNew || this.isModified('allowedWritePaths')) {
+    this.allowedWritePaths = normalizeStringList(this.allowedWritePaths)
+  }
+
+  if (this.isNew || this.isModified('forbiddenWritePaths')) {
+    this.forbiddenWritePaths = normalizeStringList(this.forbiddenWritePaths)
+  }
+
+  const hasPrimaryOutputKey = Boolean(String(this.primaryOutputKey || '').trim())
+  const hasOutputBindings = Array.isArray(this.outputBindings) && this.outputBindings.length > 0
+
+  if (hasPrimaryOutputKey && hasOutputBindings) {
+    this.invalidate('primaryOutputKey', 'Provide either a primary output key or output bindings, not both.')
+    this.invalidate('outputBindings', 'Provide either a primary output key or output bindings, not both.')
+  }
+
+  const allowedWriteSet = new Set(this.allowedWritePaths || [])
+  const forbiddenOverlap = (this.forbiddenWritePaths || []).find((value) => allowedWriteSet.has(value))
+  if (forbiddenOverlap) {
+    this.invalidate('forbiddenWritePaths', 'Forbidden write paths must not overlap with allowed write paths.')
+  }
+
+  const executionConfig = this.executionConfig && typeof this.executionConfig === 'object' && !Array.isArray(this.executionConfig)
+    ? this.executionConfig
+    : {}
+  const executionConfigHasKeys = Object.keys(executionConfig).length > 0
+
+  if (this.executionMode === RUNTIME_SKILL_EXECUTION_MODES.SYSTEM && executionConfigHasKeys) {
+    this.invalidate('executionConfig', 'Execution config is only supported for rule engine or agent-assisted skills.')
   }
 
   if ((this.isNew || !this.stableId) && this.key) {

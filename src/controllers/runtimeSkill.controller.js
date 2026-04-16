@@ -106,6 +106,15 @@ const serializeRuntimeSkill = (
     plain.runtimeConfig && typeof plain.runtimeConfig === 'object' && !Array.isArray(plain.runtimeConfig)
       ? plain.runtimeConfig
       : {}
+  plain.primaryOutputKey = reqHasValue(plain.primaryOutputKey) ? plain.primaryOutputKey : ''
+  plain.outputBindings = Array.isArray(plain.outputBindings) ? plain.outputBindings : []
+  plain.allowedReadPaths = Array.isArray(plain.allowedReadPaths) ? plain.allowedReadPaths : []
+  plain.allowedWritePaths = Array.isArray(plain.allowedWritePaths) ? plain.allowedWritePaths : []
+  plain.forbiddenWritePaths = Array.isArray(plain.forbiddenWritePaths) ? plain.forbiddenWritePaths : []
+  plain.executionConfig =
+    plain.executionConfig && typeof plain.executionConfig === 'object' && !Array.isArray(plain.executionConfig)
+      ? plain.executionConfig
+      : {}
 
   const serializedUpdatedBy = serializeUserSummary(plain.updatedBy)
   plain.createdBy = serializeUserSummary(plain.createdBy)
@@ -149,6 +158,32 @@ const sendValidationFailed = (res, req, details, message = 'Please check the for
       requestId: req.requestId,
     },
   })
+
+const pickRuntimeSkillPayload = (body = {}) => ({
+  key: body.key,
+  name: body.name,
+  description: body.description,
+  status: body.status,
+  supportedFrameworkKeys: body.supportedFrameworkKeys,
+  category: body.category,
+  type: body.type,
+  executionMode: body.executionMode,
+  inputContract: body.inputContract,
+  outputContract: body.outputContract,
+  runtimeConfig: body.runtimeConfig,
+  primaryOutputKey: body.primaryOutputKey,
+  outputBindings: body.outputBindings,
+  allowedReadPaths: body.allowedReadPaths,
+  allowedWritePaths: body.allowedWritePaths,
+  forbiddenWritePaths: body.forbiddenWritePaths,
+  executionConfig: body.executionConfig,
+})
+
+const hasObjectKeys = (value) =>
+  value
+  && typeof value === 'object'
+  && !Array.isArray(value)
+  && Object.keys(value).length > 0
 
 const populateRuntimeSkill = async (runtimeSkill) => {
   if (!runtimeSkill || typeof runtimeSkill.populate !== 'function') {
@@ -298,7 +333,7 @@ export const createRuntimeSkill = async (req, res, next) => {
 
     const actorUserId = req.context?.userId || req.userId
     const runtimeSkill = new RuntimeSkill({
-      ...req.body,
+      ...pickRuntimeSkillPayload(req.body),
       createdBy: actorUserId,
       updatedBy: actorUserId,
     })
@@ -335,6 +370,12 @@ export const createRuntimeSkill = async (req, res, next) => {
         inputContract: runtimeSkill.inputContract,
         outputContract: runtimeSkill.outputContract,
         runtimeConfig: runtimeSkill.runtimeConfig,
+        primaryOutputKey: runtimeSkill.primaryOutputKey,
+        outputBindings: runtimeSkill.outputBindings,
+        allowedReadPaths: runtimeSkill.allowedReadPaths,
+        allowedWritePaths: runtimeSkill.allowedWritePaths,
+        forbiddenWritePaths: runtimeSkill.forbiddenWritePaths,
+        executionConfig: runtimeSkill.executionConfig,
       },
     })
 
@@ -464,6 +505,14 @@ export const updateRuntimeSkill = async (req, res, next) => {
       })
     }
 
+    const effectiveExecutionMode = String(req.body.executionMode ?? runtimeSkill.executionMode ?? 'SYSTEM').trim().toUpperCase()
+
+    if (req.body.executionConfig !== undefined && effectiveExecutionMode === 'SYSTEM' && hasObjectKeys(req.body.executionConfig)) {
+      return sendValidationFailed(res, req, {
+        executionConfig: 'Execution config is only supported for rule engine or agent-assisted skills.',
+      })
+    }
+
     const diff = {}
     const fields = [
       'key',
@@ -477,6 +526,12 @@ export const updateRuntimeSkill = async (req, res, next) => {
       'inputContract',
       'outputContract',
       'runtimeConfig',
+      'primaryOutputKey',
+      'outputBindings',
+      'allowedReadPaths',
+      'allowedWritePaths',
+      'forbiddenWritePaths',
+      'executionConfig',
     ]
 
     for (const field of fields) {
