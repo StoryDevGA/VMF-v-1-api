@@ -470,6 +470,7 @@ describe('Runtime Skill Routes', () => {
       inputContract: {},
       outputContract: {},
       runtimeConfig: {},
+      referenceAssets: [],
       dependencySummary: {
         agentIds: [],
         workflowPolicyIds: [],
@@ -484,6 +485,46 @@ describe('Runtime Skill Routes', () => {
         summary: 'Super Admin created runtime skill Summary (summary)',
       }),
     )
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/skills accepts referenceAssets metadata', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    mockFindOneSelect(null)
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/skills')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        key: 'check-required-vmf-sections',
+        name: 'Check Required VMF Sections',
+        supportedFrameworkKeys: ['VMF'],
+        referenceAssets: [
+          {
+            assetId: 'asset-vmf-validation-guidance',
+            name: 'VMF Validation Guidance',
+            assetType: 'PDF',
+            mimeType: 'application/pdf',
+            purpose: 'RUNTIME_REFERENCE',
+            usageMode: 'OPTIONAL',
+            status: 'ACTIVE',
+            description: 'Reference guide for required VMF sections and validation expectations.',
+            storageKey: 'runtime-control/skills/check-required-vmf-sections/validation-guide.pdf',
+          },
+        ],
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data.referenceAssets).toHaveLength(1)
+    expect(res.body.data.referenceAssets[0]).toMatchObject({
+      assetId: 'asset-vmf-validation-guidance',
+      name: 'VMF Validation Guidance',
+      assetType: 'PDF',
+      mimeType: 'application/pdf',
+      purpose: 'RUNTIME_REFERENCE',
+      usageMode: 'OPTIONAL',
+      status: 'ACTIVE',
+      storageKey: 'runtime-control/skills/check-required-vmf-sections/validation-guide.pdf',
+    })
   })
 
   test('GET /api/v1/super-admin/runtime-control/skills/:skillId returns the runtime skill detail payload', async () => {

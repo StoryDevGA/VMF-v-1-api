@@ -115,6 +115,7 @@ const serializeRuntimeSkill = (
     plain.executionConfig && typeof plain.executionConfig === 'object' && !Array.isArray(plain.executionConfig)
       ? plain.executionConfig
       : {}
+  plain.referenceAssets = Array.isArray(plain.referenceAssets) ? plain.referenceAssets : []
 
   const serializedUpdatedBy = serializeUserSummary(plain.updatedBy)
   plain.createdBy = serializeUserSummary(plain.createdBy)
@@ -177,6 +178,7 @@ const pickRuntimeSkillPayload = (body = {}) => ({
   allowedWritePaths: body.allowedWritePaths,
   forbiddenWritePaths: body.forbiddenWritePaths,
   executionConfig: body.executionConfig,
+  referenceAssets: body.referenceAssets,
 })
 
 const hasObjectKeys = (value) =>
@@ -532,6 +534,7 @@ export const updateRuntimeSkill = async (req, res, next) => {
       'allowedWritePaths',
       'forbiddenWritePaths',
       'executionConfig',
+      'referenceAssets',
     ]
 
     for (const field of fields) {

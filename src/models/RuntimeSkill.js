@@ -1,4 +1,5 @@
 import mongoose from 'mongoose'
+import { randomUUID } from 'node:crypto'
 
 export const RUNTIME_SKILL_STATUSES = Object.freeze({
   ACTIVE: 'ACTIVE',
@@ -18,6 +19,7 @@ const frameworkKeyPattern = /^[A-Z][A-Z0-9_]*$/
 const enumTokenPattern = /^[A-Z][A-Z0-9_]*$/
 const stableIdPattern = /^skill-[a-z][a-z0-9-]*$/
 const outputBindingPattern = /^[a-zA-Z][a-zA-Z0-9_]*$/
+const assetIdPattern = /^asset-[a-z0-9-]{6,}$/
 
 const normalizeKey = (value) =>
   String(value || '')
@@ -57,6 +59,14 @@ const normalizeStringList = (values) => {
 const normalizeOutputBindingList = (values) =>
   normalizeStringList(values)
     .filter((value) => outputBindingPattern.test(value))
+
+const normalizeReferenceAssetToken = (value, fallback) => {
+  const normalized = String(value || '')
+    .trim()
+    .toUpperCase()
+
+  return normalized || fallback
+}
 
 const normalizeEnumToken = (value, fallback) => {
   const normalized = String(value || '')
@@ -216,6 +226,73 @@ const runtimeSkillSchema = new mongoose.Schema(
         message: 'Execution config must be an object.',
       },
     },
+    referenceAssets: [{
+      assetId: {
+        type: String,
+        required: true,
+        trim: true,
+        lowercase: true,
+        maxlength: 120,
+        match: [assetIdPattern, 'Asset id must use the asset-<token> format'],
+      },
+      name: {
+        type: String,
+        required: true,
+        trim: true,
+        maxlength: 140,
+      },
+      assetType: {
+        type: String,
+        trim: true,
+        uppercase: true,
+        maxlength: 40,
+        default: 'OTHER',
+      },
+      mimeType: {
+        type: String,
+        trim: true,
+        maxlength: 140,
+        default: '',
+      },
+      purpose: {
+        type: String,
+        required: true,
+        trim: true,
+        uppercase: true,
+        maxlength: 60,
+        default: 'AUTHORING_HELP',
+      },
+      usageMode: {
+        type: String,
+        trim: true,
+        uppercase: true,
+        maxlength: 40,
+        default: 'OPTIONAL',
+      },
+      status: {
+        type: String,
+        trim: true,
+        uppercase: true,
+        maxlength: 40,
+        default: 'ACTIVE',
+      },
+      description: {
+        type: String,
+        trim: true,
+        maxlength: 500,
+        default: '',
+      },
+      storageKey: {
+        type: String,
+        trim: true,
+        maxlength: 500,
+        default: '',
+      },
+      uploadedAt: {
+        type: Date,
+        default: Date.now,
+      },
+    }],
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
@@ -302,6 +379,32 @@ runtimeSkillSchema.pre('validate', function normalizeRuntimeSkill(next) {
 
   if (this.isNew || this.isModified('forbiddenWritePaths')) {
     this.forbiddenWritePaths = normalizeStringList(this.forbiddenWritePaths)
+  }
+
+  if (this.isNew || this.isModified('referenceAssets')) {
+    const assets = Array.isArray(this.referenceAssets) ? this.referenceAssets : []
+
+    this.referenceAssets = assets
+      .filter((asset) => asset && typeof asset === 'object' && !Array.isArray(asset))
+      .map((asset) => {
+        const nextAssetId = String(asset.assetId || '').trim().toLowerCase()
+        const assetId = assetIdPattern.test(nextAssetId)
+          ? nextAssetId
+          : `asset-${randomUUID().replace(/[^a-z0-9]/gi, '').toLowerCase().slice(0, 12)}`
+
+        return {
+          ...asset,
+          assetId,
+          name: normalizeName(asset.name),
+          assetType: normalizeReferenceAssetToken(asset.assetType, 'OTHER'),
+          mimeType: String(asset.mimeType || '').trim(),
+          purpose: normalizeReferenceAssetToken(asset.purpose, 'AUTHORING_HELP'),
+          usageMode: normalizeReferenceAssetToken(asset.usageMode, 'OPTIONAL'),
+          status: normalizeReferenceAssetToken(asset.status, 'ACTIVE'),
+          description: normalizeDescription(asset.description),
+          storageKey: String(asset.storageKey || '').trim(),
+        }
+      })
   }
 
   const hasPrimaryOutputKey = Boolean(String(this.primaryOutputKey || '').trim())

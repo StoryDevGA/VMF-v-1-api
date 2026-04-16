@@ -14,6 +14,7 @@ const skillIdRegex = /^skill-[a-z][a-z0-9-]*$/
 const frameworkKeyRegex = /^[A-Z][A-Z0-9_]*$/
 const enumTokenRegex = /^[A-Z][A-Z0-9_]*$/
 const outputBindingRegex = /^[a-zA-Z][a-zA-Z0-9_]*$/
+const assetIdRegex = /^asset-[a-z0-9-]{6,}$/
 
 const frameworkKeySchema = z
   .string()
@@ -77,6 +78,60 @@ const pathSchema = z
 
 const uniqueList = (values) => [...new Set(values)]
 
+const runtimeSkillReferenceAssetSchema = z.object({
+  assetId: z
+    .string()
+    .trim()
+    .min(1, 'Asset id is required')
+    .max(120, 'Asset id must be 120 characters or fewer')
+    .transform((value) => value.toLowerCase())
+    .refine((value) => assetIdRegex.test(value), 'Asset id must use the asset-<token> format'),
+  name: z
+    .string({ required_error: 'Asset name is required' })
+    .trim()
+    .min(1, 'Asset name is required')
+    .max(140, 'Asset name must be 140 characters or fewer'),
+  assetType: z
+    .string()
+    .trim()
+    .max(40, 'Asset type must be 40 characters or fewer')
+    .transform((value) => value.toUpperCase())
+    .default('OTHER'),
+  mimeType: z
+    .string()
+    .trim()
+    .max(140, 'Mime type must be 140 characters or fewer')
+    .default(''),
+  purpose: z
+    .string()
+    .trim()
+    .min(1, 'Asset purpose is required')
+    .max(60, 'Asset purpose must be 60 characters or fewer')
+    .transform((value) => value.toUpperCase()),
+  usageMode: z
+    .string()
+    .trim()
+    .max(40, 'Usage mode must be 40 characters or fewer')
+    .transform((value) => value.toUpperCase())
+    .default('OPTIONAL'),
+  status: z
+    .string()
+    .trim()
+    .max(40, 'Asset status must be 40 characters or fewer')
+    .transform((value) => value.toUpperCase())
+    .default('ACTIVE'),
+  description: z
+    .string()
+    .trim()
+    .max(500, 'Asset description must be 500 characters or fewer')
+    .default(''),
+  storageKey: z
+    .string()
+    .trim()
+    .max(500, 'Storage key must be 500 characters or fewer')
+    .default(''),
+}).strict()
+
 const createRuntimeSkillSchema = z.object({
   key: z
     .string({ required_error: 'Skill key is required' })
@@ -132,6 +187,10 @@ const createRuntimeSkillSchema = z.object({
     .transform(uniqueList)
     .default([]),
   executionConfig: objectSchema('Execution config').default({}),
+  referenceAssets: z
+    .array(runtimeSkillReferenceAssetSchema)
+    .max(50, 'Reference assets must contain 50 items or fewer')
+    .default([]),
 }).superRefine((value, ctx) => {
   if (value.primaryOutputKey && value.outputBindings.length > 0) {
     ctx.addIssue({
@@ -222,6 +281,10 @@ const updateRuntimeSkillSchema = z.object({
     .transform(uniqueList)
     .optional(),
   executionConfig: objectSchema('Execution config').optional(),
+  referenceAssets: z
+    .array(runtimeSkillReferenceAssetSchema)
+    .max(50, 'Reference assets must contain 50 items or fewer')
+    .optional(),
 }).superRefine((value, ctx) => {
   if (value.primaryOutputKey && Array.isArray(value.outputBindings) && value.outputBindings.length > 0) {
     ctx.addIssue({
