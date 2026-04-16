@@ -15,6 +15,24 @@ const frameworkKeyRegex = /^[A-Z][A-Z0-9_]*$/
 const enumTokenRegex = /^[A-Z][A-Z0-9_]*$/
 const outputBindingRegex = /^[a-zA-Z][a-zA-Z0-9_]*$/
 const assetIdRegex = /^asset-[a-z0-9-]{6,}$/
+const REFERENCE_ASSET_PURPOSES = Object.freeze([
+  'AUTHORING_HELP',
+  'RUNTIME_REFERENCE',
+  'EXAMPLE_INPUT',
+  'EXAMPLE_OUTPUT',
+  'TEMPLATE',
+  'POLICY_GUIDANCE',
+  'TEST_ASSET',
+])
+const REFERENCE_ASSET_USAGE_MODES = Object.freeze([
+  'OPTIONAL',
+  'REQUIRED',
+  'TEST_ONLY',
+])
+const REFERENCE_ASSET_STATUSES = Object.freeze([
+  'ACTIVE',
+  'INACTIVE',
+])
 
 const frameworkKeySchema = z
   .string()
@@ -107,19 +125,35 @@ const runtimeSkillReferenceAssetSchema = z.object({
     .trim()
     .min(1, 'Asset purpose is required')
     .max(60, 'Asset purpose must be 60 characters or fewer')
-    .transform((value) => value.toUpperCase()),
+    .transform((value) => value.toUpperCase())
+    .refine(
+      (value) => REFERENCE_ASSET_PURPOSES.includes(value),
+      `Asset purpose must be one of: ${REFERENCE_ASSET_PURPOSES.join(', ')}`,
+    ),
   usageMode: z
     .string()
     .trim()
     .max(40, 'Usage mode must be 40 characters or fewer')
     .transform((value) => value.toUpperCase())
+    .transform((value) => (value === 'TESTING' ? 'TEST_ONLY' : value))
+    .refine(
+      (value) => REFERENCE_ASSET_USAGE_MODES.includes(value),
+      `Usage mode must be one of: ${REFERENCE_ASSET_USAGE_MODES.join(', ')}`,
+    )
     .default('OPTIONAL'),
   status: z
     .string()
     .trim()
     .max(40, 'Asset status must be 40 characters or fewer')
     .transform((value) => value.toUpperCase())
+    .refine(
+      (value) => REFERENCE_ASSET_STATUSES.includes(value),
+      `Asset status must be one of: ${REFERENCE_ASSET_STATUSES.join(', ')}`,
+    )
     .default('ACTIVE'),
+  isRuntimeAccessible: z.boolean().default(false),
+  isAdminOnly: z.boolean().default(false),
+  isTestOnly: z.boolean().default(false),
   description: z
     .string()
     .trim()
@@ -130,7 +164,57 @@ const runtimeSkillReferenceAssetSchema = z.object({
     .trim()
     .max(500, 'Storage key must be 500 characters or fewer')
     .default(''),
-}).strict()
+})
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.isRuntimeAccessible && value.isAdminOnly) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['isRuntimeAccessible'],
+        message: 'Runtime-accessible assets cannot be marked as admin-only.',
+      })
+    }
+
+    if (value.isRuntimeAccessible && value.isTestOnly) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['isRuntimeAccessible'],
+        message: 'Runtime-accessible assets cannot be marked as test-only.',
+      })
+    }
+
+    if (value.usageMode === 'TEST_ONLY' && !value.isTestOnly) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['isTestOnly'],
+        message: 'Test-only usage mode requires the asset to be marked as test-only.',
+      })
+    }
+
+    if (value.purpose === 'TEST_ASSET' && !value.isTestOnly) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['isTestOnly'],
+        message: 'Test asset purpose requires the asset to be marked as test-only.',
+      })
+    }
+
+    if (value.usageMode === 'REQUIRED' && !String(value.storageKey || '').trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['storageKey'],
+        message: 'Required assets must include a storage key or URL.',
+      })
+    }
+
+    if (value.isRuntimeAccessible && !String(value.storageKey || '').trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['storageKey'],
+        message: 'Runtime-accessible assets must include a storage key or URL.',
+      })
+    }
+  })
 
 const createRuntimeSkillSchema = z.object({
   key: z

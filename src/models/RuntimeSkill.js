@@ -115,6 +115,9 @@ const runtimeSkillSchema = new mongoose.Schema(
       lowercase: true,
       maxlength: 120,
       match: [keyPattern, 'Skill key must use lowercase letters, numbers, or hyphens'],
+      immutable: true,
+      index: true,
+      unique: true,
     },
     name: {
       type: String,
@@ -276,6 +279,18 @@ const runtimeSkillSchema = new mongoose.Schema(
         maxlength: 40,
         default: 'ACTIVE',
       },
+      isRuntimeAccessible: {
+        type: Boolean,
+        default: false,
+      },
+      isAdminOnly: {
+        type: Boolean,
+        default: false,
+      },
+      isTestOnly: {
+        type: Boolean,
+        default: false,
+      },
       description: {
         type: String,
         trim: true,
@@ -399,8 +414,25 @@ runtimeSkillSchema.pre('validate', function normalizeRuntimeSkill(next) {
           assetType: normalizeReferenceAssetToken(asset.assetType, 'OTHER'),
           mimeType: String(asset.mimeType || '').trim(),
           purpose: normalizeReferenceAssetToken(asset.purpose, 'AUTHORING_HELP'),
-          usageMode: normalizeReferenceAssetToken(asset.usageMode, 'OPTIONAL'),
+          usageMode: normalizeReferenceAssetToken(
+            String(asset.usageMode || '').trim().toUpperCase() === 'TESTING'
+              ? 'TEST_ONLY'
+              : asset.usageMode,
+            'OPTIONAL',
+          ),
           status: normalizeReferenceAssetToken(asset.status, 'ACTIVE'),
+          isRuntimeAccessible: typeof asset.isRuntimeAccessible === 'boolean'
+            ? asset.isRuntimeAccessible
+            : normalizeReferenceAssetToken(asset.purpose, 'AUTHORING_HELP') === 'RUNTIME_REFERENCE',
+          isAdminOnly: Boolean(asset.isAdminOnly),
+          isTestOnly: Boolean(asset.isTestOnly)
+            || normalizeReferenceAssetToken(asset.purpose, 'AUTHORING_HELP') === 'TEST_ASSET'
+            || normalizeReferenceAssetToken(
+              String(asset.usageMode || '').trim().toUpperCase() === 'TESTING'
+                ? 'TEST_ONLY'
+                : asset.usageMode,
+              'OPTIONAL',
+            ) === 'TEST_ONLY',
           description: normalizeDescription(asset.description),
           storageKey: String(asset.storageKey || '').trim(),
         }

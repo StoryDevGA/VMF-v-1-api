@@ -509,6 +509,9 @@ describe('Runtime Skill Routes', () => {
             status: 'ACTIVE',
             description: 'Reference guide for required VMF sections and validation expectations.',
             storageKey: 'runtime-control/skills/check-required-vmf-sections/validation-guide.pdf',
+            isRuntimeAccessible: true,
+            isAdminOnly: false,
+            isTestOnly: false,
           },
         ],
       })
@@ -524,6 +527,9 @@ describe('Runtime Skill Routes', () => {
       usageMode: 'OPTIONAL',
       status: 'ACTIVE',
       storageKey: 'runtime-control/skills/check-required-vmf-sections/validation-guide.pdf',
+      isRuntimeAccessible: true,
+      isAdminOnly: false,
+      isTestOnly: false,
     })
   })
 
@@ -774,6 +780,131 @@ describe('Runtime Skill Routes', () => {
       id: 'skill-snapshot',
       status: 'DEPRECATED',
     })
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/skills creates a skill with reference assets', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    mockFindOneSelect(null)
+
+    const referenceAssets = [
+      {
+        assetId: 'asset-abc123def',
+        name: 'Help Document',
+        assetType: 'PDF',
+        mimeType: 'application/pdf',
+        purpose: 'AUTHORING_HELP',
+        usageMode: 'OPTIONAL',
+        status: 'ACTIVE',
+        description: 'User guide for skill authoring',
+        storageKey: 's3://bucket/help.pdf',
+      },
+    ]
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/skills')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        key: 'documented-skill',
+        name: 'Documented Skill',
+        supportedFrameworkKeys: ['VMF'],
+        referenceAssets,
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data.referenceAssets).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          assetId: 'asset-abc123def',
+          name: 'Help Document',
+          purpose: 'AUTHORING_HELP',
+        }),
+      ]),
+    )
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/skills/:skillId updates reference assets', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const runtimeSkill = makeRuntimeSkillDoc()
+
+    RuntimeSkill.findOne
+      .mockResolvedValueOnce(runtimeSkill)
+      .mockReturnValueOnce({
+        select: jest.fn().mockResolvedValue(null),
+      })
+
+    const newReferenceAssets = [
+      {
+        assetId: 'asset-xyz789',
+        name: 'API Documentation',
+        assetType: 'JSON',
+        mimeType: 'application/json',
+        purpose: 'RUNTIME_REFERENCE',
+        usageMode: 'REQUIRED',
+        status: 'ACTIVE',
+        storageKey: 's3://bucket/api.json',
+      },
+    ]
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/skills/${RUNTIME_SKILL_STABLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        referenceAssets: newReferenceAssets,
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.referenceAssets).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          assetId: 'asset-xyz789',
+          name: 'API Documentation',
+          purpose: 'RUNTIME_REFERENCE',
+        }),
+      ]),
+    )
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/skills rejects reference assets with missing required fields', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    mockFindOneSelect(null)
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/skills')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        key: 'invalid-asset-skill',
+        name: 'Invalid Asset Skill',
+        supportedFrameworkKeys: ['VMF'],
+        referenceAssets: [
+          {
+            assetId: 'asset-test',
+            // missing name
+            purpose: 'AUTHORING_HELP',
+          },
+        ],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.message).toMatch(/reference asset/i)
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/skills/:skillId rejects key changes (immutable)', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const runtimeSkill = makeRuntimeSkillDoc()
+
+    RuntimeSkill.findOne.mockResolvedValueOnce(runtimeSkill)
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/skills/${RUNTIME_SKILL_STABLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        key: 'different-key',
+        name: 'Snapshot Updated',
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details.key).toMatch(/immutable/i)
   })
 
 })

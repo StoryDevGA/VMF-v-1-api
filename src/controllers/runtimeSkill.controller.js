@@ -378,6 +378,7 @@ export const createRuntimeSkill = async (req, res, next) => {
         allowedWritePaths: runtimeSkill.allowedWritePaths,
         forbiddenWritePaths: runtimeSkill.forbiddenWritePaths,
         executionConfig: runtimeSkill.executionConfig,
+        referenceAssets: runtimeSkill.referenceAssets,
       },
     })
 
@@ -486,25 +487,19 @@ export const updateRuntimeSkill = async (req, res, next) => {
       })
     }
 
-    const nextKey = req.body.key ?? runtimeSkill.key
+    // Prevent key changes - the key is immutable after creation
+    if (req.body.key !== undefined && req.body.key !== runtimeSkill.key) {
+      return sendValidationFailed(res, req, {
+        key: 'Skill key is immutable and cannot be changed after creation.',
+      })
+    }
+
     const nextSupportedFrameworkKeys =
       req.body.supportedFrameworkKeys ?? runtimeSkill.supportedFrameworkKeys
 
     const validationDetails = await validateRuntimeSkillFrameworkKeys(nextSupportedFrameworkKeys)
     if (Object.keys(validationDetails).length > 0) {
       return sendValidationFailed(res, req, validationDetails)
-    }
-
-    const duplicateRuntimeSkill = await RuntimeSkill.findOne({
-      _id: { $ne: runtimeSkill._id },
-      key: nextKey,
-    }).select('_id')
-
-    if (duplicateRuntimeSkill) {
-      return sendConflict(res, req, DUPLICATE_RUNTIME_SKILL_KEY_MESSAGE, {
-        field: 'key',
-        reason: 'RUNTIME_SKILL_KEY_CONFLICT',
-      })
     }
 
     const effectiveExecutionMode = String(req.body.executionMode ?? runtimeSkill.executionMode ?? 'SYSTEM').trim().toUpperCase()
