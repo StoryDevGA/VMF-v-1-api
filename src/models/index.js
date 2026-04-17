@@ -14,6 +14,7 @@ import FrameworkRegistry from './FrameworkRegistry.js'
 import FrameworkPackage from './FrameworkPackage.js'
 import RuntimeAgent from './RuntimeAgent.js'
 import RuntimeSkill from './RuntimeSkill.js'
+import RuntimePathRegistry from './RuntimePathRegistry.js'
 import WorkflowPolicy from './WorkflowPolicy.js'
 
 // Export all models
@@ -33,6 +34,7 @@ export {
   FrameworkPackage,
   RuntimeAgent,
   RuntimeSkill,
+  RuntimePathRegistry,
   WorkflowPolicy,
 }
 
@@ -53,5 +55,6 @@ export default {
   FrameworkPackage,
   RuntimeAgent,
   RuntimeSkill,
+  RuntimePathRegistry,
   WorkflowPolicy,
 }

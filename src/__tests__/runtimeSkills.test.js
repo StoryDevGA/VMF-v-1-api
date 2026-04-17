@@ -87,12 +87,19 @@ const buildRuntimeSkillQueryChain = (rows) => ({
   lean: jest.fn().mockResolvedValue(rows),
 })
 
+const buildRuntimePathFindChain = (rows) => ({
+  select: jest.fn().mockReturnValue({
+    lean: jest.fn().mockResolvedValue(rows),
+  }),
+})
+
 let app
 let request
 let tokenService
 let User
 let Role
 let FrameworkRegistry
+let RuntimePathRegistry
 let RuntimeSkill
 let RuntimeAgent
 let WorkflowPolicy
@@ -166,6 +173,7 @@ beforeAll(async () => {
   User = models.User
   Role = models.Role
   FrameworkRegistry = models.FrameworkRegistry
+  RuntimePathRegistry = models.RuntimePathRegistry
   RuntimeSkill = models.RuntimeSkill
   RuntimeAgent = models.RuntimeAgent
   WorkflowPolicy = models.WorkflowPolicy
@@ -206,6 +214,7 @@ beforeEach(() => {
   RuntimeAgent.find = jest.fn()
   WorkflowPolicy.find = jest.fn()
   FrameworkRegistry.find = jest.fn()
+  RuntimePathRegistry.find = jest.fn()
   Role.find = jest.fn().mockReturnValue(buildRoleQueryChain(buildDefaultRoleRows()))
 
   RuntimeSkill.prototype.save = jest.fn(async function save() {
@@ -236,6 +245,8 @@ beforeEach(() => {
       status: 'ACTIVE',
     },
   ]))
+
+  RuntimePathRegistry.find.mockReturnValue(buildRuntimePathFindChain([]))
 
   AuditLog.createLog = jest.fn(async () => ({}))
   mockRedisClient.set.mockResolvedValue('OK')
@@ -398,6 +409,74 @@ describe('Runtime Skill Routes', () => {
     expect(res.status).toBe(422)
     expect(res.body.error.code).toBe('VALIDATION_FAILED')
     expect(res.body.error.details.forbiddenWritePaths).toBe('Forbidden write paths must not overlap with allowed write paths.')
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/skills returns 422 when forbiddenWritePaths contains non-protected runtime paths', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const rowsByKey = {
+      'vmf.sections.*': {
+        pathKey: 'vmf.sections.*',
+        status: 'ACTIVE',
+        frameworkKeys: ['VMF'],
+        allowedOperations: ['READ', 'BIND'],
+        isProtected: false,
+      },
+    }
+
+    RuntimePathRegistry.find.mockImplementation((filter) => {
+      const keys = filter?.pathKey?.$in ?? []
+      const rows = keys.map((key) => rowsByKey[key]).filter(Boolean)
+      return buildRuntimePathFindChain(rows)
+    })
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/skills')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        key: 'forbid-non-protected',
+        name: 'Forbid Non Protected',
+        supportedFrameworkKeys: ['VMF'],
+        forbiddenWritePaths: ['vmf.sections.*'],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details.forbiddenWritePaths).toContain('must be protected')
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/skills returns 422 when allowedWritePaths includes protected runtime paths', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const rowsByKey = {
+      'vmf.frameworkKey': {
+        pathKey: 'vmf.frameworkKey',
+        status: 'ACTIVE',
+        frameworkKeys: ['VMF'],
+        allowedOperations: ['READ', 'WRITE', 'BIND'],
+        isProtected: true,
+      },
+    }
+
+    RuntimePathRegistry.find.mockImplementation((filter) => {
+      const keys = filter?.pathKey?.$in ?? []
+      const rows = keys.map((key) => rowsByKey[key]).filter(Boolean)
+      return buildRuntimePathFindChain(rows)
+    })
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/skills')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        key: 'write-protected-path',
+        name: 'Write Protected Path',
+        supportedFrameworkKeys: ['VMF'],
+        allowedWritePaths: ['vmf.frameworkKey'],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details.allowedWritePaths).toContain('cannot be written')
   })
 
   test('POST /api/v1/super-admin/runtime-control/skills returns 409 when the key already exists', async () => {
@@ -885,7 +964,8 @@ describe('Runtime Skill Routes', () => {
       })
 
     expect(res.status).toBe(422)
-    expect(res.body.error.message).toMatch(/reference asset/i)
+    expect(res.body.error.message).toMatch(/check the form/i)
+    expect(res.body.error.details['referenceAssets.0.name']).toMatch(/expected string/i)
   })
 
   test('PATCH /api/v1/super-admin/runtime-control/skills/:skillId rejects key changes (immutable)', async () => {

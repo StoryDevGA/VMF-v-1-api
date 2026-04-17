@@ -7,27 +7,11 @@ import {
   buildUnknownFrameworkKeyMessage,
   resolveKnownFrameworkKeys,
 } from '../services/frameworkRegistryService.js'
+import { resolveRuntimePathSelections } from '../services/runtimePathRegistryService.js'
+import { escapeRegex, serializeUserSummary, toIdString } from '../utils/controllerUtils.js'
 
 const DUPLICATE_RUNTIME_SKILL_KEY_MESSAGE = 'Skill key must be unique.'
 const RUNTIME_SKILL_NOT_FOUND_MESSAGE = 'Skill was not found.'
-
-const toIdString = (value) => {
-  if (!value) return null
-  if (typeof value === 'string') return value
-  if (typeof value === 'number') return String(value)
-  if (typeof value === 'object') {
-    if (value?._bsontype === 'ObjectId' || value?.constructor?.name === 'ObjectId') {
-      return typeof value.toString === 'function' ? value.toString() : String(value)
-    }
-    if (typeof value.id === 'string' && value.id.trim()) return value.id
-    if (typeof value._id === 'string' && value._id.trim()) return value._id
-    if (value._id && typeof value._id.toString === 'function') return value._id.toString()
-  }
-  if (typeof value.toString === 'function') return value.toString()
-  return String(value)
-}
-
-const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 const cloneAuditValue = (value) => {
   if (value === undefined) return value
@@ -48,23 +32,6 @@ const buildActorSummary = (req) => {
     id,
     ...(actor?.name ? { name: actor.name } : {}),
     ...(actor?.email ? { email: actor.email } : {}),
-  }
-}
-
-const serializeUserSummary = (value) => {
-  if (!value) return null
-
-  if (typeof value === 'string') {
-    return { id: value }
-  }
-
-  const id = toIdString(value.id || value._id || value)
-  if (!id) return null
-
-  return {
-    id,
-    ...(value.name ? { name: value.name } : {}),
-    ...(value.email ? { email: value.email } : {}),
   }
 }
 
@@ -257,6 +224,90 @@ const validateRuntimeSkillFrameworkKeys = async (supportedFrameworkKeys = []) =>
   }
 }
 
+const joinQuoted = (values) => values.map((value) => `"${value}"`).join(', ')
+
+const buildRuntimePathSelectionMessage = ({ missing = [], inactive = [], invalidOperation = [], incompatibleFramework = [], protectedWrite = [], unprotected = [] } = {}) => {
+  const blocks = []
+
+  if (missing.length > 0) {
+    blocks.push(`Unknown runtime path keys: ${joinQuoted(missing)}.`)
+  }
+  if (inactive.length > 0) {
+    blocks.push(`Inactive or deprecated runtime path keys: ${joinQuoted(inactive)}.`)
+  }
+  if (invalidOperation.length > 0) {
+    blocks.push(`Runtime path keys do not support the required operation: ${joinQuoted(invalidOperation)}.`)
+  }
+  if (incompatibleFramework.length > 0) {
+    blocks.push(`Runtime path keys are not compatible with the selected frameworks: ${joinQuoted(incompatibleFramework)}.`)
+  }
+  if (protectedWrite.length > 0) {
+    blocks.push(`Protected runtime path keys cannot be written by skills: ${joinQuoted(protectedWrite)}.`)
+  }
+  if (unprotected.length > 0) {
+    blocks.push(`Runtime path keys must be protected: ${joinQuoted(unprotected)}.`)
+  }
+
+  return blocks.join(' ')
+}
+
+const validateRuntimeSkillRuntimePaths = async ({
+  supportedFrameworkKeys = [],
+  allowedReadPaths = [],
+  allowedWritePaths = [],
+  forbiddenWritePaths = [],
+} = {}) => {
+  const details = {}
+
+  const readResult = await resolveRuntimePathSelections({
+    pathKeys: allowedReadPaths,
+    frameworkKeys: supportedFrameworkKeys,
+    operation: 'READ',
+  })
+  if (
+    readResult.missing.length > 0
+    || readResult.inactive.length > 0
+    || readResult.invalidOperation.length > 0
+    || readResult.incompatibleFramework.length > 0
+  ) {
+    details.allowedReadPaths = buildRuntimePathSelectionMessage(readResult)
+  }
+
+  const allowedWriteResult = await resolveRuntimePathSelections({
+    pathKeys: allowedWritePaths,
+    frameworkKeys: supportedFrameworkKeys,
+    operation: 'WRITE',
+    forbidProtectedWrites: true,
+  })
+  if (
+    allowedWriteResult.missing.length > 0
+    || allowedWriteResult.inactive.length > 0
+    || allowedWriteResult.invalidOperation.length > 0
+    || allowedWriteResult.incompatibleFramework.length > 0
+    || allowedWriteResult.protectedWrite.length > 0
+  ) {
+    details.allowedWritePaths = buildRuntimePathSelectionMessage(allowedWriteResult)
+  }
+
+  const forbiddenWriteResult = await resolveRuntimePathSelections({
+    pathKeys: forbiddenWritePaths,
+    frameworkKeys: supportedFrameworkKeys,
+    operation: null,
+    requireProtected: true,
+    forbidProtectedWrites: false,
+  })
+  if (
+    forbiddenWriteResult.missing.length > 0
+    || forbiddenWriteResult.inactive.length > 0
+    || forbiddenWriteResult.incompatibleFramework.length > 0
+    || forbiddenWriteResult.unprotected.length > 0
+  ) {
+    details.forbiddenWritePaths = buildRuntimePathSelectionMessage(forbiddenWriteResult)
+  }
+
+  return details
+}
+
 const buildDependencySummary = ({ agents = [], workflowPolicies = [] }, { includeEntities = false } = {}) => ({
   agentIds: agents.map((agent) => agent.stableId),
   workflowPolicyIds: workflowPolicies.map((policy) => policy.stableId),
@@ -320,6 +371,16 @@ export const createRuntimeSkill = async (req, res, next) => {
     const validationDetails = await validateRuntimeSkillFrameworkKeys(req.body.supportedFrameworkKeys)
     if (Object.keys(validationDetails).length > 0) {
       return sendValidationFailed(res, req, validationDetails)
+    }
+
+    const runtimePathDetails = await validateRuntimeSkillRuntimePaths({
+      supportedFrameworkKeys: req.body.supportedFrameworkKeys,
+      allowedReadPaths: req.body.allowedReadPaths,
+      allowedWritePaths: req.body.allowedWritePaths,
+      forbiddenWritePaths: req.body.forbiddenWritePaths,
+    })
+    if (Object.keys(runtimePathDetails).length > 0) {
+      return sendValidationFailed(res, req, runtimePathDetails)
     }
 
     const existingRuntimeSkill = await RuntimeSkill.findOne({
@@ -500,6 +561,20 @@ export const updateRuntimeSkill = async (req, res, next) => {
     const validationDetails = await validateRuntimeSkillFrameworkKeys(nextSupportedFrameworkKeys)
     if (Object.keys(validationDetails).length > 0) {
       return sendValidationFailed(res, req, validationDetails)
+    }
+
+    const nextAllowedReadPaths = req.body.allowedReadPaths ?? runtimeSkill.allowedReadPaths ?? []
+    const nextAllowedWritePaths = req.body.allowedWritePaths ?? runtimeSkill.allowedWritePaths ?? []
+    const nextForbiddenWritePaths = req.body.forbiddenWritePaths ?? runtimeSkill.forbiddenWritePaths ?? []
+
+    const runtimePathDetails = await validateRuntimeSkillRuntimePaths({
+      supportedFrameworkKeys: nextSupportedFrameworkKeys,
+      allowedReadPaths: nextAllowedReadPaths,
+      allowedWritePaths: nextAllowedWritePaths,
+      forbiddenWritePaths: nextForbiddenWritePaths,
+    })
+    if (Object.keys(runtimePathDetails).length > 0) {
+      return sendValidationFailed(res, req, runtimePathDetails)
     }
 
     const effectiveExecutionMode = String(req.body.executionMode ?? runtimeSkill.executionMode ?? 'SYSTEM').trim().toUpperCase()
