@@ -10,6 +10,7 @@ const keyRegex = /^[a-z][a-z0-9-]*$/
 const agentIdRegex = /^agent-[a-z][a-z0-9-]*$/
 const frameworkKeyRegex = /^[A-Z][A-Z0-9_]*$/
 const enumTokenRegex = /^[A-Z][A-Z0-9_]*$/
+const executionTargetRegex = /^[a-zA-Z][a-zA-Z0-9_]*$/
 
 const frameworkKeySchema = z
   .string()
@@ -66,6 +67,16 @@ const executionPlanStepSchema = z.object({
     .string()
     .trim()
     .max(500, 'Execution step description must be 500 characters or fewer')
+    .optional()
+    .default(''),
+  writesTo: z
+    .string()
+    .trim()
+    .max(120, 'Execution step writes-to target must be 120 characters or fewer')
+    .refine(
+      (value) => !value || executionTargetRegex.test(value),
+      'Execution step writes-to target must start with a letter and only use letters, numbers, or underscores.',
+    )
     .optional()
     .default(''),
 })

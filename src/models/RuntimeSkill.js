@@ -146,6 +146,14 @@ const runtimeSkillSchema = new mongoose.Schema(
       maxlength: 100,
       match: [frameworkKeyPattern, 'Framework key must use uppercase letters, numbers, or underscores'],
     }],
+    skillRoleKey: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      maxlength: 80,
+      match: [enumTokenPattern, 'Skill role key must use uppercase letters, numbers, or underscores'],
+      default: '',
+    },
     category: {
       type: String,
       required: true,
@@ -338,6 +346,7 @@ runtimeSkillSchema.index({ key: 1 }, { unique: true, name: 'unique_runtime_skill
 runtimeSkillSchema.index({ stableId: 1 }, { unique: true, name: 'unique_runtime_skill_stable_id' })
 runtimeSkillSchema.index({ status: 1, updatedAt: -1 })
 runtimeSkillSchema.index({ supportedFrameworkKeys: 1, updatedAt: -1 })
+runtimeSkillSchema.index({ skillRoleKey: 1, updatedAt: -1 })
 runtimeSkillSchema.index({ category: 1, updatedAt: -1 })
 runtimeSkillSchema.index({ executionMode: 1, updatedAt: -1 })
 
@@ -360,6 +369,10 @@ runtimeSkillSchema.pre('validate', function normalizeRuntimeSkill(next) {
 
   if (this.isNew || this.isModified('supportedFrameworkKeys')) {
     this.supportedFrameworkKeys = normalizeFrameworkKeyList(this.supportedFrameworkKeys)
+  }
+
+  if (this.isNew || this.isModified('skillRoleKey')) {
+    this.skillRoleKey = String(this.skillRoleKey || '').trim().toUpperCase()
   }
 
   if (this.isNew || this.isModified('category')) {

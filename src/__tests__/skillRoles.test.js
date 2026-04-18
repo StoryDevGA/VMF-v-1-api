@@ -88,12 +88,19 @@ const buildFindByStableIdQuery = (resolvedValue) => {
   return query
 }
 
+const buildRuntimeSkillReferenceChain = (rows) => ({
+  select: jest.fn().mockReturnValue({
+    lean: jest.fn().mockResolvedValue(rows),
+  }),
+})
+
 let app
 let request
 let tokenService
 let User
 let Role
 let SkillRoleRegistry
+let RuntimeSkill
 let mockRedisClient
 let skillRoleControllerTestables
 
@@ -147,6 +154,7 @@ beforeAll(async () => {
   User = models.User
   Role = models.Role
   SkillRoleRegistry = models.SkillRoleRegistry
+  RuntimeSkill = models.RuntimeSkill
 
   skillRoleControllerTestables = (await import('../controllers/skillRoleRegistry.controller.js')).__testables
 })
@@ -180,10 +188,12 @@ beforeEach(() => {
   SkillRoleRegistry.findByStableId = jest.fn()
   SkillRoleRegistry.findOne = jest.fn()
   SkillRoleRegistry.create = jest.fn()
+  RuntimeSkill.find = jest.fn()
 
   SkillRoleRegistry.countDocuments.mockResolvedValue(0)
   SkillRoleRegistry.find.mockReturnValue(buildSkillRoleQueryChain([]))
   SkillRoleRegistry.findOne.mockResolvedValue(null)
+  RuntimeSkill.find.mockReturnValue(buildRuntimeSkillReferenceChain([]))
 })
 
 describe('Skill Role Registry API', () => {
@@ -296,7 +306,7 @@ describe('Skill Role Registry API', () => {
     expect(res.body.data?.roleKey).toBe('VALIDATOR')
   })
 
-  test('GET /api/v1/super-admin/runtime-control/skill-roles/:roleId/dependencies returns empty dependencies', async () => {
+  test('GET /api/v1/super-admin/runtime-control/skill-roles/:roleId/dependencies returns referencing skills', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
 
     SkillRoleRegistry.findByStableId.mockReturnValue(
@@ -305,13 +315,22 @@ describe('Skill Role Registry API', () => {
         roleKey: 'VALIDATOR',
       }),
     )
+    RuntimeSkill.find.mockReturnValue(
+      buildRuntimeSkillReferenceChain([
+        { stableId: 'skill-snapshot' },
+        { stableId: 'skill-check-required-vmf-sections' },
+      ]),
+    )
 
     const res = await request
       .get(`/api/v1/super-admin/runtime-control/skill-roles/${ROLE_STABLE_ID}/dependencies`)
       .set('Authorization', `Bearer ${token}`)
 
     expect(res.status).toBe(200)
-    expect(res.body.data?.dependencies?.skillIds).toEqual([])
+    expect(res.body.data?.dependencies?.skillIds).toEqual([
+      'skill-snapshot',
+      'skill-check-required-vmf-sections',
+    ])
   })
 
   test('PATCH /api/v1/super-admin/runtime-control/skill-roles/:roleId rejects isSystem changes at validation', async () => {

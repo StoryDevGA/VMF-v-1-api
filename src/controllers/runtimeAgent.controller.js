@@ -33,6 +33,7 @@ const toIdString = (value) => {
 const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 const normalizeToken = (value) => String(value ?? '').trim().toLowerCase()
 const normalizeFrameworkKey = (value) => String(value ?? '').trim().toUpperCase()
+const executionTargetRegex = /^[a-zA-Z][a-zA-Z0-9_]*$/
 
 const cloneAuditValue = (value) => {
   if (value === undefined) return value
@@ -293,6 +294,16 @@ const validateRuntimeAgentExecutionPlan = async (runtimeAgent) => {
 
   if (skillIds.length !== plan.length) {
     errors.executionPlan = 'Each execution plan step must reference a valid skill id.'
+    return { errors }
+  }
+
+  const invalidWritesToStep = plan.find((step) => {
+    const writesTo = String(step?.writesTo ?? '').trim()
+    return writesTo && !executionTargetRegex.test(writesTo)
+  })
+  if (invalidWritesToStep) {
+    errors.executionPlan =
+      `Execution step writes-to target "${String(invalidWritesToStep.writesTo ?? '').trim()}" is invalid.`
     return { errors }
   }
 

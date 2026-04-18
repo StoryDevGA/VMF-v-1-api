@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from 'node:util'
 import SkillRoleRegistry, { SKILL_ROLE_REGISTRY_STATUSES } from '../models/SkillRoleRegistry.js'
+import RuntimeSkill from '../models/RuntimeSkill.js'
 import auditService from '../services/auditService.js'
 import { escapeRegex, serializeUserSummary } from '../utils/controllerUtils.js'
 
@@ -74,6 +75,16 @@ const buildListFilter = ({ q, status }) => {
 }
 
 const isDuplicateRoleKeyError = (err) => err?.code === 11000
+
+const fetchSkillRoleDependencies = async (roleKey) => {
+  const skills = await RuntimeSkill.find({ skillRoleKey: roleKey })
+    .select('stableId')
+    .lean()
+
+  return {
+    skillIds: skills.map((skill) => skill.stableId).filter(Boolean),
+  }
+}
 
 export const listSkillRoles = async (req, res, next) => {
   try {
@@ -287,7 +298,7 @@ export const getSkillRoleDependencies = async (req, res, next) => {
       data: {
         id: skillRole.stableId,
         roleKey: skillRole.roleKey,
-        dependencies: { skillIds: [] },
+        dependencies: await fetchSkillRoleDependencies(skillRole.roleKey),
       },
       meta: { requestId: req.requestId, version: 'v1' },
     })

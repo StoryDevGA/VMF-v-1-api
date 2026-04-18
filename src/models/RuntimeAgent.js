@@ -11,6 +11,7 @@ const keyPattern = /^[a-z][a-z0-9-]*$/
 const frameworkKeyPattern = /^[A-Z][A-Z0-9_]*$/
 const enumTokenPattern = /^[A-Z][A-Z0-9_]*$/
 const stableIdPattern = /^agent-[a-z][a-z0-9-]*$/
+const executionTargetPattern = /^[a-zA-Z][a-zA-Z0-9_]*$/
 
 const normalizeKey = (value) =>
   String(value || '')
@@ -80,6 +81,19 @@ const executionPlanStepSchema = new mongoose.Schema(
       maxlength: 500,
       default: '',
     },
+    writesTo: {
+      type: String,
+      trim: true,
+      maxlength: 120,
+      validate: {
+        validator(value) {
+          if (!value) return true
+          return executionTargetPattern.test(String(value))
+        },
+        message: 'Writes-to target must start with a letter and only use letters, numbers, or underscores.',
+      },
+      default: '',
+    },
   },
   { _id: false },
 )
@@ -90,6 +104,7 @@ const normalizeExecutionPlan = (values) => {
   return values.map((step) => ({
     skillId: normalizeKey(step?.skillId),
     description: normalizeDescription(step?.description),
+    writesTo: String(step?.writesTo || '').trim(),
   }))
 }
 

@@ -12,6 +12,7 @@ import {
 const keyRegex = /^[a-z][a-z0-9-]*$/
 const skillIdRegex = /^skill-[a-z][a-z0-9-]*$/
 const frameworkKeyRegex = /^[A-Z][A-Z0-9_]*$/
+const skillRoleKeyRegex = /^[A-Z][A-Z0-9_]*$/
 const enumTokenRegex = /^[A-Z][A-Z0-9_]*$/
 const outputBindingRegex = /^[a-zA-Z][a-zA-Z0-9_]*$/
 const primaryOutputSelectionRegex = /^(\$root|[a-zA-Z][a-zA-Z0-9_]*)$/
@@ -51,6 +52,17 @@ const supportedFrameworkKeysSchema = z
   .min(1, 'At least one supported framework key is required.')
   .max(20, 'Supported framework keys must contain 20 items or fewer')
   .transform((values) => [...new Set(values)])
+
+const skillRoleKeySchema = z
+  .string({ required_error: 'Skill role key is required' })
+  .trim()
+  .min(1, 'Skill role key is required')
+  .max(80, 'Skill role key must be 80 characters or fewer')
+  .transform((value) => value.toUpperCase())
+  .refine(
+    (value) => skillRoleKeyRegex.test(value),
+    'Skill role key must use uppercase letters, numbers, or underscores',
+  )
 
 const enumTokenSchema = (fieldLabel) =>
   z
@@ -253,6 +265,7 @@ const createRuntimeSkillSchema = z.object({
     .enum(Object.values(RUNTIME_SKILL_STATUSES))
     .default(RUNTIME_SKILL_STATUSES.ACTIVE),
   supportedFrameworkKeys: supportedFrameworkKeysSchema,
+  skillRoleKey: skillRoleKeySchema,
   category: enumTokenSchema('Skill category').default('GENERAL'),
   type: enumTokenSchema('Skill type').default('DETERMINISTIC'),
   executionMode: z
@@ -288,6 +301,15 @@ const createRuntimeSkillSchema = z.object({
     .max(50, 'Reference assets must contain 50 items or fewer')
     .default([]),
 }).superRefine((value, ctx) => {
+  // Skill role is required only for ACTIVE skills; legacy drafts may continue without one.
+  if (value.status === RUNTIME_SKILL_STATUSES.ACTIVE && !value.skillRoleKey) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['skillRoleKey'],
+      message: 'Skill role is required for active skills.',
+    })
+  }
+
   // Intentional duplication: enforced at validator → model → controller for defense-in-depth.
   if (value.type === 'AGENT_ASSISTED' && value.executionMode !== RUNTIME_SKILL_EXECUTION_MODES.AGENT) {
     ctx.addIssue({
@@ -356,6 +378,7 @@ const updateRuntimeSkillSchema = z.object({
     .enum(Object.values(RUNTIME_SKILL_STATUSES))
     .optional(),
   supportedFrameworkKeys: supportedFrameworkKeysSchema.optional(),
+  skillRoleKey: skillRoleKeySchema.optional(),
   category: enumTokenSchema('Skill category').optional(),
   type: enumTokenSchema('Skill type').optional(),
   executionMode: z

@@ -132,7 +132,7 @@ const makeRuntimeAgentDoc = (overrides = {}) => {
     status: 'ACTIVE',
     supportedFrameworkKeys: ['VMF', 'RLD'],
     defaultSkillIds: ['skill-snapshot'],
-    executionPlan: [{ skillId: 'skill-snapshot', description: '' }],
+    executionPlan: [{ skillId: 'skill-snapshot', description: '', writesTo: '' }],
     createdBy: SUPER_ADMIN_ID,
     updatedBy: SUPER_ADMIN_ID,
     ...overrides,
@@ -375,6 +375,27 @@ describe('Runtime Agent Routes', () => {
     expect(String(res.body.error.details.inputContract || '')).toMatch(/expected|object|record/i)
   })
 
+  test('POST /api/v1/super-admin/runtime-control/agents returns 422 when an execution step writesTo target is invalid', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/agents')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        key: 'planner',
+        name: 'Planner',
+        supportedFrameworkKeys: ['VMF'],
+        defaultSkillIds: ['skill-snapshot'],
+        executionPlan: [{ skillId: 'skill-snapshot', description: '', writesTo: 'invalid-target' }],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details['executionPlan.0.writesTo']).toBe(
+      'Execution step writes-to target must start with a letter and only use letters, numbers, or underscores.',
+    )
+  })
+
   test('POST /api/v1/super-admin/runtime-control/agents returns 409 when the key already exists', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     mockFindOneSelect({ _id: RUNTIME_AGENT_DB_ID })
@@ -460,8 +481,8 @@ describe('Runtime Agent Routes', () => {
         primarySkillIds: ['skill-summary'],
         optionalSkillIds: ['skill-snapshot'],
         executionPlan: [
-          { skillId: 'skill-snapshot', description: 'Capture state.' },
-          { skillId: 'skill-summary', description: '' },
+          { skillId: 'skill-snapshot', description: 'Capture state.', writesTo: 'vmfSnapshot' },
+          { skillId: 'skill-summary', description: '', writesTo: 'summaryResult' },
         ],
         promptConfig: { base_system_prompt: 'You are governed.' },
         inputContract: { required_inputs: ['frameworkPackage'] },
@@ -481,8 +502,8 @@ describe('Runtime Agent Routes', () => {
       primarySkillIds: ['skill-summary'],
       optionalSkillIds: ['skill-snapshot'],
       executionPlan: [
-        { skillId: 'skill-snapshot', description: 'Capture state.' },
-        { skillId: 'skill-summary', description: '' },
+        { skillId: 'skill-snapshot', description: 'Capture state.', writesTo: 'vmfSnapshot' },
+        { skillId: 'skill-summary', description: '', writesTo: 'summaryResult' },
       ],
       promptConfig: { base_system_prompt: 'You are governed.' },
       inputContract: { required_inputs: ['frameworkPackage'] },
@@ -618,6 +639,7 @@ describe('Runtime Agent Routes', () => {
         status: 'INACTIVE',
         supportedFrameworkKeys: ['VMF'],
         primarySkillIds: ['skill-summary'],
+        executionPlan: [{ skillId: 'skill-snapshot', description: '', writesTo: 'validationResult' }],
         promptConfig: { role_prompt: 'Validate.' },
       })
 
@@ -629,6 +651,7 @@ describe('Runtime Agent Routes', () => {
       status: 'INACTIVE',
       supportedFrameworkKeys: ['VMF'],
       primarySkillIds: ['skill-summary'],
+      executionPlan: [{ skillId: 'skill-snapshot', description: '', writesTo: 'validationResult' }],
       promptConfig: { role_prompt: 'Validate.' },
     })
     expect(AuditLog.createLog).toHaveBeenCalledTimes(1)

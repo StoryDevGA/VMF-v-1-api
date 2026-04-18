@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from 'node:util'
 import RuntimeSkill from '../models/RuntimeSkill.js'
 import RuntimeAgent from '../models/RuntimeAgent.js'
+import SkillRoleRegistry, { SKILL_ROLE_REGISTRY_STATUSES } from '../models/SkillRoleRegistry.js'
 import WorkflowPolicy from '../models/WorkflowPolicy.js'
 import auditService from '../services/auditService.js'
 import {
@@ -61,6 +62,7 @@ const serializeRuntimeSkill = (
   plain.category = reqHasValue(plain.category) ? plain.category : 'GENERAL'
   plain.type = reqHasValue(plain.type) ? plain.type : 'DETERMINISTIC'
   plain.executionMode = reqHasValue(plain.executionMode) ? plain.executionMode : 'SYSTEM'
+  plain.skillRoleKey = reqHasValue(plain.skillRoleKey) ? plain.skillRoleKey : ''
   plain.inputContract =
     plain.inputContract && typeof plain.inputContract === 'object' && !Array.isArray(plain.inputContract)
       ? plain.inputContract
@@ -133,6 +135,7 @@ const pickRuntimeSkillPayload = (body = {}) => ({
   description: body.description,
   status: body.status,
   supportedFrameworkKeys: body.supportedFrameworkKeys,
+  skillRoleKey: body.skillRoleKey,
   category: body.category,
   type: body.type,
   executionMode: body.executionMode,
@@ -186,6 +189,7 @@ const buildListFilter = ({ q, status, frameworkKey }) => {
       { name: regex },
       { description: regex },
       { status: regex },
+      { skillRoleKey: regex },
       { category: regex },
       { type: regex },
       { executionMode: regex },
@@ -221,6 +225,46 @@ const validateRuntimeSkillFrameworkKeys = async (supportedFrameworkKeys = []) =>
 
   return {
     supportedFrameworkKeys: buildUnknownFrameworkKeyMessage(missingKeys),
+  }
+}
+
+const findSkillRoleByKey = async (skillRoleKey) => {
+  const normalizedSkillRoleKey = String(skillRoleKey || '').trim().toUpperCase()
+  if (!normalizedSkillRoleKey) return null
+
+  return SkillRoleRegistry.findOne({ roleKey: normalizedSkillRoleKey })
+    .select('roleKey status')
+    .lean()
+}
+
+const validateRuntimeSkillSkillRoleKey = async (skillRoleKey) => {
+  const normalizedSkillRoleKey = String(skillRoleKey || '').trim().toUpperCase()
+
+  if (!normalizedSkillRoleKey) {
+    return {
+      details: {
+        skillRoleKey: 'Skill role key is required.',
+      },
+      skillRole: null,
+      skillRoleKey: '',
+    }
+  }
+
+  const skillRole = await findSkillRoleByKey(normalizedSkillRoleKey)
+  if (!skillRole) {
+    return {
+      details: {
+        skillRoleKey: `Unknown skill role key "${normalizedSkillRoleKey}".`,
+      },
+      skillRole: null,
+      skillRoleKey: normalizedSkillRoleKey,
+    }
+  }
+
+  return {
+    details: {},
+    skillRole,
+    skillRoleKey: normalizedSkillRoleKey,
   }
 }
 
@@ -368,6 +412,23 @@ export const listRuntimeSkills = async (req, res, next) => {
 
 export const createRuntimeSkill = async (req, res, next) => {
   try {
+    const effectiveStatus = String(req.body.status ?? 'ACTIVE').trim().toUpperCase()
+    const isActiveSkill = effectiveStatus === 'ACTIVE'
+
+    // Skill role is required only for ACTIVE skills; legacy drafts may continue without one.
+    if (isActiveSkill && req.body.skillRoleKey) {
+      const skillRoleValidation = await validateRuntimeSkillSkillRoleKey(req.body.skillRoleKey)
+      if (Object.keys(skillRoleValidation.details).length > 0) {
+        return sendValidationFailed(res, req, skillRoleValidation.details)
+      }
+
+      if (skillRoleValidation.skillRole?.status !== SKILL_ROLE_REGISTRY_STATUSES.ACTIVE) {
+        return sendValidationFailed(res, req, {
+          skillRoleKey: `Skill role key "${skillRoleValidation.skillRoleKey}" must reference an ACTIVE skill role.`,
+        })
+      }
+    }
+
     const validationDetails = await validateRuntimeSkillFrameworkKeys(req.body.supportedFrameworkKeys)
     if (Object.keys(validationDetails).length > 0) {
       return sendValidationFailed(res, req, validationDetails)
@@ -437,6 +498,7 @@ export const createRuntimeSkill = async (req, res, next) => {
         description: runtimeSkill.description,
         status: runtimeSkill.status,
         supportedFrameworkKeys: runtimeSkill.supportedFrameworkKeys,
+        skillRoleKey: runtimeSkill.skillRoleKey,
         category: runtimeSkill.category,
         type: runtimeSkill.type,
         executionMode: runtimeSkill.executionMode,
@@ -567,6 +629,31 @@ export const updateRuntimeSkill = async (req, res, next) => {
 
     const nextSupportedFrameworkKeys =
       req.body.supportedFrameworkKeys ?? runtimeSkill.supportedFrameworkKeys
+    const currentSkillRoleKey = String(runtimeSkill.skillRoleKey ?? '').trim().toUpperCase()
+    const effectiveSkillRoleKey =
+      req.body.skillRoleKey !== undefined
+        ? req.body.skillRoleKey
+        : currentSkillRoleKey
+
+    const skillRoleValidation = await validateRuntimeSkillSkillRoleKey(effectiveSkillRoleKey)
+    if (Object.keys(skillRoleValidation.details).length > 0) {
+      return sendValidationFailed(res, req, skillRoleValidation.details)
+    }
+
+    const normalizedRequestedSkillRoleKey = String(req.body.skillRoleKey ?? '').trim().toUpperCase()
+    const isChangingSkillRoleKey =
+      req.body.skillRoleKey !== undefined
+      && normalizedRequestedSkillRoleKey !== currentSkillRoleKey
+    const requiresActiveSkillRole = isChangingSkillRoleKey || !currentSkillRoleKey
+
+    if (
+      requiresActiveSkillRole
+      && skillRoleValidation.skillRole?.status !== SKILL_ROLE_REGISTRY_STATUSES.ACTIVE
+    ) {
+      return sendValidationFailed(res, req, {
+        skillRoleKey: `Skill role key "${skillRoleValidation.skillRoleKey}" must reference an ACTIVE skill role.`,
+      })
+    }
 
     const validationDetails = await validateRuntimeSkillFrameworkKeys(nextSupportedFrameworkKeys)
     if (Object.keys(validationDetails).length > 0) {
@@ -610,6 +697,7 @@ export const updateRuntimeSkill = async (req, res, next) => {
       'description',
       'status',
       'supportedFrameworkKeys',
+      'skillRoleKey',
       'category',
       'type',
       'executionMode',
