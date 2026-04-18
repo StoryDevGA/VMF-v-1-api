@@ -383,6 +383,16 @@ export const createRuntimeSkill = async (req, res, next) => {
       return sendValidationFailed(res, req, runtimePathDetails)
     }
 
+    const effectiveExecutionMode = String(req.body.executionMode ?? 'SYSTEM').trim().toUpperCase()
+    const effectiveType = String(req.body.type ?? 'DETERMINISTIC').trim().toUpperCase()
+
+    // Intentional duplication: enforced at validator → model → controller for defense-in-depth.
+    if (effectiveType === 'AGENT_ASSISTED' && effectiveExecutionMode !== 'AGENT') {
+      return sendValidationFailed(res, req, {
+        type: 'Skill type "AGENT_ASSISTED" is only compatible with AGENT execution mode.',
+      })
+    }
+
     const existingRuntimeSkill = await RuntimeSkill.findOne({
       key: req.body.key,
     }).select('_id')
@@ -578,10 +588,18 @@ export const updateRuntimeSkill = async (req, res, next) => {
     }
 
     const effectiveExecutionMode = String(req.body.executionMode ?? runtimeSkill.executionMode ?? 'SYSTEM').trim().toUpperCase()
+    const effectiveType = String(req.body.type ?? runtimeSkill.type ?? 'DETERMINISTIC').trim().toUpperCase()
 
     if (req.body.executionConfig !== undefined && effectiveExecutionMode === 'SYSTEM' && hasObjectKeys(req.body.executionConfig)) {
       return sendValidationFailed(res, req, {
         executionConfig: 'Execution config is only supported for rule engine or agent-assisted skills.',
+      })
+    }
+
+    // Intentional duplication: enforced at validator → model → controller for defense-in-depth.
+    if (effectiveType === 'AGENT_ASSISTED' && effectiveExecutionMode !== 'AGENT') {
+      return sendValidationFailed(res, req, {
+        type: 'Skill type "AGENT_ASSISTED" is only compatible with AGENT execution mode.',
       })
     }
 

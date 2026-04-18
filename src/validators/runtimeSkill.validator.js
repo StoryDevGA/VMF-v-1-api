@@ -14,6 +14,7 @@ const skillIdRegex = /^skill-[a-z][a-z0-9-]*$/
 const frameworkKeyRegex = /^[A-Z][A-Z0-9_]*$/
 const enumTokenRegex = /^[A-Z][A-Z0-9_]*$/
 const outputBindingRegex = /^[a-zA-Z][a-zA-Z0-9_]*$/
+const primaryOutputSelectionRegex = /^(\$root|[a-zA-Z][a-zA-Z0-9_]*)$/
 const assetIdRegex = /^asset-[a-z0-9-]{6,}$/
 const REFERENCE_ASSET_PURPOSES = Object.freeze([
   'AUTHORING_HELP',
@@ -79,9 +80,20 @@ const outputBindingSchema = z
     'Output binding must start with a letter and only use letters, numbers, or underscores.',
   )
 
-const optionalOutputBindingSchema = z.preprocess(
+const optionalPrimaryOutputSelectionSchema = z.preprocess(
   (value) => (typeof value === 'string' && !value.trim() ? undefined : value),
-  outputBindingSchema.optional(),
+  z
+    .string()
+    .trim()
+    // NOTE: Empty strings are preprocessed to undefined, so this min() is only relevant for
+    // non-empty inputs and primarily documents the intended field semantics.
+    .min(1, 'Primary output selection is required')
+    .max(120, 'Primary output selection must be 120 characters or fewer')
+    .refine(
+      (value) => primaryOutputSelectionRegex.test(value),
+      'Primary output selection must be $root or start with a letter and only use letters, numbers, or underscores.',
+    )
+    .optional(),
 )
 
 const pathSchema = z
@@ -249,7 +261,7 @@ const createRuntimeSkillSchema = z.object({
   inputContract: objectSchema('Input contract').default({}),
   outputContract: objectSchema('Output contract').default({}),
   runtimeConfig: objectSchema('Runtime config').default({}),
-  primaryOutputKey: optionalOutputBindingSchema,
+  primaryOutputKey: optionalPrimaryOutputSelectionSchema,
   outputBindings: z
     .array(outputBindingSchema)
     .max(50, 'Output bindings must contain 50 items or fewer')
@@ -276,6 +288,15 @@ const createRuntimeSkillSchema = z.object({
     .max(50, 'Reference assets must contain 50 items or fewer')
     .default([]),
 }).superRefine((value, ctx) => {
+  // Intentional duplication: enforced at validator → model → controller for defense-in-depth.
+  if (value.type === 'AGENT_ASSISTED' && value.executionMode !== RUNTIME_SKILL_EXECUTION_MODES.AGENT) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['type'],
+      message: 'Skill type "AGENT_ASSISTED" is only compatible with AGENT execution mode.',
+    })
+  }
+
   if (value.primaryOutputKey && value.outputBindings.length > 0) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
@@ -343,7 +364,7 @@ const updateRuntimeSkillSchema = z.object({
   inputContract: objectSchema('Input contract').optional(),
   outputContract: objectSchema('Output contract').optional(),
   runtimeConfig: objectSchema('Runtime config').optional(),
-  primaryOutputKey: optionalOutputBindingSchema.optional(),
+  primaryOutputKey: optionalPrimaryOutputSelectionSchema.optional(),
   outputBindings: z
     .array(outputBindingSchema)
     .max(50, 'Output bindings must contain 50 items or fewer')
@@ -370,6 +391,19 @@ const updateRuntimeSkillSchema = z.object({
     .max(50, 'Reference assets must contain 50 items or fewer')
     .optional(),
 }).superRefine((value, ctx) => {
+  // Intentional duplication: enforced at validator → model → controller for defense-in-depth.
+  if (
+    value.type === 'AGENT_ASSISTED'
+    && value.executionMode
+    && value.executionMode !== RUNTIME_SKILL_EXECUTION_MODES.AGENT
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['type'],
+      message: 'Skill type "AGENT_ASSISTED" is only compatible with AGENT execution mode.',
+    })
+  }
+
   if (value.primaryOutputKey && Array.isArray(value.outputBindings) && value.outputBindings.length > 0) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,

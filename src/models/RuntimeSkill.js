@@ -19,6 +19,7 @@ const frameworkKeyPattern = /^[A-Z][A-Z0-9_]*$/
 const enumTokenPattern = /^[A-Z][A-Z0-9_]*$/
 const stableIdPattern = /^skill-[a-z][a-z0-9-]*$/
 const outputBindingPattern = /^[a-zA-Z][a-zA-Z0-9_]*$/
+const primaryOutputSelectionPattern = /^(\$root|[a-zA-Z][a-zA-Z0-9_]*)$/
 const assetIdPattern = /^asset-[a-z0-9-]{6,}$/
 
 const normalizeKey = (value) =>
@@ -197,9 +198,9 @@ const runtimeSkillSchema = new mongoose.Schema(
       validate: {
         validator(value) {
           if (!value) return true
-          return outputBindingPattern.test(String(value))
+          return primaryOutputSelectionPattern.test(String(value))
         },
-        message: 'Primary output key must start with a letter and only use letters, numbers, or underscores.',
+        message: 'Primary output selection must be $root or start with a letter and only use letters, numbers, or underscores.',
       },
       default: '',
     },
@@ -460,6 +461,11 @@ runtimeSkillSchema.pre('validate', function normalizeRuntimeSkill(next) {
 
   if (this.executionMode === RUNTIME_SKILL_EXECUTION_MODES.SYSTEM && executionConfigHasKeys) {
     this.invalidate('executionConfig', 'Execution config is only supported for rule engine or agent-assisted skills.')
+  }
+
+  // Intentional duplication: enforced at validator → model → controller for defense-in-depth.
+  if (this.type === 'AGENT_ASSISTED' && this.executionMode !== RUNTIME_SKILL_EXECUTION_MODES.AGENT) {
+    this.invalidate('type', `Skill type "${this.type}" is only compatible with AGENT execution mode.`)
   }
 
   if ((this.isNew || !this.stableId) && this.key) {

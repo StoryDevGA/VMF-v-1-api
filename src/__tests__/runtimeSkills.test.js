@@ -373,6 +373,48 @@ describe('Runtime Skill Routes', () => {
     expect(res.body.error.details.outputBindings).toBe('Provide either a primary output key or output bindings, not both.')
   })
 
+  test('POST /api/v1/super-admin/runtime-control/skills accepts $root as a primary output selection', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    mockFindOneSelect(null)
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/skills')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        key: 'root-output',
+        name: 'Root Output',
+        supportedFrameworkKeys: ['VMF'],
+        primaryOutputKey: '$root',
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data).toMatchObject({
+      id: 'skill-root-output',
+      key: 'root-output',
+      primaryOutputKey: '$root',
+    })
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/skills returns 422 when AGENT_ASSISTED type is used outside AGENT execution mode', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    mockFindOneSelect(null)
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/skills')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        key: 'agent-assisted-system',
+        name: 'Agent Assisted System',
+        supportedFrameworkKeys: ['VMF'],
+        type: 'AGENT_ASSISTED',
+        executionMode: 'SYSTEM',
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details.type).toBe('Skill type "AGENT_ASSISTED" is only compatible with AGENT execution mode.')
+  })
+
   test('POST /api/v1/super-admin/runtime-control/skills returns 422 when SYSTEM skills include executionConfig', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
 
@@ -798,6 +840,21 @@ describe('Runtime Skill Routes', () => {
         summary: 'Super Admin updated runtime skill Runtime Snapshot (snapshot)',
       }),
     )
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/skills/:skillId returns 422 when setting AGENT_ASSISTED type for non-AGENT execution mode', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const runtimeSkill = makeRuntimeSkillDoc()
+    RuntimeSkill.findOne.mockResolvedValue(runtimeSkill)
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/skills/${RUNTIME_SKILL_STABLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ type: 'AGENT_ASSISTED' })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details.type).toBe('Skill type "AGENT_ASSISTED" is only compatible with AGENT execution mode.')
   })
 
   test('PATCH /api/v1/super-admin/runtime-control/skills/:skillId returns 404 when the skill does not exist', async () => {
