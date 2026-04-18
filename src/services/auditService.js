@@ -87,6 +87,8 @@ export const AUDIT_ACTIONS = Object.freeze({
   RUNTIME_AGENT_DEPRECATED: 'RUNTIME_AGENT_DEPRECATED',
   RUNTIME_SKILL_CREATED: 'RUNTIME_SKILL_CREATED',
   RUNTIME_SKILL_UPDATED: 'RUNTIME_SKILL_UPDATED',
+  SKILL_ROLE_CREATED: 'SKILL_ROLE_CREATED',
+  SKILL_ROLE_UPDATED: 'SKILL_ROLE_UPDATED',
   WORKFLOW_POLICY_CREATED: 'WORKFLOW_POLICY_CREATED',
   WORKFLOW_POLICY_UPDATED: 'WORKFLOW_POLICY_UPDATED',
   // Super Admin - Access denied
@@ -124,6 +126,7 @@ export const RESOURCE_TYPES = Object.freeze({
   FrameworkPackage: 'FrameworkPackage',
   RuntimeAgent: 'RuntimeAgent',
   RuntimeSkill: 'RuntimeSkill',
+  SkillRole: 'SkillRole',
   WorkflowPolicy: 'WorkflowPolicy',
   AuditLog: 'AuditLog',
   LicenseLevel: 'LicenseLevel',
@@ -384,6 +387,10 @@ const buildAuditSummary = ({ action, resourceType, resourceId, diff, display }) 
       return clampSummary(`${actorLabel} created runtime skill ${targetLabel}`)
     case AUDIT_ACTIONS.RUNTIME_SKILL_UPDATED:
       return clampSummary(`${actorLabel} updated runtime skill ${targetLabel}`)
+    case AUDIT_ACTIONS.SKILL_ROLE_CREATED:
+      return clampSummary(`${actorLabel} created skill role ${targetLabel}`)
+    case AUDIT_ACTIONS.SKILL_ROLE_UPDATED:
+      return clampSummary(`${actorLabel} updated skill role ${targetLabel}`)
     case AUDIT_ACTIONS.WORKFLOW_POLICY_CREATED:
       return clampSummary(`${actorLabel} created workflow policy ${targetLabel}`)
     case AUDIT_ACTIONS.WORKFLOW_POLICY_UPDATED:

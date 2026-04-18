@@ -4,6 +4,7 @@ import { seedFrameworkRegistry } from './frameworkRegistry.js'
 import { seedSuperAdmin } from './superAdmin.js'
 import { seedDefaultLicenseLevel } from './licenseLevels.js'
 import { seedRuntimePathRegistry } from './runtimePathRegistry.js'
+import { seedSkillRoleRegistry } from './skillRoleRegistry.js'
 
 export const runSeeds = async () => {
   console.log('[seed] Starting database seeding...')
@@ -17,6 +18,7 @@ export const runSeeds = async () => {
     const superAdmin = await seedSuperAdmin()
     await seedFrameworkRegistry({ actorUserId: superAdmin?._id })
     await seedRuntimePathRegistry({ actorUserId: superAdmin?._id })
+    await seedSkillRoleRegistry({ actorUserId: superAdmin?._id })
     await seedDefaultLicenseLevel({ actorUserId: superAdmin?._id })
 
     console.log('[seed] Database seeding completed successfully.')
