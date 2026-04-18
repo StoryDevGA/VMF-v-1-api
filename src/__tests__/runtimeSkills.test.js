@@ -93,6 +93,12 @@ const buildRuntimePathFindChain = (rows) => ({
   }),
 })
 
+const buildSkillRoleLookupChain = (row) => ({
+  select: jest.fn().mockReturnValue({
+    lean: jest.fn().mockResolvedValue(row),
+  }),
+})
+
 let app
 let request
 let tokenService
@@ -102,6 +108,7 @@ let FrameworkRegistry
 let RuntimePathRegistry
 let RuntimeSkill
 let RuntimeAgent
+let SkillRoleRegistry
 let WorkflowPolicy
 let AuditLog
 let mockRedisClient
@@ -128,6 +135,7 @@ const makeRuntimeSkillDoc = (overrides = {}) => {
     description: 'Captures runtime state at workflow checkpoints.',
     status: 'ACTIVE',
     supportedFrameworkKeys: ['VMF', 'RLD'],
+    skillRoleKey: 'VALIDATOR',
     category: 'SNAPSHOT',
     type: 'DETERMINISTIC',
     executionMode: 'SYSTEM',
@@ -176,6 +184,7 @@ beforeAll(async () => {
   RuntimePathRegistry = models.RuntimePathRegistry
   RuntimeSkill = models.RuntimeSkill
   RuntimeAgent = models.RuntimeAgent
+  SkillRoleRegistry = models.SkillRoleRegistry
   WorkflowPolicy = models.WorkflowPolicy
   AuditLog = models.AuditLog
 
@@ -212,6 +221,7 @@ beforeEach(() => {
   RuntimeSkill.countDocuments = jest.fn()
   RuntimeSkill.findOne = jest.fn()
   RuntimeAgent.find = jest.fn()
+  SkillRoleRegistry.findOne = jest.fn()
   WorkflowPolicy.find = jest.fn()
   FrameworkRegistry.find = jest.fn()
   RuntimePathRegistry.find = jest.fn()
@@ -229,6 +239,15 @@ beforeEach(() => {
   RuntimeSkill.findOne.mockReturnValue({
     select: jest.fn().mockResolvedValue(null),
   })
+  SkillRoleRegistry.findOne.mockImplementation((filter = {}) =>
+    buildSkillRoleLookupChain(
+      filter.roleKey
+        ? {
+            roleKey: String(filter.roleKey).trim().toUpperCase(),
+            status: 'ACTIVE',
+          }
+        : null,
+    ))
   RuntimeAgent.find.mockReturnValue(buildReferenceLookupChain([]))
   WorkflowPolicy.find.mockReturnValue(buildReferenceLookupChain([]))
   FrameworkRegistry.find.mockReturnValue(buildFrameworkRegistryLookupChain([
@@ -344,6 +363,7 @@ describe('Runtime Skill Routes', () => {
       .send({
         key: 'Snapshot',
         name: '',
+        skillRoleKey: 'VALIDATOR',
         supportedFrameworkKeys: [],
       })
 
@@ -362,6 +382,7 @@ describe('Runtime Skill Routes', () => {
       .send({
         key: 'check-required-vmf-sections',
         name: 'Check Required VMF Sections',
+        skillRoleKey: 'VALIDATOR',
         supportedFrameworkKeys: ['VMF'],
         primaryOutputKey: 'validationResult',
         outputBindings: ['validationResult', 'missingSections'],
@@ -371,6 +392,49 @@ describe('Runtime Skill Routes', () => {
     expect(res.body.error.code).toBe('VALIDATION_FAILED')
     expect(res.body.error.details.primaryOutputKey).toBe('Provide either a primary output key or output bindings, not both.')
     expect(res.body.error.details.outputBindings).toBe('Provide either a primary output key or output bindings, not both.')
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/skills rejects unknown skill role keys', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    SkillRoleRegistry.findOne.mockReturnValueOnce(buildSkillRoleLookupChain(null))
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/skills')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        key: 'unknown-role-skill',
+        name: 'Unknown Role Skill',
+        skillRoleKey: 'UNKNOWN_ROLE',
+        supportedFrameworkKeys: ['VMF'],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details.skillRoleKey).toBe('Unknown skill role key "UNKNOWN_ROLE".')
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/skills rejects non-active skill role keys', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    SkillRoleRegistry.findOne.mockReturnValueOnce(
+      buildSkillRoleLookupChain({
+        roleKey: 'VALIDATOR',
+        status: 'DEPRECATED',
+      }),
+    )
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/skills')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        key: 'deprecated-role-skill',
+        name: 'Deprecated Role Skill',
+        skillRoleKey: 'VALIDATOR',
+        supportedFrameworkKeys: ['VMF'],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details.skillRoleKey).toBe('Skill role key "VALIDATOR" must reference an ACTIVE skill role.')
   })
 
   test('POST /api/v1/super-admin/runtime-control/skills accepts $root as a primary output selection', async () => {
@@ -383,6 +447,7 @@ describe('Runtime Skill Routes', () => {
       .send({
         key: 'root-output',
         name: 'Root Output',
+        skillRoleKey: 'VALIDATOR',
         supportedFrameworkKeys: ['VMF'],
         primaryOutputKey: '$root',
       })
@@ -405,6 +470,7 @@ describe('Runtime Skill Routes', () => {
       .send({
         key: 'agent-assisted-system',
         name: 'Agent Assisted System',
+        skillRoleKey: 'VALIDATOR',
         supportedFrameworkKeys: ['VMF'],
         type: 'AGENT_ASSISTED',
         executionMode: 'SYSTEM',
@@ -424,6 +490,7 @@ describe('Runtime Skill Routes', () => {
       .send({
         key: 'snapshot',
         name: 'Snapshot',
+        skillRoleKey: 'VALIDATOR',
         supportedFrameworkKeys: ['VMF'],
         executionMode: 'SYSTEM',
         executionConfig: { mode: 'unsafe' },
@@ -443,6 +510,7 @@ describe('Runtime Skill Routes', () => {
       .send({
         key: 'mutate-snapshot',
         name: 'Mutate Snapshot',
+        skillRoleKey: 'VALIDATOR',
         supportedFrameworkKeys: ['VMF'],
         allowedWritePaths: ['vmf.snapshotId'],
         forbiddenWritePaths: ['vmf.snapshotId'],
@@ -478,6 +546,7 @@ describe('Runtime Skill Routes', () => {
       .send({
         key: 'forbid-non-protected',
         name: 'Forbid Non Protected',
+        skillRoleKey: 'VALIDATOR',
         supportedFrameworkKeys: ['VMF'],
         forbiddenWritePaths: ['vmf.sections.*'],
       })
@@ -512,6 +581,7 @@ describe('Runtime Skill Routes', () => {
       .send({
         key: 'write-protected-path',
         name: 'Write Protected Path',
+        skillRoleKey: 'VALIDATOR',
         supportedFrameworkKeys: ['VMF'],
         allowedWritePaths: ['vmf.frameworkKey'],
       })
@@ -533,6 +603,7 @@ describe('Runtime Skill Routes', () => {
         name: 'Snapshot',
         description: 'Duplicate snapshot skill.',
         status: 'ACTIVE',
+        skillRoleKey: 'VALIDATOR',
         supportedFrameworkKeys: ['VMF'],
       })
 
@@ -555,6 +626,7 @@ describe('Runtime Skill Routes', () => {
         name: 'Review Pack',
         description: 'Assembles review artifacts.',
         status: 'ACTIVE',
+        skillRoleKey: 'VALIDATOR',
         supportedFrameworkKeys: ['QMF'],
       })
 
@@ -575,6 +647,7 @@ describe('Runtime Skill Routes', () => {
         name: 'Summary',
         description: 'Generates concise runtime summaries.',
         status: 'ACTIVE',
+        skillRoleKey: 'RENDERER',
         supportedFrameworkKeys: ['vmf', 'RLD', 'VMF'],
       })
 
@@ -618,6 +691,7 @@ describe('Runtime Skill Routes', () => {
       .send({
         key: 'check-required-vmf-sections',
         name: 'Check Required VMF Sections',
+        skillRoleKey: 'VALIDATOR',
         supportedFrameworkKeys: ['VMF'],
         referenceAssets: [
           {
@@ -882,6 +956,7 @@ describe('Runtime Skill Routes', () => {
         name: 'Draft Skill',
         description: 'A skill created in draft status.',
         status: 'DRAFT',
+        skillRoleKey: 'VALIDATOR',
         supportedFrameworkKeys: ['VMF'],
       })
 
@@ -942,6 +1017,7 @@ describe('Runtime Skill Routes', () => {
       .send({
         key: 'documented-skill',
         name: 'Documented Skill',
+        skillRoleKey: 'VALIDATOR',
         supportedFrameworkKeys: ['VMF'],
         referenceAssets,
       })
@@ -1010,6 +1086,7 @@ describe('Runtime Skill Routes', () => {
       .send({
         key: 'invalid-asset-skill',
         name: 'Invalid Asset Skill',
+        skillRoleKey: 'VALIDATOR',
         supportedFrameworkKeys: ['VMF'],
         referenceAssets: [
           {
@@ -1042,6 +1119,96 @@ describe('Runtime Skill Routes', () => {
     expect(res.status).toBe(422)
     expect(res.body.error.code).toBe('VALIDATION_FAILED')
     expect(res.body.error.details.key).toMatch(/immutable/i)
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/skills/:skillId rejects unknown skill role on ACTIVE status', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const runtimeSkill = makeRuntimeSkillDoc({ status: 'ACTIVE' })
+
+    RuntimeSkill.findOne.mockResolvedValueOnce(runtimeSkill)
+    SkillRoleRegistry.findOne.mockReturnValueOnce(buildSkillRoleLookupChain(null))
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/skills/${RUNTIME_SKILL_STABLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        skillRoleKey: 'UNKNOWN_ROLE',
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details.skillRoleKey).toBe('Unknown skill role key "UNKNOWN_ROLE".')
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/skills/:skillId allows blank skillRoleKey on non-ACTIVE status', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const runtimeSkill = makeRuntimeSkillDoc({ status: 'DRAFT', skillRoleKey: 'VALIDATOR' })
+
+    RuntimeSkill.findOne
+      .mockResolvedValueOnce(runtimeSkill)
+      .mockReturnValueOnce({
+        select: jest.fn().mockResolvedValue(null),
+      })
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/skills/${RUNTIME_SKILL_STABLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        skillRoleKey: '',
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toMatchObject({
+      id: 'skill-snapshot',
+      status: 'DRAFT',
+    })
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/skills/:skillId requires skillRoleKey when changing DRAFT to ACTIVE', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const runtimeSkill = makeRuntimeSkillDoc({ status: 'DRAFT', skillRoleKey: '' })
+
+    RuntimeSkill.findOne.mockResolvedValueOnce(runtimeSkill)
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/skills/${RUNTIME_SKILL_STABLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        status: 'ACTIVE',
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details.skillRoleKey).toBe('Skill role is required for active skills.')
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/skills/:skillId accepts valid skillRoleKey on ACTIVE status', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const runtimeSkill = makeRuntimeSkillDoc({ status: 'ACTIVE', skillRoleKey: 'VALIDATOR' })
+
+    RuntimeSkill.findOne
+      .mockResolvedValueOnce(runtimeSkill)
+      .mockReturnValueOnce({
+        select: jest.fn().mockResolvedValue(null),
+      })
+
+    SkillRoleRegistry.findOne.mockReturnValueOnce(buildSkillRoleLookupChain({
+      roleKey: 'RENDERER',
+      status: 'ACTIVE',
+    }))
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/skills/${RUNTIME_SKILL_STABLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        skillRoleKey: 'RENDERER',
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toMatchObject({
+      id: 'skill-snapshot',
+      status: 'ACTIVE',
+    })
   })
 
 })
