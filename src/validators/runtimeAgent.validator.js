@@ -10,7 +10,20 @@ const keyRegex = /^[a-z][a-z0-9-]*$/
 const agentIdRegex = /^agent-[a-z][a-z0-9-]*$/
 const frameworkKeyRegex = /^[A-Z][A-Z0-9_]*$/
 const enumTokenRegex = /^[A-Z][A-Z0-9_]*$/
-const executionTargetRegex = /^[a-zA-Z][a-zA-Z0-9_]*$/
+
+const normalizePathSelectionList = (value) => {
+  const items = Array.isArray(value)
+    ? value
+    : value === undefined || value === null || value === ''
+      ? []
+      : [value]
+
+  return [...new Set(
+    items
+      .map((item) => String(item ?? '').trim())
+      .filter(Boolean),
+  )]
+}
 
 const frameworkKeySchema = z
   .string()
@@ -45,6 +58,32 @@ const runtimeAgentTypeSchema = z
     'Agent type must use uppercase letters, numbers, or underscores',
   )
 
+const skillRoleKeySchema = z
+  .string()
+  .trim()
+  .min(1, 'Skill role key is required')
+  .max(80, 'Skill role key must be 80 characters or fewer')
+  .transform((value) => value.toUpperCase())
+  .refine(
+    (value) => enumTokenRegex.test(value),
+    'Skill role key must use uppercase letters, numbers, or underscores',
+  )
+
+const pathKeySchema = z
+  .string()
+  .trim()
+  .min(1, 'Runtime path key is required')
+  .max(200, 'Runtime path key must be 200 characters or fewer')
+  .refine(
+    (value) => !/\s/.test(value),
+    'Runtime path key must not contain whitespace.',
+  )
+
+const pathSelectionListSchema = z
+  .union([pathKeySchema, z.array(pathKeySchema).max(50, 'Runtime path selections must contain 50 items or fewer')])
+  .optional()
+  .transform((value) => normalizePathSelectionList(value))
+
 const supportedFrameworkKeysSchema = z
   .array(frameworkKeySchema)
   .min(1, 'At least one supported framework key is required.')
@@ -61,6 +100,11 @@ const skillIdsSchema = z
   .max(200, 'Skill ids must contain 200 items or fewer')
   .transform((values) => [...new Set(values)])
 
+const requiredSkillRoleKeysSchema = z
+  .array(skillRoleKeySchema)
+  .max(50, 'Required skill role keys must contain 50 items or fewer')
+  .transform((values) => [...new Set(values)])
+
 const executionPlanStepSchema = z.object({
   skillId: defaultSkillIdSchema,
   description: z
@@ -69,16 +113,8 @@ const executionPlanStepSchema = z.object({
     .max(500, 'Execution step description must be 500 characters or fewer')
     .optional()
     .default(''),
-  writesTo: z
-    .string()
-    .trim()
-    .max(120, 'Execution step writes-to target must be 120 characters or fewer')
-    .refine(
-      (value) => !value || executionTargetRegex.test(value),
-      'Execution step writes-to target must start with a letter and only use letters, numbers, or underscores.',
-    )
-    .optional()
-    .default(''),
+  readsFrom: pathSelectionListSchema.default([]),
+  writesTo: pathSelectionListSchema.default([]),
 })
 
 const executionPlanSchema = z
@@ -130,6 +166,7 @@ const createRuntimeAgentSchema = z.object({
     .default(RUNTIME_AGENT_STATUSES.ACTIVE),
   agentType: runtimeAgentTypeSchema.default('EXECUTION'),
   supportedFrameworkKeys: supportedFrameworkKeysSchema,
+  requiredSkillRoleKeys: requiredSkillRoleKeysSchema.default([]),
   defaultSkillIds: defaultSkillIdsSchema.default([]),
   primarySkillIds: skillIdsSchema.default([]),
   optionalSkillIds: skillIdsSchema.default([]),
@@ -168,6 +205,7 @@ const updateRuntimeAgentSchema = z.object({
     .optional(),
   agentType: runtimeAgentTypeSchema.optional(),
   supportedFrameworkKeys: supportedFrameworkKeysSchema.optional(),
+  requiredSkillRoleKeys: requiredSkillRoleKeysSchema.optional(),
   defaultSkillIds: defaultSkillIdsSchema.optional(),
   primarySkillIds: skillIdsSchema.optional(),
   optionalSkillIds: skillIdsSchema.optional(),

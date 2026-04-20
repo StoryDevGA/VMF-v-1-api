@@ -87,6 +87,11 @@ const buildRuntimeSkillLookupChain = (rows) => ({
   lean: jest.fn().mockResolvedValue(rows),
 })
 
+const buildRuntimePathLookupChain = (rows) => ({
+  select: jest.fn().mockReturnThis(),
+  lean: jest.fn().mockResolvedValue(rows),
+})
+
 const buildWorkflowPolicyLookupChain = (rows) => ({
   select: jest.fn().mockReturnThis(),
   lean: jest.fn().mockResolvedValue(rows),
@@ -105,6 +110,8 @@ let Role
 let FrameworkRegistry
 let RuntimeAgent
 let RuntimeSkill
+let RuntimePathRegistry
+let SkillRoleRegistry
 let WorkflowPolicy
 let FrameworkPackage
 let AuditLog
@@ -131,8 +138,14 @@ const makeRuntimeAgentDoc = (overrides = {}) => {
     description: 'Runs baseline validation rules for compatible frameworks.',
     status: 'ACTIVE',
     supportedFrameworkKeys: ['VMF', 'RLD'],
+    requiredSkillRoleKeys: ['VALIDATOR'],
     defaultSkillIds: ['skill-snapshot'],
-    executionPlan: [{ skillId: 'skill-snapshot', description: '', writesTo: '' }],
+    executionPlan: [{
+      skillId: 'skill-snapshot',
+      description: '',
+      readsFrom: ['vmf.sections.icp'],
+      writesTo: ['runtime.validationResult'],
+    }],
     createdBy: SUPER_ADMIN_ID,
     updatedBy: SUPER_ADMIN_ID,
     ...overrides,
@@ -174,6 +187,8 @@ beforeAll(async () => {
   FrameworkRegistry = models.FrameworkRegistry
   RuntimeAgent = models.RuntimeAgent
   RuntimeSkill = models.RuntimeSkill
+  RuntimePathRegistry = models.RuntimePathRegistry
+  SkillRoleRegistry = models.SkillRoleRegistry
   WorkflowPolicy = models.WorkflowPolicy
   FrameworkPackage = models.FrameworkPackage
   AuditLog = models.AuditLog
@@ -211,6 +226,8 @@ beforeEach(() => {
   RuntimeAgent.countDocuments = jest.fn()
   RuntimeAgent.findOne = jest.fn()
   RuntimeSkill.find = jest.fn()
+  RuntimePathRegistry.find = jest.fn()
+  SkillRoleRegistry.find = jest.fn()
   WorkflowPolicy.find = jest.fn()
   FrameworkPackage.find = jest.fn()
   FrameworkRegistry.find = jest.fn()
@@ -240,6 +257,43 @@ beforeEach(() => {
       supportedFrameworkKeys: ['VMF', 'RLD'],
     },
   ]))
+  RuntimePathRegistry.find.mockReturnValue(buildRuntimePathLookupChain([
+    {
+      pathKey: 'vmf.sections.icp',
+      status: 'ACTIVE',
+      frameworkKeys: ['VMF'],
+      allowedOperations: ['READ', 'BIND'],
+      isProtected: false,
+    },
+    {
+      pathKey: 'runtime.validationResult',
+      status: 'ACTIVE',
+      frameworkKeys: ['VMF', 'RLD'],
+      allowedOperations: ['READ', 'WRITE', 'BIND'],
+      isProtected: false,
+    },
+    {
+      pathKey: 'artifacts.summary',
+      status: 'ACTIVE',
+      frameworkKeys: ['VMF', 'RLD'],
+      allowedOperations: ['READ', 'WRITE', 'BIND'],
+      isProtected: false,
+    },
+    {
+      pathKey: 'vmf.id',
+      status: 'ACTIVE',
+      frameworkKeys: ['VMF'],
+      allowedOperations: ['READ'],
+      isProtected: true,
+    },
+  ]))
+  SkillRoleRegistry.find.mockReturnValue({
+    select: jest.fn().mockReturnThis(),
+    lean: jest.fn().mockResolvedValue([
+      { roleKey: 'VALIDATOR', status: 'ACTIVE' },
+      { roleKey: 'RENDERER', status: 'ACTIVE' },
+    ]),
+  })
   WorkflowPolicy.find.mockReturnValue(buildWorkflowPolicyLookupChain([]))
   FrameworkPackage.find.mockReturnValue(buildFrameworkPackageLookupChain([]))
   FrameworkRegistry.find.mockReturnValue(buildFrameworkRegistryLookupChain([
@@ -375,7 +429,7 @@ describe('Runtime Agent Routes', () => {
     expect(String(res.body.error.details.inputContract || '')).toMatch(/expected|object|record/i)
   })
 
-  test('POST /api/v1/super-admin/runtime-control/agents returns 422 when an execution step writesTo target is invalid', async () => {
+  test('POST /api/v1/super-admin/runtime-control/agents returns 422 when an execution step writes to an unknown runtime path', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
 
     const res = await request
@@ -386,13 +440,39 @@ describe('Runtime Agent Routes', () => {
         name: 'Planner',
         supportedFrameworkKeys: ['VMF'],
         defaultSkillIds: ['skill-snapshot'],
-        executionPlan: [{ skillId: 'skill-snapshot', description: '', writesTo: 'invalid-target' }],
+        executionPlan: [{
+          skillId: 'skill-snapshot',
+          description: '',
+          writesTo: ['runtime.unknownTarget'],
+        }],
       })
 
     expect(res.status).toBe(422)
     expect(res.body.error.code).toBe('VALIDATION_FAILED')
-    expect(res.body.error.details['executionPlan.0.writesTo']).toBe(
-      'Execution step writes-to target must start with a letter and only use letters, numbers, or underscores.',
+    expect(res.body.error.details.executionPlan).toBe(
+      'Step 1 writes to unknown runtime path "runtime.unknownTarget".',
+    )
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/agents returns 422 when required skill roles are unknown', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/agents')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        key: 'planner',
+        name: 'Planner',
+        supportedFrameworkKeys: ['VMF'],
+        requiredSkillRoleKeys: ['UNKNOWN_ROLE'],
+        defaultSkillIds: ['skill-snapshot'],
+        executionPlan: [{ skillId: 'skill-snapshot', description: '' }],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details.requiredSkillRoleKeys).toBe(
+      'Required skill role "UNKNOWN_ROLE" was not found.',
     )
   })
 
@@ -477,12 +557,23 @@ describe('Runtime Agent Routes', () => {
         status: 'ACTIVE',
         agentType: 'validation',
         supportedFrameworkKeys: ['vmf', 'RLD', 'VMF'],
+        requiredSkillRoleKeys: ['validator', 'RENDERER'],
         defaultSkillIds: ['skill-snapshot', 'skill-snapshot', 'skill-summary'],
         primarySkillIds: ['skill-summary'],
         optionalSkillIds: ['skill-snapshot'],
         executionPlan: [
-          { skillId: 'skill-snapshot', description: 'Capture state.', writesTo: 'vmfSnapshot' },
-          { skillId: 'skill-summary', description: '', writesTo: 'summaryResult' },
+          {
+            skillId: 'skill-snapshot',
+            description: 'Capture state.',
+            readsFrom: ['vmf.sections.icp'],
+            writesTo: ['runtime.validationResult'],
+          },
+          {
+            skillId: 'skill-summary',
+            description: '',
+            readsFrom: ['runtime.validationResult'],
+            writesTo: ['artifacts.summary'],
+          },
         ],
         promptConfig: { base_system_prompt: 'You are governed.' },
         inputContract: { required_inputs: ['frameworkPackage'] },
@@ -498,12 +589,23 @@ describe('Runtime Agent Routes', () => {
       status: 'ACTIVE',
       agentType: 'VALIDATION',
       supportedFrameworkKeys: ['VMF', 'RLD'],
+      requiredSkillRoleKeys: ['VALIDATOR', 'RENDERER'],
       defaultSkillIds: ['skill-snapshot', 'skill-summary'],
       primarySkillIds: ['skill-summary'],
       optionalSkillIds: ['skill-snapshot'],
       executionPlan: [
-        { skillId: 'skill-snapshot', description: 'Capture state.', writesTo: 'vmfSnapshot' },
-        { skillId: 'skill-summary', description: '', writesTo: 'summaryResult' },
+        {
+          skillId: 'skill-snapshot',
+          description: 'Capture state.',
+          readsFrom: ['vmf.sections.icp'],
+          writesTo: ['runtime.validationResult'],
+        },
+        {
+          skillId: 'skill-summary',
+          description: '',
+          readsFrom: ['runtime.validationResult'],
+          writesTo: ['artifacts.summary'],
+        },
       ],
       promptConfig: { base_system_prompt: 'You are governed.' },
       inputContract: { required_inputs: ['frameworkPackage'] },
@@ -638,8 +740,14 @@ describe('Runtime Agent Routes', () => {
         name: 'Validation Guard',
         status: 'INACTIVE',
         supportedFrameworkKeys: ['VMF'],
+        requiredSkillRoleKeys: ['VALIDATOR'],
         primarySkillIds: ['skill-summary'],
-        executionPlan: [{ skillId: 'skill-snapshot', description: '', writesTo: 'validationResult' }],
+        executionPlan: [{
+          skillId: 'skill-snapshot',
+          description: '',
+          readsFrom: ['vmf.sections.icp'],
+          writesTo: ['runtime.validationResult'],
+        }],
         promptConfig: { role_prompt: 'Validate.' },
       })
 
@@ -650,8 +758,14 @@ describe('Runtime Agent Routes', () => {
       name: 'Validation Guard',
       status: 'INACTIVE',
       supportedFrameworkKeys: ['VMF'],
+      requiredSkillRoleKeys: ['VALIDATOR'],
       primarySkillIds: ['skill-summary'],
-      executionPlan: [{ skillId: 'skill-snapshot', description: '', writesTo: 'validationResult' }],
+      executionPlan: [{
+        skillId: 'skill-snapshot',
+        description: '',
+        readsFrom: ['vmf.sections.icp'],
+        writesTo: ['runtime.validationResult'],
+      }],
       promptConfig: { role_prompt: 'Validate.' },
     })
     expect(AuditLog.createLog).toHaveBeenCalledTimes(1)

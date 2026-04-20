@@ -6,6 +6,11 @@ import { escapeRegex, serializeUserSummary } from '../utils/controllerUtils.js'
 
 const SKILL_ROLE_NOT_FOUND_MESSAGE = 'Skill role was not found.'
 const DUPLICATE_SKILL_ROLE_KEY_MESSAGE = 'Role key must be unique.'
+const SKILL_ROLE_SORT_FIELDS = Object.freeze({
+  LABEL: 'label',
+  UPDATED_AT: 'updatedAt',
+  USAGE_COUNT: 'usageCount',
+})
 
 const cloneAuditValue = (value) => {
   if (value === undefined) return value
@@ -86,23 +91,140 @@ const fetchSkillRoleDependencies = async (roleKey) => {
   }
 }
 
+const buildSkillRoleSort = ({ sortBy, sortOrder }) => {
+  const normalizedSortBy = String(sortBy || '').trim()
+  const normalizedSortOrder = String(sortOrder || '').trim().toLowerCase() === 'asc' ? 1 : -1
+
+  if (normalizedSortBy === SKILL_ROLE_SORT_FIELDS.LABEL) {
+    return { label: normalizedSortOrder, roleKey: 1 }
+  }
+
+  if (normalizedSortBy === SKILL_ROLE_SORT_FIELDS.UPDATED_AT) {
+    return { updatedAt: normalizedSortOrder, roleKey: 1 }
+  }
+
+  return { status: 1, updatedAt: -1, roleKey: 1 }
+}
+
+const fetchUsageCountMap = async (roleKeys) => {
+  const normalizedRoleKeys = [...new Set(
+    (Array.isArray(roleKeys) ? roleKeys : [])
+      .map((roleKey) => String(roleKey || '').trim().toUpperCase())
+      .filter(Boolean),
+  )]
+
+  if (normalizedRoleKeys.length === 0) {
+    return new Map()
+  }
+
+  const rows = await RuntimeSkill.aggregate([
+    { $match: { skillRoleKey: { $in: normalizedRoleKeys } } },
+    { $group: { _id: '$skillRoleKey', usageCount: { $sum: 1 } } },
+  ])
+
+  return new Map(
+    rows.map((row) => [String(row?._id || '').trim().toUpperCase(), Number(row?.usageCount) || 0]),
+  )
+}
+
+const appendUsageCounts = async (items) => {
+  const roleKeys = items.map((item) => item?.roleKey)
+  const usageCountMap = await fetchUsageCountMap(roleKeys)
+
+  return items.map((item) => ({
+    ...item,
+    usageCount: usageCountMap.get(String(item?.roleKey || '').trim().toUpperCase()) || 0,
+  }))
+}
+
+const listSkillRolesByUsageCount = async ({
+  filter,
+  sortOrder,
+  skip,
+  limit,
+}) => {
+  const usageLookupPipeline = [
+    {
+      $lookup: {
+        from: RuntimeSkill.collection.name,
+        let: { roleKey: '$roleKey' },
+        pipeline: [
+          { $match: { $expr: { $eq: ['$skillRoleKey', '$$roleKey'] } } },
+          { $count: 'usageCount' },
+        ],
+        as: 'usageSummary',
+      },
+    },
+    {
+      $addFields: {
+        usageCount: {
+          $ifNull: [
+            { $arrayElemAt: ['$usageSummary.usageCount', 0] },
+            0,
+          ],
+        },
+      },
+    },
+    { $project: { usageSummary: 0 } },
+  ]
+
+  return SkillRoleRegistry.aggregate([
+    { $match: filter },
+    ...usageLookupPipeline,
+    { $sort: { usageCount: sortOrder, label: 1, roleKey: 1 } },
+    { $skip: skip },
+    { $limit: limit },
+  ])
+}
+
 export const listSkillRoles = async (req, res, next) => {
   try {
     const pageNum = Math.max(1, Number(req.query.page) || 1)
     const limit = Math.min(100, Math.max(1, Number(req.query.pageSize) || 20))
     const filter = buildListFilter(req.query)
-    const total = await SkillRoleRegistry.countDocuments(filter)
-    const totalPages = Math.max(1, Math.ceil(total / limit))
-    const normalizedPage = Math.min(pageNum, totalPages)
-    const skip = (normalizedPage - 1) * limit
+    const sortBy = String(req.query.sortBy || '').trim()
+    const sortOrder = String(req.query.sortOrder || '').trim().toLowerCase() === 'asc' ? 1 : -1
+    let total = 0
+    let normalizedPage = pageNum
+    let skip = 0
+    let items = []
 
-    const items = await SkillRoleRegistry.find(filter)
-      .sort({ status: 1, updatedAt: -1, roleKey: 1 })
-      .skip(skip)
-      .limit(limit)
-      .populate('createdBy', 'name email')
-      .populate('updatedBy', 'name email')
-      .lean()
+    if (sortBy === SKILL_ROLE_SORT_FIELDS.USAGE_COUNT) {
+      total = await SkillRoleRegistry.countDocuments(filter)
+      const computedTotalPages = Math.max(1, Math.ceil(total / limit))
+      normalizedPage = Math.min(pageNum, computedTotalPages)
+      skip = (normalizedPage - 1) * limit
+
+      items = await listSkillRolesByUsageCount({
+        filter,
+        sortOrder,
+        skip,
+        limit,
+      })
+
+      items = await SkillRoleRegistry.populate(items, [
+        { path: 'createdBy', select: 'name email' },
+        { path: 'updatedBy', select: 'name email' },
+      ])
+    } else {
+      total = await SkillRoleRegistry.countDocuments(filter)
+      const computedTotalPages = Math.max(1, Math.ceil(total / limit))
+      normalizedPage = Math.min(pageNum, computedTotalPages)
+      skip = (normalizedPage - 1) * limit
+
+      items = await SkillRoleRegistry.find(filter)
+        .sort(buildSkillRoleSort(req.query))
+        .skip(skip)
+        .limit(limit)
+        .populate('createdBy', 'name email')
+        .populate('updatedBy', 'name email')
+        .lean()
+
+      items = await appendUsageCounts(items)
+    }
+
+    const computedTotalPages = Math.max(1, Math.ceil(total / limit))
+    normalizedPage = Math.min(pageNum, computedTotalPages)
 
     return res.status(200).json({
       data: items.map((item) => serializeSkillRole(item)),
@@ -110,7 +232,7 @@ export const listSkillRoles = async (req, res, next) => {
         page: normalizedPage,
         pageSize: limit,
         total,
-        totalPages,
+        totalPages: computedTotalPages,
         requestId: req.requestId,
         version: 'v1',
       },
@@ -194,8 +316,13 @@ export const getSkillRole = async (req, res, next) => {
       })
     }
 
+    const usageCount = await RuntimeSkill.countDocuments({ skillRoleKey: skillRole.roleKey })
+
     return res.status(200).json({
-      data: serializeSkillRole(skillRole),
+      data: {
+        ...serializeSkillRole(skillRole),
+        usageCount,
+      },
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
@@ -310,5 +437,7 @@ export const getSkillRoleDependencies = async (req, res, next) => {
 export const __testables = Object.freeze({
   buildListFilter,
   buildSearchClauses,
+  buildSkillRoleSort,
   SKILL_ROLE_REGISTRY_STATUSES,
+  SKILL_ROLE_SORT_FIELDS,
 })

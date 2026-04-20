@@ -8,6 +8,8 @@ import { SKILL_ROLE_REGISTRY_STATUSES } from '../models/SkillRoleRegistry.js'
 
 const roleIdRegex = /^role-[a-z0-9][a-z0-9-]*$/
 const roleKeyRegex = /^[A-Z][A-Z0-9_]*$/
+const skillRoleSortFieldValues = ['label', 'updatedAt', 'usageCount']
+const sortOrderValues = ['asc', 'desc']
 
 const skillRoleIdSchema = z.object({
   roleId: z
@@ -20,6 +22,8 @@ const skillRoleIdSchema = z.object({
 const listSkillRolesQuerySchema = z.object({
   q: z.string().trim().max(255, 'Search query must be 255 characters or fewer').optional(),
   status: z.enum(Object.values(SKILL_ROLE_REGISTRY_STATUSES)).optional(),
+  sortBy: z.enum(skillRoleSortFieldValues).optional(),
+  sortOrder: z.enum(sortOrderValues).optional(),
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(20),
 })

@@ -188,12 +188,19 @@ beforeEach(() => {
   SkillRoleRegistry.findByStableId = jest.fn()
   SkillRoleRegistry.findOne = jest.fn()
   SkillRoleRegistry.create = jest.fn()
+  SkillRoleRegistry.aggregate = jest.fn()
+  SkillRoleRegistry.populate = jest.fn(async (items) => items)
   RuntimeSkill.find = jest.fn()
+  RuntimeSkill.countDocuments = jest.fn()
+  RuntimeSkill.aggregate = jest.fn()
 
   SkillRoleRegistry.countDocuments.mockResolvedValue(0)
   SkillRoleRegistry.find.mockReturnValue(buildSkillRoleQueryChain([]))
   SkillRoleRegistry.findOne.mockResolvedValue(null)
+  SkillRoleRegistry.aggregate.mockResolvedValue([])
   RuntimeSkill.find.mockReturnValue(buildRuntimeSkillReferenceChain([]))
+  RuntimeSkill.countDocuments.mockResolvedValue(0)
+  RuntimeSkill.aggregate.mockResolvedValue([])
 })
 
 describe('Skill Role Registry API', () => {
@@ -214,6 +221,9 @@ describe('Skill Role Registry API', () => {
   test('GET /api/v1/super-admin/runtime-control/skill-roles returns paginated skill roles', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     SkillRoleRegistry.countDocuments.mockResolvedValue(1)
+    RuntimeSkill.aggregate.mockResolvedValue([
+      { _id: 'VALIDATOR', usageCount: 2 },
+    ])
     SkillRoleRegistry.find.mockReturnValue(
       buildSkillRoleQueryChain([
         {
@@ -236,6 +246,46 @@ describe('Skill Role Registry API', () => {
     expect(res.status).toBe(200)
     expect(res.body.data?.length).toBe(1)
     expect(res.body.data?.[0]?.roleKey).toBe('VALIDATOR')
+    expect(res.body.data?.[0]?.usageCount).toBe(2)
+  })
+
+  test('GET /api/v1/super-admin/runtime-control/skill-roles supports usageCount sorting', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    SkillRoleRegistry.countDocuments.mockResolvedValue(2)
+
+    SkillRoleRegistry.aggregate
+      .mockResolvedValueOnce([
+        {
+          stableId: buildSkillRoleRegistryStableId('VALIDATOR'),
+          roleKey: 'VALIDATOR',
+          label: 'Validator',
+          description: 'Evaluates correctness.',
+          status: 'ACTIVE',
+          isSystem: false,
+          usageCount: 4,
+          createdBy: { id: SUPER_ADMIN_ID, name: 'Super Administrator' },
+          updatedBy: { id: SUPER_ADMIN_ID, name: 'Super Administrator' },
+        },
+        {
+          stableId: buildSkillRoleRegistryStableId('REVIEWER'),
+          roleKey: 'REVIEWER',
+          label: 'Reviewer',
+          description: 'Reviews outputs.',
+          status: 'ACTIVE',
+          isSystem: false,
+          usageCount: 1,
+          createdBy: { id: SUPER_ADMIN_ID, name: 'Super Administrator' },
+          updatedBy: { id: SUPER_ADMIN_ID, name: 'Super Administrator' },
+        },
+      ])
+
+    const res = await request
+      .get('/api/v1/super-admin/runtime-control/skill-roles?sortBy=usageCount&sortOrder=desc')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data?.map((item) => item.roleKey)).toEqual(['VALIDATOR', 'REVIEWER'])
+    expect(res.body.data?.map((item) => item.usageCount)).toEqual([4, 1])
   })
 
   test('POST /api/v1/super-admin/runtime-control/skill-roles creates a role', async () => {
@@ -284,6 +334,7 @@ describe('Skill Role Registry API', () => {
 
   test('GET /api/v1/super-admin/runtime-control/skill-roles/:roleId returns a role', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
+    RuntimeSkill.countDocuments.mockResolvedValue(3)
 
     SkillRoleRegistry.findByStableId.mockReturnValue(
       buildFindByStableIdQuery({
@@ -304,6 +355,7 @@ describe('Skill Role Registry API', () => {
 
     expect(res.status).toBe(200)
     expect(res.body.data?.roleKey).toBe('VALIDATOR')
+    expect(res.body.data?.usageCount).toBe(3)
   })
 
   test('GET /api/v1/super-admin/runtime-control/skill-roles/:roleId/dependencies returns referencing skills', async () => {
@@ -410,5 +462,13 @@ describe('Skill Role Registry API', () => {
   test('Controller search clauses include exact status match', () => {
     const clauses = skillRoleControllerTestables.buildSearchClauses('ACTIVE')
     expect(clauses.some((clause) => clause.status === 'ACTIVE')).toBe(true)
+  })
+
+  test('Controller sort helper defaults to updatedAt descending', () => {
+    expect(skillRoleControllerTestables.buildSkillRoleSort({})).toEqual({
+      status: 1,
+      updatedAt: -1,
+      roleKey: 1,
+    })
   })
 })

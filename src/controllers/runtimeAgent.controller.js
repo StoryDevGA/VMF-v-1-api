@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from 'node:util'
 import crypto from 'node:crypto'
 import RuntimeAgent from '../models/RuntimeAgent.js'
 import RuntimeSkill from '../models/RuntimeSkill.js'
+import SkillRoleRegistry from '../models/SkillRoleRegistry.js'
 import WorkflowPolicy from '../models/WorkflowPolicy.js'
 import FrameworkPackage from '../models/FrameworkPackage.js'
 import auditService from '../services/auditService.js'
@@ -10,6 +11,8 @@ import {
   buildUnknownFrameworkKeyMessage,
   resolveKnownFrameworkKeys,
 } from '../services/frameworkRegistryService.js'
+import { resolveRuntimePathSelections } from '../services/runtimePathRegistryService.js'
+import { RUNTIME_PATH_REGISTRY_OPERATIONS } from '../models/RuntimePathRegistry.js'
 
 const DUPLICATE_RUNTIME_AGENT_KEY_MESSAGE = 'Agent key must be unique.'
 const RUNTIME_AGENT_NOT_FOUND_MESSAGE = 'Agent was not found.'
@@ -34,6 +37,31 @@ const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$
 const normalizeToken = (value) => String(value ?? '').trim().toLowerCase()
 const normalizeFrameworkKey = (value) => String(value ?? '').trim().toUpperCase()
 const executionTargetRegex = /^[a-zA-Z][a-zA-Z0-9_]*$/
+const normalizeEnumToken = (value) => String(value ?? '').trim().toUpperCase()
+
+const normalizePathSelectionList = (values) => {
+  const rawValues = Array.isArray(values)
+    ? values
+    : values === undefined || values === null || values === ''
+      ? []
+      : [values]
+
+  return [...new Set(
+    rawValues
+      .map((value) => String(value ?? '').trim())
+      .filter(Boolean),
+  )]
+}
+
+const normalizeRequiredSkillRoleKeys = (values) => {
+  if (!Array.isArray(values)) return []
+
+  return [...new Set(
+    values
+      .map((value) => normalizeEnumToken(value))
+      .filter(Boolean),
+  )]
+}
 
 const cloneAuditValue = (value) => {
   if (value === undefined) return value
@@ -157,6 +185,7 @@ const pickRuntimeAgentBody = (body = {}) => ({
   status: body?.status,
   agentType: body?.agentType,
   supportedFrameworkKeys: body?.supportedFrameworkKeys,
+  requiredSkillRoleKeys: body?.requiredSkillRoleKeys,
   defaultSkillIds: body?.defaultSkillIds,
   primarySkillIds: body?.primarySkillIds,
   optionalSkillIds: body?.optionalSkillIds,
@@ -229,6 +258,43 @@ const validateRuntimeAgentFrameworkKeys = async (supportedFrameworkKeys = []) =>
   }
 }
 
+const validateRuntimeAgentRequiredSkillRoles = async (requiredSkillRoleKeys = []) => {
+  const normalizedRoleKeys = normalizeRequiredSkillRoleKeys(requiredSkillRoleKeys)
+  if (normalizedRoleKeys.length === 0) {
+    return {}
+  }
+
+  const roles = await SkillRoleRegistry.find({
+    roleKey: { $in: normalizedRoleKeys },
+  })
+    .select('roleKey status')
+    .lean()
+
+  const roleLookup = new Map(
+    roles.map((role) => [normalizeEnumToken(role?.roleKey), role]),
+  )
+
+  const missingRoleKey = normalizedRoleKeys.find((roleKey) => !roleLookup.has(roleKey))
+  if (missingRoleKey) {
+    return {
+      requiredSkillRoleKeys: `Required skill role "${missingRoleKey}" was not found.`,
+    }
+  }
+
+  const inactiveRoleKey = normalizedRoleKeys.find((roleKey) => {
+    const role = roleLookup.get(roleKey)
+    return String(role?.status ?? '').trim().toUpperCase() !== 'ACTIVE'
+  })
+
+  if (inactiveRoleKey) {
+    return {
+      requiredSkillRoleKeys: `Required skill role "${inactiveRoleKey}" must be ACTIVE.`,
+    }
+  }
+
+  return {}
+}
+
 const fetchRuntimeAgentDependencies = async (agentId) => {
   const normalizedAgentId = normalizeToken(agentId)
   if (!normalizedAgentId) return { workflowPolicies: [], frameworkPackages: [] }
@@ -279,13 +345,17 @@ const buildRuntimeAgentDependencySummary = ({ workflowPolicies = [], frameworkPa
   }
 }
 
-const validateRuntimeAgentExecutionPlan = async (runtimeAgent) => {
+const validateRuntimeAgentExecutionPlan = async (
+  runtimeAgent,
+  { allowLegacyWriteTargets = false } = {},
+) => {
   const errors = {}
+  const warnings = []
   const plan = Array.isArray(runtimeAgent?.executionPlan) ? runtimeAgent.executionPlan : []
 
   if (plan.length === 0) {
     errors.executionPlan = 'Execution plan must contain at least one step.'
-    return { errors }
+    return { errors, warnings }
   }
 
   const skillIds = plan
@@ -294,17 +364,7 @@ const validateRuntimeAgentExecutionPlan = async (runtimeAgent) => {
 
   if (skillIds.length !== plan.length) {
     errors.executionPlan = 'Each execution plan step must reference a valid skill id.'
-    return { errors }
-  }
-
-  const invalidWritesToStep = plan.find((step) => {
-    const writesTo = String(step?.writesTo ?? '').trim()
-    return writesTo && !executionTargetRegex.test(writesTo)
-  })
-  if (invalidWritesToStep) {
-    errors.executionPlan =
-      `Execution step writes-to target "${String(invalidWritesToStep.writesTo ?? '').trim()}" is invalid.`
-    return { errors }
+    return { errors, warnings }
   }
 
   const skillIdSet = new Set()
@@ -316,7 +376,7 @@ const validateRuntimeAgentExecutionPlan = async (runtimeAgent) => {
 
   if (duplicateSkillId) {
     errors.executionPlan = `Duplicate skill "${duplicateSkillId}" is not allowed in the execution plan.`
-    return { errors }
+    return { errors, warnings }
   }
 
   const assignedSkillIds = new Set([
@@ -328,7 +388,7 @@ const validateRuntimeAgentExecutionPlan = async (runtimeAgent) => {
   const unassignedSkillId = skillIds.find((skillId) => !assignedSkillIds.has(skillId))
   if (unassignedSkillId) {
     errors.executionPlan = `Skill "${unassignedSkillId}" must be assigned to the agent before it can be used in the execution plan.`
-    return { errors }
+    return { errors, warnings }
   }
 
   const skills = await RuntimeSkill.find({ stableId: { $in: skillIds } })
@@ -339,7 +399,7 @@ const validateRuntimeAgentExecutionPlan = async (runtimeAgent) => {
   const unknownSkillId = skillIds.find((skillId) => !skillLookup.has(skillId))
   if (unknownSkillId) {
     errors.executionPlan = `Unknown skill id "${unknownSkillId}".`
-    return { errors }
+    return { errors, warnings }
   }
 
   const inactiveSkillId = skillIds.find((skillId) => {
@@ -349,7 +409,7 @@ const validateRuntimeAgentExecutionPlan = async (runtimeAgent) => {
 
   if (inactiveSkillId) {
     errors.executionPlan = `Skill "${inactiveSkillId}" is not ACTIVE and cannot be used in the execution plan.`
-    return { errors }
+    return { errors, warnings }
   }
 
   const agentFrameworks = Array.isArray(runtimeAgent?.supportedFrameworkKeys)
@@ -367,10 +427,88 @@ const validateRuntimeAgentExecutionPlan = async (runtimeAgent) => {
 
   if (incompatibleSkillId) {
     errors.executionPlan = `Skill "${incompatibleSkillId}" is not compatible with the selected frameworks.`
-    return { errors }
+    return { errors, warnings }
   }
 
-  return { errors }
+  for (let index = 0; index < plan.length; index += 1) {
+    const step = plan[index]
+    const stepNumber = index + 1
+    const readsFrom = normalizePathSelectionList(step?.readsFrom)
+    const writesTo = normalizePathSelectionList(step?.writesTo)
+    const legacyWriteTargets = allowLegacyWriteTargets
+      ? writesTo.filter((pathKey) => executionTargetRegex.test(pathKey) && !pathKey.includes('.'))
+      : []
+    const governedWriteTargets = writesTo.filter((pathKey) => !legacyWriteTargets.includes(pathKey))
+
+    const readSelections = await resolveRuntimePathSelections({
+      pathKeys: readsFrom,
+      frameworkKeys: agentFrameworks,
+      operation: RUNTIME_PATH_REGISTRY_OPERATIONS.READ,
+      requireActive: true,
+      forbidProtectedWrites: false,
+    })
+
+    if (readSelections.missing.length > 0) {
+      errors.executionPlan = `Step ${stepNumber} reads from unknown runtime path "${readSelections.missing[0]}".`
+      return { errors, warnings }
+    }
+
+    if (readSelections.inactive.length > 0) {
+      errors.executionPlan = `Step ${stepNumber} reads from inactive runtime path "${readSelections.inactive[0]}".`
+      return { errors, warnings }
+    }
+
+    if (readSelections.invalidOperation.length > 0) {
+      errors.executionPlan = `Step ${stepNumber} cannot read from runtime path "${readSelections.invalidOperation[0]}".`
+      return { errors, warnings }
+    }
+
+    if (readSelections.incompatibleFramework.length > 0) {
+      errors.executionPlan = `Step ${stepNumber} reads from runtime path "${readSelections.incompatibleFramework[0]}", which is not compatible with the selected frameworks.`
+      return { errors, warnings }
+    }
+
+    const writeSelections = await resolveRuntimePathSelections({
+      pathKeys: governedWriteTargets,
+      frameworkKeys: agentFrameworks,
+      operation: RUNTIME_PATH_REGISTRY_OPERATIONS.WRITE,
+      requireActive: true,
+      forbidProtectedWrites: true,
+    })
+
+    if (writeSelections.missing.length > 0) {
+      errors.executionPlan = `Step ${stepNumber} writes to unknown runtime path "${writeSelections.missing[0]}".`
+      return { errors, warnings }
+    }
+
+    if (writeSelections.inactive.length > 0) {
+      errors.executionPlan = `Step ${stepNumber} writes to inactive runtime path "${writeSelections.inactive[0]}".`
+      return { errors, warnings }
+    }
+
+    if (writeSelections.invalidOperation.length > 0) {
+      errors.executionPlan = `Step ${stepNumber} cannot write to runtime path "${writeSelections.invalidOperation[0]}".`
+      return { errors, warnings }
+    }
+
+    if (writeSelections.incompatibleFramework.length > 0) {
+      errors.executionPlan = `Step ${stepNumber} writes to runtime path "${writeSelections.incompatibleFramework[0]}", which is not compatible with the selected frameworks.`
+      return { errors, warnings }
+    }
+
+    if (writeSelections.protectedWrite.length > 0) {
+      errors.executionPlan = `Step ${stepNumber} cannot write to protected runtime path "${writeSelections.protectedWrite[0]}".`
+      return { errors, warnings }
+    }
+
+    if (legacyWriteTargets.length > 0) {
+      warnings.push(
+        `Step ${stepNumber} still uses legacy writes-to target${legacyWriteTargets.length === 1 ? '' : 's'}: ${legacyWriteTargets.join(', ')}.`,
+      )
+    }
+  }
+
+  return { errors, warnings }
 }
 
 const validateRuntimeAgentDocument = async (runtimeAgent) => {
@@ -392,9 +530,19 @@ const validateRuntimeAgentDocument = async (runtimeAgent) => {
     Object.assign(errors, validationDetails)
   }
 
-  if (!errors.supportedFrameworkKeys) {
-    const planDetails = await validateRuntimeAgentExecutionPlan(runtimeAgent)
+  if (!errors.requiredSkillRoleKeys) {
+    const skillRoleValidationDetails = await validateRuntimeAgentRequiredSkillRoles(
+      runtimeAgent?.requiredSkillRoleKeys,
+    )
+    Object.assign(errors, skillRoleValidationDetails)
+  }
+
+  if (!errors.supportedFrameworkKeys && !errors.requiredSkillRoleKeys) {
+    const planDetails = await validateRuntimeAgentExecutionPlan(runtimeAgent, {
+      allowLegacyWriteTargets: true,
+    })
     Object.assign(errors, planDetails.errors)
+    warnings.push(...(planDetails.warnings || []))
   }
 
   if (runtimeAgent?.status === 'DEPRECATED') {
@@ -451,7 +599,16 @@ export const createRuntimeAgent = async (req, res, next) => {
       return sendValidationFailed(res, req, validationDetails)
     }
 
-    const planDetails = await validateRuntimeAgentExecutionPlan(body)
+    const requiredSkillRoleValidationDetails = await validateRuntimeAgentRequiredSkillRoles(
+      body.requiredSkillRoleKeys,
+    )
+    if (Object.keys(requiredSkillRoleValidationDetails).length > 0) {
+      return sendValidationFailed(res, req, requiredSkillRoleValidationDetails)
+    }
+
+    const planDetails = await validateRuntimeAgentExecutionPlan(body, {
+      allowLegacyWriteTargets: false,
+    })
     if (Object.keys(planDetails.errors).length > 0) {
       return sendValidationFailed(res, req, planDetails.errors)
     }
@@ -497,6 +654,7 @@ export const createRuntimeAgent = async (req, res, next) => {
         status: runtimeAgent.status,
         agentType: runtimeAgent.agentType,
         supportedFrameworkKeys: runtimeAgent.supportedFrameworkKeys,
+        requiredSkillRoleKeys: runtimeAgent.requiredSkillRoleKeys,
         defaultSkillIds: runtimeAgent.defaultSkillIds,
         primarySkillIds: runtimeAgent.primarySkillIds,
         optionalSkillIds: runtimeAgent.optionalSkillIds,
@@ -597,12 +755,24 @@ export const updateRuntimeAgent = async (req, res, next) => {
       return sendValidationFailed(res, req, validationDetails)
     }
 
+    const nextRequiredSkillRoleKeys =
+      req.body.requiredSkillRoleKeys ?? runtimeAgent.requiredSkillRoleKeys
+    const requiredSkillRoleValidationDetails = await validateRuntimeAgentRequiredSkillRoles(
+      nextRequiredSkillRoleKeys,
+    )
+    if (Object.keys(requiredSkillRoleValidationDetails).length > 0) {
+      return sendValidationFailed(res, req, requiredSkillRoleValidationDetails)
+    }
+
     const planDetails = await validateRuntimeAgentExecutionPlan({
       supportedFrameworkKeys: nextSupportedFrameworkKeys,
+      requiredSkillRoleKeys: nextRequiredSkillRoleKeys,
       defaultSkillIds: req.body.defaultSkillIds ?? runtimeAgent.defaultSkillIds,
       primarySkillIds: req.body.primarySkillIds ?? runtimeAgent.primarySkillIds,
       optionalSkillIds: req.body.optionalSkillIds ?? runtimeAgent.optionalSkillIds,
       executionPlan: req.body.executionPlan ?? runtimeAgent.executionPlan,
+    }, {
+      allowLegacyWriteTargets: true,
     })
     if (Object.keys(planDetails.errors).length > 0) {
       return sendValidationFailed(res, req, planDetails.errors)
@@ -628,6 +798,7 @@ export const updateRuntimeAgent = async (req, res, next) => {
       'status',
       'agentType',
       'supportedFrameworkKeys',
+      'requiredSkillRoleKeys',
       'defaultSkillIds',
       'primarySkillIds',
       'optionalSkillIds',

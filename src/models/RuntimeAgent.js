@@ -11,7 +11,6 @@ const keyPattern = /^[a-z][a-z0-9-]*$/
 const frameworkKeyPattern = /^[A-Z][A-Z0-9_]*$/
 const enumTokenPattern = /^[A-Z][A-Z0-9_]*$/
 const stableIdPattern = /^agent-[a-z][a-z0-9-]*$/
-const executionTargetPattern = /^[a-zA-Z][a-zA-Z0-9_]*$/
 
 const normalizeKey = (value) =>
   String(value || '')
@@ -43,6 +42,30 @@ const normalizeTokenList = (values) => {
 
   const normalized = values
     .map((value) => String(value || '').trim().toLowerCase())
+    .filter(Boolean)
+
+  return [...new Set(normalized)]
+}
+
+const normalizeEnumTokenList = (values) => {
+  if (!Array.isArray(values)) return []
+
+  const normalized = values
+    .map((value) => String(value || '').trim().toUpperCase())
+    .filter(Boolean)
+
+  return [...new Set(normalized)]
+}
+
+const normalizePathSelectionList = (values) => {
+  const rawValues = Array.isArray(values)
+    ? values
+    : values === undefined || values === null || values === ''
+      ? []
+      : [values]
+
+  const normalized = rawValues
+    .map((value) => String(value || '').trim())
     .filter(Boolean)
 
   return [...new Set(normalized)]
@@ -81,18 +104,13 @@ const executionPlanStepSchema = new mongoose.Schema(
       maxlength: 500,
       default: '',
     },
+    readsFrom: {
+      type: [String],
+      default: [],
+    },
     writesTo: {
-      type: String,
-      trim: true,
-      maxlength: 120,
-      validate: {
-        validator(value) {
-          if (!value) return true
-          return executionTargetPattern.test(String(value))
-        },
-        message: 'Writes-to target must start with a letter and only use letters, numbers, or underscores.',
-      },
-      default: '',
+      type: [String],
+      default: [],
     },
   },
   { _id: false },
@@ -104,7 +122,8 @@ const normalizeExecutionPlan = (values) => {
   return values.map((step) => ({
     skillId: normalizeKey(step?.skillId),
     description: normalizeDescription(step?.description),
-    writesTo: String(step?.writesTo || '').trim(),
+    readsFrom: normalizePathSelectionList(step?.readsFrom),
+    writesTo: normalizePathSelectionList(step?.writesTo),
   }))
 }
 
@@ -163,6 +182,13 @@ const runtimeAgentSchema = new mongoose.Schema(
       uppercase: true,
       maxlength: 100,
       match: [frameworkKeyPattern, 'Framework key must use uppercase letters, numbers, or underscores'],
+    }],
+    requiredSkillRoleKeys: [{
+      type: String,
+      trim: true,
+      uppercase: true,
+      maxlength: 80,
+      match: [enumTokenPattern, 'Required skill role key must use uppercase letters, numbers, or underscores'],
     }],
     defaultSkillIds: [tokenField],
     primarySkillIds: [tokenField],
@@ -249,6 +275,10 @@ runtimeAgentSchema.pre('validate', function normalizeRuntimeAgent(next) {
 
   if (this.isNew || this.isModified('supportedFrameworkKeys')) {
     this.supportedFrameworkKeys = normalizeFrameworkKeyList(this.supportedFrameworkKeys)
+  }
+
+  if (this.isNew || this.isModified('requiredSkillRoleKeys')) {
+    this.requiredSkillRoleKeys = normalizeEnumTokenList(this.requiredSkillRoleKeys)
   }
 
   if (this.isNew || this.isModified('defaultSkillIds')) {
