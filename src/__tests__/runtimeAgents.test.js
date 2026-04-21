@@ -818,6 +818,80 @@ describe('Runtime Agent Routes', () => {
     })
   })
 
+  test('PATCH /api/v1/super-admin/runtime-control/agents/:agentId allows saving when a required skill role is non-active but unchanged', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const runtimeAgent = makeRuntimeAgentDoc({
+      status: 'DRAFT',
+      requiredSkillRoleKeys: ['VALIDATOR'],
+    })
+
+    RuntimeAgent.findOne
+      .mockResolvedValueOnce(runtimeAgent)
+      .mockReturnValueOnce({
+        select: jest.fn().mockResolvedValue(null),
+      })
+
+    SkillRoleRegistry.find.mockReturnValueOnce({
+      select: jest.fn().mockReturnThis(),
+      lean: jest.fn().mockResolvedValue([
+        { roleKey: 'VALIDATOR', status: 'DEPRECATED' },
+      ]),
+    })
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/agents/${RUNTIME_AGENT_STABLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        name: 'Validation Guard',
+        description: 'Updated description while role is deprecated.',
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toMatchObject({
+      id: 'agent-validator',
+      key: 'validator',
+      name: 'Validation Guard',
+      status: 'DRAFT',
+      requiredSkillRoleKeys: ['VALIDATOR'],
+      description: 'Updated description while role is deprecated.',
+    })
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/agents/:agentId rejects adding non-active required skill roles', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const runtimeAgent = makeRuntimeAgentDoc({
+      status: 'DRAFT',
+      requiredSkillRoleKeys: ['VALIDATOR'],
+    })
+
+    RuntimeAgent.findOne
+      .mockResolvedValueOnce(runtimeAgent)
+      .mockReturnValueOnce({
+        select: jest.fn().mockResolvedValue(null),
+      })
+
+    SkillRoleRegistry.find.mockReturnValueOnce({
+      select: jest.fn().mockReturnThis(),
+      lean: jest.fn().mockResolvedValue([
+        { roleKey: 'VALIDATOR', status: 'ACTIVE' },
+        { roleKey: 'RENDERER', status: 'DEPRECATED' },
+      ]),
+    })
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/agents/${RUNTIME_AGENT_STABLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        requiredSkillRoleKeys: ['VALIDATOR', 'RENDERER'],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details.requiredSkillRoleKeys).toBe(
+      'Required skill role "RENDERER" must be ACTIVE.',
+    )
+  })
+
   test('PATCH /api/v1/super-admin/runtime-control/agents/:agentId returns 409 when attempting lifecycle status changes', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     const runtimeAgent = makeRuntimeAgentDoc({

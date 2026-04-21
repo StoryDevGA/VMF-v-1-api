@@ -258,10 +258,17 @@ const validateRuntimeAgentFrameworkKeys = async (supportedFrameworkKeys = []) =>
   }
 }
 
-const validateRuntimeAgentRequiredSkillRoles = async (requiredSkillRoleKeys = []) => {
+const validateRuntimeAgentRequiredSkillRoles = async (
+  requiredSkillRoleKeys = [],
+  { currentRequiredSkillRoleKeys = [], allowUnchangedNonActive = false } = {},
+) => {
+  const errors = {}
+  const warnings = []
   const normalizedRoleKeys = normalizeRequiredSkillRoleKeys(requiredSkillRoleKeys)
+  const normalizedCurrentRoleKeys = normalizeRequiredSkillRoleKeys(currentRequiredSkillRoleKeys)
+
   if (normalizedRoleKeys.length === 0) {
-    return {}
+    return { errors, warnings }
   }
 
   const roles = await SkillRoleRegistry.find({
@@ -276,23 +283,40 @@ const validateRuntimeAgentRequiredSkillRoles = async (requiredSkillRoleKeys = []
 
   const missingRoleKey = normalizedRoleKeys.find((roleKey) => !roleLookup.has(roleKey))
   if (missingRoleKey) {
-    return {
-      requiredSkillRoleKeys: `Required skill role "${missingRoleKey}" was not found.`,
-    }
+    errors.requiredSkillRoleKeys = `Required skill role "${missingRoleKey}" was not found.`
+    return { errors, warnings }
   }
 
-  const inactiveRoleKey = normalizedRoleKeys.find((roleKey) => {
+  const currentRoleKeySet = new Set(normalizedCurrentRoleKeys)
+  const keysRequiringActive = allowUnchangedNonActive
+    ? normalizedRoleKeys.filter((roleKey) => !currentRoleKeySet.has(roleKey))
+    : normalizedRoleKeys
+
+  const inactiveRoleKey = keysRequiringActive.find((roleKey) => {
     const role = roleLookup.get(roleKey)
     return String(role?.status ?? '').trim().toUpperCase() !== 'ACTIVE'
   })
 
   if (inactiveRoleKey) {
-    return {
-      requiredSkillRoleKeys: `Required skill role "${inactiveRoleKey}" must be ACTIVE.`,
+    errors.requiredSkillRoleKeys = `Required skill role "${inactiveRoleKey}" must be ACTIVE.`
+    return { errors, warnings }
+  }
+
+  if (allowUnchangedNonActive) {
+    const nonActiveUnchanged = normalizedRoleKeys.filter((roleKey) => {
+      if (!currentRoleKeySet.has(roleKey)) return false
+      const role = roleLookup.get(roleKey)
+      return String(role?.status ?? '').trim().toUpperCase() !== 'ACTIVE'
+    })
+
+    if (nonActiveUnchanged.length > 0) {
+      warnings.push(
+        `Agent references non-active required skill role${nonActiveUnchanged.length === 1 ? '' : 's'}: ${nonActiveUnchanged.join(', ')}.`,
+      )
     }
   }
 
-  return {}
+  return { errors, warnings }
 }
 
 const fetchRuntimeAgentDependencies = async (agentId) => {
@@ -531,10 +555,15 @@ const validateRuntimeAgentDocument = async (runtimeAgent) => {
   }
 
   if (!errors.requiredSkillRoleKeys) {
-    const skillRoleValidationDetails = await validateRuntimeAgentRequiredSkillRoles(
+    const requiredRolesResult = await validateRuntimeAgentRequiredSkillRoles(
       runtimeAgent?.requiredSkillRoleKeys,
+      {
+        currentRequiredSkillRoleKeys: runtimeAgent?.requiredSkillRoleKeys,
+        allowUnchangedNonActive: true,
+      },
     )
-    Object.assign(errors, skillRoleValidationDetails)
+    Object.assign(errors, requiredRolesResult.errors)
+    warnings.push(...(requiredRolesResult.warnings || []))
   }
 
   if (!errors.supportedFrameworkKeys && !errors.requiredSkillRoleKeys) {
@@ -602,8 +631,8 @@ export const createRuntimeAgent = async (req, res, next) => {
     const requiredSkillRoleValidationDetails = await validateRuntimeAgentRequiredSkillRoles(
       body.requiredSkillRoleKeys,
     )
-    if (Object.keys(requiredSkillRoleValidationDetails).length > 0) {
-      return sendValidationFailed(res, req, requiredSkillRoleValidationDetails)
+    if (Object.keys(requiredSkillRoleValidationDetails.errors).length > 0) {
+      return sendValidationFailed(res, req, requiredSkillRoleValidationDetails.errors)
     }
 
     const planDetails = await validateRuntimeAgentExecutionPlan(body, {
@@ -798,9 +827,13 @@ export const updateRuntimeAgent = async (req, res, next) => {
       req.body.requiredSkillRoleKeys ?? runtimeAgent.requiredSkillRoleKeys
     const requiredSkillRoleValidationDetails = await validateRuntimeAgentRequiredSkillRoles(
       nextRequiredSkillRoleKeys,
+      {
+        currentRequiredSkillRoleKeys: runtimeAgent.requiredSkillRoleKeys,
+        allowUnchangedNonActive: true,
+      },
     )
-    if (Object.keys(requiredSkillRoleValidationDetails).length > 0) {
-      return sendValidationFailed(res, req, requiredSkillRoleValidationDetails)
+    if (Object.keys(requiredSkillRoleValidationDetails.errors).length > 0) {
+      return sendValidationFailed(res, req, requiredSkillRoleValidationDetails.errors)
     }
 
     const planDetails = await validateRuntimeAgentExecutionPlan({

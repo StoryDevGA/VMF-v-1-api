@@ -94,6 +94,12 @@ const buildRuntimeSkillReferenceChain = (rows) => ({
   }),
 })
 
+const buildRuntimeAgentReferenceChain = (rows) => ({
+  select: jest.fn().mockReturnValue({
+    lean: jest.fn().mockResolvedValue(rows),
+  }),
+})
+
 let app
 let request
 let tokenService
@@ -101,6 +107,7 @@ let User
 let Role
 let SkillRoleRegistry
 let RuntimeSkill
+let RuntimeAgent
 let mockRedisClient
 let skillRoleControllerTestables
 
@@ -155,6 +162,7 @@ beforeAll(async () => {
   Role = models.Role
   SkillRoleRegistry = models.SkillRoleRegistry
   RuntimeSkill = models.RuntimeSkill
+  RuntimeAgent = models.RuntimeAgent
 
   skillRoleControllerTestables = (await import('../controllers/skillRoleRegistry.controller.js')).__testables
 })
@@ -193,6 +201,7 @@ beforeEach(() => {
   RuntimeSkill.find = jest.fn()
   RuntimeSkill.countDocuments = jest.fn()
   RuntimeSkill.aggregate = jest.fn()
+  RuntimeAgent.find = jest.fn()
 
   SkillRoleRegistry.countDocuments.mockResolvedValue(0)
   SkillRoleRegistry.find.mockReturnValue(buildSkillRoleQueryChain([]))
@@ -201,6 +210,7 @@ beforeEach(() => {
   RuntimeSkill.find.mockReturnValue(buildRuntimeSkillReferenceChain([]))
   RuntimeSkill.countDocuments.mockResolvedValue(0)
   RuntimeSkill.aggregate.mockResolvedValue([])
+  RuntimeAgent.find.mockReturnValue(buildRuntimeAgentReferenceChain([]))
 })
 
 describe('Skill Role Registry API', () => {
@@ -403,6 +413,11 @@ describe('Skill Role Registry API', () => {
         { stableId: 'skill-check-required-vmf-sections' },
       ]),
     )
+    RuntimeAgent.find.mockReturnValue(
+      buildRuntimeAgentReferenceChain([
+        { stableId: 'agent-validator' },
+      ]),
+    )
 
     const res = await request
       .get(`/api/v1/super-admin/runtime-control/skill-roles/${ROLE_STABLE_ID}/dependencies`)
@@ -413,6 +428,8 @@ describe('Skill Role Registry API', () => {
       'skill-snapshot',
       'skill-check-required-vmf-sections',
     ])
+    expect(res.body.data?.dependencies?.agentIds).toEqual(['agent-validator'])
+    expect(res.body.data?.dependencies?.summary).toEqual({ skills: 2, agents: 1 })
   })
 
   test('PATCH /api/v1/super-admin/runtime-control/skill-roles/:roleId rejects isSystem changes at validation', async () => {
