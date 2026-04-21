@@ -738,7 +738,7 @@ describe('Runtime Agent Routes', () => {
       .set('Authorization', `Bearer ${token}`)
       .send({
         name: 'Validation Guard',
-        status: 'INACTIVE',
+        status: 'DRAFT',
         supportedFrameworkKeys: ['VMF'],
         requiredSkillRoleKeys: ['VALIDATOR'],
         primarySkillIds: ['skill-summary'],
@@ -756,7 +756,7 @@ describe('Runtime Agent Routes', () => {
       id: 'agent-validator',
       key: 'validator',
       name: 'Validation Guard',
-      status: 'INACTIVE',
+      status: 'DRAFT',
       supportedFrameworkKeys: ['VMF'],
       requiredSkillRoleKeys: ['VALIDATOR'],
       primarySkillIds: ['skill-summary'],
@@ -777,6 +777,97 @@ describe('Runtime Agent Routes', () => {
         summary: 'Super Admin updated runtime agent Validation Guard (validator)',
       }),
     )
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/agents/:agentId allows updating when execution plan contains legacy scalar writesTo targets', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const runtimeAgent = makeRuntimeAgentDoc({
+      status: 'DRAFT',
+    })
+
+    RuntimeAgent.findOne
+      .mockResolvedValueOnce(runtimeAgent)
+      .mockReturnValueOnce({
+        select: jest.fn().mockResolvedValue(null),
+      })
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/agents/${RUNTIME_AGENT_STABLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        name: 'Validation Guard',
+        executionPlan: [{
+          skillId: 'skill-snapshot',
+          description: '',
+          readsFrom: ['vmf.sections.icp'],
+          writesTo: 'runtime',
+        }],
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toMatchObject({
+      id: 'agent-validator',
+      key: 'validator',
+      name: 'Validation Guard',
+      status: 'DRAFT',
+      executionPlan: [{
+        skillId: 'skill-snapshot',
+        readsFrom: ['vmf.sections.icp'],
+        writesTo: ['runtime'],
+      }],
+    })
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/agents/:agentId returns 409 when attempting lifecycle status changes', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const runtimeAgent = makeRuntimeAgentDoc({
+      status: 'DRAFT',
+    })
+
+    RuntimeAgent.findOne.mockResolvedValue(runtimeAgent)
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/agents/${RUNTIME_AGENT_STABLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ status: 'INACTIVE' })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.details).toMatchObject({
+      field: 'status',
+      reason: 'RUNTIME_AGENT_LIFECYCLE_ACTION_REQUIRED',
+    })
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/agents/:agentId returns 409 when attempting to set status to DRAFT with active dependencies', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const runtimeAgent = makeRuntimeAgentDoc({
+      status: 'ACTIVE',
+    })
+
+    RuntimeAgent.findOne.mockResolvedValue(runtimeAgent)
+    WorkflowPolicy.find.mockReturnValueOnce(buildWorkflowPolicyLookupChain([
+      {
+        stableId: 'policy-active',
+        key: 'active-policy',
+        name: 'Active Policy',
+        status: 'ACTIVE',
+      },
+    ]))
+    FrameworkPackage.find.mockReturnValueOnce(buildFrameworkPackageLookupChain([]))
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/agents/${RUNTIME_AGENT_STABLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ status: 'DRAFT' })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.details).toMatchObject({
+      field: 'status',
+      reason: 'RUNTIME_AGENT_DEPENDENCIES_ACTIVE',
+      activeWorkflowPolicies: 1,
+    })
   })
 
   test('PATCH /api/v1/super-admin/runtime-control/agents/:agentId returns 404 when the agent is missing', async () => {

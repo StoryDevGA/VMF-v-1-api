@@ -25,7 +25,7 @@ const listSkillRolesQuerySchema = z.object({
   sortBy: z.enum(skillRoleSortFieldValues).optional(),
   sortOrder: z.enum(sortOrderValues).optional(),
   page: z.coerce.number().int().min(1).default(1),
-  pageSize: z.coerce.number().int().min(1).max(100).default(20),
+  pageSize: z.coerce.number().int().min(1).max(1000).default(20),
 })
 
 const roleKeySchema = z

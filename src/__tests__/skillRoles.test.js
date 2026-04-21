@@ -249,6 +249,36 @@ describe('Skill Role Registry API', () => {
     expect(res.body.data?.[0]?.usageCount).toBe(2)
   })
 
+  test('GET /api/v1/super-admin/runtime-control/skill-roles accepts pageSize=1000 for Agent Editor fetches', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    SkillRoleRegistry.countDocuments.mockResolvedValue(1)
+    RuntimeSkill.aggregate.mockResolvedValue([
+      { _id: 'VALIDATOR', usageCount: 2 },
+    ])
+    SkillRoleRegistry.find.mockReturnValue(
+      buildSkillRoleQueryChain([
+        {
+          stableId: ROLE_STABLE_ID,
+          roleKey: 'VALIDATOR',
+          label: 'Validator',
+          description: 'Evaluates correctness.',
+          status: 'ACTIVE',
+          isSystem: true,
+          createdBy: { id: SUPER_ADMIN_ID, name: 'Super Administrator' },
+          updatedBy: { id: SUPER_ADMIN_ID, name: 'Super Administrator' },
+        },
+      ]),
+    )
+
+    const res = await request
+      .get('/api/v1/super-admin/runtime-control/skill-roles?page=1&pageSize=1000&q=')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.meta?.pageSize).toBe(1000)
+    expect(res.body.data?.[0]?.roleKey).toBe('VALIDATOR')
+  })
+
   test('GET /api/v1/super-admin/runtime-control/skill-roles supports usageCount sorting', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     SkillRoleRegistry.countDocuments.mockResolvedValue(2)

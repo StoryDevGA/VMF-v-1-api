@@ -539,7 +539,7 @@ const validateRuntimeAgentDocument = async (runtimeAgent) => {
 
   if (!errors.supportedFrameworkKeys && !errors.requiredSkillRoleKeys) {
     const planDetails = await validateRuntimeAgentExecutionPlan(runtimeAgent, {
-      allowLegacyWriteTargets: true,
+      allowLegacyWriteTargets: true, // TODO: remove after legacy migration window closes per STORYLINEOS-RUNTIME-CONTROL-ALIGNMENT-SPRINT-02-SPEC.md
     })
     Object.assign(errors, planDetails.errors)
     warnings.push(...(planDetails.warnings || []))
@@ -746,6 +746,45 @@ export const updateRuntimeAgent = async (req, res, next) => {
       return sendNotFound(res, req)
     }
 
+    const requestedStatusRaw = req.body.status
+    if (requestedStatusRaw !== undefined) {
+      const currentStatus = String(runtimeAgent.status ?? '').trim().toUpperCase()
+      const nextStatus = String(requestedStatusRaw ?? '').trim().toUpperCase()
+      const lifecycleStatuses = new Set(['ACTIVE', 'INACTIVE', 'DEPRECATED'])
+
+      if (lifecycleStatuses.has(nextStatus) && nextStatus !== currentStatus) {
+        return sendConflict(
+          res,
+          req,
+          'Agent status must be changed using the lifecycle actions (activate, disable, deprecate).',
+          {
+            field: 'status',
+            reason: 'RUNTIME_AGENT_LIFECYCLE_ACTION_REQUIRED',
+          },
+        )
+      }
+
+      // Prevent bypassing dependency-protected lifecycle rules by using DRAFT as an "inactive-like" status.
+      if (nextStatus === 'DRAFT' && nextStatus !== currentStatus) {
+        const dependencySummary = buildRuntimeAgentDependencySummary(
+          await fetchRuntimeAgentDependencies(runtimeAgent.stableId),
+        )
+
+        if (dependencySummary.blocks.length > 0) {
+          return sendConflict(
+            res,
+            req,
+            'Agent cannot be set to DRAFT while referenced by ACTIVE workflow policies or framework packages.',
+            {
+              field: 'status',
+              reason: 'RUNTIME_AGENT_DEPENDENCIES_ACTIVE',
+              ...dependencySummary.summary,
+            },
+          )
+        }
+      }
+    }
+
     const nextKey = req.body.key ?? runtimeAgent.key
     const nextSupportedFrameworkKeys =
       req.body.supportedFrameworkKeys ?? runtimeAgent.supportedFrameworkKeys
@@ -772,7 +811,7 @@ export const updateRuntimeAgent = async (req, res, next) => {
       optionalSkillIds: req.body.optionalSkillIds ?? runtimeAgent.optionalSkillIds,
       executionPlan: req.body.executionPlan ?? runtimeAgent.executionPlan,
     }, {
-      allowLegacyWriteTargets: true,
+      allowLegacyWriteTargets: true, // TODO: remove after legacy migration window closes per STORYLINEOS-RUNTIME-CONTROL-ALIGNMENT-SPRINT-02-SPEC.md
     })
     if (Object.keys(planDetails.errors).length > 0) {
       return sendValidationFailed(res, req, planDetails.errors)

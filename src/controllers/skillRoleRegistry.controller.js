@@ -180,7 +180,7 @@ const listSkillRolesByUsageCount = async ({
 export const listSkillRoles = async (req, res, next) => {
   try {
     const pageNum = Math.max(1, Number(req.query.page) || 1)
-    const limit = Math.min(100, Math.max(1, Number(req.query.pageSize) || 20))
+    const limit = Math.min(1000, Math.max(1, Number(req.query.pageSize) || 20))
     const filter = buildListFilter(req.query)
     const sortBy = String(req.query.sortBy || '').trim()
     const sortOrder = String(req.query.sortOrder || '').trim().toLowerCase() === 'asc' ? 1 : -1
