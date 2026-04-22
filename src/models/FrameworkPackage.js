@@ -158,6 +158,7 @@ frameworkPackageSchema.index(
     name: 'unique_default_framework_package',
   },
 )
+frameworkPackageSchema.index({ compatibleWorkflowKeys: 1, status: 1, updatedAt: -1 })
 frameworkPackageSchema.index({ frameworkKey: 1, updatedAt: -1 })
 frameworkPackageSchema.index({ status: 1, updatedAt: -1 })
 

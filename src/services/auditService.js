@@ -91,6 +91,7 @@ export const AUDIT_ACTIONS = Object.freeze({
   SKILL_ROLE_UPDATED: 'SKILL_ROLE_UPDATED',
   WORKFLOW_POLICY_CREATED: 'WORKFLOW_POLICY_CREATED',
   WORKFLOW_POLICY_UPDATED: 'WORKFLOW_POLICY_UPDATED',
+  WORKFLOW_POLICY_TESTED: 'WORKFLOW_POLICY_TESTED',
   // Super Admin - Access denied
   ACCESS_DENIED: 'ACCESS_DENIED',
   // Super Admin - Invitations
@@ -395,6 +396,8 @@ const buildAuditSummary = ({ action, resourceType, resourceId, diff, display }) 
       return clampSummary(`${actorLabel} created workflow policy ${targetLabel}`)
     case AUDIT_ACTIONS.WORKFLOW_POLICY_UPDATED:
       return clampSummary(`${actorLabel} updated workflow policy ${targetLabel}`)
+    case AUDIT_ACTIONS.WORKFLOW_POLICY_TESTED:
+      return clampSummary(`${actorLabel} tested workflow policy ${targetLabel}`)
     default:
       return clampSummary(`${actorLabel} performed ${humanizeAuditAction(action).toLowerCase()} on ${targetLabel}`)
   }

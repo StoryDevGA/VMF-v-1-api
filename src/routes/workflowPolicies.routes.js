@@ -6,12 +6,15 @@ import {
   validateCreateWorkflowPolicy,
   validateListWorkflowPolicies,
   validateWorkflowPolicyId,
+  validateWorkflowPolicyTestConsoleBody,
   validateUpdateWorkflowPolicy,
 } from '../validators/workflowPolicy.validator.js'
 import {
   createWorkflowPolicy,
   getWorkflowPolicy,
+  getWorkflowPolicyDependencies,
   listWorkflowPolicies,
+  testWorkflowPolicy,
   updateWorkflowPolicy,
 } from '../controllers/workflowPolicy.controller.js'
 
@@ -21,7 +24,9 @@ router.use(authJwt, loadScopes, requirePlatformRole('SUPER_ADMIN'))
 
 router.get('/', validateListWorkflowPolicies, listWorkflowPolicies)
 router.post('/', validateCreateWorkflowPolicy, createWorkflowPolicy)
+router.post('/test-console', validateWorkflowPolicyTestConsoleBody, testWorkflowPolicy)
 router.get('/:policyId', validateWorkflowPolicyId, getWorkflowPolicy)
+router.get('/:policyId/dependencies', validateWorkflowPolicyId, getWorkflowPolicyDependencies)
 router.patch(
   '/:policyId',
   validateWorkflowPolicyId,

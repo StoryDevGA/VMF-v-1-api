@@ -59,7 +59,7 @@ export const resolveRuntimePathSelections = async ({
   const rows = await RuntimePathRegistry.find({
     pathKey: { $in: normalizedPathKeys },
   })
-    .select('pathKey status frameworkKeys allowedOperations isProtected')
+    .select('pathKey status frameworkKeys allowedOperations isProtected scope')
     .lean()
 
   const byPathKey = new Map(rows.map((row) => [row.pathKey, row]))
