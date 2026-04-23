@@ -16,6 +16,7 @@ import RuntimeAgent from './RuntimeAgent.js'
 import RuntimeSkill from './RuntimeSkill.js'
 import RuntimePathRegistry from './RuntimePathRegistry.js'
 import SkillRoleRegistry from './SkillRoleRegistry.js'
+import ValidationRegistry from './ValidationRegistry.js'
 import WorkflowPolicy from './WorkflowPolicy.js'
 
 // Export all models
@@ -37,6 +38,7 @@ export {
   RuntimeSkill,
   RuntimePathRegistry,
   SkillRoleRegistry,
+  ValidationRegistry,
   WorkflowPolicy,
 }
 
@@ -59,5 +61,6 @@ export default {
   RuntimeSkill,
   RuntimePathRegistry,
   SkillRoleRegistry,
+  ValidationRegistry,
   WorkflowPolicy,
 }

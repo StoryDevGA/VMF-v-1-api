@@ -13,6 +13,7 @@ import WorkflowPolicy, {
 import FrameworkPackage from '../models/FrameworkPackage.js'
 import RuntimeAgent, { RUNTIME_AGENT_STATUSES } from '../models/RuntimeAgent.js'
 import RuntimeSkill, { RUNTIME_SKILL_STATUSES } from '../models/RuntimeSkill.js'
+import ValidationRegistry, { VALIDATION_REGISTRY_STATUSES } from '../models/ValidationRegistry.js'
 import {
   RUNTIME_PATH_REGISTRY_OPERATIONS,
   RUNTIME_PATH_REGISTRY_SCOPES,
@@ -1015,13 +1016,14 @@ const validateWorkflowPolicyReferences = async ({
   requiredAgentIds,
   requiredSkillIds,
   status,
-}) => {
+}, { previousRequiredValidationKeys = [] } = {}) => {
   const details = {}
   const normalizedFrameworkKeys = normalizeFrameworkKeyList(frameworkKeys)
   const normalizedOrderedSteps = Array.isArray(orderedSteps) ? orderedSteps : []
   const normalizedRequiredAgentIds = Array.isArray(requiredAgentIds) ? requiredAgentIds : []
   const normalizedRequiredSkillIds = Array.isArray(requiredSkillIds) ? requiredSkillIds : []
   const normalizedRequiredValidationKeys = Array.isArray(requiredValidationKeys) ? requiredValidationKeys : []
+  const normalizedPreviousValidationKeys = Array.isArray(previousRequiredValidationKeys) ? previousRequiredValidationKeys : []
   const normalizedOverrideRoles = Array.isArray(overrideRoles) ? overrideRoles : []
   const normalizedEscalateTo = String(escalateTo ?? '').trim().toUpperCase()
   const requiresActiveFrameworks = status === WORKFLOW_POLICY_STATUSES.ACTIVE
@@ -1098,6 +1100,63 @@ const validateWorkflowPolicyReferences = async ({
   )
   if (duplicateValidationKey) {
     details.requiredValidationKeys = `Duplicate validation key "${duplicateValidationKey}" is not allowed.`
+  }
+
+  if (!details.requiredValidationKeys && normalizedRequiredValidationKeys.length > 0) {
+    const uniqueValidationKeys = [...new Set(
+      normalizedRequiredValidationKeys
+        .map((value) => String(value || '').trim().toLowerCase())
+        .filter(Boolean),
+    )]
+    const previousKeySet = new Set(
+      normalizedPreviousValidationKeys
+        .map((value) => String(value || '').trim().toLowerCase())
+        .filter(Boolean),
+    )
+    const addedKeys = uniqueValidationKeys.filter((key) => !previousKeySet.has(key))
+
+    const rows = await ValidationRegistry.find({ key: { $in: uniqueValidationKeys } })
+      .select('key status supportedFrameworkKeys policyUsable')
+      .lean()
+    const byKey = new Map(rows.map((row) => [String(row.key || '').trim().toLowerCase(), row]))
+
+    const missingAddedValidationKeys = addedKeys.filter((key) => !byKey.has(key))
+    if (missingAddedValidationKeys.length > 0) {
+      details.requiredValidationKeys =
+        `Unknown validation key${missingAddedValidationKeys.length === 1 ? '' : 's'}: ${missingAddedValidationKeys.join(', ')}.`
+    } else {
+      const incompatibleAddedKey = addedKeys.find((key) => {
+        const row = byKey.get(key)
+        if (!row) return false
+        const supported = Array.isArray(row?.supportedFrameworkKeys)
+          ? row.supportedFrameworkKeys.map((value) => String(value || '').trim().toUpperCase()).filter(Boolean)
+          : []
+        return normalizedFrameworkKeys.some((frameworkKey) => !supported.includes(frameworkKey))
+      })
+
+      if (incompatibleAddedKey) {
+        details.requiredValidationKeys = `Validation key "${incompatibleAddedKey}" is not compatible with the selected frameworks.`
+      } else {
+        const nonUsable = addedKeys.find((key) => {
+          const row = byKey.get(key)
+          return row && row.policyUsable === false
+        })
+
+        if (nonUsable) {
+          details.requiredValidationKeys = `Validation key "${nonUsable}" is not available for Workflow Policies.`
+        } else {
+          const nonActive = addedKeys.find((key) => {
+            const row = byKey.get(key)
+            const rowStatus = String(row?.status || '').trim().toUpperCase()
+            return rowStatus !== VALIDATION_REGISTRY_STATUSES.ACTIVE
+          })
+
+          if (nonActive) {
+            details.requiredValidationKeys = `Validation key "${nonActive}" is not ACTIVE and cannot be newly assigned.`
+          }
+        }
+      }
+    }
   }
 
   if (
@@ -1255,7 +1314,7 @@ export const createWorkflowPolicy = async (req, res, next) => {
       })
     }
 
-    const validationDetails = await validateWorkflowPolicyReferences(body)
+    const validationDetails = await validateWorkflowPolicyReferences(body, { previousRequiredValidationKeys: [] })
     if (Object.keys(validationDetails).length > 0) {
       return sendValidationFailed(res, req, validationDetails)
     }
@@ -1462,7 +1521,7 @@ export const testWorkflowPolicy = async (req, res, next) => {
       }, 'Workflow policy test failed.')
     }
 
-    const validationDetails = await validateWorkflowPolicyReferences(draft)
+    const validationDetails = await validateWorkflowPolicyReferences(draft, { previousRequiredValidationKeys: [] })
     if (Object.keys(validationDetails).length > 0) {
       return sendValidationFailed(res, req, validationDetails, 'Workflow policy test failed.')
     }
@@ -1652,7 +1711,9 @@ export const updateWorkflowPolicy = async (req, res, next) => {
       gatingRules: body.gatingRules ?? getWorkflowPolicyFieldValue(workflowPolicy, 'gatingRules'),
     }
 
-    const validationDetails = await validateWorkflowPolicyReferences(nextWorkflowPolicy)
+    const validationDetails = await validateWorkflowPolicyReferences(nextWorkflowPolicy, {
+      previousRequiredValidationKeys: workflowPolicy.requiredValidationKeys,
+    })
     if (Object.keys(validationDetails).length > 0) {
       return sendValidationFailed(res, req, validationDetails)
     }
