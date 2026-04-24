@@ -38,6 +38,7 @@ export const resolveRuntimePathSelections = async ({
   requireActive = true,
   forbidProtectedWrites = true,
   requireProtected = false,
+  selectFields = null,
 } = {}) => {
   const normalizedPathKeys = normalizeList(pathKeys)
   const normalizedFrameworkKeys = normalizeList(frameworkKeys).map((value) => value.toUpperCase())
@@ -56,10 +57,15 @@ export const resolveRuntimePathSelections = async ({
     }
   }
 
+  const select = selectFields
+    ? (Array.isArray(selectFields) ? selectFields.join(' ') : String(selectFields))
+    : 'pathKey status frameworkKeys allowedOperations isProtected scope'
+
   const rows = await RuntimePathRegistry.find({
     pathKey: { $in: normalizedPathKeys },
   })
-    .select('pathKey status frameworkKeys allowedOperations isProtected scope')
+    .maxTimeMS(3000)
+    .select(select)
     .lean()
 
   const byPathKey = new Map(rows.map((row) => [row.pathKey, row]))

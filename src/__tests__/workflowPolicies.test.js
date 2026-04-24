@@ -77,13 +77,19 @@ const buildWorkflowPolicyQueryChain = (rows) => ({
   lean: jest.fn().mockResolvedValue(rows),
 })
 
+const buildCountDocumentsChain = (count) => ({
+  maxTimeMS: jest.fn().mockResolvedValue(count),
+})
+
 const buildRegistryLookupChain = (rows) => ({
+  maxTimeMS: jest.fn().mockReturnThis(),
   select: jest.fn().mockReturnValue({
     lean: jest.fn().mockResolvedValue(rows),
   }),
 })
 
 const buildRuntimePathLookupChain = (rows) => ({
+  maxTimeMS: jest.fn().mockReturnThis(),
   select: jest.fn().mockReturnValue({
     lean: jest.fn().mockResolvedValue(rows),
   }),
@@ -100,6 +106,7 @@ let WorkflowPolicy
 let RuntimeAgent
 let RuntimeSkill
 let RuntimePathRegistry
+let ValidationRegistry
 let AuditLog
 let mockRedisClient
 let originalWorkflowPolicySave
@@ -244,6 +251,7 @@ beforeAll(async () => {
   RuntimeAgent = models.RuntimeAgent
   RuntimeSkill = models.RuntimeSkill
   RuntimePathRegistry = models.RuntimePathRegistry
+  ValidationRegistry = models.ValidationRegistry
   AuditLog = models.AuditLog
 
   originalWorkflowPolicySave = WorkflowPolicy.prototype.save
@@ -292,7 +300,7 @@ beforeEach(() => {
     return this
   })
 
-  WorkflowPolicy.countDocuments.mockResolvedValue(0)
+  WorkflowPolicy.countDocuments.mockReturnValue(buildCountDocumentsChain(0))
   WorkflowPolicy.find.mockReturnValue(buildWorkflowPolicyQueryChain([]))
   WorkflowPolicy.findOne.mockReturnValue({
     select: jest.fn().mockResolvedValue(null),
@@ -315,6 +323,14 @@ beforeEach(() => {
   RuntimeAgent.find.mockReturnValue(buildRegistryLookupChain([]))
   RuntimeSkill.find.mockReturnValue(buildRegistryLookupChain([]))
   RuntimePathRegistry.find.mockReturnValue(buildRuntimePathLookupChain([]))
+  ValidationRegistry.find = jest.fn().mockReturnValue(buildRegistryLookupChain([
+    {
+      key: 'required-sections-check',
+      status: 'ACTIVE',
+      supportedFrameworkKeys: ['VMF', 'RLD'],
+      policyUsable: true,
+    },
+  ]))
 
   AuditLog.createLog = jest.fn(async () => ({}))
   mockRedisClient.set.mockResolvedValue('OK')
@@ -376,7 +392,7 @@ describe('Workflow Policy Routes', () => {
       },
     ]
 
-    WorkflowPolicy.countDocuments.mockResolvedValue(1)
+    WorkflowPolicy.countDocuments.mockReturnValue(buildCountDocumentsChain(1))
     WorkflowPolicy.find.mockReturnValue(buildWorkflowPolicyQueryChain(rows))
 
     const res = await request
@@ -722,6 +738,91 @@ describe('Workflow Policy Routes', () => {
         }),
       ],
     })
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/workflow-policies accepts EXISTS conditions without a comparison value', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    mockFindOneSelect(null)
+    RuntimePathRegistry.find.mockReturnValue(buildRuntimePathLookupChain([
+      {
+        pathKey: 'vmf.status',
+        status: 'ACTIVE',
+        frameworkKeys: ['VMF'],
+        allowedOperations: ['READ'],
+        isProtected: true,
+        scope: 'FRAMEWORK_STATE',
+      },
+    ]))
+    mockRegistryLookups({
+      agents: [runtimeAgentRows.validator],
+      skills: [runtimeSkillRows.snapshot],
+    })
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/workflow-policies')
+      .set('Authorization', `Bearer ${token}`)
+      .send(buildPhaseOneWorkflowPolicyPayload({
+        key: 'vmf-status-exists',
+        name: 'VMF Status Exists Policy',
+        conditions: [{
+          path: 'vmf.status',
+          operator: 'exists',
+          logic: 'AND',
+        }],
+      }))
+
+    expect(res.status).toBe(201)
+    expect(res.body.data.conditions).toEqual([
+      expect.objectContaining({
+        path: 'vmf.status',
+        operator: 'exists',
+        value: '',
+      }),
+    ])
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/workflow-policies accepts IN conditions with comma-delimited values', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    mockFindOneSelect(null)
+    RuntimePathRegistry.find.mockReturnValue(buildRuntimePathLookupChain([
+      {
+        pathKey: 'vmf.status',
+        status: 'ACTIVE',
+        frameworkKeys: ['VMF'],
+        allowedOperations: ['READ'],
+        isProtected: true,
+        scope: 'FRAMEWORK_STATE',
+        dataType: 'STRING',
+        allowedValues: ['DRAFT', 'APPROVED'],
+      },
+    ]))
+    mockRegistryLookups({
+      agents: [runtimeAgentRows.validator],
+      skills: [runtimeSkillRows.snapshot],
+    })
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/workflow-policies')
+      .set('Authorization', `Bearer ${token}`)
+      .send(buildPhaseOneWorkflowPolicyPayload({
+        key: 'vmf-status-in',
+        name: 'VMF Status In Policy',
+        conditions: [{
+          path: 'vmf.status',
+          operator: 'in',
+          value: 'DRAFT, APPROVED',
+          logic: 'AND',
+        }],
+      }))
+
+    expect(res.status).toBe(201)
+    expect(res.body.data.conditions).toEqual([
+      expect.objectContaining({
+        path: 'vmf.status',
+        operator: 'in',
+        value: ['DRAFT', 'APPROVED'],
+      }),
+    ])
   })
 
   test('POST /api/v1/super-admin/runtime-control/workflow-policies accepts escalation and override controls', async () => {

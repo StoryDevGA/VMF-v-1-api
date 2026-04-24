@@ -44,9 +44,27 @@ const WORKFLOW_POLICY_FIELD_DEFAULTS = Object.freeze({
   lastActivatedAt: null,
 })
 
+const normalizeConditionOperator = (value) => {
+  const normalized = String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[_\s]+/g, ' ')
+
+  if (!normalized) return ''
+  if (normalized === 'exists') return WORKFLOW_POLICY_CONDITION_OPERATORS.EXISTS
+  if (normalized === 'not exists') return WORKFLOW_POLICY_CONDITION_OPERATORS.NOT_EXISTS
+  if (normalized === 'in') return WORKFLOW_POLICY_CONDITION_OPERATORS.IN
+  if (normalized === 'not in') return WORKFLOW_POLICY_CONDITION_OPERATORS.NOT_IN
+  return normalized
+}
+
+const VALID_WORKFLOW_POLICY_CONDITION_OPERATORS = new Set(
+  Object.values(WORKFLOW_POLICY_CONDITION_OPERATORS).map((value) => normalizeConditionOperator(value)),
+)
+
 const CONDITION_OPERATORS_WITHOUT_VALUE = new Set([
-  WORKFLOW_POLICY_CONDITION_OPERATORS.EXISTS,
-  WORKFLOW_POLICY_CONDITION_OPERATORS.NOT_EXISTS,
+  normalizeConditionOperator(WORKFLOW_POLICY_CONDITION_OPERATORS.EXISTS),
+  normalizeConditionOperator(WORKFLOW_POLICY_CONDITION_OPERATORS.NOT_EXISTS),
 ])
 
 const ROUTING_MODES_REQUIRING_PRIMARY_AGENT = new Set([
@@ -65,6 +83,171 @@ const EFFECT_TYPES_REQUIRING_VALUE = new Set([
   WORKFLOW_POLICY_EFFECT_TYPES.TRIGGER_POLICY_GROUP,
   WORKFLOW_POLICY_EFFECT_TYPES.QUEUE_NOTIFICATION,
 ])
+
+const normalizeCommaList = (value) =>
+  [...new Set(
+    String(value ?? '')
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean),
+  )]
+
+const isNumericString = (value) => /^-?\d+(\.\d+)?$/.test(String(value ?? '').trim())
+
+const RUNTIME_PATH_REGEX_CACHE_MAX = 100
+const runtimePathRegexCache = new Map()
+
+const getCachedRuntimePathRegex = (pattern) => {
+  const normalizedPattern = String(pattern ?? '').trim()
+  if (!normalizedPattern) return null
+
+  if (runtimePathRegexCache.has(normalizedPattern)) {
+    return runtimePathRegexCache.get(normalizedPattern)
+  }
+
+  try {
+    const regex = new RegExp(normalizedPattern)
+    runtimePathRegexCache.set(normalizedPattern, regex)
+    if (runtimePathRegexCache.size > RUNTIME_PATH_REGEX_CACHE_MAX) {
+      const oldestKey = runtimePathRegexCache.keys().next().value
+      runtimePathRegexCache.delete(oldestKey)
+    }
+    return regex
+  } catch {
+    return null
+  }
+}
+
+const parseJsonLikeRuntimePathValue = (rawValue) => {
+  if (rawValue === null || rawValue === undefined) {
+    return { ok: true, value: rawValue }
+  }
+
+  if (typeof rawValue === 'string') {
+    const trimmed = rawValue.trim()
+    if (!trimmed) {
+      return { ok: false, message: 'Expected valid JSON.' }
+    }
+
+    try {
+      return { ok: true, value: JSON.parse(trimmed) }
+    } catch {
+      return { ok: false, message: 'Expected valid JSON.' }
+    }
+  }
+
+  if (typeof rawValue === 'object') {
+    return { ok: true, value: rawValue }
+  }
+
+  return { ok: false, message: 'Expected valid JSON.' }
+}
+
+const validateRuntimePathLiteralValue = ({
+  runtimePath,
+  operator,
+  value,
+} = {}) => {
+  if (!runtimePath) return null
+
+  const dataType = String(runtimePath?.dataType ?? '').trim().toUpperCase()
+  const allowedValues = Array.isArray(runtimePath?.allowedValues)
+    ? runtimePath.allowedValues.map((item) => String(item ?? '').trim()).filter(Boolean)
+    : []
+  const hasAllowedValues = allowedValues.length > 0
+  const allowedSet = hasAllowedValues ? new Set(allowedValues) : null
+  const regexPattern = String(runtimePath?.regexPattern ?? '').trim()
+  const minLength = Number.isFinite(runtimePath?.minLength) ? runtimePath.minLength : null
+  const maxLength = Number.isFinite(runtimePath?.maxLength) ? runtimePath.maxLength : null
+  const minValue = Number.isFinite(runtimePath?.minValue) ? runtimePath.minValue : null
+  const maxValue = Number.isFinite(runtimePath?.maxValue) ? runtimePath.maxValue : null
+  const isNullable = runtimePath?.isNullable
+  const uiControl = String(runtimePath?.uiControl ?? '').trim().toUpperCase()
+  const cachedRegex = regexPattern ? getCachedRuntimePathRegex(regexPattern) : null
+
+  const normalizedOperator = normalizeConditionOperator(operator)
+  const valuesToValidate = Array.isArray(value)
+    ? value
+    : normalizedOperator === normalizeConditionOperator(WORKFLOW_POLICY_CONDITION_OPERATORS.IN)
+      || normalizedOperator === normalizeConditionOperator(WORKFLOW_POLICY_CONDITION_OPERATORS.NOT_IN)
+      ? normalizeCommaList(value)
+      : [value]
+
+  for (const raw of valuesToValidate) {
+    if (raw === null) {
+      if (isNullable === false) return 'Null is not allowed for this runtime path.'
+      continue
+    }
+
+    if (raw === undefined) continue
+
+    if (dataType === 'BOOLEAN') {
+      if (typeof raw === 'boolean') continue
+      const normalized = String(raw ?? '').trim().toLowerCase()
+      if (normalized === 'true' || normalized === 'false') continue
+      return 'Expected a boolean value.'
+    }
+
+    if (dataType === 'NUMBER') {
+      const numeric = typeof raw === 'number' ? raw : (isNumericString(raw) ? Number(String(raw).trim()) : NaN)
+      if (Number.isNaN(numeric)) return 'Expected a numeric value.'
+      if (minValue !== null && numeric < minValue) return `Value must be >= ${minValue}.`
+      if (maxValue !== null && numeric > maxValue) return `Value must be <= ${maxValue}.`
+      continue
+    }
+
+    if (
+      dataType === 'OBJECT'
+      || dataType === 'ARRAY'
+      || (dataType === 'MIXED' && uiControl === 'JSON')
+    ) {
+      const parsed = parseJsonLikeRuntimePathValue(raw)
+      if (!parsed.ok) return parsed.message
+
+      if (dataType === 'OBJECT') {
+        if (!parsed.value || typeof parsed.value !== 'object' || Array.isArray(parsed.value)) {
+          return 'Expected a JSON object.'
+        }
+      }
+
+      if (dataType === 'ARRAY' && !Array.isArray(parsed.value)) {
+        return 'Expected a JSON array.'
+      }
+
+      continue
+    }
+
+    const stringValue = typeof raw === 'string' ? raw : null
+    if (stringValue === null) {
+      return 'Expected a string value.'
+    }
+
+    const normalizedStringValue = stringValue.trim()
+
+    if (hasAllowedValues && allowedSet && !allowedSet.has(normalizedStringValue)) {
+      return 'Value must be one of the allowed values for this runtime path.'
+    }
+
+    if (minLength !== null && normalizedStringValue.length < minLength) {
+      return `Value must be at least ${minLength} characters.`
+    }
+
+    if (maxLength !== null && normalizedStringValue.length > maxLength) {
+      return `Value must be at most ${maxLength} characters.`
+    }
+
+    if (regexPattern) {
+      if (!cachedRegex) {
+        return 'Runtime path validation pattern is invalid.'
+      }
+      cachedRegex.lastIndex = 0
+      if (!cachedRegex.test(normalizedStringValue)) return 'Value does not match the required pattern.'
+    }
+  }
+
+  return null
+}
+
 const WORKFLOW_POLICY_MUTABLE_FIELDS = Object.freeze([
   'key',
   'name',
@@ -310,10 +493,6 @@ const buildListFilter = ({ q, status, frameworkKey, type }) => {
       { policyType: regex },
       { triggerEvent: regex },
       { governedAction: regex },
-      { routingMode: regex },
-      { primaryAgentId: regex },
-      { fallbackAgentId: regex },
-      { frameworkKeys: regex },
     ]
   }
 
@@ -353,14 +532,33 @@ const getWorkflowStepValidationMessage = (frameworkKeys = [], orderedSteps = [])
   return null
 }
 
+const normalizeConditionValue = (value, operator) => {
+  const normalizedOperator = normalizeConditionOperator(operator)
+
+  if (CONDITION_OPERATORS_WITHOUT_VALUE.has(normalizedOperator)) {
+    return ''
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item ?? '').trim()).filter(Boolean)
+  }
+
+  if (
+    normalizedOperator === normalizeConditionOperator(WORKFLOW_POLICY_CONDITION_OPERATORS.IN)
+    || normalizedOperator === normalizeConditionOperator(WORKFLOW_POLICY_CONDITION_OPERATORS.NOT_IN)
+  ) {
+    return normalizeCommaList(value)
+  }
+
+  return value
+}
+
 const normalizeConditionRows = (conditions = []) =>
   Array.isArray(conditions)
     ? conditions.map((condition) => ({
         path: String(condition?.path ?? '').trim(),
-        operator: String(condition?.operator ?? '').trim(),
-        value: Array.isArray(condition?.value)
-          ? condition.value.map((item) => String(item ?? '').trim()).filter(Boolean)
-          : condition?.value,
+        operator: normalizeConditionOperator(condition?.operator),
+        value: normalizeConditionValue(condition?.value, condition?.operator),
         logic: String(condition?.logic ?? 'AND').trim().toUpperCase(),
       }))
     : []
@@ -399,6 +597,14 @@ const validateWorkflowPolicyConditions = async ({
     return details
   }
 
+  const firstUnsupportedOperator = normalizedConditions.find(
+    (condition) => !VALID_WORKFLOW_POLICY_CONDITION_OPERATORS.has(condition.operator),
+  )
+  if (firstUnsupportedOperator) {
+    details.conditions = `Condition "${firstUnsupportedOperator.path}" uses an unsupported operator.`
+    return details
+  }
+
   const firstMissingValue = normalizedConditions.find((condition) => {
     if (CONDITION_OPERATORS_WITHOUT_VALUE.has(condition.operator)) return false
     if (Array.isArray(condition.value)) return condition.value.length === 0
@@ -417,6 +623,27 @@ const validateWorkflowPolicyConditions = async ({
     operation: RUNTIME_PATH_REGISTRY_OPERATIONS.READ,
     requireActive: true,
     forbidProtectedWrites: false,
+    selectFields: [
+      'pathKey',
+      'status',
+      'frameworkKeys',
+      'allowedOperations',
+      'isProtected',
+      'scope',
+      'dataType',
+      'allowedValues',
+      'allowedValueLabels',
+      'uiControl',
+      'placeholderText',
+      'helpText',
+      'defaultValue',
+      'minValue',
+      'maxValue',
+      'minLength',
+      'maxLength',
+      'regexPattern',
+      'isNullable',
+    ],
   })
 
   if (conditionSelections.missing.length > 0) {
@@ -446,6 +673,30 @@ const validateWorkflowPolicyConditions = async ({
   if (firstNonStatePath) {
     details.conditions =
       `Condition runtime path "${firstNonStatePath.pathKey}" must use FRAMEWORK_STATE scope.`
+    return details
+  }
+
+  const byPathKey = new Map(conditionSelections.rows.map((row) => [String(row?.pathKey ?? '').trim(), row]))
+  const firstInvalidLiteral = normalizedConditions.find((condition) => {
+    if (CONDITION_OPERATORS_WITHOUT_VALUE.has(condition.operator)) return false
+    const runtimePath = byPathKey.get(condition.path)
+    const message = validateRuntimePathLiteralValue({
+      runtimePath,
+      operator: condition.operator,
+      value: condition.value,
+    })
+    return Boolean(message)
+  })
+
+  if (firstInvalidLiteral) {
+    const runtimePath = byPathKey.get(firstInvalidLiteral.path)
+    const message = validateRuntimePathLiteralValue({
+      runtimePath,
+      operator: firstInvalidLiteral.operator,
+      value: firstInvalidLiteral.value,
+    })
+    details.conditions = `Condition "${firstInvalidLiteral.path}" value is invalid. ${message}`
+    return details
   }
 
   return details
@@ -497,6 +748,27 @@ const validateWorkflowPolicyEffects = async ({
     operation: RUNTIME_PATH_REGISTRY_OPERATIONS.WRITE,
     requireActive: true,
     forbidProtectedWrites: true,
+    selectFields: [
+      'pathKey',
+      'status',
+      'frameworkKeys',
+      'allowedOperations',
+      'isProtected',
+      'scope',
+      'dataType',
+      'allowedValues',
+      'allowedValueLabels',
+      'uiControl',
+      'placeholderText',
+      'helpText',
+      'defaultValue',
+      'minValue',
+      'maxValue',
+      'minLength',
+      'maxLength',
+      'regexPattern',
+      'isNullable',
+    ],
   })
 
   if (pathSelections.missing.length > 0) {
@@ -530,6 +802,31 @@ const validateWorkflowPolicyEffects = async ({
   )
   if (firstNonStatePath) {
     details[label] = `Effect runtime path "${firstNonStatePath.pathKey}" must use FRAMEWORK_STATE scope.`
+    return details
+  }
+
+  const byPathKey = new Map(pathSelections.rows.map((row) => [String(row?.pathKey ?? '').trim(), row]))
+  const firstInvalidLiteral = normalizedEffects.find((effect) => {
+    if (!EFFECT_TYPES_REQUIRING_VALUE.has(effect.type)) return false
+    if (!effect.targetPath) return false
+    const runtimePath = byPathKey.get(effect.targetPath)
+    const message = validateRuntimePathLiteralValue({
+      runtimePath,
+      operator: effect.type,
+      value: effect.value,
+    })
+    return Boolean(message)
+  })
+
+  if (firstInvalidLiteral) {
+    const runtimePath = byPathKey.get(firstInvalidLiteral.targetPath)
+    const message = validateRuntimePathLiteralValue({
+      runtimePath,
+      operator: firstInvalidLiteral.type,
+      value: firstInvalidLiteral.value,
+    })
+    details[label] = `Effect "${firstInvalidLiteral.type}" value is invalid. ${message}`
+    return details
   }
 
   return details
@@ -580,11 +877,13 @@ const fetchWorkflowPolicyDependencies = async (workflowPolicy) => {
   ] = await Promise.all([
     policyKey
       ? FrameworkPackage.find({ compatibleWorkflowKeys: policyKey })
+        .maxTimeMS(3000)
         .select('stableId frameworkKey frameworkName version status')
         .lean()
       : Promise.resolve([]),
     usedAgentIds.length > 0
       ? RuntimeAgent.find({ stableId: { $in: usedAgentIds } })
+        .maxTimeMS(3000)
         .select('stableId key name status')
         .lean()
       : Promise.resolve([]),
@@ -604,6 +903,7 @@ const fetchWorkflowPolicyDependencies = async (workflowPolicy) => {
         governedAction: workflowPolicy?.governedAction,
         ...(frameworkKeys.length > 0 ? { frameworkKeys: { $in: frameworkKeys } } : {}),
       })
+        .maxTimeMS(3000)
         .select('stableId key name status')
         .lean()
       : Promise.resolve([]),
@@ -1270,7 +1570,7 @@ export const listWorkflowPolicies = async (req, res, next) => {
     const pageNum = Math.max(1, Number(req.query.page) || 1)
     const limit = Math.min(100, Math.max(1, Number(req.query.pageSize) || 20))
     const filter = buildListFilter(req.query)
-    const total = await WorkflowPolicy.countDocuments(filter)
+    const total = await WorkflowPolicy.countDocuments(filter).maxTimeMS(3000)
     const totalPages = Math.max(1, Math.ceil(total / limit))
     const normalizedPage = Math.min(pageNum, totalPages)
     const skip = (normalizedPage - 1) * limit
@@ -1303,6 +1603,12 @@ export const listWorkflowPolicies = async (req, res, next) => {
 export const createWorkflowPolicy = async (req, res, next) => {
   try {
     const body = pickWorkflowPolicyPayload(req.body)
+    const normalizedBody = {
+      ...body,
+      ...(body.conditions !== undefined ? { conditions: normalizeConditionRows(body.conditions) } : {}),
+      ...(body.onPassEffects !== undefined ? { onPassEffects: normalizeEffectRows(body.onPassEffects) } : {}),
+      ...(body.onFailEffects !== undefined ? { onFailEffects: normalizeEffectRows(body.onFailEffects) } : {}),
+    }
     const existingWorkflowPolicy = await WorkflowPolicy.findOne({
       key: body.key,
     }).select('_id')
@@ -1314,14 +1620,14 @@ export const createWorkflowPolicy = async (req, res, next) => {
       })
     }
 
-    const validationDetails = await validateWorkflowPolicyReferences(body, { previousRequiredValidationKeys: [] })
+    const validationDetails = await validateWorkflowPolicyReferences(normalizedBody, { previousRequiredValidationKeys: [] })
     if (Object.keys(validationDetails).length > 0) {
       return sendValidationFailed(res, req, validationDetails)
     }
 
     const actorUserId = req.context?.userId || req.userId
     const workflowPolicy = new WorkflowPolicy({
-      ...body,
+      ...normalizedBody,
       createdBy: actorUserId,
       updatedBy: actorUserId,
     })
@@ -1391,7 +1697,6 @@ export const createWorkflowPolicy = async (req, res, next) => {
         gatingRules: workflowPolicy.gatingRules,
         version: workflowPolicy.version,
         lastActivatedAt: workflowPolicy.lastActivatedAt,
-        stepUpVerified: true,
       },
     })
 
@@ -1685,7 +1990,9 @@ export const updateWorkflowPolicy = async (req, res, next) => {
       passMessage: body.passMessage ?? getWorkflowPolicyFieldValue(workflowPolicy, 'passMessage'),
       failMessage: body.failMessage ?? getWorkflowPolicyFieldValue(workflowPolicy, 'failMessage'),
       severity: body.severity ?? getWorkflowPolicyFieldValue(workflowPolicy, 'severity'),
-      conditions: body.conditions ?? getWorkflowPolicyFieldValue(workflowPolicy, 'conditions'),
+      conditions: body.conditions !== undefined
+        ? normalizeConditionRows(body.conditions)
+        : getWorkflowPolicyFieldValue(workflowPolicy, 'conditions'),
       routingMode: body.routingMode ?? getWorkflowPolicyFieldValue(workflowPolicy, 'routingMode'),
       primaryAgentId: body.primaryAgentId ?? getWorkflowPolicyFieldValue(workflowPolicy, 'primaryAgentId'),
       fallbackAgentId: body.fallbackAgentId ?? getWorkflowPolicyFieldValue(workflowPolicy, 'fallbackAgentId'),
@@ -1697,8 +2004,12 @@ export const updateWorkflowPolicy = async (req, res, next) => {
       validationWarningOnly: body.validationWarningOnly ?? getWorkflowPolicyFieldValue(workflowPolicy, 'validationWarningOnly'),
       validationFreshnessMinutes: body.validationFreshnessMinutes ?? getWorkflowPolicyFieldValue(workflowPolicy, 'validationFreshnessMinutes'),
       validationRequireLatestRun: body.validationRequireLatestRun ?? getWorkflowPolicyFieldValue(workflowPolicy, 'validationRequireLatestRun'),
-      onPassEffects: body.onPassEffects ?? getWorkflowPolicyFieldValue(workflowPolicy, 'onPassEffects'),
-      onFailEffects: body.onFailEffects ?? getWorkflowPolicyFieldValue(workflowPolicy, 'onFailEffects'),
+      onPassEffects: body.onPassEffects !== undefined
+        ? normalizeEffectRows(body.onPassEffects)
+        : getWorkflowPolicyFieldValue(workflowPolicy, 'onPassEffects'),
+      onFailEffects: body.onFailEffects !== undefined
+        ? normalizeEffectRows(body.onFailEffects)
+        : getWorkflowPolicyFieldValue(workflowPolicy, 'onFailEffects'),
       overrideAllowed: body.overrideAllowed ?? getWorkflowPolicyFieldValue(workflowPolicy, 'overrideAllowed'),
       overrideRoles: body.overrideRoles ?? getWorkflowPolicyFieldValue(workflowPolicy, 'overrideRoles'),
       approvalRequired: body.approvalRequired ?? getWorkflowPolicyFieldValue(workflowPolicy, 'approvalRequired'),
@@ -1761,7 +2072,6 @@ export const updateWorkflowPolicy = async (req, res, next) => {
     await populateWorkflowPolicy(workflowPolicy)
 
     if (Object.keys(diff).length > 0) {
-      diff.stepUpVerified = true
       await auditService.logFromRequest(req, {
         action: auditService.AUDIT_ACTIONS.WORKFLOW_POLICY_UPDATED,
         resourceType: auditService.RESOURCE_TYPES.WorkflowPolicy,

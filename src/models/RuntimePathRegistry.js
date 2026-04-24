@@ -50,6 +50,15 @@ export const RUNTIME_PATH_REGISTRY_SOURCE_TYPES = Object.freeze({
   SYSTEM_GENERATED: 'SYSTEM_GENERATED',
 })
 
+export const RUNTIME_PATH_REGISTRY_UI_CONTROLS = Object.freeze({
+  TEXT: 'TEXT',
+  TEXTAREA: 'TEXTAREA',
+  NUMBER: 'NUMBER',
+  CHECKBOX: 'CHECKBOX',
+  SELECT: 'SELECT',
+  JSON: 'JSON',
+})
+
 const stableIdPattern = /^path-[a-z0-9][a-z0-9-]*$/
 const frameworkKeyPattern = /^[A-Z][A-Z0-9_]*$/
 
@@ -91,6 +100,214 @@ const buildStableKeyHash = (value) => {
 export const buildRuntimePathRegistryStableId = (pathKey) =>
   `path-${normalizeStableKeySegment(pathKey).slice(0, 160)}-${buildStableKeyHash(pathKey)}`
 
+const normalizeOptionalText = (value, { maxLength } = {}) => {
+  if (value === undefined || value === null) return undefined
+
+  const normalized = normalizeName(value)
+  if (!normalized) return undefined
+  if (maxLength && normalized.length > maxLength) {
+    return normalized.slice(0, maxLength)
+  }
+  return normalized
+}
+
+const normalizeAllowedValueLabels = (input) => {
+  if (!input) return undefined
+
+  const entries = input instanceof Map
+    ? [...input.entries()]
+    : Object.entries(input)
+
+  const normalized = new Map()
+  for (const [rawKey, rawValue] of entries) {
+    const key = String(rawKey || '').trim()
+    const value = String(rawValue || '').trim()
+    if (!key || !value) continue
+    normalized.set(key, value)
+  }
+
+  if (normalized.size === 0) return undefined
+  return normalized
+}
+
+const validateRuntimePathValueMetadata = (doc) => {
+  if (!doc) return
+
+  const dataType = String(doc.dataType || '').trim().toUpperCase()
+  const uiControl = doc.uiControl ? String(doc.uiControl || '').trim().toUpperCase() : ''
+  const allowedValues = Array.isArray(doc.allowedValues) ? doc.allowedValues : []
+
+  const hasAllowedValues = allowedValues.length > 0
+  const hasAllowedLabels = doc.allowedValueLabels && (
+    (doc.allowedValueLabels instanceof Map && doc.allowedValueLabels.size > 0)
+    || (typeof doc.allowedValueLabels === 'object' && Object.keys(doc.allowedValueLabels).length > 0)
+  )
+
+  const hasNumericConstraints = Number.isFinite(doc.minValue) || Number.isFinite(doc.maxValue)
+  const hasLengthConstraints = Number.isFinite(doc.minLength) || Number.isFinite(doc.maxLength)
+  const hasRegex = Boolean(String(doc.regexPattern || '').trim())
+
+  const stringLike = dataType === RUNTIME_PATH_REGISTRY_DATA_TYPES.STRING
+    || dataType === RUNTIME_PATH_REGISTRY_DATA_TYPES.ENUM
+    || dataType === RUNTIME_PATH_REGISTRY_DATA_TYPES.MIXED
+
+  const jsonLike = dataType === RUNTIME_PATH_REGISTRY_DATA_TYPES.OBJECT
+    || dataType === RUNTIME_PATH_REGISTRY_DATA_TYPES.ARRAY
+    || dataType === RUNTIME_PATH_REGISTRY_DATA_TYPES.MIXED
+
+  if (hasAllowedValues && !(dataType === RUNTIME_PATH_REGISTRY_DATA_TYPES.ENUM || dataType === RUNTIME_PATH_REGISTRY_DATA_TYPES.STRING)) {
+    doc.invalidate('allowedValues', 'allowedValues is only supported for ENUM or STRING runtime paths.')
+  }
+
+  if (hasAllowedLabels && !hasAllowedValues) {
+    doc.invalidate('allowedValueLabels', 'allowedValueLabels requires allowedValues.')
+  }
+
+  if (uiControl) {
+    if (!Object.values(RUNTIME_PATH_REGISTRY_UI_CONTROLS).includes(uiControl)) {
+      doc.invalidate('uiControl', 'uiControl is not a supported runtime-path control type.')
+    } else {
+      if (uiControl === RUNTIME_PATH_REGISTRY_UI_CONTROLS.SELECT && !hasAllowedValues) {
+        doc.invalidate('uiControl', 'uiControl=SELECT requires allowedValues.')
+      }
+      if (uiControl === RUNTIME_PATH_REGISTRY_UI_CONTROLS.CHECKBOX && dataType !== RUNTIME_PATH_REGISTRY_DATA_TYPES.BOOLEAN) {
+        doc.invalidate('uiControl', 'uiControl=CHECKBOX is only supported for BOOLEAN runtime paths.')
+      }
+      if (uiControl === RUNTIME_PATH_REGISTRY_UI_CONTROLS.NUMBER && dataType !== RUNTIME_PATH_REGISTRY_DATA_TYPES.NUMBER) {
+        doc.invalidate('uiControl', 'uiControl=NUMBER is only supported for NUMBER runtime paths.')
+      }
+      if (uiControl === RUNTIME_PATH_REGISTRY_UI_CONTROLS.JSON && !jsonLike) {
+        doc.invalidate('uiControl', 'uiControl=JSON is only supported for OBJECT, ARRAY, or MIXED runtime paths.')
+      }
+      if (uiControl === RUNTIME_PATH_REGISTRY_UI_CONTROLS.TEXTAREA && !stringLike) {
+        doc.invalidate('uiControl', 'uiControl=TEXTAREA is only supported for STRING, ENUM, or MIXED runtime paths.')
+      }
+      if (uiControl === RUNTIME_PATH_REGISTRY_UI_CONTROLS.TEXT && !stringLike) {
+        doc.invalidate('uiControl', 'uiControl=TEXT is only supported for STRING, ENUM, or MIXED runtime paths.')
+      }
+    }
+  }
+
+  if (hasNumericConstraints && dataType !== RUNTIME_PATH_REGISTRY_DATA_TYPES.NUMBER) {
+    doc.invalidate('minValue', 'Numeric constraints are only supported for NUMBER runtime paths.')
+  }
+
+  if (hasLengthConstraints && !(dataType === RUNTIME_PATH_REGISTRY_DATA_TYPES.STRING || dataType === RUNTIME_PATH_REGISTRY_DATA_TYPES.ENUM)) {
+    doc.invalidate('minLength', 'Length constraints are only supported for STRING or ENUM runtime paths.')
+  }
+
+  if (hasRegex && dataType !== RUNTIME_PATH_REGISTRY_DATA_TYPES.STRING) {
+    doc.invalidate('regexPattern', 'regexPattern is only supported for STRING runtime paths.')
+  }
+
+  if (Number.isFinite(doc.minValue) && Number.isFinite(doc.maxValue) && doc.minValue > doc.maxValue) {
+    doc.invalidate('minValue', 'minValue must be less than or equal to maxValue.')
+  }
+
+  if (Number.isFinite(doc.minLength) && Number.isFinite(doc.maxLength) && doc.minLength > doc.maxLength) {
+    doc.invalidate('minLength', 'minLength must be less than or equal to maxLength.')
+  }
+
+  if (hasRegex) {
+    try {
+      // eslint-disable-next-line no-new
+      new RegExp(String(doc.regexPattern))
+    } catch {
+      doc.invalidate('regexPattern', 'regexPattern must be a valid regular expression.')
+    }
+  }
+
+  if (hasAllowedValues) {
+    const firstInvalidAllowedValue = allowedValues.find((allowedValue) => {
+      if (Number.isFinite(doc.minLength) && allowedValue.length < doc.minLength) return true
+      if (Number.isFinite(doc.maxLength) && allowedValue.length > doc.maxLength) return true
+
+      if (hasRegex) {
+        try {
+          const regex = new RegExp(String(doc.regexPattern))
+          return !regex.test(allowedValue)
+        } catch {
+          return false
+        }
+      }
+
+      return false
+    })
+
+    if (firstInvalidAllowedValue) {
+      doc.invalidate(
+        'allowedValues',
+        'allowedValues must satisfy any configured minLength, maxLength, and regexPattern constraints.',
+      )
+    }
+  }
+
+  const defaultValue = doc.defaultValue
+  if (defaultValue !== undefined) {
+    if (defaultValue === null && doc.isNullable === false) {
+      doc.invalidate('defaultValue', 'defaultValue cannot be null when isNullable is false.')
+    }
+
+    if (defaultValue !== null) {
+      if (dataType === RUNTIME_PATH_REGISTRY_DATA_TYPES.BOOLEAN && typeof defaultValue !== 'boolean') {
+        doc.invalidate('defaultValue', 'defaultValue must be a boolean for BOOLEAN runtime paths.')
+      }
+
+      if (dataType === RUNTIME_PATH_REGISTRY_DATA_TYPES.NUMBER) {
+        if (typeof defaultValue !== 'number' || Number.isNaN(defaultValue)) {
+          doc.invalidate('defaultValue', 'defaultValue must be a number for NUMBER runtime paths.')
+        } else {
+          if (Number.isFinite(doc.minValue) && defaultValue < doc.minValue) {
+            doc.invalidate('defaultValue', 'defaultValue must be greater than or equal to minValue.')
+          }
+          if (Number.isFinite(doc.maxValue) && defaultValue > doc.maxValue) {
+            doc.invalidate('defaultValue', 'defaultValue must be less than or equal to maxValue.')
+          }
+        }
+      }
+
+      if (stringLike) {
+        const stringValue = typeof defaultValue === 'string' ? defaultValue : null
+        if (stringValue === null) {
+          doc.invalidate('defaultValue', 'defaultValue must be a string for string-like runtime paths.')
+        } else {
+          if (hasAllowedValues && !allowedValues.includes(stringValue)) {
+            doc.invalidate('defaultValue', 'defaultValue must be one of allowedValues.')
+          }
+          if (Number.isFinite(doc.minLength) && stringValue.length < doc.minLength) {
+            doc.invalidate('defaultValue', 'defaultValue must be at least minLength characters.')
+          }
+          if (Number.isFinite(doc.maxLength) && stringValue.length > doc.maxLength) {
+            doc.invalidate('defaultValue', 'defaultValue must be at most maxLength characters.')
+          }
+          if (hasRegex) {
+            try {
+              const regex = new RegExp(String(doc.regexPattern))
+              if (!regex.test(stringValue)) {
+                doc.invalidate('defaultValue', 'defaultValue must match regexPattern.')
+              }
+            } catch {
+              // ignore; regexPattern error already surfaced above
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (hasAllowedLabels && hasAllowedValues) {
+    const allowedSet = new Set(allowedValues)
+    const labelKeys = doc.allowedValueLabels instanceof Map
+      ? [...doc.allowedValueLabels.keys()]
+      : Object.keys(doc.allowedValueLabels || {})
+
+    const invalidKeys = labelKeys.filter((key) => !allowedSet.has(key))
+    if (invalidKeys.length > 0) {
+      doc.invalidate('allowedValueLabels', 'allowedValueLabels keys must be included in allowedValues.')
+    }
+  }
+}
+
 const runtimePathRegistrySchema = new mongoose.Schema(
   {
     stableId: {
@@ -109,6 +326,7 @@ const runtimePathRegistrySchema = new mongoose.Schema(
       type: String,
       required: true,
       trim: true,
+      immutable: true,
       maxlength: 200,
       validate: {
         validator(value) {
@@ -233,6 +451,56 @@ const runtimePathRegistrySchema = new mongoose.Schema(
       type: [String],
       default: [],
     },
+    allowedValues: {
+      type: [String],
+      default: undefined,
+    },
+    allowedValueLabels: {
+      type: Map,
+      of: String,
+      default: undefined,
+    },
+    uiControl: {
+      type: String,
+      enum: Object.values(RUNTIME_PATH_REGISTRY_UI_CONTROLS),
+    },
+    placeholderText: {
+      type: String,
+      trim: true,
+      maxlength: 200,
+    },
+    helpText: {
+      type: String,
+      trim: true,
+      maxlength: 600,
+    },
+    defaultValue: {
+      type: mongoose.Schema.Types.Mixed,
+    },
+    minValue: {
+      type: Number,
+    },
+    maxValue: {
+      type: Number,
+    },
+    minLength: {
+      type: Number,
+      min: 0,
+      max: 100000,
+    },
+    maxLength: {
+      type: Number,
+      min: 0,
+      max: 100000,
+    },
+    regexPattern: {
+      type: String,
+      trim: true,
+      maxlength: 500,
+    },
+    isNullable: {
+      type: Boolean,
+    },
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
@@ -293,9 +561,38 @@ runtimePathRegistrySchema.pre('validate', function normalizeRuntimePathRegistry(
     this.compatibilityTags = normalizeTokenList(this.compatibilityTags)
   }
 
+  if (this.isNew || this.isModified('allowedValues')) {
+    this.allowedValues = Array.isArray(this.allowedValues)
+      ? normalizeTokenList(this.allowedValues)
+      : undefined
+  }
+
+  if (this.isNew || this.isModified('allowedValueLabels')) {
+    this.allowedValueLabels = normalizeAllowedValueLabels(this.allowedValueLabels)
+  }
+
+  if (this.isNew || this.isModified('uiControl')) {
+    this.uiControl = this.uiControl ? String(this.uiControl || '').trim().toUpperCase() : undefined
+  }
+
+  if (this.isNew || this.isModified('placeholderText')) {
+    this.placeholderText = normalizeOptionalText(this.placeholderText, { maxLength: 200 })
+  }
+
+  if (this.isNew || this.isModified('helpText')) {
+    this.helpText = normalizeOptionalText(this.helpText, { maxLength: 600 })
+  }
+
+  if (this.isNew || this.isModified('regexPattern')) {
+    const normalizedRegex = normalizeOptionalText(this.regexPattern, { maxLength: 500 })
+    this.regexPattern = normalizedRegex ? String(normalizedRegex).trim() : undefined
+  }
+
   if (this.isNew || !this.stableId) {
     this.stableId = buildRuntimePathRegistryStableId(this.pathKey)
   }
+
+  validateRuntimePathValueMetadata(this)
 
   next()
 })
