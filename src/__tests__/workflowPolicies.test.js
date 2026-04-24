@@ -1,4 +1,5 @@
 import { describe, test, expect, beforeAll, beforeEach, afterAll, jest } from '@jest/globals'
+import mongoose from 'mongoose'
 
 beforeAll(() => {
   process.env.NODE_ENV = 'test'
@@ -1175,6 +1176,298 @@ describe('Workflow Policy Routes', () => {
         summary: 'Super Admin tested workflow policy VMF Test Console Policy (vmf-test-console)',
       }),
     )
+    const auditPayload = AuditLog.createLog.mock.calls.at(-1)?.[0]
+    expect(mongoose.Types.ObjectId.isValid(auditPayload?.resourceId)).toBe(true)
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/workflow-policies/test-console does not write audit logs when draft validation fails', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    RuntimeAgent.find.mockImplementation(() => buildRegistryLookupChain([
+      runtimeAgentRows.validator,
+    ]))
+    RuntimeSkill.find.mockImplementation(() => buildRegistryLookupChain([]))
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/workflow-policies/test-console')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        draft: buildPhaseOneWorkflowPolicyPayload({
+          key: 'vmf-test-console-invalid-skill',
+          requiredSkillIds: ['skill-missing'],
+        }),
+        frameworkState: {
+          vmf: {
+            status: 'DRAFT',
+          },
+        },
+        triggerEvent: 'ON_SUBMIT',
+        actorScope: 'USER',
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details.requiredSkillIds).toContain('Unknown runtime skill ids')
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/workflow-policies/test-console accepts inner framework-state JSON for framework_state-prefixed condition paths', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    RuntimePathRegistry.find.mockImplementation(() => buildRuntimePathLookupChain([
+      {
+        stableId: 'path-framework-state-lifecycle-stage',
+        pathKey: 'framework_state.lifecycle.stage',
+        label: 'Framework Lifecycle Stage',
+        status: 'ACTIVE',
+        frameworkKeys: ['VMF'],
+        allowedOperations: ['READ', 'WRITE', 'BIND'],
+        isProtected: false,
+        scope: 'FRAMEWORK_STATE',
+        dataType: 'STRING',
+        allowedValues: ['DRAFT', 'SUBMITTED', 'APPROVED'],
+      },
+    ]))
+    RuntimeAgent.find.mockImplementation(() => buildRegistryLookupChain([
+      runtimeAgentRows.validator,
+    ]))
+    RuntimeSkill.find.mockImplementation(() => buildRegistryLookupChain([
+      runtimeSkillRows.snapshot,
+    ]))
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/workflow-policies/test-console')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        draft: buildPhaseOneWorkflowPolicyPayload({
+          key: 'vmf-framework-state-console',
+          name: 'VMF Framework State Console Policy',
+          triggerEvent: 'ON_SUBMIT',
+          actorScope: 'USER',
+          governedAction: 'SUBMIT_FOR_REVIEW',
+          decisionMode: 'REQUIRE_AGENT_EVALUATION',
+          conditions: [{
+            path: 'framework_state.lifecycle.stage',
+            operator: '=',
+            value: 'DRAFT',
+            logic: 'AND',
+          }],
+          routingMode: 'FIXED_AGENT',
+          primaryAgentId: 'agent-validator',
+          requiredAgentIds: ['agent-validator'],
+        }),
+        frameworkState: {
+          lifecycle: {
+            stage: 'DRAFT',
+          },
+        },
+        triggerEvent: 'ON_SUBMIT',
+        actorScope: 'USER',
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.conditionsMatched).toBe(true)
+    expect(res.body.data.matchedConditions).toEqual([
+      expect.objectContaining({
+        path: 'framework_state.lifecycle.stage',
+        actualValue: 'DRAFT',
+        matched: true,
+      }),
+    ])
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/workflow-policies/test-console accepts wrapped framework_state JSON for framework_state-prefixed condition paths', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    RuntimePathRegistry.find.mockImplementation(() => buildRuntimePathLookupChain([
+      {
+        stableId: 'path-framework-state-lifecycle-stage',
+        pathKey: 'framework_state.lifecycle.stage',
+        label: 'Framework Lifecycle Stage',
+        status: 'ACTIVE',
+        frameworkKeys: ['VMF'],
+        allowedOperations: ['READ', 'WRITE', 'BIND'],
+        isProtected: false,
+        scope: 'FRAMEWORK_STATE',
+        dataType: 'STRING',
+        allowedValues: ['DRAFT', 'SUBMITTED', 'APPROVED'],
+      },
+    ]))
+    RuntimeAgent.find.mockImplementation(() => buildRegistryLookupChain([
+      runtimeAgentRows.validator,
+    ]))
+    RuntimeSkill.find.mockImplementation(() => buildRegistryLookupChain([
+      runtimeSkillRows.snapshot,
+    ]))
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/workflow-policies/test-console')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        draft: buildPhaseOneWorkflowPolicyPayload({
+          key: 'vmf-framework-state-console-wrapped',
+          name: 'VMF Framework State Console Wrapped Policy',
+          triggerEvent: 'ON_SUBMIT',
+          actorScope: 'USER',
+          governedAction: 'SUBMIT_FOR_REVIEW',
+          decisionMode: 'REQUIRE_AGENT_EVALUATION',
+          conditions: [{
+            path: 'framework_state.lifecycle.stage',
+            operator: '=',
+            value: 'DRAFT',
+            logic: 'AND',
+          }],
+          routingMode: 'FIXED_AGENT',
+          primaryAgentId: 'agent-validator',
+          requiredAgentIds: ['agent-validator'],
+        }),
+        frameworkState: {
+          framework_state: {
+            lifecycle: {
+              stage: 'DRAFT',
+            },
+          },
+        },
+        triggerEvent: 'ON_SUBMIT',
+        actorScope: 'USER',
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.conditionsMatched).toBe(true)
+    expect(res.body.data.matchedConditions).toEqual([
+      expect.objectContaining({
+        path: 'framework_state.lifecycle.stage',
+        actualValue: 'DRAFT',
+        matched: true,
+      }),
+    ])
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/workflow-policies/test-console does not fall back when wrapped framework_state is explicitly null', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    RuntimePathRegistry.find.mockImplementation(() => buildRuntimePathLookupChain([
+      {
+        stableId: 'path-framework-state-lifecycle-stage',
+        pathKey: 'framework_state.lifecycle.stage',
+        label: 'Framework Lifecycle Stage',
+        status: 'ACTIVE',
+        frameworkKeys: ['VMF'],
+        allowedOperations: ['READ', 'WRITE', 'BIND'],
+        isProtected: false,
+        scope: 'FRAMEWORK_STATE',
+        dataType: 'STRING',
+        allowedValues: ['DRAFT', 'SUBMITTED', 'APPROVED'],
+      },
+    ]))
+    RuntimeAgent.find.mockImplementation(() => buildRegistryLookupChain([
+      runtimeAgentRows.validator,
+    ]))
+    RuntimeSkill.find.mockImplementation(() => buildRegistryLookupChain([
+      runtimeSkillRows.snapshot,
+    ]))
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/workflow-policies/test-console')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        draft: buildPhaseOneWorkflowPolicyPayload({
+          key: 'vmf-framework-state-console-null',
+          name: 'VMF Framework State Console Null Policy',
+          triggerEvent: 'ON_SUBMIT',
+          actorScope: 'USER',
+          governedAction: 'SUBMIT_FOR_REVIEW',
+          decisionMode: 'REQUIRE_AGENT_EVALUATION',
+          conditions: [{
+            path: 'framework_state.lifecycle.stage',
+            operator: '=',
+            value: 'DRAFT',
+            logic: 'AND',
+          }],
+          routingMode: 'FIXED_AGENT',
+          primaryAgentId: 'agent-validator',
+          requiredAgentIds: ['agent-validator'],
+        }),
+        frameworkState: {
+          framework_state: null,
+          lifecycle: {
+            stage: 'DRAFT',
+          },
+        },
+        triggerEvent: 'ON_SUBMIT',
+        actorScope: 'USER',
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.conditionsMatched).toBe(false)
+    expect(res.body.data.matchedConditions).toEqual([
+      expect.objectContaining({
+        path: 'framework_state.lifecycle.stage',
+        matched: false,
+      }),
+    ])
+    expect(res.body.data.matchedConditions[0]?.actualValue).toBeUndefined()
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/workflow-policies/test-console preserves array equality for framework_state paths', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    RuntimePathRegistry.find.mockImplementation(() => buildRuntimePathLookupChain([
+      {
+        stableId: 'path-framework-state-validation-missing-sections',
+        pathKey: 'framework_state.validation.required_sections.missing_sections',
+        label: 'Missing Required Sections',
+        status: 'ACTIVE',
+        frameworkKeys: ['VMF'],
+        allowedOperations: ['READ', 'WRITE', 'BIND'],
+        isProtected: false,
+        scope: 'FRAMEWORK_STATE',
+        dataType: 'ARRAY',
+      },
+    ]))
+    RuntimeAgent.find.mockImplementation(() => buildRegistryLookupChain([
+      runtimeAgentRows.validator,
+    ]))
+    RuntimeSkill.find.mockImplementation(() => buildRegistryLookupChain([
+      runtimeSkillRows.snapshot,
+    ]))
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/workflow-policies/test-console')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        draft: buildPhaseOneWorkflowPolicyPayload({
+          key: 'vmf-framework-state-console-arrays',
+          name: 'VMF Framework State Console Array Policy',
+          triggerEvent: 'ON_SUBMIT',
+          actorScope: 'USER',
+          governedAction: 'SUBMIT_FOR_REVIEW',
+          decisionMode: 'REQUIRE_AGENT_EVALUATION',
+          conditions: [{
+            path: 'framework_state.validation.required_sections.missing_sections',
+            operator: '=',
+            value: ['summary', 'goals'],
+            logic: 'AND',
+          }],
+          routingMode: 'FIXED_AGENT',
+          primaryAgentId: 'agent-validator',
+          requiredAgentIds: ['agent-validator'],
+        }),
+        frameworkState: {
+          validation: {
+            required_sections: {
+              missing_sections: ['summary', 'goals'],
+            },
+          },
+        },
+        triggerEvent: 'ON_SUBMIT',
+        actorScope: 'USER',
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.conditionsMatched).toBe(true)
+    expect(res.body.data.matchedConditions).toEqual([
+      expect.objectContaining({
+        path: 'framework_state.validation.required_sections.missing_sections',
+        actualValue: ['summary', 'goals'],
+        matched: true,
+      }),
+    ])
   })
 
   test('PATCH /api/v1/super-admin/runtime-control/workflow-policies/:policyId updates the workflow policy and writes an audit log', async () => {

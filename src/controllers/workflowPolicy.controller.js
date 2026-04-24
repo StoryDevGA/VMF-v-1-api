@@ -1,4 +1,6 @@
+import crypto from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
+import mongoose from 'mongoose'
 import WorkflowPolicy, {
   WORKFLOW_POLICY_ACTOR_SCOPES,
   WORKFLOW_POLICY_ALLOWED_STEPS_BY_FRAMEWORK,
@@ -96,6 +98,7 @@ const isNumericString = (value) => /^-?\d+(\.\d+)?$/.test(String(value ?? '').tr
 
 const RUNTIME_PATH_REGEX_CACHE_MAX = 100
 const runtimePathRegexCache = new Map()
+const WORKFLOW_POLICY_TEST_AUDIT_RESOURCE_PREFIX = 'workflow-policy-test'
 
 const getCachedRuntimePathRegex = (pattern) => {
   const normalizedPattern = String(pattern ?? '').trim()
@@ -106,6 +109,7 @@ const getCachedRuntimePathRegex = (pattern) => {
   }
 
   try {
+    // Cached regex instances are reused across requests, so keep them flagless and stateless.
     const regex = new RegExp(normalizedPattern)
     runtimePathRegexCache.set(normalizedPattern, regex)
     if (runtimePathRegexCache.size > RUNTIME_PATH_REGEX_CACHE_MAX) {
@@ -164,9 +168,15 @@ const validateRuntimePathLiteralValue = ({
   const isNullable = runtimePath?.isNullable
   const uiControl = String(runtimePath?.uiControl ?? '').trim().toUpperCase()
   const cachedRegex = regexPattern ? getCachedRuntimePathRegex(regexPattern) : null
+  const expectsWholeJsonLiteral =
+    dataType === 'OBJECT'
+    || dataType === 'ARRAY'
+    || (dataType === 'MIXED' && uiControl === 'JSON')
 
   const normalizedOperator = normalizeConditionOperator(operator)
-  const valuesToValidate = Array.isArray(value)
+  const valuesToValidate = expectsWholeJsonLiteral
+    ? [value]
+    : Array.isArray(value)
     ? value
     : normalizedOperator === normalizeConditionOperator(WORKFLOW_POLICY_CONDITION_OPERATORS.IN)
       || normalizedOperator === normalizeConditionOperator(WORKFLOW_POLICY_CONDITION_OPERATORS.NOT_IN)
@@ -240,7 +250,6 @@ const validateRuntimePathLiteralValue = ({
       if (!cachedRegex) {
         return 'Runtime path validation pattern is invalid.'
       }
-      cachedRegex.lastIndex = 0
       if (!cachedRegex.test(normalizedStringValue)) return 'Value does not match the required pattern.'
     }
   }
@@ -998,6 +1007,37 @@ const getValueAtPath = (source, path) => {
     }, source)
 }
 
+const FRAMEWORK_STATE_ROOT_PATH = 'framework_state'
+
+const getFrameworkStateValueAtPath = (frameworkState, path) => {
+  const normalizedPath = String(path ?? '').trim()
+  if (!normalizedPath) return undefined
+
+  const literalValue = getValueAtPath(frameworkState, normalizedPath)
+  if (literalValue !== undefined) {
+    return literalValue
+  }
+
+  const canUseRootFallback =
+    frameworkState
+    && typeof frameworkState === 'object'
+    && !Array.isArray(frameworkState)
+    && !Object.prototype.hasOwnProperty.call(frameworkState, FRAMEWORK_STATE_ROOT_PATH)
+
+  // The Workflow Policy test console asks for sample FRAMEWORK_STATE JSON, so it should accept
+  // both the inner framework-state object and a fully wrapped payload that already includes
+  // the top-level "framework_state" key.
+  if (canUseRootFallback && normalizedPath === FRAMEWORK_STATE_ROOT_PATH) {
+    return frameworkState
+  }
+
+  if (!canUseRootFallback || !normalizedPath.startsWith(`${FRAMEWORK_STATE_ROOT_PATH}.`)) {
+    return undefined
+  }
+
+  return getValueAtPath(frameworkState, normalizedPath.slice(FRAMEWORK_STATE_ROOT_PATH.length + 1))
+}
+
 const canCoerceToNumber = (value) => {
   if (typeof value === 'number' && Number.isFinite(value)) return true
   if (typeof value === 'string' && String(value).trim() !== '') {
@@ -1093,7 +1133,7 @@ const evaluateWorkflowPolicyConditionMatch = ({ operator, actualValue, expectedV
 const evaluateWorkflowPolicyConditionsAgainstState = ({ conditions = [], frameworkState = {} }) => {
   const normalizedConditions = normalizeConditionRows(conditions)
   const conditionResults = normalizedConditions.map((condition) => {
-    const actualValue = getValueAtPath(frameworkState, condition.path)
+    const actualValue = getFrameworkStateValueAtPath(frameworkState, condition.path)
     const matched = evaluateWorkflowPolicyConditionMatch({
       operator: condition.operator,
       actualValue,
@@ -1128,6 +1168,26 @@ const serializeWorkflowPolicyTestTrace = (lines = []) =>
   lines
     .map((line) => String(line ?? '').trim())
     .filter(Boolean)
+
+const buildWorkflowPolicyTestAuditResourceId = (draft = {}, requestId = '') => {
+  const seed = [
+    String(draft?.key ?? '').trim().toLowerCase(),
+    String(draft?.stableId ?? '').trim().toLowerCase(),
+    String(requestId ?? '').trim().toLowerCase(),
+    String(draft?.name ?? '').trim().toLowerCase(),
+  ].find(Boolean)
+
+  if (!seed) {
+    return new mongoose.Types.ObjectId()
+  }
+
+  const digest = crypto
+    .createHash('sha256')
+    .update(`${WORKFLOW_POLICY_TEST_AUDIT_RESOURCE_PREFIX}:${seed}`)
+    .digest('hex')
+
+  return new mongoose.Types.ObjectId(digest.slice(0, 24))
+}
 
 const selectWorkflowPolicyTestAgent = async ({
   workflowPolicy,
@@ -1893,7 +1953,8 @@ export const testWorkflowPolicy = async (req, res, next) => {
     await auditService.logFromRequest(req, {
       action: auditService.AUDIT_ACTIONS.WORKFLOW_POLICY_TESTED,
       resourceType: auditService.RESOURCE_TYPES.WorkflowPolicy,
-      resourceId: `${draft.key || 'draft'}:${req.requestId || Date.now()}`,
+      // Test-console runs can target unsaved drafts, but AuditLog requires an ObjectId resourceId.
+      resourceId: buildWorkflowPolicyTestAuditResourceId(draft, req.requestId),
       scope: {
         frameworkKeys: normalizeFrameworkKeyList(draft.frameworkKeys),
       },
