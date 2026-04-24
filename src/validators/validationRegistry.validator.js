@@ -6,6 +6,7 @@ import {
 } from './shared.js'
 import {
   VALIDATION_REGISTRY_CATEGORIES,
+  VALIDATION_REGISTRY_RESULT_TYPES,
   VALIDATION_REGISTRY_SEVERITIES,
   VALIDATION_REGISTRY_STATUSES,
 } from '../models/ValidationRegistry.js'
@@ -13,6 +14,7 @@ import {
 const validationIdRegex = /^validation-[a-z][a-z0-9-]*$/
 const frameworkKeyRegex = /^[A-Z][A-Z0-9_]*$/
 const skillIdRegex = /^skill-[a-z][a-z0-9-]*$/
+const agentIdRegex = /^agent-[a-z][a-z0-9-]*$/
 const keyRegex = /^[a-z][a-z0-9-]*$/
 
 const keyQuerySchema = z
@@ -111,6 +113,19 @@ const skillIdSchema = z
   .transform((value) => value.toLowerCase())
   .refine((value) => skillIdRegex.test(value), 'Producer skill id must use the stable skill-<key> format')
 
+const agentIdSchema = z
+  .string()
+  .trim()
+  .min(1, 'Default agent id is required')
+  .max(160, 'Default agent id must be 160 characters or fewer')
+  .transform((value) => value.toLowerCase())
+  .refine((value) => agentIdRegex.test(value), 'Default agent id must use the stable agent-<key> format')
+
+const defaultAgentIdsSchema = z
+  .array(agentIdSchema)
+  .max(50, 'Default agent ids must contain 50 items or fewer')
+  .transform((values) => [...new Set(values)])
+
 const runtimePathKeySchema = (label) =>
   z
     .string({ required_error: `${label} is required` })
@@ -146,11 +161,14 @@ const createValidationRegistryBodySchema = z.object({
   category: z.enum(Object.values(VALIDATION_REGISTRY_CATEGORIES)),
   severity: z.enum(Object.values(VALIDATION_REGISTRY_SEVERITIES)),
   producerSkillId: skillIdSchema,
+  defaultAgentIds: defaultAgentIdsSchema.default([]),
   outputPath: runtimePathKeySchema('Output Path'),
+  resultType: z.enum(Object.values(VALIDATION_REGISTRY_RESULT_TYPES)).optional(),
   passFieldPath: optionalRuntimePathKeySchema('Pass Field Path'),
   detailsFieldPath: optionalRuntimePathKeySchema('Details Field Path'),
   policyUsable: z.coerce.boolean().default(true),
   packageUsable: z.coerce.boolean().default(true),
+  requiresLatestRun: z.coerce.boolean().default(false),
   ...defaultsSchema.shape,
 }).refine(
   (value) => !(value.blockingDefault && value.warningOnlyDefault),
@@ -166,11 +184,14 @@ const updateValidationRegistryBodySchema = z.object({
   category: z.enum(Object.values(VALIDATION_REGISTRY_CATEGORIES)).optional(),
   severity: z.enum(Object.values(VALIDATION_REGISTRY_SEVERITIES)).optional(),
   producerSkillId: skillIdSchema.optional(),
+  defaultAgentIds: defaultAgentIdsSchema.optional(),
   outputPath: runtimePathKeySchema('Output Path').optional(),
+  resultType: z.enum(Object.values(VALIDATION_REGISTRY_RESULT_TYPES)).optional(),
   passFieldPath: optionalRuntimePathKeySchema('Pass Field Path'),
   detailsFieldPath: optionalRuntimePathKeySchema('Details Field Path'),
   policyUsable: z.coerce.boolean().optional(),
   packageUsable: z.coerce.boolean().optional(),
+  requiresLatestRun: z.coerce.boolean().optional(),
   freshnessDefaultMinutes: z.coerce.number().int().min(0).max(10080).optional(),
   blockingDefault: z.coerce.boolean().optional(),
   warningOnlyDefault: z.coerce.boolean().optional(),

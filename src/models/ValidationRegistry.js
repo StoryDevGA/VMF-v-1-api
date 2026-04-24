@@ -1,4 +1,5 @@
 import mongoose from 'mongoose'
+import { RUNTIME_PATH_REGISTRY_DATA_TYPES } from './RuntimePathRegistry.js'
 
 export const VALIDATION_REGISTRY_STATUSES = Object.freeze({
   ACTIVE: 'ACTIVE',
@@ -24,10 +25,15 @@ export const VALIDATION_REGISTRY_SEVERITIES = Object.freeze({
   BLOCKING: 'BLOCKING',
 })
 
+export const VALIDATION_REGISTRY_RESULT_TYPES = Object.freeze({
+  ...RUNTIME_PATH_REGISTRY_DATA_TYPES,
+})
+
 const stableIdPattern = /^validation-[a-z][a-z0-9-]*$/
 const keyPattern = /^[a-z][a-z0-9-]*$/
 const frameworkKeyPattern = /^[A-Z][A-Z0-9_]*$/
 const stableSkillIdPattern = /^skill-[a-z][a-z0-9-]*$/
+const stableAgentIdPattern = /^agent-[a-z][a-z0-9-]*$/
 
 const normalizeText = (value) =>
   String(value || '')
@@ -136,6 +142,16 @@ const validationRegistrySchema = new mongoose.Schema(
         message: 'Producer skill id must use the stable skill-<key> format.',
       },
     },
+    defaultAgentIds: {
+      type: [String],
+      default: [],
+      validate: {
+        validator(values) {
+          return Array.isArray(values) && values.every((value) => stableAgentIdPattern.test(String(value || '').trim().toLowerCase()))
+        },
+        message: 'Default agent ids must use the stable agent-<key> format.',
+      },
+    },
     outputPath: {
       type: String,
       required: true,
@@ -147,6 +163,11 @@ const validationRegistrySchema = new mongoose.Schema(
         },
         message: 'Output path must not contain whitespace.',
       },
+    },
+    resultType: {
+      type: String,
+      enum: Object.values(VALIDATION_REGISTRY_RESULT_TYPES),
+      default: undefined,
     },
     passFieldPath: {
       type: String,
@@ -179,6 +200,10 @@ const validationRegistrySchema = new mongoose.Schema(
     packageUsable: {
       type: Boolean,
       default: true,
+    },
+    requiresLatestRun: {
+      type: Boolean,
+      default: false,
     },
     freshnessDefaultMinutes: {
       type: Number,
@@ -246,12 +271,21 @@ validationRegistrySchema.pre('validate', function normalizeValidationRegistry(ne
     this.producerSkillId = String(this.producerSkillId || '').trim().toLowerCase()
   }
 
+  if (this.isNew || this.isModified('defaultAgentIds')) {
+    this.defaultAgentIds = normalizeTokenList(this.defaultAgentIds).map((value) => value.toLowerCase())
+  }
+
   if (this.isNew || this.isModified('supportedFrameworkKeys')) {
     this.supportedFrameworkKeys = normalizeTokenList(this.supportedFrameworkKeys, { upper: true })
   }
 
   if (this.isNew || this.isModified('outputPath')) {
     this.outputPath = String(this.outputPath || '').trim()
+  }
+
+  if (this.isNew || this.isModified('resultType')) {
+    const normalizedResultType = String(this.resultType || '').trim().toUpperCase()
+    this.resultType = normalizedResultType || undefined
   }
 
   if (this.isNew || this.isModified('passFieldPath')) {

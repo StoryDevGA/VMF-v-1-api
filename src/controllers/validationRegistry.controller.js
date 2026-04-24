@@ -4,6 +4,7 @@ import ValidationRegistry, {
   VALIDATION_REGISTRY_SEVERITIES,
   VALIDATION_REGISTRY_STATUSES,
 } from '../models/ValidationRegistry.js'
+import RuntimeAgent, { RUNTIME_AGENT_STATUSES } from '../models/RuntimeAgent.js'
 import RuntimeSkill, { RUNTIME_SKILL_STATUSES } from '../models/RuntimeSkill.js'
 import FrameworkPackage from '../models/FrameworkPackage.js'
 import WorkflowPolicy from '../models/WorkflowPolicy.js'
@@ -86,6 +87,11 @@ const parseCsv = (value) =>
     .split(',')
     .map((item) => item.trim())
     .filter(Boolean)
+
+const normalizeStableIdList = (values) =>
+  [...new Set((Array.isArray(values) ? values : [])
+    .map((value) => String(value || '').trim())
+    .filter(Boolean))]
 
 const buildListFilter = ({ q, keys, status, frameworkKey, frameworkKeys, category, severity, policyUsable, packageUsable }) => {
   const filter = {}
@@ -202,6 +208,7 @@ const resolveRuntimePathRows = async ({ outputPath, passFieldPath, detailsFieldP
     operation: null,
     requireActive: true,
     forbidProtectedWrites: false,
+    selectFields: ['pathKey', 'status', 'frameworkKeys', 'allowedOperations', 'isProtected', 'scope', 'dataType'],
   })
 
   const byKey = new Map(
@@ -249,11 +256,83 @@ const appendRuntimePathErrors = (details, { outputPath, passFieldPath, detailsFi
   check('detailsFieldPath', detailsFieldPath)
 }
 
+const appendResultTypeError = (details, { outputPath, resultType, resolution }) => {
+  if (!resultType || details.outputPath) return
+  const outputRow = resolution.byKey.get(outputPath)
+  if (!outputRow?.dataType) return
+
+  const normalizedExpected = String(outputRow.dataType || '').trim().toUpperCase()
+  const normalizedActual = String(resultType || '').trim().toUpperCase()
+
+  if (normalizedExpected && normalizedActual && normalizedExpected !== normalizedActual) {
+    details.resultType = `Result Type "${normalizedActual}" does not match Output Path data type "${normalizedExpected}".`
+  }
+}
+
 const resolveProducerSkill = async (producerSkillId) => {
   if (!producerSkillId) return null
   return RuntimeSkill.findByStableId(producerSkillId)
     .select('stableId key name status supportedFrameworkKeys')
     .lean()
+}
+
+const resolveDefaultAgents = async (defaultAgentIds = []) => {
+  const requested = normalizeStableIdList(defaultAgentIds)
+  if (requested.length === 0) {
+    return { requested, byId: new Map() }
+  }
+
+  const rows = await RuntimeAgent.find({ stableId: { $in: requested } })
+    .select('stableId key name status supportedFrameworkKeys')
+    .maxTimeMS(3000)
+    .lean()
+
+  return {
+    requested,
+    byId: new Map(rows.map((row) => [row.stableId, row])),
+  }
+}
+
+const appendDefaultAgentErrors = (
+  details,
+  {
+    defaultAgentIds = [],
+    resolution,
+    frameworkKeys = [],
+    requireActive = false,
+  },
+) => {
+  if (!resolution || !Array.isArray(defaultAgentIds) || defaultAgentIds.length === 0) return
+
+  const normalizedFrameworkKeys = normalizeFrameworkKeyList(frameworkKeys)
+  const messages = []
+
+  for (const agentId of defaultAgentIds) {
+    const row = resolution.byId.get(agentId)
+
+    if (!row) {
+      messages.push(`Default agent "${agentId}" was not found.`)
+      continue
+    }
+
+    const normalizedStatus = String(row.status || '').trim().toUpperCase()
+    if (requireActive && normalizedStatus !== RUNTIME_AGENT_STATUSES.ACTIVE) {
+      messages.push(`Default agent "${agentId}" must be ACTIVE when the validation is ACTIVE.`)
+      continue
+    }
+
+    const supportedFrameworkKeys = normalizeFrameworkKeyList(row.supportedFrameworkKeys)
+    const missingFrameworks = normalizedFrameworkKeys.filter((frameworkKey) => !supportedFrameworkKeys.includes(frameworkKey))
+    if (missingFrameworks.length > 0) {
+      messages.push(
+        `Default agent "${agentId}" does not support framework${missingFrameworks.length === 1 ? '' : 's'}: ${missingFrameworks.join(', ')}.`,
+      )
+    }
+  }
+
+  if (messages.length > 0) {
+    details.defaultAgentIds = messages.join(' ')
+  }
 }
 
 export const listValidations = async (req, res, next) => {
@@ -329,6 +408,15 @@ export const createValidation = async (req, res, next) => {
       }
     }
 
+    const defaultAgentIds = normalizeStableIdList(body.defaultAgentIds)
+    const defaultAgentResolution = await resolveDefaultAgents(defaultAgentIds)
+    appendDefaultAgentErrors(details, {
+      defaultAgentIds,
+      resolution: defaultAgentResolution,
+      frameworkKeys: frameworkDetails.supportedFrameworkKeys,
+      requireActive: String(body.status || '').trim().toUpperCase() === VALIDATION_REGISTRY_STATUSES.ACTIVE,
+    })
+
     const outputPath = String(body.outputPath || '').trim()
     const passFieldPath = String(body.passFieldPath || '').trim()
     const detailsFieldPath = String(body.detailsFieldPath || '').trim()
@@ -356,6 +444,11 @@ export const createValidation = async (req, res, next) => {
       detailsFieldPath,
       resolution: runtimePathResolution,
     })
+    appendResultTypeError(details, {
+      outputPath,
+      resultType: body.resultType,
+      resolution: runtimePathResolution,
+    })
 
     if (Object.keys(details).length > 0) {
       return res.status(422).json({
@@ -377,11 +470,14 @@ export const createValidation = async (req, res, next) => {
       category: body.category,
       severity: body.severity,
       producerSkillId: body.producerSkillId,
+      defaultAgentIds,
       outputPath,
+      resultType: body.resultType,
       passFieldPath,
       detailsFieldPath,
       policyUsable: body.policyUsable === undefined ? true : Boolean(body.policyUsable),
       packageUsable: body.packageUsable === undefined ? true : Boolean(body.packageUsable),
+      requiresLatestRun: body.requiresLatestRun === undefined ? false : Boolean(body.requiresLatestRun),
       freshnessDefaultMinutes: body.freshnessDefaultMinutes,
       blockingDefault: nextBlockingDefault,
       warningOnlyDefault: nextWarningOnlyDefault,
@@ -480,11 +576,14 @@ export const updateValidation = async (req, res, next) => {
       'category',
       'severity',
       'producerSkillId',
+      'defaultAgentIds',
       'outputPath',
+      'resultType',
       'passFieldPath',
       'detailsFieldPath',
       'policyUsable',
       'packageUsable',
+      'requiresLatestRun',
       'freshnessDefaultMinutes',
       'blockingDefault',
       'warningOnlyDefault',
@@ -505,6 +604,9 @@ export const updateValidation = async (req, res, next) => {
 
     const nextStatus = req.body.status === undefined ? validation.status : req.body.status
     const nextProducerSkillId = req.body.producerSkillId === undefined ? validation.producerSkillId : req.body.producerSkillId
+    const nextDefaultAgentIds = req.body.defaultAgentIds === undefined
+      ? normalizeStableIdList(validation.defaultAgentIds)
+      : normalizeStableIdList(req.body.defaultAgentIds)
     const nextBlockingDefault = req.body.blockingDefault === undefined ? validation.blockingDefault : Boolean(req.body.blockingDefault)
     const nextWarningOnlyDefault = req.body.warningOnlyDefault === undefined ? validation.warningOnlyDefault : Boolean(req.body.warningOnlyDefault)
     if (nextBlockingDefault && nextWarningOnlyDefault) {
@@ -527,6 +629,16 @@ export const updateValidation = async (req, res, next) => {
       if (missing.length > 0) {
         details.producerSkillId = `Producer skill does not support framework${missing.length === 1 ? '' : 's'}: ${missing.join(', ')}.`
       }
+    }
+
+    if (req.body.defaultAgentIds !== undefined) {
+      const defaultAgentResolution = await resolveDefaultAgents(nextDefaultAgentIds)
+      appendDefaultAgentErrors(details, {
+        defaultAgentIds: nextDefaultAgentIds,
+        resolution: defaultAgentResolution,
+        frameworkKeys: frameworkDetails.supportedFrameworkKeys,
+        requireActive: String(nextStatus || '').trim().toUpperCase() === VALIDATION_REGISTRY_STATUSES.ACTIVE,
+      })
     }
 
     const outputPath = req.body.outputPath === undefined ? validation.outputPath : String(req.body.outputPath || '').trim()
@@ -554,6 +666,11 @@ export const updateValidation = async (req, res, next) => {
       outputPath,
       passFieldPath,
       detailsFieldPath,
+      resolution: runtimePathResolution,
+    })
+    appendResultTypeError(details, {
+      outputPath,
+      resultType: req.body.resultType === undefined ? validation.resultType : req.body.resultType,
       resolution: runtimePathResolution,
     })
 
@@ -668,10 +785,47 @@ const fetchRuntimePathSummaries = async (pathKeys) => {
   })
 }
 
+const fetchDefaultAgentSummaries = async (defaultAgentIds, frameworkKeys = []) => {
+  const unique = normalizeStableIdList(defaultAgentIds)
+  if (unique.length === 0) return []
+
+  const rows = await RuntimeAgent.find({ stableId: { $in: unique } })
+    .select('stableId key name status supportedFrameworkKeys')
+    .maxTimeMS(3000)
+    .lean()
+
+  const byId = new Map(rows.map((row) => [row.stableId, row]))
+  const normalizedFrameworkKeys = normalizeFrameworkKeyList(frameworkKeys)
+
+  return unique.map((agentId) => {
+    const row = byId.get(agentId)
+    if (!row) {
+      return {
+        id: agentId,
+        key: agentId,
+        name: agentId,
+        status: 'MISSING',
+        supportedFrameworkKeys: [],
+        compatibleWithValidation: false,
+      }
+    }
+
+    const supportedFrameworkKeys = normalizeFrameworkKeyList(row.supportedFrameworkKeys)
+    return {
+      id: row.stableId,
+      key: row.key,
+      name: row.name,
+      status: row.status,
+      supportedFrameworkKeys,
+      compatibleWithValidation: normalizedFrameworkKeys.every((frameworkKey) => supportedFrameworkKeys.includes(frameworkKey)),
+    }
+  })
+}
+
 export const getValidationDependencies = async (req, res, next) => {
   try {
     const validation = await ValidationRegistry.findByStableId(req.params.validationId)
-      .select('stableId key producerSkillId outputPath passFieldPath detailsFieldPath')
+      .select('stableId key producerSkillId defaultAgentIds supportedFrameworkKeys outputPath passFieldPath detailsFieldPath')
 
     if (!validation) {
       return res.status(404).json({
@@ -683,9 +837,10 @@ export const getValidationDependencies = async (req, res, next) => {
       })
     }
 
-    const [producerSkill, runtimePaths, deps] = await Promise.all([
+    const [producerSkill, runtimePaths, defaultAgents, deps] = await Promise.all([
       resolveProducerSkill(validation.producerSkillId),
       fetchRuntimePathSummaries([validation.outputPath, validation.passFieldPath, validation.detailsFieldPath]),
+      fetchDefaultAgentSummaries(validation.defaultAgentIds, validation.supportedFrameworkKeys),
       fetchValidationDependencies(validation.key),
     ])
 
@@ -697,6 +852,7 @@ export const getValidationDependencies = async (req, res, next) => {
           ? { id: producerSkill.stableId, key: producerSkill.key, name: producerSkill.name, status: producerSkill.status }
           : null,
         runtimePaths,
+        defaultAgents,
         dependencies: deps,
       },
       meta: { requestId: req.requestId, version: 'v1' },

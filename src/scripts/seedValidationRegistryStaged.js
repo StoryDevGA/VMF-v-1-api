@@ -5,6 +5,7 @@ import { connectDb, disconnectDb } from '../config/db.js'
 import { User } from '../models/index.js'
 import ValidationRegistry, {
   buildValidationRegistryStableId,
+  VALIDATION_REGISTRY_RESULT_TYPES,
   VALIDATION_REGISTRY_STATUSES,
 } from '../models/ValidationRegistry.js'
 import RuntimeSkill, { RUNTIME_SKILL_STATUSES } from '../models/RuntimeSkill.js'
@@ -15,6 +16,19 @@ import {
 } from '../seeds/validationRegistry.js'
 
 const STAGE_MVP = VALIDATION_REGISTRY_SEED_STAGES.MVP
+const DEFAULT_STAGE = VALIDATION_REGISTRY_SEED_STAGES.VMF_V2_3_1
+const stableAgentIdPattern = /^agent-[a-z][a-z0-9-]*$/
+
+const normalizeTokenList = (values, { upper = false } = {}) => {
+  if (!Array.isArray(values)) return []
+
+  const normalized = values
+    .map((value) => String(value || '').trim())
+    .map((value) => (upper ? value.toUpperCase() : value.toLowerCase()))
+    .filter(Boolean)
+
+  return [...new Set(normalized)]
+}
 
 const parseArgs = (argv = process.argv.slice(2)) => {
   const args = [...argv]
@@ -31,7 +45,7 @@ const parseArgs = (argv = process.argv.slice(2)) => {
     apply: hasFlag('--apply'),
     json: hasFlag('--json'),
     help: hasFlag('--help') || hasFlag('-h'),
-    stage: (readValue('--stage') || STAGE_MVP).trim().toLowerCase(),
+    stage: (readValue('--stage') || DEFAULT_STAGE).trim().toLowerCase(),
     actorUserId: (readValue('--actor') || '').trim(),
   }
 }
@@ -78,6 +92,19 @@ const validateSeed = (seed) => {
   }
   if (!String(seed?.producerSkillId || '').trim()) errors.push('producerSkillId missing')
   if (!String(seed?.outputPath || '').trim()) errors.push('outputPath missing')
+  if (seed?.defaultAgentIds !== undefined) {
+    if (!Array.isArray(seed.defaultAgentIds)) {
+      errors.push('defaultAgentIds must be an array')
+    } else if (seed.defaultAgentIds.some((value) => !stableAgentIdPattern.test(String(value || '').trim().toLowerCase()))) {
+      errors.push('defaultAgentIds must use the stable agent-<key> format')
+    }
+  }
+  if (seed?.resultType !== undefined) {
+    const normalizedResultType = String(seed.resultType || '').trim().toUpperCase()
+    if (!Object.values(VALIDATION_REGISTRY_RESULT_TYPES).includes(normalizedResultType)) {
+      errors.push(`resultType must be one of: ${Object.values(VALIDATION_REGISTRY_RESULT_TYPES).join(', ')}`)
+    }
+  }
 
   if (seed?.blockingDefault && seed?.warningOnlyDefault) {
     errors.push('blockingDefault and warningOnlyDefault cannot both be true')
@@ -126,11 +153,14 @@ const buildUpsertOperation = ({ seed, actorUserId, now }) => {
     category: seed.category,
     severity: seed.severity,
     producerSkillId: seed.producerSkillId,
+    defaultAgentIds: normalizeTokenList(seed.defaultAgentIds),
     outputPath: seed.outputPath,
+    ...(seed.resultType ? { resultType: String(seed.resultType).trim().toUpperCase() } : {}),
     passFieldPath: seed.passFieldPath || '',
     detailsFieldPath: seed.detailsFieldPath || '',
     policyUsable: Boolean(seed.policyUsable),
     packageUsable: Boolean(seed.packageUsable),
+    requiresLatestRun: Boolean(seed.requiresLatestRun),
     freshnessDefaultMinutes: Number.isInteger(Number(seed.freshnessDefaultMinutes)) ? Number(seed.freshnessDefaultMinutes) : 30,
     blockingDefault: Boolean(seed.blockingDefault),
     warningOnlyDefault: Boolean(seed.warningOnlyDefault),
@@ -162,7 +192,7 @@ export const runSeedValidationRegistryStaged = async ({
   actorUserId: configuredActorUserId,
   logger = console.log,
 } = {}) => {
-  const normalizedStage = String(stage || STAGE_MVP).trim().toLowerCase()
+  const normalizedStage = String(stage || DEFAULT_STAGE).trim().toLowerCase()
   const seeds = validationRegistrySeedsByStage[normalizedStage]
 
   if (!seeds) {
@@ -298,10 +328,10 @@ const printHelp = () => {
 seedValidationRegistryStaged.js
 
 Usage:
-  node src/scripts/seedValidationRegistryStaged.js [--apply] [--stage mvp] [--actor <ObjectId>] [--json]
+  node src/scripts/seedValidationRegistryStaged.js [--apply] [--stage vmf-v2-3-1] [--actor <ObjectId>] [--json]
 
 Defaults:
-  --stage mvp
+  --stage vmf-v2-3-1
   Dry-run unless --apply is provided.
 `.trim())
 }

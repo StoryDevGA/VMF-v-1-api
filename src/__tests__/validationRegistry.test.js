@@ -16,6 +16,7 @@ const NON_ADMIN_ID = '507f1f77bcf86cd799439012'
 const VALIDATION_STABLE_ID = buildValidationRegistryStableId('required-sections-check')
 const VALIDATION_DOCUMENT_ID = '507f1f77bcf86cd799439013'
 const ACTIVE_SKILL_ID = 'skill-vmf-required-sections-validator'
+const ACTIVE_AGENT_ID = 'agent-vmf-submit-validator-agent'
 const ACTIVE_VALIDATION_PATH = 'framework_state.validation.required_sections'
 const ACTIVE_PASS_PATH = 'framework_state.validation.required_sections.is_valid'
 const ACTIVE_DETAILS_PATH = 'framework_state.validation.required_sections.missing_sections'
@@ -75,6 +76,7 @@ const buildValidationQueryChain = (rows) => ({
 })
 
 const buildSelectLeanChain = (rows) => ({
+  maxTimeMS: jest.fn().mockReturnThis(),
   select: jest.fn().mockReturnThis(),
   lean: jest.fn().mockResolvedValue(rows),
 })
@@ -102,11 +104,14 @@ const makeValidationDocument = (overrides = {}) => ({
   category: 'COMPLETENESS',
   severity: 'BLOCKING',
   producerSkillId: ACTIVE_SKILL_ID,
+  defaultAgentIds: ['agent-vmf-submit-validator-agent'],
   outputPath: ACTIVE_VALIDATION_PATH,
+  resultType: 'OBJECT',
   passFieldPath: ACTIVE_PASS_PATH,
   detailsFieldPath: ACTIVE_DETAILS_PATH,
   policyUsable: true,
   packageUsable: true,
+  requiresLatestRun: true,
   freshnessDefaultMinutes: 30,
   blockingDefault: true,
   warningOnlyDefault: false,
@@ -126,11 +131,14 @@ const makeValidationDocument = (overrides = {}) => ({
       category: this.category,
       severity: this.severity,
       producerSkillId: this.producerSkillId,
+      defaultAgentIds: [...(this.defaultAgentIds || [])],
       outputPath: this.outputPath,
+      resultType: this.resultType,
       passFieldPath: this.passFieldPath,
       detailsFieldPath: this.detailsFieldPath,
       policyUsable: this.policyUsable,
       packageUsable: this.packageUsable,
+      requiresLatestRun: this.requiresLatestRun,
       freshnessDefaultMinutes: this.freshnessDefaultMinutes,
       blockingDefault: this.blockingDefault,
       warningOnlyDefault: this.warningOnlyDefault,
@@ -150,11 +158,14 @@ const buildCreatePayload = (overrides = {}) => ({
   category: 'COMPLETENESS',
   severity: 'BLOCKING',
   producerSkillId: ACTIVE_SKILL_ID,
+  defaultAgentIds: ['agent-vmf-submit-validator-agent'],
   outputPath: ACTIVE_VALIDATION_PATH,
+  resultType: 'OBJECT',
   passFieldPath: ACTIVE_PASS_PATH,
   detailsFieldPath: ACTIVE_DETAILS_PATH,
   policyUsable: true,
   packageUsable: true,
+  requiresLatestRun: true,
   freshnessDefaultMinutes: 30,
   blockingDefault: true,
   warningOnlyDefault: false,
@@ -169,6 +180,7 @@ let Role
 let ValidationRegistry
 let FrameworkRegistry
 let RuntimeSkill
+let RuntimeAgent
 let RuntimePathRegistry
 let FrameworkPackage
 let WorkflowPolicy
@@ -206,6 +218,7 @@ beforeAll(async () => {
   ValidationRegistry = models.ValidationRegistry
   FrameworkRegistry = models.FrameworkRegistry
   RuntimeSkill = models.RuntimeSkill
+  RuntimeAgent = models.RuntimeAgent
   RuntimePathRegistry = models.RuntimePathRegistry
   FrameworkPackage = models.FrameworkPackage
   WorkflowPolicy = models.WorkflowPolicy
@@ -263,6 +276,17 @@ beforeEach(() => {
       status: 'ACTIVE',
       supportedFrameworkKeys: ['VMF'],
     }),
+  )
+  RuntimeAgent.find = jest.fn().mockReturnValue(
+    buildSelectLeanChain([
+      {
+        stableId: ACTIVE_AGENT_ID,
+        key: 'vmf-submit-validator-agent',
+        name: 'VMF Submit Validator Agent',
+        status: 'ACTIVE',
+        supportedFrameworkKeys: ['VMF'],
+      },
+    ]),
   )
   RuntimePathRegistry.find = jest.fn().mockReturnValue(
     buildSelectLeanChain([
@@ -368,6 +392,40 @@ describe('Validation Registry API', () => {
     expect(auditService.logFromRequest).toHaveBeenCalled()
   })
 
+  test('POST /api/v1/super-admin/runtime-control/validation-registry preserves extended seed-contract fields', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/validation-registry')
+      .set('Authorization', `Bearer ${token}`)
+      .send(buildCreatePayload({
+        defaultAgentIds: ['agent-vmf-submit-validator-agent'],
+        resultType: 'OBJECT',
+        requiresLatestRun: true,
+      }))
+
+    expect(res.status).toBe(201)
+    expect(res.body.data?.defaultAgentIds).toEqual(['agent-vmf-submit-validator-agent'])
+    expect(res.body.data?.resultType).toBe('OBJECT')
+    expect(res.body.data?.requiresLatestRun).toBe(true)
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/validation-registry rejects unknown default agents', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    RuntimeAgent.find = jest.fn().mockReturnValue(buildSelectLeanChain([]))
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/validation-registry')
+      .set('Authorization', `Bearer ${token}`)
+      .send(buildCreatePayload({
+        defaultAgentIds: ['agent-missing-validator'],
+      }))
+
+    expect(res.status).toBe(422)
+    expect(res.body.error?.details?.defaultAgentIds).toContain('agent-missing-validator')
+    expect(res.body.error?.details?.defaultAgentIds).toContain('was not found')
+  })
+
   test('POST /api/v1/super-admin/runtime-control/validation-registry rejects inactive frameworks', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     FrameworkRegistry.find = jest.fn().mockReturnValue(
@@ -437,6 +495,13 @@ describe('Validation Registry API', () => {
       frameworkPackages: 1,
     })
     expect(res.body.data?.runtimePaths).toHaveLength(3)
+    expect(res.body.data?.defaultAgents).toEqual([
+      expect.objectContaining({
+        id: ACTIVE_AGENT_ID,
+        status: 'ACTIVE',
+        compatibleWithValidation: true,
+      }),
+    ])
   })
 
   test('PATCH /api/v1/super-admin/runtime-control/validation-registry/:validationId rejects key mutation', async () => {
@@ -471,5 +536,64 @@ describe('Validation Registry API', () => {
     expect(res.body.data?.freshnessDefaultMinutes).toBe(45)
     expect(document.save).toHaveBeenCalled()
     expect(auditService.logFromRequest).toHaveBeenCalled()
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/validation-registry/:validationId validates default agents when explicitly supplied', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const document = makeValidationDocument()
+    ValidationRegistry.findByStableId.mockResolvedValue(document)
+    RuntimeAgent.find = jest.fn().mockReturnValue(buildSelectLeanChain([]))
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/validation-registry/${VALIDATION_STABLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        defaultAgentIds: ['agent-missing-validator'],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error?.details?.defaultAgentIds).toContain('agent-missing-validator')
+    expect(document.save).not.toHaveBeenCalled()
+  })
+
+  test('GET /api/v1/super-admin/runtime-control/validation-registry/:validationId returns 404 for non-existent validation', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    ValidationRegistry.findByStableId.mockReturnValue(
+      buildAwaitableChain(null, ['populate']),
+    )
+
+    const res = await request
+      .get(`/api/v1/super-admin/runtime-control/validation-registry/${VALIDATION_STABLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(404)
+    expect(res.body.error?.message).toContain('not found')
+  })
+
+  test('GET /api/v1/super-admin/runtime-control/validation-registry/:validationId/dependencies returns 404 for non-existent validation', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    ValidationRegistry.findByStableId.mockReturnValue(
+      buildAwaitableChain(null, ['select']),
+    )
+
+    const res = await request
+      .get(`/api/v1/super-admin/runtime-control/validation-registry/${VALIDATION_STABLE_ID}/dependencies`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(404)
+    expect(res.body.error?.message).toContain('not found')
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/validation-registry/:validationId returns 404 for non-existent validation', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    ValidationRegistry.findByStableId.mockResolvedValue(null)
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/validation-registry/${VALIDATION_STABLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ label: 'Updated Label' })
+
+    expect(res.status).toBe(404)
+    expect(res.body.error?.message).toContain('not found')
   })
 })
