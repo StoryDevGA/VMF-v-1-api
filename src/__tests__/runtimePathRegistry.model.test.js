@@ -21,6 +21,48 @@ describe('RuntimePathRegistry model', () => {
     expect(RuntimePathRegistry.schema.path('pathKey').options.immutable).toBe(true)
   })
 
+  test('accepts SECTION and ARTIFACT categories for normalized VMF v2.3.1 rows', async () => {
+    const sectionDoc = new RuntimePathRegistry(makeBaseRuntimePath({
+      pathKey: 'framework_state.sections.customer_problem',
+      label: 'Customer Problem Section',
+      description: 'Normalized section runtime path.',
+      category: 'SECTION',
+      uiControl: 'TEXTAREA',
+      exampleValue: '',
+    }))
+
+    const artifactDoc = new RuntimePathRegistry(makeBaseRuntimePath({
+      pathKey: 'framework_state.artifacts.board_summary',
+      label: 'Board Summary Artifact',
+      description: 'Normalized artifact runtime path.',
+      dataType: 'OBJECT',
+      category: 'ARTIFACT',
+      sourceType: 'DERIVED',
+      uiControl: 'JSON',
+      exampleValue: null,
+    }))
+
+    await expect(sectionDoc.validate()).resolves.toBeUndefined()
+    await expect(artifactDoc.validate()).resolves.toBeUndefined()
+  })
+
+  test('generates a hashed stable id for wildcard path keys', async () => {
+    const doc = new RuntimePathRegistry(makeBaseRuntimePath({
+      pathKey: 'framework_state.sections.*',
+      label: 'Framework Sections Wildcard',
+      description: 'Wildcard runtime path.',
+      dataType: 'OBJECT',
+      category: 'STATE',
+      uiControl: 'JSON',
+      allowedOperations: ['READ', 'BIND'],
+      exampleValue: null,
+    }))
+
+    await expect(doc.validate()).resolves.toBeUndefined()
+    expect(doc.stableId).toMatch(/^path-framework-state-sections-[a-z0-9]+$/)
+    expect(doc.stableId).not.toBe('path-framework-state-sections-*')
+  })
+
   test('rejects allowedValues that conflict with regexPattern', async () => {
     const doc = new RuntimePathRegistry(makeBaseRuntimePath({
       allowedValues: ['DRAFT', 'APPROVED'],
@@ -47,4 +89,3 @@ describe('RuntimePathRegistry model', () => {
     await expect(doc.validate()).resolves.toBeUndefined()
   })
 })
-

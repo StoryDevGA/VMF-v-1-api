@@ -12,6 +12,7 @@ import RuntimePathRegistry, {
   RUNTIME_PATH_REGISTRY_STATUSES,
   RUNTIME_PATH_REGISTRY_UI_CONTROLS,
 } from '../models/RuntimePathRegistry.js'
+import { getRuntimePathRegistryVmf231Seeds } from '../seeds/runtimePathRegistryVmf231.js'
 
 // NOTE:
 // The temp spec in docs/temp-docs/ defines a stableId format without a hash, but the app's
@@ -19,9 +20,10 @@ import RuntimePathRegistry, {
 // real Mongoose documents so schema defaults, immutability, hooks, and validation stay aligned.
 
 const STAGE_LIFECYCLE = 'lifecycle'
+const STAGE_VMF_V231 = 'vmf-v2-3-1'
 
 const STAGED_SEEDS = Object.freeze({
-  [STAGE_LIFECYCLE]: Object.freeze([
+  [STAGE_LIFECYCLE]: () => Object.freeze([
     {
       pathKey: 'framework_state.lifecycle',
       label: 'Framework Lifecycle',
@@ -213,6 +215,7 @@ const STAGED_SEEDS = Object.freeze({
       compatibilityTags: ['VMF', '2.3.1'],
     },
   ]),
+  [STAGE_VMF_V231]: () => getRuntimePathRegistryVmf231Seeds(),
 })
 
 const parseArgs = (argv = process.argv.slice(2)) => {
@@ -281,8 +284,8 @@ const validateSeed = (seed) => {
   if (pathKey && pathKey.includes('VMF_STATE')) errors.push('pathKey must not contain VMF_STATE')
   if (pathKey && pathKey.startsWith('vmf.')) errors.push('pathKey must not start with vmf.')
   if (pathKey && /[A-Z]/.test(pathKey)) errors.push('pathKey must not contain uppercase characters')
-  if (pathKey && !/^[a-z0-9_]+(\.[a-z0-9_]+)*$/.test(pathKey)) {
-    errors.push('pathKey must use dot notation with snake_case segments')
+  if (pathKey && !/^[a-z0-9_]+(\.(\*|[a-z0-9_]+))*$/.test(pathKey)) {
+    errors.push('pathKey must use dot notation with snake_case segments and may include "*" wildcard segments')
   }
 
   if (!String(seed?.label || '').trim()) errors.push('label missing')
@@ -571,10 +574,11 @@ export const runSeedRuntimePathRegistryStaged = async ({
   } = dependencies
 
   const stageKey = String(stage || '').trim().toLowerCase()
-  const seeds = STAGED_SEEDS[stageKey]
-  if (!seeds) {
+  const seedLoader = STAGED_SEEDS[stageKey]
+  if (!seedLoader) {
     throw new Error(`Unknown stage "${stageKey}". Supported: ${Object.keys(STAGED_SEEDS).join(', ')}`)
   }
+  const seeds = seedLoader()
 
   await connect()
   try {
@@ -667,7 +671,7 @@ export const runSeedRuntimePathRegistryStaged = async ({
 const runFromCli = async () => {
   const args = parseArgs()
   if (args.help) {
-    console.log('Usage: node src/scripts/seedRuntimePathRegistryStaged.js [--stage lifecycle] [--apply] [--json] [--actor <ObjectId>] [--framework-keys VMF]')
+    console.log('Usage: node src/scripts/seedRuntimePathRegistryStaged.js [--stage lifecycle|vmf-v2-3-1] [--apply] [--json] [--actor <ObjectId>] [--framework-keys VMF]')
     console.log('')
     console.log('Defaults:')
     console.log(`- --stage ${STAGE_LIFECYCLE}`)
