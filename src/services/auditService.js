@@ -87,6 +87,12 @@ export const AUDIT_ACTIONS = Object.freeze({
   RUNTIME_AGENT_DEPRECATED: 'RUNTIME_AGENT_DEPRECATED',
   RUNTIME_SKILL_CREATED: 'RUNTIME_SKILL_CREATED',
   RUNTIME_SKILL_UPDATED: 'RUNTIME_SKILL_UPDATED',
+  RUNTIME_PATH_CREATED: 'RUNTIME_PATH_CREATED',
+  RUNTIME_PATH_UPDATED: 'RUNTIME_PATH_UPDATED',
+  RUNTIME_PATH_DUPLICATED: 'RUNTIME_PATH_DUPLICATED',
+  RUNTIME_PATH_ACTIVATED: 'RUNTIME_PATH_ACTIVATED',
+  RUNTIME_PATH_DISABLED: 'RUNTIME_PATH_DISABLED',
+  RUNTIME_PATH_DEPRECATED: 'RUNTIME_PATH_DEPRECATED',
   SKILL_ROLE_CREATED: 'SKILL_ROLE_CREATED',
   SKILL_ROLE_UPDATED: 'SKILL_ROLE_UPDATED',
   VALIDATION_REGISTRY_CREATED: 'VALIDATION_REGISTRY_CREATED',
@@ -129,6 +135,7 @@ export const RESOURCE_TYPES = Object.freeze({
   FrameworkPackage: 'FrameworkPackage',
   RuntimeAgent: 'RuntimeAgent',
   RuntimeSkill: 'RuntimeSkill',
+  RuntimePathRegistry: 'RuntimePathRegistry',
   SkillRole: 'SkillRole',
   ValidationRegistry: 'ValidationRegistry',
   WorkflowPolicy: 'WorkflowPolicy',
@@ -391,6 +398,18 @@ const buildAuditSummary = ({ action, resourceType, resourceId, diff, display }) 
       return clampSummary(`${actorLabel} created runtime skill ${targetLabel}`)
     case AUDIT_ACTIONS.RUNTIME_SKILL_UPDATED:
       return clampSummary(`${actorLabel} updated runtime skill ${targetLabel}`)
+    case AUDIT_ACTIONS.RUNTIME_PATH_CREATED:
+      return clampSummary(`${actorLabel} created runtime path ${targetLabel}`)
+    case AUDIT_ACTIONS.RUNTIME_PATH_UPDATED:
+      return clampSummary(`${actorLabel} updated runtime path ${targetLabel}`)
+    case AUDIT_ACTIONS.RUNTIME_PATH_DUPLICATED:
+      return clampSummary(`${actorLabel} duplicated runtime path ${targetLabel}`)
+    case AUDIT_ACTIONS.RUNTIME_PATH_ACTIVATED:
+      return clampSummary(`${actorLabel} activated runtime path ${targetLabel}`)
+    case AUDIT_ACTIONS.RUNTIME_PATH_DISABLED:
+      return clampSummary(`${actorLabel} disabled runtime path ${targetLabel}`)
+    case AUDIT_ACTIONS.RUNTIME_PATH_DEPRECATED:
+      return clampSummary(`${actorLabel} deprecated runtime path ${targetLabel}`)
     case AUDIT_ACTIONS.SKILL_ROLE_CREATED:
       return clampSummary(`${actorLabel} created skill role ${targetLabel}`)
     case AUDIT_ACTIONS.SKILL_ROLE_UPDATED:

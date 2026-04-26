@@ -1,6 +1,7 @@
 import mongoose from 'mongoose'
 
 export const RUNTIME_PATH_REGISTRY_STATUSES = Object.freeze({
+  DRAFT: 'DRAFT',
   ACTIVE: 'ACTIVE',
   INACTIVE: 'INACTIVE',
   DEPRECATED: 'DEPRECATED',
@@ -353,7 +354,7 @@ const runtimePathRegistrySchema = new mongoose.Schema(
       type: String,
       required: true,
       enum: Object.values(RUNTIME_PATH_REGISTRY_STATUSES),
-      default: RUNTIME_PATH_REGISTRY_STATUSES.ACTIVE,
+      default: RUNTIME_PATH_REGISTRY_STATUSES.DRAFT,
     },
     frameworkKeys: {
       type: [String],
@@ -533,6 +534,13 @@ runtimePathRegistrySchema.index({ stableId: 1 }, { unique: true, name: 'unique_r
 runtimePathRegistrySchema.index({ status: 1, updatedAt: -1 })
 runtimePathRegistrySchema.index({ frameworkKeys: 1, updatedAt: -1 })
 runtimePathRegistrySchema.index({ allowedOperations: 1, updatedAt: -1 })
+runtimePathRegistrySchema.index(
+  { pathKey: 'text', label: 'text', description: 'text' },
+  {
+    name: 'runtime_path_registry_text_search',
+    weights: { pathKey: 10, label: 5, description: 1 },
+  },
+)
 
 runtimePathRegistrySchema.statics.findByStableId = function findByStableId(stableId) {
   return this.findOne({ stableId: String(stableId || '').trim().toLowerCase() })

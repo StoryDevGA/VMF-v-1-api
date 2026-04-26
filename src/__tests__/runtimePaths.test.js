@@ -83,6 +83,12 @@ const buildRuntimeSkillFindChain = (rows) => ({
   }),
 })
 
+const buildSelectLeanChain = (rows) => ({
+  select: jest.fn().mockReturnValue({
+    lean: jest.fn().mockResolvedValue(rows),
+  }),
+})
+
 const buildFindByStableIdQuery = (resolvedValue) => {
   const query = {
     populate: jest.fn().mockReturnThis(),
@@ -95,6 +101,55 @@ const buildFindByStableIdQuery = (resolvedValue) => {
   return query
 }
 
+const makeRuntimePathDocument = (overrides = {}) => {
+  const pathKey = overrides.pathKey || 'vmf.validation.status'
+  const stableId = overrides.stableId || buildRuntimePathRegistryStableId(pathKey)
+  const doc = {
+    _id: overrides._id || '607f1f77bcf86cd799439011',
+    stableId,
+    pathKey,
+    label: overrides.label || 'VMF Validation Status',
+    description: overrides.description || 'Validation status output for VMF runs.',
+    status: overrides.status || 'ACTIVE',
+    frameworkKeys: overrides.frameworkKeys || ['VMF'],
+    scope: overrides.scope || 'VALIDATION_RESULT',
+    allowedOperations: overrides.allowedOperations || ['READ', 'WRITE', 'BIND'],
+    dataType: overrides.dataType || 'ENUM',
+    category: overrides.category || 'VALIDATION',
+    sourceType: overrides.sourceType || 'DERIVED',
+    isProtected: overrides.isProtected ?? false,
+    isSystem: overrides.isSystem ?? true,
+    createdBy: overrides.createdBy || { id: SUPER_ADMIN_ID, name: 'Super Administrator' },
+    updatedBy: overrides.updatedBy || { id: SUPER_ADMIN_ID, name: 'Super Administrator' },
+    save: jest.fn(async function save() {
+      return this
+    }),
+    populate: jest.fn(async function populate() {
+      return this
+    }),
+    toJSON: function toJSON() {
+      const {
+        save,
+        populate,
+        toJSON,
+        toObject,
+        _id,
+        ...plain
+      } = this
+      return {
+        ...plain,
+        id: this.stableId,
+      }
+    },
+    toObject: function toObject() {
+      return this.toJSON()
+    },
+    ...overrides,
+  }
+
+  return doc
+}
+
 let app
 let request
 let tokenService
@@ -102,6 +157,11 @@ let User
 let Role
 let RuntimePathRegistry
 let RuntimeSkill
+let FrameworkRegistry
+let RuntimeAgent
+let WorkflowPolicy
+let ValidationRegistry
+let auditService
 let mockRedisClient
 
 const getAccessTokenForUser = async (user) => {
@@ -132,8 +192,13 @@ beforeAll(async () => {
   const models = await import('../models/index.js')
   User = models.User
   Role = models.Role
+  FrameworkRegistry = models.FrameworkRegistry
+  RuntimeAgent = models.RuntimeAgent
   RuntimePathRegistry = models.RuntimePathRegistry
   RuntimeSkill = models.RuntimeSkill
+  ValidationRegistry = models.ValidationRegistry
+  WorkflowPolicy = models.WorkflowPolicy
+  auditService = (await import('../services/auditService.js')).default
 })
 
 afterAll(() => {})
@@ -161,12 +226,41 @@ beforeEach(() => {
   Role.find = jest.fn().mockReturnValue(buildRoleQueryChain(buildDefaultRoleRows()))
 
   RuntimePathRegistry.find = jest.fn()
+  RuntimePathRegistry.findOne = jest.fn()
   RuntimePathRegistry.countDocuments = jest.fn()
   RuntimePathRegistry.findByStableId = jest.fn()
+  FrameworkRegistry.find = jest.fn()
+  RuntimeAgent.find = jest.fn()
   RuntimeSkill.find = jest.fn()
+  ValidationRegistry.find = jest.fn()
+  WorkflowPolicy.find = jest.fn()
+  auditService.log = jest.fn().mockResolvedValue({})
+  auditService.logFromRequest = jest.fn().mockResolvedValue({})
+
+  RuntimePathRegistry.prototype.save = jest.fn(async function save() {
+    if (!this.stableId) {
+      this.stableId = buildRuntimePathRegistryStableId(this.pathKey)
+    }
+    if (!this.status) this.status = 'DRAFT'
+    if (this.isSystem === undefined) this.isSystem = true
+    return this
+  })
+  RuntimePathRegistry.prototype.populate = jest.fn(async function populate() {
+    return this
+  })
 
   RuntimePathRegistry.countDocuments.mockResolvedValue(0)
   RuntimePathRegistry.find.mockReturnValue(buildRuntimePathQueryChain([]))
+  RuntimePathRegistry.findOne.mockResolvedValue(null)
+  FrameworkRegistry.find.mockReturnValue(
+    buildSelectLeanChain([
+      { frameworkKey: 'VMF', name: 'Value Management Framework', status: 'ACTIVE' },
+    ]),
+  )
+  RuntimeAgent.find.mockReturnValue(buildSelectLeanChain([]))
+  RuntimeSkill.find.mockReturnValue(buildRuntimeSkillFindChain([]))
+  ValidationRegistry.find.mockReturnValue(buildSelectLeanChain([]))
+  WorkflowPolicy.find.mockReturnValue(buildSelectLeanChain([]))
 })
 
 describe('Runtime Path Registry API', () => {
@@ -232,6 +326,69 @@ describe('Runtime Path Registry API', () => {
     expect(RuntimePathRegistry.find).toHaveBeenCalledWith(expect.objectContaining({ isProtected: true }))
   })
 
+  test('POST /api/v1/super-admin/runtime-control/runtime-paths creates a draft custom runtime path', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/runtime-paths')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        pathKey: 'vmf.validation.outcome',
+        label: 'VMF Validation Outcome',
+        description: 'Outcome field for custom validation runs.',
+        frameworkKeys: ['vmf'],
+        scope: 'VALIDATION_RESULT',
+        allowedOperations: ['READ', 'WRITE'],
+        dataType: 'ENUM',
+        category: 'VALIDATION',
+        sourceType: 'DERIVED',
+        allowedValues: ['PASS', 'FAIL'],
+        uiControl: 'SELECT',
+        isProtected: false,
+        isSystem: false,
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data?.pathKey).toBe('vmf.validation.outcome')
+    expect(res.body.data?.status).toBe('DRAFT')
+    expect(res.body.data?.frameworkKeys).toEqual(['VMF'])
+    expect(res.body.data?.isSystem).toBe(false)
+    expect(auditService.logFromRequest).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: auditService.AUDIT_ACTIONS.RUNTIME_PATH_CREATED,
+        resourceType: auditService.RESOURCE_TYPES.RuntimePathRegistry,
+      }),
+    )
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/runtime-paths rejects inactive framework keys', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    FrameworkRegistry.find.mockReturnValue(
+      buildSelectLeanChain([
+        { frameworkKey: 'VMF', name: 'Value Management Framework', status: 'INACTIVE' },
+      ]),
+    )
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/runtime-paths')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        pathKey: 'vmf.validation.outcome',
+        label: 'VMF Validation Outcome',
+        description: 'Outcome field for custom validation runs.',
+        frameworkKeys: ['VMF'],
+        scope: 'VALIDATION_RESULT',
+        allowedOperations: ['READ'],
+        dataType: 'STRING',
+        category: 'VALIDATION',
+        sourceType: 'DERIVED',
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error?.details?.frameworkKeys).toContain('Inactive framework key "VMF"')
+  })
+
   test('GET /api/v1/super-admin/runtime-control/runtime-paths/:pathId returns 404 when missing', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     RuntimePathRegistry.findByStableId.mockReturnValue(buildFindByStableIdQuery(null))
@@ -241,6 +398,31 @@ describe('Runtime Path Registry API', () => {
       .set('Authorization', `Bearer ${token}`)
 
     expect(res.status).toBe(404)
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/runtime-paths rejects duplicate path keys', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    RuntimePathRegistry.findOne.mockResolvedValue(makeRuntimePathDocument())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/runtime-paths')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        pathKey: 'vmf.validation.status',
+        label: 'Duplicate Runtime Path',
+        description: 'Attempts to reuse an existing runtime path key.',
+        frameworkKeys: ['VMF'],
+        scope: 'VALIDATION_RESULT',
+        allowedOperations: ['READ'],
+        dataType: 'STRING',
+        category: 'VALIDATION',
+        sourceType: 'DERIVED',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error?.code).toBe('CONFLICT')
+    expect(res.body.error?.details?.pathKey).toBe('Path key must be unique.')
+    expect(RuntimePathRegistry.prototype.save).not.toHaveBeenCalled()
   })
 
   test('GET /api/v1/super-admin/runtime-control/runtime-paths/:pathId returns runtime path details', async () => {
@@ -273,6 +455,112 @@ describe('Runtime Path Registry API', () => {
     expect(res.body.data?.label).toBe('VMF Validation Status')
   })
 
+  test('PATCH /api/v1/super-admin/runtime-control/runtime-paths/:pathId rejects pathKey mutation', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    RuntimePathRegistry.findByStableId.mockReturnValue(buildFindByStableIdQuery(makeRuntimePathDocument()))
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/runtime-paths/${RUNTIME_PATH_STABLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        pathKey: 'vmf.validation.changed',
+        label: 'Changed',
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error?.details?.pathKey).toBe('Path key is immutable and cannot be changed after creation.')
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/runtime-paths/:pathId returns 404 when missing', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    RuntimePathRegistry.findByStableId.mockReturnValue(buildFindByStableIdQuery(null))
+
+    const res = await request
+      .patch('/api/v1/super-admin/runtime-control/runtime-paths/path-does-not-exist')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ label: 'Missing Runtime Path' })
+
+    expect(res.status).toBe(404)
+    expect(res.body.error?.code).toBe('NOT_FOUND')
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/runtime-paths/:pathId updates mutable fields and audits changes', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const runtimePath = makeRuntimePathDocument()
+    RuntimePathRegistry.findByStableId.mockReturnValue(buildFindByStableIdQuery(runtimePath))
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/runtime-paths/${RUNTIME_PATH_STABLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        label: 'VMF Validation Outcome',
+        frameworkKeys: ['vmf'],
+        allowedOperations: ['READ'],
+        helpText: 'Displayed in governed selectors.',
+      })
+
+    expect(res.status).toBe(200)
+    expect(runtimePath.save).toHaveBeenCalledTimes(1)
+    expect(res.body.data?.label).toBe('VMF Validation Outcome')
+    expect(res.body.data?.frameworkKeys).toEqual(['VMF'])
+    expect(auditService.logFromRequest).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: auditService.AUDIT_ACTIONS.RUNTIME_PATH_UPDATED,
+        diff: expect.objectContaining({
+          label: { from: 'VMF Validation Status', to: 'VMF Validation Outcome' },
+          allowedOperations: { from: ['READ', 'WRITE', 'BIND'], to: ['READ'] },
+        }),
+      }),
+    )
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/runtime-paths/:pathId/duplicate creates a custom draft copy', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const source = makeRuntimePathDocument()
+    RuntimePathRegistry.findByStableId.mockReturnValue(buildFindByStableIdQuery(source))
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/runtime-paths/${RUNTIME_PATH_STABLE_ID}/duplicate`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        pathKey: 'vmf.validation.status.copy',
+        label: 'VMF Validation Status Copy',
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data?.pathKey).toBe('vmf.validation.status.copy')
+    expect(res.body.data?.status).toBe('DRAFT')
+    expect(res.body.data?.isSystem).toBe(false)
+    expect(auditService.logFromRequest).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: auditService.AUDIT_ACTIONS.RUNTIME_PATH_DUPLICATED,
+      }),
+    )
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/runtime-paths/:pathId/duplicate rejects duplicate path keys', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    RuntimePathRegistry.findByStableId.mockReturnValue(buildFindByStableIdQuery(makeRuntimePathDocument()))
+    RuntimePathRegistry.findOne.mockResolvedValue(makeRuntimePathDocument({
+      pathKey: 'vmf.validation.status.copy',
+    }))
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/runtime-paths/${RUNTIME_PATH_STABLE_ID}/duplicate`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        pathKey: 'vmf.validation.status.copy',
+        label: 'VMF Validation Status Copy',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error?.code).toBe('CONFLICT')
+    expect(res.body.error?.details?.pathKey).toBe('Path key must be unique.')
+    expect(RuntimePathRegistry.prototype.save).not.toHaveBeenCalled()
+  })
+
   test('GET /api/v1/super-admin/runtime-control/runtime-paths/:pathId/dependencies returns skill dependencies', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
 
@@ -293,6 +581,70 @@ describe('Runtime Path Registry API', () => {
 
     expect(res.status).toBe(200)
     expect(res.body.data?.dependencies?.skillIds).toEqual(['skill-snapshot'])
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/runtime-paths/:pathId/disable requires confirmation with active dependencies', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const runtimePath = makeRuntimePathDocument({ status: 'ACTIVE' })
+    RuntimePathRegistry.findByStableId.mockReturnValue(buildFindByStableIdQuery(runtimePath))
+    RuntimeSkill.find.mockReturnValue(
+      buildRuntimeSkillFindChain([
+        {
+          stableId: 'skill-snapshot',
+          key: 'snapshot',
+          name: 'Snapshot',
+          status: 'ACTIVE',
+          allowedReadPaths: ['vmf.validation.status'],
+          allowedWritePaths: [],
+          forbiddenWritePaths: [],
+        },
+      ]),
+    )
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/runtime-paths/${RUNTIME_PATH_STABLE_ID}/disable`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(409)
+    expect(res.body.error?.code).toBe('DEPENDENCY_CONFIRMATION_REQUIRED')
+    expect(res.body.error?.details?.dependencies?.hasActiveDependencies).toBe(true)
+    expect(runtimePath.save).not.toHaveBeenCalled()
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/runtime-paths/:pathId/disable saves after dependency confirmation', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const runtimePath = makeRuntimePathDocument({ status: 'ACTIVE' })
+    RuntimePathRegistry.findByStableId.mockReturnValue(buildFindByStableIdQuery(runtimePath))
+    RuntimeSkill.find.mockReturnValue(
+      buildRuntimeSkillFindChain([
+        {
+          stableId: 'skill-snapshot',
+          key: 'snapshot',
+          name: 'Snapshot',
+          status: 'ACTIVE',
+          allowedReadPaths: ['vmf.validation.status'],
+          allowedWritePaths: [],
+          forbiddenWritePaths: [],
+        },
+      ]),
+    )
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/runtime-paths/${RUNTIME_PATH_STABLE_ID}/disable`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ confirmDependencies: true })
+
+    expect(res.status).toBe(200)
+    expect(runtimePath.status).toBe('INACTIVE')
+    expect(runtimePath.save).toHaveBeenCalledTimes(1)
+    expect(res.body.dependencies?.hasActiveDependencies).toBe(true)
+    expect(auditService.logFromRequest).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: auditService.AUDIT_ACTIONS.RUNTIME_PATH_DISABLED,
+      }),
+    )
   })
 
   test('buildListFilter uses compact regex search plus exact enum matches for query tokens', () => {
