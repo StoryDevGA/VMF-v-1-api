@@ -88,6 +88,7 @@ const buildRuntimeSkillQueryChain = (rows) => ({
 })
 
 const buildRuntimePathFindChain = (rows) => ({
+  maxTimeMS: jest.fn().mockReturnThis(),
   select: jest.fn().mockReturnValue({
     lean: jest.fn().mockResolvedValue(rows),
   }),
@@ -136,7 +137,7 @@ const makeRuntimeSkillDoc = (overrides = {}) => {
     status: 'ACTIVE',
     supportedFrameworkKeys: ['VMF', 'RLD'],
     skillRoleKey: 'VALIDATOR',
-    category: 'SNAPSHOT',
+    category: 'OUTPUT',
     type: 'DETERMINISTIC',
     executionMode: 'SYSTEM',
     inputContract: { schema: {} },
@@ -309,7 +310,7 @@ describe('Runtime Skill Routes', () => {
         description: 'Builds revenue lifecycle mapping outputs.',
         status: 'ACTIVE',
         supportedFrameworkKeys: ['RLD'],
-        category: 'MAPPING',
+        category: 'ANALYSIS',
         type: 'DETERMINISTIC',
         executionMode: 'SYSTEM',
         inputContract: { schema: {} },
@@ -324,7 +325,7 @@ describe('Runtime Skill Routes', () => {
     RuntimeSkill.find.mockReturnValue(buildRuntimeSkillQueryChain(rows))
 
     const res = await request
-      .get('/api/v1/super-admin/runtime-control/skills?page=1&pageSize=4&frameworkKey=RLD&status=ACTIVE&category=MAPPING&executionMode=SYSTEM&q=revenue')
+      .get('/api/v1/super-admin/runtime-control/skills?page=1&pageSize=4&frameworkKey=RLD&status=ACTIVE&category=ANALYSIS&executionMode=SYSTEM&q=revenue')
       .set('Authorization', `Bearer ${token}`)
 
     expect(res.status).toBe(200)
@@ -332,7 +333,7 @@ describe('Runtime Skill Routes', () => {
       expect.objectContaining({
         status: 'ACTIVE',
         supportedFrameworkKeys: 'RLD',
-        category: 'MAPPING',
+        category: 'ANALYSIS',
         executionMode: 'SYSTEM',
       }),
     )
@@ -342,7 +343,7 @@ describe('Runtime Skill Routes', () => {
       key: 'revenue-map',
       status: 'ACTIVE',
       supportedFrameworkKeys: ['RLD'],
-      category: 'MAPPING',
+      category: 'ANALYSIS',
       executionMode: 'SYSTEM',
     })
     expect(res.body.meta).toMatchObject({
@@ -658,7 +659,7 @@ describe('Runtime Skill Routes', () => {
       name: 'Summary',
       status: 'ACTIVE',
       supportedFrameworkKeys: ['VMF', 'RLD'],
-      category: 'GENERAL',
+      category: 'VALIDATION',
       type: 'DETERMINISTIC',
       executionMode: 'SYSTEM',
       inputContract: {},
@@ -760,7 +761,7 @@ describe('Runtime Skill Routes', () => {
       name: 'Snapshot',
       status: 'ACTIVE',
       supportedFrameworkKeys: ['VMF', 'RLD'],
-      category: 'SNAPSHOT',
+      category: 'OUTPUT',
       type: 'DETERMINISTIC',
       executionMode: 'SYSTEM',
       dependencySummary: {

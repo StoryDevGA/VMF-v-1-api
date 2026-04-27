@@ -14,6 +14,31 @@ export const RUNTIME_SKILL_EXECUTION_MODES = Object.freeze({
   AGENT: 'AGENT',
 })
 
+export const RUNTIME_SKILL_CATEGORIES = Object.freeze({
+  VALIDATION: 'VALIDATION',
+  COMPLETENESS: 'COMPLETENESS',
+  GOVERNANCE: 'GOVERNANCE',
+  QUALITY: 'QUALITY',
+  CONSISTENCY: 'CONSISTENCY',
+  COMPLIANCE: 'COMPLIANCE',
+  RISK: 'RISK',
+  LIFECYCLE: 'LIFECYCLE',
+  GENERATION: 'GENERATION',
+  OUTPUT: 'OUTPUT',
+  ANALYSIS: 'ANALYSIS',
+  ORCHESTRATION: 'ORCHESTRATION',
+  INTEGRATION: 'INTEGRATION',
+  NOTIFICATION: 'NOTIFICATION',
+})
+
+const LEGACY_RUNTIME_SKILL_CATEGORY_MAP = Object.freeze({
+  GENERAL: RUNTIME_SKILL_CATEGORIES.ANALYSIS,
+  SNAPSHOT: RUNTIME_SKILL_CATEGORIES.OUTPUT,
+  STATE: RUNTIME_SKILL_CATEGORIES.LIFECYCLE,
+  ACTION_RESOLUTION: RUNTIME_SKILL_CATEGORIES.ORCHESTRATION,
+  MAPPING: RUNTIME_SKILL_CATEGORIES.ANALYSIS,
+})
+
 const keyPattern = /^[a-z][a-z0-9-]*$/
 const frameworkKeyPattern = /^[A-Z][A-Z0-9_]*$/
 const enumTokenPattern = /^[A-Z][A-Z0-9_]*$/
@@ -75,6 +100,11 @@ const normalizeEnumToken = (value, fallback) => {
     .toUpperCase()
 
   return normalized || fallback
+}
+
+const normalizeRuntimeSkillCategory = (value) => {
+  const normalized = normalizeEnumToken(value, RUNTIME_SKILL_CATEGORIES.VALIDATION)
+  return LEGACY_RUNTIME_SKILL_CATEGORY_MAP[normalized] || normalized
 }
 
 export const buildRuntimeSkillStableId = (key) => `skill-${normalizeKey(key)}`
@@ -159,9 +189,10 @@ const runtimeSkillSchema = new mongoose.Schema(
       required: true,
       trim: true,
       uppercase: true,
+      enum: Object.values(RUNTIME_SKILL_CATEGORIES),
       maxlength: 100,
       match: [enumTokenPattern, 'Skill category must use uppercase letters, numbers, or underscores'],
-      default: 'GENERAL',
+      default: RUNTIME_SKILL_CATEGORIES.VALIDATION,
     },
     type: {
       type: String,
@@ -375,8 +406,8 @@ runtimeSkillSchema.pre('validate', function normalizeRuntimeSkill(next) {
     this.skillRoleKey = String(this.skillRoleKey || '').trim().toUpperCase()
   }
 
-  if (this.isNew || this.isModified('category')) {
-    this.category = normalizeEnumToken(this.category, 'GENERAL')
+  if (this.isNew || this.isModified('category') || LEGACY_RUNTIME_SKILL_CATEGORY_MAP[normalizeEnumToken(this.category, '')]) {
+    this.category = normalizeRuntimeSkillCategory(this.category)
   }
 
   if (this.isNew || this.isModified('type')) {

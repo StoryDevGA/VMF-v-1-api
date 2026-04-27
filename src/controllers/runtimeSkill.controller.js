@@ -1,5 +1,8 @@
 import { isDeepStrictEqual } from 'node:util'
-import RuntimeSkill from '../models/RuntimeSkill.js'
+import RuntimeSkill, {
+  RUNTIME_SKILL_CATEGORIES,
+  RUNTIME_SKILL_STATUSES,
+} from '../models/RuntimeSkill.js'
 import RuntimeAgent from '../models/RuntimeAgent.js'
 import SkillRoleRegistry, { SKILL_ROLE_REGISTRY_STATUSES } from '../models/SkillRoleRegistry.js'
 import WorkflowPolicy from '../models/WorkflowPolicy.js'
@@ -59,7 +62,7 @@ const serializeRuntimeSkill = (
   delete plain.__v
   delete plain.stableId
 
-  plain.category = reqHasValue(plain.category) ? plain.category : 'GENERAL'
+  plain.category = reqHasValue(plain.category) ? plain.category : RUNTIME_SKILL_CATEGORIES.VALIDATION
   plain.type = reqHasValue(plain.type) ? plain.type : 'DETERMINISTIC'
   plain.executionMode = reqHasValue(plain.executionMode) ? plain.executionMode : 'SYSTEM'
   plain.skillRoleKey = reqHasValue(plain.skillRoleKey) ? plain.skillRoleKey : ''
@@ -634,25 +637,35 @@ export const updateRuntimeSkill = async (req, res, next) => {
       req.body.skillRoleKey !== undefined
         ? req.body.skillRoleKey
         : currentSkillRoleKey
+    const nextStatus = String(req.body.status ?? runtimeSkill.status ?? '').trim().toUpperCase()
+    const normalizedEffectiveSkillRoleKey = String(effectiveSkillRoleKey ?? '').trim().toUpperCase()
 
-    const skillRoleValidation = await validateRuntimeSkillSkillRoleKey(effectiveSkillRoleKey)
-    if (Object.keys(skillRoleValidation.details).length > 0) {
-      return sendValidationFailed(res, req, skillRoleValidation.details)
-    }
+    if (!normalizedEffectiveSkillRoleKey) {
+      if (nextStatus === RUNTIME_SKILL_STATUSES.ACTIVE) {
+        return sendValidationFailed(res, req, {
+          skillRoleKey: 'Skill role is required for active skills.',
+        })
+      }
+    } else {
+      const skillRoleValidation = await validateRuntimeSkillSkillRoleKey(effectiveSkillRoleKey)
+      if (Object.keys(skillRoleValidation.details).length > 0) {
+        return sendValidationFailed(res, req, skillRoleValidation.details)
+      }
 
-    const normalizedRequestedSkillRoleKey = String(req.body.skillRoleKey ?? '').trim().toUpperCase()
-    const isChangingSkillRoleKey =
-      req.body.skillRoleKey !== undefined
-      && normalizedRequestedSkillRoleKey !== currentSkillRoleKey
-    const requiresActiveSkillRole = isChangingSkillRoleKey || !currentSkillRoleKey
+      const normalizedRequestedSkillRoleKey = String(req.body.skillRoleKey ?? '').trim().toUpperCase()
+      const isChangingSkillRoleKey =
+        req.body.skillRoleKey !== undefined
+        && normalizedRequestedSkillRoleKey !== currentSkillRoleKey
+      const requiresActiveSkillRole = isChangingSkillRoleKey || !currentSkillRoleKey
 
-    if (
-      requiresActiveSkillRole
-      && skillRoleValidation.skillRole?.status !== SKILL_ROLE_REGISTRY_STATUSES.ACTIVE
-    ) {
-      return sendValidationFailed(res, req, {
-        skillRoleKey: `Skill role key "${skillRoleValidation.skillRoleKey}" must reference an ACTIVE skill role.`,
-      })
+      if (
+        requiresActiveSkillRole
+        && skillRoleValidation.skillRole?.status !== SKILL_ROLE_REGISTRY_STATUSES.ACTIVE
+      ) {
+        return sendValidationFailed(res, req, {
+          skillRoleKey: `Skill role key "${skillRoleValidation.skillRoleKey}" must reference an ACTIVE skill role.`,
+        })
+      }
     }
 
     const validationDetails = await validateRuntimeSkillFrameworkKeys(nextSupportedFrameworkKeys)

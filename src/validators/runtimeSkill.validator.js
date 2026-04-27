@@ -5,6 +5,7 @@ import {
   createQueryValidator,
 } from './shared.js'
 import {
+  RUNTIME_SKILL_CATEGORIES,
   RUNTIME_SKILL_EXECUTION_MODES,
   RUNTIME_SKILL_STATUSES,
 } from '../models/RuntimeSkill.js'
@@ -61,6 +62,16 @@ const skillRoleKeySchema = z
   .transform((value) => value.toUpperCase())
   .refine(
     (value) => skillRoleKeyRegex.test(value),
+      'Skill role key must use uppercase letters, numbers, or underscores',
+  )
+
+const optionalSkillRoleKeySchema = z
+  .string()
+  .trim()
+  .max(80, 'Skill role key must be 80 characters or fewer')
+  .transform((value) => value.toUpperCase())
+  .refine(
+    (value) => !value || skillRoleKeyRegex.test(value),
     'Skill role key must use uppercase letters, numbers, or underscores',
   )
 
@@ -75,6 +86,11 @@ const enumTokenSchema = (fieldLabel) =>
       (value) => enumTokenRegex.test(value),
       `${fieldLabel} must use uppercase letters, numbers, or underscores`,
     )
+
+const runtimeSkillCategorySchema = z
+  .enum(Object.values(RUNTIME_SKILL_CATEGORIES), {
+    errorMap: () => ({ message: 'Skill category must be one of the controlled category values.' }),
+  })
 
 const objectSchema = (fieldLabel) =>
   z.object({}).catchall(z.unknown()).refine(
@@ -266,7 +282,7 @@ const createRuntimeSkillSchema = z.object({
     .default(RUNTIME_SKILL_STATUSES.ACTIVE),
   supportedFrameworkKeys: supportedFrameworkKeysSchema,
   skillRoleKey: skillRoleKeySchema,
-  category: enumTokenSchema('Skill category').default('GENERAL'),
+  category: runtimeSkillCategorySchema.default(RUNTIME_SKILL_CATEGORIES.VALIDATION),
   type: enumTokenSchema('Skill type').default('DETERMINISTIC'),
   executionMode: z
     .enum(Object.values(RUNTIME_SKILL_EXECUTION_MODES))
@@ -378,8 +394,8 @@ const updateRuntimeSkillSchema = z.object({
     .enum(Object.values(RUNTIME_SKILL_STATUSES))
     .optional(),
   supportedFrameworkKeys: supportedFrameworkKeysSchema.optional(),
-  skillRoleKey: skillRoleKeySchema.optional(),
-  category: enumTokenSchema('Skill category').optional(),
+  skillRoleKey: optionalSkillRoleKeySchema.optional(),
+  category: runtimeSkillCategorySchema.optional(),
   type: enumTokenSchema('Skill type').optional(),
   executionMode: z
     .enum(Object.values(RUNTIME_SKILL_EXECUTION_MODES))
@@ -480,7 +496,7 @@ const listRuntimeSkillsQuerySchema = z.object({
     .enum(Object.values(RUNTIME_SKILL_STATUSES))
     .optional(),
   frameworkKey: frameworkKeySchema.optional(),
-  category: enumTokenSchema('Skill category').optional(),
+  category: runtimeSkillCategorySchema.optional(),
   executionMode: z
     .enum(Object.values(RUNTIME_SKILL_EXECUTION_MODES))
     .optional(),
