@@ -362,6 +362,31 @@ describe('Runtime Path Registry API', () => {
     )
   })
 
+  test('POST /api/v1/super-admin/runtime-control/runtime-paths accepts expanded runtime categories', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/runtime-paths')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        pathKey: 'vmf.policy.last_result',
+        label: 'Last Policy Result',
+        description: 'Most recent workflow policy result for the VMF runtime.',
+        frameworkKeys: ['VMF'],
+        scope: 'FRAMEWORK_STATE',
+        allowedOperations: ['READ', 'WRITE', 'BIND'],
+        dataType: 'OBJECT',
+        category: 'POLICY',
+        sourceType: 'DERIVED',
+        uiControl: 'JSON',
+        isProtected: false,
+        isSystem: false,
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data?.category).toBe('POLICY')
+  })
+
   test('POST /api/v1/super-admin/runtime-control/runtime-paths rejects inactive framework keys', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     FrameworkRegistry.find.mockReturnValue(
@@ -496,6 +521,9 @@ describe('Runtime Path Registry API', () => {
         label: 'VMF Validation Outcome',
         frameworkKeys: ['vmf'],
         allowedOperations: ['READ'],
+        allowedValues: ['PASS', 'FAIL'],
+        allowedValueLabels: { PASS: 'Passed', FAIL: 'Failed' },
+        uiControl: 'SELECT',
         helpText: 'Displayed in governed selectors.',
       })
 
@@ -503,6 +531,11 @@ describe('Runtime Path Registry API', () => {
     expect(runtimePath.save).toHaveBeenCalledTimes(1)
     expect(res.body.data?.label).toBe('VMF Validation Outcome')
     expect(res.body.data?.frameworkKeys).toEqual(['VMF'])
+    expect(res.body.data?.allowedValues).toEqual(['PASS', 'FAIL'])
+    expect(res.body.data?.allowedValueLabels).toEqual({ PASS: 'Passed', FAIL: 'Failed' })
+    expect(res.body.data?.uiControl).toBe('SELECT')
+    expect(runtimePath.allowedValues).toEqual(['PASS', 'FAIL'])
+    expect(runtimePath.allowedValueLabels).toEqual({ PASS: 'Passed', FAIL: 'Failed' })
     expect(auditService.logFromRequest).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
@@ -510,6 +543,8 @@ describe('Runtime Path Registry API', () => {
         diff: expect.objectContaining({
           label: { from: 'VMF Validation Status', to: 'VMF Validation Outcome' },
           allowedOperations: { from: ['READ', 'WRITE', 'BIND'], to: ['READ'] },
+          allowedValues: { from: undefined, to: ['PASS', 'FAIL'] },
+          allowedValueLabels: { from: undefined, to: { PASS: 'Passed', FAIL: 'Failed' } },
         }),
       }),
     )

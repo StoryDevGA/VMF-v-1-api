@@ -8,6 +8,7 @@
     "start": "node src/server.js",
     "seed": "node src/seeds/index.js",
     "db:clean:keep-super-admin": "node src/scripts/cleanDbKeepSuperAdmin.js",
+    "runtime-paths:reclassify-categories": "node src/scripts/reclassifyRuntimePathCategories.js",
     "customers:enforce-name-uniqueness": "node src/scripts/enforceCustomerNameUniqueness.js",
     "governance:backfill": "node src/scripts/backfillCustomerLicenseGovernance.js",
     "governance:report-admin-invariants": "node src/scripts/reportCustomerAdminInvariantViolations.js",

@@ -28,13 +28,22 @@ const cloneAuditValue = (value) => {
   if (value === undefined) return value
   if (value === null) return null
   if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return value
+  if (value instanceof Map) return Object.fromEntries(value.entries())
   return JSON.parse(JSON.stringify(value))
+}
+
+const normalizeSerializedMaps = (plain) => {
+  if (plain?.allowedValueLabels instanceof Map) {
+    plain.allowedValueLabels = Object.fromEntries(plain.allowedValueLabels.entries())
+  }
 }
 
 const serializeRuntimePath = (runtimePath, { fallbackUpdatedBy = null } = {}) => {
   const plain = typeof runtimePath?.toJSON === 'function'
     ? runtimePath.toJSON()
     : { ...runtimePath }
+
+  normalizeSerializedMaps(plain)
 
   if (!plain.id && plain.stableId) {
     plain.id = plain.stableId

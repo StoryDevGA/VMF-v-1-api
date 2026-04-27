@@ -38,10 +38,21 @@ export const RUNTIME_PATH_REGISTRY_CATEGORIES = Object.freeze({
   METADATA: 'METADATA',
   VALIDATION: 'VALIDATION',
   LIFECYCLE: 'LIFECYCLE',
+  POLICY: 'POLICY',
+  WORKFLOW: 'WORKFLOW',
+  APPROVAL: 'APPROVAL',
+  ESCALATION: 'ESCALATION',
+  AUDIT: 'AUDIT',
   OUTPUT: 'OUTPUT',
   ARTIFACT: 'ARTIFACT',
   INPUT: 'INPUT',
   REFERENCE: 'REFERENCE',
+  NOTIFICATION: 'NOTIFICATION',
+  COMMENT: 'COMMENT',
+  TASK: 'TASK',
+  STYLE: 'STYLE',
+  GENERATION: 'GENERATION',
+  METRIC: 'METRIC',
   SYSTEM: 'SYSTEM',
 })
 
@@ -517,7 +528,11 @@ const runtimePathRegistrySchema = new mongoose.Schema(
   },
   {
     timestamps: true,
+    toObject: {
+      flattenMaps: true,
+    },
     toJSON: {
+      flattenMaps: true,
       transform: function transform(_doc, ret) {
         ret.id = ret.stableId
         delete ret.stableId
