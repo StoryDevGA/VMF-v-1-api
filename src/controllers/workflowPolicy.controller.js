@@ -570,6 +570,12 @@ const normalizeConditionRows = (conditions = []) =>
         value: normalizeConditionValue(condition?.value, condition?.operator),
         logic: String(condition?.logic ?? 'AND').trim().toUpperCase(),
       }))
+      .map((condition, index, rows) => {
+        if (index < rows.length - 1) return condition
+        const terminalCondition = { ...condition }
+        delete terminalCondition.logic
+        return terminalCondition
+      })
     : []
 
 const normalizeEffectRows = (effects = []) =>
@@ -629,7 +635,7 @@ const validateWorkflowPolicyConditions = async ({
   const conditionSelections = await resolveRuntimePathSelections({
     pathKeys: normalizedConditions.map((condition) => condition.path),
     frameworkKeys,
-    operation: RUNTIME_PATH_REGISTRY_OPERATIONS.READ,
+    operation: null,
     requireActive: true,
     forbidProtectedWrites: false,
     selectFields: [
@@ -665,27 +671,39 @@ const validateWorkflowPolicyConditions = async ({
     return details
   }
 
-  if (conditionSelections.invalidOperation.length > 0) {
-    details.conditions = `Condition runtime path "${conditionSelections.invalidOperation[0]}" cannot be read.`
-    return details
-  }
-
   if (conditionSelections.incompatibleFramework.length > 0) {
     details.conditions =
       `Condition runtime path "${conditionSelections.incompatibleFramework[0]}" is not compatible with the selected frameworks.`
     return details
   }
 
-  const firstNonStatePath = conditionSelections.rows.find(
-    (row) => String(row?.scope ?? '').trim().toUpperCase() !== RUNTIME_PATH_REGISTRY_SCOPES.FRAMEWORK_STATE,
+  const conditionPathKeySet = new Set(normalizedConditions.map((condition) => condition.path))
+  const conditionRows = conditionSelections.rows.filter((row) =>
+    conditionPathKeySet.has(String(row?.pathKey ?? '').trim()),
   )
-  if (firstNonStatePath) {
+
+  const firstNonFrameworkStatePath = conditionRows.find(
+    (row) => !String(row?.pathKey ?? '').trim().startsWith('framework_state.'),
+  )
+  if (firstNonFrameworkStatePath) {
     details.conditions =
-      `Condition runtime path "${firstNonStatePath.pathKey}" must use FRAMEWORK_STATE scope.`
+      `Condition runtime path "${firstNonFrameworkStatePath.pathKey}" must be under framework_state.*.`
     return details
   }
 
-  const byPathKey = new Map(conditionSelections.rows.map((row) => [String(row?.pathKey ?? '').trim(), row]))
+  const firstUnreadablePath = conditionRows.find((row) => {
+    const allowedOperations = Array.isArray(row?.allowedOperations)
+      ? row.allowedOperations.map((operation) => String(operation ?? '').trim().toUpperCase())
+      : []
+    return !allowedOperations.includes(RUNTIME_PATH_REGISTRY_OPERATIONS.READ)
+      && !allowedOperations.includes(RUNTIME_PATH_REGISTRY_OPERATIONS.BIND)
+  })
+  if (firstUnreadablePath) {
+    details.conditions = `Condition runtime path "${firstUnreadablePath.pathKey}" cannot be read.`
+    return details
+  }
+
+  const byPathKey = new Map(conditionRows.map((row) => [String(row?.pathKey ?? '').trim(), row]))
   const firstInvalidLiteral = normalizedConditions.find((condition) => {
     if (CONDITION_OPERATORS_WITHOUT_VALUE.has(condition.operator)) return false
     const runtimePath = byPathKey.get(condition.path)
@@ -1146,13 +1164,14 @@ const evaluateWorkflowPolicyConditionsAgainstState = ({ conditions = [], framewo
       expectedValue: cloneAuditValue(condition.value),
       actualValue: cloneAuditValue(actualValue),
       matched,
-      logic: condition.logic || 'AND',
+      ...(condition.logic ? { logic: condition.logic } : {}),
     }
   })
 
   const allMatched = conditionResults.reduce((currentResult, conditionResult, index) => {
     if (index === 0) return conditionResult.matched
-    if (String(conditionResult.logic ?? 'AND').trim().toUpperCase() === 'OR') {
+    const previousCondition = conditionResults[index - 1]
+    if (String(previousCondition?.logic ?? 'AND').trim().toUpperCase() === 'OR') {
       return currentResult || conditionResult.matched
     }
     return currentResult && conditionResult.matched

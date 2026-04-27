@@ -90,7 +90,7 @@ const workflowPolicyConditionSchema = z.object({
     .max(200, 'Condition path must be 200 characters or fewer'),
   operator: z.enum(Object.values(WORKFLOW_POLICY_CONDITION_OPERATORS)),
   value: conditionValueSchema.optional().default(''),
-  logic: z.enum(Object.values(WORKFLOW_POLICY_CONDITION_LOGIC)).default(WORKFLOW_POLICY_CONDITION_LOGIC.AND),
+  logic: z.enum(Object.values(WORKFLOW_POLICY_CONDITION_LOGIC)).optional(),
 })
 
 const workflowPolicyConditionsSchema = z

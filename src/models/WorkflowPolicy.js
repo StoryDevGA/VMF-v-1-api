@@ -299,7 +299,13 @@ const normalizeConditions = (values) => {
       value: normalizeConditionValue(condition?.value),
       logic: String(condition?.logic || WORKFLOW_POLICY_CONDITION_LOGIC.AND).trim().toUpperCase(),
     }))
-    .filter((condition) => condition.path || condition.operator || condition.value || condition.logic)
+    .filter((condition) => condition.path || condition.operator || condition.value)
+    .map((condition, index, rows) => {
+      if (index < rows.length - 1) return condition
+      const terminalCondition = { ...condition }
+      delete terminalCondition.logic
+      return terminalCondition
+    })
 }
 
 const effectTypeValues = Object.values(WORKFLOW_POLICY_EFFECT_TYPES)
@@ -347,9 +353,7 @@ const workflowPolicyConditionSchema = new mongoose.Schema(
     },
     logic: {
       type: String,
-      required: true,
       enum: conditionLogicValues,
-      default: WORKFLOW_POLICY_CONDITION_LOGIC.AND,
     },
   },
   { _id: false },

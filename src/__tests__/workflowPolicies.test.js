@@ -496,7 +496,7 @@ describe('Workflow Policy Routes', () => {
     expect(res.body.error.details.frameworkKeys).toBe('Unknown framework key "QMF".')
   })
 
-  test('POST /api/v1/super-admin/runtime-control/workflow-policies rejects non-FRAMEWORK_STATE condition paths', async () => {
+  test('POST /api/v1/super-admin/runtime-control/workflow-policies rejects condition paths outside framework_state', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     mockFindOneSelect(null)
     RuntimePathRegistry.find.mockReturnValue(buildRuntimePathLookupChain([
@@ -526,7 +526,50 @@ describe('Workflow Policy Routes', () => {
 
     expect(res.status).toBe(422)
     expect(res.body.error.code).toBe('VALIDATION_FAILED')
-    expect(res.body.error.details.conditions).toContain('FRAMEWORK_STATE scope')
+    expect(res.body.error.details.conditions).toContain('framework_state.*')
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/workflow-policies accepts readable framework_state validation-result condition paths', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    mockFindOneSelect(null)
+    RuntimePathRegistry.find.mockReturnValue(buildRuntimePathLookupChain([
+      {
+        pathKey: 'framework_state.validation.required_sections.is_valid',
+        status: 'ACTIVE',
+        frameworkKeys: ['VMF'],
+        allowedOperations: ['BIND'],
+        isProtected: false,
+        scope: 'VALIDATION_RESULT',
+        dataType: 'BOOLEAN',
+      },
+    ]))
+    mockRegistryLookups({
+      agents: [runtimeAgentRows.validator],
+      skills: [runtimeSkillRows.snapshot],
+    })
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/workflow-policies')
+      .set('Authorization', `Bearer ${token}`)
+      .send(buildPhaseOneWorkflowPolicyPayload({
+        key: 'vmf-validation-result-condition',
+        name: 'VMF Validation Result Condition Policy',
+        conditions: [{
+          path: 'framework_state.validation.required_sections.is_valid',
+          operator: '=',
+          value: true,
+          logic: 'AND',
+        }],
+      }))
+
+    expect(res.status).toBe(201)
+    expect(res.body.data.conditions).toEqual([
+      {
+        path: 'framework_state.validation.required_sections.is_valid',
+        operator: '=',
+        value: true,
+      },
+    ])
   })
 
   test('POST /api/v1/super-admin/runtime-control/workflow-policies rejects missing agent and skill references', async () => {
@@ -676,7 +719,7 @@ describe('Workflow Policy Routes', () => {
     mockFindOneSelect(null)
     RuntimePathRegistry.find.mockReturnValue(buildRuntimePathLookupChain([
       {
-        pathKey: 'vmf.status',
+        pathKey: 'framework_state.lifecycle.stage',
         status: 'ACTIVE',
         frameworkKeys: ['VMF'],
         allowedOperations: ['READ'],
@@ -703,7 +746,7 @@ describe('Workflow Policy Routes', () => {
         governedAction: 'SUBMIT_FOR_REVIEW',
         decisionMode: 'REQUIRE_AGENT_EVALUATION',
         conditions: [{
-          path: 'vmf.status',
+          path: 'framework_state.lifecycle.stage',
           operator: '=',
           value: 'DRAFT',
           logic: 'AND',
@@ -732,10 +775,9 @@ describe('Workflow Policy Routes', () => {
       validationFreshnessMinutes: 30,
       conditions: [
         expect.objectContaining({
-          path: 'vmf.status',
+          path: 'framework_state.lifecycle.stage',
           operator: '=',
           value: 'DRAFT',
-          logic: 'AND',
         }),
       ],
     })
@@ -746,7 +788,7 @@ describe('Workflow Policy Routes', () => {
     mockFindOneSelect(null)
     RuntimePathRegistry.find.mockReturnValue(buildRuntimePathLookupChain([
       {
-        pathKey: 'vmf.status',
+        pathKey: 'framework_state.lifecycle.stage',
         status: 'ACTIVE',
         frameworkKeys: ['VMF'],
         allowedOperations: ['READ'],
@@ -766,7 +808,7 @@ describe('Workflow Policy Routes', () => {
         key: 'vmf-status-exists',
         name: 'VMF Status Exists Policy',
         conditions: [{
-          path: 'vmf.status',
+          path: 'framework_state.lifecycle.stage',
           operator: 'exists',
           logic: 'AND',
         }],
@@ -775,7 +817,7 @@ describe('Workflow Policy Routes', () => {
     expect(res.status).toBe(201)
     expect(res.body.data.conditions).toEqual([
       expect.objectContaining({
-        path: 'vmf.status',
+        path: 'framework_state.lifecycle.stage',
         operator: 'exists',
         value: '',
       }),
@@ -787,7 +829,7 @@ describe('Workflow Policy Routes', () => {
     mockFindOneSelect(null)
     RuntimePathRegistry.find.mockReturnValue(buildRuntimePathLookupChain([
       {
-        pathKey: 'vmf.status',
+        pathKey: 'framework_state.lifecycle.stage',
         status: 'ACTIVE',
         frameworkKeys: ['VMF'],
         allowedOperations: ['READ'],
@@ -809,7 +851,7 @@ describe('Workflow Policy Routes', () => {
         key: 'vmf-status-in',
         name: 'VMF Status In Policy',
         conditions: [{
-          path: 'vmf.status',
+          path: 'framework_state.lifecycle.stage',
           operator: 'in',
           value: 'DRAFT, APPROVED',
           logic: 'AND',
@@ -819,7 +861,7 @@ describe('Workflow Policy Routes', () => {
     expect(res.status).toBe(201)
     expect(res.body.data.conditions).toEqual([
       expect.objectContaining({
-        path: 'vmf.status',
+        path: 'framework_state.lifecycle.stage',
         operator: 'in',
         value: ['DRAFT', 'APPROVED'],
       }),
@@ -974,7 +1016,7 @@ describe('Workflow Policy Routes', () => {
           frameworkKeys: ['VMF'],
           primaryAgentId: 'agent-summary',
           requiredValidationKeys: ['required-sections-check'],
-          conditions: [{ path: 'vmf.status', operator: '=', value: 'DRAFT', logic: 'AND' }],
+          conditions: [{ path: 'framework_state.lifecycle.stage', operator: '=', value: 'DRAFT', logic: 'AND' }],
           onPassEffects: [{ type: 'SET_VALUE', targetPath: 'vmf.metadata.lastValidatedAt', value: 'REVIEW_READY' }],
           onFailEffects: [],
         }),
@@ -1008,7 +1050,7 @@ describe('Workflow Policy Routes', () => {
     RuntimePathRegistry.find.mockReturnValue(buildRuntimePathLookupChain([
       {
         stableId: 'path-vmf-status',
-        pathKey: 'vmf.status',
+        pathKey: 'framework_state.lifecycle.stage',
         label: 'VMF Status',
         status: 'ACTIVE',
         frameworkKeys: ['VMF'],
@@ -1068,7 +1110,7 @@ describe('Workflow Policy Routes', () => {
     RuntimePathRegistry.find.mockImplementation(() => buildRuntimePathLookupChain([
       {
         stableId: 'path-vmf-status',
-        pathKey: 'vmf.status',
+        pathKey: 'framework_state.lifecycle.stage',
         label: 'VMF Status',
         status: 'ACTIVE',
         frameworkKeys: ['VMF'],
@@ -1106,7 +1148,7 @@ describe('Workflow Policy Routes', () => {
           governedAction: 'SUBMIT_FOR_REVIEW',
           decisionMode: 'REQUIRE_AGENT_EVALUATION',
           conditions: [{
-            path: 'vmf.status',
+            path: 'framework_state.lifecycle.stage',
             operator: '=',
             value: 'DRAFT',
             logic: 'AND',
@@ -1126,8 +1168,10 @@ describe('Workflow Policy Routes', () => {
           }],
         }),
         frameworkState: {
+          lifecycle: {
+            stage: 'DRAFT',
+          },
           vmf: {
-            status: 'DRAFT',
             metadata: {
               lastValidatedAt: null,
             },
@@ -1161,7 +1205,7 @@ describe('Workflow Policy Routes', () => {
     })
     expect(res.body.data.matchedConditions).toEqual([
       expect.objectContaining({
-        path: 'vmf.status',
+        path: 'framework_state.lifecycle.stage',
         matched: true,
       }),
     ])
@@ -1338,6 +1382,96 @@ describe('Workflow Policy Routes', () => {
         matched: true,
       }),
     ])
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/workflow-policies/test-console uses condition logic as connector to the next row', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    RuntimePathRegistry.find.mockImplementation(() => buildRuntimePathLookupChain([
+      {
+        stableId: 'path-framework-state-lifecycle-stage',
+        pathKey: 'framework_state.lifecycle.stage',
+        label: 'Framework Lifecycle Stage',
+        status: 'ACTIVE',
+        frameworkKeys: ['VMF'],
+        allowedOperations: ['READ', 'BIND'],
+        isProtected: false,
+        scope: 'FRAMEWORK_STATE',
+        dataType: 'STRING',
+        allowedValues: ['DRAFT', 'SUBMITTED', 'APPROVED'],
+      },
+      {
+        stableId: 'path-framework-state-validation-required-sections-is-valid',
+        pathKey: 'framework_state.validation.required_sections.is_valid',
+        label: 'Required Sections Valid',
+        status: 'ACTIVE',
+        frameworkKeys: ['VMF'],
+        allowedOperations: ['BIND'],
+        isProtected: false,
+        scope: 'VALIDATION_RESULT',
+        dataType: 'BOOLEAN',
+      },
+    ]))
+    RuntimeAgent.find.mockImplementation(() => buildRegistryLookupChain([
+      runtimeAgentRows.validator,
+    ]))
+    RuntimeSkill.find.mockImplementation(() => buildRegistryLookupChain([
+      runtimeSkillRows.snapshot,
+    ]))
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/workflow-policies/test-console')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        draft: buildPhaseOneWorkflowPolicyPayload({
+          key: 'vmf-framework-state-console-or-connector',
+          name: 'VMF Framework State Console OR Connector Policy',
+          triggerEvent: 'ON_SUBMIT',
+          actorScope: 'USER',
+          governedAction: 'SUBMIT_FOR_REVIEW',
+          decisionMode: 'REQUIRE_AGENT_EVALUATION',
+          conditions: [{
+            path: 'framework_state.lifecycle.stage',
+            operator: '=',
+            value: 'APPROVED',
+            logic: 'OR',
+          }, {
+            path: 'framework_state.validation.required_sections.is_valid',
+            operator: '=',
+            value: true,
+          }],
+          routingMode: 'FIXED_AGENT',
+          primaryAgentId: 'agent-validator',
+          requiredAgentIds: ['agent-validator'],
+        }),
+        frameworkState: {
+          lifecycle: {
+            stage: 'DRAFT',
+          },
+          validation: {
+            required_sections: {
+              is_valid: true,
+            },
+          },
+        },
+        triggerEvent: 'ON_SUBMIT',
+        actorScope: 'USER',
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.conditionsMatched).toBe(true)
+    expect(res.body.data.matchedConditions).toEqual([
+      expect.objectContaining({
+        path: 'framework_state.lifecycle.stage',
+        matched: false,
+        logic: 'OR',
+      }),
+      expect.objectContaining({
+        path: 'framework_state.validation.required_sections.is_valid',
+        actualValue: true,
+        matched: true,
+      }),
+    ])
+    expect(res.body.data.matchedConditions[1]).not.toHaveProperty('logic')
   })
 
   test('POST /api/v1/super-admin/runtime-control/workflow-policies/test-console does not fall back when wrapped framework_state is explicitly null', async () => {
