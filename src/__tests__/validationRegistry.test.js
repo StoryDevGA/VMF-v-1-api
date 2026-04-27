@@ -115,6 +115,9 @@ const makeValidationDocument = (overrides = {}) => ({
   freshnessDefaultMinutes: 30,
   blockingDefault: true,
   warningOnlyDefault: false,
+  allowManualRun: true,
+  executionMode: 'SYNC',
+  version: 1,
   createdBy: { _id: SUPER_ADMIN_ID, id: SUPER_ADMIN_ID, name: 'Super Administrator', email: 'admin@storylineos.com' },
   updatedBy: { _id: SUPER_ADMIN_ID, id: SUPER_ADMIN_ID, name: 'Super Administrator', email: 'admin@storylineos.com' },
   save: jest.fn(async function save() { return this }),
@@ -142,6 +145,9 @@ const makeValidationDocument = (overrides = {}) => ({
       freshnessDefaultMinutes: this.freshnessDefaultMinutes,
       blockingDefault: this.blockingDefault,
       warningOnlyDefault: this.warningOnlyDefault,
+      allowManualRun: this.allowManualRun,
+      executionMode: this.executionMode,
+      version: this.version,
       createdBy: this.createdBy,
       updatedBy: this.updatedBy,
     }
@@ -169,6 +175,9 @@ const buildCreatePayload = (overrides = {}) => ({
   freshnessDefaultMinutes: 30,
   blockingDefault: true,
   warningOnlyDefault: false,
+  allowManualRun: true,
+  executionMode: 'SYNC',
+  version: 1,
   ...overrides,
 })
 
@@ -402,12 +411,18 @@ describe('Validation Registry API', () => {
         defaultAgentIds: ['agent-vmf-submit-validator-agent'],
         resultType: 'OBJECT',
         requiresLatestRun: true,
+        allowManualRun: true,
+        executionMode: 'QUEUED',
+        version: 2,
       }))
 
     expect(res.status).toBe(201)
     expect(res.body.data?.defaultAgentIds).toEqual(['agent-vmf-submit-validator-agent'])
     expect(res.body.data?.resultType).toBe('OBJECT')
     expect(res.body.data?.requiresLatestRun).toBe(true)
+    expect(res.body.data?.allowManualRun).toBe(true)
+    expect(res.body.data?.executionMode).toBe('QUEUED')
+    expect(res.body.data?.version).toBe(2)
   })
 
   test('POST /api/v1/super-admin/runtime-control/validation-registry rejects unknown default agents', async () => {
@@ -529,11 +544,17 @@ describe('Validation Registry API', () => {
         label: 'Required Sections Check Updated',
         description: 'Updated validation description.',
         freshnessDefaultMinutes: 45,
+        allowManualRun: false,
+        executionMode: 'ASYNC',
+        version: 3,
       })
 
     expect(res.status).toBe(200)
     expect(res.body.data?.label).toBe('Required Sections Check Updated')
     expect(res.body.data?.freshnessDefaultMinutes).toBe(45)
+    expect(res.body.data?.allowManualRun).toBe(false)
+    expect(res.body.data?.executionMode).toBe('ASYNC')
+    expect(res.body.data?.version).toBe(3)
     expect(document.save).toHaveBeenCalled()
     expect(auditService.logFromRequest).toHaveBeenCalled()
   })

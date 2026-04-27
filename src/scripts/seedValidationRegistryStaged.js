@@ -164,6 +164,9 @@ const buildUpsertOperation = ({ seed, actorUserId, now }) => {
     freshnessDefaultMinutes: Number.isInteger(Number(seed.freshnessDefaultMinutes)) ? Number(seed.freshnessDefaultMinutes) : 30,
     blockingDefault: Boolean(seed.blockingDefault),
     warningOnlyDefault: Boolean(seed.warningOnlyDefault),
+    allowManualRun: seed.allowManualRun === undefined ? true : Boolean(seed.allowManualRun),
+    executionMode: String(seed.executionMode || 'SYNC').trim().toUpperCase(),
+    version: Number.isInteger(Number(seed.version)) ? Number(seed.version) : 1,
     updatedAt: now,
     updatedBy: actorUserId,
   }

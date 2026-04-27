@@ -6,6 +6,7 @@ import {
 } from './shared.js'
 import {
   VALIDATION_REGISTRY_CATEGORIES,
+  VALIDATION_REGISTRY_EXECUTION_MODES,
   VALIDATION_REGISTRY_RESULT_TYPES,
   VALIDATION_REGISTRY_SEVERITIES,
   VALIDATION_REGISTRY_STATUSES,
@@ -147,6 +148,9 @@ const defaultsSchema = z.object({
   freshnessDefaultMinutes: z.coerce.number().int().min(0).max(10080).default(30),
   blockingDefault: z.coerce.boolean().default(true),
   warningOnlyDefault: z.coerce.boolean().default(false),
+  allowManualRun: z.coerce.boolean().default(true),
+  executionMode: z.enum(Object.values(VALIDATION_REGISTRY_EXECUTION_MODES)).default(VALIDATION_REGISTRY_EXECUTION_MODES.SYNC),
+  version: z.coerce.number().int().min(1).max(100000).default(1),
 }).refine(
   (value) => !(value.blockingDefault && value.warningOnlyDefault),
   { message: 'Blocking Default and Warning Only Default cannot both be true.', path: ['warningOnlyDefault'] },
@@ -195,6 +199,9 @@ const updateValidationRegistryBodySchema = z.object({
   freshnessDefaultMinutes: z.coerce.number().int().min(0).max(10080).optional(),
   blockingDefault: z.coerce.boolean().optional(),
   warningOnlyDefault: z.coerce.boolean().optional(),
+  allowManualRun: z.coerce.boolean().optional(),
+  executionMode: z.enum(Object.values(VALIDATION_REGISTRY_EXECUTION_MODES)).optional(),
+  version: z.coerce.number().int().min(1).max(100000).optional(),
 }).refine(
   (value) => !(value.blockingDefault && value.warningOnlyDefault),
   { message: 'Blocking Default and Warning Only Default cannot both be true.', path: ['warningOnlyDefault'] },

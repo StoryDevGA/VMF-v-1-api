@@ -481,6 +481,9 @@ export const createValidation = async (req, res, next) => {
       freshnessDefaultMinutes: body.freshnessDefaultMinutes,
       blockingDefault: nextBlockingDefault,
       warningOnlyDefault: nextWarningOnlyDefault,
+      allowManualRun: body.allowManualRun === undefined ? true : Boolean(body.allowManualRun),
+      executionMode: body.executionMode,
+      version: body.version,
       createdBy: actorId,
       updatedBy: actorId,
     })
@@ -587,6 +590,9 @@ export const updateValidation = async (req, res, next) => {
       'freshnessDefaultMinutes',
       'blockingDefault',
       'warningOnlyDefault',
+      'allowManualRun',
+      'executionMode',
+      'version',
     ]
 
     const nextFrameworkKeys = req.body.supportedFrameworkKeys === undefined

@@ -29,6 +29,12 @@ export const VALIDATION_REGISTRY_RESULT_TYPES = Object.freeze({
   ...RUNTIME_PATH_REGISTRY_DATA_TYPES,
 })
 
+export const VALIDATION_REGISTRY_EXECUTION_MODES = Object.freeze({
+  SYNC: 'SYNC',
+  ASYNC: 'ASYNC',
+  QUEUED: 'QUEUED',
+})
+
 const stableIdPattern = /^validation-[a-z][a-z0-9-]*$/
 const keyPattern = /^[a-z][a-z0-9-]*$/
 const frameworkKeyPattern = /^[A-Z][A-Z0-9_]*$/
@@ -219,6 +225,21 @@ const validationRegistrySchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    allowManualRun: {
+      type: Boolean,
+      default: true,
+    },
+    executionMode: {
+      type: String,
+      enum: Object.values(VALIDATION_REGISTRY_EXECUTION_MODES),
+      default: VALIDATION_REGISTRY_EXECUTION_MODES.SYNC,
+    },
+    version: {
+      type: Number,
+      min: 1,
+      max: 100000,
+      default: 1,
+    },
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
@@ -294,6 +315,11 @@ validationRegistrySchema.pre('validate', function normalizeValidationRegistry(ne
 
   if (this.isNew || this.isModified('detailsFieldPath')) {
     this.detailsFieldPath = String(this.detailsFieldPath || '').trim()
+  }
+
+  if (this.isNew || this.isModified('executionMode')) {
+    const normalizedExecutionMode = String(this.executionMode || '').trim().toUpperCase()
+    this.executionMode = normalizedExecutionMode || VALIDATION_REGISTRY_EXECUTION_MODES.SYNC
   }
 
   if (this.isNew || !this.stableId) {
