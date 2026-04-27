@@ -702,7 +702,7 @@ describe('Workflow Policy Routes', () => {
       orderedSteps: ['snapshot', 'review', 'approve'],
       requiredAgentIds: ['agent-validator', 'agent-summary'],
       requiredSkillIds: ['skill-snapshot', 'skill-review'],
-      gatingRules: ['framework-package-active'],
+      gatingRules: [],
     })
     expect(AuditLog.createLog).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -712,6 +712,37 @@ describe('Workflow Policy Routes', () => {
         summary: 'Super Admin created workflow policy VMF Review Policy (vmf-review)',
       }),
     )
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/workflow-policies strips fields not used by the effect type', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    mockFindOneSelect(null)
+    mockRegistryLookups({
+      agents: [runtimeAgentRows.validator],
+      skills: [runtimeSkillRows.snapshot],
+    })
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/workflow-policies')
+      .set('Authorization', `Bearer ${token}`)
+      .send(buildPhaseOneWorkflowPolicyPayload({
+        key: 'vmf-block-only',
+        name: 'VMF Block Only Policy',
+        onFailEffects: [{
+          type: 'BLOCK_ACTION',
+          targetPath: 'framework_state.policy.last_result',
+          value: 'Blocked by policy.',
+        }],
+      }))
+
+    expect(res.status).toBe(201)
+    expect(res.body.data.onFailEffects).toEqual([
+      {
+        type: 'BLOCK_ACTION',
+        targetPath: '',
+        value: '',
+      },
+    ])
   })
 
   test('POST /api/v1/super-admin/runtime-control/workflow-policies accepts phase-2 conditions, routing, and validation fields', async () => {
@@ -1633,7 +1664,6 @@ describe('Workflow Policy Routes', () => {
         orderedSteps: ['snapshot', 'review', 'approve'],
         requiredAgentIds: ['agent-validator', 'agent-summary'],
         requiredSkillIds: ['skill-snapshot', 'skill-review'],
-        gatingRules: ['framework-package-active'],
         overrideAllowed: true,
         overrideRoles: ['SUPER_ADMIN', 'GOVERNANCE_LEAD'],
         approvalRequired: true,
@@ -1654,7 +1684,7 @@ describe('Workflow Policy Routes', () => {
       orderedSteps: ['snapshot', 'review', 'approve'],
       requiredAgentIds: ['agent-validator', 'agent-summary'],
       requiredSkillIds: ['skill-snapshot', 'skill-review'],
-      gatingRules: ['framework-package-active'],
+      gatingRules: ['validation-pass', 'framework-package-active'],
       overrideAllowed: true,
       overrideRoles: ['SUPER_ADMIN', 'GOVERNANCE_LEAD'],
       approvalRequired: true,

@@ -299,7 +299,6 @@ const WORKFLOW_POLICY_MUTABLE_FIELDS = Object.freeze([
   'orderedSteps',
   'requiredAgentIds',
   'requiredSkillIds',
-  'gatingRules',
 ])
 
 const toIdString = (value) => {
@@ -580,13 +579,22 @@ const normalizeConditionRows = (conditions = []) =>
 
 const normalizeEffectRows = (effects = []) =>
   Array.isArray(effects)
-    ? effects.map((effect) => ({
-        type: String(effect?.type ?? '').trim().toUpperCase(),
-        targetPath: String(effect?.targetPath ?? '').trim(),
-        value: Array.isArray(effect?.value)
-          ? effect.value.map((item) => String(item ?? '').trim()).filter(Boolean)
-          : effect?.value,
-      }))
+    ? effects.map((effect) => {
+        const type = String(effect?.type ?? '').trim().toUpperCase()
+        return {
+          type,
+          targetPath: EFFECT_TYPES_REQUIRING_TARGET_PATH.has(type)
+            ? String(effect?.targetPath ?? '').trim()
+            : '',
+          value: EFFECT_TYPES_REQUIRING_VALUE.has(type)
+            ? (
+                Array.isArray(effect?.value)
+                  ? effect.value.map((item) => String(item ?? '').trim()).filter(Boolean)
+                  : effect?.value
+              )
+            : '',
+        }
+      })
     : []
 
 const validateWorkflowPolicyConditions = async ({
@@ -1773,7 +1781,6 @@ export const createWorkflowPolicy = async (req, res, next) => {
         orderedSteps: workflowPolicy.orderedSteps,
         requiredAgentIds: workflowPolicy.requiredAgentIds,
         requiredSkillIds: workflowPolicy.requiredSkillIds,
-        gatingRules: workflowPolicy.gatingRules,
         version: workflowPolicy.version,
         lastActivatedAt: workflowPolicy.lastActivatedAt,
       },
@@ -2099,7 +2106,7 @@ export const updateWorkflowPolicy = async (req, res, next) => {
       orderedSteps: body.orderedSteps ?? getWorkflowPolicyFieldValue(workflowPolicy, 'orderedSteps'),
       requiredAgentIds: body.requiredAgentIds ?? getWorkflowPolicyFieldValue(workflowPolicy, 'requiredAgentIds'),
       requiredSkillIds: body.requiredSkillIds ?? getWorkflowPolicyFieldValue(workflowPolicy, 'requiredSkillIds'),
-      gatingRules: body.gatingRules ?? getWorkflowPolicyFieldValue(workflowPolicy, 'gatingRules'),
+      gatingRules: getWorkflowPolicyFieldValue(workflowPolicy, 'gatingRules'),
     }
 
     const validationDetails = await validateWorkflowPolicyReferences(nextWorkflowPolicy, {

@@ -310,16 +310,30 @@ const normalizeConditions = (values) => {
 
 const effectTypeValues = Object.values(WORKFLOW_POLICY_EFFECT_TYPES)
 const overrideRoleValues = Object.values(WORKFLOW_POLICY_OVERRIDE_ROLES)
+const effectTypesRequiringTargetPath = new Set([
+  WORKFLOW_POLICY_EFFECT_TYPES.SET_VALUE,
+  WORKFLOW_POLICY_EFFECT_TYPES.INCREMENT_COUNTER,
+  WORKFLOW_POLICY_EFFECT_TYPES.CLEAR_FIELD,
+])
+const effectTypesRequiringValue = new Set([
+  WORKFLOW_POLICY_EFFECT_TYPES.SET_VALUE,
+  WORKFLOW_POLICY_EFFECT_TYPES.APPEND_AUDIT_ENTRY,
+  WORKFLOW_POLICY_EFFECT_TYPES.TRIGGER_POLICY_GROUP,
+  WORKFLOW_POLICY_EFFECT_TYPES.QUEUE_NOTIFICATION,
+])
 
 const normalizeEffects = (values) => {
   if (!Array.isArray(values)) return []
 
   return values
-    .map((effect) => ({
-      type: String(effect?.type || '').trim().toUpperCase(),
-      targetPath: String(effect?.targetPath || '').trim(),
-      value: normalizeConditionValue(effect?.value),
-    }))
+    .map((effect) => {
+      const type = String(effect?.type || '').trim().toUpperCase()
+      return {
+        type,
+        targetPath: effectTypesRequiringTargetPath.has(type) ? String(effect?.targetPath || '').trim() : '',
+        value: effectTypesRequiringValue.has(type) ? normalizeConditionValue(effect?.value) : '',
+      }
+    })
     .filter((effect) => effect.type || effect.targetPath || effect.value)
 }
 
