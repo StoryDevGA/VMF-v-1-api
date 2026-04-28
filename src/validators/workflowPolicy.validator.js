@@ -12,6 +12,7 @@ import {
   WORKFLOW_POLICY_DECISION_MODES,
   WORKFLOW_POLICY_DEFAULTS,
   WORKFLOW_POLICY_EFFECT_TYPES,
+  WORKFLOW_POLICY_ESCALATION_ROLE_KEYS,
   WORKFLOW_POLICY_GOVERNED_ACTIONS,
   WORKFLOW_POLICY_OVERRIDE_ROLES,
   WORKFLOW_POLICY_ROUTING_MODES,
@@ -137,6 +138,10 @@ const workflowPolicyOverrideRolesSchema = z
   .transform((values) => [...new Set(values)])
 
 const workflowPolicyEscalateToSchema = z.union([workflowPolicyOverrideRoleSchema, z.literal('')])
+const workflowPolicyEscalationRoleKeySchema = z.union([
+  z.enum(Object.values(WORKFLOW_POLICY_ESCALATION_ROLE_KEYS)),
+  z.literal(''),
+])
 
 const workflowPolicyStatusSchema = z.enum(Object.values(WORKFLOW_POLICY_STATUSES))
 const workflowPolicyTypeSchema = z.enum(Object.values(WORKFLOW_POLICY_TYPES))
@@ -201,6 +206,7 @@ const createWorkflowPolicySchema = z.object({
   overrideAllowed: z.coerce.boolean().default(WORKFLOW_POLICY_DEFAULTS.overrideAllowed),
   overrideRoles: workflowPolicyOverrideRolesSchema.default([]),
   approvalRequired: z.coerce.boolean().default(WORKFLOW_POLICY_DEFAULTS.approvalRequired),
+  escalationRoleKey: workflowPolicyEscalationRoleKeySchema.default(WORKFLOW_POLICY_DEFAULTS.escalationRoleKey),
   escalateTo: workflowPolicyEscalateToSchema.default(WORKFLOW_POLICY_DEFAULTS.escalateTo),
   escalationMessage: z.string().trim().max(500, 'Escalation message must be 500 characters or fewer').default(WORKFLOW_POLICY_DEFAULTS.escalationMessage),
   slaMinutes: z.coerce.number().int().min(0).max(10080).default(WORKFLOW_POLICY_DEFAULTS.slaMinutes),
@@ -265,6 +271,7 @@ const updateWorkflowPolicySchema = z.object({
   overrideAllowed: z.coerce.boolean().optional(),
   overrideRoles: workflowPolicyOverrideRolesSchema.optional(),
   approvalRequired: z.coerce.boolean().optional(),
+  escalationRoleKey: workflowPolicyEscalationRoleKeySchema.optional(),
   escalateTo: workflowPolicyEscalateToSchema.optional(),
   escalationMessage: z.string().trim().max(500, 'Escalation message must be 500 characters or fewer').optional(),
   slaMinutes: z.coerce.number().int().min(0).max(10080).optional(),

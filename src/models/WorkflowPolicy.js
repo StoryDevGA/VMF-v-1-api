@@ -128,6 +128,12 @@ export const WORKFLOW_POLICY_OVERRIDE_ROLES = Object.freeze({
   OPERATIONS_ADMIN: 'OPERATIONS_ADMIN',
 })
 
+export const WORKFLOW_POLICY_ESCALATION_ROLE_KEYS = Object.freeze({
+  CUSTOMER_ADMIN: 'CUSTOMER_ADMIN',
+  TENANT_ADMIN: 'TENANT_ADMIN',
+  FRAMEWORK_OWNER: 'FRAMEWORK_OWNER',
+})
+
 export const WORKFLOW_POLICY_DEFAULTS = Object.freeze({
   status: WORKFLOW_POLICY_STATUSES.DRAFT,
   policyType: WORKFLOW_POLICY_TYPES.VALIDATION,
@@ -156,6 +162,7 @@ export const WORKFLOW_POLICY_DEFAULTS = Object.freeze({
   overrideAllowed: false,
   overrideRoles: [],
   approvalRequired: false,
+  escalationRoleKey: '',
   escalateTo: '',
   escalationMessage: '',
   slaMinutes: 0,
@@ -310,6 +317,7 @@ const normalizeConditions = (values) => {
 
 const effectTypeValues = Object.values(WORKFLOW_POLICY_EFFECT_TYPES)
 const overrideRoleValues = Object.values(WORKFLOW_POLICY_OVERRIDE_ROLES)
+const escalationRoleKeyValues = Object.values(WORKFLOW_POLICY_ESCALATION_ROLE_KEYS)
 const effectTypesRequiringTargetPath = new Set([
   WORKFLOW_POLICY_EFFECT_TYPES.SET_VALUE,
   WORKFLOW_POLICY_EFFECT_TYPES.INCREMENT_COUNTER,
@@ -605,6 +613,14 @@ const workflowPolicySchema = new mongoose.Schema(
       type: Boolean,
       default: WORKFLOW_POLICY_DEFAULTS.approvalRequired,
     },
+    escalationRoleKey: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      maxlength: 120,
+      enum: ['', ...escalationRoleKeyValues],
+      default: WORKFLOW_POLICY_DEFAULTS.escalationRoleKey,
+    },
     escalateTo: {
       type: String,
       trim: true,
@@ -753,6 +769,17 @@ workflowPolicySchema.pre('validate', function normalizeWorkflowPolicy(next) {
 
   if (this.isNew || this.isModified('escalateTo')) {
     this.escalateTo = normalizeEnumValue(this.escalateTo)
+  }
+
+  if (this.isNew || this.isModified('escalationRoleKey')) {
+    this.escalationRoleKey = normalizeEnumValue(this.escalationRoleKey)
+  }
+
+  if (!this.escalationRoleKey && this.escalateTo) {
+    const legacyEscalation = normalizeEnumValue(this.escalateTo)
+    this.escalationRoleKey = legacyEscalation === WORKFLOW_POLICY_ESCALATION_ROLE_KEYS.FRAMEWORK_OWNER
+      ? WORKFLOW_POLICY_ESCALATION_ROLE_KEYS.FRAMEWORK_OWNER
+      : WORKFLOW_POLICY_ESCALATION_ROLE_KEYS.CUSTOMER_ADMIN
   }
 
   if (this.isNew || this.isModified('escalationMessage')) {

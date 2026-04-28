@@ -916,7 +916,7 @@ describe('Workflow Policy Routes', () => {
         overrideAllowed: true,
         overrideRoles: ['SUPER_ADMIN', 'FRAMEWORK_OWNER'],
         approvalRequired: true,
-        escalateTo: 'GOVERNANCE_LEAD',
+        escalationRoleKey: 'TENANT_ADMIN',
         escalationMessage: 'Escalate blocked publish approvals to governance.',
         slaMinutes: 60,
       }))
@@ -927,9 +927,38 @@ describe('Workflow Policy Routes', () => {
       overrideAllowed: true,
       overrideRoles: ['SUPER_ADMIN', 'FRAMEWORK_OWNER'],
       approvalRequired: true,
-      escalateTo: 'GOVERNANCE_LEAD',
+      escalationRoleKey: 'TENANT_ADMIN',
       escalationMessage: 'Escalate blocked publish approvals to governance.',
       slaMinutes: 60,
+    })
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/workflow-policies maps legacy escalateTo to escalationRoleKey', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    mockFindOneSelect(null)
+    mockRegistryLookups({
+      agents: [runtimeAgentRows.validator],
+      skills: [runtimeSkillRows.snapshot],
+    })
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/workflow-policies')
+      .set('Authorization', `Bearer ${token}`)
+      .send(buildPhaseOneWorkflowPolicyPayload({
+        key: 'vmf-legacy-escalation',
+        name: 'VMF Legacy Escalation Policy',
+        overrideAllowed: true,
+        overrideRoles: ['SUPER_ADMIN'],
+        approvalRequired: true,
+        escalateTo: 'GOVERNANCE_LEAD',
+        escalationMessage: 'Escalate legacy owner to customer admins.',
+        slaMinutes: 60,
+      }))
+
+    expect(res.status).toBe(201)
+    expect(res.body.data).toMatchObject({
+      id: 'policy-vmf-legacy-escalation',
+      escalationRoleKey: 'CUSTOMER_ADMIN',
     })
   })
 
@@ -950,13 +979,13 @@ describe('Workflow Policy Routes', () => {
         overrideAllowed: true,
         overrideRoles: ['SUPER_ADMIN'],
         approvalRequired: true,
-        escalateTo: '',
+        escalationRoleKey: '',
         slaMinutes: 30,
       }))
 
     expect(res.status).toBe(422)
     expect(res.body.error.code).toBe('VALIDATION_FAILED')
-    expect(res.body.error.details.escalateTo).toBe('Escalate To is required when approval is required.')
+    expect(res.body.error.details.escalationRoleKey).toBe('Escalation Role is required when approval is required.')
   })
 
   test('POST /api/v1/super-admin/runtime-control/workflow-policies rejects protected or non-writable effect paths', async () => {
@@ -1667,7 +1696,7 @@ describe('Workflow Policy Routes', () => {
         overrideAllowed: true,
         overrideRoles: ['SUPER_ADMIN', 'GOVERNANCE_LEAD'],
         approvalRequired: true,
-        escalateTo: 'OPERATIONS_ADMIN',
+        escalationRoleKey: 'FRAMEWORK_OWNER',
         escalationMessage: 'Escalate blocked approval overrides to operations.',
         slaMinutes: 45,
       })
@@ -1688,7 +1717,7 @@ describe('Workflow Policy Routes', () => {
       overrideAllowed: true,
       overrideRoles: ['SUPER_ADMIN', 'GOVERNANCE_LEAD'],
       approvalRequired: true,
-      escalateTo: 'OPERATIONS_ADMIN',
+      escalationRoleKey: 'FRAMEWORK_OWNER',
       escalationMessage: 'Escalate blocked approval overrides to operations.',
       slaMinutes: 45,
     })

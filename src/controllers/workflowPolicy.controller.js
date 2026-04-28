@@ -8,6 +8,7 @@ import WorkflowPolicy, {
   WORKFLOW_POLICY_DECISION_MODES,
   WORKFLOW_POLICY_DEFAULTS,
   WORKFLOW_POLICY_EFFECT_TYPES,
+  WORKFLOW_POLICY_ESCALATION_ROLE_KEYS,
   WORKFLOW_POLICY_ROUTING_MODES,
   WORKFLOW_POLICY_STATUSES,
   WORKFLOW_POLICY_STEP_ORDER_CONSTRAINTS_BY_FRAMEWORK,
@@ -38,6 +39,7 @@ const WORKFLOW_POLICY_FIELD_DEFAULTS = Object.freeze({
   requiredValidationKeys: [],
   onPassEffects: [],
   onFailEffects: [],
+  escalationRoleKey: '',
   orderedSteps: [],
   requiredAgentIds: [],
   requiredSkillIds: [],
@@ -293,7 +295,7 @@ const WORKFLOW_POLICY_MUTABLE_FIELDS = Object.freeze([
   'overrideAllowed',
   'overrideRoles',
   'approvalRequired',
-  'escalateTo',
+  'escalationRoleKey',
   'escalationMessage',
   'slaMinutes',
   'orderedSteps',
@@ -328,13 +330,31 @@ const cloneAuditValue = (value) => {
   return JSON.parse(JSON.stringify(value))
 }
 
-const pickWorkflowPolicyPayload = (body = {}) =>
-  WORKFLOW_POLICY_MUTABLE_FIELDS.reduce((payload, field) => {
+const normalizeEscalationRoleKey = (value) => {
+  const normalized = String(value ?? '').trim().toUpperCase()
+  if (!normalized) return ''
+  if (Object.values(WORKFLOW_POLICY_ESCALATION_ROLE_KEYS).includes(normalized)) return normalized
+  if (normalized === 'FRAMEWORK_OWNER') return WORKFLOW_POLICY_ESCALATION_ROLE_KEYS.FRAMEWORK_OWNER
+  return WORKFLOW_POLICY_ESCALATION_ROLE_KEYS.CUSTOMER_ADMIN
+}
+
+const pickWorkflowPolicyPayload = (body = {}) => {
+  const payload = WORKFLOW_POLICY_MUTABLE_FIELDS.reduce((nextPayload, field) => {
     if (Object.prototype.hasOwnProperty.call(body, field)) {
-      payload[field] = body[field]
+      nextPayload[field] = body[field]
     }
-    return payload
+    return nextPayload
   }, {})
+
+  if (
+    !payload.escalationRoleKey
+    && Object.prototype.hasOwnProperty.call(body, 'escalateTo')
+  ) {
+    payload.escalationRoleKey = normalizeEscalationRoleKey(body.escalateTo)
+  }
+
+  return payload
+}
 
 const buildActorSummary = (req) => {
   const actor = req.scopes?.user
@@ -421,6 +441,10 @@ const serializeWorkflowPolicy = (workflowPolicy, { fallbackUpdatedBy = null } = 
     if (plain[field] === undefined) {
       plain[field] = cloneAuditValue(fallbackValue)
     }
+  }
+
+  if (!plain.escalationRoleKey && plain.escalateTo) {
+    plain.escalationRoleKey = normalizeEscalationRoleKey(plain.escalateTo)
   }
 
   const serializedUpdatedBy = serializeUserSummary(plain.updatedBy)
@@ -1396,7 +1420,7 @@ const validateWorkflowPolicyReferences = async ({
   overrideAllowed,
   overrideRoles,
   approvalRequired,
-  escalateTo,
+  escalationRoleKey,
   escalationMessage,
   slaMinutes,
   orderedSteps,
@@ -1412,7 +1436,7 @@ const validateWorkflowPolicyReferences = async ({
   const normalizedRequiredValidationKeys = Array.isArray(requiredValidationKeys) ? requiredValidationKeys : []
   const normalizedPreviousValidationKeys = Array.isArray(previousRequiredValidationKeys) ? previousRequiredValidationKeys : []
   const normalizedOverrideRoles = Array.isArray(overrideRoles) ? overrideRoles : []
-  const normalizedEscalateTo = String(escalateTo ?? '').trim().toUpperCase()
+  const normalizedEscalationRoleKey = normalizeEscalationRoleKey(escalationRoleKey)
   const requiresActiveFrameworks = status === WORKFLOW_POLICY_STATUSES.ACTIVE
   const { missingKeys, inactiveKeys } = await resolveKnownFrameworkKeys(
     normalizedFrameworkKeys,
@@ -1561,8 +1585,8 @@ const validateWorkflowPolicyReferences = async ({
     details.approvalRequired = 'Approval Required can only be enabled when overrides are allowed.'
   }
 
-  if (approvalRequired && !normalizedEscalateTo) {
-    details.escalateTo = 'Escalate To is required when approval is required.'
+  if (approvalRequired && !normalizedEscalationRoleKey) {
+    details.escalationRoleKey = 'Escalation Role is required when approval is required.'
   }
 
   if (String(escalationMessage ?? '').trim().length > 500) {
@@ -1775,7 +1799,7 @@ export const createWorkflowPolicy = async (req, res, next) => {
         overrideAllowed: workflowPolicy.overrideAllowed,
         overrideRoles: workflowPolicy.overrideRoles,
         approvalRequired: workflowPolicy.approvalRequired,
-        escalateTo: workflowPolicy.escalateTo,
+        escalationRoleKey: workflowPolicy.escalationRoleKey,
         escalationMessage: workflowPolicy.escalationMessage,
         slaMinutes: workflowPolicy.slaMinutes,
         orderedSteps: workflowPolicy.orderedSteps,
@@ -2100,7 +2124,11 @@ export const updateWorkflowPolicy = async (req, res, next) => {
       overrideAllowed: body.overrideAllowed ?? getWorkflowPolicyFieldValue(workflowPolicy, 'overrideAllowed'),
       overrideRoles: body.overrideRoles ?? getWorkflowPolicyFieldValue(workflowPolicy, 'overrideRoles'),
       approvalRequired: body.approvalRequired ?? getWorkflowPolicyFieldValue(workflowPolicy, 'approvalRequired'),
-      escalateTo: body.escalateTo ?? getWorkflowPolicyFieldValue(workflowPolicy, 'escalateTo'),
+      escalationRoleKey: body.escalationRoleKey
+        ?? (
+          getWorkflowPolicyFieldValue(workflowPolicy, 'escalationRoleKey')
+          || normalizeEscalationRoleKey(getWorkflowPolicyFieldValue(workflowPolicy, 'escalateTo'))
+        ),
       escalationMessage: body.escalationMessage ?? getWorkflowPolicyFieldValue(workflowPolicy, 'escalationMessage'),
       slaMinutes: body.slaMinutes ?? getWorkflowPolicyFieldValue(workflowPolicy, 'slaMinutes'),
       orderedSteps: body.orderedSteps ?? getWorkflowPolicyFieldValue(workflowPolicy, 'orderedSteps'),
