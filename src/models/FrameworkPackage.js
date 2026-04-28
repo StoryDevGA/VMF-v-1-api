@@ -7,9 +7,37 @@ export const FRAMEWORK_PACKAGE_STATUSES = Object.freeze({
   DEPRECATED: 'DEPRECATED',
 })
 
+export const FRAMEWORK_PACKAGE_SCOPES = Object.freeze({
+  SYSTEM: 'SYSTEM',
+  CUSTOMER: 'CUSTOMER',
+})
+
+export const FRAMEWORK_PACKAGE_TYPES = Object.freeze({
+  STANDARD: 'STANDARD',
+  EXPERIMENTAL: 'EXPERIMENTAL',
+  CUSTOM: 'CUSTOM',
+})
+
+export const FRAMEWORK_PACKAGE_VISIBILITY = Object.freeze({
+  INTERNAL_ONLY: 'INTERNAL_ONLY',
+  CUSTOMER_VISIBLE: 'CUSTOMER_VISIBLE',
+})
+
+export const FRAMEWORK_PACKAGE_CUSTOMER_ACCESS_MODES = Object.freeze({
+  ALL_CUSTOMERS: 'ALL_CUSTOMERS',
+  SELECTED_CUSTOMERS: 'SELECTED_CUSTOMERS',
+})
+
+export const FRAMEWORK_PACKAGE_RETRY_POLICIES = Object.freeze({
+  NONE: 'NONE',
+  RETRY_ONCE: 'RETRY_ONCE',
+  RETRY_WITH_BACKOFF: 'RETRY_WITH_BACKOFF',
+})
+
 const frameworkKeyPattern = /^[A-Z][A-Z0-9_]*$/
 const semverPattern = /^\d+\.\d+\.\d+$/
 const tokenPattern = /^[a-z][a-z0-9-]*$/
+const customerIdPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{1,119}$/
 
 const normalizeFrameworkKey = (value) =>
   String(value || '')
@@ -36,6 +64,16 @@ const normalizeTokenList = (values) => {
   return [...new Set(normalized)]
 }
 
+const normalizeCustomerIdList = (values) => {
+  if (!Array.isArray(values)) return []
+
+  const normalized = values
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)
+
+  return [...new Set(normalized)]
+}
+
 const stringTokenField = {
   type: String,
   trim: true,
@@ -43,6 +81,183 @@ const stringTokenField = {
   maxlength: 120,
   match: [tokenPattern, 'Value must use lowercase letters, numbers, or hyphens'],
 }
+
+const customerIdField = {
+  type: String,
+  trim: true,
+  maxlength: 120,
+  match: [customerIdPattern, 'Customer id must use letters, numbers, underscores, or hyphens'],
+}
+
+const frameworkPackageSectionSchema = new mongoose.Schema(
+  {
+    sectionKey: {
+      ...stringTokenField,
+      required: true,
+    },
+    label: {
+      type: String,
+      trim: true,
+      maxlength: 140,
+      default: '',
+    },
+    description: {
+      type: String,
+      trim: true,
+      maxlength: 500,
+      default: '',
+    },
+    required: {
+      type: Boolean,
+      default: true,
+    },
+    displayOrder: {
+      type: Number,
+      min: 0,
+      max: 10000,
+      default: 0,
+    },
+    visible: {
+      type: Boolean,
+      default: true,
+    },
+    runtimeEditable: {
+      type: Boolean,
+      default: true,
+    },
+    includeInSummary: {
+      type: Boolean,
+      default: false,
+    },
+    helpText: {
+      type: String,
+      trim: true,
+      maxlength: 500,
+      default: '',
+    },
+    placeholder: {
+      type: String,
+      trim: true,
+      maxlength: 250,
+      default: '',
+    },
+  },
+  { _id: false },
+)
+
+const frameworkPackageRuntimeSettingsSchema = new mongoose.Schema(
+  {
+    enablePreviewMode: {
+      type: Boolean,
+      default: true,
+    },
+    enableRuntimeValidation: {
+      type: Boolean,
+      default: true,
+    },
+    requireValidationBeforePublish: {
+      type: Boolean,
+      default: true,
+    },
+    allowManualValidationRun: {
+      type: Boolean,
+      default: true,
+    },
+    allowPolicyRetry: {
+      type: Boolean,
+      default: true,
+    },
+    retryPolicy: {
+      type: String,
+      enum: Object.values(FRAMEWORK_PACKAGE_RETRY_POLICIES),
+      default: FRAMEWORK_PACKAGE_RETRY_POLICIES.RETRY_ONCE,
+    },
+    defaultTimeoutMs: {
+      type: Number,
+      min: 0,
+      max: 300000,
+      default: 30000,
+    },
+    maxPolicyExecutionsPerRun: {
+      type: Number,
+      min: 1,
+      max: 100,
+      default: 10,
+    },
+  },
+  { _id: false },
+)
+
+const frameworkPackageValidationConfigSchema = new mongoose.Schema(
+  {
+    validationKey: {
+      ...stringTokenField,
+      required: true,
+    },
+    enabled: {
+      type: Boolean,
+      default: true,
+    },
+    blockingOverride: {
+      type: Boolean,
+      default: null,
+    },
+    warningOnlyOverride: {
+      type: Boolean,
+      default: null,
+    },
+    freshnessOverrideMinutes: {
+      type: Number,
+      min: 0,
+      max: 10080,
+      default: null,
+    },
+    requiresLatestRunOverride: {
+      type: Boolean,
+      default: null,
+    },
+    notes: {
+      type: String,
+      trim: true,
+      maxlength: 500,
+      default: '',
+    },
+  },
+  { _id: false },
+)
+
+const frameworkPackageWorkflowPolicyConfigSchema = new mongoose.Schema(
+  {
+    policyKey: {
+      ...stringTokenField,
+      required: true,
+    },
+    enabled: {
+      type: Boolean,
+      default: true,
+    },
+    stageGroup: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      maxlength: 120,
+      default: '',
+    },
+    executionOrder: {
+      type: Number,
+      min: 0,
+      max: 10000,
+      default: 0,
+    },
+    notes: {
+      type: String,
+      trim: true,
+      maxlength: 500,
+      default: '',
+    },
+  },
+  { _id: false },
+)
 
 const frameworkPackageSchema = new mongoose.Schema(
   {
@@ -67,6 +282,32 @@ const frameworkPackageSchema = new mongoose.Schema(
       maxlength: 50,
       match: [semverPattern, 'Version must use semantic version format'],
     },
+    packageKey: {
+      ...stringTokenField,
+      default: '',
+    },
+    packageName: {
+      type: String,
+      trim: true,
+      maxlength: 160,
+      default: '',
+    },
+    packageScope: {
+      type: String,
+      enum: Object.values(FRAMEWORK_PACKAGE_SCOPES),
+      default: FRAMEWORK_PACKAGE_SCOPES.SYSTEM,
+    },
+    packageType: {
+      type: String,
+      enum: Object.values(FRAMEWORK_PACKAGE_TYPES),
+      default: FRAMEWORK_PACKAGE_TYPES.STANDARD,
+    },
+    derivedFromPackageId: {
+      type: String,
+      trim: true,
+      maxlength: 120,
+      default: '',
+    },
     description: {
       type: String,
       trim: true,
@@ -83,6 +324,40 @@ const frameworkPackageSchema = new mongoose.Schema(
       type: Boolean,
       required: true,
       default: false,
+    },
+    visibility: {
+      type: String,
+      enum: Object.values(FRAMEWORK_PACKAGE_VISIBILITY),
+      default: FRAMEWORK_PACKAGE_VISIBILITY.INTERNAL_ONLY,
+    },
+    customerAccessMode: {
+      type: String,
+      enum: Object.values(FRAMEWORK_PACKAGE_CUSTOMER_ACCESS_MODES),
+      default: FRAMEWORK_PACKAGE_CUSTOMER_ACCESS_MODES.ALL_CUSTOMERS,
+    },
+    assignedCustomerIds: [customerIdField],
+    sections: [frameworkPackageSectionSchema],
+    runtimeSettings: {
+      type: frameworkPackageRuntimeSettingsSchema,
+      default: () => ({}),
+    },
+    validationConfig: [frameworkPackageValidationConfigSchema],
+    workflowPolicyConfig: [frameworkPackageWorkflowPolicyConfigSchema],
+    availableOutputKeys: [stringTokenField],
+    defaultOutputStyles: [stringTokenField],
+    allowCustomerOutputDefinitions: {
+      type: Boolean,
+      default: false,
+    },
+    artifactRetentionDays: {
+      type: Number,
+      min: 0,
+      max: 3650,
+      default: 365,
+    },
+    allowOutputRevisionHistory: {
+      type: Boolean,
+      default: true,
     },
     compatibleWorkflowKeys: [stringTokenField],
     defaultAgentIds: [stringTokenField],
@@ -159,6 +434,8 @@ frameworkPackageSchema.index(
   },
 )
 frameworkPackageSchema.index({ compatibleWorkflowKeys: 1, status: 1, updatedAt: -1 })
+frameworkPackageSchema.index({ 'validationConfig.validationKey': 1, status: 1, updatedAt: -1 })
+frameworkPackageSchema.index({ 'workflowPolicyConfig.policyKey': 1, status: 1, updatedAt: -1 })
 frameworkPackageSchema.index({ frameworkKey: 1, updatedAt: -1 })
 frameworkPackageSchema.index({ status: 1, updatedAt: -1 })
 
@@ -183,6 +460,69 @@ frameworkPackageSchema.pre('validate', function normalizeFrameworkPackage(next) 
     this.version = normalizeVersion(this.version)
   }
 
+  if (this.isNew || this.isModified('packageKey')) {
+    this.packageKey = String(this.packageKey || `${this.frameworkKey}-${this.version}`)
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+  }
+
+  if (this.isNew || this.isModified('packageName')) {
+    this.packageName = normalizeFrameworkName(this.packageName || `${this.frameworkName} ${this.version}`)
+  }
+
+  if (this.isNew || this.isModified('assignedCustomerIds')) {
+    this.assignedCustomerIds = normalizeCustomerIdList(this.assignedCustomerIds)
+  }
+
+  if (this.visibility === FRAMEWORK_PACKAGE_VISIBILITY.INTERNAL_ONLY) {
+    this.assignedCustomerIds = []
+  }
+
+  if (this.customerAccessMode === FRAMEWORK_PACKAGE_CUSTOMER_ACCESS_MODES.ALL_CUSTOMERS) {
+    this.assignedCustomerIds = []
+  }
+
+  if (
+    this.visibility === FRAMEWORK_PACKAGE_VISIBILITY.INTERNAL_ONLY
+    && this.customerAccessMode === FRAMEWORK_PACKAGE_CUSTOMER_ACCESS_MODES.SELECTED_CUSTOMERS
+  ) {
+    this.invalidate(
+      'customerAccessMode',
+      'Internal-only packages must use all-customers access mode.',
+    )
+  }
+
+  if (
+    this.visibility === FRAMEWORK_PACKAGE_VISIBILITY.CUSTOMER_VISIBLE
+    && this.customerAccessMode === FRAMEWORK_PACKAGE_CUSTOMER_ACCESS_MODES.SELECTED_CUSTOMERS
+    && (!Array.isArray(this.assignedCustomerIds) || this.assignedCustomerIds.length === 0)
+  ) {
+    this.invalidate(
+      'assignedCustomerIds',
+      'Assigned customers are required when customer access is selected customers.',
+    )
+  }
+
+  if (Array.isArray(this.validationConfig)) {
+    this.validationConfig.forEach((config, index) => {
+      if (config?.blockingOverride === true && config?.warningOnlyOverride === true) {
+        this.invalidate(
+          `validationConfig.${index}.warningOnlyOverride`,
+          'Validation cannot be both blocking and warning-only.',
+        )
+      }
+
+      if (config?.requiresLatestRunOverride === true && config?.freshnessOverrideMinutes !== null && config?.freshnessOverrideMinutes !== undefined) {
+        this.invalidate(
+          `validationConfig.${index}.freshnessOverrideMinutes`,
+          'Freshness override must be empty when latest-run override is required.',
+        )
+      }
+    })
+  }
+
   if (this.isNew || this.isModified('compatibleWorkflowKeys')) {
     this.compatibleWorkflowKeys = normalizeTokenList(this.compatibleWorkflowKeys)
   }
@@ -201,6 +541,14 @@ frameworkPackageSchema.pre('validate', function normalizeFrameworkPackage(next) 
       requiredSections: normalizeTokenList(validationRules.requiredSections),
       publishChecks: normalizeTokenList(validationRules.publishChecks),
     }
+  }
+
+  if (this.isNew || this.isModified('availableOutputKeys')) {
+    this.availableOutputKeys = normalizeTokenList(this.availableOutputKeys)
+  }
+
+  if (this.isNew || this.isModified('defaultOutputStyles')) {
+    this.defaultOutputStyles = normalizeTokenList(this.defaultOutputStyles)
   }
 
   if (this.isNew || this.isModified('status') || this.isModified('isDefault')) {

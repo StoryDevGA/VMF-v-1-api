@@ -102,6 +102,8 @@ let User
 let Role
 let FrameworkRegistry
 let FrameworkPackage
+let ValidationRegistry
+let WorkflowPolicy
 let AuditLog
 let mockRedisClient
 let originalFrameworkPackageSave
@@ -125,9 +127,36 @@ const makeFrameworkPackageDoc = (overrides = {}) => {
     frameworkKey: 'VMF',
     frameworkName: 'Value Management Framework',
     version: '2.3.1',
+    packageKey: 'vmf-2-3-1',
+    packageName: 'VMF 2.3.1',
+    packageScope: 'SYSTEM',
+    packageType: 'STANDARD',
     description: 'Current VMF package',
     status: 'VALIDATED',
     isDefault: false,
+    visibility: 'INTERNAL_ONLY',
+    customerAccessMode: 'ALL_CUSTOMERS',
+    assignedCustomerIds: [],
+    sections: [
+      { sectionKey: 'overview', label: 'Overview', required: true, displayOrder: 10 },
+    ],
+    runtimeSettings: {
+      enablePreviewMode: true,
+      enableRuntimeValidation: true,
+      requireValidationBeforePublish: true,
+      allowManualValidationRun: true,
+      allowPolicyRetry: true,
+      retryPolicy: 'RETRY_ONCE',
+      defaultTimeoutMs: 30000,
+      maxPolicyExecutionsPerRun: 10,
+    },
+    validationConfig: [],
+    workflowPolicyConfig: [],
+    availableOutputKeys: ['board-summary'],
+    defaultOutputStyles: ['executive-concise'],
+    allowCustomerOutputDefinitions: false,
+    artifactRetentionDays: 365,
+    allowOutputRevisionHistory: true,
     compatibleWorkflowKeys: ['vmf-baseline', 'vmf-publish'],
     defaultAgentIds: ['agent-validator'],
     requiredSkillIds: ['skill-snapshot'],
@@ -182,6 +211,8 @@ beforeAll(async () => {
   Role = models.Role
   FrameworkRegistry = models.FrameworkRegistry
   FrameworkPackage = models.FrameworkPackage
+  ValidationRegistry = models.ValidationRegistry
+  WorkflowPolicy = models.WorkflowPolicy
   AuditLog = models.AuditLog
 
   startSessionSpy = jest.spyOn(mongoose, 'startSession')
@@ -220,6 +251,8 @@ beforeEach(() => {
   FrameworkPackage.findOne = jest.fn()
   FrameworkPackage.findById = jest.fn()
   FrameworkRegistry.find = jest.fn()
+  ValidationRegistry.find = jest.fn()
+  WorkflowPolicy.find = jest.fn()
   Role.find = jest.fn().mockReturnValue(buildRoleQueryChain(buildDefaultRoleRows()))
   FrameworkPackage.prototype.save = jest.fn(async function save() {
     return this
@@ -246,6 +279,8 @@ beforeEach(() => {
       status: 'ACTIVE',
     },
   ]))
+  ValidationRegistry.find.mockReturnValue(buildFrameworkRegistryLookupChain([]))
+  WorkflowPolicy.find.mockReturnValue(buildFrameworkRegistryLookupChain([]))
 
   AuditLog.createLog = jest.fn(async () => ({}))
   startSessionSpy.mockResolvedValue(buildSession())
@@ -378,8 +413,33 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
         frameworkKey: 'VMF',
         frameworkName: 'Value Management Framework',
         version: '2.3.1',
+        packageKey: 'vmf-2-3-1',
+        packageName: 'VMF 2.3.1',
+        packageScope: 'SYSTEM',
+        packageType: 'STANDARD',
         description: 'Current VMF package',
         status: 'VALIDATED',
+        visibility: 'CUSTOMER_VISIBLE',
+        customerAccessMode: 'ALL_CUSTOMERS',
+        assignedCustomerIds: [],
+        sections: [
+          { sectionKey: 'overview', label: 'Overview', required: true, displayOrder: 10 },
+        ],
+        runtimeSettings: {
+          enablePreviewMode: true,
+          enableRuntimeValidation: true,
+          requireValidationBeforePublish: true,
+          allowManualValidationRun: true,
+          allowPolicyRetry: true,
+          retryPolicy: 'RETRY_ONCE',
+          defaultTimeoutMs: 30000,
+          maxPolicyExecutionsPerRun: 10,
+        },
+        availableOutputKeys: ['board-summary'],
+        defaultOutputStyles: ['executive-concise'],
+        allowCustomerOutputDefinitions: false,
+        artifactRetentionDays: 365,
+        allowOutputRevisionHistory: true,
         compatibleWorkflowKeys: ['vmf-baseline', 'vmf-publish'],
         defaultAgentIds: ['agent-validator'],
         requiredSkillIds: ['skill-snapshot'],
@@ -397,6 +457,9 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     expect(res.status).toBe(201)
     expect(res.body.data.frameworkKey).toBe('VMF')
     expect(res.body.data.version).toBe('2.3.1')
+    expect(res.body.data.packageKey).toBe('vmf-2-3-1')
+    expect(res.body.data.sections[0].sectionKey).toBe('overview')
+    expect(res.body.data.availableOutputKeys).toContain('board-summary')
     expect(res.body.data.updatedBy.id).toBe(SUPER_ADMIN_ID)
     expect(FrameworkPackage.prototype.save).toHaveBeenCalled()
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
@@ -405,6 +468,131 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
       scope: { frameworkKey: 'VMF' },
       summary: 'Super Admin created framework package VMF 2.3.1',
     }))
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages validates selected customer access', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/framework-packages')
+      .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', STEP_UP_TOKEN)
+      .send({
+        frameworkKey: 'VMF',
+        frameworkName: 'Value Management Framework',
+        version: '2.4.1',
+        visibility: 'CUSTOMER_VISIBLE',
+        customerAccessMode: 'SELECTED_CUSTOMERS',
+        assignedCustomerIds: [],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details).toHaveProperty('assignedCustomerIds')
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages rejects internal-only selected customer access mode', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/framework-packages')
+      .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', STEP_UP_TOKEN)
+      .send({
+        frameworkKey: 'VMF',
+        frameworkName: 'Value Management Framework',
+        version: '2.4.3',
+        visibility: 'INTERNAL_ONLY',
+        customerAccessMode: 'SELECTED_CUSTOMERS',
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.customerAccessMode).toBe(
+      'Internal-only packages must use all-customers access mode.',
+    )
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages rejects conflicting validation overrides', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const blockingWarningRes = await request
+      .post('/api/v1/super-admin/runtime-control/framework-packages')
+      .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', STEP_UP_TOKEN)
+      .send({
+        frameworkKey: 'VMF',
+        frameworkName: 'Value Management Framework',
+        version: '2.4.4',
+        validationConfig: [
+          {
+            validationKey: 'required-sections-check',
+            blockingOverride: true,
+            warningOnlyOverride: true,
+          },
+        ],
+      })
+
+    expect(blockingWarningRes.status).toBe(422)
+    expect(blockingWarningRes.body.error.details['validationConfig.0.warningOnlyOverride']).toBe(
+      'Validation cannot be both blocking and warning-only.',
+    )
+
+    const latestFreshnessRes = await request
+      .post('/api/v1/super-admin/runtime-control/framework-packages')
+      .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', STEP_UP_TOKEN)
+      .send({
+        frameworkKey: 'VMF',
+        frameworkName: 'Value Management Framework',
+        version: '2.4.5',
+        validationConfig: [
+          {
+            validationKey: 'required-sections-check',
+            requiresLatestRunOverride: true,
+            freshnessOverrideMinutes: 60,
+          },
+        ],
+      })
+
+    expect(latestFreshnessRes.status).toBe(422)
+    expect(latestFreshnessRes.body.error.details['validationConfig.0.freshnessOverrideMinutes']).toBe(
+      'Freshness override must be empty when latest-run override is required.',
+    )
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages validates governed registry links', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    mockFindOneSelect(null)
+    ValidationRegistry.find.mockReturnValue(buildFrameworkRegistryLookupChain([
+      {
+        key: 'required-sections-check',
+        status: 'ACTIVE',
+        packageUsable: true,
+        supportedFrameworkKeys: ['VMF'],
+      },
+    ]))
+    WorkflowPolicy.find.mockReturnValue(buildFrameworkRegistryLookupChain([
+      {
+        key: 'vmf-publish',
+        status: 'ACTIVE',
+        frameworkKeys: ['VMF'],
+      },
+    ]))
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/framework-packages')
+      .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', STEP_UP_TOKEN)
+      .send({
+        frameworkKey: 'VMF',
+        frameworkName: 'Value Management Framework',
+        version: '2.4.2',
+        validationConfig: [{ validationKey: 'required-sections-check', enabled: true }],
+        workflowPolicyConfig: [{ policyKey: 'vmf-publish', enabled: true, executionOrder: 10 }],
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data.validationConfig[0].validationKey).toBe('required-sections-check')
+    expect(res.body.data.workflowPolicyConfig[0].policyKey).toBe('vmf-publish')
   })
 
   test('POST /api/v1/super-admin/runtime-control/framework-packages returns 409 for duplicate framework/version', async () => {
@@ -496,6 +684,28 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
 
     expect(res.status).toBe(409)
     expect(res.body.error.details.reason).toBe('FRAMEWORK_PACKAGE_USE_ACTIVATE_ENDPOINT')
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/framework-packages/:packageId rejects merged access conflicts', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackageDoc({
+      visibility: 'INTERNAL_ONLY',
+      customerAccessMode: 'ALL_CUSTOMERS',
+      assignedCustomerIds: [],
+    }))
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', STEP_UP_TOKEN)
+      .send({
+        customerAccessMode: 'SELECTED_CUSTOMERS',
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.customerAccessMode).toBe(
+      'Internal-only packages must use all-customers access mode.',
+    )
   })
 
   test('PATCH /api/v1/super-admin/runtime-control/framework-packages/:packageId updates a framework package', async () => {

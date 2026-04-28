@@ -1,6 +1,12 @@
 import mongoose from 'mongoose'
 import { isDeepStrictEqual } from 'node:util'
-import FrameworkPackage, { FRAMEWORK_PACKAGE_STATUSES } from '../models/FrameworkPackage.js'
+import FrameworkPackage, {
+  FRAMEWORK_PACKAGE_CUSTOMER_ACCESS_MODES,
+  FRAMEWORK_PACKAGE_STATUSES,
+  FRAMEWORK_PACKAGE_VISIBILITY,
+} from '../models/FrameworkPackage.js'
+import ValidationRegistry, { VALIDATION_REGISTRY_STATUSES } from '../models/ValidationRegistry.js'
+import WorkflowPolicy, { WORKFLOW_POLICY_STATUSES } from '../models/WorkflowPolicy.js'
 import auditService from '../services/auditService.js'
 import {
   buildUnknownFrameworkKeyMessage,
@@ -166,6 +172,18 @@ const buildListFilter = ({ q, status, frameworkKey }) => {
       { version: regex },
       { description: regex },
       { status: regex },
+      { packageKey: regex },
+      { packageName: regex },
+      { packageScope: regex },
+      { packageType: regex },
+      { visibility: regex },
+      { customerAccessMode: regex },
+      { assignedCustomerIds: regex },
+      { 'sections.sectionKey': regex },
+      { 'validationConfig.validationKey': regex },
+      { 'workflowPolicyConfig.policyKey': regex },
+      { availableOutputKeys: regex },
+      { defaultOutputStyles: regex },
       { compatibleWorkflowKeys: regex },
       { defaultAgentIds: regex },
       { requiredSkillIds: regex },
@@ -185,9 +203,51 @@ const buildUnsupportedWorkflowKeyMessage = (frameworkKey, workflowKeys = []) => 
   return `Workflow keys ${workflowKeys.join(', ')} are not supported by framework "${frameworkKey}".`
 }
 
+const validateFrameworkPackageAccessRules = ({
+  visibility,
+  customerAccessMode,
+  assignedCustomerIds = [],
+}) => {
+  const details = {}
+  const selectedCustomerIds = Array.isArray(assignedCustomerIds) ? assignedCustomerIds : []
+
+  if (
+    visibility === FRAMEWORK_PACKAGE_VISIBILITY.INTERNAL_ONLY
+    && customerAccessMode === FRAMEWORK_PACKAGE_CUSTOMER_ACCESS_MODES.SELECTED_CUSTOMERS
+  ) {
+    details.customerAccessMode = 'Internal-only packages must use all-customers access mode.'
+  }
+
+  if (
+    visibility === FRAMEWORK_PACKAGE_VISIBILITY.INTERNAL_ONLY
+    && selectedCustomerIds.length > 0
+  ) {
+    details.assignedCustomerIds = 'Internal-only packages cannot be assigned to customers.'
+  }
+
+  if (
+    customerAccessMode === FRAMEWORK_PACKAGE_CUSTOMER_ACCESS_MODES.ALL_CUSTOMERS
+    && selectedCustomerIds.length > 0
+  ) {
+    details.assignedCustomerIds = 'Assigned customers must be empty when access mode is all customers.'
+  }
+
+  if (
+    visibility === FRAMEWORK_PACKAGE_VISIBILITY.CUSTOMER_VISIBLE
+    && customerAccessMode === FRAMEWORK_PACKAGE_CUSTOMER_ACCESS_MODES.SELECTED_CUSTOMERS
+    && selectedCustomerIds.length === 0
+  ) {
+    details.assignedCustomerIds = 'Assigned customers are required when customer access is selected customers.'
+  }
+
+  return details
+}
+
 const validateFrameworkPackageRegistryReferences = async ({
   frameworkKey,
   compatibleWorkflowKeys = [],
+  validationConfig = [],
+  workflowPolicyConfig = [],
 }) => {
   const details = {}
   const { missingKeys, registryByKey } = await resolveKnownFrameworkKeys([frameworkKey])
@@ -208,6 +268,49 @@ const validateFrameworkPackageRegistryReferences = async ({
       frameworkKey,
       unsupportedWorkflowKeys,
     )
+  }
+
+  const validationKeys = [
+    ...new Set((validationConfig || []).map((item) => String(item?.validationKey || '').trim().toLowerCase()).filter(Boolean)),
+  ]
+  if (validationKeys.length > 0) {
+    const validationRows = await ValidationRegistry.find({ key: { $in: validationKeys } })
+      .select('key status supportedFrameworkKeys packageUsable')
+      .lean()
+    const validationByKey = new Map(validationRows.map((row) => [row.key, row]))
+    const invalidValidationKeys = validationKeys.filter((validationKey) => {
+      const row = validationByKey.get(validationKey)
+      if (!row) return true
+      if (row.status !== VALIDATION_REGISTRY_STATUSES.ACTIVE) return true
+      if (!row.packageUsable) return true
+      return !Array.isArray(row.supportedFrameworkKeys) || !row.supportedFrameworkKeys.includes(frameworkKey)
+    })
+
+    if (invalidValidationKeys.length > 0) {
+      details.validationConfig =
+        `Validation entries must be ACTIVE, package-usable, and compatible with "${frameworkKey}": ${invalidValidationKeys.join(', ')}.`
+    }
+  }
+
+  const policyKeys = [
+    ...new Set((workflowPolicyConfig || []).map((item) => String(item?.policyKey || '').trim().toLowerCase()).filter(Boolean)),
+  ]
+  if (policyKeys.length > 0) {
+    const policyRows = await WorkflowPolicy.find({ key: { $in: policyKeys } })
+      .select('key status frameworkKeys')
+      .lean()
+    const policyByKey = new Map(policyRows.map((row) => [row.key, row]))
+    const invalidPolicyKeys = policyKeys.filter((policyKey) => {
+      const row = policyByKey.get(policyKey)
+      if (!row) return true
+      if (row.status !== WORKFLOW_POLICY_STATUSES.ACTIVE) return true
+      return !Array.isArray(row.frameworkKeys) || !row.frameworkKeys.includes(frameworkKey)
+    })
+
+    if (invalidPolicyKeys.length > 0) {
+      details.workflowPolicyConfig =
+        `Workflow policies must be ACTIVE and compatible with "${frameworkKey}": ${invalidPolicyKeys.join(', ')}.`
+    }
   }
 
   return details
@@ -250,6 +353,11 @@ export const listFrameworkPackages = async (req, res, next) => {
 
 export const createFrameworkPackage = async (req, res, next) => {
   try {
+    const accessRuleDetails = validateFrameworkPackageAccessRules(req.body)
+    if (Object.keys(accessRuleDetails).length > 0) {
+      return sendValidationFailed(res, req, accessRuleDetails)
+    }
+
     const validationDetails = await validateFrameworkPackageRegistryReferences(req.body)
     if (Object.keys(validationDetails).length > 0) {
       return sendValidationFailed(res, req, validationDetails)
@@ -297,6 +405,23 @@ export const createFrameworkPackage = async (req, res, next) => {
         description: frameworkPackage.description,
         status: frameworkPackage.status,
         isDefault: frameworkPackage.isDefault,
+        packageKey: frameworkPackage.packageKey,
+        packageName: frameworkPackage.packageName,
+        packageScope: frameworkPackage.packageScope,
+        packageType: frameworkPackage.packageType,
+        derivedFromPackageId: frameworkPackage.derivedFromPackageId,
+        visibility: frameworkPackage.visibility,
+        customerAccessMode: frameworkPackage.customerAccessMode,
+        assignedCustomerIds: frameworkPackage.assignedCustomerIds,
+        sections: frameworkPackage.sections,
+        runtimeSettings: frameworkPackage.runtimeSettings,
+        validationConfig: frameworkPackage.validationConfig,
+        workflowPolicyConfig: frameworkPackage.workflowPolicyConfig,
+        availableOutputKeys: frameworkPackage.availableOutputKeys,
+        defaultOutputStyles: frameworkPackage.defaultOutputStyles,
+        allowCustomerOutputDefinitions: frameworkPackage.allowCustomerOutputDefinitions,
+        artifactRetentionDays: frameworkPackage.artifactRetentionDays,
+        allowOutputRevisionHistory: frameworkPackage.allowOutputRevisionHistory,
         compatibleWorkflowKeys: frameworkPackage.compatibleWorkflowKeys,
         defaultAgentIds: frameworkPackage.defaultAgentIds,
         requiredSkillIds: frameworkPackage.requiredSkillIds,
@@ -383,10 +508,26 @@ export const updateFrameworkPackage = async (req, res, next) => {
     const nextStatus = req.body.status ?? frameworkPackage.status
     const nextCompatibleWorkflowKeys =
       req.body.compatibleWorkflowKeys ?? frameworkPackage.compatibleWorkflowKeys
+    const nextValidationConfig = req.body.validationConfig ?? frameworkPackage.validationConfig
+    const nextWorkflowPolicyConfig = req.body.workflowPolicyConfig ?? frameworkPackage.workflowPolicyConfig
+    const nextVisibility = req.body.visibility ?? frameworkPackage.visibility
+    const nextCustomerAccessMode = req.body.customerAccessMode ?? frameworkPackage.customerAccessMode
+    const nextAssignedCustomerIds = req.body.assignedCustomerIds ?? frameworkPackage.assignedCustomerIds
+
+    const accessRuleDetails = validateFrameworkPackageAccessRules({
+      visibility: nextVisibility,
+      customerAccessMode: nextCustomerAccessMode,
+      assignedCustomerIds: nextAssignedCustomerIds,
+    })
+    if (Object.keys(accessRuleDetails).length > 0) {
+      return sendValidationFailed(res, req, accessRuleDetails)
+    }
 
     const validationDetails = await validateFrameworkPackageRegistryReferences({
       frameworkKey: nextFrameworkKey,
       compatibleWorkflowKeys: nextCompatibleWorkflowKeys,
+      validationConfig: nextValidationConfig,
+      workflowPolicyConfig: nextWorkflowPolicyConfig,
     })
     if (Object.keys(validationDetails).length > 0) {
       return sendValidationFailed(res, req, validationDetails)
@@ -426,6 +567,23 @@ export const updateFrameworkPackage = async (req, res, next) => {
       'version',
       'description',
       'status',
+      'packageKey',
+      'packageName',
+      'packageScope',
+      'packageType',
+      'derivedFromPackageId',
+      'visibility',
+      'customerAccessMode',
+      'assignedCustomerIds',
+      'sections',
+      'runtimeSettings',
+      'validationConfig',
+      'workflowPolicyConfig',
+      'availableOutputKeys',
+      'defaultOutputStyles',
+      'allowCustomerOutputDefinitions',
+      'artifactRetentionDays',
+      'allowOutputRevisionHistory',
       'compatibleWorkflowKeys',
       'defaultAgentIds',
       'requiredSkillIds',
