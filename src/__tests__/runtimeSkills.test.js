@@ -479,7 +479,7 @@ describe('Runtime Skill Routes', () => {
 
     expect(res.status).toBe(422)
     expect(res.body.error.code).toBe('VALIDATION_FAILED')
-    expect(res.body.error.details.type).toBe('Skill type "AGENT_ASSISTED" is only compatible with AGENT execution mode.')
+    expect(res.body.error.details.type).toBe('Implementation type "AGENT_ASSISTED" is only compatible with AGENT execution mode.')
   })
 
   test('POST /api/v1/super-admin/runtime-control/skills returns 422 when SYSTEM skills include executionConfig', async () => {
@@ -499,7 +499,7 @@ describe('Runtime Skill Routes', () => {
 
     expect(res.status).toBe(422)
     expect(res.body.error.code).toBe('VALIDATION_FAILED')
-    expect(res.body.error.details.executionConfig).toBe('Execution config is only supported for rule engine or agent-assisted skills.')
+    expect(res.body.error.details.executionConfig).toBe('Execution config is only supported for Rule Engine or Agent execution modes.')
   })
 
   test('POST /api/v1/super-admin/runtime-control/skills returns 422 when forbiddenWritePaths overlaps allowedWritePaths', async () => {
@@ -680,6 +680,55 @@ describe('Runtime Skill Routes', () => {
         summary: 'Super Admin created runtime skill Summary (summary)',
       }),
     )
+  })
+
+  test.each([
+    ['RULE_BASED', 'RULE_ENGINE'],
+    ['EXTERNAL_SERVICE', 'SYSTEM'],
+    ['TEMPLATE_DRIVEN', 'SYSTEM'],
+  ])('POST /api/v1/super-admin/runtime-control/skills accepts %s implementation type', async (implementationType, executionMode) => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    mockFindOneSelect(null)
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/skills')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        key: `type-${implementationType.toLowerCase().replace(/_/g, '-')}`,
+        name: `${implementationType} Skill`,
+        description: 'Validates controlled implementation type handling.',
+        status: 'ACTIVE',
+        skillRoleKey: 'VALIDATOR',
+        supportedFrameworkKeys: ['VMF'],
+        type: implementationType,
+        executionMode,
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data).toMatchObject({
+      type: implementationType,
+      executionMode,
+    })
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/skills rejects uncontrolled implementation type values', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/skills')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        key: 'unknown-type',
+        name: 'Unknown Type',
+        description: 'Attempts to use an uncontrolled implementation type.',
+        status: 'ACTIVE',
+        skillRoleKey: 'VALIDATOR',
+        supportedFrameworkKeys: ['VMF'],
+        type: 'CUSTOM_SCRIPT',
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.type).toBe('Implementation type must be one of the controlled implementation type values.')
   })
 
   test('POST /api/v1/super-admin/runtime-control/skills accepts referenceAssets metadata', async () => {
@@ -929,7 +978,7 @@ describe('Runtime Skill Routes', () => {
 
     expect(res.status).toBe(422)
     expect(res.body.error.code).toBe('VALIDATION_FAILED')
-    expect(res.body.error.details.type).toBe('Skill type "AGENT_ASSISTED" is only compatible with AGENT execution mode.')
+    expect(res.body.error.details.type).toBe('Implementation type "AGENT_ASSISTED" is only compatible with AGENT execution mode.')
   })
 
   test('PATCH /api/v1/super-admin/runtime-control/skills/:skillId returns 404 when the skill does not exist', async () => {

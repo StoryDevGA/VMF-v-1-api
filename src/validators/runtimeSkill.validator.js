@@ -8,6 +8,7 @@ import {
   RUNTIME_SKILL_CATEGORIES,
   RUNTIME_SKILL_EXECUTION_MODES,
   RUNTIME_SKILL_STATUSES,
+  RUNTIME_SKILL_TYPES,
 } from '../models/RuntimeSkill.js'
 
 const keyRegex = /^[a-z][a-z0-9-]*$/
@@ -91,6 +92,12 @@ const runtimeSkillCategorySchema = z
   .enum(Object.values(RUNTIME_SKILL_CATEGORIES), {
     errorMap: () => ({ message: 'Skill category must be one of the controlled category values.' }),
   })
+
+const runtimeSkillTypeSchema = enumTokenSchema('Implementation type')
+  .refine(
+    (value) => Object.values(RUNTIME_SKILL_TYPES).includes(value),
+    'Implementation type must be one of the controlled implementation type values.',
+  )
 
 const objectSchema = (fieldLabel) =>
   z.object({}).catchall(z.unknown()).refine(
@@ -283,7 +290,7 @@ const createRuntimeSkillSchema = z.object({
   supportedFrameworkKeys: supportedFrameworkKeysSchema,
   skillRoleKey: skillRoleKeySchema,
   category: runtimeSkillCategorySchema.default(RUNTIME_SKILL_CATEGORIES.VALIDATION),
-  type: enumTokenSchema('Skill type').default('DETERMINISTIC'),
+  type: runtimeSkillTypeSchema.default(RUNTIME_SKILL_TYPES.DETERMINISTIC),
   executionMode: z
     .enum(Object.values(RUNTIME_SKILL_EXECUTION_MODES))
     .default(RUNTIME_SKILL_EXECUTION_MODES.SYSTEM),
@@ -327,11 +334,11 @@ const createRuntimeSkillSchema = z.object({
   }
 
   // Intentional duplication: enforced at validator → model → controller for defense-in-depth.
-  if (value.type === 'AGENT_ASSISTED' && value.executionMode !== RUNTIME_SKILL_EXECUTION_MODES.AGENT) {
+  if (value.type === RUNTIME_SKILL_TYPES.AGENT_ASSISTED && value.executionMode !== RUNTIME_SKILL_EXECUTION_MODES.AGENT) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ['type'],
-      message: 'Skill type "AGENT_ASSISTED" is only compatible with AGENT execution mode.',
+      message: 'Implementation type "AGENT_ASSISTED" is only compatible with AGENT execution mode.',
     })
   }
 
@@ -362,7 +369,7 @@ const createRuntimeSkillSchema = z.object({
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ['executionConfig'],
-      message: 'Execution config is only supported for rule engine or agent-assisted skills.',
+      message: 'Execution config is only supported for Rule Engine or Agent execution modes.',
     })
   }
 })
@@ -396,7 +403,7 @@ const updateRuntimeSkillSchema = z.object({
   supportedFrameworkKeys: supportedFrameworkKeysSchema.optional(),
   skillRoleKey: optionalSkillRoleKeySchema.optional(),
   category: runtimeSkillCategorySchema.optional(),
-  type: enumTokenSchema('Skill type').optional(),
+  type: runtimeSkillTypeSchema.optional(),
   executionMode: z
     .enum(Object.values(RUNTIME_SKILL_EXECUTION_MODES))
     .optional(),
@@ -432,14 +439,14 @@ const updateRuntimeSkillSchema = z.object({
 }).superRefine((value, ctx) => {
   // Intentional duplication: enforced at validator → model → controller for defense-in-depth.
   if (
-    value.type === 'AGENT_ASSISTED'
+    value.type === RUNTIME_SKILL_TYPES.AGENT_ASSISTED
     && value.executionMode
     && value.executionMode !== RUNTIME_SKILL_EXECUTION_MODES.AGENT
   ) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ['type'],
-      message: 'Skill type "AGENT_ASSISTED" is only compatible with AGENT execution mode.',
+      message: 'Implementation type "AGENT_ASSISTED" is only compatible with AGENT execution mode.',
     })
   }
 
@@ -467,7 +474,7 @@ const updateRuntimeSkillSchema = z.object({
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ['executionConfig'],
-      message: 'Execution config is only supported for rule engine or agent-assisted skills.',
+      message: 'Execution config is only supported for Rule Engine or Agent execution modes.',
     })
   }
 }).refine(

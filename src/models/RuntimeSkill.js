@@ -14,6 +14,15 @@ export const RUNTIME_SKILL_EXECUTION_MODES = Object.freeze({
   AGENT: 'AGENT',
 })
 
+export const RUNTIME_SKILL_TYPES = Object.freeze({
+  DETERMINISTIC: 'DETERMINISTIC',
+  AGENT_ASSISTED: 'AGENT_ASSISTED',
+  HYBRID: 'HYBRID',
+  RULE_BASED: 'RULE_BASED',
+  EXTERNAL_SERVICE: 'EXTERNAL_SERVICE',
+  TEMPLATE_DRIVEN: 'TEMPLATE_DRIVEN',
+})
+
 export const RUNTIME_SKILL_CATEGORIES = Object.freeze({
   VALIDATION: 'VALIDATION',
   COMPLETENESS: 'COMPLETENESS',
@@ -199,9 +208,10 @@ const runtimeSkillSchema = new mongoose.Schema(
       required: true,
       trim: true,
       uppercase: true,
+      enum: Object.values(RUNTIME_SKILL_TYPES),
       maxlength: 100,
-      match: [enumTokenPattern, 'Skill type must use uppercase letters, numbers, or underscores'],
-      default: 'DETERMINISTIC',
+      match: [enumTokenPattern, 'Implementation type must use uppercase letters, numbers, or underscores'],
+      default: RUNTIME_SKILL_TYPES.DETERMINISTIC,
     },
     executionMode: {
       type: String,
@@ -411,7 +421,7 @@ runtimeSkillSchema.pre('validate', function normalizeRuntimeSkill(next) {
   }
 
   if (this.isNew || this.isModified('type')) {
-    this.type = normalizeEnumToken(this.type, 'DETERMINISTIC')
+    this.type = normalizeEnumToken(this.type, RUNTIME_SKILL_TYPES.DETERMINISTIC)
   }
 
   if (this.isNew || this.isModified('executionMode')) {
@@ -504,12 +514,12 @@ runtimeSkillSchema.pre('validate', function normalizeRuntimeSkill(next) {
   const executionConfigHasKeys = Object.keys(executionConfig).length > 0
 
   if (this.executionMode === RUNTIME_SKILL_EXECUTION_MODES.SYSTEM && executionConfigHasKeys) {
-    this.invalidate('executionConfig', 'Execution config is only supported for rule engine or agent-assisted skills.')
+    this.invalidate('executionConfig', 'Execution config is only supported for Rule Engine or Agent execution modes.')
   }
 
   // Intentional duplication: enforced at validator → model → controller for defense-in-depth.
-  if (this.type === 'AGENT_ASSISTED' && this.executionMode !== RUNTIME_SKILL_EXECUTION_MODES.AGENT) {
-    this.invalidate('type', `Skill type "${this.type}" is only compatible with AGENT execution mode.`)
+  if (this.type === RUNTIME_SKILL_TYPES.AGENT_ASSISTED && this.executionMode !== RUNTIME_SKILL_EXECUTION_MODES.AGENT) {
+    this.invalidate('type', `Implementation type "${this.type}" is only compatible with AGENT execution mode.`)
   }
 
   if ((this.isNew || !this.stableId) && this.key) {
