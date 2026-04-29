@@ -7,6 +7,7 @@ import FrameworkPackage, {
 } from '../models/FrameworkPackage.js'
 import ValidationRegistry, { VALIDATION_REGISTRY_STATUSES } from '../models/ValidationRegistry.js'
 import WorkflowPolicy, { WORKFLOW_POLICY_STATUSES } from '../models/WorkflowPolicy.js'
+import UIContract, { UI_CONTRACT_STATUSES } from '../models/UIContract.js'
 import auditService from '../services/auditService.js'
 import {
   buildUnknownFrameworkKeyMessage,
@@ -180,8 +181,17 @@ const buildListFilter = ({ q, status, frameworkKey }) => {
       { customerAccessMode: regex },
       { assignedCustomerIds: regex },
       { 'sections.sectionKey': regex },
+      { 'sections.validationKeys': regex },
       { 'validationConfig.validationKey': regex },
       { 'workflowPolicyConfig.policyKey': regex },
+      { 'validationBindings.validationKey': regex },
+      { 'validationBindings.trigger': regex },
+      { 'workflowBindings.policyKey': regex },
+      { 'workflowBindings.executionContext': regex },
+      { uiContractKey: regex },
+      { 'executionModel.mode': regex },
+      { 'executionModel.stateModel': regex },
+      { 'executionModel.evaluationMode': regex },
       { availableOutputKeys: regex },
       { defaultOutputStyles: regex },
       { compatibleWorkflowKeys: regex },
@@ -248,6 +258,10 @@ const validateFrameworkPackageRegistryReferences = async ({
   compatibleWorkflowKeys = [],
   validationConfig = [],
   workflowPolicyConfig = [],
+  validationBindings = [],
+  workflowBindings = [],
+  sections = [],
+  uiContractKey = '',
 }) => {
   const details = {}
   const { missingKeys, registryByKey } = await resolveKnownFrameworkKeys([frameworkKey])
@@ -271,7 +285,13 @@ const validateFrameworkPackageRegistryReferences = async ({
   }
 
   const validationKeys = [
-    ...new Set((validationConfig || []).map((item) => String(item?.validationKey || '').trim().toLowerCase()).filter(Boolean)),
+    ...new Set([
+      ...(validationConfig || []).map((item) => String(item?.validationKey || '').trim().toLowerCase()),
+      ...(validationBindings || []).map((item) => String(item?.validationKey || '').trim().toLowerCase()),
+      ...(sections || []).flatMap((section) =>
+        (section?.validationKeys || []).map((validationKey) => String(validationKey || '').trim().toLowerCase()),
+      ),
+    ].filter(Boolean)),
   ]
   if (validationKeys.length > 0) {
     const validationRows = await ValidationRegistry.find({ key: { $in: validationKeys } })
@@ -287,13 +307,16 @@ const validateFrameworkPackageRegistryReferences = async ({
     })
 
     if (invalidValidationKeys.length > 0) {
-      details.validationConfig =
+      details.validationBindings =
         `Validation entries must be ACTIVE, package-usable, and compatible with "${frameworkKey}": ${invalidValidationKeys.join(', ')}.`
     }
   }
 
   const policyKeys = [
-    ...new Set((workflowPolicyConfig || []).map((item) => String(item?.policyKey || '').trim().toLowerCase()).filter(Boolean)),
+    ...new Set([
+      ...(workflowPolicyConfig || []).map((item) => String(item?.policyKey || '').trim().toLowerCase()),
+      ...(workflowBindings || []).map((item) => String(item?.policyKey || '').trim().toLowerCase()),
+    ].filter(Boolean)),
   ]
   if (policyKeys.length > 0) {
     const policyRows = await WorkflowPolicy.find({ key: { $in: policyKeys } })
@@ -308,8 +331,23 @@ const validateFrameworkPackageRegistryReferences = async ({
     })
 
     if (invalidPolicyKeys.length > 0) {
-      details.workflowPolicyConfig =
+      details.workflowBindings =
         `Workflow policies must be ACTIVE and compatible with "${frameworkKey}": ${invalidPolicyKeys.join(', ')}.`
+    }
+  }
+
+  const normalizedUiContractKey = String(uiContractKey || '').trim().toLowerCase()
+  if (normalizedUiContractKey) {
+    const uiContract = await UIContract.findOne({ uiContractKey: normalizedUiContractKey })
+      .select('uiContractKey status frameworkKeys introducedInVersion deprecatedInVersion compatibilityMode')
+      .lean()
+
+    if (!uiContract) {
+      details.uiContractKey = `UI Contract "${normalizedUiContractKey}" was not found.`
+    } else if (uiContract.status !== UI_CONTRACT_STATUSES.ACTIVE) {
+      details.uiContractKey = `UI Contract "${normalizedUiContractKey}" must be ACTIVE.`
+    } else if (!Array.isArray(uiContract.frameworkKeys) || !uiContract.frameworkKeys.includes(frameworkKey)) {
+      details.uiContractKey = `UI Contract "${normalizedUiContractKey}" is not compatible with framework "${frameworkKey}".`
     }
   }
 
@@ -415,8 +453,12 @@ export const createFrameworkPackage = async (req, res, next) => {
         assignedCustomerIds: frameworkPackage.assignedCustomerIds,
         sections: frameworkPackage.sections,
         runtimeSettings: frameworkPackage.runtimeSettings,
+        executionModel: frameworkPackage.executionModel,
         validationConfig: frameworkPackage.validationConfig,
         workflowPolicyConfig: frameworkPackage.workflowPolicyConfig,
+        validationBindings: frameworkPackage.validationBindings,
+        workflowBindings: frameworkPackage.workflowBindings,
+        uiContractKey: frameworkPackage.uiContractKey,
         availableOutputKeys: frameworkPackage.availableOutputKeys,
         defaultOutputStyles: frameworkPackage.defaultOutputStyles,
         allowCustomerOutputDefinitions: frameworkPackage.allowCustomerOutputDefinitions,
@@ -509,6 +551,10 @@ export const updateFrameworkPackage = async (req, res, next) => {
       req.body.compatibleWorkflowKeys ?? frameworkPackage.compatibleWorkflowKeys
     const nextValidationConfig = req.body.validationConfig ?? frameworkPackage.validationConfig
     const nextWorkflowPolicyConfig = req.body.workflowPolicyConfig ?? frameworkPackage.workflowPolicyConfig
+    const nextValidationBindings = req.body.validationBindings ?? frameworkPackage.validationBindings
+    const nextWorkflowBindings = req.body.workflowBindings ?? frameworkPackage.workflowBindings
+    const nextSections = req.body.sections ?? frameworkPackage.sections
+    const nextUiContractKey = req.body.uiContractKey ?? frameworkPackage.uiContractKey
     const nextVisibility = req.body.visibility ?? frameworkPackage.visibility
     const nextCustomerAccessMode = req.body.customerAccessMode ?? frameworkPackage.customerAccessMode
     const nextAssignedCustomerIds = req.body.assignedCustomerIds ?? frameworkPackage.assignedCustomerIds
@@ -527,6 +573,10 @@ export const updateFrameworkPackage = async (req, res, next) => {
       compatibleWorkflowKeys: nextCompatibleWorkflowKeys,
       validationConfig: nextValidationConfig,
       workflowPolicyConfig: nextWorkflowPolicyConfig,
+      validationBindings: nextValidationBindings,
+      workflowBindings: nextWorkflowBindings,
+      sections: nextSections,
+      uiContractKey: nextUiContractKey,
     })
     if (Object.keys(validationDetails).length > 0) {
       return sendValidationFailed(res, req, validationDetails)
@@ -576,8 +626,12 @@ export const updateFrameworkPackage = async (req, res, next) => {
       'assignedCustomerIds',
       'sections',
       'runtimeSettings',
+      'executionModel',
       'validationConfig',
       'workflowPolicyConfig',
+      'validationBindings',
+      'workflowBindings',
+      'uiContractKey',
       'availableOutputKeys',
       'defaultOutputStyles',
       'allowCustomerOutputDefinitions',

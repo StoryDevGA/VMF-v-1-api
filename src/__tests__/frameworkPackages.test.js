@@ -103,6 +103,7 @@ let FrameworkRegistry
 let FrameworkPackage
 let ValidationRegistry
 let WorkflowPolicy
+let UIContract
 let AuditLog
 let mockRedisClient
 let originalFrameworkPackageSave
@@ -212,6 +213,7 @@ beforeAll(async () => {
   FrameworkPackage = models.FrameworkPackage
   ValidationRegistry = models.ValidationRegistry
   WorkflowPolicy = models.WorkflowPolicy
+  UIContract = models.UIContract
   AuditLog = models.AuditLog
 
   startSessionSpy = jest.spyOn(mongoose, 'startSession')
@@ -252,6 +254,7 @@ beforeEach(() => {
   FrameworkRegistry.find = jest.fn()
   ValidationRegistry.find = jest.fn()
   WorkflowPolicy.find = jest.fn()
+  UIContract.findOne = jest.fn()
   Role.find = jest.fn().mockReturnValue(buildRoleQueryChain(buildDefaultRoleRows()))
   FrameworkPackage.prototype.save = jest.fn(async function save() {
     return this
@@ -280,6 +283,11 @@ beforeEach(() => {
   ]))
   ValidationRegistry.find.mockReturnValue(buildFrameworkRegistryLookupChain([]))
   WorkflowPolicy.find.mockReturnValue(buildFrameworkRegistryLookupChain([]))
+  UIContract.findOne.mockReturnValue({
+    select: jest.fn().mockReturnValue({
+      lean: jest.fn().mockResolvedValue(null),
+    }),
+  })
 
   AuditLog.createLog = jest.fn(async () => ({}))
   startSessionSpy.mockResolvedValue(buildSession())
@@ -536,6 +544,130 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     expect(res.status).toBe(201)
     expect(res.body.data.validationConfig[0].validationKey).toBe('required-sections-check')
     expect(res.body.data.workflowPolicyConfig[0].policyKey).toBe('vmf-publish')
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages creates Sprint 2 package bindings', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    mockFindOneSelect(null)
+    ValidationRegistry.find.mockReturnValue(buildFrameworkRegistryLookupChain([
+      {
+        key: 'required-sections-check',
+        status: 'ACTIVE',
+        packageUsable: true,
+        supportedFrameworkKeys: ['VMF'],
+      },
+    ]))
+    WorkflowPolicy.find.mockReturnValue(buildFrameworkRegistryLookupChain([
+      {
+        key: 'vmf-submit-gate',
+        status: 'ACTIVE',
+        frameworkKeys: ['VMF'],
+      },
+    ]))
+    UIContract.findOne.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue({
+          uiContractKey: 'vmf-ui-contract-v1',
+          status: 'ACTIVE',
+          frameworkKeys: ['VMF'],
+        }),
+      }),
+    })
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/framework-packages')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        frameworkKey: 'VMF',
+        frameworkName: 'Value Management Framework',
+        version: '2.5.0',
+        sections: [
+          {
+            sectionKey: 'overview',
+            label: 'Overview',
+            dataType: 'STRING',
+            maxLength: 500,
+            validationKeys: ['required-sections-check'],
+          },
+        ],
+        executionModel: {
+          mode: 'EVENT_DRIVEN',
+          stateModel: 'LIFECYCLE_BASED',
+          evaluationMode: 'POLICY_DRIVEN',
+        },
+        validationBindings: [
+          {
+            validationKey: 'required-sections-check',
+            trigger: 'ON_SUBMIT',
+            blocking: true,
+            priority: 100,
+            enabled: true,
+          },
+        ],
+        workflowBindings: [
+          {
+            policyKey: 'vmf-submit-gate',
+            executionContext: 'ON_SUBMIT',
+            priority: 100,
+            enabled: true,
+          },
+        ],
+        uiContractKey: 'vmf-ui-contract-v1',
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data.executionModel.mode).toBe('EVENT_DRIVEN')
+    expect(res.body.data.sections[0].validationKeys).toContain('required-sections-check')
+    expect(res.body.data.validationBindings[0].trigger).toBe('ON_SUBMIT')
+    expect(res.body.data.workflowBindings[0].executionContext).toBe('ON_SUBMIT')
+    expect(res.body.data.uiContractKey).toBe('vmf-ui-contract-v1')
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages rejects missing UI Contract references', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    mockFindOneSelect(null)
+    UIContract.findOne.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue(null),
+      }),
+    })
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/framework-packages')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        frameworkKey: 'VMF',
+        frameworkName: 'Value Management Framework',
+        version: '2.5.2',
+        uiContractKey: 'missing-ui-contract',
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.uiContractKey).toBe(
+      'UI Contract "missing-ui-contract" was not found.',
+    )
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages rejects duplicate Sprint 2 bindings', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/framework-packages')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        frameworkKey: 'VMF',
+        frameworkName: 'Value Management Framework',
+        version: '2.5.1',
+        validationBindings: [
+          { validationKey: 'required-sections-check', trigger: 'ON_SUBMIT', priority: 100 },
+          { validationKey: 'required-sections-check', trigger: 'ON_SUBMIT', priority: 200 },
+        ],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details['validationBindings.1.validationKey']).toBe(
+      'Validation binding already exists for this trigger.',
+    )
   })
 
   test('POST /api/v1/super-admin/runtime-control/framework-packages returns 409 for duplicate framework/version', async () => {

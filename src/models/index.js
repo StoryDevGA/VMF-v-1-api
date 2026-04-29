@@ -18,6 +18,7 @@ import RuntimePathRegistry from './RuntimePathRegistry.js'
 import SkillRoleRegistry from './SkillRoleRegistry.js'
 import ValidationRegistry from './ValidationRegistry.js'
 import WorkflowPolicy from './WorkflowPolicy.js'
+import UIContract from './UIContract.js'
 
 // Export all models
 export {
@@ -40,6 +41,7 @@ export {
   SkillRoleRegistry,
   ValidationRegistry,
   WorkflowPolicy,
+  UIContract,
 }
 
 // Default export with all models
@@ -63,4 +65,5 @@ export default {
   SkillRoleRegistry,
   ValidationRegistry,
   WorkflowPolicy,
+  UIContract,
 }
