@@ -15,7 +15,6 @@ const SUPER_ADMIN_ID = '507f1f77bcf86cd799439011'
 const NON_ADMIN_ID = '507f1f77bcf86cd799439012'
 const FRAMEWORK_PACKAGE_ID = '607f1f77bcf86cd799439022'
 const ACTIVE_FRAMEWORK_PACKAGE_ID = '607f1f77bcf86cd799439023'
-const STEP_UP_TOKEN = 'step-up-token'
 
 const buildSession = () => ({
   withTransaction: jest.fn(async (callback) => callback()),
@@ -315,61 +314,12 @@ describe('Framework Package Routes', () => {
     expect(res.body.error.code).toBe('FORBIDDEN')
   })
 
-  test('POST /api/v1/super-admin/runtime-control/framework-packages returns 403 when step-up token is missing', async () => {
-    const token = await getAccessTokenForUser(makeFakeUser())
-
-    const res = await request
-      .post('/api/v1/super-admin/runtime-control/framework-packages')
-      .set('Authorization', `Bearer ${token}`)
-      .send({
-        frameworkKey: 'VMF',
-        frameworkName: 'Value Management Framework',
-        version: '2.3.1',
-      })
-
-    expect(res.status).toBe(403)
-    expect(res.body.error.code).toBe('STEP_UP_REQUIRED')
-    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
-      action: 'ACCESS_DENIED',
-      resourceType: 'User',
-      requestId: res.body.error.requestId,
-    }))
-  })
-
-  test('POST /api/v1/super-admin/runtime-control/framework-packages returns 403 when step-up token is invalid', async () => {
-    const token = await getAccessTokenForUser(makeFakeUser())
-    const originalGet = mockRedisClient.get
-    mockRedisClient.get = jest.fn().mockResolvedValue(null)
-
-    try {
-      const res = await request
-        .post('/api/v1/super-admin/runtime-control/framework-packages')
-        .set('Authorization', `Bearer ${token}`)
-        .set('X-Step-Up-Token', STEP_UP_TOKEN)
-        .send({
-          frameworkKey: 'VMF',
-          frameworkName: 'Value Management Framework',
-          version: '2.3.1',
-        })
-
-      expect(res.status).toBe(403)
-      expect(res.body.error.code).toBe('STEP_UP_INVALID')
-      expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
-        action: 'ACCESS_DENIED',
-        resourceType: 'User',
-      }))
-    } finally {
-      mockRedisClient.get = originalGet
-    }
-  })
-
 test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 for invalid payload', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
 
     const res = await request
       .post('/api/v1/super-admin/runtime-control/framework-packages')
       .set('Authorization', `Bearer ${token}`)
-      .set('X-Step-Up-Token', STEP_UP_TOKEN)
       .send({
         frameworkKey: 'vmf',
         frameworkName: '',
@@ -388,7 +338,6 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     const res = await request
       .post('/api/v1/super-admin/runtime-control/framework-packages')
       .set('Authorization', `Bearer ${token}`)
-      .set('X-Step-Up-Token', STEP_UP_TOKEN)
       .send({
         frameworkKey: 'QMF',
         frameworkName: 'Quality Messaging Framework',
@@ -408,7 +357,6 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     const res = await request
       .post('/api/v1/super-admin/runtime-control/framework-packages')
       .set('Authorization', `Bearer ${token}`)
-      .set('X-Step-Up-Token', STEP_UP_TOKEN)
       .send({
         frameworkKey: 'VMF',
         frameworkName: 'Value Management Framework',
@@ -476,7 +424,6 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     const res = await request
       .post('/api/v1/super-admin/runtime-control/framework-packages')
       .set('Authorization', `Bearer ${token}`)
-      .set('X-Step-Up-Token', STEP_UP_TOKEN)
       .send({
         frameworkKey: 'VMF',
         frameworkName: 'Value Management Framework',
@@ -496,7 +443,6 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     const res = await request
       .post('/api/v1/super-admin/runtime-control/framework-packages')
       .set('Authorization', `Bearer ${token}`)
-      .set('X-Step-Up-Token', STEP_UP_TOKEN)
       .send({
         frameworkKey: 'VMF',
         frameworkName: 'Value Management Framework',
@@ -517,7 +463,6 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     const blockingWarningRes = await request
       .post('/api/v1/super-admin/runtime-control/framework-packages')
       .set('Authorization', `Bearer ${token}`)
-      .set('X-Step-Up-Token', STEP_UP_TOKEN)
       .send({
         frameworkKey: 'VMF',
         frameworkName: 'Value Management Framework',
@@ -539,7 +484,6 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     const latestFreshnessRes = await request
       .post('/api/v1/super-admin/runtime-control/framework-packages')
       .set('Authorization', `Bearer ${token}`)
-      .set('X-Step-Up-Token', STEP_UP_TOKEN)
       .send({
         frameworkKey: 'VMF',
         frameworkName: 'Value Management Framework',
@@ -581,7 +525,6 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     const res = await request
       .post('/api/v1/super-admin/runtime-control/framework-packages')
       .set('Authorization', `Bearer ${token}`)
-      .set('X-Step-Up-Token', STEP_UP_TOKEN)
       .send({
         frameworkKey: 'VMF',
         frameworkName: 'Value Management Framework',
@@ -602,7 +545,6 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     const res = await request
       .post('/api/v1/super-admin/runtime-control/framework-packages')
       .set('Authorization', `Bearer ${token}`)
-      .set('X-Step-Up-Token', STEP_UP_TOKEN)
       .send({
         frameworkKey: 'VMF',
         frameworkName: 'Value Management Framework',
@@ -677,7 +619,6 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     const res = await request
       .patch(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}`)
       .set('Authorization', `Bearer ${token}`)
-      .set('X-Step-Up-Token', STEP_UP_TOKEN)
       .send({
         status: 'ACTIVE',
       })
@@ -697,7 +638,6 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     const res = await request
       .patch(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}`)
       .set('Authorization', `Bearer ${token}`)
-      .set('X-Step-Up-Token', STEP_UP_TOKEN)
       .send({
         customerAccessMode: 'SELECTED_CUSTOMERS',
       })
@@ -717,7 +657,6 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     const res = await request
       .patch(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}`)
       .set('Authorization', `Bearer ${token}`)
-      .set('X-Step-Up-Token', STEP_UP_TOKEN)
       .send({
         description: 'Updated framework package description',
         compatibleWorkflowKeys: ['vmf-baseline', 'vmf-publish'],
@@ -743,7 +682,6 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     const res = await request
       .post(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/activate`)
       .set('Authorization', `Bearer ${token}`)
-      .set('X-Step-Up-Token', STEP_UP_TOKEN)
 
     expect(res.status).toBe(409)
     expect(res.body.error.details.reason).toBe('FRAMEWORK_PACKAGE_ACTIVATION_REQUIRES_VALIDATED')
@@ -770,7 +708,6 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     const res = await request
       .post(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/activate`)
       .set('Authorization', `Bearer ${token}`)
-      .set('X-Step-Up-Token', STEP_UP_TOKEN)
 
     expect(res.status).toBe(200)
     expect(frameworkPackage.save).toHaveBeenCalled()

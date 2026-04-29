@@ -427,7 +427,6 @@ export const createFrameworkPackage = async (req, res, next) => {
         requiredSkillIds: frameworkPackage.requiredSkillIds,
         capabilities: frameworkPackage.capabilities,
         validationRules: frameworkPackage.validationRules,
-        stepUpVerified: true,
       },
     })
 
@@ -613,7 +612,6 @@ export const updateFrameworkPackage = async (req, res, next) => {
     await populateFrameworkPackage(frameworkPackage)
 
     if (Object.keys(diff).length > 0) {
-      diff.stepUpVerified = true
       await auditService.logFromRequest(req, {
         action: auditService.AUDIT_ACTIONS.FRAMEWORK_PACKAGE_UPDATED,
         resourceType: auditService.RESOURCE_TYPES.FrameworkPackage,
@@ -735,7 +733,6 @@ export const activateFrameworkPackage = async (req, res, next) => {
         version: frameworkPackage.version,
         previousActivePackageIds,
         activatedAt: frameworkPackage.activatedAt,
-        stepUpVerified: true,
       },
     })
 
