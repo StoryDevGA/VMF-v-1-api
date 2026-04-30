@@ -415,6 +415,9 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     expect(res.body.data.version).toBe('2.3.1')
     expect(res.body.data.packageKey).toBe('vmf-2-3-1')
     expect(res.body.data.sections[0].sectionKey).toBe('overview')
+    expect(res.body.data.stateModelKey).toBeNull()
+    expect(res.body.data.stateModelVersion).toBeNull()
+    expect(res.body.data.stateModelMode).toBe('INTERNAL')
     expect(res.body.data.availableOutputKeys).toContain('board-summary')
     expect(res.body.data.updatedBy.id).toBe(SUPER_ADMIN_ID)
     expect(FrameworkPackage.prototype.save).toHaveBeenCalled()
@@ -613,6 +616,9 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
           },
         ],
         uiContractKey: 'vmf-ui-contract-v1',
+        stateModelKey: 'vmf-state-model-v2-5-0',
+        stateModelVersion: '2.5.0',
+        stateModelMode: 'EXTERNAL',
       })
 
     expect(res.status).toBe(201)
@@ -621,6 +627,9 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     expect(res.body.data.validationBindings[0].trigger).toBe('ON_SUBMIT')
     expect(res.body.data.workflowBindings[0].executionContext).toBe('ON_SUBMIT')
     expect(res.body.data.uiContractKey).toBe('vmf-ui-contract-v1')
+    expect(res.body.data.stateModelKey).toBe('vmf-state-model-v2-5-0')
+    expect(res.body.data.stateModelVersion).toBe('2.5.0')
+    expect(res.body.data.stateModelMode).toBe('EXTERNAL')
   })
 
   test('POST /api/v1/super-admin/runtime-control/framework-packages rejects missing UI Contract references', async () => {
@@ -791,12 +800,18 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
       .set('Authorization', `Bearer ${token}`)
       .send({
         description: 'Updated framework package description',
+        stateModelKey: 'vmf-state-model-v2-3-1',
+        stateModelVersion: '2.3.1',
+        stateModelMode: 'EXTERNAL',
         compatibleWorkflowKeys: ['vmf-baseline', 'vmf-publish'],
       })
 
     expect(res.status).toBe(200)
     expect(frameworkPackage.save).toHaveBeenCalled()
     expect(res.body.data.description).toBe('Updated framework package description')
+    expect(res.body.data.stateModelKey).toBe('vmf-state-model-v2-3-1')
+    expect(res.body.data.stateModelVersion).toBe('2.3.1')
+    expect(res.body.data.stateModelMode).toBe('EXTERNAL')
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'FRAMEWORK_PACKAGE_UPDATED',
       resourceType: 'FrameworkPackage',

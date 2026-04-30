@@ -70,6 +70,11 @@ export const FRAMEWORK_PACKAGE_STATE_MODELS = Object.freeze({
   FREEFORM: 'FREEFORM',
 })
 
+export const FRAMEWORK_PACKAGE_STATE_MODEL_MODES = Object.freeze({
+  INTERNAL: 'INTERNAL',
+  EXTERNAL: 'EXTERNAL',
+})
+
 export const FRAMEWORK_PACKAGE_EVALUATION_MODES = Object.freeze({
   POLICY_DRIVEN: 'POLICY_DRIVEN',
   VALIDATION_FIRST: 'VALIDATION_FIRST',
@@ -120,6 +125,15 @@ const stringTokenField = {
   trim: true,
   lowercase: true,
   maxlength: 120,
+  match: [tokenPattern, 'Value must use lowercase letters, numbers, or hyphens'],
+}
+
+const nullableStringTokenField = {
+  type: String,
+  trim: true,
+  lowercase: true,
+  maxlength: 120,
+  default: null,
   match: [tokenPattern, 'Value must use lowercase letters, numbers, or hyphens'],
 }
 
@@ -501,6 +515,18 @@ const frameworkPackageSchema = new mongoose.Schema(
       ...stringTokenField,
       default: '',
     },
+    stateModelKey: nullableStringTokenField,
+    stateModelVersion: {
+      type: String,
+      trim: true,
+      maxlength: 50,
+      default: null,
+    },
+    stateModelMode: {
+      type: String,
+      enum: Object.values(FRAMEWORK_PACKAGE_STATE_MODEL_MODES),
+      default: FRAMEWORK_PACKAGE_STATE_MODEL_MODES.INTERNAL,
+    },
     availableOutputKeys: [stringTokenField],
     defaultOutputStyles: [stringTokenField],
     allowCustomerOutputDefinitions: {
@@ -747,6 +773,22 @@ frameworkPackageSchema.pre('validate', function normalizeFrameworkPackage(next) 
 
   if (this.isNew || this.isModified('uiContractKey')) {
     this.uiContractKey = String(this.uiContractKey || '').trim().toLowerCase()
+  }
+
+  if (this.isNew || this.isModified('stateModelKey')) {
+    const stateModelKey = String(this.stateModelKey || '').trim().toLowerCase()
+    this.stateModelKey = stateModelKey || null
+  }
+
+  if (this.isNew || this.isModified('stateModelVersion')) {
+    const stateModelVersion = String(this.stateModelVersion || '').trim()
+    this.stateModelVersion = stateModelVersion || null
+  }
+
+  if (this.isNew || this.isModified('stateModelMode')) {
+    this.stateModelMode = String(this.stateModelMode || FRAMEWORK_PACKAGE_STATE_MODEL_MODES.INTERNAL)
+      .trim()
+      .toUpperCase()
   }
 
   if (this.isNew || this.isModified('compatibleWorkflowKeys')) {

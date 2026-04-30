@@ -11,6 +11,7 @@ import {
   FRAMEWORK_PACKAGE_RETRY_POLICIES,
   FRAMEWORK_PACKAGE_SCOPES,
   FRAMEWORK_PACKAGE_SECTION_DATA_TYPES,
+  FRAMEWORK_PACKAGE_STATE_MODEL_MODES,
   FRAMEWORK_PACKAGE_STATE_MODELS,
   FRAMEWORK_PACKAGE_STATUSES,
   FRAMEWORK_PACKAGE_TYPES,
@@ -59,6 +60,41 @@ const optionalTokenSchema = z
     'Value must use lowercase letters, numbers, or hyphens',
   )
   .default('')
+
+const nullableTokenSchema = z.preprocess(
+  (value) => {
+    const normalized = String(value ?? '').trim().toLowerCase()
+    return normalized || null
+  },
+  z.union([
+    z
+      .string()
+      .max(120, 'Value must be 120 characters or fewer')
+      .refine(
+        (value) => tokenRegex.test(value),
+        'Value must use lowercase letters, numbers, or hyphens',
+      ),
+    z.null(),
+  ]).default(null),
+)
+
+const nullableStringSchema = z.preprocess(
+  (value) => {
+    const normalized = String(value ?? '').trim()
+    return normalized || null
+  },
+  z.union([
+    z.string().max(50, 'Value must be 50 characters or fewer'),
+    z.null(),
+  ]).default(null),
+)
+
+const stateModelModeSchema = z.preprocess(
+  (value) => String(value ?? FRAMEWORK_PACKAGE_STATE_MODEL_MODES.INTERNAL).trim().toUpperCase()
+    || FRAMEWORK_PACKAGE_STATE_MODEL_MODES.INTERNAL,
+  z.enum(Object.values(FRAMEWORK_PACKAGE_STATE_MODEL_MODES))
+    .default(FRAMEWORK_PACKAGE_STATE_MODEL_MODES.INTERNAL),
+)
 
 const customerIdListSchema = z
   .array(
@@ -373,6 +409,9 @@ const createFrameworkPackageSchema = z.object({
   validationBindings: validationBindingsSchema.default([]),
   workflowBindings: workflowBindingsSchema.default([]),
   uiContractKey: optionalTokenSchema,
+  stateModelKey: nullableTokenSchema,
+  stateModelVersion: nullableStringSchema,
+  stateModelMode: stateModelModeSchema,
   availableOutputKeys: tokenListSchema.default([]),
   defaultOutputStyles: tokenListSchema.default([]),
   allowCustomerOutputDefinitions: z.boolean().default(false),
@@ -457,6 +496,9 @@ const updateFrameworkPackageSchema = z.object({
   validationBindings: validationBindingsSchema.optional(),
   workflowBindings: workflowBindingsSchema.optional(),
   uiContractKey: optionalTokenSchema.optional(),
+  stateModelKey: nullableTokenSchema.optional(),
+  stateModelVersion: nullableStringSchema.optional(),
+  stateModelMode: stateModelModeSchema.optional(),
   availableOutputKeys: tokenListSchema.optional(),
   defaultOutputStyles: tokenListSchema.optional(),
   allowCustomerOutputDefinitions: z.boolean().optional(),
