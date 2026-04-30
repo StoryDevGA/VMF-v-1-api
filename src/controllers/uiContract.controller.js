@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from 'node:util'
 import UIContract, { UI_CONTRACT_STATUSES } from '../models/UIContract.js'
-import FrameworkPackage from '../models/FrameworkPackage.js'
+import FrameworkPackage, { FRAMEWORK_PACKAGE_STATUSES } from '../models/FrameworkPackage.js'
 import auditService from '../services/auditService.js'
 import {
   buildInactiveFrameworkKeyMessage,
@@ -74,11 +74,16 @@ const buildListFilter = ({ q, status, frameworkKey }) => {
       { description: regex },
       { frameworkKeys: regex },
       { compatibilityTags: regex },
+      { sourcePackageKey: regex },
+      { sourcePackageVersion: regex },
+      { sourceFrameworkKey: regex },
       { 'sections.sectionKey': regex },
+      { 'sections.runtimePath': regex },
       { 'sections.label': regex },
       { 'lifecycleStages.stageKey': regex },
       { 'lifecycleStages.label': regex },
       { 'actions.actionKey': regex },
+      { 'actions.governedAction': regex },
       { 'actions.buttonLabel': regex },
     ]
   }
@@ -115,6 +120,82 @@ const validateFrameworkKeys = async (frameworkKeys = []) => {
     details.frameworkKeys = buildInactiveFrameworkKeyMessage(inactiveKeys)
   }
   return details
+}
+
+const validateSourcePackage = async ({
+  sourcePackageKey = '',
+  sourcePackageVersion = '',
+  sourceFrameworkKey = '',
+  frameworkKeys = [],
+  status = UI_CONTRACT_STATUSES.DRAFT,
+}) => {
+  const normalizedSourcePackageKey = String(sourcePackageKey || '').trim().toLowerCase()
+  const normalizedSourceFrameworkKey = String(sourceFrameworkKey || '').trim().toUpperCase()
+  const normalizedSourcePackageVersion = String(sourcePackageVersion || '').trim()
+  if (!normalizedSourcePackageKey && !normalizedSourceFrameworkKey && !normalizedSourcePackageVersion) {
+    return {}
+  }
+
+  let sourcePackage = null
+
+  if (normalizedSourcePackageKey) {
+    sourcePackage = await FrameworkPackage.findOne({ packageKey: normalizedSourcePackageKey })
+      .select('packageKey version frameworkKey status')
+      .lean()
+  }
+
+  if (!sourcePackage && normalizedSourceFrameworkKey && normalizedSourcePackageVersion) {
+    sourcePackage = await FrameworkPackage.findOne({
+      frameworkKey: normalizedSourceFrameworkKey,
+      version: normalizedSourcePackageVersion,
+    })
+      .select('packageKey version frameworkKey status')
+      .lean()
+  }
+
+  if (!sourcePackage) {
+    const packageReference = normalizedSourcePackageKey
+      || [normalizedSourceFrameworkKey, normalizedSourcePackageVersion].filter(Boolean).join(' ')
+    return { sourcePackageKey: `Framework Package "${packageReference}" was not found.` }
+  }
+
+  const allowedStatuses = new Set([
+    FRAMEWORK_PACKAGE_STATUSES.VALIDATED,
+    FRAMEWORK_PACKAGE_STATUSES.ACTIVE,
+  ])
+  if (status === UI_CONTRACT_STATUSES.DRAFT) {
+    allowedStatuses.add(FRAMEWORK_PACKAGE_STATUSES.DRAFT)
+  }
+
+  if (!allowedStatuses.has(sourcePackage.status)) {
+    return {
+      sourcePackageKey:
+        `Framework Package "${normalizedSourcePackageKey}" must be VALIDATED or ACTIVE${status === UI_CONTRACT_STATUSES.DRAFT ? ', or DRAFT while the UI Contract is DRAFT' : ''}.`,
+    }
+  }
+
+  if (normalizedSourceFrameworkKey && normalizedSourceFrameworkKey !== sourcePackage.frameworkKey) {
+    return {
+      sourceFrameworkKey: `Source framework key must match package framework "${sourcePackage.frameworkKey}".`,
+    }
+  }
+
+  const normalizedFrameworkKeys = Array.isArray(frameworkKeys)
+    ? frameworkKeys.map((key) => String(key || '').trim().toUpperCase())
+    : []
+  if (!normalizedFrameworkKeys.includes(sourcePackage.frameworkKey)) {
+    return {
+      sourcePackageKey: `Framework Package "${normalizedSourcePackageKey}" is not compatible with selected framework keys.`,
+    }
+  }
+
+  if (normalizedSourcePackageVersion && normalizedSourcePackageVersion !== sourcePackage.version) {
+    return {
+      sourcePackageVersion: `Source package version must match package version "${sourcePackage.version}".`,
+    }
+  }
+
+  return {}
 }
 
 const findUIContractById = (uiContractId) => {
@@ -163,6 +244,17 @@ export const createUIContract = async (req, res, next) => {
     const frameworkDetails = await validateFrameworkKeys(req.body.frameworkKeys)
     if (Object.keys(frameworkDetails).length > 0) {
       return sendValidationFailed(res, req, frameworkDetails)
+    }
+
+    const sourcePackageDetails = await validateSourcePackage({
+      sourcePackageKey: req.body.sourcePackageKey,
+      sourcePackageVersion: req.body.sourcePackageVersion,
+      sourceFrameworkKey: req.body.sourceFrameworkKey,
+      frameworkKeys: req.body.frameworkKeys,
+      status: req.body.status,
+    })
+    if (Object.keys(sourcePackageDetails).length > 0) {
+      return sendValidationFailed(res, req, sourcePackageDetails)
     }
 
     const existing = await UIContract.findOne({ uiContractKey: req.body.uiContractKey }).select('_id')
@@ -263,6 +355,17 @@ export const updateUIContract = async (req, res, next) => {
       return sendValidationFailed(res, req, frameworkDetails)
     }
 
+    const sourcePackageDetails = await validateSourcePackage({
+      sourcePackageKey: req.body.sourcePackageKey ?? uiContract.sourcePackageKey,
+      sourcePackageVersion: req.body.sourcePackageVersion ?? uiContract.sourcePackageVersion,
+      sourceFrameworkKey: req.body.sourceFrameworkKey ?? uiContract.sourceFrameworkKey,
+      frameworkKeys: nextFrameworkKeys,
+      status: req.body.status ?? uiContract.status,
+    })
+    if (Object.keys(sourcePackageDetails).length > 0) {
+      return sendValidationFailed(res, req, sourcePackageDetails)
+    }
+
     const diff = {}
     const fields = [
       'name',
@@ -273,6 +376,9 @@ export const updateUIContract = async (req, res, next) => {
       'deprecatedInVersion',
       'compatibilityTags',
       'compatibilityMode',
+      'sourcePackageKey',
+      'sourcePackageVersion',
+      'sourceFrameworkKey',
       'sections',
       'lifecycleStages',
       'actions',

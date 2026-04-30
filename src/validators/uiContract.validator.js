@@ -40,8 +40,26 @@ const optionalVersionSchema = z
   .default('')
   .refine((value) => !value || semverRegex.test(value), 'Version must use semantic version format.')
 
+const optionalKeySchema = z
+  .string()
+  .trim()
+  .max(140)
+  .default('')
+  .transform((value) => value.toLowerCase())
+  .refine((value) => !value || keyRegex.test(value), 'Value must use lowercase letters, numbers, or hyphens.')
+
+const optionalFrameworkKeySchema = z
+  .string()
+  .trim()
+  .max(100)
+  .default('')
+  .transform((value) => value.toUpperCase())
+  .refine((value) => !value || frameworkKeyRegex.test(value), 'Framework key must use uppercase letters, numbers, or underscores')
+
 const sectionSchema = z.object({
   sectionKey: z.string().trim().min(1).max(140),
+  runtimePath: z.string().trim().max(240).default(''),
+  sourcePackageKey: optionalKeySchema,
   label: z.string().trim().min(1, 'Section label is required.').max(140),
   shortLabel: z.string().trim().max(80).default(''),
   helpText: z.string().trim().max(500).default(''),
@@ -50,6 +68,11 @@ const sectionSchema = z.object({
   isVisible: z.boolean().default(true),
   isEditable: z.boolean().default(true),
   isRequiredDisplay: z.boolean().default(false),
+  isReadOnlyDisplay: z.boolean().default(false),
+  isCollapsedByDefault: z.boolean().default(false),
+  sectionGroup: z.string().trim().max(120).default(''),
+  iconKey: z.string().trim().max(120).default(''),
+  presentationKey: z.string().trim().max(120).default(''),
 })
 
 const lifecycleStageSchema = z.object({
@@ -59,18 +82,26 @@ const lifecycleStageSchema = z.object({
   badgeLabel: z.string().trim().max(80).default(''),
   displayOrder: z.number().int().min(0).max(10000).default(0),
   isVisible: z.boolean().default(true),
+  badgePresentationKey: z.string().trim().max(120).default(''),
 })
 
 const actionSchema = z.object({
   actionKey: z.string().trim().min(1).max(120).transform((value) => value.toUpperCase()),
+  governedAction: z.string().trim().max(120).default('').transform((value) => value.toUpperCase()),
   buttonLabel: z.string().trim().min(1, 'Button label is required.').max(120),
+  confirmationTitle: z.string().trim().max(160).default(''),
   confirmationMessage: z.string().trim().max(500).default(''),
   successMessage: z.string().trim().max(250).default(''),
   failureMessage: z.string().trim().max(250).default(''),
+  loadingMessage: z.string().trim().max(250).default(''),
   displayOrder: z.number().int().min(0).max(10000).default(0),
   isVisible: z.boolean().default(true),
   requiresConfirmation: z.boolean().default(false),
-})
+  presentationKey: z.string().trim().max(120).default(''),
+}).transform((value) => ({
+  ...value,
+  governedAction: value.governedAction || value.actionKey,
+}))
 
 const assertUnique = (items, ctx, getKey, path, message) => {
   const seen = new Set()
@@ -88,16 +119,45 @@ const assertUnique = (items, ctx, getKey, path, message) => {
   })
 }
 
+const assertUniqueVisibleOrder = (items, ctx, path, message) => {
+  const seen = new Set()
+  items.forEach((item, index) => {
+    if (item?.isVisible === false) return
+    const key = String(item?.displayOrder ?? '').trim()
+    if (!key) return
+    if (seen.has(key)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [index, path],
+        message,
+      })
+    }
+    seen.add(key)
+  })
+}
+
 const sectionsSchema = z.array(sectionSchema).max(100).default([]).superRefine((items, ctx) => {
   assertUnique(items, ctx, (item) => String(item.sectionKey).trim().toLowerCase(), 'sectionKey', 'Section keys must be unique.')
+  assertUniqueVisibleOrder(items, ctx, 'displayOrder', 'Visible section display order values must be unique.')
+  items.forEach((item, index) => {
+    if (item.isVisible !== false && !String(item.label || '').trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [index, 'label'],
+        message: 'Visible sections require a label.',
+      })
+    }
+  })
 })
 
 const lifecycleStagesSchema = z.array(lifecycleStageSchema).max(100).default([]).superRefine((items, ctx) => {
   assertUnique(items, ctx, (item) => item.stageKey, 'stageKey', 'Lifecycle stage keys must be unique.')
+  assertUniqueVisibleOrder(items, ctx, 'displayOrder', 'Visible lifecycle display order values must be unique.')
 })
 
 const actionsSchema = z.array(actionSchema).max(100).default([]).superRefine((items, ctx) => {
   assertUnique(items, ctx, (item) => item.actionKey, 'actionKey', 'Action keys must be unique.')
+  assertUniqueVisibleOrder(items, ctx, 'displayOrder', 'Visible action display order values must be unique.')
 })
 
 const createUIContractSchema = z.object({
@@ -111,6 +171,9 @@ const createUIContractSchema = z.object({
   deprecatedInVersion: optionalVersionSchema,
   compatibilityTags: tokenListSchema,
   compatibilityMode: z.enum(Object.values(UI_CONTRACT_COMPATIBILITY_MODES)).default(UI_CONTRACT_COMPATIBILITY_MODES.INHERITED_MINOR),
+  sourcePackageKey: optionalKeySchema,
+  sourcePackageVersion: optionalVersionSchema,
+  sourceFrameworkKey: optionalFrameworkKeySchema,
   sections: sectionsSchema,
   lifecycleStages: lifecycleStagesSchema,
   actions: actionsSchema,

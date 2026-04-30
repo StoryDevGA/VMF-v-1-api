@@ -63,6 +63,12 @@ const buildFrameworkPackageQueryChain = (rows) => ({
   lean: jest.fn().mockResolvedValue(rows),
 })
 
+const buildFrameworkPackageFindOneChain = (row) => ({
+  select: jest.fn().mockReturnValue({
+    lean: jest.fn().mockResolvedValue(row),
+  }),
+})
+
 let app
 let request
 let tokenService
@@ -155,6 +161,7 @@ beforeEach(() => {
     { frameworkKey: 'VMF', status: 'ACTIVE' },
   ]))
   FrameworkPackage.find = jest.fn().mockReturnValue(buildFrameworkPackageQueryChain([]))
+  FrameworkPackage.findOne = jest.fn().mockReturnValue(buildFrameworkPackageFindOneChain(null))
   RuntimePathRegistry.find = jest.fn().mockReturnValue(buildSelectLeanChain([]))
   UIContract.findOne = jest.fn().mockReturnValue({
     select: jest.fn().mockResolvedValue(null),
@@ -197,6 +204,7 @@ describe('UI Contract Routes', () => {
         sections: [
           {
             sectionKey: 'customer_problem',
+            runtimePath: 'framework_state.sections.customer_problem',
             label: 'Customer Problem',
             helpText: 'Describe the core customer problem.',
             displayOrder: 10,
@@ -208,11 +216,42 @@ describe('UI Contract Routes', () => {
     expect(res.status).toBe(201)
     expect(res.body.data.uiContractKey).toBe('vmf-ui-contract-v1')
     expect(res.body.data.sections[0].label).toBe('Customer Problem')
-    expect(res.body.data.sections[0]).not.toHaveProperty('runtimePath')
+    expect(res.body.data.sections[0].runtimePath).toBe('framework_state.sections.customer_problem')
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'UI_CONTRACT_CREATED',
       resourceType: 'UIContract',
     }))
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/ui-contracts accepts legacy package lookup by framework and version', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    FrameworkPackage.findOne
+      .mockReturnValueOnce(buildFrameworkPackageFindOneChain(null))
+      .mockReturnValueOnce(buildFrameworkPackageFindOneChain({
+        packageKey: '',
+        frameworkKey: 'VMF',
+        version: '2.3.1',
+        status: 'ACTIVE',
+      }))
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/ui-contracts')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        uiContractKey: 'vmf-ui-contract-v1',
+        name: 'VMF UI Contract',
+        description: 'Presentation contract for VMF.',
+        status: 'ACTIVE',
+        frameworkKeys: ['VMF'],
+        sourcePackageKey: 'vmf-2-3-1',
+        sourcePackageVersion: '2.3.1',
+        sourceFrameworkKey: 'VMF',
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data.sourcePackageKey).toBe('vmf-2-3-1')
+    expect(FrameworkPackage.findOne).toHaveBeenNthCalledWith(1, { packageKey: 'vmf-2-3-1' })
+    expect(FrameworkPackage.findOne).toHaveBeenNthCalledWith(2, { frameworkKey: 'VMF', version: '2.3.1' })
   })
 
   test('GET /api/v1/super-admin/runtime-control/ui-contracts/:uiContractId/dependencies returns referencing packages', async () => {

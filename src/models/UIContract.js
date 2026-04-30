@@ -48,6 +48,20 @@ const uiContractSectionSchema = new mongoose.Schema(
       trim: true,
       maxlength: 140,
     },
+    runtimePath: {
+      type: String,
+      trim: true,
+      maxlength: 240,
+      default: '',
+    },
+    sourcePackageKey: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      maxlength: 140,
+      default: '',
+      match: [keyPattern, 'Source package key must use lowercase letters, numbers, or hyphens.'],
+    },
     label: {
       type: String,
       required: true,
@@ -91,6 +105,33 @@ const uiContractSectionSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    isReadOnlyDisplay: {
+      type: Boolean,
+      default: false,
+    },
+    isCollapsedByDefault: {
+      type: Boolean,
+      default: false,
+    },
+    sectionGroup: {
+      type: String,
+      trim: true,
+      maxlength: 120,
+      default: '',
+    },
+    iconKey: {
+      type: String,
+      trim: true,
+      maxlength: 120,
+      default: '',
+    },
+    presentationKey: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      maxlength: 120,
+      default: '',
+    },
   },
   { _id: false },
 )
@@ -133,6 +174,13 @@ const uiContractLifecycleStageSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    badgePresentationKey: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      maxlength: 120,
+      default: '',
+    },
   },
   { _id: false },
 )
@@ -146,11 +194,27 @@ const uiContractActionSchema = new mongoose.Schema(
       uppercase: true,
       maxlength: 120,
     },
+    governedAction: {
+      type: String,
+      required: true,
+      trim: true,
+      uppercase: true,
+      maxlength: 120,
+      default: function defaultGovernedAction() {
+        return this.actionKey
+      },
+    },
     buttonLabel: {
       type: String,
       required: true,
       trim: true,
       maxlength: 120,
+    },
+    confirmationTitle: {
+      type: String,
+      trim: true,
+      maxlength: 160,
+      default: '',
     },
     confirmationMessage: {
       type: String,
@@ -170,6 +234,12 @@ const uiContractActionSchema = new mongoose.Schema(
       maxlength: 250,
       default: '',
     },
+    loadingMessage: {
+      type: String,
+      trim: true,
+      maxlength: 250,
+      default: '',
+    },
     displayOrder: {
       type: Number,
       min: 0,
@@ -184,6 +254,13 @@ const uiContractActionSchema = new mongoose.Schema(
     requiresConfirmation: {
       type: Boolean,
       default: false,
+    },
+    presentationKey: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      maxlength: 120,
+      default: '',
     },
   },
   { _id: false },
@@ -280,6 +357,39 @@ const uiContractSchema = new mongoose.Schema(
       enum: Object.values(UI_CONTRACT_COMPATIBILITY_MODES),
       default: UI_CONTRACT_COMPATIBILITY_MODES.INHERITED_MINOR,
     },
+    sourcePackageKey: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      maxlength: 140,
+      default: '',
+      match: [keyPattern, 'Source package key must use lowercase letters, numbers, or hyphens.'],
+    },
+    sourcePackageVersion: {
+      type: String,
+      trim: true,
+      maxlength: 50,
+      default: '',
+      validate: {
+        validator(value) {
+          return !value || semverPattern.test(String(value).trim())
+        },
+        message: 'Source package version must use semantic version format.',
+      },
+    },
+    sourceFrameworkKey: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      maxlength: 100,
+      default: '',
+      validate: {
+        validator(value) {
+          return !value || frameworkKeyPattern.test(String(value).trim().toUpperCase())
+        },
+        message: 'Source framework key must use uppercase letters, numbers, or underscores.',
+      },
+    },
     sections: [uiContractSectionSchema],
     lifecycleStages: [uiContractLifecycleStageSchema],
     actions: [uiContractActionSchema],
@@ -357,6 +467,18 @@ uiContractSchema.pre('validate', function normalizeUIContract(next) {
     this.compatibilityTags = normalizeTokenList(this.compatibilityTags)
   }
 
+  if (this.isNew || this.isModified('sourcePackageKey')) {
+    this.sourcePackageKey = String(this.sourcePackageKey || '').trim().toLowerCase()
+  }
+
+  if (this.isNew || this.isModified('sourcePackageVersion')) {
+    this.sourcePackageVersion = String(this.sourcePackageVersion || '').trim()
+  }
+
+  if (this.isNew || this.isModified('sourceFrameworkKey')) {
+    this.sourceFrameworkKey = String(this.sourceFrameworkKey || '').trim().toUpperCase()
+  }
+
   const ensureUnique = (items, getKey, path, message) => {
     if (!Array.isArray(items)) return
     const seen = new Set()
@@ -377,10 +499,22 @@ uiContractSchema.pre('validate', function normalizeUIContract(next) {
     'Section keys must be unique.',
   )
   ensureUnique(
+    this.sections,
+    (section) => section?.isVisible === false ? '' : String(section?.displayOrder ?? '').trim(),
+    'sections',
+    'Visible section display order values must be unique.',
+  )
+  ensureUnique(
     this.lifecycleStages,
     (stage) => String(stage?.stageKey || '').trim().toUpperCase(),
     'lifecycleStages',
     'Lifecycle stage keys must be unique.',
+  )
+  ensureUnique(
+    this.lifecycleStages,
+    (stage) => stage?.isVisible === false ? '' : String(stage?.displayOrder ?? '').trim(),
+    'lifecycleStages',
+    'Visible lifecycle display order values must be unique.',
   )
   ensureUnique(
     this.actions,
@@ -388,6 +522,20 @@ uiContractSchema.pre('validate', function normalizeUIContract(next) {
     'actions',
     'Action keys must be unique.',
   )
+  ensureUnique(
+    this.actions,
+    (action) => action?.isVisible === false ? '' : String(action?.displayOrder ?? '').trim(),
+    'actions',
+    'Visible action display order values must be unique.',
+  )
+
+  if (Array.isArray(this.actions)) {
+    this.actions.forEach((action) => {
+      action.governedAction = String(action?.governedAction || action?.actionKey || '')
+        .trim()
+        .toUpperCase()
+    })
+  }
 
   next()
 })
