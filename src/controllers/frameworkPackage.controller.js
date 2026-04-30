@@ -8,6 +8,11 @@ import FrameworkPackage, {
 import ValidationRegistry, { VALIDATION_REGISTRY_STATUSES } from '../models/ValidationRegistry.js'
 import WorkflowPolicy, { WORKFLOW_POLICY_STATUSES } from '../models/WorkflowPolicy.js'
 import UIContract, { UI_CONTRACT_STATUSES } from '../models/UIContract.js'
+import RuntimePathRegistry, {
+  RUNTIME_PATH_REGISTRY_CATEGORIES,
+  RUNTIME_PATH_REGISTRY_SCOPES,
+  RUNTIME_PATH_REGISTRY_STATUSES,
+} from '../models/RuntimePathRegistry.js'
 import auditService from '../services/auditService.js'
 import {
   buildUnknownFrameworkKeyMessage,
@@ -181,6 +186,7 @@ const buildListFilter = ({ q, status, frameworkKey }) => {
       { customerAccessMode: regex },
       { assignedCustomerIds: regex },
       { 'sections.sectionKey': regex },
+      { 'sections.runtimePath': regex },
       { 'sections.validationKeys': regex },
       { 'validationConfig.validationKey': regex },
       { 'workflowPolicyConfig.policyKey': regex },
@@ -211,6 +217,69 @@ const buildUnsupportedWorkflowKeyMessage = (frameworkKey, workflowKeys = []) => 
   }
 
   return `Workflow keys ${workflowKeys.join(', ')} are not supported by framework "${frameworkKey}".`
+}
+
+const normalizeSectionKey = (value) => String(value || '').trim().toLowerCase()
+
+const normalizeRuntimePath = (value) => String(value || '').trim()
+
+const getStructuralSections = (sections = []) =>
+  Array.isArray(sections) ? sections : []
+
+const validateSectionRuntimePaths = async ({ sections = [], frameworkKey }) => {
+  const runtimePaths = [
+    ...new Set(
+      getStructuralSections(sections)
+        .map((section) => normalizeRuntimePath(section?.runtimePath))
+        .filter(Boolean),
+    ),
+  ]
+
+  if (runtimePaths.length === 0) return null
+
+  const rows = await RuntimePathRegistry.find({ pathKey: { $in: runtimePaths } })
+    .select('pathKey status frameworkKeys scope category')
+    .lean()
+  const byPath = new Map(rows.map((row) => [row.pathKey, row]))
+  const invalidRuntimePaths = runtimePaths.filter((runtimePath) => {
+    const row = byPath.get(runtimePath)
+    if (!row) return true
+    if (row.status !== RUNTIME_PATH_REGISTRY_STATUSES.ACTIVE) return true
+    if (row.scope !== RUNTIME_PATH_REGISTRY_SCOPES.FRAMEWORK_STATE) return true
+    if (row.category !== RUNTIME_PATH_REGISTRY_CATEGORIES.SECTION) return true
+    if (!runtimePath.startsWith('framework_state.sections.')) return true
+    return !Array.isArray(row.frameworkKeys) || !row.frameworkKeys.includes(frameworkKey)
+  })
+
+  if (invalidRuntimePaths.length === 0) return null
+
+  return `Section runtime paths must be ACTIVE, FRAMEWORK_STATE/SECTION, and compatible with "${frameworkKey}": ${invalidRuntimePaths.join(', ')}.`
+}
+
+const validateUIContractSectionAlignment = ({ sections = [], uiContract = null }) => {
+  if (!uiContract) return null
+
+  const packageSectionKeys = [
+    ...new Set(
+      getStructuralSections(sections)
+        .map((section) => normalizeSectionKey(section?.sectionKey))
+        .filter(Boolean),
+    ),
+  ]
+  if (packageSectionKeys.length === 0) return null
+
+  const uiContractSectionKeys = new Set(
+    getStructuralSections(uiContract.sections)
+      .map((section) => normalizeSectionKey(section?.sectionKey))
+      .filter(Boolean),
+  )
+  const missingSectionKeys = packageSectionKeys.filter(
+    (sectionKey) => !uiContractSectionKeys.has(sectionKey),
+  )
+
+  if (missingSectionKeys.length === 0) return null
+
+  return `UI Contract "${uiContract.uiContractKey}" is missing presentation mappings for package sections: ${missingSectionKeys.join(', ')}.`
 }
 
 const validateFrameworkPackageAccessRules = ({
@@ -262,6 +331,8 @@ const validateFrameworkPackageRegistryReferences = async ({
   workflowBindings = [],
   sections = [],
   uiContractKey = '',
+  validateSections = false,
+  validateUiContractSections = false,
 }) => {
   const details = {}
   const { missingKeys, registryByKey } = await resolveKnownFrameworkKeys([frameworkKey])
@@ -288,9 +359,6 @@ const validateFrameworkPackageRegistryReferences = async ({
     ...new Set([
       ...(validationConfig || []).map((item) => String(item?.validationKey || '').trim().toLowerCase()),
       ...(validationBindings || []).map((item) => String(item?.validationKey || '').trim().toLowerCase()),
-      ...(sections || []).flatMap((section) =>
-        (section?.validationKeys || []).map((validationKey) => String(validationKey || '').trim().toLowerCase()),
-      ),
     ].filter(Boolean)),
   ]
   if (validationKeys.length > 0) {
@@ -339,7 +407,7 @@ const validateFrameworkPackageRegistryReferences = async ({
   const normalizedUiContractKey = String(uiContractKey || '').trim().toLowerCase()
   if (normalizedUiContractKey) {
     const uiContract = await UIContract.findOne({ uiContractKey: normalizedUiContractKey })
-      .select('uiContractKey status frameworkKeys introducedInVersion deprecatedInVersion compatibilityMode')
+      .select('uiContractKey status frameworkKeys introducedInVersion deprecatedInVersion compatibilityMode sections.sectionKey')
       .lean()
 
     if (!uiContract) {
@@ -348,6 +416,20 @@ const validateFrameworkPackageRegistryReferences = async ({
       details.uiContractKey = `UI Contract "${normalizedUiContractKey}" must be ACTIVE.`
     } else if (!Array.isArray(uiContract.frameworkKeys) || !uiContract.frameworkKeys.includes(frameworkKey)) {
       details.uiContractKey = `UI Contract "${normalizedUiContractKey}" is not compatible with framework "${frameworkKey}".`
+    } else if (validateUiContractSections) {
+      const alignmentMessage = validateUIContractSectionAlignment({ sections, uiContract })
+      if (alignmentMessage) {
+        details.sections = alignmentMessage
+      }
+    }
+  }
+
+  if (validateSections) {
+    const runtimePathMessage = await validateSectionRuntimePaths({ sections, frameworkKey })
+    if (runtimePathMessage) {
+      details.sections = details.sections
+        ? `${details.sections} ${runtimePathMessage}`
+        : runtimePathMessage
     }
   }
 
@@ -396,7 +478,11 @@ export const createFrameworkPackage = async (req, res, next) => {
       return sendValidationFailed(res, req, accessRuleDetails)
     }
 
-    const validationDetails = await validateFrameworkPackageRegistryReferences(req.body)
+    const validationDetails = await validateFrameworkPackageRegistryReferences({
+      ...req.body,
+      validateSections: true,
+      validateUiContractSections: true,
+    })
     if (Object.keys(validationDetails).length > 0) {
       return sendValidationFailed(res, req, validationDetails)
     }
@@ -580,6 +666,11 @@ export const updateFrameworkPackage = async (req, res, next) => {
       workflowBindings: nextWorkflowBindings,
       sections: nextSections,
       uiContractKey: nextUiContractKey,
+      validateSections: req.body.sections !== undefined,
+      validateUiContractSections:
+        req.body.sections !== undefined
+        || req.body.uiContractKey !== undefined
+        || req.body.frameworkKey !== undefined,
     })
     if (Object.keys(validationDetails).length > 0) {
       return sendValidationFailed(res, req, validationDetails)

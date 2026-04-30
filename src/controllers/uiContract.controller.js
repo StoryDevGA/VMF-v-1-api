@@ -1,7 +1,6 @@
 import { isDeepStrictEqual } from 'node:util'
 import UIContract, { UI_CONTRACT_STATUSES } from '../models/UIContract.js'
 import FrameworkPackage from '../models/FrameworkPackage.js'
-import RuntimePathRegistry from '../models/RuntimePathRegistry.js'
 import auditService from '../services/auditService.js'
 import {
   buildInactiveFrameworkKeyMessage,
@@ -76,7 +75,6 @@ const buildListFilter = ({ q, status, frameworkKey }) => {
       { frameworkKeys: regex },
       { compatibilityTags: regex },
       { 'sections.sectionKey': regex },
-      { 'sections.runtimePath': regex },
       { 'sections.label': regex },
       { 'lifecycleStages.stageKey': regex },
       { 'lifecycleStages.label': regex },
@@ -117,30 +115,6 @@ const validateFrameworkKeys = async (frameworkKeys = []) => {
     details.frameworkKeys = buildInactiveFrameworkKeyMessage(inactiveKeys)
   }
   return details
-}
-
-const validateRuntimePaths = async ({ sections = [], frameworkKeys = [] }) => {
-  const runtimePaths = [...new Set(
-    sections
-      .map((section) => String(section?.runtimePath || '').trim())
-      .filter(Boolean),
-  )]
-  if (runtimePaths.length === 0) return {}
-
-  const rows = await RuntimePathRegistry.find({ pathKey: { $in: runtimePaths } })
-    .select('pathKey status frameworkKeys')
-    .lean()
-  const byPath = new Map(rows.map((row) => [row.pathKey, row]))
-  const invalid = runtimePaths.filter((pathKey) => {
-    const row = byPath.get(pathKey)
-    if (!row) return true
-    if (row.status !== 'ACTIVE') return true
-    return !frameworkKeys.some((frameworkKey) => (row.frameworkKeys || []).includes(frameworkKey))
-  })
-
-  return invalid.length > 0
-    ? { sections: `Runtime paths must be ACTIVE and compatible: ${invalid.join(', ')}.` }
-    : {}
 }
 
 const findUIContractById = (uiContractId) => {
@@ -189,11 +163,6 @@ export const createUIContract = async (req, res, next) => {
     const frameworkDetails = await validateFrameworkKeys(req.body.frameworkKeys)
     if (Object.keys(frameworkDetails).length > 0) {
       return sendValidationFailed(res, req, frameworkDetails)
-    }
-
-    const runtimePathDetails = await validateRuntimePaths(req.body)
-    if (Object.keys(runtimePathDetails).length > 0) {
-      return sendValidationFailed(res, req, runtimePathDetails)
     }
 
     const existing = await UIContract.findOne({ uiContractKey: req.body.uiContractKey }).select('_id')
@@ -292,14 +261,6 @@ export const updateUIContract = async (req, res, next) => {
     const frameworkDetails = await validateFrameworkKeys(nextFrameworkKeys)
     if (Object.keys(frameworkDetails).length > 0) {
       return sendValidationFailed(res, req, frameworkDetails)
-    }
-
-    const runtimePathDetails = await validateRuntimePaths({
-      sections: req.body.sections ?? uiContract.sections,
-      frameworkKeys: nextFrameworkKeys,
-    })
-    if (Object.keys(runtimePathDetails).length > 0) {
-      return sendValidationFailed(res, req, runtimePathDetails)
     }
 
     const diff = {}

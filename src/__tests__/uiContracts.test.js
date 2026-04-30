@@ -196,10 +196,11 @@ describe('UI Contract Routes', () => {
         introducedInVersion: '2.3.1',
         sections: [
           {
-            sectionKey: 'customer-problem',
+            sectionKey: 'customer_problem',
             label: 'Customer Problem',
             helpText: 'Describe the core customer problem.',
             displayOrder: 10,
+            isEditable: true,
           },
         ],
       })
@@ -207,6 +208,7 @@ describe('UI Contract Routes', () => {
     expect(res.status).toBe(201)
     expect(res.body.data.uiContractKey).toBe('vmf-ui-contract-v1')
     expect(res.body.data.sections[0].label).toBe('Customer Problem')
+    expect(res.body.data.sections[0]).not.toHaveProperty('runtimePath')
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'UI_CONTRACT_CREATED',
       resourceType: 'UIContract',

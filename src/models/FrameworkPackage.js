@@ -34,14 +34,6 @@ export const FRAMEWORK_PACKAGE_RETRY_POLICIES = Object.freeze({
   RETRY_WITH_BACKOFF: 'RETRY_WITH_BACKOFF',
 })
 
-export const FRAMEWORK_PACKAGE_SECTION_DATA_TYPES = Object.freeze({
-  STRING: 'STRING',
-  NUMBER: 'NUMBER',
-  BOOLEAN: 'BOOLEAN',
-  OBJECT: 'OBJECT',
-  ARRAY: 'ARRAY',
-})
-
 export const FRAMEWORK_PACKAGE_VALIDATION_TRIGGERS = Object.freeze({
   ON_SAVE: 'ON_SAVE',
   ON_SUBMIT: 'ON_SUBMIT',
@@ -83,6 +75,7 @@ export const FRAMEWORK_PACKAGE_EVALUATION_MODES = Object.freeze({
 const frameworkKeyPattern = /^[A-Z][A-Z0-9_]*$/
 const semverPattern = /^\d+\.\d+\.\d+$/
 const tokenPattern = /^[a-z][a-z0-9-]*$/
+const sectionKeyPattern = /^[a-z][a-z0-9_-]*$/
 const customerIdPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{1,119}$/
 
 const normalizeFrameworkKey = (value) =>
@@ -128,6 +121,14 @@ const stringTokenField = {
   match: [tokenPattern, 'Value must use lowercase letters, numbers, or hyphens'],
 }
 
+const sectionKeyField = {
+  type: String,
+  trim: true,
+  lowercase: true,
+  maxlength: 120,
+  match: [sectionKeyPattern, 'Section key must use lowercase letters, numbers, underscores, or hyphens'],
+}
+
 const nullableStringTokenField = {
   type: String,
   trim: true,
@@ -147,67 +148,26 @@ const customerIdField = {
 const frameworkPackageSectionSchema = new mongoose.Schema(
   {
     sectionKey: {
-      ...stringTokenField,
+      ...sectionKeyField,
       required: true,
     },
-    label: {
+    runtimePath: {
       type: String,
       trim: true,
-      maxlength: 140,
-      default: '',
-    },
-    description: {
-      type: String,
-      trim: true,
-      maxlength: 500,
+      maxlength: 240,
       default: '',
     },
     required: {
       type: Boolean,
       default: true,
     },
-    displayOrder: {
-      type: Number,
-      min: 0,
-      max: 10000,
-      default: 0,
-    },
-    visible: {
-      type: Boolean,
-      default: true,
-    },
-    runtimeEditable: {
-      type: Boolean,
-      default: true,
-    },
-    includeInSummary: {
-      type: Boolean,
-      default: false,
-    },
-    helpText: {
+    validationKeys: [stringTokenField],
+    notes: {
       type: String,
       trim: true,
       maxlength: 500,
       default: '',
     },
-    placeholder: {
-      type: String,
-      trim: true,
-      maxlength: 250,
-      default: '',
-    },
-    dataType: {
-      type: String,
-      enum: Object.values(FRAMEWORK_PACKAGE_SECTION_DATA_TYPES),
-      default: FRAMEWORK_PACKAGE_SECTION_DATA_TYPES.STRING,
-    },
-    maxLength: {
-      type: Number,
-      min: 0,
-      max: 100000,
-      default: null,
-    },
-    validationKeys: [stringTokenField],
   },
   { _id: false },
 )
@@ -561,7 +521,7 @@ const frameworkPackageSchema = new mongoose.Schema(
       },
     },
     validationRules: {
-      requiredSections: [stringTokenField],
+      requiredSections: [sectionKeyField],
       publishChecks: [stringTokenField],
     },
     createdBy: {
@@ -623,6 +583,7 @@ frameworkPackageSchema.index({ 'workflowPolicyConfig.policyKey': 1, status: 1, u
 frameworkPackageSchema.index({ uiContractKey: 1, status: 1, updatedAt: -1 })
 frameworkPackageSchema.index({ 'validationBindings.validationKey': 1, status: 1, updatedAt: -1 })
 frameworkPackageSchema.index({ 'workflowBindings.policyKey': 1, status: 1, updatedAt: -1 })
+frameworkPackageSchema.index({ 'sections.runtimePath': 1, status: 1, updatedAt: -1 })
 frameworkPackageSchema.index({ frameworkKey: 1, updatedAt: -1 })
 frameworkPackageSchema.index({ status: 1, updatedAt: -1 })
 
@@ -756,9 +717,15 @@ frameworkPackageSchema.pre('validate', function normalizeFrameworkPackage(next) 
 
   if (Array.isArray(this.sections)) {
     const seenSectionKeys = new Set()
+    const seenRuntimePaths = new Set()
     this.sections.forEach((section, index) => {
       const sectionKey = String(section?.sectionKey || '').trim().toLowerCase()
       if (!sectionKey) return
+
+      section.sectionKey = sectionKey
+      section.runtimePath = String(section?.runtimePath || '').trim()
+      section.notes = String(section?.notes || '').trim()
+      section.validationKeys = normalizeTokenList(section.validationKeys)
 
       if (seenSectionKeys.has(sectionKey)) {
         this.invalidate(
@@ -767,7 +734,15 @@ frameworkPackageSchema.pre('validate', function normalizeFrameworkPackage(next) 
         )
       }
       seenSectionKeys.add(sectionKey)
-      section.validationKeys = normalizeTokenList(section.validationKeys)
+
+      if (!section.runtimePath) return
+      if (seenRuntimePaths.has(section.runtimePath)) {
+        this.invalidate(
+          `sections.${index}.runtimePath`,
+          'Section runtime paths must be unique.',
+        )
+      }
+      seenRuntimePaths.add(section.runtimePath)
     })
   }
 

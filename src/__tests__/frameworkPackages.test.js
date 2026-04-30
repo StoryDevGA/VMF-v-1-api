@@ -94,6 +94,16 @@ const buildDefaultRoleRows = () => ([
   },
 ])
 
+const buildDefaultSectionRuntimePathRows = () => ([
+  {
+    pathKey: 'framework_state.sections.customer_problem',
+    status: 'ACTIVE',
+    frameworkKeys: ['VMF'],
+    scope: 'FRAMEWORK_STATE',
+    category: 'SECTION',
+  },
+])
+
 let app
 let request
 let tokenService
@@ -104,6 +114,7 @@ let FrameworkPackage
 let ValidationRegistry
 let WorkflowPolicy
 let UIContract
+let RuntimePathRegistry
 let AuditLog
 let mockRedisClient
 let originalFrameworkPackageSave
@@ -138,7 +149,13 @@ const makeFrameworkPackageDoc = (overrides = {}) => {
     customerAccessMode: 'ALL_CUSTOMERS',
     assignedCustomerIds: [],
     sections: [
-      { sectionKey: 'overview', label: 'Overview', required: true, displayOrder: 10 },
+      {
+        sectionKey: 'customer_problem',
+        runtimePath: 'framework_state.sections.customer_problem',
+        required: true,
+        validationKeys: [],
+        notes: '',
+      },
     ],
     runtimeSettings: {
       enablePreviewMode: true,
@@ -166,7 +183,7 @@ const makeFrameworkPackageDoc = (overrides = {}) => {
       requiresValidationBeforePublish: true,
     },
     validationRules: {
-      requiredSections: ['overview', 'value-drivers'],
+      requiredSections: ['customer_problem'],
       publishChecks: ['validation-pass'],
     },
     createdBy: SUPER_ADMIN_ID,
@@ -214,6 +231,7 @@ beforeAll(async () => {
   ValidationRegistry = models.ValidationRegistry
   WorkflowPolicy = models.WorkflowPolicy
   UIContract = models.UIContract
+  RuntimePathRegistry = models.RuntimePathRegistry
   AuditLog = models.AuditLog
 
   startSessionSpy = jest.spyOn(mongoose, 'startSession')
@@ -255,6 +273,7 @@ beforeEach(() => {
   ValidationRegistry.find = jest.fn()
   WorkflowPolicy.find = jest.fn()
   UIContract.findOne = jest.fn()
+  RuntimePathRegistry.find = jest.fn()
   Role.find = jest.fn().mockReturnValue(buildRoleQueryChain(buildDefaultRoleRows()))
   FrameworkPackage.prototype.save = jest.fn(async function save() {
     return this
@@ -283,6 +302,7 @@ beforeEach(() => {
   ]))
   ValidationRegistry.find.mockReturnValue(buildFrameworkRegistryLookupChain([]))
   WorkflowPolicy.find.mockReturnValue(buildFrameworkRegistryLookupChain([]))
+  RuntimePathRegistry.find.mockReturnValue(buildFrameworkRegistryLookupChain(buildDefaultSectionRuntimePathRows()))
   UIContract.findOne.mockReturnValue({
     select: jest.fn().mockReturnValue({
       lean: jest.fn().mockResolvedValue(null),
@@ -379,7 +399,13 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
         customerAccessMode: 'ALL_CUSTOMERS',
         assignedCustomerIds: [],
         sections: [
-          { sectionKey: 'overview', label: 'Overview', required: true, displayOrder: 10 },
+          {
+            sectionKey: 'customer_problem',
+            runtimePath: 'framework_state.sections.customer_problem',
+            required: true,
+            validationKeys: [],
+            notes: '',
+          },
         ],
         runtimeSettings: {
           enablePreviewMode: true,
@@ -405,7 +431,7 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
           requiresValidationBeforePublish: true,
         },
         validationRules: {
-          requiredSections: ['overview', 'value-drivers'],
+          requiredSections: ['customer_problem'],
           publishChecks: ['validation-pass'],
         },
       })
@@ -414,7 +440,8 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     expect(res.body.data.frameworkKey).toBe('VMF')
     expect(res.body.data.version).toBe('2.3.1')
     expect(res.body.data.packageKey).toBe('vmf-2-3-1')
-    expect(res.body.data.sections[0].sectionKey).toBe('overview')
+    expect(res.body.data.sections[0].sectionKey).toBe('customer_problem')
+    expect(res.body.data.sections[0].runtimePath).toBe('framework_state.sections.customer_problem')
     expect(res.body.data.stateModelKey).toBeNull()
     expect(res.body.data.stateModelVersion).toBeNull()
     expect(res.body.data.stateModelMode).toBe('INTERNAL')
@@ -573,6 +600,7 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
           uiContractKey: 'vmf-ui-contract-v1',
           status: 'ACTIVE',
           frameworkKeys: ['VMF'],
+          sections: [{ sectionKey: 'customer_problem' }],
         }),
       }),
     })
@@ -586,11 +614,11 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
         version: '2.5.0',
         sections: [
           {
-            sectionKey: 'overview',
-            label: 'Overview',
-            dataType: 'STRING',
-            maxLength: 500,
+            sectionKey: 'customer_problem',
+            runtimePath: 'framework_state.sections.customer_problem',
+            required: true,
             validationKeys: ['required-sections-check'],
+            notes: '',
           },
         ],
         executionModel: {
@@ -623,6 +651,7 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
 
     expect(res.status).toBe(201)
     expect(res.body.data.executionModel.mode).toBe('EVENT_DRIVEN')
+    expect(res.body.data.sections[0].runtimePath).toBe('framework_state.sections.customer_problem')
     expect(res.body.data.sections[0].validationKeys).toContain('required-sections-check')
     expect(res.body.data.validationBindings[0].trigger).toBe('ON_SUBMIT')
     expect(res.body.data.workflowBindings[0].executionContext).toBe('ON_SUBMIT')
@@ -630,6 +659,74 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     expect(res.body.data.stateModelKey).toBe('vmf-state-model-v2-5-0')
     expect(res.body.data.stateModelVersion).toBe('2.5.0')
     expect(res.body.data.stateModelMode).toBe('EXTERNAL')
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages rejects invalid section runtime paths', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    mockFindOneSelect(null)
+    RuntimePathRegistry.find.mockReturnValue(buildFrameworkRegistryLookupChain([
+      {
+        pathKey: 'framework_state.sections.customer_problem',
+        status: 'ACTIVE',
+        frameworkKeys: ['VMF'],
+        scope: 'FRAMEWORK_STATE',
+        category: 'STATE',
+      },
+    ]))
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/framework-packages')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        frameworkKey: 'VMF',
+        frameworkName: 'Value Management Framework',
+        version: '2.5.3',
+        sections: [
+          {
+            sectionKey: 'customer_problem',
+            runtimePath: 'framework_state.sections.customer_problem',
+            required: true,
+          },
+        ],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.sections).toContain('FRAMEWORK_STATE/SECTION')
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages rejects package sections missing from selected UI Contract', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    mockFindOneSelect(null)
+    UIContract.findOne.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue({
+          uiContractKey: 'vmf-ui-contract-v1',
+          status: 'ACTIVE',
+          frameworkKeys: ['VMF'],
+          sections: [],
+        }),
+      }),
+    })
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/framework-packages')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        frameworkKey: 'VMF',
+        frameworkName: 'Value Management Framework',
+        version: '2.5.4',
+        uiContractKey: 'vmf-ui-contract-v1',
+        sections: [
+          {
+            sectionKey: 'customer_problem',
+            runtimePath: 'framework_state.sections.customer_problem',
+            required: true,
+          },
+        ],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.sections).toContain('missing presentation mappings')
   })
 
   test('POST /api/v1/super-admin/runtime-control/framework-packages rejects missing UI Contract references', async () => {

@@ -10,7 +10,6 @@ import {
   FRAMEWORK_PACKAGE_EXECUTION_MODES,
   FRAMEWORK_PACKAGE_RETRY_POLICIES,
   FRAMEWORK_PACKAGE_SCOPES,
-  FRAMEWORK_PACKAGE_SECTION_DATA_TYPES,
   FRAMEWORK_PACKAGE_STATE_MODEL_MODES,
   FRAMEWORK_PACKAGE_STATE_MODELS,
   FRAMEWORK_PACKAGE_STATUSES,
@@ -24,6 +23,8 @@ const objectIdRegex = /^[a-f\d]{24}$/i
 const frameworkKeyRegex = /^[A-Z][A-Z0-9_]*$/
 const versionRegex = /^\d+\.\d+\.\d+$/
 const tokenRegex = /^[a-z][a-z0-9-]*$/
+const sectionKeyRegex = /^[a-z][a-z0-9_-]*$/
+const runtimePathRegex = /^\S+$/
 const customerIdRegex = /^[A-Za-z0-9][A-Za-z0-9_-]{1,119}$/
 
 const createStatusValues = [
@@ -49,6 +50,32 @@ const tokenListSchema = z
   .array(tokenListItemSchema)
   .max(200, 'List must contain 200 items or fewer')
   .transform((values) => [...new Set(values)])
+
+const sectionKeySchema = z
+  .string()
+  .trim()
+  .min(1, 'Section key is required')
+  .max(120, 'Section key must be 120 characters or fewer')
+  .transform((value) => value.toLowerCase())
+  .refine(
+    (value) => sectionKeyRegex.test(value),
+    'Section key must use lowercase letters, numbers, underscores, or hyphens',
+  )
+
+const sectionKeyListSchema = z
+  .array(sectionKeySchema)
+  .max(200, 'List must contain 200 items or fewer')
+  .transform((values) => [...new Set(values)])
+
+const runtimePathSchema = z
+  .string()
+  .trim()
+  .min(1, 'Runtime path is required')
+  .max(240, 'Runtime path must be 240 characters or fewer')
+  .refine(
+    (value) => runtimePathRegex.test(value),
+    'Runtime path must not contain whitespace',
+  )
 
 const optionalTokenSchema = z
   .string()
@@ -126,7 +153,7 @@ const capabilitiesSchema = z.object({
 })
 
 const validationRulesSchema = z.object({
-  requiredSections: tokenListSchema.default([]),
+  requiredSections: sectionKeyListSchema.default([]),
   publishChecks: tokenListSchema.default([]),
 })
 
@@ -148,20 +175,11 @@ const applyUniqueBy = (items, ctx, getKey, pathField, message) => {
 }
 
 const sectionSchema = z.object({
-  sectionKey: tokenListItemSchema,
-  label: z.string().trim().max(140, 'Section label must be 140 characters or fewer').default(''),
-  description: z.string().trim().max(500, 'Section description must be 500 characters or fewer').default(''),
+  sectionKey: sectionKeySchema,
+  runtimePath: runtimePathSchema,
   required: z.boolean().default(true),
-  displayOrder: z.number().int().min(0).max(10000).default(0),
-  visible: z.boolean().default(true),
-  runtimeEditable: z.boolean().default(true),
-  includeInSummary: z.boolean().default(false),
-  helpText: z.string().trim().max(500, 'Section help text must be 500 characters or fewer').default(''),
-  placeholder: z.string().trim().max(250, 'Section placeholder must be 250 characters or fewer').default(''),
-  dataType: z.enum(Object.values(FRAMEWORK_PACKAGE_SECTION_DATA_TYPES))
-    .default(FRAMEWORK_PACKAGE_SECTION_DATA_TYPES.STRING),
-  maxLength: z.union([z.number().int().min(0).max(100000), z.null()]).default(null),
   validationKeys: tokenListSchema.default([]),
+  notes: z.string().trim().max(500, 'Section notes must be 500 characters or fewer').default(''),
 })
 
 const sectionsSchema = z
@@ -174,6 +192,13 @@ const sectionsSchema = z
       (item) => item.sectionKey,
       'sectionKey',
       'Section keys must be unique.',
+    )
+    applyUniqueBy(
+      items,
+      ctx,
+      (item) => item.runtimePath,
+      'runtimePath',
+      'Section runtime paths must be unique.',
     )
   })
 

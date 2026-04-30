@@ -48,12 +48,6 @@ const uiContractSectionSchema = new mongoose.Schema(
       trim: true,
       maxlength: 140,
     },
-    runtimePath: {
-      type: String,
-      trim: true,
-      maxlength: 240,
-      default: '',
-    },
     label: {
       type: String,
       required: true,
@@ -86,6 +80,10 @@ const uiContractSectionSchema = new mongoose.Schema(
       default: 0,
     },
     isVisible: {
+      type: Boolean,
+      default: true,
+    },
+    isEditable: {
       type: Boolean,
       default: true,
     },

@@ -42,13 +42,13 @@ const optionalVersionSchema = z
 
 const sectionSchema = z.object({
   sectionKey: z.string().trim().min(1).max(140),
-  runtimePath: z.string().trim().max(240).default(''),
   label: z.string().trim().min(1, 'Section label is required.').max(140),
   shortLabel: z.string().trim().max(80).default(''),
   helpText: z.string().trim().max(500).default(''),
   placeholder: z.string().trim().max(250).default(''),
   displayOrder: z.number().int().min(0).max(10000).default(0),
   isVisible: z.boolean().default(true),
+  isEditable: z.boolean().default(true),
   isRequiredDisplay: z.boolean().default(false),
 })
 
