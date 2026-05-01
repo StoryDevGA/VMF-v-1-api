@@ -111,12 +111,15 @@ let User
 let Role
 let FrameworkRegistry
 let FrameworkPackage
+let RuntimeAgent
+let RuntimeSkill
 let ValidationRegistry
 let WorkflowPolicy
 let UIContract
 let RuntimePathRegistry
 let AuditLog
 let mockRedisClient
+let frameworkPackageController
 let originalFrameworkPackageSave
 let originalFrameworkPackagePopulate
 let startSessionSpy
@@ -234,11 +237,14 @@ beforeAll(async () => {
   Role = models.Role
   FrameworkRegistry = models.FrameworkRegistry
   FrameworkPackage = models.FrameworkPackage
+  RuntimeAgent = models.RuntimeAgent
+  RuntimeSkill = models.RuntimeSkill
   ValidationRegistry = models.ValidationRegistry
   WorkflowPolicy = models.WorkflowPolicy
   UIContract = models.UIContract
   RuntimePathRegistry = models.RuntimePathRegistry
   AuditLog = models.AuditLog
+  frameworkPackageController = await import('../controllers/frameworkPackage.controller.js')
 
   startSessionSpy = jest.spyOn(mongoose, 'startSession')
   originalFrameworkPackageSave = FrameworkPackage.prototype.save
@@ -277,6 +283,8 @@ beforeEach(() => {
   FrameworkPackage.findById = jest.fn()
   FrameworkPackage.updateOne = jest.fn().mockResolvedValue({ matchedCount: 1, modifiedCount: 1 })
   FrameworkRegistry.find = jest.fn()
+  RuntimeAgent.find = jest.fn()
+  RuntimeSkill.find = jest.fn()
   ValidationRegistry.find = jest.fn()
   WorkflowPolicy.find = jest.fn()
   UIContract.findOne = jest.fn()
@@ -310,6 +318,8 @@ beforeEach(() => {
   ValidationRegistry.find.mockReturnValue(buildFrameworkRegistryLookupChain([]))
   WorkflowPolicy.find.mockReturnValue(buildFrameworkRegistryLookupChain([]))
   RuntimePathRegistry.find.mockReturnValue(buildFrameworkRegistryLookupChain(buildDefaultSectionRuntimePathRows()))
+  RuntimeAgent.find.mockReturnValue(buildFrameworkRegistryLookupChain([]))
+  RuntimeSkill.find.mockReturnValue(buildFrameworkRegistryLookupChain([]))
   UIContract.findOne.mockReturnValue({
     select: jest.fn().mockReturnValue({
       lean: jest.fn().mockResolvedValue(null),
@@ -317,6 +327,8 @@ beforeEach(() => {
   })
 
   AuditLog.createLog = jest.fn(async () => ({}))
+  AuditLog.find = jest.fn().mockReturnValue(buildFrameworkPackageQueryChain([]))
+  AuditLog.countDocuments = jest.fn().mockResolvedValue(0)
   startSessionSpy.mockResolvedValue(buildSession())
   mockRedisClient.set.mockResolvedValue('OK')
   mockRedisClient.setex.mockResolvedValue('OK')
@@ -409,6 +421,7 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
         packageName: 'VMF 2.3.1',
         packageScope: 'SYSTEM',
         packageType: 'STANDARD',
+        derivedFromPackageId: 'pkg-source-230',
         description: 'Current VMF package',
         status: 'VALIDATED',
         visibility: 'CUSTOMER_VISIBLE',
@@ -450,6 +463,7 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     expect(res.body.data.frameworkKey).toBe('VMF')
     expect(res.body.data.version).toBe('2.3.1')
     expect(res.body.data.packageKey).toBe('vmf-2-3-1')
+    expect(res.body.data.derivedFromPackageId).toBe('pkg-source-230')
     expect(res.body.data.sections[0].sectionKey).toBe('customer_problem')
     expect(res.body.data.sections[0].runtimePath).toBe('framework_state.sections.customer_problem')
     expect(res.body.data.stateModelKey).toBeNull()
@@ -470,6 +484,21 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
       resourceType: 'FrameworkPackage',
       scope: { frameworkKey: 'VMF' },
       summary: 'Super Admin created framework package VMF 2.3.1',
+      diff: expect.objectContaining({
+        derivedFromPackageId: 'pkg-source-230',
+      }),
+    }))
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'FRAMEWORK_PACKAGE_VALIDATED',
+      resourceType: 'FrameworkPackage',
+      scope: { frameworkKey: 'VMF' },
+      summary: 'Super Admin validated framework package VMF 2.3.1',
+      diff: expect.objectContaining({
+        status: {
+          from: null,
+          to: 'VALIDATED',
+        },
+      }),
     }))
   })
 
@@ -570,6 +599,18 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     expect(res.body.error.details.defaultAgentIds).toContain('workflow policies')
     expect(res.body.error.details.requiredSkillIds).toContain('workflow policies')
     expect(res.body.error.details.validationRules).toContain('validationBindings')
+  })
+
+  test('controller deprecated-field guard rejects deprecated fields if route validation is bypassed', () => {
+    const details = frameworkPackageController.validateDeprecatedFrameworkPackageFields({
+      validationConfig: [],
+      workflowPolicyConfig: [],
+      compatibleWorkflowKeys: [],
+    })
+
+    expect(details.validationConfig).toContain('validationBindings')
+    expect(details.workflowPolicyConfig).toContain('workflowBindings')
+    expect(details.compatibleWorkflowKeys).toContain('workflowBindings')
   })
 
   test('POST /api/v1/super-admin/runtime-control/framework-packages requires package key before validation', async () => {
@@ -1000,7 +1041,7 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
 
   test('PATCH /api/v1/super-admin/runtime-control/framework-packages/:packageId updates a framework package', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
-    const frameworkPackage = makeFrameworkPackageDoc()
+    const frameworkPackage = makeFrameworkPackageDoc({ status: 'DRAFT' })
     FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
     mockFindOneSelect(null)
     UIContract.findOne.mockReturnValue({
@@ -1019,6 +1060,7 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
       .set('Authorization', `Bearer ${token}`)
       .send({
         description: 'Updated framework package description',
+        derivedFromPackageId: 'pkg-source-230',
         uiContractKey: 'vmf-ui-contract-v1',
         stateModelKey: 'vmf-state-model-v2-3-1',
         stateModelVersion: '2.3.1',
@@ -1028,6 +1070,7 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     expect(res.status).toBe(200)
     expect(frameworkPackage.save).toHaveBeenCalled()
     expect(res.body.data.description).toBe('Updated framework package description')
+    expect(res.body.data.derivedFromPackageId).toBe('pkg-source-230')
     expect(res.body.data.stateModelKey).toBe('vmf-state-model-v2-3-1')
     expect(res.body.data.stateModelVersion).toBe('2.3.1')
     expect(res.body.data.stateModelMode).toBe('EXTERNAL')
@@ -1036,7 +1079,346 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
       resourceType: 'FrameworkPackage',
       scope: { frameworkKey: 'VMF' },
       summary: 'Super Admin updated framework package VMF 2.3.1',
+      diff: expect.objectContaining({
+        derivedFromPackageId: {
+          from: '',
+          to: 'pkg-source-230',
+        },
+      }),
     }))
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages requires external state model key and version', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/framework-packages')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        frameworkKey: 'VMF',
+        frameworkName: 'Value Management Framework',
+        version: '2.6.0',
+        stateModelMode: 'EXTERNAL',
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.stateModelKey).toBe(
+      'State Model key is required when State Model Mode is EXTERNAL.',
+    )
+    expect(res.body.error.details.stateModelVersion).toBe(
+      'State Model version is required when State Model Mode is EXTERNAL.',
+    )
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/framework-packages/:packageId blocks structural edits after validation', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackageDoc({ status: 'VALIDATED' }))
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        sections: [
+          {
+            sectionKey: 'customer_problem',
+            runtimePath: 'framework_state.sections.customer_problem',
+            required: false,
+            validationKeys: [],
+            notes: '',
+          },
+        ],
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('FRAMEWORK_PACKAGE_VALIDATED_STRUCTURAL_LOCKED')
+    expect(res.body.error.details.fields.sections).toContain('lock structural runtime fields')
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/framework-packages/:packageId blocks direct active package edits', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackageDoc({ status: 'ACTIVE', isDefault: true }))
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        description: 'Should require clone',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('FRAMEWORK_PACKAGE_ACTIVE_EDIT_LOCKED')
+  })
+
+  test('GET /api/v1/super-admin/runtime-control/framework-packages/:packageId/dependencies resolves package dependencies', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackageDoc({
+      validationBindings: [
+        {
+          validationKey: 'required-sections-check',
+          trigger: 'ON_SUBMIT',
+          blocking: true,
+          priority: 100,
+          enabled: true,
+        },
+      ],
+      workflowBindings: [
+        {
+          policyKey: 'vmf-submit-gate',
+          executionContext: 'ON_SUBMIT',
+          priority: 100,
+          enabled: true,
+        },
+      ],
+    }))
+    ValidationRegistry.find.mockReturnValue(buildFrameworkRegistryLookupChain([
+      {
+        stableId: 'validation-required-sections-check',
+        key: 'required-sections-check',
+        label: 'Required Sections',
+        status: 'ACTIVE',
+        supportedFrameworkKeys: ['VMF'],
+        packageUsable: true,
+        producerSkillId: 'skill-validator',
+        defaultAgentIds: ['agent-reviewer'],
+        outputPath: 'validation_results.required_sections',
+      },
+    ]))
+    WorkflowPolicy.find.mockReturnValue(buildFrameworkRegistryLookupChain([
+      {
+        stableId: 'policy-vmf-submit-gate',
+        key: 'vmf-submit-gate',
+        name: 'VMF Submit Gate',
+        status: 'ACTIVE',
+        frameworkKeys: ['VMF'],
+        primaryAgentId: 'agent-reviewer',
+        requiredSkillIds: ['skill-validator'],
+        conditions: [{ path: 'framework_state.sections.customer_problem' }],
+      },
+    ]))
+    RuntimeAgent.find.mockReturnValue(buildFrameworkRegistryLookupChain([
+      {
+        stableId: 'agent-reviewer',
+        key: 'reviewer',
+        name: 'Reviewer Agent',
+        status: 'ACTIVE',
+        supportedFrameworkKeys: ['VMF'],
+        defaultSkillIds: ['skill-validator'],
+      },
+    ]))
+    RuntimeSkill.find.mockReturnValue(buildFrameworkRegistryLookupChain([
+      {
+        stableId: 'skill-validator',
+        key: 'validator',
+        name: 'Validator Skill',
+        status: 'ACTIVE',
+        supportedFrameworkKeys: ['VMF'],
+        category: 'VALIDATION',
+      },
+    ]))
+    RuntimePathRegistry.find.mockReturnValue(buildFrameworkRegistryLookupChain([
+      {
+        stableId: 'path-customer-problem',
+        pathKey: 'framework_state.sections.customer_problem',
+        label: 'Customer Problem',
+        status: 'ACTIVE',
+        frameworkKeys: ['VMF'],
+        scope: 'FRAMEWORK_STATE',
+        category: 'SECTION',
+      },
+      {
+        stableId: 'path-required-sections',
+        pathKey: 'validation_results.required_sections',
+        label: 'Required Sections Result',
+        status: 'ACTIVE',
+        frameworkKeys: ['VMF'],
+        scope: 'VALIDATION_RESULT',
+        category: 'VALIDATION',
+      },
+    ]))
+    UIContract.findOne.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue({
+          stableId: 'ui-contract-vmf-ui-contract-v1',
+          uiContractKey: 'vmf-ui-contract-v1',
+          name: 'VMF UI Contract',
+          status: 'ACTIVE',
+          frameworkKeys: ['VMF'],
+          sourcePackageVersion: '2.3.1',
+          compatibilityMode: 'INHERITED_MINOR',
+        }),
+      }),
+    })
+
+    const res = await request
+      .get(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/dependencies`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.summary.agents).toBe(1)
+    expect(res.body.data.summary.skills).toBe(1)
+    expect(res.body.data.summary.validations).toBe(1)
+    expect(res.body.data.summary.workflowPolicies).toBe(1)
+    expect(res.body.data.uiContract.key).toBe('vmf-ui-contract-v1')
+    expect(res.body.data.agents[0].key).toBe('reviewer')
+    expect(res.body.data.skills[0].key).toBe('validator')
+  })
+
+  test('GET /api/v1/super-admin/runtime-control/framework-packages/:packageId/integrity returns structured checks', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackageDoc({
+      status: 'VALIDATED',
+      packageKey: '',
+      compatibleWorkflowKeys: undefined,
+      defaultAgentIds: undefined,
+      requiredSkillIds: undefined,
+      validationConfig: undefined,
+      validationRules: undefined,
+      workflowPolicyConfig: undefined,
+    }))
+    UIContract.findOne.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue({
+          uiContractKey: 'vmf-ui-contract-v1',
+          status: 'ACTIVE',
+          frameworkKeys: ['VMF'],
+          sections: [{ sectionKey: 'customer_problem', runtimePath: 'framework_state.sections.customer_problem' }],
+        }),
+      }),
+    })
+
+    const res = await request
+      .get(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/integrity`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.status).toBe('FAIL')
+    expect(res.body.data.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          key: 'packageKey.required',
+          severity: 'FAIL',
+          field: 'packageKey',
+        }),
+      ]),
+    )
+  })
+
+  test('GET /api/v1/super-admin/runtime-control/framework-packages/:packageId/integrity fails on unresolved dependencies', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackageDoc({
+      status: 'ACTIVE',
+      isDefault: true,
+      validationBindings: [
+        {
+          validationKey: 'governance-completeness',
+          trigger: 'ON_SUBMIT',
+          blocking: true,
+          priority: 100,
+          enabled: true,
+        },
+      ],
+      compatibleWorkflowKeys: undefined,
+      defaultAgentIds: undefined,
+      requiredSkillIds: undefined,
+      validationConfig: undefined,
+      validationRules: undefined,
+      workflowPolicyConfig: undefined,
+    }))
+    ValidationRegistry.find.mockReturnValue(buildFrameworkRegistryLookupChain([
+      {
+        stableId: 'validation-governance-completeness',
+        key: 'governance-completeness',
+        label: 'Governance Completeness',
+        status: 'ACTIVE',
+        supportedFrameworkKeys: ['VMF'],
+        packageUsable: true,
+        defaultAgentIds: ['agent-vmf-governance-validator-agent'],
+        passFieldPath: 'framework_state.validation.governance_completeness.is_valid',
+        detailsFieldPath: 'framework_state.validation.governance_completeness.message',
+      },
+    ]))
+    RuntimeAgent.find.mockReturnValue(buildFrameworkRegistryLookupChain([]))
+    RuntimePathRegistry.find.mockReturnValue(buildFrameworkRegistryLookupChain([
+      {
+        stableId: 'path-customer-problem',
+        pathKey: 'framework_state.sections.customer_problem',
+        label: 'Customer Problem',
+        status: 'ACTIVE',
+        frameworkKeys: ['VMF'],
+        scope: 'FRAMEWORK_STATE',
+        category: 'SECTION',
+      },
+    ]))
+    UIContract.findOne.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue({
+          uiContractKey: 'vmf-ui-contract-v1',
+          status: 'ACTIVE',
+          frameworkKeys: ['VMF'],
+          sections: [{ sectionKey: 'customer_problem', runtimePath: 'framework_state.sections.customer_problem' }],
+        }),
+      }),
+    })
+
+    const res = await request
+      .get(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/integrity`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.status).toBe('FAIL')
+    expect(res.body.data.summary.fail).toBeGreaterThanOrEqual(2)
+    expect(res.body.data.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          key: 'dependencies.agents',
+          severity: 'FAIL',
+          message: expect.stringContaining('agent-vmf-governance-validator-agent'),
+        }),
+        expect.objectContaining({
+          key: 'dependencies.runtimePaths',
+          severity: 'FAIL',
+          message: expect.stringContaining('framework_state.validation.governance_completeness.is_valid'),
+        }),
+      ]),
+    )
+  })
+
+  test('GET /api/v1/super-admin/runtime-control/framework-packages/:packageId/audit returns scoped audit events', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackageDoc())
+    AuditLog.find.mockReturnValue(buildFrameworkPackageQueryChain([
+      {
+        _id: '707f1f77bcf86cd799439099',
+        ts: '2026-05-01T10:00:00.000Z',
+        actorUserId: { _id: SUPER_ADMIN_ID, name: 'Super Administrator' },
+        action: 'FRAMEWORK_PACKAGE_UPDATED',
+        resourceType: 'FrameworkPackage',
+        resourceId: FRAMEWORK_PACKAGE_ID,
+        diff: { description: { from: 'Old', to: 'New' } },
+      },
+    ]))
+    AuditLog.countDocuments.mockResolvedValue(1)
+
+    const res = await request
+      .get(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/audit`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data[0].action).toBe('FRAMEWORK_PACKAGE_UPDATED')
+    expect(res.body.meta.totalCount).toBe(1)
+  })
+
+  test('GET /api/v1/super-admin/runtime-control/framework-packages/:packageId/diff/:version returns honest scaffold', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackageDoc())
+
+    const res = await request
+      .get(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/diff/2.3.0`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(501)
+    expect(res.body.error.code).toBe('FRAMEWORK_PACKAGE_DIFF_NOT_AVAILABLE')
+    expect(res.body.error.details.requestedVersion).toBe('2.3.0')
   })
 
   test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/activate rejects non-validated packages', async () => {
@@ -1126,6 +1508,46 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
       summary: 'Super Admin activated framework package VMF 2.3.1',
       diff: expect.objectContaining({
         previousActivePackageIds: [ACTIVE_FRAMEWORK_PACKAGE_ID],
+      }),
+    }))
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/activate records empty previous active ids for first activation', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const frameworkPackage = makeFrameworkPackageDoc({
+      _id: FRAMEWORK_PACKAGE_ID,
+      status: 'VALIDATED',
+    })
+
+    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+    FrameworkPackage.find.mockReturnValue({
+      session: jest.fn().mockResolvedValue([]),
+    })
+    UIContract.findOne.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue({
+          uiContractKey: 'vmf-ui-contract-v1',
+          status: 'ACTIVE',
+          frameworkKeys: ['VMF'],
+          sections: [{ sectionKey: 'customer_problem' }],
+        }),
+      }),
+    })
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/activate`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(FrameworkPackage.updateOne).not.toHaveBeenCalled()
+    expect(frameworkPackage.status).toBe('ACTIVE')
+    expect(frameworkPackage.isDefault).toBe(true)
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'FRAMEWORK_PACKAGE_ACTIVATED',
+      resourceType: 'FrameworkPackage',
+      scope: { frameworkKey: 'VMF' },
+      diff: expect.objectContaining({
+        previousActivePackageIds: [],
       }),
     }))
   })

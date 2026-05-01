@@ -1,4 +1,8 @@
 import mongoose from 'mongoose'
+import {
+  DEPRECATED_FRAMEWORK_PACKAGE_FIELD_MESSAGES,
+  DEPRECATED_FRAMEWORK_PACKAGE_FIELDS,
+} from '../constants/frameworkPackageContract.js'
 
 export const FRAMEWORK_PACKAGE_STATUSES = Object.freeze({
   DRAFT: 'DRAFT',
@@ -67,6 +71,16 @@ export const FRAMEWORK_PACKAGE_STATE_MODEL_MODES = Object.freeze({
   EXTERNAL: 'EXTERNAL',
 })
 
+export const FRAMEWORK_PACKAGE_STATE_BINDING_MODES = Object.freeze({
+  STRICT: 'STRICT',
+  FLEXIBLE: 'FLEXIBLE',
+})
+
+export const FRAMEWORK_PACKAGE_STATE_PERSISTENCE_MODES = Object.freeze({
+  SESSION: 'SESSION',
+  PERSISTED: 'PERSISTED',
+})
+
 export const FRAMEWORK_PACKAGE_EVALUATION_MODES = Object.freeze({
   POLICY_DRIVEN: 'POLICY_DRIVEN',
   VALIDATION_FIRST: 'VALIDATION_FIRST',
@@ -117,17 +131,6 @@ const READY_FRAMEWORK_PACKAGE_STATUSES = new Set([
   FRAMEWORK_PACKAGE_STATUSES.VALIDATED,
   FRAMEWORK_PACKAGE_STATUSES.ACTIVE,
 ])
-
-const DEPRECATED_FRAMEWORK_PACKAGE_FIELD_MESSAGES = Object.freeze({
-  compatibleWorkflowKeys: 'compatibleWorkflowKeys is deprecated. Use workflowBindings instead.',
-  defaultAgentIds: 'defaultAgentIds is deprecated. Agents are assigned through workflow policies.',
-  requiredSkillIds: 'requiredSkillIds is deprecated. Skills are resolved through workflow policies.',
-  validationRules: 'validationRules is deprecated. Use sections and validationBindings instead.',
-  validationConfig: 'validationConfig is deprecated. Use validationBindings instead.',
-  workflowPolicyConfig: 'workflowPolicyConfig is deprecated. Use workflowBindings instead.',
-})
-
-const DEPRECATED_FRAMEWORK_PACKAGE_FIELDS = Object.freeze(Object.keys(DEPRECATED_FRAMEWORK_PACKAGE_FIELD_MESSAGES))
 
 const isReadyFrameworkPackageStatus = (status) =>
   READY_FRAMEWORK_PACKAGE_STATUSES.has(String(status || '').trim().toUpperCase())
@@ -416,6 +419,40 @@ const frameworkPackageWorkflowBindingSchema = new mongoose.Schema(
   { _id: false },
 )
 
+const frameworkPackageUiContractBindingSchema = new mongoose.Schema(
+  {
+    key: {
+      ...stringTokenField,
+      required: true,
+    },
+    version: {
+      type: String,
+      trim: true,
+      maxlength: 50,
+      default: null,
+    },
+    status: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      maxlength: 40,
+      default: '',
+    },
+    compatibilityMode: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      maxlength: 80,
+      default: '',
+    },
+    resolvedAt: {
+      type: Date,
+      default: Date.now,
+    },
+  },
+  { _id: false },
+)
+
 const frameworkPackageSchema = new mongoose.Schema(
   {
     frameworkKey: {
@@ -518,17 +555,43 @@ const frameworkPackageSchema = new mongoose.Schema(
       ...stringTokenField,
       default: '',
     },
+    uiContractBinding: {
+      type: frameworkPackageUiContractBindingSchema,
+      default: null,
+    },
     stateModelKey: nullableStringTokenField,
     stateModelVersion: {
       type: String,
       trim: true,
       maxlength: 50,
       default: null,
+      validate: {
+        validator(value) {
+          return !value || semverPattern.test(String(value).trim())
+        },
+        message: 'State Model version must use semantic version format.',
+      },
     },
     stateModelMode: {
       type: String,
       enum: Object.values(FRAMEWORK_PACKAGE_STATE_MODEL_MODES),
       default: FRAMEWORK_PACKAGE_STATE_MODEL_MODES.INTERNAL,
+    },
+    stateBindingMode: {
+      type: String,
+      enum: Object.values(FRAMEWORK_PACKAGE_STATE_BINDING_MODES),
+      default: FRAMEWORK_PACKAGE_STATE_BINDING_MODES.STRICT,
+    },
+    statePersistence: {
+      type: String,
+      enum: Object.values(FRAMEWORK_PACKAGE_STATE_PERSISTENCE_MODES),
+      default: FRAMEWORK_PACKAGE_STATE_PERSISTENCE_MODES.SESSION,
+    },
+    stateContractNotes: {
+      type: String,
+      trim: true,
+      maxlength: 1000,
+      default: '',
     },
     availableOutputKeys: [stringTokenField],
     defaultOutputStyles: [stringTokenField],
@@ -797,6 +860,18 @@ frameworkPackageSchema.pre('validate', function normalizeFrameworkPackage(next) 
     this.uiContractKey = String(this.uiContractKey || '').trim().toLowerCase()
   }
 
+  if (this.isNew || this.isModified('uiContractBinding')) {
+    if (!this.uiContractBinding || !String(this.uiContractBinding.key || '').trim()) {
+      this.uiContractBinding = null
+    } else {
+      this.uiContractBinding.key = String(this.uiContractBinding.key || '').trim().toLowerCase()
+      this.uiContractBinding.version = String(this.uiContractBinding.version || '').trim() || null
+      this.uiContractBinding.status = String(this.uiContractBinding.status || '').trim().toUpperCase()
+      this.uiContractBinding.compatibilityMode = String(this.uiContractBinding.compatibilityMode || '').trim().toUpperCase()
+      this.uiContractBinding.resolvedAt = this.uiContractBinding.resolvedAt || new Date()
+    }
+  }
+
   if (this.isNew || this.isModified('stateModelKey')) {
     const stateModelKey = String(this.stateModelKey || '').trim().toLowerCase()
     this.stateModelKey = stateModelKey || null
@@ -811,6 +886,41 @@ frameworkPackageSchema.pre('validate', function normalizeFrameworkPackage(next) 
     this.stateModelMode = String(this.stateModelMode || FRAMEWORK_PACKAGE_STATE_MODEL_MODES.INTERNAL)
       .trim()
       .toUpperCase()
+  }
+
+  if (this.stateModelMode === FRAMEWORK_PACKAGE_STATE_MODEL_MODES.INTERNAL) {
+    this.stateModelKey = null
+    this.stateModelVersion = null
+  }
+
+  if (this.isNew || this.isModified('stateBindingMode')) {
+    this.stateBindingMode = String(this.stateBindingMode || FRAMEWORK_PACKAGE_STATE_BINDING_MODES.STRICT)
+      .trim()
+      .toUpperCase()
+  }
+
+  if (this.isNew || this.isModified('statePersistence')) {
+    this.statePersistence = String(this.statePersistence || FRAMEWORK_PACKAGE_STATE_PERSISTENCE_MODES.SESSION)
+      .trim()
+      .toUpperCase()
+  }
+
+  if (this.isNew || this.isModified('stateContractNotes')) {
+    this.stateContractNotes = String(this.stateContractNotes || '').trim()
+  }
+
+  if (
+    this.stateModelMode === FRAMEWORK_PACKAGE_STATE_MODEL_MODES.EXTERNAL
+    && !String(this.stateModelKey || '').trim()
+  ) {
+    this.invalidate('stateModelKey', 'State Model key is required when State Model Mode is EXTERNAL.')
+  }
+
+  if (
+    this.stateModelMode === FRAMEWORK_PACKAGE_STATE_MODEL_MODES.EXTERNAL
+    && !String(this.stateModelVersion || '').trim()
+  ) {
+    this.invalidate('stateModelVersion', 'State Model version is required when State Model Mode is EXTERNAL.')
   }
 
   if (isReadyFrameworkPackageStatus(this.status) && !String(this.packageKey || '').trim()) {

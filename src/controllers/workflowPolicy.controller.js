@@ -935,7 +935,7 @@ const fetchWorkflowPolicyDependencies = async (workflowPolicy) => {
     knownFrameworks,
   ] = await Promise.all([
     policyKey
-      ? FrameworkPackage.find({ compatibleWorkflowKeys: policyKey })
+      ? FrameworkPackage.find({ 'workflowBindings.policyKey': policyKey })
         .maxTimeMS(3000)
         .select('stableId frameworkKey frameworkName version status')
         .lean()

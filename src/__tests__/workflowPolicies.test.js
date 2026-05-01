@@ -1135,6 +1135,7 @@ describe('Workflow Policy Routes', () => {
       .set('Authorization', `Bearer ${token}`)
 
     expect(res.status).toBe(200)
+    expect(FrameworkPackage.find).toHaveBeenCalledWith({ 'workflowBindings.policyKey': 'vmf-publish' })
     expect(res.body.data).toMatchObject({
       policyId: 'policy-vmf-publish',
       summary: expect.objectContaining({

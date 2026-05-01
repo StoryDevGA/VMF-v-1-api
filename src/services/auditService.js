@@ -75,7 +75,9 @@ export const AUDIT_ACTIONS = Object.freeze({
   GOVERNANCE_OVERRIDE_DENIED: 'GOVERNANCE_OVERRIDE_DENIED',
   FRAMEWORK_PACKAGE_CREATED: 'FRAMEWORK_PACKAGE_CREATED',
   FRAMEWORK_PACKAGE_UPDATED: 'FRAMEWORK_PACKAGE_UPDATED',
+  FRAMEWORK_PACKAGE_VALIDATED: 'FRAMEWORK_PACKAGE_VALIDATED',
   FRAMEWORK_PACKAGE_ACTIVATED: 'FRAMEWORK_PACKAGE_ACTIVATED',
+  FRAMEWORK_PACKAGE_CLONED: 'FRAMEWORK_PACKAGE_CLONED',
   FRAMEWORK_REGISTRY_CREATED: 'FRAMEWORK_REGISTRY_CREATED',
   FRAMEWORK_REGISTRY_UPDATED: 'FRAMEWORK_REGISTRY_UPDATED',
   RUNTIME_AGENT_CREATED: 'RUNTIME_AGENT_CREATED',
@@ -381,8 +383,12 @@ const buildAuditSummary = ({ action, resourceType, resourceId, diff, display }) 
       return clampSummary(`${actorLabel} created framework package ${targetLabel}`)
     case AUDIT_ACTIONS.FRAMEWORK_PACKAGE_UPDATED:
       return clampSummary(`${actorLabel} updated framework package ${targetLabel}`)
+    case AUDIT_ACTIONS.FRAMEWORK_PACKAGE_VALIDATED:
+      return clampSummary(`${actorLabel} validated framework package ${targetLabel}`)
     case AUDIT_ACTIONS.FRAMEWORK_PACKAGE_ACTIVATED:
       return clampSummary(`${actorLabel} activated framework package ${targetLabel}`)
+    case AUDIT_ACTIONS.FRAMEWORK_PACKAGE_CLONED:
+      return clampSummary(`${actorLabel} cloned framework package ${targetLabel}`)
     case AUDIT_ACTIONS.RUNTIME_AGENT_CREATED:
       return clampSummary(`${actorLabel} created runtime agent ${targetLabel}`)
     case AUDIT_ACTIONS.RUNTIME_AGENT_UPDATED:

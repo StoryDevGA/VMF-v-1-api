@@ -1,21 +1,7 @@
 import { fileURLToPath } from 'url'
 import { connectDb, disconnectDb } from '../config/db.js'
 import FrameworkPackage from '../models/FrameworkPackage.js'
-
-const DEPRECATED_FRAMEWORK_PACKAGE_FIELDS = Object.freeze([
-  'compatibleWorkflowKeys',
-  'defaultAgentIds',
-  'requiredSkillIds',
-  'validationRules',
-  'validationConfig',
-  'workflowPolicyConfig',
-])
-
-const DEPRECATED_FRAMEWORK_PACKAGE_INDEX_NAMES = Object.freeze([
-  'compatibleWorkflowKeys_1_status_1_updatedAt_-1',
-  'validationConfig.validationKey_1_status_1_updatedAt_-1',
-  'workflowPolicyConfig.policyKey_1_status_1_updatedAt_-1',
-])
+import { DEPRECATED_FRAMEWORK_PACKAGE_FIELDS } from '../constants/frameworkPackageContract.js'
 
 const parseArgs = (argv = process.argv.slice(2)) => ({
   apply: argv.includes('--apply'),
@@ -32,11 +18,26 @@ const buildLegacyFieldFilter = () => ({
 const buildUnsetDocument = () =>
   Object.fromEntries(DEPRECATED_FRAMEWORK_PACKAGE_FIELDS.map((field) => [field, '']))
 
+const isDeprecatedFrameworkPackageIndex = (index = {}) =>
+  Object.keys(index.key || {}).some((path) =>
+    DEPRECATED_FRAMEWORK_PACKAGE_FIELDS.some((field) =>
+      path === field || path.startsWith(`${field}.`),
+    ),
+  )
+
 const listExistingDeprecatedIndexes = async (collection) => {
   const indexes = await collection.indexes()
-  const indexNames = new Set(indexes.map((index) => index.name))
-  return DEPRECATED_FRAMEWORK_PACKAGE_INDEX_NAMES.filter((name) => indexNames.has(name))
+  return indexes
+    .filter((index) => index.name !== '_id_' && isDeprecatedFrameworkPackageIndex(index))
+    .map((index) => index.name)
+    .filter(Boolean)
 }
+
+const getDatabaseName = (collection) =>
+  collection?.db?.databaseName
+  || collection?.db?.s?.databaseName
+  || collection?.conn?.name
+  || 'unknown'
 
 const dropDeprecatedIndexes = async (collection, indexNames) => {
   const dropped = []
@@ -69,6 +70,7 @@ export const unsetDeprecatedFrameworkPackageFields = async ({
 
   try {
     const collection = model.collection
+    const database = getDatabaseName(collection)
     const filter = buildLegacyFieldFilter()
     const matchedCount = await collection.countDocuments(filter)
     const deprecatedIndexes = await listExistingDeprecatedIndexes(collection)
@@ -79,11 +81,12 @@ export const unsetDeprecatedFrameworkPackageFields = async ({
         mode: 'dry-run',
         matched: matchedCount,
         modified: 0,
+        database,
         deprecatedFields: DEPRECATED_FRAMEWORK_PACKAGE_FIELDS,
         deprecatedIndexes,
         droppedIndexes: [],
       }
-      logger(json ? JSON.stringify(summary, null, 2) : `Dry run: ${matchedCount} framework package record(s) contain deprecated fields.`)
+      logger(json ? JSON.stringify(summary, null, 2) : `Dry run on database ${database}: ${matchedCount} framework package record(s) contain deprecated fields.`)
       return summary
     }
 
@@ -96,6 +99,7 @@ export const unsetDeprecatedFrameworkPackageFields = async ({
       mode: 'apply',
       matched: matchedCount,
       modified: Number(updateResult.modifiedCount) || 0,
+      database,
       deprecatedFields: DEPRECATED_FRAMEWORK_PACKAGE_FIELDS,
       deprecatedIndexes,
       droppedIndexes,
@@ -104,7 +108,7 @@ export const unsetDeprecatedFrameworkPackageFields = async ({
     logger(
       json
         ? JSON.stringify(summary, null, 2)
-        : `Unset deprecated framework package fields: matched=${summary.matched}, modified=${summary.modified}, droppedIndexes=${summary.droppedIndexes.length}.`,
+        : `Unset deprecated framework package fields on database ${database}: matched=${summary.matched}, modified=${summary.modified}, droppedIndexes=${summary.droppedIndexes.length}.`,
     )
     return summary
   } finally {

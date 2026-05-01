@@ -88,6 +88,7 @@ const buildRuntimeSkillLookupChain = (rows) => ({
 })
 
 const buildRuntimePathLookupChain = (rows) => ({
+  maxTimeMS: jest.fn().mockReturnThis(),
   select: jest.fn().mockReturnThis(),
   lean: jest.fn().mockResolvedValue(rows),
 })

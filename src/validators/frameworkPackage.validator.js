@@ -10,14 +10,17 @@ import {
   FRAMEWORK_PACKAGE_EXECUTION_MODES,
   FRAMEWORK_PACKAGE_RETRY_POLICIES,
   FRAMEWORK_PACKAGE_SCOPES,
+  FRAMEWORK_PACKAGE_STATE_BINDING_MODES,
   FRAMEWORK_PACKAGE_STATE_MODEL_MODES,
   FRAMEWORK_PACKAGE_STATE_MODELS,
+  FRAMEWORK_PACKAGE_STATE_PERSISTENCE_MODES,
   FRAMEWORK_PACKAGE_STATUSES,
   FRAMEWORK_PACKAGE_TYPES,
   FRAMEWORK_PACKAGE_VALIDATION_TRIGGERS,
   FRAMEWORK_PACKAGE_VISIBILITY,
   FRAMEWORK_PACKAGE_WORKFLOW_EXECUTION_CONTEXTS,
 } from '../models/FrameworkPackage.js'
+import { DEPRECATED_FRAMEWORK_PACKAGE_FIELD_MESSAGES } from '../constants/frameworkPackageContract.js'
 
 const objectIdRegex = /^[a-f\d]{24}$/i
 const frameworkKeyRegex = /^[A-Z][A-Z0-9_]*$/
@@ -118,6 +121,20 @@ const stateModelModeSchema = z.preprocess(
     .default(FRAMEWORK_PACKAGE_STATE_MODEL_MODES.INTERNAL),
 )
 
+const stateBindingModeSchema = z.preprocess(
+  (value) => String(value ?? FRAMEWORK_PACKAGE_STATE_BINDING_MODES.STRICT).trim().toUpperCase()
+    || FRAMEWORK_PACKAGE_STATE_BINDING_MODES.STRICT,
+  z.enum(Object.values(FRAMEWORK_PACKAGE_STATE_BINDING_MODES))
+    .default(FRAMEWORK_PACKAGE_STATE_BINDING_MODES.STRICT),
+)
+
+const statePersistenceSchema = z.preprocess(
+  (value) => String(value ?? FRAMEWORK_PACKAGE_STATE_PERSISTENCE_MODES.SESSION).trim().toUpperCase()
+    || FRAMEWORK_PACKAGE_STATE_PERSISTENCE_MODES.SESSION,
+  z.enum(Object.values(FRAMEWORK_PACKAGE_STATE_PERSISTENCE_MODES))
+    .default(FRAMEWORK_PACKAGE_STATE_PERSISTENCE_MODES.SESSION),
+)
+
 const customerIdListSchema = z
   .array(
     z
@@ -203,15 +220,6 @@ const executionModelSchema = z.object({
     .default(FRAMEWORK_PACKAGE_STATE_MODELS.LIFECYCLE_BASED),
   evaluationMode: z.enum(Object.values(FRAMEWORK_PACKAGE_EVALUATION_MODES))
     .default(FRAMEWORK_PACKAGE_EVALUATION_MODES.POLICY_DRIVEN),
-})
-
-const DEPRECATED_FRAMEWORK_PACKAGE_FIELD_MESSAGES = Object.freeze({
-  compatibleWorkflowKeys: 'compatibleWorkflowKeys is deprecated. Use workflowBindings instead.',
-  defaultAgentIds: 'defaultAgentIds is deprecated. Agents are assigned through workflow policies.',
-  requiredSkillIds: 'requiredSkillIds is deprecated. Skills are resolved through workflow policies.',
-  validationRules: 'validationRules is deprecated. Use sections and validationBindings instead.',
-  validationConfig: 'validationConfig is deprecated. Use validationBindings instead.',
-  workflowPolicyConfig: 'workflowPolicyConfig is deprecated. Use workflowBindings instead.',
 })
 
 const deprecatedFrameworkPackageFieldSchema = (message) =>
@@ -402,6 +410,9 @@ const createFrameworkPackageSchema = z.object({
   stateModelKey: nullableTokenSchema,
   stateModelVersion: nullableStringSchema,
   stateModelMode: stateModelModeSchema,
+  stateBindingMode: stateBindingModeSchema,
+  statePersistence: statePersistenceSchema,
+  stateContractNotes: z.string().trim().max(1000, 'State Contract notes must be 1000 characters or fewer').default(''),
   availableOutputKeys: tokenListSchema.default([]),
   defaultOutputStyles: tokenListSchema.default([]),
   allowCustomerOutputDefinitions: z.boolean().default(false),
@@ -486,6 +497,9 @@ const updateFrameworkPackageSchema = z.object({
   stateModelKey: nullableTokenSchema.optional(),
   stateModelVersion: nullableStringSchema.optional(),
   stateModelMode: stateModelModeSchema.optional(),
+  stateBindingMode: stateBindingModeSchema.optional(),
+  statePersistence: statePersistenceSchema.optional(),
+  stateContractNotes: z.string().trim().max(1000, 'State Contract notes must be 1000 characters or fewer').optional(),
   availableOutputKeys: tokenListSchema.optional(),
   defaultOutputStyles: tokenListSchema.optional(),
   allowCustomerOutputDefinitions: z.boolean().optional(),
@@ -530,6 +544,11 @@ const listFrameworkPackagesQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(20),
 })
+
+export const captureFrameworkPackageUpdateFields = (req, _res, next) => {
+  req.frameworkPackageUpdateFields = new Set(Object.keys(req.body && typeof req.body === 'object' ? req.body : {}))
+  next()
+}
 
 export const validateCreateFrameworkPackage = createBodyValidator(createFrameworkPackageSchema)
 export const validateUpdateFrameworkPackage = createBodyValidator(updateFrameworkPackageSchema)

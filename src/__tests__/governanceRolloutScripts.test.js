@@ -9,6 +9,7 @@ import {
   buildInvariantViolationReport,
   ISSUE_CODES,
 } from '../scripts/reportCustomerAdminInvariantViolations.js'
+import { unsetDeprecatedFrameworkPackageFields } from '../scripts/unsetDeprecatedFrameworkPackageFields.js'
 
 const ACTOR_ID = '507f1f77bcf86cd799439011'
 const LICENSE_LEVEL_ID = '607f1f77bcf86cd799439022'
@@ -174,6 +175,45 @@ describe('runBackfillCustomerLicenseGovernance', () => {
     expect(result.appliedOperations).toBe(1)
     expect(result.summary.pendingUpdates).toBe(1)
     expect(logs.some((line) => String(line).includes('applied operations: 1'))).toBe(true)
+  })
+})
+
+describe('unsetDeprecatedFrameworkPackageFields', () => {
+  test('discovers deprecated indexes by key path and reports the target database', async () => {
+    const connect = jest.fn(async () => {})
+    const disconnect = jest.fn(async () => {})
+    const collection = {
+      db: { databaseName: 'vmf_test' },
+      countDocuments: jest.fn().mockResolvedValue(2),
+      indexes: jest.fn().mockResolvedValue([
+        { name: '_id_', key: { _id: 1 } },
+        { name: 'legacy_validation_idx', key: { 'validationConfig.validationKey': 1, status: 1 } },
+        { name: 'legacy_workflow_idx', key: { 'workflowPolicyConfig.policyKey': 1 } },
+        { name: 'current_workflow_idx', key: { 'workflowBindings.policyKey': 1 } },
+      ]),
+      updateMany: jest.fn().mockResolvedValue({ modifiedCount: 2 }),
+      dropIndex: jest.fn().mockResolvedValue({ ok: 1 }),
+    }
+    const logs = []
+
+    const result = await unsetDeprecatedFrameworkPackageFields({
+      apply: true,
+      logger: (message) => logs.push(message),
+      dependencies: {
+        connect,
+        disconnect,
+        model: { collection },
+      },
+    })
+
+    expect(connect).toHaveBeenCalled()
+    expect(disconnect).toHaveBeenCalled()
+    expect(collection.dropIndex).toHaveBeenCalledWith('legacy_validation_idx')
+    expect(collection.dropIndex).toHaveBeenCalledWith('legacy_workflow_idx')
+    expect(collection.dropIndex).not.toHaveBeenCalledWith('current_workflow_idx')
+    expect(result.database).toBe('vmf_test')
+    expect(result.deprecatedIndexes).toEqual(['legacy_validation_idx', 'legacy_workflow_idx'])
+    expect(logs[0]).toContain('database vmf_test')
   })
 })
 
