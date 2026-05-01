@@ -113,6 +113,33 @@ const normalizeCustomerIdList = (values) => {
   return [...new Set(normalized)]
 }
 
+const READY_FRAMEWORK_PACKAGE_STATUSES = new Set([
+  FRAMEWORK_PACKAGE_STATUSES.VALIDATED,
+  FRAMEWORK_PACKAGE_STATUSES.ACTIVE,
+])
+
+const DEPRECATED_FRAMEWORK_PACKAGE_FIELD_MESSAGES = Object.freeze({
+  compatibleWorkflowKeys: 'compatibleWorkflowKeys is deprecated. Use workflowBindings instead.',
+  defaultAgentIds: 'defaultAgentIds is deprecated. Agents are assigned through workflow policies.',
+  requiredSkillIds: 'requiredSkillIds is deprecated. Skills are resolved through workflow policies.',
+  validationRules: 'validationRules is deprecated. Use sections and validationBindings instead.',
+  validationConfig: 'validationConfig is deprecated. Use validationBindings instead.',
+  workflowPolicyConfig: 'workflowPolicyConfig is deprecated. Use workflowBindings instead.',
+})
+
+const DEPRECATED_FRAMEWORK_PACKAGE_FIELDS = Object.freeze(Object.keys(DEPRECATED_FRAMEWORK_PACKAGE_FIELD_MESSAGES))
+
+const isReadyFrameworkPackageStatus = (status) =>
+  READY_FRAMEWORK_PACKAGE_STATUSES.has(String(status || '').trim().toUpperCase())
+
+const hasConfiguredSections = (sections = []) =>
+  Array.isArray(sections)
+  && sections.some(
+    (section) =>
+      String(section?.sectionKey || '').trim()
+      || String(section?.runtimePath || '').trim(),
+  )
+
 const stringTokenField = {
   type: String,
   trim: true,
@@ -349,6 +376,14 @@ const frameworkPackageWorkflowPolicyConfigSchema = new mongoose.Schema(
   { _id: false },
 )
 
+const frameworkPackageValidationRulesSchema = new mongoose.Schema(
+  {
+    requiredSections: [sectionKeyField],
+    publishChecks: [stringTokenField],
+  },
+  { _id: false },
+)
+
 const frameworkPackageWorkflowBindingSchema = new mongoose.Schema(
   {
     policyKey: {
@@ -467,8 +502,16 @@ const frameworkPackageSchema = new mongoose.Schema(
       type: frameworkPackageExecutionModelSchema,
       default: () => ({}),
     },
-    validationConfig: [frameworkPackageValidationConfigSchema],
-    workflowPolicyConfig: [frameworkPackageWorkflowPolicyConfigSchema],
+    validationConfig: {
+      type: [frameworkPackageValidationConfigSchema],
+      select: false,
+      default: undefined,
+    },
+    workflowPolicyConfig: {
+      type: [frameworkPackageWorkflowPolicyConfigSchema],
+      select: false,
+      default: undefined,
+    },
     validationBindings: [frameworkPackageValidationBindingSchema],
     workflowBindings: [frameworkPackageWorkflowBindingSchema],
     uiContractKey: {
@@ -503,9 +546,21 @@ const frameworkPackageSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
-    compatibleWorkflowKeys: [stringTokenField],
-    defaultAgentIds: [stringTokenField],
-    requiredSkillIds: [stringTokenField],
+    compatibleWorkflowKeys: {
+      type: [stringTokenField],
+      select: false,
+      default: undefined,
+    },
+    defaultAgentIds: {
+      type: [stringTokenField],
+      select: false,
+      default: undefined,
+    },
+    requiredSkillIds: {
+      type: [stringTokenField],
+      select: false,
+      default: undefined,
+    },
     capabilities: {
       supportsPreviewMode: {
         type: Boolean,
@@ -521,8 +576,9 @@ const frameworkPackageSchema = new mongoose.Schema(
       },
     },
     validationRules: {
-      requiredSections: [sectionKeyField],
-      publishChecks: [stringTokenField],
+      type: frameworkPackageValidationRulesSchema,
+      select: false,
+      default: undefined,
     },
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
@@ -577,9 +633,6 @@ frameworkPackageSchema.index(
     name: 'unique_default_framework_package',
   },
 )
-frameworkPackageSchema.index({ compatibleWorkflowKeys: 1, status: 1, updatedAt: -1 })
-frameworkPackageSchema.index({ 'validationConfig.validationKey': 1, status: 1, updatedAt: -1 })
-frameworkPackageSchema.index({ 'workflowPolicyConfig.policyKey': 1, status: 1, updatedAt: -1 })
 frameworkPackageSchema.index({ uiContractKey: 1, status: 1, updatedAt: -1 })
 frameworkPackageSchema.index({ 'validationBindings.validationKey': 1, status: 1, updatedAt: -1 })
 frameworkPackageSchema.index({ 'workflowBindings.policyKey': 1, status: 1, updatedAt: -1 })
@@ -608,8 +661,20 @@ frameworkPackageSchema.pre('validate', function normalizeFrameworkPackage(next) 
     this.version = normalizeVersion(this.version)
   }
 
-  if (this.isNew || this.isModified('packageKey')) {
-    this.packageKey = String(this.packageKey || `${this.frameworkKey}-${this.version}`)
+  if (
+    this.isNew
+    || this.isModified('packageKey')
+    || this.isModified('frameworkKey')
+    || this.isModified('version')
+  ) {
+    const packageKey = String(this.packageKey || '').trim()
+    const sourceKey = packageKey || (
+      isReadyFrameworkPackageStatus(this.status)
+        ? ''
+        : `${this.frameworkKey}-${this.version}`
+    )
+
+    this.packageKey = String(sourceKey)
       .trim()
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
@@ -651,24 +716,6 @@ frameworkPackageSchema.pre('validate', function normalizeFrameworkPackage(next) 
       'assignedCustomerIds',
       'Assigned customers are required when customer access is selected customers.',
     )
-  }
-
-  if (Array.isArray(this.validationConfig)) {
-    this.validationConfig.forEach((config, index) => {
-      if (config?.blockingOverride === true && config?.warningOnlyOverride === true) {
-        this.invalidate(
-          `validationConfig.${index}.warningOnlyOverride`,
-          'Validation cannot be both blocking and warning-only.',
-        )
-      }
-
-      if (config?.requiresLatestRunOverride === true && config?.freshnessOverrideMinutes !== null && config?.freshnessOverrideMinutes !== undefined) {
-        this.invalidate(
-          `validationConfig.${index}.freshnessOverrideMinutes`,
-          'Freshness override must be empty when latest-run override is required.',
-        )
-      }
-    })
   }
 
   if (Array.isArray(this.validationBindings)) {
@@ -766,23 +813,24 @@ frameworkPackageSchema.pre('validate', function normalizeFrameworkPackage(next) 
       .toUpperCase()
   }
 
-  if (this.isNew || this.isModified('compatibleWorkflowKeys')) {
-    this.compatibleWorkflowKeys = normalizeTokenList(this.compatibleWorkflowKeys)
+  if (isReadyFrameworkPackageStatus(this.status) && !String(this.packageKey || '').trim()) {
+    this.invalidate('packageKey', 'Package key is required before validation.')
   }
 
-  if (this.isNew || this.isModified('defaultAgentIds')) {
-    this.defaultAgentIds = normalizeTokenList(this.defaultAgentIds)
+  if (
+    isReadyFrameworkPackageStatus(this.status)
+    && hasConfiguredSections(this.sections)
+    && !String(this.uiContractKey || '').trim()
+  ) {
+    this.invalidate(
+      'uiContractKey',
+      'UI Contract is required before validation when sections are configured.',
+    )
   }
 
-  if (this.isNew || this.isModified('requiredSkillIds')) {
-    this.requiredSkillIds = normalizeTokenList(this.requiredSkillIds)
-  }
-
-  if (this.isNew || this.isModified('validationRules')) {
-    const validationRules = this.validationRules || {}
-    this.validationRules = {
-      requiredSections: normalizeTokenList(validationRules.requiredSections),
-      publishChecks: normalizeTokenList(validationRules.publishChecks),
+  for (const field of DEPRECATED_FRAMEWORK_PACKAGE_FIELDS) {
+    if (this.isModified(field) && this[field] !== undefined && this[field] !== null) {
+      this.invalidate(field, DEPRECATED_FRAMEWORK_PACKAGE_FIELD_MESSAGES[field])
     }
   }
 

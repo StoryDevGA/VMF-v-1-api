@@ -26,6 +26,27 @@ const ACTIVATION_REQUIRES_VALIDATED_MESSAGE = 'Only validated framework packages
 const ACTIVATION_ENDPOINT_REQUIRED_MESSAGE = 'Use the activation endpoint to mark a framework package active.'
 const ACTIVE_PACKAGE_STATUS_CHANGE_MESSAGE =
   'Active framework packages cannot change lifecycle in place. Activate another validated package instead.'
+const READY_FRAMEWORK_PACKAGE_STATUSES = new Set([
+  FRAMEWORK_PACKAGE_STATUSES.VALIDATED,
+  FRAMEWORK_PACKAGE_STATUSES.ACTIVE,
+])
+const DEPRECATED_FRAMEWORK_PACKAGE_FIELDS = Object.freeze([
+  'compatibleWorkflowKeys',
+  'defaultAgentIds',
+  'requiredSkillIds',
+  'validationRules',
+  'validationConfig',
+  'workflowPolicyConfig',
+])
+
+const DEPRECATED_FRAMEWORK_PACKAGE_FIELD_MESSAGES = Object.freeze({
+  compatibleWorkflowKeys: 'compatibleWorkflowKeys is deprecated. Use workflowBindings instead.',
+  defaultAgentIds: 'defaultAgentIds is deprecated. Agents are assigned through workflow policies.',
+  requiredSkillIds: 'requiredSkillIds is deprecated. Skills are resolved through workflow policies.',
+  validationRules: 'validationRules is deprecated. Use sections and validationBindings instead.',
+  validationConfig: 'validationConfig is deprecated. Use validationBindings instead.',
+  workflowPolicyConfig: 'workflowPolicyConfig is deprecated. Use workflowBindings instead.',
+})
 
 const toIdString = (value) => {
   if (!value) return null
@@ -104,7 +125,21 @@ const serializeFrameworkPackage = (frameworkPackage, { fallbackUpdatedBy = null 
       : (fallbackUpdatedBy || serializedUpdatedBy)
   plain.activatedBy = serializeUserSummary(plain.activatedBy)
 
+  for (const field of DEPRECATED_FRAMEWORK_PACKAGE_FIELDS) {
+    delete plain[field]
+  }
+
   return plain
+}
+
+const omitDeprecatedFrameworkPackageFields = (payload = {}) => {
+  const sanitizedPayload = { ...payload }
+
+  for (const field of DEPRECATED_FRAMEWORK_PACKAGE_FIELDS) {
+    delete sanitizedPayload[field]
+  }
+
+  return sanitizedPayload
 }
 
 const buildFrameworkPackageLabel = (frameworkPackage) =>
@@ -119,6 +154,15 @@ const isActiveDefaultConflictError = (err) =>
   err?.code === 11000
   && err?.keyPattern?.frameworkKey
   && (err?.keyPattern?.status || err?.keyPattern?.isDefault)
+
+const createActiveDefaultInvariantError = () => {
+  const error = new Error(ACTIVE_DEFAULT_CONFLICT_MESSAGE)
+  error.code = 'FRAMEWORK_PACKAGE_ACTIVE_DEFAULT_CONFLICT'
+  return error
+}
+
+const isActiveDefaultInvariantError = (err) =>
+  err?.code === 'FRAMEWORK_PACKAGE_ACTIVE_DEFAULT_CONFLICT'
 
 const sendConflict = (res, req, message, details = {}) =>
   res.status(409).json({
@@ -188,8 +232,6 @@ const buildListFilter = ({ q, status, frameworkKey }) => {
       { 'sections.sectionKey': regex },
       { 'sections.runtimePath': regex },
       { 'sections.validationKeys': regex },
-      { 'validationConfig.validationKey': regex },
-      { 'workflowPolicyConfig.policyKey': regex },
       { 'validationBindings.validationKey': regex },
       { 'validationBindings.trigger': regex },
       { 'workflowBindings.policyKey': regex },
@@ -200,23 +242,10 @@ const buildListFilter = ({ q, status, frameworkKey }) => {
       { 'executionModel.evaluationMode': regex },
       { availableOutputKeys: regex },
       { defaultOutputStyles: regex },
-      { compatibleWorkflowKeys: regex },
-      { defaultAgentIds: regex },
-      { requiredSkillIds: regex },
-      { 'validationRules.requiredSections': regex },
-      { 'validationRules.publishChecks': regex },
     ]
   }
 
   return filter
-}
-
-const buildUnsupportedWorkflowKeyMessage = (frameworkKey, workflowKeys = []) => {
-  if (workflowKeys.length === 1) {
-    return `Workflow key "${workflowKeys[0]}" is not supported by framework "${frameworkKey}".`
-  }
-
-  return `Workflow keys ${workflowKeys.join(', ')} are not supported by framework "${frameworkKey}".`
 }
 
 const normalizeSectionKey = (value) => String(value || '').trim().toLowerCase()
@@ -225,6 +254,49 @@ const normalizeRuntimePath = (value) => String(value || '').trim()
 
 const getStructuralSections = (sections = []) =>
   Array.isArray(sections) ? sections : []
+
+const normalizeKeyValue = (value) => String(value || '').trim()
+
+const isReadyFrameworkPackageStatus = (status) =>
+  READY_FRAMEWORK_PACKAGE_STATUSES.has(String(status || '').trim().toUpperCase())
+
+const hasConfiguredSections = (sections = []) =>
+  getStructuralSections(sections).some(
+    (section) =>
+      normalizeSectionKey(section?.sectionKey) || normalizeRuntimePath(section?.runtimePath),
+  )
+
+const validateDeprecatedFrameworkPackageFields = (payload = {}) => {
+  const details = {}
+
+  for (const field of DEPRECATED_FRAMEWORK_PACKAGE_FIELDS) {
+    if (!(field in payload)) continue
+
+    details[field] = DEPRECATED_FRAMEWORK_PACKAGE_FIELD_MESSAGES[field]
+  }
+
+  return details
+}
+
+const validateFrameworkPackageReadiness = ({
+  status,
+  packageKey,
+  sections = [],
+  uiContractKey = '',
+}) => {
+  const details = {}
+  if (!isReadyFrameworkPackageStatus(status)) return details
+
+  if (!normalizeKeyValue(packageKey)) {
+    details.packageKey = 'Package key is required before validation.'
+  }
+
+  if (hasConfiguredSections(sections) && !normalizeKeyValue(uiContractKey)) {
+    details.uiContractKey = 'UI Contract is required before validation when sections are configured.'
+  }
+
+  return details
+}
 
 const validateSectionRuntimePaths = async ({ sections = [], frameworkKey }) => {
   const runtimePaths = [
@@ -324,9 +396,6 @@ const validateFrameworkPackageAccessRules = ({
 
 const validateFrameworkPackageRegistryReferences = async ({
   frameworkKey,
-  compatibleWorkflowKeys = [],
-  validationConfig = [],
-  workflowPolicyConfig = [],
   validationBindings = [],
   workflowBindings = [],
   sections = [],
@@ -335,29 +404,15 @@ const validateFrameworkPackageRegistryReferences = async ({
   validateUiContractSections = false,
 }) => {
   const details = {}
-  const { missingKeys, registryByKey } = await resolveKnownFrameworkKeys([frameworkKey])
+  const { missingKeys } = await resolveKnownFrameworkKeys([frameworkKey])
 
   if (missingKeys.length > 0) {
     details.frameworkKey = buildUnknownFrameworkKeyMessage(missingKeys)
     return details
   }
 
-  const registryEntry = registryByKey.get(frameworkKey)
-  const supportedWorkflowKeySet = new Set(registryEntry?.supportedWorkflowKeys || [])
-  const unsupportedWorkflowKeys = compatibleWorkflowKeys.filter(
-    (workflowKey) => !supportedWorkflowKeySet.has(workflowKey),
-  )
-
-  if (unsupportedWorkflowKeys.length > 0) {
-    details.compatibleWorkflowKeys = buildUnsupportedWorkflowKeyMessage(
-      frameworkKey,
-      unsupportedWorkflowKeys,
-    )
-  }
-
   const validationKeys = [
     ...new Set([
-      ...(validationConfig || []).map((item) => String(item?.validationKey || '').trim().toLowerCase()),
       ...(validationBindings || []).map((item) => String(item?.validationKey || '').trim().toLowerCase()),
     ].filter(Boolean)),
   ]
@@ -382,7 +437,6 @@ const validateFrameworkPackageRegistryReferences = async ({
 
   const policyKeys = [
     ...new Set([
-      ...(workflowPolicyConfig || []).map((item) => String(item?.policyKey || '').trim().toLowerCase()),
       ...(workflowBindings || []).map((item) => String(item?.policyKey || '').trim().toLowerCase()),
     ].filter(Boolean)),
   ]
@@ -473,13 +527,25 @@ export const listFrameworkPackages = async (req, res, next) => {
 
 export const createFrameworkPackage = async (req, res, next) => {
   try {
+    const deprecatedFieldDetails = validateDeprecatedFrameworkPackageFields(req.body)
+    if (Object.keys(deprecatedFieldDetails).length > 0) {
+      return sendValidationFailed(res, req, deprecatedFieldDetails)
+    }
+
+    const canonicalPackagePayload = omitDeprecatedFrameworkPackageFields(req.body)
+
     const accessRuleDetails = validateFrameworkPackageAccessRules(req.body)
     if (Object.keys(accessRuleDetails).length > 0) {
       return sendValidationFailed(res, req, accessRuleDetails)
     }
 
+    const readinessDetails = validateFrameworkPackageReadiness(canonicalPackagePayload)
+    if (Object.keys(readinessDetails).length > 0) {
+      return sendValidationFailed(res, req, readinessDetails)
+    }
+
     const validationDetails = await validateFrameworkPackageRegistryReferences({
-      ...req.body,
+      ...canonicalPackagePayload,
       validateSections: true,
       validateUiContractSections: true,
     })
@@ -501,7 +567,7 @@ export const createFrameworkPackage = async (req, res, next) => {
 
     const actorUserId = req.context?.userId || req.userId
     const frameworkPackage = new FrameworkPackage({
-      ...req.body,
+      ...canonicalPackagePayload,
       isDefault: false,
       createdBy: actorUserId,
       updatedBy: actorUserId,
@@ -540,8 +606,6 @@ export const createFrameworkPackage = async (req, res, next) => {
         sections: frameworkPackage.sections,
         runtimeSettings: frameworkPackage.runtimeSettings,
         executionModel: frameworkPackage.executionModel,
-        validationConfig: frameworkPackage.validationConfig,
-        workflowPolicyConfig: frameworkPackage.workflowPolicyConfig,
         validationBindings: frameworkPackage.validationBindings,
         workflowBindings: frameworkPackage.workflowBindings,
         uiContractKey: frameworkPackage.uiContractKey,
@@ -553,11 +617,7 @@ export const createFrameworkPackage = async (req, res, next) => {
         allowCustomerOutputDefinitions: frameworkPackage.allowCustomerOutputDefinitions,
         artifactRetentionDays: frameworkPackage.artifactRetentionDays,
         allowOutputRevisionHistory: frameworkPackage.allowOutputRevisionHistory,
-        compatibleWorkflowKeys: frameworkPackage.compatibleWorkflowKeys,
-        defaultAgentIds: frameworkPackage.defaultAgentIds,
-        requiredSkillIds: frameworkPackage.requiredSkillIds,
         capabilities: frameworkPackage.capabilities,
-        validationRules: frameworkPackage.validationRules,
       },
     })
 
@@ -633,20 +693,23 @@ export const updateFrameworkPackage = async (req, res, next) => {
       })
     }
 
-    const nextFrameworkKey = req.body.frameworkKey ?? frameworkPackage.frameworkKey
-    const nextVersion = req.body.version ?? frameworkPackage.version
-    const nextStatus = req.body.status ?? frameworkPackage.status
-    const nextCompatibleWorkflowKeys =
-      req.body.compatibleWorkflowKeys ?? frameworkPackage.compatibleWorkflowKeys
-    const nextValidationConfig = req.body.validationConfig ?? frameworkPackage.validationConfig
-    const nextWorkflowPolicyConfig = req.body.workflowPolicyConfig ?? frameworkPackage.workflowPolicyConfig
-    const nextValidationBindings = req.body.validationBindings ?? frameworkPackage.validationBindings
-    const nextWorkflowBindings = req.body.workflowBindings ?? frameworkPackage.workflowBindings
-    const nextSections = req.body.sections ?? frameworkPackage.sections
-    const nextUiContractKey = req.body.uiContractKey ?? frameworkPackage.uiContractKey
-    const nextVisibility = req.body.visibility ?? frameworkPackage.visibility
-    const nextCustomerAccessMode = req.body.customerAccessMode ?? frameworkPackage.customerAccessMode
-    const nextAssignedCustomerIds = req.body.assignedCustomerIds ?? frameworkPackage.assignedCustomerIds
+    const deprecatedFieldDetails = validateDeprecatedFrameworkPackageFields(req.body)
+    if (Object.keys(deprecatedFieldDetails).length > 0) {
+      return sendValidationFailed(res, req, deprecatedFieldDetails)
+    }
+
+    const canonicalPackagePayload = omitDeprecatedFrameworkPackageFields(req.body)
+    const nextFrameworkKey = canonicalPackagePayload.frameworkKey ?? frameworkPackage.frameworkKey
+    const nextVersion = canonicalPackagePayload.version ?? frameworkPackage.version
+    const nextStatus = canonicalPackagePayload.status ?? frameworkPackage.status
+    const nextPackageKey = canonicalPackagePayload.packageKey ?? frameworkPackage.packageKey
+    const nextValidationBindings = canonicalPackagePayload.validationBindings ?? frameworkPackage.validationBindings
+    const nextWorkflowBindings = canonicalPackagePayload.workflowBindings ?? frameworkPackage.workflowBindings
+    const nextSections = canonicalPackagePayload.sections ?? frameworkPackage.sections
+    const nextUiContractKey = canonicalPackagePayload.uiContractKey ?? frameworkPackage.uiContractKey
+    const nextVisibility = canonicalPackagePayload.visibility ?? frameworkPackage.visibility
+    const nextCustomerAccessMode = canonicalPackagePayload.customerAccessMode ?? frameworkPackage.customerAccessMode
+    const nextAssignedCustomerIds = canonicalPackagePayload.assignedCustomerIds ?? frameworkPackage.assignedCustomerIds
 
     const accessRuleDetails = validateFrameworkPackageAccessRules({
       visibility: nextVisibility,
@@ -657,21 +720,50 @@ export const updateFrameworkPackage = async (req, res, next) => {
       return sendValidationFailed(res, req, accessRuleDetails)
     }
 
-    const validationDetails = await validateFrameworkPackageRegistryReferences({
-      frameworkKey: nextFrameworkKey,
-      compatibleWorkflowKeys: nextCompatibleWorkflowKeys,
-      validationConfig: nextValidationConfig,
-      workflowPolicyConfig: nextWorkflowPolicyConfig,
-      validationBindings: nextValidationBindings,
-      workflowBindings: nextWorkflowBindings,
+    if (frameworkPackage.status !== FRAMEWORK_PACKAGE_STATUSES.ACTIVE && nextStatus === FRAMEWORK_PACKAGE_STATUSES.ACTIVE) {
+      return sendConflict(res, req, ACTIVATION_ENDPOINT_REQUIRED_MESSAGE, {
+        field: 'status',
+        reason: 'FRAMEWORK_PACKAGE_USE_ACTIVATE_ENDPOINT',
+      })
+    }
+
+    if (frameworkPackage.status === FRAMEWORK_PACKAGE_STATUSES.ACTIVE && nextStatus !== FRAMEWORK_PACKAGE_STATUSES.ACTIVE) {
+      return sendConflict(res, req, ACTIVE_PACKAGE_STATUS_CHANGE_MESSAGE, {
+        field: 'status',
+        reason: 'FRAMEWORK_PACKAGE_ACTIVE_STATUS_LOCKED',
+      })
+    }
+
+    const readinessDetails = validateFrameworkPackageReadiness({
+      status: nextStatus,
+      packageKey: nextPackageKey,
       sections: nextSections,
       uiContractKey: nextUiContractKey,
-      validateSections: req.body.sections !== undefined,
-      validateUiContractSections:
-        req.body.sections !== undefined
-        || req.body.uiContractKey !== undefined
-        || req.body.frameworkKey !== undefined,
     })
+    if (Object.keys(readinessDetails).length > 0) {
+      return sendValidationFailed(res, req, readinessDetails)
+    }
+
+    const shouldValidateCanonicalReferences = [
+      'frameworkKey',
+      'status',
+      'sections',
+      'uiContractKey',
+      'validationBindings',
+      'workflowBindings',
+    ].some((field) => canonicalPackagePayload[field] !== undefined)
+
+    const validationDetails = shouldValidateCanonicalReferences
+      ? await validateFrameworkPackageRegistryReferences({
+        frameworkKey: nextFrameworkKey,
+        validationBindings: nextValidationBindings,
+        workflowBindings: nextWorkflowBindings,
+        sections: nextSections,
+        uiContractKey: nextUiContractKey,
+        validateSections: true,
+        validateUiContractSections: true,
+      })
+      : {}
     if (Object.keys(validationDetails).length > 0) {
       return sendValidationFailed(res, req, validationDetails)
     }
@@ -686,20 +778,6 @@ export const updateFrameworkPackage = async (req, res, next) => {
       return sendConflict(res, req, DUPLICATE_FRAMEWORK_PACKAGE_MESSAGE, {
         field: 'version',
         reason: 'FRAMEWORK_PACKAGE_VERSION_CONFLICT',
-      })
-    }
-
-    if (frameworkPackage.status !== FRAMEWORK_PACKAGE_STATUSES.ACTIVE && nextStatus === FRAMEWORK_PACKAGE_STATUSES.ACTIVE) {
-      return sendConflict(res, req, ACTIVATION_ENDPOINT_REQUIRED_MESSAGE, {
-        field: 'status',
-        reason: 'FRAMEWORK_PACKAGE_USE_ACTIVATE_ENDPOINT',
-      })
-    }
-
-    if (frameworkPackage.status === FRAMEWORK_PACKAGE_STATUSES.ACTIVE && nextStatus !== FRAMEWORK_PACKAGE_STATUSES.ACTIVE) {
-      return sendConflict(res, req, ACTIVE_PACKAGE_STATUS_CHANGE_MESSAGE, {
-        field: 'status',
-        reason: 'FRAMEWORK_PACKAGE_ACTIVE_STATUS_LOCKED',
       })
     }
 
@@ -721,8 +799,6 @@ export const updateFrameworkPackage = async (req, res, next) => {
       'sections',
       'runtimeSettings',
       'executionModel',
-      'validationConfig',
-      'workflowPolicyConfig',
       'validationBindings',
       'workflowBindings',
       'uiContractKey',
@@ -734,18 +810,14 @@ export const updateFrameworkPackage = async (req, res, next) => {
       'allowCustomerOutputDefinitions',
       'artifactRetentionDays',
       'allowOutputRevisionHistory',
-      'compatibleWorkflowKeys',
-      'defaultAgentIds',
-      'requiredSkillIds',
       'capabilities',
-      'validationRules',
     ]
 
     for (const field of fields) {
-      if (req.body[field] === undefined) continue
+      if (canonicalPackagePayload[field] === undefined) continue
 
       const previousValue = cloneAuditValue(frameworkPackage[field])
-      const nextValue = cloneAuditValue(req.body[field])
+      const nextValue = cloneAuditValue(canonicalPackagePayload[field])
 
       if (isDeepStrictEqual(previousValue, nextValue)) {
         continue
@@ -755,7 +827,7 @@ export const updateFrameworkPackage = async (req, res, next) => {
         from: previousValue,
         to: nextValue,
       }
-      frameworkPackage[field] = req.body[field]
+      frameworkPackage[field] = canonicalPackagePayload[field]
     }
 
     frameworkPackage.updatedBy = req.context?.userId || req.userId
@@ -832,6 +904,29 @@ export const activateFrameworkPackage = async (req, res, next) => {
       })
     }
 
+    const readinessDetails = validateFrameworkPackageReadiness({
+      status: FRAMEWORK_PACKAGE_STATUSES.ACTIVE,
+      packageKey: frameworkPackage.packageKey,
+      sections: frameworkPackage.sections,
+      uiContractKey: frameworkPackage.uiContractKey,
+    })
+    if (Object.keys(readinessDetails).length > 0) {
+      return sendValidationFailed(res, req, readinessDetails)
+    }
+
+    const validationDetails = await validateFrameworkPackageRegistryReferences({
+      frameworkKey: frameworkPackage.frameworkKey,
+      validationBindings: frameworkPackage.validationBindings,
+      workflowBindings: frameworkPackage.workflowBindings,
+      sections: frameworkPackage.sections,
+      uiContractKey: frameworkPackage.uiContractKey,
+      validateSections: true,
+      validateUiContractSections: true,
+    })
+    if (Object.keys(validationDetails).length > 0) {
+      return sendValidationFailed(res, req, validationDetails)
+    }
+
     const actorUserId = req.context?.userId || req.userId
     const previousActivePackageIds = []
 
@@ -850,15 +945,38 @@ export const activateFrameworkPackage = async (req, res, next) => {
       )
 
       for (const relatedPackage of relatedPackages) {
-        if (relatedPackage.status === FRAMEWORK_PACKAGE_STATUSES.ACTIVE) {
-          previousActivePackageIds.push(toIdString(relatedPackage._id))
-          relatedPackage.status = FRAMEWORK_PACKAGE_STATUSES.VALIDATED
+        const relatedPackagePatch = {
+          isDefault: false,
+          updatedBy: actorUserId,
+          updatedAt: activationTime,
         }
 
-        relatedPackage.isDefault = false
-        relatedPackage.updatedBy = actorUserId
-        relatedPackage.updatedAt = activationTime
-        await relatedPackage.save({ session })
+        if (relatedPackage.status === FRAMEWORK_PACKAGE_STATUSES.ACTIVE) {
+          previousActivePackageIds.push(toIdString(relatedPackage._id))
+          relatedPackagePatch.status = FRAMEWORK_PACKAGE_STATUSES.VALIDATED
+        }
+
+        await FrameworkPackage.updateOne(
+          { _id: relatedPackage._id },
+          { $set: relatedPackagePatch },
+          { session, runValidators: false },
+        )
+      }
+
+      const remainingActiveOrDefaultCount = await applySession(
+        FrameworkPackage.countDocuments({
+          frameworkKey: frameworkPackage.frameworkKey,
+          _id: { $ne: frameworkPackage._id },
+          $or: [
+            { status: FRAMEWORK_PACKAGE_STATUSES.ACTIVE },
+            { isDefault: true },
+          ],
+        }),
+        session,
+      )
+
+      if (remainingActiveOrDefaultCount > 0) {
+        throw createActiveDefaultInvariantError()
       }
 
       frameworkPackage.status = FRAMEWORK_PACKAGE_STATUSES.ACTIVE
@@ -894,7 +1012,7 @@ export const activateFrameworkPackage = async (req, res, next) => {
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
-    if (isActiveDefaultConflictError(err)) {
+    if (isActiveDefaultConflictError(err) || isActiveDefaultInvariantError(err)) {
       return sendConflict(res, req, ACTIVE_DEFAULT_CONFLICT_MESSAGE, {
         field: 'status',
         reason: 'FRAMEWORK_PACKAGE_ACTIVE_DEFAULT_CONFLICT',

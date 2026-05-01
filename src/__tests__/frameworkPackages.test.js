@@ -169,6 +169,12 @@ const makeFrameworkPackageDoc = (overrides = {}) => {
     },
     validationConfig: [],
     workflowPolicyConfig: [],
+    validationBindings: [],
+    workflowBindings: [],
+    uiContractKey: 'vmf-ui-contract-v1',
+    stateModelKey: null,
+    stateModelVersion: null,
+    stateModelMode: 'INTERNAL',
     availableOutputKeys: ['board-summary'],
     defaultOutputStyles: ['executive-concise'],
     allowCustomerOutputDefinitions: false,
@@ -269,6 +275,7 @@ beforeEach(() => {
   FrameworkPackage.countDocuments = jest.fn()
   FrameworkPackage.findOne = jest.fn()
   FrameworkPackage.findById = jest.fn()
+  FrameworkPackage.updateOne = jest.fn().mockResolvedValue({ matchedCount: 1, modifiedCount: 1 })
   FrameworkRegistry.find = jest.fn()
   ValidationRegistry.find = jest.fn()
   WorkflowPolicy.find = jest.fn()
@@ -370,7 +377,6 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
         frameworkKey: 'QMF',
         frameworkName: 'Quality Messaging Framework',
         version: '2.3.1',
-        compatibleWorkflowKeys: ['qmf-release'],
       })
 
     expect(res.status).toBe(422)
@@ -381,6 +387,16 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
   test('POST /api/v1/super-admin/runtime-control/framework-packages creates a framework package', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     mockFindOneSelect(null)
+    UIContract.findOne.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue({
+          uiContractKey: 'vmf-ui-contract-v1',
+          status: 'ACTIVE',
+          frameworkKeys: ['VMF'],
+          sections: [{ sectionKey: 'customer_problem' }],
+        }),
+      }),
+    })
 
     const res = await request
       .post('/api/v1/super-admin/runtime-control/framework-packages')
@@ -398,6 +414,7 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
         visibility: 'CUSTOMER_VISIBLE',
         customerAccessMode: 'ALL_CUSTOMERS',
         assignedCustomerIds: [],
+        uiContractKey: 'vmf-ui-contract-v1',
         sections: [
           {
             sectionKey: 'customer_problem',
@@ -422,17 +439,10 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
         allowCustomerOutputDefinitions: false,
         artifactRetentionDays: 365,
         allowOutputRevisionHistory: true,
-        compatibleWorkflowKeys: ['vmf-baseline', 'vmf-publish'],
-        defaultAgentIds: ['agent-validator'],
-        requiredSkillIds: ['skill-snapshot'],
         capabilities: {
           supportsPreviewMode: true,
           supportsFullReport: true,
           requiresValidationBeforePublish: true,
-        },
-        validationRules: {
-          requiredSections: ['customer_problem'],
-          publishChecks: ['validation-pass'],
         },
       })
 
@@ -445,6 +455,13 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     expect(res.body.data.stateModelKey).toBeNull()
     expect(res.body.data.stateModelVersion).toBeNull()
     expect(res.body.data.stateModelMode).toBe('INTERNAL')
+    expect(res.body.data.uiContractKey).toBe('vmf-ui-contract-v1')
+    expect(res.body.data.validationConfig).toBeUndefined()
+    expect(res.body.data.workflowPolicyConfig).toBeUndefined()
+    expect(res.body.data.compatibleWorkflowKeys).toBeUndefined()
+    expect(res.body.data.defaultAgentIds).toBeUndefined()
+    expect(res.body.data.requiredSkillIds).toBeUndefined()
+    expect(res.body.data.validationRules).toBeUndefined()
     expect(res.body.data.availableOutputKeys).toContain('board-summary')
     expect(res.body.data.updatedBy.id).toBe(SUPER_ADMIN_ID)
     expect(FrameworkPackage.prototype.save).toHaveBeenCalled()
@@ -495,49 +512,107 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     )
   })
 
-  test('POST /api/v1/super-admin/runtime-control/framework-packages rejects conflicting validation overrides', async () => {
+  test('POST /api/v1/super-admin/runtime-control/framework-packages rejects deprecated legacy runtime contract fields', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
 
-    const blockingWarningRes = await request
+    const res = await request
       .post('/api/v1/super-admin/runtime-control/framework-packages')
       .set('Authorization', `Bearer ${token}`)
       .send({
         frameworkKey: 'VMF',
         frameworkName: 'Value Management Framework',
         version: '2.4.4',
-        validationConfig: [
-          {
-            validationKey: 'required-sections-check',
-            blockingOverride: true,
-            warningOnlyOverride: true,
-          },
-        ],
+        validationConfig: [{ validationKey: 'required-sections-check' }],
+        workflowPolicyConfig: [{ policyKey: 'vmf-publish' }],
+        compatibleWorkflowKeys: ['vmf-baseline'],
+        defaultAgentIds: ['agent-validator'],
+        requiredSkillIds: ['skill-snapshot'],
+        validationRules: {
+          requiredSections: ['customer_problem'],
+          publishChecks: ['validation-pass'],
+        },
       })
 
-    expect(blockingWarningRes.status).toBe(422)
-    expect(blockingWarningRes.body.error.details['validationConfig.0.warningOnlyOverride']).toBe(
-      'Validation cannot be both blocking and warning-only.',
-    )
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.validationConfig).toContain('validationBindings')
+    expect(res.body.error.details.workflowPolicyConfig).toContain('workflowBindings')
+    expect(res.body.error.details.compatibleWorkflowKeys).toContain('workflowBindings')
+    expect(res.body.error.details.defaultAgentIds).toContain('workflow policies')
+    expect(res.body.error.details.requiredSkillIds).toContain('workflow policies')
+    expect(res.body.error.details.validationRules).toContain('validationBindings')
+  })
 
-    const latestFreshnessRes = await request
+  test('POST /api/v1/super-admin/runtime-control/framework-packages rejects empty deprecated legacy fields at validation boundary', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/framework-packages')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        frameworkKey: 'VMF',
+        frameworkName: 'Value Management Framework',
+        version: '2.4.45',
+        validationConfig: [],
+        workflowPolicyConfig: [],
+        compatibleWorkflowKeys: [],
+        defaultAgentIds: [],
+        requiredSkillIds: [],
+        validationRules: {
+          requiredSections: [],
+          publishChecks: [],
+        },
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.validationConfig).toContain('validationBindings')
+    expect(res.body.error.details.workflowPolicyConfig).toContain('workflowBindings')
+    expect(res.body.error.details.compatibleWorkflowKeys).toContain('workflowBindings')
+    expect(res.body.error.details.defaultAgentIds).toContain('workflow policies')
+    expect(res.body.error.details.requiredSkillIds).toContain('workflow policies')
+    expect(res.body.error.details.validationRules).toContain('validationBindings')
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages requires package key before validation', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
       .post('/api/v1/super-admin/runtime-control/framework-packages')
       .set('Authorization', `Bearer ${token}`)
       .send({
         frameworkKey: 'VMF',
         frameworkName: 'Value Management Framework',
         version: '2.4.5',
-        validationConfig: [
+        status: 'VALIDATED',
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.packageKey).toBe('Package key is required before validation.')
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages requires UI Contract before validating packages with sections', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/framework-packages')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        frameworkKey: 'VMF',
+        frameworkName: 'Value Management Framework',
+        version: '2.4.6',
+        packageKey: 'vmf-2-4-6',
+        status: 'VALIDATED',
+        sections: [
           {
-            validationKey: 'required-sections-check',
-            requiresLatestRunOverride: true,
-            freshnessOverrideMinutes: 60,
+            sectionKey: 'customer_problem',
+            runtimePath: 'framework_state.sections.customer_problem',
+            required: true,
           },
         ],
       })
 
-    expect(latestFreshnessRes.status).toBe(422)
-    expect(latestFreshnessRes.body.error.details['validationConfig.0.freshnessOverrideMinutes']).toBe(
-      'Freshness override must be empty when latest-run override is required.',
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.uiContractKey).toBe(
+      'UI Contract is required before validation when sections are configured.',
     )
   })
 
@@ -567,13 +642,30 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
         frameworkKey: 'VMF',
         frameworkName: 'Value Management Framework',
         version: '2.4.2',
-        validationConfig: [{ validationKey: 'required-sections-check', enabled: true }],
-        workflowPolicyConfig: [{ policyKey: 'vmf-publish', enabled: true, executionOrder: 10 }],
+        validationBindings: [
+          {
+            validationKey: 'required-sections-check',
+            trigger: 'ON_SUBMIT',
+            blocking: true,
+            priority: 100,
+            enabled: true,
+          },
+        ],
+        workflowBindings: [
+          {
+            policyKey: 'vmf-publish',
+            executionContext: 'ON_SUBMIT',
+            priority: 100,
+            enabled: true,
+          },
+        ],
       })
 
     expect(res.status).toBe(201)
-    expect(res.body.data.validationConfig[0].validationKey).toBe('required-sections-check')
-    expect(res.body.data.workflowPolicyConfig[0].policyKey).toBe('vmf-publish')
+    expect(res.body.data.validationBindings[0].validationKey).toBe('required-sections-check')
+    expect(res.body.data.workflowBindings[0].policyKey).toBe('vmf-publish')
+    expect(res.body.data.validationConfig).toBeUndefined()
+    expect(res.body.data.workflowPolicyConfig).toBeUndefined()
   })
 
   test('POST /api/v1/super-admin/runtime-control/framework-packages creates Sprint 2 package bindings', async () => {
@@ -833,6 +925,10 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     expect(res.body.data).toHaveLength(1)
     expect(res.body.meta.total).toBe(1)
     expect(res.body.data[0].updatedBy.name).toBe('Super Administrator')
+    expect(res.body.data[0].compatibleWorkflowKeys).toBeUndefined()
+    expect(res.body.data[0].defaultAgentIds).toBeUndefined()
+    expect(res.body.data[0].requiredSkillIds).toBeUndefined()
+    expect(res.body.data[0].validationRules).toBeUndefined()
   })
 
   test('GET /api/v1/super-admin/runtime-control/framework-packages/:packageId returns 404 when not found', async () => {
@@ -886,21 +982,47 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     )
   })
 
+  test('PATCH /api/v1/super-admin/runtime-control/framework-packages/:packageId rejects empty deprecated legacy fields before update diffing', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        validationConfig: [],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.validationConfig).toContain('validationBindings')
+    expect(FrameworkPackage.findById).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
   test('PATCH /api/v1/super-admin/runtime-control/framework-packages/:packageId updates a framework package', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     const frameworkPackage = makeFrameworkPackageDoc()
     FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
     mockFindOneSelect(null)
+    UIContract.findOne.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue({
+          uiContractKey: 'vmf-ui-contract-v1',
+          status: 'ACTIVE',
+          frameworkKeys: ['VMF'],
+          sections: [{ sectionKey: 'customer_problem' }],
+        }),
+      }),
+    })
 
     const res = await request
       .patch(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}`)
       .set('Authorization', `Bearer ${token}`)
       .send({
         description: 'Updated framework package description',
+        uiContractKey: 'vmf-ui-contract-v1',
         stateModelKey: 'vmf-state-model-v2-3-1',
         stateModelVersion: '2.3.1',
         stateModelMode: 'EXTERNAL',
-        compatibleWorkflowKeys: ['vmf-baseline', 'vmf-publish'],
       })
 
     expect(res.status).toBe(200)
@@ -931,6 +1053,23 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     expect(res.body.error.details.reason).toBe('FRAMEWORK_PACKAGE_ACTIVATION_REQUIRES_VALIDATED')
   })
 
+  test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/activate enforces runtime package readiness', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackageDoc({
+      status: 'VALIDATED',
+      uiContractKey: '',
+    }))
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/activate`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.uiContractKey).toBe(
+      'UI Contract is required before validation when sections are configured.',
+    )
+  })
+
   test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/activate activates a validated package and demotes the previous active package', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     const frameworkPackage = makeFrameworkPackageDoc({
@@ -940,6 +1079,7 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     const activePackage = makeFrameworkPackageDoc({
       _id: ACTIVE_FRAMEWORK_PACKAGE_ID,
       version: '2.3.0',
+      packageKey: '',
       status: 'ACTIVE',
       isDefault: true,
     })
@@ -948,6 +1088,16 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     FrameworkPackage.find.mockReturnValue({
       session: jest.fn().mockResolvedValue([activePackage]),
     })
+    UIContract.findOne.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue({
+          uiContractKey: 'vmf-ui-contract-v1',
+          status: 'ACTIVE',
+          frameworkKeys: ['VMF'],
+          sections: [{ sectionKey: 'customer_problem' }],
+        }),
+      }),
+    })
 
     const res = await request
       .post(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/activate`)
@@ -955,15 +1105,28 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
 
     expect(res.status).toBe(200)
     expect(frameworkPackage.save).toHaveBeenCalled()
-    expect(activePackage.save).toHaveBeenCalled()
+    expect(activePackage.save).not.toHaveBeenCalled()
+    expect(FrameworkPackage.updateOne).toHaveBeenCalledWith(
+      { _id: activePackage._id },
+      {
+        $set: expect.objectContaining({
+          status: 'VALIDATED',
+          isDefault: false,
+          updatedBy: SUPER_ADMIN_ID,
+        }),
+      },
+      expect.objectContaining({ runValidators: false }),
+    )
     expect(frameworkPackage.status).toBe('ACTIVE')
     expect(frameworkPackage.isDefault).toBe(true)
-    expect(activePackage.isDefault).toBe(false)
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'FRAMEWORK_PACKAGE_ACTIVATED',
       resourceType: 'FrameworkPackage',
       scope: { frameworkKey: 'VMF' },
       summary: 'Super Admin activated framework package VMF 2.3.1',
+      diff: expect.objectContaining({
+        previousActivePackageIds: [ACTIVE_FRAMEWORK_PACKAGE_ID],
+      }),
     }))
   })
 })

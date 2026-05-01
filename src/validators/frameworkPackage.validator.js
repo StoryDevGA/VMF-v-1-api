@@ -62,11 +62,6 @@ const sectionKeySchema = z
     'Section key must use lowercase letters, numbers, underscores, or hyphens',
   )
 
-const sectionKeyListSchema = z
-  .array(sectionKeySchema)
-  .max(200, 'List must contain 200 items or fewer')
-  .transform((values) => [...new Set(values)])
-
 const runtimePathSchema = z
   .string()
   .trim()
@@ -138,23 +133,10 @@ const customerIdListSchema = z
   .max(200, 'Assigned customers must contain 200 items or fewer')
   .transform((values) => [...new Set(values)])
 
-const nullableBooleanSchema = z
-  .union([z.boolean(), z.null()])
-  .default(null)
-
-const nullableNumberSchema = z
-  .union([z.number().int().min(0).max(10080), z.null()])
-  .default(null)
-
 const capabilitiesSchema = z.object({
   supportsPreviewMode: z.boolean().default(false),
   supportsFullReport: z.boolean().default(false),
   requiresValidationBeforePublish: z.boolean().default(true),
-})
-
-const validationRulesSchema = z.object({
-  requiredSections: sectionKeyListSchema.default([]),
-  publishChecks: tokenListSchema.default([]),
 })
 
 const applyUniqueBy = (items, ctx, getKey, pathField, message) => {
@@ -223,33 +205,24 @@ const executionModelSchema = z.object({
     .default(FRAMEWORK_PACKAGE_EVALUATION_MODES.POLICY_DRIVEN),
 })
 
-const applyValidationConfigRules = (value, ctx) => {
-  if (value.blockingOverride === true && value.warningOnlyOverride === true) {
+const DEPRECATED_FRAMEWORK_PACKAGE_FIELD_MESSAGES = Object.freeze({
+  compatibleWorkflowKeys: 'compatibleWorkflowKeys is deprecated. Use workflowBindings instead.',
+  defaultAgentIds: 'defaultAgentIds is deprecated. Agents are assigned through workflow policies.',
+  requiredSkillIds: 'requiredSkillIds is deprecated. Skills are resolved through workflow policies.',
+  validationRules: 'validationRules is deprecated. Use sections and validationBindings instead.',
+  validationConfig: 'validationConfig is deprecated. Use validationBindings instead.',
+  workflowPolicyConfig: 'workflowPolicyConfig is deprecated. Use workflowBindings instead.',
+})
+
+const deprecatedFrameworkPackageFieldSchema = (message) =>
+  z.unknown().optional().superRefine((value, ctx) => {
+    if (value === undefined) return
+
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      path: ['warningOnlyOverride'],
-      message: 'Validation cannot be both blocking and warning-only.',
+      message,
     })
-  }
-
-  if (value.requiresLatestRunOverride === true && value.freshnessOverrideMinutes !== null) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ['freshnessOverrideMinutes'],
-      message: 'Freshness override must be empty when latest-run override is required.',
-    })
-  }
-}
-
-const validationConfigSchema = z.object({
-  validationKey: tokenListItemSchema,
-  enabled: z.boolean().default(true),
-  blockingOverride: nullableBooleanSchema,
-  warningOnlyOverride: nullableBooleanSchema,
-  freshnessOverrideMinutes: nullableNumberSchema,
-  requiresLatestRunOverride: nullableBooleanSchema,
-  notes: z.string().trim().max(500, 'Validation notes must be 500 characters or fewer').default(''),
-}).superRefine(applyValidationConfigRules)
+  })
 
 const validationBindingSchema = z.object({
   validationKey: tokenListItemSchema,
@@ -273,14 +246,6 @@ const validationBindingsSchema = z
       'Validation binding already exists for this trigger.',
     )
   })
-
-const workflowPolicyConfigSchema = z.object({
-  policyKey: tokenListItemSchema,
-  enabled: z.boolean().default(true),
-  stageGroup: z.string().trim().max(120, 'Stage group must be 120 characters or fewer').transform((value) => value.toUpperCase()).default(''),
-  executionOrder: z.number().int().min(0).max(10000).default(0),
-  notes: z.string().trim().max(500, 'Workflow notes must be 500 characters or fewer').default(''),
-})
 
 const workflowBindingSchema = z.object({
   policyKey: tokenListItemSchema,
@@ -429,8 +394,8 @@ const createFrameworkPackageSchema = z.object({
     stateModel: FRAMEWORK_PACKAGE_STATE_MODELS.LIFECYCLE_BASED,
     evaluationMode: FRAMEWORK_PACKAGE_EVALUATION_MODES.POLICY_DRIVEN,
   }),
-  validationConfig: z.array(validationConfigSchema).max(100, 'Validation config must contain 100 items or fewer').default([]),
-  workflowPolicyConfig: z.array(workflowPolicyConfigSchema).max(100, 'Workflow config must contain 100 items or fewer').default([]),
+  validationConfig: deprecatedFrameworkPackageFieldSchema(DEPRECATED_FRAMEWORK_PACKAGE_FIELD_MESSAGES.validationConfig),
+  workflowPolicyConfig: deprecatedFrameworkPackageFieldSchema(DEPRECATED_FRAMEWORK_PACKAGE_FIELD_MESSAGES.workflowPolicyConfig),
   validationBindings: validationBindingsSchema.default([]),
   workflowBindings: workflowBindingsSchema.default([]),
   uiContractKey: optionalTokenSchema,
@@ -442,18 +407,15 @@ const createFrameworkPackageSchema = z.object({
   allowCustomerOutputDefinitions: z.boolean().default(false),
   artifactRetentionDays: z.number().int().min(0).max(3650).default(365),
   allowOutputRevisionHistory: z.boolean().default(true),
-  compatibleWorkflowKeys: tokenListSchema.default([]),
-  defaultAgentIds: tokenListSchema.default([]),
-  requiredSkillIds: tokenListSchema.default([]),
+  compatibleWorkflowKeys: deprecatedFrameworkPackageFieldSchema(DEPRECATED_FRAMEWORK_PACKAGE_FIELD_MESSAGES.compatibleWorkflowKeys),
+  defaultAgentIds: deprecatedFrameworkPackageFieldSchema(DEPRECATED_FRAMEWORK_PACKAGE_FIELD_MESSAGES.defaultAgentIds),
+  requiredSkillIds: deprecatedFrameworkPackageFieldSchema(DEPRECATED_FRAMEWORK_PACKAGE_FIELD_MESSAGES.requiredSkillIds),
   capabilities: capabilitiesSchema.default({
     supportsPreviewMode: false,
     supportsFullReport: false,
     requiresValidationBeforePublish: true,
   }),
-  validationRules: validationRulesSchema.default({
-    requiredSections: [],
-    publishChecks: [],
-  }),
+  validationRules: deprecatedFrameworkPackageFieldSchema(DEPRECATED_FRAMEWORK_PACKAGE_FIELD_MESSAGES.validationRules),
 }).superRefine(applyAccessRules)
 
 const updateFrameworkPackageSchema = z.object({
@@ -516,8 +478,8 @@ const updateFrameworkPackageSchema = z.object({
   sections: sectionsSchema.optional(),
   runtimeSettings: runtimeSettingsSchema.optional(),
   executionModel: executionModelSchema.optional(),
-  validationConfig: z.array(validationConfigSchema).max(100, 'Validation config must contain 100 items or fewer').optional(),
-  workflowPolicyConfig: z.array(workflowPolicyConfigSchema).max(100, 'Workflow config must contain 100 items or fewer').optional(),
+  validationConfig: deprecatedFrameworkPackageFieldSchema(DEPRECATED_FRAMEWORK_PACKAGE_FIELD_MESSAGES.validationConfig),
+  workflowPolicyConfig: deprecatedFrameworkPackageFieldSchema(DEPRECATED_FRAMEWORK_PACKAGE_FIELD_MESSAGES.workflowPolicyConfig),
   validationBindings: validationBindingsSchema.optional(),
   workflowBindings: workflowBindingsSchema.optional(),
   uiContractKey: optionalTokenSchema.optional(),
@@ -529,11 +491,11 @@ const updateFrameworkPackageSchema = z.object({
   allowCustomerOutputDefinitions: z.boolean().optional(),
   artifactRetentionDays: z.number().int().min(0).max(3650).optional(),
   allowOutputRevisionHistory: z.boolean().optional(),
-  compatibleWorkflowKeys: tokenListSchema.optional(),
-  defaultAgentIds: tokenListSchema.optional(),
-  requiredSkillIds: tokenListSchema.optional(),
+  compatibleWorkflowKeys: deprecatedFrameworkPackageFieldSchema(DEPRECATED_FRAMEWORK_PACKAGE_FIELD_MESSAGES.compatibleWorkflowKeys),
+  defaultAgentIds: deprecatedFrameworkPackageFieldSchema(DEPRECATED_FRAMEWORK_PACKAGE_FIELD_MESSAGES.defaultAgentIds),
+  requiredSkillIds: deprecatedFrameworkPackageFieldSchema(DEPRECATED_FRAMEWORK_PACKAGE_FIELD_MESSAGES.requiredSkillIds),
   capabilities: capabilitiesSchema.optional(),
-  validationRules: validationRulesSchema.optional(),
+  validationRules: deprecatedFrameworkPackageFieldSchema(DEPRECATED_FRAMEWORK_PACKAGE_FIELD_MESSAGES.validationRules),
 }).superRefine(applyAccessRules).refine(
   (value) => Object.keys(value).length > 0,
   { message: 'At least one updatable field is required.', path: ['frameworkKey'] },
