@@ -69,6 +69,21 @@ const buildFrameworkPackageFindOneChain = (row) => ({
   }),
 })
 
+const makeSourceFrameworkPackage = (overrides = {}) => ({
+  packageKey: 'vmf-2-3-1',
+  frameworkKey: 'VMF',
+  version: '2.3.1',
+  status: 'ACTIVE',
+  sections: [
+    {
+      sectionKey: 'customer_problem',
+      runtimePath: 'framework_state.sections.customer_problem',
+      required: true,
+    },
+  ],
+  ...overrides,
+})
+
 let app
 let request
 let tokenService
@@ -190,6 +205,7 @@ describe('UI Contract Routes', () => {
 
   test('POST /api/v1/super-admin/runtime-control/ui-contracts creates a UI Contract', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
+    FrameworkPackage.findOne.mockReturnValue(buildFrameworkPackageFindOneChain(makeSourceFrameworkPackage()))
 
     const res = await request
       .post('/api/v1/super-admin/runtime-control/ui-contracts')
@@ -201,10 +217,15 @@ describe('UI Contract Routes', () => {
         status: 'ACTIVE',
         frameworkKeys: ['VMF'],
         introducedInVersion: '2.3.1',
+        deprecatedInVersion: null,
+        sourcePackageKey: 'vmf-2-3-1',
+        sourcePackageVersion: '2.3.1',
+        sourceFrameworkKey: 'VMF',
         sections: [
           {
             sectionKey: 'customer_problem',
             runtimePath: 'framework_state.sections.customer_problem',
+            sourcePackageKey: 'vmf-2-3-1',
             label: 'Customer Problem',
             helpText: 'Describe the core customer problem.',
             displayOrder: 10,
@@ -217,6 +238,9 @@ describe('UI Contract Routes', () => {
     expect(res.body.data.uiContractKey).toBe('vmf-ui-contract-v1')
     expect(res.body.data.sections[0].label).toBe('Customer Problem')
     expect(res.body.data.sections[0].runtimePath).toBe('framework_state.sections.customer_problem')
+    expect(res.body.data.sections[0].source).toBe('PACKAGE')
+    expect(res.body.data.sections[0].isCustom).toBe(false)
+    expect(res.body.data.deprecatedInVersion).toBeNull()
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'UI_CONTRACT_CREATED',
       resourceType: 'UIContract',
@@ -252,6 +276,150 @@ describe('UI Contract Routes', () => {
     expect(res.body.data.sourcePackageKey).toBe('vmf-2-3-1')
     expect(FrameworkPackage.findOne).toHaveBeenNthCalledWith(1, { packageKey: 'vmf-2-3-1' })
     expect(FrameworkPackage.findOne).toHaveBeenNthCalledWith(2, { frameworkKey: 'VMF', version: '2.3.1' })
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/ui-contracts rejects package-backed sections with empty runtime paths', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/ui-contracts')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        uiContractKey: 'vmf-ui-contract-v1',
+        name: 'VMF UI Contract',
+        status: 'ACTIVE',
+        frameworkKeys: ['VMF'],
+        sourcePackageKey: 'vmf-2-3-1',
+        sourcePackageVersion: '2.3.1',
+        sourceFrameworkKey: 'VMF',
+        sections: [
+          {
+            sectionKey: 'customer_problem',
+            runtimePath: '',
+            label: 'Customer Problem',
+            displayOrder: 10,
+          },
+        ],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details['sections.0.runtimePath']).toBe(
+      'Package-backed UI Contract sections require a runtime path.',
+    )
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/ui-contracts rejects orphan package-backed sections', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    FrameworkPackage.findOne.mockReturnValue(buildFrameworkPackageFindOneChain(makeSourceFrameworkPackage()))
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/ui-contracts')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        uiContractKey: 'vmf-ui-contract-v1',
+        name: 'VMF UI Contract',
+        status: 'ACTIVE',
+        frameworkKeys: ['VMF'],
+        sourcePackageKey: 'vmf-2-3-1',
+        sourcePackageVersion: '2.3.1',
+        sourceFrameworkKey: 'VMF',
+        sections: [
+          {
+            sectionKey: 'overview',
+            runtimePath: 'framework_state.sections.overview',
+            label: 'Overview',
+            displayOrder: 10,
+          },
+        ],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.sections).toContain(
+      'UI Contract sections must exist in the source package unless marked custom: overview.',
+    )
+    expect(res.body.error.details.sections).toContain(
+      'Required package sections must have mapped UI Contract sections: customer_problem.',
+    )
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/ui-contracts rejects runtime path mismatches', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    FrameworkPackage.findOne.mockReturnValue(buildFrameworkPackageFindOneChain(makeSourceFrameworkPackage()))
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/ui-contracts')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        uiContractKey: 'vmf-ui-contract-v1',
+        name: 'VMF UI Contract',
+        status: 'ACTIVE',
+        frameworkKeys: ['VMF'],
+        sourcePackageKey: 'vmf-2-3-1',
+        sourcePackageVersion: '2.3.1',
+        sourceFrameworkKey: 'VMF',
+        sections: [
+          {
+            sectionKey: 'customer_problem',
+            runtimePath: 'framework_state.sections.wrong_problem',
+            label: 'Customer Problem',
+            displayOrder: 10,
+          },
+        ],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.sections).toContain(
+      'UI Contract section runtime paths must match the source package: customer_problem expected framework_state.sections.customer_problem.',
+    )
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/ui-contracts allows explicit custom sections without runtime paths', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/ui-contracts')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        uiContractKey: 'vmf-ui-contract-v1',
+        name: 'VMF UI Contract',
+        status: 'DRAFT',
+        frameworkKeys: ['VMF'],
+        sections: [
+          {
+            sectionKey: 'overview',
+            runtimePath: '',
+            source: 'CUSTOM',
+            isCustom: true,
+            label: 'Overview',
+            displayOrder: 10,
+          },
+        ],
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data.sections[0].source).toBe('CUSTOM')
+    expect(res.body.data.sections[0].isCustom).toBe(true)
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/ui-contracts/:uiContractId keeps omitted fields unchanged', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    UIContract.findById.mockResolvedValue(makeUIContractDoc({
+      name: 'VMF UI Contract',
+      introducedInVersion: '2.3.1',
+      deprecatedInVersion: null,
+    }))
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/ui-contracts/${UI_CONTRACT_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        name: 'Updated VMF UI Contract',
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.name).toBe('Updated VMF UI Contract')
+    expect(res.body.data.introducedInVersion).toBe('2.3.1')
+    expect(res.body.data.deprecatedInVersion).toBeNull()
   })
 
   test('GET /api/v1/super-admin/runtime-control/ui-contracts/:uiContractId/dependencies returns referencing packages', async () => {

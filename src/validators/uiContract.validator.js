@@ -6,6 +6,7 @@ import {
 } from './shared.js'
 import {
   UI_CONTRACT_COMPATIBILITY_MODES,
+  UI_CONTRACT_SECTION_SOURCES,
   UI_CONTRACT_STATUSES,
 } from '../models/UIContract.js'
 
@@ -27,39 +28,48 @@ const frameworkKeysSchema = z
   .max(50, 'Framework keys must contain 50 items or fewer')
   .transform((values) => [...new Set(values)])
 
-const tokenListSchema = z
+const tokenListBaseSchema = z
   .array(z.string().trim().min(1).max(120))
   .max(100, 'Compatibility tags must contain 100 items or fewer')
   .transform((values) => [...new Set(values.map((value) => value.trim()).filter(Boolean))])
+
+const tokenListSchema = tokenListBaseSchema
   .default([])
 
-const optionalVersionSchema = z
-  .string()
-  .trim()
-  .max(50)
-  .default('')
-  .refine((value) => !value || semverRegex.test(value), 'Version must use semantic version format.')
+const versionValueSchema = z
+  .preprocess((value) => {
+    if (value === undefined || value === null) return null
+    const normalized = String(value).trim()
+    return normalized || null
+  }, z.string().max(50).refine((value) => semverRegex.test(value), 'Version must use semantic version format.').nullable())
 
-const optionalKeySchema = z
+const optionalVersionSchema = versionValueSchema
+  .default(null)
+
+const keyValueSchema = z
   .string()
   .trim()
   .max(140)
-  .default('')
   .transform((value) => value.toLowerCase())
   .refine((value) => !value || keyRegex.test(value), 'Value must use lowercase letters, numbers, or hyphens.')
 
-const optionalFrameworkKeySchema = z
+const optionalKeySchema = keyValueSchema.default('')
+
+const frameworkKeyValueSchema = z
   .string()
   .trim()
   .max(100)
-  .default('')
   .transform((value) => value.toUpperCase())
   .refine((value) => !value || frameworkKeyRegex.test(value), 'Framework key must use uppercase letters, numbers, or underscores')
+
+const optionalFrameworkKeySchema = frameworkKeyValueSchema.default('')
 
 const sectionSchema = z.object({
   sectionKey: z.string().trim().min(1).max(140),
   runtimePath: z.string().trim().max(240).default(''),
   sourcePackageKey: optionalKeySchema,
+  source: z.enum(Object.values(UI_CONTRACT_SECTION_SOURCES)).default(UI_CONTRACT_SECTION_SOURCES.PACKAGE),
+  isCustom: z.boolean().default(false),
   label: z.string().trim().min(1, 'Section label is required.').max(140),
   shortLabel: z.string().trim().max(80).default(''),
   helpText: z.string().trim().max(500).default(''),
@@ -73,6 +83,21 @@ const sectionSchema = z.object({
   sectionGroup: z.string().trim().max(120).default(''),
   iconKey: z.string().trim().max(120).default(''),
   presentationKey: z.string().trim().max(120).default(''),
+}).transform((value) => {
+  const isCustom = value.isCustom || value.source === UI_CONTRACT_SECTION_SOURCES.CUSTOM
+  return {
+    ...value,
+    source: isCustom ? UI_CONTRACT_SECTION_SOURCES.CUSTOM : UI_CONTRACT_SECTION_SOURCES.PACKAGE,
+    isCustom,
+  }
+}).superRefine((value, ctx) => {
+  if (value.isCustom) return
+  if (String(value.runtimePath || '').trim()) return
+  ctx.addIssue({
+    code: z.ZodIssueCode.custom,
+    path: ['runtimePath'],
+    message: 'Package-backed UI Contract sections require a runtime path.',
+  })
 })
 
 const lifecycleStageSchema = z.object({
@@ -136,7 +161,7 @@ const assertUniqueVisibleOrder = (items, ctx, path, message) => {
   })
 }
 
-const sectionsSchema = z.array(sectionSchema).max(100).default([]).superRefine((items, ctx) => {
+const sectionsBaseSchema = z.array(sectionSchema).max(100).superRefine((items, ctx) => {
   assertUnique(items, ctx, (item) => String(item.sectionKey).trim().toLowerCase(), 'sectionKey', 'Section keys must be unique.')
   assertUniqueVisibleOrder(items, ctx, 'displayOrder', 'Visible section display order values must be unique.')
   items.forEach((item, index) => {
@@ -150,15 +175,21 @@ const sectionsSchema = z.array(sectionSchema).max(100).default([]).superRefine((
   })
 })
 
-const lifecycleStagesSchema = z.array(lifecycleStageSchema).max(100).default([]).superRefine((items, ctx) => {
+const sectionsSchema = sectionsBaseSchema.default([])
+
+const lifecycleStagesBaseSchema = z.array(lifecycleStageSchema).max(100).superRefine((items, ctx) => {
   assertUnique(items, ctx, (item) => item.stageKey, 'stageKey', 'Lifecycle stage keys must be unique.')
   assertUniqueVisibleOrder(items, ctx, 'displayOrder', 'Visible lifecycle display order values must be unique.')
 })
 
-const actionsSchema = z.array(actionSchema).max(100).default([]).superRefine((items, ctx) => {
+const lifecycleStagesSchema = lifecycleStagesBaseSchema.default([])
+
+const actionsBaseSchema = z.array(actionSchema).max(100).superRefine((items, ctx) => {
   assertUnique(items, ctx, (item) => item.actionKey, 'actionKey', 'Action keys must be unique.')
   assertUniqueVisibleOrder(items, ctx, 'displayOrder', 'Visible action display order values must be unique.')
 })
+
+const actionsSchema = actionsBaseSchema.default([])
 
 const createUIContractSchema = z.object({
   uiContractKey: z.string().trim().min(1).max(140).transform((value) => value.toLowerCase())
@@ -183,7 +214,29 @@ const createUIContractSchema = z.object({
   clonedFromStableId: z.string().trim().max(180).default(''),
 })
 
-const updateUIContractSchema = createUIContractSchema.partial().refine(
+const updateUIContractSchema = z.object({
+  uiContractKey: z.string().trim().min(1).max(140).transform((value) => value.toLowerCase())
+    .refine((value) => keyRegex.test(value), 'UI contract key must use lowercase letters, numbers, or hyphens.')
+    .optional(),
+  name: z.string().trim().min(1, 'Name is required.').max(160).optional(),
+  description: z.string().trim().max(800).optional(),
+  status: z.enum(Object.values(UI_CONTRACT_STATUSES)).optional(),
+  frameworkKeys: frameworkKeysSchema.optional(),
+  introducedInVersion: versionValueSchema.optional(),
+  deprecatedInVersion: versionValueSchema.optional(),
+  compatibilityTags: tokenListBaseSchema.optional(),
+  compatibilityMode: z.enum(Object.values(UI_CONTRACT_COMPATIBILITY_MODES)).optional(),
+  sourcePackageKey: keyValueSchema.optional(),
+  sourcePackageVersion: versionValueSchema.optional(),
+  sourceFrameworkKey: frameworkKeyValueSchema.optional(),
+  sections: sectionsBaseSchema.optional(),
+  lifecycleStages: lifecycleStagesBaseSchema.optional(),
+  actions: actionsBaseSchema.optional(),
+  isSystem: z.boolean().optional(),
+  isProtected: z.boolean().optional(),
+  isLocked: z.boolean().optional(),
+  clonedFromStableId: z.string().trim().max(180).optional(),
+}).refine(
   (value) => Object.keys(value).length > 0,
   { message: 'At least one updatable field is required.', path: ['name'] },
 )

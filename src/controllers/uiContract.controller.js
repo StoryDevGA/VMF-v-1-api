@@ -1,5 +1,8 @@
 import { isDeepStrictEqual } from 'node:util'
-import UIContract, { UI_CONTRACT_STATUSES } from '../models/UIContract.js'
+import UIContract, {
+  UI_CONTRACT_SECTION_SOURCES,
+  UI_CONTRACT_STATUSES,
+} from '../models/UIContract.js'
 import FrameworkPackage, { FRAMEWORK_PACKAGE_STATUSES } from '../models/FrameworkPackage.js'
 import auditService from '../services/auditService.js'
 import {
@@ -122,7 +125,105 @@ const validateFrameworkKeys = async (frameworkKeys = []) => {
   return details
 }
 
-const validateSourcePackage = async ({
+const normalizeSectionKey = (value) => String(value || '').trim().toLowerCase()
+const normalizeRuntimePath = (value) => String(value || '').trim()
+
+const isCustomSection = (section = {}) =>
+  section?.isCustom === true
+  || String(section?.source || '').trim().toUpperCase() === UI_CONTRACT_SECTION_SOURCES.CUSTOM
+
+const appendSectionIssue = (issues, issue) => {
+  if (issue) issues.push(issue)
+}
+
+const validateUIContractSectionMapping = ({ sections = [], sourcePackage = null }) => {
+  const details = {}
+  const issues = []
+  const uiSections = Array.isArray(sections) ? sections : []
+  const packageBackedSections = uiSections.filter((section) => !isCustomSection(section))
+
+  if (!sourcePackage) {
+    if (packageBackedSections.length > 0) {
+      details.sections = 'Package-backed UI Contract sections require a source package.'
+    }
+    return details
+  }
+
+  const packageSections = Array.isArray(sourcePackage.sections) ? sourcePackage.sections : []
+  const packageSectionByKey = new Map()
+  packageSections.forEach((section) => {
+    const sectionKey = normalizeSectionKey(section?.sectionKey)
+    if (sectionKey) packageSectionByKey.set(sectionKey, section)
+  })
+
+  const mappedSectionKeys = new Set()
+  const emptyRuntimePathKeys = []
+  const orphanedSectionKeys = []
+  const runtimePathMismatches = []
+
+  packageBackedSections.forEach((section) => {
+    const sectionKey = normalizeSectionKey(section?.sectionKey)
+    if (!sectionKey) return
+
+    const runtimePath = normalizeRuntimePath(section?.runtimePath)
+    if (!runtimePath) {
+      emptyRuntimePathKeys.push(sectionKey)
+      return
+    }
+
+    const packageSection = packageSectionByKey.get(sectionKey)
+    if (!packageSection) {
+      orphanedSectionKeys.push(sectionKey)
+      return
+    }
+
+    const expectedRuntimePath = normalizeRuntimePath(packageSection?.runtimePath)
+    if (runtimePath !== expectedRuntimePath) {
+      runtimePathMismatches.push(`${sectionKey} expected ${expectedRuntimePath || '(empty)'}`)
+      return
+    }
+
+    mappedSectionKeys.add(sectionKey)
+  })
+
+  const missingRequiredSectionKeys = packageSections
+    .filter((section) => section?.required === true)
+    .map((section) => normalizeSectionKey(section?.sectionKey))
+    .filter((sectionKey) => sectionKey && !mappedSectionKeys.has(sectionKey))
+
+  appendSectionIssue(
+    issues,
+    emptyRuntimePathKeys.length > 0
+      ? `Package-backed UI Contract sections require runtime paths: ${emptyRuntimePathKeys.join(', ')}.`
+      : '',
+  )
+  appendSectionIssue(
+    issues,
+    orphanedSectionKeys.length > 0
+      ? `UI Contract sections must exist in the source package unless marked custom: ${orphanedSectionKeys.join(', ')}.`
+      : '',
+  )
+  appendSectionIssue(
+    issues,
+    runtimePathMismatches.length > 0
+      ? `UI Contract section runtime paths must match the source package: ${runtimePathMismatches.join(', ')}.`
+      : '',
+  )
+  appendSectionIssue(
+    issues,
+    missingRequiredSectionKeys.length > 0
+      ? `Required package sections must have mapped UI Contract sections: ${missingRequiredSectionKeys.join(', ')}.`
+      : '',
+  )
+
+  if (issues.length > 0) {
+    details.sections = issues.join(' ')
+  }
+
+  return details
+}
+
+const resolveSourcePackage = async ({
   sourcePackageKey = '',
   sourcePackageVersion = '',
   sourceFrameworkKey = '',
@@ -133,14 +234,14 @@ const validateSourcePackage = async ({
   const normalizedSourceFrameworkKey = String(sourceFrameworkKey || '').trim().toUpperCase()
   const normalizedSourcePackageVersion = String(sourcePackageVersion || '').trim()
   if (!normalizedSourcePackageKey && !normalizedSourceFrameworkKey && !normalizedSourcePackageVersion) {
-    return {}
+    return { details: {}, sourcePackage: null }
   }
 
   let sourcePackage = null
 
   if (normalizedSourcePackageKey) {
     sourcePackage = await FrameworkPackage.findOne({ packageKey: normalizedSourcePackageKey })
-      .select('packageKey version frameworkKey status')
+      .select('packageKey version frameworkKey status sections.sectionKey sections.runtimePath sections.required')
       .lean()
   }
 
@@ -149,14 +250,17 @@ const validateSourcePackage = async ({
       frameworkKey: normalizedSourceFrameworkKey,
       version: normalizedSourcePackageVersion,
     })
-      .select('packageKey version frameworkKey status')
+      .select('packageKey version frameworkKey status sections.sectionKey sections.runtimePath sections.required')
       .lean()
   }
 
   if (!sourcePackage) {
     const packageReference = normalizedSourcePackageKey
       || [normalizedSourceFrameworkKey, normalizedSourcePackageVersion].filter(Boolean).join(' ')
-    return { sourcePackageKey: `Framework Package "${packageReference}" was not found.` }
+    return {
+      details: { sourcePackageKey: `Framework Package "${packageReference}" was not found.` },
+      sourcePackage: null,
+    }
   }
 
   const allowedStatuses = new Set([
@@ -169,14 +273,20 @@ const validateSourcePackage = async ({
 
   if (!allowedStatuses.has(sourcePackage.status)) {
     return {
-      sourcePackageKey:
-        `Framework Package "${normalizedSourcePackageKey}" must be VALIDATED or ACTIVE${status === UI_CONTRACT_STATUSES.DRAFT ? ', or DRAFT while the UI Contract is DRAFT' : ''}.`,
+      details: {
+        sourcePackageKey:
+          `Framework Package "${normalizedSourcePackageKey}" must be VALIDATED or ACTIVE${status === UI_CONTRACT_STATUSES.DRAFT ? ', or DRAFT while the UI Contract is DRAFT' : ''}.`,
+      },
+      sourcePackage: null,
     }
   }
 
   if (normalizedSourceFrameworkKey && normalizedSourceFrameworkKey !== sourcePackage.frameworkKey) {
     return {
-      sourceFrameworkKey: `Source framework key must match package framework "${sourcePackage.frameworkKey}".`,
+      details: {
+        sourceFrameworkKey: `Source framework key must match package framework "${sourcePackage.frameworkKey}".`,
+      },
+      sourcePackage: null,
     }
   }
 
@@ -185,17 +295,23 @@ const validateSourcePackage = async ({
     : []
   if (!normalizedFrameworkKeys.includes(sourcePackage.frameworkKey)) {
     return {
-      sourcePackageKey: `Framework Package "${normalizedSourcePackageKey}" is not compatible with selected framework keys.`,
+      details: {
+        sourcePackageKey: `Framework Package "${normalizedSourcePackageKey}" is not compatible with selected framework keys.`,
+      },
+      sourcePackage: null,
     }
   }
 
   if (normalizedSourcePackageVersion && normalizedSourcePackageVersion !== sourcePackage.version) {
     return {
-      sourcePackageVersion: `Source package version must match package version "${sourcePackage.version}".`,
+      details: {
+        sourcePackageVersion: `Source package version must match package version "${sourcePackage.version}".`,
+      },
+      sourcePackage: null,
     }
   }
 
-  return {}
+  return { details: {}, sourcePackage }
 }
 
 const findUIContractById = (uiContractId) => {
@@ -246,15 +362,24 @@ export const createUIContract = async (req, res, next) => {
       return sendValidationFailed(res, req, frameworkDetails)
     }
 
-    const sourcePackageDetails = await validateSourcePackage({
+    const sourcePackageResult = await resolveSourcePackage({
       sourcePackageKey: req.body.sourcePackageKey,
       sourcePackageVersion: req.body.sourcePackageVersion,
       sourceFrameworkKey: req.body.sourceFrameworkKey,
       frameworkKeys: req.body.frameworkKeys,
       status: req.body.status,
     })
+    const sourcePackageDetails = sourcePackageResult.details
     if (Object.keys(sourcePackageDetails).length > 0) {
       return sendValidationFailed(res, req, sourcePackageDetails)
+    }
+
+    const sectionMappingDetails = validateUIContractSectionMapping({
+      sections: req.body.sections,
+      sourcePackage: sourcePackageResult.sourcePackage,
+    })
+    if (Object.keys(sectionMappingDetails).length > 0) {
+      return sendValidationFailed(res, req, sectionMappingDetails)
     }
 
     const existing = await UIContract.findOne({ uiContractKey: req.body.uiContractKey }).select('_id')
@@ -355,15 +480,29 @@ export const updateUIContract = async (req, res, next) => {
       return sendValidationFailed(res, req, frameworkDetails)
     }
 
-    const sourcePackageDetails = await validateSourcePackage({
-      sourcePackageKey: req.body.sourcePackageKey ?? uiContract.sourcePackageKey,
-      sourcePackageVersion: req.body.sourcePackageVersion ?? uiContract.sourcePackageVersion,
-      sourceFrameworkKey: req.body.sourceFrameworkKey ?? uiContract.sourceFrameworkKey,
+    const nextSourcePackageKey = req.body.sourcePackageKey ?? uiContract.sourcePackageKey
+    const nextSourcePackageVersion = req.body.sourcePackageVersion ?? uiContract.sourcePackageVersion
+    const nextSourceFrameworkKey = req.body.sourceFrameworkKey ?? uiContract.sourceFrameworkKey
+    const nextSections = req.body.sections ?? uiContract.sections
+
+    const sourcePackageResult = await resolveSourcePackage({
+      sourcePackageKey: nextSourcePackageKey,
+      sourcePackageVersion: nextSourcePackageVersion,
+      sourceFrameworkKey: nextSourceFrameworkKey,
       frameworkKeys: nextFrameworkKeys,
       status: req.body.status ?? uiContract.status,
     })
+    const sourcePackageDetails = sourcePackageResult.details
     if (Object.keys(sourcePackageDetails).length > 0) {
       return sendValidationFailed(res, req, sourcePackageDetails)
+    }
+
+    const sectionMappingDetails = validateUIContractSectionMapping({
+      sections: nextSections,
+      sourcePackage: sourcePackageResult.sourcePackage,
+    })
+    if (Object.keys(sectionMappingDetails).length > 0) {
+      return sendValidationFailed(res, req, sectionMappingDetails)
     }
 
     const diff = {}

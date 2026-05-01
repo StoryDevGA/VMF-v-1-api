@@ -342,6 +342,9 @@ const validateUIContractSectionAlignment = ({ sections = [], uiContract = null }
 
   const uiContractSectionKeys = new Set(
     getStructuralSections(uiContract.sections)
+      .filter((section) =>
+        section?.isCustom !== true
+        && String(section?.source || '').trim().toUpperCase() !== 'CUSTOM')
       .map((section) => normalizeSectionKey(section?.sectionKey))
       .filter(Boolean),
   )
@@ -461,7 +464,7 @@ const validateFrameworkPackageRegistryReferences = async ({
   const normalizedUiContractKey = String(uiContractKey || '').trim().toLowerCase()
   if (normalizedUiContractKey) {
     const uiContract = await UIContract.findOne({ uiContractKey: normalizedUiContractKey })
-      .select('uiContractKey status frameworkKeys introducedInVersion deprecatedInVersion compatibilityMode sections.sectionKey')
+      .select('uiContractKey status frameworkKeys introducedInVersion deprecatedInVersion compatibilityMode sections.sectionKey sections.source sections.isCustom')
       .lean()
 
     if (!uiContract) {

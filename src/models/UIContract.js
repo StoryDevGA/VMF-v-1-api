@@ -13,6 +13,18 @@ export const UI_CONTRACT_COMPATIBILITY_MODES = Object.freeze({
   OPEN: 'OPEN',
 })
 
+export const UI_CONTRACT_SECTION_SOURCES = Object.freeze({
+  PACKAGE: 'PACKAGE',
+  CUSTOM: 'CUSTOM',
+})
+
+export const UI_CONTRACT_SECTION_MAPPING_STATUSES = Object.freeze({
+  MAPPED: 'MAPPED',
+  MISSING: 'MISSING',
+  ORPHANED: 'ORPHANED',
+  CUSTOM: 'CUSTOM',
+})
+
 const keyPattern = /^[a-z][a-z0-9-]*$/
 const stableIdPattern = /^ui-contract-[a-z][a-z0-9-]*$/
 const frameworkKeyPattern = /^[A-Z][A-Z0-9_]*$/
@@ -61,6 +73,17 @@ const uiContractSectionSchema = new mongoose.Schema(
       maxlength: 140,
       default: '',
       match: [keyPattern, 'Source package key must use lowercase letters, numbers, or hyphens.'],
+    },
+    source: {
+      type: String,
+      enum: Object.values(UI_CONTRACT_SECTION_SOURCES),
+      default: UI_CONTRACT_SECTION_SOURCES.PACKAGE,
+      trim: true,
+      uppercase: true,
+    },
+    isCustom: {
+      type: Boolean,
+      default: false,
     },
     label: {
       type: String,
@@ -328,7 +351,7 @@ const uiContractSchema = new mongoose.Schema(
       type: String,
       trim: true,
       maxlength: 50,
-      default: '',
+      default: null,
       validate: {
         validator(value) {
           return !value || semverPattern.test(String(value).trim())
@@ -340,7 +363,7 @@ const uiContractSchema = new mongoose.Schema(
       type: String,
       trim: true,
       maxlength: 50,
-      default: '',
+      default: null,
       validate: {
         validator(value) {
           return !value || semverPattern.test(String(value).trim())
@@ -504,6 +527,25 @@ uiContractSchema.pre('validate', function normalizeUIContract(next) {
     'sections',
     'Visible section display order values must be unique.',
   )
+
+  if (Array.isArray(this.sections)) {
+    this.sections.forEach((section, index) => {
+      const source = String(section?.source || '').trim().toUpperCase()
+      const isCustom = section?.isCustom === true || source === UI_CONTRACT_SECTION_SOURCES.CUSTOM
+      section.source = isCustom
+        ? UI_CONTRACT_SECTION_SOURCES.CUSTOM
+        : UI_CONTRACT_SECTION_SOURCES.PACKAGE
+      section.isCustom = isCustom
+
+      if (!isCustom && !String(section?.runtimePath || '').trim()) {
+        this.invalidate(
+          `sections.${index}.runtimePath`,
+          'Package-backed UI Contract sections require a runtime path.',
+        )
+      }
+    })
+  }
+
   ensureUnique(
     this.lifecycleStages,
     (stage) => String(stage?.stageKey || '').trim().toUpperCase(),
