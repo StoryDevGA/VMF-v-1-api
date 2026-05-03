@@ -117,6 +117,36 @@ const normalizeTokenList = (values) => {
   return [...new Set(normalized)]
 }
 
+const normalizeTokenValue = (value) =>
+  String(value || '')
+    .trim()
+    .toLowerCase()
+
+const slugifyToken = (value) => {
+  const normalized = normalizeTokenValue(value)
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+
+  if (!normalized) return ''
+  if (tokenPattern.test(normalized)) return normalized
+
+  // Request validators are the strict write gate; model slugification preserves legacy/read-path records.
+  const prefixed = `binding-${normalized}`.replace(/-+/g, '-').replace(/^-+|-+$/g, '')
+  return tokenPattern.test(prefixed) ? prefixed : 'binding'
+}
+
+const buildUniqueToken = (base, existing) => {
+  const safeBase = slugifyToken(base) || 'binding'
+  if (!existing.has(safeBase)) return safeBase
+
+  let counter = 2
+  while (existing.has(`${safeBase}-${counter}`)) {
+    counter += 1
+  }
+  return `${safeBase}-${counter}`
+}
+
 const normalizeCustomerIdList = (values) => {
   if (!Array.isArray(values)) return []
 
@@ -306,6 +336,10 @@ const frameworkPackageValidationConfigSchema = new mongoose.Schema(
 
 const frameworkPackageValidationBindingSchema = new mongoose.Schema(
   {
+    bindingKey: {
+      ...stringTokenField,
+      required: true,
+    },
     validationKey: {
       ...stringTokenField,
       required: true,
@@ -335,6 +369,10 @@ const frameworkPackageValidationBindingSchema = new mongoose.Schema(
     enabled: {
       type: Boolean,
       default: true,
+    },
+    parameters: {
+      type: mongoose.Schema.Types.Mixed,
+      default: undefined,
     },
     notes: {
       type: String,
@@ -782,19 +820,41 @@ frameworkPackageSchema.pre('validate', function normalizeFrameworkPackage(next) 
   }
 
   if (Array.isArray(this.validationBindings)) {
-    const seenBindings = new Set()
-    this.validationBindings.forEach((binding, index) => {
-      const validationKey = String(binding?.validationKey || '').trim().toLowerCase()
-      const trigger = String(binding?.trigger || '').trim().toUpperCase()
-      const key = `${validationKey}:${trigger}`
+    const seenBindingKeys = new Set()
 
-      if (seenBindings.has(key)) {
+    this.validationBindings.forEach((binding) => {
+      if (!binding) return
+      binding.validationKey = normalizeTokenValue(binding.validationKey)
+      binding.trigger = String(binding.trigger || '').trim().toUpperCase()
+
+      const triggerSlug = slugifyToken(String(binding.trigger || '').toLowerCase().replace(/_/g, '-'))
+      const baseKey = `${binding.validationKey || 'validation'}-${triggerSlug || 'trigger'}`
+
+      if (!String(binding.bindingKey || '').trim()) {
+        binding.bindingKey = buildUniqueToken(baseKey, seenBindingKeys)
+      } else {
+        binding.bindingKey = slugifyToken(binding.bindingKey)
+      }
+
+      if (binding.bindingKey) {
+        // Pre-seed so later bindings can avoid collisions with earlier explicit keys.
+        seenBindingKeys.add(binding.bindingKey)
+      }
+    })
+
+    // Validate uniqueness after generation/normalization.
+    const bindingKeySeen = new Set()
+    this.validationBindings.forEach((binding, index) => {
+      const bindingKey = String(binding?.bindingKey || '').trim().toLowerCase()
+      if (!bindingKey) return
+
+      if (bindingKeySeen.has(bindingKey)) {
         this.invalidate(
-          `validationBindings.${index}.validationKey`,
-          'Validation binding already exists for this trigger.',
+          `validationBindings.${index}.bindingKey`,
+          'Validation binding id must be unique within a package.',
         )
       }
-      seenBindings.add(key)
+      bindingKeySeen.add(bindingKey)
     })
   }
 

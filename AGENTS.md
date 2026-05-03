@@ -1,5 +1,12 @@
 # AGENTS.md instructions for C:\Users\garya\OneDrive\Documents\StoryLineOS\VMF-APP\dev-v1\VMF-v-1-api
 
+## Operating Principles (Non-Negotiable)
+
+1. Don't assume. Don't hide confusion. Surface tradeoffs.
+2. Minimum code that solves the problem. Nothing speculative.
+3. Touch only what you must. Clean up only your own mess.
+4. Define success criteria. Loop until verified.
+
 ## Skills
 A skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and file path so you can open the source for full instructions when using a specific skill.
 

@@ -152,6 +152,53 @@ const serializeUserSummary = (value) => {
   }
 }
 
+const tokenPattern = /^[a-z][a-z0-9-]*$/
+
+const slugifyToken = (value) => {
+  const normalized = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+
+  if (!normalized) return ''
+  if (tokenPattern.test(normalized)) return normalized
+
+  const prefixed = `binding-${normalized}`.replace(/-+/g, '-').replace(/^-+|-+$/g, '')
+  return tokenPattern.test(prefixed) ? prefixed : 'binding'
+}
+
+const ensureValidationBindingKeys = (bindings = []) => {
+  if (!Array.isArray(bindings)) return []
+
+  const seen = new Set()
+  return bindings.map((binding) => {
+    const normalized = { ...(binding || {}) }
+    const validationKey = slugifyToken(normalized.validationKey)
+    const trigger = String(normalized.trigger || '').trim().toUpperCase()
+    const triggerSlug = slugifyToken(trigger.toLowerCase().replace(/_/g, '-'))
+    const base = `${validationKey || 'validation'}-${triggerSlug || 'trigger'}`
+
+    // Request validators are the strict write gate; this keeps legacy/read-path payloads serializable.
+    let bindingKey = slugifyToken(normalized.bindingKey)
+    if (!bindingKey) {
+      bindingKey = base
+      let counter = 2
+      while (seen.has(bindingKey)) {
+        bindingKey = `${base}-${counter}`
+        counter += 1
+      }
+    }
+
+    seen.add(bindingKey)
+    normalized.validationKey = validationKey
+    normalized.trigger = trigger
+    normalized.bindingKey = bindingKey
+    return normalized
+  })
+}
+
 const serializeFrameworkPackage = (frameworkPackage, { fallbackUpdatedBy = null } = {}) => {
   const plain = typeof frameworkPackage?.toJSON === 'function'
     ? frameworkPackage.toJSON()
@@ -175,6 +222,8 @@ const serializeFrameworkPackage = (frameworkPackage, { fallbackUpdatedBy = null 
   for (const field of DEPRECATED_FRAMEWORK_PACKAGE_FIELDS) {
     delete plain[field]
   }
+
+  plain.validationBindings = ensureValidationBindingKeys(plain.validationBindings)
 
   return plain
 }
@@ -291,6 +340,7 @@ const buildListFilter = ({ q, status, frameworkKey }) => {
       { 'sections.runtimePath': regex },
       { 'sections.validationKeys': regex },
       { 'validationBindings.validationKey': regex },
+      { 'validationBindings.bindingKey': regex },
       { 'validationBindings.trigger': regex },
       { 'workflowBindings.policyKey': regex },
       { 'workflowBindings.executionContext': regex },

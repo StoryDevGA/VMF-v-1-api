@@ -29,6 +29,8 @@ const tokenRegex = /^[a-z][a-z0-9-]*$/
 const sectionKeyRegex = /^[a-z][a-z0-9_-]*$/
 const runtimePathRegex = /^\S+$/
 const customerIdRegex = /^[A-Za-z0-9][A-Za-z0-9_-]{1,119}$/
+const validationParametersMaxCharacters = 4096
+const validationParametersMaxDepth = 5
 
 const createStatusValues = [
   FRAMEWORK_PACKAGE_STATUSES.DRAFT,
@@ -165,6 +167,7 @@ const applyUniqueBy = (items, ctx, getKey, pathField, message) => {
     if (seen.has(key)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
+        // Parent array schemas prepend their field name, so this becomes e.g. validationBindings.1.bindingKey.
         path: [index, pathField],
         message,
       })
@@ -172,6 +175,47 @@ const applyUniqueBy = (items, ctx, getKey, pathField, message) => {
     seen.add(key)
   })
 }
+
+const getJsonDepth = (value, depth = 0) => {
+  if (value === null || typeof value !== 'object') return depth
+
+  const values = Array.isArray(value) ? value : Object.values(value)
+  if (values.length === 0) return depth + 1
+
+  return Math.max(...values.map((child) => getJsonDepth(child, depth + 1)))
+}
+
+const validationParametersSchema = z
+  .record(z.string(), z.unknown())
+  .optional()
+  .superRefine((value, ctx) => {
+    if (value === undefined) return
+
+    let serialized = ''
+    try {
+      serialized = JSON.stringify(value)
+    } catch {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Validation binding parameters must be serializable JSON.',
+      })
+      return
+    }
+
+    if (serialized.length > validationParametersMaxCharacters) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Validation binding parameters must be ${validationParametersMaxCharacters} characters or fewer.`,
+      })
+    }
+
+    if (getJsonDepth(value) > validationParametersMaxDepth) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Validation binding parameters cannot be nested more than ${validationParametersMaxDepth} levels.`,
+      })
+    }
+  })
 
 const sectionSchema = z.object({
   sectionKey: sectionKeySchema,
@@ -233,12 +277,14 @@ const deprecatedFrameworkPackageFieldSchema = (message) =>
   })
 
 const validationBindingSchema = z.object({
+  bindingKey: tokenListItemSchema,
   validationKey: tokenListItemSchema,
   trigger: z.enum(Object.values(FRAMEWORK_PACKAGE_VALIDATION_TRIGGERS)),
   blocking: z.boolean().default(true),
   priority: z.number().int().min(1).max(10000).default(100),
   freshnessMinutes: z.union([z.number().int().min(1).max(10080), z.null()]).default(null),
   enabled: z.boolean().default(true),
+  parameters: validationParametersSchema,
   notes: z.string().trim().max(500, 'Validation binding notes must be 500 characters or fewer').default(''),
 })
 
@@ -249,9 +295,9 @@ const validationBindingsSchema = z
     applyUniqueBy(
       items,
       ctx,
-      (item) => `${item.validationKey}:${item.trigger}`,
-      'validationKey',
-      'Validation binding already exists for this trigger.',
+      (item) => `${item.bindingKey}`,
+      'bindingKey',
+      'Validation binding id must be unique within a package.',
     )
   })
 

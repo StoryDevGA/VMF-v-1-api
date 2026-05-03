@@ -685,6 +685,7 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
         version: '2.4.2',
         validationBindings: [
           {
+            bindingKey: 'required-sections-on-submit',
             validationKey: 'required-sections-check',
             trigger: 'ON_SUBMIT',
             blocking: true,
@@ -761,6 +762,7 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
         },
         validationBindings: [
           {
+            bindingKey: 'required-sections-on-submit',
             validationKey: 'required-sections-check',
             trigger: 'ON_SUBMIT',
             blocking: true,
@@ -898,14 +900,78 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
         frameworkName: 'Value Management Framework',
         version: '2.5.1',
         validationBindings: [
-          { validationKey: 'required-sections-check', trigger: 'ON_SUBMIT', priority: 100 },
-          { validationKey: 'required-sections-check', trigger: 'ON_SUBMIT', priority: 200 },
+          { bindingKey: 'required-sections-submit', validationKey: 'required-sections-check', trigger: 'ON_SUBMIT', priority: 100 },
+          { bindingKey: 'required-sections-submit', validationKey: 'required-sections-check', trigger: 'ON_SUBMIT', priority: 200 },
         ],
       })
 
     expect(res.status).toBe(422)
-    expect(res.body.error.details['validationBindings.1.validationKey']).toBe(
-      'Validation binding already exists for this trigger.',
+    expect(res.body.error.details['validationBindings.1.bindingKey']).toBe(
+      'Validation binding id must be unique within a package.',
+    )
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages rejects oversized or deeply nested binding parameters', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const basePayload = {
+      frameworkKey: 'VMF',
+      frameworkName: 'Value Management Framework',
+      version: '2.5.4',
+    }
+    const baseBinding = {
+      bindingKey: 'required-sections-on-submit',
+      validationKey: 'required-sections-check',
+      trigger: 'ON_SUBMIT',
+      priority: 100,
+    }
+
+    const oversizedRes = await request
+      .post('/api/v1/super-admin/runtime-control/framework-packages')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        ...basePayload,
+        validationBindings: [
+          {
+            ...baseBinding,
+            parameters: { value: 'x'.repeat(4096) },
+          },
+        ],
+      })
+
+    expect(oversizedRes.status).toBe(422)
+    expect(oversizedRes.body.error.details['validationBindings.0.parameters']).toBe(
+      'Validation binding parameters must be 4096 characters or fewer.',
+    )
+
+    const deeplyNestedRes = await request
+      .post('/api/v1/super-admin/runtime-control/framework-packages')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        ...basePayload,
+        validationBindings: [
+          {
+            ...baseBinding,
+            bindingKey: 'required-sections-on-save',
+            parameters: {
+              one: {
+                two: {
+                  three: {
+                    four: {
+                      five: {
+                        six: true,
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        ],
+      })
+
+    expect(deeplyNestedRes.status).toBe(422)
+    expect(deeplyNestedRes.body.error.details['validationBindings.0.parameters']).toBe(
+      'Validation binding parameters cannot be nested more than 5 levels.',
     )
   })
 
@@ -970,6 +1036,53 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     expect(res.body.data[0].defaultAgentIds).toBeUndefined()
     expect(res.body.data[0].requiredSkillIds).toBeUndefined()
     expect(res.body.data[0].validationRules).toBeUndefined()
+  })
+
+  test('GET /api/v1/super-admin/runtime-control/framework-packages searches validation binding keys', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const rows = [
+      {
+        _id: FRAMEWORK_PACKAGE_ID,
+        frameworkKey: 'VMF',
+        frameworkName: 'Value Management Framework',
+        version: '0.5.33',
+        packageKey: 'qa-validation-binding-0503-1333',
+        packageName: 'QA Validation Binding',
+        description: 'QA package with duplicate validation definitions',
+        status: 'DRAFT',
+        isDefault: false,
+        validationBindings: [
+          {
+            bindingKey: 'required-sections-check-on-submit-2',
+            validationKey: 'required-sections-check',
+            trigger: 'ON_SUBMIT',
+            priority: 225,
+            blocking: true,
+            enabled: true,
+          },
+        ],
+        updatedAt: '2026-05-03T13:33:00.000Z',
+        updatedBy: { _id: SUPER_ADMIN_ID, name: 'Super Administrator' },
+      },
+    ]
+
+    FrameworkPackage.countDocuments.mockResolvedValue(1)
+    FrameworkPackage.find.mockReturnValue(buildFrameworkPackageQueryChain(rows))
+
+    const res = await request
+      .get('/api/v1/super-admin/runtime-control/framework-packages?q=required-sections-check-on-submit-2')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(FrameworkPackage.find).toHaveBeenCalledWith(
+      expect.objectContaining({
+        $or: expect.arrayContaining([
+          { 'validationBindings.bindingKey': expect.any(RegExp) },
+          { 'validationBindings.validationKey': expect.any(RegExp) },
+        ]),
+      }),
+    )
+    expect(res.body.data[0].validationBindings[0].bindingKey).toBe('required-sections-check-on-submit-2')
   })
 
   test('GET /api/v1/super-admin/runtime-control/framework-packages/:packageId returns 404 when not found', async () => {
@@ -1154,6 +1267,7 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackageDoc({
       validationBindings: [
         {
+          bindingKey: 'required-sections-on-submit',
           validationKey: 'required-sections-check',
           trigger: 'ON_SUBMIT',
           blocking: true,
@@ -1310,6 +1424,7 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
       isDefault: true,
       validationBindings: [
         {
+          bindingKey: 'governance-completeness-on-submit',
           validationKey: 'governance-completeness',
           trigger: 'ON_SUBMIT',
           blocking: true,
