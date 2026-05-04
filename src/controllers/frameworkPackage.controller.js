@@ -11,11 +11,15 @@ import ValidationRegistry, { VALIDATION_REGISTRY_STATUSES } from '../models/Vali
 import WorkflowPolicy, { WORKFLOW_POLICY_STATUSES } from '../models/WorkflowPolicy.js'
 import UIContract, { UI_CONTRACT_STATUSES } from '../models/UIContract.js'
 import RuntimeSkill from '../models/RuntimeSkill.js'
+import SkillRoleRegistry, { SKILL_ROLE_REGISTRY_STATUSES } from '../models/SkillRoleRegistry.js'
 import RuntimePathRegistry, {
   RUNTIME_PATH_REGISTRY_CATEGORIES,
   RUNTIME_PATH_REGISTRY_SCOPES,
   RUNTIME_PATH_REGISTRY_STATUSES,
 } from '../models/RuntimePathRegistry.js'
+import {
+  RUNTIME_CONTROL_VERSION_STATUSES,
+} from '../utils/runtimeControlVersioning.js'
 import auditService from '../services/auditService.js'
 import {
   buildUnknownFrameworkKeyMessage,
@@ -58,6 +62,47 @@ const STRUCTURAL_LOCK_FIELDS = Object.freeze([
   'stateModelMode',
   'stateBindingMode',
   'statePersistence',
+])
+
+const DEPENDENCY_LOCK_REASON = 'Locked by Framework Package validation.'
+
+const DEPENDENCY_LOCK_GROUPS = Object.freeze([
+  Object.freeze({
+    key: 'runtimePaths',
+    collectionKey: 'RuntimePathRegistry',
+    model: RuntimePathRegistry,
+  }),
+  Object.freeze({
+    key: 'validations',
+    collectionKey: 'ValidationRegistry',
+    model: ValidationRegistry,
+  }),
+  Object.freeze({
+    key: 'workflowPolicies',
+    collectionKey: 'WorkflowPolicy',
+    model: WorkflowPolicy,
+  }),
+  Object.freeze({
+    key: 'agents',
+    collectionKey: 'RuntimeAgent',
+    model: RuntimeAgent,
+  }),
+  Object.freeze({
+    key: 'skills',
+    collectionKey: 'RuntimeSkill',
+    model: RuntimeSkill,
+  }),
+  Object.freeze({
+    key: 'skillRoles',
+    collectionKey: 'SkillRoleRegistry',
+    model: SkillRoleRegistry,
+  }),
+  Object.freeze({
+    key: 'uiContract',
+    collectionKey: 'UIContract',
+    model: UIContract,
+    singleton: true,
+  }),
 ])
 
 const FRAMEWORK_PACKAGE_AUDITED_FIELDS = Object.freeze([
@@ -770,6 +815,7 @@ const buildDependencyResolutionIntegrityChecks = (dependencies = {}) => {
   const dependencyGroups = [
     { key: 'agents', label: 'Resolved Agents', field: 'workflowBindings' },
     { key: 'skills', label: 'Resolved Skills', field: 'workflowBindings' },
+    { key: 'skillRoles', label: 'Resolved Skill Roles', field: 'workflowBindings' },
     { key: 'runtimePaths', label: 'Resolved Runtime Paths', field: 'sections' },
     { key: 'validations', label: 'Resolved Validations', field: 'validationBindings' },
     { key: 'workflowPolicies', label: 'Resolved Workflow Policies', field: 'workflowBindings' },
@@ -842,6 +888,15 @@ const serializeDependencyReference = ({
   ...rest,
 })
 
+const pickDependencyVersioningFields = (row = {}) => ({
+  componentVersion: Number(row?.componentVersion) || 1,
+  versionStatus: row?.versionStatus || '',
+  lineageId: row?.lineageId || row?.stableId || row?.id || '',
+  isLocked: Boolean(row?.isLocked),
+  lockedAt: row?.lockedAt || null,
+  lockedByPackageKeys: Array.isArray(row?.lockedByPackageKeys) ? row.lockedByPackageKeys : [],
+})
+
 const serializeRuntimePathDependencyReference = ({ row, pathKey, source, issues = [] }) =>
   serializeDependencyReference({
     id: row?.stableId || row?.id || pathKey,
@@ -854,6 +909,7 @@ const serializeRuntimePathDependencyReference = ({ row, pathKey, source, issues 
     scope: row?.scope || '',
     category: row?.category || '',
     isProtected: Boolean(row?.isProtected),
+    ...pickDependencyVersioningFields(row),
   })
 
 const serializeUIContractDependencyReference = ({ uiContract, uiContractKey, frameworkKey }) => {
@@ -879,7 +935,7 @@ const serializeUIContractDependencyReference = ({ uiContract, uiContractKey, fra
   }
 
   return serializeDependencyReference({
-    id: uiContract.stableId || uiContract.id || uiContract.uiContractKey,
+    id: uiContract.stableId || uiContract.id || `ui-contract-${uiContract.uiContractKey}`,
     key: uiContract.uiContractKey,
     name: uiContract.name || uiContract.uiContractKey,
     status: uiContract.status,
@@ -891,6 +947,7 @@ const serializeUIContractDependencyReference = ({ uiContract, uiContractKey, fra
       || String(uiContract.introducedInVersion || '').trim()
       || '',
     compatibilityMode: uiContract.compatibilityMode || '',
+    ...pickDependencyVersioningFields(uiContract),
   })
 }
 
@@ -908,17 +965,17 @@ const fetchFrameworkPackageDependencies = async (frameworkPackage) => {
   const [validationRows, workflowRows, uiContract] = await Promise.all([
     validationKeys.length > 0
       ? ValidationRegistry.find({ key: { $in: validationKeys } })
-        .select('stableId key label status supportedFrameworkKeys packageUsable producerSkillId defaultAgentIds outputPath passFieldPath detailsFieldPath')
+        .select('stableId key label status supportedFrameworkKeys packageUsable producerSkillId defaultAgentIds outputPath passFieldPath detailsFieldPath componentVersion versionStatus lineageId isLocked lockedAt lockedByPackageKeys')
         .lean()
       : Promise.resolve([]),
     workflowPolicyKeys.length > 0
       ? WorkflowPolicy.find({ key: { $in: workflowPolicyKeys } })
-        .select('stableId key name status frameworkKeys primaryAgentId fallbackAgentId requiredAgentIds requiredSkillIds requiredValidationKeys conditions onPassEffects onFailEffects')
+        .select('stableId key name status frameworkKeys primaryAgentId fallbackAgentId requiredAgentIds requiredSkillIds requiredValidationKeys conditions onPassEffects onFailEffects componentVersion versionStatus lineageId isLocked lockedAt lockedByPackageKeys')
         .lean()
       : Promise.resolve([]),
     uiContractKey
       ? UIContract.findOne({ uiContractKey })
-        .select('stableId uiContractKey name status frameworkKeys sourcePackageVersion introducedInVersion compatibilityMode sections.sectionKey sections.runtimePath sections.source sections.isCustom')
+        .select('stableId uiContractKey name status frameworkKeys sourcePackageVersion introducedInVersion compatibilityMode sections.sectionKey sections.runtimePath sections.source sections.isCustom componentVersion versionStatus lineageId isLocked lockedAt lockedByPackageKeys')
         .lean()
       : Promise.resolve(null),
   ])
@@ -949,6 +1006,7 @@ const fetchFrameworkPackageDependencies = async (frameworkPackage) => {
       issues,
       outputPath: row?.outputPath || '',
       producerSkillId: row?.producerSkillId || '',
+      ...pickDependencyVersioningFields(row),
     })
   })
 
@@ -972,6 +1030,7 @@ const fetchFrameworkPackageDependencies = async (frameworkPackage) => {
       source: 'workflowBindings',
       frameworkCompatible: issues.length === 0,
       issues,
+      ...pickDependencyVersioningFields(row),
     })
   })
 
@@ -991,7 +1050,7 @@ const fetchFrameworkPackageDependencies = async (frameworkPackage) => {
   const validationSkillIds = validationRows.map((validation) => validation.producerSkillId)
   const agentRows = agentIds.length > 0
     ? await RuntimeAgent.find({ stableId: { $in: agentIds } })
-      .select('stableId key name status supportedFrameworkKeys defaultSkillIds primarySkillIds optionalSkillIds executionPlan')
+      .select('stableId key name status supportedFrameworkKeys requiredSkillRoleKeys defaultSkillIds primarySkillIds optionalSkillIds executionPlan componentVersion versionStatus lineageId isLocked lockedAt lockedByPackageKeys')
       .lean()
     : []
 
@@ -1006,7 +1065,19 @@ const fetchFrameworkPackageDependencies = async (frameworkPackage) => {
     .filter(Boolean))]
   const skillRows = skillIds.length > 0
     ? await RuntimeSkill.find({ stableId: { $in: skillIds } })
-      .select('stableId key name status supportedFrameworkKeys skillRoleKey category')
+      .select('stableId key name status supportedFrameworkKeys skillRoleKey category componentVersion versionStatus lineageId isLocked lockedAt lockedByPackageKeys')
+      .lean()
+    : []
+
+  const skillRoleKeys = [...new Set([
+    ...skillRows.map((skill) => skill.skillRoleKey),
+    ...agentRows.flatMap((agent) => Array.isArray(agent.requiredSkillRoleKeys) ? agent.requiredSkillRoleKeys : []),
+  ]
+    .map((value) => String(value || '').trim().toUpperCase())
+    .filter(Boolean))]
+  const skillRoleRows = skillRoleKeys.length > 0
+    ? await SkillRoleRegistry.find({ roleKey: { $in: skillRoleKeys } })
+      .select('stableId roleKey label status componentVersion versionStatus lineageId isLocked lockedAt lockedByPackageKeys')
       .lean()
     : []
 
@@ -1025,13 +1096,14 @@ const fetchFrameworkPackageDependencies = async (frameworkPackage) => {
     .filter(Boolean))]
   const runtimePathRows = runtimePathKeys.length > 0
     ? await RuntimePathRegistry.find({ pathKey: { $in: runtimePathKeys } })
-      .select('stableId pathKey label status frameworkKeys scope category isProtected')
+      .select('stableId pathKey label status frameworkKeys scope category isProtected componentVersion versionStatus lineageId isLocked lockedAt lockedByPackageKeys')
       .lean()
     : []
   const runtimePathByKey = new Map(runtimePathRows.map((row) => [row.pathKey, row]))
 
   const agentById = new Map(agentRows.map((row) => [row.stableId, row]))
   const skillById = new Map(skillRows.map((row) => [row.stableId, row]))
+  const skillRoleByKey = new Map(skillRoleRows.map((row) => [row.roleKey, row]))
 
   const agents = agentIds.map((agentId) => {
     const row = agentById.get(agentId)
@@ -1049,6 +1121,7 @@ const fetchFrameworkPackageDependencies = async (frameworkPackage) => {
       source: 'workflow/validation',
       frameworkCompatible: issues.length === 0,
       issues,
+      ...pickDependencyVersioningFields(row),
     })
   })
 
@@ -1070,6 +1143,28 @@ const fetchFrameworkPackageDependencies = async (frameworkPackage) => {
       issues,
       skillRoleKey: row?.skillRoleKey || '',
       category: row?.category || '',
+      ...pickDependencyVersioningFields(row),
+    })
+  })
+
+  const skillRoles = skillRoleKeys.map((roleKey) => {
+    const row = skillRoleByKey.get(roleKey)
+    const issues = []
+    if (!row) {
+      issues.push(`Skill Role "${roleKey}" was not found.`)
+    } else if (row.status !== SKILL_ROLE_REGISTRY_STATUSES.ACTIVE) {
+      issues.push('Skill Role must be ACTIVE.')
+    }
+
+    return serializeDependencyReference({
+      id: row?.stableId || roleKey,
+      key: row?.roleKey || roleKey,
+      name: row?.label || roleKey,
+      status: row?.status || 'MISSING',
+      source: 'skills/agents',
+      frameworkCompatible: issues.length === 0,
+      issues,
+      ...pickDependencyVersioningFields(row),
     })
   })
 
@@ -1101,6 +1196,7 @@ const fetchFrameworkPackageDependencies = async (frameworkPackage) => {
   const dependencyGroups = {
     agents,
     skills,
+    skillRoles,
     runtimePaths,
     validations: validationDependencies,
     workflowPolicies: workflowDependencies,
@@ -1109,6 +1205,7 @@ const fetchFrameworkPackageDependencies = async (frameworkPackage) => {
   const issueCount = [
     ...agents,
     ...skills,
+    ...skillRoles,
     ...runtimePaths,
     ...validationDependencies,
     ...workflowDependencies,
@@ -1122,6 +1219,7 @@ const fetchFrameworkPackageDependencies = async (frameworkPackage) => {
     summary: {
       agents: agents.length,
       skills: skills.length,
+      skillRoles: skillRoles.length,
       runtimePaths: runtimePaths.length,
       validations: validationDependencies.length,
       workflowPolicies: workflowDependencies.length,
@@ -1129,6 +1227,151 @@ const fetchFrameworkPackageDependencies = async (frameworkPackage) => {
       issues: issueCount,
     },
     ...dependencyGroups,
+  }
+}
+
+const getDependencyRowsForGroup = (dependencies, group) => {
+  if (group.singleton) {
+    return dependencies[group.key] ? [dependencies[group.key]] : []
+  }
+
+  return Array.isArray(dependencies[group.key]) ? dependencies[group.key] : []
+}
+
+const buildDependencyLockIssueDetails = (dependencies = {}) =>
+  DEPENDENCY_LOCK_GROUPS.reduce((details, group) => {
+    const issueRows = getDependencyRowsForGroup(dependencies, group)
+      .filter((row) => Array.isArray(row?.issues) && row.issues.length > 0)
+
+    if (issueRows.length > 0) {
+      details[`dependencyLock.${group.key}`] = issueRows
+        .map((row) => `${row.key || row.id}: ${row.issues.join(' ')}`)
+        .join(' ')
+    }
+
+    return details
+  }, {})
+
+const buildDependencyLockReferences = ({ dependencies = {}, lockedAt }) =>
+  DEPENDENCY_LOCK_GROUPS.flatMap((group) =>
+    getDependencyRowsForGroup(dependencies, group).map((row) => ({
+      collectionKey: group.collectionKey,
+      id: row.id,
+      key: row.key || '',
+      name: row.name || '',
+      status: row.status || '',
+      versionStatus: row.versionStatus || RUNTIME_CONTROL_VERSION_STATUSES.ACTIVE,
+      componentVersion: Number(row.componentVersion) || 1,
+      lineageId: row.lineageId || row.id,
+      lockedAt,
+      issues: Array.isArray(row.issues) ? row.issues : [],
+    })))
+
+const buildDependencyLockSnapshot = ({
+  frameworkPackage,
+  dependencies,
+  actorUserId,
+  lockedAt,
+  status = 'PASS',
+}) => ({
+  status,
+  resolvedAt: lockedAt,
+  resolvedBy: actorUserId,
+  packageKey: frameworkPackage.packageKey,
+  packageVersion: frameworkPackage.version,
+  references: buildDependencyLockReferences({ dependencies, lockedAt }),
+})
+
+const updateRuntimeControlDependencyLocks = async ({
+  dependencies,
+  packageKey,
+  packageVersion,
+  actorUserId,
+  lockedAt,
+  session,
+}) => {
+  const updateOptions = session ? { session } : {}
+
+  for (const group of DEPENDENCY_LOCK_GROUPS) {
+    const ids = [
+      ...new Set(getDependencyRowsForGroup(dependencies, group)
+        .filter((row) => !(Array.isArray(row?.issues) && row.issues.length > 0))
+        .map((row) => String(row?.id || '').trim())
+        .filter(Boolean)),
+    ]
+
+    if (ids.length === 0) continue
+
+    await group.model.updateMany(
+      { stableId: { $in: ids } },
+      {
+        $addToSet: {
+          lockedByPackageKeys: packageKey,
+        },
+      },
+      updateOptions,
+    )
+
+    await group.model.updateMany(
+      {
+        stableId: { $in: ids },
+        $or: [
+          { isLocked: { $exists: false } },
+          { isLocked: { $ne: true } },
+        ],
+      },
+      {
+        $set: {
+          isLocked: true,
+          lockedAt,
+          lockedBy: actorUserId,
+          lockedReason: DEPENDENCY_LOCK_REASON,
+          versionStatus: RUNTIME_CONTROL_VERSION_STATUSES.ACTIVE,
+        },
+      },
+      updateOptions,
+    )
+
+    await group.model.updateMany(
+      {
+        stableId: { $in: ids },
+        $or: [
+          { introducedInVersion: { $exists: false } },
+          { introducedInVersion: null },
+          { introducedInVersion: '' },
+        ],
+      },
+      {
+        $set: {
+          introducedInVersion: packageVersion,
+        },
+      },
+      updateOptions,
+    )
+  }
+}
+
+const prepareFrameworkPackageDependencyLock = async ({
+  frameworkPackage,
+  actorUserId,
+}) => {
+  const lockedAt = new Date()
+  const dependencies = await fetchFrameworkPackageDependencies(frameworkPackage)
+  const issueDetails = buildDependencyLockIssueDetails(dependencies)
+  const status = Object.keys(issueDetails).length > 0 ? 'FAIL' : 'PASS'
+  const snapshot = buildDependencyLockSnapshot({
+    frameworkPackage,
+    dependencies,
+    actorUserId,
+    lockedAt,
+    status,
+  })
+
+  return {
+    dependencies,
+    issueDetails,
+    snapshot,
+    lockedAt,
   }
 }
 
@@ -1398,6 +1641,29 @@ const buildFrameworkPackageIntegrity = async (frameworkPackage) => {
   const dependencies = await fetchFrameworkPackageDependencies(frameworkPackage)
   checks.push(...buildDependencyResolutionIntegrityChecks(dependencies))
 
+  const dependencyIssueDetails = buildDependencyLockIssueDetails(dependencies)
+  const dependencyLock = frameworkPackage.dependencyLock
+  const hasDependencyLock =
+    dependencyLock
+    && String(dependencyLock.status || '').trim().toUpperCase() === 'PASS'
+    && Array.isArray(dependencyLock.references)
+    && dependencyLock.references.length > 0
+  checks.push(buildIntegrityCheck({
+    key: 'dependencyLock.snapshot',
+    group: 'Dependency Integrity',
+    severity: Object.keys(dependencyIssueDetails).length > 0
+      ? 'FAIL'
+      : readyStatus && !hasDependencyLock
+        ? 'WARN'
+        : 'PASS',
+    message: Object.keys(dependencyIssueDetails).length > 0
+      ? 'Dependency lock snapshot cannot be created until unresolved dependencies are fixed.'
+      : hasDependencyLock
+        ? 'Dependency lock snapshot exists for this package release boundary.'
+        : 'Dependency lock snapshot will be created when the package is validated.',
+    field: 'dependencyLock',
+  }))
+
   checks.push(...resolveUIContractIntegrity({ frameworkPackage, uiContract }))
 
   const stateContractDetails = validateFrameworkPackageStateContract(frameworkPackage)
@@ -1525,7 +1791,46 @@ export const createFrameworkPackage = async (req, res, next) => {
       updatedBy: actorUserId,
     })
 
-    await frameworkPackage.save()
+    let dependencyLockResult = null
+    if (frameworkPackage.status === FRAMEWORK_PACKAGE_STATUSES.VALIDATED) {
+      dependencyLockResult = await prepareFrameworkPackageDependencyLock({
+        frameworkPackage,
+        actorUserId,
+      })
+      if (Object.keys(dependencyLockResult.issueDetails).length > 0) {
+        return sendValidationFailed(res, req, dependencyLockResult.issueDetails)
+      }
+
+      frameworkPackage.dependencyLock = dependencyLockResult.snapshot
+      frameworkPackage.lastCheckpointStatus = dependencyLockResult.snapshot.status
+      frameworkPackage.lastCheckpointAt = dependencyLockResult.snapshot.resolvedAt
+      frameworkPackage.versionStatus = RUNTIME_CONTROL_VERSION_STATUSES.ACTIVE
+      frameworkPackage.isLocked = true
+      frameworkPackage.lockedAt = dependencyLockResult.lockedAt
+      frameworkPackage.lockedBy = actorUserId
+      frameworkPackage.lockedReason = 'Framework package reached a governed runtime release boundary.'
+    }
+
+    if (dependencyLockResult) {
+      const session = await mongoose.startSession()
+      try {
+        await session.withTransaction(async () => {
+          await frameworkPackage.save({ session })
+          await updateRuntimeControlDependencyLocks({
+            dependencies: dependencyLockResult.dependencies,
+            packageKey: frameworkPackage.packageKey,
+            packageVersion: frameworkPackage.version,
+            actorUserId,
+            lockedAt: dependencyLockResult.lockedAt,
+            session,
+          })
+        })
+      } finally {
+        await session.endSession()
+      }
+    } else {
+      await frameworkPackage.save()
+    }
     await populateFrameworkPackage(frameworkPackage)
 
     const serializedPackage = serializeFrameworkPackage(frameworkPackage, {
@@ -1546,6 +1851,11 @@ export const createFrameworkPackage = async (req, res, next) => {
         version: frameworkPackage.version,
         description: frameworkPackage.description,
         status: frameworkPackage.status,
+        versionStatus: frameworkPackage.versionStatus,
+        isLocked: frameworkPackage.isLocked,
+        dependencyLock: frameworkPackage.dependencyLock,
+        lastCheckpointStatus: frameworkPackage.lastCheckpointStatus,
+        lastCheckpointAt: frameworkPackage.lastCheckpointAt,
         isDefault: frameworkPackage.isDefault,
         packageKey: frameworkPackage.packageKey,
         packageName: frameworkPackage.packageName,
@@ -1595,6 +1905,7 @@ export const createFrameworkPackage = async (req, res, next) => {
           uiContractKey: frameworkPackage.uiContractKey,
           validationBindings: frameworkPackage.validationBindings,
           workflowBindings: frameworkPackage.workflowBindings,
+          dependencyLock: frameworkPackage.dependencyLock,
         },
       })
     }
@@ -1796,6 +2107,7 @@ export const updateFrameworkPackage = async (req, res, next) => {
     }
 
     const diff = {}
+    const previousStatus = frameworkPackage.status
 
     for (const field of FRAMEWORK_PACKAGE_AUDITED_FIELDS) {
       if (canonicalPackagePayload[field] === undefined) continue
@@ -1814,8 +2126,66 @@ export const updateFrameworkPackage = async (req, res, next) => {
       frameworkPackage[field] = canonicalPackagePayload[field]
     }
 
-    frameworkPackage.updatedBy = req.context?.userId || req.userId
-    await frameworkPackage.save()
+    const actorUserId = req.context?.userId || req.userId
+    let dependencyLockResult = null
+    if (
+      frameworkPackage.status === FRAMEWORK_PACKAGE_STATUSES.VALIDATED
+      && (previousStatus !== FRAMEWORK_PACKAGE_STATUSES.VALIDATED || !frameworkPackage.dependencyLock)
+    ) {
+      dependencyLockResult = await prepareFrameworkPackageDependencyLock({
+        frameworkPackage,
+        actorUserId,
+      })
+      if (Object.keys(dependencyLockResult.issueDetails).length > 0) {
+        return sendValidationFailed(res, req, dependencyLockResult.issueDetails)
+      }
+
+      const previousDependencyLock = cloneAuditValue(frameworkPackage.dependencyLock)
+      const previousCheckpointStatus = cloneAuditValue(frameworkPackage.lastCheckpointStatus)
+      const previousCheckpointAt = cloneAuditValue(frameworkPackage.lastCheckpointAt)
+      frameworkPackage.dependencyLock = dependencyLockResult.snapshot
+      frameworkPackage.lastCheckpointStatus = dependencyLockResult.snapshot.status
+      frameworkPackage.lastCheckpointAt = dependencyLockResult.snapshot.resolvedAt
+      frameworkPackage.versionStatus = RUNTIME_CONTROL_VERSION_STATUSES.ACTIVE
+      frameworkPackage.isLocked = true
+      frameworkPackage.lockedAt = dependencyLockResult.lockedAt
+      frameworkPackage.lockedBy = actorUserId
+      frameworkPackage.lockedReason = 'Framework package reached a governed runtime release boundary.'
+      diff.dependencyLock = {
+        from: previousDependencyLock,
+        to: cloneAuditValue(dependencyLockResult.snapshot),
+      }
+      diff.lastCheckpointStatus = {
+        from: previousCheckpointStatus,
+        to: dependencyLockResult.snapshot.status,
+      }
+      diff.lastCheckpointAt = {
+        from: previousCheckpointAt,
+        to: dependencyLockResult.snapshot.resolvedAt,
+      }
+    }
+
+    frameworkPackage.updatedBy = actorUserId
+    if (dependencyLockResult) {
+      const session = await mongoose.startSession()
+      try {
+        await session.withTransaction(async () => {
+          await frameworkPackage.save({ session })
+          await updateRuntimeControlDependencyLocks({
+            dependencies: dependencyLockResult.dependencies,
+            packageKey: frameworkPackage.packageKey,
+            packageVersion: frameworkPackage.version,
+            actorUserId,
+            lockedAt: dependencyLockResult.lockedAt,
+            session,
+          })
+        })
+      } finally {
+        await session.endSession()
+      }
+    } else {
+      await frameworkPackage.save()
+    }
     await populateFrameworkPackage(frameworkPackage)
 
     if (Object.keys(diff).length > 0) {
@@ -2024,6 +2394,17 @@ export const activateFrameworkPackage = async (req, res, next) => {
     }
 
     const actorUserId = req.context?.userId || req.userId
+    const dependencyLockResult = await prepareFrameworkPackageDependencyLock({
+      frameworkPackage,
+      actorUserId,
+    })
+    if (Object.keys(dependencyLockResult.issueDetails).length > 0) {
+      return sendValidationFailed(res, req, dependencyLockResult.issueDetails)
+    }
+
+    const shouldRefreshDependencyLock =
+      !frameworkPackage.dependencyLock
+      || String(frameworkPackage.dependencyLock.status || '').trim().toUpperCase() !== 'PASS'
     const previousActivePackageIds = []
 
     await session.withTransaction(async () => {
@@ -2078,6 +2459,10 @@ export const activateFrameworkPackage = async (req, res, next) => {
 
       frameworkPackage.status = FRAMEWORK_PACKAGE_STATUSES.ACTIVE
       frameworkPackage.isDefault = true
+      frameworkPackage.versionStatus = RUNTIME_CONTROL_VERSION_STATUSES.ACTIVE
+      frameworkPackage.isLocked = true
+      frameworkPackage.lockedAt = frameworkPackage.lockedAt || activationTime
+      frameworkPackage.lockedReason = frameworkPackage.lockedReason || 'Framework package reached a governed runtime release boundary.'
       frameworkPackage.uiContractBinding = await resolveUIContractBinding({
         uiContractKey: frameworkPackage.uiContractKey,
         frameworkPackage,
@@ -2085,6 +2470,22 @@ export const activateFrameworkPackage = async (req, res, next) => {
       frameworkPackage.updatedBy = actorUserId
       frameworkPackage.activatedAt = activationTime
       frameworkPackage.activatedBy = actorUserId
+      if (shouldRefreshDependencyLock) {
+        frameworkPackage.dependencyLock = dependencyLockResult.snapshot
+        frameworkPackage.lastCheckpointStatus = dependencyLockResult.snapshot.status
+        frameworkPackage.lastCheckpointAt = dependencyLockResult.snapshot.resolvedAt
+        frameworkPackage.lockedBy = actorUserId
+
+        // Legacy validated packages may predate dependency snapshots; activation verifies and repairs that state.
+        await updateRuntimeControlDependencyLocks({
+          dependencies: dependencyLockResult.dependencies,
+          packageKey: frameworkPackage.packageKey,
+          packageVersion: frameworkPackage.version,
+          actorUserId,
+          lockedAt: dependencyLockResult.lockedAt,
+          session,
+        })
+      }
       await frameworkPackage.save({ session })
     })
 
@@ -2103,6 +2504,7 @@ export const activateFrameworkPackage = async (req, res, next) => {
         version: frameworkPackage.version,
         previousActivePackageIds,
         activatedAt: frameworkPackage.activatedAt,
+        ...(shouldRefreshDependencyLock ? { dependencyLock: frameworkPackage.dependencyLock } : {}),
       },
     })
 

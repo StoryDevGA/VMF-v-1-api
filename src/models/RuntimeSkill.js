@@ -1,5 +1,10 @@
 import mongoose from 'mongoose'
 import { randomUUID } from 'node:crypto'
+import {
+  applyRuntimeControlVersioning,
+  RUNTIME_CONTROL_COMPATIBILITY_MODES,
+  RUNTIME_CONTROL_LOCK_IMPACTING_FIELDS,
+} from '../utils/runtimeControlVersioning.js'
 
 export const RUNTIME_SKILL_STATUSES = Object.freeze({
   ACTIVE: 'ACTIVE',
@@ -527,6 +532,11 @@ runtimeSkillSchema.pre('validate', function normalizeRuntimeSkill(next) {
   }
 
   next()
+})
+
+applyRuntimeControlVersioning(runtimeSkillSchema, {
+  lockImpactingFields: RUNTIME_CONTROL_LOCK_IMPACTING_FIELDS.RuntimeSkill,
+  compatibilityModeDefault: RUNTIME_CONTROL_COMPATIBILITY_MODES.INHERITED_MINOR,
 })
 
 const RuntimeSkill = mongoose.model('RuntimeSkill', runtimeSkillSchema)

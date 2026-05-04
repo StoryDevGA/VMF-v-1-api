@@ -1,5 +1,10 @@
 import mongoose from 'mongoose'
 import { RUNTIME_PATH_REGISTRY_DATA_TYPES } from './RuntimePathRegistry.js'
+import {
+  applyRuntimeControlVersioning,
+  RUNTIME_CONTROL_COMPATIBILITY_MODES,
+  RUNTIME_CONTROL_LOCK_IMPACTING_FIELDS,
+} from '../utils/runtimeControlVersioning.js'
 
 export const VALIDATION_REGISTRY_STATUSES = Object.freeze({
   ACTIVE: 'ACTIVE',
@@ -327,6 +332,11 @@ validationRegistrySchema.pre('validate', function normalizeValidationRegistry(ne
   }
 
   next()
+})
+
+applyRuntimeControlVersioning(validationRegistrySchema, {
+  lockImpactingFields: RUNTIME_CONTROL_LOCK_IMPACTING_FIELDS.ValidationRegistry,
+  compatibilityModeDefault: RUNTIME_CONTROL_COMPATIBILITY_MODES.INHERITED_MINOR,
 })
 
 const ValidationRegistry = mongoose.model('ValidationRegistry', validationRegistrySchema)

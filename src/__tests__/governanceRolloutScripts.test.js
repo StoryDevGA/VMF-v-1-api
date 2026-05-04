@@ -10,6 +10,7 @@ import {
   ISSUE_CODES,
 } from '../scripts/reportCustomerAdminInvariantViolations.js'
 import { unsetDeprecatedFrameworkPackageFields } from '../scripts/unsetDeprecatedFrameworkPackageFields.js'
+import { backfillRuntimeControlVersioningFields } from '../scripts/backfillRuntimeControlVersioningFields.js'
 
 const ACTOR_ID = '507f1f77bcf86cd799439011'
 const LICENSE_LEVEL_ID = '607f1f77bcf86cd799439022'
@@ -214,6 +215,134 @@ describe('unsetDeprecatedFrameworkPackageFields', () => {
     expect(result.database).toBe('vmf_test')
     expect(result.deprecatedIndexes).toEqual(['legacy_validation_idx', 'legacy_workflow_idx'])
     expect(logs[0]).toContain('database vmf_test')
+  })
+})
+
+describe('backfillRuntimeControlVersioningFields', () => {
+  test('dry-run reports Runtime Control and Framework Package matches without writing', async () => {
+    const connect = jest.fn(async () => {})
+    const disconnect = jest.fn(async () => {})
+    const runtimeCollection = {
+      countDocuments: jest.fn().mockResolvedValue(2),
+      updateMany: jest.fn(),
+    }
+    const frameworkPackageCollection = {
+      db: { databaseName: 'vmf_test' },
+      countDocuments: jest.fn().mockResolvedValue(1),
+      updateMany: jest.fn(),
+    }
+    const logs = []
+
+    const result = await backfillRuntimeControlVersioningFields({
+      logger: (message) => logs.push(message),
+      dependencies: {
+        connect,
+        disconnect,
+        runtimeControlConfigs: [
+          {
+            collectionKey: 'RuntimePathRegistry',
+            model: { collection: runtimeCollection },
+            compatibilityMode: 'INHERITED_MINOR',
+          },
+        ],
+        frameworkPackageModel: { collection: frameworkPackageCollection },
+      },
+    })
+
+    expect(connect).toHaveBeenCalled()
+    expect(disconnect).toHaveBeenCalled()
+    expect(result.mode).toBe('dry-run')
+    expect(result.database).toBe('vmf_test')
+    expect(result.runtimeControl[0]).toEqual({
+      collectionKey: 'RuntimePathRegistry',
+      matched: 2,
+      modified: 0,
+    })
+    expect(result.frameworkPackages).toEqual({ matched: 1, modified: 0 })
+    expect(runtimeCollection.updateMany).not.toHaveBeenCalled()
+    expect(frameworkPackageCollection.updateMany).not.toHaveBeenCalled()
+    expect(logs[0]).toContain('database vmf_test')
+  })
+
+  test('apply mode writes versioning backfill pipelines', async () => {
+    const connect = jest.fn(async () => {})
+    const disconnect = jest.fn(async () => {})
+    const runtimeCollection = {
+      countDocuments: jest.fn().mockResolvedValue(2),
+      updateMany: jest.fn().mockResolvedValue({ modifiedCount: 2 }),
+    }
+    const frameworkPackageCollection = {
+      db: { databaseName: 'vmf_test' },
+      countDocuments: jest.fn().mockResolvedValue(1),
+      updateMany: jest.fn().mockResolvedValue({ modifiedCount: 1 }),
+    }
+
+    const result = await backfillRuntimeControlVersioningFields({
+      apply: true,
+      dependencies: {
+        connect,
+        disconnect,
+        runtimeControlConfigs: [
+          {
+            collectionKey: 'RuntimePathRegistry',
+            model: { collection: runtimeCollection },
+            compatibilityMode: 'INHERITED_MINOR',
+          },
+        ],
+        frameworkPackageModel: { collection: frameworkPackageCollection },
+      },
+    })
+
+    expect(result.mode).toBe('apply')
+    expect(result.runtimeControl[0].modified).toBe(2)
+    expect(result.frameworkPackages.modified).toBe(1)
+    expect(runtimeCollection.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        $or: expect.arrayContaining([
+          { lineageId: '' },
+          { lineageId: null },
+          { lockedAt: { $exists: false } },
+          expect.objectContaining({
+            $and: expect.arrayContaining([
+              { isLocked: true },
+              expect.objectContaining({
+                $or: expect.arrayContaining([
+                  { lockedAt: null },
+                  { lockedReason: null },
+                  { lockedReason: '' },
+                ]),
+              }),
+            ]),
+          }),
+        ]),
+      }),
+      expect.arrayContaining([
+        expect.objectContaining({
+          $set: expect.objectContaining({
+            lineageId: expect.any(Object),
+            lockedAt: expect.any(Object),
+            lockedReason: expect.any(Object),
+            compatibilityMode: expect.any(Object),
+          }),
+        }),
+      ]),
+    )
+    expect(frameworkPackageCollection.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        $or: expect.arrayContaining([
+          { lockedAt: { $exists: false } },
+          { lockedReason: { $exists: false } },
+        ]),
+      }),
+      expect.arrayContaining([
+        expect.objectContaining({
+          $set: expect.objectContaining({
+            lockedAt: expect.any(Object),
+            lockedReason: expect.any(Object),
+          }),
+        }),
+      ]),
+    )
   })
 })
 

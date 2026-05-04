@@ -20,9 +20,14 @@ import {
   resolveKnownFrameworkKeys,
 } from '../services/frameworkRegistryService.js'
 import { escapeRegex, serializeUserSummary } from '../utils/controllerUtils.js'
+import {
+  LOCKED_RUNTIME_CONTROL_EDIT_MESSAGE,
+  mapRuntimeControlStatusToVersionStatus,
+} from '../utils/runtimeControlVersioning.js'
 
 const RUNTIME_PATH_NOT_FOUND_MESSAGE = 'Runtime path was not found.'
 const DUPLICATE_RUNTIME_PATH_KEY_MESSAGE = 'Path key must be unique.'
+const RUNTIME_PATH_LOCKED_REASON = 'RUNTIME_PATH_LOCKED'
 
 const cloneAuditValue = (value) => {
   if (value === undefined) return value
@@ -210,6 +215,25 @@ const sendValidationFailed = (res, req, details, message = 'Please check the for
     },
   })
 
+const sendConflict = (res, req, message, details = {}) =>
+  res.status(409).json({
+    error: {
+      code: 'CONFLICT',
+      message,
+      details,
+      requestId: req.requestId,
+    },
+  })
+
+const sendLockedRuntimePathConflict = (res, req, runtimePath) =>
+  sendConflict(res, req, LOCKED_RUNTIME_CONTROL_EDIT_MESSAGE, {
+    field: 'isLocked',
+    reason: RUNTIME_PATH_LOCKED_REASON,
+    lockedByPackageKeys: Array.isArray(runtimePath?.lockedByPackageKeys)
+      ? runtimePath.lockedByPackageKeys
+      : [],
+  })
+
 const validateFrameworkKeys = async (frameworkKeys = []) => {
   const normalized = normalizeFrameworkKeyList(frameworkKeys)
   const { missingKeys, inactiveKeys } = await resolveKnownFrameworkKeys(normalized, undefined, { requireActive: true })
@@ -262,7 +286,7 @@ const RUNTIME_PATH_MUTABLE_FIELDS = Object.freeze([
   'isNullable',
 ])
 
-const RUNTIME_PATH_DUPLICATE_FIELDS = Object.freeze([
+const RUNTIME_PATH_CLONE_FIELDS = Object.freeze([
   'label',
   'description',
   'frameworkKeys',
@@ -757,6 +781,10 @@ export const updateRuntimePath = async (req, res, next) => {
       })
     }
 
+    if (runtimePath.isLocked === true) {
+      return sendLockedRuntimePathConflict(res, req, runtimePath)
+    }
+
     if (req.body.pathKey !== undefined && String(req.body.pathKey).trim() !== runtimePath.pathKey) {
       return sendValidationFailed(res, req, {
         pathKey: 'Path key is immutable and cannot be changed after creation.',
@@ -829,7 +857,7 @@ export const updateRuntimePath = async (req, res, next) => {
   }
 }
 
-export const duplicateRuntimePath = async (req, res, next) => {
+export const cloneRuntimePath = async (req, res, next) => {
   try {
     const actorId = req.context?.userId || req.userId
     const source = await RuntimePathRegistry.findByStableId(req.params.pathId)
@@ -856,7 +884,7 @@ export const duplicateRuntimePath = async (req, res, next) => {
       })
     }
 
-    const copied = pickRuntimePathFields(source, RUNTIME_PATH_DUPLICATE_FIELDS)
+    const copied = pickRuntimePathFields(source, RUNTIME_PATH_CLONE_FIELDS)
     const nextFrameworkKeys = copied.frameworkKeys || []
     const frameworkDetails = await validateFrameworkKeys(nextFrameworkKeys)
     const details = {}
@@ -866,35 +894,46 @@ export const duplicateRuntimePath = async (req, res, next) => {
       return sendValidationFailed(res, req, details)
     }
 
-    const duplicate = new RuntimePathRegistry({
+    const clone = new RuntimePathRegistry({
       ...copied,
       pathKey: req.body.pathKey,
       label: req.body.label || copied.label,
       description: req.body.description || copied.description,
-      status: req.body.status || RUNTIME_PATH_REGISTRY_STATUSES.DRAFT,
+      status: RUNTIME_PATH_REGISTRY_STATUSES.DRAFT,
       frameworkKeys: frameworkDetails.frameworkKeys,
       isSystem: false,
+      componentVersion: (Number(source.componentVersion) || 1) + 1,
+      versionStatus: 'DRAFT',
+      lineageId: source.lineageId || source.stableId,
+      isLocked: false,
+      lockedAt: null,
+      lockedBy: null,
+      lockedReason: '',
+      lockedByPackageKeys: [],
+      clonedFromStableId: source.stableId,
+      supersedesStableId: source.stableId,
+      supersededByStableId: null,
       createdBy: actorId,
       updatedBy: actorId,
     })
 
-    await duplicate.save()
-    await duplicate.populate('createdBy', 'name email')
-    await duplicate.populate('updatedBy', 'name email')
+    await clone.save()
+    await clone.populate('createdBy', 'name email')
+    await clone.populate('updatedBy', 'name email')
 
     await auditService.logFromRequest(req, {
-      action: auditService.AUDIT_ACTIONS.RUNTIME_PATH_DUPLICATED,
+      action: auditService.AUDIT_ACTIONS.RUNTIME_PATH_CLONED,
       resourceType: auditService.RESOURCE_TYPES.RuntimePathRegistry,
-      resourceId: duplicate._id,
-      display: { resourceLabel: buildRuntimePathLabel(duplicate) },
+      resourceId: clone._id,
+      display: { resourceLabel: buildRuntimePathLabel(clone) },
       diff: {
-        duplicatedFrom: source.stableId,
-        created: cloneAuditValue(duplicate.toJSON()),
+        clonedFrom: source.stableId,
+        created: cloneAuditValue(clone.toJSON()),
       },
     })
 
     return res.status(201).json({
-      data: serializeRuntimePath(duplicate),
+      data: serializeRuntimePath(clone),
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
@@ -918,6 +957,8 @@ export const duplicateRuntimePath = async (req, res, next) => {
   }
 }
 
+export const duplicateRuntimePath = cloneRuntimePath
+
 const updateRuntimePathLifecycle = async ({
   req,
   res,
@@ -937,6 +978,10 @@ const updateRuntimePathLifecycle = async ({
           requestId: req.requestId,
         },
       })
+    }
+
+    if (runtimePath.isLocked === true) {
+      return sendLockedRuntimePathConflict(res, req, runtimePath)
     }
 
     const dependencies = await fetchRuntimePathDependencies(runtimePath.pathKey)
@@ -959,9 +1004,11 @@ const updateRuntimePathLifecycle = async ({
     }
 
     const previousStatus = runtimePath.status
+    const previousVersionStatus = runtimePath.versionStatus
     const previousDeprecatedInVersion = runtimePath.deprecatedInVersion
 
     runtimePath.status = nextStatus
+    runtimePath.versionStatus = mapRuntimeControlStatusToVersionStatus(nextStatus)
     if (nextStatus === RUNTIME_PATH_REGISTRY_STATUSES.DEPRECATED && req.body?.deprecatedInVersion !== undefined) {
       runtimePath.deprecatedInVersion = req.body.deprecatedInVersion
     }
@@ -970,6 +1017,12 @@ const updateRuntimePathLifecycle = async ({
     const diff = {}
     if (previousStatus !== nextStatus) {
       diff.status = { from: previousStatus, to: nextStatus }
+    }
+    if (!isDeepStrictEqual(previousVersionStatus, runtimePath.versionStatus)) {
+      diff.versionStatus = {
+        from: cloneAuditValue(previousVersionStatus),
+        to: cloneAuditValue(runtimePath.versionStatus),
+      }
     }
     if (!isDeepStrictEqual(previousDeprecatedInVersion, runtimePath.deprecatedInVersion)) {
       diff.deprecatedInVersion = {
@@ -1034,6 +1087,7 @@ export const deprecateRuntimePath = (req, res, next) =>
     next,
     nextStatus: RUNTIME_PATH_REGISTRY_STATUSES.DEPRECATED,
     auditAction: auditService.AUDIT_ACTIONS.RUNTIME_PATH_DEPRECATED,
+    requireDependencyConfirmation: true,
   })
 
 export const getRuntimePathDependencies = async (req, res, next) => {

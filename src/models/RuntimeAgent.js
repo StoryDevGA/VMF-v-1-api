@@ -1,4 +1,9 @@
 import mongoose from 'mongoose'
+import {
+  applyRuntimeControlVersioning,
+  RUNTIME_CONTROL_COMPATIBILITY_MODES,
+  RUNTIME_CONTROL_LOCK_IMPACTING_FIELDS,
+} from '../utils/runtimeControlVersioning.js'
 
 export const RUNTIME_AGENT_STATUSES = Object.freeze({
   DRAFT: 'DRAFT',
@@ -302,6 +307,11 @@ runtimeAgentSchema.pre('validate', function normalizeRuntimeAgent(next) {
   }
 
   next()
+})
+
+applyRuntimeControlVersioning(runtimeAgentSchema, {
+  lockImpactingFields: RUNTIME_CONTROL_LOCK_IMPACTING_FIELDS.RuntimeAgent,
+  compatibilityModeDefault: RUNTIME_CONTROL_COMPATIBILITY_MODES.INHERITED_MINOR,
 })
 
 const RuntimeAgent = mongoose.model('RuntimeAgent', runtimeAgentSchema)

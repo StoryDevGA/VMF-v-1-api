@@ -1,4 +1,9 @@
 import mongoose from 'mongoose'
+import {
+  applyRuntimeControlVersioning,
+  RUNTIME_CONTROL_COMPATIBILITY_MODES,
+  RUNTIME_CONTROL_LOCK_IMPACTING_FIELDS,
+} from '../utils/runtimeControlVersioning.js'
 
 export const RUNTIME_PATH_REGISTRY_STATUSES = Object.freeze({
   DRAFT: 'DRAFT',
@@ -620,6 +625,11 @@ runtimePathRegistrySchema.pre('validate', function normalizeRuntimePathRegistry(
   validateRuntimePathValueMetadata(this)
 
   next()
+})
+
+applyRuntimeControlVersioning(runtimePathRegistrySchema, {
+  lockImpactingFields: RUNTIME_CONTROL_LOCK_IMPACTING_FIELDS.RuntimePathRegistry,
+  compatibilityModeDefault: RUNTIME_CONTROL_COMPATIBILITY_MODES.INHERITED_MINOR,
 })
 
 const RuntimePathRegistry = mongoose.model('RuntimePathRegistry', runtimePathRegistrySchema)

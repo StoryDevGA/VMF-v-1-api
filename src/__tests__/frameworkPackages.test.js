@@ -96,6 +96,7 @@ const buildDefaultRoleRows = () => ([
 
 const buildDefaultSectionRuntimePathRows = () => ([
   {
+    stableId: 'path-customer-problem',
     pathKey: 'framework_state.sections.customer_problem',
     status: 'ACTIVE',
     frameworkKeys: ['VMF'],
@@ -113,6 +114,7 @@ let FrameworkRegistry
 let FrameworkPackage
 let RuntimeAgent
 let RuntimeSkill
+let SkillRoleRegistry
 let ValidationRegistry
 let WorkflowPolicy
 let UIContract
@@ -239,6 +241,7 @@ beforeAll(async () => {
   FrameworkPackage = models.FrameworkPackage
   RuntimeAgent = models.RuntimeAgent
   RuntimeSkill = models.RuntimeSkill
+  SkillRoleRegistry = models.SkillRoleRegistry
   ValidationRegistry = models.ValidationRegistry
   WorkflowPolicy = models.WorkflowPolicy
   UIContract = models.UIContract
@@ -285,10 +288,18 @@ beforeEach(() => {
   FrameworkRegistry.find = jest.fn()
   RuntimeAgent.find = jest.fn()
   RuntimeSkill.find = jest.fn()
+  SkillRoleRegistry.find = jest.fn()
   ValidationRegistry.find = jest.fn()
   WorkflowPolicy.find = jest.fn()
   UIContract.findOne = jest.fn()
   RuntimePathRegistry.find = jest.fn()
+  RuntimeAgent.updateMany = jest.fn().mockResolvedValue({ matchedCount: 0, modifiedCount: 0 })
+  RuntimeSkill.updateMany = jest.fn().mockResolvedValue({ matchedCount: 0, modifiedCount: 0 })
+  SkillRoleRegistry.updateMany = jest.fn().mockResolvedValue({ matchedCount: 0, modifiedCount: 0 })
+  ValidationRegistry.updateMany = jest.fn().mockResolvedValue({ matchedCount: 0, modifiedCount: 0 })
+  WorkflowPolicy.updateMany = jest.fn().mockResolvedValue({ matchedCount: 0, modifiedCount: 0 })
+  UIContract.updateMany = jest.fn().mockResolvedValue({ matchedCount: 0, modifiedCount: 0 })
+  RuntimePathRegistry.updateMany = jest.fn().mockResolvedValue({ matchedCount: 0, modifiedCount: 0 })
   Role.find = jest.fn().mockReturnValue(buildRoleQueryChain(buildDefaultRoleRows()))
   FrameworkPackage.prototype.save = jest.fn(async function save() {
     return this
@@ -320,6 +331,7 @@ beforeEach(() => {
   RuntimePathRegistry.find.mockReturnValue(buildFrameworkRegistryLookupChain(buildDefaultSectionRuntimePathRows()))
   RuntimeAgent.find.mockReturnValue(buildFrameworkRegistryLookupChain([]))
   RuntimeSkill.find.mockReturnValue(buildFrameworkRegistryLookupChain([]))
+  SkillRoleRegistry.find.mockReturnValue(buildFrameworkRegistryLookupChain([]))
   UIContract.findOne.mockReturnValue({
     select: jest.fn().mockReturnValue({
       lean: jest.fn().mockResolvedValue(null),
@@ -470,6 +482,23 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     expect(res.body.data.stateModelVersion).toBeNull()
     expect(res.body.data.stateModelMode).toBe('INTERNAL')
     expect(res.body.data.uiContractKey).toBe('vmf-ui-contract-v1')
+    expect(res.body.data.isLocked).toBe(true)
+    expect(res.body.data.versionStatus).toBe('ACTIVE')
+    expect(res.body.data.dependencyLock).toEqual(expect.objectContaining({
+      status: 'PASS',
+      packageKey: 'vmf-2-3-1',
+      packageVersion: '2.3.1',
+      references: expect.arrayContaining([
+        expect.objectContaining({
+          collectionKey: 'RuntimePathRegistry',
+          key: 'framework_state.sections.customer_problem',
+        }),
+        expect.objectContaining({
+          collectionKey: 'UIContract',
+          key: 'vmf-ui-contract-v1',
+        }),
+      ]),
+    }))
     expect(res.body.data.validationConfig).toBeUndefined()
     expect(res.body.data.workflowPolicyConfig).toBeUndefined()
     expect(res.body.data.compatibleWorkflowKeys).toBeUndefined()
@@ -500,6 +529,29 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
         },
       }),
     }))
+    expect(RuntimePathRegistry.updateMany).toHaveBeenCalledWith(
+      { stableId: { $in: ['path-customer-problem'] } },
+      {
+        $addToSet: { lockedByPackageKeys: 'vmf-2-3-1' },
+      },
+      expect.any(Object),
+    )
+    expect(RuntimePathRegistry.updateMany).toHaveBeenCalledWith(
+      {
+        stableId: { $in: ['path-customer-problem'] },
+        $or: [
+          { isLocked: { $exists: false } },
+          { isLocked: { $ne: true } },
+        ],
+      },
+      expect.objectContaining({
+        $set: expect.objectContaining({
+          isLocked: true,
+          versionStatus: 'ACTIVE',
+        }),
+      }),
+      expect.any(Object),
+    )
   })
 
   test('POST /api/v1/super-admin/runtime-control/framework-packages validates selected customer access', async () => {

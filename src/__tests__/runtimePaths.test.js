@@ -119,6 +119,15 @@ const makeRuntimePathDocument = (overrides = {}) => {
     sourceType: overrides.sourceType || 'DERIVED',
     isProtected: overrides.isProtected ?? false,
     isSystem: overrides.isSystem ?? true,
+    componentVersion: overrides.componentVersion ?? 1,
+    versionStatus: overrides.versionStatus || 'ACTIVE',
+    lineageId: overrides.lineageId || stableId,
+    isLocked: overrides.isLocked ?? false,
+    lockedAt: overrides.lockedAt || null,
+    lockedByPackageKeys: overrides.lockedByPackageKeys || [],
+    clonedFromStableId: overrides.clonedFromStableId || null,
+    supersedesStableId: overrides.supersedesStableId || null,
+    supersededByStableId: overrides.supersededByStableId || null,
     createdBy: overrides.createdBy || { id: SUPER_ADMIN_ID, name: 'Super Administrator' },
     updatedBy: overrides.updatedBy || { id: SUPER_ADMIN_ID, name: 'Super Administrator' },
     save: jest.fn(async function save() {
@@ -550,7 +559,28 @@ describe('Runtime Path Registry API', () => {
     )
   })
 
-  test('POST /api/v1/super-admin/runtime-control/runtime-paths/:pathId/duplicate creates a custom draft copy', async () => {
+  test('PATCH /api/v1/super-admin/runtime-control/runtime-paths/:pathId blocks locked records', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const runtimePath = makeRuntimePathDocument({
+      isLocked: true,
+      lockedByPackageKeys: ['vmf-2-3-1'],
+    })
+    RuntimePathRegistry.findByStableId.mockReturnValue(buildFindByStableIdQuery(runtimePath))
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/runtime-paths/${RUNTIME_PATH_STABLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        label: 'Locked Runtime Path Edit',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error?.details?.reason).toBe('RUNTIME_PATH_LOCKED')
+    expect(res.body.error?.details?.lockedByPackageKeys).toEqual(['vmf-2-3-1'])
+    expect(runtimePath.save).not.toHaveBeenCalled()
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/runtime-paths/:pathId/duplicate remains a legacy alias for clone', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     const source = makeRuntimePathDocument()
     RuntimePathRegistry.findByStableId.mockReturnValue(buildFindByStableIdQuery(source))
@@ -567,12 +597,66 @@ describe('Runtime Path Registry API', () => {
     expect(res.body.data?.pathKey).toBe('vmf.validation.status.copy')
     expect(res.body.data?.status).toBe('DRAFT')
     expect(res.body.data?.isSystem).toBe(false)
+    expect(res.body.data?.componentVersion).toBe(2)
+    expect(res.body.data?.versionStatus).toBe('DRAFT')
+    expect(res.body.data?.lineageId).toBe(source.stableId)
+    expect(res.body.data?.clonedFromStableId).toBe(source.stableId)
+    expect(res.body.data?.supersedesStableId).toBe(source.stableId)
     expect(auditService.logFromRequest).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
-        action: auditService.AUDIT_ACTIONS.RUNTIME_PATH_DUPLICATED,
+        action: auditService.AUDIT_ACTIONS.RUNTIME_PATH_CLONED,
+        diff: expect.objectContaining({
+          clonedFrom: source.stableId,
+        }),
       }),
     )
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/runtime-paths/:pathId/clone creates a governed clone', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const source = makeRuntimePathDocument({
+      componentVersion: 3,
+      lineageId: 'path-vmf-validation-lineage',
+      isLocked: true,
+      lockedByPackageKeys: ['vmf-2-3-1'],
+    })
+    RuntimePathRegistry.findByStableId.mockReturnValue(buildFindByStableIdQuery(source))
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/runtime-paths/${RUNTIME_PATH_STABLE_ID}/clone`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        pathKey: 'vmf.validation.status.clone',
+        label: 'VMF Validation Status Clone',
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data?.status).toBe('DRAFT')
+    expect(res.body.data?.componentVersion).toBe(4)
+    expect(res.body.data?.versionStatus).toBe('DRAFT')
+    expect(res.body.data?.lineageId).toBe('path-vmf-validation-lineage')
+    expect(res.body.data?.isLocked).toBe(false)
+    expect(res.body.data?.lockedByPackageKeys).toEqual([])
+    expect(res.body.data?.clonedFromStableId).toBe(source.stableId)
+    expect(res.body.data?.supersedesStableId).toBe(source.stableId)
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/runtime-paths/:pathId/clone rejects non-draft clone status', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    RuntimePathRegistry.findByStableId.mockReturnValue(buildFindByStableIdQuery(makeRuntimePathDocument()))
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/runtime-paths/${RUNTIME_PATH_STABLE_ID}/clone`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        pathKey: 'vmf.validation.status.active-clone',
+        label: 'VMF Validation Status Active Clone',
+        status: 'ACTIVE',
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error?.details?.status).toContain('DRAFT')
   })
 
   test('POST /api/v1/super-admin/runtime-control/runtime-paths/:pathId/duplicate rejects duplicate path keys', async () => {
@@ -678,8 +762,29 @@ describe('Runtime Path Registry API', () => {
       expect.anything(),
       expect.objectContaining({
         action: auditService.AUDIT_ACTIONS.RUNTIME_PATH_DISABLED,
+        diff: expect.objectContaining({
+          versionStatus: { from: 'ACTIVE', to: 'ARCHIVED' },
+        }),
       }),
     )
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/runtime-paths/:pathId/disable blocks locked records', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const runtimePath = makeRuntimePathDocument({
+      isLocked: true,
+      lockedByPackageKeys: ['vmf-2-3-1'],
+    })
+    RuntimePathRegistry.findByStableId.mockReturnValue(buildFindByStableIdQuery(runtimePath))
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/runtime-paths/${RUNTIME_PATH_STABLE_ID}/disable`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ confirmDependencies: true })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error?.details?.reason).toBe('RUNTIME_PATH_LOCKED')
+    expect(runtimePath.save).not.toHaveBeenCalled()
   })
 
   test('buildListFilter uses compact regex search plus exact enum matches for query tokens', () => {

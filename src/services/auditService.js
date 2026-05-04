@@ -91,6 +91,7 @@ export const AUDIT_ACTIONS = Object.freeze({
   RUNTIME_SKILL_UPDATED: 'RUNTIME_SKILL_UPDATED',
   RUNTIME_PATH_CREATED: 'RUNTIME_PATH_CREATED',
   RUNTIME_PATH_UPDATED: 'RUNTIME_PATH_UPDATED',
+  RUNTIME_PATH_CLONED: 'RUNTIME_PATH_CLONED',
   RUNTIME_PATH_DUPLICATED: 'RUNTIME_PATH_DUPLICATED',
   RUNTIME_PATH_ACTIVATED: 'RUNTIME_PATH_ACTIVATED',
   RUNTIME_PATH_DISABLED: 'RUNTIME_PATH_DISABLED',
@@ -411,6 +412,8 @@ const buildAuditSummary = ({ action, resourceType, resourceId, diff, display }) 
       return clampSummary(`${actorLabel} created runtime path ${targetLabel}`)
     case AUDIT_ACTIONS.RUNTIME_PATH_UPDATED:
       return clampSummary(`${actorLabel} updated runtime path ${targetLabel}`)
+    case AUDIT_ACTIONS.RUNTIME_PATH_CLONED:
+      return clampSummary(`${actorLabel} cloned runtime path ${targetLabel}`)
     case AUDIT_ACTIONS.RUNTIME_PATH_DUPLICATED:
       return clampSummary(`${actorLabel} duplicated runtime path ${targetLabel}`)
     case AUDIT_ACTIONS.RUNTIME_PATH_ACTIVATED:

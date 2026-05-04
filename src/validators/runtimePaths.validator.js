@@ -185,11 +185,16 @@ const updateRuntimePathBodySchema = z.object({
   confirmDependencies: z.coerce.boolean().optional(),
 })
 
-const duplicateRuntimePathBodySchema = z.object({
+const cloneRuntimePathBodySchema = z.object({
   pathKey: pathKeySchema,
   label: runtimePathMutableFieldsSchema.label.optional(),
   description: runtimePathMutableFieldsSchema.description.optional(),
-  status: z.enum(Object.values(RUNTIME_PATH_REGISTRY_STATUSES)).default(RUNTIME_PATH_REGISTRY_STATUSES.DRAFT),
+  status: z.enum(Object.values(RUNTIME_PATH_REGISTRY_STATUSES))
+    .optional()
+    .refine(
+      (value) => value === undefined || value === RUNTIME_PATH_REGISTRY_STATUSES.DRAFT,
+      'Cloned runtime paths must start in DRAFT status.',
+    ),
 })
 
 const lifecycleRuntimePathBodySchema = z.object({
@@ -201,5 +206,6 @@ export const validateRuntimePathId = createParamsValidator(runtimePathIdSchema)
 export const validateListRuntimePaths = createQueryValidator(listRuntimePathsQuerySchema)
 export const validateCreateRuntimePath = createBodyValidator(createRuntimePathBodySchema)
 export const validateUpdateRuntimePath = createBodyValidator(updateRuntimePathBodySchema)
-export const validateDuplicateRuntimePath = createBodyValidator(duplicateRuntimePathBodySchema)
+export const validateCloneRuntimePath = createBodyValidator(cloneRuntimePathBodySchema)
+export const validateDuplicateRuntimePath = validateCloneRuntimePath
 export const validateRuntimePathLifecycle = createBodyValidator(lifecycleRuntimePathBodySchema)

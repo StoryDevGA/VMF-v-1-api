@@ -4,6 +4,7 @@ import loadScopes from '../middleware/loadScopes.js'
 import { requirePlatformRole } from '../middleware/authorize.js'
 import {
   validateCreateRuntimePath,
+  validateCloneRuntimePath,
   validateDuplicateRuntimePath,
   validateListRuntimePaths,
   validateRuntimePathLifecycle,
@@ -12,6 +13,7 @@ import {
 } from '../validators/runtimePaths.validator.js'
 import {
   activateRuntimePath,
+  cloneRuntimePath,
   createRuntimePath,
   deprecateRuntimePath,
   disableRuntimePath,
@@ -31,6 +33,7 @@ router.post('/', validateCreateRuntimePath, createRuntimePath)
 router.get('/:pathId', validateRuntimePathId, getRuntimePath)
 router.get('/:pathId/dependencies', validateRuntimePathId, getRuntimePathDependencies)
 router.patch('/:pathId', validateRuntimePathId, validateUpdateRuntimePath, updateRuntimePath)
+router.post('/:pathId/clone', validateRuntimePathId, validateCloneRuntimePath, cloneRuntimePath)
 router.post('/:pathId/duplicate', validateRuntimePathId, validateDuplicateRuntimePath, duplicateRuntimePath)
 router.post('/:pathId/activate', validateRuntimePathId, validateRuntimePathLifecycle, activateRuntimePath)
 router.post('/:pathId/disable', validateRuntimePathId, validateRuntimePathLifecycle, disableRuntimePath)

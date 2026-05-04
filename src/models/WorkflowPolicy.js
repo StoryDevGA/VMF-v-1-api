@@ -1,4 +1,9 @@
 import mongoose from 'mongoose'
+import {
+  applyRuntimeControlVersioning,
+  RUNTIME_CONTROL_COMPATIBILITY_MODES,
+  RUNTIME_CONTROL_LOCK_IMPACTING_FIELDS,
+} from '../utils/runtimeControlVersioning.js'
 
 export const WORKFLOW_POLICY_STATUSES = Object.freeze({
   DRAFT: 'DRAFT',
@@ -827,6 +832,11 @@ workflowPolicySchema.pre('validate', function normalizeWorkflowPolicy(next) {
   }
 
   next()
+})
+
+applyRuntimeControlVersioning(workflowPolicySchema, {
+  lockImpactingFields: RUNTIME_CONTROL_LOCK_IMPACTING_FIELDS.WorkflowPolicy,
+  compatibilityModeDefault: RUNTIME_CONTROL_COMPATIBILITY_MODES.INHERITED_MINOR,
 })
 
 const WorkflowPolicy = mongoose.model('WorkflowPolicy', workflowPolicySchema)

@@ -21,6 +21,64 @@ describe('RuntimePathRegistry model', () => {
     expect(RuntimePathRegistry.schema.path('pathKey').options.immutable).toBe(true)
   })
 
+  test('adds standard versioning and lock metadata', async () => {
+    const doc = new RuntimePathRegistry(makeBaseRuntimePath({
+      status: 'ACTIVE',
+    }))
+
+    await expect(doc.validate()).resolves.toBeUndefined()
+    expect(doc.componentVersion).toBe(1)
+    expect(doc.versionStatus).toBe('ACTIVE')
+    expect(doc.lineageId).toBe(doc.stableId)
+    expect(doc.isLocked).toBe(false)
+    expect(doc.lockedByPackageKeys).toEqual([])
+  })
+
+  test('blocks behavior-impacting edits on locked records', async () => {
+    const doc = new RuntimePathRegistry(makeBaseRuntimePath({
+      isLocked: true,
+      lockedByPackageKeys: ['vmf-2-3-1'],
+    }))
+
+    await doc.validate()
+    doc.$__reset()
+    doc.$isNew = false
+    doc.dataType = 'NUMBER'
+
+    await expect(doc.validate()).rejects.toMatchObject({
+      errors: {
+        dataType: expect.objectContaining({
+          message: 'Locked Runtime Control records cannot be edited directly. Clone the record to make behavior changes.',
+        }),
+      },
+    })
+  })
+
+  test('blocks clearing a prior lock while editing locked records', async () => {
+    const doc = new RuntimePathRegistry(makeBaseRuntimePath({
+      isLocked: true,
+      lockedByPackageKeys: ['vmf-2-3-1'],
+    }))
+
+    await doc.validate()
+    doc.$__reset()
+    doc.$isNew = false
+    doc.$locals.runtimeControlOriginalIsLocked = true
+    doc.isLocked = false
+    doc.dataType = 'NUMBER'
+
+    await expect(doc.validate()).rejects.toMatchObject({
+      errors: {
+        isLocked: expect.objectContaining({
+          message: 'Locked Runtime Control records cannot be edited directly. Clone the record to make behavior changes.',
+        }),
+        dataType: expect.objectContaining({
+          message: 'Locked Runtime Control records cannot be edited directly. Clone the record to make behavior changes.',
+        }),
+      },
+    })
+  })
+
   test('accepts SECTION and ARTIFACT categories for normalized VMF v2.3.1 rows', async () => {
     const sectionDoc = new RuntimePathRegistry(makeBaseRuntimePath({
       pathKey: 'framework_state.sections.customer_problem',

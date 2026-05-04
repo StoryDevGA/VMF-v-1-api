@@ -1,4 +1,9 @@
 import mongoose from 'mongoose'
+import {
+  applyRuntimeControlVersioning,
+  RUNTIME_CONTROL_COMPATIBILITY_MODES,
+  RUNTIME_CONTROL_LOCK_IMPACTING_FIELDS,
+} from '../utils/runtimeControlVersioning.js'
 
 export const SKILL_ROLE_REGISTRY_STATUSES = Object.freeze({
   ACTIVE: 'ACTIVE',
@@ -127,7 +132,11 @@ skillRoleRegistrySchema.pre('validate', function normalizeSkillRoleRegistry(next
   next()
 })
 
+applyRuntimeControlVersioning(skillRoleRegistrySchema, {
+  lockImpactingFields: RUNTIME_CONTROL_LOCK_IMPACTING_FIELDS.SkillRoleRegistry,
+  compatibilityModeDefault: RUNTIME_CONTROL_COMPATIBILITY_MODES.OPEN,
+})
+
 const SkillRoleRegistry = mongoose.model('SkillRoleRegistry', skillRoleRegistrySchema)
 
 export default SkillRoleRegistry
-

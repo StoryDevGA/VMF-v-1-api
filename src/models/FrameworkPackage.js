@@ -3,6 +3,10 @@ import {
   DEPRECATED_FRAMEWORK_PACKAGE_FIELD_MESSAGES,
   DEPRECATED_FRAMEWORK_PACKAGE_FIELDS,
 } from '../constants/frameworkPackageContract.js'
+import {
+  RUNTIME_CONTROL_VERSION_STATUSES,
+  mapRuntimeControlStatusToVersionStatus,
+} from '../utils/runtimeControlVersioning.js'
 
 export const FRAMEWORK_PACKAGE_STATUSES = Object.freeze({
   DRAFT: 'DRAFT',
@@ -491,6 +495,102 @@ const frameworkPackageUiContractBindingSchema = new mongoose.Schema(
   { _id: false },
 )
 
+const frameworkPackageDependencyLockReferenceSchema = new mongoose.Schema(
+  {
+    collectionKey: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 80,
+    },
+    id: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 180,
+    },
+    key: {
+      type: String,
+      trim: true,
+      maxlength: 200,
+      default: '',
+    },
+    name: {
+      type: String,
+      trim: true,
+      maxlength: 200,
+      default: '',
+    },
+    status: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      maxlength: 40,
+      default: '',
+    },
+    versionStatus: {
+      type: String,
+      enum: Object.values(RUNTIME_CONTROL_VERSION_STATUSES),
+      default: RUNTIME_CONTROL_VERSION_STATUSES.ACTIVE,
+    },
+    componentVersion: {
+      type: Number,
+      min: 1,
+      max: 100000,
+      default: 1,
+    },
+    lineageId: {
+      type: String,
+      trim: true,
+      maxlength: 180,
+      default: null,
+    },
+    lockedAt: {
+      type: Date,
+      default: null,
+    },
+    issues: {
+      type: [String],
+      default: [],
+    },
+  },
+  { _id: false },
+)
+
+const frameworkPackageDependencyLockSchema = new mongoose.Schema(
+  {
+    status: {
+      type: String,
+      enum: ['PASS', 'FAIL'],
+      default: 'PASS',
+    },
+    resolvedAt: {
+      type: Date,
+      default: Date.now,
+    },
+    resolvedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
+    packageKey: {
+      ...stringTokenField,
+      required: true,
+    },
+    packageVersion: {
+      type: String,
+      trim: true,
+      maxlength: 50,
+      required: true,
+    },
+    references: {
+      type: [frameworkPackageDependencyLockReferenceSchema],
+      default: [],
+    },
+  },
+  { _id: false },
+)
+
 const frameworkPackageSchema = new mongoose.Schema(
   {
     frameworkKey: {
@@ -551,6 +651,43 @@ const frameworkPackageSchema = new mongoose.Schema(
       required: true,
       enum: Object.values(FRAMEWORK_PACKAGE_STATUSES),
       default: FRAMEWORK_PACKAGE_STATUSES.DRAFT,
+    },
+    versionStatus: {
+      type: String,
+      enum: Object.values(RUNTIME_CONTROL_VERSION_STATUSES),
+      default: RUNTIME_CONTROL_VERSION_STATUSES.DRAFT,
+    },
+    isLocked: {
+      type: Boolean,
+      default: false,
+    },
+    lockedAt: {
+      type: Date,
+      default: null,
+    },
+    lockedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
+    lockedReason: {
+      type: String,
+      trim: true,
+      maxlength: 500,
+      default: '',
+    },
+    dependencyLock: {
+      type: frameworkPackageDependencyLockSchema,
+      default: null,
+    },
+    lastCheckpointStatus: {
+      type: String,
+      enum: ['PASS', 'WARN', 'FAIL'],
+      default: null,
+    },
+    lastCheckpointAt: {
+      type: Date,
+      default: null,
     },
     isDefault: {
       type: Boolean,
@@ -1014,6 +1151,21 @@ frameworkPackageSchema.pre('validate', function normalizeFrameworkPackage(next) 
 
   if (this.isNew || this.isModified('status') || this.isModified('isDefault')) {
     this.isDefault = this.status === FRAMEWORK_PACKAGE_STATUSES.ACTIVE
+    this.versionStatus = mapRuntimeControlStatusToVersionStatus(this.status)
+    this.isLocked = isReadyFrameworkPackageStatus(this.status)
+
+    if (this.isLocked) {
+      this.lockedAt = this.lockedAt || new Date()
+      this.lockedReason = this.lockedReason || 'Framework package reached a governed runtime release boundary.'
+    } else {
+      this.lockedAt = null
+      this.lockedBy = null
+      this.lockedReason = ''
+    }
+  }
+
+  if (this.isNew || this.isModified('lockedReason')) {
+    this.lockedReason = String(this.lockedReason || '').trim()
   }
 
   next()

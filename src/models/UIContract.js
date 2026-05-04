@@ -1,4 +1,9 @@
 import mongoose from 'mongoose'
+import {
+  applyRuntimeControlVersioning,
+  RUNTIME_CONTROL_COMPATIBILITY_MODES,
+  RUNTIME_CONTROL_LOCK_IMPACTING_FIELDS,
+} from '../utils/runtimeControlVersioning.js'
 
 export const UI_CONTRACT_STATUSES = Object.freeze({
   DRAFT: 'DRAFT',
@@ -580,6 +585,11 @@ uiContractSchema.pre('validate', function normalizeUIContract(next) {
   }
 
   next()
+})
+
+applyRuntimeControlVersioning(uiContractSchema, {
+  lockImpactingFields: RUNTIME_CONTROL_LOCK_IMPACTING_FIELDS.UIContract,
+  compatibilityModeDefault: RUNTIME_CONTROL_COMPATIBILITY_MODES.INHERITED_MINOR,
 })
 
 const UIContract = mongoose.model('UIContract', uiContractSchema)
