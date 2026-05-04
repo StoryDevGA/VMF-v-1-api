@@ -10,6 +10,7 @@ export const UI_CONTRACT_STATUSES = Object.freeze({
   ACTIVE: 'ACTIVE',
   INACTIVE: 'INACTIVE',
   DEPRECATED: 'DEPRECATED',
+  ARCHIVED: 'ARCHIVED',
 })
 
 export const UI_CONTRACT_COMPATIBILITY_MODES = Object.freeze({
@@ -437,7 +438,7 @@ const uiContractSchema = new mongoose.Schema(
       type: String,
       trim: true,
       maxlength: 180,
-      default: '',
+      default: null,
     },
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,

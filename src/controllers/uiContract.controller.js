@@ -4,6 +4,8 @@ import UIContract, {
   UI_CONTRACT_STATUSES,
 } from '../models/UIContract.js'
 import FrameworkPackage, { FRAMEWORK_PACKAGE_STATUSES } from '../models/FrameworkPackage.js'
+import RuntimePathRegistry, { RUNTIME_PATH_REGISTRY_STATUSES } from '../models/RuntimePathRegistry.js'
+import WorkflowPolicy, { WORKFLOW_POLICY_STATUSES } from '../models/WorkflowPolicy.js'
 import auditService from '../services/auditService.js'
 import {
   buildInactiveFrameworkKeyMessage,
@@ -11,9 +13,14 @@ import {
   resolveKnownFrameworkKeys,
 } from '../services/frameworkRegistryService.js'
 import { escapeRegex, serializeUserSummary } from '../utils/controllerUtils.js'
+import {
+  LOCKED_RUNTIME_CONTROL_EDIT_MESSAGE,
+  RUNTIME_CONTROL_VERSION_STATUSES,
+} from '../utils/runtimeControlVersioning.js'
 
 const UI_CONTRACT_NOT_FOUND_MESSAGE = 'UI Contract was not found.'
 const DUPLICATE_UI_CONTRACT_KEY_MESSAGE = 'UI Contract key must be unique.'
+const LIFECYCLE_STAGE_PATH_KEY = 'framework_state.lifecycle.stage'
 
 const toIdString = (value) => {
   if (!value) return null
@@ -223,6 +230,127 @@ const validateUIContractSectionMapping = ({ sections = [], sourcePackage = null 
   return details
 }
 
+const normalizeActionKey = (value) => String(value || '').trim().toUpperCase()
+
+const validateUIContractLifecycleStages = async ({ lifecycleStages = [], frameworkKeys = [] } = {}) => {
+  const visibleStages = (Array.isArray(lifecycleStages) ? lifecycleStages : [])
+    .filter((stage) => stage?.isVisible !== false)
+  if (visibleStages.length === 0) return {}
+
+  const lifecycleRuntimePath = await RuntimePathRegistry.findOne({
+    pathKey: LIFECYCLE_STAGE_PATH_KEY,
+    status: RUNTIME_PATH_REGISTRY_STATUSES.ACTIVE,
+    frameworkKeys: { $in: frameworkKeys },
+  })
+    .select('pathKey allowedValues')
+    .lean()
+
+  if (!lifecycleRuntimePath) {
+    return {
+      lifecycleStages: `Lifecycle stages require active Runtime Path "${LIFECYCLE_STAGE_PATH_KEY}".`,
+    }
+  }
+
+  const allowedValues = new Set(
+    (Array.isArray(lifecycleRuntimePath.allowedValues) ? lifecycleRuntimePath.allowedValues : [])
+      .map((value) => normalizeActionKey(value))
+      .filter(Boolean),
+  )
+
+  const invalidStageKeys = visibleStages
+    .map((stage) => normalizeActionKey(stage?.stageKey))
+    .filter((stageKey) => stageKey && !allowedValues.has(stageKey))
+
+  return invalidStageKeys.length > 0
+    ? {
+        lifecycleStages:
+          `Lifecycle stage keys must exist in Runtime Path "${LIFECYCLE_STAGE_PATH_KEY}": ${invalidStageKeys.join(', ')}.`,
+      }
+    : {}
+}
+
+const validateUIContractActions = async ({ actions = [], sourcePackage = null } = {}) => {
+  const visibleActions = (Array.isArray(actions) ? actions : [])
+    .filter((action) => action?.isVisible !== false)
+  if (visibleActions.length === 0) return {}
+
+  const policyKeys = [
+    ...new Set(
+      (Array.isArray(sourcePackage?.workflowBindings) ? sourcePackage.workflowBindings : [])
+        .map((binding) => String(binding?.policyKey || '').trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  ]
+
+  if (policyKeys.length === 0) return {}
+
+  const workflowPolicies = await WorkflowPolicy.find({ key: { $in: policyKeys } })
+    .select('key status governedAction')
+    .lean()
+  const policyKeyTokens = new Set(policyKeys.flatMap((policyKey) => [
+    normalizeActionKey(policyKey),
+    normalizeActionKey(policyKey).replace(/-/g, '_'),
+  ]))
+  const governedActionTokens = new Set(
+    workflowPolicies
+      .filter((policy) => policy.status === WORKFLOW_POLICY_STATUSES.ACTIVE)
+      .map((policy) => normalizeActionKey(policy.governedAction))
+      .filter(Boolean),
+  )
+
+  const policyKeyCollisions = []
+  const unmappedGovernedActions = []
+
+  visibleActions.forEach((action) => {
+    const governedAction = normalizeActionKey(action?.governedAction || action?.actionKey)
+    if (!governedAction) return
+
+    if (policyKeyTokens.has(governedAction)) {
+      policyKeyCollisions.push(governedAction)
+      return
+    }
+
+    if (governedActionTokens.size > 0 && !governedActionTokens.has(governedAction)) {
+      unmappedGovernedActions.push(governedAction)
+    }
+  })
+
+  if (policyKeyCollisions.length > 0) {
+    return {
+      actions:
+        `UI Contract governed actions must not use workflow policy keys: ${[...new Set(policyKeyCollisions)].join(', ')}.`,
+    }
+  }
+
+  if (unmappedGovernedActions.length > 0) {
+    return {
+      actions:
+        `UI Contract governed actions must map to selected package workflow governed actions: ${[...new Set(unmappedGovernedActions)].join(', ')}.`,
+    }
+  }
+
+  return {}
+}
+
+const validateUIContractRuntimeSafety = async ({
+  frameworkKeys = [],
+  sourcePackage = null,
+  sections = [],
+  lifecycleStages = [],
+  actions = [],
+  enforceActionGovernance = true,
+} = {}) => {
+  const sectionMappingDetails = validateUIContractSectionMapping({ sections, sourcePackage })
+  if (Object.keys(sectionMappingDetails).length > 0) return sectionMappingDetails
+
+  const lifecycleDetails = await validateUIContractLifecycleStages({ lifecycleStages, frameworkKeys })
+  if (Object.keys(lifecycleDetails).length > 0) return lifecycleDetails
+
+  if (!enforceActionGovernance) return {}
+
+  return validateUIContractActions({ actions, sourcePackage })
+}
+
 const resolveSourcePackage = async ({
   sourcePackageKey = '',
   sourcePackageVersion = '',
@@ -241,7 +369,7 @@ const resolveSourcePackage = async ({
 
   if (normalizedSourcePackageKey) {
     sourcePackage = await FrameworkPackage.findOne({ packageKey: normalizedSourcePackageKey })
-      .select('packageKey version frameworkKey status sections.sectionKey sections.runtimePath sections.required')
+      .select('packageKey version frameworkKey status sections.sectionKey sections.runtimePath sections.required workflowBindings.policyKey')
       .lean()
   }
 
@@ -250,7 +378,7 @@ const resolveSourcePackage = async ({
       frameworkKey: normalizedSourceFrameworkKey,
       version: normalizedSourcePackageVersion,
     })
-      .select('packageKey version frameworkKey status sections.sectionKey sections.runtimePath sections.required')
+      .select('packageKey version frameworkKey status sections.sectionKey sections.runtimePath sections.required workflowBindings.policyKey')
       .lean()
   }
 
@@ -315,7 +443,7 @@ const resolveSourcePackage = async ({
 }
 
 const findUIContractById = (uiContractId) => {
-  const normalized = String(uiContractId || '').trim()
+  const normalized = String(uiContractId || '').trim().toLowerCase()
   if (normalized.startsWith('ui-contract-')) {
     return UIContract.findByStableId(normalized)
   }
@@ -374,12 +502,16 @@ export const createUIContract = async (req, res, next) => {
       return sendValidationFailed(res, req, sourcePackageDetails)
     }
 
-    const sectionMappingDetails = validateUIContractSectionMapping({
+    const runtimeSafetyDetails = await validateUIContractRuntimeSafety({
+      frameworkKeys: req.body.frameworkKeys,
       sections: req.body.sections,
+      lifecycleStages: req.body.lifecycleStages,
+      actions: req.body.actions,
       sourcePackage: sourcePackageResult.sourcePackage,
+      enforceActionGovernance: req.body.status !== UI_CONTRACT_STATUSES.DRAFT,
     })
-    if (Object.keys(sectionMappingDetails).length > 0) {
-      return sendValidationFailed(res, req, sectionMappingDetails)
+    if (Object.keys(runtimeSafetyDetails).length > 0) {
+      return sendValidationFailed(res, req, runtimeSafetyDetails)
     }
 
     const existing = await UIContract.findOne({ uiContractKey: req.body.uiContractKey }).select('_id')
@@ -454,6 +586,131 @@ export const getUIContract = async (req, res, next) => {
   }
 }
 
+export const cloneUIContractRecord = async (req, res, next) => {
+  try {
+    const source = await findUIContractById(req.params.uiContractId)
+    if (!source) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: UI_CONTRACT_NOT_FOUND_MESSAGE,
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    const existing = await UIContract.findOne({ uiContractKey: req.body.uiContractKey }).select('_id')
+    if (existing) {
+      return sendConflict(res, req, DUPLICATE_UI_CONTRACT_KEY_MESSAGE, {
+        field: 'uiContractKey',
+        reason: 'UI_CONTRACT_KEY_CONFLICT',
+      })
+    }
+
+    const sourceObject = typeof source.toObject === 'function'
+      ? source.toObject()
+      : cloneAuditValue(source)
+    const actorUserId = req.context?.userId || req.userId
+    const sourceStableId = source.stableId || sourceObject.stableId || sourceObject.id
+    const clonePayload = {
+      ...sourceObject,
+      _id: undefined,
+      stableId: undefined,
+      uiContractKey: req.body.uiContractKey,
+      name: req.body.name,
+      description: req.body.description ?? source.description ?? '',
+      status: UI_CONTRACT_STATUSES.DRAFT,
+      isSystem: false,
+      isProtected: false,
+      componentVersion: (Number(source.componentVersion) || 1) + 1,
+      versionStatus: RUNTIME_CONTROL_VERSION_STATUSES.DRAFT,
+      lineageId: source.lineageId || sourceStableId,
+      isLocked: false,
+      lockedAt: null,
+      lockedBy: null,
+      lockedReason: '',
+      lockedByPackageKeys: [],
+      clonedFromStableId: sourceStableId,
+      supersedesStableId: sourceStableId,
+      supersededByStableId: null,
+      createdAt: undefined,
+      updatedAt: undefined,
+      createdBy: actorUserId,
+      updatedBy: actorUserId,
+    }
+
+    const sourcePackageResult = await resolveSourcePackage({
+      sourcePackageKey: clonePayload.sourcePackageKey,
+      sourcePackageVersion: clonePayload.sourcePackageVersion,
+      sourceFrameworkKey: clonePayload.sourceFrameworkKey,
+      frameworkKeys: clonePayload.frameworkKeys,
+      status: clonePayload.status,
+    })
+    if (Object.keys(sourcePackageResult.details).length > 0) {
+      return sendValidationFailed(res, req, sourcePackageResult.details)
+    }
+
+    const runtimeSafetyDetails = await validateUIContractRuntimeSafety({
+      frameworkKeys: clonePayload.frameworkKeys,
+      sections: clonePayload.sections,
+      lifecycleStages: clonePayload.lifecycleStages,
+      actions: clonePayload.actions,
+      sourcePackage: sourcePackageResult.sourcePackage,
+      enforceActionGovernance: false,
+    })
+    if (Object.keys(runtimeSafetyDetails).length > 0) {
+      return sendValidationFailed(res, req, runtimeSafetyDetails)
+    }
+
+    const clone = new UIContract(clonePayload)
+    await clone.save()
+
+    await UIContract.updateOne(
+      { _id: source._id },
+      {
+        $set: {
+          supersededByStableId: clone.stableId,
+          updatedBy: actorUserId,
+        },
+      },
+      { runValidators: false },
+    )
+
+    await clone.populate([
+      { path: 'createdBy', select: 'name email' },
+      { path: 'updatedBy', select: 'name email' },
+    ])
+
+    await auditService.logFromRequest(req, {
+      action: auditService.AUDIT_ACTIONS.UI_CONTRACT_CLONED,
+      resourceType: auditService.RESOURCE_TYPES.UIContract,
+      resourceId: clone._id,
+      scope: { frameworkKey: clone.frameworkKeys?.[0] },
+      display: { resourceLabel: clone.uiContractKey },
+      diff: {
+        sourceStableId,
+        clonedStableId: clone.stableId,
+        componentVersion: clone.componentVersion,
+        sourceComponentVersion: source.componentVersion,
+        lineageId: clone.lineageId,
+      },
+    })
+
+    return res.status(201).json({
+      data: serializeUIContract(clone, { fallbackUpdatedBy: buildActorSummary(req) }),
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.code === 11000) {
+      return sendConflict(res, req, DUPLICATE_UI_CONTRACT_KEY_MESSAGE, {
+        field: 'uiContractKey',
+        reason: 'UI_CONTRACT_KEY_CONFLICT',
+      })
+    }
+    next(err)
+  }
+}
+
 export const updateUIContract = async (req, res, next) => {
   try {
     const uiContract = await findUIContractById(req.params.uiContractId)
@@ -468,9 +725,12 @@ export const updateUIContract = async (req, res, next) => {
     }
 
     if (uiContract.isLocked || uiContract.isProtected) {
-      return sendConflict(res, req, 'Locked or protected UI Contracts cannot be edited directly.', {
+      return sendConflict(res, req, LOCKED_RUNTIME_CONTROL_EDIT_MESSAGE, {
         field: uiContract.isLocked ? 'isLocked' : 'isProtected',
         reason: 'UI_CONTRACT_LOCKED',
+        lockedByPackageKeys: Array.isArray(uiContract.lockedByPackageKeys)
+          ? uiContract.lockedByPackageKeys
+          : [],
       })
     }
 
@@ -484,25 +744,32 @@ export const updateUIContract = async (req, res, next) => {
     const nextSourcePackageVersion = req.body.sourcePackageVersion ?? uiContract.sourcePackageVersion
     const nextSourceFrameworkKey = req.body.sourceFrameworkKey ?? uiContract.sourceFrameworkKey
     const nextSections = req.body.sections ?? uiContract.sections
+    const nextLifecycleStages = req.body.lifecycleStages ?? uiContract.lifecycleStages
+    const nextActions = req.body.actions ?? uiContract.actions
+    const nextStatus = req.body.status ?? uiContract.status
 
     const sourcePackageResult = await resolveSourcePackage({
       sourcePackageKey: nextSourcePackageKey,
       sourcePackageVersion: nextSourcePackageVersion,
       sourceFrameworkKey: nextSourceFrameworkKey,
       frameworkKeys: nextFrameworkKeys,
-      status: req.body.status ?? uiContract.status,
+      status: nextStatus,
     })
     const sourcePackageDetails = sourcePackageResult.details
     if (Object.keys(sourcePackageDetails).length > 0) {
       return sendValidationFailed(res, req, sourcePackageDetails)
     }
 
-    const sectionMappingDetails = validateUIContractSectionMapping({
+    const runtimeSafetyDetails = await validateUIContractRuntimeSafety({
+      frameworkKeys: nextFrameworkKeys,
       sections: nextSections,
+      lifecycleStages: nextLifecycleStages,
+      actions: nextActions,
       sourcePackage: sourcePackageResult.sourcePackage,
+      enforceActionGovernance: nextStatus !== UI_CONTRACT_STATUSES.DRAFT,
     })
-    if (Object.keys(sectionMappingDetails).length > 0) {
-      return sendValidationFailed(res, req, sectionMappingDetails)
+    if (Object.keys(runtimeSafetyDetails).length > 0) {
+      return sendValidationFailed(res, req, runtimeSafetyDetails)
     }
 
     const diff = {}
@@ -523,8 +790,6 @@ export const updateUIContract = async (req, res, next) => {
       'actions',
       'isSystem',
       'isProtected',
-      'isLocked',
-      'clonedFromStableId',
     ]
 
     for (const field of fields) {
@@ -545,7 +810,7 @@ export const updateUIContract = async (req, res, next) => {
 
     if (Object.keys(diff).length > 0) {
       await auditService.logFromRequest(req, {
-        action: auditService.AUDIT_ACTIONS.UI_CONTRACT_UPDATED,
+        action: req.uiContractAuditAction || auditService.AUDIT_ACTIONS.UI_CONTRACT_UPDATED,
         resourceType: auditService.RESOURCE_TYPES.UIContract,
         resourceId: uiContract._id,
         scope: { frameworkKey: uiContract.frameworkKeys?.[0] },
@@ -602,12 +867,85 @@ export const getUIContractDependencies = async (req, res, next) => {
   }
 }
 
+export const validateUIContract = async (req, res, next) => {
+  try {
+    const uiContract = await findUIContractById(req.params.uiContractId)
+    if (!uiContract) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: UI_CONTRACT_NOT_FOUND_MESSAGE,
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    const sourcePackageResult = await resolveSourcePackage({
+      sourcePackageKey: uiContract.sourcePackageKey,
+      sourcePackageVersion: uiContract.sourcePackageVersion,
+      sourceFrameworkKey: uiContract.sourceFrameworkKey,
+      frameworkKeys: uiContract.frameworkKeys,
+      status: uiContract.status,
+    })
+    const details = {
+      ...sourcePackageResult.details,
+      ...await validateUIContractRuntimeSafety({
+        frameworkKeys: uiContract.frameworkKeys,
+        sections: uiContract.sections,
+        lifecycleStages: uiContract.lifecycleStages,
+        actions: uiContract.actions,
+        sourcePackage: sourcePackageResult.sourcePackage,
+      }),
+    }
+    const isValid = Object.keys(details).length === 0
+
+    await auditService.logFromRequest(req, {
+      action: isValid
+        ? auditService.AUDIT_ACTIONS.UI_CONTRACT_VALIDATION_RUN
+        : auditService.AUDIT_ACTIONS.UI_CONTRACT_VALIDATION_FAILED,
+      resourceType: auditService.RESOURCE_TYPES.UIContract,
+      resourceId: uiContract._id,
+      scope: { frameworkKey: uiContract.frameworkKeys?.[0] },
+      display: { resourceLabel: uiContract.uiContractKey },
+      diff: {
+        valid: isValid,
+        details,
+        componentVersion: uiContract.componentVersion,
+        versionStatus: uiContract.versionStatus,
+      },
+    })
+
+    if (!isValid) {
+      return sendValidationFailed(res, req, details, 'UI Contract validation failed.')
+    }
+
+    return res.status(200).json({
+      data: {
+        valid: true,
+        details: {},
+        componentVersion: uiContract.componentVersion,
+        versionStatus: uiContract.versionStatus,
+      },
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    next(err)
+  }
+}
+
 export const activateUIContract = async (req, res, next) => {
   req.body = { status: UI_CONTRACT_STATUSES.ACTIVE }
   return updateUIContract(req, res, next)
 }
 
 export const deprecateUIContract = async (req, res, next) => {
+  req.uiContractAuditAction = auditService.AUDIT_ACTIONS.UI_CONTRACT_DEPRECATED
   req.body = { status: UI_CONTRACT_STATUSES.DEPRECATED }
+  return updateUIContract(req, res, next)
+}
+
+export const archiveUIContract = async (req, res, next) => {
+  req.uiContractAuditAction = auditService.AUDIT_ACTIONS.UI_CONTRACT_ARCHIVED
+  req.body = { status: UI_CONTRACT_STATUSES.ARCHIVED }
   return updateUIContract(req, res, next)
 }

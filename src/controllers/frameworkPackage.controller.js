@@ -408,6 +408,80 @@ const normalizeRuntimePath = (value) => String(value || '').trim()
 const getStructuralSections = (sections = []) =>
   Array.isArray(sections) ? sections : []
 
+const isCustomUIContractSection = (section = {}) =>
+  section?.isCustom === true
+  || String(section?.source || '').trim().toUpperCase() === 'CUSTOM'
+
+const summarizeUIContractSectionMapping = ({
+  packageSections = [],
+  uiSections = [],
+} = {}) => {
+  const normalizedPackageSections = getStructuralSections(packageSections)
+  const packageSectionByKey = new Map(
+    normalizedPackageSections
+      .map((section) => [normalizeSectionKey(section?.sectionKey), section])
+      .filter(([sectionKey]) => sectionKey),
+  )
+  const packageBackedUiSections = getStructuralSections(uiSections)
+    .filter((section) => !isCustomUIContractSection(section))
+  const uiSectionByKey = new Map(
+    packageBackedUiSections
+      .map((section) => [normalizeSectionKey(section?.sectionKey), section])
+      .filter(([sectionKey]) => sectionKey),
+  )
+  const custom = getStructuralSections(uiSections)
+    .filter((section) => isCustomUIContractSection(section))
+    .map((section) => normalizeSectionKey(section?.sectionKey))
+    .filter(Boolean)
+  const mapped = []
+  const missing = []
+  const orphaned = []
+  const runtimePathMismatches = []
+
+  for (const [sectionKey, packageSection] of packageSectionByKey.entries()) {
+    const uiSection = uiSectionByKey.get(sectionKey)
+    if (!uiSection) {
+      missing.push(sectionKey)
+      continue
+    }
+
+    const expectedRuntimePath = normalizeRuntimePath(packageSection?.runtimePath)
+    const actualRuntimePath = normalizeRuntimePath(uiSection?.runtimePath)
+    if (actualRuntimePath !== expectedRuntimePath) {
+      runtimePathMismatches.push({
+        sectionKey,
+        expectedRuntimePath,
+        actualRuntimePath,
+      })
+      continue
+    }
+
+    mapped.push(sectionKey)
+  }
+
+  for (const sectionKey of uiSectionByKey.keys()) {
+    if (!packageSectionByKey.has(sectionKey)) {
+      orphaned.push(sectionKey)
+    }
+  }
+
+  return {
+    mapped,
+    missing,
+    orphaned,
+    runtimePathMismatches,
+    custom,
+    counts: {
+      packageSections: packageSectionByKey.size,
+      mapped: mapped.length,
+      missing: missing.length,
+      orphaned: orphaned.length,
+      runtimePathMismatches: runtimePathMismatches.length,
+      custom: custom.length,
+    },
+  }
+}
+
 const normalizeKeyValue = (value) => String(value || '').trim()
 
 const isReadyFrameworkPackageStatus = (status) =>
@@ -612,30 +686,35 @@ const validateSectionRuntimePaths = async ({ sections = [], frameworkKey }) => {
 const validateUIContractSectionAlignment = ({ sections = [], uiContract = null }) => {
   if (!uiContract) return null
 
-  const packageSectionKeys = [
-    ...new Set(
-      getStructuralSections(sections)
-        .map((section) => normalizeSectionKey(section?.sectionKey))
-        .filter(Boolean),
-    ),
-  ]
-  if (packageSectionKeys.length === 0) return null
+  const sectionMapping = summarizeUIContractSectionMapping({
+    packageSections: sections,
+    uiSections: uiContract.sections,
+  })
+  if (sectionMapping.counts.packageSections === 0) return null
 
-  const uiContractSectionKeys = new Set(
-    getStructuralSections(uiContract.sections)
-      .filter((section) =>
-        section?.isCustom !== true
-        && String(section?.source || '').trim().toUpperCase() !== 'CUSTOM')
-      .map((section) => normalizeSectionKey(section?.sectionKey))
-      .filter(Boolean),
-  )
-  const missingSectionKeys = packageSectionKeys.filter(
-    (sectionKey) => !uiContractSectionKeys.has(sectionKey),
-  )
+  const issues = []
+  if (sectionMapping.missing.length > 0) {
+    issues.push(
+      `UI Contract "${uiContract.uiContractKey}" is missing presentation mappings for package sections: ${sectionMapping.missing.join(', ')}.`,
+    )
+  }
+  if (sectionMapping.orphaned.length > 0) {
+    issues.push(
+      `UI Contract sections must exist in the source package unless marked custom: ${sectionMapping.orphaned.join(', ')}.`,
+    )
+  }
+  if (sectionMapping.runtimePathMismatches.length > 0) {
+    const mismatchKeys = sectionMapping.runtimePathMismatches
+      .map((item) => item.sectionKey)
+      .join(', ')
+    issues.push(
+      `UI Contract runtime paths must match package section definitions: ${mismatchKeys}.`,
+    )
+  }
 
-  if (missingSectionKeys.length === 0) return null
+  if (issues.length === 0) return null
 
-  return `UI Contract "${uiContract.uiContractKey}" is missing presentation mappings for package sections: ${missingSectionKeys.join(', ')}.`
+  return issues.join(' ')
 }
 
 const validateFrameworkPackageAccessRules = ({
@@ -745,13 +824,15 @@ const validateFrameworkPackageRegistryReferences = async ({
   const normalizedUiContractKey = String(uiContractKey || '').trim().toLowerCase()
   if (normalizedUiContractKey) {
     const uiContract = await UIContract.findOne({ uiContractKey: normalizedUiContractKey })
-      .select('uiContractKey status frameworkKeys introducedInVersion deprecatedInVersion compatibilityMode sections.sectionKey sections.source sections.isCustom')
+      .select('uiContractKey status versionStatus frameworkKeys introducedInVersion deprecatedInVersion compatibilityMode sections.sectionKey sections.runtimePath sections.source sections.isCustom')
       .lean()
 
     if (!uiContract) {
       details.uiContractKey = `UI Contract "${normalizedUiContractKey}" was not found.`
     } else if (uiContract.status !== UI_CONTRACT_STATUSES.ACTIVE) {
       details.uiContractKey = `UI Contract "${normalizedUiContractKey}" must be ACTIVE.`
+    } else if (uiContract.versionStatus !== RUNTIME_CONTROL_VERSION_STATUSES.ACTIVE) {
+      details.uiContractKey = `UI Contract "${normalizedUiContractKey}" version status must be ACTIVE.`
     } else if (!Array.isArray(uiContract.frameworkKeys) || !uiContract.frameworkKeys.includes(frameworkKey)) {
       details.uiContractKey = `UI Contract "${normalizedUiContractKey}" is not compatible with framework "${frameworkKey}".`
     } else if (validateUiContractSections) {
@@ -912,7 +993,12 @@ const serializeRuntimePathDependencyReference = ({ row, pathKey, source, issues 
     ...pickDependencyVersioningFields(row),
   })
 
-const serializeUIContractDependencyReference = ({ uiContract, uiContractKey, frameworkKey }) => {
+const serializeUIContractDependencyReference = ({
+  uiContract,
+  uiContractKey,
+  frameworkKey,
+  packageSections = [],
+}) => {
   if (!uiContract && !uiContractKey) return null
   if (!uiContract) {
     return serializeDependencyReference({
@@ -930,6 +1016,9 @@ const serializeUIContractDependencyReference = ({ uiContract, uiContractKey, fra
   if (uiContract.status !== UI_CONTRACT_STATUSES.ACTIVE) {
     issues.push(`UI Contract must be ACTIVE; current status is ${uiContract.status}.`)
   }
+  if (uiContract.versionStatus !== RUNTIME_CONTROL_VERSION_STATUSES.ACTIVE) {
+    issues.push(`UI Contract version status must be ACTIVE; current version status is ${uiContract.versionStatus || 'UNKNOWN'}.`)
+  }
   if (frameworkKey && (!Array.isArray(uiContract.frameworkKeys) || !uiContract.frameworkKeys.includes(frameworkKey))) {
     issues.push(`UI Contract is not compatible with framework "${frameworkKey}".`)
   }
@@ -946,7 +1035,15 @@ const serializeUIContractDependencyReference = ({ uiContract, uiContractKey, fra
       String(uiContract.sourcePackageVersion || '').trim()
       || String(uiContract.introducedInVersion || '').trim()
       || '',
+    sourcePackageKey: uiContract.sourcePackageKey || '',
+    sourcePackageVersion: uiContract.sourcePackageVersion || '',
     compatibilityMode: uiContract.compatibilityMode || '',
+    sectionMapping: summarizeUIContractSectionMapping({
+      packageSections,
+      uiSections: uiContract.sections,
+    }),
+    lifecycleStageCount: Array.isArray(uiContract.lifecycleStages) ? uiContract.lifecycleStages.length : 0,
+    actionCount: Array.isArray(uiContract.actions) ? uiContract.actions.length : 0,
     ...pickDependencyVersioningFields(uiContract),
   })
 }
@@ -975,7 +1072,7 @@ const fetchFrameworkPackageDependencies = async (frameworkPackage) => {
       : Promise.resolve([]),
     uiContractKey
       ? UIContract.findOne({ uiContractKey })
-        .select('stableId uiContractKey name status frameworkKeys sourcePackageVersion introducedInVersion compatibilityMode sections.sectionKey sections.runtimePath sections.source sections.isCustom componentVersion versionStatus lineageId isLocked lockedAt lockedByPackageKeys')
+        .select('stableId uiContractKey name status frameworkKeys sourcePackageKey sourcePackageVersion introducedInVersion compatibilityMode sections.sectionKey sections.runtimePath sections.source sections.isCustom lifecycleStages.stageKey lifecycleStages.isVisible actions.actionKey actions.governedAction actions.isVisible componentVersion versionStatus lineageId isLocked lockedAt lockedByPackageKeys')
         .lean()
       : Promise.resolve(null),
   ])
@@ -1192,7 +1289,12 @@ const fetchFrameworkPackageDependencies = async (frameworkPackage) => {
     })
   })
 
-  const uiContractReference = serializeUIContractDependencyReference({ uiContract, uiContractKey, frameworkKey })
+  const uiContractReference = serializeUIContractDependencyReference({
+    uiContract,
+    uiContractKey,
+    frameworkKey,
+    packageSections: frameworkPackage.sections,
+  })
   const dependencyGroups = {
     agents,
     skills,
@@ -1267,6 +1369,25 @@ const buildDependencyLockReferences = ({ dependencies = {}, lockedAt }) =>
       issues: Array.isArray(row.issues) ? row.issues : [],
     })))
 
+const buildUIContractSnapshot = ({ dependencies = {} } = {}) => {
+  const uiContract = dependencies.uiContract
+  if (!uiContract) return null
+
+  return {
+    uiContractKey: uiContract.key || '',
+    stableId: uiContract.id || '',
+    lineageId: uiContract.lineageId || uiContract.id || '',
+    componentVersion: Number(uiContract.componentVersion) || 1,
+    versionStatus: uiContract.versionStatus || '',
+    sourcePackageKey: uiContract.sourcePackageKey || '',
+    sourcePackageVersion: uiContract.sourcePackageVersion || '',
+    compatibilityMode: uiContract.compatibilityMode || '',
+    sectionMapping: uiContract.sectionMapping || null,
+    lifecycleStageCount: Number(uiContract.lifecycleStageCount) || 0,
+    actionCount: Number(uiContract.actionCount) || 0,
+  }
+}
+
 const buildDependencyLockSnapshot = ({
   frameworkPackage,
   dependencies,
@@ -1280,6 +1401,7 @@ const buildDependencyLockSnapshot = ({
   packageKey: frameworkPackage.packageKey,
   packageVersion: frameworkPackage.version,
   references: buildDependencyLockReferences({ dependencies, lockedAt }),
+  ...(dependencies?.uiContract ? { uiContractSnapshot: buildUIContractSnapshot({ dependencies }) } : {}),
 })
 
 const updateRuntimeControlDependencyLocks = async ({
@@ -1348,6 +1470,56 @@ const updateRuntimeControlDependencyLocks = async ({
       },
       updateOptions,
     )
+  }
+}
+
+const recomputeUIContractLockState = async ({
+  packageKey,
+  session,
+}) => {
+  const updateOptions = session ? { session } : {}
+
+  // Find all UI Contracts locked by this package
+  const lockedContracts = await UIContract.find(
+    { lockedByPackageKeys: packageKey },
+    { stableId: 1, lockedByPackageKeys: 1 },
+    updateOptions,
+  )
+
+  if (lockedContracts.length === 0) return
+
+  // For each contract, remove the package key and recompute lock state
+  for (const contract of lockedContracts) {
+    const updatedPackageKeys = (contract.lockedByPackageKeys || [])
+      .filter((key) => key !== packageKey)
+
+    if (updatedPackageKeys.length === 0) {
+      // No other packages lock this contract, so unlock it
+      await UIContract.updateOne(
+        { stableId: contract.stableId },
+        {
+          $set: {
+            lockedByPackageKeys: [],
+            isLocked: false,
+            lockedBy: null,
+            lockedAt: null,
+            lockedReason: '',
+          },
+        },
+        updateOptions,
+      )
+    } else {
+      // Other packages still lock this contract, just remove this package key
+      await UIContract.updateOne(
+        { stableId: contract.stableId },
+        {
+          $set: {
+            lockedByPackageKeys: updatedPackageKeys,
+          },
+        },
+        updateOptions,
+      )
+    }
   }
 }
 
@@ -1438,6 +1610,23 @@ const resolveUIContractIntegrity = ({ frameworkPackage, uiContract }) => {
       key: 'uiContract.active',
       group: 'UI Contract Integrity',
       message: `UI Contract "${uiContractKey}" is ACTIVE.`,
+      field: 'uiContractKey',
+    }))
+  }
+
+  if (uiContract.versionStatus !== RUNTIME_CONTROL_VERSION_STATUSES.ACTIVE) {
+    checks.push(buildIntegrityCheck({
+      key: 'uiContract.versionStatus',
+      group: 'UI Contract Integrity',
+      severity: isReadyFrameworkPackageStatus(frameworkPackage.status) ? 'FAIL' : 'WARN',
+      message: `UI Contract "${uiContractKey}" version status must be ACTIVE before validation.`,
+      field: 'uiContractKey',
+    }))
+  } else {
+    checks.push(buildIntegrityCheck({
+      key: 'uiContract.versionStatus',
+      group: 'UI Contract Integrity',
+      message: `UI Contract "${uiContractKey}" version status is ACTIVE.`,
       field: 'uiContractKey',
     }))
   }
@@ -1598,7 +1787,7 @@ const buildFrameworkPackageIntegrity = async (frameworkPackage) => {
       : Promise.resolve([]),
     uiContractKey
       ? UIContract.findOne({ uiContractKey })
-        .select('uiContractKey status frameworkKeys sourcePackageVersion introducedInVersion compatibilityMode sections.sectionKey sections.runtimePath sections.source sections.isCustom')
+        .select('uiContractKey status versionStatus frameworkKeys sourcePackageVersion introducedInVersion compatibilityMode sections.sectionKey sections.runtimePath sections.source sections.isCustom')
         .lean()
       : Promise.resolve(null),
   ])
@@ -2165,8 +2354,25 @@ export const updateFrameworkPackage = async (req, res, next) => {
       }
     }
 
+    const isDemotedFromValidated = previousStatus === FRAMEWORK_PACKAGE_STATUSES.VALIDATED
+      && nextStatus === FRAMEWORK_PACKAGE_STATUSES.DRAFT
+
     frameworkPackage.updatedBy = actorUserId
-    if (dependencyLockResult) {
+    if (isDemotedFromValidated) {
+      // When demoting a package from VALIDATED to DRAFT, unlock any contracts it locked
+      const session = await mongoose.startSession()
+      try {
+        await session.withTransaction(async () => {
+          await frameworkPackage.save({ session })
+          await recomputeUIContractLockState({
+            packageKey: frameworkPackage.packageKey,
+            session,
+          })
+        })
+      } finally {
+        await session.endSession()
+      }
+    } else if (dependencyLockResult) {
       const session = await mongoose.startSession()
       try {
         await session.withTransaction(async () => {

@@ -15,6 +15,30 @@ const keyRegex = /^[a-z][a-z0-9-]*$/
 const frameworkKeyRegex = /^[A-Z][A-Z0-9_]*$/
 const semverRegex = /^\d+\.\d+\.\d+$/
 
+const governedMetadataFieldSchema = (field) =>
+  z.unknown().optional().superRefine((value, ctx) => {
+    if (value === undefined) return
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `${field} is server-managed governance metadata and cannot be edited directly.`,
+    })
+  })
+
+const governedMetadataFieldsSchema = {
+  componentVersion: governedMetadataFieldSchema('componentVersion'),
+  versionStatus: governedMetadataFieldSchema('versionStatus'),
+  stableId: governedMetadataFieldSchema('stableId'),
+  lineageId: governedMetadataFieldSchema('lineageId'),
+  isLocked: governedMetadataFieldSchema('isLocked'),
+  lockedAt: governedMetadataFieldSchema('lockedAt'),
+  lockedBy: governedMetadataFieldSchema('lockedBy'),
+  lockedReason: governedMetadataFieldSchema('lockedReason'),
+  lockedByPackageKeys: governedMetadataFieldSchema('lockedByPackageKeys'),
+  clonedFromStableId: governedMetadataFieldSchema('clonedFromStableId'),
+  supersedesStableId: governedMetadataFieldSchema('supersedesStableId'),
+  supersededByStableId: governedMetadataFieldSchema('supersededByStableId'),
+}
+
 const frameworkKeysSchema = z
   .array(
     z.string()
@@ -210,14 +234,11 @@ const createUIContractSchema = z.object({
   actions: actionsSchema,
   isSystem: z.boolean().default(false),
   isProtected: z.boolean().default(false),
-  isLocked: z.boolean().default(false),
-  clonedFromStableId: z.string().trim().max(180).default(''),
+  ...governedMetadataFieldsSchema,
 })
 
 const updateUIContractSchema = z.object({
-  uiContractKey: z.string().trim().min(1).max(140).transform((value) => value.toLowerCase())
-    .refine((value) => keyRegex.test(value), 'UI contract key must use lowercase letters, numbers, or hyphens.')
-    .optional(),
+  uiContractKey: governedMetadataFieldSchema('uiContractKey'),
   name: z.string().trim().min(1, 'Name is required.').max(160).optional(),
   description: z.string().trim().max(800).optional(),
   status: z.enum(Object.values(UI_CONTRACT_STATUSES)).optional(),
@@ -234,12 +255,20 @@ const updateUIContractSchema = z.object({
   actions: actionsBaseSchema.optional(),
   isSystem: z.boolean().optional(),
   isProtected: z.boolean().optional(),
-  isLocked: z.boolean().optional(),
-  clonedFromStableId: z.string().trim().max(180).optional(),
+  ...governedMetadataFieldsSchema,
 }).refine(
   (value) => Object.keys(value).length > 0,
   { message: 'At least one updatable field is required.', path: ['name'] },
 )
+
+const cloneUIContractSchema = z.object({
+  uiContractKey: z.string().trim().min(1).max(140).transform((value) => value.toLowerCase())
+    .refine((value) => keyRegex.test(value), 'UI contract key must use lowercase letters, numbers, or hyphens.'),
+  name: z.string().trim().min(1, 'Name is required.').max(160),
+  description: z.string().trim().max(800).default(''),
+  status: z.enum([UI_CONTRACT_STATUSES.DRAFT]).default(UI_CONTRACT_STATUSES.DRAFT),
+  ...governedMetadataFieldsSchema,
+})
 
 const uiContractIdSchema = z.object({
   uiContractId: z.string().trim().regex(objectIdOrStableIdRegex, 'uiContractId must be a valid id.'),
@@ -256,5 +285,6 @@ const listUIContractsQuerySchema = z.object({
 
 export const validateCreateUIContract = createBodyValidator(createUIContractSchema)
 export const validateUpdateUIContract = createBodyValidator(updateUIContractSchema)
+export const validateCloneUIContract = createBodyValidator(cloneUIContractSchema)
 export const validateUIContractId = createParamsValidator(uiContractIdSchema)
 export const validateListUIContracts = createQueryValidator(listUIContractsQuerySchema)

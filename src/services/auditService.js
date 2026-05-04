@@ -102,6 +102,12 @@ export const AUDIT_ACTIONS = Object.freeze({
   VALIDATION_REGISTRY_UPDATED: 'VALIDATION_REGISTRY_UPDATED',
   UI_CONTRACT_CREATED: 'UI_CONTRACT_CREATED',
   UI_CONTRACT_UPDATED: 'UI_CONTRACT_UPDATED',
+  UI_CONTRACT_CLONED: 'UI_CONTRACT_CLONED',
+  UI_CONTRACT_LOCKED: 'UI_CONTRACT_LOCKED',
+  UI_CONTRACT_DEPRECATED: 'UI_CONTRACT_DEPRECATED',
+  UI_CONTRACT_ARCHIVED: 'UI_CONTRACT_ARCHIVED',
+  UI_CONTRACT_VALIDATION_RUN: 'UI_CONTRACT_VALIDATION_RUN',
+  UI_CONTRACT_VALIDATION_FAILED: 'UI_CONTRACT_VALIDATION_FAILED',
   WORKFLOW_POLICY_CREATED: 'WORKFLOW_POLICY_CREATED',
   WORKFLOW_POLICY_UPDATED: 'WORKFLOW_POLICY_UPDATED',
   WORKFLOW_POLICY_TESTED: 'WORKFLOW_POLICY_TESTED',
@@ -430,6 +436,18 @@ const buildAuditSummary = ({ action, resourceType, resourceId, diff, display }) 
       return clampSummary(`${actorLabel} created UI contract ${targetLabel}`)
     case AUDIT_ACTIONS.UI_CONTRACT_UPDATED:
       return clampSummary(`${actorLabel} updated UI contract ${targetLabel}`)
+    case AUDIT_ACTIONS.UI_CONTRACT_CLONED:
+      return clampSummary(`${actorLabel} cloned UI contract ${targetLabel}`)
+    case AUDIT_ACTIONS.UI_CONTRACT_LOCKED:
+      return clampSummary(`${actorLabel} locked UI contract ${targetLabel}`)
+    case AUDIT_ACTIONS.UI_CONTRACT_DEPRECATED:
+      return clampSummary(`${actorLabel} deprecated UI contract ${targetLabel}`)
+    case AUDIT_ACTIONS.UI_CONTRACT_ARCHIVED:
+      return clampSummary(`${actorLabel} archived UI contract ${targetLabel}`)
+    case AUDIT_ACTIONS.UI_CONTRACT_VALIDATION_RUN:
+      return clampSummary(`${actorLabel} validated UI contract ${targetLabel}`)
+    case AUDIT_ACTIONS.UI_CONTRACT_VALIDATION_FAILED:
+      return clampSummary(`${actorLabel} found UI contract validation issues for ${targetLabel}`)
     case AUDIT_ACTIONS.WORKFLOW_POLICY_CREATED:
       return clampSummary(`${actorLabel} created workflow policy ${targetLabel}`)
     case AUDIT_ACTIONS.WORKFLOW_POLICY_UPDATED:

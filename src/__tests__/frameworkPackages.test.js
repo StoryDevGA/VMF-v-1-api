@@ -416,8 +416,9 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
         lean: jest.fn().mockResolvedValue({
           uiContractKey: 'vmf-ui-contract-v1',
           status: 'ACTIVE',
+          versionStatus: 'ACTIVE',
           frameworkKeys: ['VMF'],
-          sections: [{ sectionKey: 'customer_problem' }],
+          sections: [{ sectionKey: 'customer_problem', runtimePath: 'framework_state.sections.customer_problem' }],
         }),
       }),
     })
@@ -785,8 +786,9 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
         lean: jest.fn().mockResolvedValue({
           uiContractKey: 'vmf-ui-contract-v1',
           status: 'ACTIVE',
+          versionStatus: 'ACTIVE',
           frameworkKeys: ['VMF'],
-          sections: [{ sectionKey: 'customer_problem' }],
+          sections: [{ sectionKey: 'customer_problem', runtimePath: 'framework_state.sections.customer_problem' }],
         }),
       }),
     })
@@ -889,6 +891,7 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
         lean: jest.fn().mockResolvedValue({
           uiContractKey: 'vmf-ui-contract-v1',
           status: 'ACTIVE',
+          versionStatus: 'ACTIVE',
           frameworkKeys: ['VMF'],
           sections: [],
         }),
@@ -1214,8 +1217,9 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
         lean: jest.fn().mockResolvedValue({
           uiContractKey: 'vmf-ui-contract-v1',
           status: 'ACTIVE',
+          versionStatus: 'ACTIVE',
           frameworkKeys: ['VMF'],
-          sections: [{ sectionKey: 'customer_problem' }],
+          sections: [{ sectionKey: 'customer_problem', runtimePath: 'framework_state.sections.customer_problem' }],
         }),
       }),
     })
@@ -1408,6 +1412,7 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
           uiContractKey: 'vmf-ui-contract-v1',
           name: 'VMF UI Contract',
           status: 'ACTIVE',
+          versionStatus: 'ACTIVE',
           frameworkKeys: ['VMF'],
           sourcePackageVersion: '2.3.1',
           compatibilityMode: 'INHERITED_MINOR',
@@ -1446,6 +1451,7 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
         lean: jest.fn().mockResolvedValue({
           uiContractKey: 'vmf-ui-contract-v1',
           status: 'ACTIVE',
+          versionStatus: 'ACTIVE',
           frameworkKeys: ['VMF'],
           sections: [{ sectionKey: 'customer_problem', runtimePath: 'framework_state.sections.customer_problem' }],
         }),
@@ -1521,6 +1527,7 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
         lean: jest.fn().mockResolvedValue({
           uiContractKey: 'vmf-ui-contract-v1',
           status: 'ACTIVE',
+          versionStatus: 'ACTIVE',
           frameworkKeys: ['VMF'],
           sections: [{ sectionKey: 'customer_problem', runtimePath: 'framework_state.sections.customer_problem' }],
         }),
@@ -1642,8 +1649,9 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
         lean: jest.fn().mockResolvedValue({
           uiContractKey: 'vmf-ui-contract-v1',
           status: 'ACTIVE',
+          versionStatus: 'ACTIVE',
           frameworkKeys: ['VMF'],
-          sections: [{ sectionKey: 'customer_problem' }],
+          sections: [{ sectionKey: 'customer_problem', runtimePath: 'framework_state.sections.customer_problem' }],
         }),
       }),
     })
@@ -1695,8 +1703,9 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
         lean: jest.fn().mockResolvedValue({
           uiContractKey: 'vmf-ui-contract-v1',
           status: 'ACTIVE',
+          versionStatus: 'ACTIVE',
           frameworkKeys: ['VMF'],
-          sections: [{ sectionKey: 'customer_problem' }],
+          sections: [{ sectionKey: 'customer_problem', runtimePath: 'framework_state.sections.customer_problem' }],
         }),
       }),
     })

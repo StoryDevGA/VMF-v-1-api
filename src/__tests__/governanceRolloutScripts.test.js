@@ -253,15 +253,20 @@ describe('backfillRuntimeControlVersioningFields', () => {
     expect(disconnect).toHaveBeenCalled()
     expect(result.mode).toBe('dry-run')
     expect(result.database).toBe('vmf_test')
-    expect(result.runtimeControl[0]).toEqual({
+    expect(result.runtimeControl[0]).toEqual(expect.objectContaining({
       collectionKey: 'RuntimePathRegistry',
       matched: 2,
       modified: 0,
-    })
-    expect(result.frameworkPackages).toEqual({ matched: 1, modified: 0 })
+    }))
+    expect(result.runtimeControl[0].fieldsToAdd).toContain('componentVersion')
+    expect(result.runtimeControl[0].fieldsToAdd).toContain('lockedByPackageKeys')
+    expect(result.frameworkPackages).toEqual(expect.objectContaining({ matched: 1, modified: 0 }))
+    expect(result.frameworkPackages.fieldsToAdd).toContain('dependencyLock')
     expect(runtimeCollection.updateMany).not.toHaveBeenCalled()
     expect(frameworkPackageCollection.updateMany).not.toHaveBeenCalled()
     expect(logs[0]).toContain('database vmf_test')
+    expect(logs[0]).toContain('Runtime Control fields to add/normalize')
+    expect(logs[0]).toContain('UI Contract locks to apply')
   })
 
   test('apply mode writes versioning backfill pipelines', async () => {
@@ -342,6 +347,97 @@ describe('backfillRuntimeControlVersioningFields', () => {
           }),
         }),
       ]),
+    )
+  })
+
+  test('apply mode locks UI Contracts referenced by governed framework packages', async () => {
+    const connect = jest.fn(async () => {})
+    const disconnect = jest.fn(async () => {})
+    const updatedAt = new Date('2026-05-03T12:00:00.000Z')
+    const frameworkPackageCollection = {
+      db: { databaseName: 'vmf_test' },
+      countDocuments: jest.fn().mockResolvedValue(0),
+      updateMany: jest.fn().mockResolvedValue({ modifiedCount: 0 }),
+    }
+    const frameworkPackageModel = {
+      collection: frameworkPackageCollection,
+      find: jest.fn().mockReturnValue({
+        select: jest.fn().mockReturnValue({
+          lean: jest.fn().mockResolvedValue([
+            {
+              packageKey: 'vmf-qa-manual-951',
+              version: '9.5.1',
+              uiContractKey: 'vmf-qa-ui-contract-0429-1752',
+              status: 'ACTIVE',
+              updatedAt,
+            },
+          ]),
+        }),
+      }),
+    }
+    const uiContractModel = {
+      updateMany: jest.fn()
+        .mockResolvedValueOnce({ modifiedCount: 1 })
+        .mockResolvedValueOnce({ modifiedCount: 1 }),
+    }
+    const logs = []
+
+    const result = await backfillRuntimeControlVersioningFields({
+      apply: true,
+      logger: (message) => logs.push(message),
+      dependencies: {
+        connect,
+        disconnect,
+        runtimeControlConfigs: [],
+        frameworkPackageModel,
+        uiContractModel,
+      },
+    })
+
+    expect(result.uiContractPackageLocks).toEqual(expect.objectContaining({
+      matched: 1,
+      packageReferences: 1,
+      modified: 2,
+    }))
+    expect(result.uiContractPackageLocks.locksToApply[0]).toEqual(expect.objectContaining({
+      uiContractKey: 'vmf-qa-ui-contract-0429-1752',
+      packageKeys: ['vmf-qa-manual-951'],
+      packageVersions: ['9.5.1'],
+    }))
+    expect(result.uiContractPackageLocks.locksToApply[0].fieldsToApply).toEqual(expect.arrayContaining([
+      'lockedByPackageKeys',
+      'isLocked',
+      'lockedAt',
+      'lockedReason',
+      'versionStatus',
+    ]))
+    expect(logs[0]).toContain('vmf-qa-ui-contract-0429-1752')
+    expect(logs[0]).toContain('vmf-qa-manual-951')
+    expect(uiContractModel.updateMany).toHaveBeenNthCalledWith(
+      1,
+      { uiContractKey: 'vmf-qa-ui-contract-0429-1752' },
+      {
+        $addToSet: {
+          lockedByPackageKeys: { $each: ['vmf-qa-manual-951'] },
+        },
+      },
+    )
+    expect(uiContractModel.updateMany).toHaveBeenNthCalledWith(
+      2,
+      {
+        uiContractKey: 'vmf-qa-ui-contract-0429-1752',
+        $or: [
+          { isLocked: { $exists: false } },
+          { isLocked: { $ne: true } },
+        ],
+      },
+      {
+        $set: expect.objectContaining({
+          isLocked: true,
+          lockedAt: updatedAt,
+          versionStatus: 'ACTIVE',
+        }),
+      },
     )
   })
 })

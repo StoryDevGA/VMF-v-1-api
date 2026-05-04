@@ -92,6 +92,7 @@ let Role
 let FrameworkRegistry
 let FrameworkPackage
 let RuntimePathRegistry
+let WorkflowPolicy
 let UIContract
 let AuditLog
 let mockRedisClient
@@ -157,6 +158,7 @@ beforeAll(async () => {
   FrameworkRegistry = models.FrameworkRegistry
   FrameworkPackage = models.FrameworkPackage
   RuntimePathRegistry = models.RuntimePathRegistry
+  WorkflowPolicy = models.WorkflowPolicy
   UIContract = models.UIContract
   AuditLog = models.AuditLog
 
@@ -178,11 +180,14 @@ beforeEach(() => {
   FrameworkPackage.find = jest.fn().mockReturnValue(buildFrameworkPackageQueryChain([]))
   FrameworkPackage.findOne = jest.fn().mockReturnValue(buildFrameworkPackageFindOneChain(null))
   RuntimePathRegistry.find = jest.fn().mockReturnValue(buildSelectLeanChain([]))
+  RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildSelectLeanChain(null))
+  WorkflowPolicy.find = jest.fn().mockReturnValue(buildSelectLeanChain([]))
   UIContract.findOne = jest.fn().mockReturnValue({
     select: jest.fn().mockResolvedValue(null),
   })
   UIContract.findById = jest.fn().mockResolvedValue(null)
   UIContract.findByStableId = jest.fn().mockResolvedValue(null)
+  UIContract.updateOne = jest.fn().mockResolvedValue({ modifiedCount: 1 })
   UIContract.prototype.save = jest.fn(async function save() {
     return this
   })
@@ -373,6 +378,80 @@ describe('UI Contract Routes', () => {
     )
   })
 
+  test('POST /api/v1/super-admin/runtime-control/ui-contracts rejects invalid lifecycle stages', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    RuntimePathRegistry.findOne.mockReturnValue(buildSelectLeanChain({
+      pathKey: 'framework_state.lifecycle.stage',
+      allowedValues: ['DRAFT', 'PUBLISHED'],
+    }))
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/ui-contracts')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        uiContractKey: 'vmf-ui-contract-v1',
+        name: 'VMF UI Contract',
+        status: 'DRAFT',
+        frameworkKeys: ['VMF'],
+        lifecycleStages: [
+          {
+            stageKey: 'APPROVED',
+            label: 'Approved',
+            displayOrder: 10,
+          },
+        ],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.lifecycleStages).toContain('APPROVED')
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/ui-contracts rejects workflow policy key action mappings', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    FrameworkPackage.findOne.mockReturnValue(buildFrameworkPackageFindOneChain(makeSourceFrameworkPackage({
+      workflowBindings: [{ policyKey: 'vmf-submit-gate' }],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildSelectLeanChain([
+      {
+        key: 'vmf-submit-gate',
+        status: 'ACTIVE',
+        governedAction: 'SUBMIT_FOR_REVIEW',
+      },
+    ]))
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/ui-contracts')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        uiContractKey: 'vmf-ui-contract-v1',
+        name: 'VMF UI Contract',
+        status: 'ACTIVE',
+        frameworkKeys: ['VMF'],
+        sourcePackageKey: 'vmf-2-3-1',
+        sourcePackageVersion: '2.3.1',
+        sourceFrameworkKey: 'VMF',
+        sections: [
+          {
+            sectionKey: 'customer_problem',
+            runtimePath: 'framework_state.sections.customer_problem',
+            label: 'Customer Problem',
+            displayOrder: 10,
+          },
+        ],
+        actions: [
+          {
+            actionKey: 'submit',
+            governedAction: 'VMF_SUBMIT_GATE',
+            buttonLabel: 'Submit',
+            displayOrder: 10,
+          },
+        ],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.actions).toContain('workflow policy keys')
+  })
+
   test('POST /api/v1/super-admin/runtime-control/ui-contracts allows explicit custom sections without runtime paths', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
 
@@ -420,6 +499,152 @@ describe('UI Contract Routes', () => {
     expect(res.body.data.name).toBe('Updated VMF UI Contract')
     expect(res.body.data.introducedInVersion).toBe('2.3.1')
     expect(res.body.data.deprecatedInVersion).toBeNull()
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/ui-contracts/:uiContractId rejects immutable keys', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/ui-contracts/${UI_CONTRACT_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        uiContractKey: 'renamed-ui-contract',
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.uiContractKey).toContain('server-managed governance metadata')
+    expect(UIContract.findById).not.toHaveBeenCalled()
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/ui-contracts rejects direct governance metadata edits', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/ui-contracts')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        uiContractKey: 'vmf-ui-contract-v1',
+        name: 'VMF UI Contract',
+        status: 'DRAFT',
+        frameworkKeys: ['VMF'],
+        isLocked: false,
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.isLocked).toContain('server-managed governance metadata')
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/ui-contracts/:uiContractId blocks locked edits', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    UIContract.findById.mockResolvedValue(makeUIContractDoc({
+      isLocked: true,
+      lockedByPackageKeys: ['vmf-qa-manual-951'],
+    }))
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/ui-contracts/${UI_CONTRACT_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        name: 'Updated VMF UI Contract',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.message).toContain('Clone the record')
+    expect(res.body.error.details.reason).toBe('UI_CONTRACT_LOCKED')
+    expect(res.body.error.details.lockedByPackageKeys).toEqual(['vmf-qa-manual-951'])
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/ui-contracts/:uiContractId/clone creates an unlocked draft successor', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const source = makeUIContractDoc({
+      componentVersion: 3,
+      lineageId: 'ui-contract-vmf-ui-contract-v1',
+      sourcePackageKey: 'vmf-2-3-1',
+      sourcePackageVersion: '2.3.1',
+      sourceFrameworkKey: 'VMF',
+      sections: [
+        {
+          sectionKey: 'customer_problem',
+          runtimePath: 'framework_state.sections.customer_problem',
+          sourcePackageKey: 'vmf-2-3-1',
+          label: 'Customer Problem',
+          displayOrder: 10,
+        },
+      ],
+      actions: [
+        {
+          actionKey: 'save',
+          governedAction: 'SAVE',
+          buttonLabel: 'Save',
+          displayOrder: 10,
+        },
+      ],
+    })
+    UIContract.findById.mockResolvedValue(source)
+    FrameworkPackage.findOne.mockReturnValue(buildFrameworkPackageFindOneChain(makeSourceFrameworkPackage({
+      workflowBindings: [{ policyKey: 'vmf-submit-gate' }],
+    })))
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/ui-contracts/${UI_CONTRACT_ID}/clone`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        uiContractKey: 'vmf-ui-contract-v2',
+        name: 'VMF UI Contract v2',
+        description: 'Draft successor.',
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data.uiContractKey).toBe('vmf-ui-contract-v2')
+    expect(res.body.data.status).toBe('DRAFT')
+    expect(res.body.data.componentVersion).toBe(4)
+    expect(res.body.data.versionStatus).toBe('DRAFT')
+    expect(res.body.data.isLocked).toBe(false)
+    expect(source.save).not.toHaveBeenCalled()
+    expect(UIContract.updateOne).toHaveBeenCalledWith(
+      { _id: source._id },
+      {
+        $set: {
+          supersededByStableId: 'ui-contract-vmf-ui-contract-v2',
+          updatedBy: SUPER_ADMIN_ID,
+        },
+      },
+      { runValidators: false },
+    )
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'UI_CONTRACT_CLONED',
+      resourceType: 'UIContract',
+    }))
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/ui-contracts/:uiContractId/validate records validation audit', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    UIContract.findById.mockResolvedValue(makeUIContractDoc({
+      sourcePackageKey: 'vmf-2-3-1',
+      sourcePackageVersion: '2.3.1',
+      sourceFrameworkKey: 'VMF',
+      sections: [
+        {
+          sectionKey: 'customer_problem',
+          runtimePath: 'framework_state.sections.customer_problem',
+          sourcePackageKey: 'vmf-2-3-1',
+          label: 'Customer Problem',
+          displayOrder: 10,
+        },
+      ],
+    }))
+    FrameworkPackage.findOne.mockReturnValue(buildFrameworkPackageFindOneChain(makeSourceFrameworkPackage()))
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/ui-contracts/${UI_CONTRACT_ID}/validate`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.valid).toBe(true)
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'UI_CONTRACT_VALIDATION_RUN',
+      resourceType: 'UIContract',
+    }))
   })
 
   test('GET /api/v1/super-admin/runtime-control/ui-contracts/:uiContractId/dependencies returns referencing packages', async () => {
