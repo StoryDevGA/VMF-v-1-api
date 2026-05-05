@@ -381,9 +381,10 @@ const fetchRuntimePathValidationDependencies = async (pathKey) => {
       { outputPath: pathKey },
       { passFieldPath: pathKey },
       { detailsFieldPath: pathKey },
+      { messageFieldPath: pathKey },
     ],
   })
-    .select('stableId key label status outputPath passFieldPath detailsFieldPath')
+    .select('stableId key label status outputPath passFieldPath detailsFieldPath messageFieldPath')
     .lean()
 }
 

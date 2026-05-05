@@ -7,6 +7,7 @@ import {
 } from '../utils/runtimeControlVersioning.js'
 
 export const VALIDATION_REGISTRY_STATUSES = Object.freeze({
+  DRAFT: 'DRAFT',
   ACTIVE: 'ACTIVE',
   INACTIVE: 'INACTIVE',
   DEPRECATED: 'DEPRECATED',
@@ -204,6 +205,44 @@ const validationRegistrySchema = new mongoose.Schema(
         message: 'Details field path must not contain whitespace.',
       },
     },
+    messageFieldPath: {
+      type: String,
+      trim: true,
+      maxlength: 200,
+      default: '',
+      validate: {
+        validator(value) {
+          return value === undefined || value === null || !/\s/.test(String(value))
+        },
+        message: 'Message field path must not contain whitespace.',
+      },
+    },
+    parameterSchema: {
+      type: mongoose.Schema.Types.Mixed,
+      default: undefined,
+    },
+    defaultParameters: {
+      type: mongoose.Schema.Types.Mixed,
+      default: undefined,
+    },
+    retryPolicy: {
+      maxAttempts: {
+        type: Number,
+        min: 1,
+        max: 10,
+        default: 1,
+      },
+      retryableErrorCodes: {
+        type: [String],
+        default: [],
+      },
+      backoffSeconds: {
+        type: Number,
+        min: 0,
+        max: 3600,
+        default: 0,
+      },
+    },
     policyUsable: {
       type: Boolean,
       default: true,
@@ -320,6 +359,19 @@ validationRegistrySchema.pre('validate', function normalizeValidationRegistry(ne
 
   if (this.isNew || this.isModified('detailsFieldPath')) {
     this.detailsFieldPath = String(this.detailsFieldPath || '').trim()
+  }
+
+  if (this.isNew || this.isModified('messageFieldPath')) {
+    this.messageFieldPath = String(this.messageFieldPath || '').trim()
+  }
+
+  if (this.isNew || this.isModified('retryPolicy')) {
+    const retryPolicy = this.retryPolicy || {}
+    this.retryPolicy = {
+      maxAttempts: Number(retryPolicy.maxAttempts || 1),
+      retryableErrorCodes: normalizeTokenList(retryPolicy.retryableErrorCodes).map((value) => value.toUpperCase()),
+      backoffSeconds: Number(retryPolicy.backoffSeconds || 0),
+    }
   }
 
   if (this.isNew || this.isModified('executionMode')) {

@@ -1030,6 +1030,112 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     )
   })
 
+  test('POST /api/v1/super-admin/runtime-control/framework-packages validates binding parameters against the registry schema', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    ValidationRegistry.find.mockReturnValue(buildFrameworkRegistryLookupChain([
+      {
+        key: 'required-sections-check',
+        status: 'ACTIVE',
+        supportedFrameworkKeys: ['VMF'],
+        packageUsable: true,
+        parameterSchema: {
+          type: 'object',
+          required: ['sectionKeys'],
+          additionalProperties: false,
+          properties: {
+            sectionKeys: { type: 'array' },
+          },
+        },
+      },
+    ]))
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/framework-packages')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        frameworkKey: 'VMF',
+        frameworkName: 'Value Management Framework',
+        version: '2.5.5',
+        validationBindings: [
+          {
+            bindingKey: 'required-sections-on-submit',
+            validationKey: 'required-sections-check',
+            trigger: 'ON_SUBMIT',
+            priority: 100,
+            parameters: {
+              sectionKeys: 'executive_summary',
+              unexpected: true,
+            },
+          },
+        ],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details['validationBindings.parameters']).toContain(
+      'required-sections-on-submit: parameter "sectionKeys" must be array; received string.',
+    )
+    expect(res.body.error.details['validationBindings.parameters']).toContain(
+      'required-sections-on-submit: unknown parameter unexpected.',
+    )
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages rejects workflow validation steps missing package binding keys', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    ValidationRegistry.find.mockReturnValue(buildFrameworkRegistryLookupChain([
+      {
+        key: 'required-sections-check',
+        status: 'ACTIVE',
+        supportedFrameworkKeys: ['VMF'],
+        packageUsable: true,
+      },
+    ]))
+    WorkflowPolicy.find.mockReturnValue(buildFrameworkRegistryLookupChain([
+      {
+        key: 'vmf-submit-gate',
+        status: 'ACTIVE',
+        frameworkKeys: ['VMF'],
+        steps: [
+          {
+            stepKey: 'validate-submit',
+            type: 'VALIDATION',
+            order: 100,
+            bindingKeys: ['submit-readiness-check'],
+          },
+        ],
+      },
+    ]))
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/framework-packages')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        frameworkKey: 'VMF',
+        frameworkName: 'Value Management Framework',
+        version: '2.5.6',
+        validationBindings: [
+          {
+            bindingKey: 'required-sections-on-submit',
+            validationKey: 'required-sections-check',
+            trigger: 'ON_SUBMIT',
+            priority: 100,
+          },
+        ],
+        workflowBindings: [
+          {
+            policyKey: 'vmf-submit-gate',
+            executionContext: 'ON_SUBMIT',
+            priority: 100,
+            enabled: true,
+          },
+        ],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.workflowBindings).toContain(
+      'Workflow validation steps must reference package validation bindingKeys: vmf-submit-gate: submit-readiness-check.',
+    )
+  })
+
   test('POST /api/v1/super-admin/runtime-control/framework-packages returns 409 for duplicate framework/version', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     mockFindOneSelect({ _id: '607f1f77bcf86cd799439099' })

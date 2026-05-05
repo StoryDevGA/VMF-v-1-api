@@ -720,6 +720,58 @@ const validateUIContractSectionAlignment = ({ sections = [], uiContract = null }
   return issues.join(' ')
 }
 
+const inferJsonValueType = (value) => {
+  if (Array.isArray(value)) return 'array'
+  if (value === null) return 'null'
+  return typeof value
+}
+
+const validateValidationBindingParameters = ({ parameters = {}, parameterSchema = {}, bindingKey = '' }) => {
+  const schema = parameterSchema && typeof parameterSchema === 'object' && !Array.isArray(parameterSchema)
+    ? parameterSchema
+    : {}
+  const normalizedParameters = parameters && typeof parameters === 'object' && !Array.isArray(parameters)
+    ? parameters
+    : {}
+  const issues = []
+
+  const required = Array.isArray(schema.required) ? schema.required : []
+  for (const key of required) {
+    const parameterKey = String(key || '').trim()
+    if (parameterKey && normalizedParameters[parameterKey] === undefined) {
+      issues.push(`${bindingKey}: missing required parameter "${parameterKey}".`)
+    }
+  }
+
+  const properties = schema.properties && typeof schema.properties === 'object' && !Array.isArray(schema.properties)
+    ? schema.properties
+    : {}
+  for (const [parameterKey, definition] of Object.entries(properties)) {
+    if (normalizedParameters[parameterKey] === undefined) continue
+    const expectedTypes = Array.isArray(definition?.type)
+      ? definition.type
+      : [definition?.type].filter(Boolean)
+    if (expectedTypes.length === 0) continue
+
+    const actualType = inferJsonValueType(normalizedParameters[parameterKey])
+    if (!expectedTypes.includes(actualType)) {
+      issues.push(
+        `${bindingKey}: parameter "${parameterKey}" must be ${expectedTypes.join(' or ')}; received ${actualType}.`,
+      )
+    }
+  }
+
+  if (schema.additionalProperties === false) {
+    const allowed = new Set(Object.keys(properties))
+    const unknown = Object.keys(normalizedParameters).filter((key) => !allowed.has(key))
+    if (unknown.length > 0) {
+      issues.push(`${bindingKey}: unknown parameter${unknown.length === 1 ? '' : 's'} ${unknown.join(', ')}.`)
+    }
+  }
+
+  return issues
+}
+
 const validateFrameworkPackageAccessRules = ({
   visibility,
   customerAccessMode,
@@ -784,7 +836,7 @@ const validateFrameworkPackageRegistryReferences = async ({
   ]
   if (validationKeys.length > 0) {
     const validationRows = await ValidationRegistry.find({ key: { $in: validationKeys } })
-      .select('key status supportedFrameworkKeys packageUsable')
+      .select('key status supportedFrameworkKeys packageUsable parameterSchema')
       .lean()
     const validationByKey = new Map(validationRows.map((row) => [row.key, row]))
     const invalidValidationKeys = validationKeys.filter((validationKey) => {
@@ -799,6 +851,22 @@ const validateFrameworkPackageRegistryReferences = async ({
       details.validationBindings =
         `Validation entries must be ACTIVE, package-usable, and compatible with "${frameworkKey}": ${invalidValidationKeys.join(', ')}.`
     }
+
+    const parameterIssues = (validationBindings || []).flatMap((binding) => {
+      const validationKey = String(binding?.validationKey || '').trim().toLowerCase()
+      const bindingKey = String(binding?.bindingKey || validationKey || '').trim().toLowerCase()
+      const validationRow = validationByKey.get(validationKey)
+      if (!validationRow) return []
+      return validateValidationBindingParameters({
+        parameters: binding?.parameters,
+        parameterSchema: validationRow.parameterSchema,
+        bindingKey,
+      })
+    })
+
+    if (parameterIssues.length > 0) {
+      details['validationBindings.parameters'] = parameterIssues.join(' ')
+    }
   }
 
   const policyKeys = [
@@ -808,7 +876,7 @@ const validateFrameworkPackageRegistryReferences = async ({
   ]
   if (policyKeys.length > 0) {
     const policyRows = await WorkflowPolicy.find({ key: { $in: policyKeys } })
-      .select('key status frameworkKeys')
+      .select('key status frameworkKeys steps')
       .lean()
     const policyByKey = new Map(policyRows.map((row) => [row.key, row]))
     const invalidPolicyKeys = policyKeys.filter((policyKey) => {
@@ -821,6 +889,24 @@ const validateFrameworkPackageRegistryReferences = async ({
     if (invalidPolicyKeys.length > 0) {
       details.workflowBindings =
         `Workflow policies must be ACTIVE and compatible with "${frameworkKey}": ${invalidPolicyKeys.join(', ')}.`
+    }
+
+    const validationBindingKeys = new Set((validationBindings || [])
+      .map((binding) => String(binding?.bindingKey || '').trim().toLowerCase())
+      .filter(Boolean))
+    const missingWorkflowValidationBindings = policyRows.flatMap((policy) =>
+      (Array.isArray(policy.steps) ? policy.steps : [])
+        .filter((step) => String(step?.type || '').trim().toUpperCase() === WORKFLOW_POLICY_STEP_TYPES.VALIDATION)
+        .flatMap((step) => Array.isArray(step?.bindingKeys) ? step.bindingKeys : [])
+        .map((bindingKey) => String(bindingKey || '').trim().toLowerCase())
+        .filter((bindingKey) => bindingKey && !validationBindingKeys.has(bindingKey))
+        .map((bindingKey) => `${policy.key}: ${bindingKey}`))
+
+    if (missingWorkflowValidationBindings.length > 0) {
+      details.workflowBindings = [
+        details.workflowBindings,
+        `Workflow validation steps must reference package validation bindingKeys: ${missingWorkflowValidationBindings.join(', ')}.`,
+      ].filter(Boolean).join(' ')
     }
   }
 
@@ -1070,7 +1156,7 @@ const fetchFrameworkPackageDependencies = async (frameworkPackage) => {
   const [validationRows, workflowRows, uiContract] = await Promise.all([
     validationKeys.length > 0
       ? ValidationRegistry.find({ key: { $in: validationKeys } })
-        .select('stableId key label status supportedFrameworkKeys packageUsable producerSkillId defaultAgentIds outputPath passFieldPath detailsFieldPath componentVersion versionStatus lineageId isLocked lockedAt lockedByPackageKeys')
+        .select('stableId key label status supportedFrameworkKeys packageUsable producerSkillId defaultAgentIds outputPath passFieldPath detailsFieldPath messageFieldPath parameterSchema defaultParameters retryPolicy componentVersion versionStatus lineageId isLocked lockedAt lockedByPackageKeys')
         .lean()
       : Promise.resolve([]),
     workflowPolicyKeys.length > 0
@@ -1111,7 +1197,21 @@ const fetchFrameworkPackageDependencies = async (frameworkPackage) => {
       issues,
       outputPath: row?.outputPath || '',
       producerSkillId: row?.producerSkillId || '',
+      defaultAgentIds: Array.isArray(row?.defaultAgentIds) ? row.defaultAgentIds : [],
       ...pickDependencyVersioningFields(row),
+      outputPaths: {
+        outputPath: row?.outputPath || '',
+        passFieldPath: row?.passFieldPath || '',
+        detailsFieldPath: row?.detailsFieldPath || '',
+        messageFieldPath: row?.messageFieldPath || '',
+      },
+      bindingKeys: (Array.isArray(frameworkPackage.validationBindings) ? frameworkPackage.validationBindings : [])
+        .filter((binding) => String(binding?.validationKey || '').trim().toLowerCase() === validationKey)
+        .map((binding) => String(binding?.bindingKey || '').trim())
+        .filter(Boolean),
+      hasParameterSchema: Boolean(row?.parameterSchema && typeof row.parameterSchema === 'object'),
+      defaultParameters: row?.defaultParameters || {},
+      retryPolicy: row?.retryPolicy || {},
     })
   })
 
@@ -1212,6 +1312,7 @@ const fetchFrameworkPackageDependencies = async (frameworkPackage) => {
     validation.outputPath,
     validation.passFieldPath,
     validation.detailsFieldPath,
+    validation.messageFieldPath,
   ])
   const runtimePathKeys = [...new Set([...sectionRuntimePathKeys, ...workflowRuntimePathKeys, ...validationRuntimePathKeys]
     .map((value) => String(value || '').trim())
@@ -1394,6 +1495,10 @@ const buildDependencyLockReferences = ({ dependencies = {}, lockedAt }) =>
       issues: Array.isArray(row.issues) ? row.issues : [],
       ...(row.governedAction ? { governedAction: row.governedAction } : {}),
       ...(row.stepCount !== undefined ? { stepCount: Number(row.stepCount) || 0 } : {}),
+      ...(row.outputPaths ? { outputPaths: row.outputPaths } : {}),
+      ...(Array.isArray(row.bindingKeys) ? { bindingKeys: row.bindingKeys } : {}),
+      ...(row.producerSkillId ? { producerSkillId: row.producerSkillId } : {}),
+      ...(row.hasParameterSchema !== undefined ? { hasParameterSchema: Boolean(row.hasParameterSchema) } : {}),
     })))
 
 const buildUIContractSnapshot = ({ dependencies = {} } = {}) => {

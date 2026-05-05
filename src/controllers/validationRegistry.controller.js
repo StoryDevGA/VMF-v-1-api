@@ -18,6 +18,10 @@ import {
 } from '../services/frameworkRegistryService.js'
 import { resolveRuntimePathSelections } from '../services/runtimePathRegistryService.js'
 import { escapeRegex, serializeUserSummary } from '../utils/controllerUtils.js'
+import {
+  LOCKED_RUNTIME_CONTROL_EDIT_MESSAGE,
+  RUNTIME_CONTROL_VERSION_STATUSES,
+} from '../utils/runtimeControlVersioning.js'
 
 const VALIDATION_NOT_FOUND_MESSAGE = 'Validation was not found.'
 const DUPLICATE_VALIDATION_KEY_MESSAGE = 'Validation key must be unique.'
@@ -65,6 +69,7 @@ const buildSearchClauses = (query) => {
     { description: regex },
     { producerSkillId: regex },
     { outputPath: regex },
+    { messageFieldPath: regex },
   ]
 
   if (Object.values(VALIDATION_REGISTRY_STATUSES).includes(normalizedQueryUpper)) {
@@ -175,6 +180,35 @@ const buildSort = ({ sortBy, sortOrder }) => {
 
 const isDuplicateKeyError = (err) => err?.code === 11000
 
+const sendConflict = (res, req, message, details = {}) =>
+  res.status(409).json({
+    error: {
+      code: 'CONFLICT',
+      message,
+      ...(Object.keys(details).length > 0 ? { details } : {}),
+      requestId: req.requestId,
+    },
+  })
+
+const sendValidationFailed = (res, req, details, message = 'Please check the form for errors.') =>
+  res.status(422).json({
+    error: {
+      code: 'VALIDATION_FAILED',
+      message,
+      details,
+      requestId: req.requestId,
+    },
+  })
+
+const sendLockedValidationConflict = (res, req, validation) =>
+  sendConflict(res, req, LOCKED_RUNTIME_CONTROL_EDIT_MESSAGE, {
+    field: 'isLocked',
+    reason: 'VALIDATION_REGISTRY_LOCKED',
+    lockedByPackageKeys: Array.isArray(validation?.lockedByPackageKeys)
+      ? validation.lockedByPackageKeys
+      : [],
+  })
+
 const validateSupportedFrameworkKeys = async (supportedFrameworkKeys = []) => {
   const normalized = normalizeFrameworkKeyList(supportedFrameworkKeys)
   const { missingKeys, inactiveKeys } = await resolveKnownFrameworkKeys(normalized, undefined, { requireActive: true })
@@ -193,11 +227,12 @@ const buildPathDescendantError = (outputPath, fieldPath, label) => {
   return `${label} must be inside the selected Output Path.`
 }
 
-const resolveRuntimePathRows = async ({ outputPath, passFieldPath, detailsFieldPath, frameworkKeys }) => {
+const resolveRuntimePathRows = async ({ outputPath, passFieldPath, detailsFieldPath, messageFieldPath, frameworkKeys }) => {
   const requested = [
     outputPath,
     passFieldPath,
     detailsFieldPath,
+    messageFieldPath,
   ]
     .map((value) => String(value || '').trim())
     .filter(Boolean)
@@ -227,7 +262,7 @@ const resolveRuntimePathRows = async ({ outputPath, passFieldPath, detailsFieldP
   }
 }
 
-const appendRuntimePathErrors = (details, { outputPath, passFieldPath, detailsFieldPath, resolution }) => {
+const appendRuntimePathErrors = (details, { outputPath, passFieldPath, detailsFieldPath, messageFieldPath, resolution }) => {
   const check = (field, value) => {
     if (!value) return
 
@@ -254,6 +289,7 @@ const appendRuntimePathErrors = (details, { outputPath, passFieldPath, detailsFi
   check('outputPath', outputPath)
   check('passFieldPath', passFieldPath)
   check('detailsFieldPath', detailsFieldPath)
+  check('messageFieldPath', messageFieldPath)
 }
 
 const appendResultTypeError = (details, { outputPath, resultType, resolution }) => {
@@ -420,6 +456,7 @@ export const createValidation = async (req, res, next) => {
     const outputPath = String(body.outputPath || '').trim()
     const passFieldPath = String(body.passFieldPath || '').trim()
     const detailsFieldPath = String(body.detailsFieldPath || '').trim()
+    const messageFieldPath = String(body.messageFieldPath || '').trim()
 
     if (outputPath && passFieldPath) {
       const err = buildPathDescendantError(outputPath, passFieldPath, 'Pass Field Path')
@@ -431,10 +468,16 @@ export const createValidation = async (req, res, next) => {
       if (err) details.detailsFieldPath = err
     }
 
+    if (outputPath && messageFieldPath) {
+      const err = buildPathDescendantError(outputPath, messageFieldPath, 'Message Field Path')
+      if (err) details.messageFieldPath = err
+    }
+
     const runtimePathResolution = await resolveRuntimePathRows({
       outputPath,
       passFieldPath,
       detailsFieldPath,
+      messageFieldPath,
       frameworkKeys: frameworkDetails.supportedFrameworkKeys,
     })
 
@@ -442,6 +485,7 @@ export const createValidation = async (req, res, next) => {
       outputPath,
       passFieldPath,
       detailsFieldPath,
+      messageFieldPath,
       resolution: runtimePathResolution,
     })
     appendResultTypeError(details, {
@@ -475,6 +519,10 @@ export const createValidation = async (req, res, next) => {
       resultType: body.resultType,
       passFieldPath,
       detailsFieldPath,
+      messageFieldPath,
+      parameterSchema: body.parameterSchema,
+      defaultParameters: body.defaultParameters,
+      retryPolicy: body.retryPolicy,
       policyUsable: body.policyUsable === undefined ? true : Boolean(body.policyUsable),
       packageUsable: body.packageUsable === undefined ? true : Boolean(body.packageUsable),
       requiresLatestRun: body.requiresLatestRun === undefined ? false : Boolean(body.requiresLatestRun),
@@ -516,6 +564,12 @@ export const createValidation = async (req, res, next) => {
       })
     }
 
+    if (err?.name === 'ValidationError') {
+      return sendValidationFailed(res, req, Object.fromEntries(
+        Object.entries(err.errors || {}).map(([field, error]) => [field, error.message]),
+      ), err.message)
+    }
+
     next(err)
   }
 }
@@ -541,6 +595,121 @@ export const getValidation = async (req, res, next) => {
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
+    if (err?.name === 'ValidationError') {
+      const fieldErrors = Object.fromEntries(
+        Object.entries(err.errors || {}).map(([field, error]) => [field, error.message]),
+      )
+      const isLockedError = Object.values(fieldErrors).some((message) => message === LOCKED_RUNTIME_CONTROL_EDIT_MESSAGE)
+      if (isLockedError) {
+        return sendConflict(res, req, LOCKED_RUNTIME_CONTROL_EDIT_MESSAGE, {
+          reason: 'VALIDATION_REGISTRY_LOCKED',
+          fields: Object.keys(fieldErrors),
+        })
+      }
+
+      return sendValidationFailed(res, req, fieldErrors, err.message)
+    }
+
+    next(err)
+  }
+}
+
+export const cloneValidation = async (req, res, next) => {
+  try {
+    const source = await ValidationRegistry.findByStableId(req.params.validationId)
+
+    if (!source) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: VALIDATION_NOT_FOUND_MESSAGE,
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    const nextKey = String(req.body?.key || '').trim().toLowerCase()
+    const existing = await ValidationRegistry.findOne({ key: nextKey }).select('_id').lean()
+    if (existing) {
+      return sendConflict(res, req, DUPLICATE_VALIDATION_KEY_MESSAGE, {
+        field: 'key',
+        reason: 'VALIDATION_REGISTRY_KEY_CONFLICT',
+      })
+    }
+
+    const actorUserId = req.context?.userId || req.userId
+    const sourcePlain = typeof source.toObject === 'function'
+      ? source.toObject()
+      : cloneAuditValue(source)
+    const sourceStableId = source.stableId || sourcePlain.stableId || sourcePlain.id
+
+    delete sourcePlain._id
+    delete sourcePlain.id
+    delete sourcePlain.__v
+    delete sourcePlain.stableId
+
+    const clonedValidation = new ValidationRegistry({
+      ...sourcePlain,
+      key: nextKey,
+      label: String(req.body?.label || '').trim(),
+      description: req.body?.description === undefined
+        ? source.description
+        : String(req.body.description || '').trim(),
+      status: VALIDATION_REGISTRY_STATUSES.DRAFT,
+      version: Number(source.version || 1) + 1,
+      componentVersion: Number(source.componentVersion || 1) + 1,
+      versionStatus: RUNTIME_CONTROL_VERSION_STATUSES.DRAFT,
+      lineageId: source.lineageId || sourceStableId,
+      isLocked: false,
+      lockedAt: null,
+      lockedBy: null,
+      lockedReason: '',
+      lockedByPackageKeys: [],
+      clonedFromStableId: sourceStableId,
+      supersedesStableId: sourceStableId,
+      supersededByStableId: null,
+      createdBy: actorUserId,
+      updatedBy: actorUserId,
+      createdAt: undefined,
+      updatedAt: undefined,
+    })
+
+    await clonedValidation.save()
+    await ValidationRegistry.updateOne(
+      { stableId: sourceStableId },
+      { $set: { supersededByStableId: clonedValidation.stableId, updatedBy: actorUserId } },
+      { runValidators: false },
+    )
+    await clonedValidation.populate('createdBy', 'name email')
+    await clonedValidation.populate('updatedBy', 'name email')
+
+    await auditService.logFromRequest(req, {
+      action: auditService.AUDIT_ACTIONS.VALIDATION_REGISTRY_CLONED,
+      resourceType: auditService.RESOURCE_TYPES.ValidationRegistry,
+      resourceId: clonedValidation._id,
+      display: { resourceLabel: clonedValidation.key },
+      diff: {
+        clonedFromStableId: sourceStableId,
+        supersedesStableId: sourceStableId,
+        key: clonedValidation.key,
+        status: clonedValidation.status,
+        componentVersion: clonedValidation.componentVersion,
+        versionStatus: clonedValidation.versionStatus,
+      },
+    })
+
+    return res.status(201).json({
+      data: serializeValidation(clonedValidation),
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (isDuplicateKeyError(err)) {
+      return sendConflict(res, req, DUPLICATE_VALIDATION_KEY_MESSAGE, {
+        field: 'key',
+        reason: 'VALIDATION_REGISTRY_KEY_CONFLICT',
+      })
+    }
+
     next(err)
   }
 }
@@ -557,6 +726,10 @@ export const updateValidation = async (req, res, next) => {
           requestId: req.requestId,
         },
       })
+    }
+
+    if (validation.isLocked === true) {
+      return sendLockedValidationConflict(res, req, validation)
     }
 
     if (req.body.key !== undefined && String(req.body.key).trim().toLowerCase() !== validation.key) {
@@ -584,6 +757,10 @@ export const updateValidation = async (req, res, next) => {
       'resultType',
       'passFieldPath',
       'detailsFieldPath',
+      'messageFieldPath',
+      'parameterSchema',
+      'defaultParameters',
+      'retryPolicy',
       'policyUsable',
       'packageUsable',
       'requiresLatestRun',
@@ -650,6 +827,7 @@ export const updateValidation = async (req, res, next) => {
     const outputPath = req.body.outputPath === undefined ? validation.outputPath : String(req.body.outputPath || '').trim()
     const passFieldPath = req.body.passFieldPath === undefined ? validation.passFieldPath : String(req.body.passFieldPath || '').trim()
     const detailsFieldPath = req.body.detailsFieldPath === undefined ? validation.detailsFieldPath : String(req.body.detailsFieldPath || '').trim()
+    const messageFieldPath = req.body.messageFieldPath === undefined ? validation.messageFieldPath : String(req.body.messageFieldPath || '').trim()
 
     if (outputPath && passFieldPath) {
       const err = buildPathDescendantError(outputPath, passFieldPath, 'Pass Field Path')
@@ -661,10 +839,16 @@ export const updateValidation = async (req, res, next) => {
       if (err) details.detailsFieldPath = err
     }
 
+    if (outputPath && messageFieldPath) {
+      const err = buildPathDescendantError(outputPath, messageFieldPath, 'Message Field Path')
+      if (err) details.messageFieldPath = err
+    }
+
     const runtimePathResolution = await resolveRuntimePathRows({
       outputPath,
       passFieldPath,
       detailsFieldPath,
+      messageFieldPath,
       frameworkKeys: frameworkDetails.supportedFrameworkKeys,
     })
 
@@ -672,6 +856,7 @@ export const updateValidation = async (req, res, next) => {
       outputPath,
       passFieldPath,
       detailsFieldPath,
+      messageFieldPath,
       resolution: runtimePathResolution,
     })
     appendResultTypeError(details, {
@@ -831,7 +1016,7 @@ const fetchDefaultAgentSummaries = async (defaultAgentIds, frameworkKeys = []) =
 export const getValidationDependencies = async (req, res, next) => {
   try {
     const validation = await ValidationRegistry.findByStableId(req.params.validationId)
-      .select('stableId key producerSkillId defaultAgentIds supportedFrameworkKeys outputPath passFieldPath detailsFieldPath')
+      .select('stableId key producerSkillId defaultAgentIds supportedFrameworkKeys outputPath passFieldPath detailsFieldPath messageFieldPath')
 
     if (!validation) {
       return res.status(404).json({
@@ -845,7 +1030,7 @@ export const getValidationDependencies = async (req, res, next) => {
 
     const [producerSkill, runtimePaths, defaultAgents, deps] = await Promise.all([
       resolveProducerSkill(validation.producerSkillId),
-      fetchRuntimePathSummaries([validation.outputPath, validation.passFieldPath, validation.detailsFieldPath]),
+      fetchRuntimePathSummaries([validation.outputPath, validation.passFieldPath, validation.detailsFieldPath, validation.messageFieldPath]),
       fetchDefaultAgentSummaries(validation.defaultAgentIds, validation.supportedFrameworkKeys),
       fetchValidationDependencies(validation.key),
     ])

@@ -18,6 +18,57 @@ const skillIdRegex = /^skill-[a-z][a-z0-9-]*$/
 const agentIdRegex = /^agent-[a-z][a-z0-9-]*$/
 const keyRegex = /^[a-z][a-z0-9-]*$/
 
+const governedMetadataFieldSchema = (field) =>
+  z.unknown().optional().superRefine((value, ctx) => {
+    if (value === undefined) return
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `${field} is server-managed governance metadata and cannot be edited directly.`,
+    })
+  })
+
+const governedMetadataFieldsSchema = {
+  componentVersion: governedMetadataFieldSchema('componentVersion'),
+  versionStatus: governedMetadataFieldSchema('versionStatus'),
+  stableId: governedMetadataFieldSchema('stableId'),
+  lineageId: governedMetadataFieldSchema('lineageId'),
+  isLocked: governedMetadataFieldSchema('isLocked'),
+  lockedAt: governedMetadataFieldSchema('lockedAt'),
+  lockedBy: governedMetadataFieldSchema('lockedBy'),
+  lockedReason: governedMetadataFieldSchema('lockedReason'),
+  lockedByPackageKeys: governedMetadataFieldSchema('lockedByPackageKeys'),
+  clonedFromStableId: governedMetadataFieldSchema('clonedFromStableId'),
+  supersedesStableId: governedMetadataFieldSchema('supersedesStableId'),
+  supersededByStableId: governedMetadataFieldSchema('supersededByStableId'),
+}
+
+const getJsonDepth = (value, depth = 0) => {
+  if (value === null || typeof value !== 'object') return depth
+  if (Array.isArray(value)) {
+    return value.reduce((max, item) => Math.max(max, getJsonDepth(item, depth + 1)), depth + 1)
+  }
+
+  return Object.values(value).reduce((max, item) => Math.max(max, getJsonDepth(item, depth + 1)), depth + 1)
+}
+
+const boundedJsonObjectSchema = ({ label, maxBytes = 4096, maxDepth = 6 }) =>
+  z.record(z.string(), z.unknown()).superRefine((value, ctx) => {
+    const serialized = JSON.stringify(value)
+    if (serialized.length > maxBytes) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `${label} must serialize to ${maxBytes} characters or fewer.`,
+      })
+    }
+
+    if (getJsonDepth(value) > maxDepth) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `${label} must be ${maxDepth} levels deep or fewer.`,
+      })
+    }
+  })
+
 const keyQuerySchema = z
   .string()
   .trim()
@@ -144,6 +195,16 @@ const optionalRuntimePathKeySchema = (label) =>
     .optional()
     .default('')
 
+const retryPolicySchema = z.object({
+  maxAttempts: z.coerce.number().int().min(1).max(10).default(1),
+  retryableErrorCodes: z
+    .array(z.string().trim().min(1).max(80).transform((value) => value.toUpperCase()))
+    .max(20)
+    .transform((values) => [...new Set(values)])
+    .default([]),
+  backoffSeconds: z.coerce.number().int().min(0).max(3600).default(0),
+}).default({ maxAttempts: 1, retryableErrorCodes: [], backoffSeconds: 0 })
+
 const defaultsSchema = z.object({
   freshnessDefaultMinutes: z.coerce.number().int().min(0).max(10080).default(30),
   blockingDefault: z.coerce.boolean().default(true),
@@ -157,6 +218,7 @@ const defaultsSchema = z.object({
 )
 
 const createValidationRegistryBodySchema = z.object({
+  ...governedMetadataFieldsSchema,
   key: keySchema,
   label: z.string({ required_error: 'Label is required' }).trim().min(1, 'Label is required').max(140),
   description: z.string({ required_error: 'Description is required' }).trim().min(1, 'Description is required').max(800),
@@ -170,6 +232,10 @@ const createValidationRegistryBodySchema = z.object({
   resultType: z.enum(Object.values(VALIDATION_REGISTRY_RESULT_TYPES)).optional(),
   passFieldPath: optionalRuntimePathKeySchema('Pass Field Path'),
   detailsFieldPath: optionalRuntimePathKeySchema('Details Field Path'),
+  messageFieldPath: optionalRuntimePathKeySchema('Message Field Path'),
+  parameterSchema: boundedJsonObjectSchema({ label: 'Parameter Schema', maxBytes: 8192, maxDepth: 8 }).optional(),
+  defaultParameters: boundedJsonObjectSchema({ label: 'Default Parameters' }).optional(),
+  retryPolicy: retryPolicySchema.optional(),
   policyUsable: z.coerce.boolean().default(true),
   packageUsable: z.coerce.boolean().default(true),
   requiresLatestRun: z.coerce.boolean().default(false),
@@ -180,6 +246,7 @@ const createValidationRegistryBodySchema = z.object({
 )
 
 const updateValidationRegistryBodySchema = z.object({
+  ...governedMetadataFieldsSchema,
   key: keySchema.optional(),
   label: z.string().trim().min(1, 'Label is required').max(140).optional(),
   description: z.string().trim().min(1, 'Description is required').max(800).optional(),
@@ -193,6 +260,10 @@ const updateValidationRegistryBodySchema = z.object({
   resultType: z.enum(Object.values(VALIDATION_REGISTRY_RESULT_TYPES)).optional(),
   passFieldPath: optionalRuntimePathKeySchema('Pass Field Path'),
   detailsFieldPath: optionalRuntimePathKeySchema('Details Field Path'),
+  messageFieldPath: optionalRuntimePathKeySchema('Message Field Path'),
+  parameterSchema: boundedJsonObjectSchema({ label: 'Parameter Schema', maxBytes: 8192, maxDepth: 8 }).optional(),
+  defaultParameters: boundedJsonObjectSchema({ label: 'Default Parameters' }).optional(),
+  retryPolicy: retryPolicySchema.optional(),
   policyUsable: z.coerce.boolean().optional(),
   packageUsable: z.coerce.boolean().optional(),
   requiresLatestRun: z.coerce.boolean().optional(),
@@ -207,7 +278,16 @@ const updateValidationRegistryBodySchema = z.object({
   { message: 'Blocking Default and Warning Only Default cannot both be true.', path: ['warningOnlyDefault'] },
 )
 
+const cloneValidationRegistryBodySchema = z.object({
+  ...governedMetadataFieldsSchema,
+  key: keySchema,
+  label: z.string({ required_error: 'Label is required' }).trim().min(1, 'Label is required').max(140),
+  description: z.string().trim().max(800).optional(),
+  status: z.enum([VALIDATION_REGISTRY_STATUSES.DRAFT]).default(VALIDATION_REGISTRY_STATUSES.DRAFT),
+})
+
 export const validateValidationRegistryId = createParamsValidator(validationIdSchema)
 export const validateListValidationRegistry = createQueryValidator(listValidationRegistryQuerySchema)
 export const validateCreateValidationRegistry = createBodyValidator(createValidationRegistryBodySchema)
 export const validateUpdateValidationRegistry = createBodyValidator(updateValidationRegistryBodySchema)
+export const validateCloneValidationRegistry = createBodyValidator(cloneValidationRegistryBodySchema)

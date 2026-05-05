@@ -20,6 +20,7 @@ const ACTIVE_AGENT_ID = 'agent-vmf-submit-validator-agent'
 const ACTIVE_VALIDATION_PATH = 'framework_state.validation.required_sections'
 const ACTIVE_PASS_PATH = 'framework_state.validation.required_sections.is_valid'
 const ACTIVE_DETAILS_PATH = 'framework_state.validation.required_sections.missing_sections'
+const ACTIVE_MESSAGE_PATH = 'framework_state.validation.required_sections.message'
 
 const makeFakeUser = (overrides = {}) => ({
   _id: SUPER_ADMIN_ID,
@@ -109,6 +110,17 @@ const makeValidationDocument = (overrides = {}) => ({
   resultType: 'OBJECT',
   passFieldPath: ACTIVE_PASS_PATH,
   detailsFieldPath: ACTIVE_DETAILS_PATH,
+  messageFieldPath: ACTIVE_MESSAGE_PATH,
+  parameterSchema: {
+    type: 'object',
+    required: ['sectionKeys'],
+    properties: {
+      sectionKeys: { type: 'array' },
+    },
+    additionalProperties: false,
+  },
+  defaultParameters: { sectionKeys: ['executive_summary'] },
+  retryPolicy: { maxAttempts: 2, retryableErrorCodes: ['TRANSIENT'], backoffSeconds: 5 },
   policyUsable: true,
   packageUsable: true,
   requiresLatestRun: true,
@@ -139,6 +151,10 @@ const makeValidationDocument = (overrides = {}) => ({
       resultType: this.resultType,
       passFieldPath: this.passFieldPath,
       detailsFieldPath: this.detailsFieldPath,
+      messageFieldPath: this.messageFieldPath,
+      parameterSchema: this.parameterSchema,
+      defaultParameters: this.defaultParameters,
+      retryPolicy: this.retryPolicy,
       policyUsable: this.policyUsable,
       packageUsable: this.packageUsable,
       requiresLatestRun: this.requiresLatestRun,
@@ -169,6 +185,17 @@ const buildCreatePayload = (overrides = {}) => ({
   resultType: 'OBJECT',
   passFieldPath: ACTIVE_PASS_PATH,
   detailsFieldPath: ACTIVE_DETAILS_PATH,
+  messageFieldPath: ACTIVE_MESSAGE_PATH,
+  parameterSchema: {
+    type: 'object',
+    required: ['sectionKeys'],
+    properties: {
+      sectionKeys: { type: 'array' },
+    },
+    additionalProperties: false,
+  },
+  defaultParameters: { sectionKeys: ['executive_summary'] },
+  retryPolicy: { maxAttempts: 2, retryableErrorCodes: ['TRANSIENT'], backoffSeconds: 5 },
   policyUsable: true,
   packageUsable: true,
   requiresLatestRun: true,
@@ -259,6 +286,8 @@ beforeEach(() => {
   Role.find = jest.fn().mockReturnValue(buildRoleQueryChain(buildDefaultRoleRows()))
 
   ValidationRegistry.find = jest.fn()
+  ValidationRegistry.findOne = jest.fn().mockReturnValue(buildSelectLeanChain(null))
+  ValidationRegistry.updateOne = jest.fn().mockResolvedValue({ matchedCount: 1, modifiedCount: 1 })
   ValidationRegistry.countDocuments = jest.fn()
   ValidationRegistry.findByStableId = jest.fn()
   ValidationRegistry.prototype.save = jest.fn(async function save() {
@@ -323,6 +352,14 @@ beforeEach(() => {
         isProtected: false,
         scope: 'VALIDATION_RESULT',
       },
+      {
+        pathKey: ACTIVE_MESSAGE_PATH,
+        status: 'ACTIVE',
+        frameworkKeys: ['VMF'],
+        allowedOperations: ['READ', 'WRITE', 'BIND'],
+        isProtected: false,
+        scope: 'VALIDATION_RESULT',
+      },
     ]),
   )
   FrameworkPackage.find = jest.fn().mockReturnValue(buildSelectLeanChain([]))
@@ -363,10 +400,11 @@ describe('Validation Registry API', () => {
           category: 'COMPLETENESS',
           severity: 'BLOCKING',
           producerSkillId: 'skill-vmf-required-sections-validator',
-          outputPath: 'framework_state.validation.required_sections',
-          passFieldPath: 'framework_state.validation.required_sections.is_valid',
-          detailsFieldPath: 'framework_state.validation.required_sections.missing_sections',
-          policyUsable: true,
+        outputPath: 'framework_state.validation.required_sections',
+        passFieldPath: 'framework_state.validation.required_sections.is_valid',
+        detailsFieldPath: 'framework_state.validation.required_sections.missing_sections',
+        messageFieldPath: 'framework_state.validation.required_sections.message',
+        policyUsable: true,
           packageUsable: true,
           freshnessDefaultMinutes: 30,
           blockingDefault: true,
@@ -414,6 +452,15 @@ describe('Validation Registry API', () => {
         allowManualRun: true,
         executionMode: 'QUEUED',
         version: 2,
+        messageFieldPath: ACTIVE_MESSAGE_PATH,
+        parameterSchema: {
+          type: 'object',
+          required: ['sectionKeys'],
+          properties: { sectionKeys: { type: 'array' } },
+          additionalProperties: false,
+        },
+        defaultParameters: { sectionKeys: ['executive_summary'] },
+        retryPolicy: { maxAttempts: 3, retryableErrorCodes: ['TIMEOUT'], backoffSeconds: 10 },
       }))
 
     expect(res.status).toBe(201)
@@ -423,6 +470,10 @@ describe('Validation Registry API', () => {
     expect(res.body.data?.allowManualRun).toBe(true)
     expect(res.body.data?.executionMode).toBe('QUEUED')
     expect(res.body.data?.version).toBe(2)
+    expect(res.body.data?.messageFieldPath).toBe(ACTIVE_MESSAGE_PATH)
+    expect(res.body.data?.parameterSchema?.required).toEqual(['sectionKeys'])
+    expect(res.body.data?.defaultParameters).toEqual({ sectionKeys: ['executive_summary'] })
+    expect(res.body.data?.retryPolicy).toEqual(expect.objectContaining({ maxAttempts: 3, backoffSeconds: 10 }))
   })
 
   test('POST /api/v1/super-admin/runtime-control/validation-registry rejects unknown default agents', async () => {
@@ -471,6 +522,7 @@ describe('Validation Registry API', () => {
     expect(res.status).toBe(200)
     expect(res.body.data?.id).toBe(VALIDATION_STABLE_ID)
     expect(res.body.data?.label).toBe('Required Sections Check')
+    expect(res.body.data?.messageFieldPath).toBe(ACTIVE_MESSAGE_PATH)
   })
 
   test('GET /api/v1/super-admin/runtime-control/validation-registry/:validationId/dependencies returns dependency summary', async () => {
@@ -509,7 +561,7 @@ describe('Validation Registry API', () => {
       workflowPolicies: 1,
       frameworkPackages: 1,
     })
-    expect(res.body.data?.runtimePaths).toHaveLength(3)
+    expect(res.body.data?.runtimePaths).toHaveLength(4)
     expect(res.body.data?.defaultAgents).toEqual([
       expect.objectContaining({
         id: ACTIVE_AGENT_ID,
@@ -557,6 +609,61 @@ describe('Validation Registry API', () => {
     expect(res.body.data?.version).toBe(3)
     expect(document.save).toHaveBeenCalled()
     expect(auditService.logFromRequest).toHaveBeenCalled()
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/validation-registry/:validationId/clone creates editable draft successor', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const source = makeValidationDocument({
+      componentVersion: 1,
+      versionStatus: 'ACTIVE',
+      lineageId: VALIDATION_STABLE_ID,
+      isLocked: true,
+      lockedByPackageKeys: ['vmf-qa-package'],
+    })
+    ValidationRegistry.findByStableId.mockResolvedValue(source)
+    ValidationRegistry.findOne.mockReturnValue(buildSelectLeanChain(null))
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/validation-registry/${VALIDATION_STABLE_ID}/clone`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        key: 'required-sections-check-clone',
+        label: 'Required Sections Check Clone',
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data?.key).toBe('required-sections-check-clone')
+    expect(res.body.data?.status).toBe('DRAFT')
+    expect(res.body.data?.isLocked).toBe(false)
+    expect(res.body.data?.componentVersion).toBe(2)
+    expect(res.body.data?.clonedFromStableId).toBe(VALIDATION_STABLE_ID)
+    expect(ValidationRegistry.updateOne).toHaveBeenCalledWith(
+      { stableId: VALIDATION_STABLE_ID },
+      expect.objectContaining({ $set: expect.objectContaining({ supersededByStableId: expect.any(String) }) }),
+      { runValidators: false },
+    )
+    expect(auditService.logFromRequest).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: auditService.AUDIT_ACTIONS.VALIDATION_REGISTRY_CLONED }),
+    )
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/validation-registry/:validationId rejects locked direct edits', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const document = makeValidationDocument({
+      isLocked: true,
+      lockedByPackageKeys: ['vmf-qa-package'],
+    })
+    ValidationRegistry.findByStableId.mockResolvedValue(document)
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/validation-registry/${VALIDATION_STABLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ label: 'Blocked' })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error?.details?.reason).toBe('VALIDATION_REGISTRY_LOCKED')
+    expect(document.save).not.toHaveBeenCalled()
   })
 
   test('PATCH /api/v1/super-admin/runtime-control/validation-registry/:validationId validates default agents when explicitly supplied', async () => {
