@@ -4,7 +4,9 @@ import RuntimeSkill, {
   RUNTIME_SKILL_STATUSES,
 } from '../models/RuntimeSkill.js'
 import RuntimeAgent from '../models/RuntimeAgent.js'
+import FrameworkPackage from '../models/FrameworkPackage.js'
 import SkillRoleRegistry, { SKILL_ROLE_REGISTRY_STATUSES } from '../models/SkillRoleRegistry.js'
+import ValidationRegistry from '../models/ValidationRegistry.js'
 import WorkflowPolicy from '../models/WorkflowPolicy.js'
 import auditService from '../services/auditService.js'
 import {
@@ -13,6 +15,7 @@ import {
 } from '../services/frameworkRegistryService.js'
 import { resolveRuntimePathSelections } from '../services/runtimePathRegistryService.js'
 import { escapeRegex, serializeUserSummary, toIdString } from '../utils/controllerUtils.js'
+import { RUNTIME_CONTROL_VERSION_STATUSES } from '../utils/runtimeControlVersioning.js'
 
 const DUPLICATE_RUNTIME_SKILL_KEY_MESSAGE = 'Skill key must be unique.'
 const RUNTIME_SKILL_NOT_FOUND_MESSAGE = 'Skill was not found.'
@@ -46,6 +49,15 @@ const serializeRuntimeDependencyReference = (value) => ({
   status: value?.status,
 })
 
+const serializeFrameworkPackageDependencyReference = (value) => ({
+  id: toIdString(value?._id || value?.id),
+  frameworkKey: value?.frameworkKey,
+  frameworkName: value?.frameworkName,
+  packageKey: value?.packageKey,
+  version: value?.version,
+  status: value?.status,
+})
+
 const serializeRuntimeSkill = (
   runtimeSkill,
   { fallbackUpdatedBy = null, dependencySummary = null } = {},
@@ -54,13 +66,14 @@ const serializeRuntimeSkill = (
     ? runtimeSkill.toJSON()
     : { ...runtimeSkill }
 
-  if (!plain.id && plain.stableId) {
-    plain.id = plain.stableId
+  const stableId = plain.stableId || plain.id
+  if (stableId) {
+    plain.id = stableId
+    plain.stableId = stableId
   }
 
   delete plain._id
   delete plain.__v
-  delete plain.stableId
 
   plain.category = reqHasValue(plain.category) ? plain.category : RUNTIME_SKILL_CATEGORIES.VALIDATION
   plain.type = reqHasValue(plain.type) ? plain.type : 'DETERMINISTIC'
@@ -152,6 +165,12 @@ const pickRuntimeSkillPayload = (body = {}) => ({
   forbiddenWritePaths: body.forbiddenWritePaths,
   executionConfig: body.executionConfig,
   referenceAssets: body.referenceAssets,
+})
+
+const pickRuntimeSkillCloneBody = (body = {}) => ({
+  key: body.key,
+  name: body.name,
+  description: body.description,
 })
 
 const hasObjectKeys = (value) =>
@@ -355,28 +374,66 @@ const validateRuntimeSkillRuntimePaths = async ({
   return details
 }
 
-const buildDependencySummary = ({ agents = [], workflowPolicies = [] }, { includeEntities = false } = {}) => ({
+const buildDependencySummary = (
+  {
+    agents = [],
+    workflowPolicies = [],
+    validations = [],
+    frameworkPackages = [],
+  },
+  { includeEntities = false } = {},
+) => ({
   agentIds: agents.map((agent) => agent.stableId),
   workflowPolicyIds: workflowPolicies.map((policy) => policy.stableId),
+  validationIds: validations.map((validation) => validation.stableId),
+  frameworkPackageIds: frameworkPackages.map((pkg) => toIdString(pkg?._id || pkg?.id)).filter(Boolean),
   ...(includeEntities
     ? {
         agents: agents.map(serializeRuntimeDependencyReference),
         workflowPolicies: workflowPolicies.map(serializeRuntimeDependencyReference),
+        validations: validations.map(serializeRuntimeDependencyReference),
+        frameworkPackages: frameworkPackages.map(serializeFrameworkPackageDependencyReference),
       }
     : {}),
 })
 
 const fetchRuntimeSkillDependencies = async (skillId) => {
-  const [agents, workflowPolicies] = await Promise.all([
-    RuntimeAgent.find({ defaultSkillIds: skillId })
+  const normalizedSkillId = String(skillId || '').trim().toLowerCase()
+  const [agents, workflowPolicies, validations, frameworkPackages] = await Promise.all([
+    RuntimeAgent.find({
+      $or: [
+        { defaultSkillIds: normalizedSkillId },
+        { primarySkillIds: normalizedSkillId },
+        { optionalSkillIds: normalizedSkillId },
+        { 'executionPlan.skillId': normalizedSkillId },
+      ],
+    })
       .select('stableId key name status')
       .lean(),
-    WorkflowPolicy.find({ requiredSkillIds: skillId })
+    WorkflowPolicy.find({
+      $or: [
+        { requiredSkillIds: normalizedSkillId },
+        { 'steps.skillId': normalizedSkillId },
+      ],
+    })
       .select('stableId key name status')
+      .lean(),
+    ValidationRegistry.find({ producerSkillId: normalizedSkillId })
+      .select('stableId key label name status')
+      .lean(),
+    FrameworkPackage.find({
+      'dependencyLock.references': {
+        $elemMatch: {
+          collectionKey: 'RuntimeSkill',
+          $or: [{ id: normalizedSkillId }, { key: normalizedSkillId }],
+        },
+      },
+    })
+      .select('frameworkKey frameworkName packageKey version status')
       .lean(),
   ])
 
-  return { agents, workflowPolicies }
+  return { agents, workflowPolicies, validations, frameworkPackages }
 }
 
 export const listRuntimeSkills = async (req, res, next) => {
@@ -546,7 +603,7 @@ export const createRuntimeSkill = async (req, res, next) => {
 
 export const getRuntimeSkill = async (req, res, next) => {
   try {
-    const runtimeSkill = await RuntimeSkill.findOne({ stableId: req.params.skillId })
+    const runtimeSkill = await RuntimeSkill.findByStableId(req.params.skillId)
 
     if (!runtimeSkill) {
       return res.status(404).json({
@@ -576,7 +633,7 @@ export const getRuntimeSkill = async (req, res, next) => {
 
 export const getRuntimeSkillDependencies = async (req, res, next) => {
   try {
-    const runtimeSkill = await RuntimeSkill.findOne({ stableId: req.params.skillId })
+    const runtimeSkill = await RuntimeSkill.findByStableId(req.params.skillId)
       .select('stableId key name')
       .lean()
 
@@ -598,6 +655,7 @@ export const getRuntimeSkillDependencies = async (req, res, next) => {
     return res.status(200).json({
       data: {
         id: runtimeSkill.stableId,
+        stableId: runtimeSkill.stableId,
         key: runtimeSkill.key,
         name: runtimeSkill.name,
         ...dependencies,
@@ -609,9 +667,115 @@ export const getRuntimeSkillDependencies = async (req, res, next) => {
   }
 }
 
+export const cloneRuntimeSkill = async (req, res, next) => {
+  try {
+    const source = await RuntimeSkill.findByStableId(req.params.skillId)
+
+    if (!source) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: RUNTIME_SKILL_NOT_FOUND_MESSAGE,
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    const body = pickRuntimeSkillCloneBody(req.body)
+    const duplicateRuntimeSkill = await RuntimeSkill.findOne({ key: body.key }).select('_id')
+    if (duplicateRuntimeSkill) {
+      return sendConflict(res, req, DUPLICATE_RUNTIME_SKILL_KEY_MESSAGE, {
+        field: 'key',
+        reason: 'RUNTIME_SKILL_KEY_CONFLICT',
+      })
+    }
+
+    const actorUserId = req.context?.userId || req.userId
+    const sourceStableId = source.stableId
+    const clonedSkill = new RuntimeSkill({
+      ...pickRuntimeSkillPayload(source),
+      key: body.key,
+      name: body.name,
+      description: body.description ?? source.description ?? '',
+      status: RUNTIME_SKILL_STATUSES.DRAFT,
+      componentVersion: Math.max(1, Number(source.componentVersion) || 1) + 1,
+      versionStatus: RUNTIME_CONTROL_VERSION_STATUSES.DRAFT,
+      lineageId: source.lineageId || sourceStableId,
+      isLocked: false,
+      lockedAt: null,
+      lockedBy: null,
+      lockedReason: '',
+      lockedByPackageKeys: [],
+      clonedFromStableId: sourceStableId,
+      supersedesStableId: sourceStableId,
+      supersededByStableId: null,
+      createdBy: actorUserId,
+      updatedBy: actorUserId,
+    })
+
+    await clonedSkill.save()
+    await RuntimeSkill.updateOne(
+      { stableId: sourceStableId },
+      { $set: { supersededByStableId: clonedSkill.stableId, updatedBy: actorUserId } },
+      { runValidators: false },
+    )
+    await populateRuntimeSkill(clonedSkill)
+
+    await auditService.logFromRequest(req, {
+      action: auditService.AUDIT_ACTIONS.RUNTIME_SKILL_CLONED,
+      resourceType: auditService.RESOURCE_TYPES.RuntimeSkill,
+      resourceId: clonedSkill._id,
+      scope: {
+        frameworkKeys: clonedSkill.supportedFrameworkKeys,
+      },
+      display: { resourceLabel: buildRuntimeSkillLabel(clonedSkill) },
+      diff: {
+        sourceStableId,
+        clonedStableId: clonedSkill.stableId,
+        sourceKey: source.key,
+        clonedKey: clonedSkill.key,
+        sourceComponentVersion: source.componentVersion,
+        clonedComponentVersion: clonedSkill.componentVersion,
+        lineageId: clonedSkill.lineageId,
+      },
+    })
+
+    const dependencies = buildDependencySummary(
+      await fetchRuntimeSkillDependencies(clonedSkill.stableId),
+    )
+
+    return res.status(201).json({
+      data: serializeRuntimeSkill(clonedSkill, {
+        fallbackUpdatedBy: buildActorSummary(req),
+        dependencySummary: dependencies,
+      }),
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (isDuplicateRuntimeSkillKeyError(err)) {
+      return sendConflict(res, req, DUPLICATE_RUNTIME_SKILL_KEY_MESSAGE, {
+        field: 'key',
+        reason: 'RUNTIME_SKILL_KEY_CONFLICT',
+      })
+    }
+
+    if (err?.name === 'ValidationError') {
+      return res.status(422).json({
+        error: {
+          code: 'VALIDATION_FAILED',
+          message: err.message,
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    next(err)
+  }
+}
+
 export const updateRuntimeSkill = async (req, res, next) => {
   try {
-    const runtimeSkill = await RuntimeSkill.findOne({ stableId: req.params.skillId })
+    const runtimeSkill = await RuntimeSkill.findByStableId(req.params.skillId)
 
     if (!runtimeSkill) {
       return res.status(404).json({
@@ -621,6 +785,21 @@ export const updateRuntimeSkill = async (req, res, next) => {
           requestId: req.requestId,
         },
       })
+    }
+
+    if (runtimeSkill.isLocked === true) {
+      return sendConflict(
+        res,
+        req,
+        'Locked Runtime Control records cannot be edited directly. Clone the record to make behavior changes.',
+        {
+          field: 'isLocked',
+          reason: 'RUNTIME_SKILL_LOCKED',
+          lockedByPackageKeys: Array.isArray(runtimeSkill.lockedByPackageKeys)
+            ? runtimeSkill.lockedByPackageKeys
+            : [],
+        },
+      )
     }
 
     // Prevent key changes - the key is immutable after creation

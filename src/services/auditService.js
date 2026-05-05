@@ -90,6 +90,7 @@ export const AUDIT_ACTIONS = Object.freeze({
   RUNTIME_AGENT_DEPRECATED: 'RUNTIME_AGENT_DEPRECATED',
   RUNTIME_SKILL_CREATED: 'RUNTIME_SKILL_CREATED',
   RUNTIME_SKILL_UPDATED: 'RUNTIME_SKILL_UPDATED',
+  RUNTIME_SKILL_CLONED: 'RUNTIME_SKILL_CLONED',
   RUNTIME_PATH_CREATED: 'RUNTIME_PATH_CREATED',
   RUNTIME_PATH_UPDATED: 'RUNTIME_PATH_UPDATED',
   RUNTIME_PATH_CLONED: 'RUNTIME_PATH_CLONED',
@@ -419,6 +420,8 @@ const buildAuditSummary = ({ action, resourceType, resourceId, diff, display }) 
       return clampSummary(`${actorLabel} created runtime skill ${targetLabel}`)
     case AUDIT_ACTIONS.RUNTIME_SKILL_UPDATED:
       return clampSummary(`${actorLabel} updated runtime skill ${targetLabel}`)
+    case AUDIT_ACTIONS.RUNTIME_SKILL_CLONED:
+      return clampSummary(`${actorLabel} cloned runtime skill ${targetLabel}`)
     case AUDIT_ACTIONS.RUNTIME_PATH_CREATED:
       return clampSummary(`${actorLabel} created runtime path ${targetLabel}`)
     case AUDIT_ACTIONS.RUNTIME_PATH_UPDATED:

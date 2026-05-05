@@ -25,6 +25,7 @@ const GOVERNED_PACKAGE_STATUSES = Object.freeze(['VALIDATED', 'ACTIVE'])
 const UI_CONTRACT_PACKAGE_LOCK_REASON = 'Referenced by validated or active Framework Package.'
 const WORKFLOW_POLICY_PACKAGE_LOCK_REASON = 'Referenced by validated or active Framework Package.'
 const RUNTIME_AGENT_PACKAGE_LOCK_REASON = 'Referenced by validated or active Framework Package.'
+const RUNTIME_SKILL_PACKAGE_LOCK_REASON = 'Referenced by validated or active Framework Package.'
 const RUNTIME_CONTROL_VERSIONING_FIELDS_TO_ADD = Object.freeze([
   'componentVersion',
   'versionStatus',
@@ -63,6 +64,13 @@ const WORKFLOW_POLICY_LOCK_FIELDS_TO_APPLY = Object.freeze([
   'versionStatus',
 ])
 const RUNTIME_AGENT_LOCK_FIELDS_TO_APPLY = Object.freeze([
+  'lockedByPackageKeys',
+  'isLocked',
+  'lockedAt',
+  'lockedReason',
+  'versionStatus',
+])
+const RUNTIME_SKILL_LOCK_FIELDS_TO_APPLY = Object.freeze([
   'lockedByPackageKeys',
   'isLocked',
   'lockedAt',
@@ -648,6 +656,131 @@ const applyRuntimeAgentPackageLockPlan = async ({ runtimeAgentModel, plan = [] }
   return { modified }
 }
 
+const buildRuntimeSkillPackageLockPlan = async ({ frameworkPackageModel, runtimeSkillModel }) => {
+  if (!frameworkPackageModel || typeof frameworkPackageModel.find !== 'function') {
+    return { plan: [], missingSkillIds: [] }
+  }
+
+  const rows = await resolveQueryRows(frameworkPackageModel.find({
+    status: { $in: GOVERNED_PACKAGE_STATUSES },
+    'dependencyLock.references.collectionKey': 'RuntimeSkill',
+  }))
+  const grouped = new Map()
+
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const packageKey = String(row?.packageKey || '').trim().toLowerCase()
+    if (!packageKey) continue
+
+    const references = Array.isArray(row?.dependencyLock?.references)
+      ? row.dependencyLock.references
+      : []
+    const skillIds = [
+      ...new Set(references
+        .filter((reference) => reference?.collectionKey === 'RuntimeSkill')
+        .map((reference) => String(reference?.id || '').trim())
+        .filter(Boolean)),
+    ]
+
+    for (const skillId of skillIds) {
+      if (!grouped.has(skillId)) {
+        grouped.set(skillId, {
+          skillId,
+          packageKeys: [],
+          packageVersions: [],
+          lockedAt: row.activatedAt || row.lockedAt || row.updatedAt || new Date(),
+        })
+      }
+
+      const plan = grouped.get(skillId)
+      plan.packageKeys.push(packageKey)
+      if (row.version) plan.packageVersions.push(String(row.version))
+      if (!plan.lockedAt && (row.activatedAt || row.lockedAt || row.updatedAt)) {
+        plan.lockedAt = row.activatedAt || row.lockedAt || row.updatedAt
+      }
+    }
+  }
+
+  const plan = [...grouped.values()].map((item) => ({
+    ...item,
+    packageKeys: [...new Set(item.packageKeys)],
+    packageVersions: [...new Set(item.packageVersions)],
+  }))
+  const existingSkillIds = await resolveExistingRuntimeSkillIds({
+    runtimeSkillModel,
+    skillIds: plan.map((item) => item.skillId),
+  })
+  const missingSkillIds = plan
+    .map((item) => item.skillId)
+    .filter((skillId) => !existingSkillIds.has(skillId))
+
+  return { plan, missingSkillIds }
+}
+
+const resolveExistingRuntimeSkillIds = async ({ runtimeSkillModel, skillIds = [] }) => {
+  const uniqueSkillIds = [...new Set(skillIds.filter(Boolean))]
+  if (uniqueSkillIds.length === 0 || !runtimeSkillModel || typeof runtimeSkillModel.find !== 'function') {
+    return new Set()
+  }
+
+  const query = runtimeSkillModel.find({ stableId: { $in: uniqueSkillIds } })
+  let rows
+  if (query && typeof query.select === 'function') {
+    const selected = query.select('stableId')
+    rows = selected && typeof selected.lean === 'function' ? await selected.lean() : await selected
+  } else if (query && typeof query.lean === 'function') {
+    rows = await query.lean()
+  } else {
+    rows = await query
+  }
+
+  return new Set((Array.isArray(rows) ? rows : [])
+    .map((row) => String(row?.stableId || '').trim())
+    .filter(Boolean))
+}
+
+const applyRuntimeSkillPackageLockPlan = async ({ runtimeSkillModel, plan = [] }) => {
+  const updateMany = runtimeSkillModel?.updateMany
+    ? runtimeSkillModel.updateMany.bind(runtimeSkillModel)
+    : runtimeSkillModel?.collection?.updateMany?.bind(runtimeSkillModel.collection)
+  if (!updateMany || plan.length === 0) return { modified: 0 }
+
+  let modified = 0
+  for (const item of plan) {
+    const packageKeys = item.packageKeys.filter(Boolean)
+    if (!item.skillId || packageKeys.length === 0) continue
+
+    const referenceResult = await updateMany(
+      { stableId: item.skillId },
+      {
+        $addToSet: {
+          lockedByPackageKeys: { $each: packageKeys },
+        },
+      },
+    )
+    const lockResult = await updateMany(
+      {
+        stableId: item.skillId,
+        $or: [
+          { isLocked: { $exists: false } },
+          { isLocked: { $ne: true } },
+        ],
+      },
+      {
+        $set: {
+          isLocked: true,
+          lockedAt: item.lockedAt,
+          lockedReason: RUNTIME_SKILL_PACKAGE_LOCK_REASON,
+          versionStatus: RUNTIME_CONTROL_VERSION_STATUSES.ACTIVE,
+        },
+      },
+    )
+    modified += Number(referenceResult.modifiedCount) || 0
+    modified += Number(lockResult.modifiedCount) || 0
+  }
+
+  return { modified }
+}
+
 const serializeUIContractLockPlan = (plan = []) =>
   plan.map((item) => ({
     uiContractKey: item.uiContractKey,
@@ -675,6 +808,15 @@ const serializeRuntimeAgentLockPlan = (plan = []) =>
     fieldsToApply: [...RUNTIME_AGENT_LOCK_FIELDS_TO_APPLY],
   }))
 
+const serializeRuntimeSkillLockPlan = (plan = []) =>
+  plan.map((item) => ({
+    skillId: item.skillId,
+    packageKeys: item.packageKeys,
+    packageVersions: item.packageVersions,
+    lockedAt: item.lockedAt,
+    fieldsToApply: [...RUNTIME_SKILL_LOCK_FIELDS_TO_APPLY],
+  }))
+
 const formatBackfillSummary = (summary) => {
   const lines = [
     `Runtime Control versioning backfill ${summary.mode} on database ${summary.database}: matched=${summary.totalMatched}.`,
@@ -683,6 +825,7 @@ const formatBackfillSummary = (summary) => {
     `UI Contract locks to apply: ${summary.uiContractPackageLocks.matched}; package references: ${summary.uiContractPackageLocks.packageReferences}.`,
     `Workflow Policy locks to apply: ${summary.workflowPolicyPackageLocks.matched}; package references: ${summary.workflowPolicyPackageLocks.packageReferences}.`,
     `Runtime Agent locks to apply: ${summary.runtimeAgentPackageLocks.matched}; package references: ${summary.runtimeAgentPackageLocks.packageReferences}; missing agents: ${summary.runtimeAgentPackageLocks.missingAgentIds.length}.`,
+    `Runtime Skill locks to apply: ${summary.runtimeSkillPackageLocks.matched}; package references: ${summary.runtimeSkillPackageLocks.packageReferences}; missing skills: ${summary.runtimeSkillPackageLocks.missingSkillIds.length}.`,
   ]
 
   if (summary.uiContractPackageLocks.locksToApply.length > 0) {
@@ -716,6 +859,19 @@ const formatBackfillSummary = (summary) => {
     lines.push(`Runtime Agent missing references: ${summary.runtimeAgentPackageLocks.missingAgentIds.join(', ')}`)
   }
 
+  if (summary.runtimeSkillPackageLocks.locksToApply.length > 0) {
+    lines.push('Runtime Skill lock plan:')
+    summary.runtimeSkillPackageLocks.locksToApply.forEach((item) => {
+      lines.push(
+        `- ${item.skillId}: packages=${item.packageKeys.join(', ')}; versions=${item.packageVersions.join(', ') || 'n/a'}; fields=${item.fieldsToApply.join(', ')}`,
+      )
+    })
+  }
+
+  if (summary.runtimeSkillPackageLocks.missingSkillIds.length > 0) {
+    lines.push(`Runtime Skill missing references: ${summary.runtimeSkillPackageLocks.missingSkillIds.join(', ')}`)
+  }
+
   return lines.join('\n')
 }
 
@@ -732,6 +888,7 @@ export const backfillRuntimeControlVersioningFields = async ({
   const uiContractModel = dependencies.uiContractModel || UIContract
   const workflowPolicyModel = dependencies.workflowPolicyModel || WorkflowPolicy
   const runtimeAgentModel = dependencies.runtimeAgentModel || RuntimeAgent
+  const runtimeSkillModel = dependencies.runtimeSkillModel || RuntimeSkill
 
   await connect()
 
@@ -780,6 +937,13 @@ export const backfillRuntimeControlVersioningFields = async ({
     const runtimeAgentPackageLockResult = apply
       ? await applyRuntimeAgentPackageLockPlan({ runtimeAgentModel, plan: runtimeAgentLockPlan })
       : { modified: 0 }
+    const {
+      plan: runtimeSkillLockPlan,
+      missingSkillIds: runtimeSkillMissingSkillIds,
+    } = await buildRuntimeSkillPackageLockPlan({ frameworkPackageModel, runtimeSkillModel })
+    const runtimeSkillPackageLockResult = apply
+      ? await applyRuntimeSkillPackageLockPlan({ runtimeSkillModel, plan: runtimeSkillLockPlan })
+      : { modified: 0 }
     const uiContractPackageReferences = uiContractLockPlan.reduce(
       (count, plan) => count + plan.packageKeys.length,
       0,
@@ -792,12 +956,17 @@ export const backfillRuntimeControlVersioningFields = async ({
       (count, plan) => count + plan.packageKeys.length,
       0,
     )
+    const runtimeSkillPackageReferences = runtimeSkillLockPlan.reduce(
+      (count, plan) => count + plan.packageKeys.length,
+      0,
+    )
     const totalMatched = runtimeControlRows.reduce(
       (sum, row) => sum + row.matched,
       frameworkPackageMatched
         + uiContractLockPlan.length
         + workflowPolicyLockPlan.length
-        + runtimeAgentLockPlan.length,
+        + runtimeAgentLockPlan.length
+        + runtimeSkillLockPlan.length,
     )
 
     const summary = {
@@ -829,6 +998,13 @@ export const backfillRuntimeControlVersioningFields = async ({
         modified: Number(runtimeAgentPackageLockResult.modified) || 0,
         missingAgentIds: runtimeAgentMissingAgentIds,
         locksToApply: serializeRuntimeAgentLockPlan(runtimeAgentLockPlan),
+      },
+      runtimeSkillPackageLocks: {
+        matched: runtimeSkillLockPlan.length,
+        packageReferences: runtimeSkillPackageReferences,
+        modified: Number(runtimeSkillPackageLockResult.modified) || 0,
+        missingSkillIds: runtimeSkillMissingSkillIds,
+        locksToApply: serializeRuntimeSkillLockPlan(runtimeSkillLockPlan),
       },
     }
 

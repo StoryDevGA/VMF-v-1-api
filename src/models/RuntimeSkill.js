@@ -379,7 +379,6 @@ const runtimeSkillSchema = new mongoose.Schema(
     toJSON: {
       transform: function transform(_doc, ret) {
         ret.id = ret.stableId
-        delete ret.stableId
         delete ret._id
         delete ret.__v
         return ret

@@ -38,6 +38,33 @@ const REFERENCE_ASSET_STATUSES = Object.freeze([
   'INACTIVE',
 ])
 
+const governedMetadataFieldSchema = z.unknown().optional().superRefine((value, ctx) => {
+  if (value === undefined) return
+  ctx.addIssue({
+    code: z.ZodIssueCode.custom,
+    message: 'Runtime Skill version and lock metadata is managed by the server.',
+  })
+})
+
+const governedMetadataFieldsSchema = Object.freeze({
+  componentVersion: governedMetadataFieldSchema,
+  versionStatus: governedMetadataFieldSchema,
+  stableId: governedMetadataFieldSchema,
+  lineageId: governedMetadataFieldSchema,
+  isLocked: governedMetadataFieldSchema,
+  lockedAt: governedMetadataFieldSchema,
+  lockedBy: governedMetadataFieldSchema,
+  lockedReason: governedMetadataFieldSchema,
+  lockedByPackageKeys: governedMetadataFieldSchema,
+  introducedInVersion: governedMetadataFieldSchema,
+  deprecatedInVersion: governedMetadataFieldSchema,
+  compatibilityTags: governedMetadataFieldSchema,
+  compatibilityMode: governedMetadataFieldSchema,
+  clonedFromStableId: governedMetadataFieldSchema,
+  supersedesStableId: governedMetadataFieldSchema,
+  supersededByStableId: governedMetadataFieldSchema,
+})
+
 const frameworkKeySchema = z
   .string()
   .trim()
@@ -264,6 +291,7 @@ const runtimeSkillReferenceAssetSchema = z.object({
   })
 
 const createRuntimeSkillSchema = z.object({
+  ...governedMetadataFieldsSchema,
   key: z
     .string({ required_error: 'Skill key is required' })
     .trim()
@@ -375,6 +403,7 @@ const createRuntimeSkillSchema = z.object({
 })
 
 const updateRuntimeSkillSchema = z.object({
+  ...governedMetadataFieldsSchema,
   key: z
     .string()
     .trim()
@@ -482,6 +511,30 @@ const updateRuntimeSkillSchema = z.object({
   { message: 'At least one updatable field is required.', path: ['key'] },
 )
 
+const cloneRuntimeSkillSchema = z.object({
+  ...governedMetadataFieldsSchema,
+  key: z
+    .string({ required_error: 'Skill key is required' })
+    .trim()
+    .min(1, 'Skill key is required')
+    .max(120, 'Skill key must be 120 characters or fewer')
+    .transform((value) => value.toLowerCase())
+    .refine(
+      (value) => keyRegex.test(value),
+      'Skill key must use lowercase letters, numbers, or hyphens',
+    ),
+  name: z
+    .string({ required_error: 'Skill name is required' })
+    .trim()
+    .min(1, 'Skill name is required')
+    .max(120, 'Skill name must be 120 characters or fewer'),
+  description: z
+    .string()
+    .trim()
+    .max(500, 'Description must be 500 characters or fewer')
+    .optional(),
+})
+
 const runtimeSkillIdSchema = z.object({
   skillId: z
     .string({ required_error: 'skillId is required' })
@@ -513,5 +566,6 @@ const listRuntimeSkillsQuerySchema = z.object({
 
 export const validateCreateRuntimeSkill = createBodyValidator(createRuntimeSkillSchema)
 export const validateUpdateRuntimeSkill = createBodyValidator(updateRuntimeSkillSchema)
+export const validateCloneRuntimeSkill = createBodyValidator(cloneRuntimeSkillSchema)
 export const validateRuntimeSkillId = createParamsValidator(runtimeSkillIdSchema)
 export const validateListRuntimeSkills = createQueryValidator(listRuntimeSkillsQuerySchema)

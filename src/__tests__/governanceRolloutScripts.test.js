@@ -482,6 +482,16 @@ describe('backfillRuntimeControlVersioningFields', () => {
       }),
       updateMany: jest.fn(),
     }
+    const runtimeSkillModel = {
+      find: jest.fn().mockReturnValue({
+        select: jest.fn().mockReturnValue({
+          lean: jest.fn().mockResolvedValue([
+            { stableId: 'skill-submit-validator' },
+          ]),
+        }),
+      }),
+      updateMany: jest.fn(),
+    }
     const logs = []
 
     const result = await backfillRuntimeControlVersioningFields({
@@ -493,6 +503,7 @@ describe('backfillRuntimeControlVersioningFields', () => {
         runtimeControlConfigs: [],
         frameworkPackageModel,
         runtimeAgentModel,
+        runtimeSkillModel,
       },
     })
 
@@ -516,7 +527,27 @@ describe('backfillRuntimeControlVersioningFields', () => {
     }))
     expect(logs[0]).toContain('"runtimeAgentPackageLocks"')
     expect(logs[0]).toContain('agent-missing-runtime-agent')
+    expect(result.runtimeSkillPackageLocks).toEqual(expect.objectContaining({
+      matched: 1,
+      packageReferences: 1,
+      modified: 0,
+      missingSkillIds: [],
+    }))
+    expect(result.runtimeSkillPackageLocks.locksToApply[0]).toEqual(expect.objectContaining({
+      skillId: 'skill-submit-validator',
+      packageKeys: ['vmf-qa-manual-951'],
+      packageVersions: ['9.5.1'],
+      fieldsToApply: expect.arrayContaining([
+        'lockedByPackageKeys',
+        'isLocked',
+        'lockedAt',
+        'lockedReason',
+        'versionStatus',
+      ]),
+    }))
+    expect(logs[0]).toContain('"runtimeSkillPackageLocks"')
     expect(runtimeAgentModel.updateMany).not.toHaveBeenCalled()
+    expect(runtimeSkillModel.updateMany).not.toHaveBeenCalled()
   })
 })
 

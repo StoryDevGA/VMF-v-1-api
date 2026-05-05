@@ -111,6 +111,8 @@ let RuntimeSkill
 let RuntimeAgent
 let SkillRoleRegistry
 let WorkflowPolicy
+let ValidationRegistry
+let FrameworkPackage
 let AuditLog
 let mockRedisClient
 let originalRuntimeSkillSave
@@ -187,6 +189,8 @@ beforeAll(async () => {
   RuntimeAgent = models.RuntimeAgent
   SkillRoleRegistry = models.SkillRoleRegistry
   WorkflowPolicy = models.WorkflowPolicy
+  ValidationRegistry = models.ValidationRegistry
+  FrameworkPackage = models.FrameworkPackage
   AuditLog = models.AuditLog
 
   originalRuntimeSkillSave = RuntimeSkill.prototype.save
@@ -221,9 +225,12 @@ beforeEach(() => {
   RuntimeSkill.find = jest.fn()
   RuntimeSkill.countDocuments = jest.fn()
   RuntimeSkill.findOne = jest.fn()
+  RuntimeSkill.updateOne = jest.fn()
   RuntimeAgent.find = jest.fn()
   SkillRoleRegistry.findOne = jest.fn()
   WorkflowPolicy.find = jest.fn()
+  ValidationRegistry.find = jest.fn()
+  FrameworkPackage.find = jest.fn()
   FrameworkRegistry.find = jest.fn()
   RuntimePathRegistry.find = jest.fn()
   Role.find = jest.fn().mockReturnValue(buildRoleQueryChain(buildDefaultRoleRows()))
@@ -240,6 +247,7 @@ beforeEach(() => {
   RuntimeSkill.findOne.mockReturnValue({
     select: jest.fn().mockResolvedValue(null),
   })
+  RuntimeSkill.updateOne.mockResolvedValue({ modifiedCount: 1 })
   SkillRoleRegistry.findOne.mockImplementation((filter = {}) =>
     buildSkillRoleLookupChain(
       filter.roleKey
@@ -251,6 +259,8 @@ beforeEach(() => {
     ))
   RuntimeAgent.find.mockReturnValue(buildReferenceLookupChain([]))
   WorkflowPolicy.find.mockReturnValue(buildReferenceLookupChain([]))
+  ValidationRegistry.find.mockReturnValue(buildReferenceLookupChain([]))
+  FrameworkPackage.find.mockReturnValue(buildReferenceLookupChain([]))
   FrameworkRegistry.find.mockReturnValue(buildFrameworkRegistryLookupChain([
     {
       frameworkKey: 'VMF',
@@ -340,6 +350,7 @@ describe('Runtime Skill Routes', () => {
     expect(res.body.data).toHaveLength(1)
     expect(res.body.data[0]).toMatchObject({
       id: 'skill-revenue-map',
+      stableId: 'skill-revenue-map',
       key: 'revenue-map',
       status: 'ACTIVE',
       supportedFrameworkKeys: ['RLD'],
@@ -372,6 +383,27 @@ describe('Runtime Skill Routes', () => {
     expect(res.body.error.code).toBe('VALIDATION_FAILED')
     expect(res.body.error.details.name).toBe('Skill name is required')
     expect(res.body.error.details.supportedFrameworkKeys).toBe('At least one supported framework key is required.')
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/skills rejects server-managed governance metadata', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/skills')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        key: 'metadata-injection',
+        name: 'Metadata Injection',
+        skillRoleKey: 'VALIDATOR',
+        supportedFrameworkKeys: ['VMF'],
+        componentVersion: 99,
+        isLocked: false,
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details.componentVersion).toBe('Runtime Skill version and lock metadata is managed by the server.')
+    expect(res.body.error.details.isLocked).toBe('Runtime Skill version and lock metadata is managed by the server.')
   })
 
   test('POST /api/v1/super-admin/runtime-control/skills returns 422 when both primaryOutputKey and outputBindings are provided', async () => {
@@ -806,6 +838,7 @@ describe('Runtime Skill Routes', () => {
     expect(res.status).toBe(200)
     expect(res.body.data).toMatchObject({
       id: 'skill-snapshot',
+      stableId: 'skill-snapshot',
       key: 'snapshot',
       name: 'Snapshot',
       status: 'ACTIVE',
@@ -818,6 +851,19 @@ describe('Runtime Skill Routes', () => {
         workflowPolicyIds: ['policy-vmf-publish'],
       },
     })
+  })
+
+  test('GET /api/v1/super-admin/runtime-control/skills/:skillId normalizes stable id casing', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const runtimeSkill = makeRuntimeSkillDoc()
+    RuntimeSkill.findOne.mockResolvedValue(runtimeSkill)
+
+    const res = await request
+      .get('/api/v1/super-admin/runtime-control/skills/SKILL-SNAPSHOT')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(RuntimeSkill.findOne).toHaveBeenCalledWith({ stableId: RUNTIME_SKILL_STABLE_ID })
   })
 
   test('GET /api/v1/super-admin/runtime-control/skills/:skillId returns 404 when the skill does not exist', async () => {
@@ -867,6 +913,7 @@ describe('Runtime Skill Routes', () => {
     expect(res.status).toBe(200)
     expect(res.body.data).toMatchObject({
       id: 'skill-snapshot',
+      stableId: 'skill-snapshot',
       key: 'snapshot',
       name: 'Snapshot',
       agentIds: ['agent-validator'],
@@ -964,6 +1011,99 @@ describe('Runtime Skill Routes', () => {
         summary: 'Super Admin updated runtime skill Runtime Snapshot (snapshot)',
       }),
     )
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/skills/:skillId rejects direct edits to locked skills', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const runtimeSkill = makeRuntimeSkillDoc({
+      isLocked: true,
+      lockedByPackageKeys: ['vmf-qa-manual-951'],
+    })
+
+    RuntimeSkill.findOne.mockResolvedValueOnce(runtimeSkill)
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/skills/${RUNTIME_SKILL_STABLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: 'Locked Edit' })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details).toMatchObject({
+      field: 'isLocked',
+      reason: 'RUNTIME_SKILL_LOCKED',
+      lockedByPackageKeys: ['vmf-qa-manual-951'],
+    })
+    expect(runtimeSkill.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/skills/:skillId/clone creates an editable draft successor', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const source = makeRuntimeSkillDoc({
+      componentVersion: 3,
+      lineageId: 'skill-snapshot',
+      isLocked: true,
+      lockedByPackageKeys: ['vmf-qa-manual-951'],
+    })
+
+    RuntimeSkill.findOne
+      .mockResolvedValueOnce(source)
+      .mockReturnValueOnce({
+        select: jest.fn().mockResolvedValue(null),
+      })
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/skills/${RUNTIME_SKILL_STABLE_ID}/clone`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        key: 'snapshot-v2',
+        name: 'Snapshot v2',
+        description: 'Editable clone.',
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data).toMatchObject({
+      id: 'skill-snapshot-v2',
+      stableId: 'skill-snapshot-v2',
+      key: 'snapshot-v2',
+      name: 'Snapshot v2',
+      status: 'DRAFT',
+      componentVersion: 4,
+      versionStatus: 'DRAFT',
+      isLocked: false,
+      lockedByPackageKeys: [],
+      clonedFromStableId: RUNTIME_SKILL_STABLE_ID,
+      supersedesStableId: RUNTIME_SKILL_STABLE_ID,
+      lineageId: 'skill-snapshot',
+    })
+    expect(RuntimeSkill.updateOne).toHaveBeenCalledWith(
+      { stableId: RUNTIME_SKILL_STABLE_ID },
+      { $set: { supersededByStableId: 'skill-snapshot-v2', updatedBy: SUPER_ADMIN_ID } },
+      { runValidators: false },
+    )
+    expect(AuditLog.createLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'RUNTIME_SKILL_CLONED',
+        resourceType: 'RuntimeSkill',
+        summary: 'Super Admin cloned runtime skill Snapshot v2 (snapshot-v2)',
+      }),
+    )
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/skills/:skillId/clone rejects caller-managed governance metadata', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/skills/${RUNTIME_SKILL_STABLE_ID}/clone`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        key: 'snapshot-v2',
+        name: 'Snapshot v2',
+        componentVersion: 2,
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.componentVersion).toBe('Runtime Skill version and lock metadata is managed by the server.')
   })
 
   test('PATCH /api/v1/super-admin/runtime-control/skills/:skillId returns 422 when setting AGENT_ASSISTED type for non-AGENT execution mode', async () => {
