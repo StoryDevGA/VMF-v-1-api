@@ -12,6 +12,17 @@ export const RUNTIME_AGENT_STATUSES = Object.freeze({
   DEPRECATED: 'DEPRECATED',
 })
 
+export const RUNTIME_AGENT_RETRY_POLICIES = Object.freeze({
+  NONE: 'NONE',
+  RETRY_ONCE: 'RETRY_ONCE',
+  RETRY_TWICE: 'RETRY_TWICE',
+  EXPONENTIAL_BACKOFF: 'EXPONENTIAL_BACKOFF',
+})
+
+export const RUNTIME_AGENT_EXECUTION_MODES = Object.freeze({
+  SYSTEM: 'SYSTEM',
+})
+
 const keyPattern = /^[a-z][a-z0-9-]*$/
 const frameworkKeyPattern = /^[A-Z][A-Z0-9_]*$/
 const enumTokenPattern = /^[A-Z][A-Z0-9_]*$/
@@ -99,6 +110,10 @@ const tokenField = {
 
 const executionPlanStepSchema = new mongoose.Schema(
   {
+    stepKey: {
+      ...tokenField,
+      required: true,
+    },
     skillId: {
       ...tokenField,
       required: true,
@@ -117,6 +132,15 @@ const executionPlanStepSchema = new mongoose.Schema(
       type: [String],
       default: [],
     },
+    order: {
+      type: Number,
+      min: 1,
+      default: 1,
+    },
+    required: {
+      type: Boolean,
+      default: true,
+    },
   },
   { _id: false },
 )
@@ -124,12 +148,66 @@ const executionPlanStepSchema = new mongoose.Schema(
 const normalizeExecutionPlan = (values) => {
   if (!Array.isArray(values)) return []
 
-  return values.map((step) => ({
-    skillId: normalizeKey(step?.skillId),
-    description: normalizeDescription(step?.description),
-    readsFrom: normalizePathSelectionList(step?.readsFrom),
-    writesTo: normalizePathSelectionList(step?.writesTo),
-  }))
+  return values.map((step, index) => {
+    const skillId = normalizeKey(step?.skillId)
+    const stepKey = normalizeKey(step?.stepKey) || `run-${skillId || 'step'}-${index + 1}`
+    const order = Number.parseInt(step?.order, 10)
+
+    return {
+      stepKey,
+      skillId,
+      description: normalizeDescription(step?.description),
+      readsFrom: normalizePathSelectionList(step?.readsFrom),
+      writesTo: normalizePathSelectionList(step?.writesTo),
+      order: Number.isInteger(order) && order > 0 ? order : index + 1,
+      required: step?.required === undefined ? true : Boolean(step.required),
+    }
+  })
+}
+
+const runtimeConfigSchema = new mongoose.Schema(
+  {
+    timeoutMs: {
+      type: Number,
+      min: 1,
+      default: 10000,
+    },
+    retryPolicy: {
+      type: String,
+      enum: Object.values(RUNTIME_AGENT_RETRY_POLICIES),
+      default: RUNTIME_AGENT_RETRY_POLICIES.NONE,
+    },
+    maxRetries: {
+      type: Number,
+      min: 0,
+      default: 0,
+    },
+    executionMode: {
+      type: String,
+      enum: Object.values(RUNTIME_AGENT_EXECUTION_MODES),
+      default: RUNTIME_AGENT_EXECUTION_MODES.SYSTEM,
+    },
+  },
+  { _id: false },
+)
+
+const normalizeRuntimeConfig = (value = {}) => {
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+  const timeoutMs = Number.parseInt(source.timeoutMs, 10)
+  const maxRetries = Number.parseInt(source.maxRetries, 10)
+  const retryPolicy = String(source.retryPolicy || RUNTIME_AGENT_RETRY_POLICIES.NONE).trim().toUpperCase()
+  const executionMode = String(source.executionMode || RUNTIME_AGENT_EXECUTION_MODES.SYSTEM).trim().toUpperCase()
+
+  return {
+    timeoutMs: Number.isInteger(timeoutMs) && timeoutMs > 0 ? timeoutMs : 10000,
+    retryPolicy: Object.values(RUNTIME_AGENT_RETRY_POLICIES).includes(retryPolicy)
+      ? retryPolicy
+      : RUNTIME_AGENT_RETRY_POLICIES.NONE,
+    maxRetries: Number.isInteger(maxRetries) && maxRetries >= 0 ? maxRetries : 0,
+    executionMode: Object.values(RUNTIME_AGENT_EXECUTION_MODES).includes(executionMode)
+      ? executionMode
+      : RUNTIME_AGENT_EXECUTION_MODES.SYSTEM,
+  }
 }
 
 const runtimeAgentSchema = new mongoose.Schema(
@@ -208,6 +286,10 @@ const runtimeAgentSchema = new mongoose.Schema(
         ...objectField.validate,
         message: 'Prompt config must be an object.',
       },
+    },
+    runtimeConfig: {
+      type: runtimeConfigSchema,
+      default: () => ({}),
     },
     inputContract: {
       ...objectField,
@@ -300,6 +382,10 @@ runtimeAgentSchema.pre('validate', function normalizeRuntimeAgent(next) {
 
   if (this.isNew || this.isModified('executionPlan')) {
     this.executionPlan = normalizeExecutionPlan(this.executionPlan)
+  }
+
+  if (this.isNew || this.isModified('runtimeConfig')) {
+    this.runtimeConfig = normalizeRuntimeConfig(this.runtimeConfig)
   }
 
   if ((this.isNew || !this.stableId) && this.key) {

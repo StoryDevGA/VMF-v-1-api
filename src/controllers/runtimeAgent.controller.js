@@ -1,6 +1,9 @@
 import { isDeepStrictEqual } from 'node:util'
 import crypto from 'node:crypto'
-import RuntimeAgent from '../models/RuntimeAgent.js'
+import RuntimeAgent, {
+  buildRuntimeAgentStableId,
+  RUNTIME_AGENT_STATUSES,
+} from '../models/RuntimeAgent.js'
 import RuntimeSkill from '../models/RuntimeSkill.js'
 import SkillRoleRegistry from '../models/SkillRoleRegistry.js'
 import WorkflowPolicy from '../models/WorkflowPolicy.js'
@@ -191,9 +194,16 @@ const pickRuntimeAgentBody = (body = {}) => ({
   optionalSkillIds: body?.optionalSkillIds,
   executionPlan: body?.executionPlan,
   promptConfig: body?.promptConfig,
+  runtimeConfig: body?.runtimeConfig,
   inputContract: body?.inputContract,
   outputContract: body?.outputContract,
   policies: body?.policies,
+})
+
+const pickRuntimeAgentCloneBody = (body = {}) => ({
+  key: body?.key,
+  name: body?.name,
+  description: body?.description,
 })
 
 const populateRuntimeAgent = async (runtimeAgent) => {
@@ -324,11 +334,24 @@ const fetchRuntimeAgentDependencies = async (agentId) => {
   if (!normalizedAgentId) return { workflowPolicies: [], frameworkPackages: [] }
 
   const [workflowPolicies, frameworkPackages] = await Promise.all([
-    WorkflowPolicy.find({ requiredAgentIds: normalizedAgentId })
+    WorkflowPolicy.find({
+      $or: [
+        { requiredAgentIds: normalizedAgentId },
+        { primaryAgentId: normalizedAgentId },
+        { fallbackAgentIds: normalizedAgentId },
+      ],
+    })
       .select('stableId key name status')
       .lean(),
-    FrameworkPackage.find({ defaultAgentIds: normalizedAgentId })
-      .select('frameworkKey frameworkName version status')
+    FrameworkPackage.find({
+      'dependencyLock.references': {
+        $elemMatch: {
+          collectionKey: 'RuntimeAgent',
+          $or: [{ id: normalizedAgentId }, { key: normalizedAgentId }],
+        },
+      },
+    })
+      .select('frameworkKey frameworkName packageKey version status')
       .lean(),
   ])
 
@@ -403,6 +426,35 @@ const validateRuntimeAgentExecutionPlan = async (
     return { errors, warnings }
   }
 
+  const stepKeys = plan.map((step, index) => normalizeToken(step?.stepKey) || `run-${normalizeToken(step?.skillId)}-${index + 1}`)
+  const duplicateStepKeySet = new Set()
+  const duplicateStepKey = stepKeys.find((stepKey) => {
+    if (duplicateStepKeySet.has(stepKey)) return true
+    duplicateStepKeySet.add(stepKey)
+    return false
+  })
+
+  if (duplicateStepKey) {
+    errors.executionPlan = `Duplicate step key "${duplicateStepKey}" is not allowed in the execution plan.`
+    return { errors, warnings }
+  }
+
+  const orders = plan.map((step, index) => {
+    const order = Number.parseInt(step?.order, 10)
+    return Number.isInteger(order) && order > 0 ? order : index + 1
+  })
+  const duplicateOrderSet = new Set()
+  const duplicateOrder = orders.find((order) => {
+    if (duplicateOrderSet.has(order)) return true
+    duplicateOrderSet.add(order)
+    return false
+  })
+
+  if (duplicateOrder) {
+    errors.executionPlan = `Duplicate execution order "${duplicateOrder}" is not allowed in the execution plan.`
+    return { errors, warnings }
+  }
+
   const assignedSkillIds = new Set([
     ...(Array.isArray(runtimeAgent?.defaultSkillIds) ? runtimeAgent.defaultSkillIds : []),
     ...(Array.isArray(runtimeAgent?.primarySkillIds) ? runtimeAgent.primarySkillIds : []),
@@ -459,13 +511,15 @@ const validateRuntimeAgentExecutionPlan = async (
     const stepNumber = index + 1
     const readsFrom = normalizePathSelectionList(step?.readsFrom)
     const writesTo = normalizePathSelectionList(step?.writesTo)
+    const wildcardReadsFrom = readsFrom.filter((pathKey) => pathKey.includes('*'))
+    const governedReadsFrom = readsFrom.filter((pathKey) => !wildcardReadsFrom.includes(pathKey))
     const legacyWriteTargets = allowLegacyWriteTargets
       ? writesTo.filter((pathKey) => executionTargetRegex.test(pathKey) && !pathKey.includes('.'))
       : []
     const governedWriteTargets = writesTo.filter((pathKey) => !legacyWriteTargets.includes(pathKey))
 
     const readSelections = await resolveRuntimePathSelections({
-      pathKeys: readsFrom,
+      pathKeys: governedReadsFrom,
       frameworkKeys: agentFrameworks,
       operation: RUNTIME_PATH_REGISTRY_OPERATIONS.READ,
       requireActive: true,
@@ -490,6 +544,12 @@ const validateRuntimeAgentExecutionPlan = async (
     if (readSelections.incompatibleFramework.length > 0) {
       errors.executionPlan = `Step ${stepNumber} reads from runtime path "${readSelections.incompatibleFramework[0]}", which is not compatible with the selected frameworks.`
       return { errors, warnings }
+    }
+
+    if (wildcardReadsFrom.length > 0) {
+      warnings.push(
+        `Step ${stepNumber} uses wildcard read target${wildcardReadsFrom.length === 1 ? '' : 's'}: ${wildcardReadsFrom.join(', ')}.`,
+      )
     }
 
     const writeSelections = await resolveRuntimePathSelections({
@@ -689,6 +749,7 @@ export const createRuntimeAgent = async (req, res, next) => {
         optionalSkillIds: runtimeAgent.optionalSkillIds,
         executionPlan: runtimeAgent.executionPlan,
         promptConfig: runtimeAgent.promptConfig,
+        runtimeConfig: runtimeAgent.runtimeConfig,
         inputContract: runtimeAgent.inputContract,
         outputContract: runtimeAgent.outputContract,
         policies: runtimeAgent.policies,
@@ -723,7 +784,7 @@ export const createRuntimeAgent = async (req, res, next) => {
 
 export const getRuntimeAgent = async (req, res, next) => {
   try {
-    const runtimeAgent = await RuntimeAgent.findOne({ stableId: req.params.agentId })
+    const runtimeAgent = await RuntimeAgent.findByStableId(req.params.agentId)
 
     if (!runtimeAgent) {
       return sendNotFound(res, req)
@@ -742,7 +803,7 @@ export const getRuntimeAgent = async (req, res, next) => {
 
 export const getRuntimeAgentDependencies = async (req, res, next) => {
   try {
-    const runtimeAgent = await RuntimeAgent.findOne({ stableId: req.params.agentId })
+    const runtimeAgent = await RuntimeAgent.findByStableId(req.params.agentId)
       .select('stableId key name status supportedFrameworkKeys')
       .lean()
 
@@ -767,12 +828,131 @@ export const getRuntimeAgentDependencies = async (req, res, next) => {
   }
 }
 
+export const cloneRuntimeAgent = async (req, res, next) => {
+  try {
+    const source = await RuntimeAgent.findByStableId(req.params.agentId)
+
+    if (!source) {
+      return sendNotFound(res, req)
+    }
+
+    const body = pickRuntimeAgentCloneBody(req.body)
+    const duplicateRuntimeAgent = await RuntimeAgent.findOne({ key: body.key }).select('_id')
+    if (duplicateRuntimeAgent) {
+      return sendConflict(res, req, DUPLICATE_RUNTIME_AGENT_KEY_MESSAGE, {
+        field: 'key',
+        reason: 'RUNTIME_AGENT_KEY_CONFLICT',
+      })
+    }
+
+    const actorUserId = req.context?.userId || req.userId
+    const sourceStableId = source.stableId
+    const sourcePlain = source.toObject({ depopulate: true })
+    delete sourcePlain._id
+    delete sourcePlain.id
+    delete sourcePlain.stableId
+    delete sourcePlain.createdAt
+    delete sourcePlain.updatedAt
+    delete sourcePlain.__v
+
+    const clonedAgent = new RuntimeAgent({
+      ...sourcePlain,
+      stableId: buildRuntimeAgentStableId(body.key),
+      key: body.key,
+      name: body.name,
+      description: body.description === undefined ? source.description : body.description,
+      status: RUNTIME_AGENT_STATUSES.DRAFT,
+      componentVersion: Number(source.componentVersion || 1) + 1,
+      versionStatus: 'DRAFT',
+      lineageId: source.lineageId || sourceStableId,
+      isLocked: false,
+      lockedAt: null,
+      lockedBy: null,
+      lockedReason: '',
+      lockedByPackageKeys: [],
+      clonedFromStableId: sourceStableId,
+      supersedesStableId: sourceStableId,
+      supersededByStableId: null,
+      createdBy: actorUserId,
+      updatedBy: actorUserId,
+    })
+
+    await clonedAgent.save()
+    await RuntimeAgent.updateOne(
+      { stableId: sourceStableId },
+      { $set: { supersededByStableId: clonedAgent.stableId, updatedBy: actorUserId } },
+      { runValidators: false },
+    )
+    await populateRuntimeAgent(clonedAgent)
+
+    await auditService.logFromRequest(req, {
+      action: auditService.AUDIT_ACTIONS.RUNTIME_AGENT_CLONED,
+      resourceType: auditService.RESOURCE_TYPES.RuntimeAgent,
+      resourceId: clonedAgent._id,
+      scope: {
+        frameworkKeys: clonedAgent.supportedFrameworkKeys,
+      },
+      display: { resourceLabel: buildRuntimeAgentLabel(clonedAgent) },
+      diff: {
+        clonedFromStableId: sourceStableId,
+        supersedesStableId: sourceStableId,
+        key: clonedAgent.key,
+        status: clonedAgent.status,
+        componentVersion: clonedAgent.componentVersion,
+        versionStatus: clonedAgent.versionStatus,
+        lineageId: clonedAgent.lineageId,
+      },
+    })
+
+    return res.status(201).json({
+      data: serializeRuntimeAgent(clonedAgent, {
+        fallbackUpdatedBy: buildActorSummary(req),
+      }),
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (isDuplicateRuntimeAgentKeyError(err)) {
+      return sendConflict(res, req, DUPLICATE_RUNTIME_AGENT_KEY_MESSAGE, {
+        field: 'key',
+        reason: 'RUNTIME_AGENT_KEY_CONFLICT',
+      })
+    }
+
+    if (err?.name === 'ValidationError') {
+      return res.status(422).json({
+        error: {
+          code: 'VALIDATION_FAILED',
+          message: err.message,
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    next(err)
+  }
+}
+
 export const updateRuntimeAgent = async (req, res, next) => {
   try {
-    const runtimeAgent = await RuntimeAgent.findOne({ stableId: req.params.agentId })
+    const runtimeAgent = await RuntimeAgent.findByStableId(req.params.agentId)
 
     if (!runtimeAgent) {
       return sendNotFound(res, req)
+    }
+
+    if (runtimeAgent.isLocked === true) {
+      return sendConflict(
+        res,
+        req,
+        'Locked Runtime Control records cannot be edited directly. Clone the record to make behavior changes.',
+        {
+          field: 'isLocked',
+          reason: 'RUNTIME_AGENT_LOCKED',
+          lockedByPackageKeys: Array.isArray(runtimeAgent.lockedByPackageKeys)
+            ? runtimeAgent.lockedByPackageKeys
+            : [],
+        },
+      )
     }
 
     const requestedStatusRaw = req.body.status
@@ -876,6 +1056,7 @@ export const updateRuntimeAgent = async (req, res, next) => {
       'optionalSkillIds',
       'executionPlan',
       'promptConfig',
+      'runtimeConfig',
       'inputContract',
       'outputContract',
       'policies',
@@ -972,7 +1153,7 @@ const sha256Hex = (value) =>
 
 export const validateRuntimeAgent = async (req, res, next) => {
   try {
-    const runtimeAgent = await RuntimeAgent.findOne({ stableId: req.params.agentId })
+    const runtimeAgent = await RuntimeAgent.findByStableId(req.params.agentId)
 
     if (!runtimeAgent) {
       return sendNotFound(res, req)
@@ -1019,7 +1200,7 @@ export const validateRuntimeAgent = async (req, res, next) => {
 
 export const testRuntimeAgent = async (req, res, next) => {
   try {
-    const runtimeAgent = await RuntimeAgent.findOne({ stableId: req.params.agentId })
+    const runtimeAgent = await RuntimeAgent.findByStableId(req.params.agentId)
 
     if (!runtimeAgent) {
       return sendNotFound(res, req)
@@ -1086,7 +1267,7 @@ export const testRuntimeAgent = async (req, res, next) => {
 
 export const activateRuntimeAgent = async (req, res, next) => {
   try {
-    const runtimeAgent = await RuntimeAgent.findOne({ stableId: req.params.agentId })
+    const runtimeAgent = await RuntimeAgent.findByStableId(req.params.agentId)
 
     if (!runtimeAgent) {
       return sendNotFound(res, req)
@@ -1141,7 +1322,7 @@ export const activateRuntimeAgent = async (req, res, next) => {
 
 export const disableRuntimeAgent = async (req, res, next) => {
   try {
-    const runtimeAgent = await RuntimeAgent.findOne({ stableId: req.params.agentId })
+    const runtimeAgent = await RuntimeAgent.findByStableId(req.params.agentId)
 
     if (!runtimeAgent) {
       return sendNotFound(res, req)
@@ -1190,7 +1371,7 @@ export const disableRuntimeAgent = async (req, res, next) => {
 
 export const deprecateRuntimeAgent = async (req, res, next) => {
   try {
-    const runtimeAgent = await RuntimeAgent.findOne({ stableId: req.params.agentId })
+    const runtimeAgent = await RuntimeAgent.findByStableId(req.params.agentId)
 
     if (!runtimeAgent) {
       return sendNotFound(res, req)

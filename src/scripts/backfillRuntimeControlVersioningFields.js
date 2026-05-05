@@ -24,6 +24,7 @@ const parseArgs = (argv = process.argv.slice(2)) => ({
 const GOVERNED_PACKAGE_STATUSES = Object.freeze(['VALIDATED', 'ACTIVE'])
 const UI_CONTRACT_PACKAGE_LOCK_REASON = 'Referenced by validated or active Framework Package.'
 const WORKFLOW_POLICY_PACKAGE_LOCK_REASON = 'Referenced by validated or active Framework Package.'
+const RUNTIME_AGENT_PACKAGE_LOCK_REASON = 'Referenced by validated or active Framework Package.'
 const RUNTIME_CONTROL_VERSIONING_FIELDS_TO_ADD = Object.freeze([
   'componentVersion',
   'versionStatus',
@@ -55,6 +56,13 @@ const UI_CONTRACT_LOCK_FIELDS_TO_APPLY = Object.freeze([
   'versionStatus',
 ])
 const WORKFLOW_POLICY_LOCK_FIELDS_TO_APPLY = Object.freeze([
+  'lockedByPackageKeys',
+  'isLocked',
+  'lockedAt',
+  'lockedReason',
+  'versionStatus',
+])
+const RUNTIME_AGENT_LOCK_FIELDS_TO_APPLY = Object.freeze([
   'lockedByPackageKeys',
   'isLocked',
   'lockedAt',
@@ -338,7 +346,7 @@ const buildFrameworkPackageBackfillPipeline = () => ([
 const resolveQueryRows = async (query) => {
   if (!query) return []
   if (typeof query.select === 'function') {
-    const selected = query.select('packageKey version uiContractKey workflowBindings.policyKey status activatedAt lockedAt updatedAt')
+    const selected = query.select('packageKey version uiContractKey workflowBindings.policyKey dependencyLock.references status activatedAt lockedAt updatedAt')
     if (selected && typeof selected.lean === 'function') return selected.lean()
     return selected
   }
@@ -515,6 +523,131 @@ const applyWorkflowPolicyPackageLockPlan = async ({ workflowPolicyModel, plan = 
   return { modified }
 }
 
+const buildRuntimeAgentPackageLockPlan = async ({ frameworkPackageModel, runtimeAgentModel }) => {
+  if (!frameworkPackageModel || typeof frameworkPackageModel.find !== 'function') {
+    return { plan: [], missingAgentIds: [] }
+  }
+
+  const rows = await resolveQueryRows(frameworkPackageModel.find({
+    status: { $in: GOVERNED_PACKAGE_STATUSES },
+    'dependencyLock.references.collectionKey': 'RuntimeAgent',
+  }))
+  const grouped = new Map()
+
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const packageKey = String(row?.packageKey || '').trim().toLowerCase()
+    if (!packageKey) continue
+
+    const references = Array.isArray(row?.dependencyLock?.references)
+      ? row.dependencyLock.references
+      : []
+    const agentIds = [
+      ...new Set(references
+        .filter((reference) => reference?.collectionKey === 'RuntimeAgent')
+        .map((reference) => String(reference?.id || '').trim())
+        .filter(Boolean)),
+    ]
+
+    for (const agentId of agentIds) {
+      if (!grouped.has(agentId)) {
+        grouped.set(agentId, {
+          agentId,
+          packageKeys: [],
+          packageVersions: [],
+          lockedAt: row.activatedAt || row.lockedAt || row.updatedAt || new Date(),
+        })
+      }
+
+      const plan = grouped.get(agentId)
+      plan.packageKeys.push(packageKey)
+      if (row.version) plan.packageVersions.push(String(row.version))
+      if (!plan.lockedAt && (row.activatedAt || row.lockedAt || row.updatedAt)) {
+        plan.lockedAt = row.activatedAt || row.lockedAt || row.updatedAt
+      }
+    }
+  }
+
+  const plan = [...grouped.values()].map((item) => ({
+    ...item,
+    packageKeys: [...new Set(item.packageKeys)],
+    packageVersions: [...new Set(item.packageVersions)],
+  }))
+  const existingAgentIds = await resolveExistingRuntimeAgentIds({
+    runtimeAgentModel,
+    agentIds: plan.map((item) => item.agentId),
+  })
+  const missingAgentIds = plan
+    .map((item) => item.agentId)
+    .filter((agentId) => !existingAgentIds.has(agentId))
+
+  return { plan, missingAgentIds }
+}
+
+const resolveExistingRuntimeAgentIds = async ({ runtimeAgentModel, agentIds = [] }) => {
+  const uniqueAgentIds = [...new Set(agentIds.filter(Boolean))]
+  if (uniqueAgentIds.length === 0 || !runtimeAgentModel || typeof runtimeAgentModel.find !== 'function') {
+    return new Set()
+  }
+
+  const query = runtimeAgentModel.find({ stableId: { $in: uniqueAgentIds } })
+  let rows
+  if (query && typeof query.select === 'function') {
+    const selected = query.select('stableId')
+    rows = selected && typeof selected.lean === 'function' ? await selected.lean() : await selected
+  } else if (query && typeof query.lean === 'function') {
+    rows = await query.lean()
+  } else {
+    rows = await query
+  }
+
+  return new Set((Array.isArray(rows) ? rows : [])
+    .map((row) => String(row?.stableId || '').trim())
+    .filter(Boolean))
+}
+
+const applyRuntimeAgentPackageLockPlan = async ({ runtimeAgentModel, plan = [] }) => {
+  const updateMany = runtimeAgentModel?.updateMany
+    ? runtimeAgentModel.updateMany.bind(runtimeAgentModel)
+    : runtimeAgentModel?.collection?.updateMany?.bind(runtimeAgentModel.collection)
+  if (!updateMany || plan.length === 0) return { modified: 0 }
+
+  let modified = 0
+  for (const item of plan) {
+    const packageKeys = item.packageKeys.filter(Boolean)
+    if (!item.agentId || packageKeys.length === 0) continue
+
+    const referenceResult = await updateMany(
+      { stableId: item.agentId },
+      {
+        $addToSet: {
+          lockedByPackageKeys: { $each: packageKeys },
+        },
+      },
+    )
+    const lockResult = await updateMany(
+      {
+        stableId: item.agentId,
+        $or: [
+          { isLocked: { $exists: false } },
+          { isLocked: { $ne: true } },
+        ],
+      },
+      {
+        $set: {
+          isLocked: true,
+          lockedAt: item.lockedAt,
+          lockedReason: RUNTIME_AGENT_PACKAGE_LOCK_REASON,
+          versionStatus: RUNTIME_CONTROL_VERSION_STATUSES.ACTIVE,
+        },
+      },
+    )
+    modified += Number(referenceResult.modifiedCount) || 0
+    modified += Number(lockResult.modifiedCount) || 0
+  }
+
+  return { modified }
+}
+
 const serializeUIContractLockPlan = (plan = []) =>
   plan.map((item) => ({
     uiContractKey: item.uiContractKey,
@@ -533,6 +666,15 @@ const serializeWorkflowPolicyLockPlan = (plan = []) =>
     fieldsToApply: [...WORKFLOW_POLICY_LOCK_FIELDS_TO_APPLY],
   }))
 
+const serializeRuntimeAgentLockPlan = (plan = []) =>
+  plan.map((item) => ({
+    agentId: item.agentId,
+    packageKeys: item.packageKeys,
+    packageVersions: item.packageVersions,
+    lockedAt: item.lockedAt,
+    fieldsToApply: [...RUNTIME_AGENT_LOCK_FIELDS_TO_APPLY],
+  }))
+
 const formatBackfillSummary = (summary) => {
   const lines = [
     `Runtime Control versioning backfill ${summary.mode} on database ${summary.database}: matched=${summary.totalMatched}.`,
@@ -540,6 +682,7 @@ const formatBackfillSummary = (summary) => {
     `Framework Package fields to add/normalize: ${FRAMEWORK_PACKAGE_FIELDS_TO_ADD.join(', ')}.`,
     `UI Contract locks to apply: ${summary.uiContractPackageLocks.matched}; package references: ${summary.uiContractPackageLocks.packageReferences}.`,
     `Workflow Policy locks to apply: ${summary.workflowPolicyPackageLocks.matched}; package references: ${summary.workflowPolicyPackageLocks.packageReferences}.`,
+    `Runtime Agent locks to apply: ${summary.runtimeAgentPackageLocks.matched}; package references: ${summary.runtimeAgentPackageLocks.packageReferences}; missing agents: ${summary.runtimeAgentPackageLocks.missingAgentIds.length}.`,
   ]
 
   if (summary.uiContractPackageLocks.locksToApply.length > 0) {
@@ -560,6 +703,19 @@ const formatBackfillSummary = (summary) => {
     })
   }
 
+  if (summary.runtimeAgentPackageLocks.locksToApply.length > 0) {
+    lines.push('Runtime Agent lock plan:')
+    summary.runtimeAgentPackageLocks.locksToApply.forEach((item) => {
+      lines.push(
+        `- ${item.agentId}: packages=${item.packageKeys.join(', ')}; versions=${item.packageVersions.join(', ') || 'n/a'}; fields=${item.fieldsToApply.join(', ')}`,
+      )
+    })
+  }
+
+  if (summary.runtimeAgentPackageLocks.missingAgentIds.length > 0) {
+    lines.push(`Runtime Agent missing references: ${summary.runtimeAgentPackageLocks.missingAgentIds.join(', ')}`)
+  }
+
   return lines.join('\n')
 }
 
@@ -575,6 +731,7 @@ export const backfillRuntimeControlVersioningFields = async ({
   const frameworkPackageModel = dependencies.frameworkPackageModel || FrameworkPackage
   const uiContractModel = dependencies.uiContractModel || UIContract
   const workflowPolicyModel = dependencies.workflowPolicyModel || WorkflowPolicy
+  const runtimeAgentModel = dependencies.runtimeAgentModel || RuntimeAgent
 
   await connect()
 
@@ -616,6 +773,13 @@ export const backfillRuntimeControlVersioningFields = async ({
     const workflowPolicyPackageLockResult = apply
       ? await applyWorkflowPolicyPackageLockPlan({ workflowPolicyModel, plan: workflowPolicyLockPlan })
       : { modified: 0 }
+    const {
+      plan: runtimeAgentLockPlan,
+      missingAgentIds: runtimeAgentMissingAgentIds,
+    } = await buildRuntimeAgentPackageLockPlan({ frameworkPackageModel, runtimeAgentModel })
+    const runtimeAgentPackageLockResult = apply
+      ? await applyRuntimeAgentPackageLockPlan({ runtimeAgentModel, plan: runtimeAgentLockPlan })
+      : { modified: 0 }
     const uiContractPackageReferences = uiContractLockPlan.reduce(
       (count, plan) => count + plan.packageKeys.length,
       0,
@@ -624,9 +788,16 @@ export const backfillRuntimeControlVersioningFields = async ({
       (count, plan) => count + plan.packageKeys.length,
       0,
     )
+    const runtimeAgentPackageReferences = runtimeAgentLockPlan.reduce(
+      (count, plan) => count + plan.packageKeys.length,
+      0,
+    )
     const totalMatched = runtimeControlRows.reduce(
       (sum, row) => sum + row.matched,
-      frameworkPackageMatched + uiContractLockPlan.length + workflowPolicyLockPlan.length,
+      frameworkPackageMatched
+        + uiContractLockPlan.length
+        + workflowPolicyLockPlan.length
+        + runtimeAgentLockPlan.length,
     )
 
     const summary = {
@@ -651,6 +822,13 @@ export const backfillRuntimeControlVersioningFields = async ({
         packageReferences: workflowPolicyPackageReferences,
         modified: Number(workflowPolicyPackageLockResult.modified) || 0,
         locksToApply: serializeWorkflowPolicyLockPlan(workflowPolicyLockPlan),
+      },
+      runtimeAgentPackageLocks: {
+        matched: runtimeAgentLockPlan.length,
+        packageReferences: runtimeAgentPackageReferences,
+        modified: Number(runtimeAgentPackageLockResult.modified) || 0,
+        missingAgentIds: runtimeAgentMissingAgentIds,
+        locksToApply: serializeRuntimeAgentLockPlan(runtimeAgentLockPlan),
       },
     }
 

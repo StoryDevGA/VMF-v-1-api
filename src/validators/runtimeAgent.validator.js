@@ -4,7 +4,11 @@ import {
   createParamsValidator,
   createQueryValidator,
 } from './shared.js'
-import { RUNTIME_AGENT_STATUSES } from '../models/RuntimeAgent.js'
+import {
+  RUNTIME_AGENT_EXECUTION_MODES,
+  RUNTIME_AGENT_RETRY_POLICIES,
+  RUNTIME_AGENT_STATUSES,
+} from '../models/RuntimeAgent.js'
 
 const keyRegex = /^[a-z][a-z0-9-]*$/
 const agentIdRegex = /^agent-[a-z][a-z0-9-]*$/
@@ -84,6 +88,29 @@ const pathSelectionListSchema = z
   .optional()
   .transform((value) => normalizePathSelectionList(value))
 
+const governedMetadataFieldSchema = z.unknown().optional().superRefine((value, ctx) => {
+  if (value === undefined) return
+  ctx.addIssue({
+    code: z.ZodIssueCode.custom,
+    message: 'Runtime Agent version and lock metadata is managed by the server.',
+  })
+})
+
+const governedMetadataFieldsSchema = Object.freeze({
+  componentVersion: governedMetadataFieldSchema,
+  versionStatus: governedMetadataFieldSchema,
+  stableId: governedMetadataFieldSchema,
+  lineageId: governedMetadataFieldSchema,
+  isLocked: governedMetadataFieldSchema,
+  lockedAt: governedMetadataFieldSchema,
+  lockedBy: governedMetadataFieldSchema,
+  lockedReason: governedMetadataFieldSchema,
+  lockedByPackageKeys: governedMetadataFieldSchema,
+  clonedFromStableId: governedMetadataFieldSchema,
+  supersedesStableId: governedMetadataFieldSchema,
+  supersededByStableId: governedMetadataFieldSchema,
+})
+
 const supportedFrameworkKeysSchema = z
   .array(frameworkKeySchema)
   .min(1, 'At least one supported framework key is required.')
@@ -106,6 +133,7 @@ const requiredSkillRoleKeysSchema = z
   .transform((values) => [...new Set(values)])
 
 const executionPlanStepSchema = z.object({
+  stepKey: defaultSkillIdSchema.optional(),
   skillId: defaultSkillIdSchema,
   description: z
     .string()
@@ -115,30 +143,73 @@ const executionPlanStepSchema = z.object({
     .default(''),
   readsFrom: pathSelectionListSchema.default([]),
   writesTo: pathSelectionListSchema.default([]),
+  order: z.coerce.number().int().min(1, 'Execution step order must be 1 or greater').optional(),
+  required: z.boolean().optional().default(true),
 })
 
 const executionPlanSchema = z
   .array(executionPlanStepSchema)
   .min(1, 'Execution plan must contain at least one step.')
   .max(100, 'Execution plan must contain 100 steps or fewer.')
+  .transform((steps) =>
+    steps.map((step, index) => {
+      const fallbackOrder = index + 1
+      return {
+        ...step,
+        stepKey: step.stepKey || `run-${step.skillId}-${fallbackOrder}`,
+        order: step.order || fallbackOrder,
+      }
+    }),
+  )
   .superRefine((steps, ctx) => {
-    const seen = new Set()
+    const seenSkills = new Set()
+    const seenStepKeys = new Set()
+    const seenOrders = new Set()
 
     steps.forEach((step, index) => {
-      if (seen.has(step.skillId)) {
+      if (seenStepKeys.has(step.stepKey)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Execution plan step keys must be unique.',
+          path: [index, 'stepKey'],
+        })
+      }
+      seenStepKeys.add(step.stepKey)
+
+      if (seenOrders.has(step.order)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Execution plan step order must be unique.',
+          path: [index, 'order'],
+        })
+      }
+      seenOrders.add(step.order)
+
+      if (seenSkills.has(step.skillId)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: 'Execution plan steps must be unique.',
           path: [index, 'skillId'],
         })
       }
-      seen.add(step.skillId)
+      seenSkills.add(step.skillId)
     })
   })
 
 const objectSchema = z
   .record(z.string(), z.unknown())
   .default({})
+
+const runtimeConfigSchema = z.object({
+  timeoutMs: z.coerce.number().int().min(1, 'Runtime timeout must be greater than zero.').default(10000),
+  retryPolicy: z
+    .enum(Object.values(RUNTIME_AGENT_RETRY_POLICIES))
+    .default(RUNTIME_AGENT_RETRY_POLICIES.NONE),
+  maxRetries: z.coerce.number().int().min(0, 'Max retries must be zero or greater.').default(0),
+  executionMode: z
+    .enum(Object.values(RUNTIME_AGENT_EXECUTION_MODES))
+    .default(RUNTIME_AGENT_EXECUTION_MODES.SYSTEM),
+}).default({})
 
 const createRuntimeAgentSchema = z.object({
   key: z
@@ -163,7 +234,7 @@ const createRuntimeAgentSchema = z.object({
     .default(''),
   status: z
     .enum(Object.values(RUNTIME_AGENT_STATUSES))
-    .default(RUNTIME_AGENT_STATUSES.ACTIVE),
+    .default(RUNTIME_AGENT_STATUSES.DRAFT),
   agentType: runtimeAgentTypeSchema.default('EXECUTION'),
   supportedFrameworkKeys: supportedFrameworkKeysSchema,
   requiredSkillRoleKeys: requiredSkillRoleKeysSchema.default([]),
@@ -172,9 +243,11 @@ const createRuntimeAgentSchema = z.object({
   optionalSkillIds: skillIdsSchema.default([]),
   executionPlan: executionPlanSchema,
   promptConfig: objectSchema,
+  runtimeConfig: runtimeConfigSchema,
   inputContract: objectSchema,
   outputContract: objectSchema,
   policies: objectSchema,
+  ...governedMetadataFieldsSchema,
 })
 
 const updateRuntimeAgentSchema = z.object({
@@ -211,13 +284,39 @@ const updateRuntimeAgentSchema = z.object({
   optionalSkillIds: skillIdsSchema.optional(),
   executionPlan: executionPlanSchema.optional(),
   promptConfig: objectSchema.optional(),
+  runtimeConfig: runtimeConfigSchema.optional(),
   inputContract: objectSchema.optional(),
   outputContract: objectSchema.optional(),
   policies: objectSchema.optional(),
+  ...governedMetadataFieldsSchema,
 }).refine(
   (value) => Object.keys(value).length > 0,
   { message: 'At least one updatable field is required.', path: ['key'] },
 )
+
+const cloneRuntimeAgentSchema = z.object({
+  key: z
+    .string({ required_error: 'Agent key is required' })
+    .trim()
+    .min(1, 'Agent key is required')
+    .max(120, 'Agent key must be 120 characters or fewer')
+    .transform((value) => value.toLowerCase())
+    .refine(
+      (value) => keyRegex.test(value),
+      'Agent key must use lowercase letters, numbers, or hyphens',
+    ),
+  name: z
+    .string({ required_error: 'Agent name is required' })
+    .trim()
+    .min(1, 'Agent name is required')
+    .max(120, 'Agent name must be 120 characters or fewer'),
+  description: z
+    .string()
+    .trim()
+    .max(500, 'Description must be 500 characters or fewer')
+    .optional(),
+  ...governedMetadataFieldsSchema,
+})
 
 const runtimeAgentIdSchema = z.object({
   agentId: z
@@ -246,6 +345,7 @@ const listRuntimeAgentsQuerySchema = z.object({
 
 export const validateCreateRuntimeAgent = createBodyValidator(createRuntimeAgentSchema)
 export const validateUpdateRuntimeAgent = createBodyValidator(updateRuntimeAgentSchema)
+export const validateCloneRuntimeAgent = createBodyValidator(cloneRuntimeAgentSchema)
 export const validateRuntimeAgentId = createParamsValidator(runtimeAgentIdSchema)
 export const validateListRuntimeAgents = createQueryValidator(listRuntimeAgentsQuerySchema)
 

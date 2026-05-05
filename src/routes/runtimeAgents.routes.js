@@ -4,6 +4,7 @@ import loadScopes from '../middleware/loadScopes.js'
 import { requirePlatformRole } from '../middleware/authorize.js'
 import {
   validateCreateRuntimeAgent,
+  validateCloneRuntimeAgent,
   validateListRuntimeAgents,
   validateRuntimeAgentActionBody,
   validateRuntimeAgentId,
@@ -12,6 +13,7 @@ import {
 } from '../validators/runtimeAgent.validator.js'
 import {
   createRuntimeAgent,
+  cloneRuntimeAgent,
   getRuntimeAgent,
   getRuntimeAgentDependencies,
   listRuntimeAgents,
@@ -31,6 +33,7 @@ router.get('/', validateListRuntimeAgents, listRuntimeAgents)
 router.post('/', validateCreateRuntimeAgent, createRuntimeAgent)
 router.get('/:agentId', validateRuntimeAgentId, getRuntimeAgent)
 router.get('/:agentId/dependencies', validateRuntimeAgentId, getRuntimeAgentDependencies)
+router.post('/:agentId/clone', validateRuntimeAgentId, validateCloneRuntimeAgent, cloneRuntimeAgent)
 router.patch('/:agentId', validateRuntimeAgentId, validateUpdateRuntimeAgent, updateRuntimeAgent)
 router.post('/:agentId/validate', validateRuntimeAgentId, validateRuntimeAgentActionBody, validateRuntimeAgent)
 router.post('/:agentId/test', validateRuntimeAgentId, validateRuntimeAgentTestBody, testRuntimeAgent)

@@ -226,6 +226,8 @@ beforeEach(() => {
   RuntimeAgent.find = jest.fn()
   RuntimeAgent.countDocuments = jest.fn()
   RuntimeAgent.findOne = jest.fn()
+  RuntimeAgent.findByStableId = jest.fn()
+  RuntimeAgent.updateOne = jest.fn()
   RuntimeSkill.find = jest.fn()
   RuntimePathRegistry.find = jest.fn()
   SkillRoleRegistry.find = jest.fn()
@@ -243,9 +245,12 @@ beforeEach(() => {
 
   RuntimeAgent.countDocuments.mockResolvedValue(0)
   RuntimeAgent.find.mockReturnValue(buildRuntimeAgentQueryChain([]))
+  RuntimeAgent.updateOne.mockResolvedValue({ acknowledged: true, matchedCount: 1, modifiedCount: 1 })
   RuntimeAgent.findOne.mockReturnValue({
     select: jest.fn().mockResolvedValue(null),
   })
+  RuntimeAgent.findByStableId.mockImplementation((stableId) =>
+    RuntimeAgent.findOne({ stableId: String(stableId || '').trim().toLowerCase() }))
   RuntimeSkill.find.mockReturnValue(buildRuntimeSkillLookupChain([
     {
       stableId: 'skill-snapshot',
@@ -630,16 +635,37 @@ describe('Runtime Agent Routes', () => {
     RuntimeAgent.findOne.mockResolvedValue(runtimeAgent)
 
     const res = await request
-      .get(`/api/v1/super-admin/runtime-control/agents/${RUNTIME_AGENT_STABLE_ID}`)
+      .get(`/api/v1/super-admin/runtime-control/agents/${RUNTIME_AGENT_STABLE_ID.toUpperCase()}`)
       .set('Authorization', `Bearer ${token}`)
 
     expect(res.status).toBe(200)
+    expect(RuntimeAgent.findOne).toHaveBeenCalledWith({ stableId: RUNTIME_AGENT_STABLE_ID })
     expect(res.body.data).toMatchObject({
       id: 'agent-validator',
       key: 'validator',
       name: 'Validator',
       status: 'ACTIVE',
       supportedFrameworkKeys: ['VMF', 'RLD'],
+    })
+  })
+
+  test('GET /api/v1/super-admin/runtime-control/agents/:agentId returns read-only detail for locked agents', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const runtimeAgent = makeRuntimeAgentDoc({
+      isLocked: true,
+      lockedByPackageKeys: ['vmf-qa-package'],
+    })
+    RuntimeAgent.findOne.mockResolvedValue(runtimeAgent)
+
+    const res = await request
+      .get(`/api/v1/super-admin/runtime-control/agents/${RUNTIME_AGENT_STABLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toMatchObject({
+      id: 'agent-validator',
+      isLocked: true,
+      lockedByPackageKeys: ['vmf-qa-package'],
     })
   })
 
@@ -724,6 +750,107 @@ describe('Runtime Agent Routes', () => {
     expect(res.body.error.code).toBe('NOT_FOUND')
   })
 
+  test('POST /api/v1/super-admin/runtime-control/agents rejects server-managed version metadata', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/agents')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        key: 'planner',
+        name: 'Planner',
+        supportedFrameworkKeys: ['VMF'],
+        defaultSkillIds: ['skill-snapshot'],
+        executionPlan: [{ skillId: 'skill-snapshot', description: '' }],
+        isLocked: false,
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details.isLocked).toBe(
+      'Runtime Agent version and lock metadata is managed by the server.',
+    )
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/agents rejects duplicate execution step keys', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/agents')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        key: 'planner',
+        name: 'Planner',
+        supportedFrameworkKeys: ['VMF'],
+        defaultSkillIds: ['skill-snapshot', 'skill-summary'],
+        executionPlan: [
+          { stepKey: 'run-check', order: 1, skillId: 'skill-snapshot', description: '' },
+          { stepKey: 'run-check', order: 2, skillId: 'skill-summary', description: '' },
+        ],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details['executionPlan.1.stepKey']).toBe(
+      'Execution plan step keys must be unique.',
+    )
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/agents/:agentId/clone creates an editable draft successor', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const runtimeAgent = makeRuntimeAgentDoc({
+      componentVersion: 3,
+      versionStatus: 'ACTIVE',
+      lineageId: RUNTIME_AGENT_STABLE_ID,
+      isLocked: true,
+      lockedByPackageKeys: ['vmf-qa-package'],
+    })
+
+    RuntimeAgent.findByStableId.mockResolvedValue(runtimeAgent)
+    mockFindOneSelect(null)
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/agents/${RUNTIME_AGENT_STABLE_ID}/clone`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        key: 'validator-clone',
+        name: 'Validator Clone',
+        description: 'Editable successor.',
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data).toMatchObject({
+      id: 'agent-validator-clone',
+      key: 'validator-clone',
+      name: 'Validator Clone',
+      status: 'DRAFT',
+      componentVersion: 4,
+      versionStatus: 'DRAFT',
+      lineageId: RUNTIME_AGENT_STABLE_ID,
+      isLocked: false,
+      lockedByPackageKeys: [],
+      clonedFromStableId: RUNTIME_AGENT_STABLE_ID,
+      supersedesStableId: RUNTIME_AGENT_STABLE_ID,
+    })
+    expect(RuntimeAgent.updateOne).toHaveBeenCalledWith(
+      { stableId: RUNTIME_AGENT_STABLE_ID },
+      { $set: { supersededByStableId: 'agent-validator-clone', updatedBy: SUPER_ADMIN_ID } },
+      { runValidators: false },
+    )
+    expect(AuditLog.createLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'RUNTIME_AGENT_CLONED',
+        resourceType: 'RuntimeAgent',
+        diff: expect.objectContaining({
+          clonedFromStableId: RUNTIME_AGENT_STABLE_ID,
+          supersedesStableId: RUNTIME_AGENT_STABLE_ID,
+          componentVersion: 4,
+          versionStatus: 'DRAFT',
+        }),
+      }),
+    )
+  })
+
   test('PATCH /api/v1/super-admin/runtime-control/agents/:agentId updates the runtime agent and writes an audit log', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     const runtimeAgent = makeRuntimeAgentDoc()
@@ -778,6 +905,30 @@ describe('Runtime Agent Routes', () => {
         summary: 'Super Admin updated runtime agent Validation Guard (validator)',
       }),
     )
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/agents/:agentId rejects direct edits to locked agents', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const runtimeAgent = makeRuntimeAgentDoc({
+      isLocked: true,
+      lockedByPackageKeys: ['vmf-qa-package'],
+    })
+
+    RuntimeAgent.findOne.mockResolvedValue(runtimeAgent)
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/agents/${RUNTIME_AGENT_STABLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: 'Locked Edit Attempt' })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.details).toMatchObject({
+      field: 'isLocked',
+      reason: 'RUNTIME_AGENT_LOCKED',
+      lockedByPackageKeys: ['vmf-qa-package'],
+    })
+    expect(runtimeAgent.save).not.toHaveBeenCalled()
   })
 
   test('PATCH /api/v1/super-admin/runtime-control/agents/:agentId allows updating when execution plan contains legacy scalar writesTo targets', async () => {

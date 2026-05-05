@@ -100,6 +100,7 @@ export const RUNTIME_CONTROL_LOCK_IMPACTING_FIELDS = Object.freeze({
     'optionalSkillIds',
     'executionPlan',
     'promptConfig',
+    'runtimeConfig',
     'inputContract',
     'outputContract',
     'policies',

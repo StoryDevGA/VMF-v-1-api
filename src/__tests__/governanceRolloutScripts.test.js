@@ -440,6 +440,84 @@ describe('backfillRuntimeControlVersioningFields', () => {
       },
     )
   })
+
+  test('dry-run reports Runtime Agent package lock plan and missing agent references', async () => {
+    const connect = jest.fn(async () => {})
+    const disconnect = jest.fn(async () => {})
+    const updatedAt = new Date('2026-05-05T14:40:00.000Z')
+    const frameworkPackageCollection = {
+      db: { databaseName: 'vmf_test' },
+      countDocuments: jest.fn().mockResolvedValue(0),
+      updateMany: jest.fn().mockResolvedValue({ modifiedCount: 0 }),
+    }
+    const frameworkPackageModel = {
+      collection: frameworkPackageCollection,
+      find: jest.fn().mockReturnValue({
+        select: jest.fn().mockReturnValue({
+          lean: jest.fn().mockResolvedValue([
+            {
+              packageKey: 'vmf-qa-manual-951',
+              version: '9.5.1',
+              status: 'ACTIVE',
+              updatedAt,
+              dependencyLock: {
+                references: [
+                  { collectionKey: 'RuntimeAgent', id: 'agent-vmf-submit-validator-agent' },
+                  { collectionKey: 'RuntimeAgent', id: 'agent-missing-runtime-agent' },
+                  { collectionKey: 'RuntimeSkill', id: 'skill-submit-validator' },
+                ],
+              },
+            },
+          ]),
+        }),
+      }),
+    }
+    const runtimeAgentModel = {
+      find: jest.fn().mockReturnValue({
+        select: jest.fn().mockReturnValue({
+          lean: jest.fn().mockResolvedValue([
+            { stableId: 'agent-vmf-submit-validator-agent' },
+          ]),
+        }),
+      }),
+      updateMany: jest.fn(),
+    }
+    const logs = []
+
+    const result = await backfillRuntimeControlVersioningFields({
+      json: true,
+      logger: (message) => logs.push(message),
+      dependencies: {
+        connect,
+        disconnect,
+        runtimeControlConfigs: [],
+        frameworkPackageModel,
+        runtimeAgentModel,
+      },
+    })
+
+    expect(result.runtimeAgentPackageLocks).toEqual(expect.objectContaining({
+      matched: 2,
+      packageReferences: 2,
+      modified: 0,
+      missingAgentIds: ['agent-missing-runtime-agent'],
+    }))
+    expect(result.runtimeAgentPackageLocks.locksToApply[0]).toEqual(expect.objectContaining({
+      agentId: 'agent-vmf-submit-validator-agent',
+      packageKeys: ['vmf-qa-manual-951'],
+      packageVersions: ['9.5.1'],
+      fieldsToApply: expect.arrayContaining([
+        'lockedByPackageKeys',
+        'isLocked',
+        'lockedAt',
+        'lockedReason',
+        'versionStatus',
+      ]),
+    }))
+    expect(logs[0]).toContain('"runtimeAgentPackageLocks"')
+    expect(logs[0]).toContain('agent-missing-runtime-agent')
+    expect(runtimeAgentModel.updateMany).not.toHaveBeenCalled()
+  })
 })
 
 describe('buildInvariantViolationReport', () => {
