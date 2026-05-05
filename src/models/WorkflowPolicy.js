@@ -82,6 +82,20 @@ export const WORKFLOW_POLICY_DECISION_MODES = Object.freeze({
   CONDITIONAL: 'CONDITIONAL',
 })
 
+export const WORKFLOW_POLICY_EXECUTION_TYPES = Object.freeze({
+  SINGLE_STEP: 'SINGLE_STEP',
+  ORDERED_STEPS: 'ORDERED_STEPS',
+  COMPOSITE: 'COMPOSITE',
+})
+
+export const WORKFLOW_POLICY_STEP_TYPES = Object.freeze({
+  VALIDATION: 'VALIDATION',
+  STATE_UPDATE: 'STATE_UPDATE',
+  AGENT_EXECUTION: 'AGENT_EXECUTION',
+  SKILL_EXECUTION: 'SKILL_EXECUTION',
+  EVENT_EMIT: 'EVENT_EMIT',
+})
+
 export const WORKFLOW_POLICY_SEVERITIES = Object.freeze({
   INFO: 'INFO',
   WARNING: 'WARNING',
@@ -149,6 +163,8 @@ export const WORKFLOW_POLICY_DEFAULTS = Object.freeze({
   cooldownSeconds: 0,
   reevaluateOnRetry: false,
   decisionMode: WORKFLOW_POLICY_DECISION_MODES.ALLOW,
+  executionType: WORKFLOW_POLICY_EXECUTION_TYPES.SINGLE_STEP,
+  steps: [],
   severity: WORKFLOW_POLICY_SEVERITIES.INFO,
   conditions: [],
   routingMode: '',
@@ -301,6 +317,11 @@ const normalizeConditionValue = (value) => {
   return normalized
 }
 
+const normalizeStepParameters = (value) =>
+  value && typeof value === 'object' && !Array.isArray(value)
+    ? value
+    : {}
+
 const normalizeConditions = (values) => {
   if (!Array.isArray(values)) return []
 
@@ -348,6 +369,37 @@ const normalizeEffects = (values) => {
       }
     })
     .filter((effect) => effect.type || effect.targetPath || effect.value)
+}
+
+const normalizeWorkflowPolicySteps = (values) => {
+  if (!Array.isArray(values)) return []
+
+  return values
+    .map((step) => {
+      const type = normalizeEnumValue(step?.type)
+      return {
+        stepKey: normalizeKey(step?.stepKey),
+        type,
+        order: Number.isFinite(Number(step?.order)) ? Number(step.order) : step?.order,
+        bindingKeys: normalizeTokenList(step?.bindingKeys),
+        targetPath: normalizeTextValue(step?.targetPath),
+        value: step?.value === undefined ? '' : step.value,
+        agentId: normalizeKey(step?.agentId),
+        skillId: normalizeKey(step?.skillId),
+        eventKey: normalizeKey(step?.eventKey),
+        blocking: step?.blocking === undefined ? true : Boolean(step.blocking),
+        parameters: normalizeStepParameters(step?.parameters),
+      }
+    })
+    .filter((step) =>
+      step.stepKey
+      || step.type
+      || Number.isFinite(Number(step.order))
+      || step.bindingKeys.length > 0
+      || step.targetPath
+      || step.agentId
+      || step.skillId
+      || step.eventKey)
 }
 
 export const buildWorkflowPolicyStableId = (key) => `policy-${normalizeKey(key)}`
@@ -404,6 +456,78 @@ const workflowPolicyEffectSchema = new mongoose.Schema(
     value: {
       type: mongoose.Schema.Types.Mixed,
       default: '',
+    },
+  },
+  { _id: false },
+)
+
+const workflowPolicyStepSchema = new mongoose.Schema(
+  {
+    stepKey: {
+      type: String,
+      required: true,
+      trim: true,
+      lowercase: true,
+      maxlength: 120,
+      match: [keyPattern, 'Workflow step key must use lowercase letters, numbers, or hyphens'],
+    },
+    type: {
+      type: String,
+      required: true,
+      uppercase: true,
+      enum: Object.values(WORKFLOW_POLICY_STEP_TYPES),
+    },
+    order: {
+      type: Number,
+      required: true,
+      min: 1,
+      max: 9999,
+    },
+    bindingKeys: {
+      type: [tokenField],
+      default: [],
+    },
+    targetPath: {
+      type: String,
+      trim: true,
+      maxlength: 200,
+      default: '',
+    },
+    value: {
+      type: mongoose.Schema.Types.Mixed,
+      default: '',
+    },
+    agentId: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      maxlength: 120,
+      default: '',
+      match: [keyPattern, 'Agent id must use lowercase letters, numbers, or hyphens'],
+    },
+    skillId: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      maxlength: 120,
+      default: '',
+      match: [keyPattern, 'Skill id must use lowercase letters, numbers, or hyphens'],
+    },
+    eventKey: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      maxlength: 120,
+      default: '',
+      match: [keyPattern, 'Event key must use lowercase letters, numbers, or hyphens'],
+    },
+    blocking: {
+      type: Boolean,
+      default: true,
+    },
+    parameters: {
+      type: mongoose.Schema.Types.Mixed,
+      default: {},
     },
   },
   { _id: false },
@@ -516,6 +640,16 @@ const workflowPolicySchema = new mongoose.Schema(
       required: true,
       enum: Object.values(WORKFLOW_POLICY_DECISION_MODES),
       default: WORKFLOW_POLICY_DEFAULTS.decisionMode,
+    },
+    executionType: {
+      type: String,
+      required: true,
+      enum: Object.values(WORKFLOW_POLICY_EXECUTION_TYPES),
+      default: WORKFLOW_POLICY_DEFAULTS.executionType,
+    },
+    steps: {
+      type: [workflowPolicyStepSchema],
+      default: WORKFLOW_POLICY_DEFAULTS.steps,
     },
     passMessage: {
       type: String,
@@ -742,6 +876,14 @@ workflowPolicySchema.pre('validate', function normalizeWorkflowPolicy(next) {
 
   if (this.isNew || this.isModified('decisionMode')) {
     this.decisionMode = normalizeEnumValue(this.decisionMode)
+  }
+
+  if (this.isNew || this.isModified('executionType')) {
+    this.executionType = normalizeEnumValue(this.executionType) || WORKFLOW_POLICY_DEFAULTS.executionType
+  }
+
+  if (this.isNew || this.isModified('steps')) {
+    this.steps = normalizeWorkflowPolicySteps(this.steps)
   }
 
   if (this.isNew || this.isModified('passMessage')) {

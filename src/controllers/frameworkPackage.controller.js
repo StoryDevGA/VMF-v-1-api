@@ -8,7 +8,10 @@ import FrameworkPackage, {
 } from '../models/FrameworkPackage.js'
 import RuntimeAgent from '../models/RuntimeAgent.js'
 import ValidationRegistry, { VALIDATION_REGISTRY_STATUSES } from '../models/ValidationRegistry.js'
-import WorkflowPolicy, { WORKFLOW_POLICY_STATUSES } from '../models/WorkflowPolicy.js'
+import WorkflowPolicy, {
+  WORKFLOW_POLICY_STATUSES,
+  WORKFLOW_POLICY_STEP_TYPES,
+} from '../models/WorkflowPolicy.js'
 import UIContract, { UI_CONTRACT_STATUSES } from '../models/UIContract.js'
 import RuntimeSkill from '../models/RuntimeSkill.js'
 import SkillRoleRegistry, { SKILL_ROLE_REGISTRY_STATUSES } from '../models/SkillRoleRegistry.js'
@@ -1056,6 +1059,11 @@ const fetchFrameworkPackageDependencies = async (frameworkPackage) => {
       .filter(Boolean)),
   ]
   const validationKeys = getUniqueValidationKeys(frameworkPackage)
+  const validationBindingKeys = new Set(
+    (Array.isArray(frameworkPackage.validationBindings) ? frameworkPackage.validationBindings : [])
+      .map((binding) => String(binding?.bindingKey || '').trim().toLowerCase())
+      .filter(Boolean),
+  )
   const workflowPolicyKeys = getUniqueWorkflowPolicyKeys(frameworkPackage)
   const uiContractKey = String(frameworkPackage.uiContractKey || '').trim().toLowerCase()
 
@@ -1067,7 +1075,7 @@ const fetchFrameworkPackageDependencies = async (frameworkPackage) => {
       : Promise.resolve([]),
     workflowPolicyKeys.length > 0
       ? WorkflowPolicy.find({ key: { $in: workflowPolicyKeys } })
-        .select('stableId key name status frameworkKeys primaryAgentId fallbackAgentId requiredAgentIds requiredSkillIds requiredValidationKeys conditions onPassEffects onFailEffects componentVersion versionStatus lineageId isLocked lockedAt lockedByPackageKeys')
+        .select('stableId key name status frameworkKeys governedAction primaryAgentId fallbackAgentId requiredAgentIds requiredSkillIds requiredValidationKeys conditions onPassEffects onFailEffects steps componentVersion versionStatus lineageId isLocked lockedAt lockedByPackageKeys')
         .lean()
       : Promise.resolve([]),
     uiContractKey
@@ -1117,6 +1125,16 @@ const fetchFrameworkPackageDependencies = async (frameworkPackage) => {
       if (!Array.isArray(row.frameworkKeys) || !row.frameworkKeys.includes(frameworkKey)) {
         issues.push(`Workflow policy is not compatible with framework "${frameworkKey}".`)
       }
+      const validationStepBindingKeys = (Array.isArray(row.steps) ? row.steps : [])
+        .filter((step) => String(step?.type || '').trim().toUpperCase() === WORKFLOW_POLICY_STEP_TYPES.VALIDATION)
+        .flatMap((step) => Array.isArray(step?.bindingKeys) ? step.bindingKeys : [])
+        .map((value) => String(value || '').trim().toLowerCase())
+        .filter(Boolean)
+      const missingValidationStepBindingKey = validationStepBindingKeys
+        .find((bindingKey) => !validationBindingKeys.has(bindingKey))
+      if (missingValidationStepBindingKey) {
+        issues.push(`Validation step binding "${missingValidationStepBindingKey}" is not configured on the package.`)
+      }
     }
 
     return serializeDependencyReference({
@@ -1127,6 +1145,8 @@ const fetchFrameworkPackageDependencies = async (frameworkPackage) => {
       source: 'workflowBindings',
       frameworkCompatible: issues.length === 0,
       issues,
+      governedAction: row?.governedAction || '',
+      stepCount: Array.isArray(row?.steps) ? row.steps.length : 0,
       ...pickDependencyVersioningFields(row),
     })
   })
@@ -1135,6 +1155,7 @@ const fetchFrameworkPackageDependencies = async (frameworkPackage) => {
     policy.primaryAgentId,
     policy.fallbackAgentId,
     ...(Array.isArray(policy.requiredAgentIds) ? policy.requiredAgentIds : []),
+    ...(Array.isArray(policy.steps) ? policy.steps.map((step) => step?.agentId) : []),
   ])
   const validationAgentIds = validationRows.flatMap((validation) =>
     Array.isArray(validation.defaultAgentIds) ? validation.defaultAgentIds : [])
@@ -1143,7 +1164,10 @@ const fetchFrameworkPackageDependencies = async (frameworkPackage) => {
     .filter(Boolean))]
 
   const workflowSkillIds = workflowRows.flatMap((policy) =>
-    Array.isArray(policy.requiredSkillIds) ? policy.requiredSkillIds : [])
+    [
+      ...(Array.isArray(policy.requiredSkillIds) ? policy.requiredSkillIds : []),
+      ...(Array.isArray(policy.steps) ? policy.steps.map((step) => step?.skillId) : []),
+    ])
   const validationSkillIds = validationRows.map((validation) => validation.producerSkillId)
   const agentRows = agentIds.length > 0
     ? await RuntimeAgent.find({ stableId: { $in: agentIds } })
@@ -1182,6 +1206,7 @@ const fetchFrameworkPackageDependencies = async (frameworkPackage) => {
     ...(Array.isArray(policy.conditions) ? policy.conditions.map((condition) => condition?.path) : []),
     ...(Array.isArray(policy.onPassEffects) ? policy.onPassEffects.map((effect) => effect?.targetPath) : []),
     ...(Array.isArray(policy.onFailEffects) ? policy.onFailEffects.map((effect) => effect?.targetPath) : []),
+    ...(Array.isArray(policy.steps) ? policy.steps.map((step) => step?.targetPath) : []),
   ])
   const validationRuntimePathKeys = validationRows.flatMap((validation) => [
     validation.outputPath,
@@ -1367,6 +1392,8 @@ const buildDependencyLockReferences = ({ dependencies = {}, lockedAt }) =>
       lineageId: row.lineageId || row.id,
       lockedAt,
       issues: Array.isArray(row.issues) ? row.issues : [],
+      ...(row.governedAction ? { governedAction: row.governedAction } : {}),
+      ...(row.stepCount !== undefined ? { stepCount: Number(row.stepCount) || 0 } : {}),
     })))
 
 const buildUIContractSnapshot = ({ dependencies = {} } = {}) => {
@@ -1473,52 +1500,48 @@ const updateRuntimeControlDependencyLocks = async ({
   }
 }
 
-const recomputeUIContractLockState = async ({
+const recomputeRuntimeControlDependencyLockState = async ({
   packageKey,
   session,
 }) => {
   const updateOptions = session ? { session } : {}
 
-  // Find all UI Contracts locked by this package
-  const lockedContracts = await UIContract.find(
-    { lockedByPackageKeys: packageKey },
-    { stableId: 1, lockedByPackageKeys: 1 },
-    updateOptions,
-  )
+  for (const group of DEPENDENCY_LOCK_GROUPS) {
+    const lockedRows = await group.model.find(
+      { lockedByPackageKeys: packageKey },
+      { stableId: 1, lockedByPackageKeys: 1 },
+      updateOptions,
+    )
 
-  if (lockedContracts.length === 0) return
+    for (const row of lockedRows) {
+      const updatedPackageKeys = (row.lockedByPackageKeys || [])
+        .filter((key) => key !== packageKey)
 
-  // For each contract, remove the package key and recompute lock state
-  for (const contract of lockedContracts) {
-    const updatedPackageKeys = (contract.lockedByPackageKeys || [])
-      .filter((key) => key !== packageKey)
-
-    if (updatedPackageKeys.length === 0) {
-      // No other packages lock this contract, so unlock it
-      await UIContract.updateOne(
-        { stableId: contract.stableId },
-        {
-          $set: {
-            lockedByPackageKeys: [],
-            isLocked: false,
-            lockedBy: null,
-            lockedAt: null,
-            lockedReason: '',
+      if (updatedPackageKeys.length === 0) {
+        await group.model.updateOne(
+          { stableId: row.stableId },
+          {
+            $set: {
+              lockedByPackageKeys: [],
+              isLocked: false,
+              lockedBy: null,
+              lockedAt: null,
+              lockedReason: '',
+            },
           },
-        },
-        updateOptions,
-      )
-    } else {
-      // Other packages still lock this contract, just remove this package key
-      await UIContract.updateOne(
-        { stableId: contract.stableId },
-        {
-          $set: {
-            lockedByPackageKeys: updatedPackageKeys,
+          updateOptions,
+        )
+      } else {
+        await group.model.updateOne(
+          { stableId: row.stableId },
+          {
+            $set: {
+              lockedByPackageKeys: updatedPackageKeys,
+            },
           },
-        },
-        updateOptions,
-      )
+          updateOptions,
+        )
+      }
     }
   }
 }
@@ -2359,12 +2382,12 @@ export const updateFrameworkPackage = async (req, res, next) => {
 
     frameworkPackage.updatedBy = actorUserId
     if (isDemotedFromValidated) {
-      // When demoting a package from VALIDATED to DRAFT, unlock any contracts it locked
+      // When demoting a package from VALIDATED to DRAFT, recompute dependency locks it owned.
       const session = await mongoose.startSession()
       try {
         await session.withTransaction(async () => {
           await frameworkPackage.save({ session })
-          await recomputeUIContractLockState({
+          await recomputeRuntimeControlDependencyLockState({
             packageKey: frameworkPackage.packageKey,
             session,
           })

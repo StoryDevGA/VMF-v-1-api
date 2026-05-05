@@ -23,6 +23,7 @@ const parseArgs = (argv = process.argv.slice(2)) => ({
 
 const GOVERNED_PACKAGE_STATUSES = Object.freeze(['VALIDATED', 'ACTIVE'])
 const UI_CONTRACT_PACKAGE_LOCK_REASON = 'Referenced by validated or active Framework Package.'
+const WORKFLOW_POLICY_PACKAGE_LOCK_REASON = 'Referenced by validated or active Framework Package.'
 const RUNTIME_CONTROL_VERSIONING_FIELDS_TO_ADD = Object.freeze([
   'componentVersion',
   'versionStatus',
@@ -47,6 +48,13 @@ const FRAMEWORK_PACKAGE_FIELDS_TO_ADD = Object.freeze([
   'lastCheckpointAt',
 ])
 const UI_CONTRACT_LOCK_FIELDS_TO_APPLY = Object.freeze([
+  'lockedByPackageKeys',
+  'isLocked',
+  'lockedAt',
+  'lockedReason',
+  'versionStatus',
+])
+const WORKFLOW_POLICY_LOCK_FIELDS_TO_APPLY = Object.freeze([
   'lockedByPackageKeys',
   'isLocked',
   'lockedAt',
@@ -330,7 +338,7 @@ const buildFrameworkPackageBackfillPipeline = () => ([
 const resolveQueryRows = async (query) => {
   if (!query) return []
   if (typeof query.select === 'function') {
-    const selected = query.select('packageKey version uiContractKey status activatedAt lockedAt updatedAt')
+    const selected = query.select('packageKey version uiContractKey workflowBindings.policyKey status activatedAt lockedAt updatedAt')
     if (selected && typeof selected.lean === 'function') return selected.lean()
     return selected
   }
@@ -419,6 +427,94 @@ const applyUIContractPackageLockPlan = async ({ uiContractModel, plan = [] }) =>
   return { modified }
 }
 
+const buildWorkflowPolicyPackageLockPlan = async ({ frameworkPackageModel }) => {
+  if (!frameworkPackageModel || typeof frameworkPackageModel.find !== 'function') return []
+
+  const rows = await resolveQueryRows(frameworkPackageModel.find({
+    status: { $in: GOVERNED_PACKAGE_STATUSES },
+    'workflowBindings.policyKey': { $nin: ['', null] },
+  }))
+  const grouped = new Map()
+
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const packageKey = String(row?.packageKey || '').trim().toLowerCase()
+    if (!packageKey) continue
+
+    const policyKeys = [
+      ...new Set((Array.isArray(row?.workflowBindings) ? row.workflowBindings : [])
+        .map((binding) => String(binding?.policyKey || '').trim().toLowerCase())
+        .filter(Boolean)),
+    ]
+
+    for (const policyKey of policyKeys) {
+      if (!grouped.has(policyKey)) {
+        grouped.set(policyKey, {
+          policyKey,
+          packageKeys: [],
+          packageVersions: [],
+          lockedAt: row.activatedAt || row.lockedAt || row.updatedAt || new Date(),
+        })
+      }
+
+      const plan = grouped.get(policyKey)
+      plan.packageKeys.push(packageKey)
+      if (row.version) plan.packageVersions.push(String(row.version))
+      if (!plan.lockedAt && (row.activatedAt || row.lockedAt || row.updatedAt)) {
+        plan.lockedAt = row.activatedAt || row.lockedAt || row.updatedAt
+      }
+    }
+  }
+
+  return [...grouped.values()].map((plan) => ({
+    ...plan,
+    packageKeys: [...new Set(plan.packageKeys)],
+    packageVersions: [...new Set(plan.packageVersions)],
+  }))
+}
+
+const applyWorkflowPolicyPackageLockPlan = async ({ workflowPolicyModel, plan = [] }) => {
+  const updateMany = workflowPolicyModel?.updateMany
+    ? workflowPolicyModel.updateMany.bind(workflowPolicyModel)
+    : workflowPolicyModel?.collection?.updateMany?.bind(workflowPolicyModel.collection)
+  if (!updateMany || plan.length === 0) return { modified: 0 }
+
+  let modified = 0
+  for (const item of plan) {
+    const packageKeys = item.packageKeys.filter(Boolean)
+    if (packageKeys.length === 0) continue
+
+    const referenceResult = await updateMany(
+      { key: item.policyKey },
+      {
+        $addToSet: {
+          lockedByPackageKeys: { $each: packageKeys },
+        },
+      },
+    )
+    const lockResult = await updateMany(
+      {
+        key: item.policyKey,
+        $or: [
+          { isLocked: { $exists: false } },
+          { isLocked: { $ne: true } },
+        ],
+      },
+      {
+        $set: {
+          isLocked: true,
+          lockedAt: item.lockedAt,
+          lockedReason: WORKFLOW_POLICY_PACKAGE_LOCK_REASON,
+          versionStatus: RUNTIME_CONTROL_VERSION_STATUSES.ACTIVE,
+        },
+      },
+    )
+    modified += Number(referenceResult.modifiedCount) || 0
+    modified += Number(lockResult.modifiedCount) || 0
+  }
+
+  return { modified }
+}
+
 const serializeUIContractLockPlan = (plan = []) =>
   plan.map((item) => ({
     uiContractKey: item.uiContractKey,
@@ -428,12 +524,22 @@ const serializeUIContractLockPlan = (plan = []) =>
     fieldsToApply: [...UI_CONTRACT_LOCK_FIELDS_TO_APPLY],
   }))
 
+const serializeWorkflowPolicyLockPlan = (plan = []) =>
+  plan.map((item) => ({
+    policyKey: item.policyKey,
+    packageKeys: item.packageKeys,
+    packageVersions: item.packageVersions,
+    lockedAt: item.lockedAt,
+    fieldsToApply: [...WORKFLOW_POLICY_LOCK_FIELDS_TO_APPLY],
+  }))
+
 const formatBackfillSummary = (summary) => {
   const lines = [
     `Runtime Control versioning backfill ${summary.mode} on database ${summary.database}: matched=${summary.totalMatched}.`,
     `Runtime Control fields to add/normalize: ${RUNTIME_CONTROL_VERSIONING_FIELDS_TO_ADD.join(', ')}.`,
     `Framework Package fields to add/normalize: ${FRAMEWORK_PACKAGE_FIELDS_TO_ADD.join(', ')}.`,
     `UI Contract locks to apply: ${summary.uiContractPackageLocks.matched}; package references: ${summary.uiContractPackageLocks.packageReferences}.`,
+    `Workflow Policy locks to apply: ${summary.workflowPolicyPackageLocks.matched}; package references: ${summary.workflowPolicyPackageLocks.packageReferences}.`,
   ]
 
   if (summary.uiContractPackageLocks.locksToApply.length > 0) {
@@ -441,6 +547,15 @@ const formatBackfillSummary = (summary) => {
     summary.uiContractPackageLocks.locksToApply.forEach((item) => {
       lines.push(
         `- ${item.uiContractKey}: packages=${item.packageKeys.join(', ')}; versions=${item.packageVersions.join(', ') || 'n/a'}; fields=${item.fieldsToApply.join(', ')}`,
+      )
+    })
+  }
+
+  if (summary.workflowPolicyPackageLocks.locksToApply.length > 0) {
+    lines.push('Workflow Policy lock plan:')
+    summary.workflowPolicyPackageLocks.locksToApply.forEach((item) => {
+      lines.push(
+        `- ${item.policyKey}: packages=${item.packageKeys.join(', ')}; versions=${item.packageVersions.join(', ') || 'n/a'}; fields=${item.fieldsToApply.join(', ')}`,
       )
     })
   }
@@ -459,6 +574,7 @@ export const backfillRuntimeControlVersioningFields = async ({
   const runtimeControlConfigs = dependencies.runtimeControlConfigs || RUNTIME_CONTROL_MODEL_CONFIGS
   const frameworkPackageModel = dependencies.frameworkPackageModel || FrameworkPackage
   const uiContractModel = dependencies.uiContractModel || UIContract
+  const workflowPolicyModel = dependencies.workflowPolicyModel || WorkflowPolicy
 
   await connect()
 
@@ -496,13 +612,21 @@ export const backfillRuntimeControlVersioningFields = async ({
     const uiContractPackageLockResult = apply
       ? await applyUIContractPackageLockPlan({ uiContractModel, plan: uiContractLockPlan })
       : { modified: 0 }
+    const workflowPolicyLockPlan = await buildWorkflowPolicyPackageLockPlan({ frameworkPackageModel })
+    const workflowPolicyPackageLockResult = apply
+      ? await applyWorkflowPolicyPackageLockPlan({ workflowPolicyModel, plan: workflowPolicyLockPlan })
+      : { modified: 0 }
     const uiContractPackageReferences = uiContractLockPlan.reduce(
+      (count, plan) => count + plan.packageKeys.length,
+      0,
+    )
+    const workflowPolicyPackageReferences = workflowPolicyLockPlan.reduce(
       (count, plan) => count + plan.packageKeys.length,
       0,
     )
     const totalMatched = runtimeControlRows.reduce(
       (sum, row) => sum + row.matched,
-      frameworkPackageMatched + uiContractLockPlan.length,
+      frameworkPackageMatched + uiContractLockPlan.length + workflowPolicyLockPlan.length,
     )
 
     const summary = {
@@ -521,6 +645,12 @@ export const backfillRuntimeControlVersioningFields = async ({
         packageReferences: uiContractPackageReferences,
         modified: Number(uiContractPackageLockResult.modified) || 0,
         locksToApply: serializeUIContractLockPlan(uiContractLockPlan),
+      },
+      workflowPolicyPackageLocks: {
+        matched: workflowPolicyLockPlan.length,
+        packageReferences: workflowPolicyPackageReferences,
+        modified: Number(workflowPolicyPackageLockResult.modified) || 0,
+        locksToApply: serializeWorkflowPolicyLockPlan(workflowPolicyLockPlan),
       },
     }
 

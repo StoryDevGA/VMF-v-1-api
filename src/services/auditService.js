@@ -110,6 +110,7 @@ export const AUDIT_ACTIONS = Object.freeze({
   UI_CONTRACT_VALIDATION_FAILED: 'UI_CONTRACT_VALIDATION_FAILED',
   WORKFLOW_POLICY_CREATED: 'WORKFLOW_POLICY_CREATED',
   WORKFLOW_POLICY_UPDATED: 'WORKFLOW_POLICY_UPDATED',
+  WORKFLOW_POLICY_CLONED: 'WORKFLOW_POLICY_CLONED',
   WORKFLOW_POLICY_TESTED: 'WORKFLOW_POLICY_TESTED',
   // Super Admin - Access denied
   ACCESS_DENIED: 'ACCESS_DENIED',
@@ -452,6 +453,8 @@ const buildAuditSummary = ({ action, resourceType, resourceId, diff, display }) 
       return clampSummary(`${actorLabel} created workflow policy ${targetLabel}`)
     case AUDIT_ACTIONS.WORKFLOW_POLICY_UPDATED:
       return clampSummary(`${actorLabel} updated workflow policy ${targetLabel}`)
+    case AUDIT_ACTIONS.WORKFLOW_POLICY_CLONED:
+      return clampSummary(`${actorLabel} cloned workflow policy ${targetLabel}`)
     case AUDIT_ACTIONS.WORKFLOW_POLICY_TESTED:
       return clampSummary(`${actorLabel} tested workflow policy ${targetLabel}`)
     default:

@@ -114,6 +114,8 @@ export const RUNTIME_CONTROL_LOCK_IMPACTING_FIELDS = Object.freeze({
     'reevaluateOnRetry',
     'governedAction',
     'decisionMode',
+    'executionType',
+    'steps',
     'conditions',
     'routingMode',
     'primaryAgentId',

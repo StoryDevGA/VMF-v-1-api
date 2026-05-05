@@ -9,9 +9,12 @@ import WorkflowPolicy, {
   WORKFLOW_POLICY_DEFAULTS,
   WORKFLOW_POLICY_EFFECT_TYPES,
   WORKFLOW_POLICY_ESCALATION_ROLE_KEYS,
+  WORKFLOW_POLICY_EXECUTION_TYPES,
   WORKFLOW_POLICY_ROUTING_MODES,
   WORKFLOW_POLICY_STATUSES,
+  WORKFLOW_POLICY_STEP_TYPES,
   WORKFLOW_POLICY_STEP_ORDER_CONSTRAINTS_BY_FRAMEWORK,
+  buildWorkflowPolicyStableId,
 } from '../models/WorkflowPolicy.js'
 import FrameworkPackage from '../models/FrameworkPackage.js'
 import RuntimeAgent, { RUNTIME_AGENT_STATUSES } from '../models/RuntimeAgent.js'
@@ -29,6 +32,10 @@ import {
   resolveKnownFrameworkKeys,
 } from '../services/frameworkRegistryService.js'
 import { resolveRuntimePathSelections } from '../services/runtimePathRegistryService.js'
+import {
+  LOCKED_RUNTIME_CONTROL_EDIT_MESSAGE,
+  RUNTIME_CONTROL_VERSION_STATUSES,
+} from '../utils/runtimeControlVersioning.js'
 
 const DUPLICATE_WORKFLOW_POLICY_KEY_MESSAGE = 'Workflow policy key must be unique.'
 const WORKFLOW_POLICY_NOT_FOUND_MESSAGE = 'Workflow policy was not found.'
@@ -40,6 +47,8 @@ const WORKFLOW_POLICY_FIELD_DEFAULTS = Object.freeze({
   onPassEffects: [],
   onFailEffects: [],
   escalationRoleKey: '',
+  executionType: WORKFLOW_POLICY_EXECUTION_TYPES.SINGLE_STEP,
+  steps: [],
   orderedSteps: [],
   requiredAgentIds: [],
   requiredSkillIds: [],
@@ -275,6 +284,8 @@ const WORKFLOW_POLICY_MUTABLE_FIELDS = Object.freeze([
   'reevaluateOnRetry',
   'governedAction',
   'decisionMode',
+  'executionType',
+  'steps',
   'passMessage',
   'failMessage',
   'severity',
@@ -328,6 +339,26 @@ const cloneAuditValue = (value) => {
     return value
   }
   return JSON.parse(JSON.stringify(value))
+}
+
+const normalizeWorkflowPolicyStableId = (value) =>
+  String(value || '').trim().toLowerCase()
+
+const workflowPolicyKeyFromStableId = (policyId) => {
+  const normalized = normalizeWorkflowPolicyStableId(policyId)
+  return normalized.startsWith('policy-') ? normalized.slice('policy-'.length) : normalized
+}
+
+const buildWorkflowPolicyIdentityFilter = (policyId) => {
+  const stableId = normalizeWorkflowPolicyStableId(policyId)
+  const key = workflowPolicyKeyFromStableId(stableId)
+
+  return {
+    $or: [
+      { stableId },
+      { key },
+    ],
+  }
 }
 
 const normalizeEscalationRoleKey = (value) => {
@@ -525,6 +556,12 @@ const buildListFilter = ({ q, status, frameworkKey, type }) => {
       { policyType: regex },
       { triggerEvent: regex },
       { governedAction: regex },
+      { lineageId: regex },
+      { 'steps.stepKey': regex },
+      { 'steps.bindingKeys': regex },
+      { 'steps.targetPath': regex },
+      { 'steps.agentId': regex },
+      { 'steps.skillId': regex },
     ]
   }
 
@@ -619,6 +656,28 @@ const normalizeEffectRows = (effects = []) =>
             : '',
         }
       })
+    : []
+
+const normalizeWorkflowStepRows = (steps = []) =>
+  Array.isArray(steps)
+    ? steps.map((step) => ({
+        stepKey: String(step?.stepKey ?? '').trim().toLowerCase(),
+        type: String(step?.type ?? '').trim().toUpperCase(),
+        order: Number(step?.order),
+        bindingKeys: Array.isArray(step?.bindingKeys)
+          ? [...new Set(step.bindingKeys.map((value) => String(value ?? '').trim().toLowerCase()).filter(Boolean))]
+          : [],
+        targetPath: String(step?.targetPath ?? '').trim(),
+        value: step?.value === undefined ? '' : step.value,
+        agentId: String(step?.agentId ?? '').trim().toLowerCase(),
+        skillId: String(step?.skillId ?? '').trim().toLowerCase(),
+        eventKey: String(step?.eventKey ?? '').trim().toLowerCase(),
+        blocking: step?.blocking === undefined ? true : Boolean(step.blocking),
+        parameters:
+          step?.parameters && typeof step.parameters === 'object' && !Array.isArray(step.parameters)
+            ? step.parameters
+            : {},
+      }))
     : []
 
 const validateWorkflowPolicyConditions = async ({
@@ -891,6 +950,121 @@ const validateWorkflowPolicyEffects = async ({
   return details
 }
 
+const validateWorkflowPolicySteps = async ({
+  executionType,
+  steps = [],
+  frameworkKeys = [],
+}) => {
+  const details = {}
+  const normalizedSteps = normalizeWorkflowStepRows(steps)
+  const normalizedExecutionType = String(executionType || WORKFLOW_POLICY_EXECUTION_TYPES.SINGLE_STEP)
+    .trim()
+    .toUpperCase()
+
+  if (
+    normalizedExecutionType !== WORKFLOW_POLICY_EXECUTION_TYPES.SINGLE_STEP
+    && normalizedSteps.length === 0
+  ) {
+    details.steps = 'Ordered or composite workflow policies require at least one governed step.'
+    return details
+  }
+
+  if (normalizedSteps.length === 0) {
+    return details
+  }
+
+  const stepKeys = new Set()
+  const orders = new Set()
+  for (const step of normalizedSteps) {
+    if (!step.stepKey) {
+      details.steps = 'Every governed step requires a step key.'
+      return details
+    }
+    if (stepKeys.has(step.stepKey)) {
+      details.steps = `Workflow step key "${step.stepKey}" is duplicated.`
+      return details
+    }
+    stepKeys.add(step.stepKey)
+
+    if (!Number.isInteger(step.order) || step.order < 1) {
+      details.steps = `Workflow step "${step.stepKey}" requires a positive order.`
+      return details
+    }
+    if (orders.has(step.order)) {
+      details.steps = `Workflow step order "${step.order}" is duplicated.`
+      return details
+    }
+    orders.add(step.order)
+
+    if (!Object.values(WORKFLOW_POLICY_STEP_TYPES).includes(step.type)) {
+      details.steps = `Workflow step "${step.stepKey}" uses an unsupported type.`
+      return details
+    }
+
+    if (step.type === WORKFLOW_POLICY_STEP_TYPES.VALIDATION && step.bindingKeys.length === 0) {
+      details.steps = `Validation step "${step.stepKey}" requires at least one validation binding key.`
+      return details
+    }
+    if (step.type === WORKFLOW_POLICY_STEP_TYPES.STATE_UPDATE && !step.targetPath) {
+      details.steps = `State update step "${step.stepKey}" requires a writable runtime path.`
+      return details
+    }
+    if (step.type === WORKFLOW_POLICY_STEP_TYPES.AGENT_EXECUTION && !step.agentId) {
+      details.steps = `Agent execution step "${step.stepKey}" requires an agent id.`
+      return details
+    }
+    if (step.type === WORKFLOW_POLICY_STEP_TYPES.SKILL_EXECUTION && !step.skillId) {
+      details.steps = `Skill execution step "${step.stepKey}" requires a skill id.`
+      return details
+    }
+    if (step.type === WORKFLOW_POLICY_STEP_TYPES.EVENT_EMIT && !step.eventKey) {
+      details.steps = `Event emit step "${step.stepKey}" requires an event key.`
+      return details
+    }
+  }
+
+  const stateUpdatePaths = normalizedSteps
+    .filter((step) => step.type === WORKFLOW_POLICY_STEP_TYPES.STATE_UPDATE)
+    .map((step) => step.targetPath)
+    .filter(Boolean)
+
+  if (stateUpdatePaths.length === 0) {
+    return details
+  }
+
+  const pathSelections = await resolveRuntimePathSelections({
+    pathKeys: stateUpdatePaths,
+    frameworkKeys,
+    operation: RUNTIME_PATH_REGISTRY_OPERATIONS.WRITE,
+    requireActive: true,
+    forbidProtectedWrites: true,
+    selectFields: ['pathKey', 'status', 'frameworkKeys', 'allowedOperations', 'isProtected', 'scope'],
+  })
+
+  if (pathSelections.missing.length > 0) {
+    details.steps = `Unknown step runtime path "${pathSelections.missing[0]}".`
+    return details
+  }
+  if (pathSelections.inactive.length > 0) {
+    details.steps = `Step runtime path "${pathSelections.inactive[0]}" is not ACTIVE.`
+    return details
+  }
+  if (pathSelections.invalidOperation.length > 0) {
+    details.steps = `Step runtime path "${pathSelections.invalidOperation[0]}" does not allow WRITE.`
+    return details
+  }
+  if (pathSelections.incompatibleFramework.length > 0) {
+    details.steps =
+      `Step runtime path "${pathSelections.incompatibleFramework[0]}" is not compatible with the selected frameworks.`
+    return details
+  }
+  if (pathSelections.protectedWrite.length > 0) {
+    details.steps = `Step runtime path "${pathSelections.protectedWrite[0]}" is protected and cannot be written by Workflow Policy steps.`
+  }
+
+  return details
+}
+
 const fetchRegistryReferences = async ({ requiredAgentIds = [], requiredSkillIds = [] }) => {
   const [agents, skills] = await Promise.all([
     requiredAgentIds.length > 0
@@ -917,6 +1091,13 @@ const fetchWorkflowPolicyDependencies = async (workflowPolicy) => {
       String(workflowPolicy?.primaryAgentId ?? '').trim().toLowerCase(),
       String(workflowPolicy?.fallbackAgentId ?? '').trim().toLowerCase(),
       ...(Array.isArray(workflowPolicy?.requiredAgentIds) ? workflowPolicy.requiredAgentIds : []),
+      ...(Array.isArray(workflowPolicy?.steps) ? workflowPolicy.steps.map((step) => step?.agentId) : []),
+    ].filter(Boolean)),
+  ]
+  const usedSkillIds = [
+    ...new Set([
+      ...(Array.isArray(workflowPolicy?.requiredSkillIds) ? workflowPolicy.requiredSkillIds : []),
+      ...(Array.isArray(workflowPolicy?.steps) ? workflowPolicy.steps.map((step) => step?.skillId) : []),
     ].filter(Boolean)),
   ]
   const usedRuntimePathKeys = [
@@ -924,12 +1105,14 @@ const fetchWorkflowPolicyDependencies = async (workflowPolicy) => {
       ...(Array.isArray(workflowPolicy?.conditions) ? workflowPolicy.conditions.map((condition) => condition?.path) : []),
       ...(Array.isArray(workflowPolicy?.onPassEffects) ? workflowPolicy.onPassEffects.map((effect) => effect?.targetPath) : []),
       ...(Array.isArray(workflowPolicy?.onFailEffects) ? workflowPolicy.onFailEffects.map((effect) => effect?.targetPath) : []),
+      ...(Array.isArray(workflowPolicy?.steps) ? workflowPolicy.steps.map((step) => step?.targetPath) : []),
     ].map((value) => String(value ?? '').trim()).filter(Boolean)),
   ]
 
   const [
     frameworkPackages,
     agents,
+    skills,
     runtimePaths,
     collisions,
     knownFrameworks,
@@ -942,6 +1125,12 @@ const fetchWorkflowPolicyDependencies = async (workflowPolicy) => {
       : Promise.resolve([]),
     usedAgentIds.length > 0
       ? RuntimeAgent.find({ stableId: { $in: usedAgentIds } })
+        .maxTimeMS(3000)
+        .select('stableId key name status')
+        .lean()
+      : Promise.resolve([]),
+    usedSkillIds.length > 0
+      ? RuntimeSkill.find({ stableId: { $in: usedSkillIds } })
         .maxTimeMS(3000)
         .select('stableId key name status')
         .lean()
@@ -985,6 +1174,7 @@ const fetchWorkflowPolicyDependencies = async (workflowPolicy) => {
     },
     uses: {
       agents: Array.isArray(agents) ? agents : [],
+      skills: Array.isArray(skills) ? skills : [],
       frameworks: frameworkEntries,
       validationOutputs: Array.isArray(workflowPolicy?.requiredValidationKeys)
         ? workflowPolicy.requiredValidationKeys
@@ -1002,6 +1192,7 @@ const buildWorkflowPolicyDependencySummary = ({
 }) => {
   const frameworkPackages = Array.isArray(referencedBy.frameworkPackages) ? referencedBy.frameworkPackages : []
   const agents = Array.isArray(uses.agents) ? uses.agents : []
+  const skills = Array.isArray(uses.skills) ? uses.skills : []
   const frameworks = Array.isArray(uses.frameworks) ? uses.frameworks : []
   const validationOutputs = Array.isArray(uses.validationOutputs) ? uses.validationOutputs : []
   const runtimePaths = Array.isArray(uses.runtimePaths) ? uses.runtimePaths : []
@@ -1013,6 +1204,11 @@ const buildWorkflowPolicyDependencySummary = ({
   const firstNonActiveAgent = agents.find((agent) => String(agent?.status ?? '').trim().toUpperCase() !== 'ACTIVE')
   if (firstNonActiveAgent) {
     warnings.push(`This policy references non-active Agent: ${firstNonActiveAgent.key || firstNonActiveAgent.stableId}.`)
+  }
+
+  const firstNonActiveSkill = skills.find((skill) => String(skill?.status ?? '').trim().toUpperCase() !== 'ACTIVE')
+  if (firstNonActiveSkill) {
+    warnings.push(`This policy references non-active Skill: ${firstNonActiveSkill.key || firstNonActiveSkill.stableId}.`)
   }
 
   const firstPriorityCollision = collisions[0]
@@ -1031,6 +1227,7 @@ const buildWorkflowPolicyDependencySummary = ({
       frameworkPackages: frameworkPackages.length,
       activeFrameworkPackages: activeFrameworkPackages.length,
       agents: agents.length,
+      skills: skills.length,
       frameworks: frameworks.length,
       validationOutputs: validationOutputs.length,
       runtimePaths: runtimePaths.length,
@@ -1409,6 +1606,8 @@ const validateWorkflowPolicyReferences = async ({
   triggerMode,
   governedAction,
   decisionMode,
+  executionType,
+  steps,
   conditions,
   routingMode,
   primaryAgentId,
@@ -1431,8 +1630,11 @@ const validateWorkflowPolicyReferences = async ({
   const details = {}
   const normalizedFrameworkKeys = normalizeFrameworkKeyList(frameworkKeys)
   const normalizedOrderedSteps = Array.isArray(orderedSteps) ? orderedSteps : []
+  const normalizedSteps = normalizeWorkflowStepRows(steps)
   const normalizedRequiredAgentIds = Array.isArray(requiredAgentIds) ? requiredAgentIds : []
   const normalizedRequiredSkillIds = Array.isArray(requiredSkillIds) ? requiredSkillIds : []
+  const stepAgentIds = normalizedSteps.map((step) => step.agentId).filter(Boolean)
+  const stepSkillIds = normalizedSteps.map((step) => step.skillId).filter(Boolean)
   const normalizedRequiredValidationKeys = Array.isArray(requiredValidationKeys) ? requiredValidationKeys : []
   const normalizedPreviousValidationKeys = Array.isArray(previousRequiredValidationKeys) ? previousRequiredValidationKeys : []
   const normalizedOverrideRoles = Array.isArray(overrideRoles) ? overrideRoles : []
@@ -1480,6 +1682,13 @@ const validateWorkflowPolicyReferences = async ({
     frameworkKeys: normalizedFrameworkKeys,
   })
   Object.assign(details, conditionDetails)
+
+  const stepDetails = await validateWorkflowPolicySteps({
+    executionType,
+    steps: normalizedSteps,
+    frameworkKeys: normalizedFrameworkKeys,
+  })
+  Object.assign(details, stepDetails)
 
   const routingDetails = await validateWorkflowPolicyRouting({
     status,
@@ -1600,25 +1809,27 @@ const validateWorkflowPolicyReferences = async ({
   }
 
   const { agents, skills } = await fetchRegistryReferences({
-    requiredAgentIds: normalizedRequiredAgentIds,
-    requiredSkillIds: normalizedRequiredSkillIds,
+    requiredAgentIds: [...new Set([...normalizedRequiredAgentIds, ...stepAgentIds])],
+    requiredSkillIds: [...new Set([...normalizedRequiredSkillIds, ...stepSkillIds])],
   })
 
   const agentById = new Map(agents.map((agent) => [agent.stableId, agent]))
   const skillById = new Map(skills.map((skill) => [skill.stableId, skill]))
+  const combinedAgentIds = [...new Set([...normalizedRequiredAgentIds, ...stepAgentIds])]
+  const combinedSkillIds = [...new Set([...normalizedRequiredSkillIds, ...stepSkillIds])]
 
-  const missingAgentIds = normalizedRequiredAgentIds.filter((agentId) => !agentById.has(agentId))
+  const missingAgentIds = combinedAgentIds.filter((agentId) => !agentById.has(agentId))
   if (missingAgentIds.length > 0) {
     details.requiredAgentIds = `Unknown runtime agent ids: ${missingAgentIds.join(', ')}.`
   }
 
-  const missingSkillIds = normalizedRequiredSkillIds.filter((skillId) => !skillById.has(skillId))
+  const missingSkillIds = combinedSkillIds.filter((skillId) => !skillById.has(skillId))
   if (missingSkillIds.length > 0) {
     details.requiredSkillIds = `Unknown runtime skill ids: ${missingSkillIds.join(', ')}.`
   }
 
   if (!details.requiredAgentIds) {
-    for (const agentId of normalizedRequiredAgentIds) {
+    for (const agentId of combinedAgentIds) {
       const agent = agentById.get(agentId)
       const unsupportedFrameworkKey = findUnsupportedFrameworkKey(
         agent?.supportedFrameworkKeys,
@@ -1634,7 +1845,7 @@ const validateWorkflowPolicyReferences = async ({
   }
 
   if (!details.requiredSkillIds) {
-    for (const skillId of normalizedRequiredSkillIds) {
+    for (const skillId of combinedSkillIds) {
       const skill = skillById.get(skillId)
       const unsupportedFrameworkKey = findUnsupportedFrameworkKey(
         skill?.supportedFrameworkKeys,
@@ -1652,24 +1863,24 @@ const validateWorkflowPolicyReferences = async ({
   if (
     status === WORKFLOW_POLICY_STATUSES.ACTIVE
     && !details.requiredAgentIds
-    && normalizedRequiredAgentIds.length === 1
+    && combinedAgentIds.length === 1
   ) {
-    const onlyAgent = agentById.get(normalizedRequiredAgentIds[0])
+    const onlyAgent = agentById.get(combinedAgentIds[0])
     if (onlyAgent?.status !== RUNTIME_AGENT_STATUSES.ACTIVE) {
       details.requiredAgentIds =
-        `Active workflow policies cannot depend on only inactive runtime agent "${normalizedRequiredAgentIds[0]}".`
+        `Active workflow policies cannot depend on only inactive runtime agent "${combinedAgentIds[0]}".`
     }
   }
 
   if (
     status === WORKFLOW_POLICY_STATUSES.ACTIVE
     && !details.requiredSkillIds
-    && normalizedRequiredSkillIds.length === 1
+    && combinedSkillIds.length === 1
   ) {
-    const onlySkill = skillById.get(normalizedRequiredSkillIds[0])
+    const onlySkill = skillById.get(combinedSkillIds[0])
     if (onlySkill?.status !== RUNTIME_SKILL_STATUSES.ACTIVE) {
       details.requiredSkillIds =
-        `Active workflow policies cannot depend on only inactive runtime skill "${normalizedRequiredSkillIds[0]}".`
+        `Active workflow policies cannot depend on only inactive runtime skill "${combinedSkillIds[0]}".`
     }
   }
 
@@ -1719,6 +1930,7 @@ export const createWorkflowPolicy = async (req, res, next) => {
       ...(body.conditions !== undefined ? { conditions: normalizeConditionRows(body.conditions) } : {}),
       ...(body.onPassEffects !== undefined ? { onPassEffects: normalizeEffectRows(body.onPassEffects) } : {}),
       ...(body.onFailEffects !== undefined ? { onFailEffects: normalizeEffectRows(body.onFailEffects) } : {}),
+      ...(body.steps !== undefined ? { steps: normalizeWorkflowStepRows(body.steps) } : {}),
     }
     const existingWorkflowPolicy = await WorkflowPolicy.findOne({
       key: body.key,
@@ -1779,6 +1991,8 @@ export const createWorkflowPolicy = async (req, res, next) => {
         reevaluateOnRetry: workflowPolicy.reevaluateOnRetry,
         governedAction: workflowPolicy.governedAction,
         decisionMode: workflowPolicy.decisionMode,
+        executionType: workflowPolicy.executionType,
+        steps: workflowPolicy.steps,
         passMessage: workflowPolicy.passMessage,
         failMessage: workflowPolicy.failMessage,
         severity: workflowPolicy.severity,
@@ -1838,7 +2052,7 @@ export const createWorkflowPolicy = async (req, res, next) => {
 
 export const getWorkflowPolicy = async (req, res, next) => {
   try {
-    const workflowPolicy = await WorkflowPolicy.findOne({ stableId: req.params.policyId })
+    const workflowPolicy = await WorkflowPolicy.findOne(buildWorkflowPolicyIdentityFilter(req.params.policyId))
 
     if (!workflowPolicy) {
       return res.status(404).json({
@@ -1863,7 +2077,7 @@ export const getWorkflowPolicy = async (req, res, next) => {
 
 export const getWorkflowPolicyDependencies = async (req, res, next) => {
   try {
-    const workflowPolicy = await WorkflowPolicy.findOne({ stableId: req.params.policyId })
+    const workflowPolicy = await WorkflowPolicy.findOne(buildWorkflowPolicyIdentityFilter(req.params.policyId))
       .select([
         '_id',
         'stableId',
@@ -1875,9 +2089,11 @@ export const getWorkflowPolicyDependencies = async (req, res, next) => {
         'triggerEvent',
         'governedAction',
         'conditions',
+        'steps',
         'primaryAgentId',
         'fallbackAgentId',
         'requiredAgentIds',
+        'requiredSkillIds',
         'requiredValidationKeys',
         'onPassEffects',
         'onFailEffects',
@@ -1899,7 +2115,7 @@ export const getWorkflowPolicyDependencies = async (req, res, next) => {
 
     return res.status(200).json({
       data: {
-        policyId: workflowPolicy.stableId,
+        policyId: workflowPolicy.stableId || buildWorkflowPolicyStableId(workflowPolicy.key),
         referencedBy: {
           frameworkPackages: dependencies.referencedBy.frameworkPackages.map(serializeFrameworkPackageDependencyReference),
           workflowPolicies: dependencies.referencedBy.workflowPolicies.map(serializeRuntimeDependencyReference),
@@ -1907,6 +2123,7 @@ export const getWorkflowPolicyDependencies = async (req, res, next) => {
         },
         uses: {
           agents: dependencies.uses.agents.map(serializeRuntimeDependencyReference),
+          skills: dependencies.uses.skills.map(serializeRuntimeDependencyReference),
           frameworks: dependencies.uses.frameworks.map(serializeWorkflowFrameworkReference),
           validationOutputs: dependencies.uses.validationOutputs.map(serializeWorkflowValidationReference),
           runtimePaths: dependencies.uses.runtimePaths.map(serializeWorkflowRuntimePathReference),
@@ -1917,6 +2134,124 @@ export const getWorkflowPolicyDependencies = async (req, res, next) => {
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
+    next(err)
+  }
+}
+
+export const cloneWorkflowPolicy = async (req, res, next) => {
+  try {
+    const sourcePolicy = await WorkflowPolicy.findOne(buildWorkflowPolicyIdentityFilter(req.params.policyId))
+
+    if (!sourcePolicy) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: WORKFLOW_POLICY_NOT_FOUND_MESSAGE,
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    const nextKey = String(req.body?.key || '').trim().toLowerCase()
+    const duplicateWorkflowPolicy = await WorkflowPolicy.findOne({ key: nextKey }).select('_id')
+    if (duplicateWorkflowPolicy) {
+      return sendConflict(res, req, DUPLICATE_WORKFLOW_POLICY_KEY_MESSAGE, {
+        field: 'key',
+        reason: 'WORKFLOW_POLICY_KEY_CONFLICT',
+      })
+    }
+
+    const actorUserId = req.context?.userId || req.userId
+    const sourcePlain = typeof sourcePolicy.toObject === 'function'
+      ? sourcePolicy.toObject()
+      : { ...sourcePolicy }
+    const sourceStableId = normalizeWorkflowPolicyStableId(
+      sourcePolicy.stableId
+        || sourcePlain.stableId
+        || buildWorkflowPolicyStableId(sourcePolicy.key || sourcePlain.key),
+    )
+    const nextName = String(req.body?.name || '').trim() || `${sourcePolicy.name || sourcePolicy.key} Clone`
+    const nextDescription = req.body?.description === undefined
+      ? sourcePolicy.description
+      : req.body.description
+    delete sourcePlain._id
+    delete sourcePlain.id
+    delete sourcePlain.__v
+    delete sourcePlain.stableId
+
+    const clonedPolicy = new WorkflowPolicy({
+      ...sourcePlain,
+      key: nextKey,
+      name: nextName,
+      description: nextDescription,
+      status: WORKFLOW_POLICY_STATUSES.DRAFT,
+      version: Number(sourcePolicy.version || 1) + 1,
+      lastActivatedAt: null,
+      componentVersion: Number(sourcePolicy.componentVersion || 1) + 1,
+      versionStatus: RUNTIME_CONTROL_VERSION_STATUSES.DRAFT,
+      lineageId: sourcePolicy.lineageId || sourceStableId,
+      isLocked: false,
+      lockedAt: null,
+      lockedBy: null,
+      lockedReason: '',
+      lockedByPackageKeys: [],
+      clonedFromStableId: sourceStableId,
+      supersedesStableId: sourceStableId,
+      supersededByStableId: null,
+      createdBy: actorUserId,
+      updatedBy: actorUserId,
+    })
+
+    await clonedPolicy.save()
+    await WorkflowPolicy.updateOne(
+      buildWorkflowPolicyIdentityFilter(sourceStableId),
+      { $set: { supersededByStableId: clonedPolicy.stableId } },
+      { runValidators: false },
+    )
+    await populateWorkflowPolicy(clonedPolicy)
+
+    await auditService.logFromRequest(req, {
+      action: auditService.AUDIT_ACTIONS.WORKFLOW_POLICY_CLONED,
+      resourceType: auditService.RESOURCE_TYPES.WorkflowPolicy,
+      resourceId: clonedPolicy._id,
+      scope: {
+        frameworkKeys: clonedPolicy.frameworkKeys,
+      },
+      display: { resourceLabel: buildWorkflowPolicyLabel(clonedPolicy) },
+      diff: {
+        clonedFromStableId: sourceStableId,
+        supersedesStableId: sourceStableId,
+        key: clonedPolicy.key,
+        status: clonedPolicy.status,
+        componentVersion: clonedPolicy.componentVersion,
+        versionStatus: clonedPolicy.versionStatus,
+      },
+    })
+
+    return res.status(201).json({
+      data: serializeWorkflowPolicy(clonedPolicy, {
+        fallbackUpdatedBy: buildActorSummary(req),
+      }),
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (isDuplicateWorkflowPolicyKeyError(err)) {
+      return sendConflict(res, req, DUPLICATE_WORKFLOW_POLICY_KEY_MESSAGE, {
+        field: 'key',
+        reason: 'WORKFLOW_POLICY_KEY_CONFLICT',
+      })
+    }
+
+    if (err?.name === 'ValidationError') {
+      return res.status(422).json({
+        error: {
+          code: 'VALIDATION_FAILED',
+          message: err.message,
+          requestId: req.requestId,
+        },
+      })
+    }
+
     next(err)
   }
 }
@@ -2048,7 +2383,7 @@ export const testWorkflowPolicy = async (req, res, next) => {
 export const updateWorkflowPolicy = async (req, res, next) => {
   try {
     const body = pickWorkflowPolicyPayload(req.body)
-    const workflowPolicy = await WorkflowPolicy.findOne({ stableId: req.params.policyId })
+    const workflowPolicy = await WorkflowPolicy.findOne(buildWorkflowPolicyIdentityFilter(req.params.policyId))
 
     if (!workflowPolicy) {
       return res.status(404).json({
@@ -2057,6 +2392,16 @@ export const updateWorkflowPolicy = async (req, res, next) => {
           message: WORKFLOW_POLICY_NOT_FOUND_MESSAGE,
           requestId: req.requestId,
         },
+      })
+    }
+
+    if (workflowPolicy.isLocked === true) {
+      return sendConflict(res, req, LOCKED_RUNTIME_CONTROL_EDIT_MESSAGE, {
+        field: 'isLocked',
+        reason: 'WORKFLOW_POLICY_LOCKED',
+        lockedByPackageKeys: Array.isArray(workflowPolicy.lockedByPackageKeys)
+          ? workflowPolicy.lockedByPackageKeys
+          : [],
       })
     }
 
@@ -2098,6 +2443,10 @@ export const updateWorkflowPolicy = async (req, res, next) => {
       reevaluateOnRetry: body.reevaluateOnRetry ?? getWorkflowPolicyFieldValue(workflowPolicy, 'reevaluateOnRetry'),
       governedAction: body.governedAction ?? getWorkflowPolicyFieldValue(workflowPolicy, 'governedAction'),
       decisionMode: body.decisionMode ?? getWorkflowPolicyFieldValue(workflowPolicy, 'decisionMode'),
+      executionType: body.executionType ?? getWorkflowPolicyFieldValue(workflowPolicy, 'executionType'),
+      steps: body.steps !== undefined
+        ? normalizeWorkflowStepRows(body.steps)
+        : getWorkflowPolicyFieldValue(workflowPolicy, 'steps'),
       passMessage: body.passMessage ?? getWorkflowPolicyFieldValue(workflowPolicy, 'passMessage'),
       failMessage: body.failMessage ?? getWorkflowPolicyFieldValue(workflowPolicy, 'failMessage'),
       severity: body.severity ?? getWorkflowPolicyFieldValue(workflowPolicy, 'severity'),

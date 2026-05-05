@@ -287,6 +287,7 @@ beforeEach(() => {
   WorkflowPolicy.find = jest.fn()
   WorkflowPolicy.countDocuments = jest.fn()
   WorkflowPolicy.findOne = jest.fn()
+  WorkflowPolicy.updateOne = jest.fn().mockResolvedValue({ matchedCount: 1, modifiedCount: 1 })
   FrameworkRegistry.find = jest.fn()
   FrameworkPackage.find = jest.fn()
   RuntimeAgent.find = jest.fn()
@@ -712,6 +713,56 @@ describe('Workflow Policy Routes', () => {
         summary: 'Super Admin created workflow policy VMF Review Policy (vmf-review)',
       }),
     )
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/workflow-policies rejects server-managed version metadata', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/workflow-policies')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        ...buildPhaseOneWorkflowPolicyPayload({ key: 'vmf-managed-field', name: 'VMF Managed Field Policy' }),
+        componentVersion: 99,
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details.componentVersion).toContain('server-managed governance metadata')
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/workflow-policies validates governed step identity and ordering', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/workflow-policies')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        ...buildPhaseOneWorkflowPolicyPayload({
+          key: 'vmf-step-identity',
+          name: 'VMF Step Identity Policy',
+          executionType: 'ORDERED_STEPS',
+          steps: [
+            {
+              stepKey: 'required-check',
+              type: 'VALIDATION',
+              order: 1,
+              bindingKeys: ['required-sections-on-submit'],
+            },
+            {
+              stepKey: 'required-check',
+              type: 'EVENT_EMIT',
+              order: 1,
+              eventKey: 'publish-ready',
+            },
+          ],
+        }),
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(Object.values(res.body.error.details)).toContain('Workflow step keys must be unique.')
+    expect(Object.values(res.body.error.details)).toContain('Workflow step order values must be unique.')
   })
 
   test('POST /api/v1/super-admin/runtime-control/workflow-policies strips fields not used by the effect type', async () => {
@@ -1732,6 +1783,139 @@ describe('Workflow Policy Routes', () => {
     )
   })
 
+  test('PATCH /api/v1/super-admin/runtime-control/workflow-policies/:policyId rejects direct edits to locked policies', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const workflowPolicy = makeWorkflowPolicyDoc({
+      isLocked: true,
+      lockedByPackageKeys: ['vmf-package-1'],
+    })
+    WorkflowPolicy.findOne.mockResolvedValue(workflowPolicy)
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/workflow-policies/${WORKFLOW_POLICY_STABLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: 'Locked Edit Attempt' })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.details.reason).toBe('WORKFLOW_POLICY_LOCKED')
+    expect(res.body.error.details.lockedByPackageKeys).toEqual(['vmf-package-1'])
+    expect(workflowPolicy.save).not.toHaveBeenCalled()
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/workflow-policies/:policyId/clone creates an unlocked draft successor', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const workflowPolicy = makeWorkflowPolicyDoc({
+      componentVersion: 2,
+      versionStatus: 'ACTIVE',
+      lineageId: 'policy-lineage-vmf-publish',
+      isLocked: true,
+      lockedByPackageKeys: ['vmf-package-1'],
+      executionType: 'ORDERED_STEPS',
+      steps: [{
+        stepKey: 'required-check',
+        type: 'VALIDATION',
+        order: 1,
+        bindingKeys: ['required-sections-on-submit'],
+      }],
+    })
+
+    WorkflowPolicy.findOne
+      .mockResolvedValueOnce(workflowPolicy)
+      .mockReturnValueOnce({ select: jest.fn().mockResolvedValue(null) })
+    mockRegistryLookups({
+      agents: [runtimeAgentRows.validator],
+      skills: [runtimeSkillRows.snapshot],
+    })
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/workflow-policies/${WORKFLOW_POLICY_STABLE_ID}/clone`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        key: 'vmf-publish-clone',
+        name: 'VMF Publish Clone',
+        description: 'Editable cloned policy.',
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data).toMatchObject({
+      key: 'vmf-publish-clone',
+      name: 'VMF Publish Clone',
+      description: 'Editable cloned policy.',
+      status: 'DRAFT',
+      componentVersion: 3,
+      versionStatus: 'DRAFT',
+      isLocked: false,
+      lockedByPackageKeys: [],
+      lineageId: 'policy-lineage-vmf-publish',
+      clonedFromStableId: WORKFLOW_POLICY_STABLE_ID,
+      supersedesStableId: WORKFLOW_POLICY_STABLE_ID,
+      executionType: 'ORDERED_STEPS',
+      steps: [expect.objectContaining({ stepKey: 'required-check' })],
+    })
+    expect(WorkflowPolicy.updateOne).toHaveBeenCalledWith(
+      {
+        $or: [
+          { stableId: WORKFLOW_POLICY_STABLE_ID },
+          { key: 'vmf-publish' },
+        ],
+      },
+      { $set: { supersededByStableId: expect.any(String) } },
+      { runValidators: false },
+    )
+    expect(AuditLog.createLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'WORKFLOW_POLICY_CLONED',
+        resourceType: 'WorkflowPolicy',
+      }),
+    )
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/workflow-policies/:policyId/clone can resolve legacy rows by key fallback', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const workflowPolicy = makeWorkflowPolicyDoc({
+      key: 'legacy-policy',
+      stableId: undefined,
+      lineageId: '',
+    })
+    workflowPolicy.stableId = undefined
+
+    WorkflowPolicy.findOne.mockImplementation((filter) => {
+      if (Array.isArray(filter?.$or) && filter.$or.some((clause) => clause.key === 'legacy-policy')) {
+        return Promise.resolve(workflowPolicy)
+      }
+
+      if (filter?.key === 'legacy-policy-clone') {
+        return { select: jest.fn().mockResolvedValue(null) }
+      }
+
+      return Promise.resolve(null)
+    })
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/workflow-policies/policy-legacy-policy/clone')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        key: 'legacy-policy-clone',
+        name: 'Legacy Policy Clone',
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data).toMatchObject({
+      key: 'legacy-policy-clone',
+      status: 'DRAFT',
+      clonedFromStableId: 'policy-legacy-policy',
+      supersedesStableId: 'policy-legacy-policy',
+      lineageId: 'policy-legacy-policy',
+    })
+    expect(WorkflowPolicy.findOne).toHaveBeenNthCalledWith(1, {
+      $or: [
+        { stableId: 'policy-legacy-policy' },
+        { key: 'legacy-policy' },
+      ],
+    })
+  })
+
   test('PATCH /api/v1/super-admin/runtime-control/workflow-policies/:policyId returns 404 when the workflow policy is missing', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     WorkflowPolicy.findOne.mockResolvedValue(null)
@@ -1758,5 +1942,62 @@ describe('Workflow Policy Routes', () => {
     expect(res.status).toBe(422)
     expect(res.body.error.code).toBe('VALIDATION_FAILED')
     expect(res.body.error.details.key).toBe('Workflow policy key is immutable after creation.')
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/workflow-policies/:policyId persists canonical governed steps', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const workflowPolicy = makeWorkflowPolicyDoc({
+      status: 'DRAFT',
+      executionType: 'SINGLE_STEP',
+      steps: [],
+      requiredAgentIds: [],
+      requiredSkillIds: [],
+    })
+    WorkflowPolicy.findOne
+      .mockResolvedValueOnce(workflowPolicy)
+      .mockReturnValueOnce({ select: jest.fn().mockResolvedValue(null) })
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/workflow-policies/${WORKFLOW_POLICY_STABLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        executionType: 'ORDERED_STEPS',
+        steps: [{
+          stepKey: 'emit-ready',
+          type: 'EVENT_EMIT',
+          order: 1,
+          eventKey: 'workflow-ready',
+        }],
+      })
+
+    expect(res.status).toBe(200)
+    expect(workflowPolicy.save).toHaveBeenCalled()
+    expect(workflowPolicy.executionType).toBe('ORDERED_STEPS')
+    expect(workflowPolicy.steps).toEqual([
+      expect.objectContaining({
+        stepKey: 'emit-ready',
+        type: 'EVENT_EMIT',
+        order: 1,
+        eventKey: 'workflow-ready',
+      }),
+    ])
+    expect(res.body.data.steps).toEqual([
+      expect.objectContaining({
+        stepKey: 'emit-ready',
+        type: 'EVENT_EMIT',
+        order: 1,
+        eventKey: 'workflow-ready',
+      }),
+    ])
+    expect(AuditLog.createLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'WORKFLOW_POLICY_UPDATED',
+        diff: expect.objectContaining({
+          steps: expect.objectContaining({
+            to: [expect.objectContaining({ stepKey: 'emit-ready' })],
+          }),
+        }),
+      }),
+    )
   })
 })

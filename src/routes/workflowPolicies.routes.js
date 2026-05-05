@@ -4,6 +4,7 @@ import loadScopes from '../middleware/loadScopes.js'
 import { requirePlatformRole } from '../middleware/authorize.js'
 import {
   validateCreateWorkflowPolicy,
+  validateCloneWorkflowPolicy,
   validateListWorkflowPolicies,
   validateWorkflowPolicyId,
   validateWorkflowPolicyTestConsoleBody,
@@ -14,6 +15,7 @@ import {
   getWorkflowPolicy,
   getWorkflowPolicyDependencies,
   listWorkflowPolicies,
+  cloneWorkflowPolicy,
   testWorkflowPolicy,
   updateWorkflowPolicy,
 } from '../controllers/workflowPolicy.controller.js'
@@ -27,6 +29,12 @@ router.post('/', validateCreateWorkflowPolicy, createWorkflowPolicy)
 router.post('/test-console', validateWorkflowPolicyTestConsoleBody, testWorkflowPolicy)
 router.get('/:policyId', validateWorkflowPolicyId, getWorkflowPolicy)
 router.get('/:policyId/dependencies', validateWorkflowPolicyId, getWorkflowPolicyDependencies)
+router.post(
+  '/:policyId/clone',
+  validateWorkflowPolicyId,
+  validateCloneWorkflowPolicy,
+  cloneWorkflowPolicy,
+)
 router.patch(
   '/:policyId',
   validateWorkflowPolicyId,
