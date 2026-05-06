@@ -7,6 +7,8 @@ import { escapeRegex, serializeUserSummary } from '../utils/controllerUtils.js'
 
 const SKILL_ROLE_NOT_FOUND_MESSAGE = 'Skill role was not found.'
 const DUPLICATE_SKILL_ROLE_KEY_MESSAGE = 'Role key must be unique.'
+const LOCKED_SKILL_ROLE_MESSAGE =
+  'Locked Runtime Control records cannot be edited directly. Clone the record to make behavior changes.'
 const SKILL_ROLE_SORT_FIELDS = Object.freeze({
   LABEL: 'label',
   UPDATED_AT: 'updatedAt',
@@ -31,7 +33,9 @@ const serializeSkillRole = (skillRole, { fallbackUpdatedBy = null } = {}) => {
 
   delete plain._id
   delete plain.__v
-  delete plain.stableId
+  if (!plain.stableId && plain.id) {
+    plain.stableId = plain.id
+  }
 
   const serializedUpdatedBy = serializeUserSummary(plain.updatedBy)
   plain.createdBy = serializeUserSummary(plain.createdBy)
@@ -55,6 +59,10 @@ const buildSearchClauses = (query) => {
     { roleKey: regex },
     { label: regex },
     { description: regex },
+    { category: regex },
+    { allowedOperations: regex },
+    { allowedReadScopes: regex },
+    { allowedWriteScopes: regex },
   ]
 
   if (Object.values(SKILL_ROLE_REGISTRY_STATUSES).includes(normalizedQueryUpper)) {
@@ -277,6 +285,10 @@ export const createSkillRole = async (req, res, next) => {
       label: req.body.label,
       description: req.body.description,
       status: req.body.status,
+      category: req.body.category,
+      allowedOperations: req.body.allowedOperations,
+      allowedReadScopes: req.body.allowedReadScopes,
+      allowedWriteScopes: req.body.allowedWriteScopes,
       // System roles are reserved for seeded platform entries.
       isSystem: false,
       createdBy: req.context?.userId || req.userId,
@@ -380,8 +392,33 @@ export const updateSkillRole = async (req, res, next) => {
       })
     }
 
+    if (skillRole.isLocked === true) {
+      return res.status(409).json({
+        error: {
+          code: 'CONFLICT',
+          message: LOCKED_SKILL_ROLE_MESSAGE,
+          requestId: req.requestId,
+          details: {
+            field: 'isLocked',
+            reason: 'SKILL_ROLE_LOCKED',
+            lockedByPackageKeys: Array.isArray(skillRole.lockedByPackageKeys)
+              ? skillRole.lockedByPackageKeys
+              : [],
+          },
+        },
+      })
+    }
+
     const diff = {}
-    const fields = ['label', 'description', 'status']
+    const fields = [
+      'label',
+      'description',
+      'status',
+      'category',
+      'allowedOperations',
+      'allowedReadScopes',
+      'allowedWriteScopes',
+    ]
 
     for (const field of fields) {
       if (req.body[field] === undefined) continue
@@ -417,6 +454,106 @@ export const updateSkillRole = async (req, res, next) => {
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
+    next(err)
+  }
+}
+
+export const cloneSkillRole = async (req, res, next) => {
+  try {
+    const source = await SkillRoleRegistry.findByStableId(req.params.roleId)
+
+    if (!source) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: SKILL_ROLE_NOT_FOUND_MESSAGE,
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    const roleKey = String(req.body.roleKey || '').trim().toUpperCase()
+    const existing = await SkillRoleRegistry.findOne({ roleKey })
+
+    if (existing) {
+      return res.status(409).json({
+        error: {
+          code: 'CONFLICT',
+          message: DUPLICATE_SKILL_ROLE_KEY_MESSAGE,
+          requestId: req.requestId,
+          details: { roleKey: DUPLICATE_SKILL_ROLE_KEY_MESSAGE },
+        },
+      })
+    }
+
+    const actorUserId = req.context?.userId || req.userId
+    const sourceStableId = source.stableId
+    const cloned = await SkillRoleRegistry.create({
+      roleKey,
+      label: req.body.label,
+      description: req.body.description,
+      status: SKILL_ROLE_REGISTRY_STATUSES.DRAFT,
+      category: req.body.category ?? source.category,
+      allowedOperations: req.body.allowedOperations ?? source.allowedOperations,
+      allowedReadScopes: req.body.allowedReadScopes ?? source.allowedReadScopes,
+      allowedWriteScopes: req.body.allowedWriteScopes ?? source.allowedWriteScopes,
+      isSystem: false,
+      componentVersion: (Number(source.componentVersion) || 1) + 1,
+      versionStatus: 'DRAFT',
+      lineageId: source.lineageId || sourceStableId,
+      isLocked: false,
+      lockedAt: null,
+      lockedBy: null,
+      lockedReason: '',
+      lockedByPackageKeys: [],
+      clonedFromStableId: sourceStableId,
+      supersedesStableId: sourceStableId,
+      supersededByStableId: null,
+      createdBy: actorUserId,
+      updatedBy: actorUserId,
+    })
+
+    await SkillRoleRegistry.updateOne(
+      { stableId: sourceStableId },
+      {
+        $set: {
+          supersededByStableId: cloned.stableId,
+          updatedBy: actorUserId,
+        },
+      },
+      { runValidators: false },
+    )
+
+    await cloned.populate('createdBy', 'name email')
+    await cloned.populate('updatedBy', 'name email')
+
+    await auditService.logFromRequest(req, {
+      action: auditService.AUDIT_ACTIONS.SKILL_ROLE_CLONED,
+      resourceType: auditService.RESOURCE_TYPES.SkillRole,
+      resourceId: cloned._id,
+      display: { resourceLabel: cloned.roleKey },
+      diff: {
+        clonedFromStableId: sourceStableId,
+        created: cloneAuditValue(cloned.toJSON()),
+      },
+    })
+
+    return res.status(201).json({
+      data: serializeSkillRole(cloned),
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (isDuplicateRoleKeyError(err)) {
+      return res.status(409).json({
+        error: {
+          code: 'CONFLICT',
+          message: DUPLICATE_SKILL_ROLE_KEY_MESSAGE,
+          requestId: req.requestId,
+          details: { roleKey: DUPLICATE_SKILL_ROLE_KEY_MESSAGE },
+        },
+      })
+    }
+
     next(err)
   }
 }

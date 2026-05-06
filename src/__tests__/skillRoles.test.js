@@ -135,6 +135,7 @@ beforeAll(async () => {
     AUDIT_ACTIONS: {
       SKILL_ROLE_CREATED: 'SKILL_ROLE_CREATED',
       SKILL_ROLE_UPDATED: 'SKILL_ROLE_UPDATED',
+      SKILL_ROLE_CLONED: 'SKILL_ROLE_CLONED',
     },
     RESOURCE_TYPES: {
       SkillRole: 'SkillRole',
@@ -145,6 +146,7 @@ beforeAll(async () => {
       AUDIT_ACTIONS: {
         SKILL_ROLE_CREATED: 'SKILL_ROLE_CREATED',
         SKILL_ROLE_UPDATED: 'SKILL_ROLE_UPDATED',
+        SKILL_ROLE_CLONED: 'SKILL_ROLE_CLONED',
       },
       RESOURCE_TYPES: {
         SkillRole: 'SkillRole',
@@ -196,6 +198,7 @@ beforeEach(() => {
   SkillRoleRegistry.findByStableId = jest.fn()
   SkillRoleRegistry.findOne = jest.fn()
   SkillRoleRegistry.create = jest.fn()
+  SkillRoleRegistry.updateOne = jest.fn()
   SkillRoleRegistry.aggregate = jest.fn()
   SkillRoleRegistry.populate = jest.fn(async (items) => items)
   RuntimeSkill.find = jest.fn()
@@ -207,6 +210,7 @@ beforeEach(() => {
   SkillRoleRegistry.find.mockReturnValue(buildSkillRoleQueryChain([]))
   SkillRoleRegistry.findOne.mockResolvedValue(null)
   SkillRoleRegistry.aggregate.mockResolvedValue([])
+  SkillRoleRegistry.updateOne.mockResolvedValue({ modifiedCount: 1 })
   RuntimeSkill.find.mockReturnValue(buildRuntimeSkillReferenceChain([]))
   RuntimeSkill.countDocuments.mockResolvedValue(0)
   RuntimeSkill.aggregate.mockResolvedValue([])
@@ -504,6 +508,147 @@ describe('Skill Role Registry API', () => {
 
     expect(res.status).toBe(422)
     expect(res.body.error?.details?.roleKey).toMatch(/immutable/i)
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/skill-roles/:roleId rejects locked direct edits', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    SkillRoleRegistry.findByStableId.mockReturnValue(buildFindByStableIdQuery({
+      _id: '507f1f77bcf86cd799439099',
+      stableId: ROLE_STABLE_ID,
+      roleKey: 'VALIDATOR',
+      label: 'Validator',
+      description: 'Evaluates correctness.',
+      status: 'ACTIVE',
+      isLocked: true,
+      lockedByPackageKeys: ['qa-package'],
+      isSystem: true,
+      save: jest.fn(),
+      populate: jest.fn(),
+    }))
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/skill-roles/${ROLE_STABLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ label: 'Changed' })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error?.details?.reason).toBe('SKILL_ROLE_LOCKED')
+    expect(res.body.error?.details?.lockedByPackageKeys).toEqual(['qa-package'])
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/skill-roles/:roleId/clone creates an editable draft successor', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const source = {
+      _id: '507f1f77bcf86cd799439099',
+      stableId: ROLE_STABLE_ID,
+      roleKey: 'VALIDATOR',
+      label: 'Validator',
+      description: 'Evaluates correctness.',
+      status: 'ACTIVE',
+      category: 'EXECUTION_ROLE',
+      allowedOperations: ['READ', 'WRITE'],
+      allowedReadScopes: ['*'],
+      allowedWriteScopes: ['framework_state.sections.*'],
+      componentVersion: 2,
+      lineageId: ROLE_STABLE_ID,
+      isLocked: true,
+      isSystem: true,
+    }
+    const cloned = {
+      _id: '507f1f77bcf86cd799439100',
+      stableId: buildSkillRoleRegistryStableId('VALIDATOR_CLONE'),
+      roleKey: 'VALIDATOR_CLONE',
+      label: 'Validator Clone',
+      description: 'Editable clone.',
+      status: 'DRAFT',
+      category: 'EXECUTION_ROLE',
+      allowedOperations: ['READ', 'WRITE'],
+      allowedReadScopes: ['*'],
+      allowedWriteScopes: ['framework_state.sections.*'],
+      componentVersion: 3,
+      versionStatus: 'DRAFT',
+      lineageId: ROLE_STABLE_ID,
+      clonedFromStableId: ROLE_STABLE_ID,
+      supersedesStableId: ROLE_STABLE_ID,
+      isLocked: false,
+      lockedByPackageKeys: [],
+      isSystem: false,
+      createdBy: { id: SUPER_ADMIN_ID, name: 'Super Administrator' },
+      updatedBy: { id: SUPER_ADMIN_ID, name: 'Super Administrator' },
+      populate: jest.fn().mockResolvedValue(undefined),
+      toJSON: function toJSON() {
+        return {
+          id: this.stableId,
+          stableId: this.stableId,
+          roleKey: this.roleKey,
+          label: this.label,
+          description: this.description,
+          status: this.status,
+          category: this.category,
+          allowedOperations: this.allowedOperations,
+          allowedReadScopes: this.allowedReadScopes,
+          allowedWriteScopes: this.allowedWriteScopes,
+          componentVersion: this.componentVersion,
+          versionStatus: this.versionStatus,
+          lineageId: this.lineageId,
+          clonedFromStableId: this.clonedFromStableId,
+          supersedesStableId: this.supersedesStableId,
+          isLocked: this.isLocked,
+          lockedByPackageKeys: this.lockedByPackageKeys,
+          isSystem: this.isSystem,
+        }
+      },
+    }
+
+    SkillRoleRegistry.findByStableId.mockReturnValue(buildFindByStableIdQuery(source))
+    SkillRoleRegistry.create.mockResolvedValue(cloned)
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/skill-roles/${ROLE_STABLE_ID}/clone`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        roleKey: 'VALIDATOR_CLONE',
+        label: 'Validator Clone',
+        description: 'Editable clone.',
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data).toEqual(expect.objectContaining({
+      id: buildSkillRoleRegistryStableId('VALIDATOR_CLONE'),
+      stableId: buildSkillRoleRegistryStableId('VALIDATOR_CLONE'),
+      roleKey: 'VALIDATOR_CLONE',
+      status: 'DRAFT',
+      componentVersion: 3,
+      isLocked: false,
+      clonedFromStableId: ROLE_STABLE_ID,
+    }))
+    expect(SkillRoleRegistry.updateOne).toHaveBeenCalledWith(
+      { stableId: ROLE_STABLE_ID },
+      expect.objectContaining({
+        $set: expect.objectContaining({
+          supersededByStableId: buildSkillRoleRegistryStableId('VALIDATOR_CLONE'),
+        }),
+      }),
+      { runValidators: false },
+    )
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/skill-roles rejects governed metadata', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/skill-roles')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        roleKey: 'TEST_HELPER',
+        label: 'Test helper',
+        description: 'Helper role for tests.',
+        componentVersion: 99,
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error?.details?.componentVersion).toMatch(/managed by the platform/i)
   })
 
   test('Controller search clauses include exact status match', () => {

@@ -43,6 +43,10 @@ export const RUNTIME_CONTROL_LOCK_IMPACTING_FIELDS = Object.freeze({
     'label',
     'description',
     'status',
+    'category',
+    'allowedOperations',
+    'allowedReadScopes',
+    'allowedWriteScopes',
     'isSystem',
   ]),
   RuntimeSkill: Object.freeze([

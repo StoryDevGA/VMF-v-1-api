@@ -6,9 +6,23 @@ import {
 } from '../utils/runtimeControlVersioning.js'
 
 export const SKILL_ROLE_REGISTRY_STATUSES = Object.freeze({
+  DRAFT: 'DRAFT',
   ACTIVE: 'ACTIVE',
   INACTIVE: 'INACTIVE',
   DEPRECATED: 'DEPRECATED',
+})
+
+export const SKILL_ROLE_REGISTRY_CATEGORIES = Object.freeze({
+  EXECUTION_ROLE: 'EXECUTION_ROLE',
+  GOVERNANCE_ROLE: 'GOVERNANCE_ROLE',
+  SYSTEM_ROLE: 'SYSTEM_ROLE',
+  CUSTOM_ROLE: 'CUSTOM_ROLE',
+})
+
+export const SKILL_ROLE_REGISTRY_OPERATIONS = Object.freeze({
+  READ: 'READ',
+  WRITE: 'WRITE',
+  EXECUTE: 'EXECUTE',
 })
 
 const stableIdPattern = /^role-[a-z0-9][a-z0-9-]*$/
@@ -26,6 +40,16 @@ const normalizeStableKeySegment = (value) =>
     .replace(/[^a-z0-9-]+/gi, '-')
     .replace(/^-+|-+$/g, '')
     .toLowerCase()
+
+const normalizeTokenList = (values, { uppercase = false } = {}) => {
+  const source = Array.isArray(values) ? values : []
+  return [
+    ...new Set(source
+      .map((value) => String(value || '').trim())
+      .filter(Boolean)
+      .map((value) => (uppercase ? value.toUpperCase() : value))),
+  ]
+}
 
 export const buildSkillRoleRegistryStableId = (roleKey) =>
   `role-${normalizeStableKeySegment(roleKey).slice(0, 160)}`
@@ -73,7 +97,32 @@ const skillRoleRegistrySchema = new mongoose.Schema(
       type: String,
       required: true,
       enum: Object.values(SKILL_ROLE_REGISTRY_STATUSES),
-      default: SKILL_ROLE_REGISTRY_STATUSES.ACTIVE,
+      default: SKILL_ROLE_REGISTRY_STATUSES.DRAFT,
+    },
+    category: {
+      type: String,
+      required: true,
+      enum: Object.values(SKILL_ROLE_REGISTRY_CATEGORIES),
+      default: SKILL_ROLE_REGISTRY_CATEGORIES.EXECUTION_ROLE,
+    },
+    allowedOperations: {
+      type: [String],
+      default: () => [SKILL_ROLE_REGISTRY_OPERATIONS.READ],
+      validate: {
+        validator(values) {
+          return normalizeTokenList(values, { uppercase: true })
+            .every((value) => Object.values(SKILL_ROLE_REGISTRY_OPERATIONS).includes(value))
+        },
+        message: 'Allowed operations must be READ, WRITE, or EXECUTE.',
+      },
+    },
+    allowedReadScopes: {
+      type: [String],
+      default: () => [],
+    },
+    allowedWriteScopes: {
+      type: [String],
+      default: () => [],
     },
     isSystem: {
       type: Boolean,
@@ -95,7 +144,6 @@ const skillRoleRegistrySchema = new mongoose.Schema(
     toJSON: {
       transform: function transform(_doc, ret) {
         ret.id = ret.stableId
-        delete ret.stableId
         delete ret._id
         delete ret.__v
         return ret
@@ -123,6 +171,22 @@ skillRoleRegistrySchema.pre('validate', function normalizeSkillRoleRegistry(next
 
   if (this.isNew || this.isModified('description')) {
     this.description = normalizeName(this.description)
+  }
+
+  if (this.isNew || this.isModified('category')) {
+    this.category = String(this.category || SKILL_ROLE_REGISTRY_CATEGORIES.EXECUTION_ROLE).trim().toUpperCase()
+  }
+
+  if (this.isNew || this.isModified('allowedOperations')) {
+    this.allowedOperations = normalizeTokenList(this.allowedOperations, { uppercase: true })
+  }
+
+  if (this.isNew || this.isModified('allowedReadScopes')) {
+    this.allowedReadScopes = normalizeTokenList(this.allowedReadScopes)
+  }
+
+  if (this.isNew || this.isModified('allowedWriteScopes')) {
+    this.allowedWriteScopes = normalizeTokenList(this.allowedWriteScopes)
   }
 
   if (this.isNew || !this.stableId) {

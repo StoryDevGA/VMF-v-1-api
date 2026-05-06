@@ -100,6 +100,7 @@ export const AUDIT_ACTIONS = Object.freeze({
   RUNTIME_PATH_DEPRECATED: 'RUNTIME_PATH_DEPRECATED',
   SKILL_ROLE_CREATED: 'SKILL_ROLE_CREATED',
   SKILL_ROLE_UPDATED: 'SKILL_ROLE_UPDATED',
+  SKILL_ROLE_CLONED: 'SKILL_ROLE_CLONED',
   VALIDATION_REGISTRY_CREATED: 'VALIDATION_REGISTRY_CREATED',
   VALIDATION_REGISTRY_UPDATED: 'VALIDATION_REGISTRY_UPDATED',
   VALIDATION_REGISTRY_CLONED: 'VALIDATION_REGISTRY_CLONED',
@@ -440,6 +441,8 @@ const buildAuditSummary = ({ action, resourceType, resourceId, diff, display }) 
       return clampSummary(`${actorLabel} created skill role ${targetLabel}`)
     case AUDIT_ACTIONS.SKILL_ROLE_UPDATED:
       return clampSummary(`${actorLabel} updated skill role ${targetLabel}`)
+    case AUDIT_ACTIONS.SKILL_ROLE_CLONED:
+      return clampSummary(`${actorLabel} cloned skill role ${targetLabel}`)
     case AUDIT_ACTIONS.UI_CONTRACT_CREATED:
       return clampSummary(`${actorLabel} created UI contract ${targetLabel}`)
     case AUDIT_ACTIONS.UI_CONTRACT_UPDATED:

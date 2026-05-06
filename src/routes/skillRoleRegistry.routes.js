@@ -4,11 +4,13 @@ import loadScopes from '../middleware/loadScopes.js'
 import { requirePlatformRole } from '../middleware/authorize.js'
 import {
   validateCreateSkillRole,
+  validateCloneSkillRole,
   validateListSkillRoles,
   validateSkillRoleId,
   validateUpdateSkillRole,
 } from '../validators/skillRoleRegistry.validator.js'
 import {
+  cloneSkillRole,
   createSkillRole,
   getSkillRole,
   getSkillRoleDependencies,
@@ -22,9 +24,9 @@ router.use(authJwt, loadScopes, requirePlatformRole('SUPER_ADMIN'))
 
 router.get('/', validateListSkillRoles, listSkillRoles)
 router.post('/', validateCreateSkillRole, createSkillRole)
+router.post('/:roleId/clone', validateSkillRoleId, validateCloneSkillRole, cloneSkillRole)
 router.get('/:roleId', validateSkillRoleId, getSkillRole)
 router.get('/:roleId/dependencies', validateSkillRoleId, getSkillRoleDependencies)
 router.patch('/:roleId', validateSkillRoleId, validateUpdateSkillRole, updateSkillRole)
 
 export default router
-

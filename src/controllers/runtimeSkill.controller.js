@@ -255,7 +255,7 @@ const findSkillRoleByKey = async (skillRoleKey) => {
   if (!normalizedSkillRoleKey) return null
 
   return SkillRoleRegistry.findOne({ roleKey: normalizedSkillRoleKey })
-    .select('roleKey status')
+    .select('roleKey status allowedOperations allowedWriteScopes')
     .lean()
 }
 
@@ -291,6 +291,52 @@ const validateRuntimeSkillSkillRoleKey = async (skillRoleKey) => {
 }
 
 const joinQuoted = (values) => values.map((value) => `"${value}"`).join(', ')
+
+const normalizeRuntimeScopeList = (values = []) => [
+  ...new Set((Array.isArray(values) ? values : [])
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)),
+]
+
+const runtimePathMatchesRoleScope = (pathKey, scope) => {
+  const normalizedPathKey = String(pathKey || '').trim()
+  const normalizedScope = String(scope || '').trim()
+  if (!normalizedPathKey || !normalizedScope) return false
+  if (normalizedScope === '*') return true
+  if (normalizedScope === normalizedPathKey) return true
+  if (normalizedScope.endsWith('.*')) {
+    return normalizedPathKey.startsWith(normalizedScope.slice(0, -1))
+  }
+  if (normalizedScope.endsWith('*')) {
+    return normalizedPathKey.startsWith(normalizedScope.slice(0, -1))
+  }
+  return false
+}
+
+const validateRuntimeSkillRoleWriteScopes = ({ skillRole, allowedWritePaths = [] } = {}) => {
+  const writePaths = normalizeRuntimeScopeList(allowedWritePaths)
+  if (writePaths.length === 0 || !skillRole) return {}
+
+  const operations = normalizeRuntimeScopeList(skillRole.allowedOperations)
+    .map((value) => value.toUpperCase())
+  if (!operations.includes('WRITE')) {
+    return {
+      allowedWritePaths: `Skill role key "${skillRole.roleKey}" does not allow WRITE operations.`,
+    }
+  }
+
+  const allowedWriteScopes = normalizeRuntimeScopeList(skillRole.allowedWriteScopes)
+  const uncovered = writePaths.filter((pathKey) =>
+    !allowedWriteScopes.some((scope) => runtimePathMatchesRoleScope(pathKey, scope)),
+  )
+
+  if (uncovered.length === 0) return {}
+
+  return {
+    allowedWritePaths:
+      `Allowed write paths must be covered by the selected Skill Role write scopes: ${joinQuoted(uncovered)}.`,
+  }
+}
 
 const buildRuntimePathSelectionMessage = ({ missing = [], inactive = [], invalidOperation = [], incompatibleFramework = [], protectedWrite = [], unprotected = [] } = {}) => {
   const blocks = []
@@ -474,15 +520,23 @@ export const createRuntimeSkill = async (req, res, next) => {
   try {
     const effectiveStatus = String(req.body.status ?? 'ACTIVE').trim().toUpperCase()
     const isActiveSkill = effectiveStatus === 'ACTIVE'
+    let selectedSkillRole = null
 
     // Skill role is required only for ACTIVE skills; legacy drafts may continue without one.
-    if (isActiveSkill && req.body.skillRoleKey) {
+    if (isActiveSkill && !String(req.body.skillRoleKey || '').trim()) {
+      return sendValidationFailed(res, req, {
+        skillRoleKey: 'Skill role is required for active skills.',
+      })
+    }
+
+    if (req.body.skillRoleKey) {
       const skillRoleValidation = await validateRuntimeSkillSkillRoleKey(req.body.skillRoleKey)
       if (Object.keys(skillRoleValidation.details).length > 0) {
         return sendValidationFailed(res, req, skillRoleValidation.details)
       }
+      selectedSkillRole = skillRoleValidation.skillRole
 
-      if (skillRoleValidation.skillRole?.status !== SKILL_ROLE_REGISTRY_STATUSES.ACTIVE) {
+      if (isActiveSkill && skillRoleValidation.skillRole?.status !== SKILL_ROLE_REGISTRY_STATUSES.ACTIVE) {
         return sendValidationFailed(res, req, {
           skillRoleKey: `Skill role key "${skillRoleValidation.skillRoleKey}" must reference an ACTIVE skill role.`,
         })
@@ -502,6 +556,14 @@ export const createRuntimeSkill = async (req, res, next) => {
     })
     if (Object.keys(runtimePathDetails).length > 0) {
       return sendValidationFailed(res, req, runtimePathDetails)
+    }
+
+    const skillRoleScopeDetails = validateRuntimeSkillRoleWriteScopes({
+      skillRole: selectedSkillRole,
+      allowedWritePaths: req.body.allowedWritePaths,
+    })
+    if (Object.keys(skillRoleScopeDetails).length > 0) {
+      return sendValidationFailed(res, req, skillRoleScopeDetails)
     }
 
     const effectiveExecutionMode = String(req.body.executionMode ?? 'SYSTEM').trim().toUpperCase()
@@ -818,6 +880,7 @@ export const updateRuntimeSkill = async (req, res, next) => {
         : currentSkillRoleKey
     const nextStatus = String(req.body.status ?? runtimeSkill.status ?? '').trim().toUpperCase()
     const normalizedEffectiveSkillRoleKey = String(effectiveSkillRoleKey ?? '').trim().toUpperCase()
+    let selectedSkillRole = null
 
     if (!normalizedEffectiveSkillRoleKey) {
       if (nextStatus === RUNTIME_SKILL_STATUSES.ACTIVE) {
@@ -830,6 +893,7 @@ export const updateRuntimeSkill = async (req, res, next) => {
       if (Object.keys(skillRoleValidation.details).length > 0) {
         return sendValidationFailed(res, req, skillRoleValidation.details)
       }
+      selectedSkillRole = skillRoleValidation.skillRole
 
       const normalizedRequestedSkillRoleKey = String(req.body.skillRoleKey ?? '').trim().toUpperCase()
       const isChangingSkillRoleKey =
@@ -864,6 +928,14 @@ export const updateRuntimeSkill = async (req, res, next) => {
     })
     if (Object.keys(runtimePathDetails).length > 0) {
       return sendValidationFailed(res, req, runtimePathDetails)
+    }
+
+    const skillRoleScopeDetails = validateRuntimeSkillRoleWriteScopes({
+      skillRole: selectedSkillRole,
+      allowedWritePaths: nextAllowedWritePaths,
+    })
+    if (Object.keys(skillRoleScopeDetails).length > 0) {
+      return sendValidationFailed(res, req, skillRoleScopeDetails)
     }
 
     const effectiveExecutionMode = String(req.body.executionMode ?? runtimeSkill.executionMode ?? 'SYSTEM').trim().toUpperCase()
