@@ -48,6 +48,12 @@ const buildActorSummary = (req) => {
   }
 }
 
+const normalizeOptionalText = (value) => {
+  if (value === undefined || value === null) return null
+  const normalized = String(value).trim()
+  return normalized || null
+}
+
 const serializeUIContract = (uiContract, { fallbackUpdatedBy = null } = {}) => {
   const plain = typeof uiContract?.toJSON === 'function'
     ? uiContract.toJSON()
@@ -55,6 +61,8 @@ const serializeUIContract = (uiContract, { fallbackUpdatedBy = null } = {}) => {
 
   if (!plain.id && plain.stableId) plain.id = plain.stableId
   plain.resolvedAt = plain.resolvedAt ?? plain.updatedAt ?? plain.createdAt ?? null
+  plain.deprecatedInVersion = normalizeOptionalText(plain.deprecatedInVersion)
+  plain.lockedReason = normalizeOptionalText(plain.lockedReason)
 
   delete plain._id
   delete plain.__v
@@ -627,7 +635,7 @@ export const cloneUIContractRecord = async (req, res, next) => {
       isLocked: false,
       lockedAt: null,
       lockedBy: null,
-      lockedReason: '',
+      lockedReason: null,
       lockedByPackageKeys: [],
       clonedFromStableId: sourceStableId,
       supersedesStableId: sourceStableId,

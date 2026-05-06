@@ -306,6 +306,8 @@ describe('Runtime Path Registry API', () => {
           sourceType: 'DERIVED',
           isProtected: false,
           isSystem: true,
+          lockedReason: '',
+          deprecatedInVersion: '',
           createdBy: { id: SUPER_ADMIN_ID, name: 'Super Administrator' },
           updatedBy: { id: SUPER_ADMIN_ID, name: 'Super Administrator' },
         },
@@ -319,6 +321,14 @@ describe('Runtime Path Registry API', () => {
     expect(res.status).toBe(200)
     expect(Array.isArray(res.body.data)).toBe(true)
     expect(res.body.data[0]?.pathKey).toBe('vmf.validation.status')
+    expect(res.body.data[0]?.componentVersion).toBe(1)
+    expect(res.body.data[0]?.lineageId).toBe(RUNTIME_PATH_STABLE_ID)
+    expect(res.body.data[0]?.lockedReason).toBeNull()
+    expect(res.body.data[0]?.lockedByPackageKeys).toEqual([])
+    expect(res.body.data[0]?.deprecatedInVersion).toBeNull()
+    expect(res.body.data[0]?.clonedFromStableId).toBeNull()
+    expect(res.body.data[0]?.supersedesStableId).toBeNull()
+    expect(res.body.data[0]?.supersededByStableId).toBeNull()
     expect(res.body.meta?.page).toBe(1)
   })
 
@@ -600,8 +610,11 @@ describe('Runtime Path Registry API', () => {
     expect(res.body.data?.componentVersion).toBe(2)
     expect(res.body.data?.versionStatus).toBe('DRAFT')
     expect(res.body.data?.lineageId).toBe(source.stableId)
+    expect(res.body.data?.lockedReason).toBeNull()
+    expect(res.body.data?.deprecatedInVersion).toBeNull()
     expect(res.body.data?.clonedFromStableId).toBe(source.stableId)
     expect(res.body.data?.supersedesStableId).toBe(source.stableId)
+    expect(res.body.data?.supersededByStableId).toBeNull()
     expect(auditService.logFromRequest).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
@@ -637,9 +650,12 @@ describe('Runtime Path Registry API', () => {
     expect(res.body.data?.versionStatus).toBe('DRAFT')
     expect(res.body.data?.lineageId).toBe('path-vmf-validation-lineage')
     expect(res.body.data?.isLocked).toBe(false)
+    expect(res.body.data?.lockedReason).toBeNull()
     expect(res.body.data?.lockedByPackageKeys).toEqual([])
+    expect(res.body.data?.deprecatedInVersion).toBeNull()
     expect(res.body.data?.clonedFromStableId).toBe(source.stableId)
     expect(res.body.data?.supersedesStableId).toBe(source.stableId)
+    expect(res.body.data?.supersededByStableId).toBeNull()
   })
 
   test('POST /api/v1/super-admin/runtime-control/runtime-paths/:pathId/clone rejects non-draft clone status', async () => {

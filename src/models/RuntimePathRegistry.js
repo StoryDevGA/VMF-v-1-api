@@ -440,6 +440,7 @@ const runtimePathRegistrySchema = new mongoose.Schema(
       type: String,
       trim: true,
       maxlength: 40,
+      default: null,
     },
     replacementPathKey: {
       type: String,

@@ -242,7 +242,7 @@ const buildRuntimeControlVersioningFields = ({ compatibilityModeDefault }) => ({
     type: String,
     trim: true,
     maxlength: 500,
-    default: '',
+    default: null,
   },
   lockedByPackageKeys: {
     type: [String],
@@ -343,7 +343,7 @@ export const applyRuntimeControlVersioning = (
     }
 
     if (this.isNew || this.isModified('lockedReason')) {
-      this.lockedReason = String(this.lockedReason || '').trim()
+      this.lockedReason = normalizeNullableText(this.lockedReason)
     }
 
     if (this.isNew || this.isModified('lockedByPackageKeys')) {

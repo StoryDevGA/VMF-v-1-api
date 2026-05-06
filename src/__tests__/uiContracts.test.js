@@ -69,6 +69,14 @@ const buildFrameworkPackageFindOneChain = (row) => ({
   }),
 })
 
+const buildUIContractListQueryChain = (rows) => ({
+  sort: jest.fn().mockReturnThis(),
+  skip: jest.fn().mockReturnThis(),
+  limit: jest.fn().mockReturnThis(),
+  populate: jest.fn().mockReturnThis(),
+  lean: jest.fn().mockResolvedValue(rows),
+})
+
 const makeSourceFrameworkPackage = (overrides = {}) => ({
   packageKey: 'vmf-2-3-1',
   frameworkKey: 'VMF',
@@ -187,6 +195,8 @@ beforeEach(() => {
   })
   UIContract.findById = jest.fn().mockResolvedValue(null)
   UIContract.findByStableId = jest.fn().mockResolvedValue(null)
+  UIContract.countDocuments = jest.fn().mockResolvedValue(0)
+  UIContract.find = jest.fn().mockReturnValue(buildUIContractListQueryChain([]))
   UIContract.updateOne = jest.fn().mockResolvedValue({ modifiedCount: 1 })
   UIContract.prototype.save = jest.fn(async function save() {
     return this
@@ -206,6 +216,46 @@ describe('UI Contract Routes', () => {
     const res = await request.get('/api/v1/super-admin/runtime-control/ui-contracts')
     expect(res.status).toBe(401)
     expect(res.body.error.code).toBe('UNAUTHENTICATED')
+  })
+
+  test('GET /api/v1/super-admin/runtime-control/ui-contracts normalizes legacy blank optional fields', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    UIContract.countDocuments.mockResolvedValue(1)
+    UIContract.find.mockReturnValue(buildUIContractListQueryChain([
+      {
+        id: 'ui-contract-vmf-ui-contract-v1',
+        uiContractKey: 'vmf-ui-contract-v1',
+        name: 'VMF UI Contract',
+        status: 'DRAFT',
+        frameworkKeys: ['VMF'],
+        deprecatedInVersion: '',
+        lockedReason: '',
+      },
+    ]))
+
+    const res = await request
+      .get('/api/v1/super-admin/runtime-control/ui-contracts')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data[0].deprecatedInVersion).toBeNull()
+    expect(res.body.data[0].lockedReason).toBeNull()
+  })
+
+  test('GET /api/v1/super-admin/runtime-control/ui-contracts/:uiContractId normalizes legacy blank optional fields', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    UIContract.findById.mockResolvedValue(makeUIContractDoc({
+      deprecatedInVersion: '',
+      lockedReason: '',
+    }))
+
+    const res = await request
+      .get(`/api/v1/super-admin/runtime-control/ui-contracts/${UI_CONTRACT_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.deprecatedInVersion).toBeNull()
+    expect(res.body.data.lockedReason).toBeNull()
   })
 
   test('POST /api/v1/super-admin/runtime-control/ui-contracts creates a UI Contract', async () => {
@@ -626,6 +676,7 @@ describe('UI Contract Routes', () => {
     expect(res.body.data.componentVersion).toBe(4)
     expect(res.body.data.versionStatus).toBe('DRAFT')
     expect(res.body.data.isLocked).toBe(false)
+    expect(res.body.data.lockedReason).toBeNull()
     expect(new Date(res.body.data.resolvedAt).toISOString()).toBe(res.body.data.resolvedAt)
     expect(source.save).not.toHaveBeenCalled()
     expect(UIContract.updateOne).toHaveBeenCalledWith(

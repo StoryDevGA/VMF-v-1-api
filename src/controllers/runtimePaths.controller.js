@@ -43,6 +43,13 @@ const normalizeSerializedMaps = (plain) => {
   }
 }
 
+const normalizeNullableText = (value) => {
+  if (value === undefined || value === null) return null
+
+  const normalized = String(value).trim()
+  return normalized || null
+}
+
 const serializeRuntimePath = (runtimePath, { fallbackUpdatedBy = null } = {}) => {
   const plain = typeof runtimePath?.toJSON === 'function'
     ? runtimePath.toJSON()
@@ -50,9 +57,21 @@ const serializeRuntimePath = (runtimePath, { fallbackUpdatedBy = null } = {}) =>
 
   normalizeSerializedMaps(plain)
 
-  if (!plain.id && plain.stableId) {
-    plain.id = plain.stableId
+  const stableId = plain.stableId || plain.id || null
+  if (!plain.id && stableId) {
+    plain.id = stableId
   }
+
+  plain.componentVersion = Number(plain.componentVersion) || 1
+  plain.lineageId = normalizeNullableText(plain.lineageId) || stableId
+  plain.lockedReason = normalizeNullableText(plain.lockedReason)
+  plain.lockedByPackageKeys = Array.isArray(plain.lockedByPackageKeys)
+    ? plain.lockedByPackageKeys
+    : []
+  plain.deprecatedInVersion = normalizeNullableText(plain.deprecatedInVersion)
+  plain.clonedFromStableId = normalizeNullableText(plain.clonedFromStableId)
+  plain.supersedesStableId = normalizeNullableText(plain.supersedesStableId)
+  plain.supersededByStableId = normalizeNullableText(plain.supersededByStableId)
 
   delete plain._id
   delete plain.__v
@@ -909,7 +928,7 @@ export const cloneRuntimePath = async (req, res, next) => {
       isLocked: false,
       lockedAt: null,
       lockedBy: null,
-      lockedReason: '',
+      lockedReason: null,
       lockedByPackageKeys: [],
       clonedFromStableId: source.stableId,
       supersedesStableId: source.stableId,
