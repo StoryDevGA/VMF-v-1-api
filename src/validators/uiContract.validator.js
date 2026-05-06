@@ -37,6 +37,7 @@ const governedMetadataFieldsSchema = {
   clonedFromStableId: governedMetadataFieldSchema('clonedFromStableId'),
   supersedesStableId: governedMetadataFieldSchema('supersedesStableId'),
   supersededByStableId: governedMetadataFieldSchema('supersededByStableId'),
+  resolvedAt: governedMetadataFieldSchema('resolvedAt'),
 }
 
 const frameworkKeysSchema = z

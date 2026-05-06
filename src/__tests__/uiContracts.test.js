@@ -246,6 +246,7 @@ describe('UI Contract Routes', () => {
     expect(res.body.data.sections[0].source).toBe('PACKAGE')
     expect(res.body.data.sections[0].isCustom).toBe(false)
     expect(res.body.data.deprecatedInVersion).toBeNull()
+    expect(new Date(res.body.data.resolvedAt).toISOString()).toBe(res.body.data.resolvedAt)
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'UI_CONTRACT_CREATED',
       resourceType: 'UIContract',
@@ -482,10 +483,12 @@ describe('UI Contract Routes', () => {
 
   test('PATCH /api/v1/super-admin/runtime-control/ui-contracts/:uiContractId keeps omitted fields unchanged', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
+    const previousResolvedAt = '2026-04-29T08:00:00.000Z'
     UIContract.findById.mockResolvedValue(makeUIContractDoc({
       name: 'VMF UI Contract',
       introducedInVersion: '2.3.1',
       deprecatedInVersion: null,
+      resolvedAt: new Date(previousResolvedAt),
     }))
 
     const res = await request
@@ -499,6 +502,27 @@ describe('UI Contract Routes', () => {
     expect(res.body.data.name).toBe('Updated VMF UI Contract')
     expect(res.body.data.introducedInVersion).toBe('2.3.1')
     expect(res.body.data.deprecatedInVersion).toBeNull()
+    expect(new Date(res.body.data.resolvedAt).toISOString()).toBe(res.body.data.resolvedAt)
+    expect(new Date(res.body.data.resolvedAt).getTime()).toBeGreaterThan(new Date(previousResolvedAt).getTime())
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'UI_CONTRACT_UPDATED',
+      diff: expect.objectContaining({
+        name: { from: 'VMF UI Contract', to: 'Updated VMF UI Contract' },
+        _resolution: { resolvedAt: res.body.data.resolvedAt },
+      }),
+    }))
+  })
+
+  test('UIContract model blocks direct resolvedAt mutation on existing records', async () => {
+    const uiContract = makeUIContractDoc({
+      resolvedAt: new Date('2026-04-29T08:00:00.000Z'),
+    })
+    uiContract.$isNew = false
+    uiContract.resolvedAt = new Date('2026-04-29T09:00:00.000Z')
+
+    await expect(uiContract.validate()).rejects.toThrow(
+      'resolvedAt is server-managed governance metadata and cannot be edited directly.',
+    )
   })
 
   test('PATCH /api/v1/super-admin/runtime-control/ui-contracts/:uiContractId rejects immutable keys', async () => {
@@ -528,10 +552,12 @@ describe('UI Contract Routes', () => {
         status: 'DRAFT',
         frameworkKeys: ['VMF'],
         isLocked: false,
+        resolvedAt: '2026-04-29T08:00:00.000Z',
       })
 
     expect(res.status).toBe(422)
     expect(res.body.error.details.isLocked).toContain('server-managed governance metadata')
+    expect(res.body.error.details.resolvedAt).toContain('server-managed governance metadata')
   })
 
   test('PATCH /api/v1/super-admin/runtime-control/ui-contracts/:uiContractId blocks locked edits', async () => {
@@ -600,6 +626,7 @@ describe('UI Contract Routes', () => {
     expect(res.body.data.componentVersion).toBe(4)
     expect(res.body.data.versionStatus).toBe('DRAFT')
     expect(res.body.data.isLocked).toBe(false)
+    expect(new Date(res.body.data.resolvedAt).toISOString()).toBe(res.body.data.resolvedAt)
     expect(source.save).not.toHaveBeenCalled()
     expect(UIContract.updateOne).toHaveBeenCalledWith(
       { _id: source._id },

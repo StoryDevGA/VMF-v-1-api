@@ -419,6 +419,11 @@ const uiContractSchema = new mongoose.Schema(
         message: 'Source framework key must use uppercase letters, numbers, or underscores.',
       },
     },
+    // Last successful server-side reconciliation of this projection against its source package/runtime contracts.
+    resolvedAt: {
+      type: Date,
+      default: Date.now,
+    },
     sections: [uiContractSectionSchema],
     lifecycleStages: [uiContractLifecycleStageSchema],
     actions: [uiContractActionSchema],
@@ -475,7 +480,22 @@ uiContractSchema.statics.findByStableId = function findByStableId(stableId) {
   return this.findOne({ stableId: String(stableId || '').trim().toLowerCase() })
 }
 
+uiContractSchema.methods.markResolved = function markResolved(resolvedAt = new Date()) {
+  this.$locals.allowResolvedAtWrite = true
+  this.resolvedAt = resolvedAt
+  return this
+}
+
 uiContractSchema.pre('validate', function normalizeUIContract(next) {
+  if (this.isNew) {
+    this.resolvedAt = new Date()
+  } else if (this.isModified('resolvedAt') && !this.$locals.allowResolvedAtWrite) {
+    this.invalidate(
+      'resolvedAt',
+      'resolvedAt is server-managed governance metadata and cannot be edited directly.',
+    )
+  }
+
   if (this.isNew || this.isModified('uiContractKey')) {
     this.uiContractKey = String(this.uiContractKey || '').trim().toLowerCase()
   }

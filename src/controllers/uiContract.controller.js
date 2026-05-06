@@ -54,6 +54,7 @@ const serializeUIContract = (uiContract, { fallbackUpdatedBy = null } = {}) => {
     : { ...uiContract }
 
   if (!plain.id && plain.stableId) plain.id = plain.stableId
+  plain.resolvedAt = plain.resolvedAt ?? plain.updatedAt ?? plain.createdAt ?? null
 
   delete plain._id
   delete plain.__v
@@ -614,8 +615,6 @@ export const cloneUIContractRecord = async (req, res, next) => {
     const sourceStableId = source.stableId || sourceObject.stableId || sourceObject.id
     const clonePayload = {
       ...sourceObject,
-      _id: undefined,
-      stableId: undefined,
       uiContractKey: req.body.uiContractKey,
       name: req.body.name,
       description: req.body.description ?? source.description ?? '',
@@ -633,11 +632,14 @@ export const cloneUIContractRecord = async (req, res, next) => {
       clonedFromStableId: sourceStableId,
       supersedesStableId: sourceStableId,
       supersededByStableId: null,
-      createdAt: undefined,
-      updatedAt: undefined,
       createdBy: actorUserId,
       updatedBy: actorUserId,
     }
+    delete clonePayload._id
+    delete clonePayload.stableId
+    delete clonePayload.resolvedAt
+    delete clonePayload.createdAt
+    delete clonePayload.updatedAt
 
     const sourcePackageResult = await resolveSourcePackage({
       sourcePackageKey: clonePayload.sourcePackageKey,
@@ -663,6 +665,7 @@ export const cloneUIContractRecord = async (req, res, next) => {
     }
 
     const clone = new UIContract(clonePayload)
+    clone.markResolved()
     await clone.save()
 
     await UIContract.updateOne(
@@ -802,6 +805,7 @@ export const updateUIContract = async (req, res, next) => {
     }
 
     uiContract.updatedBy = req.context?.userId || req.userId
+    uiContract.markResolved()
     await uiContract.save()
     await uiContract.populate([
       { path: 'createdBy', select: 'name email' },
@@ -815,7 +819,10 @@ export const updateUIContract = async (req, res, next) => {
         resourceId: uiContract._id,
         scope: { frameworkKey: uiContract.frameworkKeys?.[0] },
         display: { resourceLabel: uiContract.uiContractKey },
-        diff,
+        diff: {
+          ...diff,
+          _resolution: { resolvedAt: cloneAuditValue(uiContract.resolvedAt) },
+        },
       })
     }
 
