@@ -17,6 +17,7 @@ import RuntimeSkill from '../models/RuntimeSkill.js'
 import SkillRoleRegistry, { SKILL_ROLE_REGISTRY_STATUSES } from '../models/SkillRoleRegistry.js'
 import RuntimePathRegistry, {
   RUNTIME_PATH_REGISTRY_CATEGORIES,
+  RUNTIME_PATH_REGISTRY_OPERATIONS,
   RUNTIME_PATH_REGISTRY_SCOPES,
   RUNTIME_PATH_REGISTRY_STATUSES,
 } from '../models/RuntimePathRegistry.js'
@@ -668,7 +669,7 @@ const validateSectionRuntimePaths = async ({ sections = [], frameworkKey }) => {
   if (runtimePaths.length === 0) return null
 
   const rows = await RuntimePathRegistry.find({ pathKey: { $in: runtimePaths } })
-    .select('pathKey status frameworkKeys scope category')
+    .select('pathKey status frameworkKeys scope category allowedOperations')
     .lean()
   const byPath = new Map(rows.map((row) => [row.pathKey, row]))
   const invalidRuntimePaths = runtimePaths.filter((runtimePath) => {
@@ -678,12 +679,17 @@ const validateSectionRuntimePaths = async ({ sections = [], frameworkKey }) => {
     if (row.scope !== RUNTIME_PATH_REGISTRY_SCOPES.FRAMEWORK_STATE) return true
     if (row.category !== RUNTIME_PATH_REGISTRY_CATEGORIES.SECTION) return true
     if (!runtimePath.startsWith('framework_state.sections.')) return true
+    // Normalize here as a guard for legacy or seeded rows that predate model hooks.
+    const allowedOperations = Array.isArray(row.allowedOperations)
+      ? row.allowedOperations.map((operation) => String(operation ?? '').trim().toUpperCase())
+      : []
+    if (!allowedOperations.includes(RUNTIME_PATH_REGISTRY_OPERATIONS.BIND)) return true
     return !Array.isArray(row.frameworkKeys) || !row.frameworkKeys.includes(frameworkKey)
   })
 
   if (invalidRuntimePaths.length === 0) return null
 
-  return `Section runtime paths must be ACTIVE, FRAMEWORK_STATE/SECTION, and compatible with "${frameworkKey}": ${invalidRuntimePaths.join(', ')}.`
+  return `Section runtime paths must be ACTIVE, FRAMEWORK_STATE/SECTION, allow BIND, and be compatible with "${frameworkKey}": ${invalidRuntimePaths.join(', ')}.`
 }
 
 const validateUIContractSectionAlignment = ({ sections = [], uiContract = null }) => {

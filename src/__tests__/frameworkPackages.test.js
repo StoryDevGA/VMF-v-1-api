@@ -102,6 +102,7 @@ const buildDefaultSectionRuntimePathRows = () => ([
     frameworkKeys: ['VMF'],
     scope: 'FRAMEWORK_STATE',
     category: 'SECTION',
+    allowedOperations: ['READ', 'BIND'],
   },
 ])
 
@@ -883,6 +884,81 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     expect(res.body.error.details.sections).toContain('FRAMEWORK_STATE/SECTION')
   })
 
+  test.each([
+    ['READ only', ['READ']],
+    ['empty operations', []],
+    ['missing operations', undefined],
+  ])('POST /api/v1/super-admin/runtime-control/framework-packages rejects section runtime paths without BIND: %s', async (_label, allowedOperations) => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    mockFindOneSelect(null)
+    const runtimePathRow = {
+      pathKey: 'framework_state.sections.customer_problem',
+      status: 'ACTIVE',
+      frameworkKeys: ['VMF'],
+      scope: 'FRAMEWORK_STATE',
+      category: 'SECTION',
+    }
+    if (allowedOperations !== undefined) {
+      runtimePathRow.allowedOperations = allowedOperations
+    }
+    RuntimePathRegistry.find.mockReturnValue(buildFrameworkRegistryLookupChain([
+      runtimePathRow,
+    ]))
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/framework-packages')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        frameworkKey: 'VMF',
+        frameworkName: 'Value Management Framework',
+        version: '2.5.3',
+        sections: [
+          {
+            sectionKey: 'customer_problem',
+            runtimePath: 'framework_state.sections.customer_problem',
+            required: true,
+          },
+        ],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.sections).toContain('allow BIND')
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages accepts legacy lowercase BIND operation values', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    mockFindOneSelect(null)
+    RuntimePathRegistry.find.mockReturnValue(buildFrameworkRegistryLookupChain([
+      {
+        pathKey: 'framework_state.sections.customer_problem',
+        status: 'ACTIVE',
+        frameworkKeys: ['VMF'],
+        scope: 'FRAMEWORK_STATE',
+        category: 'SECTION',
+        allowedOperations: ['read', 'bind'],
+      },
+    ]))
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/framework-packages')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        frameworkKey: 'VMF',
+        frameworkName: 'Value Management Framework',
+        version: '2.5.3',
+        sections: [
+          {
+            sectionKey: 'customer_problem',
+            runtimePath: 'framework_state.sections.customer_problem',
+            required: true,
+          },
+        ],
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data.sections[0].runtimePath).toBe('framework_state.sections.customer_problem')
+  })
+
   test('POST /api/v1/super-admin/runtime-control/framework-packages rejects package sections missing from selected UI Contract', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     mockFindOneSelect(null)
@@ -1500,6 +1576,7 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
         frameworkKeys: ['VMF'],
         scope: 'FRAMEWORK_STATE',
         category: 'SECTION',
+        allowedOperations: ['READ', 'BIND'],
       },
       {
         stableId: 'path-required-sections',
@@ -1626,6 +1703,7 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
         frameworkKeys: ['VMF'],
         scope: 'FRAMEWORK_STATE',
         category: 'SECTION',
+        allowedOperations: ['READ', 'BIND'],
       },
     ]))
     UIContract.findOne.mockReturnValue({
