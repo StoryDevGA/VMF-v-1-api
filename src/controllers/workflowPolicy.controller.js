@@ -11,9 +11,11 @@ import WorkflowPolicy, {
   WORKFLOW_POLICY_ESCALATION_ROLE_KEYS,
   WORKFLOW_POLICY_EXECUTION_TYPES,
   WORKFLOW_POLICY_ROUTING_MODES,
+  WORKFLOW_POLICY_SEVERITIES,
   WORKFLOW_POLICY_STATUSES,
   WORKFLOW_POLICY_STEP_TYPES,
   WORKFLOW_POLICY_STEP_ORDER_CONSTRAINTS_BY_FRAMEWORK,
+  WORKFLOW_POLICY_TYPES,
   buildWorkflowPolicyStableId,
 } from '../models/WorkflowPolicy.js'
 import FrameworkPackage from '../models/FrameworkPackage.js'
@@ -341,6 +343,12 @@ const cloneAuditValue = (value) => {
   return JSON.parse(JSON.stringify(value))
 }
 
+const normalizeNullableText = (value) => {
+  if (value === undefined || value === null) return null
+  const normalized = String(value).trim()
+  return normalized || null
+}
+
 const normalizeWorkflowPolicyStableId = (value) =>
   String(value || '').trim().toLowerCase()
 
@@ -367,6 +375,56 @@ const normalizeEscalationRoleKey = (value) => {
   if (Object.values(WORKFLOW_POLICY_ESCALATION_ROLE_KEYS).includes(normalized)) return normalized
   if (normalized === 'FRAMEWORK_OWNER') return WORKFLOW_POLICY_ESCALATION_ROLE_KEYS.FRAMEWORK_OWNER
   return WORKFLOW_POLICY_ESCALATION_ROLE_KEYS.CUSTOMER_ADMIN
+}
+
+const normalizeWorkflowPolicyTokenList = (values = []) =>
+  [...new Set(
+    (Array.isArray(values) ? values : [])
+      .map((value) => String(value ?? '').trim().toLowerCase())
+      .filter(Boolean),
+  )]
+
+const normalizeWorkflowPolicyTimeoutMs = (value) => {
+  if (value === null) return null
+  const numericValue = Number(value)
+  if (Number.isInteger(numericValue) && numericValue >= 1 && numericValue <= 300000) {
+    return numericValue
+  }
+  return WORKFLOW_POLICY_DEFAULTS.timeoutMs
+}
+
+const deriveWorkflowPolicyExecutionFields = ({
+  steps = [],
+  primaryAgentId = '',
+  fallbackAgentId = '',
+  orderedSteps = [],
+  requiredAgentIds = [],
+  requiredSkillIds = [],
+} = {}) => {
+  const normalizedSteps = normalizeWorkflowStepRows(steps)
+  const hasCanonicalSteps = normalizedSteps.length > 0
+  const derivedOrderedSteps = hasCanonicalSteps
+    ? [...normalizedSteps]
+      .sort((left, right) => Number(left.order) - Number(right.order))
+      .map((step) => String(step.stepKey ?? '').trim().toLowerCase())
+      .filter(Boolean)
+    : normalizeWorkflowPolicyTokenList(orderedSteps)
+  const derivedRequiredAgentIds = [
+    primaryAgentId,
+    fallbackAgentId,
+    ...(hasCanonicalSteps
+      ? normalizedSteps.map((step) => step.agentId)
+      : normalizeWorkflowPolicyTokenList(requiredAgentIds)),
+  ].map((value) => String(value ?? '').trim().toLowerCase()).filter(Boolean)
+  const derivedRequiredSkillIds = hasCanonicalSteps
+    ? normalizedSteps.map((step) => String(step.skillId ?? '').trim().toLowerCase()).filter(Boolean)
+    : normalizeWorkflowPolicyTokenList(requiredSkillIds)
+
+  return {
+    orderedSteps: [...new Set(derivedOrderedSteps)],
+    requiredAgentIds: [...new Set(derivedRequiredAgentIds)],
+    requiredSkillIds: [...new Set(derivedRequiredSkillIds)],
+  }
 }
 
 const pickWorkflowPolicyPayload = (body = {}) => {
@@ -478,6 +536,12 @@ const serializeWorkflowPolicy = (workflowPolicy, { fallbackUpdatedBy = null } = 
     plain.escalationRoleKey = normalizeEscalationRoleKey(plain.escalateTo)
   }
 
+  plain.lockedReason = normalizeNullableText(plain.lockedReason)
+  plain.deprecatedInVersion = normalizeNullableText(plain.deprecatedInVersion)
+  plain.timeoutMs = normalizeWorkflowPolicyTimeoutMs(plain.timeoutMs)
+  plain.gatingRules = []
+  Object.assign(plain, deriveWorkflowPolicyExecutionFields(plain))
+
   const serializedUpdatedBy = serializeUserSummary(plain.updatedBy)
   plain.createdBy = serializeUserSummary(plain.createdBy)
   plain.updatedBy =
@@ -573,6 +637,9 @@ const findUnsupportedFrameworkKey = (supportedFrameworkKeys = [], workflowFramew
 
 const getWorkflowPolicyFieldValue = (workflowPolicy, field) => {
   const directValue = workflowPolicy?.[field]
+  if (field === 'timeoutMs' && directValue !== undefined) {
+    return normalizeWorkflowPolicyTimeoutMs(directValue)
+  }
   if (directValue !== undefined) return directValue
   return cloneAuditValue(WORKFLOW_POLICY_FIELD_DEFAULTS[field])
 }
@@ -1608,10 +1675,15 @@ const validateWorkflowPolicyReferences = async ({
   decisionMode,
   executionType,
   steps,
+  severity,
   conditions,
   routingMode,
   primaryAgentId,
   fallbackAgentId,
+  timeoutMs,
+  orderedSteps,
+  requiredAgentIds,
+  requiredSkillIds,
   requiredValidationKeys,
   validationFreshnessMinutes,
   onPassEffects,
@@ -1622,17 +1694,22 @@ const validateWorkflowPolicyReferences = async ({
   escalationRoleKey,
   escalationMessage,
   slaMinutes,
-  orderedSteps,
-  requiredAgentIds,
-  requiredSkillIds,
   status,
 }, { previousRequiredValidationKeys = [] } = {}) => {
   const details = {}
   const normalizedFrameworkKeys = normalizeFrameworkKeyList(frameworkKeys)
-  const normalizedOrderedSteps = Array.isArray(orderedSteps) ? orderedSteps : []
   const normalizedSteps = normalizeWorkflowStepRows(steps)
-  const normalizedRequiredAgentIds = Array.isArray(requiredAgentIds) ? requiredAgentIds : []
-  const normalizedRequiredSkillIds = Array.isArray(requiredSkillIds) ? requiredSkillIds : []
+  const derivedExecutionFields = deriveWorkflowPolicyExecutionFields({
+    steps: normalizedSteps,
+    primaryAgentId,
+    fallbackAgentId,
+    orderedSteps,
+    requiredAgentIds,
+    requiredSkillIds,
+  })
+  const normalizedOrderedSteps = derivedExecutionFields.orderedSteps
+  const normalizedRequiredAgentIds = derivedExecutionFields.requiredAgentIds
+  const normalizedRequiredSkillIds = derivedExecutionFields.requiredSkillIds
   const stepAgentIds = normalizedSteps.map((step) => step.agentId).filter(Boolean)
   const stepSkillIds = normalizedSteps.map((step) => step.skillId).filter(Boolean)
   const normalizedRequiredValidationKeys = Array.isArray(requiredValidationKeys) ? requiredValidationKeys : []
@@ -1669,6 +1746,30 @@ const validateWorkflowPolicyReferences = async ({
 
   if (!governedAction) {
     details.governedAction = 'Workflow policy governed action is required.'
+  }
+
+  if (
+    timeoutMs !== undefined
+    && timeoutMs !== null
+    && (!Number.isInteger(Number(timeoutMs)) || Number(timeoutMs) < 1 || Number(timeoutMs) > 300000)
+  ) {
+    details.timeoutMs = 'Timeout Override must be between 1 and 300000 milliseconds.'
+  }
+
+  if (
+    String(policyType ?? '').trim().toUpperCase() === WORKFLOW_POLICY_TYPES.LIFECYCLE_GATE
+    && approvalRequired === true
+    && String(severity ?? '').trim().toUpperCase() === WORKFLOW_POLICY_SEVERITIES.INFO
+  ) {
+    details.severity = 'Approval-required lifecycle gates must use WARNING, CRITICAL, or BLOCKING severity.'
+  }
+
+  if (
+    String(executionType ?? '').trim().toUpperCase() === WORKFLOW_POLICY_EXECUTION_TYPES.SINGLE_STEP
+    && normalizedSteps.length === 0
+    && String(decisionMode ?? '').trim().toUpperCase() !== WORKFLOW_POLICY_DECISION_MODES.ALLOW
+  ) {
+    details.steps = 'Single-step policies without governed steps are only allowed for ALLOW decisions.'
   }
 
   const stepMessage = getWorkflowStepValidationMessage(normalizedFrameworkKeys, normalizedOrderedSteps)
@@ -1927,11 +2028,13 @@ export const createWorkflowPolicy = async (req, res, next) => {
     const body = pickWorkflowPolicyPayload(req.body)
     const normalizedBody = {
       ...body,
+      ...(body.timeoutMs !== undefined ? { timeoutMs: normalizeWorkflowPolicyTimeoutMs(body.timeoutMs) } : {}),
       ...(body.conditions !== undefined ? { conditions: normalizeConditionRows(body.conditions) } : {}),
       ...(body.onPassEffects !== undefined ? { onPassEffects: normalizeEffectRows(body.onPassEffects) } : {}),
       ...(body.onFailEffects !== undefined ? { onFailEffects: normalizeEffectRows(body.onFailEffects) } : {}),
       ...(body.steps !== undefined ? { steps: normalizeWorkflowStepRows(body.steps) } : {}),
     }
+    Object.assign(normalizedBody, deriveWorkflowPolicyExecutionFields(normalizedBody), { gatingRules: [] })
     const existingWorkflowPolicy = await WorkflowPolicy.findOne({
       key: body.key,
     }).select('_id')
@@ -2185,6 +2288,7 @@ export const cloneWorkflowPolicy = async (req, res, next) => {
       name: nextName,
       description: nextDescription,
       status: WORKFLOW_POLICY_STATUSES.DRAFT,
+      timeoutMs: normalizeWorkflowPolicyTimeoutMs(sourcePlain.timeoutMs),
       version: Number(sourcePolicy.version || 1) + 1,
       lastActivatedAt: null,
       componentVersion: Number(sourcePolicy.componentVersion || 1) + 1,
@@ -2193,8 +2297,10 @@ export const cloneWorkflowPolicy = async (req, res, next) => {
       isLocked: false,
       lockedAt: null,
       lockedBy: null,
-      lockedReason: '',
+      lockedReason: null,
       lockedByPackageKeys: [],
+      ...deriveWorkflowPolicyExecutionFields(sourcePlain),
+      gatingRules: [],
       clonedFromStableId: sourceStableId,
       supersedesStableId: sourceStableId,
       supersededByStableId: null,
@@ -2427,6 +2533,7 @@ export const updateWorkflowPolicy = async (req, res, next) => {
       })
     }
 
+    const hasSubmittedTimeoutMs = Object.prototype.hasOwnProperty.call(body, 'timeoutMs')
     const nextWorkflowPolicy = {
       key: body.key ?? workflowPolicy.key,
       name: body.name ?? workflowPolicy.name,
@@ -2456,7 +2563,9 @@ export const updateWorkflowPolicy = async (req, res, next) => {
       routingMode: body.routingMode ?? getWorkflowPolicyFieldValue(workflowPolicy, 'routingMode'),
       primaryAgentId: body.primaryAgentId ?? getWorkflowPolicyFieldValue(workflowPolicy, 'primaryAgentId'),
       fallbackAgentId: body.fallbackAgentId ?? getWorkflowPolicyFieldValue(workflowPolicy, 'fallbackAgentId'),
-      timeoutMs: body.timeoutMs ?? getWorkflowPolicyFieldValue(workflowPolicy, 'timeoutMs'),
+      timeoutMs: hasSubmittedTimeoutMs
+        ? normalizeWorkflowPolicyTimeoutMs(body.timeoutMs)
+        : getWorkflowPolicyFieldValue(workflowPolicy, 'timeoutMs'),
       retryOverride: body.retryOverride ?? getWorkflowPolicyFieldValue(workflowPolicy, 'retryOverride'),
       requireSuccess: body.requireSuccess ?? getWorkflowPolicyFieldValue(workflowPolicy, 'requireSuccess'),
       requiredValidationKeys: body.requiredValidationKeys ?? getWorkflowPolicyFieldValue(workflowPolicy, 'requiredValidationKeys'),
@@ -2480,11 +2589,12 @@ export const updateWorkflowPolicy = async (req, res, next) => {
         ),
       escalationMessage: body.escalationMessage ?? getWorkflowPolicyFieldValue(workflowPolicy, 'escalationMessage'),
       slaMinutes: body.slaMinutes ?? getWorkflowPolicyFieldValue(workflowPolicy, 'slaMinutes'),
-      orderedSteps: body.orderedSteps ?? getWorkflowPolicyFieldValue(workflowPolicy, 'orderedSteps'),
-      requiredAgentIds: body.requiredAgentIds ?? getWorkflowPolicyFieldValue(workflowPolicy, 'requiredAgentIds'),
-      requiredSkillIds: body.requiredSkillIds ?? getWorkflowPolicyFieldValue(workflowPolicy, 'requiredSkillIds'),
-      gatingRules: getWorkflowPolicyFieldValue(workflowPolicy, 'gatingRules'),
+      orderedSteps: getWorkflowPolicyFieldValue(workflowPolicy, 'orderedSteps'),
+      requiredAgentIds: getWorkflowPolicyFieldValue(workflowPolicy, 'requiredAgentIds'),
+      requiredSkillIds: getWorkflowPolicyFieldValue(workflowPolicy, 'requiredSkillIds'),
+      gatingRules: [],
     }
+    Object.assign(nextWorkflowPolicy, deriveWorkflowPolicyExecutionFields(nextWorkflowPolicy))
 
     const validationDetails = await validateWorkflowPolicyReferences(nextWorkflowPolicy, {
       previousRequiredValidationKeys: workflowPolicy.requiredValidationKeys,
@@ -2495,8 +2605,23 @@ export const updateWorkflowPolicy = async (req, res, next) => {
 
     const diff = {}
     const originalStatus = String(workflowPolicy.status ?? '').trim().toUpperCase()
+    const fieldsToApply = new Set(WORKFLOW_POLICY_MUTABLE_FIELDS.filter((field) => body[field] !== undefined))
+    if (
+      body.steps !== undefined
+      || body.primaryAgentId !== undefined
+      || body.fallbackAgentId !== undefined
+      || body.executionType !== undefined
+    ) {
+      fieldsToApply.add('orderedSteps')
+      fieldsToApply.add('requiredAgentIds')
+      fieldsToApply.add('requiredSkillIds')
+    }
+    if (!isDeepStrictEqual(cloneAuditValue(workflowPolicy.timeoutMs), cloneAuditValue(nextWorkflowPolicy.timeoutMs))) {
+      fieldsToApply.add('timeoutMs')
+    }
+
     for (const field of WORKFLOW_POLICY_MUTABLE_FIELDS) {
-      if (body[field] === undefined) continue
+      if (!fieldsToApply.has(field)) continue
 
       const previousValue = cloneAuditValue(workflowPolicy[field])
       const nextValue = cloneAuditValue(nextWorkflowPolicy[field])

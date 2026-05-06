@@ -53,6 +53,15 @@ const governedMetadataFieldsSchema = {
   supersededByStableId: governedMetadataFieldSchema('supersededByStableId'),
 }
 
+const deprecatedRuntimePolicyFieldSchema = (field) =>
+  z.unknown().optional().superRefine((value, ctx) => {
+    if (value === undefined) return
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `${field} is deprecated. Use conditions and governed steps instead.`,
+    })
+  })
+
 const frameworkKeySchema = z
   .string()
   .trim()
@@ -80,26 +89,6 @@ const frameworkKeysSchema = z
   .array(frameworkKeySchema)
   .min(1, 'At least one framework key is required.')
   .max(20, 'Framework keys must contain 20 items or fewer')
-  .transform((values) => [...new Set(values)])
-
-const orderedStepsSchema = z
-  .array(tokenSchema('Workflow step'))
-  .max(50, 'Ordered steps must contain 50 items or fewer')
-  .transform((values) => [...new Set(values)])
-
-const requiredAgentIdsSchema = z
-  .array(tokenSchema('Required agent id'))
-  .max(50, 'Required agent ids must contain 50 items or fewer')
-  .transform((values) => [...new Set(values)])
-
-const requiredSkillIdsSchema = z
-  .array(tokenSchema('Required skill id'))
-  .max(50, 'Required skill ids must contain 50 items or fewer')
-  .transform((values) => [...new Set(values)])
-
-const gatingRulesSchema = z
-  .array(tokenSchema('Gating rule'))
-  .max(50, 'Gating rules must contain 50 items or fewer')
   .transform((values) => [...new Set(values)])
 
 const conditionValueSchema = z.union([
@@ -186,6 +175,11 @@ const optionalRuntimeControlIdSchema = (label) =>
       (value) => !value || keyRegex.test(value),
       `${label} must use lowercase letters, numbers, or hyphens`,
     )
+
+const timeoutMsSchema = z.union([
+  z.null(),
+  z.coerce.number().int().min(1).max(300000),
+])
 
 const workflowPolicyStepSchema = z.object({
   stepKey: tokenSchema('Step key'),
@@ -318,7 +312,7 @@ const createWorkflowPolicySchema = z.object({
   routingMode: workflowPolicyRoutingModeFieldSchema.default(WORKFLOW_POLICY_DEFAULTS.routingMode),
   primaryAgentId: optionalAgentIdSchema.default(WORKFLOW_POLICY_DEFAULTS.primaryAgentId),
   fallbackAgentId: optionalAgentIdSchema.default(WORKFLOW_POLICY_DEFAULTS.fallbackAgentId),
-  timeoutMs: z.coerce.number().int().min(0).max(300000).default(WORKFLOW_POLICY_DEFAULTS.timeoutMs),
+  timeoutMs: timeoutMsSchema.default(WORKFLOW_POLICY_DEFAULTS.timeoutMs),
   retryOverride: z.string().trim().max(120, 'Retry override must be 120 characters or fewer').default(WORKFLOW_POLICY_DEFAULTS.retryOverride),
   requireSuccess: z.coerce.boolean().default(WORKFLOW_POLICY_DEFAULTS.requireSuccess),
   requiredValidationKeys: validationKeysSchema.default([]),
@@ -335,10 +329,10 @@ const createWorkflowPolicySchema = z.object({
   escalateTo: workflowPolicyEscalateToSchema.default(WORKFLOW_POLICY_DEFAULTS.escalateTo),
   escalationMessage: z.string().trim().max(500, 'Escalation message must be 500 characters or fewer').default(WORKFLOW_POLICY_DEFAULTS.escalationMessage),
   slaMinutes: z.coerce.number().int().min(0).max(10080).default(WORKFLOW_POLICY_DEFAULTS.slaMinutes),
-  orderedSteps: orderedStepsSchema.default([]),
-  requiredAgentIds: requiredAgentIdsSchema.default([]),
-  requiredSkillIds: requiredSkillIdsSchema.default([]),
-  gatingRules: gatingRulesSchema.default([]),
+  orderedSteps: deprecatedRuntimePolicyFieldSchema('orderedSteps'),
+  requiredAgentIds: deprecatedRuntimePolicyFieldSchema('requiredAgentIds'),
+  requiredSkillIds: deprecatedRuntimePolicyFieldSchema('requiredSkillIds'),
+  gatingRules: deprecatedRuntimePolicyFieldSchema('gatingRules'),
 })
 
 const updateWorkflowPolicySchema = z.object({
@@ -386,7 +380,7 @@ const updateWorkflowPolicySchema = z.object({
   routingMode: workflowPolicyRoutingModeFieldSchema.optional(),
   primaryAgentId: optionalAgentIdSchema.optional(),
   fallbackAgentId: optionalAgentIdSchema.optional(),
-  timeoutMs: z.coerce.number().int().min(0).max(300000).optional(),
+  timeoutMs: timeoutMsSchema.optional(),
   retryOverride: z.string().trim().max(120, 'Retry override must be 120 characters or fewer').optional(),
   requireSuccess: z.coerce.boolean().optional(),
   requiredValidationKeys: validationKeysSchema.optional(),
@@ -403,10 +397,10 @@ const updateWorkflowPolicySchema = z.object({
   escalateTo: workflowPolicyEscalateToSchema.optional(),
   escalationMessage: z.string().trim().max(500, 'Escalation message must be 500 characters or fewer').optional(),
   slaMinutes: z.coerce.number().int().min(0).max(10080).optional(),
-  orderedSteps: orderedStepsSchema.optional(),
-  requiredAgentIds: requiredAgentIdsSchema.optional(),
-  requiredSkillIds: requiredSkillIdsSchema.optional(),
-  gatingRules: gatingRulesSchema.optional(),
+  orderedSteps: deprecatedRuntimePolicyFieldSchema('orderedSteps'),
+  requiredAgentIds: deprecatedRuntimePolicyFieldSchema('requiredAgentIds'),
+  requiredSkillIds: deprecatedRuntimePolicyFieldSchema('requiredSkillIds'),
+  gatingRules: deprecatedRuntimePolicyFieldSchema('gatingRules'),
 }).refine(
   (value) => Object.keys(value).length > 0,
   { message: 'At least one updatable field is required.', path: ['key'] },

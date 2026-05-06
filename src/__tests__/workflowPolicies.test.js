@@ -196,10 +196,12 @@ const buildPhaseOneWorkflowPolicyPayload = (overrides = {}) => ({
   passMessage: 'Publishing allowed.',
   failMessage: 'Publishing blocked.',
   severity: 'BLOCKING',
-  orderedSteps: ['validate', 'lock', 'publish'],
-  requiredAgentIds: ['agent-validator'],
-  requiredSkillIds: ['skill-snapshot'],
-  gatingRules: ['validation-pass', 'framework-package-active'],
+  executionType: 'ORDERED_STEPS',
+  steps: [
+    { stepKey: 'validate', type: 'EVENT_EMIT', order: 1, eventKey: 'validate' },
+    { stepKey: 'lock', type: 'EVENT_EMIT', order: 2, eventKey: 'lock' },
+    { stepKey: 'publish', type: 'EVENT_EMIT', order: 3, eventKey: 'publish' },
+  ],
   ...overrides,
 })
 
@@ -385,9 +387,12 @@ describe('Workflow Policy Routes', () => {
         governedAction: 'PUBLISH',
         decisionMode: 'REQUIRE_AGENT_EVALUATION',
         severity: 'CRITICAL',
-        orderedSteps: ['validate', 'synthesise', 'publish'],
-        requiredAgentIds: ['agent-validator', 'agent-reporter'],
-        requiredSkillIds: ['skill-snapshot', 'skill-report'],
+        executionType: 'ORDERED_STEPS',
+        steps: [
+          { stepKey: 'validate', type: 'EVENT_EMIT', order: 1, eventKey: 'validate' },
+          { stepKey: 'synthesise', type: 'EVENT_EMIT', order: 2, eventKey: 'synthesise' },
+          { stepKey: 'publish', type: 'EVENT_EMIT', order: 3, eventKey: 'publish' },
+        ],
         gatingRules: ['validation-pass', 'framework-package-active'],
         updatedAt: '2026-04-09T09:00:00.000Z',
         updatedBy: { _id: SUPER_ADMIN_ID, name: 'Super Administrator' },
@@ -588,9 +593,12 @@ describe('Workflow Policy Routes', () => {
         key: 'vmf-review',
         name: 'VMF Review Policy',
         description: 'Checks review readiness.',
-        orderedSteps: ['snapshot', 'review', 'approve'],
-        requiredAgentIds: ['agent-validator', 'agent-missing'],
-        requiredSkillIds: ['skill-snapshot', 'skill-missing'],
+        executionType: 'ORDERED_STEPS',
+        steps: [
+          { stepKey: 'snapshot', type: 'SKILL_EXECUTION', order: 1, skillId: 'skill-snapshot' },
+          { stepKey: 'review', type: 'AGENT_EXECUTION', order: 2, agentId: 'agent-missing' },
+          { stepKey: 'approve', type: 'SKILL_EXECUTION', order: 3, skillId: 'skill-missing' },
+        ],
         triggerEvent: 'ON_SUBMIT',
         governedAction: 'SUBMIT_FOR_REVIEW',
       }))
@@ -616,9 +624,12 @@ describe('Workflow Policy Routes', () => {
         key: 'vmf-report',
         name: 'VMF Report Policy',
         description: 'Invalid VMF policy with an RLD-only skill.',
-        orderedSteps: ['snapshot', 'review', 'approve'],
-        requiredAgentIds: ['agent-validator'],
-        requiredSkillIds: ['skill-report'],
+        executionType: 'ORDERED_STEPS',
+        steps: [
+          { stepKey: 'snapshot', type: 'EVENT_EMIT', order: 1, eventKey: 'snapshot' },
+          { stepKey: 'review', type: 'SKILL_EXECUTION', order: 2, skillId: 'skill-report' },
+          { stepKey: 'approve', type: 'EVENT_EMIT', order: 3, eventKey: 'approve' },
+        ],
         triggerEvent: 'ON_SUBMIT',
         governedAction: 'SUBMIT_FOR_REVIEW',
       }))
@@ -643,7 +654,11 @@ describe('Workflow Policy Routes', () => {
         key: 'vmf-out-of-order',
         name: 'VMF Out Of Order Policy',
         description: 'Invalid publish sequencing.',
-        orderedSteps: ['publish', 'validate'],
+        executionType: 'ORDERED_STEPS',
+        steps: [
+          { stepKey: 'publish', type: 'EVENT_EMIT', order: 1, eventKey: 'publish' },
+          { stepKey: 'validate', type: 'EVENT_EMIT', order: 2, eventKey: 'validate' },
+        ],
       }))
 
     expect(res.status).toBe(422)
@@ -681,10 +696,27 @@ describe('Workflow Policy Routes', () => {
         passMessage: 'Ready for review.',
         failMessage: 'Review blocked.',
         severity: 'CRITICAL',
-        orderedSteps: ['snapshot', 'review', 'approve'],
-        requiredAgentIds: ['agent-validator', 'agent-summary'],
-        requiredSkillIds: ['skill-snapshot', 'skill-review'],
-        gatingRules: ['framework-package-active', 'framework-package-active'],
+        executionType: 'ORDERED_STEPS',
+        steps: [
+          {
+            stepKey: 'snapshot',
+            type: 'SKILL_EXECUTION',
+            order: 1,
+            skillId: 'skill-snapshot',
+          },
+          {
+            stepKey: 'review',
+            type: 'SKILL_EXECUTION',
+            order: 2,
+            skillId: 'skill-review',
+          },
+          {
+            stepKey: 'approve',
+            type: 'AGENT_EXECUTION',
+            order: 3,
+            agentId: 'agent-validator',
+          },
+        ],
       }))
 
     expect(res.status).toBe(201)
@@ -701,7 +733,7 @@ describe('Workflow Policy Routes', () => {
       decisionMode: 'REQUIRE_APPROVAL',
       severity: 'CRITICAL',
       orderedSteps: ['snapshot', 'review', 'approve'],
-      requiredAgentIds: ['agent-validator', 'agent-summary'],
+      requiredAgentIds: ['agent-validator'],
       requiredSkillIds: ['skill-snapshot', 'skill-review'],
       gatingRules: [],
     })
@@ -729,6 +761,119 @@ describe('Workflow Policy Routes', () => {
     expect(res.status).toBe(422)
     expect(res.body.error.code).toBe('VALIDATION_FAILED')
     expect(res.body.error.details.componentVersion).toContain('server-managed governance metadata')
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/workflow-policies rejects deprecated gatingRules', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/workflow-policies')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        ...buildPhaseOneWorkflowPolicyPayload({ key: 'vmf-deprecated-gating', name: 'VMF Deprecated Gating Policy' }),
+        gatingRules: [],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details.gatingRules).toContain('deprecated')
+  })
+
+  test.each([
+    'orderedSteps',
+    'requiredAgentIds',
+    'requiredSkillIds',
+  ])('POST /api/v1/super-admin/runtime-control/workflow-policies rejects derived %s payload fields', async (field) => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/workflow-policies')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        ...buildPhaseOneWorkflowPolicyPayload({ key: `vmf-derived-${field.toLowerCase()}`, name: `VMF Derived ${field}` }),
+        [field]: [],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details[field]).toContain('deprecated')
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/workflow-policies rejects zero timeout override', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/workflow-policies')
+      .set('Authorization', `Bearer ${token}`)
+      .send(buildPhaseOneWorkflowPolicyPayload({
+        key: 'vmf-zero-timeout',
+        name: 'VMF Zero Timeout Policy',
+        timeoutMs: 0,
+      }))
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details.timeoutMs).toContain('>=1')
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/workflow-policies accepts null timeout override', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    mockFindOneSelect(null)
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/workflow-policies')
+      .set('Authorization', `Bearer ${token}`)
+      .send(buildPhaseOneWorkflowPolicyPayload({
+        key: 'vmf-null-timeout',
+        name: 'VMF Null Timeout Policy',
+        timeoutMs: null,
+      }))
+
+    expect(res.status).toBe(201)
+    expect(res.body.data.timeoutMs).toBeNull()
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/workflow-policies rejects approval-required INFO lifecycle gates', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    mockFindOneSelect(null)
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/workflow-policies')
+      .set('Authorization', `Bearer ${token}`)
+      .send(buildPhaseOneWorkflowPolicyPayload({
+        key: 'vmf-info-approval-gate',
+        name: 'VMF Info Approval Gate',
+        severity: 'INFO',
+        overrideAllowed: true,
+        overrideRoles: ['SUPER_ADMIN'],
+        approvalRequired: true,
+        escalationRoleKey: 'FRAMEWORK_OWNER',
+        slaMinutes: 15,
+      }))
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details.severity).toContain('Approval-required lifecycle gates')
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/workflow-policies rejects empty single-step execution for non-ALLOW decisions', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    mockFindOneSelect(null)
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/workflow-policies')
+      .set('Authorization', `Bearer ${token}`)
+      .send(buildPhaseOneWorkflowPolicyPayload({
+        key: 'vmf-empty-single-step',
+        name: 'VMF Empty Single Step Policy',
+        executionType: 'SINGLE_STEP',
+        steps: [],
+        decisionMode: 'REQUIRE_APPROVAL',
+      }))
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details.steps).toContain('only allowed for ALLOW decisions')
   })
 
   test('POST /api/v1/super-admin/runtime-control/workflow-policies validates governed step identity and ordering', async () => {
@@ -837,6 +982,13 @@ describe('Workflow Policy Routes', () => {
         primaryAgentId: 'agent-validator',
         fallbackAgentId: '',
         timeoutMs: 45000,
+        executionType: 'ORDERED_STEPS',
+        steps: [{
+          stepKey: 'validate',
+          type: 'AGENT_EXECUTION',
+          order: 1,
+          agentId: 'agent-validator',
+        }],
         retryOverride: 'retry-once',
         requireSuccess: true,
         requiredValidationKeys: ['required-sections-check'],
@@ -851,6 +1003,9 @@ describe('Workflow Policy Routes', () => {
       id: 'policy-vmf-routed-review',
       routingMode: 'FIXED_AGENT',
       primaryAgentId: 'agent-validator',
+      executionType: 'ORDERED_STEPS',
+      orderedSteps: ['validate'],
+      requiredAgentIds: ['agent-validator'],
       timeoutMs: 45000,
       requireSuccess: true,
       requiredValidationKeys: ['required-sections-check'],
@@ -1099,6 +1254,30 @@ describe('Workflow Policy Routes', () => {
     })
   })
 
+  test('GET /api/v1/super-admin/runtime-control/workflow-policies/:policyId preserves legacy execution dependencies when steps are absent', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const workflowPolicy = makeWorkflowPolicyDoc({
+      steps: [],
+      orderedSteps: ['validate'],
+      requiredAgentIds: ['agent-validator'],
+      requiredSkillIds: ['skill-snapshot'],
+      timeoutMs: 0,
+    })
+    WorkflowPolicy.findOne.mockResolvedValue(workflowPolicy)
+
+    const res = await request
+      .get(`/api/v1/super-admin/runtime-control/workflow-policies/${WORKFLOW_POLICY_STABLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toMatchObject({
+      orderedSteps: ['validate'],
+      requiredAgentIds: ['agent-validator'],
+      requiredSkillIds: ['skill-snapshot'],
+      timeoutMs: 10000,
+    })
+  })
+
   test('GET /api/v1/super-admin/runtime-control/workflow-policies/:policyId returns 404 when the workflow policy is missing', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     WorkflowPolicy.findOne.mockResolvedValue(null)
@@ -1267,7 +1446,6 @@ describe('Workflow Policy Routes', () => {
           }],
           routingMode: 'FIXED_AGENT',
           primaryAgentId: 'agent-validator',
-          requiredAgentIds: ['agent-validator'],
           onPassEffects: [{
             type: 'SET_VALUE',
             targetPath: 'vmf.metadata.lastValidatedAt',
@@ -1336,6 +1514,28 @@ describe('Workflow Policy Routes', () => {
     expect(mongoose.Types.ObjectId.isValid(auditPayload?.resourceId)).toBe(true)
   })
 
+  test('POST /api/v1/super-admin/runtime-control/workflow-policies/test-console rejects deprecated gatingRules', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/workflow-policies/test-console')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        draft: {
+          ...buildPhaseOneWorkflowPolicyPayload({
+            key: 'vmf-test-console-deprecated',
+            name: 'VMF Test Console Deprecated Policy',
+          }),
+          gatingRules: [],
+        },
+        frameworkState: {},
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details['draft.gatingRules']).toContain('deprecated')
+  })
+
   test('POST /api/v1/super-admin/runtime-control/workflow-policies/test-console does not write audit logs when draft validation fails', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     RuntimeAgent.find.mockImplementation(() => buildRegistryLookupChain([
@@ -1349,7 +1549,13 @@ describe('Workflow Policy Routes', () => {
       .send({
         draft: buildPhaseOneWorkflowPolicyPayload({
           key: 'vmf-test-console-invalid-skill',
-          requiredSkillIds: ['skill-missing'],
+          executionType: 'ORDERED_STEPS',
+          steps: [{
+            stepKey: 'missing-skill',
+            type: 'SKILL_EXECUTION',
+            order: 1,
+            skillId: 'skill-missing',
+          }],
         }),
         frameworkState: {
           vmf: {
@@ -1408,7 +1614,6 @@ describe('Workflow Policy Routes', () => {
           }],
           routingMode: 'FIXED_AGENT',
           primaryAgentId: 'agent-validator',
-          requiredAgentIds: ['agent-validator'],
         }),
         frameworkState: {
           lifecycle: {
@@ -1472,7 +1677,6 @@ describe('Workflow Policy Routes', () => {
           }],
           routingMode: 'FIXED_AGENT',
           primaryAgentId: 'agent-validator',
-          requiredAgentIds: ['agent-validator'],
         }),
         frameworkState: {
           framework_state: {
@@ -1553,7 +1757,6 @@ describe('Workflow Policy Routes', () => {
           }],
           routingMode: 'FIXED_AGENT',
           primaryAgentId: 'agent-validator',
-          requiredAgentIds: ['agent-validator'],
         }),
         frameworkState: {
           lifecycle: {
@@ -1628,7 +1831,6 @@ describe('Workflow Policy Routes', () => {
           }],
           routingMode: 'FIXED_AGENT',
           primaryAgentId: 'agent-validator',
-          requiredAgentIds: ['agent-validator'],
         }),
         frameworkState: {
           framework_state: null,
@@ -1692,7 +1894,6 @@ describe('Workflow Policy Routes', () => {
           }],
           routingMode: 'FIXED_AGENT',
           primaryAgentId: 'agent-validator',
-          requiredAgentIds: ['agent-validator'],
         }),
         frameworkState: {
           validation: {
@@ -1742,9 +1943,12 @@ describe('Workflow Policy Routes', () => {
         governedAction: 'SUBMIT_FOR_REVIEW',
         decisionMode: 'REQUIRE_APPROVAL',
         severity: 'CRITICAL',
-        orderedSteps: ['snapshot', 'review', 'approve'],
-        requiredAgentIds: ['agent-validator', 'agent-summary'],
-        requiredSkillIds: ['skill-snapshot', 'skill-review'],
+        executionType: 'ORDERED_STEPS',
+        steps: [
+          { stepKey: 'snapshot', type: 'SKILL_EXECUTION', order: 1, skillId: 'skill-snapshot' },
+          { stepKey: 'review', type: 'SKILL_EXECUTION', order: 2, skillId: 'skill-review' },
+          { stepKey: 'approve', type: 'AGENT_EXECUTION', order: 3, agentId: 'agent-validator' },
+        ],
         overrideAllowed: true,
         overrideRoles: ['SUPER_ADMIN', 'GOVERNANCE_LEAD'],
         approvalRequired: true,
@@ -1763,9 +1967,9 @@ describe('Workflow Policy Routes', () => {
       triggerEvent: 'ON_SUBMIT',
       governedAction: 'SUBMIT_FOR_REVIEW',
       orderedSteps: ['snapshot', 'review', 'approve'],
-      requiredAgentIds: ['agent-validator', 'agent-summary'],
+      requiredAgentIds: ['agent-validator'],
       requiredSkillIds: ['skill-snapshot', 'skill-review'],
-      gatingRules: ['validation-pass', 'framework-package-active'],
+      gatingRules: [],
       overrideAllowed: true,
       overrideRoles: ['SUPER_ADMIN', 'GOVERNANCE_LEAD'],
       approvalRequired: true,
@@ -1871,6 +2075,43 @@ describe('Workflow Policy Routes', () => {
     )
   })
 
+  test('POST /api/v1/super-admin/runtime-control/workflow-policies/:policyId/clone preserves legacy dependencies and normalizes legacy timeout', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const workflowPolicy = makeWorkflowPolicyDoc({
+      status: 'DRAFT',
+      timeoutMs: 0,
+      steps: [],
+      orderedSteps: ['validate'],
+      requiredAgentIds: ['agent-validator'],
+      requiredSkillIds: ['skill-snapshot'],
+    })
+
+    WorkflowPolicy.findOne
+      .mockResolvedValueOnce(workflowPolicy)
+      .mockReturnValueOnce({ select: jest.fn().mockResolvedValue(null) })
+    mockRegistryLookups({
+      agents: [runtimeAgentRows.validator],
+      skills: [runtimeSkillRows.snapshot],
+    })
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/workflow-policies/${WORKFLOW_POLICY_STABLE_ID}/clone`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        key: 'vmf-legacy-dependency-clone',
+        name: 'VMF Legacy Dependency Clone',
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data).toMatchObject({
+      key: 'vmf-legacy-dependency-clone',
+      timeoutMs: 10000,
+      orderedSteps: ['validate'],
+      requiredAgentIds: ['agent-validator'],
+      requiredSkillIds: ['skill-snapshot'],
+    })
+  })
+
   test('POST /api/v1/super-admin/runtime-control/workflow-policies/:policyId/clone can resolve legacy rows by key fallback', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     const workflowPolicy = makeWorkflowPolicyDoc({
@@ -1944,6 +2185,63 @@ describe('Workflow Policy Routes', () => {
     expect(res.body.error.details.key).toBe('Workflow policy key is immutable after creation.')
   })
 
+  test.each([
+    'orderedSteps',
+    'requiredAgentIds',
+    'requiredSkillIds',
+  ])('PATCH /api/v1/super-admin/runtime-control/workflow-policies/:policyId rejects derived %s payload fields', async (field) => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/workflow-policies/${WORKFLOW_POLICY_STABLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ [field]: [] })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details[field]).toContain('deprecated')
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/workflow-policies/:policyId persists explicit null timeout override', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const workflowPolicy = makeWorkflowPolicyDoc({
+      status: 'DRAFT',
+      timeoutMs: 45000,
+    })
+    WorkflowPolicy.findOne
+      .mockResolvedValueOnce(workflowPolicy)
+      .mockReturnValueOnce({ select: jest.fn().mockResolvedValue(null) })
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/workflow-policies/${WORKFLOW_POLICY_STABLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ timeoutMs: null })
+
+    expect(res.status).toBe(200)
+    expect(workflowPolicy.timeoutMs).toBeNull()
+    expect(res.body.data.timeoutMs).toBeNull()
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/workflow-policies/:policyId normalizes legacy zero timeout on unrelated edits', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const workflowPolicy = makeWorkflowPolicyDoc({
+      status: 'DRAFT',
+      timeoutMs: 0,
+    })
+    WorkflowPolicy.findOne
+      .mockResolvedValueOnce(workflowPolicy)
+      .mockReturnValueOnce({ select: jest.fn().mockResolvedValue(null) })
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/workflow-policies/${WORKFLOW_POLICY_STABLE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: 'VMF Publish Policy Renamed' })
+
+    expect(res.status).toBe(200)
+    expect(workflowPolicy.timeoutMs).toBe(10000)
+    expect(res.body.data.timeoutMs).toBe(10000)
+  })
+
   test('PATCH /api/v1/super-admin/runtime-control/workflow-policies/:policyId persists canonical governed steps', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     const workflowPolicy = makeWorkflowPolicyDoc({
@@ -1963,7 +2261,7 @@ describe('Workflow Policy Routes', () => {
       .send({
         executionType: 'ORDERED_STEPS',
         steps: [{
-          stepKey: 'emit-ready',
+          stepKey: 'validate',
           type: 'EVENT_EMIT',
           order: 1,
           eventKey: 'workflow-ready',
@@ -1975,7 +2273,7 @@ describe('Workflow Policy Routes', () => {
     expect(workflowPolicy.executionType).toBe('ORDERED_STEPS')
     expect(workflowPolicy.steps).toEqual([
       expect.objectContaining({
-        stepKey: 'emit-ready',
+        stepKey: 'validate',
         type: 'EVENT_EMIT',
         order: 1,
         eventKey: 'workflow-ready',
@@ -1983,7 +2281,7 @@ describe('Workflow Policy Routes', () => {
     ])
     expect(res.body.data.steps).toEqual([
       expect.objectContaining({
-        stepKey: 'emit-ready',
+        stepKey: 'validate',
         type: 'EVENT_EMIT',
         order: 1,
         eventKey: 'workflow-ready',
@@ -1994,7 +2292,7 @@ describe('Workflow Policy Routes', () => {
         action: 'WORKFLOW_POLICY_UPDATED',
         diff: expect.objectContaining({
           steps: expect.objectContaining({
-            to: [expect.objectContaining({ stepKey: 'emit-ready' })],
+            to: [expect.objectContaining({ stepKey: 'validate' })],
           }),
         }),
       }),

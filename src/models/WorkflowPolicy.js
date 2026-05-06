@@ -170,7 +170,7 @@ export const WORKFLOW_POLICY_DEFAULTS = Object.freeze({
   routingMode: '',
   primaryAgentId: '',
   fallbackAgentId: '',
-  timeoutMs: 0,
+  timeoutMs: 10000,
   retryOverride: '',
   requireSuccess: false,
   requiredValidationKeys: [],
@@ -697,7 +697,7 @@ const workflowPolicySchema = new mongoose.Schema(
     },
     timeoutMs: {
       type: Number,
-      min: 0,
+      min: 1,
       max: 300000,
       default: WORKFLOW_POLICY_DEFAULTS.timeoutMs,
     },
