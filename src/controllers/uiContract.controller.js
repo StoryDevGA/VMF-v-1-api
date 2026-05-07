@@ -5,7 +5,10 @@ import UIContract, {
 } from '../models/UIContract.js'
 import FrameworkPackage, { FRAMEWORK_PACKAGE_STATUSES } from '../models/FrameworkPackage.js'
 import RuntimePathRegistry, { RUNTIME_PATH_REGISTRY_STATUSES } from '../models/RuntimePathRegistry.js'
-import WorkflowPolicy, { WORKFLOW_POLICY_STATUSES } from '../models/WorkflowPolicy.js'
+import WorkflowPolicy, {
+  WORKFLOW_POLICY_GOVERNED_ACTIONS,
+  WORKFLOW_POLICY_STATUSES,
+} from '../models/WorkflowPolicy.js'
 import auditService from '../services/auditService.js'
 import {
   buildInactiveFrameworkKeyMessage,
@@ -21,6 +24,8 @@ import {
 const UI_CONTRACT_NOT_FOUND_MESSAGE = 'UI Contract was not found.'
 const DUPLICATE_UI_CONTRACT_KEY_MESSAGE = 'UI Contract key must be unique.'
 const LIFECYCLE_STAGE_PATH_KEY = 'framework_state.lifecycle.stage'
+const KNOWN_GOVERNED_ACTION_VALUES = Object.values(WORKFLOW_POLICY_GOVERNED_ACTIONS)
+const KNOWN_GOVERNED_ACTION_MESSAGE = KNOWN_GOVERNED_ACTION_VALUES.join(', ')
 
 const toIdString = (value) => {
   if (!value) return null
@@ -306,9 +311,16 @@ const validateUIContractActions = async ({ actions = [], sourcePackage = null } 
       .map((policy) => normalizeActionKey(policy.governedAction))
       .filter(Boolean),
   )
+  // Global registry verbs are valid UI actions; package-bound policy actions remain valid for legacy/custom bindings.
+  // Framework Package validation/checkpoint owns whether a valid action has executable runtime policy coverage.
+  const knownGovernedActionTokens = new Set(
+    KNOWN_GOVERNED_ACTION_VALUES
+      .map((governedAction) => normalizeActionKey(governedAction))
+      .filter(Boolean),
+  )
 
   const policyKeyCollisions = []
-  const unmappedGovernedActions = []
+  const unknownGovernedActions = []
 
   visibleActions.forEach((action) => {
     const governedAction = normalizeActionKey(action?.governedAction || action?.actionKey)
@@ -319,8 +331,8 @@ const validateUIContractActions = async ({ actions = [], sourcePackage = null } 
       return
     }
 
-    if (governedActionTokens.size > 0 && !governedActionTokens.has(governedAction)) {
-      unmappedGovernedActions.push(governedAction)
+    if (!knownGovernedActionTokens.has(governedAction) && !governedActionTokens.has(governedAction)) {
+      unknownGovernedActions.push(governedAction)
     }
   })
 
@@ -331,10 +343,10 @@ const validateUIContractActions = async ({ actions = [], sourcePackage = null } 
     }
   }
 
-  if (unmappedGovernedActions.length > 0) {
+  if (unknownGovernedActions.length > 0) {
     return {
       actions:
-        `UI Contract governed actions must map to selected package workflow governed actions: ${[...new Set(unmappedGovernedActions)].join(', ')}.`,
+        `UI Contract governed actions must use known governed actions (${KNOWN_GOVERNED_ACTION_MESSAGE}) or selected package workflow governed actions: ${[...new Set(unknownGovernedActions)].join(', ')}.`,
     }
   }
 
@@ -365,7 +377,6 @@ const resolveSourcePackage = async ({
   sourcePackageVersion = '',
   sourceFrameworkKey = '',
   frameworkKeys = [],
-  status = UI_CONTRACT_STATUSES.DRAFT,
 }) => {
   const normalizedSourcePackageKey = String(sourcePackageKey || '').trim().toLowerCase()
   const normalizedSourceFrameworkKey = String(sourceFrameworkKey || '').trim().toUpperCase()
@@ -400,19 +411,19 @@ const resolveSourcePackage = async ({
     }
   }
 
+  // UI Contracts activate independently from packages; package validation/checkpoint enforces ACTIVE dependencies later.
   const allowedStatuses = new Set([
+    FRAMEWORK_PACKAGE_STATUSES.DRAFT,
     FRAMEWORK_PACKAGE_STATUSES.VALIDATED,
     FRAMEWORK_PACKAGE_STATUSES.ACTIVE,
   ])
-  if (status === UI_CONTRACT_STATUSES.DRAFT) {
-    allowedStatuses.add(FRAMEWORK_PACKAGE_STATUSES.DRAFT)
-  }
 
   if (!allowedStatuses.has(sourcePackage.status)) {
+    const sourcePackageLabel = sourcePackage.packageKey || normalizedSourcePackageKey || normalizedSourceFrameworkKey || 'selected package'
     return {
       details: {
         sourcePackageKey:
-          `Framework Package "${normalizedSourcePackageKey}" must be VALIDATED or ACTIVE${status === UI_CONTRACT_STATUSES.DRAFT ? ', or DRAFT while the UI Contract is DRAFT' : ''}.`,
+          `Framework Package "${sourcePackageLabel}" must be DRAFT, VALIDATED, or ACTIVE.`,
       },
       sourcePackage: null,
     }
@@ -504,7 +515,6 @@ export const createUIContract = async (req, res, next) => {
       sourcePackageVersion: req.body.sourcePackageVersion,
       sourceFrameworkKey: req.body.sourceFrameworkKey,
       frameworkKeys: req.body.frameworkKeys,
-      status: req.body.status,
     })
     const sourcePackageDetails = sourcePackageResult.details
     if (Object.keys(sourcePackageDetails).length > 0) {
@@ -654,7 +664,6 @@ export const cloneUIContractRecord = async (req, res, next) => {
       sourcePackageVersion: clonePayload.sourcePackageVersion,
       sourceFrameworkKey: clonePayload.sourceFrameworkKey,
       frameworkKeys: clonePayload.frameworkKeys,
-      status: clonePayload.status,
     })
     if (Object.keys(sourcePackageResult.details).length > 0) {
       return sendValidationFailed(res, req, sourcePackageResult.details)
@@ -764,7 +773,6 @@ export const updateUIContract = async (req, res, next) => {
       sourcePackageVersion: nextSourcePackageVersion,
       sourceFrameworkKey: nextSourceFrameworkKey,
       frameworkKeys: nextFrameworkKeys,
-      status: nextStatus,
     })
     const sourcePackageDetails = sourcePackageResult.details
     if (Object.keys(sourcePackageDetails).length > 0) {
@@ -900,7 +908,6 @@ export const validateUIContract = async (req, res, next) => {
       sourcePackageVersion: uiContract.sourcePackageVersion,
       sourceFrameworkKey: uiContract.sourceFrameworkKey,
       frameworkKeys: uiContract.frameworkKeys,
-      status: uiContract.status,
     })
     const details = {
       ...sourcePackageResult.details,

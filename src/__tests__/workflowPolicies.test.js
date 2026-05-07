@@ -763,6 +763,14 @@ describe('Workflow Policy Routes', () => {
     expect(res.body.error.details.componentVersion).toContain('server-managed governance metadata')
   })
 
+  test('WorkflowPolicy model rejects governed actions outside the registry', async () => {
+    const workflowPolicy = makeWorkflowPolicyDoc({
+      governedAction: 'EXPORT_EXTERNAL',
+    })
+
+    await expect(workflowPolicy.validate()).rejects.toThrow(/EXPORT_EXTERNAL/)
+  })
+
   test('POST /api/v1/super-admin/runtime-control/workflow-policies rejects deprecated gatingRules', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
 

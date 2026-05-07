@@ -503,6 +503,176 @@ describe('UI Contract Routes', () => {
     expect(res.body.error.details.actions).toContain('workflow policy keys')
   })
 
+  test('POST /api/v1/super-admin/runtime-control/ui-contracts allows known governed actions without workflow bindings', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    FrameworkPackage.findOne.mockReturnValue(buildFrameworkPackageFindOneChain(makeSourceFrameworkPackage({
+      workflowBindings: [
+        { policyKey: 'submit-gate' },
+        { policyKey: 'validation-gate' },
+        { policyKey: 'publish-gate' },
+      ],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildSelectLeanChain([
+      {
+        key: 'submit-gate',
+        status: 'ACTIVE',
+        governedAction: 'SUBMIT_FOR_REVIEW',
+      },
+      {
+        key: 'validation-gate',
+        status: 'ACTIVE',
+        governedAction: 'RUN_VALIDATION',
+      },
+      {
+        key: 'publish-gate',
+        status: 'ACTIVE',
+        governedAction: 'PUBLISH',
+      },
+    ]))
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/ui-contracts')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        uiContractKey: 'vmf-ui-contract-v1',
+        name: 'VMF UI Contract',
+        status: 'ACTIVE',
+        frameworkKeys: ['VMF'],
+        sourcePackageKey: 'vmf-2-3-1',
+        sourcePackageVersion: '2.3.1',
+        sourceFrameworkKey: 'VMF',
+        sections: [
+          {
+            sectionKey: 'customer_problem',
+            runtimePath: 'framework_state.sections.customer_problem',
+            label: 'Customer Problem',
+            displayOrder: 10,
+          },
+        ],
+        actions: [
+          {
+            actionKey: 'SAVE',
+            governedAction: 'SAVE',
+            buttonLabel: 'Save',
+            displayOrder: 10,
+          },
+          {
+            actionKey: 'APPROVE',
+            governedAction: 'APPROVE',
+            buttonLabel: 'Approve',
+            displayOrder: 20,
+          },
+          {
+            actionKey: 'ARCHIVE',
+            governedAction: 'ARCHIVE',
+            buttonLabel: 'Archive',
+            displayOrder: 30,
+          },
+        ],
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data.status).toBe('ACTIVE')
+    expect(res.body.data.actions.map((action) => action.governedAction)).toEqual([
+      'SAVE',
+      'APPROVE',
+      'ARCHIVE',
+    ])
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/ui-contracts allows legacy package-bound governed actions outside the registry', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    FrameworkPackage.findOne.mockReturnValue(buildFrameworkPackageFindOneChain(makeSourceFrameworkPackage({
+      workflowBindings: [{ policyKey: 'legacy-custom-gate' }],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildSelectLeanChain([
+      {
+        key: 'legacy-custom-gate',
+        status: 'ACTIVE',
+        governedAction: 'CUSTOM_PACKAGE_ACTION',
+      },
+    ]))
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/ui-contracts')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        uiContractKey: 'vmf-ui-contract-v1',
+        name: 'VMF UI Contract',
+        status: 'ACTIVE',
+        frameworkKeys: ['VMF'],
+        sourcePackageKey: 'vmf-2-3-1',
+        sourcePackageVersion: '2.3.1',
+        sourceFrameworkKey: 'VMF',
+        sections: [
+          {
+            sectionKey: 'customer_problem',
+            runtimePath: 'framework_state.sections.customer_problem',
+            label: 'Customer Problem',
+            displayOrder: 10,
+          },
+        ],
+        actions: [
+          {
+            actionKey: 'CUSTOM_PACKAGE_ACTION',
+            governedAction: 'CUSTOM_PACKAGE_ACTION',
+            buttonLabel: 'Custom Package Action',
+            displayOrder: 10,
+          },
+        ],
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data.actions[0].governedAction).toBe('CUSTOM_PACKAGE_ACTION')
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/ui-contracts rejects unknown governed actions', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    FrameworkPackage.findOne.mockReturnValue(buildFrameworkPackageFindOneChain(makeSourceFrameworkPackage({
+      workflowBindings: [{ policyKey: 'submit-gate' }],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildSelectLeanChain([
+      {
+        key: 'submit-gate',
+        status: 'ACTIVE',
+        governedAction: 'SUBMIT_FOR_REVIEW',
+      },
+    ]))
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/ui-contracts')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        uiContractKey: 'vmf-ui-contract-v1',
+        name: 'VMF UI Contract',
+        status: 'ACTIVE',
+        frameworkKeys: ['VMF'],
+        sourcePackageKey: 'vmf-2-3-1',
+        sourcePackageVersion: '2.3.1',
+        sourceFrameworkKey: 'VMF',
+        sections: [
+          {
+            sectionKey: 'customer_problem',
+            runtimePath: 'framework_state.sections.customer_problem',
+            label: 'Customer Problem',
+            displayOrder: 10,
+          },
+        ],
+        actions: [
+          {
+            actionKey: 'EXPORT',
+            governedAction: 'EXPORT_EXTERNAL',
+            buttonLabel: 'Export',
+            displayOrder: 10,
+          },
+        ],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.actions).toContain('known governed actions')
+    expect(res.body.error.details.actions).toContain('EXPORT_EXTERNAL')
+  })
+
   test('POST /api/v1/super-admin/runtime-control/ui-contracts allows explicit custom sections without runtime paths', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
 
@@ -559,6 +729,43 @@ describe('UI Contract Routes', () => {
       diff: expect.objectContaining({
         name: { from: 'VMF UI Contract', to: 'Updated VMF UI Contract' },
         _resolution: { resolvedAt: res.body.data.resolvedAt },
+      }),
+    }))
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/ui-contracts/:uiContractId/activate allows a draft source package', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    UIContract.findById.mockResolvedValue(makeUIContractDoc({
+      status: 'DRAFT',
+      versionStatus: 'DRAFT',
+      sourcePackageKey: 'vmf-2-3-1',
+      sourcePackageVersion: '2.3.1',
+      sourceFrameworkKey: 'VMF',
+      sections: [
+        {
+          sectionKey: 'customer_problem',
+          runtimePath: 'framework_state.sections.customer_problem',
+          sourcePackageKey: 'vmf-2-3-1',
+          label: 'Customer Problem',
+          displayOrder: 10,
+        },
+      ],
+    }))
+    FrameworkPackage.findOne.mockReturnValue(buildFrameworkPackageFindOneChain(makeSourceFrameworkPackage({
+      status: 'DRAFT',
+    })))
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/ui-contracts/${UI_CONTRACT_ID}/activate`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.status).toBe('ACTIVE')
+    expect(res.body.data.sourcePackageKey).toBe('vmf-2-3-1')
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'UI_CONTRACT_UPDATED',
+      diff: expect.objectContaining({
+        status: { from: 'DRAFT', to: 'ACTIVE' },
       }),
     }))
   })

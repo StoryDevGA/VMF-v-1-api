@@ -61,11 +61,16 @@ export const WORKFLOW_POLICY_ACTOR_SCOPES = Object.freeze({
 })
 
 export const WORKFLOW_POLICY_GOVERNED_ACTIONS = Object.freeze({
+  // SAVE is the generic UI action verb; SAVE_DRAFT remains the lifecycle-specific policy verb for ON_SAVE_DRAFT.
+  SAVE: 'SAVE',
   SAVE_DRAFT: 'SAVE_DRAFT',
+  INITIALISE_STATE: 'INITIALISE_STATE',
   SUBMIT_FOR_REVIEW: 'SUBMIT_FOR_REVIEW',
   APPROVE: 'APPROVE',
   REJECT: 'REJECT',
   PUBLISH: 'PUBLISH',
+  RUN_VALIDATION: 'RUN_VALIDATION',
+  QUERY_STATE: 'QUERY_STATE',
   GENERATE_ARTEFACT: 'GENERATE_ARTEFACT',
   RUN_ANALYSIS: 'RUN_ANALYSIS',
   LOCK_RECORD: 'LOCK_RECORD',
@@ -633,6 +638,7 @@ const workflowPolicySchema = new mongoose.Schema(
       trim: true,
       uppercase: true,
       maxlength: 120,
+      enum: ['', ...Object.values(WORKFLOW_POLICY_GOVERNED_ACTIONS)],
       default: WORKFLOW_POLICY_DEFAULTS.governedAction,
     },
     decisionMode: {

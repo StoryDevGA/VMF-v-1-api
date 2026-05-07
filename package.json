@@ -8,6 +8,7 @@
     "start": "node src/server.js",
     "seed": "node src/seeds/index.js",
     "db:clean:keep-super-admin": "node src/scripts/cleanDbKeepSuperAdmin.js",
+    "framework-seed:import": "node src/scripts/importFrameworkSeed.js",
     "runtime-paths:reclassify-categories": "node src/scripts/reclassifyRuntimePathCategories.js",
     "framework-packages:unset-legacy-fields": "node src/scripts/unsetDeprecatedFrameworkPackageFields.js",
     "customers:enforce-name-uniqueness": "node src/scripts/enforceCustomerNameUniqueness.js",
