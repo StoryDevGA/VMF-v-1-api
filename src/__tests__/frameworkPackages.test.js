@@ -173,8 +173,8 @@ const makeFrameworkPackageDoc = (overrides = {}) => {
       defaultTimeoutMs: 30000,
       maxPolicyExecutionsPerRun: 10,
     },
-    validationConfig: [],
-    workflowPolicyConfig: [],
+    validationConfig: undefined,
+    workflowPolicyConfig: undefined,
     validationBindings: [],
     workflowBindings: [],
     uiContractKey: 'vmf-ui-contract-v1',
@@ -186,18 +186,15 @@ const makeFrameworkPackageDoc = (overrides = {}) => {
     allowCustomerOutputDefinitions: false,
     artifactRetentionDays: 365,
     allowOutputRevisionHistory: true,
-    compatibleWorkflowKeys: ['vmf-baseline', 'vmf-publish'],
-    defaultAgentIds: ['agent-validator'],
-    requiredSkillIds: ['skill-snapshot'],
+    compatibleWorkflowKeys: undefined,
+    defaultAgentIds: undefined,
+    requiredSkillIds: undefined,
     capabilities: {
       supportsPreviewMode: true,
       supportsFullReport: true,
       requiresValidationBeforePublish: true,
     },
-    validationRules: {
-      requiredSections: ['customer_problem'],
-      publishChecks: ['validation-pass'],
-    },
+    validationRules: undefined,
     createdBy: SUPER_ADMIN_ID,
     updatedBy: SUPER_ADMIN_ID,
     activatedAt: null,
@@ -1739,6 +1736,141 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
         }),
       ]),
     )
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/checkpoint returns checkpoint issues without promoting the package', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const frameworkPackage = makeFrameworkPackageDoc({
+      status: 'DRAFT',
+      packageKey: '',
+    })
+    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+    UIContract.findOne.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue({
+          uiContractKey: 'vmf-ui-contract-v1',
+          status: 'ACTIVE',
+          versionStatus: 'ACTIVE',
+          frameworkKeys: ['VMF'],
+          sections: [{ sectionKey: 'customer_problem', runtimePath: 'framework_state.sections.customer_problem' }],
+        }),
+      }),
+    })
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/checkpoint`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ mode: 'FULL' })
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.status).toBe('FAIL')
+    expect(res.body.data.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'PACKAGE_KEY_REQUIRED',
+        path: 'packageKey',
+      }),
+    ]))
+    expect(frameworkPackage.status).toBe('DRAFT')
+    expect(frameworkPackage.save).not.toHaveBeenCalled()
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/checkpoint rejects activation mode payloads', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/checkpoint`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ mode: 'ACTIVATION', persist: true })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details.mode).toBeTruthy()
+    expect(FrameworkPackage.findById).not.toHaveBeenCalled()
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/validate returns 422 for checkpoint failures without promoting the package', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const frameworkPackage = makeFrameworkPackageDoc({
+      status: 'DRAFT',
+      packageKey: '',
+      updatedBy: NON_ADMIN_ID,
+    })
+    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+    UIContract.findOne.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue({
+          uiContractKey: 'vmf-ui-contract-v1',
+          status: 'ACTIVE',
+          versionStatus: 'ACTIVE',
+          frameworkKeys: ['VMF'],
+          sections: [{ sectionKey: 'customer_problem', runtimePath: 'framework_state.sections.customer_problem' }],
+        }),
+      }),
+    })
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/validate`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.checkpoint.status).toBe('FAIL')
+    expect(res.body.error.checkpoint.dependencyGraph).toBeUndefined()
+    expect(res.body.error.checkpoint.passedChecks).toBeUndefined()
+    expect(frameworkPackage.status).toBe('DRAFT')
+    expect(frameworkPackage.updatedBy.toString()).toBe(NON_ADMIN_ID)
+    expect(frameworkPackage.lastCheckpointStatus).toBe('FAIL')
+    expect(frameworkPackage.save).toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+      action: 'FRAMEWORK_PACKAGE_VALIDATED',
+    }))
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/validate promotes a passing package and stores the checkpoint', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const frameworkPackage = makeFrameworkPackageDoc({
+      status: 'DRAFT',
+    })
+    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+    UIContract.findOne.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue({
+          stableId: 'ui-contract-vmf-ui-contract-v1',
+          uiContractKey: 'vmf-ui-contract-v1',
+          name: 'VMF UI Contract',
+          status: 'ACTIVE',
+          versionStatus: 'ACTIVE',
+          frameworkKeys: ['VMF'],
+          sections: [{ sectionKey: 'customer_problem', runtimePath: 'framework_state.sections.customer_problem' }],
+        }),
+      }),
+    })
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/validate`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.package.status).toBe('VALIDATED')
+    expect(res.body.data.checkpoint.status).toBe('PASS')
+    expect(frameworkPackage.status).toBe('VALIDATED')
+    expect(frameworkPackage.lastCheckpointStatus).toBe('PASS')
+    expect(frameworkPackage.lastCheckpointResult.status).toBe('PASS')
+    expect(frameworkPackage.dependencyLock.references.length).toBeGreaterThan(0)
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'FRAMEWORK_PACKAGE_VALIDATED',
+      resourceType: 'FrameworkPackage',
+      diff: expect.objectContaining({
+        lastCheckpointStatus: expect.objectContaining({
+          to: 'PASS',
+        }),
+        lastCheckpointResult: expect.objectContaining({
+          to: expect.not.objectContaining({
+            dependencyGraph: expect.anything(),
+          }),
+        }),
+      }),
+    }))
   })
 
   test('GET /api/v1/super-admin/runtime-control/framework-packages/:packageId/audit returns scoped audit events', async () => {

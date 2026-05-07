@@ -561,7 +561,7 @@ const frameworkPackageDependencyLockSchema = new mongoose.Schema(
   {
     status: {
       type: String,
-      enum: ['PASS', 'FAIL'],
+      enum: ['PASS', 'PASS_WITH_WARNINGS', 'FAIL'],
       default: 'PASS',
     },
     resolvedAt: {
@@ -682,11 +682,15 @@ const frameworkPackageSchema = new mongoose.Schema(
     },
     lastCheckpointStatus: {
       type: String,
-      enum: ['PASS', 'WARN', 'FAIL'],
+      enum: ['PASS', 'PASS_WITH_WARNINGS', 'WARN', 'FAIL'],
       default: null,
     },
     lastCheckpointAt: {
       type: Date,
+      default: null,
+    },
+    lastCheckpointResult: {
+      type: mongoose.Schema.Types.Mixed,
       default: null,
     },
     isDefault: {

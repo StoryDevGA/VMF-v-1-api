@@ -109,6 +109,45 @@ const DEPENDENCY_LOCK_GROUPS = Object.freeze([
   }),
 ])
 
+const FRAMEWORK_PACKAGE_CHECKPOINT_STATUSES = Object.freeze({
+  PASS: 'PASS',
+  PASS_WITH_WARNINGS: 'PASS_WITH_WARNINGS',
+  FAIL: 'FAIL',
+})
+
+const FRAMEWORK_PACKAGE_CHECKPOINT_MODES = Object.freeze({
+  FULL: 'FULL',
+  ACTIVATION: 'ACTIVATION',
+  DRY_RUN: 'DRY_RUN',
+})
+
+const FRAMEWORK_PACKAGE_CHECKPOINT_SEVERITIES = Object.freeze({
+  BLOCKING: 'BLOCKING',
+  WARNING: 'WARNING',
+  INFO: 'INFO',
+})
+
+const CHECKPOINT_CATEGORY_BY_INTEGRITY_GROUP = Object.freeze({
+  'Configuration Integrity': 'PACKAGE_STRUCTURE',
+  'Sections Integrity': 'RUNTIME_PATHS',
+  'Dependency Integrity': 'DEPENDENCY_GRAPH',
+  'UI Contract Integrity': 'UI_CONTRACT',
+  'State Contract Integrity': 'STATE_CONTRACT',
+  'Output Placeholder Integrity': 'PACKAGE_STRUCTURE',
+})
+
+const CHECKPOINT_CATEGORY_BY_FIELD = Object.freeze({
+  packageKey: 'PACKAGE_STRUCTURE',
+  sections: 'RUNTIME_PATHS',
+  uiContractKey: 'UI_CONTRACT',
+  validationBindings: 'VALIDATION_BINDINGS',
+  workflowBindings: 'WORKFLOW_BINDINGS',
+  dependencyLock: 'DEPENDENCY_LOCK',
+  stateModelKey: 'STATE_CONTRACT',
+  stateModelVersion: 'STATE_CONTRACT',
+  stateModelMode: 'STATE_CONTRACT',
+})
+
 const FRAMEWORK_PACKAGE_AUDITED_FIELDS = Object.freeze([
   'frameworkKey',
   'frameworkName',
@@ -979,6 +1018,243 @@ const summarizeIntegrityChecks = (checks = []) => {
   const status = summary.fail > 0 ? 'FAIL' : summary.warn > 0 ? 'WARN' : 'PASS'
   return { status, summary }
 }
+
+const normalizeCheckpointMode = (mode) => {
+  const normalized = String(mode || '').trim().toUpperCase()
+  return Object.values(FRAMEWORK_PACKAGE_CHECKPOINT_MODES).includes(normalized)
+    ? normalized
+    : FRAMEWORK_PACKAGE_CHECKPOINT_MODES.FULL
+}
+
+const buildCheckpointCode = (value) =>
+  String(value || 'checkpoint.issue')
+    .trim()
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/[^A-Za-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .toUpperCase()
+    || 'CHECKPOINT_ISSUE'
+
+const getCheckpointCategory = ({ group = '', field = '', key = '' } = {}) => {
+  if (CHECKPOINT_CATEGORY_BY_FIELD[field]) return CHECKPOINT_CATEGORY_BY_FIELD[field]
+  const normalizedKey = String(key || '').trim()
+  if (normalizedKey.startsWith('dependencies.runtimePaths')) return 'RUNTIME_PATHS'
+  if (normalizedKey.startsWith('dependencies.validations')) return 'VALIDATION_REGISTRY'
+  if (normalizedKey.startsWith('dependencies.workflowPolicies')) return 'WORKFLOW_POLICIES'
+  if (normalizedKey.startsWith('dependencies.agents')) return 'AGENTS'
+  if (normalizedKey.startsWith('dependencies.skills')) return 'SKILLS'
+  if (normalizedKey.startsWith('dependencies.skillRoles')) return 'SKILL_ROLES'
+  if (normalizedKey.startsWith('dependencies.uiContract')) return 'UI_CONTRACT'
+  if (normalizedKey.startsWith('deprecated.')) return 'PACKAGE_STRUCTURE'
+  if (CHECKPOINT_CATEGORY_BY_INTEGRITY_GROUP[group]) return CHECKPOINT_CATEGORY_BY_INTEGRITY_GROUP[group]
+
+  return 'PACKAGE_STRUCTURE'
+}
+
+const mapIntegrityCheckToCheckpointIssue = (check) => {
+  const severity = String(check?.severity || '').trim().toUpperCase()
+  if (severity === 'PASS') return null
+
+  return {
+    code: buildCheckpointCode(check?.key),
+    severity: severity === 'FAIL'
+      ? FRAMEWORK_PACKAGE_CHECKPOINT_SEVERITIES.BLOCKING
+      : FRAMEWORK_PACKAGE_CHECKPOINT_SEVERITIES.WARNING,
+    category: getCheckpointCategory(check),
+    message: check?.message || 'Checkpoint issue detected.',
+    path: check?.field || check?.key || '',
+    source: check?.group || 'Runtime Architecture Checkpoint',
+    ...(check?.details ? { details: check.details } : {}),
+  }
+}
+
+const mapDetailsToCheckpointIssues = (details = {}) =>
+  Object.entries(details)
+    .filter(([field]) => !String(field || '').startsWith('_'))
+    .map(([field, message]) => ({
+      code: buildCheckpointCode(field),
+      severity: FRAMEWORK_PACKAGE_CHECKPOINT_SEVERITIES.BLOCKING,
+      category: getCheckpointCategory({ field }),
+      message: String(message || 'Checkpoint issue detected.'),
+      path: field,
+      source: 'Runtime Architecture Checkpoint',
+    }))
+
+const dedupeCheckpointIssues = (issues = []) => {
+  const seen = new Set()
+  return issues.filter((issue) => {
+    const key = [
+      issue.code,
+      issue.severity,
+      issue.category,
+      issue.path,
+      issue.message,
+    ].join('|')
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+const buildCheckpointErrorDetails = (checkpoint = {}) => {
+  const blockingIssues = Array.isArray(checkpoint.errors) ? checkpoint.errors : []
+  return blockingIssues.reduce((details, issue) => {
+    const field = issue.path || issue.code || 'checkpoint'
+    if (!details[field]) {
+      details[field] = issue.message
+      return details
+    }
+    if (!String(details[field]).includes(issue.message)) {
+      details[field] = `${details[field]} ${issue.message}`
+    }
+    return details
+  }, {})
+}
+
+const buildCheckpointDependencyGraph = ({ frameworkPackage, dependencies = {} }) => {
+  const packageId = toIdString(frameworkPackage?._id) || frameworkPackage?.id || frameworkPackage?.packageKey || 'framework-package'
+  const packageNodeId = `framework-package:${packageId}`
+  const nodes = [
+    {
+      id: packageNodeId,
+      type: 'FrameworkPackage',
+      key: frameworkPackage?.packageKey || '',
+      label: frameworkPackage?.packageName || buildFrameworkPackageLabel(frameworkPackage || {}),
+      status: frameworkPackage?.status || '',
+    },
+  ]
+  const edges = []
+
+  for (const group of DEPENDENCY_LOCK_GROUPS) {
+    const rows = getDependencyRowsForGroup(dependencies, group)
+    for (const row of rows) {
+      const nodeId = `${group.collectionKey}:${row.id || row.key || nodes.length}`
+      nodes.push({
+        id: nodeId,
+        type: group.collectionKey,
+        key: row.key || row.id || '',
+        label: row.name || row.key || row.id || group.collectionKey,
+        status: row.status || '',
+        versionStatus: row.versionStatus || '',
+        issueCount: Array.isArray(row.issues) ? row.issues.length : 0,
+      })
+      edges.push({
+        id: `${packageNodeId}->${nodeId}`,
+        from: packageNodeId,
+        to: nodeId,
+        relationship: row.source || group.key,
+      })
+    }
+  }
+
+  return {
+    nodes,
+    edges,
+    summary: {
+      nodes: nodes.length,
+      edges: edges.length,
+      issueNodes: nodes.filter((node) => Number(node.issueCount) > 0).length,
+    },
+  }
+}
+
+const buildCheckpointResponse = ({
+  frameworkPackage,
+  mode,
+  actorUserId,
+  integrity,
+  dependencyLockResult,
+  extraIssues = [],
+}) => {
+  const integrityIssues = (integrity?.checks || [])
+    .map(mapIntegrityCheckToCheckpointIssue)
+    .filter(Boolean)
+  const issues = dedupeCheckpointIssues([...integrityIssues, ...extraIssues])
+  const errors = issues.filter((issue) => issue.severity === FRAMEWORK_PACKAGE_CHECKPOINT_SEVERITIES.BLOCKING)
+  const warnings = issues.filter((issue) => issue.severity === FRAMEWORK_PACKAGE_CHECKPOINT_SEVERITIES.WARNING)
+  const passedChecks = (integrity?.checks || [])
+    .filter((check) => String(check?.severity || '').trim().toUpperCase() === 'PASS')
+    .map((check) => ({
+      code: buildCheckpointCode(check.key),
+      category: getCheckpointCategory(check),
+      message: check.message,
+      path: check.field || check.key || '',
+      source: check.group || 'Runtime Architecture Checkpoint',
+    }))
+  const status = errors.length > 0
+    ? FRAMEWORK_PACKAGE_CHECKPOINT_STATUSES.FAIL
+    : warnings.length > 0
+      ? FRAMEWORK_PACKAGE_CHECKPOINT_STATUSES.PASS_WITH_WARNINGS
+      : FRAMEWORK_PACKAGE_CHECKPOINT_STATUSES.PASS
+  const timestamp = new Date()
+
+  return {
+    schemaVersion: '1',
+    id: toIdString(frameworkPackage?._id) || frameworkPackage?.id || null,
+    frameworkKey: frameworkPackage?.frameworkKey || '',
+    packageKey: frameworkPackage?.packageKey || '',
+    packageVersion: frameworkPackage?.version || '',
+    mode,
+    status,
+    errors,
+    warnings,
+    issues,
+    passedChecks,
+    dependencyGraph: buildCheckpointDependencyGraph({
+      frameworkPackage,
+      dependencies: dependencyLockResult?.dependencies,
+    }),
+    dependencyLockPreview: dependencyLockResult?.snapshot || null,
+    summary: {
+      totalChecks: passedChecks.length + warnings.length + errors.length,
+      passed: passedChecks.length,
+      warnings: warnings.length,
+      failed: errors.length,
+      resolvedReferences: Number(dependencyLockResult?.snapshot?.references?.length) || 0,
+    },
+    timestamp,
+    runBy: toIdString(actorUserId),
+  }
+}
+
+const normalizeIntegrityForCheckpoint = ({ integrity, dependencyLockResult }) => {
+  const dependencyLockIssueCount = Object.keys(dependencyLockResult?.issueDetails || {}).length
+  if (dependencyLockIssueCount > 0) return integrity
+
+  return {
+    ...integrity,
+    checks: (integrity?.checks || []).map((check) => {
+      if (check?.key !== 'dependencyLock.snapshot' || check?.severity !== 'WARN') {
+        return check
+      }
+
+      return {
+        ...check,
+        severity: 'PASS',
+        message: 'Dependency lock snapshot can be created by this checkpoint.',
+      }
+    }),
+  }
+}
+
+const compactCheckpointForValidationError = (checkpoint = {}) => {
+  const compactCheckpoint = { ...(checkpoint || {}) }
+  delete compactCheckpoint.dependencyGraph
+  delete compactCheckpoint.dependencyLockPreview
+  delete compactCheckpoint.passedChecks
+  return compactCheckpoint
+}
+
+const sendCheckpointValidationFailed = (res, req, checkpoint) =>
+  res.status(422).json({
+    error: {
+      code: 'VALIDATION_FAILED',
+      message: 'Runtime Architecture Checkpoint failed.',
+      details: buildCheckpointErrorDetails(checkpoint),
+      checkpoint: compactCheckpointForValidationError(checkpoint),
+      requestId: req.requestId,
+    },
+  })
 
 const buildDependencyResolutionMessage = ({ label, issueRows }) =>
   issueRows.length > 0
@@ -2016,6 +2292,96 @@ const buildFrameworkPackageIntegrity = async (frameworkPackage) => {
   }
 }
 
+const buildCheckpointPackageProjection = ({ frameworkPackage, mode }) => {
+  const plain = typeof frameworkPackage?.toObject === 'function'
+    ? frameworkPackage.toObject()
+    : { ...(frameworkPackage || {}) }
+  // Non-activation checkpoints answer "would this package satisfy the validated runtime contract?"
+  const checkpointStatus = mode === FRAMEWORK_PACKAGE_CHECKPOINT_MODES.ACTIVATION
+    ? FRAMEWORK_PACKAGE_STATUSES.ACTIVE
+    : FRAMEWORK_PACKAGE_STATUSES.VALIDATED
+
+  return {
+    ...plain,
+    _id: plain._id || frameworkPackage?._id,
+    id: plain.id || frameworkPackage?.id,
+    status: checkpointStatus,
+  }
+}
+
+const runFrameworkPackageCheckpoint = async ({
+  frameworkPackage,
+  actorUserId,
+  mode = FRAMEWORK_PACKAGE_CHECKPOINT_MODES.FULL,
+} = {}) => {
+  const normalizedMode = normalizeCheckpointMode(mode)
+  const checkpointPackage = buildCheckpointPackageProjection({
+    frameworkPackage,
+    mode: normalizedMode,
+  })
+  const [integrity, registryDetails, dependencyLockResult] = await Promise.all([
+    buildFrameworkPackageIntegrity(checkpointPackage),
+    validateFrameworkPackageRegistryReferences({
+      frameworkKey: checkpointPackage.frameworkKey,
+      validationBindings: checkpointPackage.validationBindings,
+      workflowBindings: checkpointPackage.workflowBindings,
+      sections: checkpointPackage.sections,
+      uiContractKey: checkpointPackage.uiContractKey,
+      validateSections: true,
+      validateUiContractSections: true,
+    }),
+    prepareFrameworkPackageDependencyLock({
+      frameworkPackage: checkpointPackage,
+      actorUserId,
+    }),
+  ])
+  const readinessDetails = validateFrameworkPackageReadiness(checkpointPackage)
+  const stateContractDetails = validateFrameworkPackageStateContract(checkpointPackage)
+  const extraIssues = mapDetailsToCheckpointIssues({
+    ...readinessDetails,
+    ...stateContractDetails,
+    ...registryDetails,
+    ...dependencyLockResult.issueDetails,
+  })
+  const checkpointIntegrity = normalizeIntegrityForCheckpoint({
+    integrity,
+    dependencyLockResult,
+  })
+  const checkpoint = buildCheckpointResponse({
+    frameworkPackage: checkpointPackage,
+    mode: normalizedMode,
+    actorUserId,
+    integrity: checkpointIntegrity,
+    dependencyLockResult,
+    extraIssues,
+  })
+
+  return {
+    checkpoint,
+    dependencyLockResult,
+  }
+}
+
+const persistFrameworkPackageCheckpointMetadata = ({ frameworkPackage, checkpoint }) => {
+  frameworkPackage.lastCheckpointStatus = checkpoint.status
+  frameworkPackage.lastCheckpointAt = checkpoint.timestamp
+  frameworkPackage.lastCheckpointResult = checkpoint
+}
+
+const summarizeCheckpointForAudit = (checkpoint) => {
+  if (!checkpoint) return checkpoint
+
+  return {
+    schemaVersion: checkpoint.schemaVersion || '1',
+    mode: checkpoint.mode || null,
+    status: checkpoint.status || null,
+    summary: checkpoint.summary || null,
+    timestamp: checkpoint.timestamp || null,
+    errorCount: Array.isArray(checkpoint.errors) ? checkpoint.errors.length : 0,
+    warningCount: Array.isArray(checkpoint.warnings) ? checkpoint.warnings.length : 0,
+  }
+}
+
 export const listFrameworkPackages = async (req, res, next) => {
   try {
     const pageNum = Math.max(1, Number(req.query.page) || 1)
@@ -2116,17 +2482,21 @@ export const createFrameworkPackage = async (req, res, next) => {
 
     let dependencyLockResult = null
     if (frameworkPackage.status === FRAMEWORK_PACKAGE_STATUSES.VALIDATED) {
-      dependencyLockResult = await prepareFrameworkPackageDependencyLock({
+      const checkpointRun = await runFrameworkPackageCheckpoint({
         frameworkPackage,
         actorUserId,
+        mode: FRAMEWORK_PACKAGE_CHECKPOINT_MODES.FULL,
       })
-      if (Object.keys(dependencyLockResult.issueDetails).length > 0) {
-        return sendValidationFailed(res, req, dependencyLockResult.issueDetails)
+      if (checkpointRun.checkpoint.status === FRAMEWORK_PACKAGE_CHECKPOINT_STATUSES.FAIL) {
+        return sendCheckpointValidationFailed(res, req, checkpointRun.checkpoint)
       }
 
+      dependencyLockResult = checkpointRun.dependencyLockResult
       frameworkPackage.dependencyLock = dependencyLockResult.snapshot
-      frameworkPackage.lastCheckpointStatus = dependencyLockResult.snapshot.status
-      frameworkPackage.lastCheckpointAt = dependencyLockResult.snapshot.resolvedAt
+      persistFrameworkPackageCheckpointMetadata({
+        frameworkPackage,
+        checkpoint: checkpointRun.checkpoint,
+      })
       frameworkPackage.versionStatus = RUNTIME_CONTROL_VERSION_STATUSES.ACTIVE
       frameworkPackage.isLocked = true
       frameworkPackage.lockedAt = dependencyLockResult.lockedAt
@@ -2455,20 +2825,25 @@ export const updateFrameworkPackage = async (req, res, next) => {
       frameworkPackage.status === FRAMEWORK_PACKAGE_STATUSES.VALIDATED
       && (previousStatus !== FRAMEWORK_PACKAGE_STATUSES.VALIDATED || !frameworkPackage.dependencyLock)
     ) {
-      dependencyLockResult = await prepareFrameworkPackageDependencyLock({
+      const checkpointRun = await runFrameworkPackageCheckpoint({
         frameworkPackage,
         actorUserId,
+        mode: FRAMEWORK_PACKAGE_CHECKPOINT_MODES.FULL,
       })
-      if (Object.keys(dependencyLockResult.issueDetails).length > 0) {
-        return sendValidationFailed(res, req, dependencyLockResult.issueDetails)
+      if (checkpointRun.checkpoint.status === FRAMEWORK_PACKAGE_CHECKPOINT_STATUSES.FAIL) {
+        return sendCheckpointValidationFailed(res, req, checkpointRun.checkpoint)
       }
 
+      dependencyLockResult = checkpointRun.dependencyLockResult
       const previousDependencyLock = cloneAuditValue(frameworkPackage.dependencyLock)
       const previousCheckpointStatus = cloneAuditValue(frameworkPackage.lastCheckpointStatus)
       const previousCheckpointAt = cloneAuditValue(frameworkPackage.lastCheckpointAt)
+      const previousCheckpointResult = cloneAuditValue(frameworkPackage.lastCheckpointResult)
       frameworkPackage.dependencyLock = dependencyLockResult.snapshot
-      frameworkPackage.lastCheckpointStatus = dependencyLockResult.snapshot.status
-      frameworkPackage.lastCheckpointAt = dependencyLockResult.snapshot.resolvedAt
+      persistFrameworkPackageCheckpointMetadata({
+        frameworkPackage,
+        checkpoint: checkpointRun.checkpoint,
+      })
       frameworkPackage.versionStatus = RUNTIME_CONTROL_VERSION_STATUSES.ACTIVE
       frameworkPackage.isLocked = true
       frameworkPackage.lockedAt = dependencyLockResult.lockedAt
@@ -2480,11 +2855,15 @@ export const updateFrameworkPackage = async (req, res, next) => {
       }
       diff.lastCheckpointStatus = {
         from: previousCheckpointStatus,
-        to: dependencyLockResult.snapshot.status,
+        to: checkpointRun.checkpoint.status,
       }
       diff.lastCheckpointAt = {
         from: previousCheckpointAt,
-        to: dependencyLockResult.snapshot.resolvedAt,
+        to: checkpointRun.checkpoint.timestamp,
+      }
+      diff.lastCheckpointResult = {
+        from: summarizeCheckpointForAudit(previousCheckpointResult),
+        to: summarizeCheckpointForAudit(checkpointRun.checkpoint),
       }
     }
 
@@ -2636,6 +3015,270 @@ export const getFrameworkPackageIntegrity = async (req, res, next) => {
   }
 }
 
+export const runFrameworkPackageCheckpointEndpoint = async (req, res, next) => {
+  try {
+    const frameworkPackage = await findFrameworkPackageOr404(req, res)
+    if (!frameworkPackage) return
+
+    const actorUserId = req.context?.userId || req.userId
+    const mode = req.body?.mode || FRAMEWORK_PACKAGE_CHECKPOINT_MODES.FULL
+    if (req.body?.persist === true && mode === FRAMEWORK_PACKAGE_CHECKPOINT_MODES.DRY_RUN) {
+      return sendValidationFailed(res, req, {
+        persist: 'Dry-run checkpoints cannot be persisted.',
+      })
+    }
+
+    const checkpointRun = await runFrameworkPackageCheckpoint({
+      frameworkPackage,
+      actorUserId,
+      mode,
+    })
+
+    if (req.body?.persist === true) {
+      persistFrameworkPackageCheckpointMetadata({
+        frameworkPackage,
+        checkpoint: checkpointRun.checkpoint,
+      })
+      await frameworkPackage.save()
+      await populateFrameworkPackage(frameworkPackage)
+    }
+
+    return res.status(200).json({
+      data: checkpointRun.checkpoint,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    next(err)
+  }
+}
+
+export const getFrameworkPackageLatestCheckpoint = async (req, res, next) => {
+  try {
+    const frameworkPackage = await findFrameworkPackageOr404(req, res)
+    if (!frameworkPackage) return
+
+    const storedCheckpoint = frameworkPackage.lastCheckpointResult
+    const fallbackCheckpoint = storedCheckpoint || {
+      schemaVersion: '1',
+      id: toIdString(frameworkPackage._id) || frameworkPackage.id,
+      frameworkKey: frameworkPackage.frameworkKey,
+      packageKey: frameworkPackage.packageKey,
+      packageVersion: frameworkPackage.version,
+      mode: FRAMEWORK_PACKAGE_CHECKPOINT_MODES.FULL,
+      status: frameworkPackage.lastCheckpointStatus || 'NOT_RUN',
+      errors: [],
+      warnings: [],
+      issues: [],
+      passedChecks: [],
+      dependencyGraph: null,
+      dependencyLockPreview: frameworkPackage.dependencyLock || null,
+      summary: {
+        totalChecks: 0,
+        passed: 0,
+        warnings: 0,
+        failed: 0,
+        resolvedReferences: Number(frameworkPackage.dependencyLock?.references?.length) || 0,
+      },
+      timestamp: frameworkPackage.lastCheckpointAt || null,
+      runBy: null,
+    }
+
+    return res.status(200).json({
+      data: fallbackCheckpoint,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    next(err)
+  }
+}
+
+export const getFrameworkPackageDependencyGraph = async (req, res, next) => {
+  try {
+    const frameworkPackage = await findFrameworkPackageOr404(req, res)
+    if (!frameworkPackage) return
+
+    const dependencies = await fetchFrameworkPackageDependencies(frameworkPackage)
+    const dependencyGraph = buildCheckpointDependencyGraph({
+      frameworkPackage,
+      dependencies,
+    })
+
+    return res.status(200).json({
+      data: dependencyGraph,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    next(err)
+  }
+}
+
+export const getFrameworkPackageDependencyLock = async (req, res, next) => {
+  try {
+    const frameworkPackage = await findFrameworkPackageOr404(req, res)
+    if (!frameworkPackage) return
+
+    if (frameworkPackage.dependencyLock) {
+      return res.status(200).json({
+        data: frameworkPackage.dependencyLock,
+        meta: { requestId: req.requestId, version: 'v1' },
+      })
+    }
+
+    const dependencyLockResult = await prepareFrameworkPackageDependencyLock({
+      frameworkPackage,
+      actorUserId: req.context?.userId || req.userId,
+    })
+
+    return res.status(200).json({
+      data: dependencyLockResult.snapshot,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    next(err)
+  }
+}
+
+export const validateFrameworkPackage = async (req, res, next) => {
+  let session
+  try {
+    const frameworkPackage = await findFrameworkPackageOr404(req, res)
+    if (!frameworkPackage) return
+
+    const actorUserId = req.context?.userId || req.userId
+    const previousStatus = frameworkPackage.status
+    const previousDependencyLock = cloneAuditValue(frameworkPackage.dependencyLock)
+    const previousCheckpointStatus = cloneAuditValue(frameworkPackage.lastCheckpointStatus)
+    const previousCheckpointAt = cloneAuditValue(frameworkPackage.lastCheckpointAt)
+    const previousCheckpointResult = cloneAuditValue(frameworkPackage.lastCheckpointResult)
+    const checkpointRun = await runFrameworkPackageCheckpoint({
+      frameworkPackage,
+      actorUserId,
+      mode: FRAMEWORK_PACKAGE_CHECKPOINT_MODES.FULL,
+    })
+
+    if (checkpointRun.checkpoint.status === FRAMEWORK_PACKAGE_CHECKPOINT_STATUSES.FAIL) {
+      persistFrameworkPackageCheckpointMetadata({
+        frameworkPackage,
+        checkpoint: checkpointRun.checkpoint,
+      })
+      await frameworkPackage.save()
+      await populateFrameworkPackage(frameworkPackage)
+
+      return sendCheckpointValidationFailed(res, req, checkpointRun.checkpoint)
+    }
+
+    if (previousStatus === FRAMEWORK_PACKAGE_STATUSES.ACTIVE) {
+      persistFrameworkPackageCheckpointMetadata({
+        frameworkPackage,
+        checkpoint: checkpointRun.checkpoint,
+      })
+      await frameworkPackage.save()
+      await populateFrameworkPackage(frameworkPackage)
+
+      return res.status(200).json({
+        data: {
+          package: serializeFrameworkPackage(frameworkPackage, {
+            fallbackUpdatedBy: buildActorSummary(req),
+          }),
+          checkpoint: checkpointRun.checkpoint,
+        },
+        meta: { requestId: req.requestId, version: 'v1' },
+      })
+    }
+
+    const dependencyLockResult = checkpointRun.dependencyLockResult
+    const nextUIContractBinding = await resolveUIContractBinding({
+      uiContractKey: frameworkPackage.uiContractKey,
+      frameworkPackage,
+    })
+
+    session = await mongoose.startSession()
+    await session.withTransaction(async () => {
+      persistFrameworkPackageCheckpointMetadata({
+        frameworkPackage,
+        checkpoint: checkpointRun.checkpoint,
+      })
+      frameworkPackage.updatedBy = actorUserId
+      frameworkPackage.status = FRAMEWORK_PACKAGE_STATUSES.VALIDATED
+      frameworkPackage.isDefault = false
+      frameworkPackage.versionStatus = RUNTIME_CONTROL_VERSION_STATUSES.ACTIVE
+      frameworkPackage.isLocked = true
+      frameworkPackage.lockedAt = dependencyLockResult.lockedAt
+      frameworkPackage.lockedBy = actorUserId
+      frameworkPackage.lockedReason = 'Framework package reached a governed runtime release boundary.'
+      frameworkPackage.dependencyLock = dependencyLockResult.snapshot
+      frameworkPackage.uiContractBinding = nextUIContractBinding
+
+      await frameworkPackage.save({ session })
+      await updateRuntimeControlDependencyLocks({
+        dependencies: dependencyLockResult.dependencies,
+        packageKey: frameworkPackage.packageKey,
+        packageVersion: frameworkPackage.version,
+        actorUserId,
+        lockedAt: dependencyLockResult.lockedAt,
+        session,
+      })
+    })
+    await populateFrameworkPackage(frameworkPackage)
+
+    await auditService.logFromRequest(req, {
+      action: auditService.AUDIT_ACTIONS.FRAMEWORK_PACKAGE_VALIDATED,
+      resourceType: auditService.RESOURCE_TYPES.FrameworkPackage,
+      resourceId: frameworkPackage._id,
+      scope: {
+        frameworkKey: frameworkPackage.frameworkKey,
+      },
+      display: { resourceLabel: buildFrameworkPackageLabel(frameworkPackage) },
+      diff: {
+        status: {
+          from: previousStatus,
+          to: FRAMEWORK_PACKAGE_STATUSES.VALIDATED,
+        },
+        dependencyLock: {
+          from: previousDependencyLock,
+          to: cloneAuditValue(frameworkPackage.dependencyLock),
+        },
+        lastCheckpointStatus: {
+          from: previousCheckpointStatus,
+          to: checkpointRun.checkpoint.status,
+        },
+        lastCheckpointAt: {
+          from: previousCheckpointAt,
+          to: checkpointRun.checkpoint.timestamp,
+        },
+        lastCheckpointResult: {
+          from: summarizeCheckpointForAudit(previousCheckpointResult),
+          to: summarizeCheckpointForAudit(checkpointRun.checkpoint),
+        },
+      },
+    })
+
+    return res.status(200).json({
+      data: {
+        package: serializeFrameworkPackage(frameworkPackage, {
+          fallbackUpdatedBy: buildActorSummary(req),
+        }),
+        checkpoint: checkpointRun.checkpoint,
+      },
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.name === 'ValidationError') {
+      return res.status(422).json({
+        error: {
+          code: 'VALIDATION_FAILED',
+          message: err.message,
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    next(err)
+  } finally {
+    await session?.endSession()
+  }
+}
+
 export const getFrameworkPackageAudit = async (req, res, next) => {
   try {
     const frameworkPackage = await findFrameworkPackageOr404(req, res)
@@ -2705,42 +3348,16 @@ export const activateFrameworkPackage = async (req, res, next) => {
       })
     }
 
-    const readinessDetails = validateFrameworkPackageReadiness({
-      status: FRAMEWORK_PACKAGE_STATUSES.ACTIVE,
-      packageKey: frameworkPackage.packageKey,
-      sections: frameworkPackage.sections,
-      uiContractKey: frameworkPackage.uiContractKey,
-    })
-    if (Object.keys(readinessDetails).length > 0) {
-      return sendValidationFailed(res, req, readinessDetails)
-    }
-
-    const stateContractDetails = validateFrameworkPackageStateContract(frameworkPackage)
-    if (Object.keys(stateContractDetails).length > 0) {
-      return sendValidationFailed(res, req, stateContractDetails)
-    }
-
-    const validationDetails = await validateFrameworkPackageRegistryReferences({
-      frameworkKey: frameworkPackage.frameworkKey,
-      validationBindings: frameworkPackage.validationBindings,
-      workflowBindings: frameworkPackage.workflowBindings,
-      sections: frameworkPackage.sections,
-      uiContractKey: frameworkPackage.uiContractKey,
-      validateSections: true,
-      validateUiContractSections: true,
-    })
-    if (Object.keys(validationDetails).length > 0) {
-      return sendValidationFailed(res, req, validationDetails)
-    }
-
     const actorUserId = req.context?.userId || req.userId
-    const dependencyLockResult = await prepareFrameworkPackageDependencyLock({
+    const checkpointRun = await runFrameworkPackageCheckpoint({
       frameworkPackage,
       actorUserId,
+      mode: FRAMEWORK_PACKAGE_CHECKPOINT_MODES.ACTIVATION,
     })
-    if (Object.keys(dependencyLockResult.issueDetails).length > 0) {
-      return sendValidationFailed(res, req, dependencyLockResult.issueDetails)
+    if (checkpointRun.checkpoint.status === FRAMEWORK_PACKAGE_CHECKPOINT_STATUSES.FAIL) {
+      return sendCheckpointValidationFailed(res, req, checkpointRun.checkpoint)
     }
+    const dependencyLockResult = checkpointRun.dependencyLockResult
 
     const shouldRefreshDependencyLock =
       !frameworkPackage.dependencyLock
@@ -2812,8 +3429,6 @@ export const activateFrameworkPackage = async (req, res, next) => {
       frameworkPackage.activatedBy = actorUserId
       if (shouldRefreshDependencyLock) {
         frameworkPackage.dependencyLock = dependencyLockResult.snapshot
-        frameworkPackage.lastCheckpointStatus = dependencyLockResult.snapshot.status
-        frameworkPackage.lastCheckpointAt = dependencyLockResult.snapshot.resolvedAt
         frameworkPackage.lockedBy = actorUserId
 
         // Legacy validated packages may predate dependency snapshots; activation verifies and repairs that state.
@@ -2826,6 +3441,10 @@ export const activateFrameworkPackage = async (req, res, next) => {
           session,
         })
       }
+      persistFrameworkPackageCheckpointMetadata({
+        frameworkPackage,
+        checkpoint: checkpointRun.checkpoint,
+      })
       await frameworkPackage.save({ session })
     })
 
@@ -2844,6 +3463,7 @@ export const activateFrameworkPackage = async (req, res, next) => {
         version: frameworkPackage.version,
         previousActivePackageIds,
         activatedAt: frameworkPackage.activatedAt,
+        checkpoint: summarizeCheckpointForAudit(checkpointRun.checkpoint),
         ...(shouldRefreshDependencyLock ? { dependencyLock: frameworkPackage.dependencyLock } : {}),
       },
     })

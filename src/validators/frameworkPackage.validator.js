@@ -39,6 +39,7 @@ const createStatusValues = [
 ]
 
 const updateStatusValues = Object.values(FRAMEWORK_PACKAGE_STATUSES)
+const checkpointModeValues = ['FULL', 'DRY_RUN']
 
 const tokenListItemSchema = z
   .string()
@@ -591,6 +592,15 @@ const listFrameworkPackagesQuerySchema = z.object({
   pageSize: z.coerce.number().int().min(1).max(100).default(20),
 })
 
+const runFrameworkPackageCheckpointBodySchema = z.object({
+  mode: z
+    .enum(checkpointModeValues, {
+      errorMap: () => ({ message: 'Checkpoint mode must be FULL or DRY_RUN.' }),
+    })
+    .default('FULL'),
+  persist: z.boolean().default(false),
+}).strict()
+
 export const captureFrameworkPackageUpdateFields = (req, _res, next) => {
   req.frameworkPackageUpdateFields = new Set(Object.keys(req.body && typeof req.body === 'object' ? req.body : {}))
   next()
@@ -600,3 +610,6 @@ export const validateCreateFrameworkPackage = createBodyValidator(createFramewor
 export const validateUpdateFrameworkPackage = createBodyValidator(updateFrameworkPackageSchema)
 export const validateFrameworkPackageId = createParamsValidator(frameworkPackageIdSchema)
 export const validateListFrameworkPackages = createQueryValidator(listFrameworkPackagesQuerySchema)
+export const validateRunFrameworkPackageCheckpoint = createBodyValidator(
+  runFrameworkPackageCheckpointBodySchema,
+)
