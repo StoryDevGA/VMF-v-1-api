@@ -21,6 +21,7 @@ import RuntimePathRegistry, {
   RUNTIME_PATH_REGISTRY_SCOPES,
   RUNTIME_PATH_REGISTRY_STATUSES,
 } from '../models/RuntimePathRegistry.js'
+import User from '../models/User.js'
 import {
   RUNTIME_CONTROL_VERSION_STATUSES,
 } from '../utils/runtimeControlVersioning.js'
@@ -125,6 +126,15 @@ const FRAMEWORK_PACKAGE_CHECKPOINT_SEVERITIES = Object.freeze({
   BLOCKING: 'BLOCKING',
   WARNING: 'WARNING',
   INFO: 'INFO',
+})
+
+const OPTIONAL_FRAMEWORK_PACKAGE_FIELD_MESSAGES = Object.freeze({
+  compatibleWorkflowKeys: 'compatibleWorkflowKeys is deprecated and not configured.',
+  defaultAgentIds: 'defaultAgentIds is deprecated and not configured.',
+  requiredSkillIds: 'requiredSkillIds is deprecated and not configured.',
+  validationRules: 'validationRules is deprecated and not configured.',
+  validationConfig: 'validationConfig is deprecated and not configured.',
+  workflowPolicyConfig: 'workflowPolicyConfig is deprecated and not configured.',
 })
 
 const CHECKPOINT_CATEGORY_BY_INTEGRITY_GROUP = Object.freeze({
@@ -240,6 +250,75 @@ const serializeUserSummary = (value) => {
   }
 }
 
+const serializeCheckpointRunBy = (runBy, fallbackActor = null) => {
+  const runBySummary = serializeUserSummary(runBy)
+  const fallbackSummary = serializeUserSummary(fallbackActor)
+
+  if (!runBySummary) return fallbackSummary
+
+  if (fallbackSummary?.id && runBySummary.id === fallbackSummary.id) {
+    const mergedSummary = { ...runBySummary }
+    if (!mergedSummary.name && fallbackSummary.name) {
+      mergedSummary.name = fallbackSummary.name
+    }
+    if (!mergedSummary.email && fallbackSummary.email) {
+      mergedSummary.email = fallbackSummary.email
+    }
+    return mergedSummary
+  }
+
+  return runBySummary
+}
+
+const serializeCheckpointResult = (checkpoint, { fallbackRunBy = null } = {}) => {
+  if (!checkpoint) return checkpoint
+
+  const serializedCheckpoint = cloneAuditValue(checkpoint)
+  serializedCheckpoint.runBy = serializeCheckpointRunBy(serializedCheckpoint.runBy, fallbackRunBy)
+  return serializedCheckpoint
+}
+
+const resolveCheckpointRunByFallback = async ({ checkpoint, fallbackRunBy = null } = {}) => {
+  const runBySummary = serializeCheckpointRunBy(checkpoint?.runBy, fallbackRunBy)
+  if (!runBySummary?.id || runBySummary.name || runBySummary.email) return fallbackRunBy
+  if (!mongoose.Types.ObjectId.isValid(runBySummary.id)) return fallbackRunBy
+
+  try {
+    const user = await User.findById(runBySummary.id).select('name email').lean()
+    return serializeUserSummary(user) || fallbackRunBy
+  } catch {
+    return fallbackRunBy
+  }
+}
+
+const getCheckpointRunByResolutionId = ({ checkpoint, fallbackRunBy = null } = {}) => {
+  const runBySummary = serializeCheckpointRunBy(checkpoint?.runBy, fallbackRunBy)
+  if (!runBySummary?.id || runBySummary.name || runBySummary.email) return ''
+  if (!mongoose.Types.ObjectId.isValid(runBySummary.id)) return ''
+  return runBySummary.id
+}
+
+const resolveCheckpointRunByFallbacksById = async (frameworkPackages = []) => {
+  const runByIds = Array.from(new Set(frameworkPackages
+    .map((frameworkPackage) => getCheckpointRunByResolutionId({
+      checkpoint: frameworkPackage?.lastCheckpointResult,
+      fallbackRunBy: frameworkPackage?.activatedBy || frameworkPackage?.updatedBy,
+    }))
+    .filter(Boolean)))
+
+  if (runByIds.length === 0) return new Map()
+
+  try {
+    const users = await User.find({ _id: { $in: runByIds } }).select('name email').lean()
+    return new Map((users || [])
+      .map((user) => serializeUserSummary(user))
+      .filter(Boolean)
+      .map((userSummary) => [userSummary.id, userSummary]))
+  } catch {
+    return new Map()
+  }
+}
+
 const tokenPattern = /^[a-z][a-z0-9-]*$/
 
 const slugifyToken = (value) => {
@@ -287,7 +366,10 @@ const ensureValidationBindingKeys = (bindings = []) => {
   })
 }
 
-const serializeFrameworkPackage = (frameworkPackage, { fallbackUpdatedBy = null } = {}) => {
+const serializeFrameworkPackage = (
+  frameworkPackage,
+  { fallbackUpdatedBy = null, checkpointRunByFallback = null } = {},
+) => {
   const plain = typeof frameworkPackage?.toJSON === 'function'
     ? frameworkPackage.toJSON()
     : { ...frameworkPackage }
@@ -306,6 +388,9 @@ const serializeFrameworkPackage = (frameworkPackage, { fallbackUpdatedBy = null 
       ? serializedUpdatedBy
       : (fallbackUpdatedBy || serializedUpdatedBy)
   plain.activatedBy = serializeUserSummary(plain.activatedBy)
+  plain.lastCheckpointResult = serializeCheckpointResult(plain.lastCheckpointResult, {
+    fallbackRunBy: checkpointRunByFallback || plain.activatedBy || plain.updatedBy,
+  })
 
   for (const field of DEPRECATED_FRAMEWORK_PACKAGE_FIELDS) {
     delete plain[field]
@@ -1162,6 +1247,7 @@ const buildCheckpointResponse = ({
   frameworkPackage,
   mode,
   actorUserId,
+  actorSummary = null,
   integrity,
   dependencyLockResult,
   extraIssues = [],
@@ -1213,7 +1299,7 @@ const buildCheckpointResponse = ({
       resolvedReferences: Number(dependencyLockResult?.snapshot?.references?.length) || 0,
     },
     timestamp,
-    runBy: toIdString(actorUserId),
+    runBy: serializeCheckpointRunBy(actorSummary || actorUserId),
   }
 }
 
@@ -2149,7 +2235,7 @@ const buildFrameworkPackageIntegrity = async (frameworkPackage) => {
       severity: hasValue ? 'FAIL' : 'PASS',
       message: hasValue
         ? DEPRECATED_FRAMEWORK_PACKAGE_FIELD_MESSAGES[field]
-        : `${field} is not present in the runtime package contract.`,
+        : (OPTIONAL_FRAMEWORK_PACKAGE_FIELD_MESSAGES[field] ?? `${field} is deprecated and not configured.`),
       field,
     }))
   }
@@ -2312,6 +2398,7 @@ const buildCheckpointPackageProjection = ({ frameworkPackage, mode }) => {
 const runFrameworkPackageCheckpoint = async ({
   frameworkPackage,
   actorUserId,
+  actorSummary = null,
   mode = FRAMEWORK_PACKAGE_CHECKPOINT_MODES.FULL,
 } = {}) => {
   const normalizedMode = normalizeCheckpointMode(mode)
@@ -2351,6 +2438,7 @@ const runFrameworkPackageCheckpoint = async ({
     frameworkPackage: checkpointPackage,
     mode: normalizedMode,
     actorUserId,
+    actorSummary,
     integrity: checkpointIntegrity,
     dependencyLockResult,
     extraIssues,
@@ -2363,6 +2451,7 @@ const runFrameworkPackageCheckpoint = async ({
 }
 
 const persistFrameworkPackageCheckpointMetadata = ({ frameworkPackage, checkpoint }) => {
+  // runBy is a point-in-time audit snapshot; later user profile edits should not rewrite prior checkpoint evidence.
   frameworkPackage.lastCheckpointStatus = checkpoint.status
   frameworkPackage.lastCheckpointAt = checkpoint.timestamp
   frameworkPackage.lastCheckpointResult = checkpoint
@@ -2401,8 +2490,18 @@ export const listFrameworkPackages = async (req, res, next) => {
       .populate('activatedBy', 'name email')
       .lean()
 
+    const checkpointRunByFallbacksById = await resolveCheckpointRunByFallbacksById(items)
+
     return res.status(200).json({
-      data: items.map((item) => serializeFrameworkPackage(item)),
+      data: items.map((item) => {
+        const checkpointRunById = getCheckpointRunByResolutionId({
+          checkpoint: item.lastCheckpointResult,
+          fallbackRunBy: item.activatedBy || item.updatedBy,
+        })
+        return serializeFrameworkPackage(item, {
+          checkpointRunByFallback: checkpointRunByFallbacksById.get(checkpointRunById),
+        })
+      }),
       meta: {
         page: normalizedPage,
         pageSize: limit,
@@ -2472,6 +2571,7 @@ export const createFrameworkPackage = async (req, res, next) => {
     })
 
     const actorUserId = req.context?.userId || req.userId
+    const actorSummary = buildActorSummary(req)
     const frameworkPackage = new FrameworkPackage({
       ...canonicalPackagePayload,
       uiContractBinding,
@@ -2485,6 +2585,7 @@ export const createFrameworkPackage = async (req, res, next) => {
       const checkpointRun = await runFrameworkPackageCheckpoint({
         frameworkPackage,
         actorUserId,
+        actorSummary,
         mode: FRAMEWORK_PACKAGE_CHECKPOINT_MODES.FULL,
       })
       if (checkpointRun.checkpoint.status === FRAMEWORK_PACKAGE_CHECKPOINT_STATUSES.FAIL) {
@@ -2651,9 +2752,13 @@ export const getFrameworkPackage = async (req, res, next) => {
     }
 
     await populateFrameworkPackage(frameworkPackage)
+    const checkpointRunByFallback = await resolveCheckpointRunByFallback({
+      checkpoint: frameworkPackage.lastCheckpointResult,
+      fallbackRunBy: frameworkPackage.activatedBy || frameworkPackage.updatedBy,
+    })
 
     return res.status(200).json({
-      data: serializeFrameworkPackage(frameworkPackage),
+      data: serializeFrameworkPackage(frameworkPackage, { checkpointRunByFallback }),
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
@@ -2825,9 +2930,11 @@ export const updateFrameworkPackage = async (req, res, next) => {
       frameworkPackage.status === FRAMEWORK_PACKAGE_STATUSES.VALIDATED
       && (previousStatus !== FRAMEWORK_PACKAGE_STATUSES.VALIDATED || !frameworkPackage.dependencyLock)
     ) {
+      const actorSummary = buildActorSummary(req)
       const checkpointRun = await runFrameworkPackageCheckpoint({
         frameworkPackage,
         actorUserId,
+        actorSummary,
         mode: FRAMEWORK_PACKAGE_CHECKPOINT_MODES.FULL,
       })
       if (checkpointRun.checkpoint.status === FRAMEWORK_PACKAGE_CHECKPOINT_STATUSES.FAIL) {
@@ -3021,6 +3128,7 @@ export const runFrameworkPackageCheckpointEndpoint = async (req, res, next) => {
     if (!frameworkPackage) return
 
     const actorUserId = req.context?.userId || req.userId
+    const actorSummary = buildActorSummary(req)
     const mode = req.body?.mode || FRAMEWORK_PACKAGE_CHECKPOINT_MODES.FULL
     if (req.body?.persist === true && mode === FRAMEWORK_PACKAGE_CHECKPOINT_MODES.DRY_RUN) {
       return sendValidationFailed(res, req, {
@@ -3031,6 +3139,7 @@ export const runFrameworkPackageCheckpointEndpoint = async (req, res, next) => {
     const checkpointRun = await runFrameworkPackageCheckpoint({
       frameworkPackage,
       actorUserId,
+      actorSummary,
       mode,
     })
 
@@ -3057,7 +3166,14 @@ export const getFrameworkPackageLatestCheckpoint = async (req, res, next) => {
     const frameworkPackage = await findFrameworkPackageOr404(req, res)
     if (!frameworkPackage) return
 
+    await populateFrameworkPackage(frameworkPackage)
     const storedCheckpoint = frameworkPackage.lastCheckpointResult
+    const fallbackRunBy = storedCheckpoint
+      ? await resolveCheckpointRunByFallback({
+        checkpoint: storedCheckpoint,
+        fallbackRunBy: frameworkPackage.activatedBy || frameworkPackage.updatedBy,
+      })
+      : null
     const fallbackCheckpoint = storedCheckpoint || {
       schemaVersion: '1',
       id: toIdString(frameworkPackage._id) || frameworkPackage.id,
@@ -3084,7 +3200,9 @@ export const getFrameworkPackageLatestCheckpoint = async (req, res, next) => {
     }
 
     return res.status(200).json({
-      data: fallbackCheckpoint,
+      data: serializeCheckpointResult(fallbackCheckpoint, {
+        fallbackRunBy,
+      }),
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
@@ -3145,6 +3263,7 @@ export const validateFrameworkPackage = async (req, res, next) => {
     if (!frameworkPackage) return
 
     const actorUserId = req.context?.userId || req.userId
+    const actorSummary = buildActorSummary(req)
     const previousStatus = frameworkPackage.status
     const previousDependencyLock = cloneAuditValue(frameworkPackage.dependencyLock)
     const previousCheckpointStatus = cloneAuditValue(frameworkPackage.lastCheckpointStatus)
@@ -3153,6 +3272,7 @@ export const validateFrameworkPackage = async (req, res, next) => {
     const checkpointRun = await runFrameworkPackageCheckpoint({
       frameworkPackage,
       actorUserId,
+      actorSummary,
       mode: FRAMEWORK_PACKAGE_CHECKPOINT_MODES.FULL,
     })
 
@@ -3349,9 +3469,11 @@ export const activateFrameworkPackage = async (req, res, next) => {
     }
 
     const actorUserId = req.context?.userId || req.userId
+    const actorSummary = buildActorSummary(req)
     const checkpointRun = await runFrameworkPackageCheckpoint({
       frameworkPackage,
       actorUserId,
+      actorSummary,
       mode: FRAMEWORK_PACKAGE_CHECKPOINT_MODES.ACTIVATION,
     })
     if (checkpointRun.checkpoint.status === FRAMEWORK_PACKAGE_CHECKPOINT_STATUSES.FAIL) {

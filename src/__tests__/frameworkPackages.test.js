@@ -71,6 +71,17 @@ const buildFrameworkRegistryLookupChain = (rows) => ({
   }),
 })
 
+const buildUserQueryChain = (value, { reject = false } = {}) => {
+  const promise = reject ? Promise.reject(value) : Promise.resolve(value)
+  return {
+    select: jest.fn().mockReturnThis(),
+    lean: jest.fn().mockImplementation(() => promise),
+    then: promise.then.bind(promise),
+    catch: promise.catch.bind(promise),
+    finally: promise.finally.bind(promise),
+  }
+}
+
 const buildDefaultRoleRows = () => ([
   {
     key: 'SUPER_ADMIN',
@@ -132,6 +143,26 @@ const mockFindOneSelect = (value) => {
   FrameworkPackage.findOne.mockReturnValue({ select })
   return select
 }
+
+const makeCheckpointResult = (overrides = {}) => ({
+  schemaVersion: '1',
+  id: FRAMEWORK_PACKAGE_ID,
+  frameworkKey: 'VMF',
+  packageKey: 'vmf-2-3-1',
+  packageVersion: '2.3.1',
+  mode: 'FULL',
+  status: 'PASS',
+  errors: [],
+  warnings: [],
+  issues: [],
+  passedChecks: [],
+  dependencyGraph: null,
+  dependencyLockPreview: null,
+  summary: { totalChecks: 1, passed: 1, warnings: 0, failed: 0, resolvedReferences: 0 },
+  timestamp: '2026-05-07T13:42:00.000Z',
+  runBy: SUPER_ADMIN_ID,
+  ...overrides,
+})
 
 const getAccessTokenForUser = async (user) => {
   const tokens = await tokenService.generateTokens(user)
@@ -261,22 +292,21 @@ afterAll(() => {
 beforeEach(() => {
   User.findById = jest.fn().mockImplementation((userId) => {
     if (userId === SUPER_ADMIN_ID) {
-      return Promise.resolve(makeFakeUser())
+      return buildUserQueryChain(makeFakeUser())
     }
 
     if (userId === NON_ADMIN_ID) {
-      return Promise.resolve(
-        makeFakeUser({
-          _id: NON_ADMIN_ID,
-          id: NON_ADMIN_ID,
-          email: 'user@storylineos.com',
-          memberships: [{ customerId: '607f1f77bcf86cd799439099', roles: ['USER'] }],
-        }),
-      )
+      return buildUserQueryChain(makeFakeUser({
+        _id: NON_ADMIN_ID,
+        id: NON_ADMIN_ID,
+        email: 'user@storylineos.com',
+        memberships: [{ customerId: '607f1f77bcf86cd799439099', roles: ['USER'] }],
+      }))
     }
 
-    return Promise.resolve(null)
+    return buildUserQueryChain(null)
   })
+  User.find = jest.fn().mockReturnValue(buildFrameworkRegistryLookupChain([makeFakeUser()]))
 
   FrameworkPackage.find = jest.fn()
   FrameworkPackage.countDocuments = jest.fn()
@@ -1229,6 +1259,7 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
 
   test('GET /api/v1/super-admin/runtime-control/framework-packages returns paginated framework packages', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
+    const legacyRunById = '507f1f77bcf86cd799439099'
     const rows = [
       {
         _id: FRAMEWORK_PACKAGE_ID,
@@ -1250,6 +1281,9 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
           requiredSections: ['overview'],
           publishChecks: ['validation-pass'],
         },
+        lastCheckpointStatus: 'PASS',
+        lastCheckpointAt: '2026-05-07T13:42:00.000Z',
+        lastCheckpointResult: makeCheckpointResult({ runBy: legacyRunById }),
         updatedAt: '2026-04-08T09:15:00.000Z',
         updatedBy: { _id: SUPER_ADMIN_ID, name: 'Super Administrator' },
       },
@@ -1257,6 +1291,11 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
 
     FrameworkPackage.countDocuments.mockResolvedValue(1)
     FrameworkPackage.find.mockReturnValue(buildFrameworkPackageQueryChain(rows))
+    User.find.mockReturnValue(buildFrameworkRegistryLookupChain([{
+      _id: legacyRunById,
+      name: 'Checkpoint Runner',
+      email: 'runner@storylineos.com',
+    }]))
 
     const res = await request
       .get('/api/v1/super-admin/runtime-control/framework-packages?page=1&pageSize=20')
@@ -1266,6 +1305,11 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     expect(res.body.data).toHaveLength(1)
     expect(res.body.meta.total).toBe(1)
     expect(res.body.data[0].updatedBy.name).toBe('Super Administrator')
+    expect(res.body.data[0].lastCheckpointResult.runBy).toEqual({
+      id: legacyRunById,
+      name: 'Checkpoint Runner',
+      email: 'runner@storylineos.com',
+    })
     expect(res.body.data[0].compatibleWorkflowKeys).toBeUndefined()
     expect(res.body.data[0].defaultAgentIds).toBeUndefined()
     expect(res.body.data[0].requiredSkillIds).toBeUndefined()
@@ -1647,6 +1691,40 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     expect(res.body.data.checks).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
+          key: 'deprecated.validationConfig',
+          severity: 'PASS',
+          message: 'validationConfig is deprecated and not configured.',
+        }),
+        expect.objectContaining({
+          key: 'deprecated.workflowPolicyConfig',
+          severity: 'PASS',
+          message: 'workflowPolicyConfig is deprecated and not configured.',
+        }),
+        expect.objectContaining({
+          key: 'deprecated.compatibleWorkflowKeys',
+          severity: 'PASS',
+          message: 'compatibleWorkflowKeys is deprecated and not configured.',
+        }),
+        expect.objectContaining({
+          key: 'deprecated.defaultAgentIds',
+          severity: 'PASS',
+          message: 'defaultAgentIds is deprecated and not configured.',
+        }),
+        expect.objectContaining({
+          key: 'deprecated.requiredSkillIds',
+          severity: 'PASS',
+          message: 'requiredSkillIds is deprecated and not configured.',
+        }),
+        expect.objectContaining({
+          key: 'deprecated.validationRules',
+          severity: 'PASS',
+          message: 'validationRules is deprecated and not configured.',
+        }),
+      ]),
+    )
+    expect(res.body.data.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
           key: 'packageKey.required',
           severity: 'FAIL',
           field: 'packageKey',
@@ -1764,6 +1842,11 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
 
     expect(res.status).toBe(200)
     expect(res.body.data.status).toBe('FAIL')
+    expect(res.body.data.runBy).toEqual({
+      id: SUPER_ADMIN_ID,
+      name: 'Super Administrator',
+      email: 'admin@storylineos.com',
+    })
     expect(res.body.data.errors).toEqual(expect.arrayContaining([
       expect.objectContaining({
         code: 'PACKAGE_KEY_REQUIRED',
@@ -1786,6 +1869,104 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     expect(res.body.error.code).toBe('VALIDATION_FAILED')
     expect(res.body.error.details.mode).toBeTruthy()
     expect(FrameworkPackage.findById).not.toHaveBeenCalled()
+  })
+
+  test('GET /api/v1/super-admin/runtime-control/framework-packages/:packageId/checkpoint/latest resolves legacy runBy ids', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const frameworkPackage = makeFrameworkPackageDoc({
+      lastCheckpointStatus: 'PASS',
+      lastCheckpointAt: new Date('2026-05-07T13:42:00.000Z'),
+      lastCheckpointResult: makeCheckpointResult({ runBy: SUPER_ADMIN_ID }),
+    })
+    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+
+    const res = await request
+      .get(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/checkpoint/latest`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.runBy).toEqual({
+      id: SUPER_ADMIN_ID,
+      name: 'Super Administrator',
+      email: 'admin@storylineos.com',
+    })
+  })
+
+  test('GET /api/v1/super-admin/runtime-control/framework-packages/:packageId/checkpoint/latest degrades when legacy runBy user is missing', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const legacyRunById = '507f1f77bcf86cd799439099'
+    const frameworkPackage = makeFrameworkPackageDoc({
+      lastCheckpointStatus: 'PASS',
+      lastCheckpointAt: new Date('2026-05-07T13:42:00.000Z'),
+      lastCheckpointResult: makeCheckpointResult({ runBy: legacyRunById }),
+    })
+    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+
+    const res = await request
+      .get(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/checkpoint/latest`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.runBy).toEqual({ id: legacyRunById })
+  })
+
+  test('GET /api/v1/super-admin/runtime-control/framework-packages/:packageId/checkpoint/latest degrades when legacy runBy lookup fails', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const legacyRunById = '507f1f77bcf86cd799439099'
+    User.findById.mockImplementation((userId) => {
+      if (userId === SUPER_ADMIN_ID) return buildUserQueryChain(makeFakeUser())
+      if (userId === legacyRunById) return buildUserQueryChain(new Error('lookup failed'), { reject: true })
+      return buildUserQueryChain(null)
+    })
+    const frameworkPackage = makeFrameworkPackageDoc({
+      lastCheckpointStatus: 'PASS',
+      lastCheckpointAt: new Date('2026-05-07T13:42:00.000Z'),
+      lastCheckpointResult: makeCheckpointResult({ runBy: legacyRunById }),
+    })
+    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+
+    const res = await request
+      .get(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/checkpoint/latest`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.runBy).toEqual({ id: legacyRunById })
+  })
+
+  test('GET /api/v1/super-admin/runtime-control/framework-packages/:packageId/checkpoint/latest skips invalid legacy runBy ids', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const frameworkPackage = makeFrameworkPackageDoc({
+      lastCheckpointStatus: 'PASS',
+      lastCheckpointAt: new Date('2026-05-07T13:42:00.000Z'),
+      lastCheckpointResult: makeCheckpointResult({ runBy: 'legacy-runner' }),
+    })
+    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+
+    const res = await request
+      .get(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/checkpoint/latest`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.runBy).toEqual({ id: 'legacy-runner' })
+  })
+
+  test('GET /api/v1/super-admin/runtime-control/framework-packages/:packageId/checkpoint/latest tolerates missing runBy on legacy records', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const frameworkPackage = makeFrameworkPackageDoc({
+      lastCheckpointStatus: 'PASS',
+      lastCheckpointAt: new Date('2026-05-07T13:42:00.000Z'),
+      lastCheckpointResult: makeCheckpointResult({ runBy: null }),
+      activatedBy: null,
+      updatedBy: null,
+    })
+    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+
+    const res = await request
+      .get(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/checkpoint/latest`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.runBy).toBeNull()
   })
 
   test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/validate returns 422 for checkpoint failures without promoting the package', async () => {
@@ -1853,9 +2034,19 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     expect(res.status).toBe(200)
     expect(res.body.data.package.status).toBe('VALIDATED')
     expect(res.body.data.checkpoint.status).toBe('PASS')
+    expect(res.body.data.checkpoint.runBy).toEqual({
+      id: SUPER_ADMIN_ID,
+      name: 'Super Administrator',
+      email: 'admin@storylineos.com',
+    })
     expect(frameworkPackage.status).toBe('VALIDATED')
     expect(frameworkPackage.lastCheckpointStatus).toBe('PASS')
     expect(frameworkPackage.lastCheckpointResult.status).toBe('PASS')
+    expect(frameworkPackage.lastCheckpointResult.runBy).toEqual({
+      id: SUPER_ADMIN_ID,
+      name: 'Super Administrator',
+      email: 'admin@storylineos.com',
+    })
     expect(frameworkPackage.dependencyLock.references.length).toBeGreaterThan(0)
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'FRAMEWORK_PACKAGE_VALIDATED',
