@@ -24,6 +24,7 @@ import skillRoleRegistryRoutes from './routes/skillRoleRegistry.routes.js'
 import validationRegistryRoutes from './routes/validationRegistry.routes.js'
 import workflowPolicyRoutes from './routes/workflowPolicies.routes.js'
 import uiContractRoutes from './routes/uiContracts.routes.js'
+import runtimeValidationRoutes from './routes/runtimeValidation.routes.js'
 import superAdminAuditRoutes from './routes/superAdminAudit.routes.js'
 import licenseLevelRoutes from './routes/licenseLevels.routes.js'
 import roleRoutes from './routes/roles.routes.js'
@@ -107,6 +108,7 @@ app.use('/api/v1/super-admin/runtime-control/skill-roles', skillRoleRegistryRout
 app.use('/api/v1/super-admin/runtime-control/validation-registry', validationRegistryRoutes)
 app.use('/api/v1/super-admin/runtime-control/workflow-policies', workflowPolicyRoutes)
 app.use('/api/v1/super-admin/runtime-control/ui-contracts', uiContractRoutes)
+app.use('/api/v1/super-admin/runtime-control/runtime-validation', runtimeValidationRoutes)
 app.use('/api/v1/super-admin/denied-access-logs', superAdminAuditRoutes)
 if (env.governanceLicenseLevelsEnabled) {
   app.use('/api/v1/super-admin/licence-levels', licenseLevelRoutes)
