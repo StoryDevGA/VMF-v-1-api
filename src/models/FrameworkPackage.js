@@ -45,6 +45,7 @@ export const FRAMEWORK_PACKAGE_RETRY_POLICIES = Object.freeze({
 export const FRAMEWORK_PACKAGE_VALIDATION_TRIGGERS = Object.freeze({
   ON_SAVE: 'ON_SAVE',
   ON_SUBMIT: 'ON_SUBMIT',
+  ON_VALIDATE: 'ON_VALIDATE',
   ON_STAGE_CHANGE: 'ON_STAGE_CHANGE',
   ON_PUBLISH: 'ON_PUBLISH',
   MANUAL: 'MANUAL',
@@ -53,10 +54,24 @@ export const FRAMEWORK_PACKAGE_VALIDATION_TRIGGERS = Object.freeze({
 export const FRAMEWORK_PACKAGE_WORKFLOW_EXECUTION_CONTEXTS = Object.freeze({
   ON_CREATE: 'ON_CREATE',
   ON_SAVE: 'ON_SAVE',
+  ON_RUN: 'ON_RUN',
   ON_SUBMIT: 'ON_SUBMIT',
+  ON_REVIEW_START: 'ON_REVIEW_START',
   ON_STAGE_ENTER: 'ON_STAGE_ENTER',
   ON_STAGE_EXIT: 'ON_STAGE_EXIT',
   ON_APPROVAL: 'ON_APPROVAL',
+  ON_APPROVE: 'ON_APPROVE',
+  ON_SECTION_BUILD: 'ON_SECTION_BUILD',
+  ON_DISCOVERY_COMPLETE: 'ON_DISCOVERY_COMPLETE',
+  ON_POSITIONING_COMPLETE: 'ON_POSITIONING_COMPLETE',
+  ON_PROOF_COMPLETE: 'ON_PROOF_COMPLETE',
+  ON_ECONOMICS_COMPLETE: 'ON_ECONOMICS_COMPLETE',
+  ON_TRAP_ANALYSIS_COMPLETE: 'ON_TRAP_ANALYSIS_COMPLETE',
+  ON_VALIDATE: 'ON_VALIDATE',
+  ON_DEAL_MODE_REQUEST: 'ON_DEAL_MODE_REQUEST',
+  ON_SPD_COMPILE: 'ON_SPD_COMPILE',
+  ON_RENDER: 'ON_RENDER',
+  ON_QUERY: 'ON_QUERY',
   ON_PUBLISH: 'ON_PUBLISH',
 })
 
@@ -176,6 +191,12 @@ const hasConfiguredSections = (sections = []) =>
       String(section?.sectionKey || '').trim()
       || String(section?.runtimePath || '').trim(),
   )
+
+const hasCheckpointResultValue = (value) =>
+  Boolean(value)
+  && typeof value === 'object'
+  && !Array.isArray(value)
+  && !(value instanceof Date)
 
 const stringTokenField = {
   type: String,
@@ -929,6 +950,12 @@ frameworkPackageSchema.pre('validate', function normalizeFrameworkPackage(next) 
 
   if (this.isNew || this.isModified('assignedCustomerIds')) {
     this.assignedCustomerIds = normalizeCustomerIdList(this.assignedCustomerIds)
+  }
+
+  if ((this.isNew || this.isModified('lastCheckpointResult')) && !hasCheckpointResultValue(this.lastCheckpointResult)) {
+    this.lastCheckpointResult = null
+    this.lastCheckpointStatus = null
+    this.lastCheckpointAt = null
   }
 
   if (this.visibility === FRAMEWORK_PACKAGE_VISIBILITY.INTERNAL_ONLY) {

@@ -568,6 +568,12 @@ describe('UI Contract Routes', () => {
             buttonLabel: 'Archive',
             displayOrder: 30,
           },
+          {
+            actionKey: 'RETURN_TO_DRAFT',
+            governedAction: 'RETURN_TO_DRAFT',
+            buttonLabel: 'Return to Draft',
+            displayOrder: 40,
+          },
         ],
       })
 
@@ -577,6 +583,7 @@ describe('UI Contract Routes', () => {
       'SAVE',
       'APPROVE',
       'ARCHIVE',
+      'RETURN_TO_DRAFT',
     ])
   })
 

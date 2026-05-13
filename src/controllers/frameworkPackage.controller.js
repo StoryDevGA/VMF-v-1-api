@@ -278,6 +278,9 @@ const serializeCheckpointResult = (checkpoint, { fallbackRunBy = null } = {}) =>
   return serializedCheckpoint
 }
 
+const hasStoredCheckpointResult = (checkpoint) =>
+  checkpoint && typeof checkpoint === 'object' && !Array.isArray(checkpoint) && !(checkpoint instanceof Date)
+
 const resolveCheckpointRunByFallback = async ({ checkpoint, fallbackRunBy = null } = {}) => {
   const runBySummary = serializeCheckpointRunBy(checkpoint?.runBy, fallbackRunBy)
   if (!runBySummary?.id || runBySummary.name || runBySummary.email) return fallbackRunBy
@@ -391,6 +394,11 @@ const serializeFrameworkPackage = (
   plain.lastCheckpointResult = serializeCheckpointResult(plain.lastCheckpointResult, {
     fallbackRunBy: checkpointRunByFallback || plain.activatedBy || plain.updatedBy,
   })
+  if (!hasStoredCheckpointResult(plain.lastCheckpointResult)) {
+    plain.lastCheckpointResult = null
+    plain.lastCheckpointStatus = null
+    plain.lastCheckpointAt = null
+  }
 
   for (const field of DEPRECATED_FRAMEWORK_PACKAGE_FIELDS) {
     delete plain[field]
@@ -3167,7 +3175,9 @@ export const getFrameworkPackageLatestCheckpoint = async (req, res, next) => {
     if (!frameworkPackage) return
 
     await populateFrameworkPackage(frameworkPackage)
-    const storedCheckpoint = frameworkPackage.lastCheckpointResult
+    const storedCheckpoint = hasStoredCheckpointResult(frameworkPackage.lastCheckpointResult)
+      ? frameworkPackage.lastCheckpointResult
+      : null
     const fallbackRunBy = storedCheckpoint
       ? await resolveCheckpointRunByFallback({
         checkpoint: storedCheckpoint,
@@ -3180,8 +3190,8 @@ export const getFrameworkPackageLatestCheckpoint = async (req, res, next) => {
       frameworkKey: frameworkPackage.frameworkKey,
       packageKey: frameworkPackage.packageKey,
       packageVersion: frameworkPackage.version,
-      mode: FRAMEWORK_PACKAGE_CHECKPOINT_MODES.FULL,
-      status: frameworkPackage.lastCheckpointStatus || 'NOT_RUN',
+      mode: null,
+      status: 'NOT_RUN',
       errors: [],
       warnings: [],
       issues: [],
@@ -3195,7 +3205,7 @@ export const getFrameworkPackageLatestCheckpoint = async (req, res, next) => {
         failed: 0,
         resolvedReferences: Number(frameworkPackage.dependencyLock?.references?.length) || 0,
       },
-      timestamp: frameworkPackage.lastCheckpointAt || null,
+      timestamp: null,
       runBy: null,
     }
 

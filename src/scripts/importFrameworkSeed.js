@@ -1,10 +1,9 @@
 import fs from 'fs'
 import path from 'path'
-import { fileURLToPath } from 'url'
+import { fileURLToPath, pathToFileURL } from 'url'
 import mongoose from 'mongoose'
 import { connectDb, disconnectDb } from '../config/db.js'
 import {
-  FrameworkPackage,
   RuntimeAgent,
   RuntimePathRegistry,
   RuntimeSkill,
@@ -13,18 +12,39 @@ import {
   ValidationRegistry,
   WorkflowPolicy,
 } from '../models/index.js'
+import FrameworkPackage, {
+  FRAMEWORK_PACKAGE_CUSTOMER_ACCESS_MODES,
+  FRAMEWORK_PACKAGE_EVALUATION_MODES,
+  FRAMEWORK_PACKAGE_EXECUTION_MODES,
+  FRAMEWORK_PACKAGE_RETRY_POLICIES,
+  FRAMEWORK_PACKAGE_SCOPES,
+  FRAMEWORK_PACKAGE_STATE_BINDING_MODES,
+  FRAMEWORK_PACKAGE_STATE_MODEL_MODES,
+  FRAMEWORK_PACKAGE_STATE_MODELS,
+  FRAMEWORK_PACKAGE_STATE_PERSISTENCE_MODES,
+  FRAMEWORK_PACKAGE_STATUSES,
+  FRAMEWORK_PACKAGE_TYPES,
+  FRAMEWORK_PACKAGE_VALIDATION_TRIGGERS,
+  FRAMEWORK_PACKAGE_VISIBILITY,
+  FRAMEWORK_PACKAGE_WORKFLOW_EXECUTION_CONTEXTS,
+} from '../models/FrameworkPackage.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const apiRoot = path.resolve(__dirname, '../..')
 const workspaceRoot = path.resolve(apiRoot, '..')
 
-const DEFAULT_SEED_DIR = path.resolve(workspaceRoot, 'docs/temp-docs')
+const DEFAULT_SEED_DIR = path.resolve(workspaceRoot, 'docs/seed-data')
 const DEFAULT_REPORT_DIR = path.resolve(workspaceRoot, 'docs/generated/seed-imports')
 const DEFAULT_AUDIT_FILE = path.resolve(DEFAULT_SEED_DIR, 'canonical_seed_schema_conformance_audit.json')
+const DEFAULT_EDITOR_CONSTANTS_FILE = path.resolve(
+  workspaceRoot,
+  'VMF-v-1-client/src/pages/SuperAdminFrameworkPackages/superAdminFrameworkPackages.constants.js',
+)
 const RESET_CONFIRMATION = '--confirm-reset-vmf-runtime-control'
 const VMF_VERSION = '2.3.1'
 const VMF_FRAMEWORK_KEY = 'VMF'
+const SEED_ACTOR_ID = new mongoose.Types.ObjectId('000000000000000000000001')
 const WORKFLOW_POLICY_DEFAULT_TIMEOUT_MS = 10000
 const RUNTIME_PATH_CATEGORY_MAP = Object.freeze({
   APPENDIX: 'ARTIFACT',
@@ -41,45 +61,64 @@ const RUNTIME_PATH_CATEGORY_MAP = Object.freeze({
   SPD: 'OUTPUT',
   TARGETING: 'OUTPUT',
   VALUE_DRIVER: 'OUTPUT',
+  DELIVERY: 'OUTPUT',
+  IMPACT: 'OUTPUT',
+  INTEGRITY: 'VALIDATION',
 })
 const RUNTIME_SKILL_CATEGORY_MAP = Object.freeze({
   BOUNDARY: 'GOVERNANCE',
+  DEAL: 'VALIDATION',
   DISCOVERY: 'GENERATION',
+  DELIVERY: 'GENERATION',
   ECONOMICS: 'GENERATION',
+  IMPACT: 'GENERATION',
+  INTEGRITY: 'GOVERNANCE',
   POSITIONING: 'GENERATION',
   PROOF: 'GENERATION',
   QUERY: 'ANALYSIS',
   RENDER: 'OUTPUT',
   SECTION: 'GENERATION',
   SPD: 'GENERATION',
+  TARGETING: 'GENERATION',
+  VALUE_DRIVER: 'GENERATION',
 })
 const VALIDATION_CATEGORY_MAP = Object.freeze({
   DEAL: 'QUALITY',
   DISCOVERY: 'QUALITY',
   ECONOMICS: 'QUALITY',
+  DSIC: 'QUALITY',
+  GUARDRAIL: 'GOVERNANCE',
+  IMPACT: 'QUALITY',
+  INFERENCE: 'QUALITY',
+  INTEGRITY: 'GOVERNANCE',
+  ORCHESTRATION: 'GOVERNANCE',
   POSITIONING: 'QUALITY',
   PROOF: 'QUALITY',
   QUERY: 'GOVERNANCE',
   RISK: 'GOVERNANCE',
+  RENDER: 'QUALITY',
+  SEQUENCING: 'CONSISTENCY',
   SPD: 'QUALITY',
   STATE: 'LIFECYCLE',
   TARGETING: 'QUALITY',
+  TRACEABILITY: 'QUALITY',
   VALUE_DRIVER: 'QUALITY',
 })
 const WORKFLOW_POLICY_TYPE_MAP = Object.freeze({
+  BUILD_GATE: 'VALIDATION',
+  DEAL_GATE: 'VALIDATION',
+  DISCOVERY_GATE: 'VALIDATION',
+  ECONOMICS_GATE: 'VALIDATION',
+  INTEGRITY_GATE: 'VALIDATION',
+  POSITIONING_GATE: 'VALIDATION',
+  PROOF_GATE: 'VALIDATION',
   QUERY_GATE: 'ROUTING',
+  RENDER_GATE: 'VALIDATION',
+  RISK_GATE: 'VALIDATION',
+  SPD_GATE: 'VALIDATION',
   STATE_GATE: 'LIFECYCLE_GATE',
   VALIDATION_GATE: 'VALIDATION',
 })
-const FRAMEWORK_PACKAGE_VALIDATION_TRIGGER_MAP = Object.freeze({
-  ON_VALIDATE: 'ON_SUBMIT',
-})
-const FRAMEWORK_PACKAGE_WORKFLOW_CONTEXT_MAP = Object.freeze({
-  ON_QUERY: 'ON_SAVE',
-  ON_RUN: 'ON_SAVE',
-  ON_VALIDATE: 'ON_SUBMIT',
-})
-
 const IMPORT_STEPS = Object.freeze([
   {
     label: 'Runtime Paths',
@@ -140,6 +179,29 @@ const IMPORT_STEPS = Object.freeze([
 ])
 
 const RESET_STEPS = [...IMPORT_STEPS].reverse()
+const IMPORT_MANAGED_UPDATE_FIELDS = new Set([
+  '_id',
+  '__v',
+  'createdAt',
+  'updatedAt',
+  'createdBy',
+  'updatedBy',
+  'activatedAt',
+  'activatedBy',
+  'assignedCustomerIds',
+  'dependencyLock',
+  'isLocked',
+  'lastCheckpointAt',
+  'lastCheckpointResult',
+  'lastCheckpointStatus',
+  'lockedAt',
+  'lockedBy',
+  'lockedByPackageKeys',
+  'lockedReason',
+  'resolvedAt',
+  'status',
+  'uiContractBinding',
+])
 
 const printHelp = () => {
   console.log(`
@@ -149,13 +211,14 @@ Usage:
   node src/scripts/importFrameworkSeed.js [options]
 
 Options:
-  --seed-dir <path>                    Seed JSON directory. Defaults to ../docs/temp-docs.
+  --seed-dir <path>                    Seed JSON directory. Defaults to ../docs/seed-data.
   --apply                              Write changes. Without this flag the script is a dry-run.
   --reset-runtime-control              Clear only Runtime Control seed collections before import.
   ${RESET_CONFIRMATION}    Required with --apply --reset-runtime-control.
   --report-dir <path>                  Import report directory. Defaults to docs/generated/seed-imports.
   --audit-file <path>                  Conformance audit file. Defaults to seed-dir/canonical_seed_schema_conformance_audit.json.
   --no-audit                           Skip conformance audit comparison.
+  --no-editor-contract                 Skip Framework Package editor option contract guard.
   --no-report                          Do not write an import report.
   --json                               Print machine-readable summary JSON.
   --help                               Show this help.
@@ -173,6 +236,7 @@ const parseArgs = (argv = process.argv.slice(2)) => {
     help: false,
     json: false,
     noAudit: false,
+    noEditorContract: false,
     noReport: false,
     resetRuntimeControl: false,
     confirmReset: false,
@@ -187,6 +251,7 @@ const parseArgs = (argv = process.argv.slice(2)) => {
     else if (arg === '--help' || arg === '-h') args.help = true
     else if (arg === '--json') args.json = true
     else if (arg === '--no-audit') args.noAudit = true
+    else if (arg === '--no-editor-contract') args.noEditorContract = true
     else if (arg === '--no-report') args.noReport = true
     else if (arg === '--reset-runtime-control') args.resetRuntimeControl = true
     else if (arg === RESET_CONFIRMATION) args.confirmReset = true
@@ -203,7 +268,7 @@ const parseArgs = (argv = process.argv.slice(2)) => {
       index += 1
       args.reportDir = path.resolve(process.cwd(), argv[index] || '')
     } else {
-      throw new Error(`Unknown argument: ${arg}`)
+      throw new Error(`Unknown argument: ${arg}. Run with --help for usage.`)
     }
   }
 
@@ -302,6 +367,12 @@ const normalizeVersioningFields = (record) => {
   return record
 }
 
+const stampSeedActorFields = (record) => {
+  if (!record.createdBy) record.createdBy = SEED_ACTOR_ID
+  if (!record.updatedBy) record.updatedBy = record.createdBy || SEED_ACTOR_ID
+  return record
+}
+
 const recordName = (record) =>
   record.stableId || record.key || record.pathKey || record.roleKey || record.packageKey || record.uiContractKey || 'record'
 
@@ -315,6 +386,52 @@ const normalizeMappedEnum = ({ record, field, map, notes, sourceLabel }) => {
     level: 'warning',
     source: sourceLabel,
     message: `${recordName(record)} ${field} "${currentValue}" normalized to "${mappedValue}".`,
+  })
+}
+
+const normalizeRuntimeSkillOutputBindings = (record, notes, sourceLabel) => {
+  if (!Array.isArray(record.outputBindings)) {
+    record.outputBindings = []
+    return
+  }
+
+  const structuredBindings = record.outputBindings.filter(isPlainObject)
+  if (structuredBindings.length === 0) {
+    record.outputBindings = normalizeList(record.outputBindings, (value) => String(value ?? '').trim())
+    return
+  }
+
+  const readPaths = []
+  const writePaths = []
+  const outputKeys = []
+
+  for (const binding of structuredBindings) {
+    const outputKey = String(binding.outputKey ?? '').trim()
+    const pathKey = String(binding.pathKey ?? '').trim()
+    const operation = normalizeEnumToken(binding.operation)
+
+    if (outputKey) outputKeys.push(outputKey)
+    if (pathKey && operation === 'READ') readPaths.push(pathKey)
+    if (pathKey && operation === 'WRITE') writePaths.push(pathKey)
+  }
+
+  record.allowedReadPaths = [
+    ...new Set([...normalizeList(record.allowedReadPaths, (value) => String(value ?? '').trim()), ...readPaths]),
+  ]
+  record.allowedWritePaths = [
+    ...new Set([...normalizeList(record.allowedWritePaths, (value) => String(value ?? '').trim()), ...writePaths]),
+  ]
+  // primaryOutputKey is the canonical single-output binding; legacy structured bindings only backfill it.
+  record.outputBindings = record.primaryOutputKey
+    ? []
+    : [...new Set(outputKeys)]
+
+  notes.push({
+    level: 'warning',
+    source: sourceLabel,
+    message:
+      `${record.key || record.stableId} structured outputBindings normalized to `
+      + 'RuntimeSkill string output bindings and path boundary fields.',
   })
 }
 
@@ -346,6 +463,7 @@ const normalizeRuntimeSkill = (record, notes, sourceLabel) => {
       message: `${record.key || record.stableId} missing runtimeConfig.maxRetries; defaulted to 0.`,
     })
   }
+  normalizeRuntimeSkillOutputBindings(record, notes, sourceLabel)
   return record
 }
 
@@ -439,28 +557,35 @@ const normalizeWorkflowPolicy = (record, notes, sourceLabel) => {
 }
 
 const normalizeFrameworkPackage = (record, notes, sourceLabel) => {
-  for (const binding of record.validationBindings || []) {
-    const currentValue = normalizeEnumToken(binding.trigger)
-    const mappedValue = FRAMEWORK_PACKAGE_VALIDATION_TRIGGER_MAP[currentValue]
-    if (mappedValue) {
-      binding.trigger = mappedValue
-      notes.push({
-        level: 'warning',
-        source: sourceLabel,
-        message: `${recordName(record)} validation trigger "${currentValue}" normalized to "${mappedValue}".`,
-      })
-    }
+  if (record.lastCheckpointStatus && !record.lastCheckpointResult) {
+    notes.push({
+      level: 'warning',
+      source: sourceLabel,
+      message: `${recordName(record)} has imported dependency lock evidence but no checkpoint result; checkpoint state normalized to empty.`,
+    })
+    record.lastCheckpointStatus = null
+    record.lastCheckpointAt = null
   }
 
-  for (const binding of record.workflowBindings || []) {
-    const currentValue = normalizeEnumToken(binding.executionContext)
-    const mappedValue = FRAMEWORK_PACKAGE_WORKFLOW_CONTEXT_MAP[currentValue]
-    if (mappedValue) {
-      binding.executionContext = mappedValue
+  if (Array.isArray(record.defaultOutputStyles)) {
+    const structuredStyles = record.defaultOutputStyles.filter(isPlainObject)
+    if (structuredStyles.length > 0) {
+      for (const style of structuredStyles) {
+        if (!String(style.styleKey ?? '').trim()) {
+          notes.push({
+            level: 'warning',
+            source: sourceLabel,
+            message: `${recordName(record)} defaultOutputStyles entry missing styleKey was dropped.`,
+          })
+        }
+      }
+      record.defaultOutputStyles = [
+        ...new Set(structuredStyles.map((style) => String(style.styleKey ?? '').trim()).filter(Boolean)),
+      ]
       notes.push({
         level: 'warning',
         source: sourceLabel,
-        message: `${recordName(record)} workflow executionContext "${currentValue}" normalized to "${mappedValue}".`,
+        message: `${recordName(record)} structured defaultOutputStyles normalized to style keys.`,
       })
     }
   }
@@ -470,7 +595,9 @@ const normalizeFrameworkPackage = (record, notes, sourceLabel) => {
 
 const normalizeRecord = (step, rawRecord, notes) => {
   const sourceLabel = step.label
-  const record = normalizeVersioningFields(stripImportOnlyFields(convertExtendedJson(rawRecord)))
+  const record = stampSeedActorFields(
+    normalizeVersioningFields(stripImportOnlyFields(convertExtendedJson(rawRecord))),
+  )
 
   if (step.model === RuntimePathRegistry) return normalizeRuntimePath(record, notes, sourceLabel)
   if (step.model === RuntimeSkill) return normalizeRuntimeSkill(record, notes, sourceLabel)
@@ -723,18 +850,18 @@ const validateSectionRuntimePathReference = ({ notes, source, pathKey, indexes, 
   if (!runtimePath) return
 
   const frameworkKeys = Array.isArray(runtimePath.frameworkKeys) ? runtimePath.frameworkKeys : []
-  const validSectionRoot = runtimePath.status === 'ACTIVE'
+  const validSectionPath = runtimePath.status === 'ACTIVE'
     && runtimePath.scope === 'FRAMEWORK_STATE'
     && runtimePath.category === 'SECTION'
-    && String(pathKey).startsWith('framework_state.sections.')
+    && pathKey.startsWith('framework_state.sections.')
     && (!frameworkKey || frameworkKeys.includes(frameworkKey))
 
-  if (!validSectionRoot) {
+  if (!validSectionPath) {
     notes.push({
       level: 'error',
       source,
       message:
-        `Package section runtime path "${pathKey}" must be an ACTIVE FRAMEWORK_STATE/SECTION root `
+        `Package section runtime path "${pathKey}" must be an ACTIVE FRAMEWORK_STATE/SECTION path `
         + 'under framework_state.sections.* and compatible with the package framework.',
     })
   }
@@ -943,6 +1070,216 @@ const validateCrossReferences = (bundle, notes) => {
   }
 }
 
+const loadFrameworkPackageEditorOptions = async (notes) => {
+  if (!fs.existsSync(DEFAULT_EDITOR_CONSTANTS_FILE)) {
+    const reason = `Missing editor constants file: ${DEFAULT_EDITOR_CONSTANTS_FILE}`
+    if (!['development', 'test'].includes(String(process.env.NODE_ENV || '').trim())) {
+      notes.push({
+        level: 'warning',
+        source: 'Framework Package Editor Contract',
+        message: `${reason}. Editor option guard skipped for API-only deployment context.`,
+      })
+      return { __skipped: true, reason }
+    }
+
+    notes.push({
+      level: 'error',
+      source: 'Framework Package Editor Contract',
+      message: reason,
+    })
+    return null
+  }
+
+  try {
+    return await import(pathToFileURL(DEFAULT_EDITOR_CONSTANTS_FILE).href)
+  } catch (error) {
+    notes.push({
+      level: 'error',
+      source: 'Framework Package Editor Contract',
+      message: `Could not load editor option constants: ${error.message}`,
+    })
+    return null
+  }
+}
+
+const optionValues = (options) =>
+  new Set(
+    (Array.isArray(options) ? options : [])
+      .map((option) => String(option?.value ?? '').trim())
+      .filter(Boolean),
+  )
+
+const uniqueValues = (values) =>
+  [...new Set(values.map((value) => String(value ?? '').trim()).filter(Boolean))].sort()
+
+const checkEditorOptionValues = ({ notes, source, field, values, clientValues, backendValues }) => {
+  const seededValues = uniqueValues(values)
+  const missingFromClient = seededValues.filter((value) => !clientValues.has(value))
+  const missingFromBackend = backendValues
+    ? seededValues.filter((value) => !backendValues.has(value))
+    : []
+
+  for (const value of missingFromClient) {
+    notes.push({
+      level: 'error',
+      source,
+      message:
+        `${field} uses "${value}", but the Framework Package editor option set does not expose it. `
+        + 'Add the value to the client option constants before importing this seed.',
+    })
+  }
+
+  for (const value of missingFromBackend) {
+    notes.push({
+      level: 'error',
+      source,
+      message:
+        `${field} uses "${value}", but the backend FrameworkPackage enum does not allow it. `
+        + 'Add the value to the backend enum/model contract before importing this seed.',
+    })
+  }
+
+  return {
+    field,
+    seededValues,
+    missingFromClient,
+    missingFromBackend,
+  }
+}
+
+const validateFrameworkPackageEditorContract = async (bundle, options, notes) => {
+  if (options.noEditorContract) {
+    return { skipped: true, reason: '--no-editor-contract supplied' }
+  }
+
+  const clientConstants = await loadFrameworkPackageEditorOptions(notes)
+  if (clientConstants?.__skipped) {
+    return { skipped: true, reason: clientConstants.reason }
+  }
+  if (!clientConstants) {
+    return { skipped: false, status: 'fail', checks: [] }
+  }
+
+  const frameworkPackages = recordsForModel(bundle, FrameworkPackage)
+  const contract = [
+    {
+      field: 'status',
+      values: frameworkPackages.map((record) => record.status),
+      clientValues: optionValues(clientConstants.FRAMEWORK_PACKAGE_STATUS_OPTIONS),
+      backendValues: new Set(Object.values(FRAMEWORK_PACKAGE_STATUSES)),
+    },
+    {
+      field: 'packageScope',
+      values: frameworkPackages.map((record) => record.packageScope),
+      clientValues: optionValues(clientConstants.FRAMEWORK_PACKAGE_SCOPE_OPTIONS),
+      backendValues: new Set(Object.values(FRAMEWORK_PACKAGE_SCOPES)),
+    },
+    {
+      field: 'packageType',
+      values: frameworkPackages.map((record) => record.packageType),
+      clientValues: optionValues(clientConstants.FRAMEWORK_PACKAGE_TYPE_OPTIONS),
+      backendValues: new Set(Object.values(FRAMEWORK_PACKAGE_TYPES)),
+    },
+    {
+      field: 'visibility',
+      values: frameworkPackages.map((record) => record.visibility),
+      clientValues: optionValues(clientConstants.FRAMEWORK_PACKAGE_VISIBILITY_OPTIONS),
+      backendValues: new Set(Object.values(FRAMEWORK_PACKAGE_VISIBILITY)),
+    },
+    {
+      field: 'customerAccessMode',
+      values: frameworkPackages.map((record) => record.customerAccessMode),
+      clientValues: optionValues(clientConstants.FRAMEWORK_PACKAGE_CUSTOMER_ACCESS_OPTIONS),
+      backendValues: new Set(Object.values(FRAMEWORK_PACKAGE_CUSTOMER_ACCESS_MODES)),
+    },
+    {
+      field: 'runtimeSettings.retryPolicy',
+      values: frameworkPackages.map((record) => record.runtimeSettings?.retryPolicy),
+      clientValues: optionValues(clientConstants.FRAMEWORK_PACKAGE_RETRY_POLICY_OPTIONS),
+      backendValues: new Set(Object.values(FRAMEWORK_PACKAGE_RETRY_POLICIES)),
+    },
+    {
+      field: 'executionModel.mode',
+      values: frameworkPackages.map((record) => record.executionModel?.mode),
+      clientValues: optionValues(clientConstants.FRAMEWORK_PACKAGE_EXECUTION_MODE_OPTIONS),
+      backendValues: new Set(Object.values(FRAMEWORK_PACKAGE_EXECUTION_MODES)),
+    },
+    {
+      field: 'executionModel.stateModel',
+      values: frameworkPackages.map((record) => record.executionModel?.stateModel),
+      clientValues: optionValues(clientConstants.FRAMEWORK_PACKAGE_STATE_MODEL_OPTIONS),
+      backendValues: new Set(Object.values(FRAMEWORK_PACKAGE_STATE_MODELS)),
+    },
+    {
+      field: 'executionModel.evaluationMode',
+      values: frameworkPackages.map((record) => record.executionModel?.evaluationMode),
+      clientValues: optionValues(clientConstants.FRAMEWORK_PACKAGE_EVALUATION_MODE_OPTIONS),
+      backendValues: new Set(Object.values(FRAMEWORK_PACKAGE_EVALUATION_MODES)),
+    },
+    {
+      field: 'validationBindings.trigger',
+      values: frameworkPackages.flatMap((record) =>
+        (record.validationBindings || []).map((binding) => binding.trigger)),
+      clientValues: optionValues(clientConstants.FRAMEWORK_PACKAGE_VALIDATION_TRIGGER_OPTIONS),
+      backendValues: new Set(Object.values(FRAMEWORK_PACKAGE_VALIDATION_TRIGGERS)),
+    },
+    {
+      field: 'workflowBindings.executionContext',
+      values: frameworkPackages.flatMap((record) =>
+        (record.workflowBindings || []).map((binding) => binding.executionContext)),
+      clientValues: optionValues(clientConstants.FRAMEWORK_PACKAGE_WORKFLOW_EXECUTION_CONTEXT_OPTIONS),
+      backendValues: new Set(Object.values(FRAMEWORK_PACKAGE_WORKFLOW_EXECUTION_CONTEXTS)),
+    },
+    {
+      field: 'stateModelMode',
+      values: frameworkPackages.map((record) => record.stateModelMode),
+      clientValues: optionValues(clientConstants.FRAMEWORK_PACKAGE_STATE_MODEL_REFERENCE_MODE_OPTIONS),
+      backendValues: new Set(Object.values(FRAMEWORK_PACKAGE_STATE_MODEL_MODES)),
+    },
+    {
+      field: 'stateBindingMode',
+      values: frameworkPackages.map((record) => record.stateBindingMode),
+      clientValues: optionValues(clientConstants.FRAMEWORK_PACKAGE_STATE_BINDING_MODE_OPTIONS),
+      backendValues: new Set(Object.values(FRAMEWORK_PACKAGE_STATE_BINDING_MODES)),
+    },
+    {
+      field: 'statePersistence',
+      values: frameworkPackages.map((record) => record.statePersistence),
+      clientValues: optionValues(clientConstants.FRAMEWORK_PACKAGE_STATE_PERSISTENCE_OPTIONS),
+      backendValues: new Set(Object.values(FRAMEWORK_PACKAGE_STATE_PERSISTENCE_MODES)),
+    },
+    {
+      field: 'availableOutputKeys',
+      values: frameworkPackages.flatMap((record) => record.availableOutputKeys || []),
+      clientValues: optionValues(clientConstants.FRAMEWORK_PACKAGE_OUTPUT_KEY_OPTIONS),
+    },
+    {
+      field: 'defaultOutputStyles',
+      values: frameworkPackages.flatMap((record) => record.defaultOutputStyles || []),
+      clientValues: optionValues(clientConstants.FRAMEWORK_PACKAGE_OUTPUT_STYLE_OPTIONS),
+    },
+  ]
+
+  const checks = contract.map((entry) =>
+    checkEditorOptionValues({
+      notes,
+      source: 'Framework Package Editor Contract',
+      ...entry,
+    }))
+  const failures = checks.reduce(
+    (count, check) => count + check.missingFromClient.length + check.missingFromBackend.length,
+    0,
+  )
+
+  return {
+    skipped: false,
+    status: failures > 0 ? 'fail' : 'pass',
+    constantsFile: DEFAULT_EDITOR_CONSTANTS_FILE,
+    failures,
+    checks,
+  }
+}
+
 const validateWithMongoose = async (bundle, notes) => {
   for (const step of bundle.filter((entry) => entry.records)) {
     for (const record of step.records) {
@@ -953,7 +1290,7 @@ const validateWithMongoose = async (bundle, notes) => {
         notes.push({
           level: 'error',
           source: step.label,
-          message: `${record.stableId || record.key || record.pathKey || record.packageKey}: ${error.message}`,
+          message: `${recordName(record)}: ${error.message}`,
         })
       }
     }
@@ -971,29 +1308,46 @@ const buildLookupQuery = (step, record) => {
   return filters.length === 1 ? filters[0] : { $or: filters }
 }
 
-const importRecord = async (step, record) => {
+const buildImportUpdatePayload = (record) =>
+  Object.entries(record).reduce((payload, [field, value]) => {
+    if (!IMPORT_MANAGED_UPDATE_FIELDS.has(field)) {
+      payload[field] = value
+    }
+    return payload
+  }, {})
+
+const resolveFindOne = (model, query, session) => {
+  const findQuery = model.findOne(query)
+  if (session && typeof findQuery?.session === 'function') {
+    return findQuery.session(session).exec()
+  }
+  return findQuery.exec()
+}
+
+const importRecord = async (step, record, { session = null } = {}) => {
   const query = buildLookupQuery(step, record)
-  const existing = await step.model.findOne(query)
+  const existing = await resolveFindOne(step.model, query, session)
 
   if (!existing) {
     const created = new step.model(record)
-    await created.save()
+    await created.save(session ? { session } : undefined)
     return 'created'
   }
 
-  existing.set(record)
-  if (step.model === UIContract && Object.prototype.hasOwnProperty.call(record, 'resolvedAt')) {
+  const updatePayload = buildImportUpdatePayload(record)
+  existing.set(updatePayload)
+  if (step.model === UIContract && Object.prototype.hasOwnProperty.call(updatePayload, 'resolvedAt')) {
     existing.$locals.allowResolvedAtWrite = true
   }
   if (!existing.isModified()) return 'unchanged'
-  await existing.save()
+  await existing.save(session ? { session } : undefined)
   return 'updated'
 }
 
-const resetRuntimeControlCollections = async () => {
+const resetRuntimeControlCollections = async ({ session = null } = {}) => {
   const resetResults = []
   for (const step of RESET_STEPS) {
-    const result = await step.model.deleteMany({})
+    const result = await step.model.deleteMany({}, session ? { session } : undefined)
     resetResults.push({
       collection: step.model.collection.name,
       deleted: result.deletedCount || 0,
@@ -1024,38 +1378,46 @@ const applyImport = async (bundle, options) => {
     return summary
   }
 
-  await connectDb()
+  if (options.manageConnection !== false) {
+    await connectDb()
+  }
+  const session = await mongoose.startSession()
   try {
-    if (options.resetRuntimeControl) {
-      summary.reset = await resetRuntimeControlCollections()
-    }
-
-    for (const step of bundle.filter((entry) => entry.records)) {
-      const result = {
-        label: step.label,
-        fileName: step.fileName,
-        loaded: step.records.length,
-        created: 0,
-        updated: 0,
-        unchanged: 0,
-        skipped: 0,
-        failed: 0,
+    await session.withTransaction(async () => {
+      if (options.resetRuntimeControl) {
+        summary.reset = await resetRuntimeControlCollections({ session })
       }
 
-      for (const record of step.records) {
-        try {
-          const status = await importRecord(step, record)
-          result[status] += 1
-        } catch (error) {
-          result.failed += 1
-          throw new Error(`${step.label} import failed for ${record.stableId || record.key || record.pathKey || record.packageKey}: ${error.message}`)
+      for (const step of bundle.filter((entry) => entry.records)) {
+        const result = {
+          label: step.label,
+          fileName: step.fileName,
+          loaded: step.records.length,
+          created: 0,
+          updated: 0,
+          unchanged: 0,
+          skipped: 0,
+          failed: 0,
         }
-      }
 
-      summary.collections.push(result)
-    }
+        for (const record of step.records) {
+          try {
+            const status = await importRecord(step, record, { session })
+            result[status] += 1
+          } catch (error) {
+            result.failed += 1
+            throw new Error(`${step.label} import failed for ${recordName(record)}: ${error.message}`)
+          }
+        }
+
+        summary.collections.push(result)
+      }
+    })
   } finally {
-    await disconnectDb()
+    await session.endSession()
+    if (options.manageConnection !== false) {
+      await disconnectDb()
+    }
   }
 
   return summary
@@ -1087,6 +1449,14 @@ const printSummary = (payload, reportPath, reportError, json) => {
   } else if (payload.audit?.auditFile) {
     console.log(`Audit: ${payload.audit.auditFile}`)
   }
+  if (payload.editorOptionContract?.skipped) {
+    console.log(`Editor option contract: skipped (${payload.editorOptionContract.reason})`)
+  } else if (payload.editorOptionContract) {
+    console.log(
+      `Editor option contract: ${String(payload.editorOptionContract.status || 'unknown').toUpperCase()}`
+      + ` (${payload.editorOptionContract.failures || 0} issue(s))`,
+    )
+  }
   for (const row of payload.summary.collections) {
     console.log(
       `- ${row.label}: loaded=${row.loaded}, created=${row.created}, `
@@ -1113,16 +1483,15 @@ const printSummary = (payload, reportPath, reportError, json) => {
   if (reportError) console.log(`Report not written: ${reportError}`)
 }
 
-const main = async () => {
-  const options = parseArgs()
-  if (options.help) {
-    printHelp()
-    return
+const importFrameworkSeed = async (optionOverrides = {}) => {
+  const options = {
+    ...parseArgs([]),
+    ...optionOverrides,
   }
-
   const bundle = loadSeedBundle(options.seedDir)
   const notes = bundle.find((entry) => entry.notes)?.notes || []
   validateCrossReferences(bundle, notes)
+  const editorOptionContract = await validateFrameworkPackageEditorContract(bundle, options, notes)
   const audit = validateConformanceAudit(bundle, options, notes)
   await validateWithMongoose(bundle, notes)
 
@@ -1149,10 +1518,27 @@ const main = async () => {
     generatedAt: new Date().toISOString(),
     version: VMF_VERSION,
     audit,
+    editorOptionContract,
     summary,
     notes,
   }
   const { reportPath, reportError } = writeReport(options, payload)
+  return {
+    payload,
+    reportPath,
+    reportError,
+    hasErrors,
+  }
+}
+
+const main = async () => {
+  const options = parseArgs()
+  if (options.help) {
+    printHelp()
+    return
+  }
+
+  const { payload, reportPath, reportError, hasErrors } = await importFrameworkSeed(options)
   printSummary(payload, reportPath, reportError, options.json)
 
   if (hasErrors) {
@@ -1160,12 +1546,23 @@ const main = async () => {
   }
 }
 
-main().catch(async (error) => {
-  try {
-    if (mongoose.connection.readyState !== 0) await disconnectDb()
-  } catch {
-    // Preserve the original failure.
-  }
-  console.error(error.message)
-  process.exitCode = 1
-})
+export {
+  applyImport,
+  buildImportUpdatePayload,
+  importFrameworkSeed,
+  importRecord,
+  parseArgs,
+  validateWithMongoose,
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
+  main().catch(async (error) => {
+    try {
+      if (mongoose.connection.readyState !== 0) await disconnectDb()
+    } catch {
+      // Preserve the original failure.
+    }
+    console.error(error.message)
+    process.exitCode = 1
+  })
+}

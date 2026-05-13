@@ -1969,6 +1969,94 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     expect(res.body.data.runBy).toBeNull()
   })
 
+  test('GET /api/v1/super-admin/runtime-control/framework-packages/:packageId/checkpoint/latest treats imported locks without checkpoint results as not run', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const frameworkPackage = makeFrameworkPackageDoc({
+      status: 'DRAFT',
+      lastCheckpointStatus: 'PASS',
+      lastCheckpointAt: new Date('2026-05-07T13:42:00.000Z'),
+      lastCheckpointResult: null,
+      dependencyLock: {
+        status: 'PASS',
+        packageKey: 'vmf-2-3-1',
+        packageVersion: '2.3.1',
+        references: [
+          {
+            collectionKey: 'RuntimePathRegistry',
+            id: 'path-customer-problem',
+            key: 'framework_state.sections.customer_problem',
+            status: 'ACTIVE',
+            issues: [],
+          },
+        ],
+      },
+    })
+    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+
+    const res = await request
+      .get(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/checkpoint/latest`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.status).toBe('NOT_RUN')
+    expect(res.body.data.timestamp).toBeNull()
+    expect(res.body.data.runBy).toBeNull()
+    expect(res.body.data.summary.resolvedReferences).toBe(1)
+    expect(res.body.data.dependencyLockPreview.status).toBe('PASS')
+  })
+
+  test('FrameworkPackage model clears checkpoint fields on new imported documents without checkpoint results', async () => {
+    const checkpointAt = new Date('2026-05-07T13:42:00.000Z')
+    const frameworkPackage = new FrameworkPackage({
+      frameworkKey: 'VMF',
+      frameworkName: 'Value Management Framework',
+      version: '2.3.1',
+      packageKey: 'vmf-2-3-1',
+      packageName: 'VMF 2.3.1',
+      packageScope: 'SYSTEM',
+      packageType: 'STANDARD',
+      status: 'DRAFT',
+      createdBy: SUPER_ADMIN_ID,
+      updatedBy: SUPER_ADMIN_ID,
+      lastCheckpointStatus: 'PASS',
+      lastCheckpointAt: checkpointAt,
+      lastCheckpointResult: null,
+    })
+
+    await expect(frameworkPackage.validate()).resolves.toBeUndefined()
+
+    expect(frameworkPackage.lastCheckpointResult).toBeNull()
+    expect(frameworkPackage.lastCheckpointStatus).toBeNull()
+    expect(frameworkPackage.lastCheckpointAt).toBeNull()
+  })
+
+  test('FrameworkPackage model clears checkpoint fields when an existing checkpoint result is explicitly cleared', async () => {
+    const checkpointAt = new Date('2026-05-07T13:42:00.000Z')
+    const frameworkPackage = FrameworkPackage.hydrate({
+      _id: FRAMEWORK_PACKAGE_ID,
+      frameworkKey: 'VMF',
+      frameworkName: 'Value Management Framework',
+      version: '2.3.1',
+      packageKey: 'vmf-2-3-1',
+      packageName: 'VMF 2.3.1',
+      packageScope: 'SYSTEM',
+      packageType: 'STANDARD',
+      status: 'DRAFT',
+      createdBy: SUPER_ADMIN_ID,
+      updatedBy: SUPER_ADMIN_ID,
+      lastCheckpointStatus: 'PASS',
+      lastCheckpointAt: checkpointAt,
+      lastCheckpointResult: makeCheckpointResult(),
+    })
+
+    frameworkPackage.lastCheckpointResult = null
+    await expect(frameworkPackage.validate()).resolves.toBeUndefined()
+
+    expect(frameworkPackage.lastCheckpointResult).toBeNull()
+    expect(frameworkPackage.lastCheckpointStatus).toBeNull()
+    expect(frameworkPackage.lastCheckpointAt).toBeNull()
+  })
+
   test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/validate returns 422 for checkpoint failures without promoting the package', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     const frameworkPackage = makeFrameworkPackageDoc({

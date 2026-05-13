@@ -346,7 +346,7 @@ const validateUIContractActions = async ({ actions = [], sourcePackage = null } 
   if (unknownGovernedActions.length > 0) {
     return {
       actions:
-        `UI Contract governed actions must use known governed actions (${KNOWN_GOVERNED_ACTION_MESSAGE}) or selected package workflow governed actions: ${[...new Set(unknownGovernedActions)].join(', ')}.`,
+        `UI Contract governed actions must use known governed actions (${KNOWN_GOVERNED_ACTION_MESSAGE}) or actions governed by active workflow policies on the selected package. Rejected actions: ${[...new Set(unknownGovernedActions)].join(', ')}.`,
     }
   }
 
