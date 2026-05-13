@@ -1,3 +1,6 @@
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import mongoose from 'mongoose'
 import { describe, test, expect, beforeAll, beforeEach, afterAll, jest } from '@jest/globals'
 
@@ -15,6 +18,27 @@ const SUPER_ADMIN_ID = '507f1f77bcf86cd799439011'
 const NON_ADMIN_ID = '507f1f77bcf86cd799439012'
 const FRAMEWORK_PACKAGE_ID = '607f1f77bcf86cd799439022'
 const ACTIVE_FRAMEWORK_PACKAGE_ID = '607f1f77bcf86cd799439023'
+
+const testDirname = path.dirname(fileURLToPath(import.meta.url))
+const runtimeControlParityContracts = JSON.parse(
+  fs.readFileSync(
+    path.resolve(testDirname, '../../../docs/references/runtime-control/mock-api-parity-contracts.json'),
+    'utf8',
+  ),
+)
+const {
+  frameworkPackageClone: frameworkPackageCloneParity,
+  frameworkPackageCheckpoint: frameworkPackageCheckpointParity,
+} = runtimeControlParityContracts
+
+const expectFrameworkPackageCloneReleaseFieldsCleared = (frameworkPackage) => {
+  const { clearedReleaseFields = [], clearedReleaseFieldValues = {} } = frameworkPackageCloneParity.cloneResult
+  expect(Object.keys(clearedReleaseFieldValues)).toEqual(clearedReleaseFields)
+
+  for (const field of clearedReleaseFields) {
+    expect(frameworkPackage[field]).toEqual(clearedReleaseFieldValues[field])
+  }
+}
 
 const buildSession = () => ({
   withTransaction: jest.fn(async (callback) => callback()),
@@ -1257,6 +1281,352 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     expect(res.body.error.details.reason).toBe('FRAMEWORK_PACKAGE_VERSION_CONFLICT')
   })
 
+  test('POST /api/v1/super-admin/runtime-control/framework-packages returns 409 when package key unique index rejects concurrent create', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const duplicateKeyError = new Error('Duplicate package key')
+    duplicateKeyError.code = 11000
+    duplicateKeyError.keyPattern = { packageKey: 1 }
+    mockFindOneSelect(null)
+    FrameworkPackage.prototype.save = jest.fn().mockRejectedValue(duplicateKeyError)
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/framework-packages')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        frameworkKey: 'VMF',
+        frameworkName: 'Value Management Framework',
+        version: '2.4.1',
+        packageKey: 'race-key',
+        packageName: 'Race Key',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.details).toEqual(expect.objectContaining({
+      field: 'packageKey',
+      reason: 'FRAMEWORK_PACKAGE_KEY_CONFLICT',
+    }))
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/clone creates a draft clone without release evidence', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const sourcePackage = makeFrameworkPackageDoc({
+      _id: ACTIVE_FRAMEWORK_PACKAGE_ID,
+      version: '2.3.1',
+      packageKey: 'vmf-2-3-1',
+      packageName: 'VMF 2.3.1',
+      status: 'ACTIVE',
+      versionStatus: 'ACTIVE',
+      isDefault: true,
+      isLocked: true,
+      lockedAt: new Date('2026-05-08T12:00:00.000Z'),
+      lockedBy: SUPER_ADMIN_ID,
+      lockedReason: 'Activation',
+      dependencyLock: {
+        status: 'PASS',
+        packageKey: 'vmf-2-3-1',
+        packageVersion: '2.3.1',
+        references: [
+          { collectionKey: 'RuntimePathRegistry', key: 'framework_state.sections.customer_problem' },
+        ],
+      },
+      lastCheckpointStatus: 'PASS',
+      lastCheckpointAt: new Date('2026-05-08T12:00:00.000Z'),
+      lastCheckpointResult: makeCheckpointResult({ id: ACTIVE_FRAMEWORK_PACKAGE_ID }),
+      uiContractBinding: {
+        key: 'vmf-ui-contract-v1',
+        version: '2.3.1',
+        status: 'ACTIVE',
+        resolvedAt: '2026-05-08T12:00:00.000Z',
+      },
+      activatedAt: new Date('2026-05-08T12:05:00.000Z'),
+      activatedBy: SUPER_ADMIN_ID,
+      validationBindings: [
+        {
+          bindingKey: 'required-sections-on-submit',
+          validationKey: 'required-sections-check',
+          trigger: 'ON_SUBMIT',
+          blocking: true,
+          priority: 100,
+          enabled: true,
+        },
+      ],
+      workflowBindings: [
+        {
+          policyKey: 'vmf-submit-gate',
+          executionContext: 'ON_SUBMIT',
+          priority: 100,
+          enabled: true,
+        },
+      ],
+      derivedFromPackageId: 'pkg-source-220',
+    })
+    FrameworkPackage.findById.mockResolvedValue(sourcePackage)
+    FrameworkPackage.findOne.mockReturnValue({
+      select: jest.fn().mockResolvedValue(null),
+    })
+    ValidationRegistry.find.mockReturnValue(buildFrameworkRegistryLookupChain([
+      {
+        key: 'required-sections-check',
+        status: 'ACTIVE',
+        packageUsable: true,
+        supportedFrameworkKeys: ['VMF'],
+      },
+    ]))
+    WorkflowPolicy.find.mockReturnValue(buildFrameworkRegistryLookupChain([
+      {
+        key: 'vmf-submit-gate',
+        status: 'ACTIVE',
+        frameworkKeys: ['VMF'],
+      },
+    ]))
+    UIContract.findOne.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue({
+          uiContractKey: 'vmf-ui-contract-v1',
+          status: 'ACTIVE',
+          versionStatus: 'ACTIVE',
+          frameworkKeys: ['VMF'],
+          sections: [{ sectionKey: 'customer_problem', runtimePath: 'framework_state.sections.customer_problem' }],
+        }),
+      }),
+    })
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/framework-packages/${ACTIVE_FRAMEWORK_PACKAGE_ID}/clone`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        version: '2.4.1',
+        packageKey: 'vmf-2-4-1',
+        description: 'Editable draft clone.',
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data).toEqual(expect.objectContaining({
+      frameworkKey: 'VMF',
+      frameworkName: 'Value Management Framework',
+      version: '2.4.1',
+      packageKey: 'vmf-2-4-1',
+      packageName: 'VMF 2.3.1 Clone',
+      description: 'Editable draft clone.',
+      status: 'DRAFT',
+      versionStatus: 'DRAFT',
+      derivedFromPackageId: ACTIVE_FRAMEWORK_PACKAGE_ID,
+      isDefault: false,
+      isLocked: false,
+      uiContractKey: 'vmf-ui-contract-v1',
+    }))
+    expectFrameworkPackageCloneReleaseFieldsCleared(res.body.data)
+    expect(res.body.data.sections).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        sectionKey: 'customer_problem',
+        runtimePath: 'framework_state.sections.customer_problem',
+      }),
+    ]))
+    expect(res.body.data.validationBindings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ validationKey: 'required-sections-check' }),
+    ]))
+    expect(res.body.data.workflowBindings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ policyKey: 'vmf-submit-gate' }),
+    ]))
+    expect(sourcePackage.status).toBe('ACTIVE')
+    expect(sourcePackage.isLocked).toBe(true)
+    expect(FrameworkPackage.prototype.save).toHaveBeenCalled()
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'FRAMEWORK_PACKAGE_CLONED',
+      resourceType: 'FrameworkPackage',
+      scope: { frameworkKey: 'VMF' },
+      diff: expect.objectContaining({
+        sourcePackageId: ACTIVE_FRAMEWORK_PACKAGE_ID,
+        sourcePackageKey: 'vmf-2-3-1',
+        sourceVersion: '2.3.1',
+        sourceDerivedFromPackageId: 'pkg-source-220',
+        packageKey: 'vmf-2-4-1',
+        packageName: 'VMF 2.3.1 Clone',
+        description: 'Editable draft clone.',
+        version: '2.4.1',
+        status: 'DRAFT',
+        derivedFromPackageId: ACTIVE_FRAMEWORK_PACKAGE_ID,
+      }),
+    }))
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/clone allows validated sources', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    expect(frameworkPackageCloneParity.eligibleSourceStatuses).toContain('VALIDATED')
+    FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackageDoc({
+      _id: ACTIVE_FRAMEWORK_PACKAGE_ID,
+      status: 'VALIDATED',
+      sections: [],
+      uiContractKey: '',
+    }))
+    FrameworkPackage.findOne.mockReturnValue({
+      select: jest.fn().mockResolvedValue(null),
+    })
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/framework-packages/${ACTIVE_FRAMEWORK_PACKAGE_ID}/clone`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        version: '2.4.1',
+        packageKey: 'vmf-2-4-1',
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data).toEqual(expect.objectContaining({
+      status: frameworkPackageCloneParity.cloneResult.status,
+      versionStatus: frameworkPackageCloneParity.cloneResult.versionStatus,
+      derivedFromPackageId: ACTIVE_FRAMEWORK_PACKAGE_ID,
+    }))
+  })
+
+  test.each(frameworkPackageCloneParity.ineligibleSourceStatuses)(
+    'POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/clone rejects %s sources',
+    async (status) => {
+      const token = await getAccessTokenForUser(makeFakeUser())
+      FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackageDoc({
+        _id: ACTIVE_FRAMEWORK_PACKAGE_ID,
+        status,
+        sections: [],
+        uiContractKey: '',
+      }))
+
+      const res = await request
+        .post(`/api/v1/super-admin/runtime-control/framework-packages/${ACTIVE_FRAMEWORK_PACKAGE_ID}/clone`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          version: '2.4.1',
+          packageKey: 'vmf-2-4-1',
+        })
+
+      expect(res.status).toBe(frameworkPackageCloneParity.sourceStatusConflict.httpStatus)
+      expect(res.body.error.code).toBe(frameworkPackageCloneParity.sourceStatusConflict.errorCode)
+      expect(res.body.error.details).toEqual(expect.objectContaining({
+        field: frameworkPackageCloneParity.sourceStatusConflict.field,
+        reason: frameworkPackageCloneParity.sourceStatusConflict.reason,
+      }))
+      expect(FrameworkPackage.findOne).not.toHaveBeenCalled()
+    },
+  )
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/clone returns 409 when framework version already exists', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackageDoc({
+      _id: ACTIVE_FRAMEWORK_PACKAGE_ID,
+      status: 'ACTIVE',
+      sections: [],
+      uiContractKey: '',
+    }))
+    FrameworkPackage.findOne
+      .mockReturnValueOnce({ select: jest.fn().mockResolvedValue({ _id: '607f1f77bcf86cd799439099' }) })
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/framework-packages/${ACTIVE_FRAMEWORK_PACKAGE_ID}/clone`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        version: '2.4.1',
+        packageKey: 'vmf-2-4-1',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.details).toEqual(expect.objectContaining({
+      field: 'version',
+      reason: 'FRAMEWORK_PACKAGE_VERSION_CONFLICT',
+    }))
+    expect(FrameworkPackage.findOne).toHaveBeenCalledTimes(1)
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/clone returns 409 when package key already exists', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackageDoc({
+      _id: ACTIVE_FRAMEWORK_PACKAGE_ID,
+      status: 'ACTIVE',
+      sections: [],
+      uiContractKey: '',
+    }))
+    FrameworkPackage.findOne
+      .mockReturnValueOnce({ select: jest.fn().mockResolvedValue(null) })
+      .mockReturnValueOnce({ select: jest.fn().mockResolvedValue({ _id: '607f1f77bcf86cd799439099' }) })
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/framework-packages/${ACTIVE_FRAMEWORK_PACKAGE_ID}/clone`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        version: '2.4.1',
+        packageKey: 'existing-key',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.details.reason).toBe('FRAMEWORK_PACKAGE_KEY_CONFLICT')
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/clone returns 409 when package key unique index rejects concurrent clone', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const duplicateKeyError = new Error('Duplicate package key')
+    duplicateKeyError.code = 11000
+    duplicateKeyError.keyPattern = { packageKey: 1 }
+
+    FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackageDoc({
+      _id: ACTIVE_FRAMEWORK_PACKAGE_ID,
+      status: 'ACTIVE',
+      sections: [],
+      uiContractKey: '',
+    }))
+    FrameworkPackage.findOne
+      .mockReturnValueOnce({ select: jest.fn().mockResolvedValue(null) })
+      .mockReturnValueOnce({ select: jest.fn().mockResolvedValue(null) })
+    FrameworkPackage.prototype.save = jest.fn().mockRejectedValue(duplicateKeyError)
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/framework-packages/${ACTIVE_FRAMEWORK_PACKAGE_ID}/clone`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        version: '2.4.1',
+        packageKey: 'race-key',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.details).toEqual(expect.objectContaining({
+      field: 'packageKey',
+      reason: 'FRAMEWORK_PACKAGE_KEY_CONFLICT',
+    }))
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/clone returns 404 when source package does not exist', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    FrameworkPackage.findById.mockResolvedValue(null)
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/framework-packages/${ACTIVE_FRAMEWORK_PACKAGE_ID}/clone`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        version: '2.4.1',
+        packageKey: 'vmf-2-4-1',
+      })
+
+    expect(res.status).toBe(404)
+    expect(res.body.error.code).toBe('NOT_FOUND')
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/clone only accepts clone override fields', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/framework-packages/${ACTIVE_FRAMEWORK_PACKAGE_ID}/clone`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        version: '2.4.1',
+        packageKey: 'vmf-2-4-1',
+        status: 'ACTIVE',
+      })
+
+    expect(res.status).toBe(422)
+    expect(FrameworkPackage.findById).not.toHaveBeenCalled()
+  })
+
   test('GET /api/v1/super-admin/runtime-control/framework-packages returns paginated framework packages', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     const legacyRunById = '507f1f77bcf86cd799439099'
@@ -1477,6 +1847,35 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
           to: 'pkg-source-230',
         },
       }),
+    }))
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/framework-packages/:packageId returns 409 when package key unique index rejects concurrent update', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const duplicateKeyError = new Error('Duplicate package key')
+    duplicateKeyError.code = 11000
+    duplicateKeyError.keyPattern = { packageKey: 1 }
+    const frameworkPackage = makeFrameworkPackageDoc({
+      status: 'DRAFT',
+      sections: [],
+      uiContractKey: '',
+    })
+    frameworkPackage.save = jest.fn().mockRejectedValue(duplicateKeyError)
+    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+    mockFindOneSelect(null)
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        packageKey: 'race-key',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.details).toEqual(expect.objectContaining({
+      field: 'packageKey',
+      reason: 'FRAMEWORK_PACKAGE_KEY_CONFLICT',
     }))
   })
 
@@ -1859,15 +2258,16 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
 
   test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/checkpoint rejects activation mode payloads', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
+    const invalidModeContract = frameworkPackageCheckpointParity.invalidCheckpointMode
 
     const res = await request
       .post(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/checkpoint`)
       .set('Authorization', `Bearer ${token}`)
-      .send({ mode: 'ACTIVATION', persist: true })
+      .send({ mode: invalidModeContract.requestMode, persist: invalidModeContract.persist })
 
-    expect(res.status).toBe(422)
-    expect(res.body.error.code).toBe('VALIDATION_FAILED')
-    expect(res.body.error.details.mode).toBeTruthy()
+    expect(res.status).toBe(invalidModeContract.httpStatus)
+    expect(res.body.error.code).toBe(invalidModeContract.errorCode)
+    expect(res.body.error.details[invalidModeContract.detailsField]).toBeTruthy()
     expect(FrameworkPackage.findById).not.toHaveBeenCalled()
   })
 

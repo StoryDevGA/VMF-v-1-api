@@ -601,6 +601,38 @@ const runFrameworkPackageCheckpointBodySchema = z.object({
   persist: z.boolean().default(false),
 }).strict()
 
+const cloneFrameworkPackageSchema = z.object({
+  version: z
+    .string({ required_error: 'Version is required.' })
+    .trim()
+    .min(1, 'Version is required.')
+    .max(50, 'Version must be 50 characters or fewer')
+    .refine(
+      (value) => versionRegex.test(value),
+      'Version must use semantic version format.',
+    ),
+  packageKey: z
+    .string({ required_error: 'Package key is required.' })
+    .trim()
+    .min(1, 'Package key is required.')
+    .max(120, 'Package key must be 120 characters or fewer')
+    .transform((value) => value.toLowerCase())
+    .refine(
+      (value) => tokenRegex.test(value),
+      'Package key must use lowercase letters, numbers, or hyphens',
+    ),
+  packageName: z
+    .string()
+    .trim()
+    .max(160, 'Package name must be 160 characters or fewer')
+    .optional(),
+  description: z
+    .string()
+    .trim()
+    .max(500, 'Description must be 500 characters or fewer')
+    .optional(),
+}).strict()
+
 export const captureFrameworkPackageUpdateFields = (req, _res, next) => {
   req.frameworkPackageUpdateFields = new Set(Object.keys(req.body && typeof req.body === 'object' ? req.body : {}))
   next()
@@ -608,6 +640,7 @@ export const captureFrameworkPackageUpdateFields = (req, _res, next) => {
 
 export const validateCreateFrameworkPackage = createBodyValidator(createFrameworkPackageSchema)
 export const validateUpdateFrameworkPackage = createBodyValidator(updateFrameworkPackageSchema)
+export const validateCloneFrameworkPackage = createBodyValidator(cloneFrameworkPackageSchema)
 export const validateFrameworkPackageId = createParamsValidator(frameworkPackageIdSchema)
 export const validateListFrameworkPackages = createQueryValidator(listFrameworkPackagesQuerySchema)
 export const validateRunFrameworkPackageCheckpoint = createBodyValidator(

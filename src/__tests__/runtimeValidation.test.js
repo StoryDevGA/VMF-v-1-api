@@ -1,3 +1,6 @@
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, test, expect, beforeAll, beforeEach, afterAll, jest } from '@jest/globals'
 
 beforeAll(() => {
@@ -12,6 +15,15 @@ beforeAll(() => {
 
 const SUPER_ADMIN_ID = '507f1f77bcf86cd799439011'
 const NON_ADMIN_ID = '507f1f77bcf86cd799439012'
+
+const testDirname = path.dirname(fileURLToPath(import.meta.url))
+const runtimeControlParityContracts = JSON.parse(
+  fs.readFileSync(
+    path.resolve(testDirname, '../../../docs/references/runtime-control/mock-api-parity-contracts.json'),
+    'utf8',
+  ),
+)
+const { runtimeValidation: runtimeValidationParity } = runtimeControlParityContracts
 
 const makeFakeUser = (overrides = {}) => ({
   _id: SUPER_ADMIN_ID,
@@ -269,8 +281,8 @@ describe('Runtime Validation API', () => {
     expect(RuntimeValidationAudit.create).toHaveBeenCalledTimes(1)
     expect(RuntimeValidationAudit.create).toHaveBeenCalledWith(expect.objectContaining({
       actorId: SUPER_ADMIN_ID,
-      status: 'PASS',
-      result: 'ALLOW',
+      status: runtimeValidationParity.stateWritePass.status,
+      result: runtimeValidationParity.stateWritePass.result,
     }))
   })
 
@@ -290,22 +302,22 @@ describe('Runtime Validation API', () => {
         skillRoleKey: 'VALIDATOR',
       })
 
-    expect(res.status).toBe(422)
-    expect(res.body.error.code).toBe('RUNTIME_VALIDATION_FAILED')
-    expect(res.body.error.validation.status).toBe('FAIL')
-    expect(res.body.error.validation.result).toBe('BLOCK')
+    expect(res.status).toBe(runtimeValidationParity.scopeFailure.httpStatus)
+    expect(res.body.error.code).toBe(runtimeValidationParity.scopeFailure.errorCode)
+    expect(res.body.error.validation.status).toBe(runtimeValidationParity.scopeFailure.status)
+    expect(res.body.error.validation.result).toBe(runtimeValidationParity.scopeFailure.result)
     expect(res.body.error.validation.issues).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          code: 'RVL-SCOPE-001',
-          source: 'runtime-skill-role-boundary-validator',
+          code: runtimeValidationParity.scopeFailure.issueCode,
+          source: runtimeValidationParity.scopeFailure.source,
         }),
       ]),
     )
     expect(RuntimeValidationAudit.create).toHaveBeenCalledWith(expect.objectContaining({
-      status: 'FAIL',
-      result: 'BLOCK',
-      validationCode: 'RVL-SCOPE-001',
+      status: runtimeValidationParity.scopeFailure.status,
+      result: runtimeValidationParity.scopeFailure.result,
+      validationCode: runtimeValidationParity.scopeFailure.issueCode,
     }))
   })
 
@@ -424,10 +436,14 @@ describe('Runtime Validation API', () => {
         payload: { is_valid: true, unexpected: true },
       })
 
-    expect(extraFieldRes.status).toBe(422)
+    expect(extraFieldRes.status).toBe(runtimeValidationParity.outputExtraFieldFailure.httpStatus)
+    expect(extraFieldRes.body.error.code).toBe(runtimeValidationParity.outputExtraFieldFailure.errorCode)
     expect(extraFieldRes.body.error.validation.issues).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ code: 'RVL-OUTPUT-003' }),
+        expect.objectContaining({
+          code: runtimeValidationParity.outputExtraFieldFailure.issueCode,
+          path: runtimeValidationParity.outputExtraFieldFailure.path,
+        }),
       ]),
     )
   })

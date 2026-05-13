@@ -3,6 +3,28 @@ import { RUNTIME_VALIDATION_CODES, buildRuntimeValidationIssue } from './runtime
 
 const isPlainObject = (value) => Boolean(value && typeof value === 'object' && !Array.isArray(value))
 
+const normalizePayloadPath = (instancePath = '') => {
+  const normalizedPath = String(instancePath || '')
+    .replace(/^\//, '')
+    .replace(/\//g, '.')
+  return normalizedPath ? `payload.${normalizedPath}` : 'payload'
+}
+
+const buildOutputIssuePath = (error = {}) => {
+  const basePath = normalizePayloadPath(error.instancePath)
+  const additionalProperty = error.params?.additionalProperty
+  if (error.keyword === 'additionalProperties' && additionalProperty) {
+    return `${basePath}.${additionalProperty}`
+  }
+
+  const missingProperty = error.params?.missingProperty
+  if (error.keyword === 'required' && missingProperty) {
+    return `${basePath}.${missingProperty}`
+  }
+
+  return basePath
+}
+
 export const validateRuntimeOutputContract = ({ outputContract, payload }) => {
   if (!isPlainObject(outputContract) || Object.keys(outputContract).length === 0) {
     return []
@@ -24,7 +46,7 @@ export const validateRuntimeOutputContract = ({ outputContract, payload }) => {
       message: error.message
         ? `Runtime output ${error.instancePath || '/'} ${error.message}.`
         : 'Runtime output does not match the declared output contract.',
-      path: error.instancePath || 'payload',
+      path: buildOutputIssuePath(error),
       source: 'runtime-output-validator',
     }))
 

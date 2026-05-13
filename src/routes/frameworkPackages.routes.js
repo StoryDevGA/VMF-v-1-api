@@ -4,6 +4,7 @@ import loadScopes from '../middleware/loadScopes.js'
 import { requirePlatformRole } from '../middleware/authorize.js'
 import {
   captureFrameworkPackageUpdateFields,
+  validateCloneFrameworkPackage,
   validateCreateFrameworkPackage,
   validateFrameworkPackageId,
   validateListFrameworkPackages,
@@ -12,6 +13,7 @@ import {
 } from '../validators/frameworkPackage.validator.js'
 import {
   activateFrameworkPackage,
+  cloneFrameworkPackage,
   createFrameworkPackage,
   getFrameworkPackage,
   getFrameworkPackageAudit,
@@ -47,6 +49,7 @@ router.get('/:packageId/checkpoint/latest', validateFrameworkPackageId, getFrame
 router.get('/:packageId/audit', validateFrameworkPackageId, getFrameworkPackageAudit)
 router.get('/:packageId/diff/:version', validateFrameworkPackageId, getFrameworkPackageDiff)
 router.get('/:packageId', validateFrameworkPackageId, getFrameworkPackage)
+router.post('/:packageId/clone', validateFrameworkPackageId, validateCloneFrameworkPackage, cloneFrameworkPackage)
 router.patch(
   '/:packageId',
   validateFrameworkPackageId,

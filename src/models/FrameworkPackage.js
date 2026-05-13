@@ -881,6 +881,20 @@ frameworkPackageSchema.index(
   { unique: true, name: 'unique_framework_package_version' },
 )
 frameworkPackageSchema.index(
+  { packageKey: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      $and: [
+        { packageKey: { $exists: true } },
+        { packageKey: { $type: 'string' } },
+        { packageKey: { $gt: '' } },
+      ],
+    },
+    name: 'unique_framework_package_key',
+  },
+)
+frameworkPackageSchema.index(
   { frameworkKey: 1, status: 1 },
   {
     unique: true,

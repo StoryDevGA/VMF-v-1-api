@@ -36,6 +36,7 @@ import {
 } from '../constants/frameworkPackageContract.js'
 
 const DUPLICATE_FRAMEWORK_PACKAGE_MESSAGE = 'Framework key and version must be unique.'
+const DUPLICATE_FRAMEWORK_PACKAGE_KEY_MESSAGE = 'Package key must be unique.'
 const FRAMEWORK_PACKAGE_NOT_FOUND_MESSAGE = 'Framework package not found.'
 const ACTIVE_DEFAULT_CONFLICT_MESSAGE = 'Only one active default package is allowed per framework.'
 const ACTIVATION_REQUIRES_VALIDATED_MESSAGE = 'Only validated framework packages can be activated.'
@@ -46,9 +47,15 @@ const ACTIVE_PACKAGE_EDIT_MESSAGE =
   'Active framework packages cannot be edited directly. Clone the package to make changes.'
 const VALIDATED_PACKAGE_STRUCTURAL_LOCK_MESSAGE =
   'Validated framework packages lock structural runtime fields. Return the package to Draft or clone it before changing runtime structure.'
+const FRAMEWORK_PACKAGE_CLONE_SOURCE_STATUS_MESSAGE =
+  'Only active or validated framework packages can be cloned.'
 const READY_FRAMEWORK_PACKAGE_STATUSES = new Set([
   FRAMEWORK_PACKAGE_STATUSES.VALIDATED,
   FRAMEWORK_PACKAGE_STATUSES.ACTIVE,
+])
+const CLONEABLE_FRAMEWORK_PACKAGE_STATUSES = new Set([
+  FRAMEWORK_PACKAGE_STATUSES.ACTIVE,
+  FRAMEWORK_PACKAGE_STATUSES.VALIDATED,
 ])
 const SEMVER_PATTERN = /^\d+\.\d+\.\d+$/
 
@@ -437,6 +444,10 @@ const isDuplicateFrameworkPackageVersionError = (err) =>
   err?.code === 11000
   && err?.keyPattern?.frameworkKey
   && err?.keyPattern?.version
+
+const isDuplicateFrameworkPackageKeyError = (err) =>
+  err?.code === 11000
+  && err?.keyPattern?.packageKey
 
 const isActiveDefaultConflictError = (err) =>
   err?.code === 11000
@@ -2724,6 +2735,13 @@ export const createFrameworkPackage = async (req, res, next) => {
       })
     }
 
+    if (isDuplicateFrameworkPackageKeyError(err)) {
+      return sendConflict(res, req, DUPLICATE_FRAMEWORK_PACKAGE_KEY_MESSAGE, {
+        field: 'packageKey',
+        reason: 'FRAMEWORK_PACKAGE_KEY_CONFLICT',
+      })
+    }
+
     if (isActiveDefaultConflictError(err)) {
       return sendConflict(res, req, ACTIVE_DEFAULT_CONFLICT_MESSAGE, {
         field: 'status',
@@ -2770,6 +2788,166 @@ export const getFrameworkPackage = async (req, res, next) => {
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
+    next(err)
+  }
+}
+
+export const cloneFrameworkPackage = async (req, res, next) => {
+  try {
+    const source = await FrameworkPackage.findById(req.params.packageId)
+
+    if (!source) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: FRAMEWORK_PACKAGE_NOT_FOUND_MESSAGE,
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    const sourceStatus = String(source.status || '').trim().toUpperCase()
+    if (!CLONEABLE_FRAMEWORK_PACKAGE_STATUSES.has(sourceStatus)) {
+      return sendConflict(res, req, FRAMEWORK_PACKAGE_CLONE_SOURCE_STATUS_MESSAGE, {
+        field: 'status',
+        reason: 'FRAMEWORK_PACKAGE_CLONE_SOURCE_STATUS_CONFLICT',
+      })
+    }
+
+    const existingVersion = await FrameworkPackage.findOne({
+      frameworkKey: source.frameworkKey,
+      version: req.body.version,
+    }).select('_id')
+
+    if (existingVersion) {
+      return sendConflict(res, req, DUPLICATE_FRAMEWORK_PACKAGE_MESSAGE, {
+        field: 'version',
+        reason: 'FRAMEWORK_PACKAGE_VERSION_CONFLICT',
+      })
+    }
+
+    const existingPackageKey = await FrameworkPackage.findOne({
+      packageKey: req.body.packageKey,
+    }).select('_id')
+
+    if (existingPackageKey) {
+      return sendConflict(res, req, DUPLICATE_FRAMEWORK_PACKAGE_KEY_MESSAGE, {
+        field: 'packageKey',
+        reason: 'FRAMEWORK_PACKAGE_KEY_CONFLICT',
+      })
+    }
+
+    const sourceObject = source.toObject({ depopulate: true })
+    const actorUserId = req.context?.userId || req.userId
+    const sourcePackageId = toIdString(source._id)
+    const sourceDerivedFromPackageId = source.derivedFromPackageId
+      ? toIdString(source.derivedFromPackageId)
+      : null
+    const clonedPackagePayload = {
+      ...sourceObject,
+      version: req.body.version,
+      packageKey: req.body.packageKey,
+      packageName: req.body.packageName ?? `${source.packageName || source.frameworkName} Clone`,
+      description: req.body.description === undefined ? source.description : req.body.description,
+      status: FRAMEWORK_PACKAGE_STATUSES.DRAFT,
+      versionStatus: RUNTIME_CONTROL_VERSION_STATUSES.DRAFT,
+      derivedFromPackageId: sourcePackageId,
+      isDefault: false,
+      isLocked: false,
+      lockedAt: null,
+      lockedBy: null,
+      lockedReason: '',
+      dependencyLock: null,
+      lastCheckpointStatus: null,
+      lastCheckpointAt: null,
+      lastCheckpointResult: null,
+      uiContractBinding: null,
+      activatedAt: null,
+      activatedBy: null,
+      createdBy: actorUserId,
+      updatedBy: actorUserId,
+    }
+
+    delete clonedPackagePayload._id
+    delete clonedPackagePayload.id
+    delete clonedPackagePayload.__v
+    delete clonedPackagePayload.createdAt
+    delete clonedPackagePayload.updatedAt
+    delete clonedPackagePayload.runtimeVerdict
+
+    const accessRuleDetails = validateFrameworkPackageAccessRules(clonedPackagePayload)
+    if (Object.keys(accessRuleDetails).length > 0) {
+      return sendValidationFailed(res, req, accessRuleDetails)
+    }
+
+    const stateContractDetails = validateFrameworkPackageStateContract(clonedPackagePayload)
+    if (Object.keys(stateContractDetails).length > 0) {
+      return sendValidationFailed(res, req, stateContractDetails)
+    }
+
+    const validationDetails = await validateFrameworkPackageRegistryReferences({
+      ...clonedPackagePayload,
+      validateSections: true,
+      validateUiContractSections: true,
+    })
+    if (Object.keys(validationDetails).length > 0) {
+      return sendValidationFailed(res, req, validationDetails)
+    }
+
+    const clonedPackage = new FrameworkPackage(clonedPackagePayload)
+    await clonedPackage.save()
+    await populateFrameworkPackage(clonedPackage)
+
+    await auditService.logFromRequest(req, {
+      action: auditService.AUDIT_ACTIONS.FRAMEWORK_PACKAGE_CLONED,
+      resourceType: auditService.RESOURCE_TYPES.FrameworkPackage,
+      resourceId: clonedPackage._id,
+      scope: {
+        frameworkKey: clonedPackage.frameworkKey,
+      },
+      display: { resourceLabel: buildFrameworkPackageLabel(clonedPackage) },
+      diff: {
+        sourcePackageId,
+        sourcePackageKey: source.packageKey,
+        sourceVersion: source.version,
+        sourceDerivedFromPackageId,
+        clonedPackageId: toIdString(clonedPackage._id),
+        packageKey: clonedPackage.packageKey,
+        packageName: clonedPackage.packageName,
+        description: clonedPackage.description,
+        version: clonedPackage.version,
+        status: clonedPackage.status,
+        derivedFromPackageId: clonedPackage.derivedFromPackageId,
+      },
+    })
+
+    return res.status(201).json({
+      data: serializeFrameworkPackage(clonedPackage, {
+        fallbackUpdatedBy: buildActorSummary(req),
+      }),
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (isDuplicateFrameworkPackageVersionError(err)) {
+      return sendConflict(res, req, DUPLICATE_FRAMEWORK_PACKAGE_MESSAGE, {
+        field: 'version',
+        reason: 'FRAMEWORK_PACKAGE_VERSION_CONFLICT',
+      })
+    }
+
+    if (isDuplicateFrameworkPackageKeyError(err)) {
+      return sendConflict(res, req, DUPLICATE_FRAMEWORK_PACKAGE_KEY_MESSAGE, {
+        field: 'packageKey',
+        reason: 'FRAMEWORK_PACKAGE_KEY_CONFLICT',
+      })
+    }
+
+    if (isActiveDefaultConflictError(err) || isActiveDefaultInvariantError(err)) {
+      return sendConflict(res, req, ACTIVE_DEFAULT_CONFLICT_MESSAGE, {
+        reason: 'FRAMEWORK_PACKAGE_ACTIVE_DEFAULT_CONFLICT',
+      })
+    }
+
     next(err)
   }
 }
@@ -3050,6 +3228,13 @@ export const updateFrameworkPackage = async (req, res, next) => {
       return sendConflict(res, req, DUPLICATE_FRAMEWORK_PACKAGE_MESSAGE, {
         field: 'version',
         reason: 'FRAMEWORK_PACKAGE_VERSION_CONFLICT',
+      })
+    }
+
+    if (isDuplicateFrameworkPackageKeyError(err)) {
+      return sendConflict(res, req, DUPLICATE_FRAMEWORK_PACKAGE_KEY_MESSAGE, {
+        field: 'packageKey',
+        reason: 'FRAMEWORK_PACKAGE_KEY_CONFLICT',
       })
     }
 
