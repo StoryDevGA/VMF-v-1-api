@@ -31,6 +31,11 @@ import {
   resolveKnownFrameworkKeys,
 } from '../services/frameworkRegistryService.js'
 import {
+  assertRuntimeActivationReadiness,
+  getRuntimeActivationReadiness,
+  registerRuntimeActivation,
+} from '../services/runtimeActivation/runtimeActivationService.js'
+import {
   DEPRECATED_FRAMEWORK_PACKAGE_FIELD_MESSAGES,
   DEPRECATED_FRAMEWORK_PACKAGE_FIELDS,
 } from '../constants/frameworkPackageContract.js'
@@ -452,7 +457,15 @@ const isDuplicateFrameworkPackageKeyError = (err) =>
 const isActiveDefaultConflictError = (err) =>
   err?.code === 11000
   && err?.keyPattern?.frameworkKey
-  && (err?.keyPattern?.status || err?.keyPattern?.isDefault)
+  && err?.keyPattern?.isDefault
+
+const isRuntimeActivationConcurrentConflictError = (err) =>
+  err?.code === 11000
+  && (
+    err?.keyPattern?.deploymentId
+    || err?.keyPattern?.activationId
+    || (err?.keyPattern?.frameworkKey && err?.keyPattern?.tenantScope && err?.keyPattern?.deploymentMode)
+  )
 
 const createActiveDefaultInvariantError = () => {
   const error = new Error(ACTIVE_DEFAULT_CONFLICT_MESSAGE)
@@ -3675,11 +3688,18 @@ export const activateFrameworkPackage = async (req, res, next) => {
       return sendCheckpointValidationFailed(res, req, checkpointRun.checkpoint)
     }
     const dependencyLockResult = checkpointRun.dependencyLockResult
+    const activationReadiness = await getRuntimeActivationReadiness({
+      packageId: frameworkPackage._id,
+      frameworkPackage,
+      checkpoint: checkpointRun.checkpoint,
+    })
+    assertRuntimeActivationReadiness(activationReadiness)
 
     const shouldRefreshDependencyLock =
       !frameworkPackage.dependencyLock
       || String(frameworkPackage.dependencyLock.status || '').trim().toUpperCase() !== 'PASS'
     const previousActivePackageIds = []
+    let runtimeActivation = null
 
     await session.withTransaction(async () => {
       const activationTime = new Date()
@@ -3687,10 +3707,7 @@ export const activateFrameworkPackage = async (req, res, next) => {
         FrameworkPackage.find({
           frameworkKey: frameworkPackage.frameworkKey,
           _id: { $ne: frameworkPackage._id },
-          $or: [
-            { status: FRAMEWORK_PACKAGE_STATUSES.ACTIVE },
-            { isDefault: true },
-          ],
+          isDefault: true,
         }),
         session,
       )
@@ -3704,10 +3721,9 @@ export const activateFrameworkPackage = async (req, res, next) => {
 
         if (relatedPackage.status === FRAMEWORK_PACKAGE_STATUSES.ACTIVE) {
           previousActivePackageIds.push(toIdString(relatedPackage._id))
-          relatedPackagePatch.status = FRAMEWORK_PACKAGE_STATUSES.VALIDATED
         }
 
-        // Demotion must tolerate legacy incumbent data until the deprecated-field cleanup script has run.
+        // Supersession clears the default pointer without mutating the previous release artifact status.
         await FrameworkPackage.updateOne(
           { _id: relatedPackage._id },
           { $set: relatedPackagePatch },
@@ -3715,19 +3731,16 @@ export const activateFrameworkPackage = async (req, res, next) => {
         )
       }
 
-      const remainingActiveOrDefaultCount = await applySession(
+      const remainingDefaultCount = await applySession(
         FrameworkPackage.countDocuments({
           frameworkKey: frameworkPackage.frameworkKey,
           _id: { $ne: frameworkPackage._id },
-          $or: [
-            { status: FRAMEWORK_PACKAGE_STATUSES.ACTIVE },
-            { isDefault: true },
-          ],
+          isDefault: true,
         }),
         session,
       )
 
-      if (remainingActiveOrDefaultCount > 0) {
+      if (remainingDefaultCount > 0) {
         throw createActiveDefaultInvariantError()
       }
 
@@ -3763,6 +3776,14 @@ export const activateFrameworkPackage = async (req, res, next) => {
         checkpoint: checkpointRun.checkpoint,
       })
       await frameworkPackage.save({ session })
+      runtimeActivation = await registerRuntimeActivation({
+        frameworkPackage,
+        actorUserId,
+        activatedAt: activationTime,
+        checkpoint: checkpointRun.checkpoint,
+        readiness: activationReadiness,
+        session,
+      })
     })
 
     await populateFrameworkPackage(frameworkPackage)
@@ -3781,17 +3802,82 @@ export const activateFrameworkPackage = async (req, res, next) => {
         previousActivePackageIds,
         activatedAt: frameworkPackage.activatedAt,
         checkpoint: summarizeCheckpointForAudit(checkpointRun.checkpoint),
+        runtimeActivation: {
+          activationId: runtimeActivation?.activationSnapshot?.activationId,
+          deploymentId: runtimeActivation?.deployment?.deploymentId,
+          runtimeVerdictId: runtimeActivation?.activationSnapshot?.runtimeVerdictId,
+          runtimeVerdictResult: runtimeActivation?.activationSnapshot?.runtimeVerdictResult,
+        },
         ...(shouldRefreshDependencyLock ? { dependencyLock: frameworkPackage.dependencyLock } : {}),
       },
     })
+
+    if (runtimeActivation?.activationSnapshot) {
+      await auditService.logFromRequest(req, {
+        action: auditService.AUDIT_ACTIONS.RUNTIME_ACTIVATION_COMPLETED,
+        resourceType: auditService.RESOURCE_TYPES.FrameworkPackage,
+        resourceId: frameworkPackage._id,
+        scope: {
+          frameworkKey: frameworkPackage.frameworkKey,
+        },
+        display: { resourceLabel: runtimeActivation.activationSnapshot.activationId },
+        diff: {
+          activationId: runtimeActivation.activationSnapshot.activationId,
+          deploymentId: runtimeActivation.deployment?.deploymentId,
+          packageId: toIdString(frameworkPackage._id),
+          packageKey: frameworkPackage.packageKey,
+          frameworkKey: frameworkPackage.frameworkKey,
+          frameworkVersion: frameworkPackage.version,
+          checkpointStatus: runtimeActivation.activationSnapshot.checkpointStatus,
+          runtimeVerdictId: runtimeActivation.activationSnapshot.runtimeVerdictId,
+          runtimeVerdictResult: runtimeActivation.activationSnapshot.runtimeVerdictResult,
+          dependencySnapshotId: runtimeActivation.activationSnapshot.dependencySnapshotId,
+          supersedesActivationId: runtimeActivation.activationSnapshot.supersedesActivationId,
+        },
+      })
+    }
+
+    if (runtimeActivation?.deployment) {
+      await auditService.logFromRequest(req, {
+        action: auditService.AUDIT_ACTIONS.RUNTIME_DEPLOYMENT_REGISTERED,
+        resourceType: auditService.RESOURCE_TYPES.FrameworkPackage,
+        resourceId: frameworkPackage._id,
+        scope: {
+          frameworkKey: frameworkPackage.frameworkKey,
+        },
+        display: { resourceLabel: runtimeActivation.deployment.deploymentId },
+        diff: {
+          deploymentId: runtimeActivation.deployment.deploymentId,
+          activationId: runtimeActivation.deployment.activationId,
+          packageId: toIdString(frameworkPackage._id),
+          frameworkKey: frameworkPackage.frameworkKey,
+          frameworkVersion: frameworkPackage.version,
+          supersededDeploymentId: runtimeActivation.supersededDeployment?.deploymentId || null,
+        },
+      })
+    }
 
     return res.status(200).json({
       data: serializeFrameworkPackage(frameworkPackage, {
         fallbackUpdatedBy: buildActorSummary(req),
       }),
-      meta: { requestId: req.requestId, version: 'v1' },
+      meta: {
+        requestId: req.requestId,
+        version: 'v1',
+        runtimeActivation,
+      },
     })
   } catch (err) {
+    if (err?.code === 'RUNTIME_ACTIVATION_READINESS_BLOCKED') {
+      return sendConflict(res, req, err.message, err.details)
+    }
+
+    if (isRuntimeActivationConcurrentConflictError(err)) {
+      return sendConflict(res, req, 'A concurrent runtime activation is in progress.', {
+        reason: 'RUNTIME_ACTIVATION_CONCURRENT_CONFLICT',
+      })
+    }
+
     if (isActiveDefaultConflictError(err) || isActiveDefaultInvariantError(err)) {
       return sendConflict(res, req, ACTIVE_DEFAULT_CONFLICT_MESSAGE, {
         field: 'status',

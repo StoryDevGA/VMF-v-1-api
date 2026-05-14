@@ -12,6 +12,7 @@
     "framework-seed:import": "node src/scripts/importFrameworkSeed.js",
     "runtime-paths:reclassify-categories": "node src/scripts/reclassifyRuntimePathCategories.js",
     "framework-packages:unset-legacy-fields": "node src/scripts/unsetDeprecatedFrameworkPackageFields.js",
+    "framework-packages:drop-legacy-active-index": "node src/scripts/dropLegacyFrameworkPackageActiveIndex.js",
     "customers:enforce-name-uniqueness": "node src/scripts/enforceCustomerNameUniqueness.js",
     "governance:backfill": "node src/scripts/backfillCustomerLicenseGovernance.js",
     "governance:report-admin-invariants": "node src/scripts/reportCustomerAdminInvariantViolations.js",

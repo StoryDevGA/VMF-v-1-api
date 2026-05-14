@@ -19,6 +19,10 @@ Run from `VMF-v-1-api/`:
 - `npm run governance:backfill` runs governance/license backfill in dry-run mode.
 - `npm run governance:backfill -- --apply` applies backfill updates.
 
+## Agent Testing Skill
+- Use `vmf-api-test-coverage` from `.git/skills/vmf-api-test-coverage/SKILL.md` for comprehensive API/backend test planning, implementation, and review.
+- Use it alongside `test-engineer-node` when Runtime Control work needs no-gap Jest/Supertest coverage, persistence/audit assertions, unique-index race tests, or mock/API parity fixture checks.
+
 ## Configuration
 Copy `.env.example` to `.env` and adjust values as needed:
 - `PORT` defaults to 8000.

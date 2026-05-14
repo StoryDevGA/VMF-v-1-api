@@ -20,6 +20,8 @@ import ValidationRegistry from './ValidationRegistry.js'
 import WorkflowPolicy from './WorkflowPolicy.js'
 import UIContract from './UIContract.js'
 import RuntimeValidationAudit from './RuntimeValidationAudit.js'
+import RuntimeActivationSnapshot from './RuntimeActivationSnapshot.js'
+import RuntimeDeployment from './RuntimeDeployment.js'
 
 // Export all models
 export {
@@ -44,6 +46,8 @@ export {
   WorkflowPolicy,
   UIContract,
   RuntimeValidationAudit,
+  RuntimeActivationSnapshot,
+  RuntimeDeployment,
 }
 
 // Default export with all models
@@ -69,4 +73,6 @@ export default {
   WorkflowPolicy,
   UIContract,
   RuntimeValidationAudit,
+  RuntimeActivationSnapshot,
+  RuntimeDeployment,
 }

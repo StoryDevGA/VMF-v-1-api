@@ -10,6 +10,10 @@ import {
   ISSUE_CODES,
 } from '../scripts/reportCustomerAdminInvariantViolations.js'
 import { unsetDeprecatedFrameworkPackageFields } from '../scripts/unsetDeprecatedFrameworkPackageFields.js'
+import {
+  dropLegacyFrameworkPackageActiveIndex,
+  isLegacyActiveFrameworkPackageIndex,
+} from '../scripts/dropLegacyFrameworkPackageActiveIndex.js'
 import { backfillRuntimeControlVersioningFields } from '../scripts/backfillRuntimeControlVersioningFields.js'
 
 const ACTOR_ID = '507f1f77bcf86cd799439011'
@@ -215,6 +219,269 @@ describe('unsetDeprecatedFrameworkPackageFields', () => {
     expect(result.database).toBe('vmf_test')
     expect(result.deprecatedIndexes).toEqual(['legacy_validation_idx', 'legacy_workflow_idx'])
     expect(logs[0]).toContain('database vmf_test')
+  })
+})
+
+describe('dropLegacyFrameworkPackageActiveIndex', () => {
+  test('detects only legacy unique active Framework Package indexes', () => {
+    expect(isLegacyActiveFrameworkPackageIndex({
+      name: 'unique_active_framework_package',
+      key: { frameworkKey: 1, status: 1 },
+      unique: true,
+    })).toBe(true)
+    expect(isLegacyActiveFrameworkPackageIndex({
+      name: 'legacy_active_by_shape',
+      key: { frameworkKey: 1, status: 1 },
+      unique: true,
+      partialFilterExpression: { status: 'ACTIVE' },
+    })).toBe(true)
+    expect(isLegacyActiveFrameworkPackageIndex({
+      name: 'framework_package_status_lookup',
+      key: { frameworkKey: 1, status: 1 },
+    })).toBe(false)
+    expect(isLegacyActiveFrameworkPackageIndex({
+      name: 'unique_default_framework_package',
+      key: { frameworkKey: 1, isDefault: 1 },
+      unique: true,
+      partialFilterExpression: { isDefault: true },
+    })).toBe(false)
+  })
+
+  test('dry-run reports legacy active indexes without writing', async () => {
+    const connect = jest.fn(async () => {})
+    const disconnect = jest.fn(async () => {})
+    const collection = {
+      db: { databaseName: 'vmf_test' },
+      indexes: jest.fn().mockResolvedValue([
+        { name: '_id_', key: { _id: 1 } },
+        {
+          name: 'unique_active_framework_package',
+          key: { frameworkKey: 1, status: 1 },
+          unique: true,
+          partialFilterExpression: { status: 'ACTIVE' },
+        },
+        {
+          name: 'unique_default_framework_package',
+          key: { frameworkKey: 1, isDefault: 1 },
+          unique: true,
+          partialFilterExpression: { isDefault: true },
+        },
+      ]),
+      dropIndex: jest.fn(),
+      createIndex: jest.fn(),
+    }
+    const logs = []
+
+    const result = await dropLegacyFrameworkPackageActiveIndex({
+      logger: (message) => logs.push(message),
+      dependencies: {
+        connect,
+        disconnect,
+        model: { collection },
+      },
+    })
+
+    expect(connect).toHaveBeenCalled()
+    expect(disconnect).toHaveBeenCalled()
+    expect(collection.dropIndex).not.toHaveBeenCalled()
+    expect(collection.createIndex).not.toHaveBeenCalled()
+    expect(result.mode).toBe('dry-run')
+    expect(result.legacyActiveIndexes).toEqual(['unique_active_framework_package'])
+    expect(result.defaultPointerIndexExists).toBe(true)
+    expect(logs[0]).toContain('database vmf_test')
+  })
+
+  test('apply drops legacy active indexes and creates the default pointer index when missing', async () => {
+    const connect = jest.fn(async () => {})
+    const disconnect = jest.fn(async () => {})
+    const collection = {
+      db: { databaseName: 'vmf_test' },
+      indexes: jest.fn().mockResolvedValue([
+        { name: '_id_', key: { _id: 1 } },
+        {
+          name: 'unique_active_framework_package',
+          key: { frameworkKey: 1, status: 1 },
+          unique: true,
+          partialFilterExpression: { status: 'ACTIVE' },
+        },
+      ]),
+      dropIndex: jest.fn().mockResolvedValue({ ok: 1 }),
+      createIndex: jest.fn().mockResolvedValue('unique_default_framework_package'),
+    }
+
+    const result = await dropLegacyFrameworkPackageActiveIndex({
+      apply: true,
+      logger: jest.fn(),
+      dependencies: {
+        connect,
+        disconnect,
+        model: { collection },
+      },
+    })
+
+    expect(collection.dropIndex).toHaveBeenCalledWith('unique_active_framework_package')
+    expect(collection.createIndex).toHaveBeenCalledWith(
+      { frameworkKey: 1, isDefault: 1 },
+      {
+        unique: true,
+        partialFilterExpression: { isDefault: true },
+        name: 'unique_default_framework_package',
+      },
+    )
+    expect(result.droppedIndexes).toEqual(['unique_active_framework_package'])
+    expect(result.defaultPointerIndexExists).toBe(false)
+    expect(result.defaultPointerIndexCreated).toBe(true)
+  })
+
+  test('apply skips default pointer index creation when it already exists', async () => {
+    const connect = jest.fn(async () => {})
+    const disconnect = jest.fn(async () => {})
+    const collection = {
+      db: { databaseName: 'vmf_test' },
+      indexes: jest.fn().mockResolvedValue([
+        { name: '_id_', key: { _id: 1 } },
+        {
+          name: 'unique_active_framework_package',
+          key: { frameworkKey: 1, status: 1 },
+          unique: true,
+          partialFilterExpression: { status: 'ACTIVE' },
+        },
+        {
+          name: 'unique_default_framework_package',
+          key: { frameworkKey: 1, isDefault: 1 },
+          unique: true,
+          partialFilterExpression: { isDefault: true },
+        },
+      ]),
+      dropIndex: jest.fn().mockResolvedValue({ ok: 1 }),
+      createIndex: jest.fn(),
+    }
+
+    const result = await dropLegacyFrameworkPackageActiveIndex({
+      apply: true,
+      logger: jest.fn(),
+      dependencies: {
+        connect,
+        disconnect,
+        model: { collection },
+      },
+    })
+
+    expect(collection.createIndex).not.toHaveBeenCalled()
+    expect(collection.dropIndex).toHaveBeenCalledWith('unique_active_framework_package')
+    expect(result.defaultPointerIndexExists).toBe(true)
+    expect(result.defaultPointerIndexCreated).toBe(false)
+  })
+
+  test('apply is a no-op when the database is already clean', async () => {
+    const connect = jest.fn(async () => {})
+    const disconnect = jest.fn(async () => {})
+    const collection = {
+      db: { databaseName: 'vmf_test' },
+      indexes: jest.fn().mockResolvedValue([
+        { name: '_id_', key: { _id: 1 } },
+        {
+          name: 'unique_default_framework_package',
+          key: { frameworkKey: 1, isDefault: 1 },
+          unique: true,
+          partialFilterExpression: { isDefault: true },
+        },
+      ]),
+      dropIndex: jest.fn(),
+      createIndex: jest.fn(),
+    }
+
+    const result = await dropLegacyFrameworkPackageActiveIndex({
+      apply: true,
+      logger: jest.fn(),
+      dependencies: {
+        connect,
+        disconnect,
+        model: { collection },
+      },
+    })
+
+    expect(collection.createIndex).not.toHaveBeenCalled()
+    expect(collection.dropIndex).not.toHaveBeenCalled()
+    expect(result.ok).toBe(true)
+    expect(result.droppedIndexes).toEqual([])
+    expect(result.defaultPointerIndexCreated).toBe(false)
+  })
+
+  test('apply swallows IndexNotFound when a legacy index is already gone', async () => {
+    const connect = jest.fn(async () => {})
+    const disconnect = jest.fn(async () => {})
+    const collection = {
+      db: { databaseName: 'vmf_test' },
+      indexes: jest.fn().mockResolvedValue([
+        { name: '_id_', key: { _id: 1 } },
+        {
+          name: 'unique_active_framework_package',
+          key: { frameworkKey: 1, status: 1 },
+          unique: true,
+          partialFilterExpression: { status: 'ACTIVE' },
+        },
+        {
+          name: 'unique_default_framework_package',
+          key: { frameworkKey: 1, isDefault: 1 },
+          unique: true,
+          partialFilterExpression: { isDefault: true },
+        },
+      ]),
+      dropIndex: jest.fn().mockRejectedValue({ code: 27, codeName: 'IndexNotFound' }),
+      createIndex: jest.fn(),
+    }
+
+    const result = await dropLegacyFrameworkPackageActiveIndex({
+      apply: true,
+      logger: jest.fn(),
+      dependencies: {
+        connect,
+        disconnect,
+        model: { collection },
+      },
+    })
+
+    expect(collection.dropIndex).toHaveBeenCalledWith('unique_active_framework_package')
+    expect(result.droppedIndexes).toEqual([])
+  })
+
+  test('apply rethrows unexpected dropIndex errors', async () => {
+    const connect = jest.fn(async () => {})
+    const disconnect = jest.fn(async () => {})
+    const dropError = new Error('drop failed')
+    const collection = {
+      db: { databaseName: 'vmf_test' },
+      indexes: jest.fn().mockResolvedValue([
+        { name: '_id_', key: { _id: 1 } },
+        {
+          name: 'unique_active_framework_package',
+          key: { frameworkKey: 1, status: 1 },
+          unique: true,
+          partialFilterExpression: { status: 'ACTIVE' },
+        },
+        {
+          name: 'unique_default_framework_package',
+          key: { frameworkKey: 1, isDefault: 1 },
+          unique: true,
+          partialFilterExpression: { isDefault: true },
+        },
+      ]),
+      dropIndex: jest.fn().mockRejectedValue(dropError),
+      createIndex: jest.fn(),
+    }
+
+    await expect(dropLegacyFrameworkPackageActiveIndex({
+      apply: true,
+      logger: jest.fn(),
+      dependencies: {
+        connect,
+        disconnect,
+        model: { collection },
+      },
+    })).rejects.toThrow('drop failed')
+
+    expect(disconnect).toHaveBeenCalled()
   })
 })
 

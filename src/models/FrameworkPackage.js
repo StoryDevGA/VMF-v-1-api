@@ -612,6 +612,62 @@ const frameworkPackageDependencyLockSchema = new mongoose.Schema(
   { _id: false },
 )
 
+const frameworkPackageRuntimeVerdictSchema = new mongoose.Schema(
+  {
+    validationId: {
+      type: String,
+      trim: true,
+      maxlength: 180,
+      default: '',
+    },
+    auditId: {
+      type: String,
+      trim: true,
+      maxlength: 180,
+      default: '',
+    },
+    status: {
+      type: String,
+      enum: ['PASS', 'WARN', 'FAIL'],
+      default: 'PASS',
+    },
+    result: {
+      type: String,
+      enum: ['ALLOW', 'BLOCK', 'AUDIT_ONLY'],
+      default: 'ALLOW',
+    },
+    mode: {
+      type: String,
+      enum: ['STRICT', 'WARN_ONLY', 'AUDIT_ONLY', 'DISABLED'],
+      default: 'STRICT',
+    },
+    lastValidatedAt: {
+      type: Date,
+      default: null,
+    },
+    auditPersisted: {
+      type: Boolean,
+      default: false,
+    },
+    dependencyLockState: {
+      type: String,
+      enum: ['LOCKED', 'NOT_LOCKED', 'STALE', 'FAILED'],
+      default: 'NOT_LOCKED',
+    },
+    blockingIssues: {
+      type: Number,
+      min: 0,
+      default: 0,
+    },
+    warnings: {
+      type: Number,
+      min: 0,
+      default: 0,
+    },
+  },
+  { _id: false },
+)
+
 const frameworkPackageSchema = new mongoose.Schema(
   {
     frameworkKey: {
@@ -712,6 +768,10 @@ const frameworkPackageSchema = new mongoose.Schema(
     },
     lastCheckpointResult: {
       type: mongoose.Schema.Types.Mixed,
+      default: null,
+    },
+    runtimeVerdict: {
+      type: frameworkPackageRuntimeVerdictSchema,
       default: null,
     },
     isDefault: {
@@ -896,11 +956,7 @@ frameworkPackageSchema.index(
 )
 frameworkPackageSchema.index(
   { frameworkKey: 1, status: 1 },
-  {
-    unique: true,
-    partialFilterExpression: { status: FRAMEWORK_PACKAGE_STATUSES.ACTIVE },
-    name: 'unique_active_framework_package',
-  },
+  { name: 'framework_package_status_lookup' },
 )
 frameworkPackageSchema.index(
   { frameworkKey: 1, isDefault: 1 },
@@ -1195,7 +1251,9 @@ frameworkPackageSchema.pre('validate', function normalizeFrameworkPackage(next) 
   }
 
   if (this.isNew || this.isModified('status') || this.isModified('isDefault')) {
-    this.isDefault = this.status === FRAMEWORK_PACKAGE_STATUSES.ACTIVE
+    if (this.status !== FRAMEWORK_PACKAGE_STATUSES.ACTIVE) {
+      this.isDefault = false
+    }
     this.versionStatus = mapRuntimeControlStatusToVersionStatus(this.status)
     this.isLocked = isReadyFrameworkPackageStatus(this.status)
 

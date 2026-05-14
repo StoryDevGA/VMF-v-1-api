@@ -30,6 +30,8 @@ A skill is a set of local instructions to follow that is stored in a `SKILL.md` 
 - prd-writer (api): Produce backend-oriented PRDs with technical scope, requirements, and acceptance criteria. (file: C:/Users/garya/OneDrive/Documents/StoryLineOS/VMF-APP/dev-v1/VMF-v-1-api/.git/skills/prd-writer/SKILL.md)
 - technical-writer (api): Convert backend PRDs into implementation-ready technical specs with architecture and rollout detail. (file: C:/Users/garya/OneDrive/Documents/StoryLineOS/VMF-APP/dev-v1/VMF-v-1-api/.git/skills/technical-writer/SKILL.md)
 - test-engineer-node: Create and maintain Node.js backend test suites, fixtures, and quality gates. (file: C:/Users/garya/OneDrive/Documents/StoryLineOS/VMF-APP/dev-v1/VMF-v-1-api/.git/skills/test-engineer-node/SKILL.md)
+- vmf-api-test-coverage: Comprehensive VMF API/backend regression coverage for Jest/Supertest route tests, Mongoose persistence, Runtime Control lifecycle contracts, audit assertions, unique-index race tests, and mock/API parity fixtures. (file: C:/Users/garya/OneDrive/Documents/StoryLineOS/VMF-APP/dev-v1/VMF-v-1-api/.git/skills/vmf-api-test-coverage/SKILL.md)
+- vmf-client-test-coverage: Comprehensive VMF client/frontend regression coverage for Vitest, Testing Library, RTK Query mocks, Runtime Control lifecycle matrices, editor action states, cache invalidation, and mock/live parity. (file: C:/Users/garya/OneDrive/Documents/StoryLineOS/VMF-APP/dev-v1/VMF-v-1-client/.git/skills/vmf-client-test-coverage/SKILL.md)
 
 ### How to use skills
 - Discovery: The list above is the skills available in this session (name + description + file path). Skill bodies live on disk at the listed paths.

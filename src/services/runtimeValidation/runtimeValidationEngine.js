@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { RUNTIME_PATH_REGISTRY_OPERATIONS } from '../../models/RuntimePathRegistry.js'
 import logger from '../../config/logger.js'
 import { RUNTIME_VALIDATION_CODES, buildRuntimeValidationIssue } from './runtimeValidationCodes.js'
-import { validateRuntimeDependencyState } from './runtimeDependencyValidator.js'
+import { getRuntimeDependencyLockState, validateRuntimeDependencyState } from './runtimeDependencyValidator.js'
 import { validateRuntimeExecution } from './runtimeExecutionValidator.js'
 import { normalizeRuntimeValidationMode, RUNTIME_VALIDATION_MODES } from './runtimeValidationModes.js'
 import { validateRuntimeMutation } from './runtimeMutationValidator.js'
@@ -172,6 +172,9 @@ export const validateRuntimeOperation = async (input) => {
   const highestSeverity = getHighestRuntimeValidationSeverity(validationIssues)
   const packageResolved = !validationIssues.some((issue) =>
     issue.code === RUNTIME_VALIDATION_CODES.DEPENDENCY_INVALID && issue.packageResolved === false)
+  const dependencyLockState = input.packageId && packageResolved
+    ? await getRuntimeDependencyLockState({ packageId: input.packageId })
+    : 'NOT_LOCKED'
 
   const validationResult = {
     validationId,
@@ -195,6 +198,8 @@ export const validateRuntimeOperation = async (input) => {
     beforeState: input.beforeState,
     afterState: input.afterState,
     packageResolved,
+    dependencyLockState,
+    isPackageLevelValidation: input.isPackageLevelValidation === true,
   }
 
   if (input.persistAudit !== false) {
@@ -203,8 +208,13 @@ export const validateRuntimeOperation = async (input) => {
     } catch (err) {
       logger.error(
         { err, validation: buildAuditFailureContext(validationResult) },
-        'runtime validation audit write failed',
+        'runtime validation persistence failed',
       )
+      if (validationResult.isPackageLevelValidation) {
+        err.code = err.code || 'RUNTIME_VALIDATION_EVIDENCE_PERSISTENCE_FAILED'
+        err.status = err.status || 500
+        throw err
+      }
     }
   }
 

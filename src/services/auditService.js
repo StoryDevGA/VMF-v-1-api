@@ -78,6 +78,8 @@ export const AUDIT_ACTIONS = Object.freeze({
   FRAMEWORK_PACKAGE_VALIDATED: 'FRAMEWORK_PACKAGE_VALIDATED',
   FRAMEWORK_PACKAGE_ACTIVATED: 'FRAMEWORK_PACKAGE_ACTIVATED',
   FRAMEWORK_PACKAGE_CLONED: 'FRAMEWORK_PACKAGE_CLONED',
+  RUNTIME_ACTIVATION_COMPLETED: 'RUNTIME_ACTIVATION_COMPLETED',
+  RUNTIME_DEPLOYMENT_REGISTERED: 'RUNTIME_DEPLOYMENT_REGISTERED',
   FRAMEWORK_REGISTRY_CREATED: 'FRAMEWORK_REGISTRY_CREATED',
   FRAMEWORK_REGISTRY_UPDATED: 'FRAMEWORK_REGISTRY_UPDATED',
   RUNTIME_AGENT_CREATED: 'RUNTIME_AGENT_CREATED',
@@ -401,6 +403,10 @@ const buildAuditSummary = ({ action, resourceType, resourceId, diff, display }) 
       return clampSummary(`${actorLabel} activated framework package ${targetLabel}`)
     case AUDIT_ACTIONS.FRAMEWORK_PACKAGE_CLONED:
       return clampSummary(`${actorLabel} cloned framework package ${targetLabel}`)
+    case AUDIT_ACTIONS.RUNTIME_ACTIVATION_COMPLETED:
+      return clampSummary(`${actorLabel} completed runtime activation ${targetLabel}`)
+    case AUDIT_ACTIONS.RUNTIME_DEPLOYMENT_REGISTERED:
+      return clampSummary(`${actorLabel} registered runtime deployment ${targetLabel}`)
     case AUDIT_ACTIONS.RUNTIME_AGENT_CREATED:
       return clampSummary(`${actorLabel} created runtime agent ${targetLabel}`)
     case AUDIT_ACTIONS.RUNTIME_AGENT_UPDATED:

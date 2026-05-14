@@ -29,6 +29,7 @@ const runtimeControlParityContracts = JSON.parse(
 const {
   frameworkPackageClone: frameworkPackageCloneParity,
   frameworkPackageCheckpoint: frameworkPackageCheckpointParity,
+  runtimeActivation: runtimeActivationParity,
 } = runtimeControlParityContracts
 
 const expectFrameworkPackageCloneReleaseFieldsCleared = (frameworkPackage) => {
@@ -106,6 +107,16 @@ const buildUserQueryChain = (value, { reject = false } = {}) => {
   }
 }
 
+const buildSessionQueryChain = (value) => {
+  const promise = Promise.resolve(value)
+  return {
+    session: jest.fn().mockResolvedValue(value),
+    then: promise.then.bind(promise),
+    catch: promise.catch.bind(promise),
+    finally: promise.finally.bind(promise),
+  }
+}
+
 const buildDefaultRoleRows = () => ([
   {
     key: 'SUPER_ADMIN',
@@ -155,6 +166,8 @@ let ValidationRegistry
 let WorkflowPolicy
 let UIContract
 let RuntimePathRegistry
+let RuntimeActivationSnapshot
+let RuntimeDeployment
 let AuditLog
 let mockRedisClient
 let frameworkPackageController
@@ -254,6 +267,33 @@ const makeFrameworkPackageDoc = (overrides = {}) => {
     updatedBy: SUPER_ADMIN_ID,
     activatedAt: null,
     activatedBy: null,
+    dependencyLock: {
+      status: 'PASS',
+      resolvedAt: new Date('2026-05-07T13:42:00.000Z'),
+      resolvedBy: SUPER_ADMIN_ID,
+      packageKey: 'vmf-2-3-1',
+      packageVersion: '2.3.1',
+      references: [
+        {
+          collectionKey: 'RuntimePathRegistry',
+          itemKey: 'framework_state.sections.customer_problem',
+          itemId: 'runtime-path-customer-problem',
+          status: 'ACTIVE',
+        },
+      ],
+    },
+    runtimeVerdict: {
+      validationId: 'rvl-vmf-2-3-1',
+      auditId: 'rvl-vmf-2-3-1',
+      status: 'PASS',
+      result: 'ALLOW',
+      mode: 'STRICT',
+      lastValidatedAt: new Date('2026-05-07T13:45:00.000Z'),
+      auditPersisted: true,
+      dependencyLockState: 'LOCKED',
+      blockingIssues: 0,
+      warnings: 0,
+    },
     ...overrides,
   })
 
@@ -299,6 +339,8 @@ beforeAll(async () => {
   WorkflowPolicy = models.WorkflowPolicy
   UIContract = models.UIContract
   RuntimePathRegistry = models.RuntimePathRegistry
+  RuntimeActivationSnapshot = models.RuntimeActivationSnapshot
+  RuntimeDeployment = models.RuntimeDeployment
   AuditLog = models.AuditLog
   frameworkPackageController = await import('../controllers/frameworkPackage.controller.js')
 
@@ -345,6 +387,14 @@ beforeEach(() => {
   WorkflowPolicy.find = jest.fn()
   UIContract.findOne = jest.fn()
   RuntimePathRegistry.find = jest.fn()
+  RuntimeActivationSnapshot.find = jest.fn()
+  RuntimeActivationSnapshot.findOne = jest.fn()
+  RuntimeActivationSnapshot.create = jest.fn()
+  RuntimeActivationSnapshot.updateOne = jest.fn().mockResolvedValue({ matchedCount: 0, modifiedCount: 0 })
+  RuntimeDeployment.find = jest.fn()
+  RuntimeDeployment.findOne = jest.fn()
+  RuntimeDeployment.create = jest.fn()
+  RuntimeDeployment.updateOne = jest.fn().mockResolvedValue({ matchedCount: 0, modifiedCount: 0 })
   RuntimeAgent.updateMany = jest.fn().mockResolvedValue({ matchedCount: 0, modifiedCount: 0 })
   RuntimeSkill.updateMany = jest.fn().mockResolvedValue({ matchedCount: 0, modifiedCount: 0 })
   SkillRoleRegistry.updateMany = jest.fn().mockResolvedValue({ matchedCount: 0, modifiedCount: 0 })
@@ -352,6 +402,22 @@ beforeEach(() => {
   WorkflowPolicy.updateMany = jest.fn().mockResolvedValue({ matchedCount: 0, modifiedCount: 0 })
   UIContract.updateMany = jest.fn().mockResolvedValue({ matchedCount: 0, modifiedCount: 0 })
   RuntimePathRegistry.updateMany = jest.fn().mockResolvedValue({ matchedCount: 0, modifiedCount: 0 })
+  RuntimeActivationSnapshot.find.mockReturnValue(buildFrameworkPackageQueryChain([]))
+  RuntimeActivationSnapshot.findOne.mockReturnValue({
+    lean: jest.fn().mockResolvedValue(null),
+  })
+  RuntimeActivationSnapshot.create.mockImplementation(async (rows) =>
+    rows.map((row, index) => ({
+      _id: `707f1f77bcf86cd7994390${index}1`,
+      ...row,
+    })))
+  RuntimeDeployment.find.mockReturnValue(buildFrameworkPackageQueryChain([]))
+  RuntimeDeployment.findOne.mockReturnValue(buildSessionQueryChain(null))
+  RuntimeDeployment.create.mockImplementation(async (rows) =>
+    rows.map((row, index) => ({
+      _id: `707f1f77bcf86cd7994391${index}1`,
+      ...row,
+    })))
   Role.find = jest.fn().mockReturnValue(buildRoleQueryChain(buildDefaultRoleRows()))
   FrameworkPackage.prototype.save = jest.fn(async function save() {
     return this
@@ -1749,6 +1815,7 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     const token = await getAccessTokenForUser(makeFakeUser())
     FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackageDoc({
       status: 'VALIDATED',
+      lastCheckpointStatus: 'PASS',
     }))
     mockFindOneSelect(null)
 
@@ -2621,7 +2688,214 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     )
   })
 
-  test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/activate activates a validated package and demotes the previous active package', async () => {
+  test('GET /api/v1/super-admin/runtime-control/runtime-activation/packages/:packageId/readiness returns activation readiness', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackageDoc({
+      status: 'VALIDATED',
+      lastCheckpointStatus: 'PASS',
+    }))
+
+    const res = await request
+      .get(`/api/v1/super-admin/runtime-control/runtime-activation/packages/${FRAMEWORK_PACKAGE_ID}/readiness`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toEqual(expect.objectContaining({
+      ready: true,
+      status: runtimeActivationParity.readinessReady.status,
+      dependencyLockState: runtimeActivationParity.readinessReady.dependencyLockState,
+    }))
+    expect(res.body.data.runtimeVerdict).toEqual(expect.objectContaining({
+      result: runtimeActivationParity.readinessReady.runtimeVerdictResult,
+    }))
+  })
+
+  test('GET /api/v1/super-admin/runtime-control/runtime-activation/packages/:packageId/readiness accepts PASS_WITH_WARNINGS checkpoint evidence', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackageDoc({
+      status: 'VALIDATED',
+      lastCheckpointStatus: 'PASS_WITH_WARNINGS',
+    }))
+
+    const res = await request
+      .get(`/api/v1/super-admin/runtime-control/runtime-activation/packages/${FRAMEWORK_PACKAGE_ID}/readiness`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.ready).toBe(true)
+    expect(res.body.data.checkpointStatus).toBe('PASS_WITH_WARNINGS')
+    expect(res.body.data.requirements).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        key: 'checkpoint',
+        status: 'PASS',
+        reason: 'RUNTIME_CHECKPOINT_READY',
+      }),
+    ]))
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/activate rejects missing runtime validation verdict', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackageDoc({
+      status: 'VALIDATED',
+      runtimeVerdict: null,
+    }))
+    UIContract.findOne.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue({
+          uiContractKey: 'vmf-ui-contract-v1',
+          status: 'ACTIVE',
+          versionStatus: 'ACTIVE',
+          frameworkKeys: ['VMF'],
+          sections: [{ sectionKey: 'customer_problem', runtimePath: 'framework_state.sections.customer_problem' }],
+        }),
+      }),
+    })
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/activate`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(runtimeActivationParity.readinessBlockedRuntimeVerdictMissing.httpStatus)
+    expect(res.body.error.code).toBe(runtimeActivationParity.readinessBlockedRuntimeVerdictMissing.errorCode)
+    expect(res.body.error.details.reason).toBe(
+      runtimeActivationParity.readinessBlockedRuntimeVerdictMissing.reason,
+    )
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/activate rejects blocked runtime validation verdict', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackageDoc({
+      status: 'VALIDATED',
+      runtimeVerdict: {
+        validationId: 'rvl-vmf-blocked',
+        auditId: 'rvl-vmf-blocked',
+        status: 'FAIL',
+        result: 'BLOCK',
+        mode: 'STRICT',
+        lastValidatedAt: new Date('2026-05-07T13:45:00.000Z'),
+        auditPersisted: true,
+        dependencyLockState: 'LOCKED',
+        blockingIssues: 1,
+        warnings: 0,
+      },
+    }))
+    UIContract.findOne.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue({
+          uiContractKey: 'vmf-ui-contract-v1',
+          status: 'ACTIVE',
+          versionStatus: 'ACTIVE',
+          frameworkKeys: ['VMF'],
+          sections: [{ sectionKey: 'customer_problem', runtimePath: 'framework_state.sections.customer_problem' }],
+        }),
+      }),
+    })
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/activate`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(runtimeActivationParity.readinessBlockedRuntimeVerdictBlocked.httpStatus)
+    expect(res.body.error.code).toBe(runtimeActivationParity.readinessBlockedRuntimeVerdictBlocked.errorCode)
+    expect(res.body.error.details.reason).toBe(
+      runtimeActivationParity.readinessBlockedRuntimeVerdictBlocked.reason,
+    )
+  })
+
+  test('GET /api/v1/super-admin/runtime-control/runtime-activation/packages/:packageId/readiness blocks uncertified runtime validation verdicts', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const frameworkPackage = makeFrameworkPackageDoc({
+      _id: FRAMEWORK_PACKAGE_ID,
+      status: 'VALIDATED',
+      runtimeVerdict: {
+        validationId: 'rvl-vmf-2-3-1',
+        auditId: 'rvl-vmf-2-3-1',
+        status: 'PASS',
+        result: 'ALLOW',
+        mode: 'STRICT',
+        lastValidatedAt: new Date('2026-05-07T13:45:00.000Z'),
+        auditPersisted: false,
+        dependencyLockState: 'LOCKED',
+      },
+    })
+
+    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+
+    const res = await request
+      .get(`/api/v1/super-admin/runtime-control/runtime-activation/packages/${FRAMEWORK_PACKAGE_ID}/readiness`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.ready).toBe(false)
+    expect(res.body.data.blockingReasons).toContain(
+      runtimeActivationParity.readinessBlockedRuntimeVerdictNotCertified.reason,
+    )
+  })
+
+  test('GET /api/v1/super-admin/runtime-control/runtime-activation/packages/:packageId/readiness blocks stale runtime validation verdicts', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const frameworkPackage = makeFrameworkPackageDoc({
+      _id: FRAMEWORK_PACKAGE_ID,
+      status: 'VALIDATED',
+      updatedAt: new Date('2026-05-07T14:00:00.000Z'),
+      runtimeVerdict: {
+        validationId: 'rvl-vmf-2-3-1',
+        auditId: 'rvl-vmf-2-3-1',
+        status: 'PASS',
+        result: 'ALLOW',
+        mode: 'STRICT',
+        lastValidatedAt: new Date('2026-05-07T13:45:00.000Z'),
+        auditPersisted: true,
+        dependencyLockState: 'LOCKED',
+      },
+    })
+
+    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+
+    const res = await request
+      .get(`/api/v1/super-admin/runtime-control/runtime-activation/packages/${FRAMEWORK_PACKAGE_ID}/readiness`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.ready).toBe(false)
+    expect(res.body.data.blockingReasons).toContain(
+      runtimeActivationParity.readinessBlockedRuntimeVerdictStale.reason,
+    )
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/activate rejects missing dependency lock evidence', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackageDoc({
+      status: 'VALIDATED',
+      dependencyLock: null,
+    }))
+    UIContract.findOne.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue({
+          uiContractKey: 'vmf-ui-contract-v1',
+          status: 'ACTIVE',
+          versionStatus: 'ACTIVE',
+          frameworkKeys: ['VMF'],
+          sections: [{ sectionKey: 'customer_problem', runtimePath: 'framework_state.sections.customer_problem' }],
+        }),
+      }),
+    })
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/activate`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(runtimeActivationParity.readinessBlockedDependencyLockMissing.httpStatus)
+    expect(res.body.error.code).toBe(runtimeActivationParity.readinessBlockedDependencyLockMissing.errorCode)
+    expect(res.body.error.details.reason).toBe(
+      runtimeActivationParity.readinessBlockedDependencyLockMissing.reason,
+    )
+    expect(res.body.error.details.readiness.dependencyLockState).toBe(
+      runtimeActivationParity.readinessBlockedDependencyLockMissing.dependencyLockState,
+    )
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/activate activates a validated package and clears the previous default pointer', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     const frameworkPackage = makeFrameworkPackageDoc({
       _id: FRAMEWORK_PACKAGE_ID,
@@ -2662,15 +2936,38 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
       { _id: activePackage._id },
       {
         $set: expect.objectContaining({
-          status: 'VALIDATED',
           isDefault: false,
           updatedBy: SUPER_ADMIN_ID,
         }),
       },
       expect.objectContaining({ runValidators: false }),
     )
+    expect(FrameworkPackage.updateOne.mock.calls[0][1].$set).not.toHaveProperty('status')
     expect(frameworkPackage.status).toBe('ACTIVE')
     expect(frameworkPackage.isDefault).toBe(true)
+    expect(RuntimeActivationSnapshot.create).toHaveBeenCalledWith([
+      expect.objectContaining({
+        activationStatus: runtimeActivationParity.activationResult.activationStatus,
+        runtimeVerdictResult: runtimeActivationParity.readinessReady.runtimeVerdictResult,
+        tenantScope: runtimeActivationParity.activationResult.tenantScope,
+        deploymentMode: runtimeActivationParity.activationResult.deploymentMode,
+      }),
+    ], expect.objectContaining({ session: expect.any(Object) }))
+    expect(RuntimeDeployment.create).toHaveBeenCalledWith([
+      expect.objectContaining({
+        status: runtimeActivationParity.activationResult.deploymentStatus,
+        tenantScope: runtimeActivationParity.activationResult.tenantScope,
+        deploymentMode: runtimeActivationParity.activationResult.deploymentMode,
+      }),
+    ], expect.objectContaining({ session: expect.any(Object) }))
+    expect(res.body.meta.runtimeActivation.activationSnapshot).toEqual(expect.objectContaining({
+      id: expect.any(String),
+      activationStatus: runtimeActivationParity.activationResult.activationStatus,
+    }))
+    expect(res.body.meta.runtimeActivation.deployment).toEqual(expect.objectContaining({
+      id: expect.any(String),
+      status: runtimeActivationParity.activationResult.deploymentStatus,
+    }))
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'FRAMEWORK_PACKAGE_ACTIVATED',
       resourceType: 'FrameworkPackage',
@@ -2678,8 +2975,125 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
       summary: 'Super Admin activated framework package VMF 2.3.1',
       diff: expect.objectContaining({
         previousActivePackageIds: [ACTIVE_FRAMEWORK_PACKAGE_ID],
+        runtimeActivation: expect.objectContaining({
+          runtimeVerdictResult: runtimeActivationParity.readinessReady.runtimeVerdictResult,
+        }),
       }),
     }))
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/activate supersedes the previous runtime deployment record', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const frameworkPackage = makeFrameworkPackageDoc({
+      _id: FRAMEWORK_PACKAGE_ID,
+      status: 'VALIDATED',
+    })
+    const previousDeployment = {
+      _id: '707f1f77bcf86cd799439010',
+      deploymentId: 'deployment-vmf-global-production-previous',
+      activationId: 'activation-vmf-2-3-0-previous',
+      packageId: ACTIVE_FRAMEWORK_PACKAGE_ID,
+      frameworkKey: 'VMF',
+      status: 'ACTIVE',
+      tenantScope: 'GLOBAL',
+      deploymentMode: 'PRODUCTION',
+    }
+
+    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+    FrameworkPackage.find.mockReturnValue({
+      session: jest.fn().mockResolvedValue([]),
+    })
+    RuntimeDeployment.findOne.mockReturnValue(buildSessionQueryChain(previousDeployment))
+    UIContract.findOne.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue({
+          uiContractKey: 'vmf-ui-contract-v1',
+          status: 'ACTIVE',
+          versionStatus: 'ACTIVE',
+          frameworkKeys: ['VMF'],
+          sections: [{ sectionKey: 'customer_problem', runtimePath: 'framework_state.sections.customer_problem' }],
+        }),
+      }),
+    })
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/activate`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.meta.runtimeActivation.readiness.requirements).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        key: 'activeDeployment',
+        status: 'WARN',
+        reason: runtimeActivationParity.supersession.readinessReason,
+      }),
+    ]))
+    expect(res.body.meta.runtimeActivation.readiness.supersedesDeploymentId).toBe(previousDeployment.deploymentId)
+    expect(res.body.meta.runtimeActivation.supersededDeployment).toEqual(expect.objectContaining({
+      deploymentId: previousDeployment.deploymentId,
+    }))
+    expect(RuntimeDeployment.updateOne).toHaveBeenCalledWith(
+      { _id: previousDeployment._id },
+      {
+        $set: expect.objectContaining({
+          status: runtimeActivationParity.supersession.previousDeploymentStatus,
+          supersededByDeploymentId: expect.stringMatching(/^deployment-vmf-global-production-/),
+        }),
+      },
+      expect.objectContaining({ session: expect.any(Object) }),
+    )
+    expect(RuntimeActivationSnapshot.updateOne).toHaveBeenCalledWith(
+      { activationId: previousDeployment.activationId },
+      {
+        $set: expect.objectContaining({
+          activationStatus: runtimeActivationParity.supersession.previousActivationStatus,
+          supersededByActivationId: expect.stringMatching(/^activation-vmf-2-3-1-/),
+        }),
+      },
+      expect.objectContaining({ session: expect.any(Object) }),
+    )
+    expect(RuntimeDeployment.create).toHaveBeenCalledWith([
+      expect.objectContaining({
+        deploymentId: expect.not.stringMatching(/^deployment-vmf-global-production$/),
+        status: runtimeActivationParity.activationResult.deploymentStatus,
+      }),
+    ], expect.objectContaining({ session: expect.any(Object) }))
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/activate reports concurrent runtime activation conflicts as 409', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const frameworkPackage = makeFrameworkPackageDoc({
+      _id: FRAMEWORK_PACKAGE_ID,
+      status: 'VALIDATED',
+    })
+
+    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+    FrameworkPackage.find.mockReturnValue({
+      session: jest.fn().mockResolvedValue([]),
+    })
+    RuntimeDeployment.create.mockRejectedValueOnce({
+      code: 11000,
+      keyPattern: { deploymentId: 1 },
+    })
+    UIContract.findOne.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue({
+          uiContractKey: 'vmf-ui-contract-v1',
+          status: 'ACTIVE',
+          versionStatus: 'ACTIVE',
+          frameworkKeys: ['VMF'],
+          sections: [{ sectionKey: 'customer_problem', runtimePath: 'framework_state.sections.customer_problem' }],
+        }),
+      }),
+    })
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/activate`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(runtimeActivationParity.concurrentConflict.httpStatus)
+    expect(res.body.error.code).toBe(runtimeActivationParity.concurrentConflict.errorCode)
+    expect(res.body.error.details.reason).toBe(runtimeActivationParity.concurrentConflict.reason)
   })
 
   test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/activate records empty previous active ids for first activation', async () => {

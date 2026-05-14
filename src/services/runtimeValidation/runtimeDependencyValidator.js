@@ -66,3 +66,16 @@ export const validateRuntimeDependencyState = async ({ packageId, frameworkKey }
 
   return []
 }
+
+export const getRuntimeDependencyLockState = async ({ packageId } = {}) => {
+  const frameworkPackage = await resolveFrameworkPackage(packageId)
+  const dependencyLock = frameworkPackage?.dependencyLock && typeof frameworkPackage.dependencyLock === 'object'
+    ? frameworkPackage.dependencyLock
+    : null
+  const references = Array.isArray(dependencyLock?.references) ? dependencyLock.references : []
+  const lockStatus = normalizeUpperToken(dependencyLock?.status)
+
+  return (lockStatus === 'PASS' || lockStatus === 'PASS_WITH_WARNINGS') && references.length > 0
+    ? 'LOCKED'
+    : 'NOT_LOCKED'
+}

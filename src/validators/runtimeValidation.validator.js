@@ -49,6 +49,7 @@ const runtimeValidationBodySchema = z.object({
   allowedWriteScopes: scopeListSchema,
   forbiddenReadScopes: scopeListSchema,
   forbiddenWriteScopes: scopeListSchema,
+  isPackageLevelValidation: z.boolean().optional().default(false),
   beforeState: z.unknown().optional(),
   afterState: z.unknown().optional(),
 })

@@ -201,6 +201,7 @@ beforeEach(() => {
   Role.find = jest.fn().mockReturnValue(buildRoleQueryChain(buildDefaultRoleRows()))
   FrameworkPackage.findById = jest.fn().mockReturnValue(buildLeanQuery(makeFrameworkPackage()))
   FrameworkPackage.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeFrameworkPackage()))
+  FrameworkPackage.updateOne = jest.fn().mockResolvedValue({ matchedCount: 1, modifiedCount: 1 })
   RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimePath()))
   RuntimeSkill.findOne = jest.fn().mockReturnValue(buildLeanQuery(null))
   SkillRoleRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeSkillRole()))
@@ -618,6 +619,122 @@ describe('Runtime Validation API', () => {
     expect(res.status).toBe(200)
     expect(res.body.data.status).toBe('PASS')
     expect(res.body.data.result).toBe('ALLOW')
+  })
+
+  test('does not update package activation verdict for customer-facing runtime validation', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/runtime-validation/validate')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        operationType: 'STATE_WRITE',
+        packageId: 'standard-package-2-3-1',
+        frameworkKey: 'VMF',
+        runtimePath: 'framework_state.sections.executive_summary',
+        skillRoleKey: 'VALIDATOR',
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.result).toBe('ALLOW')
+    expect(RuntimeValidationAudit.create).toHaveBeenCalledWith(expect.objectContaining({
+      packageId: 'standard-package-2-3-1',
+      result: 'ALLOW',
+    }))
+    expect(FrameworkPackage.updateOne).not.toHaveBeenCalled()
+  })
+
+  test('updates package activation verdict only for package-level runtime validation and resolves package keys', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/runtime-validation/validate')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        operationType: 'STATE_WRITE',
+        packageId: 'standard-package-2-3-1',
+        frameworkKey: 'VMF',
+        runtimePath: 'framework_state.sections.executive_summary',
+        skillRoleKey: 'VALIDATOR',
+        isPackageLevelValidation: true,
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.result).toBe('ALLOW')
+    expect(FrameworkPackage.updateOne).toHaveBeenCalledWith(
+      { packageKey: 'standard-package-2-3-1' },
+      {
+        $set: {
+          runtimeVerdict: expect.objectContaining({
+            result: 'ALLOW',
+            auditPersisted: true,
+            dependencyLockState: 'NOT_LOCKED',
+          }),
+        },
+      },
+      { timestamps: false },
+    )
+  })
+
+  test('returns 500 when package-level audit evidence cannot be created', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    RuntimeValidationAudit.create.mockRejectedValueOnce(new Error('audit write failed'))
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/runtime-validation/validate')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        operationType: 'STATE_WRITE',
+        packageId: 'standard-package-2-3-1',
+        frameworkKey: 'VMF',
+        runtimePath: 'framework_state.sections.executive_summary',
+        skillRoleKey: 'VALIDATOR',
+        isPackageLevelValidation: true,
+      })
+
+    expect(res.status).toBe(500)
+    expect(res.body.error.code).toBe('RUNTIME_VALIDATION_EVIDENCE_PERSISTENCE_FAILED')
+    expect(FrameworkPackage.updateOne).not.toHaveBeenCalled()
+  })
+
+  test('returns 500 when package-level runtime verdict update fails', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    FrameworkPackage.updateOne.mockRejectedValueOnce(new Error('update failed'))
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/runtime-validation/validate')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        operationType: 'STATE_WRITE',
+        packageId: 'standard-package-2-3-1',
+        frameworkKey: 'VMF',
+        runtimePath: 'framework_state.sections.executive_summary',
+        skillRoleKey: 'VALIDATOR',
+        isPackageLevelValidation: true,
+      })
+
+    expect(res.status).toBe(500)
+    expect(res.body.error.code).toBe('RUNTIME_VALIDATION_EVIDENCE_PERSISTENCE_FAILED')
+  })
+
+  test('returns 500 when package-level runtime verdict update matches no package', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    FrameworkPackage.updateOne.mockResolvedValueOnce({ matchedCount: 0, modifiedCount: 0 })
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/runtime-validation/validate')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        operationType: 'STATE_WRITE',
+        packageId: 'standard-package-2-3-1',
+        frameworkKey: 'VMF',
+        runtimePath: 'framework_state.sections.executive_summary',
+        skillRoleKey: 'VALIDATOR',
+        isPackageLevelValidation: true,
+      })
+
+    expect(res.status).toBe(500)
+    expect(res.body.error.code).toBe('RUNTIME_VALIDATION_EVIDENCE_PERSISTENCE_FAILED')
   })
 
   test('GET /api/v1/super-admin/runtime-control/runtime-validation/history/:packageId returns runtime validation audits', async () => {
