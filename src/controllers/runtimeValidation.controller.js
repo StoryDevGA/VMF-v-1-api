@@ -70,6 +70,7 @@ export const validateRuntimeOperationEndpoint = async (req, res, next) => {
       ...req.body,
       actorId: deriveActorId(req),
       actorType: req.body.actorType || 'USER',
+      requestId: req.requestId,
     })
 
     if (validation.result === 'BLOCK') {

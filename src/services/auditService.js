@@ -89,6 +89,13 @@ export const AUDIT_ACTIONS = Object.freeze({
   DEPENDENCY_LINKED: 'DEPENDENCY_LINKED',
   DEPENDENCY_UPDATED: 'DEPENDENCY_UPDATED',
   DEPENDENCY_IMPACT_ANALYSIS: 'DEPENDENCY_IMPACT_ANALYSIS',
+  VALIDATION_STARTED: 'VALIDATION_STARTED',
+  VALIDATION_PASSED: 'VALIDATION_PASSED',
+  VALIDATION_FAILED: 'VALIDATION_FAILED',
+  CHECKPOINT_PASSED: 'CHECKPOINT_PASSED',
+  CHECKPOINT_FAILED: 'CHECKPOINT_FAILED',
+  RUNTIME_VALIDATION_ALLOWED: 'RUNTIME_VALIDATION_ALLOWED',
+  RUNTIME_VALIDATION_BLOCKED: 'RUNTIME_VALIDATION_BLOCKED',
   FRAMEWORK_EXECUTED: 'FRAMEWORK_EXECUTED',
   POLICY_EVALUATED: 'POLICY_EVALUATED',
   AGENT_EXECUTED: 'AGENT_EXECUTED',
@@ -421,6 +428,20 @@ const buildAuditSummary = ({ action, resourceType, resourceId, diff, display }) 
       return clampSummary(`${actorLabel} completed runtime activation ${targetLabel}`)
     case AUDIT_ACTIONS.RUNTIME_DEPLOYMENT_REGISTERED:
       return clampSummary(`${actorLabel} registered runtime deployment ${targetLabel}`)
+    case AUDIT_ACTIONS.VALIDATION_STARTED:
+      return clampSummary(`${actorLabel} started validation for ${targetLabel}`)
+    case AUDIT_ACTIONS.VALIDATION_PASSED:
+      return clampSummary(`${actorLabel} passed validation for ${targetLabel}`)
+    case AUDIT_ACTIONS.VALIDATION_FAILED:
+      return clampSummary(`${actorLabel} failed validation for ${targetLabel}`)
+    case AUDIT_ACTIONS.CHECKPOINT_PASSED:
+      return clampSummary(`${actorLabel} passed checkpoint for ${targetLabel}`)
+    case AUDIT_ACTIONS.CHECKPOINT_FAILED:
+      return clampSummary(`${actorLabel} failed checkpoint for ${targetLabel}`)
+    case AUDIT_ACTIONS.RUNTIME_VALIDATION_ALLOWED:
+      return clampSummary(`${actorLabel} recorded Runtime Validation ALLOW for ${targetLabel}`)
+    case AUDIT_ACTIONS.RUNTIME_VALIDATION_BLOCKED:
+      return clampSummary(`${actorLabel} recorded Runtime Validation BLOCK for ${targetLabel}`)
     case AUDIT_ACTIONS.RUNTIME_AGENT_CREATED:
       return clampSummary(`${actorLabel} created runtime agent ${targetLabel}`)
     case AUDIT_ACTIONS.RUNTIME_AGENT_UPDATED:

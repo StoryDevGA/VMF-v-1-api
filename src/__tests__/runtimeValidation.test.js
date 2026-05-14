@@ -141,6 +141,7 @@ let RuntimePathRegistry
 let RuntimeSkill
 let SkillRoleRegistry
 let RuntimeValidationAudit
+let AuditLog
 let mockRedisClient
 
 const getAccessTokenForUser = async (user) => {
@@ -176,6 +177,7 @@ beforeAll(async () => {
   RuntimeSkill = models.RuntimeSkill
   SkillRoleRegistry = models.SkillRoleRegistry
   RuntimeValidationAudit = models.RuntimeValidationAudit
+  AuditLog = models.AuditLog
 })
 
 afterAll(() => {})
@@ -208,6 +210,7 @@ beforeEach(() => {
   RuntimeValidationAudit.create = jest.fn().mockImplementation(async (payload) => payload)
   RuntimeValidationAudit.find = jest.fn().mockReturnValue(buildAuditFindChain([]))
   RuntimeValidationAudit.countDocuments = jest.fn().mockResolvedValue(0)
+  AuditLog.createLog = jest.fn(async () => ({}))
 })
 
 describe('Runtime Validation API', () => {
@@ -642,6 +645,9 @@ describe('Runtime Validation API', () => {
       result: 'ALLOW',
     }))
     expect(FrameworkPackage.updateOne).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+      systemEventType: expect.stringMatching(/^RUNTIME_VALIDATION_/),
+    }))
   })
 
   test('updates package activation verdict only for package-level runtime validation and resolves package keys', async () => {
@@ -661,8 +667,35 @@ describe('Runtime Validation API', () => {
 
     expect(res.status).toBe(200)
     expect(res.body.data.result).toBe('ALLOW')
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'RUNTIME_VALIDATION_ALLOWED',
+      resourceType: 'FrameworkPackage',
+      resourceId: '607f1f77bcf86cd799439022',
+      auditSchemaVersion: 2,
+      signatureVersion: 2,
+      isSystemEvent: true,
+      systemEventType: 'RUNTIME_VALIDATION_ALLOWED',
+      eventCategory: 'VALIDATION',
+      eventSeverity: 'HIGH',
+      frameworkKey: 'VMF',
+      frameworkVersion: expect.any(String),
+      packageKey: 'standard-package-2-3-1',
+      requestId: expect.any(String),
+      snapshot: expect.objectContaining({
+        runtimeValidation: expect.objectContaining({
+          result: 'ALLOW',
+          status: 'PASS',
+        }),
+        runtimeVerdict: expect.objectContaining({
+          result: 'ALLOW',
+          auditPersisted: true,
+          dependencyLockState: 'NOT_LOCKED',
+        }),
+      }),
+      checksum: expect.any(String),
+    }))
     expect(FrameworkPackage.updateOne).toHaveBeenCalledWith(
-      { packageKey: 'standard-package-2-3-1' },
+      { _id: '607f1f77bcf86cd799439022' },
       {
         $set: {
           runtimeVerdict: expect.objectContaining({
@@ -674,6 +707,103 @@ describe('Runtime Validation API', () => {
       },
       { timestamps: false },
     )
+  })
+
+  test('records blocked package-level runtime validation as governance evidence', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    RuntimePathRegistry.findOne.mockReturnValue(buildLeanQuery(null))
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/runtime-validation/validate')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        operationType: 'STATE_WRITE',
+        packageId: 'standard-package-2-3-1',
+        frameworkKey: 'VMF',
+        runtimePath: 'framework_state.sections.executive_summary',
+        skillRoleKey: 'VALIDATOR',
+        isPackageLevelValidation: true,
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.validation.result).toBe('BLOCK')
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'RUNTIME_VALIDATION_BLOCKED',
+      isSystemEvent: true,
+      systemEventType: 'RUNTIME_VALIDATION_BLOCKED',
+      eventCategory: 'VALIDATION',
+      snapshot: expect.objectContaining({
+        runtimeValidation: expect.objectContaining({
+          result: 'BLOCK',
+          status: 'FAIL',
+        }),
+        runtimeVerdict: expect.objectContaining({
+          result: 'BLOCK',
+          auditPersisted: true,
+        }),
+      }),
+      checksum: expect.any(String),
+    }))
+    expect(FrameworkPackage.updateOne).toHaveBeenCalledWith(
+      { _id: '607f1f77bcf86cd799439022' },
+      expect.objectContaining({
+        $set: {
+          runtimeVerdict: expect.objectContaining({
+            result: 'BLOCK',
+            auditPersisted: true,
+          }),
+        },
+      }),
+      { timestamps: false },
+    )
+  })
+
+  test('returns 500 when package-level runtime validation governance evidence cannot be created', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    AuditLog.createLog.mockRejectedValueOnce(new Error('governance audit write failed'))
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/runtime-validation/validate')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        operationType: 'STATE_WRITE',
+        packageId: 'standard-package-2-3-1',
+        frameworkKey: 'VMF',
+        runtimePath: 'framework_state.sections.executive_summary',
+        skillRoleKey: 'VALIDATOR',
+        isPackageLevelValidation: true,
+      })
+
+    expect(res.status).toBe(500)
+    expect(res.body.error.code).toBe('RUNTIME_VALIDATION_EVIDENCE_PERSISTENCE_FAILED')
+    expect(RuntimeValidationAudit.create).toHaveBeenCalled()
+    expect(FrameworkPackage.updateOne).not.toHaveBeenCalled()
+  })
+
+  test('returns 500 when package-level runtime validation package lookup matches no package', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    FrameworkPackage.findOne
+      .mockReturnValueOnce(buildLeanQuery(makeFrameworkPackage()))
+      .mockReturnValueOnce(buildLeanQuery(makeFrameworkPackage()))
+      .mockReturnValueOnce(buildLeanQuery(null))
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/runtime-validation/validate')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        operationType: 'STATE_WRITE',
+        packageId: 'standard-package-2-3-1',
+        frameworkKey: 'VMF',
+        runtimePath: 'framework_state.sections.executive_summary',
+        skillRoleKey: 'VALIDATOR',
+        isPackageLevelValidation: true,
+      })
+
+    expect(res.status).toBe(500)
+    expect(res.body.error.code).toBe('RUNTIME_VALIDATION_EVIDENCE_PERSISTENCE_FAILED')
+    expect(RuntimeValidationAudit.create).toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+    expect(FrameworkPackage.updateOne).not.toHaveBeenCalled()
   })
 
   test('returns 500 when package-level audit evidence cannot be created', async () => {

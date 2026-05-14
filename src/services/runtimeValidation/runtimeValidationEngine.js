@@ -189,6 +189,7 @@ export const validateRuntimeOperation = async (input) => {
     workspaceId: input.workspaceId || '',
     actorId: input.actorId || '',
     actorType: input.actorType || 'USER',
+    requestId: input.requestId || '',
     validationCode: validationIssues[0]?.code || RUNTIME_VALIDATION_CODES.EXECUTION_INVALID,
     severity: highestSeverity,
     message: blocking ? 'Runtime validation blocked this operation.' : 'Runtime validation allowed this operation.',

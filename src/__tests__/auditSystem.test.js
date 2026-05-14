@@ -1758,6 +1758,48 @@ describe('governanceAuditService - Unit', () => {
     expect(generateChecksum({ a: 1, b: 2 })).toBe(generateChecksum({ b: 2, a: 1 }))
   })
 
+  test('writes package-level Runtime Validation governance events with validation category evidence', async () => {
+    const snapshot = {
+      package: {
+        frameworkKey: 'VMF',
+        frameworkVersion: '2.3.1',
+        packageKey: 'vmf-v2-3-1-standard',
+      },
+      runtimeValidation: {
+        status: 'PASS',
+        result: 'ALLOW',
+        mode: 'STRICT',
+      },
+    }
+
+    await governanceAuditService.logSystemEvent('RUNTIME_VALIDATION_ALLOWED', {
+      actorUserId: SUPER_ADMIN_ID,
+      resourceId: VMF_ID,
+      frameworkKey: 'VMF',
+      frameworkVersion: '2.3.1',
+      packageKey: 'vmf-v2-3-1-standard',
+      snapshot,
+    })
+
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      actorUserId: SUPER_ADMIN_ID,
+      action: 'RUNTIME_VALIDATION_ALLOWED',
+      resourceType: 'FrameworkPackage',
+      resourceId: VMF_ID,
+      auditSchemaVersion: 2,
+      signatureVersion: 2,
+      isSystemEvent: true,
+      systemEventType: 'RUNTIME_VALIDATION_ALLOWED',
+      eventCategory: 'VALIDATION',
+      eventSeverity: 'HIGH',
+      frameworkKey: 'VMF',
+      frameworkVersion: '2.3.1',
+      packageKey: 'vmf-v2-3-1-standard',
+      snapshot,
+      checksum: generateChecksum(snapshot),
+    }))
+  })
+
   test('infers component resource type from component type when no override is supplied', () => {
     const payload = governanceAuditService.buildGovernanceAuditPayload('COMPONENT_CLONED', {
       resourceId: VMF_ID,

@@ -2601,6 +2601,22 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
       action: 'FRAMEWORK_PACKAGE_VALIDATED',
     }))
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'CHECKPOINT_FAILED',
+      isSystemEvent: true,
+      systemEventType: 'CHECKPOINT_FAILED',
+      eventCategory: 'VALIDATION',
+      eventSeverity: 'HIGH',
+      checksum: expect.any(String),
+    }))
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'VALIDATION_FAILED',
+      isSystemEvent: true,
+      systemEventType: 'VALIDATION_FAILED',
+      eventCategory: 'VALIDATION',
+      eventSeverity: 'HIGH',
+      checksum: expect.any(String),
+    }))
   })
 
   test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/validate promotes a passing package and stores the checkpoint', async () => {
@@ -2682,6 +2698,44 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
         }),
       }),
     }), expect.objectContaining({ session: expect.any(Object) }))
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'VALIDATION_STARTED',
+      isSystemEvent: true,
+      systemEventType: 'VALIDATION_STARTED',
+      eventCategory: 'VALIDATION',
+      eventSeverity: 'INFO',
+      frameworkKey: 'VMF',
+      frameworkVersion: '2.3.1',
+      packageKey: 'vmf-2-3-1',
+    }))
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'CHECKPOINT_PASSED',
+      isSystemEvent: true,
+      systemEventType: 'CHECKPOINT_PASSED',
+      eventCategory: 'VALIDATION',
+      eventSeverity: 'HIGH',
+      dependencyGraph: expect.objectContaining({
+        status: 'PASS',
+      }),
+      checksum: expect.any(String),
+    }), expect.objectContaining({ session: expect.any(Object) }))
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'VALIDATION_PASSED',
+      isSystemEvent: true,
+      systemEventType: 'VALIDATION_PASSED',
+      eventCategory: 'VALIDATION',
+      eventSeverity: 'HIGH',
+      dependencyGraph: expect.objectContaining({
+        status: 'PASS',
+      }),
+      checksum: expect.any(String),
+    }), expect.objectContaining({ session: expect.any(Object) }))
+    expect(AuditLog.createLog.mock.calls.map(([payload]) => payload.action)).toEqual([
+      'VALIDATION_STARTED',
+      'CHECKPOINT_PASSED',
+      'VALIDATION_PASSED',
+      'FRAMEWORK_PACKAGE_VALIDATED',
+    ])
   })
 
   test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/validate fails closed when governance audit evidence cannot persist', async () => {
@@ -2707,7 +2761,12 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
         }),
       }),
     })
-    AuditLog.createLog.mockRejectedValueOnce(new Error('governance audit unavailable'))
+    AuditLog.createLog.mockImplementation(async (payload) => {
+      if (payload.action === 'FRAMEWORK_PACKAGE_VALIDATED') {
+        throw new Error('governance audit unavailable')
+      }
+      return {}
+    })
 
     const res = await request
       .post(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/validate`)
@@ -2722,6 +2781,91 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
       isSystemEvent: true,
       systemEventType: 'PACKAGE_VALIDATED',
     }), expect.objectContaining({ session: expect.any(Object) }))
+  })
+
+  const runValidationWithFailingGovernanceAudit = async (failingAction) => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const frameworkPackage = makeFrameworkPackageDoc({
+      status: 'DRAFT',
+    })
+    const initialStatus = frameworkPackage.status
+    const initialCheckpointStatus = frameworkPackage.lastCheckpointStatus
+    const rollbackSession = buildRollbackSession([frameworkPackage])
+    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+    startSessionSpy.mockResolvedValueOnce(rollbackSession)
+    UIContract.findOne.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue({
+          stableId: 'ui-contract-vmf-ui-contract-v1',
+          uiContractKey: 'vmf-ui-contract-v1',
+          name: 'VMF UI Contract',
+          status: 'ACTIVE',
+          versionStatus: 'ACTIVE',
+          frameworkKeys: ['VMF'],
+          sections: [{ sectionKey: 'customer_problem', runtimePath: 'framework_state.sections.customer_problem' }],
+        }),
+      }),
+    })
+    AuditLog.createLog.mockImplementation(async (payload) => {
+      if (payload.action === failingAction) {
+        throw new Error(`${failingAction} audit unavailable`)
+      }
+      return {}
+    })
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/validate`)
+      .set('Authorization', `Bearer ${token}`)
+
+    return {
+      res,
+      frameworkPackage,
+      rollbackSession,
+      initialStatus,
+      initialCheckpointStatus,
+      auditActions: AuditLog.createLog.mock.calls.map(([payload]) => payload.action),
+    }
+  }
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/validate fails closed when CHECKPOINT_PASSED audit cannot persist', async () => {
+    const {
+      res,
+      frameworkPackage,
+      rollbackSession,
+      initialStatus,
+      initialCheckpointStatus,
+      auditActions,
+    } = await runValidationWithFailingGovernanceAudit('CHECKPOINT_PASSED')
+
+    expect(res.status).toBe(500)
+    expect(rollbackSession.withTransaction).toHaveBeenCalled()
+    expect(auditActions).toEqual([
+      'VALIDATION_STARTED',
+      'CHECKPOINT_PASSED',
+    ])
+    expect(frameworkPackage.status).toBe(initialStatus)
+    expect(frameworkPackage.lastCheckpointStatus).toBe(initialCheckpointStatus)
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/validate fails closed when VALIDATION_PASSED audit cannot persist', async () => {
+    const {
+      res,
+      frameworkPackage,
+      rollbackSession,
+      initialStatus,
+      initialCheckpointStatus,
+      auditActions,
+    } = await runValidationWithFailingGovernanceAudit('VALIDATION_PASSED')
+
+    expect(res.status).toBe(500)
+    expect(rollbackSession.withTransaction).toHaveBeenCalled()
+    expect(auditActions).toEqual([
+      'VALIDATION_STARTED',
+      'CHECKPOINT_PASSED',
+      'VALIDATION_PASSED',
+    ])
+    expect(frameworkPackage.status).toBe(initialStatus)
+    expect(frameworkPackage.lastCheckpointStatus).toBe(initialCheckpointStatus)
   })
 
   test('GET /api/v1/super-admin/runtime-control/framework-packages/:packageId/audit returns scoped audit events', async () => {

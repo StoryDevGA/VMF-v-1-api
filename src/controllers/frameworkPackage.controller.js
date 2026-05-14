@@ -37,6 +37,7 @@ import {
 } from '../services/runtimeActivation/runtimeActivationService.js'
 import governanceAuditService from '../services/governanceAudit/governanceAuditService.js'
 import { generateChecksum } from '../services/governanceAudit/checksumService.js'
+import logger from '../config/logger.js'
 import {
   DEPRECATED_FRAMEWORK_PACKAGE_FIELD_MESSAGES,
   DEPRECATED_FRAMEWORK_PACKAGE_FIELDS,
@@ -2589,6 +2590,63 @@ const buildPackageGovernanceAuditFields = ({
   }
 }
 
+const buildPackageAuditIdentity = (frameworkPackage) => ({
+  resourceType: auditService.RESOURCE_TYPES.FrameworkPackage,
+  resourceId: frameworkPackage._id,
+  scope: {
+    frameworkKey: frameworkPackage.frameworkKey,
+  },
+  frameworkKey: frameworkPackage.frameworkKey,
+  frameworkVersion: frameworkPackage.version,
+  packageKey: frameworkPackage.packageKey,
+  display: { resourceLabel: buildFrameworkPackageLabel(frameworkPackage) },
+})
+
+const logPackageValidationGovernanceEvent = async (
+  req,
+  eventKey,
+  {
+    frameworkPackage,
+    checkpoint = null,
+    diff = {},
+    session = null,
+    throwOnError = false,
+  } = {},
+) => {
+  const releaseEvidence = eventKey === 'VALIDATION_STARTED'
+    ? {}
+    : buildPackageGovernanceAuditFields({
+      frameworkPackage,
+      checkpoint,
+    })
+
+  return governanceAuditService.logSystemEventFromRequest(req, eventKey, {
+    ...buildPackageAuditIdentity(frameworkPackage),
+    ...releaseEvidence,
+    ...(Object.keys(diff || {}).length > 0 ? { diff } : {}),
+  }, {
+    ...(session ? { session } : {}),
+    throwOnError,
+  })
+}
+
+const logPackageValidationGovernanceEvents = async (
+  req,
+  eventKeys,
+  options = {},
+) => {
+  for (const eventKey of eventKeys) {
+    const auditLog = await logPackageValidationGovernanceEvent(req, eventKey, options)
+    if (!options.throwOnError && !auditLog) {
+      logger.warn({
+        eventKey,
+        requestId: req.requestId,
+        packageId: toIdString(options.frameworkPackage?._id || options.frameworkPackage?.id),
+      }, 'best-effort package validation governance audit event did not persist')
+    }
+  }
+}
+
 export const listFrameworkPackages = async (req, res, next) => {
   try {
     const pageNum = Math.max(1, Number(req.query.page) || 1)
@@ -3446,6 +3504,18 @@ export const runFrameworkPackageCheckpointEndpoint = async (req, res, next) => {
       })
       await frameworkPackage.save()
       await populateFrameworkPackage(frameworkPackage)
+      await logPackageValidationGovernanceEvent(req, (
+        checkpointRun.checkpoint.status === FRAMEWORK_PACKAGE_CHECKPOINT_STATUSES.FAIL
+          ? 'CHECKPOINT_FAILED'
+          : 'CHECKPOINT_PASSED'
+      ), {
+        frameworkPackage,
+        checkpoint: checkpointRun.checkpoint,
+        diff: {
+          checkpoint: summarizeCheckpointForAudit(checkpointRun.checkpoint),
+          persisted: true,
+        },
+      })
     }
 
     return res.status(200).json({
@@ -3567,6 +3637,16 @@ export const validateFrameworkPackage = async (req, res, next) => {
     const previousCheckpointStatus = cloneAuditValue(frameworkPackage.lastCheckpointStatus)
     const previousCheckpointAt = cloneAuditValue(frameworkPackage.lastCheckpointAt)
     const previousCheckpointResult = cloneAuditValue(frameworkPackage.lastCheckpointResult)
+    // This pre-run marker is intentionally outside the promotion transaction; if
+    // checkpoint execution throws unexpectedly it remains as telemetry for the
+    // attempted validation.
+    await logPackageValidationGovernanceEvent(req, 'VALIDATION_STARTED', {
+      frameworkPackage,
+      diff: {
+        status: frameworkPackage.status,
+        mode: FRAMEWORK_PACKAGE_CHECKPOINT_MODES.FULL,
+      },
+    })
     const checkpointRun = await runFrameworkPackageCheckpoint({
       frameworkPackage,
       actorUserId,
@@ -3581,6 +3661,24 @@ export const validateFrameworkPackage = async (req, res, next) => {
       })
       await frameworkPackage.save()
       await populateFrameworkPackage(frameworkPackage)
+      await logPackageValidationGovernanceEvents(req, ['CHECKPOINT_FAILED', 'VALIDATION_FAILED'], {
+        frameworkPackage,
+        checkpoint: checkpointRun.checkpoint,
+        diff: {
+          lastCheckpointStatus: {
+            from: previousCheckpointStatus,
+            to: checkpointRun.checkpoint.status,
+          },
+          lastCheckpointAt: {
+            from: previousCheckpointAt,
+            to: checkpointRun.checkpoint.timestamp,
+          },
+          lastCheckpointResult: {
+            from: summarizeCheckpointForAudit(previousCheckpointResult),
+            to: summarizeCheckpointForAudit(checkpointRun.checkpoint),
+          },
+        },
+      })
 
       return sendCheckpointValidationFailed(res, req, checkpointRun.checkpoint)
     }
@@ -3592,6 +3690,28 @@ export const validateFrameworkPackage = async (req, res, next) => {
       })
       await frameworkPackage.save()
       await populateFrameworkPackage(frameworkPackage)
+      await logPackageValidationGovernanceEvents(req, ['CHECKPOINT_PASSED', 'VALIDATION_PASSED'], {
+        frameworkPackage,
+        checkpoint: checkpointRun.checkpoint,
+        diff: {
+          status: {
+            from: previousStatus,
+            to: previousStatus,
+          },
+          lastCheckpointStatus: {
+            from: previousCheckpointStatus,
+            to: checkpointRun.checkpoint.status,
+          },
+          lastCheckpointAt: {
+            from: previousCheckpointAt,
+            to: checkpointRun.checkpoint.timestamp,
+          },
+          lastCheckpointResult: {
+            from: summarizeCheckpointForAudit(previousCheckpointResult),
+            to: summarizeCheckpointForAudit(checkpointRun.checkpoint),
+          },
+        },
+      })
 
       return res.status(200).json({
         data: {
@@ -3635,6 +3755,34 @@ export const validateFrameworkPackage = async (req, res, next) => {
         actorUserId,
         lockedAt: dependencyLockResult.lockedAt,
         session,
+      })
+      await logPackageValidationGovernanceEvents(req, ['CHECKPOINT_PASSED', 'VALIDATION_PASSED'], {
+        frameworkPackage,
+        checkpoint: checkpointRun.checkpoint,
+        diff: {
+          status: {
+            from: previousStatus,
+            to: FRAMEWORK_PACKAGE_STATUSES.VALIDATED,
+          },
+          dependencyLock: {
+            from: previousDependencyLock,
+            to: cloneAuditValue(frameworkPackage.dependencyLock),
+          },
+          lastCheckpointStatus: {
+            from: previousCheckpointStatus,
+            to: checkpointRun.checkpoint.status,
+          },
+          lastCheckpointAt: {
+            from: previousCheckpointAt,
+            to: checkpointRun.checkpoint.timestamp,
+          },
+          lastCheckpointResult: {
+            from: summarizeCheckpointForAudit(previousCheckpointResult),
+            to: summarizeCheckpointForAudit(checkpointRun.checkpoint),
+          },
+        },
+        session,
+        throwOnError: true,
       })
       await governanceAuditService.logSystemEventFromRequest(req, 'PACKAGE_VALIDATED', {
         resourceType: auditService.RESOURCE_TYPES.FrameworkPackage,
