@@ -35,6 +35,8 @@ import {
   getRuntimeActivationReadiness,
   registerRuntimeActivation,
 } from '../services/runtimeActivation/runtimeActivationService.js'
+import governanceAuditService from '../services/governanceAudit/governanceAuditService.js'
+import { generateChecksum } from '../services/governanceAudit/checksumService.js'
 import {
   DEPRECATED_FRAMEWORK_PACKAGE_FIELD_MESSAGES,
   DEPRECATED_FRAMEWORK_PACKAGE_FIELDS,
@@ -2503,6 +2505,90 @@ const summarizeCheckpointForAudit = (checkpoint) => {
   }
 }
 
+const buildDependencyGraphForAudit = (frameworkPackage) => {
+  const dependencyLock = frameworkPackage?.dependencyLock || null
+  const references = Array.isArray(dependencyLock?.references)
+    ? dependencyLock.references
+    : []
+  const byCollection = references.reduce((summary, reference) => {
+    const key = reference.collectionKey || 'Unknown'
+    summary[key] = (summary[key] || 0) + 1
+    return summary
+  }, {})
+
+  return {
+    status: dependencyLock?.status || null,
+    snapshotId: dependencyLock?.snapshotId || null,
+    resolvedAt: dependencyLock?.resolvedAt || dependencyLock?.lockedAt || null,
+    referenceCount: references.length,
+    byCollection,
+    references: cloneAuditValue(references),
+  }
+}
+
+const buildPackageGovernanceSnapshot = ({
+  frameworkPackage,
+  checkpoint = null,
+  runtimeActivation = null,
+} = {}) => ({
+  package: {
+    id: toIdString(frameworkPackage?._id || frameworkPackage?.id),
+    frameworkKey: frameworkPackage?.frameworkKey || '',
+    frameworkVersion: frameworkPackage?.version || '',
+    packageKey: frameworkPackage?.packageKey || '',
+    packageName: frameworkPackage?.packageName || '',
+    status: frameworkPackage?.status || '',
+    isDefault: Boolean(frameworkPackage?.isDefault),
+    uiContractKey: frameworkPackage?.uiContractKey || '',
+    stateModelKey: frameworkPackage?.stateModelKey || '',
+    stateModelVersion: frameworkPackage?.stateModelVersion || '',
+    stateBindingMode: frameworkPackage?.stateBindingMode || '',
+  },
+  checkpoint: summarizeCheckpointForAudit(checkpoint || frameworkPackage?.lastCheckpointResult),
+  runtimeVerdict: cloneAuditValue(frameworkPackage?.runtimeVerdict || null),
+  dependencyLock: cloneAuditValue(frameworkPackage?.dependencyLock || null),
+  runtimeActivation: runtimeActivation
+    ? {
+        activationId: runtimeActivation.activationSnapshot?.activationId || null,
+        deploymentId: runtimeActivation.deployment?.deploymentId || null,
+        supersededDeploymentId: runtimeActivation.supersededDeployment?.deploymentId || null,
+      }
+    : null,
+})
+
+const buildPackageGovernanceAuditFields = ({
+  frameworkPackage,
+  checkpoint = null,
+  runtimeActivation = null,
+} = {}) => {
+  const dependencyGraph = buildDependencyGraphForAudit(frameworkPackage)
+  const snapshot = buildPackageGovernanceSnapshot({
+    frameworkPackage,
+    checkpoint,
+    runtimeActivation,
+  })
+  // One package release evidence bundle can emit multiple governance rows.
+  // Keep the checksum shared so package, activation, and deployment audit rows prove the same evidence set.
+  const checksum = generateChecksum({
+    dependencyGraph,
+    snapshot,
+  })
+
+  return {
+    frameworkKey: frameworkPackage.frameworkKey,
+    frameworkVersion: frameworkPackage.version,
+    packageKey: frameworkPackage.packageKey,
+    dependencyGraph,
+    snapshot,
+    checksum,
+    snapshotRef: {
+      type: 'FrameworkPackage',
+      id: toIdString(frameworkPackage._id || frameworkPackage.id),
+      checksum,
+    },
+  }
+}
+
 export const listFrameworkPackages = async (req, res, next) => {
   try {
     const pageNum = Math.max(1, Number(req.query.page) || 1)
@@ -2911,13 +2997,17 @@ export const cloneFrameworkPackage = async (req, res, next) => {
     await clonedPackage.save()
     await populateFrameworkPackage(clonedPackage)
 
-    await auditService.logFromRequest(req, {
-      action: auditService.AUDIT_ACTIONS.FRAMEWORK_PACKAGE_CLONED,
+    // Clone audit is provenance evidence only; validation/activation audit events remain the fail-closed governance gates.
+    await governanceAuditService.logSystemEventFromRequest(req, 'PACKAGE_CLONED', {
       resourceType: auditService.RESOURCE_TYPES.FrameworkPackage,
       resourceId: clonedPackage._id,
       scope: {
         frameworkKey: clonedPackage.frameworkKey,
       },
+      frameworkKey: clonedPackage.frameworkKey,
+      frameworkVersion: clonedPackage.version,
+      packageKey: clonedPackage.packageKey,
+      clonedFromStableId: sourcePackageId,
       display: { resourceLabel: buildFrameworkPackageLabel(clonedPackage) },
       diff: {
         sourcePackageId,
@@ -3546,40 +3636,42 @@ export const validateFrameworkPackage = async (req, res, next) => {
         lockedAt: dependencyLockResult.lockedAt,
         session,
       })
+      await governanceAuditService.logSystemEventFromRequest(req, 'PACKAGE_VALIDATED', {
+        resourceType: auditService.RESOURCE_TYPES.FrameworkPackage,
+        resourceId: frameworkPackage._id,
+        scope: {
+          frameworkKey: frameworkPackage.frameworkKey,
+        },
+        ...buildPackageGovernanceAuditFields({
+          frameworkPackage,
+          checkpoint: checkpointRun.checkpoint,
+        }),
+        display: { resourceLabel: buildFrameworkPackageLabel(frameworkPackage) },
+        diff: {
+          status: {
+            from: previousStatus,
+            to: FRAMEWORK_PACKAGE_STATUSES.VALIDATED,
+          },
+          dependencyLock: {
+            from: previousDependencyLock,
+            to: cloneAuditValue(frameworkPackage.dependencyLock),
+          },
+          lastCheckpointStatus: {
+            from: previousCheckpointStatus,
+            to: checkpointRun.checkpoint.status,
+          },
+          lastCheckpointAt: {
+            from: previousCheckpointAt,
+            to: checkpointRun.checkpoint.timestamp,
+          },
+          lastCheckpointResult: {
+            from: summarizeCheckpointForAudit(previousCheckpointResult),
+            to: summarizeCheckpointForAudit(checkpointRun.checkpoint),
+          },
+        },
+      }, { session, throwOnError: true })
     })
     await populateFrameworkPackage(frameworkPackage)
-
-    await auditService.logFromRequest(req, {
-      action: auditService.AUDIT_ACTIONS.FRAMEWORK_PACKAGE_VALIDATED,
-      resourceType: auditService.RESOURCE_TYPES.FrameworkPackage,
-      resourceId: frameworkPackage._id,
-      scope: {
-        frameworkKey: frameworkPackage.frameworkKey,
-      },
-      display: { resourceLabel: buildFrameworkPackageLabel(frameworkPackage) },
-      diff: {
-        status: {
-          from: previousStatus,
-          to: FRAMEWORK_PACKAGE_STATUSES.VALIDATED,
-        },
-        dependencyLock: {
-          from: previousDependencyLock,
-          to: cloneAuditValue(frameworkPackage.dependencyLock),
-        },
-        lastCheckpointStatus: {
-          from: previousCheckpointStatus,
-          to: checkpointRun.checkpoint.status,
-        },
-        lastCheckpointAt: {
-          from: previousCheckpointAt,
-          to: checkpointRun.checkpoint.timestamp,
-        },
-        lastCheckpointResult: {
-          from: summarizeCheckpointForAudit(previousCheckpointResult),
-          to: summarizeCheckpointForAudit(checkpointRun.checkpoint),
-        },
-      },
-    })
 
     return res.status(200).json({
       data: {
@@ -3700,6 +3792,7 @@ export const activateFrameworkPackage = async (req, res, next) => {
       || String(frameworkPackage.dependencyLock.status || '').trim().toUpperCase() !== 'PASS'
     const previousActivePackageIds = []
     let runtimeActivation = null
+    let activationGovernanceFields = null
 
     await session.withTransaction(async () => {
       const activationTime = new Date()
@@ -3784,78 +3877,82 @@ export const activateFrameworkPackage = async (req, res, next) => {
         readiness: activationReadiness,
         session,
       })
+      activationGovernanceFields = buildPackageGovernanceAuditFields({
+        frameworkPackage,
+        checkpoint: checkpointRun.checkpoint,
+        runtimeActivation,
+      })
+      await governanceAuditService.logSystemEventFromRequest(req, 'PACKAGE_ACTIVATED', {
+        resourceType: auditService.RESOURCE_TYPES.FrameworkPackage,
+        resourceId: frameworkPackage._id,
+        scope: {
+          frameworkKey: frameworkPackage.frameworkKey,
+        },
+        ...activationGovernanceFields,
+        display: { resourceLabel: buildFrameworkPackageLabel(frameworkPackage) },
+        diff: {
+          frameworkKey: frameworkPackage.frameworkKey,
+          version: frameworkPackage.version,
+          previousActivePackageIds,
+          activatedAt: frameworkPackage.activatedAt,
+          checkpoint: summarizeCheckpointForAudit(checkpointRun.checkpoint),
+          runtimeActivation: {
+            activationId: runtimeActivation?.activationSnapshot?.activationId,
+            deploymentId: runtimeActivation?.deployment?.deploymentId,
+            runtimeVerdictId: runtimeActivation?.activationSnapshot?.runtimeVerdictId,
+            runtimeVerdictResult: runtimeActivation?.activationSnapshot?.runtimeVerdictResult,
+          },
+          ...(shouldRefreshDependencyLock ? { dependencyLock: frameworkPackage.dependencyLock } : {}),
+        },
+      }, { session, throwOnError: true })
+
+      if (runtimeActivation?.activationSnapshot) {
+        await governanceAuditService.logSystemEventFromRequest(req, 'RUNTIME_ACTIVATION_COMPLETED', {
+          resourceType: auditService.RESOURCE_TYPES.FrameworkPackage,
+          resourceId: frameworkPackage._id,
+          scope: {
+            frameworkKey: frameworkPackage.frameworkKey,
+          },
+          ...activationGovernanceFields,
+          display: { resourceLabel: runtimeActivation.activationSnapshot.activationId },
+          diff: {
+            activationId: runtimeActivation.activationSnapshot.activationId,
+            deploymentId: runtimeActivation.deployment?.deploymentId,
+            packageId: toIdString(frameworkPackage._id),
+            packageKey: frameworkPackage.packageKey,
+            frameworkKey: frameworkPackage.frameworkKey,
+            frameworkVersion: frameworkPackage.version,
+            checkpointStatus: runtimeActivation.activationSnapshot.checkpointStatus,
+            runtimeVerdictId: runtimeActivation.activationSnapshot.runtimeVerdictId,
+            runtimeVerdictResult: runtimeActivation.activationSnapshot.runtimeVerdictResult,
+            dependencySnapshotId: runtimeActivation.activationSnapshot.dependencySnapshotId,
+            supersedesActivationId: runtimeActivation.activationSnapshot.supersedesActivationId,
+          },
+        }, { session, throwOnError: true })
+      }
+
+      if (runtimeActivation?.deployment) {
+        await governanceAuditService.logSystemEventFromRequest(req, 'RUNTIME_DEPLOYMENT_REGISTERED', {
+          resourceType: auditService.RESOURCE_TYPES.FrameworkPackage,
+          resourceId: frameworkPackage._id,
+          scope: {
+            frameworkKey: frameworkPackage.frameworkKey,
+          },
+          ...activationGovernanceFields,
+          display: { resourceLabel: runtimeActivation.deployment.deploymentId },
+          diff: {
+            deploymentId: runtimeActivation.deployment.deploymentId,
+            activationId: runtimeActivation.deployment.activationId,
+            packageId: toIdString(frameworkPackage._id),
+            frameworkKey: frameworkPackage.frameworkKey,
+            frameworkVersion: frameworkPackage.version,
+            supersededDeploymentId: runtimeActivation.supersededDeployment?.deploymentId || null,
+          },
+        }, { session, throwOnError: true })
+      }
     })
 
     await populateFrameworkPackage(frameworkPackage)
-
-    await auditService.logFromRequest(req, {
-      action: auditService.AUDIT_ACTIONS.FRAMEWORK_PACKAGE_ACTIVATED,
-      resourceType: auditService.RESOURCE_TYPES.FrameworkPackage,
-      resourceId: frameworkPackage._id,
-      scope: {
-        frameworkKey: frameworkPackage.frameworkKey,
-      },
-      display: { resourceLabel: buildFrameworkPackageLabel(frameworkPackage) },
-      diff: {
-        frameworkKey: frameworkPackage.frameworkKey,
-        version: frameworkPackage.version,
-        previousActivePackageIds,
-        activatedAt: frameworkPackage.activatedAt,
-        checkpoint: summarizeCheckpointForAudit(checkpointRun.checkpoint),
-        runtimeActivation: {
-          activationId: runtimeActivation?.activationSnapshot?.activationId,
-          deploymentId: runtimeActivation?.deployment?.deploymentId,
-          runtimeVerdictId: runtimeActivation?.activationSnapshot?.runtimeVerdictId,
-          runtimeVerdictResult: runtimeActivation?.activationSnapshot?.runtimeVerdictResult,
-        },
-        ...(shouldRefreshDependencyLock ? { dependencyLock: frameworkPackage.dependencyLock } : {}),
-      },
-    })
-
-    if (runtimeActivation?.activationSnapshot) {
-      await auditService.logFromRequest(req, {
-        action: auditService.AUDIT_ACTIONS.RUNTIME_ACTIVATION_COMPLETED,
-        resourceType: auditService.RESOURCE_TYPES.FrameworkPackage,
-        resourceId: frameworkPackage._id,
-        scope: {
-          frameworkKey: frameworkPackage.frameworkKey,
-        },
-        display: { resourceLabel: runtimeActivation.activationSnapshot.activationId },
-        diff: {
-          activationId: runtimeActivation.activationSnapshot.activationId,
-          deploymentId: runtimeActivation.deployment?.deploymentId,
-          packageId: toIdString(frameworkPackage._id),
-          packageKey: frameworkPackage.packageKey,
-          frameworkKey: frameworkPackage.frameworkKey,
-          frameworkVersion: frameworkPackage.version,
-          checkpointStatus: runtimeActivation.activationSnapshot.checkpointStatus,
-          runtimeVerdictId: runtimeActivation.activationSnapshot.runtimeVerdictId,
-          runtimeVerdictResult: runtimeActivation.activationSnapshot.runtimeVerdictResult,
-          dependencySnapshotId: runtimeActivation.activationSnapshot.dependencySnapshotId,
-          supersedesActivationId: runtimeActivation.activationSnapshot.supersedesActivationId,
-        },
-      })
-    }
-
-    if (runtimeActivation?.deployment) {
-      await auditService.logFromRequest(req, {
-        action: auditService.AUDIT_ACTIONS.RUNTIME_DEPLOYMENT_REGISTERED,
-        resourceType: auditService.RESOURCE_TYPES.FrameworkPackage,
-        resourceId: frameworkPackage._id,
-        scope: {
-          frameworkKey: frameworkPackage.frameworkKey,
-        },
-        display: { resourceLabel: runtimeActivation.deployment.deploymentId },
-        diff: {
-          deploymentId: runtimeActivation.deployment.deploymentId,
-          activationId: runtimeActivation.deployment.activationId,
-          packageId: toIdString(frameworkPackage._id),
-          frameworkKey: frameworkPackage.frameworkKey,
-          frameworkVersion: frameworkPackage.version,
-          supersededDeploymentId: runtimeActivation.supersededDeployment?.deploymentId || null,
-        },
-      })
-    }
 
     return res.status(200).json({
       data: serializeFrameworkPackage(frameworkPackage, {

@@ -80,6 +80,18 @@ export const AUDIT_ACTIONS = Object.freeze({
   FRAMEWORK_PACKAGE_CLONED: 'FRAMEWORK_PACKAGE_CLONED',
   RUNTIME_ACTIVATION_COMPLETED: 'RUNTIME_ACTIVATION_COMPLETED',
   RUNTIME_DEPLOYMENT_REGISTERED: 'RUNTIME_DEPLOYMENT_REGISTERED',
+  COMPONENT_CREATED: 'COMPONENT_CREATED',
+  COMPONENT_UPDATED: 'COMPONENT_UPDATED',
+  COMPONENT_CLONED: 'COMPONENT_CLONED',
+  COMPONENT_DEPRECATED: 'COMPONENT_DEPRECATED',
+  COMPONENT_LOCKED: 'COMPONENT_LOCKED',
+  PACKAGE_DEPRECATED: 'PACKAGE_DEPRECATED',
+  DEPENDENCY_LINKED: 'DEPENDENCY_LINKED',
+  DEPENDENCY_UPDATED: 'DEPENDENCY_UPDATED',
+  DEPENDENCY_IMPACT_ANALYSIS: 'DEPENDENCY_IMPACT_ANALYSIS',
+  FRAMEWORK_EXECUTED: 'FRAMEWORK_EXECUTED',
+  POLICY_EVALUATED: 'POLICY_EVALUATED',
+  AGENT_EXECUTED: 'AGENT_EXECUTED',
   FRAMEWORK_REGISTRY_CREATED: 'FRAMEWORK_REGISTRY_CREATED',
   FRAMEWORK_REGISTRY_UPDATED: 'FRAMEWORK_REGISTRY_UPDATED',
   RUNTIME_AGENT_CREATED: 'RUNTIME_AGENT_CREATED',
@@ -151,6 +163,8 @@ export const RESOURCE_TYPES = Object.freeze({
   Invitation: 'Invitation',
   SystemVersioningPolicy: 'SystemVersioningPolicy',
   FrameworkPackage: 'FrameworkPackage',
+  RuntimeActivationSnapshot: 'RuntimeActivationSnapshot',
+  RuntimeDeployment: 'RuntimeDeployment',
   RuntimeAgent: 'RuntimeAgent',
   RuntimeSkill: 'RuntimeSkill',
   RuntimePathRegistry: 'RuntimePathRegistry',
@@ -531,6 +545,27 @@ const serializeAuditLog = (entry = {}) => {
     ...(plain.ip ? { ip: plain.ip } : {}),
     ...(plain.userAgent ? { userAgent: plain.userAgent } : {}),
     ...(plain.requestId ? { requestId: plain.requestId } : {}),
+    ...(plain.auditSchemaVersion ? { auditSchemaVersion: plain.auditSchemaVersion } : {}),
+    ...(plain.signatureVersion ? { signatureVersion: plain.signatureVersion } : {}),
+    ...(plain.actorType ? { actorType: plain.actorType } : {}),
+    ...(plain.systemActor ? { systemActor: plain.systemActor } : {}),
+    ...(plain.isSystemEvent !== undefined ? { isSystemEvent: Boolean(plain.isSystemEvent) } : {}),
+    ...(plain.systemEventType ? { systemEventType: plain.systemEventType } : {}),
+    ...(plain.eventCategory ? { eventCategory: plain.eventCategory } : {}),
+    ...(plain.eventSeverity ? { eventSeverity: plain.eventSeverity } : {}),
+    ...(plain.frameworkKey ? { frameworkKey: plain.frameworkKey } : {}),
+    ...(plain.frameworkVersion ? { frameworkVersion: plain.frameworkVersion } : {}),
+    ...(plain.packageKey ? { packageKey: plain.packageKey } : {}),
+    ...(plain.componentType ? { componentType: plain.componentType } : {}),
+    ...(plain.componentStableId ? { componentStableId: plain.componentStableId } : {}),
+    ...(plain.componentVersion !== undefined ? { componentVersion: plain.componentVersion } : {}),
+    ...(plain.clonedFromStableId ? { clonedFromStableId: plain.clonedFromStableId } : {}),
+    ...(plain.dependencyGraph !== undefined ? { dependencyGraph: plain.dependencyGraph } : {}),
+    ...(plain.dependencyImpact !== undefined ? { dependencyImpact: plain.dependencyImpact } : {}),
+    ...(plain.snapshotRef !== undefined ? { snapshotRef: plain.snapshotRef } : {}),
+    ...(plain.snapshot !== undefined ? { snapshot: plain.snapshot } : {}),
+    ...(plain.checksum ? { checksum: plain.checksum } : {}),
+    ...(plain.previousSignature ? { previousSignature: plain.previousSignature } : {}),
   }
 }
 
@@ -553,15 +588,19 @@ const serializeAuditLog = (entry = {}) => {
  * @param {string} [data.requestId]   — correlation request ID
  * @returns {Promise<Object>}         — saved AuditLog document
  */
-const log = async (data) => {
+const log = async (data, options = {}) => {
   try {
-    return await AuditLog.createLog({
+    const payload = {
       ...data,
       ...buildAuditPresentation(data),
-    })
+    }
+    return options.session
+      ? await AuditLog.createLog(payload, { session: options.session })
+      : await AuditLog.createLog(payload)
   } catch (err) {
     logger.error({ err, action: data.action, resourceType: data.resourceType, resourceId: data.resourceId }, 'audit log write failed')
     // Never throw — audit failures must not break business operations
+    if (options.throwOnError) throw err
     return null
   }
 }
@@ -573,7 +612,7 @@ const log = async (data) => {
  * @param {Object} data — same as log() but without ip/userAgent/requestId/actorUserId
  * @param {string} [data.actorUserId] — defaults to req.context.userId || req.userId
  */
-const logFromRequest = async (req, data) => {
+const logFromRequest = async (req, data, options = {}) => {
   const actorUserId = data.actorUserId || req?.context?.userId || req?.userId
   const actorLabel = formatActorAuditLabel(req)
 
@@ -587,7 +626,7 @@ const logFromRequest = async (req, data) => {
     ip: req?.ip,
     userAgent: req?.get?.('user-agent'),
     requestId: req?.requestId,
-  })
+  }, options)
 }
 
 /* ------------------------------------------------------------------ */
@@ -620,6 +659,17 @@ const query = async (filters = {}) => {
     resourceType,
     resourceId,
     requestId,
+    isSystemEvent,
+    systemEventType,
+    eventCategory,
+    eventSeverity,
+    frameworkKey,
+    frameworkVersion,
+    packageKey,
+    componentType,
+    componentStableId,
+    componentVersion,
+    checksum,
     startDate,
     endDate,
     page = 1,
@@ -635,6 +685,17 @@ const query = async (filters = {}) => {
   if (resourceType) mongoQuery.resourceType = resourceType
   if (resourceId) mongoQuery.resourceId = resourceId
   if (requestId) mongoQuery.requestId = requestId
+  if (typeof isSystemEvent === 'boolean') mongoQuery.isSystemEvent = isSystemEvent
+  if (systemEventType) mongoQuery.systemEventType = String(systemEventType).trim().toUpperCase()
+  if (eventCategory) mongoQuery.eventCategory = String(eventCategory).trim().toUpperCase()
+  if (eventSeverity) mongoQuery.eventSeverity = String(eventSeverity).trim().toUpperCase()
+  if (frameworkKey) mongoQuery.frameworkKey = String(frameworkKey).trim().toUpperCase()
+  if (frameworkVersion) mongoQuery.frameworkVersion = frameworkVersion
+  if (packageKey) mongoQuery.packageKey = packageKey
+  if (componentType) mongoQuery.componentType = String(componentType).trim().toUpperCase()
+  if (componentStableId) mongoQuery.componentStableId = componentStableId
+  if (componentVersion !== undefined) mongoQuery.componentVersion = componentVersion
+  if (checksum) mongoQuery.checksum = checksum
 
   if (startDate || endDate) {
     mongoQuery.ts = {}

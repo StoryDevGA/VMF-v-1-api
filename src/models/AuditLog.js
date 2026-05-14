@@ -33,6 +33,77 @@ const auditDisplaySchema = new mongoose.Schema({
   id: false
 })
 
+const auditSnapshotRefSchema = new mongoose.Schema({
+  type: {
+    type: String,
+    trim: true,
+    maxlength: 80
+  },
+  id: {
+    type: String,
+    trim: true,
+    maxlength: 180
+  },
+  checksum: {
+    type: String,
+    trim: true,
+    maxlength: 160
+  }
+}, {
+  _id: false,
+  id: false
+})
+
+const AUDIT_SIGNATURE_V2_FIELDS = Object.freeze([
+  'auditSchemaVersion',
+  'signatureVersion',
+  'isSystemEvent',
+  'systemEventType',
+  'eventCategory',
+  'eventSeverity',
+  'actorType',
+  'systemActor',
+  'frameworkKey',
+  'frameworkVersion',
+  'packageKey',
+  'componentType',
+  'componentStableId',
+  'componentVersion',
+  'clonedFromStableId',
+  'dependencyGraph',
+  'dependencyImpact',
+  'snapshotRef',
+  'snapshot',
+  'checksum',
+])
+
+const buildSignatureData = (doc) => {
+  const data = {
+    ts: doc.ts,
+    actorUserId: doc.actorUserId,
+    action: doc.action,
+    resourceType: doc.resourceType,
+    resourceId: doc.resourceId,
+    summary: doc.summary,
+    display: doc.display,
+    scope: doc.scope,
+    diff: doc.diff,
+    ip: doc.ip,
+    userAgent: doc.userAgent,
+    requestId: doc.requestId
+  }
+
+  if (Number(doc.signatureVersion || 1) >= 2) {
+    AUDIT_SIGNATURE_V2_FIELDS.forEach((field) => {
+      if (doc[field] !== undefined) {
+        data[field] = doc[field]
+      }
+    })
+  }
+
+  return data
+}
+
 const auditLogSchema = new mongoose.Schema({
   ts: {
     type: Date,
@@ -95,6 +166,106 @@ const auditLogSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+  auditSchemaVersion: {
+    type: Number,
+    min: 1,
+    default: 1
+  },
+  signatureVersion: {
+    type: Number,
+    min: 1,
+    default: 1
+  },
+  actorType: {
+    type: String,
+    trim: true,
+    uppercase: true,
+    enum: ['USER', 'SYSTEM', 'SERVICE', 'AGENT', 'SKILL'],
+    default: 'USER'
+  },
+  systemActor: {
+    type: String,
+    trim: true,
+    maxlength: 160
+  },
+  isSystemEvent: {
+    type: Boolean,
+    default: false
+  },
+  systemEventType: {
+    type: String,
+    trim: true,
+    uppercase: true,
+    maxlength: 100
+  },
+  eventCategory: {
+    type: String,
+    trim: true,
+    uppercase: true,
+    maxlength: 50
+  },
+  eventSeverity: {
+    type: String,
+    trim: true,
+    uppercase: true,
+    enum: ['INFO', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL']
+  },
+  frameworkKey: {
+    type: String,
+    trim: true,
+    uppercase: true,
+    maxlength: 100
+  },
+  frameworkVersion: {
+    type: String,
+    trim: true,
+    maxlength: 50
+  },
+  packageKey: {
+    type: String,
+    trim: true,
+    maxlength: 160
+  },
+  componentType: {
+    type: String,
+    trim: true,
+    uppercase: true,
+    maxlength: 80
+  },
+  componentStableId: {
+    type: String,
+    trim: true,
+    maxlength: 180
+  },
+  componentVersion: {
+    type: Number,
+    min: 0
+  },
+  clonedFromStableId: {
+    type: String,
+    trim: true,
+    maxlength: 180
+  },
+  dependencyGraph: {
+    type: mongoose.Schema.Types.Mixed
+  },
+  dependencyImpact: {
+    type: mongoose.Schema.Types.Mixed
+  },
+  snapshotRef: auditSnapshotRefSchema,
+  snapshot: {
+    type: mongoose.Schema.Types.Mixed
+  },
+  checksum: {
+    type: String,
+    trim: true,
+    maxlength: 160
+  },
+  previousSignature: {
+    type: String,
+    trim: true,
+    maxlength: 160
+  },
   // Integrity protection
   signature: {
     type: String,
@@ -118,8 +289,14 @@ auditLogSchema.index({ 'scope.customerId': 1, ts: -1 })
 auditLogSchema.index({ actorUserId: 1, ts: -1 })
 auditLogSchema.index({ resourceType: 1, resourceId: 1, ts: -1 })
 auditLogSchema.index({ action: 1, ts: -1 })
-auditLogSchema.index({ ts: -1 }) // For retention cleanup
 auditLogSchema.index({ requestId: 1 }) // For correlation
+auditLogSchema.index({ isSystemEvent: 1, ts: -1 })
+auditLogSchema.index({ systemEventType: 1, ts: -1 })
+auditLogSchema.index({ eventCategory: 1, ts: -1 })
+auditLogSchema.index({ frameworkKey: 1, frameworkVersion: 1, ts: -1 })
+auditLogSchema.index({ packageKey: 1, ts: -1 })
+auditLogSchema.index({ componentType: 1, componentStableId: 1, componentVersion: 1, ts: -1 })
+auditLogSchema.index({ checksum: 1 })
 
 // TTL index for automatic cleanup (7 years = 220752000 seconds)
 auditLogSchema.index({ ts: 1 }, { expireAfterSeconds: 220752000 })
@@ -179,29 +356,15 @@ auditLogSchema.statics.findByRequestId = function(requestId) {
   return this.find({ requestId }).sort({ ts: 1 })
 }
 
-auditLogSchema.statics.createLog = function(logData) {
+auditLogSchema.statics.createLog = function(logData, options = {}) {
   const log = new this(logData)
   log.generateSignature()
-  return log.save()
+  return log.save(options)
 }
 
 // Instance methods
 auditLogSchema.methods.generateSignature = function() {
-  const data = {
-    ts: this.ts,
-    actorUserId: this.actorUserId,
-    action: this.action,
-    resourceType: this.resourceType,
-    resourceId: this.resourceId,
-    summary: this.summary,
-    display: this.display,
-    scope: this.scope,
-    diff: this.diff,
-    ip: this.ip,
-    userAgent: this.userAgent,
-    requestId: this.requestId
-  }
-  
+  const data = buildSignatureData(this)
   const dataString = JSON.stringify(data, null, 0)
   const secret = env.auditSignatureSecret
   
@@ -212,21 +375,7 @@ auditLogSchema.methods.generateSignature = function() {
 }
 
 auditLogSchema.methods.verifySignature = function() {
-  const data = {
-    ts: this.ts,
-    actorUserId: this.actorUserId,
-    action: this.action,
-    resourceType: this.resourceType,
-    resourceId: this.resourceId,
-    summary: this.summary,
-    display: this.display,
-    scope: this.scope,
-    diff: this.diff,
-    ip: this.ip,
-    userAgent: this.userAgent,
-    requestId: this.requestId
-  }
-
+  const data = buildSignatureData(this)
   const dataString = JSON.stringify(data, null, 0)
   const secret = env.auditSignatureSecret
 

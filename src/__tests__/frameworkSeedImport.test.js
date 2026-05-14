@@ -36,12 +36,22 @@ describe('framework seed import guard', () => {
     expect(() => parseArgs(['--no-edditor-contract'])).toThrow(/--help/i)
   })
 
+  test.each(['--seed-dir', '--audit-file', '--report-dir'])(
+    'rejects %s when the value is omitted or another flag',
+    (flagName) => {
+      expect(() => parseArgs([flagName])).toThrow(`${flagName} requires a value`)
+      expect(() => parseArgs([flagName, '--apply'])).toThrow(`${flagName} requires a value`)
+    },
+  )
+
   test('passes when seeded Framework Package dropdown values are exposed by the editor contract', async () => {
     const { stdout } = await runSeedGuard()
     const payload = JSON.parse(stdout)
 
     expect(payload.editorOptionContract.status).toBe('pass')
     expect(payload.editorOptionContract.failures).toBe(0)
+    expect(payload.auditRegistryContract.status).toBe('pass')
+    expect(payload.auditRegistryContract.failures).toBe(0)
     expect(payload.editorOptionContract.checks).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -63,6 +73,44 @@ describe('framework seed import guard', () => {
         }),
       ]),
     )
+  })
+
+  test('reports the framework version from the seed package instead of a hardcoded importer value', async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'framework-seed-version-contract-'))
+    const tempSeedDir = path.join(tempRoot, 'seed-data')
+    fs.cpSync(seedDir, tempSeedDir, { recursive: true })
+
+    const packageFile = path.join(tempSeedDir, 'v2_3_1_framework_package.json')
+    const frameworkPackage = JSON.parse(fs.readFileSync(packageFile, 'utf8'))
+    frameworkPackage.version = '2.3.530847'
+    fs.writeFileSync(packageFile, `${JSON.stringify(frameworkPackage, null, 2)}\n`, 'utf8')
+
+    const { stdout } = await runSeedGuard(['--seed-dir', tempSeedDir])
+    const payload = JSON.parse(stdout)
+
+    expect(payload.version).toBe('2.3.530847')
+  })
+
+  test('blocks audit-shaped seed data that references an unregistered audit action', async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'framework-seed-audit-contract-'))
+    const tempSeedDir = path.join(tempRoot, 'seed-data')
+    fs.cpSync(seedDir, tempSeedDir, { recursive: true })
+
+    fs.writeFileSync(
+      path.join(tempSeedDir, 'audit_seed_test.json'),
+      `${JSON.stringify({
+        actorUserId: '507f1f77bcf86cd799439011',
+        action: 'FUTURE_AUDIT_EVENT',
+        resourceType: 'FrameworkPackage',
+        resourceId: '807f1f77bcf86cd799439044',
+        requestId: 'req-seed-audit-contract',
+      }, null, 2)}\n`,
+      'utf8',
+    )
+
+    await expect(runSeedGuard(['--seed-dir', tempSeedDir, '--no-audit'])).rejects.toMatchObject({
+      stdout: expect.stringContaining('FUTURE_AUDIT_EVENT'),
+    })
   })
 
   test('blocks generated seed data that contains an output key missing from the editor options', async () => {

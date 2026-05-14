@@ -40,6 +40,17 @@ const pageSizeParam = z.coerce
   .max(200, 'Page size must be 200 or fewer')
   .default(50)
 
+const trimmedToken = (maxLength = 100) =>
+  z.string().trim().min(1).max(maxLength)
+
+const booleanParam = z.preprocess((value) => {
+  if (value === true || value === false) return value
+  const normalized = String(value ?? '').trim().toLowerCase()
+  if (normalized === 'true') return true
+  if (normalized === 'false') return false
+  return value
+}, z.boolean())
+
 /* ------------------------------------------------------------------ */
 /*  Audit actions & resource types for enum validation                */
 /* ------------------------------------------------------------------ */
@@ -64,6 +75,17 @@ const queryAuditLogsSchema = z.object({
   resourceType: z.enum(validResourceTypes).optional(),
   resourceId: objectIdString.optional(),
   requestId: z.string().trim().min(1).optional(),
+  isSystemEvent: booleanParam.optional(),
+  systemEventType: trimmedToken(100).optional(),
+  eventCategory: trimmedToken(50).optional(),
+  eventSeverity: z.enum(['INFO', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL']).optional(),
+  frameworkKey: trimmedToken(100).optional(),
+  frameworkVersion: trimmedToken(50).optional(),
+  packageKey: trimmedToken(160).optional(),
+  componentType: trimmedToken(80).optional(),
+  componentStableId: trimmedToken(180).optional(),
+  componentVersion: z.coerce.number().int().min(0).optional(),
+  checksum: trimmedToken(160).optional(),
   startDate: isoDateString.optional(),
   endDate: isoDateString.optional(),
   page: pageParam,

@@ -22,6 +22,7 @@ Run from `VMF-v-1-api/`:
 ## Agent Testing Skill
 - Use `vmf-api-test-coverage` from `.git/skills/vmf-api-test-coverage/SKILL.md` for comprehensive API/backend test planning, implementation, and review.
 - Use it alongside `test-engineer-node` when Runtime Control work needs no-gap Jest/Supertest coverage, persistence/audit assertions, unique-index race tests, or mock/API parity fixture checks.
+- For Runtime Control governance, audit, lifecycle, activation, validation, dependency-lock, seed, or mock/API work, also apply `../docs/references/runtime-control/runtime-control-contract-quality-gate.md`; passing happy-path tests is not enough without failure-path, rollback, index/query, seed, and parity checks.
 
 ## Configuration
 Copy `.env.example` to `.env` and adjust values as needed:

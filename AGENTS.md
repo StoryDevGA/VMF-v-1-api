@@ -7,6 +7,15 @@
 3. Touch only what you must. Clean up only your own mess.
 4. Define success criteria. Loop until verified.
 
+## Runtime Control Contract Quality Gate
+
+- For governance, audit, lifecycle, activation, validation, dependency-lock, seed, or mock/API work, apply `../docs/references/runtime-control/runtime-control-contract-quality-gate.md` before coding and again before handoff.
+- Load `backend-developer`, `mongo-db-developer` when schema/indexes are touched, `vmf-api-test-coverage` for API tests, and the API `pr-reviewer` before signoff.
+- Build a short contract map before implementation: model/schema fields, indexes, validators, controllers, services, serializers, audit events, seed/import values, parity fixtures, and focused Jest suites.
+- Governed writes require failure-path proof. Add or verify tests for audit persistence failure, real rollback semantics, unique-index race conflicts, stale/missing evidence, source immutability, and no success audit on rejected paths.
+- Do not ship future-only fields in active signatures, checksums, indexes, or required payloads unless production code writes and queries them now.
+- Final backend handoff must state the focused Jest commands, syntax checks, `git diff --check`, and which quality-gate surfaces were checked.
+
 ## Skills
 A skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and file path so you can open the source for full instructions when using a specific skill.
 

@@ -22,6 +22,9 @@
  * All Mongoose model statics are monkey-patched; no real database required.
  */
 
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, test, expect, beforeAll, beforeEach, jest } from '@jest/globals'
 
 /* ------------------------------------------------------------------ */
@@ -53,6 +56,108 @@ const AUDIT_LOG_ID_1 = 'a07f1f77bcf86cd799439001'
 const AUDIT_LOG_ID_2 = 'a07f1f77bcf86cd799439002'
 const AUDIT_LOG_ID_3 = 'a07f1f77bcf86cd799439003'
 const REQUEST_ID = 'req-abc-123-def-456'
+
+const testDirname = path.dirname(fileURLToPath(import.meta.url))
+const workspaceRoot = path.resolve(testDirname, '../../..')
+const clientAuditLogConstantsPath = path.join(
+  workspaceRoot,
+  'VMF-v-1-client/src/pages/SuperAdminAuditLogs/superAdminAuditLogs.constants.js',
+)
+const docsSeedDataDir = path.join(workspaceRoot, 'docs/seed-data')
+
+const hasOwn = (value, key) =>
+  Object.prototype.hasOwnProperty.call(Object(value), key)
+
+const extractClientOptionValues = (source, exportName) => {
+  const startMarker = `export const ${exportName} = [`
+  const start = source.indexOf(startMarker)
+  expect(start).toBeGreaterThanOrEqual(0)
+
+  const nextExport = source.indexOf('\nexport const ', start + startMarker.length)
+  const block = source.slice(start, nextExport === -1 ? source.length : nextExport)
+
+  return Array.from(block.matchAll(/value:\s*'([^']*)'/g))
+    .map((match) => match[1])
+    .filter(Boolean)
+}
+
+const sortedValues = (values) =>
+  [...values].sort((left, right) => left.localeCompare(right))
+
+const listJsonSeedFiles = (dir) => {
+  if (!fs.existsSync(dir)) return []
+
+  return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const entryPath = path.join(dir, entry.name)
+    if (entry.isDirectory()) return listJsonSeedFiles(entryPath)
+    if (entry.isFile() && /\.(json|jsonl)$/i.test(entry.name)) return [entryPath]
+    return []
+  })
+}
+
+const parseSeedJsonEntries = (filePath) => {
+  const source = fs.readFileSync(filePath, 'utf8')
+  if (/\.jsonl$/i.test(filePath)) {
+    return source
+      .split(/\r?\n/)
+      .map((line, index) => ({ line, index: index + 1 }))
+      .filter(({ line }) => line.trim())
+      .map(({ line, index }) => ({
+        source: `${path.relative(workspaceRoot, filePath)}:${index}`,
+        value: JSON.parse(line),
+      }))
+  }
+
+  return [{
+    source: path.relative(workspaceRoot, filePath),
+    value: JSON.parse(source),
+  }]
+}
+
+const isAuditSeedObject = (value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+
+  const isGovernanceAuditRow =
+    hasOwn(value, 'auditSchemaVersion') ||
+    hasOwn(value, 'isSystemEvent') ||
+    hasOwn(value, 'systemEventType') ||
+    hasOwn(value, 'eventCategory') ||
+    hasOwn(value, 'eventSeverity') ||
+    hasOwn(value, 'previousSignature')
+
+  const isLegacyAuditRow =
+    typeof value.action === 'string' &&
+    typeof value.resourceType === 'string' &&
+    ['actorUserId', 'resourceId', 'requestId', 'diff', 'summary'].some((key) =>
+      hasOwn(value, key),
+    )
+
+  const isAuditEventRegistryRow =
+    typeof value.eventKey === 'string' &&
+    ['requiresSnapshot', 'requiresChecksum', 'requiresDependencyGraph', 'isActive']
+      .some((key) => hasOwn(value, key))
+
+  return isGovernanceAuditRow || isLegacyAuditRow || isAuditEventRegistryRow
+}
+
+const collectAuditSeedObjects = (value, source, records = []) => {
+  if (Array.isArray(value)) {
+    value.forEach((entry, index) =>
+      collectAuditSeedObjects(entry, `${source}[${index}]`, records),
+    )
+    return records
+  }
+
+  if (!value || typeof value !== 'object') return records
+
+  if (isAuditSeedObject(value)) records.push({ source, value })
+
+  for (const [key, entry] of Object.entries(value)) {
+    collectAuditSeedObjects(entry, `${source}.${key}`, records)
+  }
+
+  return records
+}
 
 /* ------------------------------------------------------------------ */
 /*  Factories                                                         */
@@ -397,6 +502,54 @@ describe('Validators', () => {
       expect(res.status).toBe(200)
       expect(res.body.meta.page).toBe(2)
       expect(res.body.meta.pageSize).toBe(10)
+    })
+
+    test('accepts governance filter parameters', async () => {
+      const token = await getSuperAdminToken()
+
+      AuditLog.find.mockReturnValue({
+        populate: jest.fn().mockReturnValue({
+          sort: jest.fn().mockReturnValue({
+            skip: jest.fn().mockReturnValue({
+              limit: jest.fn().mockReturnValue({
+                lean: jest.fn().mockResolvedValue([]),
+              }),
+            }),
+          }),
+        }),
+      })
+      AuditLog.countDocuments.mockResolvedValue(0)
+
+      const res = await request
+        .get('/api/v1/audit-logs')
+        .query({
+          isSystemEvent: 'true',
+          systemEventType: 'PACKAGE_VALIDATED',
+          eventCategory: 'PACKAGE',
+          eventSeverity: 'HIGH',
+          frameworkKey: 'VMF',
+          frameworkVersion: '2.3.1',
+          packageKey: 'vmf-v2-3-1-standard',
+          componentType: 'SKILL',
+          componentStableId: 'skill-vmf-required-sections-validator',
+          componentVersion: '2',
+          checksum: 'abc123',
+        })
+        .set('Authorization', `Bearer ${token}`)
+
+      expect(res.status).toBe(200)
+      expect(res.body.meta.page).toBe(1)
+    })
+
+    test('rejects invalid governance boolean filter', async () => {
+      const token = await getSuperAdminToken()
+      const res = await request
+        .get('/api/v1/audit-logs')
+        .query({ isSystemEvent: 'sometimes' })
+        .set('Authorization', `Bearer ${token}`)
+
+      expect(res.status).toBe(422)
+      expect(res.body.error.code).toBe('VALIDATION_FAILED')
     })
 
     test('rejects invalid ObjectId in customerId', async () => {
@@ -803,6 +956,66 @@ describe('GET /api/v1/audit-logs — Query', () => {
     expect(res.status).toBe(200)
     const findCallArgs = AuditLog.find.mock.calls[0][0]
     expect(findCallArgs.requestId).toBe(REQUEST_ID)
+  })
+
+  test('filters by governance metadata', async () => {
+    const token = await getSuperAdminToken()
+    stubQueryChain([
+      makeAuditLogDoc({
+        action: 'FRAMEWORK_PACKAGE_VALIDATED',
+        resourceType: 'FrameworkPackage',
+        isSystemEvent: true,
+        systemEventType: 'PACKAGE_VALIDATED',
+        eventCategory: 'PACKAGE',
+        eventSeverity: 'HIGH',
+        frameworkKey: 'VMF',
+        frameworkVersion: '2.3.1',
+        packageKey: 'vmf-v2-3-1-standard',
+        dependencyGraph: { referenceCount: 300 },
+        snapshot: { package: { packageKey: 'vmf-v2-3-1-standard' } },
+        checksum: 'checksum-123',
+      }),
+    ], 1)
+
+    const res = await request
+      .get('/api/v1/audit-logs')
+      .query({
+        isSystemEvent: 'true',
+        systemEventType: 'PACKAGE_VALIDATED',
+        eventCategory: 'PACKAGE',
+        eventSeverity: 'HIGH',
+        frameworkKey: 'vmf',
+        frameworkVersion: '2.3.1',
+        packageKey: 'vmf-v2-3-1-standard',
+        checksum: 'checksum-123',
+      })
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    const findCallArgs = AuditLog.find.mock.calls[0][0]
+    expect(findCallArgs).toMatchObject({
+      isSystemEvent: true,
+      systemEventType: 'PACKAGE_VALIDATED',
+      eventCategory: 'PACKAGE',
+      eventSeverity: 'HIGH',
+      frameworkKey: 'VMF',
+      frameworkVersion: '2.3.1',
+      packageKey: 'vmf-v2-3-1-standard',
+      checksum: 'checksum-123',
+    })
+    expect(res.body.data[0]).toMatchObject({
+      isSystemEvent: true,
+      systemEventType: 'PACKAGE_VALIDATED',
+      eventCategory: 'PACKAGE',
+      eventSeverity: 'HIGH',
+      frameworkKey: 'VMF',
+      frameworkVersion: '2.3.1',
+      packageKey: 'vmf-v2-3-1-standard',
+      checksum: 'checksum-123',
+      dependencyGraph: { referenceCount: 300 },
+      snapshot: { package: { packageKey: 'vmf-v2-3-1-standard' } },
+    })
+    expect(res.body.data[0]).not.toHaveProperty('signature')
   })
 })
 
@@ -1484,17 +1697,217 @@ describe('auditService.logFromRequest — Unit', () => {
   })
 })
 
+describe('governanceAuditService - Unit', () => {
+  let governanceAuditService
+  let generateChecksum
+
+  beforeAll(async () => {
+    governanceAuditService = (await import('../services/governanceAudit/governanceAuditService.js')).default
+    generateChecksum = (await import('../services/governanceAudit/checksumService.js')).generateChecksum
+  })
+
+  test('writes registered package validation governance events with checksum evidence', async () => {
+    const fakeReq = {
+      context: { userId: SUPER_ADMIN_ID },
+      scopes: { platformRoles: ['SUPER_ADMIN'] },
+      ip: '10.0.0.1',
+      get: jest.fn(() => 'Test/1.0'),
+      requestId: 'req-governance-package-validated',
+    }
+
+    const dependencyGraph = { referenceCount: 300 }
+    const snapshot = {
+      package: {
+        frameworkKey: 'VMF',
+        frameworkVersion: '2.3.1',
+        packageKey: 'vmf-v2-3-1-standard',
+      },
+    }
+
+    await governanceAuditService.logSystemEventFromRequest(fakeReq, 'PACKAGE_VALIDATED', {
+      resourceId: VMF_ID,
+      frameworkKey: 'VMF',
+      frameworkVersion: '2.3.1',
+      packageKey: 'vmf-v2-3-1-standard',
+      dependencyGraph,
+      snapshot,
+      display: { resourceLabel: 'VMF 2.3.1' },
+    })
+
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      actorUserId: SUPER_ADMIN_ID,
+      action: 'FRAMEWORK_PACKAGE_VALIDATED',
+      resourceType: 'FrameworkPackage',
+      resourceId: VMF_ID,
+      auditSchemaVersion: 2,
+      signatureVersion: 2,
+      isSystemEvent: true,
+      systemEventType: 'PACKAGE_VALIDATED',
+      eventCategory: 'PACKAGE',
+      eventSeverity: 'HIGH',
+      frameworkKey: 'VMF',
+      frameworkVersion: '2.3.1',
+      packageKey: 'vmf-v2-3-1-standard',
+      dependencyGraph: { referenceCount: 300 },
+      checksum: generateChecksum({ dependencyGraph, snapshot }),
+      requestId: 'req-governance-package-validated',
+    }))
+  })
+
+  test('generates canonical checksums independent of object key order', () => {
+    expect(generateChecksum({ a: 1, b: 2 })).toBe(generateChecksum({ b: 2, a: 1 }))
+  })
+
+  test('infers component resource type from component type when no override is supplied', () => {
+    const payload = governanceAuditService.buildGovernanceAuditPayload('COMPONENT_CLONED', {
+      resourceId: VMF_ID,
+      frameworkKey: 'VMF',
+      componentType: 'SKILL',
+      componentStableId: 'skill-vmf-required-sections-validator',
+      componentVersion: 2,
+      clonedFromStableId: 'skill-vmf-required-sections-validator-v1',
+    })
+
+    expect(payload.resourceType).toBe('RuntimeSkill')
+    expect(payload.systemEventType).toBe('COMPONENT_CLONED')
+  })
+
+  test('rejects unknown governance audit events before persistence', () => {
+    expect(() => governanceAuditService.buildGovernanceAuditPayload('FUTURE_EVENT', {
+      resourceId: VMF_ID,
+      frameworkKey: 'VMF',
+    })).toThrow('Unknown or inactive governance audit event: FUTURE_EVENT')
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('rejects package validation governance events without dependency graph evidence', async () => {
+    const fakeReq = {
+      context: { userId: SUPER_ADMIN_ID },
+      scopes: { platformRoles: ['SUPER_ADMIN'] },
+      get: jest.fn(() => 'Test/1.0'),
+      requestId: 'req-governance-missing-evidence',
+    }
+
+    await expect(governanceAuditService.logSystemEventFromRequest(fakeReq, 'PACKAGE_VALIDATED', {
+      resourceId: VMF_ID,
+      frameworkKey: 'VMF',
+      frameworkVersion: '2.3.1',
+      packageKey: 'vmf-v2-3-1-standard',
+      snapshot: { package: { packageKey: 'vmf-v2-3-1-standard' } },
+    })).rejects.toMatchObject({
+      code: 'GOVERNANCE_AUDIT_VALIDATION_FAILED',
+      details: {
+        eventKey: 'PACKAGE_VALIDATED',
+        missingFields: ['dependencyGraph'],
+      },
+    })
+
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('rejects package validation governance events with empty dependency graph evidence', async () => {
+    const fakeReq = {
+      context: { userId: SUPER_ADMIN_ID },
+      scopes: { platformRoles: ['SUPER_ADMIN'] },
+      get: jest.fn(() => 'Test/1.0'),
+      requestId: 'req-governance-empty-evidence',
+    }
+
+    await expect(governanceAuditService.logSystemEventFromRequest(fakeReq, 'PACKAGE_VALIDATED', {
+      resourceId: VMF_ID,
+      frameworkKey: 'VMF',
+      frameworkVersion: '2.3.1',
+      packageKey: 'vmf-v2-3-1-standard',
+      dependencyGraph: {},
+      snapshot: { package: { packageKey: 'vmf-v2-3-1-standard' } },
+    })).rejects.toMatchObject({
+      code: 'GOVERNANCE_AUDIT_VALIDATION_FAILED',
+      details: {
+        eventKey: 'PACKAGE_VALIDATED',
+        missingFields: ['dependencyGraph'],
+      },
+    })
+
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('strict governance logging surfaces persistence failures', async () => {
+    AuditLog.createLog.mockRejectedValueOnce(new Error('audit write failed'))
+    const fakeReq = {
+      context: { userId: SUPER_ADMIN_ID },
+      scopes: { platformRoles: ['SUPER_ADMIN'] },
+      get: jest.fn(() => 'Test/1.0'),
+      requestId: 'req-governance-strict-failure',
+    }
+
+    await expect(governanceAuditService.logSystemEventFromRequest(fakeReq, 'PACKAGE_VALIDATED', {
+      resourceId: VMF_ID,
+      frameworkKey: 'VMF',
+      frameworkVersion: '2.3.1',
+      packageKey: 'vmf-v2-3-1-standard',
+      dependencyGraph: { referenceCount: 300 },
+      snapshot: { package: { packageKey: 'vmf-v2-3-1-standard' } },
+    }, { throwOnError: true })).rejects.toThrow('audit write failed')
+  })
+})
+
+describe('AuditLog signature versions - Unit', () => {
+  test('signature v2 includes governance fields and leaves previousSignature out until chain linking ships', () => {
+    const logDoc = new AuditLog({
+      ts: new Date('2026-05-14T08:53:39.000Z'),
+      actorUserId: SUPER_ADMIN_ID,
+      action: 'FRAMEWORK_PACKAGE_VALIDATED',
+      resourceType: 'FrameworkPackage',
+      resourceId: VMF_ID,
+      scope: { frameworkKey: 'VMF' },
+      diff: { status: { from: 'DRAFT', to: 'VALIDATED' } },
+      auditSchemaVersion: 2,
+      signatureVersion: 2,
+      isSystemEvent: true,
+      systemEventType: 'PACKAGE_VALIDATED',
+      eventCategory: 'PACKAGE',
+      eventSeverity: 'HIGH',
+      frameworkKey: 'VMF',
+      frameworkVersion: '2.3.1',
+      packageKey: 'vmf-2-3-1',
+      dependencyGraph: { referenceCount: 300 },
+      snapshot: { package: { packageKey: 'vmf-2-3-1' } },
+      checksum: 'checksum-123',
+      previousSignature: 'previous-signature-123',
+    })
+
+    logDoc.generateSignature()
+
+    expect(logDoc.verifySignature()).toBe(true)
+    logDoc.previousSignature = 'tampered-previous-signature'
+    expect(logDoc.verifySignature()).toBe(true)
+    logDoc.packageKey = 'tampered-package-key'
+    expect(logDoc.verifySignature()).toBe(false)
+  })
+})
+
 /* ================================================================== */
 /*  11. AUDIT ACTIONS & RESOURCE TYPES registries                     */
 /* ================================================================== */
 
 describe('AUDIT_ACTIONS & RESOURCE_TYPES constants', () => {
   let AUDIT_ACTIONS, RESOURCE_TYPES
+  let GOVERNANCE_AUDIT_EVENTS
+  let GOVERNANCE_AUDIT_EVENT_CATEGORIES
+  let GOVERNANCE_AUDIT_SEVERITIES
 
   beforeAll(async () => {
     const mod = await import('../services/auditService.js')
     AUDIT_ACTIONS = mod.AUDIT_ACTIONS
     RESOURCE_TYPES = mod.RESOURCE_TYPES
+
+    const governanceAuditEvents = await import(
+      '../services/governanceAudit/governanceAuditEvents.js'
+    )
+    GOVERNANCE_AUDIT_EVENTS = governanceAuditEvents.GOVERNANCE_AUDIT_EVENTS
+    GOVERNANCE_AUDIT_EVENT_CATEGORIES =
+      governanceAuditEvents.GOVERNANCE_AUDIT_EVENT_CATEGORIES
+    GOVERNANCE_AUDIT_SEVERITIES = governanceAuditEvents.GOVERNANCE_AUDIT_SEVERITIES
   })
 
   test('AUDIT_ACTIONS contains required baseline actions', () => {
@@ -1511,6 +1924,9 @@ describe('AUDIT_ACTIONS & RESOURCE_TYPES constants', () => {
       'IDENTITY_PLUS_REGISTRATION_COMPLETE',
     )
     expect(AUDIT_ACTIONS.FRAMEWORK_PACKAGE_ACTIVATED).toBe('FRAMEWORK_PACKAGE_ACTIVATED')
+    expect(AUDIT_ACTIONS.COMPONENT_CLONED).toBe('COMPONENT_CLONED')
+    expect(AUDIT_ACTIONS.DEPENDENCY_IMPACT_ANALYSIS).toBe('DEPENDENCY_IMPACT_ANALYSIS')
+    expect(AUDIT_ACTIONS.FRAMEWORK_EXECUTED).toBe('FRAMEWORK_EXECUTED')
     expect(AUDIT_ACTIONS.RUNTIME_AGENT_UPDATED).toBe('RUNTIME_AGENT_UPDATED')
     expect(AUDIT_ACTIONS.RUNTIME_SKILL_UPDATED).toBe('RUNTIME_SKILL_UPDATED')
     expect(AUDIT_ACTIONS.WORKFLOW_POLICY_UPDATED).toBe('WORKFLOW_POLICY_UPDATED')
@@ -1528,6 +1944,8 @@ describe('AUDIT_ACTIONS & RESOURCE_TYPES constants', () => {
     expect(RESOURCE_TYPES.VMF).toBe('VMF')
     expect(RESOURCE_TYPES.Deal).toBe('Deal')
     expect(RESOURCE_TYPES.FrameworkPackage).toBe('FrameworkPackage')
+    expect(RESOURCE_TYPES.RuntimeActivationSnapshot).toBe('RuntimeActivationSnapshot')
+    expect(RESOURCE_TYPES.RuntimeDeployment).toBe('RuntimeDeployment')
     expect(RESOURCE_TYPES.RuntimeAgent).toBe('RuntimeAgent')
     expect(RESOURCE_TYPES.RuntimeSkill).toBe('RuntimeSkill')
     expect(RESOURCE_TYPES.WorkflowPolicy).toBe('WorkflowPolicy')
@@ -1541,6 +1959,92 @@ describe('AUDIT_ACTIONS & RESOURCE_TYPES constants', () => {
     for (const [key, value] of Object.entries(AUDIT_ACTIONS)) {
       expect(key).toBe(value)
     }
+  })
+
+  test('governance audit event registry references only published audit values', () => {
+    const publishedActions = new Set(Object.values(AUDIT_ACTIONS))
+    const publishedResourceTypes = new Set(Object.values(RESOURCE_TYPES))
+    const publishedCategories = new Set(Object.values(GOVERNANCE_AUDIT_EVENT_CATEGORIES))
+    const publishedSeverities = new Set(Object.values(GOVERNANCE_AUDIT_SEVERITIES))
+
+    for (const [key, event] of Object.entries(GOVERNANCE_AUDIT_EVENTS)) {
+      expect(event.eventKey).toBe(key)
+      expect(publishedActions.has(event.action)).toBe(true)
+      if (event.resourceType) {
+        expect(publishedResourceTypes.has(event.resourceType)).toBe(true)
+      }
+      expect(publishedCategories.has(event.category)).toBe(true)
+      expect(publishedSeverities.has(event.severity)).toBe(true)
+    }
+  })
+
+  test('client Audit Logs filter constants mirror backend audit registries', () => {
+    const clientConstantsSource = fs.readFileSync(clientAuditLogConstantsPath, 'utf8')
+
+    expect(
+      sortedValues(extractClientOptionValues(clientConstantsSource, 'ACTION_OPTIONS')),
+    ).toEqual(sortedValues(Object.values(AUDIT_ACTIONS)))
+    expect(
+      sortedValues(extractClientOptionValues(clientConstantsSource, 'RESOURCE_TYPE_OPTIONS')),
+    ).toEqual(sortedValues(Object.values(RESOURCE_TYPES)))
+    expect(
+      sortedValues(extractClientOptionValues(clientConstantsSource, 'SYSTEM_EVENT_TYPE_OPTIONS')),
+    ).toEqual(
+      sortedValues(Object.values(GOVERNANCE_AUDIT_EVENTS).map((event) => event.eventKey)),
+    )
+    expect(
+      sortedValues(extractClientOptionValues(clientConstantsSource, 'EVENT_CATEGORY_OPTIONS')),
+    ).toEqual(sortedValues(Object.values(GOVERNANCE_AUDIT_EVENT_CATEGORIES)))
+    expect(
+      sortedValues(extractClientOptionValues(clientConstantsSource, 'EVENT_SEVERITY_OPTIONS')),
+    ).toEqual(sortedValues(Object.values(GOVERNANCE_AUDIT_SEVERITIES)))
+  })
+
+  test('audit-shaped seed data references only registered audit constants', () => {
+    const auditSeedRecords = listJsonSeedFiles(docsSeedDataDir)
+      .flatMap((filePath) => parseSeedJsonEntries(filePath))
+      .flatMap(({ source, value }) => collectAuditSeedObjects(value, source))
+
+    const publishedActions = new Set(Object.values(AUDIT_ACTIONS))
+    const publishedResourceTypes = new Set(Object.values(RESOURCE_TYPES))
+    const publishedSystemEventTypes = new Set(
+      Object.values(GOVERNANCE_AUDIT_EVENTS).map((event) => event.eventKey),
+    )
+    const publishedCategories = new Set(Object.values(GOVERNANCE_AUDIT_EVENT_CATEGORIES))
+    const publishedSeverities = new Set(Object.values(GOVERNANCE_AUDIT_SEVERITIES))
+
+    const invalidReferences = []
+    for (const { source, value } of auditSeedRecords) {
+      if (hasOwn(value, 'action') && !publishedActions.has(value.action)) {
+        invalidReferences.push(`${source}: action=${value.action}`)
+      }
+      if (hasOwn(value, 'resourceType') && !publishedResourceTypes.has(value.resourceType)) {
+        invalidReferences.push(`${source}: resourceType=${value.resourceType}`)
+      }
+      if (
+        hasOwn(value, 'systemEventType') &&
+        !publishedSystemEventTypes.has(value.systemEventType)
+      ) {
+        invalidReferences.push(`${source}: systemEventType=${value.systemEventType}`)
+      }
+      if (hasOwn(value, 'eventKey') && !publishedSystemEventTypes.has(value.eventKey)) {
+        invalidReferences.push(`${source}: eventKey=${value.eventKey}`)
+      }
+      if (hasOwn(value, 'eventCategory') && !publishedCategories.has(value.eventCategory)) {
+        invalidReferences.push(`${source}: eventCategory=${value.eventCategory}`)
+      }
+      if (hasOwn(value, 'category') && !publishedCategories.has(value.category)) {
+        invalidReferences.push(`${source}: category=${value.category}`)
+      }
+      if (hasOwn(value, 'eventSeverity') && !publishedSeverities.has(value.eventSeverity)) {
+        invalidReferences.push(`${source}: eventSeverity=${value.eventSeverity}`)
+      }
+      if (hasOwn(value, 'severity') && !publishedSeverities.has(value.severity)) {
+        invalidReferences.push(`${source}: severity=${value.severity}`)
+      }
+    }
+
+    expect(invalidReferences).toEqual([])
   })
 })
 
@@ -1670,8 +2174,13 @@ describe('All published audit actions are accepted by query validator', () => {
 /*  14. ALL RESOURCE TYPES accepted by validator                      */
 /* ================================================================== */
 
-describe('All 5 resource types accepted by resource validator', () => {
-  const allResourceTypes = ['Customer', 'Tenant', 'User', 'VMF', 'Deal']
+describe('All published resource types accepted by resource validator', () => {
+  let allResourceTypes = []
+
+  beforeAll(async () => {
+    const mod = await import('../services/auditService.js')
+    allResourceTypes = Object.values(mod.RESOURCE_TYPES)
+  })
 
   const stubResourceChain = () => {
     AuditLog.find.mockReturnValue({
@@ -1688,14 +2197,17 @@ describe('All 5 resource types accepted by resource validator', () => {
     AuditLog.countDocuments.mockResolvedValue(0)
   }
 
-  test.each(allResourceTypes)('accepts resourceType "%s"', async (resourceType) => {
+  test('accepts every published resource type', async () => {
     const token = await getSuperAdminToken()
-    stubResourceChain()
 
-    const res = await request
-      .get(`/api/v1/audit-logs/resource/${resourceType}/${CUSTOMER_ID}`)
-      .set('Authorization', `Bearer ${token}`)
+    for (const resourceType of allResourceTypes) {
+      stubResourceChain()
 
-    expect(res.status).toBe(200)
+      const res = await request
+        .get(`/api/v1/audit-logs/resource/${resourceType}/${CUSTOMER_ID}`)
+        .set('Authorization', `Bearer ${token}`)
+
+      expect(res.status).toBe(200)
+    }
   })
 })

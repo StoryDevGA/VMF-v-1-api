@@ -46,6 +46,47 @@ const buildSession = () => ({
   endSession: jest.fn(async () => {}),
 })
 
+const snapshotFrameworkPackageState = (frameworkPackage) => ({
+  status: frameworkPackage.status,
+  isDefault: frameworkPackage.isDefault,
+  versionStatus: frameworkPackage.versionStatus,
+  isLocked: frameworkPackage.isLocked,
+  lockedAt: frameworkPackage.lockedAt,
+  lockedBy: frameworkPackage.lockedBy,
+  lockedReason: frameworkPackage.lockedReason,
+  dependencyLock: frameworkPackage.dependencyLock,
+  uiContractBinding: frameworkPackage.uiContractBinding,
+  updatedBy: frameworkPackage.updatedBy,
+  activatedAt: frameworkPackage.activatedAt,
+  activatedBy: frameworkPackage.activatedBy,
+  lastCheckpointStatus: frameworkPackage.lastCheckpointStatus,
+  lastCheckpointAt: frameworkPackage.lastCheckpointAt,
+  lastCheckpointResult: frameworkPackage.lastCheckpointResult,
+})
+
+const restoreFrameworkPackageState = (frameworkPackage, snapshot) => {
+  Object.entries(snapshot).forEach(([field, value]) => {
+    frameworkPackage[field] = value
+  })
+}
+
+const buildRollbackSession = (frameworkPackages = []) => ({
+  withTransaction: jest.fn(async (callback) => {
+    const snapshots = frameworkPackages.map((frameworkPackage) => ({
+      frameworkPackage,
+      snapshot: snapshotFrameworkPackageState(frameworkPackage),
+    }))
+    try {
+      return await callback()
+    } catch (err) {
+      snapshots.forEach(({ frameworkPackage, snapshot }) =>
+        restoreFrameworkPackageState(frameworkPackage, snapshot))
+      throw err
+    }
+  }),
+  endSession: jest.fn(async () => {}),
+})
+
 const makeFakeUser = (overrides = {}) => ({
   _id: SUPER_ADMIN_ID,
   id: SUPER_ADMIN_ID,
@@ -2606,6 +2647,30 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'FRAMEWORK_PACKAGE_VALIDATED',
       resourceType: 'FrameworkPackage',
+      auditSchemaVersion: 2,
+      signatureVersion: 2,
+      isSystemEvent: true,
+      systemEventType: 'PACKAGE_VALIDATED',
+      eventCategory: 'PACKAGE',
+      eventSeverity: 'HIGH',
+      frameworkKey: 'VMF',
+      frameworkVersion: '2.3.1',
+      packageKey: 'vmf-2-3-1',
+      dependencyGraph: expect.objectContaining({
+        status: 'PASS',
+        referenceCount: expect.any(Number),
+        references: expect.any(Array),
+      }),
+      snapshot: expect.objectContaining({
+        package: expect.objectContaining({
+          frameworkKey: 'VMF',
+          frameworkVersion: '2.3.1',
+          packageKey: 'vmf-2-3-1',
+          status: 'VALIDATED',
+        }),
+        dependencyLock: expect.any(Object),
+      }),
+      checksum: expect.any(String),
       diff: expect.objectContaining({
         lastCheckpointStatus: expect.objectContaining({
           to: 'PASS',
@@ -2616,7 +2681,47 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
           }),
         }),
       }),
-    }))
+    }), expect.objectContaining({ session: expect.any(Object) }))
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/validate fails closed when governance audit evidence cannot persist', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const frameworkPackage = makeFrameworkPackageDoc({
+      status: 'DRAFT',
+    })
+    const initialStatus = frameworkPackage.status
+    const initialCheckpointStatus = frameworkPackage.lastCheckpointStatus
+    const rollbackSession = buildRollbackSession([frameworkPackage])
+    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+    startSessionSpy.mockResolvedValueOnce(rollbackSession)
+    UIContract.findOne.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue({
+          stableId: 'ui-contract-vmf-ui-contract-v1',
+          uiContractKey: 'vmf-ui-contract-v1',
+          name: 'VMF UI Contract',
+          status: 'ACTIVE',
+          versionStatus: 'ACTIVE',
+          frameworkKeys: ['VMF'],
+          sections: [{ sectionKey: 'customer_problem', runtimePath: 'framework_state.sections.customer_problem' }],
+        }),
+      }),
+    })
+    AuditLog.createLog.mockRejectedValueOnce(new Error('governance audit unavailable'))
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/validate`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(500)
+    expect(rollbackSession.withTransaction).toHaveBeenCalled()
+    expect(frameworkPackage.status).toBe(initialStatus)
+    expect(frameworkPackage.lastCheckpointStatus).toBe(initialCheckpointStatus)
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'FRAMEWORK_PACKAGE_VALIDATED',
+      isSystemEvent: true,
+      systemEventType: 'PACKAGE_VALIDATED',
+    }), expect.objectContaining({ session: expect.any(Object) }))
   })
 
   test('GET /api/v1/super-admin/runtime-control/framework-packages/:packageId/audit returns scoped audit events', async () => {
@@ -2895,6 +3000,53 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     )
   })
 
+  const mockActiveUIContractLookup = () => {
+    UIContract.findOne.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue({
+          uiContractKey: 'vmf-ui-contract-v1',
+          status: 'ACTIVE',
+          versionStatus: 'ACTIVE',
+          frameworkKeys: ['VMF'],
+          sections: [{ sectionKey: 'customer_problem', runtimePath: 'framework_state.sections.customer_problem' }],
+        }),
+      }),
+    })
+  }
+
+  const runActivationWithFailingGovernanceAudit = async (failingAction) => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const frameworkPackage = makeFrameworkPackageDoc({
+      _id: FRAMEWORK_PACKAGE_ID,
+      status: 'VALIDATED',
+    })
+    const rollbackSession = buildRollbackSession([frameworkPackage])
+
+    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+    FrameworkPackage.find.mockReturnValue({
+      session: jest.fn().mockResolvedValue([]),
+    })
+    mockActiveUIContractLookup()
+    startSessionSpy.mockResolvedValueOnce(rollbackSession)
+    AuditLog.createLog.mockImplementation(async (payload) => {
+      if (payload.action === failingAction) {
+        throw new Error(`${failingAction} audit unavailable`)
+      }
+      return {}
+    })
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/activate`)
+      .set('Authorization', `Bearer ${token}`)
+
+    return {
+      res,
+      frameworkPackage,
+      rollbackSession,
+      auditActions: AuditLog.createLog.mock.calls.map(([payload]) => payload.action),
+    }
+  }
+
   test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/activate activates a validated package and clears the previous default pointer', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     const frameworkPackage = makeFrameworkPackageDoc({
@@ -2971,6 +3123,32 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'FRAMEWORK_PACKAGE_ACTIVATED',
       resourceType: 'FrameworkPackage',
+      auditSchemaVersion: 2,
+      signatureVersion: 2,
+      isSystemEvent: true,
+      systemEventType: 'PACKAGE_ACTIVATED',
+      eventCategory: 'PACKAGE',
+      eventSeverity: 'CRITICAL',
+      frameworkKey: 'VMF',
+      frameworkVersion: '2.3.1',
+      packageKey: 'vmf-2-3-1',
+      dependencyGraph: expect.objectContaining({
+        status: 'PASS',
+        referenceCount: expect.any(Number),
+      }),
+      snapshot: expect.objectContaining({
+        package: expect.objectContaining({
+          frameworkKey: 'VMF',
+          frameworkVersion: '2.3.1',
+          packageKey: 'vmf-2-3-1',
+          status: 'ACTIVE',
+        }),
+        runtimeActivation: expect.objectContaining({
+          activationId: expect.any(String),
+          deploymentId: expect.any(String),
+        }),
+      }),
+      checksum: expect.any(String),
       scope: { frameworkKey: 'VMF' },
       summary: 'Super Admin activated framework package VMF 2.3.1',
       diff: expect.objectContaining({
@@ -2979,7 +3157,85 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
           runtimeVerdictResult: runtimeActivationParity.readinessReady.runtimeVerdictResult,
         }),
       }),
-    }))
+    }), expect.objectContaining({ session: expect.any(Object) }))
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'RUNTIME_ACTIVATION_COMPLETED',
+      isSystemEvent: true,
+      systemEventType: 'RUNTIME_ACTIVATION_COMPLETED',
+      eventCategory: 'RUNTIME',
+      eventSeverity: 'CRITICAL',
+      checksum: expect.any(String),
+    }), expect.objectContaining({ session: expect.any(Object) }))
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'RUNTIME_DEPLOYMENT_REGISTERED',
+      isSystemEvent: true,
+      systemEventType: 'RUNTIME_DEPLOYMENT_REGISTERED',
+      eventCategory: 'RUNTIME',
+      eventSeverity: 'HIGH',
+      checksum: expect.any(String),
+    }), expect.objectContaining({ session: expect.any(Object) }))
+
+    const activationAuditPayloads = AuditLog.createLog.mock.calls
+      .map(([payload]) => payload)
+      .filter((payload) => [
+        'FRAMEWORK_PACKAGE_ACTIVATED',
+        'RUNTIME_ACTIVATION_COMPLETED',
+        'RUNTIME_DEPLOYMENT_REGISTERED',
+      ].includes(payload.action))
+    const sharedChecksum = activationAuditPayloads[0]?.checksum
+
+    expect(activationAuditPayloads).toHaveLength(3)
+    expect(activationAuditPayloads.map((payload) => payload.checksum)).toEqual([
+      sharedChecksum,
+      sharedChecksum,
+      sharedChecksum,
+    ])
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/activate fails closed when PACKAGE_ACTIVATED audit cannot persist', async () => {
+    const { res, frameworkPackage, rollbackSession, auditActions } =
+      await runActivationWithFailingGovernanceAudit('FRAMEWORK_PACKAGE_ACTIVATED')
+
+    expect(res.status).toBe(500)
+    expect(rollbackSession.withTransaction).toHaveBeenCalled()
+    expect(auditActions).toEqual(['FRAMEWORK_PACKAGE_ACTIVATED'])
+    expect(frameworkPackage.status).toBe('VALIDATED')
+    expect(frameworkPackage.isDefault).toBe(false)
+    expect(frameworkPackage.activatedAt).toBeNull()
+    expect(frameworkPackage.activatedBy).toBeNull()
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/activate fails closed when RUNTIME_ACTIVATION_COMPLETED audit cannot persist', async () => {
+    const { res, frameworkPackage, rollbackSession, auditActions } =
+      await runActivationWithFailingGovernanceAudit('RUNTIME_ACTIVATION_COMPLETED')
+
+    expect(res.status).toBe(500)
+    expect(rollbackSession.withTransaction).toHaveBeenCalled()
+    expect(auditActions).toEqual([
+      'FRAMEWORK_PACKAGE_ACTIVATED',
+      'RUNTIME_ACTIVATION_COMPLETED',
+    ])
+    expect(frameworkPackage.status).toBe('VALIDATED')
+    expect(frameworkPackage.isDefault).toBe(false)
+    expect(frameworkPackage.activatedAt).toBeNull()
+    expect(frameworkPackage.activatedBy).toBeNull()
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/activate fails closed when RUNTIME_DEPLOYMENT_REGISTERED audit cannot persist', async () => {
+    const { res, frameworkPackage, rollbackSession, auditActions } =
+      await runActivationWithFailingGovernanceAudit('RUNTIME_DEPLOYMENT_REGISTERED')
+
+    expect(res.status).toBe(500)
+    expect(rollbackSession.withTransaction).toHaveBeenCalled()
+    expect(auditActions).toEqual([
+      'FRAMEWORK_PACKAGE_ACTIVATED',
+      'RUNTIME_ACTIVATION_COMPLETED',
+      'RUNTIME_DEPLOYMENT_REGISTERED',
+    ])
+    expect(frameworkPackage.status).toBe('VALIDATED')
+    expect(frameworkPackage.isDefault).toBe(false)
+    expect(frameworkPackage.activatedAt).toBeNull()
+    expect(frameworkPackage.activatedBy).toBeNull()
   })
 
   test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/activate supersedes the previous runtime deployment record', async () => {
@@ -3134,6 +3390,6 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
       diff: expect.objectContaining({
         previousActivePackageIds: [],
       }),
-    }))
+    }), expect.objectContaining({ session: expect.any(Object) }))
   })
 })

@@ -28,6 +28,12 @@ import FrameworkPackage, {
   FRAMEWORK_PACKAGE_VISIBILITY,
   FRAMEWORK_PACKAGE_WORKFLOW_EXECUTION_CONTEXTS,
 } from '../models/FrameworkPackage.js'
+import { AUDIT_ACTIONS, RESOURCE_TYPES } from '../services/auditService.js'
+import {
+  GOVERNANCE_AUDIT_EVENT_CATEGORIES,
+  GOVERNANCE_AUDIT_EVENTS,
+  GOVERNANCE_AUDIT_SEVERITIES,
+} from '../services/governanceAudit/governanceAuditEvents.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -41,8 +47,12 @@ const DEFAULT_EDITOR_CONSTANTS_FILE = path.resolve(
   workspaceRoot,
   'VMF-v-1-client/src/pages/SuperAdminFrameworkPackages/superAdminFrameworkPackages.constants.js',
 )
+const DEFAULT_AUDIT_LOG_CONSTANTS_FILE = path.resolve(
+  workspaceRoot,
+  'VMF-v-1-client/src/pages/SuperAdminAuditLogs/superAdminAuditLogs.constants.js',
+)
 const RESET_CONFIRMATION = '--confirm-reset-vmf-runtime-control'
-const VMF_VERSION = '2.3.1'
+const DEFAULT_VMF_VERSION = '2.3.1'
 const VMF_FRAMEWORK_KEY = 'VMF'
 const SEED_ACTOR_ID = new mongoose.Types.ObjectId('000000000000000000000001')
 const WORKFLOW_POLICY_DEFAULT_TIMEOUT_MS = 10000
@@ -245,6 +255,14 @@ const parseArgs = (argv = process.argv.slice(2)) => {
     reportDir: DEFAULT_REPORT_DIR,
   }
 
+  const readFlagValue = (index, flagName) => {
+    const value = argv[index + 1]
+    if (!value || String(value).startsWith('--')) {
+      throw new Error(`${flagName} requires a value. Run with --help for usage.`)
+    }
+    return value
+  }
+
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
     if (arg === '--apply') args.apply = true
@@ -256,17 +274,20 @@ const parseArgs = (argv = process.argv.slice(2)) => {
     else if (arg === '--reset-runtime-control') args.resetRuntimeControl = true
     else if (arg === RESET_CONFIRMATION) args.confirmReset = true
     else if (arg === '--seed-dir') {
+      const value = readFlagValue(index, arg)
       index += 1
-      args.seedDir = path.resolve(process.cwd(), argv[index] || '')
+      args.seedDir = path.resolve(process.cwd(), value)
       if (args.auditFile === DEFAULT_AUDIT_FILE) {
         args.auditFile = path.resolve(args.seedDir, 'canonical_seed_schema_conformance_audit.json')
       }
     } else if (arg === '--audit-file') {
+      const value = readFlagValue(index, arg)
       index += 1
-      args.auditFile = path.resolve(process.cwd(), argv[index] || '')
+      args.auditFile = path.resolve(process.cwd(), value)
     } else if (arg === '--report-dir') {
+      const value = readFlagValue(index, arg)
       index += 1
-      args.reportDir = path.resolve(process.cwd(), argv[index] || '')
+      args.reportDir = path.resolve(process.cwd(), value)
     } else {
       throw new Error(`Unknown argument: ${arg}. Run with --help for usage.`)
     }
@@ -342,7 +363,8 @@ const stripImportOnlyFields = (record) => {
   return next
 }
 
-const normalizeVersioningFields = (record) => {
+const normalizeVersioningFields = (record, seedContext = {}) => {
+  const frameworkVersion = seedContext.frameworkVersion || DEFAULT_VMF_VERSION
   const nullableFields = [
     'deprecatedInVersion',
     'lockedAt',
@@ -362,7 +384,7 @@ const normalizeVersioningFields = (record) => {
   if (!Array.isArray(record.lockedByPackageKeys)) record.lockedByPackageKeys = []
   if (!Array.isArray(record.compatibilityTags)) record.compatibilityTags = []
   if (!record.compatibilityTags.includes(VMF_FRAMEWORK_KEY)) record.compatibilityTags.push(VMF_FRAMEWORK_KEY)
-  if (!record.compatibilityTags.includes(VMF_VERSION)) record.compatibilityTags.push(VMF_VERSION)
+  if (!record.compatibilityTags.includes(frameworkVersion)) record.compatibilityTags.push(frameworkVersion)
 
   return record
 }
@@ -593,10 +615,10 @@ const normalizeFrameworkPackage = (record, notes, sourceLabel) => {
   return record
 }
 
-const normalizeRecord = (step, rawRecord, notes) => {
+const normalizeRecord = (step, rawRecord, notes, seedContext = {}) => {
   const sourceLabel = step.label
   const record = stampSeedActorFields(
-    normalizeVersioningFields(stripImportOnlyFields(convertExtendedJson(rawRecord))),
+    normalizeVersioningFields(stripImportOnlyFields(convertExtendedJson(rawRecord)), seedContext),
   )
 
   if (step.model === RuntimePathRegistry) return normalizeRuntimePath(record, notes, sourceLabel)
@@ -623,8 +645,21 @@ const getRecordsFromSeed = (step, parsedSeed) => {
   return records
 }
 
+const resolveSeedFrameworkVersion = (seedDir) => {
+  const frameworkPackageStep = IMPORT_STEPS.find((step) => step.model === FrameworkPackage)
+  if (!frameworkPackageStep) return DEFAULT_VMF_VERSION
+  const filePath = path.resolve(seedDir, frameworkPackageStep.fileName)
+  if (!fs.existsSync(filePath)) return DEFAULT_VMF_VERSION
+  const parsedSeed = JSON.parse(fs.readFileSync(filePath, 'utf8'))
+  const [frameworkPackage] = getRecordsFromSeed(frameworkPackageStep, parsedSeed)
+  return String(frameworkPackage?.version || '').trim() || DEFAULT_VMF_VERSION
+}
+
 const loadSeedBundle = (seedDir) => {
   const notes = []
+  const seedContext = {
+    frameworkVersion: resolveSeedFrameworkVersion(seedDir),
+  }
   return IMPORT_STEPS.map((step) => {
     const filePath = path.resolve(seedDir, step.fileName)
     if (!fs.existsSync(filePath)) {
@@ -647,9 +682,9 @@ const loadSeedBundle = (seedDir) => {
     return {
       ...step,
       filePath,
-      records: rawRecords.map((record) => normalizeRecord(step, record, notes)),
+      records: rawRecords.map((record) => normalizeRecord(step, record, notes, seedContext)),
     }
-  }).concat({ notes })
+  }).concat({ notes, seedContext })
 }
 
 const buildIndexes = (bundle) => {
@@ -1280,6 +1315,245 @@ const validateFrameworkPackageEditorContract = async (bundle, options, notes) =>
   }
 }
 
+const loadAuditLogConstants = async (notes) => {
+  if (!fs.existsSync(DEFAULT_AUDIT_LOG_CONSTANTS_FILE)) {
+    const reason = `Missing Audit Logs constants file: ${DEFAULT_AUDIT_LOG_CONSTANTS_FILE}`
+    if (!['development', 'test'].includes(String(process.env.NODE_ENV || '').trim())) {
+      notes.push({
+        level: 'warning',
+        source: 'Audit Registry Contract',
+        message: `${reason}. Client constants guard skipped for API-only deployment context.`,
+      })
+      return { __skipped: true, reason }
+    }
+
+    notes.push({
+      level: 'error',
+      source: 'Audit Registry Contract',
+      message: reason,
+    })
+    return null
+  }
+
+  try {
+    return await import(pathToFileURL(DEFAULT_AUDIT_LOG_CONSTANTS_FILE).href)
+  } catch (error) {
+    notes.push({
+      level: 'error',
+      source: 'Audit Registry Contract',
+      message: `Could not load Audit Logs constants: ${error.message}`,
+    })
+    return null
+  }
+}
+
+const setDifference = (left, right) =>
+  [...left].filter((value) => !right.has(value)).sort()
+
+const checkAuditOptionValues = ({ notes, field, clientValues, backendValues }) => {
+  const missingFromClient = setDifference(backendValues, clientValues)
+  const extraClientValues = setDifference(clientValues, backendValues)
+
+  for (const value of missingFromClient) {
+    notes.push({
+      level: 'error',
+      source: 'Audit Registry Contract',
+      message:
+        `${field} is missing registered audit value "${value}". `
+        + 'Update Audit Logs Explorer constants before importing this seed.',
+    })
+  }
+
+  for (const value of extraClientValues) {
+    notes.push({
+      level: 'error',
+      source: 'Audit Registry Contract',
+      message:
+        `${field} exposes "${value}", but the API audit registry does not allow it. `
+        + 'Add the value to the API registry first or remove it from the client constants.',
+    })
+  }
+
+  return {
+    field,
+    missingFromClient,
+    extraClientValues,
+  }
+}
+
+const listSeedJsonFiles = (dir) => {
+  if (!fs.existsSync(dir)) return []
+
+  return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const entryPath = path.join(dir, entry.name)
+    if (entry.isDirectory()) return listSeedJsonFiles(entryPath)
+    if (entry.isFile() && /\.(json|jsonl)$/i.test(entry.name)) return [entryPath]
+    return []
+  })
+}
+
+const parseSeedJsonEntries = (filePath, seedDir) => {
+  const source = fs.readFileSync(filePath, 'utf8')
+  if (/\.jsonl$/i.test(filePath)) {
+    return source
+      .split(/\r?\n/)
+      .map((line, index) => ({ line, index: index + 1 }))
+      .filter(({ line }) => line.trim())
+      .map(({ line, index }) => ({
+        source: `${path.relative(seedDir, filePath)}:${index}`,
+        value: JSON.parse(line),
+      }))
+  }
+
+  return [{
+    source: path.relative(seedDir, filePath),
+    value: JSON.parse(source),
+  }]
+}
+
+const hasOwn = (value, key) =>
+  Object.prototype.hasOwnProperty.call(Object(value), key)
+
+const isAuditSeedObject = (value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+
+  const isGovernanceAuditRow =
+    hasOwn(value, 'auditSchemaVersion') ||
+    hasOwn(value, 'isSystemEvent') ||
+    hasOwn(value, 'systemEventType') ||
+    hasOwn(value, 'eventCategory') ||
+    hasOwn(value, 'eventSeverity') ||
+    hasOwn(value, 'previousSignature')
+
+  const isLegacyAuditRow =
+    typeof value.action === 'string' &&
+    typeof value.resourceType === 'string' &&
+    ['actorUserId', 'resourceId', 'requestId', 'diff', 'summary'].some((key) =>
+      hasOwn(value, key),
+    )
+
+  const isAuditEventRegistryRow =
+    typeof value.eventKey === 'string' &&
+    ['requiresSnapshot', 'requiresChecksum', 'requiresDependencyGraph', 'isActive']
+      .some((key) => hasOwn(value, key))
+
+  return isGovernanceAuditRow || isLegacyAuditRow || isAuditEventRegistryRow
+}
+
+const collectAuditSeedObjects = (value, source, records = []) => {
+  if (Array.isArray(value)) {
+    value.forEach((entry, index) =>
+      collectAuditSeedObjects(entry, `${source}[${index}]`, records),
+    )
+    return records
+  }
+
+  if (!value || typeof value !== 'object') return records
+
+  if (isAuditSeedObject(value)) records.push({ source, value })
+
+  for (const [key, entry] of Object.entries(value)) {
+    collectAuditSeedObjects(entry, `${source}.${key}`, records)
+  }
+
+  return records
+}
+
+const validateAuditSeedRecords = (seedRecords, registrySets, notes) => {
+  const failures = []
+  const check = ({ source, field, value, allowed }) => {
+    if (!hasOwn(value, field) || allowed.has(value[field])) return
+    const message = `${source}: ${field}="${value[field]}" is not registered.`
+    failures.push(message)
+    notes.push({
+      level: 'error',
+      source: 'Audit Registry Contract',
+      message,
+    })
+  }
+
+  for (const record of seedRecords) {
+    check({ ...record, field: 'action', allowed: registrySets.actions })
+    check({ ...record, field: 'resourceType', allowed: registrySets.resourceTypes })
+    check({ ...record, field: 'systemEventType', allowed: registrySets.systemEventTypes })
+    check({ ...record, field: 'eventKey', allowed: registrySets.systemEventTypes })
+    check({ ...record, field: 'eventCategory', allowed: registrySets.categories })
+    check({ ...record, field: 'category', allowed: registrySets.categories })
+    check({ ...record, field: 'eventSeverity', allowed: registrySets.severities })
+    check({ ...record, field: 'severity', allowed: registrySets.severities })
+  }
+
+  return failures
+}
+
+const validateAuditRegistryContract = async (options, notes) => {
+  const registrySets = {
+    actions: new Set(Object.values(AUDIT_ACTIONS)),
+    resourceTypes: new Set(Object.values(RESOURCE_TYPES)),
+    systemEventTypes: new Set(Object.values(GOVERNANCE_AUDIT_EVENTS).map((event) => event.eventKey)),
+    categories: new Set(Object.values(GOVERNANCE_AUDIT_EVENT_CATEGORIES)),
+    severities: new Set(Object.values(GOVERNANCE_AUDIT_SEVERITIES)),
+  }
+
+  const clientConstants = await loadAuditLogConstants(notes)
+  const checks = []
+  if (clientConstants && !clientConstants.__skipped) {
+    checks.push(
+      checkAuditOptionValues({
+        notes,
+        field: 'ACTION_OPTIONS',
+        clientValues: optionValues(clientConstants.ACTION_OPTIONS),
+        backendValues: registrySets.actions,
+      }),
+      checkAuditOptionValues({
+        notes,
+        field: 'RESOURCE_TYPE_OPTIONS',
+        clientValues: optionValues(clientConstants.RESOURCE_TYPE_OPTIONS),
+        backendValues: registrySets.resourceTypes,
+      }),
+      checkAuditOptionValues({
+        notes,
+        field: 'SYSTEM_EVENT_TYPE_OPTIONS',
+        clientValues: optionValues(clientConstants.SYSTEM_EVENT_TYPE_OPTIONS),
+        backendValues: registrySets.systemEventTypes,
+      }),
+      checkAuditOptionValues({
+        notes,
+        field: 'EVENT_CATEGORY_OPTIONS',
+        clientValues: optionValues(clientConstants.EVENT_CATEGORY_OPTIONS),
+        backendValues: registrySets.categories,
+      }),
+      checkAuditOptionValues({
+        notes,
+        field: 'EVENT_SEVERITY_OPTIONS',
+        clientValues: optionValues(clientConstants.EVENT_SEVERITY_OPTIONS),
+        backendValues: registrySets.severities,
+      }),
+    )
+  }
+
+  const seedRecords = listSeedJsonFiles(options.seedDir)
+    .flatMap((filePath) => parseSeedJsonEntries(filePath, options.seedDir))
+    .flatMap(({ source, value }) => collectAuditSeedObjects(value, source))
+  const seedFailures = validateAuditSeedRecords(seedRecords, registrySets, notes)
+  const constantFailures = checks.reduce(
+    (count, check) => count + check.missingFromClient.length + check.extraClientValues.length,
+    0,
+  )
+  const failures = constantFailures + seedFailures.length
+
+  return {
+    skipped: Boolean(clientConstants?.__skipped),
+    status: failures > 0 ? 'fail' : 'pass',
+    constantsFile: clientConstants?.__skipped ? null : DEFAULT_AUDIT_LOG_CONSTANTS_FILE,
+    seedDir: options.seedDir,
+    seedRecords: seedRecords.length,
+    failures,
+    checks,
+    seedFailures,
+  }
+}
+
 const validateWithMongoose = async (bundle, notes) => {
   for (const step of bundle.filter((entry) => entry.records)) {
     for (const record of step.records) {
@@ -1428,7 +1702,8 @@ const writeReport = (options, payload) => {
   try {
     fs.mkdirSync(options.reportDir, { recursive: true })
     const stamp = new Date().toISOString().replace(/[:.]/g, '-')
-    const reportPath = path.join(options.reportDir, `vmf-2-3-1-seed-import-${stamp}.json`)
+    const versionSlug = String(payload.version || DEFAULT_VMF_VERSION).replace(/[^a-z\d]+/gi, '-').toLowerCase()
+    const reportPath = path.join(options.reportDir, `vmf-${versionSlug}-seed-import-${stamp}.json`)
     fs.writeFileSync(reportPath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8')
     return { reportPath, reportError: null }
   } catch (error) {
@@ -1442,7 +1717,7 @@ const printSummary = (payload, reportPath, reportError, json) => {
     return
   }
 
-  console.log(`VMF ${VMF_VERSION} seed import ${payload.summary.mode.toUpperCase()}`)
+  console.log(`VMF ${payload.version || DEFAULT_VMF_VERSION} seed import ${payload.summary.mode.toUpperCase()}`)
   console.log(`Seed dir: ${payload.summary.seedDir}`)
   if (payload.audit?.skipped) {
     console.log(`Audit: skipped (${payload.audit.reason})`)
@@ -1455,6 +1730,15 @@ const printSummary = (payload, reportPath, reportError, json) => {
     console.log(
       `Editor option contract: ${String(payload.editorOptionContract.status || 'unknown').toUpperCase()}`
       + ` (${payload.editorOptionContract.failures || 0} issue(s))`,
+    )
+  }
+  if (payload.auditRegistryContract?.skipped) {
+    console.log('Audit registry contract: skipped')
+  } else if (payload.auditRegistryContract) {
+    console.log(
+      `Audit registry contract: ${String(payload.auditRegistryContract.status || 'unknown').toUpperCase()}`
+      + ` (${payload.auditRegistryContract.failures || 0} issue(s), `
+      + `${payload.auditRegistryContract.seedRecords || 0} seed audit record(s))`,
     )
   }
   for (const row of payload.summary.collections) {
@@ -1489,9 +1773,12 @@ const importFrameworkSeed = async (optionOverrides = {}) => {
     ...optionOverrides,
   }
   const bundle = loadSeedBundle(options.seedDir)
-  const notes = bundle.find((entry) => entry.notes)?.notes || []
+  const metadata = bundle.find((entry) => entry.notes)
+  const notes = metadata?.notes || []
+  const frameworkVersion = metadata?.seedContext?.frameworkVersion || DEFAULT_VMF_VERSION
   validateCrossReferences(bundle, notes)
   const editorOptionContract = await validateFrameworkPackageEditorContract(bundle, options, notes)
+  const auditRegistryContract = await validateAuditRegistryContract(options, notes)
   const audit = validateConformanceAudit(bundle, options, notes)
   await validateWithMongoose(bundle, notes)
 
@@ -1516,8 +1803,9 @@ const importFrameworkSeed = async (optionOverrides = {}) => {
 
   const payload = {
     generatedAt: new Date().toISOString(),
-    version: VMF_VERSION,
+    version: frameworkVersion,
     audit,
+    auditRegistryContract,
     editorOptionContract,
     summary,
     notes,
