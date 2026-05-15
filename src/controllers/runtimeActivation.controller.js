@@ -50,9 +50,29 @@ export const getRuntimeActivationPackageHistory = async (req, res, next) => {
       .sort({ activatedAt: -1, createdAt: -1 })
       .limit(50)
       .lean()
+    const activationIds = rows
+      .map((row) => String(row?.activationId || '').trim())
+      .filter(Boolean)
+    const deploymentRows = activationIds.length > 0
+      ? await RuntimeDeployment.find({ activationId: { $in: activationIds } })
+        .sort({ createdAt: -1 })
+        .lean()
+      : []
+    const deploymentByActivationId = new Map(
+      deploymentRows.map((row) => [String(row.activationId).trim(), serializeDoc(row)]),
+    )
 
     return res.status(200).json({
-      data: rows.map(serializeDoc),
+      data: rows.map((row) => {
+        const serializedRow = serializeDoc(row)
+        const deployment = deploymentByActivationId.get(String(serializedRow?.activationId || '').trim())
+
+        return {
+          ...serializedRow,
+          deploymentId: serializedRow?.deploymentId || deployment?.deploymentId || '',
+          deploymentStatus: deployment?.status || '',
+        }
+      }),
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (error) {

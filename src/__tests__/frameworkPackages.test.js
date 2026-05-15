@@ -310,6 +310,8 @@ const makeFrameworkPackageDoc = (overrides = {}) => {
     activatedBy: null,
     dependencyLock: {
       status: 'PASS',
+      snapshotId: 'dep-lock-vmf-2-3-1',
+      snapshotHash: 'sha256-dep-lock-vmf-2-3-1',
       resolvedAt: new Date('2026-05-07T13:42:00.000Z'),
       resolvedBy: SUPER_ADMIN_ID,
       packageKey: 'vmf-2-3-1',
@@ -3243,6 +3245,10 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     expect(frameworkPackage.isDefault).toBe(true)
     expect(RuntimeActivationSnapshot.create).toHaveBeenCalledWith([
       expect.objectContaining({
+        activationId: expect.any(String),
+        deploymentId: expect.stringMatching(/^deployment-vmf-global-production-/),
+        dependencySnapshotId: 'dep-lock-vmf-2-3-1',
+        dependencySnapshotHash: 'sha256-dep-lock-vmf-2-3-1',
         activationStatus: runtimeActivationParity.activationResult.activationStatus,
         runtimeVerdictResult: runtimeActivationParity.readinessReady.runtimeVerdictResult,
         tenantScope: runtimeActivationParity.activationResult.tenantScope,
@@ -3258,6 +3264,10 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     ], expect.objectContaining({ session: expect.any(Object) }))
     expect(res.body.meta.runtimeActivation.activationSnapshot).toEqual(expect.objectContaining({
       id: expect.any(String),
+      activationId: expect.any(String),
+      deploymentId: expect.stringMatching(/^deployment-vmf-global-production-/),
+      dependencySnapshotId: 'dep-lock-vmf-2-3-1',
+      dependencySnapshotHash: 'sha256-dep-lock-vmf-2-3-1',
       activationStatus: runtimeActivationParity.activationResult.activationStatus,
     }))
     expect(res.body.meta.runtimeActivation.deployment).toEqual(expect.objectContaining({
@@ -3334,6 +3344,67 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
       sharedChecksum,
       sharedChecksum,
     ])
+  })
+
+  test('GET /api/v1/super-admin/runtime-control/runtime-activation/packages/:packageId/history includes resolved deployment identifiers', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const activationId = 'activation-vmf-2-3-1-history'
+    const deploymentId = 'deployment-vmf-global-production-history'
+    const deploymentQuery = buildFrameworkPackageQueryChain([
+      {
+        _id: '707f1f77bcf86cd799439301',
+        activationId,
+        deploymentId,
+        status: runtimeActivationParity.activationResult.deploymentStatus,
+      },
+    ])
+
+    RuntimeActivationSnapshot.find.mockReturnValue(buildFrameworkPackageQueryChain([
+      {
+        _id: '707f1f77bcf86cd799439201',
+        activationId,
+        packageId: FRAMEWORK_PACKAGE_ID,
+        packageKey: 'vmf-2-3-1',
+        frameworkKey: 'VMF',
+        frameworkVersion: '2.3.1',
+        activationStatus: runtimeActivationParity.activationResult.activationStatus,
+        dependencySnapshotId: 'dep-lock-vmf-2-3-1',
+        dependencySnapshotHash: 'sha256-dep-lock-vmf-2-3-1',
+      },
+    ]))
+    RuntimeDeployment.find.mockReturnValue(deploymentQuery)
+
+    const res = await request
+      .get(`/api/v1/super-admin/runtime-control/runtime-activation/packages/${FRAMEWORK_PACKAGE_ID}/history`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(RuntimeDeployment.find).toHaveBeenCalledWith({ activationId: { $in: [activationId] } })
+    expect(deploymentQuery.sort).toHaveBeenCalledWith({ createdAt: -1 })
+    expect(res.body.data).toEqual([
+      expect.objectContaining({
+        id: '707f1f77bcf86cd799439201',
+        activationId,
+        deploymentId,
+        deploymentStatus: runtimeActivationParity.activationResult.deploymentStatus,
+        dependencySnapshotId: 'dep-lock-vmf-2-3-1',
+        dependencySnapshotHash: 'sha256-dep-lock-vmf-2-3-1',
+      }),
+    ])
+  })
+
+  test('buildDependencyLockSnapshot rejects invalid lockedAt values instead of creating a wall-clock snapshot id', () => {
+    expect(() => frameworkPackageController.buildDependencyLockSnapshot({
+      frameworkPackage: {
+        frameworkKey: 'VMF',
+        packageKey: 'vmf-2-3-1',
+        version: '2.3.1',
+      },
+      dependencies: {},
+      actorUserId: SUPER_ADMIN_ID,
+      lockedAt: 'not-a-valid-date',
+      status: 'PASS',
+    })).toThrow(/buildDependencyLockSnapshot: invalid lockedAt value: not-a-valid-date/)
   })
 
   test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/activate fails closed when PACKAGE_ACTIVATED audit cannot persist', async () => {

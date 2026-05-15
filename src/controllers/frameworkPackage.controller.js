@@ -1923,21 +1923,44 @@ const buildUIContractSnapshot = ({ dependencies = {} } = {}) => {
   }
 }
 
-const buildDependencyLockSnapshot = ({
+export const buildDependencyLockSnapshot = ({
   frameworkPackage,
   dependencies,
   actorUserId,
   lockedAt,
   status = 'PASS',
-}) => ({
-  status,
-  resolvedAt: lockedAt,
-  resolvedBy: actorUserId,
-  packageKey: frameworkPackage.packageKey,
-  packageVersion: frameworkPackage.version,
-  references: buildDependencyLockReferences({ dependencies, lockedAt }),
-  ...(dependencies?.uiContract ? { uiContractSnapshot: buildUIContractSnapshot({ dependencies }) } : {}),
-})
+}) => {
+  const lockedAtDate = lockedAt instanceof Date ? lockedAt : new Date(lockedAt)
+  if (Number.isNaN(lockedAtDate.getTime())) {
+    throw new Error(`buildDependencyLockSnapshot: invalid lockedAt value: ${lockedAt}`)
+  }
+  const lockedAtIso = lockedAtDate.toISOString()
+  const snapshotIdSeed = [
+    frameworkPackage.packageKey || frameworkPackage.frameworkKey || 'package',
+    frameworkPackage.version || '',
+    lockedAtIso.replace(/[-:.TZ]/g, '').slice(0, 14),
+  ]
+    .filter(Boolean)
+    .join('-')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  const snapshot = {
+    status,
+    resolvedAt: lockedAt,
+    resolvedBy: actorUserId,
+    packageKey: frameworkPackage.packageKey,
+    packageVersion: frameworkPackage.version,
+    references: buildDependencyLockReferences({ dependencies, lockedAt }),
+    ...(dependencies?.uiContract ? { uiContractSnapshot: buildUIContractSnapshot({ dependencies }) } : {}),
+  }
+
+  return {
+    snapshotId: `dep-lock-${snapshotIdSeed || 'runtime-package'}`,
+    snapshotHash: generateChecksum(snapshot),
+    ...snapshot,
+  }
+}
 
 const updateRuntimeControlDependencyLocks = async ({
   dependencies,

@@ -283,6 +283,7 @@ export const registerRuntimeActivation = async ({
 
   const snapshotPayload = {
     activationId,
+    deploymentId,
     packageId: frameworkPackage._id,
     packageKey: frameworkPackage.packageKey || '',
     frameworkKey: frameworkPackage.frameworkKey,

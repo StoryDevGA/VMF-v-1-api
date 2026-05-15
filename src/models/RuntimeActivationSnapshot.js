@@ -20,6 +20,13 @@ const runtimeActivationSnapshotSchema = new mongoose.Schema(
       maxlength: 160,
       index: true,
     },
+    deploymentId: {
+      type: String,
+      trim: true,
+      maxlength: 180,
+      default: '',
+      index: true,
+    },
     packageId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'FrameworkPackage',

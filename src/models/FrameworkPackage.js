@@ -580,6 +580,18 @@ const frameworkPackageDependencyLockReferenceSchema = new mongoose.Schema(
 
 const frameworkPackageDependencyLockSchema = new mongoose.Schema(
   {
+    snapshotId: {
+      type: String,
+      trim: true,
+      maxlength: 180,
+      default: '',
+    },
+    snapshotHash: {
+      type: String,
+      trim: true,
+      maxlength: 180,
+      default: '',
+    },
     status: {
       type: String,
       enum: ['PASS', 'PASS_WITH_WARNINGS', 'FAIL'],
