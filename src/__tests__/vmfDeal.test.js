@@ -260,6 +260,8 @@ const makeFrameworkPackage = (overrides = {}) => ({
   id: FRAMEWORK_PACKAGE_ID,
   frameworkKey: 'VMF',
   frameworkName: 'Value Management Framework',
+  packageName: 'VMF Active Package',
+  packageKey: 'vmf-active-package',
   version: '2.3.1',
   status: 'ACTIVE',
   isDefault: true,
@@ -712,6 +714,8 @@ describe('GET /api/v1/customers/:customerId/tenants/:tenantId/vmfs', () => {
 
     expect(res.status).toBe(200)
     expect(res.body.data[0].frameworkPackageId).toBe(FRAMEWORK_PACKAGE_ID)
+    expect(res.body.data[0].frameworkPackage.packageName).toBe('VMF Active Package')
+    expect(res.body.data[0].frameworkPackage.packageKey).toBe('vmf-active-package')
     expect(res.body.data[0].frameworkPackage.version).toBe('2.3.1')
     expect(res.body.data[0].snapshotStatus).toBe('PACKAGE_BOUND')
     expect(res.body.data[0].completionState).toBe('NOT_TRACKED')

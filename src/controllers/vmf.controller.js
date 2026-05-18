@@ -103,6 +103,8 @@ const serializeFrameworkPackageSummary = (frameworkPackage) => {
     id: toIdString(plain.id || plain._id),
     frameworkKey: plain.frameworkKey,
     frameworkName: plain.frameworkName,
+    packageName: plain.packageName,
+    packageKey: plain.packageKey,
     version: plain.version,
     status: plain.status,
     isDefault: plain.isDefault,
