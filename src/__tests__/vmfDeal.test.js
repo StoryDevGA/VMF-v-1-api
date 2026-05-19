@@ -265,6 +265,9 @@ const makeFrameworkPackage = (overrides = {}) => ({
   version: '2.3.1',
   status: 'ACTIVE',
   isDefault: true,
+  visibility: 'CUSTOMER_VISIBLE',
+  customerAccessMode: 'ALL_CUSTOMERS',
+  assignedCustomerIds: [],
   compatibleWorkflowKeys: ['vmf-publish'],
   defaultAgentIds: ['agent-validator'],
   requiredSkillIds: ['skill-snapshot'],
@@ -406,6 +409,7 @@ beforeEach(() => {
   SystemVersioningPolicy.findActive = jest.fn().mockResolvedValue(null)
   FrameworkPackage.findById = jest.fn().mockResolvedValue(null)
   FrameworkPackage.find = jest.fn().mockResolvedValue([])
+  FrameworkPackage.countDocuments = jest.fn().mockResolvedValue(0)
   FrameworkPackage.findActiveByFrameworkKey = jest.fn().mockResolvedValue(null)
   Deal.findById = jest.fn()
   Deal.find = jest.fn()
@@ -941,6 +945,139 @@ describe('GET /api/v1/customers/:customerId/tenants/:tenantId/vmfs', () => {
 })
 
 /* ================================================================== */
+/*  LIST AVAILABLE VMF FRAMEWORK PACKAGES                             */
+/* ================================================================== */
+
+describe('GET /api/v1/customers/:customerId/tenants/:tenantId/vmfs/framework-packages', () => {
+  test('lists active customer-visible VMF framework packages available to the tenant workspace', async () => {
+    const token = await getTenantAdminToken()
+    const packageRows = [
+      makeFrameworkPackage(),
+      makeFrameworkPackage({
+        _id: FRAMEWORK_PACKAGE_ID_2,
+        id: FRAMEWORK_PACKAGE_ID_2,
+        packageName: 'VMF Enterprise Package',
+        packageKey: 'vmf-enterprise-package',
+        version: '2.4.0',
+        isDefault: false,
+        customerAccessMode: 'SELECTED_CUSTOMERS',
+        assignedCustomerIds: [CUSTOMER_ID],
+      }),
+    ]
+
+    Tenant.findById.mockResolvedValue(makeFakeTenant())
+    FrameworkPackage.countDocuments.mockResolvedValue(packageRows.length)
+    FrameworkPackage.find.mockReturnValue({
+      sort: jest.fn().mockReturnValue({
+        skip: jest.fn().mockReturnValue({
+          limit: jest.fn().mockReturnValue({
+            lean: jest.fn().mockResolvedValue(packageRows),
+          }),
+        }),
+      }),
+    })
+
+    const res = await request
+      .get(`/api/v1/customers/${CUSTOMER_ID}/tenants/${TENANT_ID}/vmfs/framework-packages`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(FrameworkPackage.find).toHaveBeenCalledWith({
+      frameworkKey: 'VMF',
+      status: 'ACTIVE',
+      $or: [
+        { isDefault: true },
+        {
+          visibility: 'CUSTOMER_VISIBLE',
+          customerAccessMode: 'ALL_CUSTOMERS',
+        },
+        {
+          visibility: 'CUSTOMER_VISIBLE',
+          customerAccessMode: 'SELECTED_CUSTOMERS',
+          assignedCustomerIds: CUSTOMER_ID,
+        },
+      ],
+    })
+    expect(res.body.data).toEqual([
+      expect.objectContaining({
+        id: FRAMEWORK_PACKAGE_ID,
+        packageName: 'VMF Active Package',
+        version: '2.3.1',
+        status: 'ACTIVE',
+      }),
+      expect.objectContaining({
+        id: FRAMEWORK_PACKAGE_ID_2,
+        packageName: 'VMF Enterprise Package',
+        version: '2.4.0',
+        status: 'ACTIVE',
+      }),
+    ])
+  })
+
+  test('allows VMF_VIEW-only tenant users to list customer-visible VMF packages', async () => {
+    const token = await getRegularUserToken()
+    const packageRows = [makeFrameworkPackage()]
+
+    Tenant.findById.mockResolvedValue(makeFakeTenant())
+    FrameworkPackage.countDocuments.mockResolvedValue(packageRows.length)
+    FrameworkPackage.find.mockReturnValue({
+      sort: jest.fn().mockReturnValue({
+        skip: jest.fn().mockReturnValue({
+          limit: jest.fn().mockReturnValue({
+            lean: jest.fn().mockResolvedValue(packageRows),
+          }),
+        }),
+      }),
+    })
+
+    const res = await request
+      .get(`/api/v1/customers/${CUSTOMER_ID}/tenants/${TENANT_ID}/vmfs/framework-packages`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data[0]).toEqual(expect.objectContaining({
+      id: FRAMEWORK_PACKAGE_ID,
+      packageName: 'VMF Active Package',
+      status: 'ACTIVE',
+    }))
+  })
+
+  test('lists the active default VMF framework package even when it is not customer-visible', async () => {
+    const token = await getTenantAdminToken()
+    const packageRows = [
+      makeFrameworkPackage({
+        visibility: 'INTERNAL_ONLY',
+        customerAccessMode: 'ALL_CUSTOMERS',
+      }),
+    ]
+
+    Tenant.findById.mockResolvedValue(makeFakeTenant())
+    FrameworkPackage.countDocuments.mockResolvedValue(packageRows.length)
+    FrameworkPackage.find.mockReturnValue({
+      sort: jest.fn().mockReturnValue({
+        skip: jest.fn().mockReturnValue({
+          limit: jest.fn().mockReturnValue({
+            lean: jest.fn().mockResolvedValue(packageRows),
+          }),
+        }),
+      }),
+    })
+
+    const res = await request
+      .get(`/api/v1/customers/${CUSTOMER_ID}/tenants/${TENANT_ID}/vmfs/framework-packages`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data[0]).toEqual(expect.objectContaining({
+      id: FRAMEWORK_PACKAGE_ID,
+      packageName: 'VMF Active Package',
+      isDefault: true,
+      status: 'ACTIVE',
+    }))
+  })
+})
+
+/* ================================================================== */
 /*  CREATE VMF                                                        */
 /* ================================================================== */
 
@@ -1047,6 +1184,68 @@ describe('POST /api/v1/customers/:customerId/tenants/:tenantId/vmfs', () => {
     expect(res.body.data.snapshotStatus).toBe('PACKAGE_BOUND')
 
     VMF.prototype.save = origSave
+  })
+
+  test('accepts an explicit active default frameworkPackageId even when it is not customer-visible', async () => {
+    const token = await getSuperAdminToken()
+    Tenant.findById.mockResolvedValue(makeFakeTenant())
+    VMF.countByTenant.mockResolvedValue(0)
+    FrameworkPackage.findById.mockResolvedValue(
+      makeFrameworkPackage({
+        visibility: 'INTERNAL_ONLY',
+        customerAccessMode: 'ALL_CUSTOMERS',
+      }),
+    )
+    SystemVersioningPolicy.findActive.mockResolvedValue(
+      makeActivePolicy({
+        rules: { frameworkVersion: '2.3.1' },
+      }),
+    )
+
+    const origSave = VMF.prototype.save
+    VMF.prototype.save = jest.fn(async function () {
+      this._id = VMF_ID
+      this.id = VMF_ID
+      return this
+    })
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/tenants/${TENANT_ID}/vmfs`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        name: 'Default Package VMF',
+        frameworkPackageId: FRAMEWORK_PACKAGE_ID,
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data.frameworkPackageId).toBe(FRAMEWORK_PACKAGE_ID)
+    expect(res.body.data.snapshotStatus).toBe('PACKAGE_BOUND')
+
+    VMF.prototype.save = origSave
+  })
+
+  test('returns 422 when frameworkPackageId is not available to the customer', async () => {
+    const token = await getSuperAdminToken()
+    Tenant.findById.mockResolvedValue(makeFakeTenant())
+    VMF.countByTenant.mockResolvedValue(0)
+    FrameworkPackage.findById.mockResolvedValue(
+      makeFrameworkPackage({
+        isDefault: false,
+        customerAccessMode: 'SELECTED_CUSTOMERS',
+        assignedCustomerIds: ['607f1f77bcf86cd799439999'],
+      }),
+    )
+
+    const res = await request
+      .post(`/api/v1/customers/${CUSTOMER_ID}/tenants/${TENANT_ID}/vmfs`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        name: 'Unavailable Package VMF',
+        frameworkPackageId: FRAMEWORK_PACKAGE_ID,
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.frameworkPackageId).toBe('Framework package is not available to this customer.')
   })
 
   test('returns 422 when frameworkPackageId targets a non-VMF package', async () => {

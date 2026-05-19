@@ -24,6 +24,10 @@ import {
   SystemVersioningPolicy,
   FrameworkPackage,
 } from '../models/index.js'
+import {
+  FRAMEWORK_PACKAGE_CUSTOMER_ACCESS_MODES,
+  FRAMEWORK_PACKAGE_VISIBILITY,
+} from '../models/FrameworkPackage.js'
 import auditService from '../services/auditService.js'
 import customerGovernanceService from '../services/customerGovernanceService.js'
 import logger from '../config/logger.js'
@@ -120,6 +124,48 @@ const serializeFrameworkPackageSummary = (frameworkPackage) => {
   }
 }
 
+const isFrameworkPackageAvailableToCustomer = (frameworkPackage, customerId) => {
+  if (!frameworkPackage || !customerId) return false
+
+  if (
+    frameworkPackage.frameworkKey === VMF_FRAMEWORK_KEY
+    && frameworkPackage.status === 'ACTIVE'
+    && frameworkPackage.isDefault === true
+  ) {
+    return true
+  }
+
+  const visibility = String(frameworkPackage.visibility ?? '').trim().toUpperCase()
+  const accessMode = String(frameworkPackage.customerAccessMode ?? '').trim().toUpperCase()
+
+  if (visibility !== FRAMEWORK_PACKAGE_VISIBILITY.CUSTOMER_VISIBLE) return false
+  if (accessMode === FRAMEWORK_PACKAGE_CUSTOMER_ACCESS_MODES.ALL_CUSTOMERS) return true
+  if (accessMode !== FRAMEWORK_PACKAGE_CUSTOMER_ACCESS_MODES.SELECTED_CUSTOMERS) return false
+
+  const assignedCustomerIds = Array.isArray(frameworkPackage.assignedCustomerIds)
+    ? frameworkPackage.assignedCustomerIds
+    : []
+
+  return assignedCustomerIds.some((assignedCustomerId) => toIdString(assignedCustomerId) === String(customerId))
+}
+
+const buildAvailableFrameworkPackageFilter = (customerId) => ({
+  frameworkKey: VMF_FRAMEWORK_KEY,
+  status: 'ACTIVE',
+  $or: [
+    { isDefault: true },
+    {
+      visibility: FRAMEWORK_PACKAGE_VISIBILITY.CUSTOMER_VISIBLE,
+      customerAccessMode: FRAMEWORK_PACKAGE_CUSTOMER_ACCESS_MODES.ALL_CUSTOMERS,
+    },
+    {
+      visibility: FRAMEWORK_PACKAGE_VISIBILITY.CUSTOMER_VISIBLE,
+      customerAccessMode: FRAMEWORK_PACKAGE_CUSTOMER_ACCESS_MODES.SELECTED_CUSTOMERS,
+      assignedCustomerIds: customerId,
+    },
+  ],
+})
+
 const resolveValidationStatus = (frameworkPackage) =>
   frameworkPackage?.capabilities?.requiresValidationBeforePublish === false
     ? VMF_RUNTIME_STATUSES.VALIDATION_STATUS_NOT_REQUIRED
@@ -210,7 +256,7 @@ const resolveAlignedVersionPolicyId = async (frameworkVersion) => {
     : null
 }
 
-const resolveVmfCreateBinding = async ({ frameworkPackageId = null } = {}) => {
+const resolveVmfCreateBinding = async ({ frameworkPackageId = null, customerId = null } = {}) => {
   if (frameworkPackageId) {
     const frameworkPackage = await FrameworkPackage.findById(frameworkPackageId)
 
@@ -224,6 +270,10 @@ const resolveVmfCreateBinding = async ({ frameworkPackageId = null } = {}) => {
 
     if (frameworkPackage.status !== 'ACTIVE') {
       throw buildFrameworkPackageValidationError('Framework package must be active before it can be assigned.')
+    }
+
+    if (customerId && !isFrameworkPackageAvailableToCustomer(frameworkPackage, customerId)) {
+      throw buildFrameworkPackageValidationError('Framework package is not available to this customer.')
     }
 
     return {
@@ -446,6 +496,46 @@ export const listVmfs = async (req, res, next) => {
 }
 
 /* ------------------------------------------------------------------ */
+/*  GET /api/v1/customers/:customerId/tenants/:tenantId/vmfs/framework-packages */
+/* ------------------------------------------------------------------ */
+
+/**
+ * List active customer-visible VMF framework packages available for new VMFs.
+ */
+export const listAvailableVmfFrameworkPackages = async (req, res, next) => {
+  try {
+    const { customerId } = req.params
+    const pageNum = Math.max(1, Number(req.query.page) || 1)
+    const limit = Math.min(100, Math.max(1, Number(req.query.pageSize) || 100))
+    const filter = buildAvailableFrameworkPackageFilter(customerId)
+    const total = await FrameworkPackage.countDocuments(filter)
+    const totalPages = Math.max(1, Math.ceil(total / limit))
+    const normalizedPage = Math.min(pageNum, totalPages)
+    const skip = (normalizedPage - 1) * limit
+
+    const items = await FrameworkPackage.find(filter)
+      .sort({ isDefault: -1, updatedAt: -1, packageName: 1 })
+      .skip(skip)
+      .limit(limit)
+      .lean()
+
+    return res.status(200).json({
+      data: items.map(serializeFrameworkPackageSummary),
+      meta: {
+        page: normalizedPage,
+        pageSize: limit,
+        total,
+        totalPages,
+        requestId: req.requestId,
+        version: 'v1',
+      },
+    })
+  } catch (err) {
+    next(err)
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /*  POST /api/v1/customers/:customerId/tenants/:tenantId/vmfs         */
 /* ------------------------------------------------------------------ */
 
@@ -506,6 +596,7 @@ export const createVmf = async (req, res, next) => {
       snapshotStatus,
     } = await resolveVmfCreateBinding({
       frameworkPackageId: req.body.frameworkPackageId,
+      customerId,
     })
 
     const vmf = new VMF({

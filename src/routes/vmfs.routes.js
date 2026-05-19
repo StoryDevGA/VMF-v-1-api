@@ -31,6 +31,7 @@ import {
 } from '../validators/vmf.validator.js'
 import {
   listVmfs,
+  listAvailableVmfFrameworkPackages,
   createVmf,
   getVmf,
   updateVmf,
@@ -47,6 +48,21 @@ import {
 export const tenantVmfRouter = Router({ mergeParams: true })
 
 tenantVmfRouter.use(authJwt, loadScopes)
+
+tenantVmfRouter.get(
+  '/framework-packages',
+  requireTenantPermission('VMF_VIEW', {
+    allowCustomerPermission: true,
+    allowCustomerPermissionScopes: ['CUSTOMER'],
+    allowCustomerPermissionWhenSingleTenant: true,
+    allowCustomerScopedTenantPermission: true,
+  }),
+  requireFeatureEntitlement('VMF'),
+  requireCustomerActive(),
+  requireTenantEnabled,
+  topologyGuard,
+  listAvailableVmfFrameworkPackages,
+)
 
 tenantVmfRouter.get(
   '/',
