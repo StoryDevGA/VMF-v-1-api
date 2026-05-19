@@ -22,6 +22,7 @@ import UIContract from './UIContract.js'
 import RuntimeValidationAudit from './RuntimeValidationAudit.js'
 import RuntimeActivationSnapshot from './RuntimeActivationSnapshot.js'
 import RuntimeDeployment from './RuntimeDeployment.js'
+import RuntimeInstance from './RuntimeInstance.js'
 
 // Export all models
 export {
@@ -48,6 +49,7 @@ export {
   RuntimeValidationAudit,
   RuntimeActivationSnapshot,
   RuntimeDeployment,
+  RuntimeInstance,
 }
 
 // Default export with all models
@@ -75,4 +77,5 @@ export default {
   RuntimeValidationAudit,
   RuntimeActivationSnapshot,
   RuntimeDeployment,
+  RuntimeInstance,
 }

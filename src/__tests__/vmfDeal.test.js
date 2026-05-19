@@ -62,6 +62,10 @@ const DEAL_ID = '907f1f77bcf86cd799439077'
 const POLICY_ID = '917f1f77bcf86cd799439088'
 const FRAMEWORK_PACKAGE_ID = '927f1f77bcf86cd799439099'
 const FRAMEWORK_PACKAGE_ID_2 = '927f1f77bcf86cd799439100'
+const RUNTIME_DEPLOYMENT_ID = 'runtime-deployment-vmf-active-package'
+const RUNTIME_ACTIVATION_ID = 'runtime-activation-vmf-active-package'
+const DEPENDENCY_SNAPSHOT_ID = 'dependency-snapshot-vmf-active-package'
+const DEPENDENCY_SNAPSHOT_HASH = 'dependency-snapshot-hash-vmf-active-package'
 
 /* ------------------------------------------------------------------ */
 /*  Factories                                                         */
@@ -280,7 +284,41 @@ const makeFrameworkPackage = (overrides = {}) => ({
     requiredSections: ['overview'],
     publishChecks: ['validation-pass'],
   },
+  dependencyLock: {
+    status: 'PASS',
+    snapshotId: DEPENDENCY_SNAPSHOT_ID,
+    snapshotHash: DEPENDENCY_SNAPSHOT_HASH,
+    references: [
+      {
+        collectionKey: 'RuntimeSkill',
+        stableId: 'skill-snapshot',
+        componentVersion: '1.0.0',
+      },
+    ],
+  },
   updatedAt: '2026-04-09T12:00:00.000Z',
+  ...overrides,
+})
+
+const makeRuntimeDeployment = (overrides = {}) => ({
+  _id: RUNTIME_DEPLOYMENT_ID,
+  deploymentId: RUNTIME_DEPLOYMENT_ID,
+  activationId: RUNTIME_ACTIVATION_ID,
+  packageId: FRAMEWORK_PACKAGE_ID,
+  frameworkKey: 'VMF',
+  status: 'ACTIVE',
+  ...overrides,
+})
+
+const makeRuntimeActivationSnapshot = (overrides = {}) => ({
+  _id: RUNTIME_ACTIVATION_ID,
+  activationId: RUNTIME_ACTIVATION_ID,
+  deploymentId: RUNTIME_DEPLOYMENT_ID,
+  packageId: FRAMEWORK_PACKAGE_ID,
+  frameworkKey: 'VMF',
+  activationStatus: 'ACTIVE',
+  dependencySnapshotId: DEPENDENCY_SNAPSHOT_ID,
+  dependencySnapshotHash: DEPENDENCY_SNAPSHOT_HASH,
   ...overrides,
 })
 
@@ -322,6 +360,7 @@ const makeFakeDeal = (overrides = {}) => ({
 
 let app, request, tokenService, performanceCacheService
 let User, Customer, Tenant, VMF, Deal, AuditLog, SystemVersioningPolicy, Role, FrameworkPackage
+let RuntimeDeployment, RuntimeActivationSnapshot
 
 beforeAll(async () => {
   const supertest = (await import('supertest')).default
@@ -340,6 +379,8 @@ beforeAll(async () => {
   SystemVersioningPolicy = models.SystemVersioningPolicy
   Role = models.Role
   FrameworkPackage = models.FrameworkPackage
+  RuntimeDeployment = models.RuntimeDeployment
+  RuntimeActivationSnapshot = models.RuntimeActivationSnapshot
 })
 
 const makeDefaultRoleDefinitions = () => ([
@@ -411,6 +452,12 @@ beforeEach(() => {
   FrameworkPackage.find = jest.fn().mockResolvedValue([])
   FrameworkPackage.countDocuments = jest.fn().mockResolvedValue(0)
   FrameworkPackage.findActiveByFrameworkKey = jest.fn().mockResolvedValue(null)
+  RuntimeDeployment.find = jest.fn().mockReturnValue({
+    lean: jest.fn().mockResolvedValue([]),
+  })
+  RuntimeActivationSnapshot.find = jest.fn().mockReturnValue({
+    lean: jest.fn().mockResolvedValue([]),
+  })
   Deal.findById = jest.fn()
   Deal.find = jest.fn()
   Deal.countDocuments = jest.fn()
@@ -962,19 +1009,44 @@ describe('GET /api/v1/customers/:customerId/tenants/:tenantId/vmfs/framework-pac
         isDefault: false,
         customerAccessMode: 'SELECTED_CUSTOMERS',
         assignedCustomerIds: [CUSTOMER_ID],
+        dependencyLock: {
+          status: 'PASS',
+          snapshotId: 'dependency-snapshot-vmf-enterprise-package',
+          snapshotHash: 'dependency-snapshot-hash-vmf-enterprise-package',
+          references: [{ collectionKey: 'RuntimeSkill', stableId: 'skill-enterprise' }],
+        },
       }),
     ]
 
     Tenant.findById.mockResolvedValue(makeFakeTenant())
-    FrameworkPackage.countDocuments.mockResolvedValue(packageRows.length)
     FrameworkPackage.find.mockReturnValue({
       sort: jest.fn().mockReturnValue({
-        skip: jest.fn().mockReturnValue({
-          limit: jest.fn().mockReturnValue({
-            lean: jest.fn().mockResolvedValue(packageRows),
-          }),
-        }),
+        lean: jest.fn().mockResolvedValue(packageRows),
       }),
+    })
+    RuntimeDeployment.find.mockReturnValue({
+      lean: jest.fn().mockResolvedValue([
+        makeRuntimeDeployment(),
+        makeRuntimeDeployment({
+          _id: 'runtime-deployment-vmf-enterprise-package',
+          deploymentId: 'runtime-deployment-vmf-enterprise-package',
+          activationId: 'runtime-activation-vmf-enterprise-package',
+          packageId: FRAMEWORK_PACKAGE_ID_2,
+        }),
+      ]),
+    })
+    RuntimeActivationSnapshot.find.mockReturnValue({
+      lean: jest.fn().mockResolvedValue([
+        makeRuntimeActivationSnapshot(),
+        makeRuntimeActivationSnapshot({
+          _id: 'runtime-activation-vmf-enterprise-package',
+          activationId: 'runtime-activation-vmf-enterprise-package',
+          deploymentId: 'runtime-deployment-vmf-enterprise-package',
+          packageId: FRAMEWORK_PACKAGE_ID_2,
+          dependencySnapshotId: 'dependency-snapshot-vmf-enterprise-package',
+          dependencySnapshotHash: 'dependency-snapshot-hash-vmf-enterprise-package',
+        }),
+      ]),
     })
 
     const res = await request
@@ -997,6 +1069,9 @@ describe('GET /api/v1/customers/:customerId/tenants/:tenantId/vmfs/framework-pac
           assignedCustomerIds: CUSTOMER_ID,
         },
       ],
+      'dependencyLock.status': 'PASS',
+      'dependencyLock.snapshotId': { $exists: true, $nin: [null, ''] },
+      'dependencyLock.references.0': { $exists: true },
     })
     expect(res.body.data).toEqual([
       expect.objectContaining({
@@ -1019,15 +1094,16 @@ describe('GET /api/v1/customers/:customerId/tenants/:tenantId/vmfs/framework-pac
     const packageRows = [makeFrameworkPackage()]
 
     Tenant.findById.mockResolvedValue(makeFakeTenant())
-    FrameworkPackage.countDocuments.mockResolvedValue(packageRows.length)
     FrameworkPackage.find.mockReturnValue({
       sort: jest.fn().mockReturnValue({
-        skip: jest.fn().mockReturnValue({
-          limit: jest.fn().mockReturnValue({
-            lean: jest.fn().mockResolvedValue(packageRows),
-          }),
-        }),
+        lean: jest.fn().mockResolvedValue(packageRows),
       }),
+    })
+    RuntimeDeployment.find.mockReturnValue({
+      lean: jest.fn().mockResolvedValue([makeRuntimeDeployment()]),
+    })
+    RuntimeActivationSnapshot.find.mockReturnValue({
+      lean: jest.fn().mockResolvedValue([makeRuntimeActivationSnapshot()]),
     })
 
     const res = await request
@@ -1052,15 +1128,16 @@ describe('GET /api/v1/customers/:customerId/tenants/:tenantId/vmfs/framework-pac
     ]
 
     Tenant.findById.mockResolvedValue(makeFakeTenant())
-    FrameworkPackage.countDocuments.mockResolvedValue(packageRows.length)
     FrameworkPackage.find.mockReturnValue({
       sort: jest.fn().mockReturnValue({
-        skip: jest.fn().mockReturnValue({
-          limit: jest.fn().mockReturnValue({
-            lean: jest.fn().mockResolvedValue(packageRows),
-          }),
-        }),
+        lean: jest.fn().mockResolvedValue(packageRows),
       }),
+    })
+    RuntimeDeployment.find.mockReturnValue({
+      lean: jest.fn().mockResolvedValue([makeRuntimeDeployment()]),
+    })
+    RuntimeActivationSnapshot.find.mockReturnValue({
+      lean: jest.fn().mockResolvedValue([makeRuntimeActivationSnapshot()]),
     })
 
     const res = await request
@@ -1074,6 +1151,102 @@ describe('GET /api/v1/customers/:customerId/tenants/:tenantId/vmfs/framework-pac
       isDefault: true,
       status: 'ACTIVE',
     }))
+  })
+
+  test('does not list active packages that are not runtime-creation ready', async () => {
+    const token = await getCustomerAdminToken()
+    const runtimeReadyPackage = makeFrameworkPackage({
+      _id: FRAMEWORK_PACKAGE_ID_2,
+      id: FRAMEWORK_PACKAGE_ID_2,
+      packageName: 'Runtime Evidence Package',
+      packageKey: 'vmf-runtime-evidence-package',
+      version: '2.3.2',
+      isDefault: false,
+      dependencyLock: {
+        status: 'PASS',
+        snapshotId: 'dependency-snapshot-runtime-evidence-package',
+        snapshotHash: 'dependency-snapshot-hash-runtime-evidence-package',
+        references: [{ collectionKey: 'RuntimeSkill', stableId: 'skill-runtime-evidence' }],
+      },
+    })
+    const invalidDefaultPackage = makeFrameworkPackage({
+      packageName: 'Default Package Without Evidence',
+      dependencyLock: null,
+    })
+    const mismatchPackage = makeFrameworkPackage({
+      _id: '927f1f77bcf86cd799439101',
+      id: '927f1f77bcf86cd799439101',
+      packageName: 'Mismatched Evidence Package',
+      packageKey: 'vmf-mismatched-evidence-package',
+      isDefault: false,
+      dependencyLock: {
+        status: 'PASS',
+        snapshotId: 'dependency-snapshot-mismatched-package',
+        snapshotHash: 'dependency-snapshot-hash-mismatched-package',
+        references: [{ collectionKey: 'RuntimeSkill', stableId: 'skill-mismatch' }],
+      },
+    })
+
+    Tenant.findById.mockResolvedValue(makeFakeTenant())
+    FrameworkPackage.find.mockReturnValue({
+      sort: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue([
+          invalidDefaultPackage,
+          mismatchPackage,
+          runtimeReadyPackage,
+        ]),
+      }),
+    })
+    RuntimeDeployment.find.mockReturnValue({
+      lean: jest.fn().mockResolvedValue([
+        makeRuntimeDeployment({
+          _id: 'runtime-deployment-mismatched-package',
+          deploymentId: 'runtime-deployment-mismatched-package',
+          activationId: 'runtime-activation-mismatched-package',
+          packageId: '927f1f77bcf86cd799439101',
+        }),
+        makeRuntimeDeployment({
+          _id: 'runtime-deployment-runtime-evidence-package',
+          deploymentId: 'runtime-deployment-runtime-evidence-package',
+          activationId: 'runtime-activation-runtime-evidence-package',
+          packageId: FRAMEWORK_PACKAGE_ID_2,
+        }),
+      ]),
+    })
+    RuntimeActivationSnapshot.find.mockReturnValue({
+      lean: jest.fn().mockResolvedValue([
+        makeRuntimeActivationSnapshot({
+          _id: 'runtime-activation-mismatched-package',
+          activationId: 'runtime-activation-mismatched-package',
+          deploymentId: 'runtime-deployment-mismatched-package',
+          packageId: '927f1f77bcf86cd799439101',
+          dependencySnapshotId: 'different-snapshot',
+          dependencySnapshotHash: 'different-hash',
+        }),
+        makeRuntimeActivationSnapshot({
+          _id: 'runtime-activation-runtime-evidence-package',
+          activationId: 'runtime-activation-runtime-evidence-package',
+          deploymentId: 'runtime-deployment-runtime-evidence-package',
+          packageId: FRAMEWORK_PACKAGE_ID_2,
+          dependencySnapshotId: 'dependency-snapshot-runtime-evidence-package',
+          dependencySnapshotHash: 'dependency-snapshot-hash-runtime-evidence-package',
+        }),
+      ]),
+    })
+
+    const res = await request
+      .get(`/api/v1/customers/${CUSTOMER_ID}/tenants/${TENANT_ID}/vmfs/framework-packages`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toEqual([
+      expect.objectContaining({
+        id: FRAMEWORK_PACKAGE_ID_2,
+        packageName: 'Runtime Evidence Package',
+        version: '2.3.2',
+      }),
+    ])
+    expect(res.body.meta.total).toBe(1)
   })
 })
 

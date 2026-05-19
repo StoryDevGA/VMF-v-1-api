@@ -26,6 +26,7 @@ import workflowPolicyRoutes from './routes/workflowPolicies.routes.js'
 import uiContractRoutes from './routes/uiContracts.routes.js'
 import runtimeValidationRoutes from './routes/runtimeValidation.routes.js'
 import runtimeActivationRoutes from './routes/runtimeActivation.routes.js'
+import runtimeInstanceRoutes from './routes/runtimeInstances.routes.js'
 import superAdminAuditRoutes from './routes/superAdminAudit.routes.js'
 import licenseLevelRoutes from './routes/licenseLevels.routes.js'
 import roleRoutes from './routes/roles.routes.js'
@@ -111,6 +112,7 @@ app.use('/api/v1/super-admin/runtime-control/workflow-policies', workflowPolicyR
 app.use('/api/v1/super-admin/runtime-control/ui-contracts', uiContractRoutes)
 app.use('/api/v1/super-admin/runtime-control/runtime-validation', runtimeValidationRoutes)
 app.use('/api/v1/super-admin/runtime-control/runtime-activation', runtimeActivationRoutes)
+app.use('/api/v1/runtime-instances', runtimeInstanceRoutes)
 app.use('/api/v1/super-admin/denied-access-logs', superAdminAuditRoutes)
 if (env.governanceLicenseLevelsEnabled) {
   app.use('/api/v1/super-admin/licence-levels', licenseLevelRoutes)
