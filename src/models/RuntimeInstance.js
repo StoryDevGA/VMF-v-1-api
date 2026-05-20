@@ -238,6 +238,13 @@ const runtimeInstanceSchema = new mongoose.Schema(
       enum: Object.values(RUNTIME_MODES),
       default: RUNTIME_MODES.INTERACTIVE,
     },
+    runtimeCapacitySlot: {
+      type: Number,
+      min: 1,
+      default: null,
+      index: true,
+      select: false,
+    },
     name: {
       type: String,
       required: true,
@@ -292,6 +299,16 @@ runtimeInstanceSchema.index({ customerId: 1, tenantId: 1, runtimeType: 1, status
 runtimeInstanceSchema.index({ customerId: 1, tenantId: 1, frameworkKey: 1, packageId: 1, updatedAt: -1 })
 runtimeInstanceSchema.index({ customerId: 1, tenantId: 1, executionStatus: 1, updatedAt: -1 })
 runtimeInstanceSchema.index({ assignedTo: 1, status: 1, updatedAt: -1 })
+runtimeInstanceSchema.index(
+  { customerId: 1, tenantId: 1, runtimeType: 1, status: 1, runtimeCapacitySlot: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      status: RUNTIME_INSTANCE_STATUSES.ACTIVE,
+      runtimeCapacitySlot: { $type: 'number' },
+    },
+  },
+)
 
 runtimeInstanceSchema.pre('validate', function normalizeRuntimeInstance(next) {
   if (this.isNew || this.isModified('runtimeInstanceKey')) {

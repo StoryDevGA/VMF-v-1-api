@@ -68,6 +68,15 @@ const makeRegularUser = (overrides = {}) => ({
   ...overrides,
 })
 
+const makeCustomerScopedTenantAdmin = (overrides = {}) => makeRegularUser({
+  name: 'Customer Scoped Tenant Admin',
+  memberships: [{ customerId: CUSTOMER_ID, roles: ['TENANT_ADMIN', 'USER'] }],
+  tenantMemberships: [
+    { customerId: CUSTOMER_ID, tenantId: TENANT_ID, roles: ['USER'] },
+  ],
+  ...overrides,
+})
+
 const makeCustomer = (overrides = {}) => ({
   _id: CUSTOMER_ID,
   id: CUSTOMER_ID,
@@ -356,6 +365,16 @@ const buildDefaultRoleRows = () => ([
   },
 ])
 
+const buildTenantAdminRoleRows = () => ([
+  ...buildDefaultRoleRows(),
+  {
+    key: 'TENANT_ADMIN',
+    scope: 'TENANT',
+    permissions: ['TENANT_VIEW', 'VMF_VIEW', 'VMF_CREATE'],
+    isActive: true,
+  },
+])
+
 let app
 let request
 let tokenService
@@ -446,6 +465,7 @@ beforeEach(() => {
     return buildLeanQuery(makeRuntimeInstance())
   })
   RuntimeInstance.countDocuments = jest.fn().mockResolvedValue(1)
+  RuntimeInstance.distinct = jest.fn().mockResolvedValue([1])
   RuntimeInstance.deleteOne = jest.fn().mockResolvedValue({ deletedCount: 1 })
   AuditLog.createLog = jest.fn(async () => ({}))
 })
@@ -497,8 +517,23 @@ describe('Runtime Instance API', () => {
       attachments: {},
       artifacts: {},
     })
+    expect(res.body.data.runtimeCapacitySlot).toBeUndefined()
     expect(FrameworkPackage.findById).toHaveBeenCalledWith(FRAMEWORK_PACKAGE_ID)
     expect(FrameworkPackage.findOne).not.toHaveBeenCalled()
+    expect(RuntimeInstance.countDocuments).toHaveBeenCalledWith({
+      customerId: CUSTOMER_ID,
+      tenantId: TENANT_ID,
+      runtimeType: 'VALUE_NARRATIVE',
+      status: 'ACTIVE',
+    })
+    expect(RuntimeInstance.distinct).toHaveBeenCalledWith('runtimeCapacitySlot', {
+      customerId: CUSTOMER_ID,
+      tenantId: TENANT_ID,
+      runtimeType: 'VALUE_NARRATIVE',
+      status: 'ACTIVE',
+      runtimeCapacitySlot: { $type: 'number' },
+    })
+    expect(RuntimeInstance.prototype.save.mock.contexts[0].runtimeCapacitySlot).toBe(2)
     expect(RuntimeDeployment.findOne).toHaveBeenCalledWith({
       packageId: expect.anything(),
       frameworkKey: 'VMF',
@@ -536,6 +571,156 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(201)
     expect(res.body.data.packageKey).toBe('vmf-standard-2-3-1')
+  })
+
+  test('rejects Value Narrative runtime creation when tenant runtime capacity is exhausted', async () => {
+    Customer.findById = jest.fn().mockResolvedValue(makeCustomer({
+      governance: {
+        maxTenants: 10,
+        maxVmfsPerTenant: 1,
+      },
+    }))
+    RuntimeInstance.countDocuments = jest.fn().mockResolvedValue(1)
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post('/api/v1/runtime-instances')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        customerId: CUSTOMER_ID,
+        tenantId: TENANT_ID,
+        frameworkPackageId: FRAMEWORK_PACKAGE_ID,
+        name: 'Capacity Blocked Narrative',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.details).toEqual(expect.objectContaining({
+      reason: 'VMF_LIMIT_REACHED',
+      limitType: 'MAX_VMFS_PER_TENANT',
+      limit: 1,
+      currentCount: 1,
+      tenantId: TENANT_ID,
+    }))
+    expect(FrameworkPackage.findById).not.toHaveBeenCalled()
+    expect(RuntimeInstance.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('rejects concurrent Value Narrative runtime creation when the capacity slot is already taken', async () => {
+    RuntimeInstance.countDocuments = jest.fn().mockResolvedValue(0)
+    RuntimeInstance.distinct = jest.fn().mockResolvedValue([])
+    RuntimeInstance.prototype.save = jest.fn(async () => {
+      const err = new Error('E11000 duplicate key error runtimeCapacitySlot')
+      err.code = 11000
+      err.keyPattern = {
+        customerId: 1,
+        tenantId: 1,
+        runtimeType: 1,
+        status: 1,
+        runtimeCapacitySlot: 1,
+      }
+      err.keyValue = {
+        customerId: CUSTOMER_ID,
+        tenantId: TENANT_ID,
+        runtimeType: 'VALUE_NARRATIVE',
+        status: 'ACTIVE',
+        runtimeCapacitySlot: 1,
+      }
+      throw err
+    })
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post('/api/v1/runtime-instances')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        customerId: CUSTOMER_ID,
+        tenantId: TENANT_ID,
+        frameworkPackageId: FRAMEWORK_PACKAGE_ID,
+        name: 'Concurrent Narrative',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.details).toEqual(expect.objectContaining({
+      reason: 'VMF_LIMIT_REACHED',
+      limitType: 'MAX_VMFS_PER_TENANT',
+      limit: 10,
+      currentCount: 10,
+      tenantId: TENANT_ID,
+    }))
+    expect(RuntimeInstance.prototype.save.mock.contexts[0].runtimeCapacitySlot).toBe(1)
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+    expect(RuntimeInstance.deleteOne).not.toHaveBeenCalled()
+  })
+
+  test('allows a customer-scoped tenant admin assigned to the tenant to create a Value Narrative runtime', async () => {
+    const tenantAdmin = makeCustomerScopedTenantAdmin()
+    User.findById = jest.fn().mockImplementation((userId) => {
+      if (userId === REGULAR_USER_ID) return buildUserQueryChain(tenantAdmin)
+      return buildUserQueryChain(null)
+    })
+    Role.find = jest.fn().mockReturnValue(buildRoleQueryChain(buildTenantAdminRoleRows()))
+    Tenant.findById = jest.fn().mockResolvedValue(makeTenant({
+      tenantAdminUserIds: [REGULAR_USER_ID],
+    }))
+    const token = await getAccessTokenForUser(tenantAdmin)
+
+    const res = await request
+      .post('/api/v1/runtime-instances')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        customerId: CUSTOMER_ID,
+        tenantId: TENANT_ID,
+        frameworkPackageId: FRAMEWORK_PACKAGE_ID,
+        frameworkKey: 'VMF',
+        runtimeType: 'VALUE_NARRATIVE',
+        name: 'Assigned Tenant Admin Narrative',
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data).toEqual(expect.objectContaining({
+      customerId: CUSTOMER_ID,
+      tenantId: TENANT_ID,
+      runtimeType: 'VALUE_NARRATIVE',
+      name: 'Assigned Tenant Admin Narrative',
+    }))
+    expect(RuntimeInstance.prototype.save).toHaveBeenCalledTimes(1)
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'RUNTIME_INSTANCE_CREATED',
+      resourceType: 'RuntimeInstance',
+    }))
+  })
+
+  test('rejects customer-scoped tenant admin runtime creation for an unassigned tenant', async () => {
+    const tenantAdmin = makeCustomerScopedTenantAdmin()
+    User.findById = jest.fn().mockImplementation((userId) => {
+      if (userId === REGULAR_USER_ID) return buildUserQueryChain(tenantAdmin)
+      return buildUserQueryChain(null)
+    })
+    Role.find = jest.fn().mockReturnValue(buildRoleQueryChain(buildTenantAdminRoleRows()))
+    Tenant.findById = jest.fn().mockResolvedValue(makeTenant({
+      tenantAdminUserIds: [],
+    }))
+    const token = await getAccessTokenForUser(tenantAdmin)
+
+    const res = await request
+      .post('/api/v1/runtime-instances')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        customerId: CUSTOMER_ID,
+        tenantId: TENANT_ID,
+        frameworkPackageId: FRAMEWORK_PACKAGE_ID,
+        frameworkKey: 'VMF',
+        runtimeType: 'VALUE_NARRATIVE',
+        name: 'Unassigned Tenant Admin Narrative',
+      })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.details.reason).toBe('FORBIDDEN')
+    expect(RuntimeInstance.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 
   test('rejects Deal Analysis runtime creation until a locked VMF anchor is supplied', async () => {
@@ -831,6 +1016,12 @@ describe('Runtime Instance API', () => {
       tenantId: TENANT_ID,
       runtimeType: 'VALUE_NARRATIVE',
     })
+    expect(RuntimeInstance.countDocuments).toHaveBeenCalledWith({
+      customerId: CUSTOMER_ID,
+      tenantId: TENANT_ID,
+      runtimeType: 'VALUE_NARRATIVE',
+      status: 'ACTIVE',
+    })
     expect(res.body.data[0]).toEqual(expect.objectContaining({
       id: RUNTIME_INSTANCE_ID,
       customerId: CUSTOMER_ID,
@@ -843,6 +1034,15 @@ describe('Runtime Instance API', () => {
       total: 1,
       totalPages: 1,
       version: 'v1',
+      runtimeCapacity: {
+        runtimeType: 'VALUE_NARRATIVE',
+        maxRuntimeInstances: 10,
+        currentCount: 1,
+        remainingCount: 9,
+        isAtCapacity: false,
+        countMode: 'ACTIVE_RUNTIME_INSTANCES',
+        tenantId: TENANT_ID,
+      },
     }))
   })
 
@@ -877,6 +1077,82 @@ describe('Runtime Instance API', () => {
     expect(res.status).toBe(403)
     expect(res.body.error.details.reason).toBe('FORBIDDEN')
     expect(RuntimeInstance.find).not.toHaveBeenCalled()
+  })
+
+  test('allows assigned customer-scoped tenant admins to list, open, and render runtime instances', async () => {
+    const tenantAdmin = makeCustomerScopedTenantAdmin({
+      tenantMemberships: [],
+    })
+    User.findById = jest.fn().mockImplementation((userId) => {
+      if (userId === REGULAR_USER_ID) return buildUserQueryChain(tenantAdmin)
+      return buildUserQueryChain(null)
+    })
+    Role.find = jest.fn().mockReturnValue(buildRoleQueryChain(buildTenantAdminRoleRows()))
+    Tenant.findById = jest.fn().mockResolvedValue(makeTenant({
+      tenantAdminUserIds: [REGULAR_USER_ID],
+    }))
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
+    const token = await getAccessTokenForUser(tenantAdmin)
+
+    const listRes = await request
+      .get('/api/v1/runtime-instances')
+      .query({
+        customerId: CUSTOMER_ID,
+        tenantId: TENANT_ID,
+        runtimeType: 'VALUE_NARRATIVE',
+      })
+      .set('Authorization', `Bearer ${token}`)
+    const detailRes = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+    const rendererRes = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(listRes.status).toBe(200)
+    expect(detailRes.status).toBe(200)
+    expect(rendererRes.status).toBe(200)
+    expect(rendererRes.body.data.runtimeInstance.runtimeInstanceKey).toBe('value-narrative-439111')
+  })
+
+  test('rejects unassigned customer-scoped tenant admins on list, detail, and renderer access', async () => {
+    const tenantAdmin = makeCustomerScopedTenantAdmin({
+      tenantMemberships: [],
+    })
+    User.findById = jest.fn().mockImplementation((userId) => {
+      if (userId === REGULAR_USER_ID) return buildUserQueryChain(tenantAdmin)
+      return buildUserQueryChain(null)
+    })
+    Role.find = jest.fn().mockReturnValue(buildRoleQueryChain(buildTenantAdminRoleRows()))
+    Tenant.findById = jest.fn().mockResolvedValue(makeTenant({
+      tenantAdminUserIds: [],
+    }))
+    const token = await getAccessTokenForUser(tenantAdmin)
+
+    const listRes = await request
+      .get('/api/v1/runtime-instances')
+      .query({
+        customerId: CUSTOMER_ID,
+        tenantId: TENANT_ID,
+        runtimeType: 'VALUE_NARRATIVE',
+      })
+      .set('Authorization', `Bearer ${token}`)
+    const detailRes = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+    const rendererRes = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(listRes.status).toBe(403)
+    expect(detailRes.status).toBe(403)
+    expect(rendererRes.status).toBe(403)
+    expect(listRes.body.error.details.reason).toBe('FORBIDDEN')
+    expect(detailRes.body.error.details.reason).toBe('FORBIDDEN')
+    expect(rendererRes.body.error.details.reason).toBe('FORBIDDEN')
   })
 
   test('returns a runtime instance only after scope permission passes', async () => {

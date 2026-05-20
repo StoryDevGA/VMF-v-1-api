@@ -5,6 +5,7 @@ import {
   RuntimeActivationSnapshot,
   RuntimeDeployment,
   RuntimeInstance,
+  Role,
   Tenant,
 } from '../models/index.js'
 import { FRAMEWORK_PACKAGE_STATUSES } from '../models/FrameworkPackage.js'
@@ -18,6 +19,7 @@ import {
 } from '../models/RuntimeInstance.js'
 import { resolveCustomerFeatureEntitlements } from './licenseEntitlementService.js'
 import { isFrameworkPackageAvailableToCustomer } from './frameworkPackageAvailabilityService.js'
+import customerGovernanceService from './customerGovernanceService.js'
 import auditService from './auditService.js'
 
 export const RUNTIME_INSTANCE_ERROR_REASONS = Object.freeze({
@@ -55,6 +57,12 @@ const normalizeToken = (value) => String(value || '').trim().toUpperCase()
 
 const normalizeRuntimeInstanceKey = (value) => String(value || '').trim().toLowerCase()
 
+const idsEqual = (left, right) => {
+  const normalizedLeft = toIdString(left)
+  const normalizedRight = toIdString(right)
+  return Boolean(normalizedLeft && normalizedRight && normalizedLeft === normalizedRight)
+}
+
 const createRuntimeInstanceError = ({
   status,
   code,
@@ -81,6 +89,27 @@ const createRuntimeInstanceKeyConflictError = (runtimeInstanceKey) =>
     details: { runtimeInstanceKey },
   })
 
+const buildRuntimeCapacityFilter = ({ customerId, tenantId, runtimeType }) => ({
+  customerId,
+  tenantId,
+  runtimeType,
+  status: RUNTIME_INSTANCE_STATUSES.ACTIVE,
+})
+
+const buildRuntimeCapacityMeta = ({ customer, tenantId, runtimeType, activeCount }) => {
+  const { maxVmfsPerTenant } = customerGovernanceService.getGovernanceLimits(customer)
+
+  return {
+    runtimeType,
+    maxRuntimeInstances: maxVmfsPerTenant,
+    currentCount: activeCount,
+    remainingCount: Math.max(maxVmfsPerTenant - activeCount, 0),
+    isAtCapacity: activeCount >= maxVmfsPerTenant,
+    countMode: 'ACTIVE_RUNTIME_INSTANCES',
+    tenantId: toIdString(tenantId),
+  }
+}
+
 const isRuntimeInstanceKeyDuplicateError = (err) =>
   err?.code === 11000
   && (
@@ -88,6 +117,69 @@ const isRuntimeInstanceKeyDuplicateError = (err) =>
     || err?.keyValue?.runtimeInstanceKey
     || String(err?.message || '').includes('runtimeInstanceKey')
   )
+
+const isRuntimeCapacitySlotDuplicateError = (err) =>
+  err?.code === 11000
+  && (
+    err?.keyPattern?.runtimeCapacitySlot
+    || err?.keyValue?.runtimeCapacitySlot
+    || String(err?.message || '').includes('runtimeCapacitySlot')
+  )
+
+const createRuntimeCapacitySlotConflictError = ({ customer, tenantId }) => {
+  const { maxVmfsPerTenant } = customerGovernanceService.getGovernanceLimits(customer)
+
+  return createRuntimeInstanceError({
+    status: 409,
+    code: 'CONFLICT',
+    message: 'VMF limit reached for this tenant.',
+    reason: 'VMF_LIMIT_REACHED',
+    details: {
+      customerId: toIdString(customer?._id),
+      tenantId: toIdString(tenantId),
+      limitType: 'MAX_VMFS_PER_TENANT',
+      limit: maxVmfsPerTenant,
+      currentCount: maxVmfsPerTenant,
+    },
+  })
+}
+
+const selectRuntimeCapacitySlot = async ({ customer, customerId, tenantId, runtimeType }) => {
+  const { maxVmfsPerTenant } = customerGovernanceService.getGovernanceLimits(customer)
+  const filter = buildRuntimeCapacityFilter({
+    customerId,
+    tenantId,
+    runtimeType,
+  })
+  const currentRuntimeCount = await RuntimeInstance.countDocuments(filter)
+
+  customerGovernanceService.assertVmfCreationWithinLimit({
+    customer,
+    tenantId,
+    currentVmfCount: currentRuntimeCount,
+  })
+
+  const usedRuntimeCapacitySlots = await RuntimeInstance.distinct('runtimeCapacitySlot', {
+    ...filter,
+    runtimeCapacitySlot: { $type: 'number' },
+  })
+  const usedSlotSet = new Set(
+    usedRuntimeCapacitySlots
+      .map((slot) => Number(slot))
+      .filter((slot) => Number.isInteger(slot) && slot > 0),
+  )
+
+  for (let slot = 1; slot <= maxVmfsPerTenant; slot += 1) {
+    if (!usedSlotSet.has(slot)) {
+      return {
+        currentRuntimeCount,
+        runtimeCapacitySlot: slot,
+      }
+    }
+  }
+
+  throw createRuntimeCapacitySlotConflictError({ customer, tenantId })
+}
 
 const getResolvedPermissionsSnapshot = (scopes = {}) => ({
   platform: scopes?.resolvedPermissions?.platform || { roleKeys: [], permissions: [] },
@@ -102,12 +194,6 @@ const getResolvedPermissionsSnapshot = (scopes = {}) => ({
 const hasBucketPermission = (bucket, permission) =>
   Array.isArray(bucket?.permissions) && bucket.permissions.includes(permission)
 
-const hasCustomerRuntimePermission = (bucket, permission) => {
-  if (!hasBucketPermission(bucket, permission)) return false
-  const roleKeys = Array.isArray(bucket?.roleKeys) ? bucket.roleKeys : []
-  return roleKeys.includes('CUSTOMER_ADMIN')
-}
-
 const getCustomerBucket = (scopes, customerId) =>
   getResolvedPermissionsSnapshot(scopes).customers.find(
     (bucket) => toIdString(bucket?.customerId) === String(customerId),
@@ -120,7 +206,124 @@ const getTenantBucket = (scopes, customerId, tenantId) =>
       && toIdString(bucket?.tenantId) === String(tenantId),
   ) || null
 
-const assertRuntimePermission = ({ scopes, customerId, tenantId, permission }) => {
+const getActorUserId = ({ actorUserId, scopes } = {}) =>
+  toIdString(actorUserId || scopes?.user?._id || scopes?.user?.id)
+
+const getBucketRoleKeys = (bucket) =>
+  Array.isArray(bucket?.roleKeys)
+    ? bucket.roleKeys
+      .map((roleKey) => normalizeToken(roleKey))
+      .filter(Boolean)
+    : []
+
+const getRolePermissions = (role) =>
+  Array.isArray(role?.permissions)
+    ? role.permissions.map((permission) => normalizeToken(permission)).filter(Boolean)
+    : []
+
+const loadPermissionGrantingRoles = async ({ roleKeys, permission }) => {
+  const uniqueRoleKeys = [
+    ...new Set(roleKeys.map((roleKey) => normalizeToken(roleKey)).filter(Boolean)),
+  ]
+  if (uniqueRoleKeys.length === 0) return []
+
+  const roleRows = await Role.find({ key: { $in: uniqueRoleKeys } })
+    .select('key scope permissions isActive')
+    .lean()
+
+  const roleByKey = new Map(
+    (Array.isArray(roleRows) ? roleRows : []).map((role) => [normalizeToken(role?.key), role]),
+  )
+
+  return uniqueRoleKeys
+    .map((roleKey) => roleByKey.get(roleKey))
+    .filter((role) =>
+      role
+      && role.isActive !== false
+      && getRolePermissions(role).includes(permission),
+    )
+}
+
+const hasCustomerScopedTenantAdminAccessToTenant = ({
+  scopes,
+  actorUserId,
+  customerId,
+  tenantId,
+  tenant,
+}) => {
+  const memberships = Array.isArray(scopes?.memberships) ? scopes.memberships : []
+  const tenantMemberships = Array.isArray(scopes?.tenantMemberships) ? scopes.tenantMemberships : []
+
+  const hasCustomerScopedTenantAdmin = memberships.some((membership) =>
+    idsEqual(membership?.customerId, customerId)
+    && Array.isArray(membership?.roles)
+    && membership.roles.some((role) => normalizeToken(role) === 'TENANT_ADMIN'),
+  )
+
+  if (!hasCustomerScopedTenantAdmin) return false
+
+  const hasTenantAdminMembership = tenantMemberships.some((membership) =>
+    idsEqual(membership?.customerId, customerId)
+    && idsEqual(membership?.tenantId, tenantId)
+    && Array.isArray(membership?.roles)
+    && membership.roles.some((role) => normalizeToken(role) === 'TENANT_ADMIN'),
+  )
+
+  if (hasTenantAdminMembership) return true
+
+  const normalizedActorUserId = toIdString(actorUserId)
+  if (!normalizedActorUserId || !Array.isArray(tenant?.tenantAdminUserIds)) return false
+
+  return tenant.tenantAdminUserIds.some((tenantAdminUserId) =>
+    idsEqual(tenantAdminUserId, normalizedActorUserId),
+  )
+}
+
+const hasCustomerRuntimePermission = async ({
+  scopes,
+  actorUserId,
+  customerId,
+  tenantId,
+  permission,
+}) => {
+  const customerBucket = getCustomerBucket(scopes, customerId)
+  if (!hasBucketPermission(customerBucket, permission)) return false
+
+  const roleKeys = getBucketRoleKeys(customerBucket)
+  const permissionGrantingRoles = await loadPermissionGrantingRoles({ roleKeys, permission })
+
+  if (permissionGrantingRoles.some((role) => normalizeToken(role.scope) === 'CUSTOMER')) {
+    return true
+  }
+
+  const hasTenantScopedCustomerRole = permissionGrantingRoles.some((role) =>
+    ['TENANT', 'VMF'].includes(normalizeToken(role.scope)),
+  )
+  const hasCustomerScopedTenantAdminRole = roleKeys.includes('TENANT_ADMIN')
+
+  if (hasTenantScopedCustomerRole && hasCustomerScopedTenantAdminRole) {
+    const tenant = await Tenant.findById(tenantId)
+
+    if (
+      tenant
+      && idsEqual(tenant.customerId, customerId)
+      && hasCustomerScopedTenantAdminAccessToTenant({
+        scopes,
+        actorUserId,
+        customerId,
+        tenantId,
+        tenant,
+      })
+    ) {
+      return true
+    }
+  }
+
+  const customer = await Customer.findById(customerId)
+  return customer?.topology === 'SINGLE_TENANT'
+}
+
+const assertRuntimePermission = async ({ actorUserId, scopes, customerId, tenantId, permission }) => {
   const normalizedPermission = normalizeToken(permission)
   const resolved = getResolvedPermissionsSnapshot(scopes)
 
@@ -130,7 +333,13 @@ const assertRuntimePermission = ({ scopes, customerId, tenantId, permission }) =
   if (hasBucketPermission(tenantBucket, normalizedPermission)) return
 
   const customerBucket = getCustomerBucket(scopes, customerId)
-  if (hasCustomerRuntimePermission(customerBucket, normalizedPermission)) return
+  if (await hasCustomerRuntimePermission({
+    scopes,
+    actorUserId: getActorUserId({ actorUserId, scopes }),
+    customerId,
+    tenantId,
+    permission: normalizedPermission,
+  })) return
 
   throw createRuntimeInstanceError({
     status: 403,
@@ -441,7 +650,11 @@ const logRuntimeInstanceCreated = async ({
   }
 }
 
-const saveRuntimeInstance = async ({ runtimeInstance, session = null }) => {
+const saveRuntimeInstance = async ({
+  runtimeInstance,
+  session = null,
+  capacityConflictContext = null,
+}) => {
   try {
     if (session) {
       await runtimeInstance.save({ session })
@@ -454,6 +667,10 @@ const saveRuntimeInstance = async ({ runtimeInstance, session = null }) => {
       throw createRuntimeInstanceKeyConflictError(runtimeInstance.runtimeInstanceKey)
     }
 
+    if (capacityConflictContext && isRuntimeCapacitySlotDuplicateError(err)) {
+      throw createRuntimeCapacitySlotConflictError(capacityConflictContext)
+    }
+
     throw err
   }
 }
@@ -462,6 +679,7 @@ const persistRuntimeInstanceWithAudit = async ({
   actorUserId,
   auditRequest,
   runtimeInstance,
+  capacityConflictContext = null,
 }) => {
   if (mongoose.connection.readyState === 1) {
     const session = await mongoose.startSession()
@@ -469,7 +687,7 @@ const persistRuntimeInstanceWithAudit = async ({
 
     try {
       await session.withTransaction(async () => {
-        await saveRuntimeInstance({ runtimeInstance, session })
+        await saveRuntimeInstance({ runtimeInstance, session, capacityConflictContext })
         await logRuntimeInstanceCreated({
           auditRequest,
           actorUserId,
@@ -485,7 +703,7 @@ const persistRuntimeInstanceWithAudit = async ({
     return serializedRuntimeInstance
   }
 
-  await saveRuntimeInstance({ runtimeInstance })
+  await saveRuntimeInstance({ runtimeInstance, capacityConflictContext })
 
   try {
     await logRuntimeInstanceCreated({ auditRequest, actorUserId, runtimeInstance })
@@ -521,6 +739,7 @@ export const serializeRuntimeInstance = (runtimeInstance) => {
     : typeof runtimeInstance.toObject === 'function'
       ? runtimeInstance.toObject()
       : { ...runtimeInstance }
+  delete plain.runtimeCapacitySlot
 
   const id = toIdString(plain.id || plain._id)
 
@@ -567,7 +786,8 @@ export const createRuntimeInstance = async ({
     })
   }
 
-  assertRuntimePermission({
+  await assertRuntimePermission({
+    actorUserId,
     scopes,
     customerId,
     tenantId,
@@ -576,6 +796,15 @@ export const createRuntimeInstance = async ({
 
   const { customer } = await assertCustomerTenantContext({ customerId, tenantId })
   await assertFeatureEntitlement({ customerId, customer, feature: frameworkKey })
+
+  const runtimeCapacityReservation = runtimeType === RUNTIME_TYPES.VALUE_NARRATIVE
+    ? await selectRuntimeCapacitySlot({
+        customer,
+        customerId,
+        tenantId,
+        runtimeType,
+      })
+    : null
 
   if (runtimeInstanceKey) {
     const existingRuntimeInstance = await RuntimeInstance.findOne({ runtimeInstanceKey })
@@ -613,6 +842,7 @@ export const createRuntimeInstance = async ({
     status: RUNTIME_INSTANCE_STATUSES.ACTIVE,
     executionStatus: RUNTIME_EXECUTION_STATUSES.IDLE,
     runtimeMode: RUNTIME_MODES.INTERACTIVE,
+    runtimeCapacitySlot: runtimeCapacityReservation?.runtimeCapacitySlot ?? null,
     name: payload.name,
     description: payload.description || '',
     framework_state: buildInitialFrameworkState(),
@@ -626,6 +856,9 @@ export const createRuntimeInstance = async ({
     actorUserId,
     auditRequest,
     runtimeInstance,
+    capacityConflictContext: runtimeCapacityReservation
+      ? { customer, tenantId }
+      : null,
   })
 }
 
@@ -641,7 +874,7 @@ export const listRuntimeInstances = async ({
   const pageSize = Math.min(100, Math.max(1, Number(query.pageSize) || 20))
   const skip = (page - 1) * pageSize
 
-  assertRuntimePermission({
+  await assertRuntimePermission({
     scopes,
     customerId,
     tenantId,
@@ -659,13 +892,20 @@ export const listRuntimeInstances = async ({
   filter.runtimeType = runtimeType
   if (status) filter.status = status
 
-  const [rows, total] = await Promise.all([
+  const [rows, total, activeRuntimeCount] = await Promise.all([
     RuntimeInstance.find(filter)
       .sort({ updatedAt: -1, createdAt: -1 })
       .skip(skip)
       .limit(pageSize)
       .lean(),
     RuntimeInstance.countDocuments(filter),
+    runtimeType === RUNTIME_TYPES.VALUE_NARRATIVE
+      ? RuntimeInstance.countDocuments(buildRuntimeCapacityFilter({
+          customerId,
+          tenantId,
+          runtimeType,
+        }))
+      : Promise.resolve(null),
   ])
 
   return {
@@ -675,6 +915,16 @@ export const listRuntimeInstances = async ({
       pageSize,
       total,
       totalPages: Math.max(1, Math.ceil(total / pageSize)),
+      ...(runtimeType === RUNTIME_TYPES.VALUE_NARRATIVE
+        ? {
+            runtimeCapacity: buildRuntimeCapacityMeta({
+              customer,
+              tenantId,
+              runtimeType,
+              activeCount: activeRuntimeCount,
+            }),
+          }
+        : {}),
     },
   }
 }
@@ -703,7 +953,7 @@ export const getRuntimeInstance = async ({
   const customerId = toIdString(runtimeInstance.customerId)
   const tenantId = toIdString(runtimeInstance.tenantId)
 
-  assertRuntimePermission({
+  await assertRuntimePermission({
     scopes,
     customerId,
     tenantId,
