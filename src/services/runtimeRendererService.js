@@ -79,6 +79,7 @@ const RENDERABLE_ACTIVATION_STATUSES = new Set([
   RUNTIME_ACTIVATION_STATUSES.ACTIVE,
   RUNTIME_ACTIVATION_STATUSES.SUPERSEDED,
 ])
+export const RUNTIME_RENDERER_CONTRACT_VERSION = 'runtime-renderer.v1.read-projection'
 
 const toPlainObject = (value) => {
   if (!value) return null
@@ -1062,6 +1063,9 @@ export const getRuntimeRenderer = async ({
   const workspaceId = runtimeInstance.workspaceId || runtimeInstance.id
 
   return {
+    rendererContractVersion: RUNTIME_RENDERER_CONTRACT_VERSION,
+    runtimeInstanceKey: runtimeInstance.runtimeInstanceKey,
+    projectionGeneratedAt: new Date().toISOString(),
     runtimeInstance: buildRendererRuntimeInstance(runtimeInstance),
     workspace: {
       workspaceId,

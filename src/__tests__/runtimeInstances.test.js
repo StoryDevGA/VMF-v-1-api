@@ -941,6 +941,12 @@ describe('Runtime Instance API', () => {
       status: 'ACTIVE',
       frameworkKeys: 'VMF',
     })
+    expect(res.body.data).toEqual(expect.objectContaining({
+      rendererContractVersion: 'runtime-renderer.v1.read-projection',
+      runtimeInstanceKey: 'value-narrative-439111',
+      projectionGeneratedAt: expect.any(String),
+    }))
+    expect(Number.isNaN(Date.parse(res.body.data.projectionGeneratedAt))).toBe(false)
     expect(res.body.data.workspace).toEqual(expect.objectContaining({
       workspaceId: RUNTIME_INSTANCE_ID,
       workspaceKey: 'value-narrative-439111',
