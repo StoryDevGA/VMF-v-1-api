@@ -18,6 +18,7 @@ const TENANT_ID = '707f1f77bcf86cd799439033'
 const OTHER_TENANT_ID = '707f1f77bcf86cd799439034'
 const FRAMEWORK_PACKAGE_ID = '927f1f77bcf86cd799439099'
 const RUNTIME_INSTANCE_ID = 'a27f1f77bcf86cd799439111'
+const UI_CONTRACT_KEY = 'vmf-cli-ui-contract'
 
 const makeCustomerAdmin = (overrides = {}) => ({
   _id: CUSTOMER_ADMIN_ID,
@@ -202,6 +203,112 @@ const makeRuntimeInstance = (overrides = {}) => ({
   ...overrides,
 })
 
+const makeRendererFrameworkPackage = (overrides = {}) => makeFrameworkPackage({
+  uiContractKey: UI_CONTRACT_KEY,
+  uiContractBinding: {
+    key: UI_CONTRACT_KEY,
+    version: '2.3.1',
+    status: 'ACTIVE',
+    compatibilityMode: 'INHERITED_MINOR',
+    resolvedAt: '2026-05-18T10:00:00.000Z',
+  },
+  sections: [
+    {
+      sectionKey: 'customer_problem',
+      runtimePath: 'framework_state.sections.customer_problem',
+      required: true,
+      validationKeys: ['required-sections-check'],
+    },
+  ],
+  workflowBindings: [
+    {
+      policyKey: 'submit-for-review-policy',
+      executionContext: 'ON_SUBMIT',
+      priority: 10,
+      enabled: true,
+    },
+  ],
+  ...overrides,
+})
+
+const makeRuntimePathRecord = (overrides = {}) => ({
+  stableId: 'path-framework-state-sections-customer-problem',
+  pathKey: 'framework_state.sections.customer_problem',
+  label: 'Customer Problem',
+  status: 'ACTIVE',
+  frameworkKeys: ['VMF'],
+  scope: 'FRAMEWORK_STATE',
+  allowedOperations: ['READ', 'WRITE', 'BIND'],
+  dataType: 'STRING',
+  category: 'SECTION',
+  sourceType: 'RUNTIME_STATE',
+  uiControl: 'TEXTAREA',
+  helpText: 'Describe the core problem.',
+  placeholderText: 'Example: Proposal creation is slow.',
+  displayOrder: 10,
+  ...overrides,
+})
+
+const makeUIContract = (overrides = {}) => ({
+  stableId: `ui-contract-${UI_CONTRACT_KEY}`,
+  uiContractKey: UI_CONTRACT_KEY,
+  name: 'VMF CLI UI Contract',
+  status: 'ACTIVE',
+  frameworkKeys: ['VMF'],
+  sections: [
+    {
+      sectionKey: 'customer_problem',
+      runtimePath: 'framework_state.sections.customer_problem',
+      source: 'PACKAGE',
+      isCustom: false,
+      label: 'Customer Problem',
+      shortLabel: 'Problem',
+      helpText: 'Describe the core problem.',
+      placeholder: 'Example: Proposal creation is slow.',
+      displayOrder: 10,
+      isVisible: true,
+      isEditable: true,
+      isRequiredDisplay: true,
+      isReadOnlyDisplay: false,
+    },
+  ],
+  actions: [
+    {
+      actionKey: 'SUBMIT_FOR_REVIEW',
+      governedAction: 'SUBMIT_FOR_REVIEW',
+      buttonLabel: 'Submit for Review',
+      confirmationMessage: 'Submit this framework for review?',
+      successMessage: 'Framework submitted for review.',
+      displayOrder: 10,
+      isVisible: true,
+      requiresConfirmation: true,
+    },
+  ],
+  ...overrides,
+})
+
+const makeWorkflowPolicy = (overrides = {}) => ({
+  stableId: 'policy-submit-for-review-policy',
+  key: 'submit-for-review-policy',
+  name: 'Submit for Review',
+  status: 'ACTIVE',
+  frameworkKeys: ['VMF'],
+  governedAction: 'SUBMIT_FOR_REVIEW',
+  triggerEvent: 'ON_SUBMIT',
+  decisionMode: 'ALLOW',
+  priority: 10,
+  conditions: [
+    {
+      path: 'framework_state.lifecycle.stage',
+      operator: '=',
+      value: 'DRAFT',
+    },
+  ],
+  passMessage: 'Submit action is available.',
+  failMessage: 'Submit action is not available.',
+  ...overrides,
+})
+
 const buildRoleQueryChain = (rows) => ({
   select: jest.fn().mockReturnThis(),
   lean: jest.fn().mockResolvedValue(rows),
@@ -260,6 +367,9 @@ let FrameworkPackage
 let RuntimeDeployment
 let RuntimeActivationSnapshot
 let RuntimeInstance
+let RuntimePathRegistry
+let UIContract
+let WorkflowPolicy
 let AuditLog
 let mockRedisClient
 
@@ -297,6 +407,9 @@ beforeAll(async () => {
   RuntimeDeployment = models.RuntimeDeployment
   RuntimeActivationSnapshot = models.RuntimeActivationSnapshot
   RuntimeInstance = models.RuntimeInstance
+  RuntimePathRegistry = models.RuntimePathRegistry
+  UIContract = models.UIContract
+  WorkflowPolicy = models.WorkflowPolicy
   AuditLog = models.AuditLog
 })
 
@@ -320,6 +433,9 @@ beforeEach(() => {
   FrameworkPackage.findOne = jest.fn()
   RuntimeDeployment.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeDeployment()))
   RuntimeActivationSnapshot.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeActivationSnapshot()))
+  RuntimePathRegistry.find = jest.fn().mockReturnValue(buildLeanQuery([]))
+  UIContract.findOne = jest.fn().mockReturnValue(buildLeanQuery(null))
+  WorkflowPolicy.find = jest.fn().mockReturnValue(buildLeanQuery([]))
   RuntimeInstance.prototype.save = jest.fn(async function save() { return this })
   RuntimeInstance.find = jest.fn().mockReturnValue(buildRuntimeInstanceFindChain([makeRuntimeInstance()]))
   RuntimeInstance.findOne = jest.fn().mockImplementation((query) => {
@@ -783,5 +899,372 @@ describe('Runtime Instance API', () => {
       customerId: CUSTOMER_ID,
       tenantId: TENANT_ID,
     }))
+  })
+
+  test('renders a runtime workspace from package sections, runtime paths, UI Contract, workflow policy, and framework_state', async () => {
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: 'Proposal creation is slow.',
+        },
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(FrameworkPackage.findById).toHaveBeenCalledWith(FRAMEWORK_PACKAGE_ID)
+    expect(UIContract.findOne).toHaveBeenCalledWith({
+      uiContractKey: UI_CONTRACT_KEY,
+      status: 'ACTIVE',
+      frameworkKeys: 'VMF',
+    })
+    expect(RuntimePathRegistry.find).toHaveBeenCalledWith({
+      pathKey: { $in: ['framework_state.sections.customer_problem'] },
+      status: 'ACTIVE',
+      frameworkKeys: 'VMF',
+    })
+    expect(WorkflowPolicy.find).toHaveBeenCalledWith({
+      key: { $in: ['submit-for-review-policy'] },
+      status: 'ACTIVE',
+      frameworkKeys: 'VMF',
+    })
+    expect(res.body.data.workspace).toEqual(expect.objectContaining({
+      workspaceId: RUNTIME_INSTANCE_ID,
+      workspaceKey: 'value-narrative-439111',
+      routeKey: RUNTIME_INSTANCE_ID,
+    }))
+    expect(res.body.data.sections).toEqual([
+      expect.objectContaining({
+        key: 'customer_problem',
+        runtimePath: 'framework_state.sections.customer_problem',
+        label: 'Customer Problem',
+        control: 'TEXTAREA',
+        required: true,
+        helpText: 'Describe the core problem.',
+        placeholder: 'Example: Proposal creation is slow.',
+        value: 'Proposal creation is slow.',
+        validationKeys: ['required-sections-check'],
+        editable: true,
+      }),
+    ])
+    expect(res.body.data.actions).toEqual([
+      expect.objectContaining({
+        actionKey: 'SUBMIT_FOR_REVIEW',
+        buttonLabel: 'Submit for Review',
+        enabled: true,
+        requiresConfirmation: true,
+        confirmationMessage: 'Submit this framework for review?',
+        policyKey: 'submit-for-review-policy',
+      }),
+    ])
+    expect(res.body.data.signals).toEqual([])
+    expect(res.body.data.activity).toEqual([])
+    expect(res.body.data.runtimeInstance.framework_state).toBeUndefined()
+    expect(res.body.data.frameworkState).toBeUndefined()
+    expect(res.body.data.runtimeData).toEqual({
+      readablePaths: [
+        {
+          sectionKey: 'customer_problem',
+          runtimePath: 'framework_state.sections.customer_problem',
+          value: 'Proposal creation is slow.',
+        },
+      ],
+    })
+    expect(res.body.data.diagnostics.configWarnings).toEqual([])
+    expect(res.body.meta.renderTraceId).toMatch(/^render-/)
+  })
+
+  test('does not expose runtime data outside registered READ runtime paths', async () => {
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      sections: [
+        {
+          sectionKey: 'customer_problem',
+          runtimePath: 'framework_state.sections.customer_problem',
+          required: true,
+          validationKeys: ['required-sections-check'],
+        },
+        {
+          sectionKey: 'hidden_secret',
+          runtimePath: 'framework_state.sections.hidden_secret',
+          required: false,
+          validationKeys: [],
+        },
+        {
+          sectionKey: 'write_only',
+          runtimePath: 'framework_state.sections.write_only',
+          required: false,
+          validationKeys: [],
+        },
+      ],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([
+      makeRuntimePathRecord(),
+      makeRuntimePathRecord({
+        stableId: 'path-framework-state-sections-write-only',
+        pathKey: 'framework_state.sections.write_only',
+        label: 'Write Only',
+        allowedOperations: ['WRITE'],
+      }),
+    ]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: 'Proposal creation is slow.',
+          hidden_secret: 'LEAKED_SECRET_VALUE',
+          write_only: 'WRITE_ONLY_SECRET_VALUE',
+        },
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.sections).toHaveLength(1)
+    expect(res.body.data.runtimeData).toEqual({
+      readablePaths: [
+        {
+          sectionKey: 'customer_problem',
+          runtimePath: 'framework_state.sections.customer_problem',
+          value: 'Proposal creation is slow.',
+        },
+      ],
+    })
+    expect(JSON.stringify(res.body.data)).not.toContain('LEAKED_SECRET_VALUE')
+    expect(JSON.stringify(res.body.data)).not.toContain('WRITE_ONLY_SECRET_VALUE')
+    expect(res.body.data.runtimeInstance.framework_state).toBeUndefined()
+    expect(res.body.data.frameworkState).toBeUndefined()
+    expect(res.body.data.diagnostics.configWarnings).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'RUNTIME_PATH_NOT_FOUND',
+        sectionKey: 'hidden_secret',
+      }),
+      expect.objectContaining({
+        code: 'RUNTIME_PATH_NOT_READABLE',
+        sectionKey: 'write_only',
+      }),
+    ]))
+  })
+
+  test('skips package sections whose runtime path is not registered and returns a renderer config warning', async () => {
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.sections).toEqual([])
+    expect(res.body.data.diagnostics.configWarnings).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'RUNTIME_PATH_NOT_FOUND',
+        sectionKey: 'customer_problem',
+        runtimePath: 'framework_state.sections.customer_problem',
+      }),
+    ]))
+  })
+
+  test('disables UI Contract actions that have no matching active workflow policy', async () => {
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([]))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.actions).toEqual([
+      expect.objectContaining({
+        actionKey: 'SUBMIT_FOR_REVIEW',
+        enabled: false,
+        warnings: ['ACTION_POLICY_MISSING'],
+      }),
+    ])
+    expect(res.body.data.diagnostics.configWarnings).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'ACTION_POLICY_MISSING',
+        actionKey: 'SUBMIT_FOR_REVIEW',
+        governedAction: 'SUBMIT_FOR_REVIEW',
+      }),
+    ]))
+  })
+
+  test('does not render workflow policy actions that are absent from the UI Contract', async () => {
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({ actions: [] })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.actions).toEqual([])
+    expect(res.body.data.diagnostics.configWarnings).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'POLICY_ACTION_MISSING',
+        governedAction: 'SUBMIT_FOR_REVIEW',
+        policyKey: 'submit-for-review-policy',
+      }),
+    ]))
+  })
+
+  test('disables action UI for non-executable workflow policy decisions', async () => {
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([
+      makeWorkflowPolicy({ decisionMode: 'WARN_ONLY' }),
+    ]))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.actions).toEqual([
+      expect.objectContaining({
+        actionKey: 'SUBMIT_FOR_REVIEW',
+        enabled: false,
+        policyDecisionMode: 'WARN_ONLY',
+        disabledReason: 'Workflow policy decision mode is not executable by the renderer.',
+      }),
+    ])
+  })
+
+  test('disables action UI when the actor lacks the action-level runtime permission', async () => {
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
+    const token = await getAccessTokenForUser(makeRegularUser())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.actions).toEqual([
+      expect.objectContaining({
+        actionKey: 'SUBMIT_FOR_REVIEW',
+        enabled: false,
+        requiredPermissions: ['VMF_UPDATE'],
+        disabledReason: 'Current role or permissions do not allow this runtime action.',
+      }),
+    ])
+  })
+
+  test('fails closed when runtime deployment snapshot evidence is missing', async () => {
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+      evidence: {
+        activationId: 'activation-vmf-2-3-1-001',
+        deploymentId: 'deployment-vmf-global-production-001',
+        dependencySnapshotId: 'dep-lock-vmf-standard-2-3-1',
+        dependencySnapshotHash: '',
+      },
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('DEPLOYMENT_SNAPSHOT_MISMATCH')
+    expect(res.body.error.details.missingEvidence).toEqual(['dependencySnapshotHash'])
+    expect(RuntimePathRegistry.find).not.toHaveBeenCalled()
+    expect(UIContract.findOne).not.toHaveBeenCalled()
+    expect(WorkflowPolicy.find).not.toHaveBeenCalled()
+  })
+
+  test('fails closed for Deal Analysis renderer requests without a locked runtime anchor', async () => {
+    Customer.findById = jest.fn().mockResolvedValue(makeCustomer({ entitlements: ['DEALS'] }))
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+      runtimeType: 'DEAL_ANALYSIS',
+      anchors: [],
+    })))
+    const token = await getAccessTokenForUser(makeRegularUser())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.reason).toBe('DEAL_ANALYSIS_ANCHOR_REQUIRED')
+    expect(FrameworkPackage.findById).not.toHaveBeenCalled()
+    expect(RuntimePathRegistry.find).not.toHaveBeenCalled()
+    expect(UIContract.findOne).not.toHaveBeenCalled()
+    expect(WorkflowPolicy.find).not.toHaveBeenCalled()
+  })
+
+  test('fails closed for Deal Analysis renderer requests whose anchor is not a locked VMF runtime in scope', async () => {
+    Customer.findById = jest.fn().mockResolvedValue(makeCustomer({ entitlements: ['DEALS'] }))
+    RuntimeInstance.findOne = jest.fn()
+      .mockReturnValueOnce(buildLeanQuery(makeRuntimeInstance({
+        runtimeType: 'DEAL_ANALYSIS',
+        frameworkKey: 'DEALS',
+        anchors: [
+          {
+            runtimeInstanceId: 'b37f1f77bcf86cd799439222',
+            runtimeInstanceKey: 'value-narrative-anchor',
+            runtimeType: 'VALUE_NARRATIVE',
+            relationship: 'VALUE_NARRATIVE_ANCHOR',
+            lockedAt: '2026-05-19T12:00:00.000Z',
+          },
+        ],
+      })))
+      .mockReturnValueOnce(buildLeanQuery(makeRuntimeInstance({
+        _id: 'b37f1f77bcf86cd799439222',
+        id: 'b37f1f77bcf86cd799439222',
+        runtimeInstanceKey: 'value-narrative-anchor',
+        runtimeType: 'VALUE_NARRATIVE',
+        frameworkKey: 'VMF',
+        status: 'ACTIVE',
+      })))
+    const token = await getAccessTokenForUser(makeRegularUser())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.reason).toBe('DEAL_ANALYSIS_ANCHOR_REQUIRED')
+    expect(res.body.error.details.failedChecks).toEqual(['status'])
+    expect(FrameworkPackage.findById).not.toHaveBeenCalled()
+    expect(RuntimePathRegistry.find).not.toHaveBeenCalled()
+    expect(UIContract.findOne).not.toHaveBeenCalled()
+    expect(WorkflowPolicy.find).not.toHaveBeenCalled()
   })
 })

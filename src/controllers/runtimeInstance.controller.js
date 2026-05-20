@@ -3,6 +3,7 @@ import {
   getRuntimeInstance as getRuntimeInstanceRecord,
   listRuntimeInstances as listRuntimeInstanceRecords,
 } from '../services/runtimeInstanceService.js'
+import { getRuntimeRenderer as getRuntimeRendererProjection } from '../services/runtimeRendererService.js'
 
 const buildRuntimeInstanceErrorResponse = (req, err) => ({
   error: {
@@ -67,6 +68,29 @@ export const getRuntimeInstance = async (req, res, next) => {
     return res.status(200).json({
       data: runtimeInstance,
       meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const getRuntimeRenderer = async (req, res, next) => {
+  try {
+    const renderer = await getRuntimeRendererProjection({
+      scopes: req.scopes,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+    })
+
+    return res.status(200).json({
+      data: renderer,
+      meta: {
+        requestId: req.requestId,
+        renderTraceId: renderer.diagnostics?.renderTraceId,
+        version: 'v1',
+      },
     })
   } catch (err) {
     if (err?.status && err?.code) {
