@@ -57,6 +57,8 @@ const normalizeToken = (value) => String(value || '').trim().toUpperCase()
 
 const normalizeRuntimeInstanceKey = (value) => String(value || '').trim().toLowerCase()
 
+const escapeRegExp = (value) => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
 const idsEqual = (left, right) => {
   const normalizedLeft = toIdString(left)
   const normalizedRight = toIdString(right)
@@ -870,6 +872,7 @@ export const listRuntimeInstances = async ({
   const tenantId = query.tenantId
   const runtimeType = normalizeToken(query.runtimeType)
   const status = query.status ? normalizeToken(query.status) : null
+  const searchQuery = String(query.q || '').trim()
   const page = Math.max(1, Number(query.page) || 1)
   const pageSize = Math.min(100, Math.max(1, Number(query.pageSize) || 20))
   const skip = (page - 1) * pageSize
@@ -891,6 +894,17 @@ export const listRuntimeInstances = async ({
   const filter = { customerId, tenantId }
   filter.runtimeType = runtimeType
   if (status) filter.status = status
+  if (searchQuery) {
+    const searchPattern = new RegExp(escapeRegExp(searchQuery), 'i')
+    filter.$or = [
+      { name: searchPattern },
+      { description: searchPattern },
+      { runtimeInstanceKey: searchPattern },
+      { packageKey: searchPattern },
+      { packageVersion: searchPattern },
+      { frameworkKey: searchPattern },
+    ]
+  }
 
   const [rows, total, activeRuntimeCount] = await Promise.all([
     RuntimeInstance.find(filter)

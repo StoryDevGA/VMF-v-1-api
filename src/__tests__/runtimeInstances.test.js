@@ -1046,6 +1046,40 @@ describe('Runtime Instance API', () => {
     }))
   })
 
+  test('searches runtime instances by customer-visible identity and package fields', async () => {
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get('/api/v1/runtime-instances')
+      .query({
+        customerId: CUSTOMER_ID,
+        tenantId: TENANT_ID,
+        runtimeType: 'VALUE_NARRATIVE',
+        q: 'Northwind',
+      })
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(RuntimeInstance.find).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: CUSTOMER_ID,
+      tenantId: TENANT_ID,
+      runtimeType: 'VALUE_NARRATIVE',
+      $or: expect.arrayContaining([
+        { name: expect.any(RegExp) },
+        { description: expect.any(RegExp) },
+        { runtimeInstanceKey: expect.any(RegExp) },
+        { packageKey: expect.any(RegExp) },
+        { packageVersion: expect.any(RegExp) },
+      ]),
+    }))
+    expect(RuntimeInstance.countDocuments).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: CUSTOMER_ID,
+      tenantId: TENANT_ID,
+      runtimeType: 'VALUE_NARRATIVE',
+      $or: expect.any(Array),
+    }))
+  })
+
   test('requires runtimeType when listing runtime instances instead of falling back to VMF entitlement', async () => {
     const token = await getAccessTokenForUser(makeCustomerAdmin())
 

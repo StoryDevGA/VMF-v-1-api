@@ -84,6 +84,11 @@ const listRuntimeInstancesSchema = z.object({
       invalid_type_error: 'status must be a supported runtime instance status',
     })
     .optional(),
+  q: z
+    .string()
+    .trim()
+    .max(255, 'Search query must be 255 characters or fewer')
+    .optional(),
   page: z.coerce.number().int().min(1).optional().default(1),
   pageSize: z.coerce.number().int().min(1).max(100).optional().default(20),
 }).strict()
