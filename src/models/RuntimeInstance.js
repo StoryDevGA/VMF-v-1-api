@@ -47,6 +47,10 @@ const frameworkStateSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.Mixed,
       default: () => ({}),
     },
+    readiness: {
+      type: mongoose.Schema.Types.Mixed,
+      default: () => ({}),
+    },
     policy: {
       type: mongoose.Schema.Types.Mixed,
       default: () => ({}),
@@ -327,6 +331,7 @@ runtimeInstanceSchema.pre('validate', function normalizeRuntimeInstance(next) {
   frameworkState.lifecycle = frameworkState.lifecycle || { stage: 'DRAFT' }
   frameworkState.sections = frameworkState.sections || {}
   frameworkState.validation = frameworkState.validation || {}
+  frameworkState.readiness = frameworkState.readiness || {}
   frameworkState.policy = frameworkState.policy || {}
   frameworkState.attachments = frameworkState.attachments || {}
   frameworkState.artifacts = frameworkState.artifacts || {}

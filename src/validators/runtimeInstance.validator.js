@@ -12,6 +12,15 @@ const runtimeInstanceIdSchema = z.object({
     .max(180, 'runtimeInstanceId must be 180 characters or fewer'),
 })
 
+const runtimeActionParamsSchema = runtimeInstanceIdSchema.extend({
+  actionKey: z
+    .string({ required_error: 'actionKey is required' })
+    .trim()
+    .min(1, 'actionKey is required')
+    .max(80, 'actionKey must be 80 characters or fewer')
+    .transform((value) => value.toUpperCase()),
+})
+
 const expectedUpdatedAtSchema = z
   .string({ required_error: 'expectedUpdatedAt is required' })
   .trim()
@@ -87,6 +96,10 @@ const mutateRuntimeStateSchema = z.object({
   expectedUpdatedAt: expectedUpdatedAtSchema,
 }).strict()
 
+const executeRuntimeActionSchema = z.object({
+  expectedUpdatedAt: expectedUpdatedAtSchema,
+}).strict()
+
 const listRuntimeInstancesSchema = z.object({
   customerId: z
     .string({ required_error: 'customerId is required' })
@@ -132,12 +145,22 @@ export const validateMutateRuntimeState = createBodyValidator(mutateRuntimeState
   rootIssueKey: '_root',
 })
 
+export const validateExecuteRuntimeAction = createBodyValidator(executeRuntimeActionSchema, {
+  message: 'Request validation failed.',
+  rootIssueKey: '_root',
+})
+
 export const validateListRuntimeInstances = createQueryValidator(listRuntimeInstancesSchema, {
   message: 'Invalid query parameters.',
   rootIssueKey: '_root',
 })
 
 export const validateRuntimeInstanceId = createParamsValidator(runtimeInstanceIdSchema, {
+  message: 'Invalid request parameters.',
+  rootIssueKey: '_root',
+})
+
+export const validateRuntimeActionParams = createParamsValidator(runtimeActionParamsSchema, {
   message: 'Invalid request parameters.',
   rootIssueKey: '_root',
 })

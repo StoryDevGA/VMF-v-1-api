@@ -47,6 +47,12 @@ export const RUNTIME_INSTANCE_ERROR_REASONS = Object.freeze({
   RUNTIME_MUTATION_NOT_EDITABLE: 'RUNTIME_MUTATION_NOT_EDITABLE',
   RUNTIME_MUTATION_STALE: 'RUNTIME_MUTATION_STALE',
   RUNTIME_MUTATION_UNSUPPORTED_RUNTIME_TYPE: 'RUNTIME_MUTATION_UNSUPPORTED_RUNTIME_TYPE',
+  RUNTIME_ACTION_AUDIT_PERSISTENCE_FAILED: 'RUNTIME_ACTION_AUDIT_PERSISTENCE_FAILED',
+  RUNTIME_ACTION_NOT_AVAILABLE: 'RUNTIME_ACTION_NOT_AVAILABLE',
+  RUNTIME_ACTION_NOT_DECLARED: 'RUNTIME_ACTION_NOT_DECLARED',
+  RUNTIME_ACTION_STALE: 'RUNTIME_ACTION_STALE',
+  RUNTIME_ACTION_UNSUPPORTED: 'RUNTIME_ACTION_UNSUPPORTED',
+  RUNTIME_ACTION_UNSUPPORTED_RUNTIME_TYPE: 'RUNTIME_ACTION_UNSUPPORTED_RUNTIME_TYPE',
 })
 
 const VMF_FRAMEWORK_KEY = 'VMF'
@@ -597,6 +603,7 @@ const buildInitialFrameworkState = () => ({
   lifecycle: { stage: 'DRAFT' },
   sections: {},
   validation: {},
+  readiness: {},
   policy: {},
   attachments: {},
   artifacts: {},
@@ -736,6 +743,7 @@ const normalizeFrameworkState = (frameworkState = {}) => ({
   lifecycle: frameworkState.lifecycle || { stage: 'DRAFT' },
   sections: frameworkState.sections || {},
   validation: frameworkState.validation || {},
+  readiness: frameworkState.readiness || {},
   policy: frameworkState.policy || {},
   attachments: frameworkState.attachments || {},
   artifacts: frameworkState.artifacts || {},

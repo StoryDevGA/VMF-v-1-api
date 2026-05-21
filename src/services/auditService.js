@@ -81,6 +81,7 @@ export const AUDIT_ACTIONS = Object.freeze({
   RUNTIME_ACTIVATION_COMPLETED: 'RUNTIME_ACTIVATION_COMPLETED',
   RUNTIME_DEPLOYMENT_REGISTERED: 'RUNTIME_DEPLOYMENT_REGISTERED',
   RUNTIME_INSTANCE_CREATED: 'RUNTIME_INSTANCE_CREATED',
+  RUNTIME_ACTION_EXECUTED: 'RUNTIME_ACTION_EXECUTED',
   RUNTIME_STATE_MUTATED: 'RUNTIME_STATE_MUTATED',
   COMPONENT_CREATED: 'COMPONENT_CREATED',
   COMPONENT_UPDATED: 'COMPONENT_UPDATED',
@@ -431,6 +432,8 @@ const buildAuditSummary = ({ action, resourceType, resourceId, diff, display }) 
       return clampSummary(`${actorLabel} completed runtime activation ${targetLabel}`)
     case AUDIT_ACTIONS.RUNTIME_DEPLOYMENT_REGISTERED:
       return clampSummary(`${actorLabel} registered runtime deployment ${targetLabel}`)
+    case AUDIT_ACTIONS.RUNTIME_ACTION_EXECUTED:
+      return clampSummary(`${actorLabel} executed runtime action for ${targetLabel}`)
     case AUDIT_ACTIONS.RUNTIME_STATE_MUTATED:
       return clampSummary(`${actorLabel} updated runtime state for ${targetLabel}`)
     case AUDIT_ACTIONS.VALIDATION_STARTED:

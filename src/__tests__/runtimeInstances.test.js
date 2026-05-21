@@ -196,6 +196,7 @@ const makeRuntimeInstance = (overrides = {}) => ({
     lifecycle: { stage: 'DRAFT' },
     sections: {},
     validation: {},
+    readiness: {},
     policy: {},
     attachments: {},
     artifacts: {},
@@ -271,6 +272,37 @@ const makeRuntimePathRecord = (overrides = {}) => ({
   ...overrides,
 })
 
+const actionLabels = {
+  RUN_VALIDATION: 'Run Validation',
+  MARK_READY: 'Mark Ready',
+  SUBMIT_FOR_REVIEW: 'Submit for Review',
+  RETURN_TO_DRAFT: 'Return to Draft',
+  SAVE_DRAFT: 'Save Draft',
+}
+
+const makeActionPolicyKey = (actionKey) =>
+  `${String(actionKey || '').trim().toLowerCase().replace(/_/g, '-')}-policy`
+
+const makeWorkflowBinding = (actionKey, overrides = {}) => ({
+  policyKey: makeActionPolicyKey(actionKey),
+  executionContext: 'MANUAL_RUN',
+  priority: 10,
+  enabled: true,
+  ...overrides,
+})
+
+const makeUIAction = (actionKey, overrides = {}) => ({
+  actionKey,
+  governedAction: actionKey,
+  buttonLabel: actionLabels[actionKey] || actionKey,
+  confirmationMessage: '',
+  successMessage: `${actionLabels[actionKey] || actionKey} completed.`,
+  displayOrder: 10,
+  isVisible: true,
+  requiresConfirmation: false,
+  ...overrides,
+})
+
 const makeUIContract = (overrides = {}) => ({
   stableId: `ui-contract-${UI_CONTRACT_KEY}`,
   uiContractKey: UI_CONTRACT_KEY,
@@ -295,16 +327,10 @@ const makeUIContract = (overrides = {}) => ({
     },
   ],
   actions: [
-    {
-      actionKey: 'SUBMIT_FOR_REVIEW',
-      governedAction: 'SUBMIT_FOR_REVIEW',
-      buttonLabel: 'Submit for Review',
+    makeUIAction('SUBMIT_FOR_REVIEW', {
       confirmationMessage: 'Submit this framework for review?',
-      successMessage: 'Framework submitted for review.',
-      displayOrder: 10,
-      isVisible: true,
       requiresConfirmation: true,
-    },
+    }),
   ],
   ...overrides,
 })
@@ -330,6 +356,24 @@ const makeWorkflowPolicy = (overrides = {}) => ({
   failMessage: 'Submit action is not available.',
   ...overrides,
 })
+
+const makeActionWorkflowPolicy = (actionKey, overrides = {}) => makeWorkflowPolicy({
+  stableId: `policy-${makeActionPolicyKey(actionKey)}`,
+  key: makeActionPolicyKey(actionKey),
+  name: actionLabels[actionKey] || actionKey,
+  governedAction: actionKey,
+  triggerEvent: 'MANUAL_RUN',
+  conditions: [],
+  passMessage: `${actionLabels[actionKey] || actionKey} is available.`,
+  failMessage: `${actionLabels[actionKey] || actionKey} is not available.`,
+  ...overrides,
+})
+
+const mockRuntimeInstanceForActionExecution = ({ document, rendererRuntimeInstance = document }) => {
+  RuntimeInstance.findOne = jest.fn()
+    .mockImplementationOnce(() => Promise.resolve(document))
+    .mockImplementation(() => buildLeanQuery(rendererRuntimeInstance))
+}
 
 const buildRoleQueryChain = (rows) => ({
   select: jest.fn().mockReturnThis(),
@@ -532,6 +576,7 @@ describe('Runtime Instance API', () => {
       lifecycle: { stage: 'DRAFT' },
       sections: {},
       validation: {},
+      readiness: {},
       policy: {},
       attachments: {},
       artifacts: {},
@@ -1310,6 +1355,71 @@ describe('Runtime Instance API', () => {
     })
   })
 
+  test('PATCH /api/v1/runtime-instances/:id/data invalidates validation and readiness evidence after a section write', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'READY' },
+        sections: {
+          customer_problem: 'Proposal creation is slow.',
+        },
+        validation: {
+          runtime_required_sections: {
+            is_valid: true,
+            status: 'PASSED',
+          },
+        },
+        readiness: {
+          state: 'READY',
+          ready: true,
+          validationState: 'PASSED',
+        },
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+    }))
+    RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimePathRecord()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/data`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.customer_problem',
+        operation: 'WRITE',
+        value: '',
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+      })
+
+    expect(res.status).toBe(200)
+    expect(RuntimeInstance.findOneAndUpdate).toHaveBeenCalledWith(
+      expect.any(Object),
+      {
+        $set: expect.objectContaining({
+          framework_state: expect.objectContaining({
+            validation: {},
+            readiness: expect.objectContaining({
+              state: 'DRAFT',
+              ready: false,
+              submittedForReview: false,
+              validationState: 'UNKNOWN',
+              invalidatedByRuntimePath: 'framework_state.sections.customer_problem',
+              invalidatedAt: expect.any(String),
+            }),
+          }),
+        }),
+      },
+      expect.any(Object),
+    )
+  })
+
   test('rejects runtime state mutation outside framework_state.sections scope', async () => {
     const token = await getAccessTokenForUser(makeCustomerAdmin())
 
@@ -1568,6 +1678,836 @@ describe('Runtime Instance API', () => {
     ])
   })
 
+  test('POST /api/v1/runtime-instances/:id/actions/RUN_VALIDATION persists governed validation and audit evidence', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: 'Proposal creation is slow.',
+        },
+        validation: {},
+        readiness: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('RUN_VALIDATION')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('RUN_VALIDATION')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('RUN_VALIDATION')]))
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+    }))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/RUN_VALIDATION`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+
+    expect(res.status).toBe(200)
+    expect(RuntimeInstance.findOneAndUpdate).toHaveBeenCalledWith(
+      {
+        _id: RUNTIME_INSTANCE_ID,
+        updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      },
+      {
+        $set: expect.objectContaining({
+          executionStatus: 'IDLE',
+          framework_state: expect.objectContaining({
+            validation: expect.objectContaining({
+              runtime_required_sections: expect.objectContaining({
+                is_valid: true,
+                status: 'PASSED',
+              }),
+            }),
+            readiness: expect.objectContaining({
+              state: 'VALIDATED',
+              validationState: 'PASSED',
+              lastActionKey: 'RUN_VALIDATION',
+            }),
+          }),
+          updatedBy: CUSTOMER_ADMIN_ID,
+        }),
+      },
+      {
+        new: true,
+        runValidators: true,
+      },
+    )
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'RUNTIME_ACTION_EXECUTED',
+      resourceType: 'RuntimeInstance',
+      resourceId: RUNTIME_INSTANCE_ID,
+      scope: expect.objectContaining({
+        customerId: CUSTOMER_ID,
+        tenantId: TENANT_ID,
+        runtimeInstanceId: RUNTIME_INSTANCE_ID,
+        runtimeInstanceKey: 'value-narrative-439111',
+      }),
+      diff: expect.objectContaining({
+        actionKey: 'RUN_VALIDATION',
+        governedAction: 'RUN_VALIDATION',
+        executionStatus: {
+          from: 'IDLE',
+          to: 'IDLE',
+        },
+        validation: expect.objectContaining({
+          key: 'runtime_required_sections',
+          status: 'PASSED',
+          is_valid: true,
+        }),
+      }),
+    }))
+    expect(res.body.data.state.readiness).toEqual(expect.objectContaining({
+      state: 'VALIDATED',
+      validationState: 'PASSED',
+    }))
+  })
+
+  test('RUN_VALIDATION records blocked readiness when required runtime sections are missing', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {},
+        validation: {},
+        readiness: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('RUN_VALIDATION')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('RUN_VALIDATION')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('RUN_VALIDATION')]))
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+    }))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/RUN_VALIDATION`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+
+    expect(res.status).toBe(200)
+    expect(RuntimeInstance.findOneAndUpdate).toHaveBeenCalledWith(
+      expect.any(Object),
+      {
+        $set: expect.objectContaining({
+          executionStatus: 'BLOCKED',
+          framework_state: expect.objectContaining({
+            validation: expect.objectContaining({
+              runtime_required_sections: expect.objectContaining({
+                is_valid: false,
+                status: 'FAILED',
+                missingRequiredSections: [
+                  {
+                    sectionKey: 'customer_problem',
+                    runtimePath: 'framework_state.sections.customer_problem',
+                  },
+                ],
+              }),
+            }),
+            readiness: expect.objectContaining({
+              state: 'BLOCKED',
+              validationState: 'FAILED',
+              lastActionKey: 'RUN_VALIDATION',
+            }),
+          }),
+        }),
+      },
+      expect.any(Object),
+    )
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'RUNTIME_ACTION_EXECUTED',
+      diff: expect.objectContaining({
+        validation: expect.objectContaining({
+          status: 'FAILED',
+          is_valid: false,
+        }),
+      }),
+    }))
+  })
+
+  test('rejects MARK_READY before validation evidence has passed', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('MARK_READY')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('MARK_READY')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('MARK_READY')]))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/MARK_READY`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('RUNTIME_ACTION_NOT_AVAILABLE')
+    expect(res.body.error.details.disabledReason).toContain('Run validation successfully')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('rejects MARK_READY when stale validation evidence no longer matches required section state', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: '',
+        },
+        validation: {
+          runtime_required_sections: {
+            is_valid: true,
+            status: 'PASSED',
+          },
+        },
+        readiness: {
+          state: 'VALIDATED',
+          validationState: 'PASSED',
+        },
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('MARK_READY')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('MARK_READY')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('MARK_READY')]))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/MARK_READY`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('RUNTIME_ACTION_NOT_AVAILABLE')
+    expect(res.body.error.details.disabledReason).toContain('Run validation successfully')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('MARK_READY transitions a currently valid runtime to ready', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: 'Proposal creation is slow.',
+        },
+        validation: {
+          runtime_required_sections: {
+            is_valid: true,
+            status: 'PASSED',
+          },
+        },
+        readiness: {
+          state: 'VALIDATED',
+          validationState: 'PASSED',
+        },
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('MARK_READY')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('MARK_READY')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('MARK_READY')]))
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+    }))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/MARK_READY`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+
+    expect(res.status).toBe(200)
+    expect(RuntimeInstance.findOneAndUpdate).toHaveBeenCalledWith(
+      expect.any(Object),
+      {
+        $set: expect.objectContaining({
+          executionStatus: 'IDLE',
+          framework_state: expect.objectContaining({
+            lifecycle: expect.objectContaining({
+              stage: 'READY',
+            }),
+            readiness: expect.objectContaining({
+              state: 'READY',
+              ready: true,
+              lastActionKey: 'MARK_READY',
+            }),
+          }),
+        }),
+      },
+      expect.any(Object),
+    )
+  })
+
+  test('SUBMIT_FOR_REVIEW transitions a ready runtime into review and waiting approval', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'READY' },
+        sections: {
+          customer_problem: 'Proposal creation is slow.',
+        },
+        validation: {
+          runtime_required_sections: {
+            is_valid: true,
+            status: 'PASSED',
+          },
+        },
+        readiness: {
+          state: 'READY',
+          ready: true,
+          validationState: 'PASSED',
+        },
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('SUBMIT_FOR_REVIEW')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('SUBMIT_FOR_REVIEW')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('SUBMIT_FOR_REVIEW')]))
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+    }))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/SUBMIT_FOR_REVIEW`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+
+    expect(res.status).toBe(200)
+    expect(RuntimeInstance.findOneAndUpdate).toHaveBeenCalledWith(
+      expect.any(Object),
+      {
+        $set: expect.objectContaining({
+          executionStatus: 'WAITING_APPROVAL',
+          framework_state: expect.objectContaining({
+            lifecycle: expect.objectContaining({
+              stage: 'IN_REVIEW',
+            }),
+            readiness: expect.objectContaining({
+              state: 'IN_REVIEW',
+              submittedForReview: true,
+              lastActionKey: 'SUBMIT_FOR_REVIEW',
+            }),
+          }),
+        }),
+      },
+      expect.any(Object),
+    )
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'RUNTIME_ACTION_EXECUTED',
+      diff: expect.objectContaining({
+        actionKey: 'SUBMIT_FOR_REVIEW',
+        executionStatus: {
+          from: 'IDLE',
+          to: 'WAITING_APPROVAL',
+        },
+      }),
+    }))
+  })
+
+  test('SAVE_DRAFT returns readiness to draft without requiring validation evidence', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'READY' },
+        sections: {},
+        validation: {},
+        readiness: {
+          state: 'READY',
+          ready: true,
+        },
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('SAVE_DRAFT')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('SAVE_DRAFT')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('SAVE_DRAFT')]))
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+    }))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/SAVE_DRAFT`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+
+    expect(res.status).toBe(200)
+    expect(RuntimeInstance.findOneAndUpdate).toHaveBeenCalledWith(
+      expect.any(Object),
+      {
+        $set: expect.objectContaining({
+          executionStatus: 'IDLE',
+          framework_state: expect.objectContaining({
+            lifecycle: expect.objectContaining({
+              stage: 'DRAFT',
+            }),
+            readiness: expect.objectContaining({
+              state: 'DRAFT',
+              ready: false,
+              submittedForReview: false,
+              lastActionKey: 'SAVE_DRAFT',
+            }),
+          }),
+        }),
+      },
+      expect.any(Object),
+    )
+  })
+
+  test('RETURN_TO_DRAFT transitions an in-review runtime back to draft', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      executionStatus: 'WAITING_APPROVAL',
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'IN_REVIEW' },
+        sections: {
+          customer_problem: 'Proposal creation is slow.',
+        },
+        validation: {
+          runtime_required_sections: {
+            is_valid: true,
+            status: 'PASSED',
+          },
+        },
+        readiness: {
+          state: 'IN_REVIEW',
+          ready: true,
+          submittedForReview: true,
+        },
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('RETURN_TO_DRAFT')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('RETURN_TO_DRAFT')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('RETURN_TO_DRAFT')]))
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+    }))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/RETURN_TO_DRAFT`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+
+    expect(res.status).toBe(200)
+    expect(RuntimeInstance.findOneAndUpdate).toHaveBeenCalledWith(
+      expect.any(Object),
+      {
+        $set: expect.objectContaining({
+          executionStatus: 'IDLE',
+          framework_state: expect.objectContaining({
+            lifecycle: expect.objectContaining({
+              stage: 'DRAFT',
+            }),
+            readiness: expect.objectContaining({
+              state: 'DRAFT',
+              ready: false,
+              submittedForReview: false,
+              lastActionKey: 'RETURN_TO_DRAFT',
+            }),
+          }),
+        }),
+      },
+      expect.any(Object),
+    )
+  })
+
+  test('rejects non-return actions from persisted in-review state even when execution is idle', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      executionStatus: 'IDLE',
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'IN_REVIEW' },
+        sections: {
+          customer_problem: 'Proposal creation is slow.',
+        },
+        validation: {
+          runtime_required_sections: {
+            is_valid: true,
+            status: 'PASSED',
+          },
+        },
+        readiness: {
+          state: 'IN_REVIEW',
+          ready: true,
+          submittedForReview: true,
+        },
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('MARK_READY')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('MARK_READY')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('MARK_READY')]))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/MARK_READY`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('RUNTIME_ACTION_NOT_AVAILABLE')
+    expect(res.body.error.details.disabledReason).toContain('waiting for review')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+  })
+
+  test('rejects stale runtime actions when the atomic updatedAt guard loses a write race', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: 'Proposal creation is slow.',
+        },
+        validation: {},
+        readiness: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('RUN_VALIDATION')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('RUN_VALIDATION')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('RUN_VALIDATION')]))
+    RuntimeInstance.findOneAndUpdate = jest.fn().mockResolvedValue(null)
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/RUN_VALIDATION`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('RUNTIME_ACTION_STALE')
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('rejects runtime action execution when the actor lacks VMF_UPDATE access', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    const token = await getAccessTokenForUser(makeRegularUser())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/RUN_VALIDATION`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.details.reason).toBe('FORBIDDEN')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('rejects unsupported runtime action keys before resolving runtime state', async () => {
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/PUBLISH`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.reason).toBe('RUNTIME_ACTION_UNSUPPORTED')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('rejects action execution for unsupported runtime types', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      runtimeType: 'DEAL_ANALYSIS',
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/RUN_VALIDATION`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.reason).toBe('RUNTIME_ACTION_UNSUPPORTED_RUNTIME_TYPE')
+    expect(res.body.error.details.supportedRuntimeTypes).toEqual(['VALUE_NARRATIVE'])
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('rejects runtime actions that are not declared by the renderer projection', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('RUN_VALIDATION')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('RUN_VALIDATION')]))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/RUN_VALIDATION`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.reason).toBe('RUNTIME_ACTION_NOT_DECLARED')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('rejects runtime actions when the runtime instance is inactive', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      status: 'ARCHIVED',
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('RUN_VALIDATION')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('RUN_VALIDATION')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('RUN_VALIDATION')]))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/RUN_VALIDATION`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('RUNTIME_ACTION_NOT_AVAILABLE')
+    expect(res.body.error.details.disabledReason).toContain('active runtime instance')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+  })
+
+  test('rejects runtime actions when execution is terminal', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      executionStatus: 'COMPLETE',
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('RUN_VALIDATION')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('RUN_VALIDATION')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('RUN_VALIDATION')]))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/RUN_VALIDATION`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('RUNTIME_ACTION_NOT_AVAILABLE')
+    expect(res.body.error.details.disabledReason).toContain('blocked while execution is in progress or terminal')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+  })
+
+  test('rejects renderer-projected action denial from workflow policy decision mode', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('RUN_VALIDATION')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('RUN_VALIDATION')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([
+      makeActionWorkflowPolicy('RUN_VALIDATION', { decisionMode: 'DENY' }),
+    ]))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/RUN_VALIDATION`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('RUNTIME_ACTION_NOT_AVAILABLE')
+    expect(res.body.error.details.disabledReason).toBe('Workflow policy decision mode is not executable by the renderer.')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+  })
+
+  test('rolls back a non-transactional runtime action when audit persistence fails', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedBy: CUSTOMER_ADMIN_ID,
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: 'Proposal creation is slow.',
+        },
+        validation: {},
+        readiness: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('RUN_VALIDATION')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('RUN_VALIDATION')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('RUN_VALIDATION')]))
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+      .mockResolvedValueOnce(makeRuntimeInstanceDocument({
+        ...runtimeInstanceDoc,
+        framework_state: {
+          ...runtimeInstanceDoc.framework_state,
+          readiness: { state: 'VALIDATED' },
+        },
+        updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+      }))
+      .mockResolvedValueOnce(makeRuntimeInstanceDocument({
+        ...runtimeInstanceDoc,
+        updatedAt: new Date('2026-05-19T08:02:00.000Z'),
+      }))
+    AuditLog.createLog = jest.fn(async () => {
+      throw new Error('audit unavailable')
+    })
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/RUN_VALIDATION`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+
+    expect(res.status).toBe(500)
+    expect(res.body.error.code).toBe('RUNTIME_ACTION_AUDIT_FAILED')
+    expect(res.body.error.details.reason).toBe('RUNTIME_ACTION_AUDIT_PERSISTENCE_FAILED')
+    expect(RuntimeInstance.findOneAndUpdate).toHaveBeenCalledTimes(2)
+    expect(RuntimeInstance.findOneAndUpdate.mock.calls[1]).toEqual([
+      {
+        _id: RUNTIME_INSTANCE_ID,
+        updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+      },
+      {
+        $set: {
+          framework_state: runtimeInstanceDoc.framework_state,
+          executionStatus: runtimeInstanceDoc.executionStatus,
+          updatedBy: CUSTOMER_ADMIN_ID,
+        },
+      },
+      {
+        new: true,
+        runValidators: true,
+      },
+    ])
+  })
+
   test('renders a runtime workspace from package sections, runtime paths, UI Contract, workflow policy, and framework_state', async () => {
     FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
     RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
@@ -1637,12 +2577,22 @@ describe('Runtime Instance API', () => {
       expect.objectContaining({
         actionKey: 'SUBMIT_FOR_REVIEW',
         buttonLabel: 'Submit for Review',
-        enabled: true,
+        enabled: false,
+        disabledReason: 'Mark this runtime ready after successful validation before submitting for review.',
         requiresConfirmation: true,
         confirmationMessage: 'Submit this framework for review?',
         policyKey: 'submit-for-review-policy',
       }),
     ])
+    expect(res.body.data.validation).toEqual(expect.objectContaining({
+      state: 'UNKNOWN',
+      messages: [],
+    }))
+    expect(res.body.data.readiness).toEqual(expect.objectContaining({
+      state: 'DRAFT',
+      ready: false,
+      submittedForReview: false,
+    }))
     expect(res.body.data.signals).toEqual([])
     expect(res.body.data.activity).toEqual([])
     expect(res.body.data.runtimeInstance.framework_state).toBeUndefined()
@@ -1884,6 +2834,37 @@ describe('Runtime Instance API', () => {
     UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
     WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
     const token = await getAccessTokenForUser(makeRegularUser())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.actions).toEqual([
+      expect.objectContaining({
+        actionKey: 'SUBMIT_FOR_REVIEW',
+        enabled: false,
+        requiredPermissions: ['VMF_UPDATE'],
+        disabledReason: 'Current role or permissions do not allow this runtime action.',
+      }),
+    ])
+  })
+
+  test('disables action UI for customer-scoped tenant admins who can view but are not assigned to mutate the tenant', async () => {
+    const tenantAdmin = makeCustomerScopedTenantAdmin()
+    User.findById = jest.fn().mockImplementation((userId) => {
+      if (userId === REGULAR_USER_ID) return buildUserQueryChain(tenantAdmin)
+      return buildUserQueryChain(null)
+    })
+    Role.find = jest.fn().mockReturnValue(buildRoleQueryChain(buildTenantAdminRoleRows()))
+    Tenant.findById = jest.fn().mockResolvedValue(makeTenant({
+      tenantAdminUserIds: [],
+    }))
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
+    const token = await getAccessTokenForUser(tenantAdmin)
 
     const res = await request
       .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)

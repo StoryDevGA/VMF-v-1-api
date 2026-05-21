@@ -3,6 +3,7 @@ import {
   getRuntimeInstance as getRuntimeInstanceRecord,
   listRuntimeInstances as listRuntimeInstanceRecords,
 } from '../services/runtimeInstanceService.js'
+import { executeRuntimeAction as executeRuntimeActionRecord } from '../services/runtimeActionExecutionService.js'
 import { getRuntimeRenderer as getRuntimeRendererProjection } from '../services/runtimeRendererService.js'
 import { mutateRuntimeState as mutateRuntimeStateRecord } from '../services/runtimeStateMutationService.js'
 
@@ -113,6 +114,29 @@ export const mutateRuntimeState = async (req, res, next) => {
 
     return res.status(200).json({
       data: mutation,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const executeRuntimeAction = async (req, res, next) => {
+  try {
+    const action = await executeRuntimeActionRecord({
+      actionKey: req.params.actionKey,
+      actorUserId: req.context?.userId || req.userId,
+      auditRequest: req,
+      scopes: req.scopes,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+      payload: req.body,
+    })
+
+    return res.status(200).json({
+      data: action,
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {

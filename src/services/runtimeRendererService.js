@@ -29,6 +29,10 @@ import {
   WORKFLOW_POLICY_DECISION_MODES,
   WORKFLOW_POLICY_STATUSES,
 } from '../models/WorkflowPolicy.js'
+import {
+  applyRuntimeActionStateGate,
+  deriveRuntimeReadinessState,
+} from './runtimeActionPolicyService.js'
 import { assertRuntimePermission, getRuntimeInstance } from './runtimeInstanceService.js'
 
 export const RUNTIME_RENDERER_ERROR_REASONS = Object.freeze({
@@ -58,10 +62,12 @@ const MUTATING_RUNTIME_ACTIONS = new Set([
   'ARCHIVE',
   'BUILD_SECTIONS',
   'INITIALISE_STATE',
+  'MARK_READY',
   'PUBLISH',
   'RETURN_TO_DRAFT',
   'RUN_VALIDATION',
   'SAVE',
+  'SAVE_DRAFT',
   'START_REVIEW',
   'SUBMIT_FOR_REVIEW',
 ])
@@ -414,21 +420,6 @@ const getRuntimeRoleKeys = ({ scopes, runtimeInstance }) => {
     ...(customerBucket?.roleKeys || []),
     ...(tenantBucket?.roleKeys || []),
   ])
-}
-
-const hasRuntimePermission = ({ scopes, runtimeInstance, permission }) => {
-  const normalizedPermission = normalizeToken(permission)
-  if (!normalizedPermission) return true
-
-  const resolved = getResolvedPermissionsSnapshot(scopes)
-  if ((resolved.platform.roleKeys || []).includes('SUPER_ADMIN')) return true
-  if ((resolved.platform.permissions || []).includes(normalizedPermission)) return true
-
-  const customerBucket = getCustomerBucket(scopes, runtimeInstance.customerId)
-  if ((customerBucket?.permissions || []).includes(normalizedPermission)) return true
-
-  const tenantBucket = getTenantBucket(scopes, runtimeInstance.customerId, runtimeInstance.tenantId)
-  return (tenantBucket?.permissions || []).includes(normalizedPermission)
 }
 
 const getRuntimeEvidence = (runtimeInstance) => ({
@@ -827,7 +818,7 @@ const getDefaultRuntimeActionPermission = ({ runtimeInstance, governedAction }) 
   return isMutatingAction ? 'VMF_UPDATE' : 'VMF_VIEW'
 }
 
-const getActionAccess = ({ action, runtimeInstance, scopes, governedAction }) => {
+const getActionAccess = async ({ action, runtimeInstance, scopes, governedAction }) => {
   const requiredPermissions = uniqueTokens(
     action?.requiredPermissions
     || action?.permissions
@@ -837,9 +828,20 @@ const getActionAccess = ({ action, runtimeInstance, scopes, governedAction }) =>
   const actorRoleKeys = getRuntimeRoleKeys({ scopes, runtimeInstance })
   const hasAllowedRole = rolesAllowed.length === 0
     || rolesAllowed.some((roleKey) => actorRoleKeys.includes(roleKey))
-  const hasRequiredPermissions = requiredPermissions.every((permission) =>
-    hasRuntimePermission({ scopes, runtimeInstance, permission }),
-  )
+  let hasRequiredPermissions = true
+  for (const permission of requiredPermissions) {
+    try {
+      await assertRuntimePermission({
+        scopes,
+        customerId: toIdString(runtimeInstance?.customerId),
+        tenantId: toIdString(runtimeInstance?.tenantId),
+        permission,
+      })
+    } catch {
+      hasRequiredPermissions = false
+      break
+    }
+  }
 
   return {
     allowed: hasAllowedRole && hasRequiredPermissions,
@@ -909,7 +911,8 @@ const buildRendererAction = ({
   }
 }
 
-const buildRendererActions = ({
+const buildRendererActions = async ({
+  frameworkPackage,
   uiContract,
   workflowPolicies,
   bindingByPolicyKey,
@@ -932,12 +935,12 @@ const buildRendererActions = ({
     }
   })
 
-  const renderedActions = uiActions.map((action) => {
+  const renderedActions = await Promise.all(uiActions.map(async (action) => {
     const governedAction = normalizeToken(action?.governedAction || action?.actionKey)
     const policy = policyByGovernedAction.get(governedAction) || null
     const policyBinding = bindingByPolicyKey.get(normalizeKey(policy?.key)) || null
     const conditionResult = policy ? evaluatePolicyConditions({ policy, runtimeContext }) : false
-    const actionAccess = getActionAccess({
+    const actionAccess = await getActionAccess({
       action,
       runtimeInstance,
       scopes,
@@ -953,15 +956,20 @@ const buildRendererActions = ({
       }))
     }
 
-    return buildRendererAction({
-      action,
-      policy,
-      policyBinding,
-      conditionResult,
-      actionAccess,
-      warningCode: policy ? '' : CONFIG_WARNING_CODES.ACTION_POLICY_MISSING,
+    return applyRuntimeActionStateGate({
+      action: buildRendererAction({
+        action,
+        policy,
+        policyBinding,
+        conditionResult,
+        actionAccess,
+        warningCode: policy ? '' : CONFIG_WARNING_CODES.ACTION_POLICY_MISSING,
+      }),
+      frameworkPackage,
+      runtimeInstance,
+      frameworkState: runtimeInstance.framework_state || {},
     })
-  })
+  }))
 
   const uiGovernedActions = new Set(
     uiActions.map((action) => normalizeToken(action?.governedAction || action?.actionKey)).filter(Boolean),
@@ -1084,6 +1092,21 @@ const buildValidationProjection = ({ frameworkState, sections }) => ({
     .flatMap((section) => Array.isArray(section.validationMessages) ? section.validationMessages : []),
 })
 
+const buildReadinessProjection = (frameworkState = {}) => {
+  const readiness = frameworkState.readiness || {}
+  const state = deriveRuntimeReadinessState(frameworkState)
+
+  return {
+    state,
+    ready: Boolean(readiness.ready),
+    submittedForReview: Boolean(readiness.submittedForReview),
+    validationState: readiness.validationState || '',
+    lastActionKey: readiness.lastActionKey || '',
+    updatedAt: readiness.updatedAt || null,
+    updatedBy: readiness.updatedBy || '',
+  }
+}
+
 export const getRuntimeRenderer = async ({
   scopes,
   runtimeInstanceId,
@@ -1108,7 +1131,8 @@ export const getRuntimeRenderer = async ({
     uiContract,
     configWarnings,
   })
-  const actions = buildRendererActions({
+  const actions = await buildRendererActions({
+    frameworkPackage,
     uiContract,
     workflowPolicies: workflowPolicyContext.policies,
     bindingByPolicyKey: workflowPolicyContext.bindingByPolicyKey,
@@ -1150,6 +1174,7 @@ export const getRuntimeRenderer = async ({
     sections,
     actions,
     validation: buildValidationProjection({ frameworkState, sections }),
+    readiness: buildReadinessProjection(frameworkState),
     signals: [],
     activity: [],
     runtimeData: buildRuntimeDataProjection(sections),

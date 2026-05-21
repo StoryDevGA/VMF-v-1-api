@@ -112,6 +112,23 @@ const setValueAtPath = ({ frameworkState, runtimePath, value }) => {
   }
 }
 
+const invalidateSectionMutationEvidence = ({ nextFrameworkState, runtimePath }) => {
+  if (!String(runtimePath || '').startsWith('framework_state.sections.')) return nextFrameworkState
+
+  nextFrameworkState.validation = {}
+  nextFrameworkState.readiness = {
+    ...(nextFrameworkState.readiness || {}),
+    state: 'DRAFT',
+    ready: false,
+    submittedForReview: false,
+    validationState: 'UNKNOWN',
+    invalidatedByRuntimePath: runtimePath,
+    invalidatedAt: new Date().toISOString(),
+  }
+
+  return nextFrameworkState
+}
+
 const assertRuntimeEditable = (runtimeInstance) => {
   const runtimeStatus = normalizeToken(runtimeInstance?.status)
   const executionStatus = normalizeToken(runtimeInstance?.executionStatus)
@@ -643,10 +660,14 @@ export const mutateRuntimeState = async ({
   const updatedAtBefore = runtimeInstance.updatedAt instanceof Date
     ? runtimeInstance.updatedAt.toISOString()
     : runtimeInstance.updatedAt
-  const { nextFrameworkState, previousValue } = setValueAtPath({
+  const { nextFrameworkState: frameworkStateAfterWrite, previousValue } = setValueAtPath({
     frameworkState: runtimeInstance.framework_state || {},
     runtimePath,
     value,
+  })
+  const nextFrameworkState = invalidateSectionMutationEvidence({
+    nextFrameworkState: frameworkStateAfterWrite,
+    runtimePath,
   })
 
   const updatedRuntimeInstance = await persistMutationWithAudit({
