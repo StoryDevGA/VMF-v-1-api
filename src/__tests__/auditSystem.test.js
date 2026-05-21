@@ -52,6 +52,7 @@ const REGULAR_USER_ID = '507f1f77bcf86cd799439013'
 const CUSTOMER_ID = '607f1f77bcf86cd799439022'
 const TENANT_ID = '707f1f77bcf86cd799439033'
 const VMF_ID = '807f1f77bcf86cd799439044'
+const RUNTIME_INSTANCE_ID = 'a27f1f77bcf86cd799439111'
 const AUDIT_LOG_ID_1 = 'a07f1f77bcf86cd799439001'
 const AUDIT_LOG_ID_2 = 'a07f1f77bcf86cd799439002'
 const AUDIT_LOG_ID_3 = 'a07f1f77bcf86cd799439003'
@@ -1894,6 +1895,32 @@ describe('governanceAuditService - Unit', () => {
 })
 
 describe('AuditLog signature versions - Unit', () => {
+  test('runtime mutation scope fields are retained by the AuditLog schema', () => {
+    const logDoc = new AuditLog({
+      ts: new Date('2026-05-21T08:00:00.000Z'),
+      actorUserId: CUSTOMER_ADMIN_ID,
+      action: 'RUNTIME_STATE_MUTATED',
+      resourceType: 'RuntimeInstance',
+      resourceId: RUNTIME_INSTANCE_ID,
+      scope: {
+        customerId: CUSTOMER_ID,
+        tenantId: TENANT_ID,
+        runtimeInstanceId: RUNTIME_INSTANCE_ID,
+        runtimeInstanceKey: 'value-narrative-439111',
+      },
+      diff: {
+        runtimePath: 'framework_state.sections.customer_problem',
+      },
+    })
+
+    expect(logDoc.toObject().scope).toEqual(expect.objectContaining({
+      customerId: expect.anything(),
+      tenantId: expect.anything(),
+      runtimeInstanceId: expect.anything(),
+      runtimeInstanceKey: 'value-narrative-439111',
+    }))
+  })
+
   test('signature v2 includes governance fields and leaves previousSignature out until chain linking ships', () => {
     const logDoc = new AuditLog({
       ts: new Date('2026-05-14T08:53:39.000Z'),

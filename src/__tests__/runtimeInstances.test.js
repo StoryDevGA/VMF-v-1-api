@@ -212,6 +212,19 @@ const makeRuntimeInstance = (overrides = {}) => ({
   ...overrides,
 })
 
+const makeRuntimeInstanceDocument = (overrides = {}) => {
+  const document = {
+    ...makeRuntimeInstance(overrides),
+    save: jest.fn(async function save() { return this }),
+    markModified: jest.fn(),
+    toJSON: function toJSON() {
+      return { ...this, id: this._id }
+    },
+  }
+
+  return document
+}
+
 const makeRendererFrameworkPackage = (overrides = {}) => makeFrameworkPackage({
   uiContractKey: UI_CONTRACT_KEY,
   uiContractBinding: {
@@ -453,6 +466,7 @@ beforeEach(() => {
   RuntimeDeployment.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeDeployment()))
   RuntimeActivationSnapshot.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeActivationSnapshot()))
   RuntimePathRegistry.find = jest.fn().mockReturnValue(buildLeanQuery([]))
+  RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimePathRecord()))
   UIContract.findOne = jest.fn().mockReturnValue(buildLeanQuery(null))
   WorkflowPolicy.find = jest.fn().mockReturnValue(buildLeanQuery([]))
   RuntimeInstance.prototype.save = jest.fn(async function save() { return this })
@@ -464,6 +478,11 @@ beforeEach(() => {
 
     return buildLeanQuery(makeRuntimeInstance())
   })
+  RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+    ...makeRuntimeInstance(),
+    ...(update?.$set || {}),
+    updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+  }))
   RuntimeInstance.countDocuments = jest.fn().mockResolvedValue(1)
   RuntimeInstance.distinct = jest.fn().mockResolvedValue([1])
   RuntimeInstance.deleteOne = jest.fn().mockResolvedValue({ deletedCount: 1 })
@@ -1211,6 +1230,344 @@ describe('Runtime Instance API', () => {
     }))
   })
 
+  test('PATCH /api/v1/runtime-instances/:id/data writes a section value through runtime state mutation audit', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: 'Proposal creation is slow.',
+        },
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+    }))
+    RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimePathRecord()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/data`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.customer_problem',
+        operation: 'WRITE',
+        value: 'Proposal teams lack a shared story.',
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+      })
+
+    expect(res.status).toBe(200)
+    expect(RuntimeInstance.findOneAndUpdate).toHaveBeenCalledWith(
+      {
+        _id: RUNTIME_INSTANCE_ID,
+        updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      },
+      {
+        $set: expect.objectContaining({
+          framework_state: expect.objectContaining({
+            sections: expect.objectContaining({
+              customer_problem: 'Proposal teams lack a shared story.',
+            }),
+          }),
+          updatedBy: CUSTOMER_ADMIN_ID,
+        }),
+      },
+      {
+        new: true,
+        runValidators: true,
+      },
+    )
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'RUNTIME_STATE_MUTATED',
+      resourceType: 'RuntimeInstance',
+      resourceId: RUNTIME_INSTANCE_ID,
+      scope: expect.objectContaining({
+        customerId: CUSTOMER_ID,
+        tenantId: TENANT_ID,
+        runtimeInstanceId: RUNTIME_INSTANCE_ID,
+        runtimeInstanceKey: 'value-narrative-439111',
+      }),
+      diff: expect.objectContaining({
+        runtimePath: 'framework_state.sections.customer_problem',
+        operation: 'WRITE',
+        previousValue: 'Proposal creation is slow.',
+        nextValue: 'Proposal teams lack a shared story.',
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+      }),
+    }))
+    expect(res.body.data.mutation).toEqual({
+      runtimePath: 'framework_state.sections.customer_problem',
+      operation: 'WRITE',
+      previousValue: 'Proposal creation is slow.',
+      value: 'Proposal teams lack a shared story.',
+    })
+  })
+
+  test('rejects runtime state mutation outside framework_state.sections scope', async () => {
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/data`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.lifecycle.stage',
+        operation: 'WRITE',
+        value: 'READY',
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.reason).toBe('RUNTIME_MUTATION_FORBIDDEN_PATH')
+    expect(RuntimeInstance.prototype.save).not.toHaveBeenCalled()
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('rejects runtime state mutation when the registered path lacks WRITE', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimePathRecord({
+      allowedOperations: ['READ'],
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/data`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.customer_problem',
+        operation: 'WRITE',
+        value: 'Updated problem',
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.reason).toBe('RUNTIME_MUTATION_INVALID_PATH')
+    expect(res.body.error.details.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        message: expect.stringContaining('does not allow WRITE'),
+      }),
+    ]))
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('rejects runtime state mutation when the registered path is protected', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimePathRecord({
+      isProtected: true,
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/data`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.customer_problem',
+        operation: 'WRITE',
+        value: 'Updated problem',
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.reason).toBe('RUNTIME_MUTATION_INVALID_PATH')
+    expect(res.body.error.details.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        message: expect.stringContaining('protected from runtime writes'),
+      }),
+    ]))
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('rejects stale runtime state mutation before writing state or audit', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:30:00.000Z'),
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/data`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.customer_problem',
+        operation: 'WRITE',
+        value: 'Updated problem',
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('RUNTIME_MUTATION_STALE')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('rejects runtime state mutation when the atomic updatedAt guard loses a write race', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn().mockResolvedValue(null)
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/data`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.customer_problem',
+        operation: 'WRITE',
+        value: 'Updated problem',
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('RUNTIME_MUTATION_STALE')
+    expect(RuntimeInstance.findOneAndUpdate).toHaveBeenCalledWith(
+      {
+        _id: RUNTIME_INSTANCE_ID,
+        updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      },
+      expect.objectContaining({
+        $set: expect.objectContaining({
+          framework_state: expect.any(Object),
+        }),
+      }),
+      {
+        new: true,
+        runValidators: true,
+      },
+    )
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('rejects runtime state mutation when the actor lacks VMF_UPDATE access', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    const token = await getAccessTokenForUser(makeRegularUser())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/data`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.customer_problem',
+        operation: 'WRITE',
+        value: 'Updated problem',
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+      })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.details.reason).toBe('FORBIDDEN')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('rejects runtime state mutation for non-Value Narrative runtime types in Sprint 1', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      runtimeType: 'DEAL_ANALYSIS',
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/data`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.customer_problem',
+        operation: 'WRITE',
+        value: 'Updated problem',
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.reason).toBe('RUNTIME_MUTATION_UNSUPPORTED_RUNTIME_TYPE')
+    expect(res.body.error.details.supportedRuntimeTypes).toEqual(['VALUE_NARRATIVE'])
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('rolls back a non-transactional runtime state mutation when audit persistence fails', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: 'Original problem.',
+        },
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+      .mockResolvedValueOnce(makeRuntimeInstanceDocument({
+        ...runtimeInstanceDoc,
+        framework_state: {
+          ...runtimeInstanceDoc.framework_state,
+          sections: {
+            customer_problem: 'Updated problem.',
+          },
+        },
+        updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+      }))
+      .mockResolvedValueOnce(makeRuntimeInstanceDocument({
+        ...runtimeInstanceDoc,
+        updatedAt: new Date('2026-05-19T08:02:00.000Z'),
+      }))
+    AuditLog.createLog = jest.fn(async () => {
+      throw new Error('audit unavailable')
+    })
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/data`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.customer_problem',
+        operation: 'WRITE',
+        value: 'Updated problem.',
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+      })
+
+    expect(res.status).toBe(500)
+    expect(res.body.error.code).toBe('RUNTIME_STATE_MUTATION_AUDIT_FAILED')
+    expect(res.body.error.details.reason).toBe('RUNTIME_MUTATION_AUDIT_PERSISTENCE_FAILED')
+    expect(RuntimeInstance.findOneAndUpdate).toHaveBeenCalledTimes(2)
+    expect(RuntimeInstance.findOneAndUpdate.mock.calls[1]).toEqual([
+      {
+        _id: RUNTIME_INSTANCE_ID,
+        updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+      },
+      {
+        $set: {
+          framework_state: runtimeInstanceDoc.framework_state,
+          updatedBy: CUSTOMER_ADMIN_ID,
+        },
+      },
+      {
+        new: true,
+        runValidators: true,
+      },
+    ])
+  })
+
   test('renders a runtime workspace from package sections, runtime paths, UI Contract, workflow policy, and framework_state', async () => {
     FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
     RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
@@ -1301,6 +1658,47 @@ describe('Runtime Instance API', () => {
     })
     expect(res.body.data.diagnostics.configWarnings).toEqual([])
     expect(res.body.meta.renderTraceId).toMatch(/^render-/)
+  })
+
+  test('renders section fields as read-only when the actor can view but cannot mutate runtime state', async () => {
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: 'Proposal creation is slow.',
+        },
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })))
+    const token = await getAccessTokenForUser(makeRegularUser())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.sections).toEqual([
+      expect.objectContaining({
+        key: 'customer_problem',
+        editable: false,
+        readonlyReason: 'Current role or permissions do not allow runtime section mutation.',
+        requiredPermissions: ['VMF_UPDATE'],
+      }),
+    ])
+    expect(res.body.data.actions).toEqual([
+      expect.objectContaining({
+        actionKey: 'SUBMIT_FOR_REVIEW',
+        enabled: false,
+        disabledReason: 'Current role or permissions do not allow this runtime action.',
+      }),
+    ])
   })
 
   test('does not expose runtime data outside registered READ runtime paths', async () => {

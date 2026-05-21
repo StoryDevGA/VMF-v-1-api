@@ -12,6 +12,14 @@ const runtimeInstanceIdSchema = z.object({
     .max(180, 'runtimeInstanceId must be 180 characters or fewer'),
 })
 
+const expectedUpdatedAtSchema = z
+  .string({ required_error: 'expectedUpdatedAt is required' })
+  .trim()
+  .min(1, 'expectedUpdatedAt is required')
+  .refine((value) => Number.isFinite(new Date(value).getTime()), {
+    message: 'expectedUpdatedAt must be a valid timestamp',
+  })
+
 const createRuntimeInstanceSchema = z.object({
   customerId: z
     .string({ required_error: 'customerId is required' })
@@ -58,6 +66,27 @@ const createRuntimeInstanceSchema = z.object({
     .default(''),
 }).strict()
 
+const mutateRuntimeStateSchema = z.object({
+  runtimePath: z
+    .string({ required_error: 'runtimePath is required' })
+    .trim()
+    .min(1, 'runtimePath is required')
+    .max(200, 'runtimePath must be 200 characters or fewer'),
+  operation: z
+    .string({ required_error: 'operation is required' })
+    .trim()
+    .transform((value) => value.toUpperCase())
+    .refine((value) => value === 'WRITE', {
+      message: 'operation must be WRITE',
+    }),
+  value: z
+    .any()
+    .refine((value) => value !== undefined, {
+      message: 'value is required',
+    }),
+  expectedUpdatedAt: expectedUpdatedAtSchema,
+}).strict()
+
 const listRuntimeInstancesSchema = z.object({
   customerId: z
     .string({ required_error: 'customerId is required' })
@@ -94,6 +123,11 @@ const listRuntimeInstancesSchema = z.object({
 }).strict()
 
 export const validateCreateRuntimeInstance = createBodyValidator(createRuntimeInstanceSchema, {
+  message: 'Request validation failed.',
+  rootIssueKey: '_root',
+})
+
+export const validateMutateRuntimeState = createBodyValidator(mutateRuntimeStateSchema, {
   message: 'Request validation failed.',
   rootIssueKey: '_root',
 })

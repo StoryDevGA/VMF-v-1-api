@@ -40,11 +40,18 @@ export const RUNTIME_INSTANCE_ERROR_REASONS = Object.freeze({
   DEPLOYMENT_EVIDENCE_REQUIRED: 'DEPLOYMENT_EVIDENCE_REQUIRED',
   AUDIT_PERSISTENCE_FAILED: 'AUDIT_PERSISTENCE_FAILED',
   RUNTIME_INSTANCE_KEY_CONFLICT: 'RUNTIME_INSTANCE_KEY_CONFLICT',
+  RUNTIME_INSTANCE_NOT_FOUND: 'RUNTIME_INSTANCE_NOT_FOUND',
+  RUNTIME_MUTATION_AUDIT_PERSISTENCE_FAILED: 'RUNTIME_MUTATION_AUDIT_PERSISTENCE_FAILED',
+  RUNTIME_MUTATION_FORBIDDEN_PATH: 'RUNTIME_MUTATION_FORBIDDEN_PATH',
+  RUNTIME_MUTATION_INVALID_PATH: 'RUNTIME_MUTATION_INVALID_PATH',
+  RUNTIME_MUTATION_NOT_EDITABLE: 'RUNTIME_MUTATION_NOT_EDITABLE',
+  RUNTIME_MUTATION_STALE: 'RUNTIME_MUTATION_STALE',
+  RUNTIME_MUTATION_UNSUPPORTED_RUNTIME_TYPE: 'RUNTIME_MUTATION_UNSUPPORTED_RUNTIME_TYPE',
 })
 
 const VMF_FRAMEWORK_KEY = 'VMF'
 
-const toIdString = (value) => {
+export const toIdString = (value) => {
   if (!value) return ''
   if (typeof value === 'string') return value
   if (typeof value.toHexString === 'function') return value.toHexString()
@@ -53,7 +60,7 @@ const toIdString = (value) => {
   return String(value)
 }
 
-const normalizeToken = (value) => String(value || '').trim().toUpperCase()
+export const normalizeToken = (value) => String(value || '').trim().toUpperCase()
 
 const normalizeRuntimeInstanceKey = (value) => String(value || '').trim().toLowerCase()
 
@@ -65,7 +72,7 @@ const idsEqual = (left, right) => {
   return Boolean(normalizedLeft && normalizedRight && normalizedLeft === normalizedRight)
 }
 
-const createRuntimeInstanceError = ({
+export const createRuntimeInstanceError = ({
   status,
   code,
   message,
@@ -325,7 +332,7 @@ const hasCustomerRuntimePermission = async ({
   return customer?.topology === 'SINGLE_TENANT'
 }
 
-const assertRuntimePermission = async ({ actorUserId, scopes, customerId, tenantId, permission }) => {
+export const assertRuntimePermission = async ({ actorUserId, scopes, customerId, tenantId, permission }) => {
   const normalizedPermission = normalizeToken(permission)
   const resolved = getResolvedPermissionsSnapshot(scopes)
 
@@ -352,7 +359,7 @@ const assertRuntimePermission = async ({ actorUserId, scopes, customerId, tenant
   })
 }
 
-const assertFeatureEntitlement = async ({ customerId, customer, feature }) => {
+export const assertFeatureEntitlement = async ({ customerId, customer, feature }) => {
   const entitlementContext = await resolveCustomerFeatureEntitlements({
     customerId,
     customer,
@@ -384,7 +391,7 @@ const assertFeatureEntitlement = async ({ customerId, customer, feature }) => {
   }
 }
 
-const assertCustomerTenantContext = async ({ customerId, tenantId }) => {
+export const assertCustomerTenantContext = async ({ customerId, tenantId }) => {
   const [customer, tenant] = await Promise.all([
     Customer.findById(customerId),
     Tenant.findById(tenantId),
@@ -595,7 +602,7 @@ const buildInitialFrameworkState = () => ({
   artifacts: {},
 })
 
-const getFeatureForRuntimeType = (runtimeType) =>
+export const getFeatureForRuntimeType = (runtimeType) =>
   normalizeToken(runtimeType) === RUNTIME_TYPES.DEAL_ANALYSIS ? 'DEALS' : VMF_FRAMEWORK_KEY
 
 const logRuntimeInstanceCreated = async ({

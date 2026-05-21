@@ -29,7 +29,7 @@ import {
   WORKFLOW_POLICY_DECISION_MODES,
   WORKFLOW_POLICY_STATUSES,
 } from '../models/WorkflowPolicy.js'
-import { getRuntimeInstance } from './runtimeInstanceService.js'
+import { assertRuntimePermission, getRuntimeInstance } from './runtimeInstanceService.js'
 
 export const RUNTIME_RENDERER_ERROR_REASONS = Object.freeze({
   PACKAGE_NOT_FOUND: 'PACKAGE_NOT_FOUND',
@@ -207,6 +207,54 @@ const isRuntimeEditable = (runtimeInstance) => {
     RUNTIME_EXECUTION_STATUSES.COMPLETE,
     RUNTIME_EXECUTION_STATUSES.ERROR,
   ].includes(executionStatus)
+}
+
+const resolveSectionMutationAccess = async ({ runtimeInstance, scopes }) => {
+  const runtimeType = normalizeToken(runtimeInstance?.runtimeType)
+  const requiredPermissions = ['VMF_UPDATE']
+
+  if (runtimeType !== RUNTIME_TYPES.VALUE_NARRATIVE) {
+    return {
+      allowed: false,
+      requiredPermissions,
+      reason: 'Runtime section mutation is only available for Value Narrative runtimes in Sprint 1.',
+    }
+  }
+
+  try {
+    await assertRuntimePermission({
+      scopes,
+      customerId: toIdString(runtimeInstance?.customerId),
+      tenantId: toIdString(runtimeInstance?.tenantId),
+      permission: 'VMF_UPDATE',
+    })
+    return {
+      allowed: true,
+      requiredPermissions,
+      reason: '',
+    }
+  } catch {
+    return {
+      allowed: false,
+      requiredPermissions,
+      reason: 'Current role or permissions do not allow runtime section mutation.',
+    }
+  }
+}
+
+const getReadonlyReason = ({
+  editable,
+  mutationAccess,
+  pathWritable,
+  runtimeEditable,
+  uiEditable,
+}) => {
+  if (editable) return ''
+  if (!runtimeEditable) return 'Renderer editability is governed by runtime status and execution status.'
+  if (!uiEditable) return 'Renderer editability is governed by the UI Contract.'
+  if (!pathWritable) return 'Renderer editability is governed by runtime path operations.'
+  if (mutationAccess?.allowed === false) return mutationAccess.reason
+  return 'Renderer editability is governed by runtime status, execution status, UI Contract, runtime path operations, and mutation permissions.'
 }
 
 const buildSectionValidationMessages = ({ frameworkState, validationKeys }) => {
@@ -601,6 +649,7 @@ const buildSectionIndex = (uiContract) => {
 
 const buildRendererSections = ({
   frameworkPackage,
+  mutationAccess,
   runtimeInstance,
   runtimePathRecords,
   uiContract,
@@ -667,7 +716,7 @@ const buildRendererSections = ({
     const uiVisible = uiSection?.isVisible !== false
     const uiEditable = uiSection?.isEditable !== false && uiSection?.isReadOnlyDisplay !== true
     const pathWritable = allowedOperations.includes(RUNTIME_PATH_REGISTRY_OPERATIONS.WRITE)
-    const editable = Boolean(runtimeEditable && uiEditable && pathWritable)
+    const editable = Boolean(runtimeEditable && uiEditable && pathWritable && mutationAccess?.allowed)
     const validationKeys = Array.isArray(packageSection.validationKeys)
       ? packageSection.validationKeys.map((key) => String(key || '').trim()).filter(Boolean)
       : []
@@ -690,8 +739,15 @@ const buildRendererSections = ({
       validationMessages: buildSectionValidationMessages({ frameworkState, validationKeys }),
       editable,
       visible: uiVisible,
-      readonlyReason: editable ? '' : 'Renderer editability is governed by runtime status, execution status, UI Contract, and runtime path operations.',
+      readonlyReason: getReadonlyReason({
+        editable,
+        mutationAccess,
+        pathWritable,
+        runtimeEditable,
+        uiEditable,
+      }),
       allowedOperations,
+      requiredPermissions: mutationAccess?.requiredPermissions || [],
       source: {
         package: true,
         runtimePath: true,
@@ -1043,8 +1099,10 @@ export const getRuntimeRenderer = async ({
   ])
   const configWarnings = []
   const runtimeContext = buildRuntimeContext(runtimeInstance)
+  const mutationAccess = await resolveSectionMutationAccess({ runtimeInstance, scopes })
   const sections = buildRendererSections({
     frameworkPackage,
+    mutationAccess,
     runtimeInstance,
     runtimePathRecords,
     uiContract,

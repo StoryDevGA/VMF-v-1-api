@@ -149,6 +149,15 @@ const auditLogSchema = new mongoose.Schema({
     vmfId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'VMF'
+    },
+    runtimeInstanceId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'RuntimeInstance'
+    },
+    runtimeInstanceKey: {
+      type: String,
+      trim: true,
+      maxlength: 160
     }
   },
   diff: {

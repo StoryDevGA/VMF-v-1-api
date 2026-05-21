@@ -4,6 +4,7 @@ import {
   listRuntimeInstances as listRuntimeInstanceRecords,
 } from '../services/runtimeInstanceService.js'
 import { getRuntimeRenderer as getRuntimeRendererProjection } from '../services/runtimeRendererService.js'
+import { mutateRuntimeState as mutateRuntimeStateRecord } from '../services/runtimeStateMutationService.js'
 
 const buildRuntimeInstanceErrorResponse = (req, err) => ({
   error: {
@@ -91,6 +92,28 @@ export const getRuntimeRenderer = async (req, res, next) => {
         renderTraceId: renderer.diagnostics?.renderTraceId,
         version: 'v1',
       },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const mutateRuntimeState = async (req, res, next) => {
+  try {
+    const mutation = await mutateRuntimeStateRecord({
+      actorUserId: req.context?.userId || req.userId,
+      auditRequest: req,
+      scopes: req.scopes,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+      payload: req.body,
+    })
+
+    return res.status(200).json({
+      data: mutation,
+      meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
     if (err?.status && err?.code) {
