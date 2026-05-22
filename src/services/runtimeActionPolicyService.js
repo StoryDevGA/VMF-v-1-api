@@ -13,6 +13,9 @@ export const RUNTIME_ACTION_KEYS = Object.freeze({
   RETURN_TO_DRAFT: 'RETURN_TO_DRAFT',
   GENERATE_SECTION: 'GENERATE_SECTION',
   REGENERATE_SECTION: 'REGENERATE_SECTION',
+  APPROVE: 'APPROVE',
+  PUBLISH: 'PUBLISH',
+  LOCK_RECORD: 'LOCK_RECORD',
 })
 
 export const RUNTIME_READINESS_STATES = Object.freeze({
@@ -21,6 +24,9 @@ export const RUNTIME_READINESS_STATES = Object.freeze({
   VALIDATED: 'VALIDATED',
   READY: 'READY',
   IN_REVIEW: 'IN_REVIEW',
+  APPROVED: 'APPROVED',
+  PUBLISHED: 'PUBLISHED',
+  LOCKED: 'LOCKED',
 })
 
 export const RUNTIME_VALIDATION_STATES = Object.freeze({
@@ -33,6 +39,9 @@ export const RUNTIME_LIFECYCLE_STAGES = Object.freeze({
   DRAFT: 'DRAFT',
   READY: 'READY',
   IN_REVIEW: 'IN_REVIEW',
+  APPROVED: 'APPROVED',
+  PUBLISHED: 'PUBLISHED',
+  LOCKED: 'LOCKED',
 })
 
 const SUPPORTED_SPRINT_2_ACTIONS = new Set(Object.values(RUNTIME_ACTION_KEYS))
@@ -97,6 +106,8 @@ export const normalizeFrameworkStateForAction = (frameworkState = {}) => ({
   sections: frameworkState.sections || {},
   validation: frameworkState.validation || {},
   readiness: frameworkState.readiness || {},
+  publish: frameworkState.publish || {},
+  lock: frameworkState.lock || {},
   policy: frameworkState.policy || {},
   attachments: frameworkState.attachments || {},
   artifacts: frameworkState.artifacts || {},
@@ -121,6 +132,9 @@ export const deriveRuntimeReadinessState = (frameworkState = {}) => {
   if (state) return state
 
   const stage = normalizeRuntimeActionToken(normalizedState.lifecycle?.stage || RUNTIME_LIFECYCLE_STAGES.DRAFT)
+  if (stage === RUNTIME_LIFECYCLE_STAGES.LOCKED) return RUNTIME_READINESS_STATES.LOCKED
+  if (stage === RUNTIME_LIFECYCLE_STAGES.PUBLISHED) return RUNTIME_READINESS_STATES.PUBLISHED
+  if (stage === RUNTIME_LIFECYCLE_STAGES.APPROVED) return RUNTIME_READINESS_STATES.APPROVED
   if (stage === RUNTIME_LIFECYCLE_STAGES.IN_REVIEW) return RUNTIME_READINESS_STATES.IN_REVIEW
   if (stage === RUNTIME_LIFECYCLE_STAGES.READY) return RUNTIME_READINESS_STATES.READY
 
@@ -137,6 +151,65 @@ const hasPassedValidation = (frameworkState) =>
 const hasCurrentRequiredSectionsPassed = ({ frameworkPackage, frameworkState }) => {
   if (!frameworkPackage) return hasPassedValidation(frameworkState)
   return validateRuntimeRequiredSections({ frameworkPackage, frameworkState }).is_valid === true
+}
+
+export const isRuntimeLocked = ({ runtimeInstance, frameworkState } = {}) => {
+  const normalizedState = normalizeFrameworkStateForAction(frameworkState || runtimeInstance?.framework_state)
+  return Boolean(
+    runtimeInstance?.lockedAt
+    || normalizeRuntimeActionToken(runtimeInstance?.status) === RUNTIME_INSTANCE_STATUSES.LOCKED
+    || normalizeRuntimeActionToken(normalizedState.lifecycle?.stage) === RUNTIME_LIFECYCLE_STAGES.LOCKED
+    || normalizedState.lock?.locked === true,
+  )
+}
+
+export const isRuntimeLifecycleTruthImmutable = (frameworkState = {}) => {
+  const normalizedState = normalizeFrameworkStateForAction(frameworkState)
+  return [
+    RUNTIME_LIFECYCLE_STAGES.APPROVED,
+    RUNTIME_LIFECYCLE_STAGES.PUBLISHED,
+    RUNTIME_LIFECYCLE_STAGES.LOCKED,
+  ].includes(normalizeRuntimeActionToken(normalizedState.lifecycle?.stage))
+}
+
+const hasReviewSubmissionEvidence = (frameworkState = {}) => {
+  const normalizedState = normalizeFrameworkStateForAction(frameworkState)
+  const readiness = normalizedState.readiness || {}
+  return Boolean(
+    readiness.submittedForReview === true
+    && readiness.submittedAt
+  )
+}
+
+const hasApprovalEvidence = (frameworkState = {}) => {
+  const normalizedState = normalizeFrameworkStateForAction(frameworkState)
+  const lifecycle = normalizedState.lifecycle || {}
+  const readiness = normalizedState.readiness || {}
+  const approvedAt = readiness.approvedAt || lifecycle.approvedAt
+  const approvedBy = readiness.approvedBy || lifecycle.approvedBy
+
+  return Boolean(readiness.approved === true && approvedAt && approvedBy)
+}
+
+const hasCompletePublishEvidence = (frameworkState = {}) => {
+  const normalizedState = normalizeFrameworkStateForAction(frameworkState)
+  const publish = normalizedState.publish || {}
+  const evidence = publish.evidence || {}
+  const sourceApproval = publish.sourceApproval || {}
+
+  return Boolean(
+    publish.state === RUNTIME_READINESS_STATES.PUBLISHED
+    && publish.published === true
+    && publish.publishedAt
+    && publish.publishedBy
+    && publish.outputEligible === true
+    && sourceApproval.approvedAt
+    && sourceApproval.approvedBy
+    && evidence.activationId
+    && evidence.deploymentId
+    && evidence.dependencySnapshotId
+    && evidence.dependencySnapshotHash
+  )
 }
 
 const isRuntimeActionEditBlocked = (runtimeInstance) => [
@@ -164,11 +237,15 @@ export const getRuntimeActionStateGate = ({
   const executionStatus = normalizeRuntimeActionToken(runtimeInstance?.executionStatus)
 
   if (!isSupportedSprint2RuntimeAction(normalizedAction)) {
-    return buildGate(false, 'This runtime action is not available in Sprint 2.')
+    return buildGate(false, 'This runtime action is not available for this runtime.')
   }
 
   if (normalizeRuntimeActionToken(runtimeInstance?.runtimeType) !== RUNTIME_TYPES.VALUE_NARRATIVE) {
-    return buildGate(false, 'Runtime actions are only available for Value Narrative runtimes in Sprint 2.')
+    return buildGate(false, 'Runtime actions are only available for Value Narrative runtimes.')
+  }
+
+  if (isRuntimeLocked({ runtimeInstance, frameworkState: normalizedFrameworkState })) {
+    return buildGate(false, 'Runtime is locked and cannot be mutated or actioned.')
   }
 
   if (runtimeStatus !== RUNTIME_INSTANCE_STATUSES.ACTIVE) {
@@ -183,14 +260,28 @@ export const getRuntimeActionStateGate = ({
     || lifecycleStage === RUNTIME_LIFECYCLE_STAGES.IN_REVIEW
     || readinessState === RUNTIME_READINESS_STATES.IN_REVIEW
 
-  if (isInReview && normalizedAction !== RUNTIME_ACTION_KEYS.RETURN_TO_DRAFT) {
-    return buildGate(false, 'Runtime is waiting for review and can only be returned to draft in Sprint 2.')
+  if (isInReview && ![
+    RUNTIME_ACTION_KEYS.APPROVE,
+    RUNTIME_ACTION_KEYS.RETURN_TO_DRAFT,
+  ].includes(normalizedAction)) {
+    return buildGate(false, 'Runtime is waiting for review and can only be approved or returned to draft.')
   }
 
   if (executionStatus === RUNTIME_EXECUTION_STATUSES.WAITING_APPROVAL) {
-    return normalizedAction === RUNTIME_ACTION_KEYS.RETURN_TO_DRAFT
-      ? buildGate(true)
-      : buildGate(false, 'Runtime is waiting for review and can only be returned to draft in Sprint 2.')
+    if (![
+      RUNTIME_ACTION_KEYS.APPROVE,
+      RUNTIME_ACTION_KEYS.RETURN_TO_DRAFT,
+    ].includes(normalizedAction)) {
+      return buildGate(false, 'Runtime is waiting for review and can only be approved or returned to draft.')
+    }
+  }
+
+  if (lifecycleStage === RUNTIME_LIFECYCLE_STAGES.APPROVED && normalizedAction !== RUNTIME_ACTION_KEYS.PUBLISH) {
+    return buildGate(false, 'Approved runtimes can only be published.')
+  }
+
+  if (lifecycleStage === RUNTIME_LIFECYCLE_STAGES.PUBLISHED && normalizedAction !== RUNTIME_ACTION_KEYS.LOCK_RECORD) {
+    return buildGate(false, 'Published runtimes can only be locked.')
   }
 
   if (
@@ -216,6 +307,48 @@ export const getRuntimeActionStateGate = ({
       || executionStatus === RUNTIME_EXECUTION_STATUSES.WAITING_APPROVAL
       ? buildGate(true)
       : buildGate(false, 'Runtime is not currently in review.')
+  }
+
+  if (normalizedAction === RUNTIME_ACTION_KEYS.APPROVE) {
+    const inReview = lifecycleStage === RUNTIME_LIFECYCLE_STAGES.IN_REVIEW
+      || readinessState === RUNTIME_READINESS_STATES.IN_REVIEW
+      || executionStatus === RUNTIME_EXECUTION_STATUSES.WAITING_APPROVAL
+
+    if (!inReview) {
+      return buildGate(false, 'Runtime must be submitted for review before approval.')
+    }
+
+    if (!hasCurrentRequiredSectionsPassed({ frameworkPackage, frameworkState: normalizedFrameworkState })) {
+      return buildGate(false, 'Required runtime sections must remain valid before approval.')
+    }
+
+    if (!hasReviewSubmissionEvidence(normalizedFrameworkState)) {
+      return buildGate(false, 'Runtime review submission evidence is required before approval.')
+    }
+  }
+
+  if (
+    normalizedAction === RUNTIME_ACTION_KEYS.PUBLISH
+    && (
+      lifecycleStage !== RUNTIME_LIFECYCLE_STAGES.APPROVED
+      || readinessState !== RUNTIME_READINESS_STATES.APPROVED
+      || !hasApprovalEvidence(normalizedFrameworkState)
+      || !hasCurrentRequiredSectionsPassed({ frameworkPackage, frameworkState: normalizedFrameworkState })
+    )
+  ) {
+    return buildGate(false, 'Approve this runtime with current validation evidence before publishing.')
+  }
+
+  if (
+    normalizedAction === RUNTIME_ACTION_KEYS.LOCK_RECORD
+    && (
+      lifecycleStage !== RUNTIME_LIFECYCLE_STAGES.PUBLISHED
+      || readinessState !== RUNTIME_READINESS_STATES.PUBLISHED
+      || !hasCompletePublishEvidence(normalizedFrameworkState)
+      || !hasCurrentRequiredSectionsPassed({ frameworkPackage, frameworkState: normalizedFrameworkState })
+    )
+  ) {
+    return buildGate(false, 'Publish this runtime with current evidence before locking canonical truth.')
   }
 
   return buildGate(true)
@@ -298,10 +431,13 @@ export const buildRuntimeActionTransition = ({
   const actionedAt = new Date().toISOString()
   let nextExecutionStatus = runtimeInstance?.executionStatus || RUNTIME_EXECUTION_STATUSES.IDLE
   let validationResult = null
+  let runtimeUpdate = {}
 
   nextFrameworkState.lifecycle = nextFrameworkState.lifecycle || { stage: RUNTIME_LIFECYCLE_STAGES.DRAFT }
   nextFrameworkState.validation = nextFrameworkState.validation || {}
   nextFrameworkState.readiness = nextFrameworkState.readiness || {}
+  nextFrameworkState.publish = nextFrameworkState.publish || {}
+  nextFrameworkState.lock = nextFrameworkState.lock || {}
 
   if (normalizedAction === RUNTIME_ACTION_KEYS.SAVE_DRAFT) {
     nextFrameworkState.lifecycle = {
@@ -405,11 +541,140 @@ export const buildRuntimeActionTransition = ({
     nextExecutionStatus = RUNTIME_EXECUTION_STATUSES.IDLE
   }
 
+  if (normalizedAction === RUNTIME_ACTION_KEYS.APPROVE) {
+    nextFrameworkState.lifecycle = {
+      ...nextFrameworkState.lifecycle,
+      stage: RUNTIME_LIFECYCLE_STAGES.APPROVED,
+      approvedAt: actionedAt,
+      approvedBy: toIdString(actorUserId),
+      updatedAt: actionedAt,
+      updatedBy: toIdString(actorUserId),
+    }
+    nextFrameworkState.readiness = {
+      ...nextFrameworkState.readiness,
+      state: RUNTIME_READINESS_STATES.APPROVED,
+      ready: true,
+      approved: true,
+      approvedAt: actionedAt,
+      approvedBy: toIdString(actorUserId),
+      validationState: RUNTIME_VALIDATION_STATES.PASSED,
+      lastActionKey: normalizedAction,
+      updatedAt: actionedAt,
+      updatedBy: toIdString(actorUserId),
+    }
+    nextExecutionStatus = RUNTIME_EXECUTION_STATUSES.IDLE
+  }
+
+  if (normalizedAction === RUNTIME_ACTION_KEYS.PUBLISH) {
+    const evidence = {
+      activationId: String(runtimeInstance?.evidence?.activationId || runtimeInstance?.activationId || '').trim(),
+      deploymentId: String(runtimeInstance?.evidence?.deploymentId || runtimeInstance?.deploymentId || '').trim(),
+      dependencySnapshotId: String(runtimeInstance?.evidence?.dependencySnapshotId || runtimeInstance?.dependencyLockId || '').trim(),
+      dependencySnapshotHash: String(runtimeInstance?.evidence?.dependencySnapshotHash || '').trim(),
+    }
+    nextFrameworkState.lifecycle = {
+      ...nextFrameworkState.lifecycle,
+      stage: RUNTIME_LIFECYCLE_STAGES.PUBLISHED,
+      publishedAt: actionedAt,
+      publishedBy: toIdString(actorUserId),
+      updatedAt: actionedAt,
+      updatedBy: toIdString(actorUserId),
+    }
+    nextFrameworkState.publish = {
+      ...nextFrameworkState.publish,
+      state: RUNTIME_READINESS_STATES.PUBLISHED,
+      published: true,
+      publishedAt: actionedAt,
+      publishedBy: toIdString(actorUserId),
+      sourceApproval: {
+        approvedAt: nextFrameworkState.readiness?.approvedAt || nextFrameworkState.lifecycle?.approvedAt || null,
+        approvedBy: nextFrameworkState.readiness?.approvedBy || nextFrameworkState.lifecycle?.approvedBy || '',
+      },
+      evidence,
+      outputEligible: true,
+      lastActionKey: normalizedAction,
+      updatedAt: actionedAt,
+      updatedBy: toIdString(actorUserId),
+    }
+    nextFrameworkState.readiness = {
+      ...nextFrameworkState.readiness,
+      state: RUNTIME_READINESS_STATES.PUBLISHED,
+      ready: true,
+      approved: true,
+      published: true,
+      outputEligible: true,
+      validationState: RUNTIME_VALIDATION_STATES.PASSED,
+      lastActionKey: normalizedAction,
+      updatedAt: actionedAt,
+      updatedBy: toIdString(actorUserId),
+    }
+    nextExecutionStatus = RUNTIME_EXECUTION_STATUSES.IDLE
+  }
+
+  if (normalizedAction === RUNTIME_ACTION_KEYS.LOCK_RECORD) {
+    const evidence = {
+      activationId: String(runtimeInstance?.evidence?.activationId || runtimeInstance?.activationId || '').trim(),
+      deploymentId: String(runtimeInstance?.evidence?.deploymentId || runtimeInstance?.deploymentId || '').trim(),
+      dependencySnapshotId: String(runtimeInstance?.evidence?.dependencySnapshotId || runtimeInstance?.dependencyLockId || '').trim(),
+      dependencySnapshotHash: String(runtimeInstance?.evidence?.dependencySnapshotHash || '').trim(),
+    }
+    nextFrameworkState.lifecycle = {
+      ...nextFrameworkState.lifecycle,
+      stage: RUNTIME_LIFECYCLE_STAGES.LOCKED,
+      lockedAt: actionedAt,
+      lockedBy: toIdString(actorUserId),
+      updatedAt: actionedAt,
+      updatedBy: toIdString(actorUserId),
+    }
+    nextFrameworkState.lock = {
+      ...nextFrameworkState.lock,
+      state: RUNTIME_READINESS_STATES.LOCKED,
+      locked: true,
+      lockedAt: actionedAt,
+      lockedBy: toIdString(actorUserId),
+      lockedReason: 'Runtime published truth locked for downstream canonical use.',
+      publish: {
+        publishedAt: nextFrameworkState.publish?.publishedAt || null,
+        publishedBy: nextFrameworkState.publish?.publishedBy || '',
+      },
+      evidence,
+      anchor: {
+        relationship: 'LOCKED_VALUE_NARRATIVE',
+        runtimeInstanceKey: runtimeInstance?.runtimeInstanceKey || '',
+        runtimeType: runtimeInstance?.runtimeType || '',
+      },
+      lastActionKey: normalizedAction,
+      updatedAt: actionedAt,
+      updatedBy: toIdString(actorUserId),
+    }
+    nextFrameworkState.readiness = {
+      ...nextFrameworkState.readiness,
+      state: RUNTIME_READINESS_STATES.LOCKED,
+      ready: true,
+      approved: true,
+      published: true,
+      locked: true,
+      outputEligible: true,
+      validationState: RUNTIME_VALIDATION_STATES.PASSED,
+      lastActionKey: normalizedAction,
+      updatedAt: actionedAt,
+      updatedBy: toIdString(actorUserId),
+    }
+    runtimeUpdate = {
+      status: RUNTIME_INSTANCE_STATUSES.LOCKED,
+      lockedAt: new Date(actionedAt),
+      lockedBy: actorUserId || null,
+      lockedReason: 'Runtime published truth locked for downstream canonical use.',
+    }
+    nextExecutionStatus = RUNTIME_EXECUTION_STATUSES.COMPLETE
+  }
+
   return {
     actionedAt,
     nextExecutionStatus,
     nextFrameworkState,
     previousFrameworkState,
+    runtimeUpdate,
     validationResult,
   }
 }
@@ -421,6 +686,8 @@ const runtimeActionPolicyService = {
   deriveRuntimeValidationState,
   getRuntimeActionStateGate,
   isSupportedSprint2RuntimeAction,
+  isRuntimeLocked,
+  isRuntimeLifecycleTruthImmutable,
   normalizeFrameworkStateForAction,
   normalizeRuntimeActionToken,
   validateRuntimeRequiredSections,

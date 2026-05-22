@@ -51,6 +51,14 @@ const frameworkStateSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.Mixed,
       default: () => ({}),
     },
+    publish: {
+      type: mongoose.Schema.Types.Mixed,
+      default: () => ({}),
+    },
+    lock: {
+      type: mongoose.Schema.Types.Mixed,
+      default: () => ({}),
+    },
     policy: {
       type: mongoose.Schema.Types.Mixed,
       default: () => ({}),
@@ -265,6 +273,22 @@ const runtimeInstanceSchema = new mongoose.Schema(
       type: frameworkStateSchema,
       default: () => ({}),
     },
+    lockedAt: {
+      type: Date,
+      default: null,
+      index: true,
+    },
+    lockedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
+    lockedReason: {
+      type: String,
+      trim: true,
+      maxlength: 500,
+      default: '',
+    },
     assignedTo: [{
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
@@ -327,11 +351,17 @@ runtimeInstanceSchema.pre('validate', function normalizeRuntimeInstance(next) {
     this.framework_state = {}
   }
 
+  if (this.isNew || this.isModified('lockedReason')) {
+    this.lockedReason = String(this.lockedReason || '').trim()
+  }
+
   const frameworkState = this.framework_state
   frameworkState.lifecycle = frameworkState.lifecycle || { stage: 'DRAFT' }
   frameworkState.sections = frameworkState.sections || {}
   frameworkState.validation = frameworkState.validation || {}
   frameworkState.readiness = frameworkState.readiness || {}
+  frameworkState.publish = frameworkState.publish || {}
+  frameworkState.lock = frameworkState.lock || {}
   frameworkState.policy = frameworkState.policy || {}
   frameworkState.attachments = frameworkState.attachments || {}
   frameworkState.artifacts = frameworkState.artifacts || {}

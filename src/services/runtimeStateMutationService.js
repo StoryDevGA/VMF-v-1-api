@@ -25,6 +25,12 @@ import {
   normalizeRuntimeSectionObject,
 } from './runtimeSectionModelService.js'
 import { validateRuntimeMutation } from './runtimeValidation/runtimeMutationValidator.js'
+import {
+  isRuntimeLifecycleTruthImmutable,
+  isRuntimeLocked,
+  normalizeFrameworkStateForAction,
+  normalizeRuntimeActionToken,
+} from './runtimeActionPolicyService.js'
 
 const SECTION_WRITE_SCOPE = 'framework_state.sections.*'
 const FORBIDDEN_PATH_SEGMENTS = new Set(['__proto__', 'prototype', 'constructor'])
@@ -137,6 +143,34 @@ const invalidateSectionMutationEvidence = ({ nextFrameworkState, runtimePath }) 
 const assertRuntimeEditable = (runtimeInstance) => {
   const runtimeStatus = normalizeToken(runtimeInstance?.status)
   const executionStatus = normalizeToken(runtimeInstance?.executionStatus)
+  const frameworkState = normalizeFrameworkStateForAction(runtimeInstance?.framework_state)
+  const lifecycleStage = normalizeRuntimeActionToken(frameworkState.lifecycle?.stage)
+
+  if (isRuntimeLocked({ runtimeInstance })) {
+    throw buildMutationError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Runtime instance is locked and cannot be mutated.',
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_MUTATION_NOT_EDITABLE,
+      details: {
+        runtimeStatus,
+        lockedAt: runtimeInstance?.lockedAt || runtimeInstance?.framework_state?.lock?.lockedAt || null,
+      },
+    })
+  }
+
+  if (isRuntimeLifecycleTruthImmutable(frameworkState)) {
+    throw buildMutationError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Runtime lifecycle truth is approved or published and cannot be directly mutated.',
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_MUTATION_NOT_EDITABLE,
+      details: {
+        lifecycleStage,
+        immutableLifecycleStages: ['APPROVED', 'PUBLISHED', 'LOCKED'],
+      },
+    })
+  }
 
   if (runtimeStatus !== RUNTIME_INSTANCE_STATUSES.ACTIVE) {
     throw buildMutationError({

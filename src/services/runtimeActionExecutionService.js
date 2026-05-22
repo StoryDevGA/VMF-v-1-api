@@ -358,6 +358,9 @@ const buildActionAuditPayload = ({
   updatedAtBefore,
   validationResult,
   generationResult,
+  nextRuntimeUpdate = {},
+  previousRuntimeStatus,
+  previousLockedAt,
 }) => ({
   action: auditService.AUDIT_ACTIONS.RUNTIME_ACTION_EXECUTED,
   resourceType: auditService.RESOURCE_TYPES.RuntimeInstance,
@@ -385,6 +388,24 @@ const buildActionAuditPayload = ({
     executionStatus: {
       from: previousExecutionStatus,
       to: nextExecutionStatus,
+    },
+    runtimeStatus: {
+      from: previousRuntimeStatus,
+      to: nextRuntimeUpdate.status || runtimeInstance.status,
+    },
+    lock: {
+      from: {
+        lockedAt: previousLockedAt || null,
+        state: previousFrameworkState?.lock || {},
+      },
+      to: {
+        lockedAt: runtimeInstance.lockedAt || nextRuntimeUpdate.lockedAt || null,
+        state: nextFrameworkState?.lock || {},
+      },
+    },
+    publish: {
+      from: previousFrameworkState?.publish || {},
+      to: nextFrameworkState?.publish || {},
     },
     lifecycle: {
       from: previousFrameworkState?.lifecycle || {},
@@ -431,6 +452,9 @@ const logRuntimeActionExecuted = async ({
   updatedAtBefore,
   validationResult,
   generationResult,
+  nextRuntimeUpdate,
+  previousRuntimeStatus,
+  previousLockedAt,
   session = null,
 }) => {
   const auditPayload = buildActionAuditPayload({
@@ -446,6 +470,9 @@ const logRuntimeActionExecuted = async ({
     updatedAtBefore,
     validationResult,
     generationResult,
+    nextRuntimeUpdate,
+    previousRuntimeStatus,
+    previousLockedAt,
   })
   const auditOptions = {
     throwOnError: true,
@@ -474,6 +501,7 @@ const atomicPersistRuntimeAction = async ({
   expectedUpdatedAt,
   nextExecutionStatus,
   nextFrameworkState,
+  nextRuntimeUpdate = {},
   runtimeInstance,
   session = null,
 }) => {
@@ -492,6 +520,7 @@ const atomicPersistRuntimeAction = async ({
         framework_state: nextFrameworkState,
         executionStatus: nextExecutionStatus,
         updatedBy: actorUserId || runtimeInstance.updatedBy || null,
+        ...nextRuntimeUpdate,
       },
     },
     {
@@ -511,6 +540,10 @@ const atomicPersistRuntimeAction = async ({
 const rollbackRuntimeAction = async ({
   previousExecutionStatus,
   previousFrameworkState,
+  previousRuntimeStatus,
+  previousLockedAt,
+  previousLockedBy,
+  previousLockedReason,
   previousUpdatedBy,
   runtimeInstance,
   updatedRuntimeInstance,
@@ -527,6 +560,10 @@ const rollbackRuntimeAction = async ({
       $set: {
         framework_state: previousFrameworkState,
         executionStatus: previousExecutionStatus,
+        status: previousRuntimeStatus,
+        lockedAt: previousLockedAt || null,
+        lockedBy: previousLockedBy || null,
+        lockedReason: previousLockedReason || '',
         updatedBy: previousUpdatedBy || null,
       },
     },
@@ -547,8 +584,13 @@ const persistActionWithAudit = async ({
   expectedUpdatedAt,
   nextExecutionStatus,
   nextFrameworkState,
+  nextRuntimeUpdate,
   previousExecutionStatus,
   previousFrameworkState,
+  previousRuntimeStatus,
+  previousLockedAt,
+  previousLockedBy,
+  previousLockedReason,
   previousUpdatedBy,
   runtimeInstance,
   updatedAtBefore,
@@ -565,6 +607,7 @@ const persistActionWithAudit = async ({
           expectedUpdatedAt,
           nextExecutionStatus,
           nextFrameworkState,
+          nextRuntimeUpdate,
           runtimeInstance,
           session,
         })
@@ -578,6 +621,8 @@ const persistActionWithAudit = async ({
           nextFrameworkState,
           previousExecutionStatus,
           previousFrameworkState,
+          previousRuntimeStatus,
+          previousLockedAt,
           runtimeInstance: updatedRuntimeInstance,
           updatedAtBefore,
           validationResult,
@@ -596,6 +641,7 @@ const persistActionWithAudit = async ({
     expectedUpdatedAt,
     nextExecutionStatus,
     nextFrameworkState,
+    nextRuntimeUpdate,
     runtimeInstance,
   })
 
@@ -610,6 +656,9 @@ const persistActionWithAudit = async ({
       nextFrameworkState,
       previousExecutionStatus,
       previousFrameworkState,
+      previousRuntimeStatus,
+      previousLockedAt,
+      nextRuntimeUpdate,
       runtimeInstance: updatedRuntimeInstance,
       updatedAtBefore,
       validationResult,
@@ -620,6 +669,10 @@ const persistActionWithAudit = async ({
       const rollbackSucceeded = await rollbackRuntimeAction({
         previousExecutionStatus,
         previousFrameworkState,
+        previousRuntimeStatus,
+        previousLockedAt,
+        previousLockedBy,
+        previousLockedReason,
         previousUpdatedBy,
         runtimeInstance,
         updatedRuntimeInstance,
@@ -715,6 +768,10 @@ export const executeRuntimeAction = async ({
   const previousFrameworkState = cloneRuntimeActionValue(runtimeInstance.framework_state || {})
   const previousUpdatedBy = runtimeInstance.updatedBy
   const previousExecutionStatus = runtimeInstance.executionStatus
+  const previousRuntimeStatus = runtimeInstance.status
+  const previousLockedAt = runtimeInstance.lockedAt || null
+  const previousLockedBy = runtimeInstance.lockedBy || null
+  const previousLockedReason = runtimeInstance.lockedReason || ''
   const updatedAtBefore = runtimeInstance.updatedAt instanceof Date
     ? runtimeInstance.updatedAt.toISOString()
     : runtimeInstance.updatedAt
@@ -742,8 +799,13 @@ export const executeRuntimeAction = async ({
     expectedUpdatedAt,
     nextExecutionStatus: resolvedTransition.nextExecutionStatus,
     nextFrameworkState: resolvedTransition.nextFrameworkState,
+    nextRuntimeUpdate: resolvedTransition.runtimeUpdate || {},
     previousExecutionStatus,
     previousFrameworkState,
+    previousRuntimeStatus,
+    previousLockedAt,
+    previousLockedBy,
+    previousLockedReason,
     previousUpdatedBy,
     runtimeInstance,
     updatedAtBefore,
@@ -758,6 +820,9 @@ export const executeRuntimeAction = async ({
       runtimeType: updatedRuntimeInstance.runtimeType,
       status: updatedRuntimeInstance.status,
       executionStatus: updatedRuntimeInstance.executionStatus,
+      lockedAt: updatedRuntimeInstance.lockedAt instanceof Date
+        ? updatedRuntimeInstance.lockedAt.toISOString()
+        : updatedRuntimeInstance.lockedAt || null,
       updatedAt: updatedRuntimeInstance.updatedAt instanceof Date
         ? updatedRuntimeInstance.updatedAt.toISOString()
         : updatedRuntimeInstance.updatedAt,
@@ -771,6 +836,8 @@ export const executeRuntimeAction = async ({
     state: {
       lifecycle: resolvedTransition.nextFrameworkState.lifecycle,
       readiness: resolvedTransition.nextFrameworkState.readiness,
+      publish: resolvedTransition.nextFrameworkState.publish || {},
+      lock: resolvedTransition.nextFrameworkState.lock || {},
       ...(resolvedTransition.validationResult ? { validation: resolvedTransition.validationResult } : {}),
       ...(resolvedTransition.generationResult ? { generation: {
         sectionKey: resolvedTransition.generationResult.sectionKey,

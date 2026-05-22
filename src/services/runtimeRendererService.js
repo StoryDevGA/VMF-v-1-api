@@ -32,6 +32,9 @@ import {
 import {
   applyRuntimeActionStateGate,
   deriveRuntimeReadinessState,
+  isRuntimeLifecycleTruthImmutable,
+  isRuntimeLocked,
+  normalizeFrameworkStateForAction,
 } from './runtimeActionPolicyService.js'
 import { assertRuntimePermission, getRuntimeInstance } from './runtimeInstanceService.js'
 import {
@@ -70,6 +73,7 @@ const MUTATING_RUNTIME_ACTIONS = new Set([
   'BUILD_SECTIONS',
   'GENERATE_SECTION',
   'INITIALISE_STATE',
+  'LOCK_RECORD',
   'MARK_READY',
   'PUBLISH',
   'REGENERATE_SECTION',
@@ -213,7 +217,10 @@ const resolveControlType = (runtimePathRecord) => {
 const isRuntimeEditable = (runtimeInstance) => {
   const runtimeStatus = normalizeToken(runtimeInstance?.status)
   const executionStatus = normalizeToken(runtimeInstance?.executionStatus)
+  const frameworkState = normalizeFrameworkStateForAction(runtimeInstance?.framework_state)
 
+  if (isRuntimeLocked({ runtimeInstance })) return false
+  if (isRuntimeLifecycleTruthImmutable(frameworkState)) return false
   if (runtimeStatus !== RUNTIME_INSTANCE_STATUSES.ACTIVE) return false
 
   return ![
@@ -265,7 +272,7 @@ const getReadonlyReason = ({
   uiEditable,
 }) => {
   if (editable) return ''
-  if (!runtimeEditable) return 'Renderer editability is governed by runtime status and execution status.'
+  if (!runtimeEditable) return 'Renderer editability is governed by runtime lifecycle, status, and execution status.'
   if (!uiEditable) return 'Renderer editability is governed by the UI Contract.'
   if (!pathWritable) return 'Renderer editability is governed by runtime path operations.'
   if (mutationAccess?.allowed === false) return mutationAccess.reason
@@ -390,6 +397,9 @@ const buildRuntimeContext = (runtimeInstance) => ({
     runtimeType: runtimeInstance.runtimeType,
     status: runtimeInstance.status,
     executionStatus: runtimeInstance.executionStatus,
+    lockedAt: runtimeInstance.lockedAt || null,
+    lockedBy: runtimeInstance.lockedBy || null,
+    lockedReason: runtimeInstance.lockedReason || '',
     runtimeMode: runtimeInstance.runtimeMode,
     workspaceId: runtimeInstance.workspaceId,
     customerId: runtimeInstance.customerId,
@@ -1134,6 +1144,37 @@ const buildReadinessProjection = (frameworkState = {}) => {
   }
 }
 
+const buildPublishProjection = (frameworkState = {}) => {
+  const publish = frameworkState.publish || {}
+  return {
+    state: publish.state || (publish.published ? 'PUBLISHED' : 'UNPUBLISHED'),
+    published: Boolean(publish.published),
+    publishedAt: publish.publishedAt || null,
+    publishedBy: publish.publishedBy || '',
+    outputEligible: Boolean(publish.outputEligible),
+    evidence: publish.evidence || {},
+    sourceApproval: publish.sourceApproval || {},
+  }
+}
+
+const buildLockProjection = (runtimeInstance = {}, frameworkState = {}) => {
+  const lock = frameworkState.lock || {}
+  const lockedAt = runtimeInstance.lockedAt || lock.lockedAt || null
+  return {
+    state: lock.state || (lockedAt ? 'LOCKED' : 'UNLOCKED'),
+    locked: Boolean(
+      lock.locked
+      || lockedAt
+      || normalizeToken(runtimeInstance.status) === RUNTIME_INSTANCE_STATUSES.LOCKED,
+    ),
+    lockedAt,
+    lockedBy: runtimeInstance.lockedBy || lock.lockedBy || '',
+    lockedReason: runtimeInstance.lockedReason || lock.lockedReason || '',
+    evidence: lock.evidence || {},
+    anchor: lock.anchor || {},
+  }
+}
+
 export const getRuntimeRenderer = async ({
   scopes,
   runtimeInstanceId,
@@ -1202,6 +1243,8 @@ export const getRuntimeRenderer = async ({
     actions,
     validation: buildValidationProjection({ frameworkState, sections }),
     readiness: buildReadinessProjection(frameworkState),
+    publish: buildPublishProjection(frameworkState),
+    lock: buildLockProjection(runtimeInstance, frameworkState),
     signals: [],
     activity: [],
     runtimeData: buildRuntimeDataProjection(sections),

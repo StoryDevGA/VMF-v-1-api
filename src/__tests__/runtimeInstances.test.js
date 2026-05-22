@@ -192,11 +192,16 @@ const makeRuntimeInstance = (overrides = {}) => ({
   runtimeMode: 'INTERACTIVE',
   name: 'Acme Value Narrative',
   description: '',
+  lockedAt: null,
+  lockedBy: null,
+  lockedReason: '',
   framework_state: {
     lifecycle: { stage: 'DRAFT' },
     sections: {},
     validation: {},
     readiness: {},
+    publish: {},
+    lock: {},
     policy: {},
     attachments: {},
     artifacts: {},
@@ -280,6 +285,9 @@ const actionLabels = {
   SAVE_DRAFT: 'Save Draft',
   GENERATE_SECTION: 'Generate Section',
   REGENERATE_SECTION: 'Regenerate Section',
+  APPROVE: 'Approve',
+  PUBLISH: 'Publish',
+  LOCK_RECORD: 'Lock Record',
 }
 
 const makeActionPolicyKey = (actionKey) =>
@@ -579,6 +587,8 @@ describe('Runtime Instance API', () => {
       sections: {},
       validation: {},
       readiness: {},
+      publish: {},
+      lock: {},
       policy: {},
       attachments: {},
       artifacts: {},
@@ -2317,6 +2327,678 @@ describe('Runtime Instance API', () => {
     )
   })
 
+  test('APPROVE transitions an in-review runtime into approved state with audit evidence', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      executionStatus: 'WAITING_APPROVAL',
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'IN_REVIEW' },
+        sections: {
+          customer_problem: 'Proposal creation is slow.',
+        },
+        validation: {
+          runtime_required_sections: {
+            is_valid: true,
+            status: 'PASSED',
+          },
+        },
+        readiness: {
+          state: 'IN_REVIEW',
+          ready: true,
+          submittedForReview: true,
+          submittedAt: '2026-05-19T07:55:00.000Z',
+          validationState: 'PASSED',
+        },
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('APPROVE')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('APPROVE')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('APPROVE')]))
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+    }))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/APPROVE`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+
+    expect(res.status).toBe(200)
+    expect(RuntimeInstance.findOneAndUpdate).toHaveBeenCalledWith(
+      expect.any(Object),
+      {
+        $set: expect.objectContaining({
+          executionStatus: 'IDLE',
+          framework_state: expect.objectContaining({
+            lifecycle: expect.objectContaining({
+              stage: 'APPROVED',
+              approvedAt: expect.any(String),
+              approvedBy: CUSTOMER_ADMIN_ID,
+            }),
+            readiness: expect.objectContaining({
+              state: 'APPROVED',
+              approved: true,
+              lastActionKey: 'APPROVE',
+            }),
+          }),
+        }),
+      },
+      expect.any(Object),
+    )
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'RUNTIME_ACTION_EXECUTED',
+      diff: expect.objectContaining({
+        actionKey: 'APPROVE',
+        lifecycle: expect.objectContaining({
+          to: expect.objectContaining({ stage: 'APPROVED' }),
+        }),
+      }),
+    }))
+  })
+
+  test('rejects APPROVE without review submission evidence', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      executionStatus: 'WAITING_APPROVAL',
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'IN_REVIEW' },
+        sections: {
+          customer_problem: 'Proposal creation is slow.',
+        },
+        validation: {
+          runtime_required_sections: {
+            is_valid: true,
+            status: 'PASSED',
+          },
+        },
+        readiness: {
+          state: 'IN_REVIEW',
+          ready: true,
+          submittedForReview: true,
+          validationState: 'PASSED',
+        },
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('APPROVE')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('APPROVE')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('APPROVE')]))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/APPROVE`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('RUNTIME_ACTION_NOT_AVAILABLE')
+    expect(res.body.error.details.disabledReason).toContain('review submission evidence')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+  })
+
+  test('PUBLISH records publish evidence only after approval and current validation', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: {
+          stage: 'APPROVED',
+          approvedAt: '2026-05-19T08:00:00.000Z',
+          approvedBy: CUSTOMER_ADMIN_ID,
+        },
+        sections: {
+          customer_problem: 'Proposal creation is slow.',
+        },
+        validation: {
+          runtime_required_sections: {
+            is_valid: true,
+            status: 'PASSED',
+          },
+        },
+        readiness: {
+          state: 'APPROVED',
+          approved: true,
+          approvedAt: '2026-05-19T08:00:00.000Z',
+          approvedBy: CUSTOMER_ADMIN_ID,
+          ready: true,
+          validationState: 'PASSED',
+        },
+        publish: {},
+        lock: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('PUBLISH')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('PUBLISH')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('PUBLISH')]))
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+    }))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/PUBLISH`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+
+    expect(res.status).toBe(200)
+    const persistedState = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state
+    expect(persistedState.lifecycle).toEqual(expect.objectContaining({
+      stage: 'PUBLISHED',
+      publishedAt: expect.any(String),
+      publishedBy: CUSTOMER_ADMIN_ID,
+    }))
+    expect(persistedState.publish).toEqual(expect.objectContaining({
+      state: 'PUBLISHED',
+      published: true,
+      outputEligible: true,
+      evidence: expect.objectContaining({
+        activationId: 'activation-vmf-2-3-1-001',
+        deploymentId: 'deployment-vmf-global-production-001',
+        dependencySnapshotId: 'dep-lock-vmf-standard-2-3-1',
+      }),
+    }))
+    expect(res.body.data.state.publish).toEqual(expect.objectContaining({
+      published: true,
+      outputEligible: true,
+    }))
+  })
+
+  test('rejects PUBLISH before approval evidence exists', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'READY' },
+        sections: {
+          customer_problem: 'Proposal creation is slow.',
+        },
+        validation: {
+          runtime_required_sections: {
+            is_valid: true,
+            status: 'PASSED',
+          },
+        },
+        readiness: {
+          state: 'READY',
+          ready: true,
+          validationState: 'PASSED',
+        },
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('PUBLISH')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('PUBLISH')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('PUBLISH')]))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/PUBLISH`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('RUNTIME_ACTION_NOT_AVAILABLE')
+    expect(res.body.error.details.disabledReason).toContain('Approve this runtime')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+  })
+
+  test('rejects PUBLISH when approved labels lack approval evidence', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'APPROVED' },
+        sections: {
+          customer_problem: 'Proposal creation is slow.',
+        },
+        validation: {
+          runtime_required_sections: {
+            is_valid: true,
+            status: 'PASSED',
+          },
+        },
+        readiness: {
+          state: 'APPROVED',
+          approved: true,
+          ready: true,
+          validationState: 'PASSED',
+        },
+        publish: {},
+        lock: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('PUBLISH')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('PUBLISH')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('PUBLISH')]))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/PUBLISH`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('RUNTIME_ACTION_NOT_AVAILABLE')
+    expect(res.body.error.details.disabledReason).toContain('Approve this runtime')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+  })
+
+  test('LOCK_RECORD freezes a published runtime as canonical truth', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: {
+          stage: 'PUBLISHED',
+          publishedAt: '2026-05-19T08:00:00.000Z',
+          publishedBy: CUSTOMER_ADMIN_ID,
+        },
+        sections: {
+          customer_problem: 'Proposal creation is slow.',
+        },
+        validation: {
+          runtime_required_sections: {
+            is_valid: true,
+            status: 'PASSED',
+          },
+        },
+        readiness: {
+          state: 'PUBLISHED',
+          published: true,
+          ready: true,
+          validationState: 'PASSED',
+        },
+        publish: {
+          state: 'PUBLISHED',
+          published: true,
+          publishedAt: '2026-05-19T08:00:00.000Z',
+          publishedBy: CUSTOMER_ADMIN_ID,
+          outputEligible: true,
+          sourceApproval: {
+            approvedAt: '2026-05-19T07:55:00.000Z',
+            approvedBy: CUSTOMER_ADMIN_ID,
+          },
+          evidence: {
+            activationId: 'activation-vmf-2-3-1-001',
+            deploymentId: 'deployment-vmf-global-production-001',
+            dependencySnapshotId: 'dep-lock-vmf-standard-2-3-1',
+            dependencySnapshotHash: 'hash-vmf-standard-2-3-1',
+          },
+        },
+        lock: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('LOCK_RECORD')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('LOCK_RECORD')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('LOCK_RECORD')]))
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+    }))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/LOCK_RECORD`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+
+    expect(res.status).toBe(200)
+    const persistedSet = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set
+    expect(persistedSet).toEqual(expect.objectContaining({
+      status: 'LOCKED',
+      executionStatus: 'COMPLETE',
+      lockedAt: expect.any(Date),
+      lockedBy: CUSTOMER_ADMIN_ID,
+      lockedReason: 'Runtime published truth locked for downstream canonical use.',
+    }))
+    expect(persistedSet.framework_state.lifecycle).toEqual(expect.objectContaining({
+      stage: 'LOCKED',
+      lockedAt: expect.any(String),
+    }))
+    expect(persistedSet.framework_state.lock).toEqual(expect.objectContaining({
+      state: 'LOCKED',
+      locked: true,
+      evidence: expect.objectContaining({
+        activationId: 'activation-vmf-2-3-1-001',
+        deploymentId: 'deployment-vmf-global-production-001',
+      }),
+      anchor: expect.objectContaining({
+        relationship: 'LOCKED_VALUE_NARRATIVE',
+        runtimeInstanceKey: 'value-narrative-439111',
+      }),
+    }))
+    expect(res.body.data.runtimeInstance).toEqual(expect.objectContaining({
+      status: 'LOCKED',
+      executionStatus: 'COMPLETE',
+      lockedAt: expect.any(String),
+    }))
+  })
+
+  test('rejects LOCK_RECORD before publish evidence exists', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'PUBLISHED' },
+        sections: {
+          customer_problem: 'Proposal creation is slow.',
+        },
+        validation: {
+          runtime_required_sections: {
+            is_valid: true,
+            status: 'PASSED',
+          },
+        },
+        readiness: {
+          state: 'PUBLISHED',
+          approved: true,
+          published: true,
+          ready: true,
+          validationState: 'PASSED',
+        },
+        publish: {},
+        lock: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('LOCK_RECORD')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('LOCK_RECORD')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('LOCK_RECORD')]))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/LOCK_RECORD`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('RUNTIME_ACTION_NOT_AVAILABLE')
+    expect(res.body.error.details.disabledReason).toContain('Publish this runtime')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+  })
+
+  test('rejects LOCK_RECORD when publish evidence is partial', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: {
+          stage: 'PUBLISHED',
+          publishedAt: '2026-05-19T08:00:00.000Z',
+          publishedBy: CUSTOMER_ADMIN_ID,
+        },
+        sections: {
+          customer_problem: 'Proposal creation is slow.',
+        },
+        validation: {
+          runtime_required_sections: {
+            is_valid: true,
+            status: 'PASSED',
+          },
+        },
+        readiness: {
+          state: 'PUBLISHED',
+          approved: true,
+          published: true,
+          ready: true,
+          validationState: 'PASSED',
+        },
+        publish: {
+          state: 'PUBLISHED',
+          published: true,
+          publishedAt: '2026-05-19T08:00:00.000Z',
+          outputEligible: true,
+          evidence: {
+            activationId: 'activation-vmf-2-3-1-001',
+          },
+        },
+        lock: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('LOCK_RECORD')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('LOCK_RECORD')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('LOCK_RECORD')]))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/LOCK_RECORD`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('RUNTIME_ACTION_NOT_AVAILABLE')
+    expect(res.body.error.details.disabledReason).toContain('Publish this runtime')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+  })
+
+  test.each([
+    ['APPROVED', 'approved'],
+    ['PUBLISHED', 'published'],
+  ])('rejects section mutation after a runtime is %s', async (lifecycleStage, messageFragment) => {
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:10:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: lifecycleStage },
+        sections: {
+          customer_problem: 'Proposal creation is slow.',
+        },
+        validation: {
+          runtime_required_sections: {
+            is_valid: true,
+            status: 'PASSED',
+          },
+        },
+        readiness: {
+          state: lifecycleStage,
+        },
+        publish: {},
+        lock: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    }))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/data`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.customer_problem',
+        operation: 'WRITE',
+        value: 'Mutating locked truth.',
+        expectedUpdatedAt: '2026-05-19T08:10:00.000Z',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('RUNTIME_MUTATION_NOT_EDITABLE')
+    expect(res.body.error.message).toContain(messageFragment)
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('rejects section mutation after a runtime is locked', async () => {
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(makeRuntimeInstanceDocument({
+      status: 'LOCKED',
+      executionStatus: 'COMPLETE',
+      lockedAt: new Date('2026-05-19T08:10:00.000Z'),
+      updatedAt: new Date('2026-05-19T08:10:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'LOCKED' },
+        sections: {
+          customer_problem: 'Proposal creation is slow.',
+        },
+        validation: {
+          runtime_required_sections: {
+            is_valid: true,
+            status: 'PASSED',
+          },
+        },
+        readiness: {
+          state: 'LOCKED',
+          locked: true,
+        },
+        publish: {
+          state: 'PUBLISHED',
+          published: true,
+          publishedAt: '2026-05-19T08:00:00.000Z',
+        },
+        lock: {
+          state: 'LOCKED',
+          locked: true,
+          lockedAt: '2026-05-19T08:10:00.000Z',
+        },
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    }))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/data`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.customer_problem',
+        operation: 'WRITE',
+        value: 'Mutating locked truth.',
+        expectedUpdatedAt: '2026-05-19T08:10:00.000Z',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('RUNTIME_MUTATION_NOT_EDITABLE')
+    expect(res.body.error.message).toContain('locked')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('rejects mutating runtime actions after lock', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      status: 'LOCKED',
+      executionStatus: 'COMPLETE',
+      lockedAt: new Date('2026-05-19T08:10:00.000Z'),
+      updatedAt: new Date('2026-05-19T08:10:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'LOCKED' },
+        sections: {
+          customer_problem: 'Proposal creation is slow.',
+        },
+        validation: {
+          runtime_required_sections: {
+            is_valid: true,
+            status: 'PASSED',
+          },
+        },
+        readiness: {
+          state: 'LOCKED',
+          locked: true,
+        },
+        publish: {
+          state: 'PUBLISHED',
+          published: true,
+          publishedAt: '2026-05-19T08:00:00.000Z',
+        },
+        lock: {
+          state: 'LOCKED',
+          locked: true,
+          lockedAt: '2026-05-19T08:10:00.000Z',
+        },
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('RUN_VALIDATION')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('RUN_VALIDATION')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('RUN_VALIDATION')]))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/RUN_VALIDATION`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-05-19T08:10:00.000Z' })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('RUNTIME_ACTION_NOT_AVAILABLE')
+    expect(res.body.error.details.disabledReason).toContain('locked')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+  })
+
   test('GENERATE_SECTION persists governed generated content and audit evidence', async () => {
     const runtimeInstanceDoc = makeRuntimeInstanceDocument({
       updatedAt: new Date('2026-05-19T08:00:00.000Z'),
@@ -2883,7 +3565,7 @@ describe('Runtime Instance API', () => {
     const token = await getAccessTokenForUser(makeCustomerAdmin())
 
     const res = await request
-      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/PUBLISH`)
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/LOCK_RUNTIME`)
       .set('Authorization', `Bearer ${token}`)
       .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
 
@@ -3082,6 +3764,124 @@ describe('Runtime Instance API', () => {
         $set: {
           framework_state: runtimeInstanceDoc.framework_state,
           executionStatus: runtimeInstanceDoc.executionStatus,
+          status: runtimeInstanceDoc.status,
+          lockedAt: null,
+          lockedBy: null,
+          lockedReason: '',
+          updatedBy: CUSTOMER_ADMIN_ID,
+        },
+      },
+      {
+        new: true,
+        runValidators: true,
+      },
+    ])
+  })
+
+  test('rolls back LOCK_RECORD fields when audit persistence fails', async () => {
+    const publishedFrameworkState = {
+      lifecycle: {
+        stage: 'PUBLISHED',
+        publishedAt: '2026-05-19T08:00:00.000Z',
+        publishedBy: CUSTOMER_ADMIN_ID,
+      },
+      sections: {
+        customer_problem: 'Proposal creation is slow.',
+      },
+      validation: {
+        runtime_required_sections: {
+          is_valid: true,
+          status: 'PASSED',
+        },
+      },
+      readiness: {
+        state: 'PUBLISHED',
+        approved: true,
+        published: true,
+        ready: true,
+        validationState: 'PASSED',
+      },
+      publish: {
+        state: 'PUBLISHED',
+        published: true,
+        publishedAt: '2026-05-19T08:00:00.000Z',
+        publishedBy: CUSTOMER_ADMIN_ID,
+        outputEligible: true,
+        sourceApproval: {
+          approvedAt: '2026-05-19T07:55:00.000Z',
+          approvedBy: CUSTOMER_ADMIN_ID,
+        },
+        evidence: {
+          activationId: 'activation-vmf-2-3-1-001',
+          deploymentId: 'deployment-vmf-global-production-001',
+          dependencySnapshotId: 'dep-lock-vmf-standard-2-3-1',
+          dependencySnapshotHash: 'hash-vmf-standard-2-3-1',
+        },
+      },
+      lock: {},
+      policy: {},
+      attachments: {},
+      artifacts: {},
+    }
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedBy: CUSTOMER_ADMIN_ID,
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: publishedFrameworkState,
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('LOCK_RECORD')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('LOCK_RECORD')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('LOCK_RECORD')]))
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+      .mockResolvedValueOnce(makeRuntimeInstanceDocument({
+        ...runtimeInstanceDoc,
+        status: 'LOCKED',
+        executionStatus: 'COMPLETE',
+        lockedAt: new Date('2026-05-19T08:01:00.000Z'),
+        lockedBy: CUSTOMER_ADMIN_ID,
+        lockedReason: 'Runtime published truth locked for downstream canonical use.',
+        framework_state: {
+          ...publishedFrameworkState,
+          lifecycle: { stage: 'LOCKED' },
+          lock: { state: 'LOCKED', locked: true },
+        },
+        updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+      }))
+      .mockResolvedValueOnce(makeRuntimeInstanceDocument({
+        ...runtimeInstanceDoc,
+        updatedAt: new Date('2026-05-19T08:02:00.000Z'),
+      }))
+    AuditLog.createLog = jest.fn(async () => {
+      throw new Error('audit unavailable')
+    })
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/LOCK_RECORD`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+
+    expect(res.status).toBe(500)
+    expect(res.body.error.code).toBe('RUNTIME_ACTION_AUDIT_FAILED')
+    expect(RuntimeInstance.findOneAndUpdate).toHaveBeenCalledTimes(2)
+    expect(RuntimeInstance.findOneAndUpdate.mock.calls[1]).toEqual([
+      {
+        _id: RUNTIME_INSTANCE_ID,
+        updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+      },
+      {
+        $set: {
+          framework_state: publishedFrameworkState,
+          executionStatus: 'IDLE',
+          status: 'ACTIVE',
+          lockedAt: null,
+          lockedBy: null,
+          lockedReason: '',
           updatedBy: CUSTOMER_ADMIN_ID,
         },
       },

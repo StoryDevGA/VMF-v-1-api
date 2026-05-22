@@ -745,6 +745,8 @@ const normalizeFrameworkState = (frameworkState = {}) => ({
   sections: frameworkState.sections || {},
   validation: frameworkState.validation || {},
   readiness: frameworkState.readiness || {},
+  publish: frameworkState.publish || {},
+  lock: frameworkState.lock || {},
   policy: frameworkState.policy || {},
   attachments: frameworkState.attachments || {},
   artifacts: frameworkState.artifacts || {},
@@ -769,6 +771,7 @@ export const serializeRuntimeInstance = (runtimeInstance) => {
     packageId: toIdString(plain.packageId),
     createdBy: toIdString(plain.createdBy),
     updatedBy: plain.updatedBy ? toIdString(plain.updatedBy) : null,
+    lockedBy: plain.lockedBy ? toIdString(plain.lockedBy) : null,
     assignedTo: Array.isArray(plain.assignedTo) ? plain.assignedTo.map(toIdString).filter(Boolean) : [],
     anchors: Array.isArray(plain.anchors)
       ? plain.anchors.map((anchor) => ({
