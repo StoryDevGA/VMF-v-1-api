@@ -19,6 +19,11 @@ import {
   normalizeToken,
   toIdString,
 } from './runtimeInstanceService.js'
+import {
+  getRuntimeSectionInput,
+  invalidateRuntimeSectionEvidence,
+  normalizeRuntimeSectionObject,
+} from './runtimeSectionModelService.js'
 import { validateRuntimeMutation } from './runtimeValidation/runtimeMutationValidator.js'
 
 const SECTION_WRITE_SCOPE = 'framework_state.sections.*'
@@ -104,30 +109,30 @@ const setValueAtPath = ({ frameworkState, runtimePath, value }) => {
     cursor = cursor[part]
   })
 
-  cursor[pathParts[pathParts.length - 1]] = value
+  const leafKey = pathParts[pathParts.length - 1]
+  const previousRawValue = getValueAtPath({ framework_state: frameworkState || {} }, pathParts)
+  const isSectionRootWrite = pathParts.length === 3
+  const nextValue = isSectionRootWrite
+    ? {
+        ...normalizeRuntimeSectionObject({
+          value: previousRawValue,
+          sectionKey: leafKey,
+          runtimePath,
+        }),
+        input: cloneValue(value),
+      }
+    : value
+
+  cursor[leafKey] = nextValue
 
   return {
     nextFrameworkState: mutableState,
-    previousValue: cloneValue(getValueAtPath({ framework_state: frameworkState || {} }, pathParts)),
+    previousValue: cloneValue(isSectionRootWrite ? getRuntimeSectionInput(previousRawValue) : previousRawValue),
   }
 }
 
-const invalidateSectionMutationEvidence = ({ nextFrameworkState, runtimePath }) => {
-  if (!String(runtimePath || '').startsWith('framework_state.sections.')) return nextFrameworkState
-
-  nextFrameworkState.validation = {}
-  nextFrameworkState.readiness = {
-    ...(nextFrameworkState.readiness || {}),
-    state: 'DRAFT',
-    ready: false,
-    submittedForReview: false,
-    validationState: 'UNKNOWN',
-    invalidatedByRuntimePath: runtimePath,
-    invalidatedAt: new Date().toISOString(),
-  }
-
-  return nextFrameworkState
-}
+const invalidateSectionMutationEvidence = ({ nextFrameworkState, runtimePath }) =>
+  invalidateRuntimeSectionEvidence({ frameworkState: nextFrameworkState, runtimePath })
 
 const assertRuntimeEditable = (runtimeInstance) => {
   const runtimeStatus = normalizeToken(runtimeInstance?.status)

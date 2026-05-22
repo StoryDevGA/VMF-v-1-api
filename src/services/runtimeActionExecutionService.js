@@ -14,12 +14,24 @@ import {
 } from './runtimeInstanceService.js'
 import { getRuntimeRenderer } from './runtimeRendererService.js'
 import {
+  RUNTIME_ACTION_KEYS,
   buildRuntimeActionTransition,
   cloneRuntimeActionValue,
   getRuntimeActionStateGate,
   isSupportedSprint2RuntimeAction,
   normalizeRuntimeActionToken,
 } from './runtimeActionPolicyService.js'
+import {
+  RUNTIME_SECTION_STATES,
+  buildDeterministicGeneratedSection,
+  buildRuntimeSectionRevision,
+  cloneSectionValue,
+  getRuntimeSectionGenerated,
+  getRuntimeSectionInput,
+  getRuntimeSectionRevisions,
+  invalidateRuntimeSectionEvidence,
+  normalizeRuntimeSectionObject,
+} from './runtimeSectionModelService.js'
 
 const buildActionError = ({
   status,
@@ -112,13 +124,7 @@ const assertActionSupported = (actionKey) => {
     reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_ACTION_UNSUPPORTED,
     details: {
       actionKey,
-      supportedActions: [
-        'SAVE_DRAFT',
-        'RUN_VALIDATION',
-        'MARK_READY',
-        'SUBMIT_FOR_REVIEW',
-        'RETURN_TO_DRAFT',
-      ],
+      supportedActions: Object.values(RUNTIME_ACTION_KEYS),
     },
   })
 }
@@ -157,6 +163,188 @@ const resolveRendererAction = ({ renderer, actionKey }) => {
   return action
 }
 
+const isGenerationAction = (actionKey) => [
+  RUNTIME_ACTION_KEYS.GENERATE_SECTION,
+  RUNTIME_ACTION_KEYS.REGENERATE_SECTION,
+].includes(normalizeRuntimeActionToken(actionKey))
+
+const getRuntimeSectionStateKey = ({ runtimePath, sectionKey }) => {
+  const normalizedRuntimePath = String(runtimePath || '').trim()
+  const sectionRootPrefix = 'framework_state.sections.'
+
+  if (normalizedRuntimePath.startsWith(sectionRootPrefix)) {
+    const statePath = normalizedRuntimePath.slice(sectionRootPrefix.length).trim()
+    if (statePath && !statePath.includes('.')) return statePath
+  }
+
+  return String(sectionKey || '').trim()
+}
+
+const resolveGenerationTargetSection = ({ frameworkPackage, payload }) => {
+  const sectionKey = String(payload?.sectionKey || '').trim()
+  const runtimePath = String(payload?.runtimePath || '').trim()
+  const sections = Array.isArray(frameworkPackage?.sections) ? frameworkPackage.sections : []
+  const sectionByKey = sectionKey
+    ? sections.find((candidate) => String(candidate?.sectionKey || '').trim() === sectionKey)
+    : null
+  const sectionByPath = runtimePath
+    ? sections.find((candidate) => String(candidate?.runtimePath || '').trim() === runtimePath)
+    : null
+
+  if (sectionKey && runtimePath && sectionByKey !== sectionByPath) {
+    throw buildActionError({
+      status: 422,
+      code: 'VALIDATION_FAILED',
+      message: 'Runtime generation sectionKey and runtimePath must target the same package section.',
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_ACTION_TARGET_MISMATCH,
+      details: {
+        sectionKey,
+        runtimePath,
+      },
+    })
+  }
+
+  const section = sectionByKey || sectionByPath
+
+  if (!section) {
+    throw buildActionError({
+      status: 422,
+      code: 'VALIDATION_FAILED',
+      message: 'Runtime generation action requires a package-bound section target.',
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_ACTION_NOT_AVAILABLE,
+      details: {
+        sectionKey,
+        runtimePath,
+      },
+    })
+  }
+
+  return {
+    section,
+    sectionKey: String(section.sectionKey || '').trim(),
+    runtimePath: String(section.runtimePath || '').trim(),
+    stateSectionKey: getRuntimeSectionStateKey({
+      runtimePath: section.runtimePath,
+      sectionKey: section.sectionKey,
+    }),
+  }
+}
+
+const applyRuntimeSectionGeneration = ({
+  actionKey,
+  actorUserId,
+  frameworkPackage,
+  payload,
+  runtimeInstance,
+}) => {
+  const normalizedActionKey = normalizeRuntimeActionToken(actionKey)
+  const actionedAt = new Date().toISOString()
+  const previousFrameworkState = cloneRuntimeActionValue(runtimeInstance.framework_state || {})
+  const nextFrameworkState = cloneRuntimeActionValue(previousFrameworkState)
+  nextFrameworkState.sections = nextFrameworkState.sections || {}
+
+  const target = resolveGenerationTargetSection({ frameworkPackage, payload })
+  const previousRawSection = nextFrameworkState.sections[target.stateSectionKey]
+  const sectionObject = normalizeRuntimeSectionObject({
+    value: previousRawSection,
+    sectionKey: target.sectionKey,
+    runtimePath: target.runtimePath,
+    initializedAt: actionedAt,
+  })
+  const input = getRuntimeSectionInput(sectionObject)
+  const previousGenerated = getRuntimeSectionGenerated(sectionObject)
+  const existingRevisions = getRuntimeSectionRevisions(sectionObject)
+
+  if (normalizedActionKey === RUNTIME_ACTION_KEYS.REGENERATE_SECTION && !previousGenerated) {
+    throw buildActionError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Runtime section cannot be regenerated before generated content exists.',
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_ACTION_NOT_AVAILABLE,
+      details: {
+        actionKey: normalizedActionKey,
+        sectionKey: target.sectionKey,
+        runtimePath: target.runtimePath,
+      },
+    })
+  }
+
+  const generated = buildDeterministicGeneratedSection({
+    actionKey: normalizedActionKey,
+    actorUserId: toIdString(actorUserId),
+    frameworkPackage,
+    input,
+    runtimeInstance,
+    section: target.section,
+    generatedAt: actionedAt,
+  })
+  const revisions = previousGenerated
+    ? [
+        ...existingRevisions,
+        buildRuntimeSectionRevision({
+          generated: previousGenerated,
+          revisionNumber: existingRevisions.length + 1,
+          replacedAt: actionedAt,
+        }),
+      ]
+    : existingRevisions
+
+  nextFrameworkState.sections[target.stateSectionKey] = {
+    ...sectionObject,
+    generated,
+    revisions,
+    review: {
+      ...(sectionObject.review || {}),
+      status: 'PENDING_REVIEW',
+    },
+    state: {
+      ...(sectionObject.state || {}),
+      status: normalizedActionKey === RUNTIME_ACTION_KEYS.REGENERATE_SECTION
+        ? RUNTIME_SECTION_STATES.REGENERATED
+        : RUNTIME_SECTION_STATES.GENERATED,
+      generatedAt: actionedAt,
+      lastActionKey: normalizedActionKey,
+      revisionCount: revisions.length,
+      updatedBy: toIdString(actorUserId),
+    },
+    lineage: {
+      ...(sectionObject.lineage || {}),
+      sectionKey: target.sectionKey,
+      stateSectionKey: target.stateSectionKey,
+      runtimePath: target.runtimePath,
+      runtimeInstanceId: toIdString(runtimeInstance._id),
+      runtimeInstanceKey: runtimeInstance.runtimeInstanceKey,
+      packageId: toIdString(runtimeInstance.packageId),
+      packageKey: runtimeInstance.packageKey,
+      packageVersion: runtimeInstance.packageVersion,
+      actionKey: normalizedActionKey,
+      generatedAt: actionedAt,
+      inputHash: generated.inputHash,
+    },
+  }
+  invalidateRuntimeSectionEvidence({
+    frameworkState: nextFrameworkState,
+    invalidatedAt: actionedAt,
+    runtimePath: target.runtimePath,
+  })
+
+  return {
+    actionedAt,
+    generationResult: {
+      sectionKey: target.sectionKey,
+      stateSectionKey: target.stateSectionKey,
+      runtimePath: target.runtimePath,
+      generated,
+      previousGenerated: cloneSectionValue(previousGenerated),
+      revisionCount: revisions.length,
+    },
+    nextExecutionStatus: runtimeInstance.executionStatus || 'IDLE',
+    nextFrameworkState,
+    previousFrameworkState,
+    validationResult: null,
+  }
+}
+
 const buildActionAuditPayload = ({
   action,
   actionedAt,
@@ -169,6 +357,7 @@ const buildActionAuditPayload = ({
   runtimeInstance,
   updatedAtBefore,
   validationResult,
+  generationResult,
 }) => ({
   action: auditService.AUDIT_ACTIONS.RUNTIME_ACTION_EXECUTED,
   resourceType: auditService.RESOURCE_TYPES.RuntimeInstance,
@@ -213,6 +402,17 @@ const buildActionAuditPayload = ({
         missingRequiredSections: validationResult.missingRequiredSections,
       },
     } : {}),
+    ...(generationResult ? {
+      generation: {
+        sectionKey: generationResult.sectionKey,
+        stateSectionKey: generationResult.stateSectionKey,
+        runtimePath: generationResult.runtimePath,
+        revisionCount: generationResult.revisionCount,
+        generatedAt: generationResult.generated?.generatedAt,
+        inputHash: generationResult.generated?.inputHash,
+        previousGenerated: generationResult.previousGenerated ? true : false,
+      },
+    } : {}),
     actionedAt,
   },
 })
@@ -230,6 +430,7 @@ const logRuntimeActionExecuted = async ({
   runtimeInstance,
   updatedAtBefore,
   validationResult,
+  generationResult,
   session = null,
 }) => {
   const auditPayload = buildActionAuditPayload({
@@ -244,6 +445,7 @@ const logRuntimeActionExecuted = async ({
     runtimeInstance,
     updatedAtBefore,
     validationResult,
+    generationResult,
   })
   const auditOptions = {
     throwOnError: true,
@@ -351,6 +553,7 @@ const persistActionWithAudit = async ({
   runtimeInstance,
   updatedAtBefore,
   validationResult,
+  generationResult,
 }) => {
   if (mongoose.connection.readyState === 1) {
     const session = await mongoose.startSession()
@@ -378,6 +581,7 @@ const persistActionWithAudit = async ({
           runtimeInstance: updatedRuntimeInstance,
           updatedAtBefore,
           validationResult,
+          generationResult,
           session,
         })
       })
@@ -409,6 +613,7 @@ const persistActionWithAudit = async ({
       runtimeInstance: updatedRuntimeInstance,
       updatedAtBefore,
       validationResult,
+      generationResult,
     })
   } catch (err) {
     try {
@@ -519,21 +724,31 @@ export const executeRuntimeAction = async ({
     frameworkPackage,
     runtimeInstance,
   })
+  const resolvedTransition = isGenerationAction(normalizedActionKey)
+    ? applyRuntimeSectionGeneration({
+        actionKey: normalizedActionKey,
+        actorUserId,
+        frameworkPackage,
+        payload,
+        runtimeInstance,
+      })
+    : transition
 
   const updatedRuntimeInstance = await persistActionWithAudit({
     action,
-    actionedAt: transition.actionedAt,
+    actionedAt: resolvedTransition.actionedAt,
     actorUserId,
     auditRequest,
     expectedUpdatedAt,
-    nextExecutionStatus: transition.nextExecutionStatus,
-    nextFrameworkState: transition.nextFrameworkState,
+    nextExecutionStatus: resolvedTransition.nextExecutionStatus,
+    nextFrameworkState: resolvedTransition.nextFrameworkState,
     previousExecutionStatus,
     previousFrameworkState,
     previousUpdatedBy,
     runtimeInstance,
     updatedAtBefore,
-    validationResult: transition.validationResult,
+    validationResult: resolvedTransition.validationResult,
+    generationResult: resolvedTransition.generationResult,
   })
 
   return {
@@ -551,12 +766,18 @@ export const executeRuntimeAction = async ({
       actionKey: normalizedActionKey,
       governedAction: normalizeRuntimeActionToken(action.governedAction || action.actionKey),
       policyKey: action.policyKey || '',
-      actionedAt: transition.actionedAt,
+      actionedAt: resolvedTransition.actionedAt,
     },
     state: {
-      lifecycle: transition.nextFrameworkState.lifecycle,
-      readiness: transition.nextFrameworkState.readiness,
-      ...(transition.validationResult ? { validation: transition.validationResult } : {}),
+      lifecycle: resolvedTransition.nextFrameworkState.lifecycle,
+      readiness: resolvedTransition.nextFrameworkState.readiness,
+      ...(resolvedTransition.validationResult ? { validation: resolvedTransition.validationResult } : {}),
+      ...(resolvedTransition.generationResult ? { generation: {
+        sectionKey: resolvedTransition.generationResult.sectionKey,
+        stateSectionKey: resolvedTransition.generationResult.stateSectionKey,
+        runtimePath: resolvedTransition.generationResult.runtimePath,
+        revisionCount: resolvedTransition.generationResult.revisionCount,
+      } } : {}),
     },
   }
 }

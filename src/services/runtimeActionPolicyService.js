@@ -1,4 +1,9 @@
 import { RUNTIME_EXECUTION_STATUSES, RUNTIME_INSTANCE_STATUSES, RUNTIME_TYPES } from '../models/RuntimeInstance.js'
+import {
+  getRuntimeSectionGenerated,
+  getRuntimeSectionInput,
+  isRuntimeSectionObject,
+} from './runtimeSectionModelService.js'
 
 export const RUNTIME_ACTION_KEYS = Object.freeze({
   SAVE_DRAFT: 'SAVE_DRAFT',
@@ -6,6 +11,8 @@ export const RUNTIME_ACTION_KEYS = Object.freeze({
   MARK_READY: 'MARK_READY',
   SUBMIT_FOR_REVIEW: 'SUBMIT_FOR_REVIEW',
   RETURN_TO_DRAFT: 'RETURN_TO_DRAFT',
+  GENERATE_SECTION: 'GENERATE_SECTION',
+  REGENERATE_SECTION: 'REGENERATE_SECTION',
 })
 
 export const RUNTIME_READINESS_STATES = Object.freeze({
@@ -71,6 +78,10 @@ const getValueAtPath = (source, path) => {
 }
 
 const isEmptyRequiredValue = (value) => {
+  if (isRuntimeSectionObject(value)) {
+    return isEmptyRequiredValue(getRuntimeSectionInput(value))
+      && isEmptyRequiredValue(getRuntimeSectionGenerated(value))
+  }
   if (value === null || value === undefined) return true
   if (typeof value === 'string') return value.trim().length === 0
   if (Array.isArray(value)) return value.length === 0

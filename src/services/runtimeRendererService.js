@@ -34,6 +34,13 @@ import {
   deriveRuntimeReadinessState,
 } from './runtimeActionPolicyService.js'
 import { assertRuntimePermission, getRuntimeInstance } from './runtimeInstanceService.js'
+import {
+  getRuntimeSectionGenerated,
+  getRuntimeSectionInput,
+  getRuntimeSectionRevisions,
+  getRuntimeSectionState,
+  isRuntimeSectionObject,
+} from './runtimeSectionModelService.js'
 
 export const RUNTIME_RENDERER_ERROR_REASONS = Object.freeze({
   PACKAGE_NOT_FOUND: 'PACKAGE_NOT_FOUND',
@@ -61,9 +68,11 @@ const MUTATING_RUNTIME_ACTIONS = new Set([
   'APPROVE',
   'ARCHIVE',
   'BUILD_SECTIONS',
+  'GENERATE_SECTION',
   'INITIALISE_STATE',
   'MARK_READY',
   'PUBLISH',
+  'REGENERATE_SECTION',
   'RETURN_TO_DRAFT',
   'RUN_VALIDATION',
   'SAVE',
@@ -712,6 +721,11 @@ const buildRendererSections = ({
       ? packageSection.validationKeys.map((key) => String(key || '').trim()).filter(Boolean)
       : []
 
+    const rawSectionValue = getRuntimePathValue(frameworkState, runtimePath)
+    const sectionGenerated = getRuntimeSectionGenerated(rawSectionValue)
+    const sectionRevisions = getRuntimeSectionRevisions(rawSectionValue)
+    const sectionState = getRuntimeSectionState(rawSectionValue)
+
     renderedSections.push({
       key: sectionKey,
       sectionKey,
@@ -725,7 +739,20 @@ const buildRendererSections = ({
       required: Boolean(packageSection.required),
       helpText: uiSection?.helpText || runtimePathRecord.helpText || '',
       placeholder: uiSection?.placeholder || runtimePathRecord.placeholderText || '',
-      value: getRuntimePathValue(frameworkState, runtimePath) ?? runtimePathRecord.defaultValue ?? '',
+      value: getRuntimeSectionInput(rawSectionValue) ?? runtimePathRecord.defaultValue ?? '',
+      generated: sectionGenerated,
+      review: isRuntimeSectionObject(rawSectionValue) ? rawSectionValue.review || {} : {},
+      state: {
+        status: sectionState.status || 'DRAFT',
+        revisionCount: sectionRevisions.length,
+        ...sectionState,
+      },
+      lineage: isRuntimeSectionObject(rawSectionValue) ? rawSectionValue.lineage || {} : {},
+      revisions: sectionRevisions.map((revision) => ({
+        revisionNumber: revision.revisionNumber,
+        replacedAt: revision.replacedAt,
+        generated: revision.generated || null,
+      })),
       validationKeys,
       validationMessages: buildSectionValidationMessages({ frameworkState, validationKeys }),
       editable,

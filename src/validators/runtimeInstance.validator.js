@@ -98,7 +98,30 @@ const mutateRuntimeStateSchema = z.object({
 
 const executeRuntimeActionSchema = z.object({
   expectedUpdatedAt: expectedUpdatedAtSchema,
+  runtimePath: z
+    .string()
+    .trim()
+    .min(1, 'runtimePath must not be empty')
+    .max(200, 'runtimePath must be 200 characters or fewer')
+    .optional(),
+  sectionKey: z
+    .string()
+    .trim()
+    .min(1, 'sectionKey must not be empty')
+    .max(120, 'sectionKey must be 120 characters or fewer')
+    .optional(),
 }).strict()
+
+const GENERATION_RUNTIME_ACTIONS = new Set(['GENERATE_SECTION', 'REGENERATE_SECTION'])
+
+const buildValidationErrorResponse = ({ details, message, requestId }) => ({
+  error: {
+    code: 'VALIDATION_FAILED',
+    message,
+    details,
+    requestId,
+  },
+})
 
 const listRuntimeInstancesSchema = z.object({
   customerId: z
@@ -145,10 +168,50 @@ export const validateMutateRuntimeState = createBodyValidator(mutateRuntimeState
   rootIssueKey: '_root',
 })
 
-export const validateExecuteRuntimeAction = createBodyValidator(executeRuntimeActionSchema, {
-  message: 'Request validation failed.',
-  rootIssueKey: '_root',
-})
+export const validateExecuteRuntimeAction = (req, res, next) => {
+  const result = executeRuntimeActionSchema.safeParse(req.body)
+
+  if (!result.success) {
+    const details = {}
+    for (const issue of result.error.issues) {
+      const key = issue.path.join('.') || '_root'
+      details[key] = issue.message
+    }
+
+    return res.status(422).json(buildValidationErrorResponse({
+      details,
+      message: 'Request validation failed.',
+      requestId: req.requestId,
+    }))
+  }
+
+  const actionKey = String(req.params?.actionKey || '').trim().toUpperCase()
+  const hasRuntimePath = result.data.runtimePath !== undefined
+  const hasSectionKey = result.data.sectionKey !== undefined
+
+  if (GENERATION_RUNTIME_ACTIONS.has(actionKey)) {
+    if (!hasRuntimePath && !hasSectionKey) {
+      return res.status(422).json(buildValidationErrorResponse({
+        details: {
+          _root: 'Generation actions require runtimePath or sectionKey.',
+        },
+        message: 'Request validation failed.',
+        requestId: req.requestId,
+      }))
+    }
+  } else if (hasRuntimePath || hasSectionKey) {
+    return res.status(422).json(buildValidationErrorResponse({
+      details: {
+        _root: 'runtimePath and sectionKey are only allowed for generation actions.',
+      },
+      message: 'Request validation failed.',
+      requestId: req.requestId,
+    }))
+  }
+
+  req.body = result.data
+  return next()
+}
 
 export const validateListRuntimeInstances = createQueryValidator(listRuntimeInstancesSchema, {
   message: 'Invalid query parameters.',

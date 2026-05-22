@@ -278,6 +278,8 @@ const actionLabels = {
   SUBMIT_FOR_REVIEW: 'Submit for Review',
   RETURN_TO_DRAFT: 'Return to Draft',
   SAVE_DRAFT: 'Save Draft',
+  GENERATE_SECTION: 'Generate Section',
+  REGENERATE_SECTION: 'Regenerate Section',
 }
 
 const makeActionPolicyKey = (actionKey) =>
@@ -1191,8 +1193,18 @@ describe('Runtime Instance API', () => {
     }))
     FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
     RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
-    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
-    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [
+        makeUIAction('SUBMIT_FOR_REVIEW'),
+        makeUIAction('GENERATE_SECTION'),
+        makeUIAction('REGENERATE_SECTION'),
+      ],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([
+      makeWorkflowPolicy(),
+      makeActionWorkflowPolicy('GENERATE_SECTION'),
+      makeActionWorkflowPolicy('REGENERATE_SECTION'),
+    ]))
     const token = await getAccessTokenForUser(tenantAdmin)
 
     const listRes = await request
@@ -1318,7 +1330,19 @@ describe('Runtime Instance API', () => {
         $set: expect.objectContaining({
           framework_state: expect.objectContaining({
             sections: expect.objectContaining({
-              customer_problem: 'Proposal teams lack a shared story.',
+              customer_problem: expect.objectContaining({
+                input: 'Proposal teams lack a shared story.',
+                generated: null,
+                review: {},
+                state: expect.objectContaining({
+                  status: 'DRAFT',
+                }),
+                lineage: expect.objectContaining({
+                  sectionKey: 'customer_problem',
+                  runtimePath: 'framework_state.sections.customer_problem',
+                }),
+                revisions: [],
+              }),
             }),
           }),
           updatedBy: CUSTOMER_ADMIN_ID,
@@ -1418,6 +1442,97 @@ describe('Runtime Instance API', () => {
       },
       expect.any(Object),
     )
+  })
+
+  test('PATCH /api/v1/runtime-instances/:id/data updates section input without discarding generated lineage', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: {
+            input: 'Proposal creation is slow.',
+            generated: {
+              content: 'Customer Problem: Proposal creation is slow.',
+              generatedAt: '2026-05-19T08:01:00.000Z',
+            },
+            review: {
+              status: 'PENDING_REVIEW',
+            },
+            state: {
+              status: 'GENERATED',
+              revisionCount: 1,
+            },
+            lineage: {
+              sectionKey: 'customer_problem',
+              runtimePath: 'framework_state.sections.customer_problem',
+              actionKey: 'GENERATE_SECTION',
+            },
+            revisions: [
+              {
+                revisionNumber: 1,
+                generated: {
+                  content: 'Customer Problem: Older generated content.',
+                },
+                replacedAt: '2026-05-19T08:01:00.000Z',
+              },
+            ],
+          },
+        },
+        validation: {},
+        readiness: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+    }))
+    RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimePathRecord()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/data`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.customer_problem',
+        operation: 'WRITE',
+        value: 'Proposal teams lack a shared story.',
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+      })
+
+    expect(res.status).toBe(200)
+    const persistedSection = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state.sections.customer_problem
+    expect(persistedSection).toEqual(expect.objectContaining({
+      input: 'Proposal teams lack a shared story.',
+      generated: expect.objectContaining({
+        content: 'Customer Problem: Proposal creation is slow.',
+      }),
+      review: {
+        status: 'PENDING_REVIEW',
+      },
+      state: expect.objectContaining({
+        status: 'GENERATED',
+        revisionCount: 1,
+      }),
+      lineage: expect.objectContaining({
+        sectionKey: 'customer_problem',
+        runtimePath: 'framework_state.sections.customer_problem',
+      }),
+      revisions: [
+        expect.objectContaining({
+          revisionNumber: 1,
+        }),
+      ],
+    }))
+    expect(res.body.data.mutation).toEqual(expect.objectContaining({
+      previousValue: 'Proposal creation is slow.',
+      value: 'Proposal teams lack a shared story.',
+    }))
   })
 
   test('rejects runtime state mutation outside framework_state.sections scope', async () => {
@@ -1686,8 +1801,17 @@ describe('Runtime Instance API', () => {
         sections: {
           customer_problem: 'Proposal creation is slow.',
         },
-        validation: {},
-        readiness: {},
+        validation: {
+          runtime_required_sections: {
+            is_valid: true,
+            status: 'PASSED',
+          },
+        },
+        readiness: {
+          state: 'READY',
+          ready: true,
+          validationState: 'PASSED',
+        },
         policy: {},
         attachments: {},
         artifacts: {},
@@ -2193,6 +2317,466 @@ describe('Runtime Instance API', () => {
     )
   })
 
+  test('GENERATE_SECTION persists governed generated content and audit evidence', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: 'Proposal creation is slow.',
+        },
+        validation: {},
+        readiness: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('GENERATE_SECTION')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('GENERATE_SECTION')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('GENERATE_SECTION')]))
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+    }))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/GENERATE_SECTION`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+        runtimePath: 'framework_state.sections.customer_problem',
+      })
+
+    expect(res.status).toBe(200)
+    expect(RuntimeInstance.findOneAndUpdate).toHaveBeenCalledWith(
+      expect.any(Object),
+      {
+        $set: expect.objectContaining({
+          executionStatus: 'IDLE',
+          framework_state: expect.objectContaining({
+            sections: expect.objectContaining({
+              customer_problem: expect.objectContaining({
+                input: 'Proposal creation is slow.',
+                generated: expect.objectContaining({
+                  content: 'Customer Problem: Proposal creation is slow.',
+                  actionKey: 'GENERATE_SECTION',
+                  generator: expect.objectContaining({
+                    mode: 'DETERMINISTIC_TEMPLATE',
+                  }),
+                  inputHash: expect.any(String),
+                }),
+                review: expect.objectContaining({
+                  status: 'PENDING_REVIEW',
+                }),
+                state: expect.objectContaining({
+                  status: 'GENERATED',
+                  lastActionKey: 'GENERATE_SECTION',
+                  revisionCount: 0,
+                }),
+                lineage: expect.objectContaining({
+                  sectionKey: 'customer_problem',
+                  runtimePath: 'framework_state.sections.customer_problem',
+                  actionKey: 'GENERATE_SECTION',
+                  inputHash: expect.any(String),
+                }),
+                revisions: [],
+              }),
+            }),
+            validation: {},
+            readiness: expect.objectContaining({
+              state: 'DRAFT',
+              ready: false,
+              submittedForReview: false,
+              validationState: 'UNKNOWN',
+              invalidatedByRuntimePath: 'framework_state.sections.customer_problem',
+              invalidatedAt: expect.any(String),
+            }),
+          }),
+        }),
+      },
+      expect.any(Object),
+    )
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'RUNTIME_ACTION_EXECUTED',
+      diff: expect.objectContaining({
+        actionKey: 'GENERATE_SECTION',
+        generation: expect.objectContaining({
+          sectionKey: 'customer_problem',
+          runtimePath: 'framework_state.sections.customer_problem',
+          revisionCount: 0,
+          previousGenerated: false,
+          inputHash: expect.any(String),
+        }),
+      }),
+    }))
+    expect(res.body.data.state.generation).toEqual(expect.objectContaining({
+      sectionKey: 'customer_problem',
+      runtimePath: 'framework_state.sections.customer_problem',
+      revisionCount: 0,
+    }))
+  })
+
+  test('GENERATE_SECTION writes generated content under the runtime path section key', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          section_1_executive_summary: 'Show the board why proposal creation is slow.',
+        },
+        validation: {},
+        readiness: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      sections: [
+        {
+          sectionKey: 'section-executive-summary',
+          runtimePath: 'framework_state.sections.section_1_executive_summary',
+          required: true,
+          validationKeys: ['required-sections-check'],
+        },
+      ],
+      workflowBindings: [makeWorkflowBinding('GENERATE_SECTION')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([
+      makeRuntimePathRecord({
+        pathKey: 'framework_state.sections.section_1_executive_summary',
+        label: 'Executive Summary',
+      }),
+    ]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      sections: [
+        {
+          sectionKey: 'section-executive-summary',
+          runtimePath: 'framework_state.sections.section_1_executive_summary',
+          source: 'PACKAGE',
+          isCustom: false,
+          label: 'Executive Summary',
+          displayOrder: 10,
+          isVisible: true,
+          isEditable: true,
+        },
+      ],
+      actions: [makeUIAction('GENERATE_SECTION')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('GENERATE_SECTION')]))
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+    }))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/GENERATE_SECTION`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+        sectionKey: 'section-executive-summary',
+        runtimePath: 'framework_state.sections.section_1_executive_summary',
+      })
+
+    expect(res.status).toBe(200)
+    const persistedSections = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state.sections
+    expect(persistedSections).toEqual(expect.objectContaining({
+      section_1_executive_summary: expect.objectContaining({
+        input: 'Show the board why proposal creation is slow.',
+        generated: expect.objectContaining({
+          content: 'Section Executive Summary: Show the board why proposal creation is slow.',
+        }),
+        lineage: expect.objectContaining({
+          sectionKey: 'section-executive-summary',
+          stateSectionKey: 'section_1_executive_summary',
+          runtimePath: 'framework_state.sections.section_1_executive_summary',
+        }),
+      }),
+    }))
+    expect(persistedSections['section-executive-summary']).toBeUndefined()
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      diff: expect.objectContaining({
+        generation: expect.objectContaining({
+          sectionKey: 'section-executive-summary',
+          stateSectionKey: 'section_1_executive_summary',
+          runtimePath: 'framework_state.sections.section_1_executive_summary',
+        }),
+      }),
+    }))
+    expect(res.body.data.state.generation).toEqual(expect.objectContaining({
+      sectionKey: 'section-executive-summary',
+      stateSectionKey: 'section_1_executive_summary',
+    }))
+  })
+
+  test('REGENERATE_SECTION preserves previous generated content as a revision', async () => {
+    const previousGenerated = {
+      content: 'Customer Problem: Earlier generated narrative.',
+      generatedAt: '2026-05-19T07:55:00.000Z',
+      actionKey: 'GENERATE_SECTION',
+      inputHash: 'old-input-hash',
+    }
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: {
+            input: 'Proposal creation is slow.',
+            generated: previousGenerated,
+            review: { status: 'PENDING_REVIEW' },
+            state: { status: 'GENERATED', revisionCount: 0 },
+            lineage: {
+              sectionKey: 'customer_problem',
+              runtimePath: 'framework_state.sections.customer_problem',
+            },
+            revisions: [],
+          },
+        },
+        validation: {},
+        readiness: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('REGENERATE_SECTION')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('REGENERATE_SECTION')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('REGENERATE_SECTION')]))
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+    }))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/REGENERATE_SECTION`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+        sectionKey: 'customer_problem',
+      })
+
+    expect(res.status).toBe(200)
+    const persistedFrameworkState = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state
+    expect(persistedFrameworkState.sections.customer_problem).toEqual(expect.objectContaining({
+      input: 'Proposal creation is slow.',
+      generated: expect.objectContaining({
+        content: 'Customer Problem: Proposal creation is slow.',
+        actionKey: 'REGENERATE_SECTION',
+      }),
+      state: expect.objectContaining({
+        status: 'REGENERATED',
+        revisionCount: 1,
+      }),
+      revisions: [
+        expect.objectContaining({
+          revisionNumber: 1,
+          generated: previousGenerated,
+          replacedAt: expect.any(String),
+        }),
+      ],
+    }))
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      diff: expect.objectContaining({
+        actionKey: 'REGENERATE_SECTION',
+        generation: expect.objectContaining({
+          sectionKey: 'customer_problem',
+          revisionCount: 1,
+          previousGenerated: true,
+        }),
+      }),
+    }))
+  })
+
+  test('rejects REGENERATE_SECTION before generated content exists', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: 'Proposal creation is slow.',
+        },
+        validation: {},
+        readiness: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('REGENERATE_SECTION')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('REGENERATE_SECTION')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('REGENERATE_SECTION')]))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/REGENERATE_SECTION`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+        sectionKey: 'customer_problem',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('RUNTIME_ACTION_NOT_AVAILABLE')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('rejects section generation without a request target', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('GENERATE_SECTION')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('GENERATE_SECTION')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('GENERATE_SECTION')]))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/GENERATE_SECTION`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details._root).toBe('Generation actions require runtimePath or sectionKey.')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('rejects non-generation runtime actions that include section targets', async () => {
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/RUN_VALIDATION`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+        runtimePath: 'framework_state.sections.customer_problem',
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details._root).toBe('runtimePath and sectionKey are only allowed for generation actions.')
+    expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('rejects section generation when sectionKey and runtimePath target different package sections', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: 'Proposal creation is slow.',
+          value_drivers: 'Manual revenue reporting creates delay.',
+        },
+        validation: {},
+        readiness: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      sections: [
+        {
+          sectionKey: 'customer_problem',
+          runtimePath: 'framework_state.sections.customer_problem',
+          required: true,
+          validationKeys: ['required-sections-check'],
+        },
+        {
+          sectionKey: 'value_drivers',
+          runtimePath: 'framework_state.sections.value_drivers',
+          required: true,
+          validationKeys: ['required-sections-check'],
+        },
+      ],
+      workflowBindings: [makeWorkflowBinding('GENERATE_SECTION')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([
+      makeRuntimePathRecord(),
+      makeRuntimePathRecord({
+        stableId: 'path-framework-state-sections-value-drivers',
+        pathKey: 'framework_state.sections.value_drivers',
+        label: 'Value Drivers',
+      }),
+    ]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      sections: [
+        {
+          sectionKey: 'customer_problem',
+          runtimePath: 'framework_state.sections.customer_problem',
+          source: 'PACKAGE',
+          isCustom: false,
+          label: 'Customer Problem',
+          displayOrder: 10,
+          isVisible: true,
+          isEditable: true,
+        },
+        {
+          sectionKey: 'value_drivers',
+          runtimePath: 'framework_state.sections.value_drivers',
+          source: 'PACKAGE',
+          isCustom: false,
+          label: 'Value Drivers',
+          displayOrder: 20,
+          isVisible: true,
+          isEditable: true,
+        },
+      ],
+      actions: [makeUIAction('GENERATE_SECTION')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('GENERATE_SECTION')]))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/GENERATE_SECTION`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+        sectionKey: 'customer_problem',
+        runtimePath: 'framework_state.sections.value_drivers',
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.reason).toBe('RUNTIME_ACTION_TARGET_MISMATCH')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
   test('rejects non-return actions from persisted in-review state even when execution is idle', async () => {
     const runtimeInstanceDoc = makeRuntimeInstanceDocument({
       executionStatus: 'IDLE',
@@ -2610,11 +3194,122 @@ describe('Runtime Instance API', () => {
     expect(res.body.meta.renderTraceId).toMatch(/^render-/)
   })
 
-  test('renders section fields as read-only when the actor can view but cannot mutate runtime state', async () => {
+  test('renders governed section object model without exposing raw framework state', async () => {
     FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
     RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
     UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
     WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: {
+            input: 'Proposal creation is slow.',
+            generated: {
+              content: 'Customer Problem: Proposal creation is slow.',
+              generatedAt: '2026-05-19T08:01:00.000Z',
+            },
+            review: {
+              status: 'PENDING_REVIEW',
+            },
+            state: {
+              status: 'GENERATED',
+              revisionCount: 1,
+            },
+            lineage: {
+              sectionKey: 'customer_problem',
+              runtimePath: 'framework_state.sections.customer_problem',
+              actionKey: 'GENERATE_SECTION',
+            },
+            revisions: [
+              {
+                revisionNumber: 1,
+                generated: {
+                  content: 'Customer Problem: Previous generated content.',
+                },
+                replacedAt: '2026-05-19T08:01:00.000Z',
+              },
+            ],
+          },
+        },
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.sections).toEqual([
+      expect.objectContaining({
+        key: 'customer_problem',
+        value: 'Proposal creation is slow.',
+        generated: expect.objectContaining({
+          content: 'Customer Problem: Proposal creation is slow.',
+        }),
+        review: expect.objectContaining({
+          status: 'PENDING_REVIEW',
+        }),
+        state: expect.objectContaining({
+          status: 'GENERATED',
+          revisionCount: 1,
+        }),
+        lineage: expect.objectContaining({
+          sectionKey: 'customer_problem',
+          runtimePath: 'framework_state.sections.customer_problem',
+        }),
+        revisions: [
+          expect.objectContaining({
+            revisionNumber: 1,
+            generated: expect.objectContaining({
+              content: 'Customer Problem: Previous generated content.',
+            }),
+          }),
+        ],
+      }),
+    ])
+    expect(res.body.data.runtimeData).toEqual({
+      readablePaths: [
+        {
+          sectionKey: 'customer_problem',
+          runtimePath: 'framework_state.sections.customer_problem',
+          value: 'Proposal creation is slow.',
+        },
+      ],
+    })
+    expect(res.body.data.runtimeInstance.framework_state).toBeUndefined()
+    expect(res.body.data.frameworkState).toBeUndefined()
+  })
+
+  test('renders section fields as read-only when the actor can view but cannot mutate runtime state', async () => {
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [
+        makeWorkflowBinding('SUBMIT_FOR_REVIEW', { executionContext: 'ON_SUBMIT' }),
+        makeWorkflowBinding('GENERATE_SECTION'),
+        makeWorkflowBinding('REGENERATE_SECTION'),
+      ],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [
+        makeUIAction('SUBMIT_FOR_REVIEW', {
+          confirmationMessage: 'Submit this framework for review?',
+          requiresConfirmation: true,
+        }),
+        makeUIAction('GENERATE_SECTION'),
+        makeUIAction('REGENERATE_SECTION'),
+      ],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([
+      makeWorkflowPolicy(),
+      makeActionWorkflowPolicy('GENERATE_SECTION'),
+      makeActionWorkflowPolicy('REGENERATE_SECTION'),
+    ]))
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
       framework_state: {
         lifecycle: { stage: 'DRAFT' },
@@ -2642,13 +3337,25 @@ describe('Runtime Instance API', () => {
         requiredPermissions: ['VMF_UPDATE'],
       }),
     ])
-    expect(res.body.data.actions).toEqual([
+    expect(res.body.data.actions).toEqual(expect.arrayContaining([
       expect.objectContaining({
         actionKey: 'SUBMIT_FOR_REVIEW',
         enabled: false,
         disabledReason: 'Current role or permissions do not allow this runtime action.',
       }),
-    ])
+      expect.objectContaining({
+        actionKey: 'GENERATE_SECTION',
+        enabled: false,
+        disabledReason: 'Current role or permissions do not allow this runtime action.',
+        requiredPermissions: ['VMF_UPDATE'],
+      }),
+      expect.objectContaining({
+        actionKey: 'REGENERATE_SECTION',
+        enabled: false,
+        disabledReason: 'Current role or permissions do not allow this runtime action.',
+        requiredPermissions: ['VMF_UPDATE'],
+      }),
+    ]))
   })
 
   test('does not expose runtime data outside registered READ runtime paths', async () => {
