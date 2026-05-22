@@ -65,6 +65,23 @@ const CONFIG_WARNING_CODES = Object.freeze({
   POLICY_ACTION_MISSING: 'POLICY_ACTION_MISSING',
 })
 
+const RENDERER_WARNING_SEVERITIES = Object.freeze({
+  INFO: 'INFO',
+  WARNING: 'WARNING',
+  ERROR: 'ERROR',
+  BLOCKER: 'BLOCKER',
+})
+
+const CONFIG_WARNING_SEVERITY_BY_CODE = Object.freeze({
+  [CONFIG_WARNING_CODES.PACKAGE_SECTION_MISSING_RUNTIME_PATH]: RENDERER_WARNING_SEVERITIES.ERROR,
+  [CONFIG_WARNING_CODES.RUNTIME_PATH_NOT_FOUND]: RENDERER_WARNING_SEVERITIES.ERROR,
+  [CONFIG_WARNING_CODES.RUNTIME_PATH_NOT_READABLE]: RENDERER_WARNING_SEVERITIES.ERROR,
+  [CONFIG_WARNING_CODES.UI_CONTRACT_SECTION_MISSING]: RENDERER_WARNING_SEVERITIES.WARNING,
+  [CONFIG_WARNING_CODES.UI_CONTRACT_SECTION_ORPHANED]: RENDERER_WARNING_SEVERITIES.WARNING,
+  [CONFIG_WARNING_CODES.ACTION_POLICY_MISSING]: RENDERER_WARNING_SEVERITIES.WARNING,
+  [CONFIG_WARNING_CODES.POLICY_ACTION_MISSING]: RENDERER_WARNING_SEVERITIES.WARNING,
+})
+
 const VALUE_NOT_FOUND = Symbol('VALUE_NOT_FOUND')
 const VMF_FRAMEWORK_KEY = 'VMF'
 const MUTATING_RUNTIME_ACTIONS = new Set([
@@ -144,6 +161,7 @@ const createRuntimeRendererError = ({
 const createConfigWarning = ({
   code,
   message,
+  severity,
   sectionKey,
   runtimePath,
   actionKey,
@@ -151,6 +169,7 @@ const createConfigWarning = ({
   policyKey,
 }) => ({
   code,
+  severity: severity || CONFIG_WARNING_SEVERITY_BY_CODE[code] || RENDERER_WARNING_SEVERITIES.WARNING,
   message,
   ...(sectionKey ? { sectionKey } : {}),
   ...(runtimePath ? { runtimePath } : {}),
@@ -1115,12 +1134,24 @@ const buildRendererRuntimeInstance = (runtimeInstance) => {
   return safeRuntimeInstance
 }
 
-const buildRuntimeDataProjection = (sections) => ({
-  readablePaths: (Array.isArray(sections) ? sections : []).map((section) => ({
-    sectionKey: section.sectionKey,
-    runtimePath: section.runtimePath,
-    value: section.value,
-  })),
+const isRuntimeDebugProjectionAllowed = (scopes = {}) => {
+  const platformRoleKeys = uniqueTokens(
+    Array.isArray(scopes?.resolvedPermissions?.platform?.roleKeys)
+      ? scopes.resolvedPermissions.platform.roleKeys
+      : [],
+  )
+
+  return platformRoleKeys.includes('SUPER_ADMIN')
+}
+
+const buildRuntimeDataProjection = ({ includeDebugProjection, sections }) => ({
+  readablePaths: includeDebugProjection
+    ? (Array.isArray(sections) ? sections : []).map((section) => ({
+      sectionKey: section.sectionKey,
+      runtimePath: section.runtimePath,
+      value: section.value,
+    }))
+    : [],
 })
 
 const buildValidationProjection = ({ frameworkState, sections }) => ({
@@ -1211,6 +1242,7 @@ export const getRuntimeRenderer = async ({
   })
   const frameworkState = runtimeInstance.framework_state || {}
   const workspaceId = runtimeInstance.workspaceId || runtimeInstance.id
+  const includeDebugProjection = isRuntimeDebugProjectionAllowed(scopes)
 
   return {
     rendererContractVersion: RUNTIME_RENDERER_CONTRACT_VERSION,
@@ -1247,9 +1279,10 @@ export const getRuntimeRenderer = async ({
     lock: buildLockProjection(runtimeInstance, frameworkState),
     signals: [],
     activity: [],
-    runtimeData: buildRuntimeDataProjection(sections),
+    runtimeData: buildRuntimeDataProjection({ includeDebugProjection, sections }),
     diagnostics: {
       renderTraceId: `render-${randomUUID()}`,
+      runtimePathVisibility: includeDebugProjection ? 'VISIBLE' : 'HIDDEN',
       configWarnings,
       configErrors: [],
     },

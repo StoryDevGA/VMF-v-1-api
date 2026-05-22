@@ -11,6 +11,7 @@ beforeAll(() => {
 })
 
 const CUSTOMER_ADMIN_ID = '507f1f77bcf86cd799439012'
+const SUPER_ADMIN_ID = '507f1f77bcf86cd799439013'
 const REGULAR_USER_ID = '507f1f77bcf86cd799439014'
 const CUSTOMER_ID = '607f1f77bcf86cd799439022'
 const OTHER_CUSTOMER_ID = '607f1f77bcf86cd799439023'
@@ -54,6 +55,29 @@ const makeRegularUser = (overrides = {}) => ({
   tenantMemberships: [
     { customerId: CUSTOMER_ID, tenantId: TENANT_ID, roles: ['USER'] },
   ],
+  vmfGrants: [],
+  save: jest.fn(async function save() { return this }),
+  toJSON: function toJSON() {
+    return {
+      id: this._id,
+      email: this.email,
+      name: this.name,
+      memberships: this.memberships,
+      tenantMemberships: this.tenantMemberships,
+    }
+  },
+  ...overrides,
+})
+
+const makeSuperAdmin = (overrides = {}) => ({
+  _id: SUPER_ADMIN_ID,
+  id: SUPER_ADMIN_ID,
+  email: 'superadmin@storylineos.test',
+  name: 'Super Admin',
+  isActive: true,
+  identityPlus: { trustStatus: 'TRUSTED' },
+  memberships: [{ customerId: null, roles: ['SUPER_ADMIN'] }],
+  tenantMemberships: [],
   vmfGrants: [],
   save: jest.fn(async function save() { return this }),
   toJSON: function toJSON() {
@@ -419,6 +443,12 @@ const buildRuntimeInstanceFindChain = (rows) => ({
 
 const buildDefaultRoleRows = () => ([
   {
+    key: 'SUPER_ADMIN',
+    scope: 'PLATFORM',
+    permissions: ['CUSTOMER_VIEW', 'VMF_CREATE', 'VMF_UPDATE', 'VMF_VIEW'],
+    isActive: true,
+  },
+  {
     key: 'CUSTOMER_ADMIN',
     scope: 'CUSTOMER',
     permissions: ['CUSTOMER_VIEW', 'VMF_CREATE', 'VMF_UPDATE', 'VMF_VIEW'],
@@ -503,6 +533,10 @@ beforeEach(() => {
   User.findById = jest.fn().mockImplementation((userId) => {
     if (userId === CUSTOMER_ADMIN_ID) {
       return buildUserQueryChain(makeCustomerAdmin())
+    }
+
+    if (userId === SUPER_ADMIN_ID) {
+      return buildUserQueryChain(makeSuperAdmin())
     }
 
     if (userId === REGULAR_USER_ID) {
@@ -3982,6 +4016,38 @@ describe('Runtime Instance API', () => {
     expect(res.body.data.runtimeInstance.framework_state).toBeUndefined()
     expect(res.body.data.frameworkState).toBeUndefined()
     expect(res.body.data.runtimeData).toEqual({
+      readablePaths: [],
+    })
+    expect(res.body.data.diagnostics.runtimePathVisibility).toBe('HIDDEN')
+    expect(res.body.data.diagnostics.configWarnings).toEqual([])
+    expect(res.body.meta.renderTraceId).toMatch(/^render-/)
+  })
+
+  test('includes readable runtime path projection only for platform debug actors', async () => {
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: 'Proposal creation is slow.',
+        },
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })))
+    const token = await getAccessTokenForUser(makeSuperAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.runtimeData).toEqual({
       readablePaths: [
         {
           sectionKey: 'customer_problem',
@@ -3990,8 +4056,51 @@ describe('Runtime Instance API', () => {
         },
       ],
     })
-    expect(res.body.data.diagnostics.configWarnings).toEqual([])
-    expect(res.body.meta.renderTraceId).toMatch(/^render-/)
+    expect(res.body.data.diagnostics.runtimePathVisibility).toBe('VISIBLE')
+  })
+
+  test('does not allow raw platform roles alone to expose readable runtime paths', async () => {
+    Role.find = jest.fn().mockReturnValue(buildRoleQueryChain(
+      buildDefaultRoleRows().filter((role) => role.key !== 'SUPER_ADMIN'),
+    ))
+    User.findById = jest.fn().mockReturnValue(buildUserQueryChain(makeCustomerAdmin({
+      memberships: [
+        { customerId: null, roles: ['SUPER_ADMIN'] },
+        { customerId: CUSTOMER_ID, roles: ['CUSTOMER_ADMIN'] },
+      ],
+    })))
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: 'Proposal creation is slow.',
+        },
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin({
+      memberships: [
+        { customerId: null, roles: ['SUPER_ADMIN'] },
+        { customerId: CUSTOMER_ID, roles: ['CUSTOMER_ADMIN'] },
+      ],
+    }))
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.runtimeData).toEqual({
+      readablePaths: [],
+    })
+    expect(res.body.data.diagnostics.runtimePathVisibility).toBe('HIDDEN')
   })
 
   test('renders governed section object model without exposing raw framework state', async () => {
@@ -4074,14 +4183,9 @@ describe('Runtime Instance API', () => {
       }),
     ])
     expect(res.body.data.runtimeData).toEqual({
-      readablePaths: [
-        {
-          sectionKey: 'customer_problem',
-          runtimePath: 'framework_state.sections.customer_problem',
-          value: 'Proposal creation is slow.',
-        },
-      ],
+      readablePaths: [],
     })
+    expect(res.body.data.diagnostics.runtimePathVisibility).toBe('HIDDEN')
     expect(res.body.data.runtimeInstance.framework_state).toBeUndefined()
     expect(res.body.data.frameworkState).toBeUndefined()
   })
@@ -4215,13 +4319,7 @@ describe('Runtime Instance API', () => {
     expect(res.status).toBe(200)
     expect(res.body.data.sections).toHaveLength(1)
     expect(res.body.data.runtimeData).toEqual({
-      readablePaths: [
-        {
-          sectionKey: 'customer_problem',
-          runtimePath: 'framework_state.sections.customer_problem',
-          value: 'Proposal creation is slow.',
-        },
-      ],
+      readablePaths: [],
     })
     expect(JSON.stringify(res.body.data)).not.toContain('LEAKED_SECRET_VALUE')
     expect(JSON.stringify(res.body.data)).not.toContain('WRITE_ONLY_SECRET_VALUE')
@@ -4230,10 +4328,12 @@ describe('Runtime Instance API', () => {
     expect(res.body.data.diagnostics.configWarnings).toEqual(expect.arrayContaining([
       expect.objectContaining({
         code: 'RUNTIME_PATH_NOT_FOUND',
+        severity: 'ERROR',
         sectionKey: 'hidden_secret',
       }),
       expect.objectContaining({
         code: 'RUNTIME_PATH_NOT_READABLE',
+        severity: 'ERROR',
         sectionKey: 'write_only',
       }),
     ]))
@@ -4255,6 +4355,7 @@ describe('Runtime Instance API', () => {
     expect(res.body.data.diagnostics.configWarnings).toEqual(expect.arrayContaining([
       expect.objectContaining({
         code: 'RUNTIME_PATH_NOT_FOUND',
+        severity: 'ERROR',
         sectionKey: 'customer_problem',
         runtimePath: 'framework_state.sections.customer_problem',
       }),
@@ -4283,6 +4384,7 @@ describe('Runtime Instance API', () => {
     expect(res.body.data.diagnostics.configWarnings).toEqual(expect.arrayContaining([
       expect.objectContaining({
         code: 'ACTION_POLICY_MISSING',
+        severity: 'WARNING',
         actionKey: 'SUBMIT_FOR_REVIEW',
         governedAction: 'SUBMIT_FOR_REVIEW',
       }),
@@ -4305,6 +4407,7 @@ describe('Runtime Instance API', () => {
     expect(res.body.data.diagnostics.configWarnings).toEqual(expect.arrayContaining([
       expect.objectContaining({
         code: 'POLICY_ACTION_MISSING',
+        severity: 'WARNING',
         governedAction: 'SUBMIT_FOR_REVIEW',
         policyKey: 'submit-for-review-policy',
       }),
