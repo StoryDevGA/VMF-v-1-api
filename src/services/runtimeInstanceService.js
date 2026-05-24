@@ -603,6 +603,7 @@ const buildRuntimeInstanceKey = ({ runtimeType, objectId = new mongoose.Types.Ob
 const buildInitialFrameworkState = () => ({
   lifecycle: { stage: 'DRAFT' },
   sections: {},
+  evidence_pack: {},
   validation: {},
   readiness: {},
   policy: {},
@@ -743,6 +744,7 @@ const persistRuntimeInstanceWithAudit = async ({
 const normalizeFrameworkState = (frameworkState = {}) => ({
   lifecycle: frameworkState.lifecycle || { stage: 'DRAFT' },
   sections: frameworkState.sections || {},
+  evidence_pack: frameworkState.evidence_pack || frameworkState.evidencePack || {},
   validation: frameworkState.validation || {},
   readiness: frameworkState.readiness || {},
   publish: frameworkState.publish || {},

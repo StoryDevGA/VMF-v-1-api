@@ -43,6 +43,10 @@ const frameworkStateSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.Mixed,
       default: () => ({}),
     },
+    evidence_pack: {
+      type: mongoose.Schema.Types.Mixed,
+      default: () => ({}),
+    },
     validation: {
       type: mongoose.Schema.Types.Mixed,
       default: () => ({}),

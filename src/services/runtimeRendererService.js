@@ -221,6 +221,177 @@ const titleFromKey = (key) =>
     .trim()
     .replace(/\b\w/g, (char) => char.toUpperCase())
 
+const cloneProjectionValue = (value) => {
+  if (value === undefined) return undefined
+  return JSON.parse(JSON.stringify(value))
+}
+
+const isEmptyProjectionValue = (value) => {
+  if (value === null || value === undefined) return true
+  if (typeof value === 'string') return value.trim().length === 0
+  if (Array.isArray(value)) return value.length === 0
+  if (typeof value === 'object') return Object.keys(value).length === 0
+  return false
+}
+
+const hasProjectionValue = (value) => !isEmptyProjectionValue(value)
+
+const getDiscoveryEvidencePack = (frameworkState = {}) =>
+  frameworkState.evidence_pack || frameworkState.evidencePack || null
+
+const isStrictTrue = (value) => value === true
+
+const buildProjectionSummary = (value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {
+      keys: [],
+      count: 0,
+    }
+  }
+
+  const keys = Object.keys(value).filter(Boolean)
+  return {
+    keys,
+    count: keys.length,
+  }
+}
+
+const normalizeDiscoveryStateStatus = ({
+  accepted,
+  evidenceReady,
+  explicitStatus,
+  inputComplete,
+  needsRefresh,
+}) => {
+  const status = normalizeToken(explicitStatus)
+  if (needsRefresh) return 'NEEDS_REFRESH'
+  if (accepted) return 'ACCEPTED'
+  if (evidenceReady) return 'EVIDENCE_READY'
+  if (inputComplete) return 'INPUT_COMPLETE'
+  if (status && !['ACCEPTED', 'EVIDENCE_ACCEPTED', 'EVIDENCE_READY', 'INPUT_COMPLETE'].includes(status)) return status
+  return 'EVIDENCE_NOT_READY'
+}
+
+export const buildDiscoveryProjection = (frameworkState = {}) => {
+  const evidencePack = getDiscoveryEvidencePack(frameworkState)
+  if (!evidencePack || typeof evidencePack !== 'object' || Array.isArray(evidencePack)) {
+    return {
+      state: {
+        status: 'EVIDENCE_NOT_READY',
+      },
+      inputComplete: false,
+      evidenceReady: false,
+      accepted: false,
+      needsRefresh: false,
+      scopedViews: {},
+    }
+  }
+
+  const scopedViews = evidencePack.scopedViews || evidencePack.scoped_views || {}
+  const inputComplete = isStrictTrue(evidencePack.inputComplete)
+    || isStrictTrue(evidencePack.input_complete)
+    || isStrictTrue(evidencePack.inputs?.complete)
+    || isStrictTrue(evidencePack.state?.inputComplete)
+  const evidenceReady = isStrictTrue(evidencePack.evidenceReady)
+    || isStrictTrue(evidencePack.evidence_ready)
+    || isStrictTrue(evidencePack.state?.evidenceReady)
+  const explicitStatus = evidencePack.state?.status || evidencePack.status
+  const needsRefresh = isStrictTrue(evidencePack.needsRefresh)
+    || isStrictTrue(evidencePack.needs_refresh)
+    || isStrictTrue(evidencePack.state?.needsRefresh)
+  const accepted = !needsRefresh && (
+    isStrictTrue(evidencePack.accepted)
+    || isStrictTrue(evidencePack.state?.accepted)
+  )
+  const inputSummary = buildProjectionSummary(evidencePack.inputs)
+  const evidenceSummary = buildProjectionSummary(evidencePack.evidence)
+  const scopedViewSummary = buildProjectionSummary(scopedViews)
+
+  return {
+    state: {
+      ...(evidencePack.state && typeof evidencePack.state === 'object' && !Array.isArray(evidencePack.state)
+        ? cloneProjectionValue(evidencePack.state)
+        : {}),
+      status: normalizeDiscoveryStateStatus({
+        accepted,
+        evidenceReady,
+        explicitStatus,
+        inputComplete,
+        needsRefresh,
+      }),
+    },
+    inputComplete,
+    evidenceReady,
+    accepted,
+    needsRefresh,
+    scopedViews: scopedViews && typeof scopedViews === 'object' && !Array.isArray(scopedViews)
+      ? cloneProjectionValue(scopedViews)
+      : {},
+    inputSummary,
+    evidenceSummary,
+    scopedViewSummary,
+    ...(evidencePack.acceptedAt ? { acceptedAt: evidencePack.acceptedAt } : {}),
+    ...(evidencePack.acceptedBy ? { acceptedBy: evidencePack.acceptedBy } : {}),
+    ...(evidencePack.refreshedAt ? { refreshedAt: evidencePack.refreshedAt } : {}),
+  }
+}
+
+export const getDependencySectionKeys = (packageSection = {}) => {
+  const candidates = [
+    packageSection.dependsOnSectionKeys,
+    packageSection.dependencySectionKeys,
+    packageSection.dependsOn,
+  ]
+
+  return candidates
+    .flatMap((candidate) => (Array.isArray(candidate) ? candidate : [candidate]))
+    .map((candidate) => {
+      if (candidate && typeof candidate === 'object') {
+        return normalizeKey(candidate.sectionKey || candidate.key)
+      }
+      return normalizeKey(candidate)
+    })
+    .filter(Boolean)
+}
+
+const hasSectionContextValue = (value) => {
+  if (isRuntimeSectionObject(value)) {
+    return hasProjectionValue(getRuntimeSectionInput(value))
+      || hasProjectionValue(getRuntimeSectionGenerated(value)?.content ?? getRuntimeSectionGenerated(value))
+  }
+
+  return hasProjectionValue(value)
+}
+
+export const buildSectionGenerationEligibility = ({
+  dependencySectionKeys,
+  discovery,
+  frameworkState,
+  rawSectionValue,
+}) => {
+  const sources = []
+  const sections = frameworkState.sections || {}
+
+  if (discovery?.accepted === true) sources.push('DISCOVERY_ACCEPTED')
+  if (hasSectionContextValue(rawSectionValue)) sources.push('SECTION_CONTEXT')
+
+  const satisfiedDependencies = dependencySectionKeys.filter((sectionKey) =>
+    hasSectionContextValue(sections[sectionKey]),
+  )
+  if (satisfiedDependencies.length > 0) sources.push('DEPENDENT_SECTION_CONTEXT')
+
+  const canGenerate = sources.length > 0
+  return {
+    canGenerate,
+    reason: canGenerate
+      ? ''
+      : 'Add discovery evidence or section context before generating this section.',
+    sources,
+    dependencySectionKeys,
+    satisfiedDependencySectionKeys: satisfiedDependencies,
+  }
+}
+
 const resolveControlType = (runtimePathRecord) => {
   const explicitControl = normalizeToken(runtimePathRecord?.uiControl)
   if (explicitControl) return explicitControl
@@ -677,6 +848,7 @@ const buildSectionIndex = (uiContract) => {
 }
 
 const buildRendererSections = ({
+  discovery,
   frameworkPackage,
   mutationAccess,
   runtimeInstance,
@@ -754,6 +926,13 @@ const buildRendererSections = ({
     const sectionGenerated = getRuntimeSectionGenerated(rawSectionValue)
     const sectionRevisions = getRuntimeSectionRevisions(rawSectionValue)
     const sectionState = getRuntimeSectionState(rawSectionValue)
+    const dependencySectionKeys = getDependencySectionKeys(packageSection)
+    const generationEligibility = buildSectionGenerationEligibility({
+      dependencySectionKeys,
+      discovery,
+      frameworkState,
+      rawSectionValue,
+    })
 
     renderedSections.push({
       key: sectionKey,
@@ -782,6 +961,7 @@ const buildRendererSections = ({
         replacedAt: revision.replacedAt,
         generated: revision.generated || null,
       })),
+      generationEligibility,
       validationKeys,
       validationMessages: buildSectionValidationMessages({ frameworkState, validationKeys }),
       editable,
@@ -1222,7 +1402,10 @@ export const getRuntimeRenderer = async ({
   const configWarnings = []
   const runtimeContext = buildRuntimeContext(runtimeInstance)
   const mutationAccess = await resolveSectionMutationAccess({ runtimeInstance, scopes })
+  const frameworkState = runtimeInstance.framework_state || {}
+  const discovery = buildDiscoveryProjection(frameworkState)
   const sections = buildRendererSections({
+    discovery,
     frameworkPackage,
     mutationAccess,
     runtimeInstance,
@@ -1240,7 +1423,6 @@ export const getRuntimeRenderer = async ({
     scopes,
     configWarnings,
   })
-  const frameworkState = runtimeInstance.framework_state || {}
   const workspaceId = runtimeInstance.workspaceId || runtimeInstance.id
   const includeDebugProjection = isRuntimeDebugProjectionAllowed(scopes)
 
@@ -1271,6 +1453,7 @@ export const getRuntimeRenderer = async ({
       runtimeMode: runtimeInstance.runtimeMode,
       stage: frameworkState.lifecycle?.stage || 'DRAFT',
     },
+    discovery,
     sections,
     actions,
     validation: buildValidationProjection({ frameworkState, sections }),

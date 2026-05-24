@@ -12,7 +12,12 @@ import {
   normalizeToken,
   toIdString,
 } from './runtimeInstanceService.js'
-import { getRuntimeRenderer } from './runtimeRendererService.js'
+import {
+  buildDiscoveryProjection,
+  buildSectionGenerationEligibility,
+  getDependencySectionKeys,
+  getRuntimeRenderer,
+} from './runtimeRendererService.js'
 import {
   RUNTIME_ACTION_KEYS,
   buildRuntimeActionTransition,
@@ -245,6 +250,29 @@ const applyRuntimeSectionGeneration = ({
 
   const target = resolveGenerationTargetSection({ frameworkPackage, payload })
   const previousRawSection = nextFrameworkState.sections[target.stateSectionKey]
+  const discovery = buildDiscoveryProjection(nextFrameworkState)
+  const generationEligibility = buildSectionGenerationEligibility({
+    dependencySectionKeys: getDependencySectionKeys(target.section),
+    discovery,
+    frameworkState: nextFrameworkState,
+    rawSectionValue: previousRawSection,
+  })
+
+  if (normalizedActionKey === RUNTIME_ACTION_KEYS.GENERATE_SECTION && generationEligibility.canGenerate !== true) {
+    throw buildActionError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Runtime section cannot be generated before discovery evidence or section context exists.',
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_ACTION_NOT_AVAILABLE,
+      details: {
+        actionKey: normalizedActionKey,
+        disabledReason: generationEligibility.reason,
+        sectionKey: target.sectionKey,
+        runtimePath: target.runtimePath,
+      },
+    })
+  }
+
   const sectionObject = normalizeRuntimeSectionObject({
     value: previousRawSection,
     sectionKey: target.sectionKey,

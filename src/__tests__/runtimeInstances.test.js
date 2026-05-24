@@ -619,6 +619,7 @@ describe('Runtime Instance API', () => {
     expect(res.body.data.framework_state).toEqual({
       lifecycle: { stage: 'DRAFT' },
       sections: {},
+      evidence_pack: {},
       validation: {},
       readiness: {},
       publish: {},
@@ -3141,6 +3142,48 @@ describe('Runtime Instance API', () => {
     }))
   })
 
+  test('rejects direct GENERATE_SECTION when target section has no eligible context', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: '',
+        },
+        validation: {},
+        readiness: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('GENERATE_SECTION')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('GENERATE_SECTION')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('GENERATE_SECTION')]))
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/GENERATE_SECTION`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+        runtimePath: 'framework_state.sections.customer_problem',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('RUNTIME_ACTION_NOT_AVAILABLE')
+    expect(res.body.error.details.disabledReason).toBe('Add discovery evidence or section context before generating this section.')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
   test('GENERATE_SECTION writes generated content under the runtime path section key', async () => {
     const runtimeInstanceDoc = makeRuntimeInstanceDocument({
       updatedAt: new Date('2026-05-19T08:00:00.000Z'),
@@ -3989,8 +4032,35 @@ describe('Runtime Instance API', () => {
         value: 'Proposal creation is slow.',
         validationKeys: ['required-sections-check'],
         editable: true,
+        generationEligibility: expect.objectContaining({
+          canGenerate: true,
+          reason: '',
+          sources: ['SECTION_CONTEXT'],
+        }),
       }),
     ])
+    expect(res.body.data.discovery).toEqual({
+      state: {
+        status: 'EVIDENCE_NOT_READY',
+      },
+      inputComplete: false,
+      evidenceReady: false,
+      accepted: false,
+      needsRefresh: false,
+      scopedViews: {},
+      inputSummary: {
+        keys: [],
+        count: 0,
+      },
+      evidenceSummary: {
+        keys: [],
+        count: 0,
+      },
+      scopedViewSummary: {
+        keys: [],
+        count: 0,
+      },
+    })
     expect(res.body.data.actions).toEqual([
       expect.objectContaining({
         actionKey: 'SUBMIT_FOR_REVIEW',
@@ -4021,6 +4091,334 @@ describe('Runtime Instance API', () => {
     expect(res.body.data.diagnostics.runtimePathVisibility).toBe('HIDDEN')
     expect(res.body.data.diagnostics.configWarnings).toEqual([])
     expect(res.body.meta.renderTraceId).toMatch(/^render-/)
+  })
+
+  test('projects real discovery evidence pack state without fabricating evidence content', async () => {
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: {
+          state: {
+            status: 'ACCEPTED',
+          },
+          inputComplete: true,
+          evidenceReady: true,
+          accepted: true,
+          acceptedAt: '2026-05-24T09:00:00.000Z',
+          inputs: {
+            source: 'customer-interview',
+          },
+          evidence: {
+            priorities: ['Reduce proposal cycle time'],
+          },
+          scopedViews: {
+            customer_problem: {
+              summary: 'Proposal teams need a shared governed narrative.',
+            },
+          },
+        },
+        sections: {
+          customer_problem: '',
+        },
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.discovery).toEqual(expect.objectContaining({
+      state: expect.objectContaining({
+        status: 'ACCEPTED',
+      }),
+      inputComplete: true,
+      evidenceReady: true,
+      accepted: true,
+      needsRefresh: false,
+      acceptedAt: '2026-05-24T09:00:00.000Z',
+      inputSummary: {
+        keys: ['source'],
+        count: 1,
+      },
+      evidenceSummary: {
+        keys: ['priorities'],
+        count: 1,
+      },
+      scopedViewSummary: {
+        keys: ['customer_problem'],
+        count: 1,
+      },
+      scopedViews: {
+        customer_problem: {
+          summary: 'Proposal teams need a shared governed narrative.',
+        },
+      },
+    }))
+    expect(res.body.data.sections[0].generationEligibility).toEqual(expect.objectContaining({
+      canGenerate: true,
+      sources: ['DISCOVERY_ACCEPTED'],
+    }))
+    expect(res.body.data.discovery.inputs).toBeUndefined()
+    expect(res.body.data.discovery.evidence).toBeUndefined()
+    expect(res.body.data.runtimeInstance.framework_state).toBeUndefined()
+    expect(res.body.data.frameworkState).toBeUndefined()
+  })
+
+  test('normalizes discovery booleans strictly and keeps stale accepted evidence ineligible', async () => {
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: {
+          state: {
+            status: 'ACCEPTED',
+            inputComplete: 'false',
+            evidenceReady: 'false',
+            accepted: 'false',
+            needsRefresh: true,
+          },
+          inputComplete: 'false',
+          evidenceReady: 'false',
+          accepted: true,
+          needsRefresh: true,
+          inputs: {
+            source: 'customer-interview',
+          },
+          evidence: {
+            priorities: ['Reduce proposal cycle time'],
+          },
+        },
+        sections: {
+          customer_problem: '',
+        },
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.discovery).toEqual(expect.objectContaining({
+      state: expect.objectContaining({
+        status: 'NEEDS_REFRESH',
+      }),
+      inputComplete: false,
+      evidenceReady: false,
+      accepted: false,
+      needsRefresh: true,
+    }))
+    expect(res.body.data.sections[0].generationEligibility).toEqual(expect.objectContaining({
+      canGenerate: false,
+      sources: [],
+    }))
+  })
+
+  test('disables section generation eligibility when no discovery or section context exists', async () => {
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('GENERATE_SECTION')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('GENERATE_SECTION')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('GENERATE_SECTION')]))
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: '',
+        },
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.sections[0].generationEligibility).toEqual({
+      canGenerate: false,
+      reason: 'Add discovery evidence or section context before generating this section.',
+      sources: [],
+      dependencySectionKeys: [],
+      satisfiedDependencySectionKeys: [],
+    })
+    expect(res.body.data.actions).toEqual([
+      expect.objectContaining({
+        actionKey: 'GENERATE_SECTION',
+        enabled: true,
+      }),
+    ])
+  })
+
+  test('enables section generation eligibility from satisfied declared dependency context only', async () => {
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      sections: [
+        {
+          sectionKey: 'customer_problem',
+          runtimePath: 'framework_state.sections.customer_problem',
+          required: true,
+          validationKeys: ['required-sections-check'],
+        },
+        {
+          sectionKey: 'value_drivers',
+          runtimePath: 'framework_state.sections.value_drivers',
+          required: true,
+          validationKeys: ['required-sections-check'],
+          dependsOnSectionKeys: ['customer_problem'],
+        },
+      ],
+      workflowBindings: [makeWorkflowBinding('GENERATE_SECTION')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([
+      makeRuntimePathRecord(),
+      makeRuntimePathRecord({
+        stableId: 'path-framework-state-sections-value-drivers',
+        pathKey: 'framework_state.sections.value_drivers',
+        label: 'Value Drivers',
+      }),
+    ]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      sections: [
+        makeUIContract().sections[0],
+        {
+          sectionKey: 'value_drivers',
+          runtimePath: 'framework_state.sections.value_drivers',
+          source: 'PACKAGE',
+          isCustom: false,
+          label: 'Value Drivers',
+          displayOrder: 20,
+          isVisible: true,
+          isEditable: true,
+        },
+      ],
+      actions: [makeUIAction('GENERATE_SECTION')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('GENERATE_SECTION')]))
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: 'Proposal creation is slow.',
+          value_drivers: '',
+        },
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    const valueDrivers = res.body.data.sections.find((section) => section.sectionKey === 'value_drivers')
+    expect(valueDrivers.generationEligibility).toEqual(expect.objectContaining({
+      canGenerate: true,
+      sources: ['DEPENDENT_SECTION_CONTEXT'],
+      dependencySectionKeys: ['customer_problem'],
+      satisfiedDependencySectionKeys: ['customer_problem'],
+    }))
+  })
+
+  test('keeps dependency-context generation ineligible when declared dependencies lack context', async () => {
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      sections: [
+        {
+          sectionKey: 'customer_problem',
+          runtimePath: 'framework_state.sections.customer_problem',
+          required: true,
+          validationKeys: ['required-sections-check'],
+        },
+        {
+          sectionKey: 'value_drivers',
+          runtimePath: 'framework_state.sections.value_drivers',
+          required: true,
+          validationKeys: ['required-sections-check'],
+          dependsOnSectionKeys: ['customer_problem'],
+        },
+      ],
+      workflowBindings: [makeWorkflowBinding('GENERATE_SECTION')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([
+      makeRuntimePathRecord(),
+      makeRuntimePathRecord({
+        stableId: 'path-framework-state-sections-value-drivers',
+        pathKey: 'framework_state.sections.value_drivers',
+        label: 'Value Drivers',
+      }),
+    ]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      sections: [
+        makeUIContract().sections[0],
+        {
+          sectionKey: 'value_drivers',
+          runtimePath: 'framework_state.sections.value_drivers',
+          source: 'PACKAGE',
+          isCustom: false,
+          label: 'Value Drivers',
+          displayOrder: 20,
+          isVisible: true,
+          isEditable: true,
+        },
+      ],
+      actions: [makeUIAction('GENERATE_SECTION')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('GENERATE_SECTION')]))
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: '',
+          value_drivers: '',
+        },
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    const valueDrivers = res.body.data.sections.find((section) => section.sectionKey === 'value_drivers')
+    expect(valueDrivers.generationEligibility).toEqual(expect.objectContaining({
+      canGenerate: false,
+      sources: [],
+      dependencySectionKeys: ['customer_problem'],
+      satisfiedDependencySectionKeys: [],
+    }))
   })
 
   test('includes readable runtime path projection only for platform debug actors', async () => {
