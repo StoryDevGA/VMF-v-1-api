@@ -301,6 +301,18 @@ const makeRuntimePathRecord = (overrides = {}) => ({
   ...overrides,
 })
 
+const makeEvidencePackRuntimePathRecord = (overrides = {}) => makeRuntimePathRecord({
+  stableId: 'path-framework-state-evidence-pack',
+  pathKey: 'framework_state.evidence_pack',
+  label: 'Discovery Evidence Pack',
+  allowedOperations: ['READ', 'WRITE'],
+  dataType: 'OBJECT',
+  category: 'STATE',
+  uiControl: 'JSON',
+  displayOrder: 1,
+  ...overrides,
+})
+
 const actionLabels = {
   RUN_VALIDATION: 'Run Validation',
   MARK_READY: 'Mark Ready',
@@ -1709,6 +1721,415 @@ describe('Runtime Instance API', () => {
       },
       expect.any(Object),
     )
+  })
+
+  test('PATCH /api/v1/runtime-instances/:id/discovery-inputs persists a real evidence pack with audit', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: {},
+        sections: {},
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+    }))
+    RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeEvidencePackRuntimePathRecord()))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([
+      makeRuntimePathRecord(),
+      makeRuntimePathRecord({
+        stableId: 'path-framework-state-sections-hidden-secret',
+        pathKey: 'framework_state.sections.hidden_secret',
+        label: 'Hidden Secret',
+        allowedOperations: ['READ', 'WRITE'],
+        displayOrder: 20,
+      }),
+      makeRuntimePathRecord({
+        stableId: 'path-framework-state-sections-write-only',
+        pathKey: 'framework_state.sections.write_only',
+        label: 'Write Only',
+        allowedOperations: ['WRITE'],
+        displayOrder: 30,
+      }),
+    ]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      sections: [
+        {
+          sectionKey: 'customer_problem',
+          runtimePath: 'framework_state.sections.customer_problem',
+          displayOrder: 10,
+          isVisible: true,
+        },
+        {
+          sectionKey: 'hidden_secret',
+          runtimePath: 'framework_state.sections.hidden_secret',
+          displayOrder: 20,
+          isVisible: false,
+        },
+      ],
+    })))
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      sections: [
+        {
+          sectionKey: 'customer_problem',
+          runtimePath: 'framework_state.sections.customer_problem',
+          required: true,
+        },
+        {
+          sectionKey: 'hidden_secret',
+          runtimePath: 'framework_state.sections.hidden_secret',
+          required: false,
+        },
+        {
+          sectionKey: 'write_only',
+          runtimePath: 'framework_state.sections.write_only',
+          required: false,
+        },
+        {
+          sectionKey: 'unregistered',
+          runtimePath: 'framework_state.sections.unregistered',
+          required: false,
+        },
+      ],
+    }))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/discovery-inputs`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        inputs: {
+          companyWebsite: 'https://acme.example',
+          companyName: 'Acme',
+          marketRegion: 'UK enterprise',
+          targetOffer: 'Managed proposal platform',
+          notes: 'Use only customer-provided discovery context.',
+        },
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+      })
+
+    expect(res.status).toBe(200)
+    const persistedEvidencePack = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state.evidence_pack
+    expect(persistedEvidencePack).toEqual(expect.objectContaining({
+      inputComplete: true,
+      evidenceReady: true,
+      accepted: false,
+      needsRefresh: false,
+      inputs: {
+        companyWebsite: 'https://acme.example',
+        companyName: 'Acme',
+        marketRegion: 'UK enterprise',
+        targetOffer: 'Managed proposal platform',
+        notes: 'Use only customer-provided discovery context.',
+      },
+      evidence: expect.objectContaining({
+        source: 'DISCOVERY_INPUTS',
+        inputKeys: ['companyWebsite', 'companyName', 'marketRegion', 'targetOffer', 'notes'],
+        missingInputKeys: [],
+      }),
+      scopedViews: {
+        customer_problem: expect.objectContaining({
+          source: 'DISCOVERY_EVIDENCE_PACK',
+          inputKeys: ['companyWebsite', 'companyName', 'marketRegion', 'targetOffer', 'notes'],
+        }),
+      },
+    }))
+    expect(persistedEvidencePack.scopedViews.hidden_secret).toBeUndefined()
+    expect(persistedEvidencePack.scopedViews.write_only).toBeUndefined()
+    expect(persistedEvidencePack.scopedViews.unregistered).toBeUndefined()
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'RUNTIME_STATE_MUTATED',
+      resourceType: 'RuntimeInstance',
+      resourceId: RUNTIME_INSTANCE_ID,
+      diff: expect.objectContaining({
+        runtimePath: 'framework_state.evidence_pack',
+        operation: 'WRITE',
+        previousValue: {},
+        nextValue: expect.objectContaining({
+          inputComplete: true,
+          evidenceReady: true,
+        }),
+      }),
+    }))
+    expect(res.body.data.discovery).toEqual(expect.objectContaining({
+      inputComplete: true,
+      evidenceReady: true,
+      accepted: false,
+      needsRefresh: false,
+      inputSummary: {
+        keys: ['companyWebsite', 'companyName', 'marketRegion', 'targetOffer', 'notes'],
+        count: 5,
+      },
+      scopedViewSummary: {
+        keys: ['customer_problem'],
+        count: 1,
+      },
+    }))
+  })
+
+  test.each([
+    ['missing registry path', null, 'is not registered'],
+    ['read-only registry path', makeEvidencePackRuntimePathRecord({ allowedOperations: ['READ'] }), 'does not allow WRITE'],
+    ['protected registry path', makeEvidencePackRuntimePathRecord({ isProtected: true }), 'protected from runtime writes'],
+  ])('rejects discovery input writes when the evidence pack path is %s', async (_caseName, pathRecord, messageFragment) => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {},
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(pathRecord))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/discovery-inputs`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        inputs: {
+          companyWebsite: 'https://acme.example',
+          companyName: 'Acme',
+          marketRegion: 'UK enterprise',
+          targetOffer: 'Managed proposal platform',
+        },
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.reason).toBe('RUNTIME_MUTATION_INVALID_PATH')
+    expect(res.body.error.details.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        message: expect.stringContaining(messageFragment),
+      }),
+    ]))
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('rejects stale discovery input writes before state or audit persistence', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:30:00.000Z'),
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/discovery-inputs`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        inputs: {
+          companyWebsite: 'https://acme.example',
+          companyName: 'Acme',
+          marketRegion: 'UK enterprise',
+          targetOffer: 'Managed proposal platform',
+        },
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('RUNTIME_MUTATION_STALE')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('rejects discovery input writes when the actor lacks mutation access', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    const token = await getAccessTokenForUser(makeRegularUser())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/discovery-inputs`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        inputs: {
+          companyWebsite: 'https://acme.example',
+          companyName: 'Acme',
+          marketRegion: 'UK enterprise',
+          targetOffer: 'Managed proposal platform',
+        },
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+      })
+
+    expect(res.status).toBe(403)
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('rejects undocumented discovery refresh flags', async () => {
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/discovery-inputs`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        inputs: {
+          companyWebsite: 'https://acme.example',
+          companyName: 'Acme',
+          marketRegion: 'UK enterprise',
+          targetOffer: 'Managed proposal platform',
+        },
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+        refreshEvidence: false,
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details._root).toContain('Unrecognized key')
+    expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('discovery input writes with incomplete required inputs persist input-required evidence without scoped views', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {},
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+    }))
+    RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeEvidencePackRuntimePathRecord()))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/discovery-inputs`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        inputs: {
+          companyName: 'Acme',
+        },
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+      })
+
+    expect(res.status).toBe(200)
+    const persistedEvidencePack = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state.evidence_pack
+    expect(persistedEvidencePack).toEqual(expect.objectContaining({
+      inputComplete: false,
+      evidenceReady: false,
+      accepted: false,
+      scopedViews: {},
+      state: expect.objectContaining({
+        status: 'INPUT_REQUIRED',
+      }),
+      evidence: expect.objectContaining({
+        missingInputKeys: ['companyWebsite', 'marketRegion', 'targetOffer'],
+      }),
+    }))
+    expect(res.body.data.discovery).toEqual(expect.objectContaining({
+      inputComplete: false,
+      evidenceReady: false,
+      scopedViewSummary: {
+        keys: [],
+        count: 0,
+      },
+    }))
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'RUNTIME_STATE_MUTATED',
+    }))
+  })
+
+  test('rolls back discovery input writes when audit persistence fails', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: {},
+        sections: {},
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+      .mockResolvedValueOnce(makeRuntimeInstanceDocument({
+        ...runtimeInstanceDoc,
+        framework_state: {
+          ...runtimeInstanceDoc.framework_state,
+          evidence_pack: {
+            inputComplete: true,
+            evidenceReady: true,
+          },
+        },
+        updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+      }))
+      .mockResolvedValueOnce(makeRuntimeInstanceDocument({
+        ...runtimeInstanceDoc,
+        updatedAt: new Date('2026-05-19T08:02:00.000Z'),
+      }))
+    RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeEvidencePackRuntimePathRecord()))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
+    AuditLog.createLog = jest.fn(async () => {
+      throw new Error('audit unavailable')
+    })
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/discovery-inputs`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        inputs: {
+          companyWebsite: 'https://acme.example',
+          companyName: 'Acme',
+          marketRegion: 'UK enterprise',
+          targetOffer: 'Managed proposal platform',
+        },
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+      })
+
+    expect(res.status).toBe(500)
+    expect(res.body.error.code).toBe('RUNTIME_STATE_MUTATION_AUDIT_FAILED')
+    expect(res.body.error.details.reason).toBe('RUNTIME_MUTATION_AUDIT_PERSISTENCE_FAILED')
+    expect(RuntimeInstance.findOneAndUpdate).toHaveBeenCalledTimes(2)
+    expect(RuntimeInstance.findOneAndUpdate.mock.calls[1]).toEqual([
+      {
+        _id: RUNTIME_INSTANCE_ID,
+        updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+      },
+      {
+        $set: {
+          framework_state: runtimeInstanceDoc.framework_state,
+          updatedBy: CUSTOMER_ADMIN_ID,
+        },
+      },
+      {
+        new: true,
+        runValidators: true,
+      },
+    ])
   })
 
   test('PATCH /api/v1/runtime-instances/:id/data updates section input without discarding generated lineage', async () => {
@@ -4282,6 +4703,7 @@ describe('Runtime Instance API', () => {
         keys: [],
         count: 0,
       },
+      inputValues: {},
     })
     expect(res.body.data.actions).toEqual([
       expect.objectContaining({
@@ -4861,6 +5283,7 @@ describe('Runtime Instance API', () => {
         requiredPermissions: ['VMF_UPDATE'],
       }),
     ])
+    expect(res.body.data.discovery.inputValues).toBeUndefined()
     expect(res.body.data.actions).toEqual(expect.arrayContaining([
       expect.objectContaining({
         actionKey: 'SUBMIT_FOR_REVIEW',

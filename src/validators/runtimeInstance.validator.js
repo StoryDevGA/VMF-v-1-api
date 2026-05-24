@@ -97,6 +97,19 @@ const mutateRuntimeStateSchema = z.object({
   saveAndNext: z.boolean().optional(),
 }).strict()
 
+const discoveryInputsSchema = z.object({
+  companyWebsite: z.string().trim().max(500, 'companyWebsite must be 500 characters or fewer').optional().default(''),
+  companyName: z.string().trim().max(255, 'companyName must be 255 characters or fewer').optional().default(''),
+  marketRegion: z.string().trim().max(255, 'marketRegion must be 255 characters or fewer').optional().default(''),
+  targetOffer: z.string().trim().max(500, 'targetOffer must be 500 characters or fewer').optional().default(''),
+  notes: z.string().trim().max(4000, 'notes must be 4000 characters or fewer').optional().default(''),
+}).strict()
+
+const updateDiscoveryInputsSchema = z.object({
+  inputs: discoveryInputsSchema,
+  expectedUpdatedAt: expectedUpdatedAtSchema,
+}).strict()
+
 const executeRuntimeActionSchema = z.object({
   expectedUpdatedAt: expectedUpdatedAtSchema,
   runtimePath: z
@@ -165,6 +178,11 @@ export const validateCreateRuntimeInstance = createBodyValidator(createRuntimeIn
 })
 
 export const validateMutateRuntimeState = createBodyValidator(mutateRuntimeStateSchema, {
+  message: 'Request validation failed.',
+  rootIssueKey: '_root',
+})
+
+export const validateUpdateDiscoveryInputs = createBodyValidator(updateDiscoveryInputsSchema, {
   message: 'Request validation failed.',
   rootIssueKey: '_root',
 })

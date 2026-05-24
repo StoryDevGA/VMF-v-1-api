@@ -272,7 +272,7 @@ const normalizeDiscoveryStateStatus = ({
   return 'EVIDENCE_NOT_READY'
 }
 
-export const buildDiscoveryProjection = (frameworkState = {}) => {
+export const buildDiscoveryProjection = (frameworkState = {}, { includeInputValues = false } = {}) => {
   const evidencePack = getDiscoveryEvidencePack(frameworkState)
   if (!evidencePack || typeof evidencePack !== 'object' || Array.isArray(evidencePack)) {
     return {
@@ -284,6 +284,7 @@ export const buildDiscoveryProjection = (frameworkState = {}) => {
       accepted: false,
       needsRefresh: false,
       scopedViews: {},
+      ...(includeInputValues ? { inputValues: {} } : {}),
     }
   }
 
@@ -330,6 +331,7 @@ export const buildDiscoveryProjection = (frameworkState = {}) => {
     inputSummary,
     evidenceSummary,
     scopedViewSummary,
+    ...(includeInputValues ? { inputValues: cloneProjectionValue(evidencePack.inputs || {}) } : {}),
     ...(evidencePack.acceptedAt ? { acceptedAt: evidencePack.acceptedAt } : {}),
     ...(evidencePack.acceptedBy ? { acceptedBy: evidencePack.acceptedBy } : {}),
     ...(evidencePack.refreshedAt ? { refreshedAt: evidencePack.refreshedAt } : {}),
@@ -1403,7 +1405,9 @@ export const getRuntimeRenderer = async ({
   const runtimeContext = buildRuntimeContext(runtimeInstance)
   const mutationAccess = await resolveSectionMutationAccess({ runtimeInstance, scopes })
   const frameworkState = runtimeInstance.framework_state || {}
-  const discovery = buildDiscoveryProjection(frameworkState)
+  const discovery = buildDiscoveryProjection(frameworkState, {
+    includeInputValues: mutationAccess?.allowed === true,
+  })
   const sections = buildRendererSections({
     discovery,
     frameworkPackage,

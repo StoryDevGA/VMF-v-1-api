@@ -36,7 +36,10 @@ import {
 } from './runtimeActionPolicyService.js'
 
 const SECTION_WRITE_SCOPE = 'framework_state.sections.*'
+const DISCOVERY_EVIDENCE_PACK_PATH = 'framework_state.evidence_pack'
 const FORBIDDEN_PATH_SEGMENTS = new Set(['__proto__', 'prototype', 'constructor'])
+const DISCOVERY_INPUT_KEYS = ['companyWebsite', 'companyName', 'marketRegion', 'targetOffer', 'notes']
+const REQUIRED_DISCOVERY_INPUT_KEYS = ['companyWebsite', 'companyName', 'marketRegion', 'targetOffer']
 
 const cloneValue = (value) => {
   if (value === undefined) return undefined
@@ -150,6 +153,68 @@ const setValueAtPath = ({ frameworkState, runtimePath, value }) => {
 
 const invalidateSectionMutationEvidence = ({ nextFrameworkState, runtimePath }) =>
   invalidateRuntimeSectionEvidence({ frameworkState: nextFrameworkState, runtimePath })
+
+const normalizeDiscoveryInputs = (inputs = {}) => DISCOVERY_INPUT_KEYS.reduce((normalized, key) => {
+  const value = String(inputs?.[key] ?? '').trim()
+  if (value) normalized[key] = value
+  return normalized
+}, {})
+
+const buildDiscoveryEvidencePack = async ({ inputs, runtimeInstance }) => {
+  const normalizedInputs = normalizeDiscoveryInputs(inputs)
+  const inputKeys = Object.keys(normalizedInputs)
+  const missingInputKeys = REQUIRED_DISCOVERY_INPUT_KEYS.filter((key) => !normalizedInputs[key])
+  const inputComplete = missingInputKeys.length === 0
+  const evidenceReady = inputComplete
+  const refreshedAt = new Date().toISOString()
+  const frameworkPackage = await resolvePackageForAdvance(runtimeInstance?.packageId)
+  const [uiContract, runtimePathRecords] = frameworkPackage
+    ? await Promise.all([
+        resolveUIContractForAdvance({ frameworkPackage }),
+        resolveRuntimePathRecordsForAdvance({ frameworkPackage }),
+      ])
+    : [null, new Map()]
+  const projectableSections = frameworkPackage
+    ? buildProjectableSectionsForAdvance({ frameworkPackage, runtimePathRecords, uiContract })
+    : []
+  const scopedViews = evidenceReady
+    ? projectableSections.reduce((views, section) => {
+        const sectionKey = normalizeSectionKey(section?.sectionKey)
+        if (!sectionKey) return views
+        views[sectionKey] = {
+          source: 'DISCOVERY_EVIDENCE_PACK',
+          inputKeys,
+          evidenceKeys: ['source', 'inputKeys', 'requiredInputKeys', 'missingInputKeys'],
+          refreshedAt,
+        }
+        return views
+      }, {})
+    : {}
+
+  return {
+    inputs: normalizedInputs,
+    inputComplete,
+    evidenceReady,
+    accepted: false,
+    needsRefresh: false,
+    refreshedAt,
+    state: {
+      status: evidenceReady ? 'EVIDENCE_READY' : 'INPUT_REQUIRED',
+      inputComplete,
+      evidenceReady,
+      accepted: false,
+      needsRefresh: false,
+    },
+    evidence: {
+      source: 'DISCOVERY_INPUTS',
+      inputKeys,
+      requiredInputKeys: REQUIRED_DISCOVERY_INPUT_KEYS,
+      missingInputKeys,
+      builtAt: refreshedAt,
+    },
+    scopedViews,
+  }
+}
 
 const assertRuntimeEditable = (runtimeInstance) => {
   const runtimeStatus = normalizeToken(runtimeInstance?.status)
@@ -355,12 +420,17 @@ const resolveRuntimePathRecord = async (runtimePath) => {
   return typeof query.lean === 'function' ? query.lean() : query
 }
 
-const assertRuntimePathWritable = async ({ frameworkKey, runtimePath, value }) => {
+const assertRuntimePathWritable = async ({
+  frameworkKey,
+  runtimePath,
+  value,
+  allowedWriteScopes = [SECTION_WRITE_SCOPE],
+}) => {
   const issues = await validateRuntimeMutation({
     runtimePath,
     operation: RUNTIME_PATH_REGISTRY_OPERATIONS.WRITE,
     frameworkKey,
-    allowedWriteScopes: [SECTION_WRITE_SCOPE],
+    allowedWriteScopes,
   })
 
   if (issues.length > 0) {
@@ -937,8 +1007,101 @@ export const mutateRuntimeState = async ({
   return response
 }
 
+export const updateRuntimeDiscoveryInputs = async ({
+  actorUserId,
+  auditRequest,
+  scopes,
+  runtimeInstanceId,
+  payload,
+} = {}) => {
+  const expectedUpdatedAt = payload?.expectedUpdatedAt
+  const runtimeInstance = await resolveRuntimeInstanceForMutation({
+    actorUserId,
+    runtimeInstanceId,
+    scopes,
+  })
+
+  assertRuntimeEditable(runtimeInstance)
+  assertExpectedUpdatedAt({ runtimeInstance, expectedUpdatedAt })
+
+  const previousFrameworkState = cloneValue(runtimeInstance.framework_state || {})
+  const previousUpdatedBy = runtimeInstance.updatedBy
+  const previousEvidencePack = cloneValue(previousFrameworkState.evidence_pack || {})
+  const updatedAtBefore = runtimeInstance.updatedAt instanceof Date
+    ? runtimeInstance.updatedAt.toISOString()
+    : runtimeInstance.updatedAt
+  const nextEvidencePack = await buildDiscoveryEvidencePack({
+    inputs: payload?.inputs || {},
+    runtimeInstance,
+  })
+  await assertRuntimePathWritable({
+    frameworkKey: runtimeInstance.frameworkKey,
+    runtimePath: DISCOVERY_EVIDENCE_PACK_PATH,
+    value: nextEvidencePack,
+    allowedWriteScopes: [DISCOVERY_EVIDENCE_PACK_PATH],
+  })
+  const nextFrameworkState = {
+    ...previousFrameworkState,
+    evidence_pack: nextEvidencePack,
+  }
+
+  const updatedRuntimeInstance = await persistMutationWithAudit({
+    actorUserId,
+    auditRequest,
+    runtimeInstance,
+    nextFrameworkState,
+    previousFrameworkState,
+    previousUpdatedBy,
+    runtimePath: DISCOVERY_EVIDENCE_PACK_PATH,
+    previousValue: previousEvidencePack,
+    nextValue: cloneValue(nextEvidencePack),
+    expectedUpdatedAt,
+    updatedAtBefore,
+  })
+
+  return {
+    runtimeInstance: {
+      id: toIdString(updatedRuntimeInstance._id),
+      runtimeInstanceKey: updatedRuntimeInstance.runtimeInstanceKey,
+      runtimeType: updatedRuntimeInstance.runtimeType,
+      status: updatedRuntimeInstance.status,
+      executionStatus: updatedRuntimeInstance.executionStatus,
+      updatedAt: updatedRuntimeInstance.updatedAt instanceof Date
+        ? updatedRuntimeInstance.updatedAt.toISOString()
+        : updatedRuntimeInstance.updatedAt,
+    },
+    discovery: {
+      state: nextEvidencePack.state,
+      inputComplete: nextEvidencePack.inputComplete,
+      evidenceReady: nextEvidencePack.evidenceReady,
+      accepted: nextEvidencePack.accepted,
+      needsRefresh: nextEvidencePack.needsRefresh,
+      refreshedAt: nextEvidencePack.refreshedAt,
+      inputSummary: {
+        keys: Object.keys(nextEvidencePack.inputs || {}),
+        count: Object.keys(nextEvidencePack.inputs || {}).length,
+      },
+      evidenceSummary: {
+        keys: Object.keys(nextEvidencePack.evidence || {}),
+        count: Object.keys(nextEvidencePack.evidence || {}).length,
+      },
+      scopedViewSummary: {
+        keys: Object.keys(nextEvidencePack.scopedViews || {}),
+        count: Object.keys(nextEvidencePack.scopedViews || {}).length,
+      },
+    },
+    mutation: {
+      runtimePath: DISCOVERY_EVIDENCE_PACK_PATH,
+      operation: RUNTIME_PATH_REGISTRY_OPERATIONS.WRITE,
+      previousValue: previousEvidencePack,
+      value: cloneValue(nextEvidencePack),
+    },
+  }
+}
+
 const runtimeStateMutationService = {
   mutateRuntimeState,
+  updateRuntimeDiscoveryInputs,
 }
 
 export default runtimeStateMutationService
