@@ -6,6 +6,7 @@ import {
   RuntimeDeployment,
   RuntimeInstance,
   RuntimePathRegistry,
+  AuditLog,
   UIContract,
   WorkflowPolicy,
 } from '../models/index.js'
@@ -117,6 +118,13 @@ const RENDERABLE_ACTIVATION_STATUSES = new Set([
   RUNTIME_ACTIVATION_STATUSES.SUPERSEDED,
 ])
 export const RUNTIME_RENDERER_CONTRACT_VERSION = 'runtime-renderer.v1.read-projection'
+const RUNTIME_ACTIVITY_LIMIT = 10
+const RUNTIME_ACTIVITY_RESOURCE_TYPE = 'RuntimeInstance'
+const RUNTIME_ACTIVITY_SUMMARY_BY_ACTION = Object.freeze({
+  RUNTIME_INSTANCE_CREATED: 'Runtime instance created',
+  RUNTIME_STATE_MUTATED: 'Runtime state updated',
+  RUNTIME_ACTION_EXECUTED: 'Runtime action executed',
+})
 
 const toPlainObject = (value) => {
   if (!value) return null
@@ -1339,6 +1347,46 @@ const buildRuntimeDataProjection = ({ includeDebugProjection, sections }) => ({
     : [],
 })
 
+const normalizeActivityText = (value) => String(value || '').trim()
+
+const buildRuntimeActivityEvent = (entry = {}) => {
+  const eventId = toIdString(entry.id || entry._id)
+  const occurredAtDate = entry.ts ? new Date(entry.ts) : null
+  const occurredAt = occurredAtDate && !Number.isNaN(occurredAtDate.getTime())
+    ? occurredAtDate.toISOString()
+    : null
+  const action = normalizeToken(entry.action)
+  const summary = RUNTIME_ACTIVITY_SUMMARY_BY_ACTION[action]
+    || normalizeActivityText(entry.display?.title)
+    || normalizeActivityText(entry.summary)
+    || normalizeActivityText(entry.action)
+
+  return {
+    ...(eventId ? { eventId } : {}),
+    ...(entry.action ? { action: entry.action } : {}),
+    ...(summary ? { summary } : {}),
+    ...(occurredAt ? { occurredAt } : {}),
+    ...(entry.display?.actorLabel ? { actorLabel: normalizeActivityText(entry.display.actorLabel) } : {}),
+  }
+}
+
+const resolveRuntimeActivity = async (runtimeInstance = {}) => {
+  const runtimeInstanceId = toIdString(runtimeInstance.id || runtimeInstance._id)
+  if (!runtimeInstanceId) return []
+
+  const activityRows = await AuditLog.find({
+    resourceType: RUNTIME_ACTIVITY_RESOURCE_TYPE,
+    resourceId: runtimeInstanceId,
+  })
+    .sort({ ts: -1 })
+    .limit(RUNTIME_ACTIVITY_LIMIT)
+    .lean()
+
+  return (Array.isArray(activityRows) ? activityRows : [])
+    .map(buildRuntimeActivityEvent)
+    .filter((event) => event.summary)
+}
+
 const buildValidationProjection = ({ frameworkState, sections }) => ({
   state: deriveValidationState(frameworkState),
   messages: (Array.isArray(sections) ? sections : [])
@@ -1432,6 +1480,7 @@ export const getRuntimeRenderer = async ({
   })
   const workspaceId = runtimeInstance.workspaceId || runtimeInstance.id
   const includeDebugProjection = isRuntimeDebugProjectionAllowed(scopes)
+  const activity = await resolveRuntimeActivity(runtimeInstance)
 
   return {
     rendererContractVersion: RUNTIME_RENDERER_CONTRACT_VERSION,
@@ -1468,7 +1517,7 @@ export const getRuntimeRenderer = async ({
     publish: buildPublishProjection(frameworkState),
     lock: buildLockProjection(runtimeInstance, frameworkState),
     signals: [],
-    activity: [],
+    activity,
     runtimeData: buildRuntimeDataProjection({ includeDebugProjection, sections }),
     diagnostics: {
       renderTraceId: `render-${randomUUID()}`,

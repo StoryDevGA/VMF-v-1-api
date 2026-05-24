@@ -488,6 +488,12 @@ const buildRuntimeInstanceFindChain = (rows) => ({
   lean: jest.fn().mockResolvedValue(rows),
 })
 
+const buildAuditLogFindChain = (rows) => ({
+  sort: jest.fn().mockReturnThis(),
+  limit: jest.fn().mockReturnThis(),
+  lean: jest.fn().mockResolvedValue(rows),
+})
+
 const buildDefaultRoleRows = () => ([
   {
     key: 'SUPER_ADMIN',
@@ -621,6 +627,7 @@ beforeEach(() => {
   RuntimeInstance.countDocuments = jest.fn().mockResolvedValue(1)
   RuntimeInstance.distinct = jest.fn().mockResolvedValue([1])
   RuntimeInstance.deleteOne = jest.fn().mockResolvedValue({ deletedCount: 1 })
+  AuditLog.find = jest.fn().mockReturnValue(buildAuditLogFindChain([]))
   AuditLog.createLog = jest.fn(async () => ({}))
 })
 
@@ -5439,6 +5446,78 @@ describe('Runtime Instance API', () => {
     expect(res.body.data.diagnostics.runtimePathVisibility).toBe('HIDDEN')
     expect(res.body.data.diagnostics.configWarnings).toEqual([])
     expect(res.body.meta.renderTraceId).toMatch(/^render-/)
+  })
+
+  test('projects runtime activity from persisted audit rows without exposing raw audit payloads', async () => {
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
+    const auditFindChain = buildAuditLogFindChain([
+      {
+        _id: '64f000000000000000000001',
+        ts: '2026-05-19T08:04:00.000Z',
+        action: 'RUNTIME_STATE_MUTATED',
+        resourceType: 'RuntimeInstance',
+        resourceId: RUNTIME_INSTANCE_ID,
+        summary: 'Customer Problem saved.',
+        display: {
+          actorLabel: 'Jill Faithful',
+        },
+        scope: {
+          customerId: CUSTOMER_ID,
+          runtimeInstanceId: RUNTIME_INSTANCE_ID,
+        },
+        diff: {
+          after: {
+            'framework_state.sections.customer_problem.input': 'Proposal creation is slow.',
+          },
+        },
+      },
+      {
+        _id: '64f000000000000000000002',
+        ts: '2026-05-19T08:03:00.000Z',
+        action: 'RUNTIME_ACTION_EXECUTED',
+        resourceType: 'RuntimeInstance',
+        resourceId: RUNTIME_INSTANCE_ID,
+        display: {
+          title: 'Validation ran',
+        },
+      },
+    ])
+    AuditLog.find = jest.fn().mockReturnValue(auditFindChain)
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(AuditLog.find).toHaveBeenCalledWith({
+      resourceType: 'RuntimeInstance',
+      resourceId: RUNTIME_INSTANCE_ID,
+    })
+    expect(auditFindChain.sort).toHaveBeenCalledWith({ ts: -1 })
+    expect(auditFindChain.limit).toHaveBeenCalledWith(10)
+    expect(res.body.data.signals).toEqual([])
+    expect(res.body.data.activity).toEqual([
+      {
+        eventId: '64f000000000000000000001',
+        action: 'RUNTIME_STATE_MUTATED',
+        summary: 'Runtime state updated',
+        occurredAt: '2026-05-19T08:04:00.000Z',
+        actorLabel: 'Jill Faithful',
+      },
+      {
+        eventId: '64f000000000000000000002',
+        action: 'RUNTIME_ACTION_EXECUTED',
+        summary: 'Runtime action executed',
+        occurredAt: '2026-05-19T08:03:00.000Z',
+      },
+    ])
+    expect(res.body.data.activity[0].diff).toBeUndefined()
+    expect(res.body.data.activity[0].scope).toBeUndefined()
+    expect(res.body.data.activity[0].resourceId).toBeUndefined()
   })
 
   test('projects accepted section truth from framework_state without deriving it from generated content', async () => {
