@@ -110,6 +110,10 @@ const updateDiscoveryInputsSchema = z.object({
   expectedUpdatedAt: expectedUpdatedAtSchema,
 }).strict()
 
+const acceptRuntimeDiscoverySchema = z.object({
+  expectedUpdatedAt: expectedUpdatedAtSchema,
+}).strict()
+
 const executeRuntimeActionSchema = z.object({
   expectedUpdatedAt: expectedUpdatedAtSchema,
   runtimePath: z
@@ -183,6 +187,11 @@ export const validateMutateRuntimeState = createBodyValidator(mutateRuntimeState
 })
 
 export const validateUpdateDiscoveryInputs = createBodyValidator(updateDiscoveryInputsSchema, {
+  message: 'Request validation failed.',
+  rootIssueKey: '_root',
+})
+
+export const validateAcceptRuntimeDiscovery = createBodyValidator(acceptRuntimeDiscoverySchema, {
   message: 'Request validation failed.',
   rootIssueKey: '_root',
 })

@@ -1,6 +1,6 @@
 import { describe, expect, test } from '@jest/globals'
 import { runtimePathRegistrySeeds } from '../seeds/runtimePathRegistry.js'
-import { INITIAL_RUNTIME_PATH_REGISTRY } from '../../../VMF-v-1-client/src/pages/SuperAdminRuntimePathRegistry/superAdminRuntimePathRegistry.constants.js'
+import { INITIAL_RUNTIME_PATH_REGISTRY } from '../../../VMF-v-1-client/src/mocks/runtimePathRegistry.fixtures.js'
 
 const normalizeEntry = (entry) => ({
   pathKey: entry.pathKey,
@@ -29,5 +29,19 @@ describe('Runtime Path Registry catalog parity', () => {
       .sort((left, right) => left.pathKey.localeCompare(right.pathKey))
 
     expect(clientCatalog).toEqual(backendCatalog)
+  })
+
+  test('active seed catalog includes the governed Discovery evidence pack write path', () => {
+    expect(runtimePathRegistrySeeds.find((entry) => entry.pathKey === 'framework_state.evidence_pack'))
+      .toMatchObject({
+        frameworkKeys: ['VMF'],
+        scope: 'FRAMEWORK_STATE',
+        allowedOperations: ['READ', 'WRITE'],
+        dataType: 'OBJECT',
+        category: 'STATE',
+        sourceType: 'RUNTIME_STATE',
+        isProtected: false,
+        isSystem: true,
+      })
   })
 })

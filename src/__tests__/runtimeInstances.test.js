@@ -313,6 +313,41 @@ const makeEvidencePackRuntimePathRecord = (overrides = {}) => makeRuntimePathRec
   ...overrides,
 })
 
+const makeReadyDiscoveryEvidencePack = (overrides = {}) => ({
+  inputComplete: true,
+  evidenceReady: true,
+  accepted: false,
+  needsRefresh: false,
+  refreshedAt: '2026-05-19T08:00:30.000Z',
+  inputs: {
+    companyWebsite: 'https://acme.example',
+    companyName: 'Acme',
+    marketRegion: 'UK enterprise',
+    targetOffer: 'Managed proposal platform',
+  },
+  evidence: {
+    source: 'DISCOVERY_INPUTS',
+    inputKeys: ['companyWebsite', 'companyName', 'marketRegion', 'targetOffer'],
+    requiredInputKeys: ['companyWebsite', 'companyName', 'marketRegion', 'targetOffer'],
+    missingInputKeys: [],
+    builtAt: '2026-05-19T08:00:30.000Z',
+  },
+  scopedViews: {
+    customer_problem: {
+      source: 'DISCOVERY_EVIDENCE_PACK',
+      inputKeys: ['companyWebsite', 'companyName', 'marketRegion', 'targetOffer'],
+    },
+  },
+  state: {
+    status: 'EVIDENCE_READY',
+    inputComplete: true,
+    evidenceReady: true,
+    accepted: false,
+    needsRefresh: false,
+  },
+  ...overrides,
+})
+
 const actionLabels = {
   RUN_VALIDATION: 'Run Validation',
   MARK_READY: 'Mark Ready',
@@ -2118,6 +2153,291 @@ describe('Runtime Instance API', () => {
       {
         _id: RUNTIME_INSTANCE_ID,
         updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+      },
+      {
+        $set: {
+          framework_state: runtimeInstanceDoc.framework_state,
+          updatedBy: CUSTOMER_ADMIN_ID,
+        },
+      },
+      {
+        new: true,
+        runValidators: true,
+      },
+    ])
+  })
+
+  test('PATCH /api/v1/runtime-instances/:id/discovery-acceptance persists accepted discovery truth with audit', async () => {
+    const evidencePack = makeReadyDiscoveryEvidencePack()
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: evidencePack,
+        sections: {},
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:02:00.000Z'),
+    }))
+    RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeEvidencePackRuntimePathRecord()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/discovery-acceptance`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-05-19T08:01:00.000Z',
+      })
+
+    expect(res.status).toBe(200)
+    const persistedEvidencePack = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state.evidence_pack
+    expect(persistedEvidencePack).toEqual(expect.objectContaining({
+      inputComplete: true,
+      evidenceReady: true,
+      accepted: true,
+      needsRefresh: false,
+      acceptedAt: expect.any(String),
+      acceptedBy: CUSTOMER_ADMIN_ID,
+      state: expect.objectContaining({
+        status: 'ACCEPTED',
+        accepted: true,
+        needsRefresh: false,
+      }),
+    }))
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'RUNTIME_STATE_MUTATED',
+      resourceType: 'RuntimeInstance',
+      resourceId: RUNTIME_INSTANCE_ID,
+      diff: expect.objectContaining({
+        runtimePath: 'framework_state.evidence_pack',
+        operation: 'WRITE',
+        previousValue: evidencePack,
+        nextValue: expect.objectContaining({
+          accepted: true,
+          acceptedBy: CUSTOMER_ADMIN_ID,
+        }),
+      }),
+    }))
+    expect(res.body.data.discovery).toEqual(expect.objectContaining({
+      inputComplete: true,
+      evidenceReady: true,
+      accepted: true,
+      needsRefresh: false,
+      acceptedAt: expect.any(String),
+      acceptedBy: CUSTOMER_ADMIN_ID,
+    }))
+  })
+
+  test.each([
+    ['missing evidence pack', {}, 'Discovery evidence must be refreshed before it can be accepted.'],
+    ['incomplete evidence pack', {
+      inputComplete: false,
+      evidenceReady: false,
+      accepted: false,
+      needsRefresh: false,
+      state: { status: 'INPUT_REQUIRED', inputComplete: false, evidenceReady: false },
+    }, 'Discovery evidence is not ready for acceptance.'],
+    ['stale evidence pack', {
+      inputComplete: true,
+      evidenceReady: true,
+      accepted: false,
+      needsRefresh: true,
+      state: { status: 'NEEDS_REFRESH', inputComplete: true, evidenceReady: true, needsRefresh: true },
+    }, 'Discovery evidence must be refreshed before acceptance.'],
+    ['already accepted evidence pack', {
+      inputComplete: true,
+      evidenceReady: true,
+      accepted: true,
+      needsRefresh: false,
+      state: { status: 'ACCEPTED', inputComplete: true, evidenceReady: true, accepted: true },
+    }, 'Discovery evidence is already accepted.'],
+    ['flag-only evidence pack', {
+      inputComplete: true,
+      evidenceReady: true,
+      accepted: false,
+      needsRefresh: false,
+      state: { status: 'EVIDENCE_READY', inputComplete: true, evidenceReady: true },
+    }, 'Discovery evidence is incomplete and must be refreshed before acceptance.'],
+  ])('rejects discovery acceptance for %s', async (_caseName, evidencePack, message) => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: evidencePack,
+        sections: {},
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/discovery-acceptance`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-05-19T08:01:00.000Z',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.message).toBe(message)
+    expect(res.body.error.details.reason).toBe('RUNTIME_ACTION_NOT_AVAILABLE')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('rejects stale discovery acceptance before state or audit persistence', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:30:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: makeReadyDiscoveryEvidencePack(),
+        sections: {},
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/discovery-acceptance`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-05-19T08:01:00.000Z',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('RUNTIME_MUTATION_STALE')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('rejects discovery acceptance when the actor lacks mutation access', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: makeReadyDiscoveryEvidencePack(),
+        sections: {},
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    const token = await getAccessTokenForUser(makeRegularUser())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/discovery-acceptance`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-05-19T08:01:00.000Z',
+      })
+
+    expect(res.status).toBe(403)
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('rejects discovery acceptance when the evidence pack path is not writable', async () => {
+    const evidencePack = makeReadyDiscoveryEvidencePack()
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: evidencePack,
+        sections: {},
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeEvidencePackRuntimePathRecord({
+      allowedOperations: ['READ'],
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/discovery-acceptance`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-05-19T08:01:00.000Z',
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.reason).toBe('RUNTIME_MUTATION_INVALID_PATH')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('rolls back discovery acceptance when audit persistence fails', async () => {
+    const evidencePack = makeReadyDiscoveryEvidencePack()
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: evidencePack,
+        sections: {},
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+      .mockResolvedValueOnce(makeRuntimeInstanceDocument({
+        ...runtimeInstanceDoc,
+        framework_state: {
+          ...runtimeInstanceDoc.framework_state,
+          evidence_pack: {
+            ...evidencePack,
+            accepted: true,
+          },
+        },
+        updatedAt: new Date('2026-05-19T08:02:00.000Z'),
+      }))
+      .mockResolvedValueOnce(makeRuntimeInstanceDocument({
+        ...runtimeInstanceDoc,
+        updatedAt: new Date('2026-05-19T08:03:00.000Z'),
+      }))
+    RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeEvidencePackRuntimePathRecord()))
+    AuditLog.createLog = jest.fn(async () => {
+      throw new Error('audit unavailable')
+    })
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/discovery-acceptance`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-05-19T08:01:00.000Z',
+      })
+
+    expect(res.status).toBe(500)
+    expect(res.body.error.code).toBe('RUNTIME_STATE_MUTATION_AUDIT_FAILED')
+    expect(res.body.error.details.reason).toBe('RUNTIME_MUTATION_AUDIT_PERSISTENCE_FAILED')
+    expect(RuntimeInstance.findOneAndUpdate).toHaveBeenCalledTimes(2)
+    expect(RuntimeInstance.findOneAndUpdate.mock.calls[1]).toEqual([
+      {
+        _id: RUNTIME_INSTANCE_ID,
+        updatedAt: new Date('2026-05-19T08:02:00.000Z'),
       },
       {
         $set: {

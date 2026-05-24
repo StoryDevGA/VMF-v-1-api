@@ -2,6 +2,7 @@ import { Router } from 'express'
 import authJwt from '../middleware/authJwt.js'
 import loadScopes from '../middleware/loadScopes.js'
 import {
+  acceptRuntimeDiscovery,
   createRuntimeInstance,
   executeRuntimeAction,
   getRuntimeInstance,
@@ -11,6 +12,7 @@ import {
   updateRuntimeDiscoveryInputs,
 } from '../controllers/runtimeInstance.controller.js'
 import {
+  validateAcceptRuntimeDiscovery,
   validateCreateRuntimeInstance,
   validateExecuteRuntimeAction,
   validateListRuntimeInstances,
@@ -26,6 +28,7 @@ router.use(authJwt, loadScopes)
 
 router.get('/', validateListRuntimeInstances, listRuntimeInstances)
 router.post('/', validateCreateRuntimeInstance, createRuntimeInstance)
+router.patch('/:runtimeInstanceId/discovery-acceptance', validateRuntimeInstanceId, validateAcceptRuntimeDiscovery, acceptRuntimeDiscovery)
 router.patch('/:runtimeInstanceId/discovery-inputs', validateRuntimeInstanceId, validateUpdateDiscoveryInputs, updateRuntimeDiscoveryInputs)
 router.patch('/:runtimeInstanceId/data', validateRuntimeInstanceId, validateMutateRuntimeState, mutateRuntimeState)
 router.post(

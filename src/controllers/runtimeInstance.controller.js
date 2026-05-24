@@ -6,6 +6,7 @@ import {
 import { executeRuntimeAction as executeRuntimeActionRecord } from '../services/runtimeActionExecutionService.js'
 import { getRuntimeRenderer as getRuntimeRendererProjection } from '../services/runtimeRendererService.js'
 import {
+  acceptRuntimeDiscovery as acceptRuntimeDiscoveryRecord,
   mutateRuntimeState as mutateRuntimeStateRecord,
   updateRuntimeDiscoveryInputs as updateRuntimeDiscoveryInputsRecord,
 } from '../services/runtimeStateMutationService.js'
@@ -130,6 +131,28 @@ export const mutateRuntimeState = async (req, res, next) => {
 export const updateRuntimeDiscoveryInputs = async (req, res, next) => {
   try {
     const discovery = await updateRuntimeDiscoveryInputsRecord({
+      actorUserId: req.context?.userId || req.userId,
+      auditRequest: req,
+      scopes: req.scopes,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+      payload: req.body,
+    })
+
+    return res.status(200).json({
+      data: discovery,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const acceptRuntimeDiscovery = async (req, res, next) => {
+  try {
+    const discovery = await acceptRuntimeDiscoveryRecord({
       actorUserId: req.context?.userId || req.userId,
       auditRequest: req,
       scopes: req.scopes,

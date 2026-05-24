@@ -48,6 +48,7 @@ const cloneValue = (value) => {
 
 const normalizeRuntimePath = (value) => String(value || '').trim()
 const normalizeSectionKey = (value) => String(value || '').trim()
+const isStrictTrue = (value) => value === true
 
 const getSectionKeyFromRuntimePath = (runtimePath) => {
   const pathParts = normalizeRuntimePath(runtimePath).split('.').filter(Boolean)
@@ -68,6 +69,114 @@ const buildMutationError = ({
   message,
   reason,
   details,
+})
+
+const getEvidencePackStateFlag = (evidencePack, key) =>
+  isStrictTrue(evidencePack?.[key]) || isStrictTrue(evidencePack?.state?.[key])
+
+const getEvidencePackNeedsRefresh = (evidencePack) =>
+  isStrictTrue(evidencePack?.needsRefresh) || isStrictTrue(evidencePack?.state?.needsRefresh)
+
+const buildDiscoveryAcceptanceUnavailableError = (message) => buildMutationError({
+  status: 409,
+  code: 'CONFLICT',
+  message,
+  reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_ACTION_NOT_AVAILABLE,
+  details: { runtimePath: DISCOVERY_EVIDENCE_PACK_PATH },
+})
+
+const hasRequiredDiscoveryInputs = (inputs) =>
+  inputs
+  && typeof inputs === 'object'
+  && !Array.isArray(inputs)
+  && REQUIRED_DISCOVERY_INPUT_KEYS.every((key) => String(inputs[key] ?? '').trim())
+
+const hasDeterministicDiscoveryEvidence = (evidence, inputs) => {
+  if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) return false
+  if (evidence.source !== 'DISCOVERY_INPUTS') return false
+  if (!Array.isArray(evidence.inputKeys) || evidence.inputKeys.length === 0) return false
+  if (!Array.isArray(evidence.requiredInputKeys)) return false
+  if (!Array.isArray(evidence.missingInputKeys) || evidence.missingInputKeys.length > 0) return false
+  if (!String(evidence.builtAt ?? '').trim()) return false
+
+  const inputKeys = new Set(evidence.inputKeys.map((key) => String(key || '').trim()).filter(Boolean))
+  const requiredKeys = new Set(evidence.requiredInputKeys.map((key) => String(key || '').trim()).filter(Boolean))
+
+  return REQUIRED_DISCOVERY_INPUT_KEYS.every((key) =>
+    inputKeys.has(key)
+    && requiredKeys.has(key)
+    && String(inputs?.[key] ?? '').trim())
+}
+
+const assertDiscoveryEvidenceAcceptable = (evidencePack) => {
+  if (!evidencePack || Object.keys(evidencePack).length === 0) {
+    throw buildDiscoveryAcceptanceUnavailableError('Discovery evidence must be refreshed before it can be accepted.')
+  }
+
+  const inputComplete = getEvidencePackStateFlag(evidencePack, 'inputComplete')
+  const evidenceReady = getEvidencePackStateFlag(evidencePack, 'evidenceReady')
+  const needsRefresh = getEvidencePackNeedsRefresh(evidencePack)
+  const accepted = !needsRefresh && getEvidencePackStateFlag(evidencePack, 'accepted')
+
+  if (!inputComplete || !evidenceReady) {
+    throw buildDiscoveryAcceptanceUnavailableError('Discovery evidence is not ready for acceptance.')
+  }
+
+  if (needsRefresh) {
+    throw buildDiscoveryAcceptanceUnavailableError('Discovery evidence must be refreshed before acceptance.')
+  }
+
+  if (accepted) {
+    throw buildDiscoveryAcceptanceUnavailableError('Discovery evidence is already accepted.')
+  }
+
+  if (
+    !hasRequiredDiscoveryInputs(evidencePack.inputs)
+    || !hasDeterministicDiscoveryEvidence(evidencePack.evidence, evidencePack.inputs)
+  ) {
+    throw buildDiscoveryAcceptanceUnavailableError('Discovery evidence is incomplete and must be refreshed before acceptance.')
+  }
+}
+
+const buildDiscoveryMutationResponse = ({ runtimeInstance, evidencePack, previousEvidencePack }) => ({
+  runtimeInstance: {
+    id: toIdString(runtimeInstance._id),
+    runtimeInstanceKey: runtimeInstance.runtimeInstanceKey,
+    runtimeType: runtimeInstance.runtimeType,
+    status: runtimeInstance.status,
+    executionStatus: runtimeInstance.executionStatus,
+    updatedAt: runtimeInstance.updatedAt instanceof Date
+      ? runtimeInstance.updatedAt.toISOString()
+      : runtimeInstance.updatedAt,
+  },
+  discovery: {
+    state: evidencePack.state,
+    inputComplete: evidencePack.inputComplete,
+    evidenceReady: evidencePack.evidenceReady,
+    accepted: evidencePack.accepted,
+    needsRefresh: evidencePack.needsRefresh,
+    refreshedAt: evidencePack.refreshedAt,
+    ...(evidencePack.acceptedAt ? { acceptedAt: evidencePack.acceptedAt } : {}),
+    ...(evidencePack.acceptedBy ? { acceptedBy: evidencePack.acceptedBy } : {}),
+    inputSummary: {
+      keys: Object.keys(evidencePack.inputs || {}),
+      count: Object.keys(evidencePack.inputs || {}).length,
+    },
+    evidenceSummary: {
+      keys: Object.keys(evidencePack.evidence || {}),
+      count: Object.keys(evidencePack.evidence || {}).length,
+    },
+    scopedViewSummary: {
+      keys: Object.keys(evidencePack.scopedViews || {}),
+      count: Object.keys(evidencePack.scopedViews || {}).length,
+    },
+  },
+  mutation: {
+    runtimePath: DISCOVERY_EVIDENCE_PACK_PATH,
+    operation: RUNTIME_PATH_REGISTRY_OPERATIONS.WRITE,
+    previousValue: previousEvidencePack,
+    value: cloneValue(evidencePack),
+  },
 })
 
 const getValueAtPath = (source, pathParts) => {
@@ -1059,47 +1168,93 @@ export const updateRuntimeDiscoveryInputs = async ({
     updatedAtBefore,
   })
 
-  return {
-    runtimeInstance: {
-      id: toIdString(updatedRuntimeInstance._id),
-      runtimeInstanceKey: updatedRuntimeInstance.runtimeInstanceKey,
-      runtimeType: updatedRuntimeInstance.runtimeType,
-      status: updatedRuntimeInstance.status,
-      executionStatus: updatedRuntimeInstance.executionStatus,
-      updatedAt: updatedRuntimeInstance.updatedAt instanceof Date
-        ? updatedRuntimeInstance.updatedAt.toISOString()
-        : updatedRuntimeInstance.updatedAt,
-    },
-    discovery: {
-      state: nextEvidencePack.state,
-      inputComplete: nextEvidencePack.inputComplete,
-      evidenceReady: nextEvidencePack.evidenceReady,
-      accepted: nextEvidencePack.accepted,
-      needsRefresh: nextEvidencePack.needsRefresh,
-      refreshedAt: nextEvidencePack.refreshedAt,
-      inputSummary: {
-        keys: Object.keys(nextEvidencePack.inputs || {}),
-        count: Object.keys(nextEvidencePack.inputs || {}).length,
-      },
-      evidenceSummary: {
-        keys: Object.keys(nextEvidencePack.evidence || {}),
-        count: Object.keys(nextEvidencePack.evidence || {}).length,
-      },
-      scopedViewSummary: {
-        keys: Object.keys(nextEvidencePack.scopedViews || {}),
-        count: Object.keys(nextEvidencePack.scopedViews || {}).length,
-      },
-    },
-    mutation: {
-      runtimePath: DISCOVERY_EVIDENCE_PACK_PATH,
-      operation: RUNTIME_PATH_REGISTRY_OPERATIONS.WRITE,
-      previousValue: previousEvidencePack,
-      value: cloneValue(nextEvidencePack),
+  return buildDiscoveryMutationResponse({
+    runtimeInstance: updatedRuntimeInstance,
+    evidencePack: nextEvidencePack,
+    previousEvidencePack,
+  })
+}
+
+export const acceptRuntimeDiscovery = async ({
+  actorUserId,
+  auditRequest,
+  scopes,
+  runtimeInstanceId,
+  payload,
+} = {}) => {
+  const expectedUpdatedAt = payload?.expectedUpdatedAt
+  const runtimeInstance = await resolveRuntimeInstanceForMutation({
+    actorUserId,
+    runtimeInstanceId,
+    scopes,
+  })
+
+  assertRuntimeEditable(runtimeInstance)
+  assertExpectedUpdatedAt({ runtimeInstance, expectedUpdatedAt })
+
+  const previousFrameworkState = cloneValue(runtimeInstance.framework_state || {})
+  const previousUpdatedBy = runtimeInstance.updatedBy
+  const previousEvidencePack = cloneValue(previousFrameworkState.evidence_pack || {})
+  const updatedAtBefore = runtimeInstance.updatedAt instanceof Date
+    ? runtimeInstance.updatedAt.toISOString()
+    : runtimeInstance.updatedAt
+
+  assertDiscoveryEvidenceAcceptable(previousEvidencePack)
+
+  const acceptedAt = new Date().toISOString()
+  const nextEvidencePack = {
+    ...previousEvidencePack,
+    inputComplete: true,
+    evidenceReady: true,
+    accepted: true,
+    needsRefresh: false,
+    acceptedAt,
+    acceptedBy: toIdString(actorUserId),
+    state: {
+      ...(previousEvidencePack.state || {}),
+      status: 'ACCEPTED',
+      inputComplete: true,
+      evidenceReady: true,
+      accepted: true,
+      needsRefresh: false,
     },
   }
+
+  await assertRuntimePathWritable({
+    frameworkKey: runtimeInstance.frameworkKey,
+    runtimePath: DISCOVERY_EVIDENCE_PACK_PATH,
+    value: nextEvidencePack,
+    allowedWriteScopes: [DISCOVERY_EVIDENCE_PACK_PATH],
+  })
+
+  const nextFrameworkState = {
+    ...previousFrameworkState,
+    evidence_pack: nextEvidencePack,
+  }
+
+  const updatedRuntimeInstance = await persistMutationWithAudit({
+    actorUserId,
+    auditRequest,
+    runtimeInstance,
+    nextFrameworkState,
+    previousFrameworkState,
+    previousUpdatedBy,
+    runtimePath: DISCOVERY_EVIDENCE_PACK_PATH,
+    previousValue: previousEvidencePack,
+    nextValue: cloneValue(nextEvidencePack),
+    expectedUpdatedAt,
+    updatedAtBefore,
+  })
+
+  return buildDiscoveryMutationResponse({
+    runtimeInstance: updatedRuntimeInstance,
+    evidencePack: nextEvidencePack,
+    previousEvidencePack,
+  })
 }
 
 const runtimeStateMutationService = {
+  acceptRuntimeDiscovery,
   mutateRuntimeState,
   updateRuntimeDiscoveryInputs,
 }
