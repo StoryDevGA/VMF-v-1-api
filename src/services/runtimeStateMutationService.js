@@ -23,9 +23,12 @@ import {
   toIdString,
 } from './runtimeInstanceService.js'
 import {
+  getRuntimeSectionAccepted,
+  getRuntimeSectionGenerated,
   getRuntimeSectionInput,
   invalidateRuntimeSectionEvidence,
   normalizeRuntimeSectionObject,
+  RUNTIME_SECTION_STATES,
 } from './runtimeSectionModelService.js'
 import { validateRuntimeMutation } from './runtimeValidation/runtimeMutationValidator.js'
 import {
@@ -55,6 +58,18 @@ const getSectionKeyFromRuntimePath = (runtimePath) => {
   return pathParts[0] === 'framework_state' && pathParts[1] === 'sections'
     ? normalizeSectionKey(pathParts[2])
     : ''
+}
+
+const getRuntimeSectionStateKey = ({ runtimePath, sectionKey }) => {
+  const normalizedRuntimePath = normalizeRuntimePath(runtimePath)
+  const sectionRootPrefix = 'framework_state.sections.'
+
+  if (normalizedRuntimePath.startsWith(sectionRootPrefix)) {
+    const statePath = normalizedRuntimePath.slice(sectionRootPrefix.length).trim()
+    if (statePath && !statePath.includes('.')) return statePath
+  }
+
+  return normalizeSectionKey(sectionKey)
 }
 
 const buildMutationError = ({
@@ -567,6 +582,126 @@ const assertRuntimePathWritable = async ({
 
   return runtimePathRecord
 }
+
+const assertRuntimeSectionPathWritable = async ({
+  frameworkKey,
+  runtimePath,
+}) => {
+  const issues = await validateRuntimeMutation({
+    runtimePath,
+    operation: RUNTIME_PATH_REGISTRY_OPERATIONS.WRITE,
+    frameworkKey,
+    allowedWriteScopes: [SECTION_WRITE_SCOPE],
+  })
+
+  if (issues.length > 0) {
+    throw buildMutationError({
+      status: 422,
+      code: 'VALIDATION_FAILED',
+      message: 'Runtime section acceptance path is not writable.',
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_MUTATION_INVALID_PATH,
+      details: { runtimePath, issues },
+    })
+  }
+}
+
+const resolveSectionAcceptanceTarget = ({ frameworkPackage, payload }) => {
+  const sectionKey = normalizeSectionKey(payload?.sectionKey)
+  const runtimePath = normalizeRuntimePath(payload?.runtimePath)
+  const sections = Array.isArray(frameworkPackage?.sections) ? frameworkPackage.sections : []
+  const sectionByKey = sectionKey
+    ? sections.find((candidate) => normalizeSectionKey(candidate?.sectionKey || candidate?.key) === sectionKey)
+    : null
+  const sectionByPath = runtimePath
+    ? sections.find((candidate) => normalizeRuntimePath(candidate?.runtimePath) === runtimePath)
+    : null
+
+  if (sectionKey && runtimePath && sectionByKey !== sectionByPath) {
+    throw buildMutationError({
+      status: 422,
+      code: 'VALIDATION_FAILED',
+      message: 'Runtime section acceptance sectionKey and runtimePath must target the same package section.',
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_ACTION_TARGET_MISMATCH,
+      details: { sectionKey, runtimePath },
+    })
+  }
+
+  const section = sectionByKey || sectionByPath
+  if (!section) {
+    throw buildMutationError({
+      status: 422,
+      code: 'VALIDATION_FAILED',
+      message: 'Runtime section acceptance requires a package-bound section target.',
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_ACTION_NOT_AVAILABLE,
+      details: { sectionKey, runtimePath },
+    })
+  }
+
+  const resolvedRuntimePath = normalizeRuntimePath(section.runtimePath)
+  const resolvedSectionKey = normalizeSectionKey(section.sectionKey || section.key)
+
+  return {
+    section,
+    sectionKey: resolvedSectionKey,
+    runtimePath: resolvedRuntimePath,
+    stateSectionKey: getRuntimeSectionStateKey({
+      runtimePath: resolvedRuntimePath,
+      sectionKey: resolvedSectionKey,
+    }),
+  }
+}
+
+const buildSectionAcceptanceUnavailableError = ({ message, runtimePath, sectionKey }) => buildMutationError({
+  status: 409,
+  code: 'CONFLICT',
+  message,
+  reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_ACTION_NOT_AVAILABLE,
+  details: { runtimePath, sectionKey },
+})
+
+const normalizeComparableSectionContent = (value) => {
+  if (value === null || value === undefined) return ''
+  const candidate = value?.content ?? value
+  if (typeof candidate === 'string') return candidate.trim()
+  return JSON.stringify(cloneValue(candidate))
+}
+
+const isCurrentGeneratedAlreadyAccepted = ({ accepted, generated }) => {
+  if (!accepted || !generated) return false
+
+  const acceptedGeneratedAt = normalizeRuntimePath(accepted.sourceGeneratedAt)
+  const generatedAt = normalizeRuntimePath(generated.generatedAt)
+  const acceptedInputHash = normalizeRuntimePath(accepted.inputHash)
+  const generatedInputHash = normalizeRuntimePath(generated.inputHash)
+
+  if (acceptedGeneratedAt && generatedAt && acceptedGeneratedAt !== generatedAt) return false
+  if (acceptedInputHash && generatedInputHash && acceptedInputHash !== generatedInputHash) return false
+
+  if (acceptedGeneratedAt && generatedAt && acceptedInputHash && generatedInputHash) {
+    return true
+  }
+
+  return normalizeComparableSectionContent(accepted) === normalizeComparableSectionContent(generated)
+}
+
+const buildAcceptedSectionTruth = ({
+  actorUserId,
+  acceptedAt,
+  generated,
+  sectionKey,
+  runtimePath,
+}) => ({
+  format: generated.format || 'TEXT',
+  content: cloneValue(generated.content ?? generated),
+  summary: generated.summary || '',
+  acceptedAt,
+  acceptedBy: toIdString(actorUserId),
+  sourceActionKey: generated.actionKey || '',
+  sourceGeneratedAt: generated.generatedAt || '',
+  inputHash: generated.inputHash || '',
+  sectionKey,
+  runtimePath,
+})
 
 const resolveRuntimeInstanceForMutation = async ({ actorUserId, runtimeInstanceId, scopes }) => {
   const runtimeInstance = await RuntimeInstance.findOne({
@@ -1253,7 +1388,142 @@ export const acceptRuntimeDiscovery = async ({
   })
 }
 
+export const acceptRuntimeSection = async ({
+  actorUserId,
+  auditRequest,
+  scopes,
+  runtimeInstanceId,
+  payload,
+} = {}) => {
+  const expectedUpdatedAt = payload?.expectedUpdatedAt
+  const runtimeInstance = await resolveRuntimeInstanceForMutation({
+    actorUserId,
+    runtimeInstanceId,
+    scopes,
+  })
+
+  assertRuntimeEditable(runtimeInstance)
+  assertExpectedUpdatedAt({ runtimeInstance, expectedUpdatedAt })
+
+  const frameworkPackage = await resolvePackageForAdvance(runtimeInstance?.packageId)
+  const target = resolveSectionAcceptanceTarget({ frameworkPackage, payload })
+
+  await assertRuntimeSectionPathWritable({
+    frameworkKey: runtimeInstance.frameworkKey,
+    runtimePath: target.runtimePath,
+  })
+
+  const previousFrameworkState = cloneValue(runtimeInstance.framework_state || {})
+  const previousUpdatedBy = runtimeInstance.updatedBy
+  const updatedAtBefore = runtimeInstance.updatedAt instanceof Date
+    ? runtimeInstance.updatedAt.toISOString()
+    : runtimeInstance.updatedAt
+  const previousRawSection = previousFrameworkState.sections?.[target.stateSectionKey]
+  const sectionObject = normalizeRuntimeSectionObject({
+    value: previousRawSection,
+    sectionKey: target.sectionKey,
+    runtimePath: target.runtimePath,
+  })
+  const generated = getRuntimeSectionGenerated(sectionObject)
+  const previousAccepted = getRuntimeSectionAccepted(sectionObject)
+
+  if (!generated || !String(generated.content ?? '').trim()) {
+    throw buildSectionAcceptanceUnavailableError({
+      message: 'Runtime section cannot be accepted before generated content exists.',
+      runtimePath: target.runtimePath,
+      sectionKey: target.sectionKey,
+    })
+  }
+
+  if (isCurrentGeneratedAlreadyAccepted({ accepted: previousAccepted, generated })) {
+    throw buildSectionAcceptanceUnavailableError({
+      message: 'Runtime section generated content is already accepted.',
+      runtimePath: target.runtimePath,
+      sectionKey: target.sectionKey,
+    })
+  }
+
+  const acceptedAt = new Date().toISOString()
+  const accepted = buildAcceptedSectionTruth({
+    actorUserId,
+    acceptedAt,
+    generated,
+    sectionKey: target.sectionKey,
+    runtimePath: target.runtimePath,
+  })
+  const nextFrameworkState = cloneValue(previousFrameworkState)
+  nextFrameworkState.sections = nextFrameworkState.sections || {}
+  nextFrameworkState.sections[target.stateSectionKey] = {
+    ...sectionObject,
+    accepted,
+    review: {
+      ...(sectionObject.review || {}),
+      status: 'ACCEPTED',
+      acceptedAt,
+      acceptedBy: toIdString(actorUserId),
+    },
+    state: {
+      ...(sectionObject.state || {}),
+      status: RUNTIME_SECTION_STATES.ACCEPTED,
+      acceptedAt,
+      acceptedBy: toIdString(actorUserId),
+      acceptedSourceGeneratedAt: generated.generatedAt || '',
+      inputHash: generated.inputHash || '',
+    },
+    lineage: {
+      ...(sectionObject.lineage || {}),
+      sectionKey: target.sectionKey,
+      stateSectionKey: target.stateSectionKey,
+      runtimePath: target.runtimePath,
+      acceptedAt,
+      acceptedBy: toIdString(actorUserId),
+      sourceGeneratedAt: generated.generatedAt || '',
+      inputHash: generated.inputHash || '',
+    },
+  }
+
+  const updatedRuntimeInstance = await persistMutationWithAudit({
+    actorUserId,
+    auditRequest,
+    runtimeInstance,
+    nextFrameworkState,
+    previousFrameworkState,
+    previousUpdatedBy,
+    runtimePath: target.runtimePath,
+    previousValue: previousAccepted,
+    nextValue: cloneValue(accepted),
+    expectedUpdatedAt,
+    updatedAtBefore,
+  })
+
+  return {
+    runtimeInstance: {
+      id: toIdString(updatedRuntimeInstance._id),
+      runtimeInstanceKey: updatedRuntimeInstance.runtimeInstanceKey,
+      runtimeType: updatedRuntimeInstance.runtimeType,
+      status: updatedRuntimeInstance.status,
+      executionStatus: updatedRuntimeInstance.executionStatus,
+      updatedAt: updatedRuntimeInstance.updatedAt instanceof Date
+        ? updatedRuntimeInstance.updatedAt.toISOString()
+        : updatedRuntimeInstance.updatedAt,
+    },
+    section: {
+      sectionKey: target.sectionKey,
+      runtimePath: target.runtimePath,
+      accepted,
+      previousAccepted,
+    },
+    mutation: {
+      runtimePath: target.runtimePath,
+      operation: RUNTIME_PATH_REGISTRY_OPERATIONS.WRITE,
+      previousValue: previousAccepted,
+      value: cloneValue(accepted),
+    },
+  }
+}
+
 const runtimeStateMutationService = {
+  acceptRuntimeSection,
   acceptRuntimeDiscovery,
   mutateRuntimeState,
   updateRuntimeDiscoveryInputs,

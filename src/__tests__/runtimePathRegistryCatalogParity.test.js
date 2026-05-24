@@ -44,4 +44,26 @@ describe('Runtime Path Registry catalog parity', () => {
         isSystem: true,
       })
   })
+
+  test('active seed catalog keeps Execution Workspace section paths writable', () => {
+    const sectionPaths = [
+      'framework_state.sections.customer_problem',
+      'framework_state.sections.proposed_solution',
+      'framework_state.sections.value_metrics',
+      'framework_state.sections.proof_points',
+    ]
+
+    sectionPaths.forEach((pathKey) => {
+      expect(runtimePathRegistrySeeds.find((entry) => entry.pathKey === pathKey))
+        .toMatchObject({
+          frameworkKeys: ['VMF'],
+          scope: 'FRAMEWORK_STATE',
+          allowedOperations: ['READ', 'WRITE', 'BIND'],
+          category: 'SECTION',
+          sourceType: 'RUNTIME_STATE',
+          isProtected: false,
+          isSystem: true,
+        })
+    })
+  })
 })

@@ -114,6 +114,22 @@ const acceptRuntimeDiscoverySchema = z.object({
   expectedUpdatedAt: expectedUpdatedAtSchema,
 }).strict()
 
+const acceptRuntimeSectionSchema = z.object({
+  expectedUpdatedAt: expectedUpdatedAtSchema,
+  runtimePath: z
+    .string()
+    .trim()
+    .min(1, 'runtimePath must not be empty')
+    .max(200, 'runtimePath must be 200 characters or fewer')
+    .optional(),
+  sectionKey: z
+    .string()
+    .trim()
+    .min(1, 'sectionKey must not be empty')
+    .max(120, 'sectionKey must be 120 characters or fewer')
+    .optional(),
+}).strict()
+
 const executeRuntimeActionSchema = z.object({
   expectedUpdatedAt: expectedUpdatedAtSchema,
   runtimePath: z
@@ -195,6 +211,37 @@ export const validateAcceptRuntimeDiscovery = createBodyValidator(acceptRuntimeD
   message: 'Request validation failed.',
   rootIssueKey: '_root',
 })
+
+export const validateAcceptRuntimeSection = (req, res, next) => {
+  const result = acceptRuntimeSectionSchema.safeParse(req.body)
+
+  if (!result.success) {
+    const details = {}
+    for (const issue of result.error.issues) {
+      const key = issue.path.join('.') || '_root'
+      details[key] = issue.message
+    }
+
+    return res.status(422).json(buildValidationErrorResponse({
+      details,
+      message: 'Request validation failed.',
+      requestId: req.requestId,
+    }))
+  }
+
+  if (!result.data.runtimePath && !result.data.sectionKey) {
+    return res.status(422).json(buildValidationErrorResponse({
+      details: {
+        _root: 'Section acceptance requires runtimePath or sectionKey.',
+      },
+      message: 'Request validation failed.',
+      requestId: req.requestId,
+    }))
+  }
+
+  req.body = result.data
+  return next()
+}
 
 export const validateExecuteRuntimeAction = (req, res, next) => {
   const result = executeRuntimeActionSchema.safeParse(req.body)

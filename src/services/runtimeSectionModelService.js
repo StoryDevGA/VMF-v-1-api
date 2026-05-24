@@ -4,10 +4,11 @@ export const RUNTIME_SECTION_STATES = Object.freeze({
   DRAFT: 'DRAFT',
   GENERATED: 'GENERATED',
   REGENERATED: 'REGENERATED',
+  ACCEPTED: 'ACCEPTED',
   REVIEW_PENDING: 'REVIEW_PENDING',
 })
 
-const SECTION_MODEL_KEYS = new Set(['input', 'generated', 'review', 'state', 'lineage', 'revisions'])
+const SECTION_MODEL_KEYS = new Set(['input', 'generated', 'accepted', 'review', 'state', 'lineage', 'revisions'])
 
 export const cloneSectionValue = (value) => {
   if (value === undefined) return undefined
@@ -30,6 +31,7 @@ export const normalizeRuntimeSectionObject = ({
     return {
       input: value.input ?? null,
       generated: value.generated ?? null,
+      accepted: value.accepted ?? null,
       review: isPlainObject(value.review) ? value.review : {},
       state: {
         status: RUNTIME_SECTION_STATES.DRAFT,
@@ -47,6 +49,7 @@ export const normalizeRuntimeSectionObject = ({
   return {
     input: value ?? null,
     generated: null,
+    accepted: null,
     review: {},
     state: {
       status: RUNTIME_SECTION_STATES.DRAFT,
@@ -65,6 +68,9 @@ export const getRuntimeSectionInput = (value) =>
 
 export const getRuntimeSectionGenerated = (value) =>
   isRuntimeSectionObject(value) ? value.generated ?? null : null
+
+export const getRuntimeSectionAccepted = (value) =>
+  isRuntimeSectionObject(value) ? value.accepted ?? null : null
 
 export const getRuntimeSectionRevisions = (value) =>
   isRuntimeSectionObject(value) && Array.isArray(value.revisions) ? value.revisions : []

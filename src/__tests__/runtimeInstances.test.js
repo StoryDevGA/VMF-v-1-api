@@ -2452,6 +2452,390 @@ describe('Runtime Instance API', () => {
     ])
   })
 
+  test('PATCH /api/v1/runtime-instances/:id/section-acceptance persists accepted section truth with audit', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: {
+            input: 'Proposal creation is slow.',
+            generated: {
+              format: 'TEXT',
+              content: 'Customer Problem: Proposal creation is slow.',
+              summary: 'Generated from current runtime input.',
+              generatedAt: '2026-05-19T08:01:00.000Z',
+              actionKey: 'GENERATE_SECTION',
+              inputHash: 'hash-1',
+            },
+            accepted: null,
+            review: {
+              status: 'PENDING_REVIEW',
+            },
+            state: {
+              status: 'GENERATED',
+              revisionCount: 0,
+            },
+            lineage: {
+              sectionKey: 'customer_problem',
+              runtimePath: 'framework_state.sections.customer_problem',
+            },
+            revisions: [],
+          },
+        },
+        validation: {},
+        readiness: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:02:00.000Z'),
+    }))
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
+    RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimePathRecord()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-acceptance`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.customer_problem',
+        sectionKey: 'customer_problem',
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+      })
+
+    expect(res.status).toBe(200)
+    const persistedSection = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state.sections.customer_problem
+    expect(persistedSection.accepted).toEqual(expect.objectContaining({
+      content: 'Customer Problem: Proposal creation is slow.',
+      acceptedBy: CUSTOMER_ADMIN_ID,
+      sourceActionKey: 'GENERATE_SECTION',
+      sourceGeneratedAt: '2026-05-19T08:01:00.000Z',
+      inputHash: 'hash-1',
+      sectionKey: 'customer_problem',
+      runtimePath: 'framework_state.sections.customer_problem',
+    }))
+    expect(persistedSection.generated).toEqual(runtimeInstanceDoc.framework_state.sections.customer_problem.generated)
+    expect(persistedSection.review).toEqual(expect.objectContaining({
+      status: 'ACCEPTED',
+      acceptedBy: CUSTOMER_ADMIN_ID,
+    }))
+    expect(persistedSection.state).toEqual(expect.objectContaining({
+      status: 'ACCEPTED',
+      acceptedBy: CUSTOMER_ADMIN_ID,
+      acceptedSourceGeneratedAt: '2026-05-19T08:01:00.000Z',
+    }))
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'RUNTIME_STATE_MUTATED',
+      resourceType: 'RuntimeInstance',
+      diff: expect.objectContaining({
+        runtimePath: 'framework_state.sections.customer_problem',
+        operation: 'WRITE',
+        previousValue: null,
+        nextValue: expect.objectContaining({
+          content: 'Customer Problem: Proposal creation is slow.',
+          sourceGeneratedAt: '2026-05-19T08:01:00.000Z',
+        }),
+      }),
+    }))
+    expect(res.body.data.section).toEqual(expect.objectContaining({
+      sectionKey: 'customer_problem',
+      runtimePath: 'framework_state.sections.customer_problem',
+      accepted: expect.objectContaining({
+        content: 'Customer Problem: Proposal creation is slow.',
+      }),
+      previousAccepted: null,
+    }))
+  })
+
+  test('rejects section acceptance before generated content exists without state or audit persistence', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: {
+            input: 'Proposal creation is slow.',
+            generated: null,
+            review: {},
+            state: { status: 'DRAFT' },
+            lineage: {},
+            revisions: [],
+          },
+        },
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
+    RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimePathRecord()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-acceptance`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.customer_problem',
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('RUNTIME_ACTION_NOT_AVAILABLE')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('rejects already-current section acceptance without state or audit persistence', async () => {
+    const generated = {
+      content: 'Customer Problem: Proposal creation is slow.',
+      generatedAt: '2026-05-19T08:01:00.000Z',
+      actionKey: 'GENERATE_SECTION',
+      inputHash: 'hash-1',
+    }
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: {
+            input: 'Proposal creation is slow.',
+            generated,
+            accepted: {
+              content: generated.content,
+              sourceGeneratedAt: generated.generatedAt,
+              inputHash: generated.inputHash,
+            },
+            review: { status: 'ACCEPTED' },
+            state: { status: 'ACCEPTED' },
+            lineage: {},
+            revisions: [],
+          },
+        },
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
+    RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimePathRecord()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-acceptance`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        sectionKey: 'customer_problem',
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.message).toBe('Runtime section generated content is already accepted.')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('rejects legacy already-accepted section content without source metadata', async () => {
+    const generated = {
+      content: 'Customer Problem: Proposal creation is slow.',
+      actionKey: 'GENERATE_SECTION',
+    }
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: {
+            input: 'Proposal creation is slow.',
+            generated,
+            accepted: {
+              content: generated.content,
+              acceptedAt: '2026-05-19T08:02:00.000Z',
+              acceptedBy: CUSTOMER_ADMIN_ID,
+            },
+            review: { status: 'ACCEPTED' },
+            state: { status: 'ACCEPTED' },
+            lineage: {},
+            revisions: [],
+          },
+        },
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
+    RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimePathRecord()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-acceptance`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        sectionKey: 'customer_problem',
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.message).toBe('Runtime section generated content is already accepted.')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('rejects stale section acceptance and target mismatches before persistence', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: {
+            input: 'Proposal creation is slow.',
+            generated: {
+              content: 'Customer Problem: Proposal creation is slow.',
+              generatedAt: '2026-05-19T08:01:00.000Z',
+              inputHash: 'hash-1',
+            },
+          },
+        },
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      sections: [
+        {
+          sectionKey: 'customer_problem',
+          runtimePath: 'framework_state.sections.customer_problem',
+          required: true,
+        },
+        {
+          sectionKey: 'value_drivers',
+          runtimePath: 'framework_state.sections.value_drivers',
+          required: true,
+        },
+      ],
+    }))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const staleRes = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-acceptance`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        sectionKey: 'customer_problem',
+        expectedUpdatedAt: '2026-05-19T07:59:00.000Z',
+      })
+
+    expect(staleRes.status).toBe(409)
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+
+    const mismatchRes = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-acceptance`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        sectionKey: 'customer_problem',
+        runtimePath: 'framework_state.sections.value_drivers',
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+      })
+
+    expect(mismatchRes.status).toBe(422)
+    expect(mismatchRes.body.error.details.reason).toBe('RUNTIME_ACTION_TARGET_MISMATCH')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('rolls back section acceptance when audit persistence fails', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: {
+            input: 'Proposal creation is slow.',
+            generated: {
+              format: 'TEXT',
+              content: 'Customer Problem: Proposal creation is slow.',
+              generatedAt: '2026-05-19T08:01:00.000Z',
+              actionKey: 'GENERATE_SECTION',
+              inputHash: 'hash-1',
+            },
+            accepted: null,
+            review: { status: 'PENDING_REVIEW' },
+            state: { status: 'GENERATED', revisionCount: 0 },
+            lineage: {
+              sectionKey: 'customer_problem',
+              runtimePath: 'framework_state.sections.customer_problem',
+            },
+            revisions: [],
+          },
+        },
+        validation: {},
+        readiness: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+      .mockResolvedValueOnce(makeRuntimeInstanceDocument({
+        ...runtimeInstanceDoc,
+        framework_state: {
+          ...runtimeInstanceDoc.framework_state,
+          sections: {
+            customer_problem: {
+              ...runtimeInstanceDoc.framework_state.sections.customer_problem,
+              accepted: {
+                content: 'Customer Problem: Proposal creation is slow.',
+              },
+            },
+          },
+        },
+        updatedAt: new Date('2026-05-19T08:02:00.000Z'),
+      }))
+      .mockResolvedValueOnce(makeRuntimeInstanceDocument({
+        ...runtimeInstanceDoc,
+        updatedAt: new Date('2026-05-19T08:03:00.000Z'),
+      }))
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
+    RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimePathRecord()))
+    AuditLog.createLog = jest.fn(async () => {
+      throw new Error('audit unavailable')
+    })
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-acceptance`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.customer_problem',
+        sectionKey: 'customer_problem',
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+      })
+
+    expect(res.status).toBe(500)
+    expect(res.body.error.code).toBe('RUNTIME_STATE_MUTATION_AUDIT_FAILED')
+    expect(res.body.error.details.reason).toBe('RUNTIME_MUTATION_AUDIT_PERSISTENCE_FAILED')
+    expect(RuntimeInstance.findOneAndUpdate).toHaveBeenCalledTimes(2)
+    expect(RuntimeInstance.findOneAndUpdate.mock.calls[1]).toEqual([
+      {
+        _id: RUNTIME_INSTANCE_ID,
+        updatedAt: new Date('2026-05-19T08:02:00.000Z'),
+      },
+      {
+        $set: {
+          framework_state: runtimeInstanceDoc.framework_state,
+          updatedBy: CUSTOMER_ADMIN_ID,
+        },
+      },
+      {
+        new: true,
+        runValidators: true,
+      },
+    ])
+  })
+
   test('PATCH /api/v1/runtime-instances/:id/data updates section input without discarding generated lineage', async () => {
     const runtimeInstanceDoc = makeRuntimeInstanceDocument({
       updatedAt: new Date('2026-05-19T08:00:00.000Z'),
@@ -5055,6 +5439,58 @@ describe('Runtime Instance API', () => {
     expect(res.body.data.diagnostics.runtimePathVisibility).toBe('HIDDEN')
     expect(res.body.data.diagnostics.configWarnings).toEqual([])
     expect(res.body.meta.renderTraceId).toMatch(/^render-/)
+  })
+
+  test('projects accepted section truth from framework_state without deriving it from generated content', async () => {
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: {
+            input: 'Proposal creation is slow.',
+            generated: {
+              content: 'Generated but not final.',
+              generatedAt: '2026-05-19T08:01:00.000Z',
+              inputHash: 'hash-1',
+            },
+            accepted: {
+              content: 'Accepted customer problem truth.',
+              acceptedAt: '2026-05-19T08:02:00.000Z',
+              acceptedBy: CUSTOMER_ADMIN_ID,
+              sourceGeneratedAt: '2026-05-19T08:01:00.000Z',
+              inputHash: 'hash-1',
+            },
+            review: {
+              status: 'ACCEPTED',
+            },
+            state: {
+              status: 'ACCEPTED',
+            },
+            lineage: {},
+            revisions: [],
+          },
+        },
+      },
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.sections[0].generated).toEqual(expect.objectContaining({
+      content: 'Generated but not final.',
+    }))
+    expect(res.body.data.sections[0].accepted).toEqual(expect.objectContaining({
+      content: 'Accepted customer problem truth.',
+      acceptedBy: CUSTOMER_ADMIN_ID,
+      sourceGeneratedAt: '2026-05-19T08:01:00.000Z',
+    }))
   })
 
   test('projects real discovery evidence pack state without fabricating evidence content', async () => {

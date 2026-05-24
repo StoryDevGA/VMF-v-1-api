@@ -39,6 +39,7 @@ import {
 import { assertRuntimePermission, getRuntimeInstance } from './runtimeInstanceService.js'
 import {
   getRuntimeSectionGenerated,
+  getRuntimeSectionAccepted,
   getRuntimeSectionInput,
   getRuntimeSectionRevisions,
   getRuntimeSectionState,
@@ -926,6 +927,7 @@ const buildRendererSections = ({
 
     const rawSectionValue = getRuntimePathValue(frameworkState, runtimePath)
     const sectionGenerated = getRuntimeSectionGenerated(rawSectionValue)
+    const sectionAccepted = getRuntimeSectionAccepted(rawSectionValue)
     const sectionRevisions = getRuntimeSectionRevisions(rawSectionValue)
     const sectionState = getRuntimeSectionState(rawSectionValue)
     const dependencySectionKeys = getDependencySectionKeys(packageSection)
@@ -951,6 +953,7 @@ const buildRendererSections = ({
       placeholder: uiSection?.placeholder || runtimePathRecord.placeholderText || '',
       value: getRuntimeSectionInput(rawSectionValue) ?? runtimePathRecord.defaultValue ?? '',
       generated: sectionGenerated,
+      accepted: sectionAccepted,
       review: isRuntimeSectionObject(rawSectionValue) ? rawSectionValue.review || {} : {},
       state: {
         status: sectionState.status || 'DRAFT',
