@@ -6,6 +6,10 @@ import {
 } from './runtimeSectionModelService.js'
 
 export const RUNTIME_ACTION_KEYS = Object.freeze({
+  SAVE_DISCOVERY_INPUTS: 'SAVE_DISCOVERY_INPUTS',
+  BUILD_EVIDENCE_PACK: 'BUILD_EVIDENCE_PACK',
+  REFRESH_EVIDENCE_PACK: 'REFRESH_EVIDENCE_PACK',
+  ACCEPT_EVIDENCE: 'ACCEPT_EVIDENCE',
   SAVE_DRAFT: 'SAVE_DRAFT',
   RUN_VALIDATION: 'RUN_VALIDATION',
   MARK_READY: 'MARK_READY',
@@ -103,6 +107,7 @@ export const isSupportedSprint2RuntimeAction = (actionKey) =>
 
 export const normalizeFrameworkStateForAction = (frameworkState = {}) => ({
   lifecycle: frameworkState.lifecycle || { stage: RUNTIME_LIFECYCLE_STAGES.DRAFT },
+  evidence_pack: frameworkState.evidence_pack || frameworkState.evidencePack || {},
   sections: frameworkState.sections || {},
   validation: frameworkState.validation || {},
   readiness: frameworkState.readiness || {},

@@ -132,6 +132,7 @@ const acceptRuntimeSectionSchema = z.object({
 
 const executeRuntimeActionSchema = z.object({
   expectedUpdatedAt: expectedUpdatedAtSchema,
+  inputs: discoveryInputsSchema.optional(),
   runtimePath: z
     .string()
     .trim()
@@ -147,6 +148,59 @@ const executeRuntimeActionSchema = z.object({
 }).strict()
 
 const GENERATION_RUNTIME_ACTIONS = new Set(['GENERATE_SECTION', 'REGENERATE_SECTION'])
+const DISCOVERY_INPUT_RUNTIME_ACTIONS = new Set([
+  'SAVE_DISCOVERY_INPUTS',
+  'BUILD_EVIDENCE_PACK',
+  'REFRESH_EVIDENCE_PACK',
+])
+
+const getSectionKeyFromRuntimePath = (runtimePath) => {
+  const pathParts = String(runtimePath || '').trim().split('.').filter(Boolean)
+  if (pathParts[0] !== 'framework_state' || pathParts[1] !== 'sections') return ''
+  return String(pathParts[2] || '').trim()
+}
+
+const buildExecuteRuntimeActionSchema = (actionKey) => executeRuntimeActionSchema.superRefine((data, ctx) => {
+  const hasRuntimePath = data.runtimePath !== undefined
+  const hasSectionKey = data.sectionKey !== undefined
+  const hasInputs = data.inputs !== undefined
+
+  if (GENERATION_RUNTIME_ACTIONS.has(actionKey)) {
+    if (!hasRuntimePath && !hasSectionKey) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['_root'],
+        message: 'Generation actions require runtimePath or sectionKey.',
+      })
+    }
+
+    if (hasRuntimePath && hasSectionKey) {
+      const runtimePathSectionKey = getSectionKeyFromRuntimePath(data.runtimePath)
+      const sectionKeyLooksStateBacked = /^[a-z][a-z0-9_]*$/i.test(data.sectionKey)
+      if (sectionKeyLooksStateBacked && runtimePathSectionKey && runtimePathSectionKey !== data.sectionKey) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['_root'],
+          message: 'runtimePath and sectionKey must target the same section.',
+        })
+      }
+    }
+  } else if (hasRuntimePath || hasSectionKey) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['_root'],
+      message: 'runtimePath and sectionKey are only allowed for generation actions.',
+    })
+  }
+
+  if (hasInputs && !DISCOVERY_INPUT_RUNTIME_ACTIONS.has(actionKey)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['_root'],
+      message: 'inputs are only allowed for discovery evidence build actions.',
+    })
+  }
+})
 
 const buildValidationErrorResponse = ({ details, message, requestId }) => ({
   error: {
@@ -244,7 +298,8 @@ export const validateAcceptRuntimeSection = (req, res, next) => {
 }
 
 export const validateExecuteRuntimeAction = (req, res, next) => {
-  const result = executeRuntimeActionSchema.safeParse(req.body)
+  const actionKey = String(req.params?.actionKey || '').trim().toUpperCase()
+  const result = buildExecuteRuntimeActionSchema(actionKey).safeParse(req.body)
 
   if (!result.success) {
     const details = {}
@@ -255,30 +310,6 @@ export const validateExecuteRuntimeAction = (req, res, next) => {
 
     return res.status(422).json(buildValidationErrorResponse({
       details,
-      message: 'Request validation failed.',
-      requestId: req.requestId,
-    }))
-  }
-
-  const actionKey = String(req.params?.actionKey || '').trim().toUpperCase()
-  const hasRuntimePath = result.data.runtimePath !== undefined
-  const hasSectionKey = result.data.sectionKey !== undefined
-
-  if (GENERATION_RUNTIME_ACTIONS.has(actionKey)) {
-    if (!hasRuntimePath && !hasSectionKey) {
-      return res.status(422).json(buildValidationErrorResponse({
-        details: {
-          _root: 'Generation actions require runtimePath or sectionKey.',
-        },
-        message: 'Request validation failed.',
-        requestId: req.requestId,
-      }))
-    }
-  } else if (hasRuntimePath || hasSectionKey) {
-    return res.status(422).json(buildValidationErrorResponse({
-      details: {
-        _root: 'runtimePath and sectionKey are only allowed for generation actions.',
-      },
       message: 'Request validation failed.',
       requestId: req.requestId,
     }))

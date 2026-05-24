@@ -37,6 +37,11 @@ import {
   invalidateRuntimeSectionEvidence,
   normalizeRuntimeSectionObject,
 } from './runtimeSectionModelService.js'
+import {
+  assertDiscoveryEvidenceAcceptable,
+  assertRuntimeEvidencePackWritable,
+  buildDiscoveryEvidencePack,
+} from './runtimeStateMutationService.js'
 
 const buildActionError = ({
   status,
@@ -56,6 +61,12 @@ const normalizeUpdatedAtDate = (updatedAt) => {
   const updatedAtDate = updatedAt instanceof Date ? updatedAt : new Date(updatedAt)
   return Number.isFinite(updatedAtDate.getTime()) ? updatedAtDate : null
 }
+
+const serializeErrorDetails = (err) => ({
+  name: err?.name || 'Error',
+  message: err?.message || 'Unknown error',
+  ...(err?.code ? { code: err.code } : {}),
+})
 
 const buildStaleActionError = ({ runtimeInstance, expectedUpdatedAt, currentUpdatedAt }) =>
   buildActionError({
@@ -171,6 +182,19 @@ const resolveRendererAction = ({ renderer, actionKey }) => {
 const isGenerationAction = (actionKey) => [
   RUNTIME_ACTION_KEYS.GENERATE_SECTION,
   RUNTIME_ACTION_KEYS.REGENERATE_SECTION,
+].includes(normalizeRuntimeActionToken(actionKey))
+
+const DISCOVERY_BUILD_ACTIONS = new Set([
+  RUNTIME_ACTION_KEYS.SAVE_DISCOVERY_INPUTS,
+  RUNTIME_ACTION_KEYS.BUILD_EVIDENCE_PACK,
+  RUNTIME_ACTION_KEYS.REFRESH_EVIDENCE_PACK,
+])
+
+const isDiscoveryAction = (actionKey) => [
+  RUNTIME_ACTION_KEYS.SAVE_DISCOVERY_INPUTS,
+  RUNTIME_ACTION_KEYS.BUILD_EVIDENCE_PACK,
+  RUNTIME_ACTION_KEYS.REFRESH_EVIDENCE_PACK,
+  RUNTIME_ACTION_KEYS.ACCEPT_EVIDENCE,
 ].includes(normalizeRuntimeActionToken(actionKey))
 
 const getRuntimeSectionStateKey = ({ runtimePath, sectionKey }) => {
@@ -373,6 +397,75 @@ const applyRuntimeSectionGeneration = ({
   }
 }
 
+const applyRuntimeDiscoveryAction = async ({
+  actionKey,
+  actorUserId,
+  payload,
+  runtimeInstance,
+}) => {
+  const normalizedActionKey = normalizeRuntimeActionToken(actionKey)
+  const previousFrameworkState = cloneRuntimeActionValue(runtimeInstance.framework_state || {})
+  const nextFrameworkState = cloneRuntimeActionValue(previousFrameworkState)
+  const previousEvidencePack = cloneRuntimeActionValue(previousFrameworkState.evidence_pack || {})
+  const actionedAt = new Date().toISOString()
+  let nextEvidencePack = previousEvidencePack
+
+  if (DISCOVERY_BUILD_ACTIONS.has(normalizedActionKey)) {
+    nextEvidencePack = await buildDiscoveryEvidencePack({
+      actorUserId,
+      inputs: payload?.inputs || previousEvidencePack.inputs || {},
+      previousEvidencePack,
+      reason: normalizedActionKey,
+      runtimeInstance,
+    })
+  }
+
+  if (normalizedActionKey === RUNTIME_ACTION_KEYS.ACCEPT_EVIDENCE) {
+    assertDiscoveryEvidenceAcceptable(previousEvidencePack)
+    nextEvidencePack = {
+      ...previousEvidencePack,
+      inputComplete: true,
+      evidenceReady: true,
+      accepted: true,
+      needsRefresh: false,
+      acceptedAt: actionedAt,
+      acceptedBy: toIdString(actorUserId),
+      state: {
+        ...(previousEvidencePack.state || {}),
+        status: 'ACCEPTED',
+        inputComplete: true,
+        evidenceReady: true,
+        accepted: true,
+        needsRefresh: false,
+      },
+    }
+  }
+
+  await assertRuntimeEvidencePackWritable({
+    frameworkKey: runtimeInstance.frameworkKey,
+    value: nextEvidencePack,
+  })
+
+  nextFrameworkState.evidence_pack = nextEvidencePack
+
+  return {
+    actionedAt,
+    nextExecutionStatus: runtimeInstance.executionStatus || 'IDLE',
+    nextFrameworkState,
+    runtimeUpdate: {},
+    validationResult: null,
+    discoveryResult: {
+      status: nextEvidencePack.state?.status || '',
+      inputComplete: nextEvidencePack.inputComplete === true || nextEvidencePack.state?.inputComplete === true,
+      evidenceReady: nextEvidencePack.evidenceReady === true || nextEvidencePack.state?.evidenceReady === true,
+      accepted: nextEvidencePack.accepted === true || nextEvidencePack.state?.accepted === true,
+      needsRefresh: nextEvidencePack.needsRefresh === true || nextEvidencePack.state?.needsRefresh === true,
+      inputCount: Object.keys(nextEvidencePack.inputs || {}).length,
+      sourceCount: Array.isArray(nextEvidencePack.lineage?.sources) ? nextEvidencePack.lineage.sources.length : 0,
+    },
+  }
+}
+
 const buildActionAuditPayload = ({
   action,
   actionedAt,
@@ -386,6 +479,7 @@ const buildActionAuditPayload = ({
   updatedAtBefore,
   validationResult,
   generationResult,
+  discoveryResult,
   nextRuntimeUpdate = {},
   previousRuntimeStatus,
   previousLockedAt,
@@ -462,6 +556,17 @@ const buildActionAuditPayload = ({
         previousGenerated: generationResult.previousGenerated ? true : false,
       },
     } : {}),
+    ...(discoveryResult ? {
+      discovery: {
+        status: discoveryResult.status,
+        inputComplete: discoveryResult.inputComplete,
+        evidenceReady: discoveryResult.evidenceReady,
+        accepted: discoveryResult.accepted,
+        needsRefresh: discoveryResult.needsRefresh,
+        inputCount: discoveryResult.inputCount,
+        sourceCount: discoveryResult.sourceCount,
+      },
+    } : {}),
     actionedAt,
   },
 })
@@ -480,6 +585,7 @@ const logRuntimeActionExecuted = async ({
   updatedAtBefore,
   validationResult,
   generationResult,
+  discoveryResult,
   nextRuntimeUpdate,
   previousRuntimeStatus,
   previousLockedAt,
@@ -498,6 +604,7 @@ const logRuntimeActionExecuted = async ({
     updatedAtBefore,
     validationResult,
     generationResult,
+    discoveryResult,
     nextRuntimeUpdate,
     previousRuntimeStatus,
     previousLockedAt,
@@ -514,15 +621,49 @@ const logRuntimeActionExecuted = async ({
     }
 
     await auditService.log(auditPayload, auditOptions)
-  } catch {
+  } catch (err) {
     throw buildActionError({
       status: 500,
       code: 'RUNTIME_ACTION_AUDIT_FAILED',
       message: 'Runtime action audit could not be persisted.',
       reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_ACTION_AUDIT_PERSISTENCE_FAILED,
+      details: {
+        auditError: serializeErrorDetails(err),
+      },
     })
   }
 }
+
+const logRuntimeActionRollbackFailure = async ({
+  auditError,
+  rollbackError = null,
+  runtimeInstance,
+  updatedRuntimeInstance,
+}) => auditService.log({
+  action: auditService.AUDIT_ACTIONS.RUNTIME_ACTION_EXECUTED,
+  resourceType: auditService.RESOURCE_TYPES.RuntimeInstance,
+  resourceId: runtimeInstance?._id,
+  actorType: 'SYSTEM',
+  systemActor: 'runtime-action-rollback',
+  isSystemEvent: true,
+  systemEventType: 'RUNTIME_ACTION_ROLLBACK_FAILED',
+  eventCategory: 'RUNTIME',
+  eventSeverity: 'CRITICAL',
+  scope: {
+    customerId: toIdString(runtimeInstance?.customerId),
+    tenantId: toIdString(runtimeInstance?.tenantId),
+    runtimeInstanceId: toIdString(runtimeInstance?._id),
+    runtimeInstanceKey: runtimeInstance?.runtimeInstanceKey,
+  },
+  diff: {
+    reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_ACTION_AUDIT_PERSISTENCE_FAILED,
+    auditError: serializeErrorDetails(auditError),
+    ...(rollbackError ? { rollbackError: serializeErrorDetails(rollbackError) } : {}),
+    attemptedRollbackUpdatedAt: updatedRuntimeInstance?.updatedAt instanceof Date
+      ? updatedRuntimeInstance.updatedAt.toISOString()
+      : updatedRuntimeInstance?.updatedAt,
+  },
+})
 
 const atomicPersistRuntimeAction = async ({
   actorUserId,
@@ -624,6 +765,7 @@ const persistActionWithAudit = async ({
   updatedAtBefore,
   validationResult,
   generationResult,
+  discoveryResult,
 }) => {
   if (mongoose.connection.readyState === 1) {
     const session = await mongoose.startSession()
@@ -655,6 +797,7 @@ const persistActionWithAudit = async ({
           updatedAtBefore,
           validationResult,
           generationResult,
+          discoveryResult,
           session,
         })
       })
@@ -691,6 +834,7 @@ const persistActionWithAudit = async ({
       updatedAtBefore,
       validationResult,
       generationResult,
+      discoveryResult,
     })
   } catch (err) {
     try {
@@ -710,12 +854,24 @@ const persistActionWithAudit = async ({
           ...(err.details || {}),
           rollbackFailed: true,
         }
+        await logRuntimeActionRollbackFailure({
+          auditError: err,
+          runtimeInstance,
+          updatedRuntimeInstance,
+        })
       }
-    } catch {
+    } catch (rollbackErr) {
       err.details = {
         ...(err.details || {}),
         rollbackFailed: true,
+        rollbackError: serializeErrorDetails(rollbackErr),
       }
+      await logRuntimeActionRollbackFailure({
+        auditError: err,
+        rollbackError: rollbackErr,
+        runtimeInstance,
+        updatedRuntimeInstance,
+      })
     }
     throw err
   }
@@ -809,15 +965,23 @@ export const executeRuntimeAction = async ({
     frameworkPackage,
     runtimeInstance,
   })
-  const resolvedTransition = isGenerationAction(normalizedActionKey)
-    ? applyRuntimeSectionGeneration({
+  let resolvedTransition = transition
+  if (isGenerationAction(normalizedActionKey)) {
+    resolvedTransition = applyRuntimeSectionGeneration({
         actionKey: normalizedActionKey,
         actorUserId,
         frameworkPackage,
         payload,
         runtimeInstance,
       })
-    : transition
+  } else if (isDiscoveryAction(normalizedActionKey)) {
+    resolvedTransition = await applyRuntimeDiscoveryAction({
+      actionKey: normalizedActionKey,
+      actorUserId,
+      payload,
+      runtimeInstance,
+    })
+  }
 
   const updatedRuntimeInstance = await persistActionWithAudit({
     action,
@@ -839,6 +1003,7 @@ export const executeRuntimeAction = async ({
     updatedAtBefore,
     validationResult: resolvedTransition.validationResult,
     generationResult: resolvedTransition.generationResult,
+    discoveryResult: resolvedTransition.discoveryResult,
   })
 
   return {
@@ -873,6 +1038,7 @@ export const executeRuntimeAction = async ({
         runtimePath: resolvedTransition.generationResult.runtimePath,
         revisionCount: resolvedTransition.generationResult.revisionCount,
       } } : {}),
+      ...(resolvedTransition.discoveryResult ? { discovery: resolvedTransition.discoveryResult } : {}),
     },
   }
 }

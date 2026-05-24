@@ -771,6 +771,14 @@ describe('Workflow Policy Routes', () => {
     await expect(workflowPolicy.validate()).rejects.toThrow(/EXPORT_EXTERNAL/)
   })
 
+  test('WorkflowPolicy model accepts SAVE as a governed action', async () => {
+    const workflowPolicy = makeWorkflowPolicyDoc({
+      governedAction: 'SAVE',
+    })
+
+    await expect(workflowPolicy.validate()).resolves.toBeUndefined()
+  })
+
   test('POST /api/v1/super-admin/runtime-control/workflow-policies rejects deprecated gatingRules', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
 

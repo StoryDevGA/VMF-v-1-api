@@ -40,7 +40,7 @@ import {
 } from './runtimeActionPolicyService.js'
 
 const SECTION_WRITE_SCOPE = 'framework_state.sections.*'
-const DISCOVERY_EVIDENCE_PACK_PATH = 'framework_state.evidence_pack'
+export const DISCOVERY_EVIDENCE_PACK_PATH = 'framework_state.evidence_pack'
 const FORBIDDEN_PATH_SEGMENTS = new Set(['__proto__', 'prototype', 'constructor'])
 const DISCOVERY_INPUT_KEYS = ['companyWebsite', 'companyName', 'marketRegion', 'targetOffer', 'notes']
 const REQUIRED_DISCOVERY_INPUT_KEYS = ['companyWebsite', 'companyName', 'marketRegion', 'targetOffer']
@@ -155,7 +155,7 @@ const hasDiscoveryLineage = (evidencePack = {}) =>
   && isPlainObject(evidencePack?.lineage?.builder)
   && String(evidencePack.lineage.builder.mode || '').trim()
 
-const assertDiscoveryEvidenceAcceptable = (evidencePack) => {
+export const assertDiscoveryEvidenceAcceptable = (evidencePack) => {
   if (!evidencePack || Object.keys(evidencePack).length === 0) {
     throw buildDiscoveryAcceptanceUnavailableError('Discovery evidence must be refreshed before it can be accepted.')
   }
@@ -330,7 +330,7 @@ const normalizeDiscoveryInputs = (inputs = {}) => DISCOVERY_INPUT_KEYS.reduce((n
   return normalized
 }, {})
 
-const buildDiscoveryEvidencePack = async ({
+export const buildDiscoveryEvidencePack = async ({
   actorUserId,
   inputs,
   previousEvidencePack = {},
@@ -706,6 +706,16 @@ const assertRuntimePathWritable = async ({
   return runtimePathRecord
 }
 
+export const assertRuntimeEvidencePackWritable = async ({
+  frameworkKey,
+  value,
+}) => assertRuntimePathWritable({
+  frameworkKey,
+  runtimePath: DISCOVERY_EVIDENCE_PACK_PATH,
+  value,
+  allowedWriteScopes: [DISCOVERY_EVIDENCE_PACK_PATH],
+})
+
 const assertRuntimeSectionPathWritable = async ({
   frameworkKey,
   runtimePath,
@@ -998,6 +1008,9 @@ const logRuntimeStateMutated = async ({
       code: 'RUNTIME_STATE_MUTATION_AUDIT_FAILED',
       message: 'Runtime state mutation audit could not be persisted.',
       reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_MUTATION_AUDIT_PERSISTENCE_FAILED,
+      details: {
+        auditError: serializeErrorDetails(err),
+      },
     })
   }
 }
@@ -1006,6 +1019,45 @@ const normalizeUpdatedAtDate = (updatedAt) => {
   const updatedAtDate = updatedAt instanceof Date ? updatedAt : new Date(updatedAt)
   return Number.isFinite(updatedAtDate.getTime()) ? updatedAtDate : null
 }
+
+const serializeErrorDetails = (err) => ({
+  name: err?.name || 'Error',
+  message: err?.message || 'Unknown error',
+  ...(err?.code ? { code: err.code } : {}),
+})
+
+const logRuntimeStateRollbackFailure = async ({
+  auditError,
+  rollbackError = null,
+  runtimeInstance,
+  runtimePath,
+  updatedRuntimeInstance,
+}) => auditService.log({
+  action: auditService.AUDIT_ACTIONS.RUNTIME_STATE_MUTATED,
+  resourceType: auditService.RESOURCE_TYPES.RuntimeInstance,
+  resourceId: runtimeInstance?._id,
+  actorType: 'SYSTEM',
+  systemActor: 'runtime-state-rollback',
+  isSystemEvent: true,
+  systemEventType: 'RUNTIME_STATE_ROLLBACK_FAILED',
+  eventCategory: 'RUNTIME',
+  eventSeverity: 'CRITICAL',
+  scope: {
+    customerId: toIdString(runtimeInstance?.customerId),
+    tenantId: toIdString(runtimeInstance?.tenantId),
+    runtimeInstanceId: toIdString(runtimeInstance?._id),
+    runtimeInstanceKey: runtimeInstance?.runtimeInstanceKey,
+  },
+  diff: {
+    runtimePath,
+    reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_MUTATION_AUDIT_PERSISTENCE_FAILED,
+    auditError: serializeErrorDetails(auditError),
+    ...(rollbackError ? { rollbackError: serializeErrorDetails(rollbackError) } : {}),
+    attemptedRollbackUpdatedAt: updatedRuntimeInstance?.updatedAt instanceof Date
+      ? updatedRuntimeInstance.updatedAt.toISOString()
+      : updatedRuntimeInstance?.updatedAt,
+  },
+})
 
 const atomicPersistRuntimeState = async ({
   actorUserId,
@@ -1147,12 +1199,26 @@ const persistMutationWithAudit = async ({
           ...(err.details || {}),
           rollbackFailed: true,
         }
+        await logRuntimeStateRollbackFailure({
+          auditError: err,
+          runtimeInstance,
+          runtimePath,
+          updatedRuntimeInstance,
+        })
       }
-    } catch {
+    } catch (rollbackErr) {
       err.details = {
         ...(err.details || {}),
         rollbackFailed: true,
+        rollbackError: serializeErrorDetails(rollbackErr),
       }
+      await logRuntimeStateRollbackFailure({
+        auditError: err,
+        rollbackError: rollbackErr,
+        runtimeInstance,
+        runtimePath,
+        updatedRuntimeInstance,
+      })
     }
     throw err
   }
@@ -1460,11 +1526,9 @@ export const updateRuntimeDiscoveryInputs = async ({
     reason: 'SAVE_DISCOVERY_INPUTS',
     runtimeInstance,
   })
-  await assertRuntimePathWritable({
+  await assertRuntimeEvidencePackWritable({
     frameworkKey: runtimeInstance.frameworkKey,
-    runtimePath: DISCOVERY_EVIDENCE_PACK_PATH,
     value: nextEvidencePack,
-    allowedWriteScopes: [DISCOVERY_EVIDENCE_PACK_PATH],
   })
   const nextFrameworkState = {
     ...previousFrameworkState,
@@ -1537,11 +1601,9 @@ export const acceptRuntimeDiscovery = async ({
     },
   }
 
-  await assertRuntimePathWritable({
+  await assertRuntimeEvidencePackWritable({
     frameworkKey: runtimeInstance.frameworkKey,
-    runtimePath: DISCOVERY_EVIDENCE_PACK_PATH,
     value: nextEvidencePack,
-    allowedWriteScopes: [DISCOVERY_EVIDENCE_PACK_PATH],
   })
 
   const nextFrameworkState = {
