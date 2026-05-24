@@ -94,6 +94,7 @@ const mutateRuntimeStateSchema = z.object({
       message: 'value is required',
     }),
   expectedUpdatedAt: expectedUpdatedAtSchema,
+  saveAndNext: z.boolean().optional(),
 }).strict()
 
 const executeRuntimeActionSchema = z.object({

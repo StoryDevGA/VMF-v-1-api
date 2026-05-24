@@ -1422,6 +1422,228 @@ describe('Runtime Instance API', () => {
       previousValue: 'Proposal creation is slow.',
       value: 'Proposal teams lack a shared story.',
     })
+    expect(res.body.data.advance).toBeUndefined()
+  })
+
+  test('PATCH /api/v1/runtime-instances/:id/data returns server-owned advance when Save and Next is requested', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: 'Proposal creation is slow.',
+        },
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+    }))
+    RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimePathRecord()))
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      sections: [
+        {
+          sectionKey: 'customer_problem',
+          runtimePath: 'framework_state.sections.customer_problem',
+          required: true,
+        },
+        {
+          sectionKey: 'internal_hidden',
+          runtimePath: 'framework_state.sections.internal_hidden',
+          required: true,
+        },
+        {
+          sectionKey: 'value_drivers',
+          runtimePath: 'framework_state.sections.value_drivers',
+          required: true,
+        },
+      ],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([
+      makeRuntimePathRecord(),
+      makeRuntimePathRecord({
+        stableId: 'path-framework-state-sections-internal-hidden',
+        pathKey: 'framework_state.sections.internal_hidden',
+        label: 'Internal Hidden',
+        displayOrder: 20,
+      }),
+      makeRuntimePathRecord({
+        stableId: 'path-framework-state-sections-value-drivers',
+        pathKey: 'framework_state.sections.value_drivers',
+        label: 'Value Drivers',
+        displayOrder: 30,
+      }),
+    ]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      sections: [
+        makeUIContract().sections[0],
+        {
+          sectionKey: 'internal_hidden',
+          runtimePath: 'framework_state.sections.internal_hidden',
+          source: 'PACKAGE',
+          isCustom: false,
+          label: 'Internal Hidden',
+          displayOrder: 20,
+          isVisible: false,
+          isEditable: true,
+          isRequiredDisplay: true,
+          isReadOnlyDisplay: false,
+        },
+        {
+          sectionKey: 'value_drivers',
+          runtimePath: 'framework_state.sections.value_drivers',
+          source: 'PACKAGE',
+          isCustom: false,
+          label: 'Value Drivers',
+          displayOrder: 30,
+          isVisible: true,
+          isEditable: true,
+          isRequiredDisplay: true,
+          isReadOnlyDisplay: false,
+        },
+      ],
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/data`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.customer_problem',
+        operation: 'WRITE',
+        value: 'Proposal teams lack a shared story.',
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+        saveAndNext: true,
+      })
+
+    expect(res.status).toBe(200)
+    expect(FrameworkPackage.findById).toHaveBeenCalledWith(FRAMEWORK_PACKAGE_ID)
+    expect(res.body.data.advance).toEqual({
+      requested: true,
+      hasNext: true,
+      currentRuntimePath: 'framework_state.sections.customer_problem',
+      currentSectionKey: 'customer_problem',
+      nextRuntimePath: 'framework_state.sections.value_drivers',
+      nextSectionKey: 'value_drivers',
+      reason: '',
+    })
+  })
+
+  test('PATCH /api/v1/runtime-instances/:id/data returns terminal advance when no next rendered section exists', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: 'Proposal creation is slow.',
+        },
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+    }))
+    RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimePathRecord()))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/data`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.customer_problem',
+        operation: 'WRITE',
+        value: 'Proposal teams lack a shared story.',
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+        saveAndNext: true,
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.advance).toEqual({
+      requested: true,
+      hasNext: false,
+      currentRuntimePath: 'framework_state.sections.customer_problem',
+      currentSectionKey: 'customer_problem',
+      nextRuntimePath: '',
+      nextSectionKey: '',
+      reason: 'END_OF_GUIDED_SECTIONS',
+    })
+  })
+
+  test('PATCH /api/v1/runtime-instances/:id/data does not advance from a current section the renderer would not project', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: 'Proposal creation is slow.',
+        },
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+    }))
+    RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimePathRecord()))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([]))
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      sections: [
+        {
+          sectionKey: 'customer_problem',
+          runtimePath: 'framework_state.sections.customer_problem',
+          required: true,
+        },
+        {
+          sectionKey: 'value_drivers',
+          runtimePath: 'framework_state.sections.value_drivers',
+          required: true,
+        },
+      ],
+    }))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/data`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.customer_problem',
+        operation: 'WRITE',
+        value: 'Proposal teams lack a shared story.',
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+        saveAndNext: true,
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.advance).toEqual({
+      requested: true,
+      hasNext: false,
+      currentRuntimePath: 'framework_state.sections.customer_problem',
+      currentSectionKey: 'customer_problem',
+      nextRuntimePath: '',
+      nextSectionKey: '',
+      reason: 'CURRENT_SECTION_NOT_PROJECTABLE',
+    })
   })
 
   test('PATCH /api/v1/runtime-instances/:id/data invalidates validation and readiness evidence after a section write', async () => {

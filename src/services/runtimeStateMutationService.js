@@ -1,13 +1,16 @@
 import mongoose from 'mongoose'
+import FrameworkPackage from '../models/FrameworkPackage.js'
 import RuntimePathRegistry, {
   RUNTIME_PATH_REGISTRY_DATA_TYPES,
   RUNTIME_PATH_REGISTRY_OPERATIONS,
+  RUNTIME_PATH_REGISTRY_STATUSES,
 } from '../models/RuntimePathRegistry.js'
 import RuntimeInstance, {
   RUNTIME_EXECUTION_STATUSES,
   RUNTIME_INSTANCE_STATUSES,
   RUNTIME_TYPES,
 } from '../models/RuntimeInstance.js'
+import UIContract, { UI_CONTRACT_STATUSES } from '../models/UIContract.js'
 import auditService from './auditService.js'
 import {
   RUNTIME_INSTANCE_ERROR_REASONS,
@@ -41,6 +44,14 @@ const cloneValue = (value) => {
 }
 
 const normalizeRuntimePath = (value) => String(value || '').trim()
+const normalizeSectionKey = (value) => String(value || '').trim()
+
+const getSectionKeyFromRuntimePath = (runtimePath) => {
+  const pathParts = normalizeRuntimePath(runtimePath).split('.').filter(Boolean)
+  return pathParts[0] === 'framework_state' && pathParts[1] === 'sections'
+    ? normalizeSectionKey(pathParts[2])
+    : ''
+}
 
 const buildMutationError = ({
   status,
@@ -656,6 +667,176 @@ const persistMutationWithAudit = async ({
   return updatedRuntimeInstance
 }
 
+const resolvePackageForAdvance = async (packageId) => {
+  const packageRecord = await FrameworkPackage.findById(packageId)
+  if (packageRecord && typeof packageRecord.toObject === 'function') {
+    return packageRecord.toObject()
+  }
+  return packageRecord
+}
+
+const resolveUIContractForAdvance = async ({ frameworkPackage }) => {
+  const uiContractKey = normalizeSectionKey(frameworkPackage?.uiContractBinding?.key || frameworkPackage?.uiContractKey)
+  if (!uiContractKey) return null
+
+  return UIContract.findOne({
+    uiContractKey,
+    status: UI_CONTRACT_STATUSES.ACTIVE,
+    frameworkKeys: normalizeToken(frameworkPackage?.frameworkKey),
+  }).lean()
+}
+
+const resolveRuntimePathRecordsForAdvance = async ({ frameworkPackage }) => {
+  const runtimePaths = (Array.isArray(frameworkPackage?.sections) ? frameworkPackage.sections : [])
+    .map((section) => normalizeRuntimePath(section?.runtimePath))
+    .filter(Boolean)
+
+  if (runtimePaths.length === 0) return new Map()
+
+  const rows = await RuntimePathRegistry.find({
+    pathKey: { $in: [...new Set(runtimePaths)] },
+    status: RUNTIME_PATH_REGISTRY_STATUSES.ACTIVE,
+    frameworkKeys: normalizeToken(frameworkPackage?.frameworkKey),
+  }).lean()
+
+  return new Map(
+    (Array.isArray(rows) ? rows : [])
+      .map((row) => [normalizeRuntimePath(row?.pathKey), row]),
+  )
+}
+
+const buildUISectionIndexForAdvance = (uiContract) => {
+  const sections = Array.isArray(uiContract?.sections) ? uiContract.sections : []
+  return new Map(
+    sections
+      .map((section) => {
+        const sectionKey = normalizeSectionKey(section?.sectionKey)
+        const runtimePath = normalizeRuntimePath(section?.runtimePath)
+        return sectionKey && runtimePath ? [`${sectionKey}::${runtimePath}`, section] : null
+      })
+      .filter(Boolean),
+  )
+}
+
+const buildProjectableSectionsForAdvance = ({ frameworkPackage, runtimePathRecords, uiContract }) => {
+  const packageSections = Array.isArray(frameworkPackage?.sections) ? frameworkPackage.sections : []
+  const uiSectionsByExactKey = buildUISectionIndexForAdvance(uiContract)
+
+  return packageSections
+    .map((packageSection, packageIndex) => {
+      const sectionKey = normalizeSectionKey(packageSection?.sectionKey || packageSection?.key)
+      const runtimePath = normalizeRuntimePath(packageSection?.runtimePath)
+      if (!sectionKey || !runtimePath) return null
+
+      const runtimePathRecord = runtimePathRecords.get(runtimePath)
+      const allowedOperations = Array.isArray(runtimePathRecord?.allowedOperations)
+        ? runtimePathRecord.allowedOperations.map(normalizeToken)
+        : []
+      if (!runtimePathRecord || !allowedOperations.includes(RUNTIME_PATH_REGISTRY_OPERATIONS.READ)) {
+        return null
+      }
+
+      const uiSection = uiSectionsByExactKey.get(`${sectionKey}::${runtimePath}`) || null
+      if (uiSection?.isVisible === false) return null
+
+      return {
+        sectionKey,
+        runtimePath,
+        displayOrder: Number.isFinite(Number(uiSection?.displayOrder))
+          ? Number(uiSection.displayOrder)
+          : Number.isFinite(Number(runtimePathRecord.displayOrder))
+            ? Number(runtimePathRecord.displayOrder)
+            : (packageIndex + 1) * 10,
+      }
+    })
+    .filter(Boolean)
+    .sort((left, right) => left.displayOrder - right.displayOrder || left.sectionKey.localeCompare(right.sectionKey))
+}
+
+const buildSaveAndNextAdvance = async ({ runtimeInstance, runtimePath, requested }) => {
+  if (!requested) return undefined
+
+  const currentRuntimePath = normalizeRuntimePath(runtimePath)
+  const fallbackCurrentSectionKey = getSectionKeyFromRuntimePath(currentRuntimePath)
+  const unavailableAdvance = {
+    requested: true,
+    hasNext: false,
+    currentRuntimePath,
+    currentSectionKey: fallbackCurrentSectionKey,
+    nextRuntimePath: '',
+    nextSectionKey: '',
+    reason: 'END_OF_GUIDED_SECTIONS',
+  }
+
+  let projectableSections = []
+  let packageHasCurrentSection = false
+  try {
+    const frameworkPackage = await resolvePackageForAdvance(runtimeInstance?.packageId)
+    const [uiContract, runtimePathRecords] = await Promise.all([
+      resolveUIContractForAdvance({ frameworkPackage }),
+      resolveRuntimePathRecordsForAdvance({ frameworkPackage }),
+    ])
+    const packageSections = Array.isArray(frameworkPackage?.sections) ? frameworkPackage.sections : []
+    packageHasCurrentSection = packageSections.some((section) =>
+      normalizeRuntimePath(section?.runtimePath) === currentRuntimePath,
+    )
+    projectableSections = buildProjectableSectionsForAdvance({
+      frameworkPackage,
+      runtimePathRecords,
+      uiContract,
+    })
+  } catch {
+    return {
+      ...unavailableAdvance,
+      reason: 'ADVANCE_RESOLUTION_FAILED',
+    }
+  }
+
+  if (projectableSections.length === 0) {
+    return {
+      ...unavailableAdvance,
+      reason: packageHasCurrentSection
+        ? 'CURRENT_SECTION_NOT_PROJECTABLE'
+        : 'PACKAGE_SECTIONS_NOT_PROJECTED',
+    }
+  }
+
+  const currentIndex = projectableSections.findIndex((section) =>
+    section.runtimePath === currentRuntimePath,
+  )
+
+  if (currentIndex < 0) {
+    return {
+      ...unavailableAdvance,
+      reason: 'CURRENT_SECTION_NOT_PROJECTABLE',
+    }
+  }
+
+  const currentSection = projectableSections[currentIndex]
+  const currentSectionKey = normalizeSectionKey(currentSection?.sectionKey)
+    || fallbackCurrentSectionKey
+  const nextSection = projectableSections[currentIndex + 1]
+
+  if (!nextSection) {
+    return {
+      ...unavailableAdvance,
+      currentSectionKey,
+    }
+  }
+
+  const nextRuntimePath = normalizeRuntimePath(nextSection.runtimePath)
+  return {
+    requested: true,
+    hasNext: true,
+    currentRuntimePath,
+    currentSectionKey,
+    nextRuntimePath,
+    nextSectionKey: normalizeSectionKey(nextSection.sectionKey)
+      || getSectionKeyFromRuntimePath(nextRuntimePath),
+    reason: '',
+  }
+}
+
 export const mutateRuntimeState = async ({
   actorUserId,
   auditRequest,
@@ -667,6 +848,7 @@ export const mutateRuntimeState = async ({
   const operation = normalizeToken(payload?.operation)
   const value = payload?.value
   const expectedUpdatedAt = payload?.expectedUpdatedAt
+  const saveAndNextRequested = payload?.saveAndNext === true
 
   if (operation !== RUNTIME_PATH_REGISTRY_OPERATIONS.WRITE) {
     throw buildMutationError({
@@ -723,7 +905,7 @@ export const mutateRuntimeState = async ({
     updatedAtBefore,
   })
 
-  return {
+  const response = {
     runtimeInstance: {
       id: toIdString(updatedRuntimeInstance._id),
       runtimeInstanceKey: updatedRuntimeInstance.runtimeInstanceKey,
@@ -741,6 +923,18 @@ export const mutateRuntimeState = async ({
       value: cloneValue(value),
     },
   }
+
+  const advance = await buildSaveAndNextAdvance({
+    runtimeInstance: updatedRuntimeInstance,
+    runtimePath,
+    requested: saveAndNextRequested,
+  })
+
+  if (advance) {
+    response.advance = advance
+  }
+
+  return response
 }
 
 const runtimeStateMutationService = {
