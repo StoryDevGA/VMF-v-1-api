@@ -1,3 +1,4 @@
+import crypto from 'node:crypto'
 import mongoose from 'mongoose'
 import FrameworkPackage from '../models/FrameworkPackage.js'
 import RuntimePathRegistry, {
@@ -44,10 +45,32 @@ const FORBIDDEN_PATH_SEGMENTS = new Set(['__proto__', 'prototype', 'constructor'
 const DISCOVERY_INPUT_KEYS = ['companyWebsite', 'companyName', 'marketRegion', 'targetOffer', 'notes']
 const REQUIRED_DISCOVERY_INPUT_KEYS = ['companyWebsite', 'companyName', 'marketRegion', 'targetOffer']
 
+const isPlainObject = (value) =>
+  Boolean(value && typeof value === 'object' && !Array.isArray(value))
+
 const cloneValue = (value) => {
   if (value === undefined) return undefined
   return JSON.parse(JSON.stringify(value))
 }
+
+const stableStringify = (value) => {
+  if (value === null || value === undefined) return ''
+  if (!isPlainObject(value) && !Array.isArray(value)) return String(value)
+  const normalize = (candidate) => {
+    if (Array.isArray(candidate)) return candidate.map(normalize)
+    if (!isPlainObject(candidate)) return candidate
+    return Object.keys(candidate)
+      .sort()
+      .reduce((acc, key) => ({
+        ...acc,
+        [key]: normalize(candidate[key]),
+      }), {})
+  }
+  return JSON.stringify(normalize(value))
+}
+
+const hashDiscoveryValue = (value) =>
+  `sha256:${crypto.createHash('sha256').update(stableStringify(value)).digest('hex')}`
 
 const normalizeRuntimePath = (value) => String(value || '').trim()
 const normalizeSectionKey = (value) => String(value || '').trim()
@@ -123,6 +146,15 @@ const hasDeterministicDiscoveryEvidence = (evidence, inputs) => {
     && String(inputs?.[key] ?? '').trim())
 }
 
+const getCanonicalScopedViews = (evidencePack = {}) =>
+  evidencePack.scoped_views || evidencePack.scopedViews || {}
+
+const hasDiscoveryLineage = (evidencePack = {}) =>
+  Array.isArray(evidencePack?.lineage?.sources)
+  && evidencePack.lineage.sources.length > 0
+  && isPlainObject(evidencePack?.lineage?.builder)
+  && String(evidencePack.lineage.builder.mode || '').trim()
+
 const assertDiscoveryEvidenceAcceptable = (evidencePack) => {
   if (!evidencePack || Object.keys(evidencePack).length === 0) {
     throw buildDiscoveryAcceptanceUnavailableError('Discovery evidence must be refreshed before it can be accepted.')
@@ -148,10 +180,16 @@ const assertDiscoveryEvidenceAcceptable = (evidencePack) => {
   if (
     !hasRequiredDiscoveryInputs(evidencePack.inputs)
     || !hasDeterministicDiscoveryEvidence(evidencePack.evidence, evidencePack.inputs)
+    || !hasDiscoveryLineage(evidencePack)
   ) {
     throw buildDiscoveryAcceptanceUnavailableError('Discovery evidence is incomplete and must be refreshed before acceptance.')
   }
 }
+
+const buildEvidenceSummaryProjection = (value = {}) => ({
+  keys: value && typeof value === 'object' && !Array.isArray(value) ? Object.keys(value) : [],
+  count: value && typeof value === 'object' && !Array.isArray(value) ? Object.keys(value).length : 0,
+})
 
 const buildDiscoveryMutationResponse = ({ runtimeInstance, evidencePack, previousEvidencePack }) => ({
   runtimeInstance: {
@@ -181,9 +219,17 @@ const buildDiscoveryMutationResponse = ({ runtimeInstance, evidencePack, previou
       keys: Object.keys(evidencePack.evidence || {}),
       count: Object.keys(evidencePack.evidence || {}).length,
     },
+    summarySummary: {
+      keys: Object.keys(evidencePack.summaries || {}),
+      count: Object.keys(evidencePack.summaries || {}).length,
+    },
     scopedViewSummary: {
-      keys: Object.keys(evidencePack.scopedViews || {}),
-      count: Object.keys(evidencePack.scopedViews || {}).length,
+      keys: Object.keys(getCanonicalScopedViews(evidencePack)),
+      count: Object.keys(getCanonicalScopedViews(evidencePack)).length,
+    },
+    lineageSummary: {
+      sourceCount: Array.isArray(evidencePack.lineage?.sources) ? evidencePack.lineage.sources.length : 0,
+      builderMode: evidencePack.lineage?.builder?.mode || '',
     },
   },
   mutation: {
@@ -284,13 +330,20 @@ const normalizeDiscoveryInputs = (inputs = {}) => DISCOVERY_INPUT_KEYS.reduce((n
   return normalized
 }, {})
 
-const buildDiscoveryEvidencePack = async ({ inputs, runtimeInstance }) => {
+const buildDiscoveryEvidencePack = async ({
+  actorUserId,
+  inputs,
+  previousEvidencePack = {},
+  reason = 'BUILD_EVIDENCE_PACK',
+  runtimeInstance,
+}) => {
   const normalizedInputs = normalizeDiscoveryInputs(inputs)
   const inputKeys = Object.keys(normalizedInputs)
   const missingInputKeys = REQUIRED_DISCOVERY_INPUT_KEYS.filter((key) => !normalizedInputs[key])
   const inputComplete = missingInputKeys.length === 0
   const evidenceReady = inputComplete
   const refreshedAt = new Date().toISOString()
+  const inputHash = hashDiscoveryValue(normalizedInputs)
   const frameworkPackage = await resolvePackageForAdvance(runtimeInstance?.packageId)
   const [uiContract, runtimePathRecords] = frameworkPackage
     ? await Promise.all([
@@ -301,22 +354,87 @@ const buildDiscoveryEvidencePack = async ({ inputs, runtimeInstance }) => {
   const projectableSections = frameworkPackage
     ? buildProjectableSectionsForAdvance({ frameworkPackage, runtimePathRecords, uiContract })
     : []
+  const sourceRefs = inputKeys.map((key) => `input_${key}`)
+  const sources = inputKeys.map((key) => ({
+    sourceId: `input_${key}`,
+    type: key === 'companyWebsite' ? 'USER_PROVIDED_WEBSITE' : 'USER_PROVIDED_INPUT',
+    fieldKey: key,
+    ...(key === 'companyWebsite' ? { url: normalizedInputs[key] } : {}),
+    valueHash: hashDiscoveryValue(normalizedInputs[key]),
+    status: 'USER_PROVIDED',
+    capturedAt: refreshedAt,
+  }))
+  const compactSummary = {
+    summary: `Customer-provided discovery inputs captured for ${
+      normalizedInputs.companyName || normalizedInputs.companyWebsite || 'this runtime'
+    }.`,
+    confidence: 'USER_PROVIDED',
+    sourceRefs,
+    inputHash,
+    refreshedAt,
+  }
   const scopedViews = evidenceReady
     ? projectableSections.reduce((views, section) => {
         const sectionKey = normalizeSectionKey(section?.sectionKey)
         if (!sectionKey) return views
         views[sectionKey] = {
           source: 'DISCOVERY_EVIDENCE_PACK',
+          summary: 'Customer-provided discovery inputs are available for this section.',
           inputKeys,
-          evidenceKeys: ['source', 'inputKeys', 'requiredInputKeys', 'missingInputKeys'],
+          evidenceKeys: ['summaries.compact', 'discovery.seedProfile'],
+          sourceRefs,
           refreshedAt,
+          evidenceHash: hashDiscoveryValue({
+            sectionKey,
+            inputHash,
+            sourceRefs,
+          }),
         }
         return views
       }, {})
     : {}
+  const evidence = {
+    source: 'DISCOVERY_INPUTS',
+    inputKeys,
+    requiredInputKeys: REQUIRED_DISCOVERY_INPUT_KEYS,
+    missingInputKeys,
+    builtAt: refreshedAt,
+    inputHash,
+    sourceRefs,
+    sourceCount: sources.length,
+  }
+  const evidenceHash = hashDiscoveryValue({ evidence, summaries: { compact: compactSummary }, scopedViews })
+  const previousRevisions = Array.isArray(previousEvidencePack?.revisions)
+    ? previousEvidencePack.revisions
+    : []
+  const revisions = [
+    ...previousRevisions,
+    {
+      revisionId: `evidence-rev-${evidenceHash.replace(/^sha256:/, '').slice(0, 12)}`,
+      createdAt: refreshedAt,
+      createdBy: toIdString(actorUserId),
+      reason,
+      inputHash,
+      evidenceHash,
+    },
+  ]
 
   return {
     inputs: normalizedInputs,
+    discovery: {
+      seedProfile: {
+        companyWebsite: normalizedInputs.companyWebsite || '',
+        companyName: normalizedInputs.companyName || '',
+        marketRegion: normalizedInputs.marketRegion || '',
+        targetOffer: normalizedInputs.targetOffer || '',
+        notes: normalizedInputs.notes || '',
+        confidence: 'USER_PROVIDED',
+        sourceRefs,
+      },
+    },
+    summaries: {
+      compact: compactSummary,
+    },
     inputComplete,
     evidenceReady,
     accepted: false,
@@ -328,15 +446,20 @@ const buildDiscoveryEvidencePack = async ({ inputs, runtimeInstance }) => {
       evidenceReady,
       accepted: false,
       needsRefresh: false,
+      buildCompletedAt: refreshedAt,
+      lastError: null,
     },
-    evidence: {
-      source: 'DISCOVERY_INPUTS',
-      inputKeys,
-      requiredInputKeys: REQUIRED_DISCOVERY_INPUT_KEYS,
-      missingInputKeys,
-      builtAt: refreshedAt,
+    evidence,
+    scoped_views: scopedViews,
+    lineage: {
+      sources,
+      builder: {
+        mode: 'DETERMINISTIC',
+        version: 'discovery-evidence-pack-v1',
+        adapter: 'customer-input',
+      },
     },
-    scopedViews,
+    revisions,
   }
 }
 
@@ -743,6 +866,62 @@ const resolveRuntimeInstanceForMutation = async ({ actorUserId, runtimeInstanceI
   })
 
   return runtimeInstance
+}
+
+const resolveRuntimeInstanceForEvidenceRead = async ({ actorUserId, runtimeInstanceId, scopes }) => {
+  const runtimeInstance = await RuntimeInstance.findOne({
+    $or: [
+      ...(mongoose.isValidObjectId(runtimeInstanceId) ? [{ _id: runtimeInstanceId }] : []),
+      { runtimeInstanceKey: String(runtimeInstanceId || '').trim().toLowerCase() },
+    ],
+  })
+
+  if (!runtimeInstance) {
+    throw buildMutationError({
+      status: 404,
+      code: 'NOT_FOUND',
+      message: 'Runtime instance not found.',
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_INSTANCE_NOT_FOUND,
+      details: { runtimeInstanceId },
+    })
+  }
+
+  const customerId = toIdString(runtimeInstance.customerId)
+  const tenantId = toIdString(runtimeInstance.tenantId)
+  const runtimeType = normalizeToken(runtimeInstance.runtimeType)
+
+  assertSupportedMutationRuntimeType(runtimeType)
+
+  await assertRuntimePermission({
+    actorUserId,
+    scopes,
+    customerId,
+    tenantId,
+    permission: 'VMF_VIEW',
+  })
+
+  const { customer } = await assertCustomerTenantContext({ customerId, tenantId })
+  await assertFeatureEntitlement({
+    customerId,
+    customer,
+    feature: getFeatureForRuntimeType(runtimeType),
+  })
+
+  let canViewRawEvidence = false
+  try {
+    await assertRuntimePermission({
+      actorUserId,
+      scopes,
+      customerId,
+      tenantId,
+      permission: 'VMF_UPDATE',
+    })
+    canViewRawEvidence = true
+  } catch {
+    canViewRawEvidence = false
+  }
+
+  return { runtimeInstance, canViewRawEvidence }
 }
 
 const buildMutationAuditPayload = ({
@@ -1275,7 +1454,10 @@ export const updateRuntimeDiscoveryInputs = async ({
     ? runtimeInstance.updatedAt.toISOString()
     : runtimeInstance.updatedAt
   const nextEvidencePack = await buildDiscoveryEvidencePack({
+    actorUserId,
     inputs: payload?.inputs || {},
+    previousEvidencePack,
+    reason: 'SAVE_DISCOVERY_INPUTS',
     runtimeInstance,
   })
   await assertRuntimePathWritable({
@@ -1386,6 +1568,60 @@ export const acceptRuntimeDiscovery = async ({
     evidencePack: nextEvidencePack,
     previousEvidencePack,
   })
+}
+
+export const getRuntimeDiscoveryEvidence = async ({
+  actorUserId,
+  scopes,
+  runtimeInstanceId,
+} = {}) => {
+  const { runtimeInstance, canViewRawEvidence } = await resolveRuntimeInstanceForEvidenceRead({
+    actorUserId,
+    runtimeInstanceId,
+    scopes,
+  })
+  const frameworkState = runtimeInstance.framework_state || {}
+  const evidencePack = cloneValue(frameworkState.evidence_pack || frameworkState.evidencePack || {})
+  const summaries = evidencePack.summaries || {}
+  const scopedViews = getCanonicalScopedViews(evidencePack)
+  const lineage = evidencePack.lineage || { sources: [], builder: {} }
+
+  return {
+    runtimeInstance: {
+      id: toIdString(runtimeInstance._id),
+      runtimeInstanceKey: runtimeInstance.runtimeInstanceKey,
+      runtimeType: runtimeInstance.runtimeType,
+      status: runtimeInstance.status,
+      executionStatus: runtimeInstance.executionStatus,
+      updatedAt: runtimeInstance.updatedAt instanceof Date
+        ? runtimeInstance.updatedAt.toISOString()
+        : runtimeInstance.updatedAt,
+    },
+    discovery: {
+      state: evidencePack.state || { status: 'EVIDENCE_NOT_READY' },
+      inputComplete: getEvidencePackStateFlag(evidencePack, 'inputComplete'),
+      evidenceReady: getEvidencePackStateFlag(evidencePack, 'evidenceReady'),
+      accepted: !getEvidencePackNeedsRefresh(evidencePack) && getEvidencePackStateFlag(evidencePack, 'accepted'),
+      needsRefresh: getEvidencePackNeedsRefresh(evidencePack),
+      lineage,
+      inputSummary: buildEvidenceSummaryProjection(evidencePack.inputs),
+      evidenceSummary: buildEvidenceSummaryProjection(evidencePack.evidence),
+      summarySummary: buildEvidenceSummaryProjection(summaries),
+      scopedViewSummary: buildEvidenceSummaryProjection(scopedViews),
+      canViewRawEvidence,
+      ...(canViewRawEvidence ? {
+        inputs: evidencePack.inputs || {},
+        discovery: evidencePack.discovery || {},
+        summaries,
+        evidence: evidencePack.evidence || {},
+        scoped_views: scopedViews,
+        revisions: Array.isArray(evidencePack.revisions) ? evidencePack.revisions : [],
+      } : {}),
+      ...(evidencePack.acceptedAt ? { acceptedAt: evidencePack.acceptedAt } : {}),
+      ...(evidencePack.acceptedBy ? { acceptedBy: evidencePack.acceptedBy } : {}),
+      ...(evidencePack.refreshedAt ? { refreshedAt: evidencePack.refreshedAt } : {}),
+    },
+  }
 }
 
 export const acceptRuntimeSection = async ({
@@ -1525,6 +1761,7 @@ export const acceptRuntimeSection = async ({
 const runtimeStateMutationService = {
   acceptRuntimeSection,
   acceptRuntimeDiscovery,
+  getRuntimeDiscoveryEvidence,
   mutateRuntimeState,
   updateRuntimeDiscoveryInputs,
 }

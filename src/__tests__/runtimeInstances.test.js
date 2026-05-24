@@ -331,11 +331,39 @@ const makeReadyDiscoveryEvidencePack = (overrides = {}) => ({
     requiredInputKeys: ['companyWebsite', 'companyName', 'marketRegion', 'targetOffer'],
     missingInputKeys: [],
     builtAt: '2026-05-19T08:00:30.000Z',
+    inputHash: 'sha256:ready-input-hash',
+    sourceRefs: ['input_companyWebsite', 'input_companyName', 'input_marketRegion', 'input_targetOffer'],
   },
-  scopedViews: {
+  summaries: {
+    compact: {
+      summary: 'Customer-provided discovery inputs captured for Acme.',
+      confidence: 'USER_PROVIDED',
+      sourceRefs: ['input_companyWebsite', 'input_companyName', 'input_marketRegion', 'input_targetOffer'],
+    },
+  },
+  scoped_views: {
     customer_problem: {
       source: 'DISCOVERY_EVIDENCE_PACK',
       inputKeys: ['companyWebsite', 'companyName', 'marketRegion', 'targetOffer'],
+      sourceRefs: ['input_companyWebsite', 'input_companyName', 'input_marketRegion', 'input_targetOffer'],
+    },
+  },
+  lineage: {
+    sources: [
+      {
+        sourceId: 'input_companyWebsite',
+        type: 'USER_PROVIDED_WEBSITE',
+        fieldKey: 'companyWebsite',
+        url: 'https://acme.example',
+        valueHash: 'sha256:company-website-hash',
+        status: 'USER_PROVIDED',
+        capturedAt: '2026-05-19T08:00:30.000Z',
+      },
+    ],
+    builder: {
+      mode: 'DETERMINISTIC',
+      version: 'discovery-evidence-pack-v1',
+      adapter: 'customer-input',
     },
   },
   state: {
@@ -1391,6 +1419,16 @@ describe('Runtime Instance API', () => {
       updatedAt: new Date('2026-05-19T08:00:00.000Z'),
       framework_state: {
         lifecycle: { stage: 'DRAFT' },
+        evidence_pack: makeReadyDiscoveryEvidencePack({
+          accepted: true,
+          state: {
+            status: 'ACCEPTED',
+            inputComplete: true,
+            evidenceReady: true,
+            accepted: true,
+            needsRefresh: false,
+          },
+        }),
         sections: {
           customer_problem: 'Proposal creation is slow.',
         },
@@ -1484,6 +1522,16 @@ describe('Runtime Instance API', () => {
       updatedAt: new Date('2026-05-19T08:00:00.000Z'),
       framework_state: {
         lifecycle: { stage: 'DRAFT' },
+        evidence_pack: makeReadyDiscoveryEvidencePack({
+          accepted: true,
+          state: {
+            status: 'ACCEPTED',
+            inputComplete: true,
+            evidenceReady: true,
+            accepted: true,
+            needsRefresh: false,
+          },
+        }),
         sections: {
           customer_problem: 'Proposal creation is slow.',
         },
@@ -1876,17 +1924,48 @@ describe('Runtime Instance API', () => {
         source: 'DISCOVERY_INPUTS',
         inputKeys: ['companyWebsite', 'companyName', 'marketRegion', 'targetOffer', 'notes'],
         missingInputKeys: [],
+        sourceRefs: [
+          'input_companyWebsite',
+          'input_companyName',
+          'input_marketRegion',
+          'input_targetOffer',
+          'input_notes',
+        ],
       }),
-      scopedViews: {
+      summaries: {
+        compact: expect.objectContaining({
+          confidence: 'USER_PROVIDED',
+        }),
+      },
+      scoped_views: {
         customer_problem: expect.objectContaining({
           source: 'DISCOVERY_EVIDENCE_PACK',
           inputKeys: ['companyWebsite', 'companyName', 'marketRegion', 'targetOffer', 'notes'],
         }),
       },
+      lineage: expect.objectContaining({
+        sources: expect.arrayContaining([
+          expect.objectContaining({
+            sourceId: 'input_companyWebsite',
+            type: 'USER_PROVIDED_WEBSITE',
+            status: 'USER_PROVIDED',
+          }),
+        ]),
+        builder: expect.objectContaining({
+          adapter: 'customer-input',
+        }),
+      }),
+      revisions: [
+        expect.objectContaining({
+          reason: 'SAVE_DISCOVERY_INPUTS',
+          inputHash: expect.stringMatching(/^sha256:/),
+          evidenceHash: expect.stringMatching(/^sha256:/),
+        }),
+      ],
     }))
-    expect(persistedEvidencePack.scopedViews.hidden_secret).toBeUndefined()
-    expect(persistedEvidencePack.scopedViews.write_only).toBeUndefined()
-    expect(persistedEvidencePack.scopedViews.unregistered).toBeUndefined()
+    expect(persistedEvidencePack.scoped_views.hidden_secret).toBeUndefined()
+    expect(persistedEvidencePack.scoped_views.write_only).toBeUndefined()
+    expect(persistedEvidencePack.scoped_views.unregistered).toBeUndefined()
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'RUNTIME_STATE_MUTATED',
       resourceType: 'RuntimeInstance',
@@ -2079,7 +2158,7 @@ describe('Runtime Instance API', () => {
       inputComplete: false,
       evidenceReady: false,
       accepted: false,
-      scopedViews: {},
+      scoped_views: {},
       state: expect.objectContaining({
         status: 'INPUT_REQUIRED',
       }),
@@ -2241,6 +2320,104 @@ describe('Runtime Instance API', () => {
       acceptedAt: expect.any(String),
       acceptedBy: CUSTOMER_ADMIN_ID,
     }))
+  })
+
+  test('GET /api/v1/runtime-instances/:id/evidence returns governed evidence details without fabricating sources', async () => {
+    const evidencePack = makeReadyDiscoveryEvidencePack({
+      accepted: true,
+      state: {
+        status: 'ACCEPTED',
+        inputComplete: true,
+        evidenceReady: true,
+        accepted: true,
+        needsRefresh: false,
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:02:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: evidencePack,
+        sections: {},
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    }))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/evidence`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.discovery).toEqual(expect.objectContaining({
+      accepted: true,
+      inputs: evidencePack.inputs,
+      summaries: evidencePack.summaries,
+      evidence: evidencePack.evidence,
+      scoped_views: evidencePack.scoped_views,
+      lineage: evidencePack.lineage,
+      revisions: [],
+    }))
+    expect(res.body.data.discovery.lineage.sources).toEqual([
+      expect.objectContaining({
+        sourceId: 'input_companyWebsite',
+        type: 'USER_PROVIDED_WEBSITE',
+        status: 'USER_PROVIDED',
+      }),
+    ])
+    expect(JSON.stringify(res.body.data.discovery)).not.toMatch(/competitor|proof point/i)
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('GET /api/v1/runtime-instances/:id/evidence redacts raw evidence details for view-only users', async () => {
+    const evidencePack = makeReadyDiscoveryEvidencePack({
+      accepted: true,
+      state: {
+        status: 'ACCEPTED',
+        inputComplete: true,
+        evidenceReady: true,
+        accepted: true,
+        needsRefresh: false,
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:02:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: evidencePack,
+        sections: {},
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    }))
+    const token = await getAccessTokenForUser(makeRegularUser())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/evidence`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.discovery).toEqual(expect.objectContaining({
+      accepted: true,
+      canViewRawEvidence: false,
+      inputSummary: { keys: Object.keys(evidencePack.inputs), count: Object.keys(evidencePack.inputs).length },
+      evidenceSummary: { keys: Object.keys(evidencePack.evidence), count: Object.keys(evidencePack.evidence).length },
+      summarySummary: { keys: Object.keys(evidencePack.summaries), count: Object.keys(evidencePack.summaries).length },
+      scopedViewSummary: { keys: Object.keys(evidencePack.scoped_views), count: Object.keys(evidencePack.scoped_views).length },
+      lineage: evidencePack.lineage,
+    }))
+    expect(res.body.data.discovery.inputs).toBeUndefined()
+    expect(res.body.data.discovery.discovery).toBeUndefined()
+    expect(res.body.data.discovery.summaries).toBeUndefined()
+    expect(res.body.data.discovery.evidence).toBeUndefined()
+    expect(res.body.data.discovery.scoped_views).toBeUndefined()
+    expect(res.body.data.discovery.revisions).toBeUndefined()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 
   test.each([
@@ -4393,6 +4570,16 @@ describe('Runtime Instance API', () => {
       updatedAt: new Date('2026-05-19T08:00:00.000Z'),
       framework_state: {
         lifecycle: { stage: 'DRAFT' },
+        evidence_pack: makeReadyDiscoveryEvidencePack({
+          accepted: true,
+          state: {
+            status: 'ACCEPTED',
+            inputComplete: true,
+            evidenceReady: true,
+            accepted: true,
+            needsRefresh: false,
+          },
+        }),
         sections: {
           customer_problem: 'Proposal creation is slow.',
         },
@@ -4533,7 +4720,7 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(409)
     expect(res.body.error.details.reason).toBe('RUNTIME_ACTION_NOT_AVAILABLE')
-    expect(res.body.error.details.disabledReason).toBe('Add discovery evidence or section context before generating this section.')
+    expect(res.body.error.details.disabledReason).toBe('Accept discovery evidence before generating this section.')
     expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
     expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
@@ -4543,6 +4730,16 @@ describe('Runtime Instance API', () => {
       updatedAt: new Date('2026-05-19T08:00:00.000Z'),
       framework_state: {
         lifecycle: { stage: 'DRAFT' },
+        evidence_pack: makeReadyDiscoveryEvidencePack({
+          accepted: true,
+          state: {
+            status: 'ACCEPTED',
+            inputComplete: true,
+            evidenceReady: true,
+            accepted: true,
+            needsRefresh: false,
+          },
+        }),
         sections: {
           section_1_executive_summary: 'Show the board why proposal creation is slow.',
         },
@@ -5387,8 +5584,8 @@ describe('Runtime Instance API', () => {
         validationKeys: ['required-sections-check'],
         editable: true,
         generationEligibility: expect.objectContaining({
-          canGenerate: true,
-          reason: '',
+          canGenerate: false,
+          reason: 'Accept discovery evidence before generating this section.',
           sources: ['SECTION_CONTEXT'],
         }),
       }),
@@ -5410,9 +5607,17 @@ describe('Runtime Instance API', () => {
         keys: [],
         count: 0,
       },
+      summarySummary: {
+        keys: [],
+        count: 0,
+      },
       scopedViewSummary: {
         keys: [],
         count: 0,
+      },
+      lineageSummary: {
+        sourceCount: 0,
+        builderMode: '',
       },
       inputValues: {},
     })
@@ -5594,7 +5799,7 @@ describe('Runtime Instance API', () => {
           evidence: {
             priorities: ['Reduce proposal cycle time'],
           },
-          scopedViews: {
+          scoped_views: {
             customer_problem: {
               summary: 'Proposal teams need a shared governed narrative.',
             },
@@ -5633,9 +5838,17 @@ describe('Runtime Instance API', () => {
         keys: ['priorities'],
         count: 1,
       },
+      summarySummary: {
+        keys: [],
+        count: 0,
+      },
       scopedViewSummary: {
         keys: ['customer_problem'],
         count: 1,
+      },
+      lineageSummary: {
+        sourceCount: 0,
+        builderMode: '',
       },
       scopedViews: {
         customer_problem: {
@@ -5741,7 +5954,7 @@ describe('Runtime Instance API', () => {
     expect(res.status).toBe(200)
     expect(res.body.data.sections[0].generationEligibility).toEqual({
       canGenerate: false,
-      reason: 'Add discovery evidence or section context before generating this section.',
+      reason: 'Accept discovery evidence before generating this section.',
       sources: [],
       dependencySectionKeys: [],
       satisfiedDependencySectionKeys: [],
@@ -5754,7 +5967,7 @@ describe('Runtime Instance API', () => {
     ])
   })
 
-  test('enables section generation eligibility from satisfied declared dependency context only', async () => {
+  test('keeps dependency context visible but generation locked until discovery evidence is accepted', async () => {
     FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
       sections: [
         {
@@ -5820,7 +6033,8 @@ describe('Runtime Instance API', () => {
     expect(res.status).toBe(200)
     const valueDrivers = res.body.data.sections.find((section) => section.sectionKey === 'value_drivers')
     expect(valueDrivers.generationEligibility).toEqual(expect.objectContaining({
-      canGenerate: true,
+      canGenerate: false,
+      reason: 'Accept discovery evidence before generating this section.',
       sources: ['DEPENDENT_SECTION_CONTEXT'],
       dependencySectionKeys: ['customer_problem'],
       satisfiedDependencySectionKeys: ['customer_problem'],

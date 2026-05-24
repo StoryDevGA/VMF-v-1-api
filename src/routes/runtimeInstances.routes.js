@@ -7,6 +7,7 @@ import {
   createRuntimeInstance,
   executeRuntimeAction,
   getRuntimeInstance,
+  getRuntimeEvidence,
   getRuntimeRenderer,
   listRuntimeInstances,
   mutateRuntimeState,
@@ -40,6 +41,7 @@ router.post(
   validateExecuteRuntimeAction,
   executeRuntimeAction,
 )
+router.get('/:runtimeInstanceId/evidence', validateRuntimeInstanceId, getRuntimeEvidence)
 router.get('/:runtimeInstanceId/renderer', validateRuntimeInstanceId, getRuntimeRenderer)
 router.get('/:runtimeInstanceId', validateRuntimeInstanceId, getRuntimeInstance)
 

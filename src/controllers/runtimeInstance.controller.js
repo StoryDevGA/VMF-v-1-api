@@ -8,6 +8,7 @@ import { getRuntimeRenderer as getRuntimeRendererProjection } from '../services/
 import {
   acceptRuntimeDiscovery as acceptRuntimeDiscoveryRecord,
   acceptRuntimeSection as acceptRuntimeSectionRecord,
+  getRuntimeDiscoveryEvidence as getRuntimeDiscoveryEvidenceRecord,
   mutateRuntimeState as mutateRuntimeStateRecord,
   updateRuntimeDiscoveryInputs as updateRuntimeDiscoveryInputsRecord,
 } from '../services/runtimeStateMutationService.js'
@@ -163,6 +164,26 @@ export const acceptRuntimeDiscovery = async (req, res, next) => {
 
     return res.status(200).json({
       data: discovery,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const getRuntimeEvidence = async (req, res, next) => {
+  try {
+    const evidence = await getRuntimeDiscoveryEvidenceRecord({
+      actorUserId: req.context?.userId || req.userId,
+      scopes: req.scopes,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+    })
+
+    return res.status(200).json({
+      data: evidence,
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {

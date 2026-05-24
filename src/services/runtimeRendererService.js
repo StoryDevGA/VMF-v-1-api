@@ -298,6 +298,7 @@ export const buildDiscoveryProjection = (frameworkState = {}, { includeInputValu
   }
 
   const scopedViews = evidencePack.scopedViews || evidencePack.scoped_views || {}
+  const summaries = evidencePack.summaries || {}
   const inputComplete = isStrictTrue(evidencePack.inputComplete)
     || isStrictTrue(evidencePack.input_complete)
     || isStrictTrue(evidencePack.inputs?.complete)
@@ -315,7 +316,9 @@ export const buildDiscoveryProjection = (frameworkState = {}, { includeInputValu
   )
   const inputSummary = buildProjectionSummary(evidencePack.inputs)
   const evidenceSummary = buildProjectionSummary(evidencePack.evidence)
+  const summarySummary = buildProjectionSummary(summaries)
   const scopedViewSummary = buildProjectionSummary(scopedViews)
+  const lineageSources = Array.isArray(evidencePack.lineage?.sources) ? evidencePack.lineage.sources : []
 
   return {
     state: {
@@ -339,7 +342,12 @@ export const buildDiscoveryProjection = (frameworkState = {}, { includeInputValu
       : {},
     inputSummary,
     evidenceSummary,
+    summarySummary,
     scopedViewSummary,
+    lineageSummary: {
+      sourceCount: lineageSources.length,
+      builderMode: evidencePack.lineage?.builder?.mode || '',
+    },
     ...(includeInputValues ? { inputValues: cloneProjectionValue(evidencePack.inputs || {}) } : {}),
     ...(evidencePack.acceptedAt ? { acceptedAt: evidencePack.acceptedAt } : {}),
     ...(evidencePack.acceptedBy ? { acceptedBy: evidencePack.acceptedBy } : {}),
@@ -391,12 +399,12 @@ export const buildSectionGenerationEligibility = ({
   )
   if (satisfiedDependencies.length > 0) sources.push('DEPENDENT_SECTION_CONTEXT')
 
-  const canGenerate = sources.length > 0
+  const canGenerate = discovery?.accepted === true
   return {
     canGenerate,
     reason: canGenerate
       ? ''
-      : 'Add discovery evidence or section context before generating this section.',
+      : 'Accept discovery evidence before generating this section.',
     sources,
     dependencySectionKeys,
     satisfiedDependencySectionKeys: satisfiedDependencies,
