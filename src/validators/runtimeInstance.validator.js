@@ -145,6 +145,12 @@ const executeRuntimeActionSchema = z.object({
     .min(1, 'sectionKey must not be empty')
     .max(120, 'sectionKey must be 120 characters or fewer')
     .optional(),
+  forceRegenerateReason: z
+    .string()
+    .trim()
+    .min(1, 'forceRegenerateReason must not be empty')
+    .max(500, 'forceRegenerateReason must be 500 characters or fewer')
+    .optional(),
 }).strict()
 
 const GENERATION_RUNTIME_ACTIONS = new Set(['GENERATE_SECTION', 'REGENERATE_SECTION'])
@@ -164,6 +170,7 @@ const buildExecuteRuntimeActionSchema = (actionKey) => executeRuntimeActionSchem
   const hasRuntimePath = data.runtimePath !== undefined
   const hasSectionKey = data.sectionKey !== undefined
   const hasInputs = data.inputs !== undefined
+  const hasForceRegenerateReason = data.forceRegenerateReason !== undefined
 
   if (GENERATION_RUNTIME_ACTIONS.has(actionKey)) {
     if (!hasRuntimePath && !hasSectionKey) {
@@ -190,6 +197,14 @@ const buildExecuteRuntimeActionSchema = (actionKey) => executeRuntimeActionSchem
       code: z.ZodIssueCode.custom,
       path: ['_root'],
       message: 'runtimePath and sectionKey are only allowed for generation actions.',
+    })
+  }
+
+  if (hasForceRegenerateReason && actionKey !== 'REGENERATE_SECTION') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['_root'],
+      message: 'forceRegenerateReason is only allowed for REGENERATE_SECTION.',
     })
   }
 

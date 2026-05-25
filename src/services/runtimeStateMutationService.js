@@ -28,6 +28,7 @@ import {
   getRuntimeSectionGenerated,
   getRuntimeSectionInput,
   invalidateRuntimeSectionEvidence,
+  isRuntimeSectionObject,
   normalizeRuntimeSectionObject,
   RUNTIME_SECTION_STATES,
 } from './runtimeSectionModelService.js'
@@ -70,6 +71,9 @@ const stableStringify = (value) => {
 }
 
 const hashDiscoveryValue = (value) =>
+  `sha256:${crypto.createHash('sha256').update(stableStringify(value)).digest('hex')}`
+
+const hashSectionTruthValue = (value) =>
   `sha256:${crypto.createHash('sha256').update(stableStringify(value)).digest('hex')}`
 
 const normalizeRuntimePath = (value) => String(value || '').trim()
@@ -821,20 +825,188 @@ const buildAcceptedSectionTruth = ({
   actorUserId,
   acceptedAt,
   generated,
+  previousAccepted,
   sectionKey,
   runtimePath,
-}) => ({
-  format: generated.format || 'TEXT',
-  content: cloneValue(generated.content ?? generated),
-  summary: generated.summary || '',
+}) => {
+  const content = cloneValue(generated.content ?? generated)
+  const truthHash = hashSectionTruthValue({
+    content,
+    inputHash: generated.inputHash || '',
+    runtimePath,
+    sectionKey,
+    sourceGeneratedAt: generated.generatedAt || '',
+  })
+  const previousRevisions = Array.isArray(previousAccepted?.revisions)
+    ? previousAccepted.revisions
+    : []
+  const acceptedRevisions = previousAccepted
+    ? [
+        ...previousRevisions,
+        {
+          revisionNumber: previousRevisions.length + 1,
+          accepted: (() => {
+            const snapshot = cloneValue(previousAccepted)
+            if (snapshot && typeof snapshot === 'object') delete snapshot.revisions
+            return snapshot
+          })(),
+          replacedAt: acceptedAt,
+          reason: 'ACCEPTED_TRUTH_REPLACED',
+        },
+      ].slice(-10)
+    : []
+
+  return {
+    format: generated.format || 'TEXT',
+    content,
+    summary: generated.summary || '',
+    truthHash,
+    acceptedAt,
+    acceptedBy: toIdString(actorUserId),
+    sourceActionKey: generated.actionKey || '',
+    sourceGeneratedAt: generated.generatedAt || '',
+    inputHash: generated.inputHash || '',
+    sectionKey,
+    runtimePath,
+    revisions: acceptedRevisions,
+  }
+}
+
+const getDependencySectionKeys = (section = {}) => {
+  const candidates = [
+    section.dependsOnSectionKeys,
+    section.dependencySectionKeys,
+    section.dependsOn,
+  ]
+
+  return candidates
+    .flatMap((candidate) => (Array.isArray(candidate) ? candidate : [candidate]))
+    .map((candidate) => {
+      if (candidate && typeof candidate === 'object') {
+        return normalizeSectionKey(candidate.sectionKey || candidate.key)
+      }
+      return normalizeSectionKey(candidate)
+    })
+    .filter(Boolean)
+}
+
+const appendUnique = (values, nextValue) => {
+  const normalizedNextValue = normalizeSectionKey(nextValue)
+  return [
+    ...new Set([
+      ...(Array.isArray(values) ? values.map(normalizeSectionKey) : []),
+      normalizedNextValue,
+    ].filter(Boolean)),
+  ]
+}
+
+const hasGeneratedOrAcceptedSectionTruth = (sectionObject) => {
+  const generated = getRuntimeSectionGenerated(sectionObject)
+  const accepted = getRuntimeSectionAccepted(sectionObject)
+  return Boolean(
+    String(generated?.content ?? '').trim()
+    || String(accepted?.content ?? '').trim(),
+  )
+}
+
+const applyAcceptedTruthDependencyInvalidations = ({
   acceptedAt,
-  acceptedBy: toIdString(actorUserId),
-  sourceActionKey: generated.actionKey || '',
-  sourceGeneratedAt: generated.generatedAt || '',
-  inputHash: generated.inputHash || '',
-  sectionKey,
-  runtimePath,
-})
+  actorUserId,
+  frameworkPackage,
+  frameworkState,
+  upstreamRuntimePath,
+  upstreamSectionKey,
+} = {}) => {
+  const packageSections = Array.isArray(frameworkPackage?.sections) ? frameworkPackage.sections : []
+  const stateSections = frameworkState?.sections
+  if (!stateSections || typeof stateSections !== 'object' || Array.isArray(stateSections)) return []
+
+  const invalidationRecords = []
+  packageSections.forEach((packageSection) => {
+    const downstreamSectionKey = normalizeSectionKey(packageSection?.sectionKey || packageSection?.key)
+    const downstreamRuntimePath = normalizeRuntimePath(packageSection?.runtimePath)
+    if (!downstreamSectionKey || !downstreamRuntimePath) return
+    if (downstreamSectionKey === upstreamSectionKey) return
+    if (!getDependencySectionKeys(packageSection).includes(upstreamSectionKey)) return
+
+    const stateSectionKey = getRuntimeSectionStateKey({
+      runtimePath: downstreamRuntimePath,
+      sectionKey: downstreamSectionKey,
+    })
+    const previousRawSection = stateSections[stateSectionKey]
+    if (previousRawSection === undefined) return
+
+    const downstreamSection = normalizeRuntimeSectionObject({
+      value: previousRawSection,
+      sectionKey: downstreamSectionKey,
+      runtimePath: downstreamRuntimePath,
+    })
+    if (!isRuntimeSectionObject(downstreamSection) || !hasGeneratedOrAcceptedSectionTruth(downstreamSection)) return
+
+    const previousDependencies = downstreamSection.dependencies || {}
+    const invalidationRecord = {
+      sectionKey: downstreamSectionKey,
+      runtimePath: downstreamRuntimePath,
+      invalidatedBySectionKey: upstreamSectionKey,
+      invalidatedByRuntimePath: upstreamRuntimePath,
+      upstreamAcceptedAt: acceptedAt,
+      invalidatedAt: acceptedAt,
+      invalidatedBy: toIdString(actorUserId),
+      reason: 'UPSTREAM_ACCEPTED_TRUTH_CHANGED',
+    }
+    const previousInvalidations = Array.isArray(previousDependencies.invalidations)
+      ? previousDependencies.invalidations
+      : []
+
+    stateSections[stateSectionKey] = {
+      ...downstreamSection,
+      dependencies: {
+        ...previousDependencies,
+        state: 'DEPENDENCY_CONTEXT_INVALIDATED',
+        reason: 'Accepted upstream section truth changed. Regenerate this section before publish or lock.',
+        invalidatedAt: acceptedAt,
+        invalidatedBySectionKey: upstreamSectionKey,
+        invalidatedByRuntimePath: upstreamRuntimePath,
+        invalidatedSectionKeys: appendUnique(previousDependencies.invalidatedSectionKeys, upstreamSectionKey),
+        invalidations: [
+          ...previousInvalidations,
+          invalidationRecord,
+        ].slice(-10),
+      },
+      state: {
+        ...(downstreamSection.state || {}),
+        dependencyStatus: 'DEPENDENCY_CONTEXT_INVALIDATED',
+        dependencyInvalidatedAt: acceptedAt,
+        needsRegeneration: true,
+      },
+      lineage: {
+        ...(downstreamSection.lineage || {}),
+        dependencyInvalidatedAt: acceptedAt,
+        dependencyInvalidatedBySectionKey: upstreamSectionKey,
+        dependencyInvalidatedByRuntimePath: upstreamRuntimePath,
+      },
+    }
+    invalidationRecords.push(invalidationRecord)
+  })
+
+  return invalidationRecords
+}
+
+const buildDependencyInvalidationAuditDiff = (dependencyInvalidations = []) => {
+  if (!Array.isArray(dependencyInvalidations) || dependencyInvalidations.length === 0) return {}
+
+  return {
+    dependencyInvalidations: dependencyInvalidations.map((invalidation) => ({
+      sectionKey: normalizeSectionKey(invalidation?.sectionKey),
+      runtimePath: normalizeRuntimePath(invalidation?.runtimePath),
+      invalidatedBySectionKey: normalizeSectionKey(invalidation?.invalidatedBySectionKey),
+      invalidatedByRuntimePath: normalizeRuntimePath(invalidation?.invalidatedByRuntimePath),
+      invalidatedAt: invalidation?.invalidatedAt || '',
+      upstreamAcceptedAt: invalidation?.upstreamAcceptedAt || '',
+      reason: normalizeToken(invalidation?.reason),
+    })),
+  }
+}
 
 const resolveRuntimeInstanceForMutation = async ({ actorUserId, runtimeInstanceId, scopes }) => {
   const runtimeInstance = await RuntimeInstance.findOne({
@@ -936,6 +1108,7 @@ const resolveRuntimeInstanceForEvidenceRead = async ({ actorUserId, runtimeInsta
 
 const buildMutationAuditPayload = ({
   actorUserId,
+  additionalDiff = {},
   runtimeInstance,
   runtimePath,
   previousValue,
@@ -967,11 +1140,13 @@ const buildMutationAuditPayload = ({
     frameworkKey: runtimeInstance.frameworkKey,
     packageKey: runtimeInstance.packageKey,
     packageVersion: runtimeInstance.packageVersion,
+    ...additionalDiff,
   },
 })
 
 const logRuntimeStateMutated = async ({
   actorUserId,
+  additionalDiff = {},
   auditRequest,
   runtimeInstance,
   runtimePath,
@@ -983,6 +1158,7 @@ const logRuntimeStateMutated = async ({
 }) => {
   const auditPayload = buildMutationAuditPayload({
     actorUserId,
+    additionalDiff,
     runtimeInstance,
     runtimePath,
     previousValue,
@@ -1127,6 +1303,7 @@ const rollbackRuntimeStateMutation = async ({
 
 const persistMutationWithAudit = async ({
   actorUserId,
+  additionalDiff = {},
   auditRequest,
   runtimeInstance,
   nextFrameworkState,
@@ -1152,6 +1329,7 @@ const persistMutationWithAudit = async ({
         })
         await logRuntimeStateMutated({
           actorUserId,
+          additionalDiff,
           auditRequest,
           runtimeInstance: updatedRuntimeInstance,
           runtimePath,
@@ -1178,6 +1356,7 @@ const persistMutationWithAudit = async ({
   try {
     await logRuntimeStateMutated({
       actorUserId,
+      additionalDiff,
       auditRequest,
       runtimeInstance: updatedRuntimeInstance,
       runtimePath,
@@ -1746,6 +1925,7 @@ export const acceptRuntimeSection = async ({
     actorUserId,
     acceptedAt,
     generated,
+    previousAccepted,
     sectionKey: target.sectionKey,
     runtimePath: target.runtimePath,
   })
@@ -1759,6 +1939,7 @@ export const acceptRuntimeSection = async ({
       status: 'ACCEPTED',
       acceptedAt,
       acceptedBy: toIdString(actorUserId),
+      acceptedTruthHash: accepted.truthHash,
     },
     state: {
       ...(sectionObject.state || {}),
@@ -1766,6 +1947,8 @@ export const acceptRuntimeSection = async ({
       acceptedAt,
       acceptedBy: toIdString(actorUserId),
       acceptedSourceGeneratedAt: generated.generatedAt || '',
+      acceptedTruthHash: accepted.truthHash,
+      acceptedRevisionCount: accepted.revisions.length,
       inputHash: generated.inputHash || '',
     },
     lineage: {
@@ -1776,12 +1959,38 @@ export const acceptRuntimeSection = async ({
       acceptedAt,
       acceptedBy: toIdString(actorUserId),
       sourceGeneratedAt: generated.generatedAt || '',
+      acceptedTruthHash: accepted.truthHash,
       inputHash: generated.inputHash || '',
     },
+    intelligence: {
+      ...(sectionObject.intelligence || {}),
+      acceptedTruth: {
+        state: 'CURRENT',
+        truthHash: accepted.truthHash,
+        acceptedAt,
+        sourceGeneratedAt: generated.generatedAt || '',
+        sourceActionKey: generated.actionKey || '',
+      },
+    },
+    metrics: {
+      ...(sectionObject.metrics || {}),
+      acceptedTruthRevisionCount: accepted.revisions.length,
+      acceptedTruthHash: accepted.truthHash,
+      lastAcceptedAt: acceptedAt,
+    },
   }
+  const dependencyInvalidations = applyAcceptedTruthDependencyInvalidations({
+    acceptedAt,
+    actorUserId,
+    frameworkPackage,
+    frameworkState: nextFrameworkState,
+    upstreamRuntimePath: target.runtimePath,
+    upstreamSectionKey: target.sectionKey,
+  })
 
   const updatedRuntimeInstance = await persistMutationWithAudit({
     actorUserId,
+    additionalDiff: buildDependencyInvalidationAuditDiff(dependencyInvalidations),
     auditRequest,
     runtimeInstance,
     nextFrameworkState,
@@ -1817,6 +2026,7 @@ export const acceptRuntimeSection = async ({
       previousValue: previousAccepted,
       value: cloneValue(accepted),
     },
+    dependencyInvalidations,
   }
 }
 

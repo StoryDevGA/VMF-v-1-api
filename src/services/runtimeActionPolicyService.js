@@ -4,6 +4,7 @@ import {
   getRuntimeSectionInput,
   isRuntimeSectionObject,
 } from './runtimeSectionModelService.js'
+import { evaluateRuntimeSectionTruthReadiness } from './runtimeSectionTruthReadinessService.js'
 
 export const RUNTIME_ACTION_KEYS = Object.freeze({
   SAVE_DISCOVERY_INPUTS: 'SAVE_DISCOVERY_INPUTS',
@@ -344,6 +345,16 @@ export const getRuntimeActionStateGate = ({
     return buildGate(false, 'Approve this runtime with current validation evidence before publishing.')
   }
 
+  if (normalizedAction === RUNTIME_ACTION_KEYS.PUBLISH) {
+    const sectionTruth = evaluateRuntimeSectionTruthReadiness({
+      frameworkPackage,
+      frameworkState: normalizedFrameworkState,
+    })
+    if (!sectionTruth.publishEligible) {
+      return buildGate(false, sectionTruth.reason || 'Accepted section truth is not publish-ready.')
+    }
+  }
+
   if (
     normalizedAction === RUNTIME_ACTION_KEYS.LOCK_RECORD
     && (
@@ -354,6 +365,16 @@ export const getRuntimeActionStateGate = ({
     )
   ) {
     return buildGate(false, 'Publish this runtime with current evidence before locking canonical truth.')
+  }
+
+  if (normalizedAction === RUNTIME_ACTION_KEYS.LOCK_RECORD) {
+    const sectionTruth = evaluateRuntimeSectionTruthReadiness({
+      frameworkPackage,
+      frameworkState: normalizedFrameworkState,
+    })
+    if (!sectionTruth.lockEligible) {
+      return buildGate(false, sectionTruth.reason || 'Accepted section truth is not lock-ready.')
+    }
   }
 
   return buildGate(true)
@@ -695,6 +716,7 @@ const runtimeActionPolicyService = {
   isRuntimeLifecycleTruthImmutable,
   normalizeFrameworkStateForAction,
   normalizeRuntimeActionToken,
+  evaluateRuntimeSectionTruthReadiness,
   validateRuntimeRequiredSections,
 }
 

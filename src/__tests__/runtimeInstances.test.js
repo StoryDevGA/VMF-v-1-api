@@ -573,6 +573,7 @@ let UIContract
 let WorkflowPolicy
 let AuditLog
 let mockRedisClient
+let hashSectionInput
 
 const getAccessTokenForUser = async (user) => {
   const tokens = await tokenService.generateTokens(user)
@@ -612,6 +613,7 @@ beforeAll(async () => {
   UIContract = models.UIContract
   WorkflowPolicy = models.WorkflowPolicy
   AuditLog = models.AuditLog
+  hashSectionInput = (await import('../services/runtimeSectionModelService.js')).hashSectionInput
 })
 
 beforeEach(() => {
@@ -2775,22 +2777,40 @@ describe('Runtime Instance API', () => {
     const persistedSection = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state.sections.customer_problem
     expect(persistedSection.accepted).toEqual(expect.objectContaining({
       content: 'Customer Problem: Proposal creation is slow.',
+      truthHash: expect.stringMatching(/^sha256:/),
       acceptedBy: CUSTOMER_ADMIN_ID,
       sourceActionKey: 'GENERATE_SECTION',
       sourceGeneratedAt: '2026-05-19T08:01:00.000Z',
       inputHash: 'hash-1',
       sectionKey: 'customer_problem',
       runtimePath: 'framework_state.sections.customer_problem',
+      revisions: [],
     }))
+    const acceptedTruthHash = persistedSection.accepted.truthHash
     expect(persistedSection.generated).toEqual(runtimeInstanceDoc.framework_state.sections.customer_problem.generated)
     expect(persistedSection.review).toEqual(expect.objectContaining({
       status: 'ACCEPTED',
       acceptedBy: CUSTOMER_ADMIN_ID,
+      acceptedTruthHash,
     }))
     expect(persistedSection.state).toEqual(expect.objectContaining({
       status: 'ACCEPTED',
       acceptedBy: CUSTOMER_ADMIN_ID,
       acceptedSourceGeneratedAt: '2026-05-19T08:01:00.000Z',
+      acceptedRevisionCount: 0,
+      acceptedTruthHash,
+    }))
+    expect(persistedSection.lineage).toEqual(expect.objectContaining({
+      acceptedTruthHash,
+    }))
+    expect(persistedSection.intelligence.acceptedTruth).toEqual(expect.objectContaining({
+      state: 'CURRENT',
+      truthHash: acceptedTruthHash,
+      sourceActionKey: 'GENERATE_SECTION',
+    }))
+    expect(persistedSection.metrics).toEqual(expect.objectContaining({
+      acceptedTruthRevisionCount: 0,
+      acceptedTruthHash,
     }))
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'RUNTIME_STATE_MUTATED',
@@ -2810,8 +2830,245 @@ describe('Runtime Instance API', () => {
       runtimePath: 'framework_state.sections.customer_problem',
       accepted: expect.objectContaining({
         content: 'Customer Problem: Proposal creation is slow.',
+        truthHash: acceptedTruthHash,
       }),
       previousAccepted: null,
+    }))
+  })
+
+  test('PATCH /api/v1/runtime-instances/:id/section-acceptance preserves previous accepted truth lineage', async () => {
+    const previousAccepted = {
+      format: 'TEXT',
+      content: 'Customer Problem: Earlier accepted truth.',
+      summary: 'Older accepted summary.',
+      truthHash: 'sha256:previous-accepted-truth',
+      acceptedAt: '2026-05-19T07:45:00.000Z',
+      acceptedBy: CUSTOMER_ADMIN_ID,
+      sourceActionKey: 'GENERATE_SECTION',
+      sourceGeneratedAt: '2026-05-19T07:40:00.000Z',
+      inputHash: 'hash-old',
+      sectionKey: 'customer_problem',
+      runtimePath: 'framework_state.sections.customer_problem',
+      revisions: [],
+    }
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: {
+            input: 'Proposal creation is still slow.',
+            generated: {
+              format: 'TEXT',
+              content: 'Customer Problem: Proposal creation is still slow.',
+              summary: 'Generated from updated runtime input.',
+              generatedAt: '2026-05-19T08:01:00.000Z',
+              actionKey: 'REGENERATE_SECTION',
+              inputHash: 'hash-new',
+            },
+            accepted: previousAccepted,
+            review: {
+              status: 'PENDING_REVIEW',
+            },
+            state: {
+              status: 'REGENERATED',
+              revisionCount: 1,
+              acceptedRevisionCount: 0,
+            },
+            lineage: {
+              sectionKey: 'customer_problem',
+              runtimePath: 'framework_state.sections.customer_problem',
+            },
+            revisions: [],
+          },
+        },
+        validation: {},
+        readiness: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:02:00.000Z'),
+    }))
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
+    RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimePathRecord()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-acceptance`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.customer_problem',
+        sectionKey: 'customer_problem',
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+      })
+
+    expect(res.status).toBe(200)
+    const persistedSection = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state.sections.customer_problem
+    expect(persistedSection.accepted).toEqual(expect.objectContaining({
+      content: 'Customer Problem: Proposal creation is still slow.',
+      truthHash: expect.stringMatching(/^sha256:/),
+      sourceActionKey: 'REGENERATE_SECTION',
+      sourceGeneratedAt: '2026-05-19T08:01:00.000Z',
+      inputHash: 'hash-new',
+      revisions: [
+        expect.objectContaining({
+          revisionNumber: 1,
+          reason: 'ACCEPTED_TRUTH_REPLACED',
+          accepted: expect.objectContaining({
+            content: 'Customer Problem: Earlier accepted truth.',
+            truthHash: 'sha256:previous-accepted-truth',
+          }),
+        }),
+      ],
+    }))
+    expect(persistedSection.accepted.revisions[0].accepted.revisions).toBeUndefined()
+    expect(persistedSection.state).toEqual(expect.objectContaining({
+      acceptedRevisionCount: 1,
+      acceptedTruthHash: persistedSection.accepted.truthHash,
+    }))
+    expect(persistedSection.metrics).toEqual(expect.objectContaining({
+      acceptedTruthRevisionCount: 1,
+      acceptedTruthHash: persistedSection.accepted.truthHash,
+    }))
+  })
+
+  test('PATCH /api/v1/runtime-instances/:id/section-acceptance records downstream dependency invalidation', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: {
+            input: 'Proposal creation is slow.',
+            generated: {
+              format: 'TEXT',
+              content: 'Customer Problem: Proposal creation is slow.',
+              summary: 'Generated from current runtime input.',
+              generatedAt: '2026-05-19T08:01:00.000Z',
+              actionKey: 'GENERATE_SECTION',
+              inputHash: 'hash-1',
+            },
+            accepted: null,
+            review: { status: 'PENDING_REVIEW' },
+            state: { status: 'GENERATED', revisionCount: 0 },
+            lineage: {
+              sectionKey: 'customer_problem',
+              runtimePath: 'framework_state.sections.customer_problem',
+            },
+            revisions: [],
+          },
+          value_drivers: {
+            input: 'Reduce proposal cycle time.',
+            generated: {
+              format: 'TEXT',
+              content: 'Value Drivers: Reduce proposal cycle time.',
+              generatedAt: '2026-05-19T07:40:00.000Z',
+              actionKey: 'GENERATE_SECTION',
+              inputHash: 'hash-value-drivers',
+            },
+            accepted: {
+              content: 'Accepted value drivers truth.',
+              acceptedAt: '2026-05-19T07:45:00.000Z',
+              sourceGeneratedAt: '2026-05-19T07:40:00.000Z',
+              inputHash: 'hash-value-drivers',
+            },
+            review: { status: 'ACCEPTED' },
+            state: { status: 'ACCEPTED', revisionCount: 0 },
+            lineage: {
+              sectionKey: 'value_drivers',
+              runtimePath: 'framework_state.sections.value_drivers',
+            },
+            revisions: [],
+          },
+        },
+        validation: {},
+        readiness: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:02:00.000Z'),
+    }))
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      sections: [
+        {
+          sectionKey: 'customer_problem',
+          runtimePath: 'framework_state.sections.customer_problem',
+          required: true,
+        },
+        {
+          sectionKey: 'value_drivers',
+          runtimePath: 'framework_state.sections.value_drivers',
+          required: true,
+          dependsOnSectionKeys: ['customer_problem'],
+        },
+      ],
+    }))
+    RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimePathRecord()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-acceptance`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.customer_problem',
+        sectionKey: 'customer_problem',
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+      })
+
+    expect(res.status).toBe(200)
+    const persistedSections = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state.sections
+    expect(persistedSections.value_drivers.dependencies).toEqual(expect.objectContaining({
+      state: 'DEPENDENCY_CONTEXT_INVALIDATED',
+      invalidatedBySectionKey: 'customer_problem',
+      invalidatedByRuntimePath: 'framework_state.sections.customer_problem',
+      invalidatedSectionKeys: ['customer_problem'],
+      invalidations: [
+        expect.objectContaining({
+          sectionKey: 'value_drivers',
+          runtimePath: 'framework_state.sections.value_drivers',
+          invalidatedBySectionKey: 'customer_problem',
+          invalidatedByRuntimePath: 'framework_state.sections.customer_problem',
+          reason: 'UPSTREAM_ACCEPTED_TRUTH_CHANGED',
+        }),
+      ],
+    }))
+    expect(persistedSections.value_drivers.state).toEqual(expect.objectContaining({
+      dependencyStatus: 'DEPENDENCY_CONTEXT_INVALIDATED',
+      needsRegeneration: true,
+    }))
+    expect(res.body.data.dependencyInvalidations).toEqual([
+      expect.objectContaining({
+        sectionKey: 'value_drivers',
+        runtimePath: 'framework_state.sections.value_drivers',
+        invalidatedBySectionKey: 'customer_problem',
+      }),
+    ])
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'RUNTIME_STATE_MUTATED',
+      diff: expect.objectContaining({
+        runtimePath: 'framework_state.sections.customer_problem',
+        dependencyInvalidations: [
+          expect.objectContaining({
+            sectionKey: 'value_drivers',
+            runtimePath: 'framework_state.sections.value_drivers',
+            invalidatedBySectionKey: 'customer_problem',
+            invalidatedByRuntimePath: 'framework_state.sections.customer_problem',
+            reason: 'UPSTREAM_ACCEPTED_TRUTH_CHANGED',
+          }),
+        ],
+      }),
     }))
   })
 
@@ -4502,7 +4759,21 @@ describe('Runtime Instance API', () => {
           approvedBy: CUSTOMER_ADMIN_ID,
         },
         sections: {
-          customer_problem: 'Proposal creation is slow.',
+          customer_problem: {
+            input: 'Proposal creation is slow.',
+            generated: {
+              content: 'Customer Problem: Proposal creation is slow.',
+              generatedAt: '2026-05-19T07:58:00.000Z',
+            },
+            accepted: {
+              content: 'Customer Problem: Proposal creation is slow.',
+              acceptedAt: '2026-05-19T07:59:00.000Z',
+              acceptedBy: CUSTOMER_ADMIN_ID,
+              sourceGeneratedAt: '2026-05-19T07:58:00.000Z',
+            },
+            review: { status: 'ACCEPTED' },
+            state: { status: 'ACCEPTED' },
+          },
         },
         validation: {
           runtime_required_sections: {
@@ -4567,6 +4838,61 @@ describe('Runtime Instance API', () => {
       published: true,
       outputEligible: true,
     }))
+  })
+
+  test('rejects PUBLISH when accepted section truth is missing', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: {
+          stage: 'APPROVED',
+          approvedAt: '2026-05-19T08:00:00.000Z',
+          approvedBy: CUSTOMER_ADMIN_ID,
+        },
+        sections: {
+          customer_problem: 'Proposal creation is slow.',
+        },
+        validation: {
+          runtime_required_sections: {
+            is_valid: true,
+            status: 'PASSED',
+          },
+        },
+        readiness: {
+          state: 'APPROVED',
+          approved: true,
+          approvedAt: '2026-05-19T08:00:00.000Z',
+          approvedBy: CUSTOMER_ADMIN_ID,
+          ready: true,
+          validationState: 'PASSED',
+        },
+        publish: {},
+        lock: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('PUBLISH')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('PUBLISH')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('PUBLISH')]))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/PUBLISH`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('RUNTIME_ACTION_NOT_AVAILABLE')
+    expect(res.body.error.details.disabledReason).toBe('Accepted section truth is missing.')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
   })
 
   test('rejects PUBLISH before approval evidence exists', async () => {
@@ -4674,7 +5000,21 @@ describe('Runtime Instance API', () => {
           publishedBy: CUSTOMER_ADMIN_ID,
         },
         sections: {
-          customer_problem: 'Proposal creation is slow.',
+          customer_problem: {
+            input: 'Proposal creation is slow.',
+            generated: {
+              content: 'Customer Problem: Proposal creation is slow.',
+              generatedAt: '2026-05-19T07:58:00.000Z',
+            },
+            accepted: {
+              content: 'Customer Problem: Proposal creation is slow.',
+              acceptedAt: '2026-05-19T07:59:00.000Z',
+              acceptedBy: CUSTOMER_ADMIN_ID,
+              sourceGeneratedAt: '2026-05-19T07:58:00.000Z',
+            },
+            review: { status: 'ACCEPTED' },
+            state: { status: 'ACCEPTED' },
+          },
         },
         validation: {
           runtime_required_sections: {
@@ -4762,6 +5102,91 @@ describe('Runtime Instance API', () => {
       executionStatus: 'COMPLETE',
       lockedAt: expect.any(String),
     }))
+  })
+
+  test('rejects LOCK_RECORD when accepted section truth is stale', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: {
+          stage: 'PUBLISHED',
+          publishedAt: '2026-05-19T08:00:00.000Z',
+          publishedBy: CUSTOMER_ADMIN_ID,
+        },
+        sections: {
+          customer_problem: {
+            input: 'Proposal creation is slow after a packaging change.',
+            generated: {
+              content: 'Customer Problem: Proposal creation is slow.',
+              generatedAt: '2026-05-19T07:58:00.000Z',
+              inputHash: 'hash-before-change',
+            },
+            accepted: {
+              content: 'Customer Problem: Proposal creation is slow.',
+              acceptedAt: '2026-05-19T07:59:00.000Z',
+              acceptedBy: CUSTOMER_ADMIN_ID,
+              sourceGeneratedAt: '2026-05-19T07:58:00.000Z',
+              inputHash: 'hash-before-change',
+            },
+            review: { status: 'ACCEPTED' },
+            state: { status: 'ACCEPTED' },
+          },
+        },
+        validation: {
+          runtime_required_sections: {
+            is_valid: true,
+            status: 'PASSED',
+          },
+        },
+        readiness: {
+          state: 'PUBLISHED',
+          published: true,
+          ready: true,
+          validationState: 'PASSED',
+        },
+        publish: {
+          state: 'PUBLISHED',
+          published: true,
+          publishedAt: '2026-05-19T08:00:00.000Z',
+          publishedBy: CUSTOMER_ADMIN_ID,
+          outputEligible: true,
+          sourceApproval: {
+            approvedAt: '2026-05-19T07:55:00.000Z',
+            approvedBy: CUSTOMER_ADMIN_ID,
+          },
+          evidence: {
+            activationId: 'activation-vmf-2-3-1-001',
+            deploymentId: 'deployment-vmf-global-production-001',
+            dependencySnapshotId: 'dep-lock-vmf-standard-2-3-1',
+            dependencySnapshotHash: 'hash-vmf-standard-2-3-1',
+          },
+        },
+        lock: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('LOCK_RECORD')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('LOCK_RECORD')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('LOCK_RECORD')]))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/LOCK_RECORD`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('RUNTIME_ACTION_NOT_AVAILABLE')
+    expect(res.body.error.details.disabledReason).toBe('Accepted section truth is not aligned with current generated content.')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
   })
 
   test('rejects LOCK_RECORD before publish evidence exists', async () => {
@@ -5388,6 +5813,290 @@ describe('Runtime Instance API', () => {
     }))
   })
 
+  test('rejects unchanged REGENERATE_SECTION before persistence', async () => {
+    const unchangedInput = 'Proposal creation is slow.'
+    const previousGenerated = {
+      content: 'Customer Problem: Proposal creation is slow.',
+      generatedAt: '2026-05-19T07:55:00.000Z',
+      actionKey: 'GENERATE_SECTION',
+      inputHash: hashSectionInput(unchangedInput),
+      generator: {
+        mode: 'DETERMINISTIC_TEMPLATE',
+        adapter: 'runtime-section-template-v1',
+        packageKey: 'vmf-standard-2-3-1',
+        packageVersion: '2.3.1',
+      },
+    }
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: {
+            input: unchangedInput,
+            generated: previousGenerated,
+            review: { status: 'PENDING_REVIEW' },
+            state: { status: 'GENERATED', revisionCount: 0 },
+            lineage: {
+              sectionKey: 'customer_problem',
+              runtimePath: 'framework_state.sections.customer_problem',
+            },
+            dependencies: {
+              state: 'SATISFIED',
+              requiredSectionKeys: [],
+              satisfiedSectionKeys: [],
+              missingSectionKeys: [],
+              invalidatedSectionKeys: [],
+            },
+            revisions: [],
+          },
+        },
+        validation: {},
+        readiness: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('REGENERATE_SECTION')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('REGENERATE_SECTION')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('REGENERATE_SECTION')]))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/REGENERATE_SECTION`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+        sectionKey: 'customer_problem',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('RUNTIME_ACTION_NOT_AVAILABLE')
+    expect(res.body.error.details.disabledReason).toBe(
+      'Section regeneration is blocked because input, dependency, package, and style context are unchanged.',
+    )
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('allows REGENERATE_SECTION when upstream accepted truth is newer than legacy dependency metadata', async () => {
+    const unchangedInput = 'Reduce proposal cycle time.'
+    const previousGenerated = {
+      content: 'Value Drivers: Reduce proposal cycle time.',
+      generatedAt: '2026-05-19T07:40:00.000Z',
+      actionKey: 'GENERATE_SECTION',
+      inputHash: hashSectionInput(unchangedInput),
+      generator: {
+        mode: 'DETERMINISTIC_TEMPLATE',
+        adapter: 'runtime-section-template-v1',
+        packageKey: 'vmf-standard-2-3-1',
+        packageVersion: '2.3.1',
+      },
+    }
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: {
+            input: 'Proposal creation is slow.',
+            generated: {
+              content: 'Customer Problem: Proposal creation is slow.',
+              generatedAt: '2026-05-19T08:01:00.000Z',
+              actionKey: 'GENERATE_SECTION',
+              inputHash: 'hash-customer-problem',
+            },
+            accepted: {
+              content: 'Accepted customer problem truth.',
+              acceptedAt: '2026-05-19T08:05:00.000Z',
+              sourceGeneratedAt: '2026-05-19T08:01:00.000Z',
+              inputHash: 'hash-customer-problem',
+            },
+            review: { status: 'ACCEPTED' },
+            state: { status: 'ACCEPTED', revisionCount: 0 },
+            lineage: {
+              sectionKey: 'customer_problem',
+              runtimePath: 'framework_state.sections.customer_problem',
+            },
+            revisions: [],
+          },
+          value_drivers: {
+            input: unchangedInput,
+            generated: previousGenerated,
+            accepted: {
+              content: 'Accepted value drivers truth.',
+              acceptedAt: '2026-05-19T07:45:00.000Z',
+              sourceGeneratedAt: '2026-05-19T07:40:00.000Z',
+              inputHash: hashSectionInput(unchangedInput),
+            },
+            review: { status: 'ACCEPTED' },
+            state: { status: 'ACCEPTED', revisionCount: 0 },
+            lineage: {
+              sectionKey: 'value_drivers',
+              runtimePath: 'framework_state.sections.value_drivers',
+            },
+            dependencies: {
+              state: 'SATISFIED',
+              requiredSectionKeys: ['customer_problem'],
+              satisfiedSectionKeys: ['customer_problem'],
+              missingSectionKeys: [],
+              invalidatedSectionKeys: [],
+            },
+            revisions: [],
+          },
+        },
+        validation: {},
+        readiness: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      sections: [
+        {
+          sectionKey: 'customer_problem',
+          runtimePath: 'framework_state.sections.customer_problem',
+          required: true,
+        },
+        {
+          sectionKey: 'value_drivers',
+          runtimePath: 'framework_state.sections.value_drivers',
+          required: true,
+          dependsOnSectionKeys: ['customer_problem'],
+        },
+      ],
+      workflowBindings: [makeWorkflowBinding('REGENERATE_SECTION')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('REGENERATE_SECTION')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('REGENERATE_SECTION')]))
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:06:00.000Z'),
+    }))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/REGENERATE_SECTION`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+        sectionKey: 'value_drivers',
+      })
+
+    expect(res.status).toBe(200)
+    expect(RuntimeInstance.findOneAndUpdate).toHaveBeenCalled()
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      diff: expect.objectContaining({
+        actionKey: 'REGENERATE_SECTION',
+        generation: expect.objectContaining({
+          sectionKey: 'value_drivers',
+          regeneration: expect.objectContaining({
+            forceRegenerateReason: '',
+            invalidatedDependencySectionKeys: ['customer_problem'],
+            reasons: ['DEPENDENCY_CONTEXT_INVALIDATED'],
+          }),
+        }),
+      }),
+    }))
+  })
+
+  test('allows forced REGENERATE_SECTION with a bounded server-recorded reason', async () => {
+    const unchangedInput = 'Proposal creation is slow.'
+    const previousGenerated = {
+      content: 'Customer Problem: Proposal creation is slow.',
+      generatedAt: '2026-05-19T07:55:00.000Z',
+      actionKey: 'GENERATE_SECTION',
+      inputHash: hashSectionInput(unchangedInput),
+      generator: {
+        mode: 'DETERMINISTIC_TEMPLATE',
+        adapter: 'runtime-section-template-v1',
+        packageKey: 'vmf-standard-2-3-1',
+        packageVersion: '2.3.1',
+      },
+    }
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: {
+            input: unchangedInput,
+            generated: previousGenerated,
+            review: { status: 'PENDING_REVIEW' },
+            state: { status: 'GENERATED', revisionCount: 0 },
+            lineage: {
+              sectionKey: 'customer_problem',
+              runtimePath: 'framework_state.sections.customer_problem',
+            },
+            dependencies: {
+              state: 'SATISFIED',
+              requiredSectionKeys: [],
+              satisfiedSectionKeys: [],
+              missingSectionKeys: [],
+              invalidatedSectionKeys: [],
+            },
+            revisions: [],
+          },
+        },
+        validation: {},
+        readiness: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('REGENERATE_SECTION')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('REGENERATE_SECTION')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('REGENERATE_SECTION')]))
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+    }))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/REGENERATE_SECTION`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+        sectionKey: 'customer_problem',
+        forceRegenerateReason: 'Customer requested wording review.',
+      })
+
+    expect(res.status).toBe(200)
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      diff: expect.objectContaining({
+        generation: expect.objectContaining({
+          sectionKey: 'customer_problem',
+          regeneration: expect.objectContaining({
+            forceRegenerateReason: 'Customer requested wording review.',
+            reasons: ['FORCED_REGENERATE_REASON'],
+          }),
+        }),
+      }),
+    }))
+  })
+
   test('rejects REGENERATE_SECTION before generated content exists', async () => {
     const runtimeInstanceDoc = makeRuntimeInstanceDocument({
       updatedAt: new Date('2026-05-19T08:00:00.000Z'),
@@ -5467,6 +6176,25 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(422)
     expect(res.body.error.details._root).toBe('runtimePath and sectionKey are only allowed for generation actions.')
+    expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('rejects force regenerate reason outside REGENERATE_SECTION', async () => {
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/GENERATE_SECTION`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+        sectionKey: 'customer_problem',
+        forceRegenerateReason: 'Force review.',
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details._root).toBe('forceRegenerateReason is only allowed for REGENERATE_SECTION.')
     expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
     expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
     expect(AuditLog.createLog).not.toHaveBeenCalled()
@@ -5952,7 +6680,21 @@ describe('Runtime Instance API', () => {
         publishedBy: CUSTOMER_ADMIN_ID,
       },
       sections: {
-        customer_problem: 'Proposal creation is slow.',
+        customer_problem: {
+          input: 'Proposal creation is slow.',
+          generated: {
+            content: 'Customer Problem: Proposal creation is slow.',
+            generatedAt: '2026-05-19T07:58:00.000Z',
+          },
+          accepted: {
+            content: 'Customer Problem: Proposal creation is slow.',
+            acceptedAt: '2026-05-19T07:59:00.000Z',
+            acceptedBy: CUSTOMER_ADMIN_ID,
+            sourceGeneratedAt: '2026-05-19T07:58:00.000Z',
+          },
+          review: { status: 'ACCEPTED' },
+          state: { status: 'ACCEPTED' },
+        },
       },
       validation: {
         runtime_required_sections: {
@@ -6281,10 +7023,22 @@ describe('Runtime Instance API', () => {
             },
             accepted: {
               content: 'Accepted customer problem truth.',
+              truthHash: 'sha256:accepted-customer-problem-truth',
               acceptedAt: '2026-05-19T08:02:00.000Z',
               acceptedBy: CUSTOMER_ADMIN_ID,
               sourceGeneratedAt: '2026-05-19T08:01:00.000Z',
               inputHash: 'hash-1',
+              revisions: [
+                {
+                  revisionNumber: 1,
+                  replacedAt: '2026-05-19T08:02:00.000Z',
+                  reason: 'ACCEPTED_TRUTH_REPLACED',
+                  accepted: {
+                    content: 'Earlier accepted truth.',
+                    truthHash: 'sha256:earlier-truth',
+                  },
+                },
+              ],
             },
             review: {
               status: 'ACCEPTED',
@@ -6310,8 +7064,481 @@ describe('Runtime Instance API', () => {
     }))
     expect(res.body.data.sections[0].accepted).toEqual(expect.objectContaining({
       content: 'Accepted customer problem truth.',
+      truthHash: 'sha256:accepted-customer-problem-truth',
       acceptedBy: CUSTOMER_ADMIN_ID,
       sourceGeneratedAt: '2026-05-19T08:01:00.000Z',
+    }))
+    expect(res.body.data.sections[0].acceptedRevisions).toEqual([
+      expect.objectContaining({
+        revisionNumber: 1,
+        reason: 'ACCEPTED_TRUTH_REPLACED',
+        accepted: expect.objectContaining({
+          content: 'Earlier accepted truth.',
+          truthHash: 'sha256:earlier-truth',
+        }),
+      }),
+    ])
+  })
+
+  test('projects governed section intelligence from accepted truth, discovery, dependencies, and validation', async () => {
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: makeReadyDiscoveryEvidencePack({
+          accepted: true,
+          state: {
+            status: 'ACCEPTED',
+            inputComplete: true,
+            evidenceReady: true,
+            accepted: true,
+          },
+          scoped_views: {
+            customer_problem: {
+              summary: 'Proposal teams need a shared governed narrative.',
+              sourceRefs: ['input_companyWebsite'],
+            },
+          },
+        }),
+        sections: {
+          customer_problem: {
+            input: 'Proposal creation is slow.',
+            generated: {
+              content: 'Customer Problem: Proposal creation is slow.',
+              generatedAt: '2026-05-19T08:01:00.000Z',
+              generator: {
+                mode: 'DETERMINISTIC_TEMPLATE',
+              },
+            },
+            accepted: {
+              content: 'Customer Problem: Proposal creation is slow.',
+              acceptedAt: '2026-05-19T08:02:00.000Z',
+              acceptedBy: CUSTOMER_ADMIN_ID,
+              sourceGeneratedAt: '2026-05-19T08:01:00.000Z',
+            },
+            review: {
+              status: 'ACCEPTED',
+            },
+            state: {
+              status: 'ACCEPTED',
+            },
+            lineage: {},
+            revisions: [],
+          },
+        },
+        validation: {},
+      },
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.sections[0].intelligence).toEqual(expect.objectContaining({
+      ownershipZones: expect.objectContaining({
+        suggestedFromDiscovery: {
+          available: true,
+          source: 'DISCOVERY_EVIDENCE_PACK',
+        },
+        additionalContext: {
+          available: true,
+        },
+        generatedSection: expect.objectContaining({
+          available: true,
+          generatedAt: '2026-05-19T08:01:00.000Z',
+          generatorMode: 'DETERMINISTIC_TEMPLATE',
+        }),
+        acceptedTruth: expect.objectContaining({
+          available: true,
+          current: true,
+          acceptedAt: '2026-05-19T08:02:00.000Z',
+        }),
+      }),
+      confidence: {
+        level: 'HIGH',
+        score: 90,
+        reasons: [
+          'DISCOVERY_SCOPED_EVIDENCE',
+          'ADDITIONAL_CONTEXT',
+          'GENERATED_CONTENT',
+          'ACCEPTED_TRUTH_CURRENT',
+        ],
+      },
+      dependency: {
+        state: 'NO_SECTION_DEPENDENCIES',
+        requiredSectionKeys: [],
+        satisfiedSectionKeys: [],
+        missingSectionKeys: [],
+        acceptedSectionKeys: [],
+        missingAcceptedTruthSectionKeys: [],
+        invalidatedSectionKeys: [],
+        dependencyInvalidationRecords: [],
+        lastInvalidatedAt: '',
+        invalidatedBySectionKey: '',
+        invalidatedByRuntimePath: '',
+      },
+      compare: expect.objectContaining({
+        state: 'GENERATED_MATCHES_ACCEPTED_TRUTH',
+        currentGeneratedAccepted: true,
+        hasGenerated: true,
+        hasAccepted: true,
+      }),
+      readiness: {
+        state: 'ACCEPTED_TRUTH_READY',
+        publishEligible: true,
+        reason: '',
+        blockingValidationCount: 0,
+      },
+      generationControls: {
+        tokenProfile: 'SECTION_SCOPED_BOUNDED',
+        fullVmfSynthesisAllowed: false,
+        runtimeOutputExpansionAllowed: false,
+      },
+    }))
+    expect(res.body.data.sections[0].confidence).toEqual(res.body.data.sections[0].intelligence.confidence)
+    expect(res.body.data.sections[0].signals).toBeUndefined()
+  })
+
+  test('marks generated and accepted truth stale when section input changed after generation', async () => {
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: {
+            input: 'Proposal creation became slow after a pricing change.',
+            generated: {
+              content: 'Customer Problem: Proposal creation is slow.',
+              generatedAt: '2026-05-19T08:01:00.000Z',
+              inputHash: 'hash-before-input-change',
+            },
+            accepted: {
+              content: 'Customer Problem: Proposal creation is slow.',
+              acceptedAt: '2026-05-19T08:02:00.000Z',
+              acceptedBy: CUSTOMER_ADMIN_ID,
+              sourceGeneratedAt: '2026-05-19T08:01:00.000Z',
+              inputHash: 'hash-before-input-change',
+            },
+            review: {
+              status: 'ACCEPTED',
+            },
+            state: {
+              status: 'ACCEPTED',
+            },
+            lineage: {},
+            revisions: [],
+          },
+        },
+        validation: {},
+      },
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.sections[0].compare).toEqual(expect.objectContaining({
+      state: 'GENERATED_STALE_AGAINST_INPUT',
+      currentGeneratedAccepted: false,
+      generatedStaleAgainstInput: true,
+      hasGenerated: true,
+      hasAccepted: true,
+    }))
+    expect(res.body.data.sections[0].readiness).toEqual({
+      state: 'REGENERATION_REQUIRED',
+      publishEligible: false,
+      reason: 'Section input changed after generation. Regenerate before accepting or publishing truth.',
+      blockingValidationCount: 0,
+    })
+    expect(res.body.data.sections[0].confidence).toEqual(expect.objectContaining({
+      level: 'LOW',
+      reasons: expect.arrayContaining([
+        'ADDITIONAL_CONTEXT',
+        'GENERATED_CONTENT',
+        'GENERATED_STALE_AGAINST_INPUT',
+        'ACCEPTED_TRUTH_PRESENT',
+      ]),
+    }))
+  })
+
+  test('marks downstream section truth stale when upstream accepted truth changed after generation', async () => {
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      sections: [
+        {
+          sectionKey: 'customer_problem',
+          runtimePath: 'framework_state.sections.customer_problem',
+          required: true,
+          validationKeys: ['required-sections-check'],
+        },
+        {
+          sectionKey: 'value_drivers',
+          runtimePath: 'framework_state.sections.value_drivers',
+          required: true,
+          validationKeys: ['required-sections-check'],
+          dependsOnSectionKeys: ['customer_problem'],
+        },
+      ],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([
+      makeRuntimePathRecord(),
+      makeRuntimePathRecord({
+        stableId: 'path-framework-state-sections-value-drivers',
+        pathKey: 'framework_state.sections.value_drivers',
+        label: 'Value Drivers',
+      }),
+    ]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      sections: [
+        makeUIContract().sections[0],
+        {
+          sectionKey: 'value_drivers',
+          runtimePath: 'framework_state.sections.value_drivers',
+          source: 'PACKAGE',
+          isCustom: false,
+          label: 'Value Drivers',
+          displayOrder: 20,
+          isVisible: true,
+          isEditable: true,
+        },
+      ],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: {
+            input: 'Proposal creation is slow.',
+            generated: {
+              content: 'Customer Problem: Proposal creation is slow.',
+              generatedAt: '2026-05-19T08:04:00.000Z',
+            },
+            accepted: {
+              content: 'Customer Problem: Proposal creation is slow.',
+              acceptedAt: '2026-05-19T08:05:00.000Z',
+              acceptedBy: CUSTOMER_ADMIN_ID,
+              sourceGeneratedAt: '2026-05-19T08:04:00.000Z',
+            },
+            review: {
+              status: 'ACCEPTED',
+            },
+            state: {
+              status: 'ACCEPTED',
+            },
+          },
+          value_drivers: {
+            input: 'Reduce proposal effort and improve narrative consistency.',
+            generated: {
+              content: 'Value Drivers: Reduce proposal effort and improve narrative consistency.',
+              generatedAt: '2026-05-19T08:01:00.000Z',
+            },
+            accepted: {
+              content: 'Value Drivers: Reduce proposal effort and improve narrative consistency.',
+              acceptedAt: '2026-05-19T08:02:00.000Z',
+              acceptedBy: CUSTOMER_ADMIN_ID,
+              sourceGeneratedAt: '2026-05-19T08:01:00.000Z',
+            },
+            review: {
+              status: 'ACCEPTED',
+            },
+            state: {
+              status: 'ACCEPTED',
+            },
+            dependencies: {
+              state: 'DEPENDENCY_CONTEXT_INVALIDATED',
+              invalidatedAt: '2026-05-19T08:05:00.000Z',
+              invalidatedBySectionKey: 'customer_problem',
+              invalidatedByRuntimePath: 'framework_state.sections.customer_problem',
+              invalidatedSectionKeys: ['customer_problem'],
+              invalidations: [
+                {
+                  sectionKey: 'value_drivers',
+                  runtimePath: 'framework_state.sections.value_drivers',
+                  invalidatedBySectionKey: 'customer_problem',
+                  invalidatedByRuntimePath: 'framework_state.sections.customer_problem',
+                  upstreamAcceptedAt: '2026-05-19T08:05:00.000Z',
+                  invalidatedAt: '2026-05-19T08:05:00.000Z',
+                  invalidatedBy: CUSTOMER_ADMIN_ID,
+                  reason: 'UPSTREAM_ACCEPTED_TRUTH_CHANGED',
+                },
+              ],
+            },
+          },
+        },
+        validation: {},
+      },
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    const valueDrivers = res.body.data.sections.find((section) => section.sectionKey === 'value_drivers')
+    expect(valueDrivers.dependency).toEqual({
+      state: 'DEPENDENCY_CONTEXT_INVALIDATED',
+      requiredSectionKeys: ['customer_problem'],
+      satisfiedSectionKeys: ['customer_problem'],
+      missingSectionKeys: [],
+      acceptedSectionKeys: ['customer_problem'],
+      missingAcceptedTruthSectionKeys: [],
+      invalidatedSectionKeys: ['customer_problem'],
+      dependencyInvalidationRecords: [
+        expect.objectContaining({
+          sectionKey: 'value_drivers',
+          invalidatedBySectionKey: 'customer_problem',
+          reason: 'UPSTREAM_ACCEPTED_TRUTH_CHANGED',
+        }),
+      ],
+      lastInvalidatedAt: '2026-05-19T08:05:00.000Z',
+      invalidatedBySectionKey: 'customer_problem',
+      invalidatedByRuntimePath: 'framework_state.sections.customer_problem',
+    })
+    expect(valueDrivers.compare).toEqual(expect.objectContaining({
+      state: 'GENERATED_MATCHES_ACCEPTED_TRUTH',
+      currentGeneratedAccepted: true,
+    }))
+    expect(valueDrivers.readiness).toEqual({
+      state: 'REGENERATION_REQUIRED',
+      publishEligible: false,
+      reason: 'Accepted upstream section truth changed. Regenerate this section before publish or lock.',
+      blockingValidationCount: 0,
+    })
+    expect(valueDrivers.confidence).toEqual(expect.objectContaining({
+      level: 'LOW',
+      reasons: expect.arrayContaining([
+        'ADDITIONAL_CONTEXT',
+        'GENERATED_CONTENT',
+        'ACCEPTED_TRUTH_CURRENT',
+        'DEPENDENCY_CONTEXT_INVALIDATED',
+      ]),
+    }))
+  })
+
+  test('blocks downstream publish readiness when upstream accepted truth is missing', async () => {
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      sections: [
+        {
+          sectionKey: 'customer_problem',
+          runtimePath: 'framework_state.sections.customer_problem',
+          required: true,
+          validationKeys: ['required-sections-check'],
+        },
+        {
+          sectionKey: 'value_drivers',
+          runtimePath: 'framework_state.sections.value_drivers',
+          required: true,
+          validationKeys: ['required-sections-check'],
+          dependsOnSectionKeys: ['customer_problem'],
+        },
+      ],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([
+      makeRuntimePathRecord(),
+      makeRuntimePathRecord({
+        stableId: 'path-framework-state-sections-value-drivers',
+        pathKey: 'framework_state.sections.value_drivers',
+        label: 'Value Drivers',
+      }),
+    ]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      sections: [
+        makeUIContract().sections[0],
+        {
+          sectionKey: 'value_drivers',
+          runtimePath: 'framework_state.sections.value_drivers',
+          source: 'PACKAGE',
+          isCustom: false,
+          label: 'Value Drivers',
+          displayOrder: 20,
+          isVisible: true,
+          isEditable: true,
+        },
+      ],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: {
+            input: 'Proposal creation is slow.',
+            generated: {
+              content: 'Customer Problem: Proposal creation is slow.',
+              generatedAt: '2026-05-19T08:01:00.000Z',
+            },
+            review: {
+              status: 'PENDING_REVIEW',
+            },
+            state: {
+              status: 'GENERATED',
+            },
+          },
+          value_drivers: {
+            input: 'Reduce proposal effort and improve narrative consistency.',
+            generated: {
+              content: 'Value Drivers: Reduce proposal effort and improve narrative consistency.',
+              generatedAt: '2026-05-19T08:02:00.000Z',
+            },
+            accepted: {
+              content: 'Value Drivers: Reduce proposal effort and improve narrative consistency.',
+              acceptedAt: '2026-05-19T08:03:00.000Z',
+              acceptedBy: CUSTOMER_ADMIN_ID,
+              sourceGeneratedAt: '2026-05-19T08:02:00.000Z',
+            },
+            review: {
+              status: 'ACCEPTED',
+            },
+            state: {
+              status: 'ACCEPTED',
+            },
+          },
+        },
+        validation: {},
+      },
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    const valueDrivers = res.body.data.sections.find((section) => section.sectionKey === 'value_drivers')
+    expect(valueDrivers.dependency).toEqual({
+      state: 'MISSING_ACCEPTED_TRUTH',
+      requiredSectionKeys: ['customer_problem'],
+      satisfiedSectionKeys: ['customer_problem'],
+      missingSectionKeys: [],
+      acceptedSectionKeys: [],
+      missingAcceptedTruthSectionKeys: ['customer_problem'],
+      invalidatedSectionKeys: [],
+      dependencyInvalidationRecords: [],
+      lastInvalidatedAt: '',
+      invalidatedBySectionKey: '',
+      invalidatedByRuntimePath: '',
+    })
+    expect(valueDrivers.readiness).toEqual({
+      state: 'DEPENDENCY_ACCEPTED_TRUTH_MISSING',
+      publishEligible: false,
+      reason: 'Required upstream accepted truth is missing.',
+      blockingValidationCount: 0,
+    })
+    expect(valueDrivers.confidence).toEqual(expect.objectContaining({
+      reasons: expect.arrayContaining([
+        'DEPENDENCY_ACCEPTED_TRUTH_MISSING',
+      ]),
     }))
   })
 

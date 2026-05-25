@@ -8,7 +8,20 @@ export const RUNTIME_SECTION_STATES = Object.freeze({
   REVIEW_PENDING: 'REVIEW_PENDING',
 })
 
-const SECTION_MODEL_KEYS = new Set(['input', 'generated', 'accepted', 'review', 'state', 'lineage', 'revisions'])
+const SECTION_MODEL_KEYS = new Set([
+  'input',
+  'generated',
+  'accepted',
+  'review',
+  'state',
+  'lineage',
+  'revisions',
+  'dependencies',
+  'validation',
+  'confidence',
+  'intelligence',
+  'metrics',
+])
 
 export const cloneSectionValue = (value) => {
   if (value === undefined) return undefined
@@ -43,6 +56,11 @@ export const normalizeRuntimeSectionObject = ({
         ...(isPlainObject(value.lineage) ? value.lineage : {}),
       },
       revisions: Array.isArray(value.revisions) ? value.revisions : [],
+      dependencies: isPlainObject(value.dependencies) ? value.dependencies : {},
+      validation: isPlainObject(value.validation) ? value.validation : {},
+      confidence: isPlainObject(value.confidence) ? value.confidence : {},
+      intelligence: isPlainObject(value.intelligence) ? value.intelligence : {},
+      metrics: isPlainObject(value.metrics) ? value.metrics : {},
     }
   }
 
@@ -60,6 +78,11 @@ export const normalizeRuntimeSectionObject = ({
       runtimePath,
     },
     revisions: [],
+    dependencies: {},
+    validation: {},
+    confidence: {},
+    intelligence: {},
+    metrics: {},
   }
 }
 
@@ -77,6 +100,9 @@ export const getRuntimeSectionRevisions = (value) =>
 
 export const getRuntimeSectionState = (value) =>
   isRuntimeSectionObject(value) && isPlainObject(value.state) ? value.state : {}
+
+export const getRuntimeSectionDependencies = (value) =>
+  isRuntimeSectionObject(value) && isPlainObject(value.dependencies) ? value.dependencies : {}
 
 const stableStringify = (value) => {
   if (value === null || value === undefined) return ''

@@ -38,12 +38,15 @@ import {
   normalizeFrameworkStateForAction,
 } from './runtimeActionPolicyService.js'
 import { assertRuntimePermission, getRuntimeInstance } from './runtimeInstanceService.js'
+import { evaluateRuntimeSectionTruthReadiness } from './runtimeSectionTruthReadinessService.js'
 import {
   getRuntimeSectionGenerated,
   getRuntimeSectionAccepted,
+  getRuntimeSectionDependencies,
   getRuntimeSectionInput,
   getRuntimeSectionRevisions,
   getRuntimeSectionState,
+  hashSectionInput,
   isRuntimeSectionObject,
 } from './runtimeSectionModelService.js'
 
@@ -148,6 +151,11 @@ const toIdString = (value) => {
 
 const normalizeToken = (value) => String(value || '').trim().toUpperCase()
 const normalizeKey = (value) => String(value || '').trim().toLowerCase()
+const parseRuntimeTimestamp = (value) => {
+  if (!value) return 0
+  const timestamp = Date.parse(value)
+  return Number.isFinite(timestamp) ? timestamp : 0
+}
 const uniqueTokens = (values = []) => [...new Set(
   (Array.isArray(values) ? values : [])
     .map(normalizeToken)
@@ -412,6 +420,376 @@ export const buildSectionGenerationEligibility = ({
     sources,
     dependencySectionKeys,
     satisfiedDependencySectionKeys: satisfiedDependencies,
+  }
+}
+
+const normalizeComparableSectionContent = (value) => {
+  if (value === null || value === undefined) return ''
+  const candidate = value?.content ?? value
+  if (typeof candidate === 'string') return candidate.trim()
+  return JSON.stringify(cloneProjectionValue(candidate))
+}
+
+const isGeneratedAcceptedCurrent = ({ accepted, generated }) => {
+  if (!accepted || !generated) return false
+
+  const acceptedGeneratedAt = normalizeKey(accepted.sourceGeneratedAt)
+  const generatedAt = normalizeKey(generated.generatedAt)
+  const acceptedInputHash = normalizeKey(accepted.inputHash)
+  const generatedInputHash = normalizeKey(generated.inputHash)
+
+  if (acceptedGeneratedAt && generatedAt && acceptedGeneratedAt !== generatedAt) return false
+  if (acceptedInputHash && generatedInputHash && acceptedInputHash !== generatedInputHash) return false
+
+  if (acceptedGeneratedAt && generatedAt && acceptedInputHash && generatedInputHash) return true
+
+  return normalizeComparableSectionContent(accepted) === normalizeComparableSectionContent(generated)
+}
+
+const getScopedDiscoveryViewForSection = ({ discovery, runtimePath, sectionKey }) => {
+  const scopedViews = discovery?.scopedViews && typeof discovery.scopedViews === 'object' && !Array.isArray(discovery.scopedViews)
+    ? discovery.scopedViews
+    : {}
+  const runtimePathTail = String(runtimePath || '').split('.').filter(Boolean).pop()
+  const candidates = [
+    sectionKey,
+    runtimePath,
+    runtimePathTail,
+    runtimePathTail?.replace(/_/g, '-'),
+  ]
+    .map(normalizeKey)
+    .filter(Boolean)
+
+  for (const candidate of candidates) {
+    if (Object.prototype.hasOwnProperty.call(scopedViews, candidate)) return scopedViews[candidate]
+  }
+
+  return null
+}
+
+const buildSectionCompareProjection = ({ accepted, generated, input, revisions }) => {
+  const hasGenerated = hasProjectionValue(generated?.content ?? generated)
+  const hasAccepted = hasProjectionValue(accepted?.content ?? accepted)
+  const currentInputHash = hashSectionInput(input)
+  const generatedInputHash = normalizeKey(generated?.inputHash)
+  const generatedStaleAgainstInput = Boolean(hasGenerated && generatedInputHash && currentInputHash !== generatedInputHash)
+  const currentGeneratedAccepted = !generatedStaleAgainstInput && isGeneratedAcceptedCurrent({ accepted, generated })
+  const hasPreviousGeneratedRevision = Array.isArray(revisions) && revisions.some((revision) =>
+    hasProjectionValue(revision?.generated?.content ?? revision?.generated),
+  )
+  let state = 'NO_GENERATED_CONTENT'
+  let summary = 'No generated content is available for comparison.'
+
+  if (generatedStaleAgainstInput) {
+    state = 'GENERATED_STALE_AGAINST_INPUT'
+    summary = 'Section input changed after generation. Regenerate before accepting or publishing truth.'
+  } else if (hasGenerated && !hasAccepted) {
+    state = 'UNACCEPTED_GENERATED_CONTENT'
+    summary = 'Generated content is awaiting accepted truth review.'
+  } else if (hasGenerated && currentGeneratedAccepted) {
+    state = 'GENERATED_MATCHES_ACCEPTED_TRUTH'
+    summary = 'Generated content matches the accepted truth metadata.'
+  } else if (hasGenerated && hasAccepted) {
+    state = 'GENERATED_DIFFERS_FROM_ACCEPTED_TRUTH'
+    summary = 'Generated content differs from the accepted truth and should be reviewed before publish or lock.'
+  } else if (!hasGenerated && hasAccepted) {
+    state = 'ACCEPTED_TRUTH_WITHOUT_CURRENT_GENERATION'
+    summary = 'Accepted truth exists without current generated content metadata.'
+  }
+
+  return {
+    state,
+    summary,
+    currentGeneratedAccepted,
+    generatedStaleAgainstInput,
+    hasGenerated,
+    hasAccepted,
+    hasPreviousGeneratedRevision,
+  }
+}
+
+const buildSectionDependencyProjection = ({
+  accepted,
+  dependencySectionKeys,
+  generationEligibility,
+  generated,
+  sectionDependencies,
+  sectionStates,
+}) => {
+  const requiredSectionKeys = Array.isArray(dependencySectionKeys) ? dependencySectionKeys : []
+  const satisfiedSectionKeys = Array.isArray(generationEligibility?.satisfiedDependencySectionKeys)
+    ? generationEligibility.satisfiedDependencySectionKeys
+    : []
+  const satisfiedSet = new Set(satisfiedSectionKeys)
+  const missingSectionKeys = requiredSectionKeys.filter((sectionKey) => !satisfiedSet.has(sectionKey))
+  const acceptedSectionKeys = []
+  const missingAcceptedTruthSectionKeys = []
+  const persistedInvalidatedSectionKeys = Array.isArray(sectionDependencies?.invalidatedSectionKeys)
+    ? sectionDependencies.invalidatedSectionKeys.map(normalizeKey).filter(Boolean)
+    : []
+  const invalidatedSectionKeys = [...persistedInvalidatedSectionKeys]
+  const dependencyInvalidationRecords = Array.isArray(sectionDependencies?.invalidations)
+    ? sectionDependencies.invalidations.slice(-10)
+    : []
+  const downstreamGeneratedAt = parseRuntimeTimestamp(generated?.generatedAt)
+  const downstreamAcceptedAt = parseRuntimeTimestamp(accepted?.acceptedAt)
+  const downstreamSourceGeneratedAt = parseRuntimeTimestamp(accepted?.sourceGeneratedAt)
+  const downstreamTruthTimestamp = downstreamGeneratedAt || downstreamSourceGeneratedAt || downstreamAcceptedAt
+
+  requiredSectionKeys.forEach((sectionKey) => {
+    const dependencyAccepted = getRuntimeSectionAccepted(sectionStates?.[sectionKey])
+    if (!hasProjectionValue(dependencyAccepted?.content ?? dependencyAccepted)) {
+      missingAcceptedTruthSectionKeys.push(sectionKey)
+      return
+    }
+
+    acceptedSectionKeys.push(sectionKey)
+    const dependencyAcceptedAt = parseRuntimeTimestamp(dependencyAccepted?.acceptedAt)
+    if (
+      dependencyAcceptedAt
+      && downstreamTruthTimestamp
+      && dependencyAcceptedAt > downstreamTruthTimestamp
+      && !invalidatedSectionKeys.includes(sectionKey)
+    ) {
+      invalidatedSectionKeys.push(sectionKey)
+    }
+  })
+
+  return {
+    state: requiredSectionKeys.length === 0
+      ? 'NO_SECTION_DEPENDENCIES'
+      : missingSectionKeys.length > 0
+        ? 'MISSING_CONTEXT'
+        : missingAcceptedTruthSectionKeys.length > 0
+          ? 'MISSING_ACCEPTED_TRUTH'
+          : invalidatedSectionKeys.length > 0
+            ? 'DEPENDENCY_CONTEXT_INVALIDATED'
+            : 'SATISFIED',
+    requiredSectionKeys,
+    satisfiedSectionKeys,
+    missingSectionKeys,
+    acceptedSectionKeys,
+    missingAcceptedTruthSectionKeys,
+    invalidatedSectionKeys,
+    dependencyInvalidationRecords,
+    lastInvalidatedAt: sectionDependencies?.invalidatedAt || '',
+    invalidatedBySectionKey: sectionDependencies?.invalidatedBySectionKey || '',
+    invalidatedByRuntimePath: sectionDependencies?.invalidatedByRuntimePath || '',
+  }
+}
+
+const buildSectionReadinessProjection = ({
+  compare,
+  dependency,
+  validationMessages,
+}) => {
+  const blockingValidationCount = validationMessages
+    .filter((message) => normalizeToken(message?.severity) === 'ERROR')
+    .length
+
+  if (blockingValidationCount > 0) {
+    return {
+      state: 'VALIDATION_BLOCKED',
+      publishEligible: false,
+      reason: 'Section has blocking validation messages.',
+      blockingValidationCount,
+    }
+  }
+
+  if (dependency.state === 'MISSING_CONTEXT') {
+    return {
+      state: 'DEPENDENCY_CONTEXT_MISSING',
+      publishEligible: false,
+      reason: 'Required upstream section context is missing.',
+      blockingValidationCount,
+    }
+  }
+
+  if (dependency.state === 'MISSING_ACCEPTED_TRUTH') {
+    return {
+      state: 'DEPENDENCY_ACCEPTED_TRUTH_MISSING',
+      publishEligible: false,
+      reason: 'Required upstream accepted truth is missing.',
+      blockingValidationCount,
+    }
+  }
+
+  if (dependency.state === 'DEPENDENCY_CONTEXT_INVALIDATED') {
+    return {
+      state: 'REGENERATION_REQUIRED',
+      publishEligible: false,
+      reason: 'Accepted upstream section truth changed. Regenerate this section before publish or lock.',
+      blockingValidationCount,
+    }
+  }
+
+  if (compare.currentGeneratedAccepted) {
+    return {
+      state: 'ACCEPTED_TRUTH_READY',
+      publishEligible: true,
+      reason: '',
+      blockingValidationCount,
+    }
+  }
+
+  if (compare.generatedStaleAgainstInput) {
+    return {
+      state: 'REGENERATION_REQUIRED',
+      publishEligible: false,
+      reason: 'Section input changed after generation. Regenerate before accepting or publishing truth.',
+      blockingValidationCount,
+    }
+  }
+
+  if (compare.hasAccepted) {
+    return {
+      state: 'ACCEPTED_TRUTH_REVIEW_NEEDED',
+      publishEligible: false,
+      reason: 'Accepted truth is not aligned with current generated content.',
+      blockingValidationCount,
+    }
+  }
+
+  if (compare.hasGenerated) {
+    return {
+      state: 'GENERATED_REVIEW_NEEDED',
+      publishEligible: false,
+      reason: 'Generated content must be accepted as governed truth.',
+      blockingValidationCount,
+    }
+  }
+
+  return {
+    state: 'DRAFT_INPUT_NEEDED',
+    publishEligible: false,
+    reason: 'Section needs generated and accepted truth before publish or lock.',
+    blockingValidationCount,
+  }
+}
+
+const buildSectionConfidenceProjection = ({
+  compare,
+  dependency,
+  discoveryScopedView,
+  generationEligibility,
+  readiness,
+}) => {
+  const reasons = []
+  let score = 0
+
+  if (hasProjectionValue(discoveryScopedView)) {
+    score += 20
+    reasons.push('DISCOVERY_SCOPED_EVIDENCE')
+  }
+  if (generationEligibility?.sources?.includes('SECTION_CONTEXT')) {
+    score += 15
+    reasons.push('ADDITIONAL_CONTEXT')
+  }
+  if (compare.hasGenerated) {
+    score += 20
+    reasons.push('GENERATED_CONTENT')
+  }
+  if (compare.generatedStaleAgainstInput) {
+    score = Math.max(0, score - 25)
+    reasons.push('GENERATED_STALE_AGAINST_INPUT')
+  }
+  if (compare.currentGeneratedAccepted) {
+    score += 35
+    reasons.push('ACCEPTED_TRUTH_CURRENT')
+  } else if (compare.hasAccepted) {
+    score += 20
+    reasons.push('ACCEPTED_TRUTH_PRESENT')
+  }
+  if (dependency.state === 'MISSING_CONTEXT') {
+    score = Math.max(0, score - 15)
+    reasons.push('DEPENDENCY_CONTEXT_MISSING')
+  }
+  if (dependency.state === 'MISSING_ACCEPTED_TRUTH') {
+    score = Math.max(0, score - 20)
+    reasons.push('DEPENDENCY_ACCEPTED_TRUTH_MISSING')
+  }
+  if (dependency.state === 'DEPENDENCY_CONTEXT_INVALIDATED') {
+    score = Math.max(0, score - 25)
+    reasons.push('DEPENDENCY_CONTEXT_INVALIDATED')
+  }
+  if (readiness.blockingValidationCount > 0) {
+    score = Math.max(0, score - 20)
+    reasons.push('VALIDATION_BLOCKED')
+  }
+
+  return {
+    level: score >= 80 ? 'HIGH' : score >= 50 ? 'MEDIUM' : score > 0 ? 'LOW' : 'NONE',
+    score,
+    reasons,
+  }
+}
+
+const buildSectionIntelligenceProjection = ({
+  accepted,
+  discovery,
+  generationEligibility,
+  generated,
+  input,
+  sectionDependencies,
+  dependencySectionKeys,
+  revisions,
+  runtimePath,
+  sectionKey,
+  sectionStates,
+  validationMessages,
+}) => {
+  const discoveryScopedView = getScopedDiscoveryViewForSection({ discovery, runtimePath, sectionKey })
+  const compare = buildSectionCompareProjection({ accepted, generated, input, revisions })
+  const dependency = buildSectionDependencyProjection({
+    accepted,
+    dependencySectionKeys,
+    generationEligibility,
+    generated,
+    sectionDependencies,
+    sectionStates,
+  })
+  const readiness = buildSectionReadinessProjection({ compare, dependency, validationMessages })
+  const confidence = buildSectionConfidenceProjection({
+    compare,
+    dependency,
+    discoveryScopedView,
+    generationEligibility,
+    readiness,
+  })
+
+  return {
+    ownershipZones: {
+      suggestedFromDiscovery: {
+        available: hasProjectionValue(discoveryScopedView),
+        source: hasProjectionValue(discoveryScopedView) ? 'DISCOVERY_EVIDENCE_PACK' : '',
+      },
+      additionalContext: {
+        available: hasProjectionValue(input),
+      },
+      generatedSection: {
+        available: compare.hasGenerated,
+        generatedAt: generated?.generatedAt || '',
+        generatorMode: generated?.generator?.mode || '',
+      },
+      acceptedTruth: {
+        available: compare.hasAccepted,
+        current: compare.currentGeneratedAccepted,
+        acceptedAt: accepted?.acceptedAt || '',
+      },
+    },
+    confidence,
+    dependency,
+    compare,
+    readiness,
+    metrics: {
+      revisionCount: Array.isArray(revisions) ? revisions.length : 0,
+      validationMessageCount: validationMessages.length,
+    },
+    generationControls: {
+      tokenProfile: 'SECTION_SCOPED_BOUNDED',
+      fullVmfSynthesisAllowed: false,
+      runtimeOutputExpansionAllowed: false,
+    },
   }
 }
 
@@ -948,6 +1326,8 @@ const buildRendererSections = ({
     const rawSectionValue = getRuntimePathValue(frameworkState, runtimePath)
     const sectionGenerated = getRuntimeSectionGenerated(rawSectionValue)
     const sectionAccepted = getRuntimeSectionAccepted(rawSectionValue)
+    const sectionAcceptedRevisions = Array.isArray(sectionAccepted?.revisions) ? sectionAccepted.revisions : []
+    const sectionDependencies = getRuntimeSectionDependencies(rawSectionValue)
     const sectionRevisions = getRuntimeSectionRevisions(rawSectionValue)
     const sectionState = getRuntimeSectionState(rawSectionValue)
     const dependencySectionKeys = getDependencySectionKeys(packageSection)
@@ -956,6 +1336,22 @@ const buildRendererSections = ({
       discovery,
       frameworkState,
       rawSectionValue,
+    })
+    const sectionInput = getRuntimeSectionInput(rawSectionValue)
+    const validationMessages = buildSectionValidationMessages({ frameworkState, validationKeys })
+    const sectionIntelligence = buildSectionIntelligenceProjection({
+      accepted: sectionAccepted,
+      discovery,
+      generationEligibility,
+      generated: sectionGenerated,
+      input: sectionInput,
+      sectionDependencies,
+      dependencySectionKeys,
+      revisions: sectionRevisions,
+      runtimePath,
+      sectionKey,
+      sectionStates: frameworkState.sections || {},
+      validationMessages,
     })
 
     renderedSections.push({
@@ -971,7 +1367,7 @@ const buildRendererSections = ({
       required: Boolean(packageSection.required),
       helpText: uiSection?.helpText || runtimePathRecord.helpText || '',
       placeholder: uiSection?.placeholder || runtimePathRecord.placeholderText || '',
-      value: getRuntimeSectionInput(rawSectionValue) ?? runtimePathRecord.defaultValue ?? '',
+      value: sectionInput ?? runtimePathRecord.defaultValue ?? '',
       generated: sectionGenerated,
       accepted: sectionAccepted,
       review: isRuntimeSectionObject(rawSectionValue) ? rawSectionValue.review || {} : {},
@@ -981,14 +1377,27 @@ const buildRendererSections = ({
         ...sectionState,
       },
       lineage: isRuntimeSectionObject(rawSectionValue) ? rawSectionValue.lineage || {} : {},
+      dependencies: sectionDependencies,
       revisions: sectionRevisions.map((revision) => ({
         revisionNumber: revision.revisionNumber,
         replacedAt: revision.replacedAt,
         generated: revision.generated || null,
+        accepted: revision.accepted || null,
+      })),
+      acceptedRevisions: sectionAcceptedRevisions.map((revision) => ({
+        revisionNumber: revision.revisionNumber,
+        replacedAt: revision.replacedAt,
+        reason: revision.reason || '',
+        accepted: revision.accepted || null,
       })),
       generationEligibility,
+      intelligence: sectionIntelligence,
+      confidence: sectionIntelligence.confidence,
+      dependency: sectionIntelligence.dependency,
+      compare: sectionIntelligence.compare,
+      readiness: sectionIntelligence.readiness,
       validationKeys,
-      validationMessages: buildSectionValidationMessages({ frameworkState, validationKeys }),
+      validationMessages,
       editable,
       visible: uiVisible,
       readonlyReason: getReadonlyReason({
@@ -1405,7 +1814,7 @@ const buildValidationProjection = ({ frameworkState, sections }) => ({
     .flatMap((section) => Array.isArray(section.validationMessages) ? section.validationMessages : []),
 })
 
-const buildReadinessProjection = (frameworkState = {}) => {
+const buildReadinessProjection = (frameworkState = {}, sectionTruth = null) => {
   const readiness = frameworkState.readiness || {}
   const state = deriveRuntimeReadinessState(frameworkState)
 
@@ -1417,25 +1826,30 @@ const buildReadinessProjection = (frameworkState = {}) => {
     lastActionKey: readiness.lastActionKey || '',
     updatedAt: readiness.updatedAt || null,
     updatedBy: readiness.updatedBy || '',
+    sectionTruth: sectionTruth || {},
   }
 }
 
-const buildPublishProjection = (frameworkState = {}) => {
+const buildPublishProjection = (frameworkState = {}, sectionTruth = null) => {
   const publish = frameworkState.publish || {}
+  const sectionTruthReady = sectionTruth?.publishEligible === true
   return {
     state: publish.state || (publish.published ? 'PUBLISHED' : 'UNPUBLISHED'),
     published: Boolean(publish.published),
     publishedAt: publish.publishedAt || null,
     publishedBy: publish.publishedBy || '',
-    outputEligible: Boolean(publish.outputEligible),
+    outputEligible: Boolean(publish.outputEligible && sectionTruthReady),
+    sectionTruthReady,
+    sectionTruth: sectionTruth || {},
     evidence: publish.evidence || {},
     sourceApproval: publish.sourceApproval || {},
   }
 }
 
-const buildLockProjection = (runtimeInstance = {}, frameworkState = {}) => {
+const buildLockProjection = (runtimeInstance = {}, frameworkState = {}, sectionTruth = null) => {
   const lock = frameworkState.lock || {}
   const lockedAt = runtimeInstance.lockedAt || lock.lockedAt || null
+  const sectionTruthReady = sectionTruth?.lockEligible === true
   return {
     state: lock.state || (lockedAt ? 'LOCKED' : 'UNLOCKED'),
     locked: Boolean(
@@ -1446,6 +1860,9 @@ const buildLockProjection = (runtimeInstance = {}, frameworkState = {}) => {
     lockedAt,
     lockedBy: runtimeInstance.lockedBy || lock.lockedBy || '',
     lockedReason: runtimeInstance.lockedReason || lock.lockedReason || '',
+    lockEligible: sectionTruthReady,
+    sectionTruthReady,
+    sectionTruth: sectionTruth || {},
     evidence: lock.evidence || {},
     anchor: lock.anchor || {},
   }
@@ -1493,6 +1910,10 @@ export const getRuntimeRenderer = async ({
   const workspaceId = runtimeInstance.workspaceId || runtimeInstance.id
   const includeDebugProjection = isRuntimeDebugProjectionAllowed(scopes)
   const activity = await resolveRuntimeActivity(runtimeInstance)
+  const sectionTruth = evaluateRuntimeSectionTruthReadiness({
+    frameworkPackage,
+    frameworkState,
+  })
 
   return {
     rendererContractVersion: RUNTIME_RENDERER_CONTRACT_VERSION,
@@ -1525,9 +1946,9 @@ export const getRuntimeRenderer = async ({
     sections,
     actions,
     validation: buildValidationProjection({ frameworkState, sections }),
-    readiness: buildReadinessProjection(frameworkState),
-    publish: buildPublishProjection(frameworkState),
-    lock: buildLockProjection(runtimeInstance, frameworkState),
+    readiness: buildReadinessProjection(frameworkState, sectionTruth),
+    publish: buildPublishProjection(frameworkState, sectionTruth),
+    lock: buildLockProjection(runtimeInstance, frameworkState, sectionTruth),
     signals: [],
     activity,
     runtimeData: buildRuntimeDataProjection({ includeDebugProjection, sections }),

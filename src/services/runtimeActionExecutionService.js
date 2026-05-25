@@ -31,9 +31,11 @@ import {
   buildDeterministicGeneratedSection,
   buildRuntimeSectionRevision,
   cloneSectionValue,
+  getRuntimeSectionAccepted,
   getRuntimeSectionGenerated,
   getRuntimeSectionInput,
   getRuntimeSectionRevisions,
+  hashSectionInput,
   invalidateRuntimeSectionEvidence,
   normalizeRuntimeSectionObject,
 } from './runtimeSectionModelService.js'
@@ -67,6 +69,156 @@ const serializeErrorDetails = (err) => ({
   message: err?.message || 'Unknown error',
   ...(err?.code ? { code: err.code } : {}),
 })
+
+const normalizeActionString = (value) => String(value || '').trim()
+
+const parseRuntimeTimestamp = (value) => {
+  if (!value) return 0
+  const timestamp = Date.parse(value)
+  return Number.isFinite(timestamp) ? timestamp : 0
+}
+
+const hasRuntimeValue = (value) => {
+  if (value === null || value === undefined) return false
+  if (typeof value === 'string') return value.trim().length > 0
+  if (Array.isArray(value)) return value.length > 0
+  if (typeof value === 'object') return Object.keys(value).length > 0
+  return true
+}
+
+const getGenerationPackageContext = ({ frameworkPackage, runtimeInstance } = {}) => ({
+  packageKey: normalizeActionString(runtimeInstance?.packageKey || frameworkPackage?.packageKey),
+  packageVersion: normalizeActionString(runtimeInstance?.packageVersion || frameworkPackage?.version),
+})
+
+const getGeneratedPackageContext = (generated = {}) => ({
+  packageKey: normalizeActionString(generated?.generator?.packageKey),
+  packageVersion: normalizeActionString(generated?.generator?.packageVersion),
+})
+
+const hasActiveDependencyInvalidation = (sectionObject = {}) => {
+  const dependencies = sectionObject.dependencies || {}
+  return (
+    normalizeRuntimeActionToken(dependencies.state) === 'DEPENDENCY_CONTEXT_INVALIDATED'
+    || (
+      Array.isArray(dependencies.invalidatedSectionKeys)
+      && dependencies.invalidatedSectionKeys.some((sectionKey) => normalizeActionString(sectionKey))
+    )
+  )
+}
+
+const getSectionTruthTimestamp = ({ accepted, generated } = {}) => {
+  const generatedAt = parseRuntimeTimestamp(generated?.generatedAt)
+  const sourceGeneratedAt = parseRuntimeTimestamp(accepted?.sourceGeneratedAt)
+  const acceptedAt = parseRuntimeTimestamp(accepted?.acceptedAt)
+  return generatedAt || sourceGeneratedAt || acceptedAt
+}
+
+const getPackageSectionByKey = ({ frameworkPackage, sectionKey } = {}) => {
+  const normalizedSectionKey = normalizeActionString(sectionKey)
+  return (Array.isArray(frameworkPackage?.sections) ? frameworkPackage.sections : [])
+    .find((section) => normalizeActionString(section?.sectionKey || section?.key) === normalizedSectionKey)
+}
+
+const getFrameworkStateSectionValue = ({ frameworkPackage, frameworkState, sectionKey } = {}) => {
+  const packageSection = getPackageSectionByKey({ frameworkPackage, sectionKey })
+  const stateSectionKey = getRuntimeSectionStateKey({
+    runtimePath: packageSection?.runtimePath,
+    sectionKey,
+  })
+
+  return frameworkState?.sections?.[stateSectionKey] ?? frameworkState?.sections?.[sectionKey]
+}
+
+const getTimestampInvalidatedDependencySectionKeys = ({
+  dependencySectionKeys,
+  frameworkPackage,
+  frameworkState,
+  previousGenerated,
+  sectionObject,
+} = {}) => {
+  const accepted = getRuntimeSectionAccepted(sectionObject)
+  const sectionTruthTimestamp = getSectionTruthTimestamp({
+    accepted,
+    generated: previousGenerated,
+  })
+  if (!sectionTruthTimestamp) return []
+
+  return (Array.isArray(dependencySectionKeys) ? dependencySectionKeys : [])
+    .map(normalizeActionString)
+    .filter(Boolean)
+    .filter((dependencySectionKey) => {
+      const dependencyValue = getFrameworkStateSectionValue({
+        frameworkPackage,
+        frameworkState,
+        sectionKey: dependencySectionKey,
+      })
+      const dependencyAccepted = getRuntimeSectionAccepted(dependencyValue)
+      if (!hasRuntimeValue(dependencyAccepted?.content ?? dependencyAccepted)) return false
+
+      const dependencyAcceptedAt = parseRuntimeTimestamp(dependencyAccepted?.acceptedAt)
+      return dependencyAcceptedAt && dependencyAcceptedAt > sectionTruthTimestamp
+    })
+}
+
+const buildRegenerationEligibility = ({
+  dependencySectionKeys,
+  frameworkPackage,
+  frameworkState,
+  input,
+  payload,
+  previousGenerated,
+  runtimeInstance,
+  sectionObject,
+} = {}) => {
+  const reasons = []
+  const currentInputHash = hashSectionInput(input)
+  const previousInputHash = normalizeActionString(previousGenerated?.inputHash)
+  const forceRegenerateReason = normalizeActionString(payload?.forceRegenerateReason)
+
+  if (forceRegenerateReason) reasons.push('FORCED_REGENERATE_REASON')
+
+  if (!previousInputHash) {
+    reasons.push('MISSING_GENERATION_INPUT_HASH')
+  } else if (currentInputHash !== previousInputHash) {
+    reasons.push('INPUT_CHANGED')
+  }
+
+  if (hasActiveDependencyInvalidation(sectionObject)) {
+    reasons.push('DEPENDENCY_CONTEXT_INVALIDATED')
+  }
+
+  const timestampInvalidatedSectionKeys = getTimestampInvalidatedDependencySectionKeys({
+    dependencySectionKeys,
+    frameworkPackage,
+    frameworkState,
+    previousGenerated,
+    sectionObject,
+  })
+  if (timestampInvalidatedSectionKeys.length > 0) {
+    reasons.push('DEPENDENCY_CONTEXT_INVALIDATED')
+  }
+
+  const currentPackageContext = getGenerationPackageContext({ frameworkPackage, runtimeInstance })
+  const generatedPackageContext = getGeneratedPackageContext(previousGenerated)
+  if (!generatedPackageContext.packageKey || !generatedPackageContext.packageVersion) {
+    reasons.push('MISSING_PACKAGE_GENERATION_METADATA')
+  } else if (
+    generatedPackageContext.packageKey !== currentPackageContext.packageKey
+    || generatedPackageContext.packageVersion !== currentPackageContext.packageVersion
+  ) {
+    reasons.push('PACKAGE_CONTEXT_CHANGED')
+  }
+
+  return {
+    canRegenerate: reasons.length > 0,
+    currentInputHash,
+    previousInputHash,
+    forceRegenerateReason,
+    invalidatedDependencySectionKeys: timestampInvalidatedSectionKeys,
+    reasons: [...new Set(reasons)],
+  }
+}
 
 const buildStaleActionError = ({ runtimeInstance, expectedUpdatedAt, currentUpdatedAt }) =>
   buildActionError({
@@ -303,9 +455,11 @@ const applyRuntimeSectionGeneration = ({
     runtimePath: target.runtimePath,
     initializedAt: actionedAt,
   })
+  const targetDependencySectionKeys = getDependencySectionKeys(target.section)
   const input = getRuntimeSectionInput(sectionObject)
   const previousGenerated = getRuntimeSectionGenerated(sectionObject)
   const existingRevisions = getRuntimeSectionRevisions(sectionObject)
+  let regenerationEligibility = null
 
   if (normalizedActionKey === RUNTIME_ACTION_KEYS.REGENERATE_SECTION && !previousGenerated) {
     throw buildActionError({
@@ -319,6 +473,35 @@ const applyRuntimeSectionGeneration = ({
         runtimePath: target.runtimePath,
       },
     })
+  }
+
+  if (normalizedActionKey === RUNTIME_ACTION_KEYS.REGENERATE_SECTION) {
+    regenerationEligibility = buildRegenerationEligibility({
+      dependencySectionKeys: targetDependencySectionKeys,
+      frameworkPackage,
+      frameworkState: nextFrameworkState,
+      input,
+      payload,
+      previousGenerated,
+      runtimeInstance,
+      sectionObject,
+    })
+
+    if (regenerationEligibility.canRegenerate !== true) {
+      throw buildActionError({
+        status: 409,
+        code: 'CONFLICT',
+        message: 'Runtime section regeneration is blocked because no section context changed.',
+        reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_ACTION_NOT_AVAILABLE,
+        details: {
+          actionKey: normalizedActionKey,
+          disabledReason: 'Section regeneration is blocked because input, dependency, package, and style context are unchanged.',
+          sectionKey: target.sectionKey,
+          runtimePath: target.runtimePath,
+          currentInputHash: regenerationEligibility.currentInputHash,
+        },
+      })
+    }
   }
 
   const generated = buildDeterministicGeneratedSection({
@@ -373,6 +556,23 @@ const applyRuntimeSectionGeneration = ({
       generatedAt: actionedAt,
       inputHash: generated.inputHash,
     },
+    dependencies: {
+      ...(sectionObject.dependencies || {}),
+      state: targetDependencySectionKeys.some((sectionKey) =>
+        !(generationEligibility.satisfiedDependencySectionKeys || []).includes(sectionKey),
+      ) ? 'MISSING_CONTEXT' : 'SATISFIED',
+      requiredSectionKeys: targetDependencySectionKeys,
+      satisfiedSectionKeys: Array.isArray(generationEligibility.satisfiedDependencySectionKeys)
+        ? generationEligibility.satisfiedDependencySectionKeys
+        : [],
+      missingSectionKeys: targetDependencySectionKeys.filter((sectionKey) =>
+        !(generationEligibility.satisfiedDependencySectionKeys || []).includes(sectionKey),
+      ),
+      missingAcceptedTruthSectionKeys: [],
+      invalidatedSectionKeys: [],
+      resolvedAt: actionedAt,
+      resolvedByActionKey: normalizedActionKey,
+    },
   }
   invalidateRuntimeSectionEvidence({
     frameworkState: nextFrameworkState,
@@ -388,6 +588,15 @@ const applyRuntimeSectionGeneration = ({
       runtimePath: target.runtimePath,
       generated,
       previousGenerated: cloneSectionValue(previousGenerated),
+      regeneration: regenerationEligibility
+        ? {
+            forceRegenerateReason: regenerationEligibility.forceRegenerateReason,
+            currentInputHash: regenerationEligibility.currentInputHash,
+            invalidatedDependencySectionKeys: regenerationEligibility.invalidatedDependencySectionKeys,
+            previousInputHash: regenerationEligibility.previousInputHash,
+            reasons: regenerationEligibility.reasons,
+          }
+        : null,
       revisionCount: revisions.length,
     },
     nextExecutionStatus: runtimeInstance.executionStatus || 'IDLE',
@@ -554,6 +763,7 @@ const buildActionAuditPayload = ({
         generatedAt: generationResult.generated?.generatedAt,
         inputHash: generationResult.generated?.inputHash,
         previousGenerated: generationResult.previousGenerated ? true : false,
+        regeneration: generationResult.regeneration || null,
       },
     } : {}),
     ...(discoveryResult ? {
