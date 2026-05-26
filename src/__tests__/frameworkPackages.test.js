@@ -56,6 +56,11 @@ const snapshotFrameworkPackageState = (frameworkPackage) => ({
   lockedReason: frameworkPackage.lockedReason,
   dependencyLock: frameworkPackage.dependencyLock,
   uiContractBinding: frameworkPackage.uiContractBinding,
+  packageName: frameworkPackage.packageName,
+  description: frameworkPackage.description,
+  visibility: frameworkPackage.visibility,
+  customerAccessMode: frameworkPackage.customerAccessMode,
+  assignedCustomerIds: frameworkPackage.assignedCustomerIds,
   updatedBy: frameworkPackage.updatedBy,
   activatedAt: frameworkPackage.activatedAt,
   activatedBy: frameworkPackage.activatedBy,
@@ -2048,6 +2053,243 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
 
     expect(res.status).toBe(409)
     expect(res.body.error.details.reason).toBe('FRAMEWORK_PACKAGE_ACTIVE_EDIT_LOCKED')
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/framework-packages/:packageId/safe-metadata updates active display and access metadata only', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const frameworkPackage = makeFrameworkPackageDoc({
+      status: 'ACTIVE',
+      isLocked: true,
+      packageName: 'VMF 2.3.1',
+      description: 'Current VMF package',
+      visibility: 'INTERNAL_ONLY',
+      customerAccessMode: 'ALL_CUSTOMERS',
+      assignedCustomerIds: [],
+      lastCheckpointStatus: 'PASS',
+    })
+    const initialDependencyLock = frameworkPackage.dependencyLock
+    const initialRuntimeVerdict = frameworkPackage.runtimeVerdict
+    const initialCheckpointStatus = frameworkPackage.lastCheckpointStatus
+    const rollbackSession = buildRollbackSession([frameworkPackage])
+    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+    startSessionSpy.mockResolvedValueOnce(rollbackSession)
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/safe-metadata`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        packageName: 'Enterprise VMF Package',
+        description: 'Customer-facing VMF package',
+        visibility: 'CUSTOMER_VISIBLE',
+        customerAccessMode: 'SELECTED_CUSTOMERS',
+        assignedCustomerIds: ['customer-123'],
+      })
+
+    expect(res.status).toBe(200)
+    expect(rollbackSession.withTransaction).toHaveBeenCalled()
+    expect(frameworkPackage.save).toHaveBeenCalledWith(expect.objectContaining({
+      session: expect.any(Object),
+    }))
+    expect(res.body.data.packageName).toBe('Enterprise VMF Package')
+    expect(res.body.data.description).toBe('Customer-facing VMF package')
+    expect(res.body.data.visibility).toBe('CUSTOMER_VISIBLE')
+    expect(res.body.data.customerAccessMode).toBe('SELECTED_CUSTOMERS')
+    expect(res.body.data.assignedCustomerIds).toEqual(['customer-123'])
+    expect(frameworkPackage.dependencyLock).toBe(initialDependencyLock)
+    expect(frameworkPackage.runtimeVerdict).toBe(initialRuntimeVerdict)
+    expect(frameworkPackage.lastCheckpointStatus).toBe(initialCheckpointStatus)
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'PACKAGE_METADATA_UPDATED',
+      resourceType: 'FrameworkPackage',
+      scope: { frameworkKey: 'VMF' },
+      diff: {
+        packageName: {
+          from: 'VMF 2.3.1',
+          to: 'Enterprise VMF Package',
+        },
+        description: {
+          from: 'Current VMF package',
+          to: 'Customer-facing VMF package',
+        },
+      },
+    }), expect.objectContaining({ session: expect.any(Object) }))
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'PACKAGE_ACCESS_UPDATED',
+      resourceType: 'FrameworkPackage',
+      scope: { frameworkKey: 'VMF' },
+      diff: {
+        visibility: {
+          from: 'INTERNAL_ONLY',
+          to: 'CUSTOMER_VISIBLE',
+        },
+        customerAccessMode: {
+          from: 'ALL_CUSTOMERS',
+          to: 'SELECTED_CUSTOMERS',
+        },
+        assignedCustomerIds: {
+          from: [],
+          to: ['customer-123'],
+          added: ['customer-123'],
+          removed: [],
+        },
+      },
+    }), expect.objectContaining({ session: expect.any(Object) }))
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/framework-packages/:packageId/safe-metadata rolls back metadata changes when audit fails', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const frameworkPackage = makeFrameworkPackageDoc({
+      status: 'ACTIVE',
+      isLocked: true,
+      packageName: 'VMF 2.3.1',
+      description: 'Current VMF package',
+      visibility: 'INTERNAL_ONLY',
+      customerAccessMode: 'ALL_CUSTOMERS',
+      assignedCustomerIds: [],
+    })
+    const rollbackSession = buildRollbackSession([frameworkPackage])
+    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+    startSessionSpy.mockResolvedValueOnce(rollbackSession)
+    AuditLog.createLog.mockImplementation(async (payload) => {
+      if (payload.action === 'PACKAGE_METADATA_UPDATED') {
+        throw new Error('metadata audit unavailable')
+      }
+      return {}
+    })
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/safe-metadata`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        packageName: 'Enterprise VMF Package',
+        description: 'Customer-facing VMF package',
+      })
+
+    expect(res.status).toBe(500)
+    expect(rollbackSession.withTransaction).toHaveBeenCalled()
+    expect(frameworkPackage.save).toHaveBeenCalledWith(expect.objectContaining({
+      session: expect.any(Object),
+    }))
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'PACKAGE_METADATA_UPDATED',
+      diff: {
+        packageName: {
+          from: 'VMF 2.3.1',
+          to: 'Enterprise VMF Package',
+        },
+        description: {
+          from: 'Current VMF package',
+          to: 'Customer-facing VMF package',
+        },
+      },
+    }), expect.objectContaining({ session: expect.any(Object) }))
+    expect(frameworkPackage.packageName).toBe('VMF 2.3.1')
+    expect(frameworkPackage.description).toBe('Current VMF package')
+    expect(frameworkPackage.visibility).toBe('INTERNAL_ONLY')
+    expect(frameworkPackage.customerAccessMode).toBe('ALL_CUSTOMERS')
+    expect(frameworkPackage.assignedCustomerIds).toEqual([])
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/framework-packages/:packageId/safe-metadata rolls back access changes when audit fails', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const frameworkPackage = makeFrameworkPackageDoc({
+      status: 'ACTIVE',
+      isLocked: true,
+      packageName: 'VMF 2.3.1',
+      description: 'Current VMF package',
+      visibility: 'INTERNAL_ONLY',
+      customerAccessMode: 'ALL_CUSTOMERS',
+      assignedCustomerIds: [],
+    })
+    const rollbackSession = buildRollbackSession([frameworkPackage])
+    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+    startSessionSpy.mockResolvedValueOnce(rollbackSession)
+    AuditLog.createLog.mockImplementation(async (payload) => {
+      if (payload.action === 'PACKAGE_ACCESS_UPDATED') {
+        throw new Error('access audit unavailable')
+      }
+      return {}
+    })
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/safe-metadata`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        visibility: 'CUSTOMER_VISIBLE',
+        customerAccessMode: 'SELECTED_CUSTOMERS',
+        assignedCustomerIds: ['customer-123'],
+      })
+
+    expect(res.status).toBe(500)
+    expect(rollbackSession.withTransaction).toHaveBeenCalled()
+    expect(frameworkPackage.save).toHaveBeenCalledWith(expect.objectContaining({
+      session: expect.any(Object),
+    }))
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'PACKAGE_ACCESS_UPDATED',
+      diff: {
+        visibility: {
+          from: 'INTERNAL_ONLY',
+          to: 'CUSTOMER_VISIBLE',
+        },
+        customerAccessMode: {
+          from: 'ALL_CUSTOMERS',
+          to: 'SELECTED_CUSTOMERS',
+        },
+        assignedCustomerIds: {
+          from: [],
+          to: ['customer-123'],
+          added: ['customer-123'],
+          removed: [],
+        },
+      },
+    }), expect.objectContaining({ session: expect.any(Object) }))
+    expect(frameworkPackage.packageName).toBe('VMF 2.3.1')
+    expect(frameworkPackage.description).toBe('Current VMF package')
+    expect(frameworkPackage.visibility).toBe('INTERNAL_ONLY')
+    expect(frameworkPackage.customerAccessMode).toBe('ALL_CUSTOMERS')
+    expect(frameworkPackage.assignedCustomerIds).toEqual([])
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/framework-packages/:packageId/safe-metadata rejects active runtime fields', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const frameworkPackage = makeFrameworkPackageDoc({ status: 'ACTIVE', isLocked: true })
+    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/safe-metadata`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        sections: [],
+        packageName: 'Allowed field beside rejected runtime field',
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('FIELD_LOCKED_ON_ACTIVE_PACKAGE')
+    expect(res.body.error.details).toEqual(expect.objectContaining({
+      reason: 'FIELD_LOCKED_ON_ACTIVE_PACKAGE',
+      blockedFields: ['sections'],
+    }))
+    expect(frameworkPackage.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('PATCH /api/v1/super-admin/runtime-control/framework-packages/:packageId/safe-metadata requires active status', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const frameworkPackage = makeFrameworkPackageDoc({ status: 'VALIDATED' })
+    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+
+    const res = await request
+      .patch(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/safe-metadata`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        packageName: 'Validated package metadata',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('FRAMEWORK_PACKAGE_SAFE_METADATA_REQUIRES_ACTIVE')
+    expect(frameworkPackage.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 
   test('GET /api/v1/super-admin/runtime-control/framework-packages/:packageId/dependencies resolves package dependencies', async () => {

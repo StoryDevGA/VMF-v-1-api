@@ -562,6 +562,29 @@ const updateFrameworkPackageSchema = z.object({
   { message: 'At least one updatable field is required.', path: ['frameworkKey'] },
 )
 
+const updateFrameworkPackageSafeMetadataSchema = z.object({
+  packageName: z
+    .string()
+    .trim()
+    .max(160, 'Package name must be 160 characters or fewer')
+    .optional(),
+  description: z
+    .string()
+    .trim()
+    .max(500, 'Description must be 500 characters or fewer')
+    .optional(),
+  visibility: z
+    .enum(Object.values(FRAMEWORK_PACKAGE_VISIBILITY))
+    .optional(),
+  customerAccessMode: z
+    .enum(Object.values(FRAMEWORK_PACKAGE_CUSTOMER_ACCESS_MODES))
+    .optional(),
+  assignedCustomerIds: customerIdListSchema.optional(),
+}).passthrough().refine(
+  (value) => Object.keys(value).length > 0,
+  { message: 'At least one safe metadata field is required.', path: ['packageName'] },
+)
+
 const frameworkPackageIdSchema = z.object({
   packageId: z
     .string({ required_error: 'packageId is required' })
@@ -640,6 +663,8 @@ export const captureFrameworkPackageUpdateFields = (req, _res, next) => {
 
 export const validateCreateFrameworkPackage = createBodyValidator(createFrameworkPackageSchema)
 export const validateUpdateFrameworkPackage = createBodyValidator(updateFrameworkPackageSchema)
+export const validateUpdateFrameworkPackageSafeMetadata =
+  createBodyValidator(updateFrameworkPackageSafeMetadataSchema)
 export const validateCloneFrameworkPackage = createBodyValidator(cloneFrameworkPackageSchema)
 export const validateFrameworkPackageId = createParamsValidator(frameworkPackageIdSchema)
 export const validateListFrameworkPackages = createQueryValidator(listFrameworkPackagesQuerySchema)

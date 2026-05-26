@@ -53,6 +53,12 @@ const ACTIVE_PACKAGE_STATUS_CHANGE_MESSAGE =
   'Active framework packages cannot change lifecycle in place. Activate another validated package instead.'
 const ACTIVE_PACKAGE_EDIT_MESSAGE =
   'Active framework packages cannot be edited directly. Clone the package to make changes.'
+const ACTIVE_PACKAGE_RUNTIME_LOCKED_MESSAGE =
+  'Runtime structure is locked. Access controls and display metadata may still be updated with audit evidence.'
+const ACTIVE_PACKAGE_SAFE_METADATA_STATUS_MESSAGE =
+  'Safe metadata updates are only available for active framework packages.'
+const ACTIVE_PACKAGE_SAFE_METADATA_LOCKED_MESSAGE =
+  'Active package runtime structure cannot be edited directly. Clone flow is required for runtime changes.'
 const VALIDATED_PACKAGE_STRUCTURAL_LOCK_MESSAGE =
   'Validated framework packages lock structural runtime fields. Return the package to Draft or clone it before changing runtime structure.'
 const FRAMEWORK_PACKAGE_CLONE_SOURCE_STATUS_MESSAGE =
@@ -66,6 +72,25 @@ const CLONEABLE_FRAMEWORK_PACKAGE_STATUSES = new Set([
   FRAMEWORK_PACKAGE_STATUSES.VALIDATED,
 ])
 const SEMVER_PATTERN = /^\d+\.\d+\.\d+$/
+
+const ACTIVE_PACKAGE_SAFE_METADATA_FIELDS = new Set([
+  'packageName',
+  'description',
+  'visibility',
+  'customerAccessMode',
+  'assignedCustomerIds',
+])
+
+const ACTIVE_PACKAGE_DISPLAY_METADATA_FIELDS = new Set([
+  'packageName',
+  'description',
+])
+
+const ACTIVE_PACKAGE_ACCESS_METADATA_FIELDS = new Set([
+  'visibility',
+  'customerAccessMode',
+  'assignedCustomerIds',
+])
 
 const STRUCTURAL_LOCK_FIELDS = Object.freeze([
   'frameworkKey',
@@ -975,6 +1000,43 @@ const validateFrameworkPackageAccessRules = ({
   }
 
   return details
+}
+
+const normalizeAssignedCustomerIdsForAccess = ({
+  visibility,
+  customerAccessMode,
+  assignedCustomerIds,
+}) => {
+  if (
+    visibility === FRAMEWORK_PACKAGE_VISIBILITY.INTERNAL_ONLY
+    || customerAccessMode === FRAMEWORK_PACKAGE_CUSTOMER_ACCESS_MODES.ALL_CUSTOMERS
+  ) {
+    return []
+  }
+
+  return Array.isArray(assignedCustomerIds) ? assignedCustomerIds : []
+}
+
+const normalizeCustomerAccessModeForVisibility = ({ visibility, customerAccessMode }) => {
+  if (visibility === FRAMEWORK_PACKAGE_VISIBILITY.INTERNAL_ONLY) {
+    return FRAMEWORK_PACKAGE_CUSTOMER_ACCESS_MODES.ALL_CUSTOMERS
+  }
+
+  return customerAccessMode
+}
+
+const buildAssignedCustomerIdDelta = (previousValue = [], nextValue = []) => {
+  const previousIds = (Array.isArray(previousValue) ? previousValue : []).map(toIdString).filter(Boolean)
+  const nextIds = (Array.isArray(nextValue) ? nextValue : []).map(toIdString).filter(Boolean)
+  const previousSet = new Set(previousIds)
+  const nextSet = new Set(nextIds)
+
+  return {
+    from: previousIds,
+    to: nextIds,
+    added: nextIds.filter((id) => !previousSet.has(id)),
+    removed: previousIds.filter((id) => !nextSet.has(id)),
+  }
 }
 
 const validateFrameworkPackageRegistryReferences = async ({
@@ -3132,6 +3194,189 @@ export const cloneFrameworkPackage = async (req, res, next) => {
       })
     }
 
+    next(err)
+  }
+}
+
+export const updateFrameworkPackageSafeMetadata = async (req, res, next) => {
+  try {
+    const frameworkPackage = await FrameworkPackage.findById(req.params.packageId)
+
+    if (!frameworkPackage) {
+      return res.status(404).json({
+        error: {
+          code: 'NOT_FOUND',
+          message: FRAMEWORK_PACKAGE_NOT_FOUND_MESSAGE,
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    if (frameworkPackage.status !== FRAMEWORK_PACKAGE_STATUSES.ACTIVE) {
+      return sendConflict(res, req, ACTIVE_PACKAGE_SAFE_METADATA_STATUS_MESSAGE, {
+        field: 'status',
+        reason: 'FRAMEWORK_PACKAGE_SAFE_METADATA_REQUIRES_ACTIVE',
+      })
+    }
+
+    const requestedFields = Object.keys(req.body && typeof req.body === 'object' ? req.body : {})
+    const blockedFields = requestedFields.filter((field) => !ACTIVE_PACKAGE_SAFE_METADATA_FIELDS.has(field))
+    if (blockedFields.length > 0) {
+      return res.status(422).json({
+        error: {
+          code: 'FIELD_LOCKED_ON_ACTIVE_PACKAGE',
+          message: ACTIVE_PACKAGE_SAFE_METADATA_LOCKED_MESSAGE,
+          details: {
+            reason: 'FIELD_LOCKED_ON_ACTIVE_PACKAGE',
+            blockedFields,
+          },
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    const actorUserId = req.context?.userId || req.userId
+    const nextVisibility = req.body.visibility ?? frameworkPackage.visibility
+    const requestedCustomerAccessMode = req.body.customerAccessMode ?? frameworkPackage.customerAccessMode
+    const nextCustomerAccessMode = normalizeCustomerAccessModeForVisibility({
+      visibility: nextVisibility,
+      customerAccessMode: requestedCustomerAccessMode,
+    })
+    const requestedAssignedCustomerIds =
+      req.body.assignedCustomerIds ?? frameworkPackage.assignedCustomerIds
+    const nextAssignedCustomerIds = normalizeAssignedCustomerIdsForAccess({
+      visibility: nextVisibility,
+      customerAccessMode: nextCustomerAccessMode,
+      assignedCustomerIds: requestedAssignedCustomerIds,
+    })
+
+    const accessRuleDetails = validateFrameworkPackageAccessRules({
+      visibility: nextVisibility,
+      customerAccessMode: nextCustomerAccessMode,
+      assignedCustomerIds: nextAssignedCustomerIds,
+    })
+    if (Object.keys(accessRuleDetails).length > 0) {
+      return sendValidationFailed(res, req, accessRuleDetails)
+    }
+
+    const displayDiff = {}
+    const accessDiff = {}
+    const safeMetadataUpdates = {}
+    const hasAccessFieldRequest = requestedFields.some((field) =>
+      ACTIVE_PACKAGE_ACCESS_METADATA_FIELDS.has(field))
+    const nextValues = {
+      ...(req.body.packageName !== undefined ? { packageName: req.body.packageName } : {}),
+      ...(req.body.description !== undefined ? { description: req.body.description } : {}),
+    }
+
+    for (const field of requestedFields) {
+      if (ACTIVE_PACKAGE_ACCESS_METADATA_FIELDS.has(field)) continue
+
+      const previousValue = cloneAuditValue(frameworkPackage[field])
+      const nextValue = cloneAuditValue(nextValues[field])
+      if (isDeepStrictEqual(previousValue, nextValue)) continue
+
+      if (ACTIVE_PACKAGE_DISPLAY_METADATA_FIELDS.has(field)) {
+        displayDiff[field] = { from: previousValue, to: nextValue }
+        safeMetadataUpdates[field] = nextValues[field]
+      }
+    }
+
+    if (hasAccessFieldRequest) {
+      if (!isDeepStrictEqual(cloneAuditValue(frameworkPackage.visibility), cloneAuditValue(nextVisibility))) {
+        accessDiff.visibility = {
+          from: cloneAuditValue(frameworkPackage.visibility),
+          to: cloneAuditValue(nextVisibility),
+        }
+        safeMetadataUpdates.visibility = nextVisibility
+      }
+
+      if (
+        !isDeepStrictEqual(
+          cloneAuditValue(frameworkPackage.customerAccessMode),
+          cloneAuditValue(nextCustomerAccessMode),
+        )
+      ) {
+        accessDiff.customerAccessMode = {
+          from: cloneAuditValue(frameworkPackage.customerAccessMode),
+          to: cloneAuditValue(nextCustomerAccessMode),
+        }
+        safeMetadataUpdates.customerAccessMode = nextCustomerAccessMode
+      }
+
+      const customerIdDelta = buildAssignedCustomerIdDelta(
+        frameworkPackage.assignedCustomerIds,
+        nextAssignedCustomerIds,
+      )
+      if (!isDeepStrictEqual(customerIdDelta.from, customerIdDelta.to)) {
+        accessDiff.assignedCustomerIds = customerIdDelta
+        safeMetadataUpdates.assignedCustomerIds = nextAssignedCustomerIds
+      }
+    }
+
+    const hasDisplayDiff = Object.keys(displayDiff).length > 0
+    const hasAccessDiff = Object.keys(accessDiff).length > 0
+    const auditEventIds = []
+
+    if (hasDisplayDiff || hasAccessDiff) {
+      frameworkPackage.updatedBy = actorUserId
+      const session = await mongoose.startSession()
+      try {
+        await session.withTransaction(async () => {
+          Object.entries(safeMetadataUpdates).forEach(([field, value]) => {
+            frameworkPackage[field] = value
+          })
+          await frameworkPackage.save({ session })
+
+          if (hasDisplayDiff) {
+            const auditEvent = await auditService.logFromRequest(req, {
+              action: auditService.AUDIT_ACTIONS.PACKAGE_METADATA_UPDATED,
+              resourceType: auditService.RESOURCE_TYPES.FrameworkPackage,
+              resourceId: frameworkPackage._id,
+              scope: {
+                frameworkKey: frameworkPackage.frameworkKey,
+              },
+              display: { resourceLabel: buildFrameworkPackageLabel(frameworkPackage) },
+              diff: displayDiff,
+            }, { session, throwOnError: true })
+            const auditEventId = toIdString(auditEvent)
+            if (auditEventId) auditEventIds.push(auditEventId)
+          }
+
+          if (hasAccessDiff) {
+            const auditEvent = await auditService.logFromRequest(req, {
+              action: auditService.AUDIT_ACTIONS.PACKAGE_ACCESS_UPDATED,
+              resourceType: auditService.RESOURCE_TYPES.FrameworkPackage,
+              resourceId: frameworkPackage._id,
+              scope: {
+                frameworkKey: frameworkPackage.frameworkKey,
+              },
+              display: { resourceLabel: buildFrameworkPackageLabel(frameworkPackage) },
+              diff: accessDiff,
+            }, { session, throwOnError: true })
+            const auditEventId = toIdString(auditEvent)
+            if (auditEventId) auditEventIds.push(auditEventId)
+          }
+        })
+      } finally {
+        await session.endSession()
+      }
+    }
+
+    await populateFrameworkPackage(frameworkPackage)
+
+    return res.status(200).json({
+      data: serializeFrameworkPackage(frameworkPackage, {
+        fallbackUpdatedBy: buildActorSummary(req),
+      }),
+      meta: {
+        requestId: req.requestId,
+        version: 'v1',
+        auditEventIds,
+        safeMetadataBoundary: ACTIVE_PACKAGE_RUNTIME_LOCKED_MESSAGE,
+      },
+    })
+  } catch (err) {
     next(err)
   }
 }

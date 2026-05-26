@@ -10,6 +10,7 @@ import {
   validateListFrameworkPackages,
   validateRunFrameworkPackageCheckpoint,
   validateUpdateFrameworkPackage,
+  validateUpdateFrameworkPackageSafeMetadata,
 } from '../validators/frameworkPackage.validator.js'
 import {
   activateFrameworkPackage,
@@ -26,6 +27,7 @@ import {
   listFrameworkPackages,
   runFrameworkPackageCheckpointEndpoint,
   updateFrameworkPackage,
+  updateFrameworkPackageSafeMetadata,
   validateFrameworkPackage,
 } from '../controllers/frameworkPackage.controller.js'
 
@@ -50,6 +52,12 @@ router.get('/:packageId/audit', validateFrameworkPackageId, getFrameworkPackageA
 router.get('/:packageId/diff/:version', validateFrameworkPackageId, getFrameworkPackageDiff)
 router.get('/:packageId', validateFrameworkPackageId, getFrameworkPackage)
 router.post('/:packageId/clone', validateFrameworkPackageId, validateCloneFrameworkPackage, cloneFrameworkPackage)
+router.patch(
+  '/:packageId/safe-metadata',
+  validateFrameworkPackageId,
+  validateUpdateFrameworkPackageSafeMetadata,
+  updateFrameworkPackageSafeMetadata,
+)
 router.patch(
   '/:packageId',
   validateFrameworkPackageId,
