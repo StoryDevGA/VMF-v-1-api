@@ -4827,11 +4827,23 @@ describe('Runtime Instance API', () => {
     expect(persistedState.publish).toEqual(expect.objectContaining({
       state: 'PUBLISHED',
       published: true,
+      publishVersion: 1,
       outputEligible: true,
       evidence: expect.objectContaining({
         activationId: 'activation-vmf-2-3-1-001',
         deploymentId: 'deployment-vmf-global-production-001',
         dependencySnapshotId: 'dep-lock-vmf-standard-2-3-1',
+      }),
+      snapshot: expect.objectContaining({
+        snapshotId: expect.stringMatching(/^runtime-truth-publish-value-narrative-439111-/),
+        snapshotHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+        contractVersion: 'runtime-truth-snapshot-v1',
+      }),
+      outputEligibility: expect.objectContaining({
+        state: 'PUBLISH_ELIGIBLE',
+        outputEligible: true,
+        canonicalOutputEligible: false,
+        snapshotHash: expect.stringMatching(/^[a-f0-9]{64}$/),
       }),
     }))
     expect(res.body.data.state.publish).toEqual(expect.objectContaining({
@@ -4990,6 +5002,92 @@ describe('Runtime Instance API', () => {
     expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
   })
 
+  test('rejects PUBLISH when runtime certification evidence is incomplete', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      evidence: {
+        activationId: 'activation-vmf-2-3-1-001',
+        deploymentId: 'deployment-vmf-global-production-001',
+        dependencySnapshotId: 'dep-lock-vmf-standard-2-3-1',
+      },
+      framework_state: {
+        lifecycle: {
+          stage: 'APPROVED',
+          approvedAt: '2026-05-19T08:00:00.000Z',
+          approvedBy: CUSTOMER_ADMIN_ID,
+        },
+        sections: {
+          customer_problem: {
+            input: 'Proposal creation is slow.',
+            generated: {
+              content: 'Customer Problem: Proposal creation is slow.',
+              generatedAt: '2026-05-19T07:58:00.000Z',
+            },
+            accepted: {
+              content: 'Customer Problem: Proposal creation is slow.',
+              acceptedAt: '2026-05-19T07:59:00.000Z',
+              acceptedBy: CUSTOMER_ADMIN_ID,
+              sourceGeneratedAt: '2026-05-19T07:58:00.000Z',
+            },
+            review: { status: 'ACCEPTED' },
+            state: { status: 'ACCEPTED' },
+          },
+        },
+        validation: {
+          runtime_required_sections: {
+            is_valid: true,
+            status: 'PASSED',
+          },
+        },
+        readiness: {
+          state: 'APPROVED',
+          approved: true,
+          approvedAt: '2026-05-19T08:00:00.000Z',
+          approvedBy: CUSTOMER_ADMIN_ID,
+          ready: true,
+          validationState: 'PASSED',
+        },
+        publish: {},
+        lock: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({
+      document: runtimeInstanceDoc,
+      rendererRuntimeInstance: makeRuntimeInstanceDocument({
+        ...runtimeInstanceDoc,
+        evidence: {
+          activationId: 'activation-vmf-2-3-1-001',
+          deploymentId: 'deployment-vmf-global-production-001',
+          dependencySnapshotId: 'dep-lock-vmf-standard-2-3-1',
+          dependencySnapshotHash: 'hash-vmf-standard-2-3-1',
+        },
+      }),
+    })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('PUBLISH')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('PUBLISH')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('PUBLISH')]))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/PUBLISH`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('RUNTIME_ACTION_NOT_AVAILABLE')
+    expect(res.body.error.details.disabledReason).toBe('Certified activation, deployment, and dependency snapshot evidence is required before publishing.')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
   test('LOCK_RECORD freezes a published runtime as canonical truth', async () => {
     const runtimeInstanceDoc = makeRuntimeInstanceDocument({
       updatedAt: new Date('2026-05-19T08:00:00.000Z'),
@@ -5033,6 +5131,7 @@ describe('Runtime Instance API', () => {
           published: true,
           publishedAt: '2026-05-19T08:00:00.000Z',
           publishedBy: CUSTOMER_ADMIN_ID,
+          publishVersion: 1,
           outputEligible: true,
           sourceApproval: {
             approvedAt: '2026-05-19T07:55:00.000Z',
@@ -5043,6 +5142,17 @@ describe('Runtime Instance API', () => {
             deploymentId: 'deployment-vmf-global-production-001',
             dependencySnapshotId: 'dep-lock-vmf-standard-2-3-1',
             dependencySnapshotHash: 'hash-vmf-standard-2-3-1',
+          },
+          snapshot: {
+            snapshotId: 'runtime-truth-publish-value-narrative-439111-existing',
+            snapshotHash: 'existing-publish-snapshot-hash',
+            snapshotAt: '2026-05-19T08:00:00.000Z',
+            contractVersion: 'runtime-truth-snapshot-v1',
+          },
+          outputEligibility: {
+            state: 'PUBLISH_ELIGIBLE',
+            outputEligible: true,
+            canonicalOutputEligible: false,
           },
         },
         lock: {},
@@ -5088,13 +5198,28 @@ describe('Runtime Instance API', () => {
     expect(persistedSet.framework_state.lock).toEqual(expect.objectContaining({
       state: 'LOCKED',
       locked: true,
+      lockVersion: 1,
       evidence: expect.objectContaining({
         activationId: 'activation-vmf-2-3-1-001',
         deploymentId: 'deployment-vmf-global-production-001',
       }),
+      snapshot: expect.objectContaining({
+        snapshotId: expect.stringMatching(/^runtime-truth-lock-record-value-narrative-439111-/),
+        snapshotHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+        contractVersion: 'runtime-truth-snapshot-v1',
+      }),
       anchor: expect.objectContaining({
+        replayAnchorId: expect.stringMatching(/^runtime-replay-anchor-/),
         relationship: 'LOCKED_VALUE_NARRATIVE',
         runtimeInstanceKey: 'value-narrative-439111',
+        publishSnapshotId: 'runtime-truth-publish-value-narrative-439111-existing',
+        lockSnapshotHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      }),
+      outputEligibility: expect.objectContaining({
+        state: 'OUTPUT_ELIGIBLE',
+        outputEligible: true,
+        canonicalOutputEligible: true,
+        anchorEligible: true,
       }),
     }))
     expect(res.body.data.runtimeInstance).toEqual(expect.objectContaining({
@@ -5102,6 +5227,119 @@ describe('Runtime Instance API', () => {
       executionStatus: 'COMPLETE',
       lockedAt: expect.any(String),
     }))
+  })
+
+  test('rejects LOCK_RECORD when current runtime evidence drifts from published evidence', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      evidence: {
+        activationId: 'activation-vmf-2-3-1-001',
+        deploymentId: 'deployment-vmf-global-production-001',
+        dependencySnapshotId: 'dep-lock-vmf-standard-2-3-1',
+        dependencySnapshotHash: 'hash-vmf-standard-2-3-1-drifted',
+      },
+      framework_state: {
+        lifecycle: {
+          stage: 'PUBLISHED',
+          publishedAt: '2026-05-19T08:00:00.000Z',
+          publishedBy: CUSTOMER_ADMIN_ID,
+        },
+        sections: {
+          customer_problem: {
+            input: 'Proposal creation is slow.',
+            generated: {
+              content: 'Customer Problem: Proposal creation is slow.',
+              generatedAt: '2026-05-19T07:58:00.000Z',
+            },
+            accepted: {
+              content: 'Customer Problem: Proposal creation is slow.',
+              acceptedAt: '2026-05-19T07:59:00.000Z',
+              acceptedBy: CUSTOMER_ADMIN_ID,
+              sourceGeneratedAt: '2026-05-19T07:58:00.000Z',
+            },
+            review: { status: 'ACCEPTED' },
+            state: { status: 'ACCEPTED' },
+          },
+        },
+        validation: {
+          runtime_required_sections: {
+            is_valid: true,
+            status: 'PASSED',
+          },
+        },
+        readiness: {
+          state: 'PUBLISHED',
+          published: true,
+          ready: true,
+          validationState: 'PASSED',
+        },
+        publish: {
+          state: 'PUBLISHED',
+          published: true,
+          publishedAt: '2026-05-19T08:00:00.000Z',
+          publishedBy: CUSTOMER_ADMIN_ID,
+          publishVersion: 1,
+          outputEligible: true,
+          sourceApproval: {
+            approvedAt: '2026-05-19T07:55:00.000Z',
+            approvedBy: CUSTOMER_ADMIN_ID,
+          },
+          evidence: {
+            activationId: 'activation-vmf-2-3-1-001',
+            deploymentId: 'deployment-vmf-global-production-001',
+            dependencySnapshotId: 'dep-lock-vmf-standard-2-3-1',
+            dependencySnapshotHash: 'hash-vmf-standard-2-3-1',
+          },
+          snapshot: {
+            snapshotId: 'runtime-truth-publish-value-narrative-439111-existing',
+            snapshotHash: 'existing-publish-snapshot-hash',
+            snapshotAt: '2026-05-19T08:00:00.000Z',
+            contractVersion: 'runtime-truth-snapshot-v1',
+          },
+          outputEligibility: {
+            state: 'PUBLISH_ELIGIBLE',
+            outputEligible: true,
+            canonicalOutputEligible: false,
+          },
+        },
+        lock: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({
+      document: runtimeInstanceDoc,
+      rendererRuntimeInstance: makeRuntimeInstanceDocument({
+        ...runtimeInstanceDoc,
+        evidence: {
+          activationId: 'activation-vmf-2-3-1-001',
+          deploymentId: 'deployment-vmf-global-production-001',
+          dependencySnapshotId: 'dep-lock-vmf-standard-2-3-1',
+          dependencySnapshotHash: 'hash-vmf-standard-2-3-1',
+        },
+      }),
+    })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('LOCK_RECORD')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('LOCK_RECORD')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('LOCK_RECORD')]))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/LOCK_RECORD`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('RUNTIME_ACTION_NOT_AVAILABLE')
+    expect(res.body.error.details.disabledReason).toBe('Current runtime evidence must match the published VMF evidence before locking canonical truth.')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 
   test('rejects LOCK_RECORD when accepted section truth is stale', async () => {
@@ -5149,6 +5387,7 @@ describe('Runtime Instance API', () => {
           published: true,
           publishedAt: '2026-05-19T08:00:00.000Z',
           publishedBy: CUSTOMER_ADMIN_ID,
+          publishVersion: 1,
           outputEligible: true,
           sourceApproval: {
             approvedAt: '2026-05-19T07:55:00.000Z',
@@ -5159,6 +5398,17 @@ describe('Runtime Instance API', () => {
             deploymentId: 'deployment-vmf-global-production-001',
             dependencySnapshotId: 'dep-lock-vmf-standard-2-3-1',
             dependencySnapshotHash: 'hash-vmf-standard-2-3-1',
+          },
+          snapshot: {
+            snapshotId: 'runtime-truth-publish-value-narrative-439111-existing',
+            snapshotHash: 'existing-publish-snapshot-hash',
+            snapshotAt: '2026-05-19T08:00:00.000Z',
+            contractVersion: 'runtime-truth-snapshot-v1',
+          },
+          outputEligibility: {
+            state: 'PUBLISH_ELIGIBLE',
+            outputEligible: true,
+            canonicalOutputEligible: false,
           },
         },
         lock: {},
@@ -6714,6 +6964,7 @@ describe('Runtime Instance API', () => {
         published: true,
         publishedAt: '2026-05-19T08:00:00.000Z',
         publishedBy: CUSTOMER_ADMIN_ID,
+        publishVersion: 1,
         outputEligible: true,
         sourceApproval: {
           approvedAt: '2026-05-19T07:55:00.000Z',
@@ -6724,6 +6975,17 @@ describe('Runtime Instance API', () => {
           deploymentId: 'deployment-vmf-global-production-001',
           dependencySnapshotId: 'dep-lock-vmf-standard-2-3-1',
           dependencySnapshotHash: 'hash-vmf-standard-2-3-1',
+        },
+        snapshot: {
+          snapshotId: 'runtime-truth-publish-value-narrative-439111-existing',
+          snapshotHash: 'existing-publish-snapshot-hash',
+          snapshotAt: '2026-05-19T08:00:00.000Z',
+          contractVersion: 'runtime-truth-snapshot-v1',
+        },
+        outputEligibility: {
+          state: 'PUBLISH_ELIGIBLE',
+          outputEligible: true,
+          canonicalOutputEligible: false,
         },
       },
       lock: {},

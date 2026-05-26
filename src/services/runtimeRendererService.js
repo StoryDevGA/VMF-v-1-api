@@ -1833,12 +1833,20 @@ const buildReadinessProjection = (frameworkState = {}, sectionTruth = null) => {
 const buildPublishProjection = (frameworkState = {}, sectionTruth = null) => {
   const publish = frameworkState.publish || {}
   const sectionTruthReady = sectionTruth?.publishEligible === true
+  const outputEligibility = publish.outputEligibility || {}
   return {
     state: publish.state || (publish.published ? 'PUBLISHED' : 'UNPUBLISHED'),
     published: Boolean(publish.published),
     publishedAt: publish.publishedAt || null,
     publishedBy: publish.publishedBy || '',
     outputEligible: Boolean(publish.outputEligible && sectionTruthReady),
+    outputEligibility: {
+      ...outputEligibility,
+      outputEligible: Boolean(outputEligibility.outputEligible && sectionTruthReady),
+      sectionTruthReady,
+    },
+    publishVersion: publish.publishVersion || null,
+    snapshot: publish.snapshot || {},
     sectionTruthReady,
     sectionTruth: sectionTruth || {},
     evidence: publish.evidence || {},
@@ -1850,6 +1858,8 @@ const buildLockProjection = (runtimeInstance = {}, frameworkState = {}, sectionT
   const lock = frameworkState.lock || {}
   const lockedAt = runtimeInstance.lockedAt || lock.lockedAt || null
   const sectionTruthReady = sectionTruth?.lockEligible === true
+  const outputEligibility = lock.outputEligibility || {}
+  const anchor = lock.replayAnchor || lock.anchor || {}
   return {
     state: lock.state || (lockedAt ? 'LOCKED' : 'UNLOCKED'),
     locked: Boolean(
@@ -1861,10 +1871,19 @@ const buildLockProjection = (runtimeInstance = {}, frameworkState = {}, sectionT
     lockedBy: runtimeInstance.lockedBy || lock.lockedBy || '',
     lockedReason: runtimeInstance.lockedReason || lock.lockedReason || '',
     lockEligible: sectionTruthReady,
+    outputEligible: Boolean(lock.locked && outputEligibility.outputEligible && sectionTruthReady),
+    outputEligibility: {
+      ...outputEligibility,
+      outputEligible: Boolean(outputEligibility.outputEligible && sectionTruthReady),
+      sectionTruthReady,
+    },
+    lockVersion: lock.lockVersion || null,
+    snapshot: lock.snapshot || {},
     sectionTruthReady,
     sectionTruth: sectionTruth || {},
     evidence: lock.evidence || {},
-    anchor: lock.anchor || {},
+    anchor,
+    replayAnchor: anchor,
   }
 }
 

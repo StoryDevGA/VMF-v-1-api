@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { RUNTIME_EXECUTION_STATUSES, RUNTIME_INSTANCE_STATUSES, RUNTIME_TYPES } from '../models/RuntimeInstance.js'
 import {
   getRuntimeSectionGenerated,
@@ -66,6 +67,31 @@ const toIdString = (value) => {
   if (typeof value.toString === 'function') return value.toString()
   return String(value)
 }
+
+const stableSortValue = (value) => {
+  if (Array.isArray(value)) return value.map(stableSortValue)
+  if (!value || typeof value !== 'object') return value
+
+  return Object.keys(value)
+    .sort()
+    .reduce((acc, key) => {
+      const sortedValue = stableSortValue(value[key])
+      if (sortedValue !== undefined) acc[key] = sortedValue
+      return acc
+    }, {})
+}
+
+const buildSnapshotHash = (value) =>
+  createHash('sha256')
+    .update(JSON.stringify(stableSortValue(value)))
+    .digest('hex')
+
+const buildSnapshotId = ({ runtimeInstance, actionKey, snapshotHash }) => [
+  'runtime-truth',
+  normalizeRuntimeActionToken(actionKey).toLowerCase().replace(/_/g, '-'),
+  String(runtimeInstance?.runtimeInstanceKey || runtimeInstance?.id || toIdString(runtimeInstance?._id) || 'runtime').trim(),
+  String(snapshotHash || '').slice(0, 16),
+].filter(Boolean).join('-')
 
 const getValueAtPath = (source, path) => {
   const parts = String(path || '')
@@ -197,11 +223,34 @@ const hasApprovalEvidence = (frameworkState = {}) => {
   return Boolean(readiness.approved === true && approvedAt && approvedBy)
 }
 
+const getRuntimeCertificationEvidence = (runtimeInstance = {}) => ({
+  activationId: String(runtimeInstance?.evidence?.activationId || runtimeInstance?.activationId || '').trim(),
+  deploymentId: String(runtimeInstance?.evidence?.deploymentId || runtimeInstance?.deploymentId || '').trim(),
+  dependencySnapshotId: String(
+    runtimeInstance?.evidence?.dependencySnapshotId
+    || runtimeInstance?.dependencyLockId
+    || '',
+  ).trim(),
+  dependencySnapshotHash: String(runtimeInstance?.evidence?.dependencySnapshotHash || '').trim(),
+})
+
+const hasCompleteRuntimeCertificationEvidence = (runtimeInstance = {}) => {
+  const evidence = getRuntimeCertificationEvidence(runtimeInstance)
+  return Boolean(
+    evidence.activationId
+    && evidence.deploymentId
+    && evidence.dependencySnapshotId
+    && evidence.dependencySnapshotHash
+  )
+}
+
 const hasCompletePublishEvidence = (frameworkState = {}) => {
   const normalizedState = normalizeFrameworkStateForAction(frameworkState)
   const publish = normalizedState.publish || {}
   const evidence = publish.evidence || {}
   const sourceApproval = publish.sourceApproval || {}
+  const snapshot = publish.snapshot || {}
+  const outputEligibility = publish.outputEligibility || {}
 
   return Boolean(
     publish.state === RUNTIME_READINESS_STATES.PUBLISHED
@@ -209,6 +258,11 @@ const hasCompletePublishEvidence = (frameworkState = {}) => {
     && publish.publishedAt
     && publish.publishedBy
     && publish.outputEligible === true
+    && outputEligibility.outputEligible === true
+    && publish.publishVersion
+    && snapshot.snapshotId
+    && snapshot.snapshotHash
+    && snapshot.snapshotAt
     && sourceApproval.approvedAt
     && sourceApproval.approvedBy
     && evidence.activationId
@@ -216,6 +270,188 @@ const hasCompletePublishEvidence = (frameworkState = {}) => {
     && evidence.dependencySnapshotId
     && evidence.dependencySnapshotHash
   )
+}
+
+const hasRuntimeEvidenceMatchingPublishEvidence = ({ runtimeInstance, frameworkState } = {}) => {
+  const normalizedState = normalizeFrameworkStateForAction(frameworkState)
+  const runtimeEvidence = getRuntimeCertificationEvidence(runtimeInstance)
+  const publishEvidence = normalizedState.publish?.evidence || {}
+
+  return Boolean(
+    hasCompleteRuntimeCertificationEvidence(runtimeInstance)
+    && runtimeEvidence.activationId === publishEvidence.activationId
+    && runtimeEvidence.deploymentId === publishEvidence.deploymentId
+    && runtimeEvidence.dependencySnapshotId === publishEvidence.dependencySnapshotId
+    && runtimeEvidence.dependencySnapshotHash === publishEvidence.dependencySnapshotHash
+  )
+}
+
+const getFrameworkPackageVersion = (frameworkPackage = {}) =>
+  String(frameworkPackage.version || frameworkPackage.frameworkVersion || '').trim()
+
+const buildAcceptedSectionSnapshot = ({ frameworkPackage, frameworkState }) => {
+  const packageSections = Array.isArray(frameworkPackage?.sections) ? frameworkPackage.sections : []
+  const sections = frameworkState.sections || {}
+
+  return packageSections
+    .map((section) => {
+      const sectionKey = String(section?.sectionKey || '').trim()
+      const runtimePath = String(section?.runtimePath || '').trim()
+      const sectionValue = sections[sectionKey] || {}
+      const accepted = isRuntimeSectionObject(sectionValue) ? sectionValue.accepted || {} : {}
+      const generated = isRuntimeSectionObject(sectionValue) ? sectionValue.generated || {} : {}
+
+      return {
+        sectionKey,
+        runtimePath,
+        required: section?.required === true,
+        accepted: {
+          content: accepted.content ?? null,
+          acceptedAt: accepted.acceptedAt || null,
+          acceptedBy: accepted.acceptedBy || '',
+          sourceGeneratedAt: accepted.sourceGeneratedAt || null,
+          inputHash: accepted.inputHash || '',
+          dependencyHash: accepted.dependencyHash || '',
+        },
+        generated: {
+          generatedAt: generated.generatedAt || null,
+          inputHash: generated.inputHash || '',
+          dependencyHash: generated.dependencyHash || '',
+        },
+      }
+    })
+    .filter((section) => section.sectionKey && section.runtimePath)
+}
+
+const buildRuntimeTruthSnapshot = ({
+  actionKey,
+  actionedAt,
+  evidence,
+  frameworkPackage,
+  frameworkState,
+  runtimeInstance,
+  sourceApproval,
+} = {}) => {
+  const sectionTruth = evaluateRuntimeSectionTruthReadiness({
+    frameworkPackage,
+    frameworkState,
+  })
+  const snapshot = {
+    contractVersion: 'runtime-truth-snapshot-v1',
+    actionKey: normalizeRuntimeActionToken(actionKey),
+    snapshotAt: actionedAt,
+    runtimeInstance: {
+      runtimeInstanceId: toIdString(runtimeInstance?._id || runtimeInstance?.id),
+      runtimeInstanceKey: runtimeInstance?.runtimeInstanceKey || '',
+      runtimeType: runtimeInstance?.runtimeType || '',
+      customerId: toIdString(runtimeInstance?.customerId),
+      tenantId: toIdString(runtimeInstance?.tenantId),
+    },
+    package: {
+      packageId: toIdString(frameworkPackage?._id || frameworkPackage?.id || runtimeInstance?.frameworkPackageId),
+      packageKey: frameworkPackage?.packageKey || runtimeInstance?.packageKey || '',
+      frameworkKey: frameworkPackage?.frameworkKey || runtimeInstance?.frameworkKey || '',
+      packageVersion: getFrameworkPackageVersion(frameworkPackage) || runtimeInstance?.packageVersion || '',
+      activationId: evidence?.activationId || '',
+      deploymentId: evidence?.deploymentId || '',
+      dependencySnapshotId: evidence?.dependencySnapshotId || '',
+      dependencySnapshotHash: evidence?.dependencySnapshotHash || '',
+    },
+    lifecycle: {
+      stage: frameworkState.lifecycle?.stage || '',
+      approvedAt: sourceApproval?.approvedAt || frameworkState.readiness?.approvedAt || frameworkState.lifecycle?.approvedAt || null,
+      approvedBy: sourceApproval?.approvedBy || frameworkState.readiness?.approvedBy || frameworkState.lifecycle?.approvedBy || '',
+      publishedAt: frameworkState.publish?.publishedAt || frameworkState.lifecycle?.publishedAt || null,
+      publishedBy: frameworkState.publish?.publishedBy || frameworkState.lifecycle?.publishedBy || '',
+      lockedAt: frameworkState.lock?.lockedAt || frameworkState.lifecycle?.lockedAt || null,
+      lockedBy: frameworkState.lock?.lockedBy || frameworkState.lifecycle?.lockedBy || '',
+    },
+    sectionTruth: {
+      state: sectionTruth.state,
+      publishEligible: sectionTruth.publishEligible === true,
+      lockEligible: sectionTruth.lockEligible === true,
+      readySectionKeys: sectionTruth.readySectionKeys || [],
+      requiredSectionKeys: sectionTruth.requiredSectionKeys || [],
+      acceptedSectionKeys: sectionTruth.acceptedSectionKeys || [],
+      invalidatedSectionKeys: sectionTruth.invalidatedSectionKeys || [],
+    },
+    acceptedSections: buildAcceptedSectionSnapshot({ frameworkPackage, frameworkState }),
+    evidence,
+  }
+  const snapshotHash = buildSnapshotHash(snapshot)
+
+  return {
+    snapshot,
+    snapshotRecord: {
+      snapshotId: buildSnapshotId({ runtimeInstance, actionKey, snapshotHash }),
+      snapshotHash,
+      snapshotAt: actionedAt,
+      contractVersion: snapshot.contractVersion,
+      actionKey: snapshot.actionKey,
+    },
+  }
+}
+
+const buildOutputEligibility = ({
+  actionKey,
+  sectionTruth,
+  snapshotRecord,
+  canonical = false,
+} = {}) => ({
+  state: canonical ? 'OUTPUT_ELIGIBLE' : 'PUBLISH_ELIGIBLE',
+  outputEligible: true,
+  canonicalOutputEligible: canonical,
+  anchorEligible: canonical,
+  intelligenceEligible: canonical,
+  runtimeType: RUNTIME_TYPES.VALUE_NARRATIVE,
+  actionKey: normalizeRuntimeActionToken(actionKey),
+  sectionTruthReady: canonical
+    ? sectionTruth?.lockEligible === true
+    : sectionTruth?.publishEligible === true,
+  snapshotId: snapshotRecord?.snapshotId || '',
+  snapshotHash: snapshotRecord?.snapshotHash || '',
+})
+
+const buildReplayAnchor = ({
+  actionedAt,
+  evidence,
+  frameworkPackage,
+  lockSnapshot,
+  publishSnapshot,
+  runtimeInstance,
+} = {}) => {
+  const anchorBasis = {
+    runtimeInstanceId: toIdString(runtimeInstance?._id || runtimeInstance?.id),
+    runtimeInstanceKey: runtimeInstance?.runtimeInstanceKey || '',
+    runtimeType: runtimeInstance?.runtimeType || '',
+    packageKey: frameworkPackage?.packageKey || runtimeInstance?.packageKey || '',
+    packageVersion: getFrameworkPackageVersion(frameworkPackage) || runtimeInstance?.packageVersion || '',
+    dependencySnapshotId: evidence?.dependencySnapshotId || '',
+    dependencySnapshotHash: evidence?.dependencySnapshotHash || '',
+    publishSnapshotHash: publishSnapshot?.snapshotHash || '',
+    lockSnapshotHash: lockSnapshot?.snapshotHash || '',
+  }
+  const replayAnchorHash = buildSnapshotHash(anchorBasis)
+
+  return {
+    replayAnchorId: `runtime-replay-anchor-${replayAnchorHash.slice(0, 16)}`,
+    replayAnchorHash,
+    relationship: 'LOCKED_VALUE_NARRATIVE',
+    runtimeInstanceId: anchorBasis.runtimeInstanceId,
+    runtimeInstanceKey: anchorBasis.runtimeInstanceKey,
+    runtimeType: anchorBasis.runtimeType,
+    packageKey: anchorBasis.packageKey,
+    packageVersion: anchorBasis.packageVersion,
+    activationId: evidence?.activationId || '',
+    deploymentId: evidence?.deploymentId || '',
+    dependencySnapshotId: anchorBasis.dependencySnapshotId,
+    dependencySnapshotHash: anchorBasis.dependencySnapshotHash,
+    publishSnapshotId: publishSnapshot?.snapshotId || '',
+    publishSnapshotHash: publishSnapshot?.snapshotHash || '',
+    lockSnapshotId: lockSnapshot?.snapshotId || '',
+    lockSnapshotHash: lockSnapshot?.snapshotHash || '',
+    lockedAt: actionedAt,
+  }
 }
 
 const isRuntimeActionEditBlocked = (runtimeInstance) => [
@@ -346,6 +582,10 @@ export const getRuntimeActionStateGate = ({
   }
 
   if (normalizedAction === RUNTIME_ACTION_KEYS.PUBLISH) {
+    if (!hasCompleteRuntimeCertificationEvidence(runtimeInstance)) {
+      return buildGate(false, 'Certified activation, deployment, and dependency snapshot evidence is required before publishing.')
+    }
+
     const sectionTruth = evaluateRuntimeSectionTruthReadiness({
       frameworkPackage,
       frameworkState: normalizedFrameworkState,
@@ -368,6 +608,13 @@ export const getRuntimeActionStateGate = ({
   }
 
   if (normalizedAction === RUNTIME_ACTION_KEYS.LOCK_RECORD) {
+    if (!hasRuntimeEvidenceMatchingPublishEvidence({
+      runtimeInstance,
+      frameworkState: normalizedFrameworkState,
+    })) {
+      return buildGate(false, 'Current runtime evidence must match the published VMF evidence before locking canonical truth.')
+    }
+
     const sectionTruth = evaluateRuntimeSectionTruthReadiness({
       frameworkPackage,
       frameworkState: normalizedFrameworkState,
@@ -592,11 +839,10 @@ export const buildRuntimeActionTransition = ({
   }
 
   if (normalizedAction === RUNTIME_ACTION_KEYS.PUBLISH) {
-    const evidence = {
-      activationId: String(runtimeInstance?.evidence?.activationId || runtimeInstance?.activationId || '').trim(),
-      deploymentId: String(runtimeInstance?.evidence?.deploymentId || runtimeInstance?.deploymentId || '').trim(),
-      dependencySnapshotId: String(runtimeInstance?.evidence?.dependencySnapshotId || runtimeInstance?.dependencyLockId || '').trim(),
-      dependencySnapshotHash: String(runtimeInstance?.evidence?.dependencySnapshotHash || '').trim(),
+    const evidence = getRuntimeCertificationEvidence(runtimeInstance)
+    const sourceApproval = {
+      approvedAt: nextFrameworkState.readiness?.approvedAt || nextFrameworkState.lifecycle?.approvedAt || null,
+      approvedBy: nextFrameworkState.readiness?.approvedBy || nextFrameworkState.lifecycle?.approvedBy || '',
     }
     nextFrameworkState.lifecycle = {
       ...nextFrameworkState.lifecycle,
@@ -606,17 +852,35 @@ export const buildRuntimeActionTransition = ({
       updatedAt: actionedAt,
       updatedBy: toIdString(actorUserId),
     }
+    const sectionTruth = evaluateRuntimeSectionTruthReadiness({
+      frameworkPackage,
+      frameworkState: nextFrameworkState,
+    })
+    const { snapshotRecord } = buildRuntimeTruthSnapshot({
+      actionKey: normalizedAction,
+      actionedAt,
+      evidence,
+      frameworkPackage,
+      frameworkState: nextFrameworkState,
+      runtimeInstance,
+      sourceApproval,
+    })
     nextFrameworkState.publish = {
       ...nextFrameworkState.publish,
       state: RUNTIME_READINESS_STATES.PUBLISHED,
       published: true,
       publishedAt: actionedAt,
       publishedBy: toIdString(actorUserId),
-      sourceApproval: {
-        approvedAt: nextFrameworkState.readiness?.approvedAt || nextFrameworkState.lifecycle?.approvedAt || null,
-        approvedBy: nextFrameworkState.readiness?.approvedBy || nextFrameworkState.lifecycle?.approvedBy || '',
-      },
+      publishVersion: nextFrameworkState.publish?.publishVersion || 1,
+      sourceApproval,
       evidence,
+      snapshot: snapshotRecord,
+      outputEligibility: buildOutputEligibility({
+        actionKey: normalizedAction,
+        sectionTruth,
+        snapshotRecord,
+        canonical: false,
+      }),
       outputEligible: true,
       lastActionKey: normalizedAction,
       updatedAt: actionedAt,
@@ -638,12 +902,7 @@ export const buildRuntimeActionTransition = ({
   }
 
   if (normalizedAction === RUNTIME_ACTION_KEYS.LOCK_RECORD) {
-    const evidence = {
-      activationId: String(runtimeInstance?.evidence?.activationId || runtimeInstance?.activationId || '').trim(),
-      deploymentId: String(runtimeInstance?.evidence?.deploymentId || runtimeInstance?.deploymentId || '').trim(),
-      dependencySnapshotId: String(runtimeInstance?.evidence?.dependencySnapshotId || runtimeInstance?.dependencyLockId || '').trim(),
-      dependencySnapshotHash: String(runtimeInstance?.evidence?.dependencySnapshotHash || '').trim(),
-    }
+    const evidence = getRuntimeCertificationEvidence(runtimeInstance)
     nextFrameworkState.lifecycle = {
       ...nextFrameworkState.lifecycle,
       stage: RUNTIME_LIFECYCLE_STAGES.LOCKED,
@@ -652,6 +911,27 @@ export const buildRuntimeActionTransition = ({
       updatedAt: actionedAt,
       updatedBy: toIdString(actorUserId),
     }
+    const sectionTruth = evaluateRuntimeSectionTruthReadiness({
+      frameworkPackage,
+      frameworkState: nextFrameworkState,
+    })
+    const { snapshotRecord } = buildRuntimeTruthSnapshot({
+      actionKey: normalizedAction,
+      actionedAt,
+      evidence,
+      frameworkPackage,
+      frameworkState: nextFrameworkState,
+      runtimeInstance,
+      sourceApproval: nextFrameworkState.publish?.sourceApproval || {},
+    })
+    const replayAnchor = buildReplayAnchor({
+      actionedAt,
+      evidence,
+      frameworkPackage,
+      lockSnapshot: snapshotRecord,
+      publishSnapshot: nextFrameworkState.publish?.snapshot || {},
+      runtimeInstance,
+    })
     nextFrameworkState.lock = {
       ...nextFrameworkState.lock,
       state: RUNTIME_READINESS_STATES.LOCKED,
@@ -659,16 +939,24 @@ export const buildRuntimeActionTransition = ({
       lockedAt: actionedAt,
       lockedBy: toIdString(actorUserId),
       lockedReason: 'Runtime published truth locked for downstream canonical use.',
+      lockVersion: nextFrameworkState.lock?.lockVersion || 1,
       publish: {
         publishedAt: nextFrameworkState.publish?.publishedAt || null,
         publishedBy: nextFrameworkState.publish?.publishedBy || '',
+        publishVersion: nextFrameworkState.publish?.publishVersion || 1,
+        snapshotId: nextFrameworkState.publish?.snapshot?.snapshotId || '',
+        snapshotHash: nextFrameworkState.publish?.snapshot?.snapshotHash || '',
       },
       evidence,
-      anchor: {
-        relationship: 'LOCKED_VALUE_NARRATIVE',
-        runtimeInstanceKey: runtimeInstance?.runtimeInstanceKey || '',
-        runtimeType: runtimeInstance?.runtimeType || '',
-      },
+      snapshot: snapshotRecord,
+      anchor: replayAnchor,
+      replayAnchor,
+      outputEligibility: buildOutputEligibility({
+        actionKey: normalizedAction,
+        sectionTruth,
+        snapshotRecord,
+        canonical: true,
+      }),
       lastActionKey: normalizedAction,
       updatedAt: actionedAt,
       updatedBy: toIdString(actorUserId),
