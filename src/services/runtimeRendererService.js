@@ -1770,6 +1770,37 @@ const buildRuntimeDataProjection = ({ includeDebugProjection, sections }) => ({
 
 const normalizeActivityText = (value) => String(value || '').trim()
 
+const sanitizeRuntimeActivitySummary = (value, entry = {}) => {
+  const summary = normalizeActivityText(value)
+  if (!summary) return ''
+
+  const resourceId = toIdString(entry.resourceId)
+  const normalizedSummary = summary.toLocaleLowerCase()
+  if (resourceId && normalizedSummary.includes(resourceId.toLocaleLowerCase())) {
+    return ''
+  }
+
+  return summary
+}
+
+const formatActivityTokenLabel = (value) => {
+  const token = normalizeActivityText(value)
+  if (!token) return ''
+
+  return token
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLocaleLowerCase()
+    .replace(/\b\w/g, (letter) => letter.toLocaleUpperCase())
+}
+
+const buildRuntimeActionActivitySummary = (entry = {}) => {
+  const actionKey = normalizeActivityText(entry.diff?.governedAction || entry.diff?.actionKey)
+  const actionLabel = formatActivityTokenLabel(actionKey)
+  return actionLabel ? `${actionLabel} executed` : ''
+}
+
 const buildRuntimeActivityEvent = (entry = {}) => {
   const eventId = toIdString(entry.id || entry._id)
   const occurredAtDate = entry.ts ? new Date(entry.ts) : null
@@ -1777,14 +1808,20 @@ const buildRuntimeActivityEvent = (entry = {}) => {
     ? occurredAtDate.toISOString()
     : null
   const action = normalizeToken(entry.action)
-  const summary = RUNTIME_ACTIVITY_SUMMARY_BY_ACTION[action]
-    || normalizeActivityText(entry.display?.title)
-    || normalizeActivityText(entry.summary)
+  const actionSummary = action === 'RUNTIME_ACTION_EXECUTED'
+    ? buildRuntimeActionActivitySummary(entry)
+    : ''
+  const summary = sanitizeRuntimeActivitySummary(entry.display?.title, entry)
+    || actionSummary
+    || sanitizeRuntimeActivitySummary(entry.summary, entry)
+    || RUNTIME_ACTIVITY_SUMMARY_BY_ACTION[action]
     || normalizeActivityText(entry.action)
 
   return {
     ...(eventId ? { eventId } : {}),
     ...(entry.action ? { action: entry.action } : {}),
+    ...(entry.diff?.actionKey ? { actionKey: normalizeActivityText(entry.diff.actionKey) } : {}),
+    ...(entry.diff?.governedAction ? { governedAction: normalizeActivityText(entry.diff.governedAction) } : {}),
     ...(summary ? { summary } : {}),
     ...(occurredAt ? { occurredAt } : {}),
     ...(entry.display?.actorLabel ? { actorLabel: normalizeActivityText(entry.display.actorLabel) } : {}),

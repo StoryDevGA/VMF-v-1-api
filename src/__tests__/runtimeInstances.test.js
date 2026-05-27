@@ -7203,6 +7203,17 @@ describe('Runtime Instance API', () => {
     const auditFindChain = buildAuditLogFindChain([
       {
         _id: '64f000000000000000000001',
+        ts: '2026-05-19T08:05:00.000Z',
+        action: 'RUNTIME_STATE_MUTATED',
+        resourceType: 'RuntimeInstance',
+        resourceId: RUNTIME_INSTANCE_ID,
+        summary: `Jill Faithful updated runtime state for RuntimeInstance ${RUNTIME_INSTANCE_ID}`,
+        display: {
+          actorLabel: 'Jill Faithful',
+        },
+      },
+      {
+        _id: '64f000000000000000000002',
         ts: '2026-05-19T08:04:00.000Z',
         action: 'RUNTIME_STATE_MUTATED',
         resourceType: 'RuntimeInstance',
@@ -7222,13 +7233,24 @@ describe('Runtime Instance API', () => {
         },
       },
       {
-        _id: '64f000000000000000000002',
+        _id: '64f000000000000000000003',
         ts: '2026-05-19T08:03:00.000Z',
         action: 'RUNTIME_ACTION_EXECUTED',
         resourceType: 'RuntimeInstance',
         resourceId: RUNTIME_INSTANCE_ID,
         display: {
           title: 'Validation ran',
+        },
+      },
+      {
+        _id: '64f000000000000000000004',
+        ts: '2026-05-19T08:02:00.000Z',
+        action: 'RUNTIME_ACTION_EXECUTED',
+        resourceType: 'RuntimeInstance',
+        resourceId: RUNTIME_INSTANCE_ID,
+        diff: {
+          actionKey: 'RUN_VALIDATION',
+          governedAction: 'RUN_VALIDATION',
         },
       },
     ])
@@ -7252,19 +7274,35 @@ describe('Runtime Instance API', () => {
         eventId: '64f000000000000000000001',
         action: 'RUNTIME_STATE_MUTATED',
         summary: 'Runtime state updated',
-        occurredAt: '2026-05-19T08:04:00.000Z',
+        occurredAt: '2026-05-19T08:05:00.000Z',
         actorLabel: 'Jill Faithful',
       },
       {
         eventId: '64f000000000000000000002',
+        action: 'RUNTIME_STATE_MUTATED',
+        summary: 'Customer Problem saved.',
+        occurredAt: '2026-05-19T08:04:00.000Z',
+        actorLabel: 'Jill Faithful',
+      },
+      {
+        eventId: '64f000000000000000000003',
         action: 'RUNTIME_ACTION_EXECUTED',
-        summary: 'Runtime action executed',
+        summary: 'Validation ran',
         occurredAt: '2026-05-19T08:03:00.000Z',
+      },
+      {
+        eventId: '64f000000000000000000004',
+        action: 'RUNTIME_ACTION_EXECUTED',
+        actionKey: 'RUN_VALIDATION',
+        governedAction: 'RUN_VALIDATION',
+        summary: 'Run Validation executed',
+        occurredAt: '2026-05-19T08:02:00.000Z',
       },
     ])
     expect(res.body.data.activity[0].diff).toBeUndefined()
     expect(res.body.data.activity[0].scope).toBeUndefined()
     expect(res.body.data.activity[0].resourceId).toBeUndefined()
+    expect(res.body.data.activity[0].summary).not.toContain(RUNTIME_INSTANCE_ID)
   })
 
   test('projects accepted section truth from framework_state without deriving it from generated content', async () => {
