@@ -24,9 +24,12 @@ import {
   toIdString,
 } from './runtimeInstanceService.js'
 import {
+  buildRuntimeSectionRevision,
   getRuntimeSectionAccepted,
   getRuntimeSectionGenerated,
   getRuntimeSectionInput,
+  getRuntimeSectionRevisions,
+  hashSectionInput,
   invalidateRuntimeSectionEvidence,
   isRuntimeSectionObject,
   normalizeRuntimeSectionObject,
@@ -291,6 +294,123 @@ const assertSafeRuntimePathParts = (runtimePath) => {
   return pathParts
 }
 
+const hasRuntimeSnapshotValue = (value) => {
+  if (value === null || value === undefined) return false
+  if (typeof value === 'string') return value.trim().length > 0
+  if (Array.isArray(value)) return value.length > 0
+  if (isPlainObject(value)) return Object.keys(value).length > 0
+  return true
+}
+
+const getSectionRootWriteTarget = ({ frameworkState, leafKey, runtimePath }) => {
+  const sections = isPlainObject(frameworkState?.sections) ? frameworkState.sections : {}
+  if (Object.prototype.hasOwnProperty.call(sections, leafKey)) {
+    return {
+      previousRawValue: sections[leafKey],
+      previousStateKey: leafKey,
+    }
+  }
+
+  const normalizedRuntimePath = normalizeRuntimePath(runtimePath)
+  const legacyEntry = Object.entries(sections).find(([candidateKey, candidateValue]) => {
+    if (candidateKey === leafKey || !isRuntimeSectionObject(candidateValue)) return false
+    const candidateRuntimePath = normalizeRuntimePath(candidateValue?.lineage?.runtimePath)
+    return candidateRuntimePath && candidateRuntimePath === normalizedRuntimePath
+  })
+
+  if (legacyEntry) {
+    return {
+      previousRawValue: legacyEntry[1],
+      previousStateKey: legacyEntry[0],
+    }
+  }
+
+  return {
+    previousRawValue: undefined,
+    previousStateKey: leafKey,
+  }
+}
+
+const buildSectionRootWriteValue = ({
+  previousRawValue,
+  runtimePath,
+  sectionKey,
+  value,
+}) => {
+  const sectionObject = normalizeRuntimeSectionObject({
+    value: previousRawValue,
+    sectionKey,
+    runtimePath,
+  })
+  const nextInput = cloneValue(value)
+  const previousInput = getRuntimeSectionInput(previousRawValue)
+  const previousGenerated = getRuntimeSectionGenerated(sectionObject)
+  const previousAccepted = getRuntimeSectionAccepted(sectionObject)
+  const inputChanged = hashSectionInput(previousInput) !== hashSectionInput(nextInput)
+  const hasGeneratedSnapshot = hasRuntimeSnapshotValue(previousGenerated)
+  const hasAcceptedSnapshot = hasRuntimeSnapshotValue(previousAccepted)
+
+  if (!inputChanged || (!hasGeneratedSnapshot && !hasAcceptedSnapshot)) {
+    return {
+      ...sectionObject,
+      input: nextInput,
+    }
+  }
+
+  const invalidatedAt = new Date().toISOString()
+  const existingRevisions = getRuntimeSectionRevisions(sectionObject)
+  const nextRevisions = [
+    ...existingRevisions,
+    buildRuntimeSectionRevision({
+      ...(hasGeneratedSnapshot ? { generated: previousGenerated } : {}),
+      ...(hasAcceptedSnapshot ? { accepted: previousAccepted } : {}),
+      reason: 'SECTION_INPUT_CHANGED',
+      revisionNumber: existingRevisions.length + 1,
+      replacedAt: invalidatedAt,
+    }),
+  ]
+
+  return {
+    ...sectionObject,
+    input: nextInput,
+    generated: null,
+    accepted: null,
+    revisions: nextRevisions,
+    review: {
+      ...(sectionObject.review || {}),
+      status: 'PENDING_REVIEW',
+      invalidatedAt,
+      invalidationReason: 'SECTION_INPUT_CHANGED',
+    },
+    state: {
+      ...(sectionObject.state || {}),
+      status: RUNTIME_SECTION_STATES.DRAFT,
+      revisionCount: nextRevisions.length,
+      inputHash: hashSectionInput(nextInput),
+      invalidatedAt,
+      invalidationReason: 'SECTION_INPUT_CHANGED',
+      ...(hasGeneratedSnapshot ? { generatedInvalidatedAt: invalidatedAt } : {}),
+      ...(hasAcceptedSnapshot ? { acceptedInvalidatedAt: invalidatedAt } : {}),
+    },
+    lineage: {
+      ...(sectionObject.lineage || {}),
+      sectionKey,
+      runtimePath,
+      inputHash: hashSectionInput(nextInput),
+      invalidatedAt,
+      invalidationReason: 'SECTION_INPUT_CHANGED',
+    },
+    intelligence: {
+      ...(sectionObject.intelligence || {}),
+      invalidation: {
+        reason: 'SECTION_INPUT_CHANGED',
+        invalidatedAt,
+        archivedRevisionNumber: nextRevisions.length,
+      },
+    },
+  }
+}
+
 const setValueAtPath = ({ frameworkState, runtimePath, value }) => {
   const pathParts = assertSafeRuntimePathParts(runtimePath)
   const mutableState = cloneValue(frameworkState || {})
@@ -304,19 +424,29 @@ const setValueAtPath = ({ frameworkState, runtimePath, value }) => {
   })
 
   const leafKey = pathParts[pathParts.length - 1]
-  const previousRawValue = getValueAtPath({ framework_state: frameworkState || {} }, pathParts)
   const isSectionRootWrite = pathParts.length === 3
+  const sectionRootTarget = isSectionRootWrite
+    ? getSectionRootWriteTarget({
+        frameworkState: frameworkState || {},
+        leafKey,
+        runtimePath,
+      })
+    : null
+  const previousRawValue = isSectionRootWrite
+    ? sectionRootTarget.previousRawValue
+    : getValueAtPath({ framework_state: frameworkState || {} }, pathParts)
   const nextValue = isSectionRootWrite
-    ? {
-        ...normalizeRuntimeSectionObject({
-          value: previousRawValue,
-          sectionKey: leafKey,
-          runtimePath,
-        }),
-        input: cloneValue(value),
-      }
+    ? buildSectionRootWriteValue({
+        previousRawValue,
+        runtimePath,
+        sectionKey: leafKey,
+        value,
+      })
     : value
 
+  if (isSectionRootWrite && sectionRootTarget.previousStateKey && sectionRootTarget.previousStateKey !== leafKey) {
+    delete cursor[sectionRootTarget.previousStateKey]
+  }
   cursor[leafKey] = nextValue
 
   return {
@@ -860,6 +990,13 @@ const buildAcceptedSectionTruth = ({
     format: generated.format || 'TEXT',
     content,
     summary: generated.summary || '',
+    ...(Array.isArray(generated.sections) ? { sections: cloneValue(generated.sections) } : {}),
+    ...(Array.isArray(generated.supportingEvidenceRefs)
+      ? { supportingEvidenceRefs: cloneValue(generated.supportingEvidenceRefs) }
+      : {}),
+    ...(Array.isArray(generated.generationBoundaries)
+      ? { generationBoundaries: cloneValue(generated.generationBoundaries) }
+      : {}),
     truthHash,
     acceptedAt,
     acceptedBy: toIdString(actorUserId),
@@ -1907,6 +2044,15 @@ export const acceptRuntimeSection = async ({
   if (!generated || !String(generated.content ?? '').trim()) {
     throw buildSectionAcceptanceUnavailableError({
       message: 'Runtime section cannot be accepted before generated content exists.',
+      runtimePath: target.runtimePath,
+      sectionKey: target.sectionKey,
+    })
+  }
+
+  const truthEligibility = generated.truthEligibility || sectionObject.intelligence?.truthEligibility || null
+  if (truthEligibility && truthEligibility.eligible === false) {
+    throw buildSectionAcceptanceUnavailableError({
+      message: 'Runtime section cannot be accepted until generated content is truth eligible.',
       runtimePath: target.runtimePath,
       sectionKey: target.sectionKey,
     })

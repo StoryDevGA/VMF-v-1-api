@@ -40,6 +40,7 @@ import {
 import { assertRuntimePermission, getRuntimeInstance } from './runtimeInstanceService.js'
 import { evaluateRuntimeSectionTruthReadiness } from './runtimeSectionTruthReadinessService.js'
 import {
+  buildSectionIntelligenceDisplayProjection,
   getRuntimeSectionGenerated,
   getRuntimeSectionAccepted,
   getRuntimeSectionDependencies,
@@ -256,6 +257,66 @@ const isEmptyProjectionValue = (value) => {
 }
 
 const hasProjectionValue = (value) => !isEmptyProjectionValue(value)
+
+const isProjectionObject = (value) =>
+  Boolean(value && typeof value === 'object' && !Array.isArray(value))
+
+const redactReadOnlySectionIntelligence = (intelligence) => {
+  if (!isProjectionObject(intelligence)) return intelligence
+  const redacted = cloneProjectionValue(intelligence)
+
+  if (isProjectionObject(redacted.sourceProjection)) {
+    redacted.sourceProjection = {
+      ...redacted.sourceProjection,
+      themes: Array.isArray(redacted.sourceProjection.themes)
+        ? redacted.sourceProjection.themes.map((theme) => ({
+            key: theme?.key || '',
+            label: theme?.label || '',
+            source: theme?.source || '',
+            supportLevel: theme?.supportLevel || '',
+            confidence: theme?.confidence || '',
+            claimClassification: theme?.claimClassification || '',
+          }))
+        : [],
+    }
+  }
+
+  if (isProjectionObject(redacted.scopedEvidence)) {
+    redacted.scopedEvidence = {
+      ...redacted.scopedEvidence,
+      sourceRefs: Array.isArray(redacted.scopedEvidence.sourceRefs)
+        ? redacted.scopedEvidence.sourceRefs.map((ref) => ({
+            refKey: ref?.refKey || '',
+            label: ref?.label || '',
+            type: ref?.type || '',
+          }))
+        : [],
+    }
+  }
+
+  redacted.supportingEvidence = []
+
+  if (isProjectionObject(redacted.displayProjection)) {
+    redacted.displayProjection = {
+      ...redacted.displayProjection,
+      generatedInsight: isProjectionObject(redacted.displayProjection.generatedInsight)
+        ? {
+            title: redacted.displayProjection.generatedInsight.title || 'Generated Insight',
+            summary: redacted.displayProjection.generatedInsight.summary
+              ? 'Generated section intelligence is available.'
+              : '',
+            sections: [],
+          }
+        : redacted.displayProjection.generatedInsight,
+      supportingEvidence: {
+        title: 'Supporting Evidence',
+        items: [],
+      },
+    }
+  }
+
+  return redacted
+}
 
 const getDiscoveryEvidencePack = (frameworkState = {}) =>
   frameworkState.evidence_pack || frameworkState.evidencePack || null
@@ -727,6 +788,7 @@ const buildSectionConfidenceProjection = ({
 const buildSectionIntelligenceProjection = ({
   accepted,
   discovery,
+  enrichment,
   generationEligibility,
   generated,
   input,
@@ -756,8 +818,13 @@ const buildSectionIntelligenceProjection = ({
     generationEligibility,
     readiness,
   })
+  const safeEnrichment = isProjectionObject(enrichment) ? enrichment : {}
+  const mergedDisplayProjection = {
+    ...(isProjectionObject(safeEnrichment.displayProjection) ? safeEnrichment.displayProjection : {}),
+  }
 
   return {
+    ...safeEnrichment,
     ownershipZones: {
       suggestedFromDiscovery: {
         available: hasProjectionValue(discoveryScopedView),
@@ -781,6 +848,7 @@ const buildSectionIntelligenceProjection = ({
     dependency,
     compare,
     readiness,
+    ...(Object.keys(mergedDisplayProjection).length > 0 ? { displayProjection: mergedDisplayProjection } : {}),
     metrics: {
       revisionCount: Array.isArray(revisions) ? revisions.length : 0,
       validationMessageCount: validationMessages.length,
@@ -1339,9 +1407,38 @@ const buildRendererSections = ({
     })
     const sectionInput = getRuntimeSectionInput(rawSectionValue)
     const validationMessages = buildSectionValidationMessages({ frameworkState, validationKeys })
+    const persistedIntelligence = isRuntimeSectionObject(rawSectionValue) && isProjectionObject(rawSectionValue.intelligence)
+      ? rawSectionValue.intelligence
+      : {}
+    const projectedEnrichment = buildSectionIntelligenceDisplayProjection({
+      dependencySectionKeys,
+      frameworkPackage,
+      frameworkState,
+      generated: sectionGenerated,
+      generatedAt: sectionGenerated?.generatedAt || (
+        runtimeInstance.updatedAt instanceof Date
+          ? runtimeInstance.updatedAt.toISOString()
+          : runtimeInstance.updatedAt
+      ) || new Date().toISOString(),
+      input: sectionInput,
+      runtimeInstance,
+      section: packageSection,
+    })
+    const sectionEnrichment = {
+      ...projectedEnrichment,
+      ...persistedIntelligence,
+      displayProjection: {
+        ...(isProjectionObject(projectedEnrichment.displayProjection) ? projectedEnrichment.displayProjection : {}),
+        ...(isProjectionObject(persistedIntelligence.displayProjection) ? persistedIntelligence.displayProjection : {}),
+      },
+    }
+    const safeSectionEnrichment = mutationAccess?.allowed === true
+      ? sectionEnrichment
+      : redactReadOnlySectionIntelligence(sectionEnrichment)
     const sectionIntelligence = buildSectionIntelligenceProjection({
       accepted: sectionAccepted,
       discovery,
+      enrichment: safeSectionEnrichment,
       generationEligibility,
       generated: sectionGenerated,
       input: sectionInput,

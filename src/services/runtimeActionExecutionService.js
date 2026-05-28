@@ -28,8 +28,9 @@ import {
 } from './runtimeActionPolicyService.js'
 import {
   RUNTIME_SECTION_STATES,
-  buildDeterministicGeneratedSection,
+  buildEnrichedGeneratedSection,
   buildRuntimeSectionRevision,
+  buildSectionIntelligenceDisplayProjection,
   cloneSectionValue,
   getRuntimeSectionAccepted,
   getRuntimeSectionGenerated,
@@ -130,6 +131,14 @@ const getFrameworkStateSectionValue = ({ frameworkPackage, frameworkState, secti
   return frameworkState?.sections?.[stateSectionKey] ?? frameworkState?.sections?.[sectionKey]
 }
 
+const getLatestRuntimeSectionRevisionValue = (revisions, key) => {
+  if (!Array.isArray(revisions)) return null
+  for (let index = revisions.length - 1; index >= 0; index -= 1) {
+    if (hasRuntimeValue(revisions[index]?.[key])) return revisions[index]
+  }
+  return null
+}
+
 const getTimestampInvalidatedDependencySectionKeys = ({
   dependencySectionKeys,
   frameworkPackage,
@@ -169,12 +178,25 @@ const buildRegenerationEligibility = ({
   payload,
   previousGenerated,
   runtimeInstance,
+  section,
   sectionObject,
 } = {}) => {
   const reasons = []
   const currentInputHash = hashSectionInput(input)
   const previousInputHash = normalizeActionString(previousGenerated?.inputHash)
   const forceRegenerateReason = normalizeActionString(payload?.forceRegenerateReason)
+  const currentIntelligence = buildSectionIntelligenceDisplayProjection({
+    dependencySectionKeys,
+    frameworkPackage,
+    frameworkState,
+    input,
+    runtimeInstance,
+    section,
+  })
+  const currentEvidenceHash = normalizeActionString(currentIntelligence?.boundedContext?.evidenceHash)
+  const previousEvidenceHash = normalizeActionString(previousGenerated?.evidenceHash)
+  const currentDependencyHash = normalizeActionString(currentIntelligence?.boundedContext?.dependencyHash)
+  const previousDependencyHash = normalizeActionString(previousGenerated?.dependencyHash)
 
   if (forceRegenerateReason) reasons.push('FORCED_REGENERATE_REASON')
 
@@ -182,6 +204,14 @@ const buildRegenerationEligibility = ({
     reasons.push('MISSING_GENERATION_INPUT_HASH')
   } else if (currentInputHash !== previousInputHash) {
     reasons.push('INPUT_CHANGED')
+  }
+
+  if (previousEvidenceHash && currentEvidenceHash && currentEvidenceHash !== previousEvidenceHash) {
+    reasons.push('DISCOVERY_EVIDENCE_CHANGED')
+  }
+
+  if (previousDependencyHash && currentDependencyHash && currentDependencyHash !== previousDependencyHash) {
+    reasons.push('DEPENDENCY_CONTEXT_CHANGED')
   }
 
   if (hasActiveDependencyInvalidation(sectionObject)) {
@@ -213,7 +243,11 @@ const buildRegenerationEligibility = ({
   return {
     canRegenerate: reasons.length > 0,
     currentInputHash,
+    currentEvidenceHash,
+    currentDependencyHash,
     previousInputHash,
+    previousEvidenceHash,
+    previousDependencyHash,
     forceRegenerateReason,
     invalidatedDependencySectionKeys: timestampInvalidatedSectionKeys,
     reasons: [...new Set(reasons)],
@@ -456,12 +490,40 @@ const applyRuntimeSectionGeneration = ({
     initializedAt: actionedAt,
   })
   const targetDependencySectionKeys = getDependencySectionKeys(target.section)
-  const input = getRuntimeSectionInput(sectionObject)
-  const previousGenerated = getRuntimeSectionGenerated(sectionObject)
+  const payloadAdditionalContext = typeof payload?.additionalContext === 'string'
+    ? payload.additionalContext.trim()
+    : ''
+  const existingInput = getRuntimeSectionInput(sectionObject)
+  const input = payloadAdditionalContext || existingInput
+  const inputChanged = hashSectionInput(existingInput) !== hashSectionInput(input)
+  const currentGenerated = getRuntimeSectionGenerated(sectionObject)
+  const previousAccepted = getRuntimeSectionAccepted(sectionObject)
   const existingRevisions = getRuntimeSectionRevisions(sectionObject)
+  const latestGeneratedRevision = getLatestRuntimeSectionRevisionValue(existingRevisions, 'generated')
+  const archivedGenerated = latestGeneratedRevision?.generated || null
+  const previousGenerated = hasRuntimeValue(currentGenerated)
+    ? currentGenerated
+    : normalizedActionKey === RUNTIME_ACTION_KEYS.REGENERATE_SECTION
+      ? archivedGenerated
+      : null
   let regenerationEligibility = null
 
-  if (normalizedActionKey === RUNTIME_ACTION_KEYS.REGENERATE_SECTION && !previousGenerated) {
+  if (normalizedActionKey === RUNTIME_ACTION_KEYS.GENERATE_SECTION && !hasRuntimeValue(currentGenerated) && hasRuntimeValue(archivedGenerated)) {
+    throw buildActionError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Runtime section has archived generated content and must be regenerated instead of generated.',
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_ACTION_NOT_AVAILABLE,
+      details: {
+        actionKey: normalizedActionKey,
+        disabledReason: 'Regenerate this section because previous generated content is archived for comparison.',
+        sectionKey: target.sectionKey,
+        runtimePath: target.runtimePath,
+      },
+    })
+  }
+
+  if (normalizedActionKey === RUNTIME_ACTION_KEYS.REGENERATE_SECTION && !hasRuntimeValue(previousGenerated)) {
     throw buildActionError({
       status: 409,
       code: 'CONFLICT',
@@ -469,6 +531,21 @@ const applyRuntimeSectionGeneration = ({
       reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_ACTION_NOT_AVAILABLE,
       details: {
         actionKey: normalizedActionKey,
+        sectionKey: target.sectionKey,
+        runtimePath: target.runtimePath,
+      },
+    })
+  }
+
+  if (normalizedActionKey === RUNTIME_ACTION_KEYS.REGENERATE_SECTION && generationEligibility.canGenerate !== true) {
+    throw buildActionError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Runtime section cannot be regenerated before discovery evidence is accepted.',
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_ACTION_NOT_AVAILABLE,
+      details: {
+        actionKey: normalizedActionKey,
+        disabledReason: generationEligibility.reason,
         sectionKey: target.sectionKey,
         runtimePath: target.runtimePath,
       },
@@ -484,6 +561,7 @@ const applyRuntimeSectionGeneration = ({
       payload,
       previousGenerated,
       runtimeInstance,
+      section: target.section,
       sectionObject,
     })
 
@@ -504,20 +582,26 @@ const applyRuntimeSectionGeneration = ({
     }
   }
 
-  const generated = buildDeterministicGeneratedSection({
+  const { generated, intelligence } = buildEnrichedGeneratedSection({
     actionKey: normalizedActionKey,
     actorUserId: toIdString(actorUserId),
+    dependencySectionKeys: targetDependencySectionKeys,
     frameworkPackage,
+    frameworkState: nextFrameworkState,
     input,
     runtimeInstance,
     section: target.section,
     generatedAt: actionedAt,
   })
-  const revisions = previousGenerated
+  const hasGeneratedRevision = hasRuntimeValue(currentGenerated)
+  const hasAcceptedRevision = hasRuntimeValue(previousAccepted)
+  const revisions = hasGeneratedRevision || hasAcceptedRevision
     ? [
         ...existingRevisions,
         buildRuntimeSectionRevision({
-          generated: previousGenerated,
+          ...(hasGeneratedRevision ? { generated: currentGenerated } : {}),
+          ...(hasAcceptedRevision ? { accepted: previousAccepted } : {}),
+          reason: inputChanged ? 'SECTION_INPUT_CHANGED' : 'SECTION_GENERATION_REPLACED',
           revisionNumber: existingRevisions.length + 1,
           replacedAt: actionedAt,
         }),
@@ -526,20 +610,44 @@ const applyRuntimeSectionGeneration = ({
 
   nextFrameworkState.sections[target.stateSectionKey] = {
     ...sectionObject,
+    input,
     generated,
+    accepted: null,
+    intelligence: {
+      ...(sectionObject.intelligence || {}),
+      ...intelligence,
+      ...(hasAcceptedRevision ? {
+        invalidation: {
+          reason: inputChanged ? 'SECTION_INPUT_CHANGED' : 'SECTION_GENERATION_REPLACED',
+          invalidatedAt: actionedAt,
+          archivedRevisionNumber: revisions.length,
+        },
+      } : {}),
+    },
     revisions,
     review: {
       ...(sectionObject.review || {}),
       status: 'PENDING_REVIEW',
+      ...(hasAcceptedRevision ? {
+        invalidatedAt: actionedAt,
+        invalidationReason: inputChanged ? 'SECTION_INPUT_CHANGED' : 'SECTION_GENERATION_REPLACED',
+      } : {}),
     },
     state: {
       ...(sectionObject.state || {}),
-      status: normalizedActionKey === RUNTIME_ACTION_KEYS.REGENERATE_SECTION
-        ? RUNTIME_SECTION_STATES.REGENERATED
-        : RUNTIME_SECTION_STATES.GENERATED,
+      status: intelligence.truthEligibility?.eligible === false
+        ? RUNTIME_SECTION_STATES.INSUFFICIENT_EVIDENCE
+        : normalizedActionKey === RUNTIME_ACTION_KEYS.REGENERATE_SECTION
+          ? RUNTIME_SECTION_STATES.REGENERATED
+          : RUNTIME_SECTION_STATES.GENERATED,
       generatedAt: actionedAt,
       lastActionKey: normalizedActionKey,
       revisionCount: revisions.length,
+      inputHash: generated.inputHash,
+      ...(hasAcceptedRevision ? {
+        acceptedInvalidatedAt: actionedAt,
+        acceptedInvalidationReason: inputChanged ? 'SECTION_INPUT_CHANGED' : 'SECTION_GENERATION_REPLACED',
+      } : {}),
       updatedBy: toIdString(actorUserId),
     },
     lineage: {
@@ -555,6 +663,9 @@ const applyRuntimeSectionGeneration = ({
       actionKey: normalizedActionKey,
       generatedAt: actionedAt,
       inputHash: generated.inputHash,
+      evidenceHash: generated.evidenceHash,
+      dependencyHash: generated.dependencyHash,
+      boundedContextHash: generated.boundedContextHash,
     },
     dependencies: {
       ...(sectionObject.dependencies || {}),
@@ -587,13 +698,23 @@ const applyRuntimeSectionGeneration = ({
       stateSectionKey: target.stateSectionKey,
       runtimePath: target.runtimePath,
       generated,
+      intelligence,
       previousGenerated: cloneSectionValue(previousGenerated),
+      truthEligibility: intelligence.truthEligibility || null,
+      tokenSafety: intelligence.tokenSafety || null,
+      warnings: intelligence.truthEligibility?.eligible === false
+        ? (intelligence.truthEligibility.messages || [])
+        : [],
       regeneration: regenerationEligibility
         ? {
             forceRegenerateReason: regenerationEligibility.forceRegenerateReason,
             currentInputHash: regenerationEligibility.currentInputHash,
+            currentEvidenceHash: regenerationEligibility.currentEvidenceHash,
+            currentDependencyHash: regenerationEligibility.currentDependencyHash,
             invalidatedDependencySectionKeys: regenerationEligibility.invalidatedDependencySectionKeys,
             previousInputHash: regenerationEligibility.previousInputHash,
+            previousEvidenceHash: regenerationEligibility.previousEvidenceHash,
+            previousDependencyHash: regenerationEligibility.previousDependencyHash,
             reasons: regenerationEligibility.reasons,
           }
         : null,
@@ -762,6 +883,15 @@ const buildActionAuditPayload = ({
         revisionCount: generationResult.revisionCount,
         generatedAt: generationResult.generated?.generatedAt,
         inputHash: generationResult.generated?.inputHash,
+        evidenceHash: generationResult.generated?.evidenceHash,
+        dependencyHash: generationResult.generated?.dependencyHash,
+        boundedContextHash: generationResult.generated?.boundedContextHash,
+        tokenClass: generationResult.tokenSafety?.tokenClass,
+        truthEligibility: {
+          eligible: generationResult.truthEligibility?.eligible === true,
+          status: generationResult.truthEligibility?.status || '',
+        },
+        warningCount: Array.isArray(generationResult.warnings) ? generationResult.warnings.length : 0,
         previousGenerated: generationResult.previousGenerated ? true : false,
         regeneration: generationResult.regeneration || null,
       },
@@ -1247,6 +1377,11 @@ export const executeRuntimeAction = async ({
         stateSectionKey: resolvedTransition.generationResult.stateSectionKey,
         runtimePath: resolvedTransition.generationResult.runtimePath,
         revisionCount: resolvedTransition.generationResult.revisionCount,
+        generated: resolvedTransition.generationResult.generated,
+        intelligence: resolvedTransition.generationResult.intelligence,
+        confidence: resolvedTransition.generationResult.intelligence?.displayProjection?.confidence || null,
+        truthEligibility: resolvedTransition.generationResult.truthEligibility,
+        warnings: resolvedTransition.generationResult.warnings || [],
       } } : {}),
       ...(resolvedTransition.discoveryResult ? { discovery: resolvedTransition.discoveryResult } : {}),
     },
