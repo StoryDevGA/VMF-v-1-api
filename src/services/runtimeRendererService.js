@@ -338,6 +338,21 @@ const buildProjectionSummary = (value) => {
   }
 }
 
+const buildAcceptedDiscoveryCoverageProjection = (coverage = {}) => {
+  if (!isProjectionObject(coverage)) return coverage
+
+  const sourceCount = Number(coverage.sourceCount || 0)
+  const evidenceObjectCount = Number(coverage.evidenceObjectCount || sourceCount)
+
+  return {
+    ...coverage,
+    evidenceObjectCount,
+    acceptedEvidenceCount: evidenceObjectCount,
+    pendingReviewCount: 0,
+    rejectedEvidenceCount: Number(coverage.rejectedEvidenceCount || 0),
+  }
+}
+
 const normalizeDiscoveryStateStatus = ({
   accepted,
   evidenceReady,
@@ -392,6 +407,13 @@ export const buildDiscoveryProjection = (frameworkState = {}, { includeInputValu
   const summarySummary = buildProjectionSummary(summaries)
   const scopedViewSummary = buildProjectionSummary(scopedViews)
   const lineageSources = Array.isArray(evidencePack.lineage?.sources) ? evidencePack.lineage.sources : []
+  const acquisition = evidencePack.acquisition && typeof evidencePack.acquisition === 'object' && !Array.isArray(evidencePack.acquisition)
+    ? cloneProjectionValue(evidencePack.acquisition)
+    : {}
+  if (accepted && isProjectionObject(acquisition.coverage)) {
+    acquisition.coverage = buildAcceptedDiscoveryCoverageProjection(acquisition.coverage)
+  }
+  const acquisitionProfile = String(acquisition.profile || evidencePack.acquisitionProfile || 'STANDARD').trim() || 'STANDARD'
 
   return {
     state: {
@@ -410,6 +432,8 @@ export const buildDiscoveryProjection = (frameworkState = {}, { includeInputValu
     evidenceReady,
     accepted,
     needsRefresh,
+    acquisitionProfile,
+    acquisition,
     scopedViews: scopedViews && typeof scopedViews === 'object' && !Array.isArray(scopedViews)
       ? cloneProjectionValue(scopedViews)
       : {},

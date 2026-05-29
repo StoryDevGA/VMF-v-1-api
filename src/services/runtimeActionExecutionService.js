@@ -742,6 +742,7 @@ const applyRuntimeDiscoveryAction = async ({
 
   if (DISCOVERY_BUILD_ACTIONS.has(normalizedActionKey)) {
     nextEvidencePack = await buildDiscoveryEvidencePack({
+      acquisitionProfile: payload?.acquisitionProfile,
       actorUserId,
       inputs: payload?.inputs || previousEvidencePack.inputs || {},
       previousEvidencePack,
@@ -790,6 +791,7 @@ const applyRuntimeDiscoveryAction = async ({
       evidenceReady: nextEvidencePack.evidenceReady === true || nextEvidencePack.state?.evidenceReady === true,
       accepted: nextEvidencePack.accepted === true || nextEvidencePack.state?.accepted === true,
       needsRefresh: nextEvidencePack.needsRefresh === true || nextEvidencePack.state?.needsRefresh === true,
+      acquisitionProfile: nextEvidencePack.acquisition?.profile || nextEvidencePack.acquisitionProfile || '',
       inputCount: Object.keys(nextEvidencePack.inputs || {}).length,
       sourceCount: Array.isArray(nextEvidencePack.lineage?.sources) ? nextEvidencePack.lineage.sources.length : 0,
     },
@@ -903,6 +905,7 @@ const buildActionAuditPayload = ({
         evidenceReady: discoveryResult.evidenceReady,
         accepted: discoveryResult.accepted,
         needsRefresh: discoveryResult.needsRefresh,
+        acquisitionProfile: discoveryResult.acquisitionProfile,
         inputCount: discoveryResult.inputCount,
         sourceCount: discoveryResult.sourceCount,
       },

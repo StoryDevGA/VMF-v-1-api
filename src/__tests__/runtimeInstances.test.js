@@ -1902,6 +1902,7 @@ describe('Runtime Instance API', () => {
       .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/discovery-inputs`)
       .set('Authorization', `Bearer ${token}`)
       .send({
+        acquisitionProfile: 'STANDARD',
         inputs: {
           companyWebsite: 'https://acme.example',
           companyName: 'Acme',
@@ -1919,6 +1920,26 @@ describe('Runtime Instance API', () => {
       evidenceReady: true,
       accepted: false,
       needsRefresh: false,
+      acquisitionProfile: 'STANDARD',
+      acquisition: expect.objectContaining({
+        profile: 'STANDARD',
+        status: 'EVIDENCE_READY',
+        evidenceTarget: { min: 5, max: 20 },
+        enabledSourceTypes: ['DISCOVERY_INPUTS', 'USER_PROVIDED_WEBSITE'],
+        reservedSourceTypes: [],
+        disabledProfiles: [
+          expect.objectContaining({ profile: 'ENHANCED' }),
+          expect.objectContaining({ profile: 'STRATEGIC' }),
+        ],
+        coverage: expect.objectContaining({
+          status: 'SUFFICIENT_FOR_FRAMEWORK',
+          score: 100,
+          pendingReviewCount: 5,
+        }),
+        confidence: expect.objectContaining({
+          level: 'STANDARD',
+        }),
+      }),
       inputs: {
         companyWebsite: 'https://acme.example',
         companyName: 'Acme',
@@ -1955,10 +1976,12 @@ describe('Runtime Instance API', () => {
             sourceId: 'input_companyWebsite',
             type: 'USER_PROVIDED_WEBSITE',
             status: 'USER_PROVIDED',
+            acquisitionProfile: 'STANDARD',
           }),
         ]),
         builder: expect.objectContaining({
           adapter: 'customer-input',
+          acquisitionProfile: 'STANDARD',
         }),
       }),
       revisions: [
@@ -1991,6 +2014,7 @@ describe('Runtime Instance API', () => {
       evidenceReady: true,
       accepted: false,
       needsRefresh: false,
+      acquisitionProfile: 'STANDARD',
       inputSummary: {
         keys: ['companyWebsite', 'companyName', 'marketRegion', 'targetOffer', 'notes'],
         count: 5,
@@ -2001,6 +2025,38 @@ describe('Runtime Instance API', () => {
       },
     }))
   })
+
+  test.each(['ENHANCED', 'STRATEGIC'])(
+    'PATCH /api/v1/runtime-instances/:id/discovery-inputs rejects reserved %s Acquisition',
+    async (acquisitionProfile) => {
+      RuntimeInstance.findOne = jest.fn()
+      const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+      const res = await request
+        .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/discovery-inputs`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          acquisitionProfile,
+          inputs: {
+            companyWebsite: 'https://acme.example',
+            companyName: 'Acme',
+            marketRegion: 'UK enterprise',
+            targetOffer: 'Managed proposal platform',
+          },
+          expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+        })
+
+      expect(res.status).toBe(422)
+      expect(res.body.error).toEqual(expect.objectContaining({
+        code: 'VALIDATION_FAILED',
+        message: 'Request validation failed.',
+      }))
+      expect(res.body.error.details.acquisitionProfile).toBe(
+        'acquisitionProfile must be STANDARD. ENHANCED and STRATEGIC are not available in this sprint.',
+      )
+      expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
+    },
+  )
 
   test.each([
     ['missing registry path', null, 'is not registered'],
@@ -2334,7 +2390,31 @@ describe('Runtime Instance API', () => {
   })
 
   test('PATCH /api/v1/runtime-instances/:id/discovery-acceptance persists accepted discovery truth with audit', async () => {
-    const evidencePack = makeReadyDiscoveryEvidencePack()
+    const baseEvidencePack = makeReadyDiscoveryEvidencePack()
+    const pendingCoverage = {
+      status: 'SUFFICIENT_FOR_FRAMEWORK',
+      requiredInputCount: 4,
+      completedRequiredInputCount: 4,
+      inputCount: 4,
+      missingAreas: [],
+      sourceCount: 1,
+      evidenceObjectCount: 1,
+      acceptedEvidenceCount: 0,
+      pendingReviewCount: 1,
+      rejectedEvidenceCount: 0,
+      score: 100,
+    }
+    const evidencePack = {
+      ...baseEvidencePack,
+      acquisition: {
+        profile: 'STANDARD',
+        coverage: pendingCoverage,
+      },
+      evidence: {
+        ...baseEvidencePack.evidence,
+        coverage: pendingCoverage,
+      },
+    }
     const runtimeInstanceDoc = makeRuntimeInstanceDocument({
       updatedAt: new Date('2026-05-19T08:01:00.000Z'),
       framework_state: {
@@ -2372,6 +2452,20 @@ describe('Runtime Instance API', () => {
       needsRefresh: false,
       acceptedAt: expect.any(String),
       acceptedBy: CUSTOMER_ADMIN_ID,
+      acquisition: expect.objectContaining({
+        coverage: expect.objectContaining({
+          acceptedEvidenceCount: 1,
+          pendingReviewCount: 0,
+          rejectedEvidenceCount: 0,
+        }),
+      }),
+      evidence: expect.objectContaining({
+        coverage: expect.objectContaining({
+          acceptedEvidenceCount: 1,
+          pendingReviewCount: 0,
+          rejectedEvidenceCount: 0,
+        }),
+      }),
       state: expect.objectContaining({
         status: 'ACCEPTED',
         accepted: true,
@@ -2403,7 +2497,16 @@ describe('Runtime Instance API', () => {
   })
 
   test('GET /api/v1/runtime-instances/:id/evidence returns governed evidence details without fabricating sources', async () => {
-    const evidencePack = makeReadyDiscoveryEvidencePack({
+    const pendingCoverage = {
+      status: 'SUFFICIENT_FOR_FRAMEWORK',
+      sourceCount: 1,
+      evidenceObjectCount: 1,
+      acceptedEvidenceCount: 0,
+      pendingReviewCount: 1,
+      rejectedEvidenceCount: 0,
+      score: 100,
+    }
+    const baseEvidencePack = makeReadyDiscoveryEvidencePack({
       accepted: true,
       state: {
         status: 'ACCEPTED',
@@ -2413,6 +2516,17 @@ describe('Runtime Instance API', () => {
         needsRefresh: false,
       },
     })
+    const evidencePack = {
+      ...baseEvidencePack,
+      acquisition: {
+        profile: 'STANDARD',
+        coverage: pendingCoverage,
+      },
+      evidence: {
+        ...baseEvidencePack.evidence,
+        coverage: pendingCoverage,
+      },
+    }
     RuntimeInstance.findOne = jest.fn().mockResolvedValue(makeRuntimeInstanceDocument({
       updatedAt: new Date('2026-05-19T08:02:00.000Z'),
       framework_state: {
@@ -2436,7 +2550,19 @@ describe('Runtime Instance API', () => {
       accepted: true,
       inputs: evidencePack.inputs,
       summaries: evidencePack.summaries,
-      evidence: evidencePack.evidence,
+      evidence: expect.objectContaining({
+        ...evidencePack.evidence,
+        coverage: expect.objectContaining({
+          acceptedEvidenceCount: 1,
+          pendingReviewCount: 0,
+        }),
+      }),
+      acquisition: expect.objectContaining({
+        coverage: expect.objectContaining({
+          acceptedEvidenceCount: 1,
+          pendingReviewCount: 0,
+        }),
+      }),
       scoped_views: evidencePack.scoped_views,
       lineage: evidencePack.lineage,
       revisions: [],
@@ -4187,6 +4313,7 @@ describe('Runtime Instance API', () => {
       .set('Authorization', `Bearer ${token}`)
       .send({
         expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+        acquisitionProfile: 'STANDARD',
         inputs: {
           companyWebsite: 'https://acme.example',
           companyName: 'Acme',
@@ -4205,6 +4332,7 @@ describe('Runtime Instance API', () => {
       inputComplete: true,
       evidenceReady: true,
       accepted: false,
+      acquisitionProfile: 'STANDARD',
       inputCount: 4,
       sourceCount: 4,
     }))
@@ -4213,6 +4341,14 @@ describe('Runtime Instance API', () => {
       inputComplete: true,
       evidenceReady: true,
       accepted: false,
+      acquisitionProfile: 'STANDARD',
+      acquisition: expect.objectContaining({
+        profile: 'STANDARD',
+        coverage: expect.objectContaining({
+          score: 100,
+          pendingReviewCount: 4,
+        }),
+      }),
       summaries: expect.objectContaining({
         compact: expect.objectContaining({
           confidence: 'USER_PROVIDED',
@@ -4229,8 +4365,12 @@ describe('Runtime Instance API', () => {
             sourceId: 'input_companyWebsite',
             type: 'USER_PROVIDED_WEBSITE',
             status: 'USER_PROVIDED',
+            acquisitionProfile: 'STANDARD',
           }),
         ]),
+        builder: expect.objectContaining({
+          acquisitionProfile: 'STANDARD',
+        }),
       }),
     }))
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
@@ -4239,11 +4379,67 @@ describe('Runtime Instance API', () => {
         actionKey: 'BUILD_EVIDENCE_PACK',
         discovery: expect.objectContaining({
           status: 'EVIDENCE_READY',
+          acquisitionProfile: 'STANDARD',
           inputCount: 4,
           sourceCount: 4,
         }),
       }),
     }))
+  })
+
+  test.each(['ENHANCED', 'STRATEGIC'])(
+    'POST /api/v1/runtime-instances/:id/actions/BUILD_EVIDENCE_PACK rejects reserved %s Acquisition',
+    async (acquisitionProfile) => {
+      RuntimeInstance.findOne = jest.fn()
+      const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+      const res = await request
+        .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/BUILD_EVIDENCE_PACK`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+          acquisitionProfile,
+          inputs: {
+            companyWebsite: 'https://acme.example',
+            companyName: 'Acme',
+            marketRegion: 'UK enterprise',
+            targetOffer: 'Managed proposal platform',
+          },
+        })
+
+      expect(res.status).toBe(422)
+      expect(res.body.error).toEqual(expect.objectContaining({
+        code: 'VALIDATION_FAILED',
+        message: 'Request validation failed.',
+      }))
+      expect(res.body.error.details.acquisitionProfile).toBe(
+        'acquisitionProfile must be STANDARD. ENHANCED and STRATEGIC are not available in this sprint.',
+      )
+      expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
+    },
+  )
+
+  test('POST /api/v1/runtime-instances/:id/actions/RUN_VALIDATION rejects acquisitionProfile on non-discovery actions', async () => {
+    RuntimeInstance.findOne = jest.fn()
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/RUN_VALIDATION`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+        acquisitionProfile: 'STANDARD',
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error).toEqual(expect.objectContaining({
+      code: 'VALIDATION_FAILED',
+      message: 'Request validation failed.',
+    }))
+    expect(res.body.error.details._root).toBe(
+      'acquisitionProfile is only allowed for discovery evidence build actions.',
+    )
+    expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
   })
 
   test.each([
@@ -8287,6 +8483,8 @@ describe('Runtime Instance API', () => {
       evidenceReady: false,
       accepted: false,
       needsRefresh: false,
+      acquisitionProfile: 'STANDARD',
+      acquisition: {},
       scopedViews: {},
       inputSummary: {
         keys: [],

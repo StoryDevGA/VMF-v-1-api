@@ -12,6 +12,12 @@ import RuntimeInstance, {
   RUNTIME_TYPES,
 } from '../models/RuntimeInstance.js'
 import UIContract, { UI_CONTRACT_STATUSES } from '../models/UIContract.js'
+import {
+  DISCOVERY_ACQUISITION_PROFILE_ERROR_MESSAGE,
+  DISCOVERY_ACQUISITION_PROFILES,
+  ENABLED_DISCOVERY_ACQUISITION_PROFILES,
+  RESERVED_DISCOVERY_ACQUISITION_PROFILES,
+} from '../constants/discoveryAcquisitionProfiles.js'
 import auditService from './auditService.js'
 import {
   RUNTIME_INSTANCE_ERROR_REASONS,
@@ -48,6 +54,33 @@ export const DISCOVERY_EVIDENCE_PACK_PATH = 'framework_state.evidence_pack'
 const FORBIDDEN_PATH_SEGMENTS = new Set(['__proto__', 'prototype', 'constructor'])
 const DISCOVERY_INPUT_KEYS = ['companyWebsite', 'companyName', 'marketRegion', 'targetOffer', 'notes']
 const REQUIRED_DISCOVERY_INPUT_KEYS = ['companyWebsite', 'companyName', 'marketRegion', 'targetOffer']
+export { DISCOVERY_ACQUISITION_PROFILES }
+const SUPPORTED_DISCOVERY_ACQUISITION_PROFILES = new Set(ENABLED_DISCOVERY_ACQUISITION_PROFILES)
+const DISCOVERY_ACQUISITION_PROFILE_CONFIG = Object.freeze({
+  [DISCOVERY_ACQUISITION_PROFILES.STANDARD]: {
+    label: 'Standard Acquisition',
+    purpose: 'PUBLISHABLE_FRAMEWORK',
+    evidenceTarget: { min: 5, max: 20 },
+    enabledSourceTypes: ['DISCOVERY_INPUTS', 'USER_PROVIDED_WEBSITE'],
+    reservedSourceTypes: [],
+  },
+  [DISCOVERY_ACQUISITION_PROFILES.ENHANCED]: {
+    label: 'Enhanced Acquisition',
+    purpose: 'BROADER_SUPPORTING_EVIDENCE',
+    evidenceTarget: { min: 20, max: 100 },
+    enabledSourceTypes: ['DISCOVERY_INPUTS', 'USER_PROVIDED_WEBSITE'],
+    reservedSourceTypes: ['UPLOADED_DOCUMENTS', 'ADDITIONAL_WEBSITE_PAGES'],
+    disabled: true,
+  },
+  [DISCOVERY_ACQUISITION_PROFILES.STRATEGIC]: {
+    label: 'Strategic Acquisition',
+    purpose: 'STRATEGIC_INTELLIGENCE_BASE',
+    evidenceTarget: { min: 100, max: 500 },
+    enabledSourceTypes: [],
+    reservedSourceTypes: ['PUBLIC_MARKET_CONTEXT', 'COMPETITOR_REFERENCES', 'INDUSTRY_THEMES'],
+    disabled: true,
+  },
+})
 
 const isPlainObject = (value) =>
   Boolean(value && typeof value === 'object' && !Array.isArray(value))
@@ -129,6 +162,93 @@ const buildDiscoveryAcceptanceUnavailableError = (message) => buildMutationError
   reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_ACTION_NOT_AVAILABLE,
   details: { runtimePath: DISCOVERY_EVIDENCE_PACK_PATH },
 })
+
+const normalizeDiscoveryAcquisitionProfile = ({
+  acquisitionProfile,
+  previousEvidencePack = {},
+} = {}) => {
+  const normalizedProfile = normalizeToken(
+    acquisitionProfile
+      ?? previousEvidencePack?.acquisition?.profile
+      ?? previousEvidencePack?.acquisitionProfile
+      ?? DISCOVERY_ACQUISITION_PROFILES.STANDARD,
+  )
+
+  if (SUPPORTED_DISCOVERY_ACQUISITION_PROFILES.has(normalizedProfile)) {
+    return normalizedProfile
+  }
+
+  throw buildMutationError({
+    status: 422,
+    code: 'VALIDATION_FAILED',
+    message: DISCOVERY_ACQUISITION_PROFILE_ERROR_MESSAGE,
+    reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_ACTION_NOT_AVAILABLE,
+    details: {
+      acquisitionProfile: normalizedProfile,
+      supportedAcquisitionProfiles: Array.from(SUPPORTED_DISCOVERY_ACQUISITION_PROFILES),
+      disabledAcquisitionProfiles: RESERVED_DISCOVERY_ACQUISITION_PROFILES,
+    },
+  })
+}
+
+const buildDiscoveryCoverageSummary = ({
+  accepted = false,
+  evidenceReady,
+  inputKeys,
+  missingInputKeys,
+  sourceCount,
+}) => {
+  const requiredCompleteCount = REQUIRED_DISCOVERY_INPUT_KEYS.length - missingInputKeys.length
+  const requiredCoverage = REQUIRED_DISCOVERY_INPUT_KEYS.length > 0
+    ? Math.round((requiredCompleteCount / REQUIRED_DISCOVERY_INPUT_KEYS.length) * 100)
+    : 0
+
+  return {
+    status: evidenceReady ? 'SUFFICIENT_FOR_FRAMEWORK' : 'INPUT_REQUIRED',
+    requiredInputCount: REQUIRED_DISCOVERY_INPUT_KEYS.length,
+    completedRequiredInputCount: requiredCompleteCount,
+    inputCount: inputKeys.length,
+    missingAreas: missingInputKeys,
+    sourceCount,
+    evidenceObjectCount: evidenceReady ? sourceCount : 0,
+    acceptedEvidenceCount: accepted && evidenceReady ? sourceCount : 0,
+    pendingReviewCount: evidenceReady && !accepted ? sourceCount : 0,
+    rejectedEvidenceCount: 0,
+    score: requiredCoverage,
+  }
+}
+
+const buildAcceptedDiscoveryCoverage = (coverage = {}) => {
+  const sourceCount = Number(coverage.sourceCount || 0)
+  const evidenceObjectCount = Number(coverage.evidenceObjectCount || sourceCount)
+
+  return {
+    ...coverage,
+    evidenceObjectCount,
+    acceptedEvidenceCount: evidenceObjectCount,
+    pendingReviewCount: 0,
+    rejectedEvidenceCount: Number(coverage.rejectedEvidenceCount || 0),
+  }
+}
+
+const buildDiscoveryConfidenceSummary = ({
+  coverage,
+  evidenceReady,
+}) => {
+  if (!evidenceReady) {
+    return {
+      level: 'INSUFFICIENT',
+      score: Math.min(coverage.score, 50),
+      basis: ['REQUIRED_DISCOVERY_INPUTS_MISSING'],
+    }
+  }
+
+  return {
+    level: 'STANDARD',
+    score: 65,
+    basis: ['USER_PROVIDED_INPUTS', 'DETERMINISTIC_EVIDENCE_PACK'],
+  }
+}
 
 const hasRequiredDiscoveryInputs = (inputs) =>
   inputs
@@ -216,6 +336,8 @@ const buildDiscoveryMutationResponse = ({ runtimeInstance, evidencePack, previou
     accepted: evidencePack.accepted,
     needsRefresh: evidencePack.needsRefresh,
     refreshedAt: evidencePack.refreshedAt,
+    acquisitionProfile: evidencePack.acquisition?.profile || evidencePack.acquisitionProfile || DISCOVERY_ACQUISITION_PROFILES.STANDARD,
+    acquisition: cloneValue(evidencePack.acquisition || {}),
     ...(evidencePack.acceptedAt ? { acceptedAt: evidencePack.acceptedAt } : {}),
     ...(evidencePack.acceptedBy ? { acceptedBy: evidencePack.acceptedBy } : {}),
     inputSummary: {
@@ -465,6 +587,7 @@ const normalizeDiscoveryInputs = (inputs = {}) => DISCOVERY_INPUT_KEYS.reduce((n
 }, {})
 
 export const buildDiscoveryEvidencePack = async ({
+  acquisitionProfile,
   actorUserId,
   inputs,
   previousEvidencePack = {},
@@ -472,6 +595,8 @@ export const buildDiscoveryEvidencePack = async ({
   runtimeInstance,
 }) => {
   const normalizedInputs = normalizeDiscoveryInputs(inputs)
+  const profile = normalizeDiscoveryAcquisitionProfile({ acquisitionProfile, previousEvidencePack })
+  const profileConfig = DISCOVERY_ACQUISITION_PROFILE_CONFIG[profile]
   const inputKeys = Object.keys(normalizedInputs)
   const missingInputKeys = REQUIRED_DISCOVERY_INPUT_KEYS.filter((key) => !normalizedInputs[key])
   const inputComplete = missingInputKeys.length === 0
@@ -497,7 +622,32 @@ export const buildDiscoveryEvidencePack = async ({
     valueHash: hashDiscoveryValue(normalizedInputs[key]),
     status: 'USER_PROVIDED',
     capturedAt: refreshedAt,
+    acquisitionProfile: profile,
   }))
+  const coverage = buildDiscoveryCoverageSummary({
+    evidenceReady,
+    inputKeys,
+    missingInputKeys,
+    sourceCount: sources.length,
+  })
+  const confidence = buildDiscoveryConfidenceSummary({ coverage, evidenceReady })
+  const acquisition = {
+    profile,
+    label: profileConfig.label,
+    purpose: profileConfig.purpose,
+    status: evidenceReady ? 'EVIDENCE_READY' : 'INPUT_REQUIRED',
+    evidenceTarget: profileConfig.evidenceTarget,
+    enabledSourceTypes: profileConfig.enabledSourceTypes,
+    reservedSourceTypes: profileConfig.reservedSourceTypes,
+    disabledProfiles: RESERVED_DISCOVERY_ACQUISITION_PROFILES.map((reservedProfile) => ({
+      profile: reservedProfile,
+      reason: `${DISCOVERY_ACQUISITION_PROFILE_CONFIG[reservedProfile].label} is reserved for a later Discovery Intelligence architecture sprint.`,
+    })),
+    coverage,
+    confidence,
+    requestedAt: refreshedAt,
+    completedAt: evidenceReady ? refreshedAt : null,
+  }
   const compactSummary = {
     summary: `Customer-provided discovery inputs captured for ${
       normalizedInputs.companyName || normalizedInputs.companyWebsite || 'this runtime'
@@ -506,6 +656,7 @@ export const buildDiscoveryEvidencePack = async ({
     sourceRefs,
     inputHash,
     refreshedAt,
+    acquisitionProfile: profile,
   }
   const scopedViews = evidenceReady
     ? projectableSections.reduce((views, section) => {
@@ -518,10 +669,12 @@ export const buildDiscoveryEvidencePack = async ({
           evidenceKeys: ['summaries.compact', 'discovery.seedProfile'],
           sourceRefs,
           refreshedAt,
+          acquisitionProfile: profile,
           evidenceHash: hashDiscoveryValue({
             sectionKey,
             inputHash,
             sourceRefs,
+            acquisitionProfile: profile,
           }),
         }
         return views
@@ -536,8 +689,11 @@ export const buildDiscoveryEvidencePack = async ({
     inputHash,
     sourceRefs,
     sourceCount: sources.length,
+    acquisitionProfile: profile,
+    coverage,
+    confidence,
   }
-  const evidenceHash = hashDiscoveryValue({ evidence, summaries: { compact: compactSummary }, scopedViews })
+  const evidenceHash = hashDiscoveryValue({ acquisition, evidence, summaries: { compact: compactSummary }, scopedViews })
   const previousRevisions = Array.isArray(previousEvidencePack?.revisions)
     ? previousEvidencePack.revisions
     : []
@@ -550,10 +706,13 @@ export const buildDiscoveryEvidencePack = async ({
       reason,
       inputHash,
       evidenceHash,
+      acquisitionProfile: profile,
     },
   ]
 
   return {
+    acquisition,
+    acquisitionProfile: profile,
     inputs: normalizedInputs,
     discovery: {
       seedProfile: {
@@ -564,6 +723,7 @@ export const buildDiscoveryEvidencePack = async ({
         notes: normalizedInputs.notes || '',
         confidence: 'USER_PROVIDED',
         sourceRefs,
+        acquisitionProfile: profile,
       },
     },
     summaries: {
@@ -582,6 +742,7 @@ export const buildDiscoveryEvidencePack = async ({
       needsRefresh: false,
       buildCompletedAt: refreshedAt,
       lastError: null,
+      acquisitionProfile: profile,
     },
     evidence,
     scoped_views: scopedViews,
@@ -591,6 +752,7 @@ export const buildDiscoveryEvidencePack = async ({
         mode: 'DETERMINISTIC',
         version: 'discovery-evidence-pack-v1',
         adapter: 'customer-input',
+        acquisitionProfile: profile,
       },
     },
     revisions,
@@ -1836,6 +1998,7 @@ export const updateRuntimeDiscoveryInputs = async ({
     ? runtimeInstance.updatedAt.toISOString()
     : runtimeInstance.updatedAt
   const nextEvidencePack = await buildDiscoveryEvidencePack({
+    acquisitionProfile: payload?.acquisitionProfile,
     actorUserId,
     inputs: payload?.inputs || {},
     previousEvidencePack,
@@ -1899,6 +2062,9 @@ export const acceptRuntimeDiscovery = async ({
   assertDiscoveryEvidenceAcceptable(previousEvidencePack)
 
   const acceptedAt = new Date().toISOString()
+  const previousCoverage = previousEvidencePack.acquisition?.coverage || previousEvidencePack.evidence?.coverage || {}
+  const hasCoverageSummary = isPlainObject(previousCoverage) && Object.keys(previousCoverage).length > 0
+  const acceptedCoverage = hasCoverageSummary ? buildAcceptedDiscoveryCoverage(previousCoverage) : null
   const nextEvidencePack = {
     ...previousEvidencePack,
     inputComplete: true,
@@ -1907,6 +2073,20 @@ export const acceptRuntimeDiscovery = async ({
     needsRefresh: false,
     acceptedAt,
     acceptedBy: toIdString(actorUserId),
+    ...(acceptedCoverage && isPlainObject(previousEvidencePack.acquisition)
+      ? {
+          acquisition: {
+            ...previousEvidencePack.acquisition,
+            coverage: acceptedCoverage,
+          },
+        }
+      : {}),
+    evidence: isPlainObject(previousEvidencePack.evidence) && acceptedCoverage
+      ? {
+          ...previousEvidencePack.evidence,
+          coverage: acceptedCoverage,
+        }
+      : previousEvidencePack.evidence,
     state: {
       ...(previousEvidencePack.state || {}),
       status: 'ACCEPTED',
@@ -1963,6 +2143,16 @@ export const getRuntimeDiscoveryEvidence = async ({
   const summaries = evidencePack.summaries || {}
   const scopedViews = getCanonicalScopedViews(evidencePack)
   const lineage = evidencePack.lineage || { sources: [], builder: {} }
+  const accepted = !getEvidencePackNeedsRefresh(evidencePack) && getEvidencePackStateFlag(evidencePack, 'accepted')
+  const acquisition = cloneValue(evidencePack.acquisition || {})
+  const evidence = cloneValue(evidencePack.evidence || {})
+  const projectionCoverage = acquisition.coverage || evidence.coverage || {}
+
+  if (accepted && isPlainObject(projectionCoverage) && Object.keys(projectionCoverage).length > 0) {
+    const acceptedCoverage = buildAcceptedDiscoveryCoverage(projectionCoverage)
+    if (isPlainObject(acquisition)) acquisition.coverage = acceptedCoverage
+    if (isPlainObject(evidence)) evidence.coverage = acceptedCoverage
+  }
 
   return {
     runtimeInstance: {
@@ -1979,8 +2169,10 @@ export const getRuntimeDiscoveryEvidence = async ({
       state: evidencePack.state || { status: 'EVIDENCE_NOT_READY' },
       inputComplete: getEvidencePackStateFlag(evidencePack, 'inputComplete'),
       evidenceReady: getEvidencePackStateFlag(evidencePack, 'evidenceReady'),
-      accepted: !getEvidencePackNeedsRefresh(evidencePack) && getEvidencePackStateFlag(evidencePack, 'accepted'),
+      accepted,
       needsRefresh: getEvidencePackNeedsRefresh(evidencePack),
+      acquisitionProfile: evidencePack.acquisition?.profile || evidencePack.acquisitionProfile || DISCOVERY_ACQUISITION_PROFILES.STANDARD,
+      acquisition,
       lineage,
       inputSummary: buildEvidenceSummaryProjection(evidencePack.inputs),
       evidenceSummary: buildEvidenceSummaryProjection(evidencePack.evidence),
@@ -1991,7 +2183,7 @@ export const getRuntimeDiscoveryEvidence = async ({
         inputs: evidencePack.inputs || {},
         discovery: evidencePack.discovery || {},
         summaries,
-        evidence: evidencePack.evidence || {},
+        evidence,
         scoped_views: scopedViews,
         revisions: Array.isArray(evidencePack.revisions) ? evidencePack.revisions : [],
       } : {}),

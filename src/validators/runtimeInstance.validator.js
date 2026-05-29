@@ -1,4 +1,8 @@
 import { z } from 'zod'
+import {
+  DISCOVERY_ACQUISITION_PROFILE_ERROR_MESSAGE,
+  ENABLED_DISCOVERY_ACQUISITION_PROFILES,
+} from '../constants/discoveryAcquisitionProfiles.js'
 import { RUNTIME_INSTANCE_STATUSES, RUNTIME_TYPES } from '../models/RuntimeInstance.js'
 import { createBodyValidator, createParamsValidator, createQueryValidator } from './shared.js'
 
@@ -105,8 +109,24 @@ const discoveryInputsSchema = z.object({
   notes: z.string().trim().max(4000, 'notes must be 4000 characters or fewer').optional().default(''),
 }).strict()
 
+const discoveryAcquisitionProfileSchema = z
+  .preprocess(
+    (value) => {
+      if (value === undefined || value === null) return undefined
+      const normalized = String(value).trim().toUpperCase()
+      return normalized || undefined
+    },
+    z
+      .string()
+      .refine((value) => ENABLED_DISCOVERY_ACQUISITION_PROFILES.includes(value), {
+        message: DISCOVERY_ACQUISITION_PROFILE_ERROR_MESSAGE,
+      })
+      .optional(),
+  )
+
 const updateDiscoveryInputsSchema = z.object({
   inputs: discoveryInputsSchema,
+  acquisitionProfile: discoveryAcquisitionProfileSchema,
   expectedUpdatedAt: expectedUpdatedAtSchema,
 }).strict()
 
@@ -133,6 +153,7 @@ const acceptRuntimeSectionSchema = z.object({
 const executeRuntimeActionSchema = z.object({
   expectedUpdatedAt: expectedUpdatedAtSchema,
   inputs: discoveryInputsSchema.optional(),
+  acquisitionProfile: discoveryAcquisitionProfileSchema,
   runtimePath: z
     .string()
     .trim()
@@ -179,6 +200,7 @@ const buildExecuteRuntimeActionSchema = (actionKey) => executeRuntimeActionSchem
   const hasRuntimePath = data.runtimePath !== undefined
   const hasSectionKey = data.sectionKey !== undefined
   const hasInputs = data.inputs !== undefined
+  const hasAcquisitionProfile = data.acquisitionProfile !== undefined
   const hasForceRegenerateReason = data.forceRegenerateReason !== undefined
   const hasAdditionalContext = data.additionalContext !== undefined
   const hasGenerationMode = data.generationMode !== undefined
@@ -232,6 +254,14 @@ const buildExecuteRuntimeActionSchema = (actionKey) => executeRuntimeActionSchem
       code: z.ZodIssueCode.custom,
       path: ['_root'],
       message: 'inputs are only allowed for discovery evidence build actions.',
+    })
+  }
+
+  if (hasAcquisitionProfile && !DISCOVERY_INPUT_RUNTIME_ACTIONS.has(actionKey)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['_root'],
+      message: 'acquisitionProfile is only allowed for discovery evidence build actions.',
     })
   }
 })
