@@ -83,7 +83,13 @@ app.use(helmet({
 
 app.use(cors(corsOptions))
 app.options('*', cors(corsOptions))
-app.use(express.json({ limit: '1mb' }))
+const defaultJsonParser = express.json({ limit: '1mb' })
+const runtimeInstanceJsonParser = express.json({ limit: '5mb' })
+app.use((req, res, next) => (
+  req.path.startsWith('/api/v1/runtime-instances')
+    ? runtimeInstanceJsonParser(req, res, next)
+    : defaultJsonParser(req, res, next)
+))
 app.use(requestContext) // Add request context before logger
 app.use(correlationEnricher) // Enrich responses with requestId
 app.use(requestLogger)

@@ -16,6 +16,14 @@ const runtimeInstanceIdSchema = z.object({
     .max(180, 'runtimeInstanceId must be 180 characters or fewer'),
 })
 
+const runtimeDiscoveryEvidenceParamsSchema = runtimeInstanceIdSchema.extend({
+  evidenceObjectId: z
+    .string({ required_error: 'evidenceObjectId is required' })
+    .trim()
+    .min(1, 'evidenceObjectId is required')
+    .max(180, 'evidenceObjectId must be 180 characters or fewer'),
+})
+
 const runtimeActionParamsSchema = runtimeInstanceIdSchema.extend({
   actionKey: z
     .string({ required_error: 'actionKey is required' })
@@ -127,11 +135,65 @@ const discoveryAcquisitionProfileSchema = z
 const updateDiscoveryInputsSchema = z.object({
   inputs: discoveryInputsSchema,
   acquisitionProfile: discoveryAcquisitionProfileSchema,
+  documentSources: z.array(z.object({
+    fileName: z
+      .string({ required_error: 'fileName is required' })
+      .trim()
+      .min(1, 'fileName is required')
+      .max(255, 'fileName must be 255 characters or fewer'),
+    mimeType: z
+      .string()
+      .trim()
+      .max(120, 'mimeType must be 120 characters or fewer')
+      .optional()
+      .default(''),
+    assetType: z
+      .string()
+      .trim()
+      .max(80, 'assetType must be 80 characters or fewer')
+      .optional()
+      .default('CUSTOMER_DOCUMENT'),
+    sizeBytes: z
+      .number()
+      .int()
+      .min(1, 'sizeBytes must be at least 1')
+      .max(2500000, 'sizeBytes must be 2500000 bytes or fewer')
+      .optional(),
+    contentBase64: z
+      .string()
+      .trim()
+      .max(4000000, 'contentBase64 is too large')
+      .optional(),
+    textContent: z
+      .string()
+      .trim()
+      .max(80000, 'textContent must be 80000 characters or fewer')
+      .optional(),
+  }).strict().superRefine((data, ctx) => {
+    if (!data.contentBase64 && !data.textContent) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['contentBase64'],
+        message: 'contentBase64 or textContent is required',
+      })
+    }
+  })).max(5, 'documentSources must contain 5 documents or fewer').optional(),
   expectedUpdatedAt: expectedUpdatedAtSchema,
 }).strict()
 
 const acceptRuntimeDiscoverySchema = z.object({
   expectedUpdatedAt: expectedUpdatedAtSchema,
+}).strict()
+
+const reviewRuntimeDiscoveryEvidenceSchema = z.object({
+  expectedUpdatedAt: expectedUpdatedAtSchema,
+  reviewStatus: z
+    .string({ required_error: 'reviewStatus is required' })
+    .trim()
+    .transform((value) => value.toUpperCase())
+    .refine((value) => ['PENDING', 'ACCEPTED', 'REJECTED'].includes(value), {
+      message: 'reviewStatus must be PENDING, ACCEPTED, or REJECTED',
+    }),
 }).strict()
 
 const acceptRuntimeSectionSchema = z.object({
@@ -154,6 +216,49 @@ const executeRuntimeActionSchema = z.object({
   expectedUpdatedAt: expectedUpdatedAtSchema,
   inputs: discoveryInputsSchema.optional(),
   acquisitionProfile: discoveryAcquisitionProfileSchema,
+  documentSources: z.array(z.object({
+    fileName: z
+      .string({ required_error: 'fileName is required' })
+      .trim()
+      .min(1, 'fileName is required')
+      .max(255, 'fileName must be 255 characters or fewer'),
+    mimeType: z
+      .string()
+      .trim()
+      .max(120, 'mimeType must be 120 characters or fewer')
+      .optional()
+      .default(''),
+    assetType: z
+      .string()
+      .trim()
+      .max(80, 'assetType must be 80 characters or fewer')
+      .optional()
+      .default('CUSTOMER_DOCUMENT'),
+    sizeBytes: z
+      .number()
+      .int()
+      .min(1, 'sizeBytes must be at least 1')
+      .max(2500000, 'sizeBytes must be 2500000 bytes or fewer')
+      .optional(),
+    contentBase64: z
+      .string()
+      .trim()
+      .max(4000000, 'contentBase64 is too large')
+      .optional(),
+    textContent: z
+      .string()
+      .trim()
+      .max(80000, 'textContent must be 80000 characters or fewer')
+      .optional(),
+  }).strict().superRefine((data, ctx) => {
+    if (!data.contentBase64 && !data.textContent) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['contentBase64'],
+        message: 'contentBase64 or textContent is required',
+      })
+    }
+  })).max(5, 'documentSources must contain 5 documents or fewer').optional(),
   runtimePath: z
     .string()
     .trim()
@@ -201,6 +306,7 @@ const buildExecuteRuntimeActionSchema = (actionKey) => executeRuntimeActionSchem
   const hasSectionKey = data.sectionKey !== undefined
   const hasInputs = data.inputs !== undefined
   const hasAcquisitionProfile = data.acquisitionProfile !== undefined
+  const hasDocumentSources = data.documentSources !== undefined
   const hasForceRegenerateReason = data.forceRegenerateReason !== undefined
   const hasAdditionalContext = data.additionalContext !== undefined
   const hasGenerationMode = data.generationMode !== undefined
@@ -262,6 +368,14 @@ const buildExecuteRuntimeActionSchema = (actionKey) => executeRuntimeActionSchem
       code: z.ZodIssueCode.custom,
       path: ['_root'],
       message: 'acquisitionProfile is only allowed for discovery evidence build actions.',
+    })
+  }
+
+  if (hasDocumentSources && !DISCOVERY_INPUT_RUNTIME_ACTIONS.has(actionKey)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['_root'],
+      message: 'documentSources are only allowed for discovery evidence build actions.',
     })
   }
 })
@@ -326,6 +440,16 @@ export const validateUpdateDiscoveryInputs = createBodyValidator(updateDiscovery
 })
 
 export const validateAcceptRuntimeDiscovery = createBodyValidator(acceptRuntimeDiscoverySchema, {
+  message: 'Request validation failed.',
+  rootIssueKey: '_root',
+})
+
+export const validateRuntimeDiscoveryEvidenceParams = createParamsValidator(runtimeDiscoveryEvidenceParamsSchema, {
+  message: 'Request validation failed.',
+  rootIssueKey: '_root',
+})
+
+export const validateReviewRuntimeDiscoveryEvidence = createBodyValidator(reviewRuntimeDiscoveryEvidenceSchema, {
   message: 'Request validation failed.',
   rootIssueKey: '_root',
 })

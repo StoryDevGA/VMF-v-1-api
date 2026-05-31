@@ -1,4 +1,8 @@
 import crypto from 'node:crypto'
+import {
+  DISCOVERY_EVIDENCE_REVIEW_STATUSES,
+  normalizeDiscoveryEvidenceObjects,
+} from './discoveryIntelligenceService.js'
 
 export const RUNTIME_SECTION_STATES = Object.freeze({
   DRAFT: 'DRAFT',
@@ -230,10 +234,56 @@ const isDiscoveryEvidenceAccepted = (evidencePack = {}) => {
   return !needsRefresh && (evidencePack.accepted === true || evidencePack.state?.accepted === true)
 }
 
-const getDiscoverySeedProfile = (evidencePack = {}) => ({
-  ...(isPlainObject(evidencePack.discovery?.seedProfile) ? evidencePack.discovery.seedProfile : {}),
-  ...(isPlainObject(evidencePack.inputs) ? evidencePack.inputs : {}),
-})
+const getAcceptedDiscoveryEvidenceObjects = (evidencePack = {}) => {
+  if (!isDiscoveryEvidenceAccepted(evidencePack)) return []
+
+  const evidenceObjects = normalizeDiscoveryEvidenceObjects({
+    acquisitionProfile: evidencePack.acquisition?.profile || evidencePack.acquisitionProfile,
+    createdAt: evidencePack.refreshedAt,
+    evidenceObjects: evidencePack.evidenceObjects,
+    inputs: evidencePack.inputs,
+    sources: evidencePack.lineage?.sources || [],
+  })
+
+  return evidenceObjects.filter((evidenceObject) =>
+    evidenceObject.reviewStatus === DISCOVERY_EVIDENCE_REVIEW_STATUSES.ACCEPTED,
+  )
+}
+
+const extractAcceptedFactValue = (evidenceObjects = [], prefix) => {
+  const normalizedPrefix = String(prefix || '').trim().toLowerCase()
+  const evidenceObject = evidenceObjects.find((candidate) =>
+    normalizeEvidenceString(candidate.extractedFact).toLowerCase().startsWith(normalizedPrefix),
+  )
+  if (!evidenceObject) return ''
+  return normalizeEvidenceString(evidenceObject.extractedFact).slice(prefix.length).replace(/^:\s*/, '').trim()
+}
+
+const getDiscoverySeedProfile = (evidencePack = {}) => {
+  const acceptedEvidenceObjects = getAcceptedDiscoveryEvidenceObjects(evidencePack)
+  if (acceptedEvidenceObjects.length > 0) {
+    return {
+      companyWebsite: extractAcceptedFactValue(acceptedEvidenceObjects, 'Company website'),
+      companyName: extractAcceptedFactValue(acceptedEvidenceObjects, 'Company name'),
+      marketRegion: extractAcceptedFactValue(acceptedEvidenceObjects, 'Market or region'),
+      targetOffer: extractAcceptedFactValue(acceptedEvidenceObjects, 'Target offer'),
+      notes: extractAcceptedFactValue(acceptedEvidenceObjects, 'Discovery note'),
+      acceptedEvidenceText: acceptedEvidenceObjects
+        .map((evidenceObject) => normalizeEvidenceString(evidenceObject.extractedFact))
+        .filter(Boolean)
+        .join(' '),
+    }
+  }
+
+  if (Array.isArray(evidencePack.evidenceObjects) && evidencePack.evidenceObjects.length > 0) {
+    return {}
+  }
+
+  return {
+    ...(isPlainObject(evidencePack.discovery?.seedProfile) ? evidencePack.discovery.seedProfile : {}),
+    ...(isPlainObject(evidencePack.inputs) ? evidencePack.inputs : {}),
+  }
+}
 
 const getScopedEvidenceView = ({ evidencePack, runtimePath, sectionKey }) => {
   const scopedViews = isPlainObject(evidencePack.scoped_views)
@@ -323,6 +373,7 @@ const buildTheme = ({
 })
 
 const extractEvidenceThemes = ({
+  acceptedEvidenceObjects = [],
   category,
   dependencyTruths,
   inputSummary,
@@ -334,6 +385,8 @@ const extractEvidenceThemes = ({
   const notes = normalizeEvidenceString(seedProfile.notes)
   const marketRegion = normalizeEvidenceString(seedProfile.marketRegion)
   const evidenceText = [
+    normalizeEvidenceString(seedProfile.acceptedEvidenceText),
+    ...acceptedEvidenceObjects.map((evidenceObject) => normalizeEvidenceString(evidenceObject.extractedFact)),
     normalizeEvidenceString(seedProfile.companyName),
     normalizeEvidenceString(seedProfile.companyWebsite),
     marketRegion,
@@ -424,6 +477,7 @@ const extractEvidenceThemes = ({
 }
 
 const buildSupportingEvidence = ({
+  acceptedEvidenceObjects = [],
   dependencyTruths,
   inputSummary,
   scopedEvidenceSummary,
@@ -434,6 +488,17 @@ const buildSupportingEvidence = ({
   const marketRegion = normalizeEvidenceString(seedProfile.marketRegion)
   const targetOffer = normalizeEvidenceString(seedProfile.targetOffer)
   const notes = normalizeEvidenceString(seedProfile.notes)
+
+  acceptedEvidenceObjects.slice(0, 6).forEach((evidenceObject) => {
+    const summary = normalizeEvidenceString(evidenceObject.extractedFact)
+    if (!summary) return
+    items.push({
+      label: evidenceObject.category || 'Accepted evidence',
+      summary,
+      sourceType: 'DISCOVERY_EVIDENCE_OBJECT',
+      refKey: evidenceObject.evidenceObjectId || evidenceObject.lineageRef || evidenceObject.sourceId,
+    })
+  })
 
   if (companyName) {
     items.push({
@@ -540,13 +605,22 @@ const buildGenerationBoundaries = ({
   return boundaries
 }
 
-const buildSourceRefs = ({ scopedView, seedProfile }) => {
+const buildSourceRefs = ({ acceptedEvidenceObjects = [], scopedView, seedProfile }) => {
   const refs = []
   const addRef = ({ refKey, label, type, safeDisplay }) => {
     if (!safeDisplay) return
     if (refs.some((ref) => ref.refKey === refKey)) return
     refs.push({ refKey, label, type, safeDisplay })
   }
+
+  acceptedEvidenceObjects.forEach((evidenceObject) => {
+    addRef({
+      refKey: evidenceObject.evidenceObjectId || evidenceObject.lineageRef || evidenceObject.sourceId,
+      label: evidenceObject.category || 'Accepted evidence',
+      type: 'DISCOVERY_EVIDENCE_OBJECT',
+      safeDisplay: normalizeEvidenceString(evidenceObject.extractedFact),
+    })
+  })
 
   addRef({
     refKey: 'input_companyName',
@@ -672,6 +746,7 @@ const buildSectionIntelligenceParts = ({
   const runtimePath = normalizeSectionText(section?.runtimePath)
   const label = titleFromSectionKey(section?.label || sectionKey || runtimePath)
   const category = getSectionCategory({ label, sectionKey })
+  const acceptedEvidenceObjects = getAcceptedDiscoveryEvidenceObjects(evidencePack)
   const seedProfile = getDiscoverySeedProfile(evidencePack)
   const scopedView = getScopedEvidenceView({ evidencePack, runtimePath, sectionKey })
   const scopedEvidenceSummary = normalizeEvidenceString(scopedView?.summary)
@@ -682,6 +757,7 @@ const buildSectionIntelligenceParts = ({
     frameworkState,
   })
   const themes = extractEvidenceThemes({
+    acceptedEvidenceObjects,
     category,
     dependencyTruths,
     inputSummary,
@@ -690,7 +766,8 @@ const buildSectionIntelligenceParts = ({
   })
   const discoveryAccepted = isDiscoveryEvidenceAccepted(evidencePack)
   const businessContextAvailable = Boolean(
-    normalizeEvidenceString(seedProfile.targetOffer)
+    acceptedEvidenceObjects.length > 0
+    || normalizeEvidenceString(seedProfile.targetOffer)
     || normalizeEvidenceString(seedProfile.notes)
     || scopedEvidenceSummary
     || inputSummary
@@ -702,6 +779,7 @@ const buildSectionIntelligenceParts = ({
     themes,
   })
   const supportingEvidence = buildSupportingEvidence({
+    acceptedEvidenceObjects,
     dependencyTruths,
     inputSummary,
     scopedEvidenceSummary,
@@ -715,9 +793,10 @@ const buildSectionIntelligenceParts = ({
     truthEligible: truthEligibility.eligible,
   })
   const inputHash = hashSectionInput(input)
-  const sourceRefs = buildSourceRefs({ scopedView, seedProfile })
+  const sourceRefs = buildSourceRefs({ acceptedEvidenceObjects, scopedView, seedProfile })
   const evidenceHash = hashSectionInput({
     accepted: discoveryAccepted,
+    acceptedEvidenceObjectIds: acceptedEvidenceObjects.map((evidenceObject) => evidenceObject.evidenceObjectId),
     scopedEvidenceSummary,
     sourceRefs: sourceRefs.map((ref) => ref.refKey),
     supportingEvidence,
@@ -740,6 +819,7 @@ const buildSectionIntelligenceParts = ({
   })
 
   return {
+    acceptedEvidenceObjects,
     boundedContextHash,
     category,
     dependencyHash,

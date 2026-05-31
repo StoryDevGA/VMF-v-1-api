@@ -11,6 +11,7 @@ import {
   getRuntimeRenderer,
   listRuntimeInstances,
   mutateRuntimeState,
+  reviewRuntimeDiscoveryEvidence,
   updateRuntimeDiscoveryInputs,
 } from '../controllers/runtimeInstance.controller.js'
 import {
@@ -20,6 +21,8 @@ import {
   validateExecuteRuntimeAction,
   validateListRuntimeInstances,
   validateMutateRuntimeState,
+  validateReviewRuntimeDiscoveryEvidence,
+  validateRuntimeDiscoveryEvidenceParams,
   validateRuntimeActionParams,
   validateRuntimeInstanceId,
   validateUpdateDiscoveryInputs,
@@ -32,6 +35,12 @@ router.use(authJwt, loadScopes)
 router.get('/', validateListRuntimeInstances, listRuntimeInstances)
 router.post('/', validateCreateRuntimeInstance, createRuntimeInstance)
 router.patch('/:runtimeInstanceId/discovery-acceptance', validateRuntimeInstanceId, validateAcceptRuntimeDiscovery, acceptRuntimeDiscovery)
+router.patch(
+  '/:runtimeInstanceId/discovery-evidence/:evidenceObjectId/review',
+  validateRuntimeDiscoveryEvidenceParams,
+  validateReviewRuntimeDiscoveryEvidence,
+  reviewRuntimeDiscoveryEvidence,
+)
 router.patch('/:runtimeInstanceId/section-acceptance', validateRuntimeInstanceId, validateAcceptRuntimeSection, acceptRuntimeSection)
 router.patch('/:runtimeInstanceId/discovery-inputs', validateRuntimeInstanceId, validateUpdateDiscoveryInputs, updateRuntimeDiscoveryInputs)
 router.patch('/:runtimeInstanceId/data', validateRuntimeInstanceId, validateMutateRuntimeState, mutateRuntimeState)

@@ -41,6 +41,14 @@ import {
   normalizeRuntimeSectionObject,
 } from './runtimeSectionModelService.js'
 import {
+  acceptPendingDiscoveryEvidenceObjects,
+  buildAcceptedDiscoveryScopedViews,
+  buildDiscoveryEvidenceReviewSummary,
+  buildDiscoveryHealth,
+  buildDiscoverySourceRegistry,
+  normalizeDiscoveryEvidenceObjects,
+} from './discoveryIntelligenceService.js'
+import {
   assertDiscoveryEvidenceAcceptable,
   assertRuntimeEvidencePackWritable,
   buildDiscoveryEvidencePack,
@@ -85,6 +93,23 @@ const hasRuntimeValue = (value) => {
   if (Array.isArray(value)) return value.length > 0
   if (typeof value === 'object') return Object.keys(value).length > 0
   return true
+}
+
+const isPlainRuntimeActionObject = (value) =>
+  Boolean(value && typeof value === 'object' && !Array.isArray(value))
+
+const buildAcceptedDiscoveryCoverageForAction = (coverage = {}) => {
+  const sourceCount = Number(coverage.sourceCount || 0)
+  const evidenceObjectCount = Number(coverage.evidenceObjectCount || sourceCount)
+  const rejectedEvidenceCount = Number(coverage.rejectedEvidenceCount || 0)
+
+  return {
+    ...coverage,
+    evidenceObjectCount,
+    acceptedEvidenceCount: Math.max(0, evidenceObjectCount - rejectedEvidenceCount),
+    pendingReviewCount: 0,
+    rejectedEvidenceCount,
+  }
 }
 
 const getGenerationPackageContext = ({ frameworkPackage, runtimeInstance } = {}) => ({
@@ -744,6 +769,7 @@ const applyRuntimeDiscoveryAction = async ({
     nextEvidencePack = await buildDiscoveryEvidencePack({
       acquisitionProfile: payload?.acquisitionProfile,
       actorUserId,
+      documentSources: payload?.documentSources,
       inputs: payload?.inputs || previousEvidencePack.inputs || {},
       previousEvidencePack,
       reason: normalizedActionKey,
@@ -753,6 +779,53 @@ const applyRuntimeDiscoveryAction = async ({
 
   if (normalizedActionKey === RUNTIME_ACTION_KEYS.ACCEPT_EVIDENCE) {
     assertDiscoveryEvidenceAcceptable(previousEvidencePack)
+    const acquisitionProfile = previousEvidencePack.acquisition?.profile || previousEvidencePack.acquisitionProfile
+    const acceptedEvidenceObjects = acceptPendingDiscoveryEvidenceObjects({
+      acceptedAt: actionedAt,
+      actorUserId,
+      evidenceObjects: normalizeDiscoveryEvidenceObjects({
+        acquisitionProfile,
+        createdAt: previousEvidencePack.refreshedAt || actionedAt,
+        evidenceObjects: previousEvidencePack.evidenceObjects,
+        inputs: previousEvidencePack.inputs,
+        sources: previousEvidencePack.lineage?.sources || [],
+      }),
+    })
+    const sourceRegistry = buildDiscoverySourceRegistry({
+      capturedAt: previousEvidencePack.refreshedAt || actionedAt,
+      evidenceObjects: acceptedEvidenceObjects,
+      sourceRegistry: previousEvidencePack.sourceRegistry,
+      sources: previousEvidencePack.lineage?.sources || [],
+    })
+    const reviewSummary = buildDiscoveryEvidenceReviewSummary(acceptedEvidenceObjects)
+    const acceptedScopedViews = buildAcceptedDiscoveryScopedViews({
+      acquisitionProfile,
+      evidenceObjects: acceptedEvidenceObjects,
+      inputHash: previousEvidencePack.evidence?.inputHash || '',
+      previousScopedViews: previousEvidencePack.scoped_views || previousEvidencePack.scopedViews || {},
+      refreshedAt: previousEvidencePack.refreshedAt || actionedAt,
+    })
+    const previousCoverage = previousEvidencePack.acquisition?.coverage || previousEvidencePack.evidence?.coverage || {}
+    const hasCoverageSummary = isPlainRuntimeActionObject(previousCoverage) && Object.keys(previousCoverage).length > 0
+    const acceptedCoverage = hasCoverageSummary
+      ? buildAcceptedDiscoveryCoverageForAction({
+          ...previousCoverage,
+          sourceCount: sourceRegistry.length || previousCoverage.sourceCount,
+          evidenceObjectCount: reviewSummary.evidenceObjectCount,
+          rejectedEvidenceCount: reviewSummary.rejectedEvidenceCount,
+        })
+      : null
+    const discoveryHealth = buildDiscoveryHealth({
+      acquisitionProfile,
+      coverage: {
+        ...(acceptedCoverage || {}),
+        confidence: previousEvidencePack.acquisition?.confidence || previousEvidencePack.evidence?.confidence,
+      },
+      evidenceObjects: acceptedEvidenceObjects,
+      lastAcquisitionDate: previousEvidencePack.refreshedAt || actionedAt,
+      sourceRegistry,
+    })
+
     nextEvidencePack = {
       ...previousEvidencePack,
       inputComplete: true,
@@ -761,6 +834,28 @@ const applyRuntimeDiscoveryAction = async ({
       needsRefresh: false,
       acceptedAt: actionedAt,
       acceptedBy: toIdString(actorUserId),
+      sourceRegistry,
+      evidenceObjects: acceptedEvidenceObjects,
+      discoveryHealth,
+      scopedViews: acceptedScopedViews,
+      scoped_views: acceptedScopedViews,
+      ...(acceptedCoverage && isPlainRuntimeActionObject(previousEvidencePack.acquisition)
+        ? {
+            acquisition: {
+              ...previousEvidencePack.acquisition,
+              sourceRegistry,
+              coverage: acceptedCoverage,
+              discoveryHealth,
+            },
+          }
+        : {}),
+      evidence: isPlainRuntimeActionObject(previousEvidencePack.evidence)
+        ? {
+            ...previousEvidencePack.evidence,
+            ...(acceptedCoverage ? { coverage: acceptedCoverage } : {}),
+            reviewSummary,
+          }
+        : previousEvidencePack.evidence,
       state: {
         ...(previousEvidencePack.state || {}),
         status: 'ACCEPTED',
@@ -793,7 +888,9 @@ const applyRuntimeDiscoveryAction = async ({
       needsRefresh: nextEvidencePack.needsRefresh === true || nextEvidencePack.state?.needsRefresh === true,
       acquisitionProfile: nextEvidencePack.acquisition?.profile || nextEvidencePack.acquisitionProfile || '',
       inputCount: Object.keys(nextEvidencePack.inputs || {}).length,
-      sourceCount: Array.isArray(nextEvidencePack.lineage?.sources) ? nextEvidencePack.lineage.sources.length : 0,
+      sourceCount: Array.isArray(nextEvidencePack.sourceRegistry)
+        ? nextEvidencePack.sourceRegistry.length
+        : (Array.isArray(nextEvidencePack.lineage?.sources) ? nextEvidencePack.lineage.sources.length : 0),
     },
   }
 }

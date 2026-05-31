@@ -50,6 +50,13 @@ import {
   hashSectionInput,
   isRuntimeSectionObject,
 } from './runtimeSectionModelService.js'
+import {
+  acceptPendingDiscoveryEvidenceObjects,
+  buildDiscoveryEvidenceReviewSummary,
+  buildDiscoveryHealth,
+  buildDiscoverySourceRegistry,
+  normalizeDiscoveryEvidenceObjects,
+} from './discoveryIntelligenceService.js'
 
 export const RUNTIME_RENDERER_ERROR_REASONS = Object.freeze({
   PACKAGE_NOT_FOUND: 'PACKAGE_NOT_FOUND',
@@ -343,13 +350,14 @@ const buildAcceptedDiscoveryCoverageProjection = (coverage = {}) => {
 
   const sourceCount = Number(coverage.sourceCount || 0)
   const evidenceObjectCount = Number(coverage.evidenceObjectCount || sourceCount)
+  const rejectedEvidenceCount = Number(coverage.rejectedEvidenceCount || 0)
 
   return {
     ...coverage,
     evidenceObjectCount,
-    acceptedEvidenceCount: evidenceObjectCount,
+    acceptedEvidenceCount: Math.max(0, evidenceObjectCount - rejectedEvidenceCount),
     pendingReviewCount: 0,
-    rejectedEvidenceCount: Number(coverage.rejectedEvidenceCount || 0),
+    rejectedEvidenceCount,
   }
 }
 
@@ -385,7 +393,7 @@ export const buildDiscoveryProjection = (frameworkState = {}, { includeInputValu
     }
   }
 
-  const scopedViews = evidencePack.scopedViews || evidencePack.scoped_views || {}
+  const scopedViews = evidencePack.scoped_views || evidencePack.scopedViews || {}
   const summaries = evidencePack.summaries || {}
   const inputComplete = isStrictTrue(evidencePack.inputComplete)
     || isStrictTrue(evidencePack.input_complete)
@@ -406,7 +414,6 @@ export const buildDiscoveryProjection = (frameworkState = {}, { includeInputValu
   const evidenceSummary = buildProjectionSummary(evidencePack.evidence)
   const summarySummary = buildProjectionSummary(summaries)
   const scopedViewSummary = buildProjectionSummary(scopedViews)
-  const lineageSources = Array.isArray(evidencePack.lineage?.sources) ? evidencePack.lineage.sources : []
   const acquisition = evidencePack.acquisition && typeof evidencePack.acquisition === 'object' && !Array.isArray(evidencePack.acquisition)
     ? cloneProjectionValue(evidencePack.acquisition)
     : {}
@@ -414,6 +421,42 @@ export const buildDiscoveryProjection = (frameworkState = {}, { includeInputValu
     acquisition.coverage = buildAcceptedDiscoveryCoverageProjection(acquisition.coverage)
   }
   const acquisitionProfile = String(acquisition.profile || evidencePack.acquisitionProfile || 'STANDARD').trim() || 'STANDARD'
+  const lineageSources = Array.isArray(evidencePack.lineage?.sources) ? evidencePack.lineage.sources : []
+  const normalizedEvidenceObjects = normalizeDiscoveryEvidenceObjects({
+    acquisitionProfile,
+    createdAt: evidencePack.refreshedAt,
+    evidenceObjects: evidencePack.evidenceObjects,
+    inputs: evidencePack.inputs,
+    sources: lineageSources,
+  })
+  const evidenceObjects = accepted
+    ? acceptPendingDiscoveryEvidenceObjects({
+        acceptedAt: evidencePack.acceptedAt || evidencePack.refreshedAt || '',
+        actorUserId: evidencePack.acceptedBy || '',
+        evidenceObjects: normalizedEvidenceObjects,
+      })
+    : normalizedEvidenceObjects
+  const sourceRegistry = buildDiscoverySourceRegistry({
+    capturedAt: evidencePack.refreshedAt,
+    evidenceObjects,
+    sourceRegistry: evidencePack.sourceRegistry || acquisition.sourceRegistry,
+    sources: lineageSources,
+  })
+  const persistedDiscoveryHealth = evidencePack.discoveryHealth || acquisition.discoveryHealth || null
+  const discoveryHealth = persistedDiscoveryHealth || (
+    sourceRegistry.length > 0 || evidenceObjects.length > 0
+      ? buildDiscoveryHealth({
+          acquisitionProfile,
+          coverage: {
+            ...(acquisition.coverage || evidencePack.evidence?.coverage || {}),
+            confidence: acquisition.confidence || evidencePack.evidence?.confidence,
+          },
+          evidenceObjects,
+          lastAcquisitionDate: evidencePack.refreshedAt || acquisition.completedAt,
+          sourceRegistry,
+        })
+      : {}
+  )
 
   return {
     state: {
@@ -445,6 +488,12 @@ export const buildDiscoveryProjection = (frameworkState = {}, { includeInputValu
       sourceCount: lineageSources.length,
       builderMode: evidencePack.lineage?.builder?.mode || '',
     },
+    sourceRegistrySummary: {
+      count: sourceRegistry.length,
+      sourceTypes: Array.from(new Set(sourceRegistry.map((source) => source.sourceType).filter(Boolean))),
+    },
+    evidenceObjectSummary: buildDiscoveryEvidenceReviewSummary(evidenceObjects),
+    discoveryHealth: cloneProjectionValue(discoveryHealth),
     ...(includeInputValues ? { inputValues: cloneProjectionValue(evidencePack.inputs || {}) } : {}),
     ...(evidencePack.acceptedAt ? { acceptedAt: evidencePack.acceptedAt } : {}),
     ...(evidencePack.acceptedBy ? { acceptedBy: evidencePack.acceptedBy } : {}),

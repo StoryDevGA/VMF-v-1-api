@@ -48,6 +48,19 @@ import {
   normalizeFrameworkStateForAction,
   normalizeRuntimeActionToken,
 } from './runtimeActionPolicyService.js'
+import {
+  acceptPendingDiscoveryEvidenceObjects,
+  acquireWebsiteDiscoveryEvidence,
+  buildAcceptedDiscoveryScopedViews,
+  applyDiscoveryEvidenceReview,
+  buildDiscoveryEvidenceObjectsFromSources,
+  buildDiscoveryEvidenceReviewSummary,
+  buildDiscoveryHealth,
+  buildDiscoverySourceRegistry,
+  DISCOVERY_EVIDENCE_REVIEW_STATUSES,
+  ingestUploadedDocumentDiscoveryEvidence,
+  normalizeDiscoveryEvidenceObjects,
+} from './discoveryIntelligenceService.js'
 
 const SECTION_WRITE_SCOPE = 'framework_state.sections.*'
 export const DISCOVERY_EVIDENCE_PACK_PATH = 'framework_state.evidence_pack'
@@ -61,16 +74,15 @@ const DISCOVERY_ACQUISITION_PROFILE_CONFIG = Object.freeze({
     label: 'Standard Acquisition',
     purpose: 'PUBLISHABLE_FRAMEWORK',
     evidenceTarget: { min: 5, max: 20 },
-    enabledSourceTypes: ['DISCOVERY_INPUTS', 'USER_PROVIDED_WEBSITE'],
+    enabledSourceTypes: ['DISCOVERY_INPUTS', 'USER_PROVIDED_WEBSITE', 'UPLOADED_DOCUMENTS'],
     reservedSourceTypes: [],
   },
   [DISCOVERY_ACQUISITION_PROFILES.ENHANCED]: {
     label: 'Enhanced Acquisition',
     purpose: 'BROADER_SUPPORTING_EVIDENCE',
     evidenceTarget: { min: 20, max: 100 },
-    enabledSourceTypes: ['DISCOVERY_INPUTS', 'USER_PROVIDED_WEBSITE'],
-    reservedSourceTypes: ['UPLOADED_DOCUMENTS', 'ADDITIONAL_WEBSITE_PAGES'],
-    disabled: true,
+    enabledSourceTypes: ['DISCOVERY_INPUTS', 'WEBSITE', 'UPLOADED_DOCUMENTS'],
+    reservedSourceTypes: ['ADDITIONAL_WEBSITE_PAGES'],
   },
   [DISCOVERY_ACQUISITION_PROFILES.STRATEGIC]: {
     label: 'Strategic Acquisition',
@@ -193,15 +205,27 @@ const normalizeDiscoveryAcquisitionProfile = ({
 
 const buildDiscoveryCoverageSummary = ({
   accepted = false,
+  evidenceObjectCount,
   evidenceReady,
   inputKeys,
   missingInputKeys,
+  pendingReviewCount,
+  rejectedEvidenceCount,
   sourceCount,
 }) => {
   const requiredCompleteCount = REQUIRED_DISCOVERY_INPUT_KEYS.length - missingInputKeys.length
   const requiredCoverage = REQUIRED_DISCOVERY_INPUT_KEYS.length > 0
     ? Math.round((requiredCompleteCount / REQUIRED_DISCOVERY_INPUT_KEYS.length) * 100)
     : 0
+  const normalizedEvidenceObjectCount = Number.isFinite(Number(evidenceObjectCount))
+    ? Number(evidenceObjectCount)
+    : (evidenceReady ? sourceCount : 0)
+  const normalizedRejectedEvidenceCount = Number.isFinite(Number(rejectedEvidenceCount))
+    ? Number(rejectedEvidenceCount)
+    : 0
+  const normalizedPendingReviewCount = Number.isFinite(Number(pendingReviewCount))
+    ? Number(pendingReviewCount)
+    : (evidenceReady && !accepted ? normalizedEvidenceObjectCount : 0)
 
   return {
     status: evidenceReady ? 'SUFFICIENT_FOR_FRAMEWORK' : 'INPUT_REQUIRED',
@@ -210,10 +234,12 @@ const buildDiscoveryCoverageSummary = ({
     inputCount: inputKeys.length,
     missingAreas: missingInputKeys,
     sourceCount,
-    evidenceObjectCount: evidenceReady ? sourceCount : 0,
-    acceptedEvidenceCount: accepted && evidenceReady ? sourceCount : 0,
-    pendingReviewCount: evidenceReady && !accepted ? sourceCount : 0,
-    rejectedEvidenceCount: 0,
+    evidenceObjectCount: normalizedEvidenceObjectCount,
+    acceptedEvidenceCount: accepted && evidenceReady
+      ? Math.max(0, normalizedEvidenceObjectCount - normalizedRejectedEvidenceCount)
+      : 0,
+    pendingReviewCount: accepted ? 0 : normalizedPendingReviewCount,
+    rejectedEvidenceCount: normalizedRejectedEvidenceCount,
     score: requiredCoverage,
   }
 }
@@ -221,25 +247,64 @@ const buildDiscoveryCoverageSummary = ({
 const buildAcceptedDiscoveryCoverage = (coverage = {}) => {
   const sourceCount = Number(coverage.sourceCount || 0)
   const evidenceObjectCount = Number(coverage.evidenceObjectCount || sourceCount)
+  const rejectedEvidenceCount = Number(coverage.rejectedEvidenceCount || 0)
 
   return {
     ...coverage,
     evidenceObjectCount,
-    acceptedEvidenceCount: evidenceObjectCount,
+    acceptedEvidenceCount: Math.max(0, evidenceObjectCount - rejectedEvidenceCount),
     pendingReviewCount: 0,
-    rejectedEvidenceCount: Number(coverage.rejectedEvidenceCount || 0),
+    rejectedEvidenceCount,
   }
 }
 
 const buildDiscoveryConfidenceSummary = ({
+  acquisitionProfile,
   coverage,
   evidenceReady,
+  evidenceObjects = [],
 }) => {
   if (!evidenceReady) {
     return {
       level: 'INSUFFICIENT',
       score: Math.min(coverage.score, 50),
       basis: ['REQUIRED_DISCOVERY_INPUTS_MISSING'],
+    }
+  }
+
+  const documentEvidenceCount = evidenceObjects.filter((evidenceObject) =>
+    evidenceObject?.acquisitionMethod === 'DOCUMENT_INGESTION',
+  ).length
+
+  if (documentEvidenceCount > 0) {
+    const websiteEvidenceCount = evidenceObjects.filter((evidenceObject) =>
+      evidenceObject?.acquisitionMethod === 'WEBSITE_ACQUISITION',
+    ).length
+    const sourceBackedCount = documentEvidenceCount + websiteEvidenceCount
+    return {
+      level: 'SOURCE_BACKED',
+      score: Math.min(82, Math.max(70, 62 + sourceBackedCount)),
+      basis: [
+        ...(websiteEvidenceCount > 0 ? ['CUSTOMER_WEBSITE_ACQUISITION'] : []),
+        'UPLOADED_DOCUMENT_INGESTION',
+        'DETERMINISTIC_TEXT_EXTRACTION',
+        'EVIDENCE_REVIEW_PENDING',
+      ],
+    }
+  }
+
+  if (acquisitionProfile === DISCOVERY_ACQUISITION_PROFILES.ENHANCED) {
+    const websiteEvidenceCount = evidenceObjects.filter((evidenceObject) =>
+      evidenceObject?.acquisitionMethod === 'WEBSITE_ACQUISITION',
+    ).length
+    return {
+      level: websiteEvidenceCount > 0 ? 'SOURCE_BACKED' : 'STANDARD',
+      score: websiteEvidenceCount > 0
+        ? Math.min(78, Math.max(68, 60 + websiteEvidenceCount))
+        : 65,
+      basis: websiteEvidenceCount > 0
+        ? ['CUSTOMER_WEBSITE_ACQUISITION', 'DETERMINISTIC_TEXT_EXTRACTION', 'EVIDENCE_REVIEW_PENDING']
+        : ['USER_PROVIDED_INPUTS', 'DETERMINISTIC_EVIDENCE_PACK'],
     }
   }
 
@@ -258,7 +323,12 @@ const hasRequiredDiscoveryInputs = (inputs) =>
 
 const hasDeterministicDiscoveryEvidence = (evidence, inputs) => {
   if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) return false
-  if (evidence.source !== 'DISCOVERY_INPUTS') return false
+  if (![
+    'DISCOVERY_INPUTS',
+    'DISCOVERY_INPUTS_AND_WEBSITE_ACQUISITION',
+    'DISCOVERY_INPUTS_AND_DOCUMENT_INGESTION',
+    'DISCOVERY_INPUTS_AND_WEBSITE_ACQUISITION_AND_DOCUMENT_INGESTION',
+  ].includes(evidence.source)) return false
   if (!Array.isArray(evidence.inputKeys) || evidence.inputKeys.length === 0) return false
   if (!Array.isArray(evidence.requiredInputKeys)) return false
   if (!Array.isArray(evidence.missingInputKeys) || evidence.missingInputKeys.length > 0) return false
@@ -281,6 +351,19 @@ const hasDiscoveryLineage = (evidencePack = {}) =>
   && evidencePack.lineage.sources.length > 0
   && isPlainObject(evidencePack?.lineage?.builder)
   && String(evidencePack.lineage.builder.mode || '').trim()
+
+const hasReviewableDiscoveryEvidenceObjects = (evidencePack = {}) => {
+  if (!Array.isArray(evidencePack.evidenceObjects) || evidencePack.evidenceObjects.length === 0) {
+    return true
+  }
+
+  return evidencePack.evidenceObjects.some((evidenceObject) =>
+    String(evidenceObject?.sourceId || '').trim()
+    && String(evidenceObject?.lineageRef || '').trim()
+    && String(evidenceObject?.extractedFact || '').trim()
+    && evidenceObject.reviewStatus !== DISCOVERY_EVIDENCE_REVIEW_STATUSES.REJECTED,
+  )
+}
 
 export const assertDiscoveryEvidenceAcceptable = (evidencePack) => {
   if (!evidencePack || Object.keys(evidencePack).length === 0) {
@@ -308,6 +391,7 @@ export const assertDiscoveryEvidenceAcceptable = (evidencePack) => {
     !hasRequiredDiscoveryInputs(evidencePack.inputs)
     || !hasDeterministicDiscoveryEvidence(evidencePack.evidence, evidencePack.inputs)
     || !hasDiscoveryLineage(evidencePack)
+    || !hasReviewableDiscoveryEvidenceObjects(evidencePack)
   ) {
     throw buildDiscoveryAcceptanceUnavailableError('Discovery evidence is incomplete and must be refreshed before acceptance.')
   }
@@ -360,6 +444,16 @@ const buildDiscoveryMutationResponse = ({ runtimeInstance, evidencePack, previou
       sourceCount: Array.isArray(evidencePack.lineage?.sources) ? evidencePack.lineage.sources.length : 0,
       builderMode: evidencePack.lineage?.builder?.mode || '',
     },
+    sourceRegistrySummary: {
+      count: Array.isArray(evidencePack.sourceRegistry) ? evidencePack.sourceRegistry.length : 0,
+      sourceTypes: Array.isArray(evidencePack.sourceRegistry)
+        ? Array.from(new Set(evidencePack.sourceRegistry.map((source) => source.sourceType).filter(Boolean)))
+        : [],
+    },
+    evidenceObjectSummary: buildDiscoveryEvidenceReviewSummary(
+      Array.isArray(evidencePack.evidenceObjects) ? evidencePack.evidenceObjects : [],
+    ),
+    discoveryHealth: cloneValue(evidencePack.discoveryHealth || evidencePack.acquisition?.discoveryHealth || {}),
   },
   mutation: {
     runtimePath: DISCOVERY_EVIDENCE_PACK_PATH,
@@ -589,6 +683,7 @@ const normalizeDiscoveryInputs = (inputs = {}) => DISCOVERY_INPUT_KEYS.reduce((n
 export const buildDiscoveryEvidencePack = async ({
   acquisitionProfile,
   actorUserId,
+  documentSources,
   inputs,
   previousEvidencePack = {},
   reason = 'BUILD_EVIDENCE_PACK',
@@ -600,7 +695,6 @@ export const buildDiscoveryEvidencePack = async ({
   const inputKeys = Object.keys(normalizedInputs)
   const missingInputKeys = REQUIRED_DISCOVERY_INPUT_KEYS.filter((key) => !normalizedInputs[key])
   const inputComplete = missingInputKeys.length === 0
-  const evidenceReady = inputComplete
   const refreshedAt = new Date().toISOString()
   const inputHash = hashDiscoveryValue(normalizedInputs)
   const frameworkPackage = await resolvePackageForAdvance(runtimeInstance?.packageId)
@@ -613,8 +707,7 @@ export const buildDiscoveryEvidencePack = async ({
   const projectableSections = frameworkPackage
     ? buildProjectableSectionsForAdvance({ frameworkPackage, runtimePathRecords, uiContract })
     : []
-  const sourceRefs = inputKeys.map((key) => `input_${key}`)
-  const sources = inputKeys.map((key) => ({
+  const inputSources = inputKeys.map((key) => ({
     sourceId: `input_${key}`,
     type: key === 'companyWebsite' ? 'USER_PROVIDED_WEBSITE' : 'USER_PROVIDED_INPUT',
     fieldKey: key,
@@ -624,13 +717,140 @@ export const buildDiscoveryEvidencePack = async ({
     capturedAt: refreshedAt,
     acquisitionProfile: profile,
   }))
-  const coverage = buildDiscoveryCoverageSummary({
+  const inputEvidenceObjects = buildDiscoveryEvidenceObjectsFromSources({
+    acquisitionProfile: profile,
+    createdAt: refreshedAt,
+    inputs: normalizedInputs,
+    sources: inputSources,
+  })
+  let websiteAcquisition = null
+  if (profile === DISCOVERY_ACQUISITION_PROFILES.ENHANCED && inputComplete) {
+    try {
+      websiteAcquisition = await acquireWebsiteDiscoveryEvidence({
+        acquisitionProfile: profile,
+        acquiredAt: refreshedAt,
+        websiteUrl: normalizedInputs.companyWebsite,
+      })
+    } catch (err) {
+      throw buildMutationError({
+        status: 422,
+        code: 'VALIDATION_FAILED',
+        message: 'Enhanced Acquisition could not acquire website evidence.',
+        reason: RUNTIME_INSTANCE_ERROR_REASONS.WEBSITE_ACQUISITION_FAILED,
+        details: {
+          acquisitionProfile: profile,
+          companyWebsite: normalizedInputs.companyWebsite || '',
+          acquisitionStatus: 'FAILED',
+          acquisitionError: err?.message || 'Website acquisition failed.',
+        },
+      })
+    }
+  }
+  let documentAcquisition = {
+    sources: [],
+    sourceRegistry: [],
+    evidenceObjects: [],
+  }
+  if (documentSources !== undefined) {
+    try {
+      documentAcquisition = ingestUploadedDocumentDiscoveryEvidence({
+        acquisitionProfile: profile,
+        capturedAt: refreshedAt,
+        documentSources,
+      })
+    } catch (err) {
+      throw buildMutationError({
+        status: 422,
+        code: 'VALIDATION_FAILED',
+        message: 'Document ingestion could not produce governed evidence.',
+        reason: RUNTIME_INSTANCE_ERROR_REASONS.DOCUMENT_INGESTION_FAILED,
+        details: {
+          acquisitionProfile: profile,
+          acquisitionStatus: 'FAILED',
+          acquisitionError: err?.message || 'Document ingestion failed.',
+        },
+      })
+    }
+  }
+  const previousDocumentSources = documentSources === undefined && Array.isArray(previousEvidencePack?.lineage?.sources)
+    ? previousEvidencePack.lineage.sources.filter((source) =>
+        source?.type === 'UPLOADED_DOCUMENT' || source?.sourceType === 'UPLOADED_DOCUMENT',
+      )
+    : []
+  const previousDocumentEvidenceObjects = documentSources === undefined && Array.isArray(previousEvidencePack?.evidenceObjects)
+    ? previousEvidencePack.evidenceObjects.filter((evidenceObject) =>
+        evidenceObject?.acquisitionMethod === 'DOCUMENT_INGESTION',
+      )
+    : []
+  const previousDocumentRegistry = documentSources === undefined && Array.isArray(previousEvidencePack?.sourceRegistry)
+    ? previousEvidencePack.sourceRegistry.filter((source) => source?.sourceType === 'UPLOADED_DOCUMENT')
+    : []
+  const sources = [
+    ...inputSources,
+    ...(websiteAcquisition?.source ? [websiteAcquisition.source] : []),
+    ...previousDocumentSources,
+    ...documentAcquisition.sources,
+  ]
+  const evidenceObjects = [
+    ...inputEvidenceObjects,
+    ...(Array.isArray(websiteAcquisition?.evidenceObjects) ? websiteAcquisition.evidenceObjects : []),
+    ...previousDocumentEvidenceObjects,
+    ...documentAcquisition.evidenceObjects,
+  ]
+  const inputSourceRegistry = buildDiscoverySourceRegistry({
+    capturedAt: refreshedAt,
+    evidenceObjects: inputEvidenceObjects,
+    sources: inputSources,
+  })
+  const sourceRegistry = [
+    ...inputSourceRegistry,
+    ...(websiteAcquisition?.sourceRegistryEntry ? [websiteAcquisition.sourceRegistryEntry] : []),
+    ...previousDocumentRegistry,
+    ...documentAcquisition.sourceRegistry,
+  ]
+  const evidenceReady = inputComplete
+    && (
+      profile !== DISCOVERY_ACQUISITION_PROFILES.ENHANCED
+      || Boolean(websiteAcquisition?.evidenceObjects?.length)
+    )
+  const sourceRefs = sources.map((source) => source.sourceId).filter(Boolean)
+  const reviewSummary = buildDiscoveryEvidenceReviewSummary(evidenceObjects)
+  const baseCoverage = buildDiscoveryCoverageSummary({
+    evidenceObjectCount: reviewSummary.evidenceObjectCount,
     evidenceReady,
     inputKeys,
     missingInputKeys,
+    pendingReviewCount: reviewSummary.pendingReviewCount,
+    rejectedEvidenceCount: reviewSummary.rejectedEvidenceCount,
     sourceCount: sources.length,
   })
-  const confidence = buildDiscoveryConfidenceSummary({ coverage, evidenceReady })
+  const baseDiscoveryHealth = buildDiscoveryHealth({
+    acquisitionProfile: profile,
+    coverage: baseCoverage,
+    evidenceObjects,
+    lastAcquisitionDate: refreshedAt,
+    sourceRegistry,
+  })
+  const coverage = profile === DISCOVERY_ACQUISITION_PROFILES.ENHANCED
+    ? {
+        ...baseCoverage,
+        status: evidenceReady ? 'SOURCE_BACKED_EVIDENCE_READY' : baseCoverage.status,
+        score: baseDiscoveryHealth.coveragePercent,
+      }
+    : baseCoverage
+  const confidence = buildDiscoveryConfidenceSummary({
+    acquisitionProfile: profile,
+    coverage,
+    evidenceObjects,
+    evidenceReady,
+  })
+  const discoveryHealth = buildDiscoveryHealth({
+    acquisitionProfile: profile,
+    coverage: { ...coverage, confidence },
+    evidenceObjects,
+    lastAcquisitionDate: refreshedAt,
+    sourceRegistry,
+  })
   const acquisition = {
     profile,
     label: profileConfig.label,
@@ -643,16 +863,38 @@ export const buildDiscoveryEvidencePack = async ({
       profile: reservedProfile,
       reason: `${DISCOVERY_ACQUISITION_PROFILE_CONFIG[reservedProfile].label} is reserved for a later Discovery Intelligence architecture sprint.`,
     })),
+    sourceRegistry,
     coverage,
     confidence,
+    discoveryHealth,
     requestedAt: refreshedAt,
     completedAt: evidenceReady ? refreshedAt : null,
+    ...(websiteAcquisition
+      ? {
+          websiteAcquisition: {
+            status: 'ACQUIRED',
+            sourceId: websiteAcquisition.source.sourceId,
+            evidenceProduced: websiteAcquisition.evidenceObjects.length,
+            url: websiteAcquisition.source.url,
+            finalUrl: websiteAcquisition.source.finalUrl,
+          },
+        }
+      : {}),
+    ...(documentAcquisition.evidenceObjects.length > 0
+      ? {
+          documentAcquisition: {
+            status: 'ACQUIRED',
+            sourceCount: documentAcquisition.sources.length,
+            evidenceProduced: documentAcquisition.evidenceObjects.length,
+          },
+        }
+      : {}),
   }
   const compactSummary = {
     summary: `Customer-provided discovery inputs captured for ${
       normalizedInputs.companyName || normalizedInputs.companyWebsite || 'this runtime'
-    }.`,
-    confidence: 'USER_PROVIDED',
+    }${websiteAcquisition ? ' with website acquisition evidence.' : '.'}`,
+    confidence: websiteAcquisition ? confidence.level : 'USER_PROVIDED',
     sourceRefs,
     inputHash,
     refreshedAt,
@@ -680,8 +922,13 @@ export const buildDiscoveryEvidencePack = async ({
         return views
       }, {})
     : {}
+  const evidenceSources = [
+    'DISCOVERY_INPUTS',
+    websiteAcquisition ? 'WEBSITE_ACQUISITION' : '',
+    previousDocumentEvidenceObjects.length > 0 || documentAcquisition.evidenceObjects.length > 0 ? 'DOCUMENT_INGESTION' : '',
+  ].filter(Boolean)
   const evidence = {
-    source: 'DISCOVERY_INPUTS',
+    source: evidenceSources.join('_AND_'),
     inputKeys,
     requiredInputKeys: REQUIRED_DISCOVERY_INPUT_KEYS,
     missingInputKeys,
@@ -692,8 +939,17 @@ export const buildDiscoveryEvidencePack = async ({
     acquisitionProfile: profile,
     coverage,
     confidence,
+    reviewSummary,
   }
-  const evidenceHash = hashDiscoveryValue({ acquisition, evidence, summaries: { compact: compactSummary }, scopedViews })
+  const hasDocumentEvidence = previousDocumentEvidenceObjects.length > 0 || documentAcquisition.evidenceObjects.length > 0
+  const evidenceHash = hashDiscoveryValue({
+    acquisition,
+    evidence,
+    evidenceObjects,
+    sourceRegistry,
+    summaries: { compact: compactSummary },
+    scopedViews,
+  })
   const previousRevisions = Array.isArray(previousEvidencePack?.revisions)
     ? previousEvidencePack.revisions
     : []
@@ -745,13 +1001,26 @@ export const buildDiscoveryEvidencePack = async ({
       acquisitionProfile: profile,
     },
     evidence,
+    sourceRegistry,
+    evidenceObjects,
+    discoveryHealth,
     scoped_views: scopedViews,
     lineage: {
       sources,
       builder: {
-        mode: 'DETERMINISTIC',
+        mode: websiteAcquisition && hasDocumentEvidence
+          ? 'DETERMINISTIC_WEBSITE_AND_DOCUMENT_ACQUISITION'
+          : websiteAcquisition
+            ? 'DETERMINISTIC_WEBSITE_ACQUISITION'
+            : hasDocumentEvidence
+              ? 'DETERMINISTIC_DOCUMENT_ACQUISITION'
+              : 'DETERMINISTIC',
         version: 'discovery-evidence-pack-v1',
-        adapter: 'customer-input',
+        adapter: [
+          'customer-input',
+          websiteAcquisition ? 'website-html-fetch' : '',
+          hasDocumentEvidence ? 'document-text-extraction' : '',
+        ].filter(Boolean).join('+'),
         acquisitionProfile: profile,
       },
     },
@@ -2000,6 +2269,7 @@ export const updateRuntimeDiscoveryInputs = async ({
   const nextEvidencePack = await buildDiscoveryEvidencePack({
     acquisitionProfile: payload?.acquisitionProfile,
     actorUserId,
+    documentSources: payload?.documentSources,
     inputs: payload?.inputs || {},
     previousEvidencePack,
     reason: 'SAVE_DISCOVERY_INPUTS',
@@ -2062,9 +2332,51 @@ export const acceptRuntimeDiscovery = async ({
   assertDiscoveryEvidenceAcceptable(previousEvidencePack)
 
   const acceptedAt = new Date().toISOString()
+  const acceptedEvidenceObjects = acceptPendingDiscoveryEvidenceObjects({
+    acceptedAt,
+    actorUserId,
+    evidenceObjects: normalizeDiscoveryEvidenceObjects({
+      acquisitionProfile: previousEvidencePack.acquisition?.profile || previousEvidencePack.acquisitionProfile,
+      createdAt: previousEvidencePack.refreshedAt || acceptedAt,
+      evidenceObjects: previousEvidencePack.evidenceObjects,
+      inputs: previousEvidencePack.inputs,
+      sources: previousEvidencePack.lineage?.sources || [],
+    }),
+  })
+  const sourceRegistry = buildDiscoverySourceRegistry({
+    capturedAt: previousEvidencePack.refreshedAt || acceptedAt,
+    evidenceObjects: acceptedEvidenceObjects,
+    sourceRegistry: previousEvidencePack.sourceRegistry,
+    sources: previousEvidencePack.lineage?.sources || [],
+  })
+  const reviewSummary = buildDiscoveryEvidenceReviewSummary(acceptedEvidenceObjects)
+  const acceptedScopedViews = buildAcceptedDiscoveryScopedViews({
+    acquisitionProfile: previousEvidencePack.acquisition?.profile || previousEvidencePack.acquisitionProfile,
+    evidenceObjects: acceptedEvidenceObjects,
+    inputHash: previousEvidencePack.evidence?.inputHash || '',
+    previousScopedViews: previousEvidencePack.scoped_views || previousEvidencePack.scopedViews || {},
+    refreshedAt: previousEvidencePack.refreshedAt || acceptedAt,
+  })
   const previousCoverage = previousEvidencePack.acquisition?.coverage || previousEvidencePack.evidence?.coverage || {}
   const hasCoverageSummary = isPlainObject(previousCoverage) && Object.keys(previousCoverage).length > 0
-  const acceptedCoverage = hasCoverageSummary ? buildAcceptedDiscoveryCoverage(previousCoverage) : null
+  const acceptedCoverage = hasCoverageSummary
+    ? buildAcceptedDiscoveryCoverage({
+        ...previousCoverage,
+        sourceCount: sourceRegistry.length || previousCoverage.sourceCount,
+        evidenceObjectCount: reviewSummary.evidenceObjectCount,
+        rejectedEvidenceCount: reviewSummary.rejectedEvidenceCount,
+      })
+    : null
+  const discoveryHealth = buildDiscoveryHealth({
+    acquisitionProfile: previousEvidencePack.acquisition?.profile || previousEvidencePack.acquisitionProfile,
+    coverage: {
+      ...(acceptedCoverage || {}),
+      confidence: previousEvidencePack.acquisition?.confidence || previousEvidencePack.evidence?.confidence,
+    },
+    evidenceObjects: acceptedEvidenceObjects,
+    lastAcquisitionDate: previousEvidencePack.refreshedAt || acceptedAt,
+    sourceRegistry,
+  })
   const nextEvidencePack = {
     ...previousEvidencePack,
     inputComplete: true,
@@ -2073,11 +2385,18 @@ export const acceptRuntimeDiscovery = async ({
     needsRefresh: false,
     acceptedAt,
     acceptedBy: toIdString(actorUserId),
+    sourceRegistry,
+    evidenceObjects: acceptedEvidenceObjects,
+    discoveryHealth,
+    scopedViews: acceptedScopedViews,
+    scoped_views: acceptedScopedViews,
     ...(acceptedCoverage && isPlainObject(previousEvidencePack.acquisition)
       ? {
           acquisition: {
             ...previousEvidencePack.acquisition,
+            sourceRegistry,
             coverage: acceptedCoverage,
+            discoveryHealth,
           },
         }
       : {}),
@@ -2085,6 +2404,7 @@ export const acceptRuntimeDiscovery = async ({
       ? {
           ...previousEvidencePack.evidence,
           coverage: acceptedCoverage,
+          reviewSummary,
         }
       : previousEvidencePack.evidence,
     state: {
@@ -2094,6 +2414,157 @@ export const acceptRuntimeDiscovery = async ({
       evidenceReady: true,
       accepted: true,
       needsRefresh: false,
+    },
+  }
+
+  await assertRuntimeEvidencePackWritable({
+    frameworkKey: runtimeInstance.frameworkKey,
+    value: nextEvidencePack,
+  })
+
+  const nextFrameworkState = {
+    ...previousFrameworkState,
+    evidence_pack: nextEvidencePack,
+  }
+
+  const updatedRuntimeInstance = await persistMutationWithAudit({
+    actorUserId,
+    auditRequest,
+    runtimeInstance,
+    nextFrameworkState,
+    previousFrameworkState,
+    previousUpdatedBy,
+    runtimePath: DISCOVERY_EVIDENCE_PACK_PATH,
+    previousValue: previousEvidencePack,
+    nextValue: cloneValue(nextEvidencePack),
+    expectedUpdatedAt,
+    updatedAtBefore,
+  })
+
+  return buildDiscoveryMutationResponse({
+    runtimeInstance: updatedRuntimeInstance,
+    evidencePack: nextEvidencePack,
+    previousEvidencePack,
+  })
+}
+
+export const reviewRuntimeDiscoveryEvidence = async ({
+  actorUserId,
+  auditRequest,
+  evidenceObjectId,
+  scopes,
+  runtimeInstanceId,
+  payload,
+} = {}) => {
+  const expectedUpdatedAt = payload?.expectedUpdatedAt
+  const reviewStatus = normalizeToken(payload?.reviewStatus)
+  const runtimeInstance = await resolveRuntimeInstanceForMutation({
+    actorUserId,
+    runtimeInstanceId,
+    scopes,
+  })
+
+  assertRuntimeEditable(runtimeInstance)
+  assertExpectedUpdatedAt({ runtimeInstance, expectedUpdatedAt })
+
+  const previousFrameworkState = cloneValue(runtimeInstance.framework_state || {})
+  const previousUpdatedBy = runtimeInstance.updatedBy
+  const previousEvidencePack = cloneValue(previousFrameworkState.evidence_pack || {})
+  const updatedAtBefore = runtimeInstance.updatedAt instanceof Date
+    ? runtimeInstance.updatedAt.toISOString()
+    : runtimeInstance.updatedAt
+
+  if (!getEvidencePackStateFlag(previousEvidencePack, 'evidenceReady') || getEvidencePackNeedsRefresh(previousEvidencePack)) {
+    throw buildDiscoveryAcceptanceUnavailableError('Discovery evidence must be refreshed before evidence review.')
+  }
+
+  const reviewedAt = new Date().toISOString()
+  const previousEvidenceObjects = normalizeDiscoveryEvidenceObjects({
+    acquisitionProfile: previousEvidencePack.acquisition?.profile || previousEvidencePack.acquisitionProfile,
+    createdAt: previousEvidencePack.refreshedAt || reviewedAt,
+    evidenceObjects: previousEvidencePack.evidenceObjects,
+    inputs: previousEvidencePack.inputs,
+    sources: previousEvidencePack.lineage?.sources || [],
+  })
+  const reviewResult = applyDiscoveryEvidenceReview({
+    actorUserId,
+    evidenceObjectId,
+    evidenceObjects: previousEvidenceObjects,
+    reviewStatus,
+    reviewedAt,
+  })
+
+  if (!reviewResult.found) {
+    throw buildMutationError({
+      status: 404,
+      code: 'NOT_FOUND',
+      message: 'Discovery evidence object was not found.',
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_ACTION_NOT_AVAILABLE,
+      details: {
+        evidenceObjectId,
+        runtimePath: DISCOVERY_EVIDENCE_PACK_PATH,
+      },
+    })
+  }
+
+  const sourceRegistry = buildDiscoverySourceRegistry({
+    capturedAt: previousEvidencePack.refreshedAt || reviewedAt,
+    evidenceObjects: reviewResult.evidenceObjects,
+    sourceRegistry: previousEvidencePack.sourceRegistry,
+    sources: previousEvidencePack.lineage?.sources || [],
+  })
+  const reviewSummary = buildDiscoveryEvidenceReviewSummary(reviewResult.evidenceObjects)
+  const previousCoverage = previousEvidencePack.acquisition?.coverage || previousEvidencePack.evidence?.coverage || {}
+  const nextCoverage = isPlainObject(previousCoverage)
+    ? {
+        ...previousCoverage,
+        sourceCount: sourceRegistry.length || previousCoverage.sourceCount,
+        evidenceObjectCount: reviewSummary.evidenceObjectCount,
+        acceptedEvidenceCount: reviewSummary.acceptedEvidenceCount,
+        pendingReviewCount: reviewSummary.pendingReviewCount,
+        rejectedEvidenceCount: reviewSummary.rejectedEvidenceCount,
+      }
+    : previousCoverage
+  const discoveryHealth = buildDiscoveryHealth({
+    acquisitionProfile: previousEvidencePack.acquisition?.profile || previousEvidencePack.acquisitionProfile,
+    coverage: {
+      ...nextCoverage,
+      confidence: previousEvidencePack.acquisition?.confidence || previousEvidencePack.evidence?.confidence,
+    },
+    evidenceObjects: reviewResult.evidenceObjects,
+    lastAcquisitionDate: previousEvidencePack.refreshedAt || reviewedAt,
+    sourceRegistry,
+  })
+  const nextEvidencePack = {
+    ...previousEvidencePack,
+    accepted: false,
+    needsRefresh: false,
+    sourceRegistry,
+    evidenceObjects: reviewResult.evidenceObjects,
+    discoveryHealth,
+    acquisition: isPlainObject(previousEvidencePack.acquisition)
+      ? {
+          ...previousEvidencePack.acquisition,
+          sourceRegistry,
+          coverage: nextCoverage,
+          discoveryHealth,
+        }
+      : previousEvidencePack.acquisition,
+    evidence: isPlainObject(previousEvidencePack.evidence)
+      ? {
+          ...previousEvidencePack.evidence,
+          coverage: nextCoverage,
+          reviewSummary,
+        }
+      : previousEvidencePack.evidence,
+    state: {
+      ...(previousEvidencePack.state || {}),
+      status: 'EVIDENCE_READY',
+      accepted: false,
+      needsRefresh: false,
+      lastReviewedAt: reviewedAt,
+      lastReviewedEvidenceObjectId: String(evidenceObjectId || '').trim(),
+      lastReviewStatus: reviewStatus,
     },
   }
 
@@ -2147,6 +2618,36 @@ export const getRuntimeDiscoveryEvidence = async ({
   const acquisition = cloneValue(evidencePack.acquisition || {})
   const evidence = cloneValue(evidencePack.evidence || {})
   const projectionCoverage = acquisition.coverage || evidence.coverage || {}
+  const normalizedEvidenceObjects = normalizeDiscoveryEvidenceObjects({
+    acquisitionProfile: acquisition.profile || evidencePack.acquisitionProfile,
+    createdAt: evidencePack.refreshedAt,
+    evidenceObjects: evidencePack.evidenceObjects,
+    inputs: evidencePack.inputs,
+    sources: evidencePack.lineage?.sources || [],
+  })
+  const evidenceObjects = accepted
+    ? acceptPendingDiscoveryEvidenceObjects({
+        acceptedAt: evidencePack.acceptedAt || evidencePack.refreshedAt || '',
+        actorUserId: evidencePack.acceptedBy || '',
+        evidenceObjects: normalizedEvidenceObjects,
+      })
+    : normalizedEvidenceObjects
+  const sourceRegistry = buildDiscoverySourceRegistry({
+    capturedAt: evidencePack.refreshedAt,
+    evidenceObjects,
+    sourceRegistry: evidencePack.sourceRegistry || acquisition.sourceRegistry,
+    sources: evidencePack.lineage?.sources || [],
+  })
+  const discoveryHealth = evidencePack.discoveryHealth || acquisition.discoveryHealth || buildDiscoveryHealth({
+    acquisitionProfile: acquisition.profile || evidencePack.acquisitionProfile || DISCOVERY_ACQUISITION_PROFILES.STANDARD,
+    coverage: {
+      ...projectionCoverage,
+      confidence: acquisition.confidence || evidence.confidence,
+    },
+    evidenceObjects,
+    lastAcquisitionDate: evidencePack.refreshedAt || acquisition.completedAt,
+    sourceRegistry,
+  })
 
   if (accepted && isPlainObject(projectionCoverage) && Object.keys(projectionCoverage).length > 0) {
     const acceptedCoverage = buildAcceptedDiscoveryCoverage(projectionCoverage)
@@ -2172,8 +2673,37 @@ export const getRuntimeDiscoveryEvidence = async ({
       accepted,
       needsRefresh: getEvidencePackNeedsRefresh(evidencePack),
       acquisitionProfile: evidencePack.acquisition?.profile || evidencePack.acquisitionProfile || DISCOVERY_ACQUISITION_PROFILES.STANDARD,
-      acquisition,
-      lineage,
+      acquisition: {
+        profile: acquisition.profile,
+        label: acquisition.label,
+        purpose: acquisition.purpose,
+        status: acquisition.status,
+        evidenceTarget: acquisition.evidenceTarget,
+        coverage: acquisition.coverage,
+        confidence: acquisition.confidence,
+        documentAcquisition: acquisition.documentAcquisition
+          ? {
+              status: acquisition.documentAcquisition.status,
+              sourceCount: acquisition.documentAcquisition.sourceCount,
+              evidenceProduced: acquisition.documentAcquisition.evidenceProduced,
+            }
+          : undefined,
+        websiteAcquisition: acquisition.websiteAcquisition
+          ? {
+              status: acquisition.websiteAcquisition.status,
+              evidenceProduced: acquisition.websiteAcquisition.evidenceProduced,
+            }
+          : undefined,
+      },
+      evidenceObjectSummary: buildDiscoveryEvidenceReviewSummary(evidenceObjects),
+      sourceRegistrySummary: {
+        count: sourceRegistry.length,
+        sourceTypes: Array.from(new Set(sourceRegistry.map((source) => source.sourceType).filter(Boolean))),
+      },
+      lineageSummary: {
+        sourceCount: Array.isArray(lineage.sources) ? lineage.sources.length : 0,
+        builderMode: lineage.builder?.mode || '',
+      },
       inputSummary: buildEvidenceSummaryProjection(evidencePack.inputs),
       evidenceSummary: buildEvidenceSummaryProjection(evidencePack.evidence),
       summarySummary: buildEvidenceSummaryProjection(summaries),
@@ -2184,6 +2714,10 @@ export const getRuntimeDiscoveryEvidence = async ({
         discovery: evidencePack.discovery || {},
         summaries,
         evidence,
+        sourceRegistry,
+        evidenceObjects,
+        discoveryHealth,
+        lineage,
         scoped_views: scopedViews,
         revisions: Array.isArray(evidencePack.revisions) ? evidencePack.revisions : [],
       } : {}),
