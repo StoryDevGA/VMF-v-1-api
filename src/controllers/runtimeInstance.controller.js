@@ -10,6 +10,7 @@ import {
   acceptRuntimeSection as acceptRuntimeSectionRecord,
   getRuntimeDiscoveryEvidence as getRuntimeDiscoveryEvidenceRecord,
   mutateRuntimeState as mutateRuntimeStateRecord,
+  resetRuntimeDiscovery as resetRuntimeDiscoveryRecord,
   reviewRuntimeDiscoveryEvidence as reviewRuntimeDiscoveryEvidenceRecord,
   updateRuntimeDiscoveryInputs as updateRuntimeDiscoveryInputsRecord,
 } from '../services/runtimeStateMutationService.js'
@@ -181,6 +182,28 @@ export const reviewRuntimeDiscoveryEvidence = async (req, res, next) => {
       actorUserId: req.context?.userId || req.userId,
       auditRequest: req,
       evidenceObjectId: req.params.evidenceObjectId,
+      scopes: req.scopes,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+      payload: req.body,
+    })
+
+    return res.status(200).json({
+      data: discovery,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const resetRuntimeDiscovery = async (req, res, next) => {
+  try {
+    const discovery = await resetRuntimeDiscoveryRecord({
+      actorUserId: req.context?.userId || req.userId,
+      auditRequest: req,
       scopes: req.scopes,
       runtimeInstanceId: req.params.runtimeInstanceId,
       payload: req.body,

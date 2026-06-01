@@ -497,7 +497,7 @@ const applyRuntimeSectionGeneration = ({
     throw buildActionError({
       status: 409,
       code: 'CONFLICT',
-      message: 'Runtime section cannot be generated before discovery evidence or section context exists.',
+      message: 'Runtime section cannot be generated before Intelligence Hub evidence or section context exists.',
       reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_ACTION_NOT_AVAILABLE,
       details: {
         actionKey: normalizedActionKey,
@@ -566,7 +566,7 @@ const applyRuntimeSectionGeneration = ({
     throw buildActionError({
       status: 409,
       code: 'CONFLICT',
-      message: 'Runtime section cannot be regenerated before discovery evidence is accepted.',
+      message: 'Runtime section cannot be regenerated before Intelligence Hub evidence is accepted.',
       reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_ACTION_NOT_AVAILABLE,
       details: {
         actionKey: normalizedActionKey,

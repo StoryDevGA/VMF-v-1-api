@@ -494,6 +494,7 @@ export const buildDiscoveryProjection = (frameworkState = {}, { includeInputValu
     },
     evidenceObjectSummary: buildDiscoveryEvidenceReviewSummary(evidenceObjects),
     discoveryHealth: cloneProjectionValue(discoveryHealth),
+    ...(isProjectionObject(evidencePack.resetSummary) ? { resetSummary: cloneProjectionValue(evidencePack.resetSummary) } : {}),
     ...(includeInputValues ? { inputValues: cloneProjectionValue(evidencePack.inputs || {}) } : {}),
     ...(evidencePack.acceptedAt ? { acceptedAt: evidencePack.acceptedAt } : {}),
     ...(evidencePack.acceptedBy ? { acceptedBy: evidencePack.acceptedBy } : {}),
@@ -550,7 +551,7 @@ export const buildSectionGenerationEligibility = ({
     canGenerate,
     reason: canGenerate
       ? ''
-      : 'Accept discovery evidence before generating this section.',
+      : 'Accept Intelligence Hub evidence before generating this section.',
     sources,
     dependencySectionKeys,
     satisfiedDependencySectionKeys: satisfiedDependencies,
@@ -1940,6 +1941,48 @@ const buildRuntimeDataProjection = ({ includeDebugProjection, sections }) => ({
 
 const normalizeActivityText = (value) => String(value || '').trim()
 
+const getActivitySummaryCount = (summary = {}, key) => {
+  const count = Number(summary?.[key])
+  return Number.isFinite(count) && count > 0 ? count : 0
+}
+
+const buildSafeDiscoveryResetEvidenceSummary = (summary = {}) => {
+  if (!isProjectionObject(summary)) return {}
+
+  return {
+    accepted: Boolean(summary.accepted),
+    stateStatus: normalizeActivityText(summary.stateStatus),
+    inputCount: getActivitySummaryCount(summary, 'inputCount'),
+    sourceCount: getActivitySummaryCount(summary, 'sourceCount'),
+    sourceRegistryCount: getActivitySummaryCount(summary, 'sourceRegistryCount'),
+    evidenceObjectCount: getActivitySummaryCount(summary, 'evidenceObjectCount'),
+    scopedViewCount: getActivitySummaryCount(summary, 'scopedViewCount'),
+    acceptedAt: normalizeActivityText(summary.acceptedAt),
+    acquisitionProfile: normalizeActivityText(summary.acquisitionProfile),
+  }
+}
+
+const buildDiscoveryResetActivityPayload = (entry = {}) => {
+  const diff = isProjectionObject(entry.diff) ? entry.diff : {}
+  if (normalizeToken(diff.reason) !== 'DISCOVERY_RESET') return null
+
+  const clearedSectionTruthCount = Number.isFinite(Number(diff.clearedSectionTruthCount))
+    ? Number(diff.clearedSectionTruthCount)
+    : Array.isArray(diff.clearedSectionTruths)
+      ? diff.clearedSectionTruths.length
+      : 0
+
+  return {
+    reason: 'DISCOVERY_RESET',
+    resetReason: normalizeActivityText(diff.resetReason),
+    resetAt: normalizeActivityText(diff.resetAt),
+    resetByLabel: normalizeActivityText(entry.display?.actorLabel),
+    previousEvidenceSummary: buildSafeDiscoveryResetEvidenceSummary(diff.previousEvidenceSummary),
+    nextEvidenceSummary: buildSafeDiscoveryResetEvidenceSummary(diff.nextEvidenceSummary),
+    clearedSectionTruthCount,
+  }
+}
+
 const sanitizeRuntimeActivitySummary = (value, entry = {}) => {
   const summary = normalizeActivityText(value)
   if (!summary) return ''
@@ -1978,10 +2021,13 @@ const buildRuntimeActivityEvent = (entry = {}) => {
     ? occurredAtDate.toISOString()
     : null
   const action = normalizeToken(entry.action)
+  const discoveryReset = buildDiscoveryResetActivityPayload(entry)
   const actionSummary = action === 'RUNTIME_ACTION_EXECUTED'
     ? buildRuntimeActionActivitySummary(entry)
     : ''
-  const summary = sanitizeRuntimeActivitySummary(entry.display?.title, entry)
+  const summary = discoveryReset
+    ? 'cleared Intelligence Hub evidence and section truth'
+    : sanitizeRuntimeActivitySummary(entry.display?.title, entry)
     || actionSummary
     || sanitizeRuntimeActivitySummary(entry.summary, entry)
     || RUNTIME_ACTIVITY_SUMMARY_BY_ACTION[action]
@@ -1995,6 +2041,7 @@ const buildRuntimeActivityEvent = (entry = {}) => {
     ...(summary ? { summary } : {}),
     ...(occurredAt ? { occurredAt } : {}),
     ...(entry.display?.actorLabel ? { actorLabel: normalizeActivityText(entry.display.actorLabel) } : {}),
+    ...(discoveryReset ? { activityType: 'DISCOVERY_RESET', reset: discoveryReset } : {}),
   }
 }
 

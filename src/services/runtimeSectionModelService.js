@@ -1,6 +1,7 @@
 import crypto from 'node:crypto'
 import {
   DISCOVERY_EVIDENCE_REVIEW_STATUSES,
+  isGovernedDiscoveryEvidenceFact,
   normalizeDiscoveryEvidenceObjects,
 } from './discoveryIntelligenceService.js'
 
@@ -259,6 +260,14 @@ const extractAcceptedFactValue = (evidenceObjects = [], prefix) => {
   return normalizeEvidenceString(evidenceObject.extractedFact).slice(prefix.length).replace(/^:\s*/, '').trim()
 }
 
+const extractAcceptedFactValueByPrefix = (evidenceObjects = [], prefixes = []) => {
+  for (const prefix of prefixes) {
+    const value = extractAcceptedFactValue(evidenceObjects, prefix)
+    if (value) return value
+  }
+  return ''
+}
+
 const getDiscoverySeedProfile = (evidencePack = {}) => {
   const acceptedEvidenceObjects = getAcceptedDiscoveryEvidenceObjects(evidencePack)
   if (acceptedEvidenceObjects.length > 0) {
@@ -267,7 +276,10 @@ const getDiscoverySeedProfile = (evidencePack = {}) => {
       companyName: extractAcceptedFactValue(acceptedEvidenceObjects, 'Company name'),
       marketRegion: extractAcceptedFactValue(acceptedEvidenceObjects, 'Market or region'),
       targetOffer: extractAcceptedFactValue(acceptedEvidenceObjects, 'Target offer'),
-      notes: extractAcceptedFactValue(acceptedEvidenceObjects, 'Discovery note'),
+      notes: extractAcceptedFactValueByPrefix(acceptedEvidenceObjects, [
+        'Intelligence Hub note',
+        'Discovery note',
+      ]),
       acceptedEvidenceText: acceptedEvidenceObjects
         .map((evidenceObject) => normalizeEvidenceString(evidenceObject.extractedFact))
         .filter(Boolean)
@@ -304,6 +316,12 @@ const getScopedEvidenceView = ({ evidencePack, runtimePath, sectionKey }) => {
   }
 
   return null
+}
+
+const normalizeScopedEvidenceSummary = (value) => {
+  const summary = normalizeEvidenceString(value)
+  if (!summary) return ''
+  return isGovernedDiscoveryEvidenceFact(summary) ? summary : ''
 }
 
 const getAcceptedDependencyTruths = ({ dependencySectionKeys = [], frameworkPackage, frameworkState }) => {
@@ -455,7 +473,7 @@ const extractEvidenceThemes = ({
     pushUniqueTheme(themes, buildTheme({
       key: 'market_region',
       label: 'Market and regional context',
-      description: `The accepted discovery context identifies ${marketRegion} as the current market or regional frame.`,
+      description: `The accepted Intelligence Hub context identifies ${marketRegion} as the current market or regional frame.`,
       source: 'DISCOVERY_EVIDENCE',
       supportLevel: 'DIRECT',
       confidence: 'HIGH',
@@ -526,7 +544,7 @@ const buildSupportingEvidence = ({
   }
   if (notes) {
     items.push({
-      label: 'Discovery notes',
+      label: 'Intelligence Hub notes',
       summary: notes,
       sourceType: 'DISCOVERY',
       refKey: 'input_notes',
@@ -642,7 +660,7 @@ const buildSourceRefs = ({ acceptedEvidenceObjects = [], scopedView, seedProfile
   })
   addRef({
     refKey: 'input_notes',
-    label: 'Discovery notes',
+    label: 'Intelligence Hub notes',
     type: 'DISCOVERY_FIELD',
     safeDisplay: normalizeEvidenceString(seedProfile.notes),
   })
@@ -652,9 +670,9 @@ const buildSourceRefs = ({ acceptedEvidenceObjects = [], scopedView, seedProfile
       if (!refs.some((ref) => ref.refKey === refKey)) {
         refs.push({
           refKey,
-          label: 'Scoped discovery source',
+          label: 'Scoped Intelligence Hub source',
           type: 'DISCOVERY_FIELD',
-          safeDisplay: 'Accepted Discovery evidence',
+          safeDisplay: 'Accepted Intelligence Hub evidence',
         })
       }
     })
@@ -667,7 +685,7 @@ const buildGeneratedSections = ({ category, inputSummary, label, themes, boundar
   const rule = SECTION_CATEGORY_RULES[category] || SECTION_CATEGORY_RULES.GENERIC
   const themeBullets = themes.slice(0, 5).map((theme) => `${theme.label}: ${theme.description}`)
   const boundaryBullets = boundaries.slice(0, 5).map((boundary) => boundary.message)
-  const evidenceLead = `Based on accepted Discovery evidence${inputSummary ? ' and customer-added section context' : ''}, ${label} can safely focus on the themes below.`
+  const evidenceLead = `Based on accepted Intelligence Hub evidence${inputSummary ? ' and customer-added section context' : ''}, ${label} can safely focus on the themes below.`
 
   return [
     {
@@ -684,7 +702,7 @@ const buildGeneratedSections = ({ category, inputSummary, label, themes, boundar
     },
     {
       heading: 'Evidence Boundaries',
-      body: 'The system did not assume proof that has not been accepted into Discovery or section truth.',
+      body: 'The system did not assume proof that has not been accepted into Intelligence Hub or section truth.',
       bullets: boundaryBullets,
     },
   ]
@@ -706,7 +724,7 @@ const getTruthEligibility = ({ businessContextAvailable, discoveryAccepted, them
       status: 'INSUFFICIENT_EVIDENCE',
       messages: [{
         severity: 'ERROR',
-        message: 'Accepted Discovery evidence is required before this section can be generated safely.',
+        message: 'Accepted Intelligence Hub evidence is required before this section can be generated safely.',
       }],
     }
   }
@@ -717,7 +735,7 @@ const getTruthEligibility = ({ businessContextAvailable, discoveryAccepted, them
       status: 'INSUFFICIENT_EVIDENCE',
       messages: [{
         severity: 'WARNING',
-        message: 'This section needs more accepted Discovery evidence, accepted upstream truth, or customer context before it can be accepted as truth.',
+        message: 'This section needs more accepted Intelligence Hub evidence, accepted upstream truth, or customer context before it can be accepted as truth.',
       }],
     }
   }
@@ -749,7 +767,7 @@ const buildSectionIntelligenceParts = ({
   const acceptedEvidenceObjects = getAcceptedDiscoveryEvidenceObjects(evidencePack)
   const seedProfile = getDiscoverySeedProfile(evidencePack)
   const scopedView = getScopedEvidenceView({ evidencePack, runtimePath, sectionKey })
-  const scopedEvidenceSummary = normalizeEvidenceString(scopedView?.summary)
+  const scopedEvidenceSummary = normalizeScopedEvidenceSummary(scopedView?.summary)
   const inputSummary = normalizeEvidenceString(input)
   const dependencyTruths = getAcceptedDependencyTruths({
     dependencySectionKeys,
@@ -854,7 +872,7 @@ const buildIntelligenceFromParts = ({
   const generatedSummary = normalizeEvidenceString(generated?.summary)
   const evidenceThemeBullets = parts.themes.map((theme) => theme.label)
   const confidenceSignals = [
-    parts.discoveryAccepted ? 'Discovery evidence is accepted.' : 'Discovery evidence has not been accepted.',
+    parts.discoveryAccepted ? 'Intelligence Hub evidence is accepted.' : 'Intelligence Hub evidence has not been accepted.',
     parts.inputSummary ? 'Customer-added section context is available.' : 'No customer-added section context has been provided.',
     parts.dependencyTruths.length > 0
       ? 'Accepted upstream truth is available.'
@@ -867,8 +885,8 @@ const buildIntelligenceFromParts = ({
   return {
     sourceProjection: {
       summary: parts.themes.length > 0
-        ? 'Accepted Discovery evidence has been interpreted into section-relevant evidence themes.'
-        : 'Accepted Discovery evidence is not yet sufficient to project section themes.',
+        ? 'Accepted Intelligence Hub evidence has been interpreted into section-relevant evidence themes.'
+        : 'Accepted Intelligence Hub evidence is not yet sufficient to project section themes.',
       themes: parts.themes,
       generatedAt: parts.generatedAt,
       projectionHash: parts.evidenceHash,
@@ -905,8 +923,8 @@ const buildIntelligenceFromParts = ({
           : 'This section needs more accepted evidence before themes can be projected safely.',
         bullets: evidenceThemeBullets,
         evidenceScope: parts.discoveryAccepted
-          ? 'Derived from accepted Discovery evidence and current section dependencies.'
-          : 'Discovery evidence is not yet accepted.',
+          ? 'Derived from accepted Intelligence Hub evidence and current section dependencies.'
+          : 'Intelligence Hub evidence is not yet accepted.',
       },
       generatedInsight: generated
         ? {
@@ -1003,7 +1021,7 @@ export const buildEnrichedGeneratedSection = ({
         heading: 'Insufficient Evidence',
         body: 'Evidence not sufficient to derive this section safely.',
         bullets: [
-          'Add more accepted Discovery evidence, accepted upstream truth, or customer context.',
+          'Add more accepted Intelligence Hub evidence, accepted upstream truth, or customer context.',
           ...parts.generationBoundaries.slice(0, 4).map((boundary) => boundary.message),
         ],
       }]

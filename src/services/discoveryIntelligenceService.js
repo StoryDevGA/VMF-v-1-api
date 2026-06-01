@@ -68,15 +68,15 @@ const INPUT_EVIDENCE_MAP = Object.freeze({
   notes: {
     category: DISCOVERY_EVIDENCE_CATEGORIES.VALUE_DRIVERS,
     coverageArea: 'Decision Context',
-    label: 'Discovery Notes',
+    label: 'Intelligence Hub Notes',
     sourceType: 'DISCOVERY_NOTES',
-    factPrefix: 'Discovery note',
+    factPrefix: 'Intelligence Hub note',
   },
 })
 
 const WEBSITE_ACQUISITION_LIMITS = Object.freeze({
   timeoutMs: 6000,
-  maxContentCharacters: 160000,
+  maxContentCharacters: 320000,
   maxEvidenceObjects: 20,
   maxCandidateSegments: 80,
   maxRedirects: 3,
@@ -185,6 +185,42 @@ const normalizeReviewStatus = (value) => {
 
 const sanitizeFact = (value) => String(value ?? '').trim().replace(/\s+/g, ' ')
 
+const STYLE_OR_CODE_FRAGMENT_PATTERNS = Object.freeze([
+  /stylablebutton/i,
+  /\b(?:width|height|min-width|min-height|padding|margin|display|cursor|border|box-sizing|background-color|box-shadow|pointer-events|touch-action|transition|transform|animation|opacity|z-index|font-size|line-height|position|overflow)\s*:/i,
+  /:[a-z-]+(?:\([^)]*\))?(?::[a-z-]+(?:\([^)]*\))?)*\{/i,
+  /\bcubic-bezier\s*\(/i,
+  /\bvar\(--/i,
+  /--[a-z0-9-]+/i,
+  /__[a-z0-9-]+/i,
+  /[{}][^.!?]*;/,
+])
+
+const countNaturalLanguageTokens = (value) =>
+  (String(value || '').match(/\b[A-Za-z][A-Za-z'-]{1,}\b/g) || []).length
+
+const countWhitespaceSeparatedWords = (value) =>
+  String(value || '').split(/\s+/).filter((token) => /[A-Za-z]{2,}/.test(token)).length
+
+export const isGovernedDiscoveryEvidenceFact = (value) => {
+  const fact = sanitizeFact(value)
+  if (!fact) return false
+
+  const text = fact
+    .replace(/^(?:Website|Document)\s+(?:title|description|heading|body|Customer Document|Customer Notes|Proposal|Annual Report|Strategy Deck|Competitor Analysis|Product Brochure|Implementation Documentation|Reference Material):\s*/i, '')
+    .trim()
+  if (!text) return false
+
+  if (STYLE_OR_CODE_FRAGMENT_PATTERNS.some((pattern) => pattern.test(text))) return false
+
+  const symbolCount = (text.match(/[{}[\];=<>]/g) || []).length
+  if (symbolCount >= 3 && symbolCount / Math.max(text.length, 1) > 0.04) return false
+
+  const naturalLanguageTokens = countNaturalLanguageTokens(text)
+  const whitespaceWords = countWhitespaceSeparatedWords(text)
+  return naturalLanguageTokens >= 3 && whitespaceWords >= 3
+}
+
 const normalizeDocumentAssetType = (value) => {
   const normalized = String(value || '').trim().toUpperCase().replace(/[\s-]+/g, '_')
   return Object.values(DOCUMENT_ASSET_TYPES).includes(normalized)
@@ -254,33 +290,51 @@ const stripHtmlToText = (value) => decodeHtmlEntities(String(value ?? '')
   .replace(/<[^>]+>/g, ' '))
 
 const normalizeWebsiteHostname = (hostname) =>
-  String(hostname || '').trim().toLowerCase().replace(/^www\./, '')
+  String(hostname || '').trim().toLowerCase().replace(/^\[(.*)\]$/, '$1').replace(/^www\./, '')
 
-const isPrivateIpv4 = (hostname) => {
+const normalizeWebsiteHostForNetworkCheck = (hostname) =>
+  String(hostname || '').trim().toLowerCase().replace(/^\[(.*)\]$/, '$1')
+
+const isBlockedIpv4 = (hostname) => {
   const parts = String(hostname || '').split('.').map((part) => Number(part))
-  if (parts.length !== 4 || parts.some((part) => Number.isNaN(part))) return false
-  const [a, b] = parts
-  return a === 10
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false
+
+  const [a, b, c] = parts
+  return a === 0
+    || a === 10
+    || (a === 100 && b >= 64 && b <= 127)
     || a === 127
     || (a === 169 && b === 254)
     || (a === 172 && b >= 16 && b <= 31)
-    || (a === 192 && b === 168)
+    || (a === 192 && (b === 0 || b === 168))
+    || (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100)))
+    || (a === 203 && b === 0 && c === 113)
+    || a >= 224
+}
+
+const isBlockedIpv6 = (hostname) => {
+  const normalizedHostname = normalizeWebsiteHostForNetworkCheck(hostname)
+  return normalizedHostname === '::'
+    || normalizedHostname === '::1'
+    || normalizedHostname.startsWith('::ffff:')
+    || normalizedHostname.startsWith('64:ff9b:')
+    || normalizedHostname.startsWith('100:')
+    || normalizedHostname.startsWith('2001:db8:')
+    || normalizedHostname.startsWith('2002:')
+    || normalizedHostname.startsWith('fc')
+    || normalizedHostname.startsWith('fd')
+    || /^fe[89ab]/i.test(normalizedHostname)
+    || normalizedHostname.startsWith('ff')
 }
 
 const isBlockedWebsiteHost = (hostname) => {
-  const normalizedHostname = String(hostname || '').trim().toLowerCase()
+  const normalizedHostname = normalizeWebsiteHostForNetworkCheck(hostname)
   if (!normalizedHostname) return true
   if (normalizedHostname === 'localhost' || normalizedHostname.endsWith('.localhost')) return true
-  if (normalizedHostname === '0.0.0.0') return true
 
   const ipType = isIP(normalizedHostname)
-  if (ipType === 4) return isPrivateIpv4(normalizedHostname)
-  if (ipType === 6) {
-    return normalizedHostname === '::1'
-      || normalizedHostname.startsWith('fc')
-      || normalizedHostname.startsWith('fd')
-      || normalizedHostname.startsWith('fe80')
-  }
+  if (ipType === 4) return isBlockedIpv4(normalizedHostname)
+  if (ipType === 6) return isBlockedIpv6(normalizedHostname)
 
   return false
 }
@@ -291,7 +345,7 @@ const getWebsiteDnsLookup = () =>
     : lookup)
 
 const assertWebsiteResolvesPublicly = async (hostname) => {
-  const normalizedHostname = String(hostname || '').trim().toLowerCase()
+  const normalizedHostname = normalizeWebsiteHostForNetworkCheck(hostname)
   if (isBlockedWebsiteHost(normalizedHostname)) {
     throw new Error('Website acquisition target must remain a publicly accessible domain.')
   }
@@ -313,29 +367,40 @@ const assertWebsiteResolvesPublicly = async (hostname) => {
   }
 }
 
-export const normalizeDiscoveryWebsiteUrl = (value) => {
+export const normalizeDiscoveryWebsiteUrl = (
+  value,
+  { fieldLabel = 'Company website', requireHttps = false } = {},
+) => {
   const rawUrl = String(value ?? '').trim()
   if (!rawUrl) {
-    throw new Error('Company website is required for Enhanced Acquisition.')
+    throw new Error(`${fieldLabel} is required for acquisition.`)
+  }
+
+  if (requireHttps && !/^https:\/\//i.test(rawUrl)) {
+    throw new Error('Enter the full URL including https://')
   }
 
   let parsedUrl
   try {
     parsedUrl = new URL(rawUrl)
   } catch {
-    throw new Error('Company website must be a valid http or https URL.')
+    throw new Error(`${fieldLabel} must be a valid ${requireHttps ? 'https' : 'http or https'} URL.`)
   }
 
-  if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
-    throw new Error('Company website must use http or https.')
+  if (requireHttps && parsedUrl.protocol !== 'https:') {
+    throw new Error('Enter the full URL including https://')
+  }
+
+  if (!requireHttps && !['http:', 'https:'].includes(parsedUrl.protocol)) {
+    throw new Error(`${fieldLabel} must use http or https.`)
   }
 
   if (parsedUrl.username || parsedUrl.password) {
-    throw new Error('Company website must not include credentials.')
+    throw new Error(`${fieldLabel} must not include credentials.`)
   }
 
   if (isBlockedWebsiteHost(parsedUrl.hostname)) {
-    throw new Error('Company website must be a publicly accessible domain.')
+    throw new Error(`${fieldLabel} must be a publicly accessible domain.`)
   }
 
   parsedUrl.hash = ''
@@ -356,16 +421,23 @@ const assertWebsiteDomainBoundary = ({ requestedUrl, finalUrl }) => {
 const readWebsiteResponseText = async (response, { signal } = {}) => {
   const maxCharacters = WEBSITE_ACQUISITION_LIMITS.maxContentCharacters
   if (!response?.body?.getReader) {
-    const text = String(await response.text())
-    if (text.length > maxCharacters) {
-      throw new Error('Website acquisition response exceeded the supported content size.')
+    const contentLength = Number(response?.headers?.get?.('content-length'))
+    if (!Number.isFinite(contentLength) || contentLength > maxCharacters) {
+      throw new Error('Website acquisition response exceeds the supported size limit.')
     }
-    return text
+    const text = String(await response.text())
+    return {
+      text: text.slice(0, maxCharacters),
+      truncated: text.length > maxCharacters,
+      characterLimit: maxCharacters,
+      charactersRead: Math.min(text.length, maxCharacters),
+    }
   }
 
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let text = ''
+  let truncated = false
 
   try {
     while (true) {
@@ -374,16 +446,37 @@ const readWebsiteResponseText = async (response, { signal } = {}) => {
       }
       const { done, value } = await reader.read()
       if (done) break
-      text += decoder.decode(value, { stream: true })
-      if (text.length > maxCharacters) {
-        throw new Error('Website acquisition response exceeded the supported content size.')
+      const decodedChunk = decoder.decode(value, { stream: true })
+      const remainingCharacters = maxCharacters - text.length
+      if (decodedChunk.length > remainingCharacters) {
+        text += decodedChunk.slice(0, Math.max(0, remainingCharacters))
+        truncated = true
+        await reader.cancel?.()
+        break
+      }
+      text += decodedChunk
+      if (text.length >= maxCharacters) {
+        truncated = true
+        await reader.cancel?.()
+        break
       }
     }
-    text += decoder.decode()
-    if (text.length > maxCharacters) {
-      throw new Error('Website acquisition response exceeded the supported content size.')
+    if (!truncated) {
+      const finalChunk = decoder.decode()
+      const remainingCharacters = maxCharacters - text.length
+      if (finalChunk.length > remainingCharacters) {
+        text += finalChunk.slice(0, Math.max(0, remainingCharacters))
+        truncated = true
+      } else {
+        text += finalChunk
+      }
     }
-    return text
+    return {
+      text,
+      truncated,
+      characterLimit: maxCharacters,
+      charactersRead: text.length,
+    }
   } finally {
     reader.releaseLock?.()
   }
@@ -452,6 +545,7 @@ const extractHtmlSegments = (html) => {
     .split(/[.!?\n\r]+/)
     .map(sanitizeFact)
     .filter((segment) => segment.length >= 24 && segment.length <= 260)
+    .filter(isGovernedDiscoveryEvidenceFact)
 
   const segments = [
     title ? { kind: 'title', text: title } : null,
@@ -459,6 +553,7 @@ const extractHtmlSegments = (html) => {
     ...headingMatches.map((text) => ({ kind: 'heading', text })),
     ...bodySegments.slice(0, WEBSITE_ACQUISITION_LIMITS.maxCandidateSegments).map((text) => ({ kind: 'body', text })),
   ].filter(Boolean)
+    .filter((segment) => isGovernedDiscoveryEvidenceFact(segment.text))
 
   const seen = new Set()
   return segments.filter((segment) => {
@@ -599,7 +694,73 @@ const extractPdfText = (buffer) => {
   return sanitizeFact([...extractedParts, printableFallback].filter(Boolean).join(' '))
 }
 
+const inflateZipEntryData = ({ compressedData, compressionMethod }) => {
+  if (compressionMethod === 0) return compressedData
+  if (compressionMethod === 8) {
+    try {
+      return zlib.inflateRawSync(compressedData)
+    } catch {
+      return Buffer.alloc(0)
+    }
+  }
+  return Buffer.alloc(0)
+}
+
+const readZipEntriesFromCentralDirectory = (buffer) => {
+  const entries = []
+  let offset = 0
+
+  while (offset + 46 < buffer.length) {
+    const signature = buffer.readUInt32LE(offset)
+    if (signature !== 0x02014b50) {
+      offset += 1
+      continue
+    }
+
+    const compressionMethod = buffer.readUInt16LE(offset + 10)
+    const compressedSize = buffer.readUInt32LE(offset + 20)
+    const fileNameLength = buffer.readUInt16LE(offset + 28)
+    const extraLength = buffer.readUInt16LE(offset + 30)
+    const commentLength = buffer.readUInt16LE(offset + 32)
+    const localHeaderOffset = buffer.readUInt32LE(offset + 42)
+    const fileNameStart = offset + 46
+    const fileNameEnd = fileNameStart + fileNameLength
+    const nextOffset = fileNameEnd + extraLength + commentLength
+
+    if (
+      fileNameEnd > buffer.length
+      || nextOffset > buffer.length
+      || compressedSize === 0
+      || localHeaderOffset + 30 > buffer.length
+      || buffer.readUInt32LE(localHeaderOffset) !== 0x04034b50
+    ) {
+      offset = Math.max(offset + 4, nextOffset)
+      continue
+    }
+
+    const localFileNameLength = buffer.readUInt16LE(localHeaderOffset + 26)
+    const localExtraLength = buffer.readUInt16LE(localHeaderOffset + 28)
+    const dataStart = localHeaderOffset + 30 + localFileNameLength + localExtraLength
+    const dataEnd = dataStart + compressedSize
+    if (dataEnd > buffer.length) {
+      offset = Math.max(offset + 4, nextOffset)
+      continue
+    }
+
+    const fileName = buffer.slice(fileNameStart, fileNameEnd).toString('utf8')
+    const compressedData = buffer.slice(dataStart, dataEnd)
+    const data = inflateZipEntryData({ compressedData, compressionMethod })
+    entries.push({ fileName, data })
+    offset = nextOffset
+  }
+
+  return entries
+}
+
 const readZipEntries = (buffer) => {
+  const centralDirectoryEntries = readZipEntriesFromCentralDirectory(buffer)
+  if (centralDirectoryEntries.length > 0) return centralDirectoryEntries
+
   const entries = []
   let offset = 0
 
@@ -625,17 +786,7 @@ const readZipEntries = (buffer) => {
 
     const fileName = buffer.slice(fileNameStart, fileNameEnd).toString('utf8')
     const compressedData = buffer.slice(dataStart, dataEnd)
-    let data = Buffer.alloc(0)
-
-    if (compressionMethod === 0) {
-      data = compressedData
-    } else if (compressionMethod === 8) {
-      try {
-        data = zlib.inflateRawSync(compressedData)
-      } catch {
-        data = Buffer.alloc(0)
-      }
-    }
+    const data = inflateZipEntryData({ compressedData, compressionMethod })
 
     entries.push({ fileName, data })
     offset = dataEnd
@@ -789,7 +940,12 @@ export const acquireWebsiteDiscoveryEvidence = async ({
     throw new Error('Website acquisition only supports HTML or plain text pages in this sprint.')
   }
 
-  const html = await readWebsiteResponseText(response, { signal: controller.signal })
+  const {
+    characterLimit,
+    charactersRead,
+    text: html,
+    truncated: contentTruncated,
+  } = await readWebsiteResponseText(response, { signal: controller.signal })
   const segments = extractHtmlSegments(html)
   if (segments.length === 0) {
     throw new Error('Website acquisition did not find extractable customer website text.')
@@ -812,7 +968,7 @@ export const acquireWebsiteDiscoveryEvidence = async ({
     sourceId,
     type: 'WEBSITE_ACQUISITION',
     sourceType: 'WEBSITE',
-    label: 'Website Acquisition',
+    label: 'Website Source',
     url: normalizedUrl,
     finalUrl,
     valueHash: `sha256:${hashValue({ html })}`,
@@ -823,12 +979,15 @@ export const acquireWebsiteDiscoveryEvidence = async ({
     lineageRef: `lineage:${sourceId}`,
     adapter: 'website-html-fetch-v1',
     pageCount: 1,
+    contentTruncated,
+    contentCharactersRead: charactersRead,
+    contentCharacterLimit: characterLimit,
   }
 
   const sourceRegistryEntry = {
     sourceId,
     sourceType: 'WEBSITE',
-    label: 'Website Acquisition',
+    label: 'Website Source',
     status: 'AVAILABLE',
     dateAdded: acquiredAt,
     acquisitionStatus: 'ACQUIRED',
@@ -838,6 +997,9 @@ export const acquireWebsiteDiscoveryEvidence = async ({
     acquisitionProfile,
     url: normalizedUrl,
     finalUrl,
+    contentTruncated,
+    contentCharactersRead: charactersRead,
+    contentCharacterLimit: characterLimit,
   }
 
   return {
@@ -917,6 +1079,7 @@ export const ingestUploadedDocumentDiscoveryEvidence = ({
     const label = `${formatDocumentAssetLabel(assetType)}: ${fileName}`
     const source = {
       sourceId,
+      documentId: sourceId,
       type: 'UPLOADED_DOCUMENT',
       sourceType: 'UPLOADED_DOCUMENT',
       label,
@@ -927,22 +1090,34 @@ export const ingestUploadedDocumentDiscoveryEvidence = ({
       sizeBytes: buffer.length,
       valueHash: documentHash,
       documentHash,
+      documentStatus: 'PROCESSED',
+      ingestionMode: 'TEXT_NATIVE',
+      uploadedAt: capturedAt,
       status: 'ACQUIRED',
       capturedAt,
       acquisitionStatus: 'ACQUIRED',
       acquisitionProfile,
       evidenceProduced: evidenceObjects.length,
+      evidenceObjectsGenerated: evidenceObjects.length,
+      acceptedEvidenceObjects: 0,
+      rejectedEvidenceObjects: 0,
+      pendingEvidenceObjects: evidenceObjects.length,
       lineageRef: `lineage:${sourceId}`,
       adapter: `document-${documentType.toLowerCase()}-text-extraction-v1`,
     }
     const sourceRegistryEntry = {
       sourceId,
+      documentId: sourceId,
       sourceType: 'UPLOADED_DOCUMENT',
       label,
       status: 'AVAILABLE',
       dateAdded: capturedAt,
       acquisitionStatus: 'ACQUIRED',
       evidenceProduced: evidenceObjects.length,
+      evidenceObjectsGenerated: evidenceObjects.length,
+      acceptedEvidenceObjects: 0,
+      rejectedEvidenceObjects: 0,
+      pendingEvidenceObjects: evidenceObjects.length,
       lastAcquisitionAt: capturedAt,
       lineageRef: `lineage:${sourceId}`,
       acquisitionProfile,
@@ -952,6 +1127,9 @@ export const ingestUploadedDocumentDiscoveryEvidence = ({
       assetType,
       sizeBytes: buffer.length,
       documentHash,
+      documentStatus: 'PROCESSED',
+      ingestionMode: 'TEXT_NATIVE',
+      uploadedAt: capturedAt,
     }
 
     return {
@@ -1001,6 +1179,25 @@ const buildSourceRegistryEntryFromLineage = ({
     ...(source.assetType ? { assetType: source.assetType } : {}),
     ...(Number.isFinite(Number(source.sizeBytes)) ? { sizeBytes: Number(source.sizeBytes) } : {}),
     ...(source.documentHash ? { documentHash: source.documentHash } : {}),
+    ...(source.documentId ? { documentId: source.documentId } : {}),
+    ...(source.documentStatus ? { documentStatus: source.documentStatus } : {}),
+    ...(source.ingestionMode ? { ingestionMode: source.ingestionMode } : {}),
+    ...(source.uploadedAt ? { uploadedAt: source.uploadedAt } : {}),
+    ...(source.uploadedBy ? { uploadedBy: source.uploadedBy } : {}),
+    ...(source.failureReason ? { failureReason: source.failureReason } : {}),
+    ...(source.failureReasonCode ? { failureReasonCode: source.failureReasonCode } : {}),
+    ...(Number.isFinite(Number(source.evidenceObjectsGenerated))
+      ? { evidenceObjectsGenerated: Number(source.evidenceObjectsGenerated) }
+      : {}),
+    ...(Number.isFinite(Number(source.acceptedEvidenceObjects))
+      ? { acceptedEvidenceObjects: Number(source.acceptedEvidenceObjects) }
+      : {}),
+    ...(Number.isFinite(Number(source.rejectedEvidenceObjects))
+      ? { rejectedEvidenceObjects: Number(source.rejectedEvidenceObjects) }
+      : {}),
+    ...(Number.isFinite(Number(source.pendingEvidenceObjects))
+      ? { pendingEvidenceObjects: Number(source.pendingEvidenceObjects) }
+      : {}),
   }
 }
 
@@ -1075,6 +1272,13 @@ export const normalizeDiscoveryEvidenceObjects = ({
       if (!evidenceObjectId || !sourceId || !extractedFact) return null
 
       const reviewStatus = normalizeReviewStatus(evidenceObject.reviewStatus)
+      const acquisitionMethod = evidenceObject.acquisitionMethod || 'CUSTOMER_PROVIDED_INPUT'
+      if (
+        acquisitionMethod === 'WEBSITE_ACQUISITION'
+        && !isGovernedDiscoveryEvidenceFact(extractedFact)
+      ) {
+        return null
+      }
 
       return {
         evidenceObjectId,
@@ -1091,7 +1295,7 @@ export const normalizeDiscoveryEvidenceObjects = ({
             },
         createdAt: evidenceObject.createdAt || createdAt || '',
         reviewStatus,
-        acquisitionMethod: evidenceObject.acquisitionMethod || 'CUSTOMER_PROVIDED_INPUT',
+        acquisitionMethod,
         extractionTimestamp: evidenceObject.extractionTimestamp || evidenceObject.createdAt || createdAt || '',
         acceptedBy: reviewStatus === DISCOVERY_EVIDENCE_REVIEW_STATUSES.ACCEPTED
           ? toIdString(evidenceObject.acceptedBy)
@@ -1157,27 +1361,50 @@ export const buildDiscoverySourceRegistry = ({
         }))
         .filter(Boolean)
 
-  return registry.map((source) => ({
-    sourceId: String(source?.sourceId || '').trim(),
-    sourceType: String(source?.sourceType || source?.type || 'DISCOVERY_NOTES').trim(),
-    label: String(source?.label || source?.sourceId || '').trim(),
-    status: String(source?.status || 'AVAILABLE').trim().toUpperCase(),
-    dateAdded: String(source?.dateAdded || source?.capturedAt || capturedAt || '').trim(),
-    acquisitionStatus: String(source?.acquisitionStatus || 'CAPTURED').trim().toUpperCase(),
-    evidenceProduced: Number(source?.evidenceProduced || 0),
-    lastAcquisitionAt: String(source?.lastAcquisitionAt || source?.dateAdded || capturedAt || '').trim(),
-    lineageRef: String(source?.lineageRef || `lineage:${source?.sourceId || ''}`).trim(),
-    acquisitionProfile: String(source?.acquisitionProfile || '').trim(),
-    ...(source?.fieldKey ? { fieldKey: String(source.fieldKey).trim() } : {}),
-    ...(source?.url ? { url: String(source.url).trim() } : {}),
-    ...(source?.finalUrl ? { finalUrl: String(source.finalUrl).trim() } : {}),
-    ...(source?.fileName ? { fileName: String(source.fileName).trim() } : {}),
-    ...(source?.mimeType ? { mimeType: String(source.mimeType).trim() } : {}),
-    ...(source?.documentType ? { documentType: String(source.documentType).trim() } : {}),
-    ...(source?.assetType ? { assetType: String(source.assetType).trim() } : {}),
-    ...(Number.isFinite(Number(source?.sizeBytes)) ? { sizeBytes: Number(source.sizeBytes) } : {}),
-    ...(source?.documentHash ? { documentHash: String(source.documentHash).trim() } : {}),
-  })).filter((source) => source.sourceId)
+  return registry.map((source) => {
+    const sourceId = String(source?.sourceId || '').trim()
+    const sourceEvidenceObjects = evidenceObjects.filter((evidenceObject) =>
+      evidenceObject?.sourceId === sourceId,
+    )
+    const reviewSummary = buildDiscoveryEvidenceReviewSummary(sourceEvidenceObjects)
+    const evidenceProduced = Number(source?.evidenceProduced || sourceEvidenceObjects.length || 0)
+
+    return {
+      sourceId,
+      sourceType: String(source?.sourceType || source?.type || 'DISCOVERY_NOTES').trim(),
+      label: String(source?.label || sourceId || '').trim(),
+      status: String(source?.status || 'AVAILABLE').trim().toUpperCase(),
+      dateAdded: String(source?.dateAdded || source?.capturedAt || capturedAt || '').trim(),
+      acquisitionStatus: String(source?.acquisitionStatus || 'CAPTURED').trim().toUpperCase(),
+      evidenceProduced,
+      lastAcquisitionAt: String(source?.lastAcquisitionAt || source?.dateAdded || capturedAt || '').trim(),
+      lineageRef: String(source?.lineageRef || `lineage:${sourceId}`).trim(),
+      acquisitionProfile: String(source?.acquisitionProfile || '').trim(),
+      ...(source?.fieldKey ? { fieldKey: String(source.fieldKey).trim() } : {}),
+      ...(source?.url ? { url: String(source.url).trim() } : {}),
+      ...(source?.finalUrl ? { finalUrl: String(source.finalUrl).trim() } : {}),
+      ...(source?.fileName ? { fileName: String(source.fileName).trim() } : {}),
+      ...(source?.mimeType ? { mimeType: String(source.mimeType).trim() } : {}),
+      ...(source?.documentType ? { documentType: String(source.documentType).trim() } : {}),
+      ...(source?.assetType ? { assetType: String(source.assetType).trim() } : {}),
+      ...(Number.isFinite(Number(source?.sizeBytes)) ? { sizeBytes: Number(source.sizeBytes) } : {}),
+      ...(source?.documentHash ? { documentHash: String(source.documentHash).trim() } : {}),
+      ...(source?.documentId ? { documentId: String(source.documentId).trim() } : {}),
+      ...(source?.documentStatus ? { documentStatus: String(source.documentStatus).trim().toUpperCase() } : {}),
+      ...(source?.ingestionMode ? { ingestionMode: String(source.ingestionMode).trim().toUpperCase() } : {}),
+      ...(source?.uploadedAt ? { uploadedAt: String(source.uploadedAt).trim() } : {}),
+      ...(source?.uploadedBy ? { uploadedBy: String(source.uploadedBy).trim() } : {}),
+      ...(source?.failureReason ? { failureReason: String(source.failureReason).trim() } : {}),
+      ...(source?.failureReasonCode ? { failureReasonCode: String(source.failureReasonCode).trim() } : {}),
+      ...(source?.contentTruncated !== undefined ? { contentTruncated: Boolean(source.contentTruncated) } : {}),
+      ...(Number.isFinite(Number(source?.contentCharactersRead)) ? { contentCharactersRead: Number(source.contentCharactersRead) } : {}),
+      ...(Number.isFinite(Number(source?.contentCharacterLimit)) ? { contentCharacterLimit: Number(source.contentCharacterLimit) } : {}),
+      evidenceObjectsGenerated: Number(source?.evidenceObjectsGenerated || evidenceProduced || 0),
+      acceptedEvidenceObjects: reviewSummary.acceptedEvidenceCount,
+      rejectedEvidenceObjects: reviewSummary.rejectedEvidenceCount,
+      pendingEvidenceObjects: reviewSummary.pendingReviewCount,
+    }
+  }).filter((source) => source.sourceId)
 }
 
 export const applyDiscoveryEvidenceReview = ({
@@ -1335,7 +1562,7 @@ export const buildAcceptedDiscoveryScopedViews = ({
   const summaryFacts = evidenceFacts.slice(0, 6).map((fact) => fact.extractedFact)
   const summary = summaryFacts.length > 0
     ? summaryFacts.join(' ')
-    : 'Accepted Discovery evidence is available for this section.'
+    : 'Accepted Intelligence Hub evidence is available for this section.'
   const scopedViews = isPlainObject(previousScopedViews) ? previousScopedViews : {}
 
   return Object.keys(scopedViews).reduce((views, sectionKey) => {

@@ -11,6 +11,7 @@ import {
   getRuntimeRenderer,
   listRuntimeInstances,
   mutateRuntimeState,
+  resetRuntimeDiscovery,
   reviewRuntimeDiscoveryEvidence,
   updateRuntimeDiscoveryInputs,
 } from '../controllers/runtimeInstance.controller.js'
@@ -22,6 +23,7 @@ import {
   validateListRuntimeInstances,
   validateMutateRuntimeState,
   validateReviewRuntimeDiscoveryEvidence,
+  validateResetRuntimeDiscovery,
   validateRuntimeDiscoveryEvidenceParams,
   validateRuntimeActionParams,
   validateRuntimeInstanceId,
@@ -41,6 +43,7 @@ router.patch(
   validateReviewRuntimeDiscoveryEvidence,
   reviewRuntimeDiscoveryEvidence,
 )
+router.patch('/:runtimeInstanceId/discovery-reset', validateRuntimeInstanceId, validateResetRuntimeDiscovery, resetRuntimeDiscovery)
 router.patch('/:runtimeInstanceId/section-acceptance', validateRuntimeInstanceId, validateAcceptRuntimeSection, acceptRuntimeSection)
 router.patch('/:runtimeInstanceId/discovery-inputs', validateRuntimeInstanceId, validateUpdateDiscoveryInputs, updateRuntimeDiscoveryInputs)
 router.patch('/:runtimeInstanceId/data', validateRuntimeInstanceId, validateMutateRuntimeState, mutateRuntimeState)

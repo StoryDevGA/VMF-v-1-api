@@ -1,3 +1,4 @@
+import { isIP } from 'node:net'
 import { z } from 'zod'
 import {
   DISCOVERY_ACQUISITION_PROFILE_ERROR_MESSAGE,
@@ -109,13 +110,124 @@ const mutateRuntimeStateSchema = z.object({
   saveAndNext: z.boolean().optional(),
 }).strict()
 
+const DISCOVERY_WEBSITE_SOURCE_LIMIT = 10
+
+const normalizeDiscoveryWebsiteHostname = (hostname) =>
+  String(hostname || '').trim().toLowerCase().replace(/^\[(.*)\]$/, '$1')
+
+const isBlockedDiscoveryIpv4 = (hostname) => {
+  const parts = String(hostname || '').split('.').map((part) => Number(part))
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false
+
+  const [a, b, c] = parts
+  return a === 0
+    || a === 10
+    || (a === 100 && b >= 64 && b <= 127)
+    || a === 127
+    || (a === 169 && b === 254)
+    || (a === 172 && b >= 16 && b <= 31)
+    || (a === 192 && (b === 0 || b === 168))
+    || (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100)))
+    || (a === 203 && b === 0 && c === 113)
+    || a >= 224
+}
+
+const isBlockedDiscoveryIpv6 = (hostname) => {
+  const normalizedHostname = normalizeDiscoveryWebsiteHostname(hostname)
+  return normalizedHostname === '::'
+    || normalizedHostname === '::1'
+    || normalizedHostname.startsWith('::ffff:')
+    || normalizedHostname.startsWith('64:ff9b:')
+    || normalizedHostname.startsWith('100:')
+    || normalizedHostname.startsWith('2001:db8:')
+    || normalizedHostname.startsWith('2002:')
+    || normalizedHostname.startsWith('fc')
+    || normalizedHostname.startsWith('fd')
+    || /^fe[89ab]/i.test(normalizedHostname)
+    || normalizedHostname.startsWith('ff')
+}
+
+const isBlockedDiscoveryWebsiteHostname = (hostname) => {
+  const normalizedHostname = normalizeDiscoveryWebsiteHostname(hostname)
+  if (!normalizedHostname) return true
+  if (normalizedHostname === 'localhost' || normalizedHostname.endsWith('.localhost')) return true
+
+  const ipType = isIP(normalizedHostname)
+  if (ipType === 4) return isBlockedDiscoveryIpv4(normalizedHostname)
+  if (ipType === 6) return isBlockedDiscoveryIpv6(normalizedHostname)
+
+  return false
+}
+
+const normalizeWebsiteSourceForValidation = (value) => {
+  try {
+    const parsedUrl = new URL(String(value || '').trim())
+    parsedUrl.hash = ''
+    parsedUrl.hostname = parsedUrl.hostname.toLowerCase()
+    return parsedUrl.toString()
+  } catch {
+    return ''
+  }
+}
+
+const discoveryWebsiteSourceSchema = z
+  .string()
+  .trim()
+  .max(500, 'Website source URL must be 500 characters or fewer')
+  .refine((value) => /^https:\/\//i.test(value), {
+    message: 'Enter the full URL including https://',
+  })
+  .refine((value) => {
+    if (!/^https:\/\//i.test(value)) return true
+    try {
+      const parsedUrl = new URL(value)
+      return parsedUrl.protocol === 'https:' && !parsedUrl.username && !parsedUrl.password
+    } catch {
+      return false
+    }
+  }, {
+    message: 'Website source must be a valid https URL.',
+  })
+  .refine((value) => {
+    try {
+      const parsedUrl = new URL(value)
+      if (parsedUrl.protocol !== 'https:') return true
+      return !isBlockedDiscoveryWebsiteHostname(parsedUrl.hostname)
+    } catch {
+      return true
+    }
+  }, {
+    message: 'Website source must be a publicly accessible domain.',
+  })
+
 const discoveryInputsSchema = z.object({
   companyWebsite: z.string().trim().max(500, 'companyWebsite must be 500 characters or fewer').optional().default(''),
+  websiteSources: z
+    .array(discoveryWebsiteSourceSchema)
+    .max(DISCOVERY_WEBSITE_SOURCE_LIMIT, `websiteSources must contain ${DISCOVERY_WEBSITE_SOURCE_LIMIT} URLs or fewer`)
+    .optional()
+    .default([]),
   companyName: z.string().trim().max(255, 'companyName must be 255 characters or fewer').optional().default(''),
   marketRegion: z.string().trim().max(255, 'marketRegion must be 255 characters or fewer').optional().default(''),
   targetOffer: z.string().trim().max(500, 'targetOffer must be 500 characters or fewer').optional().default(''),
   notes: z.string().trim().max(4000, 'notes must be 4000 characters or fewer').optional().default(''),
-}).strict()
+}).strict().superRefine((data, ctx) => {
+  const seenWebsiteSources = new Set()
+
+  data.websiteSources.forEach((websiteSource, index) => {
+    const normalizedSource = normalizeWebsiteSourceForValidation(websiteSource)
+    if (!normalizedSource) return
+    if (seenWebsiteSources.has(normalizedSource)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['websiteSources', index],
+        message: 'Website source URLs must not contain duplicates.',
+      })
+      return
+    }
+    seenWebsiteSources.add(normalizedSource)
+  })
+})
 
 const discoveryAcquisitionProfileSchema = z
   .preprocess(
@@ -183,6 +295,21 @@ const updateDiscoveryInputsSchema = z.object({
 
 const acceptRuntimeDiscoverySchema = z.object({
   expectedUpdatedAt: expectedUpdatedAtSchema,
+}).strict()
+
+const resetRuntimeDiscoverySchema = z.object({
+  expectedUpdatedAt: expectedUpdatedAtSchema,
+  confirmReset: z
+    .boolean({ required_error: 'confirmReset is required' })
+    .refine((value) => value === true, {
+      message: 'confirmReset must be true',
+    }),
+  reason: z
+    .string()
+    .trim()
+    .max(500, 'reason must be 500 characters or fewer')
+    .optional()
+    .default('USER_REQUESTED_DISCOVERY_RESET'),
 }).strict()
 
 const reviewRuntimeDiscoveryEvidenceSchema = z.object({
@@ -359,7 +486,7 @@ const buildExecuteRuntimeActionSchema = (actionKey) => executeRuntimeActionSchem
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ['_root'],
-      message: 'inputs are only allowed for discovery evidence build actions.',
+      message: 'inputs are only allowed for Intelligence Hub evidence build actions.',
     })
   }
 
@@ -367,7 +494,7 @@ const buildExecuteRuntimeActionSchema = (actionKey) => executeRuntimeActionSchem
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ['_root'],
-      message: 'acquisitionProfile is only allowed for discovery evidence build actions.',
+      message: 'acquisitionProfile is only allowed for Intelligence Hub evidence build actions.',
     })
   }
 
@@ -375,7 +502,7 @@ const buildExecuteRuntimeActionSchema = (actionKey) => executeRuntimeActionSchem
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ['_root'],
-      message: 'documentSources are only allowed for discovery evidence build actions.',
+      message: 'documentSources are only allowed for Intelligence Hub evidence build actions.',
     })
   }
 })
@@ -440,6 +567,11 @@ export const validateUpdateDiscoveryInputs = createBodyValidator(updateDiscovery
 })
 
 export const validateAcceptRuntimeDiscovery = createBodyValidator(acceptRuntimeDiscoverySchema, {
+  message: 'Request validation failed.',
+  rootIssueKey: '_root',
+})
+
+export const validateResetRuntimeDiscovery = createBodyValidator(resetRuntimeDiscoverySchema, {
   message: 'Request validation failed.',
   rootIssueKey: '_root',
 })
