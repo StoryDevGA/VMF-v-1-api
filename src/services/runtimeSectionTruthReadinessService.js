@@ -121,6 +121,19 @@ const createBlocker = ({ reason, sectionKey, state, details = {} }) => ({
   ...details,
 })
 
+const getSectionEvidenceInvalidationReason = (sectionValue = {}) => {
+  const sectionState = sectionValue?.state || {}
+  if (sectionState.needsRegeneration !== true) return ''
+
+  const reason = normalizeKey(
+    sectionState.acceptedInvalidationReason
+    || sectionState.sectionEvidenceInvalidationReason
+    || sectionValue?.lineage?.sectionEvidenceInvalidationReason,
+  )
+
+  return reason === 'section_evidence_changed' ? 'SECTION_EVIDENCE_CHANGED' : ''
+}
+
 export const evaluateRuntimeSectionTruthReadiness = ({
   frameworkPackage,
   frameworkState,
@@ -148,6 +161,17 @@ export const evaluateRuntimeSectionTruthReadiness = ({
     const accepted = getRuntimeSectionAccepted(sectionValue)
     const acceptedCurrent = isRuntimeSectionObject(sectionValue)
       && isAcceptedTruthCurrent({ accepted, generated, input })
+    const sectionEvidenceInvalidationReason = getSectionEvidenceInvalidationReason(sectionValue)
+
+    if (sectionEvidenceInvalidationReason === 'SECTION_EVIDENCE_CHANGED') {
+      blockers.push(createBlocker({
+        sectionKey: section.sectionKey,
+        state: 'SECTION_EVIDENCE_CHANGED',
+        reason: 'Accepted section evidence changed. Regenerate this section before accepting or publishing truth.',
+        invalidationReason: sectionEvidenceInvalidationReason,
+      }))
+      return
+    }
 
     if (!acceptedCurrent) {
       blockers.push(createBlocker({

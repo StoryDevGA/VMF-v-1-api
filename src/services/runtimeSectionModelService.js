@@ -27,6 +27,9 @@ const SECTION_MODEL_KEYS = new Set([
   'confidence',
   'intelligence',
   'metrics',
+  'additionalEvidence',
+  'evidenceObjects',
+  'gsilContext',
 ])
 
 export const cloneSectionValue = (value) => {
@@ -67,6 +70,9 @@ export const normalizeRuntimeSectionObject = ({
       confidence: isPlainObject(value.confidence) ? value.confidence : {},
       intelligence: isPlainObject(value.intelligence) ? value.intelligence : {},
       metrics: isPlainObject(value.metrics) ? value.metrics : {},
+      additionalEvidence: isPlainObject(value.additionalEvidence) ? value.additionalEvidence : {},
+      evidenceObjects: Array.isArray(value.evidenceObjects) ? value.evidenceObjects : [],
+      gsilContext: isPlainObject(value.gsilContext) ? value.gsilContext : {},
     }
   }
 
@@ -89,6 +95,9 @@ export const normalizeRuntimeSectionObject = ({
     confidence: {},
     intelligence: {},
     metrics: {},
+    additionalEvidence: {},
+    evidenceObjects: [],
+    gsilContext: {},
   }
 }
 
@@ -251,6 +260,90 @@ const getAcceptedDiscoveryEvidenceObjects = (evidencePack = {}) => {
   )
 }
 
+const getRuntimeSectionStateKey = ({ runtimePath, sectionKey }) => {
+  const normalizedRuntimePath = normalizeSectionText(runtimePath)
+  const sectionRootPrefix = 'framework_state.sections.'
+
+  if (normalizedRuntimePath.startsWith(sectionRootPrefix)) {
+    const statePath = normalizedRuntimePath.slice(sectionRootPrefix.length).trim()
+    if (statePath && !statePath.includes('.')) return statePath
+  }
+
+  return normalizeSectionText(sectionKey)
+}
+
+const getSectionStateValue = ({ frameworkState = {}, runtimePath, sectionKey }) => {
+  const sections = isPlainObject(frameworkState.sections) ? frameworkState.sections : {}
+  const stateSectionKey = getRuntimeSectionStateKey({ runtimePath, sectionKey })
+  if (stateSectionKey && Object.prototype.hasOwnProperty.call(sections, stateSectionKey)) {
+    return sections[stateSectionKey]
+  }
+  if (sectionKey && Object.prototype.hasOwnProperty.call(sections, sectionKey)) {
+    return sections[sectionKey]
+  }
+  return undefined
+}
+
+const normalizeSectionEvidenceObjects = ({
+  evidenceObjects = [],
+  runtimePath,
+  sectionKey,
+} = {}) => (Array.isArray(evidenceObjects) ? evidenceObjects : [])
+  .map((evidenceObject) => {
+    const evidenceObjectId = normalizeEvidenceString(evidenceObject?.evidenceObjectId)
+    const sourceId = normalizeEvidenceString(evidenceObject?.sourceId)
+    const extractedFact = normalizeEvidenceString(evidenceObject?.extractedFact)
+    if (!evidenceObjectId || !sourceId || !extractedFact) return null
+
+    return {
+      evidenceObjectId,
+      sectionKey: normalizeEvidenceString(evidenceObject.sectionKey || sectionKey),
+      runtimePath: normalizeEvidenceString(evidenceObject.runtimePath || runtimePath),
+      sourceId,
+      sourceType: 'SECTION_UPLOADED_DOCUMENT',
+      category: evidenceObject.category || 'Section Evidence',
+      coverageArea: evidenceObject.coverageArea || evidenceObject.category || 'Section Evidence',
+      extractedFact,
+      confidence: isPlainObject(evidenceObject.confidence)
+        ? evidenceObject.confidence
+        : {
+            level: 'SOURCE_BACKED',
+            score: 74,
+            basis: ['SECTION_UPLOADED_DOCUMENT', 'DETERMINISTIC_TEXT_EXTRACTION'],
+          },
+      createdAt: evidenceObject.createdAt || '',
+      reviewStatus: String(evidenceObject.reviewStatus || DISCOVERY_EVIDENCE_REVIEW_STATUSES.PENDING).trim().toUpperCase(),
+      acquisitionMethod: 'SECTION_DOCUMENT_INGESTION',
+      extractionTimestamp: evidenceObject.extractionTimestamp || evidenceObject.createdAt || '',
+      acceptedBy: evidenceObject.acceptedBy || '',
+      acceptanceTimestamp: evidenceObject.acceptanceTimestamp || '',
+      rejectedBy: evidenceObject.rejectedBy || '',
+      rejectionTimestamp: evidenceObject.rejectionTimestamp || '',
+      auditRef: evidenceObject.auditRef || '',
+      lineageRef: evidenceObject.lineageRef || `lineage:${sourceId}`,
+      sourceFileName: evidenceObject.sourceFileName || '',
+      documentAssetType: evidenceObject.documentAssetType || 'SECTION_SUPPORTING_FILE',
+    }
+  })
+  .filter(Boolean)
+
+const getAcceptedSectionEvidenceObjects = ({ frameworkState = {}, runtimePath, sectionKey } = {}) => {
+  const rawSectionValue = getSectionStateValue({ frameworkState, runtimePath, sectionKey })
+  const sectionObject = normalizeRuntimeSectionObject({
+    value: rawSectionValue,
+    sectionKey,
+    runtimePath,
+  })
+
+  return normalizeSectionEvidenceObjects({
+    evidenceObjects: sectionObject.evidenceObjects,
+    runtimePath,
+    sectionKey,
+  }).filter((evidenceObject) =>
+    evidenceObject.reviewStatus === DISCOVERY_EVIDENCE_REVIEW_STATUSES.ACCEPTED,
+  )
+}
+
 const extractAcceptedFactValue = (evidenceObjects = [], prefix) => {
   const normalizedPrefix = String(prefix || '').trim().toLowerCase()
   const evidenceObject = evidenceObjects.find((candidate) =>
@@ -395,6 +488,7 @@ const extractEvidenceThemes = ({
   category,
   dependencyTruths,
   inputSummary,
+  sectionEvidenceSummary,
   scopedEvidenceSummary,
   seedProfile,
 }) => {
@@ -410,6 +504,7 @@ const extractEvidenceThemes = ({
     marketRegion,
     targetOffer,
     notes,
+    sectionEvidenceSummary,
     scopedEvidenceSummary,
     inputSummary,
     ...dependencyTruths.map((dependency) => dependency.content),
@@ -496,6 +591,7 @@ const extractEvidenceThemes = ({
 
 const buildSupportingEvidence = ({
   acceptedEvidenceObjects = [],
+  acceptedSectionEvidenceObjects = [],
   dependencyTruths,
   inputSummary,
   scopedEvidenceSummary,
@@ -514,6 +610,17 @@ const buildSupportingEvidence = ({
       label: evidenceObject.category || 'Accepted evidence',
       summary,
       sourceType: 'DISCOVERY_EVIDENCE_OBJECT',
+      refKey: evidenceObject.evidenceObjectId || evidenceObject.lineageRef || evidenceObject.sourceId,
+    })
+  })
+
+  acceptedSectionEvidenceObjects.slice(0, 6).forEach((evidenceObject) => {
+    const summary = normalizeEvidenceString(evidenceObject.extractedFact)
+    if (!summary) return
+    items.push({
+      label: evidenceObject.category || 'Accepted section evidence',
+      summary,
+      sourceType: 'SECTION_EVIDENCE_OBJECT',
       refKey: evidenceObject.evidenceObjectId || evidenceObject.lineageRef || evidenceObject.sourceId,
     })
   })
@@ -576,7 +683,7 @@ const buildSupportingEvidence = ({
     })
   })
 
-  return items.slice(0, 8)
+  return items.slice(0, 10)
 }
 
 const buildGenerationBoundaries = ({
@@ -623,7 +730,7 @@ const buildGenerationBoundaries = ({
   return boundaries
 }
 
-const buildSourceRefs = ({ acceptedEvidenceObjects = [], scopedView, seedProfile }) => {
+const buildSourceRefs = ({ acceptedEvidenceObjects = [], acceptedSectionEvidenceObjects = [], scopedView, seedProfile }) => {
   const refs = []
   const addRef = ({ refKey, label, type, safeDisplay }) => {
     if (!safeDisplay) return
@@ -636,6 +743,15 @@ const buildSourceRefs = ({ acceptedEvidenceObjects = [], scopedView, seedProfile
       refKey: evidenceObject.evidenceObjectId || evidenceObject.lineageRef || evidenceObject.sourceId,
       label: evidenceObject.category || 'Accepted evidence',
       type: 'DISCOVERY_EVIDENCE_OBJECT',
+      safeDisplay: normalizeEvidenceString(evidenceObject.extractedFact),
+    })
+  })
+
+  acceptedSectionEvidenceObjects.forEach((evidenceObject) => {
+    addRef({
+      refKey: evidenceObject.evidenceObjectId || evidenceObject.lineageRef || evidenceObject.sourceId,
+      label: evidenceObject.category || 'Accepted section evidence',
+      type: 'SECTION_EVIDENCE_OBJECT',
       safeDisplay: normalizeEvidenceString(evidenceObject.extractedFact),
     })
   })
@@ -678,7 +794,7 @@ const buildSourceRefs = ({ acceptedEvidenceObjects = [], scopedView, seedProfile
     })
   }
 
-  return refs.slice(0, 8)
+  return refs.slice(0, 10)
 }
 
 const buildGeneratedSections = ({ category, inputSummary, label, themes, boundaries }) => {
@@ -765,9 +881,18 @@ const buildSectionIntelligenceParts = ({
   const label = titleFromSectionKey(section?.label || sectionKey || runtimePath)
   const category = getSectionCategory({ label, sectionKey })
   const acceptedEvidenceObjects = getAcceptedDiscoveryEvidenceObjects(evidencePack)
+  const acceptedSectionEvidenceObjects = getAcceptedSectionEvidenceObjects({
+    frameworkState,
+    runtimePath,
+    sectionKey,
+  })
   const seedProfile = getDiscoverySeedProfile(evidencePack)
   const scopedView = getScopedEvidenceView({ evidencePack, runtimePath, sectionKey })
   const scopedEvidenceSummary = normalizeScopedEvidenceSummary(scopedView?.summary)
+  const sectionEvidenceSummary = acceptedSectionEvidenceObjects
+    .map((evidenceObject) => normalizeEvidenceString(evidenceObject.extractedFact))
+    .filter(Boolean)
+    .join(' ')
   const inputSummary = normalizeEvidenceString(input)
   const dependencyTruths = getAcceptedDependencyTruths({
     dependencySectionKeys,
@@ -779,12 +904,14 @@ const buildSectionIntelligenceParts = ({
     category,
     dependencyTruths,
     inputSummary,
+    sectionEvidenceSummary,
     scopedEvidenceSummary,
     seedProfile,
   })
   const discoveryAccepted = isDiscoveryEvidenceAccepted(evidencePack)
   const businessContextAvailable = Boolean(
     acceptedEvidenceObjects.length > 0
+    || acceptedSectionEvidenceObjects.length > 0
     || normalizeEvidenceString(seedProfile.targetOffer)
     || normalizeEvidenceString(seedProfile.notes)
     || scopedEvidenceSummary
@@ -798,6 +925,7 @@ const buildSectionIntelligenceParts = ({
   })
   const supportingEvidence = buildSupportingEvidence({
     acceptedEvidenceObjects,
+    acceptedSectionEvidenceObjects,
     dependencyTruths,
     inputSummary,
     scopedEvidenceSummary,
@@ -811,11 +939,19 @@ const buildSectionIntelligenceParts = ({
     truthEligible: truthEligibility.eligible,
   })
   const inputHash = hashSectionInput(input)
-  const sourceRefs = buildSourceRefs({ acceptedEvidenceObjects, scopedView, seedProfile })
+  const sourceRefs = buildSourceRefs({ acceptedEvidenceObjects, acceptedSectionEvidenceObjects, scopedView, seedProfile })
+  const sectionEvidenceHash = hashSectionInput({
+    acceptedSectionEvidenceObjectIds: acceptedSectionEvidenceObjects.map((evidenceObject) => evidenceObject.evidenceObjectId),
+    acceptedSectionEvidenceSummaries: acceptedSectionEvidenceObjects.map((evidenceObject) => normalizeEvidenceString(evidenceObject.extractedFact)),
+    runtimePath,
+    sectionKey,
+  })
   const evidenceHash = hashSectionInput({
     accepted: discoveryAccepted,
     acceptedEvidenceObjectIds: acceptedEvidenceObjects.map((evidenceObject) => evidenceObject.evidenceObjectId),
+    acceptedSectionEvidenceObjectIds: acceptedSectionEvidenceObjects.map((evidenceObject) => evidenceObject.evidenceObjectId),
     scopedEvidenceSummary,
+    sectionEvidenceHash,
     sourceRefs: sourceRefs.map((ref) => ref.refKey),
     supportingEvidence,
     themes: themes.map((theme) => theme.key),
@@ -838,6 +974,7 @@ const buildSectionIntelligenceParts = ({
 
   return {
     acceptedEvidenceObjects,
+    acceptedSectionEvidenceObjects,
     boundedContextHash,
     category,
     dependencyHash,
@@ -854,6 +991,8 @@ const buildSectionIntelligenceParts = ({
     runtimePath,
     scopedEvidenceSummary,
     scopedView,
+    sectionEvidenceHash,
+    sectionEvidenceSummary,
     sectionKey,
     seedProfile,
     sourceRefs,
@@ -873,6 +1012,7 @@ const buildIntelligenceFromParts = ({
   const evidenceThemeBullets = parts.themes.map((theme) => theme.label)
   const confidenceSignals = [
     parts.discoveryAccepted ? 'Intelligence Hub evidence is accepted.' : 'Intelligence Hub evidence has not been accepted.',
+    parts.acceptedSectionEvidenceObjects.length > 0 ? 'Accepted section evidence is available.' : 'No accepted section evidence was used for this section.',
     parts.inputSummary ? 'Customer-added section context is available.' : 'No customer-added section context has been provided.',
     parts.dependencyTruths.length > 0
       ? 'Accepted upstream truth is available.'
@@ -896,6 +1036,7 @@ const buildIntelligenceFromParts = ({
       scopedViewKey: parts.sectionKey,
       sourceRefs: parts.sourceRefs,
       evidenceHash: parts.evidenceHash,
+      sectionEvidenceHash: parts.sectionEvidenceHash,
     },
     derivedSignals: confidenceSignals.map((description, index) => ({
       signalKey: `signal_${index + 1}`,
@@ -912,6 +1053,7 @@ const buildIntelligenceFromParts = ({
       runtimePath: parts.runtimePath,
       inputHash: parts.inputHash,
       evidenceHash: parts.evidenceHash,
+      sectionEvidenceHash: parts.sectionEvidenceHash,
       dependencyHash: parts.dependencyHash,
       boundedContextHash: parts.boundedContextHash,
     },
@@ -1040,6 +1182,7 @@ export const buildEnrichedGeneratedSection = ({
     actionKey,
     inputHash: parts.inputHash,
     evidenceHash: parts.evidenceHash,
+    sectionEvidenceHash: parts.sectionEvidenceHash,
     dependencyHash: parts.dependencyHash,
     boundedContextHash: parts.boundedContextHash,
     truthEligibility: parts.truthEligibility,

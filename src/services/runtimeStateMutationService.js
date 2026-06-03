@@ -460,6 +460,297 @@ const buildDiscoveryMutationResponse = ({ runtimeInstance, evidencePack, previou
   },
 })
 
+const SECTION_EVIDENCE_SOURCE_TYPE = 'SECTION_UPLOADED_DOCUMENT'
+const SECTION_EVIDENCE_ACQUISITION_METHOD = 'SECTION_DOCUMENT_INGESTION'
+const SECTION_EVIDENCE_ASSET_TYPE = 'SECTION_SUPPORTING_FILE'
+
+const hashSectionEvidenceValue = (value) =>
+  crypto.createHash('sha256').update(stableStringify(value)).digest('hex').slice(0, 16)
+
+const normalizeSectionEvidenceReviewStatus = (value) => {
+  const normalized = normalizeToken(value)
+  return Object.values(DISCOVERY_EVIDENCE_REVIEW_STATUSES).includes(normalized)
+    ? normalized
+    : DISCOVERY_EVIDENCE_REVIEW_STATUSES.PENDING
+}
+
+const buildSectionEvidenceReviewSummary = (evidenceObjects = []) => {
+  const summary = buildDiscoveryEvidenceReviewSummary(Array.isArray(evidenceObjects) ? evidenceObjects : [])
+  return {
+    evidenceObjectCount: summary.evidenceObjectCount,
+    acceptedEvidenceObjectCount: summary.acceptedEvidenceCount,
+    pendingEvidenceObjectCount: summary.pendingReviewCount,
+    rejectedEvidenceObjectCount: summary.rejectedEvidenceCount,
+  }
+}
+
+const buildSectionEvidenceStatus = (summary) => {
+  if (!summary || summary.evidenceObjectCount === 0) return 'EMPTY'
+  if (summary.pendingEvidenceObjectCount > 0) return 'PENDING_REVIEW'
+  if (summary.acceptedEvidenceObjectCount > 0) return 'ACCEPTED'
+  if (summary.rejectedEvidenceObjectCount > 0) return 'REJECTED'
+  return 'PENDING_REVIEW'
+}
+
+const buildSectionEvidenceProjection = ({
+  additionalEvidence = {},
+  evidenceObjects = [],
+} = {}) => {
+  const documents = Array.isArray(additionalEvidence.documents) ? additionalEvidence.documents : []
+  const summary = buildSectionEvidenceReviewSummary(evidenceObjects)
+
+  return {
+    status: additionalEvidence.status || buildSectionEvidenceStatus(summary),
+    updatedAt: additionalEvidence.updatedAt || '',
+    updatedBy: additionalEvidence.updatedBy || '',
+    documentCount: Number.isFinite(Number(additionalEvidence.documentCount))
+      ? Number(additionalEvidence.documentCount)
+      : documents.length,
+    evidenceObjectCount: summary.evidenceObjectCount,
+    acceptedEvidenceObjectCount: summary.acceptedEvidenceObjectCount,
+    pendingEvidenceObjectCount: summary.pendingEvidenceObjectCount,
+    rejectedEvidenceObjectCount: summary.rejectedEvidenceObjectCount,
+    documents: documents.map((document) => ({
+      sectionDocumentId: String(document?.sectionDocumentId || document?.sourceId || '').trim(),
+      sourceId: String(document?.sourceId || document?.sectionDocumentId || '').trim(),
+      fileName: String(document?.fileName || '').trim(),
+      fileType: String(document?.fileType || document?.documentType || '').trim(),
+      mimeType: String(document?.mimeType || '').trim(),
+      sizeBytes: Number.isFinite(Number(document?.sizeBytes)) ? Number(document.sizeBytes) : 0,
+      uploadedAt: String(document?.uploadedAt || '').trim(),
+      uploadedBy: String(document?.uploadedBy || '').trim(),
+      status: String(document?.status || document?.documentStatus || 'PROCESSED').trim().toUpperCase(),
+      ingestionMode: String(document?.ingestionMode || '').trim().toUpperCase(),
+      evidenceObjectsGenerated: Number.isFinite(Number(document?.evidenceObjectsGenerated))
+        ? Number(document.evidenceObjectsGenerated)
+        : 0,
+    })).filter((document) => document.sectionDocumentId || document.fileName),
+    evidenceObjects: (Array.isArray(evidenceObjects) ? evidenceObjects : []).map((evidenceObject) => ({
+      evidenceObjectId: String(evidenceObject?.evidenceObjectId || '').trim(),
+      sectionKey: String(evidenceObject?.sectionKey || '').trim(),
+      runtimePath: String(evidenceObject?.runtimePath || '').trim(),
+      sourceId: String(evidenceObject?.sourceId || '').trim(),
+      sourceType: String(evidenceObject?.sourceType || SECTION_EVIDENCE_SOURCE_TYPE).trim(),
+      category: String(evidenceObject?.category || 'Section Evidence').trim(),
+      coverageArea: String(evidenceObject?.coverageArea || evidenceObject?.category || 'Section Evidence').trim(),
+      reviewStatus: normalizeSectionEvidenceReviewStatus(evidenceObject?.reviewStatus),
+      sourceFileName: String(evidenceObject?.sourceFileName || '').trim(),
+      createdAt: String(evidenceObject?.createdAt || '').trim(),
+      acceptedBy: String(evidenceObject?.acceptedBy || '').trim(),
+      acceptanceTimestamp: String(evidenceObject?.acceptanceTimestamp || '').trim(),
+      rejectedBy: String(evidenceObject?.rejectedBy || '').trim(),
+      rejectionTimestamp: String(evidenceObject?.rejectionTimestamp || '').trim(),
+    })).filter((evidenceObject) => evidenceObject.evidenceObjectId),
+  }
+}
+
+const buildSectionAdditionalEvidence = ({
+  actorUserId,
+  documents = [],
+  evidenceObjects = [],
+  updatedAt,
+} = {}) => {
+  const summary = buildSectionEvidenceReviewSummary(evidenceObjects)
+  return {
+    status: buildSectionEvidenceStatus(summary),
+    updatedAt,
+    updatedBy: toIdString(actorUserId),
+    documentCount: documents.length,
+    ...summary,
+    documents,
+  }
+}
+
+const buildSectionGsilContext = ({
+  evidenceObjects = [],
+  reviewedAt,
+} = {}) => {
+  const acceptedEvidenceObjects = (Array.isArray(evidenceObjects) ? evidenceObjects : [])
+    .filter((evidenceObject) =>
+      normalizeSectionEvidenceReviewStatus(evidenceObject?.reviewStatus) === DISCOVERY_EVIDENCE_REVIEW_STATUSES.ACCEPTED,
+    )
+  const sourceRefs = acceptedEvidenceObjects
+    .map((evidenceObject) => String(evidenceObject?.evidenceObjectId || evidenceObject?.lineageRef || evidenceObject?.sourceId || '').trim())
+    .filter(Boolean)
+  const sectionEvidenceSummary = acceptedEvidenceObjects
+    .map((evidenceObject) => String(evidenceObject?.extractedFact || '').trim().replace(/\s+/g, ' '))
+    .filter(Boolean)
+    .join(' ')
+
+  return {
+    sectionEvidenceSummary,
+    acceptedEvidenceObjectIds: acceptedEvidenceObjects
+      .map((evidenceObject) => String(evidenceObject?.evidenceObjectId || '').trim())
+      .filter(Boolean),
+    sourceRefs,
+    evidenceHash: hashSectionInput({
+      acceptedEvidenceObjectIds: sourceRefs,
+      sectionEvidenceSummary,
+    }),
+    updatedAt: reviewedAt || '',
+  }
+}
+
+const transformSectionDocumentAcquisition = ({
+  acquisition,
+  actorUserId,
+  capturedAt,
+  runtimePath,
+  sectionKey,
+  stateSectionKey,
+} = {}) => {
+  const sourceIdMap = new Map()
+  const documents = (Array.isArray(acquisition?.sourceRegistry) ? acquisition.sourceRegistry : [])
+    .map((source, index) => {
+      const previousSourceId = String(source?.sourceId || '').trim()
+      const sectionDocumentId = `section_document_${hashSectionEvidenceValue({
+        capturedAt,
+        fileName: source?.fileName,
+        index,
+        previousSourceId,
+        runtimePath,
+        sectionKey,
+        stateSectionKey,
+      })}`
+      sourceIdMap.set(previousSourceId, sectionDocumentId)
+
+      return {
+        sectionDocumentId,
+        sourceId: sectionDocumentId,
+        fileName: String(source?.fileName || '').trim(),
+        fileType: String(source?.documentType || '').trim(),
+        mimeType: String(source?.mimeType || '').trim(),
+        sizeBytes: Number.isFinite(Number(source?.sizeBytes)) ? Number(source.sizeBytes) : 0,
+        uploadedAt: capturedAt,
+        uploadedBy: toIdString(actorUserId),
+        status: 'PROCESSED',
+        ingestionMode: String(source?.ingestionMode || 'TEXT_NATIVE').trim().toUpperCase(),
+        evidenceObjectsGenerated: Number.isFinite(Number(source?.evidenceObjectsGenerated))
+          ? Number(source.evidenceObjectsGenerated)
+          : 0,
+      }
+    })
+
+  const evidenceObjects = (Array.isArray(acquisition?.evidenceObjects) ? acquisition.evidenceObjects : [])
+    .map((evidenceObject, index) => {
+      const previousEvidenceObjectId = String(evidenceObject?.evidenceObjectId || '').trim()
+      const previousSourceId = String(evidenceObject?.sourceId || '').trim()
+      const sourceId = sourceIdMap.get(previousSourceId) || previousSourceId
+      const evidenceObjectId = `section_evidence_${hashSectionEvidenceValue({
+        capturedAt,
+        index,
+        previousEvidenceObjectId,
+        runtimePath,
+        sectionKey,
+        sourceId,
+      })}`
+
+      return {
+        ...evidenceObject,
+        evidenceObjectId,
+        sectionKey,
+        runtimePath,
+        sourceId,
+        sourceType: SECTION_EVIDENCE_SOURCE_TYPE,
+        acquisitionMethod: SECTION_EVIDENCE_ACQUISITION_METHOD,
+        reviewStatus: DISCOVERY_EVIDENCE_REVIEW_STATUSES.PENDING,
+        acceptedBy: '',
+        acceptanceTimestamp: '',
+        rejectedBy: '',
+        rejectionTimestamp: '',
+        auditRef: '',
+        lineageRef: `lineage:${sourceId}:${evidenceObjectId}`,
+        acquisitionProfile: '',
+        documentAssetType: SECTION_EVIDENCE_ASSET_TYPE,
+        sourceFileName: String(evidenceObject?.sourceFileName || '').trim(),
+      }
+    })
+
+  return { documents, evidenceObjects }
+}
+
+const buildSectionEvidenceMutationResponse = ({
+  runtimeInstance,
+  target,
+  previousSectionEvidence,
+  sectionEvidence,
+}) => ({
+  runtimeInstance: {
+    id: toIdString(runtimeInstance._id),
+    runtimeInstanceKey: runtimeInstance.runtimeInstanceKey,
+    runtimeType: runtimeInstance.runtimeType,
+    status: runtimeInstance.status,
+    executionStatus: runtimeInstance.executionStatus,
+    updatedAt: runtimeInstance.updatedAt instanceof Date
+      ? runtimeInstance.updatedAt.toISOString()
+      : runtimeInstance.updatedAt,
+  },
+  section: {
+    sectionKey: target.sectionKey,
+    stateSectionKey: target.stateSectionKey,
+    runtimePath: target.runtimePath,
+    sectionEvidence,
+    previousSectionEvidence,
+  },
+  mutation: {
+    runtimePath: target.runtimePath,
+    operation: RUNTIME_PATH_REGISTRY_OPERATIONS.WRITE,
+    previousValue: previousSectionEvidence,
+    value: sectionEvidence,
+  },
+})
+
+const hasSectionGeneratedOrAcceptedTruth = (sectionObject) => Boolean(
+  String(getRuntimeSectionGenerated(sectionObject)?.content ?? '').trim()
+  || String(getRuntimeSectionAccepted(sectionObject)?.content ?? '').trim(),
+)
+
+const applyAcceptedSectionEvidenceInvalidation = ({
+  actorUserId,
+  invalidatedAt,
+  nextSection,
+  nextSectionEvidenceHash = '',
+  previousSectionEvidenceHash = '',
+  sectionObject,
+} = {}) => {
+  if (!hasSectionGeneratedOrAcceptedTruth(sectionObject)) return nextSection
+
+  return {
+    ...nextSection,
+    review: {
+      ...(nextSection.review || {}),
+      invalidatedAt,
+      invalidationReason: 'SECTION_EVIDENCE_CHANGED',
+    },
+    state: {
+      ...(nextSection.state || {}),
+      needsRegeneration: true,
+      sectionEvidenceInvalidatedAt: invalidatedAt,
+      sectionEvidenceInvalidatedBy: toIdString(actorUserId),
+      acceptedInvalidatedAt: getRuntimeSectionAccepted(sectionObject) ? invalidatedAt : nextSection.state?.acceptedInvalidatedAt,
+      acceptedInvalidationReason: getRuntimeSectionAccepted(sectionObject)
+        ? 'SECTION_EVIDENCE_CHANGED'
+        : nextSection.state?.acceptedInvalidationReason,
+    },
+    lineage: {
+      ...(nextSection.lineage || {}),
+      sectionEvidenceInvalidatedAt: invalidatedAt,
+      sectionEvidenceInvalidatedBy: toIdString(actorUserId),
+      sectionEvidenceInvalidationReason: 'SECTION_EVIDENCE_CHANGED',
+    },
+    intelligence: {
+      ...(nextSection.intelligence || {}),
+      invalidation: {
+        reason: 'SECTION_EVIDENCE_CHANGED',
+        invalidatedAt,
+        invalidatedBy: toIdString(actorUserId),
+        previousSectionEvidenceHash,
+        nextSectionEvidenceHash,
+      },
+    },
+  }
+}
+
 const getValueAtPath = (source, pathParts) => {
   let cursor = source
   for (const part of pathParts) {
@@ -1823,6 +2114,81 @@ const resolveSectionAcceptanceTarget = ({ frameworkPackage, payload }) => {
   }
 }
 
+const resolveSectionEvidenceTarget = ({ frameworkPackage, payload }) => {
+  const sectionKey = normalizeSectionKey(payload?.sectionKey)
+  const runtimePath = normalizeRuntimePath(payload?.runtimePath)
+  const sections = Array.isArray(frameworkPackage?.sections) ? frameworkPackage.sections : []
+  const sectionByKey = sectionKey
+    ? sections.find((candidate) => normalizeSectionKey(candidate?.sectionKey || candidate?.key) === sectionKey)
+    : null
+  const sectionByPath = runtimePath
+    ? sections.find((candidate) => normalizeRuntimePath(candidate?.runtimePath) === runtimePath)
+    : null
+
+  if (sectionKey && runtimePath && sectionByKey !== sectionByPath) {
+    throw buildMutationError({
+      status: 422,
+      code: 'VALIDATION_FAILED',
+      message: 'Section evidence upload sectionKey and runtimePath must target the same package section.',
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_ACTION_TARGET_MISMATCH,
+      details: { sectionKey, runtimePath },
+    })
+  }
+
+  const section = sectionByKey || sectionByPath
+  if (!section) {
+    throw buildMutationError({
+      status: 422,
+      code: 'VALIDATION_FAILED',
+      message: 'Section evidence upload requires a package-bound section target.',
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_ACTION_NOT_AVAILABLE,
+      details: { sectionKey, runtimePath },
+    })
+  }
+
+  const resolvedRuntimePath = normalizeRuntimePath(section.runtimePath)
+  const resolvedSectionKey = normalizeSectionKey(section.sectionKey || section.key)
+
+  return {
+    section,
+    sectionKey: resolvedSectionKey,
+    runtimePath: resolvedRuntimePath,
+    stateSectionKey: getRuntimeSectionStateKey({
+      runtimePath: resolvedRuntimePath,
+      sectionKey: resolvedSectionKey,
+    }),
+  }
+}
+
+const assertSectionEvidenceTargetProjectable = async ({ frameworkPackage, target }) => {
+  const [uiContract, runtimePathRecords] = await Promise.all([
+    resolveUIContractForAdvance({ frameworkPackage }),
+    resolveRuntimePathRecordsForAdvance({ frameworkPackage }),
+  ])
+  const projectableSections = buildProjectableSectionsForAdvance({
+    frameworkPackage,
+    runtimePathRecords,
+    uiContract,
+  })
+  const isProjectable = projectableSections.some((section) =>
+    normalizeRuntimePath(section.runtimePath) === target.runtimePath
+      && normalizeSectionKey(section.sectionKey) === target.sectionKey,
+  )
+
+  if (!isProjectable) {
+    throw buildMutationError({
+      status: 422,
+      code: 'VALIDATION_FAILED',
+      message: 'Section evidence upload requires a projected runtime section target.',
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_ACTION_NOT_AVAILABLE,
+      details: {
+        sectionKey: target.sectionKey,
+        runtimePath: target.runtimePath,
+      },
+    })
+  }
+}
+
 const buildSectionAcceptanceUnavailableError = ({ message, runtimePath, sectionKey }) => buildMutationError({
   status: 409,
   code: 'CONFLICT',
@@ -1830,6 +2196,27 @@ const buildSectionAcceptanceUnavailableError = ({ message, runtimePath, sectionK
   reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_ACTION_NOT_AVAILABLE,
   details: { runtimePath, sectionKey },
 })
+
+const getSectionAcceptanceRegenerationRequiredReason = (sectionObject = {}) => {
+  const sectionState = sectionObject.state || {}
+  const dependencyState = normalizeToken(sectionObject.dependencies?.state)
+
+  if (sectionState.needsRegeneration === true) {
+    const invalidationReason = normalizeToken(sectionState.acceptedInvalidationReason)
+      || normalizeToken(sectionState.sectionEvidenceInvalidationReason)
+      || normalizeToken(sectionObject.lineage?.sectionEvidenceInvalidationReason)
+      || normalizeToken(sectionObject.intelligence?.invalidation?.reason)
+    return invalidationReason === 'SECTION_EVIDENCE_CHANGED'
+      ? 'Accepted section evidence changed. Regenerate this section before accepting truth.'
+      : 'Section content is stale. Regenerate this section before accepting truth.'
+  }
+
+  if (dependencyState === 'DEPENDENCY_CONTEXT_INVALIDATED') {
+    return 'Accepted upstream section truth changed. Regenerate this section before accepting truth.'
+  }
+
+  return ''
+}
 
 const normalizeComparableSectionContent = (value) => {
   if (value === null || value === undefined) return ''
@@ -1867,9 +2254,11 @@ const buildAcceptedSectionTruth = ({
   const content = cloneValue(generated.content ?? generated)
   const truthHash = hashSectionTruthValue({
     content,
+    evidenceHash: generated.evidenceHash || '',
     inputHash: generated.inputHash || '',
     runtimePath,
     sectionKey,
+    sectionEvidenceHash: generated.sectionEvidenceHash || '',
     sourceGeneratedAt: generated.generatedAt || '',
   })
   const previousRevisions = Array.isArray(previousAccepted?.revisions)
@@ -1908,6 +2297,8 @@ const buildAcceptedSectionTruth = ({
     sourceActionKey: generated.actionKey || '',
     sourceGeneratedAt: generated.generatedAt || '',
     inputHash: generated.inputHash || '',
+    evidenceHash: generated.evidenceHash || '',
+    sectionEvidenceHash: generated.sectionEvidenceHash || '',
     sectionKey,
     runtimePath,
     revisions: acceptedRevisions,
@@ -3233,6 +3624,323 @@ export const resetRuntimeDiscovery = async ({
   }
 }
 
+export const updateRuntimeSectionEvidence = async ({
+  actorUserId,
+  auditRequest,
+  scopes,
+  runtimeInstanceId,
+  payload,
+} = {}) => {
+  const expectedUpdatedAt = payload?.expectedUpdatedAt
+  const runtimeInstance = await resolveRuntimeInstanceForMutation({
+    actorUserId,
+    runtimeInstanceId,
+    scopes,
+  })
+
+  assertRuntimeEditable(runtimeInstance)
+  assertExpectedUpdatedAt({ runtimeInstance, expectedUpdatedAt })
+
+  const frameworkPackage = await resolvePackageForAdvance(runtimeInstance?.packageId)
+  const target = resolveSectionEvidenceTarget({ frameworkPackage, payload })
+
+  await assertSectionEvidenceTargetProjectable({ frameworkPackage, target })
+  await assertRuntimeSectionPathWritable({
+    frameworkKey: runtimeInstance.frameworkKey,
+    runtimePath: target.runtimePath,
+  })
+
+  const previousFrameworkState = cloneValue(runtimeInstance.framework_state || {})
+  const previousUpdatedBy = runtimeInstance.updatedBy
+  const updatedAtBefore = runtimeInstance.updatedAt instanceof Date
+    ? runtimeInstance.updatedAt.toISOString()
+    : runtimeInstance.updatedAt
+  const previousRawSection = previousFrameworkState.sections?.[target.stateSectionKey]
+  const sectionObject = normalizeRuntimeSectionObject({
+    value: previousRawSection,
+    sectionKey: target.sectionKey,
+    runtimePath: target.runtimePath,
+  })
+  const previousSectionEvidence = buildSectionEvidenceProjection({
+    additionalEvidence: sectionObject.additionalEvidence,
+    evidenceObjects: sectionObject.evidenceObjects,
+  })
+  const capturedAt = new Date().toISOString()
+
+  let acquisition
+  try {
+    acquisition = ingestUploadedDocumentDiscoveryEvidence({
+      acquisitionProfile: DISCOVERY_ACQUISITION_PROFILES.STANDARD,
+      capturedAt,
+      documentSources: payload?.documentSources || [],
+    })
+  } catch (err) {
+    throw buildMutationError({
+      status: 422,
+      code: 'VALIDATION_FAILED',
+      message: 'Section supporting file ingestion failed.',
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_ACTION_NOT_AVAILABLE,
+      details: {
+        runtimePath: target.runtimePath,
+        sectionKey: target.sectionKey,
+        ingestionError: serializeErrorDetails(err),
+      },
+    })
+  }
+
+  if (!Array.isArray(acquisition?.evidenceObjects) || acquisition.evidenceObjects.length === 0) {
+    throw buildMutationError({
+      status: 422,
+      code: 'VALIDATION_FAILED',
+      message: 'Section supporting files did not produce reviewable evidence.',
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_ACTION_NOT_AVAILABLE,
+      details: {
+        runtimePath: target.runtimePath,
+        sectionKey: target.sectionKey,
+      },
+    })
+  }
+
+  const transformed = transformSectionDocumentAcquisition({
+    acquisition,
+    actorUserId,
+    capturedAt,
+    runtimePath: target.runtimePath,
+    sectionKey: target.sectionKey,
+    stateSectionKey: target.stateSectionKey,
+  })
+  const documents = [
+    ...(Array.isArray(sectionObject.additionalEvidence?.documents)
+      ? cloneValue(sectionObject.additionalEvidence.documents)
+      : []),
+    ...transformed.documents,
+  ]
+  const evidenceObjects = [
+    ...(Array.isArray(sectionObject.evidenceObjects) ? cloneValue(sectionObject.evidenceObjects) : []),
+    ...transformed.evidenceObjects,
+  ]
+  const nextSection = {
+    ...sectionObject,
+    additionalEvidence: buildSectionAdditionalEvidence({
+      actorUserId,
+      documents,
+      evidenceObjects,
+      updatedAt: capturedAt,
+    }),
+    evidenceObjects,
+    gsilContext: buildSectionGsilContext({
+      evidenceObjects,
+      reviewedAt: sectionObject.gsilContext?.updatedAt || '',
+    }),
+  }
+  const sectionEvidence = buildSectionEvidenceProjection({
+    additionalEvidence: nextSection.additionalEvidence,
+    evidenceObjects: nextSection.evidenceObjects,
+  })
+  const nextFrameworkState = cloneValue(previousFrameworkState)
+  nextFrameworkState.sections = nextFrameworkState.sections || {}
+  nextFrameworkState.sections[target.stateSectionKey] = nextSection
+
+  const updatedRuntimeInstance = await persistMutationWithAudit({
+    actorUserId,
+    additionalDiff: {
+      reason: 'SECTION_EVIDENCE_UPLOAD',
+      sectionKey: target.sectionKey,
+      stateSectionKey: target.stateSectionKey,
+      previousDocumentCount: previousSectionEvidence.documentCount,
+      nextDocumentCount: sectionEvidence.documentCount,
+      previousEvidenceObjectCount: previousSectionEvidence.evidenceObjectCount,
+      nextEvidenceObjectCount: sectionEvidence.evidenceObjectCount,
+      uploadedSectionDocumentIds: transformed.documents
+        .map((document) => document.sectionDocumentId)
+        .filter(Boolean),
+      uploadedSectionEvidenceObjectIds: transformed.evidenceObjects
+        .map((evidenceObject) => evidenceObject.evidenceObjectId)
+        .filter(Boolean),
+    },
+    auditRequest,
+    runtimeInstance,
+    nextFrameworkState,
+    previousFrameworkState,
+    previousUpdatedBy,
+    runtimePath: target.runtimePath,
+    previousValue: previousSectionEvidence,
+    nextValue: sectionEvidence,
+    expectedUpdatedAt,
+    updatedAtBefore,
+  })
+
+  return buildSectionEvidenceMutationResponse({
+    runtimeInstance: updatedRuntimeInstance,
+    target,
+    previousSectionEvidence,
+    sectionEvidence,
+  })
+}
+
+export const reviewRuntimeSectionEvidence = async ({
+  actorUserId,
+  auditRequest,
+  evidenceObjectId,
+  scopes,
+  runtimeInstanceId,
+  payload,
+} = {}) => {
+  const expectedUpdatedAt = payload?.expectedUpdatedAt
+  const reviewStatus = normalizeSectionEvidenceReviewStatus(payload?.reviewStatus)
+  const runtimeInstance = await resolveRuntimeInstanceForMutation({
+    actorUserId,
+    runtimeInstanceId,
+    scopes,
+  })
+
+  assertRuntimeEditable(runtimeInstance)
+  assertExpectedUpdatedAt({ runtimeInstance, expectedUpdatedAt })
+
+  const frameworkPackage = await resolvePackageForAdvance(runtimeInstance?.packageId)
+  const target = resolveSectionEvidenceTarget({ frameworkPackage, payload })
+
+  await assertSectionEvidenceTargetProjectable({ frameworkPackage, target })
+  await assertRuntimeSectionPathWritable({
+    frameworkKey: runtimeInstance.frameworkKey,
+    runtimePath: target.runtimePath,
+  })
+
+  const previousFrameworkState = cloneValue(runtimeInstance.framework_state || {})
+  const previousUpdatedBy = runtimeInstance.updatedBy
+  const updatedAtBefore = runtimeInstance.updatedAt instanceof Date
+    ? runtimeInstance.updatedAt.toISOString()
+    : runtimeInstance.updatedAt
+  const previousRawSection = previousFrameworkState.sections?.[target.stateSectionKey]
+  const sectionObject = normalizeRuntimeSectionObject({
+    value: previousRawSection,
+    sectionKey: target.sectionKey,
+    runtimePath: target.runtimePath,
+  })
+  const previousSectionEvidence = buildSectionEvidenceProjection({
+    additionalEvidence: sectionObject.additionalEvidence,
+    evidenceObjects: sectionObject.evidenceObjects,
+  })
+  const previousEvidenceObjects = Array.isArray(sectionObject.evidenceObjects)
+    ? cloneValue(sectionObject.evidenceObjects)
+    : []
+  const previousGsilContext = buildSectionGsilContext({
+    evidenceObjects: previousEvidenceObjects,
+    reviewedAt: sectionObject.gsilContext?.updatedAt || '',
+  })
+  const reviewedAt = new Date().toISOString()
+  let found = false
+  const evidenceObjects = previousEvidenceObjects.map((evidenceObject) => {
+    if (String(evidenceObject?.evidenceObjectId || '').trim() !== String(evidenceObjectId || '').trim()) {
+      return evidenceObject
+    }
+
+    found = true
+    return {
+      ...evidenceObject,
+      reviewStatus,
+      acceptedBy: reviewStatus === DISCOVERY_EVIDENCE_REVIEW_STATUSES.ACCEPTED
+        ? toIdString(actorUserId)
+        : '',
+      acceptanceTimestamp: reviewStatus === DISCOVERY_EVIDENCE_REVIEW_STATUSES.ACCEPTED
+        ? reviewedAt
+        : '',
+      rejectedBy: reviewStatus === DISCOVERY_EVIDENCE_REVIEW_STATUSES.REJECTED
+        ? toIdString(actorUserId)
+        : '',
+      rejectionTimestamp: reviewStatus === DISCOVERY_EVIDENCE_REVIEW_STATUSES.REJECTED
+        ? reviewedAt
+        : '',
+      lastReviewedAt: reviewedAt,
+      lastReviewedBy: toIdString(actorUserId),
+    }
+  })
+
+  if (!found) {
+    throw buildMutationError({
+      status: 404,
+      code: 'NOT_FOUND',
+      message: 'Section evidence object was not found.',
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_ACTION_NOT_AVAILABLE,
+      details: {
+        evidenceObjectId,
+        runtimePath: target.runtimePath,
+        sectionKey: target.sectionKey,
+      },
+    })
+  }
+
+  const documents = Array.isArray(sectionObject.additionalEvidence?.documents)
+    ? cloneValue(sectionObject.additionalEvidence.documents)
+    : []
+  const nextGsilContext = buildSectionGsilContext({
+    evidenceObjects,
+    reviewedAt,
+  })
+  const acceptedEvidenceChanged = previousGsilContext.evidenceHash !== nextGsilContext.evidenceHash
+  let nextSection = {
+    ...sectionObject,
+    additionalEvidence: buildSectionAdditionalEvidence({
+      actorUserId,
+      documents,
+      evidenceObjects,
+      updatedAt: reviewedAt,
+    }),
+    evidenceObjects,
+    gsilContext: nextGsilContext,
+  }
+
+  if (acceptedEvidenceChanged) {
+    nextSection = applyAcceptedSectionEvidenceInvalidation({
+      actorUserId,
+      invalidatedAt: reviewedAt,
+      nextSection,
+      nextSectionEvidenceHash: nextGsilContext.evidenceHash,
+      previousSectionEvidenceHash: previousGsilContext.evidenceHash,
+      sectionObject,
+    })
+  }
+
+  const sectionEvidence = buildSectionEvidenceProjection({
+    additionalEvidence: nextSection.additionalEvidence,
+    evidenceObjects: nextSection.evidenceObjects,
+  })
+  const nextFrameworkState = cloneValue(previousFrameworkState)
+  nextFrameworkState.sections = nextFrameworkState.sections || {}
+  nextFrameworkState.sections[target.stateSectionKey] = nextSection
+
+  const updatedRuntimeInstance = await persistMutationWithAudit({
+    actorUserId,
+    additionalDiff: {
+      reason: 'SECTION_EVIDENCE_REVIEW',
+      sectionKey: target.sectionKey,
+      stateSectionKey: target.stateSectionKey,
+      evidenceObjectId: String(evidenceObjectId || '').trim(),
+      reviewStatus,
+      acceptedEvidenceChanged,
+      previousSectionEvidenceHash: previousGsilContext.evidenceHash,
+      nextSectionEvidenceHash: nextGsilContext.evidenceHash,
+    },
+    auditRequest,
+    runtimeInstance,
+    nextFrameworkState,
+    previousFrameworkState,
+    previousUpdatedBy,
+    runtimePath: target.runtimePath,
+    previousValue: previousSectionEvidence,
+    nextValue: sectionEvidence,
+    expectedUpdatedAt,
+    updatedAtBefore,
+  })
+
+  return buildSectionEvidenceMutationResponse({
+    runtimeInstance: updatedRuntimeInstance,
+    target,
+    previousSectionEvidence,
+    sectionEvidence,
+  })
+}
+
 export const getRuntimeDiscoveryEvidence = async ({
   actorUserId,
   scopes,
@@ -3418,6 +4126,15 @@ export const acceptRuntimeSection = async ({
     })
   }
 
+  const regenerationRequiredReason = getSectionAcceptanceRegenerationRequiredReason(sectionObject)
+  if (regenerationRequiredReason) {
+    throw buildSectionAcceptanceUnavailableError({
+      message: regenerationRequiredReason,
+      runtimePath: target.runtimePath,
+      sectionKey: target.sectionKey,
+    })
+  }
+
   if (isCurrentGeneratedAlreadyAccepted({ accepted: previousAccepted, generated })) {
     throw buildSectionAcceptanceUnavailableError({
       message: 'Runtime section generated content is already accepted.',
@@ -3541,7 +4258,9 @@ const runtimeStateMutationService = {
   acceptRuntimeDiscovery,
   getRuntimeDiscoveryEvidence,
   mutateRuntimeState,
+  reviewRuntimeSectionEvidence,
   resetRuntimeDiscovery,
+  updateRuntimeSectionEvidence,
   updateRuntimeDiscoveryInputs,
 }
 

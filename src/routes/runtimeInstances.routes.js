@@ -13,6 +13,8 @@ import {
   mutateRuntimeState,
   resetRuntimeDiscovery,
   reviewRuntimeDiscoveryEvidence,
+  reviewRuntimeSectionEvidence,
+  updateRuntimeSectionEvidence,
   updateRuntimeDiscoveryInputs,
 } from '../controllers/runtimeInstance.controller.js'
 import {
@@ -23,11 +25,14 @@ import {
   validateListRuntimeInstances,
   validateMutateRuntimeState,
   validateReviewRuntimeDiscoveryEvidence,
+  validateReviewRuntimeSectionEvidence,
   validateResetRuntimeDiscovery,
   validateRuntimeDiscoveryEvidenceParams,
   validateRuntimeActionParams,
   validateRuntimeInstanceId,
+  validateRuntimeSectionEvidenceParams,
   validateUpdateDiscoveryInputs,
+  validateUpdateRuntimeSectionEvidence,
 } from '../validators/runtimeInstance.validator.js'
 
 const router = Router()
@@ -44,6 +49,13 @@ router.patch(
   reviewRuntimeDiscoveryEvidence,
 )
 router.patch('/:runtimeInstanceId/discovery-reset', validateRuntimeInstanceId, validateResetRuntimeDiscovery, resetRuntimeDiscovery)
+router.patch('/:runtimeInstanceId/section-evidence', validateRuntimeInstanceId, validateUpdateRuntimeSectionEvidence, updateRuntimeSectionEvidence)
+router.patch(
+  '/:runtimeInstanceId/section-evidence/:evidenceObjectId/review',
+  validateRuntimeSectionEvidenceParams,
+  validateReviewRuntimeSectionEvidence,
+  reviewRuntimeSectionEvidence,
+)
 router.patch('/:runtimeInstanceId/section-acceptance', validateRuntimeInstanceId, validateAcceptRuntimeSection, acceptRuntimeSection)
 router.patch('/:runtimeInstanceId/discovery-inputs', validateRuntimeInstanceId, validateUpdateDiscoveryInputs, updateRuntimeDiscoveryInputs)
 router.patch('/:runtimeInstanceId/data', validateRuntimeInstanceId, validateMutateRuntimeState, mutateRuntimeState)

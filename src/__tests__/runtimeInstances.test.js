@@ -652,6 +652,116 @@ const makeReviewableDiscoveryEvidencePack = (overrides = {}) => {
   }
 }
 
+const makeSectionEvidenceObject = (overrides = {}) => ({
+  evidenceObjectId: 'section_evidence_value_fixture',
+  sectionKey: 'value_drivers',
+  runtimePath: 'framework_state.sections.value_drivers',
+  sourceId: 'section_document_value_fixture',
+  sourceType: 'SECTION_UPLOADED_DOCUMENT',
+  category: 'Value Drivers',
+  coverageArea: 'Decision Context',
+  extractedFact: 'Document Section Supporting File: governed workflow automation reduces manual effort.',
+  confidence: {
+    level: 'SOURCE_BACKED',
+    score: 74,
+    basis: ['UPLOADED_DOCUMENT', 'DETERMINISTIC_TEXT_EXTRACTION'],
+  },
+  createdAt: '2026-05-19T08:02:00.000Z',
+  reviewStatus: 'PENDING',
+  acquisitionMethod: 'SECTION_DOCUMENT_INGESTION',
+  extractionTimestamp: '2026-05-19T08:02:00.000Z',
+  acceptedBy: '',
+  acceptanceTimestamp: '',
+  rejectedBy: '',
+  rejectionTimestamp: '',
+  auditRef: '',
+  lineageRef: 'lineage:section_document_value_fixture:section_evidence_value_fixture',
+  acquisitionProfile: '',
+  sourceFileName: 'value-notes.md',
+  documentAssetType: 'SECTION_SUPPORTING_FILE',
+  ...overrides,
+})
+
+const makeSectionAdditionalEvidence = ({
+  documents = [
+    {
+      sectionDocumentId: 'section_document_value_fixture',
+      sourceId: 'section_document_value_fixture',
+      fileName: 'value-notes.md',
+      fileType: 'TXT',
+      mimeType: 'text/markdown',
+      sizeBytes: 92,
+      uploadedAt: '2026-05-19T08:02:00.000Z',
+      uploadedBy: CUSTOMER_ADMIN_ID,
+      status: 'PROCESSED',
+      ingestionMode: 'TEXT_NATIVE',
+      evidenceObjectsGenerated: 1,
+    },
+  ],
+  evidenceObjects = [makeSectionEvidenceObject()],
+  status = 'PENDING_REVIEW',
+} = {}) => {
+  const acceptedEvidenceObjectCount = evidenceObjects.filter((evidenceObject) => evidenceObject.reviewStatus === 'ACCEPTED').length
+  const pendingEvidenceObjectCount = evidenceObjects.filter((evidenceObject) => evidenceObject.reviewStatus === 'PENDING').length
+  const rejectedEvidenceObjectCount = evidenceObjects.filter((evidenceObject) => evidenceObject.reviewStatus === 'REJECTED').length
+
+  return {
+    status,
+    updatedAt: '2026-05-19T08:02:00.000Z',
+    updatedBy: CUSTOMER_ADMIN_ID,
+    documentCount: documents.length,
+    evidenceObjectCount: evidenceObjects.length,
+    acceptedEvidenceObjectCount,
+    pendingEvidenceObjectCount,
+    rejectedEvidenceObjectCount,
+    documents,
+  }
+}
+
+const makeSectionEvidencePackage = () => makeRendererFrameworkPackage({
+  sections: [
+    {
+      sectionKey: 'customer_problem',
+      runtimePath: 'framework_state.sections.customer_problem',
+      required: true,
+    },
+    {
+      sectionKey: 'value_drivers',
+      runtimePath: 'framework_state.sections.value_drivers',
+      required: true,
+    },
+  ],
+})
+
+const makeSectionEvidenceRuntimePathRecords = () => [
+  makeRuntimePathRecord(),
+  makeRuntimePathRecord({
+    stableId: 'path-framework-state-sections-value-drivers',
+    pathKey: 'framework_state.sections.value_drivers',
+    label: 'Value Drivers',
+    allowedOperations: ['READ', 'WRITE', 'BIND'],
+    displayOrder: 20,
+  }),
+]
+
+const makeSectionEvidenceUIContract = () => makeUIContract({
+  sections: [
+    makeUIContract().sections[0],
+    {
+      sectionKey: 'value_drivers',
+      runtimePath: 'framework_state.sections.value_drivers',
+      source: 'PACKAGE',
+      isCustom: false,
+      label: 'Value Drivers',
+      displayOrder: 20,
+      isVisible: true,
+      isEditable: true,
+      isRequiredDisplay: true,
+      isReadOnlyDisplay: false,
+    },
+  ],
+})
+
 const actionLabels = {
   SAVE_DISCOVERY_INPUTS: 'Save Intelligence Hub Inputs',
   BUILD_EVIDENCE_PACK: 'Build Evidence Pack',
@@ -4287,6 +4397,497 @@ describe('Runtime Instance API', () => {
     expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 
+  test('PATCH /api/v1/runtime-instances/:id/section-evidence stores section-scoped evidence without mutating the Intelligence Hub', async () => {
+    const evidencePack = makeReviewableDiscoveryEvidencePack({ accepted: true })
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+      packageId: FRAMEWORK_PACKAGE_ID,
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: evidencePack,
+        sections: {
+          value_drivers: {
+            input: 'Initial value driver context.',
+            state: { status: 'DRAFT' },
+          },
+        },
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:02:00.000Z'),
+    }))
+    FrameworkPackage.findById.mockResolvedValue(makeSectionEvidencePackage())
+    const runtimePathRecords = makeSectionEvidenceRuntimePathRecords()
+    RuntimePathRegistry.findOne = buildRuntimePathFindOneMock(runtimePathRecords)
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery(runtimePathRecords))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeSectionEvidenceUIContract()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-evidence`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.value_drivers',
+        sectionKey: 'value_drivers',
+        expectedUpdatedAt: '2026-05-19T08:01:00.000Z',
+        documentSources: [
+          {
+            fileName: 'value-notes.md',
+            mimeType: 'text/markdown',
+            assetType: 'SECTION_SUPPORTING_FILE',
+            sizeBytes: 156,
+            textContent: 'Governed workflow automation reduces manual proposal effort for executive value narratives.',
+          },
+        ],
+      })
+
+    expect(res.status).toBe(200)
+    const persistedFrameworkState = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state
+    expect(persistedFrameworkState.evidence_pack).toEqual(evidencePack)
+    const persistedSection = persistedFrameworkState.sections.value_drivers
+    expect(persistedSection.additionalEvidence).toEqual(expect.objectContaining({
+      status: 'PENDING_REVIEW',
+      documentCount: 1,
+      evidenceObjectCount: 1,
+      acceptedEvidenceObjectCount: 0,
+      pendingEvidenceObjectCount: 1,
+      rejectedEvidenceObjectCount: 0,
+    }))
+    expect(persistedSection.additionalEvidence.documents[0]).toEqual(expect.objectContaining({
+      fileName: 'value-notes.md',
+      sourceId: expect.stringMatching(/^section_document_/),
+      status: 'PROCESSED',
+      ingestionMode: 'TEXT_NATIVE',
+      evidenceObjectsGenerated: 1,
+    }))
+    expect(persistedSection.evidenceObjects).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        evidenceObjectId: expect.stringMatching(/^section_evidence_/),
+        sectionKey: 'value_drivers',
+        runtimePath: 'framework_state.sections.value_drivers',
+        sourceType: 'SECTION_UPLOADED_DOCUMENT',
+        acquisitionMethod: 'SECTION_DOCUMENT_INGESTION',
+        reviewStatus: 'PENDING',
+        sourceFileName: 'value-notes.md',
+        documentAssetType: 'SECTION_SUPPORTING_FILE',
+      }),
+    ]))
+    expect(JSON.stringify(persistedSection)).not.toContain('textContent')
+    expect(JSON.stringify(persistedSection)).not.toContain('contentBase64')
+    expect(res.body.data.section.sectionEvidence).toEqual(expect.objectContaining({
+      status: 'PENDING_REVIEW',
+      documentCount: 1,
+      evidenceObjectCount: 1,
+      pendingEvidenceObjectCount: 1,
+    }))
+    expect(JSON.stringify(res.body.data.section.sectionEvidence)).not.toContain('Governed workflow automation')
+    expect(JSON.stringify(AuditLog.createLog.mock.calls[0][0].diff)).not.toContain('Governed workflow automation')
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'RUNTIME_STATE_MUTATED',
+      resourceType: 'RuntimeInstance',
+      resourceId: RUNTIME_INSTANCE_ID,
+      diff: expect.objectContaining({
+        runtimePath: 'framework_state.sections.value_drivers',
+        reason: 'SECTION_EVIDENCE_UPLOAD',
+        previousValue: expect.objectContaining({
+          documentCount: 0,
+          evidenceObjectCount: 0,
+        }),
+        nextValue: expect.objectContaining({
+          documentCount: 1,
+          evidenceObjectCount: 1,
+        }),
+      }),
+    }))
+  })
+
+  test('PATCH /api/v1/runtime-instances/:id/section-evidence rejects unsupported files without partial persistence', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+      packageId: FRAMEWORK_PACKAGE_ID,
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: makeReviewableDiscoveryEvidencePack({ accepted: true }),
+        sections: {
+          value_drivers: { input: 'Initial value driver context.' },
+        },
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+    FrameworkPackage.findById.mockResolvedValue(makeSectionEvidencePackage())
+    const runtimePathRecords = makeSectionEvidenceRuntimePathRecords()
+    RuntimePathRegistry.findOne = buildRuntimePathFindOneMock(runtimePathRecords)
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery(runtimePathRecords))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeSectionEvidenceUIContract()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-evidence`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.value_drivers',
+        sectionKey: 'value_drivers',
+        expectedUpdatedAt: '2026-05-19T08:01:00.000Z',
+        documentSources: [
+          {
+            fileName: 'value-notes.exe',
+            mimeType: 'application/octet-stream',
+            assetType: 'SECTION_SUPPORTING_FILE',
+            sizeBytes: 32,
+            textContent: 'Unsupported binary-like supporting evidence file.',
+          },
+        ],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('PATCH /api/v1/runtime-instances/:id/section-evidence rejects stale section upload without partial persistence', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+      packageId: FRAMEWORK_PACKAGE_ID,
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: makeReviewableDiscoveryEvidencePack({ accepted: true }),
+        sections: {
+          value_drivers: { input: 'Initial value driver context.' },
+        },
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+    FrameworkPackage.findById.mockResolvedValue(makeSectionEvidencePackage())
+    const runtimePathRecords = makeSectionEvidenceRuntimePathRecords()
+    RuntimePathRegistry.findOne = buildRuntimePathFindOneMock(runtimePathRecords)
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery(runtimePathRecords))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeSectionEvidenceUIContract()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-evidence`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.value_drivers',
+        sectionKey: 'value_drivers',
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+        documentSources: [
+          {
+            fileName: 'value-notes.md',
+            mimeType: 'text/markdown',
+            assetType: 'SECTION_SUPPORTING_FILE',
+            sizeBytes: 156,
+            textContent: 'Governed workflow automation reduces manual proposal effort.',
+          },
+        ],
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.message).toBe('Runtime instance has changed since the renderer projection was loaded.')
+    expect(res.body.error.details).toEqual(expect.objectContaining({
+      expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+      currentUpdatedAt: '2026-05-19T08:01:00.000Z',
+    }))
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('PATCH /api/v1/runtime-instances/:id/section-evidence/:evidenceObjectId/review accepts evidence and invalidates stale section truth', async () => {
+    const evidenceObject = makeSectionEvidenceObject()
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:03:00.000Z'),
+      packageId: FRAMEWORK_PACKAGE_ID,
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: makeReviewableDiscoveryEvidencePack({ accepted: true }),
+        sections: {
+          value_drivers: {
+            input: 'Initial value driver context.',
+            generated: {
+              content: 'Value Drivers: faster proposal workflows.',
+              generatedAt: '2026-05-19T08:01:00.000Z',
+              inputHash: 'hash-input',
+              sectionEvidenceHash: 'sha256:previous-section-evidence',
+            },
+            accepted: {
+              content: 'Value Drivers: faster proposal workflows.',
+              acceptedAt: '2026-05-19T08:02:00.000Z',
+              acceptedBy: CUSTOMER_ADMIN_ID,
+              sourceGeneratedAt: '2026-05-19T08:01:00.000Z',
+              inputHash: 'hash-input',
+            },
+            review: { status: 'ACCEPTED' },
+            state: { status: 'ACCEPTED' },
+            additionalEvidence: makeSectionAdditionalEvidence({ evidenceObjects: [evidenceObject] }),
+            evidenceObjects: [evidenceObject],
+            gsilContext: {},
+          },
+        },
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:04:00.000Z'),
+    }))
+    FrameworkPackage.findById.mockResolvedValue(makeSectionEvidencePackage())
+    const runtimePathRecords = makeSectionEvidenceRuntimePathRecords()
+    RuntimePathRegistry.findOne = buildRuntimePathFindOneMock(runtimePathRecords)
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery(runtimePathRecords))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeSectionEvidenceUIContract()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-evidence/section_evidence_value_fixture/review`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.value_drivers',
+        sectionKey: 'value_drivers',
+        reviewStatus: 'ACCEPTED',
+        expectedUpdatedAt: '2026-05-19T08:03:00.000Z',
+      })
+
+    expect(res.status).toBe(200)
+    const persistedSection = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state.sections.value_drivers
+    expect(persistedSection.evidenceObjects[0]).toEqual(expect.objectContaining({
+      evidenceObjectId: 'section_evidence_value_fixture',
+      reviewStatus: 'ACCEPTED',
+      acceptedBy: CUSTOMER_ADMIN_ID,
+      acceptanceTimestamp: expect.any(String),
+      rejectedBy: '',
+      rejectionTimestamp: '',
+    }))
+    expect(persistedSection.gsilContext).toEqual(expect.objectContaining({
+      sectionEvidenceSummary: expect.stringContaining('governed workflow automation reduces manual effort'),
+      acceptedEvidenceObjectIds: ['section_evidence_value_fixture'],
+      sourceRefs: ['section_evidence_value_fixture'],
+    }))
+    expect(persistedSection.state).toEqual(expect.objectContaining({
+      needsRegeneration: true,
+      sectionEvidenceInvalidatedAt: expect.any(String),
+      sectionEvidenceInvalidatedBy: CUSTOMER_ADMIN_ID,
+      acceptedInvalidatedAt: expect.any(String),
+      acceptedInvalidationReason: 'SECTION_EVIDENCE_CHANGED',
+    }))
+    expect(persistedSection.intelligence.invalidation).toEqual(expect.objectContaining({
+      reason: 'SECTION_EVIDENCE_CHANGED',
+      invalidatedBy: CUSTOMER_ADMIN_ID,
+      previousSectionEvidenceHash: expect.any(String),
+      nextSectionEvidenceHash: expect.any(String),
+    }))
+    expect(res.body.data.section.sectionEvidence).toEqual(expect.objectContaining({
+      status: 'ACCEPTED',
+      acceptedEvidenceObjectCount: 1,
+      pendingEvidenceObjectCount: 0,
+      evidenceObjects: [
+        expect.objectContaining({
+          evidenceObjectId: 'section_evidence_value_fixture',
+          reviewStatus: 'ACCEPTED',
+        }),
+      ],
+    }))
+    expect(JSON.stringify(res.body.data.section.sectionEvidence)).not.toContain('governed workflow automation')
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      diff: expect.objectContaining({
+        runtimePath: 'framework_state.sections.value_drivers',
+        reason: 'SECTION_EVIDENCE_REVIEW',
+        reviewStatus: 'ACCEPTED',
+        acceptedEvidenceChanged: true,
+      }),
+    }))
+  })
+
+  test('PATCH /api/v1/runtime-instances/:id/section-evidence/:evidenceObjectId/review rejects stale review without partial persistence', async () => {
+    const evidenceObject = makeSectionEvidenceObject()
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:03:00.000Z'),
+      packageId: FRAMEWORK_PACKAGE_ID,
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: makeReviewableDiscoveryEvidencePack({ accepted: true }),
+        sections: {
+          value_drivers: {
+            input: 'Initial value driver context.',
+            additionalEvidence: makeSectionAdditionalEvidence({ evidenceObjects: [evidenceObject] }),
+            evidenceObjects: [evidenceObject],
+          },
+        },
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+    FrameworkPackage.findById.mockResolvedValue(makeSectionEvidencePackage())
+    const runtimePathRecords = makeSectionEvidenceRuntimePathRecords()
+    RuntimePathRegistry.findOne = buildRuntimePathFindOneMock(runtimePathRecords)
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery(runtimePathRecords))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeSectionEvidenceUIContract()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-evidence/section_evidence_value_fixture/review`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.value_drivers',
+        sectionKey: 'value_drivers',
+        reviewStatus: 'ACCEPTED',
+        expectedUpdatedAt: '2026-05-19T08:02:00.000Z',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.message).toBe('Runtime instance has changed since the renderer projection was loaded.')
+    expect(res.body.error.details).toEqual(expect.objectContaining({
+      expectedUpdatedAt: '2026-05-19T08:02:00.000Z',
+      currentUpdatedAt: '2026-05-19T08:03:00.000Z',
+    }))
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('PATCH /api/v1/runtime-instances/:id/section-evidence/:evidenceObjectId/review rejects unknown section evidence object without partial persistence', async () => {
+    const evidenceObject = makeSectionEvidenceObject()
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:03:00.000Z'),
+      packageId: FRAMEWORK_PACKAGE_ID,
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: makeReviewableDiscoveryEvidencePack({ accepted: true }),
+        sections: {
+          value_drivers: {
+            input: 'Initial value driver context.',
+            additionalEvidence: makeSectionAdditionalEvidence({ evidenceObjects: [evidenceObject] }),
+            evidenceObjects: [evidenceObject],
+          },
+        },
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+    FrameworkPackage.findById.mockResolvedValue(makeSectionEvidencePackage())
+    const runtimePathRecords = makeSectionEvidenceRuntimePathRecords()
+    RuntimePathRegistry.findOne = buildRuntimePathFindOneMock(runtimePathRecords)
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery(runtimePathRecords))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeSectionEvidenceUIContract()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-evidence/section_evidence_missing/review`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.value_drivers',
+        sectionKey: 'value_drivers',
+        reviewStatus: 'ACCEPTED',
+        expectedUpdatedAt: '2026-05-19T08:03:00.000Z',
+      })
+
+    expect(res.status).toBe(404)
+    expect(res.body.error.code).toBe('NOT_FOUND')
+    expect(res.body.error.message).toBe('Section evidence object was not found.')
+    expect(res.body.error.details).toEqual(expect.objectContaining({
+      evidenceObjectId: 'section_evidence_missing',
+      runtimePath: 'framework_state.sections.value_drivers',
+      sectionKey: 'value_drivers',
+    }))
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('PATCH /api/v1/runtime-instances/:id/section-evidence/:evidenceObjectId/review rolls back when audit persistence fails', async () => {
+    const evidenceObject = makeSectionEvidenceObject()
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedBy: CUSTOMER_ADMIN_ID,
+      updatedAt: new Date('2026-05-19T08:03:00.000Z'),
+      packageId: FRAMEWORK_PACKAGE_ID,
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: makeReviewableDiscoveryEvidencePack({ accepted: true }),
+        sections: {
+          value_drivers: {
+            input: 'Initial value driver context.',
+            additionalEvidence: makeSectionAdditionalEvidence({ evidenceObjects: [evidenceObject] }),
+            evidenceObjects: [evidenceObject],
+          },
+        },
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+      .mockResolvedValueOnce(makeRuntimeInstanceDocument({
+        ...runtimeInstanceDoc,
+        framework_state: {
+          ...runtimeInstanceDoc.framework_state,
+          sections: {
+            ...runtimeInstanceDoc.framework_state.sections,
+            value_drivers: {
+              ...runtimeInstanceDoc.framework_state.sections.value_drivers,
+              evidenceObjects: [
+                {
+                  ...evidenceObject,
+                  reviewStatus: 'ACCEPTED',
+                },
+              ],
+            },
+          },
+        },
+        updatedAt: new Date('2026-05-19T08:04:00.000Z'),
+      }))
+      .mockResolvedValueOnce(makeRuntimeInstanceDocument({
+        ...runtimeInstanceDoc,
+        updatedAt: new Date('2026-05-19T08:05:00.000Z'),
+      }))
+    FrameworkPackage.findById.mockResolvedValue(makeSectionEvidencePackage())
+    const runtimePathRecords = makeSectionEvidenceRuntimePathRecords()
+    RuntimePathRegistry.findOne = buildRuntimePathFindOneMock(runtimePathRecords)
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery(runtimePathRecords))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeSectionEvidenceUIContract()))
+    AuditLog.createLog = jest.fn(async () => {
+      throw new Error('audit unavailable')
+    })
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-evidence/section_evidence_value_fixture/review`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.value_drivers',
+        sectionKey: 'value_drivers',
+        reviewStatus: 'ACCEPTED',
+        expectedUpdatedAt: '2026-05-19T08:03:00.000Z',
+      })
+
+    expect(res.status).toBe(500)
+    expect(res.body.error.code).toBe('RUNTIME_STATE_MUTATION_AUDIT_FAILED')
+    expect(RuntimeInstance.findOneAndUpdate).toHaveBeenCalledTimes(2)
+    expect(RuntimeInstance.findOneAndUpdate.mock.calls[1]).toEqual([
+      {
+        _id: RUNTIME_INSTANCE_ID,
+        updatedAt: new Date('2026-05-19T08:04:00.000Z'),
+      },
+      {
+        $set: {
+          framework_state: runtimeInstanceDoc.framework_state,
+          updatedBy: CUSTOMER_ADMIN_ID,
+        },
+      },
+      {
+        new: true,
+        runValidators: true,
+      },
+    ])
+  })
+
   test('GET /api/v1/runtime-instances/:id/evidence returns governed evidence details without fabricating sources', async () => {
     const pendingCoverage = {
       status: 'SUFFICIENT_FOR_FRAMEWORK',
@@ -5631,6 +6232,75 @@ describe('Runtime Instance API', () => {
       })
 
     expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('RUNTIME_ACTION_NOT_AVAILABLE')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('rejects section acceptance when accepted section evidence requires regeneration', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: makeReadyDiscoveryEvidencePack({
+          accepted: true,
+          state: {
+            status: 'ACCEPTED',
+            inputComplete: true,
+            evidenceReady: true,
+            accepted: true,
+            needsRefresh: false,
+          },
+        }),
+        sections: {
+          customer_problem: {
+            input: 'Proposal creation is slow.',
+            generated: {
+              content: 'Customer Problem: Proposal creation is slow.',
+              generatedAt: '2026-05-19T08:01:00.000Z',
+              actionKey: 'GENERATE_SECTION',
+              inputHash: 'hash-1',
+            },
+            review: {
+              status: 'PENDING_REVIEW',
+              invalidatedAt: '2026-05-19T08:02:00.000Z',
+              invalidationReason: 'SECTION_EVIDENCE_CHANGED',
+            },
+            state: {
+              status: 'GENERATED',
+              needsRegeneration: true,
+              sectionEvidenceInvalidatedAt: '2026-05-19T08:02:00.000Z',
+              acceptedInvalidationReason: 'SECTION_EVIDENCE_CHANGED',
+            },
+            lineage: {
+              sectionEvidenceInvalidationReason: 'SECTION_EVIDENCE_CHANGED',
+            },
+            intelligence: {
+              invalidation: {
+                reason: 'SECTION_EVIDENCE_CHANGED',
+              },
+            },
+            revisions: [],
+          },
+        },
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
+    RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimePathRecord()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-acceptance`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.customer_problem',
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.message).toBe('Accepted section evidence changed. Regenerate this section before accepting truth.')
     expect(res.body.error.details.reason).toBe('RUNTIME_ACTION_NOT_AVAILABLE')
     expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
     expect(AuditLog.createLog).not.toHaveBeenCalled()
@@ -9225,6 +9895,122 @@ describe('Runtime Instance API', () => {
     ]))
   })
 
+  test('GENERATE_SECTION uses accepted section evidence objects and excludes pending section evidence', async () => {
+    const acceptedFact = 'Document Section Supporting File: governed workflow automation reduces manual proposal effort.'
+    const pendingFact = 'Pending section evidence says unsupported competitor displacement is guaranteed.'
+    const acceptedSectionEvidence = makeSectionEvidenceObject({
+      evidenceObjectId: 'section_evidence_accepted_fixture',
+      extractedFact: acceptedFact,
+      reviewStatus: 'ACCEPTED',
+      acceptedBy: CUSTOMER_ADMIN_ID,
+      acceptanceTimestamp: '2026-05-19T08:02:00.000Z',
+    })
+    const pendingSectionEvidence = makeSectionEvidenceObject({
+      evidenceObjectId: 'section_evidence_pending_fixture',
+      extractedFact: pendingFact,
+      reviewStatus: 'PENDING',
+    })
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: makeReadyDiscoveryEvidencePack({
+          accepted: true,
+          state: {
+            status: 'ACCEPTED',
+            inputComplete: true,
+            evidenceReady: true,
+            accepted: true,
+            needsRefresh: false,
+          },
+          scoped_views: {},
+        }),
+        sections: {
+          value_drivers: {
+            input: '',
+            additionalEvidence: makeSectionAdditionalEvidence({
+              evidenceObjects: [acceptedSectionEvidence, pendingSectionEvidence],
+              status: 'PENDING_REVIEW',
+            }),
+            evidenceObjects: [acceptedSectionEvidence, pendingSectionEvidence],
+          },
+        },
+        validation: {},
+        readiness: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      sections: [
+        {
+          sectionKey: 'value_drivers',
+          runtimePath: 'framework_state.sections.value_drivers',
+          required: true,
+          validationKeys: ['required-sections-check'],
+        },
+      ],
+      workflowBindings: [makeWorkflowBinding('GENERATE_SECTION')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([
+      makeRuntimePathRecord({
+        stableId: 'path-framework-state-sections-value-drivers',
+        pathKey: 'framework_state.sections.value_drivers',
+        label: 'Value Drivers',
+      }),
+    ]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      sections: [
+        {
+          sectionKey: 'value_drivers',
+          runtimePath: 'framework_state.sections.value_drivers',
+          source: 'PACKAGE',
+          isCustom: false,
+          label: 'Value Drivers',
+          displayOrder: 10,
+          isVisible: true,
+          isEditable: true,
+        },
+      ],
+      actions: [makeUIAction('GENERATE_SECTION')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('GENERATE_SECTION')]))
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+    }))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/GENERATE_SECTION`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+        sectionKey: 'value_drivers',
+      })
+
+    expect(res.status).toBe(200)
+    const persistedSection = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state.sections.value_drivers
+    expect(persistedSection.state.status).toBe('GENERATED')
+    expect(persistedSection.generated.sectionEvidenceHash).toEqual(expect.any(String))
+    expect(persistedSection.intelligence.supportingEvidence).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        label: 'Value Drivers',
+        sourceType: 'SECTION_EVIDENCE_OBJECT',
+        refKey: 'section_evidence_accepted_fixture',
+        summary: expect.stringContaining('governed workflow automation reduces manual proposal effort'),
+      }),
+    ]))
+    expect(persistedSection.generated.supportingEvidenceRefs).toEqual(expect.arrayContaining([
+      'section_evidence_accepted_fixture',
+    ]))
+    expect(JSON.stringify(persistedSection.intelligence.supportingEvidence)).not.toContain(pendingFact)
+    expect(JSON.stringify(persistedSection.generated.supportingEvidenceRefs)).not.toContain('section_evidence_pending_fixture')
+  })
+
   test('GENERATE_SECTION uses accepted Evidence Objects and excludes rejected Discovery facts', async () => {
     const acceptedFact = 'Document Customer Notes: governed workflow automation reduces manual proposal effort.'
     const rejectedFact = 'Rejected competitor claim: Acme beats every competitor by 90%.'
@@ -10209,6 +10995,146 @@ describe('Runtime Instance API', () => {
             forceRegenerateReason: '',
             invalidatedDependencySectionKeys: ['customer_problem'],
             reasons: ['DEPENDENCY_CONTEXT_INVALIDATED'],
+          }),
+        }),
+      }),
+    }))
+  })
+
+  test('allows REGENERATE_SECTION when accepted section evidence invalidated legacy generated truth without a previous section evidence hash', async () => {
+    const unchangedInput = 'Value drivers need better automation proof.'
+    const acceptedSectionEvidence = makeSectionEvidenceObject({
+      reviewStatus: 'ACCEPTED',
+      acceptedBy: CUSTOMER_ADMIN_ID,
+      acceptanceTimestamp: '2026-05-19T08:03:00.000Z',
+    })
+    const previousGenerated = {
+      content: 'Value Drivers: better automation proof.',
+      generatedAt: '2026-05-19T08:01:00.000Z',
+      actionKey: 'GENERATE_SECTION',
+      inputHash: hashSectionInput(unchangedInput),
+      generator: {
+        mode: 'DETERMINISTIC_TEMPLATE',
+        adapter: 'runtime-section-template-v1',
+        packageKey: 'vmf-standard-2-3-1',
+        packageVersion: '2.3.1',
+      },
+    }
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:04:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: makeReadyDiscoveryEvidencePack({
+          accepted: true,
+          state: {
+            status: 'ACCEPTED',
+            inputComplete: true,
+            evidenceReady: true,
+            accepted: true,
+            needsRefresh: false,
+          },
+        }),
+        sections: {
+          value_drivers: {
+            input: unchangedInput,
+            generated: previousGenerated,
+            accepted: {
+              content: 'Accepted value drivers truth.',
+              acceptedAt: '2026-05-19T08:02:00.000Z',
+              sourceGeneratedAt: '2026-05-19T08:01:00.000Z',
+              inputHash: hashSectionInput(unchangedInput),
+            },
+            review: { status: 'ACCEPTED' },
+            state: {
+              status: 'ACCEPTED',
+              needsRegeneration: true,
+              acceptedInvalidationReason: 'SECTION_EVIDENCE_CHANGED',
+              revisionCount: 0,
+            },
+            additionalEvidence: makeSectionAdditionalEvidence({
+              evidenceObjects: [acceptedSectionEvidence],
+              status: 'ACCEPTED',
+            }),
+            evidenceObjects: [acceptedSectionEvidence],
+            intelligence: {
+              invalidation: {
+                reason: 'SECTION_EVIDENCE_CHANGED',
+              },
+            },
+            lineage: {
+              sectionKey: 'value_drivers',
+              runtimePath: 'framework_state.sections.value_drivers',
+              sectionEvidenceInvalidationReason: 'SECTION_EVIDENCE_CHANGED',
+            },
+            dependencies: {
+              state: 'SATISFIED',
+              requiredSectionKeys: [],
+              satisfiedSectionKeys: [],
+              missingSectionKeys: [],
+              invalidatedSectionKeys: [],
+            },
+            revisions: [],
+          },
+        },
+        validation: {},
+        readiness: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeSectionEvidencePackage())
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery(makeSectionEvidenceRuntimePathRecords()))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      sections: [
+        {
+          sectionKey: 'value_drivers',
+          runtimePath: 'framework_state.sections.value_drivers',
+          source: 'PACKAGE',
+          isCustom: false,
+          label: 'Value Drivers',
+          displayOrder: 10,
+          isVisible: true,
+          isEditable: true,
+        },
+      ],
+      actions: [makeUIAction('REGENERATE_SECTION')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('REGENERATE_SECTION')]))
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:05:00.000Z'),
+    }))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/REGENERATE_SECTION`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-05-19T08:04:00.000Z',
+        sectionKey: 'value_drivers',
+      })
+
+    expect(res.status).toBe(200)
+    const persistedSection = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state.sections.value_drivers
+    expect(persistedSection.state.status).toBe('REGENERATED')
+    expect(persistedSection.state.needsRegeneration).toBeUndefined()
+    expect(persistedSection.state.sectionEvidenceInvalidatedAt).toBeUndefined()
+    expect(persistedSection.state.sectionEvidenceInvalidatedBy).toBeUndefined()
+    expect(persistedSection.state.acceptedInvalidationReason).toBe('SECTION_GENERATION_REPLACED')
+    expect(persistedSection.lineage.sectionEvidenceInvalidationReason).toBeUndefined()
+    expect(persistedSection.intelligence.invalidation.reason).toBe('SECTION_GENERATION_REPLACED')
+    expect(persistedSection.generated.sectionEvidenceHash).toEqual(expect.any(String))
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      diff: expect.objectContaining({
+        generation: expect.objectContaining({
+          sectionKey: 'value_drivers',
+          regeneration: expect.objectContaining({
+            reasons: ['SECTION_EVIDENCE_CHANGED'],
+            previousSectionEvidenceHash: '',
+            currentSectionEvidenceHash: expect.any(String),
           }),
         }),
       }),
@@ -11420,6 +12346,147 @@ describe('Runtime Instance API', () => {
         }),
       }),
     ])
+  })
+
+  test('projects section evidence metadata without exposing extracted facts or uploaded content', async () => {
+    const acceptedEvidenceObject = makeSectionEvidenceObject({
+      reviewStatus: 'ACCEPTED',
+      acceptedBy: CUSTOMER_ADMIN_ID,
+      acceptanceTimestamp: '2026-05-19T08:03:00.000Z',
+      extractedFact: 'Document Section Supporting File: confidential raw customer margin narrative.',
+      contentBase64: 'ZG8tbm90LXByb2plY3Q=',
+      rawText: 'do not project raw text',
+    })
+    FrameworkPackage.findById.mockResolvedValue(makeSectionEvidencePackage())
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery(makeSectionEvidenceRuntimePathRecords()))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeSectionEvidenceUIContract()))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {
+          customer_problem: {
+            input: 'Proposal teams need faster governed narrative creation.',
+            generated: {
+              content: 'Customer Problem: proposal teams need faster governed narrative creation.',
+              generatedAt: '2026-05-19T08:01:00.000Z',
+            },
+            accepted: {
+              content: 'Customer Problem: proposal teams need faster governed narrative creation.',
+              acceptedAt: '2026-05-19T08:02:00.000Z',
+              acceptedBy: CUSTOMER_ADMIN_ID,
+              sourceGeneratedAt: '2026-05-19T08:01:00.000Z',
+            },
+            review: { status: 'ACCEPTED' },
+            state: { status: 'ACCEPTED' },
+          },
+          value_drivers: {
+            input: 'Initial value driver context.',
+            generated: {
+              content: 'Value Drivers: faster proposal workflows.',
+              generatedAt: '2026-05-19T08:01:00.000Z',
+              inputHash: 'hash-input',
+            },
+            accepted: {
+              content: 'Value Drivers: faster proposal workflows.',
+              acceptedAt: '2026-05-19T08:02:00.000Z',
+              acceptedBy: CUSTOMER_ADMIN_ID,
+              sourceGeneratedAt: '2026-05-19T08:01:00.000Z',
+              inputHash: 'hash-input',
+            },
+            review: { status: 'ACCEPTED' },
+            state: {
+              status: 'ACCEPTED',
+              needsRegeneration: true,
+              acceptedInvalidationReason: 'SECTION_EVIDENCE_CHANGED',
+            },
+            additionalEvidence: makeSectionAdditionalEvidence({
+              documents: [
+                {
+                  sectionDocumentId: 'section_document_value_fixture',
+                  sourceId: 'section_document_value_fixture',
+                  fileName: 'value-notes.md',
+                  fileType: 'TXT',
+                  mimeType: 'text/markdown',
+                  sizeBytes: 92,
+                  uploadedAt: '2026-05-19T08:02:00.000Z',
+                  uploadedBy: CUSTOMER_ADMIN_ID,
+                  status: 'PROCESSED',
+                  ingestionMode: 'TEXT_NATIVE',
+                  evidenceObjectsGenerated: 1,
+                  contentBase64: 'ZG8tbm90LXByb2plY3Q=',
+                  textContent: 'do not project uploaded text',
+                },
+              ],
+              evidenceObjects: [acceptedEvidenceObject],
+              status: 'ACCEPTED',
+            }),
+            evidenceObjects: [acceptedEvidenceObject],
+          },
+        },
+        validation: {},
+      },
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    const valueDrivers = res.body.data.sections.find((section) => section.sectionKey === 'value_drivers')
+    expect(valueDrivers.sectionEvidence).toEqual(expect.objectContaining({
+      status: 'ACCEPTED',
+      documentCount: 1,
+      evidenceObjectCount: 1,
+      acceptedEvidenceObjectCount: 1,
+      pendingEvidenceObjectCount: 0,
+      rejectedEvidenceObjectCount: 0,
+      documents: [
+        expect.objectContaining({
+          fileName: 'value-notes.md',
+          sectionDocumentId: 'section_document_value_fixture',
+          status: 'PROCESSED',
+          ingestionMode: 'TEXT_NATIVE',
+        }),
+      ],
+      evidenceObjects: [
+        expect.objectContaining({
+          evidenceObjectId: 'section_evidence_value_fixture',
+          reviewStatus: 'ACCEPTED',
+          sourceType: 'SECTION_UPLOADED_DOCUMENT',
+          sourceFileName: 'value-notes.md',
+        }),
+      ],
+    }))
+    expect(valueDrivers.readiness).toEqual({
+      state: 'REGENERATION_REQUIRED',
+      publishEligible: false,
+      reason: 'Accepted section evidence changed. Regenerate this section before accepting or publishing truth.',
+      blockingValidationCount: 0,
+    })
+    expect(res.body.data.readiness.sectionTruth).toEqual(expect.objectContaining({
+      state: 'SECTION_TRUTH_BLOCKED',
+      publishEligible: false,
+      lockEligible: false,
+      requiredSectionCount: 2,
+      readySectionCount: 1,
+      blockingSectionCount: 1,
+      reason: 'Accepted section evidence changed. Regenerate this section before accepting or publishing truth.',
+      blockers: [
+        expect.objectContaining({
+          sectionKey: 'value_drivers',
+          state: 'SECTION_EVIDENCE_CHANGED',
+          reason: 'Accepted section evidence changed. Regenerate this section before accepting or publishing truth.',
+        }),
+      ],
+    }))
+    expect(res.body.data.publish.sectionTruthReady).toBe(false)
+    expect(res.body.data.lock.sectionTruthReady).toBe(false)
+    expect(JSON.stringify(valueDrivers.sectionEvidence)).not.toContain('confidential raw customer margin narrative')
+    expect(JSON.stringify(valueDrivers.sectionEvidence)).not.toContain('contentBase64')
+    expect(JSON.stringify(valueDrivers.sectionEvidence)).not.toContain('textContent')
+    expect(JSON.stringify(valueDrivers.sectionEvidence)).not.toContain('do not project')
   })
 
   test('projects governed section intelligence from accepted truth, discovery, dependencies, and validation', async () => {

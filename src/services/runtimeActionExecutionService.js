@@ -133,6 +133,46 @@ const hasActiveDependencyInvalidation = (sectionObject = {}) => {
   )
 }
 
+const hasActiveSectionEvidenceInvalidation = (sectionObject = {}) => {
+  const state = sectionObject.state || {}
+  const lineage = sectionObject.lineage || {}
+  const intelligence = sectionObject.intelligence || {}
+  return (
+    normalizeActionString(state.acceptedInvalidationReason) === 'SECTION_EVIDENCE_CHANGED'
+    || normalizeActionString(state.sectionEvidenceInvalidationReason) === 'SECTION_EVIDENCE_CHANGED'
+    || normalizeActionString(lineage.sectionEvidenceInvalidationReason) === 'SECTION_EVIDENCE_CHANGED'
+    || normalizeActionString(intelligence.invalidation?.reason) === 'SECTION_EVIDENCE_CHANGED'
+  )
+}
+
+const clearRuntimeSectionRegenerationState = (state = {}) => {
+  const nextState = isPlainRuntimeActionObject(state) ? { ...state } : {}
+  delete nextState.needsRegeneration
+  delete nextState.dependencyStatus
+  delete nextState.sectionEvidenceInvalidatedAt
+  delete nextState.sectionEvidenceInvalidatedBy
+  delete nextState.sectionEvidenceInvalidationReason
+  delete nextState.acceptedInvalidatedAt
+  delete nextState.acceptedInvalidationReason
+  return nextState
+}
+
+const clearRuntimeSectionRegenerationLineage = (lineage = {}) => {
+  const nextLineage = isPlainRuntimeActionObject(lineage) ? { ...lineage } : {}
+  delete nextLineage.sectionEvidenceInvalidatedAt
+  delete nextLineage.sectionEvidenceInvalidatedBy
+  delete nextLineage.sectionEvidenceInvalidationReason
+  return nextLineage
+}
+
+const clearRuntimeSectionRegenerationIntelligence = (intelligence = {}) => {
+  const nextIntelligence = isPlainRuntimeActionObject(intelligence) ? { ...intelligence } : {}
+  if (normalizeActionString(nextIntelligence.invalidation?.reason) === 'SECTION_EVIDENCE_CHANGED') {
+    delete nextIntelligence.invalidation
+  }
+  return nextIntelligence
+}
+
 const getSectionTruthTimestamp = ({ accepted, generated } = {}) => {
   const generatedAt = parseRuntimeTimestamp(generated?.generatedAt)
   const sourceGeneratedAt = parseRuntimeTimestamp(accepted?.sourceGeneratedAt)
@@ -220,6 +260,8 @@ const buildRegenerationEligibility = ({
   })
   const currentEvidenceHash = normalizeActionString(currentIntelligence?.boundedContext?.evidenceHash)
   const previousEvidenceHash = normalizeActionString(previousGenerated?.evidenceHash)
+  const currentSectionEvidenceHash = normalizeActionString(currentIntelligence?.boundedContext?.sectionEvidenceHash)
+  const previousSectionEvidenceHash = normalizeActionString(previousGenerated?.sectionEvidenceHash)
   const currentDependencyHash = normalizeActionString(currentIntelligence?.boundedContext?.dependencyHash)
   const previousDependencyHash = normalizeActionString(previousGenerated?.dependencyHash)
 
@@ -231,7 +273,11 @@ const buildRegenerationEligibility = ({
     reasons.push('INPUT_CHANGED')
   }
 
-  if (previousEvidenceHash && currentEvidenceHash && currentEvidenceHash !== previousEvidenceHash) {
+  if (previousSectionEvidenceHash && currentSectionEvidenceHash && currentSectionEvidenceHash !== previousSectionEvidenceHash) {
+    reasons.push('SECTION_EVIDENCE_CHANGED')
+  } else if (hasActiveSectionEvidenceInvalidation(sectionObject)) {
+    reasons.push('SECTION_EVIDENCE_CHANGED')
+  } else if (previousEvidenceHash && currentEvidenceHash && currentEvidenceHash !== previousEvidenceHash) {
     reasons.push('DISCOVERY_EVIDENCE_CHANGED')
   }
 
@@ -269,9 +315,11 @@ const buildRegenerationEligibility = ({
     canRegenerate: reasons.length > 0,
     currentInputHash,
     currentEvidenceHash,
+    currentSectionEvidenceHash,
     currentDependencyHash,
     previousInputHash,
     previousEvidenceHash,
+    previousSectionEvidenceHash,
     previousDependencyHash,
     forceRegenerateReason,
     invalidatedDependencySectionKeys: timestampInvalidatedSectionKeys,
@@ -632,6 +680,9 @@ const applyRuntimeSectionGeneration = ({
         }),
       ]
     : existingRevisions
+  const baseIntelligence = clearRuntimeSectionRegenerationIntelligence(sectionObject.intelligence)
+  const baseLineage = clearRuntimeSectionRegenerationLineage(sectionObject.lineage)
+  const baseState = clearRuntimeSectionRegenerationState(sectionObject.state)
 
   nextFrameworkState.sections[target.stateSectionKey] = {
     ...sectionObject,
@@ -639,7 +690,7 @@ const applyRuntimeSectionGeneration = ({
     generated,
     accepted: null,
     intelligence: {
-      ...(sectionObject.intelligence || {}),
+      ...baseIntelligence,
       ...intelligence,
       ...(hasAcceptedRevision ? {
         invalidation: {
@@ -659,7 +710,7 @@ const applyRuntimeSectionGeneration = ({
       } : {}),
     },
     state: {
-      ...(sectionObject.state || {}),
+      ...baseState,
       status: intelligence.truthEligibility?.eligible === false
         ? RUNTIME_SECTION_STATES.INSUFFICIENT_EVIDENCE
         : normalizedActionKey === RUNTIME_ACTION_KEYS.REGENERATE_SECTION
@@ -676,7 +727,7 @@ const applyRuntimeSectionGeneration = ({
       updatedBy: toIdString(actorUserId),
     },
     lineage: {
-      ...(sectionObject.lineage || {}),
+      ...baseLineage,
       sectionKey: target.sectionKey,
       stateSectionKey: target.stateSectionKey,
       runtimePath: target.runtimePath,
@@ -735,10 +786,12 @@ const applyRuntimeSectionGeneration = ({
             forceRegenerateReason: regenerationEligibility.forceRegenerateReason,
             currentInputHash: regenerationEligibility.currentInputHash,
             currentEvidenceHash: regenerationEligibility.currentEvidenceHash,
+            currentSectionEvidenceHash: regenerationEligibility.currentSectionEvidenceHash,
             currentDependencyHash: regenerationEligibility.currentDependencyHash,
             invalidatedDependencySectionKeys: regenerationEligibility.invalidatedDependencySectionKeys,
             previousInputHash: regenerationEligibility.previousInputHash,
             previousEvidenceHash: regenerationEligibility.previousEvidenceHash,
+            previousSectionEvidenceHash: regenerationEligibility.previousSectionEvidenceHash,
             previousDependencyHash: regenerationEligibility.previousDependencyHash,
             reasons: regenerationEligibility.reasons,
           }

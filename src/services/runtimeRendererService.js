@@ -55,6 +55,7 @@ import {
   buildDiscoveryEvidenceReviewSummary,
   buildDiscoveryHealth,
   buildDiscoverySourceRegistry,
+  DISCOVERY_EVIDENCE_REVIEW_STATUSES,
   normalizeDiscoveryEvidenceObjects,
 } from './discoveryIntelligenceService.js'
 
@@ -267,6 +268,98 @@ const hasProjectionValue = (value) => !isEmptyProjectionValue(value)
 
 const isProjectionObject = (value) =>
   Boolean(value && typeof value === 'object' && !Array.isArray(value))
+
+const SECTION_EVIDENCE_SOURCE_TYPE = 'SECTION_UPLOADED_DOCUMENT'
+
+const normalizeSectionEvidenceReviewStatus = (value) => {
+  const normalized = normalizeToken(value)
+  return Object.values(DISCOVERY_EVIDENCE_REVIEW_STATUSES).includes(normalized)
+    ? normalized
+    : DISCOVERY_EVIDENCE_REVIEW_STATUSES.PENDING
+}
+
+const buildSectionEvidenceProjection = (rawSectionValue) => {
+  if (!isRuntimeSectionObject(rawSectionValue)) {
+    return {
+      status: 'EMPTY',
+      documentCount: 0,
+      evidenceObjectCount: 0,
+      acceptedEvidenceObjectCount: 0,
+      pendingEvidenceObjectCount: 0,
+      rejectedEvidenceObjectCount: 0,
+      documents: [],
+      evidenceObjects: [],
+    }
+  }
+
+  const additionalEvidence = isProjectionObject(rawSectionValue.additionalEvidence)
+    ? rawSectionValue.additionalEvidence
+    : {}
+  const documents = Array.isArray(additionalEvidence.documents) ? additionalEvidence.documents : []
+  const evidenceObjects = Array.isArray(rawSectionValue.evidenceObjects) ? rawSectionValue.evidenceObjects : []
+  const reviewCounts = evidenceObjects.reduce((acc, evidenceObject) => {
+    const reviewStatus = normalizeSectionEvidenceReviewStatus(evidenceObject?.reviewStatus)
+    if (reviewStatus === DISCOVERY_EVIDENCE_REVIEW_STATUSES.ACCEPTED) acc.acceptedEvidenceObjectCount += 1
+    else if (reviewStatus === DISCOVERY_EVIDENCE_REVIEW_STATUSES.REJECTED) acc.rejectedEvidenceObjectCount += 1
+    else acc.pendingEvidenceObjectCount += 1
+    return acc
+  }, {
+    acceptedEvidenceObjectCount: 0,
+    pendingEvidenceObjectCount: 0,
+    rejectedEvidenceObjectCount: 0,
+  })
+  const evidenceObjectCount = evidenceObjects.length
+
+  return {
+    status: String(additionalEvidence.status || (
+      evidenceObjectCount === 0
+        ? 'EMPTY'
+        : reviewCounts.pendingEvidenceObjectCount > 0
+          ? 'PENDING_REVIEW'
+          : reviewCounts.acceptedEvidenceObjectCount > 0
+            ? 'ACCEPTED'
+            : 'REJECTED'
+    )).trim().toUpperCase(),
+    updatedAt: String(additionalEvidence.updatedAt || '').trim(),
+    updatedBy: String(additionalEvidence.updatedBy || '').trim(),
+    documentCount: Number.isFinite(Number(additionalEvidence.documentCount))
+      ? Number(additionalEvidence.documentCount)
+      : documents.length,
+    evidenceObjectCount,
+    ...reviewCounts,
+    documents: documents.map((document) => ({
+      sectionDocumentId: String(document?.sectionDocumentId || document?.sourceId || '').trim(),
+      sourceId: String(document?.sourceId || document?.sectionDocumentId || '').trim(),
+      fileName: String(document?.fileName || '').trim(),
+      fileType: String(document?.fileType || document?.documentType || '').trim(),
+      mimeType: String(document?.mimeType || '').trim(),
+      sizeBytes: Number.isFinite(Number(document?.sizeBytes)) ? Number(document.sizeBytes) : 0,
+      uploadedAt: String(document?.uploadedAt || '').trim(),
+      uploadedBy: String(document?.uploadedBy || '').trim(),
+      status: String(document?.status || document?.documentStatus || 'PROCESSED').trim().toUpperCase(),
+      ingestionMode: String(document?.ingestionMode || '').trim().toUpperCase(),
+      evidenceObjectsGenerated: Number.isFinite(Number(document?.evidenceObjectsGenerated))
+        ? Number(document.evidenceObjectsGenerated)
+        : 0,
+    })).filter((document) => document.sectionDocumentId || document.fileName),
+    evidenceObjects: evidenceObjects.map((evidenceObject) => ({
+      evidenceObjectId: String(evidenceObject?.evidenceObjectId || '').trim(),
+      sectionKey: String(evidenceObject?.sectionKey || '').trim(),
+      runtimePath: String(evidenceObject?.runtimePath || '').trim(),
+      sourceId: String(evidenceObject?.sourceId || '').trim(),
+      sourceType: String(evidenceObject?.sourceType || SECTION_EVIDENCE_SOURCE_TYPE).trim(),
+      category: String(evidenceObject?.category || 'Section Evidence').trim(),
+      coverageArea: String(evidenceObject?.coverageArea || evidenceObject?.category || 'Section Evidence').trim(),
+      reviewStatus: normalizeSectionEvidenceReviewStatus(evidenceObject?.reviewStatus),
+      sourceFileName: String(evidenceObject?.sourceFileName || '').trim(),
+      createdAt: String(evidenceObject?.createdAt || '').trim(),
+      acceptedBy: String(evidenceObject?.acceptedBy || '').trim(),
+      acceptanceTimestamp: String(evidenceObject?.acceptanceTimestamp || '').trim(),
+      rejectedBy: String(evidenceObject?.rejectedBy || '').trim(),
+      rejectionTimestamp: String(evidenceObject?.rejectionTimestamp || '').trim(),
+    })).filter((evidenceObject) => evidenceObject.evidenceObjectId),
+  }
+}
 
 const redactReadOnlySectionIntelligence = (intelligence) => {
   if (!isProjectionObject(intelligence)) return intelligence
@@ -716,6 +809,7 @@ const buildSectionDependencyProjection = ({
 const buildSectionReadinessProjection = ({
   compare,
   dependency,
+  sectionState,
   validationMessages,
 }) => {
   const blockingValidationCount = validationMessages
@@ -754,6 +848,18 @@ const buildSectionReadinessProjection = ({
       state: 'REGENERATION_REQUIRED',
       publishEligible: false,
       reason: 'Accepted upstream section truth changed. Regenerate this section before publish or lock.',
+      blockingValidationCount,
+    }
+  }
+
+  if (sectionState?.needsRegeneration === true) {
+    return {
+      state: 'REGENERATION_REQUIRED',
+      publishEligible: false,
+      reason: sectionState?.acceptedInvalidationReason === 'SECTION_EVIDENCE_CHANGED'
+        || sectionState?.sectionEvidenceInvalidationReason === 'SECTION_EVIDENCE_CHANGED'
+        ? 'Accepted section evidence changed. Regenerate this section before accepting or publishing truth.'
+        : 'Section evidence changed. Regenerate this section before accepting or publishing truth.',
       blockingValidationCount,
     }
   }
@@ -872,6 +978,7 @@ const buildSectionIntelligenceProjection = ({
   runtimePath,
   sectionKey,
   sectionStates,
+  sectionState,
   validationMessages,
 }) => {
   const discoveryScopedView = getScopedDiscoveryViewForSection({ discovery, runtimePath, sectionKey })
@@ -884,7 +991,12 @@ const buildSectionIntelligenceProjection = ({
     sectionDependencies,
     sectionStates,
   })
-  const readiness = buildSectionReadinessProjection({ compare, dependency, validationMessages })
+  const readiness = buildSectionReadinessProjection({
+    compare,
+    dependency,
+    sectionState,
+    validationMessages,
+  })
   const confidence = buildSectionConfidenceProjection({
     compare,
     dependency,
@@ -1472,6 +1584,7 @@ const buildRendererSections = ({
     const sectionDependencies = getRuntimeSectionDependencies(rawSectionValue)
     const sectionRevisions = getRuntimeSectionRevisions(rawSectionValue)
     const sectionState = getRuntimeSectionState(rawSectionValue)
+    const sectionEvidence = buildSectionEvidenceProjection(rawSectionValue)
     const dependencySectionKeys = getDependencySectionKeys(packageSection)
     const generationEligibility = buildSectionGenerationEligibility({
       dependencySectionKeys,
@@ -1522,6 +1635,7 @@ const buildRendererSections = ({
       runtimePath,
       sectionKey,
       sectionStates: frameworkState.sections || {},
+      sectionState,
       validationMessages,
     })
 
@@ -1541,6 +1655,7 @@ const buildRendererSections = ({
       value: sectionInput ?? runtimePathRecord.defaultValue ?? '',
       generated: sectionGenerated,
       accepted: sectionAccepted,
+      sectionEvidence,
       review: isRuntimeSectionObject(rawSectionValue) ? rawSectionValue.review || {} : {},
       state: {
         status: sectionState.status || 'DRAFT',

@@ -25,6 +25,8 @@ const runtimeDiscoveryEvidenceParamsSchema = runtimeInstanceIdSchema.extend({
     .max(180, 'evidenceObjectId must be 180 characters or fewer'),
 })
 
+const runtimeSectionEvidenceParamsSchema = runtimeDiscoveryEvidenceParamsSchema
+
 const runtimeActionParamsSchema = runtimeInstanceIdSchema.extend({
   actionKey: z
     .string({ required_error: 'actionKey is required' })
@@ -292,6 +294,116 @@ const updateDiscoveryInputsSchema = z.object({
   })).max(5, 'documentSources must contain 5 documents or fewer').optional(),
   expectedUpdatedAt: expectedUpdatedAtSchema,
 }).strict()
+
+const sectionEvidenceDocumentSourceSchema = z.object({
+  fileName: z
+    .string({ required_error: 'fileName is required' })
+    .trim()
+    .min(1, 'fileName is required')
+    .max(255, 'fileName must be 255 characters or fewer'),
+  mimeType: z
+    .string()
+    .trim()
+    .max(120, 'mimeType must be 120 characters or fewer')
+    .optional()
+    .default(''),
+  assetType: z
+    .string()
+    .trim()
+    .max(80, 'assetType must be 80 characters or fewer')
+    .optional()
+    .default('SECTION_SUPPORTING_FILE'),
+  sizeBytes: z
+    .number()
+    .int()
+    .min(1, 'sizeBytes must be at least 1')
+    .max(2500000, 'sizeBytes must be 2500000 bytes or fewer')
+    .optional(),
+  contentBase64: z
+    .string()
+    .trim()
+    .max(4000000, 'contentBase64 is too large')
+    .optional(),
+  textContent: z
+    .string()
+    .trim()
+    .max(80000, 'textContent must be 80000 characters or fewer')
+    .optional(),
+}).strict().superRefine((data, ctx) => {
+  if (!data.contentBase64 && !data.textContent) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['contentBase64'],
+      message: 'contentBase64 or textContent is required',
+    })
+  }
+})
+
+const sectionEvidenceTargetSchema = {
+  expectedUpdatedAt: expectedUpdatedAtSchema,
+  runtimePath: z
+    .string()
+    .trim()
+    .min(1, 'runtimePath must not be empty')
+    .max(200, 'runtimePath must be 200 characters or fewer')
+    .optional(),
+  sectionKey: z
+    .string()
+    .trim()
+    .min(1, 'sectionKey must not be empty')
+    .max(120, 'sectionKey must be 120 characters or fewer')
+    .optional(),
+}
+
+const refineSectionEvidenceTarget = (label) => (data, ctx) => {
+  if (!data.runtimePath && !data.sectionKey) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['_root'],
+      message: `${label} requires runtimePath or sectionKey.`,
+    })
+    return
+  }
+
+  if (data.runtimePath && !getSectionKeyFromRuntimePath(data.runtimePath)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['runtimePath'],
+      message: 'runtimePath must resolve under framework_state.sections.',
+    })
+  }
+
+  if (data.runtimePath && data.sectionKey) {
+    const runtimePathSectionKey = getSectionKeyFromRuntimePath(data.runtimePath)
+    const sectionKeyLooksStateBacked = /^[a-z][a-z0-9_]*$/i.test(data.sectionKey)
+    if (sectionKeyLooksStateBacked && runtimePathSectionKey && runtimePathSectionKey !== data.sectionKey) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['_root'],
+        message: 'runtimePath and sectionKey must target the same section.',
+      })
+    }
+  }
+}
+
+const updateRuntimeSectionEvidenceSchema = z.object({
+  ...sectionEvidenceTargetSchema,
+  documentSources: z
+    .array(sectionEvidenceDocumentSourceSchema)
+    .min(1, 'documentSources must contain at least 1 document')
+    .max(5, 'documentSources must contain 5 documents or fewer'),
+}).strict().superRefine(refineSectionEvidenceTarget('Section evidence upload'))
+
+const reviewRuntimeSectionEvidenceSchema = z.object({
+  ...sectionEvidenceTargetSchema,
+  reviewStatus: z
+    .string({ required_error: 'reviewStatus is required' })
+    .trim()
+    .transform((value) => value.toUpperCase())
+    .refine((value) => ['PENDING', 'ACCEPTED', 'REJECTED'].includes(value), {
+      message: 'reviewStatus must be PENDING, ACCEPTED, or REJECTED',
+    }),
+}).strict().superRefine(refineSectionEvidenceTarget('Section evidence review'))
 
 const acceptRuntimeDiscoverySchema = z.object({
   expectedUpdatedAt: expectedUpdatedAtSchema,
@@ -582,6 +694,21 @@ export const validateRuntimeDiscoveryEvidenceParams = createParamsValidator(runt
 })
 
 export const validateReviewRuntimeDiscoveryEvidence = createBodyValidator(reviewRuntimeDiscoveryEvidenceSchema, {
+  message: 'Request validation failed.',
+  rootIssueKey: '_root',
+})
+
+export const validateRuntimeSectionEvidenceParams = createParamsValidator(runtimeSectionEvidenceParamsSchema, {
+  message: 'Request validation failed.',
+  rootIssueKey: '_root',
+})
+
+export const validateUpdateRuntimeSectionEvidence = createBodyValidator(updateRuntimeSectionEvidenceSchema, {
+  message: 'Request validation failed.',
+  rootIssueKey: '_root',
+})
+
+export const validateReviewRuntimeSectionEvidence = createBodyValidator(reviewRuntimeSectionEvidenceSchema, {
   message: 'Request validation failed.',
   rootIssueKey: '_root',
 })
