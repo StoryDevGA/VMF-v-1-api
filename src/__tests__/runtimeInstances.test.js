@@ -4486,9 +4486,17 @@ describe('Runtime Instance API', () => {
       documentCount: 1,
       evidenceObjectCount: 1,
       pendingEvidenceObjectCount: 1,
+      evidenceObjects: [
+        expect.objectContaining({
+          sourceFileName: 'value-notes.md',
+          snippet: 'Governed workflow automation reduces manual proposal effort for executive value narratives.',
+        }),
+      ],
     }))
-    expect(JSON.stringify(res.body.data.section.sectionEvidence)).not.toContain('Governed workflow automation')
-    expect(JSON.stringify(AuditLog.createLog.mock.calls[0][0].diff)).not.toContain('Governed workflow automation')
+    expect(JSON.stringify(res.body.data.section.sectionEvidence)).not.toContain('textContent')
+    expect(JSON.stringify(res.body.data.section.sectionEvidence)).not.toContain('contentBase64')
+    expect(JSON.stringify(AuditLog.createLog.mock.calls[0][0].diff)).not.toContain('textContent')
+    expect(JSON.stringify(AuditLog.createLog.mock.calls[0][0].diff)).not.toContain('contentBase64')
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'RUNTIME_STATE_MUTATED',
       resourceType: 'RuntimeInstance',
@@ -4695,10 +4703,13 @@ describe('Runtime Instance API', () => {
         expect.objectContaining({
           evidenceObjectId: 'section_evidence_value_fixture',
           reviewStatus: 'ACCEPTED',
+          snippet: 'governed workflow automation reduces manual effort.',
         }),
       ],
     }))
-    expect(JSON.stringify(res.body.data.section.sectionEvidence)).not.toContain('governed workflow automation')
+    expect(JSON.stringify(res.body.data.section.sectionEvidence)).toContain('governed workflow automation reduces manual effort')
+    expect(JSON.stringify(res.body.data.section.sectionEvidence)).not.toContain('textContent')
+    expect(JSON.stringify(res.body.data.section.sectionEvidence)).not.toContain('contentBase64')
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       diff: expect.objectContaining({
         runtimePath: 'framework_state.sections.value_drivers',
@@ -9455,8 +9466,19 @@ describe('Runtime Instance API', () => {
                 generated: expect.objectContaining({
                   format: 'STRUCTURED_TEXT',
                   content: expect.stringContaining('Based on accepted Intelligence Hub evidence'),
-                  sections: expect.any(Array),
+                  sections: expect.arrayContaining([
+                    expect.objectContaining({
+                      heading: 'Customer-Provided Section Context',
+                      body: expect.stringContaining('included in generation as section input'),
+                      bullets: expect.arrayContaining([
+                        'Proposal creation is slow.',
+                      ]),
+                    }),
+                  ]),
                   actionKey: 'GENERATE_SECTION',
+                  supportingEvidenceRefs: expect.arrayContaining([
+                    'section_input',
+                  ]),
                   evidenceHash: expect.any(String),
                   dependencyHash: expect.any(String),
                   boundedContextHash: expect.any(String),
@@ -9658,6 +9680,17 @@ describe('Runtime Instance API', () => {
     expect(persistedSection.generated).toEqual(expect.objectContaining({
       format: 'STRUCTURED_TEXT',
       content: expect.stringContaining('Primary Value Drivers'),
+      sections: expect.arrayContaining([
+        expect.objectContaining({
+          heading: 'Customer-Provided Section Context',
+          bullets: expect.arrayContaining([
+            'The strongest customer value is reducing time spent creating enterprise-grade value narratives.',
+          ]),
+        }),
+      ]),
+      supportingEvidenceRefs: expect.arrayContaining([
+        'section_input',
+      ]),
       generationBoundaries: expect.arrayContaining([
         'No quantified ROI has been provided.',
         'No named customer proof has been provided.',
@@ -9996,6 +10029,18 @@ describe('Runtime Instance API', () => {
     const persistedSection = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state.sections.value_drivers
     expect(persistedSection.state.status).toBe('GENERATED')
     expect(persistedSection.generated.sectionEvidenceHash).toEqual(expect.any(String))
+    expect(persistedSection.generated.content).toContain('Customer-Provided Section Evidence')
+    expect(persistedSection.generated.content).toContain(acceptedFact)
+    expect(persistedSection.generated.content).not.toContain(pendingFact)
+    expect(persistedSection.generated.sections).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        heading: 'Customer-Provided Section Evidence',
+        body: expect.stringContaining('included in generation as section evidence'),
+        bullets: expect.arrayContaining([
+          acceptedFact,
+        ]),
+      }),
+    ]))
     expect(persistedSection.intelligence.supportingEvidence).toEqual(expect.arrayContaining([
       expect.objectContaining({
         label: 'Value Drivers',
@@ -12348,12 +12393,12 @@ describe('Runtime Instance API', () => {
     ])
   })
 
-  test('projects section evidence metadata without exposing extracted facts or uploaded content', async () => {
+  test('projects section evidence metadata with bounded snippets without exposing uploaded content', async () => {
     const acceptedEvidenceObject = makeSectionEvidenceObject({
       reviewStatus: 'ACCEPTED',
       acceptedBy: CUSTOMER_ADMIN_ID,
       acceptanceTimestamp: '2026-05-19T08:03:00.000Z',
-      extractedFact: 'Document Section Supporting File: confidential raw customer margin narrative.',
+      extractedFact: 'Document Section Supporting File: Customer margin workflow reduces manual proposal effort for enterprise account teams while preserving governed evidence alignment across regional sales leadership, partner delivery teams, and executive review cycles.',
       contentBase64: 'ZG8tbm90LXByb2plY3Q=',
       rawText: 'do not project raw text',
     })
@@ -12456,9 +12501,12 @@ describe('Runtime Instance API', () => {
           reviewStatus: 'ACCEPTED',
           sourceType: 'SECTION_UPLOADED_DOCUMENT',
           sourceFileName: 'value-notes.md',
+          snippet: expect.stringMatching(/^Customer margin workflow reduces manual proposal effort/),
         }),
       ],
     }))
+    expect(valueDrivers.sectionEvidence.evidenceObjects[0].snippet.length).toBeLessThanOrEqual(120)
+    expect(valueDrivers.sectionEvidence.evidenceObjects[0].snippet).toMatch(/\.\.\.$/)
     expect(valueDrivers.readiness).toEqual({
       state: 'REGENERATION_REQUIRED',
       publishEligible: false,
@@ -12483,7 +12531,8 @@ describe('Runtime Instance API', () => {
     }))
     expect(res.body.data.publish.sectionTruthReady).toBe(false)
     expect(res.body.data.lock.sectionTruthReady).toBe(false)
-    expect(JSON.stringify(valueDrivers.sectionEvidence)).not.toContain('confidential raw customer margin narrative')
+    expect(JSON.stringify(valueDrivers.sectionEvidence)).toContain('Customer margin workflow reduces manual proposal effort')
+    expect(JSON.stringify(valueDrivers.sectionEvidence)).not.toContain('Document Section Supporting File:')
     expect(JSON.stringify(valueDrivers.sectionEvidence)).not.toContain('contentBase64')
     expect(JSON.stringify(valueDrivers.sectionEvidence)).not.toContain('textContent')
     expect(JSON.stringify(valueDrivers.sectionEvidence)).not.toContain('do not project')

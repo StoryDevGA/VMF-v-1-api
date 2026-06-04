@@ -463,6 +463,7 @@ const buildDiscoveryMutationResponse = ({ runtimeInstance, evidencePack, previou
 const SECTION_EVIDENCE_SOURCE_TYPE = 'SECTION_UPLOADED_DOCUMENT'
 const SECTION_EVIDENCE_ACQUISITION_METHOD = 'SECTION_DOCUMENT_INGESTION'
 const SECTION_EVIDENCE_ASSET_TYPE = 'SECTION_SUPPORTING_FILE'
+const SECTION_EVIDENCE_SNIPPET_MAX_LENGTH = 120
 
 const hashSectionEvidenceValue = (value) =>
   crypto.createHash('sha256').update(stableStringify(value)).digest('hex').slice(0, 16)
@@ -472,6 +473,19 @@ const normalizeSectionEvidenceReviewStatus = (value) => {
   return Object.values(DISCOVERY_EVIDENCE_REVIEW_STATUSES).includes(normalized)
     ? normalized
     : DISCOVERY_EVIDENCE_REVIEW_STATUSES.PENDING
+}
+
+const buildSectionEvidenceSnippet = (value) => {
+  const normalized = String(value || '').replace(/\s+/g, ' ').trim()
+  if (!normalized) return ''
+  const withoutSourcePrefix = normalized
+    .replace(/^Document\s+[^:]{1,80}:\s*/i, '')
+    .replace(/^Website\s+[^:]{1,80}:\s*/i, '')
+    .trim()
+  const snippet = withoutSourcePrefix || normalized
+  return snippet.length > SECTION_EVIDENCE_SNIPPET_MAX_LENGTH
+    ? `${snippet.slice(0, SECTION_EVIDENCE_SNIPPET_MAX_LENGTH - 3).trim()}...`
+    : snippet
 }
 
 const buildSectionEvidenceReviewSummary = (evidenceObjects = []) => {
@@ -535,6 +549,7 @@ const buildSectionEvidenceProjection = ({
       coverageArea: String(evidenceObject?.coverageArea || evidenceObject?.category || 'Section Evidence').trim(),
       reviewStatus: normalizeSectionEvidenceReviewStatus(evidenceObject?.reviewStatus),
       sourceFileName: String(evidenceObject?.sourceFileName || '').trim(),
+      snippet: buildSectionEvidenceSnippet(evidenceObject?.extractedFact),
       createdAt: String(evidenceObject?.createdAt || '').trim(),
       acceptedBy: String(evidenceObject?.acceptedBy || '').trim(),
       acceptanceTimestamp: String(evidenceObject?.acceptanceTimestamp || '').trim(),

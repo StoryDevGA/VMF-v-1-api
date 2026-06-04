@@ -797,11 +797,41 @@ const buildSourceRefs = ({ acceptedEvidenceObjects = [], acceptedSectionEvidence
   return refs.slice(0, 10)
 }
 
-const buildGeneratedSections = ({ category, inputSummary, label, themes, boundaries }) => {
+const buildGeneratedSections = ({
+  acceptedSectionEvidenceObjects = [],
+  category,
+  inputSummary,
+  label,
+  themes,
+  boundaries,
+}) => {
   const rule = SECTION_CATEGORY_RULES[category] || SECTION_CATEGORY_RULES.GENERIC
   const themeBullets = themes.slice(0, 5).map((theme) => `${theme.label}: ${theme.description}`)
   const boundaryBullets = boundaries.slice(0, 5).map((boundary) => boundary.message)
-  const evidenceLead = `Based on accepted Intelligence Hub evidence${inputSummary ? ' and customer-added section context' : ''}, ${label} can safely focus on the themes below.`
+  const sectionEvidenceBullets = acceptedSectionEvidenceObjects
+    .map((evidenceObject) => normalizeEvidenceString(evidenceObject?.extractedFact))
+    .filter(Boolean)
+    .slice(0, 6)
+  const contextSources = [
+    'accepted Intelligence Hub evidence',
+    inputSummary ? 'customer-added section context' : '',
+    sectionEvidenceBullets.length > 0 ? 'accepted section evidence' : '',
+  ].filter(Boolean)
+  const evidenceLead = `Based on ${contextSources.join(', ').replace(/, ([^,]*)$/, ' and $1')}, ${label} can safely focus on the themes below.`
+  const customerContextSection = inputSummary
+    ? {
+        heading: 'Customer-Provided Section Context',
+        body: 'The customer-added context below was included in generation as section input, not treated as external proof.',
+        bullets: [inputSummary],
+      }
+    : null
+  const customerSectionEvidenceSection = sectionEvidenceBullets.length > 0
+    ? {
+        heading: 'Customer-Provided Section Evidence',
+        body: 'The accepted supporting-file evidence below was included in generation as section evidence.',
+        bullets: sectionEvidenceBullets,
+      }
+    : null
 
   return [
     {
@@ -809,6 +839,8 @@ const buildGeneratedSections = ({ category, inputSummary, label, themes, boundar
       body: evidenceLead,
       bullets: themeBullets,
     },
+    customerContextSection,
+    customerSectionEvidenceSection,
     {
       heading: rule.summaryHeading,
       body: themes.length > 0
@@ -821,7 +853,7 @@ const buildGeneratedSections = ({ category, inputSummary, label, themes, boundar
       body: 'The system did not assume proof that has not been accepted into Intelligence Hub or section truth.',
       bullets: boundaryBullets,
     },
-  ]
+  ].filter(Boolean)
 }
 
 const sectionsToContent = (sections = []) => sections
@@ -1153,6 +1185,7 @@ export const buildEnrichedGeneratedSection = ({
   })
   const sections = parts.truthEligibility.eligible
     ? buildGeneratedSections({
+        acceptedSectionEvidenceObjects: parts.acceptedSectionEvidenceObjects,
         category: parts.category,
         inputSummary: parts.inputSummary,
         label: parts.label,
