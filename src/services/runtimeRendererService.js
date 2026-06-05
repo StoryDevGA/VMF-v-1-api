@@ -58,6 +58,7 @@ import {
   DISCOVERY_EVIDENCE_REVIEW_STATUSES,
   normalizeDiscoveryEvidenceObjects,
 } from './discoveryIntelligenceService.js'
+import { buildRuntimeIntelligenceGraphProjection } from './runtimeIntelligenceGraphService.js'
 
 export const RUNTIME_RENDERER_ERROR_REASONS = Object.freeze({
   PACKAGE_NOT_FOUND: 'PACKAGE_NOT_FOUND',
@@ -565,6 +566,7 @@ export const buildDiscoveryProjection = (frameworkState = {}, { includeInputValu
         })
       : {}
   )
+  const intelligenceGraph = buildRuntimeIntelligenceGraphProjection(frameworkState.intelligence_graph)
 
   return {
     state: {
@@ -602,6 +604,7 @@ export const buildDiscoveryProjection = (frameworkState = {}, { includeInputValu
     },
     evidenceObjectSummary: buildDiscoveryEvidenceReviewSummary(evidenceObjects),
     discoveryHealth: cloneProjectionValue(discoveryHealth),
+    intelligenceGraph,
     ...(isProjectionObject(evidencePack.resetSummary) ? { resetSummary: cloneProjectionValue(evidencePack.resetSummary) } : {}),
     ...(includeInputValues ? { inputValues: cloneProjectionValue(evidencePack.inputs || {}) } : {}),
     ...(evidencePack.acceptedAt ? { acceptedAt: evidencePack.acceptedAt } : {}),

@@ -44,6 +44,7 @@ export const RUNTIME_INSTANCE_ERROR_REASONS = Object.freeze({
   RUNTIME_MUTATION_AUDIT_PERSISTENCE_FAILED: 'RUNTIME_MUTATION_AUDIT_PERSISTENCE_FAILED',
   RUNTIME_MUTATION_FORBIDDEN_PATH: 'RUNTIME_MUTATION_FORBIDDEN_PATH',
   RUNTIME_MUTATION_INVALID_PATH: 'RUNTIME_MUTATION_INVALID_PATH',
+  RUNTIME_INTELLIGENCE_GRAPH_INVALID: 'RUNTIME_INTELLIGENCE_GRAPH_INVALID',
   RUNTIME_MUTATION_NOT_EDITABLE: 'RUNTIME_MUTATION_NOT_EDITABLE',
   RUNTIME_MUTATION_STALE: 'RUNTIME_MUTATION_STALE',
   RUNTIME_MUTATION_UNSUPPORTED_RUNTIME_TYPE: 'RUNTIME_MUTATION_UNSUPPORTED_RUNTIME_TYPE',
@@ -754,6 +755,7 @@ const normalizeFrameworkState = (frameworkState = {}) => ({
   policy: frameworkState.policy || {},
   attachments: frameworkState.attachments || {},
   artifacts: frameworkState.artifacts || {},
+  intelligence_graph: frameworkState.intelligence_graph || frameworkState.intelligenceGraph || {},
 })
 
 export const serializeRuntimeInstance = (runtimeInstance) => {

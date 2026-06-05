@@ -27,6 +27,22 @@ const runtimeDiscoveryEvidenceParamsSchema = runtimeInstanceIdSchema.extend({
 
 const runtimeSectionEvidenceParamsSchema = runtimeDiscoveryEvidenceParamsSchema
 
+const runtimeIntelligenceGraphNodeParamsSchema = runtimeInstanceIdSchema.extend({
+  nodeId: z
+    .string({ required_error: 'nodeId is required' })
+    .trim()
+    .min(1, 'nodeId is required')
+    .max(240, 'nodeId must be 240 characters or fewer'),
+})
+
+const runtimeIntelligenceGraphSectionParamsSchema = runtimeInstanceIdSchema.extend({
+  sectionKey: z
+    .string({ required_error: 'sectionKey is required' })
+    .trim()
+    .min(1, 'sectionKey is required')
+    .max(120, 'sectionKey must be 120 characters or fewer'),
+})
+
 const runtimeActionParamsSchema = runtimeInstanceIdSchema.extend({
   actionKey: z
     .string({ required_error: 'actionKey is required' })
@@ -409,6 +425,17 @@ const acceptRuntimeDiscoverySchema = z.object({
   expectedUpdatedAt: expectedUpdatedAtSchema,
 }).strict()
 
+const rebuildRuntimeIntelligenceGraphSchema = z.object({
+  expectedUpdatedAt: expectedUpdatedAtSchema,
+  trigger: z
+    .string()
+    .trim()
+    .max(80, 'trigger must be 80 characters or fewer')
+    .transform((value) => value.toUpperCase())
+    .optional()
+    .default('EXPLICIT_REBUILD'),
+}).strict()
+
 const resetRuntimeDiscoverySchema = z.object({
   expectedUpdatedAt: expectedUpdatedAtSchema,
   confirmReset: z
@@ -683,6 +710,11 @@ export const validateAcceptRuntimeDiscovery = createBodyValidator(acceptRuntimeD
   rootIssueKey: '_root',
 })
 
+export const validateRebuildRuntimeIntelligenceGraph = createBodyValidator(rebuildRuntimeIntelligenceGraphSchema, {
+  message: 'Request validation failed.',
+  rootIssueKey: '_root',
+})
+
 export const validateResetRuntimeDiscovery = createBodyValidator(resetRuntimeDiscoverySchema, {
   message: 'Request validation failed.',
   rootIssueKey: '_root',
@@ -772,6 +804,16 @@ export const validateListRuntimeInstances = createQueryValidator(listRuntimeInst
 })
 
 export const validateRuntimeInstanceId = createParamsValidator(runtimeInstanceIdSchema, {
+  message: 'Invalid request parameters.',
+  rootIssueKey: '_root',
+})
+
+export const validateRuntimeIntelligenceGraphNodeParams = createParamsValidator(runtimeIntelligenceGraphNodeParamsSchema, {
+  message: 'Invalid request parameters.',
+  rootIssueKey: '_root',
+})
+
+export const validateRuntimeIntelligenceGraphSectionParams = createParamsValidator(runtimeIntelligenceGraphSectionParamsSchema, {
   message: 'Invalid request parameters.',
   rootIssueKey: '_root',
 })

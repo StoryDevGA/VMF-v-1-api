@@ -143,6 +143,7 @@ export const normalizeFrameworkStateForAction = (frameworkState = {}) => ({
   policy: frameworkState.policy || {},
   attachments: frameworkState.attachments || {},
   artifacts: frameworkState.artifacts || {},
+  intelligence_graph: frameworkState.intelligence_graph || frameworkState.intelligenceGraph || {},
 })
 
 export const deriveRuntimeValidationState = (frameworkState = {}) => {

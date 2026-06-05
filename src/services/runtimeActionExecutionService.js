@@ -53,6 +53,11 @@ import {
   assertRuntimeEvidencePackWritable,
   buildDiscoveryEvidencePack,
 } from './runtimeStateMutationService.js'
+import {
+  buildRuntimeIntelligenceGraphAuditSummary,
+  buildRuntimeIntelligenceGraphForFrameworkState,
+  RUNTIME_INTELLIGENCE_GRAPH_BUILD_TRIGGERS,
+} from './runtimeIntelligenceGraphService.js'
 
 const buildActionError = ({
   status,
@@ -455,6 +460,69 @@ const isDiscoveryAction = (actionKey) => [
   RUNTIME_ACTION_KEYS.REFRESH_EVIDENCE_PACK,
   RUNTIME_ACTION_KEYS.ACCEPT_EVIDENCE,
 ].includes(normalizeRuntimeActionToken(actionKey))
+
+const getRuntimeActionGraphTrigger = (actionKey) => {
+  const normalizedActionKey = normalizeRuntimeActionToken(actionKey)
+  if (normalizedActionKey === RUNTIME_ACTION_KEYS.ACCEPT_EVIDENCE) {
+    return RUNTIME_INTELLIGENCE_GRAPH_BUILD_TRIGGERS.EVIDENCE_ACCEPTED
+  }
+  if (DISCOVERY_BUILD_ACTIONS.has(normalizedActionKey)) {
+    return RUNTIME_INTELLIGENCE_GRAPH_BUILD_TRIGGERS.EVIDENCE_UPDATED
+  }
+  if (normalizedActionKey === RUNTIME_ACTION_KEYS.PUBLISH) {
+    return RUNTIME_INTELLIGENCE_GRAPH_BUILD_TRIGGERS.PUBLISH_COMPLETED
+  }
+  if (normalizedActionKey === RUNTIME_ACTION_KEYS.LOCK_RECORD) {
+    return RUNTIME_INTELLIGENCE_GRAPH_BUILD_TRIGGERS.LOCK_COMPLETED
+  }
+  return ''
+}
+
+const rebuildRuntimeIntelligenceGraphForAction = ({
+  actionKey,
+  actorUserId,
+  frameworkPackage,
+  previousFrameworkState,
+  resolvedTransition,
+  runtimeInstance,
+} = {}) => {
+  const buildTrigger = getRuntimeActionGraphTrigger(actionKey)
+  if (!buildTrigger) return resolvedTransition
+
+  const nextGraph = buildRuntimeIntelligenceGraphForFrameworkState({
+    actorUserId,
+    buildTrigger,
+    frameworkPackage,
+    frameworkState: resolvedTransition.nextFrameworkState,
+    runtimeInstance,
+  })
+
+  if (nextGraph.validation?.status !== 'VALID') {
+    throw buildActionError({
+      status: 422,
+      code: 'VALIDATION_FAILED',
+      message: 'Runtime intelligence graph validation failed.',
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_INTELLIGENCE_GRAPH_INVALID,
+      details: {
+        validationIssues: nextGraph.validation?.issues || [],
+      },
+    })
+  }
+
+  return {
+    ...resolvedTransition,
+    intelligenceGraphResult: buildRuntimeIntelligenceGraphAuditSummary({
+      autoRebuilt: true,
+      buildTrigger,
+      nextGraph,
+      previousGraph: previousFrameworkState?.intelligence_graph || {},
+    }),
+    nextFrameworkState: {
+      ...(resolvedTransition.nextFrameworkState || {}),
+      intelligence_graph: nextGraph,
+    },
+  }
+}
 
 const getRuntimeSectionStateKey = ({ runtimePath, sectionKey }) => {
   const normalizedRuntimePath = String(runtimePath || '').trim()
@@ -962,6 +1030,7 @@ const buildActionAuditPayload = ({
   validationResult,
   generationResult,
   discoveryResult,
+  intelligenceGraphResult,
   nextRuntimeUpdate = {},
   previousRuntimeStatus,
   previousLockedAt,
@@ -1060,6 +1129,9 @@ const buildActionAuditPayload = ({
         sourceCount: discoveryResult.sourceCount,
       },
     } : {}),
+    ...(intelligenceGraphResult ? {
+      intelligenceGraph: intelligenceGraphResult,
+    } : {}),
     actionedAt,
   },
 })
@@ -1079,6 +1151,7 @@ const logRuntimeActionExecuted = async ({
   validationResult,
   generationResult,
   discoveryResult,
+  intelligenceGraphResult,
   nextRuntimeUpdate,
   previousRuntimeStatus,
   previousLockedAt,
@@ -1098,6 +1171,7 @@ const logRuntimeActionExecuted = async ({
     validationResult,
     generationResult,
     discoveryResult,
+    intelligenceGraphResult,
     nextRuntimeUpdate,
     previousRuntimeStatus,
     previousLockedAt,
@@ -1259,6 +1333,7 @@ const persistActionWithAudit = async ({
   validationResult,
   generationResult,
   discoveryResult,
+  intelligenceGraphResult,
 }) => {
   if (mongoose.connection.readyState === 1) {
     const session = await mongoose.startSession()
@@ -1291,6 +1366,7 @@ const persistActionWithAudit = async ({
           validationResult,
           generationResult,
           discoveryResult,
+          intelligenceGraphResult,
           session,
         })
       })
@@ -1328,6 +1404,7 @@ const persistActionWithAudit = async ({
       validationResult,
       generationResult,
       discoveryResult,
+      intelligenceGraphResult,
     })
   } catch (err) {
     try {
@@ -1475,6 +1552,14 @@ export const executeRuntimeAction = async ({
       runtimeInstance,
     })
   }
+  resolvedTransition = rebuildRuntimeIntelligenceGraphForAction({
+    actionKey: normalizedActionKey,
+    actorUserId,
+    frameworkPackage,
+    previousFrameworkState,
+    resolvedTransition,
+    runtimeInstance,
+  })
 
   const updatedRuntimeInstance = await persistActionWithAudit({
     action,
@@ -1497,6 +1582,7 @@ export const executeRuntimeAction = async ({
     validationResult: resolvedTransition.validationResult,
     generationResult: resolvedTransition.generationResult,
     discoveryResult: resolvedTransition.discoveryResult,
+    intelligenceGraphResult: resolvedTransition.intelligenceGraphResult,
   })
 
   return {

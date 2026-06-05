@@ -75,6 +75,10 @@ const frameworkStateSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.Mixed,
       default: () => ({}),
     },
+    intelligence_graph: {
+      type: mongoose.Schema.Types.Mixed,
+      default: () => ({}),
+    },
   },
   { _id: false },
 )
@@ -369,6 +373,7 @@ runtimeInstanceSchema.pre('validate', function normalizeRuntimeInstance(next) {
   frameworkState.policy = frameworkState.policy || {}
   frameworkState.attachments = frameworkState.attachments || {}
   frameworkState.artifacts = frameworkState.artifacts || {}
+  frameworkState.intelligence_graph = frameworkState.intelligence_graph || {}
 
   next()
 })

@@ -6,10 +6,18 @@ import {
 import { executeRuntimeAction as executeRuntimeActionRecord } from '../services/runtimeActionExecutionService.js'
 import { getRuntimeRenderer as getRuntimeRendererProjection } from '../services/runtimeRendererService.js'
 import {
+  getRuntimeIntelligenceGraph as getRuntimeIntelligenceGraphRecord,
+  getRuntimeIntelligenceGraphCoverage as getRuntimeIntelligenceGraphCoverageRecord,
+  getRuntimeIntelligenceGraphHealth as getRuntimeIntelligenceGraphHealthRecord,
+  getRuntimeIntelligenceGraphNodeLineage as getRuntimeIntelligenceGraphNodeLineageRecord,
+  getRuntimeIntelligenceGraphSectionDependencies as getRuntimeIntelligenceGraphSectionDependenciesRecord,
+} from '../services/runtimeIntelligenceGraphService.js'
+import {
   acceptRuntimeDiscovery as acceptRuntimeDiscoveryRecord,
   acceptRuntimeSection as acceptRuntimeSectionRecord,
   getRuntimeDiscoveryEvidence as getRuntimeDiscoveryEvidenceRecord,
   mutateRuntimeState as mutateRuntimeStateRecord,
+  rebuildRuntimeIntelligenceGraph as rebuildRuntimeIntelligenceGraphRecord,
   resetRuntimeDiscovery as resetRuntimeDiscoveryRecord,
   reviewRuntimeDiscoveryEvidence as reviewRuntimeDiscoveryEvidenceRecord,
   reviewRuntimeSectionEvidence as reviewRuntimeSectionEvidenceRecord,
@@ -278,6 +286,125 @@ export const getRuntimeEvidence = async (req, res, next) => {
 
     return res.status(200).json({
       data: evidence,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const rebuildRuntimeIntelligenceGraph = async (req, res, next) => {
+  try {
+    const graph = await rebuildRuntimeIntelligenceGraphRecord({
+      actorUserId: req.context?.userId || req.userId,
+      auditRequest: req,
+      scopes: req.scopes,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+      payload: req.body,
+    })
+
+    return res.status(200).json({
+      data: graph,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const getRuntimeIntelligenceGraph = async (req, res, next) => {
+  try {
+    const graph = await getRuntimeIntelligenceGraphRecord({
+      scopes: req.scopes,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+    })
+
+    return res.status(200).json({
+      data: graph,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const getRuntimeIntelligenceGraphHealth = async (req, res, next) => {
+  try {
+    const graph = await getRuntimeIntelligenceGraphHealthRecord({
+      scopes: req.scopes,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+    })
+
+    return res.status(200).json({
+      data: graph,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const getRuntimeIntelligenceGraphCoverage = async (req, res, next) => {
+  try {
+    const graph = await getRuntimeIntelligenceGraphCoverageRecord({
+      scopes: req.scopes,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+    })
+
+    return res.status(200).json({
+      data: graph,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const getRuntimeIntelligenceGraphNodeLineage = async (req, res, next) => {
+  try {
+    const lineage = await getRuntimeIntelligenceGraphNodeLineageRecord({
+      nodeId: req.params.nodeId,
+      scopes: req.scopes,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+    })
+
+    return res.status(200).json({
+      data: lineage,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const getRuntimeIntelligenceGraphSectionDependencies = async (req, res, next) => {
+  try {
+    const dependencies = await getRuntimeIntelligenceGraphSectionDependenciesRecord({
+      scopes: req.scopes,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+      sectionKey: req.params.sectionKey,
+    })
+
+    return res.status(200).json({
+      data: dependencies,
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {

@@ -1103,6 +1103,7 @@ describe('Runtime Instance API', () => {
       policy: {},
       attachments: {},
       artifacts: {},
+      intelligence_graph: {},
     })
     expect(res.body.data.runtimeCapacitySlot).toBeUndefined()
     expect(FrameworkPackage.findById).toHaveBeenCalledWith(FRAMEWORK_PACKAGE_ID)
@@ -2305,7 +2306,9 @@ describe('Runtime Instance API', () => {
       })
 
     expect(res.status).toBe(200)
-    const persistedEvidencePack = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state.evidence_pack
+    const persistedFrameworkState = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state
+    const persistedEvidencePack = persistedFrameworkState.evidence_pack
+    const persistedGraph = persistedFrameworkState.intelligence_graph
     expect(persistedEvidencePack).toEqual(expect.objectContaining({
       inputComplete: true,
       evidenceReady: true,
@@ -3693,7 +3696,9 @@ describe('Runtime Instance API', () => {
       })
 
     expect(res.status).toBe(200)
-    const persistedEvidencePack = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state.evidence_pack
+    const persistedFrameworkState = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state
+    const persistedEvidencePack = persistedFrameworkState.evidence_pack
+    const persistedGraph = persistedFrameworkState.intelligence_graph
     expect(persistedEvidencePack).toEqual(expect.objectContaining({
       inputComplete: false,
       evidenceReady: false,
@@ -3922,7 +3927,9 @@ describe('Runtime Instance API', () => {
       })
 
     expect(res.status).toBe(200)
-    const persistedEvidencePack = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state.evidence_pack
+    const persistedFrameworkState = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state
+    const persistedEvidencePack = persistedFrameworkState.evidence_pack
+    const persistedGraph = persistedFrameworkState.intelligence_graph
     expect(persistedEvidencePack).toEqual(expect.objectContaining({
       inputComplete: true,
       evidenceReady: true,
@@ -3950,6 +3957,16 @@ describe('Runtime Instance API', () => {
         needsRefresh: false,
       }),
     }))
+    expect(persistedGraph).toEqual(expect.objectContaining({
+      artifactType: 'runtime_intelligence_graph',
+      graphVersion: '2.1',
+      graphHash: expect.stringMatching(/^sha256:/),
+    }))
+    expect(persistedGraph.build).toEqual(expect.objectContaining({
+      status: 'VALID',
+      trigger: 'EVIDENCE_ACCEPTED',
+      sourceHash: expect.stringMatching(/^sha256:/),
+    }))
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'RUNTIME_STATE_MUTATED',
       resourceType: 'RuntimeInstance',
@@ -3962,6 +3979,10 @@ describe('Runtime Instance API', () => {
           accepted: true,
           acceptedBy: CUSTOMER_ADMIN_ID,
         }),
+        autoRebuilt: true,
+        graphVersion: '2.1',
+        buildTrigger: 'EVIDENCE_ACCEPTED',
+        nextGraphHash: persistedGraph.graphHash,
       }),
     }))
     expect(res.body.data.discovery).toEqual(expect.objectContaining({
@@ -5712,6 +5733,711 @@ describe('Runtime Instance API', () => {
     ])
   })
 
+  const makePersistedRuntimeIntelligenceGraph = (overrides = {}) => ({
+    artifactType: 'runtime_intelligence_graph',
+    graphVersion: '2.1',
+    graphHash: 'sha256:graph-hash',
+    build: {
+      status: 'VALID',
+      trigger: 'EXPLICIT_REBUILD',
+      builtAt: '2026-06-05T10:00:00.000Z',
+      sourceHash: 'sha256:source-hash',
+      nodeCount: 2,
+      edgeCount: 1,
+    },
+    nodes: [
+      {
+        nodeId: 'source:source-1',
+        nodeType: 'SOURCE',
+        label: 'Source Registry Entry',
+        metadata: {
+          lineageRefs: ['source-1'],
+        },
+      },
+      {
+        nodeId: 'evidence:company',
+        nodeType: 'EVIDENCE',
+        label: 'Company',
+        coverageDomain: 'Company',
+        reviewStatus: 'ACCEPTED',
+        graphQualityState: 'ORPHAN',
+        snippet: 'Extracted evidence snippets must not be projected through graph APIs.',
+        metadata: {
+          lineageRefs: ['source-1', 'evidence-1'],
+        },
+      },
+    ],
+    edges: [
+      {
+        edgeId: 'source:source-1->evidence:company',
+        edgeType: 'SOURCE_PRODUCES_EVIDENCE',
+        fromNodeId: 'source:source-1',
+        toNodeId: 'evidence:company',
+        basis: 'Persisted source registry entry produced this governed evidence object.',
+        validationState: 'VALID',
+      },
+    ],
+    coverage: {
+      coverageModel: 'EVIDENCE_DOMAIN_COVERAGE',
+      coveragePercent: 10,
+      coveredDomainCount: 1,
+      totalDomainCount: 10,
+      missingDomains: ['Proof'],
+      domains: [
+        {
+          domain: 'Company',
+          acceptedEvidenceCount: 1,
+          connectedEvidenceCount: 1,
+          pendingEvidenceCount: 0,
+          rejectedEvidenceCount: 0,
+          lowQualityEvidenceCount: 0,
+          state: 'CONNECTED',
+        },
+      ],
+    },
+    dependencies: {
+      sectionDependencyCount: 1,
+      missingDependencyTruthCount: 1,
+      sections: [
+        {
+          sectionKey: 'value_drivers',
+          dependencySectionKeys: ['customer_problem'],
+          missingDependencyTruthKeys: ['customer_problem'],
+        },
+      ],
+    },
+    health: {
+      state: 'WARNING',
+      nodeCount: 2,
+      edgeCount: 1,
+      acceptedEvidenceCount: 1,
+      orphanEvidenceCount: 0,
+      lowQualityEvidenceCount: 0,
+      unclassifiedEvidenceCount: 0,
+      missingDomainCount: 1,
+      dependencyCount: 1,
+      contradictionCount: 0,
+    },
+    validation: {
+      status: 'VALID',
+      issues: [],
+    },
+    ...overrides,
+  })
+
+  test('POST /api/v1/runtime-instances/:id/intelligence-graph/rebuild persists a runtime-scoped graph with intelligence and truth nodes', async () => {
+    const rejectedEvidenceObject = makeDiscoveryEvidenceObject({
+      evidenceObjectId: 'evidence_rejected_fixture',
+      sourceId: 'input_rejected',
+      category: 'Proof',
+      coverageArea: 'Proof',
+      extractedFact: 'Rejected evidence should not support intelligence.',
+      reviewStatus: 'REJECTED',
+      rejectedBy: CUSTOMER_ADMIN_ID,
+      rejectionTimestamp: '2026-05-19T08:03:00.000Z',
+      lineageRef: 'lineage:input_rejected:fixture',
+    })
+    const sectionEvidenceObject = makeSectionEvidenceObject({
+      evidenceObjectId: 'section_evidence_value_fixture',
+      category: 'Differentiation',
+      coverageArea: 'Differentiation',
+      extractedFact: 'Governed workflow automation reduces manual effort for proposal teams.',
+      reviewStatus: 'ACCEPTED',
+      acceptedBy: CUSTOMER_ADMIN_ID,
+      acceptanceTimestamp: '2026-05-19T08:04:00.000Z',
+    })
+    const frameworkPackage = makeRendererFrameworkPackage({
+      sections: [
+        {
+          sectionKey: 'customer_problem',
+          runtimePath: 'framework_state.sections.customer_problem',
+          label: 'Customer Problem',
+          required: true,
+        },
+        {
+          sectionKey: 'value_drivers',
+          runtimePath: 'framework_state.sections.value_drivers',
+          label: 'Value Drivers',
+          required: true,
+          dependsOnSectionKeys: ['customer_problem'],
+        },
+      ],
+    })
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:05:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: makeReviewableDiscoveryEvidencePack({
+          accepted: true,
+          acceptedAt: '2026-05-19T08:03:00.000Z',
+          acceptedBy: CUSTOMER_ADMIN_ID,
+          evidenceObjects: [
+            makeDiscoveryEvidenceObject({
+              reviewStatus: 'ACCEPTED',
+              acceptedBy: CUSTOMER_ADMIN_ID,
+              acceptanceTimestamp: '2026-05-19T08:03:00.000Z',
+            }),
+            rejectedEvidenceObject,
+          ],
+          scoped_views: {
+            customer_problem: {
+              evidenceObjectIds: ['evidence_companyWebsite_fixture'],
+              sourceRefs: ['input_companyWebsite'],
+            },
+          },
+        }),
+        sections: {
+          customer_problem: {
+            accepted: {
+              content: 'Raw accepted customer problem text should not be exposed by graph responses.',
+              acceptedAt: '2026-05-19T08:04:00.000Z',
+              acceptedBy: CUSTOMER_ADMIN_ID,
+              truthHash: 'sha256:customer-problem-truth',
+            },
+          },
+          value_drivers: {
+            accepted: {
+              content: 'Raw accepted value drivers text should not be exposed by graph responses.',
+              acceptedAt: '2026-05-19T08:04:30.000Z',
+              acceptedBy: CUSTOMER_ADMIN_ID,
+              truthHash: 'sha256:value-drivers-truth',
+            },
+            additionalEvidence: makeSectionAdditionalEvidence({
+              evidenceObjects: [sectionEvidenceObject],
+              status: 'ACCEPTED',
+            }),
+            evidenceObjects: [sectionEvidenceObject],
+          },
+        },
+        validation: {},
+        readiness: {},
+        publish: {},
+        lock: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:06:00.000Z'),
+    }))
+    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/intelligence-graph/rebuild`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-05-19T08:05:00.000Z',
+        trigger: 'SECTION_TRUTH_ACCEPTED',
+      })
+
+    expect(res.status).toBe(200)
+    const persistedGraph = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state.intelligence_graph
+    expect(persistedGraph).toEqual(expect.objectContaining({
+      artifactType: 'runtime_intelligence_graph',
+      graphVersion: '2.1',
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      runtimeInstanceKey: 'value-narrative-439111',
+    }))
+    expect(persistedGraph.build).toEqual(expect.objectContaining({
+      status: 'VALID',
+      trigger: 'SECTION_TRUTH_ACCEPTED',
+      nodeCount: expect.any(Number),
+      edgeCount: expect.any(Number),
+      sourceHash: expect.stringMatching(/^sha256:/),
+    }))
+    expect(persistedGraph.nodes.some((node) => node.nodeType === 'INTELLIGENCE')).toBe(true)
+    expect(persistedGraph.nodes.some((node) => node.nodeType === 'SECTION_TRUTH' && node.sectionKey === 'value_drivers'))
+      .toBe(true)
+    expect(persistedGraph.edges.some((edge) => edge.edgeType === 'SECTION_TRUTH_DEPENDS_ON_SECTION_TRUTH'))
+      .toBe(true)
+    const rejectedNode = persistedGraph.nodes.find((node) => node.evidenceObjectId === 'evidence_rejected_fixture')
+    expect(rejectedNode).toEqual(expect.objectContaining({
+      reviewStatus: 'REJECTED',
+      graphQualityState: 'INVALID',
+    }))
+    expect(persistedGraph.edges.some((edge) =>
+      edge.edgeType === 'EVIDENCE_DERIVES_INTELLIGENCE' && edge.fromNodeId === rejectedNode.nodeId)).toBe(false)
+    expect(persistedGraph.coverage.domains).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        domain: 'Company',
+        connectedEvidenceCount: 1,
+      }),
+      expect.objectContaining({
+        domain: 'Differentiation',
+        connectedEvidenceCount: 1,
+      }),
+    ]))
+    expect(JSON.stringify(res.body.data.intelligenceGraph)).not.toContain('Raw accepted customer problem text')
+    expect(JSON.stringify(res.body.data.intelligenceGraph)).not.toContain('Raw accepted value drivers text')
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      resourceType: 'RuntimeInstance',
+      diff: expect.objectContaining({
+        runtimePath: 'framework_state.intelligence_graph',
+        graphVersion: '2.1',
+        buildTrigger: 'SECTION_TRUTH_ACCEPTED',
+        sourceHash: persistedGraph.build.sourceHash,
+        nextGraphHash: persistedGraph.graphHash,
+      }),
+    }))
+  })
+
+  test('GET /api/v1/runtime-instances/:id/intelligence-graph returns a customer-safe graph projection', async () => {
+    const runtimeInstance = makeRuntimeInstance({
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: {},
+        sections: {},
+        validation: {},
+        readiness: {},
+        publish: {},
+        lock: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+        intelligence_graph: {
+          artifactType: 'runtime_intelligence_graph',
+          graphVersion: '2.1',
+          graphHash: 'sha256:graph-hash',
+          build: {
+            status: 'VALID',
+            trigger: 'EXPLICIT_REBUILD',
+            builtAt: '2026-06-05T10:00:00.000Z',
+            sourceHash: 'sha256:source-hash',
+            nodeCount: 1,
+            edgeCount: 0,
+          },
+          nodes: [
+            {
+              nodeId: 'evidence:company',
+              nodeType: 'EVIDENCE',
+              label: 'Company',
+              snippet: 'Extracted evidence snippets must not be projected through graph APIs.',
+              textContent: 'raw text must not be projected',
+              metadata: {
+                lineageRefs: ['source-1'],
+              },
+            },
+          ],
+          edges: [],
+          coverage: {
+            coverageModel: 'EVIDENCE_DOMAIN_COVERAGE',
+            coveragePercent: 10,
+            coveredDomainCount: 1,
+            totalDomainCount: 10,
+            missingDomains: ['Proof'],
+            domains: [],
+          },
+          dependencies: {
+            sectionDependencyCount: 0,
+            missingDependencyTruthCount: 0,
+            sections: [],
+          },
+          health: {
+            state: 'WARNING',
+            nodeCount: 1,
+            edgeCount: 0,
+            acceptedEvidenceCount: 1,
+            orphanEvidenceCount: 0,
+            lowQualityEvidenceCount: 0,
+            unclassifiedEvidenceCount: 0,
+            missingDomainCount: 1,
+            dependencyCount: 0,
+            contradictionCount: 0,
+          },
+        },
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/intelligence-graph`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toEqual(expect.objectContaining({
+      available: true,
+      graphVersion: '2.1',
+      graphHash: 'sha256:graph-hash',
+      nodes: [
+        expect.objectContaining({
+          nodeId: 'evidence:company',
+          nodeType: 'EVIDENCE',
+          label: 'Company',
+        }),
+      ],
+    }))
+    expect(res.body.data.nodes[0].textContent).toBeUndefined()
+    expect(res.body.data.nodes[0].snippet).toBeUndefined()
+    expect(JSON.stringify(res.body.data)).not.toContain('raw text must not be projected')
+    expect(JSON.stringify(res.body.data)).not.toContain('Extracted evidence snippets must not be projected')
+  })
+
+  test('POST /api/v1/runtime-instances/:id/intelligence-graph/rebuild rejects unsupported runtime types before graph writes', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      runtimeType: 'DEAL_ANALYSIS',
+      frameworkKey: 'DEALS',
+      updatedAt: new Date('2026-05-19T08:05:00.000Z'),
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/intelligence-graph/rebuild`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-05-19T08:05:00.000Z',
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.reason).toBe('RUNTIME_MUTATION_UNSUPPORTED_RUNTIME_TYPE')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(FrameworkPackage.findById).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test.each([
+    [
+      'approved lifecycle truth',
+      {
+        framework_state: {
+          lifecycle: { stage: 'APPROVED' },
+          evidence_pack: makeReviewableDiscoveryEvidencePack({ accepted: true }),
+          sections: {},
+          validation: {},
+          readiness: {},
+          publish: {},
+          lock: {},
+          policy: {},
+          attachments: {},
+          artifacts: {},
+        },
+      },
+    ],
+    ['published lifecycle truth', { framework_state: { lifecycle: { stage: 'PUBLISHED' } } }],
+    ['locked runtime', { lockedAt: new Date('2026-05-19T08:10:00.000Z') }],
+    ['terminal execution state', { executionStatus: 'COMPLETE' }],
+  ])('POST /api/v1/runtime-instances/:id/intelligence-graph/rebuild rejects %s', async (_label, overrides) => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:05:00.000Z'),
+      ...overrides,
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/intelligence-graph/rebuild`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-05-19T08:05:00.000Z',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('RUNTIME_MUTATION_NOT_EDITABLE')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('GET /api/v1/runtime-instances/:id/intelligence-graph/health returns graph health without graph elements', async () => {
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+      framework_state: {
+        intelligence_graph: makePersistedRuntimeIntelligenceGraph(),
+      },
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/intelligence-graph/health`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toEqual(expect.objectContaining({
+      available: true,
+      graphVersion: '2.1',
+      graphHash: 'sha256:graph-hash',
+      health: expect.objectContaining({
+        state: 'WARNING',
+        nodeCount: 2,
+        edgeCount: 1,
+      }),
+    }))
+    expect(res.body.data.nodes).toBeUndefined()
+    expect(res.body.data.edges).toBeUndefined()
+  })
+
+  test('GET /api/v1/runtime-instances/:id/intelligence-graph/coverage returns coverage and quality summaries', async () => {
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+      framework_state: {
+        intelligence_graph: makePersistedRuntimeIntelligenceGraph(),
+      },
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/intelligence-graph/coverage`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toEqual(expect.objectContaining({
+      available: true,
+      coverage: expect.objectContaining({
+        coverageModel: 'EVIDENCE_DOMAIN_COVERAGE',
+        coveragePercent: 10,
+      }),
+      missingAreas: ['Proof'],
+      quality: expect.objectContaining({
+        orphanEvidenceCount: 0,
+        lowQualityEvidenceCount: 0,
+      }),
+    }))
+  })
+
+  test('GET /api/v1/runtime-instances/:id/intelligence-graph/nodes/:nodeId/lineage returns bounded lineage for an existing node', async () => {
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+      framework_state: {
+        intelligence_graph: makePersistedRuntimeIntelligenceGraph(),
+      },
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/intelligence-graph/nodes/evidence%3Acompany/lineage`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toEqual(expect.objectContaining({
+      available: true,
+      nodeId: 'evidence:company',
+      node: expect.objectContaining({
+        nodeId: 'evidence:company',
+        nodeType: 'EVIDENCE',
+      }),
+      lineageRefs: ['source-1', 'evidence-1'],
+    }))
+    expect(res.body.data.node.snippet).toBeUndefined()
+    expect(res.body.data.incomingEdges).toHaveLength(1)
+    expect(res.body.data.outgoingEdges).toHaveLength(0)
+  })
+
+  test('GET /api/v1/runtime-instances/:id/intelligence-graph/nodes/:nodeId/lineage returns a missing-node contract', async () => {
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+      framework_state: {
+        intelligence_graph: makePersistedRuntimeIntelligenceGraph(),
+      },
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/intelligence-graph/nodes/evidence%3Amissing/lineage`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toEqual(expect.objectContaining({
+      available: false,
+      nodeId: 'evidence:missing',
+      node: null,
+      incomingEdges: [],
+      outgoingEdges: [],
+      lineageRefs: [],
+    }))
+  })
+
+  test('GET /api/v1/runtime-instances/:id/intelligence-graph/sections/:sectionKey/dependencies returns section and missing-section contracts', async () => {
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+      framework_state: {
+        intelligence_graph: makePersistedRuntimeIntelligenceGraph(),
+      },
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const existingRes = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/intelligence-graph/sections/value_drivers/dependencies`)
+      .set('Authorization', `Bearer ${token}`)
+
+    const missingRes = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/intelligence-graph/sections/executive_summary/dependencies`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(existingRes.status).toBe(200)
+    expect(existingRes.body.data).toEqual(expect.objectContaining({
+      available: true,
+      sectionKey: 'value_drivers',
+      dependencies: expect.objectContaining({
+        sectionKey: 'value_drivers',
+        dependencySectionKeys: ['customer_problem'],
+        missingDependencyTruthKeys: ['customer_problem'],
+      }),
+    }))
+    expect(missingRes.status).toBe(200)
+    expect(missingRes.body.data).toEqual(expect.objectContaining({
+      available: true,
+      sectionKey: 'executive_summary',
+      dependencies: {
+        sectionKey: 'executive_summary',
+        dependencySectionKeys: [],
+        missingDependencyTruthKeys: [],
+      },
+    }))
+  })
+
+  test('GET /api/v1/runtime-instances/:id/intelligence-graph/health returns unavailable when the graph has not been built', async () => {
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {},
+      },
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/intelligence-graph/health`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toEqual(expect.objectContaining({
+      available: false,
+      graphVersion: '2.1',
+      build: expect.objectContaining({
+        status: 'UNAVAILABLE',
+      }),
+      health: expect.objectContaining({
+        state: 'UNAVAILABLE',
+      }),
+    }))
+  })
+
+  test('GET /api/v1/runtime-instances/:id/intelligence-graph/coverage rejects callers without runtime view permission', async () => {
+    const unauthorizedUser = makeRegularUser({
+      _id: 'a27f1f77bcf86cd799439555',
+      id: 'a27f1f77bcf86cd799439555',
+      memberships: [],
+      tenantMemberships: [],
+      vmfGrants: [],
+    })
+    User.findById = jest.fn().mockReturnValue(buildUserQueryChain(unauthorizedUser))
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+      framework_state: {
+        intelligence_graph: makePersistedRuntimeIntelligenceGraph(),
+      },
+    })))
+    const token = await getAccessTokenForUser(unauthorizedUser)
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/intelligence-graph/coverage`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.details.reason).toBe('FORBIDDEN')
+  })
+
+  test('POST /api/v1/runtime-instances/:id/intelligence-graph/rebuild rejects stale graph writes without audit', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:05:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: makeReviewableDiscoveryEvidencePack({ accepted: true }),
+        sections: {},
+        validation: {},
+        readiness: {},
+        publish: {},
+        lock: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/intelligence-graph/rebuild`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-05-19T08:04:00.000Z',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('RUNTIME_MUTATION_STALE')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('POST /api/v1/runtime-instances/:id/intelligence-graph/rebuild rolls back when audit persistence fails', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:05:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: makeReviewableDiscoveryEvidencePack({ accepted: true }),
+        sections: {},
+        validation: {},
+        readiness: {},
+        publish: {},
+        lock: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+        intelligence_graph: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+      .mockResolvedValueOnce(makeRuntimeInstanceDocument({
+        ...runtimeInstanceDoc,
+        framework_state: {
+          ...runtimeInstanceDoc.framework_state,
+          intelligence_graph: { graphHash: 'sha256:new-graph-hash' },
+        },
+        updatedAt: new Date('2026-05-19T08:06:00.000Z'),
+      }))
+      .mockResolvedValueOnce(makeRuntimeInstanceDocument({
+        ...runtimeInstanceDoc,
+        updatedAt: new Date('2026-05-19T08:07:00.000Z'),
+      }))
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
+    AuditLog.createLog = jest.fn(async () => {
+      throw new Error('audit unavailable')
+    })
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/intelligence-graph/rebuild`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-05-19T08:05:00.000Z',
+      })
+
+    expect(res.status).toBe(500)
+    expect(res.body.error.code).toBe('RUNTIME_STATE_MUTATION_AUDIT_FAILED')
+    expect(res.body.error.details.reason).toBe('RUNTIME_MUTATION_AUDIT_PERSISTENCE_FAILED')
+    expect(RuntimeInstance.findOneAndUpdate).toHaveBeenCalledTimes(2)
+    expect(RuntimeInstance.findOneAndUpdate.mock.calls[1]).toEqual([
+      {
+        _id: RUNTIME_INSTANCE_ID,
+        updatedAt: new Date('2026-05-19T08:06:00.000Z'),
+      },
+      {
+        $set: {
+          framework_state: runtimeInstanceDoc.framework_state,
+          updatedBy: CUSTOMER_ADMIN_ID,
+        },
+      },
+      {
+        new: true,
+        runValidators: true,
+      },
+    ])
+  })
+
   test('PATCH /api/v1/runtime-instances/:id/section-acceptance persists accepted section truth with audit', async () => {
     const runtimeInstanceDoc = makeRuntimeInstanceDocument({
       updatedAt: new Date('2026-05-19T08:00:00.000Z'),
@@ -5780,7 +6506,9 @@ describe('Runtime Instance API', () => {
       })
 
     expect(res.status).toBe(200)
-    const persistedSection = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state.sections.customer_problem
+    const persistedFrameworkState = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state
+    const persistedSection = persistedFrameworkState.sections.customer_problem
+    const persistedGraph = persistedFrameworkState.intelligence_graph
     expect(persistedSection.accepted).toEqual(expect.objectContaining({
       content: 'Customer Problem: Proposal creation is slow.',
       truthHash: expect.stringMatching(/^sha256:/),
@@ -5818,6 +6546,16 @@ describe('Runtime Instance API', () => {
       acceptedTruthRevisionCount: 0,
       acceptedTruthHash,
     }))
+    expect(persistedGraph).toEqual(expect.objectContaining({
+      artifactType: 'runtime_intelligence_graph',
+      graphVersion: '2.1',
+      graphHash: expect.stringMatching(/^sha256:/),
+    }))
+    expect(persistedGraph.build).toEqual(expect.objectContaining({
+      status: 'VALID',
+      trigger: 'SECTION_TRUTH_ACCEPTED',
+      sourceHash: expect.stringMatching(/^sha256:/),
+    }))
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'RUNTIME_STATE_MUTATED',
       resourceType: 'RuntimeInstance',
@@ -5829,6 +6567,10 @@ describe('Runtime Instance API', () => {
           content: 'Customer Problem: Proposal creation is slow.',
           sourceGeneratedAt: '2026-05-19T08:01:00.000Z',
         }),
+        autoRebuilt: true,
+        graphVersion: '2.1',
+        buildTrigger: 'SECTION_TRUTH_ACCEPTED',
+        nextGraphHash: persistedGraph.graphHash,
       }),
     }))
     expect(res.body.data.section).toEqual(expect.objectContaining({
@@ -8513,6 +9255,7 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(200)
     const persistedState = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state
+    const persistedGraph = persistedState.intelligence_graph
     expect(persistedState.lifecycle).toEqual(expect.objectContaining({
       stage: 'PUBLISHED',
       publishedAt: expect.any(String),
@@ -8543,6 +9286,27 @@ describe('Runtime Instance API', () => {
     expect(res.body.data.state.publish).toEqual(expect.objectContaining({
       published: true,
       outputEligible: true,
+    }))
+    expect(persistedGraph).toEqual(expect.objectContaining({
+      artifactType: 'runtime_intelligence_graph',
+      graphVersion: '2.1',
+      graphHash: expect.stringMatching(/^sha256:/),
+    }))
+    expect(persistedGraph.build).toEqual(expect.objectContaining({
+      status: 'VALID',
+      trigger: 'PUBLISH_COMPLETED',
+      sourceHash: expect.stringMatching(/^sha256:/),
+    }))
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      diff: expect.objectContaining({
+        actionKey: 'PUBLISH',
+        intelligenceGraph: expect.objectContaining({
+          autoRebuilt: true,
+          graphVersion: '2.1',
+          buildTrigger: 'PUBLISH_COMPLETED',
+          nextGraphHash: persistedGraph.graphHash,
+        }),
+      }),
     }))
   })
 
@@ -8889,6 +9653,17 @@ describe('Runtime Instance API', () => {
       stage: 'LOCKED',
       lockedAt: expect.any(String),
     }))
+    const persistedGraph = persistedSet.framework_state.intelligence_graph
+    expect(persistedGraph).toEqual(expect.objectContaining({
+      artifactType: 'runtime_intelligence_graph',
+      graphVersion: '2.1',
+      graphHash: expect.stringMatching(/^sha256:/),
+    }))
+    expect(persistedGraph.build).toEqual(expect.objectContaining({
+      status: 'VALID',
+      trigger: 'LOCK_COMPLETED',
+      sourceHash: expect.stringMatching(/^sha256:/),
+    }))
     expect(persistedSet.framework_state.lock).toEqual(expect.objectContaining({
       state: 'LOCKED',
       locked: true,
@@ -8920,6 +9695,17 @@ describe('Runtime Instance API', () => {
       status: 'LOCKED',
       executionStatus: 'COMPLETE',
       lockedAt: expect.any(String),
+    }))
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      diff: expect.objectContaining({
+        actionKey: 'LOCK_RECORD',
+        intelligenceGraph: expect.objectContaining({
+          autoRebuilt: true,
+          graphVersion: '2.1',
+          buildTrigger: 'LOCK_COMPLETED',
+          nextGraphHash: persistedGraph.graphHash,
+        }),
+      }),
     }))
   })
 
@@ -12065,7 +12851,7 @@ describe('Runtime Instance API', () => {
         }),
       }),
     ])
-    expect(res.body.data.discovery).toEqual({
+    expect(res.body.data.discovery).toEqual(expect.objectContaining({
       state: {
         status: 'EVIDENCE_NOT_READY',
       },
@@ -12107,8 +12893,13 @@ describe('Runtime Instance API', () => {
         sourceCount: 0,
         builderMode: '',
       },
+      intelligenceGraph: expect.objectContaining({
+        available: false,
+        artifactType: 'runtime_intelligence_graph',
+        graphVersion: '2.1',
+      }),
       inputValues: {},
-    })
+    }))
     expect(res.body.data.actions).toEqual([
       expect.objectContaining({
         actionKey: 'SUBMIT_FOR_REVIEW',

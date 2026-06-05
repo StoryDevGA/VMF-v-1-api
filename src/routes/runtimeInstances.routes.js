@@ -8,9 +8,15 @@ import {
   executeRuntimeAction,
   getRuntimeInstance,
   getRuntimeEvidence,
+  getRuntimeIntelligenceGraph,
+  getRuntimeIntelligenceGraphCoverage,
+  getRuntimeIntelligenceGraphHealth,
+  getRuntimeIntelligenceGraphNodeLineage,
+  getRuntimeIntelligenceGraphSectionDependencies,
   getRuntimeRenderer,
   listRuntimeInstances,
   mutateRuntimeState,
+  rebuildRuntimeIntelligenceGraph,
   resetRuntimeDiscovery,
   reviewRuntimeDiscoveryEvidence,
   reviewRuntimeSectionEvidence,
@@ -24,9 +30,12 @@ import {
   validateExecuteRuntimeAction,
   validateListRuntimeInstances,
   validateMutateRuntimeState,
+  validateRebuildRuntimeIntelligenceGraph,
   validateReviewRuntimeDiscoveryEvidence,
   validateReviewRuntimeSectionEvidence,
   validateResetRuntimeDiscovery,
+  validateRuntimeIntelligenceGraphNodeParams,
+  validateRuntimeIntelligenceGraphSectionParams,
   validateRuntimeDiscoveryEvidenceParams,
   validateRuntimeActionParams,
   validateRuntimeInstanceId,
@@ -49,6 +58,33 @@ router.patch(
   reviewRuntimeDiscoveryEvidence,
 )
 router.patch('/:runtimeInstanceId/discovery-reset', validateRuntimeInstanceId, validateResetRuntimeDiscovery, resetRuntimeDiscovery)
+router.post(
+  '/:runtimeInstanceId/intelligence-graph/rebuild',
+  validateRuntimeInstanceId,
+  validateRebuildRuntimeIntelligenceGraph,
+  rebuildRuntimeIntelligenceGraph,
+)
+router.get(
+  '/:runtimeInstanceId/intelligence-graph/health',
+  validateRuntimeInstanceId,
+  getRuntimeIntelligenceGraphHealth,
+)
+router.get(
+  '/:runtimeInstanceId/intelligence-graph/coverage',
+  validateRuntimeInstanceId,
+  getRuntimeIntelligenceGraphCoverage,
+)
+router.get(
+  '/:runtimeInstanceId/intelligence-graph/nodes/:nodeId/lineage',
+  validateRuntimeIntelligenceGraphNodeParams,
+  getRuntimeIntelligenceGraphNodeLineage,
+)
+router.get(
+  '/:runtimeInstanceId/intelligence-graph/sections/:sectionKey/dependencies',
+  validateRuntimeIntelligenceGraphSectionParams,
+  getRuntimeIntelligenceGraphSectionDependencies,
+)
+router.get('/:runtimeInstanceId/intelligence-graph', validateRuntimeInstanceId, getRuntimeIntelligenceGraph)
 router.patch('/:runtimeInstanceId/section-evidence', validateRuntimeInstanceId, validateUpdateRuntimeSectionEvidence, updateRuntimeSectionEvidence)
 router.patch(
   '/:runtimeInstanceId/section-evidence/:evidenceObjectId/review',

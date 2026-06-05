@@ -62,9 +62,16 @@ import {
   normalizeDiscoveryWebsiteUrl,
   normalizeDiscoveryEvidenceObjects,
 } from './discoveryIntelligenceService.js'
+import {
+  buildRuntimeIntelligenceGraphAuditSummary,
+  buildRuntimeIntelligenceGraphForFrameworkState,
+  buildRuntimeIntelligenceGraphProjection,
+  RUNTIME_INTELLIGENCE_GRAPH_BUILD_TRIGGERS,
+} from './runtimeIntelligenceGraphService.js'
 
 const SECTION_WRITE_SCOPE = 'framework_state.sections.*'
 export const DISCOVERY_EVIDENCE_PACK_PATH = 'framework_state.evidence_pack'
+export const RUNTIME_INTELLIGENCE_GRAPH_PATH = 'framework_state.intelligence_graph'
 const FORBIDDEN_PATH_SEGMENTS = new Set(['__proto__', 'prototype', 'constructor'])
 const DISCOVERY_INPUT_KEYS = ['companyWebsite', 'companyName', 'marketRegion', 'targetOffer', 'notes']
 const DISCOVERY_WEBSITE_SOURCE_INPUT_KEY = 'websiteSources'
@@ -2554,6 +2561,48 @@ const resolveRuntimeInstanceForEvidenceRead = async ({ actorUserId, runtimeInsta
   return { runtimeInstance, canViewRawEvidence }
 }
 
+const resolveRuntimeInstanceForGraphRebuild = async ({ actorUserId, runtimeInstanceId, scopes }) => {
+  const runtimeInstance = await RuntimeInstance.findOne({
+    $or: [
+      ...(mongoose.isValidObjectId(runtimeInstanceId) ? [{ _id: runtimeInstanceId }] : []),
+      { runtimeInstanceKey: String(runtimeInstanceId || '').trim().toLowerCase() },
+    ],
+  })
+
+  if (!runtimeInstance) {
+    throw buildMutationError({
+      status: 404,
+      code: 'NOT_FOUND',
+      message: 'Runtime instance not found.',
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_INSTANCE_NOT_FOUND,
+      details: { runtimeInstanceId },
+    })
+  }
+
+  const customerId = toIdString(runtimeInstance.customerId)
+  const tenantId = toIdString(runtimeInstance.tenantId)
+  const runtimeType = normalizeToken(runtimeInstance.runtimeType)
+
+  assertSupportedMutationRuntimeType(runtimeType)
+
+  await assertRuntimePermission({
+    actorUserId,
+    scopes,
+    customerId,
+    tenantId,
+    permission: 'VMF_UPDATE',
+  })
+
+  const { customer } = await assertCustomerTenantContext({ customerId, tenantId })
+  await assertFeatureEntitlement({
+    customerId,
+    customer,
+    feature: getFeatureForRuntimeType(runtimeType),
+  })
+
+  return runtimeInstance
+}
+
 const buildMutationAuditPayload = ({
   actorUserId,
   additionalDiff = {},
@@ -3163,12 +3212,20 @@ export const updateRuntimeDiscoveryInputs = async ({
     ...previousFrameworkState,
     evidence_pack: nextEvidencePack,
   }
+  const graphRebuild = await rebuildRuntimeIntelligenceGraphForMutation({
+    actorUserId,
+    buildTrigger: RUNTIME_INTELLIGENCE_GRAPH_BUILD_TRIGGERS.EVIDENCE_UPDATED,
+    nextFrameworkState,
+    previousFrameworkState,
+    runtimeInstance,
+  })
 
   const updatedRuntimeInstance = await persistMutationWithAudit({
     actorUserId,
+    additionalDiff: graphRebuild.auditDiff,
     auditRequest,
     runtimeInstance,
-    nextFrameworkState,
+    nextFrameworkState: graphRebuild.nextFrameworkState,
     previousFrameworkState,
     previousUpdatedBy,
     runtimePath: DISCOVERY_EVIDENCE_PACK_PATH,
@@ -3306,12 +3363,20 @@ export const acceptRuntimeDiscovery = async ({
     ...previousFrameworkState,
     evidence_pack: nextEvidencePack,
   }
+  const graphRebuild = await rebuildRuntimeIntelligenceGraphForMutation({
+    actorUserId,
+    buildTrigger: RUNTIME_INTELLIGENCE_GRAPH_BUILD_TRIGGERS.EVIDENCE_ACCEPTED,
+    nextFrameworkState,
+    previousFrameworkState,
+    runtimeInstance,
+  })
 
   const updatedRuntimeInstance = await persistMutationWithAudit({
     actorUserId,
+    additionalDiff: graphRebuild.auditDiff,
     auditRequest,
     runtimeInstance,
-    nextFrameworkState,
+    nextFrameworkState: graphRebuild.nextFrameworkState,
     previousFrameworkState,
     previousUpdatedBy,
     runtimePath: DISCOVERY_EVIDENCE_PACK_PATH,
@@ -3457,12 +3522,20 @@ export const reviewRuntimeDiscoveryEvidence = async ({
     ...previousFrameworkState,
     evidence_pack: nextEvidencePack,
   }
+  const graphRebuild = await rebuildRuntimeIntelligenceGraphForMutation({
+    actorUserId,
+    buildTrigger: RUNTIME_INTELLIGENCE_GRAPH_BUILD_TRIGGERS.EVIDENCE_REVIEWED,
+    nextFrameworkState,
+    previousFrameworkState,
+    runtimeInstance,
+  })
 
   const updatedRuntimeInstance = await persistMutationWithAudit({
     actorUserId,
+    additionalDiff: graphRebuild.auditDiff,
     auditRequest,
     runtimeInstance,
-    nextFrameworkState,
+    nextFrameworkState: graphRebuild.nextFrameworkState,
     previousFrameworkState,
     previousUpdatedBy,
     runtimePath: DISCOVERY_EVIDENCE_PACK_PATH,
@@ -3598,10 +3671,18 @@ export const resetRuntimeDiscovery = async ({
       },
     },
   }
+  const graphRebuild = await rebuildRuntimeIntelligenceGraphForMutation({
+    actorUserId,
+    buildTrigger: RUNTIME_INTELLIGENCE_GRAPH_BUILD_TRIGGERS.DISCOVERY_RESET,
+    nextFrameworkState,
+    previousFrameworkState,
+    runtimeInstance,
+  })
 
   const updatedRuntimeInstance = await persistMutationWithAudit({
     actorUserId,
     additionalDiff: {
+      ...graphRebuild.auditDiff,
       reason: 'DISCOVERY_RESET',
       resetReason,
       resetAt,
@@ -3613,7 +3694,7 @@ export const resetRuntimeDiscovery = async ({
     },
     auditRequest,
     runtimeInstance,
-    nextFrameworkState,
+    nextFrameworkState: graphRebuild.nextFrameworkState,
     previousFrameworkState,
     previousUpdatedBy,
     runtimePath: DISCOVERY_EVIDENCE_PACK_PATH,
@@ -3636,6 +3717,133 @@ export const resetRuntimeDiscovery = async ({
       clearedSectionTruthCount: clearedSections.length,
       clearedSectionTruths: clearedSections,
     },
+  }
+}
+
+const resolveFrameworkPackageForGraph = async (runtimeInstance) => {
+  if (!runtimeInstance?.packageId) return null
+  const query = FrameworkPackage.findById(runtimeInstance.packageId)
+  return typeof query?.lean === 'function' ? query.lean() : query
+}
+
+const normalizeRuntimeIntelligenceGraphTrigger = (trigger) => {
+  const normalizedTrigger = normalizeToken(trigger)
+  if (Object.values(RUNTIME_INTELLIGENCE_GRAPH_BUILD_TRIGGERS).includes(normalizedTrigger)) {
+    return normalizedTrigger
+  }
+  return RUNTIME_INTELLIGENCE_GRAPH_BUILD_TRIGGERS.EXPLICIT_REBUILD
+}
+
+const rebuildRuntimeIntelligenceGraphForMutation = async ({
+  actorUserId,
+  autoRebuilt = true,
+  buildTrigger,
+  frameworkPackage = null,
+  nextFrameworkState,
+  previousFrameworkState,
+  runtimeInstance,
+} = {}) => {
+  const normalizedBuildTrigger = normalizeRuntimeIntelligenceGraphTrigger(buildTrigger)
+  const resolvedFrameworkPackage = frameworkPackage || await resolveFrameworkPackageForGraph(runtimeInstance)
+  const previousGraph = cloneValue(previousFrameworkState?.intelligence_graph || {})
+  const nextGraph = buildRuntimeIntelligenceGraphForFrameworkState({
+    actorUserId,
+    buildTrigger: normalizedBuildTrigger,
+    frameworkPackage: resolvedFrameworkPackage,
+    frameworkState: nextFrameworkState,
+    runtimeInstance,
+  })
+
+  if (nextGraph.validation?.status !== 'VALID') {
+    throw buildMutationError({
+      status: 422,
+      code: 'VALIDATION_FAILED',
+      message: 'Runtime intelligence graph validation failed.',
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_INTELLIGENCE_GRAPH_INVALID,
+      details: {
+        validationIssues: nextGraph.validation?.issues || [],
+      },
+    })
+  }
+
+  return {
+    auditDiff: buildRuntimeIntelligenceGraphAuditSummary({
+      autoRebuilt,
+      buildTrigger: normalizedBuildTrigger,
+      nextGraph,
+      previousGraph,
+    }),
+    buildTrigger: normalizedBuildTrigger,
+    graph: nextGraph,
+    nextFrameworkState: {
+      ...nextFrameworkState,
+      intelligence_graph: nextGraph,
+    },
+  }
+}
+
+export const rebuildRuntimeIntelligenceGraph = async ({
+  actorUserId,
+  auditRequest,
+  scopes,
+  runtimeInstanceId,
+  payload,
+} = {}) => {
+  const expectedUpdatedAt = payload?.expectedUpdatedAt
+  const runtimeInstance = await resolveRuntimeInstanceForGraphRebuild({
+    actorUserId,
+    runtimeInstanceId,
+    scopes,
+  })
+
+  assertRuntimeEditable(runtimeInstance)
+  assertExpectedUpdatedAt({ runtimeInstance, expectedUpdatedAt })
+
+  const frameworkPackage = await resolveFrameworkPackageForGraph(runtimeInstance)
+  const previousFrameworkState = cloneValue(runtimeInstance.framework_state || {})
+  const previousUpdatedBy = runtimeInstance.updatedBy
+  const previousGraph = cloneValue(previousFrameworkState.intelligence_graph || {})
+  const updatedAtBefore = runtimeInstance.updatedAt instanceof Date
+    ? runtimeInstance.updatedAt.toISOString()
+    : runtimeInstance.updatedAt
+  const graphRebuild = await rebuildRuntimeIntelligenceGraphForMutation({
+    actorUserId,
+    autoRebuilt: false,
+    buildTrigger: payload?.trigger,
+    frameworkPackage,
+    runtimeInstance,
+    nextFrameworkState: previousFrameworkState,
+    previousFrameworkState,
+  })
+  const { buildTrigger, graph: nextGraph, nextFrameworkState } = graphRebuild
+
+  const updatedRuntimeInstance = await persistMutationWithAudit({
+    actorUserId,
+    additionalDiff: graphRebuild.auditDiff,
+    auditRequest,
+    runtimeInstance,
+    nextFrameworkState,
+    previousFrameworkState,
+    previousUpdatedBy,
+    runtimePath: RUNTIME_INTELLIGENCE_GRAPH_PATH,
+    previousValue: buildRuntimeIntelligenceGraphProjection(previousGraph),
+    nextValue: buildRuntimeIntelligenceGraphProjection(nextGraph),
+    expectedUpdatedAt,
+    updatedAtBefore,
+  })
+
+  return {
+    runtimeInstance: {
+      id: toIdString(updatedRuntimeInstance._id),
+      runtimeInstanceKey: updatedRuntimeInstance.runtimeInstanceKey,
+      runtimeType: updatedRuntimeInstance.runtimeType,
+      status: updatedRuntimeInstance.status,
+      executionStatus: updatedRuntimeInstance.executionStatus,
+      updatedAt: updatedRuntimeInstance.updatedAt instanceof Date
+        ? updatedRuntimeInstance.updatedAt.toISOString()
+        : updatedRuntimeInstance.updatedAt,
+    },
+    intelligenceGraph: buildRuntimeIntelligenceGraphProjection(nextGraph, { includeGraphElements: true }),
   }
 }
 
@@ -3755,10 +3963,19 @@ export const updateRuntimeSectionEvidence = async ({
   const nextFrameworkState = cloneValue(previousFrameworkState)
   nextFrameworkState.sections = nextFrameworkState.sections || {}
   nextFrameworkState.sections[target.stateSectionKey] = nextSection
+  const graphRebuild = await rebuildRuntimeIntelligenceGraphForMutation({
+    actorUserId,
+    buildTrigger: RUNTIME_INTELLIGENCE_GRAPH_BUILD_TRIGGERS.SECTION_EVIDENCE_UPDATED,
+    frameworkPackage,
+    nextFrameworkState,
+    previousFrameworkState,
+    runtimeInstance,
+  })
 
   const updatedRuntimeInstance = await persistMutationWithAudit({
     actorUserId,
     additionalDiff: {
+      ...graphRebuild.auditDiff,
       reason: 'SECTION_EVIDENCE_UPLOAD',
       sectionKey: target.sectionKey,
       stateSectionKey: target.stateSectionKey,
@@ -3775,7 +3992,7 @@ export const updateRuntimeSectionEvidence = async ({
     },
     auditRequest,
     runtimeInstance,
-    nextFrameworkState,
+    nextFrameworkState: graphRebuild.nextFrameworkState,
     previousFrameworkState,
     previousUpdatedBy,
     runtimePath: target.runtimePath,
@@ -3923,10 +4140,19 @@ export const reviewRuntimeSectionEvidence = async ({
   const nextFrameworkState = cloneValue(previousFrameworkState)
   nextFrameworkState.sections = nextFrameworkState.sections || {}
   nextFrameworkState.sections[target.stateSectionKey] = nextSection
+  const graphRebuild = await rebuildRuntimeIntelligenceGraphForMutation({
+    actorUserId,
+    buildTrigger: RUNTIME_INTELLIGENCE_GRAPH_BUILD_TRIGGERS.SECTION_EVIDENCE_REVIEWED,
+    frameworkPackage,
+    nextFrameworkState,
+    previousFrameworkState,
+    runtimeInstance,
+  })
 
   const updatedRuntimeInstance = await persistMutationWithAudit({
     actorUserId,
     additionalDiff: {
+      ...graphRebuild.auditDiff,
       reason: 'SECTION_EVIDENCE_REVIEW',
       sectionKey: target.sectionKey,
       stateSectionKey: target.stateSectionKey,
@@ -3938,7 +4164,7 @@ export const reviewRuntimeSectionEvidence = async ({
     },
     auditRequest,
     runtimeInstance,
-    nextFrameworkState,
+    nextFrameworkState: graphRebuild.nextFrameworkState,
     previousFrameworkState,
     previousUpdatedBy,
     runtimePath: target.runtimePath,
@@ -4225,13 +4451,24 @@ export const acceptRuntimeSection = async ({
     upstreamRuntimePath: target.runtimePath,
     upstreamSectionKey: target.sectionKey,
   })
+  const graphRebuild = await rebuildRuntimeIntelligenceGraphForMutation({
+    actorUserId,
+    buildTrigger: RUNTIME_INTELLIGENCE_GRAPH_BUILD_TRIGGERS.SECTION_TRUTH_ACCEPTED,
+    frameworkPackage,
+    nextFrameworkState,
+    previousFrameworkState,
+    runtimeInstance,
+  })
 
   const updatedRuntimeInstance = await persistMutationWithAudit({
     actorUserId,
-    additionalDiff: buildDependencyInvalidationAuditDiff(dependencyInvalidations),
+    additionalDiff: {
+      ...graphRebuild.auditDiff,
+      ...buildDependencyInvalidationAuditDiff(dependencyInvalidations),
+    },
     auditRequest,
     runtimeInstance,
-    nextFrameworkState,
+    nextFrameworkState: graphRebuild.nextFrameworkState,
     previousFrameworkState,
     previousUpdatedBy,
     runtimePath: target.runtimePath,
@@ -4273,6 +4510,7 @@ const runtimeStateMutationService = {
   acceptRuntimeDiscovery,
   getRuntimeDiscoveryEvidence,
   mutateRuntimeState,
+  rebuildRuntimeIntelligenceGraph,
   reviewRuntimeSectionEvidence,
   resetRuntimeDiscovery,
   updateRuntimeSectionEvidence,
