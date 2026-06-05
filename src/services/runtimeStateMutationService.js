@@ -542,6 +542,11 @@ const buildSectionEvidenceProjection = ({
       uploadedBy: String(document?.uploadedBy || '').trim(),
       status: String(document?.status || document?.documentStatus || 'PROCESSED').trim().toUpperCase(),
       ingestionMode: String(document?.ingestionMode || '').trim().toUpperCase(),
+      extractionMethod: String(document?.extractionMethod || '').trim(),
+      adapter: String(document?.adapter || '').trim(),
+      ...(Number.isFinite(Number(document?.ocrPageCount)) ? { ocrPageCount: Number(document.ocrPageCount) } : {}),
+      ...(Number.isFinite(Number(document?.ocrPagesProcessed)) ? { ocrPagesProcessed: Number(document.ocrPagesProcessed) } : {}),
+      ...(document?.ocrPageLimitReached ? { ocrPageLimitReached: true } : {}),
       evidenceObjectsGenerated: Number.isFinite(Number(document?.evidenceObjectsGenerated))
         ? Number(document.evidenceObjectsGenerated)
         : 0,
@@ -647,6 +652,11 @@ const transformSectionDocumentAcquisition = ({
         uploadedBy: toIdString(actorUserId),
         status: 'PROCESSED',
         ingestionMode: String(source?.ingestionMode || 'TEXT_NATIVE').trim().toUpperCase(),
+        extractionMethod: String(source?.extractionMethod || '').trim(),
+        adapter: String(source?.adapter || '').trim(),
+        ...(Number.isFinite(Number(source?.ocrPageCount)) ? { ocrPageCount: Number(source.ocrPageCount) } : {}),
+        ...(Number.isFinite(Number(source?.ocrPagesProcessed)) ? { ocrPagesProcessed: Number(source.ocrPagesProcessed) } : {}),
+        ...(source?.ocrPageLimitReached ? { ocrPageLimitReached: true } : {}),
         evidenceObjectsGenerated: Number.isFinite(Number(source?.evidenceObjectsGenerated))
           ? Number(source.evidenceObjectsGenerated)
           : 0,
@@ -1247,7 +1257,7 @@ export const buildDiscoveryEvidencePack = async ({
   }
   if (documentSources !== undefined) {
     try {
-      documentAcquisition = ingestUploadedDocumentDiscoveryEvidence({
+      documentAcquisition = await ingestUploadedDocumentDiscoveryEvidence({
         acquisitionProfile: profile,
         capturedAt: refreshedAt,
         documentSources,
@@ -3892,7 +3902,7 @@ export const updateRuntimeSectionEvidence = async ({
 
   let acquisition
   try {
-    acquisition = ingestUploadedDocumentDiscoveryEvidence({
+    acquisition = await ingestUploadedDocumentDiscoveryEvidence({
       acquisitionProfile: DISCOVERY_ACQUISITION_PROFILES.STANDARD,
       capturedAt,
       documentSources: payload?.documentSources || [],
@@ -4161,6 +4171,170 @@ export const reviewRuntimeSectionEvidence = async ({
       acceptedEvidenceChanged,
       previousSectionEvidenceHash: previousGsilContext.evidenceHash,
       nextSectionEvidenceHash: nextGsilContext.evidenceHash,
+    },
+    auditRequest,
+    runtimeInstance,
+    nextFrameworkState: graphRebuild.nextFrameworkState,
+    previousFrameworkState,
+    previousUpdatedBy,
+    runtimePath: target.runtimePath,
+    previousValue: previousSectionEvidence,
+    nextValue: sectionEvidence,
+    expectedUpdatedAt,
+    updatedAtBefore,
+  })
+
+  return buildSectionEvidenceMutationResponse({
+    runtimeInstance: updatedRuntimeInstance,
+    target,
+    previousSectionEvidence,
+    sectionEvidence,
+  })
+}
+
+export const clearRuntimeSectionEvidence = async ({
+  actorUserId,
+  auditRequest,
+  scopes,
+  runtimeInstanceId,
+  payload,
+} = {}) => {
+  if (payload?.confirmClear !== true) {
+    throw buildMutationError({
+      status: 422,
+      code: 'VALIDATION_FAILED',
+      message: 'Section evidence clear requires confirmation.',
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_ACTION_NOT_AVAILABLE,
+      details: {
+        confirmClear: 'confirmClear must be true',
+      },
+    })
+  }
+
+  const expectedUpdatedAt = payload?.expectedUpdatedAt
+  const runtimeInstance = await resolveRuntimeInstanceForMutation({
+    actorUserId,
+    runtimeInstanceId,
+    scopes,
+  })
+
+  assertRuntimeEditable(runtimeInstance)
+  assertExpectedUpdatedAt({ runtimeInstance, expectedUpdatedAt })
+
+  const frameworkPackage = await resolvePackageForAdvance(runtimeInstance?.packageId)
+  const target = resolveSectionEvidenceTarget({ frameworkPackage, payload })
+
+  await assertSectionEvidenceTargetProjectable({ frameworkPackage, target })
+  await assertRuntimeSectionPathWritable({
+    frameworkKey: runtimeInstance.frameworkKey,
+    runtimePath: target.runtimePath,
+  })
+
+  const previousFrameworkState = cloneValue(runtimeInstance.framework_state || {})
+  const previousUpdatedBy = runtimeInstance.updatedBy
+  const updatedAtBefore = runtimeInstance.updatedAt instanceof Date
+    ? runtimeInstance.updatedAt.toISOString()
+    : runtimeInstance.updatedAt
+  const previousRawSection = previousFrameworkState.sections?.[target.stateSectionKey]
+  const sectionObject = normalizeRuntimeSectionObject({
+    value: previousRawSection,
+    sectionKey: target.sectionKey,
+    runtimePath: target.runtimePath,
+  })
+  const previousEvidenceObjects = Array.isArray(sectionObject.evidenceObjects)
+    ? cloneValue(sectionObject.evidenceObjects)
+    : []
+  const previousDocuments = Array.isArray(sectionObject.additionalEvidence?.documents)
+    ? cloneValue(sectionObject.additionalEvidence.documents)
+    : []
+  const previousSectionEvidence = buildSectionEvidenceProjection({
+    additionalEvidence: sectionObject.additionalEvidence,
+    evidenceObjects: previousEvidenceObjects,
+  })
+
+  if (previousDocuments.length === 0 && previousEvidenceObjects.length === 0) {
+    throw buildMutationError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'There is no section evidence to clear.',
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_ACTION_NOT_AVAILABLE,
+      details: {
+        runtimePath: target.runtimePath,
+        sectionKey: target.sectionKey,
+      },
+    })
+  }
+
+  const clearedAt = new Date().toISOString()
+  const previousGsilContext = buildSectionGsilContext({
+    evidenceObjects: previousEvidenceObjects,
+    reviewedAt: sectionObject.gsilContext?.updatedAt || '',
+  })
+  const nextGsilContext = buildSectionGsilContext({
+    evidenceObjects: [],
+    reviewedAt: clearedAt,
+  })
+  const acceptedEvidenceChanged = previousGsilContext.evidenceHash !== nextGsilContext.evidenceHash
+  let nextSection = {
+    ...sectionObject,
+    additionalEvidence: buildSectionAdditionalEvidence({
+      actorUserId,
+      documents: [],
+      evidenceObjects: [],
+      updatedAt: clearedAt,
+    }),
+    evidenceObjects: [],
+    gsilContext: nextGsilContext,
+  }
+
+  if (acceptedEvidenceChanged) {
+    nextSection = applyAcceptedSectionEvidenceInvalidation({
+      actorUserId,
+      invalidatedAt: clearedAt,
+      nextSection,
+      nextSectionEvidenceHash: nextGsilContext.evidenceHash,
+      previousSectionEvidenceHash: previousGsilContext.evidenceHash,
+      sectionObject,
+    })
+  }
+
+  const sectionEvidence = buildSectionEvidenceProjection({
+    additionalEvidence: nextSection.additionalEvidence,
+    evidenceObjects: nextSection.evidenceObjects,
+  })
+  const nextFrameworkState = cloneValue(previousFrameworkState)
+  nextFrameworkState.sections = nextFrameworkState.sections || {}
+  nextFrameworkState.sections[target.stateSectionKey] = nextSection
+  const graphRebuild = await rebuildRuntimeIntelligenceGraphForMutation({
+    actorUserId,
+    buildTrigger: RUNTIME_INTELLIGENCE_GRAPH_BUILD_TRIGGERS.SECTION_EVIDENCE_UPDATED,
+    frameworkPackage,
+    nextFrameworkState,
+    previousFrameworkState,
+    runtimeInstance,
+  })
+
+  const updatedRuntimeInstance = await persistMutationWithAudit({
+    actorUserId,
+    additionalDiff: {
+      ...graphRebuild.auditDiff,
+      reason: 'SECTION_EVIDENCE_CLEAR',
+      clearReason: payload?.reason || 'USER_REQUESTED_SECTION_EVIDENCE_CLEAR',
+      sectionKey: target.sectionKey,
+      stateSectionKey: target.stateSectionKey,
+      previousDocumentCount: previousSectionEvidence.documentCount,
+      nextDocumentCount: sectionEvidence.documentCount,
+      previousEvidenceObjectCount: previousSectionEvidence.evidenceObjectCount,
+      nextEvidenceObjectCount: sectionEvidence.evidenceObjectCount,
+      acceptedEvidenceChanged,
+      previousSectionEvidenceHash: previousGsilContext.evidenceHash,
+      nextSectionEvidenceHash: nextGsilContext.evidenceHash,
+      clearedSectionDocumentIds: previousDocuments
+        .map((document) => document.sectionDocumentId || document.sourceId)
+        .filter(Boolean),
+      clearedSectionEvidenceObjectIds: previousEvidenceObjects
+        .map((evidenceObject) => evidenceObject.evidenceObjectId)
+        .filter(Boolean),
     },
     auditRequest,
     runtimeInstance,

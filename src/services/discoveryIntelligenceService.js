@@ -1,7 +1,14 @@
 import crypto from 'node:crypto'
 import { lookup } from 'node:dns/promises'
+import { createRequire } from 'node:module'
 import { isIP } from 'node:net'
+import path from 'node:path'
 import zlib from 'node:zlib'
+import * as pdfjs from 'pdfjs-dist/build/pdf.mjs'
+
+const moduleRequire = createRequire(import.meta.url)
+const { createCanvas } = moduleRequire('@napi-rs/canvas')
+const { createWorker: createOcrWorker, PSM: OCR_PAGE_SEGMENTATION_MODES } = moduleRequire('tesseract.js')
 
 const DISCOVERY_EVIDENCE_CATEGORIES = Object.freeze({
   COMPANY: 'Company',
@@ -88,7 +95,21 @@ const DOCUMENT_ACQUISITION_LIMITS = Object.freeze({
   maxTextCharacters: 80000,
   maxEvidenceObjectsPerDocument: 30,
   maxCandidateSegments: 120,
+  maxPdfTextPages: 10,
+  pdfTextTimeoutMs: 15000,
+  maxPdfOcrPages: 10,
+  pdfOcrRenderScale: 2,
+  pdfOcrTimeoutMs: 90000,
 })
+const PDF_CMAP_URL = `${path.dirname(moduleRequire.resolve('pdfjs-dist/cmaps/78-EUC-H.bcmap'))}${path.sep}`
+const PDF_STANDARD_FONT_DATA_URL = `${path.dirname(moduleRequire.resolve('pdfjs-dist/standard_fonts/LiberationSans-Regular.ttf'))}${path.sep}`
+const PDF_OCR_LANGUAGE_DATA_URL = path.dirname(moduleRequire.resolve('@tesseract.js-data/eng/4.0.0/eng.traineddata.gz'))
+const PDF_OCR_WORKER_PATH = moduleRequire.resolve('tesseract.js/src/worker-script/node/index.js')
+const PDF_OCR_CORE_PATH = path.dirname(moduleRequire.resolve('tesseract.js-core/tesseract-core-simd-lstm.wasm.js'))
+const PDF_NO_READABLE_TEXT_ERROR = 'PDF document did not contain readable extractable text.'
+const PDF_TEXT_TIMEOUT_ERROR = 'PDF text extraction timed out before this PDF could be processed.'
+const PDF_OCR_NO_READABLE_TEXT_ERROR = 'OCR could not extract reliable text from this PDF.'
+const PDF_OCR_TIMEOUT_ERROR = 'OCR timed out before this PDF could be processed.'
 
 const DOCUMENT_ASSET_TYPES = Object.freeze({
   CUSTOMER_DOCUMENT: 'CUSTOMER_DOCUMENT',
@@ -185,6 +206,101 @@ const normalizeReviewStatus = (value) => {
 
 const sanitizeFact = (value) => String(value ?? '').trim().replace(/\s+/g, ' ')
 
+const normalizeDocumentExtractionText = (value) => String(value ?? '')
+  .slice(0, DOCUMENT_ACQUISITION_LIMITS.maxTextCharacters)
+  .replace(/\r\n?/g, '\n')
+  .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\uFFFD]/g, ' ')
+  .replace(/[^\S\n]+/g, ' ')
+  .replace(/\n{3,}/g, '\n\n')
+  .trim()
+
+const countReadableDocumentWords = (value) =>
+  (String(value || '').match(/\b[A-Za-z][A-Za-z'-]{2,}\b/g) || []).length
+
+const isReadableExtractedDocumentText = (value) => {
+  const text = normalizeDocumentExtractionText(value)
+  if (!text) return false
+  const sample = text.slice(0, 4000)
+  const nonWhitespaceLength = sample.replace(/\s/g, '').length
+  if (nonWhitespaceLength < 18) return false
+
+  const asciiLetterCount = (sample.match(/[A-Za-z]/g) || []).length
+  const nonAsciiCount = (sample.match(/[^\x00-\x7F]/g) || []).length
+  const supportedCharacterCount = (sample.match(/[\p{L}\p{N}\s.,;:!?'"()[\]{}\/%&+@#*=<>_|~-]/gu) || []).length
+  const asciiLetterRatio = asciiLetterCount / nonWhitespaceLength
+  const nonAsciiRatio = nonAsciiCount / sample.length
+  const unsupportedRatio = Math.max(0, sample.length - supportedCharacterCount) / sample.length
+
+  return countReadableDocumentWords(sample) >= 4
+    && asciiLetterRatio >= 0.25
+    && nonAsciiRatio <= 0.12
+    && unsupportedRatio <= 0.18
+}
+
+const getReadableDocumentExtractionText = (value) => {
+  const text = normalizeDocumentExtractionText(value)
+  return isReadableExtractedDocumentText(text) ? text : ''
+}
+
+class PdfOcrCanvasFactory {
+  create(width, height) {
+    const canvas = createCanvas(width, height)
+    return {
+      canvas,
+      context: canvas.getContext('2d'),
+    }
+  }
+
+  reset(canvasAndContext, width, height) {
+    canvasAndContext.canvas.width = width
+    canvasAndContext.canvas.height = height
+  }
+
+  destroy(canvasAndContext) {
+    canvasAndContext.canvas.width = 0
+    canvasAndContext.canvas.height = 0
+    canvasAndContext.canvas = null
+    canvasAndContext.context = null
+  }
+}
+
+const isPdfOcrEnabled = () =>
+  String(process.env.STORYLINEOS_PDF_OCR_ENABLED || 'true').trim().toLowerCase() !== 'false'
+
+const loadPdfDocument = (buffer, options = {}) => pdfjs.getDocument({
+  data: new Uint8Array(buffer),
+  cMapPacked: true,
+  cMapUrl: PDF_CMAP_URL,
+  disableFontFace: true,
+  disableWorker: true,
+  isEvalSupported: false,
+  standardFontDataUrl: PDF_STANDARD_FONT_DATA_URL,
+  useWorkerFetch: false,
+  verbosity: pdfjs.VerbosityLevel.ERRORS,
+  ...options,
+}).promise
+
+const withTimeout = async ({ promise, timeoutMs, timeoutMessage, onTimeout }) => {
+  let timeoutId
+  let timedOut = false
+
+  const timeoutPromise = new Promise((_resolve, reject) => {
+    timeoutId = setTimeout(() => {
+      timedOut = true
+      reject(new Error(timeoutMessage))
+    }, timeoutMs)
+  })
+
+  try {
+    return await Promise.race([promise, timeoutPromise])
+  } finally {
+    clearTimeout(timeoutId)
+    if (timedOut && typeof onTimeout === 'function') {
+      await onTimeout()
+    }
+  }
+}
+
 const STYLE_OR_CODE_FRAGMENT_PATTERNS = Object.freeze([
   /stylablebutton/i,
   /\b(?:width|height|min-width|min-height|padding|margin|display|cursor|border|box-sizing|background-color|box-shadow|pointer-events|touch-action|transition|transform|animation|opacity|z-index|font-size|line-height|position|overflow)\s*:/i,
@@ -201,6 +317,179 @@ const countNaturalLanguageTokens = (value) =>
 
 const countWhitespaceSeparatedWords = (value) =>
   String(value || '').split(/\s+/).filter((token) => /[A-Za-z]{2,}/.test(token)).length
+
+const COMMON_SHORT_DOCUMENT_WORDS = new Set([
+  'a',
+  'ai',
+  'am',
+  'an',
+  'as',
+  'at',
+  'be',
+  'by',
+  'do',
+  'eu',
+  'go',
+  'he',
+  'if',
+  'in',
+  'is',
+  'it',
+  'me',
+  'my',
+  'no',
+  'of',
+  'on',
+  'or',
+  'os',
+  'so',
+  'to',
+  'uk',
+  'up',
+  'us',
+  'ux',
+  'ui',
+  'we',
+])
+
+const normalizeDocumentEvidenceSegment = (value) => sanitizeFact(value)
+  .replace(/^[^\p{L}\p{N}]+/u, '')
+  .replace(/^[A-Z][A-Z\s]{8,}\s+(?=[A-Z][a-z])/u, '')
+  .trim()
+
+const hasLikelyOcrSplitWordRun = (value) => {
+  const tokens = String(value || '').match(/\b[A-Za-z][A-Za-z']*\b/g) || []
+  let suspiciousRun = 0
+
+  for (const token of tokens) {
+    const normalizedToken = token.toLowerCase().replace(/'/g, '')
+    const isShortToken = normalizedToken.length <= 2
+    const isCommonShortWord = COMMON_SHORT_DOCUMENT_WORDS.has(normalizedToken)
+    const isUppercaseAcronym = token.length >= 2 && token === token.toUpperCase()
+
+    if (isShortToken && !isCommonShortWord && !isUppercaseAcronym) {
+      suspiciousRun += 1
+      if (suspiciousRun >= 2) return true
+    } else {
+      suspiciousRun = 0
+    }
+  }
+
+  return false
+}
+
+const getDocumentEvidenceSegmentQuality = (value) => {
+  const originalText = sanitizeFact(value)
+  const text = normalizeDocumentEvidenceSegment(originalText)
+  if (!text || !isGovernedDiscoveryEvidenceFact(text)) {
+    return { reviewable: false, score: 0, text }
+  }
+
+  const characters = Array.from(text)
+  const characterCount = Math.max(characters.length, 1)
+  const naturalLanguageTokens = countNaturalLanguageTokens(text)
+  const readableWordCount = countReadableDocumentWords(text)
+  if (text.length > 260) {
+    return { reviewable: false, score: 0, text }
+  }
+  if (naturalLanguageTokens < 4 || readableWordCount < 4) {
+    return { reviewable: false, score: 0, text }
+  }
+  if (/^(?:and|or|but|that|which|where|while|because|from|to|with|for|of|in|on|by|than)\b/.test(text)) {
+    return { reviewable: false, score: 0, text }
+  }
+  if (hasLikelyOcrSplitWordRun(text)) {
+    return { reviewable: false, score: 0, text }
+  }
+
+  const letters = text.match(/[A-Za-z]/g) || []
+  const uppercaseLetters = text.match(/[A-Z]/g) || []
+  const uppercaseRatio = letters.length > 0 ? uppercaseLetters.length / letters.length : 0
+  const endsLikeSentence = /[.!?]$/.test(text)
+  const hasSentencePunctuation = /[,;:]/.test(text)
+  const looksLikeShortTitle = naturalLanguageTokens <= 7
+    && uppercaseRatio >= 0.55
+    && !endsLikeSentence
+    && !hasSentencePunctuation
+  if (looksLikeShortTitle) {
+    return { reviewable: false, score: 0, text }
+  }
+
+  const hardNoiseCount = (text.match(/[<>\uFFFD\u25A1]/g) || []).length
+  if (hardNoiseCount > 0 && hardNoiseCount / characterCount > 0.005) {
+    return { reviewable: false, score: 0, text }
+  }
+
+  const unsupportedCharacterCount = characters.filter((character) =>
+    !/[\p{L}\p{N}\s.,;:!?'"()/%&+@#-]/u.test(character)).length
+  if (unsupportedCharacterCount >= 2 || unsupportedCharacterCount / characterCount > 0.03) {
+    return { reviewable: false, score: 0, text }
+  }
+
+  const digitCount = (text.match(/[0-9]/g) || []).length
+  if (digitCount > 0 && digitCount / characterCount > 0.25) {
+    return { reviewable: false, score: 0, text }
+  }
+
+  const hasUnmatchedTrailingBracket = /[\])}]$/.test(text)
+    && !(/[([{]/.test(text) && /[\])}]/.test(text))
+  if (hasUnmatchedTrailingBracket) {
+    return { reviewable: false, score: 0, text }
+  }
+
+  if (/(?:\/|\\)\s*\d+\s*$/.test(text)) {
+    return { reviewable: false, score: 0, text }
+  }
+
+  if (/(^|\s)[\\/](\s|$)/.test(text)) {
+    return { reviewable: false, score: 0, text }
+  }
+
+  const sentenceTerminatorCount = (text.match(/[.!?]/g) || []).length
+  if (sentenceTerminatorCount > 3) {
+    return { reviewable: false, score: 0, text }
+  }
+
+  const hasTrailingUppercaseHeading = /\b[A-Z]{2,}(?:\s+[A-Z]{2,})+\s*$/.test(text)
+    && uppercaseRatio < 0.7
+  if (hasTrailingUppercaseHeading) {
+    return { reviewable: false, score: 0, text }
+  }
+
+  if (/\b(?:and|or)\s+[A-Z][a-z][.!?]?$/.test(text)) {
+    return { reviewable: false, score: 0, text }
+  }
+
+  if (/\b[a-z]{2,}\s+,\s+[a-z]{2,}\b/.test(text)) {
+    return { reviewable: false, score: 0, text }
+  }
+
+  if (/[,;:]?\s+[a-z]\s*$/.test(text)) {
+    return { reviewable: false, score: 0, text }
+  }
+
+  if (/\b\d\)|\s[.,]\s|,\s[.,]\s/.test(text)) {
+    return { reviewable: false, score: 0, text }
+  }
+
+  let score = readableWordCount * 4
+  if (endsLikeSentence) score += 18
+  if (hasSentencePunctuation) score += 4
+  if (text.length >= 45 && text.length <= 220) score += 8
+  if (originalText !== text) score -= 3
+  score -= unsupportedCharacterCount * 10
+  score -= hardNoiseCount * 20
+  score -= Math.round(uppercaseRatio * 8)
+
+  return {
+    reviewable: score >= 24,
+    score,
+    text,
+  }
+}
+
+const isUsefulDocumentEvidenceSegment = (value) =>
+  getDocumentEvidenceSegmentQuality(value).reviewable
 
 export const isGovernedDiscoveryEvidenceFact = (value) => {
   const fact = sanitizeFact(value)
@@ -579,8 +868,8 @@ const classifyWebsiteSegment = (segment) => {
   }
 }
 
-const extractDocumentSegments = (text) => {
-  const sourceText = sanitizeFact(String(text || '').slice(0, DOCUMENT_ACQUISITION_LIMITS.maxTextCharacters))
+const extractDocumentSegments = (text, { prioritizeQuality = false } = {}) => {
+  const sourceText = normalizeDocumentExtractionText(text)
   if (!sourceText) return []
 
   const sentenceSegments = sourceText
@@ -596,17 +885,28 @@ const extractDocumentSegments = (text) => {
   const segments = [...sentenceSegments, ...fallbackSegments]
   const seen = new Set()
 
-  return segments
+  const candidates = segments
     .filter((segment) => {
       const key = segment.toLowerCase()
       if (seen.has(key)) return false
       seen.add(key)
       return true
     })
+    .map((segment, index) => ({
+      index,
+      quality: getDocumentEvidenceSegmentQuality(segment),
+    }))
+    .filter((segment) => segment.quality.reviewable)
+
+  if (prioritizeQuality) {
+    candidates.sort((a, b) => b.quality.score - a.quality.score || a.index - b.index)
+  }
+
+  return candidates
     .slice(0, DOCUMENT_ACQUISITION_LIMITS.maxCandidateSegments)
-    .map((textSegment, index) => ({
+    .map((segment, index) => ({
       kind: index === 0 ? 'summary' : 'body',
-      text: textSegment,
+      text: segment.quality.text,
     }))
 }
 
@@ -660,7 +960,7 @@ const extractPdfOperatorText = (value) => {
   return sanitizeFact([...literals, ...arrayLiterals, ...hexStrings].filter(Boolean).join(' '))
 }
 
-const extractPdfText = (buffer) => {
+const extractPdfOperatorFallbackText = (buffer) => {
   const rawText = buffer.toString('latin1')
   const extractedParts = [extractPdfOperatorText(rawText)]
   const streamPattern = /(<<[\s\S]{0,1200}?>>)\s*stream\r?\n?([\s\S]*?)\r?\n?endstream/g
@@ -687,11 +987,215 @@ const extractPdfText = (buffer) => {
     if (streamText) extractedParts.push(extractPdfOperatorText(streamText))
   }
 
-  const printableFallback = rawText
-    .replace(/[^\x20-\x7E\n\r\t]+/g, ' ')
-    .replace(/\b(obj|endobj|xref|trailer|stream|endstream)\b/gi, ' ')
+  return sanitizeFact(extractedParts.filter(Boolean).join(' '))
+}
 
-  return sanitizeFact([...extractedParts, printableFallback].filter(Boolean).join(' '))
+const extractPdfJsTextWithoutTimeout = async (buffer, documentRef = {}) => {
+  const document = await loadPdfDocument(buffer)
+  documentRef.current = document
+  const pageTexts = []
+  const pageCount = Number(document?.numPages || 0)
+  const maxPages = Math.min(pageCount, DOCUMENT_ACQUISITION_LIMITS.maxPdfTextPages)
+
+  try {
+    for (let pageNumber = 1; pageNumber <= maxPages; pageNumber += 1) {
+      const page = await document.getPage(pageNumber)
+      const textContent = await page.getTextContent({
+        disableCombineTextItems: false,
+        normalizeWhitespace: true,
+      })
+      const lines = []
+      let currentLine = ''
+      let currentY = null
+
+      for (const item of textContent.items || []) {
+        const text = String(item?.str || '').trim()
+        if (!text) continue
+
+        const itemY = Array.isArray(item.transform)
+          ? Math.round(Number(item.transform[5] || 0))
+          : null
+        const startsNewLine = currentY !== null
+          && itemY !== null
+          && Math.abs(itemY - currentY) > 2
+
+        if (startsNewLine && currentLine) {
+          lines.push(currentLine)
+          currentLine = text
+        } else {
+          currentLine = currentLine ? `${currentLine} ${text}` : text
+        }
+
+        if (itemY !== null) currentY = itemY
+      }
+
+      if (currentLine) lines.push(currentLine)
+      pageTexts.push(lines.join('\n'))
+    }
+  } finally {
+    documentRef.current = null
+    await document.destroy?.()
+  }
+
+  return normalizeDocumentExtractionText(pageTexts.filter(Boolean).join('\n'))
+}
+
+const extractPdfJsText = async (buffer) => {
+  const documentRef = { current: null }
+  return withTimeout({
+    promise: extractPdfJsTextWithoutTimeout(buffer, documentRef),
+    timeoutMs: DOCUMENT_ACQUISITION_LIMITS.pdfTextTimeoutMs,
+    timeoutMessage: PDF_TEXT_TIMEOUT_ERROR,
+    onTimeout: async () => {
+      await documentRef.current?.destroy?.()
+    },
+  })
+}
+
+const renderPdfPageToPngBuffer = async (page) => {
+  const viewport = page.getViewport({ scale: DOCUMENT_ACQUISITION_LIMITS.pdfOcrRenderScale })
+  const width = Math.ceil(viewport.width)
+  const height = Math.ceil(viewport.height)
+  const canvas = createCanvas(width, height)
+  const canvasContext = canvas.getContext('2d')
+
+  canvasContext.fillStyle = '#ffffff'
+  canvasContext.fillRect(0, 0, width, height)
+
+  await page.render({
+    canvasContext,
+    viewport,
+    background: '#ffffff',
+  }).promise
+
+  return canvas.toBuffer('image/png')
+}
+
+const createPdfOcrWorker = async () => {
+  const worker = await createOcrWorker('eng', 1, {
+    cacheMethod: 'none',
+    corePath: PDF_OCR_CORE_PATH,
+    langPath: PDF_OCR_LANGUAGE_DATA_URL,
+    workerPath: PDF_OCR_WORKER_PATH,
+  })
+
+  await worker.setParameters({
+    preserve_interword_spaces: '1',
+    tessedit_pageseg_mode: OCR_PAGE_SEGMENTATION_MODES.AUTO,
+    user_defined_dpi: '300',
+  })
+
+  return worker
+}
+
+const extractPdfOcrTextWithoutTimeout = async (buffer, workerRef = {}) => {
+  const document = await loadPdfDocument(buffer, {
+    canvasFactory: new PdfOcrCanvasFactory(),
+  })
+  const pageCount = Number(document?.numPages || 0)
+  const maxPages = Math.min(pageCount, DOCUMENT_ACQUISITION_LIMITS.maxPdfOcrPages)
+  const pageTexts = []
+  const pageConfidences = []
+
+  if (maxPages <= 0) {
+    await document.destroy?.()
+    throw new Error(PDF_OCR_NO_READABLE_TEXT_ERROR)
+  }
+
+  let worker
+  try {
+    worker = await createPdfOcrWorker()
+    workerRef.current = worker
+
+    for (let pageNumber = 1; pageNumber <= maxPages; pageNumber += 1) {
+      const page = await document.getPage(pageNumber)
+      const imageBuffer = await renderPdfPageToPngBuffer(page)
+      const { data } = await worker.recognize(imageBuffer)
+      const pageText = normalizeDocumentExtractionText(data?.text || '')
+
+      if (pageText) pageTexts.push(pageText)
+      if (Number.isFinite(Number(data?.confidence))) {
+        pageConfidences.push(Number(data.confidence))
+      }
+    }
+  } finally {
+    workerRef.current = null
+    await worker?.terminate?.()
+    await document.destroy?.()
+  }
+
+  const text = getReadableDocumentExtractionText(pageTexts.join('\n'))
+  if (!text) {
+    throw new Error(PDF_OCR_NO_READABLE_TEXT_ERROR)
+  }
+
+  const averageConfidence = pageConfidences.length > 0
+    ? Math.round(pageConfidences.reduce((sum, value) => sum + value, 0) / pageConfidences.length)
+    : undefined
+
+  return {
+    adapter: 'document-pdf-ocr-tesseract-v1',
+    confidenceScore: averageConfidence,
+    extractionMethod: 'PDF_OCR',
+    ingestionMode: 'OCR_FALLBACK',
+    ocrPageCount: pageCount,
+    ocrPageLimitReached: pageCount > maxPages,
+    ocrPagesProcessed: maxPages,
+    text,
+  }
+}
+
+const extractPdfOcrText = async (buffer) => {
+  if (!isPdfOcrEnabled()) {
+    throw new Error(PDF_NO_READABLE_TEXT_ERROR)
+  }
+
+  const workerRef = { current: null }
+  return withTimeout({
+    promise: extractPdfOcrTextWithoutTimeout(buffer, workerRef),
+    timeoutMs: DOCUMENT_ACQUISITION_LIMITS.pdfOcrTimeoutMs,
+    timeoutMessage: PDF_OCR_TIMEOUT_ERROR,
+    onTimeout: async () => {
+      await workerRef.current?.terminate?.()
+    },
+  })
+}
+
+const extractPdfText = async (buffer) => {
+  try {
+    const parsedText = await extractPdfJsText(buffer)
+    const readableText = getReadableDocumentExtractionText(parsedText)
+    if (readableText) {
+      return {
+        adapter: 'document-pdf-text-extraction-v1',
+        extractionMethod: 'PDF_TEXT_LAYER',
+        ingestionMode: 'TEXT_NATIVE',
+        text: readableText,
+      }
+    }
+  } catch {
+    // Fall back to the deterministic operator extractor for simple legacy PDFs.
+  }
+
+  const fallbackText = getReadableDocumentExtractionText(extractPdfOperatorFallbackText(buffer))
+  if (fallbackText) {
+    return {
+      adapter: 'document-pdf-text-extraction-v1',
+      extractionMethod: 'PDF_OPERATOR_TEXT',
+      ingestionMode: 'TEXT_NATIVE',
+      text: fallbackText,
+    }
+  }
+
+  try {
+    return await extractPdfOcrText(buffer)
+  } catch (err) {
+    if (err?.message === PDF_OCR_NO_READABLE_TEXT_ERROR || err?.message === PDF_OCR_TIMEOUT_ERROR) {
+      throw err
+    }
+  }
+
+  throw new Error(PDF_NO_READABLE_TEXT_ERROR)
 }
 
 const inflateZipEntryData = ({ compressedData, compressionMethod }) => {
@@ -804,28 +1308,55 @@ const extractDocxText = (buffer) => {
   const entries = readZipEntries(buffer)
   const documentEntry = entries.find((entry) => entry.fileName === 'word/document.xml')
   if (!documentEntry?.data?.length) return ''
-  return sanitizeFact(stripXmlToText(documentEntry.data.toString('utf8')))
+  return normalizeDocumentExtractionText(stripXmlToText(documentEntry.data.toString('utf8')))
 }
 
-const extractDocumentText = ({ buffer, documentType }) => {
-  if (documentType === 'TXT') return sanitizeFact(buffer.toString('utf8'))
+const extractDocumentText = async ({ buffer, documentType }) => {
+  if (documentType === 'TXT') {
+    return {
+      adapter: 'document-txt-text-extraction-v1',
+      extractionMethod: 'TEXT_NATIVE',
+      ingestionMode: 'TEXT_NATIVE',
+      text: normalizeDocumentExtractionText(buffer.toString('utf8')),
+    }
+  }
   if (documentType === 'PDF') return extractPdfText(buffer)
-  if (documentType === 'DOCX') return extractDocxText(buffer)
-  return ''
+  if (documentType === 'DOCX') {
+    return {
+      adapter: 'document-docx-text-extraction-v1',
+      extractionMethod: 'DOCX_XML_TEXT',
+      ingestionMode: 'TEXT_NATIVE',
+      text: extractDocxText(buffer),
+    }
+  }
+  return {
+    adapter: '',
+    extractionMethod: 'UNSUPPORTED',
+    ingestionMode: 'UNSUPPORTED',
+    text: '',
+  }
 }
 
 const buildDocumentEvidenceObjects = ({
   acquisitionProfile,
   assetType,
   capturedAt,
+  extraction,
   fileName,
   segments,
   sourceId,
 } = {}) => segments
+  .map((segment) => ({
+    ...segment,
+    text: getDocumentEvidenceSegmentQuality(segment?.text).text,
+  }))
+  .filter((segment) => isUsefulDocumentEvidenceSegment(segment?.text))
   .slice(0, DOCUMENT_ACQUISITION_LIMITS.maxEvidenceObjectsPerDocument)
   .map((segment) => {
     const classification = classifyDocumentSegment(segment)
     const extractedFact = sanitizeFact(`Document ${formatDocumentAssetLabel(assetType)}: ${segment.text}`)
+    const extractionMethod = String(extraction?.extractionMethod || 'TEXT_NATIVE').trim()
+    const isOcrExtraction = extractionMethod === 'PDF_OCR'
     const evidenceHash = hashValue({
       sourceId,
       extractedFact,
@@ -840,8 +1371,13 @@ const buildDocumentEvidenceObjects = ({
       extractedFact,
       confidence: {
         level: 'SOURCE_BACKED',
-        score: 74,
-        basis: ['UPLOADED_DOCUMENT', 'DETERMINISTIC_TEXT_EXTRACTION'],
+        score: Number.isFinite(Number(extraction?.confidenceScore))
+          ? Math.max(50, Math.min(74, Number(extraction.confidenceScore)))
+          : isOcrExtraction ? 68 : 74,
+        basis: [
+          'UPLOADED_DOCUMENT',
+          isOcrExtraction ? 'PDF_OCR_TEXT_EXTRACTION' : 'DETERMINISTIC_TEXT_EXTRACTION',
+        ],
       },
       createdAt: capturedAt,
       reviewStatus: DISCOVERY_EVIDENCE_REVIEW_STATUSES.PENDING,
@@ -856,6 +1392,8 @@ const buildDocumentEvidenceObjects = ({
       acquisitionProfile,
       sourceFileName: fileName,
       documentAssetType: assetType,
+      extractionMethod,
+      ingestionMode: extraction?.ingestionMode || 'TEXT_NATIVE',
     }
   })
 
@@ -1009,7 +1547,7 @@ export const acquireWebsiteDiscoveryEvidence = async ({
   }
 }
 
-export const ingestUploadedDocumentDiscoveryEvidence = ({
+export const ingestUploadedDocumentDiscoveryEvidence = async ({
   acquisitionProfile,
   capturedAt,
   documentSources = [],
@@ -1026,7 +1564,13 @@ export const ingestUploadedDocumentDiscoveryEvidence = ({
     }
   }
 
-  return candidateDocuments.reduce((result, documentSource, index) => {
+  const result = {
+    sources: [],
+    sourceRegistry: [],
+    evidenceObjects: [],
+  }
+
+  for (const [index, documentSource] of candidateDocuments.entries()) {
     const fileName = normalizeDocumentFileName(documentSource?.fileName)
     const mimeType = String(documentSource?.mimeType || '').trim().toLowerCase().split(';')[0]
     const assetType = normalizeDocumentAssetType(documentSource?.assetType)
@@ -1050,8 +1594,10 @@ export const ingestUploadedDocumentDiscoveryEvidence = ({
       throw new Error(`Uploaded document ${fileName} exceeds the supported file size.`)
     }
 
-    const extractedText = extractDocumentText({ buffer, documentType })
-    const segments = extractDocumentSegments(extractedText)
+    const extraction = await extractDocumentText({ buffer, documentType })
+    const segments = extractDocumentSegments(extraction.text, {
+      prioritizeQuality: extraction.extractionMethod === 'PDF_OCR',
+    })
 
     if (segments.length === 0) {
       throw new Error(`Uploaded document ${fileName} did not produce reviewable evidence.`)
@@ -1067,6 +1613,7 @@ export const ingestUploadedDocumentDiscoveryEvidence = ({
       acquisitionProfile,
       assetType,
       capturedAt,
+      extraction,
       fileName,
       segments,
       sourceId,
@@ -1091,7 +1638,8 @@ export const ingestUploadedDocumentDiscoveryEvidence = ({
       valueHash: documentHash,
       documentHash,
       documentStatus: 'PROCESSED',
-      ingestionMode: 'TEXT_NATIVE',
+      ingestionMode: extraction.ingestionMode || 'TEXT_NATIVE',
+      extractionMethod: extraction.extractionMethod || 'TEXT_NATIVE',
       uploadedAt: capturedAt,
       status: 'ACQUIRED',
       capturedAt,
@@ -1103,7 +1651,10 @@ export const ingestUploadedDocumentDiscoveryEvidence = ({
       rejectedEvidenceObjects: 0,
       pendingEvidenceObjects: evidenceObjects.length,
       lineageRef: `lineage:${sourceId}`,
-      adapter: `document-${documentType.toLowerCase()}-text-extraction-v1`,
+      adapter: extraction.adapter || `document-${documentType.toLowerCase()}-text-extraction-v1`,
+      ...(Number.isFinite(Number(extraction.ocrPageCount)) ? { ocrPageCount: Number(extraction.ocrPageCount) } : {}),
+      ...(Number.isFinite(Number(extraction.ocrPagesProcessed)) ? { ocrPagesProcessed: Number(extraction.ocrPagesProcessed) } : {}),
+      ...(extraction.ocrPageLimitReached ? { ocrPageLimitReached: true } : {}),
     }
     const sourceRegistryEntry = {
       sourceId,
@@ -1128,20 +1679,21 @@ export const ingestUploadedDocumentDiscoveryEvidence = ({
       sizeBytes: buffer.length,
       documentHash,
       documentStatus: 'PROCESSED',
-      ingestionMode: 'TEXT_NATIVE',
+      ingestionMode: extraction.ingestionMode || 'TEXT_NATIVE',
+      extractionMethod: extraction.extractionMethod || 'TEXT_NATIVE',
       uploadedAt: capturedAt,
+      adapter: extraction.adapter || `document-${documentType.toLowerCase()}-text-extraction-v1`,
+      ...(Number.isFinite(Number(extraction.ocrPageCount)) ? { ocrPageCount: Number(extraction.ocrPageCount) } : {}),
+      ...(Number.isFinite(Number(extraction.ocrPagesProcessed)) ? { ocrPagesProcessed: Number(extraction.ocrPagesProcessed) } : {}),
+      ...(extraction.ocrPageLimitReached ? { ocrPageLimitReached: true } : {}),
     }
 
-    return {
-      sources: [...result.sources, source],
-      sourceRegistry: [...result.sourceRegistry, sourceRegistryEntry],
-      evidenceObjects: [...result.evidenceObjects, ...evidenceObjects],
-    }
-  }, {
-    sources: [],
-    sourceRegistry: [],
-    evidenceObjects: [],
-  })
+    result.sources.push(source)
+    result.sourceRegistry.push(sourceRegistryEntry)
+    result.evidenceObjects.push(...evidenceObjects)
+  }
+
+  return result
 }
 
 const buildSourceRegistryEntryFromLineage = ({

@@ -4,6 +4,7 @@ import loadScopes from '../middleware/loadScopes.js'
 import {
   acceptRuntimeDiscovery,
   acceptRuntimeSection,
+  clearRuntimeSectionEvidence,
   createRuntimeInstance,
   executeRuntimeAction,
   getRuntimeInstance,
@@ -26,6 +27,7 @@ import {
 import {
   validateAcceptRuntimeDiscovery,
   validateAcceptRuntimeSection,
+  validateClearRuntimeSectionEvidence,
   validateCreateRuntimeInstance,
   validateExecuteRuntimeAction,
   validateListRuntimeInstances,
@@ -86,6 +88,12 @@ router.get(
 )
 router.get('/:runtimeInstanceId/intelligence-graph', validateRuntimeInstanceId, getRuntimeIntelligenceGraph)
 router.patch('/:runtimeInstanceId/section-evidence', validateRuntimeInstanceId, validateUpdateRuntimeSectionEvidence, updateRuntimeSectionEvidence)
+router.patch(
+  '/:runtimeInstanceId/section-evidence/clear',
+  validateRuntimeInstanceId,
+  validateClearRuntimeSectionEvidence,
+  clearRuntimeSectionEvidence,
+)
 router.patch(
   '/:runtimeInstanceId/section-evidence/:evidenceObjectId/review',
   validateRuntimeSectionEvidenceParams,

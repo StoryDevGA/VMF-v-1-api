@@ -421,6 +421,21 @@ const reviewRuntimeSectionEvidenceSchema = z.object({
     }),
 }).strict().superRefine(refineSectionEvidenceTarget('Section evidence review'))
 
+const clearRuntimeSectionEvidenceSchema = z.object({
+  ...sectionEvidenceTargetSchema,
+  confirmClear: z
+    .boolean({ required_error: 'confirmClear is required' })
+    .refine((value) => value === true, {
+      message: 'confirmClear must be true',
+    }),
+  reason: z
+    .string()
+    .trim()
+    .max(500, 'reason must be 500 characters or fewer')
+    .optional()
+    .default('USER_REQUESTED_SECTION_EVIDENCE_CLEAR'),
+}).strict().superRefine(refineSectionEvidenceTarget('Section evidence clear'))
+
 const acceptRuntimeDiscoverySchema = z.object({
   expectedUpdatedAt: expectedUpdatedAtSchema,
 }).strict()
@@ -741,6 +756,11 @@ export const validateUpdateRuntimeSectionEvidence = createBodyValidator(updateRu
 })
 
 export const validateReviewRuntimeSectionEvidence = createBodyValidator(reviewRuntimeSectionEvidenceSchema, {
+  message: 'Request validation failed.',
+  rootIssueKey: '_root',
+})
+
+export const validateClearRuntimeSectionEvidence = createBodyValidator(clearRuntimeSectionEvidenceSchema, {
   message: 'Request validation failed.',
   rootIssueKey: '_root',
 })

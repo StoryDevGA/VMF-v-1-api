@@ -1,5 +1,9 @@
 import { describe, test, expect, beforeAll, beforeEach, jest } from '@jest/globals'
+import { createRequire } from 'node:module'
 import zlib from 'node:zlib'
+
+const moduleRequire = createRequire(import.meta.url)
+const { createCanvas } = moduleRequire('@napi-rs/canvas')
 
 beforeAll(() => {
   process.env.NODE_ENV = 'test'
@@ -99,6 +103,91 @@ const buildDocxBufferWithDataDescriptor = (documentText) => {
     endOfCentralDirectory,
   ])
 }
+
+const LINE_ORIENTED_TEXT_PDF_BASE64 = [
+  'JVBERi0xLjMKJZOMi54gUmVwb3J0TGFiIEdlbmVyYXRlZCBQREYgZG9jdW1lbnQgKG9wZW5zb3VyY2UpCjEgMCBvYmoKPDwKL0YxIDIgMCBSCj4+CmVuZG9iagoyIDAgb2JqCjw8Ci9CYXNlRm9udCAvSGVsdmV0aWNhIC9FbmNvZGluZyAvV2luQW5zaUVuY29kaW5nIC9OYW1lIC9GMSAvU3VidHlwZSAvVHlwZTEgL1R5cGUgL0ZvbnQKPj4KZW5kb2JqCjMgMCBvYmoKPDwKL0NvbnRlbnRzIDcgMCBSIC9NZWRpYUJveCBbIDAgMCA2MTIgNzkyIF0gL1BhcmVudCA2IDAgUiAvUmVzb3VyY2VzIDw8Ci9Gb250IDEgMCBSIC9Qcm9jU2V0IFsgL1BERiAvVGV4dCAvSW1hZ2VCIC9JbWFnZUMgL0ltYWdlSSBdCj4+IC9Sb3RhdGUgMCAvVHJhbnMgPDwKCj4+IAogIC9UeXBlIC9QYWdlCj4+CmVuZG9iago0IDAgb2JqCjw8Ci9QYWdlTW9kZSAvVXNlTm9uZSAvUGFnZXMgNiAwIFIgL1R5cGUgL0NhdGFsb2cKPj4KZW5kb2JqCjUgMCBvYmoKPDwKL0F1dGhvciAoYW5vbnltb3VzKSAvQ3JlYXRpb25EYXRlIChEOjIwMjYwNjA1MTUwMTUwKzAxJzAwJykgL0NyZWF0b3IgKGFub255bW91cykgL0tleXdvcmRzICgpIC9Nb2REYXRlIChEOjIwMjYwNjA1MTUwMTUwKzAxJzAwJykgL1Byb2R1Y2VyIChSZXBvcnRMYWIgUERGIExpYnJhcnkgLSBcKG9wZW5zb3VyY2VcKSkgCiAgL1N1YmplY3QgKHVuc3BlY2lmaWVkKSAvVGl0bGUgKHVudGl0bGVkKSAvVHJhcHBlZCAvRmFsc2UKPj4KZW5kb2JqCjYgMCBvYmoKPDwKL0NvdW50IDEgL0tpZHMgWyAzIDAgUiBdIC9UeXBlIC9QYWdlcwo+PgplbmRvYmoKNyAwIG9iago8PAovRmlsdGVyIFsgL0FTQ0lJODVEZWNvZGUgL0ZsYXRlRGVjb2RlIF0gL0xlbmd0aCAyOTYKPj4Kc3RyZWFtCkdhcm87NXUsP1AkcTlvM01TQjkwMFdjZzpPMlM3Z1JSTTh1MmclVlY4SzlgXjc7a3NNQ2Q5KzlRTSMrcEI2UT5Ea2s4ZnBuNzskLW1hMVZcJGJHO0dKOWYsPzNBZUdIKl4wMFU0V1wjNURUM20zR28tOTMsMWU4SkZmQD9XKGw6Xi06THQrSVhkLCZfYWdmTDkpTDk9cF4rcG4zO0s0NSkuYiFTPy9eLDBYaCZqUy9oaGRbWiQwZ2c5J2luZUheLy9YY1heOWVqLk8uU2RiNlYnTCpJNTBhS2wyWnJAaFknO2JZW2g5Q0FGTFIlbTA3IWJMQmNGQjxlVWJyaC9oL2lBYj1aaGdXb11RNGQ+JVtOL3NxL2VWOFBaX1VzQ2lVP2smL3BJJ34+ZW5kc3RyZWFtCmVuZG9iagp4cmVmCjAgOAowMDAwMDAwMDAwIDY1NTM1IGYgCjAwMDAwMDAwNjEgMDAwMDAgbiAKMDAwMDAwMDA5MiAwMDAwMCBuIAowMDAwMDAwMTk5IDAwMDAwIG4gCjAwMDAwMDAzOTIgMDAwMDAgbiAKMDAwMDAwMDQ2MCAwMDAwMCBuIAowMDAwMDAwNzIxIDAwMDAwIG4gCjAwMDAwMDA3ODAgMDAwMDAgbiAKdHJhaWxlcgo8PAovSUQgCls8YzA0ZGU1OTBjZjdlNjg1NTcyYzNkMGNiMzg5YTBiYzI+PGMwNGRlNTkwY2Y3ZTY4NTU3MmMzZDBjYjM4OWEwYmMyPl0KJSBSZXBvcnRMYWIgZ2VuZXJhdGVkIFBERiBkb2N1bWVudCAtLSBkaWdlc3QgKG9wZW5zb3VyY2UpCgovSW5mbyA1IDAgUgovUm9vdCA0IDAgUgovU2l6ZSA4Cj4+CnN0YXJ0eHJlZgoxMTY2CiUlRU9GCg==',
+].join('')
+
+const buildUnreadablePdfFallbackBuffer = () => {
+  const unreadableText = '(´Æ Nè«¦Þ õ S ªÃ ÐÕÊåíå½ Ô®¯ô ãkB HØ zzg¾ ßNSÚ µÁM) Tj'
+  const compressedStream = zlib.deflateSync(Buffer.from(unreadableText, 'latin1'))
+  return Buffer.concat([
+    Buffer.from(`%PDF-1.4
+1 0 obj
+<< /Filter /FlateDecode /Length ${compressedStream.length} >>
+stream
+`, 'latin1'),
+    compressedStream,
+    Buffer.from(`
+endstream
+endobj
+%%EOF
+`, 'latin1'),
+  ])
+}
+
+const buildImageOnlyPdfBuffer = ({ pageCount = 1 } = {}) => {
+  const width = 1200
+  const height = 420
+  const canvas = createCanvas(width, height)
+  const context = canvas.getContext('2d')
+  context.fillStyle = 'white'
+  context.fillRect(0, 0, width, height)
+  context.fillStyle = 'black'
+  context.font = 'bold 56px Arial'
+  context.fillText('OCR subscription SaaS platform', 70, 120)
+  context.fillText('onboarding consultants customer adoption', 70, 215)
+  context.fillText('global associate delivery network', 70, 310)
+
+  const image = canvas.toBuffer('image/jpeg')
+  const pageContent = Buffer.from(`q\n${width} 0 0 ${height} 0 0 cm\n/Im0 Do\nQ\n`, 'latin1')
+  const pageTotal = Math.max(1, Number(pageCount) || 1)
+  const pageObjectStart = 3
+  const imageObjectId = pageObjectStart + pageTotal
+  const contentObjectId = imageObjectId + 1
+  const pageObjects = Array.from({ length: pageTotal }, (_value, index) => {
+    const objectId = pageObjectStart + index
+    return Buffer.from(`${objectId} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${width} ${height}] /Resources << /XObject << /Im0 ${imageObjectId} 0 R >> >> /Contents ${contentObjectId} 0 R >>\nendobj\n`, 'latin1')
+  })
+  const pageKids = Array.from({ length: pageTotal }, (_value, index) => `${pageObjectStart + index} 0 R`).join(' ')
+  const objects = [
+    Buffer.from('1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n', 'latin1'),
+    Buffer.from(`2 0 obj\n<< /Type /Pages /Kids [${pageKids}] /Count ${pageTotal} >>\nendobj\n`, 'latin1'),
+    ...pageObjects,
+    Buffer.concat([
+      Buffer.from(`${imageObjectId} 0 obj\n<< /Type /XObject /Subtype /Image /Width ${width} /Height ${height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${image.length} >>\nstream\n`, 'latin1'),
+      image,
+      Buffer.from('\nendstream\nendobj\n', 'latin1'),
+    ]),
+    Buffer.concat([
+      Buffer.from(`${contentObjectId} 0 obj\n<< /Length ${pageContent.length} >>\nstream\n`, 'latin1'),
+      pageContent,
+      Buffer.from('endstream\nendobj\n', 'latin1'),
+    ]),
+  ]
+  const parts = [Buffer.from('%PDF-1.4\n', 'latin1')]
+  const offsets = [0]
+
+  for (const object of objects) {
+    offsets.push(parts.reduce((sum, part) => sum + part.length, 0))
+    parts.push(object)
+  }
+
+  const xrefOffset = parts.reduce((sum, part) => sum + part.length, 0)
+  const xrefRows = [
+    'xref',
+    `0 ${objects.length + 1}`,
+    '0000000000 65535 f ',
+  ]
+  for (let index = 1; index <= objects.length; index += 1) {
+    xrefRows.push(`${String(offsets[index]).padStart(10, '0')} 00000 n `)
+  }
+
+  parts.push(Buffer.from(`${xrefRows.join('\n')}\ntrailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`, 'latin1'))
+
+  return Buffer.concat(parts)
+}
+
 
 const ENHANCED_WEBSITE_HTML = `
   <html>
@@ -3065,6 +3154,105 @@ describe('Runtime Instance API', () => {
     expect(JSON.stringify(persistedEvidencePack)).not.toContain('contentBase64')
   })
 
+  test('PATCH /api/v1/runtime-instances/:id/discovery-inputs extracts line-oriented PDF text into reviewable evidence', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: {},
+        sections: {},
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+    }))
+    RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeEvidencePackRuntimePathRecord()))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([
+      makeRuntimePathRecord(),
+      makeEvidencePackRuntimePathRecord(),
+    ]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      sections: [
+        {
+          sectionKey: 'value_drivers',
+          runtimePath: 'framework_state.sections.value_drivers',
+          displayOrder: 10,
+          isVisible: true,
+        },
+      ],
+    })))
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      sections: [
+        {
+          sectionKey: 'value_drivers',
+          runtimePath: 'framework_state.sections.value_drivers',
+          required: true,
+        },
+      ],
+    }))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+    const pdfLines = [
+      'StorylineOS subscription SaaS platform supports governed value narrative creation',
+      'Onboarding consultants configure source material imports for enterprise rollout',
+      'Global associate consultants extend delivery capacity for customer adoption',
+    ]
+    const pdfBuffer = Buffer.from(LINE_ORIENTED_TEXT_PDF_BASE64, 'base64')
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/discovery-inputs`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        acquisitionProfile: 'STANDARD',
+        inputs: {
+          companyWebsite: 'https://acme.example',
+          companyName: 'Acme',
+          marketRegion: 'UK enterprise',
+          targetOffer: 'Managed proposal platform',
+        },
+        documentSources: [
+          {
+            fileName: 'customer-strategy.pdf',
+            mimeType: 'application/pdf',
+            assetType: 'CUSTOMER_DOCUMENT',
+            sizeBytes: pdfBuffer.length,
+            contentBase64: pdfBuffer.toString('base64'),
+          },
+        ],
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+      })
+
+    expect(res.status).toBe(200)
+    const persistedEvidencePack = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state.evidence_pack
+    const documentSource = persistedEvidencePack.sourceRegistry.find((source) =>
+      source.sourceType === 'UPLOADED_DOCUMENT')
+    const documentEvidenceObjects = persistedEvidencePack.evidenceObjects.filter((evidenceObject) =>
+      evidenceObject.acquisitionMethod === 'DOCUMENT_INGESTION')
+    const extractedFacts = documentEvidenceObjects.map((evidenceObject) => evidenceObject.extractedFact).join('\n')
+
+    expect(documentSource).toEqual(expect.objectContaining({
+      sourceType: 'UPLOADED_DOCUMENT',
+      fileName: 'customer-strategy.pdf',
+      mimeType: 'application/pdf',
+      documentType: 'PDF',
+      documentStatus: 'PROCESSED',
+      ingestionMode: 'TEXT_NATIVE',
+      extractionMethod: 'PDF_TEXT_LAYER',
+      evidenceProduced: documentEvidenceObjects.length,
+    }))
+    expect(documentEvidenceObjects.length).toBeGreaterThan(1)
+    expect(extractedFacts).toContain('subscription SaaS platform')
+    expect(extractedFacts).toContain('Global associate consultants')
+    expect(JSON.stringify(persistedEvidencePack)).not.toContain('contentBase64')
+    expect(JSON.stringify(persistedEvidencePack.lineage.sources)).not.toContain(pdfLines[0])
+  })
+
   test('PATCH /api/v1/runtime-instances/:id/discovery-inputs appends uploaded documents to the existing document registry', async () => {
     const previousDocumentSourceId = 'document_previous_pdf'
     const previousDocumentEvidenceObject = makeDiscoveryEvidenceObject({
@@ -4537,6 +4725,418 @@ describe('Runtime Instance API', () => {
     }))
   })
 
+  test('PATCH /api/v1/runtime-instances/:id/section-evidence filters title-only and noisy document snippets before persistence', async () => {
+    const evidencePack = makeReviewableDiscoveryEvidencePack({ accepted: true })
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+      packageId: FRAMEWORK_PACKAGE_ID,
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: evidencePack,
+        sections: {
+          value_drivers: {
+            input: 'Initial value driver context.',
+            state: { status: 'DRAFT' },
+          },
+        },
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:02:00.000Z'),
+    }))
+    FrameworkPackage.findById.mockResolvedValue(makeSectionEvidencePackage())
+    const runtimePathRecords = makeSectionEvidenceRuntimePathRecords()
+    RuntimePathRegistry.findOne = buildRuntimePathFindOneMock(runtimePathRecords)
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery(runtimePathRecords))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeSectionEvidenceUIContract()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+    const documentText = [
+      'COMMERCIAL CLARITY EXECUTIVE BRIEF',
+      'Marketing believes messaging needs refining.',
+      'that creates clarity, alignment, VISIBILITY and hard to measure.',
+      'Customers ask o >] 0 %, allll 9',
+      'The Ci fi moves izati from reacting to events to creating advantage.',
+      'Sales wants better business cases.',
+    ].join('\n')
+    const documentBuffer = Buffer.from(documentText, 'utf8')
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-evidence`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.value_drivers',
+        sectionKey: 'value_drivers',
+        expectedUpdatedAt: '2026-05-19T08:01:00.000Z',
+        documentSources: [
+          {
+            fileName: 'mixed-quality-value-drivers.txt',
+            mimeType: 'text/plain',
+            assetType: 'SECTION_SUPPORTING_FILE',
+            sizeBytes: documentBuffer.length,
+            contentBase64: documentBuffer.toString('base64'),
+          },
+        ],
+      })
+
+    expect(res.status).toBe(200)
+    const persistedFrameworkState = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state
+    expect(persistedFrameworkState.evidence_pack).toEqual(evidencePack)
+    const persistedSection = persistedFrameworkState.sections.value_drivers
+    const extractedFacts = persistedSection.evidenceObjects
+      .map((evidenceObject) => evidenceObject.extractedFact)
+      .join('\n')
+
+    expect(persistedSection.additionalEvidence).toEqual(expect.objectContaining({
+      status: 'PENDING_REVIEW',
+      documentCount: 1,
+      evidenceObjectCount: 2,
+      pendingEvidenceObjectCount: 2,
+    }))
+    expect(persistedSection.evidenceObjects).toHaveLength(2)
+    expect(extractedFacts).toContain('Marketing believes messaging needs refining.')
+    expect(extractedFacts).toContain('Sales wants better business cases.')
+    expect(extractedFacts).not.toContain('COMMERCIAL CLARITY EXECUTIVE BRIEF')
+    expect(extractedFacts).not.toContain('VISIBILITY and hard to measure')
+    expect(extractedFacts).not.toContain('Ci fi moves izati')
+    expect(extractedFacts).not.toContain('Customers ask')
+    expect(extractedFacts).not.toContain('allll')
+    expect(res.body.data.section.sectionEvidence.evidenceObjects).toEqual([
+      expect.objectContaining({
+        snippet: 'Marketing believes messaging needs refining.',
+      }),
+      expect.objectContaining({
+        snippet: 'Sales wants better business cases.',
+      }),
+    ])
+    expect(JSON.stringify(persistedSection)).not.toContain('contentBase64')
+    expect(JSON.stringify(res.body.data.section.sectionEvidence)).not.toContain('contentBase64')
+    expect(JSON.stringify(AuditLog.createLog.mock.calls[0][0].diff)).not.toContain('contentBase64')
+  })
+
+  test('PATCH /api/v1/runtime-instances/:id/section-evidence extracts PDF supporting files into reviewable evidence', async () => {
+    const evidencePack = makeReviewableDiscoveryEvidencePack({ accepted: true })
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+      packageId: FRAMEWORK_PACKAGE_ID,
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: evidencePack,
+        sections: {
+          value_drivers: {
+            input: 'Initial value driver context.',
+            state: { status: 'DRAFT' },
+          },
+        },
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:02:00.000Z'),
+    }))
+    FrameworkPackage.findById.mockResolvedValue(makeSectionEvidencePackage())
+    const runtimePathRecords = makeSectionEvidenceRuntimePathRecords()
+    RuntimePathRegistry.findOne = buildRuntimePathFindOneMock(runtimePathRecords)
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery(runtimePathRecords))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeSectionEvidenceUIContract()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+    const pdfBuffer = Buffer.from(LINE_ORIENTED_TEXT_PDF_BASE64, 'base64')
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-evidence`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.value_drivers',
+        sectionKey: 'value_drivers',
+        expectedUpdatedAt: '2026-05-19T08:01:00.000Z',
+        documentSources: [
+          {
+            fileName: 'value-drivers-support.pdf',
+            mimeType: 'application/pdf',
+            assetType: 'SECTION_SUPPORTING_FILE',
+            sizeBytes: pdfBuffer.length,
+            contentBase64: pdfBuffer.toString('base64'),
+          },
+        ],
+      })
+
+    expect(res.status).toBe(200)
+    const persistedFrameworkState = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state
+    expect(persistedFrameworkState.evidence_pack).toEqual(evidencePack)
+    const persistedSection = persistedFrameworkState.sections.value_drivers
+    const extractedFacts = persistedSection.evidenceObjects
+      .map((evidenceObject) => evidenceObject.extractedFact)
+      .join('\n')
+
+    expect(persistedSection.additionalEvidence).toEqual(expect.objectContaining({
+      status: 'PENDING_REVIEW',
+      documentCount: 1,
+      evidenceObjectCount: persistedSection.evidenceObjects.length,
+    }))
+    expect(persistedSection.additionalEvidence.documents[0]).toEqual(expect.objectContaining({
+      fileName: 'value-drivers-support.pdf',
+      status: 'PROCESSED',
+      fileType: 'PDF',
+      ingestionMode: 'TEXT_NATIVE',
+      extractionMethod: 'PDF_TEXT_LAYER',
+    }))
+    expect(persistedSection.evidenceObjects.length).toBeGreaterThan(1)
+    expect(extractedFacts).toContain('subscription SaaS platform')
+    expect(extractedFacts).toContain('Global associate consultants')
+    expect(res.body.data.section.sectionEvidence.evidenceObjects).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        sourceFileName: 'value-drivers-support.pdf',
+        snippet: expect.stringContaining('subscription SaaS platform'),
+      }),
+    ]))
+    expect(res.body.data.section.sectionEvidence.documents[0]).toEqual(expect.objectContaining({
+      fileName: 'value-drivers-support.pdf',
+      extractionMethod: 'PDF_TEXT_LAYER',
+      ingestionMode: 'TEXT_NATIVE',
+      adapter: 'document-pdf-text-extraction-v1',
+    }))
+    expect(JSON.stringify(persistedSection)).not.toContain('contentBase64')
+    expect(JSON.stringify(res.body.data.section.sectionEvidence)).not.toContain('contentBase64')
+    expect(JSON.stringify(AuditLog.createLog.mock.calls[0][0].diff)).not.toContain('contentBase64')
+  })
+
+  test('PATCH /api/v1/runtime-instances/:id/section-evidence OCRs image-only PDF supporting files into reviewable evidence', async () => {
+    const evidencePack = makeReviewableDiscoveryEvidencePack({ accepted: true })
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+      packageId: FRAMEWORK_PACKAGE_ID,
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: evidencePack,
+        sections: {
+          value_drivers: {
+            input: 'Initial value driver context.',
+            state: { status: 'DRAFT' },
+          },
+        },
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:02:00.000Z'),
+    }))
+    FrameworkPackage.findById.mockResolvedValue(makeSectionEvidencePackage())
+    const runtimePathRecords = makeSectionEvidenceRuntimePathRecords()
+    RuntimePathRegistry.findOne = buildRuntimePathFindOneMock(runtimePathRecords)
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery(runtimePathRecords))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeSectionEvidenceUIContract()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+    const pdfBuffer = buildImageOnlyPdfBuffer()
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-evidence`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.value_drivers',
+        sectionKey: 'value_drivers',
+        expectedUpdatedAt: '2026-05-19T08:01:00.000Z',
+        documentSources: [
+          {
+            fileName: 'scanned-value-drivers.pdf',
+            mimeType: 'application/pdf',
+            assetType: 'SECTION_SUPPORTING_FILE',
+            sizeBytes: pdfBuffer.length,
+            contentBase64: pdfBuffer.toString('base64'),
+          },
+        ],
+      })
+
+    expect(res.status).toBe(200)
+    const persistedFrameworkState = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state
+    expect(persistedFrameworkState.evidence_pack).toEqual(evidencePack)
+    const persistedSection = persistedFrameworkState.sections.value_drivers
+    const extractedFacts = persistedSection.evidenceObjects
+      .map((evidenceObject) => evidenceObject.extractedFact)
+      .join('\n')
+
+    expect(persistedSection.additionalEvidence.documents[0]).toEqual(expect.objectContaining({
+      fileName: 'scanned-value-drivers.pdf',
+      status: 'PROCESSED',
+      fileType: 'PDF',
+      ingestionMode: 'OCR_FALLBACK',
+      extractionMethod: 'PDF_OCR',
+      adapter: 'document-pdf-ocr-tesseract-v1',
+      ocrPageCount: 1,
+      ocrPagesProcessed: 1,
+    }))
+    expect(persistedSection.evidenceObjects).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        confidence: expect.objectContaining({
+          basis: expect.arrayContaining(['PDF_OCR_TEXT_EXTRACTION']),
+        }),
+        extractionMethod: 'PDF_OCR',
+        ingestionMode: 'OCR_FALLBACK',
+        sourceFileName: 'scanned-value-drivers.pdf',
+      }),
+    ]))
+    expect(extractedFacts).toContain('subscription SaaS platform')
+    expect(extractedFacts).toContain('onboarding consultants')
+    expect(res.body.data.section.sectionEvidence.documents[0]).toEqual(expect.objectContaining({
+      fileName: 'scanned-value-drivers.pdf',
+      extractionMethod: 'PDF_OCR',
+      ingestionMode: 'OCR_FALLBACK',
+      adapter: 'document-pdf-ocr-tesseract-v1',
+      ocrPageCount: 1,
+      ocrPagesProcessed: 1,
+    }))
+    expect(JSON.stringify(persistedSection)).not.toContain('contentBase64')
+    expect(JSON.stringify(res.body.data.section.sectionEvidence)).not.toContain('contentBase64')
+    expect(JSON.stringify(AuditLog.createLog.mock.calls[0][0].diff)).not.toContain('contentBase64')
+  })
+
+  test('PATCH /api/v1/runtime-instances/:id/section-evidence caps OCR fallback for multi-page textless PDFs', async () => {
+    const evidencePack = makeReviewableDiscoveryEvidencePack({ accepted: true })
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+      packageId: FRAMEWORK_PACKAGE_ID,
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: evidencePack,
+        sections: {
+          value_drivers: {
+            input: 'Initial value driver context.',
+            state: { status: 'DRAFT' },
+          },
+        },
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:02:00.000Z'),
+    }))
+    FrameworkPackage.findById.mockResolvedValue(makeSectionEvidencePackage())
+    const runtimePathRecords = makeSectionEvidenceRuntimePathRecords()
+    RuntimePathRegistry.findOne = buildRuntimePathFindOneMock(runtimePathRecords)
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery(runtimePathRecords))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeSectionEvidenceUIContract()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+    const pdfBuffer = buildImageOnlyPdfBuffer({ pageCount: 11 })
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-evidence`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.value_drivers',
+        sectionKey: 'value_drivers',
+        expectedUpdatedAt: '2026-05-19T08:01:00.000Z',
+        documentSources: [
+          {
+            fileName: 'multi-page-scanned-value-drivers.pdf',
+            mimeType: 'application/pdf',
+            assetType: 'SECTION_SUPPORTING_FILE',
+            sizeBytes: pdfBuffer.length,
+            contentBase64: pdfBuffer.toString('base64'),
+          },
+        ],
+      })
+
+    expect(res.status).toBe(200)
+    const persistedFrameworkState = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state
+    const persistedSection = persistedFrameworkState.sections.value_drivers
+    expect(persistedSection.additionalEvidence.documents[0]).toEqual(expect.objectContaining({
+      fileName: 'multi-page-scanned-value-drivers.pdf',
+      extractionMethod: 'PDF_OCR',
+      ingestionMode: 'OCR_FALLBACK',
+      ocrPageCount: 11,
+      ocrPagesProcessed: 10,
+      ocrPageLimitReached: true,
+    }))
+    expect(res.body.data.section.sectionEvidence.documents[0]).toEqual(expect.objectContaining({
+      fileName: 'multi-page-scanned-value-drivers.pdf',
+      extractionMethod: 'PDF_OCR',
+      ingestionMode: 'OCR_FALLBACK',
+      ocrPageCount: 11,
+      ocrPagesProcessed: 10,
+      ocrPageLimitReached: true,
+    }))
+    expect(persistedSection.evidenceObjects.length).toBeGreaterThan(0)
+  })
+
+  test('PATCH /api/v1/runtime-instances/:id/section-evidence rejects unreadable PDF fallback text without partial persistence', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+      packageId: FRAMEWORK_PACKAGE_ID,
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: makeReviewableDiscoveryEvidencePack({ accepted: true }),
+        sections: {
+          value_drivers: { input: 'Initial value driver context.' },
+        },
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+    FrameworkPackage.findById.mockResolvedValue(makeSectionEvidencePackage())
+    const runtimePathRecords = makeSectionEvidenceRuntimePathRecords()
+    RuntimePathRegistry.findOne = buildRuntimePathFindOneMock(runtimePathRecords)
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery(runtimePathRecords))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeSectionEvidenceUIContract()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+    const pdfBuffer = buildUnreadablePdfFallbackBuffer()
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-evidence`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.value_drivers',
+        sectionKey: 'value_drivers',
+        expectedUpdatedAt: '2026-05-19T08:01:00.000Z',
+        documentSources: [
+          {
+            fileName: 'scanned-brief.pdf',
+            mimeType: 'application/pdf',
+            assetType: 'SECTION_SUPPORTING_FILE',
+            sizeBytes: pdfBuffer.length,
+            contentBase64: pdfBuffer.toString('base64'),
+          },
+        ],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error).toEqual(expect.objectContaining({
+      code: 'VALIDATION_FAILED',
+      message: 'Section supporting file ingestion failed.',
+      details: expect.objectContaining({
+        ingestionError: expect.objectContaining({
+          message: expect.stringContaining('PDF document did not contain readable extractable text'),
+        }),
+      }),
+    }))
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+      action: 'RUNTIME_STATE_MUTATED',
+    }))
+  })
+
   test('PATCH /api/v1/runtime-instances/:id/section-evidence rejects unsupported files without partial persistence', async () => {
     const runtimeInstanceDoc = makeRuntimeInstanceDocument({
       updatedAt: new Date('2026-05-19T08:01:00.000Z'),
@@ -4628,6 +5228,387 @@ describe('Runtime Instance API', () => {
       expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
       currentUpdatedAt: '2026-05-19T08:01:00.000Z',
     }))
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('PATCH /api/v1/runtime-instances/:id/section-evidence/clear removes section-scoped evidence and invalidates accepted truth', async () => {
+    const acceptedEvidenceObject = makeSectionEvidenceObject({
+      reviewStatus: 'ACCEPTED',
+      acceptedBy: CUSTOMER_ADMIN_ID,
+      acceptanceTimestamp: '2026-05-19T08:02:00.000Z',
+    })
+    const evidencePack = makeReviewableDiscoveryEvidencePack({ accepted: true })
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:03:00.000Z'),
+      packageId: FRAMEWORK_PACKAGE_ID,
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: evidencePack,
+        sections: {
+          value_drivers: {
+            input: 'Initial value driver context.',
+            generated: {
+              content: 'Value Drivers: faster proposal workflows.',
+              generatedAt: '2026-05-19T08:01:00.000Z',
+              inputHash: 'hash-input',
+              sectionEvidenceHash: 'sha256:previous-section-evidence',
+            },
+            accepted: {
+              content: 'Value Drivers: faster proposal workflows.',
+              acceptedAt: '2026-05-19T08:02:30.000Z',
+              acceptedBy: CUSTOMER_ADMIN_ID,
+              sourceGeneratedAt: '2026-05-19T08:01:00.000Z',
+              inputHash: 'hash-input',
+            },
+            review: { status: 'ACCEPTED' },
+            state: { status: 'ACCEPTED' },
+            additionalEvidence: makeSectionAdditionalEvidence({
+              evidenceObjects: [acceptedEvidenceObject],
+              status: 'ACCEPTED',
+            }),
+            evidenceObjects: [acceptedEvidenceObject],
+            gsilContext: {
+              acceptedEvidenceObjectIds: ['section_evidence_value_fixture'],
+              sourceRefs: ['section_evidence_value_fixture'],
+              sectionEvidenceSummary: 'governed workflow automation reduces manual effort.',
+              evidenceHash: 'sha256:previous-section-evidence',
+              updatedAt: '2026-05-19T08:02:00.000Z',
+            },
+          },
+        },
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:04:00.000Z'),
+    }))
+    FrameworkPackage.findById.mockResolvedValue(makeSectionEvidencePackage())
+    const runtimePathRecords = makeSectionEvidenceRuntimePathRecords()
+    RuntimePathRegistry.findOne = buildRuntimePathFindOneMock(runtimePathRecords)
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery(runtimePathRecords))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeSectionEvidenceUIContract()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-evidence/clear`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.value_drivers',
+        sectionKey: 'value_drivers',
+        confirmClear: true,
+        expectedUpdatedAt: '2026-05-19T08:03:00.000Z',
+        reason: 'USER_REQUESTED_SECTION_EVIDENCE_CLEAR',
+      })
+
+    expect(res.status).toBe(200)
+    const persistedFrameworkState = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state
+    expect(persistedFrameworkState.evidence_pack).toEqual(evidencePack)
+    const persistedSection = persistedFrameworkState.sections.value_drivers
+    expect(persistedSection.additionalEvidence).toEqual(expect.objectContaining({
+      status: 'EMPTY',
+      documentCount: 0,
+      evidenceObjectCount: 0,
+      acceptedEvidenceObjectCount: 0,
+      pendingEvidenceObjectCount: 0,
+      rejectedEvidenceObjectCount: 0,
+      documents: [],
+    }))
+    expect(persistedSection.evidenceObjects).toEqual([])
+    expect(persistedSection.gsilContext).toEqual(expect.objectContaining({
+      sectionEvidenceSummary: '',
+      acceptedEvidenceObjectIds: [],
+      sourceRefs: [],
+      updatedAt: expect.any(String),
+    }))
+    expect(persistedSection.state).toEqual(expect.objectContaining({
+      needsRegeneration: true,
+      sectionEvidenceInvalidatedAt: expect.any(String),
+      sectionEvidenceInvalidatedBy: CUSTOMER_ADMIN_ID,
+      acceptedInvalidatedAt: expect.any(String),
+      acceptedInvalidationReason: 'SECTION_EVIDENCE_CHANGED',
+    }))
+    expect(persistedSection.intelligence.invalidation).toEqual(expect.objectContaining({
+      reason: 'SECTION_EVIDENCE_CHANGED',
+      invalidatedBy: CUSTOMER_ADMIN_ID,
+      previousSectionEvidenceHash: expect.any(String),
+      nextSectionEvidenceHash: expect.any(String),
+    }))
+    expect(res.body.data.section.sectionEvidence).toEqual(expect.objectContaining({
+      status: 'EMPTY',
+      documentCount: 0,
+      evidenceObjectCount: 0,
+      acceptedEvidenceObjectCount: 0,
+      documents: [],
+      evidenceObjects: [],
+    }))
+    expect(res.body.data.section.previousSectionEvidence).toEqual(expect.objectContaining({
+      status: 'ACCEPTED',
+      documentCount: 1,
+      evidenceObjectCount: 1,
+      acceptedEvidenceObjectCount: 1,
+    }))
+    expect(JSON.stringify(res.body.data.section.sectionEvidence)).not.toContain('textContent')
+    expect(JSON.stringify(res.body.data.section.sectionEvidence)).not.toContain('contentBase64')
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'RUNTIME_STATE_MUTATED',
+      resourceType: 'RuntimeInstance',
+      resourceId: RUNTIME_INSTANCE_ID,
+      diff: expect.objectContaining({
+        runtimePath: 'framework_state.sections.value_drivers',
+        reason: 'SECTION_EVIDENCE_CLEAR',
+        clearReason: 'USER_REQUESTED_SECTION_EVIDENCE_CLEAR',
+        acceptedEvidenceChanged: true,
+        previousDocumentCount: 1,
+        nextDocumentCount: 0,
+        previousEvidenceObjectCount: 1,
+        nextEvidenceObjectCount: 0,
+        clearedSectionDocumentIds: ['section_document_value_fixture'],
+        clearedSectionEvidenceObjectIds: ['section_evidence_value_fixture'],
+      }),
+    }))
+    expect(JSON.stringify(AuditLog.createLog.mock.calls[0][0].diff)).not.toContain('textContent')
+    expect(JSON.stringify(AuditLog.createLog.mock.calls[0][0].diff)).not.toContain('contentBase64')
+  })
+
+  test('PATCH /api/v1/runtime-instances/:id/section-evidence/clear rejects stale clear without partial persistence', async () => {
+    const evidenceObject = makeSectionEvidenceObject()
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:03:00.000Z'),
+      packageId: FRAMEWORK_PACKAGE_ID,
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: makeReviewableDiscoveryEvidencePack({ accepted: true }),
+        sections: {
+          value_drivers: {
+            input: 'Initial value driver context.',
+            additionalEvidence: makeSectionAdditionalEvidence({ evidenceObjects: [evidenceObject] }),
+            evidenceObjects: [evidenceObject],
+          },
+        },
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-evidence/clear`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.value_drivers',
+        sectionKey: 'value_drivers',
+        confirmClear: true,
+        expectedUpdatedAt: '2026-05-19T08:02:00.000Z',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.message).toBe('Runtime instance has changed since the renderer projection was loaded.')
+    expect(res.body.error.details).toEqual(expect.objectContaining({
+      expectedUpdatedAt: '2026-05-19T08:02:00.000Z',
+      currentUpdatedAt: '2026-05-19T08:03:00.000Z',
+    }))
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('PATCH /api/v1/runtime-instances/:id/section-evidence/clear requires explicit confirmation', async () => {
+    RuntimeInstance.findOne = jest.fn()
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-evidence/clear`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.value_drivers',
+        sectionKey: 'value_drivers',
+        expectedUpdatedAt: '2026-05-19T08:03:00.000Z',
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details.confirmClear).toMatch(/confirmClear is required|Required|expected boolean/i)
+    expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('PATCH /api/v1/runtime-instances/:id/section-evidence/clear rejects when there is no section evidence to clear', async () => {
+    const updatedAt = '2026-05-19T08:03:00.000Z'
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt,
+      packageId: FRAMEWORK_PACKAGE_ID,
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: makeReviewableDiscoveryEvidencePack({ accepted: true }),
+        sections: {
+          value_drivers: {
+            input: 'Initial value driver context.',
+            additionalEvidence: makeSectionAdditionalEvidence({
+              documents: [],
+              evidenceObjects: [],
+              status: 'EMPTY',
+            }),
+            evidenceObjects: [],
+          },
+        },
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+    FrameworkPackage.findById.mockResolvedValue(makeSectionEvidencePackage())
+    const runtimePathRecords = makeSectionEvidenceRuntimePathRecords()
+    RuntimePathRegistry.findOne = buildRuntimePathFindOneMock(runtimePathRecords)
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery(runtimePathRecords))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeSectionEvidenceUIContract()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-evidence/clear`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.value_drivers',
+        sectionKey: 'value_drivers',
+        confirmClear: true,
+        expectedUpdatedAt: updatedAt,
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.message).toBe('There is no section evidence to clear.')
+    expect(res.body.error.details.reason).toBe('RUNTIME_ACTION_NOT_AVAILABLE')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('PATCH /api/v1/runtime-instances/:id/section-evidence/clear rolls back when audit persistence fails', async () => {
+    const evidenceObject = makeSectionEvidenceObject({ reviewStatus: 'ACCEPTED' })
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedBy: CUSTOMER_ADMIN_ID,
+      updatedAt: new Date('2026-05-19T08:03:00.000Z'),
+      packageId: FRAMEWORK_PACKAGE_ID,
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: makeReviewableDiscoveryEvidencePack({ accepted: true }),
+        sections: {
+          value_drivers: {
+            input: 'Initial value driver context.',
+            additionalEvidence: makeSectionAdditionalEvidence({
+              evidenceObjects: [evidenceObject],
+              status: 'ACCEPTED',
+            }),
+            evidenceObjects: [evidenceObject],
+            gsilContext: {
+              acceptedEvidenceObjectIds: ['section_evidence_value_fixture'],
+              sourceRefs: ['section_evidence_value_fixture'],
+              sectionEvidenceSummary: 'governed workflow automation reduces manual effort.',
+              evidenceHash: 'sha256:previous-section-evidence',
+              updatedAt: '2026-05-19T08:02:00.000Z',
+            },
+          },
+        },
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+      .mockResolvedValueOnce(makeRuntimeInstanceDocument({
+        ...runtimeInstanceDoc,
+        framework_state: {
+          ...runtimeInstanceDoc.framework_state,
+          sections: {
+            ...runtimeInstanceDoc.framework_state.sections,
+            value_drivers: {
+              ...runtimeInstanceDoc.framework_state.sections.value_drivers,
+              additionalEvidence: makeSectionAdditionalEvidence({ evidenceObjects: [] }),
+              evidenceObjects: [],
+            },
+          },
+        },
+        updatedAt: new Date('2026-05-19T08:04:00.000Z'),
+      }))
+      .mockResolvedValueOnce(makeRuntimeInstanceDocument({
+        ...runtimeInstanceDoc,
+        updatedAt: new Date('2026-05-19T08:05:00.000Z'),
+      }))
+    FrameworkPackage.findById.mockResolvedValue(makeSectionEvidencePackage())
+    const runtimePathRecords = makeSectionEvidenceRuntimePathRecords()
+    RuntimePathRegistry.findOne = buildRuntimePathFindOneMock(runtimePathRecords)
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery(runtimePathRecords))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeSectionEvidenceUIContract()))
+    AuditLog.createLog = jest.fn(async () => {
+      throw new Error('audit unavailable')
+    })
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-evidence/clear`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.value_drivers',
+        sectionKey: 'value_drivers',
+        confirmClear: true,
+        expectedUpdatedAt: '2026-05-19T08:03:00.000Z',
+      })
+
+    expect(res.status).toBe(500)
+    expect(res.body.error.code).toBe('RUNTIME_STATE_MUTATION_AUDIT_FAILED')
+    expect(res.body.error.details.reason).toBe('RUNTIME_MUTATION_AUDIT_PERSISTENCE_FAILED')
+    expect(RuntimeInstance.findOneAndUpdate).toHaveBeenCalledTimes(2)
+    expect(RuntimeInstance.findOneAndUpdate.mock.calls[1]).toEqual([
+      {
+        _id: RUNTIME_INSTANCE_ID,
+        updatedAt: new Date('2026-05-19T08:04:00.000Z'),
+      },
+      {
+        $set: {
+          framework_state: runtimeInstanceDoc.framework_state,
+          updatedBy: CUSTOMER_ADMIN_ID,
+        },
+      },
+      {
+        new: true,
+        runValidators: true,
+      },
+    ])
+  })
+
+  test('PATCH /api/v1/runtime-instances/:id/section-evidence/clear rejects actors without VMF_UPDATE access', async () => {
+    const evidenceObject = makeSectionEvidenceObject()
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:03:00.000Z'),
+      packageId: FRAMEWORK_PACKAGE_ID,
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: makeReviewableDiscoveryEvidencePack({ accepted: true }),
+        sections: {
+          value_drivers: {
+            input: 'Initial value driver context.',
+            additionalEvidence: makeSectionAdditionalEvidence({ evidenceObjects: [evidenceObject] }),
+            evidenceObjects: [evidenceObject],
+          },
+        },
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+    const token = await getAccessTokenForUser(makeRegularUser())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-evidence/clear`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.value_drivers',
+        sectionKey: 'value_drivers',
+        confirmClear: true,
+        expectedUpdatedAt: '2026-05-19T08:03:00.000Z',
+      })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.details.reason).toBe('FORBIDDEN')
     expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
     expect(AuditLog.createLog).not.toHaveBeenCalled()
   })

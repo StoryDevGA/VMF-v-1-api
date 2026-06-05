@@ -353,6 +353,11 @@ const buildSectionEvidenceProjection = (rawSectionValue) => {
       uploadedBy: String(document?.uploadedBy || '').trim(),
       status: String(document?.status || document?.documentStatus || 'PROCESSED').trim().toUpperCase(),
       ingestionMode: String(document?.ingestionMode || '').trim().toUpperCase(),
+      extractionMethod: String(document?.extractionMethod || '').trim(),
+      adapter: String(document?.adapter || '').trim(),
+      ...(Number.isFinite(Number(document?.ocrPageCount)) ? { ocrPageCount: Number(document.ocrPageCount) } : {}),
+      ...(Number.isFinite(Number(document?.ocrPagesProcessed)) ? { ocrPagesProcessed: Number(document.ocrPagesProcessed) } : {}),
+      ...(document?.ocrPageLimitReached ? { ocrPageLimitReached: true } : {}),
       evidenceObjectsGenerated: Number.isFinite(Number(document?.evidenceObjectsGenerated))
         ? Number(document.evidenceObjectsGenerated)
         : 0,

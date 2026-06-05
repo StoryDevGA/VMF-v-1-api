@@ -15,6 +15,7 @@ import {
 import {
   acceptRuntimeDiscovery as acceptRuntimeDiscoveryRecord,
   acceptRuntimeSection as acceptRuntimeSectionRecord,
+  clearRuntimeSectionEvidence as clearRuntimeSectionEvidenceRecord,
   getRuntimeDiscoveryEvidence as getRuntimeDiscoveryEvidenceRecord,
   mutateRuntimeState as mutateRuntimeStateRecord,
   rebuildRuntimeIntelligenceGraph as rebuildRuntimeIntelligenceGraphRecord,
@@ -237,6 +238,28 @@ export const reviewRuntimeSectionEvidence = async (req, res, next) => {
       actorUserId: req.context?.userId || req.userId,
       auditRequest: req,
       evidenceObjectId: req.params.evidenceObjectId,
+      scopes: req.scopes,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+      payload: req.body,
+    })
+
+    return res.status(200).json({
+      data: sectionEvidence,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const clearRuntimeSectionEvidence = async (req, res, next) => {
+  try {
+    const sectionEvidence = await clearRuntimeSectionEvidenceRecord({
+      actorUserId: req.context?.userId || req.userId,
+      auditRequest: req,
       scopes: req.scopes,
       runtimeInstanceId: req.params.runtimeInstanceId,
       payload: req.body,
