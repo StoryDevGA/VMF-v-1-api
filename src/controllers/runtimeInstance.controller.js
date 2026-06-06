@@ -20,6 +20,7 @@ import {
   mutateRuntimeState as mutateRuntimeStateRecord,
   rebuildRuntimeIntelligenceGraph as rebuildRuntimeIntelligenceGraphRecord,
   resetRuntimeDiscovery as resetRuntimeDiscoveryRecord,
+  reviewAllRuntimeSectionEvidence as reviewAllRuntimeSectionEvidenceRecord,
   reviewRuntimeDiscoveryEvidence as reviewRuntimeDiscoveryEvidenceRecord,
   reviewRuntimeSectionEvidence as reviewRuntimeSectionEvidenceRecord,
   updateRuntimeSectionEvidence as updateRuntimeSectionEvidenceRecord,
@@ -238,6 +239,28 @@ export const reviewRuntimeSectionEvidence = async (req, res, next) => {
       actorUserId: req.context?.userId || req.userId,
       auditRequest: req,
       evidenceObjectId: req.params.evidenceObjectId,
+      scopes: req.scopes,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+      payload: req.body,
+    })
+
+    return res.status(200).json({
+      data: sectionEvidence,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const reviewAllRuntimeSectionEvidence = async (req, res, next) => {
+  try {
+    const sectionEvidence = await reviewAllRuntimeSectionEvidenceRecord({
+      actorUserId: req.context?.userId || req.userId,
+      auditRequest: req,
       scopes: req.scopes,
       runtimeInstanceId: req.params.runtimeInstanceId,
       payload: req.body,

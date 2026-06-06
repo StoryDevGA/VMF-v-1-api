@@ -1,4 +1,5 @@
 import { describe, test, expect, beforeAll, beforeEach, jest } from '@jest/globals'
+import { randomBytes } from 'node:crypto'
 import { createRequire } from 'node:module'
 import zlib from 'node:zlib'
 
@@ -101,6 +102,135 @@ const buildDocxBufferWithDataDescriptor = (documentText) => {
     dataDescriptor,
     centralDirectory,
     endOfCentralDirectory,
+  ])
+}
+
+const buildZipBuffer = (entries) => {
+  const localParts = []
+  const centralParts = []
+  let offset = 0
+
+  for (const entry of entries) {
+    const fileNameBuffer = Buffer.from(entry.fileName, 'utf8')
+    const dataBuffer = Buffer.isBuffer(entry.data)
+      ? entry.data
+      : Buffer.from(String(entry.data || ''), 'utf8')
+    const compressedData = zlib.deflateRawSync(dataBuffer)
+    const localHeader = Buffer.alloc(30)
+    localHeader.writeUInt32LE(0x04034b50, 0)
+    localHeader.writeUInt16LE(20, 4)
+    localHeader.writeUInt16LE(0, 6)
+    localHeader.writeUInt16LE(8, 8)
+    localHeader.writeUInt16LE(0, 10)
+    localHeader.writeUInt16LE(0, 12)
+    localHeader.writeUInt32LE(0, 14)
+    localHeader.writeUInt32LE(compressedData.length, 18)
+    localHeader.writeUInt32LE(dataBuffer.length, 22)
+    localHeader.writeUInt16LE(fileNameBuffer.length, 26)
+    localHeader.writeUInt16LE(0, 28)
+
+    localParts.push(localHeader, fileNameBuffer, compressedData)
+
+    const centralHeader = Buffer.alloc(46)
+    centralHeader.writeUInt32LE(0x02014b50, 0)
+    centralHeader.writeUInt16LE(20, 4)
+    centralHeader.writeUInt16LE(20, 6)
+    centralHeader.writeUInt16LE(0, 8)
+    centralHeader.writeUInt16LE(8, 10)
+    centralHeader.writeUInt16LE(0, 12)
+    centralHeader.writeUInt16LE(0, 14)
+    centralHeader.writeUInt32LE(0, 16)
+    centralHeader.writeUInt32LE(compressedData.length, 20)
+    centralHeader.writeUInt32LE(dataBuffer.length, 24)
+    centralHeader.writeUInt16LE(fileNameBuffer.length, 28)
+    centralHeader.writeUInt16LE(0, 30)
+    centralHeader.writeUInt16LE(0, 32)
+    centralHeader.writeUInt16LE(0, 34)
+    centralHeader.writeUInt16LE(0, 36)
+    centralHeader.writeUInt32LE(0, 38)
+    centralHeader.writeUInt32LE(offset, 42)
+    centralParts.push(centralHeader, fileNameBuffer)
+
+    offset += localHeader.length + fileNameBuffer.length + compressedData.length
+  }
+
+  const centralDirectory = Buffer.concat(centralParts)
+  const endOfCentralDirectory = Buffer.alloc(22)
+  endOfCentralDirectory.writeUInt32LE(0x06054b50, 0)
+  endOfCentralDirectory.writeUInt16LE(0, 4)
+  endOfCentralDirectory.writeUInt16LE(0, 6)
+  endOfCentralDirectory.writeUInt16LE(entries.length, 8)
+  endOfCentralDirectory.writeUInt16LE(entries.length, 10)
+  endOfCentralDirectory.writeUInt32LE(centralDirectory.length, 12)
+  endOfCentralDirectory.writeUInt32LE(offset, 16)
+  endOfCentralDirectory.writeUInt16LE(0, 20)
+
+  return Buffer.concat([...localParts, centralDirectory, endOfCentralDirectory])
+}
+
+const buildPptxBuffer = ({
+  largeMediaBytes = 0,
+  slideText = 'StorylineOS sells a subscription based SaaS platform for governed value narrative execution.',
+  speakerNotes = 'Partner delivery evidence remains tied to this presentation source.',
+  imageOnly = false,
+} = {}) => {
+  const largeMedia = largeMediaBytes > 0
+    ? randomBytes(largeMediaBytes)
+    : null
+  const slideTextLines = Array.isArray(slideText) ? slideText : [slideText]
+  const slideParagraphs = slideTextLines
+    .filter((line) => String(line || '').trim())
+    .map((line) => `<a:p><a:r><a:t>${escapeDocxXmlText(line)}</a:t></a:r></a:p>`)
+    .join('')
+  const slideBody = imageOnly
+    ? ''
+    : `<p:txBody><a:bodyPr/><a:lstStyle/>${slideParagraphs}</p:txBody>`
+  const notesBody = speakerNotes
+    ? `<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>${escapeDocxXmlText(speakerNotes)}</a:t></a:r></a:p></p:txBody>`
+    : ''
+
+  return buildZipBuffer([
+    {
+      fileName: '[Content_Types].xml',
+      data: '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>',
+    },
+    {
+      fileName: 'ppt/presentation.xml',
+      data: '<?xml version="1.0" encoding="UTF-8"?><p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:sldIdLst><p:sldId id="256" r:id="rId1" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/></p:sldIdLst></p:presentation>',
+    },
+    {
+      fileName: 'ppt/slides/slide1.xml',
+      data: `<?xml version="1.0" encoding="UTF-8"?>
+        <p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <p:cSld><p:spTree>
+            <p:sp>${slideBody}</p:sp>
+            ${imageOnly ? '<p:pic><p:nvPicPr/></p:pic>' : ''}
+          </p:spTree></p:cSld>
+        </p:sld>`,
+    },
+    {
+      fileName: 'ppt/slides/_rels/slide1.xml.rels',
+      data: `<?xml version="1.0" encoding="UTF-8"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+          ${speakerNotes ? '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notesSlide1.xml"/>' : ''}
+          ${imageOnly ? '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/>' : ''}
+        </Relationships>`,
+    },
+    {
+      fileName: 'ppt/notesSlides/notesSlide1.xml',
+      data: `<?xml version="1.0" encoding="UTF-8"?>
+        <p:notes xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <p:cSld><p:spTree><p:sp>${notesBody}</p:sp></p:spTree></p:cSld>
+        </p:notes>`,
+    },
+    ...(imageOnly ? [{
+      fileName: 'ppt/media/image1.png',
+      data: 'fake-image',
+    }] : []),
+    ...(largeMedia ? [{
+      fileName: 'ppt/media/large-test-payload.bin',
+      data: largeMedia,
+    }] : []),
   ])
 }
 
@@ -1146,6 +1276,27 @@ describe('Runtime Instance API', () => {
   test('POST /api/v1/runtime-instances returns 401 without auth token', async () => {
     const res = await request.post('/api/v1/runtime-instances').send({})
     expect(res.status).toBe(401)
+  })
+
+  test('rejects unauthenticated large runtime document payloads before parsing the elevated body limit', async () => {
+    const largePayload = JSON.stringify({
+      documentSources: [
+        {
+          fileName: 'large-deck.pptx',
+          mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+          sizeBytes: 1_200_000,
+          contentBase64: 'a'.repeat(1_200_000),
+        },
+      ],
+    })
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-evidence`)
+      .set('Content-Type', 'application/json')
+      .send(largePayload)
+
+    expect(res.status).toBe(401)
+    expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
   })
 
   test('creates a runtime instance from an ACTIVE package with certified activation evidence', async () => {
@@ -3253,6 +3404,110 @@ describe('Runtime Instance API', () => {
     expect(JSON.stringify(persistedEvidencePack.lineage.sources)).not.toContain(pdfLines[0])
   })
 
+  test('PATCH /api/v1/runtime-instances/:id/discovery-inputs extracts PPTX slide text into reviewable evidence', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: {},
+        sections: {},
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+    }))
+    RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeEvidencePackRuntimePathRecord()))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([
+      makeRuntimePathRecord(),
+      makeEvidencePackRuntimePathRecord(),
+    ]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      sections: [
+        {
+          sectionKey: 'value_drivers',
+          runtimePath: 'framework_state.sections.value_drivers',
+          displayOrder: 10,
+          isVisible: true,
+        },
+      ],
+    })))
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      sections: [
+        {
+          sectionKey: 'value_drivers',
+          runtimePath: 'framework_state.sections.value_drivers',
+          required: true,
+        },
+      ],
+    }))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+    const pptxBuffer = buildPptxBuffer({
+      largeMediaBytes: 6_000_000,
+      slideText: 'StorylineOS delivers a subscription based SaaS platform for governed value narrative execution.',
+      speakerNotes: 'Onboarding consultants and associate delivery partners support customer rollout.',
+    })
+    expect(pptxBuffer.length).toBeGreaterThan(2_500_000)
+    expect(pptxBuffer.length).toBeLessThan(40_000_000)
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/discovery-inputs`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        acquisitionProfile: 'STANDARD',
+        inputs: {
+          companyWebsite: 'https://acme.example',
+          companyName: 'Acme',
+          marketRegion: 'UK enterprise',
+          targetOffer: 'Managed proposal platform',
+        },
+        documentSources: [
+          {
+            fileName: 'customer-strategy.pptx',
+            mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+            assetType: 'CUSTOMER_DOCUMENT',
+            sizeBytes: pptxBuffer.length,
+            contentBase64: pptxBuffer.toString('base64'),
+          },
+        ],
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+      })
+
+    expect(res.status).toBe(200)
+    const persistedEvidencePack = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state.evidence_pack
+    const documentSource = persistedEvidencePack.sourceRegistry.find((source) =>
+      source.sourceType === 'UPLOADED_DOCUMENT')
+    const documentEvidenceObjects = persistedEvidencePack.evidenceObjects.filter((evidenceObject) =>
+      evidenceObject.acquisitionMethod === 'DOCUMENT_INGESTION')
+    const extractedFacts = documentEvidenceObjects.map((evidenceObject) => evidenceObject.extractedFact).join('\n')
+
+    expect(documentSource).toEqual(expect.objectContaining({
+      sourceType: 'UPLOADED_DOCUMENT',
+      fileName: 'customer-strategy.pptx',
+      mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      documentType: 'PPTX',
+      documentStatus: 'PROCESSED',
+      ingestionMode: 'PRESENTATION_NATIVE_TEXT',
+      extractionMethod: 'PPTX_OPENXML_TEXT',
+      adapter: 'document-pptx-openxml-text-extraction-v1',
+      slideCount: 1,
+      slidesProcessed: 1,
+      speakerNotesIncluded: true,
+      evidenceProduced: documentEvidenceObjects.length,
+    }))
+    expect(documentEvidenceObjects.length).toBeGreaterThan(1)
+    expect(extractedFacts).toContain('subscription based SaaS platform')
+    expect(extractedFacts).toContain('Onboarding consultants')
+    expect(JSON.stringify(persistedEvidencePack)).not.toContain('contentBase64')
+    expect(JSON.stringify(persistedEvidencePack.lineage.sources)).not.toContain('subscription based SaaS platform')
+  })
+
   test('PATCH /api/v1/runtime-instances/:id/discovery-inputs appends uploaded documents to the existing document registry', async () => {
     const previousDocumentSourceId = 'document_previous_pdf'
     const previousDocumentEvidenceObject = makeDiscoveryEvidenceObject({
@@ -3481,7 +3736,7 @@ describe('Runtime Instance API', () => {
     expect(res.body.error.details).toEqual(expect.objectContaining({
       reason: 'DOCUMENT_INGESTION_FAILED',
       acquisitionStatus: 'FAILED',
-      acquisitionError: 'Uploaded document must be PDF, DOCX, or TXT.',
+      acquisitionError: 'Uploaded document must be PDF, PPTX, DOCX, or TXT.',
     }))
     expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
     expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
@@ -4912,6 +5167,123 @@ describe('Runtime Instance API', () => {
     expect(JSON.stringify(AuditLog.createLog.mock.calls[0][0].diff)).not.toContain('contentBase64')
   })
 
+  test('PATCH /api/v1/runtime-instances/:id/section-evidence extracts PPTX supporting files into reviewable evidence', async () => {
+    const evidencePack = makeReviewableDiscoveryEvidencePack({ accepted: true })
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+      packageId: FRAMEWORK_PACKAGE_ID,
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: evidencePack,
+        sections: {
+          value_drivers: {
+            input: 'Initial value driver context.',
+            state: { status: 'DRAFT' },
+          },
+        },
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:02:00.000Z'),
+    }))
+    FrameworkPackage.findById.mockResolvedValue(makeSectionEvidencePackage())
+    const runtimePathRecords = makeSectionEvidenceRuntimePathRecords()
+    RuntimePathRegistry.findOne = buildRuntimePathFindOneMock(runtimePathRecords)
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery(runtimePathRecords))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeSectionEvidenceUIContract()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+    const pptxBuffer = buildPptxBuffer({
+      largeMediaBytes: 6_000_000,
+      slideText: [
+        'What did we set out to solve?',
+        'Customer teams subscribe monthly to the StorylineOS governed value narrative SaaS application.',
+        'Why was change important?',
+        'Service desk contacts dropped by 60% where users engaged Tenjin for self-service support.',
+        'Early indications from the first few weeks from launch show that, c.',
+        'This is bloody clever!',
+      ],
+      speakerNotes: 'Consultants help with onboarding and global associates add delivery capacity.',
+    })
+    expect(pptxBuffer.length).toBeGreaterThan(2_500_000)
+    expect(pptxBuffer.length).toBeLessThan(40_000_000)
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-evidence`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.value_drivers',
+        sectionKey: 'value_drivers',
+        expectedUpdatedAt: '2026-05-19T08:01:00.000Z',
+        documentSources: [
+          {
+            fileName: 'value-drivers-support.pptx',
+            mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+            assetType: 'SECTION_SUPPORTING_FILE',
+            sizeBytes: pptxBuffer.length,
+            contentBase64: pptxBuffer.toString('base64'),
+          },
+        ],
+      })
+
+    expect(res.status).toBe(200)
+    const persistedFrameworkState = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state
+    expect(persistedFrameworkState.evidence_pack).toEqual(evidencePack)
+    const persistedSection = persistedFrameworkState.sections.value_drivers
+    const extractedFacts = persistedSection.evidenceObjects
+      .map((evidenceObject) => evidenceObject.extractedFact)
+      .join('\n')
+
+    expect(persistedSection.additionalEvidence).toEqual(expect.objectContaining({
+      status: 'PENDING_REVIEW',
+      documentCount: 1,
+      evidenceObjectCount: persistedSection.evidenceObjects.length,
+    }))
+    expect(persistedSection.additionalEvidence.documents[0]).toEqual(expect.objectContaining({
+      fileName: 'value-drivers-support.pptx',
+      status: 'PROCESSED',
+      fileType: 'PPTX',
+      ingestionMode: 'PRESENTATION_NATIVE_TEXT',
+      extractionMethod: 'PPTX_OPENXML_TEXT',
+      adapter: 'document-pptx-openxml-text-extraction-v1',
+      slideCount: 1,
+      slidesProcessed: 1,
+      speakerNotesIncluded: true,
+    }))
+    expect(persistedSection.evidenceObjects.length).toBeGreaterThan(1)
+    expect(extractedFacts).toContain('subscribe monthly')
+    expect(extractedFacts).toContain('Service desk contacts dropped by 60%')
+    expect(extractedFacts).toContain('Consultants help with onboarding')
+    expect(extractedFacts).not.toContain('What did we set out to solve')
+    expect(extractedFacts).not.toContain('Why was change important')
+    expect(extractedFacts).not.toContain('Early indications from the first few weeks from launch show that, c.')
+    expect(extractedFacts).not.toContain('This is bloody clever')
+    expect(res.body.data.section.sectionEvidence.evidenceObjects).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        sourceFileName: 'value-drivers-support.pptx',
+        snippet: expect.stringContaining('subscribe monthly'),
+      }),
+    ]))
+    expect(res.body.data.section.sectionEvidence.documents[0]).toEqual(expect.objectContaining({
+      fileName: 'value-drivers-support.pptx',
+      extractionMethod: 'PPTX_OPENXML_TEXT',
+      ingestionMode: 'PRESENTATION_NATIVE_TEXT',
+      adapter: 'document-pptx-openxml-text-extraction-v1',
+      slideCount: 1,
+      slidesProcessed: 1,
+      speakerNotesIncluded: true,
+    }))
+    expect(JSON.stringify(persistedSection)).not.toContain('contentBase64')
+    expect(JSON.stringify(res.body.data.section.sectionEvidence)).not.toContain('contentBase64')
+    expect(JSON.stringify(AuditLog.createLog.mock.calls[0][0].diff)).not.toContain('contentBase64')
+  })
+
   test('PATCH /api/v1/runtime-instances/:id/section-evidence OCRs image-only PDF supporting files into reviewable evidence', async () => {
     const evidencePack = makeReviewableDiscoveryEvidencePack({ accepted: true })
     const runtimeInstanceDoc = makeRuntimeInstanceDocument({
@@ -5135,6 +5507,125 @@ describe('Runtime Instance API', () => {
     expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
       action: 'RUNTIME_STATE_MUTATED',
     }))
+  })
+
+  test('PATCH /api/v1/runtime-instances/:id/section-evidence rejects textless PPTX files without partial persistence', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+      packageId: FRAMEWORK_PACKAGE_ID,
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: makeReviewableDiscoveryEvidencePack({ accepted: true }),
+        sections: {
+          value_drivers: { input: 'Initial value driver context.' },
+        },
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+    FrameworkPackage.findById.mockResolvedValue(makeSectionEvidencePackage())
+    const runtimePathRecords = makeSectionEvidenceRuntimePathRecords()
+    RuntimePathRegistry.findOne = buildRuntimePathFindOneMock(runtimePathRecords)
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery(runtimePathRecords))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeSectionEvidenceUIContract()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+    const pptxBuffer = buildPptxBuffer({ imageOnly: true, speakerNotes: '' })
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-evidence`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.value_drivers',
+        sectionKey: 'value_drivers',
+        expectedUpdatedAt: '2026-05-19T08:01:00.000Z',
+        documentSources: [
+          {
+            fileName: 'image-only-deck.pptx',
+            mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+            assetType: 'SECTION_SUPPORTING_FILE',
+            sizeBytes: pptxBuffer.length,
+            contentBase64: pptxBuffer.toString('base64'),
+          },
+        ],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error).toEqual(expect.objectContaining({
+      code: 'VALIDATION_FAILED',
+      message: 'Section supporting file ingestion failed.',
+      details: expect.objectContaining({
+        ingestionError: expect.objectContaining({
+          message: expect.stringContaining('PowerPoint document did not contain readable extractable slide text or speaker notes'),
+        }),
+      }),
+    }))
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+      action: 'RUNTIME_STATE_MUTATED',
+    }))
+  })
+
+  test('PATCH /api/v1/runtime-instances/:id/section-evidence rejects malformed PPTX packages with distinct guidance', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+      packageId: FRAMEWORK_PACKAGE_ID,
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: makeReviewableDiscoveryEvidencePack({ accepted: true }),
+        sections: {
+          value_drivers: { input: 'Initial value driver context.' },
+        },
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+    FrameworkPackage.findById.mockResolvedValue(makeSectionEvidencePackage())
+    const runtimePathRecords = makeSectionEvidenceRuntimePathRecords()
+    RuntimePathRegistry.findOne = buildRuntimePathFindOneMock(runtimePathRecords)
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery(runtimePathRecords))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeSectionEvidenceUIContract()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+    const malformedPptxBuffer = buildZipBuffer([
+      {
+        fileName: '[Content_Types].xml',
+        data: '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>',
+      },
+      {
+        fileName: 'not-a-presentation/document.xml',
+        data: '<document>This is not a PowerPoint package.</document>',
+      },
+    ])
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-evidence`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.value_drivers',
+        sectionKey: 'value_drivers',
+        expectedUpdatedAt: '2026-05-19T08:01:00.000Z',
+        documentSources: [
+          {
+            fileName: 'renamed-binary.pptx',
+            mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+            assetType: 'SECTION_SUPPORTING_FILE',
+            sizeBytes: malformedPptxBuffer.length,
+            contentBase64: malformedPptxBuffer.toString('base64'),
+          },
+        ],
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error).toEqual(expect.objectContaining({
+      code: 'VALIDATION_FAILED',
+      message: 'Section supporting file ingestion failed.',
+      details: expect.objectContaining({
+        ingestionError: expect.objectContaining({
+          message: expect.stringContaining('PowerPoint file is not a valid PPTX package'),
+        }),
+      }),
+    }))
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 
   test('PATCH /api/v1/runtime-instances/:id/section-evidence rejects unsupported files without partial persistence', async () => {
@@ -5720,6 +6211,389 @@ describe('Runtime Instance API', () => {
         acceptedEvidenceChanged: true,
       }),
     }))
+  })
+
+  test('PATCH /api/v1/runtime-instances/:id/section-evidence/review-all accepts all pending section evidence without reversing rejected evidence', async () => {
+    const pendingEvidenceObject = makeSectionEvidenceObject()
+    const secondPendingEvidenceObject = makeSectionEvidenceObject({
+      evidenceObjectId: 'section_evidence_service_fixture',
+      category: 'Services',
+      coverageArea: 'Services',
+      extractedFact: 'Document Section Supporting File: service teams automate onboarding support.',
+      lineageRef: 'lineage:section_document_value_fixture:section_evidence_service_fixture',
+    })
+    const rejectedEvidenceObject = makeSectionEvidenceObject({
+      evidenceObjectId: 'section_evidence_rejected_fixture',
+      extractedFact: 'Document Section Supporting File: rejected evidence stays rejected.',
+      reviewStatus: 'REJECTED',
+      rejectedBy: CUSTOMER_ADMIN_ID,
+      rejectionTimestamp: '2026-05-19T08:02:30.000Z',
+      lineageRef: 'lineage:section_document_value_fixture:section_evidence_rejected_fixture',
+    })
+    const evidenceObjects = [pendingEvidenceObject, secondPendingEvidenceObject, rejectedEvidenceObject]
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:03:00.000Z'),
+      packageId: FRAMEWORK_PACKAGE_ID,
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: makeReviewableDiscoveryEvidencePack({ accepted: true }),
+        sections: {
+          value_drivers: {
+            input: 'Initial value driver context.',
+            generated: {
+              content: 'Value Drivers: faster proposal workflows.',
+              generatedAt: '2026-05-19T08:01:00.000Z',
+              inputHash: 'hash-input',
+              sectionEvidenceHash: 'sha256:previous-section-evidence',
+            },
+            accepted: {
+              content: 'Value Drivers: faster proposal workflows.',
+              acceptedAt: '2026-05-19T08:02:00.000Z',
+              acceptedBy: CUSTOMER_ADMIN_ID,
+              sourceGeneratedAt: '2026-05-19T08:01:00.000Z',
+              inputHash: 'hash-input',
+            },
+            review: { status: 'ACCEPTED' },
+            state: { status: 'ACCEPTED' },
+            additionalEvidence: makeSectionAdditionalEvidence({ evidenceObjects }),
+            evidenceObjects,
+            gsilContext: {},
+          },
+        },
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:04:00.000Z'),
+    }))
+    FrameworkPackage.findById.mockResolvedValue(makeSectionEvidencePackage())
+    const runtimePathRecords = makeSectionEvidenceRuntimePathRecords()
+    RuntimePathRegistry.findOne = buildRuntimePathFindOneMock(runtimePathRecords)
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery(runtimePathRecords))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeSectionEvidenceUIContract()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-evidence/review-all`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.value_drivers',
+        sectionKey: 'value_drivers',
+        reviewStatus: 'ACCEPTED',
+        expectedUpdatedAt: '2026-05-19T08:03:00.000Z',
+      })
+
+    expect(res.status).toBe(200)
+    const persistedSection = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state.sections.value_drivers
+    expect(persistedSection.evidenceObjects).toEqual([
+      expect.objectContaining({
+        evidenceObjectId: 'section_evidence_value_fixture',
+        reviewStatus: 'ACCEPTED',
+        acceptedBy: CUSTOMER_ADMIN_ID,
+        rejectionTimestamp: '',
+      }),
+      expect.objectContaining({
+        evidenceObjectId: 'section_evidence_service_fixture',
+        reviewStatus: 'ACCEPTED',
+        acceptedBy: CUSTOMER_ADMIN_ID,
+        rejectionTimestamp: '',
+      }),
+      expect.objectContaining({
+        evidenceObjectId: 'section_evidence_rejected_fixture',
+        reviewStatus: 'REJECTED',
+        rejectedBy: CUSTOMER_ADMIN_ID,
+      }),
+    ])
+    expect(persistedSection.gsilContext).toEqual(expect.objectContaining({
+      acceptedEvidenceObjectIds: [
+        'section_evidence_value_fixture',
+        'section_evidence_service_fixture',
+      ],
+      sourceRefs: [
+        'section_evidence_value_fixture',
+        'section_evidence_service_fixture',
+      ],
+    }))
+    expect(res.body.data.section.sectionEvidence).toEqual(expect.objectContaining({
+      status: 'ACCEPTED',
+      acceptedEvidenceObjectCount: 2,
+      pendingEvidenceObjectCount: 0,
+      rejectedEvidenceObjectCount: 1,
+    }))
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      diff: expect.objectContaining({
+        runtimePath: 'framework_state.sections.value_drivers',
+        reason: 'SECTION_EVIDENCE_REVIEW_ALL',
+        reviewStatus: 'ACCEPTED',
+        acceptedEvidenceObjectIds: [
+          'section_evidence_value_fixture',
+          'section_evidence_service_fixture',
+        ],
+        acceptedEvidenceObjectCount: 2,
+        acceptedEvidenceChanged: true,
+      }),
+    }))
+  })
+
+  test('PATCH /api/v1/runtime-instances/:id/section-evidence/review-all rejects stale bulk review without partial persistence', async () => {
+    const evidenceObject = makeSectionEvidenceObject()
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:03:00.000Z'),
+      packageId: FRAMEWORK_PACKAGE_ID,
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: makeReviewableDiscoveryEvidencePack({ accepted: true }),
+        sections: {
+          value_drivers: {
+            input: 'Initial value driver context.',
+            additionalEvidence: makeSectionAdditionalEvidence({ evidenceObjects: [evidenceObject] }),
+            evidenceObjects: [evidenceObject],
+          },
+        },
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+    FrameworkPackage.findById.mockResolvedValue(makeSectionEvidencePackage())
+    const runtimePathRecords = makeSectionEvidenceRuntimePathRecords()
+    RuntimePathRegistry.findOne = buildRuntimePathFindOneMock(runtimePathRecords)
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery(runtimePathRecords))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeSectionEvidenceUIContract()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-evidence/review-all`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.value_drivers',
+        sectionKey: 'value_drivers',
+        reviewStatus: 'ACCEPTED',
+        expectedUpdatedAt: '2026-05-19T08:02:00.000Z',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.message).toBe('Runtime instance has changed since the renderer projection was loaded.')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('PATCH /api/v1/runtime-instances/:id/section-evidence/review-all rejects when no pending section evidence remains', async () => {
+    const acceptedEvidenceObject = makeSectionEvidenceObject({
+      reviewStatus: 'ACCEPTED',
+      acceptedBy: CUSTOMER_ADMIN_ID,
+      acceptanceTimestamp: '2026-05-19T08:02:30.000Z',
+    })
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:03:00.000Z'),
+      packageId: FRAMEWORK_PACKAGE_ID,
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: makeReviewableDiscoveryEvidencePack({ accepted: true }),
+        sections: {
+          value_drivers: {
+            input: 'Initial value driver context.',
+            additionalEvidence: makeSectionAdditionalEvidence({
+              evidenceObjects: [acceptedEvidenceObject],
+              status: 'ACCEPTED',
+            }),
+            evidenceObjects: [acceptedEvidenceObject],
+          },
+        },
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+    FrameworkPackage.findById.mockResolvedValue(makeSectionEvidencePackage())
+    const runtimePathRecords = makeSectionEvidenceRuntimePathRecords()
+    RuntimePathRegistry.findOne = buildRuntimePathFindOneMock(runtimePathRecords)
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery(runtimePathRecords))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeSectionEvidenceUIContract()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-evidence/review-all`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.value_drivers',
+        sectionKey: 'value_drivers',
+        reviewStatus: 'ACCEPTED',
+        expectedUpdatedAt: '2026-05-19T08:03:00.000Z',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.message).toBe('No pending section evidence is available to accept.')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('PATCH /api/v1/runtime-instances/:id/section-evidence/review-all rejects actors without VMF_UPDATE access', async () => {
+    const evidenceObject = makeSectionEvidenceObject()
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:03:00.000Z'),
+      packageId: FRAMEWORK_PACKAGE_ID,
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: makeReviewableDiscoveryEvidencePack({ accepted: true }),
+        sections: {
+          value_drivers: {
+            input: 'Initial value driver context.',
+            additionalEvidence: makeSectionAdditionalEvidence({ evidenceObjects: [evidenceObject] }),
+            evidenceObjects: [evidenceObject],
+          },
+        },
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+    FrameworkPackage.findById.mockResolvedValue(makeSectionEvidencePackage())
+    const runtimePathRecords = makeSectionEvidenceRuntimePathRecords()
+    RuntimePathRegistry.findOne = buildRuntimePathFindOneMock(runtimePathRecords)
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery(runtimePathRecords))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeSectionEvidenceUIContract()))
+    const token = await getAccessTokenForUser(makeRegularUser())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-evidence/review-all`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.value_drivers',
+        sectionKey: 'value_drivers',
+        reviewStatus: 'ACCEPTED',
+        expectedUpdatedAt: '2026-05-19T08:03:00.000Z',
+      })
+
+    expect(res.status).toBe(403)
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('PATCH /api/v1/runtime-instances/:id/section-evidence/review-all rejects immutable runtimes without persistence', async () => {
+    const evidenceObject = makeSectionEvidenceObject()
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:03:00.000Z'),
+      packageId: FRAMEWORK_PACKAGE_ID,
+      framework_state: {
+        lifecycle: { stage: 'LOCKED' },
+        evidence_pack: makeReviewableDiscoveryEvidencePack({ accepted: true }),
+        sections: {
+          value_drivers: {
+            input: 'Initial value driver context.',
+            additionalEvidence: makeSectionAdditionalEvidence({ evidenceObjects: [evidenceObject] }),
+            evidenceObjects: [evidenceObject],
+          },
+        },
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+    FrameworkPackage.findById.mockResolvedValue(makeSectionEvidencePackage())
+    const runtimePathRecords = makeSectionEvidenceRuntimePathRecords()
+    RuntimePathRegistry.findOne = buildRuntimePathFindOneMock(runtimePathRecords)
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery(runtimePathRecords))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeSectionEvidenceUIContract()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-evidence/review-all`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.value_drivers',
+        sectionKey: 'value_drivers',
+        reviewStatus: 'ACCEPTED',
+        expectedUpdatedAt: '2026-05-19T08:03:00.000Z',
+      })
+
+    expect(res.status).toBe(409)
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('PATCH /api/v1/runtime-instances/:id/section-evidence/review-all rolls back when audit persistence fails', async () => {
+    const evidenceObject = makeSectionEvidenceObject()
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedBy: CUSTOMER_ADMIN_ID,
+      updatedAt: new Date('2026-05-19T08:03:00.000Z'),
+      packageId: FRAMEWORK_PACKAGE_ID,
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: makeReviewableDiscoveryEvidencePack({ accepted: true }),
+        sections: {
+          value_drivers: {
+            input: 'Initial value driver context.',
+            additionalEvidence: makeSectionAdditionalEvidence({ evidenceObjects: [evidenceObject] }),
+            evidenceObjects: [evidenceObject],
+          },
+        },
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+      .mockResolvedValueOnce(makeRuntimeInstanceDocument({
+        ...runtimeInstanceDoc,
+        framework_state: {
+          ...runtimeInstanceDoc.framework_state,
+          sections: {
+            ...runtimeInstanceDoc.framework_state.sections,
+            value_drivers: {
+              ...runtimeInstanceDoc.framework_state.sections.value_drivers,
+              evidenceObjects: [
+                {
+                  ...evidenceObject,
+                  reviewStatus: 'ACCEPTED',
+                },
+              ],
+            },
+          },
+        },
+        updatedAt: new Date('2026-05-19T08:04:00.000Z'),
+      }))
+      .mockResolvedValueOnce(makeRuntimeInstanceDocument({
+        ...runtimeInstanceDoc,
+        updatedAt: new Date('2026-05-19T08:05:00.000Z'),
+      }))
+    FrameworkPackage.findById.mockResolvedValue(makeSectionEvidencePackage())
+    const runtimePathRecords = makeSectionEvidenceRuntimePathRecords()
+    RuntimePathRegistry.findOne = buildRuntimePathFindOneMock(runtimePathRecords)
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery(runtimePathRecords))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeSectionEvidenceUIContract()))
+    AuditLog.createLog = jest.fn(async () => {
+      throw new Error('audit unavailable')
+    })
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/section-evidence/review-all`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.value_drivers',
+        sectionKey: 'value_drivers',
+        reviewStatus: 'ACCEPTED',
+        expectedUpdatedAt: '2026-05-19T08:03:00.000Z',
+      })
+
+    expect(res.status).toBe(500)
+    expect(res.body.error.code).toBe('RUNTIME_STATE_MUTATION_AUDIT_FAILED')
+    expect(RuntimeInstance.findOneAndUpdate).toHaveBeenCalledTimes(2)
+    expect(RuntimeInstance.findOneAndUpdate.mock.calls[1]).toEqual([
+      {
+        _id: RUNTIME_INSTANCE_ID,
+        updatedAt: new Date('2026-05-19T08:04:00.000Z'),
+      },
+      {
+        $set: {
+          framework_state: runtimeInstanceDoc.framework_state,
+          updatedBy: CUSTOMER_ADMIN_ID,
+        },
+      },
+      {
+        new: true,
+        runValidators: true,
+      },
+    ])
   })
 
   test('PATCH /api/v1/runtime-instances/:id/section-evidence/:evidenceObjectId/review rejects stale review without partial persistence', async () => {

@@ -3,12 +3,14 @@ import { lookup } from 'node:dns/promises'
 import { createRequire } from 'node:module'
 import { isIP } from 'node:net'
 import path from 'node:path'
+import { promisify } from 'node:util'
 import zlib from 'node:zlib'
 import * as pdfjs from 'pdfjs-dist/build/pdf.mjs'
 
 const moduleRequire = createRequire(import.meta.url)
 const { createCanvas } = moduleRequire('@napi-rs/canvas')
 const { createWorker: createOcrWorker, PSM: OCR_PAGE_SEGMENTATION_MODES } = moduleRequire('tesseract.js')
+const inflateRaw = promisify(zlib.inflateRaw)
 
 const DISCOVERY_EVIDENCE_CATEGORIES = Object.freeze({
   COMPANY: 'Company',
@@ -92,6 +94,7 @@ const WEBSITE_ACQUISITION_LIMITS = Object.freeze({
 const DOCUMENT_ACQUISITION_LIMITS = Object.freeze({
   maxDocuments: 5,
   maxFileBytes: 2_500_000,
+  maxPptxFileBytes: 40_000_000,
   maxTextCharacters: 80000,
   maxEvidenceObjectsPerDocument: 30,
   maxCandidateSegments: 120,
@@ -100,6 +103,13 @@ const DOCUMENT_ACQUISITION_LIMITS = Object.freeze({
   maxPdfOcrPages: 10,
   pdfOcrRenderScale: 2,
   pdfOcrTimeoutMs: 90000,
+  maxPptxSlides: 60,
+  pptxTimeoutMs: 15000,
+  maxPptxZipEntries: 800,
+  maxPptxXmlEntries: 240,
+  maxPptxCompressedEntryBytes: 2_000_000,
+  maxPptxUncompressedEntryBytes: 2_000_000,
+  maxPptxUncompressedBytes: 12_000_000,
 })
 const PDF_CMAP_URL = `${path.dirname(moduleRequire.resolve('pdfjs-dist/cmaps/78-EUC-H.bcmap'))}${path.sep}`
 const PDF_STANDARD_FONT_DATA_URL = `${path.dirname(moduleRequire.resolve('pdfjs-dist/standard_fonts/LiberationSans-Regular.ttf'))}${path.sep}`
@@ -110,6 +120,10 @@ const PDF_NO_READABLE_TEXT_ERROR = 'PDF document did not contain readable extrac
 const PDF_TEXT_TIMEOUT_ERROR = 'PDF text extraction timed out before this PDF could be processed.'
 const PDF_OCR_NO_READABLE_TEXT_ERROR = 'OCR could not extract reliable text from this PDF.'
 const PDF_OCR_TIMEOUT_ERROR = 'OCR timed out before this PDF could be processed.'
+const PPTX_NO_READABLE_TEXT_ERROR = 'PowerPoint document did not contain readable extractable slide text or speaker notes.'
+const PPTX_EXTRACTION_TIMEOUT_ERROR = 'PowerPoint extraction timed out before this presentation could be processed.'
+const PPTX_MALFORMED_ERROR = 'PowerPoint file is not a valid PPTX package.'
+const PPTX_ZIP_LIMIT_ERROR = 'PowerPoint file exceeds extraction safety limits.'
 
 const DOCUMENT_ASSET_TYPES = Object.freeze({
   CUSTOMER_DOCUMENT: 'CUSTOMER_DOCUMENT',
@@ -125,6 +139,7 @@ const DOCUMENT_ASSET_TYPES = Object.freeze({
 
 const DOCUMENT_TYPE_BY_MIME = Object.freeze({
   'application/pdf': 'PDF',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'PPTX',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'DOCX',
   'text/csv': 'TXT',
   'text/markdown': 'TXT',
@@ -136,6 +151,7 @@ const DOCUMENT_TYPE_BY_EXTENSION = Object.freeze({
   '.docx': 'DOCX',
   '.md': 'TXT',
   '.pdf': 'PDF',
+  '.pptx': 'PPTX',
   '.txt': 'TXT',
 })
 
@@ -378,6 +394,33 @@ const hasLikelyOcrSplitWordRun = (value) => {
   return false
 }
 
+const stripPresentationSegmentPrefix = (value) => String(value || '')
+  .replace(/^Slide\s+\d+(?:\s+speaker notes)?:\s*/i, '')
+  .trim()
+
+const isWeakPresentationEvidenceSegment = (value) => {
+  const text = normalizeDocumentEvidenceSegment(value)
+  const withoutSlidePrefix = stripPresentationSegmentPrefix(text)
+  if (!withoutSlidePrefix) return true
+
+  const readableWordCount = countReadableDocumentWords(withoutSlidePrefix)
+  const normalized = withoutSlidePrefix.toLowerCase()
+
+  if (/^(?:what|why|how|when|where|who|which)\b.*\?$/.test(normalized) && readableWordCount <= 9) {
+    return true
+  }
+
+  if (/!$/.test(withoutSlidePrefix) && readableWordCount <= 7) {
+    return true
+  }
+
+  if (/\bc\.$/i.test(withoutSlidePrefix)) {
+    return true
+  }
+
+  return false
+}
+
 const getDocumentEvidenceSegmentQuality = (value) => {
   const originalText = sanitizeFact(value)
   const text = normalizeDocumentEvidenceSegment(originalText)
@@ -541,6 +584,25 @@ const getDocumentType = ({ fileName, mimeType }) => {
   const normalizedMimeType = String(mimeType || '').trim().toLowerCase().split(';')[0]
   const extension = getDocumentExtension(fileName)
   return DOCUMENT_TYPE_BY_MIME[normalizedMimeType] || DOCUMENT_TYPE_BY_EXTENSION[extension] || ''
+}
+
+const getDocumentMaxFileBytes = (documentType) =>
+  documentType === 'PPTX'
+    ? DOCUMENT_ACQUISITION_LIMITS.maxPptxFileBytes
+    : DOCUMENT_ACQUISITION_LIMITS.maxFileBytes
+
+const getUnsupportedPowerPointMessage = (fileName = '') => {
+  const extension = getDocumentExtension(fileName)
+  if (extension === '.ppt') {
+    return 'Older PowerPoint files are not supported. Save the presentation as PPTX and extract again.'
+  }
+  if (extension === '.pptm') {
+    return 'Macro-enabled PowerPoint files are not supported. Save the presentation as a non-macro PPTX and extract again.'
+  }
+  if (extension === '.pps' || extension === '.ppsx') {
+    return 'PowerPoint show files are not supported. Save the presentation as PPTX and extract again.'
+  }
+  return ''
 }
 
 const decodeDocumentBuffer = (documentSource = {}) => {
@@ -868,9 +930,10 @@ const classifyWebsiteSegment = (segment) => {
   }
 }
 
-const extractDocumentSegments = (text, { prioritizeQuality = false } = {}) => {
+const extractDocumentSegments = (text, { documentType = '', prioritizeQuality = false } = {}) => {
   const sourceText = normalizeDocumentExtractionText(text)
   if (!sourceText) return []
+  const isPresentationText = String(documentType || '').trim().toUpperCase() === 'PPTX'
 
   const sentenceSegments = sourceText
     .split(/(?<=[.!?])\s+|[\n\r]+/)
@@ -897,6 +960,7 @@ const extractDocumentSegments = (text, { prioritizeQuality = false } = {}) => {
       quality: getDocumentEvidenceSegmentQuality(segment),
     }))
     .filter((segment) => segment.quality.reviewable)
+    .filter((segment) => !isPresentationText || !isWeakPresentationEvidenceSegment(segment.quality.text))
 
   if (prioritizeQuality) {
     candidates.sort((a, b) => b.quality.score - a.quality.score || a.index - b.index)
@@ -1299,10 +1363,178 @@ const readZipEntries = (buffer) => {
   return entries
 }
 
+const normalizeZipEntryName = (fileName = '') =>
+  String(fileName || '').replace(/\\/g, '/').replace(/^\/+/, '')
+
+const isAllowedPptxXmlEntry = (fileName = '') => {
+  const normalized = normalizeZipEntryName(fileName)
+  return normalized === '[Content_Types].xml'
+    || normalized === 'ppt/presentation.xml'
+    || /^ppt\/slides\/slide\d+\.xml$/i.test(normalized)
+    || /^ppt\/slides\/_rels\/slide\d+\.xml\.rels$/i.test(normalized)
+    || /^ppt\/notesSlides\/notesSlide\d+\.xml$/i.test(normalized)
+}
+
+const readBoundedZipEntryDescriptorsFromCentralDirectory = (buffer, {
+  allowEntry = () => true,
+  maxEntries = 1000,
+  maxCompressedEntryBytes = 2_000_000,
+  maxUncompressedEntryBytes = 2_000_000,
+} = {}) => {
+  const descriptors = []
+  let totalEntries = 0
+  let offset = 0
+
+  while (offset + 46 < buffer.length) {
+    const signature = buffer.readUInt32LE(offset)
+    if (signature !== 0x02014b50) {
+      offset += 1
+      continue
+    }
+
+    totalEntries += 1
+    if (totalEntries > maxEntries) {
+      throw new Error(PPTX_ZIP_LIMIT_ERROR)
+    }
+
+    const compressionMethod = buffer.readUInt16LE(offset + 10)
+    const compressedSize = buffer.readUInt32LE(offset + 20)
+    const uncompressedSize = buffer.readUInt32LE(offset + 24)
+    const fileNameLength = buffer.readUInt16LE(offset + 28)
+    const extraLength = buffer.readUInt16LE(offset + 30)
+    const commentLength = buffer.readUInt16LE(offset + 32)
+    const localHeaderOffset = buffer.readUInt32LE(offset + 42)
+    const fileNameStart = offset + 46
+    const fileNameEnd = fileNameStart + fileNameLength
+    const nextOffset = fileNameEnd + extraLength + commentLength
+
+    if (fileNameEnd > buffer.length || nextOffset > buffer.length) {
+      throw new Error(PPTX_MALFORMED_ERROR)
+    }
+
+    const fileName = normalizeZipEntryName(buffer.slice(fileNameStart, fileNameEnd).toString('utf8'))
+    if (!allowEntry(fileName)) {
+      offset = nextOffset
+      continue
+    }
+
+    if (
+      compressedSize === 0
+      || compressedSize > maxCompressedEntryBytes
+      || uncompressedSize > maxUncompressedEntryBytes
+      || ![0, 8].includes(compressionMethod)
+      || localHeaderOffset + 30 > buffer.length
+      || buffer.readUInt32LE(localHeaderOffset) !== 0x04034b50
+    ) {
+      throw new Error(PPTX_ZIP_LIMIT_ERROR)
+    }
+
+    const localFileNameLength = buffer.readUInt16LE(localHeaderOffset + 26)
+    const localExtraLength = buffer.readUInt16LE(localHeaderOffset + 28)
+    const dataStart = localHeaderOffset + 30 + localFileNameLength + localExtraLength
+    const dataEnd = dataStart + compressedSize
+    if (dataEnd > buffer.length) {
+      throw new Error(PPTX_MALFORMED_ERROR)
+    }
+
+    descriptors.push({
+      fileName,
+      compressedData: buffer.slice(dataStart, dataEnd),
+      compressionMethod,
+      uncompressedSize,
+    })
+    offset = nextOffset
+  }
+
+  return descriptors
+}
+
+const inflateZipEntryDataAsync = async ({ compressedData, compressionMethod, uncompressedSize }) => {
+  if (compressionMethod === 0) return compressedData
+  if (compressionMethod !== 8) throw new Error(PPTX_ZIP_LIMIT_ERROR)
+
+  const data = await inflateRaw(compressedData, {
+    maxOutputLength: Math.min(
+      Number(uncompressedSize) || DOCUMENT_ACQUISITION_LIMITS.maxPptxUncompressedEntryBytes,
+      DOCUMENT_ACQUISITION_LIMITS.maxPptxUncompressedEntryBytes,
+    ),
+  })
+  if (data.length > DOCUMENT_ACQUISITION_LIMITS.maxPptxUncompressedEntryBytes) {
+    throw new Error(PPTX_ZIP_LIMIT_ERROR)
+  }
+  return data
+}
+
+const readPptxXmlEntries = async (buffer) => {
+  const descriptors = readBoundedZipEntryDescriptorsFromCentralDirectory(buffer, {
+    allowEntry: isAllowedPptxXmlEntry,
+    maxEntries: DOCUMENT_ACQUISITION_LIMITS.maxPptxZipEntries,
+    maxCompressedEntryBytes: DOCUMENT_ACQUISITION_LIMITS.maxPptxCompressedEntryBytes,
+    maxUncompressedEntryBytes: DOCUMENT_ACQUISITION_LIMITS.maxPptxUncompressedEntryBytes,
+  })
+
+  if (descriptors.length === 0) {
+    throw new Error(PPTX_MALFORMED_ERROR)
+  }
+  if (descriptors.length > DOCUMENT_ACQUISITION_LIMITS.maxPptxXmlEntries) {
+    throw new Error(PPTX_ZIP_LIMIT_ERROR)
+  }
+
+  const entries = []
+  let totalUncompressedBytes = 0
+  for (const descriptor of descriptors) {
+    const data = await inflateZipEntryDataAsync(descriptor)
+    totalUncompressedBytes += data.length
+    if (totalUncompressedBytes > DOCUMENT_ACQUISITION_LIMITS.maxPptxUncompressedBytes) {
+      throw new Error(PPTX_ZIP_LIMIT_ERROR)
+    }
+    entries.push({ fileName: descriptor.fileName, data })
+  }
+
+  return entries
+}
+
 const stripXmlToText = (xml) => decodeHtmlEntities(String(xml || '')
   .replace(/<w:tab\s*\/>/gi, ' ')
   .replace(/<\/w:p>/gi, '\n')
   .replace(/<[^>]+>/g, ' '))
+
+const getXmlAttribute = (value, attributeName) => {
+  const match = String(value || '').match(new RegExp(`\\b${attributeName}\\s*=\\s*(["'])(.*?)\\1`, 'i'))
+  return match ? decodeHtmlEntities(match[2]) : ''
+}
+
+const getPresentationXmlTextLines = (xml) => {
+  const xmlText = String(xml || '')
+    .replace(/<a:br\s*\/>/gi, '\n')
+    .replace(/<\/a:p>/gi, '</a:p>\n')
+  const paragraphMatches = xmlText.match(/<a:p\b[\s\S]*?<\/a:p>/gi) || [xmlText]
+
+  return paragraphMatches
+    .map((paragraph) => {
+      const textRuns = [...paragraph.matchAll(/<a:t\b[^>]*>([\s\S]*?)<\/a:t>/gi)]
+        .map((match) => decodeHtmlEntities(match[1]).replace(/\s+/g, ' ').trim())
+        .filter(Boolean)
+      return sanitizeFact(textRuns.join(' '))
+    })
+    .filter(Boolean)
+}
+
+const getPresentationRelationshipTargets = ({ baseFileName, relationshipXml, targetType }) => {
+  const baseDirectory = path.posix.dirname(baseFileName)
+  return [...String(relationshipXml || '').matchAll(/<Relationship\b([^>]*?)\/?>/gi)]
+    .filter((match) => getXmlAttribute(match[1], 'Type').toLowerCase().endsWith(`/${targetType.toLowerCase()}`))
+    .map((match) => getXmlAttribute(match[1], 'Target'))
+    .filter(Boolean)
+    .map((target) => path.posix.normalize(path.posix.join(baseDirectory, target)).replace(/^\/+/, ''))
+}
+
+const countPresentationRelationshipTargets = ({ relationshipXml, targetType }) =>
+  getPresentationRelationshipTargets({
+    baseFileName: 'ppt/slides/slide.xml',
+    relationshipXml,
+    targetType,
+  }).length
 
 const extractDocxText = (buffer) => {
   const entries = readZipEntries(buffer)
@@ -1310,6 +1542,102 @@ const extractDocxText = (buffer) => {
   if (!documentEntry?.data?.length) return ''
   return normalizeDocumentExtractionText(stripXmlToText(documentEntry.data.toString('utf8')))
 }
+
+const getPptxSlideNumber = (fileName = '') => {
+  const match = String(fileName || '').match(/\/slide(\d+)\.xml$/i)
+  return match ? Number(match[1]) : 0
+}
+
+const extractPowerPointTextWithoutTimeout = async (buffer) => {
+  const entries = await readPptxXmlEntries(buffer)
+  const entryByName = new Map(entries.map((entry) => [entry.fileName, entry]))
+  if (!entryByName.has('[Content_Types].xml') || !entryByName.has('ppt/presentation.xml')) {
+    throw new Error(PPTX_MALFORMED_ERROR)
+  }
+  const slideEntries = entries
+    .filter((entry) => /^ppt\/slides\/slide\d+\.xml$/i.test(entry.fileName))
+    .sort((a, b) => getPptxSlideNumber(a.fileName) - getPptxSlideNumber(b.fileName))
+  const slideCount = slideEntries.length
+  const maxSlides = Math.min(slideCount, DOCUMENT_ACQUISITION_LIMITS.maxPptxSlides)
+  const processedSlideEntries = slideEntries.slice(0, maxSlides)
+  const extractedParts = []
+  let slidesWithImages = 0
+  let slidesWithCharts = 0
+  let slidesPotentiallyMissingText = 0
+  let speakerNotesIncluded = false
+
+  if (slideCount === 0) {
+    throw new Error(PPTX_MALFORMED_ERROR)
+  }
+
+  for (const slideEntry of processedSlideEntries) {
+    const slideNumber = getPptxSlideNumber(slideEntry.fileName)
+    const slideXml = slideEntry.data.toString('utf8')
+    const slideTextLines = getPresentationXmlTextLines(slideXml)
+    const relationshipFileName = slideEntry.fileName.replace('ppt/slides/', 'ppt/slides/_rels/') + '.rels'
+    const relationshipXml = entryByName.get(relationshipFileName)?.data?.toString('utf8') || ''
+    const imageCount = countPresentationRelationshipTargets({ relationshipXml, targetType: 'image' })
+    const chartCount = countPresentationRelationshipTargets({ relationshipXml, targetType: 'chart' })
+    const notesTargets = getPresentationRelationshipTargets({
+      baseFileName: slideEntry.fileName,
+      relationshipXml,
+      targetType: 'notesSlide',
+    })
+    const notesTextLines = notesTargets
+      .flatMap((target) => getPresentationXmlTextLines(entryByName.get(target)?.data?.toString('utf8') || ''))
+      .filter(Boolean)
+
+    if (imageCount > 0) slidesWithImages += 1
+    if (chartCount > 0) slidesWithCharts += 1
+    if (notesTextLines.length > 0) speakerNotesIncluded = true
+    if (slideTextLines.length === 0 && notesTextLines.length === 0 && (imageCount > 0 || chartCount > 0)) {
+      slidesPotentiallyMissingText += 1
+    }
+
+    extractedParts.push(...slideTextLines.map((line) => `Slide ${slideNumber}: ${line}`))
+    extractedParts.push(...notesTextLines.map((line) => `Slide ${slideNumber} speaker notes: ${line}`))
+  }
+
+  const text = getReadableDocumentExtractionText(extractedParts.join('\n'))
+  if (!text) {
+    throw new Error(PPTX_NO_READABLE_TEXT_ERROR)
+  }
+
+  return {
+    adapter: 'document-pptx-openxml-text-extraction-v1',
+    extractionMethod: 'PPTX_OPENXML_TEXT',
+    ingestionMode: 'PRESENTATION_NATIVE_TEXT',
+    slideCount,
+    slideLimitReached: slideCount > maxSlides,
+    slidesProcessed: maxSlides,
+    slidesPotentiallyMissingText,
+    slidesWithCharts,
+    slidesWithImages,
+    speakerNotesIncluded,
+    text,
+  }
+}
+
+const extractPowerPointText = async (buffer) => withTimeout({
+  promise: extractPowerPointTextWithoutTimeout(buffer),
+  timeoutMs: DOCUMENT_ACQUISITION_LIMITS.pptxTimeoutMs,
+  timeoutMessage: PPTX_EXTRACTION_TIMEOUT_ERROR,
+})
+
+const buildAdditionalExtractionMetadata = (extraction = {}) => ({
+  ...(Number.isFinite(Number(extraction.ocrPageCount)) ? { ocrPageCount: Number(extraction.ocrPageCount) } : {}),
+  ...(Number.isFinite(Number(extraction.ocrPagesProcessed)) ? { ocrPagesProcessed: Number(extraction.ocrPagesProcessed) } : {}),
+  ...(extraction.ocrPageLimitReached ? { ocrPageLimitReached: true } : {}),
+  ...(Number.isFinite(Number(extraction.slideCount)) ? { slideCount: Number(extraction.slideCount) } : {}),
+  ...(Number.isFinite(Number(extraction.slidesProcessed)) ? { slidesProcessed: Number(extraction.slidesProcessed) } : {}),
+  ...(extraction.slideLimitReached ? { slideLimitReached: true } : {}),
+  ...(Number.isFinite(Number(extraction.slidesWithImages)) ? { slidesWithImages: Number(extraction.slidesWithImages) } : {}),
+  ...(Number.isFinite(Number(extraction.slidesWithCharts)) ? { slidesWithCharts: Number(extraction.slidesWithCharts) } : {}),
+  ...(Number.isFinite(Number(extraction.slidesPotentiallyMissingText))
+    ? { slidesPotentiallyMissingText: Number(extraction.slidesPotentiallyMissingText) }
+    : {}),
+  ...(extraction.speakerNotesIncluded ? { speakerNotesIncluded: true } : {}),
+})
 
 const extractDocumentText = async ({ buffer, documentType }) => {
   if (documentType === 'TXT') {
@@ -1321,6 +1649,7 @@ const extractDocumentText = async ({ buffer, documentType }) => {
     }
   }
   if (documentType === 'PDF') return extractPdfText(buffer)
+  if (documentType === 'PPTX') return extractPowerPointText(buffer)
   if (documentType === 'DOCX') {
     return {
       adapter: 'document-docx-text-extraction-v1',
@@ -1582,20 +1911,27 @@ export const ingestUploadedDocumentDiscoveryEvidence = async ({
       throw new Error('Uploaded document fileName is required.')
     }
 
+    const unsupportedPowerPointMessage = getUnsupportedPowerPointMessage(fileName)
+    if (unsupportedPowerPointMessage) {
+      throw new Error(unsupportedPowerPointMessage)
+    }
+
     if (!documentType) {
-      throw new Error('Uploaded document must be PDF, DOCX, or TXT.')
+      throw new Error('Uploaded document must be PDF, PPTX, DOCX, or TXT.')
     }
 
     if (!buffer.length) {
       throw new Error(`Uploaded document ${fileName} has no readable content.`)
     }
 
-    if (reportedSizeBytes > DOCUMENT_ACQUISITION_LIMITS.maxFileBytes || buffer.length > DOCUMENT_ACQUISITION_LIMITS.maxFileBytes) {
+    const maxFileBytes = getDocumentMaxFileBytes(documentType)
+    if (reportedSizeBytes > maxFileBytes || buffer.length > maxFileBytes) {
       throw new Error(`Uploaded document ${fileName} exceeds the supported file size.`)
     }
 
     const extraction = await extractDocumentText({ buffer, documentType })
     const segments = extractDocumentSegments(extraction.text, {
+      documentType,
       prioritizeQuality: extraction.extractionMethod === 'PDF_OCR',
     })
 
@@ -1652,9 +1988,7 @@ export const ingestUploadedDocumentDiscoveryEvidence = async ({
       pendingEvidenceObjects: evidenceObjects.length,
       lineageRef: `lineage:${sourceId}`,
       adapter: extraction.adapter || `document-${documentType.toLowerCase()}-text-extraction-v1`,
-      ...(Number.isFinite(Number(extraction.ocrPageCount)) ? { ocrPageCount: Number(extraction.ocrPageCount) } : {}),
-      ...(Number.isFinite(Number(extraction.ocrPagesProcessed)) ? { ocrPagesProcessed: Number(extraction.ocrPagesProcessed) } : {}),
-      ...(extraction.ocrPageLimitReached ? { ocrPageLimitReached: true } : {}),
+      ...buildAdditionalExtractionMetadata(extraction),
     }
     const sourceRegistryEntry = {
       sourceId,
@@ -1683,9 +2017,7 @@ export const ingestUploadedDocumentDiscoveryEvidence = async ({
       extractionMethod: extraction.extractionMethod || 'TEXT_NATIVE',
       uploadedAt: capturedAt,
       adapter: extraction.adapter || `document-${documentType.toLowerCase()}-text-extraction-v1`,
-      ...(Number.isFinite(Number(extraction.ocrPageCount)) ? { ocrPageCount: Number(extraction.ocrPageCount) } : {}),
-      ...(Number.isFinite(Number(extraction.ocrPagesProcessed)) ? { ocrPagesProcessed: Number(extraction.ocrPagesProcessed) } : {}),
-      ...(extraction.ocrPageLimitReached ? { ocrPageLimitReached: true } : {}),
+      ...buildAdditionalExtractionMetadata(extraction),
     }
 
     result.sources.push(source)

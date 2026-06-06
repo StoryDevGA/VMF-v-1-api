@@ -1,4 +1,4 @@
-import { Router } from 'express'
+import express, { Router } from 'express'
 import authJwt from '../middleware/authJwt.js'
 import loadScopes from '../middleware/loadScopes.js'
 import {
@@ -19,6 +19,7 @@ import {
   mutateRuntimeState,
   rebuildRuntimeIntelligenceGraph,
   resetRuntimeDiscovery,
+  reviewAllRuntimeSectionEvidence,
   reviewRuntimeDiscoveryEvidence,
   reviewRuntimeSectionEvidence,
   updateRuntimeSectionEvidence,
@@ -32,6 +33,7 @@ import {
   validateExecuteRuntimeAction,
   validateListRuntimeInstances,
   validateMutateRuntimeState,
+  validateReviewAllRuntimeSectionEvidence,
   validateRebuildRuntimeIntelligenceGraph,
   validateReviewRuntimeDiscoveryEvidence,
   validateReviewRuntimeSectionEvidence,
@@ -47,8 +49,23 @@ import {
 } from '../validators/runtimeInstance.validator.js'
 
 const router = Router()
+const defaultRuntimeInstanceJsonParser = express.json({ limit: '1mb' })
+const documentIngestionJsonParser = express.json({ limit: '60mb' })
+
+const isDocumentIngestionMutation = (req) => {
+  if (!['POST', 'PATCH', 'PUT'].includes(req.method)) return false
+  const routePath = String(req.path || '')
+  return /^\/[^/]+\/section-evidence\/?$/.test(routePath)
+    || /^\/[^/]+\/discovery-inputs\/?$/.test(routePath)
+    || /^\/[^/]+\/actions\/[^/]+\/?$/.test(routePath)
+}
 
 router.use(authJwt, loadScopes)
+router.use((req, res, next) => (
+  isDocumentIngestionMutation(req)
+    ? documentIngestionJsonParser(req, res, next)
+    : defaultRuntimeInstanceJsonParser(req, res, next)
+))
 
 router.get('/', validateListRuntimeInstances, listRuntimeInstances)
 router.post('/', validateCreateRuntimeInstance, createRuntimeInstance)
@@ -93,6 +110,12 @@ router.patch(
   validateRuntimeInstanceId,
   validateClearRuntimeSectionEvidence,
   clearRuntimeSectionEvidence,
+)
+router.patch(
+  '/:runtimeInstanceId/section-evidence/review-all',
+  validateRuntimeInstanceId,
+  validateReviewAllRuntimeSectionEvidence,
+  reviewAllRuntimeSectionEvidence,
 )
 router.patch(
   '/:runtimeInstanceId/section-evidence/:evidenceObjectId/review',

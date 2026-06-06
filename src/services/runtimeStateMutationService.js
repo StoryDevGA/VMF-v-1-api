@@ -513,6 +513,21 @@ const buildSectionEvidenceStatus = (summary) => {
   return 'PENDING_REVIEW'
 }
 
+const buildDocumentExtractionMetadataProjection = (document = {}) => ({
+  ...(Number.isFinite(Number(document?.ocrPageCount)) ? { ocrPageCount: Number(document.ocrPageCount) } : {}),
+  ...(Number.isFinite(Number(document?.ocrPagesProcessed)) ? { ocrPagesProcessed: Number(document.ocrPagesProcessed) } : {}),
+  ...(document?.ocrPageLimitReached ? { ocrPageLimitReached: true } : {}),
+  ...(Number.isFinite(Number(document?.slideCount)) ? { slideCount: Number(document.slideCount) } : {}),
+  ...(Number.isFinite(Number(document?.slidesProcessed)) ? { slidesProcessed: Number(document.slidesProcessed) } : {}),
+  ...(document?.slideLimitReached ? { slideLimitReached: true } : {}),
+  ...(Number.isFinite(Number(document?.slidesWithImages)) ? { slidesWithImages: Number(document.slidesWithImages) } : {}),
+  ...(Number.isFinite(Number(document?.slidesWithCharts)) ? { slidesWithCharts: Number(document.slidesWithCharts) } : {}),
+  ...(Number.isFinite(Number(document?.slidesPotentiallyMissingText))
+    ? { slidesPotentiallyMissingText: Number(document.slidesPotentiallyMissingText) }
+    : {}),
+  ...(document?.speakerNotesIncluded ? { speakerNotesIncluded: true } : {}),
+})
+
 const buildSectionEvidenceProjection = ({
   additionalEvidence = {},
   evidenceObjects = [],
@@ -544,9 +559,7 @@ const buildSectionEvidenceProjection = ({
       ingestionMode: String(document?.ingestionMode || '').trim().toUpperCase(),
       extractionMethod: String(document?.extractionMethod || '').trim(),
       adapter: String(document?.adapter || '').trim(),
-      ...(Number.isFinite(Number(document?.ocrPageCount)) ? { ocrPageCount: Number(document.ocrPageCount) } : {}),
-      ...(Number.isFinite(Number(document?.ocrPagesProcessed)) ? { ocrPagesProcessed: Number(document.ocrPagesProcessed) } : {}),
-      ...(document?.ocrPageLimitReached ? { ocrPageLimitReached: true } : {}),
+      ...buildDocumentExtractionMetadataProjection(document),
       evidenceObjectsGenerated: Number.isFinite(Number(document?.evidenceObjectsGenerated))
         ? Number(document.evidenceObjectsGenerated)
         : 0,
@@ -654,9 +667,7 @@ const transformSectionDocumentAcquisition = ({
         ingestionMode: String(source?.ingestionMode || 'TEXT_NATIVE').trim().toUpperCase(),
         extractionMethod: String(source?.extractionMethod || '').trim(),
         adapter: String(source?.adapter || '').trim(),
-        ...(Number.isFinite(Number(source?.ocrPageCount)) ? { ocrPageCount: Number(source.ocrPageCount) } : {}),
-        ...(Number.isFinite(Number(source?.ocrPagesProcessed)) ? { ocrPagesProcessed: Number(source.ocrPagesProcessed) } : {}),
-        ...(source?.ocrPageLimitReached ? { ocrPageLimitReached: true } : {}),
+        ...buildDocumentExtractionMetadataProjection(source),
         evidenceObjectsGenerated: Number.isFinite(Number(source?.evidenceObjectsGenerated))
           ? Number(source.evidenceObjectsGenerated)
           : 0,
@@ -4192,6 +4203,183 @@ export const reviewRuntimeSectionEvidence = async ({
   })
 }
 
+export const reviewAllRuntimeSectionEvidence = async ({
+  actorUserId,
+  auditRequest,
+  scopes,
+  runtimeInstanceId,
+  payload,
+} = {}) => {
+  const expectedUpdatedAt = payload?.expectedUpdatedAt
+  const reviewStatus = normalizeSectionEvidenceReviewStatus(payload?.reviewStatus)
+  const runtimeInstance = await resolveRuntimeInstanceForMutation({
+    actorUserId,
+    runtimeInstanceId,
+    scopes,
+  })
+
+  assertRuntimeEditable(runtimeInstance)
+  assertExpectedUpdatedAt({ runtimeInstance, expectedUpdatedAt })
+
+  const frameworkPackage = await resolvePackageForAdvance(runtimeInstance?.packageId)
+  const target = resolveSectionEvidenceTarget({ frameworkPackage, payload })
+
+  await assertSectionEvidenceTargetProjectable({ frameworkPackage, target })
+  await assertRuntimeSectionPathWritable({
+    frameworkKey: runtimeInstance.frameworkKey,
+    runtimePath: target.runtimePath,
+  })
+
+  if (reviewStatus !== DISCOVERY_EVIDENCE_REVIEW_STATUSES.ACCEPTED) {
+    throw buildMutationError({
+      status: 422,
+      code: 'VALIDATION_FAILED',
+      message: 'Section evidence bulk review only supports accepting pending evidence.',
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_ACTION_NOT_AVAILABLE,
+      details: {
+        reviewStatus,
+      },
+    })
+  }
+
+  const previousFrameworkState = cloneValue(runtimeInstance.framework_state || {})
+  const previousUpdatedBy = runtimeInstance.updatedBy
+  const updatedAtBefore = runtimeInstance.updatedAt instanceof Date
+    ? runtimeInstance.updatedAt.toISOString()
+    : runtimeInstance.updatedAt
+  const previousRawSection = previousFrameworkState.sections?.[target.stateSectionKey]
+  const sectionObject = normalizeRuntimeSectionObject({
+    value: previousRawSection,
+    sectionKey: target.sectionKey,
+    runtimePath: target.runtimePath,
+  })
+  const previousSectionEvidence = buildSectionEvidenceProjection({
+    additionalEvidence: sectionObject.additionalEvidence,
+    evidenceObjects: sectionObject.evidenceObjects,
+  })
+  const previousEvidenceObjects = Array.isArray(sectionObject.evidenceObjects)
+    ? cloneValue(sectionObject.evidenceObjects)
+    : []
+  const previousGsilContext = buildSectionGsilContext({
+    evidenceObjects: previousEvidenceObjects,
+    reviewedAt: sectionObject.gsilContext?.updatedAt || '',
+  })
+  const reviewedAt = new Date().toISOString()
+  const acceptedEvidenceObjectIds = []
+  const evidenceObjects = previousEvidenceObjects.map((evidenceObject) => {
+    const currentReviewStatus = normalizeSectionEvidenceReviewStatus(evidenceObject?.reviewStatus)
+    if (currentReviewStatus !== DISCOVERY_EVIDENCE_REVIEW_STATUSES.PENDING) {
+      return evidenceObject
+    }
+
+    const evidenceObjectId = String(evidenceObject?.evidenceObjectId || '').trim()
+    if (evidenceObjectId) acceptedEvidenceObjectIds.push(evidenceObjectId)
+    return {
+      ...evidenceObject,
+      reviewStatus,
+      acceptedBy: toIdString(actorUserId),
+      acceptanceTimestamp: reviewedAt,
+      rejectedBy: '',
+      rejectionTimestamp: '',
+      lastReviewedAt: reviewedAt,
+      lastReviewedBy: toIdString(actorUserId),
+    }
+  })
+
+  if (acceptedEvidenceObjectIds.length === 0) {
+    throw buildMutationError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'No pending section evidence is available to accept.',
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_ACTION_NOT_AVAILABLE,
+      details: {
+        runtimePath: target.runtimePath,
+        sectionKey: target.sectionKey,
+      },
+    })
+  }
+
+  const documents = Array.isArray(sectionObject.additionalEvidence?.documents)
+    ? cloneValue(sectionObject.additionalEvidence.documents)
+    : []
+  const nextGsilContext = buildSectionGsilContext({
+    evidenceObjects,
+    reviewedAt,
+  })
+  const acceptedEvidenceChanged = previousGsilContext.evidenceHash !== nextGsilContext.evidenceHash
+  let nextSection = {
+    ...sectionObject,
+    additionalEvidence: buildSectionAdditionalEvidence({
+      actorUserId,
+      documents,
+      evidenceObjects,
+      updatedAt: reviewedAt,
+    }),
+    evidenceObjects,
+    gsilContext: nextGsilContext,
+  }
+
+  if (acceptedEvidenceChanged) {
+    nextSection = applyAcceptedSectionEvidenceInvalidation({
+      actorUserId,
+      invalidatedAt: reviewedAt,
+      nextSection,
+      nextSectionEvidenceHash: nextGsilContext.evidenceHash,
+      previousSectionEvidenceHash: previousGsilContext.evidenceHash,
+      sectionObject,
+    })
+  }
+
+  const sectionEvidence = buildSectionEvidenceProjection({
+    additionalEvidence: nextSection.additionalEvidence,
+    evidenceObjects: nextSection.evidenceObjects,
+  })
+  const nextFrameworkState = cloneValue(previousFrameworkState)
+  nextFrameworkState.sections = nextFrameworkState.sections || {}
+  nextFrameworkState.sections[target.stateSectionKey] = nextSection
+  const graphRebuild = await rebuildRuntimeIntelligenceGraphForMutation({
+    actorUserId,
+    buildTrigger: RUNTIME_INTELLIGENCE_GRAPH_BUILD_TRIGGERS.SECTION_EVIDENCE_REVIEWED,
+    frameworkPackage,
+    nextFrameworkState,
+    previousFrameworkState,
+    runtimeInstance,
+  })
+
+  const updatedRuntimeInstance = await persistMutationWithAudit({
+    actorUserId,
+    additionalDiff: {
+      ...graphRebuild.auditDiff,
+      reason: 'SECTION_EVIDENCE_REVIEW_ALL',
+      sectionKey: target.sectionKey,
+      stateSectionKey: target.stateSectionKey,
+      reviewStatus,
+      acceptedEvidenceObjectIds,
+      acceptedEvidenceObjectCount: acceptedEvidenceObjectIds.length,
+      acceptedEvidenceChanged,
+      previousSectionEvidenceHash: previousGsilContext.evidenceHash,
+      nextSectionEvidenceHash: nextGsilContext.evidenceHash,
+    },
+    auditRequest,
+    runtimeInstance,
+    nextFrameworkState: graphRebuild.nextFrameworkState,
+    previousFrameworkState,
+    previousUpdatedBy,
+    runtimePath: target.runtimePath,
+    previousValue: previousSectionEvidence,
+    nextValue: sectionEvidence,
+    expectedUpdatedAt,
+    updatedAtBefore,
+  })
+
+  return buildSectionEvidenceMutationResponse({
+    runtimeInstance: updatedRuntimeInstance,
+    target,
+    previousSectionEvidence,
+    sectionEvidence,
+  })
+}
+
 export const clearRuntimeSectionEvidence = async ({
   actorUserId,
   auditRequest,
@@ -4685,6 +4873,7 @@ const runtimeStateMutationService = {
   getRuntimeDiscoveryEvidence,
   mutateRuntimeState,
   rebuildRuntimeIntelligenceGraph,
+  reviewAllRuntimeSectionEvidence,
   reviewRuntimeSectionEvidence,
   resetRuntimeDiscovery,
   updateRuntimeSectionEvidence,

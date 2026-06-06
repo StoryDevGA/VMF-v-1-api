@@ -293,6 +293,21 @@ const buildSectionEvidenceSnippet = (value) => {
     : snippet
 }
 
+const buildDocumentExtractionMetadataProjection = (document = {}) => ({
+  ...(Number.isFinite(Number(document?.ocrPageCount)) ? { ocrPageCount: Number(document.ocrPageCount) } : {}),
+  ...(Number.isFinite(Number(document?.ocrPagesProcessed)) ? { ocrPagesProcessed: Number(document.ocrPagesProcessed) } : {}),
+  ...(document?.ocrPageLimitReached ? { ocrPageLimitReached: true } : {}),
+  ...(Number.isFinite(Number(document?.slideCount)) ? { slideCount: Number(document.slideCount) } : {}),
+  ...(Number.isFinite(Number(document?.slidesProcessed)) ? { slidesProcessed: Number(document.slidesProcessed) } : {}),
+  ...(document?.slideLimitReached ? { slideLimitReached: true } : {}),
+  ...(Number.isFinite(Number(document?.slidesWithImages)) ? { slidesWithImages: Number(document.slidesWithImages) } : {}),
+  ...(Number.isFinite(Number(document?.slidesWithCharts)) ? { slidesWithCharts: Number(document.slidesWithCharts) } : {}),
+  ...(Number.isFinite(Number(document?.slidesPotentiallyMissingText))
+    ? { slidesPotentiallyMissingText: Number(document.slidesPotentiallyMissingText) }
+    : {}),
+  ...(document?.speakerNotesIncluded ? { speakerNotesIncluded: true } : {}),
+})
+
 const buildSectionEvidenceProjection = (rawSectionValue) => {
   if (!isRuntimeSectionObject(rawSectionValue)) {
     return {
@@ -355,9 +370,7 @@ const buildSectionEvidenceProjection = (rawSectionValue) => {
       ingestionMode: String(document?.ingestionMode || '').trim().toUpperCase(),
       extractionMethod: String(document?.extractionMethod || '').trim(),
       adapter: String(document?.adapter || '').trim(),
-      ...(Number.isFinite(Number(document?.ocrPageCount)) ? { ocrPageCount: Number(document.ocrPageCount) } : {}),
-      ...(Number.isFinite(Number(document?.ocrPagesProcessed)) ? { ocrPagesProcessed: Number(document.ocrPagesProcessed) } : {}),
-      ...(document?.ocrPageLimitReached ? { ocrPageLimitReached: true } : {}),
+      ...buildDocumentExtractionMetadataProjection(document),
       evidenceObjectsGenerated: Number.isFinite(Number(document?.evidenceObjectsGenerated))
         ? Number(document.evidenceObjectsGenerated)
         : 0,

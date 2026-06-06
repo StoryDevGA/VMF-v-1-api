@@ -8,6 +8,62 @@ import { RUNTIME_INSTANCE_STATUSES, RUNTIME_TYPES } from '../models/RuntimeInsta
 import { createBodyValidator, createParamsValidator, createQueryValidator } from './shared.js'
 
 const objectIdRegex = /^[a-f\d]{24}$/i
+const DOCUMENT_MAX_FILE_BYTES = 2_500_000
+const PPTX_DOCUMENT_MAX_FILE_BYTES = 40_000_000
+const DOCUMENT_MAX_CONTENT_BASE64_CHARACTERS = 4_000_000
+const PPTX_DOCUMENT_MAX_CONTENT_BASE64_CHARACTERS = 54_000_000
+const PPTX_MIME_TYPE = 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+
+const getDocumentSourceExtension = (fileName = '') => {
+  const normalized = String(fileName || '').trim().toLowerCase()
+  const dotIndex = normalized.lastIndexOf('.')
+  return dotIndex >= 0 ? normalized.slice(dotIndex) : ''
+}
+
+const isPptxDocumentSource = (documentSource = {}) => {
+  const mimeType = String(documentSource?.mimeType || '').trim().toLowerCase().split(';')[0]
+  return mimeType === PPTX_MIME_TYPE || getDocumentSourceExtension(documentSource?.fileName) === '.pptx'
+}
+
+const getDocumentSourceMaxFileBytes = (documentSource = {}) =>
+  isPptxDocumentSource(documentSource) ? PPTX_DOCUMENT_MAX_FILE_BYTES : DOCUMENT_MAX_FILE_BYTES
+
+const getDocumentSourceMaxContentBase64Characters = (documentSource = {}) =>
+  isPptxDocumentSource(documentSource)
+    ? PPTX_DOCUMENT_MAX_CONTENT_BASE64_CHARACTERS
+    : DOCUMENT_MAX_CONTENT_BASE64_CHARACTERS
+
+const validateDocumentSourcePayload = (data, ctx) => {
+  if (!data.contentBase64 && !data.textContent) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['contentBase64'],
+      message: 'contentBase64 or textContent is required',
+    })
+  }
+
+  if (data.sizeBytes !== undefined) {
+    const maxFileBytes = getDocumentSourceMaxFileBytes(data)
+    if (data.sizeBytes > maxFileBytes) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['sizeBytes'],
+        message: `sizeBytes must be ${maxFileBytes} bytes or fewer`,
+      })
+    }
+  }
+
+  if (data.contentBase64 !== undefined) {
+    const maxContentBase64Characters = getDocumentSourceMaxContentBase64Characters(data)
+    if (data.contentBase64.length > maxContentBase64Characters) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['contentBase64'],
+        message: 'contentBase64 is too large',
+      })
+    }
+  }
+}
 
 const runtimeInstanceIdSchema = z.object({
   runtimeInstanceId: z
@@ -287,27 +343,17 @@ const updateDiscoveryInputsSchema = z.object({
       .number()
       .int()
       .min(1, 'sizeBytes must be at least 1')
-      .max(2500000, 'sizeBytes must be 2500000 bytes or fewer')
       .optional(),
     contentBase64: z
       .string()
       .trim()
-      .max(4000000, 'contentBase64 is too large')
       .optional(),
     textContent: z
       .string()
       .trim()
       .max(80000, 'textContent must be 80000 characters or fewer')
       .optional(),
-  }).strict().superRefine((data, ctx) => {
-    if (!data.contentBase64 && !data.textContent) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['contentBase64'],
-        message: 'contentBase64 or textContent is required',
-      })
-    }
-  })).max(5, 'documentSources must contain 5 documents or fewer').optional(),
+  }).strict().superRefine(validateDocumentSourcePayload)).max(5, 'documentSources must contain 5 documents or fewer').optional(),
   expectedUpdatedAt: expectedUpdatedAtSchema,
 }).strict()
 
@@ -333,27 +379,17 @@ const sectionEvidenceDocumentSourceSchema = z.object({
     .number()
     .int()
     .min(1, 'sizeBytes must be at least 1')
-    .max(2500000, 'sizeBytes must be 2500000 bytes or fewer')
     .optional(),
   contentBase64: z
     .string()
     .trim()
-    .max(4000000, 'contentBase64 is too large')
     .optional(),
   textContent: z
     .string()
     .trim()
     .max(80000, 'textContent must be 80000 characters or fewer')
     .optional(),
-}).strict().superRefine((data, ctx) => {
-  if (!data.contentBase64 && !data.textContent) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ['contentBase64'],
-      message: 'contentBase64 or textContent is required',
-    })
-  }
-})
+}).strict().superRefine(validateDocumentSourcePayload)
 
 const sectionEvidenceTargetSchema = {
   expectedUpdatedAt: expectedUpdatedAtSchema,
@@ -420,6 +456,17 @@ const reviewRuntimeSectionEvidenceSchema = z.object({
       message: 'reviewStatus must be PENDING, ACCEPTED, or REJECTED',
     }),
 }).strict().superRefine(refineSectionEvidenceTarget('Section evidence review'))
+
+const reviewAllRuntimeSectionEvidenceSchema = z.object({
+  ...sectionEvidenceTargetSchema,
+  reviewStatus: z
+    .string({ required_error: 'reviewStatus is required' })
+    .trim()
+    .transform((value) => value.toUpperCase())
+    .refine((value) => value === 'ACCEPTED', {
+      message: 'reviewStatus must be ACCEPTED',
+    }),
+}).strict().superRefine(refineSectionEvidenceTarget('Section evidence bulk review'))
 
 const clearRuntimeSectionEvidenceSchema = z.object({
   ...sectionEvidenceTargetSchema,
@@ -519,27 +566,17 @@ const executeRuntimeActionSchema = z.object({
       .number()
       .int()
       .min(1, 'sizeBytes must be at least 1')
-      .max(2500000, 'sizeBytes must be 2500000 bytes or fewer')
       .optional(),
     contentBase64: z
       .string()
       .trim()
-      .max(4000000, 'contentBase64 is too large')
       .optional(),
     textContent: z
       .string()
       .trim()
       .max(80000, 'textContent must be 80000 characters or fewer')
       .optional(),
-  }).strict().superRefine((data, ctx) => {
-    if (!data.contentBase64 && !data.textContent) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['contentBase64'],
-        message: 'contentBase64 or textContent is required',
-      })
-    }
-  })).max(5, 'documentSources must contain 5 documents or fewer').optional(),
+  }).strict().superRefine(validateDocumentSourcePayload)).max(5, 'documentSources must contain 5 documents or fewer').optional(),
   runtimePath: z
     .string()
     .trim()
@@ -756,6 +793,11 @@ export const validateUpdateRuntimeSectionEvidence = createBodyValidator(updateRu
 })
 
 export const validateReviewRuntimeSectionEvidence = createBodyValidator(reviewRuntimeSectionEvidenceSchema, {
+  message: 'Request validation failed.',
+  rootIssueKey: '_root',
+})
+
+export const validateReviewAllRuntimeSectionEvidence = createBodyValidator(reviewAllRuntimeSectionEvidenceSchema, {
   message: 'Request validation failed.',
   rootIssueKey: '_root',
 })
