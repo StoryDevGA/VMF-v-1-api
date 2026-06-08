@@ -8,7 +8,7 @@ import {
 import { getRuntimeInstance } from './runtimeInstanceService.js'
 
 export const RUNTIME_INTELLIGENCE_GRAPH_ARTIFACT_TYPE = 'runtime_intelligence_graph'
-export const RUNTIME_INTELLIGENCE_GRAPH_VERSION = '2.1'
+export const RUNTIME_INTELLIGENCE_GRAPH_VERSION = '2.2'
 
 export const RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES = Object.freeze({
   SOURCE: 'SOURCE',
@@ -36,6 +36,278 @@ export const RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES = Object.freeze({
   INTELLIGENCE_CONTRADICTS_INTELLIGENCE: 'INTELLIGENCE_CONTRADICTS_INTELLIGENCE',
   EVIDENCE_VALIDATES_INTELLIGENCE: 'EVIDENCE_VALIDATES_INTELLIGENCE',
   VALIDATION_FLAGS_NODE: 'VALIDATION_FLAGS_NODE',
+})
+
+export const RUNTIME_INTELLIGENCE_GRAPH_QUERY_TYPES = Object.freeze({
+  SUPPORT: 'support',
+  CONTRADICTIONS: 'contradictions',
+  COVERAGE: 'coverage',
+  DEPENDENCIES: 'dependencies',
+  READINESS: 'readiness',
+  DECISIONS: 'decisions',
+})
+
+export const RUNTIME_INTELLIGENCE_GRAPH_ENTITY_REGISTRY = Object.freeze({
+  [RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.SOURCE]: Object.freeze({
+    key: RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.SOURCE,
+    displayName: 'Source',
+    description: 'Source registry entry or section source metadata that produced governed evidence.',
+    customerVisible: true,
+    sensitivity: 'SOURCE_METADATA',
+    allowedMetadataFields: ['validationStatus', 'reasoningStatus', 'lineageRefs', 'governance'],
+  }),
+  [RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.EVIDENCE]: Object.freeze({
+    key: RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.EVIDENCE,
+    displayName: 'Evidence',
+    description: 'Governed reviewable evidence object derived from a source.',
+    customerVisible: true,
+    sensitivity: 'BOUNDED_EVIDENCE_METADATA',
+    allowedMetadataFields: [
+      'confidence',
+      'confidenceScore',
+      'confidenceFactors',
+      'confidenceWarnings',
+      'confidenceReason',
+      'validationStatus',
+      'reasoningStatus',
+      'truthDomain',
+      'truthCoverage',
+      'materiality',
+      'materialityScore',
+      'materialityReason',
+      'decisionImpact',
+      'decisionImpactScore',
+      'decisionImpactReason',
+      'readinessContribution',
+      'readinessWeight',
+      'readinessDomain',
+      'contradictionRefs',
+      'lineageRefs',
+      'governance',
+    ],
+  }),
+  [RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.INTELLIGENCE]: Object.freeze({
+    key: RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.INTELLIGENCE,
+    displayName: 'Intelligence',
+    description: 'Intermediate intelligence signal derived from accepted or reviewable evidence.',
+    customerVisible: true,
+    sensitivity: 'INTELLIGENCE_METADATA',
+    allowedMetadataFields: [
+      'confidence',
+      'confidenceScore',
+      'confidenceFactors',
+      'confidenceWarnings',
+      'confidenceReason',
+      'validationStatus',
+      'reasoningStatus',
+      'truthDomain',
+      'truthCoverage',
+      'materiality',
+      'materialityScore',
+      'materialityReason',
+      'decisionImpact',
+      'decisionImpactScore',
+      'decisionImpactReason',
+      'readinessContribution',
+      'readinessWeight',
+      'readinessDomain',
+      'contradictionRefs',
+      'lineageRefs',
+      'governance',
+    ],
+  }),
+  [RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.SECTION_TRUTH]: Object.freeze({
+    key: RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.SECTION_TRUTH,
+    displayName: 'Section Truth',
+    description: 'Accepted section truth persisted in runtime section state.',
+    customerVisible: true,
+    sensitivity: 'TRUTH_METADATA',
+    allowedMetadataFields: [
+      'confidence',
+      'confidenceScore',
+      'confidenceFactors',
+      'confidenceWarnings',
+      'confidenceReason',
+      'validationStatus',
+      'reasoningStatus',
+      'truthDomain',
+      'truthCoverage',
+      'materiality',
+      'materialityScore',
+      'materialityReason',
+      'decisionImpact',
+      'decisionImpactScore',
+      'decisionImpactReason',
+      'readinessContribution',
+      'readinessWeight',
+      'readinessDomain',
+      'lineageRefs',
+      'governance',
+    ],
+  }),
+  [RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.PUBLISHED_TRUTH]: Object.freeze({
+    key: RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.PUBLISHED_TRUTH,
+    displayName: 'Published Truth',
+    description: 'Published runtime truth snapshot metadata.',
+    customerVisible: true,
+    sensitivity: 'TRUTH_METADATA',
+    allowedMetadataFields: ['validationStatus', 'reasoningStatus', 'materiality', 'decisionImpact', 'lineageRefs', 'governance'],
+  }),
+  [RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.CANONICAL_TRUTH]: Object.freeze({
+    key: RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.CANONICAL_TRUTH,
+    displayName: 'Canonical Truth',
+    description: 'Locked canonical truth snapshot metadata.',
+    customerVisible: true,
+    sensitivity: 'TRUTH_METADATA',
+    allowedMetadataFields: ['validationStatus', 'reasoningStatus', 'materiality', 'decisionImpact', 'lineageRefs', 'governance'],
+  }),
+  [RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.OUTPUT_REFERENCE]: Object.freeze({
+    key: RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.OUTPUT_REFERENCE,
+    displayName: 'Output Reference',
+    description: 'Future output reference capability without full output lineage.',
+    customerVisible: true,
+    sensitivity: 'OUTPUT_REFERENCE_METADATA',
+    allowedMetadataFields: ['validationStatus', 'reasoningStatus', 'lineageRefs', 'governance'],
+  }),
+  [RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.REASONING_CONSUMER]: Object.freeze({
+    key: RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.REASONING_CONSUMER,
+    displayName: 'Reasoning Consumer',
+    description: 'Framework, section, package, or future consumer of graph intelligence.',
+    customerVisible: true,
+    sensitivity: 'CONSUMER_METADATA',
+    allowedMetadataFields: ['validationStatus', 'reasoningStatus', 'lineageRefs', 'governance'],
+  }),
+  [RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.SIGNAL]: Object.freeze({
+    key: RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.SIGNAL,
+    displayName: 'Signal',
+    description: 'Deterministic graph signal for coverage, dependencies, or future readiness consumers.',
+    customerVisible: true,
+    sensitivity: 'SIGNAL_METADATA',
+    allowedMetadataFields: [
+      'validationStatus',
+      'reasoningStatus',
+      'truthCoverage',
+      'materiality',
+      'decisionImpact',
+      'readinessContribution',
+      'readinessWeight',
+      'readinessDomain',
+      'lineageRefs',
+      'governance',
+    ],
+  }),
+})
+
+export const RUNTIME_INTELLIGENCE_GRAPH_RELATIONSHIP_REGISTRY = Object.freeze({
+  [RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES.SOURCE_PRODUCES_EVIDENCE]: Object.freeze({
+    key: RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES.SOURCE_PRODUCES_EVIDENCE,
+    displayName: 'Source Produces Evidence',
+    fromNodeTypes: [RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.SOURCE],
+    toNodeTypes: [RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.EVIDENCE],
+    contributesTo: ['coverage', 'lineage', 'confidence'],
+    customerVisible: true,
+  }),
+  [RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES.EVIDENCE_DERIVES_INTELLIGENCE]: Object.freeze({
+    key: RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES.EVIDENCE_DERIVES_INTELLIGENCE,
+    displayName: 'Evidence Derives Intelligence',
+    fromNodeTypes: [RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.EVIDENCE],
+    toNodeTypes: [RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.INTELLIGENCE],
+    contributesTo: ['support', 'confidence', 'readiness'],
+    customerVisible: true,
+  }),
+  [RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES.INTELLIGENCE_SUPPORTS_SECTION_TRUTH]: Object.freeze({
+    key: RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES.INTELLIGENCE_SUPPORTS_SECTION_TRUTH,
+    displayName: 'Intelligence Supports Section Truth',
+    fromNodeTypes: [RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.INTELLIGENCE],
+    toNodeTypes: [RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.SECTION_TRUTH],
+    contributesTo: ['support', 'readiness', 'lineage'],
+    customerVisible: true,
+  }),
+  [RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES.SECTION_TRUTH_PUBLISHED_AS]: Object.freeze({
+    key: RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES.SECTION_TRUTH_PUBLISHED_AS,
+    displayName: 'Section Truth Published As',
+    fromNodeTypes: [RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.SECTION_TRUTH],
+    toNodeTypes: [RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.PUBLISHED_TRUTH],
+    contributesTo: ['lineage', 'readiness'],
+    customerVisible: true,
+  }),
+  [RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES.PUBLISHED_TRUTH_LOCKED_AS_CANONICAL]: Object.freeze({
+    key: RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES.PUBLISHED_TRUTH_LOCKED_AS_CANONICAL,
+    displayName: 'Published Truth Locked As Canonical',
+    fromNodeTypes: [RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.PUBLISHED_TRUTH],
+    toNodeTypes: [RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.CANONICAL_TRUTH],
+    contributesTo: ['lineage', 'readiness'],
+    customerVisible: true,
+  }),
+  [RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES.CANONICAL_TRUTH_REFERENCED_BY_OUTPUT]: Object.freeze({
+    key: RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES.CANONICAL_TRUTH_REFERENCED_BY_OUTPUT,
+    displayName: 'Canonical Truth Referenced By Output',
+    fromNodeTypes: [RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.CANONICAL_TRUTH],
+    toNodeTypes: [RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.OUTPUT_REFERENCE],
+    contributesTo: ['lineage'],
+    customerVisible: true,
+  }),
+  [RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES.INTELLIGENCE_SUPPORTS_CONSUMER]: Object.freeze({
+    key: RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES.INTELLIGENCE_SUPPORTS_CONSUMER,
+    displayName: 'Intelligence Supports Consumer',
+    fromNodeTypes: [RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.INTELLIGENCE],
+    toNodeTypes: [RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.REASONING_CONSUMER],
+    contributesTo: ['support', 'readiness'],
+    customerVisible: true,
+  }),
+  [RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES.SECTION_TRUTH_DEPENDS_ON_SECTION_TRUTH]: Object.freeze({
+    key: RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES.SECTION_TRUTH_DEPENDS_ON_SECTION_TRUTH,
+    displayName: 'Section Truth Depends On Section Truth',
+    fromNodeTypes: [RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.SECTION_TRUTH],
+    toNodeTypes: [RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.SECTION_TRUTH],
+    contributesTo: ['dependencies', 'readiness'],
+    customerVisible: true,
+  }),
+  [RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES.NODE_HAS_SIGNAL]: Object.freeze({
+    key: RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES.NODE_HAS_SIGNAL,
+    displayName: 'Node Has Signal',
+    fromNodeTypes: [
+      RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.REASONING_CONSUMER,
+      RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.EVIDENCE,
+      RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.INTELLIGENCE,
+      RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.SECTION_TRUTH,
+    ],
+    toNodeTypes: [RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.SIGNAL],
+    contributesTo: ['coverage', 'readiness'],
+    customerVisible: true,
+  }),
+  [RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES.EVIDENCE_CONTRADICTS_EVIDENCE]: Object.freeze({
+    key: RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES.EVIDENCE_CONTRADICTS_EVIDENCE,
+    displayName: 'Evidence Contradicts Evidence',
+    fromNodeTypes: [RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.EVIDENCE],
+    toNodeTypes: [RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.EVIDENCE],
+    contributesTo: ['contradictions', 'confidence'],
+    customerVisible: true,
+  }),
+  [RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES.INTELLIGENCE_CONTRADICTS_INTELLIGENCE]: Object.freeze({
+    key: RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES.INTELLIGENCE_CONTRADICTS_INTELLIGENCE,
+    displayName: 'Intelligence Contradicts Intelligence',
+    fromNodeTypes: [RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.INTELLIGENCE],
+    toNodeTypes: [RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.INTELLIGENCE],
+    contributesTo: ['contradictions', 'confidence'],
+    customerVisible: true,
+  }),
+  [RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES.EVIDENCE_VALIDATES_INTELLIGENCE]: Object.freeze({
+    key: RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES.EVIDENCE_VALIDATES_INTELLIGENCE,
+    displayName: 'Evidence Validates Intelligence',
+    fromNodeTypes: [RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.EVIDENCE],
+    toNodeTypes: [RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.INTELLIGENCE],
+    contributesTo: ['validation', 'confidence'],
+    customerVisible: true,
+  }),
+  [RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES.VALIDATION_FLAGS_NODE]: Object.freeze({
+    key: RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES.VALIDATION_FLAGS_NODE,
+    displayName: 'Validation Flags Node',
+    fromNodeTypes: [RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.SIGNAL],
+    toNodeTypes: Object.values(RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES),
+    contributesTo: ['validation', 'readiness'],
+    customerVisible: true,
+  }),
 })
 
 export const RUNTIME_INTELLIGENCE_GRAPH_BUILD_TRIGGERS = Object.freeze({
@@ -265,14 +537,259 @@ const normalizeMateriality = (value) => {
   return ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'].includes(normalized) ? normalized : 'UNKNOWN'
 }
 
+const MATERIALITY_SCORES = Object.freeze({
+  UNKNOWN: null,
+  LOW: 0.25,
+  MEDIUM: 0.5,
+  HIGH: 0.75,
+  CRITICAL: 1,
+})
+
+const DECISION_IMPACTS = Object.freeze({
+  UNKNOWN: 'UNKNOWN',
+  INFORMATIONAL: 'INFORMATIONAL',
+  OPERATIONAL: 'OPERATIONAL',
+  TACTICAL: 'TACTICAL',
+  STRATEGIC: 'STRATEGIC',
+  CRITICAL: 'CRITICAL',
+})
+
+const DECISION_IMPACT_SCORES = Object.freeze({
+  UNKNOWN: null,
+  INFORMATIONAL: 0.2,
+  OPERATIONAL: 0.4,
+  TACTICAL: 0.6,
+  STRATEGIC: 0.8,
+  CRITICAL: 1,
+})
+
+const READINESS_CONTRIBUTIONS = Object.freeze({
+  NONE: 'NONE',
+  BLOCKER: 'BLOCKER',
+  SUPPORTING: 'SUPPORTING',
+  STRONG: 'STRONG',
+})
+
+const normalizeDecisionImpact = (value) => {
+  const normalized = normalizeToken(value)
+  return Object.values(DECISION_IMPACTS).includes(normalized) ? normalized : DECISION_IMPACTS.UNKNOWN
+}
+
+const normalizeNumberOrNull = (value) => {
+  const number = Number(value)
+  return Number.isFinite(number) ? number : null
+}
+
+const normalizeScoreOrFallback = (value, fallback = null) => {
+  const score = normalizeNumberOrNull(value)
+  if (score !== null && score >= 0 && score <= 1) return score
+  return fallback
+}
+
+const READINESS_WEIGHTS = Object.freeze({
+  [READINESS_CONTRIBUTIONS.NONE]: 0,
+  [READINESS_CONTRIBUTIONS.BLOCKER]: 0,
+  [READINESS_CONTRIBUTIONS.SUPPORTING]: 0.5,
+  [READINESS_CONTRIBUTIONS.STRONG]: 0.75,
+})
+
+const normalizeReadinessContribution = (value) => {
+  const normalized = normalizeToken(value)
+  return Object.values(READINESS_CONTRIBUTIONS).includes(normalized)
+    ? normalized
+    : READINESS_CONTRIBUTIONS.NONE
+}
+
+const buildGovernanceMetadata = ({ auditScope = 'RUNTIME_INTELLIGENCE_GRAPH', classification = 'INTERNAL', owner = 'SYSTEM', retentionPolicy = 'RUNTIME_LIFECYCLE', sensitivity = 'METADATA' } = {}) => ({
+  classification,
+  sensitivity,
+  retentionPolicy,
+  auditScope,
+  owner,
+})
+
+const deriveMateriality = ({
+  domain = '',
+  explicitMateriality,
+  lowQuality = false,
+  reviewStatus = '',
+  validationStatus = VALIDATION_STATUSES.UNKNOWN,
+} = {}) => {
+  const explicit = normalizeMateriality(explicitMateriality)
+  if (explicit !== 'UNKNOWN') {
+    return {
+      materiality: explicit,
+      materialityScore: MATERIALITY_SCORES[explicit],
+      materialityReason: 'Explicit persisted materiality metadata.',
+    }
+  }
+
+  if (
+    reviewStatus === DISCOVERY_EVIDENCE_REVIEW_STATUSES.REJECTED
+    || validationStatus === VALIDATION_STATUSES.REJECTED
+    || lowQuality
+  ) {
+    return {
+      materiality: 'LOW',
+      materialityScore: MATERIALITY_SCORES.LOW,
+      materialityReason: lowQuality
+        ? 'Low quality evidence cannot carry high materiality.'
+        : 'Rejected or invalid evidence cannot carry high materiality.',
+    }
+  }
+
+  if (validationStatus === VALIDATION_STATUSES.VALIDATED) {
+    return {
+      materiality: 'HIGH',
+      materialityScore: MATERIALITY_SCORES.HIGH,
+      materialityReason: 'Validated truth node has deterministic high materiality.',
+    }
+  }
+
+  if (reviewStatus === DISCOVERY_EVIDENCE_REVIEW_STATUSES.ACCEPTED && ['Economics', 'Consequences', 'Differentiation'].includes(domain)) {
+    return {
+      materiality: 'HIGH',
+      materialityScore: MATERIALITY_SCORES.HIGH,
+      materialityReason: 'Accepted evidence in a high-impact coverage domain.',
+    }
+  }
+
+  if (reviewStatus === DISCOVERY_EVIDENCE_REVIEW_STATUSES.ACCEPTED || validationStatus === VALIDATION_STATUSES.PARTIALLY_VALIDATED) {
+    return {
+      materiality: 'MEDIUM',
+      materialityScore: MATERIALITY_SCORES.MEDIUM,
+      materialityReason: 'Accepted or partially validated persisted graph evidence.',
+    }
+  }
+
+  return {
+    materiality: 'UNKNOWN',
+    materialityScore: null,
+    materialityReason: 'No persisted materiality signal is available.',
+  }
+}
+
+const deriveDecisionImpact = ({
+  domain = '',
+  explicitDecisionImpact,
+  materiality = 'UNKNOWN',
+  validationStatus = VALIDATION_STATUSES.UNKNOWN,
+} = {}) => {
+  const explicit = normalizeDecisionImpact(explicitDecisionImpact)
+  if (explicit !== DECISION_IMPACTS.UNKNOWN) {
+    return {
+      decisionImpact: explicit,
+      decisionImpactScore: DECISION_IMPACT_SCORES[explicit],
+      decisionImpactReason: 'Explicit persisted decision-impact metadata.',
+    }
+  }
+
+  if (validationStatus === VALIDATION_STATUSES.REJECTED) {
+    return {
+      decisionImpact: DECISION_IMPACTS.INFORMATIONAL,
+      decisionImpactScore: DECISION_IMPACT_SCORES.INFORMATIONAL,
+      decisionImpactReason: 'Rejected evidence is retained only as informational graph context.',
+    }
+  }
+
+  if (validationStatus === VALIDATION_STATUSES.VALIDATED && ['HIGH', 'CRITICAL'].includes(materiality)) {
+    return {
+      decisionImpact: DECISION_IMPACTS.STRATEGIC,
+      decisionImpactScore: DECISION_IMPACT_SCORES.STRATEGIC,
+      decisionImpactReason: 'Validated high-materiality truth can affect strategic decisions.',
+    }
+  }
+
+  if (materiality === 'HIGH' && ['Economics', 'Consequences'].includes(domain)) {
+    return {
+      decisionImpact: DECISION_IMPACTS.TACTICAL,
+      decisionImpactScore: DECISION_IMPACT_SCORES.TACTICAL,
+      decisionImpactReason: 'High-materiality evidence in economics or consequence domains affects tactical decisions.',
+    }
+  }
+
+  if (['MEDIUM', 'HIGH'].includes(materiality)) {
+    return {
+      decisionImpact: DECISION_IMPACTS.OPERATIONAL,
+      decisionImpactScore: DECISION_IMPACT_SCORES.OPERATIONAL,
+      decisionImpactReason: 'Accepted graph evidence can affect operational decisions.',
+    }
+  }
+
+  if (materiality === 'LOW') {
+    return {
+      decisionImpact: DECISION_IMPACTS.INFORMATIONAL,
+      decisionImpactScore: DECISION_IMPACT_SCORES.INFORMATIONAL,
+      decisionImpactReason: 'Low-materiality graph evidence is informational.',
+    }
+  }
+
+  return {
+    decisionImpact: DECISION_IMPACTS.UNKNOWN,
+    decisionImpactScore: null,
+    decisionImpactReason: 'No persisted decision-impact signal is available.',
+  }
+}
+
+const deriveReadinessContribution = ({
+  domain = '',
+  materiality = 'UNKNOWN',
+  reasoningStatus = REASONING_STATUSES.NOT_APPLICABLE,
+  validationStatus = VALIDATION_STATUSES.UNKNOWN,
+} = {}) => {
+  if ([VALIDATION_STATUSES.REJECTED, VALIDATION_STATUSES.CONTRADICTED].includes(validationStatus)) {
+    return {
+      readinessContribution: READINESS_CONTRIBUTIONS.BLOCKER,
+      readinessWeight: 0,
+      readinessDomain: domain || 'unknown',
+    }
+  }
+
+  if (reasoningStatus === REASONING_STATUSES.READY_FOR_REASONING) {
+    return {
+      readinessContribution: ['HIGH', 'CRITICAL'].includes(materiality)
+        ? READINESS_CONTRIBUTIONS.STRONG
+        : READINESS_CONTRIBUTIONS.SUPPORTING,
+      readinessWeight: ['HIGH', 'CRITICAL'].includes(materiality) ? 0.75 : 0.5,
+      readinessDomain: domain || 'unknown',
+    }
+  }
+
+  if ([REASONING_STATUSES.NEEDS_EVIDENCE, REASONING_STATUSES.CONFIDENCE_INSUFFICIENT, REASONING_STATUSES.VALIDATION_REQUIRED].includes(reasoningStatus)) {
+    return {
+      readinessContribution: READINESS_CONTRIBUTIONS.BLOCKER,
+      readinessWeight: 0,
+      readinessDomain: domain || 'unknown',
+    }
+  }
+
+  return {
+    readinessContribution: READINESS_CONTRIBUTIONS.NONE,
+    readinessWeight: 0,
+    readinessDomain: domain || 'unknown',
+  }
+}
+
 const extractConfidence = (evidenceObject = {}) => {
   const confidence = isPlainObject(evidenceObject.confidence) ? evidenceObject.confidence : {}
   const score = Number(confidence.score ?? evidenceObject.confidenceScore)
+  const basis = Array.isArray(confidence.basis)
+    ? confidence.basis
+    : Array.isArray(evidenceObject.confidenceFactors)
+      ? evidenceObject.confidenceFactors
+      : []
+  const warnings = Array.isArray(confidence.warnings)
+    ? confidence.warnings
+    : Array.isArray(evidenceObject.confidenceWarnings)
+      ? evidenceObject.confidenceWarnings
+      : []
   return {
     confidence: Number.isFinite(score) ? score : null,
-    confidenceBasis: Array.isArray(confidence.basis)
-      ? confidence.basis.map((basis) => String(basis || '').trim()).filter(Boolean)
-      : [],
+    confidenceScore: Number.isFinite(score) ? score : null,
+    confidenceBasis: basis.map((item) => String(item || '').trim()).filter(Boolean),
+    confidenceFactors: basis.map((item) => String(item || '').trim()).filter(Boolean),
+    confidenceWarnings: warnings.map((item) => String(item || '').trim()).filter(Boolean),
+    confidenceReason: String(confidence.reason || evidenceObject.confidenceReason || '').trim(),
   }
 }
 
@@ -293,27 +810,60 @@ const getExplicitLowQuality = (evidenceObject = {}) => {
 const createDefaultMetadata = ({
   confidence = null,
   confidenceBasis = [],
+  confidenceFactors = [],
+  confidenceReason = '',
+  confidenceScore = null,
+  confidenceWarnings = [],
   contradictionRefs = [],
+  decisionImpact = DECISION_IMPACTS.UNKNOWN,
+  decisionImpactReason = '',
+  decisionImpactScore = null,
+  governance = {},
   lineageRefs = [],
   materiality = 'UNKNOWN',
+  materialityReason = '',
+  materialityScore = null,
+  readinessContribution = READINESS_CONTRIBUTIONS.NONE,
+  readinessDomain = 'unknown',
+  readinessWeight = 0,
   reasoningStatus = REASONING_STATUSES.NOT_APPLICABLE,
   truthCoverage = [],
   truthDomain = 'unknown',
   validationStatus = VALIDATION_STATUSES.UNKNOWN,
-} = {}) => ({
-  confidence,
-  confidenceBasis,
-  validationStatus,
-  reasoningStatus,
-  truthDomain,
-  truthCoverage,
-  materiality,
-  contradictionRefs,
-  lineageRefs,
-})
+} = {}) => {
+  const normalizedMateriality = normalizeMateriality(materiality)
+  const normalizedDecisionImpact = normalizeDecisionImpact(decisionImpact)
+  const normalizedReadinessContribution = normalizeReadinessContribution(readinessContribution)
+  return {
+    confidence,
+    confidenceScore: normalizeNumberOrNull(confidenceScore ?? confidence),
+    confidenceBasis,
+    confidenceFactors: confidenceFactors.length > 0 ? confidenceFactors : confidenceBasis,
+    confidenceWarnings,
+    confidenceReason,
+    validationStatus,
+    reasoningStatus,
+    truthDomain,
+    truthCoverage,
+    materiality: normalizedMateriality,
+    materialityScore: normalizeScoreOrFallback(materialityScore, MATERIALITY_SCORES[normalizedMateriality]),
+    materialityReason,
+    decisionImpact: normalizedDecisionImpact,
+    decisionImpactScore: normalizeScoreOrFallback(decisionImpactScore, DECISION_IMPACT_SCORES[normalizedDecisionImpact]),
+    decisionImpactReason,
+    readinessContribution: normalizedReadinessContribution,
+    readinessWeight: normalizeScoreOrFallback(readinessWeight, READINESS_WEIGHTS[normalizedReadinessContribution]),
+    readinessDomain,
+    contradictionRefs,
+    lineageRefs,
+    governance: buildGovernanceMetadata(governance),
+  }
+}
 
 const createGraphContext = ({ builtAt }) => ({
   builtAt,
+  entityRegistry: RUNTIME_INTELLIGENCE_GRAPH_ENTITY_REGISTRY,
+  relationshipRegistry: RUNTIME_INTELLIGENCE_GRAPH_RELATIONSHIP_REGISTRY,
   nodes: new Map(),
   edges: new Map(),
   evidenceRecords: new Map(),
@@ -326,15 +876,52 @@ const createGraphContext = ({ builtAt }) => ({
 
 const addNode = (context, node) => {
   if (!node?.nodeId || !node?.nodeType) return null
+  const entityDefinition = context.entityRegistry[node.nodeType]
+  if (!entityDefinition) {
+    context.warnings.push({
+      code: 'UNKNOWN_GRAPH_ENTITY_TYPE',
+      severity: 'ERROR',
+      nodeType: node.nodeType,
+      message: 'Graph node uses an unknown entity type.',
+    })
+    return null
+  }
   const previous = context.nodes.get(node.nodeId)
-  context.nodes.set(node.nodeId, previous ? { ...previous, ...node } : node)
+  const nextNode = {
+    entityDefinitionKey: entityDefinition.key,
+    entityDisplayName: entityDefinition.displayName,
+    customerVisible: entityDefinition.customerVisible === true,
+    ...node,
+    metadata: createDefaultMetadata({
+      ...(node.metadata || {}),
+      governance: {
+        sensitivity: entityDefinition.sensitivity,
+        ...(node.metadata?.governance || {}),
+      },
+    }),
+  }
+  context.nodes.set(node.nodeId, previous ? { ...previous, ...nextNode } : nextNode)
   return context.nodes.get(node.nodeId)
 }
 
 const addEdge = (context, edge) => {
   if (!edge?.edgeType || !edge?.fromNodeId || !edge?.toNodeId || !edge?.basis) return null
+  const relationshipDefinition = context.relationshipRegistry[edge.edgeType]
+  if (!relationshipDefinition) {
+    context.warnings.push({
+      code: 'UNKNOWN_GRAPH_RELATIONSHIP_TYPE',
+      severity: 'ERROR',
+      edgeType: edge.edgeType,
+      message: 'Graph edge uses an unknown relationship type.',
+    })
+    return null
+  }
   const nextEdge = {
     edgeId: buildEdgeId(edge),
+    relationshipDefinitionKey: relationshipDefinition.key,
+    relationshipDisplayName: relationshipDefinition.displayName,
+    contributesTo: relationshipDefinition.contributesTo,
+    customerVisible: relationshipDefinition.customerVisible === true,
     builtAt: context.builtAt,
     validationState: 'VALID',
     sourceRefs: [],
@@ -348,6 +935,12 @@ const addEdge = (context, edge) => {
 const buildRuntimeGraphSourceHash = ({ frameworkPackage, frameworkState, runtimeInstance }) =>
   hashRuntimeIntelligenceGraphValue({
     runtimeInstanceId: toIdString(runtimeInstance?._id || runtimeInstance?.id),
+    runtimeId: toIdString(runtimeInstance?._id || runtimeInstance?.id),
+    customerId: toIdString(runtimeInstance?.customerId),
+    tenantId: toIdString(runtimeInstance?.tenantId),
+    projectId: toIdString(runtimeInstance?.projectId),
+    outcomeId: toIdString(runtimeInstance?.outcomeId),
+    frameworkId: toIdString(runtimeInstance?.frameworkId || runtimeInstance?.packageId),
     runtimeInstanceKey: runtimeInstance?.runtimeInstanceKey || '',
     runtimeType: runtimeInstance?.runtimeType || '',
     frameworkKey: runtimeInstance?.frameworkKey || '',
@@ -495,7 +1088,14 @@ const addSourceNode = ({ context, source, sourceIdFallback, sourceTypeFallback =
 }
 
 const buildEvidenceMetadata = ({ domain, evidenceObject, lowQuality, reviewStatus }) => {
-  const { confidence, confidenceBasis } = extractConfidence(evidenceObject)
+  const {
+    confidence,
+    confidenceBasis,
+    confidenceFactors,
+    confidenceReason,
+    confidenceScore,
+    confidenceWarnings,
+  } = extractConfidence(evidenceObject)
   const rejected = reviewStatus === DISCOVERY_EVIDENCE_REVIEW_STATUSES.REJECTED
   const accepted = reviewStatus === DISCOVERY_EVIDENCE_REVIEW_STATUSES.ACCEPTED
   const validationStatus = rejected
@@ -508,17 +1108,56 @@ const buildEvidenceMetadata = ({ domain, evidenceObject, lowQuality, reviewStatu
     : lowQuality
       ? REASONING_STATUSES.VALIDATION_REQUIRED
       : accepted
-        ? REASONING_STATUSES.READY_FOR_REASONING
-        : REASONING_STATUSES.VALIDATION_REQUIRED
+      ? REASONING_STATUSES.READY_FOR_REASONING
+      : REASONING_STATUSES.VALIDATION_REQUIRED
+  const materialityResult = deriveMateriality({
+    domain,
+    explicitMateriality: evidenceObject.materiality,
+    lowQuality,
+    reviewStatus,
+    validationStatus,
+  })
+  const decisionImpactResult = deriveDecisionImpact({
+    domain,
+    explicitDecisionImpact: evidenceObject.decisionImpact,
+    materiality: materialityResult.materiality,
+    validationStatus,
+  })
+  const readinessResult = deriveReadinessContribution({
+    domain,
+    materiality: materialityResult.materiality,
+    reasoningStatus,
+    validationStatus,
+  })
+  const nextConfidenceFactors = [
+    ...confidenceFactors,
+    accepted ? 'accepted evidence' : '',
+    domain ? `coverage domain: ${domain}` : '',
+  ].filter(Boolean)
+  const nextConfidenceWarnings = [
+    ...confidenceWarnings,
+    rejected ? 'rejected evidence' : '',
+    lowQuality ? 'low quality evidence' : '',
+    !domain ? 'unclassified evidence domain' : '',
+    !evidenceObject.sourceId && !evidenceObject.sourceRef ? 'missing source link' : '',
+  ].filter(Boolean)
 
   return createDefaultMetadata({
     confidence,
+    confidenceScore,
     confidenceBasis,
+    confidenceFactors: nextConfidenceFactors,
+    confidenceWarnings: nextConfidenceWarnings,
+    confidenceReason: confidenceReason || (confidence === null
+      ? 'No persisted confidence score is available.'
+      : 'Persisted confidence score from evidence metadata.'),
     validationStatus,
     reasoningStatus,
     truthDomain: getTruthDomain({ domain, explicitTruthDomain: evidenceObject.truthDomain }),
     truthCoverage: domain ? [domain] : [],
-    materiality: normalizeMateriality(evidenceObject.materiality),
+    ...materialityResult,
+    ...decisionImpactResult,
+    ...readinessResult,
     contradictionRefs: Array.isArray(evidenceObject.contradictionRefs) ? evidenceObject.contradictionRefs : [],
     lineageRefs: [
       evidenceObject.lineageRef,
@@ -812,6 +1451,20 @@ const addSectionTruthNodes = ({ context, frameworkPackage, frameworkState, runti
     const truthHash = getAcceptedTruthHash(accepted)
 
     if (!sectionKey || (!acceptedAt && !truthHash)) return
+    const sectionTruthMateriality = deriveMateriality({
+      explicitMateriality: accepted.materiality,
+      validationStatus: VALIDATION_STATUSES.PARTIALLY_VALIDATED,
+    })
+    const sectionTruthDecisionImpact = deriveDecisionImpact({
+      explicitDecisionImpact: accepted.decisionImpact,
+      materiality: sectionTruthMateriality.materiality,
+      validationStatus: VALIDATION_STATUSES.PARTIALLY_VALIDATED,
+    })
+    const sectionTruthReadiness = deriveReadinessContribution({
+      materiality: sectionTruthMateriality.materiality,
+      reasoningStatus: REASONING_STATUSES.READY_FOR_REASONING,
+      validationStatus: VALIDATION_STATUSES.PARTIALLY_VALIDATED,
+    })
 
     const sectionTruthNodeId = buildNodeId(
       RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.SECTION_TRUTH,
@@ -833,7 +1486,9 @@ const addSectionTruthNodes = ({ context, frameworkPackage, frameworkState, runti
         reasoningStatus: REASONING_STATUSES.READY_FOR_REASONING,
         truthDomain: 'unknown',
         truthCoverage: [],
-        materiality: normalizeMateriality(accepted.materiality),
+        ...sectionTruthMateriality,
+        ...sectionTruthDecisionImpact,
+        ...sectionTruthReadiness,
         lineageRefs: [
           accepted.sourceGeneratedAt,
           accepted.inputHash,
@@ -911,6 +1566,20 @@ const addPublishedAndCanonicalTruth = ({ context, frameworkState, runtimeInstanc
   let publishedNodeId = ''
 
   if (publish.published === true || publish.state === 'PUBLISHED' || publish.snapshot?.snapshotId) {
+    const publishedMateriality = deriveMateriality({
+      explicitMateriality: publish.materiality,
+      validationStatus: VALIDATION_STATUSES.VALIDATED,
+    })
+    const publishedDecisionImpact = deriveDecisionImpact({
+      explicitDecisionImpact: publish.decisionImpact,
+      materiality: publishedMateriality.materiality,
+      validationStatus: VALIDATION_STATUSES.VALIDATED,
+    })
+    const publishedReadiness = deriveReadinessContribution({
+      materiality: publishedMateriality.materiality,
+      reasoningStatus: REASONING_STATUSES.READY_FOR_REASONING,
+      validationStatus: VALIDATION_STATUSES.VALIDATED,
+    })
     publishedNodeId = buildNodeId(
       RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.PUBLISHED_TRUTH,
       runtimeInstance.runtimeInstanceKey || runtimeInstance._id || runtimeInstance.id,
@@ -928,6 +1597,9 @@ const addPublishedAndCanonicalTruth = ({ context, frameworkState, runtimeInstanc
       metadata: createDefaultMetadata({
         validationStatus: VALIDATION_STATUSES.VALIDATED,
         reasoningStatus: REASONING_STATUSES.READY_FOR_REASONING,
+        ...publishedMateriality,
+        ...publishedDecisionImpact,
+        ...publishedReadiness,
         lineageRefs: [
           publish.snapshot?.snapshotId,
           publish.snapshot?.snapshotHash,
@@ -953,6 +1625,20 @@ const addPublishedAndCanonicalTruth = ({ context, frameworkState, runtimeInstanc
   }
 
   if (lock.locked === true || lock.state === 'LOCKED' || lock.snapshot?.snapshotId) {
+    const canonicalMateriality = deriveMateriality({
+      explicitMateriality: lock.materiality,
+      validationStatus: VALIDATION_STATUSES.VALIDATED,
+    })
+    const canonicalDecisionImpact = deriveDecisionImpact({
+      explicitDecisionImpact: lock.decisionImpact,
+      materiality: canonicalMateriality.materiality,
+      validationStatus: VALIDATION_STATUSES.VALIDATED,
+    })
+    const canonicalReadiness = deriveReadinessContribution({
+      materiality: canonicalMateriality.materiality,
+      reasoningStatus: REASONING_STATUSES.READY_FOR_REASONING,
+      validationStatus: VALIDATION_STATUSES.VALIDATED,
+    })
     const canonicalNodeId = buildNodeId(
       RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.CANONICAL_TRUTH,
       runtimeInstance.runtimeInstanceKey || runtimeInstance._id || runtimeInstance.id,
@@ -971,6 +1657,9 @@ const addPublishedAndCanonicalTruth = ({ context, frameworkState, runtimeInstanc
       metadata: createDefaultMetadata({
         validationStatus: VALIDATION_STATUSES.VALIDATED,
         reasoningStatus: REASONING_STATUSES.READY_FOR_REASONING,
+        ...canonicalMateriality,
+        ...canonicalDecisionImpact,
+        ...canonicalReadiness,
         lineageRefs: [
           lock.snapshot?.snapshotId,
           lock.snapshot?.snapshotHash,
@@ -1098,6 +1787,21 @@ const addSignalNodes = ({ context, coverage, dependencies }) => {
   if (!frameworkConsumerId) return
 
   const coverageSignalNodeId = buildNodeId(RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.SIGNAL, 'coverage', coverage.coveragePercent)
+  const coverageReasoningStatus = coverage.missingDomains.length > 0
+    ? REASONING_STATUSES.NEEDS_EVIDENCE
+    : REASONING_STATUSES.READY_FOR_REASONING
+  const coverageSignalMateriality = deriveMateriality({
+    validationStatus: VALIDATION_STATUSES.PARTIALLY_VALIDATED,
+  })
+  const coverageSignalDecisionImpact = deriveDecisionImpact({
+    materiality: coverageSignalMateriality.materiality,
+    validationStatus: VALIDATION_STATUSES.PARTIALLY_VALIDATED,
+  })
+  const coverageSignalReadiness = deriveReadinessContribution({
+    materiality: coverageSignalMateriality.materiality,
+    reasoningStatus: coverageReasoningStatus,
+    validationStatus: VALIDATION_STATUSES.PARTIALLY_VALIDATED,
+  })
   addNode(context, {
     nodeId: coverageSignalNodeId,
     nodeType: RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.SIGNAL,
@@ -1105,12 +1809,13 @@ const addSignalNodes = ({ context, coverage, dependencies }) => {
     signalType: 'COVERAGE',
     metadata: createDefaultMetadata({
       validationStatus: VALIDATION_STATUSES.PARTIALLY_VALIDATED,
-      reasoningStatus: coverage.missingDomains.length > 0
-        ? REASONING_STATUSES.NEEDS_EVIDENCE
-        : REASONING_STATUSES.READY_FOR_REASONING,
+      reasoningStatus: coverageReasoningStatus,
       truthCoverage: coverage.domains
         .filter((domain) => domain.connectedEvidenceCount > 0)
         .map((domain) => domain.domain),
+      ...coverageSignalMateriality,
+      ...coverageSignalDecisionImpact,
+      ...coverageSignalReadiness,
       lineageRefs: ['framework_state.evidence_pack'],
     }),
   })
@@ -1123,6 +1828,24 @@ const addSignalNodes = ({ context, coverage, dependencies }) => {
   })
 
   if (dependencies.sectionDependencyCount > 0) {
+    const dependencyValidationStatus = dependencies.missingDependencyTruthCount > 0
+      ? VALIDATION_STATUSES.PARTIALLY_VALIDATED
+      : VALIDATION_STATUSES.VALIDATED
+    const dependencyReasoningStatus = dependencies.missingDependencyTruthCount > 0
+      ? REASONING_STATUSES.NEEDS_EVIDENCE
+      : REASONING_STATUSES.READY_FOR_REASONING
+    const dependencySignalMateriality = deriveMateriality({
+      validationStatus: dependencyValidationStatus,
+    })
+    const dependencySignalDecisionImpact = deriveDecisionImpact({
+      materiality: dependencySignalMateriality.materiality,
+      validationStatus: dependencyValidationStatus,
+    })
+    const dependencySignalReadiness = deriveReadinessContribution({
+      materiality: dependencySignalMateriality.materiality,
+      reasoningStatus: dependencyReasoningStatus,
+      validationStatus: dependencyValidationStatus,
+    })
     const dependencySignalNodeId = buildNodeId(
       RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.SIGNAL,
       'dependencies',
@@ -1134,12 +1857,11 @@ const addSignalNodes = ({ context, coverage, dependencies }) => {
       label: 'Section Dependency Signal',
       signalType: 'DEPENDENCY',
       metadata: createDefaultMetadata({
-        validationStatus: dependencies.missingDependencyTruthCount > 0
-          ? VALIDATION_STATUSES.PARTIALLY_VALIDATED
-          : VALIDATION_STATUSES.VALIDATED,
-        reasoningStatus: dependencies.missingDependencyTruthCount > 0
-          ? REASONING_STATUSES.NEEDS_EVIDENCE
-          : REASONING_STATUSES.READY_FOR_REASONING,
+        validationStatus: dependencyValidationStatus,
+        reasoningStatus: dependencyReasoningStatus,
+        ...dependencySignalMateriality,
+        ...dependencySignalDecisionImpact,
+        ...dependencySignalReadiness,
         lineageRefs: dependencies.sections.map((section) => section.sectionKey),
       }),
     })
@@ -1197,9 +1919,30 @@ export const validateRuntimeIntelligenceGraph = (graph = {}) => {
   const nodes = Array.isArray(graph.nodes) ? graph.nodes : []
   const edges = Array.isArray(graph.edges) ? graph.edges : []
   const nodeIds = new Set(nodes.map((node) => node.nodeId).filter(Boolean))
+  const nodeById = new Map(nodes.map((node) => [node.nodeId, node]).filter(([nodeId]) => Boolean(nodeId)))
   const issues = []
 
+  nodes.forEach((node) => {
+    if (!node.nodeId) {
+      issues.push({
+        code: 'NODE_ID_MISSING',
+        nodeType: node.nodeType || '',
+        message: 'Graph node is missing a deterministic nodeId.',
+      })
+    }
+
+    if (!RUNTIME_INTELLIGENCE_GRAPH_ENTITY_REGISTRY[node.nodeType]) {
+      issues.push({
+        code: 'UNKNOWN_GRAPH_ENTITY_TYPE',
+        nodeId: node.nodeId || '',
+        nodeType: node.nodeType || '',
+        message: 'Graph node uses an unknown entity type.',
+      })
+    }
+  })
+
   edges.forEach((edge) => {
+    const relationshipDefinition = RUNTIME_INTELLIGENCE_GRAPH_RELATIONSHIP_REGISTRY[edge.edgeType]
     if (!edge.edgeId) {
       issues.push({
         code: 'EDGE_ID_MISSING',
@@ -1212,6 +1955,14 @@ export const validateRuntimeIntelligenceGraph = (graph = {}) => {
         code: 'EDGE_BASIS_MISSING',
         edgeId: edge.edgeId || '',
         message: 'Graph edge is missing a relationship basis.',
+      })
+    }
+    if (!relationshipDefinition) {
+      issues.push({
+        code: 'UNKNOWN_GRAPH_RELATIONSHIP_TYPE',
+        edgeId: edge.edgeId || '',
+        edgeType: edge.edgeType || '',
+        message: 'Graph edge uses an unknown relationship type.',
       })
     }
     if (!nodeIds.has(edge.fromNodeId)) {
@@ -1229,6 +1980,30 @@ export const validateRuntimeIntelligenceGraph = (graph = {}) => {
         toNodeId: edge.toNodeId || '',
         message: 'Graph edge target node is missing.',
       })
+    }
+    if (relationshipDefinition && nodeIds.has(edge.fromNodeId) && nodeIds.has(edge.toNodeId)) {
+      const fromNodeType = nodeById.get(edge.fromNodeId)?.nodeType || ''
+      const toNodeType = nodeById.get(edge.toNodeId)?.nodeType || ''
+      if (!relationshipDefinition.fromNodeTypes.includes(fromNodeType)) {
+        issues.push({
+          code: 'EDGE_FROM_NODE_TYPE_MISMATCH',
+          edgeId: edge.edgeId || '',
+          edgeType: edge.edgeType || '',
+          fromNodeId: edge.fromNodeId || '',
+          fromNodeType,
+          message: 'Graph edge source node type is not allowed by the relationship registry.',
+        })
+      }
+      if (!relationshipDefinition.toNodeTypes.includes(toNodeType)) {
+        issues.push({
+          code: 'EDGE_TO_NODE_TYPE_MISMATCH',
+          edgeId: edge.edgeId || '',
+          edgeType: edge.edgeType || '',
+          toNodeId: edge.toNodeId || '',
+          toNodeType,
+          message: 'Graph edge target node type is not allowed by the relationship registry.',
+        })
+      }
     }
   })
 
@@ -1291,10 +2066,25 @@ export const buildRuntimeIntelligenceGraph = ({
   addSignalNodes({ context, coverage, dependencies })
 
   const sourceHash = buildRuntimeGraphSourceHash({ frameworkPackage, frameworkState, runtimeInstance })
+  const scope = {
+    customerId: toIdString(runtimeInstance?.customerId),
+    tenantId: toIdString(runtimeInstance?.tenantId),
+    projectId: toIdString(runtimeInstance?.projectId) || null,
+    outcomeId: toIdString(runtimeInstance?.outcomeId) || null,
+    frameworkId: toIdString(runtimeInstance?.frameworkId || runtimeInstance?.packageId) || null,
+    runtimeId: toIdString(runtimeInstance?._id || runtimeInstance?.id),
+  }
   const preliminaryGraph = {
     artifactType: RUNTIME_INTELLIGENCE_GRAPH_ARTIFACT_TYPE,
     graphVersion: RUNTIME_INTELLIGENCE_GRAPH_VERSION,
     runtimeInstanceId: toIdString(runtimeInstance?._id || runtimeInstance?.id),
+    runtimeId: scope.runtimeId,
+    customerId: scope.customerId,
+    tenantId: scope.tenantId,
+    projectId: scope.projectId,
+    outcomeId: scope.outcomeId,
+    frameworkId: scope.frameworkId,
+    scope,
     runtimeInstanceKey: runtimeInstance?.runtimeInstanceKey || '',
     runtimeType: normalizeToken(runtimeInstance?.runtimeType),
     frameworkKey: normalizeToken(runtimeInstance?.frameworkKey || frameworkPackage?.frameworkKey),
@@ -1311,6 +2101,10 @@ export const buildRuntimeIntelligenceGraph = ({
     },
     nodes: Array.from(context.nodes.values()).sort((left, right) => left.nodeId.localeCompare(right.nodeId)),
     edges: Array.from(context.edges.values()).sort((left, right) => left.edgeId.localeCompare(right.edgeId)),
+    registries: {
+      entityTypes: RUNTIME_INTELLIGENCE_GRAPH_ENTITY_REGISTRY,
+      relationshipTypes: RUNTIME_INTELLIGENCE_GRAPH_RELATIONSHIP_REGISTRY,
+    },
     coverage,
     dependencies,
     health: {},
@@ -1339,9 +2133,11 @@ export const buildRuntimeIntelligenceGraph = ({
       artifactType: graph.artifactType,
       graphVersion: graph.graphVersion,
       runtimeInstanceId: graph.runtimeInstanceId,
+      scope: graph.scope,
       sourceHash,
       nodes: graph.nodes,
       edges: graph.edges,
+      registries: graph.registries,
       coverage: graph.coverage,
       dependencies: graph.dependencies,
       health: graph.health,
@@ -1359,8 +2155,11 @@ const buildRuntimeInstanceGraphSnapshot = ({ frameworkState, runtimeInstance } =
   packageKey: runtimeInstance?.packageKey || '',
   packageVersion: runtimeInstance?.packageVersion || '',
   packageId: runtimeInstance?.packageId || null,
+  frameworkId: runtimeInstance?.frameworkId || runtimeInstance?.packageId || null,
   customerId: runtimeInstance?.customerId || null,
   tenantId: runtimeInstance?.tenantId || null,
+  projectId: runtimeInstance?.projectId || null,
+  outcomeId: runtimeInstance?.outcomeId || null,
   framework_state: frameworkState || {},
 })
 
@@ -1404,57 +2203,80 @@ export const buildRuntimeIntelligenceGraphAuditSummary = ({
   }
 }
 
-const buildUnavailableProjection = () => ({
-  available: false,
-  artifactType: RUNTIME_INTELLIGENCE_GRAPH_ARTIFACT_TYPE,
-  graphVersion: RUNTIME_INTELLIGENCE_GRAPH_VERSION,
-  build: {
-    status: 'UNAVAILABLE',
-    trigger: '',
-    builtAt: '',
-    nodeCount: 0,
-    edgeCount: 0,
-  },
-  health: {
-    state: 'UNAVAILABLE',
-    nodeCount: 0,
-    edgeCount: 0,
-    acceptedEvidenceCount: 0,
-    orphanEvidenceCount: 0,
-    lowQualityEvidenceCount: 0,
-    unclassifiedEvidenceCount: 0,
-    missingDomainCount: RUNTIME_INTELLIGENCE_GRAPH_DOMAINS.length,
-    dependencyCount: 0,
-    contradictionCount: 0,
-  },
-  coverage: {
-    coverageModel: 'EVIDENCE_DOMAIN_COVERAGE',
-    coveragePercent: 0,
-    coveredDomainCount: 0,
-    totalDomainCount: RUNTIME_INTELLIGENCE_GRAPH_DOMAINS.length,
-    missingDomains: [...RUNTIME_INTELLIGENCE_GRAPH_DOMAINS],
-    domains: RUNTIME_INTELLIGENCE_GRAPH_DOMAINS.map((domain) => ({
-      domain,
+const buildUnavailableProjection = ({ includeGraphContract = true } = {}) => {
+  const projection = {
+    available: false,
+    artifactType: RUNTIME_INTELLIGENCE_GRAPH_ARTIFACT_TYPE,
+    graphVersion: RUNTIME_INTELLIGENCE_GRAPH_VERSION,
+    build: {
+      status: 'UNAVAILABLE',
+      trigger: '',
+      builtAt: '',
+      nodeCount: 0,
+      edgeCount: 0,
+    },
+    validation: {
+      status: 'UNAVAILABLE',
+      issues: [],
+    },
+    health: {
+      state: 'UNAVAILABLE',
+      nodeCount: 0,
+      edgeCount: 0,
       acceptedEvidenceCount: 0,
-      connectedEvidenceCount: 0,
-      pendingEvidenceCount: 0,
-      rejectedEvidenceCount: 0,
+      orphanEvidenceCount: 0,
       lowQualityEvidenceCount: 0,
-      state: 'MISSING',
-    })),
-  },
-  dependencies: {
-    sectionDependencyCount: 0,
-    missingDependencyTruthCount: 0,
-    sections: [],
-  },
-  missingAreas: [...RUNTIME_INTELLIGENCE_GRAPH_DOMAINS],
-  quality: {
-    orphanEvidenceCount: 0,
-    lowQualityEvidenceCount: 0,
-    unclassifiedEvidenceCount: 0,
-  },
-})
+      unclassifiedEvidenceCount: 0,
+      missingDomainCount: RUNTIME_INTELLIGENCE_GRAPH_DOMAINS.length,
+      dependencyCount: 0,
+      contradictionCount: 0,
+    },
+    coverage: {
+      coverageModel: 'EVIDENCE_DOMAIN_COVERAGE',
+      coveragePercent: 0,
+      coveredDomainCount: 0,
+      totalDomainCount: RUNTIME_INTELLIGENCE_GRAPH_DOMAINS.length,
+      missingDomains: [...RUNTIME_INTELLIGENCE_GRAPH_DOMAINS],
+      domains: RUNTIME_INTELLIGENCE_GRAPH_DOMAINS.map((domain) => ({
+        domain,
+        acceptedEvidenceCount: 0,
+        connectedEvidenceCount: 0,
+        pendingEvidenceCount: 0,
+        rejectedEvidenceCount: 0,
+        lowQualityEvidenceCount: 0,
+        state: 'MISSING',
+      })),
+    },
+    dependencies: {
+      sectionDependencyCount: 0,
+      missingDependencyTruthCount: 0,
+      sections: [],
+    },
+    missingAreas: [...RUNTIME_INTELLIGENCE_GRAPH_DOMAINS],
+    quality: {
+      orphanEvidenceCount: 0,
+      lowQualityEvidenceCount: 0,
+      unclassifiedEvidenceCount: 0,
+    },
+  }
+
+  if (includeGraphContract) {
+    projection.scope = {
+      customerId: '',
+      tenantId: '',
+      projectId: null,
+      outcomeId: null,
+      frameworkId: null,
+      runtimeId: '',
+    }
+    projection.registries = {
+      entityTypes: RUNTIME_INTELLIGENCE_GRAPH_ENTITY_REGISTRY,
+      relationshipTypes: RUNTIME_INTELLIGENCE_GRAPH_RELATIONSHIP_REGISTRY,
+    }
+  }
+
+  return projection
+}
 
 const buildNodeSummary = (nodes = []) => nodes.reduce((acc, node) => {
   const nodeType = node.nodeType || 'UNKNOWN'
@@ -1471,7 +2293,10 @@ const buildEdgeSummary = (edges = []) => edges.reduce((acc, edge) => {
 const projectNode = (node = {}) => ({
   nodeId: node.nodeId,
   nodeType: node.nodeType,
+  entityDefinitionKey: node.entityDefinitionKey || node.nodeType,
+  entityDisplayName: node.entityDisplayName || RUNTIME_INTELLIGENCE_GRAPH_ENTITY_REGISTRY[node.nodeType]?.displayName || titleFromKey(node.nodeType),
   label: node.label,
+  customerVisible: node.customerVisible !== false,
   ...(node.sectionKey ? { sectionKey: node.sectionKey } : {}),
   ...(node.consumerType ? { consumerType: node.consumerType } : {}),
   ...(node.frameworkKey ? { frameworkKey: node.frameworkKey } : {}),
@@ -1485,15 +2310,21 @@ const projectNode = (node = {}) => ({
 const projectEdge = (edge = {}) => ({
   edgeId: edge.edgeId,
   edgeType: edge.edgeType,
+  relationshipDefinitionKey: edge.relationshipDefinitionKey || edge.edgeType,
+  relationshipDisplayName: edge.relationshipDisplayName || RUNTIME_INTELLIGENCE_GRAPH_RELATIONSHIP_REGISTRY[edge.edgeType]?.displayName || titleFromKey(edge.edgeType),
   fromNodeId: edge.fromNodeId,
   toNodeId: edge.toNodeId,
   basis: edge.basis,
+  contributesTo: Array.isArray(edge.contributesTo)
+    ? edge.contributesTo
+    : RUNTIME_INTELLIGENCE_GRAPH_RELATIONSHIP_REGISTRY[edge.edgeType]?.contributesTo || [],
+  customerVisible: edge.customerVisible !== false,
   validationState: edge.validationState || 'UNKNOWN',
 })
 
 export const buildRuntimeIntelligenceGraphProjection = (graph = {}, { includeGraphElements = false } = {}) => {
   if (!isPlainObject(graph) || graph.artifactType !== RUNTIME_INTELLIGENCE_GRAPH_ARTIFACT_TYPE) {
-    return buildUnavailableProjection()
+    return buildUnavailableProjection({ includeGraphContract: includeGraphElements })
   }
 
   const nodes = Array.isArray(graph.nodes) ? graph.nodes : []
@@ -1501,6 +2332,16 @@ export const buildRuntimeIntelligenceGraphProjection = (graph = {}, { includeGra
   const coverage = isPlainObject(graph.coverage) ? graph.coverage : buildUnavailableProjection().coverage
   const health = isPlainObject(graph.health) ? graph.health : buildUnavailableProjection().health
   const dependencies = isPlainObject(graph.dependencies) ? graph.dependencies : buildUnavailableProjection().dependencies
+  const scope = isPlainObject(graph.scope)
+    ? cloneValue(graph.scope)
+    : {
+        customerId: toIdString(graph.customerId),
+        tenantId: toIdString(graph.tenantId),
+        projectId: toIdString(graph.projectId) || null,
+        outcomeId: toIdString(graph.outcomeId) || null,
+        frameworkId: toIdString(graph.frameworkId) || null,
+        runtimeId: toIdString(graph.runtimeId || graph.runtimeInstanceId),
+      }
   const projection = {
     available: true,
     artifactType: RUNTIME_INTELLIGENCE_GRAPH_ARTIFACT_TYPE,
@@ -1514,6 +2355,12 @@ export const buildRuntimeIntelligenceGraphProjection = (graph = {}, { includeGra
       edgeCount: Number(graph.build?.edgeCount || edges.length),
       sourceHash: graph.build?.sourceHash || '',
     },
+    validation: isPlainObject(graph.validation)
+      ? cloneValue(graph.validation)
+      : {
+          status: 'UNKNOWN',
+          issues: [],
+        },
     health: cloneValue(health),
     coverage: cloneValue(coverage),
     dependencies: cloneValue(dependencies),
@@ -1528,11 +2375,254 @@ export const buildRuntimeIntelligenceGraphProjection = (graph = {}, { includeGra
   }
 
   if (includeGraphElements) {
+    projection.scope = scope
+    projection.registries = {
+      entityTypes: cloneValue(graph.registries?.entityTypes || RUNTIME_INTELLIGENCE_GRAPH_ENTITY_REGISTRY),
+      relationshipTypes: cloneValue(graph.registries?.relationshipTypes || RUNTIME_INTELLIGENCE_GRAPH_RELATIONSHIP_REGISTRY),
+    }
     projection.nodes = nodes.map(projectNode)
     projection.edges = edges.map(projectEdge)
   }
 
   return projection
+}
+
+const SUPPORT_EDGE_TYPES = new Set([
+  RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES.SOURCE_PRODUCES_EVIDENCE,
+  RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES.EVIDENCE_DERIVES_INTELLIGENCE,
+  RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES.INTELLIGENCE_SUPPORTS_SECTION_TRUTH,
+  RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES.SECTION_TRUTH_PUBLISHED_AS,
+  RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES.PUBLISHED_TRUTH_LOCKED_AS_CANONICAL,
+  RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES.CANONICAL_TRUTH_REFERENCED_BY_OUTPUT,
+  RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES.INTELLIGENCE_SUPPORTS_CONSUMER,
+])
+
+const CONTRADICTION_EDGE_TYPES = new Set([
+  RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES.EVIDENCE_CONTRADICTS_EVIDENCE,
+  RUNTIME_INTELLIGENCE_GRAPH_EDGE_TYPES.INTELLIGENCE_CONTRADICTS_INTELLIGENCE,
+])
+
+const getQueryNodeById = (projection = {}) =>
+  new Map((projection.nodes || []).map((node) => [node.nodeId, node]))
+
+const buildNodePair = ({ edge, nodeById }) => ({
+  edge,
+  fromNode: nodeById.get(edge.fromNodeId) || null,
+  toNode: nodeById.get(edge.toNodeId) || null,
+})
+
+const buildSupportQueryProjection = (projection = {}) => {
+  const nodeById = getQueryNodeById(projection)
+  const relationships = (projection.edges || [])
+    .filter((edge) => SUPPORT_EDGE_TYPES.has(edge.edgeType))
+    .map((edge) => buildNodePair({ edge, nodeById }))
+
+  return {
+    available: projection.available,
+    graphVersion: projection.graphVersion,
+    graphHash: projection.graphHash,
+    scope: projection.scope,
+    queryType: RUNTIME_INTELLIGENCE_GRAPH_QUERY_TYPES.SUPPORT,
+    relationshipCount: relationships.length,
+    relationships,
+  }
+}
+
+const buildContradictionsQueryProjection = (projection = {}) => {
+  const nodeById = getQueryNodeById(projection)
+  const relationships = (projection.edges || [])
+    .filter((edge) => CONTRADICTION_EDGE_TYPES.has(edge.edgeType))
+    .map((edge) => buildNodePair({ edge, nodeById }))
+  const nodes = (projection.nodes || [])
+    .filter((node) =>
+      node.metadata?.validationStatus === VALIDATION_STATUSES.CONTRADICTED
+      || (Array.isArray(node.metadata?.contradictionRefs) && node.metadata.contradictionRefs.length > 0))
+
+  return {
+    available: projection.available,
+    graphVersion: projection.graphVersion,
+    graphHash: projection.graphHash,
+    scope: projection.scope,
+    queryType: RUNTIME_INTELLIGENCE_GRAPH_QUERY_TYPES.CONTRADICTIONS,
+    contradictionCount: relationships.length + nodes.length,
+    relationships,
+    nodes,
+  }
+}
+
+const buildReadinessQueryProjection = (projection = {}) => {
+  const nodes = (projection.nodes || [])
+    .filter((node) => node.metadata?.readinessContribution && node.metadata.readinessContribution !== READINESS_CONTRIBUTIONS.NONE)
+    .map((node) => ({
+      nodeId: node.nodeId,
+      nodeType: node.nodeType,
+      label: node.label,
+      sectionKey: node.sectionKey,
+      readinessContribution: node.metadata.readinessContribution,
+      readinessWeight: node.metadata.readinessWeight,
+      readinessDomain: node.metadata.readinessDomain,
+      reasoningStatus: node.metadata.reasoningStatus,
+      validationStatus: node.metadata.validationStatus,
+    }))
+  const blockers = nodes.filter((node) => node.readinessContribution === READINESS_CONTRIBUTIONS.BLOCKER)
+
+  return {
+    available: projection.available,
+    graphVersion: projection.graphVersion,
+    graphHash: projection.graphHash,
+    scope: projection.scope,
+    queryType: RUNTIME_INTELLIGENCE_GRAPH_QUERY_TYPES.READINESS,
+    state: blockers.length > 0 || projection.coverage?.missingDomains?.length > 0 ? 'PARTIALLY_READY' : 'READY',
+    blockerCount: blockers.length,
+    contributionCount: nodes.length,
+    missingDomains: projection.coverage?.missingDomains || [],
+    nodes,
+  }
+}
+
+const buildDecisionsQueryProjection = (projection = {}) => {
+  const nodes = (projection.nodes || [])
+    .filter((node) =>
+      node.metadata?.decisionImpact
+      && node.metadata.decisionImpact !== DECISION_IMPACTS.UNKNOWN)
+    .map((node) => ({
+      nodeId: node.nodeId,
+      nodeType: node.nodeType,
+      label: node.label,
+      sectionKey: node.sectionKey,
+      coverageDomain: node.coverageDomain,
+      materiality: node.metadata.materiality,
+      materialityScore: node.metadata.materialityScore,
+      materialityReason: node.metadata.materialityReason,
+      decisionImpact: node.metadata.decisionImpact,
+      decisionImpactScore: node.metadata.decisionImpactScore,
+      decisionImpactReason: node.metadata.decisionImpactReason,
+      validationStatus: node.metadata.validationStatus,
+    }))
+
+  return {
+    available: projection.available,
+    graphVersion: projection.graphVersion,
+    graphHash: projection.graphHash,
+    scope: projection.scope,
+    queryType: RUNTIME_INTELLIGENCE_GRAPH_QUERY_TYPES.DECISIONS,
+    nodeCount: nodes.length,
+    nodes,
+  }
+}
+
+const buildDependenciesQueryProjection = (projection = {}) => ({
+  available: projection.available,
+  graphVersion: projection.graphVersion,
+  graphHash: projection.graphHash,
+  scope: projection.scope,
+  queryType: RUNTIME_INTELLIGENCE_GRAPH_QUERY_TYPES.DEPENDENCIES,
+  dependencies: projection.dependencies,
+})
+
+const buildCoverageQueryProjection = (projection = {}) => ({
+  available: projection.available,
+  graphVersion: projection.graphVersion,
+  graphHash: projection.graphHash,
+  scope: projection.scope,
+  queryType: RUNTIME_INTELLIGENCE_GRAPH_QUERY_TYPES.COVERAGE,
+  coverage: projection.coverage,
+  missingAreas: projection.missingAreas,
+  quality: projection.quality,
+})
+
+const getClosedGraphQueryReason = (projection = {}) => {
+  const buildStatus = normalizeToken(projection.build?.status)
+  const validationStatus = normalizeToken(projection.validation?.status)
+  const healthState = normalizeToken(projection.health?.state)
+
+  if ([buildStatus, validationStatus, healthState].includes('INVALID')) {
+    return {
+      code: 'GRAPH_QUERY_UNAVAILABLE_INVALID_GRAPH',
+      message: 'The intelligence graph is invalid and cannot be used for query responses.',
+      buildStatus,
+      validationStatus,
+      healthState,
+    }
+  }
+
+  if ([buildStatus, validationStatus, healthState].includes('STALE') || projection.build?.stale === true) {
+    return {
+      code: 'GRAPH_QUERY_UNAVAILABLE_STALE_GRAPH',
+      message: 'The intelligence graph is stale and must be rebuilt before query responses are available.',
+      buildStatus,
+      validationStatus,
+      healthState,
+    }
+  }
+
+  return null
+}
+
+const buildClosedGraphQueryProjection = ({ projection = {}, queryType = '', reason = {} } = {}) => ({
+  available: false,
+  graphVersion: projection.graphVersion || RUNTIME_INTELLIGENCE_GRAPH_VERSION,
+  graphHash: projection.graphHash || '',
+  scope: projection.scope,
+  queryType,
+  build: projection.build,
+  validation: projection.validation,
+  health: projection.health,
+  error: reason,
+})
+
+export const buildRuntimeIntelligenceGraphQueryProjection = (projection = {}, queryType = '') => {
+  const normalizedQueryType = String(queryType || '').trim().toLowerCase()
+  if (!Object.values(RUNTIME_INTELLIGENCE_GRAPH_QUERY_TYPES).includes(normalizedQueryType)) {
+    return {
+      available: false,
+      queryType: normalizedQueryType,
+      error: {
+        code: 'GRAPH_QUERY_TYPE_UNSUPPORTED',
+        message: 'Unsupported intelligence graph query type.',
+      },
+    }
+  }
+
+  if (!projection.available) {
+    return {
+      ...buildUnavailableProjection(),
+      queryType: normalizedQueryType,
+    }
+  }
+
+  const closedReason = getClosedGraphQueryReason(projection)
+  if (closedReason) {
+    return buildClosedGraphQueryProjection({
+      projection,
+      queryType: normalizedQueryType,
+      reason: closedReason,
+    })
+  }
+
+  switch (normalizedQueryType) {
+    case RUNTIME_INTELLIGENCE_GRAPH_QUERY_TYPES.SUPPORT:
+      return buildSupportQueryProjection(projection)
+    case RUNTIME_INTELLIGENCE_GRAPH_QUERY_TYPES.CONTRADICTIONS:
+      return buildContradictionsQueryProjection(projection)
+    case RUNTIME_INTELLIGENCE_GRAPH_QUERY_TYPES.COVERAGE:
+      return buildCoverageQueryProjection(projection)
+    case RUNTIME_INTELLIGENCE_GRAPH_QUERY_TYPES.DEPENDENCIES:
+      return buildDependenciesQueryProjection(projection)
+    case RUNTIME_INTELLIGENCE_GRAPH_QUERY_TYPES.READINESS:
+      return buildReadinessQueryProjection(projection)
+    case RUNTIME_INTELLIGENCE_GRAPH_QUERY_TYPES.DECISIONS:
+      return buildDecisionsQueryProjection(projection)
+    default:
+      return {
+        available: false,
+        queryType: normalizedQueryType,
+        error: {
+          code: 'GRAPH_QUERY_TYPE_UNSUPPORTED',
+          message: 'Unsupported intelligence graph query type.',
+        },
+      }
+  }
 }
 
 export const getRuntimeIntelligenceGraph = async ({
@@ -1542,6 +2632,15 @@ export const getRuntimeIntelligenceGraph = async ({
   const runtimeInstance = await getRuntimeInstance({ scopes, runtimeInstanceId })
   const graph = getFrameworkState(runtimeInstance).intelligence_graph
   return buildRuntimeIntelligenceGraphProjection(graph, { includeGraphElements: true })
+}
+
+export const getRuntimeIntelligenceGraphQuery = async ({
+  queryType,
+  runtimeInstanceId,
+  scopes,
+} = {}) => {
+  const projection = await getRuntimeIntelligenceGraph({ runtimeInstanceId, scopes })
+  return buildRuntimeIntelligenceGraphQueryProjection(projection, queryType)
 }
 
 export const getRuntimeIntelligenceGraphHealth = async ({
@@ -1633,10 +2732,12 @@ const runtimeIntelligenceGraphService = {
   buildRuntimeIntelligenceGraphAuditSummary,
   buildRuntimeIntelligenceGraphForFrameworkState,
   buildRuntimeIntelligenceGraphProjection,
+  buildRuntimeIntelligenceGraphQueryProjection,
   getRuntimeIntelligenceGraph,
   getRuntimeIntelligenceGraphCoverage,
   getRuntimeIntelligenceGraphHealth,
   getRuntimeIntelligenceGraphNodeLineage,
+  getRuntimeIntelligenceGraphQuery,
   getRuntimeIntelligenceGraphSectionDependencies,
   hashRuntimeIntelligenceGraphValue,
   validateRuntimeIntelligenceGraph,

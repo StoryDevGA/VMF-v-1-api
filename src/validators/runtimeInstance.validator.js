@@ -99,6 +99,23 @@ const runtimeIntelligenceGraphSectionParamsSchema = runtimeInstanceIdSchema.exte
     .max(120, 'sectionKey must be 120 characters or fewer'),
 })
 
+const runtimeIntelligenceGraphQueryParamsSchema = runtimeInstanceIdSchema.extend({
+  queryType: z
+    .string({ required_error: 'queryType is required' })
+    .trim()
+    .transform((value) => value.toLowerCase())
+    .refine((value) => [
+      'support',
+      'contradictions',
+      'coverage',
+      'dependencies',
+      'readiness',
+      'decisions',
+    ].includes(value), {
+      message: 'queryType must be support, contradictions, coverage, dependencies, readiness, or decisions',
+    }),
+})
+
 const runtimeActionParamsSchema = runtimeInstanceIdSchema.extend({
   actionKey: z
     .string({ required_error: 'actionKey is required' })
@@ -876,6 +893,11 @@ export const validateRuntimeIntelligenceGraphNodeParams = createParamsValidator(
 })
 
 export const validateRuntimeIntelligenceGraphSectionParams = createParamsValidator(runtimeIntelligenceGraphSectionParamsSchema, {
+  message: 'Invalid request parameters.',
+  rootIssueKey: '_root',
+})
+
+export const validateRuntimeIntelligenceGraphQueryParams = createParamsValidator(runtimeIntelligenceGraphQueryParamsSchema, {
   message: 'Invalid request parameters.',
   rootIssueKey: '_root',
 })

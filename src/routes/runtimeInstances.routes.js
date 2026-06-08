@@ -13,6 +13,7 @@ import {
   getRuntimeIntelligenceGraphCoverage,
   getRuntimeIntelligenceGraphHealth,
   getRuntimeIntelligenceGraphNodeLineage,
+  getRuntimeIntelligenceGraphQuery,
   getRuntimeIntelligenceGraphSectionDependencies,
   getRuntimeRenderer,
   listRuntimeInstances,
@@ -39,6 +40,7 @@ import {
   validateReviewRuntimeSectionEvidence,
   validateResetRuntimeDiscovery,
   validateRuntimeIntelligenceGraphNodeParams,
+  validateRuntimeIntelligenceGraphQueryParams,
   validateRuntimeIntelligenceGraphSectionParams,
   validateRuntimeDiscoveryEvidenceParams,
   validateRuntimeActionParams,
@@ -92,6 +94,11 @@ router.get(
   '/:runtimeInstanceId/intelligence-graph/coverage',
   validateRuntimeInstanceId,
   getRuntimeIntelligenceGraphCoverage,
+)
+router.get(
+  '/:runtimeInstanceId/intelligence-graph/query/:queryType',
+  validateRuntimeIntelligenceGraphQueryParams,
+  getRuntimeIntelligenceGraphQuery,
 )
 router.get(
   '/:runtimeInstanceId/intelligence-graph/nodes/:nodeId/lineage',

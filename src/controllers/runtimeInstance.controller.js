@@ -10,6 +10,7 @@ import {
   getRuntimeIntelligenceGraphCoverage as getRuntimeIntelligenceGraphCoverageRecord,
   getRuntimeIntelligenceGraphHealth as getRuntimeIntelligenceGraphHealthRecord,
   getRuntimeIntelligenceGraphNodeLineage as getRuntimeIntelligenceGraphNodeLineageRecord,
+  getRuntimeIntelligenceGraphQuery as getRuntimeIntelligenceGraphQueryRecord,
   getRuntimeIntelligenceGraphSectionDependencies as getRuntimeIntelligenceGraphSectionDependenciesRecord,
 } from '../services/runtimeIntelligenceGraphService.js'
 import {
@@ -405,6 +406,26 @@ export const getRuntimeIntelligenceGraphHealth = async (req, res, next) => {
 export const getRuntimeIntelligenceGraphCoverage = async (req, res, next) => {
   try {
     const graph = await getRuntimeIntelligenceGraphCoverageRecord({
+      scopes: req.scopes,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+    })
+
+    return res.status(200).json({
+      data: graph,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const getRuntimeIntelligenceGraphQuery = async (req, res, next) => {
+  try {
+    const graph = await getRuntimeIntelligenceGraphQueryRecord({
+      queryType: req.params.queryType,
       scopes: req.scopes,
       runtimeInstanceId: req.params.runtimeInstanceId,
     })
