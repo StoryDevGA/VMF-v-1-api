@@ -15332,6 +15332,80 @@ describe('Runtime Instance API', () => {
     expect(res.body.meta.renderTraceId).toMatch(/^render-/)
   })
 
+  test('projects locked runtimes as immutable inspection state without granting output eligibility', async () => {
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+      status: 'LOCKED',
+      executionStatus: 'COMPLETE',
+      lockedAt: '2026-05-22T10:00:00.000Z',
+      lockedBy: CUSTOMER_ADMIN_ID,
+      lockedReason: 'Runtime published truth locked for downstream canonical use.',
+      framework_state: {
+        lifecycle: { stage: 'LOCKED' },
+        readiness: {
+          state: 'LOCKED',
+          ready: true,
+        },
+        publish: {
+          state: 'PUBLISHED',
+          published: true,
+          outputEligible: true,
+          outputEligibility: {
+            outputEligible: true,
+          },
+        },
+        lock: {
+          state: 'LOCKED',
+          locked: true,
+          lockedAt: '2026-05-22T10:00:00.000Z',
+          outputEligibility: {
+            outputEligible: true,
+          },
+        },
+        sections: {
+          customer_problem: 'Proposal creation is slow.',
+        },
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.sections[0]).toEqual(expect.objectContaining({
+      editable: false,
+      readonlyReason: 'Runtime is locked and can only be inspected. Create a revision before changing discovery or section truth.',
+      state: expect.objectContaining({
+        status: 'LOCKED',
+        sourceStatus: 'DRAFT',
+        locked: true,
+      }),
+    }))
+    expect(res.body.data.readiness.sectionTruth).toEqual(expect.objectContaining({
+      state: 'SECTION_TRUTH_LOCKED',
+      sourceState: 'SECTION_TRUTH_BLOCKED',
+      locked: true,
+      publishEligible: false,
+      lockEligible: false,
+      reason: expect.stringContaining('Accepted section truth'),
+    }))
+    expect(res.body.data.publish.sectionTruthReady).toBe(false)
+    expect(res.body.data.publish.outputEligible).toBe(false)
+    expect(res.body.data.publish.outputEligibility.outputEligible).toBe(false)
+    expect(res.body.data.lock.sectionTruthReady).toBe(false)
+    expect(res.body.data.lock.outputEligible).toBe(false)
+    expect(res.body.data.lock.outputEligibility.outputEligible).toBe(false)
+  })
+
   test('projects runtime activity from persisted audit rows without exposing raw audit payloads', async () => {
     FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
     RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))

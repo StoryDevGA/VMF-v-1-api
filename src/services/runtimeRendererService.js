@@ -99,6 +99,8 @@ const CONFIG_WARNING_SEVERITY_BY_CODE = Object.freeze({
 
 const VALUE_NOT_FOUND = Symbol('VALUE_NOT_FOUND')
 const VMF_FRAMEWORK_KEY = 'VMF'
+const LOCKED_RUNTIME_READONLY_REASON =
+  'Runtime is locked and can only be inspected. Create a revision before changing discovery or section truth.'
 const MUTATING_RUNTIME_ACTIONS = new Set([
   'APPROVE',
   'ARCHIVE',
@@ -1112,6 +1114,12 @@ const isRuntimeEditable = (runtimeInstance) => {
   ].includes(executionStatus)
 }
 
+const isRuntimeLockedForInspection = ({ runtimeInstance, frameworkState } = {}) =>
+  isRuntimeLocked({
+    runtimeInstance,
+    frameworkState: frameworkState || runtimeInstance?.framework_state,
+  })
+
 const resolveSectionMutationAccess = async ({ runtimeInstance, scopes }) => {
   const runtimeType = normalizeToken(runtimeInstance?.runtimeType)
   const requiredPermissions = ['VMF_UPDATE']
@@ -1149,15 +1157,35 @@ const getReadonlyReason = ({
   editable,
   mutationAccess,
   pathWritable,
+  runtimeLocked = false,
   runtimeEditable,
   uiEditable,
 }) => {
   if (editable) return ''
+  if (!runtimeEditable && runtimeLocked) return LOCKED_RUNTIME_READONLY_REASON
   if (!runtimeEditable) return 'Renderer editability is governed by runtime lifecycle, status, and execution status.'
   if (!uiEditable) return 'Renderer editability is governed by the UI Contract.'
   if (!pathWritable) return 'Renderer editability is governed by runtime path operations.'
   if (mutationAccess?.allowed === false) return mutationAccess.reason
   return 'Renderer editability is governed by runtime status, execution status, UI Contract, runtime path operations, and mutation permissions.'
+}
+
+const buildSectionStateProjection = ({ sectionRevisions, sectionState, runtimeLocked }) => {
+  const projectedState = {
+    status: sectionState.status || 'DRAFT',
+    revisionCount: sectionRevisions.length,
+    ...sectionState,
+  }
+
+  if (!runtimeLocked) return projectedState
+
+  return {
+    ...projectedState,
+    sourceStatus: projectedState.status || 'DRAFT',
+    status: 'LOCKED',
+    locked: true,
+    readonlyReason: LOCKED_RUNTIME_READONLY_REASON,
+  }
 }
 
 const buildSectionValidationMessages = ({ frameworkState, validationKeys }) => {
@@ -1552,6 +1580,7 @@ const buildRendererSections = ({
   const packageSectionKeys = new Set()
   const frameworkState = runtimeInstance.framework_state || {}
   const runtimeEditable = isRuntimeEditable(runtimeInstance)
+  const runtimeLocked = isRuntimeLockedForInspection({ runtimeInstance, frameworkState })
   const renderedSections = []
 
   packageSections.forEach((packageSection, packageIndex) => {
@@ -1693,11 +1722,7 @@ const buildRendererSections = ({
       accepted: sectionAccepted,
       sectionEvidence,
       review: isRuntimeSectionObject(rawSectionValue) ? rawSectionValue.review || {} : {},
-      state: {
-        status: sectionState.status || 'DRAFT',
-        revisionCount: sectionRevisions.length,
-        ...sectionState,
-      },
+      state: buildSectionStateProjection({ sectionRevisions, sectionState, runtimeLocked }),
       lineage: isRuntimeSectionObject(rawSectionValue) ? rawSectionValue.lineage || {} : {},
       dependencies: sectionDependencies,
       revisions: sectionRevisions.map((revision) => ({
@@ -1726,6 +1751,7 @@ const buildRendererSections = ({
         editable,
         mutationAccess,
         pathWritable,
+        runtimeLocked,
         runtimeEditable,
         uiEditable,
       }),
@@ -2219,7 +2245,26 @@ const buildValidationProjection = ({ frameworkState, sections }) => ({
     .flatMap((section) => Array.isArray(section.validationMessages) ? section.validationMessages : []),
 })
 
-const buildReadinessProjection = (frameworkState = {}, sectionTruth = null) => {
+const buildSectionTruthReadinessProjection = ({
+  runtimeInstance = {},
+  frameworkState = {},
+  sectionTruth = null,
+} = {}) => {
+  const projectedSectionTruth = sectionTruth || {}
+  if (!isRuntimeLockedForInspection({ runtimeInstance, frameworkState })) {
+    return projectedSectionTruth
+  }
+
+  return {
+    ...projectedSectionTruth,
+    sourceState: projectedSectionTruth.state || 'SECTION_TRUTH_NOT_CONFIGURED',
+    state: 'SECTION_TRUTH_LOCKED',
+    locked: true,
+    readonlyReason: LOCKED_RUNTIME_READONLY_REASON,
+  }
+}
+
+const buildReadinessProjection = (runtimeInstance = {}, frameworkState = {}, sectionTruth = null) => {
   const readiness = frameworkState.readiness || {}
   const state = deriveRuntimeReadinessState(frameworkState)
 
@@ -2231,7 +2276,11 @@ const buildReadinessProjection = (frameworkState = {}, sectionTruth = null) => {
     lastActionKey: readiness.lastActionKey || '',
     updatedAt: readiness.updatedAt || null,
     updatedBy: readiness.updatedBy || '',
-    sectionTruth: sectionTruth || {},
+    sectionTruth: buildSectionTruthReadinessProjection({
+      runtimeInstance,
+      frameworkState,
+      sectionTruth,
+    }),
   }
 }
 
@@ -2370,7 +2419,7 @@ export const getRuntimeRenderer = async ({
     sections,
     actions,
     validation: buildValidationProjection({ frameworkState, sections }),
-    readiness: buildReadinessProjection(frameworkState, sectionTruth),
+    readiness: buildReadinessProjection(runtimeInstance, frameworkState, sectionTruth),
     publish: buildPublishProjection(frameworkState, sectionTruth),
     lock: buildLockProjection(runtimeInstance, frameworkState, sectionTruth),
     signals: [],
