@@ -6,6 +6,7 @@ import path from 'node:path'
 import { promisify } from 'node:util'
 import zlib from 'node:zlib'
 import * as pdfjs from 'pdfjs-dist/build/pdf.mjs'
+import { DISCOVERY_ACQUISITION_PROFILES } from '../constants/discoveryAcquisitionProfiles.js'
 
 const moduleRequire = createRequire(import.meta.url)
 const { createCanvas } = moduleRequire('@napi-rs/canvas')
@@ -43,6 +44,160 @@ const DISCOVERY_COVERAGE_AREAS = Object.freeze([
   'Differentiation',
   'Decision Context',
   'Constraints',
+])
+
+const DISCOVERY_GRAPH_DOMAIN_BY_COVERAGE_AREA = Object.freeze({
+  Company: 'Company',
+  Products: 'Products',
+  Services: 'Services',
+  Markets: 'Market',
+  Industries: 'Market',
+  Technology: 'Products',
+  Proof: 'Proof',
+  Economics: 'Economics',
+  Differentiation: 'Differentiation',
+  'Decision Context': 'Stakeholders',
+  Constraints: 'Consequences',
+  Risks: 'Consequences',
+})
+
+const DISCOVERY_TRUTH_DOMAIN_BY_GRAPH_DOMAIN = Object.freeze({
+  Company: 'commercial',
+  Products: 'commercial',
+  Services: 'commercial',
+  Market: 'commercial',
+  Problems: 'operational',
+  Consequences: 'operational',
+  Proof: 'commercial',
+  Economics: 'financial',
+  Differentiation: 'commercial',
+  Stakeholders: 'stakeholder',
+})
+
+const DISCOVERY_MATERIALITY_BY_GRAPH_DOMAIN = Object.freeze({
+  Company: 'HIGH',
+  Products: 'HIGH',
+  Services: 'HIGH',
+  Market: 'MEDIUM',
+  Problems: 'HIGH',
+  Consequences: 'HIGH',
+  Proof: 'HIGH',
+  Economics: 'CRITICAL',
+  Differentiation: 'HIGH',
+  Stakeholders: 'MEDIUM',
+})
+
+const DISCOVERY_MATERIALITY_SCORES = Object.freeze({
+  UNKNOWN: null,
+  LOW: 0.25,
+  MEDIUM: 0.5,
+  HIGH: 0.75,
+  CRITICAL: 1,
+})
+
+const DISCOVERY_DECISION_IMPACT_BY_GRAPH_DOMAIN = Object.freeze({
+  Company: 'TACTICAL',
+  Products: 'STRATEGIC',
+  Services: 'TACTICAL',
+  Market: 'TACTICAL',
+  Problems: 'STRATEGIC',
+  Consequences: 'STRATEGIC',
+  Proof: 'STRATEGIC',
+  Economics: 'CRITICAL',
+  Differentiation: 'STRATEGIC',
+  Stakeholders: 'OPERATIONAL',
+})
+
+const DISCOVERY_DECISION_IMPACT_SCORES = Object.freeze({
+  UNKNOWN: null,
+  INFORMATIONAL: 0.2,
+  OPERATIONAL: 0.4,
+  TACTICAL: 0.6,
+  STRATEGIC: 0.8,
+  CRITICAL: 1,
+})
+
+const DISCOVERY_SIGNAL_STRENGTHS = Object.freeze({
+  MISSING: 'MISSING',
+  WEAK: 'WEAK',
+  MODERATE: 'MODERATE',
+  STRONG: 'STRONG',
+})
+
+const DISCOVERY_READINESS_STATES = Object.freeze({
+  NOT_READY: 'NOT_READY',
+  PARTIALLY_READY: 'PARTIALLY_READY',
+  READY: 'READY',
+})
+
+const DISCOVERY_READINESS_CONTRIBUTIONS = Object.freeze({
+  NONE: 'NONE',
+  BLOCKER: 'BLOCKER',
+  SUPPORTING: 'SUPPORTING',
+  STRONG: 'STRONG',
+})
+
+const DISCOVERY_PROFILE_GUIDANCE = Object.freeze({
+  [DISCOVERY_ACQUISITION_PROFILES.STANDARD]: {
+    label: 'Standard Acquisition',
+    summary: 'Good for quick discovery.',
+    targetCoverageRange: { min: 40, max: 70 },
+    targetEvidenceObjectRange: { min: 5, max: 20 },
+    minimumRecommendedInputs: [
+      'Website URL',
+      'Company name',
+      'Product / offer',
+      'Notes or document',
+    ],
+    additionalUsefulInputs: [
+      'Market / region',
+      'Uploaded document',
+    ],
+  },
+  [DISCOVERY_ACQUISITION_PROFILES.ENHANCED]: {
+    label: 'Enhanced Acquisition',
+    summary: 'Best for customer-ready VMF work.',
+    targetCoverageRange: { min: 60, max: 85 },
+    targetEvidenceObjectRange: { min: 20, max: 100 },
+    minimumRecommendedInputs: [
+      'Website URL',
+      'Company name',
+      'Product / offer',
+      'Notes or document',
+    ],
+    additionalUsefulInputs: [
+      'Product pages',
+      'Sales deck',
+      'Customer proof',
+      'Case studies',
+      'Discovery notes',
+    ],
+  },
+  [DISCOVERY_ACQUISITION_PROFILES.STRATEGIC]: {
+    label: 'Strategic Acquisition',
+    summary: 'Best for board-level or strategic outputs.',
+    targetCoverageRange: { min: 80, max: 95 },
+    targetEvidenceObjectRange: { min: 100, max: 500 },
+    minimumRecommendedInputs: [
+      'Website URL',
+      'Company name',
+      'Product / offer',
+      'Notes or document',
+    ],
+    additionalUsefulInputs: [
+      'Market evidence',
+      'Competitor information',
+      'Economic or ROI evidence',
+      'Investor material',
+      'Customer proof',
+      'Strategic notes',
+    ],
+  },
+})
+
+const ACTIVE_DISCOVERY_ACQUISITION_PROFILES = new Set([
+  DISCOVERY_ACQUISITION_PROFILES.STANDARD,
+  DISCOVERY_ACQUISITION_PROFILES.ENHANCED,
 ])
 
 const INPUT_EVIDENCE_MAP = Object.freeze({
@@ -89,6 +244,21 @@ const WEBSITE_ACQUISITION_LIMITS = Object.freeze({
   maxEvidenceObjects: 20,
   maxCandidateSegments: 80,
   maxRedirects: 3,
+})
+
+const WEBSITE_ACQUISITION_PROFILE_LIMITS = Object.freeze({
+  [DISCOVERY_ACQUISITION_PROFILES.STANDARD]: {
+    maxCandidateSegments: 12,
+    maxEvidenceObjects: 4,
+  },
+  [DISCOVERY_ACQUISITION_PROFILES.ENHANCED]: {
+    maxCandidateSegments: WEBSITE_ACQUISITION_LIMITS.maxCandidateSegments,
+    maxEvidenceObjects: WEBSITE_ACQUISITION_LIMITS.maxEvidenceObjects,
+  },
+  [DISCOVERY_ACQUISITION_PROFILES.STRATEGIC]: {
+    maxCandidateSegments: WEBSITE_ACQUISITION_LIMITS.maxCandidateSegments,
+    maxEvidenceObjects: WEBSITE_ACQUISITION_LIMITS.maxEvidenceObjects,
+  },
 })
 
 const DOCUMENT_ACQUISITION_LIMITS = Object.freeze({
@@ -220,7 +390,112 @@ const normalizeReviewStatus = (value) => {
     : DISCOVERY_EVIDENCE_REVIEW_STATUSES.PENDING
 }
 
+const normalizeGraphReadyConfidenceScore = (value) => {
+  const score = Number(value)
+  if (!Number.isFinite(score)) return null
+  if (score > 1) return Math.max(0, Math.min(1, score / 100))
+  return Math.max(0, Math.min(1, score))
+}
+
 const sanitizeFact = (value) => String(value ?? '').trim().replace(/\s+/g, ' ')
+
+const uniqueStrings = (values = []) =>
+  Array.from(new Set(values.map((value) => String(value || '').trim()).filter(Boolean)))
+
+const normalizeAcquisitionProfile = (value) => {
+  const profile = String(value || '').trim().toUpperCase()
+  return ACTIVE_DISCOVERY_ACQUISITION_PROFILES.has(profile)
+    ? profile
+    : DISCOVERY_ACQUISITION_PROFILES.STANDARD
+}
+
+const getWebsiteAcquisitionProfileLimits = (acquisitionProfile) => {
+  const profile = normalizeAcquisitionProfile(acquisitionProfile)
+  return WEBSITE_ACQUISITION_PROFILE_LIMITS[profile]
+    || WEBSITE_ACQUISITION_PROFILE_LIMITS[DISCOVERY_ACQUISITION_PROFILES.STANDARD]
+}
+
+const getDiscoveryGraphDomain = (coverageArea = '') => {
+  const normalizedArea = String(coverageArea || '').trim()
+  return DISCOVERY_GRAPH_DOMAIN_BY_COVERAGE_AREA[normalizedArea] || normalizedArea || 'Unknown'
+}
+
+const getEvidenceConfidenceInputs = (evidenceObject = {}) => {
+  const confidence = isPlainObject(evidenceObject.confidence) ? evidenceObject.confidence : {}
+  const basis = Array.isArray(confidence.basis)
+    ? confidence.basis
+    : Array.isArray(evidenceObject.confidenceFactors)
+      ? evidenceObject.confidenceFactors
+      : []
+  return {
+    level: String(confidence.level || evidenceObject.confidenceLevel || 'UNKNOWN').trim().toUpperCase(),
+    score: normalizeGraphReadyConfidenceScore(confidence.score ?? evidenceObject.confidenceScore),
+    factors: basis.map((item) => String(item || '').trim()).filter(Boolean),
+    warnings: Array.isArray(confidence.warnings)
+      ? confidence.warnings.map((item) => String(item || '').trim()).filter(Boolean)
+      : [],
+  }
+}
+
+const deriveGraphReadyEvidenceMetadata = (evidenceObject = {}) => {
+  const reviewStatus = normalizeReviewStatus(evidenceObject.reviewStatus)
+  const graphDomain = getDiscoveryGraphDomain(evidenceObject.coverageArea || evidenceObject.category)
+  const confidence = getEvidenceConfidenceInputs(evidenceObject)
+  const rejected = reviewStatus === DISCOVERY_EVIDENCE_REVIEW_STATUSES.REJECTED
+  const pending = reviewStatus === DISCOVERY_EVIDENCE_REVIEW_STATUSES.PENDING
+  const sourceBacked = [
+    'WEBSITE_ACQUISITION',
+    'DOCUMENT_INGESTION',
+  ].includes(String(evidenceObject.acquisitionMethod || '').trim().toUpperCase())
+  const materiality = rejected
+    ? 'UNKNOWN'
+    : DISCOVERY_MATERIALITY_BY_GRAPH_DOMAIN[graphDomain] || 'MEDIUM'
+  const decisionImpact = rejected
+    ? 'UNKNOWN'
+    : DISCOVERY_DECISION_IMPACT_BY_GRAPH_DOMAIN[graphDomain] || 'OPERATIONAL'
+  const signalStrength = rejected
+    ? DISCOVERY_SIGNAL_STRENGTHS.MISSING
+    : confidence.score !== null && confidence.score >= 0.75 && sourceBacked
+      ? DISCOVERY_SIGNAL_STRENGTHS.STRONG
+      : confidence.score !== null && confidence.score >= 0.65
+        ? DISCOVERY_SIGNAL_STRENGTHS.MODERATE
+        : DISCOVERY_SIGNAL_STRENGTHS.WEAK
+  const readinessContribution = rejected
+    ? DISCOVERY_READINESS_CONTRIBUTIONS.NONE
+    : pending
+      ? DISCOVERY_READINESS_CONTRIBUTIONS.SUPPORTING
+      : signalStrength === DISCOVERY_SIGNAL_STRENGTHS.STRONG
+        ? DISCOVERY_READINESS_CONTRIBUTIONS.STRONG
+        : DISCOVERY_READINESS_CONTRIBUTIONS.SUPPORTING
+
+  return {
+    evidenceId: String(evidenceObject.evidenceObjectId || '').trim(),
+    sourceId: String(evidenceObject.sourceId || '').trim(),
+    domain: graphDomain,
+    classification: String(evidenceObject.category || graphDomain).trim(),
+    confidence: confidence.level,
+    confidenceScore: confidence.score,
+    confidenceFactors: confidence.factors,
+    confidenceWarnings: [
+      ...confidence.warnings,
+      ...(pending ? ['EVIDENCE_REVIEW_PENDING'] : []),
+      ...(rejected ? ['EVIDENCE_REJECTED'] : []),
+    ],
+    materiality,
+    materialityScore: DISCOVERY_MATERIALITY_SCORES[materiality],
+    decisionImpact,
+    decisionImpactScore: DISCOVERY_DECISION_IMPACT_SCORES[decisionImpact],
+    signalStrength,
+    readinessContribution,
+    readinessDomain: graphDomain,
+    truthDomain: DISCOVERY_TRUTH_DOMAIN_BY_GRAPH_DOMAIN[graphDomain] || 'unknown',
+    validationStatus: rejected
+      ? 'REJECTED'
+      : pending
+        ? 'UNVALIDATED'
+        : 'VALIDATED',
+  }
+}
 
 const normalizeDocumentExtractionText = (value) => String(value ?? '')
   .slice(0, DOCUMENT_ACQUISITION_LIMITS.maxTextCharacters)
@@ -880,8 +1155,9 @@ const extractHtmlMatch = (html, pattern) => {
   return sanitizeFact(stripHtmlToText(match?.[1] || ''))
 }
 
-const extractHtmlSegments = (html) => {
+const extractHtmlSegments = (html, { acquisitionProfile } = {}) => {
   const sourceHtml = String(html || '')
+  const profileLimits = getWebsiteAcquisitionProfileLimits(acquisitionProfile)
   const title = extractHtmlMatch(sourceHtml, /<title[^>]*>([\s\S]*?)<\/title>/i)
   const description = extractHtmlMatch(
     sourceHtml,
@@ -902,7 +1178,7 @@ const extractHtmlSegments = (html) => {
     title ? { kind: 'title', text: title } : null,
     description ? { kind: 'description', text: description } : null,
     ...headingMatches.map((text) => ({ kind: 'heading', text })),
-    ...bodySegments.slice(0, WEBSITE_ACQUISITION_LIMITS.maxCandidateSegments).map((text) => ({ kind: 'body', text })),
+    ...bodySegments.slice(0, profileLimits.maxCandidateSegments).map((text) => ({ kind: 'body', text })),
   ].filter(Boolean)
     .filter((segment) => isGovernedDiscoveryEvidenceFact(segment.text))
 
@@ -1732,42 +2008,45 @@ const buildWebsiteEvidenceObjects = ({
   finalUrl,
   sourceId,
   segments,
-} = {}) => segments
-  .slice(0, WEBSITE_ACQUISITION_LIMITS.maxEvidenceObjects)
-  .map((segment) => {
-    const classification = classifyWebsiteSegment(segment)
-    const extractedFact = sanitizeFact(`Website ${segment.kind}: ${segment.text}`)
-    const evidenceHash = hashValue({
-      sourceId,
-      extractedFact,
-      acquisitionProfile,
-    })
+} = {}) => {
+  const profileLimits = getWebsiteAcquisitionProfileLimits(acquisitionProfile)
+  return segments
+    .slice(0, profileLimits.maxEvidenceObjects)
+    .map((segment) => {
+      const classification = classifyWebsiteSegment(segment)
+      const extractedFact = sanitizeFact(`Website ${segment.kind}: ${segment.text}`)
+      const evidenceHash = hashValue({
+        sourceId,
+        extractedFact,
+        acquisitionProfile,
+      })
 
-    return {
-      evidenceObjectId: `evidence_website_${evidenceHash}`,
-      sourceId,
-      category: classification.category,
-      coverageArea: classification.coverageArea,
-      extractedFact,
-      confidence: {
-        level: 'SOURCE_BACKED',
-        score: 72,
-        basis: ['WEBSITE_PAGE_ACQUIRED', 'DETERMINISTIC_TEXT_EXTRACTION'],
-      },
-      createdAt: acquiredAt,
-      reviewStatus: DISCOVERY_EVIDENCE_REVIEW_STATUSES.PENDING,
-      acquisitionMethod: 'WEBSITE_ACQUISITION',
-      extractionTimestamp: acquiredAt,
-      acceptedBy: '',
-      acceptanceTimestamp: '',
-      rejectedBy: '',
-      rejectionTimestamp: '',
-      auditRef: '',
-      lineageRef: `lineage:${sourceId}:${evidenceHash}`,
-      acquisitionProfile,
-      sourceUrl: finalUrl,
-    }
-  })
+      return {
+        evidenceObjectId: `evidence_website_${evidenceHash}`,
+        sourceId,
+        category: classification.category,
+        coverageArea: classification.coverageArea,
+        extractedFact,
+        confidence: {
+          level: 'SOURCE_BACKED',
+          score: 72,
+          basis: ['WEBSITE_PAGE_ACQUIRED', 'DETERMINISTIC_TEXT_EXTRACTION'],
+        },
+        createdAt: acquiredAt,
+        reviewStatus: DISCOVERY_EVIDENCE_REVIEW_STATUSES.PENDING,
+        acquisitionMethod: 'WEBSITE_ACQUISITION',
+        extractionTimestamp: acquiredAt,
+        acceptedBy: '',
+        acceptanceTimestamp: '',
+        rejectedBy: '',
+        rejectionTimestamp: '',
+        auditRef: '',
+        lineageRef: `lineage:${sourceId}:${evidenceHash}`,
+        acquisitionProfile,
+        sourceUrl: finalUrl,
+      }
+    })
+}
 
 export const acquireWebsiteDiscoveryEvidence = async ({
   acquisitionProfile,
@@ -1813,7 +2092,7 @@ export const acquireWebsiteDiscoveryEvidence = async ({
     text: html,
     truncated: contentTruncated,
   } = await readWebsiteResponseText(response, { signal: controller.signal })
-  const segments = extractHtmlSegments(html)
+  const segments = extractHtmlSegments(html, { acquisitionProfile })
   if (segments.length === 0) {
     throw new Error('Website acquisition did not find extractable customer website text.')
   }
@@ -2164,7 +2443,7 @@ export const normalizeDiscoveryEvidenceObjects = ({
         return null
       }
 
-      return {
+      const normalizedEvidenceObject = {
         evidenceObjectId,
         sourceId,
         category: evidenceObject.category || DISCOVERY_EVIDENCE_CATEGORIES.COMPANY,
@@ -2199,6 +2478,26 @@ export const normalizeDiscoveryEvidenceObjects = ({
         ...(evidenceObject.sourceUrl ? { sourceUrl: String(evidenceObject.sourceUrl).trim() } : {}),
         ...(evidenceObject.sourceFileName ? { sourceFileName: String(evidenceObject.sourceFileName).trim() } : {}),
         ...(evidenceObject.documentAssetType ? { documentAssetType: String(evidenceObject.documentAssetType).trim() } : {}),
+      }
+      const graphReadyMetadata = deriveGraphReadyEvidenceMetadata(normalizedEvidenceObject)
+
+      return {
+        ...normalizedEvidenceObject,
+        domain: graphReadyMetadata.domain,
+        classification: graphReadyMetadata.classification,
+        confidenceScore: graphReadyMetadata.confidenceScore,
+        confidenceFactors: graphReadyMetadata.confidenceFactors,
+        confidenceWarnings: graphReadyMetadata.confidenceWarnings,
+        materiality: graphReadyMetadata.materiality,
+        materialityScore: graphReadyMetadata.materialityScore,
+        decisionImpact: graphReadyMetadata.decisionImpact,
+        decisionImpactScore: graphReadyMetadata.decisionImpactScore,
+        signalStrength: graphReadyMetadata.signalStrength,
+        readinessContribution: graphReadyMetadata.readinessContribution,
+        readinessDomain: graphReadyMetadata.readinessDomain,
+        truthDomain: graphReadyMetadata.truthDomain,
+        validationStatus: graphReadyMetadata.validationStatus,
+        graphReadyMetadata,
       }
     })
     .filter(Boolean)
@@ -2388,11 +2687,168 @@ export const buildDiscoveryCoverageAreas = (evidenceObjects = []) => {
   })
 }
 
+const buildDiscoverySignalCandidates = ({
+  evidenceObjects = [],
+  sourceRegistry = [],
+} = {}) => {
+  const sourceTypeById = new Map(sourceRegistry.map((source) => [
+    String(source?.sourceId || '').trim(),
+    String(source?.sourceType || '').trim().toUpperCase(),
+  ]))
+  const activeEvidenceObjects = evidenceObjects.filter((evidenceObject) =>
+    normalizeReviewStatus(evidenceObject?.reviewStatus) !== DISCOVERY_EVIDENCE_REVIEW_STATUSES.REJECTED,
+  )
+  const groupedEvidence = activeEvidenceObjects.reduce((groups, evidenceObject) => {
+    const domain = evidenceObject.graphReadyMetadata?.domain
+      || getDiscoveryGraphDomain(evidenceObject.coverageArea || evidenceObject.category)
+    if (!domain || domain === 'Unknown') return groups
+    if (!groups.has(domain)) groups.set(domain, [])
+    groups.get(domain).push(evidenceObject)
+    return groups
+  }, new Map())
+
+  return Array.from(groupedEvidence.entries()).map(([domain, domainEvidence]) => {
+    const acceptedCount = domainEvidence.filter((evidenceObject) =>
+      normalizeReviewStatus(evidenceObject.reviewStatus) === DISCOVERY_EVIDENCE_REVIEW_STATUSES.ACCEPTED,
+    ).length
+    const pendingCount = domainEvidence.filter((evidenceObject) =>
+      normalizeReviewStatus(evidenceObject.reviewStatus) === DISCOVERY_EVIDENCE_REVIEW_STATUSES.PENDING,
+    ).length
+    const sourceTypes = Array.from(new Set(domainEvidence
+      .map((evidenceObject) => sourceTypeById.get(String(evidenceObject.sourceId || '').trim()) || '')
+      .filter(Boolean)))
+    const sourceDiversity = sourceTypes.length
+    const signalStrength = acceptedCount >= 2 && sourceDiversity >= 2
+      ? DISCOVERY_SIGNAL_STRENGTHS.STRONG
+      : acceptedCount >= 1 || domainEvidence.length >= 2
+        ? DISCOVERY_SIGNAL_STRENGTHS.MODERATE
+        : DISCOVERY_SIGNAL_STRENGTHS.WEAK
+
+    return {
+      signalId: `signal_${hashValue({ domain, evidenceObjectIds: domainEvidence.map((item) => item.evidenceObjectId) })}`,
+      domain,
+      signalStrength,
+      evidenceObjectCount: domainEvidence.length,
+      acceptedEvidenceCount: acceptedCount,
+      pendingReviewCount: pendingCount,
+      sourceCount: new Set(domainEvidence.map((item) => item.sourceId).filter(Boolean)).size,
+      sourceTypes,
+      summary: `${domain} evidence is ${signalStrength.toLowerCase()} based on ${acceptedCount} accepted and ${pendingCount} pending evidence object${domainEvidence.length === 1 ? '' : 's'}.`,
+      evidenceObjectIds: domainEvidence
+        .slice(0, 8)
+        .map((evidenceObject) => evidenceObject.evidenceObjectId)
+        .filter(Boolean),
+    }
+  }).sort((left, right) =>
+    right.acceptedEvidenceCount - left.acceptedEvidenceCount
+    || right.evidenceObjectCount - left.evidenceObjectCount
+    || left.domain.localeCompare(right.domain))
+}
+
+const hasNegatingEvidenceLanguage = (value) =>
+  /\b(no|not|never|without|lacks?|missing|limited|unable|cannot|can't|does not|do not|isn't|aren't)\b/i
+    .test(String(value || ''))
+
+const buildDiscoveryContradictionCandidates = (evidenceObjects = []) => {
+  const activeEvidenceObjects = evidenceObjects.filter((evidenceObject) =>
+    normalizeReviewStatus(evidenceObject?.reviewStatus) !== DISCOVERY_EVIDENCE_REVIEW_STATUSES.REJECTED,
+  )
+  const groupedEvidence = activeEvidenceObjects.reduce((groups, evidenceObject) => {
+    const domain = evidenceObject.graphReadyMetadata?.domain
+      || getDiscoveryGraphDomain(evidenceObject.coverageArea || evidenceObject.category)
+    if (!domain || domain === 'Unknown') return groups
+    if (!groups.has(domain)) groups.set(domain, [])
+    groups.get(domain).push(evidenceObject)
+    return groups
+  }, new Map())
+  const candidates = []
+
+  groupedEvidence.forEach((domainEvidence, domain) => {
+    const negatingEvidence = domainEvidence.filter((item) => hasNegatingEvidenceLanguage(item.extractedFact))
+    if (negatingEvidence.length === 0) return
+    const positiveEvidence = domainEvidence.filter((item) => !hasNegatingEvidenceLanguage(item.extractedFact))
+    if (positiveEvidence.length === 0) return
+
+    candidates.push({
+      contradictionId: `contradiction_${hashValue({
+        domain,
+        negative: negatingEvidence[0].evidenceObjectId,
+        positive: positiveEvidence[0].evidenceObjectId,
+      })}`,
+      domain,
+      severity: negatingEvidence.length > 1 ? 'MEDIUM' : 'LOW',
+      claimA: sanitizeFact(positiveEvidence[0].extractedFact).slice(0, 280),
+      claimB: sanitizeFact(negatingEvidence[0].extractedFact).slice(0, 280),
+      sourceRefs: Array.from(new Set([
+        positiveEvidence[0].sourceId,
+        negatingEvidence[0].sourceId,
+      ].filter(Boolean))),
+      evidenceObjectIds: [
+        positiveEvidence[0].evidenceObjectId,
+        negatingEvidence[0].evidenceObjectId,
+      ].filter(Boolean),
+      basis: 'Deterministic negation-language check across evidence in the same readiness domain.',
+    })
+  })
+
+  return candidates.slice(0, 8)
+}
+
+const buildDiscoveryReadinessAssessment = ({
+  contradictionCandidates = [],
+  coverageAreas = [],
+  evidenceObjects = [],
+  evidenceReady = false,
+  sourceRegistry = [],
+} = {}) => {
+  const reviewSummary = buildDiscoveryEvidenceReviewSummary(evidenceObjects)
+  const coveredAreaCount = coverageAreas.filter((area) => area.state !== 'MISSING').length
+  const coveragePercent = coverageAreas.length > 0
+    ? Math.round((coveredAreaCount / coverageAreas.length) * 100)
+    : 0
+  const sourceCount = sourceRegistry.length
+  const blockerReasons = []
+
+  if (!evidenceReady) blockerReasons.push('DISCOVERY_EVIDENCE_NOT_READY')
+  if (reviewSummary.acceptedEvidenceCount === 0) blockerReasons.push('NO_ACCEPTED_EVIDENCE')
+  if (coveragePercent < 40) blockerReasons.push('COVERAGE_BELOW_READINESS_THRESHOLD')
+  if (contradictionCandidates.some((candidate) => candidate.severity !== 'LOW')) {
+    blockerReasons.push('CONTRADICTIONS_REQUIRE_REVIEW')
+  }
+
+  const warningReasons = []
+  if (reviewSummary.pendingReviewCount > 0) warningReasons.push('EVIDENCE_REVIEW_PENDING')
+  if (sourceCount < 2) warningReasons.push('LIMITED_SOURCE_DIVERSITY')
+  if (coverageAreas.some((area) => area.state === 'MISSING')) warningReasons.push('MISSING_COVERAGE_AREAS')
+
+  const state = blockerReasons.length > 0
+    ? DISCOVERY_READINESS_STATES.NOT_READY
+    : warningReasons.length > 0 || coveragePercent < 70
+      ? DISCOVERY_READINESS_STATES.PARTIALLY_READY
+      : DISCOVERY_READINESS_STATES.READY
+
+  return {
+    state,
+    coveragePercent,
+    sourceCount,
+    evidenceObjectCount: reviewSummary.evidenceObjectCount,
+    acceptedEvidenceCount: reviewSummary.acceptedEvidenceCount,
+    pendingReviewCount: reviewSummary.pendingReviewCount,
+    rejectedEvidenceCount: reviewSummary.rejectedEvidenceCount,
+    contradictionCount: contradictionCandidates.length,
+    blockerReasons,
+    warningReasons,
+    assessedAt: '',
+  }
+}
+
 export const buildDiscoveryHealth = ({
   acquisitionProfile,
   coverage,
+  evidenceReady,
   evidenceObjects = [],
   lastAcquisitionDate,
+  needsRefresh = false,
   sourceRegistry = [],
 } = {}) => {
   const reviewSummary = buildDiscoveryEvidenceReviewSummary(evidenceObjects)
@@ -2404,6 +2860,21 @@ export const buildDiscoveryHealth = ({
   const missingAreas = coverageAreas
     .filter((area) => area.state === 'MISSING')
     .map((area) => area.area)
+  const signalCandidates = buildDiscoverySignalCandidates({ evidenceObjects, sourceRegistry })
+  const contradictionCandidates = buildDiscoveryContradictionCandidates(evidenceObjects)
+  const normalizedNeedsRefresh = needsRefresh === true
+  const normalizedEvidenceReady = normalizedNeedsRefresh
+    ? false
+    : typeof evidenceReady === 'boolean'
+      ? evidenceReady
+      : coverage?.status !== 'INPUT_REQUIRED'
+  const readiness = buildDiscoveryReadinessAssessment({
+    contradictionCandidates,
+    coverageAreas,
+    evidenceObjects,
+    evidenceReady: normalizedEvidenceReady,
+    sourceRegistry,
+  })
 
   return {
     coveragePercent,
@@ -2414,9 +2885,176 @@ export const buildDiscoveryHealth = ({
     rejectedEvidenceCount: reviewSummary.rejectedEvidenceCount,
     sourceCount: sourceRegistry.length,
     missingAreas,
-    acquisitionProfile,
+    acquisitionProfile: normalizeAcquisitionProfile(acquisitionProfile),
     lastAcquisitionDate: lastAcquisitionDate || '',
     coverageAreas,
+    signalCandidates,
+    contradictionCandidates,
+    readiness: {
+      ...readiness,
+      assessedAt: lastAcquisitionDate || '',
+    },
+  }
+}
+
+const hasSourceType = (sourceRegistry = [], sourceType) =>
+  sourceRegistry.some((source) =>
+    String(source?.sourceType || '').trim().toUpperCase() === sourceType)
+
+const hasEvidenceDomain = (coverageAreas = [], domain) =>
+  coverageAreas.some((area) =>
+    String(area?.area || '').trim().toLowerCase() === String(domain || '').trim().toLowerCase()
+    && String(area?.state || '').trim().toUpperCase() !== 'MISSING')
+
+const buildMissingRecommendedInputs = ({
+  coverageAreas = [],
+  inputs = {},
+  profile,
+  sourceRegistry = [],
+} = {}) => {
+  const missingInputs = []
+  const hasWebsite = Boolean(String(inputs.companyWebsite || '').trim()) || hasSourceType(sourceRegistry, 'WEBSITE')
+  const hasCompanyName = Boolean(String(inputs.companyName || '').trim())
+  const hasProductOffer = Boolean(String(inputs.targetOffer || '').trim()) || hasEvidenceDomain(coverageAreas, 'Products')
+  const hasNotesOrDocument = Boolean(String(inputs.notes || '').trim()) || hasSourceType(sourceRegistry, 'UPLOADED_DOCUMENT')
+
+  if (!hasWebsite) missingInputs.push('Website URL')
+  if (!hasCompanyName) missingInputs.push('Company name')
+  if (!hasProductOffer) missingInputs.push('Product / offer')
+  if (!hasNotesOrDocument) missingInputs.push('Notes or document')
+
+  if (profile === DISCOVERY_ACQUISITION_PROFILES.ENHANCED) {
+    if (!hasEvidenceDomain(coverageAreas, 'Proof')) missingInputs.push('Customer proof')
+    if (!hasSourceType(sourceRegistry, 'UPLOADED_DOCUMENT')) missingInputs.push('Sales deck or product material')
+  }
+
+  if (profile === DISCOVERY_ACQUISITION_PROFILES.STRATEGIC) {
+    if (!hasEvidenceDomain(coverageAreas, 'Market') && !hasEvidenceDomain(coverageAreas, 'Markets')) {
+      missingInputs.push('Market evidence')
+    }
+    if (!hasEvidenceDomain(coverageAreas, 'Differentiation')) missingInputs.push('Competitor evidence')
+    if (!hasEvidenceDomain(coverageAreas, 'Economics')) missingInputs.push('Economic or ROI evidence')
+    if (!hasEvidenceDomain(coverageAreas, 'Proof')) missingInputs.push('Customer proof')
+  }
+
+  return uniqueStrings(missingInputs)
+}
+
+const getAcquisitionQualityLabel = ({
+  blockerReasons = [],
+  confidenceLevel,
+  coveragePercent,
+  evidenceObjectCount,
+  readinessState,
+} = {}) => {
+  const normalizedReadiness = String(readinessState || '').trim().toUpperCase()
+  const normalizedConfidence = String(confidenceLevel || '').trim().toUpperCase()
+  if (evidenceObjectCount <= 0) return 'Not Started'
+  if (
+    normalizedReadiness === DISCOVERY_READINESS_STATES.NOT_READY
+    && Array.isArray(blockerReasons)
+    && blockerReasons.includes('DISCOVERY_EVIDENCE_NOT_READY')
+  ) {
+    return 'Needs Refresh'
+  }
+  if (normalizedReadiness === DISCOVERY_READINESS_STATES.READY && coveragePercent >= 80) return 'Strong'
+  if (coveragePercent >= 60 && ['SOURCE_BACKED', 'HIGH', 'MEDIUM_HIGH'].includes(normalizedConfidence)) return 'Good'
+  if (coveragePercent >= 40) return 'Developing'
+  return 'Limited'
+}
+
+const getRecommendedNextInput = ({
+  missingRecommendedInputs = [],
+  missingAreas = [],
+} = {}) => {
+  const nextInput = missingRecommendedInputs[0] || missingAreas[0] || ''
+  return nextInput ? `Add ${nextInput}.` : 'No immediate input gap is projected.'
+}
+
+export const buildDiscoveryAcquisitionEffectiveness = ({
+  acquisitionProfile,
+  discoveryHealth = {},
+  evidenceObjects = [],
+  inputs = {},
+  sourceRegistry = [],
+} = {}) => {
+  const profile = normalizeAcquisitionProfile(acquisitionProfile)
+  const guidance = DISCOVERY_PROFILE_GUIDANCE[profile] || DISCOVERY_PROFILE_GUIDANCE[DISCOVERY_ACQUISITION_PROFILES.STANDARD]
+  const reviewSummary = buildDiscoveryEvidenceReviewSummary(evidenceObjects)
+  const coverageAreas = Array.isArray(discoveryHealth.coverageAreas)
+    ? discoveryHealth.coverageAreas
+    : buildDiscoveryCoverageAreas(evidenceObjects)
+  const coveragePercent = Number.isFinite(Number(discoveryHealth.coveragePercent))
+    ? Number(discoveryHealth.coveragePercent)
+    : 0
+  const readiness = discoveryHealth.readiness && typeof discoveryHealth.readiness === 'object' && !Array.isArray(discoveryHealth.readiness)
+    ? discoveryHealth.readiness
+    : {}
+  const signalCandidates = Array.isArray(discoveryHealth.signalCandidates)
+    ? discoveryHealth.signalCandidates
+    : []
+  const contradictionCandidates = Array.isArray(discoveryHealth.contradictionCandidates)
+    ? discoveryHealth.contradictionCandidates
+    : []
+  const missingDomains = Array.isArray(discoveryHealth.missingAreas)
+    ? discoveryHealth.missingAreas.map((area) => String(area || '').trim()).filter(Boolean)
+    : coverageAreas
+        .filter((area) => String(area?.state || '').trim().toUpperCase() === 'MISSING')
+        .map((area) => String(area?.area || '').trim())
+        .filter(Boolean)
+  const missingRecommendedInputs = buildMissingRecommendedInputs({
+    coverageAreas,
+    inputs,
+    profile,
+    sourceRegistry,
+  })
+  const confidenceLevel = String(discoveryHealth.confidence || 'UNKNOWN').trim().toUpperCase()
+  const sourceTypes = uniqueStrings(sourceRegistry.map((source) => source?.sourceType))
+  const readinessState = String(readiness.state || '').trim().toUpperCase()
+  const qualityLabel = getAcquisitionQualityLabel({
+    blockerReasons: readiness.blockerReasons,
+    confidenceLevel,
+    coveragePercent,
+    evidenceObjectCount: reviewSummary.evidenceObjectCount,
+    readinessState,
+  })
+
+  return {
+    profile,
+    label: guidance.label,
+    summary: guidance.summary,
+    qualityLabel,
+    recommendedInputs: uniqueStrings([
+      ...guidance.minimumRecommendedInputs,
+      ...guidance.additionalUsefulInputs,
+    ]),
+    minimumRecommendedInputs: [...guidance.minimumRecommendedInputs],
+    additionalUsefulInputs: [...guidance.additionalUsefulInputs],
+    missingRecommendedInputs,
+    recommendedNextInput: getRecommendedNextInput({
+      missingAreas: missingDomains,
+      missingRecommendedInputs,
+    }),
+    targetCoverageRange: { ...guidance.targetCoverageRange },
+    targetEvidenceObjectRange: { ...guidance.targetEvidenceObjectRange },
+    metrics: {
+      sourceCount: sourceRegistry.length,
+      sourceTypes,
+      sourceDiversity: sourceTypes.length,
+      evidenceObjectCount: reviewSummary.evidenceObjectCount,
+      acceptedEvidenceCount: reviewSummary.acceptedEvidenceCount,
+      pendingReviewCount: reviewSummary.pendingReviewCount,
+      rejectedEvidenceCount: reviewSummary.rejectedEvidenceCount,
+      coveragePercent,
+      confidence: confidenceLevel,
+      readinessState,
+      missingDomainCount: missingDomains.length,
+      signalCount: signalCandidates.length,
+      strongSignalCount: signalCandidates.filter((signal) =>
+        String(signal?.signalStrength || '').trim().toUpperCase() === DISCOVERY_SIGNAL_STRENGTHS.STRONG).length,
+      contradictionCount: contradictionCandidates.length,
+    },
+    missingDomains,
   }
 }
 

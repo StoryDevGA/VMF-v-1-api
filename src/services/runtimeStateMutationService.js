@@ -53,6 +53,7 @@ import {
   acquireWebsiteDiscoveryEvidence,
   buildAcceptedDiscoveryScopedViews,
   applyDiscoveryEvidenceReview,
+  buildDiscoveryAcquisitionEffectiveness,
   buildDiscoveryEvidenceObjectsFromSources,
   buildDiscoveryEvidenceReviewSummary,
   buildDiscoveryHealth,
@@ -457,6 +458,9 @@ const buildDiscoveryMutationResponse = ({ runtimeInstance, evidencePack, previou
       Array.isArray(evidencePack.evidenceObjects) ? evidencePack.evidenceObjects : [],
     ),
     discoveryHealth: cloneValue(evidencePack.discoveryHealth || evidencePack.acquisition?.discoveryHealth || {}),
+    acquisitionEffectiveness: cloneValue(
+      evidencePack.acquisitionEffectiveness || evidencePack.acquisition?.effectiveness || {},
+    ),
     ...(evidencePack.resetSummary ? { resetSummary: cloneValue(evidencePack.resetSummary) } : {}),
   },
   mutation: {
@@ -1214,11 +1218,15 @@ export const buildDiscoveryEvidencePack = async ({
     capturedAt: refreshedAt,
     acquisitionProfile: profile,
   }))
-  const inputEvidenceObjects = buildDiscoveryEvidenceObjectsFromSources({
+  const inputEvidenceObjects = normalizeDiscoveryEvidenceObjects({
     acquisitionProfile: profile,
     createdAt: refreshedAt,
-    inputs: normalizedInputs,
-    sources: inputSources,
+    evidenceObjects: buildDiscoveryEvidenceObjectsFromSources({
+      acquisitionProfile: profile,
+      createdAt: refreshedAt,
+      inputs: normalizedInputs,
+      sources: inputSources,
+    }),
   })
   let websiteAcquisition = null
   let submittedWebsiteAcquisition = {
@@ -1321,12 +1329,18 @@ export const buildDiscoveryEvidencePack = async ({
     ...submittedWebsiteAcquisition.sources,
     ...documentSourcesForPack,
   ]
-  const evidenceObjects = [
-    ...inputEvidenceObjects,
-    ...(Array.isArray(websiteAcquisition?.evidenceObjects) ? websiteAcquisition.evidenceObjects : []),
-    ...submittedWebsiteAcquisition.evidenceObjects,
-    ...documentEvidenceObjectsForPack,
-  ]
+  const evidenceObjects = normalizeDiscoveryEvidenceObjects({
+    acquisitionProfile: profile,
+    createdAt: refreshedAt,
+    evidenceObjects: [
+      ...inputEvidenceObjects,
+      ...(Array.isArray(websiteAcquisition?.evidenceObjects) ? websiteAcquisition.evidenceObjects : []),
+      ...submittedWebsiteAcquisition.evidenceObjects,
+      ...documentEvidenceObjectsForPack,
+    ],
+    inputs: normalizedInputs,
+    sources,
+  })
   const inputSourceRegistry = buildDiscoverySourceRegistry({
     capturedAt: refreshedAt,
     evidenceObjects: inputEvidenceObjects,
@@ -1345,6 +1359,11 @@ export const buildDiscoveryEvidencePack = async ({
     )
   const sourceRefs = sources.map((source) => source.sourceId).filter(Boolean)
   const reviewSummary = buildDiscoveryEvidenceReviewSummary(evidenceObjects)
+  const websiteAcquisitionEvidenceObjects = [
+    ...(Array.isArray(websiteAcquisition?.evidenceObjects) ? websiteAcquisition.evidenceObjects : []),
+    ...submittedWebsiteAcquisition.evidenceObjects,
+  ]
+  const hasWebsiteAcquisitionEvidence = websiteAcquisitionEvidenceObjects.length > 0
   const baseCoverage = buildDiscoveryCoverageSummary({
     evidenceObjectCount: reviewSummary.evidenceObjectCount,
     evidenceReady,
@@ -1361,10 +1380,17 @@ export const buildDiscoveryEvidencePack = async ({
     lastAcquisitionDate: refreshedAt,
     sourceRegistry,
   })
-  const coverage = profile === DISCOVERY_ACQUISITION_PROFILES.ENHANCED
+  const shouldUseEvidenceDomainCoverage = profile === DISCOVERY_ACQUISITION_PROFILES.ENHANCED
+    || (
+      profile === DISCOVERY_ACQUISITION_PROFILES.STANDARD
+      && hasWebsiteAcquisitionEvidence
+    )
+  const coverage = shouldUseEvidenceDomainCoverage
     ? {
         ...baseCoverage,
-        status: evidenceReady ? 'SOURCE_BACKED_EVIDENCE_READY' : baseCoverage.status,
+        status: evidenceReady && hasWebsiteAcquisitionEvidence
+          ? 'SOURCE_BACKED_EVIDENCE_READY'
+          : baseCoverage.status,
         score: baseDiscoveryHealth.coveragePercent,
       }
     : baseCoverage
@@ -1381,11 +1407,13 @@ export const buildDiscoveryEvidencePack = async ({
     lastAcquisitionDate: refreshedAt,
     sourceRegistry,
   })
-  const websiteAcquisitionEvidenceObjects = [
-    ...(Array.isArray(websiteAcquisition?.evidenceObjects) ? websiteAcquisition.evidenceObjects : []),
-    ...submittedWebsiteAcquisition.evidenceObjects,
-  ]
-  const hasWebsiteAcquisitionEvidence = websiteAcquisitionEvidenceObjects.length > 0
+  const acquisitionEffectiveness = buildDiscoveryAcquisitionEffectiveness({
+    acquisitionProfile: profile,
+    discoveryHealth,
+    evidenceObjects,
+    inputs: normalizedInputs,
+    sourceRegistry,
+  })
   const websiteAcquisitionSourceCount = Number(submittedWebsiteAcquisition.sources.length)
     + (websiteAcquisition?.source ? 1 : 0)
   const websiteAcquisitionFailureCount = Number(submittedWebsiteAcquisition.failedSourceCount || 0)
@@ -1407,6 +1435,7 @@ export const buildDiscoveryEvidencePack = async ({
     coverage,
     confidence,
     discoveryHealth,
+    effectiveness: acquisitionEffectiveness,
     requestedAt: refreshedAt,
     completedAt: evidenceReady ? refreshedAt : null,
     ...(websiteAcquisitionSourceCount > 0
@@ -1553,6 +1582,7 @@ export const buildDiscoveryEvidencePack = async ({
     sourceRegistry,
     evidenceObjects,
     discoveryHealth,
+    acquisitionEffectiveness,
     scoped_views: scopedViews,
     lineage: {
       sources,
@@ -3335,6 +3365,13 @@ export const acceptRuntimeDiscovery = async ({
     lastAcquisitionDate: previousEvidencePack.refreshedAt || acceptedAt,
     sourceRegistry,
   })
+  const acquisitionEffectiveness = buildDiscoveryAcquisitionEffectiveness({
+    acquisitionProfile: previousEvidencePack.acquisition?.profile || previousEvidencePack.acquisitionProfile,
+    discoveryHealth,
+    evidenceObjects: acceptedEvidenceObjects,
+    inputs: previousEvidencePack.inputs || {},
+    sourceRegistry,
+  })
   const nextEvidencePack = {
     ...previousEvidencePack,
     inputComplete: true,
@@ -3346,6 +3383,7 @@ export const acceptRuntimeDiscovery = async ({
     sourceRegistry,
     evidenceObjects: acceptedEvidenceObjects,
     discoveryHealth,
+    acquisitionEffectiveness,
     scopedViews: acceptedScopedViews,
     scoped_views: acceptedScopedViews,
     ...(acceptedCoverage && isPlainObject(previousEvidencePack.acquisition)
@@ -3355,6 +3393,7 @@ export const acceptRuntimeDiscovery = async ({
             sourceRegistry,
             coverage: acceptedCoverage,
             discoveryHealth,
+            effectiveness: acquisitionEffectiveness,
           },
         }
       : {}),
@@ -3501,6 +3540,13 @@ export const reviewRuntimeDiscoveryEvidence = async ({
     lastAcquisitionDate: previousEvidencePack.refreshedAt || reviewedAt,
     sourceRegistry,
   })
+  const acquisitionEffectiveness = buildDiscoveryAcquisitionEffectiveness({
+    acquisitionProfile: previousEvidencePack.acquisition?.profile || previousEvidencePack.acquisitionProfile,
+    discoveryHealth,
+    evidenceObjects: reviewResult.evidenceObjects,
+    inputs: previousEvidencePack.inputs || {},
+    sourceRegistry,
+  })
   const nextEvidencePack = {
     ...previousEvidencePack,
     accepted: false,
@@ -3508,12 +3554,14 @@ export const reviewRuntimeDiscoveryEvidence = async ({
     sourceRegistry,
     evidenceObjects: reviewResult.evidenceObjects,
     discoveryHealth,
+    acquisitionEffectiveness,
     acquisition: isPlainObject(previousEvidencePack.acquisition)
       ? {
           ...previousEvidencePack.acquisition,
           sourceRegistry,
           coverage: nextCoverage,
           discoveryHealth,
+          effectiveness: acquisitionEffectiveness,
         }
       : previousEvidencePack.acquisition,
     evidence: isPlainObject(previousEvidencePack.evidence)
@@ -4583,7 +4631,7 @@ export const getRuntimeDiscoveryEvidence = async ({
     sourceRegistry: evidencePack.sourceRegistry || acquisition.sourceRegistry,
     sources: evidencePack.lineage?.sources || [],
   })
-  const discoveryHealth = evidencePack.discoveryHealth || acquisition.discoveryHealth || buildDiscoveryHealth({
+  const discoveryHealth = buildDiscoveryHealth({
     acquisitionProfile: acquisition.profile || evidencePack.acquisitionProfile || DISCOVERY_ACQUISITION_PROFILES.STANDARD,
     coverage: {
       ...projectionCoverage,
@@ -4591,6 +4639,13 @@ export const getRuntimeDiscoveryEvidence = async ({
     },
     evidenceObjects,
     lastAcquisitionDate: evidencePack.refreshedAt || acquisition.completedAt,
+    sourceRegistry,
+  })
+  const acquisitionEffectiveness = buildDiscoveryAcquisitionEffectiveness({
+    acquisitionProfile: acquisition.profile || evidencePack.acquisitionProfile || DISCOVERY_ACQUISITION_PROFILES.STANDARD,
+    discoveryHealth,
+    evidenceObjects,
+    inputs: evidencePack.inputs || {},
     sourceRegistry,
   })
 
@@ -4641,6 +4696,7 @@ export const getRuntimeDiscoveryEvidence = async ({
           : undefined,
       },
       evidenceObjectSummary: buildDiscoveryEvidenceReviewSummary(evidenceObjects),
+      acquisitionEffectiveness,
       sourceRegistrySummary: {
         count: sourceRegistry.length,
         sourceTypes: Array.from(new Set(sourceRegistry.map((source) => source.sourceType).filter(Boolean))),
@@ -4662,6 +4718,7 @@ export const getRuntimeDiscoveryEvidence = async ({
         sourceRegistry,
         evidenceObjects,
         discoveryHealth,
+        acquisitionEffectiveness,
         lineage,
         scoped_views: scopedViews,
         revisions: Array.isArray(evidencePack.revisions) ? evidencePack.revisions : [],

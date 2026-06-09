@@ -23,6 +23,10 @@ import {
   RUNTIME_INSTANCE_STATUSES,
   RUNTIME_TYPES,
 } from '../models/RuntimeInstance.js'
+import {
+  DISCOVERY_ACQUISITION_PROFILES,
+  ENABLED_DISCOVERY_ACQUISITION_PROFILES,
+} from '../constants/discoveryAcquisitionProfiles.js'
 import { UI_CONTRACT_STATUSES } from '../models/UIContract.js'
 import {
   WORKFLOW_POLICY_CONDITION_LOGIC,
@@ -52,6 +56,7 @@ import {
 } from './runtimeSectionModelService.js'
 import {
   acceptPendingDiscoveryEvidenceObjects,
+  buildDiscoveryAcquisitionEffectiveness,
   buildDiscoveryEvidenceReviewSummary,
   buildDiscoveryHealth,
   buildDiscoverySourceRegistry,
@@ -459,6 +464,31 @@ const getDiscoveryEvidencePack = (frameworkState = {}) =>
 
 const isStrictTrue = (value) => value === true
 
+const normalizeRendererAcquisitionProfile = (value) => {
+  const profile = String(value || '').trim().toUpperCase()
+  return ENABLED_DISCOVERY_ACQUISITION_PROFILES.includes(profile)
+    ? profile
+    : DISCOVERY_ACQUISITION_PROFILES.STANDARD
+}
+
+const stripRendererContradictionClaims = (discoveryHealth = {}) => {
+  if (!discoveryHealth || typeof discoveryHealth !== 'object' || Array.isArray(discoveryHealth)) {
+    return {}
+  }
+
+  const projection = cloneProjectionValue(discoveryHealth)
+  if (Array.isArray(projection.contradictionCandidates)) {
+    projection.contradictionCandidates = projection.contradictionCandidates.map((candidate) => {
+      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return candidate
+      const safeCandidate = { ...candidate }
+      delete safeCandidate.claimA
+      delete safeCandidate.claimB
+      return safeCandidate
+    })
+  }
+  return projection
+}
+
 const buildProjectionSummary = (value) => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return {
@@ -549,7 +579,10 @@ export const buildDiscoveryProjection = (frameworkState = {}, { includeInputValu
   if (accepted && isProjectionObject(acquisition.coverage)) {
     acquisition.coverage = buildAcceptedDiscoveryCoverageProjection(acquisition.coverage)
   }
-  const acquisitionProfile = String(acquisition.profile || evidencePack.acquisitionProfile || 'STANDARD').trim() || 'STANDARD'
+  const acquisitionProfile = normalizeRendererAcquisitionProfile(acquisition.profile || evidencePack.acquisitionProfile)
+  if (acquisition && typeof acquisition === 'object' && !Array.isArray(acquisition)) {
+    acquisition.profile = acquisitionProfile
+  }
   const lineageSources = Array.isArray(evidencePack.lineage?.sources) ? evidencePack.lineage.sources : []
   const normalizedEvidenceObjects = normalizeDiscoveryEvidenceObjects({
     acquisitionProfile,
@@ -571,21 +604,29 @@ export const buildDiscoveryProjection = (frameworkState = {}, { includeInputValu
     sourceRegistry: evidencePack.sourceRegistry || acquisition.sourceRegistry,
     sources: lineageSources,
   })
-  const persistedDiscoveryHealth = evidencePack.discoveryHealth || acquisition.discoveryHealth || null
-  const discoveryHealth = persistedDiscoveryHealth || (
-    sourceRegistry.length > 0 || evidenceObjects.length > 0
-      ? buildDiscoveryHealth({
-          acquisitionProfile,
-          coverage: {
-            ...(acquisition.coverage || evidencePack.evidence?.coverage || {}),
-            confidence: acquisition.confidence || evidencePack.evidence?.confidence,
-          },
-          evidenceObjects,
-          lastAcquisitionDate: evidencePack.refreshedAt || acquisition.completedAt,
-          sourceRegistry,
-        })
-      : {}
-  )
+  const discoveryHealth = sourceRegistry.length > 0 || evidenceObjects.length > 0
+    ? buildDiscoveryHealth({
+        acquisitionProfile,
+        coverage: {
+          ...(acquisition.coverage || evidencePack.evidence?.coverage || {}),
+          confidence: acquisition.confidence || evidencePack.evidence?.confidence,
+        },
+        evidenceReady,
+        evidenceObjects,
+        lastAcquisitionDate: evidencePack.refreshedAt || acquisition.completedAt,
+        needsRefresh,
+        sourceRegistry,
+      })
+    : {}
+  const acquisitionEffectiveness = sourceRegistry.length > 0 || evidenceObjects.length > 0
+    ? buildDiscoveryAcquisitionEffectiveness({
+        acquisitionProfile,
+        discoveryHealth,
+        evidenceObjects,
+        inputs: evidencePack.inputs || {},
+        sourceRegistry,
+      })
+    : cloneProjectionValue(evidencePack.acquisitionEffectiveness || acquisition.effectiveness || {})
   const intelligenceGraph = buildRuntimeIntelligenceGraphProjection(frameworkState.intelligence_graph)
 
   return {
@@ -623,7 +664,8 @@ export const buildDiscoveryProjection = (frameworkState = {}, { includeInputValu
       sourceTypes: Array.from(new Set(sourceRegistry.map((source) => source.sourceType).filter(Boolean))),
     },
     evidenceObjectSummary: buildDiscoveryEvidenceReviewSummary(evidenceObjects),
-    discoveryHealth: cloneProjectionValue(discoveryHealth),
+    discoveryHealth: stripRendererContradictionClaims(discoveryHealth),
+    acquisitionEffectiveness: cloneProjectionValue(acquisitionEffectiveness),
     intelligenceGraph,
     ...(isProjectionObject(evidencePack.resetSummary) ? { resetSummary: cloneProjectionValue(evidencePack.resetSummary) } : {}),
     ...(includeInputValues ? { inputValues: cloneProjectionValue(evidencePack.inputs || {}) } : {}),

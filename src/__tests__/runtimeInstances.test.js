@@ -357,6 +357,23 @@ const STYLE_ARTIFACT_WEBSITE_HTML = `
   </html>
 `
 
+const RICH_PROFILE_DIFFERENTIATION_WEBSITE_HTML = `
+  <html>
+    <head>
+      <title>Acme revenue operations platform</title>
+      <meta name="description" content="Acme helps enterprise sales teams run governed proposal workflows.">
+    </head>
+    <body>
+      <h1>Governed proposal platform</h1>
+      <p>Implementation services help sales teams launch managed value narrative delivery across enterprise buying teams.</p>
+      <p>Customer case studies show buyers reduced proposal effort by 35 percent after adopting Acme.</p>
+      <p>ROI analysis reports 22 percent cost savings and faster revenue productivity for commercial teams.</p>
+      <p>Unique certified narrative controls create differentiated buyer messaging without ungoverned claims.</p>
+      <p>Executive stakeholders use Acme decision evidence to align sales, finance, and delivery.</p>
+    </body>
+  </html>
+`
+
 const mockEnhancedWebsiteFetch = ({
   html = ENHANCED_WEBSITE_HTML,
   ok = true,
@@ -2661,6 +2678,28 @@ describe('Runtime Instance API', () => {
         reviewStatus: 'PENDING',
         acquisitionMethod: 'CUSTOMER_PROVIDED_INPUT',
         extractedFact: 'Company website: https://acme.example',
+        domain: 'Company',
+        classification: 'Company',
+        confidenceScore: 0.65,
+        materiality: 'HIGH',
+        materialityScore: 0.75,
+        decisionImpact: 'TACTICAL',
+        decisionImpactScore: 0.6,
+        signalStrength: 'MODERATE',
+        readinessContribution: 'SUPPORTING',
+        readinessDomain: 'Company',
+        truthDomain: 'commercial',
+        validationStatus: 'UNVALIDATED',
+        graphReadyMetadata: expect.objectContaining({
+          evidenceId: expect.any(String),
+          sourceId: 'input_companyWebsite',
+          domain: 'Company',
+          confidence: 'USER_PROVIDED',
+          confidenceScore: 0.65,
+          materiality: 'HIGH',
+          decisionImpact: 'TACTICAL',
+          readinessContribution: 'SUPPORTING',
+        }),
       }),
       expect.objectContaining({
         sourceId: 'input_notes',
@@ -2678,6 +2717,23 @@ describe('Runtime Instance API', () => {
       rejectedEvidenceCount: 0,
       sourceCount: 5,
       acquisitionProfile: 'STANDARD',
+      readiness: expect.objectContaining({
+        state: 'NOT_READY',
+        coveragePercent: 40,
+        acceptedEvidenceCount: 0,
+        pendingReviewCount: 5,
+        blockerReasons: expect.arrayContaining(['NO_ACCEPTED_EVIDENCE']),
+        warningReasons: expect.arrayContaining(['EVIDENCE_REVIEW_PENDING']),
+      }),
+      signalCandidates: expect.arrayContaining([
+        expect.objectContaining({
+          domain: 'Company',
+          signalStrength: 'MODERATE',
+          evidenceObjectCount: 2,
+          pendingReviewCount: 2,
+        }),
+      ]),
+      contradictionCandidates: [],
     }))
     expect(persistedEvidencePack.scoped_views.hidden_secret).toBeUndefined()
     expect(persistedEvidencePack.scoped_views.write_only).toBeUndefined()
@@ -2723,6 +2779,9 @@ describe('Runtime Instance API', () => {
       discoveryHealth: expect.objectContaining({
         evidenceObjectCount: 5,
         pendingReviewCount: 5,
+        readiness: expect.objectContaining({
+          state: 'NOT_READY',
+        }),
       }),
     }))
   })
@@ -2854,6 +2913,108 @@ describe('Runtime Instance API', () => {
         extractedFact: expect.stringMatching(/StylableButton|box-sizing|width:100%|var\(--|PnnIOa|:hover|cubic-bezier|transition:all|spC4EKo|:focus|box-shadow/),
       }),
     ]))
+  })
+
+  test('PATCH /api/v1/runtime-instances/:id/discovery-inputs differentiates Standard and Enhanced website depth without fake evidence', async () => {
+    mockEnhancedWebsiteFetch({ html: RICH_PROFILE_DIFFERENTIATION_WEBSITE_HTML })
+
+    const configureDiscoveryRuntime = () => {
+      const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+        updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+        framework_state: {
+          lifecycle: { stage: 'DRAFT' },
+          evidence_pack: {},
+          sections: {},
+          validation: {},
+          policy: {},
+          attachments: {},
+          artifacts: {},
+        },
+      })
+      RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+      RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+        ...runtimeInstanceDoc,
+        ...(update?.$set || {}),
+        updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+      }))
+      RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeEvidencePackRuntimePathRecord()))
+      RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([
+        makeRuntimePathRecord(),
+        makeEvidencePackRuntimePathRecord(),
+      ]))
+      UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+        sections: [
+          {
+            sectionKey: 'customer_problem',
+            runtimePath: 'framework_state.sections.customer_problem',
+            displayOrder: 10,
+            isVisible: true,
+          },
+        ],
+      })))
+      FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+        sections: [
+          {
+            sectionKey: 'customer_problem',
+            runtimePath: 'framework_state.sections.customer_problem',
+            required: true,
+          },
+        ],
+      }))
+    }
+
+    const runDiscoveryRefresh = async (acquisitionProfile) => {
+      configureDiscoveryRuntime()
+      const token = await getAccessTokenForUser(makeCustomerAdmin())
+      const res = await request
+        .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/discovery-inputs`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          acquisitionProfile,
+          inputs: {
+            websiteSources: ['https://acme.example'],
+            companyName: 'Acme',
+            marketRegion: 'UK enterprise',
+            targetOffer: 'Managed proposal platform',
+          },
+          expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+        })
+
+      expect(res.status).toBe(200)
+      return RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state.evidence_pack
+    }
+
+    const standardPack = await runDiscoveryRefresh('STANDARD')
+    const enhancedPack = await runDiscoveryRefresh('ENHANCED')
+    const standardWebsiteEvidenceObjects = standardPack.evidenceObjects.filter((evidenceObject) =>
+      evidenceObject.acquisitionMethod === 'WEBSITE_ACQUISITION')
+    const enhancedWebsiteEvidenceObjects = enhancedPack.evidenceObjects.filter((evidenceObject) =>
+      evidenceObject.acquisitionMethod === 'WEBSITE_ACQUISITION')
+    const standardCoverageAreas = standardPack.discoveryHealth.coverageAreas
+      .filter((area) => area.state !== 'MISSING')
+      .map((area) => area.area)
+    const enhancedCoverageAreas = enhancedPack.discoveryHealth.coverageAreas
+      .filter((area) => area.state !== 'MISSING')
+      .map((area) => area.area)
+    const standardFacts = standardWebsiteEvidenceObjects.map((evidenceObject) => evidenceObject.extractedFact).join(' ')
+    const enhancedFacts = enhancedWebsiteEvidenceObjects.map((evidenceObject) => evidenceObject.extractedFact).join(' ')
+
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2)
+    expect(standardWebsiteEvidenceObjects).toHaveLength(4)
+    expect(enhancedWebsiteEvidenceObjects.length).toBeGreaterThan(standardWebsiteEvidenceObjects.length)
+    expect(standardCoverageAreas).not.toEqual(expect.arrayContaining(['Proof', 'Economics', 'Differentiation']))
+    expect(enhancedCoverageAreas).toEqual(expect.arrayContaining(['Proof', 'Economics', 'Differentiation']))
+    expect(enhancedPack.discoveryHealth.coveragePercent).toBeGreaterThan(standardPack.discoveryHealth.coveragePercent)
+    expect(standardPack.acquisition.coverage.score).toBe(standardPack.discoveryHealth.coveragePercent)
+    expect(enhancedPack.acquisition.coverage.score).toBe(enhancedPack.discoveryHealth.coveragePercent)
+    expect(standardFacts).not.toContain('ROI analysis reports 22 percent cost savings')
+    expect(enhancedFacts).toContain('ROI analysis reports 22 percent cost savings')
+    expect(enhancedPack.acquisitionEffectiveness.metrics.evidenceObjectCount).toBeGreaterThan(
+      standardPack.acquisitionEffectiveness.metrics.evidenceObjectCount,
+    )
+    expect(enhancedPack.acquisitionEffectiveness.metrics.coveragePercent).toBeGreaterThan(
+      standardPack.acquisitionEffectiveness.metrics.coveragePercent,
+    )
   })
 
   test('PATCH /api/v1/runtime-instances/:id/discovery-inputs rejects Standard website sources without https', async () => {
@@ -5451,7 +5612,7 @@ describe('Runtime Instance API', () => {
       ocrPageLimitReached: true,
     }))
     expect(persistedSection.evidenceObjects.length).toBeGreaterThan(0)
-  })
+  }, 15000)
 
   test('PATCH /api/v1/runtime-instances/:id/section-evidence rejects unreadable PDF fallback text without partial persistence', async () => {
     const runtimeInstanceDoc = makeRuntimeInstanceDocument({
@@ -10464,6 +10625,26 @@ describe('Runtime Instance API', () => {
         }),
       }),
     }))
+    expect(persistedEvidencePack.acquisition.effectiveness).toEqual(expect.objectContaining({
+      profile: 'STANDARD',
+      qualityLabel: 'Limited',
+      missingRecommendedInputs: expect.arrayContaining(['Notes or document']),
+      recommendedNextInput: 'Add Notes or document.',
+      metrics: expect.objectContaining({
+        sourceCount: 4,
+        evidenceObjectCount: 4,
+        coveragePercent: 30,
+        readinessState: 'NOT_READY',
+      }),
+    }))
+    expect(persistedEvidencePack.acquisitionEffectiveness).toEqual(
+      persistedEvidencePack.acquisition.effectiveness,
+    )
+    expect(persistedEvidencePack.acquisitionEffectiveness).toEqual(expect.objectContaining({
+      label: 'Standard Acquisition',
+      recommendedInputs: expect.arrayContaining(['Website URL', 'Company name', 'Product / offer']),
+      targetCoverageRange: expect.objectContaining({ min: 40, max: 70 }),
+    }))
   })
 
   test('POST /api/v1/runtime-instances/:id/actions/BUILD_EVIDENCE_PACK executes Enhanced website acquisition', async () => {
@@ -10535,9 +10716,57 @@ describe('Runtime Instance API', () => {
       confidence: expect.objectContaining({
         level: 'SOURCE_BACKED',
       }),
+      discoveryHealth: expect.objectContaining({
+        readiness: expect.objectContaining({
+          state: 'NOT_READY',
+          blockerReasons: expect.arrayContaining(['NO_ACCEPTED_EVIDENCE']),
+        }),
+        signalCandidates: expect.arrayContaining([
+          expect.objectContaining({
+            domain: expect.any(String),
+            signalStrength: expect.stringMatching(/WEAK|MODERATE|STRONG/),
+          }),
+        ]),
+        contradictionCandidates: expect.any(Array),
+      }),
+      effectiveness: expect.objectContaining({
+        profile: 'ENHANCED',
+        qualityLabel: 'Developing',
+        missingRecommendedInputs: expect.arrayContaining([
+          'Notes or document',
+          'Customer proof',
+          'Sales deck or product material',
+        ]),
+        recommendedNextInput: 'Add Notes or document.',
+        metrics: expect.objectContaining({
+          sourceCount: persistedEvidencePack.sourceRegistry.length,
+          evidenceObjectCount: persistedEvidencePack.evidenceObjects.length,
+          coveragePercent: expect.any(Number),
+          confidence: 'SOURCE_BACKED',
+        }),
+      }),
     }))
+    expect(persistedEvidencePack.acquisitionEffectiveness).toEqual(
+      persistedEvidencePack.acquisition.effectiveness,
+    )
     expect(persistedEvidencePack.evidenceObjects.some((evidenceObject) =>
       evidenceObject.acquisitionMethod === 'WEBSITE_ACQUISITION')).toBe(true)
+    expect(persistedEvidencePack.evidenceObjects).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        acquisitionMethod: 'WEBSITE_ACQUISITION',
+        domain: expect.any(String),
+        confidenceScore: 0.72,
+        materiality: expect.stringMatching(/MEDIUM|HIGH|CRITICAL/),
+        decisionImpact: expect.stringMatching(/OPERATIONAL|TACTICAL|STRATEGIC|CRITICAL/),
+        signalStrength: 'MODERATE',
+        readinessContribution: 'SUPPORTING',
+        graphReadyMetadata: expect.objectContaining({
+          sourceId: expect.stringMatching(/^website_/),
+          confidence: 'SOURCE_BACKED',
+          confidenceScore: 0.72,
+        }),
+      }),
+    ]))
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'RUNTIME_ACTION_EXECUTED',
       diff: expect.objectContaining({
@@ -15258,7 +15487,10 @@ describe('Runtime Instance API', () => {
       accepted: false,
       needsRefresh: false,
       acquisitionProfile: 'STANDARD',
-      acquisition: {},
+      acquisition: expect.objectContaining({
+        profile: 'STANDARD',
+      }),
+      acquisitionEffectiveness: {},
       sourceRegistrySummary: {
         count: 0,
         sourceTypes: [],
@@ -16464,6 +16696,20 @@ describe('Runtime Instance API', () => {
         rejectedEvidenceCount: 0,
         sourceCount: 5,
         missingAreas: expect.arrayContaining(['Services', 'Proof', 'Economics']),
+        readiness: expect.objectContaining({
+          state: 'PARTIALLY_READY',
+          acceptedEvidenceCount: 5,
+          pendingReviewCount: 0,
+          warningReasons: expect.arrayContaining(['MISSING_COVERAGE_AREAS']),
+        }),
+        signalCandidates: expect.arrayContaining([
+          expect.objectContaining({
+            domain: 'Company',
+            acceptedEvidenceCount: expect.any(Number),
+            signalStrength: expect.stringMatching(/MODERATE|STRONG/),
+          }),
+        ]),
+        contradictionCandidates: [],
       }),
     }))
     expect(res.body.data.discovery.sourceRegistry).toBeUndefined()
@@ -16526,6 +16772,251 @@ describe('Runtime Instance API', () => {
       canGenerate: false,
       sources: [],
     }))
+  })
+
+  test('fails discovery readiness closed for stale accepted evidence with source data', async () => {
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
+    const staleEvidencePack = makeReadyDiscoveryEvidencePack({
+      inputComplete: true,
+      evidenceReady: true,
+      accepted: true,
+      needsRefresh: true,
+      acceptedAt: '2026-05-24T09:00:00.000Z',
+      acceptedBy: CUSTOMER_ADMIN_ID,
+      state: {
+        status: 'ACCEPTED',
+        inputComplete: true,
+        evidenceReady: true,
+        accepted: true,
+        needsRefresh: true,
+      },
+      sourceRegistry: [
+        makeDiscoverySourceRegistryEntry(),
+        makeDiscoverySourceRegistryEntry({
+          sourceId: 'input_targetOffer',
+          sourceType: 'DISCOVERY_NOTES',
+          label: 'Target Product or Offer',
+          lineageRef: 'lineage:input_targetOffer:fixture',
+          fieldKey: 'targetOffer',
+          url: undefined,
+        }),
+      ],
+      evidenceObjects: [
+        makeDiscoveryEvidenceObject({
+          evidenceObjectId: 'evidence_companyWebsite_fixture',
+          reviewStatus: 'ACCEPTED',
+        }),
+        makeDiscoveryEvidenceObject({
+          evidenceObjectId: 'evidence_targetOffer_fixture',
+          sourceId: 'input_targetOffer',
+          category: 'Products',
+          coverageArea: 'Products',
+          extractedFact: 'Target offer: Managed proposal platform',
+          lineageRef: 'lineage:input_targetOffer:fixture',
+          reviewStatus: 'ACCEPTED',
+        }),
+      ],
+      acquisition: {
+        profile: 'ENHANCED',
+        status: 'ACCEPTED',
+        coverage: {
+          status: 'SUFFICIENT_FOR_FRAMEWORK',
+          score: 70,
+        },
+        confidence: {
+          level: 'SOURCE_BACKED',
+        },
+      },
+      acquisitionProfile: 'ENHANCED',
+    })
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: staleEvidencePack,
+        sections: {
+          customer_problem: '',
+        },
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.discovery).toEqual(expect.objectContaining({
+      accepted: false,
+      evidenceReady: true,
+      needsRefresh: true,
+      state: expect.objectContaining({
+        status: 'NEEDS_REFRESH',
+      }),
+      discoveryHealth: expect.objectContaining({
+        readiness: expect.objectContaining({
+          state: 'NOT_READY',
+          blockerReasons: expect.arrayContaining(['DISCOVERY_EVIDENCE_NOT_READY']),
+          acceptedEvidenceCount: 2,
+        }),
+      }),
+      acquisitionEffectiveness: expect.objectContaining({
+        profile: 'ENHANCED',
+        qualityLabel: 'Needs Refresh',
+        metrics: expect.objectContaining({
+          readinessState: 'NOT_READY',
+          acceptedEvidenceCount: 2,
+        }),
+      }),
+    }))
+    expect(res.body.data.sections[0].generationEligibility).toEqual(expect.objectContaining({
+      canGenerate: false,
+      sources: [],
+    }))
+  })
+
+  test('redacts contradiction claim text from renderer discovery health', async () => {
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
+    const positiveClaim = 'Acme delivers governed proposal workflows for enterprise revenue teams.'
+    const negativeClaim = 'Acme does not provide governed proposal workflows for enterprise revenue teams.'
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: makeReadyDiscoveryEvidencePack({
+          evidenceObjects: [
+            makeDiscoveryEvidenceObject({
+              evidenceObjectId: 'evidence_company_positive',
+              sourceId: 'source_positive',
+              coverageArea: 'Company',
+              category: 'Company',
+              extractedFact: positiveClaim,
+              reviewStatus: 'PENDING',
+            }),
+            makeDiscoveryEvidenceObject({
+              evidenceObjectId: 'evidence_company_negative',
+              sourceId: 'source_negative',
+              coverageArea: 'Company',
+              category: 'Company',
+              extractedFact: negativeClaim,
+              reviewStatus: 'PENDING',
+            }),
+          ],
+          sourceRegistry: [
+            makeDiscoverySourceRegistryEntry({
+              sourceId: 'source_positive',
+              label: 'Positive source',
+              evidenceProduced: 1,
+            }),
+            makeDiscoverySourceRegistryEntry({
+              sourceId: 'source_negative',
+              label: 'Negative source',
+              evidenceProduced: 1,
+            }),
+          ],
+        }),
+        sections: {
+          customer_problem: '',
+        },
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.discovery.discoveryHealth.contradictionCandidates).toEqual([
+      expect.objectContaining({
+        contradictionId: expect.any(String),
+        domain: 'Company',
+        severity: 'LOW',
+        sourceRefs: expect.arrayContaining(['source_positive', 'source_negative']),
+        evidenceObjectIds: expect.arrayContaining(['evidence_company_positive', 'evidence_company_negative']),
+        basis: expect.any(String),
+      }),
+    ])
+    expect(res.body.data.discovery.discoveryHealth.contradictionCandidates[0]).not.toHaveProperty('claimA')
+    expect(res.body.data.discovery.discoveryHealth.contradictionCandidates[0]).not.toHaveProperty('claimB')
+    expect(JSON.stringify(res.body.data.discovery)).not.toContain(positiveClaim)
+    expect(JSON.stringify(res.body.data.discovery)).not.toContain(negativeClaim)
+  })
+
+  test('normalizes reserved Strategic acquisition profile in renderer projection', async () => {
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: makeReadyDiscoveryEvidencePack({
+          acquisitionProfile: 'STRATEGIC',
+          acquisition: {
+            profile: 'STRATEGIC',
+            status: 'EVIDENCE_READY',
+            coverage: {
+              status: 'SUFFICIENT_FOR_FRAMEWORK',
+              score: 70,
+            },
+            confidence: {
+              level: 'SOURCE_BACKED',
+            },
+          },
+          sourceRegistry: [
+            makeDiscoverySourceRegistryEntry({
+              acquisitionProfile: 'STRATEGIC',
+            }),
+          ],
+          evidenceObjects: [
+            makeDiscoveryEvidenceObject({
+              acquisitionProfile: 'STRATEGIC',
+            }),
+          ],
+        }),
+        sections: {
+          customer_problem: '',
+        },
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.discovery).toEqual(expect.objectContaining({
+      acquisitionProfile: 'STANDARD',
+      acquisition: expect.objectContaining({
+        profile: 'STANDARD',
+      }),
+      discoveryHealth: expect.objectContaining({
+        acquisitionProfile: 'STANDARD',
+      }),
+      acquisitionEffectiveness: expect.objectContaining({
+        profile: 'STANDARD',
+        label: 'Standard Acquisition',
+      }),
+    }))
+    expect(JSON.stringify(res.body.data.discovery)).not.toContain('Strategic Acquisition')
   })
 
   test('disables section generation eligibility when no discovery or section context exists', async () => {
