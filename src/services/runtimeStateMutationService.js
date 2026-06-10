@@ -1159,6 +1159,15 @@ const acquireSubmittedWebsiteSources = async ({
   return acquisitionResults
 }
 
+const buildWebsiteAcquisitionFailureDetails = (sourceRegistry = []) =>
+  sourceRegistry
+    .filter((source) => String(source?.acquisitionStatus || source?.status || '').trim().toUpperCase() === 'FAILED')
+    .map((source) => ({
+      url: String(source?.url || '').trim(),
+      failureReasonCode: String(source?.failureReasonCode || 'WEBSITE_ACQUISITION_FAILED').trim(),
+      failureReason: String(source?.failureReason || 'Website acquisition failed.').trim(),
+    }))
+
 const mergeDiscoveryEntriesByKey = (keyName, ...entryGroups) => {
   const entriesByKey = new Map()
 
@@ -1228,7 +1237,6 @@ export const buildDiscoveryEvidencePack = async ({
       sources: inputSources,
     }),
   })
-  let websiteAcquisition = null
   let submittedWebsiteAcquisition = {
     sources: [],
     sourceRegistry: [],
@@ -1248,13 +1256,15 @@ export const buildDiscoveryEvidencePack = async ({
     })
   }
   if (profile === DISCOVERY_ACQUISITION_PROFILES.ENHANCED && inputComplete) {
-    try {
-      websiteAcquisition = await acquireWebsiteDiscoveryEvidence({
-        acquisitionProfile: profile,
-        acquiredAt: refreshedAt,
-        websiteUrl: normalizedInputs.companyWebsite,
-      })
-    } catch (err) {
+    const enhancedWebsiteSources = explicitWebsiteSources.length > 0
+      ? explicitWebsiteSources
+      : [normalizedInputs.companyWebsite].filter(Boolean)
+    submittedWebsiteAcquisition = await acquireSubmittedWebsiteSources({
+      acquisitionProfile: profile,
+      capturedAt: refreshedAt,
+      websiteSources: enhancedWebsiteSources,
+    })
+    if (submittedWebsiteAcquisition.evidenceObjects.length === 0) {
       throw buildMutationError({
         status: 422,
         code: 'VALIDATION_FAILED',
@@ -1264,7 +1274,10 @@ export const buildDiscoveryEvidencePack = async ({
           acquisitionProfile: profile,
           companyWebsite: normalizedInputs.companyWebsite || '',
           acquisitionStatus: 'FAILED',
-          acquisitionError: err?.message || 'Website acquisition failed.',
+          acquisitionError: submittedWebsiteAcquisition.failedSourceCount > 0
+            ? 'Website acquisition failed for all submitted website sources.'
+            : 'Website acquisition did not produce reviewable evidence.',
+          websiteSourceFailures: buildWebsiteAcquisitionFailureDetails(submittedWebsiteAcquisition.sourceRegistry),
         },
       })
     }
@@ -1325,7 +1338,6 @@ export const buildDiscoveryEvidencePack = async ({
   )
   const sources = [
     ...inputSources,
-    ...(websiteAcquisition?.source ? [websiteAcquisition.source] : []),
     ...submittedWebsiteAcquisition.sources,
     ...documentSourcesForPack,
   ]
@@ -1334,7 +1346,6 @@ export const buildDiscoveryEvidencePack = async ({
     createdAt: refreshedAt,
     evidenceObjects: [
       ...inputEvidenceObjects,
-      ...(Array.isArray(websiteAcquisition?.evidenceObjects) ? websiteAcquisition.evidenceObjects : []),
       ...submittedWebsiteAcquisition.evidenceObjects,
       ...documentEvidenceObjectsForPack,
     ],
@@ -1348,21 +1359,17 @@ export const buildDiscoveryEvidencePack = async ({
   })
   const sourceRegistry = [
     ...inputSourceRegistry,
-    ...(websiteAcquisition?.sourceRegistryEntry ? [websiteAcquisition.sourceRegistryEntry] : []),
     ...submittedWebsiteAcquisition.sourceRegistry,
     ...documentRegistryForPack,
   ]
+  const websiteAcquisitionEvidenceObjects = submittedWebsiteAcquisition.evidenceObjects
   const evidenceReady = inputComplete
     && (
       profile !== DISCOVERY_ACQUISITION_PROFILES.ENHANCED
-      || Boolean(websiteAcquisition?.evidenceObjects?.length)
+      || websiteAcquisitionEvidenceObjects.length > 0
     )
   const sourceRefs = sources.map((source) => source.sourceId).filter(Boolean)
   const reviewSummary = buildDiscoveryEvidenceReviewSummary(evidenceObjects)
-  const websiteAcquisitionEvidenceObjects = [
-    ...(Array.isArray(websiteAcquisition?.evidenceObjects) ? websiteAcquisition.evidenceObjects : []),
-    ...submittedWebsiteAcquisition.evidenceObjects,
-  ]
   const hasWebsiteAcquisitionEvidence = websiteAcquisitionEvidenceObjects.length > 0
   const baseCoverage = buildDiscoveryCoverageSummary({
     evidenceObjectCount: reviewSummary.evidenceObjectCount,
@@ -1415,10 +1422,9 @@ export const buildDiscoveryEvidencePack = async ({
     sourceRegistry,
   })
   const websiteAcquisitionSourceCount = Number(submittedWebsiteAcquisition.sources.length)
-    + (websiteAcquisition?.source ? 1 : 0)
   const websiteAcquisitionFailureCount = Number(submittedWebsiteAcquisition.failedSourceCount || 0)
   const websiteAcquisitionAcquiredCount = Number(submittedWebsiteAcquisition.acquiredSourceCount || 0)
-    + (websiteAcquisition?.source ? 1 : 0)
+  const primaryWebsiteAcquisitionSource = submittedWebsiteAcquisition.sources[0] || null
   const acquisition = {
     profile,
     label: profileConfig.label,
@@ -1448,11 +1454,11 @@ export const buildDiscoveryEvidencePack = async ({
             acquiredSourceCount: websiteAcquisitionAcquiredCount,
             failedSourceCount: websiteAcquisitionFailureCount,
             evidenceProduced: websiteAcquisitionEvidenceObjects.length,
-            ...(websiteAcquisition?.source
+            ...(primaryWebsiteAcquisitionSource
               ? {
-                  sourceId: websiteAcquisition.source.sourceId,
-                  url: websiteAcquisition.source.url,
-                  finalUrl: websiteAcquisition.source.finalUrl,
+                  sourceId: primaryWebsiteAcquisitionSource.sourceId,
+                  url: primaryWebsiteAcquisitionSource.url,
+                  finalUrl: primaryWebsiteAcquisitionSource.finalUrl,
                 }
               : {}),
           },

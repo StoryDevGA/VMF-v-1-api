@@ -3250,6 +3250,244 @@ describe('Runtime Instance API', () => {
     }))
   })
 
+  test('PATCH /api/v1/runtime-instances/:id/discovery-inputs runs Enhanced acquisition across every submitted website source', async () => {
+    mockEnhancedWebsiteFetch()
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: {},
+        sections: {},
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+    }))
+    RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeEvidencePackRuntimePathRecord()))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([
+      makeRuntimePathRecord(),
+      makeEvidencePackRuntimePathRecord(),
+    ]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      sections: [
+        {
+          sectionKey: 'customer_problem',
+          runtimePath: 'framework_state.sections.customer_problem',
+          displayOrder: 10,
+          isVisible: true,
+        },
+      ],
+    })))
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      sections: [
+        {
+          sectionKey: 'customer_problem',
+          runtimePath: 'framework_state.sections.customer_problem',
+          required: true,
+        },
+      ],
+    }))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/discovery-inputs`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        acquisitionProfile: 'ENHANCED',
+        inputs: {
+          websiteSources: [
+            'https://acme.example',
+            'https://acme.example/product',
+          ],
+          companyName: 'Acme',
+          marketRegion: 'UK enterprise',
+          targetOffer: 'Managed proposal platform',
+        },
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+      })
+
+    expect(res.status).toBe(200)
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2)
+    expect(globalThis.fetch).toHaveBeenNthCalledWith(
+      1,
+      'https://acme.example/',
+      expect.objectContaining({ redirect: 'manual' }),
+    )
+    expect(globalThis.fetch).toHaveBeenNthCalledWith(
+      2,
+      'https://acme.example/product',
+      expect.objectContaining({ redirect: 'manual' }),
+    )
+    const persistedEvidencePack = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state.evidence_pack
+    const websiteSources = persistedEvidencePack.sourceRegistry.filter((source) =>
+      source.sourceId.startsWith('website_') && source.sourceType === 'WEBSITE')
+    const websiteEvidenceObjects = persistedEvidencePack.evidenceObjects.filter((evidenceObject) =>
+      evidenceObject.acquisitionMethod === 'WEBSITE_ACQUISITION')
+
+    expect(persistedEvidencePack.inputs).toEqual(expect.objectContaining({
+      companyWebsite: 'https://acme.example/',
+      websiteSources: [
+        'https://acme.example/',
+        'https://acme.example/product',
+      ],
+    }))
+    expect(persistedEvidencePack.acquisition.websiteAcquisition).toEqual(expect.objectContaining({
+      status: 'ACQUIRED',
+      sourceCount: 2,
+      acquiredSourceCount: 2,
+      failedSourceCount: 0,
+      evidenceProduced: websiteEvidenceObjects.length,
+      url: 'https://acme.example/',
+    }))
+    expect(websiteSources).toHaveLength(2)
+    expect(websiteSources).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        acquisitionProfile: 'ENHANCED',
+        acquisitionStatus: 'ACQUIRED',
+        url: 'https://acme.example/',
+      }),
+      expect.objectContaining({
+        acquisitionProfile: 'ENHANCED',
+        acquisitionStatus: 'ACQUIRED',
+        url: 'https://acme.example/product',
+      }),
+    ]))
+    expect(new Set(websiteEvidenceObjects.map((evidenceObject) => evidenceObject.sourceId)).size).toBe(2)
+  })
+
+  test('PATCH /api/v1/runtime-instances/:id/discovery-inputs preserves partial Enhanced website acquisition results', async () => {
+    mockEnhancedWebsiteFetch()
+    globalThis.fetch = jest.fn(async (url) => {
+      const normalizedUrl = String(url || '')
+      if (normalizedUrl.includes('/missing')) {
+        return {
+          ok: false,
+          status: 404,
+          url: normalizedUrl,
+          headers: {
+            get: jest.fn((key) => {
+              const normalizedKey = String(key).toLowerCase()
+              if (normalizedKey === 'content-type') return 'text/html; charset=utf-8'
+              if (normalizedKey === 'content-length') return '0'
+              return ''
+            }),
+          },
+          text: jest.fn(async () => ''),
+        }
+      }
+      return {
+        ok: true,
+        status: 200,
+        url: normalizedUrl,
+        headers: {
+          get: jest.fn((key) => {
+            const normalizedKey = String(key).toLowerCase()
+            if (normalizedKey === 'content-type') return 'text/html; charset=utf-8'
+            if (normalizedKey === 'content-length') return String(Buffer.byteLength(ENHANCED_WEBSITE_HTML, 'utf8'))
+            return ''
+          }),
+        },
+        text: jest.fn(async () => ENHANCED_WEBSITE_HTML),
+      }
+    })
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: {},
+        sections: {},
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+    }))
+    RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeEvidencePackRuntimePathRecord()))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([
+      makeRuntimePathRecord(),
+      makeEvidencePackRuntimePathRecord(),
+    ]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      sections: [
+        {
+          sectionKey: 'customer_problem',
+          runtimePath: 'framework_state.sections.customer_problem',
+          displayOrder: 10,
+          isVisible: true,
+        },
+      ],
+    })))
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      sections: [
+        {
+          sectionKey: 'customer_problem',
+          runtimePath: 'framework_state.sections.customer_problem',
+          required: true,
+        },
+      ],
+    }))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/discovery-inputs`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        acquisitionProfile: 'ENHANCED',
+        inputs: {
+          websiteSources: [
+            'https://acme.example',
+            'https://acme.example/missing',
+          ],
+          companyName: 'Acme',
+          marketRegion: 'UK enterprise',
+          targetOffer: 'Managed proposal platform',
+        },
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+      })
+
+    expect(res.status).toBe(200)
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2)
+    const persistedEvidencePack = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state.evidence_pack
+    const websiteSources = persistedEvidencePack.sourceRegistry.filter((source) =>
+      source.sourceId.startsWith('website_') && source.sourceType === 'WEBSITE')
+    const websiteEvidenceObjects = persistedEvidencePack.evidenceObjects.filter((evidenceObject) =>
+      evidenceObject.acquisitionMethod === 'WEBSITE_ACQUISITION')
+
+    expect(websiteEvidenceObjects.length).toBeGreaterThan(0)
+    expect(persistedEvidencePack.evidenceReady).toBe(true)
+    expect(persistedEvidencePack.acquisition.websiteAcquisition).toEqual(expect.objectContaining({
+      status: 'PARTIAL',
+      sourceCount: 2,
+      acquiredSourceCount: 1,
+      failedSourceCount: 1,
+      evidenceProduced: websiteEvidenceObjects.length,
+    }))
+    expect(websiteSources).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        acquisitionStatus: 'ACQUIRED',
+        url: 'https://acme.example/',
+      }),
+      expect.objectContaining({
+        acquisitionStatus: 'FAILED',
+        url: 'https://acme.example/missing',
+        failureReason: expect.stringContaining('HTTP 404'),
+      }),
+    ]))
+  })
+
   test('PATCH /api/v1/runtime-instances/:id/discovery-inputs ingests uploaded TXT document into governed Evidence Objects', async () => {
     const runtimeInstanceDoc = makeRuntimeInstanceDocument({
       updatedAt: new Date('2026-05-19T08:00:00.000Z'),
@@ -3953,6 +4191,13 @@ describe('Runtime Instance API', () => {
       reason: 'WEBSITE_ACQUISITION_FAILED',
       acquisitionProfile: 'ENHANCED',
       acquisitionStatus: 'FAILED',
+      websiteSourceFailures: [
+        expect.objectContaining({
+          url: 'https://acme.example',
+          failureReasonCode: 'WEBSITE_ACQUISITION_FAILED',
+          failureReason: expect.stringContaining('redirected outside the requested domain'),
+        }),
+      ],
     }))
     expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
     expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
