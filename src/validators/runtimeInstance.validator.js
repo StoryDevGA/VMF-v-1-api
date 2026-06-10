@@ -4,6 +4,10 @@ import {
   DISCOVERY_ACQUISITION_PROFILE_ERROR_MESSAGE,
   ENABLED_DISCOVERY_ACQUISITION_PROFILES,
 } from '../constants/discoveryAcquisitionProfiles.js'
+import {
+  OUTPUT_LAB_EXPORT_FORMATS,
+  OUTPUT_LAB_OUTPUT_TYPE_KEYS,
+} from '../constants/runtimeOutputLab.js'
 import { RUNTIME_INSTANCE_STATUSES, RUNTIME_TYPES } from '../models/RuntimeInstance.js'
 import { createBodyValidator, createParamsValidator, createQueryValidator } from './shared.js'
 
@@ -123,6 +127,32 @@ const runtimeActionParamsSchema = runtimeInstanceIdSchema.extend({
     .min(1, 'actionKey is required')
     .max(80, 'actionKey must be 80 characters or fewer')
     .transform((value) => value.toUpperCase()),
+})
+
+const runtimeOutputRequestParamsSchema = runtimeInstanceIdSchema.extend({
+  outputRequestId: z
+    .string({ required_error: 'outputRequestId is required' })
+    .trim()
+    .min(1, 'outputRequestId is required')
+    .max(180, 'outputRequestId must be 180 characters or fewer'),
+})
+
+const runtimeOutputAssetParamsSchema = runtimeInstanceIdSchema.extend({
+  outputAssetId: z
+    .string({ required_error: 'outputAssetId is required' })
+    .trim()
+    .min(1, 'outputAssetId is required')
+    .max(180, 'outputAssetId must be 180 characters or fewer'),
+})
+
+const runtimeOutputAssetExportParamsSchema = runtimeOutputAssetParamsSchema.extend({
+  format: z
+    .string({ required_error: 'format is required' })
+    .trim()
+    .transform((value) => value.toUpperCase())
+    .refine((value) => Object.values(OUTPUT_LAB_EXPORT_FORMATS).includes(value), {
+      message: 'format must be MARKDOWN or JSON',
+    }),
 })
 
 const expectedUpdatedAtSchema = z
@@ -759,6 +789,18 @@ const listRuntimeInstancesSchema = z.object({
   pageSize: z.coerce.number().int().min(1).max(100).optional().default(20),
 }).strict()
 
+const createRuntimeOutputRequestSchema = z.object({
+  outputTypeKey: z
+    .string({ required_error: 'outputTypeKey is required' })
+    .trim()
+    .transform((value) => value.toUpperCase())
+    .refine((value) => Object.values(OUTPUT_LAB_OUTPUT_TYPE_KEYS).includes(value), {
+      message: 'outputTypeKey must be a supported Output Lab type',
+    }),
+}).strict()
+
+const emptyRuntimeOutputMutationSchema = z.object({}).strict()
+
 export const validateCreateRuntimeInstance = createBodyValidator(createRuntimeInstanceSchema, {
   message: 'Request validation failed.',
   rootIssueKey: '_root',
@@ -904,5 +946,35 @@ export const validateRuntimeIntelligenceGraphQueryParams = createParamsValidator
 
 export const validateRuntimeActionParams = createParamsValidator(runtimeActionParamsSchema, {
   message: 'Invalid request parameters.',
+  rootIssueKey: '_root',
+})
+
+export const validateRuntimeOutputRequestParams = createParamsValidator(runtimeOutputRequestParamsSchema, {
+  message: 'Invalid request parameters.',
+  rootIssueKey: '_root',
+})
+
+export const validateRuntimeOutputAssetParams = createParamsValidator(runtimeOutputAssetParamsSchema, {
+  message: 'Invalid request parameters.',
+  rootIssueKey: '_root',
+})
+
+export const validateRuntimeOutputAssetExportParams = createParamsValidator(runtimeOutputAssetExportParamsSchema, {
+  message: 'Invalid request parameters.',
+  rootIssueKey: '_root',
+})
+
+export const validateCreateRuntimeOutputRequest = createBodyValidator(createRuntimeOutputRequestSchema, {
+  message: 'Request validation failed.',
+  rootIssueKey: '_root',
+})
+
+export const validateGenerateRuntimeOutputRequest = createBodyValidator(emptyRuntimeOutputMutationSchema, {
+  message: 'Request validation failed.',
+  rootIssueKey: '_root',
+})
+
+export const validatePublishRuntimeOutputAsset = createBodyValidator(emptyRuntimeOutputMutationSchema, {
+  message: 'Request validation failed.',
   rootIssueKey: '_root',
 })

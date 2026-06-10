@@ -1190,6 +1190,8 @@ let FrameworkPackage
 let RuntimeDeployment
 let RuntimeActivationSnapshot
 let RuntimeInstance
+let RuntimeOutputAsset
+let RuntimeOutputRequest
 let RuntimePathRegistry
 let UIContract
 let WorkflowPolicy
@@ -1231,6 +1233,8 @@ beforeAll(async () => {
   RuntimeDeployment = models.RuntimeDeployment
   RuntimeActivationSnapshot = models.RuntimeActivationSnapshot
   RuntimeInstance = models.RuntimeInstance
+  RuntimeOutputAsset = models.RuntimeOutputAsset
+  RuntimeOutputRequest = models.RuntimeOutputRequest
   RuntimePathRegistry = models.RuntimePathRegistry
   UIContract = models.UIContract
   WorkflowPolicy = models.WorkflowPolicy
@@ -1285,6 +1289,14 @@ beforeEach(() => {
   RuntimeInstance.countDocuments = jest.fn().mockResolvedValue(1)
   RuntimeInstance.distinct = jest.fn().mockResolvedValue([1])
   RuntimeInstance.deleteOne = jest.fn().mockResolvedValue({ deletedCount: 1 })
+  RuntimeOutputRequest.prototype.save = jest.fn(async function save() { return this })
+  RuntimeOutputRequest.find = jest.fn().mockReturnValue(buildRuntimeInstanceFindChain([]))
+  RuntimeOutputRequest.findOne = jest.fn().mockResolvedValue(null)
+  RuntimeOutputRequest.deleteOne = jest.fn().mockResolvedValue({ deletedCount: 1 })
+  RuntimeOutputAsset.prototype.save = jest.fn(async function save() { return this })
+  RuntimeOutputAsset.find = jest.fn().mockReturnValue(buildRuntimeInstanceFindChain([]))
+  RuntimeOutputAsset.findOne = jest.fn().mockResolvedValue(null)
+  RuntimeOutputAsset.deleteOne = jest.fn().mockResolvedValue({ deletedCount: 1 })
   AuditLog.find = jest.fn().mockReturnValue(buildAuditLogFindChain([]))
   AuditLog.createLog = jest.fn(async () => ({}))
 })
@@ -7877,6 +7889,181 @@ describe('Runtime Instance API', () => {
     ...overrides,
   })
 
+  const makeOutputLabFrameworkPackage = (overrides = {}) => makeFrameworkPackage({
+    sections: [
+      {
+        sectionKey: 'situation',
+        runtimePath: 'framework_state.sections.situation',
+        label: 'Situation',
+        required: true,
+      },
+      {
+        sectionKey: 'commercial_problem',
+        runtimePath: 'framework_state.sections.commercial_problem',
+        label: 'Commercial Problem',
+        required: true,
+      },
+      {
+        sectionKey: 'value_drivers',
+        runtimePath: 'framework_state.sections.value_drivers',
+        label: 'Value Drivers',
+        required: true,
+      },
+      {
+        sectionKey: 'recommended_focus',
+        runtimePath: 'framework_state.sections.recommended_focus',
+        label: 'Recommended Focus',
+        required: true,
+      },
+    ],
+    ...overrides,
+  })
+
+  const makeOutputLabGraph = () => makePersistedRuntimeIntelligenceGraph({
+    coverage: {
+      coverageModel: 'EVIDENCE_DOMAIN_COVERAGE',
+      coveragePercent: 100,
+      coveredDomainCount: 4,
+      totalDomainCount: 4,
+      missingDomains: [],
+      domains: [],
+    },
+    dependencies: {
+      sectionDependencyCount: 0,
+      missingDependencyTruthCount: 0,
+      sections: [],
+    },
+    health: {
+      state: 'READY',
+      nodeCount: 2,
+      edgeCount: 1,
+      acceptedEvidenceCount: 1,
+      orphanEvidenceCount: 0,
+      lowQualityEvidenceCount: 0,
+      unclassifiedEvidenceCount: 0,
+      missingDomainCount: 0,
+      dependencyCount: 0,
+      contradictionCount: 0,
+    },
+  })
+
+  const makeOutputLabReadyRuntime = (overrides = {}) => makeRuntimeInstance({
+    status: 'LOCKED',
+    executionStatus: 'COMPLETE',
+    lockedAt: '2026-06-05T10:05:00.000Z',
+    lockedBy: CUSTOMER_ADMIN_ID,
+    framework_state: {
+      lifecycle: {
+        stage: 'LOCKED',
+        publishedAt: '2026-06-05T10:00:00.000Z',
+        lockedAt: '2026-06-05T10:05:00.000Z',
+      },
+      sections: {
+        situation: {
+          accepted: {
+            content: 'Acme operates a governed proposal workflow for enterprise sales teams.',
+            acceptedAt: '2026-06-05T09:40:00.000Z',
+            acceptedBy: CUSTOMER_ADMIN_ID,
+            truthHash: 'sha256:situation-truth',
+          },
+        },
+        commercial_problem: {
+          accepted: {
+            content: 'Sales teams struggle to prove ROI because value evidence is inconsistent across proposals.',
+            acceptedAt: '2026-06-05T09:41:00.000Z',
+            acceptedBy: CUSTOMER_ADMIN_ID,
+            truthHash: 'sha256:problem-truth',
+          },
+        },
+        value_drivers: {
+          accepted: {
+            content: 'Governed value narratives reduce manual effort and create repeatable executive-ready messaging.',
+            acceptedAt: '2026-06-05T09:42:00.000Z',
+            acceptedBy: CUSTOMER_ADMIN_ID,
+            truthHash: 'sha256:value-truth',
+          },
+        },
+        recommended_focus: {
+          accepted: {
+            content: 'Prioritise outcome proof, decision context, and a concise commercial value story.',
+            acceptedAt: '2026-06-05T09:43:00.000Z',
+            acceptedBy: CUSTOMER_ADMIN_ID,
+            truthHash: 'sha256:focus-truth',
+          },
+        },
+      },
+      publish: {
+        state: 'PUBLISHED',
+        published: true,
+        publishedAt: '2026-06-05T10:00:00.000Z',
+        publishedBy: CUSTOMER_ADMIN_ID,
+        snapshot: {
+          snapshotId: 'runtime-truth-publish-output-lab-fixture',
+          snapshotHash: 'publish-output-lab-hash',
+        },
+      },
+      lock: {
+        state: 'LOCKED',
+        locked: true,
+        lockedAt: '2026-06-05T10:05:00.000Z',
+        lockedBy: CUSTOMER_ADMIN_ID,
+        snapshot: {
+          snapshotId: 'runtime-truth-lock-output-lab-fixture',
+          snapshotHash: 'lock-output-lab-hash',
+        },
+        anchor: {
+          replayAnchorId: 'runtime-replay-anchor-output-lab',
+          replayAnchorHash: 'replay-anchor-output-lab-hash',
+        },
+        replayAnchor: {
+          replayAnchorId: 'runtime-replay-anchor-output-lab',
+          replayAnchorHash: 'replay-anchor-output-lab-hash',
+        },
+        outputEligibility: {
+          state: 'OUTPUT_ELIGIBLE',
+          outputEligible: true,
+          canonicalOutputEligible: true,
+          anchorEligible: true,
+          intelligenceEligible: true,
+        },
+      },
+      validation: {},
+      readiness: {},
+      policy: {},
+      attachments: {},
+      artifacts: {},
+      intelligence_graph: makeOutputLabGraph(),
+    },
+    ...overrides,
+  })
+
+  const makeRuntimeOutputRequest = (overrides = {}) => ({
+    _id: 'd27f1f77bcf86cd799439111',
+    outputRequestId: 'out_req_output_lab_fixture',
+    tenantId: TENANT_ID,
+    customerId: CUSTOMER_ID,
+    runtimeInstanceId: RUNTIME_INSTANCE_ID,
+    runtimeInstanceKey: 'value-narrative-439111',
+    frameworkKey: 'VMF',
+    packageKey: 'vmf-standard-2-3-1',
+    packageVersion: '2.3.1',
+    outputTypeKey: 'EXECUTIVE_BRIEF',
+    outputTypeLabel: 'Executive Brief',
+    status: 'REQUESTED',
+    readinessState: 'READY',
+    readinessSummary: {},
+    requestedBy: CUSTOMER_ADMIN_ID,
+    requestedAt: '2026-06-05T10:10:00.000Z',
+    generatedAt: null,
+    outputAssetId: '',
+    failureReason: '',
+    save: jest.fn(async function save() { return this }),
+    toJSON: function toJSON() {
+      return { ...this, id: this._id }
+    },
+    ...overrides,
+  })
+
   test('POST /api/v1/runtime-instances/:id/intelligence-graph/rebuild persists a runtime-scoped graph with intelligence and truth nodes', async () => {
     const rejectedEvidenceObject = makeDiscoveryEvidenceObject({
       evidenceObjectId: 'evidence_rejected_fixture',
@@ -12333,6 +12520,221 @@ describe('Runtime Instance API', () => {
           nextGraphHash: persistedGraph.graphHash,
         }),
       }),
+    }))
+  })
+
+  test('Output Lab readiness blocks published runtimes without canonical lock eligibility', async () => {
+    const runtimeInstance = makeOutputLabReadyRuntime({
+      status: 'ACTIVE',
+      executionStatus: 'IDLE',
+      lockedAt: null,
+      lockedBy: null,
+      framework_state: {
+        ...makeOutputLabReadyRuntime().framework_state,
+        lifecycle: {
+          stage: 'PUBLISHED',
+          publishedAt: '2026-06-05T10:00:00.000Z',
+        },
+        lock: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/output-lab/readiness`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toEqual(expect.objectContaining({
+      state: 'BLOCKED',
+      canGenerate: false,
+    }))
+    expect(res.body.data.blockers.map((blocker) => blocker.code)).toEqual(expect.arrayContaining([
+      'RUNTIME_NOT_LOCKED',
+      'OUTPUT_ELIGIBILITY_MISSING',
+      'LOCK_SNAPSHOT_MISSING',
+      'REPLAY_ANCHOR_MISSING',
+    ]))
+    expect(RuntimeOutputAsset.find).not.toHaveBeenCalled()
+  })
+
+  test('Output Lab creates an audited request from a locked output-eligible runtime', async () => {
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/output-lab/requests`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ outputTypeKey: 'executive_brief' })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data).toEqual(expect.objectContaining({
+      outputTypeKey: 'EXECUTIVE_BRIEF',
+      outputTypeLabel: 'Executive Brief',
+      status: 'REQUESTED',
+      readinessState: 'READY',
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+    }))
+    expect(RuntimeOutputRequest.prototype.save).toHaveBeenCalledTimes(1)
+    expect(RuntimeOutputRequest.findOne).toHaveBeenCalledWith({
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      outputTypeKey: 'EXECUTIVE_BRIEF',
+      status: {
+        $in: ['REQUESTED', 'GENERATING'],
+      },
+    })
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'OUTPUT_REQUEST_CREATED',
+      resourceType: 'RuntimeInstance',
+      resourceId: RUNTIME_INSTANCE_ID,
+      diff: expect.objectContaining({
+        outputTypeKey: 'EXECUTIVE_BRIEF',
+        readinessState: 'READY',
+      }),
+    }))
+  })
+
+  test('Output Lab rejects duplicate active requests for the same output type', async () => {
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    RuntimeOutputRequest.findOne.mockResolvedValue(makeRuntimeOutputRequest({
+      outputRequestId: 'out_req_existing_active',
+      status: 'REQUESTED',
+    }))
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/output-lab/requests`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ outputTypeKey: 'executive_brief' })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.details.reason).toBe('OUTPUT_REQUEST_DUPLICATE')
+    expect(res.body.error.details.outputRequestId).toBe('out_req_existing_active')
+    expect(RuntimeOutputRequest.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+      action: 'OUTPUT_REQUEST_CREATED',
+    }))
+  })
+
+  test('Output Lab generates governed output and exports safe Markdown for downstream LLM expansion', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument(makeOutputLabReadyRuntime())
+    const outputRequest = makeRuntimeOutputRequest()
+    RuntimeInstance.findOne = jest.fn()
+      .mockImplementationOnce(() => Promise.resolve(runtimeInstanceDoc))
+      .mockImplementation(() => buildLeanQuery(runtimeInstanceDoc))
+    RuntimeOutputRequest.findOne.mockResolvedValue(outputRequest)
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const generateRes = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/output-lab/requests/${outputRequest.outputRequestId}/generate`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(generateRes.status).toBe(200)
+    expect(generateRes.body.data).toEqual(expect.objectContaining({
+      outputTypeKey: 'EXECUTIVE_BRIEF',
+      outputTypeLabel: 'Executive Brief',
+      status: 'GENERATED',
+      exportable: true,
+    }))
+    expect(generateRes.body.data.markdown).toContain('# Executive Brief')
+    expect(generateRes.body.data.markdown).toContain('Do not introduce new facts')
+    expect(generateRes.body.data.markdown).not.toContain('Extracted evidence snippets')
+    expect(JSON.stringify(generateRes.body.data.safeJson)).not.toContain('"nodes"')
+    expect(generateRes.body.data.safeJson.expansionGuardrails).toEqual(expect.objectContaining({
+      llmMayExpandPresentation: true,
+      llmMayCreateTruth: false,
+      llmMayInventEvidence: false,
+    }))
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'OUTPUT_GENERATION_COMPLETED',
+      resourceType: 'RuntimeInstance',
+      resourceId: RUNTIME_INSTANCE_ID,
+      diff: expect.objectContaining({
+        outputRequestId: outputRequest.outputRequestId,
+        outputTypeKey: 'EXECUTIVE_BRIEF',
+        lockSnapshotId: 'runtime-truth-lock-output-lab-fixture',
+        graphHash: 'sha256:graph-hash',
+      }),
+    }))
+
+    const savedAsset = RuntimeOutputAsset.prototype.save.mock.contexts[0]
+    RuntimeOutputAsset.findOne.mockResolvedValue(savedAsset)
+
+    const exportRes = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/output-lab/assets/${savedAsset.outputAssetId}/export/MARKDOWN`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(exportRes.status).toBe(200)
+    expect(exportRes.body.data).toEqual(expect.objectContaining({
+      format: 'MARKDOWN',
+      filename: 'value-narrative-439111-executive-brief.md',
+      mimeType: 'text/markdown',
+    }))
+    expect(exportRes.body.data.content).toContain('## Expansion Instruction')
+    expect(exportRes.body.data.content).toContain('## Lineage Summary')
+    expect(exportRes.body.data.content).not.toContain('sourceRegistry')
+    expect(exportRes.body.data.content).not.toContain('Extracted evidence snippets')
+  })
+
+  test('Output Lab generation rolls back the asset when audit persistence fails', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument(makeOutputLabReadyRuntime())
+    const outputRequest = makeRuntimeOutputRequest()
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeOutputRequest.findOne.mockResolvedValue(outputRequest)
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+    AuditLog.createLog.mockRejectedValueOnce(new Error('audit store unavailable'))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/output-lab/requests/${outputRequest.outputRequestId}/generate`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(500)
+    expect(res.body.error.code).toBe('OUTPUT_AUDIT_FAILED')
+    expect(res.body.error.details.reason).toBe('OUTPUT_AUDIT_PERSISTENCE_FAILED')
+    expect(RuntimeOutputAsset.deleteOne).toHaveBeenCalledWith({
+      _id: expect.anything(),
+    })
+    expect(outputRequest.status).toBe('REQUESTED')
+    expect(outputRequest.outputAssetId).toBe('')
+    expect(outputRequest.failureReason).toBe('Audit persistence failed.')
+  })
+
+  test('Output Lab rejects generating an already completed request', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument(makeOutputLabReadyRuntime())
+    const outputRequest = makeRuntimeOutputRequest({
+      status: 'COMPLETED',
+      outputAssetId: 'out_asset_existing',
+      generatedAt: '2026-06-05T10:11:00.000Z',
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeOutputRequest.findOne.mockResolvedValue(outputRequest)
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/output-lab/requests/${outputRequest.outputRequestId}/generate`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.details.reason).toBe('OUTPUT_REQUEST_ALREADY_GENERATED')
+    expect(res.body.error.details.outputAssetId).toBe('out_asset_existing')
+    expect(RuntimeOutputAsset.prototype.save).not.toHaveBeenCalled()
+    expect(outputRequest.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+      action: 'OUTPUT_GENERATION_COMPLETED',
     }))
   })
 

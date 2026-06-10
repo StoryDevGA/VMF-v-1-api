@@ -23,6 +23,8 @@ import RuntimeValidationAudit from './RuntimeValidationAudit.js'
 import RuntimeActivationSnapshot from './RuntimeActivationSnapshot.js'
 import RuntimeDeployment from './RuntimeDeployment.js'
 import RuntimeInstance from './RuntimeInstance.js'
+import RuntimeOutputAsset from './RuntimeOutputAsset.js'
+import RuntimeOutputRequest from './RuntimeOutputRequest.js'
 
 // Export all models
 export {
@@ -50,6 +52,8 @@ export {
   RuntimeActivationSnapshot,
   RuntimeDeployment,
   RuntimeInstance,
+  RuntimeOutputAsset,
+  RuntimeOutputRequest,
 }
 
 // Default export with all models
@@ -78,4 +82,6 @@ export default {
   RuntimeActivationSnapshot,
   RuntimeDeployment,
   RuntimeInstance,
+  RuntimeOutputAsset,
+  RuntimeOutputRequest,
 }

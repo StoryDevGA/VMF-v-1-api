@@ -27,6 +27,18 @@ import {
   updateRuntimeSectionEvidence as updateRuntimeSectionEvidenceRecord,
   updateRuntimeDiscoveryInputs as updateRuntimeDiscoveryInputsRecord,
 } from '../services/runtimeStateMutationService.js'
+import {
+  createRuntimeOutputRequest as createRuntimeOutputRequestRecord,
+  exportRuntimeOutputAsset as exportRuntimeOutputAssetRecord,
+  generateRuntimeOutputAsset as generateRuntimeOutputAssetRecord,
+  getOutputLabDefinitions as getRuntimeOutputLabDefinitionsRecord,
+  getRuntimeOutputAsset as getRuntimeOutputAssetRecord,
+  getRuntimeOutputLab as getRuntimeOutputLabRecord,
+  getRuntimeOutputLabReadiness as getRuntimeOutputLabReadinessRecord,
+  getRuntimeOutputRequest as getRuntimeOutputRequestRecord,
+  listRuntimeOutputAssets as listRuntimeOutputAssetsRecord,
+  publishRuntimeOutputAsset as publishRuntimeOutputAssetRecord,
+} from '../services/runtimeOutputLabService.js'
 
 const buildRuntimeInstanceErrorResponse = (req, err) => ({
   error: {
@@ -494,6 +506,206 @@ export const acceptRuntimeSection = async (req, res, next) => {
 
     return res.status(200).json({
       data: section,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const getRuntimeOutputLab = async (req, res, next) => {
+  try {
+    const outputLab = await getRuntimeOutputLabRecord({
+      scopes: req.scopes,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+    })
+
+    return res.status(200).json({
+      data: outputLab,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const getRuntimeOutputLabDefinitions = async (req, res, next) => {
+  try {
+    const definitions = await getRuntimeOutputLabDefinitionsRecord()
+
+    return res.status(200).json({
+      data: definitions,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const getRuntimeOutputLabReadiness = async (req, res, next) => {
+  try {
+    const readiness = await getRuntimeOutputLabReadinessRecord({
+      scopes: req.scopes,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+    })
+
+    return res.status(200).json({
+      data: readiness,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const createRuntimeOutputRequest = async (req, res, next) => {
+  try {
+    const outputRequest = await createRuntimeOutputRequestRecord({
+      actorUserId: req.context?.userId || req.userId,
+      auditRequest: req,
+      payload: req.body,
+      scopes: req.scopes,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+    })
+
+    return res.status(201).json({
+      data: outputRequest,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const getRuntimeOutputRequest = async (req, res, next) => {
+  try {
+    const outputRequest = await getRuntimeOutputRequestRecord({
+      scopes: req.scopes,
+      outputRequestId: req.params.outputRequestId,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+    })
+
+    return res.status(200).json({
+      data: outputRequest,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const generateRuntimeOutputRequest = async (req, res, next) => {
+  try {
+    const outputAsset = await generateRuntimeOutputAssetRecord({
+      actorUserId: req.context?.userId || req.userId,
+      auditRequest: req,
+      outputRequestId: req.params.outputRequestId,
+      scopes: req.scopes,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+    })
+
+    return res.status(200).json({
+      data: outputAsset,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const listRuntimeOutputAssets = async (req, res, next) => {
+  try {
+    const outputAssets = await listRuntimeOutputAssetsRecord({
+      scopes: req.scopes,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+    })
+
+    return res.status(200).json({
+      data: outputAssets,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const getRuntimeOutputAsset = async (req, res, next) => {
+  try {
+    const outputAsset = await getRuntimeOutputAssetRecord({
+      scopes: req.scopes,
+      outputAssetId: req.params.outputAssetId,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+    })
+
+    return res.status(200).json({
+      data: outputAsset,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const publishRuntimeOutputAsset = async (req, res, next) => {
+  try {
+    const outputAsset = await publishRuntimeOutputAssetRecord({
+      actorUserId: req.context?.userId || req.userId,
+      auditRequest: req,
+      outputAssetId: req.params.outputAssetId,
+      scopes: req.scopes,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+    })
+
+    return res.status(200).json({
+      data: outputAsset,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const exportRuntimeOutputAsset = async (req, res, next) => {
+  try {
+    const exportedAsset = await exportRuntimeOutputAssetRecord({
+      format: req.params.format,
+      scopes: req.scopes,
+      outputAssetId: req.params.outputAssetId,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+    })
+
+    return res.status(200).json({
+      data: exportedAsset,
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {

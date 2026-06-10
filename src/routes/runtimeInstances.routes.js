@@ -6,7 +6,9 @@ import {
   acceptRuntimeSection,
   clearRuntimeSectionEvidence,
   createRuntimeInstance,
+  createRuntimeOutputRequest,
   executeRuntimeAction,
+  exportRuntimeOutputAsset,
   getRuntimeInstance,
   getRuntimeEvidence,
   getRuntimeIntelligenceGraph,
@@ -15,9 +17,17 @@ import {
   getRuntimeIntelligenceGraphNodeLineage,
   getRuntimeIntelligenceGraphQuery,
   getRuntimeIntelligenceGraphSectionDependencies,
+  getRuntimeOutputAsset,
+  getRuntimeOutputLab,
+  getRuntimeOutputLabDefinitions,
+  getRuntimeOutputLabReadiness,
+  getRuntimeOutputRequest,
   getRuntimeRenderer,
+  generateRuntimeOutputRequest,
+  listRuntimeOutputAssets,
   listRuntimeInstances,
   mutateRuntimeState,
+  publishRuntimeOutputAsset,
   rebuildRuntimeIntelligenceGraph,
   resetRuntimeDiscovery,
   reviewAllRuntimeSectionEvidence,
@@ -30,10 +40,13 @@ import {
   validateAcceptRuntimeDiscovery,
   validateAcceptRuntimeSection,
   validateClearRuntimeSectionEvidence,
+  validateCreateRuntimeOutputRequest,
   validateCreateRuntimeInstance,
   validateExecuteRuntimeAction,
+  validateGenerateRuntimeOutputRequest,
   validateListRuntimeInstances,
   validateMutateRuntimeState,
+  validatePublishRuntimeOutputAsset,
   validateReviewAllRuntimeSectionEvidence,
   validateRebuildRuntimeIntelligenceGraph,
   validateReviewRuntimeDiscoveryEvidence,
@@ -43,6 +56,9 @@ import {
   validateRuntimeIntelligenceGraphQueryParams,
   validateRuntimeIntelligenceGraphSectionParams,
   validateRuntimeDiscoveryEvidenceParams,
+  validateRuntimeOutputAssetExportParams,
+  validateRuntimeOutputAssetParams,
+  validateRuntimeOutputRequestParams,
   validateRuntimeActionParams,
   validateRuntimeInstanceId,
   validateRuntimeSectionEvidenceParams,
@@ -140,6 +156,43 @@ router.post(
   executeRuntimeAction,
 )
 router.get('/:runtimeInstanceId/evidence', validateRuntimeInstanceId, getRuntimeEvidence)
+router.get('/:runtimeInstanceId/output-lab', validateRuntimeInstanceId, getRuntimeOutputLab)
+router.get('/:runtimeInstanceId/output-lab/definitions', validateRuntimeInstanceId, getRuntimeOutputLabDefinitions)
+router.get('/:runtimeInstanceId/output-lab/readiness', validateRuntimeInstanceId, getRuntimeOutputLabReadiness)
+router.post(
+  '/:runtimeInstanceId/output-lab/requests',
+  validateRuntimeInstanceId,
+  validateCreateRuntimeOutputRequest,
+  createRuntimeOutputRequest,
+)
+router.get(
+  '/:runtimeInstanceId/output-lab/requests/:outputRequestId',
+  validateRuntimeOutputRequestParams,
+  getRuntimeOutputRequest,
+)
+router.post(
+  '/:runtimeInstanceId/output-lab/requests/:outputRequestId/generate',
+  validateRuntimeOutputRequestParams,
+  validateGenerateRuntimeOutputRequest,
+  generateRuntimeOutputRequest,
+)
+router.get('/:runtimeInstanceId/output-lab/assets', validateRuntimeInstanceId, listRuntimeOutputAssets)
+router.get(
+  '/:runtimeInstanceId/output-lab/assets/:outputAssetId',
+  validateRuntimeOutputAssetParams,
+  getRuntimeOutputAsset,
+)
+router.post(
+  '/:runtimeInstanceId/output-lab/assets/:outputAssetId/publish',
+  validateRuntimeOutputAssetParams,
+  validatePublishRuntimeOutputAsset,
+  publishRuntimeOutputAsset,
+)
+router.get(
+  '/:runtimeInstanceId/output-lab/assets/:outputAssetId/export/:format',
+  validateRuntimeOutputAssetExportParams,
+  exportRuntimeOutputAsset,
+)
 router.get('/:runtimeInstanceId/renderer', validateRuntimeInstanceId, getRuntimeRenderer)
 router.get('/:runtimeInstanceId', validateRuntimeInstanceId, getRuntimeInstance)
 
