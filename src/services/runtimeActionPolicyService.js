@@ -93,6 +93,23 @@ const buildSnapshotId = ({ runtimeInstance, actionKey, snapshotHash }) => [
   String(snapshotHash || '').slice(0, 16),
 ].filter(Boolean).join('-')
 
+const hasOwnObjectValue = (source, key) =>
+  Object.prototype.hasOwnProperty.call(source, key)
+
+const isMongooseDocumentLike = (source) =>
+  Boolean(source && typeof source.get === 'function' && typeof source.toObject === 'function')
+
+const getObjectValue = (source, key) => {
+  if (source === null || source === undefined || !key || typeof source !== 'object') return undefined
+  if (source instanceof Map) return source.get(key)
+  if (isMongooseDocumentLike(source)) {
+    const value = source.get(key)
+    if (value !== undefined) return value
+  }
+  if (hasOwnObjectValue(source, key)) return source[key]
+  return undefined
+}
+
 const getValueAtPath = (source, path) => {
   const parts = String(path || '')
     .split('.')
@@ -103,15 +120,11 @@ const getValueAtPath = (source, path) => {
 
   let cursor = source
   for (const part of parts) {
-    if (
-      cursor === null
-      || cursor === undefined
-      || typeof cursor !== 'object'
-      || !Object.prototype.hasOwnProperty.call(cursor, part)
-    ) {
+    if (cursor === null || cursor === undefined || typeof cursor !== 'object') {
       return undefined
     }
-    cursor = cursor[part]
+    cursor = getObjectValue(cursor, part)
+    if (cursor === undefined) return undefined
   }
 
   return cursor
@@ -292,20 +305,24 @@ const getFrameworkPackageVersion = (frameworkPackage = {}) =>
 
 const buildAcceptedSectionSnapshot = ({ frameworkPackage, frameworkState }) => {
   const packageSections = Array.isArray(frameworkPackage?.sections) ? frameworkPackage.sections : []
-  const sections = frameworkState.sections || {}
+  const state = frameworkState || {}
+  const sections = getObjectValue(state, 'sections') || {}
 
   return packageSections
     .map((section) => {
-      const sectionKey = String(section?.sectionKey || '').trim()
-      const runtimePath = String(section?.runtimePath || '').trim()
-      const sectionValue = sections[sectionKey] || {}
+      const sectionKey = String(getObjectValue(section, 'sectionKey') || '').trim()
+      const runtimePath = String(getObjectValue(section, 'runtimePath') || '').trim()
+      const runtimePathValue = runtimePath
+        ? getValueAtPath({ framework_state: state }, runtimePath)
+        : undefined
+      const sectionValue = runtimePathValue ?? getObjectValue(sections, sectionKey) ?? {}
       const accepted = isRuntimeSectionObject(sectionValue) ? sectionValue.accepted || {} : {}
       const generated = isRuntimeSectionObject(sectionValue) ? sectionValue.generated || {} : {}
 
       return {
         sectionKey,
         runtimePath,
-        required: section?.required === true,
+        required: getObjectValue(section, 'required') === true,
         accepted: {
           content: accepted.content ?? null,
           acceptedAt: accepted.acceptedAt || null,
@@ -510,15 +527,6 @@ export const getRuntimeActionStateGate = ({
     return buildGate(false, 'Runtime is waiting for review and can only be approved or returned to draft.')
   }
 
-  if (executionStatus === RUNTIME_EXECUTION_STATUSES.WAITING_APPROVAL) {
-    if (![
-      RUNTIME_ACTION_KEYS.APPROVE,
-      RUNTIME_ACTION_KEYS.RETURN_TO_DRAFT,
-    ].includes(normalizedAction)) {
-      return buildGate(false, 'Runtime is waiting for review and can only be approved or returned to draft.')
-    }
-  }
-
   if (lifecycleStage === RUNTIME_LIFECYCLE_STAGES.APPROVED && normalizedAction !== RUNTIME_ACTION_KEYS.PUBLISH) {
     return buildGate(false, 'Approved runtimes can only be published.')
   }
@@ -658,12 +666,12 @@ export const applyRuntimeActionStateGate = ({
 export const validateRuntimeRequiredSections = ({ frameworkPackage, frameworkState } = {}) => {
   const normalizedState = normalizeFrameworkStateForAction(frameworkState)
   const requiredSections = (Array.isArray(frameworkPackage?.sections) ? frameworkPackage.sections : [])
-    .filter((section) => section?.required === true)
+    .filter((section) => getObjectValue(section, 'required') === true)
   const missingSections = requiredSections
     .map((section) => ({
-      sectionKey: String(section?.sectionKey || '').trim(),
-      runtimePath: String(section?.runtimePath || '').trim(),
-      value: getValueAtPath({ framework_state: normalizedState }, section?.runtimePath),
+      sectionKey: String(getObjectValue(section, 'sectionKey') || '').trim(),
+      runtimePath: String(getObjectValue(section, 'runtimePath') || '').trim(),
+      value: getValueAtPath({ framework_state: normalizedState }, getObjectValue(section, 'runtimePath')),
     }))
     .filter((section) => section.sectionKey && isEmptyRequiredValue(section.value))
 
@@ -978,7 +986,7 @@ export const buildRuntimeActionTransition = ({
     runtimeUpdate = {
       status: RUNTIME_INSTANCE_STATUSES.LOCKED,
       lockedAt: new Date(actionedAt),
-      lockedBy: actorUserId || null,
+      lockedBy: toIdString(actorUserId),
       lockedReason: 'Runtime published truth locked for downstream canonical use.',
     }
     nextExecutionStatus = RUNTIME_EXECUTION_STATUSES.COMPLETE

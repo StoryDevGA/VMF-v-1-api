@@ -49,6 +49,36 @@ const OUTPUT_LAB_REQUEST_LIST_LIMIT = 20
 const normalizeToken = (value) => String(value || '').trim().toUpperCase()
 const normalizeKey = (value) => String(value || '').trim().toLowerCase()
 const normalizeText = (value) => String(value ?? '').trim()
+
+const hasOwnObjectValue = (source, key) =>
+  Object.prototype.hasOwnProperty.call(source, key)
+
+const isMongooseDocumentLike = (source) =>
+  Boolean(source && typeof source.get === 'function' && typeof source.toObject === 'function')
+
+const getObjectValue = (source, key) => {
+  if (source === null || source === undefined || !key || typeof source !== 'object') return undefined
+  if (source instanceof Map) return source.get(key)
+  if (isMongooseDocumentLike(source)) {
+    const value = source.get(key)
+    if (value !== undefined) return value
+  }
+  if (hasOwnObjectValue(source, key)) return source[key]
+  return undefined
+}
+
+const getValueAtPath = (source, path) => {
+  const parts = normalizeText(path).split('.').filter(Boolean)
+  if (parts.length === 0) return undefined
+
+  let cursor = source
+  for (const part of parts) {
+    cursor = getObjectValue(cursor, part)
+    if (cursor === undefined || cursor === null) return cursor
+  }
+  return cursor
+}
+
 const normalizeDateValue = (value) => {
   if (!value) return ''
   const date = value instanceof Date ? value : new Date(value)
@@ -139,68 +169,82 @@ const resolveFrameworkPackage = async (runtimeInstance) => {
   const packageId = runtimeInstance?.packageId || runtimeInstance?.frameworkPackageId
   if (!packageId) return null
   const query = FrameworkPackage.findById(packageId)
-  return typeof query?.lean === 'function' ? query.lean() : query
+  return typeof query?.lean === 'function' ? await query.lean() : query
 }
 
-const getFrameworkState = (runtimeInstance = {}) => runtimeInstance.framework_state || {}
+const getFrameworkState = (runtimeInstance = {}) =>
+  getObjectValue(runtimeInstance, 'framework_state')
+  || getObjectValue(runtimeInstance, 'frameworkState')
+  || {}
 
 const getCanonicalOutputEligibility = (frameworkState = {}) => {
-  const lock = frameworkState.lock || {}
-  const outputEligibility = lock.outputEligibility || {}
-  const replayAnchor = lock.replayAnchor || lock.anchor || {}
-  const publish = frameworkState.publish || {}
+  const lock = getObjectValue(frameworkState, 'lock') || {}
+  const outputEligibility = getObjectValue(lock, 'outputEligibility') || {}
+  const replayAnchor = getObjectValue(lock, 'replayAnchor') || getObjectValue(lock, 'anchor') || {}
+  const publish = getObjectValue(frameworkState, 'publish') || {}
 
   return {
-    locked: Boolean(lock.locked === true || normalizeToken(lock.state) === 'LOCKED'),
-    published: Boolean(publish.published === true || normalizeToken(publish.state) === 'PUBLISHED'),
-    outputEligible: outputEligibility.outputEligible === true,
-    canonicalOutputEligible: outputEligibility.canonicalOutputEligible === true,
-    anchorEligible: outputEligibility.anchorEligible === true,
-    intelligenceEligible: outputEligibility.intelligenceEligible === true,
-    publishSnapshotId: publish.snapshot?.snapshotId || lock.publish?.snapshotId || '',
-    publishSnapshotHash: publish.snapshot?.snapshotHash || lock.publish?.snapshotHash || '',
-    lockSnapshotId: lock.snapshot?.snapshotId || '',
-    lockSnapshotHash: lock.snapshot?.snapshotHash || '',
-    replayAnchorId: replayAnchor.replayAnchorId || replayAnchor.anchorId || '',
-    replayAnchorHash: replayAnchor.replayAnchorHash || replayAnchor.anchorHash || '',
+    locked: Boolean(getObjectValue(lock, 'locked') === true || normalizeToken(getObjectValue(lock, 'state')) === 'LOCKED'),
+    published: Boolean(getObjectValue(publish, 'published') === true || normalizeToken(getObjectValue(publish, 'state')) === 'PUBLISHED'),
+    outputEligible: getObjectValue(outputEligibility, 'outputEligible') === true,
+    canonicalOutputEligible: getObjectValue(outputEligibility, 'canonicalOutputEligible') === true,
+    anchorEligible: getObjectValue(outputEligibility, 'anchorEligible') === true,
+    intelligenceEligible: getObjectValue(outputEligibility, 'intelligenceEligible') === true,
+    publishSnapshotId: getObjectValue(getObjectValue(publish, 'snapshot') || {}, 'snapshotId')
+      || getObjectValue(getObjectValue(lock, 'publish') || {}, 'snapshotId')
+      || '',
+    publishSnapshotHash: getObjectValue(getObjectValue(publish, 'snapshot') || {}, 'snapshotHash')
+      || getObjectValue(getObjectValue(lock, 'publish') || {}, 'snapshotHash')
+      || '',
+    lockSnapshotId: getObjectValue(getObjectValue(lock, 'snapshot') || {}, 'snapshotId') || '',
+    lockSnapshotHash: getObjectValue(getObjectValue(lock, 'snapshot') || {}, 'snapshotHash') || '',
+    replayAnchorId: getObjectValue(replayAnchor, 'replayAnchorId') || getObjectValue(replayAnchor, 'anchorId') || '',
+    replayAnchorHash: getObjectValue(replayAnchor, 'replayAnchorHash') || getObjectValue(replayAnchor, 'anchorHash') || '',
   }
 }
 
 const getAcceptedContent = (value) => {
   if (!value) return ''
   if (typeof value === 'string') return normalizeText(value)
-  if (typeof value.content === 'string') return normalizeText(value.content)
-  if (typeof value.summary === 'string') return normalizeText(value.summary)
-  if (typeof value.value === 'string') return normalizeText(value.value)
+  const content = getObjectValue(value, 'content')
+  const summary = getObjectValue(value, 'summary')
+  const acceptedValue = getObjectValue(value, 'value')
+  if (typeof content === 'string') return normalizeText(content)
+  if (typeof summary === 'string') return normalizeText(summary)
+  if (typeof acceptedValue === 'string') return normalizeText(acceptedValue)
   return ''
 }
 
 const getSectionLabel = (section = {}, fallback = '') =>
-  normalizeText(section.label)
-  || normalizeText(section.title)
-  || normalizeText(section.name)
-  || normalizeText(section.sectionLabel)
-  || normalizeText(section.sectionKey)
+  normalizeText(getObjectValue(section, 'label'))
+  || normalizeText(getObjectValue(section, 'title'))
+  || normalizeText(getObjectValue(section, 'name'))
+  || normalizeText(getObjectValue(section, 'sectionLabel'))
+  || normalizeText(getObjectValue(section, 'sectionKey'))
   || fallback
 
 const getAcceptedTruthRecords = ({ frameworkPackage, frameworkState }) => {
   const packageSections = Array.isArray(frameworkPackage?.sections) ? frameworkPackage.sections : []
-  const runtimeSections = frameworkState.sections || {}
+  const runtimeSections = getObjectValue(frameworkState, 'sections') || {}
   return packageSections.map((packageSection, index) => {
-    const sectionKey = normalizeKey(packageSection?.sectionKey || packageSection?.key)
-    const runtimePath = normalizeText(packageSection?.runtimePath)
-    const runtimeSection = runtimeSections[sectionKey] || {}
-    const accepted = runtimeSection.accepted || {}
+    const sectionKey = normalizeKey(
+      getObjectValue(packageSection, 'sectionKey')
+      || getObjectValue(packageSection, 'key'),
+    )
+    const runtimePath = normalizeText(getObjectValue(packageSection, 'runtimePath'))
+    const runtimePathSection = getValueAtPath({ framework_state: frameworkState }, runtimePath)
+    const runtimeSection = runtimePathSection || getObjectValue(runtimeSections, sectionKey) || {}
+    const accepted = getObjectValue(runtimeSection, 'accepted') || {}
     const content = getAcceptedContent(accepted)
     return {
       sectionKey,
       runtimePath,
       label: getSectionLabel(packageSection, `Section ${index + 1}`),
-      required: packageSection?.required === true,
+      required: getObjectValue(packageSection, 'required') === true,
       content,
-      acceptedAt: accepted.acceptedAt || null,
-      acceptedBy: toIdString(accepted.acceptedBy),
-      truthHash: accepted.truthHash || (content ? hashSafeValue({ sectionKey, content }) : ''),
+      acceptedAt: getObjectValue(accepted, 'acceptedAt') || null,
+      acceptedBy: toIdString(getObjectValue(accepted, 'acceptedBy')),
+      truthHash: getObjectValue(accepted, 'truthHash') || (content ? hashSafeValue({ sectionKey, content }) : ''),
     }
   }).filter((record) => record.sectionKey || record.runtimePath || record.content)
 }
@@ -775,6 +819,7 @@ const logOutputLabAudit = async ({
 }) => {
   const auditPayload = {
     action,
+    actorUserId: diff?.actorUserId,
     resourceType: auditService.RESOURCE_TYPES.RuntimeInstance,
     resourceId: runtimeInstance._id || runtimeInstance.id,
     scope: {

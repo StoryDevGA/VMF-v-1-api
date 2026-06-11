@@ -2,6 +2,7 @@ import { describe, test, expect, beforeAll, beforeEach, jest } from '@jest/globa
 import { randomBytes } from 'node:crypto'
 import { createRequire } from 'node:module'
 import zlib from 'node:zlib'
+import { evaluateRuntimeSectionTruthReadiness } from '../services/runtimeSectionTruthReadinessService.js'
 
 const moduleRequire = createRequire(import.meta.url)
 const { createCanvas } = moduleRequire('@napi-rs/canvas')
@@ -11770,6 +11771,74 @@ describe('Runtime Instance API', () => {
     }))
   })
 
+  test('RUN_VALIDATION fails closed when a required section path resolves only through object prototype', async () => {
+    const prototypeRuntimePath = 'framework_state.sections.constructor'
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {},
+        validation: {},
+        readiness: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      sections: [
+        {
+          sectionKey: 'customer_problem',
+          runtimePath: prototypeRuntimePath,
+          required: true,
+          validationKeys: ['required-sections-check'],
+        },
+      ],
+      workflowBindings: [makeWorkflowBinding('RUN_VALIDATION')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([
+      makeRuntimePathRecord({
+        stableId: 'path-framework-state-sections-constructor',
+        pathKey: prototypeRuntimePath,
+      }),
+    ]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('RUN_VALIDATION')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('RUN_VALIDATION')]))
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+    }))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/RUN_VALIDATION`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+
+    expect(res.status).toBe(200)
+    const persistedState = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state
+    expect(RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.executionStatus).toBe('BLOCKED')
+    expect(persistedState.validation.runtime_required_sections).toEqual(expect.objectContaining({
+      is_valid: false,
+      status: 'FAILED',
+      missingRequiredSections: [
+        {
+          sectionKey: 'customer_problem',
+          runtimePath: prototypeRuntimePath,
+        },
+      ],
+    }))
+    expect(persistedState.readiness).toEqual(expect.objectContaining({
+      state: 'BLOCKED',
+      validationState: 'FAILED',
+      lastActionKey: 'RUN_VALIDATION',
+    }))
+  })
+
   test('rejects MARK_READY before validation evidence has passed', async () => {
     const runtimeInstanceDoc = makeRuntimeInstanceDocument({
       updatedAt: new Date('2026-05-19T08:00:00.000Z'),
@@ -12803,6 +12872,117 @@ describe('Runtime Instance API', () => {
       'REPLAY_ANCHOR_MISSING',
     ]))
     expect(RuntimeOutputAsset.find).not.toHaveBeenCalled()
+  })
+
+  test('Output Lab readiness resolves accepted section truth through package runtime paths', async () => {
+    const baseRuntime = makeOutputLabReadyRuntime()
+    const runtimePathSection = ({ sectionKey, runtimePath, label }) => Object.create(null, {
+      sectionKey: { get: () => sectionKey },
+      runtimePath: { get: () => runtimePath },
+      label: { get: () => label },
+      required: { get: () => true },
+    })
+    const runtimeInstance = makeOutputLabReadyRuntime({
+      framework_state: {
+        ...baseRuntime.framework_state,
+        sections: {
+          section_1_situation: baseRuntime.framework_state.sections.situation,
+          section_2_commercial_problem: baseRuntime.framework_state.sections.commercial_problem,
+          section_3_value_drivers: baseRuntime.framework_state.sections.value_drivers,
+          section_4_recommended_focus: baseRuntime.framework_state.sections.recommended_focus,
+        },
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage({
+      sections: [
+        runtimePathSection({
+          sectionKey: 'situation',
+          runtimePath: 'framework_state.sections.section_1_situation',
+          label: 'Situation',
+        }),
+        runtimePathSection({
+          sectionKey: 'commercial_problem',
+          runtimePath: 'framework_state.sections.section_2_commercial_problem',
+          label: 'Commercial Problem',
+        }),
+        runtimePathSection({
+          sectionKey: 'value_drivers',
+          runtimePath: 'framework_state.sections.section_3_value_drivers',
+          label: 'Value Drivers',
+        }),
+        runtimePathSection({
+          sectionKey: 'recommended_focus',
+          runtimePath: 'framework_state.sections.section_4_recommended_focus',
+          label: 'Recommended Focus',
+        }),
+      ],
+    }))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/output-lab/readiness`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toEqual(expect.objectContaining({
+      state: 'READY',
+      canGenerate: true,
+      acceptedTruthCount: 4,
+      requiredTruthCount: 4,
+      acceptedRequiredTruthCount: 4,
+    }))
+    expect(res.body.data.blockers.map((blocker) => blocker.code)).not.toContain('REQUIRED_TRUTH_MISSING')
+    expect(res.body.data.blockers.map((blocker) => blocker.code)).not.toContain('ACCEPTED_TRUTH_MISSING')
+  })
+
+  test('runtime section truth readiness resolves accepted truth through map-backed runtime paths', () => {
+    const generatedAt = '2026-06-11T09:00:00.000Z'
+    const packageSection = Object.create(null, {
+      sectionKey: { get: () => 'section-executive-summary' },
+      runtimePath: { get: () => 'framework_state.sections.section_1_executive_summary' },
+      label: { get: () => 'Executive Summary' },
+      required: { get: () => true },
+    })
+    const frameworkPackage = makeOutputLabFrameworkPackage({
+      sections: [packageSection],
+    })
+    const sectionValue = {
+      input: {
+        additionalContext: 'Use the accepted StorylineOS website evidence.',
+      },
+      generated: {
+        content: 'Executive Summary: StorylineOS provides governed runtime execution for value narratives.',
+        generatedAt,
+      },
+      accepted: {
+        content: 'Executive Summary: StorylineOS provides governed runtime execution for value narratives.',
+        acceptedAt: '2026-06-11T09:02:00.000Z',
+        acceptedBy: CUSTOMER_ADMIN_ID,
+        sourceGeneratedAt: generatedAt,
+      },
+      review: { status: 'ACCEPTED' },
+      state: { status: 'ACCEPTED' },
+    }
+
+    const readiness = evaluateRuntimeSectionTruthReadiness({
+      frameworkPackage,
+      frameworkState: {
+        sections: new Map([
+          ['section_1_executive_summary', sectionValue],
+        ]),
+      },
+    })
+
+    expect(readiness).toEqual(expect.objectContaining({
+      state: 'SECTION_TRUTH_READY',
+      publishEligible: true,
+      lockEligible: true,
+      readySectionCount: 1,
+      requiredSectionCount: 1,
+    }))
+    expect(readiness.readySectionKeys).toEqual(['section-executive-summary'])
+    expect(readiness.blockers).toEqual([])
   })
 
   test('Output Lab creates an audited request from a locked output-eligible runtime', async () => {

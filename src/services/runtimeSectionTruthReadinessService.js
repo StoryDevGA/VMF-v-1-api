@@ -14,6 +14,23 @@ const parseRuntimeTimestamp = (value) => {
   return Number.isFinite(timestamp) ? timestamp : 0
 }
 
+const hasOwnObjectValue = (source, key) =>
+  Object.prototype.hasOwnProperty.call(source, key)
+
+const isMongooseDocumentLike = (source) =>
+  Boolean(source && typeof source.get === 'function' && typeof source.toObject === 'function')
+
+const getObjectValue = (source, key) => {
+  if (source === null || source === undefined || !key || typeof source !== 'object') return undefined
+  if (source instanceof Map) return source.get(key)
+  if (isMongooseDocumentLike(source)) {
+    const value = source.get(key)
+    if (value !== undefined) return value
+  }
+  if (hasOwnObjectValue(source, key)) return source[key]
+  return undefined
+}
+
 const getValueAtPath = (source, path) => {
   const parts = String(path || '')
     .split('.')
@@ -24,15 +41,11 @@ const getValueAtPath = (source, path) => {
 
   let cursor = source
   for (const part of parts) {
-    if (
-      cursor === null
-      || cursor === undefined
-      || typeof cursor !== 'object'
-      || !Object.prototype.hasOwnProperty.call(cursor, part)
-    ) {
+    if (cursor === null || cursor === undefined || typeof cursor !== 'object') {
       return undefined
     }
-    cursor = cursor[part]
+    cursor = getObjectValue(cursor, part)
+    if (cursor === undefined) return undefined
   }
 
   return cursor
@@ -60,16 +73,16 @@ const normalizeComparableSectionContent = (value) => {
 
 const getDependencySectionKeys = (packageSection = {}) => {
   const candidates = [
-    packageSection.dependsOnSectionKeys,
-    packageSection.dependencySectionKeys,
-    packageSection.dependsOn,
+    getObjectValue(packageSection, 'dependsOnSectionKeys'),
+    getObjectValue(packageSection, 'dependencySectionKeys'),
+    getObjectValue(packageSection, 'dependsOn'),
   ]
 
   return candidates
     .flatMap((candidate) => (Array.isArray(candidate) ? candidate : [candidate]))
     .map((candidate) => {
       if (candidate && typeof candidate === 'object') {
-        return normalizeKey(candidate.sectionKey || candidate.key)
+        return normalizeKey(getObjectValue(candidate, 'sectionKey') || getObjectValue(candidate, 'key'))
       }
       return normalizeKey(candidate)
     })
@@ -78,14 +91,14 @@ const getDependencySectionKeys = (packageSection = {}) => {
 
 const getSectionValue = ({ frameworkState, packageSection }) => {
   const state = frameworkState || {}
-  const sectionKey = normalizeKey(packageSection?.sectionKey)
-  const runtimePath = String(packageSection?.runtimePath || '').trim()
+  const sectionKey = normalizeKey(getObjectValue(packageSection, 'sectionKey'))
+  const runtimePath = String(getObjectValue(packageSection, 'runtimePath') || '').trim()
   const runtimePathValue = runtimePath
     ? getValueAtPath({ framework_state: state }, runtimePath)
     : undefined
 
   if (runtimePathValue !== undefined) return runtimePathValue
-  return state.sections?.[sectionKey]
+  return getObjectValue(getObjectValue(state, 'sections') || {}, sectionKey)
 }
 
 const isAcceptedTruthCurrent = ({ accepted, generated, input }) => {
@@ -140,10 +153,13 @@ export const evaluateRuntimeSectionTruthReadiness = ({
 } = {}) => {
   const packageSections = Array.isArray(frameworkPackage?.sections) ? frameworkPackage.sections : []
   const requiredSections = packageSections
-    .filter((section) => section?.required === true)
+    .filter((section) => getObjectValue(section, 'required') === true)
     .map((section) => ({
-      ...section,
-      sectionKey: normalizeKey(section?.sectionKey),
+      sectionKey: normalizeKey(getObjectValue(section, 'sectionKey')),
+      runtimePath: String(getObjectValue(section, 'runtimePath') || '').trim(),
+      dependsOnSectionKeys: getObjectValue(section, 'dependsOnSectionKeys'),
+      dependencySectionKeys: getObjectValue(section, 'dependencySectionKeys'),
+      dependsOn: getObjectValue(section, 'dependsOn'),
     }))
     .filter((section) => section.sectionKey)
 
@@ -192,8 +208,9 @@ export const evaluateRuntimeSectionTruthReadiness = ({
     const invalidatedSectionKeys = []
 
     dependencyKeys.forEach((dependencySectionKey) => {
+      const stateSections = getObjectValue(frameworkState || {}, 'sections') || {}
       const dependencyValue = sectionValuesByKey[dependencySectionKey]
-        ?? frameworkState?.sections?.[dependencySectionKey]
+        ?? getObjectValue(stateSections, dependencySectionKey)
       const dependencyAccepted = getRuntimeSectionAccepted(dependencyValue)
 
       if (!hasProjectionValue(dependencyAccepted?.content ?? dependencyAccepted)) {
