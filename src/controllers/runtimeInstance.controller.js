@@ -6,6 +6,7 @@ import {
 import { createRuntimeRevision as createRuntimeRevisionRecord } from '../services/runtimeRevisionService.js'
 import { executeRuntimeAction as executeRuntimeActionRecord } from '../services/runtimeActionExecutionService.js'
 import { getRuntimeRenderer as getRuntimeRendererProjection } from '../services/runtimeRendererService.js'
+import { getRuntimeTruthQuality as getRuntimeTruthQualityProjection } from '../services/runtimeTruthQualityService.js'
 import {
   getRuntimeIntelligenceGraph as getRuntimeIntelligenceGraphRecord,
   getRuntimeIntelligenceGraphCoverage as getRuntimeIntelligenceGraphCoverageRecord,
@@ -149,6 +150,27 @@ export const getRuntimeRenderer = async (req, res, next) => {
         renderTraceId: renderer.diagnostics?.renderTraceId,
         version: 'v1',
       },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const getRuntimeTruthQuality = async (req, res, next) => {
+  try {
+    const truthQuality = await getRuntimeTruthQualityProjection({
+      actorUserId: req.context?.userId || req.userId,
+      auditRequest: req,
+      scopes: req.scopes,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+    })
+
+    return res.status(200).json({
+      data: truthQuality,
+      meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
     if (err?.status && err?.code) {

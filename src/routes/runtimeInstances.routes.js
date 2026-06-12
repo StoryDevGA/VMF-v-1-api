@@ -24,6 +24,7 @@ import {
   getRuntimeOutputLabReadiness,
   getRuntimeOutputRequest,
   getRuntimeRenderer,
+  getRuntimeTruthQuality,
   generateRuntimeOutputRequest,
   listRuntimeOutputAssets,
   listRuntimeInstances,
@@ -201,6 +202,7 @@ router.post(
   validateCreateRuntimeRevision,
   createRuntimeRevision,
 )
+router.get('/:runtimeInstanceId/truth-quality', validateRuntimeInstanceId, getRuntimeTruthQuality)
 router.get('/:runtimeInstanceId/renderer', validateRuntimeInstanceId, getRuntimeRenderer)
 router.get('/:runtimeInstanceId', validateRuntimeInstanceId, getRuntimeInstance)
 

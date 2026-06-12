@@ -86,6 +86,7 @@ export const AUDIT_ACTIONS = Object.freeze({
   RUNTIME_REVISION_CREATED: 'RUNTIME_REVISION_CREATED',
   RUNTIME_ACTION_EXECUTED: 'RUNTIME_ACTION_EXECUTED',
   RUNTIME_STATE_MUTATED: 'RUNTIME_STATE_MUTATED',
+  TRUTH_QUALITY_EVALUATED: 'TRUTH_QUALITY_EVALUATED',
   OUTPUT_REQUEST_CREATED: 'OUTPUT_REQUEST_CREATED',
   OUTPUT_GENERATION_COMPLETED: 'OUTPUT_GENERATION_COMPLETED',
   OUTPUT_ASSET_PUBLISHED: 'OUTPUT_ASSET_PUBLISHED',
@@ -450,6 +451,8 @@ const buildAuditSummary = ({ action, resourceType, resourceId, diff, display }) 
       return clampSummary(`${actorLabel} executed runtime action for ${targetLabel}`)
     case AUDIT_ACTIONS.RUNTIME_STATE_MUTATED:
       return clampSummary(`${actorLabel} updated runtime state for ${targetLabel}`)
+    case AUDIT_ACTIONS.TRUTH_QUALITY_EVALUATED:
+      return clampSummary(`${actorLabel} evaluated Truth Quality for ${targetLabel}`)
     case AUDIT_ACTIONS.VALIDATION_STARTED:
       return clampSummary(`${actorLabel} started validation for ${targetLabel}`)
     case AUDIT_ACTIONS.VALIDATION_PASSED:

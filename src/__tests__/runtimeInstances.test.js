@@ -8426,6 +8426,184 @@ describe('Runtime Instance API', () => {
     },
   })
 
+  const makeTruthQualityPackageSections = (count = 4) => [
+    {
+      sectionKey: 'situation',
+      runtimePath: 'framework_state.sections.situation',
+      label: 'Situation',
+      required: true,
+    },
+    {
+      sectionKey: 'commercial_problem',
+      runtimePath: 'framework_state.sections.commercial_problem',
+      label: 'Commercial Problem',
+      required: true,
+    },
+    {
+      sectionKey: 'value_drivers',
+      runtimePath: 'framework_state.sections.value_drivers',
+      label: 'Value Drivers',
+      required: true,
+    },
+    {
+      sectionKey: 'recommended_focus',
+      runtimePath: 'framework_state.sections.recommended_focus',
+      label: 'Recommended Focus',
+      required: true,
+    },
+  ].slice(0, count)
+
+  const makeTruthQualityEvidencePack = ({
+    evidenceCount = 8,
+    sourceCount = 5,
+    sourceTypes = ['WEBSITE', 'CUSTOMER_PROOF', 'SALES_DECK', 'ANALYST_REPORT', 'MARKET_REPORT'],
+  } = {}) => {
+    const sourceRegistry = Array.from({ length: sourceCount }, (_value, index) => ({
+      sourceId: `truth-quality-source-${index + 1}`,
+      sourceType: sourceTypes[index % sourceTypes.length],
+      label: `Truth Quality Source ${index + 1}`,
+    }))
+    const evidenceObjects = Array.from({ length: evidenceCount }, (_value, index) => {
+      const source = sourceRegistry[index % Math.max(sourceRegistry.length, 1)] || {}
+      return {
+        evidenceObjectId: `truth-quality-evidence-${index + 1}`,
+        sourceId: source.sourceId || '',
+        sourceType: source.sourceType || 'UNKNOWN',
+        category: 'Proof',
+        coverageArea: 'Proof',
+        reviewStatus: 'ACCEPTED',
+        extractedFact: `Accepted evidence support ${index + 1} must not be projected raw.`,
+      }
+    })
+
+    return {
+      accepted: true,
+      state: {
+        accepted: true,
+      },
+      sourceRegistry,
+      evidenceObjects,
+    }
+  }
+
+  const makeTruthQualityGraph = ({
+    coveragePercent = 90,
+    missingDomains = [],
+    contradictionCount = 0,
+    buildStatus = 'VALID',
+    validationStatus = 'VALID',
+    healthState = 'READY',
+  } = {}) => {
+    const contradictionNodes = Array.from({ length: contradictionCount }, (_value, index) => ({
+      nodeId: `evidence:truth-quality-conflict-${index + 1}`,
+      nodeType: 'EVIDENCE',
+      label: `Contradicting Evidence ${index + 1}`,
+      snippet: 'Raw contradiction evidence must not be projected.',
+      metadata: {
+        validationStatus: 'CONTRADICTED',
+        contradictionRefs: ['evidence:company'],
+      },
+    }))
+
+    return makePersistedRuntimeIntelligenceGraph({
+      graphHash: 'sha256:truth-quality-graph',
+      build: {
+        status: buildStatus,
+        trigger: 'EXPLICIT_REBUILD',
+        builtAt: '2026-06-12T15:00:00.000Z',
+        sourceHash: 'sha256:truth-quality-source',
+        nodeCount: 1 + contradictionNodes.length,
+        edgeCount: 1,
+      },
+      nodes: [
+        {
+          nodeId: 'evidence:company',
+          nodeType: 'EVIDENCE',
+          label: 'Company',
+          coverageDomain: 'Company',
+          reviewStatus: 'ACCEPTED',
+          graphQualityState: 'CONNECTED',
+          snippet: 'Raw graph snippet must not be projected through Truth Quality.',
+          metadata: {
+            validationStatus: 'ACCEPTED',
+          },
+        },
+        ...contradictionNodes,
+      ],
+      edges: [],
+      coverage: {
+        coverageModel: 'EVIDENCE_DOMAIN_COVERAGE',
+        coveragePercent,
+        coveredDomainCount: Math.round((coveragePercent / 100) * 10),
+        totalDomainCount: 10,
+        missingDomains,
+        domains: [],
+      },
+      health: {
+        state: healthState,
+        nodeCount: 1 + contradictionNodes.length,
+        edgeCount: 0,
+        acceptedEvidenceCount: 8,
+        orphanEvidenceCount: 0,
+        lowQualityEvidenceCount: 0,
+        unclassifiedEvidenceCount: 0,
+        missingDomainCount: missingDomains.length,
+        dependencyCount: 0,
+        contradictionCount,
+      },
+      validation: {
+        status: validationStatus,
+        issues: [],
+      },
+    })
+  }
+
+  const makeTruthQualityRuntime = ({
+    coveragePercent = 90,
+    evidenceCount = 8,
+    sourceCount = 5,
+    sourceTypes,
+    truthCount = 4,
+    graph,
+    missingDomains = [],
+    runtimeType = 'VALUE_NARRATIVE',
+  } = {}) => {
+    const packageSections = makeTruthQualityPackageSections(Math.max(truthCount, 2))
+    const sections = packageSections.reduce((acc, section, index) => ({
+      ...acc,
+      [section.sectionKey]: index < truthCount
+        ? {
+            accepted: {
+              content: `Accepted truth ${index + 1}.`,
+              acceptedAt: '2026-06-12T15:05:00.000Z',
+              acceptedBy: CUSTOMER_ADMIN_ID,
+              truthHash: `sha256:truth-quality-${section.sectionKey}`,
+            },
+          }
+        : {},
+    }), {})
+
+    return makeRuntimeInstance({
+      runtimeType,
+      frameworkKey: runtimeType === 'VALUE_NARRATIVE' ? 'VMF' : 'VMF',
+      framework_state: {
+        lifecycle: { stage: 'LOCKED' },
+        sections,
+        evidence_pack: makeTruthQualityEvidencePack({ evidenceCount, sourceCount, sourceTypes }),
+        validation: {},
+        readiness: {},
+        publish: {},
+        lock: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+        intelligence_graph: graph === undefined
+          ? makeTruthQualityGraph({ coveragePercent, missingDomains })
+          : graph,
+      },
+    })
+  }
+
   const makeOutputLabReadyRuntime = (overrides = {}) => makeRuntimeInstance({
     status: 'LOCKED',
     executionStatus: 'COMPLETE',
@@ -9561,6 +9739,413 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(403)
     expect(res.body.error.details.reason).toBe('FORBIDDEN')
+  })
+
+  test('GET /api/v1/runtime-instances/:id/truth-quality returns strategic certification from DIG and accepted evidence', async () => {
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage({
+      sections: makeTruthQualityPackageSections(4),
+    }))
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeTruthQualityRuntime({
+      coveragePercent: 90,
+      evidenceCount: 8,
+      sourceCount: 5,
+      truthCount: 4,
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/truth-quality`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toEqual(expect.objectContaining({
+      contractVersion: 'truth-quality.v1',
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      runtimeInstanceKey: 'value-narrative-439111',
+      certification: expect.objectContaining({
+        level: 'STRATEGIC_TRUTH',
+        levelNumber: 4,
+        label: 'Strategic Truth',
+      }),
+      graph: expect.objectContaining({
+        graphVersion: '2.2',
+        graphHash: 'sha256:truth-quality-graph',
+        evaluatedAt: expect.any(String),
+      }),
+    }))
+    expect(res.body.data.quality.coverage).toEqual(expect.objectContaining({
+      score: 90,
+      band: 'VERY_HIGH',
+      source: 'DIG_COVERAGE',
+    }))
+    expect(res.body.data.quality.confidence).toEqual(expect.objectContaining({
+      band: 'HIGH',
+      acceptedEvidenceCount: 8,
+      acceptedTruthCount: 4,
+      supportingSourceCount: 5,
+    }))
+    expect(res.body.data.quality.sourceDiversity).toEqual(expect.objectContaining({
+      band: 'HIGH',
+      sourceRecordCount: 5,
+      sourceTypeCount: 5,
+    }))
+    expect(res.body.data.quality.contradictionRisk).toEqual(expect.objectContaining({
+      level: 'LOW',
+      count: 0,
+      unresolvedCount: 0,
+    }))
+    expect(res.body.data.quality.knownGaps).toEqual([])
+    expect(JSON.stringify(res.body.data)).not.toContain('Accepted evidence support')
+    expect(JSON.stringify(res.body.data)).not.toContain('Raw graph snippet')
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'TRUTH_QUALITY_EVALUATED',
+      resourceType: 'RuntimeInstance',
+      resourceId: RUNTIME_INSTANCE_ID,
+      diff: expect.objectContaining({
+        certificationLevel: 'STRATEGIC_TRUTH',
+        certificationLevelNumber: 4,
+        coverageScore: 90,
+        confidenceBand: 'HIGH',
+        sourceDiversityBand: 'HIGH',
+        contradictionRisk: 'LOW',
+        graphHash: 'sha256:truth-quality-graph',
+        knownGapCount: 0,
+      }),
+    }))
+  })
+
+  test('GET /api/v1/runtime-instances/:id/truth-quality dedupes source registry aliases before scoring diversity', async () => {
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage({
+      sections: makeTruthQualityPackageSections(4),
+    }))
+    const runtime = makeTruthQualityRuntime({
+      coveragePercent: 80,
+      evidenceCount: 4,
+      sourceCount: 2,
+      sourceTypes: ['WEBSITE', 'CUSTOMER_PROOF'],
+      truthCount: 3,
+    })
+    runtime.framework_state.evidence_pack.acquisition = {
+      sourceRegistry: [
+        { sourceId: 'truth-quality-source-1', sourceType: 'WEBSITE' },
+        { sectionDocumentId: 'truth-quality-source-2', sourceKind: 'CUSTOMER_PROOF' },
+      ],
+    }
+    runtime.framework_state.evidence_pack.lineage = {
+      sources: [
+        { lineageRef: 'truth-quality-source-1', type: 'WEBSITE' },
+      ],
+    }
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtime))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/truth-quality`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.quality.sourceDiversity).toEqual(expect.objectContaining({
+      sourceRecordCount: 2,
+      sourceTypeCount: 2,
+      sourceTypes: ['CUSTOMER_PROOF', 'WEBSITE'],
+    }))
+    expect(res.body.data.quality.confidence.supportingSourceCount).toBe(2)
+  })
+
+  test.each([
+    [
+      'certified truth',
+      {
+        runtime: makeTruthQualityRuntime({
+          coveragePercent: 80,
+          evidenceCount: 8,
+          sourceCount: 2,
+          sourceTypes: ['WEBSITE', 'CUSTOMER_PROOF'],
+          truthCount: 4,
+        }),
+        expectedLevel: 'CERTIFIED_TRUTH',
+        expectedLevelNumber: 3,
+      },
+    ],
+    [
+      'evidence supported',
+      {
+        runtime: makeTruthQualityRuntime({
+          coveragePercent: 45,
+          evidenceCount: 4,
+          sourceCount: 2,
+          sourceTypes: ['WEBSITE', 'CUSTOMER_PROOF'],
+          truthCount: 2,
+        }),
+        expectedLevel: 'EVIDENCE_SUPPORTED',
+        expectedLevelNumber: 2,
+      },
+    ],
+    [
+      'evidence present',
+      {
+        runtime: makeTruthQualityRuntime({
+          coveragePercent: 25,
+          evidenceCount: 1,
+          sourceCount: 1,
+          sourceTypes: ['WEBSITE'],
+          truthCount: 1,
+        }),
+        expectedLevel: 'EVIDENCE_PRESENT',
+        expectedLevelNumber: 1,
+      },
+    ],
+    [
+      'uncertified without accepted evidence',
+      {
+        runtime: makeTruthQualityRuntime({
+          coveragePercent: 90,
+          evidenceCount: 0,
+          sourceCount: 0,
+          sourceTypes: [],
+          truthCount: 4,
+        }),
+        expectedLevel: 'UNCERTIFIED',
+        expectedLevelNumber: 0,
+      },
+    ],
+  ])('GET /api/v1/runtime-instances/:id/truth-quality returns %s without mutating runtime state', async (_caseName, {
+    runtime,
+    expectedLevel,
+    expectedLevelNumber,
+  }) => {
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage({
+      sections: makeTruthQualityPackageSections(4),
+    }))
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtime))
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/truth-quality`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.certification).toEqual(expect.objectContaining({
+      level: expectedLevel,
+      levelNumber: expectedLevelNumber,
+    }))
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'TRUTH_QUALITY_EVALUATED',
+      diff: expect.objectContaining({
+        certificationLevel: expectedLevel,
+        certificationLevelNumber: expectedLevelNumber,
+      }),
+    }))
+  })
+
+  test('GET /api/v1/runtime-instances/:id/truth-quality returns uncertified with known gaps when DIG graph is unavailable', async () => {
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage({
+      sections: makeTruthQualityPackageSections(4),
+    }))
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeTruthQualityRuntime({
+      graph: {},
+      evidenceCount: 8,
+      sourceCount: 5,
+      truthCount: 4,
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/truth-quality`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.certification).toEqual(expect.objectContaining({
+      level: 'UNCERTIFIED',
+      levelNumber: 0,
+    }))
+    expect(res.body.data.quality.contradictionRisk).toEqual(expect.objectContaining({
+      level: 'BLOCKING',
+      blocking: true,
+      reason: 'CONTRADICTION_QUERY_UNAVAILABLE',
+    }))
+    expect(res.body.data.quality.knownGaps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'GRAPH_UNAVAILABLE',
+        severity: 'HIGH',
+      }),
+      expect.objectContaining({
+        code: 'CONTRADICTION_QUERY_UNAVAILABLE',
+      }),
+    ]))
+    expect(res.body.data.graph.graphHash).toBe('')
+  })
+
+  test('GET /api/v1/runtime-instances/:id/truth-quality fails closed for stale DIG graph evidence', async () => {
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage({
+      sections: makeTruthQualityPackageSections(4),
+    }))
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeTruthQualityRuntime({
+      coveragePercent: 90,
+      evidenceCount: 8,
+      sourceCount: 5,
+      truthCount: 4,
+      graph: makeTruthQualityGraph({
+        coveragePercent: 90,
+        buildStatus: 'STALE',
+        healthState: 'READY',
+      }),
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/truth-quality`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.certification).toEqual(expect.objectContaining({
+      level: 'UNCERTIFIED',
+      levelNumber: 0,
+    }))
+    expect(res.body.data.quality.contradictionRisk).toEqual(expect.objectContaining({
+      level: 'BLOCKING',
+      blocking: true,
+      reason: 'GRAPH_QUERY_UNAVAILABLE_STALE_GRAPH',
+    }))
+    expect(res.body.data.quality.knownGaps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'GRAPH_UNAVAILABLE',
+        severity: 'HIGH',
+      }),
+      expect.objectContaining({
+        code: 'CONTRADICTION_QUERY_UNAVAILABLE',
+      }),
+    ]))
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'TRUTH_QUALITY_EVALUATED',
+      diff: expect.objectContaining({
+        certificationLevel: 'UNCERTIFIED',
+        graphHash: 'sha256:truth-quality-graph',
+      }),
+    }))
+  })
+
+  test('GET /api/v1/runtime-instances/:id/truth-quality projects high contradiction risk without raw graph payloads', async () => {
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage({
+      sections: makeTruthQualityPackageSections(4),
+    }))
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeTruthQualityRuntime({
+      coveragePercent: 80,
+      evidenceCount: 8,
+      sourceCount: 5,
+      truthCount: 4,
+      graph: makeTruthQualityGraph({
+        coveragePercent: 80,
+        contradictionCount: 3,
+      }),
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/truth-quality`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.quality.contradictionRisk).toEqual(expect.objectContaining({
+      level: 'HIGH',
+      count: 3,
+      unresolvedCount: 3,
+    }))
+    expect(res.body.data.certification.level).toBe('EVIDENCE_SUPPORTED')
+    expect(res.body.data.quality.knownGaps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'CONTRADICTIONS_UNRESOLVED',
+        severity: 'HIGH',
+      }),
+    ]))
+    expect(JSON.stringify(res.body.data)).not.toContain('Raw contradiction evidence')
+    expect(JSON.stringify(res.body.data)).not.toContain('Raw graph snippet')
+  })
+
+  test('GET /api/v1/runtime-instances/:id/truth-quality rejects unsupported runtime types before audit', async () => {
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeTruthQualityRuntime({
+      runtimeType: 'ACCOUNT_PLAN',
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/truth-quality`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(422)
+    expect(res.body.error).toEqual(expect.objectContaining({
+      code: 'VALIDATION_FAILED',
+      details: expect.objectContaining({
+        reason: 'TRUTH_QUALITY_UNSUPPORTED_RUNTIME_TYPE',
+        runtimeType: 'ACCOUNT_PLAN',
+      }),
+    }))
+    expect(FrameworkPackage.findById).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('GET /api/v1/runtime-instances/:id/truth-quality returns not found before package lookup and audit', async () => {
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(null))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/truth-quality`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(404)
+    expect(res.body.error.code).toBe('NOT_FOUND')
+    expect(FrameworkPackage.findById).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('GET /api/v1/runtime-instances/:id/truth-quality rejects callers without runtime view permission before audit', async () => {
+    const unauthorizedUser = makeRegularUser({
+      _id: 'a27f1f77bcf86cd799439557',
+      id: 'a27f1f77bcf86cd799439557',
+      memberships: [],
+      tenantMemberships: [],
+      vmfGrants: [],
+    })
+    User.findById = jest.fn().mockReturnValue(buildUserQueryChain(unauthorizedUser))
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeTruthQualityRuntime()))
+    const token = await getAccessTokenForUser(unauthorizedUser)
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/truth-quality`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.details.reason).toBe('FORBIDDEN')
+    expect(FrameworkPackage.findById).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('GET /api/v1/runtime-instances/:id/truth-quality fails closed when audit persistence fails', async () => {
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage({
+      sections: makeTruthQualityPackageSections(4),
+    }))
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeTruthQualityRuntime()))
+    AuditLog.createLog = jest.fn(async () => {
+      throw new Error('audit unavailable')
+    })
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/truth-quality`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(500)
+    expect(res.body.error).toEqual(expect.objectContaining({
+      code: 'TRUTH_QUALITY_AUDIT_FAILED',
+      details: expect.objectContaining({
+        reason: 'TRUTH_QUALITY_AUDIT_PERSISTENCE_FAILED',
+        runtimeInstanceId: RUNTIME_INSTANCE_ID,
+        runtimeInstanceKey: 'value-narrative-439111',
+      }),
+    }))
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
   })
 
   test('POST /api/v1/runtime-instances/:id/intelligence-graph/rebuild rejects stale graph writes without audit', async () => {
