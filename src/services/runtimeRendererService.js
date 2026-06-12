@@ -146,6 +146,7 @@ const RUNTIME_ACTIVITY_LIMIT = 10
 const RUNTIME_ACTIVITY_RESOURCE_TYPE = 'RuntimeInstance'
 const RUNTIME_ACTIVITY_SUMMARY_BY_ACTION = Object.freeze({
   RUNTIME_INSTANCE_CREATED: 'Runtime instance created',
+  RUNTIME_REVISION_CREATED: 'Runtime revision created',
   RUNTIME_STATE_MUTATED: 'Runtime state updated',
   RUNTIME_ACTION_EXECUTED: 'Runtime action executed',
 })
@@ -2383,6 +2384,147 @@ const buildLockProjection = (runtimeInstance = {}, frameworkState = {}, sectionT
   }
 }
 
+const hasSnapshotProof = (snapshot = {}) =>
+  Boolean(String(snapshot.snapshotId || snapshot.id || '').trim())
+  && Boolean(String(snapshot.snapshotHash || snapshot.hash || '').trim())
+
+const hasReplayAnchorProof = (anchor = {}) =>
+  Boolean(String(anchor.replayAnchorId || anchor.anchorId || anchor.id || '').trim())
+  && Boolean(String(anchor.replayAnchorHash || anchor.anchorHash || anchor.hash || '').trim())
+
+const resolveMaybeLean = async (queryOrValue) => {
+  if (queryOrValue && typeof queryOrValue.lean === 'function') {
+    return await queryOrValue.lean()
+  }
+
+  return queryOrValue
+}
+
+const canUpdateRuntime = async ({ runtimeInstance, scopes }) => {
+  try {
+    await assertRuntimePermission({
+      actorUserId: scopes?.userId,
+      scopes,
+      customerId: runtimeInstance.customerId,
+      tenantId: runtimeInstance.tenantId,
+      permission: 'VMF_UPDATE',
+    })
+    return true
+  } catch {
+    return false
+  }
+}
+
+const buildRevisionLineageItem = ({
+  runtimeInstanceId,
+  runtimeInstanceKey,
+  revisionNumber,
+  relationship,
+  status,
+  lifecycleStage,
+} = {}) => ({
+  runtimeInstanceId: toIdString(runtimeInstanceId),
+  runtimeInstanceKey: runtimeInstanceKey || '',
+  revisionNumber: Number(revisionNumber) > 0 ? Number(revisionNumber) : 1,
+  relationship,
+  status: status || '',
+  lifecycleStage: lifecycleStage || '',
+})
+
+const buildRevisionProjection = async ({
+  runtimeInstance,
+  frameworkState,
+  publish,
+  lock,
+  scopes,
+} = {}) => {
+  const revision = runtimeInstance.revision || {}
+  const revisionNumber = Number(revision.revisionNumber) > 0 ? Number(revision.revisionNumber) : 1
+  const hasUpdatePermission = await canUpdateRuntime({ runtimeInstance, scopes })
+  const childRevision = hasUpdatePermission
+    ? await resolveMaybeLean(RuntimeInstance.findOne({
+      customerId: runtimeInstance.customerId,
+      tenantId: runtimeInstance.tenantId,
+      'revision.parentRuntimeId': runtimeInstance.id || runtimeInstance._id,
+    }))
+    : null
+  const runtimeType = normalizeToken(runtimeInstance.runtimeType)
+  const runtimeStatus = normalizeToken(runtimeInstance.status)
+  const publishReady = publish?.published === true
+    && normalizeToken(publish?.state) === 'PUBLISHED'
+    && hasSnapshotProof(publish?.snapshot)
+  const lockReady = lock?.locked === true
+    && normalizeToken(lock?.state) === 'LOCKED'
+    && runtimeStatus === RUNTIME_INSTANCE_STATUSES.LOCKED
+    && hasSnapshotProof(lock?.snapshot)
+    && hasReplayAnchorProof(lock?.replayAnchor || lock?.anchor)
+  const lineage = [
+    ...(revision.parentRuntimeId ? [buildRevisionLineageItem({
+      runtimeInstanceId: revision.parentRuntimeId,
+      runtimeInstanceKey: revision.parentRuntimeInstanceKey,
+      revisionNumber: revision.createdFromRevision,
+      relationship: 'PARENT',
+      status: 'LOCKED',
+      lifecycleStage: 'LOCKED',
+    })] : []),
+    buildRevisionLineageItem({
+      runtimeInstanceId: runtimeInstance.id || runtimeInstance._id,
+      runtimeInstanceKey: runtimeInstance.runtimeInstanceKey,
+      revisionNumber,
+      relationship: 'CURRENT',
+      status: runtimeInstance.status,
+      lifecycleStage: frameworkState?.lifecycle?.stage || '',
+    }),
+    ...(childRevision ? [buildRevisionLineageItem({
+      runtimeInstanceId: childRevision._id || childRevision.id,
+      runtimeInstanceKey: childRevision.runtimeInstanceKey,
+      revisionNumber: childRevision.revision?.revisionNumber,
+      relationship: 'CHILD',
+      status: childRevision.status,
+      lifecycleStage: childRevision.framework_state?.lifecycle?.stage || '',
+    })] : []),
+  ]
+
+  let disabledReason = ''
+  if (runtimeType !== RUNTIME_TYPES.VALUE_NARRATIVE) {
+    disabledReason = 'Only Value Narrative runtimes can create revisions.'
+  } else if (!hasUpdatePermission) {
+    disabledReason = 'VMF update permission is required to create a revision.'
+  } else if (!publishReady) {
+    disabledReason = 'Publish snapshot proof is required before creating a revision.'
+  } else if (!lockReady) {
+    disabledReason = 'Lock snapshot and replay anchor proof are required before creating a revision.'
+  } else if (childRevision) {
+    disabledReason = 'A revision already exists for this locked runtime.'
+  }
+
+  return {
+    contractVersion: 'runtime-revision.v1',
+    revisionNumber,
+    rootRuntimeId: toIdString(revision.rootRuntimeId || runtimeInstance.id || runtimeInstance._id),
+    rootRuntimeInstanceKey: revision.rootRuntimeInstanceKey || runtimeInstance.runtimeInstanceKey || '',
+    parentRuntimeId: revision.parentRuntimeId ? toIdString(revision.parentRuntimeId) : null,
+    parentRuntimeInstanceKey: revision.parentRuntimeInstanceKey || '',
+    lineage,
+    createRevision: {
+      enabled: !disabledReason,
+      disabledReason,
+      permission: 'VMF_UPDATE',
+      expectedUpdatedAt: runtimeInstance.updatedAt || null,
+      existingChildRuntimeId: childRevision ? toIdString(childRevision._id || childRevision.id) : null,
+      existingChildRuntimeInstanceKey: childRevision?.runtimeInstanceKey || '',
+    },
+    sourceProof: {
+      publishSnapshotId: publish?.snapshot?.snapshotId || '',
+      publishSnapshotHash: publish?.snapshot?.snapshotHash || '',
+      lockSnapshotId: lock?.snapshot?.snapshotId || '',
+      lockSnapshotHash: lock?.snapshot?.snapshotHash || '',
+      replayAnchorId: lock?.replayAnchor?.replayAnchorId || lock?.anchor?.replayAnchorId || '',
+      replayAnchorHash: lock?.replayAnchor?.replayAnchorHash || lock?.anchor?.replayAnchorHash || '',
+    },
+  }
+}
+
 export const getRuntimeRenderer = async ({
   scopes,
   runtimeInstanceId,
@@ -2429,6 +2571,15 @@ export const getRuntimeRenderer = async ({
     frameworkPackage,
     frameworkState,
   })
+  const publishProjection = buildPublishProjection(frameworkState, sectionTruth)
+  const lockProjection = buildLockProjection(runtimeInstance, frameworkState, sectionTruth)
+  const revisionProjection = await buildRevisionProjection({
+    runtimeInstance,
+    frameworkState,
+    publish: publishProjection,
+    lock: lockProjection,
+    scopes,
+  })
 
   return {
     rendererContractVersion: RUNTIME_RENDERER_CONTRACT_VERSION,
@@ -2462,8 +2613,9 @@ export const getRuntimeRenderer = async ({
     actions,
     validation: buildValidationProjection({ frameworkState, sections }),
     readiness: buildReadinessProjection(runtimeInstance, frameworkState, sectionTruth),
-    publish: buildPublishProjection(frameworkState, sectionTruth),
-    lock: buildLockProjection(runtimeInstance, frameworkState, sectionTruth),
+    publish: publishProjection,
+    lock: lockProjection,
+    revision: revisionProjection,
     signals: [],
     activity,
     runtimeData: buildRuntimeDataProjection({ includeDebugProjection, sections }),

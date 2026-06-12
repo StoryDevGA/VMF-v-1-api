@@ -209,6 +209,16 @@ const createRuntimeInstanceSchema = z.object({
     .default(''),
 }).strict()
 
+const createRuntimeRevisionSchema = z.object({
+  expectedUpdatedAt: expectedUpdatedAtSchema,
+  reason: z
+    .string()
+    .trim()
+    .max(1000, 'Reason must be 1000 characters or fewer')
+    .optional()
+    .default(''),
+}).strict()
+
 const mutateRuntimeStateSchema = z.object({
   runtimePath: z
     .string({ required_error: 'runtimePath is required' })
@@ -802,6 +812,11 @@ const createRuntimeOutputRequestSchema = z.object({
 const emptyRuntimeOutputMutationSchema = z.object({}).strict()
 
 export const validateCreateRuntimeInstance = createBodyValidator(createRuntimeInstanceSchema, {
+  message: 'Request validation failed.',
+  rootIssueKey: '_root',
+})
+
+export const validateCreateRuntimeRevision = createBodyValidator(createRuntimeRevisionSchema, {
   message: 'Request validation failed.',
   rootIssueKey: '_root',
 })

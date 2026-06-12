@@ -635,6 +635,82 @@ const makeRuntimeInstanceDocument = (overrides = {}) => {
   return document
 }
 
+const makeLockedPublishedRuntimeInstance = (overrides = {}) => makeRuntimeInstanceDocument({
+  status: 'LOCKED',
+  lockedAt: new Date('2026-05-19T08:10:00.000Z'),
+  lockedBy: CUSTOMER_ADMIN_ID,
+  lockedReason: 'Certified canonical runtime truth',
+  revision: {
+    revisionNumber: 1,
+  },
+  framework_state: {
+    lifecycle: { stage: 'LOCKED' },
+    sections: {
+      customer_problem: {
+        accepted: {
+          content: 'Accepted canonical problem.',
+        },
+      },
+    },
+    evidence_pack: {
+      objects: [
+        {
+          evidenceObjectId: 'evidence-object-1',
+          status: 'ACCEPTED',
+        },
+      ],
+    },
+    validation: {
+      state: 'PASSED',
+    },
+    readiness: {
+      state: 'READY',
+      ready: true,
+    },
+    publish: {
+      state: 'PUBLISHED',
+      published: true,
+      publishedAt: '2026-05-19T08:05:00.000Z',
+      snapshot: {
+        snapshotId: 'publish-snapshot-runtime-1',
+        snapshotHash: 'sha256:publish-snapshot-runtime-1',
+      },
+      outputEligibility: {
+        outputEligible: true,
+      },
+    },
+    lock: {
+      state: 'LOCKED',
+      locked: true,
+      lockedAt: '2026-05-19T08:10:00.000Z',
+      snapshot: {
+        snapshotId: 'lock-snapshot-runtime-1',
+        snapshotHash: 'sha256:lock-snapshot-runtime-1',
+      },
+      replayAnchor: {
+        replayAnchorId: 'replay-anchor-runtime-1',
+        replayAnchorHash: 'sha256:replay-anchor-runtime-1',
+      },
+      outputEligibility: {
+        outputEligible: true,
+      },
+    },
+    policy: {
+      lastResult: {
+        decision: 'ALLOW',
+      },
+    },
+    attachments: {},
+    artifacts: {
+      renderedOutputAssetId: 'asset-that-must-not-copy',
+    },
+    intelligence_graph: {
+      graphHash: 'sha256:graph',
+    },
+  },
+  ...overrides,
+})
+
 const makeRendererFrameworkPackage = (overrides = {}) => makeFrameworkPackage({
   uiContractKey: UI_CONTRACT_KEY,
   uiContractBinding: {
@@ -1847,6 +1923,163 @@ describe('Runtime Instance API', () => {
     expect(res.body.error.details.reason).toBe('AUDIT_PERSISTENCE_FAILED')
     expect(RuntimeInstance.prototype.save).toHaveBeenCalledTimes(1)
     expect(RuntimeInstance.deleteOne).toHaveBeenCalledWith({ _id: expect.anything() })
+  })
+
+  test('creates an editable revision from a published locked runtime with lineage proof', async () => {
+    const sourceRuntimeInstance = makeLockedPublishedRuntimeInstance()
+    RuntimeInstance.findOne = jest.fn().mockImplementation((query) => {
+      if (query?.['revision.parentRuntimeId']) {
+        return buildLeanQuery(null)
+      }
+
+      return buildLeanQuery(sourceRuntimeInstance)
+    })
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/revisions`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+        reason: 'Refresh Q3 positioning.',
+      })
+
+    expect(res.status).toBe(201)
+    expect(RuntimeInstance.prototype.save).toHaveBeenCalledTimes(1)
+    const savedRevision = RuntimeInstance.prototype.save.mock.contexts[0]
+    expect(savedRevision.status).toBe('ACTIVE')
+    expect(savedRevision.lockedAt).toBeNull()
+    expect(savedRevision.revision.revisionNumber).toBe(2)
+    expect(savedRevision.revision.parentRuntimeId.toString()).toBe(RUNTIME_INSTANCE_ID)
+    expect(savedRevision.revision.parentRuntimeInstanceKey).toBe('value-narrative-439111')
+    expect(savedRevision.revision.rootRuntimeId.toString()).toBe(RUNTIME_INSTANCE_ID)
+    expect(savedRevision.revision.derivedFromPublishSnapshotId).toBe('publish-snapshot-runtime-1')
+    expect(savedRevision.revision.derivedFromLockSnapshotId).toBe('lock-snapshot-runtime-1')
+    expect(savedRevision.revision.derivedFromReplayAnchorId).toBe('replay-anchor-runtime-1')
+    expect(savedRevision.revision.revisionReason).toBe('Refresh Q3 positioning.')
+    expect(savedRevision.framework_state.lifecycle.stage).toBe('DRAFT')
+    expect(savedRevision.framework_state.sections.customer_problem.accepted.content).toBe('Accepted canonical problem.')
+    expect(savedRevision.framework_state.evidence_pack.objects).toHaveLength(1)
+    expect(savedRevision.framework_state.publish.state).toBe('UNPUBLISHED')
+    expect(savedRevision.framework_state.publish.snapshot).toEqual({})
+    expect(savedRevision.framework_state.lock.state).toBe('UNLOCKED')
+    expect(savedRevision.framework_state.lock.replayAnchor).toEqual({})
+    expect(savedRevision.framework_state.policy).toEqual({})
+    expect(savedRevision.framework_state.artifacts).toEqual({})
+    expect(res.body.data).toEqual(expect.objectContaining({
+      runtimeType: 'VALUE_NARRATIVE',
+      status: 'ACTIVE',
+      revision: expect.objectContaining({
+        revisionNumber: 2,
+        parentRuntimeId: RUNTIME_INSTANCE_ID,
+        rootRuntimeId: RUNTIME_INSTANCE_ID,
+        derivedFromPublishSnapshotId: 'publish-snapshot-runtime-1',
+        derivedFromLockSnapshotId: 'lock-snapshot-runtime-1',
+        derivedFromReplayAnchorId: 'replay-anchor-runtime-1',
+      }),
+    }))
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'RUNTIME_REVISION_CREATED',
+      resourceType: 'RuntimeInstance',
+      resourceId: expect.anything(),
+      diff: expect.objectContaining({
+        resetState: expect.objectContaining({
+          publish: true,
+          lock: true,
+          artifacts: true,
+        }),
+      }),
+    }))
+  })
+
+  test('accepts revision concurrency markers within the timestamp tolerance window', async () => {
+    const sourceRuntimeInstance = makeLockedPublishedRuntimeInstance()
+    RuntimeInstance.findOne = jest.fn().mockImplementation((query) => {
+      if (query?.['revision.parentRuntimeId']) {
+        return buildLeanQuery(null)
+      }
+
+      return buildLeanQuery(sourceRuntimeInstance)
+    })
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/revisions`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-05-19T08:00:00.500Z',
+        reason: 'Refresh Q3 positioning.',
+      })
+
+    expect(res.status).toBe(201)
+    expect(RuntimeInstance.prototype.save).toHaveBeenCalledTimes(1)
+  })
+
+  test('fails closed and rolls back a runtime revision when audit write fails', async () => {
+    const sourceRuntimeInstance = makeLockedPublishedRuntimeInstance()
+    RuntimeInstance.findOne = jest.fn().mockImplementation((query) => {
+      if (query?.['revision.parentRuntimeId']) {
+        return buildLeanQuery(null)
+      }
+
+      return buildLeanQuery(sourceRuntimeInstance)
+    })
+    AuditLog.createLog = jest.fn(async () => {
+      throw new Error('audit store unavailable')
+    })
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/revisions`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+        reason: 'Refresh Q3 positioning.',
+      })
+
+    expect(res.status).toBe(500)
+    expect(res.body.error.code).toBe('RUNTIME_REVISION_AUDIT_FAILED')
+    expect(res.body.error.details.reason).toBe('RUNTIME_REVISION_AUDIT_PERSISTENCE_FAILED')
+    expect(RuntimeInstance.prototype.save).toHaveBeenCalledTimes(1)
+    expect(RuntimeInstance.deleteOne).toHaveBeenCalledWith({ _id: expect.anything() })
+  })
+
+  test('rejects revision creation when locked source proof is incomplete', async () => {
+    const sourceRuntimeInstance = makeLockedPublishedRuntimeInstance({
+      framework_state: {
+        ...makeLockedPublishedRuntimeInstance().framework_state,
+        lock: {
+          state: 'LOCKED',
+          locked: true,
+          snapshot: {},
+          replayAnchor: {
+            replayAnchorId: 'replay-anchor-runtime-1',
+            replayAnchorHash: 'sha256:replay-anchor-runtime-1',
+          },
+        },
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockImplementation((query) => {
+      if (query?.['revision.parentRuntimeId']) {
+        return buildLeanQuery(null)
+      }
+
+      return buildLeanQuery(sourceRuntimeInstance)
+    })
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/revisions`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+        reason: 'Refresh Q3 positioning.',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('RUNTIME_REVISION_LOCK_SNAPSHOT_REQUIRED')
+    expect(RuntimeInstance.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 
   test('lists runtime instances inside the requested customer and tenant scope', async () => {
@@ -18307,6 +18540,57 @@ describe('Runtime Instance API', () => {
         requiredPermissions: ['VMF_UPDATE'],
       }),
     ]))
+  })
+
+  test('does not expose child revision identifiers to actors without VMF_UPDATE access', async () => {
+    const sourceRuntimeInstance = makeLockedPublishedRuntimeInstance()
+    const childRevision = makeRuntimeInstance({
+      _id: '6a2be3e65352125f1a3bb034',
+      id: '6a2be3e65352125f1a3bb034',
+      runtimeInstanceKey: 'value-narrative-439111-rev-2-1a3bb034',
+      status: 'ACTIVE',
+      revision: {
+        revisionNumber: 2,
+        parentRuntimeId: sourceRuntimeInstance._id,
+        parentRuntimeInstanceKey: sourceRuntimeInstance.runtimeInstanceKey,
+      },
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        sections: {},
+        validation: {},
+        policy: {},
+        artifacts: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockImplementation((query) => {
+      if (query?.['revision.parentRuntimeId']) {
+        return buildLeanQuery(childRevision)
+      }
+
+      return buildLeanQuery(sourceRuntimeInstance)
+    })
+    const token = await getAccessTokenForUser(makeRegularUser())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.revision.createRevision).toEqual(expect.objectContaining({
+      enabled: false,
+      disabledReason: 'VMF update permission is required to create a revision.',
+      existingChildRuntimeId: null,
+      existingChildRuntimeInstanceKey: '',
+    }))
+    expect(res.body.data.revision.lineage).toEqual([
+      expect.objectContaining({
+        relationship: 'CURRENT',
+        runtimeInstanceKey: 'value-narrative-439111',
+      }),
+    ])
+    expect(RuntimeInstance.findOne).not.toHaveBeenCalledWith(expect.objectContaining({
+      'revision.parentRuntimeId': expect.anything(),
+    }))
   })
 
   test('does not expose runtime data outside registered READ runtime paths', async () => {

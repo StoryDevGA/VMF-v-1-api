@@ -7,6 +7,7 @@ import {
   clearRuntimeSectionEvidence,
   createRuntimeInstance,
   createRuntimeOutputRequest,
+  createRuntimeRevision,
   executeRuntimeAction,
   exportRuntimeOutputAsset,
   getRuntimeInstance,
@@ -42,6 +43,7 @@ import {
   validateClearRuntimeSectionEvidence,
   validateCreateRuntimeOutputRequest,
   validateCreateRuntimeInstance,
+  validateCreateRuntimeRevision,
   validateExecuteRuntimeAction,
   validateGenerateRuntimeOutputRequest,
   validateListRuntimeInstances,
@@ -192,6 +194,12 @@ router.get(
   '/:runtimeInstanceId/output-lab/assets/:outputAssetId/export/:format',
   validateRuntimeOutputAssetExportParams,
   exportRuntimeOutputAsset,
+)
+router.post(
+  '/:runtimeInstanceId/revisions',
+  validateRuntimeInstanceId,
+  validateCreateRuntimeRevision,
+  createRuntimeRevision,
 )
 router.get('/:runtimeInstanceId/renderer', validateRuntimeInstanceId, getRuntimeRenderer)
 router.get('/:runtimeInstanceId', validateRuntimeInstanceId, getRuntimeInstance)

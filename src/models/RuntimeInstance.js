@@ -148,6 +148,100 @@ const runtimeEvidenceSchema = new mongoose.Schema(
   { _id: false },
 )
 
+const runtimeRevisionSchema = new mongoose.Schema(
+  {
+    revisionNumber: {
+      type: Number,
+      min: 1,
+      default: 1,
+      index: true,
+    },
+    parentRuntimeId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'RuntimeInstance',
+      default: null,
+      index: true,
+    },
+    parentRuntimeInstanceKey: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      maxlength: 160,
+      default: '',
+    },
+    rootRuntimeId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'RuntimeInstance',
+      default: null,
+      index: true,
+    },
+    rootRuntimeInstanceKey: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      maxlength: 160,
+      default: '',
+    },
+    createdFromRevision: {
+      type: Number,
+      min: 1,
+      default: 1,
+    },
+    revisionReason: {
+      type: String,
+      trim: true,
+      maxlength: 1000,
+      default: '',
+    },
+    derivedFromPublishSnapshotId: {
+      type: String,
+      trim: true,
+      maxlength: 180,
+      default: '',
+    },
+    derivedFromPublishSnapshotHash: {
+      type: String,
+      trim: true,
+      maxlength: 240,
+      default: '',
+    },
+    derivedFromLockSnapshotId: {
+      type: String,
+      trim: true,
+      maxlength: 180,
+      default: '',
+    },
+    derivedFromLockSnapshotHash: {
+      type: String,
+      trim: true,
+      maxlength: 240,
+      default: '',
+    },
+    derivedFromReplayAnchorId: {
+      type: String,
+      trim: true,
+      maxlength: 180,
+      default: '',
+    },
+    derivedFromReplayAnchorHash: {
+      type: String,
+      trim: true,
+      maxlength: 240,
+      default: '',
+    },
+    createdAt: {
+      type: Date,
+      default: null,
+    },
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
+  },
+  { _id: false },
+)
+
 const runtimeInstanceSchema = new mongoose.Schema(
   {
     runtimeInstanceKey: {
@@ -237,6 +331,10 @@ const runtimeInstanceSchema = new mongoose.Schema(
     evidence: {
       type: runtimeEvidenceSchema,
       required: true,
+    },
+    revision: {
+      type: runtimeRevisionSchema,
+      default: () => ({ revisionNumber: 1 }),
     },
     status: {
       type: String,
@@ -335,6 +433,16 @@ runtimeInstanceSchema.index({ customerId: 1, tenantId: 1, runtimeType: 1, status
 runtimeInstanceSchema.index({ customerId: 1, tenantId: 1, frameworkKey: 1, packageId: 1, updatedAt: -1 })
 runtimeInstanceSchema.index({ customerId: 1, tenantId: 1, executionStatus: 1, updatedAt: -1 })
 runtimeInstanceSchema.index({ assignedTo: 1, status: 1, updatedAt: -1 })
+runtimeInstanceSchema.index({ customerId: 1, tenantId: 1, 'revision.rootRuntimeId': 1, 'revision.revisionNumber': 1 })
+runtimeInstanceSchema.index(
+  { customerId: 1, tenantId: 1, 'revision.parentRuntimeId': 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      'revision.parentRuntimeId': { $type: 'objectId' },
+    },
+  },
+)
 runtimeInstanceSchema.index(
   { customerId: 1, tenantId: 1, runtimeType: 1, status: 1, runtimeCapacitySlot: 1 },
   {

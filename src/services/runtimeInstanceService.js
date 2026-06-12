@@ -55,6 +55,18 @@ export const RUNTIME_INSTANCE_ERROR_REASONS = Object.freeze({
   RUNTIME_ACTION_TARGET_MISMATCH: 'RUNTIME_ACTION_TARGET_MISMATCH',
   RUNTIME_ACTION_UNSUPPORTED: 'RUNTIME_ACTION_UNSUPPORTED',
   RUNTIME_ACTION_UNSUPPORTED_RUNTIME_TYPE: 'RUNTIME_ACTION_UNSUPPORTED_RUNTIME_TYPE',
+  RUNTIME_REVISION_AUDIT_PERSISTENCE_FAILED: 'RUNTIME_REVISION_AUDIT_PERSISTENCE_FAILED',
+  RUNTIME_REVISION_BRANCH_UNSUPPORTED: 'RUNTIME_REVISION_BRANCH_UNSUPPORTED',
+  RUNTIME_REVISION_FORBIDDEN: 'RUNTIME_REVISION_FORBIDDEN',
+  RUNTIME_REVISION_KEY_CONFLICT: 'RUNTIME_REVISION_KEY_CONFLICT',
+  RUNTIME_REVISION_LOCK_SNAPSHOT_REQUIRED: 'RUNTIME_REVISION_LOCK_SNAPSHOT_REQUIRED',
+  RUNTIME_REVISION_PUBLISH_SNAPSHOT_REQUIRED: 'RUNTIME_REVISION_PUBLISH_SNAPSHOT_REQUIRED',
+  RUNTIME_REVISION_REPLAY_ANCHOR_REQUIRED: 'RUNTIME_REVISION_REPLAY_ANCHOR_REQUIRED',
+  RUNTIME_REVISION_SOURCE_NOT_FOUND: 'RUNTIME_REVISION_SOURCE_NOT_FOUND',
+  RUNTIME_REVISION_SOURCE_NOT_LOCKED: 'RUNTIME_REVISION_SOURCE_NOT_LOCKED',
+  RUNTIME_REVISION_SOURCE_NOT_PUBLISHED: 'RUNTIME_REVISION_SOURCE_NOT_PUBLISHED',
+  RUNTIME_REVISION_STALE: 'RUNTIME_REVISION_STALE',
+  RUNTIME_REVISION_UNSUPPORTED_RUNTIME_TYPE: 'RUNTIME_REVISION_UNSUPPORTED_RUNTIME_TYPE',
   DOCUMENT_INGESTION_FAILED: 'DOCUMENT_INGESTION_FAILED',
   WEBSITE_ACQUISITION_FAILED: 'WEBSITE_ACQUISITION_FAILED',
 })
@@ -778,6 +790,14 @@ export const serializeRuntimeInstance = (runtimeInstance) => {
     createdBy: toIdString(plain.createdBy),
     updatedBy: plain.updatedBy ? toIdString(plain.updatedBy) : null,
     lockedBy: plain.lockedBy ? toIdString(plain.lockedBy) : null,
+    revision: plain.revision
+      ? {
+          ...plain.revision,
+          parentRuntimeId: plain.revision.parentRuntimeId ? toIdString(plain.revision.parentRuntimeId) : null,
+          rootRuntimeId: plain.revision.rootRuntimeId ? toIdString(plain.revision.rootRuntimeId) : null,
+          createdBy: plain.revision.createdBy ? toIdString(plain.revision.createdBy) : null,
+        }
+      : { revisionNumber: 1 },
     assignedTo: Array.isArray(plain.assignedTo) ? plain.assignedTo.map(toIdString).filter(Boolean) : [],
     anchors: Array.isArray(plain.anchors)
       ? plain.anchors.map((anchor) => ({
