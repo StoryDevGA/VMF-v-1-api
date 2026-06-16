@@ -25,6 +25,14 @@ import RuntimeDeployment from './RuntimeDeployment.js'
 import RuntimeInstance from './RuntimeInstance.js'
 import RuntimeOutputAsset from './RuntimeOutputAsset.js'
 import RuntimeOutputRequest from './RuntimeOutputRequest.js'
+import TruthSignature from './TruthSignature.js'
+import OutcomeAsset from './OutcomeAsset.js'
+import OutcomeAssetVersion from './OutcomeAssetVersion.js'
+import OutcomeSession from './OutcomeSession.js'
+import OutcomeMessage from './OutcomeMessage.js'
+import KnowledgePack from './KnowledgePack.js'
+import KnowledgePackVersion from './KnowledgePackVersion.js'
+import KnowledgePackActivation from './KnowledgePackActivation.js'
 
 // Export all models
 export {
@@ -54,6 +62,14 @@ export {
   RuntimeInstance,
   RuntimeOutputAsset,
   RuntimeOutputRequest,
+  TruthSignature,
+  OutcomeAsset,
+  OutcomeAssetVersion,
+  OutcomeSession,
+  OutcomeMessage,
+  KnowledgePack,
+  KnowledgePackVersion,
+  KnowledgePackActivation,
 }
 
 // Default export with all models
@@ -84,4 +100,12 @@ export default {
   RuntimeInstance,
   RuntimeOutputAsset,
   RuntimeOutputRequest,
+  TruthSignature,
+  OutcomeAsset,
+  OutcomeAssetVersion,
+  OutcomeSession,
+  OutcomeMessage,
+  KnowledgePack,
+  KnowledgePackVersion,
+  KnowledgePackActivation,
 }

@@ -8,6 +8,7 @@ import {
   OUTPUT_LAB_EXPORT_FORMATS,
   OUTPUT_LAB_OUTPUT_TYPE_KEYS,
 } from '../constants/runtimeOutputLab.js'
+import { OUTCOME_STUDIO_EXPORT_FORMATS } from '../constants/runtimeOutcomeStudio.js'
 import { RUNTIME_INSTANCE_STATUSES, RUNTIME_TYPES } from '../models/RuntimeInstance.js'
 import { createBodyValidator, createParamsValidator, createQueryValidator } from './shared.js'
 
@@ -809,6 +810,71 @@ const createRuntimeOutputRequestSchema = z.object({
     }),
 }).strict()
 
+const createRuntimeOutcomeSessionSchema = z.object({
+  sourceOutputAssetId: z
+    .string()
+    .trim()
+    .min(1, 'sourceOutputAssetId must not be empty')
+    .max(180, 'sourceOutputAssetId must be 180 characters or fewer')
+    .optional(),
+  prompt: z
+    .string()
+    .trim()
+    .min(1, 'prompt must not be empty')
+    .max(2000, 'prompt must be 2000 characters or fewer')
+    .optional(),
+}).strict()
+
+const createRuntimeOutcomeMessageSchema = z.object({
+  prompt: z
+    .string({ required_error: 'prompt is required' })
+    .trim()
+    .min(1, 'prompt must not be empty')
+    .max(2000, 'prompt must be 2000 characters or fewer'),
+}).strict()
+
+const runtimeOutcomeSessionParamsSchema = runtimeInstanceIdSchema.extend({
+  sessionId: z
+    .string({ required_error: 'sessionId is required' })
+    .trim()
+    .min(1, 'sessionId is required')
+    .max(180, 'sessionId must be 180 characters or fewer'),
+})
+
+const runtimeOutcomeMessageParamsSchema = runtimeOutcomeSessionParamsSchema.extend({
+  messageId: z
+    .string({ required_error: 'messageId is required' })
+    .trim()
+    .min(1, 'messageId is required')
+    .max(180, 'messageId must be 180 characters or fewer'),
+})
+
+const runtimeOutcomeAssetParamsSchema = runtimeInstanceIdSchema.extend({
+  outcomeAssetId: z
+    .string({ required_error: 'outcomeAssetId is required' })
+    .trim()
+    .min(1, 'outcomeAssetId is required')
+    .max(180, 'outcomeAssetId must be 180 characters or fewer'),
+})
+
+const runtimeOutcomeAssetVersionParamsSchema = runtimeOutcomeAssetParamsSchema.extend({
+  outcomeAssetVersionId: z
+    .string({ required_error: 'outcomeAssetVersionId is required' })
+    .trim()
+    .min(1, 'outcomeAssetVersionId is required')
+    .max(180, 'outcomeAssetVersionId must be 180 characters or fewer'),
+})
+
+const runtimeOutcomeAssetExportParamsSchema = runtimeOutcomeAssetParamsSchema.extend({
+  format: z
+    .string({ required_error: 'format is required' })
+    .trim()
+    .transform((value) => value.toUpperCase())
+    .refine((value) => Object.values(OUTCOME_STUDIO_EXPORT_FORMATS).includes(value), {
+      message: 'format must be MARKDOWN, JSON, DOCX, or PDF',
+    }),
+})
+
 const emptyRuntimeOutputMutationSchema = z.object({}).strict()
 
 export const validateCreateRuntimeInstance = createBodyValidator(createRuntimeInstanceSchema, {
@@ -980,6 +1046,56 @@ export const validateRuntimeOutputAssetExportParams = createParamsValidator(runt
 })
 
 export const validateCreateRuntimeOutputRequest = createBodyValidator(createRuntimeOutputRequestSchema, {
+  message: 'Request validation failed.',
+  rootIssueKey: '_root',
+})
+
+export const validateCreateRuntimeOutcomeSession = createBodyValidator(createRuntimeOutcomeSessionSchema, {
+  message: 'Request validation failed.',
+  rootIssueKey: '_root',
+})
+
+export const validateCreateRuntimeOutcomeMessage = createBodyValidator(createRuntimeOutcomeMessageSchema, {
+  message: 'Request validation failed.',
+  rootIssueKey: '_root',
+})
+
+export const validateRuntimeOutcomeSessionParams = createParamsValidator(runtimeOutcomeSessionParamsSchema, {
+  message: 'Invalid request parameters.',
+  rootIssueKey: '_root',
+})
+
+export const validateRuntimeOutcomeMessageParams = createParamsValidator(runtimeOutcomeMessageParamsSchema, {
+  message: 'Invalid request parameters.',
+  rootIssueKey: '_root',
+})
+
+export const validateRuntimeOutcomeAssetParams = createParamsValidator(runtimeOutcomeAssetParamsSchema, {
+  message: 'Invalid request parameters.',
+  rootIssueKey: '_root',
+})
+
+export const validateRuntimeOutcomeAssetVersionParams = createParamsValidator(runtimeOutcomeAssetVersionParamsSchema, {
+  message: 'Invalid request parameters.',
+  rootIssueKey: '_root',
+})
+
+export const validateRuntimeOutcomeAssetExportParams = createParamsValidator(runtimeOutcomeAssetExportParamsSchema, {
+  message: 'Invalid request parameters.',
+  rootIssueKey: '_root',
+})
+
+export const validateGenerateRuntimeOutcomeResponse = createBodyValidator(emptyRuntimeOutputMutationSchema, {
+  message: 'Request validation failed.',
+  rootIssueKey: '_root',
+})
+
+export const validateUpdateRuntimeOutcomeSessionFromLatestTruth = createBodyValidator(emptyRuntimeOutputMutationSchema, {
+  message: 'Request validation failed.',
+  rootIssueKey: '_root',
+})
+
+export const validatePublishRuntimeOutcomeAsset = createBodyValidator(emptyRuntimeOutputMutationSchema, {
   message: 'Request validation failed.',
   rootIssueKey: '_root',
 })

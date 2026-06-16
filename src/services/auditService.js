@@ -90,6 +90,25 @@ export const AUDIT_ACTIONS = Object.freeze({
   OUTPUT_REQUEST_CREATED: 'OUTPUT_REQUEST_CREATED',
   OUTPUT_GENERATION_COMPLETED: 'OUTPUT_GENERATION_COMPLETED',
   OUTPUT_ASSET_PUBLISHED: 'OUTPUT_ASSET_PUBLISHED',
+  OUTCOME_SESSION_CREATED: 'OUTCOME_SESSION_CREATED',
+  TRUTH_SIGNATURE_BOUND: 'TRUTH_SIGNATURE_BOUND',
+  KNOWLEDGE_PACK_BOUND_TO_SESSION: 'KNOWLEDGE_PACK_BOUND_TO_SESSION',
+  PROMPT_SUBMITTED: 'PROMPT_SUBMITTED',
+  OUTCOME_RESPONSE_GENERATED: 'OUTCOME_RESPONSE_GENERATED',
+  ASSET_GENERATED: 'ASSET_GENERATED',
+  ASSET_PUBLISHED: 'ASSET_PUBLISHED',
+  ASSET_EXPORTED: 'ASSET_EXPORTED',
+  OUTCOME_DRIFT_DETECTED: 'OUTCOME_DRIFT_DETECTED',
+  OUTCOME_UPDATED_FROM_NEW_TRUTH: 'OUTCOME_UPDATED_FROM_NEW_TRUTH',
+  OUTCOME_KNOWLEDGE_PACK_STARTER_IMPORTED: 'OUTCOME_KNOWLEDGE_PACK_STARTER_IMPORTED',
+  OUTCOME_KNOWLEDGE_PACK_VERSION_UPLOADED: 'OUTCOME_KNOWLEDGE_PACK_VERSION_UPLOADED',
+  OUTCOME_KNOWLEDGE_PACK_VERSION_VALIDATED: 'OUTCOME_KNOWLEDGE_PACK_VERSION_VALIDATED',
+  OUTCOME_KNOWLEDGE_PACK_VALIDATION_FAILED: 'OUTCOME_KNOWLEDGE_PACK_VALIDATION_FAILED',
+  OUTCOME_KNOWLEDGE_PACK_ACTIVATED: 'OUTCOME_KNOWLEDGE_PACK_ACTIVATED',
+  KNOWLEDGE_PACK_CONTENT_PREVIEWED: 'KNOWLEDGE_PACK_CONTENT_PREVIEWED',
+  KNOWLEDGE_PACK_DEPRECATED: 'KNOWLEDGE_PACK_DEPRECATED',
+  KNOWLEDGE_PACK_DISABLED: 'KNOWLEDGE_PACK_DISABLED',
+  KNOWLEDGE_PACK_ROLLED_BACK: 'KNOWLEDGE_PACK_ROLLED_BACK',
   COMPONENT_CREATED: 'COMPONENT_CREATED',
   COMPONENT_UPDATED: 'COMPONENT_UPDATED',
   COMPONENT_CLONED: 'COMPONENT_CLONED',
@@ -185,6 +204,12 @@ export const RESOURCE_TYPES = Object.freeze({
   RuntimeInstance: 'RuntimeInstance',
   RuntimeOutputAsset: 'RuntimeOutputAsset',
   RuntimeOutputRequest: 'RuntimeOutputRequest',
+  OutcomeSession: 'OutcomeSession',
+  OutcomeMessage: 'OutcomeMessage',
+  OutcomeAsset: 'OutcomeAsset',
+  KnowledgePack: 'KnowledgePack',
+  KnowledgePackVersion: 'KnowledgePackVersion',
+  KnowledgePackActivation: 'KnowledgePackActivation',
   RuntimeAgent: 'RuntimeAgent',
   RuntimeSkill: 'RuntimeSkill',
   RuntimePathRegistry: 'RuntimePathRegistry',
@@ -453,6 +478,34 @@ const buildAuditSummary = ({ action, resourceType, resourceId, diff, display }) 
       return clampSummary(`${actorLabel} updated runtime state for ${targetLabel}`)
     case AUDIT_ACTIONS.TRUTH_QUALITY_EVALUATED:
       return clampSummary(`${actorLabel} evaluated Truth Quality for ${targetLabel}`)
+    case AUDIT_ACTIONS.OUTCOME_SESSION_CREATED:
+      return clampSummary(`${actorLabel} created Outcome Studio session ${targetLabel}`)
+    case AUDIT_ACTIONS.TRUTH_SIGNATURE_BOUND:
+      return clampSummary(`${actorLabel} bound Truth Signature for ${targetLabel}`)
+    case AUDIT_ACTIONS.KNOWLEDGE_PACK_BOUND_TO_SESSION:
+      return clampSummary(`${actorLabel} bound Knowledge Packs for ${targetLabel}`)
+    case AUDIT_ACTIONS.PROMPT_SUBMITTED:
+      return clampSummary(`${actorLabel} submitted Outcome Studio prompt ${targetLabel}`)
+    case AUDIT_ACTIONS.OUTCOME_RESPONSE_GENERATED:
+      return clampSummary(`${actorLabel} generated Outcome Studio response ${targetLabel}`)
+    case AUDIT_ACTIONS.ASSET_GENERATED:
+      return clampSummary(`${actorLabel} generated Outcome Studio asset ${targetLabel}`)
+    case AUDIT_ACTIONS.ASSET_PUBLISHED:
+      return clampSummary(`${actorLabel} published Outcome Studio asset ${targetLabel}`)
+    case AUDIT_ACTIONS.OUTCOME_DRIFT_DETECTED:
+      return clampSummary(`${actorLabel} detected Outcome Studio truth drift for ${targetLabel}`)
+    case AUDIT_ACTIONS.OUTCOME_UPDATED_FROM_NEW_TRUTH:
+      return clampSummary(`${actorLabel} updated Outcome Studio truth binding for ${targetLabel}`)
+    case AUDIT_ACTIONS.OUTCOME_KNOWLEDGE_PACK_STARTER_IMPORTED:
+      return clampSummary(`${actorLabel} imported starter Knowledge Pack ${targetLabel}`)
+    case AUDIT_ACTIONS.KNOWLEDGE_PACK_CONTENT_PREVIEWED:
+      return clampSummary(`${actorLabel} previewed Knowledge Pack content ${targetLabel}`)
+    case AUDIT_ACTIONS.KNOWLEDGE_PACK_DEPRECATED:
+      return clampSummary(`${actorLabel} deprecated Knowledge Pack ${targetLabel}`)
+    case AUDIT_ACTIONS.KNOWLEDGE_PACK_DISABLED:
+      return clampSummary(`${actorLabel} disabled Knowledge Pack ${targetLabel}`)
+    case AUDIT_ACTIONS.KNOWLEDGE_PACK_ROLLED_BACK:
+      return clampSummary(`${actorLabel} rolled back Knowledge Pack ${targetLabel}`)
     case AUDIT_ACTIONS.VALIDATION_STARTED:
       return clampSummary(`${actorLabel} started validation for ${targetLabel}`)
     case AUDIT_ACTIONS.VALIDATION_PASSED:

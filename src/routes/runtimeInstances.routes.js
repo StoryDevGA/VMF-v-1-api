@@ -6,10 +6,17 @@ import {
   acceptRuntimeSection,
   clearRuntimeSectionEvidence,
   createRuntimeInstance,
+  createRuntimeOutcomeMessage,
+  createRuntimeOutcomeSession,
   createRuntimeOutputRequest,
   createRuntimeRevision,
   executeRuntimeAction,
+  exportRuntimeOutcomeAsset,
   exportRuntimeOutputAsset,
+  generateRuntimeOutcomeResponse,
+  getRuntimeOutcomeAsset,
+  getRuntimeOutcomeAssetPreview,
+  getRuntimeOutcomeAssetVersion,
   getRuntimeInstance,
   getRuntimeEvidence,
   getRuntimeIntelligenceGraph,
@@ -23,18 +30,24 @@ import {
   getRuntimeOutputLabDefinitions,
   getRuntimeOutputLabReadiness,
   getRuntimeOutputRequest,
+  getRuntimeOutcomeSession,
+  getRuntimeOutcomeStudio,
+  getRuntimeOutcomeStudioReadiness,
   getRuntimeRenderer,
   getRuntimeTruthQuality,
   generateRuntimeOutputRequest,
   listRuntimeOutputAssets,
+  listRuntimeOutcomeSessionAssets,
   listRuntimeInstances,
   mutateRuntimeState,
+  publishRuntimeOutcomeAsset,
   publishRuntimeOutputAsset,
   rebuildRuntimeIntelligenceGraph,
   resetRuntimeDiscovery,
   reviewAllRuntimeSectionEvidence,
   reviewRuntimeDiscoveryEvidence,
   reviewRuntimeSectionEvidence,
+  updateRuntimeOutcomeSessionFromLatestTruth,
   updateRuntimeSectionEvidence,
   updateRuntimeDiscoveryInputs,
 } from '../controllers/runtimeInstance.controller.js'
@@ -42,10 +55,13 @@ import {
   validateAcceptRuntimeDiscovery,
   validateAcceptRuntimeSection,
   validateClearRuntimeSectionEvidence,
+  validateCreateRuntimeOutcomeMessage,
+  validateCreateRuntimeOutcomeSession,
   validateCreateRuntimeOutputRequest,
   validateCreateRuntimeInstance,
   validateCreateRuntimeRevision,
   validateExecuteRuntimeAction,
+  validateGenerateRuntimeOutcomeResponse,
   validateGenerateRuntimeOutputRequest,
   validateListRuntimeInstances,
   validateMutateRuntimeState,
@@ -61,10 +77,17 @@ import {
   validateRuntimeDiscoveryEvidenceParams,
   validateRuntimeOutputAssetExportParams,
   validateRuntimeOutputAssetParams,
+  validatePublishRuntimeOutcomeAsset,
+  validateRuntimeOutcomeAssetExportParams,
+  validateRuntimeOutcomeAssetParams,
+  validateRuntimeOutcomeAssetVersionParams,
+  validateRuntimeOutcomeMessageParams,
   validateRuntimeOutputRequestParams,
+  validateRuntimeOutcomeSessionParams,
   validateRuntimeActionParams,
   validateRuntimeInstanceId,
   validateRuntimeSectionEvidenceParams,
+  validateUpdateRuntimeOutcomeSessionFromLatestTruth,
   validateUpdateDiscoveryInputs,
   validateUpdateRuntimeSectionEvidence,
 } from '../validators/runtimeInstance.validator.js'
@@ -162,6 +185,68 @@ router.get('/:runtimeInstanceId/evidence', validateRuntimeInstanceId, getRuntime
 router.get('/:runtimeInstanceId/output-lab', validateRuntimeInstanceId, getRuntimeOutputLab)
 router.get('/:runtimeInstanceId/output-lab/definitions', validateRuntimeInstanceId, getRuntimeOutputLabDefinitions)
 router.get('/:runtimeInstanceId/output-lab/readiness', validateRuntimeInstanceId, getRuntimeOutputLabReadiness)
+router.get('/:runtimeInstanceId/outcome-studio', validateRuntimeInstanceId, getRuntimeOutcomeStudio)
+router.get('/:runtimeInstanceId/outcome-studio/readiness', validateRuntimeInstanceId, getRuntimeOutcomeStudioReadiness)
+router.get(
+  '/:runtimeInstanceId/outcome-studio/sessions/:sessionId/assets',
+  validateRuntimeOutcomeSessionParams,
+  listRuntimeOutcomeSessionAssets,
+)
+router.get(
+  '/:runtimeInstanceId/outcome-studio/sessions/:sessionId',
+  validateRuntimeOutcomeSessionParams,
+  getRuntimeOutcomeSession,
+)
+router.get(
+  '/:runtimeInstanceId/outcome-studio/assets/:outcomeAssetId/versions/:outcomeAssetVersionId',
+  validateRuntimeOutcomeAssetVersionParams,
+  getRuntimeOutcomeAssetVersion,
+)
+router.get(
+  '/:runtimeInstanceId/outcome-studio/assets/:outcomeAssetId/preview',
+  validateRuntimeOutcomeAssetParams,
+  getRuntimeOutcomeAssetPreview,
+)
+router.get(
+  '/:runtimeInstanceId/outcome-studio/assets/:outcomeAssetId',
+  validateRuntimeOutcomeAssetParams,
+  getRuntimeOutcomeAsset,
+)
+router.post(
+  '/:runtimeInstanceId/outcome-studio/assets/:outcomeAssetId/publish',
+  validateRuntimeOutcomeAssetParams,
+  validatePublishRuntimeOutcomeAsset,
+  publishRuntimeOutcomeAsset,
+)
+router.get(
+  '/:runtimeInstanceId/outcome-studio/assets/:outcomeAssetId/export/:format',
+  validateRuntimeOutcomeAssetExportParams,
+  exportRuntimeOutcomeAsset,
+)
+router.post(
+  '/:runtimeInstanceId/outcome-studio/sessions/:sessionId/update-from-latest-truth',
+  validateRuntimeOutcomeSessionParams,
+  validateUpdateRuntimeOutcomeSessionFromLatestTruth,
+  updateRuntimeOutcomeSessionFromLatestTruth,
+)
+router.post(
+  '/:runtimeInstanceId/outcome-studio/sessions/:sessionId/messages/:messageId/generate-response',
+  validateRuntimeOutcomeMessageParams,
+  validateGenerateRuntimeOutcomeResponse,
+  generateRuntimeOutcomeResponse,
+)
+router.post(
+  '/:runtimeInstanceId/outcome-studio/sessions/:sessionId/messages',
+  validateRuntimeOutcomeSessionParams,
+  validateCreateRuntimeOutcomeMessage,
+  createRuntimeOutcomeMessage,
+)
+router.post(
+  '/:runtimeInstanceId/outcome-studio/sessions',
+  validateRuntimeInstanceId,
+  validateCreateRuntimeOutcomeSession,
+  createRuntimeOutcomeSession,
+)
 router.post(
   '/:runtimeInstanceId/output-lab/requests',
   validateRuntimeInstanceId,

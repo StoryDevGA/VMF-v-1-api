@@ -446,6 +446,7 @@ const getRuntimeScope = (runtimeInstance = {}) => ({
   customerId: runtimeInstance.customerId,
   runtimeInstanceId: runtimeInstance._id || runtimeInstance.id,
   runtimeInstanceKey: runtimeInstance.runtimeInstanceKey || '',
+  runtimeType: runtimeInstance.runtimeType || '',
   frameworkKey: runtimeInstance.frameworkKey || '',
   packageKey: runtimeInstance.packageKey || '',
   packageVersion: runtimeInstance.packageVersion || '',
@@ -868,6 +869,7 @@ export const getRuntimeOutputLabReadiness = async ({
 }
 
 export const getRuntimeOutputLab = async ({
+  includeRuntimeScope = false,
   runtimeInstanceId,
   scopes,
 } = {}) => {
@@ -888,6 +890,7 @@ export const getRuntimeOutputLab = async ({
 
   return {
     contractVersion: OUTPUT_LAB_CONTRACT_VERSION,
+    ...(includeRuntimeScope ? { runtimeScope: getRuntimeScope(runtimeInstance) } : {}),
     definitions: getOutputLabDefinitions(),
     readiness,
     requests: requests.map(serializeRequest),
