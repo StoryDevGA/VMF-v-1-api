@@ -1269,6 +1269,7 @@ let RuntimeActivationSnapshot
 let RuntimeInstance
 let RuntimeOutputAsset
 let RuntimeOutputRequest
+let RuntimeGraphRelationship
 let TruthSignature
 let OutcomeAsset
 let OutcomeAssetVersion
@@ -1319,6 +1320,7 @@ beforeAll(async () => {
   RuntimeInstance = models.RuntimeInstance
   RuntimeOutputAsset = models.RuntimeOutputAsset
   RuntimeOutputRequest = models.RuntimeOutputRequest
+  RuntimeGraphRelationship = models.RuntimeGraphRelationship
   TruthSignature = models.TruthSignature
   OutcomeAsset = models.OutcomeAsset
   OutcomeAssetVersion = models.OutcomeAssetVersion
@@ -1388,6 +1390,9 @@ beforeEach(() => {
   RuntimeOutputAsset.find = jest.fn().mockReturnValue(buildRuntimeInstanceFindChain([]))
   RuntimeOutputAsset.findOne = jest.fn().mockResolvedValue(null)
   RuntimeOutputAsset.deleteOne = jest.fn().mockResolvedValue({ deletedCount: 1 })
+  RuntimeGraphRelationship.prototype.save = jest.fn(async function save() { return this })
+  RuntimeGraphRelationship.find = jest.fn().mockReturnValue(buildRuntimeInstanceFindChain([]))
+  RuntimeGraphRelationship.deleteMany = jest.fn().mockResolvedValue({ deletedCount: 1 })
   TruthSignature.prototype.save = jest.fn(async function save() { return this })
   TruthSignature.deleteOne = jest.fn().mockResolvedValue({ deletedCount: 1 })
   OutcomeAsset.prototype.save = jest.fn(async function save() { return this })
@@ -14486,6 +14491,49 @@ describe('Runtime Instance API', () => {
       decisionBindings: [],
     }))
     expect(OutcomeSession.deleteOne).not.toHaveBeenCalled()
+    expect(RuntimeGraphRelationship.prototype.save).toHaveBeenCalledTimes(6)
+    const savedSessionRelationships = RuntimeGraphRelationship.prototype.save.mock.contexts
+    expect(savedSessionRelationships[0]).toEqual(expect.objectContaining({
+      relationshipId: expect.stringMatching(/^rt_graph_rel_/),
+      relationshipType: 'SESSION_BOUND_TO_TRUTH',
+      workspaceType: 'OUTCOME',
+      sourceNode: expect.objectContaining({
+        nodeType: 'WORKSPACE_SESSION',
+        nodeId: sessionRes.body.data.sessionId,
+        recordModel: 'OutcomeSession',
+      }),
+      targetNode: expect.objectContaining({
+        nodeType: 'TRUTH_SIGNATURE',
+        nodeId: sessionRes.body.data.truthSignatureId,
+        recordModel: 'TruthSignature',
+      }),
+      evidence: expect.objectContaining({
+        sessionId: sessionRes.body.data.sessionId,
+        truthSignatureId: sessionRes.body.data.truthSignatureId,
+        truthSignatureCurrentness: 'CURRENT',
+      }),
+    }))
+    expect(savedSessionRelationships.slice(1)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        relationshipType: 'SESSION_BOUND_TO_PACK',
+        sourceNode: expect.objectContaining({
+          nodeType: 'WORKSPACE_SESSION',
+          nodeId: sessionRes.body.data.sessionId,
+        }),
+        targetNode: expect.objectContaining({
+          nodeType: 'KNOWLEDGE_PACK',
+          nodeId: 'truth-certification-pack',
+        }),
+        evidence: expect.objectContaining({
+          packCategory: 'PLATFORM',
+          packType: 'TRUTH_CERTIFICATION',
+          contentHash: 'sha256:truth-certification-pack',
+        }),
+      }),
+    ]))
+    expect(JSON.stringify(savedSessionRelationships)).not.toContain('sourceBundle')
+    expect(JSON.stringify(savedSessionRelationships)).not.toContain('Raw')
+    expect(RuntimeGraphRelationship.deleteMany).not.toHaveBeenCalled()
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'TRUTH_QUALITY_EVALUATED',
       resourceType: 'RuntimeInstance',
@@ -14503,6 +14551,7 @@ describe('Runtime Instance API', () => {
         knowledgePackBindingStatus: 'PROJECTED',
         activeKnowledgePackCount: 5,
         requiredKnowledgePackCount: 5,
+        runtimeGraphRelationshipCount: 6,
       }),
     }))
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
@@ -14579,6 +14628,57 @@ describe('Runtime Instance API', () => {
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'TRUTH_SIGNATURE_BOUND',
       resourceType: 'OutcomeSession',
+    }))
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+      action: 'KNOWLEDGE_PACK_BOUND_TO_SESSION',
+    }))
+  })
+
+  test('Outcome Studio session creation rolls back when runtime graph relationship persistence fails', async () => {
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    RuntimeOutputAsset.find.mockReturnValue(buildRuntimeInstanceFindChain([makeRuntimeOutputAsset()]))
+    KnowledgePackActivation.find.mockReturnValue(buildRuntimeInstanceFindChain(makeActiveOutcomeKnowledgePackActivations()))
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+    RuntimeGraphRelationship.prototype.save = jest.fn(async () => {
+      throw new Error('relationship store unavailable')
+    })
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        sourceOutputAssetId: 'out_asset_outcome_studio_fixture',
+        prompt: 'Create a governed outcome narrative.',
+      })
+
+    expect(res.status).toBe(500)
+    expect(res.body.error.code).toBe('OUTCOME_GRAPH_RELATIONSHIP_FAILED')
+    expect(res.body.error.details).toEqual(expect.objectContaining({
+      reason: 'OUTCOME_GRAPH_RELATIONSHIP_FAILED',
+      sessionId: expect.stringMatching(/^out_sess_/),
+      truthSignatureId: expect.stringMatching(/^truth_sig_/),
+      graphRelationshipError: expect.objectContaining({
+        message: 'relationship store unavailable',
+      }),
+    }))
+    expect(TruthSignature.prototype.save).toHaveBeenCalledTimes(1)
+    expect(OutcomeSession.prototype.save).toHaveBeenCalledTimes(1)
+    expect(RuntimeGraphRelationship.prototype.save).toHaveBeenCalledTimes(1)
+    const relationshipRollbackFilter = RuntimeGraphRelationship.deleteMany.mock.calls[0][0]
+    expect(relationshipRollbackFilter._id.$in).toHaveLength(6)
+    expect(OutcomeSession.deleteOne).toHaveBeenCalledWith({
+      _id: expect.anything(),
+    })
+    expect(TruthSignature.deleteOne).toHaveBeenCalledWith({
+      _id: expect.anything(),
+    })
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+      action: 'OUTCOME_SESSION_CREATED',
+    }))
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+      action: 'TRUTH_SIGNATURE_BOUND',
     }))
     expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
       action: 'KNOWLEDGE_PACK_BOUND_TO_SESSION',
@@ -15090,6 +15190,45 @@ describe('Runtime Instance API', () => {
     }))
     expect(OutcomeAsset.deleteOne).not.toHaveBeenCalled()
     expect(OutcomeAssetVersion.deleteOne).not.toHaveBeenCalled()
+    expect(RuntimeGraphRelationship.prototype.save).toHaveBeenCalledTimes(2)
+    const savedAssetRelationships = RuntimeGraphRelationship.prototype.save.mock.contexts
+    expect(savedAssetRelationships).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        relationshipType: 'ASSET_DERIVED_FROM_TRUTH',
+        workspaceType: 'OUTCOME',
+        sourceNode: expect.objectContaining({
+          nodeType: 'TRUTH_SIGNATURE',
+          nodeId: 'truth_sig_existing_fixture',
+        }),
+        targetNode: expect.objectContaining({
+          nodeType: 'WORKSPACE_ASSET',
+          nodeId: res.body.data.asset.outcomeAssetId,
+        }),
+        evidence: expect.objectContaining({
+          outcomeAssetId: res.body.data.asset.outcomeAssetId,
+          outcomeAssetVersionId: res.body.data.assetVersion.outcomeAssetVersionId,
+          truthSignatureCurrentness: 'CURRENT',
+        }),
+      }),
+      expect.objectContaining({
+        relationshipType: 'ASSET_DERIVED_FROM_SESSION',
+        sourceNode: expect.objectContaining({
+          nodeType: 'WORKSPACE_SESSION',
+          nodeId: 'out_sess_existing_fixture',
+        }),
+        targetNode: expect.objectContaining({
+          nodeType: 'WORKSPACE_ASSET',
+          nodeId: res.body.data.asset.outcomeAssetId,
+        }),
+        evidence: expect.objectContaining({
+          sessionId: 'out_sess_existing_fixture',
+          outputTypeKey: 'EXECUTIVE_BRIEF',
+          versionNumber: 1,
+        }),
+      }),
+    ]))
+    expect(JSON.stringify(savedAssetRelationships)).not.toContain('Raw')
+    expect(RuntimeGraphRelationship.deleteMany).not.toHaveBeenCalled()
     expect(OutcomeAsset.find).not.toHaveBeenCalled()
     expect(OutcomeAsset.findOne).not.toHaveBeenCalled()
     expect(OutcomeAssetVersion.find).not.toHaveBeenCalled()
@@ -15109,6 +15248,7 @@ describe('Runtime Instance API', () => {
         assetCreated: true,
         outcomeAssetId: res.body.data.asset.outcomeAssetId,
         outcomeAssetVersionId: res.body.data.assetVersion.outcomeAssetVersionId,
+        runtimeGraphRelationshipCount: 2,
       }),
     }))
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
@@ -15128,6 +15268,7 @@ describe('Runtime Instance API', () => {
         outcomeAssetVersionId: res.body.data.assetVersion.outcomeAssetVersionId,
         versionNumber: 1,
         generatedBodyAvailable: true,
+        runtimeGraphRelationshipCount: 2,
       }),
     }))
   })
@@ -15219,6 +15360,62 @@ describe('Runtime Instance API', () => {
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'OUTCOME_RESPONSE_GENERATED',
       resourceType: 'OutcomeMessage',
+    }))
+  })
+
+  test('Outcome Studio response generation rolls back when runtime graph relationship persistence fails', async () => {
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord()))
+    RuntimeGraphRelationship.prototype.save = jest.fn(async () => {
+      throw new Error('relationship store unavailable')
+    })
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/messages/out_msg_existing_fixture/generate-response`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(500)
+    expect(res.body.error.code).toBe('OUTCOME_GRAPH_RELATIONSHIP_FAILED')
+    expect(res.body.error.details).toEqual(expect.objectContaining({
+      reason: 'OUTCOME_GRAPH_RELATIONSHIP_FAILED',
+      sessionId: 'out_sess_existing_fixture',
+      messageId: 'out_msg_existing_fixture',
+      responseMessageId: expect.stringMatching(/^out_msg_/),
+      outcomeAssetId: expect.stringMatching(/^outcome_asset_/),
+      outcomeAssetVersionId: expect.stringMatching(/^outcome_asset_version_/),
+      graphRelationshipError: expect.objectContaining({
+        message: 'relationship store unavailable',
+      }),
+    }))
+    expect(OutcomeMessage.prototype.save).toHaveBeenCalledTimes(1)
+    expect(OutcomeAsset.prototype.save).toHaveBeenCalledTimes(1)
+    expect(OutcomeAssetVersion.prototype.save).toHaveBeenCalledTimes(1)
+    expect(RuntimeGraphRelationship.prototype.save).toHaveBeenCalledTimes(1)
+    expect(RuntimeGraphRelationship.deleteMany).toHaveBeenCalledWith({
+      _id: { $in: [expect.anything(), expect.anything()] },
+    })
+    expect(OutcomeAssetVersion.deleteOne).toHaveBeenCalledWith({
+      _id: expect.anything(),
+    })
+    expect(OutcomeAsset.deleteOne).toHaveBeenCalledWith({
+      _id: expect.anything(),
+    })
+    expect(OutcomeMessage.deleteOne).toHaveBeenCalledWith({
+      _id: expect.anything(),
+    })
+    expect(OutcomeMessage.updateOne).toHaveBeenCalledWith(
+      { _id: 'c47f1f77bcf86cd799439111' },
+      { $set: { responseStatus: 'PENDING_RESPONSE' } },
+    )
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+      action: 'OUTCOME_RESPONSE_GENERATED',
+    }))
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+      action: 'ASSET_GENERATED',
     }))
   })
 
@@ -16750,6 +16947,30 @@ describe('Runtime Instance API', () => {
         publishedBy: CUSTOMER_ADMIN_ID,
       }),
     })
+    expect(RuntimeGraphRelationship.prototype.save).toHaveBeenCalledTimes(1)
+    const savedPublishRelationship = RuntimeGraphRelationship.prototype.save.mock.contexts[0]
+    expect(savedPublishRelationship).toEqual(expect.objectContaining({
+      relationshipId: expect.stringMatching(/^rt_graph_rel_/),
+      relationshipType: 'ASSET_PUBLISHED_FROM_VERSION',
+      workspaceType: 'OUTCOME',
+      sourceNode: expect.objectContaining({
+        nodeType: 'WORKSPACE_ASSET_VERSION',
+        nodeId: 'outcome_asset_version_existing_fixture',
+        recordModel: 'OutcomeAssetVersion',
+      }),
+      targetNode: expect.objectContaining({
+        nodeType: 'WORKSPACE_ASSET',
+        nodeId: 'outcome_asset_existing_fixture',
+        recordModel: 'OutcomeAsset',
+      }),
+      evidence: expect.objectContaining({
+        outcomeAssetId: 'outcome_asset_existing_fixture',
+        outcomeAssetVersionId: 'outcome_asset_version_existing_fixture',
+        previousStatus: 'GENERATED',
+        truthSignatureCurrentness: 'CURRENT',
+      }),
+    }))
+    expect(RuntimeGraphRelationship.deleteMany).not.toHaveBeenCalled()
     const auditPayload = AuditLog.createLog.mock.calls.find(
       ([payload]) => payload.action === 'ASSET_PUBLISHED',
     )?.[0]
@@ -16769,6 +16990,7 @@ describe('Runtime Instance API', () => {
         previousStatus: 'GENERATED',
         nextStatus: 'PUBLISHED',
         truthSignatureCurrentness: 'CURRENT',
+        runtimeGraphRelationshipCount: 1,
       }),
     }))
   })
@@ -16798,11 +17020,56 @@ describe('Runtime Instance API', () => {
       }),
     }))
     expect(OutcomeAsset.updateOne).toHaveBeenCalledTimes(2)
+    expect(RuntimeGraphRelationship.prototype.save).toHaveBeenCalledTimes(1)
+    expect(RuntimeGraphRelationship.deleteMany).toHaveBeenCalledWith({
+      _id: { $in: [expect.anything()] },
+    })
     expect(OutcomeAsset.updateOne).toHaveBeenNthCalledWith(2, { _id: asset._id }, {
       $set: expect.objectContaining({
         status: 'GENERATED',
       }),
     })
+  })
+
+  test('Outcome Studio asset publish rolls back when runtime graph relationship persistence fails', async () => {
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    const asset = makeOutcomeAssetRecord()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    OutcomeAsset.findOne.mockReturnValue(buildLeanQuery(asset))
+    OutcomeAssetVersion.findOne.mockReturnValue(buildLeanQuery(makeOutcomeAssetVersionRecord()))
+    RuntimeGraphRelationship.prototype.save = jest.fn(async () => {
+      throw new Error('relationship store unavailable')
+    })
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/assets/outcome_asset_existing_fixture/publish`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(500)
+    expect(res.body.error.code).toBe('OUTCOME_GRAPH_RELATIONSHIP_FAILED')
+    expect(res.body.error.details).toEqual(expect.objectContaining({
+      reason: 'OUTCOME_GRAPH_RELATIONSHIP_FAILED',
+      outcomeAssetId: 'outcome_asset_existing_fixture',
+      outcomeAssetVersionId: 'outcome_asset_version_existing_fixture',
+      graphRelationshipError: expect.objectContaining({
+        message: 'relationship store unavailable',
+      }),
+    }))
+    expect(OutcomeAsset.updateOne).toHaveBeenCalledTimes(2)
+    expect(RuntimeGraphRelationship.prototype.save).toHaveBeenCalledTimes(1)
+    expect(RuntimeGraphRelationship.deleteMany).toHaveBeenCalledWith({
+      _id: { $in: [expect.anything()] },
+    })
+    expect(OutcomeAsset.updateOne).toHaveBeenNthCalledWith(2, { _id: asset._id }, {
+      $set: expect.objectContaining({
+        status: 'GENERATED',
+      }),
+    })
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+      action: 'ASSET_PUBLISHED',
+    }))
   })
 
   test('Outcome Studio asset publish rejects payload fields before runtime lookup', async () => {

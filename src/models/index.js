@@ -25,6 +25,7 @@ import RuntimeDeployment from './RuntimeDeployment.js'
 import RuntimeInstance from './RuntimeInstance.js'
 import RuntimeOutputAsset from './RuntimeOutputAsset.js'
 import RuntimeOutputRequest from './RuntimeOutputRequest.js'
+import RuntimeGraphRelationship from './RuntimeGraphRelationship.js'
 import TruthSignature from './TruthSignature.js'
 import OutcomeAsset from './OutcomeAsset.js'
 import OutcomeAssetVersion from './OutcomeAssetVersion.js'
@@ -62,6 +63,7 @@ export {
   RuntimeInstance,
   RuntimeOutputAsset,
   RuntimeOutputRequest,
+  RuntimeGraphRelationship,
   TruthSignature,
   OutcomeAsset,
   OutcomeAssetVersion,
@@ -100,6 +102,7 @@ export default {
   RuntimeInstance,
   RuntimeOutputAsset,
   RuntimeOutputRequest,
+  RuntimeGraphRelationship,
   TruthSignature,
   OutcomeAsset,
   OutcomeAssetVersion,

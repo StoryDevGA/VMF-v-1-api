@@ -22,6 +22,8 @@ import {
 import {
   DEFAULT_OUTCOME_ASSET_TYPE,
   DEFAULT_OUTCOME_WORKSPACE_TYPE,
+  RUNTIME_GRAPH_NODE_TYPES,
+  RUNTIME_GRAPH_RELATIONSHIP_TYPES,
   resolveKnowledgePackCategory,
 } from '../constants/workspaceGovernance.js'
 import {
@@ -39,6 +41,11 @@ import {
   toIdString,
 } from './runtimeInstanceService.js'
 import { getRuntimeTruthQuality } from './runtimeTruthQualityService.js'
+import {
+  createRuntimeGraphRelationshipDocuments,
+  deleteRuntimeGraphRelationshipDocuments,
+  saveRuntimeGraphRelationshipDocuments,
+} from './runtimeGraphRelationshipService.js'
 import auditService from './auditService.js'
 
 const normalizeText = (value) => String(value ?? '').trim()
@@ -59,6 +66,7 @@ export const OUTCOME_STUDIO_ERROR_REASONS = Object.freeze({
   OUTCOME_ASSET_PUBLISH_AUDIT_FAILED: 'OUTCOME_ASSET_PUBLISH_AUDIT_FAILED',
   OUTCOME_ASSET_PUBLISH_BLOCKED: 'OUTCOME_ASSET_PUBLISH_BLOCKED',
   OUTCOME_ASSET_VERSION_NOT_FOUND: 'OUTCOME_ASSET_VERSION_NOT_FOUND',
+  OUTCOME_GRAPH_RELATIONSHIP_FAILED: 'OUTCOME_GRAPH_RELATIONSHIP_FAILED',
   OUTCOME_MESSAGE_AUDIT_FAILED: 'OUTCOME_MESSAGE_AUDIT_FAILED',
   OUTCOME_MESSAGE_NOT_FOUND: 'OUTCOME_MESSAGE_NOT_FOUND',
   OUTCOME_RESPONSE_GENERATION_BLOCKED: 'OUTCOME_RESPONSE_GENERATION_BLOCKED',
@@ -612,6 +620,185 @@ const buildOutcomeContextBindings = ({
     decisionBindings: [],
   }
 }
+
+const buildRuntimeGraphScope = (runtimeScope = {}) => ({
+  tenantId: runtimeScope.tenantId,
+  customerId: runtimeScope.customerId,
+  runtimeInstanceId: runtimeScope.runtimeInstanceId,
+  workspaceType: DEFAULT_OUTCOME_WORKSPACE_TYPE,
+})
+
+const buildRuntimeGraphNode = ({
+  label = '',
+  nodeId = '',
+  nodeType = '',
+  recordId = '',
+  recordModel = '',
+} = {}) => ({
+  nodeType,
+  nodeId: normalizeText(nodeId),
+  recordId: normalizeText(recordId),
+  recordModel: normalizeText(recordModel),
+  label: normalizeText(label),
+})
+
+const buildWorkspaceSessionNode = (session = {}) => buildRuntimeGraphNode({
+  nodeType: RUNTIME_GRAPH_NODE_TYPES.WORKSPACE_SESSION,
+  nodeId: session.sessionId,
+  recordId: toIdString(session._id || session.id),
+  recordModel: 'OutcomeSession',
+  label: 'Outcome Studio Session',
+})
+
+const buildTruthSignatureNode = (truthSignature = {}) => buildRuntimeGraphNode({
+  nodeType: RUNTIME_GRAPH_NODE_TYPES.TRUTH_SIGNATURE,
+  nodeId: truthSignature.truthSignatureId,
+  recordId: truthSignature.truthSignatureId,
+  recordModel: 'TruthSignature',
+  label: 'Certified Runtime Truth Signature',
+})
+
+const buildKnowledgePackNode = (pack = {}) => buildRuntimeGraphNode({
+  nodeType: RUNTIME_GRAPH_NODE_TYPES.KNOWLEDGE_PACK,
+  nodeId: pack.packKey,
+  recordId: pack.packKey,
+  recordModel: 'KnowledgePack',
+  label: pack.label || pack.packType || 'Knowledge Pack',
+})
+
+const buildWorkspaceAssetNode = (asset = {}) => buildRuntimeGraphNode({
+  nodeType: RUNTIME_GRAPH_NODE_TYPES.WORKSPACE_ASSET,
+  nodeId: asset.outcomeAssetId,
+  recordId: toIdString(asset._id || asset.id),
+  recordModel: 'OutcomeAsset',
+  label: asset.title || asset.outputTypeLabel || 'Outcome Asset',
+})
+
+const buildWorkspaceAssetVersionNode = (version = {}) => buildRuntimeGraphNode({
+  nodeType: RUNTIME_GRAPH_NODE_TYPES.WORKSPACE_ASSET_VERSION,
+  nodeId: version.outcomeAssetVersionId,
+  recordId: toIdString(version._id || version.id),
+  recordModel: 'OutcomeAssetVersion',
+  label: version.title || version.outputTypeLabel || 'Outcome Asset Version',
+})
+
+const buildSessionRuntimeGraphRelationships = ({
+  actorUserId,
+  knowledgePackBinding = {},
+  runtimeScope = {},
+  session = {},
+  truthSignature = {},
+} = {}) => {
+  const graphScope = buildRuntimeGraphScope(runtimeScope)
+  const sessionNode = buildWorkspaceSessionNode(session)
+  const safeTruthSignature = sanitizePersistedTruthSignature(truthSignature)
+  const activePacks = Array.isArray(knowledgePackBinding.activePacks)
+    ? knowledgePackBinding.activePacks
+    : []
+
+  return [
+    {
+      ...graphScope,
+      createdBy: actorUserId,
+      relationshipType: RUNTIME_GRAPH_RELATIONSHIP_TYPES.SESSION_BOUND_TO_TRUTH,
+      sourceNode: sessionNode,
+      targetNode: buildTruthSignatureNode(safeTruthSignature),
+      evidence: {
+        sessionId: session.sessionId,
+        truthSignatureId: safeTruthSignature.truthSignatureId,
+        truthSignatureStatus: safeTruthSignature.status,
+        truthSignatureCurrentness: safeTruthSignature.currentness,
+        evidence: safeTruthSignature.evidence,
+      },
+    },
+    ...activePacks.map((pack) => ({
+      ...graphScope,
+      createdBy: actorUserId,
+      relationshipType: RUNTIME_GRAPH_RELATIONSHIP_TYPES.SESSION_BOUND_TO_PACK,
+      sourceNode: sessionNode,
+      targetNode: buildKnowledgePackNode(pack),
+      evidence: {
+        sessionId: session.sessionId,
+        packCategory: pack.packCategory,
+        packType: pack.packType,
+        packKey: pack.packKey,
+        semanticVersion: pack.semanticVersion,
+        contentHash: pack.contentHash,
+        bindingStatus: knowledgePackBinding.status,
+        boundAt: knowledgePackBinding.boundAt,
+      },
+    })),
+  ]
+}
+
+const buildGeneratedAssetRuntimeGraphRelationships = ({
+  actorUserId,
+  asset = {},
+  runtimeScope = {},
+  session = {},
+  version = {},
+} = {}) => {
+  const graphScope = buildRuntimeGraphScope(runtimeScope)
+  const assetNode = buildWorkspaceAssetNode(asset)
+  const safeTruthSignature = sanitizePersistedTruthSignature(asset.truthSignature || {})
+
+  return [
+    {
+      ...graphScope,
+      createdBy: actorUserId,
+      relationshipType: RUNTIME_GRAPH_RELATIONSHIP_TYPES.ASSET_DERIVED_FROM_TRUTH,
+      sourceNode: buildTruthSignatureNode(safeTruthSignature),
+      targetNode: assetNode,
+      evidence: {
+        sessionId: asset.sessionId,
+        outcomeAssetId: asset.outcomeAssetId,
+        outcomeAssetVersionId: version.outcomeAssetVersionId,
+        truthSignatureId: safeTruthSignature.truthSignatureId,
+        truthSignatureStatus: safeTruthSignature.status,
+        truthSignatureCurrentness: safeTruthSignature.currentness,
+        evidence: safeTruthSignature.evidence,
+      },
+    },
+    {
+      ...graphScope,
+      createdBy: actorUserId,
+      relationshipType: RUNTIME_GRAPH_RELATIONSHIP_TYPES.ASSET_DERIVED_FROM_SESSION,
+      sourceNode: buildWorkspaceSessionNode(session),
+      targetNode: assetNode,
+      evidence: {
+        sessionId: asset.sessionId,
+        outcomeAssetId: asset.outcomeAssetId,
+        outcomeAssetVersionId: version.outcomeAssetVersionId,
+        sourceOutputAssetId: asset.sourceOutputAssetId,
+        outputTypeKey: asset.outputTypeKey,
+        versionNumber: version.versionNumber,
+      },
+    },
+  ]
+}
+
+const buildPublishedAssetRuntimeGraphRelationships = ({
+  actorUserId,
+  asset = {},
+  runtimeScope = {},
+  version = {},
+} = {}) => ([
+  {
+    ...buildRuntimeGraphScope(runtimeScope),
+    createdBy: actorUserId,
+    relationshipType: RUNTIME_GRAPH_RELATIONSHIP_TYPES.ASSET_PUBLISHED_FROM_VERSION,
+    sourceNode: buildWorkspaceAssetVersionNode(version),
+    targetNode: buildWorkspaceAssetNode(asset),
+    evidence: {
+      outcomeAssetId: asset.outcomeAssetId,
+      outcomeAssetVersionId: version.outcomeAssetVersionId,
+      previousStatus: asset.previousStatus || asset.status,
+      publishedAt: asset.publishedAt,
+      truthSignatureId: version.truthSignature?.truthSignatureId || asset.truthSignature?.truthSignatureId,
+      truthSignatureCurrentness: version.truthSignature?.currentness || asset.truthSignature?.currentness,
+    },
+  },
+])
 
 const serializeOutcomeSession = (session, options = {}) => {
   const plain = toPlainObject(session)
@@ -1680,6 +1867,20 @@ const failAssetPublishAuditClosed = (err, details = {}) =>
     },
   })
 
+const failGraphRelationshipClosed = (err, details = {}) =>
+  createOutcomeStudioError({
+    status: 500,
+    code: 'OUTCOME_GRAPH_RELATIONSHIP_FAILED',
+    message: 'Outcome Studio runtime graph relationship could not be persisted.',
+    reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_GRAPH_RELATIONSHIP_FAILED,
+    details: {
+      graphRelationshipError: {
+        message: err?.message || 'Runtime graph relationship persistence failed.',
+      },
+      ...details,
+    },
+  })
+
 const failTruthDriftAuditClosed = (err, details = {}) =>
   createOutcomeStudioError({
     status: 500,
@@ -2481,11 +2682,26 @@ export const createRuntimeOutcomeSession = async ({
     startedAt: boundAt,
     lastActivityAt: boundAt,
   })
+  const sessionRelationshipDocuments = createRuntimeGraphRelationshipDocuments(
+    buildSessionRuntimeGraphRelationships({
+      actorUserId,
+      knowledgePackBinding,
+      runtimeScope,
+      session,
+      truthSignature,
+    }),
+  )
 
   const persistSessionAndAudit = async (dbSession = null) => {
     const saveOptions = dbSession ? { session: dbSession } : undefined
     await truthSignatureRecord.save(saveOptions)
     await session.save(saveOptions)
+    try {
+      await saveRuntimeGraphRelationshipDocuments(sessionRelationshipDocuments, { dbSession })
+    } catch (err) {
+      err.outcomeGraphRelationshipFailure = 'session'
+      throw err
+    }
 
     try {
       await logOutcomeSessionAudit({
@@ -2506,6 +2722,7 @@ export const createRuntimeOutcomeSession = async ({
           knowledgePackBindingStatus: knowledgePackBinding.status,
           activeKnowledgePackCount: knowledgePackBinding.activeCount,
           requiredKnowledgePackCount: knowledgePackBinding.requiredCount,
+          runtimeGraphRelationshipCount: sessionRelationshipDocuments.length,
         },
       })
       await logOutcomeSessionAudit({
@@ -2530,6 +2747,7 @@ export const createRuntimeOutcomeSession = async ({
             evidence: truthSignature.evidence,
             missingEvidence: truthSignature.missingEvidence,
           },
+          runtimeGraphRelationshipId: sessionRelationshipDocuments[0]?.relationshipId || '',
         },
       })
       await logOutcomeSessionAudit({
@@ -2550,6 +2768,7 @@ export const createRuntimeOutcomeSession = async ({
             requiredCount: knowledgePackBinding.requiredCount,
             activePacks: knowledgePackBinding.activePacks,
           },
+          runtimeGraphRelationshipCount: Math.max(sessionRelationshipDocuments.length - 1, 0),
         },
       })
     } catch (err) {
@@ -2565,6 +2784,12 @@ export const createRuntimeOutcomeSession = async ({
         await persistSessionAndAudit(dbSession)
       })
     } catch (err) {
+      if (err?.outcomeGraphRelationshipFailure === 'session') {
+        throw failGraphRelationshipClosed(err, {
+          sessionId: session.sessionId,
+          truthSignatureId,
+        })
+      }
       if (!err?.outcomeSessionAuditFailure) throw err
       throw failAuditClosed(err, {
         sessionId: session.sessionId,
@@ -2577,8 +2802,15 @@ export const createRuntimeOutcomeSession = async ({
     try {
       await persistSessionAndAudit()
     } catch (err) {
+      await deleteRuntimeGraphRelationshipDocuments(sessionRelationshipDocuments)
       await OutcomeSession.deleteOne({ _id: session._id })
       await TruthSignature.deleteOne({ _id: truthSignatureRecord._id })
+      if (err?.outcomeGraphRelationshipFailure === 'session') {
+        throw failGraphRelationshipClosed(err, {
+          sessionId: session.sessionId,
+          truthSignatureId,
+        })
+      }
       if (!err?.outcomeSessionAuditFailure) throw err
       throw failAuditClosed(err, {
         sessionId: session.sessionId,
@@ -2930,6 +3162,15 @@ export const generateRuntimeOutcomeResponse = async ({
     generatedBy: actorUserId,
     generatedAt,
   })
+  const generatedAssetRelationshipDocuments = createRuntimeGraphRelationshipDocuments(
+    buildGeneratedAssetRuntimeGraphRelationships({
+      actorUserId,
+      asset: outcomeAsset,
+      runtimeScope,
+      session,
+      version: outcomeAssetVersion,
+    }),
+  )
 
   let failureStage = 'write'
   const persistGeneratedResponseAndAudit = async (dbSession = null) => {
@@ -2949,6 +3190,12 @@ export const generateRuntimeOutcomeResponse = async ({
     }
     await outcomeAsset.save(saveOptions)
     await outcomeAssetVersion.save(saveOptions)
+    try {
+      await saveRuntimeGraphRelationshipDocuments(generatedAssetRelationshipDocuments, { dbSession })
+    } catch (err) {
+      err.outcomeGraphRelationshipFailure = 'generatedAsset'
+      throw err
+    }
     try {
       failureStage = 'responseAudit'
       await logOutcomeMessageAudit({
@@ -2972,6 +3219,7 @@ export const generateRuntimeOutcomeResponse = async ({
           assetCreated: true,
           outcomeAssetId,
           outcomeAssetVersionId,
+          runtimeGraphRelationshipCount: generatedAssetRelationshipDocuments.length,
         },
       })
       failureStage = 'assetAudit'
@@ -2996,6 +3244,7 @@ export const generateRuntimeOutcomeResponse = async ({
           truthSignatureCurrentness: serializedSession.truthSignature.currentness,
           knowledgePackBindingStatus: serializedSession.knowledgePackBinding.status,
           generatedBodyAvailable: true,
+          runtimeGraphRelationshipCount: generatedAssetRelationshipDocuments.length,
         },
       })
     } catch (err) {
@@ -3011,6 +3260,15 @@ export const generateRuntimeOutcomeResponse = async ({
         await persistGeneratedResponseAndAudit(dbSession)
       })
     } catch (err) {
+      if (err?.outcomeGraphRelationshipFailure === 'generatedAsset') {
+        throw failGraphRelationshipClosed(err, {
+          sessionId: serializedSession.sessionId,
+          messageId: serializedMessage.messageId,
+          responseMessageId: responseMessage.messageId,
+          outcomeAssetId,
+          outcomeAssetVersionId,
+        })
+      }
       if (err?.outcomeResponseAuditFailure === 'assetAudit') {
         throw failAssetGenerationAuditClosed(err, {
           sessionId: serializedSession.sessionId,
@@ -3035,6 +3293,7 @@ export const generateRuntimeOutcomeResponse = async ({
     try {
       await persistGeneratedResponseAndAudit()
     } catch (err) {
+      await deleteRuntimeGraphRelationshipDocuments(generatedAssetRelationshipDocuments)
       await OutcomeAssetVersion.deleteOne({ _id: outcomeAssetVersion._id })
       await OutcomeAsset.deleteOne({ _id: outcomeAsset._id })
       await OutcomeMessage.deleteOne({ _id: responseMessage._id })
@@ -3042,6 +3301,15 @@ export const generateRuntimeOutcomeResponse = async ({
         { _id: message._id },
         { $set: { responseStatus: OUTCOME_STUDIO_RESPONSE_STATUSES.PENDING_RESPONSE } },
       )
+      if (err?.outcomeGraphRelationshipFailure === 'generatedAsset') {
+        throw failGraphRelationshipClosed(err, {
+          sessionId: serializedSession.sessionId,
+          messageId: serializedMessage.messageId,
+          responseMessageId: responseMessage.messageId,
+          outcomeAssetId,
+          outcomeAssetVersionId,
+        })
+      }
       if (err?.outcomeResponseAuditFailure === 'assetAudit') {
         throw failAssetGenerationAuditClosed(err, {
           sessionId: serializedSession.sessionId,
@@ -3130,76 +3398,152 @@ export const publishRuntimeOutcomeAsset = async ({
   })
 
   const publishedAt = new Date()
-  const updateResult = await OutcomeAsset.updateOne({
-    _id: asset._id,
-    runtimeInstanceId: runtimeObjectId,
-    outcomeAssetId: serializedAsset.outcomeAssetId,
-    status: OUTCOME_STUDIO_ASSET_STATUSES.GENERATED,
-  }, {
-    $set: {
-      status: OUTCOME_STUDIO_ASSET_STATUSES.PUBLISHED,
-      publishedBy: actorUserId,
-      publishedAt,
-      updatedAt: publishedAt,
-    },
-  })
-  if (!updateResult?.matchedCount && !updateResult?.modifiedCount) {
-    throw createOutcomeStudioError({
-      status: 409,
-      code: 'CONFLICT',
-      message: 'Outcome Studio asset publish could not confirm a generated asset mutation.',
-      reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_ASSET_PUBLISH_BLOCKED,
-      details: {
-        outcomeAssetId: serializedAsset.outcomeAssetId,
-        status: serializedAsset.status,
-        publishAvailable: false,
-        blockerReason: 'OUTCOME_ASSET_PUBLISH_MUTATION_NOT_CONFIRMED',
-        safetyGate: {
-          code: OUTCOME_STUDIO_SAFETY_GATE_CODES.ASSET_PUBLISH,
-          status: OUTCOME_STUDIO_SAFETY_GATE_STATUSES.BLOCKED,
-        },
-      },
-    })
-  }
-
   const publishedAsset = {
     ...asset,
+    previousStatus: serializedAsset.status,
     status: OUTCOME_STUDIO_ASSET_STATUSES.PUBLISHED,
     publishedBy: actorUserId,
     publishedAt,
     updatedAt: publishedAt,
   }
-
-  try {
-    await logOutcomeAssetPublishedAudit({
-      auditRequest,
+  const publishedAssetRelationshipDocuments = createRuntimeGraphRelationshipDocuments(
+    buildPublishedAssetRuntimeGraphRelationships({
+      actorUserId,
       asset: publishedAsset,
-      runtimeInstance,
-      diff: {
-        actorUserId,
+      runtimeScope: getRuntimeScope(runtimeInstance),
+      version: currentVersion,
+    }),
+  )
+
+  const persistPublishedAssetAndAudit = async (dbSession = null) => {
+    const updateOptions = dbSession ? { session: dbSession } : undefined
+    const updateResult = updateOptions
+      ? await OutcomeAsset.updateOne({
+          _id: asset._id,
+          runtimeInstanceId: runtimeObjectId,
+          outcomeAssetId: serializedAsset.outcomeAssetId,
+          status: OUTCOME_STUDIO_ASSET_STATUSES.GENERATED,
+        }, {
+          $set: {
+            status: OUTCOME_STUDIO_ASSET_STATUSES.PUBLISHED,
+            publishedBy: actorUserId,
+            publishedAt,
+            updatedAt: publishedAt,
+          },
+        }, updateOptions)
+      : await OutcomeAsset.updateOne({
+          _id: asset._id,
+          runtimeInstanceId: runtimeObjectId,
+          outcomeAssetId: serializedAsset.outcomeAssetId,
+          status: OUTCOME_STUDIO_ASSET_STATUSES.GENERATED,
+        }, {
+          $set: {
+            status: OUTCOME_STUDIO_ASSET_STATUSES.PUBLISHED,
+            publishedBy: actorUserId,
+            publishedAt,
+            updatedAt: publishedAt,
+          },
+        })
+
+    if (!updateResult?.matchedCount && !updateResult?.modifiedCount) {
+      throw createOutcomeStudioError({
+        status: 409,
+        code: 'CONFLICT',
+        message: 'Outcome Studio asset publish could not confirm a generated asset mutation.',
+        reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_ASSET_PUBLISH_BLOCKED,
+        details: {
+          outcomeAssetId: serializedAsset.outcomeAssetId,
+          status: serializedAsset.status,
+          publishAvailable: false,
+          blockerReason: 'OUTCOME_ASSET_PUBLISH_MUTATION_NOT_CONFIRMED',
+          safetyGate: {
+            code: OUTCOME_STUDIO_SAFETY_GATE_CODES.ASSET_PUBLISH,
+            status: OUTCOME_STUDIO_SAFETY_GATE_STATUSES.BLOCKED,
+          },
+        },
+      })
+    }
+
+    try {
+      await saveRuntimeGraphRelationshipDocuments(publishedAssetRelationshipDocuments, { dbSession })
+    } catch (err) {
+      err.outcomeGraphRelationshipFailure = 'publishedAsset'
+      throw err
+    }
+
+    try {
+      await logOutcomeAssetPublishedAudit({
+        auditRequest,
+        asset: publishedAsset,
+        dbSession,
+        runtimeInstance,
+        diff: {
+          actorUserId,
+          outcomeAssetId: serializedAsset.outcomeAssetId,
+          outcomeAssetVersionId: serializedVersion.outcomeAssetVersionId,
+          previousStatus: serializedAsset.status,
+          nextStatus: OUTCOME_STUDIO_ASSET_STATUSES.PUBLISHED,
+          publishedAt: publishedAt.toISOString(),
+          truthSignatureStatus: serializedAsset.truthSignature.status,
+          truthSignatureCurrentness: serializedAsset.truthSignature.currentness,
+          runtimeGraphRelationshipCount: publishedAssetRelationshipDocuments.length,
+        },
+        summary: 'Published Outcome Studio asset from current certified runtime truth.',
+      })
+    } catch (err) {
+      err.outcomeAssetPublishAuditFailure = true
+      throw err
+    }
+  }
+
+  if (canUseMongoTransaction()) {
+    const dbSession = await mongoose.startSession()
+    try {
+      await dbSession.withTransaction(async () => {
+        await persistPublishedAssetAndAudit(dbSession)
+      })
+    } catch (err) {
+      if (err?.outcomeGraphRelationshipFailure === 'publishedAsset') {
+        throw failGraphRelationshipClosed(err, {
+          outcomeAssetId: serializedAsset.outcomeAssetId,
+          outcomeAssetVersionId: serializedVersion.outcomeAssetVersionId,
+        })
+      }
+      if (!err?.outcomeAssetPublishAuditFailure) throw err
+      throw failAssetPublishAuditClosed(err, {
         outcomeAssetId: serializedAsset.outcomeAssetId,
         outcomeAssetVersionId: serializedVersion.outcomeAssetVersionId,
-        previousStatus: serializedAsset.status,
-        nextStatus: OUTCOME_STUDIO_ASSET_STATUSES.PUBLISHED,
-        publishedAt: publishedAt.toISOString(),
-        truthSignatureStatus: serializedAsset.truthSignature.status,
-        truthSignatureCurrentness: serializedAsset.truthSignature.currentness,
-      },
-      summary: 'Published Outcome Studio asset from current certified runtime truth.',
-    })
-  } catch (err) {
-    await OutcomeAsset.updateOne({ _id: asset._id }, {
-      $set: {
-        status: asset.status,
-        publishedBy: asset.publishedBy || null,
-        publishedAt: asset.publishedAt || null,
-        updatedAt: asset.updatedAt || new Date(),
-      },
-    })
-    throw failAssetPublishAuditClosed(err, {
-      outcomeAssetId: serializedAsset.outcomeAssetId,
-      outcomeAssetVersionId: serializedVersion.outcomeAssetVersionId,
-    })
+      })
+    } finally {
+      await dbSession.endSession()
+    }
+  } else {
+    try {
+      await persistPublishedAssetAndAudit()
+    } catch (err) {
+      if (!err?.outcomeGraphRelationshipFailure && !err?.outcomeAssetPublishAuditFailure) {
+        throw err
+      }
+      await deleteRuntimeGraphRelationshipDocuments(publishedAssetRelationshipDocuments)
+      await OutcomeAsset.updateOne({ _id: asset._id }, {
+        $set: {
+          status: asset.status,
+          publishedBy: asset.publishedBy || null,
+          publishedAt: asset.publishedAt || null,
+          updatedAt: asset.updatedAt || new Date(),
+        },
+      })
+      if (err?.outcomeGraphRelationshipFailure === 'publishedAsset') {
+        throw failGraphRelationshipClosed(err, {
+          outcomeAssetId: serializedAsset.outcomeAssetId,
+          outcomeAssetVersionId: serializedVersion.outcomeAssetVersionId,
+        })
+      }
+      throw failAssetPublishAuditClosed(err, {
+        outcomeAssetId: serializedAsset.outcomeAssetId,
+        outcomeAssetVersionId: serializedVersion.outcomeAssetVersionId,
+      })
+    }
   }
 
   return {
