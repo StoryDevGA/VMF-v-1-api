@@ -4,6 +4,10 @@ import {
   OUTCOME_KNOWLEDGE_PACK_SCOPE_TYPES,
   OUTCOME_KNOWLEDGE_PACK_TYPES,
 } from '../constants/outcomeKnowledgePacks.js'
+import {
+  KNOWLEDGE_PACK_CATEGORIES,
+  resolveKnowledgePackCategory,
+} from '../constants/workspaceGovernance.js'
 import { buildKnowledgePackId } from './KnowledgePack.js'
 
 const normalizeText = (value) => String(value || '').trim()
@@ -83,6 +87,13 @@ const knowledgePackActivationSchema = new mongoose.Schema(
       trim: true,
       maxlength: 240,
       index: true,
+    },
+    packCategory: {
+      type: String,
+      required: true,
+      uppercase: true,
+      enum: Object.values(KNOWLEDGE_PACK_CATEGORIES),
+      default: () => resolveKnowledgePackCategory(),
     },
     packType: {
       type: String,
@@ -236,6 +247,10 @@ knowledgePackActivationSchema.index({ packId: 1, status: 1, activatedAt: -1 })
 
 knowledgePackActivationSchema.pre('validate', function normalizeKnowledgePackActivation(next) {
   this.packType = normalizeToken(this.packType)
+  this.packCategory = resolveKnowledgePackCategory({
+    packCategory: this.packCategory,
+    packType: this.packType,
+  })
   this.packKey = normalizeLowerKey(this.packKey)
   this.label = normalizeText(this.label)
   this.semanticVersion = normalizeText(this.semanticVersion)

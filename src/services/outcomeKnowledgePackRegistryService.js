@@ -25,12 +25,15 @@ import {
   OUTCOME_STUDIO_BINDING_STATUSES,
   OUTCOME_STUDIO_REQUIRED_PACKS,
 } from '../constants/runtimeOutcomeStudio.js'
+import { resolveKnowledgePackCategory } from '../constants/workspaceGovernance.js'
 import { escapeRegex } from '../utils/controllerUtils.js'
 import auditService from './auditService.js'
 
 const normalizeText = (value) => String(value || '').trim()
 const normalizeToken = (value) => normalizeText(value).toUpperCase()
 const normalizeLowerKey = (value) => normalizeText(value).toLowerCase()
+const normalizePackCategory = (value, packType) =>
+  resolveKnowledgePackCategory({ packCategory: value, packType })
 
 export const OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS = Object.freeze({
   AUDIT_PERSISTENCE_FAILED: 'AUDIT_PERSISTENCE_FAILED',
@@ -150,6 +153,7 @@ const buildStarterPackSourceMetadata = ({ packDefinition, sourceFilename }) => (
 const buildPackUpsertPayload = ({ packDefinition, actorUserId, versionId, semanticVersion, status }) => ({
   $setOnInsert: {
     packId: buildKnowledgePackId(packDefinition),
+    packCategory: normalizePackCategory(packDefinition.packCategory, packDefinition.packType),
     packType: packDefinition.packType,
     packKey: packDefinition.packKey,
     description: `${packDefinition.label} starter knowledge pack for Outcome Studio.`,
@@ -157,6 +161,7 @@ const buildPackUpsertPayload = ({ packDefinition, actorUserId, versionId, semant
     createdBy: actorUserId || null,
   },
   $set: {
+    packCategory: normalizePackCategory(packDefinition.packCategory, packDefinition.packType),
     label: packDefinition.label,
     updatedBy: actorUserId || null,
     sourceMetadata: buildStarterPackSourceMetadata({
@@ -605,9 +610,11 @@ const rollbackStarterImportAfterAuditFailure = async ({
     const restoreSet = {
       status: normalizeToken(existingPack.status || OUTCOME_KNOWLEDGE_PACK_STATUSES.DRAFT),
     }
+    const restoreUnset = {}
     const fieldsToRestore = [
       'latestVersionId',
       'latestSemanticVersion',
+      'packCategory',
       'label',
       'description',
       'sourceMetadata',
@@ -616,11 +623,17 @@ const rollbackStarterImportAfterAuditFailure = async ({
 
     fieldsToRestore.forEach((field) => {
       if (existingPack[field] !== undefined) restoreSet[field] = existingPack[field]
+      else if (field === 'packCategory') restoreUnset[field] = ''
     })
+
+    const restoreUpdate = {
+      $set: restoreSet,
+      ...(Object.keys(restoreUnset).length ? { $unset: restoreUnset } : {}),
+    }
 
     rollbackWrites.push(KnowledgePack.updateOne(
       { packId: canonicalPackId },
-      { $set: restoreSet },
+      restoreUpdate,
     ))
   } else if (typeof KnowledgePack.deleteOne === 'function') {
     rollbackWrites.push(KnowledgePack.deleteOne({ packId: canonicalPackId }))
@@ -649,6 +662,7 @@ const serializeKnowledgePack = (pack) => {
     ...plain,
     id: packId,
     packId,
+    packCategory: normalizePackCategory(plain.packCategory, plain.packType),
     packType: normalizeToken(plain.packType),
     packKey: normalizeLowerKey(plain.packKey),
     status: normalizeToken(plain.status || OUTCOME_KNOWLEDGE_PACK_STATUSES.DRAFT),
@@ -665,6 +679,7 @@ const serializeKnowledgePackVersion = (version) => {
     ...plain,
     id: versionId,
     versionId,
+    packCategory: normalizePackCategory(plain.packCategory, plain.packType),
     packType: normalizeToken(plain.packType),
     packKey: normalizeLowerKey(plain.packKey),
     status: normalizeToken(plain.status || OUTCOME_KNOWLEDGE_PACK_STATUSES.DRAFT),
@@ -685,6 +700,7 @@ const serializeKnowledgePackContentPreview = ({ version, packDefinition }) => {
     id: versionId,
     versionId,
     packId: normalizeText(plain.packId),
+    packCategory: normalizePackCategory(plain.packCategory || packDefinition?.packCategory, plain.packType || packDefinition?.packType),
     packType: normalizeToken(plain.packType || packDefinition?.packType),
     packKey: normalizeLowerKey(plain.packKey || packDefinition?.packKey),
     semanticVersion: normalizeText(plain.semanticVersion),
@@ -712,6 +728,7 @@ const serializeKnowledgePackActivation = (activation) => {
     activationId,
     packId: normalizeText(plain.packId),
     versionId: normalizeText(plain.versionId),
+    packCategory: normalizePackCategory(plain.packCategory, plain.packType),
     packType: normalizeToken(plain.packType),
     packKey: normalizeLowerKey(plain.packKey),
     semanticVersion: normalizeText(plain.semanticVersion),
@@ -758,6 +775,7 @@ const buildOutcomeKnowledgePackStarterPackProjections = (registryPacks = []) => 
       return {
         packType: pack.packType,
         packKey: pack.packKey,
+        packCategory: normalizePackCategory(pack.packCategory, pack.packType),
         label: pack.label,
         sourceFilename: pack.sourceFilename,
         runtimeBindable: false,
@@ -869,6 +887,7 @@ const selectActiveActivations = ({ activations = [], scopeCandidates = [] }) => 
 }
 
 const buildActivePackProjection = (pack, activation) => ({
+  packCategory: normalizePackCategory(pack.packCategory || activation.packCategory, pack.packType),
   packType: pack.packType,
   packKey: pack.packKey,
   label: pack.label,
@@ -952,6 +971,7 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
       activeCount: activePacks.length,
       requiredCount: requiredPacks.length,
       unboundRequiredPacks: unboundRequiredPacks.map((pack) => ({
+        packCategory: normalizePackCategory(pack.packCategory, pack.packType),
         packType: pack.packType,
         packKey: pack.packKey,
         label: pack.label,
@@ -1132,6 +1152,7 @@ export const createOutcomeKnowledgePackVersion = async ({
   const version = new KnowledgePackVersion({
     versionId,
     packId: canonicalPackId,
+    packCategory: normalizePackCategory(packDefinition.packCategory, packDefinition.packType),
     packType: packDefinition.packType,
     packKey: packDefinition.packKey,
     semanticVersion,
@@ -1253,6 +1274,7 @@ export const importOutcomeKnowledgePackStarterVersion = async ({
     const version = new KnowledgePackVersion({
       versionId,
       packId: canonicalPackId,
+      packCategory: normalizePackCategory(packDefinition.packCategory, packDefinition.packType),
       packType: packDefinition.packType,
       packKey: packDefinition.packKey,
       semanticVersion,
@@ -1556,6 +1578,7 @@ const applyKnowledgePackActivationMutation = async ({
     activationId,
     packId: version.packId,
     versionId: version.versionId,
+    packCategory: normalizePackCategory(version.packCategory || packDefinition?.packCategory, version.packType),
     packType: version.packType,
     packKey: version.packKey,
     label: packDefinition?.label || packRecord?.label || version.packKey,

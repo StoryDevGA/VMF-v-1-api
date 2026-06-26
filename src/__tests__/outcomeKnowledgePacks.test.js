@@ -14,11 +14,11 @@ const SUPER_ADMIN_ID = '507f1f77bcf86cd799439011'
 const NON_ADMIN_ID = '507f1f77bcf86cd799439012'
 
 const REQUIRED_PACKS = [
-  { packType: 'ARL', packKey: 'adaptive-reasoning-layer', label: 'Adaptive Reasoning Layer' },
-  { packType: 'RL', packKey: 'rendering-layer', label: 'Rendering Layer' },
-  { packType: 'OUTPUT_SCHEMA', packKey: 'output-schemas-pack', label: 'Output Schemas' },
-  { packType: 'TRUTH_CERTIFICATION', packKey: 'truth-certification-pack', label: 'Truth Certification' },
-  { packType: 'OUTPUT_TYPE_DEFINITION', packKey: 'outcome-output-types', label: 'Outcome Output Types' },
+  { packCategory: 'OUTCOME', packType: 'ARL', packKey: 'adaptive-reasoning-layer', label: 'Adaptive Reasoning Layer' },
+  { packCategory: 'OUTCOME', packType: 'RL', packKey: 'rendering-layer', label: 'Rendering Layer' },
+  { packCategory: 'OUTCOME', packType: 'OUTPUT_SCHEMA', packKey: 'output-schemas-pack', label: 'Output Schemas' },
+  { packCategory: 'PLATFORM', packType: 'TRUTH_CERTIFICATION', packKey: 'truth-certification-pack', label: 'Truth Certification' },
+  { packCategory: 'OUTCOME', packType: 'OUTPUT_TYPE_DEFINITION', packKey: 'outcome-output-types', label: 'Outcome Output Types' },
 ]
 
 const makeFakeUser = (overrides = {}) => ({
@@ -99,6 +99,7 @@ const buildActivationFindOneChain = (row) => ({
 const makeKnowledgePack = (overrides = {}) => ({
   _id: '607f1f77bcf86cd799439001',
   packId: 'kp-output-schema-output-schemas-pack',
+  packCategory: 'OUTCOME',
   packType: 'OUTPUT_SCHEMA',
   packKey: 'output-schemas-pack',
   label: 'Output Schemas',
@@ -120,6 +121,7 @@ const makeKnowledgePack = (overrides = {}) => ({
 const makeKnowledgePackVersion = (overrides = {}) => ({
   versionId: 'kpv-output-schema-output-schemas-pack-1-0-0-global',
   packId: 'kp-output-schema-output-schemas-pack',
+  packCategory: 'OUTCOME',
   packType: 'OUTPUT_SCHEMA',
   packKey: 'output-schemas-pack',
   semanticVersion: '1.0.0',
@@ -148,6 +150,7 @@ const makeActivation = (pack, overrides = {}) => ({
   activationId: `kpa-${pack.packKey}-${overrides.scopeKey || 'global'}`,
   packId: `kp-${pack.packType.toLowerCase().replace(/_/g, '-')}-${pack.packKey}`,
   versionId: `kpv-${pack.packKey}-1-0-0-global`,
+  packCategory: pack.packCategory || 'OUTCOME',
   packType: pack.packType,
   packKey: pack.packKey,
   semanticVersion: '1.0.0',
@@ -358,6 +361,7 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
     expect(res.body.data).toEqual([
       expect.objectContaining({
         packId: 'kp-output-schema-output-schemas-pack',
+        packCategory: 'OUTCOME',
         packType: 'OUTPUT_SCHEMA',
         packKey: 'output-schemas-pack',
         status: 'VALIDATED',
@@ -367,18 +371,21 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       status: 'SOURCE_ONLY',
       starterPacks: expect.arrayContaining([
         expect.objectContaining({
+          packCategory: 'OUTCOME',
           packType: 'ARL',
           sourceFilename: 'adaptive-reasoning-layer-v1.yaml',
           runtimeBindable: false,
           importStatus: 'NOT_IMPORTED',
         }),
         expect.objectContaining({
+          packCategory: 'OUTCOME',
           packType: 'RL',
           sourceFilename: 'rendering-layer-v1.yaml',
           runtimeBindable: false,
           importStatus: 'NOT_IMPORTED',
         }),
         expect.objectContaining({
+          packCategory: 'OUTCOME',
           packType: 'OUTPUT_SCHEMA',
           sourceFilename: 'output-schemas-pack-v1.yaml',
           runtimeBindable: false,
@@ -388,12 +395,14 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
           registryStatus: 'VALIDATED',
         }),
         expect.objectContaining({
+          packCategory: 'PLATFORM',
           packType: 'TRUTH_CERTIFICATION',
           sourceFilename: 'truth-certification-pack-v1.yaml',
           runtimeBindable: false,
           importStatus: 'NOT_IMPORTED',
         }),
         expect.objectContaining({
+          packCategory: 'OUTCOME',
           packType: 'OUTPUT_TYPE_DEFINITION',
           sourceFilename: 'outcome-output-types-v1.yaml',
           runtimeBindable: false,
@@ -675,10 +684,15 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
     const [, packUpsert] = KnowledgePack.findOneAndUpdate.mock.calls[0]
     expect(Object.keys(packUpsert.$setOnInsert)).not.toContain('label')
     expect(packUpsert.$set).toEqual(expect.objectContaining({
+      packCategory: 'OUTCOME',
       label: 'Output Schemas',
+    }))
+    expect(KnowledgePackVersion.prototype.save.mock.contexts[0]).toEqual(expect.objectContaining({
+      packCategory: 'OUTCOME',
     }))
     expect(res.body.data.version).toEqual(expect.objectContaining({
       versionId: 'kpv-output-schema-output-schemas-pack-1-0-0-global',
+      packCategory: 'OUTCOME',
       packType: 'OUTPUT_SCHEMA',
       packKey: 'output-schemas-pack',
       status: 'VALIDATED',
@@ -795,6 +809,47 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       packId: 'kp-output-schema-output-schemas-pack',
     })
     expect(JSON.stringify(res.body)).not.toContain('EXECUTIVE_BRIEF')
+  })
+
+  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/starter-import removes new category metadata when existing-row audit rollback runs', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const existingPack = makeKnowledgePack({
+      status: 'DRAFT',
+      latestVersionId: 'kpv-output-schema-output-schemas-pack-0-9-0-global',
+      latestSemanticVersion: '0.9.0',
+    })
+    delete existingPack.packCategory
+    KnowledgePack.findOne.mockReturnValueOnce(buildFindOneChain(existingPack))
+    AuditLog.createLog.mockImplementation(async (payload) => {
+      if (payload.action === 'OUTCOME_KNOWLEDGE_PACK_STARTER_IMPORTED') {
+        throw new Error('audit unavailable')
+      }
+      return {}
+    })
+
+    const res = await request
+      .post('/api/v1/super-admin/outcome-studio/knowledge-packs/output-schemas-pack/starter-import')
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(500)
+    expect(KnowledgePackVersion.deleteOne).toHaveBeenCalledWith({
+      versionId: 'kpv-output-schema-output-schemas-pack-1-0-0-global',
+    })
+    expect(KnowledgePack.deleteOne).not.toHaveBeenCalled()
+    expect(KnowledgePack.updateOne).toHaveBeenCalledWith(
+      { packId: 'kp-output-schema-output-schemas-pack' },
+      expect.objectContaining({
+        $set: expect.objectContaining({
+          status: 'DRAFT',
+          latestVersionId: 'kpv-output-schema-output-schemas-pack-0-9-0-global',
+          latestSemanticVersion: '0.9.0',
+        }),
+        $unset: {
+          packCategory: '',
+        },
+      }),
+    )
   })
 
   test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/versions uploads starter source as draft without activation', async () => {
@@ -989,6 +1044,7 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
     )
     expect(KnowledgePackActivation.prototype.save).toHaveBeenCalled()
     expect(res.body.data.activation).toEqual(expect.objectContaining({
+      packCategory: 'OUTCOME',
       packType: 'OUTPUT_SCHEMA',
       packKey: 'output-schemas-pack',
       status: 'ACTIVE',

@@ -1,3 +1,7 @@
+import {
+  KNOWLEDGE_PACK_CATEGORIES,
+} from './workspaceGovernance.js'
+
 export const OUTCOME_STUDIO_CONTRACT_VERSION = 'outcome-studio.v1'
 
 export const OUTCOME_STUDIO_PHASE = 'FOUNDATION_READINESS_ONLY'
@@ -83,6 +87,7 @@ export const OUTCOME_STUDIO_BLOCKER_CODES = Object.freeze({
 
 export const OUTCOME_STUDIO_REQUIRED_PACKS = Object.freeze([
   Object.freeze({
+    packCategory: KNOWLEDGE_PACK_CATEGORIES.OUTCOME,
     packType: 'ARL',
     packKey: 'adaptive-reasoning-layer',
     label: 'Adaptive Reasoning Layer',
@@ -90,6 +95,7 @@ export const OUTCOME_STUDIO_REQUIRED_PACKS = Object.freeze([
     sourceFilename: 'adaptive-reasoning-layer-v1.yaml',
   }),
   Object.freeze({
+    packCategory: KNOWLEDGE_PACK_CATEGORIES.OUTCOME,
     packType: 'RL',
     packKey: 'rendering-layer',
     label: 'Rendering Layer',
@@ -97,6 +103,7 @@ export const OUTCOME_STUDIO_REQUIRED_PACKS = Object.freeze([
     sourceFilename: 'rendering-layer-v1.yaml',
   }),
   Object.freeze({
+    packCategory: KNOWLEDGE_PACK_CATEGORIES.OUTCOME,
     packType: 'OUTPUT_SCHEMA',
     packKey: 'output-schemas-pack',
     label: 'Output Schemas',
@@ -104,6 +111,7 @@ export const OUTCOME_STUDIO_REQUIRED_PACKS = Object.freeze([
     sourceFilename: 'output-schemas-pack-v1.yaml',
   }),
   Object.freeze({
+    packCategory: KNOWLEDGE_PACK_CATEGORIES.PLATFORM,
     packType: 'TRUTH_CERTIFICATION',
     packKey: 'truth-certification-pack',
     label: 'Truth Certification',
@@ -111,6 +119,7 @@ export const OUTCOME_STUDIO_REQUIRED_PACKS = Object.freeze([
     sourceFilename: 'truth-certification-pack-v1.yaml',
   }),
   Object.freeze({
+    packCategory: KNOWLEDGE_PACK_CATEGORIES.OUTCOME,
     packType: 'OUTPUT_TYPE_DEFINITION',
     packKey: 'outcome-output-types',
     label: 'Outcome Output Types',

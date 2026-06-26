@@ -1,0 +1,134 @@
+{
+  "test_scope": "MOCKED",
+  "coverage": {
+    "createRuntimeOutcomeMessage": {
+      "audit_failure_scenario": "Audit log creation throws error",
+      "verified_behavior": [
+        "Message is saved to database (OutcomeMessage.prototype.save called)",
+        "When audit fails, message is deleted (OutcomeMessage.deleteOne called)",
+        "Error code OUTCOME_MESSAGE_AUDIT_FAILED is returned",
+        "HTTP 500 response with audit error details"
+      ],
+      "test_location": "src/__tests__/runtimeInstances.test.js:14822",
+      "test_name": "Outcome Studio message submission rolls back the message when prompt audit persistence fails",
+      "mocked_operations": [
+        "OutcomeMessage.prototype.save() → jest.fn(async function save() { return this })",
+        "OutcomeMessage.deleteOne() → jest.fn().mockResolvedValue({ deletedCount: 1 })",
+        "AuditLog.createLog() → jest.fn(async () => { throw new Error('prompt audit unavailable') })"
+      ]
+    },
+    "generateRuntimeOutcomeResponse": {
+      "scenario_1_response_audit_fails": {
+        "verified_behavior": [
+          "Response message is saved (OutcomeMessage.prototype.save)",
+          "Outcome asset is saved (OutcomeAsset.prototype.save)",
+          "Asset version is saved (OutcomeAssetVersion.prototype.save)",
+          "When response audit fails: all three are deleted via deleteOne()",
+          "Original message's responseStatus reverted to PENDING_RESPONSE via updateOne()",
+          "Error code OUTCOME_MESSAGE_AUDIT_FAILED returned"
+        ],
+        "test_location": "src/__tests__/runtimeInstances.test.js:15170",
+        "test_name": "Outcome Studio response generation rolls back the generated response when audit persistence fails"
+      },
+      "scenario_2_asset_audit_fails": {
+        "verified_behavior": [
+          "All three objects (message, asset, version) still saved initially",
+          "When asset audit fails: all three deleted",
+          "Original message's responseStatus reverted",
+          "Error code OUTCOME_ASSET_GENERATION_AUDIT_FAILED returned"
+        ],
+        "test_location": "src/__tests__/runtimeInstances.test.js:15225",
+        "test_name": "Outcome Studio response generation rolls back the generated asset when asset audit persistence fails"
+      ],
+      "mocked_operations": [
+        "OutcomeMessage.prototype.save() → jest.fn(async function save() { return this })",
+        "OutcomeAsset.prototype.save() → jest.fn(async function save() { return this })",
+        "OutcomeAssetVersion.prototype.save() → jest.fn(async function save() { return this })",
+        "OutcomeMessage.deleteOne() → jest.fn().mockResolvedValue({ deletedCount: 1 })",
+        "OutcomeAsset.deleteOne() → jest.fn().mockResolvedValue({ deletedCount: 1 })",
+        "OutcomeAssetVersion.deleteOne() → jest.fn().mockResolvedValue({ deletedCount: 1 })",
+        "OutcomeMessage.updateOne() → jest.fn().mockResolvedValue({ modifiedCount: 1 })",
+        "AuditLog.createLog() → jest.fn(async () => { throw ... })"
+      ]
+    }
+  },
+  "database_connection_state": {
+    "environment": "test",
+    "mongodb_uri": "mongodb://localhost:27017/vmf_test (configured but NOT connected)",
+    "mongoose_ready_state": 0,
+    "actual_connection_made": false,
+    "reason": "beforeAll() loads models via import but does not call mongoose.connect()",
+    "fallback_behavior_triggered": true
+  },
+  "transaction_implementation": {
+    "location": "src/services/outcomeStudioService.js",
+    "transaction_check": "canUseMongoTransaction() => mongoose.connection.readyState === 1",
+    "in_test_environment": {
+      "readyState_value": 0,
+      "mongoose_connection_connected": false,
+      "uses_real_transactions": false,
+      "uses_fallback_manual_rollback": true,
+      "fallback_code_path": "else { try { await persistXandAudit(); } catch (err) { await deleteOne(...); await updateOne(...); } }"
+    }
+  },
+  "gap": {
+    "what_is_not_tested": [
+      "Real MongoDB replica-set transaction atomicity (transaction.abort())",
+      "Multi-document ACID guarantees across saves",
+      "Actual MongoDB session state during failures",
+      "Read concern and write concern in transactions",
+      "Isolation level enforcement (SNAPSHOT isolation in replica-sets)",
+      "Actual network failure scenarios",
+      "Concurrent write conflicts during transaction rollback"
+    ],
+    "what_would_be_needed": [
+      "Integration tests with real MongoDB replica-set (docker-compose or testcontainers)",
+      "Test that verifies: when audit throws, entire transaction rolls back atomically",
+      "Verify no orphaned documents exist after transaction abort",
+      "Multi-client concurrency tests to verify isolation",
+      "Network partition tests to verify session recovery",
+      "Load tests to verify transaction throughput and lock behavior"
+    ],
+    "severity": "LOW",
+    "reason": "Fallback code (used in tests) has clear rollback logic and is tested. Real transaction rollback untested but MongoDB's withTransaction() is standard library code."
+  },
+  "sufficient_for_merge": true,
+  "justification": [
+    "Jest suite comprehensively covers the fallback code path that executes in test environment",
+    "Both message and response generation rollback scenarios test all save() and deleteOne() calls",
+    "Audit failure injection tests verify error codes and response structure",
+    "Service layer has explicit canUseMongoTransaction() guard to use proper fallback when not connected",
+    "Real transaction rollback relies on Mongoose + MongoDB standard library, not custom code",
+    "The user's note is ACCURATE: 'Jest suite still uses mocked/non-connected persistence for these route tests, so it proves fail-closed behavior but not a live replica-set transaction rollback.'",
+    "Gap analysis: real transaction testing requires integration-test infrastructure (replica-set), not appropriate for unit test suite"
+  ],
+  "test_count": {
+    "message_submission_rollback": 1,
+    "response_generation_response_audit_rollback": 1,
+    "response_generation_asset_audit_rollback": 1,
+    "total_fail_closed_tests_for_outcome_studio": 3,
+    "total_fail_closed_tests_in_suite": 50
+  },
+  "evidence": {
+    "test_example_message_submission": {
+      "line_range": "14822-14860",
+      "assert_save_called": "expect(OutcomeMessage.prototype.save).toHaveBeenCalledTimes(1)",
+      "assert_delete_called": "expect(OutcomeMessage.deleteOne).toHaveBeenCalledWith({ _id: expect.anything() })",
+      "assert_audit_called": "expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({ action: 'PROMPT_SUBMITTED' }))"
+    },
+    "test_example_response_generation": {
+      "line_range": "15170-15223",
+      "assert_all_saves": [
+        "expect(OutcomeMessage.prototype.save).toHaveBeenCalledTimes(1)",
+        "expect(OutcomeAsset.prototype.save).toHaveBeenCalledTimes(1)",
+        "expect(OutcomeAssetVersion.prototype.save).toHaveBeenCalledTimes(1)"
+      ],
+      "assert_all_deletes": [
+        "expect(OutcomeMessage.deleteOne).toHaveBeenCalledWith(...)",
+        "expect(OutcomeAsset.deleteOne).toHaveBeenCalledWith(...)",
+        "expect(OutcomeAssetVersion.deleteOne).toHaveBeenCalledWith(...)"
+      ],
+      "assert_revert_status": "expect(OutcomeMessage.updateOne).toHaveBeenCalledWith({ _id: ... }, { $set: { responseStatus: 'PENDING_RESPONSE' } })"
+    }
+  }
+}

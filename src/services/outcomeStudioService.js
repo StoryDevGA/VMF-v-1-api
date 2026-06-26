@@ -20,6 +20,11 @@ import {
   OUTCOME_STUDIO_SESSION_STATUSES,
 } from '../constants/runtimeOutcomeStudio.js'
 import {
+  DEFAULT_OUTCOME_ASSET_TYPE,
+  DEFAULT_OUTCOME_WORKSPACE_TYPE,
+  resolveKnowledgePackCategory,
+} from '../constants/workspaceGovernance.js'
+import {
   OutcomeAsset,
   OutcomeAssetVersion,
   OutcomeMessage,
@@ -38,6 +43,9 @@ import auditService from './auditService.js'
 
 const normalizeText = (value) => String(value ?? '').trim()
 const normalizeToken = (value) => normalizeText(value).toUpperCase()
+const normalizePackCategory = (value, packType) =>
+  resolveKnowledgePackCategory({ packCategory: value, packType })
+const canUseMongoTransaction = () => mongoose.connection.readyState === 1
 
 export const OUTCOME_STUDIO_ERROR_REASONS = Object.freeze({
   OUTCOME_ASSET_EXPORT_BLOCKED: 'OUTCOME_ASSET_EXPORT_BLOCKED',
@@ -66,6 +74,7 @@ const OUTCOME_STUDIO_ASSET_LIST_LIMIT = 20
 const OUTCOME_STUDIO_ASSET_VERSION_LIST_LIMIT = 20
 const OUTCOME_STUDIO_MESSAGE_LIST_LIMIT = 20
 const OUTCOME_STUDIO_SESSION_LIST_LIMIT = 10
+const OUTCOME_CONTEXT_BINDING_LIST_LIMIT = 50
 const TRUTH_SIGNATURE_CURRENTNESS_FIELDS = Object.freeze([
   'sourceOutputAssetId',
   'publishSnapshotId',
@@ -377,6 +386,7 @@ const resolveTruthSignatureCurrentness = ({
 }
 
 const sanitizeKnowledgePackActivation = (pack = {}) => ({
+  packCategory: normalizePackCategory(pack.packCategory, pack.packType),
   packType: normalizeToken(pack.packType),
   packKey: normalizeText(pack.packKey),
   label: normalizeText(pack.label),
@@ -397,6 +407,7 @@ const buildSessionKnowledgePackBinding = (packBinding = {}, boundAt) => {
     : []
   const requiredPacks = Array.isArray(packBinding.requiredPacks)
     ? packBinding.requiredPacks.map((pack) => ({
+        packCategory: normalizePackCategory(pack.packCategory, pack.packType),
         packType: normalizeToken(pack.packType),
         packKey: normalizeText(pack.packKey),
         label: normalizeText(pack.label),
@@ -473,10 +484,11 @@ const sanitizePersistedTruthSignature = (truthSignature = {}, {
 
 const sanitizePersistedKnowledgePackBinding = (binding = {}) => {
   const activePacks = Array.isArray(binding.activePacks)
-    ? binding.activePacks.map(sanitizeKnowledgePackActivation)
+    ? binding.activePacks.slice(0, OUTCOME_CONTEXT_BINDING_LIST_LIMIT).map(sanitizeKnowledgePackActivation)
     : []
   const requiredPacks = Array.isArray(binding.requiredPacks)
-    ? binding.requiredPacks.map((pack) => ({
+    ? binding.requiredPacks.slice(0, OUTCOME_CONTEXT_BINDING_LIST_LIMIT).map((pack) => ({
+        packCategory: normalizePackCategory(pack?.packCategory, pack?.packType),
         packType: normalizeToken(pack?.packType),
         packKey: normalizeText(pack?.packKey),
         label: normalizeText(pack?.label),
@@ -498,13 +510,106 @@ const sanitizePersistedKnowledgePackBinding = (binding = {}) => {
       activeCount: Number(binding.resolution?.activeCount ?? activePacks.length),
       requiredCount: Number(binding.resolution?.requiredCount ?? requiredPacks.length),
       scopeCandidates: Array.isArray(binding.resolution?.scopeCandidates)
-        ? binding.resolution.scopeCandidates.map((candidate) => ({
+        ? binding.resolution.scopeCandidates.slice(0, OUTCOME_CONTEXT_BINDING_LIST_LIMIT).map((candidate) => ({
             scopeType: normalizeToken(candidate.scopeType),
             scopeKey: normalizeToken(candidate.scopeKey),
             precedence: Number(candidate.precedence ?? 0),
           }))
         : [],
     },
+  }
+}
+
+const buildOutcomeContextBindings = ({
+  assetType = '',
+  contextType = '',
+  knowledgePackBinding = {},
+  messageId = '',
+  outcomeAssetId = '',
+  outcomeAssetVersionId = '',
+  runtimeScope = {},
+  sessionId = '',
+  sourceOutput = {},
+  truthSignature = {},
+} = {}) => {
+  const safeSourceOutput = sanitizePersistedSourceOutput(sourceOutput || {})
+  const safeTruthBinding = sanitizePersistedTruthSignature(truthSignature || {})
+  const safeKnowledgeBinding = sanitizePersistedKnowledgePackBinding(knowledgePackBinding || {})
+  const normalizedAssetType = normalizeToken(assetType)
+  const evidence = safeTruthBinding.evidence && typeof safeTruthBinding.evidence === 'object'
+    ? safeTruthBinding.evidence
+    : {}
+
+  return {
+    projectContext: {
+      projectId: normalizeText(runtimeScope.projectId),
+      outcomeId: normalizeText(runtimeScope.outcomeId),
+    },
+    workspaceContext: {
+      workspaceType: DEFAULT_OUTCOME_WORKSPACE_TYPE,
+      workspaceSessionId: normalizeText(sessionId),
+      workspaceMessageId: normalizeText(messageId),
+      workspaceAssetId: normalizeText(outcomeAssetId),
+      workspaceAssetVersionId: normalizeText(outcomeAssetVersionId),
+      contextType: normalizeToken(contextType),
+      ...(normalizedAssetType ? { assetType: normalizedAssetType } : {}),
+    },
+    runtimeContext: {
+      runtimeInstanceId: toIdString(runtimeScope.runtimeInstanceId),
+      runtimeInstanceKey: normalizeText(runtimeScope.runtimeInstanceKey),
+      runtimeType: normalizeToken(runtimeScope.runtimeType),
+      frameworkKey: normalizeToken(runtimeScope.frameworkKey),
+      packageKey: normalizeText(runtimeScope.packageKey),
+      packageVersion: normalizeText(runtimeScope.packageVersion),
+    },
+    sourceOutputBinding: {
+      outputAssetId: safeSourceOutput.outputAssetId,
+      outputTypeKey: safeSourceOutput.outputTypeKey,
+      outputTypeLabel: safeSourceOutput.outputTypeLabel,
+      status: safeSourceOutput.status,
+      stale: safeSourceOutput.stale,
+      exportable: safeSourceOutput.exportable,
+      generatedAt: safeSourceOutput.generatedAt,
+      publishedAt: safeSourceOutput.publishedAt,
+      supportedFormats: safeSourceOutput.supportedFormats,
+      sourceSnapshot: safeSourceOutput.sourceSnapshot,
+    },
+    truthBinding: {
+      truthSignatureId: safeTruthBinding.truthSignatureId,
+      status: safeTruthBinding.status,
+      mode: safeTruthBinding.mode,
+      persistence: safeTruthBinding.persistence,
+      currentness: safeTruthBinding.currentness,
+      boundAt: safeTruthBinding.boundAt,
+      evidence: safeTruthBinding.evidence,
+      missingEvidence: safeTruthBinding.missingEvidence,
+    },
+    knowledgeBindings: {
+      status: safeKnowledgeBinding.status,
+      mode: safeKnowledgeBinding.mode,
+      boundAt: safeKnowledgeBinding.boundAt,
+      activeCount: safeKnowledgeBinding.activeCount,
+      requiredCount: safeKnowledgeBinding.requiredCount,
+      activePacks: safeKnowledgeBinding.activePacks,
+      requiredPacks: safeKnowledgeBinding.requiredPacks,
+      resolution: safeKnowledgeBinding.resolution,
+    },
+    // Intentionally duplicated as a compact evidence access path for audit/support review.
+    // The canonical full evidence snapshot remains under truthBinding.evidence.
+    evidenceBindings: {
+      sourceOutputAssetId: normalizeText(evidence.sourceOutputAssetId),
+      publishSnapshotId: normalizeText(evidence.publishSnapshotId),
+      publishSnapshotHash: normalizeText(evidence.publishSnapshotHash),
+      lockSnapshotId: normalizeText(evidence.lockSnapshotId),
+      lockSnapshotHash: normalizeText(evidence.lockSnapshotHash),
+      replayAnchorId: normalizeText(evidence.replayAnchorId),
+      replayAnchorHash: normalizeText(evidence.replayAnchorHash),
+      graphVersion: normalizeText(evidence.graphVersion),
+      graphHash: normalizeText(evidence.graphHash),
+    },
+    // Reserved for future ARL/RL interpretation and decision-pack bindings.
+    interpretationBindings: [],
+    decisionBindings: [],
   }
 }
 
@@ -1361,6 +1466,7 @@ const logOutcomeSessionAudit = async ({
 const logOutcomeMessageAudit = async ({
   action = auditService.AUDIT_ACTIONS.PROMPT_SUBMITTED,
   auditRequest,
+  dbSession = null,
   diff,
   message,
   runtimeInstance,
@@ -1383,7 +1489,10 @@ const logOutcomeMessageAudit = async ({
     summary,
     diff,
   }
-  const options = { throwOnError: true }
+  const options = {
+    throwOnError: true,
+    ...(dbSession ? { session: dbSession } : {}),
+  }
   if (auditRequest) {
     await auditService.logFromRequest(auditRequest, auditPayload, options)
     return
@@ -1394,6 +1503,7 @@ const logOutcomeMessageAudit = async ({
 const logOutcomeAssetExportAudit = async ({
   auditRequest,
   asset,
+  dbSession = null,
   diff,
   runtimeInstance,
   summary,
@@ -1415,7 +1525,10 @@ const logOutcomeAssetExportAudit = async ({
     summary,
     diff,
   }
-  const options = { throwOnError: true }
+  const options = {
+    throwOnError: true,
+    ...(dbSession ? { session: dbSession } : {}),
+  }
   if (auditRequest) {
     await auditService.logFromRequest(auditRequest, auditPayload, options)
     return
@@ -1426,6 +1539,7 @@ const logOutcomeAssetExportAudit = async ({
 const logOutcomeAssetPublishedAudit = async ({
   auditRequest,
   asset,
+  dbSession = null,
   diff,
   runtimeInstance,
   summary,
@@ -1448,7 +1562,10 @@ const logOutcomeAssetPublishedAudit = async ({
     summary,
     diff,
   }
-  const options = { throwOnError: true }
+  const options = {
+    throwOnError: true,
+    ...(dbSession ? { session: dbSession } : {}),
+  }
   if (auditRequest) {
     await auditService.logFromRequest(auditRequest, auditPayload, options)
     return
@@ -1459,6 +1576,7 @@ const logOutcomeAssetPublishedAudit = async ({
 const logOutcomeAssetGeneratedAudit = async ({
   auditRequest,
   asset,
+  dbSession = null,
   diff,
   runtimeInstance,
   summary,
@@ -1481,7 +1599,10 @@ const logOutcomeAssetGeneratedAudit = async ({
     summary,
     diff,
   }
-  const options = { throwOnError: true }
+  const options = {
+    throwOnError: true,
+    ...(dbSession ? { session: dbSession } : {}),
+  }
   if (auditRequest) {
     await auditService.logFromRequest(auditRequest, auditPayload, options)
     return
@@ -2311,6 +2432,14 @@ export const createRuntimeOutcomeSession = async ({
     boundAt,
     truthSignatureId,
   )
+  const contextBindings = buildOutcomeContextBindings({
+    contextType: 'SESSION',
+    knowledgePackBinding,
+    runtimeScope,
+    sessionId,
+    sourceOutput,
+    truthSignature,
+  })
   const truthSignatureRecord = new TruthSignature({
     truthSignatureId,
     sessionId,
@@ -2335,6 +2464,7 @@ export const createRuntimeOutcomeSession = async ({
   const session = new OutcomeSession({
     sessionId,
     ...runtimeScope,
+    workspaceType: DEFAULT_OUTCOME_WORKSPACE_TYPE,
     contractVersion: OUTCOME_STUDIO_CONTRACT_VERSION,
     phase: OUTCOME_STUDIO_PHASE,
     status: OUTCOME_STUDIO_SESSION_STATUSES.ACTIVE,
@@ -2345,6 +2475,7 @@ export const createRuntimeOutcomeSession = async ({
     sourceOutputSnapshot: sourceOutput,
     truthSignature,
     knowledgePackBinding,
+    contextBindings,
     prompt: normalizeText(payload?.prompt),
     startedBy: actorUserId,
     startedAt: boundAt,
@@ -2427,7 +2558,7 @@ export const createRuntimeOutcomeSession = async ({
     }
   }
 
-  if (mongoose.connection.readyState === 1) {
+  if (canUseMongoTransaction()) {
     const dbSession = await mongoose.startSession()
     try {
       await dbSession.withTransaction(async () => {
@@ -2502,10 +2633,22 @@ export const createRuntimeOutcomeMessage = async ({
 
   const submittedAt = new Date().toISOString()
   const prompt = normalizeText(payload?.prompt)
-  const message = new OutcomeMessage({
-    messageId: buildOutcomeMessageId(),
+  const runtimeScope = getRuntimeScope(runtimeInstance)
+  const messageId = buildOutcomeMessageId()
+  const contextBindings = buildOutcomeContextBindings({
+    contextType: 'MESSAGE',
+    knowledgePackBinding: serializedSession.knowledgePackBinding,
+    messageId,
+    runtimeScope,
     sessionId: serializedSession.sessionId,
-    ...getRuntimeScope(runtimeInstance),
+    sourceOutput: serializedSession.sourceOutput,
+    truthSignature: serializedSession.truthSignature,
+  })
+  const message = new OutcomeMessage({
+    messageId,
+    sessionId: serializedSession.sessionId,
+    ...runtimeScope,
+    workspaceType: DEFAULT_OUTCOME_WORKSPACE_TYPE,
     contractVersion: OUTCOME_STUDIO_CONTRACT_VERSION,
     phase: OUTCOME_STUDIO_PHASE,
     role: OUTCOME_STUDIO_MESSAGE_ROLES.USER,
@@ -2515,37 +2658,66 @@ export const createRuntimeOutcomeMessage = async ({
     sourceOutputSnapshot: serializedSession.sourceOutput,
     truthSignature: serializedSession.truthSignature,
     knowledgePackBinding: serializedSession.knowledgePackBinding,
+    contextBindings,
     submittedBy: actorUserId,
     submittedAt,
   })
 
-  await message.save()
+  const persistMessageAndAudit = async (dbSession = null) => {
+    const saveOptions = dbSession ? { session: dbSession } : undefined
+    await message.save(saveOptions)
+    try {
+      await logOutcomeMessageAudit({
+        auditRequest,
+        dbSession,
+        runtimeInstance,
+        message,
+        summary: 'Outcome Studio prompt submitted to governed session.',
+        diff: {
+          actorUserId,
+          sessionId: serializedSession.sessionId,
+          messageId: message.messageId,
+          runtimeInstanceId: toIdString(runtimeObjectId),
+          sourceOutputAssetId: serializedSession.sourceOutputAssetId,
+          sourceOutputTypeKey: serializedSession.sourceOutputTypeKey,
+          truthSignatureStatus: serializedSession.truthSignature.status,
+          knowledgePackBindingStatus: serializedSession.knowledgePackBinding.status,
+          promptLength: prompt.length,
+          responseStatus: OUTCOME_STUDIO_RESPONSE_STATUSES.PENDING_RESPONSE,
+        },
+      })
+    } catch (err) {
+      err.outcomeMessageAuditFailure = true
+      throw err
+    }
+  }
 
-  try {
-    await logOutcomeMessageAudit({
-      auditRequest,
-      runtimeInstance,
-      message,
-      summary: 'Outcome Studio prompt submitted to governed session.',
-      diff: {
-        actorUserId,
+  if (canUseMongoTransaction()) {
+    const dbSession = await mongoose.startSession()
+    try {
+      await dbSession.withTransaction(async () => {
+        await persistMessageAndAudit(dbSession)
+      })
+    } catch (err) {
+      if (!err?.outcomeMessageAuditFailure) throw err
+      throw failMessageAuditClosed(err, {
         sessionId: serializedSession.sessionId,
         messageId: message.messageId,
-        runtimeInstanceId: toIdString(runtimeObjectId),
-        sourceOutputAssetId: serializedSession.sourceOutputAssetId,
-        sourceOutputTypeKey: serializedSession.sourceOutputTypeKey,
-        truthSignatureStatus: serializedSession.truthSignature.status,
-        knowledgePackBindingStatus: serializedSession.knowledgePackBinding.status,
-        promptLength: prompt.length,
-        responseStatus: OUTCOME_STUDIO_RESPONSE_STATUSES.PENDING_RESPONSE,
-      },
-    })
-  } catch (err) {
-    await OutcomeMessage.deleteOne({ _id: message._id })
-    throw failMessageAuditClosed(err, {
-      sessionId: serializedSession.sessionId,
-      messageId: message.messageId,
-    })
+      })
+    } finally {
+      await dbSession.endSession()
+    }
+  } else {
+    try {
+      await persistMessageAndAudit()
+    } catch (err) {
+      await OutcomeMessage.deleteOne({ _id: message._id })
+      if (!err?.outcomeMessageAuditFailure) throw err
+      throw failMessageAuditClosed(err, {
+        sessionId: serializedSession.sessionId,
+        messageId: message.messageId,
+      })
+    }
   }
 
   return serializeOutcomeMessage(message)
@@ -2646,6 +2818,7 @@ export const generateRuntimeOutcomeResponse = async ({
     message: serializedMessage,
     session: serializedSession,
   })
+  const responseMessageId = buildOutcomeMessageId()
   const outcomeAssetId = buildOutcomeAssetId()
   const outcomeAssetVersionId = buildOutcomeAssetVersionId()
   const outcomeAssetTitle = buildOutcomeAssetTitle({ session: serializedSession })
@@ -2667,10 +2840,31 @@ export const generateRuntimeOutcomeResponse = async ({
   const limitations = [
     'Do not treat this scaffold as provider-generated or ARL/RL-executed output.',
   ]
+  const responseContextBindings = buildOutcomeContextBindings({
+    contextType: 'MESSAGE',
+    knowledgePackBinding: serializedSession.knowledgePackBinding,
+    messageId: responseMessageId,
+    runtimeScope,
+    sessionId: serializedSession.sessionId,
+    sourceOutput: serializedSession.sourceOutput,
+    truthSignature: serializedSession.truthSignature,
+  })
+  const assetContextBindings = buildOutcomeContextBindings({
+    assetType: DEFAULT_OUTCOME_ASSET_TYPE,
+    contextType: 'ASSET',
+    knowledgePackBinding: serializedSession.knowledgePackBinding,
+    outcomeAssetId,
+    outcomeAssetVersionId,
+    runtimeScope,
+    sessionId: serializedSession.sessionId,
+    sourceOutput: serializedSession.sourceOutput,
+    truthSignature: serializedSession.truthSignature,
+  })
   const responseMessage = new OutcomeMessage({
-    messageId: buildOutcomeMessageId(),
+    messageId: responseMessageId,
     sessionId: serializedSession.sessionId,
     ...runtimeScope,
+    workspaceType: DEFAULT_OUTCOME_WORKSPACE_TYPE,
     contractVersion: OUTCOME_STUDIO_CONTRACT_VERSION,
     phase: OUTCOME_STUDIO_PHASE,
     role: OUTCOME_STUDIO_MESSAGE_ROLES.ASSISTANT,
@@ -2680,6 +2874,7 @@ export const generateRuntimeOutcomeResponse = async ({
     sourceOutputSnapshot: serializedSession.sourceOutput,
     truthSignature: serializedSession.truthSignature,
     knowledgePackBinding: serializedSession.knowledgePackBinding,
+    contextBindings: responseContextBindings,
     submittedBy: actorUserId,
     submittedAt: generatedAt,
   })
@@ -2687,6 +2882,8 @@ export const generateRuntimeOutcomeResponse = async ({
     outcomeAssetId,
     sessionId: serializedSession.sessionId,
     ...runtimeScope,
+    workspaceType: DEFAULT_OUTCOME_WORKSPACE_TYPE,
+    assetType: DEFAULT_OUTCOME_ASSET_TYPE,
     contractVersion: OUTCOME_STUDIO_CONTRACT_VERSION,
     phase: OUTCOME_STUDIO_PHASE,
     status: OUTCOME_STUDIO_ASSET_STATUSES.GENERATED,
@@ -2699,6 +2896,7 @@ export const generateRuntimeOutcomeResponse = async ({
     sourceOutputSnapshot: serializedSession.sourceOutput,
     truthSignature: serializedSession.truthSignature,
     knowledgePackBinding: serializedSession.knowledgePackBinding,
+    contextBindings: assetContextBindings,
     lineageSummary,
     warnings,
     limitations,
@@ -2711,6 +2909,8 @@ export const generateRuntimeOutcomeResponse = async ({
     parentVersionId: '',
     sessionId: serializedSession.sessionId,
     ...runtimeScope,
+    workspaceType: DEFAULT_OUTCOME_WORKSPACE_TYPE,
+    assetType: DEFAULT_OUTCOME_ASSET_TYPE,
     contractVersion: OUTCOME_STUDIO_CONTRACT_VERSION,
     phase: OUTCOME_STUDIO_PHASE,
     versionNumber: 1,
@@ -2722,6 +2922,7 @@ export const generateRuntimeOutcomeResponse = async ({
     sourceOutputSnapshot: serializedSession.sourceOutput,
     truthSignature: serializedSession.truthSignature,
     knowledgePackBinding: serializedSession.knowledgePackBinding,
+    contextBindings: assetContextBindings,
     lineageSummary,
     customerContent,
     warnings,
@@ -2731,70 +2932,127 @@ export const generateRuntimeOutcomeResponse = async ({
   })
 
   let failureStage = 'write'
-  try {
-    await responseMessage.save()
-    await OutcomeMessage.updateOne(
-      { _id: message._id },
-      { $set: { responseStatus: OUTCOME_STUDIO_RESPONSE_STATUSES.RESPONSE_GENERATED } },
-    )
-    await outcomeAsset.save()
-    await outcomeAssetVersion.save()
-    failureStage = 'responseAudit'
-    await logOutcomeMessageAudit({
-      action: auditService.AUDIT_ACTIONS.OUTCOME_RESPONSE_GENERATED,
-      auditRequest,
-      runtimeInstance,
-      message: responseMessage,
-      summary: 'Outcome Studio governed response generated for prompt.',
-      diff: {
-        actorUserId,
+  const persistGeneratedResponseAndAudit = async (dbSession = null) => {
+    const saveOptions = dbSession ? { session: dbSession } : undefined
+    await responseMessage.save(saveOptions)
+    if (dbSession) {
+      await OutcomeMessage.updateOne(
+        { _id: message._id },
+        { $set: { responseStatus: OUTCOME_STUDIO_RESPONSE_STATUSES.RESPONSE_GENERATED } },
+        { session: dbSession },
+      )
+    } else {
+      await OutcomeMessage.updateOne(
+        { _id: message._id },
+        { $set: { responseStatus: OUTCOME_STUDIO_RESPONSE_STATUSES.RESPONSE_GENERATED } },
+      )
+    }
+    await outcomeAsset.save(saveOptions)
+    await outcomeAssetVersion.save(saveOptions)
+    try {
+      failureStage = 'responseAudit'
+      await logOutcomeMessageAudit({
+        action: auditService.AUDIT_ACTIONS.OUTCOME_RESPONSE_GENERATED,
+        auditRequest,
+        dbSession,
+        runtimeInstance,
+        message: responseMessage,
+        summary: 'Outcome Studio governed response generated for prompt.',
+        diff: {
+          actorUserId,
+          sessionId: serializedSession.sessionId,
+          messageId: serializedMessage.messageId,
+          responseMessageId: responseMessage.messageId,
+          runtimeInstanceId: toIdString(runtimeObjectId),
+          sourceOutputAssetId: serializedSession.sourceOutputAssetId,
+          sourceOutputTypeKey: serializedSession.sourceOutputTypeKey,
+          truthSignatureStatus: serializedSession.truthSignature.status,
+          knowledgePackBindingStatus: serializedSession.knowledgePackBinding.status,
+          responseStatus: OUTCOME_STUDIO_RESPONSE_STATUSES.RESPONSE_GENERATED,
+          assetCreated: true,
+          outcomeAssetId,
+          outcomeAssetVersionId,
+        },
+      })
+      failureStage = 'assetAudit'
+      await logOutcomeAssetGeneratedAudit({
+        auditRequest,
+        dbSession,
+        runtimeInstance,
+        asset: outcomeAsset,
+        summary: 'Outcome Studio asset and first version generated from governed response.',
+        diff: {
+          actorUserId,
+          sessionId: serializedSession.sessionId,
+          messageId: serializedMessage.messageId,
+          responseMessageId: responseMessage.messageId,
+          runtimeInstanceId: toIdString(runtimeObjectId),
+          outcomeAssetId,
+          outcomeAssetVersionId,
+          versionNumber: 1,
+          sourceOutputAssetId: outcomeAsset.sourceOutputAssetId,
+          sourceOutputTypeKey: outcomeAsset.outputTypeKey,
+          truthSignatureStatus: serializedSession.truthSignature.status,
+          truthSignatureCurrentness: serializedSession.truthSignature.currentness,
+          knowledgePackBindingStatus: serializedSession.knowledgePackBinding.status,
+          generatedBodyAvailable: true,
+        },
+      })
+    } catch (err) {
+      err.outcomeResponseAuditFailure = failureStage
+      throw err
+    }
+  }
+
+  if (canUseMongoTransaction()) {
+    const dbSession = await mongoose.startSession()
+    try {
+      await dbSession.withTransaction(async () => {
+        await persistGeneratedResponseAndAudit(dbSession)
+      })
+    } catch (err) {
+      if (err?.outcomeResponseAuditFailure === 'assetAudit') {
+        throw failAssetGenerationAuditClosed(err, {
+          sessionId: serializedSession.sessionId,
+          messageId: serializedMessage.messageId,
+          responseMessageId: responseMessage.messageId,
+          outcomeAssetId,
+          outcomeAssetVersionId,
+        })
+      }
+      if (err?.outcomeResponseAuditFailure !== 'responseAudit') throw err
+      throw failMessageAuditClosed(err, {
         sessionId: serializedSession.sessionId,
         messageId: serializedMessage.messageId,
         responseMessageId: responseMessage.messageId,
-        runtimeInstanceId: toIdString(runtimeObjectId),
-        sourceOutputAssetId: serializedSession.sourceOutputAssetId,
-        sourceOutputTypeKey: serializedSession.sourceOutputTypeKey,
-        truthSignatureStatus: serializedSession.truthSignature.status,
-        knowledgePackBindingStatus: serializedSession.knowledgePackBinding.status,
-        responseStatus: OUTCOME_STUDIO_RESPONSE_STATUSES.RESPONSE_GENERATED,
-        assetCreated: true,
         outcomeAssetId,
         outcomeAssetVersionId,
-      },
-    })
-    failureStage = 'assetAudit'
-    await logOutcomeAssetGeneratedAudit({
-      auditRequest,
-      runtimeInstance,
-      asset: outcomeAsset,
-      summary: 'Outcome Studio asset and first version generated from governed response.',
-      diff: {
-        actorUserId,
-        sessionId: serializedSession.sessionId,
-        messageId: serializedMessage.messageId,
-        responseMessageId: responseMessage.messageId,
-        runtimeInstanceId: toIdString(runtimeObjectId),
-        outcomeAssetId,
-        outcomeAssetVersionId,
-        versionNumber: 1,
-        sourceOutputAssetId: outcomeAsset.sourceOutputAssetId,
-        sourceOutputTypeKey: outcomeAsset.outputTypeKey,
-        truthSignatureStatus: serializedSession.truthSignature.status,
-        truthSignatureCurrentness: serializedSession.truthSignature.currentness,
-        knowledgePackBindingStatus: serializedSession.knowledgePackBinding.status,
-        generatedBodyAvailable: true,
-      },
-    })
-  } catch (err) {
-    await OutcomeAssetVersion.deleteOne({ _id: outcomeAssetVersion._id })
-    await OutcomeAsset.deleteOne({ _id: outcomeAsset._id })
-    await OutcomeMessage.deleteOne({ _id: responseMessage._id })
-    await OutcomeMessage.updateOne(
-      { _id: message._id },
-      { $set: { responseStatus: OUTCOME_STUDIO_RESPONSE_STATUSES.PENDING_RESPONSE } },
-    )
-    if (failureStage === 'assetAudit') {
-      throw failAssetGenerationAuditClosed(err, {
+      })
+    } finally {
+      await dbSession.endSession()
+    }
+  } else {
+    try {
+      await persistGeneratedResponseAndAudit()
+    } catch (err) {
+      await OutcomeAssetVersion.deleteOne({ _id: outcomeAssetVersion._id })
+      await OutcomeAsset.deleteOne({ _id: outcomeAsset._id })
+      await OutcomeMessage.deleteOne({ _id: responseMessage._id })
+      await OutcomeMessage.updateOne(
+        { _id: message._id },
+        { $set: { responseStatus: OUTCOME_STUDIO_RESPONSE_STATUSES.PENDING_RESPONSE } },
+      )
+      if (err?.outcomeResponseAuditFailure === 'assetAudit') {
+        throw failAssetGenerationAuditClosed(err, {
+          sessionId: serializedSession.sessionId,
+          messageId: serializedMessage.messageId,
+          responseMessageId: responseMessage.messageId,
+          outcomeAssetId,
+          outcomeAssetVersionId,
+        })
+      }
+      if (err?.outcomeResponseAuditFailure !== 'responseAudit') throw err
+      throw failMessageAuditClosed(err, {
         sessionId: serializedSession.sessionId,
         messageId: serializedMessage.messageId,
         responseMessageId: responseMessage.messageId,
@@ -2802,14 +3060,6 @@ export const generateRuntimeOutcomeResponse = async ({
         outcomeAssetVersionId,
       })
     }
-    if (failureStage !== 'responseAudit') throw err
-    throw failMessageAuditClosed(err, {
-      sessionId: serializedSession.sessionId,
-      messageId: serializedMessage.messageId,
-      responseMessageId: responseMessage.messageId,
-      outcomeAssetId,
-      outcomeAssetVersionId,
-    })
   }
 
   return {

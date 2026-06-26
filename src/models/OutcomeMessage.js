@@ -6,6 +6,10 @@ import {
   OUTCOME_STUDIO_PHASE,
   OUTCOME_STUDIO_RESPONSE_STATUSES,
 } from '../constants/runtimeOutcomeStudio.js'
+import {
+  DEFAULT_OUTCOME_WORKSPACE_TYPE,
+  WORKSPACE_TYPES,
+} from '../constants/workspaceGovernance.js'
 
 const nullableString = {
   type: String,
@@ -85,6 +89,13 @@ const outcomeMessageSchema = new mongoose.Schema(
     },
     projectId: nullableString,
     outcomeId: nullableString,
+    workspaceType: {
+      type: String,
+      required: true,
+      uppercase: true,
+      enum: Object.values(WORKSPACE_TYPES),
+      default: DEFAULT_OUTCOME_WORKSPACE_TYPE,
+    },
     contractVersion: {
       type: String,
       trim: true,
@@ -139,6 +150,10 @@ const outcomeMessageSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.Mixed,
       default: () => ({}),
     },
+    contextBindings: {
+      type: mongoose.Schema.Types.Mixed,
+      default: () => ({}),
+    },
     submittedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
@@ -178,6 +193,7 @@ outcomeMessageSchema.pre('validate', function normalizeOutcomeMessage(next) {
   this.frameworkKey = String(this.frameworkKey || '').trim().toUpperCase()
   this.packageKey = String(this.packageKey || '').trim()
   this.packageVersion = String(this.packageVersion || '').trim()
+  this.workspaceType = String(this.workspaceType || DEFAULT_OUTCOME_WORKSPACE_TYPE).trim().toUpperCase()
   this.contractVersion = String(this.contractVersion || OUTCOME_STUDIO_CONTRACT_VERSION).trim()
   this.phase = String(this.phase || OUTCOME_STUDIO_PHASE).trim()
   this.role = String(this.role || OUTCOME_STUDIO_MESSAGE_ROLES.USER).trim().toUpperCase()

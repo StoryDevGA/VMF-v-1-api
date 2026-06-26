@@ -8804,6 +8804,9 @@ describe('Runtime Instance API', () => {
     ...overrides,
   })
 
+  const getOutcomeKnowledgePackCategory = (packType) =>
+    packType === 'TRUTH_CERTIFICATION' ? 'PLATFORM' : 'OUTCOME'
+
   const makeOutcomeKnowledgePackActivation = ({
     packType,
     packKey,
@@ -8816,6 +8819,7 @@ describe('Runtime Instance API', () => {
     activationId: `kpa-${packKey}-${scopeKey.toLowerCase().replace(/[^a-z0-9-]+/g, '-')}`,
     packId: `kp-${packType.toLowerCase().replace(/_/g, '-')}-${packKey}`,
     versionId: `kpv-${packKey}-${semanticVersion.replace(/\./g, '-')}`,
+    packCategory: getOutcomeKnowledgePackCategory(packType),
     packType,
     packKey,
     label,
@@ -14397,11 +14401,13 @@ describe('Runtime Instance API', () => {
       requiredCount: 5,
       activePacks: expect.arrayContaining([
         expect.objectContaining({
+          packCategory: 'OUTCOME',
           packType: 'ARL',
           packKey: 'adaptive-reasoning-layer',
           contentHash: 'sha256:adaptive-reasoning-layer',
         }),
         expect.objectContaining({
+          packCategory: 'PLATFORM',
           packType: 'TRUTH_CERTIFICATION',
           packKey: 'truth-certification-pack',
           contentHash: 'sha256:truth-certification-pack',
@@ -14440,6 +14446,44 @@ describe('Runtime Instance API', () => {
     const savedOutcomeSession = OutcomeSession.prototype.save.mock.contexts[0]
     expect(savedOutcomeSession.toJSON()).toEqual(expect.objectContaining({
       truthSignatureId: sessionRes.body.data.truthSignatureId,
+    }))
+    expect(savedOutcomeSession.workspaceType).toBe('OUTCOME')
+    expect(savedOutcomeSession.contextBindings).toEqual(expect.objectContaining({
+      workspaceContext: expect.objectContaining({
+        workspaceType: 'OUTCOME',
+        workspaceSessionId: sessionRes.body.data.sessionId,
+        contextType: 'SESSION',
+      }),
+      runtimeContext: expect.objectContaining({
+        runtimeInstanceId: RUNTIME_INSTANCE_ID,
+        runtimeType: 'VALUE_NARRATIVE',
+        frameworkKey: 'VMF',
+      }),
+      sourceOutputBinding: expect.objectContaining({
+        outputAssetId: 'out_asset_outcome_studio_fixture',
+        outputTypeKey: 'EXECUTIVE_BRIEF',
+      }),
+      truthBinding: expect.objectContaining({
+        truthSignatureId: sessionRes.body.data.truthSignatureId,
+        currentness: 'CURRENT',
+      }),
+      knowledgeBindings: expect.objectContaining({
+        activeCount: 5,
+        requiredCount: 5,
+        activePacks: expect.arrayContaining([
+          expect.objectContaining({
+            packCategory: 'PLATFORM',
+            packType: 'TRUTH_CERTIFICATION',
+          }),
+        ]),
+      }),
+      evidenceBindings: expect.objectContaining({
+        lockSnapshotId: 'runtime-truth-lock-output-lab-fixture',
+        replayAnchorId: 'runtime-replay-anchor-output-lab',
+        graphHash: 'sha256:graph-hash',
+      }),
+      interpretationBindings: [],
+      decisionBindings: [],
     }))
     expect(OutcomeSession.deleteOne).not.toHaveBeenCalled()
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
@@ -14688,6 +14732,26 @@ describe('Runtime Instance API', () => {
     expect(res.body.data.knowledgePackBinding).not.toHaveProperty('sourceBundle')
     expect(OutcomeMessage.prototype.save).toHaveBeenCalledTimes(1)
     const savedOutcomeMessage = OutcomeMessage.prototype.save.mock.contexts[0]
+    expect(savedOutcomeMessage.workspaceType).toBe('OUTCOME')
+    expect(savedOutcomeMessage.contextBindings).toEqual(expect.objectContaining({
+      workspaceContext: expect.objectContaining({
+        workspaceType: 'OUTCOME',
+        workspaceSessionId: 'out_sess_existing_fixture',
+        workspaceMessageId: res.body.data.messageId,
+        contextType: 'MESSAGE',
+      }),
+      sourceOutputBinding: expect.objectContaining({
+        outputAssetId: 'out_asset_outcome_studio_fixture',
+      }),
+      truthBinding: expect.objectContaining({
+        truthSignatureId: 'truth_sig_existing_fixture',
+        currentness: 'CURRENT',
+      }),
+      knowledgeBindings: expect.objectContaining({
+        activeCount: 5,
+        requiredCount: 5,
+      }),
+    }))
     expect(OutcomeMessage.deleteOne).not.toHaveBeenCalled()
     expect(RuntimeOutputAsset.find).not.toHaveBeenCalled()
     expect(KnowledgePackActivation.find).not.toHaveBeenCalled()
@@ -14960,6 +15024,22 @@ describe('Runtime Instance API', () => {
     })
     expect(OutcomeMessage.prototype.save).toHaveBeenCalledTimes(1)
     const savedOutcomeResponseMessage = OutcomeMessage.prototype.save.mock.contexts[0]
+    expect(savedOutcomeResponseMessage.workspaceType).toBe('OUTCOME')
+    expect(savedOutcomeResponseMessage.contextBindings).toEqual(expect.objectContaining({
+      workspaceContext: expect.objectContaining({
+        workspaceType: 'OUTCOME',
+        workspaceSessionId: 'out_sess_existing_fixture',
+        workspaceMessageId: res.body.data.messageId,
+        contextType: 'MESSAGE',
+      }),
+      sourceOutputBinding: expect.objectContaining({
+        outputAssetId: 'out_asset_outcome_studio_fixture',
+      }),
+      truthBinding: expect.objectContaining({
+        truthSignatureId: 'truth_sig_existing_fixture',
+        currentness: 'CURRENT',
+      }),
+    }))
     expect(OutcomeMessage.updateOne).toHaveBeenCalledWith(
       { _id: 'c47f1f77bcf86cd799439111' },
       { $set: { responseStatus: 'RESPONSE_GENERATED' } },
@@ -14968,6 +15048,46 @@ describe('Runtime Instance API', () => {
     expect(OutcomeAsset.prototype.save).toHaveBeenCalledTimes(1)
     const savedOutcomeAsset = OutcomeAsset.prototype.save.mock.contexts[0]
     expect(OutcomeAssetVersion.prototype.save).toHaveBeenCalledTimes(1)
+    const savedOutcomeAssetVersion = OutcomeAssetVersion.prototype.save.mock.contexts[0]
+    expect(savedOutcomeAsset.workspaceType).toBe('OUTCOME')
+    expect(savedOutcomeAsset.assetType).toBe('OUTCOME_NARRATIVE')
+    expect(savedOutcomeAsset.contextBindings).toEqual(expect.objectContaining({
+      workspaceContext: expect.objectContaining({
+        workspaceType: 'OUTCOME',
+        workspaceSessionId: 'out_sess_existing_fixture',
+        workspaceAssetId: res.body.data.asset.outcomeAssetId,
+        workspaceAssetVersionId: res.body.data.assetVersion.outcomeAssetVersionId,
+        assetType: 'OUTCOME_NARRATIVE',
+        contextType: 'ASSET',
+      }),
+      runtimeContext: expect.objectContaining({
+        runtimeInstanceId: RUNTIME_INSTANCE_ID,
+        frameworkKey: 'VMF',
+      }),
+      knowledgeBindings: expect.objectContaining({
+        activePacks: expect.arrayContaining([
+          expect.objectContaining({
+            packCategory: 'PLATFORM',
+            packType: 'TRUTH_CERTIFICATION',
+          }),
+        ]),
+      }),
+    }))
+    expect(savedOutcomeAssetVersion.workspaceType).toBe('OUTCOME')
+    expect(savedOutcomeAssetVersion.assetType).toBe('OUTCOME_NARRATIVE')
+    expect(savedOutcomeAssetVersion.contextBindings).toEqual(expect.objectContaining({
+      workspaceContext: expect.objectContaining({
+        workspaceType: 'OUTCOME',
+        workspaceAssetId: res.body.data.asset.outcomeAssetId,
+        workspaceAssetVersionId: res.body.data.assetVersion.outcomeAssetVersionId,
+        assetType: 'OUTCOME_NARRATIVE',
+        contextType: 'ASSET',
+      }),
+      truthBinding: expect.objectContaining({
+        truthSignatureId: 'truth_sig_existing_fixture',
+        currentness: 'CURRENT',
+      }),
+    }))
     expect(OutcomeAsset.deleteOne).not.toHaveBeenCalled()
     expect(OutcomeAssetVersion.deleteOne).not.toHaveBeenCalled()
     expect(OutcomeAsset.find).not.toHaveBeenCalled()

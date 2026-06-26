@@ -4,6 +4,10 @@ import {
   OUTCOME_STUDIO_PHASE,
   OUTCOME_STUDIO_SESSION_STATUSES,
 } from '../constants/runtimeOutcomeStudio.js'
+import {
+  DEFAULT_OUTCOME_WORKSPACE_TYPE,
+  WORKSPACE_TYPES,
+} from '../constants/workspaceGovernance.js'
 
 const nullableString = {
   type: String,
@@ -76,6 +80,13 @@ const outcomeSessionSchema = new mongoose.Schema(
     },
     projectId: nullableString,
     outcomeId: nullableString,
+    workspaceType: {
+      type: String,
+      required: true,
+      uppercase: true,
+      enum: Object.values(WORKSPACE_TYPES),
+      default: DEFAULT_OUTCOME_WORKSPACE_TYPE,
+    },
     contractVersion: {
       type: String,
       trim: true,
@@ -135,6 +146,10 @@ const outcomeSessionSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.Mixed,
       default: () => ({}),
     },
+    contextBindings: {
+      type: mongoose.Schema.Types.Mixed,
+      default: () => ({}),
+    },
     prompt: {
       type: String,
       trim: true,
@@ -185,6 +200,7 @@ outcomeSessionSchema.pre('validate', function normalizeOutcomeSession(next) {
   this.frameworkKey = String(this.frameworkKey || '').trim().toUpperCase()
   this.packageKey = String(this.packageKey || '').trim()
   this.packageVersion = String(this.packageVersion || '').trim()
+  this.workspaceType = String(this.workspaceType || DEFAULT_OUTCOME_WORKSPACE_TYPE).trim().toUpperCase()
   this.contractVersion = String(this.contractVersion || OUTCOME_STUDIO_CONTRACT_VERSION).trim()
   this.phase = String(this.phase || OUTCOME_STUDIO_PHASE).trim()
   this.status = String(this.status || OUTCOME_STUDIO_SESSION_STATUSES.ACTIVE).trim().toUpperCase()

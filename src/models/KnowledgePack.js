@@ -3,6 +3,10 @@ import {
   OUTCOME_KNOWLEDGE_PACK_STATUSES,
   OUTCOME_KNOWLEDGE_PACK_TYPES,
 } from '../constants/outcomeKnowledgePacks.js'
+import {
+  KNOWLEDGE_PACK_CATEGORIES,
+  resolveKnowledgePackCategory,
+} from '../constants/workspaceGovernance.js'
 
 const normalizeText = (value) => String(value || '').trim()
 const normalizeToken = (value) => normalizeText(value).toUpperCase()
@@ -24,6 +28,13 @@ const knowledgePackSchema = new mongoose.Schema(
       unique: true,
       index: true,
       maxlength: 180,
+    },
+    packCategory: {
+      type: String,
+      required: true,
+      uppercase: true,
+      enum: Object.values(KNOWLEDGE_PACK_CATEGORIES),
+      default: () => resolveKnowledgePackCategory(),
     },
     packType: {
       type: String,
@@ -117,6 +128,10 @@ knowledgePackSchema.index({ updatedAt: -1, packType: 1 })
 
 knowledgePackSchema.pre('validate', function normalizeKnowledgePack(next) {
   this.packType = normalizeToken(this.packType)
+  this.packCategory = resolveKnowledgePackCategory({
+    packCategory: this.packCategory,
+    packType: this.packType,
+  })
   this.packKey = normalizeText(this.packKey).toLowerCase()
   this.status = normalizeToken(this.status || OUTCOME_KNOWLEDGE_PACK_STATUSES.DRAFT)
   this.label = normalizeText(this.label)
