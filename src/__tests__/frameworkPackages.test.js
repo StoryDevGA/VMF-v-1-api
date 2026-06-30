@@ -1750,6 +1750,7 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
         frameworkKey: 'VMF',
         frameworkName: 'Value Management Framework',
         version: '2.3.1',
+        packageKey: 'vmf-2-3-1',
         description: 'Current VMF package',
         status: 'ACTIVE',
         isDefault: true,
@@ -1788,6 +1789,7 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     expect(res.status).toBe(200)
     expect(res.body.data).toHaveLength(1)
     expect(res.body.meta.total).toBe(1)
+    expect(res.body.data[0].id).toBe('vmf-2-3-1')
     expect(res.body.data[0].updatedBy.name).toBe('Super Administrator')
     expect(res.body.data[0].lastCheckpointResult.runBy).toEqual({
       id: legacyRunById,
@@ -1857,6 +1859,22 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
 
     expect(res.status).toBe(404)
     expect(res.body.error.code).toBe('NOT_FOUND')
+  })
+
+  test('GET /api/v1/super-admin/runtime-control/framework-packages/:packageId accepts package keys as stable identifiers', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const frameworkPackage = makeFrameworkPackageDoc({ packageKey: 'vmf-2-3-1' })
+    FrameworkPackage.findOne.mockResolvedValueOnce(frameworkPackage)
+
+    const res = await request
+      .get('/api/v1/super-admin/runtime-control/framework-packages/vmf-2-3-1')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(FrameworkPackage.findById).not.toHaveBeenCalled()
+    expect(FrameworkPackage.findOne).toHaveBeenCalledWith({ packageKey: 'vmf-2-3-1' })
+    expect(res.body.data.id).toBe('vmf-2-3-1')
+    expect(res.body.data.packageKey).toBe('vmf-2-3-1')
   })
 
   test('PATCH /api/v1/super-admin/runtime-control/framework-packages/:packageId rejects direct activation through update', async () => {
@@ -3203,6 +3221,24 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     }))
   })
 
+  test('GET /api/v1/super-admin/runtime-control/runtime-activation/packages/:packageId/readiness accepts package keys', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    FrameworkPackage.findOne.mockResolvedValueOnce(makeFrameworkPackageDoc({
+      status: 'VALIDATED',
+      lastCheckpointStatus: 'PASS',
+      packageKey: 'vmf-2-3-1',
+    }))
+
+    const res = await request
+      .get('/api/v1/super-admin/runtime-control/runtime-activation/packages/vmf-2-3-1/readiness')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(FrameworkPackage.findById).not.toHaveBeenCalled()
+    expect(FrameworkPackage.findOne).toHaveBeenCalledWith({ packageKey: 'vmf-2-3-1' })
+    expect(res.body.data.ready).toBe(true)
+  })
+
   test('GET /api/v1/super-admin/runtime-control/runtime-activation/packages/:packageId/readiness accepts PASS_WITH_WARNINGS checkpoint evidence', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackageDoc({
@@ -3633,6 +3669,20 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
         dependencySnapshotHash: 'sha256-dep-lock-vmf-2-3-1',
       }),
     ])
+  })
+
+  test('GET /api/v1/super-admin/runtime-control/runtime-activation/packages/:packageId/history accepts package keys', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    RuntimeActivationSnapshot.find.mockReturnValue(buildFrameworkPackageQueryChain([]))
+
+    const res = await request
+      .get('/api/v1/super-admin/runtime-control/runtime-activation/packages/vmf-2-3-1/history')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(RuntimeActivationSnapshot.find).toHaveBeenCalledWith({ packageKey: 'vmf-2-3-1' })
+    expect(RuntimeDeployment.find).not.toHaveBeenCalled()
+    expect(res.body.data).toEqual([])
   })
 
   test('buildDependencyLockSnapshot rejects invalid lockedAt values instead of creating a wall-clock snapshot id', () => {

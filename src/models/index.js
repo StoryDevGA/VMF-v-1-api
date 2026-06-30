@@ -34,6 +34,7 @@ import OutcomeMessage from './OutcomeMessage.js'
 import KnowledgePack from './KnowledgePack.js'
 import KnowledgePackVersion from './KnowledgePackVersion.js'
 import KnowledgePackActivation from './KnowledgePackActivation.js'
+import KnowledgePackManifest from './KnowledgePackManifest.js'
 
 // Export all models
 export {
@@ -72,6 +73,7 @@ export {
   KnowledgePack,
   KnowledgePackVersion,
   KnowledgePackActivation,
+  KnowledgePackManifest,
 }
 
 // Default export with all models
@@ -111,4 +113,5 @@ export default {
   KnowledgePack,
   KnowledgePackVersion,
   KnowledgePackActivation,
+  KnowledgePackManifest,
 }

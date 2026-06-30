@@ -10,9 +10,16 @@ import {
   OUTCOME_KNOWLEDGE_PACK_STATUSES,
   OUTCOME_KNOWLEDGE_PACK_TYPES,
 } from '../constants/outcomeKnowledgePacks.js'
+import {
+  KNOWLEDGE_PACK_MANIFEST_STATUSES,
+} from '../constants/knowledgeRuntime.js'
+import {
+  WORKSPACE_TYPES,
+} from '../constants/workspaceGovernance.js'
 
 const frameworkKeyRegex = /^[A-Z][A-Z0-9_]*$/
 const packIdRegex = /^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,179}$/
+const manifestIdRegex = /^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,219}$/
 const versionIdRegex = /^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,239}$/
 const semanticVersionRegex = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/
 
@@ -48,6 +55,21 @@ const listKnowledgePacksQuerySchema = z.object({
   pageSize: z.coerce.number().int().min(1).max(100).default(20),
 })
 
+const listKnowledgePackManifestsQuerySchema = z.object({
+  q: optionalKeySchema('Search query', 255),
+  manifestKey: optionalKeySchema('Manifest key', 160),
+  status: z.enum(Object.values(KNOWLEDGE_PACK_MANIFEST_STATUSES)).optional(),
+  workspaceType: z.enum(Object.values(WORKSPACE_TYPES)).optional(),
+  frameworkKey: optionalFrameworkKeySchema,
+  runtimeType: optionalRuntimeTypeSchema,
+  packageKey: optionalKeySchema('Package key'),
+  outputKey: optionalKeySchema('Output key'),
+  sortBy: z.enum(['manifestName', 'manifestKey', 'status', 'updatedAt']).optional(),
+  sortOrder: z.enum(['asc', 'desc']).optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(20),
+})
+
 const knowledgePackIdParamsSchema = z.object({
   packId: z
     .string({ required_error: 'packId is required' })
@@ -60,6 +82,13 @@ const knowledgePackVersionParamsSchema = knowledgePackIdParamsSchema.extend({
     .string({ required_error: 'versionId is required' })
     .trim()
     .refine((value) => versionIdRegex.test(value), 'versionId must use a safe identifier format'),
+})
+
+const manifestIdParamsSchema = z.object({
+  manifestId: z
+    .string({ required_error: 'manifestId is required' })
+    .trim()
+    .refine((value) => manifestIdRegex.test(value), 'manifestId must use a safe identifier format'),
 })
 
 const previewResolutionQuerySchema = z.object({
@@ -168,7 +197,9 @@ const rollbackKnowledgePackBodySchema = z
   .superRefine(validateActivationScope)
 
 export const validateListKnowledgePacks = createQueryValidator(listKnowledgePacksQuerySchema)
+export const validateListKnowledgePackManifests = createQueryValidator(listKnowledgePackManifestsQuerySchema)
 export const validateKnowledgePackId = createParamsValidator(knowledgePackIdParamsSchema)
+export const validateKnowledgePackManifestId = createParamsValidator(manifestIdParamsSchema)
 export const validateKnowledgePackVersionParams = createParamsValidator(knowledgePackVersionParamsSchema)
 export const validateKnowledgePackResolutionPreview = createQueryValidator(previewResolutionQuerySchema)
 export const validateCreateKnowledgePackVersion = createBodyValidator(createKnowledgePackVersionBodySchema)

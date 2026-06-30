@@ -588,7 +588,13 @@ const updateFrameworkPackageSafeMetadataSchema = z.object({
 const frameworkPackageIdSchema = z.object({
   packageId: z
     .string({ required_error: 'packageId is required' })
-    .regex(objectIdRegex, 'packageId must be a valid ObjectId'),
+    .trim()
+    .min(1, 'packageId is required')
+    .max(120, 'packageId must be 120 characters or fewer')
+    .refine(
+      (value) => objectIdRegex.test(value) || tokenRegex.test(value),
+      'packageId must be a valid ObjectId or package key',
+    ),
 })
 
 const listFrameworkPackagesQuerySchema = z.object({

@@ -10,6 +10,7 @@
     "db:clean:keep-super-admin": "node src/scripts/cleanDbKeepSuperAdmin.js",
     "framework-seed:guard": "node src/scripts/importFrameworkSeed.js --json --no-report",
     "framework-seed:import": "node src/scripts/importFrameworkSeed.js",
+    "vmf:cleanup-pre-v3-1": "node src/scripts/cleanupPreV31VmfRecords.js",
     "runtime-paths:reclassify-categories": "node src/scripts/reclassifyRuntimePathCategories.js",
     "knowledge-packs:backfill-categories": "node src/scripts/backfillKnowledgePackCategories.js",
     "framework-packages:unset-legacy-fields": "node src/scripts/unsetDeprecatedFrameworkPackageFields.js",

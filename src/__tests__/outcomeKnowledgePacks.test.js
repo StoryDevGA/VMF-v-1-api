@@ -1,3 +1,4 @@
+import mongoose from 'mongoose'
 import { describe, test, expect, beforeAll, beforeEach, afterAll, jest } from '@jest/globals'
 
 beforeAll(() => {
@@ -78,14 +79,17 @@ const buildFindChain = (rows) => ({
   sort: jest.fn().mockReturnThis(),
   skip: jest.fn().mockReturnThis(),
   limit: jest.fn().mockReturnThis(),
+  session: jest.fn().mockReturnThis(),
   lean: jest.fn().mockResolvedValue(rows),
 })
 
 const buildFindOneChain = (row) => ({
+  session: jest.fn().mockReturnThis(),
   lean: jest.fn().mockResolvedValue(row),
 })
 
 const buildVersionFindOneChain = (row) => ({
+  session: jest.fn().mockReturnThis(),
   lean: jest.fn().mockResolvedValue(row),
   select: jest.fn().mockResolvedValue(row),
 })
@@ -94,6 +98,40 @@ const buildActivationFindOneChain = (row) => ({
   sort: jest.fn().mockReturnThis(),
   lean: jest.fn().mockResolvedValue(row),
   session: jest.fn().mockReturnThis(),
+})
+
+const snapshotKnowledgePackMutationState = (doc) => ({
+  status: doc.status,
+  latestVersionId: doc.latestVersionId,
+  latestSemanticVersion: doc.latestSemanticVersion,
+})
+
+const restoreKnowledgePackMutationState = (doc, snapshot) => {
+  Object.entries(snapshot).forEach(([field, value]) => {
+    doc[field] = value
+  })
+}
+
+const buildSession = () => ({
+  withTransaction: jest.fn(async (callback) => callback()),
+  endSession: jest.fn(async () => {}),
+})
+
+const buildRollbackSession = (docs = []) => ({
+  withTransaction: jest.fn(async (callback) => {
+    const snapshots = docs.map((doc) => ({
+      doc,
+      snapshot: snapshotKnowledgePackMutationState(doc),
+    }))
+    try {
+      return await callback()
+    } catch (err) {
+      snapshots.forEach(({ doc, snapshot }) =>
+        restoreKnowledgePackMutationState(doc, snapshot))
+      throw err
+    }
+  }),
+  endSession: jest.fn(async () => {}),
 })
 
 const makeKnowledgePack = (overrides = {}) => ({
@@ -146,6 +184,51 @@ const makeKnowledgePackVersionDoc = (overrides = {}) => ({
   }),
 })
 
+const makeKnowledgePackManifest = (overrides = {}) => ({
+  manifestId: 'kpm-vmf-outcome-studio-1-0-0-global',
+  manifestKey: 'vmf-outcome-studio',
+  manifestName: 'VMF Outcome Studio Manifest',
+  manifestType: 'FRAMEWORK_RUNTIME',
+  description: 'Persisted VMF manifest.',
+  semanticVersion: '1.0.0',
+  status: 'VALIDATED',
+  workspaceType: 'OUTCOME',
+  frameworkKey: 'VMF',
+  runtimeType: 'VALUE_NARRATIVE',
+  packageKey: 'standard-package-vmf-3-1-rkm',
+  outputKey: '',
+  scopeType: 'PACKAGE',
+  scopeKey: 'PACKAGE:VMF:standard-package-vmf-3-1-rkm:3.1',
+  mandatoryPacks: [
+    {
+      packCategory: 'OUTCOME',
+      purposeCategory: 'GOVERNANCE',
+      packType: 'ARL',
+      packKey: 'adaptive-reasoning-layer',
+      label: 'Adaptive Reasoning Layer',
+      executionMode: 'PROVIDER_CONTEXT',
+      required: true,
+      dependencyKeys: [],
+      metadata: {},
+    },
+  ],
+  optionalPacks: [],
+  blockedPacks: [],
+  resolutionPolicy: {},
+  validationPolicy: {},
+  sourceMetadata: {},
+  isSystem: false,
+  createdAt: '2026-06-29T09:00:00.000Z',
+  updatedAt: '2026-06-29T09:00:00.000Z',
+  ...overrides,
+})
+
+const makeAllRequiredActivations = () =>
+  REQUIRED_PACKS.map((pack) => makeActivation(pack, {
+    versionId: `kpv-${pack.packKey}-1-0-0-global`,
+    contentHash: `sha256:${pack.packKey}`,
+  }))
+
 const makeActivation = (pack, overrides = {}) => ({
   activationId: `kpa-${pack.packKey}-${overrides.scopeKey || 'global'}`,
   packId: `kp-${pack.packType.toLowerCase().replace(/_/g, '-')}-${pack.packKey}`,
@@ -165,6 +248,24 @@ const makeActivation = (pack, overrides = {}) => ({
   activatedAt: '2026-06-15T09:30:00.000Z',
   ...overrides,
 })
+
+const makeVersionForActivation = (activation, overrides = {}) => makeKnowledgePackVersion({
+  versionId: activation.versionId,
+  packId: activation.packId,
+  packCategory: activation.packCategory,
+  packType: activation.packType,
+  packKey: activation.packKey,
+  semanticVersion: activation.semanticVersion,
+  schemaVersion: activation.schemaVersion,
+  status: 'VALIDATED',
+  scopeType: activation.scopeType,
+  scopeKey: activation.scopeKey,
+  contentHash: activation.contentHash,
+  ...overrides,
+})
+
+const makeVersionsForActivations = (activations = []) =>
+  activations.map((activation) => makeVersionForActivation(activation))
 
 const OUTPUT_SCHEMAS_YAML = `
 pack:
@@ -266,8 +367,31 @@ let Role
 let KnowledgePack
 let KnowledgePackVersion
 let KnowledgePackActivation
+let KnowledgePackManifest
 let AuditLog
 let mockRedisClient
+let startSessionSpy
+let originalMongooseReadyStateDescriptor
+
+const setMongooseReadyState = (readyState) => {
+  Object.defineProperty(mongoose.connection, 'readyState', {
+    configurable: true,
+    get: () => readyState,
+  })
+}
+
+const restoreMongooseReadyState = () => {
+  if (originalMongooseReadyStateDescriptor) {
+    Object.defineProperty(
+      mongoose.connection,
+      'readyState',
+      originalMongooseReadyStateDescriptor,
+    )
+    return
+  }
+
+  delete mongoose.connection.readyState
+}
 
 const getAccessTokenForUser = async (user) => {
   const tokens = await tokenService.generateTokens(user)
@@ -301,11 +425,24 @@ beforeAll(async () => {
   KnowledgePack = models.KnowledgePack
   KnowledgePackVersion = models.KnowledgePackVersion
   KnowledgePackActivation = models.KnowledgePackActivation
+  KnowledgePackManifest = models.KnowledgePackManifest
+  originalMongooseReadyStateDescriptor = Object.getOwnPropertyDescriptor(
+    mongoose.connection,
+    'readyState',
+  )
+  startSessionSpy = jest.spyOn(mongoose, 'startSession')
 })
 
-afterAll(() => {})
+afterAll(() => {
+  startSessionSpy?.mockRestore()
+  restoreMongooseReadyState()
+})
 
 beforeEach(() => {
+  restoreMongooseReadyState()
+  startSessionSpy.mockReset()
+  startSessionSpy.mockResolvedValue(buildSession())
+
   User.findById = jest.fn().mockImplementation((userId) => {
     if (userId === SUPER_ADMIN_ID) {
       return Promise.resolve(makeFakeUser())
@@ -346,6 +483,9 @@ beforeEach(() => {
   KnowledgePackActivation.prototype.save = jest.fn(async function save() {
     return this
   })
+  KnowledgePackManifest.countDocuments = jest.fn().mockResolvedValue(1)
+  KnowledgePackManifest.find = jest.fn().mockReturnValue(buildFindChain([makeKnowledgePackManifest()]))
+  KnowledgePackManifest.findOne = jest.fn().mockReturnValue(buildFindOneChain(makeKnowledgePackManifest()))
   AuditLog.createLog = jest.fn(async () => ({}))
 })
 
@@ -412,6 +552,328 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
     }))
     expect(JSON.stringify(res.body)).not.toContain('Pack content must not leak')
     expect(KnowledgePack.find).toHaveBeenCalledWith({})
+  })
+
+  test('GET /api/v1/super-admin/outcome-studio/knowledge-packs/manifests returns default and persisted manifest metadata', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .get('/api/v1/super-admin/outcome-studio/knowledge-packs/manifests')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toEqual([
+      expect.objectContaining({
+        manifestId: 'kpm-outcome-studio-default-1-0-0-global',
+        manifestKey: 'outcome-studio-default',
+        manifestName: 'Outcome Studio Default Knowledge Manifest',
+        status: 'ACTIVE',
+        isSystem: true,
+        mandatoryPacks: expect.arrayContaining([
+          expect.objectContaining({
+            packType: 'ARL',
+            packKey: 'adaptive-reasoning-layer',
+            purposeCategory: 'GOVERNANCE',
+            executionMode: 'PROVIDER_CONTEXT',
+          }),
+        ]),
+      }),
+      expect.objectContaining({
+        manifestId: 'kpm-vmf-outcome-studio-1-0-0-global',
+        manifestKey: 'vmf-outcome-studio',
+        status: 'VALIDATED',
+        frameworkKey: 'VMF',
+      }),
+    ])
+    expect(res.body.meta).toEqual(expect.objectContaining({
+      total: 2,
+      defaultManifestIncluded: true,
+    }))
+    expect(KnowledgePackManifest.find).toHaveBeenCalledWith({})
+  })
+
+  test('GET /api/v1/super-admin/outcome-studio/knowledge-packs/manifests/:manifestId returns the default OES manifest without DB lookup', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .get('/api/v1/super-admin/outcome-studio/knowledge-packs/manifests/outcome-studio-default')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toEqual(expect.objectContaining({
+      manifestId: 'kpm-outcome-studio-default-1-0-0-global',
+      manifestType: 'OUTCOME_STUDIO_DEFAULT',
+      mandatoryPacks: expect.arrayContaining([
+        expect.objectContaining({
+          packType: 'TRUTH_CERTIFICATION',
+          packKey: 'truth-certification-pack',
+          packCategory: 'PLATFORM',
+        }),
+      ]),
+    }))
+    expect(KnowledgePackManifest.findOne).not.toHaveBeenCalled()
+  })
+
+  test('GET /api/v1/super-admin/outcome-studio/knowledge-packs/manifests/:manifestId/resolution-preview wraps existing OES resolver for the default manifest', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    KnowledgePackActivation.find.mockReturnValue(buildFindChain(makeAllRequiredActivations()))
+
+    const res = await request
+      .get('/api/v1/super-admin/outcome-studio/knowledge-packs/manifests/outcome-studio-default/resolution-preview?frameworkKey=VMF&runtimeType=VALUE_NARRATIVE&packageKey=standard-package-vmf-3-1-rkm&packageVersion=3.1')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toEqual(expect.objectContaining({
+      manifest: expect.objectContaining({
+        manifestId: 'kpm-outcome-studio-default-1-0-0-global',
+        manifestKey: 'outcome-studio-default',
+      }),
+      binding: expect.objectContaining({
+        status: 'PROJECTED',
+        mode: 'REGISTRY_RESOLUTION',
+        manifestId: 'kpm-outcome-studio-default-1-0-0-global',
+        manifestVersion: '1.0.0',
+        previewOnly: true,
+        contentVisible: false,
+        resolution: expect.objectContaining({
+          activeCount: 5,
+          requiredCount: 5,
+        }),
+      }),
+    }))
+    expect(res.body.data.binding.activePacks).toHaveLength(5)
+  })
+
+  test('GET /api/v1/super-admin/outcome-studio/knowledge-packs/manifests/:manifestId/resolution-preview resolves a persisted manifest without exposing pack content', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const manifest = makeKnowledgePackManifest({
+      mandatoryPacks: [
+        {
+          packCategory: 'OUTCOME',
+          purposeCategory: 'GOVERNANCE',
+          packType: 'ARL',
+          packKey: 'adaptive-reasoning-layer',
+          label: 'Adaptive Reasoning Layer',
+          executionMode: 'PROVIDER_CONTEXT',
+          required: true,
+          dependencyKeys: ['rendering-layer'],
+          metadata: {},
+        },
+        {
+          packCategory: 'OUTCOME',
+          purposeCategory: 'GOVERNANCE',
+          packType: 'RL',
+          packKey: 'rendering-layer',
+          label: 'Rendering Layer',
+          executionMode: 'PROVIDER_CONTEXT',
+          required: true,
+          dependencyKeys: [],
+          metadata: {},
+        },
+      ],
+    })
+    const activations = [
+      makeActivation({ packCategory: 'OUTCOME', packType: 'ARL', packKey: 'adaptive-reasoning-layer', label: 'Adaptive Reasoning Layer' }),
+      makeActivation({ packCategory: 'OUTCOME', packType: 'RL', packKey: 'rendering-layer', label: 'Rendering Layer' }),
+    ]
+    KnowledgePackManifest.findOne.mockReturnValue(buildFindOneChain(manifest))
+    KnowledgePackActivation.find.mockReturnValue(buildFindChain(activations))
+    KnowledgePackVersion.find.mockReturnValue(buildFindChain(makeVersionsForActivations(activations)))
+
+    const res = await request
+      .get('/api/v1/super-admin/outcome-studio/knowledge-packs/manifests/kpm-vmf-outcome-studio-1-0-0-global/resolution-preview?frameworkKey=VMF&runtimeType=VALUE_NARRATIVE&packageKey=standard-package-vmf-3-1-rkm&packageVersion=3.1')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.binding).toEqual(expect.objectContaining({
+      status: 'PROJECTED',
+      manifestId: 'kpm-vmf-outcome-studio-1-0-0-global',
+      manifestKey: 'vmf-outcome-studio',
+      previewOnly: true,
+      contentVisible: false,
+      dependencyGraph: expect.objectContaining({
+        status: 'RESOLVED',
+        edgeCount: 1,
+      }),
+      resolution: expect.objectContaining({
+        activeCount: 2,
+        requiredCount: 2,
+        dependencyCount: 1,
+      }),
+    }))
+    expect(res.body.data.binding.activePacks).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        packType: 'ARL',
+        packKey: 'adaptive-reasoning-layer',
+        executionMode: 'PROVIDER_CONTEXT',
+        contentHash: 'sha256:adaptive-reasoning-layer',
+      }),
+      expect.objectContaining({
+        packType: 'RL',
+        packKey: 'rendering-layer',
+        runtimeBindable: true,
+      }),
+    ]))
+    expect(JSON.stringify(res.body)).not.toContain('Activation content must not leak')
+    expect(JSON.stringify(res.body)).not.toContain('Version content must not leak')
+  })
+
+  test('GET /api/v1/super-admin/outcome-studio/knowledge-packs/manifests/:manifestId/resolution-preview rejects non-bindable manifests before activation lookup', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    KnowledgePackManifest.findOne.mockReturnValue(buildFindOneChain(makeKnowledgePackManifest({
+      status: 'DRAFT',
+    })))
+
+    const res = await request
+      .get('/api/v1/super-admin/outcome-studio/knowledge-packs/manifests/kpm-vmf-outcome-studio-1-0-0-global/resolution-preview')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('MANIFEST_NOT_RUNTIME_BINDABLE')
+    expect(KnowledgePackActivation.find).not.toHaveBeenCalled()
+  })
+
+  test('GET /api/v1/super-admin/outcome-studio/knowledge-packs/manifests/:manifestId/resolution-preview fails closed when a mandatory pack is missing', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    KnowledgePackActivation.find.mockReturnValue(buildFindChain([]))
+
+    const res = await request
+      .get('/api/v1/super-admin/outcome-studio/knowledge-packs/manifests/kpm-vmf-outcome-studio-1-0-0-global/resolution-preview')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('MANDATORY_PACK_MISSING')
+    expect(res.body.error.details.packType).toBe('ARL')
+    expect(KnowledgePackVersion.find).not.toHaveBeenCalled()
+  })
+
+  test('GET /api/v1/super-admin/outcome-studio/knowledge-packs/manifests/:manifestId/resolution-preview fails closed when a mandatory activation is inactive', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    KnowledgePackActivation.find.mockReturnValue(buildFindChain([
+      makeActivation(
+        { packCategory: 'OUTCOME', packType: 'ARL', packKey: 'adaptive-reasoning-layer', label: 'Adaptive Reasoning Layer' },
+        { status: 'DISABLED' },
+      ),
+    ]))
+
+    const res = await request
+      .get('/api/v1/super-admin/outcome-studio/knowledge-packs/manifests/kpm-vmf-outcome-studio-1-0-0-global/resolution-preview')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('MANDATORY_PACK_INACTIVE')
+    expect(res.body.error.details.observedStatuses).toEqual(['DISABLED'])
+  })
+
+  test('GET /api/v1/super-admin/outcome-studio/knowledge-packs/manifests/:manifestId/resolution-preview fails closed on ambiguous active activations', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const pack = { packCategory: 'OUTCOME', packType: 'ARL', packKey: 'adaptive-reasoning-layer', label: 'Adaptive Reasoning Layer' }
+    KnowledgePackActivation.find.mockReturnValue(buildFindChain([
+      makeActivation(pack, { activationId: 'kpa-arl-global-one' }),
+      makeActivation(pack, { activationId: 'kpa-arl-global-two' }),
+    ]))
+
+    const res = await request
+      .get('/api/v1/super-admin/outcome-studio/knowledge-packs/manifests/kpm-vmf-outcome-studio-1-0-0-global/resolution-preview')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('MANDATORY_PACK_AMBIGUOUS')
+    expect(res.body.error.details.activationIds).toEqual(['kpa-arl-global-one', 'kpa-arl-global-two'])
+  })
+
+  test('GET /api/v1/super-admin/outcome-studio/knowledge-packs/manifests/:manifestId/resolution-preview rejects dependency cycles before activation lookup', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    KnowledgePackManifest.findOne.mockReturnValue(buildFindOneChain(makeKnowledgePackManifest({
+      mandatoryPacks: [
+        {
+          packCategory: 'OUTCOME',
+          purposeCategory: 'GOVERNANCE',
+          packType: 'ARL',
+          packKey: 'adaptive-reasoning-layer',
+          label: 'Adaptive Reasoning Layer',
+          executionMode: 'PROVIDER_CONTEXT',
+          dependencyKeys: ['rendering-layer'],
+        },
+        {
+          packCategory: 'OUTCOME',
+          purposeCategory: 'GOVERNANCE',
+          packType: 'RL',
+          packKey: 'rendering-layer',
+          label: 'Rendering Layer',
+          executionMode: 'PROVIDER_CONTEXT',
+          dependencyKeys: ['adaptive-reasoning-layer'],
+        },
+      ],
+    })))
+
+    const res = await request
+      .get('/api/v1/super-admin/outcome-studio/knowledge-packs/manifests/kpm-vmf-outcome-studio-1-0-0-global/resolution-preview')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('MANIFEST_DEPENDENCY_CYCLE')
+    expect(KnowledgePackActivation.find).not.toHaveBeenCalled()
+  })
+
+  test('GET /api/v1/super-admin/outcome-studio/knowledge-packs/manifests/:manifestId/resolution-preview fails closed when a mandatory dependency is unresolved', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const arlActivation = makeActivation(
+      { packCategory: 'OUTCOME', packType: 'ARL', packKey: 'adaptive-reasoning-layer', label: 'Adaptive Reasoning Layer' },
+    )
+    KnowledgePackManifest.findOne.mockReturnValue(buildFindOneChain(makeKnowledgePackManifest({
+      mandatoryPacks: [
+        {
+          packCategory: 'OUTCOME',
+          purposeCategory: 'GOVERNANCE',
+          packType: 'ARL',
+          packKey: 'adaptive-reasoning-layer',
+          label: 'Adaptive Reasoning Layer',
+          executionMode: 'PROVIDER_CONTEXT',
+          dependencyKeys: ['rendering-layer'],
+        },
+      ],
+      optionalPacks: [
+        {
+          packCategory: 'OUTCOME',
+          purposeCategory: 'GOVERNANCE',
+          packType: 'RL',
+          packKey: 'rendering-layer',
+          label: 'Rendering Layer',
+          executionMode: 'PROVIDER_CONTEXT',
+          dependencyKeys: [],
+        },
+      ],
+    })))
+    KnowledgePackActivation.find.mockReturnValue(buildFindChain([arlActivation]))
+    KnowledgePackVersion.find.mockReturnValue(buildFindChain([makeVersionForActivation(arlActivation)]))
+
+    const res = await request
+      .get('/api/v1/super-admin/outcome-studio/knowledge-packs/manifests/kpm-vmf-outcome-studio-1-0-0-global/resolution-preview')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('MANIFEST_DEPENDENCY_UNRESOLVED')
+    expect(res.body.error.details.dependencyKey).toBe('rendering-layer')
+  })
+
+  test('GET /api/v1/super-admin/outcome-studio/knowledge-packs/manifests/:manifestId/resolution-preview fails closed when the activated version is draft', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const activation = makeActivation(
+      { packCategory: 'OUTCOME', packType: 'ARL', packKey: 'adaptive-reasoning-layer', label: 'Adaptive Reasoning Layer' },
+    )
+    KnowledgePackActivation.find.mockReturnValue(buildFindChain([activation]))
+    KnowledgePackVersion.find.mockReturnValue(buildFindChain([
+      makeVersionForActivation(activation, { status: 'DRAFT' }),
+    ]))
+
+    const res = await request
+      .get('/api/v1/super-admin/outcome-studio/knowledge-packs/manifests/kpm-vmf-outcome-studio-1-0-0-global/resolution-preview')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('KNOWLEDGE_PACK_VERSION_NOT_RUNTIME_BINDABLE')
+    expect(res.body.error.details.versionStatus).toBe('DRAFT')
   })
 
   test('GET /api/v1/super-admin/outcome-studio/knowledge-packs/resolution-preview fails closed when required packs are unbound', async () => {
@@ -811,6 +1273,38 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
     expect(JSON.stringify(res.body)).not.toContain('EXECUTIVE_BRIEF')
   })
 
+  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/starter-import uses transaction rollback when connected', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const rollbackSession = buildRollbackSession()
+    setMongooseReadyState(1)
+    startSessionSpy.mockResolvedValueOnce(rollbackSession)
+    KnowledgePack.findOne.mockReturnValueOnce(buildFindOneChain(null))
+    AuditLog.createLog.mockImplementation(async (payload) => {
+      if (payload.action === 'OUTCOME_KNOWLEDGE_PACK_STARTER_IMPORTED') {
+        throw new Error('audit unavailable')
+      }
+      return {}
+    })
+
+    const res = await request
+      .post('/api/v1/super-admin/outcome-studio/knowledge-packs/output-schemas-pack/starter-import')
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(500)
+    expect(res.body.error.code).toBe('OUTCOME_KNOWLEDGE_PACK_AUDIT_FAILED')
+    expect(startSessionSpy).toHaveBeenCalled()
+    expect(rollbackSession.withTransaction).toHaveBeenCalled()
+    expect(rollbackSession.endSession).toHaveBeenCalled()
+    expect(KnowledgePackVersion.prototype.save).toHaveBeenCalledWith({ session: rollbackSession })
+    expect(AuditLog.createLog).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'OUTCOME_KNOWLEDGE_PACK_STARTER_IMPORTED' }),
+      expect.objectContaining({ session: rollbackSession }),
+    )
+    expect(KnowledgePackVersion.deleteOne).not.toHaveBeenCalled()
+    expect(KnowledgePack.deleteOne).not.toHaveBeenCalled()
+  })
+
   test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/starter-import removes new category metadata when existing-row audit rollback runs', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     const existingPack = makeKnowledgePack({
@@ -1096,6 +1590,55 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
     )
   })
 
+  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/versions/:versionId/activate uses transaction rollback when activation audit cannot persist', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const versionDoc = makeKnowledgePackVersionDoc({
+      status: 'VALIDATED',
+      content: OUTPUT_SCHEMAS_YAML,
+    })
+    const rollbackSession = buildRollbackSession([versionDoc])
+    setMongooseReadyState(1)
+    startSessionSpy.mockResolvedValueOnce(rollbackSession)
+    KnowledgePackVersion.findOne.mockReturnValueOnce(buildVersionFindOneChain(versionDoc))
+    AuditLog.createLog.mockImplementation(async (payload) => {
+      if (payload.action === 'OUTCOME_KNOWLEDGE_PACK_ACTIVATED') {
+        throw new Error('audit unavailable')
+      }
+      return {}
+    })
+
+    const res = await request
+      .post(`/api/v1/super-admin/outcome-studio/knowledge-packs/kp-output-schema-output-schemas-pack/versions/${versionDoc.versionId}/activate`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ scopeType: 'GLOBAL' })
+
+    expect(res.status).toBe(500)
+    expect(res.body.error.code).toBe('OUTCOME_KNOWLEDGE_PACK_AUDIT_FAILED')
+    expect(rollbackSession.withTransaction).toHaveBeenCalled()
+    expect(rollbackSession.endSession).toHaveBeenCalled()
+    expect(versionDoc.status).toBe('VALIDATED')
+    expect(KnowledgePackActivation.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        packType: 'OUTPUT_SCHEMA',
+        packKey: 'output-schemas-pack',
+        scopeKey: 'GLOBAL',
+        status: 'ACTIVE',
+      }),
+      expect.objectContaining({
+        $set: expect.objectContaining({ status: 'ROLLED_BACK' }),
+      }),
+      expect.objectContaining({ session: rollbackSession }),
+    )
+    expect(KnowledgePackActivation.prototype.save).toHaveBeenCalledWith({ session: rollbackSession })
+    expect(versionDoc.save).toHaveBeenCalledWith({ session: rollbackSession })
+    expect(AuditLog.createLog).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'OUTCOME_KNOWLEDGE_PACK_ACTIVATED' }),
+      expect.objectContaining({ session: rollbackSession }),
+    )
+    expect(KnowledgePackActivation.updateOne).not.toHaveBeenCalled()
+    expect(KnowledgePackVersion.updateOne).not.toHaveBeenCalled()
+  })
+
   test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/versions/:versionId/disable disables active version bindings and audits the lifecycle event', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     const versionDoc = makeKnowledgePackVersionDoc({
@@ -1227,6 +1770,65 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
     )
   })
 
+  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/versions/:versionId/disable uses transaction rollback when lifecycle audit cannot persist', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const versionDoc = makeKnowledgePackVersionDoc({
+      status: 'ACTIVE',
+      content: OUTPUT_SCHEMAS_YAML,
+    })
+    const activeActivation = makeActivation(REQUIRED_PACKS[2], {
+      activationId: 'kpa-output-schema-current-active',
+      versionId: versionDoc.versionId,
+      status: 'ACTIVE',
+    })
+    const rollbackSession = buildRollbackSession([versionDoc])
+    setMongooseReadyState(1)
+    startSessionSpy.mockResolvedValueOnce(rollbackSession)
+    KnowledgePackVersion.findOne.mockReturnValueOnce(buildVersionFindOneChain(versionDoc))
+    KnowledgePack.findOne.mockReturnValueOnce(buildFindOneChain(makeKnowledgePack({
+      status: 'ACTIVE',
+      latestVersionId: versionDoc.versionId,
+      latestSemanticVersion: versionDoc.semanticVersion,
+    })))
+    KnowledgePackActivation.find.mockReturnValueOnce(buildFindChain([activeActivation]))
+    AuditLog.createLog.mockImplementation(async (payload) => {
+      if (payload.action === 'KNOWLEDGE_PACK_DISABLED') {
+        throw new Error('audit unavailable')
+      }
+      return {}
+    })
+
+    const res = await request
+      .post(`/api/v1/super-admin/outcome-studio/knowledge-packs/kp-output-schema-output-schemas-pack/versions/${versionDoc.versionId}/disable`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(500)
+    expect(res.body.error.code).toBe('OUTCOME_KNOWLEDGE_PACK_AUDIT_FAILED')
+    expect(rollbackSession.withTransaction).toHaveBeenCalled()
+    expect(rollbackSession.endSession).toHaveBeenCalled()
+    expect(versionDoc.status).toBe('ACTIVE')
+    expect(versionDoc.save).toHaveBeenCalledWith({ session: rollbackSession })
+    expect(KnowledgePackActivation.updateMany).toHaveBeenCalledTimes(1)
+    expect(KnowledgePackActivation.updateMany).toHaveBeenCalledWith(
+      {
+        activationId: { $in: ['kpa-output-schema-current-active'] },
+        status: 'ACTIVE',
+      },
+      {
+        $set: {
+          status: 'DISABLED',
+        },
+      },
+      expect.objectContaining({ session: rollbackSession }),
+    )
+    expect(AuditLog.createLog).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'KNOWLEDGE_PACK_DISABLED' }),
+      expect.objectContaining({ session: rollbackSession }),
+    )
+    expect(KnowledgePackVersion.updateOne).not.toHaveBeenCalled()
+  })
+
   test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/rollback activates the selected validated version and audits rollback lineage', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     const targetVersionDoc = makeKnowledgePackVersionDoc({
@@ -1296,6 +1898,78 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
         rollbackReason: 'Restore previous certified schema set.',
       }),
     }))
+  })
+
+  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/rollback uses transaction rollback when rollback audit cannot persist', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const targetVersionDoc = makeKnowledgePackVersionDoc({
+      versionId: 'kpv-output-schema-output-schemas-pack-1-0-0-global',
+      semanticVersion: '1.0.0',
+      status: 'VALIDATED',
+      content: OUTPUT_SCHEMAS_YAML,
+    })
+    const activeActivation = makeActivation(REQUIRED_PACKS[2], {
+      activationId: 'kpa-output-schema-v1-1-active',
+      versionId: 'kpv-output-schema-output-schemas-pack-1-1-0-global',
+      semanticVersion: '1.1.0',
+      status: 'ACTIVE',
+    })
+    const rollbackSession = buildRollbackSession([targetVersionDoc])
+    setMongooseReadyState(1)
+    startSessionSpy.mockResolvedValueOnce(rollbackSession)
+    KnowledgePackVersion.findOne.mockReturnValueOnce(buildVersionFindOneChain(targetVersionDoc))
+    KnowledgePackActivation.findOne
+      .mockReturnValueOnce(buildActivationFindOneChain(activeActivation))
+      .mockReturnValueOnce(buildActivationFindOneChain(activeActivation))
+    KnowledgePack.findOne.mockReturnValueOnce(buildFindOneChain(makeKnowledgePack({
+      status: 'ACTIVE',
+      latestVersionId: activeActivation.versionId,
+      latestSemanticVersion: activeActivation.semanticVersion,
+    })))
+    AuditLog.createLog.mockImplementation(async (payload) => {
+      if (payload.action === 'KNOWLEDGE_PACK_ROLLED_BACK') {
+        throw new Error('audit unavailable')
+      }
+      return {}
+    })
+
+    const res = await request
+      .post('/api/v1/super-admin/outcome-studio/knowledge-packs/kp-output-schema-output-schemas-pack/rollback')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        versionId: targetVersionDoc.versionId,
+        scopeType: 'GLOBAL',
+        rollbackReason: 'Restore previous certified schema set.',
+      })
+
+    expect(res.status).toBe(500)
+    expect(res.body.error.code).toBe('OUTCOME_KNOWLEDGE_PACK_AUDIT_FAILED')
+    expect(rollbackSession.withTransaction).toHaveBeenCalled()
+    expect(rollbackSession.endSession).toHaveBeenCalled()
+    expect(targetVersionDoc.status).toBe('VALIDATED')
+    expect(KnowledgePackActivation.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        packType: 'OUTPUT_SCHEMA',
+        packKey: 'output-schemas-pack',
+        scopeKey: 'GLOBAL',
+        status: 'ACTIVE',
+      }),
+      expect.objectContaining({
+        $set: expect.objectContaining({
+          status: 'ROLLED_BACK',
+          rollbackReason: 'Restore previous certified schema set.',
+        }),
+      }),
+      expect.objectContaining({ session: rollbackSession }),
+    )
+    expect(KnowledgePackActivation.prototype.save).toHaveBeenCalledWith({ session: rollbackSession })
+    expect(targetVersionDoc.save).toHaveBeenCalledWith({ session: rollbackSession })
+    expect(AuditLog.createLog).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'KNOWLEDGE_PACK_ROLLED_BACK' }),
+      expect.objectContaining({ session: rollbackSession }),
+    )
+    expect(KnowledgePackActivation.updateOne).not.toHaveBeenCalled()
+    expect(KnowledgePackVersion.updateOne).not.toHaveBeenCalled()
   })
 
   test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/rollback rejects non-validated rollback targets', async () => {

@@ -33,7 +33,7 @@ import {
   OutcomeSession,
   TruthSignature,
 } from '../models/index.js'
-import { resolveOutcomeStudioKnowledgePacks } from './outcomeKnowledgePackRegistryService.js'
+import { resolveDefaultOutcomeStudioKnowledgePackBinding } from './knowledgePackManifestService.js'
 import { getRuntimeOutputLab } from './runtimeOutputLabService.js'
 import {
   assertRuntimePermission,
@@ -46,6 +46,12 @@ import {
   deleteRuntimeGraphRelationshipDocuments,
   saveRuntimeGraphRelationshipDocuments,
 } from './runtimeGraphRelationshipService.js'
+import {
+  buildOutcomeAssetPostValidationSnapshot,
+  buildOutcomePostValidationAuditSummary,
+  isOutcomePostValidationAllowed,
+  sanitizeOutcomePostValidationSnapshot,
+} from './outcomePostValidationService.js'
 import auditService from './auditService.js'
 
 const normalizeText = (value) => String(value ?? '').trim()
@@ -61,6 +67,7 @@ export const OUTCOME_STUDIO_ERROR_REASONS = Object.freeze({
   OUTCOME_ASSET_EXPORT_FORMAT_UNSUPPORTED: 'OUTCOME_ASSET_EXPORT_FORMAT_UNSUPPORTED',
   OUTCOME_ASSET_GENERATION_AUDIT_FAILED: 'OUTCOME_ASSET_GENERATION_AUDIT_FAILED',
   OUTCOME_ASSET_NOT_FOUND: 'OUTCOME_ASSET_NOT_FOUND',
+  OUTCOME_ASSET_POST_VALIDATION_BLOCKED: 'OUTCOME_ASSET_POST_VALIDATION_BLOCKED',
   OUTCOME_ASSET_PREVIEW_BLOCKED: 'OUTCOME_ASSET_PREVIEW_BLOCKED',
   OUTCOME_ASSET_PREVIEW_CONTENT_UNAVAILABLE: 'OUTCOME_ASSET_PREVIEW_CONTENT_UNAVAILABLE',
   OUTCOME_ASSET_PUBLISH_AUDIT_FAILED: 'OUTCOME_ASSET_PUBLISH_AUDIT_FAILED',
@@ -428,6 +435,9 @@ const buildSessionKnowledgePackBinding = (packBinding = {}, boundAt) => {
     status: normalizeToken(packBinding.status),
     mode: normalizeText(packBinding.mode),
     summary: normalizeText(packBinding.summary),
+    manifestId: normalizeText(packBinding.manifestId),
+    manifestKey: normalizeText(packBinding.manifestKey),
+    manifestVersion: normalizeText(packBinding.manifestVersion),
     boundAt,
     activeCount: activePacks.length,
     requiredCount: requiredPacks.length,
@@ -508,6 +518,9 @@ const sanitizePersistedKnowledgePackBinding = (binding = {}) => {
     status: normalizeToken(binding.status),
     mode: normalizeText(binding.mode),
     summary: normalizeText(binding.summary),
+    manifestId: normalizeText(binding.manifestId),
+    manifestKey: normalizeText(binding.manifestKey),
+    manifestVersion: normalizeText(binding.manifestVersion),
     boundAt: normalizeText(binding.boundAt),
     activeCount: Number(binding.activeCount ?? activePacks.length),
     requiredCount: Number(binding.requiredCount ?? requiredPacks.length),
@@ -595,6 +608,9 @@ const buildOutcomeContextBindings = ({
     knowledgeBindings: {
       status: safeKnowledgeBinding.status,
       mode: safeKnowledgeBinding.mode,
+      manifestId: safeKnowledgeBinding.manifestId,
+      manifestKey: safeKnowledgeBinding.manifestKey,
+      manifestVersion: safeKnowledgeBinding.manifestVersion,
       boundAt: safeKnowledgeBinding.boundAt,
       activeCount: safeKnowledgeBinding.activeCount,
       requiredCount: safeKnowledgeBinding.requiredCount,
@@ -853,6 +869,9 @@ const serializeOutcomeSessionSummary = (session, options = {}) => {
     knowledgePackBinding: {
       status: serialized.knowledgePackBinding.status,
       mode: serialized.knowledgePackBinding.mode,
+      manifestId: serialized.knowledgePackBinding.manifestId,
+      manifestKey: serialized.knowledgePackBinding.manifestKey,
+      manifestVersion: serialized.knowledgePackBinding.manifestVersion,
       activeCount: serialized.knowledgePackBinding.activeCount,
       requiredCount: serialized.knowledgePackBinding.requiredCount,
       boundAt: serialized.knowledgePackBinding.boundAt,
@@ -913,6 +932,7 @@ const serializeOutcomeAssetVersion = (version, options = {}) => {
     ? plain.customerContent
     : {}
   const truthSignature = sanitizePersistedTruthSignature(plain.truthSignature || {}, options)
+  const postValidation = sanitizeOutcomePostValidationSnapshot(plain.postValidation)
   const lineageSummary = {
     ...buildOutcomeAssetLineageSummary(plain.lineageSummary || {}),
     truthSignatureCurrentness: truthSignature.currentness,
@@ -941,6 +961,7 @@ const serializeOutcomeAssetVersion = (version, options = {}) => {
     sourceOutput: sanitizePersistedSourceOutput(plain.sourceOutputSnapshot || {}),
     truthSignature,
     knowledgePackBinding: sanitizePersistedKnowledgePackBinding(plain.knowledgePackBinding || {}),
+    postValidation,
     lineageSummary,
     contentAvailable: Object.keys(customerContent).length > 0,
     warnings: Array.isArray(plain.warnings) ? plain.warnings.map(normalizeText).filter(Boolean) : [],
@@ -955,6 +976,7 @@ const serializeOutcomeAssetVersion = (version, options = {}) => {
 const serializeOutcomeAsset = (asset, options = {}) => {
   const plain = toPlainObject(asset)
   const truthSignature = sanitizePersistedTruthSignature(plain.truthSignature || {}, options)
+  const postValidation = sanitizeOutcomePostValidationSnapshot(plain.postValidation)
   const lineageSummary = {
     ...buildOutcomeAssetLineageSummary(plain.lineageSummary || {}),
     truthSignatureCurrentness: truthSignature.currentness,
@@ -982,6 +1004,7 @@ const serializeOutcomeAsset = (asset, options = {}) => {
     sourceOutput: sanitizePersistedSourceOutput(plain.sourceOutputSnapshot || {}),
     truthSignature,
     knowledgePackBinding: sanitizePersistedKnowledgePackBinding(plain.knowledgePackBinding || {}),
+    postValidation,
     lineageSummary,
     warnings: Array.isArray(plain.warnings) ? plain.warnings.map(normalizeText).filter(Boolean) : [],
     limitations: Array.isArray(plain.limitations) ? plain.limitations.map(normalizeText).filter(Boolean) : [],
@@ -1015,10 +1038,14 @@ const serializeOutcomeAssetSummary = (asset, options = {}) => {
     knowledgePackBinding: {
       status: serialized.knowledgePackBinding.status,
       mode: serialized.knowledgePackBinding.mode,
+      manifestId: serialized.knowledgePackBinding.manifestId,
+      manifestKey: serialized.knowledgePackBinding.manifestKey,
+      manifestVersion: serialized.knowledgePackBinding.manifestVersion,
       activeCount: serialized.knowledgePackBinding.activeCount,
       requiredCount: serialized.knowledgePackBinding.requiredCount,
       boundAt: serialized.knowledgePackBinding.boundAt,
     },
+    postValidation: serialized.postValidation,
     lineageSummary: serialized.lineageSummary,
     warnings: serialized.warnings,
     limitations: serialized.limitations,
@@ -1295,10 +1322,14 @@ const buildOutcomeAssetJsonExport = ({
   knowledgePackBinding: {
     status: asset.knowledgePackBinding?.status,
     mode: asset.knowledgePackBinding?.mode,
+    manifestId: asset.knowledgePackBinding?.manifestId,
+    manifestKey: asset.knowledgePackBinding?.manifestKey,
+    manifestVersion: asset.knowledgePackBinding?.manifestVersion,
     activeCount: asset.knowledgePackBinding?.activeCount,
     requiredCount: asset.knowledgePackBinding?.requiredCount,
     boundAt: asset.knowledgePackBinding?.boundAt,
   },
+  postValidation: asset.postValidation || version.postValidation || null,
   generatedAt: asset.generatedAt,
   exportedAt: new Date().toISOString(),
 })
@@ -1522,6 +1553,53 @@ const assertOutcomeAssetCurrentTruth = ({
       blockerReason: 'OUTCOME_ASSET_TRUTH_NOT_CURRENT',
       truthSignatureCurrentness: assetCurrentness || 'UNKNOWN',
       versionTruthSignatureCurrentness: versionCurrentness || 'UNKNOWN',
+      safetyGate: {
+        code: safetyGateCode,
+        status: OUTCOME_STUDIO_SAFETY_GATE_STATUSES.BLOCKED,
+      },
+    },
+  })
+}
+
+const assertOutcomeAssetPostValidation = ({
+  actionLabel = 'asset action',
+  asset = {},
+  availabilityKey = 'actionAvailable',
+  reason = OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_ASSET_POST_VALIDATION_BLOCKED,
+  safetyGateCode = OUTCOME_STUDIO_SAFETY_GATE_CODES.EXPORT_RENDERER,
+  version = {},
+} = {}) => {
+  const postValidation = sanitizeOutcomePostValidationSnapshot(version.postValidation)
+  const validationMatchesAsset = !postValidation?.outcomeAssetId
+    || postValidation.outcomeAssetId === normalizeText(asset.outcomeAssetId)
+  const validationMatchesVersion = !postValidation?.outcomeAssetVersionId
+    || postValidation.outcomeAssetVersionId === normalizeText(version.outcomeAssetVersionId)
+
+  if (
+    isOutcomePostValidationAllowed(postValidation)
+    && validationMatchesAsset
+    && validationMatchesVersion
+  ) {
+    return postValidation
+  }
+
+  const blockerReason = !postValidation
+    ? 'OUTCOME_ASSET_POST_VALIDATION_MISSING'
+    : (!validationMatchesAsset || !validationMatchesVersion)
+        ? 'OUTCOME_ASSET_POST_VALIDATION_STALE'
+        : 'OUTCOME_ASSET_POST_VALIDATION_FAILED'
+
+  throw createOutcomeStudioError({
+    status: 409,
+    code: 'CONFLICT',
+    message: `Outcome Studio asset ${actionLabel} requires passing post-validation evidence.`,
+    reason,
+    details: {
+      outcomeAssetId: normalizeText(asset.outcomeAssetId),
+      outcomeAssetVersionId: normalizeText(version.outcomeAssetVersionId),
+      [availabilityKey]: false,
+      blockerReason,
+      postValidation: buildOutcomePostValidationAuditSummary(postValidation),
       safetyGate: {
         code: safetyGateCode,
         status: OUTCOME_STUDIO_SAFETY_GATE_STATUSES.BLOCKED,
@@ -2055,6 +2133,9 @@ const buildReadiness = ({
     knowledgePacks: {
       status: packBinding.status,
       mode: packBinding.mode,
+      manifestId: normalizeText(packBinding.manifestId),
+      manifestKey: normalizeText(packBinding.manifestKey),
+      manifestVersion: normalizeText(packBinding.manifestVersion),
       activeCount: Array.isArray(packBinding.activePacks) ? packBinding.activePacks.length : 0,
       requiredCount: Array.isArray(packBinding.requiredPacks) ? packBinding.requiredPacks.length : 0,
       sourceOnlyCount: Array.isArray(packBinding.requiredPacks)
@@ -2259,7 +2340,9 @@ const buildOutcomeStudioProjection = async ({
     asset: selectSourceOutputAsset(Array.isArray(outputLab?.assets) ? outputLab.assets : []),
     readiness: outputLab?.readiness || {},
   })
-  const packBinding = await resolveOutcomeStudioKnowledgePacks(outputLab?.runtimeScope || {})
+  const { binding: packBinding } = await resolveDefaultOutcomeStudioKnowledgePackBinding({
+    query: outputLab?.runtimeScope || {},
+  })
   const readiness = buildReadiness({
     outputLab,
     packBinding,
@@ -2763,6 +2846,9 @@ export const createRuntimeOutcomeSession = async ({
           knowledgePackBinding: {
             status: knowledgePackBinding.status,
             mode: knowledgePackBinding.mode,
+            manifestId: knowledgePackBinding.manifestId,
+            manifestKey: knowledgePackBinding.manifestKey,
+            manifestVersion: knowledgePackBinding.manifestVersion,
             boundAt,
             activeCount: knowledgePackBinding.activeCount,
             requiredCount: knowledgePackBinding.requiredCount,
@@ -3066,6 +3152,20 @@ export const generateRuntimeOutcomeResponse = async ({
     session: serializedSession,
     versionId: outcomeAssetVersionId,
   })
+  const postValidation = buildOutcomeAssetPostValidationSnapshot({
+    asset: {
+      outcomeAssetId,
+      outputTypeKey: serializedSession.sourceOutputTypeKey || serializedSession.sourceOutput?.outputTypeKey,
+    },
+    customerContent,
+    knowledgePackBinding: serializedSession.knowledgePackBinding,
+    truthSignature: serializedSession.truthSignature,
+    validatedAt: generatedAt,
+    version: {
+      outcomeAssetVersionId,
+      outputTypeKey: serializedSession.sourceOutputTypeKey || serializedSession.sourceOutput?.outputTypeKey,
+    },
+  })
   const warnings = [
     'Generated from the deterministic Outcome Studio scaffold; executable ARL/RL reasoning is not yet implemented.',
   ]
@@ -3128,6 +3228,7 @@ export const generateRuntimeOutcomeResponse = async ({
     sourceOutputSnapshot: serializedSession.sourceOutput,
     truthSignature: serializedSession.truthSignature,
     knowledgePackBinding: serializedSession.knowledgePackBinding,
+    postValidation,
     contextBindings: assetContextBindings,
     lineageSummary,
     warnings,
@@ -3154,6 +3255,7 @@ export const generateRuntimeOutcomeResponse = async ({
     sourceOutputSnapshot: serializedSession.sourceOutput,
     truthSignature: serializedSession.truthSignature,
     knowledgePackBinding: serializedSession.knowledgePackBinding,
+    postValidation,
     contextBindings: assetContextBindings,
     lineageSummary,
     customerContent,
@@ -3243,6 +3345,7 @@ export const generateRuntimeOutcomeResponse = async ({
           truthSignatureStatus: serializedSession.truthSignature.status,
           truthSignatureCurrentness: serializedSession.truthSignature.currentness,
           knowledgePackBindingStatus: serializedSession.knowledgePackBinding.status,
+          postValidation: buildOutcomePostValidationAuditSummary(postValidation),
           generatedBodyAvailable: true,
           runtimeGraphRelationshipCount: generatedAssetRelationshipDocuments.length,
         },
@@ -3396,6 +3499,13 @@ export const publishRuntimeOutcomeAsset = async ({
     safetyGateCode: OUTCOME_STUDIO_SAFETY_GATE_CODES.ASSET_PUBLISH,
     version: serializedVersion,
   })
+  const postValidation = assertOutcomeAssetPostValidation({
+    actionLabel: 'publish',
+    asset: serializedAsset,
+    availabilityKey: 'publishAvailable',
+    safetyGateCode: OUTCOME_STUDIO_SAFETY_GATE_CODES.ASSET_PUBLISH,
+    version: serializedVersion,
+  })
 
   const publishedAt = new Date()
   const publishedAsset = {
@@ -3486,6 +3596,7 @@ export const publishRuntimeOutcomeAsset = async ({
           publishedAt: publishedAt.toISOString(),
           truthSignatureStatus: serializedAsset.truthSignature.status,
           truthSignatureCurrentness: serializedAsset.truthSignature.currentness,
+          postValidation: buildOutcomePostValidationAuditSummary(postValidation),
           runtimeGraphRelationshipCount: publishedAssetRelationshipDocuments.length,
         },
         summary: 'Published Outcome Studio asset from current certified runtime truth.',
@@ -3596,6 +3707,13 @@ export const exportRuntimeOutcomeAsset = async ({
     reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_ASSET_EXPORT_BLOCKED,
     version: serializedVersion,
   })
+  const postValidation = assertOutcomeAssetPostValidation({
+    actionLabel: 'export',
+    asset: serializedAsset,
+    availabilityKey: 'exportAvailable',
+    safetyGateCode: OUTCOME_STUDIO_SAFETY_GATE_CODES.EXPORT_RENDERER,
+    version: serializedVersion,
+  })
   const { customerContent, markdown } = getOutcomeAssetVersionCustomerContent({
     format: normalizedFormat,
     outcomeAssetId: serializedAsset.outcomeAssetId,
@@ -3627,6 +3745,7 @@ export const exportRuntimeOutcomeAsset = async ({
     filename,
     mimeType,
     contentIncludedInAudit: false,
+    postValidation: buildOutcomePostValidationAuditSummary(postValidation),
   }
 
   try {

@@ -34,15 +34,42 @@ export const RUNTIME_SKILL_CATEGORIES = Object.freeze({
   GOVERNANCE: 'GOVERNANCE',
   QUALITY: 'QUALITY',
   CONSISTENCY: 'CONSISTENCY',
+  CONSUMPTION: 'CONSUMPTION',
   COMPLIANCE: 'COMPLIANCE',
   RISK: 'RISK',
+  ADVISOR: 'ADVISOR',
   LIFECYCLE: 'LIFECYCLE',
+  STATE: 'STATE',
+  TRUTH: 'TRUTH',
+  EVIDENCE: 'EVIDENCE',
+  RECOMMENDATION: 'RECOMMENDATION',
   GENERATION: 'GENERATION',
+  KNOWLEDGE_PACK: 'KNOWLEDGE_PACK',
   OUTPUT: 'OUTPUT',
+  OUTCOME: 'OUTCOME',
   ANALYSIS: 'ANALYSIS',
   ORCHESTRATION: 'ORCHESTRATION',
   INTEGRATION: 'INTEGRATION',
   NOTIFICATION: 'NOTIFICATION',
+  ASSET: 'ASSET',
+  BOUNDARY: 'BOUNDARY',
+  COMMERCIAL: 'COMMERCIAL',
+  DEAL: 'DEAL',
+  DECISION: 'DECISION',
+  DEPENDENCY: 'DEPENDENCY',
+  DISCOVERY: 'DISCOVERY',
+  DSIC: 'DSIC',
+  ECONOMICS: 'ECONOMICS',
+  HFRE: 'HFRE',
+  INTEGRITY: 'INTEGRITY',
+  POSITIONING: 'POSITIONING',
+  PROOF: 'PROOF',
+  QUERY: 'QUERY',
+  RENDER: 'RENDER',
+  RUNTIME: 'RUNTIME',
+  SYNCHRONIZATION: 'SYNCHRONIZATION',
+  TARGETING: 'TARGETING',
+  VALUE_DRIVER: 'VALUE_DRIVER',
 })
 
 const LEGACY_RUNTIME_SKILL_CATEGORY_MAP = Object.freeze({
@@ -118,6 +145,7 @@ const normalizeEnumToken = (value, fallback) => {
 
 const normalizeRuntimeSkillCategory = (value) => {
   const normalized = normalizeEnumToken(value, RUNTIME_SKILL_CATEGORIES.VALIDATION)
+  if (Object.values(RUNTIME_SKILL_CATEGORIES).includes(normalized)) return normalized
   return LEGACY_RUNTIME_SKILL_CATEGORY_MAP[normalized] || normalized
 }
 
@@ -379,6 +407,7 @@ const runtimeSkillSchema = new mongoose.Schema(
     toJSON: {
       transform: function transform(_doc, ret) {
         ret.id = ret.stableId
+        delete ret.stableId
         delete ret._id
         delete ret.__v
         return ret

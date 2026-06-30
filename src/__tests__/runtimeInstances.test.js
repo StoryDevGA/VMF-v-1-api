@@ -8919,6 +8919,9 @@ describe('Runtime Instance API', () => {
       status: 'PROJECTED',
       mode: 'REGISTRY_RESOLUTION',
       summary: 'All required Outcome Studio knowledge pack bindings are active.',
+      manifestId: 'kpm-outcome-studio-default-1-0-0-global',
+      manifestKey: 'outcome-studio-default',
+      manifestVersion: '1.0.0',
       boundAt: '2026-06-15T10:55:00.000Z',
       activeCount: 5,
       requiredCount: 5,
@@ -9043,6 +9046,58 @@ describe('Runtime Instance API', () => {
     ...overrides,
   })
 
+  const makeOutcomePostValidationSnapshot = (overrides = {}) => ({
+    contractVersion: 'outcome-post-validation.v1',
+    validationId: 'outcome_post_val_existing_fixture',
+    mode: 'FOUNDATION_STATIC_CHECKS',
+    validationScope: 'OUTCOME_ASSET_VERSION',
+    status: 'PASS',
+    result: 'ALLOW',
+    validatedAt: '2026-06-15T11:15:00.000Z',
+    outcomeAssetId: 'outcome_asset_existing_fixture',
+    outcomeAssetVersionId: 'outcome_asset_version_existing_fixture',
+    outputTypeKey: 'EXECUTIVE_BRIEF',
+    manifestId: 'kpm-outcome-studio-default-1-0-0-global',
+    manifestKey: 'outcome-studio-default',
+    manifestVersion: '1.0.0',
+    contentIncludedInValidation: false,
+    rawPackContentIncluded: false,
+    validators: [
+      {
+        validatorKey: 'truth-boundary-preservation',
+        label: 'Truth boundary preservation',
+        status: 'PASS',
+        severity: 'INFO',
+        message: 'Truth Signature is current for the generated asset.',
+        path: 'truthSignature.currentness',
+      },
+      {
+        validatorKey: 'knowledge-binding-preservation',
+        label: 'Knowledge binding preservation',
+        status: 'PASS',
+        severity: 'INFO',
+        message: 'Knowledge Pack binding is complete for the generated asset.',
+        path: 'knowledgePackBinding',
+      },
+      {
+        validatorKey: 'customer-content-presence',
+        label: 'Customer content presence',
+        status: 'PASS',
+        severity: 'INFO',
+        message: 'Customer-facing generated content is present.',
+        path: 'customerContent',
+      },
+    ],
+    issues: [],
+    summary: {
+      totalChecks: 3,
+      passed: 3,
+      warnings: 0,
+      failed: 0,
+    },
+    ...overrides,
+  })
+
   const makeOutcomeAssetRecord = (overrides = {}) => {
     const session = makeOutcomeSessionRecord()
     return {
@@ -9085,6 +9140,7 @@ describe('Runtime Instance API', () => {
           content: 'Raw outcome asset active pack content must not leak.',
         })),
       },
+      postValidation: makeOutcomePostValidationSnapshot(),
       lineageSummary: {
         sourceOutputAssetId: 'out_asset_outcome_studio_fixture',
         sourceOutputTypeKey: 'EXECUTIVE_BRIEF',
@@ -9137,6 +9193,7 @@ describe('Runtime Instance API', () => {
       sourceOutputSnapshot: asset.sourceOutputSnapshot,
       truthSignature: asset.truthSignature,
       knowledgePackBinding: asset.knowledgePackBinding,
+      postValidation: asset.postValidation,
       lineageSummary: asset.lineageSummary,
       customerContent: {
         markdown: 'Raw outcome asset version customer content must not leak from scaffold reads.',
@@ -14298,6 +14355,9 @@ describe('Runtime Instance API', () => {
     ]))
     expect(res.body.data.knowledgePacks).toEqual(expect.objectContaining({
       status: 'BLOCKED',
+      manifestId: 'kpm-outcome-studio-default-1-0-0-global',
+      manifestKey: 'outcome-studio-default',
+      manifestVersion: '1.0.0',
       activeCount: 0,
       requiredCount: 5,
       sourceOnlyCount: 5,
@@ -14339,6 +14399,9 @@ describe('Runtime Instance API', () => {
     expect(readinessRes.body.data.knowledgePacks).toEqual(expect.objectContaining({
       status: 'PROJECTED',
       mode: 'REGISTRY_RESOLUTION',
+      manifestId: 'kpm-outcome-studio-default-1-0-0-global',
+      manifestKey: 'outcome-studio-default',
+      manifestVersion: '1.0.0',
       activeCount: 5,
       requiredCount: 5,
       sourceOnlyCount: 0,
@@ -14402,6 +14465,9 @@ describe('Runtime Instance API', () => {
     expect(sessionRes.body.data.knowledgePackBinding).toEqual(expect.objectContaining({
       status: 'PROJECTED',
       mode: 'REGISTRY_RESOLUTION',
+      manifestId: 'kpm-outcome-studio-default-1-0-0-global',
+      manifestKey: 'outcome-studio-default',
+      manifestVersion: '1.0.0',
       activeCount: 5,
       requiredCount: 5,
       activePacks: expect.arrayContaining([
@@ -14473,6 +14539,9 @@ describe('Runtime Instance API', () => {
         currentness: 'CURRENT',
       }),
       knowledgeBindings: expect.objectContaining({
+        manifestId: 'kpm-outcome-studio-default-1-0-0-global',
+        manifestKey: 'outcome-studio-default',
+        manifestVersion: '1.0.0',
         activeCount: 5,
         requiredCount: 5,
         activePacks: expect.arrayContaining([
@@ -14577,6 +14646,9 @@ describe('Runtime Instance API', () => {
         sessionId: sessionRes.body.data.sessionId,
         knowledgePackBinding: expect.objectContaining({
           status: 'PROJECTED',
+          manifestId: 'kpm-outcome-studio-default-1-0-0-global',
+          manifestKey: 'outcome-studio-default',
+          manifestVersion: '1.0.0',
           activeCount: 5,
           requiredCount: 5,
         }),
@@ -15095,6 +15167,23 @@ describe('Runtime Instance API', () => {
       limitations: [
         'Do not treat this scaffold as provider-generated or ARL/RL-executed output.',
       ],
+      postValidation: expect.objectContaining({
+        contractVersion: 'outcome-post-validation.v1',
+        validationId: expect.stringMatching(/^outcome_post_val_/),
+        status: 'PASS',
+        result: 'ALLOW',
+        mode: 'FOUNDATION_STATIC_CHECKS',
+        contentIncludedInValidation: false,
+        rawPackContentIncluded: false,
+        manifestId: 'kpm-outcome-studio-default-1-0-0-global',
+        manifestKey: 'outcome-studio-default',
+        manifestVersion: '1.0.0',
+        summary: expect.objectContaining({
+          totalChecks: 3,
+          passed: 3,
+          failed: 0,
+        }),
+      }),
     }))
     expect(res.body.data.asset).not.toHaveProperty('customerContent')
     expect(res.body.data.assetVersion).toEqual(expect.objectContaining({
@@ -15104,6 +15193,13 @@ describe('Runtime Instance API', () => {
       status: 'CURRENT',
       outputTypeKey: 'EXECUTIVE_BRIEF',
       contentAvailable: true,
+      postValidation: expect.objectContaining({
+        validationId: res.body.data.asset.postValidation.validationId,
+        status: 'PASS',
+        result: 'ALLOW',
+        contentIncludedInValidation: false,
+        rawPackContentIncluded: false,
+      }),
     }))
     expect(res.body.data.assetVersion).not.toHaveProperty('customerContent')
     expect(res.body.data.asset.lineageSummary).toEqual(expect.objectContaining({
@@ -15173,6 +15269,13 @@ describe('Runtime Instance API', () => {
         ]),
       }),
     }))
+    expect(savedOutcomeAsset.postValidation).toEqual(expect.objectContaining({
+      validationId: res.body.data.asset.postValidation.validationId,
+      status: 'PASS',
+      result: 'ALLOW',
+      contentIncludedInValidation: false,
+      rawPackContentIncluded: false,
+    }))
     expect(savedOutcomeAssetVersion.workspaceType).toBe('OUTCOME')
     expect(savedOutcomeAssetVersion.assetType).toBe('OUTCOME_NARRATIVE')
     expect(savedOutcomeAssetVersion.contextBindings).toEqual(expect.objectContaining({
@@ -15187,6 +15290,13 @@ describe('Runtime Instance API', () => {
         truthSignatureId: 'truth_sig_existing_fixture',
         currentness: 'CURRENT',
       }),
+    }))
+    expect(savedOutcomeAssetVersion.postValidation).toEqual(expect.objectContaining({
+      validationId: res.body.data.asset.postValidation.validationId,
+      status: 'PASS',
+      result: 'ALLOW',
+      contentIncludedInValidation: false,
+      rawPackContentIncluded: false,
     }))
     expect(OutcomeAsset.deleteOne).not.toHaveBeenCalled()
     expect(OutcomeAssetVersion.deleteOne).not.toHaveBeenCalled()
@@ -15267,6 +15377,13 @@ describe('Runtime Instance API', () => {
         outcomeAssetId: res.body.data.asset.outcomeAssetId,
         outcomeAssetVersionId: res.body.data.assetVersion.outcomeAssetVersionId,
         versionNumber: 1,
+        postValidation: expect.objectContaining({
+          validationId: res.body.data.asset.postValidation.validationId,
+          status: 'PASS',
+          result: 'ALLOW',
+          contentIncludedInValidation: false,
+          rawPackContentIncluded: false,
+        }),
         generatedBodyAvailable: true,
         runtimeGraphRelationshipCount: 2,
       }),
@@ -16197,6 +16314,9 @@ describe('Runtime Instance API', () => {
     expect(res.body.data.packBinding).toEqual(expect.objectContaining({
       status: 'BLOCKED',
       mode: 'REGISTRY_RESOLUTION',
+      manifestId: 'kpm-outcome-studio-default-1-0-0-global',
+      manifestKey: 'outcome-studio-default',
+      manifestVersion: '1.0.0',
       summary: 'Knowledge Pack Registry activation is required before Outcome Studio sessions can start.',
       sourceBundle: expect.objectContaining({
         status: 'SOURCE_ONLY',
@@ -16926,6 +17046,11 @@ describe('Runtime Instance API', () => {
       truthSignature: expect.objectContaining({
         currentness: 'CURRENT',
       }),
+      postValidation: expect.objectContaining({
+        validationId: 'outcome_post_val_existing_fixture',
+        status: 'PASS',
+        result: 'ALLOW',
+      }),
     }))
     expect(OutcomeAsset.findOne).toHaveBeenCalledWith({
       runtimeInstanceId: RUNTIME_INSTANCE_ID,
@@ -16990,8 +17115,53 @@ describe('Runtime Instance API', () => {
         previousStatus: 'GENERATED',
         nextStatus: 'PUBLISHED',
         truthSignatureCurrentness: 'CURRENT',
+        postValidation: expect.objectContaining({
+          validationId: 'outcome_post_val_existing_fixture',
+          status: 'PASS',
+          result: 'ALLOW',
+          contentIncludedInValidation: false,
+          rawPackContentIncluded: false,
+        }),
         runtimeGraphRelationshipCount: 1,
       }),
+    }))
+  })
+
+  test('Outcome Studio asset publish fails closed when post-validation evidence is missing', async () => {
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    OutcomeAsset.findOne.mockReturnValue(buildLeanQuery(makeOutcomeAssetRecord()))
+    OutcomeAssetVersion.findOne.mockReturnValue(buildLeanQuery(makeOutcomeAssetVersionRecord({
+      postValidation: undefined,
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/assets/outcome_asset_existing_fixture/publish`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.details).toEqual(expect.objectContaining({
+      reason: 'OUTCOME_ASSET_POST_VALIDATION_BLOCKED',
+      outcomeAssetId: 'outcome_asset_existing_fixture',
+      outcomeAssetVersionId: 'outcome_asset_version_existing_fixture',
+      publishAvailable: false,
+      blockerReason: 'OUTCOME_ASSET_POST_VALIDATION_MISSING',
+      postValidation: expect.objectContaining({
+        status: 'MISSING',
+        result: 'BLOCK',
+      }),
+      safetyGate: expect.objectContaining({
+        code: 'ASSET_PUBLISH',
+        status: 'BLOCKED',
+      }),
+    }))
+    expect(OutcomeAsset.updateOne).not.toHaveBeenCalled()
+    expect(RuntimeGraphRelationship.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+      action: 'ASSET_PUBLISHED',
     }))
   })
 
@@ -17208,6 +17378,13 @@ describe('Runtime Instance API', () => {
         filename: 'value-narrative-439111-governed-executive-narrative.md',
         mimeType: 'text/markdown',
         contentIncludedInAudit: false,
+        postValidation: expect.objectContaining({
+          validationId: 'outcome_post_val_existing_fixture',
+          status: 'PASS',
+          result: 'ALLOW',
+          contentIncludedInValidation: false,
+          rawPackContentIncluded: false,
+        }),
       }),
     }))
     expect(JSON.stringify(auditPayload)).not.toContain('Governed outcome narrative for export.')
@@ -17256,6 +17433,13 @@ describe('Runtime Instance API', () => {
         activeCount: 5,
         requiredCount: 5,
       }),
+      postValidation: expect.objectContaining({
+        validationId: 'outcome_post_val_existing_fixture',
+        status: 'PASS',
+        result: 'ALLOW',
+        contentIncludedInValidation: false,
+        rawPackContentIncluded: false,
+      }),
     }))
     expect(JSON.stringify(res.body.data.content)).not.toContain('Raw outcome asset source Markdown must not leak')
     expect(JSON.stringify(res.body.data.content)).not.toContain('Raw outcome asset source bundle must not leak')
@@ -17275,6 +17459,11 @@ describe('Runtime Instance API', () => {
         filename: 'value-narrative-439111-governed-executive-narrative.json',
         mimeType: 'application/json',
         contentIncludedInAudit: false,
+        postValidation: expect.objectContaining({
+          validationId: 'outcome_post_val_existing_fixture',
+          status: 'PASS',
+          result: 'ALLOW',
+        }),
       }),
     }))
     expect(JSON.stringify(auditPayload)).not.toContain('Governed JSON export markdown.')
@@ -17514,6 +17703,68 @@ describe('Runtime Instance API', () => {
       outcomeAssetVersionId: 'outcome_asset_version_existing_fixture',
     })
     expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('Outcome Studio asset export fails closed when post-validation blocks the current version', async () => {
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    OutcomeAsset.findOne.mockReturnValue(buildLeanQuery(makeOutcomeAssetRecord()))
+    OutcomeAssetVersion.findOne.mockReturnValue(buildLeanQuery(makeOutcomeAssetVersionRecord({
+      customerContent: {
+        markdown: 'Blocked validation content must not be exported.',
+      },
+      postValidation: makeOutcomePostValidationSnapshot({
+        status: 'FAIL',
+        result: 'BLOCK',
+        summary: {
+          totalChecks: 3,
+          passed: 2,
+          warnings: 0,
+          failed: 1,
+        },
+        issues: [
+          {
+            code: 'CONTRADICTION_BOUNDARY_FAILED',
+            severity: 'BLOCKING',
+            message: 'Contradiction boundary validation failed.',
+            path: 'customerContent',
+            source: 'outcome-post-validation',
+          },
+        ],
+      }),
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/assets/outcome_asset_existing_fixture/export/markdown`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(409)
+    expect(res.body.data).toBeUndefined()
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.details).toEqual(expect.objectContaining({
+      reason: 'OUTCOME_ASSET_POST_VALIDATION_BLOCKED',
+      outcomeAssetId: 'outcome_asset_existing_fixture',
+      outcomeAssetVersionId: 'outcome_asset_version_existing_fixture',
+      exportAvailable: false,
+      blockerReason: 'OUTCOME_ASSET_POST_VALIDATION_FAILED',
+      postValidation: expect.objectContaining({
+        validationId: 'outcome_post_val_existing_fixture',
+        status: 'FAIL',
+        result: 'BLOCK',
+        summary: expect.objectContaining({
+          failed: 1,
+        }),
+      }),
+      safetyGate: expect.objectContaining({
+        code: 'EXPORT_RENDERER',
+        status: 'BLOCKED',
+      }),
+    }))
+    expect(JSON.stringify(res.body)).not.toContain('Blocked validation content must not be exported.')
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+      action: 'ASSET_EXPORTED',
+    }))
   })
 
   test('Outcome Studio asset export fails closed when Markdown content is unavailable', async () => {

@@ -7,11 +7,14 @@ import {
   createKnowledgePackVersion,
   deprecateKnowledgePackVersion,
   disableKnowledgePackVersion,
+  getKnowledgePackManifestController,
   getKnowledgePack,
   getKnowledgePackVersion,
   importKnowledgePackStarterVersion,
+  listKnowledgePackManifestsController,
   listKnowledgePacks,
   previewKnowledgePackVersionContent,
+  previewKnowledgePackManifestResolutionController,
   previewKnowledgePackResolution,
   rollbackKnowledgePack,
   validateKnowledgePackVersion,
@@ -21,10 +24,12 @@ import {
   validateCreateKnowledgePackVersion,
   validateImportKnowledgePackStarterVersion,
   validateKnowledgePackId,
+  validateKnowledgePackManifestId,
   validateKnowledgePackResolutionPreview,
   validateRollbackKnowledgePack,
   validateKnowledgePackVersionActionBody,
   validateKnowledgePackVersionParams,
+  validateListKnowledgePackManifests,
   validateListKnowledgePacks,
 } from '../validators/outcomeKnowledgePacks.validator.js'
 
@@ -33,6 +38,9 @@ const router = Router()
 router.use(authJwt, loadScopes, requirePlatformRole('SUPER_ADMIN'))
 
 router.get('/', validateListKnowledgePacks, listKnowledgePacks)
+router.get('/manifests', validateListKnowledgePackManifests, listKnowledgePackManifestsController)
+router.get('/manifests/:manifestId/resolution-preview', validateKnowledgePackManifestId, validateKnowledgePackResolutionPreview, previewKnowledgePackManifestResolutionController)
+router.get('/manifests/:manifestId', validateKnowledgePackManifestId, getKnowledgePackManifestController)
 router.get('/resolution-preview', validateKnowledgePackResolutionPreview, previewKnowledgePackResolution)
 router.post('/:packId/starter-import', validateKnowledgePackId, validateImportKnowledgePackStarterVersion, importKnowledgePackStarterVersion)
 router.post('/:packId/versions', validateKnowledgePackId, validateCreateKnowledgePackVersion, createKnowledgePackVersion)

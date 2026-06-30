@@ -19,6 +19,15 @@ const serializeDoc = (doc) => {
   return ret
 }
 
+const buildPackageActivationHistoryFilter = (packageIdentifier) => {
+  const normalizedIdentifier = String(packageIdentifier || '').trim()
+  const normalizedPackageKey = normalizedIdentifier.toLowerCase()
+
+  return /^[0-9a-fA-F]{24}$/.test(normalizedIdentifier)
+    ? { packageId: normalizedIdentifier }
+    : { packageKey: normalizedPackageKey }
+}
+
 export const getRuntimeActivationPackageReadiness = async (req, res, next) => {
   try {
     const readiness = await getRuntimeActivationReadiness({
@@ -46,7 +55,7 @@ export const getRuntimeActivationPackageReadiness = async (req, res, next) => {
 
 export const getRuntimeActivationPackageHistory = async (req, res, next) => {
   try {
-    const rows = await RuntimeActivationSnapshot.find({ packageId: req.params.packageId })
+    const rows = await RuntimeActivationSnapshot.find(buildPackageActivationHistoryFilter(req.params.packageId))
       .sort({ activatedAt: -1, createdAt: -1 })
       .limit(50)
       .lean()

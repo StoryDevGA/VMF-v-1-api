@@ -17,6 +17,11 @@ const nullableString = {
   default: null,
 }
 
+const normalizeNullableString = (value) => {
+  const normalized = String(value ?? '').trim()
+  return normalized || null
+}
+
 const outcomeAssetVersionSchema = new mongoose.Schema(
   {
     outcomeAssetVersionId: {
@@ -182,6 +187,10 @@ const outcomeAssetVersionSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.Mixed,
       default: () => ({}),
     },
+    postValidation: {
+      type: mongoose.Schema.Types.Mixed,
+      default: undefined,
+    },
     contextBindings: {
       type: mongoose.Schema.Types.Mixed,
       default: () => ({}),
@@ -250,6 +259,8 @@ outcomeAssetVersionSchema.pre('validate', function normalizeOutcomeAssetVersion(
   this.frameworkKey = String(this.frameworkKey || '').trim().toUpperCase()
   this.packageKey = String(this.packageKey || '').trim()
   this.packageVersion = String(this.packageVersion || '').trim()
+  this.projectId = normalizeNullableString(this.projectId)
+  this.outcomeId = normalizeNullableString(this.outcomeId)
   this.workspaceType = String(this.workspaceType || DEFAULT_OUTCOME_WORKSPACE_TYPE).trim().toUpperCase()
   this.assetType = String(this.assetType || DEFAULT_OUTCOME_ASSET_TYPE).trim().toUpperCase()
   this.contractVersion = String(this.contractVersion || OUTCOME_STUDIO_CONTRACT_VERSION).trim()

@@ -27,6 +27,19 @@ const toNullableObjectId = (value) => {
   return new mongoose.Types.ObjectId(value)
 }
 
+const findFrameworkPackageByActivationIdentifier = (packageId) => {
+  const normalizedIdentifier = String(packageId || '').trim()
+  if (!normalizedIdentifier) return null
+
+  if (mongoose.isValidObjectId(normalizedIdentifier)) {
+    return FrameworkPackage.findById(normalizedIdentifier)
+  }
+
+  return FrameworkPackage.findOne({
+    packageKey: normalizedIdentifier.toLowerCase(),
+  })
+}
+
 const toValidDate = (value) => {
   if (!value) return null
   const date = value instanceof Date ? value : new Date(value)
@@ -203,7 +216,7 @@ export const getRuntimeActivationReadiness = async ({
   frameworkPackage = null,
   checkpoint = null,
 } = {}) => {
-  const packageRecord = frameworkPackage || await FrameworkPackage.findById(packageId)
+  const packageRecord = frameworkPackage || await findFrameworkPackageByActivationIdentifier(packageId)
   if (!packageRecord) return null
 
   const activeDeployment = await getActiveRuntimeDeployment({

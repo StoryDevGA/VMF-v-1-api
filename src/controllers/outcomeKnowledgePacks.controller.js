@@ -12,6 +12,11 @@ import {
   rollbackOutcomeKnowledgePack,
   validateOutcomeKnowledgePackVersion,
 } from '../services/outcomeKnowledgePackRegistryService.js'
+import {
+  getKnowledgePackManifest,
+  listKnowledgePackManifests,
+  previewKnowledgePackManifestResolution,
+} from '../services/knowledgePackManifestService.js'
 
 const sendControllerError = (res, req, err) =>
   res.status(err?.status || 500).json({
@@ -27,6 +32,36 @@ export const listKnowledgePacks = async (req, res) => {
   try {
     const result = await listOutcomeKnowledgePacks({ query: req.query })
     res.status(200).json(result)
+  } catch (err) {
+    sendControllerError(res, req, err)
+  }
+}
+
+export const listKnowledgePackManifestsController = async (req, res) => {
+  try {
+    const result = await listKnowledgePackManifests({ query: req.query })
+    res.status(200).json(result)
+  } catch (err) {
+    sendControllerError(res, req, err)
+  }
+}
+
+export const getKnowledgePackManifestController = async (req, res) => {
+  try {
+    const data = await getKnowledgePackManifest({ manifestId: req.params.manifestId })
+    res.status(200).json({ data })
+  } catch (err) {
+    sendControllerError(res, req, err)
+  }
+}
+
+export const previewKnowledgePackManifestResolutionController = async (req, res) => {
+  try {
+    const data = await previewKnowledgePackManifestResolution({
+      manifestId: req.params.manifestId,
+      query: req.query,
+    })
+    res.status(200).json({ data })
   } catch (err) {
     sendControllerError(res, req, err)
   }

@@ -28,6 +28,10 @@ import FrameworkPackage, {
   FRAMEWORK_PACKAGE_VISIBILITY,
   FRAMEWORK_PACKAGE_WORKFLOW_EXECUTION_CONTEXTS,
 } from '../models/FrameworkPackage.js'
+import { RUNTIME_PATH_REGISTRY_CATEGORIES } from '../models/RuntimePathRegistry.js'
+import { RUNTIME_SKILL_CATEGORIES } from '../models/RuntimeSkill.js'
+import { VALIDATION_REGISTRY_CATEGORIES } from '../models/ValidationRegistry.js'
+import { WORKFLOW_POLICY_TYPES } from '../models/WorkflowPolicy.js'
 import { AUDIT_ACTIONS, RESOURCE_TYPES } from '../services/auditService.js'
 import {
   GOVERNANCE_AUDIT_EVENT_CATEGORIES,
@@ -42,7 +46,6 @@ const workspaceRoot = path.resolve(apiRoot, '..')
 
 const DEFAULT_SEED_DIR = path.resolve(workspaceRoot, 'docs/seed-data')
 const DEFAULT_REPORT_DIR = path.resolve(workspaceRoot, 'docs/generated/seed-imports')
-const DEFAULT_AUDIT_FILE = path.resolve(DEFAULT_SEED_DIR, 'canonical_seed_schema_conformance_audit.json')
 const DEFAULT_EDITOR_CONSTANTS_FILE = path.resolve(
   workspaceRoot,
   'VMF-v-1-client/src/pages/SuperAdminFrameworkPackages/superAdminFrameworkPackages.constants.js',
@@ -52,6 +55,7 @@ const DEFAULT_AUDIT_LOG_CONSTANTS_FILE = path.resolve(
   'VMF-v-1-client/src/pages/SuperAdminAuditLogs/superAdminAuditLogs.constants.js',
 )
 const RESET_CONFIRMATION = '--confirm-reset-vmf-runtime-control'
+const DEFAULT_SEED_VERSION = '2.3.1'
 const DEFAULT_VMF_VERSION = '2.3.1'
 const VMF_FRAMEWORK_KEY = 'VMF'
 const SEED_ACTOR_ID = new mongoose.Types.ObjectId('000000000000000000000001')
@@ -129,65 +133,127 @@ const WORKFLOW_POLICY_TYPE_MAP = Object.freeze({
   STATE_GATE: 'LIFECYCLE_GATE',
   VALIDATION_GATE: 'VALIDATION',
 })
-const IMPORT_STEPS = Object.freeze([
-  {
+const buildImportSteps = (fileNames) => Object.freeze([
+  Object.freeze({
     label: 'Runtime Paths',
-    fileName: 'v2_3_1_runtime_paths.json',
+    fileName: fileNames.runtimePaths,
     arrayKey: 'runtimePathRegistries',
     model: RuntimePathRegistry,
     identityFields: ['stableId', 'pathKey'],
-  },
-  {
+  }),
+  Object.freeze({
     label: 'Skill Roles',
-    fileName: 'v2_3_1_skill_roles.json',
+    fileName: fileNames.skillRoles,
     arrayKey: 'skillRoles',
     model: SkillRoleRegistry,
     identityFields: ['stableId', 'roleKey'],
-  },
-  {
+  }),
+  Object.freeze({
     label: 'Skills',
-    fileName: 'v2_3_1_skills.json',
+    fileName: fileNames.skills,
     arrayKey: 'runtimeSkills',
     model: RuntimeSkill,
     identityFields: ['stableId', 'key'],
-  },
-  {
+  }),
+  Object.freeze({
     label: 'Validation Registry',
-    fileName: 'v2_3_1_validations.json',
+    fileName: fileNames.validations,
     arrayKey: 'validationRegistries',
     model: ValidationRegistry,
     identityFields: ['stableId', 'key'],
-  },
-  {
+  }),
+  Object.freeze({
     label: 'Agents',
-    fileName: 'v2_3_1_agents.json',
+    fileName: fileNames.agents,
     arrayKey: 'runtimeAgents',
     model: RuntimeAgent,
     identityFields: ['stableId', 'key'],
-  },
-  {
+  }),
+  Object.freeze({
     label: 'Workflow Policies',
-    fileName: 'v2_3_1_policies.json',
+    fileName: fileNames.policies,
     arrayKey: 'workflowPolicies',
     model: WorkflowPolicy,
     identityFields: ['stableId', 'key'],
-  },
-  {
+  }),
+  Object.freeze({
     label: 'UI Contracts',
-    fileName: 'v2_3_1_ui_contract.json',
+    fileName: fileNames.uiContract,
     singleRecord: true,
     model: UIContract,
     identityFields: ['stableId', 'uiContractKey'],
-  },
-  {
+  }),
+  Object.freeze({
     label: 'Framework Packages',
-    fileName: 'v2_3_1_framework_package.json',
+    fileName: fileNames.frameworkPackage,
     singleRecord: true,
     model: FrameworkPackage,
     identityFields: ['packageKey'],
-  },
+  }),
 ])
 
+const SEED_PACKS = Object.freeze({
+  '2.3.1': Object.freeze({
+    version: '2.3.1',
+    auditFileName: 'canonical_seed_schema_conformance_audit.json',
+    auditKey: 'v2_3_1',
+    importSteps: buildImportSteps({
+      runtimePaths: 'v2_3_1_runtime_paths.json',
+      skillRoles: 'v2_3_1_skill_roles.json',
+      skills: 'v2_3_1_skills.json',
+      validations: 'v2_3_1_validations.json',
+      agents: 'v2_3_1_agents.json',
+      policies: 'v2_3_1_policies.json',
+      uiContract: 'v2_3_1_ui_contract.json',
+      frameworkPackage: 'v2_3_1_framework_package.json',
+    }),
+  }),
+  '3.1': Object.freeze({
+    version: '3.1',
+    auditFileName: 'vmf_v3_1_seed_pack_audit.json',
+    importSteps: buildImportSteps({
+      runtimePaths: 'vmf_v3_1_runtime_paths.json',
+      skillRoles: 'vmf_v3_1_skill_roles.json',
+      skills: 'vmf_v3_1_runtime_skills.json',
+      validations: 'vmf_v3_1_validation_registry.json',
+      agents: 'vmf_v3_1_runtime_agents.json',
+      policies: 'vmf_v3_1_workflow_policies.json',
+      uiContract: 'vmf_v3_1_ui_contract.json',
+      frameworkPackage: 'vmf_v3_1_framework_package.json',
+    }),
+    supportAssetManifest: Object.freeze({
+      fileName: 'vmf_v3_1_support_asset_manifest.json',
+      arrayKey: 'assets',
+    }),
+  }),
+})
+
+const resolveSeedPack = (seedVersion = DEFAULT_SEED_VERSION) => {
+  const version = String(seedVersion || '').trim()
+  const seedPack = SEED_PACKS[version]
+  if (!seedPack) {
+    throw new Error(
+      `Unknown seed version: ${seedVersion}. Supported versions: ${Object.keys(SEED_PACKS).join(', ')}.`,
+    )
+  }
+  return seedPack
+}
+
+const resolveDefaultAuditFile = (seedDir, seedVersion) =>
+  path.resolve(seedDir, resolveSeedPack(seedVersion).auditFileName)
+
+const resolveImportOptions = (args) => {
+  const seedPack = resolveSeedPack(args.seedVersion)
+  return {
+    ...args,
+    seedVersion: seedPack.version,
+    auditFile: args.auditFileExplicit && args.auditFile
+      ? args.auditFile
+      : resolveDefaultAuditFile(args.seedDir, seedPack.version),
+  }
+}
+
+const IMPORT_STEPS = SEED_PACKS[DEFAULT_SEED_VERSION].importSteps
 const RESET_STEPS = [...IMPORT_STEPS].reverse()
 const IMPORT_MANAGED_UPDATE_FIELDS = new Set([
   '_id',
@@ -222,6 +288,7 @@ Usage:
 
 Options:
   --seed-dir <path>                    Seed JSON directory. Defaults to ../docs/seed-data.
+  --seed-version <version>             Seed pack version. Defaults to ${DEFAULT_SEED_VERSION}. Supported: ${Object.keys(SEED_PACKS).join(', ')}.
   --apply                              Write changes. Without this flag the script is a dry-run.
   --reset-runtime-control              Clear only Runtime Control seed collections before import.
   ${RESET_CONFIRMATION}    Required with --apply --reset-runtime-control.
@@ -243,6 +310,7 @@ Reset scope:
 const parseArgs = (argv = process.argv.slice(2)) => {
   const args = {
     apply: false,
+    auditFileExplicit: false,
     help: false,
     json: false,
     noAudit: false,
@@ -251,7 +319,8 @@ const parseArgs = (argv = process.argv.slice(2)) => {
     resetRuntimeControl: false,
     confirmReset: false,
     seedDir: DEFAULT_SEED_DIR,
-    auditFile: DEFAULT_AUDIT_FILE,
+    seedVersion: DEFAULT_SEED_VERSION,
+    auditFile: null,
     reportDir: DEFAULT_REPORT_DIR,
   }
 
@@ -273,17 +342,20 @@ const parseArgs = (argv = process.argv.slice(2)) => {
     else if (arg === '--no-report') args.noReport = true
     else if (arg === '--reset-runtime-control') args.resetRuntimeControl = true
     else if (arg === RESET_CONFIRMATION) args.confirmReset = true
+    else if (arg === '--seed-version') {
+      const value = readFlagValue(index, arg)
+      index += 1
+      args.seedVersion = String(value).trim()
+    }
     else if (arg === '--seed-dir') {
       const value = readFlagValue(index, arg)
       index += 1
       args.seedDir = path.resolve(process.cwd(), value)
-      if (args.auditFile === DEFAULT_AUDIT_FILE) {
-        args.auditFile = path.resolve(args.seedDir, 'canonical_seed_schema_conformance_audit.json')
-      }
     } else if (arg === '--audit-file') {
       const value = readFlagValue(index, arg)
       index += 1
       args.auditFile = path.resolve(process.cwd(), value)
+      args.auditFileExplicit = true
     } else if (arg === '--report-dir') {
       const value = readFlagValue(index, arg)
       index += 1
@@ -300,7 +372,7 @@ const parseArgs = (argv = process.argv.slice(2)) => {
     )
   }
 
-  return args
+  return resolveImportOptions(args)
 }
 
 const isPlainObject = (value) =>
@@ -324,6 +396,63 @@ const normalizeEnumToken = (value) => String(value ?? '').trim().toUpperCase()
 const normalizeList = (values, normalizer = normalizeToken) => {
   if (!Array.isArray(values)) return []
   return [...new Set(values.map((value) => normalizer(value)).filter(Boolean))]
+}
+
+const normalizeAssetId = (assetKey) => {
+  const normalized = normalizeToken(assetKey)
+    .replace(/[^a-z0-9-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+
+  return `asset-${normalized || 'seed-asset'}`
+}
+
+const humanizeAssetName = (assetKey) =>
+  normalizeToken(assetKey)
+    .split('-')
+    .filter(Boolean)
+    .map((part) => `${part.charAt(0).toUpperCase()}${part.slice(1)}`)
+    .join(' ')
+
+const mimeTypeForAssetFile = (fileName) => {
+  const extension = path.extname(String(fileName || '').trim()).toLowerCase()
+  if (extension === '.md') return 'text/markdown'
+  if (extension === '.json') return 'application/json'
+  if (extension === '.txt') return 'text/plain'
+  if (extension === '.docx') return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+  if (extension === '.pdf') return 'application/pdf'
+  return ''
+}
+
+const seedReferenceAssetKey = (value) => {
+  if (typeof value === 'string') return normalizeToken(value)
+  if (!isPlainObject(value)) return ''
+  return normalizeToken(
+    value.assetKey
+    || String(value.assetId || '').replace(/^asset-/, '')
+    || value.storageKey,
+  )
+}
+
+const buildRuntimeSkillReferenceAsset = (asset) => {
+  const assetKey = normalizeToken(asset.assetKey)
+  const assetType = normalizeEnumToken(asset.assetType) || 'OTHER'
+  const fileName = String(asset.fileName || '').trim()
+
+  return {
+    assetId: normalizeAssetId(assetKey),
+    name: String(asset.name || '').trim() || humanizeAssetName(assetKey),
+    assetType,
+    mimeType: mimeTypeForAssetFile(fileName),
+    purpose: assetType || 'AUTHORING_HELP',
+    usageMode: assetType === 'TEST_ASSET' ? 'TEST_ONLY' : 'OPTIONAL',
+    status: normalizeEnumToken(asset.status) || 'ACTIVE',
+    isRuntimeAccessible: Boolean(asset.runtimeAccessible || asset.skillAccessible),
+    isAdminOnly: false,
+    isTestOnly: assetType === 'TEST_ASSET',
+    description: String(asset.description || '').trim(),
+    storageKey: fileName,
+  }
 }
 
 const clone = (value) => {
@@ -398,8 +527,9 @@ const stampSeedActorFields = (record) => {
 const recordName = (record) =>
   record.stableId || record.key || record.pathKey || record.roleKey || record.packageKey || record.uiContractKey || 'record'
 
-const normalizeMappedEnum = ({ record, field, map, notes, sourceLabel }) => {
+const normalizeMappedEnum = ({ record, field, map, allowedValues, notes, sourceLabel }) => {
   const currentValue = normalizeEnumToken(record[field])
+  if (allowedValues?.has(currentValue)) return
   const mappedValue = map[currentValue]
   if (!mappedValue) return
 
@@ -462,6 +592,7 @@ const normalizeRuntimePath = (record, notes, sourceLabel) => {
     record,
     field: 'category',
     map: RUNTIME_PATH_CATEGORY_MAP,
+    allowedValues: new Set(Object.values(RUNTIME_PATH_REGISTRY_CATEGORIES)),
     notes,
     sourceLabel,
   })
@@ -473,6 +604,7 @@ const normalizeRuntimeSkill = (record, notes, sourceLabel) => {
     record,
     field: 'category',
     map: RUNTIME_SKILL_CATEGORY_MAP,
+    allowedValues: new Set(Object.values(RUNTIME_SKILL_CATEGORIES)),
     notes,
     sourceLabel,
   })
@@ -494,6 +626,7 @@ const normalizeValidationRegistry = (record, notes, sourceLabel) => {
     record,
     field: 'category',
     map: VALIDATION_CATEGORY_MAP,
+    allowedValues: new Set(Object.values(VALIDATION_REGISTRY_CATEGORIES)),
     notes,
     sourceLabel,
   })
@@ -551,6 +684,7 @@ const normalizeWorkflowPolicy = (record, notes, sourceLabel) => {
     record,
     field: 'policyType',
     map: WORKFLOW_POLICY_TYPE_MAP,
+    allowedValues: new Set(Object.values(WORKFLOW_POLICY_TYPES)),
     notes,
     sourceLabel,
   })
@@ -578,7 +712,41 @@ const normalizeWorkflowPolicy = (record, notes, sourceLabel) => {
   return record
 }
 
+const normalizeSeedSemanticVersion = (value) => {
+  const normalized = String(value || '').trim()
+  if (/^\d+\.\d+$/.test(normalized)) return `${normalized}.0`
+  return normalized
+}
+
+const normalizeSeedSemanticVersionFields = (record, fields, notes, sourceLabel) => {
+  for (const field of fields) {
+    if (!Object.prototype.hasOwnProperty.call(record, field)) continue
+    const currentValue = record[field]
+    if (!currentValue) continue
+    const normalizedValue = normalizeSeedSemanticVersion(currentValue)
+    if (normalizedValue === currentValue) continue
+    record[field] = normalizedValue
+    notes.push({
+      level: 'warning',
+      source: sourceLabel,
+      message: `${recordName(record)} ${field} "${currentValue}" normalized to "${normalizedValue}".`,
+    })
+  }
+}
+
+const normalizeUiContract = (record, notes, sourceLabel) => {
+  normalizeSeedSemanticVersionFields(
+    record,
+    ['introducedInVersion', 'deprecatedInVersion', 'sourcePackageVersion'],
+    notes,
+    sourceLabel,
+  )
+  return record
+}
+
 const normalizeFrameworkPackage = (record, notes, sourceLabel) => {
+  normalizeSeedSemanticVersionFields(record, ['version', 'stateModelVersion'], notes, sourceLabel)
+
   if (record.lastCheckpointStatus && !record.lastCheckpointResult) {
     notes.push({
       level: 'warning',
@@ -625,6 +793,7 @@ const normalizeRecord = (step, rawRecord, notes, seedContext = {}) => {
   if (step.model === RuntimeSkill) return normalizeRuntimeSkill(record, notes, sourceLabel)
   if (step.model === ValidationRegistry) return normalizeValidationRegistry(record, notes, sourceLabel)
   if (step.model === WorkflowPolicy) return normalizeWorkflowPolicy(record, notes, sourceLabel)
+  if (step.model === UIContract) return normalizeUiContract(record, notes, sourceLabel)
   if (step.model === FrameworkPackage) return normalizeFrameworkPackage(record, notes, sourceLabel)
   return record
 }
@@ -645,22 +814,185 @@ const getRecordsFromSeed = (step, parsedSeed) => {
   return records
 }
 
-const resolveSeedFrameworkVersion = (seedDir) => {
-  const frameworkPackageStep = IMPORT_STEPS.find((step) => step.model === FrameworkPackage)
+const resolveSeedFrameworkVersion = (seedDir, seedPack) => {
+  const frameworkPackageStep = seedPack.importSteps.find((step) => step.model === FrameworkPackage)
   if (!frameworkPackageStep) return DEFAULT_VMF_VERSION
   const filePath = path.resolve(seedDir, frameworkPackageStep.fileName)
-  if (!fs.existsSync(filePath)) return DEFAULT_VMF_VERSION
+  if (!fs.existsSync(filePath)) return seedPack.version || DEFAULT_VMF_VERSION
   const parsedSeed = JSON.parse(fs.readFileSync(filePath, 'utf8'))
   const [frameworkPackage] = getRecordsFromSeed(frameworkPackageStep, parsedSeed)
-  return String(frameworkPackage?.version || '').trim() || DEFAULT_VMF_VERSION
+  return String(frameworkPackage?.version || '').trim() || seedPack.version || DEFAULT_VMF_VERSION
 }
 
-const loadSeedBundle = (seedDir) => {
+const isPathInside = (parentPath, childPath) => {
+  const relativePath = path.relative(parentPath, childPath)
+  return relativePath === '' || (!relativePath.startsWith('..') && !path.isAbsolute(relativePath))
+}
+
+const loadSupportAssetManifest = (seedDir, seedPack, notes) => {
+  if (!seedPack.supportAssetManifest) return null
+
+  const manifest = seedPack.supportAssetManifest
+  const filePath = path.resolve(seedDir, manifest.fileName)
+  if (!fs.existsSync(filePath)) {
+    notes.push({
+      level: 'error',
+      source: 'Support Asset Manifest',
+      message: `Missing support asset manifest: ${filePath}`,
+    })
+    return {
+      label: 'Support Assets',
+      fileName: manifest.fileName,
+      filePath,
+      assetRecords: [],
+    }
+  }
+
+  const parsedSeed = JSON.parse(fs.readFileSync(filePath, 'utf8'))
+  const assetRecords = parsedSeed[manifest.arrayKey]
+  if (!Array.isArray(assetRecords)) {
+    notes.push({
+      level: 'error',
+      source: 'Support Asset Manifest',
+      message: `${manifest.fileName} must contain an array named ${manifest.arrayKey}.`,
+    })
+    return {
+      label: 'Support Assets',
+      fileName: manifest.fileName,
+      filePath,
+      assetRecords: [],
+    }
+  }
+
+  if (
+    Number.isInteger(parsedSeed.recordCount)
+    && parsedSeed.recordCount !== assetRecords.length
+  ) {
+    notes.push({
+      level: 'warning',
+      source: 'Support Asset Manifest',
+      message: `${manifest.fileName} recordCount=${parsedSeed.recordCount} but loaded ${assetRecords.length}.`,
+    })
+  }
+
+  for (const asset of assetRecords) {
+    const assetKey = String(asset?.assetKey || 'unknown asset').trim()
+    const fileName = String(asset?.fileName || '').trim()
+    if (!fileName) {
+      notes.push({
+        level: 'error',
+        source: 'Support Asset Manifest',
+        message: `${assetKey} is missing fileName.`,
+      })
+      continue
+    }
+
+    const assetPath = path.resolve(seedDir, fileName)
+    if (!isPathInside(seedDir, assetPath)) {
+      notes.push({
+        level: 'error',
+        source: 'Support Asset Manifest',
+        message: `${assetKey} fileName resolves outside seed dir: ${fileName}`,
+      })
+      continue
+    }
+
+    if (!fs.existsSync(assetPath)) {
+      notes.push({
+        level: 'error',
+        source: 'Support Asset Manifest',
+        message: `${assetKey} file does not exist: ${fileName}`,
+      })
+    }
+  }
+
+  return {
+    label: 'Support Assets',
+    fileName: manifest.fileName,
+    filePath,
+    assetRecords,
+  }
+}
+
+const hydrateRuntimeSkillReferenceAssets = (importEntries, supportAssetManifest, notes) => {
+  if (!supportAssetManifest?.assetRecords?.length) return
+
+  const skillStep = importEntries.find((entry) => entry.model === RuntimeSkill)
+  if (!skillStep?.records?.length) return
+
+  const manifestAssetsByKey = new Map()
+  const assetsBySkillKey = new Map()
+
+  for (const asset of supportAssetManifest.assetRecords) {
+    if (String(asset?.targetType || '').trim() !== 'RuntimeSkill') continue
+
+    const assetKey = normalizeToken(asset.assetKey)
+    const targetKey = normalizeToken(asset.targetKey)
+    if (!assetKey) continue
+
+    manifestAssetsByKey.set(assetKey, asset)
+
+    if (targetKey) {
+      const targetAssets = assetsBySkillKey.get(targetKey) || []
+      targetAssets.push(asset)
+      assetsBySkillKey.set(targetKey, targetAssets)
+    }
+  }
+
+  let hydratedCount = 0
+
+  for (const skill of skillStep.records) {
+    const skillKey = normalizeToken(skill.key)
+    const seededReferenceAssets = Array.isArray(skill.referenceAssets) ? skill.referenceAssets : []
+    const declaredAssetKeys = seededReferenceAssets.map(seedReferenceAssetKey).filter(Boolean)
+    const nextAssetsById = new Map()
+
+    for (const asset of seededReferenceAssets.filter(isPlainObject)) {
+      if (!asset.assetId || !asset.name) continue
+      nextAssetsById.set(normalizeAssetId(asset.assetId).replace(/^asset-asset-/, 'asset-'), asset)
+    }
+
+    for (const asset of assetsBySkillKey.get(skillKey) || []) {
+      const referenceAsset = buildRuntimeSkillReferenceAsset(asset)
+      nextAssetsById.set(referenceAsset.assetId, referenceAsset)
+    }
+
+    for (const assetKey of declaredAssetKeys) {
+      const manifestAsset = manifestAssetsByKey.get(assetKey)
+      if (!manifestAsset) {
+        notes.push({
+          level: 'error',
+          source: `Skill ${skill.key}`,
+          message: `referenceAssets includes "${assetKey}", but no RuntimeSkill support asset manifest entry exists.`,
+        })
+        continue
+      }
+
+      const referenceAsset = buildRuntimeSkillReferenceAsset(manifestAsset)
+      nextAssetsById.set(referenceAsset.assetId, referenceAsset)
+    }
+
+    skill.referenceAssets = [...nextAssetsById.values()]
+    hydratedCount += skill.referenceAssets.length
+  }
+
+  if (hydratedCount > 0) {
+    notes.push({
+      level: 'info',
+      source: 'Support Asset Manifest',
+      message: `Hydrated ${hydratedCount} RuntimeSkill referenceAssets from support asset manifest entries.`,
+    })
+  }
+}
+
+const loadSeedBundle = (seedDir, seedVersion = DEFAULT_SEED_VERSION) => {
+  const seedPack = resolveSeedPack(seedVersion)
   const notes = []
   const seedContext = {
-    frameworkVersion: resolveSeedFrameworkVersion(seedDir),
+    frameworkVersion: resolveSeedFrameworkVersion(seedDir, seedPack),
+    seedVersion: seedPack.version,
   }
-  return IMPORT_STEPS.map((step) => {
+  const importEntries = seedPack.importSteps.map((step) => {
     const filePath = path.resolve(seedDir, step.fileName)
     if (!fs.existsSync(filePath)) {
       throw new Error(`Missing seed file: ${filePath}`)
@@ -684,7 +1016,14 @@ const loadSeedBundle = (seedDir) => {
       filePath,
       records: rawRecords.map((record) => normalizeRecord(step, record, notes, seedContext)),
     }
-  }).concat({ notes, seedContext })
+  })
+  const supportAssetManifest = loadSupportAssetManifest(seedDir, seedPack, notes)
+  hydrateRuntimeSkillReferenceAssets(importEntries, supportAssetManifest, notes)
+  return [
+    ...importEntries,
+    ...(supportAssetManifest ? [supportAssetManifest] : []),
+    { notes, seedContext },
+  ]
 }
 
 const buildIndexes = (bundle) => {
@@ -696,6 +1035,7 @@ const buildIndexes = (bundle) => {
   const validations = new Map()
   const validationsByKey = new Map()
   const agents = new Map()
+  const agentsByKey = new Map()
   const uiContractsByKey = new Map()
   const policiesByKey = new Map()
   const packagesByKey = new Map()
@@ -715,6 +1055,7 @@ const buildIndexes = (bundle) => {
         validationsByKey.set(normalizeToken(record.key), record)
       } else if (step.model === RuntimeAgent) {
         agents.set(normalizeToken(record.stableId), record)
+        agentsByKey.set(normalizeToken(record.key), record)
       } else if (step.model === WorkflowPolicy) {
         policiesByKey.set(normalizeToken(record.key), record)
       } else if (step.model === UIContract) {
@@ -734,6 +1075,7 @@ const buildIndexes = (bundle) => {
     validations,
     validationsByKey,
     agents,
+    agentsByKey,
     uiContractsByKey,
     policiesByKey,
     packagesByKey,
@@ -743,8 +1085,11 @@ const buildIndexes = (bundle) => {
 const recordsForModel = (bundle, model) =>
   bundle.find((entry) => entry.model === model)?.records || []
 
+const supportAssetsForBundle = (bundle) =>
+  bundle.find((entry) => entry.assetRecords)?.assetRecords || []
+
 const countVmfStateNamespaceReferences = (value) => {
-  if (typeof value === 'string') return value.includes('vmf_state') ? 1 : 0
+  if (typeof value === 'string') return /\bvmf_state\./.test(value) ? 1 : 0
   if (Array.isArray(value)) {
     return value.reduce((total, item) => total + countVmfStateNamespaceReferences(item), 0)
   }
@@ -763,6 +1108,7 @@ const buildConformanceActuals = (bundle) => {
   const policies = recordsForModel(bundle, WorkflowPolicy)
   const uiContracts = recordsForModel(bundle, UIContract)
   const frameworkPackages = recordsForModel(bundle, FrameworkPackage)
+  const supportAssets = supportAssetsForBundle(bundle)
 
   return {
     runtimePathCount: runtimePaths.length,
@@ -771,11 +1117,19 @@ const buildConformanceActuals = (bundle) => {
     validationCount: validations.length,
     agentCount: agents.length,
     policyCount: policies.length,
+    skillReferenceAssetCount: skills.reduce(
+      (count, skill) =>
+        count + (Array.isArray(skill.referenceAssets)
+          ? skill.referenceAssets.filter(isPlainObject).length
+          : 0),
+      0,
+    ),
     packageDependencyReferenceCount: frameworkPackages.reduce(
       (count, frameworkPackage) => count + (frameworkPackage.dependencyLock?.references?.length || 0),
       0,
     ),
     uiSectionCount: uiContracts.reduce((count, contract) => count + (contract.sections?.length || 0), 0),
+    supportAssetCount: supportAssets.length,
     vmfStateNamespaceReferences: bundle
       .filter((entry) => entry.records)
       .reduce((count, entry) => count + countVmfStateNamespaceReferences(entry.records), 0),
@@ -783,6 +1137,50 @@ const buildConformanceActuals = (bundle) => {
       (runtimePath) => runtimePath.dataType === 'OBJECT' && runtimePath.uiControl === 'TEXTAREA',
     ).length,
   }
+}
+
+const AUDIT_COUNT_FIELD_MAP = Object.freeze({
+  runtimePaths: 'runtimePathCount',
+  skillRoles: 'skillRoleCount',
+  skills: 'skillCount',
+  validations: 'validationCount',
+  agents: 'agentCount',
+  workflowPolicies: 'policyCount',
+  dependencyReferences: 'packageDependencyReferenceCount',
+  uiSections: 'uiSectionCount',
+  supportAssets: 'supportAssetCount',
+})
+
+const AUDIT_CHECK_FIELD_MAP = Object.freeze({
+  vmfStateReferences: 'vmfStateNamespaceReferences',
+  objectTextareaViolations: 'objectTextareaViolations',
+})
+
+const mapAuditFields = (source, fieldMap) =>
+  Object.entries(source || {}).reduce((expected, [field, value]) => {
+    const mappedField = fieldMap[field]
+    if (mappedField && Number.isInteger(value)) expected[mappedField] = value
+    return expected
+  }, {})
+
+const resolveConformanceExpected = (audit, seedPack, notes) => {
+  const expectedByKey = seedPack.auditKey ? audit[seedPack.auditKey] : null
+  if (isPlainObject(expectedByKey)) return expectedByKey
+
+  const expected = {
+    ...mapAuditFields(audit.counts, AUDIT_COUNT_FIELD_MAP),
+    ...mapAuditFields(audit.checks, AUDIT_CHECK_FIELD_MAP),
+  }
+  if (Object.keys(expected).length > 0) return expected
+
+  notes.push({
+    level: 'error',
+    source: 'Conformance Audit',
+    message:
+      `Audit file must contain a ${seedPack.auditKey || 'recognized'} object or `
+      + 'recognized counts/checks fields.',
+  })
+  return null
 }
 
 const validateConformanceAudit = (bundle, options, notes) => {
@@ -800,13 +1198,9 @@ const validateConformanceAudit = (bundle, options, notes) => {
   }
 
   const audit = JSON.parse(fs.readFileSync(options.auditFile, 'utf8'))
-  const expected = audit.v2_3_1
+  const seedPack = resolveSeedPack(options.seedVersion)
+  const expected = resolveConformanceExpected(audit, seedPack, notes)
   if (!isPlainObject(expected)) {
-    notes.push({
-      level: 'error',
-      source: 'Conformance Audit',
-      message: 'Audit file must contain a v2_3_1 object.',
-    })
     return { skipped: false, auditFile: options.auditFile, invalid: true }
   }
 
@@ -1090,6 +1484,60 @@ const validateFrameworkPackages = (records, indexes, notes) => {
   }
 }
 
+const validateSupportAssetManifest = (bundle, indexes, notes) => {
+  const supportAssets = supportAssetsForBundle(bundle)
+  if (supportAssets.length === 0) return
+
+  const seen = new Set()
+  supportAssets.forEach((asset, index) => {
+    const assetKey = String(asset?.assetKey || '').trim()
+    const source = `Support Asset ${assetKey || index + 1}`
+    if (!assetKey) {
+      notes.push({ level: 'error', source, message: 'Missing assetKey.' })
+    } else if (seen.has(assetKey)) {
+      notes.push({ level: 'error', source, message: `Duplicate assetKey "${assetKey}".` })
+    }
+    if (assetKey) seen.add(assetKey)
+
+    const targetType = String(asset?.targetType || '').trim()
+    const targetKey = String(asset?.targetKey || '').trim()
+    if (!targetType || !targetKey) {
+      notes.push({ level: 'error', source, message: 'Missing targetType or targetKey.' })
+      return
+    }
+
+    if (targetType === 'RuntimeSkill') {
+      if (!indexes.skillsByKey.has(normalizeToken(targetKey))) {
+        notes.push({ level: 'error', source, message: `Unknown RuntimeSkill targetKey "${targetKey}".` })
+      }
+      return
+    }
+
+    if (targetType === 'RuntimeAgent') {
+      if (!indexes.agentsByKey.has(normalizeToken(targetKey))) {
+        notes.push({ level: 'error', source, message: `Unknown RuntimeAgent targetKey "${targetKey}".` })
+      }
+      return
+    }
+
+    if (targetType === 'WorkflowPolicy') {
+      if (!indexes.policiesByKey.has(normalizeToken(targetKey))) {
+        notes.push({ level: 'error', source, message: `Unknown WorkflowPolicy targetKey "${targetKey}".` })
+      }
+      return
+    }
+
+    if (targetType === 'FrameworkPackage') {
+      if (!indexes.packagesByKey.has(normalizeToken(targetKey))) {
+        notes.push({ level: 'error', source, message: `Unknown FrameworkPackage targetKey "${targetKey}".` })
+      }
+      return
+    }
+
+    notes.push({ level: 'error', source, message: `Unsupported support asset targetType "${targetType}".` })
+  })
+}
+
 const validateCrossReferences = (bundle, notes) => {
   const indexes = buildIndexes(bundle)
 
@@ -1103,6 +1551,7 @@ const validateCrossReferences = (bundle, notes) => {
     else if (step.model === UIContract) validateUiContracts(step.records, indexes, notes)
     else if (step.model === FrameworkPackage) validateFrameworkPackages(step.records, indexes, notes)
   }
+  validateSupportAssetManifest(bundle, indexes, notes)
 }
 
 const loadFrameworkPackageEditorOptions = async (notes) => {
@@ -1630,6 +2079,15 @@ const resetRuntimeControlCollections = async ({ session = null } = {}) => {
   return resetResults
 }
 
+const bulkInsertResetRecords = async (step, { session = null } = {}) => {
+  if (step.records.length === 0) return 0
+  await step.model.insertMany(step.records, {
+    ordered: true,
+    session: session || undefined,
+  })
+  return step.records.length
+}
+
 const applyImport = async (bundle, options) => {
   const summary = {
     mode: options.apply ? 'apply' : 'dry-run',
@@ -1672,6 +2130,17 @@ const applyImport = async (bundle, options) => {
           unchanged: 0,
           skipped: 0,
           failed: 0,
+        }
+
+        if (options.resetRuntimeControl) {
+          try {
+            result.created = await bulkInsertResetRecords(step, { session })
+          } catch (error) {
+            result.failed = step.records.length
+            throw new Error(`${step.label} bulk import failed from ${step.fileName}: ${error.message}`)
+          }
+          summary.collections.push(result)
+          continue
         }
 
         for (const record of step.records) {
@@ -1768,11 +2237,12 @@ const printSummary = (payload, reportPath, reportError, json) => {
 }
 
 const importFrameworkSeed = async (optionOverrides = {}) => {
-  const options = {
+  const options = resolveImportOptions({
     ...parseArgs([]),
     ...optionOverrides,
-  }
-  const bundle = loadSeedBundle(options.seedDir)
+    auditFileExplicit: Boolean(optionOverrides.auditFile) || optionOverrides.auditFileExplicit || false,
+  })
+  const bundle = loadSeedBundle(options.seedDir, options.seedVersion)
   const metadata = bundle.find((entry) => entry.notes)
   const notes = metadata?.notes || []
   const frameworkVersion = metadata?.seedContext?.frameworkVersion || DEFAULT_VMF_VERSION

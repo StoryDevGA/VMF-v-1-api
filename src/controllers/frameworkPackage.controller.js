@@ -362,6 +362,7 @@ const resolveCheckpointRunByFallbacksById = async (frameworkPackages = []) => {
   }
 }
 
+const objectIdPattern = /^[0-9a-fA-F]{24}$/
 const tokenPattern = /^[a-z][a-z0-9-]*$/
 
 const slugifyToken = (value) => {
@@ -417,7 +418,9 @@ const serializeFrameworkPackage = (
     ? frameworkPackage.toJSON()
     : { ...frameworkPackage }
 
-  if (!plain.id && plain._id) {
+  if (plain.packageKey) {
+    plain.id = plain.packageKey
+  } else if (!plain.id && plain._id) {
     plain.id = toIdString(plain._id)
   }
 
@@ -447,6 +450,17 @@ const serializeFrameworkPackage = (
   plain.validationBindings = ensureValidationBindingKeys(plain.validationBindings)
 
   return plain
+}
+
+const findFrameworkPackageByIdentifier = (packageIdentifier) => {
+  const normalizedIdentifier = String(packageIdentifier || '').trim()
+  if (objectIdPattern.test(normalizedIdentifier)) {
+    return FrameworkPackage.findById(normalizedIdentifier)
+  }
+
+  return FrameworkPackage.findOne({
+    packageKey: normalizedIdentifier.toLowerCase(),
+  })
 }
 
 const omitDeprecatedFrameworkPackageFields = (payload = {}) => {
@@ -1906,7 +1920,7 @@ const fetchFrameworkPackageDependencies = async (frameworkPackage) => {
   ].reduce((count, row) => count + (Array.isArray(row.issues) ? row.issues.length : 0), 0)
 
   return {
-    id: toIdString(frameworkPackage._id) || frameworkPackage.id,
+    id: frameworkPackage.packageKey || toIdString(frameworkPackage._id) || frameworkPackage.id,
     frameworkKey,
     packageKey: frameworkPackage.packageKey || '',
     summary: {
@@ -3007,7 +3021,7 @@ export const createFrameworkPackage = async (req, res, next) => {
 
 export const getFrameworkPackage = async (req, res, next) => {
   try {
-    const frameworkPackage = await FrameworkPackage.findById(req.params.packageId)
+    const frameworkPackage = await findFrameworkPackageByIdentifier(req.params.packageId)
 
     if (!frameworkPackage) {
       return res.status(404).json({
@@ -3036,7 +3050,7 @@ export const getFrameworkPackage = async (req, res, next) => {
 
 export const cloneFrameworkPackage = async (req, res, next) => {
   try {
-    const source = await FrameworkPackage.findById(req.params.packageId)
+    const source = await findFrameworkPackageByIdentifier(req.params.packageId)
 
     if (!source) {
       return res.status(404).json({
@@ -3200,7 +3214,7 @@ export const cloneFrameworkPackage = async (req, res, next) => {
 
 export const updateFrameworkPackageSafeMetadata = async (req, res, next) => {
   try {
-    const frameworkPackage = await FrameworkPackage.findById(req.params.packageId)
+    const frameworkPackage = await findFrameworkPackageByIdentifier(req.params.packageId)
 
     if (!frameworkPackage) {
       return res.status(404).json({
@@ -3383,7 +3397,7 @@ export const updateFrameworkPackageSafeMetadata = async (req, res, next) => {
 
 export const updateFrameworkPackage = async (req, res, next) => {
   try {
-    const frameworkPackage = await FrameworkPackage.findById(req.params.packageId)
+    const frameworkPackage = await findFrameworkPackageByIdentifier(req.params.packageId)
 
     if (!frameworkPackage) {
       return res.status(404).json({
@@ -3689,7 +3703,7 @@ export const updateFrameworkPackage = async (req, res, next) => {
 }
 
 const findFrameworkPackageOr404 = async (req, res) => {
-  const frameworkPackage = await FrameworkPackage.findById(req.params.packageId)
+  const frameworkPackage = await findFrameworkPackageByIdentifier(req.params.packageId)
 
   if (!frameworkPackage) {
     res.status(404).json({
@@ -3730,7 +3744,7 @@ export const getFrameworkPackageIntegrity = async (req, res, next) => {
 
     return res.status(200).json({
       data: {
-        id: toIdString(frameworkPackage._id) || frameworkPackage.id,
+        id: frameworkPackage.packageKey || toIdString(frameworkPackage._id) || frameworkPackage.id,
         frameworkKey: frameworkPackage.frameworkKey,
         packageKey: frameworkPackage.packageKey,
         version: frameworkPackage.version,
@@ -4165,7 +4179,7 @@ export const getFrameworkPackageDiff = async (req, res, next) => {
 export const activateFrameworkPackage = async (req, res, next) => {
   const session = await mongoose.startSession()
   try {
-    const frameworkPackage = await FrameworkPackage.findById(req.params.packageId)
+    const frameworkPackage = await findFrameworkPackageByIdentifier(req.params.packageId)
 
     if (!frameworkPackage) {
       return res.status(404).json({
