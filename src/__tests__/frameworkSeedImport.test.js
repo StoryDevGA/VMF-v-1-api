@@ -137,9 +137,11 @@ describe('framework seed import guard', () => {
     expect(payload.summary.mode).toBe('dry-run')
     expect(payload.audit.actual).toEqual(
       expect.objectContaining({
+        runtimePathCount: 283,
         skillCount: 36,
         skillReferenceAssetCount: 216,
         supportAssetCount: 265,
+        packageDependencyReferenceCount: 401,
       }),
     )
     expect(payload.notes).toEqual(
@@ -154,6 +156,42 @@ describe('framework seed import guard', () => {
     expect(payload.notes.filter((note) => note.level === 'error')).toEqual([])
   })
 
+  test('staged v3.1 RKM seed includes the governed Discovery evidence pack write path', () => {
+    const rkmSeedDir = path.resolve(seedDir, 'vmf-v3-1-rkm')
+    const runtimePaths = JSON.parse(
+      fs.readFileSync(path.join(rkmSeedDir, 'vmf_v3_1_runtime_paths.json'), 'utf8'),
+    )
+    const frameworkPackage = JSON.parse(
+      fs.readFileSync(path.join(rkmSeedDir, 'vmf_v3_1_framework_package.json'), 'utf8'),
+    )
+
+    const evidencePackPath = runtimePaths.runtimePathRegistries.find(
+      (entry) => entry.pathKey === 'framework_state.evidence_pack',
+    )
+    expect(evidencePackPath).toEqual(expect.objectContaining({
+      status: 'ACTIVE',
+      frameworkKeys: ['VMF'],
+      scope: 'FRAMEWORK_STATE',
+      dataType: 'OBJECT',
+      category: 'STATE',
+      sourceType: 'RUNTIME_STATE',
+      isProtected: false,
+      isSystem: true,
+    }))
+    expect(evidencePackPath.allowedOperations).toEqual(['READ', 'WRITE'])
+
+    expect(frameworkPackage.dependencyLock.references).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          collectionKey: 'RuntimePathRegistry',
+          key: 'framework_state.evidence_pack',
+          status: 'ACTIVE',
+          issues: [],
+        }),
+      ]),
+    )
+  })
+
   test('passes RKM compatibility values used by the v3.1 runtime knowledge model seed', async () => {
     const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'framework-seed-rkm-contract-'))
     const tempSeedDir = path.join(tempRoot, 'seed-data')
@@ -166,21 +204,26 @@ describe('framework seed import guard', () => {
     }
 
     const runtimePaths = readSeed('vmf_v3_1_runtime_paths.json')
-    ;['ADVISOR', 'GOVERNANCE', 'KNOWLEDGE_PACK', 'OWNERSHIP'].forEach((category, index) => {
-      runtimePaths.runtimePathRegistries[index].category = category
+    const pathCategoriesToTest = ['ADVISOR', 'GOVERNANCE', 'KNOWLEDGE_PACK', 'OWNERSHIP']
+    pathCategoriesToTest.forEach((category, index) => {
+      if (index < runtimePaths.runtimePathRegistries.length) {
+        runtimePaths.runtimePathRegistries[index].category = category
+      }
     })
     writeSeed('vmf_v3_1_runtime_paths.json', runtimePaths)
 
     const skills = readSeed('vmf_v3_1_runtime_skills.json')
-    ;['TRUTH', 'EVIDENCE', 'RECOMMENDATION', 'OUTCOME', 'KNOWLEDGE_PACK', 'ADVISOR', 'CONSUMPTION']
-      .forEach((category, index) => {
+    const skillCategoriesToTest = ['TRUTH', 'EVIDENCE', 'RECOMMENDATION', 'OUTCOME', 'KNOWLEDGE_PACK', 'ADVISOR', 'CONSUMPTION']
+    skillCategoriesToTest.forEach((category, index) => {
+      if (index < skills.runtimeSkills.length) {
         skills.runtimeSkills[index].category = category
-      })
+      }
+    })
     writeSeed('vmf_v3_1_runtime_skills.json', skills)
 
     const policies = readSeed('vmf_v3_1_workflow_policies.json')
     const policyTemplate = policies.workflowPolicies[0]
-    const rkmActions = [
+    const rkmPolicies = [
       'SAVE_DISCOVERY',
       'GENERATE_TRUTH',
       'ESCALATE_CONTRADICTION',
@@ -199,43 +242,49 @@ describe('framework seed import guard', () => {
       'NOTIFY',
       'PREPARE_CONSUMPTION',
     ]
+    const rkmPolicyMap = new Map()
     policies.workflowPolicies.push(
-      ...rkmActions.map((governedAction, index) => ({
-        ...policyTemplate,
-        _id: { $oid: `000000000000000000${String(index + 1000).padStart(6, '0')}` },
-        key: `rkm-compat-policy-${index + 1}`,
-        stableId: `policy-rkm-compat-policy-${index + 1}`,
-        lineageId: `policy-rkm-compat-policy-${index + 1}`,
-        name: `RKM Compat Policy ${index + 1}`,
-        policyType: 'RUNTIME_KNOWLEDGE_POLICY',
-        governedAction,
-        decisionMode: 'ALLOW',
-        severity: 'INFO',
-        requiredValidationKeys: [],
-        onPassEffects: [],
-        onFailEffects: [],
-        requiredAgentIds: [],
-        gatingRules: [],
-      })),
+      ...rkmPolicies.map((governedAction, index) => {
+        const policyKey = `rkm-compat-policy-${index + 1}`
+        const policy = {
+          ...policyTemplate,
+          _id: { $oid: `000000000000000000${String(index + 1000).padStart(6, '0')}` },
+          key: policyKey,
+          stableId: `policy-${policyKey}`,
+          lineageId: `policy-${policyKey}`,
+          name: `RKM Compat Policy ${index + 1}`,
+          policyType: 'RUNTIME_KNOWLEDGE_POLICY',
+          governedAction,
+          decisionMode: 'ALLOW',
+          severity: 'INFO',
+          requiredValidationKeys: [],
+          onPassEffects: [],
+          onFailEffects: [],
+          requiredAgentIds: [],
+          gatingRules: [],
+        }
+        rkmPolicyMap.set(governedAction, policyKey)
+        return policy
+      }),
     )
     writeSeed('vmf_v3_1_workflow_policies.json', policies)
 
     const frameworkPackage = readSeed('vmf_v3_1_framework_package.json')
-    const rkmContexts = [
-      'ON_DISCOVERY_SAVE',
-      'ON_GENERATE_TRUTH',
-      'ON_CONTRADICTION_FOUND',
-      'ON_ECONOMIC_MODEL_SAVE',
-      'ON_COMMERCIAL_MODEL_SAVE',
-      'ON_DECISION_REVIEW',
-      'ON_RECOMMENDATION_GENERATED',
-      'ON_OUTPUT_REQUEST',
-      'ON_ADVISOR_REQUEST',
-      'ON_OUTCOME_REQUEST',
-      'ON_HANDOFF',
-      'ON_PACKAGE_BUILD',
-      'ON_MUTATION',
-      'ON_CONSUMPTION_REQUEST',
+    const rkmBindings = [
+      { executionContext: 'ON_DISCOVERY_SAVE', governedAction: 'SAVE_DISCOVERY' },
+      { executionContext: 'ON_GENERATE_TRUTH', governedAction: 'GENERATE_TRUTH' },
+      { executionContext: 'ON_CONTRADICTION_FOUND', governedAction: 'ESCALATE_CONTRADICTION' },
+      { executionContext: 'ON_ECONOMIC_MODEL_SAVE', governedAction: 'SAVE_ECONOMIC_MODEL' },
+      { executionContext: 'ON_COMMERCIAL_MODEL_SAVE', governedAction: 'SAVE_COMMERCIAL_MODEL' },
+      { executionContext: 'ON_DECISION_REVIEW', governedAction: 'REVIEW_DECISION' },
+      { executionContext: 'ON_RECOMMENDATION_GENERATED', governedAction: 'REVIEW_RECOMMENDATION' },
+      { executionContext: 'ON_OUTPUT_REQUEST', governedAction: 'PREPARE_OUTPUT' },
+      { executionContext: 'ON_ADVISOR_REQUEST', governedAction: 'PREPARE_ADVISOR' },
+      { executionContext: 'ON_OUTCOME_REQUEST', governedAction: 'PREPARE_OUTCOME' },
+      { executionContext: 'ON_HANDOFF', governedAction: 'HANDOFF_DOWNSTREAM' },
+      { executionContext: 'ON_PACKAGE_BUILD', governedAction: 'BUILD_KNOWLEDGE_PACKS' },
+      { executionContext: 'ON_MUTATION', governedAction: 'VALIDATE_MUTATION' },
+      { executionContext: 'ON_CONSUMPTION_REQUEST', governedAction: 'PREPARE_CONSUMPTION' },
     ]
     frameworkPackage.executionModel = {
       ...(frameworkPackage.executionModel || {}),
@@ -243,10 +292,10 @@ describe('framework seed import guard', () => {
     }
     frameworkPackage.workflowBindings = [
       ...(frameworkPackage.workflowBindings || []),
-      ...rkmContexts.map((executionContext, index) => ({
-        policyKey: policyTemplate.key,
-        executionContext,
-        governedAction: policyTemplate.governedAction,
+      ...rkmBindings.map((binding, index) => ({
+        policyKey: rkmPolicyMap.get(binding.governedAction),
+        executionContext: binding.executionContext,
+        governedAction: binding.governedAction,
         priority: 700 + index,
       })),
     ]
@@ -266,8 +315,8 @@ describe('framework seed import guard', () => {
     const supportAssets = readSeed('vmf_v3_1_support_asset_manifest.json')
     fs.writeFileSync(path.join(tempSeedDir, 'support_assets/rkm-agent-asset.md'), 'agent asset\n', 'utf8')
     fs.writeFileSync(path.join(tempSeedDir, 'support_assets/rkm-policy-asset.md'), 'policy asset\n', 'utf8')
-    supportAssets.assets.push(
-      {
+    if (agents.runtimeAgents && agents.runtimeAgents.length > 0) {
+      supportAssets.assets.push({
         assetKey: 'rkm-agent-asset',
         fileName: 'support_assets/rkm-agent-asset.md',
         assetType: 'POLICY_GUIDANCE',
@@ -282,13 +331,16 @@ describe('framework seed import guard', () => {
         skillAccessible: true,
         runtimeAccessible: true,
         status: 'ACTIVE',
-      },
-      {
+      })
+    }
+    const firstRkmPolicyKey = rkmPolicyMap.values().next().value
+    if (firstRkmPolicyKey) {
+      supportAssets.assets.push({
         assetKey: 'rkm-policy-asset',
         fileName: 'support_assets/rkm-policy-asset.md',
         assetType: 'POLICY_GUIDANCE',
         targetType: 'WorkflowPolicy',
-        targetKey: policyTemplate.key,
+        targetKey: firstRkmPolicyKey,
         visible: false,
         editable: false,
         publishable: false,
@@ -298,8 +350,8 @@ describe('framework seed import guard', () => {
         skillAccessible: true,
         runtimeAccessible: true,
         status: 'ACTIVE',
-      },
-    )
+      })
+    }
     writeSeed('vmf_v3_1_support_asset_manifest.json', supportAssets)
 
     const { stdout } = await runSeedGuard([
@@ -324,7 +376,7 @@ describe('framework seed import guard', () => {
       missingFromBackend: [],
     }))
     expect(checksByField.get('workflowBindings.executionContext')).toEqual(expect.objectContaining({
-      seededValues: expect.arrayContaining(['ON_DISCOVERY_SAVE', 'ON_ADVISOR_REQUEST', 'ON_PACKAGE_BUILD']),
+      seededValues: expect.arrayContaining(['ON_DISCOVERY_SAVE', 'ON_ADVISOR_REQUEST', 'ON_OUTCOME_REQUEST']),
       missingFromClient: [],
       missingFromBackend: [],
     }))
