@@ -16,8 +16,8 @@ import UIContract, { UI_CONTRACT_STATUSES } from '../models/UIContract.js'
 import RuntimeSkill from '../models/RuntimeSkill.js'
 import SkillRoleRegistry, { SKILL_ROLE_REGISTRY_STATUSES } from '../models/SkillRoleRegistry.js'
 import RuntimePathRegistry, {
-  RUNTIME_PATH_REGISTRY_CATEGORIES,
   RUNTIME_PATH_REGISTRY_OPERATIONS,
+  RUNTIME_PATH_REGISTRY_SECTION_BINDING_CATEGORIES,
   RUNTIME_PATH_REGISTRY_SCOPES,
   RUNTIME_PATH_REGISTRY_STATUSES,
 } from '../models/RuntimePathRegistry.js'
@@ -870,12 +870,13 @@ const validateSectionRuntimePaths = async ({ sections = [], frameworkKey }) => {
     .select('pathKey status frameworkKeys scope category allowedOperations')
     .lean()
   const byPath = new Map(rows.map((row) => [row.pathKey, row]))
+  const sectionBindingCategories = new Set(RUNTIME_PATH_REGISTRY_SECTION_BINDING_CATEGORIES)
   const invalidRuntimePaths = runtimePaths.filter((runtimePath) => {
     const row = byPath.get(runtimePath)
     if (!row) return true
     if (row.status !== RUNTIME_PATH_REGISTRY_STATUSES.ACTIVE) return true
     if (row.scope !== RUNTIME_PATH_REGISTRY_SCOPES.FRAMEWORK_STATE) return true
-    if (row.category !== RUNTIME_PATH_REGISTRY_CATEGORIES.SECTION) return true
+    if (!sectionBindingCategories.has(row.category)) return true
     if (!runtimePath.startsWith('framework_state.sections.')) return true
     // Normalize here as a guard for legacy or seeded rows that predate model hooks.
     const allowedOperations = Array.isArray(row.allowedOperations)
@@ -887,7 +888,7 @@ const validateSectionRuntimePaths = async ({ sections = [], frameworkKey }) => {
 
   if (invalidRuntimePaths.length === 0) return null
 
-  return `Section runtime paths must be ACTIVE, FRAMEWORK_STATE/SECTION, allow BIND, and be compatible with "${frameworkKey}": ${invalidRuntimePaths.join(', ')}.`
+  return `Section runtime paths must be ACTIVE, FRAMEWORK_STATE section-compatible paths, allow BIND, and be compatible with "${frameworkKey}": ${invalidRuntimePaths.join(', ')}.`
 }
 
 const validateUIContractSectionAlignment = ({ sections = [], uiContract = null }) => {

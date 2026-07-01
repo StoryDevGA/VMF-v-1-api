@@ -159,7 +159,7 @@ export const normalizeRuntimeActivationReadiness = ({
       status: activeDeployment ? 'WARN' : 'PASS',
       reason: activeDeployment ? 'RUNTIME_DEPLOYMENT_WILL_SUPERSEDE' : 'RUNTIME_DEPLOYMENT_NO_CONFLICT',
       message: activeDeployment
-        ? 'Existing active deployment will be superseded.'
+        ? 'Existing active deployment for this package will be superseded.'
         : 'No active runtime deployment conflict exists.',
     },
   ]
@@ -195,16 +195,23 @@ export const normalizeRuntimeActivationReadiness = ({
 
 export const getActiveRuntimeDeployment = async ({
   frameworkKey,
+  packageId = null,
   tenantScope = RUNTIME_ACTIVATION_TENANT_SCOPE,
   deploymentMode = RUNTIME_ACTIVATION_DEPLOYMENT_MODE,
   session = null,
 } = {}) => {
-  const query = RuntimeDeployment.findOne({
+  const filter = {
     frameworkKey,
     tenantScope,
     deploymentMode,
     status: RUNTIME_DEPLOYMENT_STATUSES.ACTIVE,
-  })
+  }
+
+  if (packageId) {
+    filter.packageId = packageId
+  }
+
+  const query = RuntimeDeployment.findOne(filter)
 
   return session && typeof query.session === 'function'
     ? query.session(session)
@@ -221,6 +228,7 @@ export const getRuntimeActivationReadiness = async ({
 
   const activeDeployment = await getActiveRuntimeDeployment({
     frameworkKey: packageRecord.frameworkKey,
+    packageId: packageRecord._id,
   })
 
   return normalizeRuntimeActivationReadiness({
@@ -253,6 +261,7 @@ export const registerRuntimeActivation = async ({
   const deploymentMode = RUNTIME_ACTIVATION_DEPLOYMENT_MODE
   const previousDeployment = await getActiveRuntimeDeployment({
     frameworkKey: frameworkPackage.frameworkKey,
+    packageId: frameworkPackage._id,
     tenantScope,
     deploymentMode,
     session,

@@ -15,6 +15,8 @@
     "knowledge-packs:backfill-categories": "node src/scripts/backfillKnowledgePackCategories.js",
     "framework-packages:unset-legacy-fields": "node src/scripts/unsetDeprecatedFrameworkPackageFields.js",
     "framework-packages:drop-legacy-active-index": "node src/scripts/dropLegacyFrameworkPackageActiveIndex.js",
+    "runtime-deployments:migrate-active-index": "node src/scripts/migrateRuntimeDeploymentActiveIndex.js",
+    "runtime-deployments:restore-package": "node src/scripts/restoreRuntimePackageDeployment.js",
     "customers:enforce-name-uniqueness": "node src/scripts/enforceCustomerNameUniqueness.js",
     "governance:backfill": "node src/scripts/backfillCustomerLicenseGovernance.js",
     "governance:report-admin-invariants": "node src/scripts/reportCustomerAdminInvariantViolations.js",

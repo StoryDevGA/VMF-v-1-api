@@ -28,7 +28,10 @@ import FrameworkPackage, {
   FRAMEWORK_PACKAGE_VISIBILITY,
   FRAMEWORK_PACKAGE_WORKFLOW_EXECUTION_CONTEXTS,
 } from '../models/FrameworkPackage.js'
-import { RUNTIME_PATH_REGISTRY_CATEGORIES } from '../models/RuntimePathRegistry.js'
+import {
+  RUNTIME_PATH_REGISTRY_CATEGORIES,
+  RUNTIME_PATH_REGISTRY_SECTION_BINDING_CATEGORIES,
+} from '../models/RuntimePathRegistry.js'
 import { RUNTIME_SKILL_CATEGORIES } from '../models/RuntimeSkill.js'
 import { VALIDATION_REGISTRY_CATEGORIES } from '../models/ValidationRegistry.js'
 import { WORKFLOW_POLICY_TYPES } from '../models/WorkflowPolicy.js'
@@ -133,6 +136,7 @@ const WORKFLOW_POLICY_TYPE_MAP = Object.freeze({
   STATE_GATE: 'LIFECYCLE_GATE',
   VALIDATION_GATE: 'VALIDATION',
 })
+const SECTION_BINDING_CATEGORY_SET = new Set(RUNTIME_PATH_REGISTRY_SECTION_BINDING_CATEGORIES)
 const buildImportSteps = (fileNames) => Object.freeze([
   Object.freeze({
     label: 'Runtime Paths',
@@ -224,6 +228,25 @@ const SEED_PACKS = Object.freeze({
     supportAssetManifest: Object.freeze({
       fileName: 'vmf_v3_1_support_asset_manifest.json',
       arrayKey: 'assets',
+    }),
+  }),
+  '3.1.1': Object.freeze({
+    version: '3.1.1',
+    auditFileName: '04_audits/seed_pack_audit.json',
+    acceptCompatibilityAuditWithoutCounts: true,
+    importSteps: buildImportSteps({
+      runtimePaths: '02_seed_data/runtime_path_registry.json',
+      skillRoles: '02_seed_data/skill_role_registry.json',
+      skills: '02_seed_data/runtime_skills.json',
+      validations: '02_seed_data/validation_registry.json',
+      agents: '02_seed_data/runtime_agents.json',
+      policies: '02_seed_data/workflow_policies.json',
+      uiContract: '02_seed_data/ui_contract.json',
+      frameworkPackage: '02_seed_data/framework_package.json',
+    }),
+    supportAssetManifest: Object.freeze({
+      fileName: '02_seed_data/supporting_asset_records.json',
+      arrayKey: 'supportingAssets',
     }),
   }),
 })
@@ -829,6 +852,16 @@ const isPathInside = (parentPath, childPath) => {
   return relativePath === '' || (!relativePath.startsWith('..') && !path.isAbsolute(relativePath))
 }
 
+const normalizeSupportAssetRecord = (asset) => {
+  if (!isPlainObject(asset)) return asset
+  return {
+    ...asset,
+    fileName: String(asset.fileName || asset.filePath || '').trim(),
+    targetType: String(asset.targetType || asset.ownerType || '').trim(),
+    targetKey: String(asset.targetKey || asset.ownerKey || '').trim(),
+  }
+}
+
 const loadSupportAssetManifest = (seedDir, seedPack, notes) => {
   if (!seedPack.supportAssetManifest) return null
 
@@ -849,8 +882,8 @@ const loadSupportAssetManifest = (seedDir, seedPack, notes) => {
   }
 
   const parsedSeed = JSON.parse(fs.readFileSync(filePath, 'utf8'))
-  const assetRecords = parsedSeed[manifest.arrayKey]
-  if (!Array.isArray(assetRecords)) {
+  const rawAssetRecords = parsedSeed[manifest.arrayKey]
+  if (!Array.isArray(rawAssetRecords)) {
     notes.push({
       level: 'error',
       source: 'Support Asset Manifest',
@@ -863,6 +896,7 @@ const loadSupportAssetManifest = (seedDir, seedPack, notes) => {
       assetRecords: [],
     }
   }
+  const assetRecords = rawAssetRecords.map(normalizeSupportAssetRecord)
 
   if (
     Number.isInteger(parsedSeed.recordCount)
@@ -1173,6 +1207,18 @@ const resolveConformanceExpected = (audit, seedPack, notes) => {
   }
   if (Object.keys(expected).length > 0) return expected
 
+  if (
+    seedPack.acceptCompatibilityAuditWithoutCounts
+    && String(audit.status || '').trim().toUpperCase() === 'PASS'
+  ) {
+    notes.push({
+      level: 'info',
+      source: 'Conformance Audit',
+      message: `${seedPack.version} compatibility audit has PASS status; count assertions are enforced from seed recordCount fields.`,
+    })
+    return {}
+  }
+
   notes.push({
     level: 'error',
     source: 'Conformance Audit',
@@ -1281,7 +1327,7 @@ const validateSectionRuntimePathReference = ({ notes, source, pathKey, indexes, 
   const frameworkKeys = Array.isArray(runtimePath.frameworkKeys) ? runtimePath.frameworkKeys : []
   const validSectionPath = runtimePath.status === 'ACTIVE'
     && runtimePath.scope === 'FRAMEWORK_STATE'
-    && runtimePath.category === 'SECTION'
+    && SECTION_BINDING_CATEGORY_SET.has(runtimePath.category)
     && pathKey.startsWith('framework_state.sections.')
     && (!frameworkKey || frameworkKeys.includes(frameworkKey))
 
@@ -1290,7 +1336,7 @@ const validateSectionRuntimePathReference = ({ notes, source, pathKey, indexes, 
       level: 'error',
       source,
       message:
-        `Package section runtime path "${pathKey}" must be an ACTIVE FRAMEWORK_STATE/SECTION path `
+        `Package section runtime path "${pathKey}" must be an ACTIVE FRAMEWORK_STATE section-compatible path `
         + 'under framework_state.sections.* and compatible with the package framework.',
     })
   }
@@ -2039,12 +2085,36 @@ const buildImportUpdatePayload = (record) =>
     return payload
   }, {})
 
+const isLockedExistingRuntimeControlRecord = (record) => record?.isLocked === true
+
 const resolveFindOne = (model, query, session) => {
   const findQuery = model.findOne(query)
   if (session && typeof findQuery?.session === 'function') {
     return findQuery.session(session).exec()
   }
   return findQuery.exec()
+}
+
+const prepareSideBySideImportEntries = async (bundle) => {
+  for (const step of bundle.filter((entry) => entry.records)) {
+    const sourceRecordCount = step.records.length
+    const records = []
+    let lockedExistingSkipped = 0
+
+    for (const record of step.records) {
+      const query = buildLookupQuery(step, record)
+      const existing = await resolveFindOne(step.model, query, null)
+      if (isLockedExistingRuntimeControlRecord(existing)) {
+        lockedExistingSkipped += 1
+      } else {
+        records.push(record)
+      }
+    }
+
+    step.sourceRecordCount = sourceRecordCount
+    step.lockedExistingSkipped = lockedExistingSkipped
+    step.records = records
+  }
 }
 
 const importRecord = async (step, record, { session = null } = {}) => {
@@ -2056,6 +2126,8 @@ const importRecord = async (step, record, { session = null } = {}) => {
     await created.save(session ? { session } : undefined)
     return 'created'
   }
+
+  if (isLockedExistingRuntimeControlRecord(existing)) return 'skipped'
 
   const updatePayload = buildImportUpdatePayload(record)
   existing.set(updatePayload)
@@ -2113,6 +2185,9 @@ const applyImport = async (bundle, options) => {
   if (options.manageConnection !== false) {
     await connectDb()
   }
+  if (!options.resetRuntimeControl) {
+    await prepareSideBySideImportEntries(bundle)
+  }
   const session = await mongoose.startSession()
   try {
     await session.withTransaction(async () => {
@@ -2124,11 +2199,11 @@ const applyImport = async (bundle, options) => {
         const result = {
           label: step.label,
           fileName: step.fileName,
-          loaded: step.records.length,
+          loaded: step.sourceRecordCount ?? step.records.length,
           created: 0,
           updated: 0,
           unchanged: 0,
-          skipped: 0,
+          skipped: step.lockedExistingSkipped || 0,
           failed: 0,
         }
 

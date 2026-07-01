@@ -996,41 +996,49 @@ describe('GET /api/v1/customers/:customerId/tenants/:tenantId/vmfs', () => {
 /* ================================================================== */
 
 describe('GET /api/v1/customers/:customerId/tenants/:tenantId/vmfs/framework-packages', () => {
-  test('lists active customer-visible VMF framework packages available to the tenant workspace', async () => {
+  test('lists multiple active runtime-ready VMF versions available to the tenant workspace', async () => {
     const token = await getTenantAdminToken()
     const packageRows = [
-      makeFrameworkPackage(),
+      makeFrameworkPackage({
+        packageName: 'VMF v3.1.1 Runtime Knowledge Model',
+        packageKey: 'standard-package-vmf-3-1-1-rkm',
+        version: '3.1.1',
+        isDefault: true,
+        updatedAt: '2026-07-01T12:00:00.000Z',
+      }),
       makeFrameworkPackage({
         _id: FRAMEWORK_PACKAGE_ID_2,
         id: FRAMEWORK_PACKAGE_ID_2,
-        packageName: 'VMF Enterprise Package',
-        packageKey: 'vmf-enterprise-package',
-        version: '2.4.0',
+        packageName: 'VMF v3.1 Runtime Knowledge Model',
+        packageKey: 'standard-package-vmf-3-1-rkm',
+        version: '3.1.0',
         isDefault: false,
         customerAccessMode: 'SELECTED_CUSTOMERS',
         assignedCustomerIds: [CUSTOMER_ID],
         dependencyLock: {
           status: 'PASS',
-          snapshotId: 'dependency-snapshot-vmf-enterprise-package',
-          snapshotHash: 'dependency-snapshot-hash-vmf-enterprise-package',
-          references: [{ collectionKey: 'RuntimeSkill', stableId: 'skill-enterprise' }],
+          snapshotId: 'dependency-snapshot-vmf-v3-1-rkm',
+          snapshotHash: 'dependency-snapshot-hash-vmf-v3-1-rkm',
+          references: [{ collectionKey: 'RuntimeSkill', stableId: 'skill-vmf-v3-1' }],
         },
+        updatedAt: '2026-06-29T18:24:02.000Z',
       }),
     ]
+    const sortPackages = jest.fn().mockReturnValue({
+      lean: jest.fn().mockResolvedValue(packageRows),
+    })
 
     Tenant.findById.mockResolvedValue(makeFakeTenant())
     FrameworkPackage.find.mockReturnValue({
-      sort: jest.fn().mockReturnValue({
-        lean: jest.fn().mockResolvedValue(packageRows),
-      }),
+      sort: sortPackages,
     })
     RuntimeDeployment.find.mockReturnValue({
       lean: jest.fn().mockResolvedValue([
         makeRuntimeDeployment(),
         makeRuntimeDeployment({
-          _id: 'runtime-deployment-vmf-enterprise-package',
-          deploymentId: 'runtime-deployment-vmf-enterprise-package',
-          activationId: 'runtime-activation-vmf-enterprise-package',
+          _id: 'runtime-deployment-vmf-v3-1-rkm',
+          deploymentId: 'runtime-deployment-vmf-v3-1-rkm',
+          activationId: 'runtime-activation-vmf-v3-1-rkm',
           packageId: FRAMEWORK_PACKAGE_ID_2,
         }),
       ]),
@@ -1039,12 +1047,12 @@ describe('GET /api/v1/customers/:customerId/tenants/:tenantId/vmfs/framework-pac
       lean: jest.fn().mockResolvedValue([
         makeRuntimeActivationSnapshot(),
         makeRuntimeActivationSnapshot({
-          _id: 'runtime-activation-vmf-enterprise-package',
-          activationId: 'runtime-activation-vmf-enterprise-package',
-          deploymentId: 'runtime-deployment-vmf-enterprise-package',
+          _id: 'runtime-activation-vmf-v3-1-rkm',
+          activationId: 'runtime-activation-vmf-v3-1-rkm',
+          deploymentId: 'runtime-deployment-vmf-v3-1-rkm',
           packageId: FRAMEWORK_PACKAGE_ID_2,
-          dependencySnapshotId: 'dependency-snapshot-vmf-enterprise-package',
-          dependencySnapshotHash: 'dependency-snapshot-hash-vmf-enterprise-package',
+          dependencySnapshotId: 'dependency-snapshot-vmf-v3-1-rkm',
+          dependencySnapshotHash: 'dependency-snapshot-hash-vmf-v3-1-rkm',
         }),
       ]),
     })
@@ -1073,17 +1081,22 @@ describe('GET /api/v1/customers/:customerId/tenants/:tenantId/vmfs/framework-pac
       'dependencyLock.snapshotId': { $exists: true, $nin: [null, ''] },
       'dependencyLock.references.0': { $exists: true },
     })
+    expect(sortPackages).toHaveBeenCalledWith({ isDefault: -1, updatedAt: -1, packageName: 1 })
     expect(res.body.data).toEqual([
       expect.objectContaining({
         id: FRAMEWORK_PACKAGE_ID,
-        packageName: 'VMF Active Package',
-        version: '2.3.1',
+        packageName: 'VMF v3.1.1 Runtime Knowledge Model',
+        packageKey: 'standard-package-vmf-3-1-1-rkm',
+        version: '3.1.1',
+        isDefault: true,
         status: 'ACTIVE',
       }),
       expect.objectContaining({
         id: FRAMEWORK_PACKAGE_ID_2,
-        packageName: 'VMF Enterprise Package',
-        version: '2.4.0',
+        packageName: 'VMF v3.1 Runtime Knowledge Model',
+        packageKey: 'standard-package-vmf-3-1-rkm',
+        version: '3.1.0',
+        isDefault: false,
         status: 'ACTIVE',
       }),
     ])

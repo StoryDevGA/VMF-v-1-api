@@ -14,6 +14,13 @@ import {
   dropLegacyFrameworkPackageActiveIndex,
   isLegacyActiveFrameworkPackageIndex,
 } from '../scripts/dropLegacyFrameworkPackageActiveIndex.js'
+import {
+  migrateRuntimeDeploymentActiveIndex,
+  isLegacyActiveRuntimeDeploymentIndex,
+} from '../scripts/migrateRuntimeDeploymentActiveIndex.js'
+import {
+  restoreRuntimePackageDeployment,
+} from '../scripts/restoreRuntimePackageDeployment.js'
 import { backfillRuntimeControlVersioningFields } from '../scripts/backfillRuntimeControlVersioningFields.js'
 
 const ACTOR_ID = '507f1f77bcf86cd799439011'
@@ -481,6 +488,417 @@ describe('dropLegacyFrameworkPackageActiveIndex', () => {
       },
     })).rejects.toThrow('drop failed')
 
+    expect(disconnect).toHaveBeenCalled()
+  })
+})
+
+describe('migrateRuntimeDeploymentActiveIndex', () => {
+  test('detects only legacy unique active Runtime Deployment indexes', () => {
+    expect(isLegacyActiveRuntimeDeploymentIndex({
+      name: 'unique_active_runtime_deployment',
+      key: { frameworkKey: 1, tenantScope: 1, deploymentMode: 1, status: 1 },
+      unique: true,
+    })).toBe(true)
+    expect(isLegacyActiveRuntimeDeploymentIndex({
+      name: 'legacy_active_runtime_deployment_by_shape',
+      key: { frameworkKey: 1, tenantScope: 1, deploymentMode: 1, status: 1 },
+      unique: true,
+      partialFilterExpression: { status: 'ACTIVE' },
+    })).toBe(true)
+    expect(isLegacyActiveRuntimeDeploymentIndex({
+      name: 'unique_active_runtime_deployment_per_package',
+      key: { frameworkKey: 1, packageId: 1, tenantScope: 1, deploymentMode: 1, status: 1 },
+      unique: true,
+      partialFilterExpression: { status: 'ACTIVE' },
+    })).toBe(false)
+    expect(isLegacyActiveRuntimeDeploymentIndex({
+      name: 'runtime_deployment_status_lookup',
+      key: { frameworkKey: 1, status: 1 },
+    })).toBe(false)
+  })
+
+  test('dry-run reports legacy active Runtime Deployment indexes without writing', async () => {
+    const connect = jest.fn(async () => {})
+    const disconnect = jest.fn(async () => {})
+    const collection = {
+      db: { databaseName: 'vmf_test' },
+      indexes: jest.fn().mockResolvedValue([
+        { name: '_id_', key: { _id: 1 } },
+        {
+          name: 'unique_active_runtime_deployment',
+          key: { frameworkKey: 1, tenantScope: 1, deploymentMode: 1, status: 1 },
+          unique: true,
+          partialFilterExpression: { status: 'ACTIVE' },
+        },
+      ]),
+      dropIndex: jest.fn(),
+      createIndex: jest.fn(),
+    }
+    const logs = []
+
+    const result = await migrateRuntimeDeploymentActiveIndex({
+      logger: (message) => logs.push(message),
+      dependencies: {
+        connect,
+        disconnect,
+        model: { collection },
+      },
+    })
+
+    expect(connect).toHaveBeenCalled()
+    expect(disconnect).toHaveBeenCalled()
+    expect(collection.dropIndex).not.toHaveBeenCalled()
+    expect(collection.createIndex).not.toHaveBeenCalled()
+    expect(result.mode).toBe('dry-run')
+    expect(result.legacyActiveIndexes).toEqual(['unique_active_runtime_deployment'])
+    expect(result.targetActiveIndexExists).toBe(false)
+    expect(logs[0]).toContain('database vmf_test')
+  })
+
+  test('apply creates per-package active index before dropping legacy index', async () => {
+    const connect = jest.fn(async () => {})
+    const disconnect = jest.fn(async () => {})
+    const collection = {
+      db: { databaseName: 'vmf_test' },
+      indexes: jest.fn().mockResolvedValue([
+        { name: '_id_', key: { _id: 1 } },
+        {
+          name: 'unique_active_runtime_deployment',
+          key: { frameworkKey: 1, tenantScope: 1, deploymentMode: 1, status: 1 },
+          unique: true,
+          partialFilterExpression: { status: 'ACTIVE' },
+        },
+      ]),
+      dropIndex: jest.fn().mockResolvedValue({ ok: 1 }),
+      createIndex: jest.fn().mockResolvedValue('unique_active_runtime_deployment_per_package'),
+    }
+
+    const result = await migrateRuntimeDeploymentActiveIndex({
+      apply: true,
+      logger: jest.fn(),
+      dependencies: {
+        connect,
+        disconnect,
+        model: { collection },
+      },
+    })
+
+    expect(collection.createIndex).toHaveBeenCalledWith(
+      { frameworkKey: 1, packageId: 1, tenantScope: 1, deploymentMode: 1, status: 1 },
+      {
+        unique: true,
+        partialFilterExpression: { status: 'ACTIVE' },
+        name: 'unique_active_runtime_deployment_per_package',
+      },
+    )
+    expect(collection.dropIndex).toHaveBeenCalledWith('unique_active_runtime_deployment')
+    expect(collection.createIndex.mock.invocationCallOrder[0]).toBeLessThan(
+      collection.dropIndex.mock.invocationCallOrder[0],
+    )
+    expect(result.droppedIndexes).toEqual(['unique_active_runtime_deployment'])
+    expect(result.targetActiveIndexCreated).toBe(true)
+  })
+
+  test('apply skips target creation when per-package active index already exists', async () => {
+    const connect = jest.fn(async () => {})
+    const disconnect = jest.fn(async () => {})
+    const collection = {
+      db: { databaseName: 'vmf_test' },
+      indexes: jest.fn().mockResolvedValue([
+        { name: '_id_', key: { _id: 1 } },
+        {
+          name: 'unique_active_runtime_deployment',
+          key: { frameworkKey: 1, tenantScope: 1, deploymentMode: 1, status: 1 },
+          unique: true,
+          partialFilterExpression: { status: 'ACTIVE' },
+        },
+        {
+          name: 'unique_active_runtime_deployment_per_package',
+          key: { frameworkKey: 1, packageId: 1, tenantScope: 1, deploymentMode: 1, status: 1 },
+          unique: true,
+          partialFilterExpression: { status: 'ACTIVE' },
+        },
+      ]),
+      dropIndex: jest.fn().mockResolvedValue({ ok: 1 }),
+      createIndex: jest.fn(),
+    }
+
+    const result = await migrateRuntimeDeploymentActiveIndex({
+      apply: true,
+      logger: jest.fn(),
+      dependencies: {
+        connect,
+        disconnect,
+        model: { collection },
+      },
+    })
+
+    expect(collection.createIndex).not.toHaveBeenCalled()
+    expect(collection.dropIndex).toHaveBeenCalledWith('unique_active_runtime_deployment')
+    expect(result.targetActiveIndexExists).toBe(true)
+    expect(result.targetActiveIndexCreated).toBe(false)
+  })
+
+  test('apply is a no-op when Runtime Deployment indexes are already migrated', async () => {
+    const connect = jest.fn(async () => {})
+    const disconnect = jest.fn(async () => {})
+    const collection = {
+      db: { databaseName: 'vmf_test' },
+      indexes: jest.fn().mockResolvedValue([
+        { name: '_id_', key: { _id: 1 } },
+        {
+          name: 'unique_active_runtime_deployment_per_package',
+          key: { frameworkKey: 1, packageId: 1, tenantScope: 1, deploymentMode: 1, status: 1 },
+          unique: true,
+          partialFilterExpression: { status: 'ACTIVE' },
+        },
+      ]),
+      dropIndex: jest.fn(),
+      createIndex: jest.fn(),
+    }
+
+    const result = await migrateRuntimeDeploymentActiveIndex({
+      apply: true,
+      logger: jest.fn(),
+      dependencies: {
+        connect,
+        disconnect,
+        model: { collection },
+      },
+    })
+
+    expect(collection.createIndex).not.toHaveBeenCalled()
+    expect(collection.dropIndex).not.toHaveBeenCalled()
+    expect(result.ok).toBe(true)
+    expect(result.droppedIndexes).toEqual([])
+    expect(result.targetActiveIndexCreated).toBe(false)
+  })
+
+  test('apply swallows IndexNotFound when a legacy runtime deployment index is already gone', async () => {
+    const connect = jest.fn(async () => {})
+    const disconnect = jest.fn(async () => {})
+    const collection = {
+      db: { databaseName: 'vmf_test' },
+      indexes: jest.fn().mockResolvedValue([
+        { name: '_id_', key: { _id: 1 } },
+        {
+          name: 'unique_active_runtime_deployment',
+          key: { frameworkKey: 1, tenantScope: 1, deploymentMode: 1, status: 1 },
+          unique: true,
+          partialFilterExpression: { status: 'ACTIVE' },
+        },
+        {
+          name: 'unique_active_runtime_deployment_per_package',
+          key: { frameworkKey: 1, packageId: 1, tenantScope: 1, deploymentMode: 1, status: 1 },
+          unique: true,
+          partialFilterExpression: { status: 'ACTIVE' },
+        },
+      ]),
+      dropIndex: jest.fn().mockRejectedValue({ code: 27, codeName: 'IndexNotFound' }),
+      createIndex: jest.fn(),
+    }
+
+    const result = await migrateRuntimeDeploymentActiveIndex({
+      apply: true,
+      logger: jest.fn(),
+      dependencies: {
+        connect,
+        disconnect,
+        model: { collection },
+      },
+    })
+
+    expect(collection.dropIndex).toHaveBeenCalledWith('unique_active_runtime_deployment')
+    expect(result.droppedIndexes).toEqual([])
+  })
+})
+
+describe('restoreRuntimePackageDeployment', () => {
+  const packageRecord = {
+    _id: '6a42b841aca8d97e82b956ce',
+    frameworkKey: 'VMF',
+    version: '3.1.0',
+    packageKey: 'standard-package-vmf-3-1-rkm',
+    status: 'ACTIVE',
+    isDefault: false,
+    visibility: 'INTERNAL_ONLY',
+    customerAccessMode: 'ALL_CUSTOMERS',
+    assignedCustomerIds: [],
+  }
+  const deploymentRecord = {
+    _id: '6a43c5969828a0ca67e4f80b',
+    deploymentId: 'deployment-vmf-global-production--20260630133310-82b956ce',
+    activationId: 'activation-vmf-3-1-0-20260630133310-82b956ce',
+    status: 'SUPERSEDED',
+    tenantScope: 'GLOBAL',
+    deploymentMode: 'PRODUCTION',
+    supersededAt: new Date('2026-07-01T12:43:53.973Z'),
+    supersededByDeploymentId: 'deployment-vmf-global-production--20260701124353-cfc173ca',
+  }
+  const snapshotRecord = {
+    _id: '6a43c5969828a0ca67e4f809',
+    activationId: 'activation-vmf-3-1-0-20260630133310-82b956ce',
+    activationStatus: 'SUPERSEDED',
+    supersededByActivationId: 'activation-vmf-3-1-1-20260701124353-cfc173ca',
+  }
+
+  const makeSelectLeanQuery = (value) => ({
+    select: jest.fn().mockReturnValue({
+      lean: jest.fn().mockResolvedValue(value),
+    }),
+  })
+  const makeSortLeanQuery = (value) => ({
+    sort: jest.fn().mockReturnValue({
+      lean: jest.fn().mockResolvedValue(value),
+    }),
+  })
+  const makeRestoreModels = ({
+    packageValue = packageRecord,
+    deploymentValue = deploymentRecord,
+    snapshotValue = snapshotRecord,
+  } = {}) => ({
+    FrameworkPackage: {
+      findOne: jest.fn().mockReturnValue(makeSelectLeanQuery(packageValue)),
+      updateOne: jest.fn().mockResolvedValue({ matchedCount: 1, modifiedCount: 1 }),
+    },
+    RuntimeDeployment: {
+      findOne: jest.fn().mockReturnValue(makeSortLeanQuery(deploymentValue)),
+      updateOne: jest.fn().mockResolvedValue({ matchedCount: 1, modifiedCount: 1 }),
+    },
+    RuntimeActivationSnapshot: {
+      findOne: jest.fn().mockReturnValue(makeSortLeanQuery(snapshotValue)),
+      updateOne: jest.fn().mockResolvedValue({ matchedCount: 1, modifiedCount: 1 }),
+    },
+  })
+
+  test('dry-run reports package deployment restore actions without writing', async () => {
+    const connect = jest.fn(async () => {})
+    const disconnect = jest.fn(async () => {})
+    const models = makeRestoreModels()
+
+    const result = await restoreRuntimePackageDeployment({
+      packageKey: 'standard-package-vmf-3-1-rkm',
+      customerVisible: true,
+      logger: jest.fn(),
+      dependencies: {
+        connect,
+        disconnect,
+        models,
+      },
+    })
+
+    expect(connect).toHaveBeenCalled()
+    expect(disconnect).toHaveBeenCalled()
+    expect(models.FrameworkPackage.findOne).toHaveBeenCalledWith({
+      packageKey: 'standard-package-vmf-3-1-rkm',
+    })
+    expect(models.RuntimeDeployment.findOne).toHaveBeenCalledWith({
+      frameworkKey: 'VMF',
+      packageId: packageRecord._id,
+      tenantScope: 'GLOBAL',
+      deploymentMode: 'PRODUCTION',
+    })
+    expect(models.RuntimeActivationSnapshot.findOne).toHaveBeenCalledWith({
+      activationId: deploymentRecord.activationId,
+      packageId: packageRecord._id,
+    })
+    expect(models.FrameworkPackage.updateOne).not.toHaveBeenCalled()
+    expect(models.RuntimeDeployment.updateOne).not.toHaveBeenCalled()
+    expect(models.RuntimeActivationSnapshot.updateOne).not.toHaveBeenCalled()
+    expect(result.mode).toBe('dry-run')
+    expect(result.applied).toBe(false)
+    expect(result.actions).toEqual({
+      packageAccessUpdate: {
+        visibility: 'CUSTOMER_VISIBLE',
+        customerAccessMode: 'ALL_CUSTOMERS',
+        assignedCustomerIds: [],
+      },
+      restoreDeployment: true,
+      restoreActivationSnapshot: true,
+    })
+  })
+
+  test('apply restores one package deployment and activation snapshot transactionally', async () => {
+    const connect = jest.fn(async () => {})
+    const disconnect = jest.fn(async () => {})
+    const models = makeRestoreModels()
+    const session = {
+      withTransaction: jest.fn(async (callback) => callback()),
+      endSession: jest.fn(async () => {}),
+    }
+
+    const result = await restoreRuntimePackageDeployment({
+      apply: true,
+      packageKey: 'standard-package-vmf-3-1-rkm',
+      customerVisible: true,
+      logger: jest.fn(),
+      dependencies: {
+        connect,
+        disconnect,
+        models,
+        startSession: jest.fn().mockResolvedValue(session),
+      },
+    })
+
+    expect(session.withTransaction).toHaveBeenCalled()
+    expect(session.endSession).toHaveBeenCalled()
+    expect(models.FrameworkPackage.updateOne).toHaveBeenCalledWith(
+      { _id: packageRecord._id },
+      {
+        $set: {
+          visibility: 'CUSTOMER_VISIBLE',
+          customerAccessMode: 'ALL_CUSTOMERS',
+          assignedCustomerIds: [],
+        },
+      },
+      { session },
+    )
+    expect(models.RuntimeDeployment.updateOne).toHaveBeenCalledWith(
+      { _id: deploymentRecord._id },
+      {
+        $set: {
+          status: 'ACTIVE',
+          supersededAt: null,
+          supersededByDeploymentId: null,
+        },
+      },
+      { session },
+    )
+    expect(models.RuntimeActivationSnapshot.updateOne).toHaveBeenCalledWith(
+      { _id: snapshotRecord._id },
+      {
+        $set: {
+          activationStatus: 'ACTIVE',
+          supersededByActivationId: null,
+        },
+      },
+      { session },
+    )
+    expect(result.mode).toBe('apply')
+    expect(result.applied).toBe(true)
+  })
+
+  test('fails closed when the package is not active', async () => {
+    const connect = jest.fn(async () => {})
+    const disconnect = jest.fn(async () => {})
+    const models = makeRestoreModels({
+      packageValue: {
+        ...packageRecord,
+        status: 'VALIDATED',
+      },
+    })
+
+    await expect(restoreRuntimePackageDeployment({
+      packageKey: 'standard-package-vmf-3-1-rkm',
+      logger: jest.fn(),
+      dependencies: {
+        connect,
+        disconnect,
+        models,
+      },
+    })).rejects.toThrow('must be ACTIVE')
+
+    expect(models.RuntimeDeployment.findOne).not.toHaveBeenCalled()
     expect(disconnect).toHaveBeenCalled()
   })
 })

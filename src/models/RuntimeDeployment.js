@@ -114,11 +114,11 @@ const runtimeDeploymentSchema = new mongoose.Schema(
 )
 
 runtimeDeploymentSchema.index(
-  { frameworkKey: 1, tenantScope: 1, deploymentMode: 1, status: 1 },
+  { frameworkKey: 1, packageId: 1, tenantScope: 1, deploymentMode: 1, status: 1 },
   {
     unique: true,
     partialFilterExpression: { status: RUNTIME_DEPLOYMENT_STATUSES.ACTIVE },
-    name: 'unique_active_runtime_deployment',
+    name: 'unique_active_runtime_deployment_per_package',
   },
 )
 runtimeDeploymentSchema.index({ packageId: 1, registeredAt: -1 })

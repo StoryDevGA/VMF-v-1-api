@@ -44,11 +44,18 @@ describe('framework seed import guard', () => {
     },
   )
 
-  test('uses the selected seed version to resolve the default audit file', () => {
-    const parsed = parseArgs(['--seed-dir', seedDir, '--seed-version', '3.1'])
+  test.each([
+    ['3.1', seedDir, 'vmf_v3_1_seed_pack_audit.json'],
+    ['3.1.1', path.resolve(seedDir, 'vmf-v3-1-1-rkm'), 'seed_pack_audit.json'],
+  ])('uses the selected %s seed version to resolve the default audit file', (
+    seedVersion,
+    selectedSeedDir,
+    expectedAuditFile,
+  ) => {
+    const parsed = parseArgs(['--seed-dir', selectedSeedDir, '--seed-version', seedVersion])
 
-    expect(parsed.seedVersion).toBe('3.1')
-    expect(path.basename(parsed.auditFile)).toBe('vmf_v3_1_seed_pack_audit.json')
+    expect(parsed.seedVersion).toBe(seedVersion)
+    expect(path.basename(parsed.auditFile)).toBe(expectedAuditFile)
   })
 
   test('passes when seeded Framework Package dropdown values are exposed by the editor contract', async () => {
@@ -175,6 +182,88 @@ describe('framework seed import guard', () => {
       dataType: 'OBJECT',
       category: 'STATE',
       sourceType: 'RUNTIME_STATE',
+      isProtected: false,
+      isSystem: true,
+    }))
+    expect(evidencePackPath.allowedOperations).toEqual(['READ', 'WRITE'])
+
+    expect(frameworkPackage.dependencyLock.references).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          collectionKey: 'RuntimePathRegistry',
+          key: 'framework_state.evidence_pack',
+          status: 'ACTIVE',
+          issues: [],
+        }),
+      ]),
+    )
+  })
+
+  test('passes the staged VMF v3.1.1 RKM seed pack when selected', async () => {
+    const rkmSeedDir = path.resolve(seedDir, 'vmf-v3-1-1-rkm')
+    const { stdout } = await runSeedGuard([
+      '--seed-version',
+      '3.1.1',
+      '--seed-dir',
+      rkmSeedDir,
+    ])
+    const payload = JSON.parse(stdout)
+
+    expect(payload.version).toBe('3.1.1')
+    expect(payload.summary.mode).toBe('dry-run')
+    expect(payload.audit.actual).toEqual(
+      expect.objectContaining({
+        runtimePathCount: 283,
+        skillRoleCount: 20,
+        skillCount: 36,
+        validationCount: 26,
+        agentCount: 14,
+        policyCount: 21,
+        skillReferenceAssetCount: 278,
+        uiSectionCount: 6,
+        supportAssetCount: 278,
+        packageDependencyReferenceCount: 401,
+      }),
+    )
+    expect(payload.editorOptionContract.status).toBe('pass')
+    expect(payload.auditRegistryContract.status).toBe('pass')
+    expect(payload.notes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          level: 'info',
+          source: 'Support Asset Manifest',
+          message: expect.stringContaining('Hydrated 278 RuntimeSkill referenceAssets'),
+        }),
+        expect.objectContaining({
+          level: 'info',
+          source: 'Conformance Audit',
+          message: expect.stringContaining('compatibility audit has PASS status'),
+        }),
+      ]),
+    )
+    expect(payload.notes.filter((note) => note.level === 'error')).toEqual([])
+  })
+
+  test('staged v3.1.1 RKM seed includes the governed Discovery evidence pack write path', () => {
+    const rkmSeedDir = path.resolve(seedDir, 'vmf-v3-1-1-rkm')
+    const runtimePaths = JSON.parse(
+      fs.readFileSync(path.join(rkmSeedDir, '02_seed_data/runtime_path_registry.json'), 'utf8'),
+    )
+    const frameworkPackage = JSON.parse(
+      fs.readFileSync(path.join(rkmSeedDir, '02_seed_data/framework_package.json'), 'utf8'),
+    )
+
+    const evidencePackPath = runtimePaths.runtimePathRegistries.find(
+      (entry) => entry.pathKey === 'framework_state.evidence_pack',
+    )
+    expect(evidencePackPath).toEqual(expect.objectContaining({
+      status: 'ACTIVE',
+      frameworkKeys: ['VMF'],
+      scope: 'FRAMEWORK_STATE',
+      dataType: 'OBJECT',
+      category: 'STATE',
+      sourceType: 'RUNTIME_STATE',
+      introducedInVersion: '3.1.1',
       isProtected: false,
       isSystem: true,
     }))
@@ -491,6 +580,41 @@ describe('framework seed import guard', () => {
       name: 'Updated Package',
     })
     expect(existing.save).toHaveBeenCalled()
+  })
+
+  test('skips locked existing Runtime Control rows during side-by-side seed import', async () => {
+    const existing = {
+      isLocked: true,
+      set: jest.fn(),
+      isModified: jest.fn(),
+      save: jest.fn(),
+    }
+    class FakeModel {
+      static findOne = jest.fn(() => ({
+        exec: jest.fn().mockResolvedValue(existing),
+      }))
+      constructor(record) {
+        this.record = record
+      }
+    }
+
+    const status = await importRecord(
+      {
+        label: 'Runtime Paths',
+        model: FakeModel,
+        identityFields: ['pathKey'],
+      },
+      {
+        pathKey: 'framework_state.sections.customer_context',
+        category: 'CUSTOMER_KNOWLEDGE',
+        sourceType: 'CUSTOMER_RUNTIME_STATE',
+      },
+    )
+
+    expect(status).toBe('skipped')
+    expect(existing.set).not.toHaveBeenCalled()
+    expect(existing.isModified).not.toHaveBeenCalled()
+    expect(existing.save).not.toHaveBeenCalled()
   })
 
   test('creates missing seed rows', async () => {

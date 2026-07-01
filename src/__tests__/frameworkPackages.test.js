@@ -1046,7 +1046,41 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
       })
 
     expect(res.status).toBe(422)
-    expect(res.body.error.details.sections).toContain('FRAMEWORK_STATE/SECTION')
+    expect(res.body.error.details.sections).toContain('FRAMEWORK_STATE section-compatible')
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages accepts domain-classified section runtime paths', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    mockFindOneSelect(null)
+    RuntimePathRegistry.find.mockReturnValue(buildFrameworkRegistryLookupChain([
+      {
+        pathKey: 'framework_state.sections.customer_context',
+        status: 'ACTIVE',
+        frameworkKeys: ['VMF'],
+        scope: 'FRAMEWORK_STATE',
+        category: 'CUSTOMER_KNOWLEDGE',
+        allowedOperations: ['READ', 'WRITE', 'BIND'],
+      },
+    ]))
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/framework-packages')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        frameworkKey: 'VMF',
+        frameworkName: 'Value Management Framework',
+        version: '3.1.1',
+        sections: [
+          {
+            sectionKey: 'customer_context',
+            runtimePath: 'framework_state.sections.customer_context',
+            required: true,
+          },
+        ],
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data.sections[0].runtimePath).toBe('framework_state.sections.customer_context')
   })
 
   test.each([
@@ -3521,6 +3555,13 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     expect(FrameworkPackage.updateOne.mock.calls[0][1].$set).not.toHaveProperty('status')
     expect(frameworkPackage.status).toBe('ACTIVE')
     expect(frameworkPackage.isDefault).toBe(true)
+    expect(RuntimeDeployment.findOne).toHaveBeenCalledWith(expect.objectContaining({
+      frameworkKey: 'VMF',
+      packageId: frameworkPackage._id,
+      tenantScope: 'GLOBAL',
+      deploymentMode: 'PRODUCTION',
+      status: runtimeActivationParity.activationResult.deploymentStatus,
+    }))
     expect(RuntimeActivationSnapshot.create).toHaveBeenCalledWith([
       expect.objectContaining({
         activationId: expect.any(String),
@@ -3745,7 +3786,74 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     expect(frameworkPackage.activatedBy).toBeNull()
   })
 
-  test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/activate supersedes the previous runtime deployment record', async () => {
+  test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/activate leaves other package deployments active for version selection', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const frameworkPackage = makeFrameworkPackageDoc({
+      _id: FRAMEWORK_PACKAGE_ID,
+      status: 'VALIDATED',
+    })
+    const activePackage = makeFrameworkPackageDoc({
+      _id: ACTIVE_FRAMEWORK_PACKAGE_ID,
+      version: '2.3.0',
+      packageKey: 'vmf-2-3-0',
+      status: 'ACTIVE',
+      isDefault: true,
+    })
+
+    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+    FrameworkPackage.find.mockReturnValue({
+      session: jest.fn().mockResolvedValue([activePackage]),
+    })
+    RuntimeDeployment.findOne.mockReturnValue(buildSessionQueryChain(null))
+    UIContract.findOne.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue({
+          uiContractKey: 'vmf-ui-contract-v1',
+          status: 'ACTIVE',
+          versionStatus: 'ACTIVE',
+          frameworkKeys: ['VMF'],
+          sections: [{ sectionKey: 'customer_problem', runtimePath: 'framework_state.sections.customer_problem' }],
+        }),
+      }),
+    })
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/activate`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(RuntimeDeployment.findOne).toHaveBeenCalledWith(expect.objectContaining({
+      frameworkKey: 'VMF',
+      packageId: frameworkPackage._id,
+      tenantScope: 'GLOBAL',
+      deploymentMode: 'PRODUCTION',
+      status: runtimeActivationParity.activationResult.deploymentStatus,
+    }))
+    expect(res.body.meta.runtimeActivation.readiness.requirements).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        key: 'activeDeployment',
+        status: 'PASS',
+        reason: 'RUNTIME_DEPLOYMENT_NO_CONFLICT',
+      }),
+    ]))
+    expect(res.body.meta.runtimeActivation.readiness.supersedesDeploymentId).toBeNull()
+    expect(res.body.meta.runtimeActivation.supersededDeployment).toBeNull()
+    expect(RuntimeDeployment.updateOne).not.toHaveBeenCalled()
+    expect(RuntimeActivationSnapshot.updateOne).not.toHaveBeenCalled()
+    expect(FrameworkPackage.updateOne).toHaveBeenCalledWith(
+      { _id: activePackage._id },
+      {
+        $set: expect.objectContaining({
+          isDefault: false,
+          updatedBy: SUPER_ADMIN_ID,
+        }),
+      },
+      expect.objectContaining({ runValidators: false }),
+    )
+    expect(FrameworkPackage.updateOne.mock.calls[0][1].$set).not.toHaveProperty('status')
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/activate supersedes the previous runtime deployment record for the same package', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     const frameworkPackage = makeFrameworkPackageDoc({
       _id: FRAMEWORK_PACKAGE_ID,
@@ -3755,7 +3863,7 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
       _id: '707f1f77bcf86cd799439010',
       deploymentId: 'deployment-vmf-global-production-previous',
       activationId: 'activation-vmf-2-3-0-previous',
-      packageId: ACTIVE_FRAMEWORK_PACKAGE_ID,
+      packageId: FRAMEWORK_PACKAGE_ID,
       frameworkKey: 'VMF',
       status: 'ACTIVE',
       tenantScope: 'GLOBAL',
@@ -3784,6 +3892,13 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
       .set('Authorization', `Bearer ${token}`)
 
     expect(res.status).toBe(200)
+    expect(RuntimeDeployment.findOne).toHaveBeenCalledWith(expect.objectContaining({
+      frameworkKey: 'VMF',
+      packageId: frameworkPackage._id,
+      tenantScope: 'GLOBAL',
+      deploymentMode: 'PRODUCTION',
+      status: runtimeActivationParity.activationResult.deploymentStatus,
+    }))
     expect(res.body.meta.runtimeActivation.readiness.requirements).toEqual(expect.arrayContaining([
       expect.objectContaining({
         key: 'activeDeployment',
