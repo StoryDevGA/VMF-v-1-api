@@ -79,6 +79,22 @@ describe('RuntimePathRegistry model', () => {
     })
   })
 
+  test('allows server-local locked runtime control replacement writes', async () => {
+    const doc = new RuntimePathRegistry(makeBaseRuntimePath({
+      isLocked: true,
+      lockedByPackageKeys: ['vmf-3-1-1'],
+    }))
+
+    await doc.validate()
+    doc.$__reset()
+    doc.$isNew = false
+    doc.$locals.runtimeControlOriginalIsLocked = true
+    doc.$locals.allowLockedRuntimeControlWrite = true
+    doc.dataType = 'NUMBER'
+
+    await expect(doc.validate()).resolves.toBeUndefined()
+  })
+
   test('accepts SECTION and ARTIFACT categories for normalized VMF v2.3.1 rows', async () => {
     const sectionDoc = new RuntimePathRegistry(makeBaseRuntimePath({
       pathKey: 'framework_state.sections.customer_problem',

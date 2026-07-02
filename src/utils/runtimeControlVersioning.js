@@ -367,8 +367,9 @@ export const applyRuntimeControlVersioning = (
       this.$locals?.runtimeControlOriginalIsLocked === true
       || this.$__?.priorDoc?.isLocked === true
     const isLockedForValidation = this.isLocked === true || wasLoadedLocked
+    const allowLockedRuntimeControlWrite = this.$locals?.allowLockedRuntimeControlWrite === true
 
-    if (!this.isNew && isLockedForValidation === true) {
+    if (!this.isNew && isLockedForValidation === true && !allowLockedRuntimeControlWrite) {
       if (this.isModified('isLocked') && this.isLocked !== true) {
         this.invalidate('isLocked', LOCKED_RUNTIME_CONTROL_EDIT_MESSAGE)
       }

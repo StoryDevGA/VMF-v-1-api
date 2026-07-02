@@ -23325,11 +23325,18 @@ describe('Runtime Instance API', () => {
     ]))
   })
 
-  test('does not render workflow policy actions that are absent from the UI Contract', async () => {
+  test('does not warn for policy-only workflow bindings that are absent from the UI Contract', async () => {
     FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage())
     RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
     UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({ actions: [] })))
-    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([
+      makeWorkflowPolicy(),
+      makeActionWorkflowPolicy('BUILD_KNOWLEDGE_PACKS', {
+        key: 'knowledge-pack-coverage-policy',
+        governedAction: 'BUILD_KNOWLEDGE_PACKS',
+        triggerEvent: 'ON_PACKAGE_BUILD',
+      }),
+    ]))
     const token = await getAccessTokenForUser(makeCustomerAdmin())
 
     const res = await request
@@ -23338,12 +23345,9 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(200)
     expect(res.body.data.actions).toEqual([])
-    expect(res.body.data.diagnostics.configWarnings).toEqual(expect.arrayContaining([
+    expect(res.body.data.diagnostics.configWarnings).not.toEqual(expect.arrayContaining([
       expect.objectContaining({
         code: 'POLICY_ACTION_MISSING',
-        severity: 'WARNING',
-        governedAction: 'SUBMIT_FOR_REVIEW',
-        policyKey: 'submit-for-review-policy',
       }),
     ]))
   })
@@ -23368,6 +23372,46 @@ describe('Runtime Instance API', () => {
         enabled: false,
         policyDecisionMode: 'WARN_ONLY',
         disabledReason: 'Workflow policy decision mode is not executable by the renderer.',
+      }),
+    ])
+  })
+
+  test('renders action UI for executable agent and skill workflow decisions', async () => {
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('RUN_VALIDATION')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('RUN_VALIDATION')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([
+      makeActionWorkflowPolicy('RUN_VALIDATION', {
+        decisionMode: 'REQUIRE_AGENT_AND_SKILL_EXECUTION',
+        executionType: 'ORDERED_WORKFLOW',
+        steps: [
+          {
+            stepKey: 'project-truth',
+            type: 'RUNTIME_STATE_PROJECTION',
+            order: 1,
+            targetPath: 'framework_state.runtime.truth_projection.status',
+          },
+        ],
+        orderedSteps: ['project-truth'],
+      }),
+    ]))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.actions).toEqual([
+      expect.objectContaining({
+        actionKey: 'RUN_VALIDATION',
+        enabled: true,
+        policyDecisionMode: 'REQUIRE_AGENT_AND_SKILL_EXECUTION',
+        disabledReason: '',
       }),
     ])
   })

@@ -22,6 +22,15 @@ import {
   restoreRuntimePackageDeployment,
 } from '../scripts/restoreRuntimePackageDeployment.js'
 import { backfillRuntimeControlVersioningFields } from '../scripts/backfillRuntimeControlVersioningFields.js'
+import {
+  applyReplacementPlan,
+  assertDeterministicSeedStableIds,
+  assertExistingStableIds,
+  buildControlRecordPayload,
+  buildPackageReplacementPayload,
+  cloneBundleWithMappedKeys,
+  withRequiredActorFields,
+} from '../scripts/replaceActiveFrameworkPackageFromSeed.js'
 
 const ACTOR_ID = '507f1f77bcf86cd799439011'
 const LICENSE_LEVEL_ID = '607f1f77bcf86cd799439022'
@@ -900,6 +909,339 @@ describe('restoreRuntimePackageDeployment', () => {
 
     expect(models.RuntimeDeployment.findOne).not.toHaveBeenCalled()
     expect(disconnect).toHaveBeenCalled()
+  })
+})
+
+describe('replaceActiveFrameworkPackageFromSeed helpers', () => {
+  const makePersistedDoc = (values) => {
+    const doc = {
+      ...values,
+      $locals: {},
+      set: jest.fn(function setPayload(payload) {
+        Object.assign(this, payload)
+      }),
+      save: jest.fn(async () => {}),
+    }
+    return doc
+  }
+
+  const makeQuery = (doc) => {
+    const exec = jest.fn(async () => doc)
+    return {
+      exec,
+      lean: jest.fn(async () => doc),
+      session: jest.fn(() => ({ exec })),
+    }
+  }
+
+  const makeModel = ({ keyField, docs = [], findOne = null } = {}) => {
+    function Model(payload) {
+      const doc = makePersistedDoc(payload)
+      Model.createdDocs.push(doc)
+      return doc
+    }
+    Model.createdDocs = []
+    Model.updateOne = jest.fn()
+    Model.findOne = jest.fn((query) => {
+      if (findOne) return makeQuery(findOne(query))
+      const doc = docs.find((candidate) => String(candidate?.[keyField] || '') === String(query?.[keyField] || ''))
+      return makeQuery(doc || null)
+    })
+    return Model
+  }
+
+  const makeReplacementPlan = () => ({
+    target: {
+      packageKey: 'standard-package-vmf-3-1-1-rkm',
+      uiContractKey: 'standard-ui-contract-vmf-3-1-1-rkm',
+    },
+    seedRecords: {
+      package: {
+        frameworkKey: 'VMF',
+        packageKey: 'standard-package-vmf-3-1-1-rkm',
+        version: '3.1.1',
+        status: 'DRAFT',
+        isDefault: false,
+        isLocked: false,
+        uiContractKey: 'standard-ui-contract-vmf-3-1-1-rkm',
+        workflowBindings: [{ policyKey: 'truth-generation-policy' }],
+      },
+      uiContract: {
+        uiContractKey: 'standard-ui-contract-vmf-3-1-1-rkm',
+        stableId: 'ui-contract-standard-ui-contract-vmf-3-1-1-rkm',
+        actions: [{ actionKey: 'RUN_VALIDATION' }],
+      },
+      runtimePaths: [{
+        pathKey: 'framework_state.runtime.truth_projection',
+        stableId: 'path-framework-state-runtime-truth-projection-164lldb',
+        label: 'Truth Projection',
+      }],
+      workflowPolicies: [{
+        key: 'truth-generation-policy',
+        stableId: 'policy-truth-generation-policy',
+        name: 'Truth Generation Policy',
+      }],
+    },
+    existingRecords: {
+      runtimePathMap: new Map([[
+        'framework_state.runtime.truth_projection',
+        { pathKey: 'framework_state.runtime.truth_projection', stableId: 'path-existing-runtime-truth-projection' },
+      ]]),
+      workflowPolicyMap: new Map([[
+        'truth-generation-policy',
+        { key: 'truth-generation-policy', stableId: 'policy-truth-generation-policy' },
+      ]]),
+    },
+  })
+
+  test('maps canonical r3 package and UI keys without mutating BSON-like ids', () => {
+    const bsonLikeId = { toHexString: () => '698b3800f83b3257365fd7a3' }
+    const bundle = [
+      {
+        label: 'Framework Packages',
+        records: [
+          {
+            _id: bsonLikeId,
+            packageKey: 'standard-package-vmf-3-1-1-rkm-canonical',
+            uiContractKey: 'standard-ui-contract-vmf-3-1-1-rkm-canonical',
+            uiContractBinding: {
+              key: 'standard-ui-contract-vmf-3-1-1-rkm-canonical',
+              version: '3.1.1',
+            },
+            dependencyLock: {
+              references: [
+                {
+                  targetKey: 'standard-package-vmf-3-1-1-rkm-canonical',
+                  sourceUiContractKey: 'standard-ui-contract-vmf-3-1-1-rkm-canonical',
+                },
+              ],
+            },
+          },
+        ],
+      },
+    ]
+
+    const mapped = cloneBundleWithMappedKeys(bundle, {
+      sourcePackageKey: 'standard-package-vmf-3-1-1-rkm-canonical',
+      targetPackageKey: 'standard-package-vmf-3-1-1-rkm',
+      sourceUiContractKey: 'standard-ui-contract-vmf-3-1-1-rkm-canonical',
+      targetUiContractKey: 'standard-ui-contract-vmf-3-1-1-rkm',
+    })
+
+    expect(mapped[0].records[0]._id).toBe(bsonLikeId)
+    expect(mapped[0].records[0].packageKey).toBe('standard-package-vmf-3-1-1-rkm')
+    expect(mapped[0].records[0].uiContractKey).toBe('standard-ui-contract-vmf-3-1-1-rkm')
+    expect(mapped[0].records[0].uiContractBinding).toEqual({
+      key: 'standard-ui-contract-vmf-3-1-1-rkm',
+      version: '3.1.1',
+    })
+    expect(mapped[0].records[0].dependencyLock.references[0]).toEqual({
+      targetKey: 'standard-package-vmf-3-1-1-rkm',
+      sourceUiContractKey: 'standard-ui-contract-vmf-3-1-1-rkm',
+    })
+  })
+
+  test('builds locked control-record payloads while preserving existing package lock provenance', () => {
+    const payload = buildControlRecordPayload({
+      seedRecord: {
+        _id: 'seed-id',
+        key: 'truth-generation-policy',
+        status: 'ACTIVE',
+        isLocked: true,
+        lockedByPackageKeys: ['standard-package-vmf-3-1-1-rkm'],
+        steps: [{ stepKey: 'project-truth' }],
+      },
+      existingRecord: {
+        lockedByPackageKeys: ['standard-package-vmf-3-1-rkm'],
+      },
+      targetPackageKey: 'standard-package-vmf-3-1-1-rkm',
+    })
+
+    expect(payload._id).toBeUndefined()
+    expect(payload.isLocked).toBeUndefined()
+    expect(payload.key).toBe('truth-generation-policy')
+    expect(payload.steps).toEqual([{ stepKey: 'project-truth' }])
+    expect(payload.lockedByPackageKeys).toEqual([
+      'standard-package-vmf-3-1-1-rkm',
+      'standard-package-vmf-3-1-rkm',
+    ])
+  })
+
+  test('builds package payloads that preserve the active package identity', () => {
+    const payload = buildPackageReplacementPayload({
+      seedPackage: {
+        frameworkKey: 'VMF',
+        packageKey: 'standard-package-vmf-3-1-1-rkm-canonical',
+        version: '3.1.1',
+        status: 'DRAFT',
+        isDefault: false,
+        isLocked: false,
+        uiContractKey: 'standard-ui-contract-vmf-3-1-1-rkm',
+        uiContractBinding: {
+          key: 'standard-ui-contract-vmf-3-1-1-rkm',
+          version: '3.1.1',
+          status: 'DRAFT',
+        },
+        workflowBindings: [{ policyKey: 'truth-generation-policy' }],
+        dependencyLock: { references: [{ targetKey: 'truth-generation-policy' }] },
+      },
+      existingPackage: {
+        frameworkKey: 'VMF',
+        packageKey: 'standard-package-vmf-3-1-1-rkm',
+        version: '3.1.1',
+        status: 'ACTIVE',
+        isDefault: true,
+        isLocked: true,
+      },
+    })
+
+    expect(payload.packageKey).toBe('standard-package-vmf-3-1-1-rkm')
+    expect(payload.version).toBe('3.1.1')
+    expect(payload.status).toBe('ACTIVE')
+    expect(payload.isDefault).toBe(true)
+    expect(payload.isLocked).toBe(true)
+    expect(payload.uiContractBinding).toEqual({
+      key: 'standard-ui-contract-vmf-3-1-1-rkm',
+      version: '3.1.1',
+      status: 'DRAFT',
+    })
+    expect(payload.workflowBindings).toEqual([{ policyKey: 'truth-generation-policy' }])
+    expect(payload.dependencyLock).toEqual({ references: [{ targetKey: 'truth-generation-policy' }] })
+  })
+
+  test('rejects seed control records whose stable ids do not match deterministic identities', () => {
+    expect(() => assertDeterministicSeedStableIds({
+      workflowPolicies: [{
+        key: 'truth-generation-policy',
+        stableId: 'policy-colliding-stale-id',
+      }],
+    })).toThrow(/does not match deterministic stableId "policy-truth-generation-policy"/)
+  })
+
+  test('rejects existing control records whose stable ids already drifted from deterministic identities', () => {
+    expect(() => assertExistingStableIds({
+      records: [{ key: 'run-validation-policy' }],
+      existingMap: new Map([[
+        'run-validation-policy',
+        { key: 'run-validation-policy', stableId: 'workflow-policy-run-validation-policy' },
+      ]]),
+      keyField: 'key',
+      buildStableId: (key) => `policy-${key}`,
+      sourceLabel: 'Existing workflow policy',
+    })).toThrow(/Existing workflow policy run-validation-policy stableId/)
+  })
+
+  test('backfills required actor fields for legacy persisted seed records', () => {
+    const existingActorId = '507f1f77bcf86cd799439011'
+    const payload = withRequiredActorFields(
+      { label: 'Truth Projection', updatedBy: existingActorId },
+      { createdBy: existingActorId },
+    )
+    const legacyPayload = withRequiredActorFields({ label: 'Truth Projection' }, {})
+
+    expect(payload).not.toHaveProperty('createdBy')
+    expect(String(payload.updatedBy)).toBe(existingActorId)
+    expect(String(legacyPayload.createdBy)).toBe('000000000000000000000001')
+    expect(String(legacyPayload.updatedBy)).toBe('000000000000000000000001')
+  })
+
+  test('applies replacement through hydrated document saves and preserves existing stable ids', async () => {
+    const session = {}
+    const packageDoc = makePersistedDoc({
+      frameworkKey: 'VMF',
+      packageKey: 'standard-package-vmf-3-1-1-rkm',
+      version: '3.1.1',
+      status: 'ACTIVE',
+      isDefault: true,
+      isLocked: true,
+      stableId: 'package-existing',
+    })
+    const uiContractDoc = makePersistedDoc({
+      uiContractKey: 'standard-ui-contract-vmf-3-1-1-rkm',
+      status: 'ACTIVE',
+      stableId: 'ui-contract-existing',
+    })
+    const runtimePathDoc = makePersistedDoc({
+      pathKey: 'framework_state.runtime.truth_projection',
+      stableId: 'path-existing-runtime-truth-projection',
+    })
+    const workflowPolicyDoc = makePersistedDoc({
+      key: 'truth-generation-policy',
+      stableId: 'policy-truth-generation-policy',
+    })
+    const frameworkPackageModel = makeModel({
+      findOne: (query) => (query?.packageKey?.$ne ? null : packageDoc),
+    })
+    const runtimePathModel = makeModel({
+      keyField: 'pathKey',
+      docs: [runtimePathDoc],
+    })
+    const workflowPolicyModel = makeModel({
+      keyField: 'key',
+      docs: [workflowPolicyDoc],
+    })
+    const uiContractModel = makeModel({
+      keyField: 'uiContractKey',
+      docs: [uiContractDoc],
+    })
+
+    await applyReplacementPlan({
+      plan: makeReplacementPlan(),
+      models: {
+        FrameworkPackage: frameworkPackageModel,
+        RuntimePathRegistry: runtimePathModel,
+        WorkflowPolicy: workflowPolicyModel,
+        UIContract: uiContractModel,
+      },
+      session,
+      targetPackageKey: 'standard-package-vmf-3-1-1-rkm',
+    })
+
+    expect(runtimePathDoc.save).toHaveBeenCalledWith({ session })
+    expect(workflowPolicyDoc.save).toHaveBeenCalledWith({ session })
+    expect(uiContractDoc.save).toHaveBeenCalledWith({ session })
+    expect(packageDoc.save).toHaveBeenCalledWith({ session })
+    expect(runtimePathDoc.set.mock.calls[0][0]).not.toHaveProperty('stableId')
+    expect(String(runtimePathDoc.set.mock.calls[0][0].createdBy)).toBe('000000000000000000000001')
+    expect(String(runtimePathDoc.set.mock.calls[0][0].updatedBy)).toBe('000000000000000000000001')
+    expect(runtimePathDoc.$locals.allowLockedRuntimeControlWrite).toBe(true)
+    expect(runtimePathDoc.stableId).toBe('path-existing-runtime-truth-projection')
+    expect(runtimePathModel.updateOne).not.toHaveBeenCalled()
+    expect(workflowPolicyModel.updateOne).not.toHaveBeenCalled()
+    expect(uiContractModel.updateOne).not.toHaveBeenCalled()
+    expect(frameworkPackageModel.updateOne).not.toHaveBeenCalled()
+  })
+
+  test('rechecks the target package active invariant inside the apply transaction', async () => {
+    const inactivePackageDoc = makePersistedDoc({
+      frameworkKey: 'VMF',
+      packageKey: 'standard-package-vmf-3-1-1-rkm',
+      version: '3.1.1',
+      status: 'DEPRECATED',
+      isDefault: true,
+      isLocked: true,
+    })
+    const uiContractDoc = makePersistedDoc({
+      uiContractKey: 'standard-ui-contract-vmf-3-1-1-rkm',
+      status: 'ACTIVE',
+    })
+    const runtimePathModel = makeModel({ keyField: 'pathKey' })
+    const workflowPolicyModel = makeModel({ keyField: 'key' })
+
+    await expect(applyReplacementPlan({
+      plan: makeReplacementPlan(),
+      models: {
+        FrameworkPackage: makeModel({ findOne: () => inactivePackageDoc }),
+        RuntimePathRegistry: runtimePathModel,
+        WorkflowPolicy: workflowPolicyModel,
+        UIContract: makeModel({ findOne: () => uiContractDoc }),
+      },
+      session: {},
+      targetPackageKey: 'standard-package-vmf-3-1-1-rkm',
+    })).rejects.toThrow(/must still be ACTIVE during apply/)
+
+    expect(runtimePathModel.createdDocs).toHaveLength(0)
+    expect(workflowPolicyModel.createdDocs).toHaveLength(0)
   })
 })
 

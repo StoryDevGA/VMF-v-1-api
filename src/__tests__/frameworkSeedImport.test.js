@@ -8,6 +8,7 @@ import { describe, expect, jest, test } from '@jest/globals'
 import {
   buildImportUpdatePayload,
   importRecord,
+  loadSeedBundle,
   parseArgs,
 } from '../scripts/importFrameworkSeed.js'
 
@@ -103,6 +104,38 @@ describe('framework seed import guard', () => {
     const payload = JSON.parse(stdout)
 
     expect(payload.version).toBe('2.3.530847')
+  })
+
+  test('normalizes workflow step binding keys before Mongoose validation and persistence', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'framework-seed-binding-keys-'))
+    const tempSeedDir = path.join(tempRoot, 'seed-data')
+    fs.cpSync(seedDir, tempSeedDir, { recursive: true })
+
+    const policyFile = path.join(tempSeedDir, 'v2_3_1_policies.json')
+    const policies = JSON.parse(fs.readFileSync(policyFile, 'utf8'))
+    policies.workflowPolicies[0].key = 'qa-binding-key-policy'
+    policies.workflowPolicies[0].stableId = 'workflow-policy-qa-binding-key-policy'
+    policies.workflowPolicies[0].steps = [{
+      stepKey: 'validate_required.truth',
+      type: 'VALIDATION',
+      order: 1,
+      validationKeys: ['required.truth_key', 'REQUIRED_TRUTH_KEY'],
+      requiredValidationKeys: ['required-truth-key'],
+    }]
+    fs.writeFileSync(policyFile, `${JSON.stringify(policies, null, 2)}\n`, 'utf8')
+
+    const bundle = loadSeedBundle(tempSeedDir, '2.3.1')
+    const workflowPolicyStep = bundle
+      .find((entry) => entry.label === 'Workflow Policies')
+      .records[0]
+      .steps[0]
+    const workflowPolicyRecord = bundle
+      .find((entry) => entry.label === 'Workflow Policies')
+      .records[0]
+
+    expect(workflowPolicyRecord.stableId).toBe('policy-qa-binding-key-policy')
+    expect(workflowPolicyStep.stepKey).toBe('validate-required-truth')
+    expect(workflowPolicyStep.bindingKeys).toEqual(['required-truth-key'])
   })
 
   test('passes the VMF v3.1 seed pack when selected', async () => {

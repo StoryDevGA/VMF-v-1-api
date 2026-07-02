@@ -29,12 +29,13 @@ import FrameworkPackage, {
   FRAMEWORK_PACKAGE_WORKFLOW_EXECUTION_CONTEXTS,
 } from '../models/FrameworkPackage.js'
 import {
+  buildRuntimePathRegistryStableId,
   RUNTIME_PATH_REGISTRY_CATEGORIES,
   RUNTIME_PATH_REGISTRY_SECTION_BINDING_CATEGORIES,
 } from '../models/RuntimePathRegistry.js'
 import { RUNTIME_SKILL_CATEGORIES } from '../models/RuntimeSkill.js'
 import { VALIDATION_REGISTRY_CATEGORIES } from '../models/ValidationRegistry.js'
-import { WORKFLOW_POLICY_TYPES } from '../models/WorkflowPolicy.js'
+import { buildWorkflowPolicyStableId, WORKFLOW_POLICY_TYPES } from '../models/WorkflowPolicy.js'
 import { AUDIT_ACTIONS, RESOURCE_TYPES } from '../services/auditService.js'
 import {
   GOVERNANCE_AUDIT_EVENT_CATEGORIES,
@@ -81,6 +82,10 @@ const RUNTIME_PATH_CATEGORY_MAP = Object.freeze({
   DELIVERY: 'OUTPUT',
   IMPACT: 'OUTPUT',
   INTEGRITY: 'VALIDATION',
+  DEPENDENCIES: 'DEPENDENCY',
+  OUTPUTS: 'OUTPUT',
+  ROOT: 'STATE',
+  SECTIONS: 'SECTION',
 })
 const RUNTIME_SKILL_CATEGORY_MAP = Object.freeze({
   BOUNDARY: 'GOVERNANCE',
@@ -413,6 +418,10 @@ const normalizeNullableText = (value) => {
 }
 
 const normalizeToken = (value) => String(value ?? '').trim().toLowerCase()
+const normalizeKeyToken = (value) =>
+  normalizeToken(value)
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
 
 const normalizeEnumToken = (value) => String(value ?? '').trim().toUpperCase()
 
@@ -619,6 +628,24 @@ const normalizeRuntimePath = (record, notes, sourceLabel) => {
     notes,
     sourceLabel,
   })
+  if (normalizeEnumToken(record.scope) === 'RUNTIME') {
+    record.scope = 'FRAMEWORK_STATE'
+    notes.push({
+      level: 'warning',
+      source: sourceLabel,
+      message: `${recordName(record)} scope "RUNTIME" normalized to "FRAMEWORK_STATE".`,
+    })
+  }
+  const derivedStableId = record.pathKey ? buildRuntimePathRegistryStableId(record.pathKey) : ''
+  if (derivedStableId && record.stableId !== derivedStableId) {
+    const previousStableId = record.stableId
+    record.stableId = derivedStableId
+    notes.push({
+      level: 'warning',
+      source: sourceLabel,
+      message: `${record.pathKey} stableId "${previousStableId}" normalized to "${derivedStableId}".`,
+    })
+  }
   return record
 }
 
@@ -662,10 +689,25 @@ const normalizeWorkflowStepRows = (steps) => {
     .map((step, index) => {
       if (!isPlainObject(step)) return null
       const order = Number(step.order)
+      const stepType = normalizeEnumToken(step.type || step.stepType)
+      const targetPath = String(
+        step.targetPath
+        || (Array.isArray(step.targetPaths) ? step.targetPaths[0] : '')
+        || (Array.isArray(step.writePaths) ? step.writePaths[0] : '')
+        || '',
+      ).trim()
+      const bindingKeys = [
+        ...normalizeList(step.bindingKeys),
+        ...normalizeList(step.validationKeys),
+        ...normalizeList(step.requiredValidationKeys),
+      ].map(normalizeKeyToken).filter(Boolean)
       return {
         ...step,
-        stepKey: normalizeToken(step.stepKey),
-        stepType: normalizeEnumToken(step.stepType),
+        stepKey: normalizeKeyToken(step.stepKey),
+        type: stepType,
+        stepType,
+        bindingKeys: [...new Set(bindingKeys)],
+        targetPath,
         agentId: normalizeToken(step.agentId),
         skillId: normalizeToken(step.skillId),
         validationKey: normalizeToken(step.validationKey),
@@ -703,6 +745,17 @@ const deriveWorkflowPolicyExecutionFields = (record) => {
 }
 
 const normalizeWorkflowPolicy = (record, notes, sourceLabel) => {
+  const derivedStableId = record.key ? buildWorkflowPolicyStableId(record.key) : ''
+  if (derivedStableId && record.stableId !== derivedStableId) {
+    const previousStableId = record.stableId
+    record.stableId = derivedStableId
+    notes.push({
+      level: 'warning',
+      source: sourceLabel,
+      message: `${record.key || previousStableId} stableId "${previousStableId}" normalized to "${derivedStableId}".`,
+    })
+  }
+
   normalizeMappedEnum({
     record,
     field: 'policyType',
@@ -958,13 +1011,13 @@ const hydrateRuntimeSkillReferenceAssets = (importEntries, supportAssetManifest,
   const assetsBySkillKey = new Map()
 
   for (const asset of supportAssetManifest.assetRecords) {
-    if (String(asset?.targetType || '').trim() !== 'RuntimeSkill') continue
-
     const assetKey = normalizeToken(asset.assetKey)
     const targetKey = normalizeToken(asset.targetKey)
     if (!assetKey) continue
 
     manifestAssetsByKey.set(assetKey, asset)
+
+    if (String(asset?.targetType || '').trim() !== 'RuntimeSkill') continue
 
     if (targetKey) {
       const targetAssets = assetsBySkillKey.get(targetKey) || []
@@ -2384,7 +2437,9 @@ export {
   buildImportUpdatePayload,
   importFrameworkSeed,
   importRecord,
+  loadSeedBundle,
   parseArgs,
+  validateCrossReferences,
   validateWithMongoose,
 }
 

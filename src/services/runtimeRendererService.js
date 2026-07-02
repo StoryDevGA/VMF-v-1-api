@@ -1864,8 +1864,13 @@ const resolveWorkflowPolicies = async ({ frameworkPackage }) => {
   }
 }
 
+const EXECUTABLE_WORKFLOW_POLICY_DECISION_MODES = new Set([
+  WORKFLOW_POLICY_DECISION_MODES.ALLOW,
+  WORKFLOW_POLICY_DECISION_MODES.REQUIRE_AGENT_AND_SKILL_EXECUTION,
+])
+
 const isExecutablePolicyDecision = (decisionMode) =>
-  normalizeToken(decisionMode) === WORKFLOW_POLICY_DECISION_MODES.ALLOW
+  EXECUTABLE_WORKFLOW_POLICY_DECISION_MODES.has(normalizeToken(decisionMode))
 
 const getDefaultRuntimeActionPermission = ({ runtimeInstance, governedAction }) => {
   const runtimeType = normalizeToken(runtimeInstance?.runtimeType)
@@ -2031,22 +2036,6 @@ const buildRendererActions = async ({
       frameworkState: runtimeInstance.framework_state || {},
     })
   }))
-
-  const uiGovernedActions = new Set(
-    uiActions.map((action) => normalizeToken(action?.governedAction || action?.actionKey)).filter(Boolean),
-  )
-
-  workflowPolicies.forEach((policy) => {
-    const governedAction = normalizeToken(policy?.governedAction)
-    if (!governedAction || uiGovernedActions.has(governedAction)) return
-
-    configWarnings.push(createConfigWarning({
-      code: CONFIG_WARNING_CODES.POLICY_ACTION_MISSING,
-      message: 'Active workflow policy has no UI Contract action and was not rendered.',
-      governedAction,
-      policyKey: policy.key,
-    }))
-  })
 
   return renderedActions
     .sort((left, right) => left.displayOrder - right.displayOrder || left.actionKey.localeCompare(right.actionKey))
