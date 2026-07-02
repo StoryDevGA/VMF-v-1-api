@@ -4,6 +4,9 @@ import loadScopes from '../middleware/loadScopes.js'
 import { requirePlatformRole } from '../middleware/authorize.js'
 import {
   activateKnowledgePackVersion,
+  cloneKnowledgePackManifestController,
+  compareKnowledgePackManifestsController,
+  createKnowledgePackManifestController,
   createKnowledgePackVersion,
   deprecateKnowledgePackVersion,
   disableKnowledgePackVersion,
@@ -11,26 +14,35 @@ import {
   getKnowledgePack,
   getKnowledgePackVersion,
   importKnowledgePackStarterVersion,
+  importKnowledgePackSourceDocumentDraft,
   listKnowledgePackManifestsController,
   listKnowledgePacks,
+  previewKnowledgePackReasoningContextController,
   previewKnowledgePackVersionContent,
   previewKnowledgePackManifestResolutionController,
   previewKnowledgePackResolution,
   rollbackKnowledgePack,
+  updateKnowledgePackManifestController,
   validateKnowledgePackVersion,
 } from '../controllers/outcomeKnowledgePacks.controller.js'
 import {
   validateActivateKnowledgePackVersion,
+  validateCloneKnowledgePackManifest,
+  validateCompareKnowledgePackManifestParams,
+  validateCreateKnowledgePackManifest,
   validateCreateKnowledgePackVersion,
   validateImportKnowledgePackStarterVersion,
+  validateImportSourceDocumentDraft,
   validateKnowledgePackId,
   validateKnowledgePackManifestId,
   validateKnowledgePackResolutionPreview,
+  validateReasoningContextPreview,
   validateRollbackKnowledgePack,
   validateKnowledgePackVersionActionBody,
   validateKnowledgePackVersionParams,
   validateListKnowledgePackManifests,
   validateListKnowledgePacks,
+  validateUpdateKnowledgePackManifest,
 } from '../validators/outcomeKnowledgePacks.validator.js'
 
 const router = Router()
@@ -39,9 +51,15 @@ router.use(authJwt, loadScopes, requirePlatformRole('SUPER_ADMIN'))
 
 router.get('/', validateListKnowledgePacks, listKnowledgePacks)
 router.get('/manifests', validateListKnowledgePackManifests, listKnowledgePackManifestsController)
+router.post('/manifests', validateCreateKnowledgePackManifest, createKnowledgePackManifestController)
+router.get('/manifests/:manifestId/reasoning-context-preview', validateKnowledgePackManifestId, validateReasoningContextPreview, previewKnowledgePackReasoningContextController)
 router.get('/manifests/:manifestId/resolution-preview', validateKnowledgePackManifestId, validateKnowledgePackResolutionPreview, previewKnowledgePackManifestResolutionController)
+router.get('/manifests/:manifestId/compare/:targetManifestId', validateCompareKnowledgePackManifestParams, compareKnowledgePackManifestsController)
+router.post('/manifests/:manifestId/clone', validateKnowledgePackManifestId, validateCloneKnowledgePackManifest, cloneKnowledgePackManifestController)
+router.put('/manifests/:manifestId', validateKnowledgePackManifestId, validateUpdateKnowledgePackManifest, updateKnowledgePackManifestController)
 router.get('/manifests/:manifestId', validateKnowledgePackManifestId, getKnowledgePackManifestController)
 router.get('/resolution-preview', validateKnowledgePackResolutionPreview, previewKnowledgePackResolution)
+router.post('/source-document-import', validateImportSourceDocumentDraft, importKnowledgePackSourceDocumentDraft)
 router.post('/:packId/starter-import', validateKnowledgePackId, validateImportKnowledgePackStarterVersion, importKnowledgePackStarterVersion)
 router.post('/:packId/versions', validateKnowledgePackId, validateCreateKnowledgePackVersion, createKnowledgePackVersion)
 router.get('/:packId/versions/:versionId/content-preview', validateKnowledgePackVersionParams, previewKnowledgePackVersionContent)

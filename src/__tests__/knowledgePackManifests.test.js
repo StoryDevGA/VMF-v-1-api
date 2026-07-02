@@ -29,6 +29,17 @@ describe('KnowledgePackManifest model', () => {
           dependencyKeys: [' ARL ', 'arl', ''],
         },
       ],
+      validationPacks: [
+        {
+          packCategory: 'platform',
+          purposeCategory: 'validation',
+          packType: 'truth_certification',
+          packKey: ' Truth-Validation-Pack ',
+          label: ' Truth Validation ',
+          executionMode: 'post_validation',
+          dependencyKeys: [' TRUTH-CERTIFICATION-PACK '],
+        },
+      ],
     })
 
     await expect(manifest.validate()).resolves.toBeUndefined()
@@ -49,6 +60,14 @@ describe('KnowledgePackManifest model', () => {
       packKey: 'truth-certification-pack',
       executionMode: 'PROVIDER_CONTEXT',
       dependencyKeys: ['arl'],
+    }))
+    expect(manifest.validationPacks[0]).toEqual(expect.objectContaining({
+      packCategory: 'PLATFORM',
+      purposeCategory: 'VALIDATION',
+      packType: 'TRUTH_CERTIFICATION',
+      packKey: 'truth-validation-pack',
+      executionMode: 'POST_VALIDATION',
+      dependencyKeys: ['truth-certification-pack'],
     }))
   })
 
@@ -78,4 +97,3 @@ describe('KnowledgePackManifest model', () => {
     })).toBe('kpm-outcome-studio-default-1-0-0-global')
   })
 })
-

@@ -88,6 +88,10 @@ const buildFindOneChain = (row) => ({
   lean: jest.fn().mockResolvedValue(row),
 })
 
+const buildFindOneAndUpdateChain = (row) => ({
+  lean: jest.fn().mockResolvedValue(row),
+})
+
 const buildVersionFindOneChain = (row) => ({
   session: jest.fn().mockReturnThis(),
   lean: jest.fn().mockResolvedValue(row),
@@ -213,6 +217,7 @@ const makeKnowledgePackManifest = (overrides = {}) => ({
     },
   ],
   optionalPacks: [],
+  validationPacks: [],
   blockedPacks: [],
   resolutionPolicy: {},
   validationPolicy: {},
@@ -486,6 +491,13 @@ beforeEach(() => {
   KnowledgePackManifest.countDocuments = jest.fn().mockResolvedValue(1)
   KnowledgePackManifest.find = jest.fn().mockReturnValue(buildFindChain([makeKnowledgePackManifest()]))
   KnowledgePackManifest.findOne = jest.fn().mockReturnValue(buildFindOneChain(makeKnowledgePackManifest()))
+  KnowledgePackManifest.exists = jest.fn().mockResolvedValue(null)
+  KnowledgePackManifest.findOneAndUpdate = jest.fn().mockReturnValue(buildFindOneAndUpdateChain(makeKnowledgePackManifest({
+    status: 'DRAFT',
+  })))
+  KnowledgePackManifest.prototype.save = jest.fn(async function save() {
+    return this
+  })
   AuditLog.createLog = jest.fn(async () => ({}))
 })
 
@@ -614,6 +626,294 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
     expect(KnowledgePackManifest.findOne).not.toHaveBeenCalled()
   })
 
+  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/manifests creates a draft manifest with validation packs and audits the mutation', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/outcome-studio/knowledge-packs/manifests')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        manifestKey: 'vmf-outcome-studio-authoring',
+        manifestName: 'VMF Outcome Studio Authoring',
+        semanticVersion: '1.0.0',
+        manifestType: 'FRAMEWORK_RUNTIME',
+        workspaceType: 'OUTCOME',
+        frameworkKey: 'VMF',
+        runtimeType: 'VALUE_NARRATIVE',
+        packageKey: 'standard-package-vmf-3-1-rkm',
+        mandatoryPacks: [
+          {
+            packCategory: 'OUTCOME',
+            purposeCategory: 'GOVERNANCE',
+            packType: 'ARL',
+            packKey: 'adaptive-reasoning-layer',
+            label: 'Adaptive Reasoning Layer',
+          },
+        ],
+        validationPacks: [
+          {
+            packCategory: 'PLATFORM',
+            purposeCategory: 'VALIDATION',
+            packType: 'TRUTH_CERTIFICATION',
+            packKey: 'truth-certification-pack',
+            label: 'Truth Certification',
+            executionMode: 'POST_VALIDATION',
+            dependencyKeys: ['adaptive-reasoning-layer'],
+          },
+        ],
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data).toEqual(expect.objectContaining({
+      manifestId: 'kpm-vmf-outcome-studio-authoring-1-0-0-global',
+      manifestKey: 'vmf-outcome-studio-authoring',
+      status: 'DRAFT',
+      frameworkKey: 'VMF',
+      validationPacks: [
+        expect.objectContaining({
+          packType: 'TRUTH_CERTIFICATION',
+          packKey: 'truth-certification-pack',
+          executionMode: 'POST_VALIDATION',
+          required: true,
+        }),
+      ],
+      isSystem: false,
+    }))
+    expect(KnowledgePackManifest.exists).toHaveBeenCalled()
+    expect(KnowledgePackManifest.prototype.save).toHaveBeenCalled()
+    expect(AuditLog.createLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'KNOWLEDGE_PACK_MANIFEST_CREATED',
+        resourceType: 'KnowledgePackManifest',
+        resourceId: 'kpm-vmf-outcome-studio-authoring-1-0-0-global',
+        diff: expect.objectContaining({
+          operation: 'CREATE_MANIFEST',
+          manifest: expect.objectContaining({
+            contentVisible: false,
+            validationCount: 1,
+          }),
+        }),
+      }),
+      expect.objectContaining({ session: expect.any(Object) }),
+    )
+  })
+
+  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/manifests rejects duplicate manifest identity before saving', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    KnowledgePackManifest.exists.mockResolvedValue({ _id: 'existing-manifest' })
+
+    const res = await request
+      .post('/api/v1/super-admin/outcome-studio/knowledge-packs/manifests')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        manifestKey: 'vmf-outcome-studio',
+        manifestName: 'VMF Outcome Studio',
+        semanticVersion: '1.0.0',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('MANIFEST_ALREADY_EXISTS')
+    expect(KnowledgePackManifest.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('PUT /api/v1/super-admin/outcome-studio/knowledge-packs/manifests/:manifestId updates draft authoring fields and keeps identity immutable', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const draftManifest = makeKnowledgePackManifest({
+      status: 'DRAFT',
+      isSystem: false,
+      manifestName: 'Draft Manifest',
+    })
+    const updatedManifest = {
+      ...draftManifest,
+      manifestName: 'Draft Manifest Updated',
+      validationPacks: [
+        {
+          packCategory: 'PLATFORM',
+          purposeCategory: 'VALIDATION',
+          packType: 'TRUTH_CERTIFICATION',
+          packKey: 'truth-certification-pack',
+          label: 'Truth Certification',
+          executionMode: 'POST_VALIDATION',
+          required: true,
+          dependencyKeys: [],
+          metadata: {},
+        },
+      ],
+    }
+    KnowledgePackManifest.findOne.mockReturnValue(buildFindOneChain(draftManifest))
+    KnowledgePackManifest.findOneAndUpdate.mockReturnValue(buildFindOneAndUpdateChain(updatedManifest))
+
+    const res = await request
+      .put('/api/v1/super-admin/outcome-studio/knowledge-packs/manifests/kpm-vmf-outcome-studio-1-0-0-global')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        manifestName: 'Draft Manifest Updated',
+        validationPacks: [
+          {
+            packCategory: 'PLATFORM',
+            purposeCategory: 'VALIDATION',
+            packType: 'TRUTH_CERTIFICATION',
+            packKey: 'truth-certification-pack',
+            executionMode: 'POST_VALIDATION',
+          },
+        ],
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toEqual(expect.objectContaining({
+      manifestId: 'kpm-vmf-outcome-studio-1-0-0-global',
+      manifestName: 'Draft Manifest Updated',
+      validationPacks: [expect.objectContaining({ packKey: 'truth-certification-pack' })],
+    }))
+    expect(KnowledgePackManifest.findOneAndUpdate).toHaveBeenCalledWith(
+      { manifestId: 'kpm-vmf-outcome-studio-1-0-0-global' },
+      expect.objectContaining({
+        $set: expect.not.objectContaining({
+          manifestKey: expect.anything(),
+          semanticVersion: expect.anything(),
+          scopeKey: expect.anything(),
+        }),
+      }),
+      expect.objectContaining({ new: true, runValidators: true }),
+    )
+    expect(AuditLog.createLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'KNOWLEDGE_PACK_MANIFEST_UPDATED',
+        resourceType: 'KnowledgePackManifest',
+        resourceId: 'kpm-vmf-outcome-studio-1-0-0-global',
+      }),
+      expect.objectContaining({ session: expect.any(Object) }),
+    )
+  })
+
+  test('PUT /api/v1/super-admin/outcome-studio/knowledge-packs/manifests/:manifestId rejects active manifest edits before update and audit', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    KnowledgePackManifest.findOne.mockReturnValue(buildFindOneChain(makeKnowledgePackManifest({
+      status: 'ACTIVE',
+      isSystem: false,
+    })))
+
+    const res = await request
+      .put('/api/v1/super-admin/outcome-studio/knowledge-packs/manifests/kpm-vmf-outcome-studio-1-0-0-global')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ manifestName: 'Blocked Edit' })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('MANIFEST_IMMUTABLE')
+    expect(KnowledgePackManifest.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/manifests/:manifestId/clone creates a new draft manifest with source lineage', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const sourceManifest = makeKnowledgePackManifest({
+      status: 'VALIDATED',
+      manifestName: 'VMF Outcome Studio Manifest',
+    })
+    KnowledgePackManifest.findOne.mockReturnValue(buildFindOneChain(sourceManifest))
+
+    const res = await request
+      .post('/api/v1/super-admin/outcome-studio/knowledge-packs/manifests/kpm-vmf-outcome-studio-1-0-0-global/clone')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        manifestKey: 'vmf-outcome-studio-variant',
+        semanticVersion: '1.1.0',
+        manifestName: 'VMF Outcome Studio Variant',
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data).toEqual(expect.objectContaining({
+      manifestId: 'kpm-vmf-outcome-studio-variant-1-1-0-package-vmf-standard-package-vmf-3-1-rkm-3-1',
+      manifestKey: 'vmf-outcome-studio-variant',
+      manifestName: 'VMF Outcome Studio Variant',
+      status: 'DRAFT',
+      sourceMetadata: expect.objectContaining({
+        clonedFromManifestId: 'kpm-vmf-outcome-studio-1-0-0-global',
+      }),
+    }))
+    expect(AuditLog.createLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'KNOWLEDGE_PACK_MANIFEST_CLONED',
+        resourceType: 'KnowledgePackManifest',
+        resourceId: 'kpm-vmf-outcome-studio-variant-1-1-0-package-vmf-standard-package-vmf-3-1-rkm-3-1',
+        diff: expect.objectContaining({
+          operation: 'CLONE_MANIFEST',
+          clonedFromManifestId: 'kpm-vmf-outcome-studio-1-0-0-global',
+        }),
+      }),
+      expect.objectContaining({ session: expect.any(Object) }),
+    )
+  })
+
+  test('GET /api/v1/super-admin/outcome-studio/knowledge-packs/manifests/:manifestId/compare/:targetManifestId returns safe section deltas', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const sourceManifest = makeKnowledgePackManifest({
+      manifestId: 'kpm-vmf-outcome-studio-1-0-0-global',
+      semanticVersion: '1.0.0',
+      mandatoryPacks: [
+        {
+          packCategory: 'OUTCOME',
+          purposeCategory: 'GOVERNANCE',
+          packType: 'ARL',
+          packKey: 'adaptive-reasoning-layer',
+          label: 'Adaptive Reasoning Layer',
+          executionMode: 'PROVIDER_CONTEXT',
+          required: true,
+          dependencyKeys: [],
+          metadata: {},
+        },
+      ],
+    })
+    const targetManifest = makeKnowledgePackManifest({
+      manifestId: 'kpm-vmf-outcome-studio-1-1-0-global',
+      semanticVersion: '1.1.0',
+      mandatoryPacks: [],
+      validationPacks: [
+        {
+          packCategory: 'PLATFORM',
+          purposeCategory: 'VALIDATION',
+          packType: 'TRUTH_CERTIFICATION',
+          packKey: 'truth-certification-pack',
+          label: 'Truth Certification',
+          executionMode: 'POST_VALIDATION',
+          required: true,
+          dependencyKeys: [],
+          metadata: {},
+        },
+      ],
+      content: {
+        hidden: 'Manifest compare must not leak hidden source content.',
+      },
+    })
+    KnowledgePackManifest.findOne
+      .mockReturnValueOnce(buildFindOneChain(sourceManifest))
+      .mockReturnValueOnce(buildFindOneChain(targetManifest))
+
+    const res = await request
+      .get('/api/v1/super-admin/outcome-studio/knowledge-packs/manifests/kpm-vmf-outcome-studio-1-0-0-global/compare/kpm-vmf-outcome-studio-1-1-0-global')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toEqual(expect.objectContaining({
+      status: 'COMPARED',
+      contentVisible: false,
+      source: expect.objectContaining({ semanticVersion: '1.0.0' }),
+      target: expect.objectContaining({ semanticVersion: '1.1.0' }),
+      sections: expect.objectContaining({
+        mandatoryPacks: expect.objectContaining({ removedCount: 1 }),
+        validationPacks: expect.objectContaining({ addedCount: 1 }),
+      }),
+      summary: expect.objectContaining({
+        semanticVersionChanged: true,
+        totalAdded: 1,
+        totalRemoved: 1,
+      }),
+    }))
+    expect(JSON.stringify(res.body)).not.toContain('hidden source content')
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
   test('GET /api/v1/super-admin/outcome-studio/knowledge-packs/manifests/:manifestId/resolution-preview wraps existing OES resolver for the default manifest', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     KnowledgePackActivation.find.mockReturnValue(buildFindChain(makeAllRequiredActivations()))
@@ -716,6 +1016,315 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
     ]))
     expect(JSON.stringify(res.body)).not.toContain('Activation content must not leak')
     expect(JSON.stringify(res.body)).not.toContain('Version content must not leak')
+  })
+
+  test('GET /api/v1/super-admin/outcome-studio/knowledge-packs/manifests/:manifestId/resolution-preview resolves validation packs as required manifest entries', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const manifest = makeKnowledgePackManifest({
+      mandatoryPacks: [
+        {
+          packCategory: 'OUTCOME',
+          purposeCategory: 'GOVERNANCE',
+          packType: 'ARL',
+          packKey: 'adaptive-reasoning-layer',
+          label: 'Adaptive Reasoning Layer',
+          executionMode: 'PROVIDER_CONTEXT',
+          required: true,
+          dependencyKeys: [],
+          metadata: {},
+        },
+      ],
+      validationPacks: [
+        {
+          packCategory: 'PLATFORM',
+          purposeCategory: 'VALIDATION',
+          packType: 'TRUTH_CERTIFICATION',
+          packKey: 'truth-certification-pack',
+          label: 'Truth Certification',
+          executionMode: 'POST_VALIDATION',
+          required: true,
+          dependencyKeys: ['adaptive-reasoning-layer'],
+          metadata: {},
+        },
+      ],
+    })
+    const activations = [
+      makeActivation({ packCategory: 'OUTCOME', packType: 'ARL', packKey: 'adaptive-reasoning-layer', label: 'Adaptive Reasoning Layer' }),
+      makeActivation({ packCategory: 'PLATFORM', packType: 'TRUTH_CERTIFICATION', packKey: 'truth-certification-pack', label: 'Truth Certification' }),
+    ]
+    KnowledgePackManifest.findOne.mockReturnValue(buildFindOneChain(manifest))
+    KnowledgePackActivation.find.mockReturnValue(buildFindChain(activations))
+    KnowledgePackVersion.find.mockReturnValue(buildFindChain(makeVersionsForActivations(activations)))
+
+    const res = await request
+      .get('/api/v1/super-admin/outcome-studio/knowledge-packs/manifests/kpm-vmf-outcome-studio-1-0-0-global/resolution-preview?frameworkKey=VMF&runtimeType=VALUE_NARRATIVE&packageKey=standard-package-vmf-3-1-rkm&packageVersion=3.1')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.binding).toEqual(expect.objectContaining({
+      status: 'PROJECTED',
+      validationPacks: [
+        expect.objectContaining({
+          packType: 'TRUTH_CERTIFICATION',
+          packKey: 'truth-certification-pack',
+          manifestSection: 'validation',
+          required: true,
+          runtimeBindable: true,
+        }),
+      ],
+      resolution: expect.objectContaining({
+        activeCount: 2,
+        requiredCount: 2,
+        validationCount: 1,
+        dependencyCount: 1,
+      }),
+    }))
+  })
+
+  test('GET /api/v1/super-admin/outcome-studio/knowledge-packs/manifests/:manifestId/reasoning-context-preview selects requested context packs without exposing content', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const stylePack = {
+      packCategory: 'CONTEXT',
+      purposeCategory: 'STYLE',
+      packType: 'STYLE',
+      packKey: 'board-reporting-style',
+      label: 'Board Reporting Style',
+      executionMode: 'PROVIDER_CONTEXT',
+      required: false,
+      dependencyKeys: [],
+      metadata: {},
+    }
+    const audiencePack = {
+      packCategory: 'CONTEXT',
+      purposeCategory: 'AUDIENCE',
+      packType: 'AUDIENCE',
+      packKey: 'c-suite-audience',
+      label: 'C-Suite Audience',
+      executionMode: 'PROVIDER_CONTEXT',
+      required: false,
+      dependencyKeys: [],
+      metadata: {},
+    }
+    const decisionPack = {
+      packCategory: 'CONTEXT',
+      purposeCategory: 'DECISION',
+      packType: 'DECISION',
+      packKey: 'investment-committee-decision',
+      label: 'Investment Committee Decision',
+      executionMode: 'PROVIDER_CONTEXT',
+      required: false,
+      dependencyKeys: [],
+      metadata: {},
+    }
+    const manifest = makeKnowledgePackManifest({
+      outputKey: 'executive_brief',
+      mandatoryPacks: [
+        {
+          packCategory: 'OUTCOME',
+          purposeCategory: 'GOVERNANCE',
+          packType: 'ARL',
+          packKey: 'adaptive-reasoning-layer',
+          label: 'Adaptive Reasoning Layer',
+          executionMode: 'PROVIDER_CONTEXT',
+          required: true,
+          dependencyKeys: [],
+          metadata: {},
+        },
+      ],
+      optionalPacks: [stylePack, audiencePack, decisionPack],
+    })
+    const activations = [
+      makeActivation({ packCategory: 'OUTCOME', packType: 'ARL', packKey: 'adaptive-reasoning-layer', label: 'Adaptive Reasoning Layer' }),
+      makeActivation(stylePack, { contentHash: 'sha256:style-pack' }),
+      makeActivation(audiencePack, { contentHash: 'sha256:audience-pack' }),
+      makeActivation(decisionPack, { contentHash: 'sha256:decision-pack' }),
+    ]
+    KnowledgePackManifest.findOne.mockReturnValue(buildFindOneChain(manifest))
+    KnowledgePackActivation.find.mockReturnValue(buildFindChain(activations))
+    KnowledgePackVersion.find.mockReturnValue(buildFindChain(makeVersionsForActivations(activations)))
+
+    const res = await request
+      .get('/api/v1/super-admin/outcome-studio/knowledge-packs/manifests/kpm-vmf-outcome-studio-1-0-0-global/reasoning-context-preview?frameworkKey=VMF&runtimeType=VALUE_NARRATIVE&packageKey=standard-package-vmf-3-1-rkm&packageVersion=3.1&outputKey=EXECUTIVE_BRIEF&contextCategories=STYLE,AUDIENCE,DECISION')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toEqual(expect.objectContaining({
+      status: 'PROJECTED',
+      previewOnly: true,
+      contentVisible: false,
+      generatedOutput: false,
+      providerExecution: false,
+      request: expect.objectContaining({
+        outputKey: 'executive_brief',
+        contextCategories: ['STYLE', 'AUDIENCE', 'DECISION'],
+      }),
+      context: expect.objectContaining({
+        assemblyMode: 'PREVIEW_ONLY',
+        basePacks: [
+          expect.objectContaining({
+            packType: 'ARL',
+            packKey: 'adaptive-reasoning-layer',
+            runtimeBindable: true,
+          }),
+        ],
+        selectedContextPacks: expect.arrayContaining([
+          expect.objectContaining({
+            purposeCategory: 'STYLE',
+            packKey: 'board-reporting-style',
+            contentHash: 'sha256:style-pack',
+          }),
+          expect.objectContaining({
+            purposeCategory: 'AUDIENCE',
+            packKey: 'c-suite-audience',
+          }),
+          expect.objectContaining({
+            purposeCategory: 'DECISION',
+            packKey: 'investment-committee-decision',
+          }),
+        ]),
+        resolution: expect.objectContaining({
+          status: 'PROJECTED',
+          basePackCount: 1,
+          selectedContextPackCount: 3,
+          requestedContextCategories: ['STYLE', 'AUDIENCE', 'DECISION'],
+        }),
+      }),
+      safeguards: expect.arrayContaining([
+        'PREVIEW_ONLY_NO_PROVIDER_EXECUTION',
+        'NO_GENERATED_OUTPUT',
+        'NO_PACK_CONTENT_EXPOSED',
+        'NO_RUNTIME_TRUTH_EXPOSED',
+      ]),
+    }))
+    expect(JSON.stringify(res.body)).not.toContain('Activation content must not leak')
+    expect(JSON.stringify(res.body)).not.toContain('Version content must not leak')
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('GET /api/v1/super-admin/outcome-studio/knowledge-packs/manifests/:manifestId/reasoning-context-preview fails closed when a requested context category is not runtime-bindable', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const stylePack = {
+      packCategory: 'CONTEXT',
+      purposeCategory: 'STYLE',
+      packType: 'STYLE',
+      packKey: 'board-reporting-style',
+      label: 'Board Reporting Style',
+      executionMode: 'PROVIDER_CONTEXT',
+      required: false,
+      dependencyKeys: [],
+      metadata: {},
+    }
+    const audiencePack = {
+      packCategory: 'CONTEXT',
+      purposeCategory: 'AUDIENCE',
+      packType: 'AUDIENCE',
+      packKey: 'c-suite-audience',
+      label: 'C-Suite Audience',
+      executionMode: 'PROVIDER_CONTEXT',
+      required: false,
+      dependencyKeys: [],
+      metadata: {},
+    }
+    const arlPack = {
+      packCategory: 'OUTCOME',
+      purposeCategory: 'GOVERNANCE',
+      packType: 'ARL',
+      packKey: 'adaptive-reasoning-layer',
+      label: 'Adaptive Reasoning Layer',
+    }
+    KnowledgePackManifest.findOne.mockReturnValue(buildFindOneChain(makeKnowledgePackManifest({
+      mandatoryPacks: [{
+        ...arlPack,
+        executionMode: 'PROVIDER_CONTEXT',
+        required: true,
+        dependencyKeys: [],
+        metadata: {},
+      }],
+      optionalPacks: [stylePack, audiencePack],
+    })))
+    const activations = [
+      makeActivation(arlPack),
+      makeActivation(stylePack),
+    ]
+    KnowledgePackActivation.find.mockReturnValue(buildFindChain(activations))
+    KnowledgePackVersion.find.mockReturnValue(buildFindChain(makeVersionsForActivations(activations)))
+
+    const res = await request
+      .get('/api/v1/super-admin/outcome-studio/knowledge-packs/manifests/kpm-vmf-outcome-studio-1-0-0-global/reasoning-context-preview?contextCategories=STYLE,AUDIENCE')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('REASONING_CONTEXT_PACK_MISSING')
+    expect(res.body.error.details.purposeCategory).toBe('AUDIENCE')
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('GET /api/v1/super-admin/outcome-studio/knowledge-packs/manifests/:manifestId/reasoning-context-preview rejects tenant-scoped context packs outside the requested tenant', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const brandPack = {
+      packCategory: 'CONTEXT',
+      purposeCategory: 'BRAND',
+      packType: 'BRAND',
+      packKey: 'customer-brand',
+      label: 'Customer Brand',
+      executionMode: 'PROVIDER_CONTEXT',
+      required: false,
+      dependencyKeys: [],
+      metadata: {},
+    }
+    const arlPack = {
+      packCategory: 'OUTCOME',
+      purposeCategory: 'GOVERNANCE',
+      packType: 'ARL',
+      packKey: 'adaptive-reasoning-layer',
+      label: 'Adaptive Reasoning Layer',
+    }
+    KnowledgePackManifest.findOne.mockReturnValue(buildFindOneChain(makeKnowledgePackManifest({
+      mandatoryPacks: [{
+        ...arlPack,
+        executionMode: 'PROVIDER_CONTEXT',
+        required: true,
+        dependencyKeys: [],
+        metadata: {},
+      }],
+      optionalPacks: [brandPack],
+    })))
+    const activations = [
+      makeActivation(arlPack),
+      makeActivation(brandPack, {
+        visibility: 'TENANT',
+        tenantId: '507f1f77bcf86cd799439099',
+      }),
+    ]
+    KnowledgePackActivation.find.mockReturnValue(buildFindChain(activations))
+    KnowledgePackVersion.find.mockReturnValue(buildFindChain(makeVersionsForActivations(activations)))
+
+    const res = await request
+      .get('/api/v1/super-admin/outcome-studio/knowledge-packs/manifests/kpm-vmf-outcome-studio-1-0-0-global/reasoning-context-preview?contextCategories=BRAND&tenantId=507f1f77bcf86cd799439012')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.details.reason).toBe('REASONING_CONTEXT_PACK_SCOPE_FORBIDDEN')
+    expect(res.body.error.details).toEqual(expect.objectContaining({
+      purposeCategory: 'BRAND',
+      packType: 'BRAND',
+      packKey: 'customer-brand',
+      visibility: 'TENANT',
+    }))
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('GET /api/v1/super-admin/outcome-studio/knowledge-packs/manifests/:manifestId/reasoning-context-preview rejects unsupported context categories at the validator boundary', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .get('/api/v1/super-admin/outcome-studio/knowledge-packs/manifests/kpm-vmf-outcome-studio-1-0-0-global/reasoning-context-preview?contextCategories=STYLE,UNKNOWN')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(KnowledgePackManifest.findOne).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 
   test('GET /api/v1/super-admin/outcome-studio/knowledge-packs/manifests/:manifestId/resolution-preview rejects non-bindable manifests before activation lookup', async () => {
@@ -1023,6 +1632,78 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
     }))
     expect(JSON.stringify(res.body)).not.toContain('Version content must not leak')
     expect(JSON.stringify(res.body)).not.toContain('Activation content must not leak')
+  })
+
+  test('GET /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/versions/:versionId returns source-document draft metadata', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const draftPack = makeKnowledgePack({
+      packId: 'kp-style-board-executive-style',
+      packCategory: 'STYLE',
+      packType: 'STYLE',
+      packKey: 'board-executive-style',
+      label: 'Board Executive Style',
+      status: 'DRAFT',
+      purposeCategory: 'STYLE',
+      sourceAuthority: 'StorylineOS Methodology',
+      executionMode: 'PROVIDER_CONTEXT',
+      visibility: 'PLATFORM',
+      authoringMode: 'IMPORT_SOURCE_DOCUMENT',
+      reviewStatus: 'DRAFT',
+      latestVersionId: 'kpv-style-board-executive-style-1-0-0-global',
+      latestSemanticVersion: '1.0.0',
+    })
+    const draftVersion = makeKnowledgePackVersion({
+      versionId: 'kpv-style-board-executive-style-1-0-0-global',
+      packId: 'kp-style-board-executive-style',
+      packCategory: 'STYLE',
+      packType: 'STYLE',
+      packKey: 'board-executive-style',
+      status: 'DRAFT',
+      purposeCategory: 'STYLE',
+      sourceAuthority: 'StorylineOS Methodology',
+      contentFormat: 'DOCX',
+      sourceFilename: 'Board Executive Style.docx',
+      content: 'Source document extracted text must not leak from metadata endpoint.',
+      sourceDocuments: [
+        {
+          sourceDocumentId: 'style-doc-1',
+          filename: 'Board Executive Style.docx',
+          fileExtension: 'docx',
+          sourceHash: 'sha256:style-doc-hash',
+        },
+      ],
+      validationSummary: {
+        status: 'NOT_RUN',
+        mode: 'HUMAN_REVIEW_REQUIRED',
+      },
+      authoringMode: 'IMPORT_SOURCE_DOCUMENT',
+      reviewStatus: 'DRAFT',
+    })
+    KnowledgePack.findOne.mockReturnValueOnce(buildFindOneChain(draftPack))
+    KnowledgePackVersion.findOne.mockReturnValueOnce(buildVersionFindOneChain(draftVersion))
+
+    const res = await request
+      .get('/api/v1/super-admin/outcome-studio/knowledge-packs/kp-style-board-executive-style/versions/kpv-style-board-executive-style-1-0-0-global')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toEqual(expect.objectContaining({
+      versionId: 'kpv-style-board-executive-style-1-0-0-global',
+      packId: 'kp-style-board-executive-style',
+      packType: 'STYLE',
+      packKey: 'board-executive-style',
+      status: 'DRAFT',
+      contentFormat: 'DOCX',
+      sourceFilename: 'Board Executive Style.docx',
+      sourceAuthority: 'StorylineOS Methodology',
+      authoringMode: 'IMPORT_SOURCE_DOCUMENT',
+      reviewStatus: 'DRAFT',
+      validationSummary: expect.objectContaining({
+        status: 'NOT_RUN',
+        mode: 'HUMAN_REVIEW_REQUIRED',
+      }),
+    }))
+    expect(JSON.stringify(res.body)).not.toContain('Source document extracted text must not leak')
   })
 
   test('GET /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/versions/:versionId/content-preview returns source content on a dedicated audited endpoint', async () => {
@@ -1416,6 +2097,164 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       action: 'OUTCOME_KNOWLEDGE_PACK_VERSION_UPLOADED',
     }))
     expect(JSON.stringify(res.body)).not.toContain('rendering_rules')
+  })
+
+  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import creates a source-document draft without activation', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    KnowledgePack.findOneAndUpdate.mockResolvedValueOnce(makeKnowledgePack({
+      packId: 'kp-style-board-executive-style',
+      packType: 'STYLE',
+      packKey: 'board-executive-style',
+      label: 'Board Executive Style',
+      status: 'DRAFT',
+      purposeCategory: 'STYLE',
+      sourceAuthority: 'StorylineOS Methodology',
+      executionMode: 'PROVIDER_CONTEXT',
+      visibility: 'PLATFORM',
+      authoringMode: 'IMPORT_SOURCE_DOCUMENT',
+      reviewStatus: 'DRAFT',
+      latestVersionId: 'kpv-style-board-executive-style-1-0-0-global',
+      latestSemanticVersion: '1.0.0',
+    }))
+
+    const res = await request
+      .post('/api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        packType: 'STYLE',
+        packKey: 'board-executive-style',
+        label: 'Board Executive Style',
+        purposeCategory: 'STYLE',
+        semanticVersion: '1.0.0',
+        sourceAuthority: 'StorylineOS Methodology',
+        sourceDocument: {
+          sourceDocumentId: 'style-doc-1',
+          filename: 'Board Executive Style.docx',
+          contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          sourceHash: 'sha256:style-doc-hash',
+        },
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data.pack).toEqual(expect.objectContaining({
+      packId: 'kp-style-board-executive-style',
+      packType: 'STYLE',
+      purposeCategory: 'STYLE',
+      visibility: 'PLATFORM',
+      authoringMode: 'IMPORT_SOURCE_DOCUMENT',
+      reviewStatus: 'DRAFT',
+    }))
+    expect(res.body.data.version).toEqual(expect.objectContaining({
+      versionId: 'kpv-style-board-executive-style-1-0-0-global',
+      packType: 'STYLE',
+      packKey: 'board-executive-style',
+      status: 'DRAFT',
+      contentFormat: 'DOCX',
+      sourceFilename: 'Board Executive Style.docx',
+      sourceAuthority: 'StorylineOS Methodology',
+      authoringMode: 'IMPORT_SOURCE_DOCUMENT',
+      reviewStatus: 'DRAFT',
+    }))
+    expect(res.body.data.version.sourceDocuments).toEqual([
+      expect.objectContaining({
+        sourceDocumentId: 'style-doc-1',
+        filename: 'Board Executive Style.docx',
+        fileExtension: 'docx',
+        sourceHash: 'sha256:style-doc-hash',
+      }),
+    ])
+    expect(res.body.data.version.validationSummary).toEqual(expect.objectContaining({
+      status: 'NOT_RUN',
+      mode: 'HUMAN_REVIEW_REQUIRED',
+    }))
+    expect(JSON.stringify(res.body)).not.toContain('Provider instructions hidden from list responses')
+    expect(KnowledgePackActivation.updateMany).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'OUTCOME_KNOWLEDGE_PACK_VERSION_UPLOADED',
+      diff: expect.objectContaining({
+        importMode: 'SOURCE_DOCUMENT_IMPORT_DRAFT',
+        contentIncludedInAudit: false,
+        activationCreated: false,
+      }),
+    }))
+  })
+
+  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import rejects unsupported source document formats', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        packType: 'STYLE',
+        packKey: 'board-executive-style',
+        label: 'Board Executive Style',
+        semanticVersion: '1.0.0',
+        sourceDocument: {
+          filename: 'Board Executive Style.exe',
+        },
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.reason).toBe('PACK_SOURCE_FORMAT_UNSUPPORTED')
+    expect(KnowledgePack.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(KnowledgePackVersion.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import requires owner ids for scoped drafts', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        packType: 'BRAND',
+        packKey: 'acme-brand',
+        label: 'Acme Brand',
+        semanticVersion: '1.0.0',
+        visibility: 'CUSTOMER',
+        sourceDocument: {
+          filename: 'Acme Brand Guidelines.pdf',
+        },
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.customerId).toBe('customerId is required for CUSTOMER visibility')
+    expect(KnowledgePack.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(KnowledgePackVersion.prototype.save).not.toHaveBeenCalled()
+  })
+
+  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import rejects duplicate draft versions for the same scope', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    KnowledgePackVersion.findOne.mockReturnValueOnce(
+      buildVersionFindOneChain(makeKnowledgePackVersion({
+        versionId: 'kpv-style-board-executive-style-1-0-0-global',
+        packType: 'STYLE',
+        packKey: 'board-executive-style',
+        semanticVersion: '1.0.0',
+        scopeKey: 'GLOBAL',
+      })),
+    )
+
+    const res = await request
+      .post('/api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        packType: 'STYLE',
+        packKey: 'board-executive-style',
+        label: 'Board Executive Style',
+        semanticVersion: '1.0.0',
+        sourceDocument: {
+          filename: 'Board Executive Style.docx',
+        },
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('PACK_VERSION_ALREADY_EXISTS')
+    expect(KnowledgePack.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(KnowledgePackVersion.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 
   test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/versions/:versionId/validate marks valid starter source as validated', async () => {

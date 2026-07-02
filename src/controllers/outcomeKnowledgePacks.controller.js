@@ -6,6 +6,7 @@ import {
   getOutcomeKnowledgePack,
   getOutcomeKnowledgePackVersion,
   importOutcomeKnowledgePackStarterVersion,
+  importOutcomeKnowledgePackSourceDocumentDraft,
   listOutcomeKnowledgePacks,
   previewOutcomeKnowledgePackVersionContent,
   previewOutcomeKnowledgePackResolution,
@@ -13,9 +14,14 @@ import {
   validateOutcomeKnowledgePackVersion,
 } from '../services/outcomeKnowledgePackRegistryService.js'
 import {
+  cloneKnowledgePackManifest,
+  compareKnowledgePackManifests,
+  createKnowledgePackManifest,
   getKnowledgePackManifest,
   listKnowledgePackManifests,
+  previewKnowledgePackReasoningContext,
   previewKnowledgePackManifestResolution,
+  updateKnowledgePackManifest,
 } from '../services/knowledgePackManifestService.js'
 
 const sendControllerError = (res, req, err) =>
@@ -55,9 +61,74 @@ export const getKnowledgePackManifestController = async (req, res) => {
   }
 }
 
+export const createKnowledgePackManifestController = async (req, res) => {
+  try {
+    const data = await createKnowledgePackManifest({
+      body: req.body,
+      actorUserId: req.context?.userId || req.userId,
+      auditRequest: req,
+    })
+    res.status(201).json({ data })
+  } catch (err) {
+    sendControllerError(res, req, err)
+  }
+}
+
+export const updateKnowledgePackManifestController = async (req, res) => {
+  try {
+    const data = await updateKnowledgePackManifest({
+      manifestId: req.params.manifestId,
+      body: req.body,
+      actorUserId: req.context?.userId || req.userId,
+      auditRequest: req,
+    })
+    res.status(200).json({ data })
+  } catch (err) {
+    sendControllerError(res, req, err)
+  }
+}
+
+export const cloneKnowledgePackManifestController = async (req, res) => {
+  try {
+    const data = await cloneKnowledgePackManifest({
+      manifestId: req.params.manifestId,
+      body: req.body,
+      actorUserId: req.context?.userId || req.userId,
+      auditRequest: req,
+    })
+    res.status(201).json({ data })
+  } catch (err) {
+    sendControllerError(res, req, err)
+  }
+}
+
+export const compareKnowledgePackManifestsController = async (req, res) => {
+  try {
+    const data = await compareKnowledgePackManifests({
+      manifestId: req.params.manifestId,
+      targetManifestId: req.params.targetManifestId,
+    })
+    res.status(200).json({ data })
+  } catch (err) {
+    sendControllerError(res, req, err)
+  }
+}
+
 export const previewKnowledgePackManifestResolutionController = async (req, res) => {
   try {
     const data = await previewKnowledgePackManifestResolution({
+      manifestId: req.params.manifestId,
+      query: req.query,
+    })
+    res.status(200).json({ data })
+  } catch (err) {
+    sendControllerError(res, req, err)
+  }
+}
+
+export const previewKnowledgePackReasoningContextController = async (req, res) => {
+  try {
+    const data = await previewKnowledgePackReasoningContext({
       manifestId: req.params.manifestId,
       query: req.query,
     })
@@ -94,6 +165,19 @@ export const importKnowledgePackStarterVersion = async (req, res) => {
   try {
     const data = await importOutcomeKnowledgePackStarterVersion({
       packId: req.params.packId,
+      actorUserId: req.context?.userId || req.userId,
+      auditRequest: req,
+    })
+    res.status(201).json({ data })
+  } catch (err) {
+    sendControllerError(res, req, err)
+  }
+}
+
+export const importKnowledgePackSourceDocumentDraft = async (req, res) => {
+  try {
+    const data = await importOutcomeKnowledgePackSourceDocumentDraft({
+      body: req.body,
       actorUserId: req.context?.userId || req.userId,
       auditRequest: req,
     })

@@ -3,6 +3,9 @@ import { describe, test, expect } from '@jest/globals'
 
 import FrameworkPackage from '../models/FrameworkPackage.js'
 import RuntimeSkill from '../models/RuntimeSkill.js'
+import KnowledgePack from '../models/KnowledgePack.js'
+import KnowledgePackVersion from '../models/KnowledgePackVersion.js'
+import KnowledgePackActivation from '../models/KnowledgePackActivation.js'
 import KnowledgePackManifest from '../models/KnowledgePackManifest.js'
 import OutcomeAsset from '../models/OutcomeAsset.js'
 import OutcomeAssetVersion from '../models/OutcomeAssetVersion.js'
@@ -88,6 +91,9 @@ describe('Knowledge Runtime model contracts', () => {
 
   test('declares resolver and output lookup indexes', () => {
     expect(hasIndex(KnowledgePackManifest, { scopeType: 1, scopeKey: 1, status: 1 })).toBe(true)
+    expect(hasIndex(KnowledgePack, { purposeCategory: 1, status: 1, updatedAt: -1 })).toBe(true)
+    expect(hasIndex(KnowledgePackVersion, { visibility: 1, customerId: 1, tenantId: 1, status: 1 })).toBe(true)
+    expect(hasIndex(KnowledgePackActivation, { purposeCategory: 1, status: 1, activatedAt: -1 })).toBe(true)
     expect(hasIndex(OutcomeAsset, {
       runtimeInstanceId: 1,
       outputTypeKey: 1,
@@ -107,5 +113,132 @@ describe('Knowledge Runtime model contracts', () => {
     expect(asset.outcomeId).toBeNull()
     expect(version.projectId).toBeNull()
     expect(version.outcomeId).toBeNull()
+  })
+
+  test('normalizes KP-002 reasoning category and source-document metadata', async () => {
+    const customerId = objectId()
+    const pack = new KnowledgePack({
+      packType: ' style ',
+      packKey: ' Board-Executive ',
+      label: ' Board Executive Style ',
+      purposeCategory: ' style ',
+      executionMode: ' provider_context ',
+      visibility: ' customer ',
+      customerId,
+      sourceAuthority: ' StorylineOS Methodology ',
+      authoringMode: ' import_source_document ',
+      reviewStatus: ' ready_for_review ',
+      sourceMetadata: {
+        importedFrom: 'Corporate Writing Guide.docx',
+      },
+    })
+    const version = new KnowledgePackVersion({
+      packType: 'style',
+      packKey: ' Board-Executive ',
+      semanticVersion: ' 1.2.0 ',
+      purposeCategory: 'style',
+      executionMode: 'provider_context',
+      visibility: 'customer',
+      customerId,
+      contentFormat: 'docx',
+      sourceAuthority: ' StorylineOS Methodology ',
+      authoringMode: ' import_source_document ',
+      reviewStatus: ' ready_for_review ',
+      sourceDocuments: [
+        {
+          sourceDocumentId: ' style-doc-1 ',
+          filename: ' Board Executive Style.DOCX ',
+          contentType: ' application/vnd.openxmlformats-officedocument.wordprocessingml.document ',
+          fileExtension: ' DOCX ',
+          sourceHash: ' sha256:abc123 ',
+        },
+      ],
+    })
+    const activation = new KnowledgePackActivation({
+      packType: 'style',
+      packKey: 'board-executive',
+      versionId: 'kpv-style-board-executive-1-2-0-customer-acme',
+      semanticVersion: '1.2.0',
+      purposeCategory: 'style',
+      executionMode: 'provider_context',
+      visibility: 'customer',
+      customerId,
+      scopeType: 'customer',
+      scopeKey: ' customer:acme ',
+    })
+
+    await expect(pack.validate()).resolves.toBeUndefined()
+    await expect(version.validate()).resolves.toBeUndefined()
+    await expect(activation.validate()).resolves.toBeUndefined()
+
+    expect(pack.packType).toBe('STYLE')
+    expect(pack.packKey).toBe('board-executive')
+    expect(pack.purposeCategory).toBe('STYLE')
+    expect(pack.executionMode).toBe('PROVIDER_CONTEXT')
+    expect(pack.visibility).toBe('CUSTOMER')
+    expect(pack.sourceAuthority).toBe('StorylineOS Methodology')
+    expect(pack.authoringMode).toBe('IMPORT_SOURCE_DOCUMENT')
+    expect(pack.reviewStatus).toBe('READY_FOR_REVIEW')
+    expect(version.contentFormat).toBe('DOCX')
+    expect(version.sourceDocuments[0]).toEqual(expect.objectContaining({
+      sourceDocumentId: 'style-doc-1',
+      filename: 'Board Executive Style.DOCX',
+      fileExtension: 'docx',
+      sourceHash: 'sha256:abc123',
+      sourceType: 'SOURCE_DOCUMENT',
+    }))
+    expect(activation.purposeCategory).toBe('STYLE')
+    expect(activation.visibility).toBe('CUSTOMER')
+  })
+
+  test('fails closed for customer or tenant scoped packs without owning scope ids', async () => {
+    const customerPack = new KnowledgePack({
+      packType: 'BRAND',
+      packKey: 'acme-brand',
+      label: 'Acme Brand',
+      purposeCategory: 'BRAND',
+      visibility: 'CUSTOMER',
+    })
+    const tenantVersion = new KnowledgePackVersion({
+      packType: 'STYLE',
+      packKey: 'tenant-style',
+      semanticVersion: '1.0.0',
+      purposeCategory: 'STYLE',
+      visibility: 'TENANT',
+    })
+
+    await expect(customerPack.validate()).rejects.toThrow(/customerId/)
+    await expect(tenantVersion.validate()).rejects.toThrow(/tenantId/)
+  })
+
+  test('rejects tenant-scoped provider packs that try to store runtime truth or raw evidence metadata', async () => {
+    const tenantId = objectId()
+    const pack = new KnowledgePack({
+      packType: 'BRAND',
+      packKey: 'acme-brand',
+      label: 'Acme Brand',
+      purposeCategory: 'BRAND',
+      visibility: 'TENANT',
+      tenantId,
+      sourceMetadata: {
+        certifiedTruth: {
+          status: 'CERTIFIED',
+        },
+      },
+    })
+    const version = new KnowledgePackVersion({
+      packType: 'STYLE',
+      packKey: 'acme-style',
+      semanticVersion: '1.0.0',
+      purposeCategory: 'STYLE',
+      visibility: 'TENANT',
+      tenantId,
+      content: {
+        rawEvidence: ['customer source extract'],
+      },
+    })
+
+    await expect(pack.validate()).rejects.toThrow(/runtime truth or raw evidence/)
+    await expect(version.validate()).rejects.toThrow(/runtime truth or raw evidence/)
   })
 })

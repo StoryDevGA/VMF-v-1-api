@@ -5,6 +5,11 @@ import {
   OUTCOME_KNOWLEDGE_PACK_TYPES,
 } from '../constants/outcomeKnowledgePacks.js'
 import {
+  KNOWLEDGE_PACK_EXECUTION_MODES,
+  KNOWLEDGE_PACK_PURPOSE_CATEGORIES,
+  KNOWLEDGE_PACK_VISIBILITY_SCOPES,
+} from '../constants/knowledgeRuntime.js'
+import {
   KNOWLEDGE_PACK_CATEGORIES,
   resolveKnowledgePackCategory,
 } from '../constants/workspaceGovernance.js'
@@ -94,6 +99,14 @@ const knowledgePackActivationSchema = new mongoose.Schema(
       uppercase: true,
       enum: Object.values(KNOWLEDGE_PACK_CATEGORIES),
       default: () => resolveKnowledgePackCategory(),
+    },
+    purposeCategory: {
+      type: String,
+      required: true,
+      uppercase: true,
+      enum: Object.values(KNOWLEDGE_PACK_PURPOSE_CATEGORIES),
+      default: KNOWLEDGE_PACK_PURPOSE_CATEGORIES.SYSTEM,
+      index: true,
     },
     packType: {
       type: String,
@@ -185,6 +198,33 @@ const knowledgePackActivationSchema = new mongoose.Schema(
       maxlength: 80,
       default: '',
     },
+    customerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Customer',
+      default: null,
+      index: true,
+    },
+    tenantId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Tenant',
+      default: null,
+      index: true,
+    },
+    executionMode: {
+      type: String,
+      required: true,
+      uppercase: true,
+      enum: Object.values(KNOWLEDGE_PACK_EXECUTION_MODES),
+      default: KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT,
+    },
+    visibility: {
+      type: String,
+      required: true,
+      uppercase: true,
+      enum: Object.values(KNOWLEDGE_PACK_VISIBILITY_SCOPES),
+      default: KNOWLEDGE_PACK_VISIBILITY_SCOPES.PLATFORM,
+      index: true,
+    },
     contentHash: {
       type: String,
       trim: true,
@@ -244,6 +284,8 @@ knowledgePackActivationSchema.index(
 )
 knowledgePackActivationSchema.index({ status: 1, scopeKey: 1, packType: 1, packKey: 1 })
 knowledgePackActivationSchema.index({ packId: 1, status: 1, activatedAt: -1 })
+knowledgePackActivationSchema.index({ purposeCategory: 1, status: 1, activatedAt: -1 })
+knowledgePackActivationSchema.index({ visibility: 1, customerId: 1, tenantId: 1, status: 1 })
 
 knowledgePackActivationSchema.pre('validate', function normalizeKnowledgePackActivation(next) {
   this.packType = normalizeToken(this.packType)
@@ -251,6 +293,7 @@ knowledgePackActivationSchema.pre('validate', function normalizeKnowledgePackAct
     packCategory: this.packCategory,
     packType: this.packType,
   })
+  this.purposeCategory = normalizeToken(this.purposeCategory || KNOWLEDGE_PACK_PURPOSE_CATEGORIES.SYSTEM)
   this.packKey = normalizeLowerKey(this.packKey)
   this.label = normalizeText(this.label)
   this.semanticVersion = normalizeText(this.semanticVersion)
@@ -262,6 +305,18 @@ knowledgePackActivationSchema.pre('validate', function normalizeKnowledgePackAct
   this.packageKey = normalizeLowerKey(this.packageKey)
   this.packageVersion = normalizeText(this.packageVersion)
   this.environmentKey = normalizeToken(this.environmentKey)
+  this.executionMode = normalizeToken(this.executionMode || KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT)
+  this.visibility = normalizeToken(this.visibility || KNOWLEDGE_PACK_VISIBILITY_SCOPES.PLATFORM)
+  if (this.visibility === KNOWLEDGE_PACK_VISIBILITY_SCOPES.CUSTOMER && !this.customerId) {
+    this.invalidate('customerId', 'Customer-scoped Knowledge Pack activations require customerId.')
+  }
+  if (this.visibility === KNOWLEDGE_PACK_VISIBILITY_SCOPES.TENANT && !this.tenantId) {
+    this.invalidate('tenantId', 'Tenant-scoped Knowledge Pack activations require tenantId.')
+  }
+  if (this.visibility === KNOWLEDGE_PACK_VISIBILITY_SCOPES.PLATFORM) {
+    this.customerId = null
+    this.tenantId = null
+  }
   this.contentHash = normalizeText(this.contentHash)
   if (!this.packId) this.packId = buildKnowledgePackId(this)
   if (!this.scopeKey) this.scopeKey = buildKnowledgePackActivationScopeKey(this)

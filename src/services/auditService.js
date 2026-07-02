@@ -106,6 +106,9 @@ export const AUDIT_ACTIONS = Object.freeze({
   OUTCOME_KNOWLEDGE_PACK_VALIDATION_FAILED: 'OUTCOME_KNOWLEDGE_PACK_VALIDATION_FAILED',
   OUTCOME_KNOWLEDGE_PACK_ACTIVATED: 'OUTCOME_KNOWLEDGE_PACK_ACTIVATED',
   KNOWLEDGE_PACK_CONTENT_PREVIEWED: 'KNOWLEDGE_PACK_CONTENT_PREVIEWED',
+  KNOWLEDGE_PACK_MANIFEST_CREATED: 'KNOWLEDGE_PACK_MANIFEST_CREATED',
+  KNOWLEDGE_PACK_MANIFEST_UPDATED: 'KNOWLEDGE_PACK_MANIFEST_UPDATED',
+  KNOWLEDGE_PACK_MANIFEST_CLONED: 'KNOWLEDGE_PACK_MANIFEST_CLONED',
   KNOWLEDGE_PACK_DEPRECATED: 'KNOWLEDGE_PACK_DEPRECATED',
   KNOWLEDGE_PACK_DISABLED: 'KNOWLEDGE_PACK_DISABLED',
   KNOWLEDGE_PACK_ROLLED_BACK: 'KNOWLEDGE_PACK_ROLLED_BACK',
@@ -210,6 +213,7 @@ export const RESOURCE_TYPES = Object.freeze({
   KnowledgePack: 'KnowledgePack',
   KnowledgePackVersion: 'KnowledgePackVersion',
   KnowledgePackActivation: 'KnowledgePackActivation',
+  KnowledgePackManifest: 'KnowledgePackManifest',
   RuntimeAgent: 'RuntimeAgent',
   RuntimeSkill: 'RuntimeSkill',
   RuntimePathRegistry: 'RuntimePathRegistry',
@@ -500,6 +504,12 @@ const buildAuditSummary = ({ action, resourceType, resourceId, diff, display }) 
       return clampSummary(`${actorLabel} imported starter Knowledge Pack ${targetLabel}`)
     case AUDIT_ACTIONS.KNOWLEDGE_PACK_CONTENT_PREVIEWED:
       return clampSummary(`${actorLabel} previewed Knowledge Pack content ${targetLabel}`)
+    case AUDIT_ACTIONS.KNOWLEDGE_PACK_MANIFEST_CREATED:
+      return clampSummary(`${actorLabel} created Knowledge Pack manifest ${targetLabel}`)
+    case AUDIT_ACTIONS.KNOWLEDGE_PACK_MANIFEST_UPDATED:
+      return clampSummary(`${actorLabel} updated Knowledge Pack manifest ${targetLabel}`)
+    case AUDIT_ACTIONS.KNOWLEDGE_PACK_MANIFEST_CLONED:
+      return clampSummary(`${actorLabel} cloned Knowledge Pack manifest ${targetLabel}`)
     case AUDIT_ACTIONS.KNOWLEDGE_PACK_DEPRECATED:
       return clampSummary(`${actorLabel} deprecated Knowledge Pack ${targetLabel}`)
     case AUDIT_ACTIONS.KNOWLEDGE_PACK_DISABLED:

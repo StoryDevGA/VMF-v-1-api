@@ -223,6 +223,10 @@ const knowledgePackManifestSchema = new mongoose.Schema(
       type: [knowledgePackManifestPackSchema],
       default: [],
     },
+    validationPacks: {
+      type: [knowledgePackManifestPackSchema],
+      default: [],
+    },
     blockedPacks: {
       type: [knowledgePackManifestPackSchema],
       default: [],

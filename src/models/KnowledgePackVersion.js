@@ -6,10 +6,18 @@ import {
   OUTCOME_KNOWLEDGE_PACK_TYPES,
 } from '../constants/outcomeKnowledgePacks.js'
 import {
+  KNOWLEDGE_PACK_AUTHORING_MODES,
+  KNOWLEDGE_PACK_EXECUTION_MODES,
+  KNOWLEDGE_PACK_PURPOSE_CATEGORIES,
+  KNOWLEDGE_PACK_REVIEW_STATUSES,
+  KNOWLEDGE_PACK_VISIBILITY_SCOPES,
+} from '../constants/knowledgeRuntime.js'
+import {
   KNOWLEDGE_PACK_CATEGORIES,
   resolveKnowledgePackCategory,
 } from '../constants/workspaceGovernance.js'
 import { buildKnowledgePackId } from './KnowledgePack.js'
+import { containsForbiddenProviderContextKey } from '../utils/knowledgePackSafety.js'
 
 const normalizeText = (value) => String(value || '').trim()
 const normalizeToken = (value) => normalizeText(value).toUpperCase()
@@ -51,6 +59,14 @@ const knowledgePackVersionSchema = new mongoose.Schema(
       uppercase: true,
       enum: Object.values(KNOWLEDGE_PACK_CATEGORIES),
       default: () => resolveKnowledgePackCategory(),
+    },
+    purposeCategory: {
+      type: String,
+      required: true,
+      uppercase: true,
+      enum: Object.values(KNOWLEDGE_PACK_PURPOSE_CATEGORIES),
+      default: KNOWLEDGE_PACK_PURPOSE_CATEGORIES.SYSTEM,
+      index: true,
     },
     packType: {
       type: String,
@@ -118,11 +134,60 @@ const knowledgePackVersionSchema = new mongoose.Schema(
       enum: Object.values(OUTCOME_KNOWLEDGE_PACK_CONTENT_FORMATS),
       default: OUTCOME_KNOWLEDGE_PACK_CONTENT_FORMATS.YAML,
     },
+    sourceAuthority: {
+      type: String,
+      trim: true,
+      maxlength: 160,
+      default: '',
+    },
     sourceFilename: {
       type: String,
       trim: true,
       maxlength: 180,
       default: '',
+    },
+    sourceDocuments: {
+      type: [{
+        sourceDocumentId: {
+          type: String,
+          trim: true,
+          maxlength: 180,
+          default: '',
+        },
+        filename: {
+          type: String,
+          trim: true,
+          maxlength: 220,
+          default: '',
+        },
+        contentType: {
+          type: String,
+          trim: true,
+          maxlength: 120,
+          default: '',
+        },
+        fileExtension: {
+          type: String,
+          trim: true,
+          lowercase: true,
+          maxlength: 24,
+          default: '',
+        },
+        sourceHash: {
+          type: String,
+          trim: true,
+          maxlength: 140,
+          default: '',
+        },
+        sourceType: {
+          type: String,
+          trim: true,
+          uppercase: true,
+          maxlength: 80,
+          default: 'SOURCE_DOCUMENT',
+        },
+      }],
+      default: [],
     },
     content: {
       type: mongoose.Schema.Types.Mixed,
@@ -136,6 +201,48 @@ const knowledgePackVersionSchema = new mongoose.Schema(
     validationSummary: {
       type: mongoose.Schema.Types.Mixed,
       default: () => ({}),
+    },
+    executionMode: {
+      type: String,
+      required: true,
+      uppercase: true,
+      enum: Object.values(KNOWLEDGE_PACK_EXECUTION_MODES),
+      default: KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT,
+    },
+    visibility: {
+      type: String,
+      required: true,
+      uppercase: true,
+      enum: Object.values(KNOWLEDGE_PACK_VISIBILITY_SCOPES),
+      default: KNOWLEDGE_PACK_VISIBILITY_SCOPES.PLATFORM,
+      index: true,
+    },
+    customerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Customer',
+      default: null,
+      index: true,
+    },
+    tenantId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Tenant',
+      default: null,
+      index: true,
+    },
+    authoringMode: {
+      type: String,
+      required: true,
+      uppercase: true,
+      enum: Object.values(KNOWLEDGE_PACK_AUTHORING_MODES),
+      default: KNOWLEDGE_PACK_AUTHORING_MODES.IMPORT_SOURCE_DOCUMENT,
+    },
+    reviewStatus: {
+      type: String,
+      required: true,
+      uppercase: true,
+      enum: Object.values(KNOWLEDGE_PACK_REVIEW_STATUSES),
+      default: KNOWLEDGE_PACK_REVIEW_STATUSES.DRAFT,
+      index: true,
     },
     validatedAt: {
       type: Date,
@@ -168,6 +275,8 @@ knowledgePackVersionSchema.index(
 )
 knowledgePackVersionSchema.index({ packId: 1, status: 1, updatedAt: -1 })
 knowledgePackVersionSchema.index({ scopeKey: 1, packType: 1, packKey: 1, status: 1 })
+knowledgePackVersionSchema.index({ purposeCategory: 1, status: 1, updatedAt: -1 })
+knowledgePackVersionSchema.index({ visibility: 1, customerId: 1, tenantId: 1, status: 1 })
 
 knowledgePackVersionSchema.pre('validate', function normalizeKnowledgePackVersion(next) {
   this.packType = normalizeToken(this.packType)
@@ -175,6 +284,7 @@ knowledgePackVersionSchema.pre('validate', function normalizeKnowledgePackVersio
     packCategory: this.packCategory,
     packType: this.packType,
   })
+  this.purposeCategory = normalizeToken(this.purposeCategory || KNOWLEDGE_PACK_PURPOSE_CATEGORIES.SYSTEM)
   this.packKey = normalizeText(this.packKey).toLowerCase()
   this.semanticVersion = normalizeText(this.semanticVersion)
   this.schemaVersion = normalizeText(this.schemaVersion || '1.0.0')
@@ -183,7 +293,45 @@ knowledgePackVersionSchema.pre('validate', function normalizeKnowledgePackVersio
   this.scopeKey = normalizeScopeKey(this.scopeKey || OUTCOME_KNOWLEDGE_PACK_SCOPE_TYPES.GLOBAL)
   this.contentHash = normalizeText(this.contentHash)
   this.contentFormat = normalizeToken(this.contentFormat || OUTCOME_KNOWLEDGE_PACK_CONTENT_FORMATS.YAML)
+  this.sourceAuthority = normalizeText(this.sourceAuthority)
   this.sourceFilename = normalizeText(this.sourceFilename)
+  this.sourceDocuments = Array.isArray(this.sourceDocuments)
+    ? this.sourceDocuments.map((sourceDocument) => ({
+      sourceDocumentId: normalizeText(sourceDocument.sourceDocumentId),
+      filename: normalizeText(sourceDocument.filename),
+      contentType: normalizeText(sourceDocument.contentType),
+      fileExtension: normalizeText(sourceDocument.fileExtension).toLowerCase(),
+      sourceHash: normalizeText(sourceDocument.sourceHash),
+      sourceType: normalizeToken(sourceDocument.sourceType || 'SOURCE_DOCUMENT'),
+    })).filter((sourceDocument) => sourceDocument.filename || sourceDocument.sourceDocumentId)
+    : []
+  this.executionMode = normalizeToken(this.executionMode || KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT)
+  this.visibility = normalizeToken(this.visibility || KNOWLEDGE_PACK_VISIBILITY_SCOPES.PLATFORM)
+  this.authoringMode = normalizeToken(this.authoringMode || KNOWLEDGE_PACK_AUTHORING_MODES.IMPORT_SOURCE_DOCUMENT)
+  this.reviewStatus = normalizeToken(this.reviewStatus || KNOWLEDGE_PACK_REVIEW_STATUSES.DRAFT)
+  if (this.visibility === KNOWLEDGE_PACK_VISIBILITY_SCOPES.CUSTOMER && !this.customerId) {
+    this.invalidate('customerId', 'Customer-scoped Knowledge Pack versions require customerId.')
+  }
+  if (this.visibility === KNOWLEDGE_PACK_VISIBILITY_SCOPES.TENANT && !this.tenantId) {
+    this.invalidate('tenantId', 'Tenant-scoped Knowledge Pack versions require tenantId.')
+  }
+  if (this.visibility === KNOWLEDGE_PACK_VISIBILITY_SCOPES.PLATFORM) {
+    this.customerId = null
+    this.tenantId = null
+  }
+  if (
+    [KNOWLEDGE_PACK_VISIBILITY_SCOPES.CUSTOMER, KNOWLEDGE_PACK_VISIBILITY_SCOPES.TENANT]
+      .includes(this.visibility)
+    && (
+      containsForbiddenProviderContextKey(this.sourceMetadata)
+      || containsForbiddenProviderContextKey(this.content)
+    )
+  ) {
+    this.invalidate(
+      'sourceMetadata',
+      'Customer or tenant provider-context Knowledge Pack versions must not store runtime truth or raw evidence metadata.',
+    )
+  }
   if (!this.packId) this.packId = buildKnowledgePackId(this)
   if (!this.versionId) this.versionId = buildKnowledgePackVersionId(this)
   next()

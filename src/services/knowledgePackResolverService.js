@@ -97,6 +97,9 @@ const serializeActivation = (activation) => {
     packageKey: normalizeLowerKey(plain.packageKey),
     packageVersion: normalizeText(plain.packageVersion),
     environmentKey: normalizeToken(plain.environmentKey),
+    visibility: normalizeToken(plain.visibility || 'PLATFORM'),
+    customerId: normalizeText(plain.customerId),
+    tenantId: normalizeText(plain.tenantId),
     contentHash: normalizeText(plain.contentHash),
     activatedAt: plain.activatedAt,
   }
@@ -133,7 +136,7 @@ const normalizeManifestPack = (pack = {}, group) => ({
   dependencyKeys: Array.isArray(pack.dependencyKeys)
     ? [...new Set(pack.dependencyKeys.map(dependencyRefId).filter(Boolean))]
     : [],
-  required: group === 'mandatory',
+  required: group === 'mandatory' || group === 'validation',
   sourceAuthority: normalizeText(pack.sourceAuthority),
   metadata: pack.metadata || {},
 })
@@ -144,6 +147,8 @@ const buildManifestEntries = (manifest = {}) => {
       .map((pack) => normalizeManifestPack(pack, 'mandatory')),
     ...(Array.isArray(manifest.optionalPacks) ? manifest.optionalPacks : [])
       .map((pack) => normalizeManifestPack(pack, 'optional')),
+    ...(Array.isArray(manifest.validationPacks) ? manifest.validationPacks : [])
+      .map((pack) => normalizeManifestPack(pack, 'validation')),
   ]
   const blockedEntries = (Array.isArray(manifest.blockedPacks) ? manifest.blockedPacks : [])
     .map((pack) => normalizeManifestPack(pack, 'blocked'))
@@ -348,6 +353,7 @@ const buildPackProjection = ({
   purposeCategory: entry.purposeCategory,
   packType: entry.packType,
   packKey: entry.packKey,
+  manifestSection: entry.group,
   label: entry.label || activation?.label || '',
   executionMode: entry.executionMode,
   required: entry.required,
@@ -363,6 +369,9 @@ const buildPackProjection = ({
     activationStatus: activation.status,
     scopeType: activation.scopeType,
     scopeKey: activation.scopeKey,
+    visibility: activation.visibility,
+    customerId: activation.customerId,
+    tenantId: activation.tenantId,
     contentHash: activation.contentHash,
     activatedAt: activation.activatedAt,
   } : {}),
@@ -558,6 +567,7 @@ export const resolveKnowledgePackManifest = async ({
   const activePacks = resolvedPacks.filter((pack) => pack.runtimeBindable)
   const requiredPacks = resolvedPacks.filter((pack) => pack.required)
   const optionalPacks = resolvedPacks.filter((pack) => !pack.required)
+  const validationPacks = resolvedPacks.filter((pack) => pack.manifestSection === 'validation')
 
   return {
     status: 'PROJECTED',
@@ -571,6 +581,7 @@ export const resolveKnowledgePackManifest = async ({
     activePacks,
     requiredPacks,
     optionalPacks,
+    validationPacks,
     dependencyGraph,
     resolution: {
       status: 'PROJECTED',
@@ -578,6 +589,7 @@ export const resolveKnowledgePackManifest = async ({
       activeCount: activePacks.length,
       requiredCount: requiredPacks.length,
       optionalCount: optionalPacks.length,
+      validationCount: validationPacks.length,
       dependencyCount: dependencyGraph.edgeCount,
       unboundRequiredPacks: [],
     },

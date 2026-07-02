@@ -25,6 +25,13 @@ import {
   OUTCOME_STUDIO_BINDING_STATUSES,
   OUTCOME_STUDIO_REQUIRED_PACKS,
 } from '../constants/runtimeOutcomeStudio.js'
+import {
+  KNOWLEDGE_PACK_AUTHORING_MODES,
+  KNOWLEDGE_PACK_EXECUTION_MODES,
+  KNOWLEDGE_PACK_PURPOSE_CATEGORIES,
+  KNOWLEDGE_PACK_REVIEW_STATUSES,
+  KNOWLEDGE_PACK_VISIBILITY_SCOPES,
+} from '../constants/knowledgeRuntime.js'
 import { resolveKnowledgePackCategory } from '../constants/workspaceGovernance.js'
 import { escapeRegex } from '../utils/controllerUtils.js'
 import auditService from './auditService.js'
@@ -38,6 +45,7 @@ const normalizePackCategory = (value, packType) =>
 export const OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS = Object.freeze({
   AUDIT_PERSISTENCE_FAILED: 'AUDIT_PERSISTENCE_FAILED',
   PACK_SOURCE_NOT_AVAILABLE: 'PACK_SOURCE_NOT_AVAILABLE',
+  PACK_SOURCE_FORMAT_UNSUPPORTED: 'PACK_SOURCE_FORMAT_UNSUPPORTED',
   PACK_NOT_FOUND: 'PACK_NOT_FOUND',
   PACK_ACTIVE_ACTIVATION_NOT_FOUND: 'PACK_ACTIVE_ACTIVATION_NOT_FOUND',
   PACK_VERSION_ALREADY_EXISTS: 'PACK_VERSION_ALREADY_EXISTS',
@@ -95,6 +103,141 @@ const cloneValue = (value) => {
 
 const buildContentHash = (content) =>
   `sha256:${crypto.createHash('sha256').update(String(content || ''), 'utf8').digest('hex')}`
+
+const SOURCE_DOCUMENT_FORMATS_BY_EXTENSION = Object.freeze({
+  md: OUTCOME_KNOWLEDGE_PACK_CONTENT_FORMATS.MARKDOWN,
+  markdown: OUTCOME_KNOWLEDGE_PACK_CONTENT_FORMATS.MARKDOWN,
+  json: OUTCOME_KNOWLEDGE_PACK_CONTENT_FORMATS.JSON,
+  yaml: OUTCOME_KNOWLEDGE_PACK_CONTENT_FORMATS.YAML,
+  yml: OUTCOME_KNOWLEDGE_PACK_CONTENT_FORMATS.YAML,
+  docx: OUTCOME_KNOWLEDGE_PACK_CONTENT_FORMATS.DOCX,
+  pdf: OUTCOME_KNOWLEDGE_PACK_CONTENT_FORMATS.PDF,
+})
+
+const TEXT_SOURCE_DOCUMENT_FORMATS = new Set([
+  OUTCOME_KNOWLEDGE_PACK_CONTENT_FORMATS.JSON,
+  OUTCOME_KNOWLEDGE_PACK_CONTENT_FORMATS.MARKDOWN,
+  OUTCOME_KNOWLEDGE_PACK_CONTENT_FORMATS.YAML,
+])
+
+const getFileExtension = (sourceDocument = {}) => {
+  const explicitExtension = normalizeLowerKey(sourceDocument.fileExtension).replace(/^\./, '')
+  if (explicitExtension) return explicitExtension
+
+  const filename = normalizeText(sourceDocument.filename)
+  const lastSegment = filename.includes('.') ? filename.split('.').pop() : ''
+  return normalizeLowerKey(lastSegment).replace(/^\./, '')
+}
+
+const resolveSourceDocumentContentFormat = ({ contentFormat, sourceDocument }) => {
+  const requestedFormat = normalizeToken(contentFormat)
+  if (requestedFormat) return requestedFormat
+
+  return SOURCE_DOCUMENT_FORMATS_BY_EXTENSION[getFileExtension(sourceDocument)] || ''
+}
+
+const assertSupportedSourceDocumentFormat = ({ contentFormat, sourceDocument }) => {
+  const resolvedFormat = resolveSourceDocumentContentFormat({ contentFormat, sourceDocument })
+  if (!Object.values(OUTCOME_KNOWLEDGE_PACK_CONTENT_FORMATS).includes(resolvedFormat)) {
+    throw createKnowledgePackError({
+      status: 422,
+      code: 'VALIDATION_FAILED',
+      message: 'Source document format is not supported for Knowledge Pack draft import.',
+      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_SOURCE_FORMAT_UNSUPPORTED,
+      details: {
+        filename: normalizeText(sourceDocument?.filename),
+        fileExtension: getFileExtension(sourceDocument),
+        supportedFormats: Object.values(OUTCOME_KNOWLEDGE_PACK_CONTENT_FORMATS),
+      },
+    })
+  }
+
+  return resolvedFormat
+}
+
+const resolveSourceImportPurposeCategory = ({ packType, purposeCategory }) => {
+  const normalizedPurposeCategory = normalizeToken(purposeCategory)
+  if (Object.values(KNOWLEDGE_PACK_PURPOSE_CATEGORIES).includes(normalizedPurposeCategory)) {
+    return normalizedPurposeCategory
+  }
+
+  const normalizedPackType = normalizeToken(packType)
+  if (Object.values(KNOWLEDGE_PACK_PURPOSE_CATEGORIES).includes(normalizedPackType)) {
+    return normalizedPackType
+  }
+
+  if (normalizedPackType === OUTCOME_KNOWLEDGE_PACK_TYPES.OUTPUT_SCHEMA) {
+    return KNOWLEDGE_PACK_PURPOSE_CATEGORIES.OUTPUT
+  }
+
+  if (normalizedPackType === OUTCOME_KNOWLEDGE_PACK_TYPES.TRUTH_CERTIFICATION) {
+    return KNOWLEDGE_PACK_PURPOSE_CATEGORIES.VALIDATION
+  }
+
+  return KNOWLEDGE_PACK_PURPOSE_CATEGORIES.SYSTEM
+}
+
+const buildSourceImportScope = ({ visibility, customerId, tenantId }) => {
+  const normalizedVisibility = normalizeToken(visibility || KNOWLEDGE_PACK_VISIBILITY_SCOPES.PLATFORM)
+  const normalizedCustomerId = normalizeText(customerId)
+  const normalizedTenantId = normalizeText(tenantId)
+
+  if (normalizedVisibility === KNOWLEDGE_PACK_VISIBILITY_SCOPES.CUSTOMER) {
+    return {
+      scopeType: OUTCOME_KNOWLEDGE_PACK_SCOPE_TYPES.CUSTOMER,
+      scopeKey: `CUSTOMER:${normalizedCustomerId}`,
+      visibility: normalizedVisibility,
+      customerId: normalizedCustomerId,
+      tenantId: null,
+    }
+  }
+
+  if (normalizedVisibility === KNOWLEDGE_PACK_VISIBILITY_SCOPES.TENANT) {
+    return {
+      scopeType: OUTCOME_KNOWLEDGE_PACK_SCOPE_TYPES.TENANT,
+      scopeKey: `TENANT:${normalizedTenantId}`,
+      visibility: normalizedVisibility,
+      customerId: null,
+      tenantId: normalizedTenantId,
+    }
+  }
+
+  return {
+    scopeType: OUTCOME_KNOWLEDGE_PACK_SCOPE_TYPES.GLOBAL,
+    scopeKey: OUTCOME_KNOWLEDGE_PACK_SCOPE_TYPES.GLOBAL,
+    visibility: KNOWLEDGE_PACK_VISIBILITY_SCOPES.PLATFORM,
+    customerId: null,
+    tenantId: null,
+  }
+}
+
+const normalizeSourceDocumentReference = (sourceDocument = {}) => {
+  const filename = normalizeText(sourceDocument.filename)
+  const fileExtension = getFileExtension(sourceDocument)
+
+  return {
+    sourceDocumentId: normalizeText(sourceDocument.sourceDocumentId),
+    filename,
+    contentType: normalizeText(sourceDocument.contentType),
+    fileExtension,
+    sourceHash: normalizeText(sourceDocument.sourceHash),
+    sourceType: 'SOURCE_DOCUMENT',
+  }
+}
+
+const buildSourceDocumentImportHash = ({ extractedText, sourceDocument }) => {
+  const sourceHash = normalizeText(sourceDocument?.sourceHash)
+  if (sourceHash) return sourceHash
+
+  if (normalizeText(extractedText)) return buildContentHash(extractedText)
+
+  return buildContentHash(JSON.stringify({
+    sourceDocumentId: normalizeText(sourceDocument?.sourceDocumentId),
+    filename: normalizeText(sourceDocument?.filename),
+    contentType: normalizeText(sourceDocument?.contentType),
+    fileExtension: getFileExtension(sourceDocument),
+  }))
+}
 
 const findRequiredPackDefinition = (packId) => {
   const normalizedPackId = normalizeText(packId)
@@ -190,6 +333,54 @@ const ensureStarterPackRecord = async ({
     semanticVersion,
     status,
   }),
+  {
+    upsert: true,
+    new: true,
+    runValidators: true,
+    setDefaultsOnInsert: true,
+    ...(session ? { session } : {}),
+  },
+)
+
+const ensureSourceDocumentDraftPackRecord = async ({
+  packDefinition,
+  actorUserId,
+  versionId,
+  semanticVersion,
+  scope,
+  session = null,
+} = {}) => KnowledgePack.findOneAndUpdate(
+  { packId: buildKnowledgePackId(packDefinition) },
+  {
+    $setOnInsert: {
+      packId: buildKnowledgePackId(packDefinition),
+      createdBy: actorUserId || null,
+      isSystem: false,
+    },
+    $set: {
+      packCategory: normalizePackCategory(packDefinition.packCategory, packDefinition.packType),
+      purposeCategory: packDefinition.purposeCategory,
+      packType: normalizeToken(packDefinition.packType),
+      packKey: normalizeLowerKey(packDefinition.packKey),
+      label: normalizeText(packDefinition.label),
+      description: normalizeText(packDefinition.description),
+      status: OUTCOME_KNOWLEDGE_PACK_STATUSES.DRAFT,
+      latestVersionId: versionId,
+      latestSemanticVersion: semanticVersion,
+      sourceAuthority: normalizeText(packDefinition.sourceAuthority),
+      executionMode: normalizeToken(packDefinition.executionMode || KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT),
+      visibility: scope.visibility,
+      customerId: scope.customerId || null,
+      tenantId: scope.tenantId || null,
+      authoringMode: KNOWLEDGE_PACK_AUTHORING_MODES.IMPORT_SOURCE_DOCUMENT,
+      reviewStatus: KNOWLEDGE_PACK_REVIEW_STATUSES.DRAFT,
+      updatedBy: actorUserId || null,
+      sourceMetadata: {
+        importMode: 'SOURCE_DOCUMENT_IMPORT_DRAFT',
+        sourceDocument: packDefinition.sourceDocument,
+      },
+    },
+  },
   {
     upsert: true,
     new: true,
@@ -663,9 +854,17 @@ const serializeKnowledgePack = (pack) => {
     id: packId,
     packId,
     packCategory: normalizePackCategory(plain.packCategory, plain.packType),
+    purposeCategory: normalizeToken(plain.purposeCategory || KNOWLEDGE_PACK_PURPOSE_CATEGORIES.SYSTEM),
     packType: normalizeToken(plain.packType),
     packKey: normalizeLowerKey(plain.packKey),
     status: normalizeToken(plain.status || OUTCOME_KNOWLEDGE_PACK_STATUSES.DRAFT),
+    sourceAuthority: normalizeText(plain.sourceAuthority),
+    executionMode: normalizeToken(plain.executionMode || KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT),
+    visibility: normalizeToken(plain.visibility || KNOWLEDGE_PACK_VISIBILITY_SCOPES.PLATFORM),
+    customerId: plain.customerId ? normalizeText(plain.customerId) : null,
+    tenantId: plain.tenantId ? normalizeText(plain.tenantId) : null,
+    authoringMode: normalizeToken(plain.authoringMode || KNOWLEDGE_PACK_AUTHORING_MODES.CREATE_BLANK),
+    reviewStatus: normalizeToken(plain.reviewStatus || KNOWLEDGE_PACK_REVIEW_STATUSES.DRAFT),
   }
 }
 
@@ -680,10 +879,18 @@ const serializeKnowledgePackVersion = (version) => {
     id: versionId,
     versionId,
     packCategory: normalizePackCategory(plain.packCategory, plain.packType),
+    purposeCategory: normalizeToken(plain.purposeCategory || KNOWLEDGE_PACK_PURPOSE_CATEGORIES.SYSTEM),
     packType: normalizeToken(plain.packType),
     packKey: normalizeLowerKey(plain.packKey),
     status: normalizeToken(plain.status || OUTCOME_KNOWLEDGE_PACK_STATUSES.DRAFT),
     scopeKey: normalizeToken(plain.scopeKey || OUTCOME_KNOWLEDGE_PACK_SCOPE_TYPES.GLOBAL),
+    sourceAuthority: normalizeText(plain.sourceAuthority),
+    executionMode: normalizeToken(plain.executionMode || KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT),
+    visibility: normalizeToken(plain.visibility || KNOWLEDGE_PACK_VISIBILITY_SCOPES.PLATFORM),
+    customerId: plain.customerId ? normalizeText(plain.customerId) : null,
+    tenantId: plain.tenantId ? normalizeText(plain.tenantId) : null,
+    authoringMode: normalizeToken(plain.authoringMode || KNOWLEDGE_PACK_AUTHORING_MODES.IMPORT_SOURCE_DOCUMENT),
+    reviewStatus: normalizeToken(plain.reviewStatus || KNOWLEDGE_PACK_REVIEW_STATUSES.DRAFT),
     validatedAt: toDateString(plain.validatedAt),
   }
 }
@@ -701,6 +908,7 @@ const serializeKnowledgePackContentPreview = ({ version, packDefinition }) => {
     versionId,
     packId: normalizeText(plain.packId),
     packCategory: normalizePackCategory(plain.packCategory || packDefinition?.packCategory, plain.packType || packDefinition?.packType),
+    purposeCategory: normalizeToken(plain.purposeCategory || KNOWLEDGE_PACK_PURPOSE_CATEGORIES.SYSTEM),
     packType: normalizeToken(plain.packType || packDefinition?.packType),
     packKey: normalizeLowerKey(plain.packKey || packDefinition?.packKey),
     semanticVersion: normalizeText(plain.semanticVersion),
@@ -709,7 +917,15 @@ const serializeKnowledgePackContentPreview = ({ version, packDefinition }) => {
     scopeType: normalizeToken(plain.scopeType || OUTCOME_KNOWLEDGE_PACK_SCOPE_TYPES.GLOBAL),
     scopeKey: normalizeToken(plain.scopeKey || OUTCOME_KNOWLEDGE_PACK_SCOPE_TYPES.GLOBAL),
     contentFormat: normalizeToken(plain.contentFormat || OUTCOME_KNOWLEDGE_PACK_CONTENT_FORMATS.YAML),
+    sourceAuthority: normalizeText(plain.sourceAuthority),
     sourceFilename: normalizeText(plain.sourceFilename || plain.sourceMetadata?.sourceFilename || packDefinition?.sourceFilename),
+    sourceDocuments: Array.isArray(plain.sourceDocuments) ? plain.sourceDocuments : [],
+    executionMode: normalizeToken(plain.executionMode || KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT),
+    visibility: normalizeToken(plain.visibility || KNOWLEDGE_PACK_VISIBILITY_SCOPES.PLATFORM),
+    customerId: plain.customerId ? normalizeText(plain.customerId) : null,
+    tenantId: plain.tenantId ? normalizeText(plain.tenantId) : null,
+    authoringMode: normalizeToken(plain.authoringMode || KNOWLEDGE_PACK_AUTHORING_MODES.IMPORT_SOURCE_DOCUMENT),
+    reviewStatus: normalizeToken(plain.reviewStatus || KNOWLEDGE_PACK_REVIEW_STATUSES.DRAFT),
     contentHash: normalizeText(plain.contentHash),
     contentLength: content.length,
     contentVisible: true,
@@ -729,6 +945,7 @@ const serializeKnowledgePackActivation = (activation) => {
     packId: normalizeText(plain.packId),
     versionId: normalizeText(plain.versionId),
     packCategory: normalizePackCategory(plain.packCategory, plain.packType),
+    purposeCategory: normalizeToken(plain.purposeCategory || KNOWLEDGE_PACK_PURPOSE_CATEGORIES.SYSTEM),
     packType: normalizeToken(plain.packType),
     packKey: normalizeLowerKey(plain.packKey),
     semanticVersion: normalizeText(plain.semanticVersion),
@@ -741,6 +958,10 @@ const serializeKnowledgePackActivation = (activation) => {
     packageKey: normalizeLowerKey(plain.packageKey),
     packageVersion: normalizeText(plain.packageVersion),
     environmentKey: normalizeToken(plain.environmentKey),
+    executionMode: normalizeToken(plain.executionMode || KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT),
+    visibility: normalizeToken(plain.visibility || KNOWLEDGE_PACK_VISIBILITY_SCOPES.PLATFORM),
+    customerId: plain.customerId ? normalizeText(plain.customerId) : null,
+    tenantId: plain.tenantId ? normalizeText(plain.tenantId) : null,
     contentHash: normalizeText(plain.contentHash),
     activatedAt: toDateString(plain.activatedAt),
   }
@@ -1188,6 +1409,150 @@ export const createOutcomeKnowledgePackVersion = async ({
   }
 }
 
+export const importOutcomeKnowledgePackSourceDocumentDraft = async ({
+  body = {},
+  actorUserId = null,
+  auditRequest = null,
+} = {}) => {
+  const semanticVersion = normalizeText(body.semanticVersion)
+  if (!SEMANTIC_VERSION_RE.test(semanticVersion)) {
+    throw createKnowledgePackError({
+      status: 422,
+      code: 'VALIDATION_FAILED',
+      message: 'Knowledge pack semantic version must use major.minor.patch format.',
+      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_VERSION_VALIDATION_FAILED,
+      details: { field: 'semanticVersion' },
+    })
+  }
+
+  const sourceDocument = normalizeSourceDocumentReference(body.sourceDocument)
+  const contentFormat = assertSupportedSourceDocumentFormat({
+    contentFormat: body.contentFormat,
+    sourceDocument,
+  })
+  const extractedText = normalizeText(body.extractedText)
+  const shouldPersistContent = TEXT_SOURCE_DOCUMENT_FORMATS.has(contentFormat) && extractedText
+  const scope = buildSourceImportScope({
+    visibility: body.visibility,
+    customerId: body.customerId,
+    tenantId: body.tenantId,
+  })
+  const packDefinition = {
+    packType: normalizeToken(body.packType),
+    packKey: normalizeLowerKey(body.packKey),
+    label: normalizeText(body.label),
+    description: normalizeText(body.description),
+    purposeCategory: resolveSourceImportPurposeCategory({
+      packType: body.packType,
+      purposeCategory: body.purposeCategory,
+    }),
+    sourceAuthority: normalizeText(body.sourceAuthority),
+    executionMode: normalizeToken(body.executionMode || KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT),
+    sourceDocument,
+  }
+  const canonicalPackId = buildKnowledgePackId(packDefinition)
+  const versionId = buildKnowledgePackVersionId({
+    packType: packDefinition.packType,
+    packKey: packDefinition.packKey,
+    semanticVersion,
+    scopeKey: scope.scopeKey,
+  })
+
+  const existingVersion = await KnowledgePackVersion.findOne({
+    packType: packDefinition.packType,
+    packKey: packDefinition.packKey,
+    semanticVersion,
+    scopeKey: scope.scopeKey,
+  }).lean()
+
+  if (existingVersion) {
+    throw createKnowledgePackError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Knowledge pack source document draft already exists for this pack, semantic version, and scope.',
+      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_VERSION_ALREADY_EXISTS,
+      details: {
+        packId: canonicalPackId,
+        versionId,
+        semanticVersion,
+        scopeKey: scope.scopeKey,
+      },
+    })
+  }
+
+  const packRecord = await ensureSourceDocumentDraftPackRecord({
+    packDefinition,
+    actorUserId,
+    versionId,
+    semanticVersion,
+    scope,
+  })
+  const version = new KnowledgePackVersion({
+    versionId,
+    packId: canonicalPackId,
+    packCategory: normalizePackCategory(packDefinition.packCategory, packDefinition.packType),
+    purposeCategory: packDefinition.purposeCategory,
+    packType: packDefinition.packType,
+    packKey: packDefinition.packKey,
+    semanticVersion,
+    schemaVersion: normalizeText(body.schemaVersion || '1.0.0'),
+    status: OUTCOME_KNOWLEDGE_PACK_STATUSES.DRAFT,
+    scopeType: scope.scopeType,
+    scopeKey: scope.scopeKey,
+    contentHash: buildSourceDocumentImportHash({ extractedText, sourceDocument }),
+    contentFormat,
+    sourceAuthority: packDefinition.sourceAuthority,
+    sourceFilename: sourceDocument.filename,
+    sourceDocuments: [sourceDocument],
+    content: shouldPersistContent ? extractedText : undefined,
+    sourceMetadata: {
+      importMode: 'SOURCE_DOCUMENT_IMPORT_DRAFT',
+      sourceDocument,
+      parserStatus: shouldPersistContent ? 'TEXT_CAPTURED' : 'SOURCE_REFERENCE_ONLY',
+    },
+    validationSummary: {
+      status: 'NOT_RUN',
+      mode: 'HUMAN_REVIEW_REQUIRED',
+      checkedAt: null,
+      checks: [],
+      issues: [],
+    },
+    executionMode: packDefinition.executionMode,
+    visibility: scope.visibility,
+    customerId: scope.customerId,
+    tenantId: scope.tenantId,
+    authoringMode: KNOWLEDGE_PACK_AUTHORING_MODES.IMPORT_SOURCE_DOCUMENT,
+    reviewStatus: KNOWLEDGE_PACK_REVIEW_STATUSES.DRAFT,
+    uploadedBy: actorUserId || null,
+  })
+
+  await saveDocument(version)
+  await logKnowledgePackAudit({
+    auditRequest,
+    action: auditService.AUDIT_ACTIONS.OUTCOME_KNOWLEDGE_PACK_VERSION_UPLOADED,
+    actorUserId,
+    packRecord,
+    packDefinition,
+    version,
+    diff: {
+      status: { from: null, to: OUTCOME_KNOWLEDGE_PACK_STATUSES.DRAFT },
+      importMode: 'SOURCE_DOCUMENT_IMPORT_DRAFT',
+      sourceFilename: sourceDocument.filename,
+      sourceDocumentId: sourceDocument.sourceDocumentId,
+      contentFormat,
+      contentVisible: false,
+      contentIncludedInAudit: false,
+      reviewStatus: KNOWLEDGE_PACK_REVIEW_STATUSES.DRAFT,
+      activationCreated: false,
+    },
+  })
+
+  return {
+    pack: serializeKnowledgePack(packRecord),
+    version: serializeKnowledgePackVersion(version),
+  }
+}
+
 export const importOutcomeKnowledgePackStarterVersion = async ({
   packId,
   actorUserId = null,
@@ -1371,8 +1736,18 @@ export const importOutcomeKnowledgePackStarterVersion = async ({
 }
 
 export const getOutcomeKnowledgePackVersion = async ({ packId, versionId } = {}) => {
-  const packDefinition = getSourceBackedPackDefinitionOrThrow(packId)
-  const canonicalPackId = buildKnowledgePackId(packDefinition)
+  const packRecord = await KnowledgePack.findOne(buildPackLookup(packId)).lean()
+  if (!packRecord) {
+    throw createKnowledgePackError({
+      status: 404,
+      code: 'NOT_FOUND',
+      message: 'Outcome Studio knowledge pack was not found.',
+      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_NOT_FOUND,
+      details: { packId },
+    })
+  }
+
+  const canonicalPackId = normalizeText(packRecord.packId || packId)
   const version = await KnowledgePackVersion.findOne({
     packId: canonicalPackId,
     versionId: normalizeText(versionId),
