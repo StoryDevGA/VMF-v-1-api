@@ -314,6 +314,106 @@ describe('framework seed import guard', () => {
     )
   })
 
+  test('staged v3.1.1 R3 action alignment preserves executable workspace action bridge', () => {
+    const r3SeedDataDir = path.resolve(seedDir, 'vmf-v3-1-1-rkm-r3-action-alignment/02_seed_data')
+    const uiContract = JSON.parse(fs.readFileSync(path.join(r3SeedDataDir, 'ui_contract.json'), 'utf8'))
+    const workflowPolicies = JSON.parse(fs.readFileSync(path.join(r3SeedDataDir, 'workflow_policies.json'), 'utf8'))
+    const frameworkPackage = JSON.parse(fs.readFileSync(path.join(r3SeedDataDir, 'framework_package.json'), 'utf8'))
+
+    expect(uiContract.actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        actionKey: 'GENERATE_TRUTH',
+        governedAction: 'GENERATE_TRUTH',
+        presentationKey: 'primary-action',
+      }),
+      expect.objectContaining({
+        actionKey: 'GENERATE_SECTION',
+        governedAction: 'GENERATE_SECTION',
+        presentationKey: 'section-action',
+      }),
+      expect.objectContaining({
+        actionKey: 'REGENERATE_SECTION',
+        governedAction: 'REGENERATE_SECTION',
+        presentationKey: 'section-action',
+      }),
+      expect.objectContaining({
+        actionKey: 'MARK_READY',
+        governedAction: 'MARK_READY',
+        presentationKey: 'primary-action',
+      }),
+      expect.objectContaining({
+        actionKey: 'APPROVE',
+        governedAction: 'APPROVE',
+        presentationKey: 'primary-action',
+      }),
+      expect.objectContaining({
+        actionKey: 'LOCK_RECORD',
+        governedAction: 'LOCK_RECORD',
+        presentationKey: 'primary-action',
+      }),
+    ]))
+
+    expect(workflowPolicies.workflowPolicies).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        key: 'truth-generation-policy',
+        governedAction: 'GENERATE_TRUTH',
+      }),
+      expect.objectContaining({
+        key: 'generate-section-gate',
+        governedAction: 'GENERATE_SECTION',
+        decisionMode: 'ALLOW',
+      }),
+      expect.objectContaining({
+        key: 'regenerate-section-gate',
+        governedAction: 'REGENERATE_SECTION',
+        decisionMode: 'ALLOW',
+      }),
+      expect.objectContaining({
+        key: 'mark-ready-policy',
+        governedAction: 'MARK_READY',
+        decisionMode: 'ALLOW',
+      }),
+      expect.objectContaining({
+        key: 'lifecycle-approval-policy',
+        governedAction: 'APPROVE',
+        decisionMode: 'REQUIRE_AGENT_AND_SKILL_EXECUTION',
+        executionType: 'ORDERED_WORKFLOW',
+      }),
+      expect.objectContaining({
+        key: 'lock-record-policy',
+        governedAction: 'LOCK_RECORD',
+        decisionMode: 'ALLOW',
+      }),
+    ]))
+
+    expect(frameworkPackage.workflowBindings).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        policyKey: 'truth-generation-policy',
+        executionContext: 'ON_GENERATE_TRUTH',
+      }),
+      expect.objectContaining({
+        policyKey: 'generate-section-gate',
+        executionContext: 'ON_SECTION_GENERATE',
+      }),
+      expect.objectContaining({
+        policyKey: 'regenerate-section-gate',
+        executionContext: 'ON_SECTION_REGENERATE',
+      }),
+      expect.objectContaining({
+        policyKey: 'mark-ready-policy',
+        executionContext: 'ON_MARK_READY',
+      }),
+      expect.objectContaining({
+        policyKey: 'lifecycle-approval-policy',
+        executionContext: 'ON_APPROVE',
+      }),
+      expect.objectContaining({
+        policyKey: 'lock-record-policy',
+        executionContext: 'ON_LOCK',
+      }),
+    ]))
+  })
+
   test('passes RKM compatibility values used by the v3.1 runtime knowledge model seed', async () => {
     const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'framework-seed-rkm-contract-'))
     const tempSeedDir = path.join(tempRoot, 'seed-data')

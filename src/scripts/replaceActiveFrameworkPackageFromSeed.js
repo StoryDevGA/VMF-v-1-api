@@ -5,6 +5,7 @@ import FrameworkPackage from '../models/FrameworkPackage.js'
 import UIContract, { buildUIContractStableId } from '../models/UIContract.js'
 import WorkflowPolicy, { buildWorkflowPolicyStableId } from '../models/WorkflowPolicy.js'
 import RuntimePathRegistry, { buildRuntimePathRegistryStableId } from '../models/RuntimePathRegistry.js'
+import { RUNTIME_CONTROL_VERSION_STATUSES } from '../utils/runtimeControlVersioning.js'
 import {
   loadSeedBundle,
   validateCrossReferences,
@@ -41,11 +42,13 @@ const PACKAGE_PRESERVED_FIELDS = new Set([
   'packageKey',
   'version',
   'status',
+  'versionStatus',
   'isDefault',
   'isLocked',
   'lockedAt',
   'lockedBy',
   'lockedReason',
+  'dependencyLock',
   'visibility',
   'customerAccessMode',
   'lastCheckpointAt',
@@ -263,19 +266,35 @@ const mergeLockedPackageKeys = (seedRecord, existingRecord, targetPackageKey) =>
   return [...new Set(values)]
 }
 
+const resolveActiveReplacementVersionStatus = (existingPackage) =>
+  existingPackage?.status === 'ACTIVE'
+    ? RUNTIME_CONTROL_VERSION_STATUSES.ACTIVE
+    : existingPackage?.versionStatus || RUNTIME_CONTROL_VERSION_STATUSES.DRAFT
+
+const resolveActiveUiContractBindingStatus = (existingPackage) =>
+  existingPackage?.status === 'ACTIVE'
+    ? RUNTIME_CONTROL_VERSION_STATUSES.ACTIVE
+    : existingPackage?.uiContractBinding?.status || RUNTIME_CONTROL_VERSION_STATUSES.DRAFT
+
 const buildPackageReplacementPayload = ({ seedPackage, existingPackage }) => ({
   ...removePreservedFields(seedPackage, PACKAGE_PRESERVED_FIELDS),
   frameworkKey: existingPackage.frameworkKey,
   packageKey: existingPackage.packageKey,
   version: existingPackage.version,
   status: existingPackage.status,
+  versionStatus: resolveActiveReplacementVersionStatus(existingPackage),
   isDefault: existingPackage.isDefault === true,
   isLocked: existingPackage.isLocked === true,
+  dependencyLock: existingPackage.dependencyLock || null,
   uiContractKey: seedPackage.uiContractKey,
   uiContractBinding: {
     ...(seedPackage.uiContractBinding || {}),
     key: seedPackage.uiContractKey,
     version: seedPackage.uiContractBinding?.version || seedPackage.version,
+    status: resolveActiveUiContractBindingStatus(existingPackage),
+    compatibilityMode: existingPackage.uiContractBinding?.compatibilityMode
+      || seedPackage.uiContractBinding?.compatibilityMode,
+    resolvedAt: existingPackage.uiContractBinding?.resolvedAt || seedPackage.uiContractBinding?.resolvedAt || new Date(),
   },
   updatedAt: new Date(),
 })
@@ -781,5 +800,7 @@ export {
   mapSeedValue,
   parseArgs,
   replaceActiveFrameworkPackageFromSeed,
+  resolveActiveReplacementVersionStatus,
+  resolveActiveUiContractBindingStatus,
   withRequiredActorFields,
 }

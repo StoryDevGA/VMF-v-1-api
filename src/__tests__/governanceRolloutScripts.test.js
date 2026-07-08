@@ -1,6 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach, jest } from '@jest/globals'
 import { Customer, User } from '../models/index.js'
 import LicenseLevel from '../models/LicenseLevel.js'
+import WorkflowPolicy from '../models/WorkflowPolicy.js'
 import {
   buildBackfillPlan,
   runBackfillCustomerLicenseGovernance,
@@ -31,6 +32,12 @@ import {
   cloneBundleWithMappedKeys,
   withRequiredActorFields,
 } from '../scripts/replaceActiveFrameworkPackageFromSeed.js'
+import {
+  buildReleaseMetadataRepairPlan,
+} from '../scripts/repairActiveFrameworkPackageReleaseMetadata.js'
+import {
+  buildSectionGenerationActionRepairPlan,
+} from '../scripts/repairActiveFrameworkPackageSectionGenerationActions.js'
 
 const ACTOR_ID = '507f1f77bcf86cd799439011'
 const LICENSE_LEVEL_ID = '607f1f77bcf86cd799439022'
@@ -1074,6 +1081,7 @@ describe('replaceActiveFrameworkPackageFromSeed helpers', () => {
         packageKey: 'standard-package-vmf-3-1-1-rkm-canonical',
         version: '3.1.1',
         status: 'DRAFT',
+        versionStatus: 'DRAFT',
         isDefault: false,
         isLocked: false,
         uiContractKey: 'standard-ui-contract-vmf-3-1-1-rkm',
@@ -1083,30 +1091,63 @@ describe('replaceActiveFrameworkPackageFromSeed helpers', () => {
           status: 'DRAFT',
         },
         workflowBindings: [{ policyKey: 'truth-generation-policy' }],
-        dependencyLock: { references: [{ targetKey: 'truth-generation-policy' }] },
+        dependencyLock: {
+          snapshotId: '',
+          snapshotHash: '',
+          status: 'PASS',
+          packageKey: 'standard-package-vmf-3-1-rkm',
+          packageVersion: '3.1',
+          references: [{ targetKey: 'truth-generation-policy' }],
+        },
       },
       existingPackage: {
         frameworkKey: 'VMF',
         packageKey: 'standard-package-vmf-3-1-1-rkm',
         version: '3.1.1',
         status: 'ACTIVE',
+        versionStatus: 'ACTIVE',
         isDefault: true,
         isLocked: true,
+        dependencyLock: {
+          snapshotId: 'dep-lock-standard-package-vmf-3-1-1-rkm-3-1-1-20260701124144',
+          snapshotHash: '621c63f74b2ff7a53a3a19e727fd45c6f88a885f126fa3e0e7ddbd21a8d417c5',
+          status: 'PASS',
+          packageKey: 'standard-package-vmf-3-1-1-rkm',
+          packageVersion: '3.1.1',
+          references: [{ key: 'active-reference' }],
+        },
+        uiContractBinding: {
+          key: 'standard-ui-contract-vmf-3-1-1-rkm',
+          version: '3.1.1',
+          status: 'ACTIVE',
+          compatibilityMode: 'INHERITED_MINOR',
+          resolvedAt: new Date('2026-07-01T12:43:53.000Z'),
+        },
       },
     })
 
     expect(payload.packageKey).toBe('standard-package-vmf-3-1-1-rkm')
     expect(payload.version).toBe('3.1.1')
     expect(payload.status).toBe('ACTIVE')
+    expect(payload.versionStatus).toBe('ACTIVE')
     expect(payload.isDefault).toBe(true)
     expect(payload.isLocked).toBe(true)
     expect(payload.uiContractBinding).toEqual({
       key: 'standard-ui-contract-vmf-3-1-1-rkm',
       version: '3.1.1',
-      status: 'DRAFT',
+      status: 'ACTIVE',
+      compatibilityMode: 'INHERITED_MINOR',
+      resolvedAt: new Date('2026-07-01T12:43:53.000Z'),
     })
     expect(payload.workflowBindings).toEqual([{ policyKey: 'truth-generation-policy' }])
-    expect(payload.dependencyLock).toEqual({ references: [{ targetKey: 'truth-generation-policy' }] })
+    expect(payload.dependencyLock).toEqual({
+      snapshotId: 'dep-lock-standard-package-vmf-3-1-1-rkm-3-1-1-20260701124144',
+      snapshotHash: '621c63f74b2ff7a53a3a19e727fd45c6f88a885f126fa3e0e7ddbd21a8d417c5',
+      status: 'PASS',
+      packageKey: 'standard-package-vmf-3-1-1-rkm',
+      packageVersion: '3.1.1',
+      references: [{ key: 'active-reference' }],
+    })
   })
 
   test('rejects seed control records whose stable ids do not match deterministic identities', () => {
@@ -1242,6 +1283,233 @@ describe('replaceActiveFrameworkPackageFromSeed helpers', () => {
 
     expect(runtimePathModel.createdDocs).toHaveLength(0)
     expect(workflowPolicyModel.createdDocs).toHaveLength(0)
+  })
+})
+
+describe('repairActiveFrameworkPackageReleaseMetadata helpers', () => {
+  const makeRepairInput = (overrides = {}) => ({
+    frameworkPackage: {
+      _id: '6a45094226228691cfc173ca',
+      frameworkKey: 'VMF',
+      packageKey: 'standard-package-vmf-3-1-1-rkm',
+      version: '3.1.1',
+      status: 'ACTIVE',
+      versionStatus: 'DRAFT',
+      isLocked: true,
+      lockedAt: new Date('2026-07-01T12:41:44.390Z'),
+      lockedBy: '698b3800f83b3257365fd7a3',
+      uiContractKey: 'standard-ui-contract-vmf-3-1-1-rkm',
+      uiContractBinding: {
+        key: 'standard-ui-contract-vmf-3-1-1-rkm',
+        version: '3.1.1',
+        status: 'DRAFT',
+        compatibilityMode: 'INHERITED_MINOR',
+        resolvedAt: new Date('2026-06-29T12:00:00.000Z'),
+      },
+      dependencyLock: {
+        snapshotId: '',
+        snapshotHash: '',
+        status: 'PASS',
+        packageKey: 'standard-package-vmf-3-1-rkm',
+        packageVersion: '3.1',
+        references: [{ key: 'truth-generation-policy' }],
+      },
+    },
+    deployment: {
+      deploymentId: 'deployment-vmf-global-production--20260701124353-cfc173ca',
+      activationId: 'activation-vmf-3-1-1-20260701124353-cfc173ca',
+      status: 'ACTIVE',
+    },
+    activationSnapshot: {
+      activationId: 'activation-vmf-3-1-1-20260701124353-cfc173ca',
+      activationStatus: 'ACTIVE',
+      dependencySnapshotId: 'dep-lock-standard-package-vmf-3-1-1-rkm-3-1-1-20260701124144',
+      dependencySnapshotHash: '621c63f74b2ff7a53a3a19e727fd45c6f88a885f126fa3e0e7ddbd21a8d417c5',
+      activatedAt: new Date('2026-07-01T12:43:55.327Z'),
+    },
+    ...overrides,
+  })
+
+  test('repairs active package metadata from the active activation snapshot', () => {
+    const plan = buildReleaseMetadataRepairPlan(makeRepairInput())
+
+    expect(plan.before.versionStatus).toBe('DRAFT')
+    expect(plan.before.dependencyLock.snapshotId).toBe('')
+    expect(plan.before.dependencyLock.packageKey).toBe('standard-package-vmf-3-1-rkm')
+    expect(plan.before.uiContractBinding.status).toBe('DRAFT')
+    expect(plan.after.versionStatus).toBe('ACTIVE')
+    expect(plan.after.dependencyLock).toEqual({
+      snapshotId: 'dep-lock-standard-package-vmf-3-1-1-rkm-3-1-1-20260701124144',
+      snapshotHash: '621c63f74b2ff7a53a3a19e727fd45c6f88a885f126fa3e0e7ddbd21a8d417c5',
+      status: 'PASS',
+      packageKey: 'standard-package-vmf-3-1-1-rkm',
+      packageVersion: '3.1.1',
+      references: 1,
+    })
+    expect(plan.after.uiContractBinding).toEqual({
+      key: 'standard-ui-contract-vmf-3-1-1-rkm',
+      version: '3.1.1',
+      status: 'ACTIVE',
+    })
+    expect(plan.update.dependencyLock.references).toEqual([{ key: 'truth-generation-policy' }])
+  })
+
+  test('fails closed when activation snapshot dependency evidence is missing', () => {
+    expect(() => buildReleaseMetadataRepairPlan(makeRepairInput({
+      activationSnapshot: {
+        activationId: 'activation-vmf-3-1-1-20260701124353-cfc173ca',
+        activationStatus: 'ACTIVE',
+        dependencySnapshotId: '',
+        dependencySnapshotHash: '',
+      },
+    }))).toThrow(/missing dependency snapshot evidence/)
+  })
+})
+
+describe('repairActiveFrameworkPackageSectionGenerationActions helpers', () => {
+  const makeSectionActionRepairInput = (overrides = {}) => ({
+    frameworkPackage: {
+      packageKey: 'standard-package-vmf-3-1-1-rkm',
+      status: 'ACTIVE',
+      workflowBindings: [
+        { policyKey: 'truth-generation-policy', executionContext: 'ON_GENERATE_TRUTH' },
+      ],
+    },
+    uiContract: {
+      uiContractKey: 'standard-ui-contract-vmf-3-1-1-rkm',
+      status: 'ACTIVE',
+      actions: [
+        { actionKey: 'GENERATE_TRUTH', governedAction: 'GENERATE_TRUTH' },
+      ],
+    },
+    policies: [
+      { key: 'truth-generation-policy', governedAction: 'GENERATE_TRUTH' },
+    ],
+    ...overrides,
+  })
+
+  test('plans missing Runtime Workspace action bridge UI actions, policies, and bindings', () => {
+    const plan = buildSectionGenerationActionRepairPlan(makeSectionActionRepairInput())
+
+    expect(plan.missing).toEqual({
+      actions: ['GENERATE_SECTION', 'REGENERATE_SECTION', 'MARK_READY', 'APPROVE', 'LOCK_RECORD'],
+      bindings: [
+        'generate-section-gate:ON_SECTION_GENERATE',
+        'regenerate-section-gate:ON_SECTION_REGENERATE',
+        'mark-ready-policy:ON_MARK_READY',
+        'lifecycle-approval-policy:ON_APPROVE',
+        'lock-record-policy:ON_LOCK',
+      ],
+      policies: [
+        'generate-section-gate',
+        'regenerate-section-gate',
+        'mark-ready-policy',
+        'lifecycle-approval-policy',
+        'lock-record-policy',
+      ],
+    })
+    expect(plan.updates.actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        actionKey: 'GENERATE_SECTION',
+        governedAction: 'GENERATE_SECTION',
+        presentationKey: 'section-action',
+      }),
+      expect.objectContaining({
+        actionKey: 'REGENERATE_SECTION',
+        governedAction: 'REGENERATE_SECTION',
+        presentationKey: 'section-action',
+      }),
+      expect.objectContaining({
+        actionKey: 'MARK_READY',
+        governedAction: 'MARK_READY',
+        presentationKey: 'primary-action',
+      }),
+      expect.objectContaining({
+        actionKey: 'APPROVE',
+        governedAction: 'APPROVE',
+        presentationKey: 'primary-action',
+      }),
+      expect.objectContaining({
+        actionKey: 'LOCK_RECORD',
+        governedAction: 'LOCK_RECORD',
+        presentationKey: 'primary-action',
+      }),
+    ]))
+    expect(plan.updates.policies).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        key: 'lifecycle-approval-policy',
+        governedAction: 'APPROVE',
+        triggerEvent: 'ON_APPROVE',
+        decisionMode: 'REQUIRE_AGENT_AND_SKILL_EXECUTION',
+        executionType: 'ORDERED_WORKFLOW',
+        requiredAgentIds: ['agent-validation-agent'],
+        requiredSkillIds: ['skill-truth-integrity-validator', 'skill-decision-readiness-validator'],
+      }),
+    ]))
+    expect(plan.updates.bindings).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        policyKey: 'lifecycle-approval-policy',
+        executionContext: 'ON_APPROVE',
+      }),
+    ]))
+  })
+
+  test('builds a schema-valid approval policy when APPROVE governance is missing', () => {
+    const plan = buildSectionGenerationActionRepairPlan(makeSectionActionRepairInput())
+    const approvalPolicy = plan.updates.policies.find((policy) => policy.key === 'lifecycle-approval-policy')
+
+    expect(approvalPolicy).toEqual(expect.objectContaining({
+      governedAction: 'APPROVE',
+      triggerEvent: 'ON_APPROVE',
+      decisionMode: 'REQUIRE_AGENT_AND_SKILL_EXECUTION',
+      executionType: 'ORDERED_WORKFLOW',
+    }))
+    const validationError = new WorkflowPolicy(approvalPolicy).validateSync()
+
+    expect(validationError).toBeUndefined()
+  })
+
+  test('is idempotent when Runtime Workspace action bridge already exists', () => {
+    const plan = buildSectionGenerationActionRepairPlan(makeSectionActionRepairInput({
+      frameworkPackage: {
+        packageKey: 'standard-package-vmf-3-1-1-rkm',
+        status: 'ACTIVE',
+        workflowBindings: [
+          { policyKey: 'truth-generation-policy', executionContext: 'ON_GENERATE_TRUTH' },
+          { policyKey: 'generate-section-gate', executionContext: 'ON_SECTION_GENERATE' },
+          { policyKey: 'regenerate-section-gate', executionContext: 'ON_SECTION_REGENERATE' },
+          { policyKey: 'mark-ready-policy', executionContext: 'ON_MARK_READY' },
+          { policyKey: 'lifecycle-approval-policy', executionContext: 'ON_APPROVE' },
+          { policyKey: 'lock-record-policy', executionContext: 'ON_LOCK' },
+        ],
+      },
+      uiContract: {
+        uiContractKey: 'standard-ui-contract-vmf-3-1-1-rkm',
+        status: 'ACTIVE',
+        actions: [
+          { actionKey: 'GENERATE_TRUTH', governedAction: 'GENERATE_TRUTH' },
+          { actionKey: 'GENERATE_SECTION', governedAction: 'GENERATE_SECTION' },
+          { actionKey: 'REGENERATE_SECTION', governedAction: 'REGENERATE_SECTION' },
+          { actionKey: 'MARK_READY', governedAction: 'MARK_READY' },
+          { actionKey: 'APPROVE', governedAction: 'APPROVE' },
+          { actionKey: 'LOCK_RECORD', governedAction: 'LOCK_RECORD' },
+        ],
+      },
+      policies: [
+        { key: 'truth-generation-policy', governedAction: 'GENERATE_TRUTH' },
+        { key: 'generate-section-gate', governedAction: 'GENERATE_SECTION' },
+        { key: 'regenerate-section-gate', governedAction: 'REGENERATE_SECTION' },
+        { key: 'mark-ready-policy', governedAction: 'MARK_READY' },
+        { key: 'lifecycle-approval-policy', governedAction: 'APPROVE' },
+        { key: 'lock-record-policy', governedAction: 'LOCK_RECORD' },
+      ],
+    }))
+
+    expect(plan.missing).toEqual({
+      actions: [],
+      bindings: [],
+      policies: [],
+    })
   })
 })
 

@@ -11,6 +11,8 @@
     "framework-seed:guard": "node src/scripts/importFrameworkSeed.js --json --no-report",
     "framework-seed:import": "node src/scripts/importFrameworkSeed.js",
     "framework-seed:replace-active": "node src/scripts/replaceActiveFrameworkPackageFromSeed.js",
+    "framework-packages:repair-release-metadata": "node src/scripts/repairActiveFrameworkPackageReleaseMetadata.js",
+    "framework-packages:repair-section-generation-actions": "node src/scripts/repairActiveFrameworkPackageSectionGenerationActions.js",
     "vmf:cleanup-pre-v3-1": "node src/scripts/cleanupPreV31VmfRecords.js",
     "runtime-paths:reclassify-categories": "node src/scripts/reclassifyRuntimePathCategories.js",
     "knowledge-packs:backfill-categories": "node src/scripts/backfillKnowledgePackCategories.js",
