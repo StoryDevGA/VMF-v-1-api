@@ -30,6 +30,7 @@ const manifestIdRegex = /^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,219}$/
 const versionIdRegex = /^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,239}$/
 const semanticVersionRegex = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/
 const objectIdRegex = /^[a-f\d]{24}$/i
+const sourceDocumentContentBase64MaxLength = 12_000_000
 
 const optionalFrameworkKeySchema = z
   .string()
@@ -347,6 +348,20 @@ const sourceDocumentSchema = z.object({
     .trim()
     .max(140, 'sourceHash must be 140 characters or fewer')
     .optional(),
+  sizeBytes: z.coerce
+    .number()
+    .int()
+    .min(0, 'sizeBytes must be zero or greater')
+    .max(10_000_000, 'sizeBytes must be 10000000 bytes or fewer')
+    .optional(),
+  contentBase64: z
+    .string()
+    .trim()
+    .max(
+      sourceDocumentContentBase64MaxLength,
+      `contentBase64 must be ${sourceDocumentContentBase64MaxLength} characters or fewer`,
+    )
+    .optional(),
 }).strict()
 
 const importSourceDocumentDraftBodySchema = z.object({
@@ -492,6 +507,16 @@ const activateKnowledgePackVersionBodySchema = z
   .strict()
   .superRefine(validateActivationScope)
 
+const updateKnowledgePackReviewBodySchema = z.object({
+  reviewStatus: z.enum([
+    KNOWLEDGE_PACK_REVIEW_STATUSES.READY_FOR_REVIEW,
+    KNOWLEDGE_PACK_REVIEW_STATUSES.APPROVED,
+    KNOWLEDGE_PACK_REVIEW_STATUSES.REJECTED,
+  ], {
+    required_error: 'reviewStatus is required',
+  }),
+}).strict()
+
 const rollbackKnowledgePackBodySchema = z
   .object({
     versionId: z
@@ -520,4 +545,5 @@ export const validateImportSourceDocumentDraft = createBodyValidator(importSourc
 export const validateImportKnowledgePackStarterVersion = createBodyValidator(emptyBodySchema)
 export const validateKnowledgePackVersionActionBody = createBodyValidator(emptyBodySchema)
 export const validateActivateKnowledgePackVersion = createBodyValidator(activateKnowledgePackVersionBodySchema)
+export const validateUpdateKnowledgePackReview = createBodyValidator(updateKnowledgePackReviewBodySchema)
 export const validateRollbackKnowledgePack = createBodyValidator(rollbackKnowledgePackBodySchema)

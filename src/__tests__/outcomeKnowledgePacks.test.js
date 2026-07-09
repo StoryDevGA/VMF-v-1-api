@@ -1,4 +1,6 @@
 import mongoose from 'mongoose'
+import zlib from 'node:zlib'
+import crypto from 'node:crypto'
 import { describe, test, expect, beforeAll, beforeEach, afterAll, jest } from '@jest/globals'
 
 beforeAll(() => {
@@ -13,6 +15,162 @@ beforeAll(() => {
 
 const SUPER_ADMIN_ID = '507f1f77bcf86cd799439011'
 const NON_ADMIN_ID = '507f1f77bcf86cd799439012'
+
+const escapeDocxXmlText = (value) => String(value || '')
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&apos;')
+
+const buildDocxBuffer = (documentText) => {
+  const fileNameBuffer = Buffer.from('word/document.xml', 'utf8')
+  const xmlBuffer = Buffer.from(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+      <w:body><w:p><w:r><w:t>${escapeDocxXmlText(documentText)}</w:t></w:r></w:p></w:body>
+    </w:document>`, 'utf8')
+  const compressedData = zlib.deflateRawSync(xmlBuffer)
+  const localHeader = Buffer.alloc(30)
+  localHeader.writeUInt32LE(0x04034b50, 0)
+  localHeader.writeUInt16LE(20, 4)
+  localHeader.writeUInt16LE(0, 6)
+  localHeader.writeUInt16LE(8, 8)
+  localHeader.writeUInt16LE(0, 10)
+  localHeader.writeUInt16LE(0, 12)
+  localHeader.writeUInt32LE(0, 14)
+  localHeader.writeUInt32LE(compressedData.length, 18)
+  localHeader.writeUInt32LE(xmlBuffer.length, 22)
+  localHeader.writeUInt16LE(fileNameBuffer.length, 26)
+  localHeader.writeUInt16LE(0, 28)
+
+  const centralDirectoryOffset = localHeader.length + fileNameBuffer.length + compressedData.length
+  const centralHeader = Buffer.alloc(46)
+  centralHeader.writeUInt32LE(0x02014b50, 0)
+  centralHeader.writeUInt16LE(20, 4)
+  centralHeader.writeUInt16LE(20, 6)
+  centralHeader.writeUInt16LE(0, 8)
+  centralHeader.writeUInt16LE(8, 10)
+  centralHeader.writeUInt16LE(0, 12)
+  centralHeader.writeUInt16LE(0, 14)
+  centralHeader.writeUInt32LE(0, 16)
+  centralHeader.writeUInt32LE(compressedData.length, 20)
+  centralHeader.writeUInt32LE(xmlBuffer.length, 24)
+  centralHeader.writeUInt16LE(fileNameBuffer.length, 28)
+  centralHeader.writeUInt16LE(0, 30)
+  centralHeader.writeUInt16LE(0, 32)
+  centralHeader.writeUInt16LE(0, 34)
+  centralHeader.writeUInt16LE(0, 36)
+  centralHeader.writeUInt32LE(0, 38)
+  centralHeader.writeUInt32LE(0, 42)
+  const centralDirectory = Buffer.concat([centralHeader, fileNameBuffer])
+
+  const endOfCentralDirectory = Buffer.alloc(22)
+  endOfCentralDirectory.writeUInt32LE(0x06054b50, 0)
+  endOfCentralDirectory.writeUInt16LE(0, 4)
+  endOfCentralDirectory.writeUInt16LE(0, 6)
+  endOfCentralDirectory.writeUInt16LE(1, 8)
+  endOfCentralDirectory.writeUInt16LE(1, 10)
+  endOfCentralDirectory.writeUInt32LE(centralDirectory.length, 12)
+  endOfCentralDirectory.writeUInt32LE(centralDirectoryOffset, 16)
+  endOfCentralDirectory.writeUInt16LE(0, 20)
+
+  return Buffer.concat([
+    localHeader,
+    fileNameBuffer,
+    compressedData,
+    centralDirectory,
+    endOfCentralDirectory,
+  ])
+}
+
+const buildZipBuffer = (entries = []) => {
+  const localParts = []
+  const centralParts = []
+  let localOffset = 0
+
+  entries.forEach((entry) => {
+    const fileNameBuffer = Buffer.from(entry.fileName, 'utf8')
+    const compressionMethod = entry.compressionMethod ?? 8
+    const data = Buffer.isBuffer(entry.data)
+      ? entry.data
+      : Buffer.from(String(entry.data || ''), 'utf8')
+    const compressedData = entry.compressedData
+      || (compressionMethod === 8 ? zlib.deflateRawSync(data) : data)
+    const uncompressedSize = entry.uncompressedSize ?? data.length
+
+    const localHeader = Buffer.alloc(30)
+    localHeader.writeUInt32LE(0x04034b50, 0)
+    localHeader.writeUInt16LE(20, 4)
+    localHeader.writeUInt16LE(0, 6)
+    localHeader.writeUInt16LE(compressionMethod, 8)
+    localHeader.writeUInt16LE(0, 10)
+    localHeader.writeUInt16LE(0, 12)
+    localHeader.writeUInt32LE(0, 14)
+    localHeader.writeUInt32LE(compressedData.length, 18)
+    localHeader.writeUInt32LE(uncompressedSize, 22)
+    localHeader.writeUInt16LE(fileNameBuffer.length, 26)
+    localHeader.writeUInt16LE(0, 28)
+    localParts.push(localHeader, fileNameBuffer, compressedData)
+
+    const centralHeader = Buffer.alloc(46)
+    centralHeader.writeUInt32LE(0x02014b50, 0)
+    centralHeader.writeUInt16LE(20, 4)
+    centralHeader.writeUInt16LE(20, 6)
+    centralHeader.writeUInt16LE(0, 8)
+    centralHeader.writeUInt16LE(compressionMethod, 10)
+    centralHeader.writeUInt16LE(0, 12)
+    centralHeader.writeUInt16LE(0, 14)
+    centralHeader.writeUInt32LE(0, 16)
+    centralHeader.writeUInt32LE(compressedData.length, 20)
+    centralHeader.writeUInt32LE(uncompressedSize, 24)
+    centralHeader.writeUInt16LE(fileNameBuffer.length, 28)
+    centralHeader.writeUInt16LE(0, 30)
+    centralHeader.writeUInt16LE(0, 32)
+    centralHeader.writeUInt16LE(0, 34)
+    centralHeader.writeUInt16LE(0, 36)
+    centralHeader.writeUInt32LE(0, 38)
+    centralHeader.writeUInt32LE(localOffset, 42)
+    centralParts.push(centralHeader, fileNameBuffer)
+
+    localOffset += localHeader.length + fileNameBuffer.length + compressedData.length
+  })
+
+  const localContent = Buffer.concat(localParts)
+  const centralDirectory = Buffer.concat(centralParts)
+  const endOfCentralDirectory = Buffer.alloc(22)
+  endOfCentralDirectory.writeUInt32LE(0x06054b50, 0)
+  endOfCentralDirectory.writeUInt16LE(0, 4)
+  endOfCentralDirectory.writeUInt16LE(0, 6)
+  endOfCentralDirectory.writeUInt16LE(entries.length, 8)
+  endOfCentralDirectory.writeUInt16LE(entries.length, 10)
+  endOfCentralDirectory.writeUInt32LE(centralDirectory.length, 12)
+  endOfCentralDirectory.writeUInt32LE(localContent.length, 16)
+  endOfCentralDirectory.writeUInt16LE(0, 20)
+
+  return Buffer.concat([localContent, centralDirectory, endOfCentralDirectory])
+}
+
+const buildDocxXmlBuffer = (documentText) => Buffer.from(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+  <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+    <w:body><w:p><w:r><w:t>${escapeDocxXmlText(documentText)}</w:t></w:r></w:p></w:body>
+  </w:document>`, 'utf8')
+
+const buildPdfBuffer = (documentText) => {
+  const escapedText = String(documentText || '').replace(/[()\\]/g, '\\$&')
+  const stream = `BT /F1 12 Tf 72 720 Td (${escapedText}) Tj ET`
+  return Buffer.from(`%PDF-1.4
+1 0 obj
+<< /Length ${Buffer.byteLength(stream, 'latin1')} >>
+stream
+${stream}
+endstream
+endobj
+%%EOF
+`, 'latin1')
+}
+
+const buildTestContentHash = (content) =>
+  `sha256:${crypto.createHash('sha256').update(String(content || ''), 'utf8').digest('hex')}`
 
 const REQUIRED_PACKS = [
   { packCategory: 'OUTCOME', packType: 'ARL', packKey: 'adaptive-reasoning-layer', label: 'Adaptive Reasoning Layer' },
@@ -108,6 +266,7 @@ const snapshotKnowledgePackMutationState = (doc) => ({
   status: doc.status,
   latestVersionId: doc.latestVersionId,
   latestSemanticVersion: doc.latestSemanticVersion,
+  reviewStatus: doc.reviewStatus,
 })
 
 const restoreKnowledgePackMutationState = (doc, snapshot) => {
@@ -1786,6 +1945,98 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
     expect(JSON.stringify(auditPayload)).not.toContain('reasoning_stages')
   })
 
+  test('GET /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/versions/:versionId/content-preview returns imported source-document draft content', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const extractedText = 'Enterprise Technology methodology principles capability governance and architecture guidance.'
+    const draftPack = makeKnowledgePack({
+      packId: 'kp-et-et',
+      packCategory: 'FRAMEWORK',
+      packType: 'ET',
+      packKey: 'et',
+      label: 'ET v2.8',
+      status: 'DRAFT',
+      purposeCategory: 'FRAMEWORK',
+      sourceMetadata: {
+        importMode: 'SOURCE_DOCUMENT_IMPORT_DRAFT',
+        sourceStatus: 'SOURCE_DOCUMENT_PRESENT',
+        sourceFilename: 'ET v2.8 - Canonical Execution Translation System.docx',
+      },
+      authoringMode: 'IMPORT_SOURCE_DOCUMENT',
+      reviewStatus: 'DRAFT',
+      latestVersionId: 'kpv-et-et-1-0-0-global',
+      latestSemanticVersion: '1.0.0',
+    })
+    const versionDoc = makeKnowledgePackVersionDoc({
+      versionId: 'kpv-et-et-1-0-0-global',
+      packId: 'kp-et-et',
+      packCategory: 'FRAMEWORK',
+      packType: 'ET',
+      packKey: 'et',
+      semanticVersion: '1.0.0',
+      status: 'DRAFT',
+      purposeCategory: 'FRAMEWORK',
+      content: extractedText,
+      contentFormat: 'DOCX',
+      sourceFilename: 'ET v2.8 - Canonical Execution Translation System.docx',
+      sourceMetadata: {
+        sourceStatus: 'SOURCE_DOCUMENT_PRESENT',
+        parserStatus: 'TEXT_CAPTURED',
+        extractionMode: 'DETERMINISTIC_DOCX',
+        contentPersisted: true,
+      },
+      sourceDocuments: [
+        {
+          sourceDocumentId: 'kpsrc-et-et-1-0-0-1234567890abcdef',
+          filename: 'ET v2.8 - Canonical Execution Translation System.docx',
+          fileExtension: 'docx',
+          sourceHash: 'sha256:docx-source-hash',
+        },
+      ],
+      authoringMode: 'IMPORT_SOURCE_DOCUMENT',
+      reviewStatus: 'DRAFT',
+    })
+    KnowledgePack.findOne.mockReturnValueOnce(buildFindOneChain(draftPack))
+    KnowledgePackVersion.findOne.mockReturnValueOnce(buildVersionFindOneChain(versionDoc))
+
+    const res = await request
+      .get('/api/v1/super-admin/outcome-studio/knowledge-packs/kp-et-et/versions/kpv-et-et-1-0-0-global/content-preview')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(KnowledgePackVersion.findOne).toHaveBeenCalledWith({
+      packId: 'kp-et-et',
+      versionId: 'kpv-et-et-1-0-0-global',
+    })
+    expect(res.body.data).toEqual(expect.objectContaining({
+      packId: 'kp-et-et',
+      versionId: 'kpv-et-et-1-0-0-global',
+      packType: 'ET',
+      packKey: 'et',
+      status: 'DRAFT',
+      contentFormat: 'DOCX',
+      sourceFilename: 'ET v2.8 - Canonical Execution Translation System.docx',
+      contentVisible: true,
+      previewMode: 'SOURCE_BACKED_SUPER_ADMIN_ONLY',
+      content: extractedText,
+      contentLength: extractedText.length,
+      authoringMode: 'IMPORT_SOURCE_DOCUMENT',
+    }))
+    const auditPayload = AuditLog.createLog.mock.calls.find(
+      ([payload]) => payload.action === 'KNOWLEDGE_PACK_CONTENT_PREVIEWED',
+    )?.[0]
+    expect(auditPayload).toEqual(expect.objectContaining({
+      action: 'KNOWLEDGE_PACK_CONTENT_PREVIEWED',
+      diff: expect.objectContaining({
+        contentFormat: 'DOCX',
+        sourceFilename: 'ET v2.8 - Canonical Execution Translation System.docx',
+        contentVisible: true,
+        contentIncludedInAudit: false,
+        contentLength: extractedText.length,
+      }),
+    }))
+    expect(JSON.stringify(auditPayload)).not.toContain(extractedText)
+  })
+
   test('GET /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/versions/:versionId/content-preview fails closed when preview audit cannot persist', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     const versionDoc = makeKnowledgePackVersionDoc({
@@ -2099,7 +2350,7 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
     expect(JSON.stringify(res.body)).not.toContain('rendering_rules')
   })
 
-  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import creates a source-document draft without activation', async () => {
+  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import creates a text source-document draft with server-derived source metadata', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     KnowledgePack.findOneAndUpdate.mockResolvedValueOnce(makeKnowledgePack({
       packId: 'kp-style-board-executive-style',
@@ -2109,6 +2360,13 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       status: 'DRAFT',
       purposeCategory: 'STYLE',
       sourceAuthority: 'StorylineOS Methodology',
+      sourceMetadata: {
+        importMode: 'SOURCE_DOCUMENT_IMPORT_DRAFT',
+        sourceStatus: 'SOURCE_DOCUMENT_PRESENT',
+        sourceFilename: 'Board Executive Style.md',
+        sourceDocumentId: 'kpsrc-style-board-executive-style-1-0-0-derived',
+        sourceHash: 'sha256:derived',
+      },
       executionMode: 'PROVIDER_CONTEXT',
       visibility: 'PLATFORM',
       authoringMode: 'IMPORT_SOURCE_DOCUMENT',
@@ -2127,12 +2385,12 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
         purposeCategory: 'STYLE',
         semanticVersion: '1.0.0',
         sourceAuthority: 'StorylineOS Methodology',
+        contentFormat: 'MARKDOWN',
         sourceDocument: {
-          sourceDocumentId: 'style-doc-1',
-          filename: 'Board Executive Style.docx',
-          contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-          sourceHash: 'sha256:style-doc-hash',
+          filename: 'Board Executive Style.md',
+          contentType: 'text/markdown',
         },
+        extractedText: 'pack:\n  key: board-executive-style\n\nProvider instructions hidden from list responses.',
       })
 
     expect(res.status).toBe(201)
@@ -2140,6 +2398,10 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       packId: 'kp-style-board-executive-style',
       packType: 'STYLE',
       purposeCategory: 'STYLE',
+      sourceMetadata: expect.objectContaining({
+        sourceStatus: 'SOURCE_DOCUMENT_PRESENT',
+        sourceFilename: 'Board Executive Style.md',
+      }),
       visibility: 'PLATFORM',
       authoringMode: 'IMPORT_SOURCE_DOCUMENT',
       reviewStatus: 'DRAFT',
@@ -2149,20 +2411,33 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       packType: 'STYLE',
       packKey: 'board-executive-style',
       status: 'DRAFT',
-      contentFormat: 'DOCX',
-      sourceFilename: 'Board Executive Style.docx',
+      contentFormat: 'MARKDOWN',
+      sourceFilename: 'Board Executive Style.md',
       sourceAuthority: 'StorylineOS Methodology',
       authoringMode: 'IMPORT_SOURCE_DOCUMENT',
       reviewStatus: 'DRAFT',
     }))
     expect(res.body.data.version.sourceDocuments).toEqual([
       expect.objectContaining({
-        sourceDocumentId: 'style-doc-1',
-        filename: 'Board Executive Style.docx',
-        fileExtension: 'docx',
-        sourceHash: 'sha256:style-doc-hash',
+        sourceDocumentId: expect.stringMatching(/^kpsrc-style-board-executive-style-1-0-0-[a-f0-9]{16}$/),
+        filename: 'Board Executive Style.md',
+        fileExtension: 'md',
+        sourceHash: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
       }),
     ])
+    const savedVersion = KnowledgePackVersion.prototype.save.mock.contexts[0]
+    expect(savedVersion.get('content')).toContain('key: board-executive-style')
+    expect(savedVersion.get('content')).toContain('Provider instructions hidden from list responses.')
+    expect(savedVersion).toEqual(expect.objectContaining({
+      contentHash: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+      sourceMetadata: expect.objectContaining({
+        sourceStatus: 'SOURCE_DOCUMENT_PRESENT',
+        sourceFilename: 'Board Executive Style.md',
+        parserStatus: 'TEXT_CAPTURED',
+        extractionMode: 'DETERMINISTIC_TEXT',
+        contentPersisted: true,
+      }),
+    }))
     expect(res.body.data.version.validationSummary).toEqual(expect.objectContaining({
       status: 'NOT_RUN',
       mode: 'HUMAN_REVIEW_REQUIRED',
@@ -2173,10 +2448,255 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       action: 'OUTCOME_KNOWLEDGE_PACK_VERSION_UPLOADED',
       diff: expect.objectContaining({
         importMode: 'SOURCE_DOCUMENT_IMPORT_DRAFT',
+        sourceStatus: 'SOURCE_DOCUMENT_PRESENT',
+        sourceFilename: 'Board Executive Style.md',
+        sourceDocumentId: expect.stringMatching(/^kpsrc-style-board-executive-style-1-0-0-[a-f0-9]{16}$/),
+        sourceHash: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
         contentIncludedInAudit: false,
         activationCreated: false,
       }),
     }))
+  })
+
+  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import creates a DOCX source-document draft with deterministic extraction', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const documentText = 'Enterprise Technology methodology principles capability governance and architecture guidance.'
+    const docxBuffer = buildDocxBuffer(documentText)
+    KnowledgePack.findOneAndUpdate.mockResolvedValueOnce(makeKnowledgePack({
+      packId: 'kp-system-enterprise-technology',
+      packType: 'SYSTEM',
+      packKey: 'enterprise-technology',
+      label: 'Enterprise Technology',
+      status: 'DRAFT',
+      purposeCategory: 'FRAMEWORK',
+      sourceMetadata: {
+        importMode: 'SOURCE_DOCUMENT_IMPORT_DRAFT',
+        sourceStatus: 'SOURCE_DOCUMENT_PRESENT',
+        sourceFilename: 'Enterprise Technology Framework v5.docx',
+      },
+      executionMode: 'PROVIDER_CONTEXT',
+      visibility: 'PLATFORM',
+      authoringMode: 'IMPORT_SOURCE_DOCUMENT',
+      reviewStatus: 'DRAFT',
+      latestVersionId: 'kpv-system-enterprise-technology-5-0-0-global',
+      latestSemanticVersion: '5.0.0',
+    }))
+
+    const res = await request
+      .post('/api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        packType: 'SYSTEM',
+        packKey: 'enterprise-technology',
+        label: 'Enterprise Technology',
+        purposeCategory: 'FRAMEWORK',
+        semanticVersion: '5.0.0',
+        contentFormat: 'DOCX',
+        sourceDocument: {
+          filename: 'Enterprise Technology Framework v5.docx',
+          contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          sizeBytes: docxBuffer.length,
+          contentBase64: docxBuffer.toString('base64'),
+        },
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data.version).toEqual(expect.objectContaining({
+      packType: 'SYSTEM',
+      packKey: 'enterprise-technology',
+      status: 'DRAFT',
+      contentFormat: 'DOCX',
+      sourceFilename: 'Enterprise Technology Framework v5.docx',
+    }))
+    const savedVersion = KnowledgePackVersion.prototype.save.mock.contexts[0]
+    expect(savedVersion.get('content')).toContain(documentText)
+    expect(savedVersion).toEqual(expect.objectContaining({
+      contentHash: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+      sourceMetadata: expect.objectContaining({
+        sourceStatus: 'SOURCE_DOCUMENT_PRESENT',
+        parserStatus: 'TEXT_CAPTURED',
+        extractionMode: 'DETERMINISTIC_DOCX',
+        extractionMethod: 'DOCX_XML_TEXT',
+        extractionAdapter: 'knowledge-pack-docx-text-extraction-v1',
+        sourceSizeBytes: docxBuffer.length,
+        contentPersisted: true,
+      }),
+    }))
+    expect(JSON.stringify(res.body)).not.toContain(documentText)
+    expect(JSON.stringify(savedVersion)).not.toContain(docxBuffer.toString('base64'))
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      diff: expect.objectContaining({
+        sourceFilename: 'Enterprise Technology Framework v5.docx',
+        sourceHash: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+        contentIncludedInAudit: false,
+        activationCreated: false,
+      }),
+    }))
+  })
+
+  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import extracts DOCX content without inflating unrelated zip entries', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const documentText = 'Enterprise Technology methodology principles capability model governance architecture guidance.'
+    const docxBuffer = buildZipBuffer([
+      {
+        fileName: 'word/unused.xml',
+        compressedData: Buffer.from('not-valid-deflate-data', 'utf8'),
+        uncompressedSize: 128,
+      },
+      {
+        fileName: 'word/document.xml',
+        data: buildDocxXmlBuffer(documentText),
+      },
+    ])
+    KnowledgePack.findOneAndUpdate.mockResolvedValueOnce(makeKnowledgePack({
+      packId: 'kp-system-enterprise-technology-lazy-docx',
+      packType: 'SYSTEM',
+      packKey: 'enterprise-technology-lazy-docx',
+      label: 'Enterprise Technology Lazy DOCX',
+      status: 'DRAFT',
+      purposeCategory: 'FRAMEWORK',
+      sourceMetadata: {
+        importMode: 'SOURCE_DOCUMENT_IMPORT_DRAFT',
+        sourceStatus: 'SOURCE_DOCUMENT_PRESENT',
+        sourceFilename: 'Enterprise Technology Framework v5.docx',
+      },
+      executionMode: 'PROVIDER_CONTEXT',
+      visibility: 'PLATFORM',
+      authoringMode: 'IMPORT_SOURCE_DOCUMENT',
+      reviewStatus: 'DRAFT',
+      latestVersionId: 'kpv-system-enterprise-technology-lazy-docx-5-0-0-global',
+      latestSemanticVersion: '5.0.0',
+    }))
+
+    const res = await request
+      .post('/api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        packType: 'SYSTEM',
+        packKey: 'enterprise-technology-lazy-docx',
+        label: 'Enterprise Technology Lazy DOCX',
+        purposeCategory: 'FRAMEWORK',
+        semanticVersion: '5.0.0',
+        contentFormat: 'DOCX',
+        sourceDocument: {
+          filename: 'Enterprise Technology Framework v5.docx',
+          contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          sizeBytes: docxBuffer.length,
+          contentBase64: docxBuffer.toString('base64'),
+        },
+      })
+
+    expect(res.status).toBe(201)
+    const savedVersion = KnowledgePackVersion.prototype.save.mock.contexts[0]
+    expect(savedVersion.get('content')).toContain(documentText)
+    expect(savedVersion.sourceMetadata).toEqual(expect.objectContaining({
+      extractionMode: 'DETERMINISTIC_DOCX',
+      extractionMethod: 'DOCX_XML_TEXT',
+      contentPersisted: true,
+    }))
+    expect(JSON.stringify(res.body)).not.toContain(documentText)
+  })
+
+  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import rejects DOCX content that inflates beyond the deterministic extraction limit', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const oversizedXml = Buffer.concat([
+      Buffer.from('<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>', 'utf8'),
+      Buffer.alloc(3_100_000, 65),
+      Buffer.from('</w:t></w:r></w:p></w:body></w:document>', 'utf8'),
+    ])
+    const docxBuffer = buildZipBuffer([
+      {
+        fileName: 'word/document.xml',
+        data: oversizedXml,
+      },
+    ])
+
+    const res = await request
+      .post('/api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        packType: 'SYSTEM',
+        packKey: 'enterprise-technology-bomb-docx',
+        label: 'Enterprise Technology Bomb DOCX',
+        purposeCategory: 'FRAMEWORK',
+        semanticVersion: '5.0.0',
+        contentFormat: 'DOCX',
+        sourceDocument: {
+          filename: 'Enterprise Technology Framework v5.docx',
+          contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          sizeBytes: docxBuffer.length,
+          contentBase64: docxBuffer.toString('base64'),
+        },
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.reason).toBe('PACK_SOURCE_EXTRACTION_FAILED')
+    expect(res.body.error.details.extractionError).toBe('SOURCE_DOCUMENT_EXTRACTION_FAILED')
+    expect(KnowledgePack.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(KnowledgePackVersion.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import creates a PDF source-document draft with deterministic extraction', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const documentText = 'Enterprise Technology framework assessment governance templates examples glossary principles.'
+    const pdfBuffer = buildPdfBuffer(documentText)
+    KnowledgePack.findOneAndUpdate.mockResolvedValueOnce(makeKnowledgePack({
+      packId: 'kp-system-enterprise-technology-pdf',
+      packType: 'SYSTEM',
+      packKey: 'enterprise-technology-pdf',
+      label: 'Enterprise Technology PDF',
+      status: 'DRAFT',
+      purposeCategory: 'FRAMEWORK',
+      sourceMetadata: {
+        importMode: 'SOURCE_DOCUMENT_IMPORT_DRAFT',
+        sourceStatus: 'SOURCE_DOCUMENT_PRESENT',
+        sourceFilename: 'Enterprise Technology Framework v5.pdf',
+      },
+      executionMode: 'PROVIDER_CONTEXT',
+      visibility: 'PLATFORM',
+      authoringMode: 'IMPORT_SOURCE_DOCUMENT',
+      reviewStatus: 'DRAFT',
+      latestVersionId: 'kpv-system-enterprise-technology-pdf-5-0-0-global',
+      latestSemanticVersion: '5.0.0',
+    }))
+
+    const res = await request
+      .post('/api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        packType: 'SYSTEM',
+        packKey: 'enterprise-technology-pdf',
+        label: 'Enterprise Technology PDF',
+        purposeCategory: 'FRAMEWORK',
+        semanticVersion: '5.0.0',
+        contentFormat: 'PDF',
+        sourceDocument: {
+          filename: 'Enterprise Technology Framework v5.pdf',
+          contentType: 'application/pdf',
+          sizeBytes: pdfBuffer.length,
+          contentBase64: pdfBuffer.toString('base64'),
+        },
+      })
+
+    expect(res.status).toBe(201)
+    const savedVersion = KnowledgePackVersion.prototype.save.mock.contexts[0]
+    expect(savedVersion.get('content')).toBe(documentText)
+    expect(savedVersion).toEqual(expect.objectContaining({
+      contentFormat: 'PDF',
+      sourceMetadata: expect.objectContaining({
+        parserStatus: 'TEXT_CAPTURED',
+        extractionMode: 'DETERMINISTIC_PDF',
+        extractionAdapter: 'knowledge-pack-pdf-text-extraction-v1',
+        sourceSizeBytes: pdfBuffer.length,
+      }),
+    }))
+    expect([
+      'PDF_OPERATOR_TEXT',
+      'PDF_TEXT_LAYER',
+    ]).toContain(savedVersion.sourceMetadata.extractionMethod)
+    expect(JSON.stringify(res.body)).not.toContain(documentText)
+    expect(JSON.stringify(savedVersion)).not.toContain(pdfBuffer.toString('base64'))
   })
 
   test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import rejects unsupported source document formats', async () => {
@@ -2197,6 +2717,82 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
 
     expect(res.status).toBe(422)
     expect(res.body.error.details.reason).toBe('PACK_SOURCE_FORMAT_UNSUPPORTED')
+    expect(KnowledgePack.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(KnowledgePackVersion.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import rejects binary formats without source content', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        packType: 'STYLE',
+        packKey: 'board-executive-style',
+        label: 'Board Executive Style',
+        semanticVersion: '1.0.0',
+        contentFormat: 'PDF',
+        sourceDocument: {
+          filename: 'Board Executive Style.pdf',
+        },
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.reason).toBe('PACK_SOURCE_EXTRACTION_REQUIRED')
+    expect(res.body.error.details.supportedFormats).toEqual(['YAML', 'JSON', 'MARKDOWN', 'DOCX', 'PDF'])
+    expect(KnowledgePack.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(KnowledgePackVersion.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import rejects unreadable binary source content', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        packType: 'STYLE',
+        packKey: 'board-executive-style',
+        label: 'Board Executive Style',
+        semanticVersion: '1.0.0',
+        contentFormat: 'PDF',
+        sourceDocument: {
+          filename: 'Board Executive Style.pdf',
+          contentType: 'application/pdf',
+          contentBase64: Buffer.from('%PDF-1.4\n%%EOF\n', 'latin1').toString('base64'),
+        },
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.reason).toBe('PACK_SOURCE_EXTRACTION_FAILED')
+    expect(res.body.error.details.extractionError).toBe('SOURCE_DOCUMENT_NO_READABLE_TEXT')
+    expect(KnowledgePack.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(KnowledgePackVersion.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import rejects text imports without extracted source text', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        packType: 'STYLE',
+        packKey: 'board-executive-style',
+        label: 'Board Executive Style',
+        semanticVersion: '1.0.0',
+        contentFormat: 'MARKDOWN',
+        sourceDocument: {
+          filename: 'Board Executive Style.md',
+        },
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.reason).toBe('PACK_SOURCE_TEXT_REQUIRED')
     expect(KnowledgePack.findOneAndUpdate).not.toHaveBeenCalled()
     expect(KnowledgePackVersion.prototype.save).not.toHaveBeenCalled()
     expect(AuditLog.createLog).not.toHaveBeenCalled()
@@ -2245,9 +2841,11 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
         packKey: 'board-executive-style',
         label: 'Board Executive Style',
         semanticVersion: '1.0.0',
+        contentFormat: 'MARKDOWN',
         sourceDocument: {
-          filename: 'Board Executive Style.docx',
+          filename: 'Board Executive Style.md',
         },
+        extractedText: 'Board executive style source text.',
       })
 
     expect(res.status).toBe(409)
@@ -2320,6 +2918,425 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       action: 'OUTCOME_KNOWLEDGE_PACK_VALIDATION_FAILED',
     }))
     expect(KnowledgePackActivation.updateMany).not.toHaveBeenCalled()
+  })
+
+  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/versions/:versionId/validate marks imported source-document drafts as validated', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const extractedText = 'Enterprise Technology methodology principles, capability model, governance, and architecture guidance.'
+    const draftPack = makeKnowledgePack({
+      packId: 'kp-system-et',
+      packCategory: 'FRAMEWORK',
+      packType: 'SYSTEM',
+      packKey: 'et',
+      label: 'Enterprise Technology',
+      status: 'DRAFT',
+      purposeCategory: 'FRAMEWORK',
+      sourceMetadata: {
+        importMode: 'SOURCE_DOCUMENT_IMPORT_DRAFT',
+        sourceStatus: 'SOURCE_DOCUMENT_PRESENT',
+        sourceFilename: 'Enterprise Technology.md',
+        sourceDocumentId: 'kpsrc-system-et-5-0-0-source-hash',
+        sourceHash: 'sha256:source-hash',
+        contentPersisted: true,
+      },
+      authoringMode: 'IMPORT_SOURCE_DOCUMENT',
+      reviewStatus: 'DRAFT',
+      latestVersionId: 'kpv-system-et-5-0-0-global',
+      latestSemanticVersion: '5.0.0',
+    })
+    const versionDoc = makeKnowledgePackVersionDoc({
+      versionId: 'kpv-system-et-5-0-0-global',
+      packId: 'kp-system-et',
+      packCategory: 'FRAMEWORK',
+      packType: 'SYSTEM',
+      packKey: 'et',
+      semanticVersion: '5.0.0',
+      status: 'DRAFT',
+      purposeCategory: 'FRAMEWORK',
+      content: extractedText,
+      contentHash: buildTestContentHash(extractedText),
+      contentFormat: 'MARKDOWN',
+      sourceFilename: 'Enterprise Technology.md',
+      sourceMetadata: {
+        importMode: 'SOURCE_DOCUMENT_IMPORT_DRAFT',
+        sourceStatus: 'SOURCE_DOCUMENT_PRESENT',
+        sourceFilename: 'Enterprise Technology.md',
+        sourceDocumentId: 'kpsrc-system-et-5-0-0-source-hash',
+        sourceHash: 'sha256:source-hash',
+        contentPersisted: true,
+      },
+      sourceDocuments: [
+        {
+          sourceDocumentId: 'kpsrc-system-et-5-0-0-source-hash',
+          filename: 'Enterprise Technology.md',
+          fileExtension: 'md',
+          sourceHash: 'sha256:source-hash',
+        },
+      ],
+      validationSummary: {},
+      validatedAt: null,
+      authoringMode: 'IMPORT_SOURCE_DOCUMENT',
+      reviewStatus: 'DRAFT',
+    })
+    KnowledgePack.findOne.mockReturnValueOnce(buildFindOneChain(draftPack))
+    KnowledgePackVersion.findOne.mockReturnValueOnce(buildVersionFindOneChain(versionDoc))
+
+    const res = await request
+      .post('/api/v1/super-admin/outcome-studio/knowledge-packs/kp-system-et/versions/kpv-system-et-5-0-0-global/validate')
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(200)
+    expect(versionDoc.status).toBe('VALIDATED')
+    expect(versionDoc.validatedAt).toBeInstanceOf(Date)
+    expect(res.body.data.validationSummary).toEqual(expect.objectContaining({
+      status: 'PASSED',
+      mode: 'SOURCE_ONLY_TEXT_VALIDATION',
+    }))
+    expect(KnowledgePack.updateOne).toHaveBeenCalledWith(
+      { packId: 'kp-system-et' },
+      expect.objectContaining({
+        $set: expect.objectContaining({
+          status: 'VALIDATED',
+          latestVersionId: 'kpv-system-et-5-0-0-global',
+          latestSemanticVersion: '5.0.0',
+        }),
+      }),
+      expect.any(Object),
+    )
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'OUTCOME_KNOWLEDGE_PACK_VERSION_VALIDATED',
+    }))
+    expect(JSON.stringify(res.body)).not.toContain(extractedText)
+  })
+
+  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/versions/:versionId/review submits validated imported drafts for review', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const draftPack = makeKnowledgePack({
+      packId: 'kp-system-et',
+      packCategory: 'FRAMEWORK',
+      packType: 'SYSTEM',
+      packKey: 'et',
+      label: 'Enterprise Technology',
+      status: 'VALIDATED',
+      purposeCategory: 'FRAMEWORK',
+      sourceMetadata: {
+        importMode: 'SOURCE_DOCUMENT_IMPORT_DRAFT',
+        sourceStatus: 'SOURCE_DOCUMENT_PRESENT',
+      },
+      authoringMode: 'IMPORT_SOURCE_DOCUMENT',
+      reviewStatus: 'DRAFT',
+      latestVersionId: 'kpv-system-et-5-0-0-global',
+      latestSemanticVersion: '5.0.0',
+    })
+    const versionDoc = makeKnowledgePackVersionDoc({
+      versionId: 'kpv-system-et-5-0-0-global',
+      packId: 'kp-system-et',
+      packCategory: 'FRAMEWORK',
+      packType: 'SYSTEM',
+      packKey: 'et',
+      semanticVersion: '5.0.0',
+      status: 'VALIDATED',
+      validationSummary: { status: 'PASSED' },
+      authoringMode: 'IMPORT_SOURCE_DOCUMENT',
+      reviewStatus: 'DRAFT',
+    })
+    KnowledgePack.findOne.mockReturnValueOnce(buildFindOneChain(draftPack))
+    KnowledgePackVersion.findOne.mockReturnValueOnce(buildVersionFindOneChain(versionDoc))
+
+    const res = await request
+      .post('/api/v1/super-admin/outcome-studio/knowledge-packs/kp-system-et/versions/kpv-system-et-5-0-0-global/review')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ reviewStatus: 'READY_FOR_REVIEW' })
+
+    expect(res.status).toBe(200)
+    expect(versionDoc.reviewStatus).toBe('READY_FOR_REVIEW')
+    expect(KnowledgePack.updateOne).toHaveBeenCalledWith(
+      { packId: 'kp-system-et' },
+      expect.objectContaining({
+        $set: expect.objectContaining({
+          reviewStatus: 'READY_FOR_REVIEW',
+        }),
+      }),
+      expect.any(Object),
+    )
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'KNOWLEDGE_PACK_REVIEW_STATUS_UPDATED',
+      diff: expect.objectContaining({
+        reviewAction: 'SUBMIT_FOR_REVIEW',
+        reviewStatus: {
+          from: 'DRAFT',
+          to: 'READY_FOR_REVIEW',
+        },
+      }),
+    }))
+  })
+
+  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/versions/:versionId/review fails closed when review audit cannot persist', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const draftPack = makeKnowledgePack({
+      packId: 'kp-system-et',
+      packCategory: 'FRAMEWORK',
+      packType: 'SYSTEM',
+      packKey: 'et',
+      label: 'Enterprise Technology',
+      status: 'VALIDATED',
+      sourceMetadata: {
+        importMode: 'SOURCE_DOCUMENT_IMPORT_DRAFT',
+        sourceStatus: 'SOURCE_DOCUMENT_PRESENT',
+      },
+      authoringMode: 'IMPORT_SOURCE_DOCUMENT',
+      reviewStatus: 'DRAFT',
+      latestVersionId: 'kpv-system-et-5-0-0-global',
+      latestSemanticVersion: '5.0.0',
+    })
+    const versionDoc = makeKnowledgePackVersionDoc({
+      versionId: 'kpv-system-et-5-0-0-global',
+      packId: 'kp-system-et',
+      packCategory: 'FRAMEWORK',
+      packType: 'SYSTEM',
+      packKey: 'et',
+      semanticVersion: '5.0.0',
+      status: 'VALIDATED',
+      validationSummary: { status: 'PASSED' },
+      authoringMode: 'IMPORT_SOURCE_DOCUMENT',
+      reviewStatus: 'DRAFT',
+    })
+    KnowledgePack.findOne.mockReturnValueOnce(buildFindOneChain(draftPack))
+    KnowledgePackVersion.findOne.mockReturnValueOnce(buildVersionFindOneChain(versionDoc))
+    AuditLog.createLog.mockImplementation(async (payload) => {
+      if (payload.action === 'KNOWLEDGE_PACK_REVIEW_STATUS_UPDATED') {
+        throw new Error('audit unavailable')
+      }
+      return {}
+    })
+
+    const res = await request
+      .post('/api/v1/super-admin/outcome-studio/knowledge-packs/kp-system-et/versions/kpv-system-et-5-0-0-global/review')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ reviewStatus: 'READY_FOR_REVIEW' })
+
+    expect(res.status).toBe(500)
+    expect(res.body.error.code).toBe('OUTCOME_KNOWLEDGE_PACK_AUDIT_FAILED')
+    expect(res.body.error.details.reason).toBe('AUDIT_PERSISTENCE_FAILED')
+    expect(versionDoc.reviewStatus).toBe('DRAFT')
+    expect(KnowledgePackVersion.updateOne).toHaveBeenCalledWith(
+      { versionId: 'kpv-system-et-5-0-0-global' },
+      { $set: { reviewStatus: 'DRAFT' } },
+    )
+    expect(KnowledgePack.updateOne).toHaveBeenCalledWith(
+      { packId: 'kp-system-et' },
+      { $set: { reviewStatus: 'DRAFT' } },
+    )
+  })
+
+  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/versions/:versionId/review uses transaction rollback when review audit cannot persist', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const draftPack = makeKnowledgePack({
+      packId: 'kp-system-et',
+      packCategory: 'FRAMEWORK',
+      packType: 'SYSTEM',
+      packKey: 'et',
+      label: 'Enterprise Technology',
+      status: 'VALIDATED',
+      sourceMetadata: {
+        importMode: 'SOURCE_DOCUMENT_IMPORT_DRAFT',
+        sourceStatus: 'SOURCE_DOCUMENT_PRESENT',
+      },
+      authoringMode: 'IMPORT_SOURCE_DOCUMENT',
+      reviewStatus: 'DRAFT',
+      latestVersionId: 'kpv-system-et-5-0-0-global',
+      latestSemanticVersion: '5.0.0',
+    })
+    const versionDoc = makeKnowledgePackVersionDoc({
+      versionId: 'kpv-system-et-5-0-0-global',
+      packId: 'kp-system-et',
+      packCategory: 'FRAMEWORK',
+      packType: 'SYSTEM',
+      packKey: 'et',
+      semanticVersion: '5.0.0',
+      status: 'VALIDATED',
+      validationSummary: { status: 'PASSED' },
+      authoringMode: 'IMPORT_SOURCE_DOCUMENT',
+      reviewStatus: 'DRAFT',
+    })
+    const rollbackSession = buildRollbackSession([versionDoc])
+    setMongooseReadyState(1)
+    startSessionSpy.mockResolvedValueOnce(rollbackSession)
+    KnowledgePack.findOne.mockReturnValueOnce(buildFindOneChain(draftPack))
+    KnowledgePackVersion.findOne.mockReturnValueOnce(buildVersionFindOneChain(versionDoc))
+    AuditLog.createLog.mockImplementation(async (payload) => {
+      if (payload.action === 'KNOWLEDGE_PACK_REVIEW_STATUS_UPDATED') {
+        throw new Error('audit unavailable')
+      }
+      return {}
+    })
+
+    const res = await request
+      .post('/api/v1/super-admin/outcome-studio/knowledge-packs/kp-system-et/versions/kpv-system-et-5-0-0-global/review')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ reviewStatus: 'READY_FOR_REVIEW' })
+
+    expect(res.status).toBe(500)
+    expect(res.body.error.code).toBe('OUTCOME_KNOWLEDGE_PACK_AUDIT_FAILED')
+    expect(startSessionSpy).toHaveBeenCalled()
+    expect(rollbackSession.withTransaction).toHaveBeenCalled()
+    expect(rollbackSession.endSession).toHaveBeenCalled()
+    expect(versionDoc.save).toHaveBeenCalledWith({ session: rollbackSession })
+    expect(KnowledgePack.updateOne).toHaveBeenCalledWith(
+      { packId: 'kp-system-et' },
+      expect.objectContaining({
+        $set: expect.objectContaining({
+          reviewStatus: 'READY_FOR_REVIEW',
+        }),
+      }),
+      expect.objectContaining({ session: rollbackSession }),
+    )
+    expect(AuditLog.createLog).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'KNOWLEDGE_PACK_REVIEW_STATUS_UPDATED' }),
+      expect.objectContaining({ session: rollbackSession }),
+    )
+    expect(KnowledgePackVersion.updateOne).not.toHaveBeenCalled()
+    expect(versionDoc.reviewStatus).toBe('DRAFT')
+  })
+
+  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/versions/:versionId/activate rejects imported drafts before review approval', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const extractedText = 'Enterprise Technology methodology principles, capability model, governance, and architecture guidance.'
+    const draftPack = makeKnowledgePack({
+      packId: 'kp-system-et',
+      packCategory: 'FRAMEWORK',
+      packType: 'SYSTEM',
+      packKey: 'et',
+      label: 'Enterprise Technology',
+      status: 'VALIDATED',
+      sourceMetadata: {
+        importMode: 'SOURCE_DOCUMENT_IMPORT_DRAFT',
+        sourceStatus: 'SOURCE_DOCUMENT_PRESENT',
+        sourceFilename: 'Enterprise Technology.md',
+      },
+      authoringMode: 'IMPORT_SOURCE_DOCUMENT',
+      reviewStatus: 'READY_FOR_REVIEW',
+      latestVersionId: 'kpv-system-et-5-0-0-global',
+      latestSemanticVersion: '5.0.0',
+    })
+    const versionDoc = makeKnowledgePackVersionDoc({
+      versionId: 'kpv-system-et-5-0-0-global',
+      packId: 'kp-system-et',
+      packCategory: 'FRAMEWORK',
+      packType: 'SYSTEM',
+      packKey: 'et',
+      semanticVersion: '5.0.0',
+      status: 'VALIDATED',
+      content: extractedText,
+      contentHash: buildTestContentHash(extractedText),
+      contentFormat: 'MARKDOWN',
+      sourceFilename: 'Enterprise Technology.md',
+      sourceMetadata: {
+        sourceStatus: 'SOURCE_DOCUMENT_PRESENT',
+        sourceFilename: 'Enterprise Technology.md',
+        sourceDocumentId: 'kpsrc-system-et-5-0-0-source-hash',
+        sourceHash: 'sha256:source-hash',
+        contentPersisted: true,
+      },
+      sourceDocuments: [
+        {
+          sourceDocumentId: 'kpsrc-system-et-5-0-0-source-hash',
+          filename: 'Enterprise Technology.md',
+          fileExtension: 'md',
+          sourceHash: 'sha256:source-hash',
+        },
+      ],
+      validationSummary: { status: 'PASSED' },
+      authoringMode: 'IMPORT_SOURCE_DOCUMENT',
+      reviewStatus: 'READY_FOR_REVIEW',
+    })
+    KnowledgePack.findOne.mockReturnValueOnce(buildFindOneChain(draftPack))
+    KnowledgePackVersion.findOne.mockReturnValueOnce(buildVersionFindOneChain(versionDoc))
+
+    const res = await request
+      .post('/api/v1/super-admin/outcome-studio/knowledge-packs/kp-system-et/versions/kpv-system-et-5-0-0-global/activate')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ scopeType: 'GLOBAL' })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('PACK_VERSION_REVIEW_REQUIRED')
+    expect(KnowledgePackActivation.updateMany).not.toHaveBeenCalled()
+    expect(KnowledgePackActivation.prototype.save).not.toHaveBeenCalled()
+  })
+
+  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/versions/:versionId/activate activates approved imported source-document drafts', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const extractedText = 'Enterprise Technology methodology principles, capability model, governance, and architecture guidance.'
+    const draftPack = makeKnowledgePack({
+      packId: 'kp-system-et',
+      packCategory: 'FRAMEWORK',
+      packType: 'SYSTEM',
+      packKey: 'et',
+      label: 'Enterprise Technology',
+      status: 'VALIDATED',
+      sourceMetadata: {
+        importMode: 'SOURCE_DOCUMENT_IMPORT_DRAFT',
+        sourceStatus: 'SOURCE_DOCUMENT_PRESENT',
+        sourceFilename: 'Enterprise Technology.md',
+      },
+      authoringMode: 'IMPORT_SOURCE_DOCUMENT',
+      reviewStatus: 'APPROVED',
+      latestVersionId: 'kpv-system-et-5-0-0-global',
+      latestSemanticVersion: '5.0.0',
+    })
+    const versionDoc = makeKnowledgePackVersionDoc({
+      versionId: 'kpv-system-et-5-0-0-global',
+      packId: 'kp-system-et',
+      packCategory: 'FRAMEWORK',
+      packType: 'SYSTEM',
+      packKey: 'et',
+      semanticVersion: '5.0.0',
+      status: 'VALIDATED',
+      content: extractedText,
+      contentHash: buildTestContentHash(extractedText),
+      contentFormat: 'MARKDOWN',
+      sourceFilename: 'Enterprise Technology.md',
+      sourceMetadata: {
+        sourceStatus: 'SOURCE_DOCUMENT_PRESENT',
+        sourceFilename: 'Enterprise Technology.md',
+        sourceDocumentId: 'kpsrc-system-et-5-0-0-source-hash',
+        sourceHash: 'sha256:source-hash',
+        contentPersisted: true,
+      },
+      sourceDocuments: [
+        {
+          sourceDocumentId: 'kpsrc-system-et-5-0-0-source-hash',
+          filename: 'Enterprise Technology.md',
+          fileExtension: 'md',
+          sourceHash: 'sha256:source-hash',
+        },
+      ],
+      validationSummary: { status: 'PASSED' },
+      authoringMode: 'IMPORT_SOURCE_DOCUMENT',
+      reviewStatus: 'APPROVED',
+    })
+    KnowledgePack.findOne.mockReturnValueOnce(buildFindOneChain(draftPack))
+    KnowledgePackVersion.findOne.mockReturnValueOnce(buildVersionFindOneChain(versionDoc))
+
+    const res = await request
+      .post('/api/v1/super-admin/outcome-studio/knowledge-packs/kp-system-et/versions/kpv-system-et-5-0-0-global/activate')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ scopeType: 'GLOBAL' })
+
+    expect(res.status).toBe(200)
+    expect(versionDoc.status).toBe('ACTIVE')
+    expect(res.body.data.activation).toEqual(expect.objectContaining({
+      packId: 'kp-system-et',
+      packCategory: 'FRAMEWORK',
+      packType: 'SYSTEM',
+      packKey: 'et',
+      status: 'ACTIVE',
+    }))
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'OUTCOME_KNOWLEDGE_PACK_ACTIVATED',
+    }))
+    expect(JSON.stringify(res.body)).not.toContain(extractedText)
   })
 
   test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/versions/:versionId/activate rejects draft versions', async () => {

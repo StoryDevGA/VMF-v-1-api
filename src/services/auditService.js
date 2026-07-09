@@ -106,6 +106,7 @@ export const AUDIT_ACTIONS = Object.freeze({
   OUTCOME_KNOWLEDGE_PACK_VALIDATION_FAILED: 'OUTCOME_KNOWLEDGE_PACK_VALIDATION_FAILED',
   OUTCOME_KNOWLEDGE_PACK_ACTIVATED: 'OUTCOME_KNOWLEDGE_PACK_ACTIVATED',
   KNOWLEDGE_PACK_CONTENT_PREVIEWED: 'KNOWLEDGE_PACK_CONTENT_PREVIEWED',
+  KNOWLEDGE_PACK_REVIEW_STATUS_UPDATED: 'KNOWLEDGE_PACK_REVIEW_STATUS_UPDATED',
   KNOWLEDGE_PACK_MANIFEST_CREATED: 'KNOWLEDGE_PACK_MANIFEST_CREATED',
   KNOWLEDGE_PACK_MANIFEST_UPDATED: 'KNOWLEDGE_PACK_MANIFEST_UPDATED',
   KNOWLEDGE_PACK_MANIFEST_CLONED: 'KNOWLEDGE_PACK_MANIFEST_CLONED',
@@ -504,6 +505,8 @@ const buildAuditSummary = ({ action, resourceType, resourceId, diff, display }) 
       return clampSummary(`${actorLabel} imported starter Knowledge Pack ${targetLabel}`)
     case AUDIT_ACTIONS.KNOWLEDGE_PACK_CONTENT_PREVIEWED:
       return clampSummary(`${actorLabel} previewed Knowledge Pack content ${targetLabel}`)
+    case AUDIT_ACTIONS.KNOWLEDGE_PACK_REVIEW_STATUS_UPDATED:
+      return clampSummary(`${actorLabel} updated Knowledge Pack review status ${targetLabel}`)
     case AUDIT_ACTIONS.KNOWLEDGE_PACK_MANIFEST_CREATED:
       return clampSummary(`${actorLabel} created Knowledge Pack manifest ${targetLabel}`)
     case AUDIT_ACTIONS.KNOWLEDGE_PACK_MANIFEST_UPDATED:

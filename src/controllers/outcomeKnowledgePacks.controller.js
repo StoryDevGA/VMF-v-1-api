@@ -11,6 +11,7 @@ import {
   previewOutcomeKnowledgePackVersionContent,
   previewOutcomeKnowledgePackResolution,
   rollbackOutcomeKnowledgePack,
+  updateOutcomeKnowledgePackVersionReview,
   validateOutcomeKnowledgePackVersion,
 } from '../services/outcomeKnowledgePackRegistryService.js'
 import {
@@ -230,6 +231,21 @@ export const validateKnowledgePackVersion = async (req, res) => {
 export const activateKnowledgePackVersion = async (req, res) => {
   try {
     const data = await activateOutcomeKnowledgePackVersion({
+      packId: req.params.packId,
+      versionId: req.params.versionId,
+      body: req.body,
+      actorUserId: req.context?.userId || req.userId,
+      auditRequest: req,
+    })
+    res.status(200).json({ data })
+  } catch (err) {
+    sendControllerError(res, req, err)
+  }
+}
+
+export const updateKnowledgePackVersionReview = async (req, res) => {
+  try {
+    const data = await updateOutcomeKnowledgePackVersionReview({
       packId: req.params.packId,
       versionId: req.params.versionId,
       body: req.body,

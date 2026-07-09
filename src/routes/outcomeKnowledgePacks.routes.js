@@ -1,4 +1,4 @@
-import { Router } from 'express'
+import express, { Router } from 'express'
 import authJwt from '../middleware/authJwt.js'
 import loadScopes from '../middleware/loadScopes.js'
 import { requirePlatformRole } from '../middleware/authorize.js'
@@ -23,6 +23,7 @@ import {
   previewKnowledgePackResolution,
   rollbackKnowledgePack,
   updateKnowledgePackManifestController,
+  updateKnowledgePackVersionReview,
   validateKnowledgePackVersion,
 } from '../controllers/outcomeKnowledgePacks.controller.js'
 import {
@@ -42,10 +43,12 @@ import {
   validateKnowledgePackVersionParams,
   validateListKnowledgePackManifests,
   validateListKnowledgePacks,
+  validateUpdateKnowledgePackReview,
   validateUpdateKnowledgePackManifest,
 } from '../validators/outcomeKnowledgePacks.validator.js'
 
 const router = Router()
+const sourceDocumentImportJsonParser = express.json({ limit: '15mb' })
 
 router.use(authJwt, loadScopes, requirePlatformRole('SUPER_ADMIN'))
 
@@ -59,12 +62,18 @@ router.post('/manifests/:manifestId/clone', validateKnowledgePackManifestId, val
 router.put('/manifests/:manifestId', validateKnowledgePackManifestId, validateUpdateKnowledgePackManifest, updateKnowledgePackManifestController)
 router.get('/manifests/:manifestId', validateKnowledgePackManifestId, getKnowledgePackManifestController)
 router.get('/resolution-preview', validateKnowledgePackResolutionPreview, previewKnowledgePackResolution)
-router.post('/source-document-import', validateImportSourceDocumentDraft, importKnowledgePackSourceDocumentDraft)
+router.post(
+  '/source-document-import',
+  sourceDocumentImportJsonParser,
+  validateImportSourceDocumentDraft,
+  importKnowledgePackSourceDocumentDraft,
+)
 router.post('/:packId/starter-import', validateKnowledgePackId, validateImportKnowledgePackStarterVersion, importKnowledgePackStarterVersion)
 router.post('/:packId/versions', validateKnowledgePackId, validateCreateKnowledgePackVersion, createKnowledgePackVersion)
 router.get('/:packId/versions/:versionId/content-preview', validateKnowledgePackVersionParams, previewKnowledgePackVersionContent)
 router.get('/:packId/versions/:versionId', validateKnowledgePackVersionParams, getKnowledgePackVersion)
 router.post('/:packId/versions/:versionId/validate', validateKnowledgePackVersionParams, validateKnowledgePackVersionActionBody, validateKnowledgePackVersion)
+router.post('/:packId/versions/:versionId/review', validateKnowledgePackVersionParams, validateUpdateKnowledgePackReview, updateKnowledgePackVersionReview)
 router.post('/:packId/versions/:versionId/activate', validateKnowledgePackVersionParams, validateActivateKnowledgePackVersion, activateKnowledgePackVersion)
 router.post('/:packId/versions/:versionId/deprecate', validateKnowledgePackVersionParams, validateKnowledgePackVersionActionBody, deprecateKnowledgePackVersion)
 router.post('/:packId/versions/:versionId/disable', validateKnowledgePackVersionParams, validateKnowledgePackVersionActionBody, disableKnowledgePackVersion)

@@ -35,6 +35,10 @@ import {
 import { resolveKnowledgePackCategory } from '../constants/workspaceGovernance.js'
 import { escapeRegex } from '../utils/controllerUtils.js'
 import auditService from './auditService.js'
+import {
+  extractKnowledgePackSourceDocumentText,
+  SOURCE_DOCUMENT_EXTRACTION_ERRORS,
+} from './knowledgePackSourceDocumentExtractionService.js'
 
 const normalizeText = (value) => String(value || '').trim()
 const normalizeToken = (value) => normalizeText(value).toUpperCase()
@@ -46,6 +50,9 @@ export const OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS = Object.freeze({
   AUDIT_PERSISTENCE_FAILED: 'AUDIT_PERSISTENCE_FAILED',
   PACK_SOURCE_NOT_AVAILABLE: 'PACK_SOURCE_NOT_AVAILABLE',
   PACK_SOURCE_FORMAT_UNSUPPORTED: 'PACK_SOURCE_FORMAT_UNSUPPORTED',
+  PACK_SOURCE_EXTRACTION_REQUIRED: 'PACK_SOURCE_EXTRACTION_REQUIRED',
+  PACK_SOURCE_EXTRACTION_FAILED: 'PACK_SOURCE_EXTRACTION_FAILED',
+  PACK_SOURCE_TEXT_REQUIRED: 'PACK_SOURCE_TEXT_REQUIRED',
   PACK_NOT_FOUND: 'PACK_NOT_FOUND',
   PACK_ACTIVE_ACTIVATION_NOT_FOUND: 'PACK_ACTIVE_ACTIVATION_NOT_FOUND',
   PACK_VERSION_ALREADY_EXISTS: 'PACK_VERSION_ALREADY_EXISTS',
@@ -53,11 +60,13 @@ export const OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS = Object.freeze({
   PACK_VERSION_LIFECYCLE_CONFLICT: 'PACK_VERSION_LIFECYCLE_CONFLICT',
   PACK_VERSION_CONTENT_NOT_AVAILABLE: 'PACK_VERSION_CONTENT_NOT_AVAILABLE',
   PACK_VERSION_REQUIRES_VALIDATED: 'PACK_VERSION_REQUIRES_VALIDATED',
+  PACK_VERSION_REVIEW_REQUIRED: 'PACK_VERSION_REVIEW_REQUIRED',
   PACK_VERSION_VALIDATION_FAILED: 'PACK_VERSION_VALIDATION_FAILED',
   UNSUPPORTED_SCOPE_TYPE: 'UNSUPPORTED_SCOPE_TYPE',
 })
 
 const STARTER_SOURCE_STATUS = 'SOURCE_ONLY'
+const SOURCE_DOCUMENT_PRESENT_STATUS = 'SOURCE_DOCUMENT_PRESENT'
 const SOURCE_VALIDATION_MODE = 'SOURCE_ONLY_TEXT_VALIDATION'
 const SUPPORTED_SOURCE_PACK_KEYS = new Set(
   OUTCOME_STUDIO_REQUIRED_PACKS
@@ -114,7 +123,7 @@ const SOURCE_DOCUMENT_FORMATS_BY_EXTENSION = Object.freeze({
   pdf: OUTCOME_KNOWLEDGE_PACK_CONTENT_FORMATS.PDF,
 })
 
-const TEXT_SOURCE_DOCUMENT_FORMATS = new Set([
+const CLIENT_TEXT_SOURCE_DOCUMENT_FORMATS = new Set([
   OUTCOME_KNOWLEDGE_PACK_CONTENT_FORMATS.JSON,
   OUTCOME_KNOWLEDGE_PACK_CONTENT_FORMATS.MARKDOWN,
   OUTCOME_KNOWLEDGE_PACK_CONTENT_FORMATS.YAML,
@@ -225,6 +234,12 @@ const normalizeSourceDocumentReference = (sourceDocument = {}) => {
   }
 }
 
+const normalizeIdSegment = (value) =>
+  normalizeText(value)
+    .replace(/[^a-z0-9-]+/gi, '-')
+    .replace(/^-+|-+$/g, '')
+    .toLowerCase()
+
 const buildSourceDocumentImportHash = ({ extractedText, sourceDocument }) => {
   const sourceHash = normalizeText(sourceDocument?.sourceHash)
   if (sourceHash) return sourceHash
@@ -237,6 +252,42 @@ const buildSourceDocumentImportHash = ({ extractedText, sourceDocument }) => {
     contentType: normalizeText(sourceDocument?.contentType),
     fileExtension: getFileExtension(sourceDocument),
   }))
+}
+
+const buildSourceDocumentId = ({
+  packDefinition,
+  semanticVersion,
+  sourceDocument,
+  sourceHash,
+} = {}) => {
+  const existingSourceDocumentId = normalizeText(sourceDocument?.sourceDocumentId)
+  if (existingSourceDocumentId) return existingSourceDocumentId
+
+  const hashSegment = normalizeLowerKey(sourceHash)
+    .replace(/^sha256:/, '')
+    .replace(/[^a-f0-9]/g, '')
+    .slice(0, 16)
+  const fallbackHashSegment = crypto
+    .createHash('sha256')
+    .update(JSON.stringify({
+      packType: packDefinition?.packType,
+      packKey: packDefinition?.packKey,
+      semanticVersion,
+      filename: sourceDocument?.filename,
+    }))
+    .digest('hex')
+    .slice(0, 16)
+
+  return [
+    'kpsrc',
+    normalizeIdSegment(packDefinition?.packType || 'knowledge-pack'),
+    normalizeIdSegment(packDefinition?.packKey || 'source'),
+    normalizeIdSegment(semanticVersion || 'draft'),
+    hashSegment || fallbackHashSegment,
+  ]
+    .filter(Boolean)
+    .join('-')
+    .slice(0, 180)
 }
 
 const findRequiredPackDefinition = (packId) => {
@@ -377,6 +428,10 @@ const ensureSourceDocumentDraftPackRecord = async ({
       updatedBy: actorUserId || null,
       sourceMetadata: {
         importMode: 'SOURCE_DOCUMENT_IMPORT_DRAFT',
+        sourceStatus: SOURCE_DOCUMENT_PRESENT_STATUS,
+        sourceFilename: packDefinition.sourceDocument?.filename || '',
+        sourceDocumentId: packDefinition.sourceDocument?.sourceDocumentId || '',
+        sourceHash: packDefinition.sourceDocument?.sourceHash || '',
         sourceDocument: packDefinition.sourceDocument,
       },
     },
@@ -536,6 +591,104 @@ const buildStarterPackValidationSummary = ({ packDefinition, content }) => {
   const typeChecks = typeChecksByPackType[packDefinition.packType] || []
 
   const checks = [...commonChecks, ...typeChecks]
+  const issues = checks
+    .filter((check) => check.status === 'FAILED')
+    .map((check) => ({
+      code: check.code,
+      message: check.message,
+    }))
+
+  return {
+    status: issues.length === 0 ? 'PASSED' : 'FAILED',
+    mode: SOURCE_VALIDATION_MODE,
+    checkedAt: new Date().toISOString(),
+    checks,
+    issues,
+  }
+}
+
+const getSourceDocumentHash = ({ version = {}, packRecord = {} } = {}) => {
+  const sourceDocuments = Array.isArray(version.sourceDocuments) ? version.sourceDocuments : []
+  const primarySourceDocument = sourceDocuments[0] || {}
+  return normalizeText(
+    primarySourceDocument.sourceHash
+      || version.sourceMetadata?.sourceHash
+      || version.sourceMetadata?.sourceDocument?.sourceHash
+      || packRecord.sourceMetadata?.sourceHash
+      || packRecord.sourceMetadata?.sourceDocument?.sourceHash,
+  )
+}
+
+const getSourceDocumentId = ({ version = {}, packRecord = {} } = {}) => {
+  const sourceDocuments = Array.isArray(version.sourceDocuments) ? version.sourceDocuments : []
+  const primarySourceDocument = sourceDocuments[0] || {}
+  return normalizeText(
+    primarySourceDocument.sourceDocumentId
+      || version.sourceMetadata?.sourceDocumentId
+      || version.sourceMetadata?.sourceDocument?.sourceDocumentId
+      || packRecord.sourceMetadata?.sourceDocumentId
+      || packRecord.sourceMetadata?.sourceDocument?.sourceDocumentId,
+  )
+}
+
+const buildSourceDocumentDraftValidationSummary = ({
+  packDefinition,
+  packRecord,
+  version,
+}) => {
+  const text = typeof version?.content === 'string'
+    ? version.content
+    : JSON.stringify(version?.content ?? '')
+  const expectedContentHash = buildContentHash(text)
+  const sourceFilename = normalizeText(
+    version?.sourceFilename
+      || version?.sourceMetadata?.sourceFilename
+      || packDefinition?.sourceFilename,
+  )
+  const sourceStatus = normalizeToken(
+    version?.sourceMetadata?.sourceStatus
+      || packRecord?.sourceMetadata?.sourceStatus,
+  )
+  const sourceHash = getSourceDocumentHash({ version, packRecord })
+  const sourceDocumentId = getSourceDocumentId({ version, packRecord })
+  const contentHash = normalizeText(version?.contentHash)
+
+  const checks = [
+    buildValidationCheck({
+      code: 'PACK_METADATA_PRESENT',
+      passed: Boolean(
+        normalizeToken(packDefinition?.packType)
+          && normalizeLowerKey(packDefinition?.packKey)
+          && normalizeText(packDefinition?.label),
+      ),
+      message: 'Draft pack must include governed pack type, key, and label.',
+    }),
+    buildValidationCheck({
+      code: 'SOURCE_DOCUMENT_PRESENT',
+      passed: Boolean(
+        sourceStatus === SOURCE_DOCUMENT_PRESENT_STATUS
+          && sourceFilename
+          && sourceDocumentId,
+      ),
+      message: 'Draft pack must reference the imported source document.',
+    }),
+    buildValidationCheck({
+      code: 'SOURCE_HASH_PRESENT',
+      passed: Boolean(sourceHash),
+      message: 'Draft pack must retain the source document hash.',
+    }),
+    buildValidationCheck({
+      code: 'SOURCE_TEXT_PERSISTED',
+      passed: Boolean(text.trim() && version?.sourceMetadata?.contentPersisted === true),
+      message: 'Draft pack must have persisted extracted source text before validation.',
+    }),
+    buildValidationCheck({
+      code: 'CONTENT_HASH_MATCH',
+      passed: Boolean(contentHash && contentHash === expectedContentHash),
+      message: 'Persisted content hash must match the extracted source text.',
+    }),
+  ]
+
   const issues = checks
     .filter((check) => check.status === 'FAILED')
     .map((check) => ({
@@ -1277,6 +1430,154 @@ const buildPackLookup = (packId) => {
   return { $or: clauses }
 }
 
+const packRecordMatchesLookup = (packRecord, packId) => {
+  if (!packRecord) return false
+  const normalizedPackId = normalizeText(packId)
+  const normalizedLookupKey = normalizeLowerKey(normalizedPackId)
+  return normalizeLowerKey(packRecord.packId) === normalizedLookupKey
+    || normalizeLowerKey(packRecord.packKey) === normalizedLookupKey
+    || normalizeText(packRecord._id) === normalizedPackId
+    || normalizeText(packRecord.id) === normalizedPackId
+}
+
+const buildPersistedPackDefinition = (packRecord = {}) => ({
+  packCategory: normalizePackCategory(packRecord.packCategory, packRecord.packType),
+  purposeCategory: normalizeToken(packRecord.purposeCategory || KNOWLEDGE_PACK_PURPOSE_CATEGORIES.SYSTEM),
+  packType: normalizeToken(packRecord.packType),
+  packKey: normalizeLowerKey(packRecord.packKey),
+  label: normalizeText(packRecord.label || packRecord.packKey),
+  sourceFilename: normalizeText(
+    packRecord.sourceFilename
+      || packRecord.sourceMetadata?.sourceFilename
+      || packRecord.sourceMetadata?.sourceDocument?.filename,
+  ),
+})
+
+const isImportedSourceDocumentPack = (packRecord = {}) => (
+  normalizeToken(packRecord.authoringMode) === KNOWLEDGE_PACK_AUTHORING_MODES.IMPORT_SOURCE_DOCUMENT
+    || normalizeToken(packRecord.sourceMetadata?.importMode) === 'SOURCE_DOCUMENT_IMPORT_DRAFT'
+    || normalizeToken(packRecord.sourceMetadata?.sourceStatus) === SOURCE_DOCUMENT_PRESENT_STATUS
+)
+
+const resolveKnowledgePackContentPreviewContext = async ({ packId } = {}) => {
+  const starterPackDefinition = findRequiredPackDefinition(packId)
+  if (starterPackDefinition) {
+    const requiredPackKey = `${starterPackDefinition.packType}:${starterPackDefinition.packKey}`
+    if (!SUPPORTED_SOURCE_PACK_KEYS.has(requiredPackKey)) {
+      throw createKnowledgePackError({
+        status: 409,
+        code: 'CONFLICT',
+        message: 'This Outcome Studio knowledge pack does not have an importable starter source in the current bundle.',
+        reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_SOURCE_NOT_AVAILABLE,
+        details: {
+          packType: starterPackDefinition.packType,
+          packKey: starterPackDefinition.packKey,
+        },
+      })
+    }
+
+    const canonicalPackId = buildKnowledgePackId(starterPackDefinition)
+    const packRecord = await KnowledgePack.findOne({ packId: canonicalPackId }).lean()
+    return {
+      canonicalPackId,
+      packDefinition: starterPackDefinition,
+      packRecord: packRecordMatchesLookup(packRecord, canonicalPackId) ? packRecord : null,
+    }
+  }
+
+  const packRecord = await KnowledgePack.findOne(buildPackLookup(packId)).lean()
+  if (!packRecord || !packRecordMatchesLookup(packRecord, packId)) {
+    throw createKnowledgePackError({
+      status: 404,
+      code: 'NOT_FOUND',
+      message: 'Outcome Studio knowledge pack was not found.',
+      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_NOT_FOUND,
+      details: { packId },
+    })
+  }
+
+  if (!isImportedSourceDocumentPack(packRecord)) {
+    throw createKnowledgePackError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'This Outcome Studio knowledge pack does not have source-document content available for preview.',
+      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_SOURCE_NOT_AVAILABLE,
+      details: {
+        packId: normalizeText(packRecord.packId),
+        packType: normalizeToken(packRecord.packType),
+        packKey: normalizeLowerKey(packRecord.packKey),
+      },
+    })
+  }
+
+  return {
+    canonicalPackId: normalizeText(packRecord.packId),
+    packDefinition: buildPersistedPackDefinition(packRecord),
+    packRecord,
+  }
+}
+
+const resolveKnowledgePackAuthoringContext = async ({ packId, session = null } = {}) => {
+  const starterPackDefinition = findRequiredPackDefinition(packId)
+  if (starterPackDefinition) {
+    const requiredPackKey = `${starterPackDefinition.packType}:${starterPackDefinition.packKey}`
+    if (!SUPPORTED_SOURCE_PACK_KEYS.has(requiredPackKey)) {
+      throw createKnowledgePackError({
+        status: 409,
+        code: 'CONFLICT',
+        message: 'This Outcome Studio knowledge pack does not have an importable starter source in the current bundle.',
+        reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_SOURCE_NOT_AVAILABLE,
+        details: {
+          packType: starterPackDefinition.packType,
+          packKey: starterPackDefinition.packKey,
+        },
+      })
+    }
+
+    return {
+      canonicalPackId: buildKnowledgePackId(starterPackDefinition),
+      packDefinition: starterPackDefinition,
+      packRecord: null,
+      isImportedSourceDocument: false,
+      isStarterSource: true,
+    }
+  }
+
+  const packRecordQuery = KnowledgePack.findOne(buildPackLookup(packId))
+  const packRecord = await resolveLeanQuery(withOptionalSession(packRecordQuery, session))
+  if (!packRecord || !packRecordMatchesLookup(packRecord, packId)) {
+    throw createKnowledgePackError({
+      status: 404,
+      code: 'NOT_FOUND',
+      message: 'Outcome Studio knowledge pack was not found.',
+      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_NOT_FOUND,
+      details: { packId },
+    })
+  }
+
+  if (!isImportedSourceDocumentPack(packRecord)) {
+    throw createKnowledgePackError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'This Outcome Studio knowledge pack does not use the imported source-document authoring workflow.',
+      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_SOURCE_NOT_AVAILABLE,
+      details: {
+        packId: normalizeText(packRecord.packId),
+        packType: normalizeToken(packRecord.packType),
+        packKey: normalizeLowerKey(packRecord.packKey),
+      },
+    })
+  }
+
+  return {
+    canonicalPackId: normalizeText(packRecord.packId),
+    packDefinition: buildPersistedPackDefinition(packRecord),
+    packRecord,
+    isImportedSourceDocument: true,
+    isStarterSource: false,
+  }
+}
+
 export const getOutcomeKnowledgePack = async ({ packId } = {}) => {
   const pack = await KnowledgePack.findOne(buildPackLookup(packId)).lean()
 
@@ -1425,13 +1726,66 @@ export const importOutcomeKnowledgePackSourceDocumentDraft = async ({
     })
   }
 
-  const sourceDocument = normalizeSourceDocumentReference(body.sourceDocument)
+  const sourceDocumentPayload = body.sourceDocument || {}
+  const sourceDocumentInput = normalizeSourceDocumentReference(sourceDocumentPayload)
   const contentFormat = assertSupportedSourceDocumentFormat({
     contentFormat: body.contentFormat,
-    sourceDocument,
+    sourceDocument: sourceDocumentInput,
   })
-  const extractedText = normalizeText(body.extractedText)
-  const shouldPersistContent = TEXT_SOURCE_DOCUMENT_FORMATS.has(contentFormat) && extractedText
+  if (CLIENT_TEXT_SOURCE_DOCUMENT_FORMATS.has(contentFormat) && !normalizeText(body.extractedText)) {
+    throw createKnowledgePackError({
+      status: 422,
+      code: 'VALIDATION_FAILED',
+      message: 'Extracted source text is required before a Knowledge Pack draft can be created.',
+      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_SOURCE_TEXT_REQUIRED,
+      details: {
+        contentFormat,
+        filename: sourceDocumentInput.filename,
+      },
+    })
+  }
+  let extraction
+  try {
+    extraction = await extractKnowledgePackSourceDocumentText({
+      contentFormat,
+      extractedText: body.extractedText,
+      sourceDocument: sourceDocumentPayload,
+    })
+  } catch (err) {
+    const isExtractionRequired = err?.code === SOURCE_DOCUMENT_EXTRACTION_ERRORS.EXTRACTION_REQUIRED
+    const isNoReadableText = err?.code === SOURCE_DOCUMENT_EXTRACTION_ERRORS.NO_READABLE_TEXT
+    throw createKnowledgePackError({
+      status: 422,
+      code: 'VALIDATION_FAILED',
+      message: isExtractionRequired
+        ? 'This Knowledge Pack import path requires deterministic source document extraction before draft creation.'
+        : 'Source document text could not be extracted deterministically for Knowledge Pack draft import.',
+      reason: isExtractionRequired
+        ? OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_SOURCE_EXTRACTION_REQUIRED
+        : OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_SOURCE_EXTRACTION_FAILED,
+      details: {
+        contentFormat,
+        filename: sourceDocumentInput.filename,
+        extractionError: isNoReadableText
+          ? SOURCE_DOCUMENT_EXTRACTION_ERRORS.NO_READABLE_TEXT
+          : err?.code || SOURCE_DOCUMENT_EXTRACTION_ERRORS.EXTRACTION_FAILED,
+        supportedFormats: Object.values(OUTCOME_KNOWLEDGE_PACK_CONTENT_FORMATS),
+      },
+    })
+  }
+  const extractedText = normalizeText(extraction.text)
+  if (!extractedText) {
+    throw createKnowledgePackError({
+      status: 422,
+      code: 'VALIDATION_FAILED',
+      message: 'Extracted source text is required before a Knowledge Pack draft can be created.',
+      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_SOURCE_TEXT_REQUIRED,
+      details: {
+        contentFormat,
+        filename: sourceDocumentInput.filename,
+      },
+    })
+  }
   const scope = buildSourceImportScope({
     visibility: body.visibility,
     customerId: body.customerId,
@@ -1448,7 +1802,7 @@ export const importOutcomeKnowledgePackSourceDocumentDraft = async ({
     }),
     sourceAuthority: normalizeText(body.sourceAuthority),
     executionMode: normalizeToken(body.executionMode || KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT),
-    sourceDocument,
+    sourceDocument: sourceDocumentInput,
   }
   const canonicalPackId = buildKnowledgePackId(packDefinition)
   const versionId = buildKnowledgePackVersionId({
@@ -1457,6 +1811,22 @@ export const importOutcomeKnowledgePackSourceDocumentDraft = async ({
     semanticVersion,
     scopeKey: scope.scopeKey,
   })
+  const sourceHash = normalizeText(extraction.sourceHash) || buildSourceDocumentImportHash({
+    extractedText,
+    sourceDocument: sourceDocumentInput,
+  })
+  const contentHash = buildContentHash(extractedText)
+  const sourceDocument = normalizeSourceDocumentReference({
+    ...sourceDocumentInput,
+    sourceHash,
+    sourceDocumentId: buildSourceDocumentId({
+      packDefinition,
+      semanticVersion,
+      sourceDocument: sourceDocumentInput,
+      sourceHash,
+    }),
+  })
+  packDefinition.sourceDocument = sourceDocument
 
   const existingVersion = await KnowledgePackVersion.findOne({
     packType: packDefinition.packType,
@@ -1499,16 +1869,26 @@ export const importOutcomeKnowledgePackSourceDocumentDraft = async ({
     status: OUTCOME_KNOWLEDGE_PACK_STATUSES.DRAFT,
     scopeType: scope.scopeType,
     scopeKey: scope.scopeKey,
-    contentHash: buildSourceDocumentImportHash({ extractedText, sourceDocument }),
+    contentHash,
     contentFormat,
     sourceAuthority: packDefinition.sourceAuthority,
     sourceFilename: sourceDocument.filename,
     sourceDocuments: [sourceDocument],
-    content: shouldPersistContent ? extractedText : undefined,
+    content: extractedText,
     sourceMetadata: {
       importMode: 'SOURCE_DOCUMENT_IMPORT_DRAFT',
+      sourceStatus: SOURCE_DOCUMENT_PRESENT_STATUS,
+      sourceFilename: sourceDocument.filename,
+      sourceDocumentId: sourceDocument.sourceDocumentId,
+      sourceHash,
+      contentFormat,
       sourceDocument,
-      parserStatus: shouldPersistContent ? 'TEXT_CAPTURED' : 'SOURCE_REFERENCE_ONLY',
+      parserStatus: extraction.parserStatus || 'TEXT_CAPTURED',
+      extractionMode: extraction.extractionMode || 'DETERMINISTIC_TEXT',
+      extractionMethod: extraction.extractionMethod || 'CLIENT_TEXT',
+      extractionAdapter: extraction.extractionAdapter || 'knowledge-pack-text-import-v1',
+      sourceSizeBytes: extraction.sourceSizeBytes,
+      contentPersisted: true,
     },
     validationSummary: {
       status: 'NOT_RUN',
@@ -1534,14 +1914,16 @@ export const importOutcomeKnowledgePackSourceDocumentDraft = async ({
     packRecord,
     packDefinition,
     version,
-    diff: {
-      status: { from: null, to: OUTCOME_KNOWLEDGE_PACK_STATUSES.DRAFT },
-      importMode: 'SOURCE_DOCUMENT_IMPORT_DRAFT',
-      sourceFilename: sourceDocument.filename,
-      sourceDocumentId: sourceDocument.sourceDocumentId,
-      contentFormat,
-      contentVisible: false,
-      contentIncludedInAudit: false,
+      diff: {
+        status: { from: null, to: OUTCOME_KNOWLEDGE_PACK_STATUSES.DRAFT },
+        importMode: 'SOURCE_DOCUMENT_IMPORT_DRAFT',
+        sourceStatus: SOURCE_DOCUMENT_PRESENT_STATUS,
+        sourceFilename: sourceDocument.filename,
+        sourceDocumentId: sourceDocument.sourceDocumentId,
+        sourceHash,
+        contentFormat,
+        contentVisible: false,
+        contentIncludedInAudit: false,
       reviewStatus: KNOWLEDGE_PACK_REVIEW_STATUSES.DRAFT,
       activationCreated: false,
     },
@@ -1772,8 +2154,11 @@ export const previewOutcomeKnowledgePackVersionContent = async ({
   actorUserId = null,
   auditRequest = null,
 } = {}) => {
-  const packDefinition = getSourceBackedPackDefinitionOrThrow(packId)
-  const canonicalPackId = buildKnowledgePackId(packDefinition)
+  const {
+    canonicalPackId,
+    packDefinition,
+    packRecord,
+  } = await resolveKnowledgePackContentPreviewContext({ packId })
   const normalizedVersionId = normalizeText(versionId)
   const version = await findKnowledgePackVersionWithContent({
     packId: canonicalPackId,
@@ -1805,7 +2190,6 @@ export const previewOutcomeKnowledgePackVersionContent = async ({
     version,
     packDefinition,
   })
-  const packRecord = await KnowledgePack.findOne({ packId: canonicalPackId }).lean()
   const auditPackRecord = packRecord || {
     packId: canonicalPackId,
     packType: packDefinition.packType,
@@ -1844,8 +2228,12 @@ export const validateOutcomeKnowledgePackVersion = async ({
   actorUserId = null,
   auditRequest = null,
 } = {}) => {
-  const packDefinition = getSourceBackedPackDefinitionOrThrow(packId)
-  const canonicalPackId = buildKnowledgePackId(packDefinition)
+  const authoringContext = await resolveKnowledgePackAuthoringContext({ packId })
+  const {
+    canonicalPackId,
+    packDefinition,
+    isImportedSourceDocument,
+  } = authoringContext
   const version = await findKnowledgePackVersionWithContent({
     packId: canonicalPackId,
     versionId: normalizeText(versionId),
@@ -1861,10 +2249,16 @@ export const validateOutcomeKnowledgePackVersion = async ({
     })
   }
 
-  const validationSummary = buildStarterPackValidationSummary({
-    packDefinition,
-    content: version.content,
-  })
+  const validationSummary = isImportedSourceDocument
+    ? buildSourceDocumentDraftValidationSummary({
+      packDefinition,
+      packRecord: authoringContext.packRecord,
+      version,
+    })
+    : buildStarterPackValidationSummary({
+      packDefinition,
+      content: version.content,
+    })
   const validationPassed = validationSummary.status === 'PASSED'
   const previousStatus = normalizeToken(version.status || OUTCOME_KNOWLEDGE_PACK_STATUSES.DRAFT)
   version.status = validationPassed
@@ -1874,13 +2268,31 @@ export const validateOutcomeKnowledgePackVersion = async ({
   version.validatedAt = validationPassed ? new Date(validationSummary.checkedAt) : null
 
   await saveDocument(version)
-  const packRecord = await ensureStarterPackRecord({
-    packDefinition,
-    actorUserId,
-    versionId: version.versionId,
-    semanticVersion: version.semanticVersion,
-    status: version.status,
-  })
+  const packRecord = isImportedSourceDocument
+    ? {
+      ...toPlainObject(authoringContext.packRecord),
+      status: version.status,
+      latestVersionId: version.versionId,
+      latestSemanticVersion: version.semanticVersion,
+      updatedBy: actorUserId || null,
+    }
+    : await ensureStarterPackRecord({
+      packDefinition,
+      actorUserId,
+      versionId: version.versionId,
+      semanticVersion: version.semanticVersion,
+      status: version.status,
+    })
+
+  if (isImportedSourceDocument) {
+    await updateKnowledgePackLatestVersion({
+      packId: canonicalPackId,
+      status: version.status,
+      versionId: version.versionId,
+      semanticVersion: version.semanticVersion,
+      actorUserId,
+    })
+  }
 
   await logKnowledgePackAudit({
     auditRequest,
@@ -1918,6 +2330,268 @@ export const validateOutcomeKnowledgePackVersion = async ({
     pack: serializeKnowledgePack(packRecord),
     version: serializeKnowledgePackVersion(version),
     validationSummary,
+  }
+}
+
+const REVIEW_TRANSITIONS = Object.freeze({
+  [KNOWLEDGE_PACK_REVIEW_STATUSES.DRAFT]: new Set([
+    KNOWLEDGE_PACK_REVIEW_STATUSES.READY_FOR_REVIEW,
+  ]),
+  [KNOWLEDGE_PACK_REVIEW_STATUSES.REJECTED]: new Set([
+    KNOWLEDGE_PACK_REVIEW_STATUSES.READY_FOR_REVIEW,
+  ]),
+  [KNOWLEDGE_PACK_REVIEW_STATUSES.READY_FOR_REVIEW]: new Set([
+    KNOWLEDGE_PACK_REVIEW_STATUSES.APPROVED,
+    KNOWLEDGE_PACK_REVIEW_STATUSES.REJECTED,
+  ]),
+})
+
+const REVIEW_ACTION_LABELS = Object.freeze({
+  [KNOWLEDGE_PACK_REVIEW_STATUSES.READY_FOR_REVIEW]: 'SUBMIT_FOR_REVIEW',
+  [KNOWLEDGE_PACK_REVIEW_STATUSES.APPROVED]: 'APPROVE_REVIEW',
+  [KNOWLEDGE_PACK_REVIEW_STATUSES.REJECTED]: 'REJECT_REVIEW',
+})
+
+const assertKnowledgePackReviewTransitionAllowed = ({
+  canonicalPackId,
+  requestedReviewStatus,
+  version,
+}) => {
+  const lifecycleStatus = normalizeToken(version.status)
+  if (lifecycleStatus !== OUTCOME_KNOWLEDGE_PACK_STATUSES.VALIDATED) {
+    throw createKnowledgePackError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Knowledge pack version must be validated before review status can change.',
+      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_VERSION_REQUIRES_VALIDATED,
+      details: {
+        packId: canonicalPackId,
+        versionId: version.versionId,
+        status: lifecycleStatus,
+      },
+    })
+  }
+
+  const previousReviewStatus = normalizeToken(
+    version.reviewStatus || KNOWLEDGE_PACK_REVIEW_STATUSES.DRAFT,
+  )
+  const allowedStatuses = REVIEW_TRANSITIONS[previousReviewStatus] || new Set()
+  if (!allowedStatuses.has(requestedReviewStatus)) {
+    throw createKnowledgePackError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Knowledge pack review status transition is not allowed.',
+      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_VERSION_LIFECYCLE_CONFLICT,
+      details: {
+        packId: canonicalPackId,
+        versionId: version.versionId,
+        reviewStatus: previousReviewStatus,
+        requestedReviewStatus,
+      },
+    })
+  }
+
+  return previousReviewStatus
+}
+
+const rollbackKnowledgePackReviewAfterAuditFailure = async ({
+  packRecord = null,
+  packReviewStatusUpdated = false,
+  previousPackReviewStatus,
+  previousReviewStatus,
+  version,
+}) => {
+  const rollbackWrites = [
+    KnowledgePackVersion.updateOne(
+      { versionId: version.versionId },
+      { $set: { reviewStatus: previousReviewStatus } },
+    ),
+  ]
+
+  if (packReviewStatusUpdated && packRecord) {
+    rollbackWrites.push(KnowledgePack.updateOne(
+      { packId: version.packId },
+      { $set: { reviewStatus: previousPackReviewStatus } },
+    ))
+  }
+
+  await Promise.allSettled(rollbackWrites)
+  version.reviewStatus = previousReviewStatus
+}
+
+const applyKnowledgePackReviewMutation = async ({
+  actorUserId,
+  auditRequest,
+  packDefinition,
+  packRecord,
+  requestedReviewStatus,
+  version,
+  session = null,
+}) => {
+  const previousReviewStatus = normalizeToken(
+    version.reviewStatus || KNOWLEDGE_PACK_REVIEW_STATUSES.DRAFT,
+  )
+  const previousPackReviewStatus = normalizeToken(
+    packRecord?.reviewStatus || KNOWLEDGE_PACK_REVIEW_STATUSES.DRAFT,
+  )
+  const latestVersionId = normalizeText(packRecord?.latestVersionId)
+  const packReviewStatusUpdated = !latestVersionId
+    || latestVersionId === normalizeText(version.versionId)
+
+  version.reviewStatus = requestedReviewStatus
+  await saveDocument(version, session)
+
+  if (packReviewStatusUpdated) {
+    await KnowledgePack.updateOne(
+      { packId: version.packId },
+      {
+        $set: {
+          reviewStatus: requestedReviewStatus,
+          updatedBy: actorUserId || null,
+        },
+      },
+      {
+        runValidators: true,
+        ...(session ? { session } : {}),
+      },
+    )
+  }
+
+  const mutationResult = {
+    packReviewStatusUpdated,
+    previousPackReviewStatus,
+    previousReviewStatus,
+  }
+
+  try {
+    await logKnowledgePackAudit({
+      auditRequest,
+      action: auditService.AUDIT_ACTIONS.KNOWLEDGE_PACK_REVIEW_STATUS_UPDATED,
+      actorUserId,
+      packRecord,
+      packDefinition,
+      version,
+      session,
+      throwOnError: true,
+      diff: {
+        reviewAction: REVIEW_ACTION_LABELS[requestedReviewStatus] || 'UPDATE_REVIEW_STATUS',
+        reviewStatus: {
+          from: previousReviewStatus,
+          to: requestedReviewStatus,
+        },
+      },
+    })
+  } catch (err) {
+    err.outcomeKnowledgePackAuditFailure = true
+    err.reviewResult = mutationResult
+    throw err
+  }
+
+  return mutationResult
+}
+
+export const updateOutcomeKnowledgePackVersionReview = async ({
+  packId,
+  versionId,
+  body = {},
+  actorUserId = null,
+  auditRequest = null,
+} = {}) => {
+  const authoringContext = await resolveKnowledgePackAuthoringContext({ packId })
+  const {
+    canonicalPackId,
+    packDefinition,
+    packRecord,
+    isImportedSourceDocument,
+  } = authoringContext
+
+  if (!isImportedSourceDocument) {
+    throw createKnowledgePackError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Knowledge pack review workflow is available for imported source-document drafts only.',
+      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_VERSION_LIFECYCLE_CONFLICT,
+      details: { packId: canonicalPackId },
+    })
+  }
+
+  const requestedReviewStatus = normalizeToken(body.reviewStatus)
+  const version = await findKnowledgePackVersionWithContent({
+    packId: canonicalPackId,
+    versionId: normalizeText(versionId),
+  })
+
+  if (!version) {
+    throw createKnowledgePackError({
+      status: 404,
+      code: 'NOT_FOUND',
+      message: 'Outcome Studio knowledge pack version was not found.',
+      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_VERSION_NOT_FOUND,
+      details: { packId: canonicalPackId, versionId },
+    })
+  }
+
+  assertKnowledgePackReviewTransitionAllowed({
+    canonicalPackId,
+    requestedReviewStatus,
+    version,
+  })
+
+  let mutationResult = null
+  let session = null
+
+  try {
+    if (mongoose.connection.readyState === 1) {
+      session = await mongoose.startSession()
+      await session.withTransaction(async () => {
+        mutationResult = await applyKnowledgePackReviewMutation({
+          actorUserId,
+          auditRequest,
+          packDefinition,
+          packRecord,
+          requestedReviewStatus,
+          version,
+          session,
+        })
+      })
+    } else {
+      mutationResult = await applyKnowledgePackReviewMutation({
+        actorUserId,
+        auditRequest,
+        packDefinition,
+        packRecord,
+        requestedReviewStatus,
+        version,
+      })
+    }
+  } catch (err) {
+    const reviewResult = mutationResult || err?.reviewResult
+    if (err?.outcomeKnowledgePackAuditFailure) {
+      if (mongoose.connection.readyState !== 1) {
+        await rollbackKnowledgePackReviewAfterAuditFailure({
+          packRecord,
+          packReviewStatusUpdated: reviewResult?.packReviewStatusUpdated === true,
+          previousPackReviewStatus: reviewResult?.previousPackReviewStatus,
+          previousReviewStatus: reviewResult?.previousReviewStatus,
+          version,
+        })
+      }
+
+      throwKnowledgePackAuditError(err)
+    }
+
+    throw err
+  } finally {
+    await session?.endSession()
+  }
+
+  const packReviewStatusUpdated = mutationResult?.packReviewStatusUpdated === true
+  return {
+    pack: serializeKnowledgePack({
+      ...toPlainObject(packRecord),
+      ...(packReviewStatusUpdated ? { reviewStatus: requestedReviewStatus } : {}),
+    }),
+    version: serializeKnowledgePackVersion(version),
   }
 }
 
@@ -2081,6 +2755,61 @@ const rollbackActivationAfterAuditFailure = async ({
   await Promise.allSettled(rollbackWrites)
 }
 
+const assertImportedSourceDocumentReadyForActivation = ({
+  canonicalPackId,
+  packDefinition,
+  packRecord,
+  version,
+}) => {
+  const reviewStatus = normalizeToken(version.reviewStatus || KNOWLEDGE_PACK_REVIEW_STATUSES.DRAFT)
+  if (reviewStatus !== KNOWLEDGE_PACK_REVIEW_STATUSES.APPROVED) {
+    throw createKnowledgePackError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Imported source-document knowledge pack versions require approved review before activation.',
+      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_VERSION_REVIEW_REQUIRED,
+      details: {
+        packId: canonicalPackId,
+        versionId: version.versionId,
+        reviewStatus,
+      },
+    })
+  }
+
+  if (normalizeToken(version.validationSummary?.status) !== 'PASSED') {
+    throw createKnowledgePackError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Imported source-document knowledge pack versions require passed validation before activation.',
+      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_VERSION_VALIDATION_FAILED,
+      details: {
+        packId: canonicalPackId,
+        versionId: version.versionId,
+        validationStatus: normalizeToken(version.validationSummary?.status),
+      },
+    })
+  }
+
+  const validationSummary = buildSourceDocumentDraftValidationSummary({
+    packDefinition,
+    packRecord,
+    version,
+  })
+  if (validationSummary.status !== 'PASSED') {
+    throw createKnowledgePackError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Imported source-document knowledge pack source evidence is not activation ready.',
+      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_VERSION_VALIDATION_FAILED,
+      details: {
+        packId: canonicalPackId,
+        versionId: version.versionId,
+        validationSummary,
+      },
+    })
+  }
+}
+
 export const activateOutcomeKnowledgePackVersion = async ({
   packId,
   versionId,
@@ -2088,8 +2817,12 @@ export const activateOutcomeKnowledgePackVersion = async ({
   actorUserId = null,
   auditRequest = null,
 } = {}) => {
-  const packDefinition = getSourceBackedPackDefinitionOrThrow(packId)
-  const canonicalPackId = buildKnowledgePackId(packDefinition)
+  const authoringContext = await resolveKnowledgePackAuthoringContext({ packId })
+  const {
+    canonicalPackId,
+    packDefinition,
+    isImportedSourceDocument,
+  } = authoringContext
   const version = await findKnowledgePackVersionWithContent({
     packId: canonicalPackId,
     versionId: normalizeText(versionId),
@@ -2120,14 +2853,26 @@ export const activateOutcomeKnowledgePackVersion = async ({
     })
   }
 
-  const existingPackRecord = await KnowledgePack.findOne({ packId: canonicalPackId }).lean()
-  const packRecord = existingPackRecord || await ensureStarterPackRecord({
-    packDefinition,
-    actorUserId,
-    versionId: version.versionId,
-    semanticVersion: version.semanticVersion,
-    status: previousStatus,
-  })
+  if (isImportedSourceDocument) {
+    assertImportedSourceDocumentReadyForActivation({
+      canonicalPackId,
+      packDefinition,
+      packRecord: authoringContext.packRecord,
+      version,
+    })
+  }
+
+  let packRecord = authoringContext.packRecord
+  if (!packRecord) {
+    const existingPackRecord = await KnowledgePack.findOne({ packId: canonicalPackId }).lean()
+    packRecord = existingPackRecord || await ensureStarterPackRecord({
+      packDefinition,
+      actorUserId,
+      versionId: version.versionId,
+      semanticVersion: version.semanticVersion,
+      status: previousStatus,
+    })
+  }
   const scope = buildActivationScope(body)
   const activationTime = new Date()
   let activationResult = null

@@ -85,8 +85,11 @@ app.use(helmet({
 app.use(cors(corsOptions))
 app.options('*', cors(corsOptions))
 const defaultJsonParser = express.json({ limit: '1mb' })
+const usesRouteScopedJsonParser = (path = '') =>
+  path.startsWith('/api/v1/runtime-instances')
+  || path === '/api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import'
 app.use((req, res, next) => (
-  req.path.startsWith('/api/v1/runtime-instances')
+  usesRouteScopedJsonParser(req.path)
     ? next()
     : defaultJsonParser(req, res, next)
 ))
