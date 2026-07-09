@@ -53,6 +53,7 @@ import {
   sanitizeOutcomePostValidationSnapshot,
 } from './outcomePostValidationService.js'
 import auditService from './auditService.js'
+import { createGovernedReasoningExecution } from './governedReasoningRuntimeService.js'
 
 const normalizeText = (value) => String(value ?? '').trim()
 const normalizeToken = (value) => normalizeText(value).toUpperCase()
@@ -177,6 +178,18 @@ const buildOutcomeAssetVersionId = () => `outcome_asset_version_${randomUUID()}`
 const buildOutcomeSessionId = () => `out_sess_${randomUUID()}`
 const buildTruthSignatureId = () => `truth_sig_${randomUUID()}`
 
+const isEnvEnabled = (value) => ['1', 'TRUE', 'YES', 'ENABLED', 'ON'].includes(normalizeToken(value))
+const isEnvDisabled = (value) => ['0', 'FALSE', 'NO', 'DISABLED', 'OFF'].includes(normalizeToken(value))
+
+const isOutcomeStudioGrrEnabled = () => {
+  const explicitFlag = process.env.STORYLINEOS_OUTCOME_STUDIO_GRR_ENABLED
+  if (isEnvEnabled(explicitFlag)) return true
+  if (isEnvDisabled(explicitFlag)) return false
+
+  if (process.env.NODE_ENV === 'production') return false
+  return true
+}
+
 const buildGovernedOutcomeResponseText = ({
   message = {},
   session = {},
@@ -222,12 +235,32 @@ const buildOutcomeAssetTitle = ({ session = {} } = {}) => {
 
 const buildGeneratedOutcomeAssetCustomerContent = ({
   assetId = '',
+  generationMode = 'DETERMINISTIC_SCAFFOLD',
+  grrExecution = null,
   message = {},
   responseText = '',
   session = {},
   versionId = '',
 } = {}) => {
   const title = buildOutcomeAssetTitle({ session })
+  const grrArtifact = grrExecution?.artifact && typeof grrExecution.artifact === 'object'
+    ? grrExecution.artifact
+    : null
+  const grrLineage = grrArtifact?.lineageSummary && typeof grrArtifact.lineageSummary === 'object'
+    ? grrArtifact.lineageSummary
+    : {}
+  const grrCertification = grrArtifact?.certification && typeof grrArtifact.certification === 'object'
+    ? grrArtifact.certification
+    : {}
+  const grrGovernanceLines = grrExecution
+    ? [
+        `- GRR Execution ID: ${normalizeText(grrExecution.executionId) || 'Not recorded'}`,
+        `- GRR Runtime Artefact ID: ${normalizeText(grrArtifact?.runtimeArtifactId) || 'Not recorded'}`,
+        `- Provider Mode: ${normalizeToken(grrExecution.providerMode) || 'Not recorded'}`,
+        `- Runtime State Writes: ${normalizeToken(grrExecution.runtimeStateWrites?.status) || 'Not recorded'}`,
+        `- Runtime Artefact Is Certified Truth: ${grrCertification.runtimeArtifactIsCertifiedTruth === false ? 'No' : 'Not recorded'}`,
+      ]
+    : []
   const markdown = [
     `# ${title}`,
     '',
@@ -239,6 +272,7 @@ const buildGeneratedOutcomeAssetCustomerContent = ({
     `- Truth Signature ID: ${normalizeText(session.truthSignatureId || session.truthSignature?.truthSignatureId) || 'Not recorded'}`,
     `- Knowledge Packs: ${Number(session.knowledgePackBinding?.activeCount || 0)} active / ${Number(session.knowledgePackBinding?.requiredCount || 0)} required`,
     `- Source Prompt Message ID: ${normalizeText(message.messageId) || 'Not recorded'}`,
+    ...grrGovernanceLines,
   ].join('\n')
 
   return {
@@ -259,19 +293,30 @@ const buildGeneratedOutcomeAssetCustomerContent = ({
       outcomeAssetId: normalizeText(assetId),
       outcomeAssetVersionId: normalizeText(versionId),
       sourceMessageId: normalizeText(message.messageId),
-      generationMode: 'DETERMINISTIC_SCAFFOLD',
+      generationMode: normalizeToken(generationMode) || 'DETERMINISTIC_SCAFFOLD',
+      grrExecutionId: normalizeText(grrExecution?.executionId),
+      grrRuntimeArtifactId: normalizeText(grrArtifact?.runtimeArtifactId),
+      grrProviderMode: normalizeToken(grrExecution?.providerMode),
+      grrManifestId: normalizeText(grrLineage?.manifest?.manifestId || grrExecution?.knowledgeManifest?.manifestId),
     },
   }
 }
 
 const buildGeneratedOutcomeAssetLineageSummary = ({
   generatedAt = '',
+  grrExecution = null,
   parentVersionId = '',
   runtimeInstance = {},
   session = {},
 } = {}) => {
   const frameworkState = getFrameworkState(runtimeInstance)
   const revision = getObjectValue(frameworkState, 'revision') || {}
+  const grrArtifact = grrExecution?.artifact && typeof grrExecution.artifact === 'object'
+    ? grrExecution.artifact
+    : null
+  const grrCertification = grrArtifact?.certification && typeof grrArtifact.certification === 'object'
+    ? grrArtifact.certification
+    : {}
   return {
     sourceOutputAssetId: normalizeText(session.sourceOutputAssetId || session.sourceOutput?.outputAssetId),
     sourceOutputTypeKey: normalizeToken(session.sourceOutputTypeKey || session.sourceOutput?.outputTypeKey),
@@ -291,7 +336,88 @@ const buildGeneratedOutcomeAssetLineageSummary = ({
     ),
     parentVersionId: normalizeText(parentVersionId),
     generatedAt,
+    grrExecutionId: normalizeText(grrExecution?.executionId),
+    grrRuntimeArtifactId: normalizeText(grrArtifact?.runtimeArtifactId),
+    grrProviderMode: normalizeToken(grrExecution?.providerMode),
+    grrRuntimeStateWrites: {
+      status: normalizeToken(grrExecution?.runtimeStateWrites?.status),
+      reason: normalizeText(grrExecution?.runtimeStateWrites?.reason),
+    },
+    grrKnowledgeBinding: {
+      manifestId: normalizeText(grrExecution?.knowledgeManifest?.manifestId),
+      manifestKey: normalizeText(grrExecution?.knowledgeManifest?.manifestKey),
+      manifestVersion: normalizeText(grrExecution?.knowledgeManifest?.semanticVersion),
+      status: normalizeToken(grrExecution?.knowledgeBinding?.status),
+      contentVisible: grrExecution?.knowledgeBinding?.contentVisible === true,
+      packContentLoaded: grrExecution?.knowledgeBinding?.packContentLoaded === true,
+    },
+    grrCertification: {
+      certifiedTruthOnly: grrCertification.certifiedTruthOnly === true,
+      runtimeArtifactIsCertifiedTruth: grrCertification.runtimeArtifactIsCertifiedTruth === true,
+      requiresSeparateCertificationBeforeTruthReuse:
+        grrCertification.requiresSeparateCertificationBeforeTruthReuse === true,
+    },
   }
+}
+
+const buildGrrOutcomeResponseText = ({ grrExecution = null } = {}) => {
+  const artifact = grrExecution?.artifact && typeof grrExecution.artifact === 'object'
+    ? grrExecution.artifact
+    : {}
+  const generatedOutput = artifact.generatedOutput && typeof artifact.generatedOutput === 'object'
+    ? artifact.generatedOutput
+    : {}
+  const markdown = normalizeText(artifact.markdown)
+  if (markdown) return markdown
+
+  const title = normalizeText(generatedOutput.title) || 'Governed reasoning output'
+  const summary = normalizeText(generatedOutput.summary)
+  const sections = Array.isArray(generatedOutput.sections) ? generatedOutput.sections : []
+  const sectionMarkdown = sections
+    .map((section, index) => {
+      const heading = normalizeText(section?.heading) || `Section ${index + 1}`
+      const narrative = normalizeText(section?.narrative || section?.body || section?.summary)
+      return [`## ${heading}`, narrative].filter(Boolean).join('\n\n')
+    })
+    .filter(Boolean)
+
+  return [
+    `# ${title}`,
+    summary,
+    ...sectionMarkdown,
+  ].filter(Boolean).join('\n\n')
+}
+
+const buildGrrExecutionIntent = ({ message = {}, session = {} } = {}) => {
+  const prompt = normalizeText(message.prompt)
+  const outputTypeLabel = normalizeText(session.sourceOutputTypeLabel || session.sourceOutput?.outputTypeLabel)
+  return [
+    outputTypeLabel ? `Outcome Studio ${outputTypeLabel} request.` : 'Outcome Studio governed response request.',
+    prompt,
+  ].filter(Boolean).join('\n\n').slice(0, 2000)
+}
+
+const buildOutcomeWarningsFromGrr = ({ grrExecution = null } = {}) => {
+  const warnings = Array.isArray(grrExecution?.artifact?.warnings)
+    ? grrExecution.artifact.warnings
+    : Array.isArray(grrExecution?.warnings)
+      ? grrExecution.warnings
+      : []
+  return warnings.map(normalizeText).filter(Boolean)
+}
+
+const buildOutcomeLimitationsFromGrr = ({ grrExecution = null } = {}) => {
+  if (!grrExecution) return []
+
+  const limitations = Array.isArray(grrExecution?.artifact?.limitations)
+    ? grrExecution.artifact.limitations
+    : Array.isArray(grrExecution?.limitations)
+      ? grrExecution.limitations
+      : []
+  return [
+    ...limitations.map(normalizeText).filter(Boolean),
+    'Governed Runtime Artefacts are not Certified Truth and require separate certification before truth reuse.',
+  ].filter((value, index, values) => value && values.indexOf(value) === index)
 }
 
 const getRuntimeScope = (runtimeInstance = {}) => ({
@@ -544,6 +670,7 @@ const sanitizePersistedKnowledgePackBinding = (binding = {}) => {
 const buildOutcomeContextBindings = ({
   assetType = '',
   contextType = '',
+  grrExecution = null,
   knowledgePackBinding = {},
   messageId = '',
   outcomeAssetId = '',
@@ -560,6 +687,9 @@ const buildOutcomeContextBindings = ({
   const evidence = safeTruthBinding.evidence && typeof safeTruthBinding.evidence === 'object'
     ? safeTruthBinding.evidence
     : {}
+  const grrArtifact = grrExecution?.artifact && typeof grrExecution.artifact === 'object'
+    ? grrExecution.artifact
+    : null
 
   return {
     projectContext: {
@@ -630,6 +760,15 @@ const buildOutcomeContextBindings = ({
       replayAnchorHash: normalizeText(evidence.replayAnchorHash),
       graphVersion: normalizeText(evidence.graphVersion),
       graphHash: normalizeText(evidence.graphHash),
+    },
+    governedReasoning: {
+      executionId: normalizeText(grrExecution?.executionId),
+      runtimeArtifactId: normalizeText(grrArtifact?.runtimeArtifactId),
+      status: normalizeToken(grrExecution?.status),
+      providerMode: normalizeToken(grrExecution?.providerMode),
+      runtimeStateWriteStatus: normalizeToken(grrExecution?.runtimeStateWrites?.status),
+      runtimeStateWriteReason: normalizeText(grrExecution?.runtimeStateWrites?.reason),
+      runtimeArtifactIsCertifiedTruth: grrArtifact?.certification?.runtimeArtifactIsCertifiedTruth === true,
     },
     // Reserved for future ARL/RL interpretation and decision-pack bindings.
     interpretationBindings: [],
@@ -924,6 +1063,27 @@ const buildOutcomeAssetLineageSummary = (lineage = {}) => ({
   runtimeRevisionNumber: Number(lineage.runtimeRevisionNumber || 0),
   parentVersionId: normalizeText(lineage.parentVersionId),
   generatedAt: normalizeDateValue(lineage.generatedAt),
+  grrExecutionId: normalizeText(lineage.grrExecutionId),
+  grrRuntimeArtifactId: normalizeText(lineage.grrRuntimeArtifactId),
+  grrProviderMode: normalizeToken(lineage.grrProviderMode),
+  grrRuntimeStateWrites: {
+    status: normalizeToken(lineage.grrRuntimeStateWrites?.status),
+    reason: normalizeText(lineage.grrRuntimeStateWrites?.reason),
+  },
+  grrKnowledgeBinding: {
+    manifestId: normalizeText(lineage.grrKnowledgeBinding?.manifestId),
+    manifestKey: normalizeText(lineage.grrKnowledgeBinding?.manifestKey),
+    manifestVersion: normalizeText(lineage.grrKnowledgeBinding?.manifestVersion),
+    status: normalizeToken(lineage.grrKnowledgeBinding?.status),
+    contentVisible: lineage.grrKnowledgeBinding?.contentVisible === true,
+    packContentLoaded: lineage.grrKnowledgeBinding?.packContentLoaded === true,
+  },
+  grrCertification: {
+    certifiedTruthOnly: lineage.grrCertification?.certifiedTruthOnly === true,
+    runtimeArtifactIsCertifiedTruth: lineage.grrCertification?.runtimeArtifactIsCertifiedTruth === true,
+    requiresSeparateCertificationBeforeTruthReuse:
+      lineage.grrCertification?.requiresSeparateCertificationBeforeTruthReuse === true,
+  },
 })
 
 const serializeOutcomeAssetVersion = (version, options = {}) => {
@@ -3132,21 +3292,49 @@ export const generateRuntimeOutcomeResponse = async ({
 
   const runtimeScope = getRuntimeScope(runtimeInstance)
   const generatedAt = new Date().toISOString()
-  const responsePrompt = buildGovernedOutcomeResponseText({
-    message: serializedMessage,
-    session: serializedSession,
-  })
+  const grrEnabled = isOutcomeStudioGrrEnabled()
+  const grrExecution = grrEnabled
+    ? await createGovernedReasoningExecution({
+        actorUserId,
+        auditRequest,
+        payload: {
+          outputTypeKey: serializedSession.sourceOutputTypeKey || serializedSession.sourceOutput?.outputTypeKey,
+          executionIntent: buildGrrExecutionIntent({
+            message: serializedMessage,
+            session: serializedSession,
+          }),
+          idempotencyKey: [
+            DEFAULT_OUTCOME_WORKSPACE_TYPE,
+            serializedSession.sessionId,
+            serializedMessage.messageId,
+            'GENERATE_RESPONSE',
+          ].join(':'),
+          workspaceType: DEFAULT_OUTCOME_WORKSPACE_TYPE,
+        },
+        runtimeInstanceId,
+        scopes,
+      })
+    : null
+  const responsePrompt = grrEnabled
+    ? buildGrrOutcomeResponseText({ grrExecution })
+    : buildGovernedOutcomeResponseText({
+        message: serializedMessage,
+        session: serializedSession,
+      })
   const responseMessageId = buildOutcomeMessageId()
   const outcomeAssetId = buildOutcomeAssetId()
   const outcomeAssetVersionId = buildOutcomeAssetVersionId()
   const outcomeAssetTitle = buildOutcomeAssetTitle({ session: serializedSession })
   const lineageSummary = buildGeneratedOutcomeAssetLineageSummary({
     generatedAt,
+    grrExecution,
     runtimeInstance,
     session: serializedSession,
   })
   const customerContent = buildGeneratedOutcomeAssetCustomerContent({
     assetId: outcomeAssetId,
+    generationMode: grrEnabled ? 'GOVERNED_REASONING_RUNTIME' : 'DETERMINISTIC_SCAFFOLD',
+    grrExecution,
     message: serializedMessage,
     responseText: responsePrompt,
     session: serializedSession,
@@ -3166,14 +3354,11 @@ export const generateRuntimeOutcomeResponse = async ({
       outputTypeKey: serializedSession.sourceOutputTypeKey || serializedSession.sourceOutput?.outputTypeKey,
     },
   })
-  const warnings = [
-    'Generated from the deterministic Outcome Studio scaffold; executable ARL/RL reasoning is not yet implemented.',
-  ]
-  const limitations = [
-    'Do not treat this scaffold as provider-generated or ARL/RL-executed output.',
-  ]
+  const warnings = buildOutcomeWarningsFromGrr({ grrExecution })
+  const limitations = buildOutcomeLimitationsFromGrr({ grrExecution })
   const responseContextBindings = buildOutcomeContextBindings({
     contextType: 'MESSAGE',
+    grrExecution,
     knowledgePackBinding: serializedSession.knowledgePackBinding,
     messageId: responseMessageId,
     runtimeScope,
@@ -3184,6 +3369,7 @@ export const generateRuntimeOutcomeResponse = async ({
   const assetContextBindings = buildOutcomeContextBindings({
     assetType: DEFAULT_OUTCOME_ASSET_TYPE,
     contextType: 'ASSET',
+    grrExecution,
     knowledgePackBinding: serializedSession.knowledgePackBinding,
     outcomeAssetId,
     outcomeAssetVersionId,
@@ -3321,6 +3507,9 @@ export const generateRuntimeOutcomeResponse = async ({
           assetCreated: true,
           outcomeAssetId,
           outcomeAssetVersionId,
+          grrExecutionId: grrExecution?.executionId || '',
+          grrRuntimeArtifactId: grrExecution?.artifact?.runtimeArtifactId || '',
+          grrProviderMode: grrExecution?.providerMode || '',
           runtimeGraphRelationshipCount: generatedAssetRelationshipDocuments.length,
         },
       })
@@ -3345,6 +3534,11 @@ export const generateRuntimeOutcomeResponse = async ({
           truthSignatureStatus: serializedSession.truthSignature.status,
           truthSignatureCurrentness: serializedSession.truthSignature.currentness,
           knowledgePackBindingStatus: serializedSession.knowledgePackBinding.status,
+          grrExecutionId: grrExecution?.executionId || '',
+          grrRuntimeArtifactId: grrExecution?.artifact?.runtimeArtifactId || '',
+          grrProviderMode: grrExecution?.providerMode || '',
+          runtimeArtifactIsCertifiedTruth:
+            grrExecution?.artifact?.certification?.runtimeArtifactIsCertifiedTruth === true,
           postValidation: buildOutcomePostValidationAuditSummary(postValidation),
           generatedBodyAvailable: true,
           runtimeGraphRelationshipCount: generatedAssetRelationshipDocuments.length,

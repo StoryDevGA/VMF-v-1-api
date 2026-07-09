@@ -35,6 +35,8 @@ import KnowledgePack from './KnowledgePack.js'
 import KnowledgePackVersion from './KnowledgePackVersion.js'
 import KnowledgePackActivation from './KnowledgePackActivation.js'
 import KnowledgePackManifest from './KnowledgePackManifest.js'
+import GovernedReasoningExecution from './GovernedReasoningExecution.js'
+import GovernedRuntimeArtifact from './GovernedRuntimeArtifact.js'
 
 // Export all models
 export {
@@ -74,6 +76,8 @@ export {
   KnowledgePackVersion,
   KnowledgePackActivation,
   KnowledgePackManifest,
+  GovernedReasoningExecution,
+  GovernedRuntimeArtifact,
 }
 
 // Default export with all models
@@ -114,4 +118,6 @@ export default {
   KnowledgePackVersion,
   KnowledgePackActivation,
   KnowledgePackManifest,
+  GovernedReasoningExecution,
+  GovernedRuntimeArtifact,
 }

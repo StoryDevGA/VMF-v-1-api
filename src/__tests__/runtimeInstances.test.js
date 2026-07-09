@@ -1270,6 +1270,8 @@ let RuntimeInstance
 let RuntimeOutputAsset
 let RuntimeOutputRequest
 let RuntimeGraphRelationship
+let GovernedReasoningExecution
+let GovernedRuntimeArtifact
 let TruthSignature
 let OutcomeAsset
 let OutcomeAssetVersion
@@ -1321,6 +1323,8 @@ beforeAll(async () => {
   RuntimeOutputAsset = models.RuntimeOutputAsset
   RuntimeOutputRequest = models.RuntimeOutputRequest
   RuntimeGraphRelationship = models.RuntimeGraphRelationship
+  GovernedReasoningExecution = models.GovernedReasoningExecution
+  GovernedRuntimeArtifact = models.GovernedRuntimeArtifact
   TruthSignature = models.TruthSignature
   OutcomeAsset = models.OutcomeAsset
   OutcomeAssetVersion = models.OutcomeAssetVersion
@@ -1338,6 +1342,8 @@ beforeAll(async () => {
 beforeEach(() => {
   globalThis.fetch = originalFetch
   globalThis.__STORYLINEOS_DISCOVERY_DNS_LOOKUP__ = originalDiscoveryDnsLookup
+  delete process.env.STORYLINEOS_GRR_PROVIDER_MODE
+  delete process.env.STORYLINEOS_GRR_DETERMINISTIC_PROVIDER_ENABLED
   User.findById = jest.fn().mockImplementation((userId) => {
     if (userId === CUSTOMER_ADMIN_ID) {
       return buildUserQueryChain(makeCustomerAdmin())
@@ -1393,6 +1399,12 @@ beforeEach(() => {
   RuntimeGraphRelationship.prototype.save = jest.fn(async function save() { return this })
   RuntimeGraphRelationship.find = jest.fn().mockReturnValue(buildRuntimeInstanceFindChain([]))
   RuntimeGraphRelationship.deleteMany = jest.fn().mockResolvedValue({ deletedCount: 1 })
+  GovernedReasoningExecution.prototype.save = jest.fn(async function save() { return this })
+  GovernedReasoningExecution.findOne = jest.fn().mockReturnValue(buildLeanQuery(null))
+  GovernedReasoningExecution.deleteOne = jest.fn().mockResolvedValue({ deletedCount: 1 })
+  GovernedRuntimeArtifact.prototype.save = jest.fn(async function save() { return this })
+  GovernedRuntimeArtifact.findOne = jest.fn().mockReturnValue(buildLeanQuery(null))
+  GovernedRuntimeArtifact.deleteOne = jest.fn().mockResolvedValue({ deletedCount: 1 })
   TruthSignature.prototype.save = jest.fn(async function save() { return this })
   TruthSignature.deleteOne = jest.fn().mockResolvedValue({ deletedCount: 1 })
   OutcomeAsset.prototype.save = jest.fn(async function save() { return this })
@@ -8809,6 +8821,125 @@ describe('Runtime Instance API', () => {
     ...overrides,
   })
 
+  const makeGovernedReasoningExecutionRecord = (overrides = {}) => ({
+    _id: 'f17f1f77bcf86cd799439111',
+    executionId: 'grr_exec_existing_fixture',
+    tenantId: TENANT_ID,
+    customerId: CUSTOMER_ID,
+    runtimeInstanceId: RUNTIME_INSTANCE_ID,
+    runtimeInstanceKey: 'value-narrative-439111',
+    runtimeType: 'VALUE_NARRATIVE',
+    workspaceType: 'PLATFORM',
+    frameworkKey: 'VMF',
+    packageKey: 'vmf-standard-2-3-1',
+    packageVersion: '2.3.1',
+    outputTypeKey: 'CUSTOMER_PROPOSAL',
+    executionIntent: 'Create a customer-ready proposal.',
+    status: 'COMPLETED',
+    contractVersion: '1.0.0',
+    providerMode: 'DETERMINISTIC_TEST',
+    provider: {
+      providerKey: 'storylineos-deterministic-test-provider',
+      liveProvider: false,
+      rawPrompt: 'Raw prompt must not leak.',
+    },
+    knowledgeManifest: {
+      manifestId: 'kpm-outcome-studio-default-1-0-0-global',
+      manifestKey: 'outcome-studio-default',
+      semanticVersion: '1.0.0',
+    },
+    knowledgeBinding: {
+      status: 'PROJECTED',
+      contentVisible: false,
+      packContentLoaded: false,
+      requiredPacks: makeActiveOutcomeKnowledgePackActivations().map((pack) => ({
+        packType: pack.packType,
+        packKey: pack.packKey,
+        versionId: pack.versionId,
+        activationId: pack.activationId,
+      })),
+      optionalPacks: [],
+      validationPacks: [],
+    },
+    reasoningContext: {
+      assemblyMode: 'CERTIFIED_TRUTH_WITH_KNOWLEDGE_BINDING_METADATA',
+      contentVisible: false,
+      packContentLoaded: false,
+    },
+    certifiedTruth: {
+      acceptedTruthCount: 4,
+      sourceTruthSummary: [
+        {
+          sectionKey: 'situation',
+          label: 'Situation',
+          summary: 'Stored summary only.',
+          truthHash: 'sha256:situation-truth',
+        },
+      ],
+    },
+    runtimeStateWrites: {
+      status: 'NOT_WRITTEN',
+      reason: 'NO_REVIEWED_GRR_RUNTIME_PATH_V1',
+      paths: [],
+    },
+    artifactIds: ['grr_art_existing_fixture'],
+    auditLogIds: ['audit-log-existing-fixture'],
+    warnings: ['KNOWLEDGE_PACK_CONTENT_NOT_EXPOSED_V1'],
+    limitations: ['Runtime State writes are not performed until a governed GRR runtime path is reviewed.'],
+    requestedBy: CUSTOMER_ADMIN_ID,
+    requestedAt: '2026-07-09T09:00:00.000Z',
+    completedAt: '2026-07-09T09:00:00.000Z',
+    createdAt: '2026-07-09T09:00:00.000Z',
+    updatedAt: '2026-07-09T09:00:00.000Z',
+    ...overrides,
+  })
+
+  const makeGovernedRuntimeArtifactRecord = (overrides = {}) => ({
+    _id: 'f27f1f77bcf86cd799439111',
+    runtimeArtifactId: 'grr_art_existing_fixture',
+    executionId: 'grr_exec_existing_fixture',
+    tenantId: TENANT_ID,
+    customerId: CUSTOMER_ID,
+    runtimeInstanceId: RUNTIME_INSTANCE_ID,
+    runtimeInstanceKey: 'value-narrative-439111',
+    frameworkKey: 'VMF',
+    outputTypeKey: 'CUSTOMER_PROPOSAL',
+    artifactType: 'GOVERNED_REASONING_OUTPUT',
+    status: 'GENERATED',
+    contractVersion: '1.0.0',
+    generatedOutput: {
+      title: 'Governed output',
+      markdown: '# Governed output',
+    },
+    safeJson: {
+      output: {
+        title: 'Governed output',
+      },
+      provider: {
+        providerKey: 'storylineos-deterministic-test-provider',
+      },
+    },
+    markdown: '# Governed output',
+    lineageSummary: {
+      executionId: 'grr_exec_existing_fixture',
+      certifiedTruth: {
+        acceptedTruthCount: 4,
+      },
+    },
+    certification: {
+      certifiedTruthOnly: true,
+      runtimeArtifactIsCertifiedTruth: false,
+      requiresSeparateCertificationBeforeTruthReuse: true,
+    },
+    warnings: ['KNOWLEDGE_PACK_CONTENT_NOT_EXPOSED_V1'],
+    limitations: ['Runtime State writes are not performed until a governed GRR runtime path is reviewed.'],
+    generatedBy: CUSTOMER_ADMIN_ID,
+    generatedAt: '2026-07-09T09:00:00.000Z',
+    createdAt: '2026-07-09T09:00:00.000Z',
+    updatedAt: '2026-07-09T09:00:00.000Z',
+    ...overrides,
+  })
+
   const getOutcomeKnowledgePackCategory = (packType) =>
     packType === 'TRUTH_CERTIFICATION' ? 'PLATFORM' : 'OUTCOME'
 
@@ -14241,6 +14372,161 @@ describe('Runtime Instance API', () => {
     expect(res.body.data.blockers.map((blocker) => blocker.code)).not.toContain('ACCEPTED_TRUTH_MISSING')
   })
 
+  test('GRR execution API creates an audited governed artefact from Certified Truth and KIL binding metadata', async () => {
+    const previousProviderMode = process.env.STORYLINEOS_GRR_PROVIDER_MODE
+    process.env.STORYLINEOS_GRR_PROVIDER_MODE = 'DETERMINISTIC'
+
+    try {
+      RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeOutputLabReadyRuntime()))
+      FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+      KnowledgePackActivation.find.mockReturnValue(buildRuntimeInstanceFindChain(makeActiveOutcomeKnowledgePackActivations()))
+      const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+      const res = await request
+        .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/governed-reasoning/executions`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          outputTypeKey: 'customer_proposal',
+          executionIntent: 'Create a customer-ready proposal.',
+          contextCategories: ['framework'],
+        })
+
+      expect(res.status).toBe(201)
+      expect(res.body.data).toEqual(expect.objectContaining({
+        status: 'COMPLETED',
+        providerMode: 'DETERMINISTIC_TEST',
+        outputTypeKey: 'CUSTOMER_PROPOSAL',
+        runtimeStateWrites: expect.objectContaining({
+          status: 'NOT_WRITTEN',
+          reason: 'NO_REVIEWED_GRR_RUNTIME_PATH_V1',
+        }),
+        knowledgeBinding: expect.objectContaining({
+          contentVisible: false,
+          packContentLoaded: false,
+        }),
+        reasoningContext: expect.objectContaining({
+          assemblyMode: 'CERTIFIED_TRUTH_WITH_KNOWLEDGE_BINDING_METADATA',
+          contentVisible: false,
+          packContentLoaded: false,
+        }),
+        certifiedTruth: expect.objectContaining({
+          acceptedTruthCount: 4,
+        }),
+      }))
+      expect(res.body.data.artifact).toEqual(expect.objectContaining({
+        artifactType: 'GOVERNED_REASONING_OUTPUT',
+        certification: expect.objectContaining({
+          certifiedTruthOnly: true,
+          runtimeArtifactIsCertifiedTruth: false,
+          requiresSeparateCertificationBeforeTruthReuse: true,
+        }),
+      }))
+      expect(JSON.stringify(res.body.data)).not.toContain('Raw active pack content')
+      expect(GovernedReasoningExecution.prototype.save).toHaveBeenCalled()
+      expect(GovernedRuntimeArtifact.prototype.save).toHaveBeenCalled()
+      expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+        action: 'GOVERNED_REASONING_EXECUTED',
+        resourceType: 'GovernedReasoningExecution',
+        diff: expect.objectContaining({
+          operation: 'CREATE_GOVERNED_REASONING_EXECUTION',
+          providerMode: 'DETERMINISTIC_TEST',
+          outputTypeKey: 'CUSTOMER_PROPOSAL',
+          runtimeStateWrites: expect.objectContaining({
+            status: 'NOT_WRITTEN',
+          }),
+        }),
+      }))
+    } finally {
+      if (previousProviderMode === undefined) {
+        delete process.env.STORYLINEOS_GRR_PROVIDER_MODE
+      } else {
+        process.env.STORYLINEOS_GRR_PROVIDER_MODE = previousProviderMode
+      }
+    }
+  })
+
+  test('GRR execution API fails closed without explicit provider posture', async () => {
+    const previousProviderMode = process.env.STORYLINEOS_GRR_PROVIDER_MODE
+    delete process.env.STORYLINEOS_GRR_PROVIDER_MODE
+
+    try {
+      RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeOutputLabReadyRuntime()))
+      FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+      KnowledgePackActivation.find.mockReturnValue(buildRuntimeInstanceFindChain(makeActiveOutcomeKnowledgePackActivations()))
+      const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+      const res = await request
+        .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/governed-reasoning/executions`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          outputTypeKey: 'CUSTOMER_PROPOSAL',
+        })
+
+      expect(res.status).toBe(409)
+      expect(res.body.error.code).toBe('GRR_PROVIDER_UNAVAILABLE')
+      expect(res.body.error.details.reason).toBe('PROVIDER_UNAVAILABLE')
+      expect(GovernedReasoningExecution.prototype.save).not.toHaveBeenCalled()
+      expect(GovernedRuntimeArtifact.prototype.save).not.toHaveBeenCalled()
+      expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+        action: 'GOVERNED_REASONING_EXECUTED',
+      }))
+    } finally {
+      if (previousProviderMode === undefined) {
+        delete process.env.STORYLINEOS_GRR_PROVIDER_MODE
+      } else {
+        process.env.STORYLINEOS_GRR_PROVIDER_MODE = previousProviderMode
+      }
+    }
+  })
+
+  test('GRR execution detail returns scoped sanitized metadata without raw provider or pack content', async () => {
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeOutputLabReadyRuntime()))
+    GovernedReasoningExecution.findOne.mockReturnValue(buildLeanQuery(makeGovernedReasoningExecutionRecord()))
+    GovernedRuntimeArtifact.findOne.mockReturnValue(buildLeanQuery(makeGovernedRuntimeArtifactRecord({
+      safeJson: {
+        provider: {
+          providerKey: 'storylineos-deterministic-test-provider',
+          rawPrompt: 'Raw artifact prompt must not leak.',
+        },
+        output: {
+          title: 'Governed output',
+        },
+      },
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/governed-reasoning/executions/grr_exec_existing_fixture`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toEqual(expect.objectContaining({
+      executionId: 'grr_exec_existing_fixture',
+      status: 'COMPLETED',
+      runtimeStateWrites: expect.objectContaining({
+        status: 'NOT_WRITTEN',
+      }),
+      artifact: expect.objectContaining({
+        runtimeArtifactId: 'grr_art_existing_fixture',
+        certification: expect.objectContaining({
+          runtimeArtifactIsCertifiedTruth: false,
+        }),
+      }),
+    }))
+    expect(GovernedReasoningExecution.findOne).toHaveBeenCalledWith({
+      executionId: 'grr_exec_existing_fixture',
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+    })
+    expect(GovernedRuntimeArtifact.findOne).toHaveBeenCalledWith({
+      executionId: 'grr_exec_existing_fixture',
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+    })
+    expect(JSON.stringify(res.body.data)).not.toContain('Raw prompt must not leak.')
+    expect(JSON.stringify(res.body.data)).not.toContain('Raw artifact prompt must not leak.')
+    expect(JSON.stringify(res.body.data)).not.toContain('Raw required pack content must not leak.')
+    expect(JSON.stringify(res.body.data)).not.toContain('Raw active pack content must not leak.')
+  })
+
   test('runtime section truth readiness resolves accepted truth through map-backed runtime paths', () => {
     const generatedAt = '2026-06-11T09:00:00.000Z'
     const packageSection = Object.create(null, {
@@ -15108,8 +15394,11 @@ describe('Runtime Instance API', () => {
   })
 
   test('Outcome Studio response generation persists a governed assistant response and first asset version', async () => {
+    process.env.STORYLINEOS_GRR_PROVIDER_MODE = 'DETERMINISTIC'
     const runtimeInstance = makeOutputLabReadyRuntime()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+    KnowledgePackActivation.find.mockReturnValue(buildRuntimeInstanceFindChain(makeActiveOutcomeKnowledgePackActivations()))
     OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
     OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord()))
     const token = await getAccessTokenForUser(makeCustomerAdmin())
@@ -15128,7 +15417,7 @@ describe('Runtime Instance API', () => {
       role: 'ASSISTANT',
       status: 'GENERATED',
       responseStatus: 'RESPONSE_GENERATED',
-      prompt: expect.stringContaining('Governed response prepared from the current Executive Brief.'),
+      prompt: expect.stringContaining('# EXECUTIVE_BRIEF governed reasoning artefact'),
       runtimeInstanceId: RUNTIME_INSTANCE_ID,
       runtimeInstanceKey: 'value-narrative-439111',
       runtimeType: 'VALUE_NARRATIVE',
@@ -15136,8 +15425,9 @@ describe('Runtime Instance API', () => {
       packageKey: 'vmf-standard-2-3-1',
       packageVersion: '2.3.1',
     }))
-    expect(res.body.data.prompt).toContain('truth signature truth_sig_existing_fixture')
-    expect(res.body.data.prompt).toContain('knowledge packs 5/5')
+    expect(res.body.data.prompt).toContain('## Situation')
+    expect(res.body.data.prompt).toContain('## Commercial Problem')
+    expect(res.body.data.prompt).toContain('Evidence hash: sha256:situation-truth')
     expect(res.body.data.prompt).not.toContain('Raw message source Markdown must not leak')
     expect(res.body.data.prompt).not.toContain('Raw message source JSON must not leak')
     expect(res.body.data.sourceOutput).toEqual(expect.objectContaining({
@@ -15161,12 +15451,14 @@ describe('Runtime Instance API', () => {
       sourceOutputAssetId: 'out_asset_outcome_studio_fixture',
       currentVersionId: expect.stringMatching(/^outcome_asset_version_/),
       currentVersionNumber: 1,
-      warnings: [
-        'Generated from the deterministic Outcome Studio scaffold; executable ARL/RL reasoning is not yet implemented.',
-      ],
-      limitations: [
-        'Do not treat this scaffold as provider-generated or ARL/RL-executed output.',
-      ],
+      warnings: expect.arrayContaining([
+        'KNOWLEDGE_PACK_CONTENT_NOT_EXPOSED_V1',
+      ]),
+      limitations: expect.arrayContaining([
+        'Runtime State writes are not performed until a governed GRR runtime path is reviewed.',
+        'Deterministic provider output is non-production scaffolding unless replaced by a live provider adapter.',
+        'Governed Runtime Artefacts are not Certified Truth and require separate certification before truth reuse.',
+      ]),
       postValidation: expect.objectContaining({
         contractVersion: 'outcome-post-validation.v1',
         validationId: expect.stringMatching(/^outcome_post_val_/),
@@ -15208,6 +15500,18 @@ describe('Runtime Instance API', () => {
       truthSignatureStatus: 'PROJECTED',
       truthSignatureCurrentness: 'CURRENT',
       parentVersionId: '',
+      grrExecutionId: expect.stringMatching(/^grr_exec_/),
+      grrRuntimeArtifactId: expect.stringMatching(/^grr_art_/),
+      grrProviderMode: 'DETERMINISTIC_TEST',
+      grrRuntimeStateWrites: expect.objectContaining({
+        status: 'NOT_WRITTEN',
+        reason: 'NO_REVIEWED_GRR_RUNTIME_PATH_V1',
+      }),
+      grrCertification: expect.objectContaining({
+        certifiedTruthOnly: true,
+        runtimeArtifactIsCertifiedTruth: false,
+        requiresSeparateCertificationBeforeTruthReuse: true,
+      }),
     }))
     expect(OutcomeSession.findOne).toHaveBeenCalledWith({
       runtimeInstanceId: RUNTIME_INSTANCE_ID,
@@ -15234,6 +15538,13 @@ describe('Runtime Instance API', () => {
       truthBinding: expect.objectContaining({
         truthSignatureId: 'truth_sig_existing_fixture',
         currentness: 'CURRENT',
+      }),
+      governedReasoning: expect.objectContaining({
+        executionId: expect.stringMatching(/^grr_exec_/),
+        runtimeArtifactId: expect.stringMatching(/^grr_art_/),
+        providerMode: 'DETERMINISTIC_TEST',
+        runtimeStateWriteStatus: 'NOT_WRITTEN',
+        runtimeArtifactIsCertifiedTruth: false,
       }),
     }))
     expect(OutcomeMessage.updateOne).toHaveBeenCalledWith(
@@ -15268,6 +15579,13 @@ describe('Runtime Instance API', () => {
           }),
         ]),
       }),
+      governedReasoning: expect.objectContaining({
+        executionId: expect.stringMatching(/^grr_exec_/),
+        runtimeArtifactId: expect.stringMatching(/^grr_art_/),
+        providerMode: 'DETERMINISTIC_TEST',
+        runtimeStateWriteStatus: 'NOT_WRITTEN',
+        runtimeArtifactIsCertifiedTruth: false,
+      }),
     }))
     expect(savedOutcomeAsset.postValidation).toEqual(expect.objectContaining({
       validationId: res.body.data.asset.postValidation.validationId,
@@ -15289,6 +15607,13 @@ describe('Runtime Instance API', () => {
       truthBinding: expect.objectContaining({
         truthSignatureId: 'truth_sig_existing_fixture',
         currentness: 'CURRENT',
+      }),
+      governedReasoning: expect.objectContaining({
+        executionId: expect.stringMatching(/^grr_exec_/),
+        runtimeArtifactId: expect.stringMatching(/^grr_art_/),
+        providerMode: 'DETERMINISTIC_TEST',
+        runtimeStateWriteStatus: 'NOT_WRITTEN',
+        runtimeArtifactIsCertifiedTruth: false,
       }),
     }))
     expect(savedOutcomeAssetVersion.postValidation).toEqual(expect.objectContaining({
@@ -15342,6 +15667,16 @@ describe('Runtime Instance API', () => {
     expect(OutcomeAsset.find).not.toHaveBeenCalled()
     expect(OutcomeAsset.findOne).not.toHaveBeenCalled()
     expect(OutcomeAssetVersion.find).not.toHaveBeenCalled()
+    expect(GovernedReasoningExecution.prototype.save).toHaveBeenCalled()
+    expect(GovernedRuntimeArtifact.prototype.save).toHaveBeenCalled()
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'GOVERNED_REASONING_EXECUTED',
+      resourceType: 'GovernedReasoningExecution',
+      diff: expect.objectContaining({
+        providerMode: 'DETERMINISTIC_TEST',
+        outputTypeKey: 'EXECUTIVE_BRIEF',
+      }),
+    }))
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'OUTCOME_RESPONSE_GENERATED',
       resourceType: 'OutcomeMessage',
@@ -15359,6 +15694,9 @@ describe('Runtime Instance API', () => {
         outcomeAssetId: res.body.data.asset.outcomeAssetId,
         outcomeAssetVersionId: res.body.data.assetVersion.outcomeAssetVersionId,
         runtimeGraphRelationshipCount: 2,
+        grrExecutionId: expect.stringMatching(/^grr_exec_/),
+        grrRuntimeArtifactId: expect.stringMatching(/^grr_art_/),
+        grrProviderMode: 'DETERMINISTIC_TEST',
       }),
     }))
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
@@ -15386,8 +15724,81 @@ describe('Runtime Instance API', () => {
         }),
         generatedBodyAvailable: true,
         runtimeGraphRelationshipCount: 2,
+        grrExecutionId: expect.stringMatching(/^grr_exec_/),
+        grrRuntimeArtifactId: expect.stringMatching(/^grr_art_/),
+        grrProviderMode: 'DETERMINISTIC_TEST',
+        runtimeArtifactIsCertifiedTruth: false,
       }),
     }))
+  })
+
+  test('Outcome Studio response generation falls back to governed scaffold in production when GRR is not explicitly enabled', async () => {
+    const previousNodeEnv = process.env.NODE_ENV
+    const previousOutcomeGrrFlag = process.env.STORYLINEOS_OUTCOME_STUDIO_GRR_ENABLED
+    const previousProviderMode = process.env.STORYLINEOS_GRR_PROVIDER_MODE
+    process.env.NODE_ENV = 'production'
+    delete process.env.STORYLINEOS_OUTCOME_STUDIO_GRR_ENABLED
+    delete process.env.STORYLINEOS_GRR_PROVIDER_MODE
+
+    try {
+      const runtimeInstance = makeOutputLabReadyRuntime()
+      RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+      OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+      OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord()))
+      const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+      const res = await request
+        .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/messages/out_msg_existing_fixture/generate-response`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({})
+
+      expect(res.status).toBe(200)
+      expect(res.body.data).toEqual(expect.objectContaining({
+        role: 'ASSISTANT',
+        status: 'GENERATED',
+        responseStatus: 'RESPONSE_GENERATED',
+        prompt: expect.stringContaining('Governed response prepared from the current Executive Brief.'),
+      }))
+      expect(res.body.data.prompt).toContain('This scaffold does not expose hidden reasoning')
+      expect(res.body.data.prompt).not.toContain('governed reasoning artefact')
+      expect(res.body.data.asset).toEqual(expect.objectContaining({
+        status: 'GENERATED',
+        outputTypeKey: 'EXECUTIVE_BRIEF',
+        lineageSummary: expect.objectContaining({
+          grrExecutionId: '',
+          grrRuntimeArtifactId: '',
+          grrProviderMode: '',
+        }),
+      }))
+      expect(res.body.data.assetVersion).toEqual(expect.objectContaining({
+        status: 'CURRENT',
+        contentAvailable: true,
+      }))
+      expect(GovernedReasoningExecution.findOne).not.toHaveBeenCalled()
+      expect(GovernedReasoningExecution.prototype.save).not.toHaveBeenCalled()
+      expect(GovernedRuntimeArtifact.prototype.save).not.toHaveBeenCalled()
+      expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+        action: 'GOVERNED_REASONING_EXECUTED',
+      }))
+      expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+        action: 'OUTCOME_RESPONSE_GENERATED',
+      }))
+      expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+        action: 'ASSET_GENERATED',
+      }))
+    } finally {
+      process.env.NODE_ENV = previousNodeEnv
+      if (previousOutcomeGrrFlag === undefined) {
+        delete process.env.STORYLINEOS_OUTCOME_STUDIO_GRR_ENABLED
+      } else {
+        process.env.STORYLINEOS_OUTCOME_STUDIO_GRR_ENABLED = previousOutcomeGrrFlag
+      }
+      if (previousProviderMode === undefined) {
+        delete process.env.STORYLINEOS_GRR_PROVIDER_MODE
+      } else {
+        process.env.STORYLINEOS_GRR_PROVIDER_MODE = previousProviderMode
+      }
+    }
   })
 
   test('Outcome Studio response generation rejects prompts that already have a response', async () => {
@@ -15425,9 +15836,48 @@ describe('Runtime Instance API', () => {
     expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 
-  test('Outcome Studio response generation rolls back the generated response when audit persistence fails', async () => {
+  test('Outcome Studio response generation fails closed when GRR provider is unavailable without Outcome Studio writes', async () => {
     const runtimeInstance = makeOutputLabReadyRuntime()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+    KnowledgePackActivation.find.mockReturnValue(buildRuntimeInstanceFindChain(makeActiveOutcomeKnowledgePackActivations()))
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/messages/out_msg_existing_fixture/generate-response`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('GRR_PROVIDER_UNAVAILABLE')
+    expect(res.body.error.details.reason).toBe('PROVIDER_UNAVAILABLE')
+    expect(OutcomeMessage.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeMessage.updateOne).not.toHaveBeenCalled()
+    expect(OutcomeMessage.deleteOne).not.toHaveBeenCalled()
+    expect(OutcomeAsset.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeAssetVersion.prototype.save).not.toHaveBeenCalled()
+    expect(RuntimeGraphRelationship.prototype.save).not.toHaveBeenCalled()
+    expect(GovernedReasoningExecution.prototype.save).not.toHaveBeenCalled()
+    expect(GovernedRuntimeArtifact.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+      action: 'GOVERNED_REASONING_EXECUTED',
+    }))
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+      action: 'OUTCOME_RESPONSE_GENERATED',
+    }))
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+      action: 'ASSET_GENERATED',
+    }))
+  })
+
+  test('Outcome Studio response generation rolls back the generated response when audit persistence fails', async () => {
+    process.env.STORYLINEOS_GRR_PROVIDER_MODE = 'DETERMINISTIC'
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+    KnowledgePackActivation.find.mockReturnValue(buildRuntimeInstanceFindChain(makeActiveOutcomeKnowledgePackActivations()))
     OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
     OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord()))
     AuditLog.createLog = jest.fn(async (payload) => {
@@ -15481,8 +15931,11 @@ describe('Runtime Instance API', () => {
   })
 
   test('Outcome Studio response generation rolls back when runtime graph relationship persistence fails', async () => {
+    process.env.STORYLINEOS_GRR_PROVIDER_MODE = 'DETERMINISTIC'
     const runtimeInstance = makeOutputLabReadyRuntime()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+    KnowledgePackActivation.find.mockReturnValue(buildRuntimeInstanceFindChain(makeActiveOutcomeKnowledgePackActivations()))
     OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
     OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord()))
     RuntimeGraphRelationship.prototype.save = jest.fn(async () => {
@@ -15537,8 +15990,11 @@ describe('Runtime Instance API', () => {
   })
 
   test('Outcome Studio response generation rolls back the generated asset when asset audit persistence fails', async () => {
+    process.env.STORYLINEOS_GRR_PROVIDER_MODE = 'DETERMINISTIC'
     const runtimeInstance = makeOutputLabReadyRuntime()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+    KnowledgePackActivation.find.mockReturnValue(buildRuntimeInstanceFindChain(makeActiveOutcomeKnowledgePackActivations()))
     OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
     OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord()))
     AuditLog.createLog = jest.fn(async (payload) => {

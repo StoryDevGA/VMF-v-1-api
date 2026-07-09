@@ -146,6 +146,14 @@ const runtimeOutputAssetParamsSchema = runtimeInstanceIdSchema.extend({
     .max(180, 'outputAssetId must be 180 characters or fewer'),
 })
 
+const governedReasoningExecutionParamsSchema = runtimeInstanceIdSchema.extend({
+  executionId: z
+    .string({ required_error: 'executionId is required' })
+    .trim()
+    .min(1, 'executionId is required')
+    .max(180, 'executionId must be 180 characters or fewer'),
+})
+
 const runtimeOutputAssetExportParamsSchema = runtimeOutputAssetParamsSchema.extend({
   format: z
     .string({ required_error: 'format is required' })
@@ -810,6 +818,44 @@ const createRuntimeOutputRequestSchema = z.object({
     }),
 }).strict()
 
+const createGovernedReasoningExecutionSchema = z.object({
+  outputTypeKey: z
+    .string({ required_error: 'outputTypeKey is required' })
+    .trim()
+    .min(1, 'outputTypeKey is required')
+    .max(80, 'outputTypeKey must be 80 characters or fewer')
+    .transform((value) => value.toUpperCase()),
+  executionIntent: z
+    .string()
+    .trim()
+    .max(2000, 'executionIntent must be 2000 characters or fewer')
+    .optional(),
+  manifestId: z
+    .string()
+    .trim()
+    .min(1, 'manifestId must not be empty')
+    .max(260, 'manifestId must be 260 characters or fewer')
+    .optional(),
+  workspaceType: z
+    .string()
+    .trim()
+    .min(1, 'workspaceType must not be empty')
+    .max(80, 'workspaceType must be 80 characters or fewer')
+    .transform((value) => value.toUpperCase())
+    .optional(),
+  environmentKey: z
+    .string()
+    .trim()
+    .min(1, 'environmentKey must not be empty')
+    .max(80, 'environmentKey must be 80 characters or fewer')
+    .transform((value) => value.toUpperCase())
+    .optional(),
+  contextCategories: z
+    .array(z.string().trim().min(1).max(80).transform((value) => value.toUpperCase()))
+    .max(12, 'contextCategories must contain 12 entries or fewer')
+    .optional(),
+}).strict()
+
 const createRuntimeOutcomeSessionSchema = z.object({
   sourceOutputAssetId: z
     .string()
@@ -1040,12 +1086,22 @@ export const validateRuntimeOutputAssetParams = createParamsValidator(runtimeOut
   rootIssueKey: '_root',
 })
 
+export const validateGovernedReasoningExecutionParams = createParamsValidator(governedReasoningExecutionParamsSchema, {
+  message: 'Invalid request parameters.',
+  rootIssueKey: '_root',
+})
+
 export const validateRuntimeOutputAssetExportParams = createParamsValidator(runtimeOutputAssetExportParamsSchema, {
   message: 'Invalid request parameters.',
   rootIssueKey: '_root',
 })
 
 export const validateCreateRuntimeOutputRequest = createBodyValidator(createRuntimeOutputRequestSchema, {
+  message: 'Request validation failed.',
+  rootIssueKey: '_root',
+})
+
+export const validateCreateGovernedReasoningExecution = createBodyValidator(createGovernedReasoningExecutionSchema, {
   message: 'Request validation failed.',
   rootIssueKey: '_root',
 })

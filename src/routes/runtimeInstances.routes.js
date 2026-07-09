@@ -5,6 +5,7 @@ import {
   acceptRuntimeDiscovery,
   acceptRuntimeSection,
   clearRuntimeSectionEvidence,
+  createGovernedReasoningExecution,
   createRuntimeInstance,
   createRuntimeOutcomeMessage,
   createRuntimeOutcomeSession,
@@ -14,6 +15,7 @@ import {
   exportRuntimeOutcomeAsset,
   exportRuntimeOutputAsset,
   generateRuntimeOutcomeResponse,
+  getGovernedReasoningExecution,
   getRuntimeOutcomeAsset,
   getRuntimeOutcomeAssetPreview,
   getRuntimeOutcomeAssetVersion,
@@ -57,12 +59,14 @@ import {
   validateClearRuntimeSectionEvidence,
   validateCreateRuntimeOutcomeMessage,
   validateCreateRuntimeOutcomeSession,
+  validateCreateGovernedReasoningExecution,
   validateCreateRuntimeOutputRequest,
   validateCreateRuntimeInstance,
   validateCreateRuntimeRevision,
   validateExecuteRuntimeAction,
   validateGenerateRuntimeOutcomeResponse,
   validateGenerateRuntimeOutputRequest,
+  validateGovernedReasoningExecutionParams,
   validateListRuntimeInstances,
   validateMutateRuntimeState,
   validatePublishRuntimeOutputAsset,
@@ -182,6 +186,17 @@ router.post(
   executeRuntimeAction,
 )
 router.get('/:runtimeInstanceId/evidence', validateRuntimeInstanceId, getRuntimeEvidence)
+router.post(
+  '/:runtimeInstanceId/governed-reasoning/executions',
+  validateRuntimeInstanceId,
+  validateCreateGovernedReasoningExecution,
+  createGovernedReasoningExecution,
+)
+router.get(
+  '/:runtimeInstanceId/governed-reasoning/executions/:executionId',
+  validateGovernedReasoningExecutionParams,
+  getGovernedReasoningExecution,
+)
 router.get('/:runtimeInstanceId/output-lab', validateRuntimeInstanceId, getRuntimeOutputLab)
 router.get('/:runtimeInstanceId/output-lab/definitions', validateRuntimeInstanceId, getRuntimeOutputLabDefinitions)
 router.get('/:runtimeInstanceId/output-lab/readiness', validateRuntimeInstanceId, getRuntimeOutputLabReadiness)

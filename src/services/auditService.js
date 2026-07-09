@@ -170,6 +170,8 @@ export const AUDIT_ACTIONS = Object.freeze({
   WORKFLOW_POLICY_UPDATED: 'WORKFLOW_POLICY_UPDATED',
   WORKFLOW_POLICY_CLONED: 'WORKFLOW_POLICY_CLONED',
   WORKFLOW_POLICY_TESTED: 'WORKFLOW_POLICY_TESTED',
+  GOVERNED_REASONING_EXECUTED: 'GOVERNED_REASONING_EXECUTED',
+  GOVERNED_REASONING_BLOCKED: 'GOVERNED_REASONING_BLOCKED',
   // Super Admin - Access denied
   ACCESS_DENIED: 'ACCESS_DENIED',
   // Super Admin - Invitations
@@ -215,6 +217,8 @@ export const RESOURCE_TYPES = Object.freeze({
   KnowledgePackVersion: 'KnowledgePackVersion',
   KnowledgePackActivation: 'KnowledgePackActivation',
   KnowledgePackManifest: 'KnowledgePackManifest',
+  GovernedReasoningExecution: 'GovernedReasoningExecution',
+  GovernedRuntimeArtifact: 'GovernedRuntimeArtifact',
   RuntimeAgent: 'RuntimeAgent',
   RuntimeSkill: 'RuntimeSkill',
   RuntimePathRegistry: 'RuntimePathRegistry',

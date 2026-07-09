@@ -8,6 +8,10 @@ import { executeRuntimeAction as executeRuntimeActionRecord } from '../services/
 import { getRuntimeRenderer as getRuntimeRendererProjection } from '../services/runtimeRendererService.js'
 import { getRuntimeTruthQuality as getRuntimeTruthQualityProjection } from '../services/runtimeTruthQualityService.js'
 import {
+  createGovernedReasoningExecution as createGovernedReasoningExecutionRecord,
+  getGovernedReasoningExecution as getGovernedReasoningExecutionRecord,
+} from '../services/governedReasoningRuntimeService.js'
+import {
   getRuntimeIntelligenceGraph as getRuntimeIntelligenceGraphRecord,
   getRuntimeIntelligenceGraphCoverage as getRuntimeIntelligenceGraphCoverageRecord,
   getRuntimeIntelligenceGraphHealth as getRuntimeIntelligenceGraphHealthRecord,
@@ -185,6 +189,48 @@ export const getRuntimeTruthQuality = async (req, res, next) => {
 
     return res.status(200).json({
       data: truthQuality,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const createGovernedReasoningExecution = async (req, res, next) => {
+  try {
+    const execution = await createGovernedReasoningExecutionRecord({
+      actorUserId: req.context?.userId || req.userId,
+      auditRequest: req,
+      payload: req.body,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+      scopes: req.scopes,
+    })
+
+    return res.status(201).json({
+      data: execution,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const getGovernedReasoningExecution = async (req, res, next) => {
+  try {
+    const execution = await getGovernedReasoningExecutionRecord({
+      executionId: req.params.executionId,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+      scopes: req.scopes,
+    })
+
+    return res.status(200).json({
+      data: execution,
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
