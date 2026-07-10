@@ -14646,7 +14646,7 @@ describe('Runtime Instance API', () => {
       manifestVersion: '1.0.0',
       activeCount: 0,
       requiredCount: 5,
-      sourceOnlyCount: 5,
+      sourceOnlyCount: 0,
     }))
     expect(res.body.data.safetyGates).toEqual(expect.objectContaining({
       status: 'BLOCKED',
@@ -16775,56 +16775,35 @@ describe('Runtime Instance API', () => {
       manifestVersion: '1.0.0',
       summary: 'Knowledge Pack Registry activation is required before Outcome Studio sessions can start.',
       sourceBundle: expect.objectContaining({
-        status: 'SOURCE_ONLY',
-        starterPacks: expect.arrayContaining([
-          expect.objectContaining({
-            packType: 'ARL',
-            sourceFilename: 'adaptive-reasoning-layer-v1.yaml',
-          }),
-          expect.objectContaining({
-            packType: 'RL',
-            sourceFilename: 'rendering-layer-v1.yaml',
-          }),
-          expect.objectContaining({
-            packType: 'OUTPUT_SCHEMA',
-            sourceFilename: 'output-schemas-pack-v1.yaml',
-          }),
-          expect.objectContaining({
-            packType: 'TRUTH_CERTIFICATION',
-            sourceFilename: 'truth-certification-pack-v1.yaml',
-          }),
-          expect.objectContaining({
-            packType: 'OUTPUT_TYPE_DEFINITION',
-            sourceFilename: 'outcome-output-types-v1.yaml',
-          }),
-        ]),
+        status: 'RETIRED',
+        sourceDocuments: [],
       }),
     }))
     expect(res.body.data.packBinding.requiredPacks).toHaveLength(5)
     expect(res.body.data.packBinding.requiredPacks).toEqual(expect.arrayContaining([
       expect.objectContaining({
         packType: 'ARL',
-        status: 'SOURCE_ONLY',
+        status: 'MISSING',
         runtimeBindable: false,
       }),
       expect.objectContaining({
         packType: 'RL',
-        status: 'SOURCE_ONLY',
+        status: 'MISSING',
         runtimeBindable: false,
       }),
       expect.objectContaining({
         packType: 'OUTPUT_SCHEMA',
-        status: 'SOURCE_ONLY',
+        status: 'MISSING',
         runtimeBindable: false,
       }),
       expect.objectContaining({
         packType: 'TRUTH_CERTIFICATION',
-        status: 'SOURCE_ONLY',
+        status: 'MISSING',
         runtimeBindable: false,
       }),
       expect.objectContaining({
         packType: 'OUTPUT_TYPE_DEFINITION',
-        status: 'SOURCE_ONLY',
+        status: 'MISSING',
         runtimeBindable: false,
       }),
     ]))

@@ -23,6 +23,7 @@
     "customers:enforce-name-uniqueness": "node src/scripts/enforceCustomerNameUniqueness.js",
     "governance:backfill": "node src/scripts/backfillCustomerLicenseGovernance.js",
     "governance:report-admin-invariants": "node src/scripts/reportCustomerAdminInvariantViolations.js",
+    "knowledge-packs:retire-starter": "node src/scripts/retireOutcomeStarterKnowledgePacks.js",
     "test": "set NODE_ENV=test && node --experimental-vm-modules node_modules/jest/bin/jest.js",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage"

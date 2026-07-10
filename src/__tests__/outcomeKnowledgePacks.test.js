@@ -172,6 +172,9 @@ endobj
 const buildTestContentHash = (content) =>
   `sha256:${crypto.createHash('sha256').update(String(content || ''), 'utf8').digest('hex')}`
 
+const DEFAULT_SOURCE_DOCUMENT_TEXT =
+  'Output Schemas source document with required sections, schema guidance, and prohibited unsupported claims.'
+
 const REQUIRED_PACKS = [
   { packCategory: 'OUTCOME', packType: 'ARL', packKey: 'adaptive-reasoning-layer', label: 'Adaptive Reasoning Layer' },
   { packCategory: 'OUTCOME', packType: 'RL', packKey: 'rendering-layer', label: 'Rendering Layer' },
@@ -304,13 +307,26 @@ const makeKnowledgePack = (overrides = {}) => ({
   packType: 'OUTPUT_SCHEMA',
   packKey: 'output-schemas-pack',
   label: 'Output Schemas',
-  description: 'Starter output schema pack.',
+  description: 'Imported output schema pack.',
   status: 'VALIDATED',
   latestVersionId: 'kpv-output-schema-output-schemas-pack-1-0-0-global',
   latestSemanticVersion: '1.0.0',
   sourceMetadata: {
-    sourceFilename: 'output-schemas-pack-v1.yaml',
+    importMode: 'SOURCE_DOCUMENT_IMPORT_DRAFT',
+    sourceStatus: 'SOURCE_DOCUMENT_PRESENT',
+    sourceFilename: 'output-schemas-pack-v1.md',
+    sourceDocumentId: 'kpsrc-output-schema-output-schemas-pack-1-0-0-source-hash',
+    sourceHash: 'sha256:source-hash',
+    contentPersisted: true,
+    sourceDocument: {
+      sourceDocumentId: 'kpsrc-output-schema-output-schemas-pack-1-0-0-source-hash',
+      filename: 'output-schemas-pack-v1.md',
+      fileExtension: 'md',
+      sourceHash: 'sha256:source-hash',
+    },
   },
+  authoringMode: 'IMPORT_SOURCE_DOCUMENT',
+  reviewStatus: 'APPROVED',
   content: {
     hidden: 'Pack content must not leak from list/detail responses.',
   },
@@ -330,12 +346,27 @@ const makeKnowledgePackVersion = (overrides = {}) => ({
   status: 'VALIDATED',
   scopeType: 'GLOBAL',
   scopeKey: 'GLOBAL',
-  contentHash: 'sha256:output-schema-content',
-  content: {
-    hidden: 'Version content must not leak from detail responses.',
+  contentHash: buildTestContentHash(DEFAULT_SOURCE_DOCUMENT_TEXT),
+  content: DEFAULT_SOURCE_DOCUMENT_TEXT,
+  contentFormat: 'MARKDOWN',
+  sourceFilename: 'output-schemas-pack-v1.md',
+  sourceDocuments: [{
+    sourceDocumentId: 'kpsrc-output-schema-output-schemas-pack-1-0-0-source-hash',
+    filename: 'output-schemas-pack-v1.md',
+    fileExtension: 'md',
+    sourceHash: 'sha256:source-hash',
+  }],
+  sourceMetadata: {
+    importMode: 'SOURCE_DOCUMENT_IMPORT_DRAFT',
+    sourceStatus: 'SOURCE_DOCUMENT_PRESENT',
+    sourceFilename: 'output-schemas-pack-v1.md',
+    sourceDocumentId: 'kpsrc-output-schema-output-schemas-pack-1-0-0-source-hash',
+    sourceHash: 'sha256:source-hash',
+    contentPersisted: true,
   },
-  sourceMetadata: {},
-  validationSummary: {},
+  validationSummary: { status: 'PASSED' },
+  authoringMode: 'IMPORT_SOURCE_DOCUMENT',
+  reviewStatus: 'APPROVED',
   validatedAt: '2026-06-15T09:10:00.000Z',
   ...overrides,
 })
@@ -665,7 +696,7 @@ beforeEach(() => {
 })
 
 describe('Outcome Studio Knowledge Pack Registry API', () => {
-  test('GET /api/v1/super-admin/outcome-studio/knowledge-packs returns safe registry metadata and source-only starter bundle', async () => {
+  test('GET /api/v1/super-admin/outcome-studio/knowledge-packs returns safe registry metadata and retired source bundle status', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
 
     const res = await request
@@ -683,47 +714,8 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       }),
     ])
     expect(res.body.sourceBundle).toEqual(expect.objectContaining({
-      status: 'SOURCE_ONLY',
-      starterPacks: expect.arrayContaining([
-        expect.objectContaining({
-          packCategory: 'OUTCOME',
-          packType: 'ARL',
-          sourceFilename: 'adaptive-reasoning-layer-v1.yaml',
-          runtimeBindable: false,
-          importStatus: 'NOT_IMPORTED',
-        }),
-        expect.objectContaining({
-          packCategory: 'OUTCOME',
-          packType: 'RL',
-          sourceFilename: 'rendering-layer-v1.yaml',
-          runtimeBindable: false,
-          importStatus: 'NOT_IMPORTED',
-        }),
-        expect.objectContaining({
-          packCategory: 'OUTCOME',
-          packType: 'OUTPUT_SCHEMA',
-          sourceFilename: 'output-schemas-pack-v1.yaml',
-          runtimeBindable: false,
-          importStatus: 'IMPORTED',
-          latestVersionId: 'kpv-output-schema-output-schemas-pack-1-0-0-global',
-          latestSemanticVersion: '1.0.0',
-          registryStatus: 'VALIDATED',
-        }),
-        expect.objectContaining({
-          packCategory: 'PLATFORM',
-          packType: 'TRUTH_CERTIFICATION',
-          sourceFilename: 'truth-certification-pack-v1.yaml',
-          runtimeBindable: false,
-          importStatus: 'NOT_IMPORTED',
-        }),
-        expect.objectContaining({
-          packCategory: 'OUTCOME',
-          packType: 'OUTPUT_TYPE_DEFINITION',
-          sourceFilename: 'outcome-output-types-v1.yaml',
-          runtimeBindable: false,
-          importStatus: 'NOT_IMPORTED',
-        }),
-      ]),
+      status: 'RETIRED',
+      sourceDocuments: [],
     }))
     expect(JSON.stringify(res.body)).not.toContain('Pack content must not leak')
     expect(KnowledgePack.find).toHaveBeenCalledWith({})
@@ -1918,55 +1910,34 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
     expect(res.body.data.requiredPacks).toEqual(expect.arrayContaining([
       expect.objectContaining({
         packType: 'ARL',
-        status: 'SOURCE_ONLY',
+        status: 'MISSING',
         runtimeBindable: false,
       }),
       expect.objectContaining({
         packType: 'RL',
-        status: 'SOURCE_ONLY',
+        status: 'MISSING',
         runtimeBindable: false,
       }),
       expect.objectContaining({
         packType: 'OUTPUT_SCHEMA',
-        status: 'SOURCE_ONLY',
+        status: 'MISSING',
         runtimeBindable: false,
       }),
       expect.objectContaining({
         packType: 'TRUTH_CERTIFICATION',
-        status: 'SOURCE_ONLY',
+        status: 'MISSING',
         runtimeBindable: false,
       }),
       expect.objectContaining({
         packType: 'OUTPUT_TYPE_DEFINITION',
-        status: 'SOURCE_ONLY',
+        status: 'MISSING',
         runtimeBindable: false,
       }),
     ]))
-    expect(res.body.data.sourceBundle.starterPacks).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        packType: 'ARL',
-        importStatus: 'NOT_IMPORTED',
-      }),
-      expect.objectContaining({
-        packType: 'RL',
-        importStatus: 'NOT_IMPORTED',
-      }),
-      expect.objectContaining({
-        packType: 'OUTPUT_SCHEMA',
-        importStatus: 'IMPORTED',
-        latestVersionId: 'kpv-output-schema-output-schemas-pack-1-0-0-global',
-        latestSemanticVersion: '1.0.0',
-        registryStatus: 'VALIDATED',
-      }),
-      expect.objectContaining({
-        packType: 'TRUTH_CERTIFICATION',
-        importStatus: 'NOT_IMPORTED',
-      }),
-      expect.objectContaining({
-        packType: 'OUTPUT_TYPE_DEFINITION',
-        importStatus: 'NOT_IMPORTED',
-      }),
-    ]))
+    expect(res.body.data.sourceBundle).toEqual(expect.objectContaining({
+      status: 'RETIRED',
+      sourceDocuments: [],
+    }))
   })
 
   test('GET /api/v1/super-admin/outcome-studio/knowledge-packs/resolution-preview resolves active packs without exposing content', async () => {
@@ -2027,7 +1998,7 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       versions: [
         expect.objectContaining({
           versionId: 'kpv-output-schema-output-schemas-pack-1-0-0-global',
-          contentHash: 'sha256:output-schema-content',
+          contentHash: buildTestContentHash(DEFAULT_SOURCE_DOCUMENT_TEXT),
         }),
       ],
       activations: [
@@ -2154,19 +2125,38 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
 
   test('GET /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/versions/:versionId/content-preview returns approved ARL source content only through preview', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
+    const packRecord = makeKnowledgePack({
+      packId: 'kp-arl-adaptive-reasoning-layer',
+      packCategory: 'OUTCOME',
+      packType: 'ARL',
+      packKey: 'adaptive-reasoning-layer',
+      label: 'Adaptive Reasoning Layer',
+      sourceMetadata: {
+        importMode: 'SOURCE_DOCUMENT_IMPORT_DRAFT',
+        sourceStatus: 'SOURCE_DOCUMENT_PRESENT',
+        sourceFilename: 'adaptive-reasoning-layer-v1.yaml',
+        sourceDocumentId: 'kpsrc-arl-adaptive-reasoning-layer-1-0-0-source-hash',
+        sourceHash: 'sha256:source-hash',
+        contentPersisted: true,
+      },
+      authoringMode: 'IMPORT_SOURCE_DOCUMENT',
+      reviewStatus: 'APPROVED',
+    })
     const versionDoc = makeKnowledgePackVersionDoc({
       versionId: 'kpv-arl-adaptive-reasoning-layer-1-0-0-global',
       packId: 'kp-arl-adaptive-reasoning-layer',
       packType: 'ARL',
       packKey: 'adaptive-reasoning-layer',
       content: ARL_YAML,
+      contentHash: buildTestContentHash(ARL_YAML),
       contentFormat: 'YAML',
       sourceFilename: 'adaptive-reasoning-layer-v1.yaml',
     })
+    KnowledgePack.findOne.mockReturnValueOnce(buildFindOneChain(packRecord))
     KnowledgePackVersion.findOne.mockReturnValueOnce(buildVersionFindOneChain(versionDoc))
 
     const res = await request
-      .get('/api/v1/super-admin/outcome-studio/knowledge-packs/adaptive-reasoning-layer/versions/kpv-adaptive-reasoning-layer-1-0-0-global/content-preview')
+      .get(`/api/v1/super-admin/outcome-studio/knowledge-packs/adaptive-reasoning-layer/versions/${versionDoc.versionId}/content-preview`)
       .set('Authorization', `Bearer ${token}`)
 
     expect(res.status).toBe(200)
@@ -2309,230 +2299,25 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
     expect(JSON.stringify(res.body)).not.toContain('EXECUTIVE_BRIEF')
   })
 
-  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/starter-import imports bundled starter source as validated without activation', async () => {
+  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/starter-import is retired in favor of source-document import', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
-    KnowledgePack.findOneAndUpdate.mockResolvedValueOnce(makeKnowledgePack({
-      status: 'VALIDATED',
-      latestVersionId: 'kpv-output-schema-output-schemas-pack-1-0-0-global',
-      latestSemanticVersion: '1.0.0',
-    }))
 
     const res = await request
       .post('/api/v1/super-admin/outcome-studio/knowledge-packs/output-schemas-pack/starter-import')
       .set('Authorization', `Bearer ${token}`)
       .send({})
 
-    expect(res.status).toBe(201)
-    const [, packUpsert] = KnowledgePack.findOneAndUpdate.mock.calls[0]
-    expect(Object.keys(packUpsert.$setOnInsert)).not.toContain('label')
-    expect(packUpsert.$set).toEqual(expect.objectContaining({
-      packCategory: 'OUTCOME',
-      label: 'Output Schemas',
-    }))
-    expect(KnowledgePackVersion.prototype.save.mock.contexts[0]).toEqual(expect.objectContaining({
-      packCategory: 'OUTCOME',
-    }))
-    expect(res.body.data.version).toEqual(expect.objectContaining({
-      versionId: 'kpv-output-schema-output-schemas-pack-1-0-0-global',
-      packCategory: 'OUTCOME',
-      packType: 'OUTPUT_SCHEMA',
-      packKey: 'output-schemas-pack',
-      status: 'VALIDATED',
-      contentFormat: 'YAML',
-      sourceFilename: 'output-schemas-pack-v1.yaml',
-      validatedAt: expect.any(String),
-    }))
-    expect(res.body.data.version.contentHash).toMatch(/^sha256:/)
-    expect(res.body.data.validationSummary).toEqual(expect.objectContaining({
-      status: 'PASSED',
-      mode: 'SOURCE_ONLY_TEXT_VALIDATION',
-    }))
-    expect(KnowledgePackVersion.prototype.save).toHaveBeenCalled()
-    expect(KnowledgePackActivation.updateMany).not.toHaveBeenCalled()
-    const auditPayload = AuditLog.createLog.mock.calls.find(
-      ([payload]) => payload.action === 'OUTCOME_KNOWLEDGE_PACK_STARTER_IMPORTED',
-    )?.[0]
-    expect(auditPayload).toEqual(expect.objectContaining({
-      action: 'OUTCOME_KNOWLEDGE_PACK_STARTER_IMPORTED',
-      diff: expect.objectContaining({
-        contentVisible: false,
-        contentIncludedInAudit: false,
-        importMode: 'BUNDLED_STARTER_SOURCE',
-        sourceFilename: 'output-schemas-pack-v1.yaml',
-      }),
-    }))
-    expect(JSON.stringify(res.body)).not.toContain('Executive Summary')
-    expect(JSON.stringify(res.body)).not.toContain('required_sections')
-    expect(JSON.stringify(AuditLog.createLog.mock.calls)).not.toContain('Executive Summary')
-  })
-
-  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/starter-import rejects duplicate bundled imports', async () => {
-    const token = await getAccessTokenForUser(makeFakeUser())
-    KnowledgePackVersion.findOne.mockReturnValueOnce(
-      buildVersionFindOneChain(makeKnowledgePackVersion()),
-    )
-
-    const res = await request
-      .post('/api/v1/super-admin/outcome-studio/knowledge-packs/output-schemas-pack/starter-import')
-      .set('Authorization', `Bearer ${token}`)
-      .send({})
-
-    expect(res.status).toBe(409)
-    expect(res.body.error.details.reason).toBe('PACK_VERSION_ALREADY_EXISTS')
+    expect(res.status).toBe(410)
+    expect(res.body.error.code).toBe('GONE')
+    expect(res.body.error.details.reason).toBe('PACK_STARTER_AUTHORING_RETIRED')
+    expect(res.body.error.details.replacementWorkflow).toBe('IMPORT_SOURCE_DOCUMENT')
+    expect(KnowledgePack.findOneAndUpdate).not.toHaveBeenCalled()
     expect(KnowledgePackVersion.prototype.save).not.toHaveBeenCalled()
     expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 
-  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/starter-import imports bundled ARL starter source', async () => {
+  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/versions is retired in favor of source-document import', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
-    KnowledgePack.findOneAndUpdate.mockResolvedValueOnce(makeKnowledgePack({
-      packId: 'kp-arl-adaptive-reasoning-layer',
-      packType: 'ARL',
-      packKey: 'adaptive-reasoning-layer',
-      label: 'Adaptive Reasoning Layer',
-      status: 'VALIDATED',
-      latestVersionId: 'kpv-arl-adaptive-reasoning-layer-1-0-0-global',
-      latestSemanticVersion: '1.0.0',
-    }))
-
-    const res = await request
-      .post('/api/v1/super-admin/outcome-studio/knowledge-packs/adaptive-reasoning-layer/starter-import')
-      .set('Authorization', `Bearer ${token}`)
-      .send({})
-
-    expect(res.status).toBe(201)
-    expect(res.body.data.version).toEqual(expect.objectContaining({
-      versionId: 'kpv-arl-adaptive-reasoning-layer-1-0-0-global',
-      packType: 'ARL',
-      packKey: 'adaptive-reasoning-layer',
-      status: 'VALIDATED',
-      contentFormat: 'YAML',
-      sourceFilename: 'adaptive-reasoning-layer-v1.yaml',
-      validatedAt: expect.any(String),
-    }))
-    expect(res.body.data.validationSummary).toEqual(expect.objectContaining({
-      status: 'PASSED',
-      mode: 'SOURCE_ONLY_TEXT_VALIDATION',
-    }))
-    const auditPayload = AuditLog.createLog.mock.calls.find(
-      ([payload]) => payload.action === 'OUTCOME_KNOWLEDGE_PACK_STARTER_IMPORTED',
-    )?.[0]
-    expect(auditPayload.diff).toEqual(expect.objectContaining({
-      contentVisible: false,
-      contentIncludedInAudit: false,
-      importMode: 'BUNDLED_STARTER_SOURCE',
-      sourceFilename: 'adaptive-reasoning-layer-v1.yaml',
-    }))
-    expect(JSON.stringify(res.body)).not.toContain('reasoning_stages')
-  })
-
-  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/starter-import fails closed and rolls back when import audit cannot persist', async () => {
-    const token = await getAccessTokenForUser(makeFakeUser())
-    KnowledgePack.findOne.mockReturnValueOnce(buildFindOneChain(null))
-    AuditLog.createLog.mockImplementation(async (payload) => {
-      if (payload.action === 'OUTCOME_KNOWLEDGE_PACK_STARTER_IMPORTED') {
-        throw new Error('audit unavailable')
-      }
-      return {}
-    })
-
-    const res = await request
-      .post('/api/v1/super-admin/outcome-studio/knowledge-packs/output-schemas-pack/starter-import')
-      .set('Authorization', `Bearer ${token}`)
-      .send({})
-
-    expect(res.status).toBe(500)
-    expect(res.body.error.code).toBe('OUTCOME_KNOWLEDGE_PACK_AUDIT_FAILED')
-    expect(res.body.error.details.reason).toBe('AUDIT_PERSISTENCE_FAILED')
-    expect(KnowledgePackVersion.deleteOne).toHaveBeenCalledWith({
-      versionId: 'kpv-output-schema-output-schemas-pack-1-0-0-global',
-    })
-    expect(KnowledgePack.deleteOne).toHaveBeenCalledWith({
-      packId: 'kp-output-schema-output-schemas-pack',
-    })
-    expect(JSON.stringify(res.body)).not.toContain('EXECUTIVE_BRIEF')
-  })
-
-  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/starter-import uses transaction rollback when connected', async () => {
-    const token = await getAccessTokenForUser(makeFakeUser())
-    const rollbackSession = buildRollbackSession()
-    setMongooseReadyState(1)
-    startSessionSpy.mockResolvedValueOnce(rollbackSession)
-    KnowledgePack.findOne.mockReturnValueOnce(buildFindOneChain(null))
-    AuditLog.createLog.mockImplementation(async (payload) => {
-      if (payload.action === 'OUTCOME_KNOWLEDGE_PACK_STARTER_IMPORTED') {
-        throw new Error('audit unavailable')
-      }
-      return {}
-    })
-
-    const res = await request
-      .post('/api/v1/super-admin/outcome-studio/knowledge-packs/output-schemas-pack/starter-import')
-      .set('Authorization', `Bearer ${token}`)
-      .send({})
-
-    expect(res.status).toBe(500)
-    expect(res.body.error.code).toBe('OUTCOME_KNOWLEDGE_PACK_AUDIT_FAILED')
-    expect(startSessionSpy).toHaveBeenCalled()
-    expect(rollbackSession.withTransaction).toHaveBeenCalled()
-    expect(rollbackSession.endSession).toHaveBeenCalled()
-    expect(KnowledgePackVersion.prototype.save).toHaveBeenCalledWith({ session: rollbackSession })
-    expect(AuditLog.createLog).toHaveBeenCalledWith(
-      expect.objectContaining({ action: 'OUTCOME_KNOWLEDGE_PACK_STARTER_IMPORTED' }),
-      expect.objectContaining({ session: rollbackSession }),
-    )
-    expect(KnowledgePackVersion.deleteOne).not.toHaveBeenCalled()
-    expect(KnowledgePack.deleteOne).not.toHaveBeenCalled()
-  })
-
-  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/starter-import removes new category metadata when existing-row audit rollback runs', async () => {
-    const token = await getAccessTokenForUser(makeFakeUser())
-    const existingPack = makeKnowledgePack({
-      status: 'DRAFT',
-      latestVersionId: 'kpv-output-schema-output-schemas-pack-0-9-0-global',
-      latestSemanticVersion: '0.9.0',
-    })
-    delete existingPack.packCategory
-    KnowledgePack.findOne.mockReturnValueOnce(buildFindOneChain(existingPack))
-    AuditLog.createLog.mockImplementation(async (payload) => {
-      if (payload.action === 'OUTCOME_KNOWLEDGE_PACK_STARTER_IMPORTED') {
-        throw new Error('audit unavailable')
-      }
-      return {}
-    })
-
-    const res = await request
-      .post('/api/v1/super-admin/outcome-studio/knowledge-packs/output-schemas-pack/starter-import')
-      .set('Authorization', `Bearer ${token}`)
-      .send({})
-
-    expect(res.status).toBe(500)
-    expect(KnowledgePackVersion.deleteOne).toHaveBeenCalledWith({
-      versionId: 'kpv-output-schema-output-schemas-pack-1-0-0-global',
-    })
-    expect(KnowledgePack.deleteOne).not.toHaveBeenCalled()
-    expect(KnowledgePack.updateOne).toHaveBeenCalledWith(
-      { packId: 'kp-output-schema-output-schemas-pack' },
-      expect.objectContaining({
-        $set: expect.objectContaining({
-          status: 'DRAFT',
-          latestVersionId: 'kpv-output-schema-output-schemas-pack-0-9-0-global',
-          latestSemanticVersion: '0.9.0',
-        }),
-        $unset: {
-          packCategory: '',
-        },
-      }),
-    )
-  })
-
-  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/versions uploads starter source as draft without activation', async () => {
-    const token = await getAccessTokenForUser(makeFakeUser())
-    KnowledgePack.findOneAndUpdate.mockResolvedValueOnce(makeKnowledgePack({
-      status: 'DRAFT',
-      latestVersionId: 'kpv-output-schema-output-schemas-pack-1-0-0-global',
-      latestSemanticVersion: '1.0.0',
-    }))
 
     const res = await request
       .post('/api/v1/super-admin/outcome-studio/knowledge-packs/kp-output-schema-output-schemas-pack/versions')
@@ -2543,59 +2328,13 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
         content: OUTPUT_SCHEMAS_YAML,
       })
 
-    expect(res.status).toBe(201)
-    expect(res.body.data.version).toEqual(expect.objectContaining({
-      versionId: 'kpv-output-schema-output-schemas-pack-1-0-0-global',
-      packType: 'OUTPUT_SCHEMA',
-      packKey: 'output-schemas-pack',
-      status: 'DRAFT',
-      contentFormat: 'YAML',
-      sourceFilename: 'output-schemas-pack-v1.yaml',
-    }))
-    expect(res.body.data.version.contentHash).toMatch(/^sha256:/)
-    expect(JSON.stringify(res.body)).not.toContain('Executive Summary')
-    expect(KnowledgePackActivation.updateMany).not.toHaveBeenCalled()
-    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
-      action: 'OUTCOME_KNOWLEDGE_PACK_VERSION_UPLOADED',
-    }))
-  })
-
-  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/versions uploads RL starter source as draft without activation', async () => {
-    const token = await getAccessTokenForUser(makeFakeUser())
-    KnowledgePack.findOneAndUpdate.mockResolvedValueOnce(makeKnowledgePack({
-      packId: 'kp-rl-rendering-layer',
-      packType: 'RL',
-      packKey: 'rendering-layer',
-      label: 'Rendering Layer',
-      status: 'DRAFT',
-      latestVersionId: 'kpv-rendering-layer-1-0-0-global',
-      latestSemanticVersion: '1.0.0',
-    }))
-
-    const res = await request
-      .post('/api/v1/super-admin/outcome-studio/knowledge-packs/rendering-layer/versions')
-      .set('Authorization', `Bearer ${token}`)
-      .send({
-        semanticVersion: '1.0.0',
-        schemaVersion: '1.0.0',
-        content: RL_YAML,
-      })
-
-    expect(res.status).toBe(201)
-    expect(res.body.data.version).toEqual(expect.objectContaining({
-      versionId: 'kpv-rl-rendering-layer-1-0-0-global',
-      packType: 'RL',
-      packKey: 'rendering-layer',
-      status: 'DRAFT',
-      contentFormat: 'YAML',
-      sourceFilename: 'rendering-layer-v1.yaml',
-    }))
-    expect(KnowledgePackVersion.prototype.save).toHaveBeenCalled()
-    expect(KnowledgePackActivation.updateMany).not.toHaveBeenCalled()
-    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
-      action: 'OUTCOME_KNOWLEDGE_PACK_VERSION_UPLOADED',
-    }))
-    expect(JSON.stringify(res.body)).not.toContain('rendering_rules')
+    expect(res.status).toBe(410)
+    expect(res.body.error.code).toBe('GONE')
+    expect(res.body.error.details.reason).toBe('PACK_STARTER_AUTHORING_RETIRED')
+    expect(res.body.error.details.replacementWorkflow).toBe('IMPORT_SOURCE_DOCUMENT')
+    expect(KnowledgePack.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(KnowledgePackVersion.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 
   test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import creates a text source-document draft with server-derived source metadata', async () => {
@@ -3118,20 +2857,16 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
     expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 
-  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/versions/:versionId/validate marks valid starter source as validated', async () => {
+  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/versions/:versionId/validate marks valid source-document content as validated', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     const versionDoc = makeKnowledgePackVersionDoc({
       status: 'DRAFT',
       content: OUTPUT_SCHEMAS_YAML,
+      contentHash: buildTestContentHash(OUTPUT_SCHEMAS_YAML),
       validationSummary: {},
       validatedAt: null,
     })
     KnowledgePackVersion.findOne.mockReturnValueOnce(buildVersionFindOneChain(versionDoc))
-    KnowledgePack.findOneAndUpdate.mockResolvedValueOnce(makeKnowledgePack({
-      status: 'VALIDATED',
-      latestVersionId: versionDoc.versionId,
-      latestSemanticVersion: versionDoc.semanticVersion,
-    }))
 
     const res = await request
       .post(`/api/v1/super-admin/outcome-studio/knowledge-packs/kp-output-schema-output-schemas-pack/versions/${versionDoc.versionId}/validate`)
@@ -3152,6 +2887,17 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'OUTCOME_KNOWLEDGE_PACK_VERSION_VALIDATED',
     }))
+    expect(KnowledgePack.updateOne).toHaveBeenCalledWith(
+      { packId: 'kp-output-schema-output-schemas-pack' },
+      expect.objectContaining({
+        $set: expect.objectContaining({
+          status: 'VALIDATED',
+          latestVersionId: versionDoc.versionId,
+          latestSemanticVersion: versionDoc.semanticVersion,
+        }),
+      }),
+      expect.any(Object),
+    )
     expect(JSON.stringify(res.body)).not.toContain('Executive Summary')
   })
 
@@ -3627,6 +3373,7 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
     const versionDoc = makeKnowledgePackVersionDoc({
       status: 'VALIDATED',
       content: OUTPUT_SCHEMAS_YAML,
+      contentHash: buildTestContentHash(OUTPUT_SCHEMAS_YAML),
     })
     KnowledgePackVersion.findOne.mockReturnValueOnce(buildVersionFindOneChain(versionDoc))
     KnowledgePack.findOneAndUpdate.mockResolvedValueOnce(makeKnowledgePack({
@@ -3679,6 +3426,7 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
     const versionDoc = makeKnowledgePackVersionDoc({
       status: 'VALIDATED',
       content: OUTPUT_SCHEMAS_YAML,
+      contentHash: buildTestContentHash(OUTPUT_SCHEMAS_YAML),
     })
     KnowledgePackVersion.findOne.mockReturnValueOnce(buildVersionFindOneChain(versionDoc))
     AuditLog.createLog.mockImplementation(async (payload) => {
@@ -3714,6 +3462,7 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
     const versionDoc = makeKnowledgePackVersionDoc({
       status: 'VALIDATED',
       content: OUTPUT_SCHEMAS_YAML,
+      contentHash: buildTestContentHash(OUTPUT_SCHEMAS_YAML),
     })
     const rollbackSession = buildRollbackSession([versionDoc])
     setMongooseReadyState(1)
@@ -3955,6 +3704,7 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       semanticVersion: '1.0.0',
       status: 'VALIDATED',
       content: OUTPUT_SCHEMAS_YAML,
+      contentHash: buildTestContentHash(OUTPUT_SCHEMAS_YAML),
     })
     const activeActivation = makeActivation(REQUIRED_PACKS[2], {
       activationId: 'kpa-output-schema-v1-1-active',
@@ -4026,6 +3776,7 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       semanticVersion: '1.0.0',
       status: 'VALIDATED',
       content: OUTPUT_SCHEMAS_YAML,
+      contentHash: buildTestContentHash(OUTPUT_SCHEMAS_YAML),
     })
     const activeActivation = makeActivation(REQUIRED_PACKS[2], {
       activationId: 'kpa-output-schema-v1-1-active',
@@ -4114,7 +3865,7 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
     expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 
-  test('GET /api/v1/super-admin/outcome-studio/knowledge-packs/resolution-preview remains blocked when only starter source packs are active', async () => {
+  test('GET /api/v1/super-admin/outcome-studio/knowledge-packs/resolution-preview remains blocked when required bindings are incomplete', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     KnowledgePackActivation.find.mockReturnValue(buildFindChain([
       makeActivation(REQUIRED_PACKS[2]),

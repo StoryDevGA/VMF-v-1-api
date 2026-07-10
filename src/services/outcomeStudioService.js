@@ -2298,9 +2298,7 @@ const buildReadiness = ({
       manifestVersion: normalizeText(packBinding.manifestVersion),
       activeCount: Array.isArray(packBinding.activePacks) ? packBinding.activePacks.length : 0,
       requiredCount: Array.isArray(packBinding.requiredPacks) ? packBinding.requiredPacks.length : 0,
-      sourceOnlyCount: Array.isArray(packBinding.requiredPacks)
-        ? packBinding.requiredPacks.filter((pack) => pack.status === 'SOURCE_ONLY').length
-        : 0,
+      sourceOnlyCount: 0,
     },
   }
 }

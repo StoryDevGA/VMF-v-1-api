@@ -286,10 +286,7 @@ const buildDefaultManifestPack = (pack = {}) => ({
   executionMode: KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT,
   required: true,
   dependencyKeys: [],
-  sourceAuthority: pack.sourceStatus || '',
-  metadata: {
-    sourceFilename: pack.sourceFilename || '',
-  },
+  metadata: {},
 })
 
 export const buildDefaultOutcomeStudioManifest = () => {

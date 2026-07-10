@@ -17,11 +17,9 @@ import {
   OUTCOME_KNOWLEDGE_PACK_CONTENT_FORMATS,
   OUTCOME_KNOWLEDGE_PACK_RESOLUTION_MODE,
   OUTCOME_KNOWLEDGE_PACK_SCOPE_TYPES,
-  OUTCOME_KNOWLEDGE_PACK_SOURCE_BUNDLE_PATH,
   OUTCOME_KNOWLEDGE_PACK_STATUSES,
   OUTCOME_KNOWLEDGE_PACK_TYPES,
 } from '../constants/outcomeKnowledgePacks.js'
-import { OUTCOME_KNOWLEDGE_PACK_STARTER_SOURCES } from '../constants/outcomeKnowledgePackStarterSources.js'
 import {
   OUTCOME_STUDIO_BINDING_STATUSES,
   OUTCOME_STUDIO_REQUIRED_PACKS,
@@ -68,17 +66,14 @@ export const OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS = Object.freeze({
   PACK_DELETE_BLOCKED_MANIFEST_BOUND: 'PACK_DELETE_BLOCKED_MANIFEST_BOUND',
   PACK_DELETE_TRANSACTION_REQUIRED: 'PACK_DELETE_TRANSACTION_REQUIRED',
   PACK_DELETE_CONFLICT: 'PACK_DELETE_CONFLICT',
+  PACK_STARTER_AUTHORING_RETIRED: 'PACK_STARTER_AUTHORING_RETIRED',
   UNSUPPORTED_SCOPE_TYPE: 'UNSUPPORTED_SCOPE_TYPE',
 })
 
-const STARTER_SOURCE_STATUS = 'SOURCE_ONLY'
+const RETIRED_SOURCE_BUNDLE_STATUS = 'RETIRED'
+const MISSING_REQUIRED_PACK_STATUS = 'MISSING'
 const SOURCE_DOCUMENT_PRESENT_STATUS = 'SOURCE_DOCUMENT_PRESENT'
 const SOURCE_VALIDATION_MODE = 'SOURCE_ONLY_TEXT_VALIDATION'
-const SUPPORTED_SOURCE_PACK_KEYS = new Set(
-  OUTCOME_STUDIO_REQUIRED_PACKS
-    .filter((pack) => pack.sourceStatus === STARTER_SOURCE_STATUS)
-    .map((pack) => `${pack.packType}:${pack.packKey}`),
-)
 const SEMANTIC_VERSION_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/
 const AUDIT_FALLBACK_OBJECT_ID = '000000000000000000000000'
 const ROLLBACK_ELIGIBLE_VERSION_STATUSES = new Set([
@@ -101,6 +96,19 @@ const createKnowledgePackError = ({
     ...details,
   }
   return err
+}
+
+const throwStarterAuthoringRetiredError = ({ packId } = {}) => {
+  throw createKnowledgePackError({
+    status: 410,
+    code: 'GONE',
+    message: 'Starter Knowledge Pack authoring has been retired. Use Import Source Document to create governed Knowledge Pack drafts and new versions.',
+    reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_STARTER_AUTHORING_RETIRED,
+    details: {
+      packId: normalizeText(packId),
+      replacementWorkflow: 'IMPORT_SOURCE_DOCUMENT',
+    },
+  })
 }
 
 const getObjectIdString = (value) => {
@@ -296,109 +304,6 @@ const buildSourceDocumentId = ({
     .slice(0, 180)
 }
 
-const findRequiredPackDefinition = (packId) => {
-  const normalizedPackId = normalizeText(packId)
-  const normalizedPackKey = normalizeLowerKey(normalizedPackId)
-
-  for (const pack of OUTCOME_STUDIO_REQUIRED_PACKS) {
-    const generatedPackId = buildKnowledgePackId(pack)
-    if (
-      normalizedPackId === generatedPackId
-      || normalizedPackKey === normalizeLowerKey(pack.packKey)
-      || normalizedPackKey === normalizeLowerKey(`${pack.packType}:${pack.packKey}`)
-    ) {
-      return pack
-    }
-  }
-
-  return null
-}
-
-const getSourceBackedPackDefinitionOrThrow = (packId) => {
-  const packDefinition = findRequiredPackDefinition(packId)
-  if (!packDefinition) {
-    throw createKnowledgePackError({
-      status: 404,
-      code: 'NOT_FOUND',
-      message: 'Outcome Studio knowledge pack was not found.',
-      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_NOT_FOUND,
-      details: { packId },
-    })
-  }
-
-  const requiredPackKey = `${packDefinition.packType}:${packDefinition.packKey}`
-  if (!SUPPORTED_SOURCE_PACK_KEYS.has(requiredPackKey)) {
-    throw createKnowledgePackError({
-      status: 409,
-      code: 'CONFLICT',
-      message: 'This Outcome Studio knowledge pack does not have an importable starter source in the current bundle.',
-      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_SOURCE_NOT_AVAILABLE,
-      details: {
-        packType: packDefinition.packType,
-        packKey: packDefinition.packKey,
-      },
-    })
-  }
-
-  return packDefinition
-}
-
-const buildStarterPackSourceMetadata = ({ packDefinition, sourceFilename }) => ({
-  sourceStatus: STARTER_SOURCE_STATUS,
-  sourcePath: OUTCOME_KNOWLEDGE_PACK_SOURCE_BUNDLE_PATH,
-  sourceFilename,
-  importedFrom: 'OES-002 starter knowledge pack bundle',
-})
-
-const buildPackUpsertPayload = ({ packDefinition, actorUserId, versionId, semanticVersion, status }) => ({
-  $setOnInsert: {
-    packId: buildKnowledgePackId(packDefinition),
-    packCategory: normalizePackCategory(packDefinition.packCategory, packDefinition.packType),
-    packType: packDefinition.packType,
-    packKey: packDefinition.packKey,
-    description: `${packDefinition.label} starter knowledge pack for Outcome Studio.`,
-    isSystem: true,
-    createdBy: actorUserId || null,
-  },
-  $set: {
-    packCategory: normalizePackCategory(packDefinition.packCategory, packDefinition.packType),
-    label: packDefinition.label,
-    updatedBy: actorUserId || null,
-    sourceMetadata: buildStarterPackSourceMetadata({
-      packDefinition,
-      sourceFilename: packDefinition.sourceFilename,
-    }),
-    ...(status ? { status } : {}),
-    ...(versionId ? { latestVersionId: versionId } : {}),
-    ...(semanticVersion ? { latestSemanticVersion: semanticVersion } : {}),
-  },
-})
-
-const ensureStarterPackRecord = async ({
-  packDefinition,
-  actorUserId,
-  versionId = '',
-  semanticVersion = '',
-  status = '',
-  session = null,
-} = {}) => KnowledgePack.findOneAndUpdate(
-  { packId: buildKnowledgePackId(packDefinition) },
-  buildPackUpsertPayload({
-    packDefinition,
-    actorUserId,
-    versionId,
-    semanticVersion,
-    status,
-  }),
-  {
-    upsert: true,
-    new: true,
-    runValidators: true,
-    setDefaultsOnInsert: true,
-    ...(session ? { session } : {}),
-  },
-)
-
 const ensureSourceDocumentDraftPackRecord = async ({
   packDefinition,
   actorUserId,
@@ -457,162 +362,6 @@ const buildValidationCheck = ({ code, passed, message }) => ({
   status: passed ? 'PASSED' : 'FAILED',
   message,
 })
-
-const contentIncludes = (content, needle) =>
-  String(content || '').toLowerCase().includes(String(needle || '').toLowerCase())
-
-const buildStarterPackValidationSummary = ({ packDefinition, content }) => {
-  const text = String(content || '')
-  const expectedKey = packDefinition.packKey
-  const commonChecks = [
-    buildValidationCheck({
-      code: 'PACK_KEY_MATCH',
-      passed: contentIncludes(text, `key: ${expectedKey}`),
-      message: `Source must declare pack key ${expectedKey}.`,
-    }),
-    buildValidationCheck({
-      code: 'PACK_SECTION_PRESENT',
-      passed: contentIncludes(text, 'pack:'),
-      message: 'Source must include a pack metadata section.',
-    }),
-    buildValidationCheck({
-      code: 'CUSTOMER_SAFE_BOUNDARY_PRESENT',
-      passed: contentIncludes(text, 'must not') || contentIncludes(text, 'prohibited'),
-      message: 'Source must preserve explicit prohibited-output boundaries.',
-    }),
-  ]
-
-  const typeChecksByPackType = {
-    [OUTCOME_KNOWLEDGE_PACK_TYPES.ARL]: [
-      buildValidationCheck({
-        code: 'REASONING_STAGES_PRESENT',
-        passed: contentIncludes(text, 'reasoning_stages:'),
-        message: 'ARL pack must include reasoning stages.',
-      }),
-      buildValidationCheck({
-        code: 'TRUTH_BINDING_RULES_PRESENT',
-        passed: contentIncludes(text, 'truth_binding_rules:'),
-        message: 'ARL pack must include truth binding rules.',
-      }),
-      buildValidationCheck({
-        code: 'SAFETY_GATES_PRESENT',
-        passed: contentIncludes(text, 'safety_gates:'),
-        message: 'ARL pack must include safety gates.',
-      }),
-      buildValidationCheck({
-        code: 'HIDDEN_REASONING_BOUNDARY_PRESENT',
-        passed: contentIncludes(text, 'hidden_from_customer:'),
-        message: 'ARL pack must include hidden-from-customer boundaries.',
-      }),
-    ],
-    [OUTCOME_KNOWLEDGE_PACK_TYPES.RL]: [
-      buildValidationCheck({
-        code: 'RENDERING_RULES_PRESENT',
-        passed: contentIncludes(text, 'rendering_rules:'),
-        message: 'RL pack must include rendering rules.',
-      }),
-      buildValidationCheck({
-        code: 'CUSTOMER_SAFE_OUTPUT_PRESENT',
-        passed: contentIncludes(text, 'customer_safe_output:'),
-        message: 'RL pack must define customer-safe output rules.',
-      }),
-      buildValidationCheck({
-        code: 'EXPORT_RULES_PRESENT',
-        passed: contentIncludes(text, 'export_rules:'),
-        message: 'RL pack must include export rules.',
-      }),
-      buildValidationCheck({
-        code: 'NO_INTERNAL_REASONING_PRESENT',
-        passed: contentIncludes(text, 'no_internal_reasoning'),
-        message: 'RL pack must block internal reasoning disclosure.',
-      }),
-    ],
-    [OUTCOME_KNOWLEDGE_PACK_TYPES.OUTPUT_SCHEMA]: [
-      buildValidationCheck({
-        code: 'SCHEMAS_PRESENT',
-        passed: contentIncludes(text, 'schemas:'),
-        message: 'Output Schema pack must include schemas.',
-      }),
-      buildValidationCheck({
-        code: 'EXECUTIVE_BRIEF_PRESENT',
-        passed: contentIncludes(text, 'EXECUTIVE_BRIEF:'),
-        message: 'Output Schema pack must include the Executive Brief schema.',
-      }),
-      buildValidationCheck({
-        code: 'REQUIRED_SECTIONS_PRESENT',
-        passed: contentIncludes(text, 'required_sections:'),
-        message: 'Output Schema pack must define required sections.',
-      }),
-      buildValidationCheck({
-        code: 'LINEAGE_RULE_PRESENT',
-        passed: contentIncludes(text, 'lineage summary') || contentIncludes(text, 'lineage_summary'),
-        message: 'Output Schema pack must preserve lineage summary requirements.',
-      }),
-    ],
-    [OUTCOME_KNOWLEDGE_PACK_TYPES.TRUTH_CERTIFICATION]: [
-      buildValidationCheck({
-        code: 'CERTIFICATION_LEVELS_PRESENT',
-        passed: contentIncludes(text, 'certification_levels:'),
-        message: 'Truth Certification pack must include certification levels.',
-      }),
-      buildValidationCheck({
-        code: 'BLOCKING_RULES_PRESENT',
-        passed: contentIncludes(text, 'blocking_rules:'),
-        message: 'Truth Certification pack must include blocking rules.',
-      }),
-      buildValidationCheck({
-        code: 'WARNINGS_PRESENT',
-        passed: contentIncludes(text, 'warnings:'),
-        message: 'Truth Certification pack must include warnings.',
-      }),
-      buildValidationCheck({
-        code: 'CERTIFIED_TRUTH_PRESENT',
-        passed: contentIncludes(text, 'CERTIFIED_TRUTH:'),
-        message: 'Truth Certification pack must include Certified Truth rules.',
-      }),
-    ],
-    [OUTCOME_KNOWLEDGE_PACK_TYPES.OUTPUT_TYPE_DEFINITION]: [
-      buildValidationCheck({
-        code: 'OUTPUT_TYPES_PRESENT',
-        passed: contentIncludes(text, 'output_types:'),
-        message: 'Output Type Definition pack must include output types.',
-      }),
-      buildValidationCheck({
-        code: 'ASSET_TYPES_PRESENT',
-        passed: contentIncludes(text, 'asset_types:'),
-        message: 'Output Type Definition pack must include derived asset types.',
-      }),
-      buildValidationCheck({
-        code: 'SUPPORTED_FORMATS_PRESENT',
-        passed: contentIncludes(text, 'supported_formats:'),
-        message: 'Output Type Definition pack must include supported formats.',
-      }),
-      buildValidationCheck({
-        code: 'PUBLISH_REQUIREMENTS_PRESENT',
-        passed: contentIncludes(text, 'publish_requirements:'),
-        message: 'Output Type Definition pack must include publish requirements.',
-      }),
-    ],
-  }
-
-  const typeChecks = typeChecksByPackType[packDefinition.packType] || []
-
-  const checks = [...commonChecks, ...typeChecks]
-  const issues = checks
-    .filter((check) => check.status === 'FAILED')
-    .map((check) => ({
-      code: check.code,
-      message: check.message,
-    }))
-
-  return {
-    status: issues.length === 0 ? 'PASSED' : 'FAILED',
-    mode: SOURCE_VALIDATION_MODE,
-    checkedAt: new Date().toISOString(),
-    checks,
-    issues,
-  }
-}
 
 const getSourceDocumentHash = ({ version = {}, packRecord = {} } = {}) => {
   const sourceDocuments = Array.isArray(version.sourceDocuments) ? version.sourceDocuments : []
@@ -709,53 +458,6 @@ const buildSourceDocumentDraftValidationSummary = ({
     checkedAt: new Date().toISOString(),
     checks,
     issues,
-  }
-}
-
-const getValidatedSourceFilename = ({ packDefinition, sourceFilename }) => {
-  const normalized = normalizeText(sourceFilename || packDefinition.sourceFilename)
-  if (normalized !== packDefinition.sourceFilename) {
-    throw createKnowledgePackError({
-      status: 422,
-      code: 'VALIDATION_FAILED',
-      message: 'Source filename does not match the known starter knowledge pack source.',
-      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_VERSION_VALIDATION_FAILED,
-      details: {
-        field: 'sourceFilename',
-        expected: packDefinition.sourceFilename,
-        received: normalized,
-      },
-    })
-  }
-
-  return normalized
-}
-
-const getStarterSourceKey = (packDefinition = {}) =>
-  `${normalizeToken(packDefinition.packType)}:${normalizeLowerKey(packDefinition.packKey)}`
-
-const getStarterSourceForPackDefinitionOrThrow = (packDefinition) => {
-  const source = OUTCOME_KNOWLEDGE_PACK_STARTER_SOURCES[getStarterSourceKey(packDefinition)]
-  if (!source) {
-    throw createKnowledgePackError({
-      status: 409,
-      code: 'CONFLICT',
-      message: 'This Outcome Studio knowledge pack does not have an importable starter source in the current bundle.',
-      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_SOURCE_NOT_AVAILABLE,
-      details: {
-        packType: packDefinition.packType,
-        packKey: packDefinition.packKey,
-      },
-    })
-  }
-
-  return {
-    ...source,
-    sourceFilename: getValidatedSourceFilename({
-      packDefinition,
-      sourceFilename: source.sourceFilename,
-    }),
-    content: String(source.content || '').trim(),
   }
 }
 
@@ -952,52 +654,6 @@ const toRawPlainObject = (value) => {
   return toPlainObject(value)
 }
 
-const rollbackStarterImportAfterAuditFailure = async ({
-  canonicalPackId,
-  existingPackRecord = null,
-  versionId,
-}) => {
-  const rollbackWrites = [
-    KnowledgePackVersion.deleteOne({ versionId }),
-  ]
-
-  if (existingPackRecord) {
-    const existingPack = toPlainObject(existingPackRecord) || {}
-    const restoreSet = {
-      status: normalizeToken(existingPack.status || OUTCOME_KNOWLEDGE_PACK_STATUSES.DRAFT),
-    }
-    const restoreUnset = {}
-    const fieldsToRestore = [
-      'latestVersionId',
-      'latestSemanticVersion',
-      'packCategory',
-      'label',
-      'description',
-      'sourceMetadata',
-      'updatedBy',
-    ]
-
-    fieldsToRestore.forEach((field) => {
-      if (existingPack[field] !== undefined) restoreSet[field] = existingPack[field]
-      else if (field === 'packCategory') restoreUnset[field] = ''
-    })
-
-    const restoreUpdate = {
-      $set: restoreSet,
-      ...(Object.keys(restoreUnset).length ? { $unset: restoreUnset } : {}),
-    }
-
-    rollbackWrites.push(KnowledgePack.updateOne(
-      { packId: canonicalPackId },
-      restoreUpdate,
-    ))
-  } else if (typeof KnowledgePack.deleteOne === 'function') {
-    rollbackWrites.push(KnowledgePack.deleteOne({ packId: canonicalPackId }))
-  }
-
-  await Promise.allSettled(rollbackWrites)
-}
-
 const stripRestrictedPackContent = (plain = {}) => {
   const clone = { ...plain }
   delete clone.content
@@ -1132,51 +788,9 @@ const serializeKnowledgePackActivation = (activation) => {
   }
 }
 
-const buildSourceBackedPackFilter = () => ({
-  $or: OUTCOME_STUDIO_REQUIRED_PACKS
-    .filter((pack) => pack.sourceStatus === STARTER_SOURCE_STATUS)
-    .map((pack) => ({
-      packType: pack.packType,
-      packKey: pack.packKey,
-    })),
-})
-
-const buildSourcePackRecordMap = (registryPacks = []) => new Map(
-  registryPacks
-    .map((pack) => [getStarterSourceKey(pack), pack])
-    .filter(([key]) => key !== ':'),
-)
-
-const buildOutcomeKnowledgePackStarterPackProjections = (registryPacks = []) => {
-  const sourcePackRecordByKey = buildSourcePackRecordMap(registryPacks)
-
-  return OUTCOME_STUDIO_REQUIRED_PACKS
-    .filter((pack) => pack.sourceStatus === STARTER_SOURCE_STATUS)
-    .map((pack) => {
-      const record = sourcePackRecordByKey.get(getStarterSourceKey(pack))
-      const latestVersionId = normalizeText(record?.latestVersionId)
-      const latestSemanticVersion = normalizeText(record?.latestSemanticVersion)
-      const registryStatus = normalizeToken(record?.status)
-
-      return {
-        packType: pack.packType,
-        packKey: pack.packKey,
-        packCategory: normalizePackCategory(pack.packCategory, pack.packType),
-        label: pack.label,
-        sourceFilename: pack.sourceFilename,
-        runtimeBindable: false,
-        importStatus: latestVersionId ? 'IMPORTED' : 'NOT_IMPORTED',
-        ...(latestVersionId ? { latestVersionId } : {}),
-        ...(latestSemanticVersion ? { latestSemanticVersion } : {}),
-        ...(registryStatus ? { registryStatus } : {}),
-      }
-    })
-}
-
-export const buildOutcomeKnowledgePackSourceBundle = ({ registryPacks = [] } = {}) => ({
-  status: 'SOURCE_ONLY',
-  sourcePath: OUTCOME_KNOWLEDGE_PACK_SOURCE_BUNDLE_PATH,
-  starterPacks: buildOutcomeKnowledgePackStarterPackProjections(registryPacks),
+export const buildOutcomeKnowledgePackSourceBundle = () => ({
+  status: RETIRED_SOURCE_BUNDLE_STATUS,
+  sourceDocuments: [],
 })
 
 const buildScopeCandidate = ({ scopeType, scopeKey, precedence }) => ({
@@ -1298,7 +912,7 @@ const buildRequiredPackProjection = ({ activeActivationByPackKey }) =>
 
     return {
       ...pack,
-      status: pack.sourceStatus || 'MISSING',
+      status: MISSING_REQUIRED_PACK_STATUS,
       runtimeBindable: false,
     }
   })
@@ -1320,17 +934,14 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
   const requiredPackTypes = [...new Set(OUTCOME_STUDIO_REQUIRED_PACKS.map((pack) => pack.packType))]
   const requiredPackKeys = OUTCOME_STUDIO_REQUIRED_PACKS.map((pack) => pack.packKey)
   const scopeKeys = scopeCandidates.map((candidate) => candidate.scopeKey)
-  const [activations, sourcePackRecords] = await Promise.all([
-    KnowledgePackActivation.find({
-      status: OUTCOME_KNOWLEDGE_PACK_ACTIVATION_STATUSES.ACTIVE,
-      packType: { $in: requiredPackTypes },
-      packKey: { $in: requiredPackKeys },
-      scopeKey: { $in: scopeKeys },
-    })
-      .sort({ activatedAt: -1 })
-      .lean(),
-    KnowledgePack.find(buildSourceBackedPackFilter()).lean(),
-  ])
+  const activations = await KnowledgePackActivation.find({
+    status: OUTCOME_KNOWLEDGE_PACK_ACTIVATION_STATUSES.ACTIVE,
+    packType: { $in: requiredPackTypes },
+    packKey: { $in: requiredPackKeys },
+    scopeKey: { $in: scopeKeys },
+  })
+    .sort({ activatedAt: -1 })
+    .lean()
   const activeActivationByPackKey = selectActiveActivations({
     activations,
     scopeCandidates,
@@ -1350,7 +961,7 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
       : 'Knowledge Pack Registry activation is required before Outcome Studio sessions can start.',
     activePacks,
     requiredPacks,
-    sourceBundle: buildOutcomeKnowledgePackSourceBundle({ registryPacks: sourcePackRecords }),
+    sourceBundle: buildOutcomeKnowledgePackSourceBundle(),
     resolution: {
       status,
       scopeCandidates,
@@ -1410,19 +1021,18 @@ export const listOutcomeKnowledgePacks = async ({ query = {} } = {}) => {
   const page = Number(query.page) || 1
   const pageSize = Number(query.pageSize) || 20
   const filter = buildListFilter(query)
-  const [total, rows, sourcePackRecords] = await Promise.all([
+  const [total, rows] = await Promise.all([
     KnowledgePack.countDocuments(filter),
     KnowledgePack.find(filter)
       .sort(buildSort(query))
       .skip((page - 1) * pageSize)
       .limit(pageSize)
       .lean(),
-    KnowledgePack.find(buildSourceBackedPackFilter()).lean(),
   ])
 
   return {
     data: rows.map(serializeKnowledgePack),
-    sourceBundle: buildOutcomeKnowledgePackSourceBundle({ registryPacks: sourcePackRecords }),
+    sourceBundle: buildOutcomeKnowledgePackSourceBundle(),
     meta: {
       page,
       pageSize,
@@ -1472,31 +1082,6 @@ const isImportedSourceDocumentPack = (packRecord = {}) => (
 )
 
 const resolveKnowledgePackContentPreviewContext = async ({ packId } = {}) => {
-  const starterPackDefinition = findRequiredPackDefinition(packId)
-  if (starterPackDefinition) {
-    const requiredPackKey = `${starterPackDefinition.packType}:${starterPackDefinition.packKey}`
-    if (!SUPPORTED_SOURCE_PACK_KEYS.has(requiredPackKey)) {
-      throw createKnowledgePackError({
-        status: 409,
-        code: 'CONFLICT',
-        message: 'This Outcome Studio knowledge pack does not have an importable starter source in the current bundle.',
-        reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_SOURCE_NOT_AVAILABLE,
-        details: {
-          packType: starterPackDefinition.packType,
-          packKey: starterPackDefinition.packKey,
-        },
-      })
-    }
-
-    const canonicalPackId = buildKnowledgePackId(starterPackDefinition)
-    const packRecord = await KnowledgePack.findOne({ packId: canonicalPackId }).lean()
-    return {
-      canonicalPackId,
-      packDefinition: starterPackDefinition,
-      packRecord: packRecordMatchesLookup(packRecord, canonicalPackId) ? packRecord : null,
-    }
-  }
-
   const packRecord = await KnowledgePack.findOne(buildPackLookup(packId)).lean()
   if (!packRecord || !packRecordMatchesLookup(packRecord, packId)) {
     throw createKnowledgePackError({
@@ -1530,31 +1115,6 @@ const resolveKnowledgePackContentPreviewContext = async ({ packId } = {}) => {
 }
 
 const resolveKnowledgePackAuthoringContext = async ({ packId, session = null } = {}) => {
-  const starterPackDefinition = findRequiredPackDefinition(packId)
-  if (starterPackDefinition) {
-    const requiredPackKey = `${starterPackDefinition.packType}:${starterPackDefinition.packKey}`
-    if (!SUPPORTED_SOURCE_PACK_KEYS.has(requiredPackKey)) {
-      throw createKnowledgePackError({
-        status: 409,
-        code: 'CONFLICT',
-        message: 'This Outcome Studio knowledge pack does not have an importable starter source in the current bundle.',
-        reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_SOURCE_NOT_AVAILABLE,
-        details: {
-          packType: starterPackDefinition.packType,
-          packKey: starterPackDefinition.packKey,
-        },
-      })
-    }
-
-    return {
-      canonicalPackId: buildKnowledgePackId(starterPackDefinition),
-      packDefinition: starterPackDefinition,
-      packRecord: null,
-      isImportedSourceDocument: false,
-      isStarterSource: true,
-    }
-  }
-
   const packRecordQuery = KnowledgePack.findOne(buildPackLookup(packId))
   const packRecord = await resolveLeanQuery(withOptionalSession(packRecordQuery, session))
   if (!packRecord || !packRecordMatchesLookup(packRecord, packId)) {
@@ -1585,8 +1145,6 @@ const resolveKnowledgePackAuthoringContext = async ({ packId, session = null } =
     canonicalPackId: normalizeText(packRecord.packId),
     packDefinition: buildPersistedPackDefinition(packRecord),
     packRecord,
-    isImportedSourceDocument: true,
-    isStarterSource: false,
   }
 }
 
@@ -1624,102 +1182,8 @@ export const getOutcomeKnowledgePack = async ({ packId } = {}) => {
 
 export const createOutcomeKnowledgePackVersion = async ({
   packId,
-  body = {},
-  actorUserId = null,
-  auditRequest = null,
 } = {}) => {
-  const packDefinition = getSourceBackedPackDefinitionOrThrow(packId)
-  const semanticVersion = normalizeText(body.semanticVersion)
-  if (!SEMANTIC_VERSION_RE.test(semanticVersion)) {
-    throw createKnowledgePackError({
-      status: 422,
-      code: 'VALIDATION_FAILED',
-      message: 'Knowledge pack semantic version must use major.minor.patch format.',
-      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_VERSION_VALIDATION_FAILED,
-      details: { field: 'semanticVersion' },
-    })
-  }
-
-  const content = String(body.content || '').trim()
-  const sourceFilename = getValidatedSourceFilename({
-    packDefinition,
-    sourceFilename: body.sourceFilename,
-  })
-  const canonicalPackId = buildKnowledgePackId(packDefinition)
-  const scopeType = OUTCOME_KNOWLEDGE_PACK_SCOPE_TYPES.GLOBAL
-  const scopeKey = OUTCOME_KNOWLEDGE_PACK_SCOPE_TYPES.GLOBAL
-  const versionId = buildKnowledgePackVersionId({
-    packType: packDefinition.packType,
-    packKey: packDefinition.packKey,
-    semanticVersion,
-    scopeKey,
-  })
-
-  const existingVersion = await KnowledgePackVersion.findOne({
-    packType: packDefinition.packType,
-    packKey: packDefinition.packKey,
-    semanticVersion,
-    scopeKey,
-  }).lean()
-
-  if (existingVersion) {
-    throw createKnowledgePackError({
-      status: 409,
-      code: 'CONFLICT',
-      message: 'Knowledge pack version already exists for this pack, semantic version, and scope.',
-      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_VERSION_ALREADY_EXISTS,
-      details: {
-        packId: canonicalPackId,
-        versionId,
-        semanticVersion,
-      },
-    })
-  }
-
-  const packRecord = await ensureStarterPackRecord({
-    packDefinition,
-    actorUserId,
-    versionId,
-    semanticVersion,
-    status: OUTCOME_KNOWLEDGE_PACK_STATUSES.DRAFT,
-  })
-  const version = new KnowledgePackVersion({
-    versionId,
-    packId: canonicalPackId,
-    packCategory: normalizePackCategory(packDefinition.packCategory, packDefinition.packType),
-    packType: packDefinition.packType,
-    packKey: packDefinition.packKey,
-    semanticVersion,
-    schemaVersion: normalizeText(body.schemaVersion || '1.0.0'),
-    status: OUTCOME_KNOWLEDGE_PACK_STATUSES.DRAFT,
-    scopeType,
-    scopeKey,
-    contentHash: buildContentHash(content),
-    contentFormat: OUTCOME_KNOWLEDGE_PACK_CONTENT_FORMATS.YAML,
-    sourceFilename,
-    content,
-    sourceMetadata: buildStarterPackSourceMetadata({ packDefinition, sourceFilename }),
-    uploadedBy: actorUserId || null,
-  })
-
-  await saveDocument(version)
-  await logKnowledgePackAudit({
-    auditRequest,
-    action: auditService.AUDIT_ACTIONS.OUTCOME_KNOWLEDGE_PACK_VERSION_UPLOADED,
-    actorUserId,
-    packRecord,
-    packDefinition,
-    version,
-    diff: {
-      status: { from: null, to: OUTCOME_KNOWLEDGE_PACK_STATUSES.DRAFT },
-      contentVisible: false,
-    },
-  })
-
-  return {
-    pack: serializeKnowledgePack(packRecord),
-    version: serializeKnowledgePackVersion(version),
-  }
+  throwStarterAuthoringRetiredError({ packId })
 }
 
 export const importOutcomeKnowledgePackSourceDocumentDraft = async ({
@@ -1949,184 +1413,8 @@ export const importOutcomeKnowledgePackSourceDocumentDraft = async ({
 
 export const importOutcomeKnowledgePackStarterVersion = async ({
   packId,
-  actorUserId = null,
-  auditRequest = null,
 } = {}) => {
-  const packDefinition = getSourceBackedPackDefinitionOrThrow(packId)
-  const starterSource = getStarterSourceForPackDefinitionOrThrow(packDefinition)
-  const semanticVersion = normalizeText(starterSource.semanticVersion)
-  if (!SEMANTIC_VERSION_RE.test(semanticVersion)) {
-    throw createKnowledgePackError({
-      status: 422,
-      code: 'VALIDATION_FAILED',
-      message: 'Knowledge pack starter source semantic version must use major.minor.patch format.',
-      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_VERSION_VALIDATION_FAILED,
-      details: { field: 'semanticVersion' },
-    })
-  }
-
-  const canonicalPackId = buildKnowledgePackId(packDefinition)
-  const scopeType = OUTCOME_KNOWLEDGE_PACK_SCOPE_TYPES.GLOBAL
-  const scopeKey = OUTCOME_KNOWLEDGE_PACK_SCOPE_TYPES.GLOBAL
-  const versionId = buildKnowledgePackVersionId({
-    packType: packDefinition.packType,
-    packKey: packDefinition.packKey,
-    semanticVersion,
-    scopeKey,
-  })
-  const validationSummary = buildStarterPackValidationSummary({
-    packDefinition,
-    content: starterSource.content,
-  })
-
-  if (validationSummary.status !== 'PASSED') {
-    throw createKnowledgePackError({
-      status: 422,
-      code: 'VALIDATION_FAILED',
-      message: 'Knowledge pack starter source validation failed.',
-      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_VERSION_VALIDATION_FAILED,
-      details: {
-        packId: canonicalPackId,
-        versionId,
-        validationSummary,
-      },
-    })
-  }
-
-  const runImportMutation = async (session = null) => {
-    const existingVersion = await resolveLeanQuery(withOptionalSession(
-      KnowledgePackVersion.findOne({
-        packType: packDefinition.packType,
-        packKey: packDefinition.packKey,
-        semanticVersion,
-        scopeKey,
-      }),
-      session,
-    ))
-
-    if (existingVersion) {
-      throw createKnowledgePackError({
-        status: 409,
-        code: 'CONFLICT',
-        message: 'Knowledge pack starter version has already been imported.',
-        reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_VERSION_ALREADY_EXISTS,
-        details: {
-          packId: canonicalPackId,
-          versionId,
-          semanticVersion,
-        },
-      })
-    }
-
-    const existingPackRecord = await resolveLeanQuery(withOptionalSession(
-      KnowledgePack.findOne({ packId: canonicalPackId }),
-      session,
-    ))
-    const packRecord = await ensureStarterPackRecord({
-      packDefinition,
-      actorUserId,
-      versionId,
-      semanticVersion,
-      status: OUTCOME_KNOWLEDGE_PACK_STATUSES.VALIDATED,
-      session,
-    })
-    const version = new KnowledgePackVersion({
-      versionId,
-      packId: canonicalPackId,
-      packCategory: normalizePackCategory(packDefinition.packCategory, packDefinition.packType),
-      packType: packDefinition.packType,
-      packKey: packDefinition.packKey,
-      semanticVersion,
-      schemaVersion: normalizeText(starterSource.schemaVersion || '1.0.0'),
-      status: OUTCOME_KNOWLEDGE_PACK_STATUSES.VALIDATED,
-      scopeType,
-      scopeKey,
-      contentHash: buildContentHash(starterSource.content),
-      contentFormat: OUTCOME_KNOWLEDGE_PACK_CONTENT_FORMATS.YAML,
-      sourceFilename: starterSource.sourceFilename,
-      content: starterSource.content,
-      sourceMetadata: buildStarterPackSourceMetadata({
-        packDefinition,
-        sourceFilename: starterSource.sourceFilename,
-      }),
-      validationSummary,
-      validatedAt: new Date(validationSummary.checkedAt),
-      uploadedBy: actorUserId || null,
-    })
-
-    await saveDocument(version, session)
-
-    try {
-      await logKnowledgePackAudit({
-        auditRequest,
-        action: auditService.AUDIT_ACTIONS.OUTCOME_KNOWLEDGE_PACK_STARTER_IMPORTED,
-        actorUserId,
-        packRecord,
-        packDefinition,
-        version,
-        session,
-        throwOnError: true,
-        diff: {
-          status: {
-            from: null,
-            to: OUTCOME_KNOWLEDGE_PACK_STATUSES.VALIDATED,
-          },
-          sourceFilename: starterSource.sourceFilename,
-          sourcePath: OUTCOME_KNOWLEDGE_PACK_SOURCE_BUNDLE_PATH,
-          importMode: 'BUNDLED_STARTER_SOURCE',
-          contentVisible: false,
-          contentIncludedInAudit: false,
-          validationSummary,
-        },
-      })
-    } catch (err) {
-      err.outcomeKnowledgePackAuditFailure = true
-      err.starterImportRollback = {
-        canonicalPackId,
-        existingPackRecord,
-        versionId,
-      }
-      throw err
-    }
-
-    return {
-      packRecord,
-      validationSummary,
-      version,
-    }
-  }
-
-  let importResult = null
-  let session = null
-
-  try {
-    if (mongoose.connection.readyState === 1) {
-      session = await mongoose.startSession()
-      await session.withTransaction(async () => {
-        importResult = await runImportMutation(session)
-      })
-    } else {
-      importResult = await runImportMutation()
-    }
-  } catch (err) {
-    if (err?.outcomeKnowledgePackAuditFailure) {
-      if (mongoose.connection.readyState !== 1 && err.starterImportRollback) {
-        await rollbackStarterImportAfterAuditFailure(err.starterImportRollback)
-      }
-
-      throwKnowledgePackAuditError(err)
-    }
-
-    throw err
-  } finally {
-    await session?.endSession()
-  }
-
-  return {
-    pack: serializeKnowledgePack(importResult.packRecord),
-    version: serializeKnowledgePackVersion(importResult.version),
-    validationSummary: importResult.validationSummary,
-  }
+  throwStarterAuthoringRetiredError({ packId })
 }
 
 export const getOutcomeKnowledgePackVersion = async ({ packId, versionId } = {}) => {
@@ -2244,7 +1532,6 @@ export const validateOutcomeKnowledgePackVersion = async ({
   const {
     canonicalPackId,
     packDefinition,
-    isImportedSourceDocument,
   } = authoringContext
   const version = await findKnowledgePackVersionWithContent({
     packId: canonicalPackId,
@@ -2261,16 +1548,11 @@ export const validateOutcomeKnowledgePackVersion = async ({
     })
   }
 
-  const validationSummary = isImportedSourceDocument
-    ? buildSourceDocumentDraftValidationSummary({
-      packDefinition,
-      packRecord: authoringContext.packRecord,
-      version,
-    })
-    : buildStarterPackValidationSummary({
-      packDefinition,
-      content: version.content,
-    })
+  const validationSummary = buildSourceDocumentDraftValidationSummary({
+    packDefinition,
+    packRecord: authoringContext.packRecord,
+    version,
+  })
   const validationPassed = validationSummary.status === 'PASSED'
   const previousStatus = normalizeToken(version.status || OUTCOME_KNOWLEDGE_PACK_STATUSES.DRAFT)
   version.status = validationPassed
@@ -2280,31 +1562,20 @@ export const validateOutcomeKnowledgePackVersion = async ({
   version.validatedAt = validationPassed ? new Date(validationSummary.checkedAt) : null
 
   await saveDocument(version)
-  const packRecord = isImportedSourceDocument
-    ? {
-      ...toPlainObject(authoringContext.packRecord),
-      status: version.status,
-      latestVersionId: version.versionId,
-      latestSemanticVersion: version.semanticVersion,
-      updatedBy: actorUserId || null,
-    }
-    : await ensureStarterPackRecord({
-      packDefinition,
-      actorUserId,
-      versionId: version.versionId,
-      semanticVersion: version.semanticVersion,
-      status: version.status,
-    })
-
-  if (isImportedSourceDocument) {
-    await updateKnowledgePackLatestVersion({
-      packId: canonicalPackId,
-      status: version.status,
-      versionId: version.versionId,
-      semanticVersion: version.semanticVersion,
-      actorUserId,
-    })
+  const packRecord = {
+    ...toPlainObject(authoringContext.packRecord),
+    status: version.status,
+    latestVersionId: version.versionId,
+    latestSemanticVersion: version.semanticVersion,
+    updatedBy: actorUserId || null,
   }
+  await updateKnowledgePackLatestVersion({
+    packId: canonicalPackId,
+    status: version.status,
+    versionId: version.versionId,
+    semanticVersion: version.semanticVersion,
+    actorUserId,
+  })
 
   await logKnowledgePackAudit({
     auditRequest,
@@ -2514,18 +1785,7 @@ export const updateOutcomeKnowledgePackVersionReview = async ({
     canonicalPackId,
     packDefinition,
     packRecord,
-    isImportedSourceDocument,
   } = authoringContext
-
-  if (!isImportedSourceDocument) {
-    throw createKnowledgePackError({
-      status: 409,
-      code: 'CONFLICT',
-      message: 'Knowledge pack review workflow is available for imported source-document drafts only.',
-      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_VERSION_LIFECYCLE_CONFLICT,
-      details: { packId: canonicalPackId },
-    })
-  }
 
   const requestedReviewStatus = normalizeToken(body.reviewStatus)
   const version = await findKnowledgePackVersionWithContent({
@@ -2833,7 +2093,6 @@ export const activateOutcomeKnowledgePackVersion = async ({
   const {
     canonicalPackId,
     packDefinition,
-    isImportedSourceDocument,
   } = authoringContext
   const version = await findKnowledgePackVersionWithContent({
     packId: canonicalPackId,
@@ -2865,26 +2124,14 @@ export const activateOutcomeKnowledgePackVersion = async ({
     })
   }
 
-  if (isImportedSourceDocument) {
-    assertImportedSourceDocumentReadyForActivation({
-      canonicalPackId,
-      packDefinition,
-      packRecord: authoringContext.packRecord,
-      version,
-    })
-  }
+  assertImportedSourceDocumentReadyForActivation({
+    canonicalPackId,
+    packDefinition,
+    packRecord: authoringContext.packRecord,
+    version,
+  })
 
-  let packRecord = authoringContext.packRecord
-  if (!packRecord) {
-    const existingPackRecord = await KnowledgePack.findOne({ packId: canonicalPackId }).lean()
-    packRecord = existingPackRecord || await ensureStarterPackRecord({
-      packDefinition,
-      actorUserId,
-      versionId: version.versionId,
-      semanticVersion: version.semanticVersion,
-      status: previousStatus,
-    })
-  }
+  const packRecord = authoringContext.packRecord
   const scope = buildActivationScope(body)
   const activationTime = new Date()
   let activationResult = null
@@ -3119,8 +2366,12 @@ const updateOutcomeKnowledgePackVersionLifecycle = async ({
   auditAction,
   allowedPreviousStatuses,
 } = {}) => {
-  const packDefinition = getSourceBackedPackDefinitionOrThrow(packId)
-  const canonicalPackId = buildKnowledgePackId(packDefinition)
+  const authoringContext = await resolveKnowledgePackAuthoringContext({ packId })
+  const {
+    canonicalPackId,
+    packDefinition,
+    packRecord,
+  } = authoringContext
   const version = await findKnowledgePackVersionWithContent({
     packId: canonicalPackId,
     versionId: normalizeText(versionId),
@@ -3152,14 +2403,6 @@ const updateOutcomeKnowledgePackVersionLifecycle = async ({
     })
   }
 
-  const existingPackRecord = await KnowledgePack.findOne({ packId: canonicalPackId }).lean()
-  const packRecord = existingPackRecord || await ensureStarterPackRecord({
-    packDefinition,
-    actorUserId,
-    versionId: version.versionId,
-    semanticVersion: version.semanticVersion,
-    status: previousStatus,
-  })
   let mutationResult = null
   let session = null
 
@@ -3266,8 +2509,12 @@ export const rollbackOutcomeKnowledgePack = async ({
   actorUserId = null,
   auditRequest = null,
 } = {}) => {
-  const packDefinition = getSourceBackedPackDefinitionOrThrow(packId)
-  const canonicalPackId = buildKnowledgePackId(packDefinition)
+  const authoringContext = await resolveKnowledgePackAuthoringContext({ packId })
+  const {
+    canonicalPackId,
+    packDefinition,
+    packRecord,
+  } = authoringContext
   const targetVersion = await findKnowledgePackVersionWithContent({
     packId: canonicalPackId,
     versionId: normalizeText(body.versionId),
@@ -3297,6 +2544,13 @@ export const rollbackOutcomeKnowledgePack = async ({
       },
     })
   }
+
+  assertImportedSourceDocumentReadyForActivation({
+    canonicalPackId,
+    packDefinition,
+    packRecord,
+    version: targetVersion,
+  })
 
   const scope = buildActivationScope(body)
   const activeActivationQuery = KnowledgePackActivation.findOne({
@@ -3335,14 +2589,6 @@ export const rollbackOutcomeKnowledgePack = async ({
     })
   }
 
-  const existingPackRecord = await KnowledgePack.findOne({ packId: canonicalPackId }).lean()
-  const packRecord = existingPackRecord || await ensureStarterPackRecord({
-    packDefinition,
-    actorUserId,
-    versionId: targetVersion.versionId,
-    semanticVersion: targetVersion.semanticVersion,
-    status: previousStatus,
-  })
   const activationTime = new Date()
   const rollbackReason = normalizeText(body.rollbackReason)
     || `Rollback from ${activeActivation.versionId} to ${targetVersion.versionId}`
@@ -3463,7 +2709,6 @@ const buildPackDeleteEligibility = async ({ packRecord, session = null } = {}) =
   return {
     activeActivationCount,
     activationCount,
-    isRequiredSystemPack: Boolean(findRequiredPackDefinition(canonicalPackId) || findRequiredPackDefinition(packKey)),
     isSystem: packRecord?.isSystem === true,
     manifestFilter,
     manifestReferenceCount,
@@ -3479,7 +2724,7 @@ const assertKnowledgePackCanBeDeleted = async ({
   eligibility,
   session = null,
 } = {}) => {
-  if (eligibility.isSystem || eligibility.isRequiredSystemPack) {
+  if (eligibility.isSystem) {
     throw createKnowledgePackError({
       status: 409,
       code: 'CONFLICT',

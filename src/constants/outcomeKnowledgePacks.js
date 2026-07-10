@@ -68,7 +68,4 @@ export const OUTCOME_KNOWLEDGE_PACK_SCOPE_TYPES = Object.freeze({
   RUNTIME_INSTANCE: 'RUNTIME_INSTANCE',
 })
 
-export const OUTCOME_KNOWLEDGE_PACK_SOURCE_BUNDLE_PATH =
-  'docs/product-specs/source-artifacts/2026-06-15-governed-outcome-studio-oes-002/knowledge-packs-v1/'
-
 export const OUTCOME_KNOWLEDGE_PACK_RESOLUTION_MODE = 'REGISTRY_RESOLUTION'

@@ -318,7 +318,7 @@ const createKnowledgePackVersionBodySchema = z.object({
   content: z
     .string({ required_error: 'content is required' })
     .trim()
-    .min(40, 'content must include the starter knowledge pack source')
+    .min(40, 'content must include the knowledge pack source content')
     .max(750000, 'content must be 750000 characters or fewer'),
 }).strict()
 
