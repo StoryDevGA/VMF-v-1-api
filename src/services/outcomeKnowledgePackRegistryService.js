@@ -3,6 +3,7 @@ import mongoose from 'mongoose'
 import {
   KnowledgePack,
   KnowledgePackActivation,
+  KnowledgePackManifest,
   KnowledgePackVersion,
 } from '../models/index.js'
 import { buildKnowledgePackId } from '../models/KnowledgePack.js'
@@ -62,6 +63,11 @@ export const OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS = Object.freeze({
   PACK_VERSION_REQUIRES_VALIDATED: 'PACK_VERSION_REQUIRES_VALIDATED',
   PACK_VERSION_REVIEW_REQUIRED: 'PACK_VERSION_REVIEW_REQUIRED',
   PACK_VERSION_VALIDATION_FAILED: 'PACK_VERSION_VALIDATION_FAILED',
+  PACK_DELETE_BLOCKED_ACTIVE: 'PACK_DELETE_BLOCKED_ACTIVE',
+  PACK_DELETE_BLOCKED_SYSTEM: 'PACK_DELETE_BLOCKED_SYSTEM',
+  PACK_DELETE_BLOCKED_MANIFEST_BOUND: 'PACK_DELETE_BLOCKED_MANIFEST_BOUND',
+  PACK_DELETE_TRANSACTION_REQUIRED: 'PACK_DELETE_TRANSACTION_REQUIRED',
+  PACK_DELETE_CONFLICT: 'PACK_DELETE_CONFLICT',
   UNSUPPORTED_SCOPE_TYPE: 'UNSUPPORTED_SCOPE_TYPE',
 })
 
@@ -433,6 +439,7 @@ const ensureSourceDocumentDraftPackRecord = async ({
         sourceDocumentId: packDefinition.sourceDocument?.sourceDocumentId || '',
         sourceHash: packDefinition.sourceDocument?.sourceHash || '',
         sourceDocument: packDefinition.sourceDocument,
+        contentPersisted: true,
       },
     },
   },
@@ -808,6 +815,11 @@ const resolveLeanQuery = async (query) => (
     ? query.lean()
     : query
 )
+
+const countDocumentsWithOptionalSession = async (model, filter, session = null) => {
+  const query = model.countDocuments(filter)
+  return Number(await withOptionalSession(query, session)) || 0
+}
 
 const findKnowledgePackVersionWithContent = async ({ packId, versionId, session = null }) => {
   const query = withOptionalSession(KnowledgePackVersion.findOne({ packId, versionId }), session)
@@ -3407,6 +3419,282 @@ export const rollbackOutcomeKnowledgePack = async ({
     version: serializeKnowledgePackVersion(targetVersion),
     activation: serializeKnowledgePackActivation(activationResult.activation),
     previousActivation: serializeKnowledgePackActivation(activationResult.previousActivation),
+  }
+}
+
+const buildManifestPackReferenceFilter = ({ packType, packKey } = {}) => {
+  const normalizedPackType = normalizeToken(packType)
+  const normalizedPackKey = normalizeLowerKey(packKey)
+  const sectionFilters = [
+    'mandatoryPacks',
+    'optionalPacks',
+    'validationPacks',
+    'blockedPacks',
+  ].map((section) => ({
+    [section]: {
+      $elemMatch: {
+        packType: normalizedPackType,
+        packKey: normalizedPackKey,
+      },
+    },
+  }))
+
+  return { $or: sectionFilters }
+}
+
+const findManifestReferenceSample = async ({ filter, session = null } = {}) => {
+  const query = KnowledgePackManifest.find(filter).limit(5)
+  return resolveLeanQuery(withOptionalSession(query, session))
+}
+
+const buildPackDeleteEligibility = async ({ packRecord, session = null } = {}) => {
+  const canonicalPackId = normalizeText(packRecord?.packId)
+  const packType = normalizeToken(packRecord?.packType)
+  const packKey = normalizeLowerKey(packRecord?.packKey)
+  const manifestFilter = buildManifestPackReferenceFilter({ packType, packKey })
+  const versionCount = await countDocumentsWithOptionalSession(KnowledgePackVersion, { packId: canonicalPackId }, session)
+  const activationCount = await countDocumentsWithOptionalSession(KnowledgePackActivation, { packId: canonicalPackId }, session)
+  const activeActivationCount = await countDocumentsWithOptionalSession(KnowledgePackActivation, {
+    packId: canonicalPackId,
+    status: OUTCOME_KNOWLEDGE_PACK_ACTIVATION_STATUSES.ACTIVE,
+  }, session)
+  const manifestReferenceCount = await countDocumentsWithOptionalSession(KnowledgePackManifest, manifestFilter, session)
+
+  return {
+    activeActivationCount,
+    activationCount,
+    isRequiredSystemPack: Boolean(findRequiredPackDefinition(canonicalPackId) || findRequiredPackDefinition(packKey)),
+    isSystem: packRecord?.isSystem === true,
+    manifestFilter,
+    manifestReferenceCount,
+    packId: canonicalPackId,
+    packKey,
+    packType,
+    status: normalizeToken(packRecord?.status),
+    versionCount,
+  }
+}
+
+const assertKnowledgePackCanBeDeleted = async ({
+  eligibility,
+  session = null,
+} = {}) => {
+  if (eligibility.isSystem || eligibility.isRequiredSystemPack) {
+    throw createKnowledgePackError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'System knowledge packs cannot be deleted.',
+      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_DELETE_BLOCKED_SYSTEM,
+      details: {
+        packId: eligibility.packId,
+        packType: eligibility.packType,
+        packKey: eligibility.packKey,
+      },
+    })
+  }
+
+  if (
+    eligibility.status === OUTCOME_KNOWLEDGE_PACK_STATUSES.ACTIVE
+    || eligibility.activeActivationCount > 0
+  ) {
+    throw createKnowledgePackError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Active knowledge packs cannot be deleted. Disable or deprecate the active version first.',
+      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_DELETE_BLOCKED_ACTIVE,
+      details: {
+        packId: eligibility.packId,
+        packType: eligibility.packType,
+        packKey: eligibility.packKey,
+        status: eligibility.status,
+        activeActivationCount: eligibility.activeActivationCount,
+      },
+    })
+  }
+
+  if (eligibility.manifestReferenceCount > 0) {
+    const referencedManifests = await findManifestReferenceSample({
+      filter: eligibility.manifestFilter,
+      session,
+    }) || []
+
+    throw createKnowledgePackError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Knowledge packs referenced by manifests cannot be deleted.',
+      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_DELETE_BLOCKED_MANIFEST_BOUND,
+      details: {
+        packId: eligibility.packId,
+        packType: eligibility.packType,
+        packKey: eligibility.packKey,
+        manifestReferenceCount: eligibility.manifestReferenceCount,
+        manifestIds: referencedManifests
+          .map((manifest) => normalizeText(manifest.manifestId))
+          .filter(Boolean),
+      },
+    })
+  }
+}
+
+const applyKnowledgePackHardDelete = async ({
+  actorUserId,
+  auditRequest,
+  eligibility,
+  packRecord,
+  session,
+}) => {
+  const packDefinition = buildPersistedPackDefinition(packRecord)
+  const deletionSummary = {
+    packId: eligibility.packId,
+    packType: eligibility.packType,
+    packKey: eligibility.packKey,
+    status: eligibility.status,
+    expectedVersionCount: eligibility.versionCount,
+    expectedActivationCount: eligibility.activationCount,
+    manifestReferenceCount: eligibility.manifestReferenceCount,
+    hardDelete: true,
+  }
+
+  try {
+    await logKnowledgePackAudit({
+      auditRequest,
+      action: auditService.AUDIT_ACTIONS.KNOWLEDGE_PACK_DELETED,
+      actorUserId,
+      packRecord,
+      packDefinition,
+      session,
+      throwOnError: true,
+      diff: deletionSummary,
+    })
+  } catch (err) {
+    err.outcomeKnowledgePackAuditFailure = true
+    throw err
+  }
+
+  const versionDeleteResult = await KnowledgePackVersion.deleteMany(
+    { packId: eligibility.packId },
+    { session },
+  )
+  const activationDeleteResult = await KnowledgePackActivation.deleteMany(
+    { packId: eligibility.packId },
+    { session },
+  )
+  const packDeleteResult = await KnowledgePack.deleteOne(
+    { packId: eligibility.packId },
+    { session },
+  )
+
+  if (Number(packDeleteResult?.deletedCount) !== 1) {
+    throw createKnowledgePackError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Knowledge pack delete could not be completed because the pack changed during the request.',
+      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_DELETE_CONFLICT,
+      details: {
+        packId: eligibility.packId,
+      },
+    })
+  }
+
+  return {
+    deletedCounts: {
+      packs: Number(packDeleteResult?.deletedCount) || 0,
+      versions: Number(versionDeleteResult?.deletedCount) || 0,
+      activations: Number(activationDeleteResult?.deletedCount) || 0,
+    },
+  }
+}
+
+export const deleteOutcomeKnowledgePack = async ({
+  packId,
+  actorUserId = null,
+  auditRequest = null,
+} = {}) => {
+  const packRecord = await KnowledgePack.findOne(buildPackLookup(packId)).lean()
+
+  if (!packRecord || !packRecordMatchesLookup(packRecord, packId)) {
+    throw createKnowledgePackError({
+      status: 404,
+      code: 'NOT_FOUND',
+      message: 'Outcome Studio knowledge pack was not found.',
+      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_NOT_FOUND,
+      details: { packId },
+    })
+  }
+
+  const initialEligibility = await buildPackDeleteEligibility({ packRecord })
+  await assertKnowledgePackCanBeDeleted({ eligibility: initialEligibility })
+
+  if (mongoose.connection.readyState !== 1) {
+    throw createKnowledgePackError({
+      status: 503,
+      code: 'OUTCOME_KNOWLEDGE_PACK_DELETE_UNAVAILABLE',
+      message: 'Knowledge pack delete requires transactional registry persistence.',
+      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_DELETE_TRANSACTION_REQUIRED,
+      details: {
+        packId: initialEligibility.packId,
+      },
+    })
+  }
+
+  let deleteResult = null
+  let session = null
+
+  try {
+    session = await mongoose.startSession()
+    await session.withTransaction(async () => {
+      const transactionalPackRecord = await resolveLeanQuery(withOptionalSession(
+        KnowledgePack.findOne({ packId: initialEligibility.packId }),
+        session,
+      ))
+
+      if (!transactionalPackRecord) {
+        throw createKnowledgePackError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: 'Outcome Studio knowledge pack was not found.',
+          reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_NOT_FOUND,
+          details: { packId: initialEligibility.packId },
+        })
+      }
+
+      const transactionalEligibility = await buildPackDeleteEligibility({
+        packRecord: transactionalPackRecord,
+        session,
+      })
+      await assertKnowledgePackCanBeDeleted({
+        eligibility: transactionalEligibility,
+        session,
+      })
+
+      deleteResult = await applyKnowledgePackHardDelete({
+        actorUserId,
+        auditRequest,
+        eligibility: transactionalEligibility,
+        packRecord: transactionalPackRecord,
+        session,
+      })
+    })
+  } catch (err) {
+    if (err?.outcomeKnowledgePackAuditFailure) {
+      throwKnowledgePackAuditError(err)
+    }
+
+    throw err
+  } finally {
+    await session?.endSession()
+  }
+
+  return {
+    deleted: true,
+    packId: initialEligibility.packId,
+    packType: initialEligibility.packType,
+    packKey: initialEligibility.packKey,
+    deletedCounts: deleteResult?.deletedCounts || {
+      packs: 0,
+      versions: 0,
+      activations: 0,
+    },
   }
 }
 

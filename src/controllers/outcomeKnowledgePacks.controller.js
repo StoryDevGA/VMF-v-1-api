@@ -1,6 +1,7 @@
 import {
   activateOutcomeKnowledgePackVersion,
   createOutcomeKnowledgePackVersion,
+  deleteOutcomeKnowledgePack,
   deprecateOutcomeKnowledgePackVersion,
   disableOutcomeKnowledgePackVersion,
   getOutcomeKnowledgePack,
@@ -142,6 +143,19 @@ export const previewKnowledgePackReasoningContextController = async (req, res) =
 export const getKnowledgePack = async (req, res) => {
   try {
     const data = await getOutcomeKnowledgePack({ packId: req.params.packId })
+    res.status(200).json({ data })
+  } catch (err) {
+    sendControllerError(res, req, err)
+  }
+}
+
+export const deleteKnowledgePack = async (req, res) => {
+  try {
+    const data = await deleteOutcomeKnowledgePack({
+      packId: req.params.packId,
+      actorUserId: req.context?.userId || req.userId,
+      auditRequest: req,
+    })
     res.status(200).json({ data })
   } catch (err) {
     sendControllerError(res, req, err)

@@ -634,16 +634,20 @@ beforeEach(() => {
   KnowledgePack.updateOne = jest.fn().mockResolvedValue({ modifiedCount: 1 })
   KnowledgePack.deleteOne = jest.fn().mockResolvedValue({ deletedCount: 1 })
   KnowledgePackVersion.find = jest.fn().mockReturnValue(buildFindChain([makeKnowledgePackVersion()]))
+  KnowledgePackVersion.countDocuments = jest.fn().mockResolvedValue(1)
   KnowledgePackVersion.findOne = jest.fn().mockReturnValue(buildVersionFindOneChain(null))
   KnowledgePackVersion.updateOne = jest.fn().mockResolvedValue({ modifiedCount: 1 })
   KnowledgePackVersion.deleteOne = jest.fn().mockResolvedValue({ deletedCount: 1 })
+  KnowledgePackVersion.deleteMany = jest.fn().mockResolvedValue({ deletedCount: 1 })
   KnowledgePackVersion.prototype.save = jest.fn(async function save() {
     return this
   })
   KnowledgePackActivation.find = jest.fn().mockReturnValue(buildFindChain([]))
+  KnowledgePackActivation.countDocuments = jest.fn().mockResolvedValue(0)
   KnowledgePackActivation.findOne = jest.fn().mockReturnValue(buildActivationFindOneChain(null))
   KnowledgePackActivation.updateMany = jest.fn().mockResolvedValue({ modifiedCount: 0 })
   KnowledgePackActivation.updateOne = jest.fn().mockResolvedValue({ modifiedCount: 1 })
+  KnowledgePackActivation.deleteMany = jest.fn().mockResolvedValue({ deletedCount: 0 })
   KnowledgePackActivation.prototype.save = jest.fn(async function save() {
     return this
   })
@@ -723,6 +727,250 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
     }))
     expect(JSON.stringify(res.body)).not.toContain('Pack content must not leak')
     expect(KnowledgePack.find).toHaveBeenCalledWith({})
+  })
+
+  test('DELETE /api/v1/super-admin/outcome-studio/knowledge-packs/:packId hard-deletes an eligible draft pack with audit in one transaction', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const deleteSession = buildSession()
+    const draftPack = makeKnowledgePack({
+      packId: 'kp-et-et-v2-8-global',
+      packType: 'ET',
+      packKey: 'et-v2-8',
+      label: 'ET v2.8',
+      status: 'DRAFT',
+      latestVersionId: 'kpv-et-et-v2-8-2-8-0-global',
+      latestSemanticVersion: '2.8.0',
+      isSystem: false,
+      sourceMetadata: {
+        sourceStatus: 'SOURCE_DOCUMENT_PRESENT',
+        sourceFilename: 'Enterprise Technology v2.8.pdf',
+      },
+    })
+    setMongooseReadyState(1)
+    startSessionSpy.mockResolvedValueOnce(deleteSession)
+    KnowledgePack.findOne.mockReturnValue(buildFindOneChain(draftPack))
+    KnowledgePackVersion.countDocuments.mockResolvedValue(1)
+    KnowledgePackActivation.countDocuments.mockResolvedValue(0)
+    KnowledgePackManifest.countDocuments.mockResolvedValue(0)
+    KnowledgePackVersion.deleteMany.mockResolvedValueOnce({ deletedCount: 1 })
+    KnowledgePackActivation.deleteMany.mockResolvedValueOnce({ deletedCount: 0 })
+    KnowledgePack.deleteOne.mockResolvedValueOnce({ deletedCount: 1 })
+
+    const res = await request
+      .delete('/api/v1/super-admin/outcome-studio/knowledge-packs/kp-et-et-v2-8-global')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toEqual(expect.objectContaining({
+      deleted: true,
+      packId: 'kp-et-et-v2-8-global',
+      packType: 'ET',
+      packKey: 'et-v2-8',
+      deletedCounts: {
+        packs: 1,
+        versions: 1,
+        activations: 0,
+      },
+    }))
+    expect(deleteSession.withTransaction).toHaveBeenCalled()
+    expect(deleteSession.endSession).toHaveBeenCalled()
+    expect(AuditLog.createLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'KNOWLEDGE_PACK_DELETED',
+        resourceType: 'KnowledgePack',
+        diff: expect.objectContaining({
+          packId: 'kp-et-et-v2-8-global',
+          hardDelete: true,
+          expectedVersionCount: 1,
+          expectedActivationCount: 0,
+        }),
+      }),
+      expect.objectContaining({ session: deleteSession }),
+    )
+    expect(KnowledgePackVersion.deleteMany).toHaveBeenCalledWith(
+      { packId: 'kp-et-et-v2-8-global' },
+      { session: deleteSession },
+    )
+    expect(KnowledgePackActivation.deleteMany).toHaveBeenCalledWith(
+      { packId: 'kp-et-et-v2-8-global' },
+      { session: deleteSession },
+    )
+    expect(KnowledgePack.deleteOne).toHaveBeenCalledWith(
+      { packId: 'kp-et-et-v2-8-global' },
+      { session: deleteSession },
+    )
+  })
+
+  test('DELETE /api/v1/super-admin/outcome-studio/knowledge-packs/:packId blocks active packs before destructive writes', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    KnowledgePack.findOne.mockReturnValue(buildFindOneChain(makeKnowledgePack({
+      packId: 'kp-et-active',
+      packType: 'ET',
+      packKey: 'active-et',
+      status: 'ACTIVE',
+      isSystem: false,
+    })))
+
+    const res = await request
+      .delete('/api/v1/super-admin/outcome-studio/knowledge-packs/kp-et-active')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('PACK_DELETE_BLOCKED_ACTIVE')
+    expect(KnowledgePackVersion.deleteMany).not.toHaveBeenCalled()
+    expect(KnowledgePackActivation.deleteMany).not.toHaveBeenCalled()
+    expect(KnowledgePack.deleteOne).not.toHaveBeenCalled()
+  })
+
+  test('DELETE /api/v1/super-admin/outcome-studio/knowledge-packs/:packId blocks system packs before destructive writes', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    KnowledgePack.findOne.mockReturnValue(buildFindOneChain(makeKnowledgePack({
+      packId: 'kp-et-system',
+      packType: 'ET',
+      packKey: 'system-et',
+      status: 'DRAFT',
+      isSystem: true,
+    })))
+
+    const res = await request
+      .delete('/api/v1/super-admin/outcome-studio/knowledge-packs/kp-et-system')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('PACK_DELETE_BLOCKED_SYSTEM')
+    expect(KnowledgePackVersion.deleteMany).not.toHaveBeenCalled()
+    expect(KnowledgePackActivation.deleteMany).not.toHaveBeenCalled()
+    expect(KnowledgePack.deleteOne).not.toHaveBeenCalled()
+  })
+
+  test('DELETE /api/v1/super-admin/outcome-studio/knowledge-packs/:packId blocks manifest-bound packs', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    KnowledgePack.findOne.mockReturnValue(buildFindOneChain(makeKnowledgePack({
+      packId: 'kp-et-manifest-bound',
+      packType: 'ET',
+      packKey: 'manifest-bound-et',
+      status: 'DRAFT',
+      isSystem: false,
+    })))
+    KnowledgePackManifest.countDocuments.mockResolvedValue(1)
+    KnowledgePackManifest.find.mockReturnValue(buildFindChain([
+      makeKnowledgePackManifest({
+        manifestId: 'kpm-et-runtime-1-0-0-global',
+        mandatoryPacks: [
+          {
+            packCategory: 'OUTCOME',
+            purposeCategory: 'FRAMEWORK',
+            packType: 'ET',
+            packKey: 'manifest-bound-et',
+            label: 'Manifest Bound ET',
+            executionMode: 'PROVIDER_CONTEXT',
+            required: true,
+            dependencyKeys: [],
+            metadata: {},
+          },
+        ],
+      }),
+    ]))
+
+    const res = await request
+      .delete('/api/v1/super-admin/outcome-studio/knowledge-packs/kp-et-manifest-bound')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('PACK_DELETE_BLOCKED_MANIFEST_BOUND')
+    expect(res.body.error.details.manifestIds).toEqual(['kpm-et-runtime-1-0-0-global'])
+    expect(KnowledgePackVersion.deleteMany).not.toHaveBeenCalled()
+    expect(KnowledgePackActivation.deleteMany).not.toHaveBeenCalled()
+    expect(KnowledgePack.deleteOne).not.toHaveBeenCalled()
+  })
+
+  test('DELETE /api/v1/super-admin/outcome-studio/knowledge-packs/:packId fails closed when delete audit cannot persist', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const deleteSession = buildSession()
+    setMongooseReadyState(1)
+    startSessionSpy.mockResolvedValueOnce(deleteSession)
+    KnowledgePack.findOne.mockReturnValue(buildFindOneChain(makeKnowledgePack({
+      packId: 'kp-et-audit-failure',
+      packType: 'ET',
+      packKey: 'audit-failure-et',
+      status: 'DRAFT',
+      isSystem: false,
+    })))
+    KnowledgePackManifest.countDocuments.mockResolvedValue(0)
+    AuditLog.createLog.mockImplementation(async (payload) => {
+      if (payload.action === 'KNOWLEDGE_PACK_DELETED') {
+        throw new Error('audit unavailable')
+      }
+      return {}
+    })
+
+    const res = await request
+      .delete('/api/v1/super-admin/outcome-studio/knowledge-packs/kp-et-audit-failure')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(500)
+    expect(res.body.error.code).toBe('OUTCOME_KNOWLEDGE_PACK_AUDIT_FAILED')
+    expect(res.body.error.details.reason).toBe('AUDIT_PERSISTENCE_FAILED')
+    expect(deleteSession.withTransaction).toHaveBeenCalled()
+    expect(KnowledgePackVersion.deleteMany).not.toHaveBeenCalled()
+    expect(KnowledgePackActivation.deleteMany).not.toHaveBeenCalled()
+    expect(KnowledgePack.deleteOne).not.toHaveBeenCalled()
+  })
+
+  test('DELETE /api/v1/super-admin/outcome-studio/knowledge-packs/:packId returns 404 for non-existent pack', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    setMongooseReadyState(1)
+    KnowledgePack.findOne.mockReturnValue(buildFindOneChain(null))
+
+    const res = await request
+      .delete('/api/v1/super-admin/outcome-studio/knowledge-packs/kp-nonexistent')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(404)
+    expect(res.body.error.code).toBe('NOT_FOUND')
+  })
+
+  test('DELETE /api/v1/super-admin/outcome-studio/knowledge-packs/:packId returns 503 when transactions are unavailable', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    setMongooseReadyState(0)
+    KnowledgePack.findOne.mockReturnValue(buildFindOneChain(makeKnowledgePack({
+      packId: 'kp-et-notrans',
+      packType: 'ET',
+      packKey: 'notrans-et',
+      status: 'DRAFT',
+      isSystem: false,
+    })))
+    KnowledgePackManifest.countDocuments.mockResolvedValue(0)
+
+    const res = await request
+      .delete('/api/v1/super-admin/outcome-studio/knowledge-packs/kp-et-notrans')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(503)
+    expect(res.body.error.code).toBe('OUTCOME_KNOWLEDGE_PACK_DELETE_UNAVAILABLE')
+  })
+
+  test('DELETE /api/v1/super-admin/outcome-studio/knowledge-packs/:packId returns 409 when concurrent delete conflicts', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const deleteSession = buildSession()
+    setMongooseReadyState(1)
+    startSessionSpy.mockResolvedValueOnce(deleteSession)
+    KnowledgePack.findOne.mockReturnValue(buildFindOneChain(makeKnowledgePack({
+      packId: 'kp-et-conflict',
+      packType: 'ET',
+      packKey: 'conflict-et',
+      status: 'DRAFT',
+      isSystem: false,
+    })))
+    KnowledgePackManifest.countDocuments.mockResolvedValue(0)
+    KnowledgePack.deleteOne.mockResolvedValue({ deletedCount: 0 })
+
+    const res = await request
+      .delete('/api/v1/super-admin/outcome-studio/knowledge-packs/kp-et-conflict')
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
   })
 
   test('GET /api/v1/super-admin/outcome-studio/knowledge-packs/manifests returns default and persisted manifest metadata', async () => {
@@ -2394,6 +2642,21 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       })
 
     expect(res.status).toBe(201)
+    expect(KnowledgePack.findOneAndUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        packId: 'kp-style-board-executive-style',
+      }),
+      expect.objectContaining({
+        $set: expect.objectContaining({
+          sourceMetadata: expect.objectContaining({
+            sourceStatus: 'SOURCE_DOCUMENT_PRESENT',
+            sourceFilename: 'Board Executive Style.md',
+            contentPersisted: true,
+          }),
+        }),
+      }),
+      expect.any(Object),
+    )
     expect(res.body.data.pack).toEqual(expect.objectContaining({
       packId: 'kp-style-board-executive-style',
       packType: 'STYLE',

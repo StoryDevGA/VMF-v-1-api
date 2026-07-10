@@ -8,6 +8,7 @@ import {
   compareKnowledgePackManifestsController,
   createKnowledgePackManifestController,
   createKnowledgePackVersion,
+  deleteKnowledgePack,
   deprecateKnowledgePackVersion,
   disableKnowledgePackVersion,
   getKnowledgePackManifestController,
@@ -78,6 +79,7 @@ router.post('/:packId/versions/:versionId/activate', validateKnowledgePackVersio
 router.post('/:packId/versions/:versionId/deprecate', validateKnowledgePackVersionParams, validateKnowledgePackVersionActionBody, deprecateKnowledgePackVersion)
 router.post('/:packId/versions/:versionId/disable', validateKnowledgePackVersionParams, validateKnowledgePackVersionActionBody, disableKnowledgePackVersion)
 router.post('/:packId/rollback', validateKnowledgePackId, validateRollbackKnowledgePack, rollbackKnowledgePack)
+router.delete('/:packId', validateKnowledgePackId, deleteKnowledgePack)
 router.get('/:packId', validateKnowledgePackId, getKnowledgePack)
 
 export default router
