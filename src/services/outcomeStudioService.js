@@ -9,6 +9,9 @@ import {
   OUTCOME_STUDIO_ASSET_STATUSES,
   OUTCOME_STUDIO_ASSET_VERSION_STATUSES,
   OUTCOME_STUDIO_CONTRACT_VERSION,
+  OUTCOME_STUDIO_DRAFT_ITERATION_STATUSES,
+  OUTCOME_STUDIO_DRAFT_ITERATION_TYPES,
+  OUTCOME_STUDIO_DRAFT_STATUSES,
   OUTCOME_STUDIO_EXPORT_FORMATS,
   OUTCOME_STUDIO_MESSAGE_ROLES,
   OUTCOME_STUDIO_MESSAGE_STATUSES,
@@ -29,6 +32,8 @@ import {
 import {
   OutcomeAsset,
   OutcomeAssetVersion,
+  OutcomeDraft,
+  OutcomeDraftIteration,
   OutcomeMessage,
   OutcomeSession,
   TruthSignature,
@@ -54,9 +59,18 @@ import {
 } from './outcomePostValidationService.js'
 import auditService from './auditService.js'
 import { createGovernedReasoningExecution } from './governedReasoningRuntimeService.js'
+import {
+  assertOutcomeStudioRequestResolution,
+  buildResolvedOutcomeStudioExecutionIntent,
+} from './outcomeStudioResolutionService.js'
 
 const normalizeText = (value) => String(value ?? '').trim()
 const normalizeToken = (value) => normalizeText(value).toUpperCase()
+const clampText = (value, maxLength = 120) => {
+  const normalized = normalizeText(value)
+  if (normalized.length <= maxLength) return normalized
+  return `${normalized.slice(0, Math.max(0, maxLength - 3)).trim()}...`
+}
 const normalizePackCategory = (value, packType) =>
   resolveKnowledgePackCategory({ packCategory: value, packType })
 const canUseMongoTransaction = () => mongoose.connection.readyState === 1
@@ -74,6 +88,12 @@ export const OUTCOME_STUDIO_ERROR_REASONS = Object.freeze({
   OUTCOME_ASSET_PUBLISH_AUDIT_FAILED: 'OUTCOME_ASSET_PUBLISH_AUDIT_FAILED',
   OUTCOME_ASSET_PUBLISH_BLOCKED: 'OUTCOME_ASSET_PUBLISH_BLOCKED',
   OUTCOME_ASSET_VERSION_NOT_FOUND: 'OUTCOME_ASSET_VERSION_NOT_FOUND',
+  OUTCOME_DRAFT_APPROVAL_AUDIT_FAILED: 'OUTCOME_DRAFT_APPROVAL_AUDIT_FAILED',
+  OUTCOME_DRAFT_APPROVAL_BLOCKED: 'OUTCOME_DRAFT_APPROVAL_BLOCKED',
+  OUTCOME_DRAFT_GENERATION_AUDIT_FAILED: 'OUTCOME_DRAFT_GENERATION_AUDIT_FAILED',
+  OUTCOME_DRAFT_NOT_FOUND: 'OUTCOME_DRAFT_NOT_FOUND',
+  OUTCOME_DRAFT_REFINEMENT_AUDIT_FAILED: 'OUTCOME_DRAFT_REFINEMENT_AUDIT_FAILED',
+  OUTCOME_DRAFT_REFINEMENT_BLOCKED: 'OUTCOME_DRAFT_REFINEMENT_BLOCKED',
   OUTCOME_GRAPH_RELATIONSHIP_FAILED: 'OUTCOME_GRAPH_RELATIONSHIP_FAILED',
   OUTCOME_MESSAGE_AUDIT_FAILED: 'OUTCOME_MESSAGE_AUDIT_FAILED',
   OUTCOME_MESSAGE_NOT_FOUND: 'OUTCOME_MESSAGE_NOT_FOUND',
@@ -88,6 +108,7 @@ export const OUTCOME_STUDIO_ERROR_REASONS = Object.freeze({
 
 const OUTCOME_STUDIO_ASSET_LIST_LIMIT = 20
 const OUTCOME_STUDIO_ASSET_VERSION_LIST_LIMIT = 20
+const OUTCOME_STUDIO_DRAFT_LIST_LIMIT = 20
 const OUTCOME_STUDIO_MESSAGE_LIST_LIMIT = 20
 const OUTCOME_STUDIO_SESSION_LIST_LIMIT = 10
 const OUTCOME_CONTEXT_BINDING_LIST_LIMIT = 50
@@ -175,6 +196,8 @@ const normalizeDateValue = (value) => {
 const buildOutcomeMessageId = () => `out_msg_${randomUUID()}`
 const buildOutcomeAssetId = () => `outcome_asset_${randomUUID()}`
 const buildOutcomeAssetVersionId = () => `outcome_asset_version_${randomUUID()}`
+const buildOutcomeDraftId = () => `outcome_draft_${randomUUID()}`
+const buildOutcomeDraftIterationId = () => `outcome_draft_iteration_${randomUUID()}`
 const buildOutcomeSessionId = () => `out_sess_${randomUUID()}`
 const buildTruthSignatureId = () => `truth_sig_${randomUUID()}`
 
@@ -199,38 +222,70 @@ const buildGovernedOutcomeResponseText = ({
     || session.sourceOutput?.outputTypeLabel
     || message.sourceOutput?.outputTypeLabel,
   ) || 'governed output'
-  const sourceOutputAssetId = normalizeText(
-    session.sourceOutputAssetId
-    || session.sourceOutput?.outputAssetId
-    || message.sourceOutput?.outputAssetId,
-  )
-  const truthSignatureId = normalizeText(
-    session.truthSignatureId
-    || session.truthSignature?.truthSignatureId
-    || message.truthSignature?.truthSignatureId,
-  )
-  const activePackCount = Number(
-    session.knowledgePackBinding?.activeCount
-    ?? message.knowledgePackBinding?.activeCount
-    ?? 0,
-  )
-  const requiredPackCount = Number(
-    session.knowledgePackBinding?.requiredCount
-    ?? message.knowledgePackBinding?.requiredCount
-    ?? 0,
-  )
+  const title = buildOutcomeDraftTitle({ session })
 
   return [
-    `Governed response prepared from the current ${outputTypeLabel}.`,
-    'The answer is bound to certified Runtime Truth and the active Outcome Studio knowledge-pack set.',
-    `Lineage: source output ${sourceOutputAssetId || 'unavailable'}, truth signature ${truthSignatureId || 'unavailable'}, knowledge packs ${activePackCount}/${requiredPackCount}.`,
-    'This scaffold does not expose hidden reasoning, raw source content, prompt assembly, or ARL/RL internals.',
+    `# ${title}`,
+    '',
+    `This working ${outputTypeLabel} draft is prepared from the current certified Runtime Truth and the active Outcome Studio governance boundary.`,
+    '',
+    '## Draft Position',
+    '',
+    'Use this as a first pass for review. It is still editable draft content and has not been approved as a governed asset version.',
+    '',
+    '## Working Narrative',
+    '',
+    `The draft should describe the ${outputTypeLabel} in clear business language, using only certified runtime evidence available to this session.`,
   ].join('\n\n')
 }
 
 const buildOutcomeAssetTitle = ({ session = {} } = {}) => {
   const outputTypeLabel = normalizeText(session.sourceOutputTypeLabel || session.sourceOutput?.outputTypeLabel)
   return outputTypeLabel ? `Governed ${outputTypeLabel}` : 'Governed Outcome Asset'
+}
+
+const buildOutcomeDraftTitle = ({ session = {} } = {}) => {
+  const outputTypeLabel = normalizeText(session.sourceOutputTypeLabel || session.sourceOutput?.outputTypeLabel)
+  return outputTypeLabel ? `${outputTypeLabel} Draft` : 'Outcome Draft'
+}
+
+const buildGeneratedOutcomeDraftCustomerContent = ({
+  draftId = '',
+  generationMode = 'DETERMINISTIC_SCAFFOLD',
+  grrExecution = null,
+  iterationId = '',
+  message = {},
+  responseText = '',
+  session = {},
+} = {}) => {
+  const title = buildOutcomeDraftTitle({ session })
+  const grrArtifact = grrExecution?.artifact && typeof grrExecution.artifact === 'object'
+    ? grrExecution.artifact
+    : null
+  const grrLineage = grrArtifact?.lineageSummary && typeof grrArtifact.lineageSummary === 'object'
+    ? grrArtifact.lineageSummary
+    : {}
+
+  return {
+    markdown: responseText,
+    sections: [
+      {
+        key: 'draft-body',
+        label: title,
+        body: responseText,
+      },
+    ],
+    metadata: {
+      draftId: normalizeText(draftId),
+      draftIterationId: normalizeText(iterationId),
+      sourceMessageId: normalizeText(message.messageId),
+      generationMode: normalizeToken(generationMode) || 'DETERMINISTIC_SCAFFOLD',
+      grrExecutionId: normalizeText(grrExecution?.executionId),
+      grrRuntimeArtifactId: normalizeText(grrArtifact?.runtimeArtifactId),
+      grrProviderMode: normalizeToken(grrExecution?.providerMode),
+      grrManifestId: normalizeText(grrLineage?.manifest?.manifestId || grrExecution?.knowledgeManifest?.manifestId),
+    },
+  }
 }
 
 const buildGeneratedOutcomeAssetCustomerContent = ({
@@ -360,7 +415,7 @@ const buildGeneratedOutcomeAssetLineageSummary = ({
   }
 }
 
-const buildGrrOutcomeResponseText = ({ grrExecution = null } = {}) => {
+const buildGrrOutcomeResponseText = ({ grrExecution = null, session = {} } = {}) => {
   const artifact = grrExecution?.artifact && typeof grrExecution.artifact === 'object'
     ? grrExecution.artifact
     : {}
@@ -368,9 +423,9 @@ const buildGrrOutcomeResponseText = ({ grrExecution = null } = {}) => {
     ? artifact.generatedOutput
     : {}
   const markdown = normalizeText(artifact.markdown)
-  if (markdown) return markdown
+  if (markdown && normalizeToken(grrExecution?.providerMode) !== 'DETERMINISTIC_TEST') return markdown
 
-  const title = normalizeText(generatedOutput.title) || 'Governed reasoning output'
+  const title = buildOutcomeDraftTitle({ session })
   const summary = normalizeText(generatedOutput.summary)
   const sections = Array.isArray(generatedOutput.sections) ? generatedOutput.sections : []
   const sectionMarkdown = sections
@@ -388,8 +443,94 @@ const buildGrrOutcomeResponseText = ({ grrExecution = null } = {}) => {
   ].filter(Boolean).join('\n\n')
 }
 
-const buildGrrExecutionIntent = ({ message = {}, session = {} } = {}) => {
+const getDraftIterationMarkdown = (iteration = {}) => {
+  const customerContent = iteration?.customerContent && typeof iteration.customerContent === 'object'
+    ? iteration.customerContent
+    : {}
+  const markdown = normalizeText(customerContent.markdown)
+  if (markdown) return markdown
+
+  const sectionBody = Array.isArray(customerContent.sections)
+    ? customerContent.sections
+      .map((section) => normalizeText(section?.body || section?.summary || section?.narrative))
+      .filter(Boolean)
+      .join('\n\n')
+    : ''
+  return sectionBody || ''
+}
+
+const getDraftRefinementOperationMode = () => 'FULL_DRAFT'
+
+const buildDraftRefinementMetadata = ({
+  currentIteration = {},
+  requestResolution = {},
+} = {}) => ({
+  operation: 'DRAFT_REFINEMENT',
+  mode: getDraftRefinementOperationMode({ requestResolution }),
+  intentType: normalizeToken(requestResolution?.intent?.type),
+  sourceIterationId: normalizeText(currentIteration.draftIterationId),
+  sourceIterationNumber: Number(currentIteration.iterationNumber || 0),
+  compare: {
+    available: true,
+    fromIterationId: normalizeText(currentIteration.draftIterationId),
+    toIterationId: '',
+  },
+  revert: {
+    available: true,
+    targetIterationId: normalizeText(currentIteration.draftIterationId),
+  },
+  preservedPreviousContent: true,
+})
+
+const buildRefinedOutcomeDraftResponseText = ({
+  currentIteration = {},
+  generatedResponseText = '',
+  grrExecution = null,
+  message = {},
+  requestResolution = {},
+  session = {},
+} = {}) => {
+  const providerMode = normalizeToken(grrExecution?.providerMode)
+  const generatedText = normalizeText(generatedResponseText)
+  if (generatedText && providerMode && providerMode !== 'DETERMINISTIC_TEST') return generatedText
+
+  const title = buildOutcomeDraftTitle({ session })
+  const previousMarkdown = getDraftIterationMarkdown(currentIteration) || `# ${title}`
+  const refinementRequest = clampText(normalizeText(message.prompt), 500)
+  const intentType = normalizeToken(requestResolution?.intent?.type) || 'REFINEMENT_REQUEST'
+  return [
+    previousMarkdown,
+    '',
+    '## Draft Refinement Update',
+    '',
+    `Intent: ${intentType}.`,
+    refinementRequest ? `Requested change: ${refinementRequest}` : '',
+    'Unchanged draft sections are preserved from the previous iteration unless the requested refinement explicitly changes them.',
+  ].filter(Boolean).join('\n\n')
+}
+
+const buildGrrExecutionIntent = ({
+  currentDraftIteration = null,
+  message = {},
+  requestResolution = null,
+  session = {},
+} = {}) => {
   const prompt = normalizeText(message.prompt)
+  const currentDraftContext = requestResolution?.intent?.refinement
+    ? clampText(getDraftIterationMarkdown(currentDraftIteration), 2500)
+    : ''
+  if (requestResolution?.canProceed) {
+    return [
+      buildResolvedOutcomeStudioExecutionIntent({
+        prompt,
+        resolution: requestResolution,
+      }),
+      currentDraftContext
+        ? `Current conversation draft content for refinement:\n${currentDraftContext}`
+        : '',
+    ].filter(Boolean).join('\n\n').slice(0, 5000)
+  }
+
   const outputTypeLabel = normalizeText(session.sourceOutputTypeLabel || session.sourceOutput?.outputTypeLabel)
   return [
     outputTypeLabel ? `Outcome Studio ${outputTypeLabel} request.` : 'Outcome Studio governed response request.',
@@ -1053,38 +1194,88 @@ const serializeOutcomeMessage = (message, options = {}) => {
   }
 }
 
-const buildOutcomeAssetLineageSummary = (lineage = {}) => ({
-  sourceOutputAssetId: normalizeText(lineage.sourceOutputAssetId),
-  sourceOutputTypeKey: normalizeToken(lineage.sourceOutputTypeKey),
-  sourceOutputTypeLabel: normalizeText(lineage.sourceOutputTypeLabel),
-  truthSignatureStatus: normalizeToken(lineage.truthSignatureStatus),
-  truthSignatureCurrentness: normalizeToken(lineage.truthSignatureCurrentness),
-  runtimeRevisionId: normalizeText(lineage.runtimeRevisionId),
-  runtimeRevisionNumber: Number(lineage.runtimeRevisionNumber || 0),
-  parentVersionId: normalizeText(lineage.parentVersionId),
-  generatedAt: normalizeDateValue(lineage.generatedAt),
-  grrExecutionId: normalizeText(lineage.grrExecutionId),
-  grrRuntimeArtifactId: normalizeText(lineage.grrRuntimeArtifactId),
-  grrProviderMode: normalizeToken(lineage.grrProviderMode),
-  grrRuntimeStateWrites: {
-    status: normalizeToken(lineage.grrRuntimeStateWrites?.status),
-    reason: normalizeText(lineage.grrRuntimeStateWrites?.reason),
-  },
-  grrKnowledgeBinding: {
-    manifestId: normalizeText(lineage.grrKnowledgeBinding?.manifestId),
-    manifestKey: normalizeText(lineage.grrKnowledgeBinding?.manifestKey),
-    manifestVersion: normalizeText(lineage.grrKnowledgeBinding?.manifestVersion),
-    status: normalizeToken(lineage.grrKnowledgeBinding?.status),
-    contentVisible: lineage.grrKnowledgeBinding?.contentVisible === true,
-    packContentLoaded: lineage.grrKnowledgeBinding?.packContentLoaded === true,
-  },
-  grrCertification: {
-    certifiedTruthOnly: lineage.grrCertification?.certifiedTruthOnly === true,
-    runtimeArtifactIsCertifiedTruth: lineage.grrCertification?.runtimeArtifactIsCertifiedTruth === true,
-    requiresSeparateCertificationBeforeTruthReuse:
-      lineage.grrCertification?.requiresSeparateCertificationBeforeTruthReuse === true,
-  },
-})
+const sanitizeDraftRefinementLineage = (lineage = {}) => {
+  const refinement = lineage.draftRefinement && typeof lineage.draftRefinement === 'object'
+    ? lineage.draftRefinement
+    : null
+  if (!refinement) return null
+
+  return {
+    operation: normalizeToken(refinement.operation),
+    mode: normalizeToken(refinement.mode),
+    intentType: normalizeToken(refinement.intentType),
+    sourceIterationId: normalizeText(refinement.sourceIterationId),
+    sourceIterationNumber: Number(refinement.sourceIterationNumber || 0),
+    compare: {
+      available: refinement.compare?.available === true,
+      fromIterationId: normalizeText(refinement.compare?.fromIterationId),
+      toIterationId: normalizeText(refinement.compare?.toIterationId),
+    },
+    revert: {
+      available: refinement.revert?.available === true,
+      targetIterationId: normalizeText(refinement.revert?.targetIterationId),
+    },
+    preservedPreviousContent: refinement.preservedPreviousContent === true,
+  }
+}
+
+const sanitizeDraftApprovalLineage = (lineage = {}) => {
+  const approval = lineage.draftApproval && typeof lineage.draftApproval === 'object'
+    ? lineage.draftApproval
+    : null
+  if (!approval) return null
+
+  return {
+    operation: normalizeToken(approval.operation),
+    draftId: normalizeText(approval.draftId),
+    draftIterationId: normalizeText(approval.draftIterationId),
+    approvedAt: normalizeDateValue(approval.approvedAt),
+    approvedBy: normalizeText(approval.approvedBy),
+    outcomeAssetId: normalizeText(approval.outcomeAssetId),
+    outcomeAssetVersionId: normalizeText(approval.outcomeAssetVersionId),
+    versionNumber: Number(approval.versionNumber || 0),
+  }
+}
+
+const buildOutcomeAssetLineageSummary = (lineage = {}) => {
+  const summary = {
+    sourceOutputAssetId: normalizeText(lineage.sourceOutputAssetId),
+    sourceOutputTypeKey: normalizeToken(lineage.sourceOutputTypeKey),
+    sourceOutputTypeLabel: normalizeText(lineage.sourceOutputTypeLabel),
+    truthSignatureStatus: normalizeToken(lineage.truthSignatureStatus),
+    truthSignatureCurrentness: normalizeToken(lineage.truthSignatureCurrentness),
+    runtimeRevisionId: normalizeText(lineage.runtimeRevisionId),
+    runtimeRevisionNumber: Number(lineage.runtimeRevisionNumber || 0),
+    parentVersionId: normalizeText(lineage.parentVersionId),
+    generatedAt: normalizeDateValue(lineage.generatedAt),
+    grrExecutionId: normalizeText(lineage.grrExecutionId),
+    grrRuntimeArtifactId: normalizeText(lineage.grrRuntimeArtifactId),
+    grrProviderMode: normalizeToken(lineage.grrProviderMode),
+    grrRuntimeStateWrites: {
+      status: normalizeToken(lineage.grrRuntimeStateWrites?.status),
+      reason: normalizeText(lineage.grrRuntimeStateWrites?.reason),
+    },
+    grrKnowledgeBinding: {
+      manifestId: normalizeText(lineage.grrKnowledgeBinding?.manifestId),
+      manifestKey: normalizeText(lineage.grrKnowledgeBinding?.manifestKey),
+      manifestVersion: normalizeText(lineage.grrKnowledgeBinding?.manifestVersion),
+      status: normalizeToken(lineage.grrKnowledgeBinding?.status),
+      contentVisible: lineage.grrKnowledgeBinding?.contentVisible === true,
+      packContentLoaded: lineage.grrKnowledgeBinding?.packContentLoaded === true,
+    },
+    grrCertification: {
+      certifiedTruthOnly: lineage.grrCertification?.certifiedTruthOnly === true,
+      runtimeArtifactIsCertifiedTruth: lineage.grrCertification?.runtimeArtifactIsCertifiedTruth === true,
+      requiresSeparateCertificationBeforeTruthReuse:
+        lineage.grrCertification?.requiresSeparateCertificationBeforeTruthReuse === true,
+    },
+  }
+  const draftRefinement = sanitizeDraftRefinementLineage(lineage)
+  if (draftRefinement) summary.draftRefinement = draftRefinement
+  const draftApproval = sanitizeDraftApprovalLineage(lineage)
+  if (draftApproval) summary.draftApproval = draftApproval
+  return summary
+}
 
 const serializeOutcomeAssetVersion = (version, options = {}) => {
   const plain = toPlainObject(version)
@@ -1124,6 +1315,98 @@ const serializeOutcomeAssetVersion = (version, options = {}) => {
     postValidation,
     lineageSummary,
     contentAvailable: Object.keys(customerContent).length > 0,
+    warnings: Array.isArray(plain.warnings) ? plain.warnings.map(normalizeText).filter(Boolean) : [],
+    limitations: Array.isArray(plain.limitations) ? plain.limitations.map(normalizeText).filter(Boolean) : [],
+    generatedBy: toIdString(plain.generatedBy),
+    generatedAt: normalizeDateValue(plain.generatedAt),
+    createdAt: normalizeDateValue(plain.createdAt),
+    updatedAt: normalizeDateValue(plain.updatedAt),
+  }
+}
+
+const serializeOutcomeDraft = (draft, options = {}) => {
+  const plain = toPlainObject(draft)
+  const truthSignature = sanitizePersistedTruthSignature(plain.truthSignature || {}, options)
+  const validationSummary = sanitizeOutcomePostValidationSnapshot(plain.validationSummary)
+  const lineageSummary = {
+    ...buildOutcomeAssetLineageSummary(plain.lineageSummary || {}),
+    truthSignatureCurrentness: truthSignature.currentness,
+  }
+  return {
+    draftId: normalizeText(plain.draftId),
+    sessionId: normalizeText(plain.sessionId),
+    contractVersion: normalizeText(plain.contractVersion || OUTCOME_STUDIO_CONTRACT_VERSION),
+    phase: normalizeText(plain.phase || OUTCOME_STUDIO_PHASE),
+    status: normalizeToken(plain.status || 'UNKNOWN'),
+    runtimeInstanceId: toIdString(plain.runtimeInstanceId),
+    runtimeInstanceKey: normalizeText(plain.runtimeInstanceKey),
+    runtimeType: normalizeToken(plain.runtimeType),
+    frameworkKey: normalizeToken(plain.frameworkKey),
+    packageKey: normalizeText(plain.packageKey),
+    packageVersion: normalizeText(plain.packageVersion),
+    projectId: normalizeText(plain.projectId),
+    outcomeId: normalizeText(plain.outcomeId),
+    workspaceType: normalizeToken(plain.workspaceType || DEFAULT_OUTCOME_WORKSPACE_TYPE),
+    assetType: normalizeToken(plain.assetType || DEFAULT_OUTCOME_ASSET_TYPE),
+    outputTypeKey: normalizeToken(plain.outputTypeKey),
+    outputTypeLabel: normalizeText(plain.outputTypeLabel),
+    title: normalizeText(plain.title),
+    sourceOutputAssetId: normalizeText(plain.sourceOutputAssetId),
+    truthSignature,
+    knowledgePackBinding: sanitizePersistedKnowledgePackBinding(plain.knowledgePackBinding || {}),
+    currentIterationId: normalizeText(plain.currentIterationId),
+    currentIterationNumber: Number(plain.currentIterationNumber || 0),
+    approvedIterationId: normalizeText(plain.approvedIterationId),
+    approvedAssetVersionId: normalizeText(plain.approvedAssetVersionId),
+    validationSummary,
+    lineageSummary,
+    warnings: Array.isArray(plain.warnings) ? plain.warnings.map(normalizeText).filter(Boolean) : [],
+    limitations: Array.isArray(plain.limitations) ? plain.limitations.map(normalizeText).filter(Boolean) : [],
+    createdBy: toIdString(plain.createdBy),
+    approvedBy: toIdString(plain.approvedBy),
+    approvedAt: normalizeDateValue(plain.approvedAt),
+    createdAt: normalizeDateValue(plain.createdAt),
+    updatedAt: normalizeDateValue(plain.updatedAt),
+  }
+}
+
+const serializeOutcomeDraftIteration = (iteration) => {
+  const plain = toPlainObject(iteration)
+  const customerContent = plain.customerContent && typeof plain.customerContent === 'object'
+    ? plain.customerContent
+    : {}
+  const validationSummary = sanitizeOutcomePostValidationSnapshot(plain.validationSummary)
+  return {
+    draftIterationId: normalizeText(plain.draftIterationId),
+    draftId: normalizeText(plain.draftId),
+    previousIterationId: normalizeText(plain.previousIterationId),
+    iterationNumber: Number(plain.iterationNumber || 0),
+    sessionId: normalizeText(plain.sessionId),
+    contractVersion: normalizeText(plain.contractVersion || OUTCOME_STUDIO_CONTRACT_VERSION),
+    phase: normalizeText(plain.phase || OUTCOME_STUDIO_PHASE),
+    iterationType: normalizeToken(plain.iterationType || 'UNKNOWN'),
+    status: normalizeToken(plain.status || 'UNKNOWN'),
+    runtimeInstanceId: toIdString(plain.runtimeInstanceId),
+    runtimeInstanceKey: normalizeText(plain.runtimeInstanceKey),
+    runtimeType: normalizeToken(plain.runtimeType),
+    frameworkKey: normalizeToken(plain.frameworkKey),
+    packageKey: normalizeText(plain.packageKey),
+    packageVersion: normalizeText(plain.packageVersion),
+    projectId: normalizeText(plain.projectId),
+    outcomeId: normalizeText(plain.outcomeId),
+    workspaceType: normalizeToken(plain.workspaceType || DEFAULT_OUTCOME_WORKSPACE_TYPE),
+    assetType: normalizeToken(plain.assetType || DEFAULT_OUTCOME_ASSET_TYPE),
+    outputTypeKey: normalizeToken(plain.outputTypeKey),
+    outputTypeLabel: normalizeText(plain.outputTypeLabel),
+    title: normalizeText(plain.title),
+    sourceMessageId: normalizeText(plain.sourceMessageId),
+    responseMessageId: normalizeText(plain.responseMessageId),
+    truthSignatureId: normalizeText(plain.truthSignatureId),
+    grrExecutionId: normalizeText(plain.grrExecutionId),
+    grrRuntimeArtifactId: normalizeText(plain.grrRuntimeArtifactId),
+    customerContent,
+    contentAvailable: Object.keys(customerContent).length > 0,
+    validationSummary,
     warnings: Array.isArray(plain.warnings) ? plain.warnings.map(normalizeText).filter(Boolean) : [],
     limitations: Array.isArray(plain.limitations) ? plain.limitations.map(normalizeText).filter(Boolean) : [],
     generatedBy: toIdString(plain.generatedBy),
@@ -1509,6 +1792,21 @@ const listOutcomeMessagesForSession = async ({
   return messages.map((message) => serializeOutcomeMessage(message, { currentEvidence }))
 }
 
+const listOutcomeDraftsForSession = async ({
+  currentEvidence = null,
+  runtimeInstanceId,
+  sessionId,
+}) => {
+  const drafts = await OutcomeDraft.find({
+    runtimeInstanceId,
+    sessionId: normalizeText(sessionId),
+  })
+    .sort({ updatedAt: -1, createdAt: -1 })
+    .limit(OUTCOME_STUDIO_DRAFT_LIST_LIMIT)
+    .lean()
+  return drafts.map((draft) => serializeOutcomeDraft(draft, { currentEvidence }))
+}
+
 const findOutcomeMessageForRuntime = async ({
   detailsRuntimeInstanceId,
   messageId,
@@ -1537,6 +1835,208 @@ const findOutcomeMessageForRuntime = async ({
   }
 
   return message
+}
+
+const findActiveOutcomeDraftForSession = async ({
+  runtimeInstanceId,
+  sessionId,
+} = {}) => {
+  const query = OutcomeDraft.findOne({
+    runtimeInstanceId,
+    sessionId: normalizeText(sessionId),
+    status: OUTCOME_STUDIO_DRAFT_STATUSES.ACTIVE,
+  })
+  const draft = typeof query?.lean === 'function' ? await query.lean() : await query
+  return draft || null
+}
+
+const buildOutcomeDraftRefinementBlockedError = ({
+  blockerReason = 'OUTCOME_DRAFT_REFINEMENT_BLOCKED',
+  currentIterationId = '',
+  draftId = '',
+  messageId = '',
+  sessionId = '',
+} = {}) =>
+  createOutcomeStudioError({
+    status: 409,
+    code: 'CONFLICT',
+    message: 'Outcome Studio draft refinement requires an active current draft iteration.',
+    reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_DRAFT_REFINEMENT_BLOCKED,
+    details: {
+      sessionId: normalizeText(sessionId),
+      messageId: normalizeText(messageId),
+      draftId: normalizeText(draftId),
+      currentIterationId: normalizeText(currentIterationId),
+      responseGenerationAvailable: false,
+      blockerReason,
+      safetyGate: {
+        code: OUTCOME_STUDIO_SAFETY_GATE_CODES.RESPONSE_GENERATION_ENGINE,
+        status: OUTCOME_STUDIO_SAFETY_GATE_STATUSES.BLOCKED,
+      },
+    },
+  })
+
+const findCurrentOutcomeDraftIterationForRefinement = async ({
+  activeDraft = {},
+  messageId = '',
+  runtimeInstanceId,
+  sessionId = '',
+} = {}) => {
+  const draftId = normalizeText(activeDraft.draftId)
+  const currentIterationId = normalizeText(activeDraft.currentIterationId)
+  if (!draftId || !currentIterationId) {
+    throw buildOutcomeDraftRefinementBlockedError({
+      blockerReason: 'OUTCOME_DRAFT_CURRENT_POINTER_MISSING',
+      currentIterationId,
+      draftId,
+      messageId,
+      sessionId,
+    })
+  }
+
+  const query = OutcomeDraftIteration.findOne({
+    runtimeInstanceId,
+    sessionId: normalizeText(sessionId),
+    draftId,
+    draftIterationId: currentIterationId,
+    status: OUTCOME_STUDIO_DRAFT_ITERATION_STATUSES.CURRENT,
+  })
+  const iteration = typeof query?.lean === 'function' ? await query.lean() : await query
+  if (iteration) return iteration
+
+  throw buildOutcomeDraftRefinementBlockedError({
+    blockerReason: 'OUTCOME_DRAFT_CURRENT_ITERATION_NOT_FOUND',
+    currentIterationId,
+    draftId,
+    messageId,
+    sessionId,
+  })
+}
+
+const buildOutcomeDraftApprovalBlockedError = ({
+  blockerReason = 'OUTCOME_DRAFT_APPROVAL_BLOCKED',
+  currentIterationId = '',
+  draftId = '',
+  sessionId = '',
+} = {}) =>
+  createOutcomeStudioError({
+    status: 409,
+    code: 'CONFLICT',
+    message: 'Outcome Studio draft approval requires an active draft with a current iteration.',
+    reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_DRAFT_APPROVAL_BLOCKED,
+    details: {
+      sessionId: normalizeText(sessionId),
+      draftId: normalizeText(draftId),
+      currentIterationId: normalizeText(currentIterationId),
+      approvalAvailable: false,
+      blockerReason,
+      safetyGate: {
+        code: OUTCOME_STUDIO_SAFETY_GATE_CODES.ASSET_APPROVAL,
+        status: OUTCOME_STUDIO_SAFETY_GATE_STATUSES.BLOCKED,
+      },
+    },
+  })
+
+const findActiveOutcomeDraftForApproval = async ({
+  draftId = '',
+  runtimeInstanceId,
+  sessionId = '',
+} = {}) => {
+  const query = OutcomeDraft.findOne({
+    runtimeInstanceId,
+    sessionId: normalizeText(sessionId),
+    draftId: normalizeText(draftId),
+  })
+  const draft = typeof query?.lean === 'function' ? await query.lean() : await query
+
+  if (!draft) {
+    throw createOutcomeStudioError({
+      status: 404,
+      code: 'NOT_FOUND',
+      message: 'Outcome Studio draft not found.',
+      reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_DRAFT_NOT_FOUND,
+      details: {
+        runtimeInstanceId,
+        sessionId: normalizeText(sessionId),
+        draftId: normalizeText(draftId),
+      },
+    })
+  }
+
+  const draftStatus = normalizeToken(draft.status)
+  if (draftStatus !== OUTCOME_STUDIO_DRAFT_STATUSES.ACTIVE) {
+    throw buildOutcomeDraftApprovalBlockedError({
+      blockerReason: draftStatus === OUTCOME_STUDIO_DRAFT_STATUSES.APPROVED
+        ? 'OUTCOME_DRAFT_ALREADY_APPROVED'
+        : 'OUTCOME_DRAFT_NOT_ACTIVE',
+      currentIterationId: draft.currentIterationId,
+      draftId: draft.draftId,
+      sessionId,
+    })
+  }
+
+  return draft
+}
+
+const findCurrentOutcomeDraftIterationForApproval = async ({
+  activeDraft = {},
+  runtimeInstanceId,
+  sessionId = '',
+} = {}) => {
+  const draftId = normalizeText(activeDraft.draftId)
+  const currentIterationId = normalizeText(activeDraft.currentIterationId)
+  if (!draftId || !currentIterationId) {
+    throw buildOutcomeDraftApprovalBlockedError({
+      blockerReason: 'OUTCOME_DRAFT_CURRENT_POINTER_MISSING',
+      currentIterationId,
+      draftId,
+      sessionId,
+    })
+  }
+
+  const query = OutcomeDraftIteration.findOne({
+    runtimeInstanceId,
+    sessionId: normalizeText(sessionId),
+    draftId,
+    draftIterationId: currentIterationId,
+    status: OUTCOME_STUDIO_DRAFT_ITERATION_STATUSES.CURRENT,
+  })
+  const iteration = typeof query?.lean === 'function' ? await query.lean() : await query
+  if (iteration) return iteration
+
+  throw buildOutcomeDraftApprovalBlockedError({
+    blockerReason: 'OUTCOME_DRAFT_CURRENT_ITERATION_NOT_FOUND',
+    currentIterationId,
+    draftId,
+    sessionId,
+  })
+}
+
+const buildApprovedOutcomeAssetVersionCustomerContent = ({
+  customerContent = {},
+  draft = {},
+  iteration = {},
+  outcomeAssetId = '',
+  outcomeAssetVersionId = '',
+} = {}) => {
+  const sourceContent = customerContent && typeof customerContent === 'object'
+    ? customerContent
+    : {}
+  const markdown = getDraftIterationMarkdown({ customerContent: sourceContent })
+  return {
+    ...sourceContent,
+    ...(markdown ? { markdown } : {}),
+    metadata: {
+      ...(sourceContent.metadata && typeof sourceContent.metadata === 'object'
+        ? sourceContent.metadata
+        : {}),
+      approvalStatus: OUTCOME_STUDIO_DRAFT_STATUSES.APPROVED,
+      approvedDraftId: normalizeText(draft.draftId),
+      approvedDraftIterationId: normalizeText(iteration.draftIterationId),
+      outcomeAssetId: normalizeText(outcomeAssetId),
+      outcomeAssetVersionId: normalizeText(outcomeAssetVersionId),
+    },
+  }
 }
 
 const listOutcomeAssetsForRuntime = async ({
@@ -2035,6 +2535,44 @@ const logOutcomeAssetGeneratedAudit = async ({
   await auditService.log(auditPayload, options)
 }
 
+const logOutcomeDraftGeneratedAudit = async ({
+  action = auditService.AUDIT_ACTIONS.OUTCOME_DRAFT_GENERATED,
+  auditRequest,
+  dbSession = null,
+  diff,
+  draft,
+  runtimeInstance,
+  summary,
+}) => {
+  const runtimeInstanceId = runtimeInstance._id || runtimeInstance.id
+  const auditPayload = {
+    action,
+    actorUserId: diff?.actorUserId,
+    resourceType: auditService.RESOURCE_TYPES.OutcomeDraft,
+    resourceId: draft._id || draft.id,
+    scope: {
+      customerId: runtimeInstance.customerId,
+      tenantId: runtimeInstance.tenantId,
+      runtimeInstanceId,
+      runtimeInstanceKey: runtimeInstance.runtimeInstanceKey || '',
+      outcomeSessionId: draft.sessionId,
+      outcomeDraftId: draft.draftId,
+      outcomeDraftIterationId: diff?.draftIterationId,
+    },
+    summary,
+    diff,
+  }
+  const options = {
+    throwOnError: true,
+    ...(dbSession ? { session: dbSession } : {}),
+  }
+  if (auditRequest) {
+    await auditService.logFromRequest(auditRequest, auditPayload, options)
+    return
+  }
+  await auditService.log(auditPayload, options)
+}
+
 const failAuditClosed = (err, details = {}) =>
   createOutcomeStudioError({
     status: 500,
@@ -2083,6 +2621,48 @@ const failAssetGenerationAuditClosed = (err, details = {}) =>
     code: 'OUTCOME_ASSET_GENERATION_AUDIT_FAILED',
     message: 'Outcome Studio asset generation audit could not be persisted.',
     reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_ASSET_GENERATION_AUDIT_FAILED,
+    details: {
+      auditError: {
+        message: err?.message || 'Audit persistence failed.',
+      },
+      ...details,
+    },
+  })
+
+const failDraftGenerationAuditClosed = (err, details = {}) =>
+  createOutcomeStudioError({
+    status: 500,
+    code: 'OUTCOME_DRAFT_GENERATION_AUDIT_FAILED',
+    message: 'Outcome Studio draft generation audit could not be persisted.',
+    reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_DRAFT_GENERATION_AUDIT_FAILED,
+    details: {
+      auditError: {
+        message: err?.message || 'Audit persistence failed.',
+      },
+      ...details,
+    },
+  })
+
+const failDraftRefinementAuditClosed = (err, details = {}) =>
+  createOutcomeStudioError({
+    status: 500,
+    code: 'OUTCOME_DRAFT_REFINEMENT_AUDIT_FAILED',
+    message: 'Outcome Studio draft refinement audit could not be persisted.',
+    reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_DRAFT_REFINEMENT_AUDIT_FAILED,
+    details: {
+      auditError: {
+        message: err?.message || 'Audit persistence failed.',
+      },
+      ...details,
+    },
+  })
+
+const failDraftApprovalAuditClosed = (err, details = {}) =>
+  createOutcomeStudioError({
+    status: 500,
+    code: 'OUTCOME_DRAFT_APPROVAL_AUDIT_FAILED',
+    message: 'Outcome Studio draft approval audit could not be persisted.',
+    reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_DRAFT_APPROVAL_AUDIT_FAILED,
     details: {
       auditError: {
         message: err?.message || 'Audit persistence failed.',
@@ -2656,6 +3236,11 @@ export const getRuntimeOutcomeSession = async ({
     runtimeInstanceId: runtimeObjectId,
     sessionId,
   })
+  const drafts = await listOutcomeDraftsForSession({
+    currentEvidence,
+    runtimeInstanceId: runtimeObjectId,
+    sessionId,
+  })
   const assets = await listOutcomeAssetsForRuntime({
     currentEvidence,
     runtimeInstanceId: runtimeObjectId,
@@ -2665,6 +3250,7 @@ export const getRuntimeOutcomeSession = async ({
   return {
     ...serializeOutcomeSession(session, { currentEvidence }),
     messages,
+    drafts,
     assets,
   }
 }
@@ -3288,6 +3874,25 @@ export const generateRuntimeOutcomeResponse = async ({
     })
   }
 
+  const activeDraft = await findActiveOutcomeDraftForSession({
+    runtimeInstanceId: runtimeObjectId,
+    sessionId: serializedSession.sessionId,
+  })
+  const requestResolution = assertOutcomeStudioRequestResolution({
+    activeDraft,
+    message: serializedMessage,
+    session: serializedSession,
+  })
+  const isDraftRefinement = requestResolution?.intent?.refinement === true
+  const currentDraftIteration = isDraftRefinement
+    ? await findCurrentOutcomeDraftIterationForRefinement({
+        activeDraft,
+        messageId: serializedMessage.messageId,
+        runtimeInstanceId: runtimeObjectId,
+        sessionId: serializedSession.sessionId,
+      })
+    : null
+
   const runtimeScope = getRuntimeScope(runtimeInstance)
   const generatedAt = new Date().toISOString()
   const grrEnabled = isOutcomeStudioGrrEnabled()
@@ -3298,7 +3903,9 @@ export const generateRuntimeOutcomeResponse = async ({
         payload: {
           outputTypeKey: serializedSession.sourceOutputTypeKey || serializedSession.sourceOutput?.outputTypeKey,
           executionIntent: buildGrrExecutionIntent({
+            currentDraftIteration,
             message: serializedMessage,
+            requestResolution,
             session: serializedSession,
           }),
           idempotencyKey: [
@@ -3313,34 +3920,83 @@ export const generateRuntimeOutcomeResponse = async ({
         scopes,
       })
     : null
-  const responsePrompt = grrEnabled
-    ? buildGrrOutcomeResponseText({ grrExecution })
+  const generatedResponseText = grrEnabled
+    ? buildGrrOutcomeResponseText({ grrExecution, session: serializedSession })
     : buildGovernedOutcomeResponseText({
         message: serializedMessage,
         session: serializedSession,
       })
+  const responsePrompt = isDraftRefinement
+    ? buildRefinedOutcomeDraftResponseText({
+        currentIteration: currentDraftIteration,
+        generatedResponseText,
+        grrExecution,
+        message: serializedMessage,
+        requestResolution,
+        session: serializedSession,
+      })
+    : generatedResponseText
   const responseMessageId = buildOutcomeMessageId()
-  const outcomeAssetId = buildOutcomeAssetId()
-  const outcomeAssetVersionId = buildOutcomeAssetVersionId()
-  const outcomeAssetTitle = buildOutcomeAssetTitle({ session: serializedSession })
+  const draftId = isDraftRefinement ? normalizeText(activeDraft.draftId) : buildOutcomeDraftId()
+  const draftIterationId = buildOutcomeDraftIterationId()
+  const previousDraftIterationId = normalizeText(currentDraftIteration?.draftIterationId)
+  const previousDraftIterationNumber = Number(
+    currentDraftIteration?.iterationNumber
+    || activeDraft?.currentIterationNumber
+    || 0,
+  )
+  const draftIterationNumber = isDraftRefinement ? previousDraftIterationNumber + 1 : 1
+  const draftTitle = isDraftRefinement
+    ? normalizeText(activeDraft.title) || buildOutcomeDraftTitle({ session: serializedSession })
+    : buildOutcomeDraftTitle({ session: serializedSession })
+  const baseRefinementMetadata = isDraftRefinement
+    ? buildDraftRefinementMetadata({
+        currentIteration: currentDraftIteration,
+        requestResolution,
+      })
+    : null
+  const refinementMetadata = baseRefinementMetadata
+    ? {
+        ...baseRefinementMetadata,
+        compare: {
+          ...baseRefinementMetadata.compare,
+          toIterationId: draftIterationId,
+        },
+      }
+    : null
   const lineageSummary = buildGeneratedOutcomeAssetLineageSummary({
     generatedAt,
     grrExecution,
     runtimeInstance,
     session: serializedSession,
   })
-  const customerContent = buildGeneratedOutcomeAssetCustomerContent({
-    assetId: outcomeAssetId,
-    generationMode: grrEnabled ? 'GOVERNED_REASONING_RUNTIME' : 'DETERMINISTIC_SCAFFOLD',
+  if (refinementMetadata) {
+    lineageSummary.draftRefinement = refinementMetadata
+  }
+  const customerContent = buildGeneratedOutcomeDraftCustomerContent({
+    draftId,
+    generationMode: isDraftRefinement
+      ? 'GOVERNED_REASONING_RUNTIME_REFINEMENT'
+      : grrEnabled ? 'GOVERNED_REASONING_RUNTIME' : 'DETERMINISTIC_SCAFFOLD',
     grrExecution,
+    iterationId: draftIterationId,
     message: serializedMessage,
     responseText: responsePrompt,
     session: serializedSession,
-    versionId: outcomeAssetVersionId,
   })
+  if (refinementMetadata) {
+    customerContent.metadata = {
+      ...(customerContent.metadata || {}),
+      draftOperation: refinementMetadata.operation,
+      refinementMode: refinementMetadata.mode,
+      sourceIterationId: refinementMetadata.sourceIterationId,
+      compareAvailable: true,
+      revertAvailable: true,
+    }
+  }
   const postValidation = buildOutcomeAssetPostValidationSnapshot({
     asset: {
-      outcomeAssetId,
+      outcomeAssetId: draftId,
       outputTypeKey: serializedSession.sourceOutputTypeKey || serializedSession.sourceOutput?.outputTypeKey,
     },
     customerContent,
@@ -3348,10 +4004,24 @@ export const generateRuntimeOutcomeResponse = async ({
     truthSignature: serializedSession.truthSignature,
     validatedAt: generatedAt,
     version: {
-      outcomeAssetVersionId,
+      outcomeAssetVersionId: draftIterationId,
       outputTypeKey: serializedSession.sourceOutputTypeKey || serializedSession.sourceOutput?.outputTypeKey,
     },
   })
+  const draftValidationSummary = {
+    ...postValidation,
+    validationScope: 'OUTCOME_DRAFT_ITERATION',
+    outcomeAssetId: '',
+    outcomeAssetVersionId: '',
+    draftId,
+    draftIterationId,
+    validators: Array.isArray(postValidation.validators)
+      ? postValidation.validators.map((validator) => ({
+          ...validator,
+          message: normalizeText(validator?.message).replace(/generated asset/gi, 'generated draft'),
+        }))
+      : [],
+  }
   const warnings = buildOutcomeWarningsFromGrr({ grrExecution })
   const limitations = buildOutcomeLimitationsFromGrr({ grrExecution })
   const responseContextBindings = buildOutcomeContextBindings({
@@ -3364,13 +4034,11 @@ export const generateRuntimeOutcomeResponse = async ({
     sourceOutput: serializedSession.sourceOutput,
     truthSignature: serializedSession.truthSignature,
   })
-  const assetContextBindings = buildOutcomeContextBindings({
+  const draftContextBindings = buildOutcomeContextBindings({
     assetType: DEFAULT_OUTCOME_ASSET_TYPE,
-    contextType: 'ASSET',
+    contextType: 'DRAFT',
     grrExecution,
     knowledgePackBinding: serializedSession.knowledgePackBinding,
-    outcomeAssetId,
-    outcomeAssetVersionId,
     runtimeScope,
     sessionId: serializedSession.sessionId,
     sourceOutput: serializedSession.sourceOutput,
@@ -3394,69 +4062,73 @@ export const generateRuntimeOutcomeResponse = async ({
     submittedBy: actorUserId,
     submittedAt: generatedAt,
   })
-  const outcomeAsset = new OutcomeAsset({
-    outcomeAssetId,
+  const outcomeDraft = isDraftRefinement
+    ? {
+        ...activeDraft,
+        currentIterationId: draftIterationId,
+        currentIterationNumber: draftIterationNumber,
+        lineageSummary,
+        validationSummary: draftValidationSummary,
+        warnings,
+        limitations,
+        updatedAt: generatedAt,
+      }
+    : new OutcomeDraft({
+        draftId,
+        sessionId: serializedSession.sessionId,
+        ...runtimeScope,
+        workspaceType: DEFAULT_OUTCOME_WORKSPACE_TYPE,
+        assetType: DEFAULT_OUTCOME_ASSET_TYPE,
+        contractVersion: OUTCOME_STUDIO_CONTRACT_VERSION,
+        phase: OUTCOME_STUDIO_PHASE,
+        status: OUTCOME_STUDIO_DRAFT_STATUSES.ACTIVE,
+        outputTypeKey: serializedSession.sourceOutputTypeKey || serializedSession.sourceOutput?.outputTypeKey,
+        outputTypeLabel: serializedSession.sourceOutputTypeLabel || serializedSession.sourceOutput?.outputTypeLabel,
+        title: draftTitle,
+        sourceOutputAssetId: serializedSession.sourceOutputAssetId || serializedSession.sourceOutput?.outputAssetId,
+        truthSignature: serializedSession.truthSignature,
+        truthSignatureId: serializedSession.truthSignatureId || serializedSession.truthSignature?.truthSignatureId,
+        knowledgePackBinding: serializedSession.knowledgePackBinding,
+        currentIterationId: draftIterationId,
+        currentIterationNumber: 1,
+        contextBindings: draftContextBindings,
+        lineageSummary,
+        validationSummary: draftValidationSummary,
+        warnings,
+        limitations,
+        createdBy: actorUserId,
+      })
+  const outcomeDraftIteration = new OutcomeDraftIteration({
+    draftIterationId,
+    draftId,
+    previousIterationId: previousDraftIterationId,
+    iterationNumber: draftIterationNumber,
     sessionId: serializedSession.sessionId,
     ...runtimeScope,
     workspaceType: DEFAULT_OUTCOME_WORKSPACE_TYPE,
     assetType: DEFAULT_OUTCOME_ASSET_TYPE,
     contractVersion: OUTCOME_STUDIO_CONTRACT_VERSION,
     phase: OUTCOME_STUDIO_PHASE,
-    status: OUTCOME_STUDIO_ASSET_STATUSES.GENERATED,
-    outputTypeKey: serializedSession.sourceOutputTypeKey || serializedSession.sourceOutput?.outputTypeKey,
-    outputTypeLabel: serializedSession.sourceOutputTypeLabel || serializedSession.sourceOutput?.outputTypeLabel,
-    title: outcomeAssetTitle,
-    sourceOutputAssetId: serializedSession.sourceOutputAssetId || serializedSession.sourceOutput?.outputAssetId,
-    currentVersionId: outcomeAssetVersionId,
-    currentVersionNumber: 1,
-    sourceOutputSnapshot: serializedSession.sourceOutput,
-    truthSignature: serializedSession.truthSignature,
-    knowledgePackBinding: serializedSession.knowledgePackBinding,
-    postValidation,
-    contextBindings: assetContextBindings,
-    lineageSummary,
-    warnings,
-    limitations,
-    generatedBy: actorUserId,
-    generatedAt,
-  })
-  const outcomeAssetVersion = new OutcomeAssetVersion({
-    outcomeAssetVersionId,
-    outcomeAssetId,
-    parentVersionId: '',
-    sessionId: serializedSession.sessionId,
-    ...runtimeScope,
-    workspaceType: DEFAULT_OUTCOME_WORKSPACE_TYPE,
-    assetType: DEFAULT_OUTCOME_ASSET_TYPE,
-    contractVersion: OUTCOME_STUDIO_CONTRACT_VERSION,
-    phase: OUTCOME_STUDIO_PHASE,
-    versionNumber: 1,
-    status: OUTCOME_STUDIO_ASSET_VERSION_STATUSES.CURRENT,
-    outputTypeKey: outcomeAsset.outputTypeKey,
-    outputTypeLabel: outcomeAsset.outputTypeLabel,
-    title: outcomeAssetTitle,
-    sourceOutputAssetId: outcomeAsset.sourceOutputAssetId,
-    sourceOutputSnapshot: serializedSession.sourceOutput,
-    truthSignature: serializedSession.truthSignature,
-    knowledgePackBinding: serializedSession.knowledgePackBinding,
-    postValidation,
-    contextBindings: assetContextBindings,
-    lineageSummary,
+    iterationType: isDraftRefinement
+      ? OUTCOME_STUDIO_DRAFT_ITERATION_TYPES.REFINEMENT
+      : OUTCOME_STUDIO_DRAFT_ITERATION_TYPES.INITIAL,
+    status: OUTCOME_STUDIO_DRAFT_ITERATION_STATUSES.CURRENT,
+    outputTypeKey: outcomeDraft.outputTypeKey,
+    outputTypeLabel: outcomeDraft.outputTypeLabel,
+    title: draftTitle,
+    sourceMessageId: serializedMessage.messageId,
+    responseMessageId,
+    truthSignatureId: serializedSession.truthSignatureId || serializedSession.truthSignature?.truthSignatureId,
+    grrExecutionId: grrExecution?.executionId || '',
+    grrRuntimeArtifactId: grrExecution?.artifact?.runtimeArtifactId || '',
     customerContent,
+    validationSummary: draftValidationSummary,
+    lineageSummary,
     warnings,
     limitations,
     generatedBy: actorUserId,
     generatedAt,
   })
-  const generatedAssetRelationshipDocuments = createRuntimeGraphRelationshipDocuments(
-    buildGeneratedAssetRuntimeGraphRelationships({
-      actorUserId,
-      asset: outcomeAsset,
-      runtimeScope,
-      session,
-      version: outcomeAssetVersion,
-    }),
-  )
 
   let failureStage = 'write'
   const persistGeneratedResponseAndAudit = async (dbSession = null) => {
@@ -3474,13 +4146,56 @@ export const generateRuntimeOutcomeResponse = async ({
         { $set: { responseStatus: OUTCOME_STUDIO_RESPONSE_STATUSES.RESPONSE_GENERATED } },
       )
     }
-    await outcomeAsset.save(saveOptions)
-    await outcomeAssetVersion.save(saveOptions)
-    try {
-      await saveRuntimeGraphRelationshipDocuments(generatedAssetRelationshipDocuments, { dbSession })
-    } catch (err) {
-      err.outcomeGraphRelationshipFailure = 'generatedAsset'
-      throw err
+    if (isDraftRefinement) {
+      const previousIterationUpdate = {
+        $set: {
+          status: OUTCOME_STUDIO_DRAFT_ITERATION_STATUSES.SUPERSEDED,
+        },
+      }
+      const draftUpdate = {
+        $set: {
+          currentIterationId: draftIterationId,
+          currentIterationNumber: draftIterationNumber,
+          lineageSummary,
+          validationSummary: draftValidationSummary,
+          warnings,
+          limitations,
+        },
+      }
+      if (dbSession) {
+        await OutcomeDraftIteration.updateMany(
+          {
+            runtimeInstanceId: runtimeObjectId,
+            draftId,
+            status: OUTCOME_STUDIO_DRAFT_ITERATION_STATUSES.CURRENT,
+          },
+          previousIterationUpdate,
+          { session: dbSession },
+        )
+        await outcomeDraftIteration.save(saveOptions)
+        await OutcomeDraft.updateOne(
+          { _id: activeDraft._id || activeDraft.id },
+          draftUpdate,
+          { session: dbSession },
+        )
+      } else {
+        await OutcomeDraftIteration.updateMany(
+          {
+            runtimeInstanceId: runtimeObjectId,
+            draftId,
+            status: OUTCOME_STUDIO_DRAFT_ITERATION_STATUSES.CURRENT,
+          },
+          previousIterationUpdate,
+        )
+        await outcomeDraftIteration.save(saveOptions)
+        await OutcomeDraft.updateOne(
+          { _id: activeDraft._id || activeDraft.id },
+          draftUpdate,
+        )
+      }
+    } else {
+      await outcomeDraft.save(saveOptions)
+      await outcomeDraftIteration.save(saveOptions)
     }
     try {
       failureStage = 'responseAudit'
@@ -3502,33 +4217,48 @@ export const generateRuntimeOutcomeResponse = async ({
           truthSignatureStatus: serializedSession.truthSignature.status,
           knowledgePackBindingStatus: serializedSession.knowledgePackBinding.status,
           responseStatus: OUTCOME_STUDIO_RESPONSE_STATUSES.RESPONSE_GENERATED,
-          assetCreated: true,
-          outcomeAssetId,
-          outcomeAssetVersionId,
+          assetCreated: false,
+          draftCreated: !isDraftRefinement,
+          draftRefined: isDraftRefinement,
+          draftId,
+          draftIterationId,
+          previousDraftIterationId,
+          iterationNumber: draftIterationNumber,
           grrExecutionId: grrExecution?.executionId || '',
           grrRuntimeArtifactId: grrExecution?.artifact?.runtimeArtifactId || '',
           grrProviderMode: grrExecution?.providerMode || '',
-          runtimeGraphRelationshipCount: generatedAssetRelationshipDocuments.length,
+          runtimeGraphRelationshipCount: 0,
         },
       })
-      failureStage = 'assetAudit'
-      await logOutcomeAssetGeneratedAudit({
+      failureStage = 'draftAudit'
+      await logOutcomeDraftGeneratedAudit({
+        action: isDraftRefinement
+          ? auditService.AUDIT_ACTIONS.OUTCOME_DRAFT_REFINED
+          : auditService.AUDIT_ACTIONS.OUTCOME_DRAFT_GENERATED,
         auditRequest,
         dbSession,
         runtimeInstance,
-        asset: outcomeAsset,
-        summary: 'Outcome Studio asset and first version generated from governed response.',
+        draft: outcomeDraft,
+        summary: isDraftRefinement
+          ? 'Outcome Studio conversation draft refined from governed response.'
+          : 'Outcome Studio conversation draft and first iteration generated from governed response.',
         diff: {
           actorUserId,
           sessionId: serializedSession.sessionId,
           messageId: serializedMessage.messageId,
           responseMessageId: responseMessage.messageId,
           runtimeInstanceId: toIdString(runtimeObjectId),
-          outcomeAssetId,
-          outcomeAssetVersionId,
-          versionNumber: 1,
-          sourceOutputAssetId: outcomeAsset.sourceOutputAssetId,
-          sourceOutputTypeKey: outcomeAsset.outputTypeKey,
+          draftId,
+          draftIterationId,
+          previousDraftIterationId,
+          iterationNumber: draftIterationNumber,
+          draftCreated: !isDraftRefinement,
+          draftRefined: isDraftRefinement,
+          refinementMode: refinementMetadata?.mode || '',
+          compareAvailable: refinementMetadata?.compare?.available === true,
+          revertAvailable: refinementMetadata?.revert?.available === true,
+          sourceOutputAssetId: outcomeDraft.sourceOutputAssetId,
+          sourceOutputTypeKey: outcomeDraft.outputTypeKey,
           truthSignatureStatus: serializedSession.truthSignature.status,
           truthSignatureCurrentness: serializedSession.truthSignature.currentness,
           knowledgePackBindingStatus: serializedSession.knowledgePackBinding.status,
@@ -3537,9 +4267,10 @@ export const generateRuntimeOutcomeResponse = async ({
           grrProviderMode: grrExecution?.providerMode || '',
           runtimeArtifactIsCertifiedTruth:
             grrExecution?.artifact?.certification?.runtimeArtifactIsCertifiedTruth === true,
-          postValidation: buildOutcomePostValidationAuditSummary(postValidation),
+          postValidation: buildOutcomePostValidationAuditSummary(draftValidationSummary),
           generatedBodyAvailable: true,
-          runtimeGraphRelationshipCount: generatedAssetRelationshipDocuments.length,
+          assetVersionCreated: false,
+          runtimeGraphRelationshipCount: 0,
         },
       })
     } catch (err) {
@@ -3555,22 +4286,17 @@ export const generateRuntimeOutcomeResponse = async ({
         await persistGeneratedResponseAndAudit(dbSession)
       })
     } catch (err) {
-      if (err?.outcomeGraphRelationshipFailure === 'generatedAsset') {
-        throw failGraphRelationshipClosed(err, {
+      if (err?.outcomeResponseAuditFailure === 'draftAudit') {
+        const failClosed = isDraftRefinement
+          ? failDraftRefinementAuditClosed
+          : failDraftGenerationAuditClosed
+        throw failClosed(err, {
           sessionId: serializedSession.sessionId,
           messageId: serializedMessage.messageId,
           responseMessageId: responseMessage.messageId,
-          outcomeAssetId,
-          outcomeAssetVersionId,
-        })
-      }
-      if (err?.outcomeResponseAuditFailure === 'assetAudit') {
-        throw failAssetGenerationAuditClosed(err, {
-          sessionId: serializedSession.sessionId,
-          messageId: serializedMessage.messageId,
-          responseMessageId: responseMessage.messageId,
-          outcomeAssetId,
-          outcomeAssetVersionId,
+          draftId,
+          draftIterationId,
+          previousDraftIterationId,
         })
       }
       if (err?.outcomeResponseAuditFailure !== 'responseAudit') throw err
@@ -3578,8 +4304,9 @@ export const generateRuntimeOutcomeResponse = async ({
         sessionId: serializedSession.sessionId,
         messageId: serializedMessage.messageId,
         responseMessageId: responseMessage.messageId,
-        outcomeAssetId,
-        outcomeAssetVersionId,
+        draftId,
+        draftIterationId,
+        previousDraftIterationId,
       })
     } finally {
       await dbSession.endSession()
@@ -3588,30 +4315,52 @@ export const generateRuntimeOutcomeResponse = async ({
     try {
       await persistGeneratedResponseAndAudit()
     } catch (err) {
-      await deleteRuntimeGraphRelationshipDocuments(generatedAssetRelationshipDocuments)
-      await OutcomeAssetVersion.deleteOne({ _id: outcomeAssetVersion._id })
-      await OutcomeAsset.deleteOne({ _id: outcomeAsset._id })
+      await OutcomeDraftIteration.deleteOne({ _id: outcomeDraftIteration._id })
+      if (isDraftRefinement) {
+        await OutcomeDraftIteration.updateMany(
+          {
+            runtimeInstanceId: runtimeObjectId,
+            draftId,
+            draftIterationId: previousDraftIterationId,
+          },
+          {
+            $set: {
+              status: OUTCOME_STUDIO_DRAFT_ITERATION_STATUSES.CURRENT,
+            },
+          },
+        )
+        await OutcomeDraft.updateOne(
+          { _id: activeDraft._id || activeDraft.id },
+          {
+            $set: {
+              currentIterationId: previousDraftIterationId,
+              currentIterationNumber: previousDraftIterationNumber,
+              lineageSummary: activeDraft.lineageSummary || {},
+              validationSummary: activeDraft.validationSummary || {},
+              warnings: Array.isArray(activeDraft.warnings) ? activeDraft.warnings : [],
+              limitations: Array.isArray(activeDraft.limitations) ? activeDraft.limitations : [],
+            },
+          },
+        )
+      } else {
+        await OutcomeDraft.deleteOne({ _id: outcomeDraft._id })
+      }
       await OutcomeMessage.deleteOne({ _id: responseMessage._id })
       await OutcomeMessage.updateOne(
         { _id: message._id },
         { $set: { responseStatus: OUTCOME_STUDIO_RESPONSE_STATUSES.PENDING_RESPONSE } },
       )
-      if (err?.outcomeGraphRelationshipFailure === 'generatedAsset') {
-        throw failGraphRelationshipClosed(err, {
+      if (err?.outcomeResponseAuditFailure === 'draftAudit') {
+        const failClosed = isDraftRefinement
+          ? failDraftRefinementAuditClosed
+          : failDraftGenerationAuditClosed
+        throw failClosed(err, {
           sessionId: serializedSession.sessionId,
           messageId: serializedMessage.messageId,
           responseMessageId: responseMessage.messageId,
-          outcomeAssetId,
-          outcomeAssetVersionId,
-        })
-      }
-      if (err?.outcomeResponseAuditFailure === 'assetAudit') {
-        throw failAssetGenerationAuditClosed(err, {
-          sessionId: serializedSession.sessionId,
-          messageId: serializedMessage.messageId,
-          responseMessageId: responseMessage.messageId,
-          outcomeAssetId,
-          outcomeAssetVersionId,
+          draftId,
+          draftIterationId,
+          previousDraftIterationId,
         })
       }
       if (err?.outcomeResponseAuditFailure !== 'responseAudit') throw err
@@ -3619,6 +4368,476 @@ export const generateRuntimeOutcomeResponse = async ({
         sessionId: serializedSession.sessionId,
         messageId: serializedMessage.messageId,
         responseMessageId: responseMessage.messageId,
+        draftId,
+        draftIterationId,
+        previousDraftIterationId,
+      })
+    }
+  }
+
+  return {
+    ...serializeOutcomeMessage(responseMessage),
+    draft: serializeOutcomeDraft(outcomeDraft, { currentEvidence }),
+    draftIteration: serializeOutcomeDraftIteration(outcomeDraftIteration),
+  }
+}
+
+export const approveRuntimeOutcomeDraft = async ({
+  actorUserId,
+  auditRequest,
+  draftId,
+  runtimeInstanceId,
+  scopes,
+  sessionId,
+} = {}) => {
+  const runtimeInstance = await assertOutcomeSessionMutationPermission({
+    actorUserId,
+    runtimeInstanceId,
+    scopes,
+  })
+  const runtimeObjectId = runtimeInstance._id || runtimeInstance.id
+  const session = await findOutcomeSessionForRuntime({
+    detailsRuntimeInstanceId: runtimeInstanceId,
+    runtimeInstanceId: runtimeObjectId,
+    sessionId,
+  })
+  const currentEvidence = buildRuntimeTruthEvidence(runtimeInstance)
+  const serializedSession = serializeOutcomeSession(session, { currentEvidence })
+
+  if (serializedSession.status !== OUTCOME_STUDIO_SESSION_STATUSES.ACTIVE) {
+    throw createOutcomeStudioError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Outcome Studio draft approval cannot run for a non-active session.',
+      reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_SESSION_BLOCKED,
+      details: {
+        sessionId: serializedSession.sessionId,
+        status: serializedSession.status,
+        approvalAvailable: false,
+      },
+    })
+  }
+
+  assertOutcomeSessionTruthCurrent({
+    actionLabel: 'draft approval',
+    availabilityKey: 'approvalAvailable',
+    session: serializedSession,
+  })
+
+  const activeDraft = await findActiveOutcomeDraftForApproval({
+    draftId,
+    runtimeInstanceId: runtimeObjectId,
+    sessionId: serializedSession.sessionId,
+  })
+  const currentDraftIteration = await findCurrentOutcomeDraftIterationForApproval({
+    activeDraft,
+    runtimeInstanceId: runtimeObjectId,
+    sessionId: serializedSession.sessionId,
+  })
+
+  const approvedAt = new Date()
+  const approvedAtIso = approvedAt.toISOString()
+  const runtimeScope = getRuntimeScope(runtimeInstance)
+  const outcomeAssetId = buildOutcomeAssetId()
+  const outcomeAssetVersionId = buildOutcomeAssetVersionId()
+  const versionNumber = 1
+  const parentVersionId = normalizeText(
+    activeDraft.lineageSummary?.parentVersionId
+    || currentDraftIteration.lineageSummary?.parentVersionId,
+  )
+  const outputTypeKey = normalizeToken(activeDraft.outputTypeKey || serializedSession.sourceOutputTypeKey)
+  const outputTypeLabel = normalizeText(activeDraft.outputTypeLabel || serializedSession.sourceOutputTypeLabel)
+  const sourceOutputAssetId = normalizeText(
+    activeDraft.sourceOutputAssetId
+    || serializedSession.sourceOutputAssetId
+    || serializedSession.sourceOutput?.outputAssetId,
+  )
+  const title = normalizeText(activeDraft.title) || buildOutcomeAssetTitle({ session: serializedSession })
+  const customerContent = buildApprovedOutcomeAssetVersionCustomerContent({
+    customerContent: currentDraftIteration.customerContent,
+    draft: activeDraft,
+    iteration: currentDraftIteration,
+    outcomeAssetId,
+    outcomeAssetVersionId,
+  })
+  const lineageSummary = {
+    ...buildOutcomeAssetLineageSummary(
+      currentDraftIteration.lineageSummary
+      || activeDraft.lineageSummary
+      || {},
+    ),
+    sourceOutputAssetId,
+    sourceOutputTypeKey: outputTypeKey,
+    sourceOutputTypeLabel: outputTypeLabel,
+    truthSignatureStatus: normalizeToken(serializedSession.truthSignature?.status),
+    truthSignatureCurrentness: normalizeToken(serializedSession.truthSignature?.currentness),
+    parentVersionId,
+    generatedAt: approvedAtIso,
+    draftApproval: {
+      operation: 'DRAFT_APPROVAL',
+      draftId: normalizeText(activeDraft.draftId),
+      draftIterationId: normalizeText(currentDraftIteration.draftIterationId),
+      approvedAt: approvedAtIso,
+      approvedBy: actorUserId,
+      outcomeAssetId,
+      outcomeAssetVersionId,
+      versionNumber,
+    },
+  }
+  const postValidation = buildOutcomeAssetPostValidationSnapshot({
+    asset: {
+      outcomeAssetId,
+      outputTypeKey,
+    },
+    customerContent,
+    knowledgePackBinding: serializedSession.knowledgePackBinding,
+    truthSignature: serializedSession.truthSignature,
+    validatedAt: approvedAtIso,
+    version: {
+      outcomeAssetVersionId,
+      outputTypeKey,
+    },
+  })
+  assertOutcomeAssetPostValidation({
+    actionLabel: 'approval',
+    asset: {
+      outcomeAssetId,
+    },
+    availabilityKey: 'approvalAvailable',
+    safetyGateCode: OUTCOME_STUDIO_SAFETY_GATE_CODES.ASSET_APPROVAL,
+    version: {
+      outcomeAssetVersionId,
+      postValidation,
+    },
+  })
+
+  const grrExecutionContext = normalizeText(currentDraftIteration.grrExecutionId)
+    ? {
+        executionId: currentDraftIteration.grrExecutionId,
+        providerMode: lineageSummary.grrProviderMode,
+        runtimeStateWrites: lineageSummary.grrRuntimeStateWrites,
+        artifact: {
+          runtimeArtifactId: currentDraftIteration.grrRuntimeArtifactId,
+          certification: lineageSummary.grrCertification,
+        },
+      }
+    : null
+  const assetContextBindings = buildOutcomeContextBindings({
+    assetType: DEFAULT_OUTCOME_ASSET_TYPE,
+    contextType: 'ASSET',
+    grrExecution: grrExecutionContext,
+    knowledgePackBinding: serializedSession.knowledgePackBinding,
+    outcomeAssetId,
+    outcomeAssetVersionId,
+    runtimeScope,
+    sessionId: serializedSession.sessionId,
+    sourceOutput: serializedSession.sourceOutput,
+    truthSignature: serializedSession.truthSignature,
+  })
+  const versionContextBindings = buildOutcomeContextBindings({
+    assetType: DEFAULT_OUTCOME_ASSET_TYPE,
+    contextType: 'ASSET_VERSION',
+    grrExecution: grrExecutionContext,
+    knowledgePackBinding: serializedSession.knowledgePackBinding,
+    outcomeAssetId,
+    outcomeAssetVersionId,
+    runtimeScope,
+    sessionId: serializedSession.sessionId,
+    sourceOutput: serializedSession.sourceOutput,
+    truthSignature: serializedSession.truthSignature,
+  })
+  const warnings = Array.isArray(currentDraftIteration.warnings) && currentDraftIteration.warnings.length
+    ? currentDraftIteration.warnings
+    : Array.isArray(activeDraft.warnings) ? activeDraft.warnings : []
+  const limitations = Array.isArray(currentDraftIteration.limitations) && currentDraftIteration.limitations.length
+    ? currentDraftIteration.limitations
+    : Array.isArray(activeDraft.limitations) ? activeDraft.limitations : []
+  const outcomeAsset = new OutcomeAsset({
+    outcomeAssetId,
+    sessionId: serializedSession.sessionId,
+    ...runtimeScope,
+    workspaceType: DEFAULT_OUTCOME_WORKSPACE_TYPE,
+    assetType: DEFAULT_OUTCOME_ASSET_TYPE,
+    contractVersion: OUTCOME_STUDIO_CONTRACT_VERSION,
+    phase: OUTCOME_STUDIO_PHASE,
+    status: OUTCOME_STUDIO_ASSET_STATUSES.GENERATED,
+    outputTypeKey,
+    outputTypeLabel,
+    title,
+    sourceOutputAssetId,
+    currentVersionId: outcomeAssetVersionId,
+    currentVersionNumber: versionNumber,
+    sourceOutputSnapshot: serializedSession.sourceOutput,
+    truthSignature: serializedSession.truthSignature,
+    knowledgePackBinding: serializedSession.knowledgePackBinding,
+    postValidation,
+    contextBindings: assetContextBindings,
+    lineageSummary,
+    warnings,
+    limitations,
+    generatedBy: actorUserId,
+    generatedAt: approvedAt,
+  })
+  const outcomeAssetVersion = new OutcomeAssetVersion({
+    outcomeAssetVersionId,
+    outcomeAssetId,
+    parentVersionId,
+    sessionId: serializedSession.sessionId,
+    ...runtimeScope,
+    workspaceType: DEFAULT_OUTCOME_WORKSPACE_TYPE,
+    assetType: DEFAULT_OUTCOME_ASSET_TYPE,
+    contractVersion: OUTCOME_STUDIO_CONTRACT_VERSION,
+    phase: OUTCOME_STUDIO_PHASE,
+    versionNumber,
+    status: OUTCOME_STUDIO_ASSET_VERSION_STATUSES.CURRENT,
+    outputTypeKey,
+    outputTypeLabel,
+    title,
+    sourceOutputAssetId,
+    sourceOutputSnapshot: serializedSession.sourceOutput,
+    truthSignature: serializedSession.truthSignature,
+    knowledgePackBinding: serializedSession.knowledgePackBinding,
+    postValidation,
+    contextBindings: versionContextBindings,
+    lineageSummary,
+    customerContent,
+    warnings,
+    limitations,
+    generatedBy: actorUserId,
+    generatedAt: approvedAt,
+  })
+  const approvedDraft = {
+    ...activeDraft,
+    status: OUTCOME_STUDIO_DRAFT_STATUSES.APPROVED,
+    approvedIterationId: currentDraftIteration.draftIterationId,
+    approvedAssetVersionId: outcomeAssetVersionId,
+    approvedBy: actorUserId,
+    approvedAt,
+    updatedAt: approvedAt,
+  }
+  const approvedDraftIteration = {
+    ...currentDraftIteration,
+    status: OUTCOME_STUDIO_DRAFT_ITERATION_STATUSES.APPROVED,
+    updatedAt: approvedAt,
+  }
+  const assetRelationshipDocuments = createRuntimeGraphRelationshipDocuments(
+    buildGeneratedAssetRuntimeGraphRelationships({
+      actorUserId,
+      asset: outcomeAsset,
+      runtimeScope,
+      session,
+      version: outcomeAssetVersion,
+    }),
+  )
+
+  let failureStage = 'write'
+  let approvalClaimAcquired = false
+  const persistApprovalAndAudit = async (dbSession = null) => {
+    const saveOptions = dbSession ? { session: dbSession } : undefined
+    const updateOptions = dbSession ? { session: dbSession } : undefined
+    const draftClaimFilter = {
+      _id: activeDraft._id || activeDraft.id,
+      status: OUTCOME_STUDIO_DRAFT_STATUSES.ACTIVE,
+    }
+    const draftApprovalUpdate = {
+      $set: {
+        status: OUTCOME_STUDIO_DRAFT_STATUSES.APPROVED,
+        approvedIterationId: currentDraftIteration.draftIterationId,
+        approvedAssetVersionId: outcomeAssetVersionId,
+        approvedBy: actorUserId,
+        approvedAt,
+      },
+    }
+    const draftClaimResult = updateOptions
+      ? await OutcomeDraft.updateOne(draftClaimFilter, draftApprovalUpdate, updateOptions)
+      : await OutcomeDraft.updateOne(draftClaimFilter, draftApprovalUpdate)
+
+    if (Number(draftClaimResult?.modifiedCount || 0) !== 1) {
+      throw buildOutcomeDraftApprovalBlockedError({
+        blockerReason: 'OUTCOME_DRAFT_ALREADY_APPROVED',
+        currentIterationId: currentDraftIteration.draftIterationId,
+        draftId: activeDraft.draftId,
+        sessionId: serializedSession.sessionId,
+      })
+    }
+    approvalClaimAcquired = true
+
+    const iterationFilter = {
+      runtimeInstanceId: runtimeObjectId,
+      draftId: activeDraft.draftId,
+      draftIterationId: currentDraftIteration.draftIterationId,
+      status: OUTCOME_STUDIO_DRAFT_ITERATION_STATUSES.CURRENT,
+    }
+    const iterationApprovalUpdate = {
+      $set: {
+        status: OUTCOME_STUDIO_DRAFT_ITERATION_STATUSES.APPROVED,
+      },
+    }
+    if (updateOptions) {
+      await OutcomeDraftIteration.updateMany(iterationFilter, iterationApprovalUpdate, updateOptions)
+    } else {
+      await OutcomeDraftIteration.updateMany(iterationFilter, iterationApprovalUpdate)
+    }
+
+    await outcomeAsset.save(saveOptions)
+    await outcomeAssetVersion.save(saveOptions)
+    try {
+      await saveRuntimeGraphRelationshipDocuments(assetRelationshipDocuments, { dbSession })
+    } catch (err) {
+      err.outcomeGraphRelationshipFailure = 'approvedAsset'
+      throw err
+    }
+
+    try {
+      failureStage = 'draftApprovalAudit'
+      await logOutcomeDraftGeneratedAudit({
+        action: auditService.AUDIT_ACTIONS.OUTCOME_DRAFT_APPROVED,
+        auditRequest,
+        dbSession,
+        draft: approvedDraft,
+        runtimeInstance,
+        summary: 'Outcome Studio conversation draft approved into a governed asset version.',
+        diff: {
+          actorUserId,
+          sessionId: serializedSession.sessionId,
+          runtimeInstanceId: toIdString(runtimeObjectId),
+          draftId: activeDraft.draftId,
+          draftIterationId: currentDraftIteration.draftIterationId,
+          previousDraftStatus: normalizeToken(activeDraft.status),
+          nextDraftStatus: OUTCOME_STUDIO_DRAFT_STATUSES.APPROVED,
+          outcomeAssetId,
+          outcomeAssetVersionId,
+          versionNumber,
+          approvalCreatedAssetVersion: true,
+          truthSignatureStatus: serializedSession.truthSignature.status,
+          truthSignatureCurrentness: serializedSession.truthSignature.currentness,
+          postValidation: buildOutcomePostValidationAuditSummary(postValidation),
+          runtimeGraphRelationshipCount: assetRelationshipDocuments.length,
+        },
+      })
+      failureStage = 'assetAudit'
+      await logOutcomeAssetGeneratedAudit({
+        auditRequest,
+        asset: outcomeAsset,
+        dbSession,
+        runtimeInstance,
+        summary: 'Generated Outcome Studio governed asset version from approved conversation draft.',
+        diff: {
+          actorUserId,
+          sessionId: serializedSession.sessionId,
+          runtimeInstanceId: toIdString(runtimeObjectId),
+          draftId: activeDraft.draftId,
+          draftIterationId: currentDraftIteration.draftIterationId,
+          outcomeAssetId,
+          outcomeAssetVersionId,
+          parentVersionId,
+          versionNumber,
+          sourceOutputAssetId,
+          sourceOutputTypeKey: outputTypeKey,
+          truthSignatureStatus: serializedSession.truthSignature.status,
+          truthSignatureCurrentness: serializedSession.truthSignature.currentness,
+          knowledgePackBindingStatus: serializedSession.knowledgePackBinding.status,
+          postValidation: buildOutcomePostValidationAuditSummary(postValidation),
+          generatedBodyAvailable: true,
+          runtimeGraphRelationshipCount: assetRelationshipDocuments.length,
+        },
+      })
+    } catch (err) {
+      err.outcomeDraftApprovalAuditFailure = failureStage
+      throw err
+    }
+  }
+
+  if (canUseMongoTransaction()) {
+    const dbSession = await mongoose.startSession()
+    try {
+      await dbSession.withTransaction(async () => {
+        await persistApprovalAndAudit(dbSession)
+      })
+    } catch (err) {
+      if (err?.outcomeGraphRelationshipFailure === 'approvedAsset') {
+        throw failGraphRelationshipClosed(err, {
+          draftId: activeDraft.draftId,
+          draftIterationId: currentDraftIteration.draftIterationId,
+          outcomeAssetId,
+          outcomeAssetVersionId,
+        })
+      }
+      if (err?.outcomeDraftApprovalAuditFailure === 'draftApprovalAudit') {
+        throw failDraftApprovalAuditClosed(err, {
+          draftId: activeDraft.draftId,
+          draftIterationId: currentDraftIteration.draftIterationId,
+          outcomeAssetId,
+          outcomeAssetVersionId,
+        })
+      }
+      if (err?.outcomeDraftApprovalAuditFailure !== 'assetAudit') throw err
+      throw failAssetGenerationAuditClosed(err, {
+        draftId: activeDraft.draftId,
+        draftIterationId: currentDraftIteration.draftIterationId,
+        outcomeAssetId,
+        outcomeAssetVersionId,
+      })
+    } finally {
+      await dbSession.endSession()
+    }
+  } else {
+    try {
+      await persistApprovalAndAudit()
+    } catch (err) {
+      if (approvalClaimAcquired) {
+        await deleteRuntimeGraphRelationshipDocuments(assetRelationshipDocuments)
+        await OutcomeAssetVersion.deleteOne({ _id: outcomeAssetVersion._id })
+        await OutcomeAsset.deleteOne({ _id: outcomeAsset._id })
+        await OutcomeDraftIteration.updateMany(
+          {
+            runtimeInstanceId: runtimeObjectId,
+            draftId: activeDraft.draftId,
+            draftIterationId: currentDraftIteration.draftIterationId,
+          },
+          {
+            $set: {
+              status: OUTCOME_STUDIO_DRAFT_ITERATION_STATUSES.CURRENT,
+            },
+          },
+        )
+        await OutcomeDraft.updateOne(
+          {
+            _id: activeDraft._id || activeDraft.id,
+            status: OUTCOME_STUDIO_DRAFT_STATUSES.APPROVED,
+            approvedAssetVersionId: outcomeAssetVersionId,
+          },
+          {
+            $set: {
+              status: activeDraft.status || OUTCOME_STUDIO_DRAFT_STATUSES.ACTIVE,
+              approvedIterationId: activeDraft.approvedIterationId || '',
+              approvedAssetVersionId: activeDraft.approvedAssetVersionId || '',
+              approvedBy: activeDraft.approvedBy || null,
+              approvedAt: activeDraft.approvedAt || null,
+            },
+          },
+        )
+      }
+      if (err?.outcomeGraphRelationshipFailure === 'approvedAsset') {
+        throw failGraphRelationshipClosed(err, {
+          draftId: activeDraft.draftId,
+          draftIterationId: currentDraftIteration.draftIterationId,
+          outcomeAssetId,
+          outcomeAssetVersionId,
+        })
+      }
+      if (err?.outcomeDraftApprovalAuditFailure === 'draftApprovalAudit') {
+        throw failDraftApprovalAuditClosed(err, {
+          draftId: activeDraft.draftId,
+          draftIterationId: currentDraftIteration.draftIterationId,
+          outcomeAssetId,
+          outcomeAssetVersionId,
+        })
+      }
+      if (err?.outcomeDraftApprovalAuditFailure !== 'assetAudit') throw err
+      throw failAssetGenerationAuditClosed(err, {
+        draftId: activeDraft.draftId,
+        draftIterationId: currentDraftIteration.draftIterationId,
         outcomeAssetId,
         outcomeAssetVersionId,
       })
@@ -3626,8 +4845,9 @@ export const generateRuntimeOutcomeResponse = async ({
   }
 
   return {
-    ...serializeOutcomeMessage(responseMessage),
-    asset: serializeOutcomeAssetSummary(outcomeAsset, { currentEvidence }),
+    draft: serializeOutcomeDraft(approvedDraft, { currentEvidence }),
+    draftIteration: serializeOutcomeDraftIteration(approvedDraftIteration),
+    asset: serializeOutcomeAsset(outcomeAsset, { currentEvidence }),
     assetVersion: serializeOutcomeAssetVersion(outcomeAssetVersion, { currentEvidence }),
   }
 }

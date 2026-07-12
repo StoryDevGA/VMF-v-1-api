@@ -46,6 +46,7 @@ import {
   publishRuntimeOutputAsset as publishRuntimeOutputAssetRecord,
 } from '../services/runtimeOutputLabService.js'
 import {
+  approveRuntimeOutcomeDraft as approveRuntimeOutcomeDraftRecord,
   createRuntimeOutcomeMessage as createRuntimeOutcomeMessageRecord,
   createRuntimeOutcomeSession as createRuntimeOutcomeSessionRecord,
   exportRuntimeOutcomeAsset as exportRuntimeOutcomeAssetRecord,
@@ -920,6 +921,29 @@ export const generateRuntimeOutcomeResponse = async (req, res, next) => {
 
     return res.status(200).json({
       data: outcomeResponse,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const approveRuntimeOutcomeDraft = async (req, res, next) => {
+  try {
+    const approvedOutcomeDraft = await approveRuntimeOutcomeDraftRecord({
+      actorUserId: req.context?.userId || req.userId,
+      auditRequest: req,
+      draftId: req.params.draftId,
+      scopes: req.scopes,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+      sessionId: req.params.sessionId,
+    })
+
+    return res.status(201).json({
+      data: approvedOutcomeDraft,
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {

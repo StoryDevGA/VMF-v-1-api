@@ -1275,6 +1275,8 @@ let GovernedRuntimeArtifact
 let TruthSignature
 let OutcomeAsset
 let OutcomeAssetVersion
+let OutcomeDraft
+let OutcomeDraftIteration
 let OutcomeMessage
 let OutcomeSession
 let KnowledgePack
@@ -1328,6 +1330,8 @@ beforeAll(async () => {
   TruthSignature = models.TruthSignature
   OutcomeAsset = models.OutcomeAsset
   OutcomeAssetVersion = models.OutcomeAssetVersion
+  OutcomeDraft = models.OutcomeDraft
+  OutcomeDraftIteration = models.OutcomeDraftIteration
   OutcomeMessage = models.OutcomeMessage
   OutcomeSession = models.OutcomeSession
   KnowledgePack = models.KnowledgePack
@@ -1418,6 +1422,16 @@ beforeEach(() => {
   OutcomeAssetVersion.findOne = jest.fn().mockReturnValue(buildLeanQuery(null))
   OutcomeAssetVersion.updateMany = jest.fn().mockResolvedValue({ matchedCount: 0, modifiedCount: 0 })
   OutcomeAssetVersion.deleteOne = jest.fn().mockResolvedValue({ deletedCount: 1 })
+  OutcomeDraft.prototype.save = jest.fn(async function save() { return this })
+  OutcomeDraft.find = jest.fn().mockReturnValue(buildRuntimeInstanceFindChain([]))
+  OutcomeDraft.findOne = jest.fn().mockReturnValue(buildLeanQuery(null))
+  OutcomeDraft.updateOne = jest.fn().mockResolvedValue({ matchedCount: 1, modifiedCount: 1 })
+  OutcomeDraft.deleteOne = jest.fn().mockResolvedValue({ deletedCount: 1 })
+  OutcomeDraftIteration.prototype.save = jest.fn(async function save() { return this })
+  OutcomeDraftIteration.find = jest.fn().mockReturnValue(buildRuntimeInstanceFindChain([]))
+  OutcomeDraftIteration.findOne = jest.fn().mockReturnValue(buildLeanQuery(null))
+  OutcomeDraftIteration.updateMany = jest.fn().mockResolvedValue({ matchedCount: 0, modifiedCount: 0 })
+  OutcomeDraftIteration.deleteOne = jest.fn().mockResolvedValue({ deletedCount: 1 })
   OutcomeMessage.prototype.save = jest.fn(async function save() { return this })
   OutcomeMessage.find = jest.fn().mockReturnValue(buildRuntimeInstanceFindChain([]))
   OutcomeMessage.findOne = jest.fn().mockReturnValue(buildLeanQuery(null))
@@ -9177,6 +9191,141 @@ describe('Runtime Instance API', () => {
     ...overrides,
   })
 
+  const makeOutcomeDraftRecord = (overrides = {}) => {
+    const session = makeOutcomeSessionRecord()
+    return {
+      _id: 'f77f1f77bcf86cd799439111',
+      draftId: 'outcome_draft_existing_fixture',
+      sessionId: 'out_sess_existing_fixture',
+      tenantId: TENANT_ID,
+      customerId: CUSTOMER_ID,
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      runtimeInstanceKey: 'value-narrative-439111',
+      runtimeType: 'VALUE_NARRATIVE',
+      frameworkKey: 'VMF',
+      packageKey: 'vmf-standard-2-3-1',
+      packageVersion: '2.3.1',
+      contractVersion: 'outcome-studio.v1',
+      phase: 'FOUNDATION_READINESS_ONLY',
+      status: 'ACTIVE',
+      workspaceType: 'OUTCOME',
+      assetType: 'OUTCOME_NARRATIVE',
+      outputTypeKey: 'EXECUTIVE_BRIEF',
+      outputTypeLabel: 'Executive Brief',
+      title: 'Executive Brief Draft',
+      sourceOutputAssetId: 'out_asset_outcome_studio_fixture',
+      truthSignatureId: 'truth_sig_existing_fixture',
+      truthSignature: session.truthSignature,
+      knowledgePackBinding: session.knowledgePackBinding,
+      currentIterationId: 'outcome_draft_iteration_current_fixture',
+      currentIterationNumber: 1,
+      approvedIterationId: '',
+      approvedAssetVersionId: '',
+      contextBindings: {
+        workspaceContext: {
+          workspaceType: 'OUTCOME',
+          workspaceSessionId: 'out_sess_existing_fixture',
+          assetType: 'OUTCOME_NARRATIVE',
+          contextType: 'DRAFT',
+        },
+      },
+      lineageSummary: {
+        sourceOutputAssetId: 'out_asset_outcome_studio_fixture',
+        sourceOutputTypeKey: 'EXECUTIVE_BRIEF',
+        truthSignatureStatus: 'PROJECTED',
+        truthSignatureCurrentness: 'CURRENT',
+      },
+      validationSummary: {
+        validationId: 'outcome_post_val_draft_fixture',
+        validationScope: 'OUTCOME_DRAFT_ITERATION',
+        outcomeAssetId: '',
+        outcomeAssetVersionId: '',
+        status: 'PASS',
+        result: 'ALLOW',
+      },
+      warnings: ['KNOWLEDGE_PACK_CONTENT_NOT_EXPOSED_V1'],
+      limitations: ['Existing draft limitation.'],
+      createdBy: CUSTOMER_ADMIN_ID,
+      createdAt: '2026-06-15T11:15:00.000Z',
+      updatedAt: '2026-06-15T11:15:00.000Z',
+      ...overrides,
+    }
+  }
+
+  const makeOutcomeDraftIterationRecord = (overrides = {}) => {
+    const draft = makeOutcomeDraftRecord()
+    return {
+      _id: 'f87f1f77bcf86cd799439111',
+      draftIterationId: 'outcome_draft_iteration_current_fixture',
+      draftId: draft.draftId,
+      previousIterationId: '',
+      iterationNumber: 1,
+      sessionId: 'out_sess_existing_fixture',
+      tenantId: TENANT_ID,
+      customerId: CUSTOMER_ID,
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      runtimeInstanceKey: 'value-narrative-439111',
+      runtimeType: 'VALUE_NARRATIVE',
+      frameworkKey: 'VMF',
+      packageKey: 'vmf-standard-2-3-1',
+      packageVersion: '2.3.1',
+      contractVersion: 'outcome-studio.v1',
+      phase: 'FOUNDATION_READINESS_ONLY',
+      iterationType: 'INITIAL',
+      status: 'CURRENT',
+      workspaceType: 'OUTCOME',
+      assetType: 'OUTCOME_NARRATIVE',
+      outputTypeKey: 'EXECUTIVE_BRIEF',
+      outputTypeLabel: 'Executive Brief',
+      title: 'Executive Brief Draft',
+      sourceMessageId: 'out_msg_initial_fixture',
+      responseMessageId: 'out_msg_initial_response_fixture',
+      truthSignatureId: 'truth_sig_existing_fixture',
+      grrExecutionId: 'grr_exec_existing_fixture',
+      grrRuntimeArtifactId: 'grr_art_existing_fixture',
+      customerContent: {
+        markdown: [
+          '# Executive Brief Draft',
+          '',
+          '## Situation',
+          '',
+          'The existing board narrative is grounded in certified runtime truth.',
+          '',
+          '## Commercial Problem',
+          '',
+          'The board needs a concise explanation of the commercial value story.',
+        ].join('\n'),
+        sections: [
+          {
+            key: 'draft-body',
+            label: 'Executive Brief Draft',
+            body: [
+              '# Executive Brief Draft',
+              '',
+              '## Situation',
+              '',
+              'The existing board narrative is grounded in certified runtime truth.',
+            ].join('\n'),
+          },
+        ],
+        metadata: {
+          draftId: draft.draftId,
+          draftIterationId: 'outcome_draft_iteration_current_fixture',
+          generationMode: 'GOVERNED_REASONING_RUNTIME',
+        },
+      },
+      validationSummary: draft.validationSummary,
+      lineageSummary: draft.lineageSummary,
+      warnings: draft.warnings,
+      limitations: draft.limitations,
+      generatedBy: CUSTOMER_ADMIN_ID,
+      generatedAt: '2026-06-15T11:15:00.000Z',
+      createdAt: '2026-06-15T11:15:00.000Z',
+      updatedAt: '2026-06-15T11:15:00.000Z',
+      ...overrides,
+    }
+  }
+
   const makeOutcomePostValidationSnapshot = (overrides = {}) => ({
     contractVersion: 'outcome-post-validation.v1',
     validationId: 'outcome_post_val_existing_fixture',
@@ -15393,7 +15542,7 @@ describe('Runtime Instance API', () => {
     expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 
-  test('Outcome Studio response generation persists a governed assistant response and first asset version', async () => {
+  test('Outcome Studio response generation persists a governed assistant response and first draft iteration', async () => {
     process.env.STORYLINEOS_GRR_PROVIDER_MODE = 'DETERMINISTIC'
     const runtimeInstance = makeOutputLabReadyRuntime()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
@@ -15417,7 +15566,7 @@ describe('Runtime Instance API', () => {
       role: 'ASSISTANT',
       status: 'GENERATED',
       responseStatus: 'RESPONSE_GENERATED',
-      prompt: expect.stringContaining('# EXECUTIVE_BRIEF governed reasoning artefact'),
+      prompt: expect.stringContaining('# Executive Brief Draft'),
       runtimeInstanceId: RUNTIME_INSTANCE_ID,
       runtimeInstanceKey: 'value-narrative-439111',
       runtimeType: 'VALUE_NARRATIVE',
@@ -15427,7 +15576,8 @@ describe('Runtime Instance API', () => {
     }))
     expect(res.body.data.prompt).toContain('## Situation')
     expect(res.body.data.prompt).toContain('## Commercial Problem')
-    expect(res.body.data.prompt).toContain('Evidence hash: sha256:situation-truth')
+    expect(res.body.data.prompt).not.toContain('governed reasoning artefact')
+    expect(res.body.data.prompt).not.toContain('Evidence hash:')
     expect(res.body.data.prompt).not.toContain('Raw message source Markdown must not leak')
     expect(res.body.data.prompt).not.toContain('Raw message source JSON must not leak')
     expect(res.body.data.sourceOutput).toEqual(expect.objectContaining({
@@ -15441,16 +15591,20 @@ describe('Runtime Instance API', () => {
       requiredCount: 5,
     }))
     expect(res.body.data.knowledgePackBinding).not.toHaveProperty('sourceBundle')
-    expect(res.body.data.asset).toEqual(expect.objectContaining({
-      outcomeAssetId: expect.stringMatching(/^outcome_asset_/),
+    expect(res.body.data).not.toHaveProperty('asset')
+    expect(res.body.data).not.toHaveProperty('assetVersion')
+    expect(res.body.data.draft).toEqual(expect.objectContaining({
+      draftId: expect.stringMatching(/^outcome_draft_/),
       sessionId: 'out_sess_existing_fixture',
-      status: 'GENERATED',
+      status: 'ACTIVE',
       outputTypeKey: 'EXECUTIVE_BRIEF',
       outputTypeLabel: 'Executive Brief',
-      title: 'Governed Executive Brief',
+      title: 'Executive Brief Draft',
       sourceOutputAssetId: 'out_asset_outcome_studio_fixture',
-      currentVersionId: expect.stringMatching(/^outcome_asset_version_/),
-      currentVersionNumber: 1,
+      currentIterationId: expect.stringMatching(/^outcome_draft_iteration_/),
+      currentIterationNumber: 1,
+      approvedIterationId: '',
+      approvedAssetVersionId: '',
       warnings: expect.arrayContaining([
         'KNOWLEDGE_PACK_CONTENT_NOT_EXPOSED_V1',
       ]),
@@ -15459,9 +15613,12 @@ describe('Runtime Instance API', () => {
         'Deterministic provider output is non-production scaffolding unless replaced by a live provider adapter.',
         'Governed Runtime Artefacts are not Certified Truth and require separate certification before truth reuse.',
       ]),
-      postValidation: expect.objectContaining({
+      validationSummary: expect.objectContaining({
         contractVersion: 'outcome-post-validation.v1',
         validationId: expect.stringMatching(/^outcome_post_val_/),
+        validationScope: 'OUTCOME_DRAFT_ITERATION',
+        outcomeAssetId: '',
+        outcomeAssetVersionId: '',
         status: 'PASS',
         result: 'ALLOW',
         mode: 'FOUNDATION_STATIC_CHECKS',
@@ -15477,24 +15634,39 @@ describe('Runtime Instance API', () => {
         }),
       }),
     }))
-    expect(res.body.data.asset).not.toHaveProperty('customerContent')
-    expect(res.body.data.assetVersion).toEqual(expect.objectContaining({
-      outcomeAssetVersionId: res.body.data.asset.currentVersionId,
-      outcomeAssetId: res.body.data.asset.outcomeAssetId,
-      versionNumber: 1,
+    expect(res.body.data.draft).not.toHaveProperty('customerContent')
+    expect(res.body.data.draftIteration).toEqual(expect.objectContaining({
+      draftIterationId: res.body.data.draft.currentIterationId,
+      draftId: res.body.data.draft.draftId,
+      iterationNumber: 1,
+      iterationType: 'INITIAL',
       status: 'CURRENT',
       outputTypeKey: 'EXECUTIVE_BRIEF',
+      title: 'Executive Brief Draft',
       contentAvailable: true,
-      postValidation: expect.objectContaining({
-        validationId: res.body.data.asset.postValidation.validationId,
+      customerContent: expect.objectContaining({
+        markdown: expect.stringContaining('# Executive Brief Draft'),
+        sections: expect.arrayContaining([
+          expect.objectContaining({
+            key: 'draft-body',
+            body: expect.stringContaining('## Situation'),
+          }),
+        ]),
+      }),
+      validationSummary: expect.objectContaining({
+        validationId: res.body.data.draft.validationSummary.validationId,
+        validationScope: 'OUTCOME_DRAFT_ITERATION',
+        outcomeAssetId: '',
+        outcomeAssetVersionId: '',
         status: 'PASS',
         result: 'ALLOW',
         contentIncludedInValidation: false,
         rawPackContentIncluded: false,
       }),
     }))
-    expect(res.body.data.assetVersion).not.toHaveProperty('customerContent')
-    expect(res.body.data.asset.lineageSummary).toEqual(expect.objectContaining({
+    expect(res.body.data.draftIteration.customerContent.markdown).not.toContain('governed reasoning artefact')
+    expect(res.body.data.draftIteration.customerContent.markdown).not.toContain('Raw message source Markdown must not leak')
+    expect(res.body.data.draft.lineageSummary).toEqual(expect.objectContaining({
       sourceOutputAssetId: 'out_asset_outcome_studio_fixture',
       sourceOutputTypeKey: 'EXECUTIVE_BRIEF',
       truthSignatureStatus: 'PROJECTED',
@@ -15525,6 +15697,8 @@ describe('Runtime Instance API', () => {
     expect(OutcomeMessage.prototype.save).toHaveBeenCalledTimes(1)
     const savedOutcomeResponseMessage = OutcomeMessage.prototype.save.mock.contexts[0]
     expect(savedOutcomeResponseMessage.workspaceType).toBe('OUTCOME')
+    savedOutcomeResponseMessage.prompt = 'Generated assistant response. '.repeat(170)
+    await expect(savedOutcomeResponseMessage.validate()).resolves.toBeUndefined()
     expect(savedOutcomeResponseMessage.contextBindings).toEqual(expect.objectContaining({
       workspaceContext: expect.objectContaining({
         workspaceType: 'OUTCOME',
@@ -15552,20 +15726,21 @@ describe('Runtime Instance API', () => {
       { $set: { responseStatus: 'RESPONSE_GENERATED' } },
     )
     expect(OutcomeMessage.deleteOne).not.toHaveBeenCalled()
-    expect(OutcomeAsset.prototype.save).toHaveBeenCalledTimes(1)
-    const savedOutcomeAsset = OutcomeAsset.prototype.save.mock.contexts[0]
-    expect(OutcomeAssetVersion.prototype.save).toHaveBeenCalledTimes(1)
-    const savedOutcomeAssetVersion = OutcomeAssetVersion.prototype.save.mock.contexts[0]
-    expect(savedOutcomeAsset.workspaceType).toBe('OUTCOME')
-    expect(savedOutcomeAsset.assetType).toBe('OUTCOME_NARRATIVE')
-    expect(savedOutcomeAsset.contextBindings).toEqual(expect.objectContaining({
+    expect(OutcomeDraft.prototype.save).toHaveBeenCalledTimes(1)
+    const savedOutcomeDraft = OutcomeDraft.prototype.save.mock.contexts[0]
+    expect(OutcomeDraftIteration.prototype.save).toHaveBeenCalledTimes(1)
+    const savedOutcomeDraftIteration = OutcomeDraftIteration.prototype.save.mock.contexts[0]
+    expect(savedOutcomeDraft.workspaceType).toBe('OUTCOME')
+    expect(savedOutcomeDraft.assetType).toBe('OUTCOME_NARRATIVE')
+    expect(savedOutcomeDraft.draftId).toBe(res.body.data.draft.draftId)
+    expect(savedOutcomeDraft.currentIterationId).toBe(res.body.data.draftIteration.draftIterationId)
+    expect(savedOutcomeDraft.currentIterationNumber).toBe(1)
+    expect(savedOutcomeDraft.contextBindings).toEqual(expect.objectContaining({
       workspaceContext: expect.objectContaining({
         workspaceType: 'OUTCOME',
         workspaceSessionId: 'out_sess_existing_fixture',
-        workspaceAssetId: res.body.data.asset.outcomeAssetId,
-        workspaceAssetVersionId: res.body.data.assetVersion.outcomeAssetVersionId,
         assetType: 'OUTCOME_NARRATIVE',
-        contextType: 'ASSET',
+        contextType: 'DRAFT',
       }),
       runtimeContext: expect.objectContaining({
         runtimeInstanceId: RUNTIME_INSTANCE_ID,
@@ -15587,82 +15762,42 @@ describe('Runtime Instance API', () => {
         runtimeArtifactIsCertifiedTruth: false,
       }),
     }))
-    expect(savedOutcomeAsset.postValidation).toEqual(expect.objectContaining({
-      validationId: res.body.data.asset.postValidation.validationId,
+    expect(savedOutcomeDraft.validationSummary).toEqual(expect.objectContaining({
+      validationId: res.body.data.draft.validationSummary.validationId,
+      validationScope: 'OUTCOME_DRAFT_ITERATION',
+      outcomeAssetId: '',
+      outcomeAssetVersionId: '',
       status: 'PASS',
       result: 'ALLOW',
       contentIncludedInValidation: false,
       rawPackContentIncluded: false,
     }))
-    expect(savedOutcomeAssetVersion.workspaceType).toBe('OUTCOME')
-    expect(savedOutcomeAssetVersion.assetType).toBe('OUTCOME_NARRATIVE')
-    expect(savedOutcomeAssetVersion.contextBindings).toEqual(expect.objectContaining({
-      workspaceContext: expect.objectContaining({
-        workspaceType: 'OUTCOME',
-        workspaceAssetId: res.body.data.asset.outcomeAssetId,
-        workspaceAssetVersionId: res.body.data.assetVersion.outcomeAssetVersionId,
-        assetType: 'OUTCOME_NARRATIVE',
-        contextType: 'ASSET',
-      }),
-      truthBinding: expect.objectContaining({
-        truthSignatureId: 'truth_sig_existing_fixture',
-        currentness: 'CURRENT',
-      }),
-      governedReasoning: expect.objectContaining({
-        executionId: expect.stringMatching(/^grr_exec_/),
-        runtimeArtifactId: expect.stringMatching(/^grr_art_/),
-        providerMode: 'DETERMINISTIC_TEST',
-        runtimeStateWriteStatus: 'NOT_WRITTEN',
-        runtimeArtifactIsCertifiedTruth: false,
-      }),
+    expect(savedOutcomeDraftIteration.workspaceType).toBe('OUTCOME')
+    expect(savedOutcomeDraftIteration.assetType).toBe('OUTCOME_NARRATIVE')
+    expect(savedOutcomeDraftIteration.draftId).toBe(res.body.data.draft.draftId)
+    expect(savedOutcomeDraftIteration.draftIterationId).toBe(res.body.data.draftIteration.draftIterationId)
+    expect(savedOutcomeDraftIteration.iterationType).toBe('INITIAL')
+    expect(savedOutcomeDraftIteration.status).toBe('CURRENT')
+    expect(savedOutcomeDraftIteration.customerContent).toEqual(expect.objectContaining({
+      markdown: expect.stringContaining('# Executive Brief Draft'),
     }))
-    expect(savedOutcomeAssetVersion.postValidation).toEqual(expect.objectContaining({
-      validationId: res.body.data.asset.postValidation.validationId,
+    expect(savedOutcomeDraftIteration.validationSummary).toEqual(expect.objectContaining({
+      validationId: res.body.data.draft.validationSummary.validationId,
+      validationScope: 'OUTCOME_DRAFT_ITERATION',
+      outcomeAssetId: '',
+      outcomeAssetVersionId: '',
       status: 'PASS',
       result: 'ALLOW',
       contentIncludedInValidation: false,
       rawPackContentIncluded: false,
     }))
+    expect(OutcomeAsset.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeAssetVersion.prototype.save).not.toHaveBeenCalled()
     expect(OutcomeAsset.deleteOne).not.toHaveBeenCalled()
     expect(OutcomeAssetVersion.deleteOne).not.toHaveBeenCalled()
-    expect(RuntimeGraphRelationship.prototype.save).toHaveBeenCalledTimes(2)
-    const savedAssetRelationships = RuntimeGraphRelationship.prototype.save.mock.contexts
-    expect(savedAssetRelationships).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        relationshipType: 'ASSET_DERIVED_FROM_TRUTH',
-        workspaceType: 'OUTCOME',
-        sourceNode: expect.objectContaining({
-          nodeType: 'TRUTH_SIGNATURE',
-          nodeId: 'truth_sig_existing_fixture',
-        }),
-        targetNode: expect.objectContaining({
-          nodeType: 'WORKSPACE_ASSET',
-          nodeId: res.body.data.asset.outcomeAssetId,
-        }),
-        evidence: expect.objectContaining({
-          outcomeAssetId: res.body.data.asset.outcomeAssetId,
-          outcomeAssetVersionId: res.body.data.assetVersion.outcomeAssetVersionId,
-          truthSignatureCurrentness: 'CURRENT',
-        }),
-      }),
-      expect.objectContaining({
-        relationshipType: 'ASSET_DERIVED_FROM_SESSION',
-        sourceNode: expect.objectContaining({
-          nodeType: 'WORKSPACE_SESSION',
-          nodeId: 'out_sess_existing_fixture',
-        }),
-        targetNode: expect.objectContaining({
-          nodeType: 'WORKSPACE_ASSET',
-          nodeId: res.body.data.asset.outcomeAssetId,
-        }),
-        evidence: expect.objectContaining({
-          sessionId: 'out_sess_existing_fixture',
-          outputTypeKey: 'EXECUTIVE_BRIEF',
-          versionNumber: 1,
-        }),
-      }),
-    ]))
-    expect(JSON.stringify(savedAssetRelationships)).not.toContain('Raw')
+    expect(OutcomeDraft.deleteOne).not.toHaveBeenCalled()
+    expect(OutcomeDraftIteration.deleteOne).not.toHaveBeenCalled()
+    expect(RuntimeGraphRelationship.prototype.save).not.toHaveBeenCalled()
     expect(RuntimeGraphRelationship.deleteMany).not.toHaveBeenCalled()
     expect(OutcomeAsset.find).not.toHaveBeenCalled()
     expect(OutcomeAsset.findOne).not.toHaveBeenCalled()
@@ -15690,45 +15825,342 @@ describe('Runtime Instance API', () => {
         messageId: 'out_msg_existing_fixture',
         responseMessageId: res.body.data.messageId,
         responseStatus: 'RESPONSE_GENERATED',
-        assetCreated: true,
-        outcomeAssetId: res.body.data.asset.outcomeAssetId,
-        outcomeAssetVersionId: res.body.data.assetVersion.outcomeAssetVersionId,
-        runtimeGraphRelationshipCount: 2,
+        assetCreated: false,
+        draftCreated: true,
+        draftId: res.body.data.draft.draftId,
+        draftIterationId: res.body.data.draftIteration.draftIterationId,
+        runtimeGraphRelationshipCount: 0,
         grrExecutionId: expect.stringMatching(/^grr_exec_/),
         grrRuntimeArtifactId: expect.stringMatching(/^grr_art_/),
         grrProviderMode: 'DETERMINISTIC_TEST',
       }),
     }))
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
-      action: 'ASSET_GENERATED',
-      resourceType: 'OutcomeAsset',
-      resourceId: savedOutcomeAsset._id,
+      action: 'OUTCOME_DRAFT_GENERATED',
+      resourceType: 'OutcomeDraft',
+      resourceId: savedOutcomeDraft._id,
       scope: expect.objectContaining({
         runtimeInstanceId: RUNTIME_INSTANCE_ID,
         outcomeSessionId: 'out_sess_existing_fixture',
-        outcomeAssetId: res.body.data.asset.outcomeAssetId,
-        outcomeAssetVersionId: res.body.data.assetVersion.outcomeAssetVersionId,
+        outcomeDraftId: res.body.data.draft.draftId,
+        outcomeDraftIterationId: res.body.data.draftIteration.draftIterationId,
       }),
       diff: expect.objectContaining({
         messageId: 'out_msg_existing_fixture',
         responseMessageId: res.body.data.messageId,
-        outcomeAssetId: res.body.data.asset.outcomeAssetId,
-        outcomeAssetVersionId: res.body.data.assetVersion.outcomeAssetVersionId,
-        versionNumber: 1,
+        draftId: res.body.data.draft.draftId,
+        draftIterationId: res.body.data.draftIteration.draftIterationId,
+        iterationNumber: 1,
         postValidation: expect.objectContaining({
-          validationId: res.body.data.asset.postValidation.validationId,
+          validationId: res.body.data.draft.validationSummary.validationId,
           status: 'PASS',
           result: 'ALLOW',
           contentIncludedInValidation: false,
           rawPackContentIncluded: false,
         }),
         generatedBodyAvailable: true,
-        runtimeGraphRelationshipCount: 2,
+        assetVersionCreated: false,
+        runtimeGraphRelationshipCount: 0,
         grrExecutionId: expect.stringMatching(/^grr_exec_/),
         grrRuntimeArtifactId: expect.stringMatching(/^grr_art_/),
         grrProviderMode: 'DETERMINISTIC_TEST',
         runtimeArtifactIsCertifiedTruth: false,
       }),
+    }))
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+      action: 'ASSET_GENERATED',
+    }))
+  })
+
+  test('Outcome Studio response generation refines the current conversation draft without creating an asset version', async () => {
+    process.env.STORYLINEOS_GRR_PROVIDER_MODE = 'DETERMINISTIC'
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    const activeDraft = makeOutcomeDraftRecord()
+    const currentIteration = makeOutcomeDraftIterationRecord()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+    KnowledgePackActivation.find.mockReturnValue(buildRuntimeInstanceFindChain(makeActiveOutcomeKnowledgePackActivations()))
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord({
+      prompt: 'Make it shorter and more board-ready.',
+    })))
+    OutcomeDraft.findOne.mockReturnValue(buildLeanQuery(activeDraft))
+    OutcomeDraftIteration.findOne.mockReturnValue(buildLeanQuery(currentIteration))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/messages/out_msg_existing_fixture/generate-response`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.prompt).toContain('The existing board narrative is grounded in certified runtime truth.')
+    expect(res.body.data.prompt).toContain('## Draft Refinement Update')
+    expect(res.body.data.prompt).toContain('Requested change: Make it shorter and more board-ready.')
+    expect(res.body.data).not.toHaveProperty('asset')
+    expect(res.body.data).not.toHaveProperty('assetVersion')
+    expect(res.body.data.draft).toEqual(expect.objectContaining({
+      draftId: activeDraft.draftId,
+      status: 'ACTIVE',
+      currentIterationId: expect.stringMatching(/^outcome_draft_iteration_/),
+      currentIterationNumber: 2,
+      approvedIterationId: '',
+      approvedAssetVersionId: '',
+      lineageSummary: expect.objectContaining({
+        draftRefinement: expect.objectContaining({
+          operation: 'DRAFT_REFINEMENT',
+          mode: 'FULL_DRAFT',
+          intentType: 'CONTENT_REDUCTION',
+          sourceIterationId: currentIteration.draftIterationId,
+          sourceIterationNumber: 1,
+          preservedPreviousContent: true,
+          compare: expect.objectContaining({
+            available: true,
+            fromIterationId: currentIteration.draftIterationId,
+            toIterationId: expect.stringMatching(/^outcome_draft_iteration_/),
+          }),
+          revert: expect.objectContaining({
+            available: true,
+            targetIterationId: currentIteration.draftIterationId,
+          }),
+        }),
+      }),
+    }))
+    expect(res.body.data.draftIteration).toEqual(expect.objectContaining({
+      draftId: activeDraft.draftId,
+      previousIterationId: currentIteration.draftIterationId,
+      iterationNumber: 2,
+      iterationType: 'REFINEMENT',
+      status: 'CURRENT',
+      contentAvailable: true,
+      customerContent: expect.objectContaining({
+        markdown: expect.stringContaining('## Draft Refinement Update'),
+        metadata: expect.objectContaining({
+          draftOperation: 'DRAFT_REFINEMENT',
+          refinementMode: 'FULL_DRAFT',
+          sourceIterationId: currentIteration.draftIterationId,
+          compareAvailable: true,
+          revertAvailable: true,
+        }),
+      }),
+      validationSummary: expect.objectContaining({
+        validationScope: 'OUTCOME_DRAFT_ITERATION',
+        outcomeAssetId: '',
+        outcomeAssetVersionId: '',
+        status: 'PASS',
+        result: 'ALLOW',
+      }),
+    }))
+    expect(OutcomeDraft.findOne).toHaveBeenCalledWith({
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      sessionId: 'out_sess_existing_fixture',
+      status: 'ACTIVE',
+    })
+    expect(OutcomeDraftIteration.findOne).toHaveBeenCalledWith({
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      sessionId: 'out_sess_existing_fixture',
+      draftId: activeDraft.draftId,
+      draftIterationId: currentIteration.draftIterationId,
+      status: 'CURRENT',
+    })
+    expect(OutcomeDraft.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeDraftIteration.prototype.save).toHaveBeenCalledTimes(1)
+    const savedOutcomeDraftIteration = OutcomeDraftIteration.prototype.save.mock.contexts[0]
+    expect(savedOutcomeDraftIteration.previousIterationId).toBe(currentIteration.draftIterationId)
+    expect(savedOutcomeDraftIteration.iterationNumber).toBe(2)
+    expect(savedOutcomeDraftIteration.iterationType).toBe('REFINEMENT')
+    expect(savedOutcomeDraftIteration.customerContent.markdown).toContain('The existing board narrative is grounded in certified runtime truth.')
+    expect(OutcomeDraftIteration.updateMany).toHaveBeenCalledWith(
+      {
+        runtimeInstanceId: RUNTIME_INSTANCE_ID,
+        draftId: activeDraft.draftId,
+        status: 'CURRENT',
+      },
+      {
+        $set: {
+          status: 'SUPERSEDED',
+        },
+      },
+    )
+    expect(OutcomeDraft.updateOne).toHaveBeenCalledWith(
+      { _id: activeDraft._id },
+      {
+        $set: expect.objectContaining({
+          currentIterationId: res.body.data.draftIteration.draftIterationId,
+          currentIterationNumber: 2,
+          lineageSummary: expect.objectContaining({
+            draftRefinement: expect.objectContaining({
+              sourceIterationId: currentIteration.draftIterationId,
+            }),
+          }),
+          validationSummary: expect.objectContaining({
+            validationScope: 'OUTCOME_DRAFT_ITERATION',
+          }),
+        }),
+      },
+    )
+    expect(OutcomeAsset.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeAssetVersion.prototype.save).not.toHaveBeenCalled()
+    expect(RuntimeGraphRelationship.prototype.save).not.toHaveBeenCalled()
+    expect(RuntimeGraphRelationship.deleteMany).not.toHaveBeenCalled()
+    expect(GovernedReasoningExecution.prototype.save).toHaveBeenCalledTimes(1)
+    const savedGrrExecution = GovernedReasoningExecution.prototype.save.mock.contexts[0]
+    expect(savedGrrExecution.executionIntent).toContain('Draft operation: refinement on draft outcome_draft_existing_fixture.')
+    expect(savedGrrExecution.executionIntent).toContain('Current conversation draft content for refinement:')
+    expect(savedGrrExecution.executionIntent).toContain('The existing board narrative is grounded in certified runtime truth.')
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'OUTCOME_RESPONSE_GENERATED',
+      diff: expect.objectContaining({
+        draftCreated: false,
+        draftRefined: true,
+        draftId: activeDraft.draftId,
+        draftIterationId: res.body.data.draftIteration.draftIterationId,
+        previousDraftIterationId: currentIteration.draftIterationId,
+        iterationNumber: 2,
+      }),
+    }))
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'OUTCOME_DRAFT_REFINED',
+      resourceType: 'OutcomeDraft',
+      resourceId: activeDraft._id,
+      scope: expect.objectContaining({
+        outcomeDraftId: activeDraft.draftId,
+        outcomeDraftIterationId: res.body.data.draftIteration.draftIterationId,
+      }),
+      diff: expect.objectContaining({
+        draftRefined: true,
+        previousDraftIterationId: currentIteration.draftIterationId,
+        iterationNumber: 2,
+        refinementMode: 'FULL_DRAFT',
+        compareAvailable: true,
+        revertAvailable: true,
+        assetVersionCreated: false,
+        runtimeGraphRelationshipCount: 0,
+      }),
+    }))
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+      action: 'OUTCOME_DRAFT_GENERATED',
+    }))
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+      action: 'ASSET_GENERATED',
+    }))
+  })
+
+  test('Outcome Studio draft refinement rolls back draft pointers when refinement audit persistence fails', async () => {
+    process.env.STORYLINEOS_GRR_PROVIDER_MODE = 'DETERMINISTIC'
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    const activeDraft = makeOutcomeDraftRecord()
+    const currentIteration = makeOutcomeDraftIterationRecord()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+    KnowledgePackActivation.find.mockReturnValue(buildRuntimeInstanceFindChain(makeActiveOutcomeKnowledgePackActivations()))
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord({
+      prompt: 'Make it shorter and more board-ready.',
+    })))
+    OutcomeDraft.findOne.mockReturnValue(buildLeanQuery(activeDraft))
+    OutcomeDraftIteration.findOne.mockReturnValue(buildLeanQuery(currentIteration))
+    AuditLog.createLog = jest.fn(async (payload) => {
+      if (payload?.action === 'OUTCOME_DRAFT_REFINED') {
+        throw new Error('draft refinement audit unavailable')
+      }
+      return {}
+    })
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/messages/out_msg_existing_fixture/generate-response`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(500)
+    expect(res.body.error.code).toBe('OUTCOME_DRAFT_REFINEMENT_AUDIT_FAILED')
+    expect(res.body.error.details.reason).toBe('OUTCOME_DRAFT_REFINEMENT_AUDIT_FAILED')
+    expect(res.body.error.details).toEqual(expect.objectContaining({
+      sessionId: 'out_sess_existing_fixture',
+      messageId: 'out_msg_existing_fixture',
+      responseMessageId: expect.stringMatching(/^out_msg_/),
+      draftId: activeDraft.draftId,
+      draftIterationId: expect.stringMatching(/^outcome_draft_iteration_/),
+      previousDraftIterationId: currentIteration.draftIterationId,
+    }))
+    expect(res.body.error.details.auditError).toEqual(expect.objectContaining({
+      message: 'draft refinement audit unavailable',
+    }))
+    expect(OutcomeDraft.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeDraftIteration.prototype.save).toHaveBeenCalledTimes(1)
+    expect(OutcomeDraftIteration.deleteOne).toHaveBeenCalledWith({
+      _id: expect.anything(),
+    })
+    expect(OutcomeMessage.deleteOne).toHaveBeenCalledWith({
+      _id: expect.anything(),
+    })
+    expect(OutcomeMessage.updateOne).toHaveBeenCalledWith(
+      { _id: 'c47f1f77bcf86cd799439111' },
+      { $set: { responseStatus: 'RESPONSE_GENERATED' } },
+    )
+    expect(OutcomeMessage.updateOne).toHaveBeenCalledWith(
+      { _id: 'c47f1f77bcf86cd799439111' },
+      { $set: { responseStatus: 'PENDING_RESPONSE' } },
+    )
+    expect(OutcomeDraftIteration.updateMany).toHaveBeenCalledWith(
+      {
+        runtimeInstanceId: RUNTIME_INSTANCE_ID,
+        draftId: activeDraft.draftId,
+        status: 'CURRENT',
+      },
+      {
+        $set: {
+          status: 'SUPERSEDED',
+        },
+      },
+    )
+    expect(OutcomeDraftIteration.updateMany).toHaveBeenCalledWith(
+      {
+        runtimeInstanceId: RUNTIME_INSTANCE_ID,
+        draftId: activeDraft.draftId,
+        draftIterationId: currentIteration.draftIterationId,
+      },
+      {
+        $set: {
+          status: 'CURRENT',
+        },
+      },
+    )
+    expect(OutcomeDraft.updateOne).toHaveBeenCalledWith(
+      { _id: activeDraft._id },
+      {
+        $set: expect.objectContaining({
+          currentIterationId: expect.stringMatching(/^outcome_draft_iteration_/),
+          currentIterationNumber: 2,
+        }),
+      },
+    )
+    expect(OutcomeDraft.updateOne).toHaveBeenCalledWith(
+      { _id: activeDraft._id },
+      {
+        $set: expect.objectContaining({
+          currentIterationId: currentIteration.draftIterationId,
+          currentIterationNumber: 1,
+          lineageSummary: activeDraft.lineageSummary,
+          validationSummary: activeDraft.validationSummary,
+          warnings: activeDraft.warnings,
+          limitations: activeDraft.limitations,
+        }),
+      },
+    )
+    expect(OutcomeAsset.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeAssetVersion.prototype.save).not.toHaveBeenCalled()
+    expect(RuntimeGraphRelationship.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'OUTCOME_RESPONSE_GENERATED',
+    }))
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'OUTCOME_DRAFT_REFINED',
+      resourceType: 'OutcomeDraft',
+    }))
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+      action: 'OUTCOME_DRAFT_GENERATED',
     }))
   })
 
@@ -15757,12 +16189,14 @@ describe('Runtime Instance API', () => {
         role: 'ASSISTANT',
         status: 'GENERATED',
         responseStatus: 'RESPONSE_GENERATED',
-        prompt: expect.stringContaining('Governed response prepared from the current Executive Brief.'),
+        prompt: expect.stringContaining('# Executive Brief Draft'),
       }))
-      expect(res.body.data.prompt).toContain('This scaffold does not expose hidden reasoning')
+      expect(res.body.data.prompt).toContain('working Executive Brief draft')
       expect(res.body.data.prompt).not.toContain('governed reasoning artefact')
-      expect(res.body.data.asset).toEqual(expect.objectContaining({
-        status: 'GENERATED',
+      expect(res.body.data).not.toHaveProperty('asset')
+      expect(res.body.data).not.toHaveProperty('assetVersion')
+      expect(res.body.data.draft).toEqual(expect.objectContaining({
+        status: 'ACTIVE',
         outputTypeKey: 'EXECUTIVE_BRIEF',
         lineageSummary: expect.objectContaining({
           grrExecutionId: '',
@@ -15770,8 +16204,9 @@ describe('Runtime Instance API', () => {
           grrProviderMode: '',
         }),
       }))
-      expect(res.body.data.assetVersion).toEqual(expect.objectContaining({
+      expect(res.body.data.draftIteration).toEqual(expect.objectContaining({
         status: 'CURRENT',
+        iterationType: 'INITIAL',
         contentAvailable: true,
       }))
       expect(GovernedReasoningExecution.findOne).not.toHaveBeenCalled()
@@ -15784,6 +16219,9 @@ describe('Runtime Instance API', () => {
         action: 'OUTCOME_RESPONSE_GENERATED',
       }))
       expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+        action: 'OUTCOME_DRAFT_GENERATED',
+      }))
+      expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
         action: 'ASSET_GENERATED',
       }))
     } finally {
@@ -15833,6 +16271,47 @@ describe('Runtime Instance API', () => {
     expect(OutcomeMessage.deleteOne).not.toHaveBeenCalled()
     expect(OutcomeAsset.prototype.save).not.toHaveBeenCalled()
     expect(OutcomeAssetVersion.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeDraft.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeDraftIteration.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('Outcome Studio response generation fails closed when request resolution requires an active draft', async () => {
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord({
+      prompt: 'Make it better.',
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/messages/out_msg_existing_fixture/generate-response`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.details).toEqual(expect.objectContaining({
+      reason: 'OUTCOME_REQUEST_RESOLUTION_BLOCKED',
+      sessionId: 'out_sess_existing_fixture',
+      messageId: 'out_msg_existing_fixture',
+      intentType: 'REFINEMENT_REQUEST',
+      blockers: expect.arrayContaining([
+        expect.objectContaining({
+          code: 'DRAFT_REQUIRED',
+        }),
+      ]),
+    }))
+    expect(OutcomeMessage.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeMessage.updateOne).not.toHaveBeenCalled()
+    expect(OutcomeAsset.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeAssetVersion.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeDraft.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeDraftIteration.prototype.save).not.toHaveBeenCalled()
+    expect(RuntimeGraphRelationship.prototype.save).not.toHaveBeenCalled()
+    expect(GovernedReasoningExecution.prototype.save).not.toHaveBeenCalled()
+    expect(GovernedRuntimeArtifact.prototype.save).not.toHaveBeenCalled()
     expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 
@@ -15858,6 +16337,8 @@ describe('Runtime Instance API', () => {
     expect(OutcomeMessage.deleteOne).not.toHaveBeenCalled()
     expect(OutcomeAsset.prototype.save).not.toHaveBeenCalled()
     expect(OutcomeAssetVersion.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeDraft.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeDraftIteration.prototype.save).not.toHaveBeenCalled()
     expect(RuntimeGraphRelationship.prototype.save).not.toHaveBeenCalled()
     expect(GovernedReasoningExecution.prototype.save).not.toHaveBeenCalled()
     expect(GovernedRuntimeArtifact.prototype.save).not.toHaveBeenCalled()
@@ -15900,13 +16381,17 @@ describe('Runtime Instance API', () => {
       sessionId: 'out_sess_existing_fixture',
       messageId: 'out_msg_existing_fixture',
       responseMessageId: expect.stringMatching(/^out_msg_/),
+      draftId: expect.stringMatching(/^outcome_draft_/),
+      draftIterationId: expect.stringMatching(/^outcome_draft_iteration_/),
     }))
     expect(res.body.error.details.auditError).toEqual(expect.objectContaining({
       message: 'response audit unavailable',
     }))
     expect(OutcomeMessage.prototype.save).toHaveBeenCalledTimes(1)
-    expect(OutcomeAsset.prototype.save).toHaveBeenCalledTimes(1)
-    expect(OutcomeAssetVersion.prototype.save).toHaveBeenCalledTimes(1)
+    expect(OutcomeDraft.prototype.save).toHaveBeenCalledTimes(1)
+    expect(OutcomeDraftIteration.prototype.save).toHaveBeenCalledTimes(1)
+    expect(OutcomeAsset.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeAssetVersion.prototype.save).not.toHaveBeenCalled()
     expect(OutcomeMessage.updateOne).toHaveBeenCalledWith(
       { _id: 'c47f1f77bcf86cd799439111' },
       { $set: { responseStatus: 'RESPONSE_GENERATED' } },
@@ -15918,19 +16403,21 @@ describe('Runtime Instance API', () => {
     expect(OutcomeMessage.deleteOne).toHaveBeenCalledWith({
       _id: expect.anything(),
     })
-    expect(OutcomeAsset.deleteOne).toHaveBeenCalledWith({
+    expect(OutcomeDraft.deleteOne).toHaveBeenCalledWith({
       _id: expect.anything(),
     })
-    expect(OutcomeAssetVersion.deleteOne).toHaveBeenCalledWith({
+    expect(OutcomeDraftIteration.deleteOne).toHaveBeenCalledWith({
       _id: expect.anything(),
     })
+    expect(OutcomeAsset.deleteOne).not.toHaveBeenCalled()
+    expect(OutcomeAssetVersion.deleteOne).not.toHaveBeenCalled()
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'OUTCOME_RESPONSE_GENERATED',
       resourceType: 'OutcomeMessage',
     }))
   })
 
-  test('Outcome Studio response generation rolls back when runtime graph relationship persistence fails', async () => {
+  test('Outcome Studio response generation rolls back when draft iteration persistence fails', async () => {
     process.env.STORYLINEOS_GRR_PROVIDER_MODE = 'DETERMINISTIC'
     const runtimeInstance = makeOutputLabReadyRuntime()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
@@ -15938,8 +16425,8 @@ describe('Runtime Instance API', () => {
     KnowledgePackActivation.find.mockReturnValue(buildRuntimeInstanceFindChain(makeActiveOutcomeKnowledgePackActivations()))
     OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
     OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord()))
-    RuntimeGraphRelationship.prototype.save = jest.fn(async () => {
-      throw new Error('relationship store unavailable')
+    OutcomeDraftIteration.prototype.save = jest.fn(async () => {
+      throw new Error('draft iteration store unavailable')
     })
     const token = await getAccessTokenForUser(makeCustomerAdmin())
 
@@ -15949,29 +16436,17 @@ describe('Runtime Instance API', () => {
       .send({})
 
     expect(res.status).toBe(500)
-    expect(res.body.error.code).toBe('OUTCOME_GRAPH_RELATIONSHIP_FAILED')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      reason: 'OUTCOME_GRAPH_RELATIONSHIP_FAILED',
-      sessionId: 'out_sess_existing_fixture',
-      messageId: 'out_msg_existing_fixture',
-      responseMessageId: expect.stringMatching(/^out_msg_/),
-      outcomeAssetId: expect.stringMatching(/^outcome_asset_/),
-      outcomeAssetVersionId: expect.stringMatching(/^outcome_asset_version_/),
-      graphRelationshipError: expect.objectContaining({
-        message: 'relationship store unavailable',
-      }),
-    }))
     expect(OutcomeMessage.prototype.save).toHaveBeenCalledTimes(1)
-    expect(OutcomeAsset.prototype.save).toHaveBeenCalledTimes(1)
-    expect(OutcomeAssetVersion.prototype.save).toHaveBeenCalledTimes(1)
-    expect(RuntimeGraphRelationship.prototype.save).toHaveBeenCalledTimes(1)
-    expect(RuntimeGraphRelationship.deleteMany).toHaveBeenCalledWith({
-      _id: { $in: [expect.anything(), expect.anything()] },
-    })
-    expect(OutcomeAssetVersion.deleteOne).toHaveBeenCalledWith({
+    expect(OutcomeDraft.prototype.save).toHaveBeenCalledTimes(1)
+    expect(OutcomeDraftIteration.prototype.save).toHaveBeenCalledTimes(1)
+    expect(OutcomeAsset.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeAssetVersion.prototype.save).not.toHaveBeenCalled()
+    expect(RuntimeGraphRelationship.prototype.save).not.toHaveBeenCalled()
+    expect(RuntimeGraphRelationship.deleteMany).not.toHaveBeenCalled()
+    expect(OutcomeDraftIteration.deleteOne).toHaveBeenCalledWith({
       _id: expect.anything(),
     })
-    expect(OutcomeAsset.deleteOne).toHaveBeenCalledWith({
+    expect(OutcomeDraft.deleteOne).toHaveBeenCalledWith({
       _id: expect.anything(),
     })
     expect(OutcomeMessage.deleteOne).toHaveBeenCalledWith({
@@ -15985,11 +16460,11 @@ describe('Runtime Instance API', () => {
       action: 'OUTCOME_RESPONSE_GENERATED',
     }))
     expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
-      action: 'ASSET_GENERATED',
+      action: 'OUTCOME_DRAFT_GENERATED',
     }))
   })
 
-  test('Outcome Studio response generation rolls back the generated asset when asset audit persistence fails', async () => {
+  test('Outcome Studio response generation rolls back the generated draft when draft audit persistence fails', async () => {
     process.env.STORYLINEOS_GRR_PROVIDER_MODE = 'DETERMINISTIC'
     const runtimeInstance = makeOutputLabReadyRuntime()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
@@ -15998,8 +16473,8 @@ describe('Runtime Instance API', () => {
     OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
     OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord()))
     AuditLog.createLog = jest.fn(async (payload) => {
-      if (payload?.action === 'ASSET_GENERATED') {
-        throw new Error('asset audit unavailable')
+      if (payload?.action === 'OUTCOME_DRAFT_GENERATED') {
+        throw new Error('draft audit unavailable')
       }
       return {}
     })
@@ -16011,21 +16486,23 @@ describe('Runtime Instance API', () => {
       .send({})
 
     expect(res.status).toBe(500)
-    expect(res.body.error.code).toBe('OUTCOME_ASSET_GENERATION_AUDIT_FAILED')
-    expect(res.body.error.details.reason).toBe('OUTCOME_ASSET_GENERATION_AUDIT_FAILED')
+    expect(res.body.error.code).toBe('OUTCOME_DRAFT_GENERATION_AUDIT_FAILED')
+    expect(res.body.error.details.reason).toBe('OUTCOME_DRAFT_GENERATION_AUDIT_FAILED')
     expect(res.body.error.details).toEqual(expect.objectContaining({
       sessionId: 'out_sess_existing_fixture',
       messageId: 'out_msg_existing_fixture',
       responseMessageId: expect.stringMatching(/^out_msg_/),
-      outcomeAssetId: expect.stringMatching(/^outcome_asset_/),
-      outcomeAssetVersionId: expect.stringMatching(/^outcome_asset_version_/),
+      draftId: expect.stringMatching(/^outcome_draft_/),
+      draftIterationId: expect.stringMatching(/^outcome_draft_iteration_/),
     }))
     expect(res.body.error.details.auditError).toEqual(expect.objectContaining({
-      message: 'asset audit unavailable',
+      message: 'draft audit unavailable',
     }))
     expect(OutcomeMessage.prototype.save).toHaveBeenCalledTimes(1)
-    expect(OutcomeAsset.prototype.save).toHaveBeenCalledTimes(1)
-    expect(OutcomeAssetVersion.prototype.save).toHaveBeenCalledTimes(1)
+    expect(OutcomeDraft.prototype.save).toHaveBeenCalledTimes(1)
+    expect(OutcomeDraftIteration.prototype.save).toHaveBeenCalledTimes(1)
+    expect(OutcomeAsset.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeAssetVersion.prototype.save).not.toHaveBeenCalled()
     expect(OutcomeMessage.updateOne).toHaveBeenCalledWith(
       { _id: 'c47f1f77bcf86cd799439111' },
       { $set: { responseStatus: 'RESPONSE_GENERATED' } },
@@ -16037,19 +16514,21 @@ describe('Runtime Instance API', () => {
     expect(OutcomeMessage.deleteOne).toHaveBeenCalledWith({
       _id: expect.anything(),
     })
-    expect(OutcomeAsset.deleteOne).toHaveBeenCalledWith({
+    expect(OutcomeDraft.deleteOne).toHaveBeenCalledWith({
       _id: expect.anything(),
     })
-    expect(OutcomeAssetVersion.deleteOne).toHaveBeenCalledWith({
+    expect(OutcomeDraftIteration.deleteOne).toHaveBeenCalledWith({
       _id: expect.anything(),
     })
+    expect(OutcomeAsset.deleteOne).not.toHaveBeenCalled()
+    expect(OutcomeAssetVersion.deleteOne).not.toHaveBeenCalled()
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'OUTCOME_RESPONSE_GENERATED',
       resourceType: 'OutcomeMessage',
     }))
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
-      action: 'ASSET_GENERATED',
-      resourceType: 'OutcomeAsset',
+      action: 'OUTCOME_DRAFT_GENERATED',
+      resourceType: 'OutcomeDraft',
     }))
   })
 
@@ -16166,6 +16645,462 @@ describe('Runtime Instance API', () => {
     expect(OutcomeMessage.findOne).not.toHaveBeenCalled()
     expect(OutcomeAsset.find).not.toHaveBeenCalled()
     expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('Outcome Studio draft approval creates a governed asset version from the current draft', async () => {
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    const activeDraft = makeOutcomeDraftRecord()
+    const currentIteration = makeOutcomeDraftIterationRecord()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    OutcomeDraft.findOne.mockReturnValue(buildLeanQuery(activeDraft))
+    OutcomeDraftIteration.findOne.mockReturnValue(buildLeanQuery(currentIteration))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/drafts/${activeDraft.draftId}/approve`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(201)
+    expect(res.body.data.draft).toEqual(expect.objectContaining({
+      draftId: activeDraft.draftId,
+      status: 'APPROVED',
+      approvedIterationId: currentIteration.draftIterationId,
+      approvedAssetVersionId: expect.stringMatching(/^outcome_asset_version_/),
+      approvedBy: CUSTOMER_ADMIN_ID,
+      approvedAt: expect.any(String),
+    }))
+    expect(res.body.data.draftIteration).toEqual(expect.objectContaining({
+      draftIterationId: currentIteration.draftIterationId,
+      draftId: activeDraft.draftId,
+      status: 'APPROVED',
+      contentAvailable: true,
+      customerContent: expect.objectContaining({
+        markdown: expect.stringContaining('The existing board narrative is grounded in certified runtime truth.'),
+      }),
+    }))
+    expect(res.body.data.asset).toEqual(expect.objectContaining({
+      outcomeAssetId: expect.stringMatching(/^outcome_asset_/),
+      sessionId: 'out_sess_existing_fixture',
+      status: 'GENERATED',
+      outputTypeKey: 'EXECUTIVE_BRIEF',
+      currentVersionId: res.body.data.draft.approvedAssetVersionId,
+      currentVersionNumber: 1,
+      postValidation: expect.objectContaining({
+        validationScope: 'OUTCOME_ASSET_VERSION',
+        outcomeAssetId: expect.stringMatching(/^outcome_asset_/),
+        outcomeAssetVersionId: res.body.data.draft.approvedAssetVersionId,
+        status: 'PASS',
+        result: 'ALLOW',
+      }),
+      lineageSummary: expect.objectContaining({
+        sourceOutputAssetId: 'out_asset_outcome_studio_fixture',
+        truthSignatureCurrentness: 'CURRENT',
+        draftApproval: expect.objectContaining({
+          operation: 'DRAFT_APPROVAL',
+          draftId: activeDraft.draftId,
+          draftIterationId: currentIteration.draftIterationId,
+          outcomeAssetVersionId: res.body.data.draft.approvedAssetVersionId,
+          versionNumber: 1,
+        }),
+      }),
+    }))
+    expect(res.body.data.asset).not.toHaveProperty('customerContent')
+    expect(res.body.data.assetVersion).toEqual(expect.objectContaining({
+      outcomeAssetVersionId: res.body.data.draft.approvedAssetVersionId,
+      outcomeAssetId: res.body.data.asset.outcomeAssetId,
+      versionNumber: 1,
+      status: 'CURRENT',
+      contentAvailable: true,
+      postValidation: expect.objectContaining({
+        validationScope: 'OUTCOME_ASSET_VERSION',
+        outcomeAssetId: res.body.data.asset.outcomeAssetId,
+        outcomeAssetVersionId: res.body.data.draft.approvedAssetVersionId,
+        status: 'PASS',
+        result: 'ALLOW',
+      }),
+      lineageSummary: expect.objectContaining({
+        draftApproval: expect.objectContaining({
+          draftId: activeDraft.draftId,
+          draftIterationId: currentIteration.draftIterationId,
+        }),
+      }),
+    }))
+    expect(res.body.data.assetVersion).not.toHaveProperty('customerContent')
+    expect(OutcomeSession.findOne).toHaveBeenCalledWith({
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      sessionId: 'out_sess_existing_fixture',
+    })
+    expect(OutcomeDraft.findOne).toHaveBeenCalledWith({
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      sessionId: 'out_sess_existing_fixture',
+      draftId: activeDraft.draftId,
+    })
+    expect(OutcomeDraftIteration.findOne).toHaveBeenCalledWith({
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      sessionId: 'out_sess_existing_fixture',
+      draftId: activeDraft.draftId,
+      draftIterationId: currentIteration.draftIterationId,
+      status: 'CURRENT',
+    })
+    expect(OutcomeAsset.prototype.save).toHaveBeenCalledTimes(1)
+    expect(OutcomeAssetVersion.prototype.save).toHaveBeenCalledTimes(1)
+    const savedAsset = OutcomeAsset.prototype.save.mock.contexts[0]
+    const savedVersion = OutcomeAssetVersion.prototype.save.mock.contexts[0]
+    expect(savedAsset.customerContent).toBeUndefined()
+    expect(savedAsset.currentVersionId).toBe(savedVersion.outcomeAssetVersionId)
+    expect(savedAsset.contextBindings.workspaceContext).toEqual(expect.objectContaining({
+      contextType: 'ASSET',
+      workspaceAssetId: savedAsset.outcomeAssetId,
+      workspaceAssetVersionId: savedVersion.outcomeAssetVersionId,
+    }))
+    expect(savedVersion.customerContent).toEqual(expect.objectContaining({
+      markdown: expect.stringContaining('The existing board narrative is grounded in certified runtime truth.'),
+      metadata: expect.objectContaining({
+        approvalStatus: 'APPROVED',
+        approvedDraftId: activeDraft.draftId,
+        approvedDraftIterationId: currentIteration.draftIterationId,
+        outcomeAssetId: savedAsset.outcomeAssetId,
+        outcomeAssetVersionId: savedVersion.outcomeAssetVersionId,
+      }),
+    }))
+    expect(savedVersion.postValidation).toEqual(expect.objectContaining({
+      validationScope: 'OUTCOME_ASSET_VERSION',
+      outcomeAssetId: savedAsset.outcomeAssetId,
+      outcomeAssetVersionId: savedVersion.outcomeAssetVersionId,
+      status: 'PASS',
+      result: 'ALLOW',
+    }))
+    expect(OutcomeDraftIteration.updateMany).toHaveBeenCalledWith(
+      {
+        runtimeInstanceId: RUNTIME_INSTANCE_ID,
+        draftId: activeDraft.draftId,
+        draftIterationId: currentIteration.draftIterationId,
+        status: 'CURRENT',
+      },
+      {
+        $set: {
+          status: 'APPROVED',
+        },
+      },
+    )
+    expect(OutcomeDraft.updateOne).toHaveBeenCalledWith(
+      {
+        _id: activeDraft._id,
+        status: 'ACTIVE',
+      },
+      {
+        $set: expect.objectContaining({
+          status: 'APPROVED',
+          approvedIterationId: currentIteration.draftIterationId,
+          approvedAssetVersionId: savedVersion.outcomeAssetVersionId,
+          approvedBy: CUSTOMER_ADMIN_ID,
+          approvedAt: expect.any(Date),
+        }),
+      },
+    )
+    expect(RuntimeGraphRelationship.prototype.save).toHaveBeenCalledTimes(2)
+    const savedRelationships = RuntimeGraphRelationship.prototype.save.mock.contexts
+    expect(savedRelationships).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        relationshipType: 'ASSET_DERIVED_FROM_TRUTH',
+        sourceNode: expect.objectContaining({
+          nodeType: 'TRUTH_SIGNATURE',
+          nodeId: 'truth_sig_existing_fixture',
+        }),
+        targetNode: expect.objectContaining({
+          nodeType: 'WORKSPACE_ASSET',
+          nodeId: savedAsset.outcomeAssetId,
+        }),
+      }),
+      expect.objectContaining({
+        relationshipType: 'ASSET_DERIVED_FROM_SESSION',
+        sourceNode: expect.objectContaining({
+          nodeType: 'WORKSPACE_SESSION',
+          nodeId: 'out_sess_existing_fixture',
+        }),
+        targetNode: expect.objectContaining({
+          nodeType: 'WORKSPACE_ASSET',
+          nodeId: savedAsset.outcomeAssetId,
+        }),
+      }),
+    ]))
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'OUTCOME_DRAFT_APPROVED',
+      resourceType: 'OutcomeDraft',
+      resourceId: activeDraft._id,
+      scope: expect.objectContaining({
+        outcomeDraftId: activeDraft.draftId,
+        outcomeDraftIterationId: currentIteration.draftIterationId,
+      }),
+      diff: expect.objectContaining({
+        draftId: activeDraft.draftId,
+        draftIterationId: currentIteration.draftIterationId,
+        nextDraftStatus: 'APPROVED',
+        outcomeAssetId: savedAsset.outcomeAssetId,
+        outcomeAssetVersionId: savedVersion.outcomeAssetVersionId,
+        approvalCreatedAssetVersion: true,
+        runtimeGraphRelationshipCount: 2,
+        postValidation: expect.objectContaining({
+          status: 'PASS',
+          result: 'ALLOW',
+        }),
+      }),
+    }))
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'ASSET_GENERATED',
+      resourceType: 'OutcomeAsset',
+      resourceId: savedAsset._id,
+      scope: expect.objectContaining({
+        outcomeAssetId: savedAsset.outcomeAssetId,
+        outcomeAssetVersionId: savedVersion.outcomeAssetVersionId,
+      }),
+      diff: expect.objectContaining({
+        draftId: activeDraft.draftId,
+        draftIterationId: currentIteration.draftIterationId,
+        outcomeAssetId: savedAsset.outcomeAssetId,
+        outcomeAssetVersionId: savedVersion.outcomeAssetVersionId,
+        versionNumber: 1,
+        generatedBodyAvailable: true,
+        runtimeGraphRelationshipCount: 2,
+      }),
+    }))
+  })
+
+  test('Outcome Studio draft approval rejects payload fields before runtime lookup', async () => {
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/drafts/outcome_draft_existing_fixture/approve`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        status: 'APPROVED',
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details).toEqual(expect.objectContaining({
+      _root: expect.stringContaining('Unrecognized key'),
+    }))
+    expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
+    expect(OutcomeSession.findOne).not.toHaveBeenCalled()
+    expect(OutcomeDraft.findOne).not.toHaveBeenCalled()
+    expect(OutcomeAsset.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('Outcome Studio draft approval rejects an already approved draft without creating an asset version', async () => {
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    const activeDraft = makeOutcomeDraftRecord({
+      status: 'APPROVED',
+      approvedIterationId: 'outcome_draft_iteration_current_fixture',
+      approvedAssetVersionId: 'outcome_asset_version_existing_fixture',
+    })
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    OutcomeDraft.findOne.mockReturnValue(buildLeanQuery(activeDraft))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/drafts/${activeDraft.draftId}/approve`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.details).toEqual(expect.objectContaining({
+      reason: 'OUTCOME_DRAFT_APPROVAL_BLOCKED',
+      draftId: activeDraft.draftId,
+      approvalAvailable: false,
+      blockerReason: 'OUTCOME_DRAFT_ALREADY_APPROVED',
+      safetyGate: expect.objectContaining({
+        code: 'ASSET_APPROVAL',
+        status: 'BLOCKED',
+      }),
+    }))
+    expect(OutcomeDraftIteration.findOne).not.toHaveBeenCalled()
+    expect(OutcomeAsset.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeAssetVersion.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('Outcome Studio draft approval rejects a lost approval claim before creating governed records', async () => {
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    const activeDraft = makeOutcomeDraftRecord()
+    const currentIteration = makeOutcomeDraftIterationRecord()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    OutcomeDraft.findOne.mockReturnValue(buildLeanQuery(activeDraft))
+    OutcomeDraftIteration.findOne.mockReturnValue(buildLeanQuery(currentIteration))
+    OutcomeDraft.updateOne.mockResolvedValueOnce({ matchedCount: 0, modifiedCount: 0 })
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/drafts/${activeDraft.draftId}/approve`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.details).toEqual(expect.objectContaining({
+      reason: 'OUTCOME_DRAFT_APPROVAL_BLOCKED',
+      blockerReason: 'OUTCOME_DRAFT_ALREADY_APPROVED',
+      approvalAvailable: false,
+    }))
+    expect(OutcomeDraft.updateOne).toHaveBeenCalledTimes(1)
+    expect(OutcomeDraftIteration.updateMany).not.toHaveBeenCalled()
+    expect(OutcomeAsset.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeAssetVersion.prototype.save).not.toHaveBeenCalled()
+    expect(RuntimeGraphRelationship.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeAsset.deleteOne).not.toHaveBeenCalled()
+    expect(OutcomeAssetVersion.deleteOne).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('Outcome Studio draft approval rejects missing current draft iterations without persistence', async () => {
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    const activeDraft = makeOutcomeDraftRecord()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    OutcomeDraft.findOne.mockReturnValue(buildLeanQuery(activeDraft))
+    OutcomeDraftIteration.findOne.mockReturnValue(buildLeanQuery(null))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/drafts/${activeDraft.draftId}/approve`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.details).toEqual(expect.objectContaining({
+      reason: 'OUTCOME_DRAFT_APPROVAL_BLOCKED',
+      draftId: activeDraft.draftId,
+      currentIterationId: activeDraft.currentIterationId,
+      approvalAvailable: false,
+      blockerReason: 'OUTCOME_DRAFT_CURRENT_ITERATION_NOT_FOUND',
+    }))
+    expect(OutcomeDraftIteration.findOne).toHaveBeenCalledWith({
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      sessionId: 'out_sess_existing_fixture',
+      draftId: activeDraft.draftId,
+      draftIterationId: activeDraft.currentIterationId,
+      status: 'CURRENT',
+    })
+    expect(OutcomeAsset.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeAssetVersion.prototype.save).not.toHaveBeenCalled()
+    expect(RuntimeGraphRelationship.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('Outcome Studio draft approval rolls back asset version creation when asset audit persistence fails', async () => {
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    const activeDraft = makeOutcomeDraftRecord()
+    const currentIteration = makeOutcomeDraftIterationRecord()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    OutcomeDraft.findOne.mockReturnValue(buildLeanQuery(activeDraft))
+    OutcomeDraftIteration.findOne.mockReturnValue(buildLeanQuery(currentIteration))
+    AuditLog.createLog = jest.fn(async (payload) => {
+      if (payload?.action === 'ASSET_GENERATED') {
+        throw new Error('asset approval audit unavailable')
+      }
+      return {}
+    })
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/drafts/${activeDraft.draftId}/approve`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    const savedAsset = OutcomeAsset.prototype.save.mock.contexts[0]
+    const savedVersion = OutcomeAssetVersion.prototype.save.mock.contexts[0]
+    expect(res.status).toBe(500)
+    expect(res.body.error.code).toBe('OUTCOME_ASSET_GENERATION_AUDIT_FAILED')
+    expect(res.body.error.details).toEqual(expect.objectContaining({
+      reason: 'OUTCOME_ASSET_GENERATION_AUDIT_FAILED',
+      draftId: activeDraft.draftId,
+      draftIterationId: currentIteration.draftIterationId,
+      outcomeAssetId: savedAsset.outcomeAssetId,
+      outcomeAssetVersionId: savedVersion.outcomeAssetVersionId,
+      auditError: expect.objectContaining({
+        message: 'asset approval audit unavailable',
+      }),
+    }))
+    expect(OutcomeAsset.prototype.save).toHaveBeenCalledTimes(1)
+    expect(OutcomeAssetVersion.prototype.save).toHaveBeenCalledTimes(1)
+    expect(RuntimeGraphRelationship.prototype.save).toHaveBeenCalledTimes(2)
+    expect(RuntimeGraphRelationship.deleteMany).toHaveBeenCalledWith({
+      _id: { $in: [expect.anything(), expect.anything()] },
+    })
+    expect(OutcomeAssetVersion.deleteOne).toHaveBeenCalledWith({
+      _id: savedVersion._id,
+    })
+    expect(OutcomeAsset.deleteOne).toHaveBeenCalledWith({
+      _id: savedAsset._id,
+    })
+    expect(OutcomeDraftIteration.updateMany).toHaveBeenCalledWith(
+      {
+        runtimeInstanceId: RUNTIME_INSTANCE_ID,
+        draftId: activeDraft.draftId,
+        draftIterationId: currentIteration.draftIterationId,
+        status: 'CURRENT',
+      },
+      {
+        $set: {
+          status: 'APPROVED',
+        },
+      },
+    )
+    expect(OutcomeDraftIteration.updateMany).toHaveBeenCalledWith(
+      {
+        runtimeInstanceId: RUNTIME_INSTANCE_ID,
+        draftId: activeDraft.draftId,
+        draftIterationId: currentIteration.draftIterationId,
+      },
+      {
+        $set: {
+          status: 'CURRENT',
+        },
+      },
+    )
+    expect(OutcomeDraft.updateOne).toHaveBeenCalledWith(
+      {
+        _id: activeDraft._id,
+        status: 'ACTIVE',
+      },
+      {
+        $set: expect.objectContaining({
+          status: 'APPROVED',
+          approvedIterationId: currentIteration.draftIterationId,
+          approvedAssetVersionId: savedVersion.outcomeAssetVersionId,
+        }),
+      },
+    )
+    expect(OutcomeDraft.updateOne).toHaveBeenCalledWith(
+      {
+        _id: activeDraft._id,
+        status: 'APPROVED',
+        approvedAssetVersionId: savedVersion.outcomeAssetVersionId,
+      },
+      {
+        $set: expect.objectContaining({
+          status: 'ACTIVE',
+          approvedIterationId: '',
+          approvedAssetVersionId: '',
+          approvedBy: null,
+          approvedAt: null,
+        }),
+      },
+    )
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'OUTCOME_DRAFT_APPROVED',
+    }))
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'ASSET_GENERATED',
+    }))
   })
 
   test('Outcome Studio update-from-latest-truth rebinds stale active session truth with drift and update audits', async () => {
@@ -16956,6 +17891,7 @@ describe('Runtime Instance API', () => {
     const runtimeInstance = makeOutputLabReadyRuntime()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
     OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    OutcomeDraft.find.mockReturnValue(buildRuntimeInstanceFindChain([makeOutcomeDraftRecord()]))
     const token = await getAccessTokenForUser(makeCustomerAdmin())
 
     const res = await request
@@ -16996,10 +17932,43 @@ describe('Runtime Instance API', () => {
         ]),
       }),
     }))
+    expect(OutcomeDraft.find).toHaveBeenCalledWith({
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      sessionId: 'out_sess_existing_fixture',
+    })
+    expect(res.body.data.drafts).toHaveLength(1)
+    expect(res.body.data.drafts[0]).toEqual(expect.objectContaining({
+      draftId: 'outcome_draft_existing_fixture',
+      sessionId: 'out_sess_existing_fixture',
+      status: 'ACTIVE',
+      outputTypeKey: 'EXECUTIVE_BRIEF',
+      title: 'Executive Brief Draft',
+      currentIterationId: 'outcome_draft_iteration_current_fixture',
+      currentIterationNumber: 1,
+      approvedIterationId: '',
+      approvedAssetVersionId: '',
+      truthSignature: expect.objectContaining({
+        status: 'PROJECTED',
+        persistence: 'SESSION_BOUND',
+        currentness: 'CURRENT',
+      }),
+      knowledgePackBinding: expect.objectContaining({
+        status: 'PROJECTED',
+        activeCount: 5,
+        requiredCount: 5,
+      }),
+      lineageSummary: expect.objectContaining({
+        sourceOutputAssetId: 'out_asset_outcome_studio_fixture',
+        sourceOutputTypeKey: 'EXECUTIVE_BRIEF',
+        truthSignatureCurrentness: 'CURRENT',
+      }),
+    }))
+    expect(res.body.data.drafts[0]).not.toHaveProperty('customerContent')
     expect(res.body.data.sourceOutput).not.toHaveProperty('markdown')
     expect(res.body.data.sourceOutput).not.toHaveProperty('safeJson')
     expect(res.body.data.knowledgePackBinding).not.toHaveProperty('sourceBundle')
     expect(JSON.stringify(res.body.data)).not.toContain('Raw persisted session Markdown must not leak')
+    expect(JSON.stringify(res.body.data)).not.toContain('The existing board narrative is grounded in certified runtime truth.')
     expect(JSON.stringify(res.body.data)).not.toContain('Raw source bundle must not leak')
     expect(JSON.stringify(res.body.data)).not.toContain('Raw active pack content must not leak')
     expect(JSON.stringify(res.body.data)).not.toContain('Raw truth signature internals must not leak')

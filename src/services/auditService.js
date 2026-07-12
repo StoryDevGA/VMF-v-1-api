@@ -95,6 +95,9 @@ export const AUDIT_ACTIONS = Object.freeze({
   KNOWLEDGE_PACK_BOUND_TO_SESSION: 'KNOWLEDGE_PACK_BOUND_TO_SESSION',
   PROMPT_SUBMITTED: 'PROMPT_SUBMITTED',
   OUTCOME_RESPONSE_GENERATED: 'OUTCOME_RESPONSE_GENERATED',
+  OUTCOME_DRAFT_GENERATED: 'OUTCOME_DRAFT_GENERATED',
+  OUTCOME_DRAFT_REFINED: 'OUTCOME_DRAFT_REFINED',
+  OUTCOME_DRAFT_APPROVED: 'OUTCOME_DRAFT_APPROVED',
   ASSET_GENERATED: 'ASSET_GENERATED',
   ASSET_PUBLISHED: 'ASSET_PUBLISHED',
   ASSET_EXPORTED: 'ASSET_EXPORTED',
@@ -213,6 +216,7 @@ export const RESOURCE_TYPES = Object.freeze({
   RuntimeOutputRequest: 'RuntimeOutputRequest',
   OutcomeSession: 'OutcomeSession',
   OutcomeMessage: 'OutcomeMessage',
+  OutcomeDraft: 'OutcomeDraft',
   OutcomeAsset: 'OutcomeAsset',
   KnowledgePack: 'KnowledgePack',
   KnowledgePackVersion: 'KnowledgePackVersion',
@@ -498,6 +502,10 @@ const buildAuditSummary = ({ action, resourceType, resourceId, diff, display }) 
       return clampSummary(`${actorLabel} submitted Outcome Studio prompt ${targetLabel}`)
     case AUDIT_ACTIONS.OUTCOME_RESPONSE_GENERATED:
       return clampSummary(`${actorLabel} generated Outcome Studio response ${targetLabel}`)
+    case AUDIT_ACTIONS.OUTCOME_DRAFT_GENERATED:
+      return clampSummary(`${actorLabel} generated Outcome Studio draft ${targetLabel}`)
+    case AUDIT_ACTIONS.OUTCOME_DRAFT_REFINED:
+      return clampSummary(`${actorLabel} refined Outcome Studio draft ${targetLabel}`)
     case AUDIT_ACTIONS.ASSET_GENERATED:
       return clampSummary(`${actorLabel} generated Outcome Studio asset ${targetLabel}`)
     case AUDIT_ACTIONS.ASSET_PUBLISHED:

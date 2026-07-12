@@ -136,7 +136,7 @@ const outcomeMessageSchema = new mongoose.Schema(
       type: String,
       required: true,
       trim: true,
-      maxlength: 2000,
+      maxlength: 120000,
     },
     sourceOutputSnapshot: {
       type: mongoose.Schema.Types.Mixed,

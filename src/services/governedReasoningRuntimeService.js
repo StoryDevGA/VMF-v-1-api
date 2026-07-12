@@ -421,12 +421,40 @@ const sanitizePack = (pack = {}) => ({
   packType: normalizeToken(pack.packType),
   packKey: normalizeKey(pack.packKey),
   versionId: normalizeText(pack.versionId),
-  activationId: normalizeText(pack.activationId),
+  semanticVersion: normalizeText(pack.semanticVersion),
+  contentHash: normalizeText(pack.contentHash),
   label: normalizeText(pack.label),
   purposeCategory: normalizeToken(pack.purposeCategory),
   executionMode: normalizeToken(pack.executionMode),
   scopeType: normalizeToken(pack.scopeType),
   scopeKey: normalizeText(pack.scopeKey),
+})
+
+const sanitizeDependencyGraph = (dependencyGraph = {}) => ({
+  status: normalizeToken(dependencyGraph.status || 'NOT_AVAILABLE') || 'NOT_AVAILABLE',
+  edgeCount: Number.isFinite(Number(dependencyGraph.edgeCount))
+    ? Number(dependencyGraph.edgeCount)
+    : Array.isArray(dependencyGraph.edges) ? dependencyGraph.edges.length : 0,
+  edges: Array.isArray(dependencyGraph.edges)
+    ? dependencyGraph.edges.map((edge) => ({
+        from: normalizeText(edge.from),
+        to: normalizeText(edge.to),
+        fromPackKey: normalizeKey(edge.fromPackKey),
+        toPackKey: normalizeKey(edge.toPackKey),
+      })).filter((edge) => edge.from || edge.to || edge.fromPackKey || edge.toPackKey)
+    : [],
+})
+
+const sanitizeKnowledgeResolution = (resolution = {}) => ({
+  status: normalizeToken(resolution.status || 'PROJECTED') || 'PROJECTED',
+  activeCount: Number.isFinite(Number(resolution.activeCount)) ? Number(resolution.activeCount) : 0,
+  requiredCount: Number.isFinite(Number(resolution.requiredCount)) ? Number(resolution.requiredCount) : 0,
+  optionalCount: Number.isFinite(Number(resolution.optionalCount)) ? Number(resolution.optionalCount) : 0,
+  validationCount: Number.isFinite(Number(resolution.validationCount)) ? Number(resolution.validationCount) : 0,
+  blockedCount: Number.isFinite(Number(resolution.blockedCount)) ? Number(resolution.blockedCount) : 0,
+  requestedContextCategories: Array.isArray(resolution.requestedContextCategories)
+    ? resolution.requestedContextCategories.map(normalizeToken).filter(Boolean)
+    : [],
 })
 
 const buildKnowledgeContext = ({ manifest, binding, payload }) => ({
@@ -445,8 +473,8 @@ const buildKnowledgeContext = ({ manifest, binding, payload }) => ({
     requiredPacks: Array.isArray(binding?.requiredPacks) ? binding.requiredPacks.map(sanitizePack) : [],
     optionalPacks: Array.isArray(binding?.optionalPacks) ? binding.optionalPacks.map(sanitizePack) : [],
     validationPacks: Array.isArray(binding?.validationPacks) ? binding.validationPacks.map(sanitizePack) : [],
-    dependencyGraph: binding?.dependencyGraph || { status: 'NOT_AVAILABLE', edges: [], edgeCount: 0 },
-    resolution: binding?.resolution || {},
+    dependencyGraph: sanitizeDependencyGraph(binding?.dependencyGraph || {}),
+    resolution: sanitizeKnowledgeResolution(binding?.resolution || {}),
   },
   request: {
     outputTypeKey: normalizeToken(payload?.outputTypeKey),
@@ -480,6 +508,115 @@ const resolveProviderPosture = () => {
       deterministicProviderAllowed: process.env.NODE_ENV !== 'production',
     },
   })
+}
+
+const buildProviderRequestProjection = (payload = {}) => ({
+  outputTypeKey: normalizeToken(payload.outputTypeKey),
+  workspaceType: normalizeToken(payload.workspaceType || 'PLATFORM'),
+  environmentKey: normalizeToken(payload.environmentKey || 'PRODUCTION'),
+  manifestId: normalizeText(payload.manifestId),
+  contextCategories: Array.isArray(payload.contextCategories)
+    ? payload.contextCategories.map(normalizeToken).filter(Boolean)
+    : [],
+  executionIntent: clampText(payload.executionIntent, 2000),
+})
+
+const buildProviderTruthContext = ({ payload = {}, truthContext = {} } = {}) => {
+  const sourceTruthSummary = Array.isArray(truthContext.summary?.sourceTruthSummary)
+    ? truthContext.summary.sourceTruthSummary.map((record, index) => ({
+        order: index + 1,
+        sectionKey: normalizeKey(record.sectionKey),
+        label: normalizeText(record.label),
+        summary: clampText(record.summary, 900),
+        acceptedAt: record.acceptedAt || null,
+        truthHash: normalizeText(record.truthHash),
+      }))
+    : []
+  const outputEligibility = truthContext.summary?.outputEligibility || {}
+  const graph = truthContext.summary?.graph || {}
+
+  return {
+    canExecute: truthContext.canExecute === true,
+    // Provider execution is reached only after readiness has rejected blockers;
+    // do not project internal blocker detail into the provider-facing envelope.
+    blockers: [],
+    summary: {
+      acceptedTruthCount: Number.isFinite(Number(truthContext.summary?.acceptedTruthCount))
+        ? Number(truthContext.summary.acceptedTruthCount)
+        : sourceTruthSummary.length,
+      requiredTruthCount: Number.isFinite(Number(truthContext.summary?.requiredTruthCount))
+        ? Number(truthContext.summary.requiredTruthCount)
+        : 0,
+      missingRequiredTruthCount: Number.isFinite(Number(truthContext.summary?.missingRequiredTruthCount))
+        ? Number(truthContext.summary.missingRequiredTruthCount)
+        : 0,
+      outputEligibility: {
+        locked: outputEligibility.locked === true,
+        published: outputEligibility.published === true,
+        outputEligible: outputEligibility.outputEligible === true,
+        canonicalOutputEligible: outputEligibility.canonicalOutputEligible === true,
+        anchorEligible: outputEligibility.anchorEligible === true,
+        intelligenceEligible: outputEligibility.intelligenceEligible === true,
+        lockSnapshotHash: normalizeText(outputEligibility.lockSnapshotHash),
+        replayAnchorHash: normalizeText(outputEligibility.replayAnchorHash),
+      },
+      graph: {
+        available: graph.available === true,
+        graphVersion: normalizeText(graph.graphVersion),
+        graphHash: normalizeText(graph.graphHash),
+        state: normalizeText(graph.state),
+      },
+      sourceTruthSummary,
+    },
+    projection: {
+      status: 'PROJECTED',
+      source: 'CERTIFIED_RUNTIME_TRUTH',
+      projectionMode: 'CERTIFIED_TRUTH_SUMMARY',
+      outputTypeKey: normalizeToken(payload.outputTypeKey),
+      relevanceBasis: {
+        outputTypeKey: normalizeToken(payload.outputTypeKey),
+        selection: 'CERTIFIED_RUNTIME_TRUTH_SUMMARY',
+        structuredRuntimeSectionMapApplied: false,
+      },
+      sectionCount: sourceTruthSummary.length,
+      sections: sourceTruthSummary,
+      safeguards: [
+        'NO_RAW_RUNTIME_OBJECTS',
+        'NO_RUNTIME_GRAPH_INTERNALS',
+        'NO_DATABASE_IDS',
+        'NO_RAW_SOURCE',
+      ],
+    },
+  }
+}
+
+const buildProviderContext = ({
+  knowledgeContext,
+  payload,
+  truthContext,
+} = {}) => {
+  const request = buildProviderRequestProjection(payload)
+  const projectedTruthContext = buildProviderTruthContext({ payload: request, truthContext })
+
+  return {
+    assemblyMode: 'CERTIFIED_TRUTH_WITH_KNOWLEDGE_BINDING_METADATA',
+    request,
+    knowledgeContext: {
+      ...knowledgeContext,
+      request,
+    },
+    truthContext: projectedTruthContext,
+    certifiedTruthProjection: projectedTruthContext.projection,
+    contentVisible: false,
+    packContentLoaded: false,
+    safeguards: [
+      'KNOWLEDGE_PACK_CONTENT_NOT_EXPOSED',
+      'RAW_PROVIDER_PROMPT_NOT_EXPOSED',
+      'RAW_SOURCE_NOT_EXPOSED',
+      'DATABASE_IDS_NOT_EXPOSED',
+      'RUNTIME_GRAPH_INTERNALS_NOT_EXPOSED',
+    ],
+  }
 }
 
 const executeDeterministicProvider = ({
@@ -537,12 +674,19 @@ const executeDeterministicProvider = ({
 
 const executeProvider = async ({
   deps = {},
-  knowledgeContext,
-  payload,
-  truthContext,
+  providerContext,
 } = {}) => {
+  const knowledgeContext = providerContext?.knowledgeContext || {}
+  const payload = providerContext?.request || {}
+  const truthContext = providerContext?.truthContext || {}
+
   if (typeof deps.providerAdapter === 'function') {
-    return deps.providerAdapter({ knowledgeContext, payload, truthContext })
+    return deps.providerAdapter({
+      knowledgeContext,
+      payload,
+      truthContext,
+      providerContext,
+    })
   }
 
   const posture = resolveProviderPosture()
@@ -574,25 +718,42 @@ const serializeDocument = (document) => {
 const UNSAFE_METADATA_KEYS = new Set([
   'content',
   'contentBase64',
+  'customerId',
+  'edgeId',
+  'evidenceId',
+  'frameworkPackageId',
   'hiddenPromptAssembly',
+  'id',
+  'nodeId',
   'packContent',
+  'packId',
+  'packageId',
   'prompt',
   'promptAssembly',
   'rawContent',
   'rawPackContent',
   'rawPrompt',
+  'runtimeInstanceId',
   'sourceBundle',
+  'sourceBundleId',
+  'sourceId',
   'sourceText',
+  'tenantId',
   'textContent',
+  '_id',
+  'acceptedBy',
+  'activationId',
 ])
 
-const scrubUnsafeMetadata = (value) => {
-  if (Array.isArray(value)) return value.map(scrubUnsafeMetadata)
+const scrubUnsafeMetadata = (value, seen = new WeakSet()) => {
+  if (Array.isArray(value)) return value.map((entry) => scrubUnsafeMetadata(entry, seen))
   if (!value || typeof value !== 'object') return value
+  if (seen.has(value)) return {}
+  seen.add(value)
 
   return Object.entries(value).reduce((acc, [key, entry]) => {
-    if (UNSAFE_METADATA_KEYS.has(key)) return acc
-    acc[key] = scrubUnsafeMetadata(entry)
+    if (UNSAFE_METADATA_KEYS.has(key) || UNSAFE_METADATA_KEYS.has(String(key).toLowerCase())) return acc
+    acc[key] = scrubUnsafeMetadata(entry, seen)
     return acc
   }, {})
 }
@@ -639,7 +800,7 @@ const logGrrExecutionAudit = async ({
       actorUserId: execution.requestedBy,
       action: auditService.AUDIT_ACTIONS.GOVERNED_REASONING_EXECUTED,
       resourceType: auditService.RESOURCE_TYPES.GovernedReasoningExecution,
-      resourceId: execution.executionId,
+      resourceId: execution._id || execution.id,
       scope: {
         customerId: toIdString(runtimeInstance.customerId),
         tenantId: toIdString(runtimeInstance.tenantId),
@@ -818,11 +979,10 @@ export const createGovernedReasoningExecution = async ({
   assertKnowledgeBindingReady({ manifest, binding })
 
   const knowledgeContext = buildKnowledgeContext({ manifest, binding, payload })
+  const providerContext = buildProviderContext({ knowledgeContext, payload, truthContext })
   const providerResult = await executeProvider({
     deps,
-    knowledgeContext,
-    payload,
-    truthContext,
+    providerContext,
   })
   const runtimeStateWrites = buildRuntimeStateWrites()
   const executionId = buildGrrId('grr_exec')
@@ -851,12 +1011,14 @@ export const createGovernedReasoningExecution = async ({
     knowledgeManifest: knowledgeContext.manifest,
     knowledgeBinding: knowledgeContext.binding,
     reasoningContext: {
-      assemblyMode: 'CERTIFIED_TRUTH_WITH_KNOWLEDGE_BINDING_METADATA',
-      request: knowledgeContext.request,
+      assemblyMode: providerContext.assemblyMode,
+      request: providerContext.request,
+      certifiedTruthProjection: providerContext.certifiedTruthProjection,
+      safeguards: providerContext.safeguards,
       contentVisible: false,
       packContentLoaded: false,
     },
-    certifiedTruth: truthContext.summary,
+    certifiedTruth: providerContext.truthContext.summary,
     runtimeStateWrites,
     artifactIds: [runtimeArtifactId],
     warnings,
@@ -890,10 +1052,10 @@ export const createGovernedReasoningExecution = async ({
         validationPackCount: knowledgeContext.binding.validationPacks.length,
       },
       certifiedTruth: {
-        acceptedTruthCount: truthContext.summary.acceptedTruthCount,
-        requiredTruthCount: truthContext.summary.requiredTruthCount,
-        graphHash: truthContext.summary.graph.graphHash,
-        lockSnapshotHash: truthContext.summary.outputEligibility.lockSnapshotHash,
+        acceptedTruthCount: providerContext.truthContext.summary.acceptedTruthCount,
+        requiredTruthCount: providerContext.truthContext.summary.requiredTruthCount,
+        graphHash: providerContext.truthContext.summary.graph.graphHash,
+        lockSnapshotHash: providerContext.truthContext.summary.outputEligibility.lockSnapshotHash,
       },
     },
     certification: {

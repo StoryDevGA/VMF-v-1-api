@@ -306,6 +306,10 @@ describe('Governed Reasoning Runtime models and service', () => {
       }),
       { throwOnError: true },
     )
+    const auditPayload = deps.logAudit.mock.calls[0][1]
+    expect(mongoose.Types.ObjectId.isValid(auditPayload.resourceId)).toBe(true)
+    expect(auditPayload.resourceId).not.toBe(auditPayload.diff.executionId)
+    expect(auditPayload.diff.executionId).toMatch(/^grr_exec_/)
     expect(result.status).toBe('COMPLETED')
     expect(result.idempotencyKey).toBe('')
     expect(result.runtimeStateWrites).toEqual(expect.objectContaining({
@@ -318,6 +322,155 @@ describe('Governed Reasoning Runtime models and service', () => {
       certifiedTruthOnly: true,
       runtimeArtifactIsCertifiedTruth: false,
     }))
+  })
+
+  test('passes only projected Knowledge Pack metadata and Certified Truth summaries to providers', async () => {
+    const runtimeInstance = makeRuntimeInstance()
+    runtimeInstance.framework_state.rawSourceText = 'RAW_RUNTIME_SOURCE_SHOULD_NOT_LEAK'
+    runtimeInstance.framework_state.sections.situation.accepted.rawSourceText = 'RAW_ACCEPTED_SOURCE_SHOULD_NOT_LEAK'
+    runtimeInstance.framework_state.sections.situation.accepted.sourceBundle = {
+      content: 'RAW_SOURCE_BUNDLE_SHOULD_NOT_LEAK',
+    }
+    runtimeInstance.framework_state.intelligence_graph = {
+      ...makeReadyGraph(),
+      nodes: [
+        {
+          nodeId: 'graph-node-db-id-should-not-leak',
+          rawContent: 'RAW_GRAPH_CONTENT_SHOULD_NOT_LEAK',
+        },
+      ],
+      edges: [
+        {
+          edgeId: 'graph-edge-db-id-should-not-leak',
+          sourceText: 'RAW_GRAPH_EDGE_SOURCE_SHOULD_NOT_LEAK',
+        },
+      ],
+    }
+    const knowledgeBinding = makeKnowledgeBinding()
+    knowledgeBinding.binding.requiredPacks = [
+      {
+        ...knowledgeBinding.binding.requiredPacks[0],
+        _id: 'knowledge-pack-db-id-should-not-leak',
+        id: 'knowledge-pack-id-should-not-leak',
+        activationId: 'knowledge-pack-activation-id-should-not-leak',
+        packId: 'knowledge-pack-pack-id-should-not-leak',
+        customerId: CUSTOMER_ID,
+        rawPackContent: 'RAW_PACK_CONTENT_SHOULD_NOT_LEAK',
+        sourceBundle: {
+          sourceText: 'RAW_PACK_SOURCE_SHOULD_NOT_LEAK',
+        },
+        promptAssembly: 'RAW_PROVIDER_PROMPT_SHOULD_NOT_LEAK',
+      },
+    ]
+    knowledgeBinding.binding.dependencyGraph = {
+      status: 'RESOLVED',
+      edgeCount: 1,
+      edges: [
+        {
+          from: 'ARL:adaptive-reasoning-layer',
+          to: 'RL:reasoning-layer',
+          fromPackKey: 'adaptive-reasoning-layer',
+          toPackKey: 'reasoning-layer',
+          nodeId: 'dependency-node-id-should-not-leak',
+          rawContent: 'RAW_DEPENDENCY_CONTENT_SHOULD_NOT_LEAK',
+        },
+      ],
+    }
+    knowledgeBinding.binding.resolution = {
+      status: 'PROJECTED',
+      activeCount: 1,
+      requiredCount: 1,
+      activationIds: ['knowledge-pack-activation-id-should-not-leak'],
+      scopeCandidates: [
+        {
+          customerId: CUSTOMER_ID,
+          tenantId: TENANT_ID,
+        },
+      ],
+    }
+    const deps = makeDeps({
+      resolveRuntimeInstance: jest.fn().mockResolvedValue(runtimeInstance),
+      resolveKnowledgeBinding: jest.fn().mockResolvedValue(knowledgeBinding),
+    })
+
+    const result = await createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      auditRequest: { requestId: 'req-provider-projection' },
+      deps,
+      payload: {
+        outputTypeKey: 'BOARD_SUMMARY',
+        executionIntent: 'Create a board summary from certified runtime truth.',
+        contextCategories: ['style', 'audience'],
+      },
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })
+
+    const providerCall = deps.providerAdapter.mock.calls[0][0]
+    expect(providerCall.providerContext).toEqual(expect.objectContaining({
+      assemblyMode: 'CERTIFIED_TRUTH_WITH_KNOWLEDGE_BINDING_METADATA',
+      contentVisible: false,
+      packContentLoaded: false,
+    }))
+    expect(providerCall.payload).toEqual(expect.objectContaining({
+      outputTypeKey: 'BOARD_SUMMARY',
+      contextCategories: ['STYLE', 'AUDIENCE'],
+      executionIntent: 'Create a board summary from certified runtime truth.',
+    }))
+    expect(providerCall.truthContext.acceptedTruth).toBeUndefined()
+    expect(providerCall.truthContext.summary.sourceTruthSummary).toEqual([
+      expect.objectContaining({
+        sectionKey: 'situation',
+        summary: 'The customer needs a governed value narrative.',
+        truthHash: 'sha256:situation-truth',
+      }),
+      expect.objectContaining({
+        sectionKey: 'commercial_problem',
+        summary: 'The commercial problem is fragmented proof and unclear value.',
+        truthHash: 'sha256:commercial-problem-truth',
+      }),
+    ])
+    expect(providerCall.truthContext.summary.sourceTruthSummary[0]).not.toHaveProperty('runtimePath')
+    expect(providerCall.truthContext.summary.sourceTruthSummary[0]).not.toHaveProperty('acceptedBy')
+    expect(providerCall.knowledgeContext.binding.requiredPacks[0]).toEqual(expect.objectContaining({
+      packType: 'ARL',
+      packKey: 'adaptive-reasoning-layer',
+      versionId: 'kpv-arl',
+      contentHash: '',
+    }))
+    expect(providerCall.knowledgeContext.binding.requiredPacks[0]).not.toHaveProperty('activationId')
+    expect(providerCall.knowledgeContext.binding.requiredPacks[0]).not.toHaveProperty('packId')
+    expect(result.reasoningContext.certifiedTruthProjection).toEqual(expect.objectContaining({
+      status: 'PROJECTED',
+      source: 'CERTIFIED_RUNTIME_TRUTH',
+      outputTypeKey: 'BOARD_SUMMARY',
+      relevanceBasis: expect.objectContaining({
+        outputTypeKey: 'BOARD_SUMMARY',
+        selection: 'CERTIFIED_RUNTIME_TRUTH_SUMMARY',
+        structuredRuntimeSectionMapApplied: false,
+      }),
+      sectionCount: 2,
+    }))
+
+    const projectedJson = JSON.stringify({
+      providerCall,
+      reasoningContext: result.reasoningContext,
+      knowledgeBinding: result.knowledgeBinding,
+    })
+    expect(projectedJson).not.toContain('RAW_RUNTIME_SOURCE_SHOULD_NOT_LEAK')
+    expect(projectedJson).not.toContain('RAW_ACCEPTED_SOURCE_SHOULD_NOT_LEAK')
+    expect(projectedJson).not.toContain('RAW_SOURCE_BUNDLE_SHOULD_NOT_LEAK')
+    expect(projectedJson).not.toContain('RAW_GRAPH_CONTENT_SHOULD_NOT_LEAK')
+    expect(projectedJson).not.toContain('RAW_GRAPH_EDGE_SOURCE_SHOULD_NOT_LEAK')
+    expect(projectedJson).not.toContain('RAW_PACK_CONTENT_SHOULD_NOT_LEAK')
+    expect(projectedJson).not.toContain('RAW_PACK_SOURCE_SHOULD_NOT_LEAK')
+    expect(projectedJson).not.toContain('RAW_PROVIDER_PROMPT_SHOULD_NOT_LEAK')
+    expect(projectedJson).not.toContain('RAW_DEPENDENCY_CONTENT_SHOULD_NOT_LEAK')
+    expect(projectedJson).not.toContain('knowledge-pack-db-id-should-not-leak')
+    expect(projectedJson).not.toContain('knowledge-pack-activation-id-should-not-leak')
+    expect(projectedJson).not.toContain('dependency-node-id-should-not-leak')
+    expect(projectedJson).not.toContain(CUSTOMER_ID)
+    expect(projectedJson).not.toContain(TENANT_ID)
   })
 
   test('blocks before manifest resolution when Certified Truth is missing', async () => {

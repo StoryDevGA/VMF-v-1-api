@@ -4,6 +4,7 @@ import loadScopes from '../middleware/loadScopes.js'
 import {
   acceptRuntimeDiscovery,
   acceptRuntimeSection,
+  approveRuntimeOutcomeDraft,
   clearRuntimeSectionEvidence,
   createGovernedReasoningExecution,
   createRuntimeInstance,
@@ -66,6 +67,7 @@ import {
   validateExecuteRuntimeAction,
   validateGenerateRuntimeOutcomeResponse,
   validateGenerateRuntimeOutputRequest,
+  validateApproveRuntimeOutcomeDraft,
   validateGovernedReasoningExecutionParams,
   validateListRuntimeInstances,
   validateMutateRuntimeState,
@@ -85,6 +87,7 @@ import {
   validateRuntimeOutcomeAssetExportParams,
   validateRuntimeOutcomeAssetParams,
   validateRuntimeOutcomeAssetVersionParams,
+  validateRuntimeOutcomeDraftParams,
   validateRuntimeOutcomeMessageParams,
   validateRuntimeOutputRequestParams,
   validateRuntimeOutcomeSessionParams,
@@ -237,6 +240,12 @@ router.get(
   '/:runtimeInstanceId/outcome-studio/assets/:outcomeAssetId/export/:format',
   validateRuntimeOutcomeAssetExportParams,
   exportRuntimeOutcomeAsset,
+)
+router.post(
+  '/:runtimeInstanceId/outcome-studio/sessions/:sessionId/drafts/:draftId/approve',
+  validateRuntimeOutcomeDraftParams,
+  validateApproveRuntimeOutcomeDraft,
+  approveRuntimeOutcomeDraft,
 )
 router.post(
   '/:runtimeInstanceId/outcome-studio/sessions/:sessionId/update-from-latest-truth',

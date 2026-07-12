@@ -895,6 +895,14 @@ const runtimeOutcomeMessageParamsSchema = runtimeOutcomeSessionParamsSchema.exte
     .max(180, 'messageId must be 180 characters or fewer'),
 })
 
+const runtimeOutcomeDraftParamsSchema = runtimeOutcomeSessionParamsSchema.extend({
+  draftId: z
+    .string({ required_error: 'draftId is required' })
+    .trim()
+    .min(1, 'draftId is required')
+    .max(180, 'draftId must be 180 characters or fewer'),
+})
+
 const runtimeOutcomeAssetParamsSchema = runtimeInstanceIdSchema.extend({
   outcomeAssetId: z
     .string({ required_error: 'outcomeAssetId is required' })
@@ -1126,6 +1134,11 @@ export const validateRuntimeOutcomeMessageParams = createParamsValidator(runtime
   rootIssueKey: '_root',
 })
 
+export const validateRuntimeOutcomeDraftParams = createParamsValidator(runtimeOutcomeDraftParamsSchema, {
+  message: 'Invalid request parameters.',
+  rootIssueKey: '_root',
+})
+
 export const validateRuntimeOutcomeAssetParams = createParamsValidator(runtimeOutcomeAssetParamsSchema, {
   message: 'Invalid request parameters.',
   rootIssueKey: '_root',
@@ -1147,6 +1160,11 @@ export const validateGenerateRuntimeOutcomeResponse = createBodyValidator(emptyR
 })
 
 export const validateUpdateRuntimeOutcomeSessionFromLatestTruth = createBodyValidator(emptyRuntimeOutputMutationSchema, {
+  message: 'Request validation failed.',
+  rootIssueKey: '_root',
+})
+
+export const validateApproveRuntimeOutcomeDraft = createBodyValidator(emptyRuntimeOutputMutationSchema, {
   message: 'Request validation failed.',
   rootIssueKey: '_root',
 })

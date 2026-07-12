@@ -29,6 +29,8 @@ import RuntimeGraphRelationship from './RuntimeGraphRelationship.js'
 import TruthSignature from './TruthSignature.js'
 import OutcomeAsset from './OutcomeAsset.js'
 import OutcomeAssetVersion from './OutcomeAssetVersion.js'
+import OutcomeDraft from './OutcomeDraft.js'
+import OutcomeDraftIteration from './OutcomeDraftIteration.js'
 import OutcomeSession from './OutcomeSession.js'
 import OutcomeMessage from './OutcomeMessage.js'
 import KnowledgePack from './KnowledgePack.js'
@@ -70,6 +72,8 @@ export {
   TruthSignature,
   OutcomeAsset,
   OutcomeAssetVersion,
+  OutcomeDraft,
+  OutcomeDraftIteration,
   OutcomeSession,
   OutcomeMessage,
   KnowledgePack,
@@ -112,6 +116,8 @@ export default {
   TruthSignature,
   OutcomeAsset,
   OutcomeAssetVersion,
+  OutcomeDraft,
+  OutcomeDraftIteration,
   OutcomeSession,
   OutcomeMessage,
   KnowledgePack,
