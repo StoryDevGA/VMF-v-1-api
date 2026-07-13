@@ -24,8 +24,8 @@ import {
 } from './runtimeInstanceService.js'
 import {
   previewKnowledgePackManifestResolution,
-  resolveDefaultOutcomeStudioKnowledgePackBinding,
 } from './knowledgePackManifestService.js'
+import { resolveOutcomeStudioKnowledgePackBinding } from './outcomeKnowledgePackRegistryService.js'
 import {
   buildRuntimeIntelligenceGraphProjection,
   buildRuntimeIntelligenceGraphQueryProjection,
@@ -398,7 +398,7 @@ const resolveKnowledgeBinding = async ({
 
   return manifestId
     ? previewKnowledgePackManifestResolution({ manifestId, query })
-    : resolveDefaultOutcomeStudioKnowledgePackBinding({ query })
+    : resolveOutcomeStudioKnowledgePackBinding({ query })
 }
 
 const assertKnowledgeBindingReady = ({ manifest, binding }) => {
@@ -406,7 +406,7 @@ const assertKnowledgeBindingReady = ({ manifest, binding }) => {
     throw createGrrError({
       status: 409,
       code: 'GRR_KNOWLEDGE_BINDING_BLOCKED',
-      message: 'Knowledge Manifest resolution is blocked.',
+      message: 'Knowledge Pack Registry resolution is blocked.',
       reason: GRR_ERROR_REASONS.KNOWLEDGE_BINDING_BLOCKED,
       details: {
         manifestId: manifest?.manifestId || null,
@@ -448,6 +448,7 @@ const sanitizeDependencyGraph = (dependencyGraph = {}) => ({
 const sanitizeKnowledgeResolution = (resolution = {}) => ({
   status: normalizeToken(resolution.status || 'PROJECTED') || 'PROJECTED',
   activeCount: Number.isFinite(Number(resolution.activeCount)) ? Number(resolution.activeCount) : 0,
+  resolvedCount: Number.isFinite(Number(resolution.resolvedCount)) ? Number(resolution.resolvedCount) : 0,
   requiredCount: Number.isFinite(Number(resolution.requiredCount)) ? Number(resolution.requiredCount) : 0,
   optionalCount: Number.isFinite(Number(resolution.optionalCount)) ? Number(resolution.optionalCount) : 0,
   validationCount: Number.isFinite(Number(resolution.validationCount)) ? Number(resolution.validationCount) : 0,
@@ -459,6 +460,9 @@ const sanitizeKnowledgeResolution = (resolution = {}) => ({
 
 const buildKnowledgeContext = ({ manifest, binding, payload }) => ({
   manifest: {
+    sourceType: manifest?.sourceType || binding?.resolutionSource || null,
+    policyKey: manifest?.policyKey || binding?.policyKey || null,
+    policyVersion: manifest?.policyVersion || binding?.policyVersion || null,
     manifestId: manifest?.manifestId || binding?.manifestId || null,
     manifestKey: manifest?.manifestKey || binding?.manifestKey || null,
     manifestName: manifest?.manifestName || null,

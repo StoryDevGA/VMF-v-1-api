@@ -31,7 +31,10 @@ import {
   KNOWLEDGE_PACK_REVIEW_STATUSES,
   KNOWLEDGE_PACK_VISIBILITY_SCOPES,
 } from '../constants/knowledgeRuntime.js'
-import { resolveKnowledgePackCategory } from '../constants/workspaceGovernance.js'
+import {
+  KNOWLEDGE_PACK_CATEGORIES,
+  resolveKnowledgePackCategory,
+} from '../constants/workspaceGovernance.js'
 import { escapeRegex } from '../utils/controllerUtils.js'
 import auditService from './auditService.js'
 import {
@@ -80,6 +83,16 @@ const ROLLBACK_ELIGIBLE_VERSION_STATUSES = new Set([
   OUTCOME_KNOWLEDGE_PACK_STATUSES.VALIDATED,
   OUTCOME_KNOWLEDGE_PACK_STATUSES.ACTIVE,
 ])
+const OUTCOME_STUDIO_RESOLUTION_PACK_CATEGORIES = new Set([
+  KNOWLEDGE_PACK_CATEGORIES.OUTCOME,
+  KNOWLEDGE_PACK_CATEGORIES.FRAMEWORK,
+  KNOWLEDGE_PACK_CATEGORIES.PLATFORM,
+])
+const OUTCOME_STUDIO_REGISTRY_POLICY = Object.freeze({
+  sourceType: 'KNOWLEDGE_PACK_REGISTRY',
+  policyKey: 'outcome-studio-v1-required-packs',
+  policyVersion: '1.0.0',
+})
 
 const createKnowledgePackError = ({
   status,
@@ -678,6 +691,7 @@ const serializeKnowledgePack = (pack) => {
     purposeCategory: normalizeToken(plain.purposeCategory || KNOWLEDGE_PACK_PURPOSE_CATEGORIES.SYSTEM),
     packType: normalizeToken(plain.packType),
     packKey: normalizeLowerKey(plain.packKey),
+    label: normalizeText(plain.label || plain.packKey),
     status: normalizeToken(plain.status || OUTCOME_KNOWLEDGE_PACK_STATUSES.DRAFT),
     sourceAuthority: normalizeText(plain.sourceAuthority),
     executionMode: normalizeToken(plain.executionMode || KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT),
@@ -769,6 +783,7 @@ const serializeKnowledgePackActivation = (activation) => {
     purposeCategory: normalizeToken(plain.purposeCategory || KNOWLEDGE_PACK_PURPOSE_CATEGORIES.SYSTEM),
     packType: normalizeToken(plain.packType),
     packKey: normalizeLowerKey(plain.packKey),
+    label: normalizeText(plain.label || plain.packKey),
     semanticVersion: normalizeText(plain.semanticVersion),
     schemaVersion: normalizeText(plain.schemaVersion),
     status: normalizeToken(plain.status || OUTCOME_KNOWLEDGE_PACK_ACTIVATION_STATUSES.ACTIVE),
@@ -805,12 +820,18 @@ export const buildOutcomeKnowledgePackScopeCandidates = ({
   packageKey,
   packageVersion,
   environmentKey,
+  customerId,
+  tenantId,
+  runtimeInstanceId,
 } = {}) => {
   const normalizedFrameworkKey = normalizeToken(frameworkKey)
   const normalizedRuntimeType = normalizeToken(runtimeType)
   const normalizedPackageKey = normalizeLowerKey(packageKey)
   const normalizedPackageVersion = normalizeText(packageVersion)
   const normalizedEnvironmentKey = normalizeToken(environmentKey)
+  const normalizedCustomerId = normalizeText(customerId)
+  const normalizedTenantId = normalizeText(tenantId)
+  const normalizedRuntimeInstanceId = normalizeText(runtimeInstanceId)
   const candidates = [
     buildScopeCandidate({
       scopeType: OUTCOME_KNOWLEDGE_PACK_SCOPE_TYPES.GLOBAL,
@@ -851,6 +872,30 @@ export const buildOutcomeKnowledgePackScopeCandidates = ({
     }))
   }
 
+  if (normalizedCustomerId) {
+    candidates.push(buildScopeCandidate({
+      scopeType: OUTCOME_KNOWLEDGE_PACK_SCOPE_TYPES.CUSTOMER,
+      scopeKey: normalizeToken(`CUSTOMER:${normalizedCustomerId}`),
+      precedence: 5,
+    }))
+  }
+
+  if (normalizedTenantId) {
+    candidates.push(buildScopeCandidate({
+      scopeType: OUTCOME_KNOWLEDGE_PACK_SCOPE_TYPES.TENANT,
+      scopeKey: normalizeToken(`TENANT:${normalizedTenantId}`),
+      precedence: 6,
+    }))
+  }
+
+  if (normalizedRuntimeInstanceId) {
+    candidates.push(buildScopeCandidate({
+      scopeType: OUTCOME_KNOWLEDGE_PACK_SCOPE_TYPES.RUNTIME_INSTANCE,
+      scopeKey: normalizeToken(`RUNTIME_INSTANCE:${normalizedRuntimeInstanceId}`),
+      precedence: 7,
+    }))
+  }
+
   return candidates
 }
 
@@ -888,9 +933,10 @@ const selectActiveActivations = ({ activations = [], scopeCandidates = [] }) => 
 
 const buildActivePackProjection = (pack, activation) => ({
   packCategory: normalizePackCategory(pack.packCategory || activation.packCategory, pack.packType),
-  packType: pack.packType,
-  packKey: pack.packKey,
-  label: pack.label,
+  purposeCategory: normalizeToken(activation.purposeCategory || pack.purposeCategory),
+  packType: normalizeToken(pack.packType || activation.packType),
+  packKey: normalizeLowerKey(pack.packKey || activation.packKey),
+  label: normalizeText(pack.label || activation.label || activation.packKey),
   status: OUTCOME_KNOWLEDGE_PACK_ACTIVATION_STATUSES.ACTIVE,
   runtimeBindable: true,
   activationId: activation.activationId,
@@ -899,6 +945,10 @@ const buildActivePackProjection = (pack, activation) => ({
   schemaVersion: activation.schemaVersion,
   scopeType: activation.scopeType,
   scopeKey: activation.scopeKey,
+  executionMode: activation.executionMode,
+  visibility: activation.visibility,
+  customerId: activation.customerId,
+  tenantId: activation.tenantId,
   contentHash: activation.contentHash,
   activatedAt: activation.activatedAt,
 })
@@ -917,12 +967,92 @@ const buildRequiredPackProjection = ({ activeActivationByPackKey }) =>
     }
   })
 
+const isActivationVisibleToRuntime = ({ activation, customerId, tenantId }) => {
+  const visibility = normalizeToken(activation?.visibility)
+  if (visibility === KNOWLEDGE_PACK_VISIBILITY_SCOPES.PLATFORM) return true
+
+  if (visibility === KNOWLEDGE_PACK_VISIBILITY_SCOPES.CUSTOMER) {
+    const scopedCustomerId = normalizeText(activation?.customerId)
+    return Boolean(scopedCustomerId && scopedCustomerId === normalizeText(customerId))
+  }
+
+  if (visibility === KNOWLEDGE_PACK_VISIBILITY_SCOPES.TENANT) {
+    const scopedTenantId = normalizeText(activation?.tenantId)
+    return Boolean(scopedTenantId && scopedTenantId === normalizeText(tenantId))
+  }
+
+  return false
+}
+
+const isOutcomeStudioActivation = (activation) =>
+  OUTCOME_STUDIO_RESOLUTION_PACK_CATEGORIES.has(
+    normalizePackCategory(activation?.packCategory, activation?.packType),
+  )
+
+const classifyAdditionalActivePacks = ({ activations = [], contextCategories = [] }) => {
+  const requiredPackKeys = new Set(OUTCOME_STUDIO_REQUIRED_PACKS.map(buildRequiredPackKey))
+  const requestedCategories = new Set(
+    contextCategories.map(normalizeToken).filter(Boolean),
+  )
+  const optionalPacks = []
+  const validationPacks = []
+  const blockedPacks = []
+
+  for (const activation of activations) {
+    if (requiredPackKeys.has(buildRequiredPackKey(activation))) continue
+
+    const projectedPack = buildActivePackProjection(activation, activation)
+    const purposeCategory = normalizeToken(projectedPack.purposeCategory)
+    const executionMode = normalizeToken(projectedPack.executionMode)
+
+    if (
+      executionMode === KNOWLEDGE_PACK_EXECUTION_MODES.SYSTEM_ONLY
+      || purposeCategory === KNOWLEDGE_PACK_PURPOSE_CATEGORIES.SYSTEM
+    ) {
+      blockedPacks.push({
+        ...projectedPack,
+        runtimeBindable: false,
+        blockedReason: 'SYSTEM_ONLY_PACK',
+      })
+      continue
+    }
+
+    // Validation packs apply independently of provider-context category selection.
+    if (
+      executionMode === KNOWLEDGE_PACK_EXECUTION_MODES.PRE_VALIDATION
+      || executionMode === KNOWLEDGE_PACK_EXECUTION_MODES.POST_VALIDATION
+      || purposeCategory === KNOWLEDGE_PACK_PURPOSE_CATEGORIES.VALIDATION
+    ) {
+      validationPacks.push(projectedPack)
+      continue
+    }
+
+    if (executionMode !== KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT) {
+      blockedPacks.push({
+        ...projectedPack,
+        runtimeBindable: false,
+        blockedReason: 'EXECUTION_MODE_NOT_RUNTIME_BINDABLE',
+      })
+      continue
+    }
+
+    if (requestedCategories.size > 0 && !requestedCategories.has(purposeCategory)) continue
+    optionalPacks.push(projectedPack)
+  }
+
+  return { optionalPacks, validationPacks, blockedPacks }
+}
+
 export const resolveOutcomeStudioKnowledgePacks = async ({
   frameworkKey,
   runtimeType,
   packageKey,
   packageVersion,
   environmentKey,
+  customerId,
+  tenantId,
+  runtimeInstanceId,
+  contextCategories = [],
 } = {}) => {
   const scopeCandidates = buildOutcomeKnowledgePackScopeCandidates({
     frameworkKey,
@@ -930,24 +1060,37 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
     packageKey,
     packageVersion,
     environmentKey,
+    customerId,
+    tenantId,
+    runtimeInstanceId,
   })
-  const requiredPackTypes = [...new Set(OUTCOME_STUDIO_REQUIRED_PACKS.map((pack) => pack.packType))]
-  const requiredPackKeys = OUTCOME_STUDIO_REQUIRED_PACKS.map((pack) => pack.packKey)
   const scopeKeys = scopeCandidates.map((candidate) => candidate.scopeKey)
   const activations = await KnowledgePackActivation.find({
     status: OUTCOME_KNOWLEDGE_PACK_ACTIVATION_STATUSES.ACTIVE,
-    packType: { $in: requiredPackTypes },
-    packKey: { $in: requiredPackKeys },
     scopeKey: { $in: scopeKeys },
   })
     .sort({ activatedAt: -1 })
     .lean()
+  const eligibleActivations = activations
+    .map(serializeKnowledgePackActivation)
+    .filter(Boolean)
+    .filter(isOutcomeStudioActivation)
+    .filter((activation) => isActivationVisibleToRuntime({ activation, customerId, tenantId }))
   const activeActivationByPackKey = selectActiveActivations({
-    activations,
+    activations: eligibleActivations,
     scopeCandidates,
   })
   const requiredPacks = buildRequiredPackProjection({ activeActivationByPackKey })
-  const activePacks = requiredPacks.filter((pack) => pack.runtimeBindable === true)
+  const additionalPacks = classifyAdditionalActivePacks({
+    activations: [...activeActivationByPackKey.values()],
+    contextCategories,
+  })
+  const activeRequiredPacks = requiredPacks.filter((pack) => pack.runtimeBindable === true)
+  const activePacks = [
+    ...activeRequiredPacks,
+    ...additionalPacks.optionalPacks,
+    ...additionalPacks.validationPacks,
+  ]
   const unboundRequiredPacks = requiredPacks.filter((pack) => pack.runtimeBindable !== true)
   const status = unboundRequiredPacks.length === 0
     ? OUTCOME_STUDIO_BINDING_STATUSES.PROJECTED
@@ -961,12 +1104,20 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
       : 'Knowledge Pack Registry activation is required before Outcome Studio sessions can start.',
     activePacks,
     requiredPacks,
+    optionalPacks: additionalPacks.optionalPacks,
+    validationPacks: additionalPacks.validationPacks,
+    blockedPacks: additionalPacks.blockedPacks,
     sourceBundle: buildOutcomeKnowledgePackSourceBundle(),
     resolution: {
       status,
       scopeCandidates,
-      activeCount: activePacks.length,
+      activeCount: activeRequiredPacks.length,
+      resolvedCount: activePacks.length,
       requiredCount: requiredPacks.length,
+      optionalCount: additionalPacks.optionalPacks.length,
+      validationCount: additionalPacks.validationPacks.length,
+      blockedCount: additionalPacks.blockedPacks.length,
+      requestedContextCategories: contextCategories.map(normalizeToken).filter(Boolean),
       unboundRequiredPacks: unboundRequiredPacks.map((pack) => ({
         packCategory: normalizePackCategory(pack.packCategory, pack.packType),
         packType: pack.packType,
@@ -974,6 +1125,25 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
         label: pack.label,
         status: pack.status,
       })),
+    },
+  }
+}
+
+export const resolveOutcomeStudioKnowledgePackBinding = async ({ query = {} } = {}) => {
+  const binding = await resolveOutcomeStudioKnowledgePacks(query)
+
+  return {
+    manifest: {
+      ...OUTCOME_STUDIO_REGISTRY_POLICY,
+      status: binding.status,
+    },
+    binding: {
+      ...binding,
+      resolutionSource: OUTCOME_STUDIO_REGISTRY_POLICY.sourceType,
+      policyKey: OUTCOME_STUDIO_REGISTRY_POLICY.policyKey,
+      policyVersion: OUTCOME_STUDIO_REGISTRY_POLICY.policyVersion,
+      previewOnly: false,
+      contentVisible: false,
     },
   }
 }
@@ -1900,6 +2070,11 @@ const applyKnowledgePackActivationMutation = async ({
     packId: version.packId,
     versionId: version.versionId,
     packCategory: normalizePackCategory(version.packCategory || packDefinition?.packCategory, version.packType),
+    purposeCategory: normalizeToken(
+      version.purposeCategory
+      || packRecord?.purposeCategory
+      || KNOWLEDGE_PACK_PURPOSE_CATEGORIES.SYSTEM,
+    ),
     packType: version.packType,
     packKey: version.packKey,
     label: packDefinition?.label || packRecord?.label || version.packKey,
@@ -1913,6 +2088,18 @@ const applyKnowledgePackActivationMutation = async ({
     packageKey: scope.packageKey,
     packageVersion: scope.packageVersion,
     environmentKey: scope.environmentKey,
+    executionMode: normalizeToken(
+      version.executionMode
+      || packRecord?.executionMode
+      || KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT,
+    ),
+    visibility: normalizeToken(
+      version.visibility
+      || packRecord?.visibility
+      || KNOWLEDGE_PACK_VISIBILITY_SCOPES.PLATFORM,
+    ),
+    customerId: version.customerId || packRecord?.customerId || null,
+    tenantId: version.tenantId || packRecord?.tenantId || null,
     contentHash: version.contentHash,
     activatedBy: actorUserId || null,
     activatedAt: activationTime,

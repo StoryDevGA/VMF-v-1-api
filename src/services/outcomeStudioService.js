@@ -38,7 +38,7 @@ import {
   OutcomeSession,
   TruthSignature,
 } from '../models/index.js'
-import { resolveDefaultOutcomeStudioKnowledgePackBinding } from './knowledgePackManifestService.js'
+import { resolveOutcomeStudioKnowledgePackBinding } from './outcomeKnowledgePackRegistryService.js'
 import { getRuntimeOutputLab } from './runtimeOutputLabService.js'
 import {
   assertRuntimePermission,
@@ -669,9 +669,12 @@ const resolveTruthSignatureCurrentness = ({
 
 const sanitizeKnowledgePackActivation = (pack = {}) => ({
   packCategory: normalizePackCategory(pack.packCategory, pack.packType),
+  purposeCategory: normalizeToken(pack.purposeCategory),
   packType: normalizeToken(pack.packType),
   packKey: normalizeText(pack.packKey),
   label: normalizeText(pack.label),
+  executionMode: normalizeToken(pack.executionMode),
+  visibility: normalizeToken(pack.visibility),
   status: normalizeToken(pack.status || 'ACTIVE'),
   activationId: normalizeText(pack.activationId),
   versionId: normalizeText(pack.versionId),
@@ -702,18 +705,26 @@ const buildSessionKnowledgePackBinding = (packBinding = {}, boundAt) => {
     status: normalizeToken(packBinding.status),
     mode: normalizeText(packBinding.mode),
     summary: normalizeText(packBinding.summary),
+    resolutionSource: normalizeToken(packBinding.resolutionSource),
+    policyKey: normalizeText(packBinding.policyKey),
+    policyVersion: normalizeText(packBinding.policyVersion),
     manifestId: normalizeText(packBinding.manifestId),
     manifestKey: normalizeText(packBinding.manifestKey),
     manifestVersion: normalizeText(packBinding.manifestVersion),
     boundAt,
-    activeCount: activePacks.length,
+    activeCount: Number(packBinding.resolution?.activeCount ?? activePacks.length),
+    resolvedCount: Number(packBinding.resolution?.resolvedCount ?? activePacks.length),
     requiredCount: requiredPacks.length,
     activePacks,
     requiredPacks,
     resolution: {
       status: normalizeToken(packBinding.resolution?.status || packBinding.status),
       activeCount: Number(packBinding.resolution?.activeCount ?? activePacks.length),
+      resolvedCount: Number(packBinding.resolution?.resolvedCount ?? activePacks.length),
       requiredCount: Number(packBinding.resolution?.requiredCount ?? requiredPacks.length),
+      optionalCount: Number(packBinding.resolution?.optionalCount ?? 0),
+      validationCount: Number(packBinding.resolution?.validationCount ?? 0),
+      blockedCount: Number(packBinding.resolution?.blockedCount ?? 0),
       scopeCandidates: Array.isArray(packBinding.resolution?.scopeCandidates)
         ? packBinding.resolution.scopeCandidates.map((candidate) => ({
             scopeType: normalizeToken(candidate.scopeType),
@@ -785,18 +796,26 @@ const sanitizePersistedKnowledgePackBinding = (binding = {}) => {
     status: normalizeToken(binding.status),
     mode: normalizeText(binding.mode),
     summary: normalizeText(binding.summary),
+    resolutionSource: normalizeToken(binding.resolutionSource),
+    policyKey: normalizeText(binding.policyKey),
+    policyVersion: normalizeText(binding.policyVersion),
     manifestId: normalizeText(binding.manifestId),
     manifestKey: normalizeText(binding.manifestKey),
     manifestVersion: normalizeText(binding.manifestVersion),
     boundAt: normalizeText(binding.boundAt),
     activeCount: Number(binding.activeCount ?? activePacks.length),
+    resolvedCount: Number(binding.resolvedCount ?? activePacks.length),
     requiredCount: Number(binding.requiredCount ?? requiredPacks.length),
     activePacks,
     requiredPacks,
     resolution: {
       status: normalizeToken(binding.resolution?.status || binding.status),
       activeCount: Number(binding.resolution?.activeCount ?? activePacks.length),
+      resolvedCount: Number(binding.resolution?.resolvedCount ?? activePacks.length),
       requiredCount: Number(binding.resolution?.requiredCount ?? requiredPacks.length),
+      optionalCount: Number(binding.resolution?.optionalCount ?? 0),
+      validationCount: Number(binding.resolution?.validationCount ?? 0),
+      blockedCount: Number(binding.resolution?.blockedCount ?? 0),
       scopeCandidates: Array.isArray(binding.resolution?.scopeCandidates)
         ? binding.resolution.scopeCandidates.slice(0, OUTCOME_CONTEXT_BINDING_LIST_LIMIT).map((candidate) => ({
             scopeType: normalizeToken(candidate.scopeType),
@@ -879,11 +898,15 @@ const buildOutcomeContextBindings = ({
     knowledgeBindings: {
       status: safeKnowledgeBinding.status,
       mode: safeKnowledgeBinding.mode,
+      resolutionSource: safeKnowledgeBinding.resolutionSource,
+      policyKey: safeKnowledgeBinding.policyKey,
+      policyVersion: safeKnowledgeBinding.policyVersion,
       manifestId: safeKnowledgeBinding.manifestId,
       manifestKey: safeKnowledgeBinding.manifestKey,
       manifestVersion: safeKnowledgeBinding.manifestVersion,
       boundAt: safeKnowledgeBinding.boundAt,
       activeCount: safeKnowledgeBinding.activeCount,
+      resolvedCount: safeKnowledgeBinding.resolvedCount,
       requiredCount: safeKnowledgeBinding.requiredCount,
       activePacks: safeKnowledgeBinding.activePacks,
       requiredPacks: safeKnowledgeBinding.requiredPacks,
@@ -1149,10 +1172,14 @@ const serializeOutcomeSessionSummary = (session, options = {}) => {
     knowledgePackBinding: {
       status: serialized.knowledgePackBinding.status,
       mode: serialized.knowledgePackBinding.mode,
+      resolutionSource: serialized.knowledgePackBinding.resolutionSource,
+      policyKey: serialized.knowledgePackBinding.policyKey,
+      policyVersion: serialized.knowledgePackBinding.policyVersion,
       manifestId: serialized.knowledgePackBinding.manifestId,
       manifestKey: serialized.knowledgePackBinding.manifestKey,
       manifestVersion: serialized.knowledgePackBinding.manifestVersion,
       activeCount: serialized.knowledgePackBinding.activeCount,
+      resolvedCount: serialized.knowledgePackBinding.resolvedCount,
       requiredCount: serialized.knowledgePackBinding.requiredCount,
       boundAt: serialized.knowledgePackBinding.boundAt,
     },
@@ -1481,10 +1508,14 @@ const serializeOutcomeAssetSummary = (asset, options = {}) => {
     knowledgePackBinding: {
       status: serialized.knowledgePackBinding.status,
       mode: serialized.knowledgePackBinding.mode,
+      resolutionSource: serialized.knowledgePackBinding.resolutionSource,
+      policyKey: serialized.knowledgePackBinding.policyKey,
+      policyVersion: serialized.knowledgePackBinding.policyVersion,
       manifestId: serialized.knowledgePackBinding.manifestId,
       manifestKey: serialized.knowledgePackBinding.manifestKey,
       manifestVersion: serialized.knowledgePackBinding.manifestVersion,
       activeCount: serialized.knowledgePackBinding.activeCount,
+      resolvedCount: serialized.knowledgePackBinding.resolvedCount,
       requiredCount: serialized.knowledgePackBinding.requiredCount,
       boundAt: serialized.knowledgePackBinding.boundAt,
     },
@@ -1765,10 +1796,14 @@ const buildOutcomeAssetJsonExport = ({
   knowledgePackBinding: {
     status: asset.knowledgePackBinding?.status,
     mode: asset.knowledgePackBinding?.mode,
+    resolutionSource: asset.knowledgePackBinding?.resolutionSource,
+    policyKey: asset.knowledgePackBinding?.policyKey,
+    policyVersion: asset.knowledgePackBinding?.policyVersion,
     manifestId: asset.knowledgePackBinding?.manifestId,
     manifestKey: asset.knowledgePackBinding?.manifestKey,
     manifestVersion: asset.knowledgePackBinding?.manifestVersion,
     activeCount: asset.knowledgePackBinding?.activeCount,
+    resolvedCount: asset.knowledgePackBinding?.resolvedCount,
     requiredCount: asset.knowledgePackBinding?.requiredCount,
     boundAt: asset.knowledgePackBinding?.boundAt,
   },
@@ -2873,11 +2908,21 @@ const buildReadiness = ({
     knowledgePacks: {
       status: packBinding.status,
       mode: packBinding.mode,
-      manifestId: normalizeText(packBinding.manifestId),
-      manifestKey: normalizeText(packBinding.manifestKey),
-      manifestVersion: normalizeText(packBinding.manifestVersion),
-      activeCount: Array.isArray(packBinding.activePacks) ? packBinding.activePacks.length : 0,
-      requiredCount: Array.isArray(packBinding.requiredPacks) ? packBinding.requiredPacks.length : 0,
+      resolutionSource: normalizeToken(packBinding.resolutionSource),
+      policyKey: normalizeText(packBinding.policyKey),
+      policyVersion: normalizeText(packBinding.policyVersion),
+      activeCount: Number(packBinding.resolution?.activeCount ?? 0),
+      resolvedCount: Number(
+        packBinding.resolution?.resolvedCount
+          ?? (Array.isArray(packBinding.activePacks) ? packBinding.activePacks.length : 0),
+      ),
+      requiredCount: Number(
+        packBinding.resolution?.requiredCount
+          ?? (Array.isArray(packBinding.requiredPacks) ? packBinding.requiredPacks.length : 0),
+      ),
+      optionalCount: Number(packBinding.resolution?.optionalCount ?? 0),
+      validationCount: Number(packBinding.resolution?.validationCount ?? 0),
+      blockedCount: Number(packBinding.resolution?.blockedCount ?? 0),
       sourceOnlyCount: 0,
     },
   }
@@ -3078,7 +3123,7 @@ const buildOutcomeStudioProjection = async ({
     asset: selectSourceOutputAsset(Array.isArray(outputLab?.assets) ? outputLab.assets : []),
     readiness: outputLab?.readiness || {},
   })
-  const { binding: packBinding } = await resolveDefaultOutcomeStudioKnowledgePackBinding({
+  const { binding: packBinding } = await resolveOutcomeStudioKnowledgePackBinding({
     query: outputLab?.runtimeScope || {},
   })
   const readiness = buildReadiness({
@@ -3590,11 +3635,15 @@ export const createRuntimeOutcomeSession = async ({
           knowledgePackBinding: {
             status: knowledgePackBinding.status,
             mode: knowledgePackBinding.mode,
+            resolutionSource: knowledgePackBinding.resolutionSource,
+            policyKey: knowledgePackBinding.policyKey,
+            policyVersion: knowledgePackBinding.policyVersion,
             manifestId: knowledgePackBinding.manifestId,
             manifestKey: knowledgePackBinding.manifestKey,
             manifestVersion: knowledgePackBinding.manifestVersion,
             boundAt,
             activeCount: knowledgePackBinding.activeCount,
+            resolvedCount: knowledgePackBinding.resolvedCount,
             requiredCount: knowledgePackBinding.requiredCount,
             activePacks: knowledgePackBinding.activePacks,
           },

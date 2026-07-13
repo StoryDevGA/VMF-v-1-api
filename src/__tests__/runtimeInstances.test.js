@@ -14790,10 +14790,11 @@ describe('Runtime Instance API', () => {
     ]))
     expect(res.body.data.knowledgePacks).toEqual(expect.objectContaining({
       status: 'BLOCKED',
-      manifestId: 'kpm-outcome-studio-default-1-0-0-global',
-      manifestKey: 'outcome-studio-default',
-      manifestVersion: '1.0.0',
+      resolutionSource: 'KNOWLEDGE_PACK_REGISTRY',
+      policyKey: 'outcome-studio-v1-required-packs',
+      policyVersion: '1.0.0',
       activeCount: 0,
+      resolvedCount: 0,
       requiredCount: 5,
       sourceOnlyCount: 0,
     }))
@@ -14834,10 +14835,11 @@ describe('Runtime Instance API', () => {
     expect(readinessRes.body.data.knowledgePacks).toEqual(expect.objectContaining({
       status: 'PROJECTED',
       mode: 'REGISTRY_RESOLUTION',
-      manifestId: 'kpm-outcome-studio-default-1-0-0-global',
-      manifestKey: 'outcome-studio-default',
-      manifestVersion: '1.0.0',
+      resolutionSource: 'KNOWLEDGE_PACK_REGISTRY',
+      policyKey: 'outcome-studio-v1-required-packs',
+      policyVersion: '1.0.0',
       activeCount: 5,
+      resolvedCount: 5,
       requiredCount: 5,
       sourceOnlyCount: 0,
     }))
@@ -14900,10 +14902,11 @@ describe('Runtime Instance API', () => {
     expect(sessionRes.body.data.knowledgePackBinding).toEqual(expect.objectContaining({
       status: 'PROJECTED',
       mode: 'REGISTRY_RESOLUTION',
-      manifestId: 'kpm-outcome-studio-default-1-0-0-global',
-      manifestKey: 'outcome-studio-default',
-      manifestVersion: '1.0.0',
+      resolutionSource: 'KNOWLEDGE_PACK_REGISTRY',
+      policyKey: 'outcome-studio-v1-required-packs',
+      policyVersion: '1.0.0',
       activeCount: 5,
+      resolvedCount: 5,
       requiredCount: 5,
       activePacks: expect.arrayContaining([
         expect.objectContaining({
@@ -14974,10 +14977,11 @@ describe('Runtime Instance API', () => {
         currentness: 'CURRENT',
       }),
       knowledgeBindings: expect.objectContaining({
-        manifestId: 'kpm-outcome-studio-default-1-0-0-global',
-        manifestKey: 'outcome-studio-default',
-        manifestVersion: '1.0.0',
+        resolutionSource: 'KNOWLEDGE_PACK_REGISTRY',
+        policyKey: 'outcome-studio-v1-required-packs',
+        policyVersion: '1.0.0',
         activeCount: 5,
+        resolvedCount: 5,
         requiredCount: 5,
         activePacks: expect.arrayContaining([
           expect.objectContaining({
@@ -15081,10 +15085,11 @@ describe('Runtime Instance API', () => {
         sessionId: sessionRes.body.data.sessionId,
         knowledgePackBinding: expect.objectContaining({
           status: 'PROJECTED',
-          manifestId: 'kpm-outcome-studio-default-1-0-0-global',
-          manifestKey: 'outcome-studio-default',
-          manifestVersion: '1.0.0',
+          resolutionSource: 'KNOWLEDGE_PACK_REGISTRY',
+          policyKey: 'outcome-studio-v1-required-packs',
+          policyVersion: '1.0.0',
           activeCount: 5,
+          resolvedCount: 5,
           requiredCount: 5,
         }),
       }),
@@ -17705,9 +17710,9 @@ describe('Runtime Instance API', () => {
     expect(res.body.data.packBinding).toEqual(expect.objectContaining({
       status: 'BLOCKED',
       mode: 'REGISTRY_RESOLUTION',
-      manifestId: 'kpm-outcome-studio-default-1-0-0-global',
-      manifestKey: 'outcome-studio-default',
-      manifestVersion: '1.0.0',
+      resolutionSource: 'KNOWLEDGE_PACK_REGISTRY',
+      policyKey: 'outcome-studio-v1-required-packs',
+      policyVersion: '1.0.0',
       summary: 'Knowledge Pack Registry activation is required before Outcome Studio sessions can start.',
       sourceBundle: expect.objectContaining({
         status: 'RETIRED',

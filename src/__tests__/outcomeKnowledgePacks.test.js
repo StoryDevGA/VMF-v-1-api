@@ -429,13 +429,19 @@ const makeActivation = (pack, overrides = {}) => ({
   packId: `kp-${pack.packType.toLowerCase().replace(/_/g, '-')}-${pack.packKey}`,
   versionId: `kpv-${pack.packKey}-1-0-0-global`,
   packCategory: pack.packCategory || 'OUTCOME',
+  purposeCategory: pack.purposeCategory || 'GOVERNANCE',
   packType: pack.packType,
   packKey: pack.packKey,
+  label: pack.label || pack.packKey,
   semanticVersion: '1.0.0',
   schemaVersion: '1.0.0',
   status: 'ACTIVE',
   scopeType: 'GLOBAL',
   scopeKey: 'GLOBAL',
+  executionMode: pack.executionMode || 'PROVIDER_CONTEXT',
+  visibility: pack.visibility || 'PLATFORM',
+  customerId: pack.customerId || null,
+  tenantId: pack.tenantId || null,
   contentHash: `sha256:${pack.packKey}`,
   content: {
     hidden: 'Activation content must not leak from preview responses.',
@@ -567,6 +573,7 @@ let AuditLog
 let mockRedisClient
 let startSessionSpy
 let originalMongooseReadyStateDescriptor
+let resolveOutcomeStudioKnowledgePackBinding
 
 const setMongooseReadyState = (readyState) => {
   Object.defineProperty(mongoose.connection, 'readyState', {
@@ -621,6 +628,9 @@ beforeAll(async () => {
   KnowledgePackVersion = models.KnowledgePackVersion
   KnowledgePackActivation = models.KnowledgePackActivation
   KnowledgePackManifest = models.KnowledgePackManifest
+  ;({
+    resolveOutcomeStudioKnowledgePackBinding,
+  } = await import('../services/outcomeKnowledgePackRegistryService.js'))
   originalMongooseReadyStateDescriptor = Object.getOwnPropertyDescriptor(
     mongoose.connection,
     'readyState',
@@ -1984,6 +1994,125 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
     expect(JSON.stringify(res.body)).not.toContain('Activation content must not leak')
   })
 
+  test('registry resolution dynamically classifies eligible active packs without using a fixed pack filter', async () => {
+    const activations = [
+      ...makeAllRequiredActivations(),
+      makeActivation({
+        packCategory: 'OUTCOME',
+        purposeCategory: 'STYLE',
+        packType: 'STYLE',
+        packKey: 'executive-board-style',
+        label: 'Executive Board Style',
+        executionMode: 'PROVIDER_CONTEXT',
+      }),
+      makeActivation({
+        packCategory: 'PLATFORM',
+        purposeCategory: 'VALIDATION',
+        packType: 'COMPLIANCE',
+        packKey: 'contradiction-review',
+        label: 'Contradiction Review',
+        executionMode: 'POST_VALIDATION',
+      }),
+      makeActivation({
+        packCategory: 'PLATFORM',
+        purposeCategory: 'SYSTEM',
+        packType: 'SYSTEM',
+        packKey: 'runtime-concepts',
+        label: 'Runtime Concepts',
+        executionMode: 'SYSTEM_ONLY',
+      }),
+      makeActivation({
+        packCategory: 'OUTCOME',
+        purposeCategory: 'STYLE',
+        packType: 'STYLE',
+        packKey: 'manual-reference-style',
+        label: 'Manual Reference Style',
+        executionMode: 'MANUAL_REFERENCE',
+      }),
+      makeActivation({
+        packCategory: 'DISCOVERY',
+        purposeCategory: 'DOMAIN',
+        packType: 'DOMAIN',
+        packKey: 'discovery-only-domain',
+        label: 'Discovery Only Domain',
+        executionMode: 'PROVIDER_CONTEXT',
+      }),
+      makeActivation({
+        packCategory: 'OUTCOME',
+        purposeCategory: 'BRAND',
+        packType: 'BRAND',
+        packKey: 'other-tenant-brand',
+        label: 'Other Tenant Brand',
+        executionMode: 'PROVIDER_CONTEXT',
+        visibility: 'TENANT',
+        tenantId: '507f1f77bcf86cd799439099',
+      }),
+    ]
+    KnowledgePackActivation.find.mockReturnValue(buildFindChain(activations))
+
+    const resolutionResult = await resolveOutcomeStudioKnowledgePackBinding({
+      query: {
+        frameworkKey: 'VMF',
+        runtimeType: 'VALUE_NARRATIVE',
+        tenantId: '507f1f77bcf86cd799439012',
+      },
+    })
+    const { binding } = resolutionResult
+
+    expect(resolutionResult.manifest).toEqual({
+      sourceType: 'KNOWLEDGE_PACK_REGISTRY',
+      policyKey: 'outcome-studio-v1-required-packs',
+      policyVersion: '1.0.0',
+      status: 'PROJECTED',
+    })
+    expect(resolutionResult.manifest).not.toHaveProperty('manifestId')
+    expect(binding).toEqual(expect.objectContaining({
+      status: 'PROJECTED',
+      resolutionSource: 'KNOWLEDGE_PACK_REGISTRY',
+      optionalPacks: [expect.objectContaining({
+        packKey: 'executive-board-style',
+        label: 'Executive Board Style',
+        purposeCategory: 'STYLE',
+        executionMode: 'PROVIDER_CONTEXT',
+      })],
+      validationPacks: [expect.objectContaining({
+        packKey: 'contradiction-review',
+        executionMode: 'POST_VALIDATION',
+      })],
+      blockedPacks: expect.arrayContaining([
+        expect.objectContaining({
+          packKey: 'runtime-concepts',
+          blockedReason: 'SYSTEM_ONLY_PACK',
+        }),
+        expect.objectContaining({
+          packKey: 'manual-reference-style',
+          blockedReason: 'EXECUTION_MODE_NOT_RUNTIME_BINDABLE',
+          runtimeBindable: false,
+        }),
+      ]),
+      resolution: expect.objectContaining({
+        activeCount: 5,
+        resolvedCount: 7,
+        requiredCount: 5,
+        optionalCount: 1,
+        validationCount: 1,
+        blockedCount: 2,
+      }),
+    }))
+    expect(binding.activePacks).toHaveLength(7)
+    expect(binding.activePacks.map((pack) => pack.packKey)).not.toEqual(expect.arrayContaining([
+      'discovery-only-domain',
+      'other-tenant-brand',
+      'runtime-concepts',
+      'manual-reference-style',
+    ]))
+    expect(KnowledgePackActivation.find).toHaveBeenCalledWith({
+      status: 'ACTIVE',
+      scopeKey: { $in: expect.arrayContaining(['GLOBAL', 'TENANT:507F1F77BCF86CD799439012']) },
+    })
+    expect(JSON.stringify(binding)).not.toContain('Activation content must not leak')
+  })
+
   test('GET /api/v1/super-admin/outcome-studio/knowledge-packs/:packId returns detail without version content', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     KnowledgePackActivation.find.mockReturnValue(buildFindChain([makeActivation(REQUIRED_PACKS[2])]))
@@ -3283,6 +3412,10 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       packType: 'SYSTEM',
       packKey: 'et',
       label: 'Enterprise Technology',
+      purposeCategory: 'FRAMEWORK',
+      executionMode: 'PROVIDER_CONTEXT',
+      visibility: 'CUSTOMER',
+      customerId: '507f1f77bcf86cd799439011',
       status: 'VALIDATED',
       sourceMetadata: {
         importMode: 'SOURCE_DOCUMENT_IMPORT_DRAFT',
@@ -3300,6 +3433,10 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       packCategory: 'FRAMEWORK',
       packType: 'SYSTEM',
       packKey: 'et',
+      purposeCategory: 'FRAMEWORK',
+      executionMode: 'PROVIDER_CONTEXT',
+      visibility: 'CUSTOMER',
+      customerId: '507f1f77bcf86cd799439011',
       semanticVersion: '5.0.0',
       status: 'VALIDATED',
       content: extractedText,
@@ -3341,6 +3478,10 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       packType: 'SYSTEM',
       packKey: 'et',
       status: 'ACTIVE',
+      purposeCategory: 'FRAMEWORK',
+      executionMode: 'PROVIDER_CONTEXT',
+      visibility: 'CUSTOMER',
+      customerId: '507f1f77bcf86cd799439011',
     }))
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'OUTCOME_KNOWLEDGE_PACK_ACTIVATED',

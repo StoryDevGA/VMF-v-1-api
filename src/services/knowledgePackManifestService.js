@@ -984,22 +984,3 @@ export const previewKnowledgePackManifestResolution = async ({
     },
   }
 }
-
-export const resolveDefaultOutcomeStudioKnowledgePackBinding = async ({
-  query = {},
-} = {}) => {
-  const manifest = serializeManifest(buildDefaultOutcomeStudioManifest())
-  const binding = await resolveOutcomeStudioKnowledgePacks(query)
-
-  return {
-    manifest,
-    binding: {
-      ...binding,
-      manifestId: manifest.manifestId,
-      manifestKey: manifest.manifestKey,
-      manifestVersion: manifest.semanticVersion,
-      previewOnly: false,
-      contentVisible: false,
-    },
-  }
-}
