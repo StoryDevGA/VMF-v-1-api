@@ -1,0 +1,73 @@
+{
+  "schemaVersion": "1.0.0",
+  "correctionRowsSha256": "0E01DD6FD3398237631162E2DC9286FB7869AD16442F166DA78728DE75E47730",
+  "environmentGuard": {
+    "allowedNodeEnvs": [
+      "development",
+      "test"
+    ],
+    "allowedDatabaseNames": [
+      "test"
+    ]
+  },
+  "duplicateSurvivors": [
+    {
+      "legacyPackId": "kp-framework-pack-truth-certification-framework",
+      "survivorPackId": "kp-truth-certification-truth-certification-framework"
+    },
+    {
+      "legacyPackId": "kp-framework-pack-truth-quality-dimensions",
+      "survivorPackId": "kp-truth-certification-truth-quality-dimensions"
+    },
+    {
+      "legacyPackId": "kp-ve-certification-levels",
+      "survivorPackId": "kp-truth-certification-certification-levels"
+    },
+    {
+      "legacyPackId": "kp-ve-blocking-rules",
+      "survivorPackId": "kp-truth-certification-blocking-rules"
+    },
+    {
+      "legacyPackId": "kp-ve-runtime-warning-rules",
+      "survivorPackId": "kp-truth-certification-runtime-warning-rules"
+    },
+    {
+      "legacyPackId": "kp-ve-prohibited-output-claims",
+      "survivorPackId": "kp-truth-certification-prohibited-output-claims"
+    },
+    {
+      "legacyPackId": "kp-et-rt-export-metadata-rules",
+      "survivorPackId": "kp-truth-certification-export-metadata-rules"
+    }
+  ],
+  "excludedCorrections": [
+    {
+      "packId": "*",
+      "field": "packType",
+      "reason": "Pack type participates in governed IDs and unique identities; defer to an explicit identity migration."
+    },
+    {
+      "packId": "kp-arl-adaptive-reasoning-layer",
+      "field": "executionMode",
+      "reason": "ARL remains a required provider-context binding for Outcome Studio V1."
+    },
+    {
+      "packId": "kp-rl-rendering-layer",
+      "field": "executionMode",
+      "reason": "RL remains a required provider-context binding for Outcome Studio V1."
+    }
+  ],
+  "expectedCurrentOverrides": [
+    {
+      "packId": "kp-rl-rendering-layer",
+      "collectionKey": "KnowledgePackActivation",
+      "field": "purposeCategory",
+      "manifestFrom": "OUTPUT",
+      "actualFrom": "SYSTEM",
+      "to": "GOVERNANCE",
+      "reason": "The development database readback established SYSTEM as the real current value."
+    }
+  ],
+  "historicalPolicy": "PRESERVE",
+  "manifestPolicy": "BLOCK_IF_PRESENT"
+}

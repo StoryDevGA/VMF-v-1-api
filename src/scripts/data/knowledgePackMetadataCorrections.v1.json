@@ -1,0 +1,805 @@
+{
+  "schemaVersion": "1.0.0",
+  "source": {
+    "workbook": "docs/product-specs/source-artifacts/2026-07-14-knowledge-pack-metadata-reconciliation/Full_List_Corrected_with_Change_Log.xlsx",
+    "sheet": "Change Log",
+    "sha256": "11741C281EFA8377C231351C7CC9E53B3863E12F33A06AD72FE7E57094AA0C63",
+    "changeLogRowsSha256": "0E01DD6FD3398237631162E2DC9286FB7869AD16442F166DA78728DE75E47730"
+  },
+  "expectations": {
+    "correctedLibraryRecords": 89,
+    "changedPacks": 39,
+    "corrections": 85
+  },
+  "allowedFields": [
+    "packType",
+    "purposeCategory",
+    "executionMode",
+    "packCategory"
+  ],
+  "packs": [
+    {
+      "packId": "kp-system-execution-translation-runtime",
+      "packKey": "execution-translation-runtime",
+      "label": "Execution Translation Runtime",
+      "corrections": [
+        {
+          "field": "packType",
+          "from": "SYSTEM",
+          "to": "ET_RUNTIME",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "executionMode",
+          "from": "PROVIDER_CONTEXT",
+          "to": "SYSTEM_ONLY",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "packCategory",
+          "from": "OUTCOME",
+          "to": "PLATFORM",
+          "reason": "Aligned runtime scope with pack role"
+        }
+      ]
+    },
+    {
+      "packId": "kp-system-execution-translation",
+      "packKey": "execution-translation",
+      "label": "Execution Translation",
+      "corrections": [
+        {
+          "field": "packType",
+          "from": "SYSTEM",
+          "to": "ET",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        }
+      ]
+    },
+    {
+      "packId": "kp-system-canonical-derived-runtime",
+      "packKey": "canonical-derived-runtime",
+      "label": "Canonical Derived Runtime",
+      "corrections": [
+        {
+          "field": "packType",
+          "from": "SYSTEM",
+          "to": "CDRT",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "executionMode",
+          "from": "PROVIDER_CONTEXT",
+          "to": "SYSTEM_ONLY",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "packCategory",
+          "from": "OUTCOME",
+          "to": "PLATFORM",
+          "reason": "Aligned runtime scope with pack role"
+        }
+      ]
+    },
+    {
+      "packId": "kp-err-evidence-resolution-runtime",
+      "packKey": "evidence-resolution-runtime",
+      "label": "Evidence Resolution Runtime",
+      "corrections": [
+        {
+          "field": "executionMode",
+          "from": "PROVIDER_CONTEXT",
+          "to": "SYSTEM_ONLY",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "packCategory",
+          "from": "OUTCOME",
+          "to": "PLATFORM",
+          "reason": "Aligned runtime scope with pack role"
+        }
+      ]
+    },
+    {
+      "packId": "kp-rgs-render-governance-state",
+      "packKey": "render-governance-state",
+      "label": "Render Governance State",
+      "corrections": [
+        {
+          "field": "executionMode",
+          "from": "PROVIDER_CONTEXT",
+          "to": "SYSTEM_ONLY",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "packCategory",
+          "from": "OUTCOME",
+          "to": "PLATFORM",
+          "reason": "Aligned runtime scope with pack role"
+        }
+      ]
+    },
+    {
+      "packId": "kp-cdrm-canonical-runtime-model",
+      "packKey": "canonical-runtime-model",
+      "label": "Canonical Runtime Model",
+      "corrections": [
+        {
+          "field": "executionMode",
+          "from": "PROVIDER_CONTEXT",
+          "to": "SYSTEM_ONLY",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "packCategory",
+          "from": "OUTCOME",
+          "to": "PLATFORM",
+          "reason": "Aligned runtime scope with pack role"
+        }
+      ]
+    },
+    {
+      "packId": "kp-output-schema-sales-narrative-schema",
+      "packKey": "sales-narrative-schema",
+      "label": "Sales Narrative Schema",
+      "corrections": [
+        {
+          "field": "purposeCategory",
+          "from": "SYSTEM",
+          "to": "OUTPUT",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        }
+      ]
+    },
+    {
+      "packId": "kp-output-schema-commercial-assessment-schema",
+      "packKey": "commercial-assessment-schema",
+      "label": "Commercial Assessment Schema",
+      "corrections": [
+        {
+          "field": "purposeCategory",
+          "from": "SYSTEM",
+          "to": "OUTPUT",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        }
+      ]
+    },
+    {
+      "packId": "kp-output-schema-board-summary-schema",
+      "packKey": "board-summary-schema",
+      "label": "Board Summary Schema",
+      "corrections": [
+        {
+          "field": "purposeCategory",
+          "from": "SYSTEM",
+          "to": "OUTPUT",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        }
+      ]
+    },
+    {
+      "packId": "kp-output-schema-customer-proposal-schema",
+      "packKey": "customer-proposal-schema",
+      "label": "Customer Proposal Schema",
+      "corrections": [
+        {
+          "field": "purposeCategory",
+          "from": "SYSTEM",
+          "to": "OUTPUT",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        }
+      ]
+    },
+    {
+      "packId": "kp-output-schema-one-pager-schema",
+      "packKey": "one-pager-schema",
+      "label": "One Pager Schema",
+      "corrections": [
+        {
+          "field": "purposeCategory",
+          "from": "SYSTEM",
+          "to": "OUTPUT",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        }
+      ]
+    },
+    {
+      "packId": "kp-output-schema-website-copy-schema",
+      "packKey": "website-copy-schema",
+      "label": "Website Copy Schema",
+      "corrections": [
+        {
+          "field": "purposeCategory",
+          "from": "SYSTEM",
+          "to": "OUTPUT",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        }
+      ]
+    },
+    {
+      "packId": "kp-output-schema-sales-email-schema",
+      "packKey": "sales-email-schema",
+      "label": "Sales Email Schema",
+      "corrections": [
+        {
+          "field": "purposeCategory",
+          "from": "SYSTEM",
+          "to": "OUTPUT",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        }
+      ]
+    },
+    {
+      "packId": "kp-framework-pack-truth-certification-framework",
+      "packKey": "truth-certification-framework",
+      "label": "Truth Certification Framework",
+      "corrections": [
+        {
+          "field": "packType",
+          "from": "FRAMEWORK_PACK",
+          "to": "TRUTH_CERTIFICATION",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "purposeCategory",
+          "from": "SYSTEM",
+          "to": "VALIDATION",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "executionMode",
+          "from": "PROVIDER_CONTEXT",
+          "to": "POST_VALIDATION",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "packCategory",
+          "from": "OUTCOME",
+          "to": "PLATFORM",
+          "reason": "Aligned runtime scope with pack role"
+        }
+      ]
+    },
+    {
+      "packId": "kp-framework-pack-truth-quality-dimensions",
+      "packKey": "truth-quality-dimensions",
+      "label": "Truth Quality Dimensions",
+      "corrections": [
+        {
+          "field": "packType",
+          "from": "FRAMEWORK_PACK",
+          "to": "TRUTH_CERTIFICATION",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "purposeCategory",
+          "from": "SYSTEM",
+          "to": "VALIDATION",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "executionMode",
+          "from": "PROVIDER_CONTEXT",
+          "to": "POST_VALIDATION",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "packCategory",
+          "from": "OUTCOME",
+          "to": "PLATFORM",
+          "reason": "Aligned runtime scope with pack role"
+        }
+      ]
+    },
+    {
+      "packId": "kp-ve-certification-levels",
+      "packKey": "certification-levels",
+      "label": "Certification Levels",
+      "corrections": [
+        {
+          "field": "packType",
+          "from": "VE",
+          "to": "TRUTH_CERTIFICATION",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "purposeCategory",
+          "from": "SYSTEM",
+          "to": "VALIDATION",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "executionMode",
+          "from": "PROVIDER_CONTEXT",
+          "to": "POST_VALIDATION",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "packCategory",
+          "from": "OUTCOME",
+          "to": "PLATFORM",
+          "reason": "Aligned runtime scope with pack role"
+        }
+      ]
+    },
+    {
+      "packId": "kp-ve-blocking-rules",
+      "packKey": "blocking-rules",
+      "label": "Blocking Rules",
+      "corrections": [
+        {
+          "field": "packType",
+          "from": "VE",
+          "to": "TRUTH_CERTIFICATION",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "purposeCategory",
+          "from": "SYSTEM",
+          "to": "VALIDATION",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "executionMode",
+          "from": "PROVIDER_CONTEXT",
+          "to": "POST_VALIDATION",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "packCategory",
+          "from": "OUTCOME",
+          "to": "PLATFORM",
+          "reason": "Aligned runtime scope with pack role"
+        }
+      ]
+    },
+    {
+      "packId": "kp-ve-runtime-warning-rules",
+      "packKey": "runtime-warning-rules",
+      "label": "Runtime Warning Rules",
+      "corrections": [
+        {
+          "field": "packType",
+          "from": "VE",
+          "to": "TRUTH_CERTIFICATION",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "purposeCategory",
+          "from": "SYSTEM",
+          "to": "VALIDATION",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "executionMode",
+          "from": "PROVIDER_CONTEXT",
+          "to": "POST_VALIDATION",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "packCategory",
+          "from": "OUTCOME",
+          "to": "PLATFORM",
+          "reason": "Aligned runtime scope with pack role"
+        }
+      ]
+    },
+    {
+      "packId": "kp-ve-prohibited-output-claims",
+      "packKey": "prohibited-output-claims",
+      "label": "Prohibited Output Claims",
+      "corrections": [
+        {
+          "field": "packType",
+          "from": "VE",
+          "to": "TRUTH_CERTIFICATION",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "purposeCategory",
+          "from": "SYSTEM",
+          "to": "VALIDATION",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "executionMode",
+          "from": "PROVIDER_CONTEXT",
+          "to": "POST_VALIDATION",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "packCategory",
+          "from": "OUTCOME",
+          "to": "PLATFORM",
+          "reason": "Aligned runtime scope with pack role"
+        }
+      ]
+    },
+    {
+      "packId": "kp-et-rt-export-metadata-rules",
+      "packKey": "export-metadata-rules",
+      "label": "Export Metadata Rules",
+      "corrections": [
+        {
+          "field": "packType",
+          "from": "ET_RT",
+          "to": "TRUTH_CERTIFICATION",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "purposeCategory",
+          "from": "SYSTEM",
+          "to": "VALIDATION",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "executionMode",
+          "from": "PROVIDER_CONTEXT",
+          "to": "POST_VALIDATION",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "packCategory",
+          "from": "OUTCOME",
+          "to": "PLATFORM",
+          "reason": "Aligned runtime scope with pack role"
+        }
+      ]
+    },
+    {
+      "packId": "kp-arl-adaptive-reasoning-layer",
+      "packKey": "adaptive-reasoning-layer",
+      "label": "Adaptive Reasoning Layer",
+      "corrections": [
+        {
+          "field": "executionMode",
+          "from": "PROVIDER_CONTEXT",
+          "to": "SYSTEM_ONLY",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "packCategory",
+          "from": "OUTCOME",
+          "to": "PLATFORM",
+          "reason": "Aligned runtime scope with pack role"
+        }
+      ]
+    },
+    {
+      "packId": "kp-rl-rendering-layer",
+      "packKey": "rendering-layer",
+      "label": "Rendering Layer",
+      "corrections": [
+        {
+          "field": "purposeCategory",
+          "from": "OUTPUT",
+          "to": "GOVERNANCE",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "executionMode",
+          "from": "PROVIDER_CONTEXT",
+          "to": "SYSTEM_ONLY",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "packCategory",
+          "from": "OUTCOME",
+          "to": "PLATFORM",
+          "reason": "Aligned runtime scope with pack role"
+        }
+      ]
+    },
+    {
+      "packId": "kp-system-reference-visual-truth-preservation-rules",
+      "packKey": "visual-truth-preservation-rules",
+      "label": "Visual Truth Preservation Rules",
+      "corrections": [
+        {
+          "field": "purposeCategory",
+          "from": "SYSTEM",
+          "to": "GOVERNANCE",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "executionMode",
+          "from": "PROVIDER_CONTEXT",
+          "to": "SYSTEM_ONLY",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "packCategory",
+          "from": "OUTCOME",
+          "to": "PLATFORM",
+          "reason": "Aligned runtime scope with pack role"
+        }
+      ]
+    },
+    {
+      "packId": "kp-system-reference-data-visualisation-integrity-rules",
+      "packKey": "data-visualisation-integrity-rules",
+      "label": "Data Visualisation Integrity Rules",
+      "corrections": [
+        {
+          "field": "purposeCategory",
+          "from": "SYSTEM",
+          "to": "GOVERNANCE",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "executionMode",
+          "from": "PROVIDER_CONTEXT",
+          "to": "SYSTEM_ONLY",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "packCategory",
+          "from": "OUTCOME",
+          "to": "PLATFORM",
+          "reason": "Aligned runtime scope with pack role"
+        }
+      ]
+    },
+    {
+      "packId": "kp-system-reference-accessibility-for-visual-outputs",
+      "packKey": "accessibility-for-visual-outputs",
+      "label": "Accessibility for Visual Outputs",
+      "corrections": [
+        {
+          "field": "purposeCategory",
+          "from": "SYSTEM",
+          "to": "GOVERNANCE",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "executionMode",
+          "from": "PROVIDER_CONTEXT",
+          "to": "SYSTEM_ONLY",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "packCategory",
+          "from": "OUTCOME",
+          "to": "PLATFORM",
+          "reason": "Aligned runtime scope with pack role"
+        }
+      ]
+    },
+    {
+      "packId": "kp-system-reference-customer-safe-visual-rendering-rules",
+      "packKey": "customer-safe-visual-rendering-rules",
+      "label": "Customer-Safe Visual Rendering Rules",
+      "corrections": [
+        {
+          "field": "purposeCategory",
+          "from": "SYSTEM",
+          "to": "GOVERNANCE",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "executionMode",
+          "from": "PROVIDER_CONTEXT",
+          "to": "SYSTEM_ONLY",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "packCategory",
+          "from": "OUTCOME",
+          "to": "PLATFORM",
+          "reason": "Aligned runtime scope with pack role"
+        }
+      ]
+    },
+    {
+      "packId": "kp-truth-certification-truth-certification-framework",
+      "packKey": "truth-certification-framework",
+      "label": "Truth Certification Framework",
+      "corrections": [
+        {
+          "field": "purposeCategory",
+          "from": "SYSTEM",
+          "to": "VALIDATION",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        }
+      ]
+    },
+    {
+      "packId": "kp-truth-certification-truth-quality-dimensions",
+      "packKey": "truth-quality-dimensions",
+      "label": "Truth Quality Dimensions",
+      "corrections": [
+        {
+          "field": "purposeCategory",
+          "from": "SYSTEM",
+          "to": "VALIDATION",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        }
+      ]
+    },
+    {
+      "packId": "kp-truth-certification-blocking-rules",
+      "packKey": "blocking-rules",
+      "label": "Blocking Rules",
+      "corrections": [
+        {
+          "field": "purposeCategory",
+          "from": "SYSTEM",
+          "to": "VALIDATION",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        }
+      ]
+    },
+    {
+      "packId": "kp-truth-certification-runtime-warning-rules",
+      "packKey": "runtime-warning-rules",
+      "label": "Runtime Warning Rules",
+      "corrections": [
+        {
+          "field": "purposeCategory",
+          "from": "SYSTEM",
+          "to": "VALIDATION",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        }
+      ]
+    },
+    {
+      "packId": "kp-truth-certification-prohibited-output-claims",
+      "packKey": "prohibited-output-claims",
+      "label": "Prohibited Output Claims",
+      "corrections": [
+        {
+          "field": "purposeCategory",
+          "from": "SYSTEM",
+          "to": "VALIDATION",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        }
+      ]
+    },
+    {
+      "packId": "kp-truth-certification-export-metadata-rules",
+      "packKey": "export-metadata-rules",
+      "label": "Export Metadata Rules",
+      "corrections": [
+        {
+          "field": "purposeCategory",
+          "from": "SYSTEM",
+          "to": "VALIDATION",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        }
+      ]
+    },
+    {
+      "packId": "kp-system-reference-hidden-content-policy",
+      "packKey": "hidden-content-policy",
+      "label": "Hidden Content Policy",
+      "corrections": [
+        {
+          "field": "purposeCategory",
+          "from": "SYSTEM",
+          "to": "GOVERNANCE",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "packCategory",
+          "from": "OUTCOME",
+          "to": "PLATFORM",
+          "reason": "Aligned runtime scope with pack role"
+        }
+      ]
+    },
+    {
+      "packId": "kp-system-reference-customer-visible-content-policy",
+      "packKey": "customer-visible-content-policy",
+      "label": "Customer Visible Content Policy",
+      "corrections": [
+        {
+          "field": "purposeCategory",
+          "from": "SYSTEM",
+          "to": "GOVERNANCE",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "packCategory",
+          "from": "OUTCOME",
+          "to": "PLATFORM",
+          "reason": "Aligned runtime scope with pack role"
+        }
+      ]
+    },
+    {
+      "packId": "kp-system-reference-redaction-rules",
+      "packKey": "redaction-rules",
+      "label": "Redaction Rules",
+      "corrections": [
+        {
+          "field": "purposeCategory",
+          "from": "SYSTEM",
+          "to": "GOVERNANCE",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "packCategory",
+          "from": "OUTCOME",
+          "to": "PLATFORM",
+          "reason": "Aligned runtime scope with pack role"
+        }
+      ]
+    },
+    {
+      "packId": "kp-system-reference-evidence-boundary-rules",
+      "packKey": "evidence-boundary-rules",
+      "label": "Evidence Boundary Rules",
+      "corrections": [
+        {
+          "field": "purposeCategory",
+          "from": "SYSTEM",
+          "to": "GOVERNANCE",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "packCategory",
+          "from": "OUTCOME",
+          "to": "PLATFORM",
+          "reason": "Aligned runtime scope with pack role"
+        }
+      ]
+    },
+    {
+      "packId": "kp-system-reference-truth-preservation-rules",
+      "packKey": "truth-preservation-rules",
+      "label": "Truth Preservation Rules",
+      "corrections": [
+        {
+          "field": "purposeCategory",
+          "from": "SYSTEM",
+          "to": "GOVERNANCE",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "packCategory",
+          "from": "OUTCOME",
+          "to": "PLATFORM",
+          "reason": "Aligned runtime scope with pack role"
+        }
+      ]
+    },
+    {
+      "packId": "kp-system-reference-lineage-preservation-rules",
+      "packKey": "lineage-preservation-rules",
+      "label": "Lineage Preservation Rules",
+      "corrections": [
+        {
+          "field": "purposeCategory",
+          "from": "SYSTEM",
+          "to": "GOVERNANCE",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "packCategory",
+          "from": "OUTCOME",
+          "to": "PLATFORM",
+          "reason": "Aligned runtime scope with pack role"
+        }
+      ]
+    },
+    {
+      "packId": "kp-truth-certification-certification-levels",
+      "packKey": "certification-levels",
+      "label": "Certification Levels",
+      "corrections": [
+        {
+          "field": "purposeCategory",
+          "from": "GOVERNANCE",
+          "to": "VALIDATION",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        },
+        {
+          "field": "executionMode",
+          "from": "PROVIDER_CONTEXT",
+          "to": "POST_VALIDATION",
+          "reason": "Normalised to canonical StorylineOS metadata mapping"
+        }
+      ]
+    }
+  ]
+}

@@ -16,6 +16,8 @@
     "vmf:cleanup-pre-v3-1": "node src/scripts/cleanupPreV31VmfRecords.js",
     "runtime-paths:reclassify-categories": "node src/scripts/reclassifyRuntimePathCategories.js",
     "knowledge-packs:backfill-categories": "node src/scripts/backfillKnowledgePackCategories.js",
+    "knowledge-packs:reconcile-metadata": "node src/scripts/reconcileKnowledgePackMetadata.js",
+    "knowledge-packs:rehearse-metadata": "node src/scripts/rehearseKnowledgePackMetadataReconciliation.js",
     "framework-packages:unset-legacy-fields": "node src/scripts/unsetDeprecatedFrameworkPackageFields.js",
     "framework-packages:drop-legacy-active-index": "node src/scripts/dropLegacyFrameworkPackageActiveIndex.js",
     "runtime-deployments:migrate-active-index": "node src/scripts/migrateRuntimeDeploymentActiveIndex.js",
