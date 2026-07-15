@@ -5,6 +5,7 @@ import {
   deprecateOutcomeKnowledgePackVersion,
   disableOutcomeKnowledgePackVersion,
   getOutcomeKnowledgePack,
+  getOutcomeKnowledgePackDuplicateDiagnostics,
   getOutcomeKnowledgePackVersion,
   importOutcomeKnowledgePackStarterVersion,
   importOutcomeKnowledgePackSourceDocumentDraft,
@@ -40,6 +41,15 @@ export const listKnowledgePacks = async (req, res) => {
   try {
     const result = await listOutcomeKnowledgePacks({ query: req.query })
     res.status(200).json(result)
+  } catch (err) {
+    sendControllerError(res, req, err)
+  }
+}
+
+export const getKnowledgePackDuplicateDiagnostics = async (req, res) => {
+  try {
+    const data = await getOutcomeKnowledgePackDuplicateDiagnostics()
+    res.status(200).json({ data })
   } catch (err) {
     sendControllerError(res, req, err)
   }

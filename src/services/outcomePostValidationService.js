@@ -89,7 +89,9 @@ export const buildOutcomeAssetPostValidationSnapshot = ({
   const truthCurrent = normalizeToken(truthSignature.currentness) === 'CURRENT'
   const activeCount = Number(knowledgePackBinding.activeCount || 0)
   const requiredCount = Number(knowledgePackBinding.requiredCount || 0)
-  const bindingPass = normalizeToken(knowledgePackBinding.status) === 'PROJECTED'
+  const bindingStatus = normalizeToken(knowledgePackBinding.status)
+  // READY_WITH_GAPS means every required safeguard resolved; only optional context is absent.
+  const bindingPass = ['PROJECTED', 'READY', 'READY_WITH_GAPS'].includes(bindingStatus)
     && requiredCount > 0
     && activeCount >= requiredCount
   const contentPass = hasCustomerContent(customerContent)

@@ -14,6 +14,13 @@ import {
   resolveKnowledgePackCategory,
 } from '../constants/workspaceGovernance.js'
 import { buildKnowledgePackId } from './KnowledgePack.js'
+import {
+  knowledgePackCapabilityKeyField,
+  knowledgePackDependencyReferenceSchema,
+  knowledgePackLayerField,
+  knowledgePackWorkspaceCompatibilityField,
+  normalizeKnowledgePackGovernanceFields,
+} from './knowledgePackGovernanceSchemas.js'
 
 const normalizeText = (value) => String(value || '').trim()
 const normalizeToken = (value) => normalizeText(value).toUpperCase()
@@ -107,6 +114,13 @@ const knowledgePackActivationSchema = new mongoose.Schema(
       enum: Object.values(KNOWLEDGE_PACK_PURPOSE_CATEGORIES),
       default: KNOWLEDGE_PACK_PURPOSE_CATEGORIES.SYSTEM,
       index: true,
+    },
+    knowledgeLayer: knowledgePackLayerField,
+    capabilityKey: knowledgePackCapabilityKeyField,
+    workspaceCompatibility: knowledgePackWorkspaceCompatibilityField,
+    dependencyReferences: {
+      type: [knowledgePackDependencyReferenceSchema],
+      default: undefined,
     },
     packType: {
       type: String,
@@ -282,6 +296,18 @@ knowledgePackActivationSchema.index(
     },
   },
 )
+knowledgePackActivationSchema.index(
+  { status: 1, scopeKey: 1, knowledgeLayer: 1, capabilityKey: 1 },
+  {
+    name: 'uniq_active_knowledge_capability_scope',
+    unique: true,
+    partialFilterExpression: {
+      status: OUTCOME_KNOWLEDGE_PACK_ACTIVATION_STATUSES.ACTIVE,
+      knowledgeLayer: { $type: 'string' },
+      capabilityKey: { $type: 'string' },
+    },
+  },
+)
 knowledgePackActivationSchema.index({ status: 1, scopeKey: 1, packType: 1, packKey: 1 })
 knowledgePackActivationSchema.index({ packId: 1, status: 1, activatedAt: -1 })
 knowledgePackActivationSchema.index({ purposeCategory: 1, status: 1, activatedAt: -1 })
@@ -294,11 +320,26 @@ knowledgePackActivationSchema.pre('validate', function normalizeKnowledgePackAct
     packType: this.packType,
   })
   this.purposeCategory = normalizeToken(this.purposeCategory || KNOWLEDGE_PACK_PURPOSE_CATEGORIES.SYSTEM)
+  normalizeKnowledgePackGovernanceFields(this, { includeDependencies: true })
   this.packKey = normalizeLowerKey(this.packKey)
   this.label = normalizeText(this.label)
   this.semanticVersion = normalizeText(this.semanticVersion)
   this.schemaVersion = normalizeText(this.schemaVersion || '1.0.0')
   this.status = normalizeToken(this.status || OUTCOME_KNOWLEDGE_PACK_ACTIVATION_STATUSES.ACTIVE)
+  if (this.status === OUTCOME_KNOWLEDGE_PACK_ACTIVATION_STATUSES.ACTIVE) {
+    if (!this.knowledgeLayer) {
+      this.invalidate('knowledgeLayer', 'Active Knowledge Pack activations require knowledgeLayer.')
+    }
+    if (!this.capabilityKey) {
+      this.invalidate('capabilityKey', 'Active Knowledge Pack activations require capabilityKey.')
+    }
+    if (!Array.isArray(this.workspaceCompatibility) || this.workspaceCompatibility.length === 0) {
+      this.invalidate(
+        'workspaceCompatibility',
+        'Active Knowledge Pack activations require non-empty workspaceCompatibility.',
+      )
+    }
+  }
   this.scopeType = normalizeToken(this.scopeType || OUTCOME_KNOWLEDGE_PACK_SCOPE_TYPES.GLOBAL)
   this.frameworkKey = normalizeToken(this.frameworkKey)
   this.runtimeType = normalizeToken(this.runtimeType)

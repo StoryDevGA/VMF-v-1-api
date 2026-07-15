@@ -13,6 +13,8 @@ import {
 import {
   KNOWLEDGE_PACK_AUTHORING_MODES,
   KNOWLEDGE_PACK_EXECUTION_MODES,
+  KNOWLEDGE_PACK_DEPENDENCY_REQUIREMENTS,
+  KNOWLEDGE_PACK_LAYERS,
   KNOWLEDGE_PACK_MANIFEST_STATUSES,
   KNOWLEDGE_PACK_MANIFEST_TYPES,
   KNOWLEDGE_PACK_PURPOSE_CATEGORIES,
@@ -56,9 +58,10 @@ const optionalKeySchema = (label, max = 140) =>
 const listKnowledgePacksQuerySchema = z.object({
   q: optionalKeySchema('Search query', 255),
   packType: z.enum(Object.values(OUTCOME_KNOWLEDGE_PACK_TYPES)).optional(),
+  knowledgeLayer: z.enum(Object.values(KNOWLEDGE_PACK_LAYERS)).optional(),
   packKey: optionalKeySchema('Pack key'),
   status: z.enum(Object.values(OUTCOME_KNOWLEDGE_PACK_STATUSES)).optional(),
-  sortBy: z.enum(['label', 'packKey', 'packType', 'status', 'updatedAt']).optional(),
+  sortBy: z.enum(['label', 'packKey', 'packType', 'knowledgeLayer', 'status', 'updatedAt']).optional(),
   sortOrder: z.enum(['asc', 'desc']).optional(),
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(20),
@@ -364,6 +367,38 @@ const sourceDocumentSchema = z.object({
     .optional(),
 }).strict()
 
+const knowledgePackDependencyReferenceSchema = z.object({
+  knowledgeLayer: z.enum(Object.values(KNOWLEDGE_PACK_LAYERS), {
+    required_error: 'dependency knowledgeLayer is required',
+  }),
+  requirement: z
+    .enum(Object.values(KNOWLEDGE_PACK_DEPENDENCY_REQUIREMENTS))
+    .default(KNOWLEDGE_PACK_DEPENDENCY_REQUIREMENTS.REQUIRED),
+  packType: z.enum(Object.values(OUTCOME_KNOWLEDGE_PACK_TYPES)).optional(),
+  packKey: optionalKeySchema('Dependency pack key'),
+  capabilityKey: optionalKeySchema('Dependency capability key'),
+}).strict().superRefine((value, ctx) => {
+  const hasPackType = Boolean(value.packType)
+  const hasPackKey = Boolean(value.packKey)
+  const hasExactIdentity = hasPackType && hasPackKey
+  const hasCapability = Boolean(value.capabilityKey)
+
+  if (hasPackType !== hasPackKey) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['packKey'],
+      message: 'Dependency identity requires both packType and packKey',
+    })
+  }
+  if (hasExactIdentity === hasCapability) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['capabilityKey'],
+      message: 'Dependency must use exactly one selector: packType plus packKey, or capabilityKey',
+    })
+  }
+})
+
 const importSourceDocumentDraftBodySchema = z.object({
   packType: z.enum(Object.values(OUTCOME_KNOWLEDGE_PACK_TYPES), {
     required_error: 'packType is required',
@@ -384,6 +419,16 @@ const importSourceDocumentDraftBodySchema = z.object({
     .max(1000, 'description must be 1000 characters or fewer')
     .optional(),
   purposeCategory: z.enum(Object.values(KNOWLEDGE_PACK_PURPOSE_CATEGORIES)).optional(),
+  knowledgeLayer: z.enum(Object.values(KNOWLEDGE_PACK_LAYERS)).optional(),
+  capabilityKey: optionalKeySchema('Capability key'),
+  workspaceCompatibility: z
+    .array(z.enum(Object.values(WORKSPACE_TYPES)))
+    .max(Object.values(WORKSPACE_TYPES).length, 'workspaceCompatibility contains too many entries')
+    .optional(),
+  dependencyReferences: z
+    .array(knowledgePackDependencyReferenceSchema)
+    .max(50, 'dependencyReferences can contain at most 50 entries')
+    .optional(),
   semanticVersion: z
     .string({ required_error: 'semanticVersion is required' })
     .trim()
@@ -428,6 +473,12 @@ const importSourceDocumentDraftBodySchema = z.object({
     .string()
     .trim()
     .max(750000, 'extractedText must be 750000 characters or fewer')
+    .optional(),
+  duplicateOverrideReason: z
+    .string()
+    .trim()
+    .min(10, 'duplicateOverrideReason must be at least 10 characters')
+    .max(500, 'duplicateOverrideReason must be 500 characters or fewer')
     .optional(),
 }).strict().superRefine((value, ctx) => {
   if (value.visibility === KNOWLEDGE_PACK_VISIBILITY_SCOPES.CUSTOMER && !value.customerId) {

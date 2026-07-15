@@ -73,6 +73,7 @@ export const AUDIT_ACTIONS = Object.freeze({
   SYSTEM_VERSIONING_POLICY_UPDATED: 'SYSTEM_VERSIONING_POLICY_UPDATED',
   GOVERNANCE_OVERRIDE_APPLIED: 'GOVERNANCE_OVERRIDE_APPLIED',
   GOVERNANCE_OVERRIDE_DENIED: 'GOVERNANCE_OVERRIDE_DENIED',
+  KNOWLEDGE_PACK_GOVERNANCE_MAPPING_APPLIED: 'KNOWLEDGE_PACK_GOVERNANCE_MAPPING_APPLIED',
   FRAMEWORK_PACKAGE_CREATED: 'FRAMEWORK_PACKAGE_CREATED',
   FRAMEWORK_PACKAGE_UPDATED: 'FRAMEWORK_PACKAGE_UPDATED',
   FRAMEWORK_PACKAGE_VALIDATED: 'FRAMEWORK_PACKAGE_VALIDATED',
@@ -534,6 +535,8 @@ const buildAuditSummary = ({ action, resourceType, resourceId, diff, display }) 
       return clampSummary(`${actorLabel} rolled back Knowledge Pack ${targetLabel}`)
     case AUDIT_ACTIONS.KNOWLEDGE_PACK_DELETED:
       return clampSummary(`${actorLabel} deleted Knowledge Pack ${targetLabel}`)
+    case AUDIT_ACTIONS.KNOWLEDGE_PACK_GOVERNANCE_MAPPING_APPLIED:
+      return clampSummary(`${actorLabel} applied governed Knowledge Pack metadata ${targetLabel}`)
     case AUDIT_ACTIONS.VALIDATION_STARTED:
       return clampSummary(`${actorLabel} started validation for ${targetLabel}`)
     case AUDIT_ACTIONS.VALIDATION_PASSED:

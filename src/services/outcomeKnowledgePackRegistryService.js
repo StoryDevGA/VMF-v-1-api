@@ -41,12 +41,44 @@ import {
   extractKnowledgePackSourceDocumentText,
   SOURCE_DOCUMENT_EXTRACTION_ERRORS,
 } from './knowledgePackSourceDocumentExtractionService.js'
+import {
+  findActiveCapabilityConflict,
+  findSourceImportDuplicateWarnings,
+  isActiveCapabilityConflictRace,
+  isKnowledgePackVersionDuplicateRace,
+  scanOutcomeKnowledgePackDuplicates,
+} from './knowledgePackDuplicateGovernanceService.js'
+import { resolveRequestSpecificKnowledgePacks } from './knowledgePackRequestResolutionService.js'
 
 const normalizeText = (value) => String(value || '').trim()
 const normalizeToken = (value) => normalizeText(value).toUpperCase()
 const normalizeLowerKey = (value) => normalizeText(value).toLowerCase()
+const MONGO_TRANSACTION_TOPOLOGY_TYPES = new Set([
+  'ReplicaSetWithPrimary',
+  'Sharded',
+])
+const canUseSourceImportTransaction = () => (
+  mongoose.connection.readyState === 1
+  && MONGO_TRANSACTION_TOPOLOGY_TYPES.has(
+    normalizeText(mongoose.connection.client?.topology?.description?.type),
+  )
+)
 const normalizePackCategory = (value, packType) =>
   resolveKnowledgePackCategory({ packCategory: value, packType })
+const normalizeTokenList = (values) => Array.isArray(values)
+  ? [...new Set(values.map(normalizeToken).filter(Boolean))]
+  : []
+const normalizeDependencyReferences = (references) => Array.isArray(references)
+  ? references.map((reference) => ({
+    knowledgeLayer: normalizeToken(reference?.knowledgeLayer),
+    requirement: normalizeToken(reference?.requirement || 'REQUIRED'),
+    ...(normalizeToken(reference?.packType) ? { packType: normalizeToken(reference.packType) } : {}),
+    ...(normalizeLowerKey(reference?.packKey) ? { packKey: normalizeLowerKey(reference.packKey) } : {}),
+    ...(normalizeLowerKey(reference?.capabilityKey)
+      ? { capabilityKey: normalizeLowerKey(reference.capabilityKey) }
+      : {}),
+  }))
+  : []
 
 export const OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS = Object.freeze({
   AUDIT_PERSISTENCE_FAILED: 'AUDIT_PERSISTENCE_FAILED',
@@ -55,8 +87,13 @@ export const OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS = Object.freeze({
   PACK_SOURCE_EXTRACTION_REQUIRED: 'PACK_SOURCE_EXTRACTION_REQUIRED',
   PACK_SOURCE_EXTRACTION_FAILED: 'PACK_SOURCE_EXTRACTION_FAILED',
   PACK_SOURCE_TEXT_REQUIRED: 'PACK_SOURCE_TEXT_REQUIRED',
+  PACK_SOURCE_IMPORT_ROLLBACK_CONFLICT: 'PACK_SOURCE_IMPORT_ROLLBACK_CONFLICT',
   PACK_NOT_FOUND: 'PACK_NOT_FOUND',
   PACK_ACTIVE_ACTIVATION_NOT_FOUND: 'PACK_ACTIVE_ACTIVATION_NOT_FOUND',
+  PACK_ACTIVE_CAPABILITY_CONFLICT: 'PACK_ACTIVE_CAPABILITY_CONFLICT',
+  PACK_ACTIVATION_GOVERNANCE_METADATA_REQUIRED: 'PACK_ACTIVATION_GOVERNANCE_METADATA_REQUIRED',
+  PACK_ACTIVATION_GOVERNANCE_METADATA_MISMATCH: 'PACK_ACTIVATION_GOVERNANCE_METADATA_MISMATCH',
+  PACK_DUPLICATE_REVIEW_REQUIRED: 'PACK_DUPLICATE_REVIEW_REQUIRED',
   PACK_VERSION_ALREADY_EXISTS: 'PACK_VERSION_ALREADY_EXISTS',
   PACK_VERSION_NOT_FOUND: 'PACK_VERSION_NOT_FOUND',
   PACK_VERSION_LIFECYCLE_CONFLICT: 'PACK_VERSION_LIFECYCLE_CONFLICT',
@@ -93,6 +130,9 @@ const OUTCOME_STUDIO_REGISTRY_POLICY = Object.freeze({
   policyKey: 'outcome-studio-v1-required-packs',
   policyVersion: '1.0.0',
 })
+const REQUEST_RESOLUTION_VERSION_STATUSES = new Set([
+  OUTCOME_KNOWLEDGE_PACK_STATUSES.ACTIVE,
+])
 
 const createKnowledgePackError = ({
   status,
@@ -335,6 +375,11 @@ const ensureSourceDocumentDraftPackRecord = async ({
     $set: {
       packCategory: normalizePackCategory(packDefinition.packCategory, packDefinition.packType),
       purposeCategory: packDefinition.purposeCategory,
+      ...(packDefinition.knowledgeLayer ? { knowledgeLayer: packDefinition.knowledgeLayer } : {}),
+      ...(packDefinition.capabilityKey ? { capabilityKey: packDefinition.capabilityKey } : {}),
+      ...(packDefinition.workspaceCompatibility?.length > 0
+        ? { workspaceCompatibility: packDefinition.workspaceCompatibility }
+        : {}),
       packType: normalizeToken(packDefinition.packType),
       packKey: normalizeLowerKey(packDefinition.packKey),
       label: normalizeText(packDefinition.label),
@@ -369,6 +414,103 @@ const ensureSourceDocumentDraftPackRecord = async ({
     ...(session ? { session } : {}),
   },
 )
+
+const SOURCE_DOCUMENT_IMPORT_PACK_FIELDS = [
+  'packCategory',
+  'purposeCategory',
+  'knowledgeLayer',
+  'capabilityKey',
+  'workspaceCompatibility',
+  'packType',
+  'packKey',
+  'label',
+  'description',
+  'status',
+  'latestVersionId',
+  'latestSemanticVersion',
+  'sourceAuthority',
+  'executionMode',
+  'visibility',
+  'customerId',
+  'tenantId',
+  'authoringMode',
+  'reviewStatus',
+  'updatedBy',
+  'sourceMetadata',
+]
+
+const buildSourceDocumentImportRollbackGuard = ({ failedImportPackRecord, packId }) => {
+  const guard = { packId }
+  const recordId = failedImportPackRecord?._id
+  const updatedAt = failedImportPackRecord?.updatedAt
+  if (recordId) guard._id = recordId
+  if (updatedAt) guard.updatedAt = updatedAt
+  if (!updatedAt) {
+    guard.latestVersionId = normalizeText(failedImportPackRecord?.latestVersionId)
+    guard.latestSemanticVersion = normalizeText(failedImportPackRecord?.latestSemanticVersion)
+    guard.reviewStatus = normalizeToken(failedImportPackRecord?.reviewStatus)
+    guard['sourceMetadata.sourceDocumentId'] = normalizeText(
+      failedImportPackRecord?.sourceMetadata?.sourceDocumentId,
+    )
+  }
+  return guard
+}
+
+const throwSourceDocumentImportRollbackConflict = ({ packId, message }) => {
+  throw createKnowledgePackError({
+    status: 500,
+    code: 'OUTCOME_KNOWLEDGE_PACK_ROLLBACK_FAILED',
+    message,
+    reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_SOURCE_IMPORT_ROLLBACK_CONFLICT,
+    details: { packId },
+  })
+}
+
+const restoreSourceDocumentImportPackRecord = async ({
+  existingPackRecord,
+  failedImportPackRecord,
+  packId,
+}) => {
+  const rollbackGuard = buildSourceDocumentImportRollbackGuard({
+    failedImportPackRecord,
+    packId,
+  })
+  const currentPackRecord = await resolveLeanQuery(KnowledgePack.findOne(rollbackGuard))
+  if (!currentPackRecord) {
+    throwSourceDocumentImportRollbackConflict({
+      packId,
+      message: 'Knowledge pack source import rollback was blocked by a concurrent pack change.',
+    })
+  }
+
+  if (!existingPackRecord) {
+    const result = await KnowledgePack.deleteOne(rollbackGuard)
+    if (Number(result?.deletedCount || 0) !== 1) {
+      throwSourceDocumentImportRollbackConflict({
+        packId,
+        message: 'Knowledge pack source import rollback could not remove the failed draft.',
+      })
+    }
+    return
+  }
+
+  const update = { $set: {}, $unset: {} }
+  SOURCE_DOCUMENT_IMPORT_PACK_FIELDS.forEach((field) => {
+    if (Object.prototype.hasOwnProperty.call(existingPackRecord, field)) {
+      update.$set[field] = existingPackRecord[field]
+    } else {
+      update.$unset[field] = ''
+    }
+  })
+  if (Object.keys(update.$unset).length === 0) delete update.$unset
+  const result = await KnowledgePack.updateOne(rollbackGuard, update, { runValidators: true })
+  if (Number(result?.matchedCount ?? result?.modifiedCount ?? 0) !== 1) {
+    throwSourceDocumentImportRollbackConflict({
+      packId,
+      message: 'Knowledge pack source import rollback was blocked by a concurrent pack change.',
+    })
+  }
+}
 
 const buildValidationCheck = ({ code, passed, message }) => ({
   code,
@@ -689,6 +831,9 @@ const serializeKnowledgePack = (pack) => {
     packId,
     packCategory: normalizePackCategory(plain.packCategory, plain.packType),
     purposeCategory: normalizeToken(plain.purposeCategory || KNOWLEDGE_PACK_PURPOSE_CATEGORIES.SYSTEM),
+    knowledgeLayer: normalizeToken(plain.knowledgeLayer),
+    capabilityKey: normalizeLowerKey(plain.capabilityKey),
+    workspaceCompatibility: normalizeTokenList(plain.workspaceCompatibility),
     packType: normalizeToken(plain.packType),
     packKey: normalizeLowerKey(plain.packKey),
     label: normalizeText(plain.label || plain.packKey),
@@ -715,6 +860,10 @@ const serializeKnowledgePackVersion = (version) => {
     versionId,
     packCategory: normalizePackCategory(plain.packCategory, plain.packType),
     purposeCategory: normalizeToken(plain.purposeCategory || KNOWLEDGE_PACK_PURPOSE_CATEGORIES.SYSTEM),
+    knowledgeLayer: normalizeToken(plain.knowledgeLayer),
+    capabilityKey: normalizeLowerKey(plain.capabilityKey),
+    workspaceCompatibility: normalizeTokenList(plain.workspaceCompatibility),
+    dependencyReferences: normalizeDependencyReferences(plain.dependencyReferences),
     packType: normalizeToken(plain.packType),
     packKey: normalizeLowerKey(plain.packKey),
     status: normalizeToken(plain.status || OUTCOME_KNOWLEDGE_PACK_STATUSES.DRAFT),
@@ -744,6 +893,12 @@ const serializeKnowledgePackContentPreview = ({ version, packDefinition }) => {
     packId: normalizeText(plain.packId),
     packCategory: normalizePackCategory(plain.packCategory || packDefinition?.packCategory, plain.packType || packDefinition?.packType),
     purposeCategory: normalizeToken(plain.purposeCategory || KNOWLEDGE_PACK_PURPOSE_CATEGORIES.SYSTEM),
+    knowledgeLayer: normalizeToken(plain.knowledgeLayer || packDefinition?.knowledgeLayer),
+    capabilityKey: normalizeLowerKey(plain.capabilityKey || packDefinition?.capabilityKey),
+    workspaceCompatibility: normalizeTokenList(
+      plain.workspaceCompatibility || packDefinition?.workspaceCompatibility,
+    ),
+    dependencyReferences: normalizeDependencyReferences(plain.dependencyReferences),
     packType: normalizeToken(plain.packType || packDefinition?.packType),
     packKey: normalizeLowerKey(plain.packKey || packDefinition?.packKey),
     semanticVersion: normalizeText(plain.semanticVersion),
@@ -781,6 +936,10 @@ const serializeKnowledgePackActivation = (activation) => {
     versionId: normalizeText(plain.versionId),
     packCategory: normalizePackCategory(plain.packCategory, plain.packType),
     purposeCategory: normalizeToken(plain.purposeCategory || KNOWLEDGE_PACK_PURPOSE_CATEGORIES.SYSTEM),
+    knowledgeLayer: normalizeToken(plain.knowledgeLayer),
+    capabilityKey: normalizeLowerKey(plain.capabilityKey),
+    workspaceCompatibility: normalizeTokenList(plain.workspaceCompatibility),
+    dependencyReferences: normalizeDependencyReferences(plain.dependencyReferences),
     packType: normalizeToken(plain.packType),
     packKey: normalizeLowerKey(plain.packKey),
     label: normalizeText(plain.label || plain.packKey),
@@ -934,6 +1093,10 @@ const selectActiveActivations = ({ activations = [], scopeCandidates = [] }) => 
 const buildActivePackProjection = (pack, activation) => ({
   packCategory: normalizePackCategory(pack.packCategory || activation.packCategory, pack.packType),
   purposeCategory: normalizeToken(activation.purposeCategory || pack.purposeCategory),
+  knowledgeLayer: normalizeToken(activation.knowledgeLayer),
+  capabilityKey: normalizeLowerKey(activation.capabilityKey),
+  workspaceCompatibility: normalizeTokenList(activation.workspaceCompatibility),
+  dependencyReferences: normalizeDependencyReferences(activation.dependencyReferences),
   packType: normalizeToken(pack.packType || activation.packType),
   packKey: normalizeLowerKey(pack.packKey || activation.packKey),
   label: normalizeText(pack.label || activation.label || activation.packKey),
@@ -1043,6 +1206,119 @@ const classifyAdditionalActivePacks = ({ activations = [], contextCategories = [
   return { optionalPacks, validationPacks, blockedPacks }
 }
 
+const canonicalizeGovernanceList = (values = []) => JSON.stringify(
+  [...values].map((value) => (
+    value && typeof value === 'object'
+      ? Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)))
+      : value
+  )).sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))),
+)
+
+const resolveRequestRuntimeVersionEvidence = async ({ activations = [] } = {}) => {
+  const activationRows = activations.map(serializeKnowledgePackActivation).filter(Boolean)
+  const versionIds = [...new Set(activationRows.map((activation) => activation.versionId).filter(Boolean))]
+  const versionRows = versionIds.length > 0
+    ? await KnowledgePackVersion.find({ versionId: { $in: versionIds } }).lean()
+    : []
+  const versionById = new Map(
+    versionRows
+      .map(serializeKnowledgePackVersion)
+      .filter(Boolean)
+      .map((version) => [version.versionId, version]),
+  )
+  const requiredPackKeys = new Set(OUTCOME_STUDIO_REQUIRED_PACKS.map(buildRequiredPackKey))
+  const eligible = []
+  const excluded = []
+
+  const exclude = (activation, blockedReason) => {
+    excluded.push({
+      ...buildActivePackProjection(activation, activation),
+      runtimeBindable: false,
+      blockedReason,
+    })
+  }
+
+  for (const activation of activationRows) {
+    const version = versionById.get(activation.versionId)
+    if (!version) {
+      exclude(activation, 'VERSION_EVIDENCE_MISSING')
+      continue
+    }
+    if (!REQUEST_RESOLUTION_VERSION_STATUSES.has(normalizeToken(version.status))) {
+      exclude(activation, 'VERSION_NOT_ACTIVE')
+      continue
+    }
+    if (normalizeToken(version.reviewStatus) !== KNOWLEDGE_PACK_REVIEW_STATUSES.APPROVED) {
+      exclude(activation, 'VERSION_NOT_APPROVED')
+      continue
+    }
+    if (!normalizeText(version.contentHash) || version.contentHash !== activation.contentHash) {
+      exclude(activation, 'VERSION_CONTENT_HASH_MISMATCH')
+      continue
+    }
+
+    const mandatorySafeguard = requiredPackKeys.has(buildRequiredPackKey(activation))
+    if (!mandatorySafeguard) {
+      const versionLayer = normalizeToken(version.knowledgeLayer)
+      const versionCapability = normalizeLowerKey(version.capabilityKey)
+      const versionCompatibility = normalizeTokenList(version.workspaceCompatibility)
+      const versionDependencies = normalizeDependencyReferences(version.dependencyReferences)
+      if (!versionLayer || versionLayer !== normalizeToken(activation.knowledgeLayer)) {
+        exclude(activation, 'VERSION_LAYER_EVIDENCE_MISMATCH')
+        continue
+      }
+      if (versionCapability !== normalizeLowerKey(activation.capabilityKey)) {
+        exclude(activation, 'VERSION_CAPABILITY_EVIDENCE_MISMATCH')
+        continue
+      }
+      if (
+        canonicalizeGovernanceList(versionCompatibility)
+        !== canonicalizeGovernanceList(normalizeTokenList(activation.workspaceCompatibility))
+      ) {
+        exclude(activation, 'VERSION_WORKSPACE_EVIDENCE_MISMATCH')
+        continue
+      }
+      if (
+        canonicalizeGovernanceList(versionDependencies)
+        !== canonicalizeGovernanceList(normalizeDependencyReferences(activation.dependencyReferences))
+      ) {
+        exclude(activation, 'VERSION_DEPENDENCY_EVIDENCE_MISMATCH')
+        continue
+      }
+    }
+
+    eligible.push(activation)
+  }
+
+  return { eligible, excluded }
+}
+
+const hasRequestSpecificSelectors = ({
+  requestedOutputTypeKey,
+  requestedStyleKey,
+  audienceKeys,
+  industryKeys,
+  languageKey,
+  channelKey,
+} = {}) => Boolean(
+  normalizeLowerKey(requestedOutputTypeKey)
+  || normalizeLowerKey(requestedStyleKey)
+  || normalizeTokenList(audienceKeys).length
+  || normalizeTokenList(industryKeys).length
+  || normalizeLowerKey(languageKey)
+  || normalizeLowerKey(channelKey)
+)
+
+const uniquePacksByActivation = (packs = []) => {
+  const selected = new Map()
+  for (const pack of packs.filter(Boolean)) {
+    const key = normalizeText(pack.activationId)
+      || `${normalizeToken(pack.packType)}:${normalizeLowerKey(pack.packKey)}:${normalizeText(pack.versionId)}`
+    if (!selected.has(key)) selected.set(key, pack)
+  }
+  return [...selected.values()]
+}
+
 export const resolveOutcomeStudioKnowledgePacks = async ({
   frameworkKey,
   runtimeType,
@@ -1053,6 +1329,14 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
   tenantId,
   runtimeInstanceId,
   contextCategories = [],
+  workspaceType = 'OUTCOME',
+  requestedOutputTypeKey,
+  requestedStyleKey,
+  audienceKeys = [],
+  industryKeys = [],
+  languageKey,
+  channelKey,
+  resolvedAt,
 } = {}) => {
   const scopeCandidates = buildOutcomeKnowledgePackScopeCandidates({
     frameworkKey,
@@ -1071,11 +1355,27 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
   })
     .sort({ activatedAt: -1 })
     .lean()
-  const eligibleActivations = activations
+  let eligibleActivations = activations
     .map(serializeKnowledgePackActivation)
     .filter(Boolean)
     .filter(isOutcomeStudioActivation)
     .filter((activation) => isActivationVisibleToRuntime({ activation, customerId, tenantId }))
+  const requestSpecific = hasRequestSpecificSelectors({
+    requestedOutputTypeKey,
+    requestedStyleKey,
+    audienceKeys,
+    industryKeys,
+    languageKey,
+    channelKey,
+  })
+  let versionEvidenceExclusions = []
+  if (requestSpecific) {
+    const versionEvidence = await resolveRequestRuntimeVersionEvidence({
+      activations: eligibleActivations,
+    })
+    eligibleActivations = versionEvidence.eligible
+    versionEvidenceExclusions = versionEvidence.excluded
+  }
   const activeActivationByPackKey = selectActiveActivations({
     activations: eligibleActivations,
     scopeCandidates,
@@ -1092,6 +1392,99 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
     ...additionalPacks.validationPacks,
   ]
   const unboundRequiredPacks = requiredPacks.filter((pack) => pack.runtimeBindable !== true)
+  if (requestSpecific) {
+    const requestResolution = resolveRequestSpecificKnowledgePacks({
+      mandatorySafeguards: activeRequiredPacks,
+      candidates: [...activeActivationByPackKey.values()].filter(
+        (activation) => !OUTCOME_STUDIO_REQUIRED_PACKS
+          .some((requiredPack) => buildRequiredPackKey(requiredPack) === buildRequiredPackKey(activation)),
+      ),
+      request: {
+        workspaceType,
+        requestedOutputTypeKey,
+        requestedStyleKey,
+        audienceKeys,
+        industryKeys,
+        languageKey,
+        channelKey,
+        resolvedAt,
+      },
+      scopeCandidates,
+    })
+    const selectedPacks = uniquePacksByActivation([
+      ...requestResolution.providerContextPacks,
+      ...requestResolution.preValidationPacks,
+      ...requestResolution.postValidationPacks,
+      ...requestResolution.systemOnlyPacks,
+    ])
+    const providerContextPacks = requestResolution.providerContextPacks.filter(
+      (pack) => !OUTCOME_STUDIO_REQUIRED_PACKS
+        .some((requiredPack) => buildRequiredPackKey(requiredPack) === buildRequiredPackKey(pack)),
+    )
+    const validationPacks = uniquePacksByActivation([
+      ...requestResolution.preValidationPacks,
+      ...requestResolution.postValidationPacks,
+    ])
+    const summaryByStatus = {
+      READY: 'Request-specific Knowledge Pack resolution is ready.',
+      READY_WITH_GAPS: 'Request-specific Knowledge Pack resolution is ready with optional gaps.',
+      BLOCKED: 'Request-specific Knowledge Pack resolution is blocked by missing governed knowledge.',
+      AMBIGUOUS: 'Request-specific Knowledge Pack resolution found multiple equally eligible candidates.',
+    }
+
+    return {
+      status: requestResolution.status,
+      mode: OUTCOME_KNOWLEDGE_PACK_RESOLUTION_MODE,
+      summary: summaryByStatus[requestResolution.status],
+      activePacks: selectedPacks.filter(
+        (pack) => normalizeToken(pack.executionMode) !== KNOWLEDGE_PACK_EXECUTION_MODES.SYSTEM_ONLY,
+      ),
+      requiredPacks: requestResolution.mandatorySafeguards,
+      mandatorySafeguards: requestResolution.mandatorySafeguards,
+      optionalPacks: providerContextPacks,
+      validationPacks,
+      providerContextPacks: requestResolution.providerContextPacks,
+      preValidationPacks: requestResolution.preValidationPacks,
+      postValidationPacks: requestResolution.postValidationPacks,
+      systemOnlyPacks: requestResolution.systemOnlyPacks,
+      blockedPacks: [
+        ...versionEvidenceExclusions,
+        ...additionalPacks.blockedPacks,
+      ],
+      sourceBundle: buildOutcomeKnowledgePackSourceBundle(),
+      selectedByLayer: requestResolution.selectedByLayer,
+      missingDependencies: requestResolution.missingDependencies,
+      ambiguousCandidates: requestResolution.ambiguousCandidates,
+      excludedCandidates: requestResolution.excludedCandidates,
+      warnings: requestResolution.warnings,
+      dependencyGraph: requestResolution.dependencyGraph,
+      lineage: requestResolution.lineage,
+      resolution: {
+        ...requestResolution,
+        scopeCandidates,
+        activeCount: requestResolution.mandatorySafeguards
+          .filter((pack) => pack.runtimeBindable === true).length,
+        resolvedCount: selectedPacks.length,
+        requiredCount: requestResolution.mandatorySafeguards.length,
+        optionalCount: providerContextPacks.length,
+        validationCount: validationPacks.length,
+        blockedCount: versionEvidenceExclusions.length
+          + requestResolution.missingDependencies.length
+          + requestResolution.ambiguousCandidates.length,
+        requestedContextCategories: contextCategories.map(normalizeToken).filter(Boolean),
+        unboundRequiredPacks: requestResolution.mandatorySafeguards
+          .filter((pack) => pack.runtimeBindable !== true)
+          .map((pack) => ({
+            packCategory: normalizePackCategory(pack.packCategory, pack.packType),
+            packType: pack.packType,
+            packKey: pack.packKey,
+            label: pack.label,
+            status: pack.status,
+          })),
+      },
+    }
+  }
+
   const status = unboundRequiredPacks.length === 0
     ? OUTCOME_STUDIO_BINDING_STATUSES.PROJECTED
     : OUTCOME_STUDIO_BINDING_STATUSES.BLOCKED
@@ -1150,16 +1543,19 @@ export const resolveOutcomeStudioKnowledgePackBinding = async ({ query = {} } = 
 
 const buildListFilter = ({
   q,
+  knowledgeLayer,
   packType,
   status,
   packKey,
 } = {}) => {
   const filter = {}
   const normalizedPackType = normalizeToken(packType)
+  const normalizedKnowledgeLayer = normalizeToken(knowledgeLayer)
   const normalizedStatus = normalizeToken(status)
   const normalizedPackKey = normalizeLowerKey(packKey)
 
   if (normalizedPackType) filter.packType = normalizedPackType
+  if (normalizedKnowledgeLayer) filter.knowledgeLayer = normalizedKnowledgeLayer
   if (normalizedStatus) filter.status = normalizedStatus
   if (normalizedPackKey) filter.packKey = normalizedPackKey
 
@@ -1182,6 +1578,7 @@ const buildSort = ({ sortBy, sortOrder } = {}) => {
   if (sortBy === 'label') return { label: direction, packKey: 1 }
   if (sortBy === 'packKey') return { packKey: direction }
   if (sortBy === 'packType') return { packType: direction, packKey: 1 }
+  if (sortBy === 'knowledgeLayer') return { knowledgeLayer: direction, packType: 1, packKey: 1 }
   if (sortBy === 'status') return { status: direction, packKey: 1 }
   if (sortBy === 'updatedAt') return { updatedAt: direction, packKey: 1 }
   return { packType: 1, packKey: 1 }
@@ -1212,6 +1609,9 @@ export const listOutcomeKnowledgePacks = async ({ query = {} } = {}) => {
   }
 }
 
+export const getOutcomeKnowledgePackDuplicateDiagnostics = async () =>
+  scanOutcomeKnowledgePackDuplicates()
+
 const buildPackLookup = (packId) => {
   const normalizedPackId = normalizeText(packId)
   const clauses = [
@@ -1235,6 +1635,9 @@ const packRecordMatchesLookup = (packRecord, packId) => {
 const buildPersistedPackDefinition = (packRecord = {}) => ({
   packCategory: normalizePackCategory(packRecord.packCategory, packRecord.packType),
   purposeCategory: normalizeToken(packRecord.purposeCategory || KNOWLEDGE_PACK_PURPOSE_CATEGORIES.SYSTEM),
+  knowledgeLayer: normalizeToken(packRecord.knowledgeLayer),
+  capabilityKey: normalizeLowerKey(packRecord.capabilityKey),
+  workspaceCompatibility: normalizeTokenList(packRecord.workspaceCompatibility),
   packType: normalizeToken(packRecord.packType),
   packKey: normalizeLowerKey(packRecord.packKey),
   label: normalizeText(packRecord.label || packRecord.packKey),
@@ -1446,6 +1849,10 @@ export const importOutcomeKnowledgePackSourceDocumentDraft = async ({
       packType: body.packType,
       purposeCategory: body.purposeCategory,
     }),
+    knowledgeLayer: normalizeToken(body.knowledgeLayer),
+    capabilityKey: normalizeLowerKey(body.capabilityKey),
+    workspaceCompatibility: normalizeTokenList(body.workspaceCompatibility),
+    dependencyReferences: normalizeDependencyReferences(body.dependencyReferences),
     sourceAuthority: normalizeText(body.sourceAuthority),
     executionMode: normalizeToken(body.executionMode || KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT),
     sourceDocument: sourceDocumentInput,
@@ -1496,84 +1903,218 @@ export const importOutcomeKnowledgePackSourceDocumentDraft = async ({
     })
   }
 
-  const packRecord = await ensureSourceDocumentDraftPackRecord({
-    packDefinition,
-    actorUserId,
-    versionId,
-    semanticVersion,
-    scope,
-  })
-  const version = new KnowledgePackVersion({
-    versionId,
-    packId: canonicalPackId,
-    packCategory: normalizePackCategory(packDefinition.packCategory, packDefinition.packType),
-    purposeCategory: packDefinition.purposeCategory,
-    packType: packDefinition.packType,
-    packKey: packDefinition.packKey,
-    semanticVersion,
-    schemaVersion: normalizeText(body.schemaVersion || '1.0.0'),
-    status: OUTCOME_KNOWLEDGE_PACK_STATUSES.DRAFT,
-    scopeType: scope.scopeType,
-    scopeKey: scope.scopeKey,
+  const duplicateWarnings = await findSourceImportDuplicateWarnings({
+    canonicalPackId,
     contentHash,
-    contentFormat,
-    sourceAuthority: packDefinition.sourceAuthority,
-    sourceFilename: sourceDocument.filename,
-    sourceDocuments: [sourceDocument],
-    content: extractedText,
-    sourceMetadata: {
-      importMode: 'SOURCE_DOCUMENT_IMPORT_DRAFT',
-      sourceStatus: SOURCE_DOCUMENT_PRESENT_STATUS,
-      sourceFilename: sourceDocument.filename,
-      sourceDocumentId: sourceDocument.sourceDocumentId,
-      sourceHash,
-      contentFormat,
-      sourceDocument,
-      parserStatus: extraction.parserStatus || 'TEXT_CAPTURED',
-      extractionMode: extraction.extractionMode || 'DETERMINISTIC_TEXT',
-      extractionMethod: extraction.extractionMethod || 'CLIENT_TEXT',
-      extractionAdapter: extraction.extractionAdapter || 'knowledge-pack-text-import-v1',
-      sourceSizeBytes: extraction.sourceSizeBytes,
-      contentPersisted: true,
-    },
-    validationSummary: {
-      status: 'NOT_RUN',
-      mode: 'HUMAN_REVIEW_REQUIRED',
-      checkedAt: null,
-      checks: [],
-      issues: [],
-    },
-    executionMode: packDefinition.executionMode,
-    visibility: scope.visibility,
-    customerId: scope.customerId,
-    tenantId: scope.tenantId,
-    authoringMode: KNOWLEDGE_PACK_AUTHORING_MODES.IMPORT_SOURCE_DOCUMENT,
-    reviewStatus: KNOWLEDGE_PACK_REVIEW_STATUSES.DRAFT,
-    uploadedBy: actorUserId || null,
+    label: packDefinition.label,
+    sourceHash,
+    scopeKey: scope.scopeKey,
   })
+  const duplicateOverrideReason = normalizeText(body.duplicateOverrideReason)
+  if (duplicateWarnings.length > 0 && !duplicateOverrideReason) {
+    throw createKnowledgePackError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Potential duplicate Knowledge Pack records require review before this draft can be created.',
+      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_DUPLICATE_REVIEW_REQUIRED,
+      details: {
+        duplicateStatus: 'REVIEW_REQUIRED',
+        classifications: [...new Set(duplicateWarnings.map((warning) => warning.classification))],
+        candidates: duplicateWarnings.map((warning) => ({
+          classification: warning.classification,
+          ...warning.candidate,
+        })),
+        allowedActions: ['VIEW_EXISTING', 'CONTINUE_WITH_REASON', 'CANCEL'],
+      },
+    })
+  }
 
-  await saveDocument(version)
-  await logKnowledgePackAudit({
-    auditRequest,
-    action: auditService.AUDIT_ACTIONS.OUTCOME_KNOWLEDGE_PACK_VERSION_UPLOADED,
-    actorUserId,
-    packRecord,
-    packDefinition,
-    version,
-      diff: {
-        status: { from: null, to: OUTCOME_KNOWLEDGE_PACK_STATUSES.DRAFT },
+  const buildSourceImportVersion = (metadataPackRecord = null) => {
+    const versionKnowledgeLayer = packDefinition.knowledgeLayer
+      || normalizeToken(metadataPackRecord?.knowledgeLayer)
+    const versionCapabilityKey = packDefinition.capabilityKey
+      || normalizeLowerKey(metadataPackRecord?.capabilityKey)
+    const versionWorkspaceCompatibility = packDefinition.workspaceCompatibility.length > 0
+      ? packDefinition.workspaceCompatibility
+      : normalizeTokenList(metadataPackRecord?.workspaceCompatibility)
+
+    return new KnowledgePackVersion({
+      versionId,
+      packId: canonicalPackId,
+      packCategory: normalizePackCategory(packDefinition.packCategory, packDefinition.packType),
+      purposeCategory: packDefinition.purposeCategory,
+      knowledgeLayer: versionKnowledgeLayer || undefined,
+      capabilityKey: versionCapabilityKey || undefined,
+      workspaceCompatibility: versionWorkspaceCompatibility.length > 0
+        ? versionWorkspaceCompatibility
+        : undefined,
+      dependencyReferences: packDefinition.dependencyReferences.length > 0
+        ? packDefinition.dependencyReferences
+        : undefined,
+      packType: packDefinition.packType,
+      packKey: packDefinition.packKey,
+      semanticVersion,
+      schemaVersion: normalizeText(body.schemaVersion || '1.0.0'),
+      status: OUTCOME_KNOWLEDGE_PACK_STATUSES.DRAFT,
+      scopeType: scope.scopeType,
+      scopeKey: scope.scopeKey,
+      contentHash,
+      contentFormat,
+      sourceAuthority: packDefinition.sourceAuthority,
+      sourceFilename: sourceDocument.filename,
+      sourceDocuments: [sourceDocument],
+      content: extractedText,
+      sourceMetadata: {
         importMode: 'SOURCE_DOCUMENT_IMPORT_DRAFT',
         sourceStatus: SOURCE_DOCUMENT_PRESENT_STATUS,
         sourceFilename: sourceDocument.filename,
         sourceDocumentId: sourceDocument.sourceDocumentId,
         sourceHash,
         contentFormat,
-        contentVisible: false,
-        contentIncludedInAudit: false,
+        sourceDocument,
+        parserStatus: extraction.parserStatus || 'TEXT_CAPTURED',
+        extractionMode: extraction.extractionMode || 'DETERMINISTIC_TEXT',
+        extractionMethod: extraction.extractionMethod || 'CLIENT_TEXT',
+        extractionAdapter: extraction.extractionAdapter || 'knowledge-pack-text-import-v1',
+        sourceSizeBytes: extraction.sourceSizeBytes,
+        contentPersisted: true,
+      },
+      validationSummary: {
+        status: 'NOT_RUN',
+        mode: 'HUMAN_REVIEW_REQUIRED',
+        checkedAt: null,
+        checks: [],
+        issues: [],
+      },
+      executionMode: packDefinition.executionMode,
+      visibility: scope.visibility,
+      customerId: scope.customerId,
+      tenantId: scope.tenantId,
+      authoringMode: KNOWLEDGE_PACK_AUTHORING_MODES.IMPORT_SOURCE_DOCUMENT,
       reviewStatus: KNOWLEDGE_PACK_REVIEW_STATUSES.DRAFT,
-      activationCreated: false,
-    },
-  })
+      uploadedBy: actorUserId || null,
+    })
+  }
+
+  const useTransaction = canUseSourceImportTransaction()
+  const existingPackRecord = useTransaction
+    ? null
+    : await resolveLeanQuery(KnowledgePack.findOne({ packId: canonicalPackId }))
+  let packRecord = null
+  let version = null
+  let versionPersisted = false
+  let packPersisted = false
+  let session = null
+
+  const persistSourceImport = async ({ transactionSession = null, versionFirst = false } = {}) => {
+    if (versionFirst) {
+      version = buildSourceImportVersion(existingPackRecord)
+      await saveDocument(version)
+      versionPersisted = true
+    }
+
+    packRecord = await ensureSourceDocumentDraftPackRecord({
+      packDefinition,
+      actorUserId,
+      versionId,
+      semanticVersion,
+      scope,
+      session: transactionSession,
+    })
+    packPersisted = true
+
+    if (!versionFirst) {
+      version = buildSourceImportVersion(packRecord)
+      await saveDocument(version, transactionSession)
+      versionPersisted = true
+    }
+
+    try {
+      await logKnowledgePackAudit({
+        auditRequest,
+        action: auditService.AUDIT_ACTIONS.OUTCOME_KNOWLEDGE_PACK_VERSION_UPLOADED,
+        actorUserId,
+        packRecord,
+        packDefinition,
+        version,
+        session: transactionSession,
+        throwOnError: true,
+        diff: {
+          status: { from: null, to: OUTCOME_KNOWLEDGE_PACK_STATUSES.DRAFT },
+          importMode: 'SOURCE_DOCUMENT_IMPORT_DRAFT',
+          sourceStatus: SOURCE_DOCUMENT_PRESENT_STATUS,
+          sourceFilename: sourceDocument.filename,
+          sourceDocumentId: sourceDocument.sourceDocumentId,
+          sourceHash,
+          contentFormat,
+          contentVisible: false,
+          contentIncludedInAudit: false,
+          reviewStatus: KNOWLEDGE_PACK_REVIEW_STATUSES.DRAFT,
+          activationCreated: false,
+          ...(duplicateWarnings.length > 0
+            ? {
+              duplicateOverrideReason,
+              duplicateClassifications: [...new Set(
+                duplicateWarnings.map((warning) => warning.classification),
+              )],
+              duplicateCandidatePackIds: [...new Set(
+                duplicateWarnings.map((warning) => warning.candidate.packId).filter(Boolean),
+              )],
+            }
+            : {}),
+        },
+      })
+    } catch (err) {
+      err.outcomeKnowledgePackAuditFailure = true
+      throw err
+    }
+  }
+
+  try {
+    if (useTransaction) {
+      session = await mongoose.startSession()
+      await session.withTransaction(async () => {
+        await persistSourceImport({ transactionSession: session })
+      })
+    } else {
+      await persistSourceImport({ versionFirst: true })
+    }
+  } catch (err) {
+    if (!useTransaction) {
+      if (packPersisted) {
+        await restoreSourceDocumentImportPackRecord({
+          existingPackRecord,
+          failedImportPackRecord: packRecord,
+          packId: canonicalPackId,
+        })
+      }
+      if (versionPersisted) {
+        await KnowledgePackVersion.deleteOne({ versionId })
+      }
+    }
+
+    if (err?.outcomeKnowledgePackAuditFailure) {
+      throwKnowledgePackAuditError(err)
+    }
+    if (isKnowledgePackVersionDuplicateRace(err)) {
+      throw createKnowledgePackError({
+        status: 409,
+        code: 'CONFLICT',
+        message: 'Knowledge pack source document draft already exists for this pack, semantic version, and scope.',
+        reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_VERSION_ALREADY_EXISTS,
+        details: {
+          packId: canonicalPackId,
+          versionId,
+          semanticVersion,
+          scopeKey: scope.scopeKey,
+          conflictSource: 'UNIQUE_INDEX',
+        },
+      })
+    }
+    throw err
+  } finally {
+    await session?.endSession()
+  }
 
   return {
     pack: serializeKnowledgePack(packRecord),
@@ -1725,45 +2266,109 @@ export const validateOutcomeKnowledgePackVersion = async ({
   })
   const validationPassed = validationSummary.status === 'PASSED'
   const previousStatus = normalizeToken(version.status || OUTCOME_KNOWLEDGE_PACK_STATUSES.DRAFT)
-  version.status = validationPassed
+  const previousVersionState = {
+    status: previousStatus,
+    validationSummary: cloneValue(version.validationSummary),
+    validatedAt: version.validatedAt || null,
+  }
+  const previousPackState = {
+    status: normalizeToken(authoringContext.packRecord?.status),
+    latestVersionId: normalizeText(authoringContext.packRecord?.latestVersionId),
+    latestSemanticVersion: normalizeText(authoringContext.packRecord?.latestSemanticVersion),
+    updatedBy: authoringContext.packRecord?.updatedBy || null,
+  }
+  const nextStatus = validationPassed
     ? OUTCOME_KNOWLEDGE_PACK_STATUSES.VALIDATED
     : OUTCOME_KNOWLEDGE_PACK_STATUSES.FAILED_VALIDATION
-  version.validationSummary = validationSummary
-  version.validatedAt = validationPassed ? new Date(validationSummary.checkedAt) : null
+  let packRecord = null
+  let session = null
 
-  await saveDocument(version)
-  const packRecord = {
-    ...toPlainObject(authoringContext.packRecord),
-    status: version.status,
-    latestVersionId: version.versionId,
-    latestSemanticVersion: version.semanticVersion,
-    updatedBy: actorUserId || null,
+  const applyValidationMutation = async (transactionSession = null) => {
+    version.status = nextStatus
+    version.validationSummary = validationSummary
+    version.validatedAt = validationPassed ? new Date(validationSummary.checkedAt) : null
+    await saveDocument(version, transactionSession)
+
+    packRecord = {
+      ...toPlainObject(authoringContext.packRecord),
+      status: version.status,
+      latestVersionId: version.versionId,
+      latestSemanticVersion: version.semanticVersion,
+      updatedBy: actorUserId || null,
+    }
+    await updateKnowledgePackLatestVersion({
+      packId: canonicalPackId,
+      status: version.status,
+      versionId: version.versionId,
+      semanticVersion: version.semanticVersion,
+      actorUserId,
+      session: transactionSession,
+    })
+
+    try {
+      await logKnowledgePackAudit({
+        auditRequest,
+        action: validationPassed
+          ? auditService.AUDIT_ACTIONS.OUTCOME_KNOWLEDGE_PACK_VERSION_VALIDATED
+          : auditService.AUDIT_ACTIONS.OUTCOME_KNOWLEDGE_PACK_VALIDATION_FAILED,
+        actorUserId,
+        packRecord,
+        packDefinition,
+        version,
+        session: transactionSession,
+        throwOnError: true,
+        diff: {
+          validationSummary,
+          status: {
+            from: previousStatus,
+            to: version.status,
+          },
+        },
+      })
+    } catch (err) {
+      err.outcomeKnowledgePackAuditFailure = true
+      throw err
+    }
   }
-  await updateKnowledgePackLatestVersion({
-    packId: canonicalPackId,
-    status: version.status,
-    versionId: version.versionId,
-    semanticVersion: version.semanticVersion,
-    actorUserId,
-  })
 
-  await logKnowledgePackAudit({
-    auditRequest,
-    action: validationPassed
-      ? auditService.AUDIT_ACTIONS.OUTCOME_KNOWLEDGE_PACK_VERSION_VALIDATED
-      : auditService.AUDIT_ACTIONS.OUTCOME_KNOWLEDGE_PACK_VALIDATION_FAILED,
-    actorUserId,
-    packRecord,
-    packDefinition,
-    version,
-    diff: {
-      validationSummary,
-      status: {
-        from: previousStatus,
-        to: version.status,
-      },
-    },
-  })
+  try {
+    if (mongoose.connection.readyState === 1) {
+      session = await mongoose.startSession()
+      await session.withTransaction(async () => {
+        await applyValidationMutation(session)
+      })
+    } else {
+      await applyValidationMutation()
+    }
+  } catch (err) {
+    version.status = previousVersionState.status
+    version.validationSummary = previousVersionState.validationSummary
+    version.validatedAt = previousVersionState.validatedAt
+
+    if (err?.outcomeKnowledgePackAuditFailure) {
+      if (mongoose.connection.readyState !== 1) {
+        await KnowledgePackVersion.updateOne(
+          { versionId: version.versionId },
+          {
+            $set: {
+              status: previousVersionState.status,
+              validationSummary: previousVersionState.validationSummary,
+              validatedAt: previousVersionState.validatedAt,
+            },
+          },
+        )
+        await KnowledgePack.updateOne(
+          { packId: canonicalPackId },
+          { $set: previousPackState },
+          { runValidators: true },
+        )
+      }
+      throwKnowledgePackAuditError(err)
+    }
+    throw err
+  } finally {
+    await session?.endSession()
+  }
 
   if (!validationPassed) {
     throw createKnowledgePackError({
@@ -2052,6 +2657,82 @@ const applyKnowledgePackActivationMutation = async ({
   version,
   session = null,
 }) => {
+  const knowledgeLayer = normalizeToken(version.knowledgeLayer)
+  const capabilityKey = normalizeLowerKey(version.capabilityKey)
+  const workspaceCompatibility = normalizeTokenList(version.workspaceCompatibility)
+  const missingFields = [
+    ...(!knowledgeLayer ? ['knowledgeLayer'] : []),
+    ...(!capabilityKey ? ['capabilityKey'] : []),
+    ...(workspaceCompatibility.length === 0 ? ['workspaceCompatibility'] : []),
+  ]
+
+  if (missingFields.length > 0) {
+    throw createKnowledgePackError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Knowledge pack activation requires complete governance metadata.',
+      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_ACTIVATION_GOVERNANCE_METADATA_REQUIRED,
+      details: {
+        packId: version.packId,
+        versionId: version.versionId,
+        missingFields,
+      },
+    })
+  }
+
+  const packKnowledgeLayer = normalizeToken(packRecord?.knowledgeLayer)
+  const packCapabilityKey = normalizeLowerKey(packRecord?.capabilityKey)
+  const packWorkspaceCompatibility = normalizeTokenList(packRecord?.workspaceCompatibility)
+  const mismatchFields = [
+    ...(packKnowledgeLayer && packKnowledgeLayer !== knowledgeLayer ? ['knowledgeLayer'] : []),
+    ...(packCapabilityKey && packCapabilityKey !== capabilityKey ? ['capabilityKey'] : []),
+    ...(
+      packWorkspaceCompatibility.length > 0
+      && canonicalizeGovernanceList(packWorkspaceCompatibility)
+        !== canonicalizeGovernanceList(workspaceCompatibility)
+        ? ['workspaceCompatibility']
+        : []
+    ),
+  ]
+
+  if (mismatchFields.length > 0) {
+    throw createKnowledgePackError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Knowledge pack version governance metadata does not match the pack.',
+      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_ACTIVATION_GOVERNANCE_METADATA_MISMATCH,
+      details: {
+        packId: version.packId,
+        versionId: version.versionId,
+        mismatchFields,
+      },
+    })
+  }
+
+  const capabilityConflict = await findActiveCapabilityConflict({
+    capabilityKey,
+    knowledgeLayer,
+    packId: version.packId,
+    scopeKey: scope.scopeKey,
+    session,
+  })
+  if (capabilityConflict) {
+    throw createKnowledgePackError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'A different Knowledge Pack is already active for this knowledge capability and scope.',
+      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_ACTIVE_CAPABILITY_CONFLICT,
+      details: {
+        packId: version.packId,
+        versionId: version.versionId,
+        knowledgeLayer,
+        capabilityKey,
+        scopeKey: scope.scopeKey,
+        conflictingActivation: capabilityConflict,
+      },
+    })
+  }
+
   const previousActivationQuery = KnowledgePackActivation.findOne({
     packType: version.packType,
     packKey: version.packKey,
@@ -2075,6 +2756,12 @@ const applyKnowledgePackActivationMutation = async ({
       || packRecord?.purposeCategory
       || KNOWLEDGE_PACK_PURPOSE_CATEGORIES.SYSTEM,
     ),
+    knowledgeLayer,
+    capabilityKey,
+    workspaceCompatibility,
+    ...(Array.isArray(version.dependencyReferences)
+      ? { dependencyReferences: normalizeDependencyReferences(version.dependencyReferences) }
+      : {}),
     packType: version.packType,
     packKey: version.packKey,
     label: packDefinition?.label || packRecord?.label || version.packKey,
@@ -2125,7 +2812,15 @@ const applyKnowledgePackActivationMutation = async ({
       ...(session ? { session } : {}),
     },
   )
-  await saveDocument(activation, session)
+  try {
+    await saveDocument(activation, session)
+  } catch (err) {
+    err.activationResult = {
+      activation,
+      previousActivation,
+    }
+    throw err
+  }
 
   version.status = OUTCOME_KNOWLEDGE_PACK_STATUSES.ACTIVE
   await saveDocument(version, session)
@@ -2175,6 +2870,7 @@ const rollbackActivationAfterAuditFailure = async ({
   activationId,
   version,
   previousStatus,
+  previousPackState,
   previousActivation = null,
 }) => {
   const rollbackWrites = [
@@ -2194,7 +2890,14 @@ const rollbackActivationAfterAuditFailure = async ({
     ),
     KnowledgePack.updateOne(
       { packId: version.packId },
-      { $set: { status: previousStatus } },
+      {
+        $set: {
+          status: previousPackState.status,
+          latestVersionId: previousPackState.latestVersionId,
+          latestSemanticVersion: previousPackState.latestSemanticVersion,
+          updatedBy: previousPackState.updatedBy,
+        },
+      },
     ),
   ]
 
@@ -2319,6 +3022,12 @@ export const activateOutcomeKnowledgePackVersion = async ({
   })
 
   const packRecord = authoringContext.packRecord
+  const previousPackState = {
+    status: normalizeToken(packRecord.status),
+    latestVersionId: normalizeText(packRecord.latestVersionId),
+    latestSemanticVersion: normalizeText(packRecord.latestSemanticVersion),
+    updatedBy: packRecord.updatedBy || null,
+  }
   const scope = buildActivationScope(body)
   const activationTime = new Date()
   let activationResult = null
@@ -2358,6 +3067,7 @@ export const activateOutcomeKnowledgePackVersion = async ({
           activationId: rollbackActivationResult.activation.activationId,
           version,
           previousStatus,
+          previousPackState,
           previousActivation: rollbackActivationResult.previousActivation,
         })
       }
@@ -2370,7 +3080,25 @@ export const activateOutcomeKnowledgePackVersion = async ({
         activationId: rollbackActivationResult.activation.activationId,
         version,
         previousStatus,
+        previousPackState,
         previousActivation: rollbackActivationResult.previousActivation,
+      })
+    }
+
+    if (isActiveCapabilityConflictRace(err)) {
+      throw createKnowledgePackError({
+        status: 409,
+        code: 'CONFLICT',
+        message: 'A different Knowledge Pack became active for this knowledge capability and scope.',
+        reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_ACTIVE_CAPABILITY_CONFLICT,
+        details: {
+          packId: version.packId,
+          versionId: version.versionId,
+          knowledgeLayer: normalizeToken(version.knowledgeLayer),
+          capabilityKey: normalizeLowerKey(version.capabilityKey),
+          scopeKey: scope.scopeKey,
+          conflictSource: 'UNIQUE_INDEX',
+        },
       })
     }
 
@@ -2777,6 +3505,12 @@ export const rollbackOutcomeKnowledgePack = async ({
   }
 
   const activationTime = new Date()
+  const previousPackState = {
+    status: normalizeToken(packRecord.status),
+    latestVersionId: normalizeText(packRecord.latestVersionId),
+    latestSemanticVersion: normalizeText(packRecord.latestSemanticVersion),
+    updatedBy: packRecord.updatedBy || null,
+  }
   const rollbackReason = normalizeText(body.rollbackReason)
     || `Rollback from ${activeActivation.versionId} to ${targetVersion.versionId}`
   let activationResult = null
@@ -2821,6 +3555,7 @@ export const rollbackOutcomeKnowledgePack = async ({
           activationId: rollbackActivationResult.activation.activationId,
           version: targetVersion,
           previousStatus,
+          previousPackState,
           previousActivation: rollbackActivationResult.previousActivation,
         })
       }
@@ -2833,6 +3568,7 @@ export const rollbackOutcomeKnowledgePack = async ({
         activationId: rollbackActivationResult.activation.activationId,
         version: targetVersion,
         previousStatus,
+        previousPackState,
         previousActivation: rollbackActivationResult.previousActivation,
       })
     }

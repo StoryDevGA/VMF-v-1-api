@@ -16,6 +16,10 @@ const hasIndex = (model, expectedFields) =>
   model.schema.indexes().some(([fields]) =>
     JSON.stringify(fields) === JSON.stringify(expectedFields))
 
+const getIndexOptions = (model, expectedFields) =>
+  model.schema.indexes().find(([fields]) =>
+    JSON.stringify(fields) === JSON.stringify(expectedFields))?.[1]
+
 const makeOutcomeAssetPayload = () => ({
   outcomeAssetId: 'asset-vmf-summary-001',
   sessionId: 'session-vmf-001',
@@ -57,6 +61,18 @@ const makeOutcomeAssetVersionPayload = () => ({
   customerContent: { markdown: '# Summary' },
 })
 
+const makeKnowledgePackActivationPayload = (overrides = {}) => ({
+  packType: 'STYLE',
+  packKey: 'executive-board-style',
+  versionId: 'kpv-style-executive-board-style-1-0-0-global',
+  semanticVersion: '1.0.0',
+  status: 'ACTIVE',
+  knowledgeLayer: 'STYLE',
+  capabilityKey: 'executive-board',
+  workspaceCompatibility: ['OUTCOME'],
+  ...overrides,
+})
+
 describe('Knowledge Runtime model contracts', () => {
   test('serializes stable public ids for framework packages and runtime skills', () => {
     const frameworkPackage = new FrameworkPackage({
@@ -93,7 +109,22 @@ describe('Knowledge Runtime model contracts', () => {
     expect(hasIndex(KnowledgePackManifest, { scopeType: 1, scopeKey: 1, status: 1 })).toBe(true)
     expect(hasIndex(KnowledgePack, { purposeCategory: 1, status: 1, updatedAt: -1 })).toBe(true)
     expect(hasIndex(KnowledgePackVersion, { visibility: 1, customerId: 1, tenantId: 1, status: 1 })).toBe(true)
+    expect(hasIndex(KnowledgePackVersion, { 'sourceDocuments.sourceHash': 1, scopeKey: 1 })).toBe(true)
     expect(hasIndex(KnowledgePackActivation, { purposeCategory: 1, status: 1, activatedAt: -1 })).toBe(true)
+    expect(getIndexOptions(KnowledgePackActivation, {
+      status: 1,
+      scopeKey: 1,
+      knowledgeLayer: 1,
+      capabilityKey: 1,
+    })).toEqual(expect.objectContaining({
+      name: 'uniq_active_knowledge_capability_scope',
+      unique: true,
+      partialFilterExpression: {
+        status: 'ACTIVE',
+        knowledgeLayer: { $type: 'string' },
+        capabilityKey: { $type: 'string' },
+      },
+    }))
     expect(hasIndex(OutcomeAsset, {
       runtimeInstanceId: 1,
       outputTypeKey: 1,
@@ -160,6 +191,9 @@ describe('Knowledge Runtime model contracts', () => {
       versionId: 'kpv-style-board-executive-1-2-0-customer-acme',
       semanticVersion: '1.2.0',
       purposeCategory: 'style',
+      knowledgeLayer: 'style',
+      capabilityKey: 'board-executive',
+      workspaceCompatibility: ['outcome'],
       executionMode: 'provider_context',
       visibility: 'customer',
       customerId,
@@ -189,6 +223,106 @@ describe('Knowledge Runtime model contracts', () => {
     }))
     expect(activation.purposeCategory).toBe('STYLE')
     expect(activation.visibility).toBe('CUSTOMER')
+  })
+
+  test.each([
+    ['knowledgeLayer', { knowledgeLayer: undefined }],
+    ['capabilityKey', { capabilityKey: undefined }],
+    ['workspaceCompatibility', { workspaceCompatibility: [] }],
+  ])('rejects ACTIVE Knowledge Pack activations without %s', async (field, override) => {
+    const activation = new KnowledgePackActivation(
+      makeKnowledgePackActivationPayload(override),
+    )
+
+    await expect(activation.validate()).rejects.toThrow(new RegExp(field))
+  })
+
+  test('allows non-active legacy Knowledge Pack activations without governance metadata', async () => {
+    const activation = new KnowledgePackActivation(makeKnowledgePackActivationPayload({
+      status: 'ROLLED_BACK',
+      knowledgeLayer: undefined,
+      capabilityKey: undefined,
+      workspaceCompatibility: undefined,
+    }))
+
+    await expect(activation.validate()).resolves.toBeUndefined()
+  })
+
+  test('normalizes KP-004 classification and governed dependency metadata', async () => {
+    const version = new KnowledgePackVersion({
+      packType: 'STYLE',
+      packKey: 'executive-board-style',
+      semanticVersion: '1.0.0',
+      knowledgeLayer: ' style ',
+      capabilityKey: ' Executive-Board ',
+      workspaceCompatibility: [' outcome ', 'OUTCOME', ' advisor '],
+      dependencyReferences: [
+        {
+          knowledgeLayer: ' output_schema ',
+          requirement: ' required ',
+          packType: ' output_schema ',
+          packKey: ' Board-Summary ',
+        },
+        {
+          knowledgeLayer: ' audience ',
+          requirement: ' optional ',
+          capabilityKey: ' Board-Audience ',
+        },
+      ],
+    })
+
+    await expect(version.validate()).resolves.toBeUndefined()
+
+    expect(version.knowledgeLayer).toBe('STYLE')
+    expect(version.capabilityKey).toBe('executive-board')
+    expect(version.workspaceCompatibility).toEqual(['OUTCOME', 'ADVISOR'])
+    expect(version.dependencyReferences.map((reference) => reference.toObject())).toEqual([
+      {
+        knowledgeLayer: 'OUTPUT_SCHEMA',
+        requirement: 'REQUIRED',
+        packType: 'OUTPUT_SCHEMA',
+        packKey: 'board-summary',
+      },
+      {
+        knowledgeLayer: 'AUDIENCE',
+        requirement: 'OPTIONAL',
+        capabilityKey: 'board-audience',
+      },
+    ])
+  })
+
+  test.each([
+    {
+      name: 'partial exact identity',
+      dependency: {
+        knowledgeLayer: 'OUTPUT_SCHEMA',
+        packType: 'OUTPUT_SCHEMA',
+      },
+    },
+    {
+      name: 'both exact identity and capability selectors',
+      dependency: {
+        knowledgeLayer: 'OUTPUT_SCHEMA',
+        packType: 'OUTPUT_SCHEMA',
+        packKey: 'board-summary',
+        capabilityKey: 'board-summary',
+      },
+    },
+    {
+      name: 'no selector',
+      dependency: {
+        knowledgeLayer: 'OUTPUT_SCHEMA',
+      },
+    },
+  ])('rejects a KP-004 dependency with $name', async ({ dependency }) => {
+    const version = new KnowledgePackVersion({
+      packType: 'STYLE',
+      packKey: 'executive-board-style',
+      semanticVersion: '1.0.0',
+      dependencyReferences: [dependency],
+    })
+
+    await expect(version.validate()).rejects.toThrow(/dependency/i)
   })
 
   test('fails closed for customer or tenant scoped packs without owning scope ids', async () => {

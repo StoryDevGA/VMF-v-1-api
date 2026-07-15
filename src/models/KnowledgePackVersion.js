@@ -18,6 +18,13 @@ import {
 } from '../constants/workspaceGovernance.js'
 import { buildKnowledgePackId } from './KnowledgePack.js'
 import { containsForbiddenProviderContextKey } from '../utils/knowledgePackSafety.js'
+import {
+  knowledgePackCapabilityKeyField,
+  knowledgePackDependencyReferenceSchema,
+  knowledgePackLayerField,
+  knowledgePackWorkspaceCompatibilityField,
+  normalizeKnowledgePackGovernanceFields,
+} from './knowledgePackGovernanceSchemas.js'
 
 const normalizeText = (value) => String(value || '').trim()
 const normalizeToken = (value) => normalizeText(value).toUpperCase()
@@ -67,6 +74,13 @@ const knowledgePackVersionSchema = new mongoose.Schema(
       enum: Object.values(KNOWLEDGE_PACK_PURPOSE_CATEGORIES),
       default: KNOWLEDGE_PACK_PURPOSE_CATEGORIES.SYSTEM,
       index: true,
+    },
+    knowledgeLayer: knowledgePackLayerField,
+    capabilityKey: knowledgePackCapabilityKeyField,
+    workspaceCompatibility: knowledgePackWorkspaceCompatibilityField,
+    dependencyReferences: {
+      type: [knowledgePackDependencyReferenceSchema],
+      default: undefined,
     },
     packType: {
       type: String,
@@ -275,6 +289,7 @@ knowledgePackVersionSchema.index(
 )
 knowledgePackVersionSchema.index({ packId: 1, status: 1, updatedAt: -1 })
 knowledgePackVersionSchema.index({ scopeKey: 1, packType: 1, packKey: 1, status: 1 })
+knowledgePackVersionSchema.index({ 'sourceDocuments.sourceHash': 1, scopeKey: 1 })
 knowledgePackVersionSchema.index({ purposeCategory: 1, status: 1, updatedAt: -1 })
 knowledgePackVersionSchema.index({ visibility: 1, customerId: 1, tenantId: 1, status: 1 })
 
@@ -285,6 +300,7 @@ knowledgePackVersionSchema.pre('validate', function normalizeKnowledgePackVersio
     packType: this.packType,
   })
   this.purposeCategory = normalizeToken(this.purposeCategory || KNOWLEDGE_PACK_PURPOSE_CATEGORIES.SYSTEM)
+  normalizeKnowledgePackGovernanceFields(this, { includeDependencies: true })
   this.packKey = normalizeText(this.packKey).toLowerCase()
   this.semanticVersion = normalizeText(this.semanticVersion)
   this.schemaVersion = normalizeText(this.schemaVersion || '1.0.0')

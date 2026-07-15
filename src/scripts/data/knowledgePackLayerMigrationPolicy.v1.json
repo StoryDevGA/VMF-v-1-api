@@ -1,0 +1,49 @@
+{
+  "policyVersion": "kp-004-layer-migration-v1",
+  "packTypeLayerMap": {
+    "ARL": "REASONING",
+    "RL": "COMMUNICATION_PATTERN",
+    "ET": "FRAMEWORK",
+    "ET_RT": "FRAMEWORK",
+    "ERR": "FRAMEWORK",
+    "RGS": "FRAMEWORK",
+    "OR": "FRAMEWORK",
+    "CCD": "FRAMEWORK",
+    "CCR": "FRAMEWORK",
+    "DX": "FRAMEWORK",
+    "VE": "FRAMEWORK",
+    "CR": "FRAMEWORK",
+    "CDRM": "FRAMEWORK",
+    "CDRT": "FRAMEWORK",
+    "FRAMEWORK_METADATA": "FRAMEWORK",
+    "FRAMEWORK_PACK": "FRAMEWORK",
+    "OUTPUT_SCHEMA": "OUTPUT_SCHEMA",
+    "TRUTH_CERTIFICATION": "VALIDATION",
+    "OUTPUT_TYPE_DEFINITION": "OUTPUT_TYPE",
+    "STYLE": "STYLE",
+    "AUDIENCE": "AUDIENCE",
+    "INDUSTRY": "INDUSTRY",
+    "LANGUAGE": "LANGUAGE",
+    "BRAND": "BRAND",
+    "COMPLIANCE": "VALIDATION",
+    "DECISION": "REASONING",
+    "ADVISOR": "REASONING"
+  },
+  "unmappedPackTypes": [
+    "DOMAIN",
+    "SYSTEM_REFERENCE",
+    "SYSTEM"
+  ],
+  "capabilityRequiredLayers": [
+    "OUTPUT_TYPE",
+    "OUTPUT_SCHEMA",
+    "AUDIENCE",
+    "INDUSTRY",
+    "COMMUNICATION_PATTERN",
+    "STYLE",
+    "CHANNEL",
+    "BRAND",
+    "LANGUAGE",
+    "VISUAL_SYSTEM"
+  ]
+}

@@ -13,6 +13,7 @@ import {
   disableKnowledgePackVersion,
   getKnowledgePackManifestController,
   getKnowledgePack,
+  getKnowledgePackDuplicateDiagnostics,
   getKnowledgePackVersion,
   importKnowledgePackStarterVersion,
   importKnowledgePackSourceDocumentDraft,
@@ -54,6 +55,7 @@ const sourceDocumentImportJsonParser = express.json({ limit: '15mb' })
 router.use(authJwt, loadScopes, requirePlatformRole('SUPER_ADMIN'))
 
 router.get('/', validateListKnowledgePacks, listKnowledgePacks)
+router.get('/duplicate-diagnostics', getKnowledgePackDuplicateDiagnostics)
 router.get('/manifests', validateListKnowledgePackManifests, listKnowledgePackManifestsController)
 router.post('/manifests', validateCreateKnowledgePackManifest, createKnowledgePackManifestController)
 router.get('/manifests/:manifestId/reasoning-context-preview', validateKnowledgePackManifestId, validateReasoningContextPreview, previewKnowledgePackReasoningContextController)

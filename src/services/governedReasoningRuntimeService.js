@@ -14,6 +14,7 @@ import {
   GRR_PROVIDER_MODES,
   GRR_RUNTIME_STATE_WRITE_STATUSES,
 } from '../constants/governedReasoningRuntime.js'
+import { KNOWLEDGE_PACK_EXECUTION_MODES } from '../constants/knowledgeRuntime.js'
 import {
   assertCustomerTenantContext,
   assertFeatureEntitlement,
@@ -36,7 +37,9 @@ export const GRR_ERROR_REASONS = Object.freeze({
   RUNTIME_NOT_FOUND: 'RUNTIME_NOT_FOUND',
   CERTIFIED_TRUTH_MISSING: 'CERTIFIED_TRUTH_MISSING',
   KNOWLEDGE_BINDING_BLOCKED: 'KNOWLEDGE_BINDING_BLOCKED',
+  KNOWLEDGE_BINDING_AMBIGUOUS: 'KNOWLEDGE_BINDING_AMBIGUOUS',
   PROVIDER_UNAVAILABLE: 'PROVIDER_UNAVAILABLE',
+  IDEMPOTENCY_REQUEST_CONFLICT: 'IDEMPOTENCY_REQUEST_CONFLICT',
   PERSISTENCE_FAILED: 'PERSISTENCE_FAILED',
   AUDIT_PERSISTENCE_FAILED: 'AUDIT_PERSISTENCE_FAILED',
   EXECUTION_NOT_FOUND: 'EXECUTION_NOT_FOUND',
@@ -44,6 +47,10 @@ export const GRR_ERROR_REASONS = Object.freeze({
 
 const normalizeToken = (value) => String(value || '').trim().toUpperCase()
 const normalizeKey = (value) => String(value || '').trim().toLowerCase()
+const normalizeCapabilityKey = (value) => normalizeKey(value).replace(/_/g, '-')
+const normalizeCapabilityKeys = (values) => Array.isArray(values)
+  ? [...new Set(values.map(normalizeCapabilityKey).filter(Boolean))]
+  : []
 const normalizeText = (value) => String(value ?? '').trim()
 const buildGrrId = (prefix) => `${prefix}_${randomUUID()}`
 const canUseMongoTransaction = () => mongoose.connection.readyState === 1
@@ -402,20 +409,43 @@ const resolveKnowledgeBinding = async ({
 }
 
 const assertKnowledgeBindingReady = ({ manifest, binding }) => {
-  if (!binding || normalizeToken(binding.status) === 'BLOCKED') {
+  const status = normalizeToken(binding?.status)
+  if (!binding || status === 'BLOCKED' || status === 'AMBIGUOUS') {
+    const ambiguous = status === 'AMBIGUOUS'
     throw createGrrError({
       status: 409,
-      code: 'GRR_KNOWLEDGE_BINDING_BLOCKED',
-      message: 'Knowledge Pack Registry resolution is blocked.',
-      reason: GRR_ERROR_REASONS.KNOWLEDGE_BINDING_BLOCKED,
+      code: ambiguous
+        ? 'GRR_KNOWLEDGE_BINDING_AMBIGUOUS'
+        : 'GRR_KNOWLEDGE_BINDING_BLOCKED',
+      message: ambiguous
+        ? 'Knowledge Pack Registry resolution is ambiguous.'
+        : 'Knowledge Pack Registry resolution is blocked.',
+      reason: ambiguous
+        ? GRR_ERROR_REASONS.KNOWLEDGE_BINDING_AMBIGUOUS
+        : GRR_ERROR_REASONS.KNOWLEDGE_BINDING_BLOCKED,
       details: {
         manifestId: manifest?.manifestId || null,
         status: binding?.status || null,
-        blockers: binding?.blockers || binding?.resolution?.blockers || [],
+        blockers: binding?.blockers
+          || binding?.missingDependencies
+          || binding?.resolution?.missingDependencies
+          || binding?.resolution?.blockers
+          || [],
+        ambiguousCandidates: binding?.ambiguousCandidates
+          || binding?.resolution?.ambiguousCandidates
+          || [],
       },
     })
   }
 }
+
+const sanitizeDependencyReference = (reference = {}) => ({
+  knowledgeLayer: normalizeToken(reference.knowledgeLayer),
+  requirement: normalizeToken(reference.requirement),
+  packType: normalizeToken(reference.packType),
+  packKey: normalizeKey(reference.packKey),
+  capabilityKey: normalizeKey(reference.capabilityKey),
+})
 
 const sanitizePack = (pack = {}) => ({
   packType: normalizeToken(pack.packType),
@@ -425,6 +455,14 @@ const sanitizePack = (pack = {}) => ({
   contentHash: normalizeText(pack.contentHash),
   label: normalizeText(pack.label),
   purposeCategory: normalizeToken(pack.purposeCategory),
+  knowledgeLayer: normalizeToken(pack.knowledgeLayer),
+  capabilityKey: normalizeKey(pack.capabilityKey),
+  workspaceCompatibility: Array.isArray(pack.workspaceCompatibility)
+    ? pack.workspaceCompatibility.map(normalizeToken).filter(Boolean)
+    : [],
+  dependencyReferences: Array.isArray(pack.dependencyReferences)
+    ? pack.dependencyReferences.map(sanitizeDependencyReference)
+    : [],
   executionMode: normalizeToken(pack.executionMode),
   scopeType: normalizeToken(pack.scopeType),
   scopeKey: normalizeText(pack.scopeKey),
@@ -456,7 +494,32 @@ const sanitizeKnowledgeResolution = (resolution = {}) => ({
   requestedContextCategories: Array.isArray(resolution.requestedContextCategories)
     ? resolution.requestedContextCategories.map(normalizeToken).filter(Boolean)
     : [],
+  policyVersion: normalizeText(resolution.policyVersion),
+  requestedOutputTypeKey: normalizeKey(resolution.request?.requestedOutputTypeKey),
+  requestedStyleKey: normalizeKey(resolution.request?.requestedStyleKey),
 })
+
+const sanitizeKnowledgeLineage = (lineage = {}) => ({
+  resolvedAt: normalizeText(lineage.resolvedAt),
+  activationIds: Array.isArray(lineage.activationIds)
+    ? lineage.activationIds.map(normalizeText).filter(Boolean)
+    : [],
+  versionIds: Array.isArray(lineage.versionIds)
+    ? lineage.versionIds.map(normalizeText).filter(Boolean)
+    : [],
+  contentHashes: Array.isArray(lineage.contentHashes)
+    ? lineage.contentHashes.map(normalizeText).filter(Boolean)
+    : [],
+})
+
+const sanitizeSelectedByLayer = (selectedByLayer = {}) => Object.fromEntries(
+  Object.entries(selectedByLayer)
+    .map(([layer, packs]) => [
+      normalizeToken(layer),
+      Array.isArray(packs) ? packs.map(sanitizePack) : [],
+    ])
+    .filter(([layer]) => Boolean(layer)),
+)
 
 const buildKnowledgeContext = ({ manifest, binding, payload }) => ({
   manifest: {
@@ -477,11 +540,26 @@ const buildKnowledgeContext = ({ manifest, binding, payload }) => ({
     requiredPacks: Array.isArray(binding?.requiredPacks) ? binding.requiredPacks.map(sanitizePack) : [],
     optionalPacks: Array.isArray(binding?.optionalPacks) ? binding.optionalPacks.map(sanitizePack) : [],
     validationPacks: Array.isArray(binding?.validationPacks) ? binding.validationPacks.map(sanitizePack) : [],
+    providerContextPacks: Array.isArray(binding?.providerContextPacks)
+      ? binding.providerContextPacks.map(sanitizePack)
+      : [],
+    preValidationPacks: Array.isArray(binding?.preValidationPacks)
+      ? binding.preValidationPacks.map(sanitizePack)
+      : [],
+    postValidationPacks: Array.isArray(binding?.postValidationPacks)
+      ? binding.postValidationPacks.map(sanitizePack)
+      : [],
+    systemOnlyPacks: Array.isArray(binding?.systemOnlyPacks)
+      ? binding.systemOnlyPacks.map(sanitizePack)
+      : [],
+    selectedByLayer: sanitizeSelectedByLayer(binding?.selectedByLayer),
     dependencyGraph: sanitizeDependencyGraph(binding?.dependencyGraph || {}),
     resolution: sanitizeKnowledgeResolution(binding?.resolution || {}),
+    lineage: sanitizeKnowledgeLineage(binding?.lineage || binding?.resolution?.lineage || {}),
   },
   request: {
     outputTypeKey: normalizeToken(payload?.outputTypeKey),
+    requestedStyleKey: normalizeKey(payload?.requestedStyleKey),
     contextCategories: Array.isArray(payload?.contextCategories)
       ? payload.contextCategories.map(normalizeToken).filter(Boolean)
       : [],
@@ -516,6 +594,15 @@ const resolveProviderPosture = () => {
 
 const buildProviderRequestProjection = (payload = {}) => ({
   outputTypeKey: normalizeToken(payload.outputTypeKey),
+  requestedStyleKey: normalizeKey(payload.requestedStyleKey),
+  audienceKeys: Array.isArray(payload.audienceKeys)
+    ? payload.audienceKeys.map(normalizeKey).filter(Boolean)
+    : [],
+  industryKeys: Array.isArray(payload.industryKeys)
+    ? payload.industryKeys.map(normalizeKey).filter(Boolean)
+    : [],
+  languageKey: normalizeKey(payload.languageKey),
+  channelKey: normalizeKey(payload.channelKey),
   workspaceType: normalizeToken(payload.workspaceType || 'PLATFORM'),
   environmentKey: normalizeToken(payload.environmentKey || 'PRODUCTION'),
   manifestId: normalizeText(payload.manifestId),
@@ -601,14 +688,56 @@ const buildProviderContext = ({
 } = {}) => {
   const request = buildProviderRequestProjection(payload)
   const projectedTruthContext = buildProviderTruthContext({ payload: request, truthContext })
+  const binding = knowledgeContext.binding || {}
+  const isProviderContextPack = (pack) => (
+    normalizeToken(pack?.executionMode) === KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT
+  )
+  const projectProviderPack = (pack) => ({
+    ...pack,
+    // Resolution has already enforced dependencies. Do not reveal references
+    // to validation or system-only packs to the provider.
+    dependencyReferences: [],
+  })
+  const projectProviderPackList = (packs) => (Array.isArray(packs)
+    ? packs.filter(isProviderContextPack).map(projectProviderPack)
+    : [])
+  const providerContextPacks = binding.providerContextPacks?.length > 0
+    ? projectProviderPackList(binding.providerContextPacks)
+    : projectProviderPackList([
+        ...(Array.isArray(binding.requiredPacks) ? binding.requiredPacks : []),
+        ...(Array.isArray(binding.optionalPacks) ? binding.optionalPacks : []),
+      ])
+  const providerSelectedByLayer = Object.fromEntries(
+    Object.entries(binding.selectedByLayer || {})
+      .map(([layer, packs]) => [normalizeToken(layer), projectProviderPackList(packs)])
+      .filter(([, packs]) => packs.length > 0),
+  )
+  const providerBinding = {
+    status: binding.status,
+    mode: binding.mode,
+    contentVisible: false,
+    packContentLoaded: false,
+    requiredPacks: projectProviderPackList(binding.requiredPacks),
+    optionalPacks: projectProviderPackList(binding.optionalPacks),
+    providerContextPacks,
+    selectedByLayer: providerSelectedByLayer,
+    resolution: {
+      status: binding.resolution?.status || binding.status,
+      policyVersion: binding.resolution?.policyVersion || '',
+      requestedOutputTypeKey: binding.resolution?.requestedOutputTypeKey || '',
+      requestedStyleKey: binding.resolution?.requestedStyleKey || '',
+    },
+  }
+  const providerKnowledgeContext = {
+    manifest: knowledgeContext.manifest,
+    binding: providerBinding,
+    request,
+  }
 
   return {
     assemblyMode: 'CERTIFIED_TRUTH_WITH_KNOWLEDGE_BINDING_METADATA',
     request,
-    knowledgeContext: {
-      ...knowledgeContext,
-      request,
-    },
+    knowledgeContext: providerKnowledgeContext,
     truthContext: projectedTruthContext,
     certifiedTruthProjection: projectedTruthContext.projection,
     contentVisible: false,
@@ -664,7 +793,7 @@ const executeDeterministicProvider = ({
       outputTypeKey,
       sections,
       summary: sections.length > 0
-        ? `Generated from ${sections.length} Certified Truth section(s) and ${knowledgeContext.binding.requiredPacks.length} required Knowledge Pack binding(s).`
+        ? `Generated from ${sections.length} Certified Truth section(s) and ${knowledgeContext.binding.requiredPacks.length} required provider-context Knowledge Pack binding(s).`
         : 'Generated with no available Certified Truth sections.',
       markdown,
     },
@@ -747,6 +876,7 @@ const UNSAFE_METADATA_KEYS = new Set([
   '_id',
   'acceptedBy',
   'activationId',
+  'activationIds',
 ])
 
 const scrubUnsafeMetadata = (value, seen = new WeakSet()) => {
@@ -817,6 +947,20 @@ const logGrrExecutionAudit = async ({
         runtimeInstanceKey: runtimeInstance.runtimeInstanceKey || '',
         providerMode: execution.providerMode,
         outputTypeKey: execution.outputTypeKey,
+        knowledgeResolution: {
+          status: normalizeToken(execution.knowledgeBinding?.status),
+          policyVersion: normalizeText(execution.knowledgeBinding?.resolution?.policyVersion),
+          resolvedCount: Number(execution.knowledgeBinding?.resolution?.resolvedCount || 0),
+          activationIds: Array.isArray(execution.knowledgeBinding?.lineage?.activationIds)
+            ? execution.knowledgeBinding.lineage.activationIds
+            : [],
+          versionIds: Array.isArray(execution.knowledgeBinding?.lineage?.versionIds)
+            ? execution.knowledgeBinding.lineage.versionIds
+            : [],
+          contentHashes: Array.isArray(execution.knowledgeBinding?.lineage?.contentHashes)
+            ? execution.knowledgeBinding.lineage.contentHashes
+            : [],
+        },
         runtimeStateWrites: execution.runtimeStateWrites,
       },
       display: {
@@ -867,6 +1011,7 @@ const buildGrrAuditFailure = ({
 
 const findExistingIdempotentExecution = async ({
   idempotencyKey,
+  requestFingerprint,
   runtimeInstance,
 } = {}) => {
   const safeKey = normalizeText(idempotencyKey)
@@ -880,6 +1025,19 @@ const findExistingIdempotentExecution = async ({
     ? await executionQuery.lean()
     : await executionQuery
   if (!existingExecution) return null
+
+  const existingFingerprint = normalizeText(existingExecution.requestFingerprint)
+  if (!existingFingerprint || existingFingerprint !== requestFingerprint) {
+    throw createGrrError({
+      status: 409,
+      code: 'GRR_IDEMPOTENCY_REQUEST_CONFLICT',
+      message: 'The idempotency key is already associated with a different governed reasoning request.',
+      reason: GRR_ERROR_REASONS.IDEMPOTENCY_REQUEST_CONFLICT,
+      details: {
+        fingerprintState: existingFingerprint ? 'MISMATCHED' : 'MISSING',
+      },
+    })
+  }
 
   const artifactQuery = GovernedRuntimeArtifact.findOne({
     executionId: existingExecution.executionId,
@@ -896,6 +1054,12 @@ const findExistingIdempotentExecution = async ({
   }
 
   return serializeExecution(existingExecution, existingArtifact)
+}
+
+const isIdempotencyDuplicateError = (err) => {
+  if (Number(err?.code) !== 11000) return false
+  if (err?.keyPattern?.idempotencyKey || err?.keyValue?.idempotencyKey) return true
+  return normalizeText(err?.message).includes('runtimeInstanceId_1_idempotencyKey_1')
 }
 
 const persistGrrExecutionAndAudit = async ({
@@ -939,11 +1103,26 @@ const buildManifestQuery = ({ payload = {}, runtimeInstance = {} }) => ({
   packageKey: normalizeKey(runtimeInstance.packageKey),
   packageVersion: normalizeText(runtimeInstance.packageVersion),
   outputKey: normalizeKey(payload.outputTypeKey),
+  requestedOutputTypeKey: normalizeCapabilityKey(
+    payload.requestedOutputTypeKey || payload.outputTypeKey,
+  ),
+  requestedStyleKey: normalizeCapabilityKey(payload.requestedStyleKey),
+  audienceKeys: normalizeCapabilityKeys(payload.audienceKeys),
+  industryKeys: normalizeCapabilityKeys(payload.industryKeys),
+  languageKey: normalizeCapabilityKey(payload.languageKey),
+  channelKey: normalizeCapabilityKey(payload.channelKey),
+  workspaceType: normalizeToken(payload.workspaceType || 'PLATFORM'),
   contextCategories: Array.isArray(payload.contextCategories) ? payload.contextCategories : [],
   environmentKey: normalizeToken(payload.environmentKey || 'PRODUCTION'),
   customerId: toIdString(runtimeInstance.customerId),
   tenantId: toIdString(runtimeInstance.tenantId),
   runtimeInstanceId: toIdString(runtimeInstance._id || runtimeInstance.id),
+})
+
+const buildRequestFingerprint = ({ payload = {}, runtimeInstance = {} } = {}) => hashSafeValue({
+  fingerprintVersion: 'GRR_REQUEST_V1',
+  manifestQuery: buildManifestQuery({ payload, runtimeInstance }),
+  providerRequest: buildProviderRequestProjection(payload),
 })
 
 export const createGovernedReasoningExecution = async ({
@@ -965,8 +1144,10 @@ export const createGovernedReasoningExecution = async ({
     ? await deps.resolveFrameworkPackage(runtimeInstance)
     : await resolveFrameworkPackage(runtimeInstance)
   const idempotencyKey = normalizeText(payload.idempotencyKey)
+  const requestFingerprint = buildRequestFingerprint({ payload, runtimeInstance })
   const existingExecution = await findExistingIdempotentExecution({
     idempotencyKey,
+    requestFingerprint,
     runtimeInstance,
   })
   if (existingExecution) return existingExecution
@@ -1008,6 +1189,7 @@ export const createGovernedReasoningExecution = async ({
     outputTypeKey: payload.outputTypeKey,
     executionIntent: payload.executionIntent || '',
     idempotencyKey,
+    requestFingerprint,
     status: GRR_EXECUTION_STATUSES.COMPLETED,
     contractVersion: GRR_CONTRACT_VERSION,
     providerMode: providerResult.provider?.providerMode || providerResult.provider?.mode || GRR_PROVIDER_MODES.DETERMINISTIC_TEST,
@@ -1054,6 +1236,9 @@ export const createGovernedReasoningExecution = async ({
         requiredPackCount: knowledgeContext.binding.requiredPacks.length,
         optionalPackCount: knowledgeContext.binding.optionalPacks.length,
         validationPackCount: knowledgeContext.binding.validationPacks.length,
+        status: knowledgeContext.binding.status,
+        policyVersion: knowledgeContext.binding.resolution.policyVersion,
+        lineage: knowledgeContext.binding.lineage,
       },
       certifiedTruth: {
         acceptedTruthCount: providerContext.truthContext.summary.acceptedTruthCount,
@@ -1088,6 +1273,14 @@ export const createGovernedReasoningExecution = async ({
       })
     } catch (err) {
       if (err?.code === 'GRR_AUDIT_FAILED') throw err
+      if (isIdempotencyDuplicateError(err)) {
+        const winner = await findExistingIdempotentExecution({
+          idempotencyKey,
+          requestFingerprint,
+          runtimeInstance,
+        })
+        if (winner) return winner
+      }
       throw buildGrrPersistenceFailure({
         cause: err,
         executionId,
@@ -1109,6 +1302,14 @@ export const createGovernedReasoningExecution = async ({
       await GovernedRuntimeArtifact.deleteOne({ runtimeArtifactId })
       await GovernedReasoningExecution.deleteOne({ executionId })
       if (err?.code === 'GRR_AUDIT_FAILED') throw err
+      if (isIdempotencyDuplicateError(err)) {
+        const winner = await findExistingIdempotentExecution({
+          idempotencyKey,
+          requestFingerprint,
+          runtimeInstance,
+        })
+        if (winner) return winner
+      }
       throw buildGrrPersistenceFailure({
         cause: err,
         executionId,

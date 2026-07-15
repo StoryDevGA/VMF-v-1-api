@@ -312,6 +312,7 @@ describe('Governed Reasoning Runtime models and service', () => {
     expect(auditPayload.diff.executionId).toMatch(/^grr_exec_/)
     expect(result.status).toBe('COMPLETED')
     expect(result.idempotencyKey).toBe('')
+    expect(result.requestFingerprint).toMatch(/^sha256:[a-f0-9]{64}$/)
     expect(result.runtimeStateWrites).toEqual(expect.objectContaining({
       status: 'NOT_WRITTEN',
       reason: 'NO_REVIEWED_GRR_RUNTIME_PATH_V1',
@@ -324,7 +325,49 @@ describe('Governed Reasoning Runtime models and service', () => {
     }))
   })
 
+  test('normalizes every request capability selector before registry resolution', async () => {
+    const deps = makeDeps()
+
+    await createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      auditRequest: { requestId: 'req-normalized-capabilities' },
+      deps,
+      payload: {
+        outputTypeKey: 'BOARD_SUMMARY',
+        requestedOutputTypeKey: 'BOARD_SUMMARY',
+        requestedStyleKey: 'EXECUTIVE_BOARD_STYLE',
+        audienceKeys: ['EXECUTIVE_BOARD', 'executive_board'],
+        industryKeys: ['FINANCIAL_SERVICES'],
+        languageKey: 'UK_ENGLISH',
+        channelKey: 'BOARD_PORTAL',
+      },
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })
+
+    expect(deps.resolveKnowledgeBinding).toHaveBeenCalledWith(expect.objectContaining({
+      query: expect.objectContaining({
+        requestedOutputTypeKey: 'board-summary',
+        requestedStyleKey: 'executive-board-style',
+        audienceKeys: ['executive-board'],
+        industryKeys: ['financial-services'],
+        languageKey: 'uk-english',
+        channelKey: 'board-portal',
+      }),
+    }))
+  })
+
   test('passes only projected Knowledge Pack metadata and Certified Truth summaries to providers', async () => {
+    let persistedExecution
+    let persistedArtifact
+    GovernedReasoningExecution.prototype.save = jest.fn(async function save() {
+      persistedExecution = this
+      return this
+    })
+    GovernedRuntimeArtifact.prototype.save = jest.fn(async function save() {
+      persistedArtifact = this
+      return this
+    })
     const runtimeInstance = makeRuntimeInstance()
     runtimeInstance.framework_state.rawSourceText = 'RAW_RUNTIME_SOURCE_SHOULD_NOT_LEAK'
     runtimeInstance.framework_state.sections.situation.accepted.rawSourceText = 'RAW_ACCEPTED_SOURCE_SHOULD_NOT_LEAK'
@@ -388,6 +431,46 @@ describe('Governed Reasoning Runtime models and service', () => {
         },
       ],
     }
+    knowledgeBinding.binding.lineage = {
+      resolvedAt: '2026-07-14T12:00:00.000Z',
+      activationIds: ['knowledge-pack-activation-id-should-not-leak'],
+      versionIds: ['kpv-arl'],
+      contentHashes: ['sha256:arl'],
+    }
+    const preValidationPack = {
+      packType: 'TRUTH_CERTIFICATION',
+      packKey: 'truth-certification-internal',
+      versionId: 'kpv-truth-certification',
+      executionMode: 'PRE_VALIDATION',
+      knowledgeLayer: 'VALIDATION',
+      capabilityKey: 'truth-certification',
+    }
+    const postValidationPack = {
+      packType: 'COMPLIANCE',
+      packKey: 'contradiction-review-internal',
+      versionId: 'kpv-contradiction-review',
+      executionMode: 'POST_VALIDATION',
+      knowledgeLayer: 'VALIDATION',
+      capabilityKey: 'contradiction-review',
+    }
+    const systemOnlyPack = {
+      packType: 'SYSTEM',
+      packKey: 'runtime-coordinator-internal',
+      versionId: 'kpv-runtime-coordinator',
+      executionMode: 'SYSTEM_ONLY',
+      knowledgeLayer: 'FRAMEWORK',
+      capabilityKey: 'runtime-coordinator',
+    }
+    knowledgeBinding.binding.validationPacks = [preValidationPack, postValidationPack]
+    knowledgeBinding.binding.preValidationPacks = [preValidationPack]
+    knowledgeBinding.binding.postValidationPacks = [postValidationPack]
+    knowledgeBinding.binding.systemOnlyPacks = [systemOnlyPack]
+    knowledgeBinding.binding.providerContextPacks = knowledgeBinding.binding.requiredPacks
+    knowledgeBinding.binding.selectedByLayer = {
+      REASONING: knowledgeBinding.binding.requiredPacks,
+      VALIDATION: [preValidationPack, postValidationPack],
+      FRAMEWORK: [systemOnlyPack],
+    }
     const deps = makeDeps({
       resolveRuntimeInstance: jest.fn().mockResolvedValue(runtimeInstance),
       resolveKnowledgeBinding: jest.fn().mockResolvedValue(knowledgeBinding),
@@ -440,6 +523,12 @@ describe('Governed Reasoning Runtime models and service', () => {
     }))
     expect(providerCall.knowledgeContext.binding.requiredPacks[0]).not.toHaveProperty('activationId')
     expect(providerCall.knowledgeContext.binding.requiredPacks[0]).not.toHaveProperty('packId')
+    expect(providerCall.knowledgeContext.binding.requiredPacks[0].dependencyReferences).toEqual([])
+    expect(providerCall.knowledgeContext.binding).not.toHaveProperty('validationPacks')
+    expect(providerCall.knowledgeContext.binding).not.toHaveProperty('preValidationPacks')
+    expect(providerCall.knowledgeContext.binding).not.toHaveProperty('postValidationPacks')
+    expect(providerCall.knowledgeContext.binding).not.toHaveProperty('systemOnlyPacks')
+    expect(providerCall.knowledgeContext.binding).not.toHaveProperty('dependencyGraph')
     expect(result.reasoningContext.certifiedTruthProjection).toEqual(expect.objectContaining({
       status: 'PROJECTED',
       source: 'CERTIFIED_RUNTIME_TRUTH',
@@ -471,6 +560,56 @@ describe('Governed Reasoning Runtime models and service', () => {
     expect(projectedJson).not.toContain('dependency-node-id-should-not-leak')
     expect(projectedJson).not.toContain(CUSTOMER_ID)
     expect(projectedJson).not.toContain(TENANT_ID)
+    const providerJson = JSON.stringify(providerCall)
+    expect(providerJson).not.toContain('truth-certification-internal')
+    expect(providerJson).not.toContain('contradiction-review-internal')
+    expect(providerJson).not.toContain('runtime-coordinator-internal')
+    expect(persistedExecution.knowledgeBinding.lineage).toEqual({
+      resolvedAt: '2026-07-14T12:00:00.000Z',
+      activationIds: ['knowledge-pack-activation-id-should-not-leak'],
+      versionIds: ['kpv-arl'],
+      contentHashes: ['sha256:arl'],
+    })
+    expect(persistedArtifact.lineageSummary.knowledgeBinding.lineage).toEqual(
+      persistedExecution.knowledgeBinding.lineage,
+    )
+    expect(persistedExecution.knowledgeBinding.validationPacks).toHaveLength(2)
+    expect(persistedExecution.knowledgeBinding.systemOnlyPacks).toHaveLength(1)
+  })
+
+  test('blocks ambiguous Knowledge Pack resolution before provider execution or persistence', async () => {
+    const knowledgeBinding = makeKnowledgeBinding()
+    knowledgeBinding.binding.status = 'AMBIGUOUS'
+    knowledgeBinding.binding.ambiguousCandidates = [{
+      selector: { knowledgeLayer: 'STYLE', capabilityKey: 'executive' },
+      candidates: [
+        { activationId: 'kpa-style-one' },
+        { activationId: 'kpa-style-two' },
+      ],
+    }]
+    const deps = makeDeps({
+      resolveKnowledgeBinding: jest.fn().mockResolvedValue(knowledgeBinding),
+    })
+
+    await expect(createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      auditRequest: { requestId: 'req-ambiguous-knowledge' },
+      deps,
+      payload: { outputTypeKey: 'CUSTOMER_PROPOSAL' },
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })).rejects.toMatchObject({
+      code: 'GRR_KNOWLEDGE_BINDING_AMBIGUOUS',
+      details: expect.objectContaining({
+        reason: 'KNOWLEDGE_BINDING_AMBIGUOUS',
+        status: 'AMBIGUOUS',
+      }),
+    })
+
+    expect(deps.providerAdapter).not.toHaveBeenCalled()
+    expect(GovernedReasoningExecution.prototype.save).not.toHaveBeenCalled()
+    expect(GovernedRuntimeArtifact.prototype.save).not.toHaveBeenCalled()
+    expect(deps.logAudit).not.toHaveBeenCalled()
   })
 
   test('blocks before manifest resolution when Certified Truth is missing', async () => {
@@ -635,52 +774,276 @@ describe('Governed Reasoning Runtime models and service', () => {
     }
   })
 
-  test('reuses a completed execution for the same idempotency key', async () => {
+  test('stores a deterministic request fingerprint and reuses the same idempotent request', async () => {
     const deps = makeDeps()
+    const payload = {
+      outputTypeKey: 'CUSTOMER_PROPOSAL',
+      executionIntent: 'Create a customer-ready proposal.',
+      requestedOutputTypeKey: 'customer-proposal',
+      requestedStyleKey: 'executive',
+      audienceKeys: ['board'],
+      industryKeys: ['technology'],
+      languageKey: 'en-gb',
+      channelKey: 'proposal',
+      manifestId: 'kpm-outcome-studio-default-1-0-0-global',
+      workspaceType: 'OUTCOME',
+      environmentKey: 'PRODUCTION',
+      contextCategories: ['STYLE', 'AUDIENCE'],
+      idempotencyKey: 'OUTCOME:SESSION:MESSAGE:GENERATE_RESPONSE',
+    }
+    let persistedExecution
+    let persistedArtifact
+    GovernedReasoningExecution.prototype.save = jest.fn(async function save() {
+      persistedExecution = this
+      return this
+    })
+    GovernedRuntimeArtifact.prototype.save = jest.fn(async function save() {
+      persistedArtifact = this
+      return this
+    })
+
+    const firstResult = await createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      auditRequest: { requestId: 'req-idempotent-first' },
+      deps,
+      payload,
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })
+
+    expect(firstResult.requestFingerprint).toMatch(/^sha256:[a-f0-9]{64}$/)
+    expect(persistedExecution.requestFingerprint).toBe(firstResult.requestFingerprint)
+    GovernedReasoningExecution.findOne = jest.fn().mockReturnValue({
+      lean: jest.fn().mockResolvedValue(persistedExecution.toObject()),
+    })
+    GovernedRuntimeArtifact.findOne = jest.fn().mockReturnValue({
+      lean: jest.fn().mockResolvedValue(persistedArtifact.toObject()),
+    })
+    deps.resolveKnowledgeBinding.mockClear()
+    deps.providerAdapter.mockClear()
+    deps.logAudit.mockClear()
+    GovernedReasoningExecution.prototype.save.mockClear()
+    GovernedRuntimeArtifact.prototype.save.mockClear()
+
+    const result = await createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      auditRequest: { requestId: 'req-idempotent-retry' },
+      deps,
+      payload: { ...payload },
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })
+
+    expect(result.executionId).toBe(firstResult.executionId)
+    expect(result.requestFingerprint).toBe(firstResult.requestFingerprint)
+    expect(result.artifact.runtimeArtifactId).toBe(firstResult.artifact.runtimeArtifactId)
+    expect(deps.resolveKnowledgeBinding).not.toHaveBeenCalled()
+    expect(deps.providerAdapter).not.toHaveBeenCalled()
+    expect(GovernedReasoningExecution.prototype.save).not.toHaveBeenCalled()
+    expect(GovernedRuntimeArtifact.prototype.save).not.toHaveBeenCalled()
+    expect(deps.logAudit).not.toHaveBeenCalled()
+  })
+
+  test('returns a stable 409 when an idempotency key is reused with different request selectors', async () => {
+    const deps = makeDeps()
+    const idempotencyKey = 'OUTCOME:SESSION:MESSAGE:SELECTOR_CONFLICT'
+    let persistedExecution
+    GovernedReasoningExecution.prototype.save = jest.fn(async function save() {
+      persistedExecution = this
+      return this
+    })
+
+    await createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      auditRequest: { requestId: 'req-selector-original' },
+      deps,
+      payload: {
+        outputTypeKey: 'CUSTOMER_PROPOSAL',
+        requestedStyleKey: 'executive',
+        idempotencyKey,
+      },
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })
+
+    GovernedReasoningExecution.findOne = jest.fn().mockReturnValue({
+      lean: jest.fn().mockResolvedValue(persistedExecution.toObject()),
+    })
+    GovernedRuntimeArtifact.findOne.mockClear()
+    deps.resolveKnowledgeBinding.mockClear()
+    deps.providerAdapter.mockClear()
+    deps.logAudit.mockClear()
+    GovernedReasoningExecution.prototype.save.mockClear()
+    GovernedRuntimeArtifact.prototype.save.mockClear()
+
+    await expect(createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      auditRequest: { requestId: 'req-selector-conflict' },
+      deps,
+      payload: {
+        outputTypeKey: 'CUSTOMER_PROPOSAL',
+        requestedStyleKey: 'concise',
+        idempotencyKey,
+      },
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })).rejects.toMatchObject({
+      status: 409,
+      code: 'GRR_IDEMPOTENCY_REQUEST_CONFLICT',
+      details: {
+        reason: 'IDEMPOTENCY_REQUEST_CONFLICT',
+        fingerprintState: 'MISMATCHED',
+      },
+    })
+
+    expect(GovernedRuntimeArtifact.findOne).not.toHaveBeenCalled()
+    expect(deps.resolveKnowledgeBinding).not.toHaveBeenCalled()
+    expect(deps.providerAdapter).not.toHaveBeenCalled()
+    expect(GovernedReasoningExecution.prototype.save).not.toHaveBeenCalled()
+    expect(GovernedRuntimeArtifact.prototype.save).not.toHaveBeenCalled()
+    expect(deps.logAudit).not.toHaveBeenCalled()
+  })
+
+  test('returns the same stable 409 for a legacy idempotent execution without a fingerprint', async () => {
+    const deps = makeDeps()
+    GovernedReasoningExecution.findOne = jest.fn().mockReturnValue({
+      lean: jest.fn().mockResolvedValue({
+        executionId: 'grr_exec_legacy',
+        idempotencyKey: 'OUTCOME:SESSION:MESSAGE:LEGACY_RESPONSE',
+      }),
+    })
+
+    await expect(createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      auditRequest: { requestId: 'req-legacy-idempotent' },
+      deps,
+      payload: {
+        outputTypeKey: 'CUSTOMER_PROPOSAL',
+        idempotencyKey: 'OUTCOME:SESSION:MESSAGE:LEGACY_RESPONSE',
+      },
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })).rejects.toMatchObject({
+      status: 409,
+      code: 'GRR_IDEMPOTENCY_REQUEST_CONFLICT',
+      details: {
+        reason: 'IDEMPOTENCY_REQUEST_CONFLICT',
+        fingerprintState: 'MISSING',
+      },
+    })
+
+    expect(GovernedRuntimeArtifact.findOne).not.toHaveBeenCalled()
+    expect(deps.resolveKnowledgeBinding).not.toHaveBeenCalled()
+    expect(deps.providerAdapter).not.toHaveBeenCalled()
+    expect(GovernedReasoningExecution.prototype.save).not.toHaveBeenCalled()
+    expect(GovernedRuntimeArtifact.prototype.save).not.toHaveBeenCalled()
+    expect(deps.logAudit).not.toHaveBeenCalled()
+  })
+
+  test('recovers the completed winner when concurrent idempotent persistence loses a unique-index race', async () => {
+    const deps = makeDeps()
+    const idempotencyKey = 'OUTCOME:SESSION:MESSAGE:CONCURRENT_RESPONSE'
+    let attemptedFingerprint
     const existingExecution = {
-      executionId: 'grr_exec_existing',
+      executionId: 'grr_exec_concurrent_winner',
       status: 'COMPLETED',
       providerMode: 'DETERMINISTIC_TEST',
       runtimeStateWrites: {
         status: 'NOT_WRITTEN',
         reason: 'NO_REVIEWED_GRR_RUNTIME_PATH_V1',
       },
-      idempotencyKey: 'OUTCOME:SESSION:MESSAGE:GENERATE_RESPONSE',
+      idempotencyKey,
     }
     const existingArtifact = {
-      runtimeArtifactId: 'grr_art_existing',
-      executionId: 'grr_exec_existing',
+      runtimeArtifactId: 'grr_art_concurrent_winner',
+      executionId: existingExecution.executionId,
       status: 'GENERATED',
       certification: {
         certifiedTruthOnly: true,
         runtimeArtifactIsCertifiedTruth: false,
       },
     }
-    GovernedReasoningExecution.findOne = jest.fn().mockReturnValue({
-      lean: jest.fn().mockResolvedValue(existingExecution),
-    })
+    GovernedReasoningExecution.findOne = jest.fn()
+      .mockReturnValueOnce({ lean: jest.fn().mockResolvedValue(null) })
+      .mockReturnValueOnce({
+        lean: jest.fn(async () => ({
+          ...existingExecution,
+          requestFingerprint: attemptedFingerprint,
+        })),
+      })
     GovernedRuntimeArtifact.findOne = jest.fn().mockReturnValue({
       lean: jest.fn().mockResolvedValue(existingArtifact),
+    })
+    GovernedReasoningExecution.prototype.save = jest.fn(async function save() {
+      attemptedFingerprint = this.requestFingerprint
+      const error = new Error('duplicate runtimeInstanceId_1_idempotencyKey_1')
+      error.code = 11000
+      error.keyPattern = { runtimeInstanceId: 1, idempotencyKey: 1 }
+      throw error
     })
 
     const result = await createGovernedReasoningExecution({
       actorUserId: ACTOR_ID,
-      auditRequest: { requestId: 'req-idempotent' },
+      auditRequest: { requestId: 'req-concurrent-idempotent' },
       deps,
       payload: {
         outputTypeKey: 'CUSTOMER_PROPOSAL',
-        idempotencyKey: 'OUTCOME:SESSION:MESSAGE:GENERATE_RESPONSE',
+        idempotencyKey,
       },
       runtimeInstanceId: RUNTIME_INSTANCE_ID,
       scopes: {},
     })
 
-    expect(result.executionId).toBe('grr_exec_existing')
-    expect(result.artifact.runtimeArtifactId).toBe('grr_art_existing')
-    expect(deps.resolveKnowledgeBinding).not.toHaveBeenCalled()
-    expect(deps.providerAdapter).not.toHaveBeenCalled()
-    expect(GovernedReasoningExecution.prototype.save).not.toHaveBeenCalled()
-    expect(GovernedRuntimeArtifact.prototype.save).not.toHaveBeenCalled()
+    expect(result.executionId).toBe(existingExecution.executionId)
+    expect(result.artifact.runtimeArtifactId).toBe(existingArtifact.runtimeArtifactId)
+    expect(deps.providerAdapter).toHaveBeenCalledTimes(1)
     expect(deps.logAudit).not.toHaveBeenCalled()
+    expect(GovernedRuntimeArtifact.deleteOne).toHaveBeenCalledTimes(1)
+    expect(GovernedReasoningExecution.deleteOne).toHaveBeenCalledTimes(1)
+  })
+
+  test('returns the stable 409 when a unique-index race winner has a different fingerprint', async () => {
+    const deps = makeDeps()
+    const idempotencyKey = 'OUTCOME:SESSION:MESSAGE:CONCURRENT_CONFLICT'
+    GovernedReasoningExecution.findOne = jest.fn()
+      .mockReturnValueOnce({ lean: jest.fn().mockResolvedValue(null) })
+      .mockReturnValueOnce({
+        lean: jest.fn().mockResolvedValue({
+          executionId: 'grr_exec_concurrent_conflict',
+          idempotencyKey,
+          requestFingerprint: 'sha256:different-request',
+        }),
+      })
+    GovernedReasoningExecution.prototype.save = jest.fn(async () => {
+      const error = new Error('duplicate runtimeInstanceId_1_idempotencyKey_1')
+      error.code = 11000
+      error.keyPattern = { runtimeInstanceId: 1, idempotencyKey: 1 }
+      throw error
+    })
+
+    await expect(createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      auditRequest: { requestId: 'req-concurrent-conflict' },
+      deps,
+      payload: {
+        outputTypeKey: 'CUSTOMER_PROPOSAL',
+        idempotencyKey,
+      },
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })).rejects.toMatchObject({
+      status: 409,
+      code: 'GRR_IDEMPOTENCY_REQUEST_CONFLICT',
+      details: {
+        reason: 'IDEMPOTENCY_REQUEST_CONFLICT',
+        fingerprintState: 'MISMATCHED',
+      },
+    })
+
+    expect(deps.providerAdapter).toHaveBeenCalledTimes(1)
+    expect(deps.logAudit).not.toHaveBeenCalled()
+    expect(GovernedRuntimeArtifact.findOne).not.toHaveBeenCalled()
+    expect(GovernedRuntimeArtifact.deleteOne).toHaveBeenCalledTimes(1)
+    expect(GovernedReasoningExecution.deleteOne).toHaveBeenCalledTimes(1)
   })
 })

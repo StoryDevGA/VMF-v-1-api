@@ -15,6 +15,12 @@ import {
   resolveKnowledgePackCategory,
 } from '../constants/workspaceGovernance.js'
 import { containsForbiddenProviderContextKey } from '../utils/knowledgePackSafety.js'
+import {
+  knowledgePackCapabilityKeyField,
+  knowledgePackLayerField,
+  knowledgePackWorkspaceCompatibilityField,
+  normalizeKnowledgePackGovernanceFields,
+} from './knowledgePackGovernanceSchemas.js'
 
 const normalizeText = (value) => String(value || '').trim()
 const normalizeToken = (value) => normalizeText(value).toUpperCase()
@@ -52,6 +58,9 @@ const knowledgePackSchema = new mongoose.Schema(
       default: KNOWLEDGE_PACK_PURPOSE_CATEGORIES.SYSTEM,
       index: true,
     },
+    knowledgeLayer: knowledgePackLayerField,
+    capabilityKey: knowledgePackCapabilityKeyField,
+    workspaceCompatibility: knowledgePackWorkspaceCompatibilityField,
     packType: {
       type: String,
       required: true,
@@ -199,6 +208,7 @@ knowledgePackSchema.pre('validate', function normalizeKnowledgePack(next) {
     packType: this.packType,
   })
   this.purposeCategory = normalizeToken(this.purposeCategory || KNOWLEDGE_PACK_PURPOSE_CATEGORIES.SYSTEM)
+  normalizeKnowledgePackGovernanceFields(this)
   this.packKey = normalizeText(this.packKey).toLowerCase()
   this.status = normalizeToken(this.status || OUTCOME_KNOWLEDGE_PACK_STATUSES.DRAFT)
   this.label = normalizeText(this.label)

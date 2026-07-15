@@ -830,6 +830,48 @@ const createGovernedReasoningExecutionSchema = z.object({
     .trim()
     .max(2000, 'executionIntent must be 2000 characters or fewer')
     .optional(),
+  requestedOutputTypeKey: z
+    .string()
+    .trim()
+    .min(1, 'requestedOutputTypeKey must not be empty')
+    .max(120, 'requestedOutputTypeKey must be 120 characters or fewer')
+    .transform((value) => value.toLowerCase())
+    .optional(),
+  requestedStyleKey: z
+    .string()
+    .trim()
+    .min(1, 'requestedStyleKey must not be empty')
+    .max(120, 'requestedStyleKey must be 120 characters or fewer')
+    .transform((value) => value.toLowerCase())
+    .optional(),
+  audienceKeys: z
+    .array(z.string().trim().min(1).max(120).transform((value) => value.toLowerCase()))
+    .max(12, 'audienceKeys must contain 12 entries or fewer')
+    .optional(),
+  industryKeys: z
+    .array(z.string().trim().min(1).max(120).transform((value) => value.toLowerCase()))
+    .max(12, 'industryKeys must contain 12 entries or fewer')
+    .optional(),
+  languageKey: z
+    .string()
+    .trim()
+    .min(1, 'languageKey must not be empty')
+    .max(120, 'languageKey must be 120 characters or fewer')
+    .transform((value) => value.toLowerCase())
+    .optional(),
+  channelKey: z
+    .string()
+    .trim()
+    .min(1, 'channelKey must not be empty')
+    .max(120, 'channelKey must be 120 characters or fewer')
+    .transform((value) => value.toLowerCase())
+    .optional(),
+  idempotencyKey: z
+    .string()
+    .trim()
+    .min(1, 'idempotencyKey must not be empty')
+    .max(240, 'idempotencyKey must be 240 characters or fewer')
+    .optional(),
   manifestId: z
     .string()
     .trim()

@@ -1,0 +1,285 @@
+{
+  "schemaVersion": "1.0.0",
+  "policyVersion": "kp-004-governance-dev-v1",
+  "environmentGuard": {
+    "allowedNodeEnvs": [
+      "development",
+      "test"
+    ],
+    "allowedDatabaseNames": [
+      "test"
+    ]
+  },
+  "workspaceCompatibility": [
+    "OUTCOME"
+  ],
+  "packTypeLayerMap": {
+    "ARL": "REASONING",
+    "RL": "COMMUNICATION_PATTERN",
+    "ET": "FRAMEWORK",
+    "ET_RT": "FRAMEWORK",
+    "ERR": "FRAMEWORK",
+    "RGS": "FRAMEWORK",
+    "OR": "FRAMEWORK",
+    "CCD": "FRAMEWORK",
+    "CCR": "FRAMEWORK",
+    "DX": "FRAMEWORK",
+    "VE": "FRAMEWORK",
+    "CR": "FRAMEWORK",
+    "CDRM": "FRAMEWORK",
+    "CDRT": "FRAMEWORK",
+    "FRAMEWORK_METADATA": "FRAMEWORK",
+    "FRAMEWORK_PACK": "FRAMEWORK",
+    "OUTPUT_SCHEMA": "OUTPUT_SCHEMA",
+    "TRUTH_CERTIFICATION": "VALIDATION",
+    "OUTPUT_TYPE_DEFINITION": "OUTPUT_TYPE",
+    "STYLE": "STYLE",
+    "AUDIENCE": "AUDIENCE",
+    "INDUSTRY": "INDUSTRY",
+    "LANGUAGE": "LANGUAGE",
+    "BRAND": "BRAND",
+    "COMPLIANCE": "VALIDATION",
+    "DECISION": "REASONING",
+    "ADVISOR": "REASONING"
+  },
+  "packKeyLayerOverrides": {
+    "execution-translation": "FRAMEWORK",
+    "execution-translation-runtime": "FRAMEWORK",
+    "canonical-derived-runtime": "FRAMEWORK",
+    "accessibility-for-visual-outputs": "VISUAL_SYSTEM",
+    "customer-safe-visual-rendering-rules": "VISUAL_SYSTEM",
+    "data-visualisation-integrity-rules": "VISUAL_SYSTEM",
+    "visual-truth-preservation-rules": "VISUAL_SYSTEM",
+    "customer-visible-content-policy": "VALIDATION",
+    "evidence-boundary-rules": "VALIDATION",
+    "hidden-content-policy": "VALIDATION",
+    "lineage-preservation-rules": "VALIDATION",
+    "redaction-rules": "VALIDATION",
+    "truth-preservation-rules": "VALIDATION"
+  },
+  "capabilityRequiredLayers": [
+    "OUTPUT_TYPE",
+    "OUTPUT_SCHEMA",
+    "AUDIENCE",
+    "INDUSTRY",
+    "COMMUNICATION_PATTERN",
+    "STYLE",
+    "CHANNEL",
+    "BRAND",
+    "LANGUAGE",
+    "VISUAL_SYSTEM"
+  ],
+  "capabilityKeyOverrides": {
+    "adaptive-reasoning-layer": "adaptive-reasoning",
+    "rendering-layer": "rendering",
+    "output-schemas-pack": "mandatory-output-schema",
+    "outcome-output-types": "outcome-output-types",
+    "executive-briefing-style": "executive-brief-style",
+    "board-governance-style": "board-executive-style",
+    "sales-narrative-style": "customer-value-narrative-style"
+  },
+  "dependencyReferencesByPackKey": {
+    "executive-brief": [
+      {
+        "knowledgeLayer": "OUTPUT_SCHEMA",
+        "requirement": "REQUIRED",
+        "packType": "OUTPUT_SCHEMA",
+        "packKey": "executive-brief-schema"
+      },
+      {
+        "knowledgeLayer": "STYLE",
+        "requirement": "REQUIRED",
+        "capabilityKey": "executive-brief-style"
+      }
+    ],
+    "sales-narrative": [
+      {
+        "knowledgeLayer": "OUTPUT_SCHEMA",
+        "requirement": "REQUIRED",
+        "packType": "OUTPUT_SCHEMA",
+        "packKey": "sales-narrative-schema"
+      },
+      {
+        "knowledgeLayer": "STYLE",
+        "requirement": "REQUIRED",
+        "capabilityKey": "customer-value-narrative-style"
+      }
+    ],
+    "commercial-assessment": [
+      {
+        "knowledgeLayer": "OUTPUT_SCHEMA",
+        "requirement": "REQUIRED",
+        "packType": "OUTPUT_SCHEMA",
+        "packKey": "commercial-assessment-schema"
+      },
+      {
+        "knowledgeLayer": "STYLE",
+        "requirement": "REQUIRED",
+        "capabilityKey": "commercial-assessment-style"
+      }
+    ],
+    "board-summary": [
+      {
+        "knowledgeLayer": "OUTPUT_SCHEMA",
+        "requirement": "REQUIRED",
+        "packType": "OUTPUT_SCHEMA",
+        "packKey": "board-summary-schema"
+      },
+      {
+        "knowledgeLayer": "STYLE",
+        "requirement": "REQUIRED",
+        "capabilityKey": "board-executive-style"
+      }
+    ],
+    "customer-proposal": [
+      {
+        "knowledgeLayer": "OUTPUT_SCHEMA",
+        "requirement": "REQUIRED",
+        "packType": "OUTPUT_SCHEMA",
+        "packKey": "customer-proposal-schema"
+      },
+      {
+        "knowledgeLayer": "STYLE",
+        "requirement": "REQUIRED",
+        "capabilityKey": "professional-marketing-style"
+      }
+    ],
+    "one-pager": [
+      {
+        "knowledgeLayer": "OUTPUT_SCHEMA",
+        "requirement": "REQUIRED",
+        "packType": "OUTPUT_SCHEMA",
+        "packKey": "one-pager-schema"
+      },
+      {
+        "knowledgeLayer": "STYLE",
+        "requirement": "REQUIRED",
+        "capabilityKey": "executive-brief-style"
+      }
+    ],
+    "website-copy": [
+      {
+        "knowledgeLayer": "OUTPUT_SCHEMA",
+        "requirement": "REQUIRED",
+        "packType": "OUTPUT_SCHEMA",
+        "packKey": "website-copy-schema"
+      },
+      {
+        "knowledgeLayer": "STYLE",
+        "requirement": "REQUIRED",
+        "capabilityKey": "website-content-style"
+      }
+    ],
+    "sales-email": [
+      {
+        "knowledgeLayer": "OUTPUT_SCHEMA",
+        "requirement": "REQUIRED",
+        "packType": "OUTPUT_SCHEMA",
+        "packKey": "sales-email-schema"
+      },
+      {
+        "knowledgeLayer": "STYLE",
+        "requirement": "REQUIRED",
+        "capabilityKey": "consultative-sales-style"
+      }
+    ],
+    "executive-infographic": [
+      {
+        "knowledgeLayer": "OUTPUT_SCHEMA",
+        "requirement": "REQUIRED",
+        "packType": "OUTPUT_SCHEMA",
+        "packKey": "executive-infographic-schema"
+      },
+      {
+        "knowledgeLayer": "STYLE",
+        "requirement": "REQUIRED",
+        "capabilityKey": "executive-consulting-visual-style"
+      }
+    ],
+    "framework-diagram": [
+      {
+        "knowledgeLayer": "OUTPUT_SCHEMA",
+        "requirement": "REQUIRED",
+        "packType": "OUTPUT_SCHEMA",
+        "packKey": "framework-diagram-schema"
+      },
+      {
+        "knowledgeLayer": "STYLE",
+        "requirement": "REQUIRED",
+        "capabilityKey": "executive-consulting-visual-style"
+      }
+    ],
+    "one-page-visual-summary": [
+      {
+        "knowledgeLayer": "OUTPUT_SCHEMA",
+        "requirement": "REQUIRED",
+        "packType": "OUTPUT_SCHEMA",
+        "packKey": "one-page-visual-summary-schema"
+      },
+      {
+        "knowledgeLayer": "STYLE",
+        "requirement": "REQUIRED",
+        "capabilityKey": "storylineos-corporate-visual-style"
+      }
+    ],
+    "process-diagram": [
+      {
+        "knowledgeLayer": "OUTPUT_SCHEMA",
+        "requirement": "REQUIRED",
+        "packType": "OUTPUT_SCHEMA",
+        "packKey": "process-diagram-schema"
+      },
+      {
+        "knowledgeLayer": "STYLE",
+        "requirement": "REQUIRED",
+        "capabilityKey": "executive-consulting-visual-style"
+      }
+    ],
+    "truth-certification-pack": [
+      {
+        "knowledgeLayer": "VALIDATION",
+        "requirement": "REQUIRED",
+        "packType": "TRUTH_CERTIFICATION",
+        "packKey": "blocking-rules"
+      },
+      {
+        "knowledgeLayer": "VALIDATION",
+        "requirement": "REQUIRED",
+        "packType": "TRUTH_CERTIFICATION",
+        "packKey": "certification-levels"
+      },
+      {
+        "knowledgeLayer": "VALIDATION",
+        "requirement": "REQUIRED",
+        "packType": "TRUTH_CERTIFICATION",
+        "packKey": "export-metadata-rules"
+      },
+      {
+        "knowledgeLayer": "VALIDATION",
+        "requirement": "REQUIRED",
+        "packType": "TRUTH_CERTIFICATION",
+        "packKey": "prohibited-output-claims"
+      },
+      {
+        "knowledgeLayer": "VALIDATION",
+        "requirement": "REQUIRED",
+        "packType": "TRUTH_CERTIFICATION",
+        "packKey": "runtime-warning-rules"
+      },
+      {
+        "knowledgeLayer": "VALIDATION",
+        "requirement": "REQUIRED",
+        "packType": "TRUTH_CERTIFICATION",
+        "packKey": "truth-certification-framework"
+      },
+      {
+        "knowledgeLayer": "VALIDATION",
+        "requirement": "REQUIRED",
+        "packType": "TRUTH_CERTIFICATION",
+        "packKey": "truth-quality-dimensions"
+      }
+    ]
+  },
+  "historicalPolicy": "PRESERVE",
+  "manifestPolicy": "BLOCK_IF_PRESENT"
+}

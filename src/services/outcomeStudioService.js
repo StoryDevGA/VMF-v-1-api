@@ -66,6 +66,7 @@ import {
 
 const normalizeText = (value) => String(value ?? '').trim()
 const normalizeToken = (value) => normalizeText(value).toUpperCase()
+const normalizeCapabilityKey = (value) => normalizeText(value).toLowerCase().replace(/_/g, '-')
 const clampText = (value, maxLength = 120) => {
   const normalized = normalizeText(value)
   if (normalized.length <= maxLength) return normalized
@@ -670,6 +671,20 @@ const resolveTruthSignatureCurrentness = ({
 const sanitizeKnowledgePackActivation = (pack = {}) => ({
   packCategory: normalizePackCategory(pack.packCategory, pack.packType),
   purposeCategory: normalizeToken(pack.purposeCategory),
+  knowledgeLayer: normalizeToken(pack.knowledgeLayer),
+  capabilityKey: normalizeText(pack.capabilityKey).toLowerCase(),
+  workspaceCompatibility: Array.isArray(pack.workspaceCompatibility)
+    ? pack.workspaceCompatibility.map(normalizeToken).filter(Boolean)
+    : [],
+  dependencyReferences: Array.isArray(pack.dependencyReferences)
+    ? pack.dependencyReferences.map((reference) => ({
+        knowledgeLayer: normalizeToken(reference?.knowledgeLayer),
+        requirement: normalizeToken(reference?.requirement),
+        packType: normalizeToken(reference?.packType),
+        packKey: normalizeText(reference?.packKey).toLowerCase(),
+        capabilityKey: normalizeText(reference?.capabilityKey).toLowerCase(),
+      }))
+    : [],
   packType: normalizeToken(pack.packType),
   packKey: normalizeText(pack.packKey),
   label: normalizeText(pack.label),
@@ -700,6 +715,21 @@ const buildSessionKnowledgePackBinding = (packBinding = {}, boundAt) => {
         runtimeBindable: pack.runtimeBindable === true,
       }))
     : []
+  const sanitizePackList = (packs) => Array.isArray(packs)
+    ? packs.map(sanitizeKnowledgePackActivation)
+    : []
+  const sanitizeLineage = (lineage = {}) => ({
+    resolvedAt: normalizeText(lineage.resolvedAt),
+    activationIds: Array.isArray(lineage.activationIds)
+      ? lineage.activationIds.map(normalizeText).filter(Boolean)
+      : [],
+    versionIds: Array.isArray(lineage.versionIds)
+      ? lineage.versionIds.map(normalizeText).filter(Boolean)
+      : [],
+    contentHashes: Array.isArray(lineage.contentHashes)
+      ? lineage.contentHashes.map(normalizeText).filter(Boolean)
+      : [],
+  })
 
   return {
     status: normalizeToken(packBinding.status),
@@ -717,6 +747,13 @@ const buildSessionKnowledgePackBinding = (packBinding = {}, boundAt) => {
     requiredCount: requiredPacks.length,
     activePacks,
     requiredPacks,
+    optionalPacks: sanitizePackList(packBinding.optionalPacks),
+    validationPacks: sanitizePackList(packBinding.validationPacks),
+    providerContextPacks: sanitizePackList(packBinding.providerContextPacks),
+    preValidationPacks: sanitizePackList(packBinding.preValidationPacks),
+    postValidationPacks: sanitizePackList(packBinding.postValidationPacks),
+    systemOnlyPacks: sanitizePackList(packBinding.systemOnlyPacks),
+    lineage: sanitizeLineage(packBinding.lineage || packBinding.resolution?.lineage),
     resolution: {
       status: normalizeToken(packBinding.resolution?.status || packBinding.status),
       activeCount: Number(packBinding.resolution?.activeCount ?? activePacks.length),
@@ -725,6 +762,7 @@ const buildSessionKnowledgePackBinding = (packBinding = {}, boundAt) => {
       optionalCount: Number(packBinding.resolution?.optionalCount ?? 0),
       validationCount: Number(packBinding.resolution?.validationCount ?? 0),
       blockedCount: Number(packBinding.resolution?.blockedCount ?? 0),
+      policyVersion: normalizeText(packBinding.resolution?.policyVersion),
       scopeCandidates: Array.isArray(packBinding.resolution?.scopeCandidates)
         ? packBinding.resolution.scopeCandidates.map((candidate) => ({
             scopeType: normalizeToken(candidate.scopeType),
@@ -734,6 +772,51 @@ const buildSessionKnowledgePackBinding = (packBinding = {}, boundAt) => {
         : [],
     },
   }
+}
+
+const assertRequestKnowledgePackBindingReady = ({ binding, requestResolution } = {}) => {
+  const status = normalizeToken(binding?.status)
+  if (status === 'READY' || status === 'READY_WITH_GAPS') return
+
+  throw createOutcomeStudioError({
+    status: 409,
+    code: 'CONFLICT',
+    message: status === 'AMBIGUOUS'
+      ? 'Outcome Studio found multiple equally eligible Knowledge Packs for this request.'
+      : 'Outcome Studio could not resolve all required Knowledge Packs for this request.',
+    reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_RESPONSE_GENERATION_BLOCKED,
+    details: {
+      responseGenerationAvailable: false,
+      blockerReason: status === 'AMBIGUOUS'
+        ? 'KNOWLEDGE_PACK_RESOLUTION_AMBIGUOUS'
+        : 'KNOWLEDGE_PACK_RESOLUTION_BLOCKED',
+      resolutionStatus: status || 'BLOCKED',
+      requestedOutputTypeKey: normalizeText(requestResolution?.outputType?.key),
+      requestedStyleKey: normalizeText(requestResolution?.style?.styleKey),
+      missingDependencies: Array.isArray(binding?.missingDependencies)
+        ? binding.missingDependencies.map((missing) => ({
+            reason: normalizeToken(missing?.reason),
+            requirement: normalizeToken(missing?.requirement),
+            knowledgeLayer: normalizeToken(missing?.selector?.knowledgeLayer),
+            packType: normalizeToken(missing?.selector?.packType),
+            packKey: normalizeText(missing?.selector?.packKey),
+            capabilityKey: normalizeText(missing?.selector?.capabilityKey),
+          }))
+        : [],
+      ambiguousSelectors: Array.isArray(binding?.ambiguousCandidates)
+        ? binding.ambiguousCandidates.map((entry) => ({
+            knowledgeLayer: normalizeToken(entry?.selector?.knowledgeLayer),
+            packType: normalizeToken(entry?.selector?.packType),
+            packKey: normalizeText(entry?.selector?.packKey),
+            capabilityKey: normalizeText(entry?.selector?.capabilityKey),
+          }))
+        : [],
+      safetyGate: {
+        code: OUTCOME_STUDIO_SAFETY_GATE_CODES.RESPONSE_GENERATION_ENGINE,
+        status: OUTCOME_STUDIO_SAFETY_GATE_STATUSES.BLOCKED,
+      },
+    },
+  })
 }
 
 const buildSessionTruthSignature = (truthSignature = {}, boundAt, truthSignatureId = '') => ({
@@ -792,6 +875,9 @@ const sanitizePersistedKnowledgePackBinding = (binding = {}) => {
         runtimeBindable: pack?.runtimeBindable === true,
       })).filter((pack) => pack.packType || pack.packKey)
     : []
+  const sanitizePackList = (packs) => Array.isArray(packs)
+    ? packs.slice(0, OUTCOME_CONTEXT_BINDING_LIST_LIMIT).map(sanitizeKnowledgePackActivation)
+    : []
   return {
     status: normalizeToken(binding.status),
     mode: normalizeText(binding.mode),
@@ -808,6 +894,24 @@ const sanitizePersistedKnowledgePackBinding = (binding = {}) => {
     requiredCount: Number(binding.requiredCount ?? requiredPacks.length),
     activePacks,
     requiredPacks,
+    optionalPacks: sanitizePackList(binding.optionalPacks),
+    validationPacks: sanitizePackList(binding.validationPacks),
+    providerContextPacks: sanitizePackList(binding.providerContextPacks),
+    preValidationPacks: sanitizePackList(binding.preValidationPacks),
+    postValidationPacks: sanitizePackList(binding.postValidationPacks),
+    systemOnlyPacks: sanitizePackList(binding.systemOnlyPacks),
+    lineage: {
+      resolvedAt: normalizeText(binding.lineage?.resolvedAt),
+      activationIds: Array.isArray(binding.lineage?.activationIds)
+        ? binding.lineage.activationIds.map(normalizeText).filter(Boolean)
+        : [],
+      versionIds: Array.isArray(binding.lineage?.versionIds)
+        ? binding.lineage.versionIds.map(normalizeText).filter(Boolean)
+        : [],
+      contentHashes: Array.isArray(binding.lineage?.contentHashes)
+        ? binding.lineage.contentHashes.map(normalizeText).filter(Boolean)
+        : [],
+    },
     resolution: {
       status: normalizeToken(binding.resolution?.status || binding.status),
       activeCount: Number(binding.resolution?.activeCount ?? activePacks.length),
@@ -816,6 +920,7 @@ const sanitizePersistedKnowledgePackBinding = (binding = {}) => {
       optionalCount: Number(binding.resolution?.optionalCount ?? 0),
       validationCount: Number(binding.resolution?.validationCount ?? 0),
       blockedCount: Number(binding.resolution?.blockedCount ?? 0),
+      policyVersion: normalizeText(binding.resolution?.policyVersion),
       scopeCandidates: Array.isArray(binding.resolution?.scopeCandidates)
         ? binding.resolution.scopeCandidates.slice(0, OUTCOME_CONTEXT_BINDING_LIST_LIMIT).map((candidate) => ({
             scopeType: normalizeToken(candidate.scopeType),
@@ -1821,10 +1926,12 @@ const listOutcomeMessagesForSession = async ({
     runtimeInstanceId,
     sessionId: normalizeText(sessionId),
   })
-    .sort({ createdAt: 1 })
+    .sort({ createdAt: -1 })
     .limit(OUTCOME_STUDIO_MESSAGE_LIST_LIMIT)
     .lean()
-  return messages.map((message) => serializeOutcomeMessage(message, { currentEvidence }))
+  return messages
+    .reverse()
+    .map((message) => serializeOutcomeMessage(message, { currentEvidence }))
 }
 
 const listOutcomeDraftsForSession = async ({
@@ -3944,13 +4051,45 @@ export const generateRuntimeOutcomeResponse = async ({
 
   const runtimeScope = getRuntimeScope(runtimeInstance)
   const generatedAt = new Date().toISOString()
+  const resolvedOutputTypeKey = normalizeToken(
+    requestResolution?.outputType?.key
+    || serializedSession.sourceOutputTypeKey
+    || serializedSession.sourceOutput?.outputTypeKey,
+  )
+  const resolvedOutputTypeLabel = normalizeText(
+    requestResolution?.outputType?.label
+    || serializedSession.sourceOutputTypeLabel
+    || serializedSession.sourceOutput?.outputTypeLabel,
+  )
+  const resolvedOutputTypeCapabilityKey = normalizeCapabilityKey(resolvedOutputTypeKey)
+  const resolvedStyleKey = normalizeText(requestResolution?.style?.styleKey).toLowerCase()
+  const requestKnowledgeResolution = await resolveOutcomeStudioKnowledgePackBinding({
+    query: {
+      ...runtimeScope,
+      environmentKey: 'PRODUCTION',
+      workspaceType: DEFAULT_OUTCOME_WORKSPACE_TYPE,
+      requestedOutputTypeKey: resolvedOutputTypeCapabilityKey,
+      requestedStyleKey: resolvedStyleKey,
+      resolvedAt: generatedAt,
+    },
+  })
+  assertRequestKnowledgePackBindingReady({
+    binding: requestKnowledgeResolution.binding,
+    requestResolution,
+  })
+  const generationKnowledgePackBinding = buildSessionKnowledgePackBinding(
+    requestKnowledgeResolution.binding,
+    generatedAt,
+  )
   const grrEnabled = isOutcomeStudioGrrEnabled()
   const grrExecution = grrEnabled
     ? await createGovernedReasoningExecution({
         actorUserId,
         auditRequest,
         payload: {
-          outputTypeKey: serializedSession.sourceOutputTypeKey || serializedSession.sourceOutput?.outputTypeKey,
+          outputTypeKey: resolvedOutputTypeKey,
+          requestedOutputTypeKey: resolvedOutputTypeCapabilityKey,
+          requestedStyleKey: resolvedStyleKey,
           executionIntent: buildGrrExecutionIntent({
             currentDraftIteration,
             message: serializedMessage,
@@ -3964,6 +4103,9 @@ export const generateRuntimeOutcomeResponse = async ({
             'GENERATE_RESPONSE',
           ].join(':'),
           workspaceType: DEFAULT_OUTCOME_WORKSPACE_TYPE,
+        },
+        deps: {
+          resolveKnowledgeBinding: async () => requestKnowledgeResolution,
         },
         runtimeInstanceId,
         scopes,
@@ -4019,6 +4161,14 @@ export const generateRuntimeOutcomeResponse = async ({
     runtimeInstance,
     session: serializedSession,
   })
+  lineageSummary.knowledgeResolution = {
+    status: generationKnowledgePackBinding.status,
+    policyVersion: generationKnowledgePackBinding.resolution.policyVersion,
+    resolvedAt: generationKnowledgePackBinding.lineage.resolvedAt,
+    activationIds: generationKnowledgePackBinding.lineage.activationIds,
+    versionIds: generationKnowledgePackBinding.lineage.versionIds,
+    contentHashes: generationKnowledgePackBinding.lineage.contentHashes,
+  }
   if (refinementMetadata) {
     lineageSummary.draftRefinement = refinementMetadata
   }
@@ -4046,15 +4196,15 @@ export const generateRuntimeOutcomeResponse = async ({
   const postValidation = buildOutcomeAssetPostValidationSnapshot({
     asset: {
       outcomeAssetId: draftId,
-      outputTypeKey: serializedSession.sourceOutputTypeKey || serializedSession.sourceOutput?.outputTypeKey,
+      outputTypeKey: resolvedOutputTypeKey,
     },
     customerContent,
-    knowledgePackBinding: serializedSession.knowledgePackBinding,
+    knowledgePackBinding: generationKnowledgePackBinding,
     truthSignature: serializedSession.truthSignature,
     validatedAt: generatedAt,
     version: {
       outcomeAssetVersionId: draftIterationId,
-      outputTypeKey: serializedSession.sourceOutputTypeKey || serializedSession.sourceOutput?.outputTypeKey,
+      outputTypeKey: resolvedOutputTypeKey,
     },
   })
   const draftValidationSummary = {
@@ -4076,7 +4226,7 @@ export const generateRuntimeOutcomeResponse = async ({
   const responseContextBindings = buildOutcomeContextBindings({
     contextType: 'MESSAGE',
     grrExecution,
-    knowledgePackBinding: serializedSession.knowledgePackBinding,
+    knowledgePackBinding: generationKnowledgePackBinding,
     messageId: responseMessageId,
     runtimeScope,
     sessionId: serializedSession.sessionId,
@@ -4087,7 +4237,7 @@ export const generateRuntimeOutcomeResponse = async ({
     assetType: DEFAULT_OUTCOME_ASSET_TYPE,
     contextType: 'DRAFT',
     grrExecution,
-    knowledgePackBinding: serializedSession.knowledgePackBinding,
+    knowledgePackBinding: generationKnowledgePackBinding,
     runtimeScope,
     sessionId: serializedSession.sessionId,
     sourceOutput: serializedSession.sourceOutput,
@@ -4106,7 +4256,7 @@ export const generateRuntimeOutcomeResponse = async ({
     prompt: responsePrompt,
     sourceOutputSnapshot: serializedSession.sourceOutput,
     truthSignature: serializedSession.truthSignature,
-    knowledgePackBinding: serializedSession.knowledgePackBinding,
+    knowledgePackBinding: generationKnowledgePackBinding,
     contextBindings: responseContextBindings,
     submittedBy: actorUserId,
     submittedAt: generatedAt,
@@ -4114,6 +4264,9 @@ export const generateRuntimeOutcomeResponse = async ({
   const outcomeDraft = isDraftRefinement
     ? {
         ...activeDraft,
+        outputTypeKey: resolvedOutputTypeKey,
+        outputTypeLabel: resolvedOutputTypeLabel,
+        knowledgePackBinding: generationKnowledgePackBinding,
         currentIterationId: draftIterationId,
         currentIterationNumber: draftIterationNumber,
         lineageSummary,
@@ -4131,13 +4284,13 @@ export const generateRuntimeOutcomeResponse = async ({
         contractVersion: OUTCOME_STUDIO_CONTRACT_VERSION,
         phase: OUTCOME_STUDIO_PHASE,
         status: OUTCOME_STUDIO_DRAFT_STATUSES.ACTIVE,
-        outputTypeKey: serializedSession.sourceOutputTypeKey || serializedSession.sourceOutput?.outputTypeKey,
-        outputTypeLabel: serializedSession.sourceOutputTypeLabel || serializedSession.sourceOutput?.outputTypeLabel,
+        outputTypeKey: resolvedOutputTypeKey,
+        outputTypeLabel: resolvedOutputTypeLabel,
         title: draftTitle,
         sourceOutputAssetId: serializedSession.sourceOutputAssetId || serializedSession.sourceOutput?.outputAssetId,
         truthSignature: serializedSession.truthSignature,
         truthSignatureId: serializedSession.truthSignatureId || serializedSession.truthSignature?.truthSignatureId,
-        knowledgePackBinding: serializedSession.knowledgePackBinding,
+        knowledgePackBinding: generationKnowledgePackBinding,
         currentIterationId: draftIterationId,
         currentIterationNumber: 1,
         contextBindings: draftContextBindings,
@@ -4203,6 +4356,9 @@ export const generateRuntimeOutcomeResponse = async ({
       }
       const draftUpdate = {
         $set: {
+          outputTypeKey: resolvedOutputTypeKey,
+          outputTypeLabel: resolvedOutputTypeLabel,
+          knowledgePackBinding: generationKnowledgePackBinding,
           currentIterationId: draftIterationId,
           currentIterationNumber: draftIterationNumber,
           lineageSummary,
@@ -4264,7 +4420,12 @@ export const generateRuntimeOutcomeResponse = async ({
           sourceOutputAssetId: serializedSession.sourceOutputAssetId,
           sourceOutputTypeKey: serializedSession.sourceOutputTypeKey,
           truthSignatureStatus: serializedSession.truthSignature.status,
-          knowledgePackBindingStatus: serializedSession.knowledgePackBinding.status,
+          knowledgePackBindingStatus: generationKnowledgePackBinding.status,
+          knowledgePackResolutionPolicyVersion:
+            generationKnowledgePackBinding.resolution.policyVersion,
+          knowledgePackActivationIds: generationKnowledgePackBinding.lineage.activationIds,
+          knowledgePackVersionIds: generationKnowledgePackBinding.lineage.versionIds,
+          knowledgePackContentHashes: generationKnowledgePackBinding.lineage.contentHashes,
           responseStatus: OUTCOME_STUDIO_RESPONSE_STATUSES.RESPONSE_GENERATED,
           assetCreated: false,
           draftCreated: !isDraftRefinement,
@@ -4310,7 +4471,12 @@ export const generateRuntimeOutcomeResponse = async ({
           sourceOutputTypeKey: outcomeDraft.outputTypeKey,
           truthSignatureStatus: serializedSession.truthSignature.status,
           truthSignatureCurrentness: serializedSession.truthSignature.currentness,
-          knowledgePackBindingStatus: serializedSession.knowledgePackBinding.status,
+          knowledgePackBindingStatus: generationKnowledgePackBinding.status,
+          knowledgePackResolutionPolicyVersion:
+            generationKnowledgePackBinding.resolution.policyVersion,
+          knowledgePackActivationIds: generationKnowledgePackBinding.lineage.activationIds,
+          knowledgePackVersionIds: generationKnowledgePackBinding.lineage.versionIds,
+          knowledgePackContentHashes: generationKnowledgePackBinding.lineage.contentHashes,
           grrExecutionId: grrExecution?.executionId || '',
           grrRuntimeArtifactId: grrExecution?.artifact?.runtimeArtifactId || '',
           grrProviderMode: grrExecution?.providerMode || '',
@@ -4483,6 +4649,9 @@ export const approveRuntimeOutcomeDraft = async ({
     runtimeInstanceId: runtimeObjectId,
     sessionId: serializedSession.sessionId,
   })
+  const approvedKnowledgePackBinding = sanitizePersistedKnowledgePackBinding(
+    activeDraft.knowledgePackBinding || serializedSession.knowledgePackBinding,
+  )
 
   const approvedAt = new Date()
   const approvedAtIso = approvedAt.toISOString()
@@ -4539,7 +4708,7 @@ export const approveRuntimeOutcomeDraft = async ({
       outputTypeKey,
     },
     customerContent,
-    knowledgePackBinding: serializedSession.knowledgePackBinding,
+    knowledgePackBinding: approvedKnowledgePackBinding,
     truthSignature: serializedSession.truthSignature,
     validatedAt: approvedAtIso,
     version: {
@@ -4575,7 +4744,7 @@ export const approveRuntimeOutcomeDraft = async ({
     assetType: DEFAULT_OUTCOME_ASSET_TYPE,
     contextType: 'ASSET',
     grrExecution: grrExecutionContext,
-    knowledgePackBinding: serializedSession.knowledgePackBinding,
+    knowledgePackBinding: approvedKnowledgePackBinding,
     outcomeAssetId,
     outcomeAssetVersionId,
     runtimeScope,
@@ -4587,7 +4756,7 @@ export const approveRuntimeOutcomeDraft = async ({
     assetType: DEFAULT_OUTCOME_ASSET_TYPE,
     contextType: 'ASSET_VERSION',
     grrExecution: grrExecutionContext,
-    knowledgePackBinding: serializedSession.knowledgePackBinding,
+    knowledgePackBinding: approvedKnowledgePackBinding,
     outcomeAssetId,
     outcomeAssetVersionId,
     runtimeScope,
@@ -4618,7 +4787,7 @@ export const approveRuntimeOutcomeDraft = async ({
     currentVersionNumber: versionNumber,
     sourceOutputSnapshot: serializedSession.sourceOutput,
     truthSignature: serializedSession.truthSignature,
-    knowledgePackBinding: serializedSession.knowledgePackBinding,
+    knowledgePackBinding: approvedKnowledgePackBinding,
     postValidation,
     contextBindings: assetContextBindings,
     lineageSummary,
@@ -4645,7 +4814,7 @@ export const approveRuntimeOutcomeDraft = async ({
     sourceOutputAssetId,
     sourceOutputSnapshot: serializedSession.sourceOutput,
     truthSignature: serializedSession.truthSignature,
-    knowledgePackBinding: serializedSession.knowledgePackBinding,
+    knowledgePackBinding: approvedKnowledgePackBinding,
     postValidation,
     contextBindings: versionContextBindings,
     lineageSummary,
@@ -4785,7 +4954,12 @@ export const approveRuntimeOutcomeDraft = async ({
           sourceOutputTypeKey: outputTypeKey,
           truthSignatureStatus: serializedSession.truthSignature.status,
           truthSignatureCurrentness: serializedSession.truthSignature.currentness,
-          knowledgePackBindingStatus: serializedSession.knowledgePackBinding.status,
+          knowledgePackBindingStatus: approvedKnowledgePackBinding.status,
+          knowledgePackResolutionPolicyVersion:
+            approvedKnowledgePackBinding.resolution.policyVersion,
+          knowledgePackActivationIds: approvedKnowledgePackBinding.lineage.activationIds,
+          knowledgePackVersionIds: approvedKnowledgePackBinding.lineage.versionIds,
+          knowledgePackContentHashes: approvedKnowledgePackBinding.lineage.contentHashes,
           postValidation: buildOutcomePostValidationAuditSummary(postValidation),
           generatedBodyAvailable: true,
           runtimeGraphRelationshipCount: assetRelationshipDocuments.length,

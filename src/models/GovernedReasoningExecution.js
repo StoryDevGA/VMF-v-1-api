@@ -104,6 +104,12 @@ const governedReasoningExecutionSchema = new mongoose.Schema(
       default: '',
       index: true,
     },
+    requestFingerprint: {
+      type: String,
+      trim: true,
+      maxlength: 80,
+      default: null,
+    },
     status: {
       type: String,
       required: true,
@@ -219,6 +225,7 @@ governedReasoningExecutionSchema.pre('validate', function normalizeGovernedReaso
   this.outputTypeKey = String(this.outputTypeKey || '').trim().toUpperCase()
   this.executionIntent = String(this.executionIntent || '').trim()
   this.idempotencyKey = String(this.idempotencyKey || '').trim()
+  this.requestFingerprint = String(this.requestFingerprint || '').trim() || null
   this.status = String(this.status || GRR_EXECUTION_STATUSES.COMPLETED).trim().toUpperCase()
   this.providerMode = String(this.providerMode || '').trim().toUpperCase()
   this.artifactIds = Array.isArray(this.artifactIds)

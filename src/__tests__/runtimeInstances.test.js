@@ -1281,6 +1281,7 @@ let OutcomeMessage
 let OutcomeSession
 let KnowledgePack
 let KnowledgePackActivation
+let KnowledgePackVersion
 let RuntimePathRegistry
 let UIContract
 let WorkflowPolicy
@@ -1336,6 +1337,7 @@ beforeAll(async () => {
   OutcomeSession = models.OutcomeSession
   KnowledgePack = models.KnowledgePack
   KnowledgePackActivation = models.KnowledgePackActivation
+  KnowledgePackVersion = models.KnowledgePackVersion
   RuntimePathRegistry = models.RuntimePathRegistry
   UIContract = models.UIContract
   WorkflowPolicy = models.WorkflowPolicy
@@ -1444,6 +1446,7 @@ beforeEach(() => {
   OutcomeSession.deleteOne = jest.fn().mockResolvedValue({ deletedCount: 1 })
   KnowledgePack.find = jest.fn().mockReturnValue(buildRuntimeInstanceFindChain([]))
   KnowledgePackActivation.find = jest.fn().mockReturnValue(buildRuntimeInstanceFindChain([]))
+  KnowledgePackVersion.find = jest.fn().mockReturnValue(buildRuntimeInstanceFindChain([]))
   AuditLog.find = jest.fn().mockReturnValue(buildAuditLogFindChain([]))
   AuditLog.createLog = jest.fn(async () => ({}))
 })
@@ -8958,6 +8961,10 @@ describe('Runtime Instance API', () => {
     packType === 'TRUTH_CERTIFICATION' ? 'PLATFORM' : 'OUTCOME'
 
   const makeOutcomeKnowledgePackActivation = ({
+    capabilityKey = '',
+    dependencyReferences = [],
+    executionMode = 'PROVIDER_CONTEXT',
+    knowledgeLayer = '',
     packType,
     packKey,
     label,
@@ -8965,17 +8972,23 @@ describe('Runtime Instance API', () => {
     scopeType = 'GLOBAL',
     semanticVersion = '1.0.0',
     activatedAt = '2026-06-15T09:30:00.000Z',
+    workspaceCompatibility = [],
   }) => ({
     activationId: `kpa-${packKey}-${scopeKey.toLowerCase().replace(/[^a-z0-9-]+/g, '-')}`,
     packId: `kp-${packType.toLowerCase().replace(/_/g, '-')}-${packKey}`,
     versionId: `kpv-${packKey}-${semanticVersion.replace(/\./g, '-')}`,
     packCategory: getOutcomeKnowledgePackCategory(packType),
+    knowledgeLayer,
+    capabilityKey,
+    workspaceCompatibility,
+    dependencyReferences,
     packType,
     packKey,
     label,
     semanticVersion,
     schemaVersion: '1.0.0',
     status: 'ACTIVE',
+    executionMode,
     scopeType,
     scopeKey,
     contentHash: `sha256:${packKey}`,
@@ -9009,6 +9022,77 @@ describe('Runtime Instance API', () => {
       label: 'Outcome Output Types',
     }),
   ])
+
+  const makeRequestReadyOutcomeKnowledgePackActivations = () => ([
+    ...makeActiveOutcomeKnowledgePackActivations(),
+    makeOutcomeKnowledgePackActivation({
+      knowledgeLayer: 'OUTPUT_TYPE',
+      capabilityKey: 'executive-brief',
+      workspaceCompatibility: ['OUTCOME'],
+      dependencyReferences: [
+        {
+          knowledgeLayer: 'OUTPUT_SCHEMA',
+          capabilityKey: 'executive-brief-schema',
+          requirement: 'REQUIRED',
+        },
+        {
+          knowledgeLayer: 'STYLE',
+          capabilityKey: 'executive-brief-style',
+          requirement: 'REQUIRED',
+        },
+      ],
+      packType: 'OUTPUT_TYPE_DEFINITION',
+      packKey: 'executive-brief-output-type',
+      label: 'Executive Brief Output Type',
+    }),
+    makeOutcomeKnowledgePackActivation({
+      knowledgeLayer: 'OUTPUT_SCHEMA',
+      capabilityKey: 'executive-brief-schema',
+      workspaceCompatibility: ['OUTCOME'],
+      packType: 'OUTPUT_SCHEMA',
+      packKey: 'executive-brief-schema',
+      label: 'Executive Brief Schema',
+    }),
+    makeOutcomeKnowledgePackActivation({
+      knowledgeLayer: 'STYLE',
+      capabilityKey: 'executive-brief-style',
+      workspaceCompatibility: ['OUTCOME'],
+      packType: 'STYLE',
+      packKey: 'executive-brief-style',
+      label: 'Executive Brief Style',
+    }),
+  ])
+
+  const makeOutcomeKnowledgePackVersions = (activations = []) => activations.map((activation) => ({
+    versionId: activation.versionId,
+    packId: activation.packId,
+    packCategory: activation.packCategory,
+    purposeCategory: activation.purposeCategory,
+    knowledgeLayer: activation.knowledgeLayer,
+    capabilityKey: activation.capabilityKey,
+    workspaceCompatibility: activation.workspaceCompatibility,
+    dependencyReferences: activation.dependencyReferences,
+    packType: activation.packType,
+    packKey: activation.packKey,
+    semanticVersion: activation.semanticVersion,
+    schemaVersion: activation.schemaVersion,
+    status: 'ACTIVE',
+    reviewStatus: 'APPROVED',
+    scopeType: activation.scopeType,
+    scopeKey: activation.scopeKey,
+    contentHash: activation.contentHash,
+    executionMode: activation.executionMode,
+    visibility: activation.visibility || 'PLATFORM',
+  }))
+
+  const mockRequestReadyOutcomeKnowledgePacks = () => {
+    const activations = makeRequestReadyOutcomeKnowledgePackActivations()
+    KnowledgePackActivation.find.mockReturnValue(buildRuntimeInstanceFindChain(activations))
+    KnowledgePackVersion.find.mockReturnValue(
+      buildRuntimeInstanceFindChain(makeOutcomeKnowledgePackVersions(activations)),
+    )
+    return activations
+  }
 
   const makeOutcomeSessionRecord = (overrides = {}) => ({
     _id: 'b37f1f77bcf86cd799439111',
@@ -14528,14 +14612,20 @@ describe('Runtime Instance API', () => {
     try {
       RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeOutputLabReadyRuntime()))
       FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
-      KnowledgePackActivation.find.mockReturnValue(buildRuntimeInstanceFindChain(makeActiveOutcomeKnowledgePackActivations()))
+      mockRequestReadyOutcomeKnowledgePacks()
       const token = await getAccessTokenForUser(makeCustomerAdmin())
 
       const res = await request
         .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/governed-reasoning/executions`)
         .set('Authorization', `Bearer ${token}`)
         .send({
-          outputTypeKey: 'customer_proposal',
+          outputTypeKey: 'executive_brief',
+          requestedOutputTypeKey: 'executive-brief',
+          requestedStyleKey: 'executive-brief-style',
+          audienceKeys: [],
+          industryKeys: [],
+          idempotencyKey: 'DIRECT:GRR:EXECUTIVE_BRIEF:1',
+          workspaceType: 'OUTCOME',
           executionIntent: 'Create a customer-ready proposal.',
           contextCategories: ['framework'],
         })
@@ -14544,12 +14634,13 @@ describe('Runtime Instance API', () => {
       expect(res.body.data).toEqual(expect.objectContaining({
         status: 'COMPLETED',
         providerMode: 'DETERMINISTIC_TEST',
-        outputTypeKey: 'CUSTOMER_PROPOSAL',
+        outputTypeKey: 'EXECUTIVE_BRIEF',
         runtimeStateWrites: expect.objectContaining({
           status: 'NOT_WRITTEN',
           reason: 'NO_REVIEWED_GRR_RUNTIME_PATH_V1',
         }),
         knowledgeBinding: expect.objectContaining({
+          status: 'READY',
           contentVisible: false,
           packContentLoaded: false,
         }),
@@ -14579,7 +14670,7 @@ describe('Runtime Instance API', () => {
         diff: expect.objectContaining({
           operation: 'CREATE_GOVERNED_REASONING_EXECUTION',
           providerMode: 'DETERMINISTIC_TEST',
-          outputTypeKey: 'CUSTOMER_PROPOSAL',
+          outputTypeKey: 'EXECUTIVE_BRIEF',
           runtimeStateWrites: expect.objectContaining({
             status: 'NOT_WRITTEN',
           }),
@@ -14601,14 +14692,15 @@ describe('Runtime Instance API', () => {
     try {
       RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeOutputLabReadyRuntime()))
       FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
-      KnowledgePackActivation.find.mockReturnValue(buildRuntimeInstanceFindChain(makeActiveOutcomeKnowledgePackActivations()))
+      mockRequestReadyOutcomeKnowledgePacks()
       const token = await getAccessTokenForUser(makeCustomerAdmin())
 
       const res = await request
         .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/governed-reasoning/executions`)
         .set('Authorization', `Bearer ${token}`)
         .send({
-          outputTypeKey: 'CUSTOMER_PROPOSAL',
+          outputTypeKey: 'EXECUTIVE_BRIEF',
+          workspaceType: 'OUTCOME',
         })
 
       expect(res.status).toBe(409)
@@ -14626,6 +14718,32 @@ describe('Runtime Instance API', () => {
         process.env.STORYLINEOS_GRR_PROVIDER_MODE = previousProviderMode
       }
     }
+  })
+
+  test('GRR execution API rejects idempotency keys that exceed the persistence contract', async () => {
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/governed-reasoning/executions`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        outputTypeKey: 'EXECUTIVE_BRIEF',
+        idempotencyKey: 'x'.repeat(241),
+        workspaceType: 'OUTCOME',
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error).toEqual(expect.objectContaining({
+      code: 'VALIDATION_FAILED',
+      message: 'Request validation failed.',
+    }))
+    expect(JSON.stringify(res.body.error.details)).toContain(
+      'idempotencyKey must be 240 characters or fewer',
+    )
+    expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
+    expect(GovernedReasoningExecution.prototype.save).not.toHaveBeenCalled()
+    expect(GovernedRuntimeArtifact.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 
   test('GRR execution detail returns scoped sanitized metadata without raw provider or pack content', async () => {
@@ -15552,7 +15670,7 @@ describe('Runtime Instance API', () => {
     const runtimeInstance = makeOutputLabReadyRuntime()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
     FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
-    KnowledgePackActivation.find.mockReturnValue(buildRuntimeInstanceFindChain(makeActiveOutcomeKnowledgePackActivations()))
+    mockRequestReadyOutcomeKnowledgePacks()
     OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
     OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord()))
     const token = await getAccessTokenForUser(makeCustomerAdmin())
@@ -15581,6 +15699,7 @@ describe('Runtime Instance API', () => {
     }))
     expect(res.body.data.prompt).toContain('## Situation')
     expect(res.body.data.prompt).toContain('## Commercial Problem')
+    expect(res.body.data.prompt).toContain('required provider-context Knowledge Pack binding(s).')
     expect(res.body.data.prompt).not.toContain('governed reasoning artefact')
     expect(res.body.data.prompt).not.toContain('Evidence hash:')
     expect(res.body.data.prompt).not.toContain('Raw message source Markdown must not leak')
@@ -15591,9 +15710,27 @@ describe('Runtime Instance API', () => {
     }))
     expect(res.body.data.sourceOutput).not.toHaveProperty('markdown')
     expect(res.body.data.knowledgePackBinding).toEqual(expect.objectContaining({
-      status: 'PROJECTED',
+      status: 'READY',
       activeCount: 5,
+      resolvedCount: 8,
       requiredCount: 5,
+      lineage: expect.objectContaining({
+        activationIds: expect.arrayContaining([
+          'kpa-executive-brief-output-type-global',
+          'kpa-executive-brief-schema-global',
+          'kpa-executive-brief-style-global',
+        ]),
+        versionIds: expect.arrayContaining([
+          'kpv-executive-brief-output-type-1-0-0',
+          'kpv-executive-brief-schema-1-0-0',
+          'kpv-executive-brief-style-1-0-0',
+        ]),
+        contentHashes: expect.arrayContaining([
+          'sha256:executive-brief-output-type',
+          'sha256:executive-brief-schema',
+          'sha256:executive-brief-style',
+        ]),
+      }),
     }))
     expect(res.body.data.knowledgePackBinding).not.toHaveProperty('sourceBundle')
     expect(res.body.data).not.toHaveProperty('asset')
@@ -15629,9 +15766,9 @@ describe('Runtime Instance API', () => {
         mode: 'FOUNDATION_STATIC_CHECKS',
         contentIncludedInValidation: false,
         rawPackContentIncluded: false,
-        manifestId: 'kpm-outcome-studio-default-1-0-0-global',
-        manifestKey: 'outcome-studio-default',
-        manifestVersion: '1.0.0',
+        manifestId: '',
+        manifestKey: '',
+        manifestVersion: '',
         summary: expect.objectContaining({
           totalChecks: 3,
           passed: 3,
@@ -15884,7 +16021,7 @@ describe('Runtime Instance API', () => {
     const currentIteration = makeOutcomeDraftIterationRecord()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
     FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
-    KnowledgePackActivation.find.mockReturnValue(buildRuntimeInstanceFindChain(makeActiveOutcomeKnowledgePackActivations()))
+    mockRequestReadyOutcomeKnowledgePacks()
     OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
     OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord({
       prompt: 'Make it shorter and more board-ready.',
@@ -16058,7 +16195,7 @@ describe('Runtime Instance API', () => {
     const currentIteration = makeOutcomeDraftIterationRecord()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
     FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
-    KnowledgePackActivation.find.mockReturnValue(buildRuntimeInstanceFindChain(makeActiveOutcomeKnowledgePackActivations()))
+    mockRequestReadyOutcomeKnowledgePacks()
     OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
     OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord({
       prompt: 'Make it shorter and more board-ready.',
@@ -16180,6 +16317,7 @@ describe('Runtime Instance API', () => {
     try {
       const runtimeInstance = makeOutputLabReadyRuntime()
       RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+      mockRequestReadyOutcomeKnowledgePacks()
       OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
       OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord()))
       const token = await getAccessTokenForUser(makeCustomerAdmin())
@@ -16324,7 +16462,7 @@ describe('Runtime Instance API', () => {
     const runtimeInstance = makeOutputLabReadyRuntime()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
     FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
-    KnowledgePackActivation.find.mockReturnValue(buildRuntimeInstanceFindChain(makeActiveOutcomeKnowledgePackActivations()))
+    mockRequestReadyOutcomeKnowledgePacks()
     OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
     OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord()))
     const token = await getAccessTokenForUser(makeCustomerAdmin())
@@ -16358,12 +16496,101 @@ describe('Runtime Instance API', () => {
     }))
   })
 
+  test('Outcome Studio response generation blocks before provider and persistence when a required schema pack is missing', async () => {
+    process.env.STORYLINEOS_GRR_PROVIDER_MODE = 'DETERMINISTIC'
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    const activations = makeRequestReadyOutcomeKnowledgePackActivations()
+      .filter((activation) => activation.capabilityKey !== 'executive-brief-schema')
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+    KnowledgePackActivation.find.mockReturnValue(buildRuntimeInstanceFindChain(activations))
+    KnowledgePackVersion.find.mockReturnValue(
+      buildRuntimeInstanceFindChain(makeOutcomeKnowledgePackVersions(activations)),
+    )
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/messages/out_msg_existing_fixture/generate-response`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details).toEqual(expect.objectContaining({
+      reason: 'OUTCOME_RESPONSE_GENERATION_BLOCKED',
+      blockerReason: 'KNOWLEDGE_PACK_RESOLUTION_BLOCKED',
+      resolutionStatus: 'BLOCKED',
+      missingDependencies: expect.arrayContaining([
+        expect.objectContaining({
+          requirement: 'REQUIRED',
+          knowledgeLayer: 'OUTPUT_SCHEMA',
+        }),
+      ]),
+    }))
+    expect(GovernedReasoningExecution.prototype.save).not.toHaveBeenCalled()
+    expect(GovernedRuntimeArtifact.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeMessage.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeDraft.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeDraftIteration.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('Outcome Studio response generation blocks before provider and persistence when style resolution is ambiguous', async () => {
+    process.env.STORYLINEOS_GRR_PROVIDER_MODE = 'DETERMINISTIC'
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    const activations = [
+      ...makeRequestReadyOutcomeKnowledgePackActivations(),
+      makeOutcomeKnowledgePackActivation({
+        knowledgeLayer: 'STYLE',
+        capabilityKey: 'executive-brief-style',
+        workspaceCompatibility: ['OUTCOME'],
+        packType: 'STYLE',
+        packKey: 'executive-brief-style-alternate',
+        label: 'Executive Brief Style Alternate',
+      }),
+    ]
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+    KnowledgePackActivation.find.mockReturnValue(buildRuntimeInstanceFindChain(activations))
+    KnowledgePackVersion.find.mockReturnValue(
+      buildRuntimeInstanceFindChain(makeOutcomeKnowledgePackVersions(activations)),
+    )
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/messages/out_msg_existing_fixture/generate-response`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details).toEqual(expect.objectContaining({
+      reason: 'OUTCOME_RESPONSE_GENERATION_BLOCKED',
+      blockerReason: 'KNOWLEDGE_PACK_RESOLUTION_AMBIGUOUS',
+      resolutionStatus: 'AMBIGUOUS',
+      ambiguousSelectors: expect.arrayContaining([
+        expect.objectContaining({
+          knowledgeLayer: 'STYLE',
+          capabilityKey: 'executive-brief-style',
+        }),
+      ]),
+    }))
+    expect(GovernedReasoningExecution.prototype.save).not.toHaveBeenCalled()
+    expect(GovernedRuntimeArtifact.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeMessage.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeDraft.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeDraftIteration.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
   test('Outcome Studio response generation rolls back the generated response when audit persistence fails', async () => {
     process.env.STORYLINEOS_GRR_PROVIDER_MODE = 'DETERMINISTIC'
     const runtimeInstance = makeOutputLabReadyRuntime()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
     FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
-    KnowledgePackActivation.find.mockReturnValue(buildRuntimeInstanceFindChain(makeActiveOutcomeKnowledgePackActivations()))
+    mockRequestReadyOutcomeKnowledgePacks()
     OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
     OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord()))
     AuditLog.createLog = jest.fn(async (payload) => {
@@ -16427,7 +16654,7 @@ describe('Runtime Instance API', () => {
     const runtimeInstance = makeOutputLabReadyRuntime()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
     FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
-    KnowledgePackActivation.find.mockReturnValue(buildRuntimeInstanceFindChain(makeActiveOutcomeKnowledgePackActivations()))
+    mockRequestReadyOutcomeKnowledgePacks()
     OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
     OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord()))
     OutcomeDraftIteration.prototype.save = jest.fn(async () => {
@@ -16474,7 +16701,7 @@ describe('Runtime Instance API', () => {
     const runtimeInstance = makeOutputLabReadyRuntime()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
     FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
-    KnowledgePackActivation.find.mockReturnValue(buildRuntimeInstanceFindChain(makeActiveOutcomeKnowledgePackActivations()))
+    mockRequestReadyOutcomeKnowledgePacks()
     OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
     OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord()))
     AuditLog.createLog = jest.fn(async (payload) => {
@@ -18109,6 +18336,37 @@ describe('Runtime Instance API', () => {
     expect(JSON.stringify(res.body.data.messages)).not.toContain('Raw message required pack content must not leak')
     expect(JSON.stringify(res.body.data.messages)).not.toContain('Raw message truth internals must not leak')
     expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('Outcome Studio session detail returns the newest capped message window in chronological order', async () => {
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    const allMessages = Array.from({ length: 21 }, (_, index) => makeOutcomeMessageRecord({
+      messageId: `out_msg_window_fixture_${String(index).padStart(2, '0')}`,
+      prompt: `Governed prompt ${index}.`,
+      createdAt: new Date(Date.UTC(2026, 6, 14, 20, index, 0)),
+    }))
+    const expectedNewestWindow = allMessages.slice(1)
+    const databaseNewestWindow = [...expectedNewestWindow].reverse()
+    const messageQuery = buildRuntimeInstanceFindChain(databaseNewestWindow)
+    OutcomeMessage.find.mockReturnValue(messageQuery)
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(messageQuery.sort).toHaveBeenCalledWith({ createdAt: -1 })
+    expect(messageQuery.limit).toHaveBeenCalledWith(20)
+    expect(res.body.data.messages).toHaveLength(20)
+    expect(res.body.data.messages.map((message) => message.messageId)).toEqual(
+      expectedNewestWindow.map((message) => message.messageId),
+    )
+    expect(res.body.data.messages.map((message) => message.messageId)).not.toContain(
+      allMessages[0].messageId,
+    )
   })
 
   test('Outcome Studio asset detail returns scoped sanitized version metadata', async () => {
