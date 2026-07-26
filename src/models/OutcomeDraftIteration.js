@@ -151,7 +151,14 @@ const outcomeDraftIterationSchema = new mongoose.Schema(
       required: true,
       uppercase: true,
       trim: true,
-      maxlength: 80,
+      maxlength: 140,
+    },
+    outputTypeCapabilityKey: {
+      type: String,
+      lowercase: true,
+      trim: true,
+      maxlength: 140,
+      default: '',
     },
     outputTypeLabel: {
       type: String,
@@ -281,6 +288,7 @@ outcomeDraftIterationSchema.pre('validate', function normalizeOutcomeDraftIterat
   this.iterationType = String(this.iterationType || OUTCOME_STUDIO_DRAFT_ITERATION_TYPES.INITIAL).trim().toUpperCase()
   this.status = String(this.status || OUTCOME_STUDIO_DRAFT_ITERATION_STATUSES.CURRENT).trim().toUpperCase()
   this.outputTypeKey = String(this.outputTypeKey || '').trim().toUpperCase()
+  this.outputTypeCapabilityKey = String(this.outputTypeCapabilityKey || '').trim().toLowerCase()
   this.outputTypeLabel = String(this.outputTypeLabel || '').trim()
   this.title = String(this.title || '').trim()
   this.sourceMessageId = String(this.sourceMessageId || '').trim()

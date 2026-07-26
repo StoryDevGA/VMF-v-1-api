@@ -16,6 +16,10 @@ import {
 } from '../constants/governedReasoningRuntime.js'
 import { KNOWLEDGE_PACK_EXECUTION_MODES } from '../constants/knowledgeRuntime.js'
 import {
+  OUTCOME_STUDIO_READINESS_POLICY_VERSIONS,
+  OUTCOME_STUDIO_REFERENCE_FAMILIES,
+} from '../constants/outcomeStudioReadiness.js'
+import {
   assertCustomerTenantContext,
   assertFeatureEntitlement,
   assertRuntimePermission,
@@ -32,6 +36,13 @@ import {
   buildRuntimeIntelligenceGraphQueryProjection,
 } from './runtimeIntelligenceGraphService.js'
 import auditService from './auditService.js'
+import { authorizeOutcomeStudioLiveTestExecution } from './outcomeStudioReadinessService.js'
+import {
+  assertOutcomeStudioProviderSafeContext,
+  assertOutcomeStudioProviderSafeRequest,
+  buildOutcomeStudioProviderSafeContext,
+  buildOutcomeStudioProviderSafeRequest,
+} from './outcomeStudioProviderSafeContextService.js'
 
 export const GRR_ERROR_REASONS = Object.freeze({
   RUNTIME_NOT_FOUND: 'RUNTIME_NOT_FOUND',
@@ -43,13 +54,17 @@ export const GRR_ERROR_REASONS = Object.freeze({
   PERSISTENCE_FAILED: 'PERSISTENCE_FAILED',
   AUDIT_PERSISTENCE_FAILED: 'AUDIT_PERSISTENCE_FAILED',
   EXECUTION_NOT_FOUND: 'EXECUTION_NOT_FOUND',
+  LIVE_TEST_PROVIDER_CONFIGURATION_INVALID: 'LIVE_TEST_PROVIDER_CONFIGURATION_INVALID',
+  LIVE_TEST_PROVIDER_RESULT_INVALID: 'LIVE_TEST_PROVIDER_RESULT_INVALID',
+  PROVIDER_SAFE_CONTEXT_BLOCKED: 'PROVIDER_SAFE_CONTEXT_BLOCKED',
 })
 
 const normalizeToken = (value) => String(value || '').trim().toUpperCase()
 const normalizeKey = (value) => String(value || '').trim().toLowerCase()
-const normalizeCapabilityKey = (value) => normalizeKey(value).replace(/_/g, '-')
+const normalizeCapabilityKey = (value) => normalizeKey(value)
+const normalizeLegacyCapabilitySelectorKey = (value) => normalizeKey(value).replace(/_/g, '-')
 const normalizeCapabilityKeys = (values) => Array.isArray(values)
-  ? [...new Set(values.map(normalizeCapabilityKey).filter(Boolean))]
+  ? [...new Set(values.map(normalizeLegacyCapabilitySelectorKey).filter(Boolean))]
   : []
 const normalizeText = (value) => String(value ?? '').trim()
 const buildGrrId = (prefix) => `${prefix}_${randomUUID()}`
@@ -114,6 +129,35 @@ const createGrrError = ({
   }
   return err
 }
+
+const liveTestConfigurationInvalid = () => createGrrError({
+  status: 503,
+  code: 'GRR_LIVE_TEST_PROVIDER_CONFIGURATION_INVALID',
+  message: 'Live TEST provider execution is not configured correctly.',
+  reason: GRR_ERROR_REASONS.LIVE_TEST_PROVIDER_CONFIGURATION_INVALID,
+})
+
+const providerSafeContextBlocked = () => createGrrError({
+  status: 422,
+  code: 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED',
+  message: 'The request could not be projected into a provider-safe context.',
+  reason: GRR_ERROR_REASONS.PROVIDER_SAFE_CONTEXT_BLOCKED,
+  details: { safeContextPolicyKey: 'OUTCOME_STUDIO_PROVIDER_SAFE_CONTEXT_V1' },
+})
+
+const liveTestProviderResultInvalid = () => createGrrError({
+  status: 502,
+  code: 'GRR_LIVE_TEST_PROVIDER_RESULT_INVALID',
+  message: 'The live TEST provider response could not be verified.',
+  reason: GRR_ERROR_REASONS.LIVE_TEST_PROVIDER_RESULT_INVALID,
+})
+
+const liveTestReadinessBlocked = () => createGrrError({
+  status: 409,
+  code: 'GRR_LIVE_TEST_READINESS_BLOCKED',
+  message: 'Outcome Studio Development/Test execution is not currently authorized.',
+  reason: 'DEVELOPMENT_TEST_READINESS_BLOCKED',
+})
 
 const getRuntimeLookup = (runtimeInstanceId) => ({
   $or: [
@@ -559,6 +603,9 @@ const buildKnowledgeContext = ({ manifest, binding, payload }) => ({
   },
   request: {
     outputTypeKey: normalizeToken(payload?.outputTypeKey),
+    requestedOutputTypeKey: normalizeCapabilityKey(
+      payload?.requestedOutputTypeKey || payload?.outputTypeKey,
+    ),
     requestedStyleKey: normalizeKey(payload?.requestedStyleKey),
     contextCategories: Array.isArray(payload?.contextCategories)
       ? payload.contextCategories.map(normalizeToken).filter(Boolean)
@@ -594,6 +641,9 @@ const resolveProviderPosture = () => {
 
 const buildProviderRequestProjection = (payload = {}) => ({
   outputTypeKey: normalizeToken(payload.outputTypeKey),
+  requestedOutputTypeKey: normalizeCapabilityKey(
+    payload.requestedOutputTypeKey || payload.outputTypeKey,
+  ),
   requestedStyleKey: normalizeKey(payload.requestedStyleKey),
   audienceKeys: Array.isArray(payload.audienceKeys)
     ? payload.audienceKeys.map(normalizeKey).filter(Boolean)
@@ -611,6 +661,253 @@ const buildProviderRequestProjection = (payload = {}) => ({
     : [],
   executionIntent: clampText(payload.executionIntent, 2000),
 })
+
+const LIVE_TEST_DESCRIPTOR_KEYS = Object.freeze([
+  'providerKey',
+  'model',
+  'providerMode',
+  'environment',
+  'safeContextPolicyKey',
+  'failurePosture',
+])
+
+const PROVIDER_RESULT_DESCRIPTOR_KEYS = Object.freeze([
+  'providerKey',
+  'model',
+  'providerMode',
+  'liveProvider',
+])
+
+const PROVIDER_INPUT_KEYS = Object.freeze(['customerPrompt', 'currentDraftMarkdown', 'request'])
+const PROVIDER_INPUT_REQUEST_KEYS = Object.freeze([
+  'intentType',
+  'refinement',
+  'outputTypeKey',
+  'outputTypeLabel',
+  'outputSchemaKey',
+  'requiredSections',
+  'styleKey',
+  'styleLabel',
+  'requestedOutputTypeKey',
+  'requestedStyleKey',
+  'workspaceType',
+])
+const AUTHORIZATION_KEYS = Object.freeze(['policyVersion', 'revision', 'verdict', 'providerAuthority', 'referenceSnapshots'])
+const REFERENCE_SNAPSHOT_KEYS = Object.freeze(['family', 'referenceKey', 'referenceRevision', 'sha256', 'byteLength', 'mimeType'])
+const STABLE_KEY_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,138}[a-z0-9])?$/
+const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+const SHA256_PATTERN = /^[a-f0-9]{64}$/
+const CONTROL_PATTERN = /[\u0000-\u001F\u007F]/
+
+const hasMalformedUtf16 = (value) => {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index)
+    if (code >= 0xD800 && code <= 0xDBFF) {
+      const next = value.charCodeAt(index + 1)
+      if (!(next >= 0xDC00 && next <= 0xDFFF)) return true
+      index += 1
+    } else if (code >= 0xDC00 && code <= 0xDFFF) return true
+  }
+  return false
+}
+
+const hasExactPlainKeys = (value, keys) => Boolean(
+  value
+  && typeof value === 'object'
+  && !Array.isArray(value)
+  && Object.getPrototypeOf(value) === Object.prototype
+  && Object.keys(value).length === keys.length
+  && keys.every((key) => Object.prototype.hasOwnProperty.call(value, key)),
+)
+
+export const resolveLiveTestConfiguration = (deps = {}) => {
+  const executionMode = deps.executionMode === undefined ? 'LEGACY' : deps.executionMode
+  if (!['LEGACY', 'LIVE_TEST'].includes(executionMode)) throw liveTestConfigurationInvalid()
+  if (executionMode === 'LEGACY') return { executionMode }
+
+  const providerDescriptor = deps.providerDescriptor
+  const authorizeLiveTest = deps.authorizeLiveTest === undefined
+    ? authorizeOutcomeStudioLiveTestExecution
+    : deps.authorizeLiveTest
+  const buildProviderSafeRequest = deps.buildProviderSafeRequest === undefined
+    ? buildOutcomeStudioProviderSafeRequest
+    : deps.buildProviderSafeRequest
+  const buildProviderSafeContext = deps.buildProviderSafeContext === undefined
+    ? buildOutcomeStudioProviderSafeContext
+    : deps.buildProviderSafeContext
+  if (typeof deps.providerAdapter !== 'function'
+    || typeof authorizeLiveTest !== 'function'
+    || typeof buildProviderSafeRequest !== 'function'
+    || typeof buildProviderSafeContext !== 'function'
+    || !hasExactPlainKeys(providerDescriptor, LIVE_TEST_DESCRIPTOR_KEYS)
+    || typeof providerDescriptor.providerKey !== 'string'
+    || providerDescriptor.providerKey !== providerDescriptor.providerKey.trim().toLowerCase()
+    || !STABLE_KEY_PATTERN.test(providerDescriptor.providerKey)
+    || typeof providerDescriptor.model !== 'string'
+    || providerDescriptor.model !== providerDescriptor.model.trim()
+    || providerDescriptor.model.length < 1
+    || providerDescriptor.model.length > 160
+    || hasMalformedUtf16(providerDescriptor.model)
+    || CONTROL_PATTERN.test(providerDescriptor.model)
+    || providerDescriptor.providerMode !== 'LIVE_TEST'
+    || providerDescriptor.environment !== 'TEST'
+    || providerDescriptor.safeContextPolicyKey !== 'OUTCOME_STUDIO_PROVIDER_SAFE_CONTEXT_V1'
+    || providerDescriptor.failurePosture !== 'FAIL_CLOSED') throw liveTestConfigurationInvalid()
+  return {
+    executionMode,
+    providerAdapter: deps.providerAdapter,
+    providerDescriptor: { ...providerDescriptor },
+    authorizeLiveTest,
+    buildProviderSafeRequest,
+    buildProviderSafeContext,
+  }
+}
+
+const assertLiveTestSelectorIdentity = ({ payload, providerInput }) => {
+  const request = providerInput?.request
+  const matches = hasExactPlainKeys(providerInput, PROVIDER_INPUT_KEYS)
+    && hasExactPlainKeys(request, PROVIDER_INPUT_REQUEST_KEYS)
+    && normalizeToken(request.outputTypeKey) === normalizeToken(payload.outputTypeKey)
+    && normalizeCapabilityKey(request.requestedOutputTypeKey) === normalizeCapabilityKey(payload.requestedOutputTypeKey || payload.outputTypeKey)
+    && normalizeKey(request.requestedStyleKey) === normalizeKey(payload.requestedStyleKey)
+    && normalizeToken(request.workspaceType) === normalizeToken(payload.workspaceType || 'PLATFORM')
+  if (!matches) throw providerSafeContextBlocked()
+}
+
+const assertSafeRequestSelectorIdentity = ({ payload, safeRequest }) => {
+  const businessRequest = safeRequest?.businessRequest
+  const matches = normalizeToken(businessRequest?.outputTypeKey) === normalizeToken(payload.outputTypeKey)
+    && normalizeCapabilityKey(businessRequest?.requestedOutputTypeKey) === normalizeCapabilityKey(payload.requestedOutputTypeKey || payload.outputTypeKey)
+    && normalizeKey(businessRequest?.requestedStyleKey) === normalizeKey(payload.requestedStyleKey)
+    && normalizeToken(businessRequest?.workspaceType) === normalizeToken(payload.workspaceType || 'PLATFORM')
+  if (!matches) throw providerSafeContextBlocked()
+}
+
+const assertSafeRequestResult = (value) => {
+  try {
+    return assertOutcomeStudioProviderSafeRequest(value)
+  } catch {
+    throw providerSafeContextBlocked()
+  }
+}
+
+const assertProviderContextResult = (value, safeRequest) => {
+  try {
+    const result = assertOutcomeStudioProviderSafeContext(value)
+    if (JSON.stringify(result.businessRequest) !== JSON.stringify(safeRequest.businessRequest)
+      || JSON.stringify(result.draftContext) !== JSON.stringify(safeRequest.draftContext)) throw providerSafeContextBlocked()
+    return result
+  } catch {
+    throw providerSafeContextBlocked()
+  }
+}
+
+const assertLiveTestAuthorizationResult = (value, providerDescriptor) => {
+  const valid = hasExactPlainKeys(value, AUTHORIZATION_KEYS)
+    && value.policyVersion === OUTCOME_STUDIO_READINESS_POLICY_VERSIONS.DEVELOPMENT_TEST
+    && Number.isSafeInteger(value.revision)
+    && value.revision > 0
+    && value.verdict === 'READY_FOR_TESTING'
+    && hasExactPlainKeys(value.providerAuthority, LIVE_TEST_DESCRIPTOR_KEYS)
+    && LIVE_TEST_DESCRIPTOR_KEYS.every((key) => value.providerAuthority[key] === providerDescriptor[key])
+    && Array.isArray(value.referenceSnapshots)
+    && value.referenceSnapshots.length === OUTCOME_STUDIO_REFERENCE_FAMILIES.length
+    && value.referenceSnapshots.every((snapshot, index) => hasExactPlainKeys(snapshot, REFERENCE_SNAPSHOT_KEYS)
+      && snapshot.family === OUTCOME_STUDIO_REFERENCE_FAMILIES[index]
+      && typeof snapshot.referenceKey === 'string'
+      && UUID_V4_PATTERN.test(snapshot.referenceKey)
+      && Number.isSafeInteger(snapshot.referenceRevision)
+      && snapshot.referenceRevision > 0
+      && typeof snapshot.sha256 === 'string'
+      && SHA256_PATTERN.test(snapshot.sha256)
+      && Number.isSafeInteger(snapshot.byteLength)
+      && snapshot.byteLength > 0
+      && snapshot.mimeType === 'application/pdf')
+  if (!valid) throw liveTestReadinessBlocked()
+  return value
+}
+
+const buildLiveTestEffectivePayload = ({ payload, safeRequest }) => ({
+  ...payload,
+  outputTypeKey: safeRequest.businessRequest.outputTypeKey,
+  requestedOutputTypeKey: safeRequest.businessRequest.requestedOutputTypeKey,
+  requestedStyleKey: safeRequest.businessRequest.requestedStyleKey,
+  workspaceType: safeRequest.businessRequest.workspaceType,
+  executionIntent: safeRequest.effectiveRequest.executionIntent,
+})
+
+const assertProviderEvidence = ({ provider, providerDescriptor, conflict = false }) => {
+  const matches = hasExactPlainKeys(provider, PROVIDER_RESULT_DESCRIPTOR_KEYS)
+    && provider.providerKey === providerDescriptor.providerKey
+    && provider.model === providerDescriptor.model
+    && provider.providerMode === 'LIVE_TEST'
+    && provider.liveProvider === true
+  if (matches) return
+  if (conflict) {
+    throw createGrrError({
+      status: 409,
+      code: 'GRR_IDEMPOTENCY_REQUEST_CONFLICT',
+      message: 'The idempotency key is already associated with a different governed reasoning request.',
+      reason: GRR_ERROR_REASONS.IDEMPOTENCY_REQUEST_CONFLICT,
+      details: { fingerprintState: 'PROVIDER_MISMATCHED' },
+    })
+  }
+  throw liveTestProviderResultInvalid()
+}
+
+const buildPersistedProviderEvidence = ({ executionMode, providerDescriptor, providerResult }) => {
+  if (executionMode === 'LIVE_TEST') {
+    return {
+      providerKey: providerDescriptor.providerKey,
+      model: providerDescriptor.model,
+      providerMode: 'LIVE_TEST',
+      liveProvider: true,
+    }
+  }
+  return providerResult?.provider || {}
+}
+
+const buildLiveTestRequestFingerprint = ({ payload, providerDescriptor, runtimeInstance, safeRequest }) => hashSafeValue({
+  fingerprintVersion: 'GRR_REQUEST_V2',
+  manifestQuery: buildManifestQuery({ payload, runtimeInstance }),
+  providerAuthority: {
+    providerKey: providerDescriptor.providerKey,
+    model: providerDescriptor.model,
+    providerMode: providerDescriptor.providerMode,
+    environment: providerDescriptor.environment,
+    safeContextPolicyKey: providerDescriptor.safeContextPolicyKey,
+    failurePosture: providerDescriptor.failurePosture,
+  },
+  providerRequest: buildProviderRequestProjection(payload),
+  draftContext: safeRequest.draftContext,
+})
+
+const buildTruthSource = (truthContext = {}) => ({
+  acceptedTruth: (Array.isArray(truthContext.acceptedTruth) ? truthContext.acceptedTruth : [])
+    .filter((record) => typeof record?.content === 'string' && record.content)
+    .map((record) => ({ label: normalizeText(record.label), content: record.content })),
+})
+
+const buildKnowledgeSelection = (binding = {}) => {
+  const source = [
+    ...(Array.isArray(binding.providerContextPacks) ? binding.providerContextPacks : []),
+    ...(Array.isArray(binding.preValidationPacks) ? binding.preValidationPacks : []),
+    ...(Array.isArray(binding.postValidationPacks) ? binding.postValidationPacks : []),
+  ]
+  const seen = new Set()
+  const selection = []
+  for (const pack of source) {
+    const versionId = normalizeText(pack?.versionId)
+    if (!versionId || seen.has(versionId)) continue
+    seen.add(versionId)
+    selection.push({
+      versionId,
+      knowledgeLayer: normalizeToken(pack?.knowledgeLayer),
+      executionMode: normalizeToken(pack?.executionMode),
+    })
+  }
+  return selection
+}
 
 const buildProviderTruthContext = ({ payload = {}, truthContext = {} } = {}) => {
   const sourceTruthSummary = Array.isArray(truthContext.summary?.sourceTruthSummary)
@@ -1011,6 +1308,7 @@ const buildGrrAuditFailure = ({
 
 const findExistingIdempotentExecution = async ({
   idempotencyKey,
+  providerDescriptor = null,
   requestFingerprint,
   runtimeInstance,
 } = {}) => {
@@ -1038,6 +1336,7 @@ const findExistingIdempotentExecution = async ({
       },
     })
   }
+  if (providerDescriptor) assertProviderEvidence({ provider: existingExecution.provider, providerDescriptor, conflict: true })
 
   const artifactQuery = GovernedRuntimeArtifact.findOne({
     executionId: existingExecution.executionId,
@@ -1106,11 +1405,11 @@ const buildManifestQuery = ({ payload = {}, runtimeInstance = {} }) => ({
   requestedOutputTypeKey: normalizeCapabilityKey(
     payload.requestedOutputTypeKey || payload.outputTypeKey,
   ),
-  requestedStyleKey: normalizeCapabilityKey(payload.requestedStyleKey),
+  requestedStyleKey: normalizeLegacyCapabilitySelectorKey(payload.requestedStyleKey),
   audienceKeys: normalizeCapabilityKeys(payload.audienceKeys),
   industryKeys: normalizeCapabilityKeys(payload.industryKeys),
-  languageKey: normalizeCapabilityKey(payload.languageKey),
-  channelKey: normalizeCapabilityKey(payload.channelKey),
+  languageKey: normalizeLegacyCapabilitySelectorKey(payload.languageKey),
+  channelKey: normalizeLegacyCapabilitySelectorKey(payload.channelKey),
   workspaceType: normalizeToken(payload.workspaceType || 'PLATFORM'),
   contextCategories: Array.isArray(payload.contextCategories) ? payload.contextCategories : [],
   environmentKey: normalizeToken(payload.environmentKey || 'PRODUCTION'),
@@ -1133,6 +1432,29 @@ export const createGovernedReasoningExecution = async ({
   runtimeInstanceId,
   scopes,
 } = {}) => {
+  const liveTest = resolveLiveTestConfiguration(deps)
+  const idempotencyKey = normalizeText(payload.idempotencyKey)
+  let effectivePayload = payload
+  let safeRequest = null
+  const authorizeCurrentLiveTest = async (stage) => assertLiveTestAuthorizationResult(
+    await liveTest.authorizeLiveTest({ providerDescriptor: liveTest.providerDescriptor, stage }),
+    liveTest.providerDescriptor,
+  )
+  if (liveTest.executionMode === 'LIVE_TEST') {
+    await authorizeCurrentLiveTest('PRE_IDEMPOTENCY')
+    assertLiveTestSelectorIdentity({ payload, providerInput: deps.providerInput })
+    try {
+      safeRequest = assertSafeRequestResult(await liveTest.buildProviderSafeRequest({
+        providerDescriptor: liveTest.providerDescriptor,
+        providerInput: deps.providerInput,
+      }))
+      assertSafeRequestSelectorIdentity({ payload, safeRequest })
+    } catch (error) {
+      if (error?.code === 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED') throw error
+      throw providerSafeContextBlocked()
+    }
+    effectivePayload = buildLiveTestEffectivePayload({ payload, safeRequest })
+  }
   const runtimeInstance = typeof deps.resolveRuntimeInstance === 'function'
     ? await deps.resolveRuntimeInstance({ runtimeInstanceId, scopes, permission: 'VMF_UPDATE' })
     : await resolveRuntimeInstance({
@@ -1140,22 +1462,32 @@ export const createGovernedReasoningExecution = async ({
         scopes,
         permission: 'VMF_UPDATE',
       })
-  const frameworkPackage = typeof deps.resolveFrameworkPackage === 'function'
-    ? await deps.resolveFrameworkPackage(runtimeInstance)
-    : await resolveFrameworkPackage(runtimeInstance)
-  const idempotencyKey = normalizeText(payload.idempotencyKey)
-  const requestFingerprint = buildRequestFingerprint({ payload, runtimeInstance })
+  let requestFingerprint
+  if (liveTest.executionMode === 'LIVE_TEST') {
+    requestFingerprint = buildLiveTestRequestFingerprint({
+      payload: effectivePayload,
+      providerDescriptor: liveTest.providerDescriptor,
+      runtimeInstance,
+      safeRequest,
+    })
+  } else {
+    requestFingerprint = buildRequestFingerprint({ payload, runtimeInstance })
+  }
   const existingExecution = await findExistingIdempotentExecution({
     idempotencyKey,
+    providerDescriptor: liveTest.executionMode === 'LIVE_TEST' ? liveTest.providerDescriptor : null,
     requestFingerprint,
     runtimeInstance,
   })
   if (existingExecution) return existingExecution
 
+  const frameworkPackage = typeof deps.resolveFrameworkPackage === 'function'
+    ? await deps.resolveFrameworkPackage(runtimeInstance)
+    : await resolveFrameworkPackage(runtimeInstance)
   const truthContext = buildCertifiedTruthContext({ frameworkPackage, runtimeInstance })
   assertCertifiedTruthReady(truthContext)
 
-  const manifestQuery = buildManifestQuery({ payload, runtimeInstance })
+  const manifestQuery = buildManifestQuery({ payload: effectivePayload, runtimeInstance })
   const { manifest, binding } = await resolveKnowledgeBinding({
     deps,
     manifestId: payload.manifestId,
@@ -1163,40 +1495,75 @@ export const createGovernedReasoningExecution = async ({
   })
   assertKnowledgeBindingReady({ manifest, binding })
 
-  const knowledgeContext = buildKnowledgeContext({ manifest, binding, payload })
-  const providerContext = buildProviderContext({ knowledgeContext, payload, truthContext })
-  const providerResult = await executeProvider({
-    deps,
-    providerContext,
-  })
+  const knowledgeContext = buildKnowledgeContext({ manifest, binding, payload: effectivePayload })
+  let providerContext
+  let providerResult
+  if (liveTest.executionMode === 'LIVE_TEST') {
+    try {
+      providerContext = assertProviderContextResult(await liveTest.buildProviderSafeContext({
+        providerDescriptor: liveTest.providerDescriptor,
+        safeRequest,
+        truthSource: buildTruthSource(truthContext),
+        knowledgeSelection: buildKnowledgeSelection(binding),
+      }), safeRequest)
+    } catch (error) {
+      if (error?.code === 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED') throw error
+      throw providerSafeContextBlocked()
+    }
+    await authorizeCurrentLiveTest('PRE_ADAPTER')
+    providerResult = await liveTest.providerAdapter({ providerContext })
+    assertProviderEvidence({ provider: providerResult?.provider, providerDescriptor: liveTest.providerDescriptor })
+  } else {
+    providerContext = buildProviderContext({ knowledgeContext, payload: effectivePayload, truthContext })
+    providerResult = await executeProvider({ deps, providerContext })
+  }
   const runtimeStateWrites = buildRuntimeStateWrites()
   const executionId = buildGrrId('grr_exec')
   const runtimeArtifactId = buildGrrId('grr_art')
   const warnings = [
     ...(Array.isArray(providerResult?.warnings) ? providerResult.warnings : []),
-    'KNOWLEDGE_PACK_CONTENT_NOT_EXPOSED_V1',
+    ...(liveTest.executionMode === 'LIVE_TEST' ? [] : ['KNOWLEDGE_PACK_CONTENT_NOT_EXPOSED_V1']),
   ]
   const limitations = [
     ...(Array.isArray(providerResult?.limitations) ? providerResult.limitations : []),
     'Runtime State writes are not performed until a governed GRR runtime path is reviewed.',
-    'Deterministic provider output is non-production scaffolding unless replaced by a live provider adapter.',
+    ...(liveTest.executionMode === 'LIVE_TEST' ? [] : ['Deterministic provider output is non-production scaffolding unless replaced by a live provider adapter.']),
   ]
+  const executionProviderEvidence = buildPersistedProviderEvidence({
+    executionMode: liveTest.executionMode,
+    providerDescriptor: liveTest.providerDescriptor,
+    providerResult,
+  })
+  const artifactProviderEvidence = buildPersistedProviderEvidence({
+    executionMode: liveTest.executionMode,
+    providerDescriptor: liveTest.providerDescriptor,
+    providerResult,
+  })
 
   const execution = new GovernedReasoningExecution({
     executionId,
     ...getRuntimeScope(runtimeInstance),
     workspaceType: normalizeToken(payload.workspaceType || 'PLATFORM'),
     outputTypeKey: payload.outputTypeKey,
-    executionIntent: payload.executionIntent || '',
+    requestedOutputTypeKey: normalizeCapabilityKey(
+      payload.requestedOutputTypeKey || payload.outputTypeKey,
+    ),
+    executionIntent: effectivePayload.executionIntent || '',
     idempotencyKey,
     requestFingerprint,
     status: GRR_EXECUTION_STATUSES.COMPLETED,
     contractVersion: GRR_CONTRACT_VERSION,
-    providerMode: providerResult.provider?.providerMode || providerResult.provider?.mode || GRR_PROVIDER_MODES.DETERMINISTIC_TEST,
-    provider: providerResult.provider || {},
+    providerMode: executionProviderEvidence.providerMode || executionProviderEvidence.mode || GRR_PROVIDER_MODES.DETERMINISTIC_TEST,
+    provider: executionProviderEvidence,
     knowledgeManifest: knowledgeContext.manifest,
     knowledgeBinding: knowledgeContext.binding,
-    reasoningContext: {
+    reasoningContext: liveTest.executionMode === 'LIVE_TEST' ? {
+      assemblyMode: 'PROVIDER_SAFE_CONTEXT',
+      request: safeRequest.businessRequest,
+      safeguards: providerContext.safeguards,
+      contentVisible: false,
+      packContentLoaded: false,
+    } : {
       assemblyMode: providerContext.assemblyMode,
       request: providerContext.request,
       certifiedTruthProjection: providerContext.certifiedTruthProjection,
@@ -1204,7 +1571,7 @@ export const createGovernedReasoningExecution = async ({
       contentVisible: false,
       packContentLoaded: false,
     },
-    certifiedTruth: providerContext.truthContext.summary,
+    certifiedTruth: liveTest.executionMode === 'LIVE_TEST' ? truthContext.summary : providerContext.truthContext.summary,
     runtimeStateWrites,
     artifactIds: [runtimeArtifactId],
     warnings,
@@ -1219,13 +1586,16 @@ export const createGovernedReasoningExecution = async ({
     executionId,
     ...getRuntimeScope(runtimeInstance),
     outputTypeKey: payload.outputTypeKey,
+    requestedOutputTypeKey: normalizeCapabilityKey(
+      payload.requestedOutputTypeKey || payload.outputTypeKey,
+    ),
     artifactType: 'GOVERNED_REASONING_OUTPUT',
     status: GRR_ARTIFACT_STATUSES.GENERATED,
     contractVersion: GRR_CONTRACT_VERSION,
     generatedOutput: providerResult.output || {},
     safeJson: {
       output: providerResult.output || {},
-      provider: providerResult.provider || {},
+      provider: artifactProviderEvidence,
       metadata: providerResult.metadata || {},
     },
     markdown: providerResult.output?.markdown || '',
@@ -1241,10 +1611,10 @@ export const createGovernedReasoningExecution = async ({
         lineage: knowledgeContext.binding.lineage,
       },
       certifiedTruth: {
-        acceptedTruthCount: providerContext.truthContext.summary.acceptedTruthCount,
-        requiredTruthCount: providerContext.truthContext.summary.requiredTruthCount,
-        graphHash: providerContext.truthContext.summary.graph.graphHash,
-        lockSnapshotHash: providerContext.truthContext.summary.outputEligibility.lockSnapshotHash,
+        acceptedTruthCount: truthContext.summary.acceptedTruthCount,
+        requiredTruthCount: truthContext.summary.requiredTruthCount,
+        graphHash: truthContext.summary.graph.graphHash,
+        lockSnapshotHash: truthContext.summary.outputEligibility.lockSnapshotHash,
       },
     },
     certification: {
@@ -1274,8 +1644,12 @@ export const createGovernedReasoningExecution = async ({
     } catch (err) {
       if (err?.code === 'GRR_AUDIT_FAILED') throw err
       if (isIdempotencyDuplicateError(err)) {
+        if (liveTest.executionMode === 'LIVE_TEST') {
+          await authorizeCurrentLiveTest('PRE_RACE_WINNER_RETURN')
+        }
         const winner = await findExistingIdempotentExecution({
           idempotencyKey,
+          providerDescriptor: liveTest.executionMode === 'LIVE_TEST' ? liveTest.providerDescriptor : null,
           requestFingerprint,
           runtimeInstance,
         })
@@ -1303,8 +1677,12 @@ export const createGovernedReasoningExecution = async ({
       await GovernedReasoningExecution.deleteOne({ executionId })
       if (err?.code === 'GRR_AUDIT_FAILED') throw err
       if (isIdempotencyDuplicateError(err)) {
+        if (liveTest.executionMode === 'LIVE_TEST') {
+          await authorizeCurrentLiveTest('PRE_RACE_WINNER_RETURN')
+        }
         const winner = await findExistingIdempotentExecution({
           idempotencyKey,
+          providerDescriptor: liveTest.executionMode === 'LIVE_TEST' ? liveTest.providerDescriptor : null,
           requestFingerprint,
           runtimeInstance,
         })

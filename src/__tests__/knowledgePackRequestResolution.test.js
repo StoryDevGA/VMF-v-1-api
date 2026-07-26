@@ -1,6 +1,9 @@
 import { describe, expect, test } from '@jest/globals'
 
-import { resolveRequestSpecificKnowledgePacks } from '../services/knowledgePackRequestResolutionService.js'
+import {
+  discoverRequestSpecificOutputTypes,
+  resolveRequestSpecificKnowledgePacks,
+} from '../services/knowledgePackRequestResolutionService.js'
 
 const RESOLVED_AT = '2026-07-14T12:00:00.000Z'
 const GLOBAL_SCOPE = [{ scopeType: 'GLOBAL', scopeKey: 'GLOBAL', precedence: 0 }]
@@ -435,5 +438,88 @@ describe('resolveRequestSpecificKnowledgePacks', () => {
       expect.objectContaining({ capabilityKey: 'output-validator' }),
       expect.objectContaining({ capabilityKey: 'system-coordinator' }),
     ]))
+  })
+})
+
+describe('discoverRequestSpecificOutputTypes', () => {
+  test('discovers a newly activated valid Output Type without an application enumeration', () => {
+    const candidates = makeOutputCandidates({
+      extra: [
+        makePack({
+          packType: 'OUTPUT_TYPE_DEFINITION',
+          packKey: 'strategic-option-review-output',
+          knowledgeLayer: 'OUTPUT_TYPE',
+          capabilityKey: 'strategic-option-review',
+          dependencyReferences: [
+            requiredDependency('OUTPUT_SCHEMA', 'strategic-option-review-schema'),
+            requiredDependency('STYLE', 'strategy-review-style'),
+          ],
+        }),
+        makePack({
+          packType: 'OUTPUT_SCHEMA',
+          packKey: 'strategic-option-review-schema',
+          knowledgeLayer: 'OUTPUT_SCHEMA',
+          capabilityKey: 'strategic-option-review-schema',
+        }),
+        makePack({
+          packType: 'STYLE',
+          packKey: 'strategy-review-style',
+          knowledgeLayer: 'STYLE',
+          capabilityKey: 'strategy-review-style',
+        }),
+      ],
+    })
+
+    const discovered = discoverRequestSpecificOutputTypes({
+      mandatorySafeguards: makeMandatorySafeguards(),
+      candidates,
+      request: {
+        workspaceType: 'OUTCOME',
+        resolvedAt: RESOLVED_AT,
+      },
+      scopeCandidates: GLOBAL_SCOPE,
+    })
+
+    expect(discovered.map((entry) => entry.capabilityKey)).toEqual([
+      'board-summary',
+      'strategic-option-review',
+    ])
+    expect(discovered).toContainEqual(expect.objectContaining({
+      capabilityKey: 'strategic-option-review',
+      status: 'READY',
+      outputType: expect.objectContaining({ capabilityKey: 'strategic-option-review' }),
+      outputSchema: expect.objectContaining({ capabilityKey: 'strategic-option-review-schema' }),
+      style: expect.objectContaining({ capabilityKey: 'strategy-review-style' }),
+    }))
+    expect(JSON.stringify(discovered)).not.toContain('must never leak')
+  })
+
+  test('retains blocked discovery evidence when required deliverable guidance is missing', () => {
+    const candidates = makeOutputCandidates()
+      .filter((candidate) => candidate.knowledgeLayer !== 'STYLE')
+
+    const discovered = discoverRequestSpecificOutputTypes({
+      mandatorySafeguards: makeMandatorySafeguards(),
+      candidates,
+      request: {
+        workspaceType: 'OUTCOME',
+        resolvedAt: RESOLVED_AT,
+      },
+      scopeCandidates: GLOBAL_SCOPE,
+    })
+
+    expect(discovered).toHaveLength(1)
+    expect(discovered[0]).toEqual(expect.objectContaining({
+      capabilityKey: 'board-summary',
+      status: 'BLOCKED',
+      style: null,
+    }))
+    expect(discovered[0].missingDependencies).toContainEqual(expect.objectContaining({
+      reason: 'DEPENDENCY_MISSING',
+      selector: expect.objectContaining({
+        knowledgeLayer: 'STYLE',
+        capabilityKey: 'executive',
+      }),
+    }))
   })
 })

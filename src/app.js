@@ -2,6 +2,7 @@ import express from 'express'
 import cors from 'cors'
 import helmet from 'helmet'
 import env from './config/env.js'
+import { buildOutcomeStudioProviderRuntime } from './config/outcomeStudioProvider.js'
 import requestLogger from './middleware/requestLogger.js'
 import requestContext from './middleware/requestContext.js'
 import correlationEnricher from './middleware/correlationEnricher.js'
@@ -26,6 +27,7 @@ import workflowPolicyRoutes from './routes/workflowPolicies.routes.js'
 import uiContractRoutes from './routes/uiContracts.routes.js'
 import runtimeValidationRoutes from './routes/runtimeValidation.routes.js'
 import runtimeActivationRoutes from './routes/runtimeActivation.routes.js'
+import outcomeStudioReadinessRoutes from './routes/outcomeStudioReadiness.routes.js'
 import outcomeKnowledgePackRoutes from './routes/outcomeKnowledgePacks.routes.js'
 import runtimeInstanceRoutes from './routes/runtimeInstances.routes.js'
 import superAdminAuditRoutes from './routes/superAdminAudit.routes.js'
@@ -44,6 +46,15 @@ import fakeAuthRoutes from './routes/fakeAuth.routes.js'
 import logger from './config/logger.js'
 
 const app = express()
+const outcomeStudioProviderRuntime = buildOutcomeStudioProviderRuntime()
+app.locals.outcomeStudioReasoningDeps = outcomeStudioProviderRuntime.deps
+
+if (env.outcomeStudioProviderEnabled && !outcomeStudioProviderRuntime.status.configured) {
+  logger.warn(
+    { reason: outcomeStudioProviderRuntime.status.reason },
+    'Outcome Studio Development/Test provider is not configured; generation remains fail-closed',
+  )
+}
 
 if (env.fakeAuthAllowed) {
   logger.warn('FAKE AUTH IS ENABLED — Identity Plus verification is bypassed. Do not use in production.')
@@ -85,11 +96,13 @@ app.use(helmet({
 app.use(cors(corsOptions))
 app.options('*', cors(corsOptions))
 const defaultJsonParser = express.json({ limit: '1mb' })
-const usesRouteScopedJsonParser = (path = '') =>
+const outcomeStudioTestReferenceUploadPath = '/api/v1/super-admin/runtime-control/outcome-studio-readiness/references'
+const usesRouteScopedJsonParser = (path = '', method = 'GET') =>
   path.startsWith('/api/v1/runtime-instances')
   || path === '/api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import'
+  || (method === 'POST' && (path === outcomeStudioTestReferenceUploadPath || path === `${outcomeStudioTestReferenceUploadPath}/`))
 app.use((req, res, next) => (
-  usesRouteScopedJsonParser(req.path)
+  usesRouteScopedJsonParser(req.path, req.method)
     ? next()
     : defaultJsonParser(req, res, next)
 ))
@@ -121,6 +134,7 @@ app.use('/api/v1/super-admin/runtime-control/workflow-policies', workflowPolicyR
 app.use('/api/v1/super-admin/runtime-control/ui-contracts', uiContractRoutes)
 app.use('/api/v1/super-admin/runtime-control/runtime-validation', runtimeValidationRoutes)
 app.use('/api/v1/super-admin/runtime-control/runtime-activation', runtimeActivationRoutes)
+app.use('/api/v1/super-admin/runtime-control/outcome-studio-readiness', outcomeStudioReadinessRoutes)
 app.use('/api/v1/super-admin/outcome-studio/knowledge-packs', outcomeKnowledgePackRoutes)
 app.use('/api/v1/runtime-instances', runtimeInstanceRoutes)
 app.use('/api/v1/super-admin/denied-access-logs', superAdminAuditRoutes)

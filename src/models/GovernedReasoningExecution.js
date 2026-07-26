@@ -87,9 +87,16 @@ const governedReasoningExecutionSchema = new mongoose.Schema(
       type: String,
       trim: true,
       uppercase: true,
-      maxlength: 80,
+      maxlength: 140,
       required: true,
       index: true,
+    },
+    requestedOutputTypeKey: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      maxlength: 140,
+      default: '',
     },
     executionIntent: {
       type: String,
@@ -223,6 +230,7 @@ governedReasoningExecutionSchema.pre('validate', function normalizeGovernedReaso
   this.packageKey = String(this.packageKey || '').trim()
   this.packageVersion = String(this.packageVersion || '').trim()
   this.outputTypeKey = String(this.outputTypeKey || '').trim().toUpperCase()
+  this.requestedOutputTypeKey = String(this.requestedOutputTypeKey || '').trim().toLowerCase()
   this.executionIntent = String(this.executionIntent || '').trim()
   this.idempotencyKey = String(this.idempotencyKey || '').trim()
   this.requestFingerprint = String(this.requestFingerprint || '').trim() || null

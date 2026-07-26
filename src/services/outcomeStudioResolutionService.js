@@ -1,9 +1,4 @@
 import {
-  getOutputLabDefinition,
-  OUTPUT_LAB_EXPORT_SCHEMA_VERSION,
-  OUTPUT_LAB_OUTPUT_TYPE_KEYS,
-} from '../constants/runtimeOutputLab.js'
-import {
   OUTCOME_STUDIO_REQUEST_INTENT_TYPES,
   OUTCOME_STUDIO_REQUEST_RESOLUTION_BLOCKER_CODES,
   OUTCOME_STUDIO_REQUEST_RESOLUTION_STATUSES,
@@ -11,15 +6,7 @@ import {
 
 const normalizeText = (value) => String(value ?? '').trim()
 const normalizeToken = (value) => normalizeText(value).toUpperCase()
-const normalizeKey = (value) => normalizeText(value).toLowerCase()
-
-const toKebabCase = (value) =>
-  normalizeKey(value)
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-
-const unique = (values = []) =>
-  [...new Set(values.map(normalizeToken).filter(Boolean))]
+const normalizeCapabilityKey = (value) => normalizeText(value).toLowerCase()
 
 const hasPattern = (text, patterns = []) =>
   patterns.some((pattern) => pattern.test(text))
@@ -29,50 +16,6 @@ const clampText = (value, maxLength = 120) => {
   if (text.length <= maxLength) return text
   return `${text.slice(0, maxLength - 1).trim()}...`
 }
-
-const OUTPUT_TYPE_HINTS = Object.freeze([
-  Object.freeze({
-    key: OUTPUT_LAB_OUTPUT_TYPE_KEYS.BOARD_SUMMARY,
-    label: 'Board Summary',
-    patterns: Object.freeze([
-      /\bexecutive\s+board\s+review\b/i,
-      /\bboard\s+(review|summary|presentation|pack|paper)\b/i,
-    ]),
-  }),
-  Object.freeze({
-    key: OUTPUT_LAB_OUTPUT_TYPE_KEYS.EXECUTIVE_BRIEF,
-    label: 'Executive Brief',
-    patterns: Object.freeze([
-      /\bexecutive\s+(brief|summary|overview)\b/i,
-      /\bexec\s+brief\b/i,
-    ]),
-  }),
-  Object.freeze({
-    key: OUTPUT_LAB_OUTPUT_TYPE_KEYS.COMMERCIAL_ASSESSMENT,
-    label: 'Commercial Assessment',
-    patterns: Object.freeze([
-      /\bcommercial\s+(assessment|review|analysis)\b/i,
-      /\bstrategic\s+risk\s+assessment\b/i,
-    ]),
-  }),
-  Object.freeze({
-    key: OUTPUT_LAB_OUTPUT_TYPE_KEYS.SALES_NARRATIVE,
-    label: 'Sales Narrative',
-    patterns: Object.freeze([
-      /\bsales\s+narrative\b/i,
-      /\bcustomer\s+value\s+narrative\b/i,
-      /\bvalue\s+narrative\b/i,
-    ]),
-  }),
-])
-
-const UNSUPPORTED_OUTPUT_HINTS = Object.freeze([
-  Object.freeze({ code: 'ACTION_PLAN', pattern: /\baction\s+plan\b/i }),
-  Object.freeze({ code: 'PITCH_DECK', pattern: /\bpitch\s+deck\b/i }),
-  Object.freeze({ code: 'CONTRACT', pattern: /\bcontract\b/i }),
-  Object.freeze({ code: 'EMAIL', pattern: /\bemail\b/i }),
-  Object.freeze({ code: 'CUSTOMER_PROPOSAL', pattern: /\bcustomer\s+proposal\b/i }),
-])
 
 const UNSAFE_REQUEST_PATTERNS = Object.freeze([
   /\b(raw|hidden|internal|system)\s+(prompt|instruction|instructions|reasoning)\b/i,
@@ -155,33 +98,6 @@ const INTENT_PATTERNS = Object.freeze({
   ]),
 })
 
-const DEFAULT_STYLES_BY_OUTPUT_TYPE = Object.freeze({
-  [OUTPUT_LAB_OUTPUT_TYPE_KEYS.EXECUTIVE_BRIEF]: Object.freeze({
-    styleKey: 'executive-brief-style',
-    label: 'Executive Brief Style',
-    audience: 'Executive',
-    tone: 'Concise, commercial, evidence-led',
-  }),
-  [OUTPUT_LAB_OUTPUT_TYPE_KEYS.BOARD_SUMMARY]: Object.freeze({
-    styleKey: 'board-executive-style',
-    label: 'Board Executive Style',
-    audience: 'Board',
-    tone: 'Strategic, decision-oriented, risk-aware',
-  }),
-  [OUTPUT_LAB_OUTPUT_TYPE_KEYS.SALES_NARRATIVE]: Object.freeze({
-    styleKey: 'customer-value-narrative-style',
-    label: 'Customer Value Narrative Style',
-    audience: 'Customer-facing commercial team',
-    tone: 'Outcome-led, persuasive, grounded',
-  }),
-  [OUTPUT_LAB_OUTPUT_TYPE_KEYS.COMMERCIAL_ASSESSMENT]: Object.freeze({
-    styleKey: 'commercial-assessment-style',
-    label: 'Commercial Assessment Style',
-    audience: 'Commercial leadership',
-    tone: 'Analytical, balanced, evidence-led',
-  }),
-})
-
 const getSourceOutput = (session = {}) =>
   session.sourceOutput
   || session.sourceOutputSnapshot
@@ -189,43 +105,32 @@ const getSourceOutput = (session = {}) =>
 
 const getSessionOutputType = (session = {}) => {
   const sourceOutput = getSourceOutput(session)
-  const key = normalizeToken(
-    session.sourceOutputTypeKey
+  const key = normalizeCapabilityKey(
+    session.requestedOutputTypeKey
+    || session.sourceOutputTypeKey
     || sourceOutput.outputTypeKey,
   )
-  const definition = getOutputLabDefinition(key)
   return {
     key,
     label: normalizeText(
-      session.sourceOutputTypeLabel
+      session.requestedOutputTypeLabel
+      || session.sourceOutputTypeLabel
       || sourceOutput.outputTypeLabel
-      || definition?.label,
     ),
-    source: key ? 'SESSION_SOURCE_OUTPUT' : '',
+    source: key ? (session.requestedOutputTypeKey ? 'SESSION_REQUEST' : 'SESSION_SOURCE_OUTPUT') : '',
   }
 }
 
 const getDraftOutputType = (activeDraft = {}) => {
+  const capabilityKey = normalizeCapabilityKey(activeDraft?.outputTypeCapabilityKey)
   const key = normalizeToken(activeDraft?.outputTypeKey)
-  const definition = getOutputLabDefinition(key)
   return {
     key,
-    label: normalizeText(activeDraft?.outputTypeLabel || definition?.label),
+    capabilityKey,
+    label: normalizeText(activeDraft?.outputTypeLabel),
     source: key ? 'ACTIVE_DRAFT' : '',
   }
 }
-
-const detectExplicitOutputTypeHints = (prompt) => {
-  const matches = OUTPUT_TYPE_HINTS
-    .filter((entry) => hasPattern(prompt, entry.patterns))
-    .map((entry) => entry.key)
-  return unique(matches)
-}
-
-const detectUnsupportedOutputHints = (prompt) =>
-  UNSUPPORTED_OUTPUT_HINTS
-    .filter((entry) => entry.pattern.test(prompt))
-    .map((entry) => entry.code)
 
 const detectUnsafeRequest = (prompt) =>
   UNSAFE_REQUEST_PATTERNS.some((pattern) => pattern.test(prompt))
@@ -363,49 +268,64 @@ const classifyIntent = ({ prompt, hasActiveDraft = false } = {}) => {
 const resolveOutputType = ({
   activeDraft,
   blockers,
-  explicitOutputTypeHints,
   intent,
-  prompt,
+  requestedOutputTypeKey,
+  resolvedKnowledgeContext,
   session,
 } = {}) => {
-  if (explicitOutputTypeHints.length > 1) {
+  const contextStatus = normalizeToken(resolvedKnowledgeContext?.status)
+  const contextOutputType = resolvedKnowledgeContext?.outputType || {}
+  const contextCapabilityKey = normalizeCapabilityKey(contextOutputType.key)
+  const requestedCapabilityKey = normalizeCapabilityKey(requestedOutputTypeKey)
+
+  if (contextStatus === 'AMBIGUOUS') {
     blockers.push({
       code: OUTCOME_STUDIO_REQUEST_RESOLUTION_BLOCKER_CODES.OUTPUT_TYPE_AMBIGUOUS,
-      message: 'Multiple output types were requested in one Outcome Studio prompt.',
-      details: {
-        outputTypeKeys: explicitOutputTypeHints,
-      },
+      message: 'Outcome Studio found more than one eligible deliverable for this request.',
+      details: {},
     })
     return {
       key: '',
+      capabilityKey: requestedCapabilityKey,
       label: '',
-      source: 'PROMPT_HINT',
+      source: 'KNOWLEDGE_RESOLUTION',
     }
   }
 
-  const unsupportedOutputHints = detectUnsupportedOutputHints(prompt)
-  if (unsupportedOutputHints.length > 0 && explicitOutputTypeHints.length === 0) {
+  if (resolvedKnowledgeContext && (
+    resolvedKnowledgeContext.available !== true
+    || !['READY', 'READY_WITH_GAPS'].includes(contextStatus)
+  )) {
     blockers.push({
       code: OUTCOME_STUDIO_REQUEST_RESOLUTION_BLOCKER_CODES.OUTPUT_TYPE_UNSUPPORTED,
-      message: 'The requested output type is not supported by the current Outcome Studio resolver.',
+      message: 'The requested deliverable is not currently available.',
       details: {
-        requestedOutputKinds: unsupportedOutputHints,
+        requestedOutputTypeKey: requestedCapabilityKey,
       },
     })
     return {
       key: '',
+      capabilityKey: requestedCapabilityKey,
       label: '',
-      source: 'UNSUPPORTED_PROMPT_HINT',
+      source: 'KNOWLEDGE_RESOLUTION',
     }
   }
 
-  if (explicitOutputTypeHints.length === 1) {
-    const key = explicitOutputTypeHints[0]
-    const definition = getOutputLabDefinition(key)
+  if (contextCapabilityKey) {
+    if (requestedCapabilityKey && contextCapabilityKey !== requestedCapabilityKey) {
+      blockers.push({
+        code: OUTCOME_STUDIO_REQUEST_RESOLUTION_BLOCKER_CODES.OUTPUT_TYPE_UNSUPPORTED,
+        message: 'The requested deliverable does not match the available governed result.',
+        details: {
+          requestedOutputTypeKey: requestedCapabilityKey,
+        },
+      })
+    }
     return {
-      key,
-      label: definition?.label || key,
-      source: 'PROMPT_HINT',
+      key: normalizeToken(contextCapabilityKey.replace(/-/g, '_')),
+      capabilityKey: contextCapabilityKey,
+      label: normalizeText(contextOutputType.label),
+      source: 'KNOWLEDGE_RESOLUTION',
     }
   }
 
@@ -419,25 +339,26 @@ const resolveOutputType = ({
 
   blockers.push({
     code: OUTCOME_STUDIO_REQUEST_RESOLUTION_BLOCKER_CODES.OUTPUT_TYPE_UNRESOLVED,
-    message: 'Outcome Studio could not resolve an output type from the prompt or current session.',
+    message: 'Outcome Studio could not resolve a deliverable from the current request or session.',
     details: {},
   })
   return {
     key: '',
+    capabilityKey: requestedCapabilityKey,
     label: '',
     source: '',
   }
 }
 
-const resolveOutputSchema = ({ outputType = {}, blockers } = {}) => {
-  const definition = getOutputLabDefinition(outputType.key)
-  if (!definition) {
+const resolveOutputSchema = ({ resolvedKnowledgeContext = {}, blockers } = {}) => {
+  const context = resolvedKnowledgeContext || {}
+  const schema = context.outputSchema || {}
+  const schemaKey = normalizeCapabilityKey(schema.key)
+  if (!schemaKey) {
     blockers.push({
       code: OUTCOME_STUDIO_REQUEST_RESOLUTION_BLOCKER_CODES.OUTPUT_SCHEMA_UNRESOLVED,
-      message: 'Outcome Studio could not resolve an output schema for the requested output type.',
-      details: {
-        outputTypeKey: outputType.key || '',
-      },
+      message: 'Outcome Studio could not resolve the required structure for this deliverable.',
+      details: {},
     })
     return {
       schemaKey: '',
@@ -448,23 +369,25 @@ const resolveOutputSchema = ({ outputType = {}, blockers } = {}) => {
   }
 
   return {
-    schemaKey: `${toKebabCase(definition.outputTypeKey)}-schema`,
-    schemaVersion: OUTPUT_LAB_EXPORT_SCHEMA_VERSION,
-    source: 'OUTPUT_LAB_DEFINITION',
-    requiredSections: [...definition.requiredSections],
-    supportedFormats: [...definition.supportedFormats],
+    schemaKey,
+    schemaVersion: normalizeText(schema.version),
+    label: normalizeText(schema.label),
+    source: 'KNOWLEDGE_RESOLUTION',
+    requiredSections: [],
+    supportedFormats: Array.isArray(context.renderer?.formats)
+      ? context.renderer.formats.map((format) => normalizeToken(format.format)).filter(Boolean)
+      : [],
   }
 }
 
-const resolveDefaultStyle = ({ outputType = {}, blockers } = {}) => {
-  const style = DEFAULT_STYLES_BY_OUTPUT_TYPE[outputType.key]
-  if (!style) {
+const resolveStyle = ({ resolvedKnowledgeContext = {}, blockers } = {}) => {
+  const style = (resolvedKnowledgeContext || {}).style || {}
+  const styleKey = normalizeCapabilityKey(style.key)
+  if (!styleKey) {
     blockers.push({
       code: OUTCOME_STUDIO_REQUEST_RESOLUTION_BLOCKER_CODES.STYLE_UNRESOLVED,
-      message: 'Outcome Studio could not resolve a default style for the requested output type.',
-      details: {
-        outputTypeKey: outputType.key || '',
-      },
+      message: 'Outcome Studio could not resolve the required presentation guidance.',
+      details: {},
     })
     return {
       styleKey: '',
@@ -476,8 +399,12 @@ const resolveDefaultStyle = ({ outputType = {}, blockers } = {}) => {
   }
 
   return {
-    ...style,
-    source: 'OUTPUT_TYPE_DEFAULT',
+    styleKey,
+    label: normalizeText(style.label),
+    styleVersion: normalizeText(style.version),
+    audience: '',
+    tone: '',
+    source: 'KNOWLEDGE_RESOLUTION',
   }
 }
 
@@ -518,6 +445,8 @@ const buildBlockedResolution = ({
 export const resolveOutcomeStudioRequestContext = ({
   activeDraft = null,
   prompt = '',
+  requestedOutputTypeKey = '',
+  resolvedKnowledgeContext = null,
   session = {},
 } = {}) => {
   const normalizedPrompt = normalizeText(prompt).replace(/\s+/g, ' ')
@@ -568,17 +497,16 @@ export const resolveOutcomeStudioRequestContext = ({
     })
   }
 
-  const explicitOutputTypeHints = detectExplicitOutputTypeHints(normalizedPrompt)
   const outputType = resolveOutputType({
     activeDraft,
     blockers,
-    explicitOutputTypeHints,
     intent,
-    prompt: normalizedPrompt,
+    requestedOutputTypeKey,
+    resolvedKnowledgeContext,
     session,
   })
   const outputSchema = outputType.key
-    ? resolveOutputSchema({ outputType, blockers })
+    ? resolveOutputSchema({ resolvedKnowledgeContext, blockers })
     : {
         schemaKey: '',
         schemaVersion: '',
@@ -586,7 +514,7 @@ export const resolveOutcomeStudioRequestContext = ({
         requiredSections: [],
       }
   const style = outputType.key
-    ? resolveDefaultStyle({ outputType, blockers })
+    ? resolveStyle({ resolvedKnowledgeContext, blockers })
     : {
         styleKey: '',
         label: '',
@@ -651,11 +579,15 @@ export const assertOutcomeStudioRequestResolution = ({
   activeDraft = null,
   message = {},
   prompt = '',
+  requestedOutputTypeKey = '',
+  resolvedKnowledgeContext = null,
   session = {},
 } = {}) => {
   const resolution = resolveOutcomeStudioRequestContext({
     activeDraft,
     prompt: prompt || message?.prompt,
+    requestedOutputTypeKey: requestedOutputTypeKey || message?.requestedOutputTypeKey,
+    resolvedKnowledgeContext,
     session,
   })
   if (!resolution.canProceed) {

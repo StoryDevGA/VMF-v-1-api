@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto'
 
-export const OUTCOME_POST_VALIDATION_CONTRACT_VERSION = 'outcome-post-validation.v1'
+import { validateOutcomeCustomerLanguage } from './outcomeCustomerLanguageService.js'
+
+export const OUTCOME_POST_VALIDATION_CONTRACT_VERSION = 'outcome-post-validation.v2'
 
 export const OUTCOME_POST_VALIDATION_MODES = Object.freeze({
   FOUNDATION_STATIC_CHECKS: 'FOUNDATION_STATIC_CHECKS',
@@ -82,9 +84,11 @@ export const buildOutcomeAssetPostValidationSnapshot = ({
   asset = {},
   customerContent = {},
   knowledgePackBinding = {},
+  limitations = [],
   truthSignature = {},
   validatedAt = new Date().toISOString(),
   version = {},
+  warnings = [],
 } = {}) => {
   const truthCurrent = normalizeToken(truthSignature.currentness) === 'CURRENT'
   const activeCount = Number(knowledgePackBinding.activeCount || 0)
@@ -95,6 +99,12 @@ export const buildOutcomeAssetPostValidationSnapshot = ({
     && requiredCount > 0
     && activeCount >= requiredCount
   const contentPass = hasCustomerContent(customerContent)
+  const customerLanguageValidation = validateOutcomeCustomerLanguage({
+    customerContent,
+    limitations,
+    warnings,
+  })
+  const customerLanguagePass = customerLanguageValidation.safe
 
   const validators = [
     buildValidatorResult({
@@ -102,18 +112,18 @@ export const buildOutcomeAssetPostValidationSnapshot = ({
       label: 'Truth boundary preservation',
       pass: truthCurrent,
       message: truthCurrent
-        ? 'Truth Signature is current for the generated asset.'
-        : 'Truth Signature is not current for the generated asset.',
-      path: 'truthSignature.currentness',
+        ? 'Current verified business information is available for this content.'
+        : 'Current verified business information is required before this content can be used.',
+      path: 'currentInformation.status',
     }),
     buildValidatorResult({
       code: 'knowledge-binding-preservation',
       label: 'Knowledge binding preservation',
       pass: bindingPass,
       message: bindingPass
-        ? 'Knowledge Pack binding is complete for the generated asset.'
-        : 'Knowledge Pack binding is missing or incomplete for the generated asset.',
-      path: 'knowledgePackBinding',
+        ? 'Required business guidance is available for this content.'
+        : 'Required business guidance is missing or incomplete for this content.',
+      path: 'businessGuidance',
     }),
     buildValidatorResult({
       code: 'customer-content-presence',
@@ -123,6 +133,15 @@ export const buildOutcomeAssetPostValidationSnapshot = ({
         ? 'Customer-facing generated content is present.'
         : 'Customer-facing generated content is missing.',
       path: 'customerContent',
+    }),
+    buildValidatorResult({
+      code: 'customer-language',
+      label: 'Customer language',
+      pass: customerLanguagePass,
+      message: customerLanguagePass
+        ? 'Customer-facing content uses business language.'
+        : 'Customer-facing content includes internal implementation language and requires review.',
+      path: customerLanguageValidation.violation?.path || 'customerContent',
     }),
   ]
   const issues = validators
@@ -150,7 +169,7 @@ export const buildOutcomeAssetPostValidationSnapshot = ({
     manifestId: normalizeText(knowledgePackBinding.manifestId),
     manifestKey: normalizeText(knowledgePackBinding.manifestKey),
     manifestVersion: normalizeText(knowledgePackBinding.manifestVersion),
-    contentIncludedInValidation: false,
+    contentIncludedInValidation: true,
     rawPackContentIncluded: false,
     validators,
     issues,

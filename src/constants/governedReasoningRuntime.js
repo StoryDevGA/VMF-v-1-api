@@ -9,6 +9,7 @@ export const GRR_ARTIFACT_STATUSES = Object.freeze({
 
 export const GRR_PROVIDER_MODES = Object.freeze({
   LIVE: 'LIVE',
+  LIVE_TEST: 'LIVE_TEST',
   DETERMINISTIC_TEST: 'DETERMINISTIC_TEST',
 })
 

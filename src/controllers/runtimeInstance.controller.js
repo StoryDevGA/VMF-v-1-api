@@ -49,6 +49,7 @@ import {
   approveRuntimeOutcomeDraft as approveRuntimeOutcomeDraftRecord,
   createRuntimeOutcomeMessage as createRuntimeOutcomeMessageRecord,
   createRuntimeOutcomeSession as createRuntimeOutcomeSessionRecord,
+  discardRuntimeOutcomeDraft as discardRuntimeOutcomeDraftRecord,
   exportRuntimeOutcomeAsset as exportRuntimeOutcomeAssetRecord,
   generateRuntimeOutcomeResponse as generateRuntimeOutcomeResponseRecord,
   getRuntimeOutcomeAsset as getRuntimeOutcomeAssetRecord,
@@ -61,6 +62,7 @@ import {
   publishRuntimeOutcomeAsset as publishRuntimeOutcomeAssetRecord,
   updateRuntimeOutcomeSessionFromLatestTruth as updateRuntimeOutcomeSessionFromLatestTruthRecord,
 } from '../services/outcomeStudioService.js'
+import { isOutcomeCustomerLanguageSafe } from '../services/outcomeCustomerLanguageService.js'
 
 const buildRuntimeInstanceErrorResponse = (req, err) => ({
   error: {
@@ -70,6 +72,71 @@ const buildRuntimeInstanceErrorResponse = (req, err) => ({
     requestId: req.requestId,
   },
 })
+
+const OUTCOME_CUSTOMER_ERROR_STATE_KEYS = Object.freeze([
+  'actionAvailable',
+  'approvalAvailable',
+  'draftCreated',
+  'exportAvailable',
+  'previewAvailable',
+  'publishAvailable',
+  'responseCreated',
+  'responseGenerationAvailable',
+  'updateAvailable',
+])
+
+const OUTCOME_CUSTOMER_ERROR_CODES = new Set([
+  'CONFLICT',
+  'CUSTOMER_CONTENT_REQUIRES_REVIEW',
+  'DRAFTING_SERVICE_UNAVAILABLE',
+  'FORBIDDEN',
+  'NOT_FOUND',
+  'VALIDATION_ERROR',
+  'VALIDATION_FAILED',
+])
+
+const getOutcomeCustomerErrorCode = (err = {}) => {
+  if (OUTCOME_CUSTOMER_ERROR_CODES.has(err.code)) return err.code
+  if ([400, 422].includes(err.status)) return 'INVALID_REQUEST'
+  if ([401, 403].includes(err.status)) return 'FORBIDDEN'
+  if (err.status === 404) return 'NOT_FOUND'
+  if (err.status === 409) return 'CONFLICT'
+  return 'OUTCOME_ACTION_FAILED'
+}
+
+const getOutcomeCustomerErrorMessage = (err = {}) => {
+  if (Number(err.status) >= 500) {
+    return 'Outcome Studio could not complete this action. No changes were made.'
+  }
+
+  const message = String(err.message || '').trim()
+  if (message && isOutcomeCustomerLanguageSafe(message, { path: 'error.message' })) return message
+  if ([400, 422].includes(err.status)) return 'Please review the information provided and try again.'
+  if ([401, 403].includes(err.status)) return 'You do not have permission to perform this action.'
+  if (err.status === 404) return 'The requested Outcome Studio item could not be found.'
+  return 'Outcome Studio cannot complete this action in its current state.'
+}
+
+const getOutcomeCustomerErrorState = (details = {}) => {
+  if (!details || typeof details !== 'object') return null
+  const state = {}
+  OUTCOME_CUSTOMER_ERROR_STATE_KEYS.forEach((key) => {
+    if (typeof details[key] === 'boolean') state[key] = details[key]
+  })
+  return Object.keys(state).length > 0 ? state : null
+}
+
+const buildRuntimeOutcomeErrorResponse = (req, err) => {
+  const state = getOutcomeCustomerErrorState(err.details)
+  return {
+    error: {
+      code: getOutcomeCustomerErrorCode(err),
+      message: getOutcomeCustomerErrorMessage(err),
+      ...(state ? { state } : {}),
+      requestId: req.requestId,
+    },
+  }
+}
 
 export const createRuntimeInstance = async (req, res, next) => {
   try {
@@ -692,7 +759,7 @@ export const getRuntimeOutcomeStudio = async (req, res, next) => {
     })
   } catch (err) {
     if (err?.status && err?.code) {
-      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+      return res.status(err.status).json(buildRuntimeOutcomeErrorResponse(req, err))
     }
     return next(err)
   }
@@ -701,6 +768,8 @@ export const getRuntimeOutcomeStudio = async (req, res, next) => {
 export const getRuntimeOutcomeStudioReadiness = async (req, res, next) => {
   try {
     const readiness = await getRuntimeOutcomeStudioReadinessRecord({
+      actorUserId: req.user?._id || req.user?.id,
+      auditRequest: req,
       scopes: req.scopes,
       runtimeInstanceId: req.params.runtimeInstanceId,
     })
@@ -711,7 +780,7 @@ export const getRuntimeOutcomeStudioReadiness = async (req, res, next) => {
     })
   } catch (err) {
     if (err?.status && err?.code) {
-      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+      return res.status(err.status).json(buildRuntimeOutcomeErrorResponse(req, err))
     }
     return next(err)
   }
@@ -731,7 +800,7 @@ export const getRuntimeOutcomeSession = async (req, res, next) => {
     })
   } catch (err) {
     if (err?.status && err?.code) {
-      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+      return res.status(err.status).json(buildRuntimeOutcomeErrorResponse(req, err))
     }
     return next(err)
   }
@@ -751,7 +820,7 @@ export const listRuntimeOutcomeSessionAssets = async (req, res, next) => {
     })
   } catch (err) {
     if (err?.status && err?.code) {
-      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+      return res.status(err.status).json(buildRuntimeOutcomeErrorResponse(req, err))
     }
     return next(err)
   }
@@ -771,7 +840,7 @@ export const getRuntimeOutcomeAsset = async (req, res, next) => {
     })
   } catch (err) {
     if (err?.status && err?.code) {
-      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+      return res.status(err.status).json(buildRuntimeOutcomeErrorResponse(req, err))
     }
     return next(err)
   }
@@ -792,7 +861,7 @@ export const getRuntimeOutcomeAssetVersion = async (req, res, next) => {
     })
   } catch (err) {
     if (err?.status && err?.code) {
-      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+      return res.status(err.status).json(buildRuntimeOutcomeErrorResponse(req, err))
     }
     return next(err)
   }
@@ -812,7 +881,7 @@ export const getRuntimeOutcomeAssetPreview = async (req, res, next) => {
     })
   } catch (err) {
     if (err?.status && err?.code) {
-      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+      return res.status(err.status).json(buildRuntimeOutcomeErrorResponse(req, err))
     }
     return next(err)
   }
@@ -834,7 +903,7 @@ export const publishRuntimeOutcomeAsset = async (req, res, next) => {
     })
   } catch (err) {
     if (err?.status && err?.code) {
-      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+      return res.status(err.status).json(buildRuntimeOutcomeErrorResponse(req, err))
     }
     return next(err)
   }
@@ -857,7 +926,7 @@ export const exportRuntimeOutcomeAsset = async (req, res, next) => {
     })
   } catch (err) {
     if (err?.status && err?.code) {
-      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+      return res.status(err.status).json(buildRuntimeOutcomeErrorResponse(req, err))
     }
     return next(err)
   }
@@ -879,7 +948,7 @@ export const createRuntimeOutcomeSession = async (req, res, next) => {
     })
   } catch (err) {
     if (err?.status && err?.code) {
-      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+      return res.status(err.status).json(buildRuntimeOutcomeErrorResponse(req, err))
     }
     return next(err)
   }
@@ -902,7 +971,7 @@ export const createRuntimeOutcomeMessage = async (req, res, next) => {
     })
   } catch (err) {
     if (err?.status && err?.code) {
-      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+      return res.status(err.status).json(buildRuntimeOutcomeErrorResponse(req, err))
     }
     return next(err)
   }
@@ -913,6 +982,9 @@ export const generateRuntimeOutcomeResponse = async (req, res, next) => {
     const outcomeResponse = await generateRuntimeOutcomeResponseRecord({
       actorUserId: req.context?.userId || req.userId,
       auditRequest: req,
+      executionMode: req.app.locals.outcomeStudioReasoningDeps?.executionMode,
+      providerAdapter: req.app.locals.outcomeStudioReasoningDeps?.providerAdapter,
+      providerDescriptor: req.app.locals.outcomeStudioReasoningDeps?.providerDescriptor,
       scopes: req.scopes,
       runtimeInstanceId: req.params.runtimeInstanceId,
       sessionId: req.params.sessionId,
@@ -925,7 +997,7 @@ export const generateRuntimeOutcomeResponse = async (req, res, next) => {
     })
   } catch (err) {
     if (err?.status && err?.code) {
-      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+      return res.status(err.status).json(buildRuntimeOutcomeErrorResponse(req, err))
     }
     return next(err)
   }
@@ -948,7 +1020,31 @@ export const approveRuntimeOutcomeDraft = async (req, res, next) => {
     })
   } catch (err) {
     if (err?.status && err?.code) {
-      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+      return res.status(err.status).json(buildRuntimeOutcomeErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const discardRuntimeOutcomeDraft = async (req, res, next) => {
+  try {
+    const discardedDraft = await discardRuntimeOutcomeDraftRecord({
+      actorUserId: req.context?.userId || req.userId,
+      auditRequest: req,
+      draftId: req.params.draftId,
+      expectedUpdatedAt: req.body.expectedUpdatedAt,
+      scopes: req.scopes,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+      sessionId: req.params.sessionId,
+    })
+
+    return res.status(200).json({
+      data: { draft: discardedDraft },
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeOutcomeErrorResponse(req, err))
     }
     return next(err)
   }
@@ -970,7 +1066,7 @@ export const updateRuntimeOutcomeSessionFromLatestTruth = async (req, res, next)
     })
   } catch (err) {
     if (err?.status && err?.code) {
-      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+      return res.status(err.status).json(buildRuntimeOutcomeErrorResponse(req, err))
     }
     return next(err)
   }

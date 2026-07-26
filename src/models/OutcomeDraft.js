@@ -127,7 +127,14 @@ const outcomeDraftSchema = new mongoose.Schema(
       required: true,
       uppercase: true,
       trim: true,
-      maxlength: 80,
+      maxlength: 140,
+    },
+    outputTypeCapabilityKey: {
+      type: String,
+      lowercase: true,
+      trim: true,
+      maxlength: 140,
+      default: '',
     },
     outputTypeLabel: {
       type: String,
@@ -218,6 +225,15 @@ const outcomeDraftSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    discardedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
+    discardedAt: {
+      type: Date,
+      default: null,
+    },
   },
   {
     collection: 'outcome_drafts',
@@ -265,6 +281,7 @@ outcomeDraftSchema.pre('validate', function normalizeOutcomeDraft(next) {
   this.phase = String(this.phase || OUTCOME_STUDIO_PHASE).trim()
   this.status = String(this.status || OUTCOME_STUDIO_DRAFT_STATUSES.ACTIVE).trim().toUpperCase()
   this.outputTypeKey = String(this.outputTypeKey || '').trim().toUpperCase()
+  this.outputTypeCapabilityKey = String(this.outputTypeCapabilityKey || '').trim().toLowerCase()
   this.outputTypeLabel = String(this.outputTypeLabel || '').trim()
   this.title = String(this.title || '').trim()
   this.sourceOutputAssetId = String(this.sourceOutputAssetId || '').trim()

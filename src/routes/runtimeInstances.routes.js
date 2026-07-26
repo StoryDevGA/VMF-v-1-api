@@ -11,6 +11,7 @@ import {
   createRuntimeOutcomeMessage,
   createRuntimeOutcomeSession,
   createRuntimeOutputRequest,
+  discardRuntimeOutcomeDraft,
   createRuntimeRevision,
   executeRuntimeAction,
   exportRuntimeOutcomeAsset,
@@ -66,6 +67,7 @@ import {
   validateCreateRuntimeRevision,
   validateExecuteRuntimeAction,
   validateGenerateRuntimeOutcomeResponse,
+  validateDiscardRuntimeOutcomeDraft,
   validateGenerateRuntimeOutputRequest,
   validateApproveRuntimeOutcomeDraft,
   validateGovernedReasoningExecutionParams,
@@ -88,6 +90,7 @@ import {
   validateRuntimeOutcomeAssetParams,
   validateRuntimeOutcomeAssetVersionParams,
   validateRuntimeOutcomeDraftParams,
+  validateRuntimeOutcomeInstanceId,
   validateRuntimeOutcomeMessageParams,
   validateRuntimeOutputRequestParams,
   validateRuntimeOutcomeSessionParams,
@@ -203,8 +206,8 @@ router.get(
 router.get('/:runtimeInstanceId/output-lab', validateRuntimeInstanceId, getRuntimeOutputLab)
 router.get('/:runtimeInstanceId/output-lab/definitions', validateRuntimeInstanceId, getRuntimeOutputLabDefinitions)
 router.get('/:runtimeInstanceId/output-lab/readiness', validateRuntimeInstanceId, getRuntimeOutputLabReadiness)
-router.get('/:runtimeInstanceId/outcome-studio', validateRuntimeInstanceId, getRuntimeOutcomeStudio)
-router.get('/:runtimeInstanceId/outcome-studio/readiness', validateRuntimeInstanceId, getRuntimeOutcomeStudioReadiness)
+router.get('/:runtimeInstanceId/outcome-studio', validateRuntimeOutcomeInstanceId, getRuntimeOutcomeStudio)
+router.get('/:runtimeInstanceId/outcome-studio/readiness', validateRuntimeOutcomeInstanceId, getRuntimeOutcomeStudioReadiness)
 router.get(
   '/:runtimeInstanceId/outcome-studio/sessions/:sessionId/assets',
   validateRuntimeOutcomeSessionParams,
@@ -248,6 +251,12 @@ router.post(
   approveRuntimeOutcomeDraft,
 )
 router.post(
+  '/:runtimeInstanceId/outcome-studio/sessions/:sessionId/drafts/:draftId/discard',
+  validateRuntimeOutcomeDraftParams,
+  validateDiscardRuntimeOutcomeDraft,
+  discardRuntimeOutcomeDraft,
+)
+router.post(
   '/:runtimeInstanceId/outcome-studio/sessions/:sessionId/update-from-latest-truth',
   validateRuntimeOutcomeSessionParams,
   validateUpdateRuntimeOutcomeSessionFromLatestTruth,
@@ -267,7 +276,7 @@ router.post(
 )
 router.post(
   '/:runtimeInstanceId/outcome-studio/sessions',
-  validateRuntimeInstanceId,
+  validateRuntimeOutcomeInstanceId,
   validateCreateRuntimeOutcomeSession,
   createRuntimeOutcomeSession,
 )

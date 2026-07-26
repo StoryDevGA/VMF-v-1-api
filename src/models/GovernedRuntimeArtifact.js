@@ -59,9 +59,16 @@ const governedRuntimeArtifactSchema = new mongoose.Schema(
       type: String,
       trim: true,
       uppercase: true,
-      maxlength: 80,
+      maxlength: 140,
       required: true,
       index: true,
+    },
+    requestedOutputTypeKey: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      maxlength: 140,
+      default: '',
     },
     artifactType: {
       type: String,
@@ -148,6 +155,7 @@ governedRuntimeArtifactSchema.pre('validate', function normalizeGovernedRuntimeA
   this.runtimeInstanceKey = String(this.runtimeInstanceKey || '').trim().toLowerCase()
   this.frameworkKey = String(this.frameworkKey || '').trim().toUpperCase()
   this.outputTypeKey = String(this.outputTypeKey || '').trim().toUpperCase()
+  this.requestedOutputTypeKey = String(this.requestedOutputTypeKey || '').trim().toLowerCase()
   this.artifactType = String(this.artifactType || 'GOVERNED_REASONING_OUTPUT').trim().toUpperCase()
   this.status = String(this.status || GRR_ARTIFACT_STATUSES.GENERATED).trim().toUpperCase()
   this.markdown = String(this.markdown || '')

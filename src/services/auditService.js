@@ -99,6 +99,7 @@ export const AUDIT_ACTIONS = Object.freeze({
   OUTCOME_DRAFT_GENERATED: 'OUTCOME_DRAFT_GENERATED',
   OUTCOME_DRAFT_REFINED: 'OUTCOME_DRAFT_REFINED',
   OUTCOME_DRAFT_APPROVED: 'OUTCOME_DRAFT_APPROVED',
+  OUTCOME_DRAFT_DISCARDED: 'OUTCOME_DRAFT_DISCARDED',
   ASSET_GENERATED: 'ASSET_GENERATED',
   ASSET_PUBLISHED: 'ASSET_PUBLISHED',
   ASSET_EXPORTED: 'ASSET_EXPORTED',
@@ -177,6 +178,10 @@ export const AUDIT_ACTIONS = Object.freeze({
   WORKFLOW_POLICY_TESTED: 'WORKFLOW_POLICY_TESTED',
   GOVERNED_REASONING_EXECUTED: 'GOVERNED_REASONING_EXECUTED',
   GOVERNED_REASONING_BLOCKED: 'GOVERNED_REASONING_BLOCKED',
+  OUTCOME_STUDIO_READINESS_REVISION_CREATED: 'OUTCOME_STUDIO_READINESS_REVISION_CREATED',
+  OUTCOME_STUDIO_TEST_REFERENCE_UPLOADED: 'OUTCOME_STUDIO_TEST_REFERENCE_UPLOADED',
+  OUTCOME_STUDIO_TEST_REFERENCE_APPROVED: 'OUTCOME_STUDIO_TEST_REFERENCE_APPROVED',
+  OUTCOME_STUDIO_TEST_REFERENCE_SUPERSEDED: 'OUTCOME_STUDIO_TEST_REFERENCE_SUPERSEDED',
   // Super Admin - Access denied
   ACCESS_DENIED: 'ACCESS_DENIED',
   // Super Admin - Invitations
@@ -236,6 +241,8 @@ export const RESOURCE_TYPES = Object.freeze({
   LicenseLevel: 'LicenseLevel',
   Role: 'Role',
   FrameworkRegistry: 'FrameworkRegistry',
+  OutcomeStudioReadinessRevision: 'OutcomeStudioReadinessRevision',
+  OutcomeStudioTestReferenceRevision: 'OutcomeStudioTestReferenceRevision',
 })
 
 /* ------------------------------------------------------------------ */
@@ -487,6 +494,14 @@ const buildAuditSummary = ({ action, resourceType, resourceId, diff, display }) 
       return clampSummary(`${actorLabel} registered runtime deployment ${targetLabel}`)
     case AUDIT_ACTIONS.RUNTIME_REVISION_CREATED:
       return clampSummary(`${actorLabel} created runtime revision ${targetLabel}`)
+    case AUDIT_ACTIONS.OUTCOME_STUDIO_READINESS_REVISION_CREATED:
+      return clampSummary(`${actorLabel} created Outcome Studio readiness revision ${targetLabel}`)
+    case AUDIT_ACTIONS.OUTCOME_STUDIO_TEST_REFERENCE_UPLOADED:
+      return clampSummary(`${actorLabel} uploaded Outcome Studio TEST reference ${targetLabel}`)
+    case AUDIT_ACTIONS.OUTCOME_STUDIO_TEST_REFERENCE_APPROVED:
+      return clampSummary(`${actorLabel} recorded approval for Outcome Studio TEST reference ${targetLabel}`)
+    case AUDIT_ACTIONS.OUTCOME_STUDIO_TEST_REFERENCE_SUPERSEDED:
+      return clampSummary(`${actorLabel} superseded Outcome Studio TEST reference ${targetLabel}`)
     case AUDIT_ACTIONS.RUNTIME_ACTION_EXECUTED:
       return clampSummary(`${actorLabel} executed runtime action for ${targetLabel}`)
     case AUDIT_ACTIONS.RUNTIME_STATE_MUTATED:
@@ -507,6 +522,8 @@ const buildAuditSummary = ({ action, resourceType, resourceId, diff, display }) 
       return clampSummary(`${actorLabel} generated Outcome Studio draft ${targetLabel}`)
     case AUDIT_ACTIONS.OUTCOME_DRAFT_REFINED:
       return clampSummary(`${actorLabel} refined Outcome Studio draft ${targetLabel}`)
+    case AUDIT_ACTIONS.OUTCOME_DRAFT_DISCARDED:
+      return clampSummary(`${actorLabel} discarded Outcome Studio draft ${targetLabel}`)
     case AUDIT_ACTIONS.ASSET_GENERATED:
       return clampSummary(`${actorLabel} generated Outcome Studio asset ${targetLabel}`)
     case AUDIT_ACTIONS.ASSET_PUBLISHED:

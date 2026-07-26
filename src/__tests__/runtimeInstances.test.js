@@ -1,7 +1,8 @@
 import { describe, test, expect, beforeAll, beforeEach, jest } from '@jest/globals'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { createRequire } from 'node:module'
 import zlib from 'node:zlib'
+import JSZip from 'jszip'
 import { evaluateRuntimeSectionTruthReadiness } from '../services/runtimeSectionTruthReadinessService.js'
 
 const moduleRequire = createRequire(import.meta.url)
@@ -1213,6 +1214,7 @@ const buildSelectableLeanQuery = (value) => ({
 })
 
 const buildRuntimeInstanceFindChain = (rows) => ({
+  select: jest.fn().mockReturnThis(),
   sort: jest.fn().mockReturnThis(),
   skip: jest.fn().mockReturnThis(),
   limit: jest.fn().mockReturnThis(),
@@ -1279,6 +1281,11 @@ let OutcomeDraft
 let OutcomeDraftIteration
 let OutcomeMessage
 let OutcomeSession
+let OutcomeStudioReadinessPointer
+let OutcomeStudioReadinessRevision
+let OutcomeStudioTestReferenceObject
+let OutcomeStudioTestReferencePointer
+let OutcomeStudioTestReferenceRevision
 let KnowledgePack
 let KnowledgePackActivation
 let KnowledgePackVersion
@@ -1286,6 +1293,7 @@ let RuntimePathRegistry
 let UIContract
 let WorkflowPolicy
 let AuditLog
+let mongoose
 let mockRedisClient
 let hashSectionInput
 
@@ -1310,6 +1318,7 @@ beforeAll(async () => {
   }))
 
   const supertest = (await import('supertest')).default
+  mongoose = (await import('mongoose')).default
   app = (await import('../app.js')).default
   tokenService = (await import('../services/tokenService.js')).default
   request = supertest(app)
@@ -1335,6 +1344,11 @@ beforeAll(async () => {
   OutcomeDraftIteration = models.OutcomeDraftIteration
   OutcomeMessage = models.OutcomeMessage
   OutcomeSession = models.OutcomeSession
+  OutcomeStudioReadinessPointer = models.OutcomeStudioReadinessPointer
+  OutcomeStudioReadinessRevision = models.OutcomeStudioReadinessRevision
+  OutcomeStudioTestReferenceObject = models.OutcomeStudioTestReferenceObject
+  OutcomeStudioTestReferencePointer = models.OutcomeStudioTestReferencePointer
+  OutcomeStudioTestReferenceRevision = models.OutcomeStudioTestReferenceRevision
   KnowledgePack = models.KnowledgePack
   KnowledgePackActivation = models.KnowledgePackActivation
   KnowledgePackVersion = models.KnowledgePackVersion
@@ -1348,6 +1362,7 @@ beforeAll(async () => {
 beforeEach(() => {
   globalThis.fetch = originalFetch
   globalThis.__STORYLINEOS_DISCOVERY_DNS_LOOKUP__ = originalDiscoveryDnsLookup
+  app.locals.outcomeStudioReasoningDeps = { executionMode: 'LEGACY' }
   delete process.env.STORYLINEOS_GRR_PROVIDER_MODE
   delete process.env.STORYLINEOS_GRR_DETERMINISTIC_PROVIDER_ENABLED
   User.findById = jest.fn().mockImplementation((userId) => {
@@ -1444,6 +1459,11 @@ beforeEach(() => {
   OutcomeSession.findOne = jest.fn().mockReturnValue(buildLeanQuery(null))
   OutcomeSession.updateOne = jest.fn().mockResolvedValue({ modifiedCount: 1 })
   OutcomeSession.deleteOne = jest.fn().mockResolvedValue({ deletedCount: 1 })
+  OutcomeStudioReadinessPointer.findOne = jest.fn().mockReturnValue(buildLeanQuery(null))
+  OutcomeStudioReadinessRevision.findById = jest.fn().mockReturnValue(buildLeanQuery(null))
+  OutcomeStudioTestReferenceObject.findOne = jest.fn()
+  OutcomeStudioTestReferencePointer.findOne = jest.fn()
+  OutcomeStudioTestReferenceRevision.findById = jest.fn()
   KnowledgePack.find = jest.fn().mockReturnValue(buildRuntimeInstanceFindChain([]))
   KnowledgePackActivation.find = jest.fn().mockReturnValue(buildRuntimeInstanceFindChain([]))
   KnowledgePackVersion.find = jest.fn().mockReturnValue(buildRuntimeInstanceFindChain([]))
@@ -8851,6 +8871,7 @@ describe('Runtime Instance API', () => {
     packageKey: 'vmf-standard-2-3-1',
     packageVersion: '2.3.1',
     outputTypeKey: 'CUSTOMER_PROPOSAL',
+    requestedOutputTypeKey: 'customer-proposal',
     executionIntent: 'Create a customer-ready proposal.',
     status: 'COMPLETED',
     contractVersion: '1.0.0',
@@ -8921,6 +8942,7 @@ describe('Runtime Instance API', () => {
     runtimeInstanceKey: 'value-narrative-439111',
     frameworkKey: 'VMF',
     outputTypeKey: 'CUSTOMER_PROPOSAL',
+    requestedOutputTypeKey: 'customer-proposal',
     artifactType: 'GOVERNED_REASONING_OUTPUT',
     status: 'GENERATED',
     contractVersion: '1.0.0',
@@ -9023,47 +9045,55 @@ describe('Runtime Instance API', () => {
     }),
   ])
 
-  const makeRequestReadyOutcomeKnowledgePackActivations = () => ([
+  const makeRequestReadyOutcomeKnowledgePackActivations = ({
+    capabilityKey = 'executive-brief',
+    label = 'Executive Brief',
+    outputSchemaKey = `${capabilityKey}-schema`,
+    styleKey = `${capabilityKey}-style`,
+    outputTypePackKey = capabilityKey.length <= 100
+      ? `${capabilityKey}-output-type`
+      : 'boundary-output-type',
+  } = {}) => ([
     ...makeActiveOutcomeKnowledgePackActivations(),
     makeOutcomeKnowledgePackActivation({
       knowledgeLayer: 'OUTPUT_TYPE',
-      capabilityKey: 'executive-brief',
+      capabilityKey,
       workspaceCompatibility: ['OUTCOME'],
       dependencyReferences: [
         {
           knowledgeLayer: 'OUTPUT_SCHEMA',
-          capabilityKey: 'executive-brief-schema',
+          capabilityKey: outputSchemaKey,
           requirement: 'REQUIRED',
         },
         {
           knowledgeLayer: 'STYLE',
-          capabilityKey: 'executive-brief-style',
+          capabilityKey: styleKey,
           requirement: 'REQUIRED',
         },
       ],
       packType: 'OUTPUT_TYPE_DEFINITION',
-      packKey: 'executive-brief-output-type',
-      label: 'Executive Brief Output Type',
+      packKey: outputTypePackKey,
+      label: `${label} Output Type`,
     }),
     makeOutcomeKnowledgePackActivation({
       knowledgeLayer: 'OUTPUT_SCHEMA',
-      capabilityKey: 'executive-brief-schema',
+      capabilityKey: outputSchemaKey,
       workspaceCompatibility: ['OUTCOME'],
       packType: 'OUTPUT_SCHEMA',
-      packKey: 'executive-brief-schema',
-      label: 'Executive Brief Schema',
+      packKey: outputSchemaKey,
+      label: `${label} Schema`,
     }),
     makeOutcomeKnowledgePackActivation({
       knowledgeLayer: 'STYLE',
-      capabilityKey: 'executive-brief-style',
+      capabilityKey: styleKey,
       workspaceCompatibility: ['OUTCOME'],
       packType: 'STYLE',
-      packKey: 'executive-brief-style',
-      label: 'Executive Brief Style',
+      packKey: styleKey,
+      label: `${label} Style`,
     }),
   ])
 
-  const makeOutcomeKnowledgePackVersions = (activations = []) => activations.map((activation) => ({
+  const makeOutcomeKnowledgePackVersions = (activations = [], { providerSafeContent = false } = {}) => activations.map((activation) => ({
     versionId: activation.versionId,
     packId: activation.packId,
     packCategory: activation.packCategory,
@@ -9083,14 +9113,44 @@ describe('Runtime Instance API', () => {
     contentHash: activation.contentHash,
     executionMode: activation.executionMode,
     visibility: activation.visibility || 'PLATFORM',
+    ...(providerSafeContent ? {
+      content: [
+        '# Business Guidance',
+        'Prioritise the decision, commercial consequence, and evidence-based recommendation.',
+        '# Structure',
+        'Open with an executive summary, followed by priorities and recommended actions.',
+        '# Executive Style',
+        'Use concise business language, short sections, and decision-oriented headings.',
+        '# Validation Criteria',
+        'Every material claim must be supported by the verified business context.',
+      ].join('\n'),
+    } : {}),
   }))
 
-  const mockRequestReadyOutcomeKnowledgePacks = () => {
-    const activations = makeRequestReadyOutcomeKnowledgePackActivations()
+  const mockRequestReadyOutcomeKnowledgePacks = (options = {}) => {
+    const layerByPackType = {
+      ARL: 'REASONING',
+      RL: 'REASONING',
+      OUTPUT_SCHEMA: 'OUTPUT_SCHEMA',
+      TRUTH_CERTIFICATION: 'VALIDATION',
+      OUTPUT_TYPE_DEFINITION: 'OUTPUT_TYPE',
+    }
+    const activations = makeRequestReadyOutcomeKnowledgePackActivations(options).map((activation) => (
+      options.providerSafeContent === true && !activation.knowledgeLayer
+        ? { ...activation, knowledgeLayer: layerByPackType[activation.packType] }
+        : activation
+    ))
+    const versions = makeOutcomeKnowledgePackVersions(activations, {
+      providerSafeContent: options.providerSafeContent === true,
+    })
     KnowledgePackActivation.find.mockReturnValue(buildRuntimeInstanceFindChain(activations))
-    KnowledgePackVersion.find.mockReturnValue(
-      buildRuntimeInstanceFindChain(makeOutcomeKnowledgePackVersions(activations)),
-    )
+    KnowledgePackVersion.find.mockImplementation((query = {}) => {
+      const requestedVersionIds = query.versionId?.$in
+      const rows = Array.isArray(requestedVersionIds)
+        ? versions.filter((version) => requestedVersionIds.includes(version.versionId))
+        : versions
+      return buildRuntimeInstanceFindChain(rows)
+    })
     return activations
   }
 
@@ -9112,6 +9172,8 @@ describe('Runtime Instance API', () => {
     truthSignatureId: 'truth_sig_existing_fixture',
     sourceOutputTypeKey: 'EXECUTIVE_BRIEF',
     sourceOutputTypeLabel: 'Executive Brief',
+    requestedOutputTypeKey: 'executive-brief',
+    requestedOutputTypeLabel: 'Executive Brief',
     sourceOutputSnapshot: {
       outputAssetId: 'out_asset_outcome_studio_fixture',
       outputTypeKey: 'EXECUTIVE_BRIEF',
@@ -9205,6 +9267,8 @@ describe('Runtime Instance API', () => {
     status: 'SUBMITTED',
     responseStatus: 'PENDING_RESPONSE',
     prompt: 'Clarify the evidence behind the commercial value story.',
+    requestedOutputTypeKey: 'executive-brief',
+    requestedOutputTypeLabel: 'Executive Brief',
     sourceOutputSnapshot: {
       outputAssetId: 'out_asset_outcome_studio_fixture',
       outputTypeKey: 'EXECUTIVE_BRIEF',
@@ -9295,6 +9359,7 @@ describe('Runtime Instance API', () => {
       workspaceType: 'OUTCOME',
       assetType: 'OUTCOME_NARRATIVE',
       outputTypeKey: 'EXECUTIVE_BRIEF',
+      outputTypeCapabilityKey: 'executive-brief',
       outputTypeLabel: 'Executive Brief',
       title: 'Executive Brief Draft',
       sourceOutputAssetId: 'out_asset_outcome_studio_fixture',
@@ -9327,7 +9392,7 @@ describe('Runtime Instance API', () => {
         status: 'PASS',
         result: 'ALLOW',
       },
-      warnings: ['KNOWLEDGE_PACK_CONTENT_NOT_EXPOSED_V1'],
+      warnings: ['Review the draft with the account owner before external use.'],
       limitations: ['Existing draft limitation.'],
       createdBy: CUSTOMER_ADMIN_ID,
       createdAt: '2026-06-15T11:15:00.000Z',
@@ -9360,6 +9425,7 @@ describe('Runtime Instance API', () => {
       workspaceType: 'OUTCOME',
       assetType: 'OUTCOME_NARRATIVE',
       outputTypeKey: 'EXECUTIVE_BRIEF',
+      outputTypeCapabilityKey: 'executive-brief',
       outputTypeLabel: 'Executive Brief',
       title: 'Executive Brief Draft',
       sourceMessageId: 'out_msg_initial_fixture',
@@ -9373,7 +9439,7 @@ describe('Runtime Instance API', () => {
           '',
           '## Situation',
           '',
-          'The existing board narrative is grounded in certified runtime truth.',
+          'The existing board narrative is grounded in verified business information.',
           '',
           '## Commercial Problem',
           '',
@@ -9388,7 +9454,7 @@ describe('Runtime Instance API', () => {
               '',
               '## Situation',
               '',
-              'The existing board narrative is grounded in certified runtime truth.',
+              'The existing board narrative is grounded in verified business information.',
             ].join('\n'),
           },
         ],
@@ -9480,6 +9546,7 @@ describe('Runtime Instance API', () => {
       phase: 'FOUNDATION_READINESS_ONLY',
       status: 'GENERATED',
       outputTypeKey: 'EXECUTIVE_BRIEF',
+      outputTypeCapabilityKey: 'executive-brief',
       outputTypeLabel: 'Executive Brief',
       title: 'Governed Executive Narrative',
       sourceOutputAssetId: 'out_asset_outcome_studio_fixture',
@@ -9551,6 +9618,7 @@ describe('Runtime Instance API', () => {
       versionNumber: 1,
       status: 'CURRENT',
       outputTypeKey: asset.outputTypeKey,
+      outputTypeCapabilityKey: asset.outputTypeCapabilityKey,
       outputTypeLabel: asset.outputTypeLabel,
       title: asset.title,
       sourceOutputAssetId: asset.sourceOutputAssetId,
@@ -9560,7 +9628,7 @@ describe('Runtime Instance API', () => {
       postValidation: asset.postValidation,
       lineageSummary: asset.lineageSummary,
       customerContent: {
-        markdown: 'Raw outcome asset version customer content must not leak from scaffold reads.',
+        markdown: '# Governed Executive Narrative\n\nVerified business information supports the recommended commercial focus.',
       },
       warnings: asset.warnings,
       limitations: asset.limitations,
@@ -9570,6 +9638,175 @@ describe('Runtime Instance API', () => {
       updatedAt: '2026-06-15T11:15:00.000Z',
       ...overrides,
     }
+  }
+
+  const makeOutcomeStudioLiveProviderAdapter = (overrides = {}) => jest.fn(async () => ({
+    generatedAt: new Date('2026-07-16T10:00:00.000Z'),
+    provider: {
+      providerKey: 'outcome-studio-live-test-provider',
+      providerMode: 'LIVE_TEST',
+      model: 'outcome-studio-live-test-v1',
+      liveProvider: true,
+    },
+    output: {
+      title: 'Executive Brief Draft',
+      outputTypeKey: 'EXECUTIVE_BRIEF',
+      sections: [
+        {
+          order: 1,
+          heading: 'Situation',
+          narrative: 'The current business assessment supports a focused commercial narrative.',
+        },
+        {
+          order: 2,
+          heading: 'Recommendation',
+          narrative: 'Prioritise the strongest evidenced value themes for the next board discussion.',
+        },
+      ],
+      summary: 'A concise executive brief based on the current business assessment.',
+      markdown: [
+        '# Executive Brief Draft',
+        '',
+        '## Situation',
+        '',
+        'The current business assessment supports a focused commercial narrative.',
+        '',
+        '## Recommendation',
+        '',
+        'Prioritise the strongest evidenced value themes for the next board discussion.',
+      ].join('\n'),
+    },
+    warnings: ['Review the draft with the account owner before external use.'],
+    limitations: ['Do not strengthen claims beyond the available business information.'],
+    metadata: {
+      tokenUsage: null,
+    },
+    ...overrides,
+  }))
+
+  const mockOutcomeStudioLiveTestReadiness = (providerDescriptor) => {
+    const bytes = Buffer.from('%PDF-1.4\nApproved reference\n%%EOF', 'utf8')
+    const sha256 = createHash('sha256').update(bytes).digest('hex')
+    const families = ['PROFESSIONAL_DOCUMENT', 'PRESENTATION', 'INFOGRAPHIC']
+    const records = new Map(families.map((family, index) => {
+      const suffix = String(index + 1).padStart(2, '0')
+      const referenceKey = `11111111-1111-4111-8111-1111111111${suffix}`
+      const revisionId = `607f1f77bcf86cd7994390${suffix}`
+      const objectId = `707f1f77bcf86cd7994390${suffix}`
+      return [family, {
+        pointer: { family, currentStatus: 'APPROVED', referenceKey, currentRevision: 2, currentRevisionId: revisionId },
+        revision: {
+          _id: revisionId,
+          objectId,
+          family,
+          status: 'APPROVED',
+          referenceKey,
+          revision: 2,
+          title: `${family} approved reference`,
+          sha256,
+          byteLength: bytes.length,
+          mimeType: 'application/pdf',
+          extension: '.pdf',
+          storageIdentity: `storage-${suffix}`,
+        },
+        object: {
+          _id: objectId,
+          storageIdentity: `storage-${suffix}`,
+          sha256,
+          byteLength: bytes.length,
+          mimeType: 'application/pdf',
+          extension: '.pdf',
+          bytes,
+        },
+      }]
+    }))
+    const referenceSnapshots = [...records.values()].map(({ revision }) => ({
+      family: revision.family,
+      referenceKey: revision.referenceKey,
+      referenceRevision: revision.revision,
+      sha256: revision.sha256,
+      byteLength: revision.byteLength,
+      mimeType: revision.mimeType,
+    }))
+    OutcomeStudioReadinessPointer.findOne.mockReturnValue(buildLeanQuery({
+      currentRevision: 2,
+      currentRevisionId: '807f1f77bcf86cd799439011',
+    }))
+    OutcomeStudioReadinessRevision.findById.mockReturnValue(buildLeanQuery({
+      _id: '807f1f77bcf86cd799439011',
+      registerId: 'oes-004-r2-slice-5-application-readiness-test',
+      environment: 'TEST',
+      revision: 2,
+      policyVersion: 'OES_004_DEVELOPMENT_TEST_READINESS_V1',
+      verdict: 'READY_FOR_TESTING',
+      blockers: [],
+      providerPolicy: providerDescriptor,
+      testReferences: referenceSnapshots,
+    }))
+    OutcomeStudioTestReferencePointer.findOne.mockImplementation(({ family }) => {
+      const value = records.get(family)?.pointer || null
+      const promise = Promise.resolve(value)
+      return {
+        sort: jest.fn().mockReturnThis(),
+        then: promise.then.bind(promise),
+        catch: promise.catch.bind(promise),
+        finally: promise.finally.bind(promise),
+      }
+    })
+    OutcomeStudioTestReferenceRevision.findById.mockImplementation((id) => {
+      const value = [...records.values()].find((record) => record.revision._id === String(id))?.revision || null
+      const promise = Promise.resolve(value)
+      return {
+        then: promise.then.bind(promise),
+        catch: promise.catch.bind(promise),
+        finally: promise.finally.bind(promise),
+      }
+    })
+    OutcomeStudioTestReferenceObject.findOne.mockImplementation(({ _id }) => {
+      const value = [...records.values()].find((record) => record.object._id === String(_id))?.object || null
+      const promise = Promise.resolve(value)
+      return {
+        select: jest.fn().mockReturnThis(),
+        then: promise.then.bind(promise),
+        catch: promise.catch.bind(promise),
+        finally: promise.finally.bind(promise),
+      }
+    })
+    return referenceSnapshots
+  }
+
+  const expectCustomerSafeOutcomeError = (res) => {
+    expect(res.body.error).toEqual(expect.objectContaining({
+      code: expect.any(String),
+      message: expect.any(String),
+      requestId: expect.any(String),
+    }))
+    expect(res.body.error.details).toBeUndefined()
+    expect(Object.keys(res.body.error).every((key) => [
+      'code',
+      'message',
+      'requestId',
+      'state',
+    ].includes(key))).toBe(true)
+    if (res.body.error.state) {
+      expect(Object.entries(res.body.error.state).every(([key, value]) => [
+        'actionAvailable',
+        'approvalAvailable',
+        'draftCreated',
+        'exportAvailable',
+        'previewAvailable',
+        'publishAvailable',
+        'responseCreated',
+        'responseGenerationAvailable',
+        'updateAvailable',
+      ].includes(key) && typeof value === 'boolean')).toBe(true)
+    }
+    expect(JSON.stringify(res.body.error)).not.toMatch(
+      /knowledgePack|truthSignature|runtimeInstanceId|sessionId|messageId|draftId|outcomeAssetId|safetyGate|auditError|blockerReason|resolutionStatus/i,
+    )
+    expect(JSON.stringify(res.body.error)).not.toMatch(
+      /OUTCOME_(?:SESSION|MESSAGE|DRAFT|ASSET|GRAPH|TRUTH|RESPONSE)_/,
+    )
   }
 
   test('POST /api/v1/runtime-instances/:id/intelligence-graph/rebuild persists a runtime-scoped graph with intelligence and truth nodes', async () => {
@@ -14700,6 +14937,7 @@ describe('Runtime Instance API', () => {
         .set('Authorization', `Bearer ${token}`)
         .send({
           outputTypeKey: 'EXECUTIVE_BRIEF',
+          requestedOutputTypeKey: 'executive-brief',
           workspaceType: 'OUTCOME',
         })
 
@@ -14897,36 +15135,221 @@ describe('Runtime Instance API', () => {
       state: 'BLOCKED',
       canStartSession: false,
       canReason: false,
-      summary: 'Outcome Studio requires active Outcome Studio knowledge pack bindings before sessions can start.',
-    }))
-    expect(res.body.data.blockers.map((blocker) => blocker.code)).toEqual(expect.arrayContaining([
-      'ARL_PACK_MISSING',
-      'RL_PACK_MISSING',
-      'OUTPUT_SCHEMA_PACK_MISSING',
-      'TRUTH_CERTIFICATION_PACK_MISSING',
-      'OUTPUT_TYPE_PACK_MISSING',
-    ]))
-    expect(res.body.data.knowledgePacks).toEqual(expect.objectContaining({
-      status: 'BLOCKED',
-      resolutionSource: 'KNOWLEDGE_PACK_REGISTRY',
-      policyKey: 'outcome-studio-v1-required-packs',
-      policyVersion: '1.0.0',
-      activeCount: 0,
-      resolvedCount: 0,
-      requiredCount: 5,
-      sourceOnlyCount: 0,
+      summary: 'Outcome Studio requires additional business information before a session can start.',
+      blockerCount: 5,
     }))
     expect(res.body.data.safetyGates).toEqual(expect.objectContaining({
       status: 'BLOCKED',
       responseGenerationAvailable: false,
-      passedCount: 1,
-      blockedCount: 4,
+      passedCount: 2,
+      blockedCount: 3,
       totalCount: 5,
     }))
-    expect(res.body.data.blockers.map((blocker) => blocker.code)).not.toContain('SOURCE_OUTPUT_MISSING')
+    expect(res.body.data).not.toHaveProperty('blockers')
+    expect(res.body.data).not.toHaveProperty('knowledgePacks')
     expect(RuntimeOutputAsset.find).toHaveBeenCalledWith({ runtimeInstanceId: RUNTIME_INSTANCE_ID })
-    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'TRUTH_QUALITY_EVALUATED',
+    }))
+  })
+
+  test('Outcome Studio validation hides malformed runtime identifier details before lookup', async () => {
+    const oversizedRuntimeInstanceId = 'x'.repeat(181)
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${oversizedRuntimeInstanceId}/outcome-studio`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expectCustomerSafeOutcomeError(res)
+    expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
+  })
+
+  test.each([
+    {
+      path: `/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions`,
+      body: { requestedOutputTypeKey: 'x'.repeat(141) },
+    },
+    {
+      path: `/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/messages`,
+      body: {
+        prompt: 'Create the selected deliverable.',
+        requestedOutputTypeKey: 'x'.repeat(141),
+      },
+    },
+  ])('Outcome Studio rejects over-length selected deliverable keys before runtime lookup', async ({ body, path }) => {
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(path)
+      .set('Authorization', `Bearer ${token}`)
+      .send(body)
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expectCustomerSafeOutcomeError(res)
+    expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
+    expect(OutcomeSession.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeMessage.prototype.save).not.toHaveBeenCalled()
+  })
+
+  test.each([
+    {
+      caseLabel: 'underscore capability key',
+      capabilityKey: 'sales_email',
+      capabilityLabel: 'Sales Email',
+    },
+    {
+      caseLabel: '140-character capability key',
+      capabilityKey: 'x'.repeat(140),
+      capabilityLabel: 'Boundary Deliverable',
+    },
+  ])('Outcome Studio preserves a $caseLabel through session, message, generation, approval, and export', async ({
+    capabilityKey,
+    capabilityLabel,
+  }) => {
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    const knowledgeOptions = {
+      capabilityKey,
+      label: capabilityLabel,
+      outputSchemaKey: 'boundary-output-schema',
+      styleKey: 'boundary-style',
+    }
+    app.locals.outcomeStudioReasoningDeps = {
+      executionMode: 'LEGACY',
+      providerAdapter: makeOutcomeStudioLiveProviderAdapter({
+        provider: {
+          providerKey: 'outcome-studio-capability-contract-test',
+          providerMode: 'LIVE',
+          model: 'outcome-studio-capability-contract-v1',
+          liveProvider: true,
+        },
+        output: {
+          title: `${capabilityLabel} Draft`,
+          outputTypeKey: capabilityKey.toUpperCase(),
+          sections: [
+            {
+              order: 1,
+              heading: 'Situation',
+              narrative: 'The current business assessment supports this deliverable.',
+            },
+            {
+              order: 2,
+              heading: 'Recommendation',
+              narrative: 'Use the strongest verified business information in the final review.',
+            },
+          ],
+          summary: `A governed ${capabilityLabel} based on the current business assessment.`,
+          markdown: [
+            `# ${capabilityLabel} Draft`,
+            '',
+            '## Situation',
+            '',
+            'The current business assessment supports this deliverable.',
+            '',
+            '## Recommendation',
+            '',
+            'Use the strongest verified business information in the final review.',
+          ].join('\n'),
+        },
+      }),
+    }
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    RuntimeOutputAsset.find.mockReturnValue(buildRuntimeInstanceFindChain([makeRuntimeOutputAsset()]))
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+    mockRequestReadyOutcomeKnowledgePacks(knowledgeOptions)
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const sessionRes = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        sourceOutputAssetId: 'out_asset_outcome_studio_fixture',
+        prompt: `Create the ${capabilityLabel} deliverable.`,
+        requestedOutputTypeKey: capabilityKey,
+      })
+
+    expect(sessionRes.status).toBe(201)
+    expect(sessionRes.body.data.requestedOutputTypeKey).toBe(capabilityKey)
+    const savedSession = OutcomeSession.prototype.save.mock.contexts[0]
+    expect(savedSession.requestedOutputTypeKey).toBe(capabilityKey)
+    await expect(savedSession.validate()).resolves.toBeUndefined()
+
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(savedSession.toObject()))
+    mockRequestReadyOutcomeKnowledgePacks(knowledgeOptions)
+    const messageRes = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/${sessionRes.body.data.sessionId}/messages`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        prompt: `Create the ${capabilityLabel} deliverable with customer-ready recommendations.`,
+        requestedOutputTypeKey: capabilityKey,
+      })
+
+    expect(messageRes.status).toBe(201)
+    expect(messageRes.body.data.requestedOutputTypeKey).toBe(capabilityKey)
+    const savedMessage = OutcomeMessage.prototype.save.mock.contexts[0]
+    expect(savedMessage.requestedOutputTypeKey).toBe(capabilityKey)
+    await expect(savedMessage.validate()).resolves.toBeUndefined()
+
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(savedSession.toObject()))
+    OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(savedMessage.toObject()))
+    mockRequestReadyOutcomeKnowledgePacks(knowledgeOptions)
+    const generationRes = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/${sessionRes.body.data.sessionId}/messages/${messageRes.body.data.messageId}/generate-response`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(generationRes.status).toBe(200)
+    expect(generationRes.body.data.draft.outputTypeCapabilityKey).toBe(capabilityKey)
+    expect(generationRes.body.data.draftIteration.outputTypeCapabilityKey).toBe(capabilityKey)
+    const savedDraft = OutcomeDraft.prototype.save.mock.contexts[0]
+    const savedIteration = OutcomeDraftIteration.prototype.save.mock.contexts[0]
+    const savedExecution = GovernedReasoningExecution.prototype.save.mock.contexts[0]
+    const savedArtifact = GovernedRuntimeArtifact.prototype.save.mock.contexts[0]
+    expect(savedDraft.outputTypeCapabilityKey).toBe(capabilityKey)
+    expect(savedIteration.outputTypeCapabilityKey).toBe(capabilityKey)
+    expect(savedExecution.requestedOutputTypeKey).toBe(capabilityKey)
+    expect(savedArtifact.requestedOutputTypeKey).toBe(capabilityKey)
+    await expect(Promise.all([
+      savedDraft.validate(),
+      savedIteration.validate(),
+      savedExecution.validate(),
+      savedArtifact.validate(),
+    ])).resolves.toBeDefined()
+
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(savedSession.toObject()))
+    OutcomeDraft.findOne.mockReturnValue(buildLeanQuery(savedDraft.toObject()))
+    OutcomeDraftIteration.findOne.mockReturnValue(buildLeanQuery(savedIteration.toObject()))
+    const approvalRes = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/${sessionRes.body.data.sessionId}/drafts/${savedDraft.draftId}/approve`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(approvalRes.status).toBe(201)
+    expect(approvalRes.body.data.asset.outputTypeCapabilityKey).toBe(capabilityKey)
+    expect(approvalRes.body.data.assetVersion.outputTypeCapabilityKey).toBe(capabilityKey)
+    const savedAsset = OutcomeAsset.prototype.save.mock.contexts[0]
+    const savedVersion = OutcomeAssetVersion.prototype.save.mock.contexts[0]
+    expect(savedAsset.outputTypeCapabilityKey).toBe(capabilityKey)
+    expect(savedVersion.outputTypeCapabilityKey).toBe(capabilityKey)
+    await expect(Promise.all([
+      savedAsset.validate(),
+      savedVersion.validate(),
+    ])).resolves.toBeDefined()
+
+    OutcomeAsset.findOne.mockReturnValue(buildLeanQuery(savedAsset.toObject()))
+    OutcomeAssetVersion.findOne.mockReturnValue(buildLeanQuery(savedVersion.toObject()))
+    mockRequestReadyOutcomeKnowledgePacks(knowledgeOptions)
+    const exportRes = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/assets/${savedAsset.outcomeAssetId}/export/markdown`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(exportRes.status).toBe(200)
+    expect(exportRes.body.data).toEqual(expect.objectContaining({
+      format: 'MARKDOWN',
+      exportAvailable: true,
     }))
   })
 
@@ -14934,7 +15357,7 @@ describe('Runtime Instance API', () => {
     const runtimeInstance = makeOutputLabReadyRuntime()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
     RuntimeOutputAsset.find.mockReturnValue(buildRuntimeInstanceFindChain([makeRuntimeOutputAsset()]))
-    KnowledgePackActivation.find.mockReturnValue(buildRuntimeInstanceFindChain(makeActiveOutcomeKnowledgePackActivations()))
+    mockRequestReadyOutcomeKnowledgePacks()
     FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
     const token = await getAccessTokenForUser(makeCustomerAdmin())
 
@@ -14946,26 +15369,15 @@ describe('Runtime Instance API', () => {
     expect(readinessRes.body.data).toEqual(expect.objectContaining({
       state: 'READY',
       canStartSession: true,
-      canReason: false,
-      summary: 'Outcome Studio can start governed sessions; response generation remains blocked until all pre-generation gates pass.',
-      blockers: [],
-    }))
-    expect(readinessRes.body.data.knowledgePacks).toEqual(expect.objectContaining({
-      status: 'PROJECTED',
-      mode: 'REGISTRY_RESOLUTION',
-      resolutionSource: 'KNOWLEDGE_PACK_REGISTRY',
-      policyKey: 'outcome-studio-v1-required-packs',
-      policyVersion: '1.0.0',
-      activeCount: 5,
-      resolvedCount: 5,
-      requiredCount: 5,
-      sourceOnlyCount: 0,
+      canReason: true,
+      summary: 'Outcome Studio is ready to prepare drafts.',
+      blockerCount: 0,
     }))
     expect(readinessRes.body.data.safetyGates).toEqual(expect.objectContaining({
-      status: 'BLOCKED',
-      responseGenerationAvailable: false,
-      passedCount: 3,
-      blockedCount: 2,
+      status: 'PASSED',
+      responseGenerationAvailable: true,
+      passedCount: 5,
+      blockedCount: 0,
       totalCount: 5,
     }))
 
@@ -14975,82 +15387,45 @@ describe('Runtime Instance API', () => {
       .send({
         sourceOutputAssetId: 'out_asset_outcome_studio_fixture',
         prompt: 'Create a governed outcome narrative.',
+        requestedOutputTypeKey: 'executive-brief',
+        requestedOutputTypeKey: 'EXECUTIVE-BRIEF',
       })
 
     expect(sessionRes.status).toBe(201)
+    const savedTruthSignature = TruthSignature.prototype.save.mock.contexts[0].toJSON()
+    const persistedTruthSignatureId = savedTruthSignature.truthSignatureId
     expect(sessionRes.body.data).toEqual(expect.objectContaining({
       sessionId: expect.stringMatching(/^out_sess_/),
-      contractVersion: 'outcome-studio.v1',
-      phase: 'FOUNDATION_READINESS_ONLY',
       status: 'ACTIVE',
-      runtimeInstanceId: RUNTIME_INSTANCE_ID,
-      runtimeInstanceKey: 'value-narrative-439111',
-      runtimeType: 'VALUE_NARRATIVE',
-      frameworkKey: 'VMF',
-      packageKey: 'vmf-standard-2-3-1',
-      packageVersion: '2.3.1',
       sourceOutputAssetId: 'out_asset_outcome_studio_fixture',
-      truthSignatureId: expect.stringMatching(/^truth_sig_/),
       sourceOutputTypeKey: 'EXECUTIVE_BRIEF',
       sourceOutputTypeLabel: 'Executive Brief',
-      prompt: 'Create a governed outcome narrative.',
+      requestedOutputTypeKey: 'executive-brief',
+      requestedOutputTypeLabel: 'Executive Brief',
+      requestText: 'Create a governed outcome narrative.',
+      informationStatus: expect.objectContaining({
+        status: 'PROJECTED',
+        currentness: 'CURRENT',
+      }),
+      businessGuidance: expect.objectContaining({
+        status: 'READY',
+        ready: true,
+      }),
     }))
     expect(sessionRes.body.data.sourceOutput).toEqual(expect.objectContaining({
       outputAssetId: 'out_asset_outcome_studio_fixture',
       outputTypeKey: 'EXECUTIVE_BRIEF',
-      sourceSnapshot: expect.objectContaining({
-        lockSnapshotId: 'runtime-truth-lock-output-lab-fixture',
-        replayAnchorId: 'runtime-replay-anchor-output-lab',
-      }),
+      outputTypeLabel: 'Executive Brief',
     }))
-    expect(sessionRes.body.data.truthSignature).toEqual(expect.objectContaining({
-      truthSignatureId: sessionRes.body.data.truthSignatureId,
-      status: 'PROJECTED',
-      mode: 'PROJECTED_FROM_RUNTIME_EVIDENCE',
-      persistence: 'SESSION_BOUND',
-      currentness: 'CURRENT',
-      evidence: expect.objectContaining({
-        sourceOutputAssetId: 'out_asset_outcome_studio_fixture',
-        lockSnapshotId: 'runtime-truth-lock-output-lab-fixture',
-        replayAnchorId: 'runtime-replay-anchor-output-lab',
-        graphHash: 'sha256:graph-hash',
-      }),
-      missingEvidence: [],
-    }))
-    expect(sessionRes.body.data.knowledgePackBinding).toEqual(expect.objectContaining({
-      status: 'PROJECTED',
-      mode: 'REGISTRY_RESOLUTION',
-      resolutionSource: 'KNOWLEDGE_PACK_REGISTRY',
-      policyKey: 'outcome-studio-v1-required-packs',
-      policyVersion: '1.0.0',
-      activeCount: 5,
-      resolvedCount: 5,
-      requiredCount: 5,
-      activePacks: expect.arrayContaining([
-        expect.objectContaining({
-          packCategory: 'OUTCOME',
-          packType: 'ARL',
-          packKey: 'adaptive-reasoning-layer',
-          contentHash: 'sha256:adaptive-reasoning-layer',
-        }),
-        expect.objectContaining({
-          packCategory: 'PLATFORM',
-          packType: 'TRUTH_CERTIFICATION',
-          packKey: 'truth-certification-pack',
-          contentHash: 'sha256:truth-certification-pack',
-        }),
-      ]),
-    }))
-    expect(sessionRes.body.data.knowledgePackBinding).not.toHaveProperty('sourceBundle')
-    expect(sessionRes.body.data.sourceOutput).not.toHaveProperty('markdown')
-    expect(sessionRes.body.data.sourceOutput).not.toHaveProperty('safeJson')
-    expect(sessionRes.body.data.sourceOutput).not.toHaveProperty('governedOutput')
+    expect(sessionRes.body.data).not.toHaveProperty('truthSignature')
+    expect(sessionRes.body.data).not.toHaveProperty('truthSignatureId')
+    expect(sessionRes.body.data).not.toHaveProperty('knowledgePackBinding')
+    expect(sessionRes.body.data).not.toHaveProperty('runtimeInstanceId')
     expect(JSON.stringify(sessionRes.body.data)).not.toContain('Raw generated Markdown must not leak')
     expect(JSON.stringify(sessionRes.body.data)).not.toContain('Raw governed output must not leak')
     expect(JSON.stringify(sessionRes.body.data)).not.toContain('Raw truth summary must not leak')
     expect(TruthSignature.prototype.save).toHaveBeenCalledTimes(1)
-    const savedTruthSignature = TruthSignature.prototype.save.mock.contexts[0].toJSON()
-    expect(savedTruthSignature.truthSignatureId).toBe(sessionRes.body.data.truthSignatureId)
+    expect(savedTruthSignature.truthSignatureId).toMatch(/^truth_sig_/)
     expect(savedTruthSignature.sessionId).toBe(sessionRes.body.data.sessionId)
     expect(String(savedTruthSignature.tenantId)).toBe(TENANT_ID)
     expect(String(savedTruthSignature.customerId)).toBe(CUSTOMER_ID)
@@ -15072,7 +15447,9 @@ describe('Runtime Instance API', () => {
     expect(OutcomeSession.prototype.save).toHaveBeenCalledTimes(1)
     const savedOutcomeSession = OutcomeSession.prototype.save.mock.contexts[0]
     expect(savedOutcomeSession.toJSON()).toEqual(expect.objectContaining({
-      truthSignatureId: sessionRes.body.data.truthSignatureId,
+      requestedOutputTypeKey: 'executive-brief',
+      requestedOutputTypeLabel: 'Executive Brief',
+      truthSignatureId: persistedTruthSignatureId,
     }))
     expect(savedOutcomeSession.workspaceType).toBe('OUTCOME')
     expect(savedOutcomeSession.contextBindings).toEqual(expect.objectContaining({
@@ -15091,7 +15468,7 @@ describe('Runtime Instance API', () => {
         outputTypeKey: 'EXECUTIVE_BRIEF',
       }),
       truthBinding: expect.objectContaining({
-        truthSignatureId: sessionRes.body.data.truthSignatureId,
+        truthSignatureId: persistedTruthSignatureId,
         currentness: 'CURRENT',
       }),
       knowledgeBindings: expect.objectContaining({
@@ -15099,7 +15476,7 @@ describe('Runtime Instance API', () => {
         policyKey: 'outcome-studio-v1-required-packs',
         policyVersion: '1.0.0',
         activeCount: 5,
-        resolvedCount: 5,
+        resolvedCount: 8,
         requiredCount: 5,
         activePacks: expect.arrayContaining([
           expect.objectContaining({
@@ -15117,7 +15494,7 @@ describe('Runtime Instance API', () => {
       decisionBindings: [],
     }))
     expect(OutcomeSession.deleteOne).not.toHaveBeenCalled()
-    expect(RuntimeGraphRelationship.prototype.save).toHaveBeenCalledTimes(6)
+    expect(RuntimeGraphRelationship.prototype.save).toHaveBeenCalledTimes(9)
     const savedSessionRelationships = RuntimeGraphRelationship.prototype.save.mock.contexts
     expect(savedSessionRelationships[0]).toEqual(expect.objectContaining({
       relationshipId: expect.stringMatching(/^rt_graph_rel_/),
@@ -15130,12 +15507,12 @@ describe('Runtime Instance API', () => {
       }),
       targetNode: expect.objectContaining({
         nodeType: 'TRUTH_SIGNATURE',
-        nodeId: sessionRes.body.data.truthSignatureId,
+        nodeId: persistedTruthSignatureId,
         recordModel: 'TruthSignature',
       }),
       evidence: expect.objectContaining({
         sessionId: sessionRes.body.data.sessionId,
-        truthSignatureId: sessionRes.body.data.truthSignatureId,
+        truthSignatureId: persistedTruthSignatureId,
         truthSignatureCurrentness: 'CURRENT',
       }),
     }))
@@ -15172,12 +15549,12 @@ describe('Runtime Instance API', () => {
       diff: expect.objectContaining({
         sessionId: sessionRes.body.data.sessionId,
         sourceOutputAssetId: 'out_asset_outcome_studio_fixture',
-        truthSignatureId: sessionRes.body.data.truthSignatureId,
+        truthSignatureId: persistedTruthSignatureId,
         truthSignatureStatus: 'PROJECTED',
-        knowledgePackBindingStatus: 'PROJECTED',
+        knowledgePackBindingStatus: 'READY',
         activeKnowledgePackCount: 5,
         requiredKnowledgePackCount: 5,
-        runtimeGraphRelationshipCount: 6,
+        runtimeGraphRelationshipCount: 9,
       }),
     }))
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
@@ -15186,9 +15563,9 @@ describe('Runtime Instance API', () => {
       resourceId: savedOutcomeSession._id,
       diff: expect.objectContaining({
         sessionId: sessionRes.body.data.sessionId,
-        truthSignatureId: sessionRes.body.data.truthSignatureId,
+        truthSignatureId: persistedTruthSignatureId,
         truthSignature: expect.objectContaining({
-          truthSignatureId: sessionRes.body.data.truthSignatureId,
+          truthSignatureId: persistedTruthSignatureId,
           status: 'PROJECTED',
           persistence: 'SESSION_BOUND',
           currentness: 'CURRENT',
@@ -15202,12 +15579,12 @@ describe('Runtime Instance API', () => {
       diff: expect.objectContaining({
         sessionId: sessionRes.body.data.sessionId,
         knowledgePackBinding: expect.objectContaining({
-          status: 'PROJECTED',
+          status: 'READY',
           resolutionSource: 'KNOWLEDGE_PACK_REGISTRY',
           policyKey: 'outcome-studio-v1-required-packs',
           policyVersion: '1.0.0',
           activeCount: 5,
-          resolvedCount: 5,
+          resolvedCount: 8,
           requiredCount: 5,
         }),
       }),
@@ -15218,7 +15595,7 @@ describe('Runtime Instance API', () => {
     const runtimeInstance = makeOutputLabReadyRuntime()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
     RuntimeOutputAsset.find.mockReturnValue(buildRuntimeInstanceFindChain([makeRuntimeOutputAsset()]))
-    KnowledgePackActivation.find.mockReturnValue(buildRuntimeInstanceFindChain(makeActiveOutcomeKnowledgePackActivations()))
+    mockRequestReadyOutcomeKnowledgePacks()
     FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
     AuditLog.createLog = jest.fn(async (payload) => {
       if (payload?.action === 'TRUTH_SIGNATURE_BOUND') {
@@ -15234,15 +15611,13 @@ describe('Runtime Instance API', () => {
       .send({
         sourceOutputAssetId: 'out_asset_outcome_studio_fixture',
         prompt: 'Create a governed outcome narrative.',
+        requestedOutputTypeKey: 'executive-brief',
       })
 
     expect(res.status).toBe(500)
-    expect(res.body.error.code).toBe('OUTCOME_SESSION_AUDIT_FAILED')
-    expect(res.body.error.details.reason).toBe('OUTCOME_SESSION_AUDIT_FAILED')
-    expect(res.body.error.details.auditError).toEqual(expect.objectContaining({
-      message: 'audit store unavailable',
-    }))
-    expect(res.body.error.details.truthSignatureId).toMatch(/^truth_sig_/)
+    expect(res.body.error.code).toBe('OUTCOME_ACTION_FAILED')
+    expectCustomerSafeOutcomeError(res)
+
     expect(TruthSignature.prototype.save).toHaveBeenCalledTimes(1)
     expect(OutcomeSession.prototype.save).toHaveBeenCalledTimes(1)
     expect(OutcomeSession.deleteOne).toHaveBeenCalledWith({
@@ -15264,11 +15639,41 @@ describe('Runtime Instance API', () => {
     }))
   })
 
+  test('Outcome Studio session creation fails closed for an unavailable selected deliverable', async () => {
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    RuntimeOutputAsset.find.mockReturnValue(buildRuntimeInstanceFindChain([makeRuntimeOutputAsset()]))
+    mockRequestReadyOutcomeKnowledgePacks()
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        sourceOutputAssetId: 'out_asset_outcome_studio_fixture',
+        prompt: 'Create a customer proposal.',
+        requestedOutputTypeKey: 'customer-proposal',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(res.body.error.state).toBeUndefined()
+    expect(res.body.error.details).toBeUndefined()
+    expectCustomerSafeOutcomeError(res)
+    expect(TruthSignature.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeSession.prototype.save).not.toHaveBeenCalled()
+    expect(RuntimeGraphRelationship.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+      action: 'OUTCOME_SESSION_CREATED',
+    }))
+  })
+
   test('Outcome Studio session creation rolls back when runtime graph relationship persistence fails', async () => {
     const runtimeInstance = makeOutputLabReadyRuntime()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
     RuntimeOutputAsset.find.mockReturnValue(buildRuntimeInstanceFindChain([makeRuntimeOutputAsset()]))
-    KnowledgePackActivation.find.mockReturnValue(buildRuntimeInstanceFindChain(makeActiveOutcomeKnowledgePackActivations()))
+    mockRequestReadyOutcomeKnowledgePacks()
     FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
     RuntimeGraphRelationship.prototype.save = jest.fn(async () => {
       throw new Error('relationship store unavailable')
@@ -15281,23 +15686,17 @@ describe('Runtime Instance API', () => {
       .send({
         sourceOutputAssetId: 'out_asset_outcome_studio_fixture',
         prompt: 'Create a governed outcome narrative.',
+        requestedOutputTypeKey: 'executive-brief',
       })
 
     expect(res.status).toBe(500)
-    expect(res.body.error.code).toBe('OUTCOME_GRAPH_RELATIONSHIP_FAILED')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      reason: 'OUTCOME_GRAPH_RELATIONSHIP_FAILED',
-      sessionId: expect.stringMatching(/^out_sess_/),
-      truthSignatureId: expect.stringMatching(/^truth_sig_/),
-      graphRelationshipError: expect.objectContaining({
-        message: 'relationship store unavailable',
-      }),
-    }))
+    expect(res.body.error.code).toBe('OUTCOME_ACTION_FAILED')
+    expectCustomerSafeOutcomeError(res)
     expect(TruthSignature.prototype.save).toHaveBeenCalledTimes(1)
     expect(OutcomeSession.prototype.save).toHaveBeenCalledTimes(1)
     expect(RuntimeGraphRelationship.prototype.save).toHaveBeenCalledTimes(1)
     const relationshipRollbackFilter = RuntimeGraphRelationship.deleteMany.mock.calls[0][0]
-    expect(relationshipRollbackFilter._id.$in).toHaveLength(6)
+    expect(relationshipRollbackFilter._id.$in).toHaveLength(9)
     expect(OutcomeSession.deleteOne).toHaveBeenCalledWith({
       _id: expect.anything(),
     })
@@ -15332,20 +15731,8 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(409)
     expect(res.body.error.code).toBe('CONFLICT')
-    expect(res.body.error.details.reason).toBe('OUTCOME_SESSION_BLOCKED')
-    expect(res.body.error.details.sourceOutputAssetId).toBe('out_asset_outcome_studio_fixture')
-    expect(res.body.error.details.readiness).toEqual(expect.objectContaining({
-      state: 'BLOCKED',
-      canStartSession: false,
-      canReason: false,
-    }))
-    expect(res.body.error.details.readiness.blockers.map((blocker) => blocker.code)).toEqual(expect.arrayContaining([
-      'ARL_PACK_MISSING',
-      'RL_PACK_MISSING',
-      'OUTPUT_SCHEMA_PACK_MISSING',
-      'TRUTH_CERTIFICATION_PACK_MISSING',
-      'OUTPUT_TYPE_PACK_MISSING',
-    ]))
+    expectCustomerSafeOutcomeError(res)
+
     expect(RuntimeOutputAsset.find).toHaveBeenCalledWith({ runtimeInstanceId: RUNTIME_INSTANCE_ID })
     expect(TruthSignature.prototype.save).not.toHaveBeenCalled()
     expect(OutcomeSession.prototype.save).not.toHaveBeenCalled()
@@ -15372,7 +15759,7 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(403)
     expect(res.body.error.code).toBe('FORBIDDEN')
-    expect(res.body.error.details.permission).toBe('VMF_UPDATE')
+    expectCustomerSafeOutcomeError(res)
     expect(RuntimeOutputAsset.find).not.toHaveBeenCalled()
     expect(TruthSignature.prototype.save).not.toHaveBeenCalled()
     expect(OutcomeSession.prototype.save).not.toHaveBeenCalled()
@@ -15394,7 +15781,7 @@ describe('Runtime Instance API', () => {
       code: 'VALIDATION_FAILED',
       message: 'Request validation failed.',
     }))
-    expect(JSON.stringify(res.body.error.details)).toContain('prompt must not be empty')
+    expectCustomerSafeOutcomeError(res)
     expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
     expect(OutcomeSession.findOne).not.toHaveBeenCalled()
     expect(OutcomeMessage.prototype.save).not.toHaveBeenCalled()
@@ -15406,6 +15793,7 @@ describe('Runtime Instance API', () => {
     const session = makeOutcomeSessionRecord()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
     OutcomeSession.findOne.mockReturnValue(buildLeanQuery(session))
+    mockRequestReadyOutcomeKnowledgePacks()
     const token = await getAccessTokenForUser(makeCustomerAdmin())
 
     const res = await request
@@ -15413,6 +15801,7 @@ describe('Runtime Instance API', () => {
       .set('Authorization', `Bearer ${token}`)
       .send({
         prompt: 'Clarify the evidence behind the commercial value story.',
+        requestedOutputTypeKey: 'EXECUTIVE-BRIEF',
       })
 
     expect(res.status).toBe(201)
@@ -15423,43 +15812,20 @@ describe('Runtime Instance API', () => {
     expect(res.body.data).toEqual(expect.objectContaining({
       messageId: expect.stringMatching(/^out_msg_/),
       sessionId: 'out_sess_existing_fixture',
-      contractVersion: 'outcome-studio.v1',
-      phase: 'FOUNDATION_READINESS_ONLY',
       role: 'USER',
       status: 'SUBMITTED',
       responseStatus: 'PENDING_RESPONSE',
-      runtimeInstanceId: RUNTIME_INSTANCE_ID,
-      runtimeInstanceKey: 'value-narrative-439111',
-      runtimeType: 'VALUE_NARRATIVE',
-      frameworkKey: 'VMF',
-      packageKey: 'vmf-standard-2-3-1',
-      packageVersion: '2.3.1',
-      prompt: 'Clarify the evidence behind the commercial value story.',
+      requestedOutputTypeKey: 'executive-brief',
+      requestedOutputTypeLabel: 'Executive Brief',
+      content: 'Clarify the evidence behind the commercial value story.',
     }))
-    expect(res.body.data.sourceOutput).toEqual(expect.objectContaining({
-      outputAssetId: 'out_asset_outcome_studio_fixture',
-      outputTypeKey: 'EXECUTIVE_BRIEF',
-      sourceSnapshot: expect.objectContaining({
-        lockSnapshotId: 'runtime-truth-lock-output-lab-fixture',
-        replayAnchorId: 'runtime-replay-anchor-output-lab',
-      }),
-    }))
-    expect(res.body.data.truthSignature).toEqual(expect.objectContaining({
-      status: 'PROJECTED',
-      persistence: 'SESSION_BOUND',
-      currentness: 'CURRENT',
-    }))
-    expect(res.body.data.knowledgePackBinding).toEqual(expect.objectContaining({
-      status: 'PROJECTED',
-      activeCount: 5,
-      requiredCount: 5,
-    }))
-    expect(res.body.data).not.toHaveProperty('content')
+    expect(res.body.data).not.toHaveProperty('prompt')
+    expect(res.body.data).not.toHaveProperty('truthSignature')
+    expect(res.body.data).not.toHaveProperty('knowledgePackBinding')
+    expect(res.body.data).not.toHaveProperty('runtimeInstanceId')
     expect(res.body.data).not.toHaveProperty('response')
     expect(res.body.data).not.toHaveProperty('generatedResponse')
     expect(res.body.data).not.toHaveProperty('assetId')
-    expect(res.body.data.sourceOutput).not.toHaveProperty('markdown')
-    expect(res.body.data.knowledgePackBinding).not.toHaveProperty('sourceBundle')
     expect(OutcomeMessage.prototype.save).toHaveBeenCalledTimes(1)
     const savedOutcomeMessage = OutcomeMessage.prototype.save.mock.contexts[0]
     expect(savedOutcomeMessage.workspaceType).toBe('OUTCOME')
@@ -15484,7 +15850,7 @@ describe('Runtime Instance API', () => {
     }))
     expect(OutcomeMessage.deleteOne).not.toHaveBeenCalled()
     expect(RuntimeOutputAsset.find).not.toHaveBeenCalled()
-    expect(KnowledgePackActivation.find).not.toHaveBeenCalled()
+    expect(KnowledgePackActivation.find).toHaveBeenCalled()
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'PROMPT_SUBMITTED',
       resourceType: 'OutcomeMessage',
@@ -15515,6 +15881,7 @@ describe('Runtime Instance API', () => {
     }
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
     OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    mockRequestReadyOutcomeKnowledgePacks()
     const token = await getAccessTokenForUser(makeCustomerAdmin())
 
     const res = await request
@@ -15527,20 +15894,9 @@ describe('Runtime Instance API', () => {
     expect(res.status).toBe(409)
     expect(res.body.error).toEqual(expect.objectContaining({
       code: 'CONFLICT',
-      message: 'Outcome Studio prompt submission is blocked until the session Truth Signature is current.',
+      message: 'Outcome Studio request submission is blocked until the session uses current verified business information.',
     }))
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      reason: 'OUTCOME_SESSION_BLOCKED',
-      sessionId: 'out_sess_existing_fixture',
-      truthSignatureId: 'truth_sig_existing_fixture',
-      truthSignatureCurrentness: 'OUT_OF_DATE',
-      promptPersistenceAvailable: false,
-      blockerReason: 'OUTCOME_SESSION_TRUTH_NOT_CURRENT',
-      safetyGate: expect.objectContaining({
-        code: 'TRUTH_SIGNATURE_BOUND',
-        status: 'BLOCKED',
-      }),
-    }))
+    expectCustomerSafeOutcomeError(res)
     expect(OutcomeMessage.prototype.save).not.toHaveBeenCalled()
     expect(OutcomeMessage.deleteOne).not.toHaveBeenCalled()
     expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
@@ -15553,6 +15909,7 @@ describe('Runtime Instance API', () => {
     const runtimeInstance = makeOutputLabReadyRuntime()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
     OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    mockRequestReadyOutcomeKnowledgePacks()
     AuditLog.createLog = jest.fn(async (payload) => {
       if (payload?.action === 'PROMPT_SUBMITTED') {
         throw new Error('prompt audit unavailable')
@@ -15569,15 +15926,9 @@ describe('Runtime Instance API', () => {
       })
 
     expect(res.status).toBe(500)
-    expect(res.body.error.code).toBe('OUTCOME_MESSAGE_AUDIT_FAILED')
-    expect(res.body.error.details.reason).toBe('OUTCOME_MESSAGE_AUDIT_FAILED')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      sessionId: 'out_sess_existing_fixture',
-      messageId: expect.stringMatching(/^out_msg_/),
-    }))
-    expect(res.body.error.details.auditError).toEqual(expect.objectContaining({
-      message: 'prompt audit unavailable',
-    }))
+    expect(res.body.error.code).toBe('OUTCOME_ACTION_FAILED')
+    expectCustomerSafeOutcomeError(res)
+
     expect(OutcomeMessage.prototype.save).toHaveBeenCalledTimes(1)
     const savedOutcomeResponseMessage = OutcomeMessage.prototype.save.mock.contexts[0]
     expect(OutcomeMessage.deleteOne).toHaveBeenCalledWith({
@@ -15604,7 +15955,7 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(404)
     expect(res.body.error.code).toBe('NOT_FOUND')
-    expect(res.body.error.details.reason).toBe('OUTCOME_SESSION_NOT_FOUND')
+    expectCustomerSafeOutcomeError(res)
     expect(OutcomeSession.findOne).toHaveBeenCalledWith({
       runtimeInstanceId: RUNTIME_INSTANCE_ID,
       sessionId: 'out_sess_other_runtime',
@@ -15633,11 +15984,8 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(409)
     expect(res.body.error.code).toBe('CONFLICT')
-    expect(res.body.error.details.reason).toBe('OUTCOME_SESSION_BLOCKED')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      sessionId: 'out_sess_existing_fixture',
-      status: 'CLOSED',
-    }))
+    expectCustomerSafeOutcomeError(res)
+
     expect(OutcomeMessage.prototype.save).not.toHaveBeenCalled()
     expect(OutcomeMessage.deleteOne).not.toHaveBeenCalled()
     expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
@@ -15659,14 +16007,239 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(403)
     expect(res.body.error.code).toBe('FORBIDDEN')
-    expect(res.body.error.details.permission).toBe('VMF_UPDATE')
+    expectCustomerSafeOutcomeError(res)
     expect(OutcomeSession.findOne).not.toHaveBeenCalled()
     expect(OutcomeMessage.prototype.save).not.toHaveBeenCalled()
     expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 
+  test('Outcome Studio LIVE_TEST blocks on readiness before provider execution or generated-record persistence', async () => {
+    app.locals.outcomeStudioReasoningDeps = {
+      executionMode: 'LIVE_TEST',
+      providerDescriptor: {
+        providerKey: 'outcome-studio-live-test-provider',
+        model: 'outcome-studio-live-test-v1',
+        providerMode: 'LIVE_TEST',
+        environment: 'TEST',
+        safeContextPolicyKey: 'OUTCOME_STUDIO_PROVIDER_SAFE_CONTEXT_V1',
+        failurePosture: 'FAIL_CLOSED',
+      },
+      providerAdapter: makeOutcomeStudioLiveProviderAdapter(),
+    }
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeOutputLabReadyRuntime()))
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+    mockRequestReadyOutcomeKnowledgePacks()
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/messages/out_msg_existing_fixture/generate-response`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expectCustomerSafeOutcomeError(res)
+    expect(OutcomeStudioReadinessPointer.findOne).toHaveBeenCalledTimes(1)
+    expect(app.locals.outcomeStudioReasoningDeps.providerAdapter).not.toHaveBeenCalled()
+    expect(GovernedReasoningExecution.prototype.save).not.toHaveBeenCalled()
+    expect(GovernedRuntimeArtifact.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeMessage.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeDraft.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeDraftIteration.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeAsset.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeAssetVersion.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('Outcome Studio default LIVE_TEST mode validates a missing adapter before readiness or generated-record persistence', async () => {
+    app.locals.outcomeStudioReasoningDeps = {
+      providerDescriptor: {
+        providerKey: 'outcome-studio-live-test-provider',
+        model: 'outcome-studio-live-test-v1',
+        providerMode: 'LIVE_TEST',
+        environment: 'TEST',
+        safeContextPolicyKey: 'OUTCOME_STUDIO_PROVIDER_SAFE_CONTEXT_V1',
+        failurePosture: 'FAIL_CLOSED',
+      },
+    }
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeOutputLabReadyRuntime()))
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+    mockRequestReadyOutcomeKnowledgePacks()
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/messages/out_msg_existing_fixture/generate-response`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(503)
+    expect(res.body.error.code).toBe('OUTCOME_ACTION_FAILED')
+    expectCustomerSafeOutcomeError(res)
+    expect(OutcomeStudioReadinessPointer.findOne).not.toHaveBeenCalled()
+    expect(GovernedReasoningExecution.prototype.save).not.toHaveBeenCalled()
+    expect(GovernedRuntimeArtifact.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeMessage.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeDraft.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeDraftIteration.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeAsset.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeAssetVersion.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('Outcome Studio LIVE_TEST delegates only the bounded provider-safe context after current authorization', async () => {
+    const providerDescriptor = {
+      providerKey: 'outcome-studio-live-test-provider',
+      model: 'outcome-studio-live-test-v1',
+      providerMode: 'LIVE_TEST',
+      environment: 'TEST',
+      safeContextPolicyKey: 'OUTCOME_STUDIO_PROVIDER_SAFE_CONTEXT_V1',
+      failurePosture: 'FAIL_CLOSED',
+    }
+    const providerAdapter = makeOutcomeStudioLiveProviderAdapter()
+    app.locals.outcomeStudioReasoningDeps = {
+      executionMode: 'LIVE_TEST',
+      providerDescriptor,
+      providerAdapter,
+    }
+    mockOutcomeStudioLiveTestReadiness(providerDescriptor)
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeOutputLabReadyRuntime()))
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+    mockRequestReadyOutcomeKnowledgePacks({ providerSafeContent: true })
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/messages/out_msg_existing_fixture/generate-response`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.body.error).toBeUndefined()
+    expect(res.status).toBe(200)
+    expect(providerAdapter).toHaveBeenCalledTimes(1)
+    expect(providerAdapter).toHaveBeenCalledWith({
+      providerContext: expect.objectContaining({
+        contractVersion: 'OUTCOME_STUDIO_PROVIDER_SAFE_CONTEXT_V1',
+        businessRequest: expect.objectContaining({
+          outputTypeKey: 'EXECUTIVE_BRIEF',
+          requestedOutputTypeKey: 'executive-brief',
+          workspaceType: 'OUTCOME',
+          instruction: expect.stringContaining('Customer request: Clarify the evidence behind the commercial value story.'),
+        }),
+        draftContext: { content: '' },
+        truthSummaries: expect.any(Array),
+        guidance: expect.objectContaining({
+          outputSchema: expect.arrayContaining([expect.any(String)]),
+          styleGuidance: expect.arrayContaining([expect.any(String)]),
+          validationCriteria: expect.arrayContaining([expect.any(String)]),
+        }),
+        safeguards: [
+          'CUSTOMER_LANGUAGE_ONLY',
+          'VERIFIED_BUSINESS_CONTEXT_ONLY',
+          'NO_INTERNAL_RUNTIME_TERMINOLOGY',
+          'NO_SECRETS_OR_PERSONAL_DATA',
+          'FAIL_CLOSED_ON_UNSAFE_CONTEXT',
+        ],
+      }),
+    })
+    const providerContext = providerAdapter.mock.calls[0][0].providerContext
+    expect(JSON.stringify(providerContext)).not.toMatch(/runtimeInstanceId|sessionId|messageId|versionId|contentHash|storageIdentity/i)
+    expect(OutcomeStudioReadinessPointer.findOne).toHaveBeenCalledTimes(3)
+    expect(GovernedReasoningExecution.prototype.save).toHaveBeenCalledTimes(1)
+    expect(GovernedRuntimeArtifact.prototype.save).toHaveBeenCalledTimes(1)
+    expect(OutcomeDraft.prototype.save).toHaveBeenCalledTimes(1)
+    expect(OutcomeDraftIteration.prototype.save).toHaveBeenCalledTimes(1)
+  })
+
+  test('Outcome Studio uses the message-level deliverable title through generation and approval', async () => {
+    app.locals.outcomeStudioReasoningDeps = {
+      executionMode: 'LEGACY',
+      providerAdapter: makeOutcomeStudioLiveProviderAdapter(),
+    }
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    const boardSummarySession = makeOutcomeSessionRecord({
+      requestedOutputTypeKey: 'board-summary',
+      requestedOutputTypeLabel: 'Board Summary',
+    })
+    const executiveBriefMessage = makeOutcomeMessageRecord({
+      requestedOutputTypeKey: 'executive-brief',
+      requestedOutputTypeLabel: 'Executive Brief',
+    })
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+    mockRequestReadyOutcomeKnowledgePacks()
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(boardSummarySession))
+    OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(executiveBriefMessage))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const generationRes = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/messages/out_msg_existing_fixture/generate-response`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(generationRes.status).toBe(200)
+    expect(generationRes.body.data.draft).toEqual(expect.objectContaining({
+      outputTypeKey: 'EXECUTIVE_BRIEF',
+      outputTypeCapabilityKey: 'executive-brief',
+      outputTypeLabel: 'Executive Brief',
+      title: 'Executive Brief Draft',
+    }))
+    expect(generationRes.body.data.draftIteration).toEqual(expect.objectContaining({
+      outputTypeKey: 'EXECUTIVE_BRIEF',
+      outputTypeCapabilityKey: 'executive-brief',
+      outputTypeLabel: 'Executive Brief',
+      title: 'Executive Brief Draft',
+      customerContent: expect.objectContaining({
+        sections: expect.arrayContaining([
+          expect.objectContaining({
+            key: 'draft-body',
+            label: 'Executive Brief Draft',
+          }),
+        ]),
+      }),
+    }))
+
+    const savedDraft = OutcomeDraft.prototype.save.mock.contexts[0]
+    const savedIteration = OutcomeDraftIteration.prototype.save.mock.contexts[0]
+    expect(savedDraft.title).toBe('Executive Brief Draft')
+    expect(savedIteration.title).toBe('Executive Brief Draft')
+    expect(savedIteration.customerContent.sections[0].label).toBe('Executive Brief Draft')
+
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(boardSummarySession))
+    OutcomeDraft.findOne.mockReturnValue(buildLeanQuery(savedDraft.toObject()))
+    OutcomeDraftIteration.findOne.mockReturnValue(buildLeanQuery(savedIteration.toObject()))
+
+    const approvalRes = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/drafts/${savedDraft.draftId}/approve`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(approvalRes.status).toBe(201)
+    expect(approvalRes.body.data.asset).toEqual(expect.objectContaining({
+      outputTypeKey: 'EXECUTIVE_BRIEF',
+      outputTypeCapabilityKey: 'executive-brief',
+      outputTypeLabel: 'Executive Brief',
+      title: 'Executive Brief',
+    }))
+    expect(approvalRes.body.data.assetVersion).toEqual(expect.objectContaining({
+      outputTypeKey: 'EXECUTIVE_BRIEF',
+      outputTypeCapabilityKey: 'executive-brief',
+      outputTypeLabel: 'Executive Brief',
+      title: 'Executive Brief',
+    }))
+    expect(OutcomeAsset.prototype.save.mock.contexts[0].title).toBe('Executive Brief')
+    expect(OutcomeAssetVersion.prototype.save.mock.contexts[0].title).toBe('Executive Brief')
+  })
+
   test('Outcome Studio response generation persists a governed assistant response and first draft iteration', async () => {
-    process.env.STORYLINEOS_GRR_PROVIDER_MODE = 'DETERMINISTIC'
+    app.locals.outcomeStudioReasoningDeps = {
+      executionMode: 'LEGACY',
+      providerAdapter: makeOutcomeStudioLiveProviderAdapter(),
+    }
     const runtimeInstance = makeOutputLabReadyRuntime()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
     FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
@@ -15684,55 +16257,19 @@ describe('Runtime Instance API', () => {
     expect(res.body.data).toEqual(expect.objectContaining({
       messageId: expect.stringMatching(/^out_msg_/),
       sessionId: 'out_sess_existing_fixture',
-      contractVersion: 'outcome-studio.v1',
-      phase: 'FOUNDATION_READINESS_ONLY',
       role: 'ASSISTANT',
       status: 'GENERATED',
       responseStatus: 'RESPONSE_GENERATED',
-      prompt: expect.stringContaining('# Executive Brief Draft'),
-      runtimeInstanceId: RUNTIME_INSTANCE_ID,
-      runtimeInstanceKey: 'value-narrative-439111',
-      runtimeType: 'VALUE_NARRATIVE',
-      frameworkKey: 'VMF',
-      packageKey: 'vmf-standard-2-3-1',
-      packageVersion: '2.3.1',
+      content: expect.stringContaining('# Executive Brief Draft'),
     }))
-    expect(res.body.data.prompt).toContain('## Situation')
-    expect(res.body.data.prompt).toContain('## Commercial Problem')
-    expect(res.body.data.prompt).toContain('required provider-context Knowledge Pack binding(s).')
-    expect(res.body.data.prompt).not.toContain('governed reasoning artefact')
-    expect(res.body.data.prompt).not.toContain('Evidence hash:')
-    expect(res.body.data.prompt).not.toContain('Raw message source Markdown must not leak')
-    expect(res.body.data.prompt).not.toContain('Raw message source JSON must not leak')
-    expect(res.body.data.sourceOutput).toEqual(expect.objectContaining({
-      outputAssetId: 'out_asset_outcome_studio_fixture',
-      outputTypeKey: 'EXECUTIVE_BRIEF',
-    }))
-    expect(res.body.data.sourceOutput).not.toHaveProperty('markdown')
-    expect(res.body.data.knowledgePackBinding).toEqual(expect.objectContaining({
-      status: 'READY',
-      activeCount: 5,
-      resolvedCount: 8,
-      requiredCount: 5,
-      lineage: expect.objectContaining({
-        activationIds: expect.arrayContaining([
-          'kpa-executive-brief-output-type-global',
-          'kpa-executive-brief-schema-global',
-          'kpa-executive-brief-style-global',
-        ]),
-        versionIds: expect.arrayContaining([
-          'kpv-executive-brief-output-type-1-0-0',
-          'kpv-executive-brief-schema-1-0-0',
-          'kpv-executive-brief-style-1-0-0',
-        ]),
-        contentHashes: expect.arrayContaining([
-          'sha256:executive-brief-output-type',
-          'sha256:executive-brief-schema',
-          'sha256:executive-brief-style',
-        ]),
-      }),
-    }))
-    expect(res.body.data.knowledgePackBinding).not.toHaveProperty('sourceBundle')
+    expect(res.body.data.content).toContain('## Situation')
+    expect(res.body.data.content).toContain('## Recommendation')
+    expect(res.body.data.content).not.toContain('provider')
+    expect(res.body.data.content).not.toContain('Knowledge Pack')
+    expect(res.body.data).not.toHaveProperty('prompt')
+    expect(res.body.data).not.toHaveProperty('sourceOutput')
+    expect(res.body.data).not.toHaveProperty('knowledgePackBinding')
+    expect(res.body.data).not.toHaveProperty('runtimeInstanceId')
     expect(res.body.data).not.toHaveProperty('asset')
     expect(res.body.data).not.toHaveProperty('assetVersion')
     expect(res.body.data.draft).toEqual(expect.objectContaining({
@@ -15742,38 +16279,19 @@ describe('Runtime Instance API', () => {
       outputTypeKey: 'EXECUTIVE_BRIEF',
       outputTypeLabel: 'Executive Brief',
       title: 'Executive Brief Draft',
-      sourceOutputAssetId: 'out_asset_outcome_studio_fixture',
       currentIterationId: expect.stringMatching(/^outcome_draft_iteration_/),
       currentIterationNumber: 1,
       approvedIterationId: '',
       approvedAssetVersionId: '',
-      warnings: expect.arrayContaining([
-        'KNOWLEDGE_PACK_CONTENT_NOT_EXPOSED_V1',
-      ]),
+      approvalAvailable: true,
+      warnings: ['Review the draft with the account owner before external use.'],
       limitations: expect.arrayContaining([
-        'Runtime State writes are not performed until a governed GRR runtime path is reviewed.',
-        'Deterministic provider output is non-production scaffolding unless replaced by a live provider adapter.',
-        'Governed Runtime Artefacts are not Certified Truth and require separate certification before truth reuse.',
+        'Do not strengthen claims beyond the available business information.',
+        'Generated drafts must be reviewed before their information is reused as an approved business source.',
       ]),
-      validationSummary: expect.objectContaining({
-        contractVersion: 'outcome-post-validation.v1',
-        validationId: expect.stringMatching(/^outcome_post_val_/),
-        validationScope: 'OUTCOME_DRAFT_ITERATION',
-        outcomeAssetId: '',
-        outcomeAssetVersionId: '',
+      contentReview: expect.objectContaining({
         status: 'PASS',
         result: 'ALLOW',
-        mode: 'FOUNDATION_STATIC_CHECKS',
-        contentIncludedInValidation: false,
-        rawPackContentIncluded: false,
-        manifestId: '',
-        manifestKey: '',
-        manifestVersion: '',
-        summary: expect.objectContaining({
-          totalChecks: 3,
-          passed: 3,
-          failed: 0,
-        }),
       }),
     }))
     expect(res.body.data.draft).not.toHaveProperty('customerContent')
@@ -15786,6 +16304,7 @@ describe('Runtime Instance API', () => {
       outputTypeKey: 'EXECUTIVE_BRIEF',
       title: 'Executive Brief Draft',
       contentAvailable: true,
+      approvalAvailable: true,
       customerContent: expect.objectContaining({
         markdown: expect.stringContaining('# Executive Brief Draft'),
         sections: expect.arrayContaining([
@@ -15795,38 +16314,14 @@ describe('Runtime Instance API', () => {
           }),
         ]),
       }),
-      validationSummary: expect.objectContaining({
-        validationId: res.body.data.draft.validationSummary.validationId,
-        validationScope: 'OUTCOME_DRAFT_ITERATION',
-        outcomeAssetId: '',
-        outcomeAssetVersionId: '',
+      contentReview: expect.objectContaining({
         status: 'PASS',
         result: 'ALLOW',
-        contentIncludedInValidation: false,
-        rawPackContentIncluded: false,
       }),
     }))
     expect(res.body.data.draftIteration.customerContent.markdown).not.toContain('governed reasoning artefact')
     expect(res.body.data.draftIteration.customerContent.markdown).not.toContain('Raw message source Markdown must not leak')
-    expect(res.body.data.draft.lineageSummary).toEqual(expect.objectContaining({
-      sourceOutputAssetId: 'out_asset_outcome_studio_fixture',
-      sourceOutputTypeKey: 'EXECUTIVE_BRIEF',
-      truthSignatureStatus: 'PROJECTED',
-      truthSignatureCurrentness: 'CURRENT',
-      parentVersionId: '',
-      grrExecutionId: expect.stringMatching(/^grr_exec_/),
-      grrRuntimeArtifactId: expect.stringMatching(/^grr_art_/),
-      grrProviderMode: 'DETERMINISTIC_TEST',
-      grrRuntimeStateWrites: expect.objectContaining({
-        status: 'NOT_WRITTEN',
-        reason: 'NO_REVIEWED_GRR_RUNTIME_PATH_V1',
-      }),
-      grrCertification: expect.objectContaining({
-        certifiedTruthOnly: true,
-        runtimeArtifactIsCertifiedTruth: false,
-        requiresSeparateCertificationBeforeTruthReuse: true,
-      }),
-    }))
+    expect(res.body.data.draft).not.toHaveProperty('lineageSummary')
     expect(OutcomeSession.findOne).toHaveBeenCalledWith({
       runtimeInstanceId: RUNTIME_INSTANCE_ID,
       sessionId: 'out_sess_existing_fixture',
@@ -15858,7 +16353,7 @@ describe('Runtime Instance API', () => {
       governedReasoning: expect.objectContaining({
         executionId: expect.stringMatching(/^grr_exec_/),
         runtimeArtifactId: expect.stringMatching(/^grr_art_/),
-        providerMode: 'DETERMINISTIC_TEST',
+        providerMode: 'LIVE_TEST',
         runtimeStateWriteStatus: 'NOT_WRITTEN',
         runtimeArtifactIsCertifiedTruth: false,
       }),
@@ -15899,19 +16394,20 @@ describe('Runtime Instance API', () => {
       governedReasoning: expect.objectContaining({
         executionId: expect.stringMatching(/^grr_exec_/),
         runtimeArtifactId: expect.stringMatching(/^grr_art_/),
-        providerMode: 'DETERMINISTIC_TEST',
+        providerMode: 'LIVE_TEST',
         runtimeStateWriteStatus: 'NOT_WRITTEN',
         runtimeArtifactIsCertifiedTruth: false,
       }),
     }))
     expect(savedOutcomeDraft.validationSummary).toEqual(expect.objectContaining({
-      validationId: res.body.data.draft.validationSummary.validationId,
+      contractVersion: 'outcome-post-validation.v2',
+      validationId: expect.stringMatching(/^outcome_post_val_/),
       validationScope: 'OUTCOME_DRAFT_ITERATION',
       outcomeAssetId: '',
       outcomeAssetVersionId: '',
       status: 'PASS',
       result: 'ALLOW',
-      contentIncludedInValidation: false,
+      contentIncludedInValidation: true,
       rawPackContentIncluded: false,
     }))
     expect(savedOutcomeDraftIteration.workspaceType).toBe('OUTCOME')
@@ -15924,13 +16420,13 @@ describe('Runtime Instance API', () => {
       markdown: expect.stringContaining('# Executive Brief Draft'),
     }))
     expect(savedOutcomeDraftIteration.validationSummary).toEqual(expect.objectContaining({
-      validationId: res.body.data.draft.validationSummary.validationId,
+      validationId: savedOutcomeDraft.validationSummary.validationId,
       validationScope: 'OUTCOME_DRAFT_ITERATION',
       outcomeAssetId: '',
       outcomeAssetVersionId: '',
       status: 'PASS',
       result: 'ALLOW',
-      contentIncludedInValidation: false,
+      contentIncludedInValidation: true,
       rawPackContentIncluded: false,
     }))
     expect(OutcomeAsset.prototype.save).not.toHaveBeenCalled()
@@ -15950,7 +16446,7 @@ describe('Runtime Instance API', () => {
       action: 'GOVERNED_REASONING_EXECUTED',
       resourceType: 'GovernedReasoningExecution',
       diff: expect.objectContaining({
-        providerMode: 'DETERMINISTIC_TEST',
+        providerMode: 'LIVE_TEST',
         outputTypeKey: 'EXECUTIVE_BRIEF',
       }),
     }))
@@ -15974,7 +16470,7 @@ describe('Runtime Instance API', () => {
         runtimeGraphRelationshipCount: 0,
         grrExecutionId: expect.stringMatching(/^grr_exec_/),
         grrRuntimeArtifactId: expect.stringMatching(/^grr_art_/),
-        grrProviderMode: 'DETERMINISTIC_TEST',
+        grrProviderMode: 'LIVE_TEST',
       }),
     }))
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
@@ -15994,10 +16490,10 @@ describe('Runtime Instance API', () => {
         draftIterationId: res.body.data.draftIteration.draftIterationId,
         iterationNumber: 1,
         postValidation: expect.objectContaining({
-          validationId: res.body.data.draft.validationSummary.validationId,
+          validationId: savedOutcomeDraft.validationSummary.validationId,
           status: 'PASS',
           result: 'ALLOW',
-          contentIncludedInValidation: false,
+          contentIncludedInValidation: true,
           rawPackContentIncluded: false,
         }),
         generatedBodyAvailable: true,
@@ -16005,7 +16501,7 @@ describe('Runtime Instance API', () => {
         runtimeGraphRelationshipCount: 0,
         grrExecutionId: expect.stringMatching(/^grr_exec_/),
         grrRuntimeArtifactId: expect.stringMatching(/^grr_art_/),
-        grrProviderMode: 'DETERMINISTIC_TEST',
+        grrProviderMode: 'LIVE_TEST',
         runtimeArtifactIsCertifiedTruth: false,
       }),
     }))
@@ -16015,7 +16511,10 @@ describe('Runtime Instance API', () => {
   })
 
   test('Outcome Studio response generation refines the current conversation draft without creating an asset version', async () => {
-    process.env.STORYLINEOS_GRR_PROVIDER_MODE = 'DETERMINISTIC'
+    app.locals.outcomeStudioReasoningDeps = {
+      executionMode: 'LEGACY',
+      providerAdapter: makeOutcomeStudioLiveProviderAdapter(),
+    }
     const runtimeInstance = makeOutputLabReadyRuntime()
     const activeDraft = makeOutcomeDraftRecord()
     const currentIteration = makeOutcomeDraftIterationRecord()
@@ -16036,9 +16535,9 @@ describe('Runtime Instance API', () => {
       .send({})
 
     expect(res.status).toBe(200)
-    expect(res.body.data.prompt).toContain('The existing board narrative is grounded in certified runtime truth.')
-    expect(res.body.data.prompt).toContain('## Draft Refinement Update')
-    expect(res.body.data.prompt).toContain('Requested change: Make it shorter and more board-ready.')
+    expect(res.body.data.content).toContain('# Executive Brief Draft')
+    expect(res.body.data.content).toContain('## Recommendation')
+    expect(res.body.data.content).not.toContain('runtime')
     expect(res.body.data).not.toHaveProperty('asset')
     expect(res.body.data).not.toHaveProperty('assetVersion')
     expect(res.body.data.draft).toEqual(expect.objectContaining({
@@ -16048,26 +16547,10 @@ describe('Runtime Instance API', () => {
       currentIterationNumber: 2,
       approvedIterationId: '',
       approvedAssetVersionId: '',
-      lineageSummary: expect.objectContaining({
-        draftRefinement: expect.objectContaining({
-          operation: 'DRAFT_REFINEMENT',
-          mode: 'FULL_DRAFT',
-          intentType: 'CONTENT_REDUCTION',
-          sourceIterationId: currentIteration.draftIterationId,
-          sourceIterationNumber: 1,
-          preservedPreviousContent: true,
-          compare: expect.objectContaining({
-            available: true,
-            fromIterationId: currentIteration.draftIterationId,
-            toIterationId: expect.stringMatching(/^outcome_draft_iteration_/),
-          }),
-          revert: expect.objectContaining({
-            available: true,
-            targetIterationId: currentIteration.draftIterationId,
-          }),
-        }),
-      }),
+      approvalAvailable: true,
+      contentReview: expect.objectContaining({ status: 'PASS', result: 'ALLOW' }),
     }))
+    expect(res.body.data.draft).not.toHaveProperty('lineageSummary')
     expect(res.body.data.draftIteration).toEqual(expect.objectContaining({
       draftId: activeDraft.draftId,
       previousIterationId: currentIteration.draftIterationId,
@@ -16076,22 +16559,9 @@ describe('Runtime Instance API', () => {
       status: 'CURRENT',
       contentAvailable: true,
       customerContent: expect.objectContaining({
-        markdown: expect.stringContaining('## Draft Refinement Update'),
-        metadata: expect.objectContaining({
-          draftOperation: 'DRAFT_REFINEMENT',
-          refinementMode: 'FULL_DRAFT',
-          sourceIterationId: currentIteration.draftIterationId,
-          compareAvailable: true,
-          revertAvailable: true,
-        }),
+        markdown: expect.stringContaining('## Recommendation'),
       }),
-      validationSummary: expect.objectContaining({
-        validationScope: 'OUTCOME_DRAFT_ITERATION',
-        outcomeAssetId: '',
-        outcomeAssetVersionId: '',
-        status: 'PASS',
-        result: 'ALLOW',
-      }),
+      contentReview: expect.objectContaining({ status: 'PASS', result: 'ALLOW' }),
     }))
     expect(OutcomeDraft.findOne).toHaveBeenCalledWith({
       runtimeInstanceId: RUNTIME_INSTANCE_ID,
@@ -16111,7 +16581,7 @@ describe('Runtime Instance API', () => {
     expect(savedOutcomeDraftIteration.previousIterationId).toBe(currentIteration.draftIterationId)
     expect(savedOutcomeDraftIteration.iterationNumber).toBe(2)
     expect(savedOutcomeDraftIteration.iterationType).toBe('REFINEMENT')
-    expect(savedOutcomeDraftIteration.customerContent.markdown).toContain('The existing board narrative is grounded in certified runtime truth.')
+    expect(savedOutcomeDraftIteration.customerContent.markdown).toContain('## Recommendation')
     expect(OutcomeDraftIteration.updateMany).toHaveBeenCalledWith(
       {
         runtimeInstanceId: RUNTIME_INSTANCE_ID,
@@ -16125,7 +16595,11 @@ describe('Runtime Instance API', () => {
       },
     )
     expect(OutcomeDraft.updateOne).toHaveBeenCalledWith(
-      { _id: activeDraft._id },
+      {
+        _id: activeDraft._id,
+        status: 'ACTIVE',
+        currentIterationId: currentIteration.draftIterationId,
+      },
       {
         $set: expect.objectContaining({
           currentIterationId: res.body.data.draftIteration.draftIterationId,
@@ -16149,7 +16623,7 @@ describe('Runtime Instance API', () => {
     const savedGrrExecution = GovernedReasoningExecution.prototype.save.mock.contexts[0]
     expect(savedGrrExecution.executionIntent).toContain('Draft operation: refinement on draft outcome_draft_existing_fixture.')
     expect(savedGrrExecution.executionIntent).toContain('Current conversation draft content for refinement:')
-    expect(savedGrrExecution.executionIntent).toContain('The existing board narrative is grounded in certified runtime truth.')
+    expect(savedGrrExecution.executionIntent).toContain('The existing board narrative is grounded in verified business information.')
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'OUTCOME_RESPONSE_GENERATED',
       diff: expect.objectContaining({
@@ -16188,8 +16662,66 @@ describe('Runtime Instance API', () => {
     }))
   })
 
+  test('Outcome Studio draft refinement loses its active-pointer claim without persisting an iteration', async () => {
+    app.locals.outcomeStudioReasoningDeps = {
+      executionMode: 'LEGACY',
+      providerAdapter: makeOutcomeStudioLiveProviderAdapter(),
+    }
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    const activeDraft = makeOutcomeDraftRecord()
+    const currentIteration = makeOutcomeDraftIterationRecord()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+    mockRequestReadyOutcomeKnowledgePacks()
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord({
+      prompt: 'Make it shorter and more board-ready.',
+    })))
+    OutcomeDraft.findOne.mockReturnValue(buildLeanQuery(activeDraft))
+    OutcomeDraftIteration.findOne.mockReturnValue(buildLeanQuery(currentIteration))
+    OutcomeDraft.updateOne.mockResolvedValueOnce({ matchedCount: 0, modifiedCount: 0 })
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/messages/out_msg_existing_fixture/generate-response`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(OutcomeDraft.updateOne).toHaveBeenCalledWith(
+      {
+        _id: activeDraft._id,
+        status: 'ACTIVE',
+        currentIterationId: currentIteration.draftIterationId,
+      },
+      expect.objectContaining({
+        $set: expect.objectContaining({
+          currentIterationId: expect.stringMatching(/^outcome_draft_iteration_/),
+        }),
+      }),
+    )
+    expect(OutcomeDraftIteration.updateMany).not.toHaveBeenCalled()
+    expect(OutcomeDraftIteration.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeDraft.deleteOne).not.toHaveBeenCalled()
+    expect(OutcomeMessage.deleteOne).toHaveBeenCalledWith({ _id: expect.anything() })
+    expect(OutcomeMessage.updateOne).toHaveBeenLastCalledWith(
+      { _id: 'c47f1f77bcf86cd799439111' },
+      { $set: { responseStatus: 'PENDING_RESPONSE' } },
+    )
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+      action: 'OUTCOME_RESPONSE_GENERATED',
+    }))
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+      action: 'OUTCOME_DRAFT_REFINED',
+    }))
+  })
+
   test('Outcome Studio draft refinement rolls back draft pointers when refinement audit persistence fails', async () => {
-    process.env.STORYLINEOS_GRR_PROVIDER_MODE = 'DETERMINISTIC'
+    app.locals.outcomeStudioReasoningDeps = {
+      executionMode: 'LEGACY',
+      providerAdapter: makeOutcomeStudioLiveProviderAdapter(),
+    }
     const runtimeInstance = makeOutputLabReadyRuntime()
     const activeDraft = makeOutcomeDraftRecord()
     const currentIteration = makeOutcomeDraftIterationRecord()
@@ -16216,19 +16748,9 @@ describe('Runtime Instance API', () => {
       .send({})
 
     expect(res.status).toBe(500)
-    expect(res.body.error.code).toBe('OUTCOME_DRAFT_REFINEMENT_AUDIT_FAILED')
-    expect(res.body.error.details.reason).toBe('OUTCOME_DRAFT_REFINEMENT_AUDIT_FAILED')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      sessionId: 'out_sess_existing_fixture',
-      messageId: 'out_msg_existing_fixture',
-      responseMessageId: expect.stringMatching(/^out_msg_/),
-      draftId: activeDraft.draftId,
-      draftIterationId: expect.stringMatching(/^outcome_draft_iteration_/),
-      previousDraftIterationId: currentIteration.draftIterationId,
-    }))
-    expect(res.body.error.details.auditError).toEqual(expect.objectContaining({
-      message: 'draft refinement audit unavailable',
-    }))
+    expect(res.body.error.code).toBe('OUTCOME_ACTION_FAILED')
+    expectCustomerSafeOutcomeError(res)
+
     expect(OutcomeDraft.prototype.save).not.toHaveBeenCalled()
     expect(OutcomeDraftIteration.prototype.save).toHaveBeenCalledTimes(1)
     expect(OutcomeDraftIteration.deleteOne).toHaveBeenCalledWith({
@@ -16270,7 +16792,11 @@ describe('Runtime Instance API', () => {
       },
     )
     expect(OutcomeDraft.updateOne).toHaveBeenCalledWith(
-      { _id: activeDraft._id },
+      {
+        _id: activeDraft._id,
+        status: 'ACTIVE',
+        currentIterationId: currentIteration.draftIterationId,
+      },
       {
         $set: expect.objectContaining({
           currentIterationId: expect.stringMatching(/^outcome_draft_iteration_/),
@@ -16279,7 +16805,11 @@ describe('Runtime Instance API', () => {
       },
     )
     expect(OutcomeDraft.updateOne).toHaveBeenCalledWith(
-      { _id: activeDraft._id },
+      {
+        _id: activeDraft._id,
+        status: 'ACTIVE',
+        currentIterationId: expect.stringMatching(/^outcome_draft_iteration_/),
+      },
       {
         $set: expect.objectContaining({
           currentIterationId: currentIteration.draftIterationId,
@@ -16306,7 +16836,7 @@ describe('Runtime Instance API', () => {
     }))
   })
 
-  test('Outcome Studio response generation falls back to governed scaffold in production when GRR is not explicitly enabled', async () => {
+  test('Outcome Studio response generation fails closed in production when drafting is not enabled', async () => {
     const previousNodeEnv = process.env.NODE_ENV
     const previousOutcomeGrrFlag = process.env.STORYLINEOS_OUTCOME_STUDIO_GRR_ENABLED
     const previousProviderMode = process.env.STORYLINEOS_GRR_PROVIDER_MODE
@@ -16327,41 +16857,25 @@ describe('Runtime Instance API', () => {
         .set('Authorization', `Bearer ${token}`)
         .send({})
 
-      expect(res.status).toBe(200)
-      expect(res.body.data).toEqual(expect.objectContaining({
-        role: 'ASSISTANT',
-        status: 'GENERATED',
-        responseStatus: 'RESPONSE_GENERATED',
-        prompt: expect.stringContaining('# Executive Brief Draft'),
+      expect(res.status).toBe(409)
+      expect(res.body.error).toEqual(expect.objectContaining({
+        code: 'DRAFTING_SERVICE_UNAVAILABLE',
+        message: 'Draft generation is temporarily unavailable. No response or draft was created.',
       }))
-      expect(res.body.data.prompt).toContain('working Executive Brief draft')
-      expect(res.body.data.prompt).not.toContain('governed reasoning artefact')
-      expect(res.body.data).not.toHaveProperty('asset')
-      expect(res.body.data).not.toHaveProperty('assetVersion')
-      expect(res.body.data.draft).toEqual(expect.objectContaining({
-        status: 'ACTIVE',
-        outputTypeKey: 'EXECUTIVE_BRIEF',
-        lineageSummary: expect.objectContaining({
-          grrExecutionId: '',
-          grrRuntimeArtifactId: '',
-          grrProviderMode: '',
-        }),
-      }))
-      expect(res.body.data.draftIteration).toEqual(expect.objectContaining({
-        status: 'CURRENT',
-        iterationType: 'INITIAL',
-        contentAvailable: true,
-      }))
+      expectCustomerSafeOutcomeError(res)
       expect(GovernedReasoningExecution.findOne).not.toHaveBeenCalled()
       expect(GovernedReasoningExecution.prototype.save).not.toHaveBeenCalled()
       expect(GovernedRuntimeArtifact.prototype.save).not.toHaveBeenCalled()
+      expect(OutcomeMessage.prototype.save).not.toHaveBeenCalled()
+      expect(OutcomeDraft.prototype.save).not.toHaveBeenCalled()
+      expect(OutcomeDraftIteration.prototype.save).not.toHaveBeenCalled()
       expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
         action: 'GOVERNED_REASONING_EXECUTED',
       }))
-      expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
         action: 'OUTCOME_RESPONSE_GENERATED',
       }))
-      expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
         action: 'OUTCOME_DRAFT_GENERATED',
       }))
       expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
@@ -16382,6 +16896,53 @@ describe('Runtime Instance API', () => {
     }
   })
 
+  test('Outcome Studio response generation blocks deterministic output without customer persistence or success audits', async () => {
+    process.env.STORYLINEOS_GRR_PROVIDER_MODE = 'DETERMINISTIC'
+    const ignoredKnowledgeOverride = jest.fn()
+    app.locals.outcomeStudioReasoningDeps = {
+      executionMode: 'LEGACY',
+      resolveKnowledgeBinding: ignoredKnowledgeOverride,
+    }
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+    mockRequestReadyOutcomeKnowledgePacks()
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/messages/out_msg_existing_fixture/generate-response`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(409)
+    expect(res.body.error).toEqual(expect.objectContaining({
+      code: 'DRAFTING_SERVICE_UNAVAILABLE',
+    }))
+    expectCustomerSafeOutcomeError(res)
+    expect(ignoredKnowledgeOverride).not.toHaveBeenCalled()
+    expect(GovernedReasoningExecution.prototype.save).not.toHaveBeenCalled()
+    expect(GovernedRuntimeArtifact.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeMessage.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeDraft.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeDraftIteration.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeAsset.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeAssetVersion.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+      action: 'GOVERNED_REASONING_EXECUTED',
+    }))
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+      action: 'OUTCOME_RESPONSE_GENERATED',
+    }))
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+      action: 'OUTCOME_DRAFT_GENERATED',
+    }))
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+      action: 'ASSET_GENERATED',
+    }))
+  })
+
   test('Outcome Studio response generation rejects prompts that already have a response', async () => {
     const runtimeInstance = makeOutputLabReadyRuntime()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
@@ -16398,17 +16959,7 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(409)
     expect(res.body.error.code).toBe('CONFLICT')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      reason: 'OUTCOME_RESPONSE_GENERATION_BLOCKED',
-      sessionId: 'out_sess_existing_fixture',
-      messageId: 'out_msg_existing_fixture',
-      responseStatus: 'RESPONSE_GENERATED',
-      blockerReason: 'OUTCOME_RESPONSE_ALREADY_GENERATED',
-      safetyGate: expect.objectContaining({
-        code: 'RESPONSE_GENERATION_ENGINE',
-        status: 'BLOCKED',
-      }),
-    }))
+    expectCustomerSafeOutcomeError(res)
     expect(OutcomeMessage.prototype.save).not.toHaveBeenCalled()
     expect(OutcomeMessage.updateOne).not.toHaveBeenCalled()
     expect(OutcomeMessage.deleteOne).not.toHaveBeenCalled()
@@ -16435,17 +16986,7 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(409)
     expect(res.body.error.code).toBe('CONFLICT')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      reason: 'OUTCOME_REQUEST_RESOLUTION_BLOCKED',
-      sessionId: 'out_sess_existing_fixture',
-      messageId: 'out_msg_existing_fixture',
-      intentType: 'REFINEMENT_REQUEST',
-      blockers: expect.arrayContaining([
-        expect.objectContaining({
-          code: 'DRAFT_REQUIRED',
-        }),
-      ]),
-    }))
+    expectCustomerSafeOutcomeError(res)
     expect(OutcomeMessage.prototype.save).not.toHaveBeenCalled()
     expect(OutcomeMessage.updateOne).not.toHaveBeenCalled()
     expect(OutcomeAsset.prototype.save).not.toHaveBeenCalled()
@@ -16473,8 +17014,8 @@ describe('Runtime Instance API', () => {
       .send({})
 
     expect(res.status).toBe(409)
-    expect(res.body.error.code).toBe('GRR_PROVIDER_UNAVAILABLE')
-    expect(res.body.error.details.reason).toBe('PROVIDER_UNAVAILABLE')
+    expect(res.body.error.code).toBe('DRAFTING_SERVICE_UNAVAILABLE')
+    expectCustomerSafeOutcomeError(res)
     expect(OutcomeMessage.prototype.save).not.toHaveBeenCalled()
     expect(OutcomeMessage.updateOne).not.toHaveBeenCalled()
     expect(OutcomeMessage.deleteOne).not.toHaveBeenCalled()
@@ -16497,8 +17038,9 @@ describe('Runtime Instance API', () => {
   })
 
   test('Outcome Studio response generation blocks before provider and persistence when a required schema pack is missing', async () => {
-    process.env.STORYLINEOS_GRR_PROVIDER_MODE = 'DETERMINISTIC'
     const runtimeInstance = makeOutputLabReadyRuntime()
+    const providerAdapter = jest.fn()
+    app.locals.outcomeStudioReasoningDeps = { executionMode: 'LEGACY', providerAdapter }
     const activations = makeRequestReadyOutcomeKnowledgePackActivations()
       .filter((activation) => activation.capabilityKey !== 'executive-brief-schema')
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
@@ -16517,28 +17059,20 @@ describe('Runtime Instance API', () => {
       .send({})
 
     expect(res.status).toBe(409)
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      reason: 'OUTCOME_RESPONSE_GENERATION_BLOCKED',
-      blockerReason: 'KNOWLEDGE_PACK_RESOLUTION_BLOCKED',
-      resolutionStatus: 'BLOCKED',
-      missingDependencies: expect.arrayContaining([
-        expect.objectContaining({
-          requirement: 'REQUIRED',
-          knowledgeLayer: 'OUTPUT_SCHEMA',
-        }),
-      ]),
-    }))
+    expectCustomerSafeOutcomeError(res)
     expect(GovernedReasoningExecution.prototype.save).not.toHaveBeenCalled()
     expect(GovernedRuntimeArtifact.prototype.save).not.toHaveBeenCalled()
     expect(OutcomeMessage.prototype.save).not.toHaveBeenCalled()
     expect(OutcomeDraft.prototype.save).not.toHaveBeenCalled()
     expect(OutcomeDraftIteration.prototype.save).not.toHaveBeenCalled()
+    expect(providerAdapter).not.toHaveBeenCalled()
     expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 
   test('Outcome Studio response generation blocks before provider and persistence when style resolution is ambiguous', async () => {
-    process.env.STORYLINEOS_GRR_PROVIDER_MODE = 'DETERMINISTIC'
     const runtimeInstance = makeOutputLabReadyRuntime()
+    const providerAdapter = jest.fn()
+    app.locals.outcomeStudioReasoningDeps = { executionMode: 'LEGACY', providerAdapter }
     const activations = [
       ...makeRequestReadyOutcomeKnowledgePackActivations(),
       makeOutcomeKnowledgePackActivation({
@@ -16566,27 +17100,21 @@ describe('Runtime Instance API', () => {
       .send({})
 
     expect(res.status).toBe(409)
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      reason: 'OUTCOME_RESPONSE_GENERATION_BLOCKED',
-      blockerReason: 'KNOWLEDGE_PACK_RESOLUTION_AMBIGUOUS',
-      resolutionStatus: 'AMBIGUOUS',
-      ambiguousSelectors: expect.arrayContaining([
-        expect.objectContaining({
-          knowledgeLayer: 'STYLE',
-          capabilityKey: 'executive-brief-style',
-        }),
-      ]),
-    }))
+    expectCustomerSafeOutcomeError(res)
     expect(GovernedReasoningExecution.prototype.save).not.toHaveBeenCalled()
     expect(GovernedRuntimeArtifact.prototype.save).not.toHaveBeenCalled()
     expect(OutcomeMessage.prototype.save).not.toHaveBeenCalled()
     expect(OutcomeDraft.prototype.save).not.toHaveBeenCalled()
     expect(OutcomeDraftIteration.prototype.save).not.toHaveBeenCalled()
+    expect(providerAdapter).not.toHaveBeenCalled()
     expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 
   test('Outcome Studio response generation rolls back the generated response when audit persistence fails', async () => {
-    process.env.STORYLINEOS_GRR_PROVIDER_MODE = 'DETERMINISTIC'
+    app.locals.outcomeStudioReasoningDeps = {
+      executionMode: 'LEGACY',
+      providerAdapter: makeOutcomeStudioLiveProviderAdapter(),
+    }
     const runtimeInstance = makeOutputLabReadyRuntime()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
     FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
@@ -16607,18 +17135,9 @@ describe('Runtime Instance API', () => {
       .send({})
 
     expect(res.status).toBe(500)
-    expect(res.body.error.code).toBe('OUTCOME_MESSAGE_AUDIT_FAILED')
-    expect(res.body.error.details.reason).toBe('OUTCOME_MESSAGE_AUDIT_FAILED')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      sessionId: 'out_sess_existing_fixture',
-      messageId: 'out_msg_existing_fixture',
-      responseMessageId: expect.stringMatching(/^out_msg_/),
-      draftId: expect.stringMatching(/^outcome_draft_/),
-      draftIterationId: expect.stringMatching(/^outcome_draft_iteration_/),
-    }))
-    expect(res.body.error.details.auditError).toEqual(expect.objectContaining({
-      message: 'response audit unavailable',
-    }))
+    expect(res.body.error.code).toBe('OUTCOME_ACTION_FAILED')
+    expectCustomerSafeOutcomeError(res)
+
     expect(OutcomeMessage.prototype.save).toHaveBeenCalledTimes(1)
     expect(OutcomeDraft.prototype.save).toHaveBeenCalledTimes(1)
     expect(OutcomeDraftIteration.prototype.save).toHaveBeenCalledTimes(1)
@@ -16650,7 +17169,10 @@ describe('Runtime Instance API', () => {
   })
 
   test('Outcome Studio response generation rolls back when draft iteration persistence fails', async () => {
-    process.env.STORYLINEOS_GRR_PROVIDER_MODE = 'DETERMINISTIC'
+    app.locals.outcomeStudioReasoningDeps = {
+      executionMode: 'LEGACY',
+      providerAdapter: makeOutcomeStudioLiveProviderAdapter(),
+    }
     const runtimeInstance = makeOutputLabReadyRuntime()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
     FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
@@ -16697,7 +17219,10 @@ describe('Runtime Instance API', () => {
   })
 
   test('Outcome Studio response generation rolls back the generated draft when draft audit persistence fails', async () => {
-    process.env.STORYLINEOS_GRR_PROVIDER_MODE = 'DETERMINISTIC'
+    app.locals.outcomeStudioReasoningDeps = {
+      executionMode: 'LEGACY',
+      providerAdapter: makeOutcomeStudioLiveProviderAdapter(),
+    }
     const runtimeInstance = makeOutputLabReadyRuntime()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
     FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
@@ -16718,18 +17243,9 @@ describe('Runtime Instance API', () => {
       .send({})
 
     expect(res.status).toBe(500)
-    expect(res.body.error.code).toBe('OUTCOME_DRAFT_GENERATION_AUDIT_FAILED')
-    expect(res.body.error.details.reason).toBe('OUTCOME_DRAFT_GENERATION_AUDIT_FAILED')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      sessionId: 'out_sess_existing_fixture',
-      messageId: 'out_msg_existing_fixture',
-      responseMessageId: expect.stringMatching(/^out_msg_/),
-      draftId: expect.stringMatching(/^outcome_draft_/),
-      draftIterationId: expect.stringMatching(/^outcome_draft_iteration_/),
-    }))
-    expect(res.body.error.details.auditError).toEqual(expect.objectContaining({
-      message: 'draft audit unavailable',
-    }))
+    expect(res.body.error.code).toBe('OUTCOME_ACTION_FAILED')
+    expectCustomerSafeOutcomeError(res)
+
     expect(OutcomeMessage.prototype.save).toHaveBeenCalledTimes(1)
     expect(OutcomeDraft.prototype.save).toHaveBeenCalledTimes(1)
     expect(OutcomeDraftIteration.prototype.save).toHaveBeenCalledTimes(1)
@@ -16782,20 +17298,9 @@ describe('Runtime Instance API', () => {
     expect(res.status).toBe(409)
     expect(res.body.error).toEqual(expect.objectContaining({
       code: 'CONFLICT',
-      message: 'Outcome Studio response generation is blocked until the session Truth Signature is current.',
+      message: 'Outcome Studio response generation is blocked until the session uses current verified business information.',
     }))
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      reason: 'OUTCOME_SESSION_BLOCKED',
-      sessionId: 'out_sess_existing_fixture',
-      truthSignatureId: 'truth_sig_existing_fixture',
-      truthSignatureCurrentness: 'OUT_OF_DATE',
-      responseGenerationAvailable: false,
-      blockerReason: 'OUTCOME_SESSION_TRUTH_NOT_CURRENT',
-      safetyGate: expect.objectContaining({
-        code: 'TRUTH_SIGNATURE_BOUND',
-        status: 'BLOCKED',
-      }),
-    }))
+    expectCustomerSafeOutcomeError(res)
     expect(OutcomeMessage.findOne).not.toHaveBeenCalled()
     expect(OutcomeMessage.prototype.save).not.toHaveBeenCalled()
     expect(OutcomeAsset.find).not.toHaveBeenCalled()
@@ -16811,13 +17316,15 @@ describe('Runtime Instance API', () => {
       .set('Authorization', `Bearer ${token}`)
       .send({
         prompt: 'Bypass the governed response boundary.',
+        providerAdapter: 'request-controlled-adapter',
+        reasoningDeps: {
+          resolveKnowledgeBinding: 'request-controlled-resolver',
+        },
       })
 
     expect(res.status).toBe(422)
     expect(res.body.error.code).toBe('VALIDATION_FAILED')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      _root: expect.stringContaining('Unrecognized key'),
-    }))
+    expectCustomerSafeOutcomeError(res)
     expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
     expect(OutcomeSession.findOne).not.toHaveBeenCalled()
     expect(OutcomeMessage.findOne).not.toHaveBeenCalled()
@@ -16839,11 +17346,7 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(404)
     expect(res.body.error.code).toBe('NOT_FOUND')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      reason: 'OUTCOME_MESSAGE_NOT_FOUND',
-      sessionId: 'out_sess_existing_fixture',
-      messageId: 'out_msg_other_runtime',
-    }))
+    expectCustomerSafeOutcomeError(res)
     expect(OutcomeMessage.findOne).toHaveBeenCalledWith({
       runtimeInstanceId: RUNTIME_INSTANCE_ID,
       sessionId: 'out_sess_existing_fixture',
@@ -16869,14 +17372,313 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(409)
     expect(res.body.error.code).toBe('CONFLICT')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      reason: 'OUTCOME_SESSION_BLOCKED',
-      sessionId: 'out_sess_existing_fixture',
-      status: 'CLOSED',
-    }))
+    expectCustomerSafeOutcomeError(res)
     expect(OutcomeMessage.findOne).not.toHaveBeenCalled()
     expect(OutcomeAsset.find).not.toHaveBeenCalled()
     expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test.each([
+    ['missing expectedUpdatedAt', {}],
+    ['invalid expectedUpdatedAt', { expectedUpdatedAt: 'not-a-date' }],
+    ['unknown fields', {
+      expectedUpdatedAt: '2026-06-15T11:15:00.000Z',
+      deleteIterations: true,
+    }],
+  ])('Outcome Studio draft discard rejects %s before runtime lookup', async (_label, body) => {
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/drafts/outcome_draft_existing_fixture/discard`)
+      .set('Authorization', `Bearer ${token}`)
+      .send(body)
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
+    expect(OutcomeSession.findOne).not.toHaveBeenCalled()
+    expect(OutcomeDraft.findOne).not.toHaveBeenCalled()
+    expect(OutcomeDraft.updateOne).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('Outcome Studio draft discard requires runtime update permission before session or draft lookup', async () => {
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeOutputLabReadyRuntime()))
+    const token = await getAccessTokenForUser(makeRegularUser())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/drafts/outcome_draft_existing_fixture/discard`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-06-15T11:15:00.000Z' })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('FORBIDDEN')
+    expect(OutcomeSession.findOne).not.toHaveBeenCalled()
+    expect(OutcomeDraft.findOne).not.toHaveBeenCalled()
+    expect(OutcomeDraft.updateOne).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('Outcome Studio draft discard retains iteration lineage and writes a governed audit', async () => {
+    const activeDraft = makeOutcomeDraftRecord()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeOutputLabReadyRuntime()))
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    OutcomeDraft.findOne.mockReturnValue(buildLeanQuery(activeDraft))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/drafts/${activeDraft.draftId}/discard`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: activeDraft.updatedAt })
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.draft).toEqual(expect.objectContaining({
+      draftId: activeDraft.draftId,
+      sessionId: activeDraft.sessionId,
+      status: 'DISCARDED',
+      currentIterationId: activeDraft.currentIterationId,
+      currentIterationNumber: activeDraft.currentIterationNumber,
+      approvedIterationId: activeDraft.approvedIterationId,
+      approvedAssetVersionId: activeDraft.approvedAssetVersionId,
+      discardedAt: expect.any(String),
+    }))
+    expect(res.body.data.draft).not.toHaveProperty('discardedBy')
+    expect(OutcomeDraft.updateOne).toHaveBeenCalledWith(
+      {
+        _id: activeDraft._id,
+        status: 'ACTIVE',
+        updatedAt: new Date(activeDraft.updatedAt),
+        currentIterationId: activeDraft.currentIterationId,
+      },
+      {
+        $set: expect.objectContaining({
+          status: 'DISCARDED',
+          discardedAt: expect.any(Date),
+          discardedBy: CUSTOMER_ADMIN_ID,
+          updatedAt: expect.any(Date),
+        }),
+      },
+    )
+    expect(OutcomeDraftIteration.updateMany).not.toHaveBeenCalled()
+    expect(OutcomeDraftIteration.deleteOne).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'OUTCOME_DRAFT_DISCARDED',
+      resourceType: 'OutcomeDraft',
+      resourceId: activeDraft._id,
+      scope: expect.objectContaining({
+        outcomeSessionId: activeDraft.sessionId,
+        outcomeDraftId: activeDraft.draftId,
+        outcomeDraftIterationId: activeDraft.currentIterationId,
+      }),
+      diff: expect.objectContaining({
+        draftId: activeDraft.draftId,
+        retainedIterationId: activeDraft.currentIterationId,
+        previousDraftStatus: 'ACTIVE',
+        nextDraftStatus: 'DISCARDED',
+        discardedAt: expect.any(String),
+      }),
+    }))
+  })
+
+  test('Outcome Studio draft discard returns not found for a missing runtime-scoped draft', async () => {
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeOutputLabReadyRuntime()))
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    OutcomeDraft.findOne.mockReturnValue(buildLeanQuery(null))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/drafts/missing-draft/discard`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-06-15T11:15:00.000Z' })
+
+    expect(res.status).toBe(404)
+    expect(res.body.error.code).toBe('NOT_FOUND')
+    expect(OutcomeDraft.updateOne).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('Outcome Studio draft discard blocks an inactive session before draft lookup', async () => {
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeOutputLabReadyRuntime()))
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord({ status: 'CLOSED' })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/drafts/outcome_draft_existing_fixture/discard`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: '2026-06-15T11:15:00.000Z' })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(OutcomeDraft.findOne).not.toHaveBeenCalled()
+    expect(OutcomeDraft.updateOne).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test.each([
+    ['non-active draft', makeOutcomeDraftRecord({ status: 'APPROVED' }), '2026-06-15T11:15:00.000Z'],
+    ['stale draft', makeOutcomeDraftRecord(), '2026-06-15T11:14:00.000Z'],
+  ])('Outcome Studio draft discard blocks a %s without persistence', async (_label, draft, expectedUpdatedAt) => {
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeOutputLabReadyRuntime()))
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    OutcomeDraft.findOne.mockReturnValue(buildLeanQuery(draft))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/drafts/${draft.draftId}/discard`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(OutcomeDraft.updateOne).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('Outcome Studio draft discard blocks a lost conditional claim', async () => {
+    const activeDraft = makeOutcomeDraftRecord()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeOutputLabReadyRuntime()))
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    OutcomeDraft.findOne.mockReturnValue(buildLeanQuery(activeDraft))
+    OutcomeDraft.updateOne.mockResolvedValueOnce({ matchedCount: 0, modifiedCount: 0 })
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/drafts/${activeDraft.draftId}/discard`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: activeDraft.updatedAt })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(OutcomeDraft.updateOne).toHaveBeenCalledTimes(1)
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('Outcome Studio draft discard fails closed and attempts compensation when audit persistence fails', async () => {
+    const activeDraft = makeOutcomeDraftRecord()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeOutputLabReadyRuntime()))
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    OutcomeDraft.findOne.mockReturnValue(buildLeanQuery(activeDraft))
+    OutcomeDraft.updateOne
+      .mockResolvedValueOnce({ matchedCount: 1, modifiedCount: 1 })
+      .mockResolvedValueOnce({ matchedCount: 1, modifiedCount: 0 })
+    AuditLog.createLog.mockRejectedValueOnce(new Error('discard audit unavailable'))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/drafts/${activeDraft.draftId}/discard`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: activeDraft.updatedAt })
+
+    expect(res.status).toBe(500)
+    expect(res.body.error.code).toBe('OUTCOME_ACTION_FAILED')
+    expect(OutcomeDraft.updateOne).toHaveBeenCalledTimes(2)
+    const discardedAt = OutcomeDraft.updateOne.mock.calls[0][1].$set.discardedAt
+    expect(OutcomeDraft.updateOne).toHaveBeenLastCalledWith(
+      {
+        _id: activeDraft._id,
+        status: 'DISCARDED',
+        currentIterationId: activeDraft.currentIterationId,
+        discardedAt,
+        discardedBy: CUSTOMER_ADMIN_ID,
+      },
+      {
+        $set: {
+          status: 'ACTIVE',
+          discardedAt: null,
+          discardedBy: null,
+          updatedAt: activeDraft.updatedAt,
+        },
+      },
+    )
+    expect(AuditLog.createLog).toHaveBeenCalledTimes(1)
+  })
+
+  test('Outcome Studio draft discard restores the active draft when audit fails in disconnected mode', async () => {
+    const activeDraft = makeOutcomeDraftRecord()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeOutputLabReadyRuntime()))
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    OutcomeDraft.findOne.mockReturnValue(buildLeanQuery(activeDraft))
+    AuditLog.createLog.mockRejectedValueOnce(new Error('discard audit unavailable'))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/drafts/${activeDraft.draftId}/discard`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ expectedUpdatedAt: activeDraft.updatedAt })
+
+    expect(res.status).toBe(500)
+    expect(res.body.error.code).toBe('OUTCOME_ACTION_FAILED')
+    expect(OutcomeDraft.updateOne).toHaveBeenCalledTimes(2)
+    const discardedAt = OutcomeDraft.updateOne.mock.calls[0][1].$set.discardedAt
+    expect(OutcomeDraft.updateOne).toHaveBeenLastCalledWith(
+      {
+        _id: activeDraft._id,
+        status: 'DISCARDED',
+        currentIterationId: activeDraft.currentIterationId,
+        discardedAt,
+        discardedBy: CUSTOMER_ADMIN_ID,
+      },
+      {
+        $set: {
+          status: 'ACTIVE',
+          discardedAt: null,
+          discardedBy: null,
+          updatedAt: activeDraft.updatedAt,
+        },
+      },
+    )
+  })
+
+  test('Outcome Studio draft discard uses one transaction session for claim and audit when connected', async () => {
+    const activeDraft = makeOutcomeDraftRecord()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeOutputLabReadyRuntime()))
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    OutcomeDraft.findOne.mockReturnValue(buildLeanQuery(activeDraft))
+    const originalStartSession = mongoose.startSession
+    const readyStateDescriptor = Object.getOwnPropertyDescriptor(mongoose.connection, 'readyState')
+    const dbSession = {
+      withTransaction: jest.fn(async (callback) => callback()),
+      endSession: jest.fn(),
+    }
+    mongoose.startSession = jest.fn().mockResolvedValue(dbSession)
+    Object.defineProperty(mongoose.connection, 'readyState', {
+      configurable: true,
+      value: 1,
+    })
+
+    try {
+      const token = await getAccessTokenForUser(makeCustomerAdmin())
+      const res = await request
+        .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/drafts/${activeDraft.draftId}/discard`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ expectedUpdatedAt: activeDraft.updatedAt })
+
+      expect(res.status).toBe(200)
+      expect(dbSession.withTransaction).toHaveBeenCalledTimes(1)
+      expect(dbSession.endSession).toHaveBeenCalledTimes(1)
+      expect(OutcomeDraft.updateOne).toHaveBeenCalledWith(
+        expect.objectContaining({
+          _id: activeDraft._id,
+          status: 'ACTIVE',
+          currentIterationId: activeDraft.currentIterationId,
+        }),
+        expect.objectContaining({
+          $set: expect.objectContaining({ status: 'DISCARDED' }),
+        }),
+        { session: dbSession },
+      )
+      expect(AuditLog.createLog).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'OUTCOME_DRAFT_DISCARDED' }),
+        { session: dbSession },
+      )
+    } finally {
+      mongoose.startSession = originalStartSession
+      if (readyStateDescriptor) {
+        Object.defineProperty(mongoose.connection, 'readyState', readyStateDescriptor)
+      } else {
+        delete mongoose.connection.readyState
+      }
+    }
   })
 
   test('Outcome Studio draft approval creates a governed asset version from the current draft', async () => {
@@ -16900,8 +17702,8 @@ describe('Runtime Instance API', () => {
       status: 'APPROVED',
       approvedIterationId: currentIteration.draftIterationId,
       approvedAssetVersionId: expect.stringMatching(/^outcome_asset_version_/),
-      approvedBy: CUSTOMER_ADMIN_ID,
       approvedAt: expect.any(String),
+      approvalAvailable: false,
     }))
     expect(res.body.data.draftIteration).toEqual(expect.objectContaining({
       draftIterationId: currentIteration.draftIterationId,
@@ -16909,7 +17711,7 @@ describe('Runtime Instance API', () => {
       status: 'APPROVED',
       contentAvailable: true,
       customerContent: expect.objectContaining({
-        markdown: expect.stringContaining('The existing board narrative is grounded in certified runtime truth.'),
+        markdown: expect.stringContaining('The existing board narrative is grounded in verified business information.'),
       }),
     }))
     expect(res.body.data.asset).toEqual(expect.objectContaining({
@@ -16917,26 +17719,14 @@ describe('Runtime Instance API', () => {
       sessionId: 'out_sess_existing_fixture',
       status: 'GENERATED',
       outputTypeKey: 'EXECUTIVE_BRIEF',
+      title: 'Executive Brief',
       currentVersionId: res.body.data.draft.approvedAssetVersionId,
       currentVersionNumber: 1,
-      postValidation: expect.objectContaining({
-        validationScope: 'OUTCOME_ASSET_VERSION',
-        outcomeAssetId: expect.stringMatching(/^outcome_asset_/),
-        outcomeAssetVersionId: res.body.data.draft.approvedAssetVersionId,
+      contentReview: expect.objectContaining({
         status: 'PASS',
         result: 'ALLOW',
       }),
-      lineageSummary: expect.objectContaining({
-        sourceOutputAssetId: 'out_asset_outcome_studio_fixture',
-        truthSignatureCurrentness: 'CURRENT',
-        draftApproval: expect.objectContaining({
-          operation: 'DRAFT_APPROVAL',
-          draftId: activeDraft.draftId,
-          draftIterationId: currentIteration.draftIterationId,
-          outcomeAssetVersionId: res.body.data.draft.approvedAssetVersionId,
-          versionNumber: 1,
-        }),
-      }),
+      distributionAvailable: true,
     }))
     expect(res.body.data.asset).not.toHaveProperty('customerContent')
     expect(res.body.data.assetVersion).toEqual(expect.objectContaining({
@@ -16944,20 +17734,13 @@ describe('Runtime Instance API', () => {
       outcomeAssetId: res.body.data.asset.outcomeAssetId,
       versionNumber: 1,
       status: 'CURRENT',
+      title: 'Executive Brief',
       contentAvailable: true,
-      postValidation: expect.objectContaining({
-        validationScope: 'OUTCOME_ASSET_VERSION',
-        outcomeAssetId: res.body.data.asset.outcomeAssetId,
-        outcomeAssetVersionId: res.body.data.draft.approvedAssetVersionId,
+      contentReview: expect.objectContaining({
         status: 'PASS',
         result: 'ALLOW',
       }),
-      lineageSummary: expect.objectContaining({
-        draftApproval: expect.objectContaining({
-          draftId: activeDraft.draftId,
-          draftIterationId: currentIteration.draftIterationId,
-        }),
-      }),
+      distributionAvailable: true,
     }))
     expect(res.body.data.assetVersion).not.toHaveProperty('customerContent')
     expect(OutcomeSession.findOne).toHaveBeenCalledWith({
@@ -16980,6 +17763,8 @@ describe('Runtime Instance API', () => {
     expect(OutcomeAssetVersion.prototype.save).toHaveBeenCalledTimes(1)
     const savedAsset = OutcomeAsset.prototype.save.mock.contexts[0]
     const savedVersion = OutcomeAssetVersion.prototype.save.mock.contexts[0]
+    expect(savedAsset.title).toBe('Executive Brief')
+    expect(savedVersion.title).toBe('Executive Brief')
     expect(savedAsset.customerContent).toBeUndefined()
     expect(savedAsset.currentVersionId).toBe(savedVersion.outcomeAssetVersionId)
     expect(savedAsset.contextBindings.workspaceContext).toEqual(expect.objectContaining({
@@ -16988,15 +17773,9 @@ describe('Runtime Instance API', () => {
       workspaceAssetVersionId: savedVersion.outcomeAssetVersionId,
     }))
     expect(savedVersion.customerContent).toEqual(expect.objectContaining({
-      markdown: expect.stringContaining('The existing board narrative is grounded in certified runtime truth.'),
-      metadata: expect.objectContaining({
-        approvalStatus: 'APPROVED',
-        approvedDraftId: activeDraft.draftId,
-        approvedDraftIterationId: currentIteration.draftIterationId,
-        outcomeAssetId: savedAsset.outcomeAssetId,
-        outcomeAssetVersionId: savedVersion.outcomeAssetVersionId,
-      }),
+      markdown: expect.stringContaining('The existing board narrative is grounded in verified business information.'),
     }))
+    expect(savedVersion.customerContent).not.toHaveProperty('metadata')
     expect(savedVersion.postValidation).toEqual(expect.objectContaining({
       validationScope: 'OUTCOME_ASSET_VERSION',
       outcomeAssetId: savedAsset.outcomeAssetId,
@@ -17112,9 +17891,7 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(422)
     expect(res.body.error.code).toBe('VALIDATION_FAILED')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      _root: expect.stringContaining('Unrecognized key'),
-    }))
+    expectCustomerSafeOutcomeError(res)
     expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
     expect(OutcomeSession.findOne).not.toHaveBeenCalled()
     expect(OutcomeDraft.findOne).not.toHaveBeenCalled()
@@ -17141,16 +17918,7 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(409)
     expect(res.body.error.code).toBe('CONFLICT')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      reason: 'OUTCOME_DRAFT_APPROVAL_BLOCKED',
-      draftId: activeDraft.draftId,
-      approvalAvailable: false,
-      blockerReason: 'OUTCOME_DRAFT_ALREADY_APPROVED',
-      safetyGate: expect.objectContaining({
-        code: 'ASSET_APPROVAL',
-        status: 'BLOCKED',
-      }),
-    }))
+    expectCustomerSafeOutcomeError(res)
     expect(OutcomeDraftIteration.findOne).not.toHaveBeenCalled()
     expect(OutcomeAsset.prototype.save).not.toHaveBeenCalled()
     expect(OutcomeAssetVersion.prototype.save).not.toHaveBeenCalled()
@@ -17175,11 +17943,7 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(409)
     expect(res.body.error.code).toBe('CONFLICT')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      reason: 'OUTCOME_DRAFT_APPROVAL_BLOCKED',
-      blockerReason: 'OUTCOME_DRAFT_ALREADY_APPROVED',
-      approvalAvailable: false,
-    }))
+    expectCustomerSafeOutcomeError(res)
     expect(OutcomeDraft.updateOne).toHaveBeenCalledTimes(1)
     expect(OutcomeDraftIteration.updateMany).not.toHaveBeenCalled()
     expect(OutcomeAsset.prototype.save).not.toHaveBeenCalled()
@@ -17206,13 +17970,7 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(409)
     expect(res.body.error.code).toBe('CONFLICT')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      reason: 'OUTCOME_DRAFT_APPROVAL_BLOCKED',
-      draftId: activeDraft.draftId,
-      currentIterationId: activeDraft.currentIterationId,
-      approvalAvailable: false,
-      blockerReason: 'OUTCOME_DRAFT_CURRENT_ITERATION_NOT_FOUND',
-    }))
+    expectCustomerSafeOutcomeError(res)
     expect(OutcomeDraftIteration.findOne).toHaveBeenCalledWith({
       runtimeInstanceId: RUNTIME_INSTANCE_ID,
       sessionId: 'out_sess_existing_fixture',
@@ -17250,17 +18008,8 @@ describe('Runtime Instance API', () => {
     const savedAsset = OutcomeAsset.prototype.save.mock.contexts[0]
     const savedVersion = OutcomeAssetVersion.prototype.save.mock.contexts[0]
     expect(res.status).toBe(500)
-    expect(res.body.error.code).toBe('OUTCOME_ASSET_GENERATION_AUDIT_FAILED')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      reason: 'OUTCOME_ASSET_GENERATION_AUDIT_FAILED',
-      draftId: activeDraft.draftId,
-      draftIterationId: currentIteration.draftIterationId,
-      outcomeAssetId: savedAsset.outcomeAssetId,
-      outcomeAssetVersionId: savedVersion.outcomeAssetVersionId,
-      auditError: expect.objectContaining({
-        message: 'asset approval audit unavailable',
-      }),
-    }))
+    expect(res.body.error.code).toBe('OUTCOME_ACTION_FAILED')
+    expectCustomerSafeOutcomeError(res)
     expect(OutcomeAsset.prototype.save).toHaveBeenCalledTimes(1)
     expect(OutcomeAssetVersion.prototype.save).toHaveBeenCalledTimes(1)
     expect(RuntimeGraphRelationship.prototype.save).toHaveBeenCalledTimes(2)
@@ -17360,27 +18109,23 @@ describe('Runtime Instance API', () => {
       .send({})
 
     expect(res.status).toBe(200)
+    const persistedTruthSignatureId = TruthSignature.prototype.save.mock.contexts[0].truthSignatureId
     expect(res.body.data).toEqual(expect.objectContaining({
       sessionId: 'out_sess_existing_fixture',
-      truthSignatureId: expect.stringMatching(/^truth_sig_/),
-      truthSignature: expect.objectContaining({
-        truthSignatureId: expect.stringMatching(/^truth_sig_/),
+      status: 'ACTIVE',
+      informationStatus: expect.objectContaining({
+        status: 'PROJECTED',
         currentness: 'CURRENT',
-        evidence: expect.objectContaining({
-          sourceOutputAssetId: 'out_asset_outcome_studio_fixture',
-          graphHash: 'sha256:graph-hash',
-        }),
       }),
       update: expect.objectContaining({
         status: 'UPDATED',
-        previousTruthSignatureId: 'truth_sig_existing_fixture',
-        truthSignatureCurrentness: 'CURRENT',
-        reboundOutcomeAssets: 1,
-        reboundOutcomeAssetVersions: 1,
+        informationCurrentness: 'CURRENT',
+        updatedAssetCount: 1,
+        updatedVersionCount: 1,
       }),
     }))
-    expect(res.body.data.truthSignatureId).not.toBe('truth_sig_existing_fixture')
-    expect(res.body.data.update.truthSignatureId).toBe(res.body.data.truthSignatureId)
+    expect(res.body.data).not.toHaveProperty('truthSignatureId')
+    expect(res.body.data).not.toHaveProperty('truthSignature')
     expect(OutcomeSession.findOne).toHaveBeenCalledWith({
       runtimeInstanceId: RUNTIME_INSTANCE_ID,
       sessionId: 'out_sess_existing_fixture',
@@ -17395,9 +18140,9 @@ describe('Runtime Instance API', () => {
       },
       {
         $set: expect.objectContaining({
-          truthSignatureId: res.body.data.truthSignatureId,
+          truthSignatureId: persistedTruthSignatureId,
           truthSignature: expect.objectContaining({
-            truthSignatureId: res.body.data.truthSignatureId,
+            truthSignatureId: persistedTruthSignatureId,
             currentness: 'CURRENT',
           }),
         }),
@@ -17416,7 +18161,7 @@ describe('Runtime Instance API', () => {
       {
         $set: expect.objectContaining({
           truthSignature: expect.objectContaining({
-            truthSignatureId: res.body.data.truthSignatureId,
+            truthSignatureId: persistedTruthSignatureId,
             currentness: 'CURRENT',
           }),
           'lineageSummary.truthSignatureStatus': 'PROJECTED',
@@ -17435,7 +18180,7 @@ describe('Runtime Instance API', () => {
       {
         $set: expect.objectContaining({
           truthSignature: expect.objectContaining({
-            truthSignatureId: res.body.data.truthSignatureId,
+            truthSignatureId: persistedTruthSignatureId,
             currentness: 'CURRENT',
           }),
           'lineageSummary.truthSignatureStatus': 'PROJECTED',
@@ -17482,7 +18227,7 @@ describe('Runtime Instance API', () => {
         actorUserId: CUSTOMER_ADMIN_ID,
         sessionId: 'out_sess_existing_fixture',
         previousTruthSignatureId: 'truth_sig_existing_fixture',
-        nextTruthSignatureId: res.body.data.truthSignatureId,
+        nextTruthSignatureId: persistedTruthSignatureId,
         previousTruthSignatureCurrentness: 'OUT_OF_DATE',
         nextTruthSignatureCurrentness: 'CURRENT',
         currentEvidence: expect.objectContaining({
@@ -17524,16 +18269,8 @@ describe('Runtime Instance API', () => {
       .send({})
 
     expect(res.status).toBe(500)
-    expect(res.body.error.code).toBe('OUTCOME_TRUTH_DRIFT_AUDIT_FAILED')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      reason: 'OUTCOME_TRUTH_DRIFT_AUDIT_FAILED',
-      sessionId: 'out_sess_existing_fixture',
-      truthSignatureId: 'truth_sig_existing_fixture',
-      truthSignatureCurrentness: 'OUT_OF_DATE',
-      auditError: expect.objectContaining({
-        message: 'drift audit unavailable',
-      }),
-    }))
+    expect(res.body.error.code).toBe('OUTCOME_ACTION_FAILED')
+    expectCustomerSafeOutcomeError(res)
     expect(TruthSignature.prototype.save).not.toHaveBeenCalled()
     expect(TruthSignature.deleteOne).not.toHaveBeenCalled()
     expect(OutcomeSession.prototype.save).not.toHaveBeenCalled()
@@ -17579,16 +18316,8 @@ describe('Runtime Instance API', () => {
       .send({})
 
     expect(res.status).toBe(500)
-    expect(res.body.error.code).toBe('OUTCOME_TRUTH_UPDATE_AUDIT_FAILED')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      reason: 'OUTCOME_TRUTH_UPDATE_AUDIT_FAILED',
-      sessionId: 'out_sess_existing_fixture',
-      previousTruthSignatureId: 'truth_sig_existing_fixture',
-      nextTruthSignatureId: expect.stringMatching(/^truth_sig_/),
-      auditError: expect.objectContaining({
-        message: 'truth update audit unavailable',
-      }),
-    }))
+    expect(res.body.error.code).toBe('OUTCOME_ACTION_FAILED')
+    expectCustomerSafeOutcomeError(res)
     expect(TruthSignature.prototype.save).toHaveBeenCalledTimes(1)
     expect(TruthSignature.deleteOne).toHaveBeenCalledTimes(1)
     expect(OutcomeSession.updateOne).toHaveBeenCalledTimes(2)
@@ -17747,14 +18476,7 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(409)
     expect(res.body.error.code).toBe('CONFLICT')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      reason: 'OUTCOME_TRUTH_UPDATE_BLOCKED',
-      sessionId: 'out_sess_existing_fixture',
-      truthSignatureId: 'truth_sig_existing_fixture',
-      truthSignatureCurrentness: 'CURRENT',
-      updateAvailable: false,
-      blockerReason: 'TRUTH_SIGNATURE_ALREADY_CURRENT',
-    }))
+    expectCustomerSafeOutcomeError(res)
     expect(TruthSignature.prototype.save).not.toHaveBeenCalled()
     expect(OutcomeSession.updateOne).not.toHaveBeenCalled()
     expect(OutcomeAsset.updateMany).not.toHaveBeenCalled()
@@ -17774,9 +18496,7 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(422)
     expect(res.body.error.code).toBe('VALIDATION_FAILED')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      _root: expect.stringContaining('Unrecognized key'),
-    }))
+    expectCustomerSafeOutcomeError(res)
     expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
     expect(OutcomeSession.findOne).not.toHaveBeenCalled()
     expect(TruthSignature.prototype.save).not.toHaveBeenCalled()
@@ -17796,10 +18516,7 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(404)
     expect(res.body.error.code).toBe('NOT_FOUND')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      reason: 'OUTCOME_SESSION_NOT_FOUND',
-      sessionId: 'out_sess_other_runtime',
-    }))
+    expectCustomerSafeOutcomeError(res)
     expect(OutcomeSession.findOne).toHaveBeenCalledWith({
       runtimeInstanceId: RUNTIME_INSTANCE_ID,
       sessionId: 'out_sess_other_runtime',
@@ -17825,11 +18542,7 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(409)
     expect(res.body.error.code).toBe('CONFLICT')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      reason: 'OUTCOME_SESSION_BLOCKED',
-      sessionId: 'out_sess_existing_fixture',
-      status: 'CLOSED',
-    }))
+    expectCustomerSafeOutcomeError(res)
     expect(TruthSignature.prototype.save).not.toHaveBeenCalled()
     expect(OutcomeMessage.findOne).not.toHaveBeenCalled()
     expect(OutcomeAsset.findOne).not.toHaveBeenCalled()
@@ -17848,7 +18561,7 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(403)
     expect(res.body.error.code).toBe('FORBIDDEN')
-    expect(res.body.error.details.permission).toBe('VMF_UPDATE')
+    expectCustomerSafeOutcomeError(res)
     expect(OutcomeSession.findOne).not.toHaveBeenCalled()
     expect(TruthSignature.prototype.save).not.toHaveBeenCalled()
     expect(OutcomeMessage.findOne).not.toHaveBeenCalled()
@@ -17869,8 +18582,19 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(200)
     expect(res.body.data).toEqual(expect.objectContaining({
-      contractVersion: 'outcome-studio.v1',
-      phase: 'FOUNDATION_READINESS_ONLY',
+      readiness: expect.objectContaining({
+        state: 'BLOCKED',
+        canStartSession: false,
+        canReason: false,
+      }),
+      information: expect.objectContaining({
+        status: 'PROJECTED',
+        currentness: 'CURRENT',
+      }),
+      businessGuidance: expect.objectContaining({
+        status: 'BLOCKED',
+        ready: false,
+      }),
       safetyGates: expect.objectContaining({
         status: 'BLOCKED',
         responseGenerationAvailable: false,
@@ -17880,100 +18604,40 @@ describe('Runtime Instance API', () => {
       }),
       conversation: expect.objectContaining({
         enabled: false,
-        disabledReason: 'Outcome Studio requires active Outcome Studio knowledge pack bindings before sessions can start.',
+        disabledReason: 'Additional business information is required before a session can start.',
       }),
     }))
     expect(res.body.data.safetyGates.gates).toEqual(expect.arrayContaining([
       expect.objectContaining({
-        code: 'SOURCE_OUTPUT_BOUND',
+        key: 'check-1',
+        label: 'Source information',
         status: 'PASSED',
       }),
       expect.objectContaining({
-        code: 'TRUTH_SIGNATURE_BOUND',
+        key: 'check-2',
+        label: 'Verified information',
         status: 'PASSED',
       }),
       expect.objectContaining({
-        code: 'KNOWLEDGE_PACKS_BOUND',
+        key: 'check-3',
+        label: 'Business guidance',
         status: 'BLOCKED',
-        blockerReason: 'KNOWLEDGE_PACK_BINDING_MISSING',
       }),
       expect.objectContaining({
-        code: 'RESPONSE_GENERATION_ENGINE',
+        key: 'check-5',
+        label: 'Drafting service',
         status: 'BLOCKED',
-        blockerReason: 'PRE_GENERATION_GATES_BLOCKED',
       }),
     ]))
-    expect(res.body.data.truthBinding).toEqual(expect.objectContaining({
-      status: 'PROJECTED',
-      mode: 'CERTIFIED_RUNTIME_TRUTH',
-      certification: expect.objectContaining({
-        label: expect.any(String),
-      }),
-      sourceOutput: expect.objectContaining({
+    expect(res.body.data.information.sourceOutput).toEqual(expect.objectContaining({
         outputAssetId: 'out_asset_outcome_studio_fixture',
         outputTypeKey: 'EXECUTIVE_BRIEF',
         outputTypeLabel: 'Executive Brief',
-        sourceSnapshot: expect.objectContaining({
-          lockSnapshotId: 'runtime-truth-lock-output-lab-fixture',
-          replayAnchorId: 'runtime-replay-anchor-output-lab',
-          graphHash: 'sha256:graph-hash',
-        }),
-      }),
-      truthSignature: expect.objectContaining({
-        status: 'PROJECTED',
-        mode: 'PROJECTED_FROM_RUNTIME_EVIDENCE',
-        persistence: 'NOT_PERSISTED',
-        currentness: 'CURRENT',
-        evidence: expect.objectContaining({
-          sourceOutputAssetId: 'out_asset_outcome_studio_fixture',
-          certificationLevel: expect.any(String),
-          lockSnapshotId: 'runtime-truth-lock-output-lab-fixture',
-          replayAnchorId: 'runtime-replay-anchor-output-lab',
-          graphHash: 'sha256:graph-hash',
-        }),
-        missingEvidence: [],
-      }),
     }))
-    expect(res.body.data.packBinding).toEqual(expect.objectContaining({
-      status: 'BLOCKED',
-      mode: 'REGISTRY_RESOLUTION',
-      resolutionSource: 'KNOWLEDGE_PACK_REGISTRY',
-      policyKey: 'outcome-studio-v1-required-packs',
-      policyVersion: '1.0.0',
-      summary: 'Knowledge Pack Registry activation is required before Outcome Studio sessions can start.',
-      sourceBundle: expect.objectContaining({
-        status: 'RETIRED',
-        sourceDocuments: [],
-      }),
-    }))
-    expect(res.body.data.packBinding.requiredPacks).toHaveLength(5)
-    expect(res.body.data.packBinding.requiredPacks).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        packType: 'ARL',
-        status: 'MISSING',
-        runtimeBindable: false,
-      }),
-      expect.objectContaining({
-        packType: 'RL',
-        status: 'MISSING',
-        runtimeBindable: false,
-      }),
-      expect.objectContaining({
-        packType: 'OUTPUT_SCHEMA',
-        status: 'MISSING',
-        runtimeBindable: false,
-      }),
-      expect.objectContaining({
-        packType: 'TRUTH_CERTIFICATION',
-        status: 'MISSING',
-        runtimeBindable: false,
-      }),
-      expect.objectContaining({
-        packType: 'OUTPUT_TYPE_DEFINITION',
-        status: 'MISSING',
-        runtimeBindable: false,
-      }),
-    ]))
+    expect(res.body.data).not.toHaveProperty('truthBinding')
+    expect(res.body.data).not.toHaveProperty('packBinding')
+    expect(res.body.data).not.toHaveProperty('contractVersion')
+    expect(res.body.data).not.toHaveProperty('phase')
     expect(res.body.data.sourceOutputs).toHaveLength(1)
     expect(res.body.data.sourceOutputs[0]).not.toHaveProperty('markdown')
     expect(res.body.data.sourceOutputs[0]).not.toHaveProperty('safeJson')
@@ -18008,19 +18672,17 @@ describe('Runtime Instance API', () => {
       status: 'ACTIVE',
       sourceOutputAssetId: 'out_asset_outcome_studio_fixture',
       sourceOutputTypeKey: 'EXECUTIVE_BRIEF',
-      truthSignature: expect.objectContaining({
+      informationStatus: expect.objectContaining({
         status: 'PROJECTED',
-        persistence: 'SESSION_BOUND',
         currentness: 'CURRENT',
       }),
-      knowledgePackBinding: expect.objectContaining({
+      businessGuidance: expect.objectContaining({
         status: 'PROJECTED',
-        mode: 'REGISTRY_RESOLUTION',
-        activeCount: 5,
-        requiredCount: 5,
+        ready: true,
       }),
     }))
-    expect(res.body.data.sessions[0].knowledgePackBinding).not.toHaveProperty('activePacks')
+    expect(res.body.data.sessions[0]).not.toHaveProperty('truthSignature')
+    expect(res.body.data.sessions[0]).not.toHaveProperty('knowledgePackBinding')
     expect(JSON.stringify(res.body.data.sessions)).not.toContain('Raw persisted session Markdown must not leak')
     expect(JSON.stringify(res.body.data.sessions)).not.toContain('Raw persisted session JSON must not leak')
     expect(JSON.stringify(res.body.data.sessions)).not.toContain('Raw source bundle must not leak')
@@ -18051,24 +18713,20 @@ describe('Runtime Instance API', () => {
       outputTypeKey: 'EXECUTIVE_BRIEF',
       currentVersionId: 'outcome_asset_version_existing_fixture',
       currentVersionNumber: 1,
-      truthSignature: expect.objectContaining({
+      informationStatus: expect.objectContaining({
         status: 'PROJECTED',
-        persistence: 'SESSION_BOUND',
         currentness: 'CURRENT',
       }),
-      knowledgePackBinding: expect.objectContaining({
+      businessGuidance: expect.objectContaining({
         status: 'PROJECTED',
-        activeCount: 5,
-        requiredCount: 5,
+        ready: true,
       }),
-      lineageSummary: expect.objectContaining({
-        sourceOutputAssetId: 'out_asset_outcome_studio_fixture',
-        sourceOutputTypeKey: 'EXECUTIVE_BRIEF',
-        truthSignatureCurrentness: 'CURRENT',
-        runtimeRevisionId: 'value-narrative-439111-rev-2',
-        runtimeRevisionNumber: 2,
-      }),
+      contentReview: expect.objectContaining({ status: 'PASS', result: 'ALLOW' }),
+      distributionAvailable: true,
     }))
+    expect(res.body.data.assets[0]).not.toHaveProperty('truthSignature')
+    expect(res.body.data.assets[0]).not.toHaveProperty('knowledgePackBinding')
+    expect(res.body.data.assets[0]).not.toHaveProperty('lineageSummary')
     expect(res.body.data.assets[0]).not.toHaveProperty('customerContent')
     expect(res.body.data.assets[0]).not.toHaveProperty('markdown')
     expect(res.body.data.assets[0]).not.toHaveProperty('safeJson')
@@ -18104,14 +18762,12 @@ describe('Runtime Instance API', () => {
     expect(res.status).toBe(200)
     expect(res.body.data.sessions).toHaveLength(1)
     expect(res.body.data.assets).toHaveLength(1)
-    expect(res.body.data.sessions[0].truthSignature).toEqual(expect.objectContaining({
+    expect(res.body.data.sessions[0].informationStatus).toEqual(expect.objectContaining({
       status: 'PROJECTED',
-      persistence: 'SESSION_BOUND',
       currentness: 'OUT_OF_DATE',
     }))
-    expect(res.body.data.assets[0].truthSignature).toEqual(expect.objectContaining({
+    expect(res.body.data.assets[0].informationStatus).toEqual(expect.objectContaining({
       status: 'PROJECTED',
-      persistence: 'SESSION_BOUND',
       currentness: 'OUT_OF_DATE',
     }))
     expect(TruthSignature.prototype.save).not.toHaveBeenCalled()
@@ -18138,30 +18794,18 @@ describe('Runtime Instance API', () => {
     expect(res.body.data).toEqual(expect.objectContaining({
       sessionId: 'out_sess_existing_fixture',
       status: 'ACTIVE',
-      runtimeInstanceId: RUNTIME_INSTANCE_ID,
       sourceOutputAssetId: 'out_asset_outcome_studio_fixture',
       sourceOutput: expect.objectContaining({
         outputAssetId: 'out_asset_outcome_studio_fixture',
         outputTypeKey: 'EXECUTIVE_BRIEF',
-        sourceSnapshot: expect.objectContaining({
-          lockSnapshotId: 'runtime-truth-lock-output-lab-fixture',
-          replayAnchorId: 'runtime-replay-anchor-output-lab',
-        }),
       }),
-      truthSignature: expect.objectContaining({
+      informationStatus: expect.objectContaining({
         status: 'PROJECTED',
-        persistence: 'SESSION_BOUND',
         currentness: 'CURRENT',
       }),
-      knowledgePackBinding: expect.objectContaining({
+      businessGuidance: expect.objectContaining({
         status: 'PROJECTED',
-        activePacks: expect.arrayContaining([
-          expect.objectContaining({
-            packType: 'ARL',
-            packKey: 'adaptive-reasoning-layer',
-            contentHash: 'sha256:adaptive-reasoning-layer',
-          }),
-        ]),
+        ready: true,
       }),
     }))
     expect(OutcomeDraft.find).toHaveBeenCalledWith({
@@ -18179,26 +18823,20 @@ describe('Runtime Instance API', () => {
       currentIterationNumber: 1,
       approvedIterationId: '',
       approvedAssetVersionId: '',
-      truthSignature: expect.objectContaining({
+      informationStatus: expect.objectContaining({
         status: 'PROJECTED',
-        persistence: 'SESSION_BOUND',
         currentness: 'CURRENT',
       }),
-      knowledgePackBinding: expect.objectContaining({
+      businessGuidance: expect.objectContaining({
         status: 'PROJECTED',
-        activeCount: 5,
-        requiredCount: 5,
+        ready: true,
       }),
-      lineageSummary: expect.objectContaining({
-        sourceOutputAssetId: 'out_asset_outcome_studio_fixture',
-        sourceOutputTypeKey: 'EXECUTIVE_BRIEF',
-        truthSignatureCurrentness: 'CURRENT',
-      }),
+      contentReview: expect.objectContaining({ status: 'PASS', result: 'ALLOW' }),
     }))
     expect(res.body.data.drafts[0]).not.toHaveProperty('customerContent')
-    expect(res.body.data.sourceOutput).not.toHaveProperty('markdown')
-    expect(res.body.data.sourceOutput).not.toHaveProperty('safeJson')
-    expect(res.body.data.knowledgePackBinding).not.toHaveProperty('sourceBundle')
+    expect(res.body.data).not.toHaveProperty('runtimeInstanceId')
+    expect(res.body.data).not.toHaveProperty('truthSignature')
+    expect(res.body.data).not.toHaveProperty('knowledgePackBinding')
     expect(JSON.stringify(res.body.data)).not.toContain('Raw persisted session Markdown must not leak')
     expect(JSON.stringify(res.body.data)).not.toContain('The existing board narrative is grounded in certified runtime truth.')
     expect(JSON.stringify(res.body.data)).not.toContain('Raw source bundle must not leak')
@@ -18227,19 +18865,13 @@ describe('Runtime Instance API', () => {
       .set('Authorization', `Bearer ${token}`)
 
     expect(res.status).toBe(200)
-    expect(res.body.data.truthSignature).toEqual(expect.objectContaining({
+    expect(res.body.data.informationStatus).toEqual(expect.objectContaining({
       status: 'PROJECTED',
-      persistence: 'SESSION_BOUND',
       currentness: 'OUT_OF_DATE',
     }))
-    expect(res.body.data.messages[0].truthSignature).toEqual(expect.objectContaining({
+    expect(res.body.data.messages[0]).not.toHaveProperty('truthSignature')
+    expect(res.body.data.assets[0].informationStatus).toEqual(expect.objectContaining({
       status: 'PROJECTED',
-      persistence: 'SESSION_BOUND',
-      currentness: 'OUT_OF_DATE',
-    }))
-    expect(res.body.data.assets[0].truthSignature).toEqual(expect.objectContaining({
-      status: 'PROJECTED',
-      persistence: 'SESSION_BOUND',
       currentness: 'OUT_OF_DATE',
     }))
     expect(TruthSignature.prototype.save).not.toHaveBeenCalled()
@@ -18274,14 +18906,41 @@ describe('Runtime Instance API', () => {
       sessionId: 'out_sess_existing_fixture',
       outputTypeKey: 'EXECUTIVE_BRIEF',
       currentVersionId: 'outcome_asset_version_existing_fixture',
-      lineageSummary: expect.objectContaining({
-        sourceOutputAssetId: 'out_asset_outcome_studio_fixture',
-        sourceOutputTypeKey: 'EXECUTIVE_BRIEF',
-        truthSignatureCurrentness: 'CURRENT',
-        runtimeRevisionNumber: 2,
-      }),
+      informationStatus: expect.objectContaining({ status: 'PROJECTED', currentness: 'CURRENT' }),
+      businessGuidance: expect.objectContaining({ status: 'PROJECTED', ready: true }),
+      contentReview: expect.objectContaining({ status: 'PASS', result: 'ALLOW' }),
+      previewAvailable: true,
+      distributionAvailable: true,
     }))
+    expect(res.body.data[0]).not.toHaveProperty('lineageSummary')
     expect(JSON.stringify(res.body.data)).not.toContain('Raw outcome asset customer content must not leak')
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('Outcome Studio asset summaries disable preview for non-customer-ready generated content', async () => {
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    const asset = makeOutcomeAssetRecord()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    OutcomeAsset.find.mockReturnValue(buildRuntimeInstanceFindChain([{
+      ...asset,
+      lineageSummary: {
+        ...asset.lineageSummary,
+        grrProviderMode: 'DETERMINISTIC_SCAFFOLD',
+      },
+    }]))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/assets`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data[0]).toEqual(expect.objectContaining({
+      previewAvailable: false,
+      distributionAvailable: false,
+    }))
+    expect(OutcomeAsset.prototype.save).not.toHaveBeenCalled()
     expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 
@@ -18308,33 +18967,74 @@ describe('Runtime Instance API', () => {
       role: 'USER',
       status: 'SUBMITTED',
       responseStatus: 'PENDING_RESPONSE',
-      prompt: 'Clarify the evidence behind the commercial value story.',
-      sourceOutput: expect.objectContaining({
-        outputAssetId: 'out_asset_outcome_studio_fixture',
-        outputTypeKey: 'EXECUTIVE_BRIEF',
-      }),
-      truthSignature: expect.objectContaining({
-        status: 'PROJECTED',
-        persistence: 'SESSION_BOUND',
-      }),
-      knowledgePackBinding: expect.objectContaining({
-        status: 'PROJECTED',
-        activeCount: 5,
-        requiredCount: 5,
-      }),
+      content: 'Clarify the evidence behind the commercial value story.',
     }))
-    expect(res.body.data.messages[0]).not.toHaveProperty('content')
+    expect(res.body.data.messages[0]).not.toHaveProperty('prompt')
+    expect(res.body.data.messages[0]).not.toHaveProperty('sourceOutput')
+    expect(res.body.data.messages[0]).not.toHaveProperty('truthSignature')
+    expect(res.body.data.messages[0]).not.toHaveProperty('knowledgePackBinding')
     expect(res.body.data.messages[0]).not.toHaveProperty('response')
     expect(res.body.data.messages[0]).not.toHaveProperty('generatedResponse')
-    expect(res.body.data.messages[0].sourceOutput).not.toHaveProperty('markdown')
-    expect(res.body.data.messages[0].sourceOutput).not.toHaveProperty('safeJson')
-    expect(res.body.data.messages[0].knowledgePackBinding).not.toHaveProperty('sourceBundle')
     expect(JSON.stringify(res.body.data.messages)).not.toContain('Raw message source Markdown must not leak')
     expect(JSON.stringify(res.body.data.messages)).not.toContain('Raw message source JSON must not leak')
     expect(JSON.stringify(res.body.data.messages)).not.toContain('Raw message source bundle must not leak')
     expect(JSON.stringify(res.body.data.messages)).not.toContain('Raw message active pack content must not leak')
     expect(JSON.stringify(res.body.data.messages)).not.toContain('Raw message required pack content must not leak')
     expect(JSON.stringify(res.body.data.messages)).not.toContain('Raw message truth internals must not leak')
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('Outcome Studio session detail hides unsafe historical assistant content without changing user messages', async () => {
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    OutcomeMessage.find.mockReturnValue(buildRuntimeInstanceFindChain([
+      makeOutcomeMessageRecord({
+        messageId: 'out_msg_user_platform_terms',
+        role: 'USER',
+        prompt: 'Can you explain the Knowledge Pack used for this request?',
+      }),
+      makeOutcomeMessageRecord({
+        messageId: 'out_msg_unsafe_assistant',
+        role: 'ASSISTANT',
+        status: 'GENERATED',
+        responseStatus: 'RESPONSE_GENERATED',
+        prompt: 'The Certified Truth and customer-context section key were passed through the runtime.',
+      }),
+      makeOutcomeMessageRecord({
+        messageId: 'out_msg_safe_assistant',
+        role: 'ASSISTANT',
+        status: 'GENERATED',
+        responseStatus: 'RESPONSE_GENERATED',
+        prompt: 'Your current business assessment supports a focused customer proposition.',
+      }),
+    ]))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        messageId: 'out_msg_user_platform_terms',
+        content: 'Can you explain the Knowledge Pack used for this request?',
+      }),
+      expect.objectContaining({
+        messageId: 'out_msg_safe_assistant',
+        content: 'Your current business assessment supports a focused customer proposition.',
+      }),
+      expect.objectContaining({
+        messageId: 'out_msg_unsafe_assistant',
+        content: 'This earlier response is unavailable because it does not meet the current customer content standard.',
+      }),
+    ]))
+    const unsafeAssistant = res.body.data.messages.find((message) =>
+      message.messageId === 'out_msg_unsafe_assistant')
+    expect(unsafeAssistant.content).not.toContain('Certified Truth')
+    expect(unsafeAssistant.content).not.toContain('customer-context')
+    expect(OutcomeMessage.prototype.save).not.toHaveBeenCalled()
     expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 
@@ -18394,14 +19094,10 @@ describe('Runtime Instance API', () => {
       sessionId: 'out_sess_existing_fixture',
       currentVersionId: 'outcome_asset_version_existing_fixture',
       currentVersionNumber: 1,
-      sourceOutput: expect.objectContaining({
-        outputAssetId: 'out_asset_outcome_studio_fixture',
-        outputTypeKey: 'EXECUTIVE_BRIEF',
-      }),
-      truthSignature: expect.objectContaining({
-        status: 'PROJECTED',
-        persistence: 'SESSION_BOUND',
-      }),
+      informationStatus: expect.objectContaining({ status: 'PROJECTED', currentness: 'CURRENT' }),
+      businessGuidance: expect.objectContaining({ status: 'PROJECTED', ready: true }),
+      contentReview: expect.objectContaining({ status: 'PASS', result: 'ALLOW' }),
+      distributionAvailable: true,
       versions: [
         expect.objectContaining({
           outcomeAssetVersionId: 'outcome_asset_version_existing_fixture',
@@ -18413,6 +19109,8 @@ describe('Runtime Instance API', () => {
       ],
     }))
     expect(res.body.data).not.toHaveProperty('customerContent')
+    expect(res.body.data).not.toHaveProperty('sourceOutput')
+    expect(res.body.data).not.toHaveProperty('truthSignature')
     expect(res.body.data.versions[0]).not.toHaveProperty('customerContent')
     expect(JSON.stringify(res.body.data)).not.toContain('Raw outcome asset source Markdown must not leak')
     expect(JSON.stringify(res.body.data)).not.toContain('Raw outcome asset source JSON must not leak')
@@ -18436,7 +19134,7 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(404)
     expect(res.body.error.code).toBe('NOT_FOUND')
-    expect(res.body.error.details.reason).toBe('OUTCOME_ASSET_NOT_FOUND')
+    expectCustomerSafeOutcomeError(res)
     expect(OutcomeAsset.findOne).toHaveBeenCalledWith({
       runtimeInstanceId: RUNTIME_INSTANCE_ID,
       outcomeAssetId: 'outcome_asset_other_runtime',
@@ -18470,27 +19168,20 @@ describe('Runtime Instance API', () => {
     expect(res.body.data).toEqual(expect.objectContaining({
       outcomeAssetVersionId: 'outcome_asset_version_existing_fixture',
       outcomeAssetId: 'outcome_asset_existing_fixture',
-      parentVersionId: '',
       sessionId: 'out_sess_existing_fixture',
       versionNumber: 1,
       status: 'CURRENT',
       contentAvailable: true,
-      sourceOutput: expect.objectContaining({
-        outputAssetId: 'out_asset_outcome_studio_fixture',
-        outputTypeKey: 'EXECUTIVE_BRIEF',
-      }),
-      truthSignature: expect.objectContaining({
-        truthSignatureId: 'truth_sig_existing_fixture',
-        status: 'PROJECTED',
-        persistence: 'SESSION_BOUND',
-      }),
-      knowledgePackBinding: expect.objectContaining({
-        status: 'PROJECTED',
-        activeCount: 5,
-        requiredCount: 5,
-      }),
+      informationStatus: expect.objectContaining({ status: 'PROJECTED', currentness: 'CURRENT' }),
+      businessGuidance: expect.objectContaining({ status: 'PROJECTED', ready: true }),
+      contentReview: expect.objectContaining({ status: 'PASS', result: 'ALLOW' }),
+      distributionAvailable: true,
     }))
     expect(res.body.data).not.toHaveProperty('customerContent')
+    expect(res.body.data).not.toHaveProperty('parentVersionId')
+    expect(res.body.data).not.toHaveProperty('sourceOutput')
+    expect(res.body.data).not.toHaveProperty('truthSignature')
+    expect(res.body.data).not.toHaveProperty('knowledgePackBinding')
     expect(JSON.stringify(res.body.data)).not.toContain('Raw outcome asset version customer content must not leak')
     expect(JSON.stringify(res.body.data)).not.toContain('Raw outcome asset source Markdown must not leak')
     expect(JSON.stringify(res.body.data)).not.toContain('Raw outcome asset source bundle must not leak')
@@ -18512,11 +19203,7 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(404)
     expect(res.body.error.code).toBe('NOT_FOUND')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      reason: 'OUTCOME_ASSET_VERSION_NOT_FOUND',
-      outcomeAssetId: 'outcome_asset_existing_fixture',
-      outcomeAssetVersionId: 'outcome_asset_version_other_runtime',
-    }))
+    expectCustomerSafeOutcomeError(res)
     expect(OutcomeAsset.findOne).toHaveBeenCalledWith({
       runtimeInstanceId: RUNTIME_INSTANCE_ID,
       outcomeAssetId: 'outcome_asset_existing_fixture',
@@ -18547,7 +19234,7 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(403)
     expect(res.body.error.code).toBe('FORBIDDEN')
-    expect(res.body.error.details.permission).toBe('VMF_VIEW')
+    expectCustomerSafeOutcomeError(res)
     expect(OutcomeAsset.findOne).not.toHaveBeenCalled()
     expect(OutcomeAssetVersion.findOne).not.toHaveBeenCalled()
     expect(OutcomeAssetVersion.find).not.toHaveBeenCalled()
@@ -18572,6 +19259,7 @@ describe('Runtime Instance API', () => {
         hiddenInternalNotes: 'Raw customer content internals must not leak.',
       },
     })))
+    mockRequestReadyOutcomeKnowledgePacks()
     const token = await getAccessTokenForUser(makeCustomerAdmin())
 
     const res = await request
@@ -18605,14 +19293,11 @@ describe('Runtime Instance API', () => {
           body: 'Customer-facing section body.',
         },
       ],
-      truthSignature: expect.objectContaining({
-        status: 'PROJECTED',
-        currentness: 'CURRENT',
-      }),
       warnings: ['Keep limitations visible.'],
       limitations: ['Do not strengthen unsupported claims.'],
     }))
     expect(res.body.data).not.toHaveProperty('customerContent')
+    expect(res.body.data).not.toHaveProperty('truthSignature')
     expect(JSON.stringify(res.body.data)).not.toContain('Raw outcome asset source Markdown must not leak')
     expect(JSON.stringify(res.body.data)).not.toContain('Raw outcome asset source bundle must not leak')
     expect(JSON.stringify(res.body.data)).not.toContain('Raw outcome asset active pack content must not leak')
@@ -18642,15 +19327,7 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(409)
     expect(res.body.error.code).toBe('CONFLICT')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      reason: 'OUTCOME_ASSET_PREVIEW_BLOCKED',
-      outcomeAssetId: 'outcome_asset_existing_fixture',
-      outcomeAssetVersionId: 'outcome_asset_version_existing_fixture',
-      previewAvailable: false,
-      blockerReason: 'OUTCOME_ASSET_TRUTH_NOT_CURRENT',
-      truthSignatureCurrentness: 'OUT_OF_DATE',
-      versionTruthSignatureCurrentness: 'OUT_OF_DATE',
-    }))
+    expectCustomerSafeOutcomeError(res)
     expect(OutcomeAssetVersion.findOne).toHaveBeenCalledWith({
       runtimeInstanceId: RUNTIME_INSTANCE_ID,
       outcomeAssetId: 'outcome_asset_existing_fixture',
@@ -18675,13 +19352,7 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(409)
     expect(res.body.error.code).toBe('CONFLICT')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      reason: 'OUTCOME_ASSET_PREVIEW_CONTENT_UNAVAILABLE',
-      outcomeAssetId: 'outcome_asset_existing_fixture',
-      outcomeAssetVersionId: 'outcome_asset_version_existing_fixture',
-      previewAvailable: false,
-      blockerReason: 'OUTCOME_ASSET_CUSTOMER_CONTENT_NOT_AVAILABLE',
-    }))
+    expectCustomerSafeOutcomeError(res)
     expect(OutcomeAssetVersion.findOne).toHaveBeenCalledWith({
       runtimeInstanceId: RUNTIME_INSTANCE_ID,
       outcomeAssetId: 'outcome_asset_existing_fixture',
@@ -18710,11 +19381,11 @@ describe('Runtime Instance API', () => {
       published: true,
       publishAvailable: false,
       currentVersionId: 'outcome_asset_version_existing_fixture',
-      truthSignature: expect.objectContaining({
+      informationStatus: expect.objectContaining({
+        status: 'PROJECTED',
         currentness: 'CURRENT',
       }),
-      postValidation: expect.objectContaining({
-        validationId: 'outcome_post_val_existing_fixture',
+      contentReview: expect.objectContaining({
         status: 'PASS',
         result: 'ALLOW',
       }),
@@ -18810,21 +19481,7 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(409)
     expect(res.body.error.code).toBe('CONFLICT')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      reason: 'OUTCOME_ASSET_POST_VALIDATION_BLOCKED',
-      outcomeAssetId: 'outcome_asset_existing_fixture',
-      outcomeAssetVersionId: 'outcome_asset_version_existing_fixture',
-      publishAvailable: false,
-      blockerReason: 'OUTCOME_ASSET_POST_VALIDATION_MISSING',
-      postValidation: expect.objectContaining({
-        status: 'MISSING',
-        result: 'BLOCK',
-      }),
-      safetyGate: expect.objectContaining({
-        code: 'ASSET_PUBLISH',
-        status: 'BLOCKED',
-      }),
-    }))
+    expectCustomerSafeOutcomeError(res)
     expect(OutcomeAsset.updateOne).not.toHaveBeenCalled()
     expect(RuntimeGraphRelationship.prototype.save).not.toHaveBeenCalled()
     expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
@@ -18847,15 +19504,8 @@ describe('Runtime Instance API', () => {
       .send({})
 
     expect(res.status).toBe(500)
-    expect(res.body.error.code).toBe('OUTCOME_ASSET_PUBLISH_AUDIT_FAILED')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      reason: 'OUTCOME_ASSET_PUBLISH_AUDIT_FAILED',
-      outcomeAssetId: 'outcome_asset_existing_fixture',
-      outcomeAssetVersionId: 'outcome_asset_version_existing_fixture',
-      auditError: expect.objectContaining({
-        message: 'audit unavailable',
-      }),
-    }))
+    expect(res.body.error.code).toBe('OUTCOME_ACTION_FAILED')
+    expectCustomerSafeOutcomeError(res)
     expect(OutcomeAsset.updateOne).toHaveBeenCalledTimes(2)
     expect(RuntimeGraphRelationship.prototype.save).toHaveBeenCalledTimes(1)
     expect(RuntimeGraphRelationship.deleteMany).toHaveBeenCalledWith({
@@ -18885,15 +19535,8 @@ describe('Runtime Instance API', () => {
       .send({})
 
     expect(res.status).toBe(500)
-    expect(res.body.error.code).toBe('OUTCOME_GRAPH_RELATIONSHIP_FAILED')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      reason: 'OUTCOME_GRAPH_RELATIONSHIP_FAILED',
-      outcomeAssetId: 'outcome_asset_existing_fixture',
-      outcomeAssetVersionId: 'outcome_asset_version_existing_fixture',
-      graphRelationshipError: expect.objectContaining({
-        message: 'relationship store unavailable',
-      }),
-    }))
+    expect(res.body.error.code).toBe('OUTCOME_ACTION_FAILED')
+    expectCustomerSafeOutcomeError(res)
     expect(OutcomeAsset.updateOne).toHaveBeenCalledTimes(2)
     expect(RuntimeGraphRelationship.prototype.save).toHaveBeenCalledTimes(1)
     expect(RuntimeGraphRelationship.deleteMany).toHaveBeenCalledWith({
@@ -18921,9 +19564,7 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(422)
     expect(res.body.error.code).toBe('VALIDATION_FAILED')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      _root: expect.stringContaining('Unrecognized key'),
-    }))
+    expectCustomerSafeOutcomeError(res)
     expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
     expect(OutcomeAsset.findOne).not.toHaveBeenCalled()
     expect(OutcomeAssetVersion.find).not.toHaveBeenCalled()
@@ -18943,10 +19584,7 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(404)
     expect(res.body.error.code).toBe('NOT_FOUND')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      reason: 'OUTCOME_ASSET_NOT_FOUND',
-      outcomeAssetId: 'outcome_asset_other_runtime',
-    }))
+    expectCustomerSafeOutcomeError(res)
     expect(OutcomeAsset.findOne).toHaveBeenCalledWith({
       runtimeInstanceId: RUNTIME_INSTANCE_ID,
       outcomeAssetId: 'outcome_asset_other_runtime',
@@ -18967,10 +19605,38 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(403)
     expect(res.body.error.code).toBe('FORBIDDEN')
-    expect(res.body.error.details.permission).toBe('VMF_UPDATE')
+    expectCustomerSafeOutcomeError(res)
     expect(OutcomeAsset.findOne).not.toHaveBeenCalled()
     expect(OutcomeAssetVersion.find).not.toHaveBeenCalled()
     expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('Outcome Studio asset export fails historical records closed when exact capability identity is unavailable', async () => {
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    OutcomeAsset.findOne.mockReturnValue(buildLeanQuery(makeOutcomeAssetRecord({
+      outputTypeCapabilityKey: undefined,
+    })))
+    OutcomeAssetVersion.findOne.mockReturnValue(buildLeanQuery(makeOutcomeAssetVersionRecord({
+      outputTypeCapabilityKey: undefined,
+    })))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/assets/outcome_asset_existing_fixture/export/markdown`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(409)
+    expect(res.body.error).toEqual(expect.objectContaining({
+      code: 'CONFLICT',
+      message: 'This approved deliverable cannot be exported until its output type is confirmed.',
+    }))
+    expectCustomerSafeOutcomeError(res)
+    expect(KnowledgePackActivation.find).not.toHaveBeenCalled()
+    expect(KnowledgePackVersion.find).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+      action: 'ASSET_EXPORTED',
+    }))
   })
 
   test('Outcome Studio asset export returns governed Markdown from the current persisted asset version', async () => {
@@ -18988,6 +19654,7 @@ describe('Runtime Instance API', () => {
         ],
       },
     })))
+    mockRequestReadyOutcomeKnowledgePacks()
     const token = await getAccessTokenForUser(makeCustomerAdmin())
 
     const res = await request
@@ -18997,17 +19664,16 @@ describe('Runtime Instance API', () => {
     expect(res.status).toBe(200)
     expect(res.body.data).toEqual(expect.objectContaining({
       format: 'MARKDOWN',
-      filename: 'value-narrative-439111-governed-executive-narrative.md',
+      filename: 'governed-executive-narrative-v1.md',
       mimeType: 'text/markdown',
       exportAvailable: true,
     }))
-    expect(res.body.data.content).toContain('# Governed Executive Narrative')
     expect(res.body.data.content).toContain('Governed outcome narrative for export.')
-    expect(res.body.data.content).toContain('## Lineage Summary')
-    expect(res.body.data.content).toContain('Outcome Asset Version ID: outcome_asset_version_existing_fixture')
-    expect(res.body.data.content).toContain('Truth Signature ID: truth_sig_existing_fixture')
-    expect(res.body.data.content).toContain('## Warnings')
+    expect(res.body.data.content).toContain('## Important Review Notes')
     expect(res.body.data.content).toContain('Keep limitations visible.')
+    expect(res.body.data.content).not.toContain('Lineage')
+    expect(res.body.data.content).not.toContain('Truth Signature')
+    expect(res.body.data.content).not.toContain('outcome_asset_version_existing_fixture')
     expect(res.body.data.content).not.toContain('Raw outcome asset source Markdown must not leak')
     expect(res.body.data.content).not.toContain('Raw outcome asset source bundle must not leak')
     expect(res.body.data.content).not.toContain('Raw outcome asset active pack content must not leak')
@@ -19042,9 +19708,19 @@ describe('Runtime Instance API', () => {
         outcomeAssetVersionId: 'outcome_asset_version_existing_fixture',
         versionNumber: 1,
         format: 'MARKDOWN',
-        filename: 'value-narrative-439111-governed-executive-narrative.md',
+        filename: 'governed-executive-narrative-v1.md',
         mimeType: 'text/markdown',
         contentIncludedInAudit: false,
+        outputService: expect.objectContaining({
+          contractVersion: 'output-service.compatibility-v1',
+          capabilityKey: 'outcome-studio-current-document-export',
+          format: 'MARKDOWN',
+          byteLength: expect.any(Number),
+          outputChecksum: expect.stringMatching(/^sha256:/),
+          derivativeFingerprint: expect.stringMatching(/^sha256:/),
+          validation: expect.objectContaining({ status: 'PASS' }),
+          contentIncludedInEvidence: false,
+        }),
         postValidation: expect.objectContaining({
           validationId: 'outcome_post_val_existing_fixture',
           status: 'PASS',
@@ -19073,6 +19749,7 @@ describe('Runtime Instance API', () => {
         ],
       },
     })))
+    mockRequestReadyOutcomeKnowledgePacks()
     const token = await getAccessTokenForUser(makeCustomerAdmin())
 
     const res = await request
@@ -19082,32 +19759,22 @@ describe('Runtime Instance API', () => {
     expect(res.status).toBe(200)
     expect(res.body.data).toEqual(expect.objectContaining({
       format: 'JSON',
-      filename: 'value-narrative-439111-governed-executive-narrative.json',
+      filename: 'governed-executive-narrative-v1.json',
       mimeType: 'application/json',
       exportAvailable: true,
     }))
     expect(res.body.data.content).toEqual(expect.objectContaining({
-      outcomeAssetId: 'outcome_asset_existing_fixture',
-      outcomeAssetVersionId: 'outcome_asset_version_existing_fixture',
       title: 'Governed Executive Narrative',
-      customerContent: expect.objectContaining({
+      deliverableType: 'Executive Brief',
+      version: 1,
+      status: 'GENERATED',
+      content: expect.objectContaining({
         markdown: 'Governed JSON export markdown.',
       }),
-      truthSignature: expect.objectContaining({
-        truthSignatureId: 'truth_sig_existing_fixture',
-      }),
-      knowledgePackBinding: expect.objectContaining({
-        activeCount: 5,
-        requiredCount: 5,
-      }),
-      postValidation: expect.objectContaining({
-        validationId: 'outcome_post_val_existing_fixture',
-        status: 'PASS',
-        result: 'ALLOW',
-        contentIncludedInValidation: false,
-        rawPackContentIncluded: false,
-      }),
     }))
+    expect(res.body.data.content).not.toHaveProperty('truthSignature')
+    expect(res.body.data.content).not.toHaveProperty('knowledgePackBinding')
+    expect(res.body.data.content).not.toHaveProperty('outcomeAssetId')
     expect(JSON.stringify(res.body.data.content)).not.toContain('Raw outcome asset source Markdown must not leak')
     expect(JSON.stringify(res.body.data.content)).not.toContain('Raw outcome asset source bundle must not leak')
     expect(JSON.stringify(res.body.data.content)).not.toContain('Raw outcome asset active pack content must not leak')
@@ -19123,7 +19790,7 @@ describe('Runtime Instance API', () => {
         outcomeAssetId: 'outcome_asset_existing_fixture',
         outcomeAssetVersionId: 'outcome_asset_version_existing_fixture',
         format: 'JSON',
-        filename: 'value-narrative-439111-governed-executive-narrative.json',
+        filename: 'governed-executive-narrative-v1.json',
         mimeType: 'application/json',
         contentIncludedInAudit: false,
         postValidation: expect.objectContaining({
@@ -19146,6 +19813,7 @@ describe('Runtime Instance API', () => {
         markdown: 'Governed binary export narrative.',
       },
     })))
+    mockRequestReadyOutcomeKnowledgePacks()
     const token = await getAccessTokenForUser(makeCustomerAdmin())
 
     const docxRes = await request
@@ -19159,20 +19827,23 @@ describe('Runtime Instance API', () => {
     expect(docxRes.status).toBe(200)
     expect(docxRes.body.data).toEqual(expect.objectContaining({
       format: 'DOCX',
-      filename: 'value-narrative-439111-governed-executive-narrative.docx',
+      filename: 'governed-executive-narrative-v1.docx',
       mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       encoding: 'base64',
       exportAvailable: true,
     }))
     expect(docxRes.body.data.contentBase64).toMatch(/^UEsDB/)
-    expect(Buffer.from(docxRes.body.data.contentBase64, 'base64').toString('utf8')).toContain('word/document.xml')
-    expect(Buffer.from(docxRes.body.data.contentBase64, 'base64').toString('utf8')).toContain('Governed binary export narrative.')
-    expect(Buffer.from(docxRes.body.data.contentBase64, 'base64').toString('utf8')).not.toContain('Raw outcome asset source Markdown must not leak')
+    const docxArchive = await JSZip.loadAsync(Buffer.from(docxRes.body.data.contentBase64, 'base64'))
+    const docxDocumentXml = await docxArchive.file('word/document.xml').async('string')
+    expect(docxArchive.file('word/styles.xml')).not.toBeNull()
+    expect(docxArchive.file('word/numbering.xml')).not.toBeNull()
+    expect(docxDocumentXml).toContain('Governed binary export narrative.')
+    expect(docxDocumentXml).not.toContain('Raw outcome asset source Markdown must not leak')
 
     expect(pdfRes.status).toBe(200)
     expect(pdfRes.body.data).toEqual(expect.objectContaining({
       format: 'PDF',
-      filename: 'value-narrative-439111-governed-executive-narrative.pdf',
+      filename: 'governed-executive-narrative-v1.pdf',
       mimeType: 'application/pdf',
       encoding: 'base64',
       exportAvailable: true,
@@ -19193,6 +19864,23 @@ describe('Runtime Instance API', () => {
         format: 'DOCX',
         mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
         contentIncludedInAudit: false,
+        outputService: expect.objectContaining({
+          capabilityKey: 'outcome-professional-document-dev-test',
+          engine: expect.objectContaining({
+            key: 'DOCX_JS_IN_PROCESS_DEVELOPMENT_TEST',
+            version: 'docx@9.7.1',
+          }),
+          format: 'DOCX',
+          deliveryPolicy: 'INLINE_BASE64',
+          validation: expect.objectContaining({
+            status: 'PASS',
+            checks: expect.arrayContaining([
+              'DOCX_DOCUMENT_ENTRY_PRESENT',
+              'DOCX_CORE_ENTRIES_PRESENT',
+              'DOCX_RELATIONSHIPS_INTERNAL_ONLY',
+            ]),
+          }),
+        }),
       }),
     }))
     expect(pdfAuditPayload).toEqual(expect.objectContaining({
@@ -19200,6 +19888,15 @@ describe('Runtime Instance API', () => {
         format: 'PDF',
         mimeType: 'application/pdf',
         contentIncludedInAudit: false,
+        outputService: expect.objectContaining({
+          format: 'PDF',
+          pageCount: 1,
+          deliveryPolicy: 'INLINE_BASE64',
+          validation: expect.objectContaining({
+            status: 'PASS',
+            checks: expect.arrayContaining(['PDF_TRAILER_VALID']),
+          }),
+        }),
       }),
     }))
     expect(JSON.stringify(docxAuditPayload)).not.toContain('Governed binary export narrative.')
@@ -19215,6 +19912,7 @@ describe('Runtime Instance API', () => {
         markdown: 'Governed outcome narrative should not be returned when audit fails.',
       },
     })))
+    mockRequestReadyOutcomeKnowledgePacks()
     AuditLog.createLog.mockImplementation(async (payload) => {
       if (payload.action === 'ASSET_EXPORTED') {
         throw new Error('asset export audit unavailable')
@@ -19229,17 +19927,8 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(500)
     expect(res.body.data).toBeUndefined()
-    expect(res.body.error.code).toBe('OUTCOME_ASSET_EXPORT_AUDIT_FAILED')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      reason: 'OUTCOME_ASSET_EXPORT_AUDIT_FAILED',
-      outcomeAssetId: 'outcome_asset_existing_fixture',
-      outcomeAssetVersionId: 'outcome_asset_version_existing_fixture',
-      format: 'MARKDOWN',
-      exportAvailable: false,
-      auditError: expect.objectContaining({
-        message: 'asset export audit unavailable',
-      }),
-    }))
+    expect(res.body.error.code).toBe('OUTCOME_ACTION_FAILED')
+    expectCustomerSafeOutcomeError(res)
     expect(JSON.stringify(res.body)).not.toContain('Governed outcome narrative should not be returned when audit fails.')
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'ASSET_EXPORTED',
@@ -19260,9 +19949,7 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(422)
     expect(res.body.error.code).toBe('VALIDATION_FAILED')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      format: 'format must be MARKDOWN, JSON, DOCX, or PDF',
-    }))
+    expectCustomerSafeOutcomeError(res)
     expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
     expect(OutcomeAsset.findOne).not.toHaveBeenCalled()
     expect(OutcomeAssetVersion.find).not.toHaveBeenCalled()
@@ -19281,10 +19968,7 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(404)
     expect(res.body.error.code).toBe('NOT_FOUND')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      reason: 'OUTCOME_ASSET_NOT_FOUND',
-      outcomeAssetId: 'outcome_asset_other_runtime',
-    }))
+    expectCustomerSafeOutcomeError(res)
     expect(OutcomeAsset.findOne).toHaveBeenCalledWith({
       runtimeInstanceId: RUNTIME_INSTANCE_ID,
       outcomeAssetId: 'outcome_asset_other_runtime',
@@ -19306,17 +19990,7 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(409)
     expect(res.body.error.code).toBe('CONFLICT')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      reason: 'OUTCOME_ASSET_EXPORT_CONTENT_UNAVAILABLE',
-      outcomeAssetId: 'outcome_asset_existing_fixture',
-      currentVersionId: 'outcome_asset_version_existing_fixture',
-      exportAvailable: false,
-      blockerReason: 'OUTCOME_ASSET_CURRENT_VERSION_NOT_FOUND',
-      safetyGate: expect.objectContaining({
-        code: 'EXPORT_RENDERER',
-        status: 'BLOCKED',
-      }),
-    }))
+    expectCustomerSafeOutcomeError(res)
     expect(OutcomeAssetVersion.findOne).toHaveBeenCalledWith({
       runtimeInstanceId: RUNTIME_INSTANCE_ID,
       outcomeAssetId: 'outcome_asset_existing_fixture',
@@ -19341,6 +20015,7 @@ describe('Runtime Instance API', () => {
         markdown: 'Stale governed content must not be exported.',
       },
     })))
+    mockRequestReadyOutcomeKnowledgePacks()
     const token = await getAccessTokenForUser(makeCustomerAdmin())
 
     const res = await request
@@ -19350,19 +20025,7 @@ describe('Runtime Instance API', () => {
     expect(res.status).toBe(409)
     expect(res.body.data).toBeUndefined()
     expect(res.body.error.code).toBe('CONFLICT')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      reason: 'OUTCOME_ASSET_EXPORT_BLOCKED',
-      outcomeAssetId: 'outcome_asset_existing_fixture',
-      outcomeAssetVersionId: 'outcome_asset_version_existing_fixture',
-      exportAvailable: false,
-      blockerReason: 'OUTCOME_ASSET_TRUTH_NOT_CURRENT',
-      truthSignatureCurrentness: 'OUT_OF_DATE',
-      versionTruthSignatureCurrentness: 'OUT_OF_DATE',
-      safetyGate: expect.objectContaining({
-        code: 'EXPORT_RENDERER',
-        status: 'BLOCKED',
-      }),
-    }))
+    expectCustomerSafeOutcomeError(res)
     expect(JSON.stringify(res.body)).not.toContain('Stale governed content must not be exported.')
     expect(OutcomeAssetVersion.findOne).toHaveBeenCalledWith({
       runtimeInstanceId: RUNTIME_INSTANCE_ID,
@@ -19409,25 +20072,7 @@ describe('Runtime Instance API', () => {
     expect(res.status).toBe(409)
     expect(res.body.data).toBeUndefined()
     expect(res.body.error.code).toBe('CONFLICT')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      reason: 'OUTCOME_ASSET_POST_VALIDATION_BLOCKED',
-      outcomeAssetId: 'outcome_asset_existing_fixture',
-      outcomeAssetVersionId: 'outcome_asset_version_existing_fixture',
-      exportAvailable: false,
-      blockerReason: 'OUTCOME_ASSET_POST_VALIDATION_FAILED',
-      postValidation: expect.objectContaining({
-        validationId: 'outcome_post_val_existing_fixture',
-        status: 'FAIL',
-        result: 'BLOCK',
-        summary: expect.objectContaining({
-          failed: 1,
-        }),
-      }),
-      safetyGate: expect.objectContaining({
-        code: 'EXPORT_RENDERER',
-        status: 'BLOCKED',
-      }),
-    }))
+    expectCustomerSafeOutcomeError(res)
     expect(JSON.stringify(res.body)).not.toContain('Blocked validation content must not be exported.')
     expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
       action: 'ASSET_EXPORTED',
@@ -19448,6 +20093,7 @@ describe('Runtime Instance API', () => {
         ],
       },
     })))
+    mockRequestReadyOutcomeKnowledgePacks()
     const token = await getAccessTokenForUser(makeCustomerAdmin())
 
     const res = await request
@@ -19456,15 +20102,83 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(409)
     expect(res.body.error.code).toBe('CONFLICT')
-    expect(res.body.error.details).toEqual(expect.objectContaining({
-      reason: 'OUTCOME_ASSET_EXPORT_CONTENT_UNAVAILABLE',
-      outcomeAssetId: 'outcome_asset_existing_fixture',
-      outcomeAssetVersionId: 'outcome_asset_version_existing_fixture',
-      format: 'MARKDOWN',
-      exportAvailable: false,
-      blockerReason: 'OUTCOME_ASSET_MARKDOWN_CONTENT_NOT_AVAILABLE',
-    }))
+    expectCustomerSafeOutcomeError(res)
     expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('Outcome Studio asset export maps invalid renderer input to content unavailable', async () => {
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    OutcomeAsset.findOne.mockReturnValue(buildLeanQuery(makeOutcomeAssetRecord()))
+    OutcomeAssetVersion.findOne.mockReturnValue(buildLeanQuery(makeOutcomeAssetVersionRecord({
+      versionNumber: 0,
+      customerContent: {
+        markdown: 'Customer-ready content with invalid source metadata.',
+        sections: [],
+      },
+    })))
+    mockRequestReadyOutcomeKnowledgePacks()
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/assets/outcome_asset_existing_fixture/export/markdown`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(409)
+    expect(res.body.error).toEqual(expect.objectContaining({
+      code: 'CONFLICT',
+      message: 'Outcome Studio asset export requires persisted customer content for the requested format.',
+    }))
+    expectCustomerSafeOutcomeError(res)
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+      action: 'ASSET_EXPORTED',
+    }))
+  })
+
+  test('Outcome Studio asset export fails closed when rendered DOCX validation fails', async () => {
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    OutcomeAsset.findOne.mockReturnValue(buildLeanQuery(makeOutcomeAssetRecord()))
+    OutcomeAssetVersion.findOne.mockReturnValue(buildLeanQuery(makeOutcomeAssetVersionRecord({
+      customerContent: {
+        markdown: 'Rendered content must not be returned after validation failure.',
+        sections: [],
+      },
+    })))
+    mockRequestReadyOutcomeKnowledgePacks()
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+    const bufferIncludes = Buffer.prototype.includes
+    const includesSpy = jest.spyOn(Buffer.prototype, 'includes').mockImplementation(function includes(
+      value,
+      ...args
+    ) {
+      if (Buffer.isBuffer(value) && value.toString('utf8') === 'word/document.xml') return false
+      return bufferIncludes.call(this, value, ...args)
+    })
+
+    try {
+      const res = await request
+        .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/assets/outcome_asset_existing_fixture/export/docx`)
+        .set('Authorization', `Bearer ${token}`)
+
+      expect(res.status).toBe(500)
+      expect(res.body.data).toBeUndefined()
+      expect(res.body.error).toEqual(expect.objectContaining({
+        code: 'OUTCOME_ACTION_FAILED',
+        message: 'Outcome Studio could not complete this action. No changes were made.',
+      }))
+      expectCustomerSafeOutcomeError(res)
+      expect(JSON.stringify(res.body)).not.toContain('Rendered content must not be returned')
+      expect(res.body.error.state).toEqual(expect.objectContaining({
+        exportAvailable: false,
+      }))
+      expect(JSON.stringify(res.body)).not.toContain('OUTPUT_COMPATIBILITY_VALIDATION_FAILED')
+      expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+        action: 'ASSET_EXPORTED',
+      }))
+    } finally {
+      includesSpy.mockRestore()
+    }
   })
 
   test('Outcome Studio asset export requires runtime view permission before asset lookup', async () => {
@@ -19484,7 +20198,7 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(403)
     expect(res.body.error.code).toBe('FORBIDDEN')
-    expect(res.body.error.details.permission).toBe('VMF_VIEW')
+    expectCustomerSafeOutcomeError(res)
     expect(OutcomeAsset.findOne).not.toHaveBeenCalled()
     expect(OutcomeAssetVersion.find).not.toHaveBeenCalled()
     expect(AuditLog.createLog).not.toHaveBeenCalled()
@@ -19502,7 +20216,7 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(404)
     expect(res.body.error.code).toBe('NOT_FOUND')
-    expect(res.body.error.details.reason).toBe('OUTCOME_SESSION_NOT_FOUND')
+    expectCustomerSafeOutcomeError(res)
     expect(OutcomeSession.findOne).toHaveBeenCalledWith({
       runtimeInstanceId: RUNTIME_INSTANCE_ID,
       sessionId: 'out_sess_other_runtime',
@@ -19611,6 +20325,67 @@ describe('Runtime Instance API', () => {
     expect(exportRes.body.data.content).toContain('## Lineage Summary')
     expect(exportRes.body.data.content).not.toContain('sourceRegistry')
     expect(exportRes.body.data.content).not.toContain('Extracted evidence snippets')
+
+    const jsonExportRes = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/output-lab/assets/${savedAsset.outputAssetId}/export/JSON`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(jsonExportRes.status).toBe(200)
+    expect(jsonExportRes.body.data).toEqual(expect.objectContaining({
+      format: 'JSON',
+      filename: 'value-narrative-439111-executive-brief.json',
+      mimeType: 'application/json',
+      content: expect.objectContaining({
+        schemaVersion: 'output-lab-export.v1',
+        outputTypeKey: 'EXECUTIVE_BRIEF',
+      }),
+    }))
+    expect(JSON.stringify(jsonExportRes.body.data.content)).not.toContain('sourceRegistry')
+    expect(JSON.stringify(jsonExportRes.body.data.content)).not.toContain('Extracted evidence snippets')
+  })
+
+  test('Output Lab keeps legacy-shaped asset detail and JSON export readable without backfill', async () => {
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    const legacyAsset = makeRuntimeOutputAsset({
+      outputAssetId: 'out_asset_legacy_fixture',
+      markdown: '# Legacy governed output',
+      safeJson: {
+        schemaVersion: 'output-lab-export.v1',
+        outputType: { key: 'EXECUTIVE_BRIEF', label: 'Executive Brief' },
+      },
+      warnings: undefined,
+      limitations: undefined,
+      expansionGuardrails: undefined,
+    })
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+    RuntimeOutputAsset.findOne.mockResolvedValue(legacyAsset)
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const detailRes = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/output-lab/assets/${legacyAsset.outputAssetId}`)
+      .set('Authorization', `Bearer ${token}`)
+    const exportRes = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/output-lab/assets/${legacyAsset.outputAssetId}/export/JSON`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(detailRes.status).toBe(200)
+    expect(detailRes.body.data).toEqual(expect.objectContaining({
+      outputAssetId: legacyAsset.outputAssetId,
+      markdown: '# Legacy governed output',
+      warnings: [],
+      limitations: [],
+      expansionGuardrails: expect.objectContaining({
+        llmMayCreateTruth: false,
+      }),
+    }))
+    expect(exportRes.status).toBe(200)
+    expect(exportRes.body.data).toEqual(expect.objectContaining({
+      format: 'JSON',
+      filename: 'value-narrative-439111-executive-brief.json',
+      mimeType: 'application/json',
+      content: legacyAsset.safeJson,
+    }))
   })
 
   test('Output Lab generation rolls back the asset when audit persistence fails', async () => {

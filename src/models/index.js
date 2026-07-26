@@ -39,6 +39,11 @@ import KnowledgePackActivation from './KnowledgePackActivation.js'
 import KnowledgePackManifest from './KnowledgePackManifest.js'
 import GovernedReasoningExecution from './GovernedReasoningExecution.js'
 import GovernedRuntimeArtifact from './GovernedRuntimeArtifact.js'
+import OutcomeStudioReadinessRevision from './OutcomeStudioReadinessRevision.js'
+import OutcomeStudioReadinessPointer from './OutcomeStudioReadinessPointer.js'
+import OutcomeStudioTestReferenceObject from './OutcomeStudioTestReferenceObject.js'
+import OutcomeStudioTestReferenceRevision from './OutcomeStudioTestReferenceRevision.js'
+import OutcomeStudioTestReferencePointer from './OutcomeStudioTestReferencePointer.js'
 
 // Export all models
 export {
@@ -82,6 +87,11 @@ export {
   KnowledgePackManifest,
   GovernedReasoningExecution,
   GovernedRuntimeArtifact,
+  OutcomeStudioReadinessRevision,
+  OutcomeStudioReadinessPointer,
+  OutcomeStudioTestReferenceObject,
+  OutcomeStudioTestReferenceRevision,
+  OutcomeStudioTestReferencePointer,
 }
 
 // Default export with all models
@@ -126,4 +136,9 @@ export default {
   KnowledgePackManifest,
   GovernedReasoningExecution,
   GovernedRuntimeArtifact,
+  OutcomeStudioReadinessRevision,
+  OutcomeStudioReadinessPointer,
+  OutcomeStudioTestReferenceObject,
+  OutcomeStudioTestReferenceRevision,
+  OutcomeStudioTestReferencePointer,
 }

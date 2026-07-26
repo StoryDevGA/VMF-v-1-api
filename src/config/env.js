@@ -84,6 +84,25 @@ const env = {
   identityPlusWebhookSecret: process.env.IDENTITY_PLUS_WEBHOOK_SECRET || '',
   identityPlusAuthUrl: process.env.IDENTITY_PLUS_AUTH_URL || '',
 
+  // Outcome Studio Development/Test provider. Vendor and model have no defaults.
+  outcomeStudioProviderEnabled: toBoolean(process.env.OUTCOME_STUDIO_PROVIDER_ENABLED, false),
+  outcomeStudioProviderKey: process.env.OUTCOME_STUDIO_PROVIDER_KEY || '',
+  outcomeStudioProviderModel: process.env.OUTCOME_STUDIO_PROVIDER_MODEL || '',
+  outcomeStudioProviderApiKey:
+    process.env.OUTCOME_STUDIO_PROVIDER_API_KEY || process.env.OPENAI_API_KEY || '',
+  outcomeStudioProviderTimeoutMs: toPositiveNumber(
+    process.env.OUTCOME_STUDIO_PROVIDER_TIMEOUT_MS,
+    60000,
+  ),
+  outcomeStudioProviderMaxRetries: toNumber(
+    process.env.OUTCOME_STUDIO_PROVIDER_MAX_RETRIES,
+    2,
+  ),
+  outcomeStudioProviderMaxOutputTokens: toPositiveNumber(
+    process.env.OUTCOME_STUDIO_PROVIDER_MAX_OUTPUT_TOKENS,
+    8000,
+  ),
+
   // Invitation and Step-Up Configuration
   invitationExpiryHours: toPositiveNumber(process.env.INVITATION_EXPIRY_HOURS, 168),
   appBaseUrl: process.env.APP_BASE_URL || 'http://localhost:8000',
@@ -235,6 +254,18 @@ env.fakeAuthAllowed = env.fakeAuthEnabled && !env.isAppProduction
 env.mongoMinPoolSize = Math.max(1, env.mongoMinPoolSize)
 env.mongoMaxPoolSize = Math.max(env.mongoMinPoolSize, env.mongoMaxPoolSize)
 env.backgroundJobConcurrency = Math.max(1, env.backgroundJobConcurrency)
+env.outcomeStudioProviderMaxRetries = Math.min(
+  2,
+  Math.max(0, env.outcomeStudioProviderMaxRetries),
+)
+env.outcomeStudioProviderTimeoutMs = Math.min(
+  120000,
+  Math.max(5000, env.outcomeStudioProviderTimeoutMs),
+)
+env.outcomeStudioProviderMaxOutputTokens = Math.min(
+  32000,
+  Math.max(512, env.outcomeStudioProviderMaxOutputTokens),
+)
 env.monitoringWindowMs = Math.min(env.monitoringWindowMs, env.monitoringHistoryRetentionMs)
 env.monitoringTrendDefaultWindowMs = Math.min(
   env.monitoringTrendDefaultWindowMs,

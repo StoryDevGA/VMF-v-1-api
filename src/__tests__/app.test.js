@@ -20,6 +20,14 @@ describe('Phase 1 Core Setup', () => {
     expect(typeof env.port).toBe('number')
   })
 
+  test('Outcome Studio provider startup remains LIVE_TEST and fail-closed by default', async () => {
+    const { default: app } = await import('../app.js')
+
+    expect(app.locals.outcomeStudioReasoningDeps).toEqual({ executionMode: 'LIVE_TEST' })
+    expect(app.locals.outcomeStudioReasoningDeps).not.toHaveProperty('providerAdapter')
+    expect(app.locals.outcomeStudioReasoningDeps).not.toHaveProperty('providerDescriptor')
+  })
+
   test('MongoDB models', async () => {
     // Test that models are properly defined
     const models = await import('../models/index.js')

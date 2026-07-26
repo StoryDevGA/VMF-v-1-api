@@ -134,6 +134,19 @@ const outcomeSessionSchema = new mongoose.Schema(
       maxlength: 120,
       default: '',
     },
+    requestedOutputTypeKey: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      maxlength: 140,
+      default: '',
+    },
+    requestedOutputTypeLabel: {
+      type: String,
+      trim: true,
+      maxlength: 120,
+      default: '',
+    },
     sourceOutputSnapshot: {
       type: mongoose.Schema.Types.Mixed,
       default: () => ({}),
@@ -208,6 +221,8 @@ outcomeSessionSchema.pre('validate', function normalizeOutcomeSession(next) {
   this.truthSignatureId = String(this.truthSignatureId || '').trim()
   this.sourceOutputTypeKey = String(this.sourceOutputTypeKey || '').trim().toUpperCase()
   this.sourceOutputTypeLabel = String(this.sourceOutputTypeLabel || '').trim()
+  this.requestedOutputTypeKey = String(this.requestedOutputTypeKey || '').trim().toLowerCase()
+  this.requestedOutputTypeLabel = String(this.requestedOutputTypeLabel || '').trim()
   this.prompt = String(this.prompt || '').trim()
   next()
 })

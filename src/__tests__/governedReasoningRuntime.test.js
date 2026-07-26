@@ -2,9 +2,13 @@ import { describe, test, expect, beforeEach, afterEach, jest } from '@jest/globa
 import mongoose from 'mongoose'
 import GovernedReasoningExecution from '../models/GovernedReasoningExecution.js'
 import GovernedRuntimeArtifact from '../models/GovernedRuntimeArtifact.js'
+import KnowledgePackVersion from '../models/KnowledgePackVersion.js'
 import {
   createGovernedReasoningExecution,
 } from '../services/governedReasoningRuntimeService.js'
+import {
+  buildOutcomeStudioProviderSafeContext,
+} from '../services/outcomeStudioProviderSafeContextService.js'
 
 const TENANT_ID = '707f1f77bcf86cd799439033'
 const CUSTOMER_ID = '607f1f77bcf86cd799439022'
@@ -205,6 +209,131 @@ const makeDeps = (overrides = {}) => ({
   ...overrides,
 })
 
+const liveDescriptor = {
+  providerKey: 'approved-provider',
+  model: 'approved-model',
+  providerMode: 'LIVE_TEST',
+  environment: 'TEST',
+  safeContextPolicyKey: 'OUTCOME_STUDIO_PROVIDER_SAFE_CONTEXT_V1',
+  failurePosture: 'FAIL_CLOSED',
+}
+
+const liveReferenceSnapshots = [
+  ['PROFESSIONAL_DOCUMENT', '11111111-1111-4111-8111-111111111111'],
+  ['PRESENTATION', '22222222-2222-4222-8222-222222222222'],
+  ['INFOGRAPHIC', '33333333-3333-4333-8333-333333333333'],
+].map(([family, referenceKey], index) => ({
+  family,
+  referenceKey,
+  referenceRevision: 1,
+  sha256: String(index + 1).repeat(64),
+  byteLength: 1000 + index,
+  mimeType: 'application/pdf',
+}))
+
+const makeLiveProviderInput = (overrides = {}) => ({
+  customerPrompt: 'Create a customer-ready proposal.',
+  currentDraftMarkdown: '',
+  request: {
+    intentType: 'CREATE_DELIVERABLE',
+    refinement: false,
+    outputTypeKey: 'CUSTOMER_PROPOSAL',
+    outputTypeLabel: 'Customer Proposal',
+    outputSchemaKey: 'CUSTOMER_PROPOSAL_SCHEMA',
+    requiredSections: [],
+    styleKey: 'EXECUTIVE',
+    styleLabel: 'Executive',
+    requestedOutputTypeKey: 'customer_proposal',
+    requestedStyleKey: 'executive',
+    workspaceType: 'OUTCOME_STUDIO',
+    ...overrides.request,
+  },
+  ...Object.fromEntries(Object.entries(overrides).filter(([key]) => key !== 'request')),
+})
+
+const makeLiveSafeRequest = () => ({
+  businessRequest: {
+    outputTypeKey: 'CUSTOMER_PROPOSAL',
+    requestedOutputTypeKey: 'customer_proposal',
+    requestedStyleKey: 'executive',
+    workspaceType: 'OUTCOME_STUDIO',
+    instruction: 'Create a customer-ready proposal.',
+  },
+  draftContext: { content: '' },
+  effectiveRequest: {
+    executionIntent: 'Create a customer-ready proposal.',
+    draftContext: { content: '' },
+  },
+})
+
+const makeLiveProviderContext = () => ({
+  contractVersion: 'OUTCOME_STUDIO_PROVIDER_SAFE_CONTEXT_V1',
+  businessRequest: { ...makeLiveSafeRequest().businessRequest },
+  draftContext: { content: '' },
+  truthSummaries: [{ label: 'Situation', summary: 'The customer needs a governed value narrative.' }],
+  guidance: {
+    businessInstructions: ['Create a decision-ready proposal.'],
+    reasoningGuidance: [],
+    outputSchema: ['Use an executive summary and recommendations.'],
+    styleGuidance: ['Use concise executive language.'],
+    validationCriteria: ['Support material claims with verified context.'],
+    prohibitedOutputBoundaries: [],
+  },
+  safeguards: [
+    'CUSTOMER_LANGUAGE_ONLY',
+    'VERIFIED_BUSINESS_CONTEXT_ONLY',
+    'NO_INTERNAL_RUNTIME_TERMINOLOGY',
+    'NO_SECRETS_OR_PERSONAL_DATA',
+    'FAIL_CLOSED_ON_UNSAFE_CONTEXT',
+  ],
+})
+
+const makeLiveAuthorization = (providerDescriptor = liveDescriptor, overrides = {}) => ({
+  policyVersion: 'OES_004_DEVELOPMENT_TEST_READINESS_V1',
+  revision: 1,
+  verdict: 'READY_FOR_TESTING',
+  providerAuthority: { ...providerDescriptor },
+  referenceSnapshots: liveReferenceSnapshots.map((snapshot) => ({ ...snapshot })),
+  ...overrides,
+})
+
+const makeLivePayload = (overrides = {}) => ({
+  outputTypeKey: 'CUSTOMER_PROPOSAL',
+  requestedOutputTypeKey: 'customer_proposal',
+  requestedStyleKey: 'executive',
+  workspaceType: 'OUTCOME_STUDIO',
+  idempotencyKey: 'live-test-request',
+  ...overrides,
+})
+
+const makeLiveDeps = (overrides = {}) => {
+  const knowledge = makeKnowledgeBinding()
+  knowledge.binding.providerContextPacks = [{
+    versionId: 'kpv-reasoning',
+    knowledgeLayer: 'REASONING',
+    executionMode: 'PROVIDER_CONTEXT',
+  }]
+  return makeDeps({
+    executionMode: 'LIVE_TEST',
+    providerDescriptor: { ...liveDescriptor },
+    providerInput: makeLiveProviderInput(),
+    authorizeLiveTest: jest.fn().mockResolvedValue(makeLiveAuthorization(overrides.providerDescriptor || liveDescriptor)),
+    buildProviderSafeRequest: jest.fn().mockResolvedValue(makeLiveSafeRequest()),
+    buildProviderSafeContext: jest.fn().mockResolvedValue(makeLiveProviderContext()),
+    providerAdapter: jest.fn().mockResolvedValue({
+      ...makeProviderResult(),
+      provider: {
+        providerKey: liveDescriptor.providerKey,
+        model: liveDescriptor.model,
+        providerMode: 'LIVE_TEST',
+        liveProvider: true,
+      },
+    }),
+    resolveKnowledgeBinding: jest.fn().mockResolvedValue(knowledge),
+    ...overrides,
+  })
+}
+
 describe('Governed Reasoning Runtime models and service', () => {
   let originalProviderMode
 
@@ -347,7 +476,7 @@ describe('Governed Reasoning Runtime models and service', () => {
 
     expect(deps.resolveKnowledgeBinding).toHaveBeenCalledWith(expect.objectContaining({
       query: expect.objectContaining({
-        requestedOutputTypeKey: 'board-summary',
+        requestedOutputTypeKey: 'board_summary',
         requestedStyleKey: 'executive-board-style',
         audienceKeys: ['executive-board'],
         industryKeys: ['financial-services'],
@@ -355,6 +484,43 @@ describe('Governed Reasoning Runtime models and service', () => {
         channelKey: 'board-portal',
       }),
     }))
+  })
+
+  test('keeps underscore and hyphen output capabilities distinct in persisted GRR requests and fingerprints', async () => {
+    const deps = makeDeps()
+    const basePayload = {
+      outputTypeKey: 'SALES_EMAIL',
+      executionIntent: 'Create a customer-ready sales email.',
+    }
+
+    const underscoreResult = await createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      auditRequest: { requestId: 'req-sales-email-underscore' },
+      deps,
+      payload: {
+        ...basePayload,
+        requestedOutputTypeKey: 'sales_email',
+      },
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })
+    const hyphenResult = await createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      auditRequest: { requestId: 'req-sales-email-hyphen' },
+      deps,
+      payload: {
+        ...basePayload,
+        requestedOutputTypeKey: 'sales-email',
+      },
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })
+
+    expect(underscoreResult.requestedOutputTypeKey).toBe('sales_email')
+    expect(underscoreResult.artifact.requestedOutputTypeKey).toBe('sales_email')
+    expect(hyphenResult.requestedOutputTypeKey).toBe('sales-email')
+    expect(hyphenResult.artifact.requestedOutputTypeKey).toBe('sales-email')
+    expect(underscoreResult.requestFingerprint).not.toBe(hyphenResult.requestFingerprint)
   })
 
   test('passes only projected Knowledge Pack metadata and Certified Truth summaries to providers', async () => {
@@ -1045,5 +1211,624 @@ describe('Governed Reasoning Runtime models and service', () => {
     expect(GovernedRuntimeArtifact.findOne).not.toHaveBeenCalled()
     expect(GovernedRuntimeArtifact.deleteOne).toHaveBeenCalledTimes(1)
     expect(GovernedReasoningExecution.deleteOne).toHaveBeenCalledTimes(1)
+  })
+
+  test('executes LIVE_TEST through two readiness checks and one exact provider-safe adapter envelope', async () => {
+    const deps = makeLiveDeps()
+    const result = await createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      auditRequest: { requestId: 'req-live-test' },
+      deps,
+      payload: {
+        outputTypeKey: 'CUSTOMER_PROPOSAL',
+        requestedOutputTypeKey: 'customer_proposal',
+        requestedStyleKey: 'executive',
+        workspaceType: 'OUTCOME_STUDIO',
+        executionIntent: 'Ignored raw intent.',
+        idempotencyKey: 'live-test-request-1',
+      },
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })
+
+    expect(deps.authorizeLiveTest.mock.calls.map(([call]) => call.stage)).toEqual(['PRE_IDEMPOTENCY', 'PRE_ADAPTER'])
+    expect(deps.buildProviderSafeRequest).toHaveBeenCalledWith({
+      providerDescriptor: liveDescriptor,
+      providerInput: deps.providerInput,
+    })
+    expect(deps.buildProviderSafeContext).toHaveBeenCalledWith(expect.objectContaining({
+      providerDescriptor: liveDescriptor,
+      safeRequest: makeLiveSafeRequest(),
+      truthSource: {
+        acceptedTruth: [
+          { label: 'Situation', content: 'The customer needs a governed value narrative.' },
+          { label: 'Commercial Problem', content: 'The commercial problem is fragmented proof and unclear value.' },
+        ],
+      },
+      knowledgeSelection: [{ versionId: 'kpv-reasoning', knowledgeLayer: 'REASONING', executionMode: 'PROVIDER_CONTEXT' }],
+    }))
+    expect(deps.providerAdapter).toHaveBeenCalledTimes(1)
+    expect(deps.providerAdapter).toHaveBeenCalledWith({ providerContext: makeLiveProviderContext() })
+    expect(result.providerMode).toBe('LIVE_TEST')
+    expect(result.executionIntent).toBe('Create a customer-ready proposal.')
+    expect(result.requestFingerprint).toMatch(/^sha256:[a-f0-9]{64}$/)
+    expect(GovernedReasoningExecution.prototype.save).toHaveBeenCalled()
+    expect(GovernedRuntimeArtifact.prototype.save).toHaveBeenCalled()
+    expect(deps.logAudit).toHaveBeenCalledTimes(1)
+  })
+
+  test('persists LIVE_TEST provider evidence from governed authority without aliasing adapter output', async () => {
+    const adapterProvider = {
+      providerKey: liveDescriptor.providerKey,
+      model: liveDescriptor.model,
+      providerMode: 'LIVE_TEST',
+      liveProvider: true,
+    }
+    const deps = makeLiveDeps({
+      providerAdapter: jest.fn().mockResolvedValue({
+        ...makeProviderResult(),
+        provider: adapterProvider,
+      }),
+    })
+
+    await createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      deps,
+      payload: makeLivePayload({ idempotencyKey: 'live-test-provider-provenance' }),
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })
+
+    const execution = GovernedReasoningExecution.prototype.save.mock.instances[0]
+    const artifact = GovernedRuntimeArtifact.prototype.save.mock.instances[0]
+    const governedEvidence = {
+      providerKey: liveDescriptor.providerKey,
+      model: liveDescriptor.model,
+      providerMode: 'LIVE_TEST',
+      liveProvider: true,
+    }
+
+    expect(execution.provider).toEqual(governedEvidence)
+    expect(artifact.safeJson.provider).toEqual(governedEvidence)
+    expect(execution.provider).not.toBe(adapterProvider)
+    expect(artifact.safeJson.provider).not.toBe(adapterProvider)
+    expect(execution.provider).not.toBe(artifact.safeJson.provider)
+
+    adapterProvider.model = 'adapter-mutated-after-validation'
+    expect(execution.provider.model).toBe(liveDescriptor.model)
+    expect(artifact.safeJson.provider.model).toBe(liveDescriptor.model)
+  })
+
+  test.each([
+    ['missing authorization', () => null],
+    ['extra authorization field', () => ({ ...makeLiveAuthorization(), extra: true })],
+    ...['policyVersion', 'revision', 'verdict', 'providerAuthority', 'referenceSnapshots'].map((key) => [
+      `missing authorization.${key}`,
+      () => {
+        const value = makeLiveAuthorization()
+        delete value[key]
+        return value
+      },
+    ]),
+    ['non-ready verdict', () => makeLiveAuthorization(liveDescriptor, { verdict: 'BLOCKED_FOR_TESTING' })],
+    ['non-positive revision', () => makeLiveAuthorization(liveDescriptor, { revision: 0 })],
+    ['wrong policy', () => makeLiveAuthorization(liveDescriptor, { policyVersion: 'LEGACY_SLICE_5A_V1' })],
+    ['missing authority field', () => {
+      const value = makeLiveAuthorization()
+      delete value.providerAuthority.model
+      return value
+    }],
+    ['extra snapshot field', () => {
+      const value = makeLiveAuthorization()
+      value.referenceSnapshots[0].extra = true
+      return value
+    }],
+    ...['family', 'referenceKey', 'referenceRevision', 'sha256', 'byteLength', 'mimeType'].map((key) => [
+      `missing snapshot.${key}`,
+      () => {
+        const value = makeLiveAuthorization()
+        delete value.referenceSnapshots[0][key]
+        return value
+      },
+    ]),
+    ['missing snapshot', () => makeLiveAuthorization(liveDescriptor, { referenceSnapshots: liveReferenceSnapshots.slice(0, 2) })],
+    ['wrong snapshot order', () => makeLiveAuthorization(liveDescriptor, { referenceSnapshots: [...liveReferenceSnapshots].reverse() })],
+    ['malformed snapshot identity', () => {
+      const value = makeLiveAuthorization()
+      value.referenceSnapshots[0].referenceKey = 'not-a-v4-uuid'
+      return value
+    }],
+  ])('rejects %s before runtime resolution, cache lookup, or provider work', async (_label, buildAuthorization) => {
+    const deps = makeLiveDeps({ authorizeLiveTest: jest.fn().mockResolvedValue(buildAuthorization()) })
+    await expect(createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      deps,
+      payload: makeLivePayload(),
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })).rejects.toMatchObject({ status: 409, code: 'GRR_LIVE_TEST_READINESS_BLOCKED' })
+    expect(deps.resolveRuntimeInstance).not.toHaveBeenCalled()
+    expect(deps.buildProviderSafeRequest).not.toHaveBeenCalled()
+    expect(GovernedReasoningExecution.findOne).not.toHaveBeenCalled()
+    expect(deps.providerAdapter).not.toHaveBeenCalled()
+  })
+
+  test('rejects a malformed second authorization before the provider adapter', async () => {
+    const deps = makeLiveDeps({
+      authorizeLiveTest: jest.fn()
+        .mockResolvedValueOnce(makeLiveAuthorization())
+        .mockResolvedValueOnce(makeLiveAuthorization(liveDescriptor, { verdict: 'BLOCKED_FOR_TESTING' })),
+    })
+    await expect(createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      deps,
+      payload: makeLivePayload(),
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })).rejects.toMatchObject({ status: 409, code: 'GRR_LIVE_TEST_READINESS_BLOCKED' })
+    expect(deps.authorizeLiveTest.mock.calls.map(([call]) => call.stage)).toEqual(['PRE_IDEMPOTENCY', 'PRE_ADAPTER'])
+    expect(deps.providerAdapter).not.toHaveBeenCalled()
+    expect(GovernedReasoningExecution.prototype.save).not.toHaveBeenCalled()
+  })
+
+  test('binds LIVE_TEST request fingerprints to the approved provider authority', async () => {
+    const first = await createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      deps: makeLiveDeps(),
+      payload: {
+        outputTypeKey: 'CUSTOMER_PROPOSAL',
+        requestedOutputTypeKey: 'customer_proposal',
+        requestedStyleKey: 'executive',
+        workspaceType: 'OUTCOME_STUDIO',
+        idempotencyKey: 'live-test-provider-authority-1',
+      },
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })
+    const changedDescriptor = { ...liveDescriptor, model: 'approved-model-v2' }
+    const second = await createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      deps: makeLiveDeps({
+        providerDescriptor: changedDescriptor,
+        providerAdapter: jest.fn().mockResolvedValue({
+          ...makeProviderResult(),
+          provider: {
+            providerKey: changedDescriptor.providerKey,
+            model: changedDescriptor.model,
+            providerMode: 'LIVE_TEST',
+            liveProvider: true,
+          },
+        }),
+      }),
+      payload: {
+        outputTypeKey: 'CUSTOMER_PROPOSAL',
+        requestedOutputTypeKey: 'customer_proposal',
+        requestedStyleKey: 'executive',
+        workspaceType: 'OUTCOME_STUDIO',
+        idempotencyKey: 'live-test-provider-authority-2',
+      },
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })
+
+    expect(first.requestFingerprint).toMatch(/^sha256:[a-f0-9]{64}$/)
+    expect(second.requestFingerprint).toMatch(/^sha256:[a-f0-9]{64}$/)
+    expect(second.requestFingerprint).not.toBe(first.requestFingerprint)
+  })
+
+  test('returns a cached LIVE_TEST execution only after current authorization and exact provider evidence', async () => {
+    const deps = makeLiveDeps()
+    const payload = makeLivePayload({ idempotencyKey: 'live-test-cache-hit' })
+    const first = await createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      deps,
+      payload,
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })
+    GovernedReasoningExecution.findOne = jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue(first) })
+    GovernedRuntimeArtifact.findOne = jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue(first.artifact) })
+    deps.authorizeLiveTest.mockClear()
+    deps.buildProviderSafeRequest.mockClear()
+    deps.buildProviderSafeContext.mockClear()
+    deps.providerAdapter.mockClear()
+
+    const cached = await createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      deps,
+      payload,
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })
+
+    expect(cached.executionId).toBe(first.executionId)
+    expect(deps.authorizeLiveTest.mock.calls.map(([call]) => call.stage)).toEqual(['PRE_IDEMPOTENCY'])
+    expect(deps.buildProviderSafeRequest).toHaveBeenCalledTimes(1)
+    expect(deps.buildProviderSafeContext).not.toHaveBeenCalled()
+    expect(deps.providerAdapter).not.toHaveBeenCalled()
+  })
+
+  test('rejects cached LIVE_TEST provider evidence that no longer matches current authority', async () => {
+    const deps = makeLiveDeps()
+    const payload = makeLivePayload({ idempotencyKey: 'live-test-cache-provider-conflict' })
+    const first = await createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      deps,
+      payload,
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })
+    GovernedReasoningExecution.findOne = jest.fn().mockReturnValue({
+      lean: jest.fn().mockResolvedValue({
+        ...first,
+        provider: { ...first.provider, model: 'unapproved-model' },
+      }),
+    })
+    GovernedRuntimeArtifact.findOne.mockClear()
+
+    await expect(createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      deps,
+      payload,
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })).rejects.toMatchObject({
+      status: 409,
+      code: 'GRR_IDEMPOTENCY_REQUEST_CONFLICT',
+      details: expect.objectContaining({ fingerprintState: 'PROVIDER_MISMATCHED' }),
+    })
+    expect(GovernedRuntimeArtifact.findOne).not.toHaveBeenCalled()
+  })
+
+  test('reauthorizes and checks provider evidence before returning a LIVE_TEST race winner', async () => {
+    const deps = makeLiveDeps()
+    const idempotencyKey = 'live-test-race-winner'
+    let attemptedFingerprint
+    const winner = {
+      executionId: 'grr_exec_live_race_winner',
+      status: 'COMPLETED',
+      providerMode: 'LIVE_TEST',
+      provider: {
+        providerKey: liveDescriptor.providerKey,
+        model: liveDescriptor.model,
+        providerMode: 'LIVE_TEST',
+        liveProvider: true,
+      },
+      idempotencyKey,
+    }
+    const winnerArtifact = { runtimeArtifactId: 'grr_art_live_race_winner', executionId: winner.executionId, status: 'GENERATED' }
+    GovernedReasoningExecution.findOne = jest.fn()
+      .mockReturnValueOnce({ lean: jest.fn().mockResolvedValue(null) })
+      .mockReturnValueOnce({ lean: jest.fn(async () => ({ ...winner, requestFingerprint: attemptedFingerprint })) })
+    GovernedRuntimeArtifact.findOne = jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue(winnerArtifact) })
+    GovernedReasoningExecution.prototype.save = jest.fn(async function save() {
+      attemptedFingerprint = this.requestFingerprint
+      const error = new Error('duplicate runtimeInstanceId_1_idempotencyKey_1')
+      error.code = 11000
+      error.keyPattern = { runtimeInstanceId: 1, idempotencyKey: 1 }
+      throw error
+    })
+
+    const result = await createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      deps,
+      payload: makeLivePayload({ idempotencyKey }),
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })
+
+    expect(result.executionId).toBe(winner.executionId)
+    expect(deps.authorizeLiveTest.mock.calls.map(([call]) => call.stage)).toEqual([
+      'PRE_IDEMPOTENCY',
+      'PRE_ADAPTER',
+      'PRE_RACE_WINNER_RETURN',
+    ])
+    expect(GovernedRuntimeArtifact.findOne).toHaveBeenCalledTimes(1)
+  })
+
+  test('blocks a LIVE_TEST race winner when final authorization is no longer ready', async () => {
+    const deps = makeLiveDeps({
+      authorizeLiveTest: jest.fn()
+        .mockResolvedValueOnce(makeLiveAuthorization())
+        .mockResolvedValueOnce(makeLiveAuthorization())
+        .mockResolvedValueOnce(makeLiveAuthorization(liveDescriptor, { verdict: 'BLOCKED_FOR_TESTING' })),
+    })
+    GovernedReasoningExecution.findOne = jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue(null) })
+    GovernedReasoningExecution.prototype.save = jest.fn(async () => {
+      const error = new Error('duplicate runtimeInstanceId_1_idempotencyKey_1')
+      error.code = 11000
+      error.keyPattern = { runtimeInstanceId: 1, idempotencyKey: 1 }
+      throw error
+    })
+
+    await expect(createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      deps,
+      payload: makeLivePayload({ idempotencyKey: 'live-test-race-revoked' }),
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })).rejects.toMatchObject({ status: 409, code: 'GRR_LIVE_TEST_READINESS_BLOCKED' })
+    expect(deps.authorizeLiveTest.mock.calls.map(([call]) => call.stage)).toEqual([
+      'PRE_IDEMPOTENCY',
+      'PRE_ADAPTER',
+      'PRE_RACE_WINNER_RETURN',
+    ])
+    expect(GovernedReasoningExecution.findOne).toHaveBeenCalledTimes(1)
+    expect(GovernedRuntimeArtifact.findOne).not.toHaveBeenCalled()
+  })
+
+  test.each([null, '', 'live_test', 'UNKNOWN'])('rejects invalid explicit execution mode %p before runtime or cache lookup', async (executionMode) => {
+    const deps = makeLiveDeps({ executionMode })
+    await expect(createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      deps,
+      payload: { outputTypeKey: 'CUSTOMER_PROPOSAL' },
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })).rejects.toMatchObject({
+      status: 503,
+      code: 'GRR_LIVE_TEST_PROVIDER_CONFIGURATION_INVALID',
+      details: { reason: 'LIVE_TEST_PROVIDER_CONFIGURATION_INVALID' },
+    })
+    expect(deps.resolveRuntimeInstance).not.toHaveBeenCalled()
+    expect(GovernedReasoningExecution.findOne).not.toHaveBeenCalled()
+    expect(deps.providerAdapter).not.toHaveBeenCalled()
+  })
+
+  test.each([
+    ['provider adapter', { providerAdapter: null }],
+    ['authorization function', { authorizeLiveTest: null }],
+    ['safe-request builder', { buildProviderSafeRequest: null }],
+    ['safe-context builder', { buildProviderSafeContext: null }],
+  ])('rejects an invalid LIVE_TEST %s dependency before runtime work', async (_label, override) => {
+    const deps = makeLiveDeps(override)
+    await expect(createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      deps,
+      payload: makeLivePayload(),
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })).rejects.toMatchObject({ status: 503, code: 'GRR_LIVE_TEST_PROVIDER_CONFIGURATION_INVALID' })
+    expect(deps.resolveRuntimeInstance).not.toHaveBeenCalled()
+    expect(GovernedReasoningExecution.findOne).not.toHaveBeenCalled()
+  })
+
+  test.each([
+    ['missing field', (value) => { delete value.model }],
+    ['extra field', (value) => { value.extra = true }],
+    ['unstable provider key', (value) => { value.providerKey = 'Approved Provider' }],
+    ['oversize provider key', (value) => { value.providerKey = `a${'b'.repeat(140)}` }],
+    ['blank model', (value) => { value.model = ' ' }],
+    ['control-character model', (value) => { value.model = 'approved\u0007model' }],
+    ['wrong provider mode', (value) => { value.providerMode = 'DETERMINISTIC_TEST' }],
+    ['wrong environment', (value) => { value.environment = 'PRODUCTION' }],
+    ['wrong safe-context policy', (value) => { value.safeContextPolicyKey = 'OTHER_POLICY' }],
+    ['non-fail-closed posture', (value) => { value.failurePosture = 'BEST_EFFORT' }],
+  ])('rejects LIVE_TEST descriptor with %s', async (_label, mutate) => {
+    const providerDescriptor = { ...liveDescriptor }
+    mutate(providerDescriptor)
+    const deps = makeLiveDeps({ providerDescriptor })
+    await expect(createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      deps,
+      payload: makeLivePayload(),
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })).rejects.toMatchObject({ status: 503, code: 'GRR_LIVE_TEST_PROVIDER_CONFIGURATION_INVALID' })
+    expect(deps.resolveRuntimeInstance).not.toHaveBeenCalled()
+  })
+
+  test('blocks LIVE_TEST readiness before safe projection, cache lookup, adapter, or persistence', async () => {
+    const readinessError = Object.assign(new Error('blocked'), {
+      status: 409,
+      code: 'GRR_LIVE_TEST_READINESS_BLOCKED',
+      details: { reason: 'DEVELOPMENT_TEST_READINESS_BLOCKED' },
+    })
+    const deps = makeLiveDeps({ authorizeLiveTest: jest.fn().mockRejectedValue(readinessError) })
+    await expect(createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      deps,
+      payload: {
+        outputTypeKey: 'CUSTOMER_PROPOSAL',
+        requestedOutputTypeKey: 'customer_proposal',
+        requestedStyleKey: 'executive',
+        workspaceType: 'OUTCOME_STUDIO',
+      },
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })).rejects.toMatchObject({ status: 409, code: 'GRR_LIVE_TEST_READINESS_BLOCKED' })
+    expect(deps.buildProviderSafeRequest).not.toHaveBeenCalled()
+    expect(GovernedReasoningExecution.findOne).not.toHaveBeenCalled()
+    expect(deps.providerAdapter).not.toHaveBeenCalled()
+    expect(GovernedReasoningExecution.prototype.save).not.toHaveBeenCalled()
+    expect(deps.logAudit).not.toHaveBeenCalled()
+  })
+
+  test('blocks an exact 2501-line selected source before provider execution or persistence', async () => {
+    const governedContent = [
+      '# Business Guidance',
+      'Prioritise the decision and evidence-based recommendation.',
+      '# Structure',
+      'Use an executive summary and recommendations.',
+      '# Executive Style',
+      'Use concise customer language.',
+      '# Validation Criteria',
+      'Support material claims with verified business information.',
+      ...Array.from({ length: 2493 }, (_, index) => `- supporting business criterion ${index + 1}`),
+    ].join('\n')
+    const lean = jest.fn().mockResolvedValue([{
+      versionId: 'kpv-reasoning',
+      content: governedContent,
+    }])
+    const select = jest.fn().mockReturnValue({ lean })
+    const find = jest.spyOn(KnowledgePackVersion, 'find').mockReturnValue({ select })
+    const deps = makeLiveDeps({
+      buildProviderSafeContext: buildOutcomeStudioProviderSafeContext,
+    })
+
+    await expect(createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      deps,
+      payload: makeLivePayload(),
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })).rejects.toMatchObject({
+      status: 422,
+      code: 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED',
+    })
+
+    expect(find).toHaveBeenCalledTimes(1)
+    expect(deps.providerAdapter).not.toHaveBeenCalled()
+    expect(GovernedReasoningExecution.prototype.save).not.toHaveBeenCalled()
+    expect(GovernedRuntimeArtifact.prototype.save).not.toHaveBeenCalled()
+    expect(deps.logAudit).not.toHaveBeenCalled()
+    find.mockRestore()
+  })
+
+  test.each([
+    ['output type', { outputTypeKey: 'BOARD_REVIEW' }],
+    ['requested output type', { requestedOutputTypeKey: 'board_review' }],
+    ['requested style', { requestedStyleKey: 'formal' }],
+    ['workspace type', { workspaceType: 'DISCOVERY' }],
+  ])('blocks mismatched provider-input %s selector before fingerprint or cache lookup', async (_label, request) => {
+    const deps = makeLiveDeps({ providerInput: makeLiveProviderInput({ request }) })
+    await expect(createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      deps,
+      payload: {
+        outputTypeKey: 'CUSTOMER_PROPOSAL',
+        requestedOutputTypeKey: 'customer_proposal',
+        requestedStyleKey: 'executive',
+        workspaceType: 'OUTCOME_STUDIO',
+      },
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })).rejects.toMatchObject({
+      status: 422,
+      code: 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED',
+      details: { reason: 'PROVIDER_SAFE_CONTEXT_BLOCKED' },
+    })
+    expect(deps.buildProviderSafeRequest).not.toHaveBeenCalled()
+    expect(GovernedReasoningExecution.findOne).not.toHaveBeenCalled()
+    expect(deps.providerAdapter).not.toHaveBeenCalled()
+  })
+
+  test.each([
+    ['missing customer prompt', (value) => { delete value.customerPrompt }],
+    ['missing current draft', (value) => { delete value.currentDraftMarkdown }],
+    ['missing request', (value) => { delete value.request }],
+    ['extra top-level key', (value) => { value.extra = true }],
+    ['extra request key', (value) => { value.request.extra = true }],
+    ...[
+      'intentType',
+      'refinement',
+      'outputTypeKey',
+      'outputTypeLabel',
+      'outputSchemaKey',
+      'requiredSections',
+      'styleKey',
+      'styleLabel',
+      'requestedOutputTypeKey',
+      'requestedStyleKey',
+      'workspaceType',
+    ].map((key) => [`missing request.${key}`, (value) => { delete value.request[key] }]),
+  ])('blocks provider input with %s before safe projection or cache lookup', async (_label, mutate) => {
+    const providerInput = makeLiveProviderInput()
+    mutate(providerInput)
+    const deps = makeLiveDeps({ providerInput })
+    await expect(createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      deps,
+      payload: makeLivePayload(),
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })).rejects.toMatchObject({ status: 422, code: 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED' })
+    expect(deps.buildProviderSafeRequest).not.toHaveBeenCalled()
+    expect(GovernedReasoningExecution.findOne).not.toHaveBeenCalled()
+  })
+
+  test.each([
+    ['an extra nested safe-request field', () => {
+      const value = makeLiveSafeRequest()
+      value.businessRequest.extra = true
+      return { buildProviderSafeRequest: jest.fn().mockResolvedValue(value) }
+    }],
+    ['safe-request selector drift', () => {
+      const value = makeLiveSafeRequest()
+      value.businessRequest.outputTypeKey = 'BOARD_REVIEW'
+      return { buildProviderSafeRequest: jest.fn().mockResolvedValue(value) }
+    }],
+    ['missing required context guidance', () => {
+      const value = makeLiveProviderContext()
+      value.guidance.outputSchema = []
+      return { buildProviderSafeContext: jest.fn().mockResolvedValue(value) }
+    }],
+    ['unsafe provider context text', () => {
+      const value = makeLiveProviderContext()
+      value.guidance.styleGuidance = ['Use the provider context directly.']
+      return { buildProviderSafeContext: jest.fn().mockResolvedValue(value) }
+    }],
+    ['provider context request drift', () => {
+      const value = makeLiveProviderContext()
+      value.businessRequest.instruction = 'Create a different deliverable.'
+      return { buildProviderSafeContext: jest.fn().mockResolvedValue(value) }
+    }],
+  ])('blocks %s without provider execution or persistence', async (_label, buildOverride) => {
+    const deps = makeLiveDeps(buildOverride())
+    await expect(createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      deps,
+      payload: makeLivePayload(),
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })).rejects.toMatchObject({ status: 422, code: 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED' })
+    expect(deps.providerAdapter).not.toHaveBeenCalled()
+    expect(GovernedReasoningExecution.prototype.save).not.toHaveBeenCalled()
+    expect(deps.logAudit).not.toHaveBeenCalled()
+  })
+
+  test.each([
+    ['provider key', (provider) => { provider.providerKey = 'other-provider' }],
+    ['provider key casing', (provider) => { provider.providerKey = provider.providerKey.toUpperCase() }],
+    ['model', (provider) => { provider.model = 'other-model' }],
+    ['model whitespace', (provider) => { provider.model = ` ${provider.model} ` }],
+    ['provider mode', (provider) => { provider.providerMode = 'DETERMINISTIC_TEST' }],
+    ['live-provider flag', (provider) => { provider.liveProvider = false }],
+    ['missing evidence field', (provider) => { delete provider.model }],
+    ['extra evidence field', (provider) => { provider.extra = true }],
+  ])('rejects a mismatched LIVE_TEST provider result %s without persistence or audit', async (_label, mutate) => {
+    const provider = {
+      providerKey: liveDescriptor.providerKey,
+      model: liveDescriptor.model,
+      providerMode: 'LIVE_TEST',
+      liveProvider: true,
+    }
+    mutate(provider)
+    const deps = makeLiveDeps({
+      providerAdapter: jest.fn().mockResolvedValue({
+        ...makeProviderResult(),
+        provider,
+      }),
+    })
+    await expect(createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      deps,
+      payload: {
+        outputTypeKey: 'CUSTOMER_PROPOSAL',
+        requestedOutputTypeKey: 'customer_proposal',
+        requestedStyleKey: 'executive',
+        workspaceType: 'OUTCOME_STUDIO',
+      },
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })).rejects.toMatchObject({
+      status: 502,
+      code: 'GRR_LIVE_TEST_PROVIDER_RESULT_INVALID',
+      details: { reason: 'LIVE_TEST_PROVIDER_RESULT_INVALID' },
+    })
+    expect(deps.providerAdapter).toHaveBeenCalledTimes(1)
+    expect(GovernedReasoningExecution.prototype.save).not.toHaveBeenCalled()
+    expect(GovernedRuntimeArtifact.prototype.save).not.toHaveBeenCalled()
+    expect(deps.logAudit).not.toHaveBeenCalled()
   })
 })

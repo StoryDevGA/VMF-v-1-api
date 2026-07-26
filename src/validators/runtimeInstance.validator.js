@@ -823,7 +823,7 @@ const createGovernedReasoningExecutionSchema = z.object({
     .string({ required_error: 'outputTypeKey is required' })
     .trim()
     .min(1, 'outputTypeKey is required')
-    .max(80, 'outputTypeKey must be 80 characters or fewer')
+    .max(140, 'outputTypeKey must be 140 characters or fewer')
     .transform((value) => value.toUpperCase()),
   executionIntent: z
     .string()
@@ -834,7 +834,7 @@ const createGovernedReasoningExecutionSchema = z.object({
     .string()
     .trim()
     .min(1, 'requestedOutputTypeKey must not be empty')
-    .max(120, 'requestedOutputTypeKey must be 120 characters or fewer')
+    .max(140, 'requestedOutputTypeKey must be 140 characters or fewer')
     .transform((value) => value.toLowerCase())
     .optional(),
   requestedStyleKey: z
@@ -911,6 +911,13 @@ const createRuntimeOutcomeSessionSchema = z.object({
     .min(1, 'prompt must not be empty')
     .max(2000, 'prompt must be 2000 characters or fewer')
     .optional(),
+  requestedOutputTypeKey: z
+    .string()
+    .trim()
+    .min(1, 'requestedOutputTypeKey must not be empty')
+    .max(140, 'requestedOutputTypeKey must be 140 characters or fewer')
+    .transform((value) => value.toLowerCase())
+    .optional(),
 }).strict()
 
 const createRuntimeOutcomeMessageSchema = z.object({
@@ -919,6 +926,13 @@ const createRuntimeOutcomeMessageSchema = z.object({
     .trim()
     .min(1, 'prompt must not be empty')
     .max(2000, 'prompt must be 2000 characters or fewer'),
+  requestedOutputTypeKey: z
+    .string()
+    .trim()
+    .min(1, 'requestedOutputTypeKey must not be empty')
+    .max(140, 'requestedOutputTypeKey must be 140 characters or fewer')
+    .transform((value) => value.toLowerCase())
+    .optional(),
 }).strict()
 
 const runtimeOutcomeSessionParamsSchema = runtimeInstanceIdSchema.extend({
@@ -972,6 +986,9 @@ const runtimeOutcomeAssetExportParamsSchema = runtimeOutcomeAssetParamsSchema.ex
 })
 
 const emptyRuntimeOutputMutationSchema = z.object({}).strict()
+const discardRuntimeOutcomeDraftSchema = z.object({
+  expectedUpdatedAt: expectedUpdatedAtSchema,
+}).strict()
 
 export const validateCreateRuntimeInstance = createBodyValidator(createRuntimeInstanceSchema, {
   message: 'Request validation failed.',
@@ -1159,61 +1176,85 @@ export const validateCreateGovernedReasoningExecution = createBodyValidator(crea
 export const validateCreateRuntimeOutcomeSession = createBodyValidator(createRuntimeOutcomeSessionSchema, {
   message: 'Request validation failed.',
   rootIssueKey: '_root',
+  includeDetails: false,
 })
 
 export const validateCreateRuntimeOutcomeMessage = createBodyValidator(createRuntimeOutcomeMessageSchema, {
   message: 'Request validation failed.',
   rootIssueKey: '_root',
+  includeDetails: false,
+})
+
+export const validateRuntimeOutcomeInstanceId = createParamsValidator(runtimeInstanceIdSchema, {
+  message: 'Invalid request parameters.',
+  rootIssueKey: '_root',
+  includeDetails: false,
 })
 
 export const validateRuntimeOutcomeSessionParams = createParamsValidator(runtimeOutcomeSessionParamsSchema, {
   message: 'Invalid request parameters.',
   rootIssueKey: '_root',
+  includeDetails: false,
 })
 
 export const validateRuntimeOutcomeMessageParams = createParamsValidator(runtimeOutcomeMessageParamsSchema, {
   message: 'Invalid request parameters.',
   rootIssueKey: '_root',
+  includeDetails: false,
 })
 
 export const validateRuntimeOutcomeDraftParams = createParamsValidator(runtimeOutcomeDraftParamsSchema, {
   message: 'Invalid request parameters.',
   rootIssueKey: '_root',
+  includeDetails: false,
 })
 
 export const validateRuntimeOutcomeAssetParams = createParamsValidator(runtimeOutcomeAssetParamsSchema, {
   message: 'Invalid request parameters.',
   rootIssueKey: '_root',
+  includeDetails: false,
 })
 
 export const validateRuntimeOutcomeAssetVersionParams = createParamsValidator(runtimeOutcomeAssetVersionParamsSchema, {
   message: 'Invalid request parameters.',
   rootIssueKey: '_root',
+  includeDetails: false,
 })
 
 export const validateRuntimeOutcomeAssetExportParams = createParamsValidator(runtimeOutcomeAssetExportParamsSchema, {
   message: 'Invalid request parameters.',
   rootIssueKey: '_root',
+  includeDetails: false,
 })
 
 export const validateGenerateRuntimeOutcomeResponse = createBodyValidator(emptyRuntimeOutputMutationSchema, {
   message: 'Request validation failed.',
   rootIssueKey: '_root',
+  includeDetails: false,
 })
 
 export const validateUpdateRuntimeOutcomeSessionFromLatestTruth = createBodyValidator(emptyRuntimeOutputMutationSchema, {
   message: 'Request validation failed.',
   rootIssueKey: '_root',
+  includeDetails: false,
 })
 
 export const validateApproveRuntimeOutcomeDraft = createBodyValidator(emptyRuntimeOutputMutationSchema, {
   message: 'Request validation failed.',
   rootIssueKey: '_root',
+  includeDetails: false,
+})
+
+export const validateDiscardRuntimeOutcomeDraft = createBodyValidator(discardRuntimeOutcomeDraftSchema, {
+  message: 'Request validation failed.',
+  rootIssueKey: '_root',
+  includeDetails: false,
 })
 
 export const validatePublishRuntimeOutcomeAsset = createBodyValidator(emptyRuntimeOutputMutationSchema, {
   message: 'Request validation failed.',
   rootIssueKey: '_root',
+  includeDetails: false,
 })
 
 export const validateGenerateRuntimeOutputRequest = createBodyValidator(emptyRuntimeOutputMutationSchema, {

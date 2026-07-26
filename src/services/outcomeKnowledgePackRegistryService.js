@@ -48,7 +48,10 @@ import {
   isKnowledgePackVersionDuplicateRace,
   scanOutcomeKnowledgePackDuplicates,
 } from './knowledgePackDuplicateGovernanceService.js'
-import { resolveRequestSpecificKnowledgePacks } from './knowledgePackRequestResolutionService.js'
+import {
+  discoverRequestSpecificOutputTypes,
+  resolveRequestSpecificKnowledgePacks,
+} from './knowledgePackRequestResolutionService.js'
 
 const normalizeText = (value) => String(value || '').trim()
 const normalizeToken = (value) => normalizeText(value).toUpperCase()
@@ -1368,8 +1371,13 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
     languageKey,
     channelKey,
   })
+  const hasDiscoverableOutputTypes = eligibleActivations.some((activation) => (
+    normalizeToken(activation.knowledgeLayer) === 'OUTPUT_TYPE'
+    && !OUTCOME_STUDIO_REQUIRED_PACKS
+      .some((requiredPack) => buildRequiredPackKey(requiredPack) === buildRequiredPackKey(activation))
+  ))
   let versionEvidenceExclusions = []
-  if (requestSpecific) {
+  if (requestSpecific || hasDiscoverableOutputTypes) {
     const versionEvidence = await resolveRequestRuntimeVersionEvidence({
       activations: eligibleActivations,
     })
@@ -1488,6 +1496,18 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
   const status = unboundRequiredPacks.length === 0
     ? OUTCOME_STUDIO_BINDING_STATUSES.PROJECTED
     : OUTCOME_STUDIO_BINDING_STATUSES.BLOCKED
+  const availableOutputTypes = discoverRequestSpecificOutputTypes({
+    mandatorySafeguards: activeRequiredPacks,
+    candidates: [...activeActivationByPackKey.values()].filter(
+      (activation) => !OUTCOME_STUDIO_REQUIRED_PACKS
+        .some((requiredPack) => buildRequiredPackKey(requiredPack) === buildRequiredPackKey(activation)),
+    ),
+    request: {
+      workspaceType,
+      resolvedAt,
+    },
+    scopeCandidates,
+  })
 
   return {
     status,
@@ -1499,7 +1519,11 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
     requiredPacks,
     optionalPacks: additionalPacks.optionalPacks,
     validationPacks: additionalPacks.validationPacks,
-    blockedPacks: additionalPacks.blockedPacks,
+    blockedPacks: [
+      ...versionEvidenceExclusions,
+      ...additionalPacks.blockedPacks,
+    ],
+    availableOutputTypes,
     sourceBundle: buildOutcomeKnowledgePackSourceBundle(),
     resolution: {
       status,
@@ -1509,7 +1533,7 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
       requiredCount: requiredPacks.length,
       optionalCount: additionalPacks.optionalPacks.length,
       validationCount: additionalPacks.validationPacks.length,
-      blockedCount: additionalPacks.blockedPacks.length,
+      blockedCount: versionEvidenceExclusions.length + additionalPacks.blockedPacks.length,
       requestedContextCategories: contextCategories.map(normalizeToken).filter(Boolean),
       unboundRequiredPacks: unboundRequiredPacks.map((pack) => ({
         packCategory: normalizePackCategory(pack.packCategory, pack.packType),

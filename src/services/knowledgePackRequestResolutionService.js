@@ -629,3 +629,49 @@ export const resolveRequestSpecificKnowledgePacks = ({
     },
   }
 }
+
+export const discoverRequestSpecificOutputTypes = ({
+  mandatorySafeguards = [],
+  candidates = [],
+  request = {},
+  scopeCandidates = [],
+  maxDepth = DEFAULT_MAX_DEPTH,
+} = {}) => {
+  const requestedWorkspaceType = normalizeWorkspaceType(request.workspaceType)
+  const capabilityKeys = uniqueValues(
+    candidates
+      .map(toSafePack)
+      .filter(isActivePack)
+      .filter((pack) => hasWorkspaceCompatibility(pack, requestedWorkspaceType))
+      .filter((pack) => pack.knowledgeLayer === 'OUTPUT_TYPE')
+      .map((pack) => pack.capabilityKey),
+  ).sort()
+
+  return capabilityKeys.map((capabilityKey) => {
+    const resolution = resolveRequestSpecificKnowledgePacks({
+      mandatorySafeguards,
+      candidates,
+      request: {
+        ...request,
+        requestedOutputTypeKey: capabilityKey,
+      },
+      scopeCandidates,
+      maxDepth,
+    })
+    const outputTypes = resolution.selectedByLayer.OUTPUT_TYPE || []
+    const outputSchemas = resolution.selectedByLayer.OUTPUT_SCHEMA || []
+    const styles = resolution.selectedByLayer.STYLE || []
+
+    return {
+      capabilityKey,
+      status: resolution.status,
+      outputType: outputTypes.length === 1 ? outputTypes[0] : null,
+      outputSchema: outputSchemas.length === 1 ? outputSchemas[0] : null,
+      style: styles.length === 1 ? styles[0] : null,
+      warnings: resolution.warnings,
+      missingDependencies: resolution.missingDependencies,
+      ambiguousCandidates: resolution.ambiguousCandidates,
+      lineage: resolution.lineage,
+    }
+  })
+}

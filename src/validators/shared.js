@@ -12,6 +12,7 @@
  * @param {Object} [options]
  * @param {string} [options.message] - User-facing validation message.
  * @param {string} [options.rootIssueKey] - Key used when issue.path is empty.
+ * @param {boolean} [options.includeDetails] - Include field-level validation details.
  * @returns {(req: import('express').Request, res: import('express').Response, next: import('express').NextFunction) => void}
  */
 export const createBodyValidator = (
@@ -19,6 +20,7 @@ export const createBodyValidator = (
   {
     message = 'Please check the form for errors.',
     rootIssueKey = '',
+    includeDetails = true,
   } = {},
 ) => (req, res, next) => {
   const result = schema.safeParse(req.body)
@@ -30,14 +32,14 @@ export const createBodyValidator = (
       details[key] = issue.message
     }
 
-    return res.status(422).json({
-      error: {
-        code: 'VALIDATION_FAILED',
-        message,
-        details,
-        requestId: req.requestId,
-      },
-    })
+    const error = {
+      code: 'VALIDATION_FAILED',
+      message,
+      requestId: req.requestId,
+    }
+    if (includeDetails) error.details = details
+
+    return res.status(422).json({ error })
   }
 
   req.body = result.data
@@ -51,6 +53,7 @@ export const createBodyValidator = (
  * @param {Object} [options]
  * @param {string} [options.message] - User-facing validation message.
  * @param {string} [options.rootIssueKey] - Key used when issue.path is empty.
+ * @param {boolean} [options.includeDetails] - Include field-level validation details.
  * @returns {(req: import('express').Request, res: import('express').Response, next: import('express').NextFunction) => void}
  */
 export const createParamsValidator = (
@@ -58,6 +61,7 @@ export const createParamsValidator = (
   {
     message = 'Invalid request parameters.',
     rootIssueKey = '',
+    includeDetails = true,
   } = {},
 ) => (req, res, next) => {
   const result = schema.safeParse(req.params)
@@ -69,14 +73,14 @@ export const createParamsValidator = (
       details[key] = issue.message
     }
 
-    return res.status(422).json({
-      error: {
-        code: 'VALIDATION_FAILED',
-        message,
-        details,
-        requestId: req.requestId,
-      },
-    })
+    const error = {
+      code: 'VALIDATION_FAILED',
+      message,
+      requestId: req.requestId,
+    }
+    if (includeDetails) error.details = details
+
+    return res.status(422).json({ error })
   }
 
   req.params = { ...req.params, ...result.data }

@@ -138,6 +138,19 @@ const outcomeMessageSchema = new mongoose.Schema(
       trim: true,
       maxlength: 120000,
     },
+    requestedOutputTypeKey: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      maxlength: 140,
+      default: '',
+    },
+    requestedOutputTypeLabel: {
+      type: String,
+      trim: true,
+      maxlength: 120,
+      default: '',
+    },
     sourceOutputSnapshot: {
       type: mongoose.Schema.Types.Mixed,
       default: () => ({}),
@@ -202,6 +215,8 @@ outcomeMessageSchema.pre('validate', function normalizeOutcomeMessage(next) {
     .trim()
     .toUpperCase()
   this.prompt = String(this.prompt || '').trim()
+  this.requestedOutputTypeKey = String(this.requestedOutputTypeKey || '').trim().toLowerCase()
+  this.requestedOutputTypeLabel = String(this.requestedOutputTypeLabel || '').trim()
   next()
 })
 

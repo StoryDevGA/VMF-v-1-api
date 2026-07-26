@@ -133,8 +133,15 @@ const outcomeAssetSchema = new mongoose.Schema(
       required: true,
       uppercase: true,
       trim: true,
-      maxlength: 80,
+      maxlength: 140,
       index: true,
+    },
+    outputTypeCapabilityKey: {
+      type: String,
+      lowercase: true,
+      trim: true,
+      maxlength: 140,
+      default: '',
     },
     outputTypeLabel: {
       type: String,
@@ -267,6 +274,7 @@ outcomeAssetSchema.pre('validate', function normalizeOutcomeAsset(next) {
   this.phase = String(this.phase || OUTCOME_STUDIO_PHASE).trim()
   this.status = String(this.status || OUTCOME_STUDIO_ASSET_STATUSES.GENERATED).trim().toUpperCase()
   this.outputTypeKey = String(this.outputTypeKey || '').trim().toUpperCase()
+  this.outputTypeCapabilityKey = String(this.outputTypeCapabilityKey || '').trim().toLowerCase()
   this.outputTypeLabel = String(this.outputTypeLabel || '').trim()
   this.title = String(this.title || '').trim()
   this.sourceOutputAssetId = String(this.sourceOutputAssetId || '').trim()
