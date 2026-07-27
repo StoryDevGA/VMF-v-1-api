@@ -74,4 +74,30 @@ describe('env governance rollout flags', () => {
     expect(env.fakeAuthEnabled).toBe(true)
     expect(env.fakeAuthAllowed).toBe(false)
   })
+
+  test('distinguishes hosted Node production mode from a Development application environment', async () => {
+    process.env = {
+      ...ORIGINAL_ENV,
+      NODE_ENV: 'production',
+      APP_ENV: 'development',
+    }
+
+    const env = await loadEnv()
+    expect(env.nodeEnv).toBe('production')
+    expect(env.appEnv).toBe('development')
+    expect(env.isProduction).toBe(true)
+    expect(env.isAppProduction).toBe(false)
+  })
+
+  test('identifies the application production boundary independently of Node mode', async () => {
+    process.env = {
+      ...ORIGINAL_ENV,
+      NODE_ENV: 'production',
+      APP_ENV: 'production',
+    }
+
+    const env = await loadEnv()
+    expect(env.isProduction).toBe(true)
+    expect(env.isAppProduction).toBe(true)
+  })
 })

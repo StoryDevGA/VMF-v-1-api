@@ -2,6 +2,7 @@ import env from './env.js'
 import { createOpenAiOutcomeStudioProviderAdapter } from '../services/openAiOutcomeStudioProviderAdapter.js'
 
 const STABLE_KEY_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,138}[a-z0-9])?$/
+const LIVE_TEST_APP_ENVIRONMENTS = new Set(['development', 'test'])
 
 const normalizedText = (value) => String(value || '').trim()
 
@@ -18,7 +19,8 @@ export const buildOutcomeStudioProviderRuntime = ({
   if (config.outcomeStudioProviderEnabled !== true) {
     return disabledRuntime('PROVIDER_DISABLED')
   }
-  if (config.isAppProduction === true || config.isProduction === true) {
+  const appEnvironment = normalizedText(config.appEnv).toLowerCase()
+  if (config.isAppProduction === true || !LIVE_TEST_APP_ENVIRONMENTS.has(appEnvironment)) {
     return disabledRuntime('PRODUCTION_NOT_AUTHORIZED')
   }
 

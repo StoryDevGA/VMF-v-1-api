@@ -83,6 +83,7 @@ const validConfig = (overrides = {}) => ({
   outcomeStudioProviderTimeoutMs: 5000,
   outcomeStudioProviderMaxRetries: 2,
   outcomeStudioProviderMaxOutputTokens: 4000,
+  appEnv: 'development',
   isAppProduction: false,
   isProduction: false,
   ...overrides,
@@ -150,13 +151,34 @@ describe('Outcome Studio Development/Test provider configuration', () => {
   })
 
   test.each([
-    ['application production', { isAppProduction: true }],
-    ['node production', { isProduction: true }],
+    ['application production', { appEnv: 'production', isAppProduction: true }],
+    ['staging', { appEnv: 'staging' }],
+    ['missing application environment', { appEnv: '' }],
+    ['unknown application environment', { appEnv: 'stagin' }],
   ])('does not enable the Development/Test adapter in %s', (_label, overrides) => {
     const runtime = buildOutcomeStudioProviderRuntime({ config: validConfig(overrides) })
 
     expect(runtime.deps).toEqual({ executionMode: 'LIVE_TEST' })
     expect(runtime.status.reason).toBe('PRODUCTION_NOT_AUTHORIZED')
+  })
+
+  test('allows hosted Development execution when Node runs in production mode', () => {
+    const runtime = buildOutcomeStudioProviderRuntime({
+      config: validConfig({
+        appEnv: 'development',
+        isAppProduction: false,
+        isProduction: true,
+      }),
+      fetchImpl: jest.fn(),
+    })
+
+    expect(runtime.status).toEqual({
+      configured: true,
+      reason: 'LIVE_TEST_PROVIDER_CONFIGURED',
+      providerKey: 'openai',
+      model: 'approved-test-model',
+    })
+    expect(runtime.deps.providerAdapter).toEqual(expect.any(Function))
   })
 
   test('builds the exact LIVE_TEST descriptor only for complete non-production configuration', () => {
