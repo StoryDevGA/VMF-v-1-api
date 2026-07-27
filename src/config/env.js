@@ -25,6 +25,10 @@ const toBoolean = (value, fallback) => {
   return ['1', 'true', 'yes', 'on'].includes(normalized)
 }
 
+const toTrustProxy = (value) => (
+  String(value ?? '').trim() === '1' ? 1 : false
+)
+
 const normalizeOrigin = (origin) => origin.replace(/\/+$/, '')
 
 const parseCorsOrigins = (value) => {
@@ -57,7 +61,7 @@ const env = {
   rateLimitWindowMs: toNumber(process.env.RATE_LIMIT_WINDOW_MS, 15 * 60 * 1000),
   rateLimitMax: toNumber(process.env.RATE_LIMIT_MAX, 300),
   logLevel: process.env.LOG_LEVEL || 'info',
-  trustProxy: toBoolean(process.env.TRUST_PROXY, false),
+  trustProxy: toTrustProxy(process.env.TRUST_PROXY),
   mongoUri: process.env.MONGODB_URI || '',
   mongoServerSelectionTimeoutMs: toPositiveNumber(process.env.MONGO_SERVER_SELECTION_TIMEOUT_MS, 5000),
   mongoConnectTimeoutMs: toPositiveNumber(process.env.MONGO_CONNECT_TIMEOUT_MS, 10000),

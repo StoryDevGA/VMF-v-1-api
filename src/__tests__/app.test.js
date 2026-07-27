@@ -1,4 +1,6 @@
-import { describe, test, expect, beforeAll } from '@jest/globals'
+import { describe, test, expect, beforeAll, jest } from '@jest/globals'
+import express from 'express'
+import request from 'supertest'
 
 // Set up test environment variables
 beforeAll(() => {
@@ -7,6 +9,7 @@ beforeAll(() => {
   process.env.JWT_REFRESH_SECRET = 'test-jwt-refresh-secret-for-unit-tests-should-be-long-and-complex-in-production'
   process.env.MONGODB_URI = 'mongodb://localhost:27017/vmf_test'
   process.env.REDIS_URL = 'redis://localhost:6379'
+  process.env.TRUST_PROXY = '1'
 })
 
 describe('Phase 1 Core Setup', () => {
@@ -26,6 +29,37 @@ describe('Phase 1 Core Setup', () => {
     expect(app.locals.outcomeStudioReasoningDeps).toEqual({ executionMode: 'LIVE_TEST' })
     expect(app.locals.outcomeStudioReasoningDeps).not.toHaveProperty('providerAdapter')
     expect(app.locals.outcomeStudioReasoningDeps).not.toHaveProperty('providerDescriptor')
+  })
+
+  test('Express trusts one proxy hop without accepting a spoofed leftmost address', async () => {
+    const { default: app } = await import('../app.js')
+    expect(app.get('trust proxy')).toBe(1)
+
+    const proxyProbe = express()
+    proxyProbe.set('trust proxy', app.get('trust proxy'))
+    proxyProbe.get('/', (req, res) => res.json({ ip: req.ip }))
+
+    const proxyResponse = await request(proxyProbe)
+      .get('/')
+      .set('X-Forwarded-For', '198.51.100.10, 203.0.113.20')
+
+    expect(proxyResponse.status).toBe(200)
+    expect(proxyResponse.body.ip).toBe('203.0.113.20')
+    expect(proxyResponse.body.ip).not.toBe('198.51.100.10')
+
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const response = await request(app)
+        .get('/')
+        .set('X-Forwarded-For', '198.51.100.10, 203.0.113.20')
+
+      expect(response.status).toBe(200)
+      expect(consoleError.mock.calls.flat().join(' ')).not.toContain(
+        'ERR_ERL_PERMISSIVE_TRUST_PROXY',
+      )
+    } finally {
+      consoleError.mockRestore()
+    }
   })
 
   test('MongoDB models', async () => {

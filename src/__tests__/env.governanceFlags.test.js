@@ -14,6 +14,38 @@ afterEach(() => {
 })
 
 describe('env governance rollout flags', () => {
+  test('parses the approved one-hop trust proxy topology as a number', async () => {
+    process.env = {
+      ...ORIGINAL_ENV,
+      NODE_ENV: 'test',
+      TRUST_PROXY: ' 1 ',
+    }
+
+    const env = await loadEnv()
+    expect(env.trustProxy).toBe(1)
+  })
+
+  test.each([
+    undefined,
+    '',
+    '0',
+    '2',
+    '-1',
+    'true',
+    'yes',
+    '1.0',
+    'invalid',
+  ])('fails trust proxy closed for %p', async (trustProxy) => {
+    process.env = {
+      ...ORIGINAL_ENV,
+      NODE_ENV: 'test',
+      TRUST_PROXY: trustProxy,
+    }
+
+    const env = await loadEnv()
+    expect(env.trustProxy).toBe(false)
+  })
+
   test('defaults governance flags to enabled', async () => {
     process.env = {
       ...ORIGINAL_ENV,
