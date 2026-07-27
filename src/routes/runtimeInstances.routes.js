@@ -21,6 +21,7 @@ import {
   getRuntimeOutcomeAsset,
   getRuntimeOutcomeAssetPreview,
   getRuntimeOutcomeAssetVersion,
+  getRuntimeOutcomeDraftPreview,
   getRuntimeInstance,
   getRuntimeEvidence,
   getRuntimeIntelligenceGraph,
@@ -232,6 +233,11 @@ router.get(
   '/:runtimeInstanceId/outcome-studio/assets/:outcomeAssetId',
   validateRuntimeOutcomeAssetParams,
   getRuntimeOutcomeAsset,
+)
+router.get(
+  '/:runtimeInstanceId/outcome-studio/sessions/:sessionId/drafts/:draftId/preview',
+  validateRuntimeOutcomeDraftParams,
+  getRuntimeOutcomeDraftPreview,
 )
 router.post(
   '/:runtimeInstanceId/outcome-studio/assets/:outcomeAssetId/publish',

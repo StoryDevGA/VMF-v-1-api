@@ -9387,6 +9387,8 @@ describe('Runtime Instance API', () => {
       validationSummary: {
         validationId: 'outcome_post_val_draft_fixture',
         validationScope: 'OUTCOME_DRAFT_ITERATION',
+        draftId: 'outcome_draft_existing_fixture',
+        draftIterationId: 'outcome_draft_iteration_current_fixture',
         outcomeAssetId: '',
         outcomeAssetVersionId: '',
         status: 'PASS',
@@ -19238,6 +19240,216 @@ describe('Runtime Instance API', () => {
     expect(OutcomeAsset.findOne).not.toHaveBeenCalled()
     expect(OutcomeAssetVersion.findOne).not.toHaveBeenCalled()
     expect(OutcomeAssetVersion.find).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('Outcome Studio working draft preview returns only current validated customer content without writes', async () => {
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    const activeDraft = makeOutcomeDraftRecord()
+    const currentIteration = makeOutcomeDraftIterationRecord({
+      customerContent: {
+        markdown: '# Executive Brief Draft\n\nCustomer-facing working content.',
+        sections: [{
+          key: 'executive-summary',
+          label: 'Executive Summary',
+          body: 'Customer-facing section body.',
+          hiddenReasoning: 'Internal reasoning must not leak.',
+        }],
+        hiddenInternalNotes: 'Internal notes must not leak.',
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    OutcomeDraft.findOne.mockReturnValue(buildLeanQuery(activeDraft))
+    OutcomeDraftIteration.findOne.mockReturnValue(buildLeanQuery(currentIteration))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/drafts/${activeDraft.draftId}/preview`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(OutcomeDraft.findOne).toHaveBeenCalledWith({
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      sessionId: 'out_sess_existing_fixture',
+      draftId: activeDraft.draftId,
+    })
+    expect(OutcomeDraftIteration.findOne).toHaveBeenCalledWith({
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      sessionId: 'out_sess_existing_fixture',
+      draftId: activeDraft.draftId,
+      draftIterationId: activeDraft.currentIterationId,
+      status: 'CURRENT',
+    })
+    expect(res.body.data).toEqual({
+      draftId: activeDraft.draftId,
+      draftIterationId: currentIteration.draftIterationId,
+      iterationNumber: 1,
+      title: 'Executive Brief Draft',
+      previewAvailable: true,
+      contentFormat: 'MARKDOWN',
+      markdown: '# Executive Brief Draft\n\nCustomer-facing working content.',
+      sections: [{
+        key: 'executive-summary',
+        label: 'Executive Summary',
+        body: 'Customer-facing section body.',
+      }],
+      generatedAt: '2026-06-15T11:15:00.000Z',
+    })
+    expect(JSON.stringify(res.body.data)).not.toContain('Internal reasoning')
+    expect(JSON.stringify(res.body.data)).not.toContain('Internal notes')
+    expect(res.body.data).not.toHaveProperty('truthSignature')
+    expect(res.body.data).not.toHaveProperty('knowledgePackBinding')
+    expect(res.body.data).not.toHaveProperty('validationSummary')
+    expect(res.body.data).not.toHaveProperty('lineageSummary')
+    expect(OutcomeSession.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeSession.updateOne).not.toHaveBeenCalled()
+    expect(OutcomeDraft.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeDraft.updateOne).not.toHaveBeenCalled()
+    expect(OutcomeDraftIteration.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeDraftIteration.updateMany).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('Outcome Studio working draft preview requires authentication before runtime lookup', async () => {
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/drafts/outcome_draft_existing_fixture/preview`)
+
+    expect(res.status).toBe(401)
+    expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
+    expect(OutcomeSession.findOne).not.toHaveBeenCalled()
+    expect(OutcomeDraft.findOne).not.toHaveBeenCalled()
+    expect(OutcomeDraftIteration.findOne).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('Outcome Studio working draft preview requires runtime view permission before draft lookup', async () => {
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeOutputLabReadyRuntime()))
+    const noViewUser = makeRegularUser({
+      memberships: [],
+      tenantMemberships: [],
+      vmfGrants: [],
+    })
+    User.findById = jest.fn().mockReturnValue(buildUserQueryChain(noViewUser))
+    const token = await getAccessTokenForUser(noViewUser)
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/drafts/outcome_draft_existing_fixture/preview`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('FORBIDDEN')
+    expect(OutcomeSession.findOne).not.toHaveBeenCalled()
+    expect(OutcomeDraft.findOne).not.toHaveBeenCalled()
+    expect(OutcomeDraftIteration.findOne).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('Outcome Studio working draft preview returns customer-safe 404 when the draft does not exist', async () => {
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeOutputLabReadyRuntime()))
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    OutcomeDraft.findOne.mockReturnValue(buildLeanQuery(null))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/drafts/outcome_draft_missing_fixture/preview`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(404)
+    expect(res.body.error.code).toBe('NOT_FOUND')
+    expectCustomerSafeOutcomeError(res)
+    expect(OutcomeDraftIteration.findOne).not.toHaveBeenCalled()
+    expect(OutcomeSession.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeSession.updateOne).not.toHaveBeenCalled()
+    expect(OutcomeDraft.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeDraft.updateOne).not.toHaveBeenCalled()
+    expect(OutcomeDraftIteration.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeDraftIteration.updateMany).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test.each([
+    ['inactive session', {
+      session: { status: 'CLOSED' },
+    }],
+    ['inactive draft', {
+      draft: { status: 'APPROVED' },
+    }],
+    ['missing current pointer', {
+      draft: { currentIterationId: '' },
+    }],
+    ['missing current iteration', {
+      iteration: null,
+    }],
+    ['iteration number mismatch', {
+      iteration: { iterationNumber: 2 },
+    }],
+    ['iteration truth mismatch', {
+      iteration: { truthSignatureId: 'truth_sig_other_fixture' },
+    }],
+    ['stale draft truth', {
+      draft: {
+        truthSignature: {
+          ...makeOutcomeSessionRecord().truthSignature,
+          evidence: {
+            ...makeOutcomeSessionRecord().truthSignature.evidence,
+            graphHash: 'sha256:graph-hash-stale',
+          },
+        },
+      },
+    }],
+    ['non-customer-ready generation', {
+      iteration: {
+        customerContent: {
+          markdown: '# Draft\n\nPreview content.',
+          metadata: { generationMode: 'DETERMINISTIC_TEST' },
+        },
+      },
+    }],
+    ['stale validation binding', {
+      iteration: {
+        validationSummary: {
+          ...makeOutcomeDraftIterationRecord().validationSummary,
+          draftIterationId: 'outcome_draft_iteration_other_fixture',
+        },
+      },
+    }],
+    ['prohibited customer language', {
+      iteration: {
+        customerContent: {
+          markdown: '# Draft\n\nKnowledge Pack details must not be customer visible.',
+          metadata: { generationMode: 'GOVERNED_REASONING_RUNTIME' },
+        },
+      },
+    }],
+    ['missing projected content', {
+      iteration: { customerContent: {} },
+    }],
+  ])('Outcome Studio working draft preview fails closed for %s without writes', async (_label, overrides) => {
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeOutputLabReadyRuntime()))
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord(overrides.session || {})))
+    const draft = makeOutcomeDraftRecord(overrides.draft || {})
+    OutcomeDraft.findOne.mockReturnValue(buildLeanQuery(draft))
+    OutcomeDraftIteration.findOne.mockReturnValue(buildLeanQuery(
+      overrides.iteration === null
+        ? null
+        : makeOutcomeDraftIterationRecord(overrides.iteration || {}),
+    ))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/drafts/${draft.draftId}/preview`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toMatch(/CONFLICT|CUSTOMER_CONTENT_REQUIRES_REVIEW|DRAFTING_SERVICE_UNAVAILABLE/)
+    expectCustomerSafeOutcomeError(res)
+    expect(OutcomeSession.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeSession.updateOne).not.toHaveBeenCalled()
+    expect(OutcomeDraft.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeDraft.updateOne).not.toHaveBeenCalled()
+    expect(OutcomeDraftIteration.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeDraftIteration.updateMany).not.toHaveBeenCalled()
     expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 

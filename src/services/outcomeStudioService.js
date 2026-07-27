@@ -118,6 +118,8 @@ export const OUTCOME_STUDIO_ERROR_REASONS = Object.freeze({
   OUTCOME_DRAFT_DISCARD_BLOCKED: 'OUTCOME_DRAFT_DISCARD_BLOCKED',
   OUTCOME_DRAFT_GENERATION_AUDIT_FAILED: 'OUTCOME_DRAFT_GENERATION_AUDIT_FAILED',
   OUTCOME_DRAFT_NOT_FOUND: 'OUTCOME_DRAFT_NOT_FOUND',
+  OUTCOME_DRAFT_PREVIEW_BLOCKED: 'OUTCOME_DRAFT_PREVIEW_BLOCKED',
+  OUTCOME_DRAFT_PREVIEW_CONTENT_UNAVAILABLE: 'OUTCOME_DRAFT_PREVIEW_CONTENT_UNAVAILABLE',
   OUTCOME_DRAFT_REFINEMENT_AUDIT_FAILED: 'OUTCOME_DRAFT_REFINEMENT_AUDIT_FAILED',
   OUTCOME_DRAFT_REFINEMENT_BLOCKED: 'OUTCOME_DRAFT_REFINEMENT_BLOCKED',
   OUTCOME_CUSTOMER_CONTENT_BLOCKED: 'OUTCOME_CUSTOMER_CONTENT_BLOCKED',
@@ -265,12 +267,14 @@ const assertOutcomeCustomerLanguage = ({
   customerContent = {},
   filename = '',
   limitations = [],
+  title = '',
   warnings = [],
 } = {}) => {
   const validation = validateOutcomeCustomerLanguage({
     customerContent: projectOutcomeCustomerContent(customerContent),
     filename,
     limitations,
+    title,
     warnings,
   })
   if (!validation.safe) throw buildCustomerContentReviewError({ action })
@@ -1990,6 +1994,27 @@ const buildOutcomeDraftApprovalBlockedError = ({
     },
   })
 
+const buildOutcomeDraftPreviewBlockedError = ({
+  blockerReason = 'OUTCOME_DRAFT_PREVIEW_BLOCKED',
+  currentIterationId = '',
+  draftId = '',
+  message = 'Outcome Studio draft preview requires an active draft with a current validated iteration.',
+  sessionId = '',
+} = {}) =>
+  createOutcomeStudioError({
+    status: 409,
+    code: 'CONFLICT',
+    message,
+    reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_DRAFT_PREVIEW_BLOCKED,
+    details: {
+      sessionId: normalizeText(sessionId),
+      draftId: normalizeText(draftId),
+      currentIterationId: normalizeText(currentIterationId),
+      previewAvailable: false,
+      blockerReason,
+    },
+  })
+
 const buildOutcomeDraftDiscardBlockedError = ({
   blockerReason = 'OUTCOME_DRAFT_DISCARD_BLOCKED',
   currentIterationId = '',
@@ -2084,6 +2109,173 @@ const findCurrentOutcomeDraftIterationForApproval = async ({
     currentIterationId,
     draftId,
     sessionId,
+  })
+}
+
+const findActiveOutcomeDraftForPreview = async ({
+  draftId = '',
+  runtimeInstanceId,
+  sessionId = '',
+} = {}) => {
+  const query = OutcomeDraft.findOne({
+    runtimeInstanceId,
+    sessionId: normalizeText(sessionId),
+    draftId: normalizeText(draftId),
+  })
+  const draft = typeof query?.lean === 'function' ? await query.lean() : await query
+
+  if (!draft) {
+    throw createOutcomeStudioError({
+      status: 404,
+      code: 'NOT_FOUND',
+      message: 'Outcome Studio draft not found.',
+      reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_DRAFT_NOT_FOUND,
+      details: {
+        sessionId: normalizeText(sessionId),
+        draftId: normalizeText(draftId),
+      },
+    })
+  }
+
+  if (normalizeToken(draft.status) !== OUTCOME_STUDIO_DRAFT_STATUSES.ACTIVE) {
+    throw buildOutcomeDraftPreviewBlockedError({
+      blockerReason: 'OUTCOME_DRAFT_NOT_ACTIVE',
+      currentIterationId: draft.currentIterationId,
+      draftId: draft.draftId,
+      sessionId,
+    })
+  }
+
+  return draft
+}
+
+const findCurrentOutcomeDraftIterationForPreview = async ({
+  activeDraft = {},
+  runtimeInstanceId,
+  sessionId = '',
+} = {}) => {
+  const draftId = normalizeText(activeDraft.draftId)
+  const currentIterationId = normalizeText(activeDraft.currentIterationId)
+  if (!draftId || !currentIterationId) {
+    throw buildOutcomeDraftPreviewBlockedError({
+      blockerReason: 'OUTCOME_DRAFT_CURRENT_POINTER_MISSING',
+      currentIterationId,
+      draftId,
+      sessionId,
+    })
+  }
+
+  const query = OutcomeDraftIteration.findOne({
+    runtimeInstanceId,
+    sessionId: normalizeText(sessionId),
+    draftId,
+    draftIterationId: currentIterationId,
+    status: OUTCOME_STUDIO_DRAFT_ITERATION_STATUSES.CURRENT,
+  })
+  const iteration = typeof query?.lean === 'function' ? await query.lean() : await query
+  if (iteration) return iteration
+
+  throw buildOutcomeDraftPreviewBlockedError({
+    blockerReason: 'OUTCOME_DRAFT_CURRENT_ITERATION_NOT_FOUND',
+    currentIterationId,
+    draftId,
+    sessionId,
+  })
+}
+
+const assertOutcomeDraftPreviewCurrentTruth = ({
+  draft = {},
+  iteration = {},
+  session = {},
+} = {}) => {
+  const sessionCurrentness = normalizeToken(session.truthSignature?.currentness)
+  const draftCurrentness = normalizeToken(draft.truthSignature?.currentness)
+  const sessionTruthSignatureId = normalizeText(
+    session.truthSignatureId || session.truthSignature?.truthSignatureId,
+  )
+  const draftTruthSignatureId = normalizeText(
+    draft.truthSignatureId || draft.truthSignature?.truthSignatureId,
+  )
+  const iterationTruthSignatureId = normalizeText(iteration.truthSignatureId)
+
+  if (
+    sessionCurrentness === 'CURRENT'
+    && draftCurrentness === 'CURRENT'
+    && sessionTruthSignatureId
+    && sessionTruthSignatureId === draftTruthSignatureId
+    && sessionTruthSignatureId === iterationTruthSignatureId
+  ) {
+    return
+  }
+
+  throw buildOutcomeDraftPreviewBlockedError({
+    blockerReason: 'OUTCOME_DRAFT_TRUTH_NOT_CURRENT',
+    currentIterationId: iteration.draftIterationId,
+    draftId: draft.draftId,
+    message: 'Draft preview is blocked until the draft uses current verified business information.',
+    sessionId: session.sessionId,
+  })
+}
+
+const assertOutcomeDraftPreviewValidation = ({
+  draft = {},
+  iteration = {},
+  sessionId = '',
+} = {}) => {
+  const validationSummary = iteration?.validationSummary
+    && typeof iteration.validationSummary === 'object'
+    ? toPlainObject(iteration.validationSummary)
+    : null
+  const validationMatchesDraft = normalizeText(validationSummary?.draftId) === normalizeText(draft.draftId)
+  const validationMatchesIteration = normalizeText(validationSummary?.draftIterationId)
+    === normalizeText(iteration.draftIterationId)
+
+  if (
+    isOutcomePostValidationAllowed(validationSummary)
+    && validationMatchesDraft
+    && validationMatchesIteration
+  ) {
+    return
+  }
+
+  throw buildOutcomeDraftPreviewBlockedError({
+    blockerReason: !validationSummary
+      ? 'OUTCOME_DRAFT_VALIDATION_MISSING'
+      : (!validationMatchesDraft || !validationMatchesIteration)
+          ? 'OUTCOME_DRAFT_VALIDATION_STALE'
+          : 'OUTCOME_DRAFT_VALIDATION_FAILED',
+    currentIterationId: iteration.draftIterationId,
+    draftId: draft.draftId,
+    message: 'Draft preview is unavailable until the current draft passes content review.',
+    sessionId,
+  })
+}
+
+const getOutcomeDraftIterationPreviewContent = ({
+  draftId = '',
+  iteration = {},
+  sessionId = '',
+} = {}) => {
+  const customerContent = projectOutcomeCustomerContent(iteration.customerContent)
+  const markdown = normalizeText(customerContent.markdown)
+  const sections = Array.isArray(customerContent.sections) ? customerContent.sections : []
+
+  if (markdown || sections.length > 0) {
+    return { markdown, sections }
+  }
+
+  throw createOutcomeStudioError({
+    status: 409,
+    code: 'CONFLICT',
+    message: 'Outcome Studio draft preview requires available customer content.',
+    reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_DRAFT_PREVIEW_CONTENT_UNAVAILABLE,
+    details: {
+      sessionId: normalizeText(sessionId),
+      draftId: normalizeText(draftId),
+      currentIterationId: normalizeText(iteration.draftIterationId),
+      previewAvailable: false,
+      blockerReason: 'OUTCOME_DRAFT_CUSTOMER_CONTENT_NOT_AVAILABLE',
+    },
   })
 }
 
@@ -3604,6 +3796,96 @@ export const getRuntimeOutcomeAssetPreview = async ({
     warnings: serializedVersion.warnings,
     limitations: serializedVersion.limitations,
     generatedAt: serializedVersion.generatedAt,
+  }
+}
+
+export const getRuntimeOutcomeDraftPreview = async ({
+  draftId,
+  runtimeInstanceId,
+  scopes,
+  sessionId,
+} = {}) => {
+  const runtimeInstance = await getRuntimeInstance({ runtimeInstanceId, scopes })
+  const runtimeObjectId = runtimeInstance._id || runtimeInstance.id
+  const session = await findOutcomeSessionForRuntime({
+    detailsRuntimeInstanceId: runtimeInstanceId,
+    runtimeInstanceId: runtimeObjectId,
+    sessionId,
+  })
+  const currentEvidence = buildRuntimeTruthEvidence(runtimeInstance)
+  const serializedSession = serializeOutcomeSession(session, { currentEvidence })
+
+  if (serializedSession.status !== OUTCOME_STUDIO_SESSION_STATUSES.ACTIVE) {
+    throw buildOutcomeDraftPreviewBlockedError({
+      blockerReason: 'OUTCOME_SESSION_NOT_ACTIVE',
+      draftId,
+      message: 'Outcome Studio draft preview cannot run for a non-active session.',
+      sessionId: serializedSession.sessionId,
+    })
+  }
+
+  assertOutcomeSessionTruthCurrent({
+    actionLabel: 'draft preview',
+    availabilityKey: 'previewAvailable',
+    session: serializedSession,
+  })
+
+  const activeDraft = await findActiveOutcomeDraftForPreview({
+    draftId,
+    runtimeInstanceId: runtimeObjectId,
+    sessionId: serializedSession.sessionId,
+  })
+  const currentIteration = await findCurrentOutcomeDraftIterationForPreview({
+    activeDraft,
+    runtimeInstanceId: runtimeObjectId,
+    sessionId: serializedSession.sessionId,
+  })
+  const serializedDraft = serializeOutcomeDraft(activeDraft, { currentEvidence })
+  const serializedIteration = serializeOutcomeDraftIteration(currentIteration)
+
+  if (serializedIteration.iterationNumber !== serializedDraft.currentIterationNumber) {
+    throw buildOutcomeDraftPreviewBlockedError({
+      blockerReason: 'OUTCOME_DRAFT_ITERATION_NUMBER_MISMATCH',
+      currentIterationId: serializedIteration.draftIterationId,
+      draftId: serializedDraft.draftId,
+      sessionId: serializedSession.sessionId,
+    })
+  }
+
+  assertOutcomeDraftPreviewCurrentTruth({
+    draft: serializedDraft,
+    iteration: serializedIteration,
+    session: serializedSession,
+  })
+  assertCustomerReadyGeneration(currentIteration)
+  assertOutcomeDraftPreviewValidation({
+    draft: activeDraft,
+    iteration: currentIteration,
+    sessionId: serializedSession.sessionId,
+  })
+
+  const title = normalizeText(serializedIteration.title || serializedDraft.title) || 'Working draft'
+  const previewContent = getOutcomeDraftIterationPreviewContent({
+    draftId: serializedDraft.draftId,
+    iteration: currentIteration,
+    sessionId: serializedSession.sessionId,
+  })
+  assertOutcomeCustomerLanguage({
+    action: 'preview this draft',
+    customerContent: previewContent,
+    title,
+  })
+
+  return {
+    draftId: serializedDraft.draftId,
+    draftIterationId: serializedIteration.draftIterationId,
+    iterationNumber: serializedIteration.iterationNumber,
+    title,
+    previewAvailable: true,
+    contentFormat: previewContent.markdown ? 'MARKDOWN' : 'SECTIONS',
+    markdown: previewContent.markdown,
+    sections: previewContent.sections,
+    generatedAt: serializedIteration.generatedAt,
   }
 }
 

@@ -55,6 +55,7 @@ import {
   getRuntimeOutcomeAsset as getRuntimeOutcomeAssetRecord,
   getRuntimeOutcomeAssetPreview as getRuntimeOutcomeAssetPreviewRecord,
   getRuntimeOutcomeAssetVersion as getRuntimeOutcomeAssetVersionRecord,
+  getRuntimeOutcomeDraftPreview as getRuntimeOutcomeDraftPreviewRecord,
   getRuntimeOutcomeSession as getRuntimeOutcomeSessionRecord,
   getRuntimeOutcomeStudio as getRuntimeOutcomeStudioRecord,
   getRuntimeOutcomeStudioReadiness as getRuntimeOutcomeStudioReadinessRecord,
@@ -877,6 +878,27 @@ export const getRuntimeOutcomeAssetPreview = async (req, res, next) => {
 
     return res.status(200).json({
       data: outcomeAssetPreview,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeOutcomeErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const getRuntimeOutcomeDraftPreview = async (req, res, next) => {
+  try {
+    const outcomeDraftPreview = await getRuntimeOutcomeDraftPreviewRecord({
+      draftId: req.params.draftId,
+      scopes: req.scopes,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+      sessionId: req.params.sessionId,
+    })
+
+    return res.status(200).json({
+      data: outcomeDraftPreview,
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
