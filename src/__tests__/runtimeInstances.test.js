@@ -16523,7 +16523,7 @@ describe('Runtime Instance API', () => {
     mockRequestReadyOutcomeKnowledgePacks()
     OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
     OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord({
-      prompt: 'Make it shorter and more board-ready.',
+      prompt: 'Make the Executive Brief shorter.',
     })))
     OutcomeDraft.findOne.mockReturnValue(buildLeanQuery(activeDraft))
     OutcomeDraftIteration.findOne.mockReturnValue(buildLeanQuery(currentIteration))

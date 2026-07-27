@@ -172,6 +172,63 @@ describe('Outcome Studio request resolution', () => {
     expect(resolution.outputType.source).toBe('KNOWLEDGE_RESOLUTION')
   })
 
+  test('resolves named-deliverable shortening against the active draft', () => {
+    const resolution = resolveOutcomeStudioRequestContext({
+      activeDraft: activeBoardDraft,
+      prompt: 'Make the Executive Brief shorter.',
+      requestedOutputTypeKey: 'board-summary',
+      resolvedKnowledgeContext: makeKnowledgeContext(),
+      session: baseSession,
+    })
+
+    expect(resolution.status).toBe(OUTCOME_STUDIO_REQUEST_RESOLUTION_STATUSES.RESOLVED)
+    expect(resolution.intent).toEqual(expect.objectContaining({
+      type: OUTCOME_STUDIO_REQUEST_INTENT_TYPES.CONTENT_REDUCTION,
+      refinement: true,
+      requiresActiveDraft: true,
+    }))
+    expect(resolution.draft).toEqual(expect.objectContaining({
+      draftId: 'draft_board_review_1',
+      currentIterationId: 'draft_iter_board_review_2',
+      currentIterationNumber: 2,
+    }))
+  })
+
+  test('keeps explicit creation of a shorter deliverable as a new outcome request', () => {
+    const resolution = resolveOutcomeStudioRequestContext({
+      prompt: 'Create a shorter Executive Brief.',
+      requestedOutputTypeKey: 'board-summary',
+      resolvedKnowledgeContext: makeKnowledgeContext(),
+      session: baseSession,
+    })
+
+    expect(resolution.status).toBe(OUTCOME_STUDIO_REQUEST_RESOLUTION_STATUSES.RESOLVED)
+    expect(resolution.intent).toEqual(expect.objectContaining({
+      type: OUTCOME_STUDIO_REQUEST_INTENT_TYPES.NEW_OUTCOME_REQUEST,
+      refinement: false,
+      requiresActiveDraft: false,
+    }))
+  })
+
+  test('fails closed when named-deliverable shortening has no active draft', () => {
+    const resolution = resolveOutcomeStudioRequestContext({
+      prompt: 'Make the Executive Brief shorter.',
+      requestedOutputTypeKey: 'board-summary',
+      resolvedKnowledgeContext: makeKnowledgeContext(),
+      session: baseSession,
+    })
+
+    expect(resolution.status).toBe(OUTCOME_STUDIO_REQUEST_RESOLUTION_STATUSES.BLOCKED)
+    expect(resolution.intent).toEqual(expect.objectContaining({
+      type: OUTCOME_STUDIO_REQUEST_INTENT_TYPES.CONTENT_REDUCTION,
+      refinement: true,
+      requiresActiveDraft: true,
+    }))
+    expect(resolution.blockers).toContainEqual(expect.objectContaining({
+      code: OUTCOME_STUDIO_REQUEST_RESOLUTION_BLOCKER_CODES.DRAFT_REQUIRED,
+    }))
+  })
+
   test('fails closed when a draft-only refinement has no active draft', () => {
     const resolution = resolveOutcomeStudioRequestContext({
       prompt: 'Make it better.',

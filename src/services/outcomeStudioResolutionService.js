@@ -48,6 +48,7 @@ const INTENT_PATTERNS = Object.freeze({
   ]),
   reduce: Object.freeze([
     /\bshorten\b/i,
+    /\bshorter\b/i,
     /\bmake\s+(it|this|the\s+draft)\s+shorter\b/i,
     /\bmore\s+concise\b/i,
     /\breduce\b/i,
