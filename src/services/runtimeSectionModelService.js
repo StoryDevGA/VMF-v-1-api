@@ -14,6 +14,37 @@ export const RUNTIME_SECTION_STATES = Object.freeze({
   REVIEW_PENDING: 'REVIEW_PENDING',
 })
 
+export const SECTION_INTERPRETATION_SIMILARITY_POLICY = Object.freeze({
+  algorithm: 'TOKEN_JACCARD',
+  version: 'business-interpretation-token-jaccard-v1',
+  threshold: 0.85,
+  maxPeerCount: 50,
+  excludedFields: Object.freeze([
+    'sourceRefs',
+    'supportingEvidenceRefs',
+    'supportingEvidence',
+    'generationBoundaries',
+    'hashes',
+    'timestamps',
+    'sectionIdentity',
+  ]),
+})
+
+const SECTION_SIMILARITY_STOP_WORDS = new Set([
+  'a', 'an', 'and', 'are', 'as', 'at', 'be', 'been', 'but', 'by', 'can',
+  'for', 'from', 'has', 'have', 'in', 'into', 'is', 'it', 'of', 'on', 'or',
+  'that', 'the', 'their', 'these', 'this', 'those', 'to', 'was', 'were',
+  'will', 'with',
+])
+
+const SECTION_SIMILARITY_EXCLUDED_HEADINGS = new Set([
+  'customer provided section context',
+  'customer provided section evidence',
+  'supporting evidence',
+  'evidence boundaries',
+  'boundaries not assumed',
+])
+
 const SECTION_MODEL_KEYS = new Set([
   'input',
   'generated',
@@ -802,11 +833,18 @@ const buildGeneratedSections = ({
   category,
   inputSummary,
   label,
+  sectionExecutionContract,
   themes,
   boundaries,
 }) => {
   const rule = SECTION_CATEGORY_RULES[category] || SECTION_CATEGORY_RULES.GENERIC
-  const themeBullets = themes.slice(0, 5).map((theme) => `${theme.label}: ${theme.description}`)
+  const purpose = normalizeEvidenceString(sectionExecutionContract?.sectionIdentity?.purpose)
+  const hasRuntimeInstruction = Boolean(normalizeEvidenceString(
+    sectionExecutionContract?.runtimeInstructions?.description,
+  ))
+  const themeBullets = themes.slice(0, 5).map((theme) => purpose
+    ? `${theme.label}: ${theme.description} For this section, interpret the evidence only where it supports ${purpose}`
+    : `${theme.label}: ${theme.description}`)
   const boundaryBullets = boundaries.slice(0, 5).map((boundary) => boundary.message)
   const sectionEvidenceBullets = acceptedSectionEvidenceObjects
     .map((evidenceObject) => normalizeEvidenceString(evidenceObject?.extractedFact))
@@ -835,18 +873,24 @@ const buildGeneratedSections = ({
 
   return [
     {
-      heading: rule.heading,
-      body: evidenceLead,
+      heading: purpose ? `${label} Interpretation` : rule.heading,
+      body: purpose
+        ? `${evidenceLead} The locked section purpose is: ${purpose}`
+        : evidenceLead,
       bullets: themeBullets,
     },
     customerContextSection,
     customerSectionEvidenceSection,
     {
-      heading: rule.summaryHeading,
+      heading: purpose ? `${label} Decision Use` : rule.summaryHeading,
       body: themes.length > 0
-        ? 'These themes are deterministic derivations from accepted evidence and current section context. They are not quantified proof or final output assets.'
+        ? hasRuntimeInstruction
+          ? 'Use this section-specific interpretation to assess only the business implications supported by accepted evidence.'
+          : 'These themes are deterministic derivations from accepted evidence and current section context. They are not quantified proof or final output assets.'
         : 'The current evidence does not yet support a safe generated section draft.',
-      bullets: [],
+      bullets: purpose
+        ? [`Review whether the accepted evidence supports this section purpose: ${purpose}`]
+        : [],
     },
     {
       heading: 'Evidence Boundaries',
@@ -864,6 +908,168 @@ const sectionsToContent = (sections = []) => sections
   ].filter(Boolean).join('\n\n'))
   .filter(Boolean)
   .join('\n\n')
+
+const normalizeSimilarityText = (value) =>
+  String(value || '')
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim()
+    .replace(/\s+/g, ' ')
+
+const getSectionIdentityTokens = (...values) => new Set(
+  values
+    .flatMap((value) => normalizeSimilarityText(value).split(' '))
+    .filter(Boolean),
+)
+
+const extractInterpretationText = ({ value, sourceKind }) => {
+  const sections = Array.isArray(value?.sections) ? value.sections : []
+  if (sections.length > 0) {
+    return sections
+      .filter((section) =>
+        !SECTION_SIMILARITY_EXCLUDED_HEADINGS.has(
+          normalizeSimilarityText(section?.heading),
+        ))
+      .flatMap((section) => [
+        normalizeEvidenceString(section?.body),
+        ...(Array.isArray(section?.bullets) ? section.bullets.map(normalizeEvidenceString) : []),
+      ])
+      .filter(Boolean)
+      .join('\n')
+  }
+
+  return String(value?.content ?? value ?? '')
+    .split(/\r?\n/)
+    .map((line) => line.trim().replace(/^[-*]\s+/, ''))
+    .filter(Boolean)
+    .filter((line) => {
+      const normalized = normalizeSimilarityText(line)
+      if (!normalized) return false
+      if (SECTION_SIMILARITY_EXCLUDED_HEADINGS.has(normalized)) return false
+      if (/^(source|citation|reference|supporting evidence)\s*:/i.test(line)) return false
+      return sourceKind === 'ACCEPTED' || !/^(generated at|generated by)\s*:/i.test(line)
+    })
+    .join('\n')
+}
+
+const tokenizeInterpretation = ({ text, identityTokens }) =>
+  normalizeSimilarityText(text)
+    .split(' ')
+    .filter(Boolean)
+    .filter((token) => !SECTION_SIMILARITY_STOP_WORDS.has(token))
+    .filter((token) => !identityTokens.has(token))
+
+const getSimilarityPeerSource = (sectionObject) => {
+  const generated = getRuntimeSectionGenerated(sectionObject)
+  if (generated && normalizeEvidenceString(generated.content ?? generated)) {
+    return { sourceKind: 'GENERATED', value: generated }
+  }
+  const accepted = getRuntimeSectionAccepted(sectionObject)
+  if (accepted && normalizeEvidenceString(accepted.content ?? accepted)) {
+    return { sourceKind: 'ACCEPTED', value: accepted }
+  }
+  return null
+}
+
+export const evaluateSectionInterpretationSimilarity = ({
+  candidate,
+  frameworkPackage,
+  frameworkState = {},
+  section,
+  sectionLabel,
+} = {}) => {
+  const targetSectionKey = normalizeSectionText(section?.sectionKey || section?.key)
+  const targetRuntimePath = normalizeSectionText(section?.runtimePath)
+  const sectionRootPrefix = 'framework_state.sections.'
+  const targetStateKey = targetRuntimePath.startsWith(sectionRootPrefix)
+    ? targetRuntimePath.slice(sectionRootPrefix.length)
+    : targetSectionKey.replace(/-/g, '_')
+  const targetLabel = normalizeSectionText(
+    sectionLabel || section?.label || titleFromSectionKey(targetSectionKey),
+  )
+  const packageSections = Array.isArray(frameworkPackage?.sections)
+    ? frameworkPackage.sections
+    : []
+  const labelByStateKey = new Map(packageSections.map((packageSection) => {
+    const key = normalizeSectionText(packageSection?.sectionKey || packageSection?.key)
+    const runtimePath = normalizeSectionText(packageSection?.runtimePath)
+    const stateKey = runtimePath.startsWith(sectionRootPrefix)
+      ? runtimePath.slice(sectionRootPrefix.length)
+      : key.replace(/-/g, '_')
+    return [
+      stateKey,
+      titleFromSectionKey(packageSection?.label || key),
+    ]
+  }))
+  const targetText = extractInterpretationText({ value: candidate, sourceKind: 'GENERATED' })
+  const frameworkSections = frameworkState?.sections && typeof frameworkState.sections === 'object'
+    ? frameworkState.sections
+    : {}
+  const peerRows = Object.keys(frameworkSections)
+    .map((stateKey) => normalizeSectionText(stateKey))
+    .filter(Boolean)
+    .filter((stateKey) => stateKey !== targetStateKey)
+    .map((stateKey) => ({
+      stateKey,
+      peerSource: getSimilarityPeerSource(frameworkSections[stateKey]),
+    }))
+    .filter((row) => row.peerSource)
+    .sort((left, right) => left.stateKey.localeCompare(right.stateKey))
+    .slice(0, SECTION_INTERPRETATION_SIMILARITY_POLICY.maxPeerCount)
+    .map(({ stateKey, peerSource }) => {
+      const peerLabel = labelByStateKey.get(stateKey) || titleFromSectionKey(stateKey)
+      const identityTokens = getSectionIdentityTokens(
+        targetSectionKey,
+        targetLabel,
+        stateKey,
+        peerLabel,
+      )
+      const targetTokens = tokenizeInterpretation({ text: targetText, identityTokens })
+      const peerText = extractInterpretationText(peerSource)
+      const peerTokens = tokenizeInterpretation({ text: peerText, identityTokens })
+      const targetSet = new Set(targetTokens)
+      const peerSet = new Set(peerTokens)
+      const intersectionCount = [...targetSet].filter((token) => peerSet.has(token)).length
+      const unionCount = new Set([...targetSet, ...peerSet]).size
+      const score = unionCount === 0 ? 0 : intersectionCount / unionCount
+      const exactMatch =
+        targetTokens.length > 0
+        && targetTokens.join(' ') === peerTokens.join(' ')
+      const normalizedScore = Number(score.toFixed(6))
+      const passed =
+        !exactMatch
+        && score < SECTION_INTERPRETATION_SIMILARITY_POLICY.threshold
+
+      return {
+        sectionKey: stateKey,
+        sourceKind: peerSource.sourceKind,
+        score: normalizedScore,
+        exactMatch,
+        targetTokenCount: targetSet.size,
+        peerTokenCount: peerSet.size,
+        intersectionCount,
+        passed,
+      }
+    })
+
+  const ranked = [...peerRows].sort((left, right) =>
+    right.score - left.score || left.sectionKey.localeCompare(right.sectionKey))
+  const topMatch = ranked[0] || null
+  const passed = peerRows.every((row) => row.passed)
+
+  return {
+    algorithm: SECTION_INTERPRETATION_SIMILARITY_POLICY.algorithm,
+    version: SECTION_INTERPRETATION_SIMILARITY_POLICY.version,
+    threshold: SECTION_INTERPRETATION_SIMILARITY_POLICY.threshold,
+    excludedFields: [...SECTION_INTERPRETATION_SIMILARITY_POLICY.excludedFields],
+    comparisonCount: peerRows.length,
+    maximumScore: topMatch?.score || 0,
+    topMatchSectionKey: topMatch?.sectionKey || '',
+    passed,
+    comparisons: peerRows,
+  }
+}
 
 const getTruthEligibility = ({ businessContextAvailable, discoveryAccepted, themes }) => {
   if (!discoveryAccepted) {
@@ -906,11 +1112,13 @@ const buildSectionIntelligenceParts = ({
   input,
   runtimeInstance,
   section,
+  sectionExecutionContract,
 } = {}) => {
   const evidencePack = getEvidencePackFromFrameworkState(frameworkState)
   const sectionKey = normalizeSectionText(section?.sectionKey || section?.key)
   const runtimePath = normalizeSectionText(section?.runtimePath)
-  const label = titleFromSectionKey(section?.label || sectionKey || runtimePath)
+  const label = normalizeEvidenceString(sectionExecutionContract?.sectionIdentity?.label)
+    || titleFromSectionKey(section?.label || sectionKey || runtimePath)
   const category = getSectionCategory({ label, sectionKey })
   const acceptedEvidenceObjects = getAcceptedDiscoveryEvidenceObjects(evidencePack)
   const acceptedSectionEvidenceObjects = getAcceptedSectionEvidenceObjects({
@@ -937,6 +1145,7 @@ const buildSectionIntelligenceParts = ({
     dependencyTruths,
     inputSummary,
     sectionEvidenceSummary,
+    sectionExecutionContract,
     scopedEvidenceSummary,
     seedProfile,
   })
@@ -1025,6 +1234,7 @@ const buildSectionIntelligenceParts = ({
     scopedView,
     sectionEvidenceHash,
     sectionEvidenceSummary,
+    sectionExecutionContract,
     sectionKey,
     seedProfile,
     sourceRefs,
@@ -1172,6 +1382,7 @@ export const buildEnrichedGeneratedSection = ({
   input,
   runtimeInstance,
   section,
+  sectionExecutionContract,
   generatedAt = new Date().toISOString(),
 } = {}) => {
   const parts = buildSectionIntelligenceParts({
@@ -1182,6 +1393,7 @@ export const buildEnrichedGeneratedSection = ({
     input,
     runtimeInstance,
     section,
+    sectionExecutionContract,
   })
   const sections = parts.truthEligibility.eligible
     ? buildGeneratedSections({
@@ -1189,6 +1401,7 @@ export const buildEnrichedGeneratedSection = ({
         category: parts.category,
         inputSummary: parts.inputSummary,
         label: parts.label,
+        sectionExecutionContract: parts.sectionExecutionContract,
         themes: parts.themes,
         boundaries: parts.generationBoundaries,
       })
@@ -1224,6 +1437,8 @@ export const buildEnrichedGeneratedSection = ({
       adapter: GSIL_ENRICHMENT_VERSION,
       packageKey: runtimeInstance?.packageKey || frameworkPackage?.packageKey || '',
       packageVersion: runtimeInstance?.packageVersion || frameworkPackage?.version || '',
+      contractVersion: sectionExecutionContract?.contractVersion || '',
+      sectionContractHash: sectionExecutionContract?.sectionContractHash || '',
     },
   }
   const intelligence = buildIntelligenceFromParts({ actorUserId, generated, parts })

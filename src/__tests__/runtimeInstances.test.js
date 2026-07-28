@@ -526,11 +526,40 @@ const makeFrameworkPackage = (overrides = {}) => ({
     status: 'PASS',
     snapshotId: 'dep-lock-vmf-standard-2-3-1',
     snapshotHash: 'hash-vmf-standard-2-3-1',
+    packageKey: 'vmf-standard-2-3-1',
+    packageVersion: '2.3.1',
     references: [
       {
-        componentType: 'UI_CONTRACT',
-        stableId: 'vmf-cli-ui-contract',
-        componentVersion: '2.3.1',
+        collectionKey: 'UIContract',
+        id: `ui-contract-${UI_CONTRACT_KEY}`,
+        key: UI_CONTRACT_KEY,
+        status: 'ACTIVE',
+        versionStatus: 'ACTIVE',
+        componentVersion: 1,
+      },
+      {
+        collectionKey: 'RuntimeSkill',
+        id: 'skill-vmf-section-generator',
+        key: 'vmf-section-generator',
+        status: 'ACTIVE',
+        versionStatus: 'ACTIVE',
+        componentVersion: 1,
+      },
+      {
+        collectionKey: 'ValidationRegistry',
+        id: 'validation-completeness-check',
+        key: 'completeness-check',
+        status: 'ACTIVE',
+        versionStatus: 'ACTIVE',
+        componentVersion: 1,
+      },
+      {
+        collectionKey: 'ValidationRegistry',
+        id: 'validation-required-sections-check',
+        key: 'required-sections-check',
+        status: 'ACTIVE',
+        versionStatus: 'ACTIVE',
+        componentVersion: 1,
       },
     ],
   },
@@ -1116,35 +1145,101 @@ const makeUIAction = (actionKey, overrides = {}) => ({
   ...overrides,
 })
 
-const makeUIContract = (overrides = {}) => ({
-  stableId: `ui-contract-${UI_CONTRACT_KEY}`,
-  uiContractKey: UI_CONTRACT_KEY,
-  name: 'VMF CLI UI Contract',
+const makeUIContract = (overrides = {}) => {
+  const contract = {
+    stableId: `ui-contract-${UI_CONTRACT_KEY}`,
+    uiContractKey: UI_CONTRACT_KEY,
+    name: 'VMF CLI UI Contract',
+    status: 'ACTIVE',
+    versionStatus: 'ACTIVE',
+    componentVersion: 1,
+    frameworkKeys: ['VMF'],
+    sections: [
+      {
+        sectionKey: 'customer_problem',
+        runtimePath: 'framework_state.sections.customer_problem',
+        source: 'PACKAGE',
+        isCustom: false,
+        label: 'Customer Problem',
+        shortLabel: 'Problem',
+        helpText: 'Describe the core problem.',
+        placeholder: 'Example: Proposal creation is slow.',
+        displayOrder: 10,
+        isVisible: true,
+        isEditable: true,
+        isRequiredDisplay: true,
+        isReadOnlyDisplay: false,
+      },
+    ],
+    actions: [
+      makeUIAction('SUBMIT_FOR_REVIEW', {
+        confirmationMessage: 'Submit this framework for review?',
+        requiresConfirmation: true,
+      }),
+    ],
+    ...overrides,
+  }
+
+  return {
+    ...contract,
+    sections: (contract.sections || []).map((section) => ({
+      helpText: `Describe the governed purpose of ${section.label || section.sectionKey}.`,
+      ...section,
+    })),
+  }
+}
+
+const makeSectionRuntimeSkill = (overrides = {}) => ({
+  stableId: 'skill-vmf-section-generator',
+  key: 'vmf-section-generator',
+  name: 'VMF Section Generator',
+  description: 'Interprets accepted evidence through the locked purpose of the target section.',
   status: 'ACTIVE',
-  frameworkKeys: ['VMF'],
-  sections: [
-    {
-      sectionKey: 'customer_problem',
-      runtimePath: 'framework_state.sections.customer_problem',
-      source: 'PACKAGE',
-      isCustom: false,
-      label: 'Customer Problem',
-      shortLabel: 'Problem',
-      helpText: 'Describe the core problem.',
-      placeholder: 'Example: Proposal creation is slow.',
-      displayOrder: 10,
-      isVisible: true,
-      isEditable: true,
-      isRequiredDisplay: true,
-      isReadOnlyDisplay: false,
-    },
+  versionStatus: 'ACTIVE',
+  componentVersion: 1,
+  supportedFrameworkKeys: ['VMF'],
+  skillRoleKey: 'SECTION_MODELLER',
+  category: 'BUSINESS',
+  inputContract: {
+    frameworkVersions: ['2.3.1', '3.1.1'],
+    fields: ['acceptedEvidence'],
+  },
+  outputContract: {
+    format: 'STRUCTURED_TEXT',
+    fields: ['content', 'sections'],
+  },
+  allowedReadPaths: ['framework_state.evidence_pack'],
+  allowedWritePaths: [
+    'framework_state.sections.customer_context',
+    'framework_state.sections.customer_problem',
+    'framework_state.sections.value_drivers',
+    'framework_state.sections.strategic_objectives',
+    'framework_state.sections.current_state_assessment',
+    'framework_state.sections.stakeholder_register',
+    'framework_state.sections.evidence_register',
+    'framework_state.sections.output_requirements',
+    'framework_state.sections.executive_summary',
+    'framework_state.sections.section_1_executive_summary',
+    'framework_state.sections.business_case_economics',
+    'framework_state.sections.competitive_trap_map',
+    'framework_state.sections.positioning_differentiation',
   ],
-  actions: [
-    makeUIAction('SUBMIT_FOR_REVIEW', {
-      confirmationMessage: 'Submit this framework for review?',
-      requiresConfirmation: true,
-    }),
-  ],
+  forbiddenWritePaths: [],
+  ...overrides,
+})
+
+const makeSectionValidation = (overrides = {}) => ({
+  stableId: overrides.stableId || `validation-${overrides.key || 'completeness-check'}`,
+  key: overrides.key || 'completeness-check',
+  label: 'Completeness Check',
+  status: 'ACTIVE',
+  versionStatus: 'ACTIVE',
+  componentVersion: 1,
+  supportedFrameworkKeys: ['VMF'],
+  category: 'VALIDATION',
+  severity: 'ERROR',
+  executionMode: 'SYNC',
+  packageUsable: true,
   ...overrides,
 })
 
@@ -1290,12 +1385,16 @@ let KnowledgePack
 let KnowledgePackActivation
 let KnowledgePackVersion
 let RuntimePathRegistry
+let RuntimeSkill
+let ValidationRegistry
 let UIContract
 let WorkflowPolicy
 let AuditLog
 let mongoose
 let mockRedisClient
 let hashSectionInput
+let buildEnrichedGeneratedSection
+let evaluateSectionInterpretationSimilarity
 
 const getAccessTokenForUser = async (user) => {
   const tokens = await tokenService.generateTokens(user)
@@ -1353,10 +1452,16 @@ beforeAll(async () => {
   KnowledgePackActivation = models.KnowledgePackActivation
   KnowledgePackVersion = models.KnowledgePackVersion
   RuntimePathRegistry = models.RuntimePathRegistry
+  RuntimeSkill = models.RuntimeSkill
+  ValidationRegistry = models.ValidationRegistry
   UIContract = models.UIContract
   WorkflowPolicy = models.WorkflowPolicy
   AuditLog = models.AuditLog
-  hashSectionInput = (await import('../services/runtimeSectionModelService.js')).hashSectionInput
+  const runtimeSectionModelService = await import('../services/runtimeSectionModelService.js')
+  hashSectionInput = runtimeSectionModelService.hashSectionInput
+  buildEnrichedGeneratedSection = runtimeSectionModelService.buildEnrichedGeneratedSection
+  evaluateSectionInterpretationSimilarity =
+    runtimeSectionModelService.evaluateSectionInterpretationSimilarity
 })
 
 beforeEach(() => {
@@ -1390,6 +1495,11 @@ beforeEach(() => {
   RuntimeActivationSnapshot.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeActivationSnapshot()))
   RuntimePathRegistry.find = jest.fn().mockReturnValue(buildLeanQuery([]))
   RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimePathRecord()))
+  RuntimeSkill.find = jest.fn().mockReturnValue(buildLeanQuery([makeSectionRuntimeSkill()]))
+  ValidationRegistry.find = jest.fn().mockReturnValue(buildLeanQuery([
+    makeSectionValidation(),
+    makeSectionValidation({ key: 'required-sections-check' }),
+  ]))
   UIContract.findOne = jest.fn().mockReturnValue(buildLeanQuery(null))
   WorkflowPolicy.find = jest.fn().mockReturnValue(buildLeanQuery([]))
   RuntimeInstance.prototype.save = jest.fn(async function save() { return this })
@@ -21219,6 +21329,15 @@ describe('Runtime Instance API', () => {
                   generator: expect.objectContaining({
                     mode: 'DETERMINISTIC_PLUS_BOUNDED_SYNTHESIS',
                     adapter: 'gsil-section-enrichment-v1',
+                    contractVersion: 'section-execution-contract-v1',
+                    sectionContractHash: expect.any(String),
+                  }),
+                  similarityResult: expect.objectContaining({
+                    version: 'business-interpretation-token-jaccard-v1',
+                    passed: true,
+                    threshold: 0.85,
+                    maximumScore: 0,
+                    comparisonCount: 0,
                   }),
                   inputHash: expect.any(String),
                 }),
@@ -21297,6 +21416,15 @@ describe('Runtime Instance API', () => {
           evidenceHash: expect.any(String),
           dependencyHash: expect.any(String),
           boundedContextHash: expect.any(String),
+          sectionContractHash: expect.any(String),
+          similarityResult: {
+            version: 'business-interpretation-token-jaccard-v1',
+            passed: true,
+            threshold: 0.85,
+            maximumScore: 0,
+            comparisonCount: 0,
+            topMatchSectionKey: '',
+          },
           truthEligibility: expect.objectContaining({
             eligible: true,
             status: 'ELIGIBLE',
@@ -21309,6 +21437,365 @@ describe('Runtime Instance API', () => {
       runtimePath: 'framework_state.sections.customer_problem',
       revisionCount: 0,
     }))
+    const auditPayload = AuditLog.createLog.mock.calls.at(-1)[0]
+    expect(auditPayload.diff.generation.similarityResult).not.toHaveProperty('comparisons')
+    expect(JSON.stringify(auditPayload.diff.generation.similarityResult)).not.toMatch(
+      /content|tokens|sourceRefs|supportingEvidence/i,
+    )
+    expect(JSON.stringify(res.body.data)).not.toContain(
+      'Interprets accepted evidence through the locked purpose of the target section.',
+    )
+  })
+
+  test('GENERATE_SECTION fails closed on dependency-lock component drift without mutation or audit', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: makeReadyDiscoveryEvidencePack({
+          accepted: true,
+          state: {
+            status: 'ACCEPTED',
+            inputComplete: true,
+            evidenceReady: true,
+            accepted: true,
+            needsRefresh: false,
+          },
+        }),
+        sections: {
+          customer_problem: 'Proposal creation is slow.',
+        },
+        validation: {},
+        readiness: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('GENERATE_SECTION')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      componentVersion: 2,
+      actions: [makeUIAction('GENERATE_SECTION')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('GENERATE_SECTION')]))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/GENERATE_SECTION`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+        runtimePath: 'framework_state.sections.customer_problem',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details).toEqual(expect.objectContaining({
+      reason: 'DEPENDENCY_LOCK_EVIDENCE_MISMATCH',
+      contractIssue: 'LOCKED_DEPENDENCY_MISMATCH',
+      dependencyType: 'UI Contract',
+      expectedComponentVersion: 1,
+      actualComponentVersion: 2,
+    }))
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test.each([
+    ['UI Contract framework mismatch', 'UI_FRAMEWORK', 'COMPONENT_FRAMEWORK_MISMATCH', 'UI Contract'],
+    ['Runtime Skill framework mismatch', 'SKILL_FRAMEWORK', 'COMPONENT_FRAMEWORK_MISMATCH', 'Runtime Skill'],
+    ['package dependency-lock identity mismatch', 'PACKAGE_LOCK', 'PACKAGE_LOCK_IDENTITY_MISMATCH', null],
+  ])(
+    'GENERATE_SECTION fails closed on %s without mutation or audit',
+    async (_label, mismatchKind, expectedContractIssue, expectedDependencyType) => {
+      const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+        updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+        framework_state: {
+          lifecycle: { stage: 'DRAFT' },
+          evidence_pack: makeReadyDiscoveryEvidencePack({
+            accepted: true,
+            state: {
+              status: 'ACCEPTED',
+              inputComplete: true,
+              evidenceReady: true,
+              accepted: true,
+              needsRefresh: false,
+            },
+          }),
+          sections: {
+            customer_problem: 'Proposal creation is slow.',
+          },
+          validation: {},
+          readiness: {},
+          policy: {},
+          attachments: {},
+          artifacts: {},
+        },
+      })
+      mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+      const frameworkPackage = makeRendererFrameworkPackage({
+        workflowBindings: [makeWorkflowBinding('GENERATE_SECTION')],
+      })
+      if (mismatchKind === 'PACKAGE_LOCK') {
+        frameworkPackage.dependencyLock = {
+          ...frameworkPackage.dependencyLock,
+          packageVersion: '2.3.2',
+        }
+      }
+      FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+      RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+      UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+        ...(mismatchKind === 'UI_FRAMEWORK' ? { frameworkKeys: ['OTHER'] } : {}),
+        actions: [makeUIAction('GENERATE_SECTION')],
+      })))
+      if (mismatchKind === 'SKILL_FRAMEWORK') {
+        RuntimeSkill.find.mockReturnValue(buildLeanQuery([
+          makeSectionRuntimeSkill({ supportedFrameworkKeys: ['OTHER'] }),
+        ]))
+      }
+      WorkflowPolicy.find.mockReturnValue(buildLeanQuery([
+        makeActionWorkflowPolicy('GENERATE_SECTION'),
+      ]))
+      const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+      const res = await request
+        .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/GENERATE_SECTION`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+          runtimePath: 'framework_state.sections.customer_problem',
+        })
+
+      expect(res.status).toBe(409)
+      expect(res.body.error.details).toEqual(expect.objectContaining({
+        reason: 'DEPENDENCY_LOCK_EVIDENCE_MISMATCH',
+        contractIssue: expectedContractIssue,
+        ...(expectedDependencyType ? { dependencyType: expectedDependencyType } : {}),
+      }))
+      expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+      expect(AuditLog.createLog).not.toHaveBeenCalled()
+    },
+  )
+
+  test('GENERATE_SECTION rejects duplicate business interpretation without mutation or audit', async () => {
+    const frameworkPackage = makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('GENERATE_SECTION')],
+    })
+    const targetSection = frameworkPackage.sections[0]
+    const baseFrameworkState = {
+      lifecycle: { stage: 'DRAFT' },
+      evidence_pack: makeReadyDiscoveryEvidencePack({
+        accepted: true,
+        state: {
+          status: 'ACCEPTED',
+          inputComplete: true,
+          evidenceReady: true,
+          accepted: true,
+          needsRefresh: false,
+        },
+      }),
+      sections: {
+        customer_problem: 'Proposal creation is slow.',
+      },
+      validation: {},
+      readiness: {},
+      policy: {},
+      attachments: {},
+      artifacts: {},
+    }
+    const runtimeInstanceSeed = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: baseFrameworkState,
+    })
+    const { generated: duplicateGenerated } = buildEnrichedGeneratedSection({
+      actionKey: 'GENERATE_SECTION',
+      actorUserId: CUSTOMER_ADMIN_ID,
+      dependencySectionKeys: [],
+      frameworkPackage,
+      frameworkState: baseFrameworkState,
+      input: 'Proposal creation is slow.',
+      runtimeInstance: runtimeInstanceSeed,
+      section: targetSection,
+      sectionExecutionContract: {
+        contractVersion: 'section-execution-contract-v1',
+        sectionContractHash: 'test-section-contract-hash',
+        sectionIdentity: {
+          label: 'Customer Problem',
+          purpose: 'Describe the core problem.',
+        },
+        runtimeInstructions: {
+          description: 'Interprets accepted evidence through the locked purpose of the target section.',
+        },
+      },
+      generatedAt: '2026-05-19T07:59:00.000Z',
+    })
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        ...baseFrameworkState,
+        sections: {
+          ...baseFrameworkState.sections,
+          duplicate_peer: {
+            generated: duplicateGenerated,
+            state: { status: 'GENERATED' },
+          },
+        },
+      },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      actions: [makeUIAction('GENERATE_SECTION')],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('GENERATE_SECTION')]))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/GENERATE_SECTION`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+        runtimePath: 'framework_state.sections.customer_problem',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details).toEqual(expect.objectContaining({
+      reason: 'RUNTIME_ACTION_NOT_AVAILABLE',
+      similarityResult: expect.objectContaining({
+        version: 'business-interpretation-token-jaccard-v1',
+        passed: false,
+        threshold: 0.85,
+        maximumScore: 1,
+        topMatchSectionKey: 'duplicate_peer',
+      }),
+    }))
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('section interpretation similarity blocks at the 0.85 threshold and passes below it', () => {
+    const section = {
+      sectionKey: 'target_section',
+      runtimePath: 'framework_state.sections.target_section',
+    }
+    const frameworkPackage = {
+      sections: [
+        section,
+        {
+          sectionKey: 'peer_section',
+          runtimePath: 'framework_state.sections.peer_section',
+          label: 'Peer Section',
+        },
+      ],
+    }
+    const evaluateWithTokenCounts = ({ targetTokenCount, peerTokenCount }) => {
+      const targetTokens = Array.from(
+        { length: targetTokenCount },
+        (_, index) => `signal${index + 1}`,
+      )
+      return evaluateSectionInterpretationSimilarity({
+        candidate: {
+          content: targetTokens.join(' '),
+          sections: [{
+            heading: 'Target Interpretation',
+            body: targetTokens.join(' '),
+            bullets: [],
+          }],
+        },
+        frameworkPackage,
+        frameworkState: {
+          sections: {
+            peer_section: {
+              generated: {
+                content: targetTokens.slice(0, peerTokenCount).join(' '),
+                sections: [{
+                  heading: 'Peer Interpretation',
+                  body: targetTokens.slice(0, peerTokenCount).join(' '),
+                  bullets: [],
+                }],
+              },
+            },
+          },
+        },
+        section,
+        sectionLabel: 'Target Section',
+      })
+    }
+
+    const atThreshold = evaluateWithTokenCounts({
+      targetTokenCount: 20,
+      peerTokenCount: 17,
+    })
+    expect(atThreshold).toEqual(expect.objectContaining({
+      passed: false,
+      maximumScore: 0.85,
+      topMatchSectionKey: 'peer_section',
+    }))
+
+    const belowThreshold = evaluateWithTokenCounts({
+      targetTokenCount: 20001,
+      peerTokenCount: 17000,
+    })
+    expect(belowThreshold).toEqual(expect.objectContaining({
+      passed: true,
+      maximumScore: 0.849958,
+      topMatchSectionKey: 'peer_section',
+    }))
+  })
+
+  test('section interpretation similarity uses stable tie ordering and caps peers at 50', () => {
+    const targetTokens = Array.from({ length: 20 }, (_, index) => `theme${index + 1}`)
+    const candidate = {
+      content: targetTokens.join(' '),
+      sections: [{ heading: 'Target Interpretation', body: targetTokens.join(' '), bullets: [] }],
+    }
+    const section = {
+      sectionKey: 'target_section',
+      runtimePath: 'framework_state.sections.target_section',
+    }
+    const peerSection = (stateKey) => ({
+      sectionKey: stateKey,
+      runtimePath: `framework_state.sections.${stateKey}`,
+      label: stateKey,
+    })
+    const stateKeys = ['alpha_peer', 'beta_peer']
+    for (let index = 0; index < 49; index += 1) {
+      stateKeys.push(`peer_${String(index).padStart(2, '0')}`)
+    }
+    const frameworkStateSections = {
+      '000_raw_input_only': 'This raw section has no generated or accepted interpretation.',
+      ...Object.fromEntries(stateKeys.map((stateKey) => [
+        stateKey,
+        {
+          generated: {
+            content: targetTokens.slice(0, 17).join(' '),
+            sections: [{
+              heading: 'Peer Interpretation',
+              body: targetTokens.slice(0, 17).join(' '),
+              bullets: [],
+            }],
+          },
+        },
+      ])),
+    }
+    const result = evaluateSectionInterpretationSimilarity({
+      candidate,
+      frameworkPackage: {
+        sections: [section, ...stateKeys.map(peerSection)],
+      },
+      frameworkState: { sections: frameworkStateSections },
+      section,
+      sectionLabel: 'Target Section',
+    })
+
+    expect(result.comparisonCount).toBe(50)
+    expect(result.topMatchSectionKey).toBe('alpha_peer')
+    expect(result.comparisons).toHaveLength(50)
+    expect(result.comparisons.map((comparison) => comparison.sectionKey)).not.toContain('peer_48')
   })
 
   test('GENERATE_SECTION produces evidence-bound Value Drivers intelligence without unsupported claims', async () => {
@@ -21409,7 +21896,7 @@ describe('Runtime Instance API', () => {
     )
     expect(persistedSection.generated).toEqual(expect.objectContaining({
       format: 'STRUCTURED_TEXT',
-      content: expect.stringContaining('Primary Value Drivers'),
+      content: expect.stringContaining('Value Drivers Interpretation'),
       sections: expect.arrayContaining([
         expect.objectContaining({
           heading: 'Customer-Provided Section Context',
@@ -21641,7 +22128,7 @@ describe('Runtime Instance API', () => {
     expect(res.status).toBe(200)
     const persistedSection = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state.sections.value_drivers
     expect(persistedSection.state.status).toBe('GENERATED')
-    expect(persistedSection.generated.content).toContain('Primary Value Drivers')
+    expect(persistedSection.generated.content).toContain('Value Drivers Interpretation')
     expect(persistedSection.generated.truthEligibility).toEqual(expect.objectContaining({
       eligible: true,
       status: 'ELIGIBLE',
@@ -22141,7 +22628,7 @@ describe('Runtime Instance API', () => {
         input: 'Show the board why proposal creation is slow.',
         generated: expect.objectContaining({
           format: 'STRUCTURED_TEXT',
-          content: expect.stringContaining('Strategic Overview'),
+          content: expect.stringContaining('Executive Summary Interpretation'),
           actionKey: 'GENERATE_SECTION',
           generator: expect.objectContaining({
             adapter: 'gsil-section-enrichment-v1',
@@ -22224,6 +22711,30 @@ describe('Runtime Instance API', () => {
     }))
     RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
     UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      sections: [
+        {
+          sectionKey: 'customer_problem',
+          runtimePath: 'framework_state.sections.customer_problem',
+          source: 'PACKAGE',
+          isCustom: false,
+          label: 'Customer Problem',
+          helpText: 'Describe the customer problem supported by accepted evidence.',
+          displayOrder: 10,
+          isVisible: true,
+          isEditable: true,
+        },
+        {
+          sectionKey: 'value_drivers',
+          runtimePath: 'framework_state.sections.value_drivers',
+          source: 'PACKAGE',
+          isCustom: false,
+          label: 'Value Drivers',
+          helpText: 'Identify customer value drivers supported by accepted evidence.',
+          displayOrder: 20,
+          isVisible: true,
+          isEditable: true,
+        },
+      ],
       actions: [makeUIAction('REGENERATE_SECTION')],
     })))
     WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('REGENERATE_SECTION')]))
@@ -22355,6 +22866,18 @@ describe('Runtime Instance API', () => {
     }))
     RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
     UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      sections: [
+        {
+          sectionKey: 'customer_problem',
+          runtimePath: 'framework_state.sections.customer_problem',
+          label: 'Customer Problem',
+        },
+        {
+          sectionKey: 'value_drivers',
+          runtimePath: 'framework_state.sections.value_drivers',
+          label: 'Value Drivers',
+        },
+      ],
       actions: [makeUIAction('REGENERATE_SECTION')],
     })))
     WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('REGENERATE_SECTION')]))
@@ -22741,6 +23264,18 @@ describe('Runtime Instance API', () => {
     }))
     RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
     UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      sections: [
+        {
+          sectionKey: 'customer_problem',
+          runtimePath: 'framework_state.sections.customer_problem',
+          label: 'Customer Problem',
+        },
+        {
+          sectionKey: 'value_drivers',
+          runtimePath: 'framework_state.sections.value_drivers',
+          label: 'Value Drivers',
+        },
+      ],
       actions: [makeUIAction('REGENERATE_SECTION')],
     })))
     WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('REGENERATE_SECTION')]))

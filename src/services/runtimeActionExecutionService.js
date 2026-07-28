@@ -29,6 +29,7 @@ import {
 import {
   RUNTIME_SECTION_STATES,
   buildEnrichedGeneratedSection,
+  evaluateSectionInterpretationSimilarity,
   buildRuntimeSectionRevision,
   buildSectionIntelligenceDisplayProjection,
   cloneSectionValue,
@@ -40,6 +41,7 @@ import {
   invalidateRuntimeSectionEvidence,
   normalizeRuntimeSectionObject,
 } from './runtimeSectionModelService.js'
+import { resolveSectionExecutionContract } from './sectionExecutionContractService.js'
 import {
   acceptPendingDiscoveryEvidenceObjects,
   buildAcceptedDiscoveryScopedViews,
@@ -586,7 +588,7 @@ const resolveGenerationTargetSection = ({ frameworkPackage, payload }) => {
   }
 }
 
-const applyRuntimeSectionGeneration = ({
+const applyRuntimeSectionGeneration = async ({
   actionKey,
   actorUserId,
   frameworkPackage,
@@ -600,6 +602,10 @@ const applyRuntimeSectionGeneration = ({
   nextFrameworkState.sections = nextFrameworkState.sections || {}
 
   const target = resolveGenerationTargetSection({ frameworkPackage, payload })
+  const sectionExecutionContract = await resolveSectionExecutionContract({
+    frameworkPackage,
+    section: target.section,
+  })
   const previousRawSection = nextFrameworkState.sections[target.stateSectionKey]
   const discovery = buildDiscoveryProjection(nextFrameworkState)
   const generationEligibility = buildSectionGenerationEligibility({
@@ -732,8 +738,31 @@ const applyRuntimeSectionGeneration = ({
     input,
     runtimeInstance,
     section: target.section,
+    sectionExecutionContract,
     generatedAt: actionedAt,
   })
+  const similarityResult = evaluateSectionInterpretationSimilarity({
+    candidate: generated,
+    frameworkPackage,
+    frameworkState: nextFrameworkState,
+    section: target.section,
+    sectionLabel: sectionExecutionContract.sectionIdentity.label,
+  })
+  if (!similarityResult.passed) {
+    throw buildActionError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Runtime section generation was blocked because the business interpretation duplicates another section.',
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_ACTION_NOT_AVAILABLE,
+      details: {
+        actionKey: normalizedActionKey,
+        sectionKey: target.sectionKey,
+        runtimePath: target.runtimePath,
+        similarityResult,
+      },
+    })
+  }
+  generated.similarityResult = similarityResult
   const hasGeneratedRevision = hasRuntimeValue(currentGenerated)
   const hasAcceptedRevision = hasRuntimeValue(previousAccepted)
   const revisions = hasGeneratedRevision || hasAcceptedRevision
@@ -1107,6 +1136,17 @@ const buildActionAuditPayload = ({
         evidenceHash: generationResult.generated?.evidenceHash,
         dependencyHash: generationResult.generated?.dependencyHash,
         boundedContextHash: generationResult.generated?.boundedContextHash,
+        sectionContractHash: generationResult.generated?.generator?.sectionContractHash,
+        similarityResult: generationResult.generated?.similarityResult
+          ? {
+              version: generationResult.generated.similarityResult.version,
+              passed: generationResult.generated.similarityResult.passed === true,
+              threshold: generationResult.generated.similarityResult.threshold,
+              maximumScore: generationResult.generated.similarityResult.maximumScore,
+              comparisonCount: generationResult.generated.similarityResult.comparisonCount,
+              topMatchSectionKey: generationResult.generated.similarityResult.topMatchSectionKey,
+            }
+          : null,
         tokenClass: generationResult.tokenSafety?.tokenClass,
         truthEligibility: {
           eligible: generationResult.truthEligibility?.eligible === true,
@@ -1537,13 +1577,13 @@ export const executeRuntimeAction = async ({
   })
   let resolvedTransition = transition
   if (isGenerationAction(normalizedActionKey)) {
-    resolvedTransition = applyRuntimeSectionGeneration({
-        actionKey: normalizedActionKey,
-        actorUserId,
-        frameworkPackage,
-        payload,
-        runtimeInstance,
-      })
+    resolvedTransition = await applyRuntimeSectionGeneration({
+      actionKey: normalizedActionKey,
+      actorUserId,
+      frameworkPackage,
+      payload,
+      runtimeInstance,
+    })
   } else if (isDiscoveryAction(normalizedActionKey)) {
     resolvedTransition = await applyRuntimeDiscoveryAction({
       actionKey: normalizedActionKey,
