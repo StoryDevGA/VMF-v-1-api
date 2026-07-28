@@ -1236,6 +1236,187 @@ const makeSectionRuntimeSkill = (overrides = {}) => ({
   ...overrides,
 })
 
+const currentSectionProfileFixtures = [
+  {
+    sectionKey: 'customer_context',
+    label: 'Customer Context',
+    stableId: 'skill-customer-context-interpreter',
+    skillKey: 'customer-context-interpreter',
+    expectedHeadings: [
+      'Customer and Offer Context',
+      'Operating Context Checks',
+    ],
+  },
+  {
+    sectionKey: 'strategic_objectives',
+    label: 'Strategic Objectives',
+    stableId: 'skill-strategic-objective-modeller',
+    skillKey: 'strategic-objective-modeller',
+    expectedHeadings: [
+      'Strategic Priorities',
+      'Objective Definition Checks',
+    ],
+  },
+  {
+    sectionKey: 'current_state_assessment',
+    label: 'Current State Assessment',
+    stableId: 'skill-current-state-diagnoser',
+    skillKey: 'current-state-diagnoser',
+    expectedHeadings: [
+      'Observed Current State',
+      'Assessment Checks',
+    ],
+  },
+  {
+    sectionKey: 'stakeholder_register',
+    label: 'Stakeholder Register',
+    stableId: 'skill-stakeholder-register-builder',
+    skillKey: 'stakeholder-register-builder',
+    expectedHeadings: [
+      'Known Stakeholder Groups',
+      'Roles to Confirm',
+    ],
+  },
+  {
+    sectionKey: 'evidence_register',
+    label: 'Evidence Register',
+    stableId: 'skill-evidence-register-curator',
+    skillKey: 'evidence-register-curator',
+    expectedHeadings: [
+      'Accepted Evidence Record',
+      'Proof Checks',
+    ],
+  },
+  {
+    sectionKey: 'output_requirements',
+    label: 'Output Requirements',
+    stableId: 'skill-output-requirements-capturer',
+    skillKey: 'output-requirements-capturer',
+    expectedHeadings: [
+      'Known Output Requirements',
+      'Delivery Brief Checks',
+    ],
+  },
+]
+
+const makeCurrentProfileSection = (fixture) => ({
+  sectionKey: fixture.sectionKey,
+  runtimePath: `framework_state.sections.${fixture.sectionKey}`,
+  label: fixture.label,
+  required: true,
+  validationKeys: ['required-sections-check'],
+})
+
+const makeCurrentProfileExecutionContract = (fixture, overrides = {}) => ({
+  contractVersion: 'section-execution-contract-v1',
+  sectionContractHash: `contract-hash-${fixture.sectionKey}`,
+  sectionIdentity: {
+    sectionKey: fixture.sectionKey,
+    runtimePath: `framework_state.sections.${fixture.sectionKey}`,
+    label: fixture.label,
+    purpose: `Capture the business meaning required for ${fixture.label}.`,
+  },
+  runtimeInstructions: {
+    stableId: fixture.stableId,
+    key: fixture.skillKey,
+    componentVersion: 1,
+    description: `Interpret reviewed evidence for ${fixture.label}.`,
+    skillRoleKey: 'SECTION_MODELLER',
+    category: 'BUSINESS',
+    inputContract: {
+      frameworkVersions: ['3.1.2'],
+      fields: ['acceptedEvidence'],
+    },
+    outputContract: {
+      format: 'STRUCTURED_TEXT',
+      fields: ['content', 'sections'],
+    },
+    constraints: {
+      allowedReadPaths: ['framework_state.evidence_pack'],
+      allowedWritePaths: [`framework_state.sections.${fixture.sectionKey}`],
+      forbiddenWritePaths: [],
+    },
+    ...overrides,
+  },
+})
+
+const makeCurrentProfileFrameworkPackage = (
+  fixture,
+  { skillComponentVersion = 1 } = {},
+) => {
+  const packageKey = 'vmf-standard-3-1-2'
+  const version = '3.1.2'
+  const frameworkPackage = makeRendererFrameworkPackage({
+    packageKey,
+    version,
+    sections: [makeCurrentProfileSection(fixture)],
+    workflowBindings: [makeWorkflowBinding('GENERATE_SECTION')],
+  })
+
+  return {
+    ...frameworkPackage,
+    dependencyLock: {
+      ...frameworkPackage.dependencyLock,
+      packageKey,
+      packageVersion: version,
+      references: frameworkPackage.dependencyLock.references.map((reference) =>
+        reference.collectionKey === 'RuntimeSkill'
+          ? {
+              ...reference,
+              id: fixture.stableId,
+              key: fixture.skillKey,
+              componentVersion: skillComponentVersion,
+            }
+          : reference,
+      ),
+    },
+  }
+}
+
+const makeCurrentProfileActionPolicy = (fixture) =>
+  makeActionWorkflowPolicy('GENERATE_SECTION', {
+    steps: [{
+      stepKey: `generate-${fixture.sectionKey}`,
+      type: 'SKILL_EXECUTION',
+      order: 1,
+      targetPath: `framework_state.sections.${fixture.sectionKey}`,
+      skillId: fixture.stableId,
+    }],
+  })
+
+const makeReleasedPurposeSubstitutionGenerated = ({ label, purpose }) => ({
+  format: 'STRUCTURED_TEXT',
+  sections: [
+    {
+      heading: `${label} Interpretation`,
+      body: `Based on accepted Intelligence Hub evidence, ${label} can safely focus on the themes below. The locked section purpose is: ${purpose}`,
+      bullets: [
+        `Governed framework execution: The accepted context supports a theme around controlled, framework-bound execution. For this section, interpret the evidence only where it supports ${purpose}`,
+        `Structured commercial output creation: The accepted context supports a theme around creating structured customer-facing material. For this section, interpret the evidence only where it supports ${purpose}`,
+        `Offer-led business context: The accepted target offer gives this section a bounded offer context: StorylineOS - Intelligence Workspace. For this section, interpret the evidence only where it supports ${purpose}`,
+        `Market and regional context: The accepted Intelligence Hub context identifies Global as the current market or regional frame. For this section, interpret the evidence only where it supports ${purpose}`,
+      ],
+    },
+    {
+      heading: `${label} Decision Use`,
+      body: 'Use this section-specific interpretation to assess only the business implications supported by accepted evidence.',
+      bullets: [
+        `Review whether the accepted evidence supports this section purpose: ${purpose}`,
+      ],
+    },
+    {
+      heading: 'Evidence Boundaries',
+      body: 'The system did not assume proof that has not been accepted into Intelligence Hub or section truth.',
+      bullets: [
+        'No quantified commercial proof has been provided.',
+        'No named customer proof has been provided.',
+        'No external market validation has been provided.',
+        'No customer-added section context has been provided.',
+      ],
+    },
+  ],
+})
+
 const makeSectionValidation = (overrides = {}) => ({
   stableId: overrides.stableId || `validation-${overrides.key || 'completeness-check'}`,
   key: overrides.key || 'completeness-check',
@@ -21817,6 +21998,896 @@ describe('Runtime Instance API', () => {
     },
   )
 
+  test('current VMF guided sections use exact versioned profiles with distinct customer-safe structures', () => {
+    const frameworkPackage = makeRendererFrameworkPackage({
+      packageKey: 'vmf-standard-3-1-2',
+      version: '3.1.2',
+      sections: currentSectionProfileFixtures.map(makeCurrentProfileSection),
+    })
+    const frameworkState = {
+      lifecycle: { stage: 'DRAFT' },
+      evidence_pack: makeReadyDiscoveryEvidencePack({
+        accepted: true,
+        inputs: {
+          companyWebsite: 'https://storylineos.example',
+          companyName: 'StorylineOS',
+          marketRegion: 'UK enterprise software',
+          targetOffer: 'AI-assisted value narrative platform',
+          notes: 'Teams want faster delivery, consistent output and less manual effort.',
+        },
+        state: {
+          status: 'ACCEPTED',
+          inputComplete: true,
+          evidenceReady: true,
+          accepted: true,
+          needsRefresh: false,
+        },
+      }),
+      sections: Object.fromEntries(
+        currentSectionProfileFixtures.map((fixture) => [fixture.sectionKey, '']),
+      ),
+    }
+    const runtimeInstance = makeRuntimeInstanceDocument({
+      packageKey: 'vmf-standard-3-1-2',
+      packageVersion: '3.1.2',
+      framework_state: frameworkState,
+    })
+    const generatedRows = currentSectionProfileFixtures.map((fixture) => {
+      const { generated, intelligence } = buildEnrichedGeneratedSection({
+        actionKey: 'GENERATE_SECTION',
+        actorUserId: CUSTOMER_ADMIN_ID,
+        dependencySectionKeys: [],
+        frameworkPackage,
+        frameworkState,
+        input: '',
+        runtimeInstance,
+        section: makeCurrentProfileSection(fixture),
+        sectionExecutionContract: makeCurrentProfileExecutionContract(fixture),
+        generatedAt: '2026-07-28T10:00:00.000Z',
+      })
+      return { fixture, generated, intelligence }
+    })
+    const forbiddenCustomerTerms = [
+      'locked section purpose',
+      'skill-customer',
+      'skill-strategic',
+      'skill-current',
+      'skill-stakeholder',
+      'skill-evidence',
+      'skill-output',
+      'interpretation profile',
+      'schema',
+      'validator',
+      'workflow policy',
+      'dependency snapshot',
+      'dependency hash',
+      'runtime debug',
+    ]
+
+    generatedRows.forEach(({ fixture, generated, intelligence }) => {
+      expect(generated.sections.map((section) => section.heading)).toEqual(
+        expect.arrayContaining(fixture.expectedHeadings),
+      )
+      expect(generated.generator).toEqual(expect.objectContaining({
+        adapter: 'gsil-section-enrichment-v2',
+      }))
+      expect(generated.generator.interpretationProfile).toBeUndefined()
+      expect(intelligence.enrichmentVersion).toBe('gsil-section-enrichment-v2')
+      const customerProjection = JSON.stringify({
+        generated: generated.sections,
+        accepted: {
+          content: generated.content,
+          sections: generated.sections,
+        },
+        displayProjection: intelligence.displayProjection.generatedInsight,
+      }).toLowerCase()
+      forbiddenCustomerTerms.forEach((term) => {
+        expect(customerProjection).not.toContain(term)
+      })
+      const fullGeneratedPayload = JSON.stringify(generated).toLowerCase()
+      expect(fullGeneratedPayload).not.toContain(fixture.stableId)
+      expect(fullGeneratedPayload).not.toContain('interpretationprofile')
+      expect(fullGeneratedPayload).not.toContain('selectionkey')
+      expect(fullGeneratedPayload).not.toContain('skillstableid')
+      expect(fullGeneratedPayload).not.toContain('skillcomponentversion')
+    })
+
+    expect(new Set(
+      generatedRows.map(({ generated }) =>
+        generated.sections.map((section) => section.heading).join('|')),
+    ).size).toBe(currentSectionProfileFixtures.length)
+
+    const strategicRow = generatedRows.find(({ fixture }) =>
+      fixture.sectionKey === 'strategic_objectives')
+    const repeatedStrategicGeneration = buildEnrichedGeneratedSection({
+      actionKey: 'GENERATE_SECTION',
+      actorUserId: CUSTOMER_ADMIN_ID,
+      dependencySectionKeys: [],
+      frameworkPackage,
+      frameworkState,
+      input: '',
+      runtimeInstance,
+      section: makeCurrentProfileSection(strategicRow.fixture),
+      sectionExecutionContract: makeCurrentProfileExecutionContract(strategicRow.fixture),
+      generatedAt: '2026-07-28T10:00:00.000Z',
+    })
+    expect(repeatedStrategicGeneration).toEqual({
+      generated: strategicRow.generated,
+      intelligence: strategicRow.intelligence,
+    })
+  })
+
+  test('renderer full payload does not expose current profile or Runtime Skill identifiers', async () => {
+    const fixture = currentSectionProfileFixtures.find(
+      (candidate) => candidate.sectionKey === 'strategic_objectives',
+    )
+    const section = makeCurrentProfileSection(fixture)
+    const frameworkPackage = makeRendererFrameworkPackage({
+      packageKey: 'vmf-standard-3-1-2',
+      version: '3.1.2',
+      sections: [section],
+      workflowBindings: [],
+    })
+    const baseFrameworkState = {
+      lifecycle: { stage: 'DRAFT' },
+      evidence_pack: makeReadyDiscoveryEvidencePack({
+        accepted: true,
+        inputs: {
+          companyName: 'StorylineOS',
+          targetOffer: 'AI-assisted value narrative platform',
+          notes: 'Teams want faster delivery with less manual effort.',
+        },
+        state: {
+          status: 'ACCEPTED',
+          inputComplete: true,
+          evidenceReady: true,
+          accepted: true,
+          needsRefresh: false,
+        },
+      }),
+      sections: {
+        strategic_objectives: '',
+      },
+      validation: {},
+      readiness: {},
+      policy: {},
+      attachments: {},
+      artifacts: {},
+    }
+    const runtimeInstanceSeed = makeRuntimeInstance({
+      packageKey: frameworkPackage.packageKey,
+      packageVersion: frameworkPackage.version,
+      framework_state: baseFrameworkState,
+    })
+    const { generated, intelligence } = buildEnrichedGeneratedSection({
+      actionKey: 'GENERATE_SECTION',
+      actorUserId: CUSTOMER_ADMIN_ID,
+      dependencySectionKeys: [],
+      frameworkPackage,
+      frameworkState: baseFrameworkState,
+      input: '',
+      runtimeInstance: runtimeInstanceSeed,
+      section,
+      sectionExecutionContract: makeCurrentProfileExecutionContract(fixture),
+      generatedAt: '2026-07-28T10:00:00.000Z',
+    })
+    const accepted = {
+      content: generated.content,
+      sections: generated.sections,
+      acceptedAt: '2026-07-28T10:01:00.000Z',
+      acceptedBy: CUSTOMER_ADMIN_ID,
+      sourceGeneratedAt: generated.generatedAt,
+      sourceBoundedContextHash: generated.boundedContextHash,
+      sourceSectionContractHash: generated.generator.sectionContractHash,
+      truthHash: 'accepted-strategic-truth-hash',
+    }
+    const runtimeInstance = makeRuntimeInstance({
+      packageKey: frameworkPackage.packageKey,
+      packageVersion: frameworkPackage.version,
+      framework_state: {
+        ...baseFrameworkState,
+        sections: {
+          strategic_objectives: {
+            generated,
+            accepted,
+            intelligence,
+            state: {
+              status: 'ACCEPTED',
+            },
+          },
+        },
+      },
+    })
+    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+    RuntimeDeployment.findOne.mockReturnValue(buildLeanQuery(makeRuntimeDeployment({
+      packageKey: frameworkPackage.packageKey,
+      frameworkVersion: frameworkPackage.version,
+    })))
+    RuntimeActivationSnapshot.findOne.mockReturnValue(buildLeanQuery(
+      makeRuntimeActivationSnapshot({
+        packageKey: frameworkPackage.packageKey,
+        frameworkVersion: frameworkPackage.version,
+      }),
+    ))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([
+      makeRuntimePathRecord({
+        stableId: 'path-framework-state-sections-strategic-objectives',
+        pathKey: section.runtimePath,
+        label: fixture.label,
+      }),
+    ]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      sections: [{
+        sectionKey: fixture.sectionKey,
+        runtimePath: section.runtimePath,
+        label: fixture.label,
+        helpText: 'Capture the strategic outcomes this value narrative should support.',
+        isVisible: true,
+        isEditable: true,
+        isRequiredDisplay: true,
+      }],
+      actions: [],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([]))
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.sections[0]).toEqual(expect.objectContaining({
+      generated: expect.objectContaining({
+        generator: expect.objectContaining({
+          adapter: 'gsil-section-enrichment-v2',
+        }),
+      }),
+      accepted: expect.objectContaining({
+        content: generated.content,
+      }),
+    }))
+    const fullRendererPayload = JSON.stringify(res.body.data).toLowerCase()
+    expect(fullRendererPayload).not.toContain(fixture.stableId)
+    expect(fullRendererPayload).not.toContain('interpretationprofile')
+    expect(fullRendererPayload).not.toContain('selectionkey')
+    expect(fullRendererPayload).not.toContain('skillstableid')
+    expect(fullRendererPayload).not.toContain('skillcomponentversion')
+  })
+
+  test('all six same-evidence current profiles remain below the v2 pairwise similarity boundary', () => {
+    const frameworkPackage = makeRendererFrameworkPackage({
+      packageKey: 'vmf-standard-3-1-2',
+      version: '3.1.2',
+      sections: currentSectionProfileFixtures.map(makeCurrentProfileSection),
+    })
+    const frameworkState = {
+      lifecycle: { stage: 'DRAFT' },
+      evidence_pack: makeReadyDiscoveryEvidencePack({
+        accepted: true,
+        inputs: {
+          companyName: 'StorylineOS',
+          marketRegion: 'UK enterprise software',
+          targetOffer: 'AI-assisted value narrative platform',
+          notes: 'Teams want faster delivery, consistent output and less manual effort.',
+        },
+        state: {
+          status: 'ACCEPTED',
+          inputComplete: true,
+          evidenceReady: true,
+          accepted: true,
+          needsRefresh: false,
+        },
+      }),
+      sections: Object.fromEntries(
+        currentSectionProfileFixtures.map((fixture) => [fixture.sectionKey, '']),
+      ),
+    }
+    const runtimeInstance = makeRuntimeInstanceDocument({
+      packageKey: 'vmf-standard-3-1-2',
+      packageVersion: '3.1.2',
+      framework_state: frameworkState,
+    })
+    const generatedBySectionKey = Object.fromEntries(
+      currentSectionProfileFixtures.map((fixture) => {
+        const { generated } = buildEnrichedGeneratedSection({
+          actionKey: 'GENERATE_SECTION',
+          actorUserId: CUSTOMER_ADMIN_ID,
+          dependencySectionKeys: [],
+          frameworkPackage,
+          frameworkState,
+          input: '',
+          runtimeInstance,
+          section: makeCurrentProfileSection(fixture),
+          sectionExecutionContract: makeCurrentProfileExecutionContract(fixture),
+          generatedAt: '2026-07-28T10:00:00.000Z',
+        })
+        return [fixture.sectionKey, generated]
+      }),
+    )
+    const pairwiseScores = []
+
+    for (let leftIndex = 0; leftIndex < currentSectionProfileFixtures.length; leftIndex += 1) {
+      for (
+        let rightIndex = leftIndex + 1;
+        rightIndex < currentSectionProfileFixtures.length;
+        rightIndex += 1
+      ) {
+        const left = currentSectionProfileFixtures[leftIndex]
+        const right = currentSectionProfileFixtures[rightIndex]
+        const result = evaluateSectionInterpretationSimilarity({
+          candidate: generatedBySectionKey[left.sectionKey],
+          frameworkPackage,
+          frameworkState: {
+            ...frameworkState,
+            sections: {
+              [right.sectionKey]: {
+                generated: generatedBySectionKey[right.sectionKey],
+              },
+            },
+          },
+          section: makeCurrentProfileSection(left),
+          sectionLabel: left.label,
+        })
+        pairwiseScores.push({
+          pair: `${left.sectionKey}:${right.sectionKey}`,
+          score: result.maximumScore,
+        })
+        expect(result).toEqual(expect.objectContaining({
+          version: 'business-interpretation-token-jaccard-v2',
+          threshold: 0.75,
+          passed: true,
+          topMatchSectionKey: right.sectionKey,
+        }))
+        expect(result.maximumScore).toBeLessThan(0.75)
+      }
+    }
+
+    expect(pairwiseScores).toEqual([
+      { pair: 'customer_context:strategic_objectives', score: 0.317647 },
+      { pair: 'customer_context:current_state_assessment', score: 0.277108 },
+      { pair: 'customer_context:stakeholder_register', score: 0.27907 },
+      { pair: 'customer_context:evidence_register', score: 0.290698 },
+      { pair: 'customer_context:output_requirements', score: 0.2875 },
+      { pair: 'strategic_objectives:current_state_assessment', score: 0.268817 },
+      { pair: 'strategic_objectives:stakeholder_register', score: 0.270833 },
+      { pair: 'strategic_objectives:evidence_register', score: 0.257732 },
+      { pair: 'strategic_objectives:output_requirements', score: 0.337209 },
+      { pair: 'current_state_assessment:stakeholder_register', score: 0.247312 },
+      { pair: 'current_state_assessment:evidence_register', score: 0.26087 },
+      { pair: 'current_state_assessment:output_requirements', score: 0.313253 },
+      { pair: 'stakeholder_register:evidence_register', score: 0.247423 },
+      { pair: 'stakeholder_register:output_requirements', score: 0.313953 },
+      { pair: 'evidence_register:output_requirements', score: 0.228261 },
+    ])
+  })
+
+  test('same-evidence Strategic Objectives and Current State Assessment express different business meanings', () => {
+    const fixtures = currentSectionProfileFixtures.filter((fixture) =>
+      ['strategic_objectives', 'current_state_assessment'].includes(fixture.sectionKey),
+    )
+    const frameworkPackage = makeRendererFrameworkPackage({
+      packageKey: 'vmf-standard-3-1-2',
+      version: '3.1.2',
+      sections: fixtures.map(makeCurrentProfileSection),
+    })
+    const frameworkState = {
+      evidence_pack: makeReadyDiscoveryEvidencePack({
+        accepted: true,
+        inputs: {
+          companyName: 'StorylineOS',
+          marketRegion: 'UK enterprise software',
+          targetOffer: 'AI-assisted value narrative platform',
+          notes: 'Teams want faster delivery, consistent output and less manual effort.',
+        },
+        state: {
+          status: 'ACCEPTED',
+          inputComplete: true,
+          evidenceReady: true,
+          accepted: true,
+          needsRefresh: false,
+        },
+      }),
+      sections: {
+        strategic_objectives: '',
+        current_state_assessment: '',
+      },
+    }
+    const runtimeInstance = makeRuntimeInstanceDocument({
+      packageKey: 'vmf-standard-3-1-2',
+      packageVersion: '3.1.2',
+      framework_state: frameworkState,
+    })
+    const generated = Object.fromEntries(fixtures.map((fixture) => [
+      fixture.sectionKey,
+      buildEnrichedGeneratedSection({
+        actionKey: 'GENERATE_SECTION',
+        actorUserId: CUSTOMER_ADMIN_ID,
+        dependencySectionKeys: [],
+        frameworkPackage,
+        frameworkState,
+        input: '',
+        runtimeInstance,
+        section: makeCurrentProfileSection(fixture),
+        sectionExecutionContract: makeCurrentProfileExecutionContract(fixture),
+        generatedAt: '2026-07-28T10:00:00.000Z',
+      }).generated,
+    ]))
+
+    expect(generated.strategic_objectives.content).toMatch(
+      /Strategic Priorities|candidate aims|success measure|objective owner/i,
+    )
+    expect(generated.current_state_assessment.content).toMatch(
+      /Observed Current State|present operating conditions|performance baseline|current friction/i,
+    )
+    expect(generated.strategic_objectives.content).not.toContain(
+      'The locked section purpose is:',
+    )
+    expect(generated.current_state_assessment.content).not.toContain(
+      'The locked section purpose is:',
+    )
+    expect(generated.strategic_objectives.content).not.toContain(
+      'Use this section-specific interpretation',
+    )
+    expect(generated.current_state_assessment.content).not.toContain(
+      'Use this section-specific interpretation',
+    )
+  })
+
+  test('current profiles do not contradict supplied owners, measures, baselines, stakeholders, audiences, or formats', () => {
+    const suppliedDetails = [
+      'Alex Morgan is the executive sponsor and Casey Lee owns the objective.',
+      'Success means a 20 percent cycle-time reduction by Q4.',
+      'The current baseline is 12 hours per proposal.',
+      'The primary audience is the CFO.',
+      'The required deliverable is a two-page PDF sent by email.',
+    ].join(' ')
+    const frameworkPackage = makeRendererFrameworkPackage({
+      packageKey: 'vmf-standard-3-1-2',
+      version: '3.1.2',
+      sections: currentSectionProfileFixtures.map(makeCurrentProfileSection),
+    })
+    const frameworkState = {
+      evidence_pack: makeReadyDiscoveryEvidencePack({
+        accepted: true,
+        inputs: {
+          companyName: 'StorylineOS',
+          targetOffer: 'AI-assisted value narrative platform',
+          notes: suppliedDetails,
+        },
+        state: {
+          status: 'ACCEPTED',
+          inputComplete: true,
+          evidenceReady: true,
+          accepted: true,
+          needsRefresh: false,
+        },
+      }),
+      sections: Object.fromEntries(
+        currentSectionProfileFixtures.map((fixture) => [fixture.sectionKey, '']),
+      ),
+    }
+    const runtimeInstance = makeRuntimeInstanceDocument({
+      packageKey: 'vmf-standard-3-1-2',
+      packageVersion: '3.1.2',
+      framework_state: frameworkState,
+    })
+    const contradictedAbsenceClaims = [
+      'no quantified success measure is yet established',
+      'no accountable objective owner is yet named',
+      'no delivery horizon or target date is yet confirmed',
+      'no measured performance baseline is yet available',
+      'the executive sponsor is not yet named',
+      'the final decision maker and approver are not yet confirmed',
+      'the primary audience and decision moment are not yet specified',
+      'the required format, channel and length are not yet specified',
+      'no quantified commercial proof has been provided',
+      'no named customer proof has been provided',
+      'no external market validation has been provided',
+      'not committed targets',
+      'performance impact are not yet measured',
+      'does not by itself define the delivery brief',
+      'does not determine the intended audience, format or channel',
+    ]
+
+    currentSectionProfileFixtures.forEach((fixture) => {
+      const { generated } = buildEnrichedGeneratedSection({
+        actionKey: 'GENERATE_SECTION',
+        actorUserId: CUSTOMER_ADMIN_ID,
+        dependencySectionKeys: [],
+        frameworkPackage,
+        frameworkState,
+        input: suppliedDetails,
+        runtimeInstance,
+        section: makeCurrentProfileSection(fixture),
+        sectionExecutionContract: makeCurrentProfileExecutionContract(fixture),
+        generatedAt: '2026-07-28T10:00:00.000Z',
+      })
+      const visibleContent = generated.content.toLowerCase()
+
+      contradictedAbsenceClaims.forEach((claim) => {
+        expect(visibleContent).not.toContain(claim)
+      })
+      expect(visibleContent).toMatch(/confirm|check|verify|identify|record|attach/)
+    })
+  })
+
+  test('GENERATE_SECTION fails closed when a current skill version has no registered interpretation profile', async () => {
+    const fixture = currentSectionProfileFixtures.find(
+      (candidate) => candidate.sectionKey === 'strategic_objectives',
+    )
+    const frameworkPackage = makeCurrentProfileFrameworkPackage(fixture, {
+      skillComponentVersion: 2,
+    })
+    const frameworkState = {
+      lifecycle: { stage: 'DRAFT' },
+      evidence_pack: makeReadyDiscoveryEvidencePack({
+        accepted: true,
+        inputs: {
+          companyName: 'StorylineOS',
+          targetOffer: 'AI-assisted value narrative platform',
+          notes: 'Teams want faster delivery with less manual effort.',
+        },
+        state: {
+          status: 'ACCEPTED',
+          inputComplete: true,
+          evidenceReady: true,
+          accepted: true,
+          needsRefresh: false,
+        },
+      }),
+      sections: {
+        strategic_objectives: '',
+      },
+      validation: {},
+      readiness: {},
+      policy: {},
+      attachments: {},
+      artifacts: {},
+    }
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      packageKey: frameworkPackage.packageKey,
+      packageVersion: frameworkPackage.version,
+      dependencyLockId: frameworkPackage.dependencyLock.snapshotId,
+      updatedAt: new Date('2026-07-28T10:00:00.000Z'),
+      framework_state: frameworkState,
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+    RuntimeDeployment.findOne.mockReturnValue(buildLeanQuery(makeRuntimeDeployment({
+      packageKey: frameworkPackage.packageKey,
+      frameworkVersion: frameworkPackage.version,
+    })))
+    RuntimeActivationSnapshot.findOne.mockReturnValue(buildLeanQuery(
+      makeRuntimeActivationSnapshot({
+        packageKey: frameworkPackage.packageKey,
+        frameworkVersion: frameworkPackage.version,
+      }),
+    ))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([
+      makeRuntimePathRecord({
+        stableId: 'path-framework-state-sections-strategic-objectives',
+        pathKey: 'framework_state.sections.strategic_objectives',
+        label: 'Strategic Objectives',
+      }),
+    ]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      sections: [{
+        sectionKey: 'strategic_objectives',
+        runtimePath: 'framework_state.sections.strategic_objectives',
+        label: 'Strategic Objectives',
+        helpText: 'Capture the strategic outcomes this value narrative should support.',
+        isVisible: true,
+        isEditable: true,
+        isRequiredDisplay: true,
+      }],
+      actions: [makeUIAction('GENERATE_SECTION')],
+    })))
+    RuntimeSkill.find.mockReturnValue(buildLeanQuery([
+      makeSectionRuntimeSkill({
+        stableId: fixture.stableId,
+        key: fixture.skillKey,
+        name: 'Strategic Objective Modeller',
+        componentVersion: 2,
+        inputContract: {
+          frameworkVersions: ['3.1.2'],
+          fields: ['acceptedEvidence'],
+        },
+        allowedWritePaths: ['framework_state.sections.strategic_objectives'],
+      }),
+    ]))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([
+      makeCurrentProfileActionPolicy(fixture),
+    ]))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/GENERATE_SECTION`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-07-28T10:00:00.000Z',
+        runtimePath: 'framework_state.sections.strategic_objectives',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details).toEqual(expect.objectContaining({
+      reason: 'RUNTIME_ACTION_NOT_AVAILABLE',
+      contractIssue: 'SECTION_INTERPRETATION_PROFILE_UNSUPPORTED',
+      skillStableId: fixture.stableId,
+      skillComponentVersion: 2,
+      supportedSelectionKeys: [`${fixture.stableId}@1`],
+    }))
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('retained released Strategic and Current State content is blocked by the v2 policy', () => {
+    const strategicPurpose =
+      'Customer goals, outcomes and strategic priorities that the VMF must preserve.'
+    const currentStatePurpose =
+      'Observed current state, operating friction, status quo forces, and constraint context.'
+    const strategicGenerated = {
+      ...makeReleasedPurposeSubstitutionGenerated({
+        label: 'Strategic Objectives',
+        purpose: strategicPurpose,
+      }),
+      generator: {
+        adapter: 'gsil-section-enrichment-v2',
+      },
+    }
+    const currentStateGenerated = makeReleasedPurposeSubstitutionGenerated({
+      label: 'Current State Assessment',
+      purpose: currentStatePurpose,
+    })
+    const strategicSection = {
+      sectionKey: 'strategic_objectives',
+      runtimePath: 'framework_state.sections.strategic_objectives',
+      label: 'Strategic Objectives',
+    }
+    const currentStateSection = {
+      sectionKey: 'current_state_assessment',
+      runtimePath: 'framework_state.sections.current_state_assessment',
+      label: 'Current State Assessment',
+    }
+
+    const result = evaluateSectionInterpretationSimilarity({
+      candidate: strategicGenerated,
+      frameworkPackage: {
+        sections: [strategicSection, currentStateSection],
+      },
+      frameworkState: {
+        sections: {
+          current_state_assessment: {
+            generated: currentStateGenerated,
+          },
+        },
+      },
+      section: strategicSection,
+      sectionLabel: strategicSection.label,
+    })
+
+    expect(result).toEqual(expect.objectContaining({
+      version: 'business-interpretation-token-jaccard-v2',
+      threshold: 0.75,
+      maximumScore: 0.80303,
+      topMatchSectionKey: 'current_state_assessment',
+      passed: false,
+    }))
+    expect(result.comparisons[0]).toEqual(expect.objectContaining({
+      targetTokenCount: 59,
+      peerTokenCount: 60,
+      intersectionCount: 53,
+      passed: false,
+    }))
+  })
+
+  test('GENERATE_SECTION blocks a calibrated v2 near-duplicate before mutation or audit', async () => {
+    const fixture = currentSectionProfileFixtures.find(
+      (candidate) => candidate.sectionKey === 'strategic_objectives',
+    )
+    const targetSection = makeCurrentProfileSection(fixture)
+    const frameworkPackage = makeCurrentProfileFrameworkPackage(fixture)
+    const baseFrameworkState = {
+      lifecycle: { stage: 'DRAFT' },
+      evidence_pack: makeReadyDiscoveryEvidencePack({
+        accepted: true,
+        inputs: {
+          companyName: 'StorylineOS',
+          marketRegion: 'UK enterprise software',
+          targetOffer: 'AI-assisted value narrative platform',
+          notes: 'Teams want faster delivery, consistent output and less manual effort.',
+        },
+        state: {
+          status: 'ACCEPTED',
+          inputComplete: true,
+          evidenceReady: true,
+          accepted: true,
+          needsRefresh: false,
+        },
+      }),
+      sections: {
+        strategic_objectives: '',
+      },
+      validation: {},
+      readiness: {},
+      policy: {},
+      attachments: {},
+      artifacts: {},
+    }
+    const runtimeInstanceSeed = makeRuntimeInstanceDocument({
+      packageKey: frameworkPackage.packageKey,
+      packageVersion: frameworkPackage.version,
+      dependencyLockId: frameworkPackage.dependencyLock.snapshotId,
+      updatedAt: new Date('2026-07-28T10:00:00.000Z'),
+      framework_state: baseFrameworkState,
+    })
+    const { generated: candidateGenerated } = buildEnrichedGeneratedSection({
+      actionKey: 'GENERATE_SECTION',
+      actorUserId: CUSTOMER_ADMIN_ID,
+      dependencySectionKeys: [],
+      frameworkPackage,
+      frameworkState: baseFrameworkState,
+      input: '',
+      runtimeInstance: runtimeInstanceSeed,
+      section: targetSection,
+      sectionExecutionContract: makeCurrentProfileExecutionContract(fixture),
+      generatedAt: '2026-07-28T09:59:00.000Z',
+    })
+    const similarityStopWords = new Set([
+      'a', 'an', 'and', 'are', 'as', 'at', 'be', 'been', 'but', 'by', 'can',
+      'for', 'from', 'has', 'have', 'in', 'into', 'is', 'it', 'of', 'on', 'or',
+      'that', 'the', 'their', 'these', 'this', 'those', 'to', 'was', 'were',
+      'will', 'with',
+    ])
+    const similarityIdentityTokens = new Set([
+      'strategic',
+      'objectives',
+      'released',
+      'clone',
+    ])
+    const candidateInterpretationText = candidateGenerated.sections
+      .filter((section) => ![
+        'customer-provided section context',
+        'customer-provided section evidence',
+        'evidence boundaries',
+      ].includes(String(section.heading || '').toLowerCase()))
+      .flatMap((section) => [
+        section.body,
+        ...(Array.isArray(section.bullets) ? section.bullets : []),
+      ])
+      .filter(Boolean)
+      .join(' ')
+    const candidateTokens = candidateInterpretationText
+      .normalize('NFKC')
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, ' ')
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .filter((token) => !similarityStopWords.has(token))
+      .filter((token) => !similarityIdentityTokens.has(token))
+    const candidateTokenSet = [...new Set(candidateTokens)]
+    expect(candidateTokenSet.length).toBeGreaterThanOrEqual(62)
+    const releasedCloneTokens = [
+      ...candidateTokenSet.slice(0, 54),
+      'releasedcloneextra1',
+      'releasedcloneextra2',
+      'releasedcloneextra3',
+      'releasedcloneextra4',
+      'releasedcloneextra5',
+    ]
+    const releasedClone = {
+      format: 'STRUCTURED_TEXT',
+      content: releasedCloneTokens.join(' '),
+      generatedAt: '2026-07-28T09:58:00.000Z',
+    }
+    const frameworkState = {
+      ...baseFrameworkState,
+      sections: {
+        ...baseFrameworkState.sections,
+        released_clone: {
+          generated: releasedClone,
+          state: { status: 'GENERATED' },
+        },
+      },
+    }
+    const calibration = evaluateSectionInterpretationSimilarity({
+      candidate: candidateGenerated,
+      frameworkPackage,
+      frameworkState,
+      section: targetSection,
+      sectionLabel: fixture.label,
+    })
+    expect(calibration).toEqual(expect.objectContaining({
+      version: 'business-interpretation-token-jaccard-v2',
+      threshold: 0.75,
+      maximumScore: 0.80597,
+      topMatchSectionKey: 'released_clone',
+      passed: false,
+    }))
+    expect(calibration.comparisons[0]).toEqual(expect.objectContaining({
+      intersectionCount: 54,
+      passed: false,
+    }))
+
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      packageKey: frameworkPackage.packageKey,
+      packageVersion: frameworkPackage.version,
+      dependencyLockId: frameworkPackage.dependencyLock.snapshotId,
+      updatedAt: new Date('2026-07-28T10:00:00.000Z'),
+      framework_state: frameworkState,
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+    RuntimeDeployment.findOne.mockReturnValue(buildLeanQuery(makeRuntimeDeployment({
+      packageKey: frameworkPackage.packageKey,
+      frameworkVersion: frameworkPackage.version,
+    })))
+    RuntimeActivationSnapshot.findOne.mockReturnValue(buildLeanQuery(
+      makeRuntimeActivationSnapshot({
+        packageKey: frameworkPackage.packageKey,
+        frameworkVersion: frameworkPackage.version,
+      }),
+    ))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([
+      makeRuntimePathRecord({
+        stableId: 'path-framework-state-sections-strategic-objectives',
+        pathKey: 'framework_state.sections.strategic_objectives',
+        label: 'Strategic Objectives',
+      }),
+    ]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      sections: [{
+        sectionKey: 'strategic_objectives',
+        runtimePath: 'framework_state.sections.strategic_objectives',
+        label: 'Strategic Objectives',
+        helpText: 'Capture the strategic outcomes this value narrative should support.',
+        isVisible: true,
+        isEditable: true,
+        isRequiredDisplay: true,
+      }],
+      actions: [makeUIAction('GENERATE_SECTION')],
+    })))
+    RuntimeSkill.find.mockReturnValue(buildLeanQuery([
+      makeSectionRuntimeSkill({
+        stableId: fixture.stableId,
+        key: fixture.skillKey,
+        name: 'Strategic Objective Modeller',
+        inputContract: {
+          frameworkVersions: ['3.1.2'],
+          fields: ['acceptedEvidence'],
+        },
+        allowedWritePaths: ['framework_state.sections.strategic_objectives'],
+      }),
+    ]))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([
+      makeCurrentProfileActionPolicy(fixture),
+    ]))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/GENERATE_SECTION`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-07-28T10:00:00.000Z',
+        runtimePath: 'framework_state.sections.strategic_objectives',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details).toEqual(expect.objectContaining({
+      reason: 'RUNTIME_ACTION_NOT_AVAILABLE',
+      similarityResult: expect.objectContaining({
+        version: 'business-interpretation-token-jaccard-v2',
+        threshold: 0.75,
+        maximumScore: 0.80597,
+        topMatchSectionKey: 'released_clone',
+        passed: false,
+      }),
+    }))
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
   test('GENERATE_SECTION rejects duplicate business interpretation without mutation or audit', async () => {
     const frameworkPackage = makeRendererFrameworkPackage({
       workflowBindings: [makeWorkflowBinding('GENERATE_SECTION')],
@@ -21980,6 +23051,83 @@ describe('Runtime Instance API', () => {
     expect(belowThreshold).toEqual(expect.objectContaining({
       passed: true,
       maximumScore: 0.849958,
+      topMatchSectionKey: 'peer_section',
+    }))
+  })
+
+  test('current-profile similarity blocks at the 0.75 threshold and passes below it', () => {
+    const section = {
+      sectionKey: 'strategic_objectives',
+      runtimePath: 'framework_state.sections.strategic_objectives',
+    }
+    const frameworkPackage = {
+      sections: [
+        section,
+        {
+          sectionKey: 'peer_section',
+          runtimePath: 'framework_state.sections.peer_section',
+          label: 'Peer Section',
+        },
+      ],
+    }
+    const evaluateWithTokenCounts = ({ targetTokenCount, peerTokenCount }) => {
+      const targetTokens = Array.from(
+        { length: targetTokenCount },
+        (_, index) => `signal${index + 1}`,
+      )
+      return evaluateSectionInterpretationSimilarity({
+        candidate: {
+          content: targetTokens.join(' '),
+          sections: [{
+            heading: 'Strategic Priorities',
+            body: targetTokens.join(' '),
+            bullets: [],
+          }],
+          generator: {
+            adapter: 'gsil-section-enrichment-v2',
+          },
+        },
+        frameworkPackage,
+        frameworkState: {
+          sections: {
+            peer_section: {
+              generated: {
+                content: targetTokens.slice(0, peerTokenCount).join(' '),
+                sections: [{
+                  heading: 'Peer Interpretation',
+                  body: targetTokens.slice(0, peerTokenCount).join(' '),
+                  bullets: [],
+                }],
+              },
+            },
+          },
+        },
+        section,
+        sectionLabel: 'Strategic Objectives',
+      })
+    }
+
+    const atThreshold = evaluateWithTokenCounts({
+      targetTokenCount: 20,
+      peerTokenCount: 15,
+    })
+    expect(atThreshold).toEqual(expect.objectContaining({
+      version: 'business-interpretation-token-jaccard-v2',
+      threshold: 0.75,
+      passed: false,
+      maximumScore: 0.75,
+      topMatchSectionKey: 'peer_section',
+    }))
+
+    const belowThreshold = evaluateWithTokenCounts({
+      targetTokenCount: 20001,
+      peerTokenCount: 15000,
+    })
+    expect(belowThreshold).toEqual(expect.objectContaining({
+      version: 'business-interpretation-token-jaccard-v2',
+      threshold: 0.75,
+      passed: true,
+      maximumScore: 0.749963,
       topMatchSectionKey: 'peer_section',
     }))
   })

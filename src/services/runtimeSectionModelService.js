@@ -30,6 +30,12 @@ export const SECTION_INTERPRETATION_SIMILARITY_POLICY = Object.freeze({
   ]),
 })
 
+export const CURRENT_SECTION_INTERPRETATION_SIMILARITY_POLICY = Object.freeze({
+  ...SECTION_INTERPRETATION_SIMILARITY_POLICY,
+  version: 'business-interpretation-token-jaccard-v2',
+  threshold: 0.75,
+})
+
 const SECTION_SIMILARITY_STOP_WORDS = new Set([
   'a', 'an', 'and', 'are', 'as', 'at', 'be', 'been', 'but', 'by', 'can',
   'for', 'from', 'has', 'have', 'in', 'into', 'is', 'it', 'of', 'on', 'or',
@@ -177,6 +183,45 @@ const summarizeInput = (input) => {
 }
 
 const GSIL_ENRICHMENT_VERSION = 'gsil-section-enrichment-v1'
+const GSIL_PROFILE_ENRICHMENT_VERSION = 'gsil-section-enrichment-v2'
+
+const CURRENT_SECTION_INTERPRETATION_PROFILES = Object.freeze({
+  'skill-customer-context-interpreter@1': Object.freeze({
+    key: 'customer-context',
+    semanticType: 'CUSTOMER_CONTEXT',
+  }),
+  'skill-strategic-objective-modeller@1': Object.freeze({
+    key: 'strategic-objectives',
+    semanticType: 'STRATEGIC_OBJECTIVES',
+  }),
+  'skill-current-state-diagnoser@1': Object.freeze({
+    key: 'current-state-assessment',
+    semanticType: 'CURRENT_STATE_ASSESSMENT',
+  }),
+  'skill-stakeholder-register-builder@1': Object.freeze({
+    key: 'stakeholder-register',
+    semanticType: 'STAKEHOLDER_REGISTER',
+  }),
+  'skill-evidence-register-curator@1': Object.freeze({
+    key: 'evidence-register',
+    semanticType: 'EVIDENCE_REGISTER',
+  }),
+  'skill-output-requirements-capturer@1': Object.freeze({
+    key: 'output-requirements',
+    semanticType: 'OUTPUT_REQUIREMENTS',
+  }),
+})
+
+const CURRENT_SECTION_INTERPRETATION_STABLE_IDS = new Set(
+  Object.keys(CURRENT_SECTION_INTERPRETATION_PROFILES)
+    .map((selectionKey) => selectionKey.split('@')[0]),
+)
+
+const CURRENT_PROFILE_VERIFICATION_BOUNDARIES = Object.freeze([
+  'Verify direct support before using quantified commercial claims.',
+  'Confirm source permission before using named customer examples.',
+  'Verify sources before relying on external market validation.',
+])
 
 const SECTION_CATEGORY_RULES = Object.freeze({
   EXECUTIVE_SUMMARY: {
@@ -261,6 +306,46 @@ const normalizeEvidenceString = (value) => {
     return Object.values(value).map(normalizeEvidenceString).filter(Boolean).join('; ')
   }
   return ''
+}
+
+const resolveSectionInterpretationProfile = (sectionExecutionContract = {}) => {
+  const stableId = normalizeSectionText(
+    sectionExecutionContract?.runtimeInstructions?.stableId,
+  ).toLowerCase()
+  const rawComponentVersion =
+    sectionExecutionContract?.runtimeInstructions?.componentVersion
+  const componentVersion = Number(rawComponentVersion)
+
+  if (!CURRENT_SECTION_INTERPRETATION_STABLE_IDS.has(stableId)) return null
+
+  const selectionKey = `${stableId}@${componentVersion}`
+  const registeredProfile = CURRENT_SECTION_INTERPRETATION_PROFILES[selectionKey]
+  if (!registeredProfile) {
+    const err = new Error(
+      'Runtime section generation is blocked because the resolved skill version has no compatible interpretation profile.',
+    )
+    err.status = 409
+    err.code = 'CONFLICT'
+    err.details = {
+      reason: 'RUNTIME_ACTION_NOT_AVAILABLE',
+      contractIssue: 'SECTION_INTERPRETATION_PROFILE_UNSUPPORTED',
+      skillStableId: stableId,
+      skillComponentVersion:
+        Number.isInteger(componentVersion) && componentVersion > 0
+          ? componentVersion
+          : rawComponentVersion || null,
+      supportedSelectionKeys: Object.keys(CURRENT_SECTION_INTERPRETATION_PROFILES)
+        .filter((key) => key.startsWith(`${stableId}@`)),
+    }
+    throw err
+  }
+
+  return {
+    ...registeredProfile,
+    selectionKey,
+    skillStableId: stableId,
+    skillComponentVersion: componentVersion,
+  }
 }
 
 const getEvidencePackFromFrameworkState = (frameworkState = {}) =>
@@ -722,10 +807,14 @@ const buildGenerationBoundaries = ({
   dependencySectionKeys,
   dependencyTruths,
   inputSummary,
+  useVerificationLanguage = false,
   truthEligible,
 }) => {
   const rule = SECTION_CATEGORY_RULES[category] || SECTION_CATEGORY_RULES.GENERIC
-  const boundaries = rule.boundaries.map((message, index) => ({
+  const boundaryMessages = useVerificationLanguage
+    ? CURRENT_PROFILE_VERIFICATION_BOUNDARIES
+    : rule.boundaries
+  const boundaries = boundaryMessages.map((message, index) => ({
     boundaryKey: `${category.toLowerCase()}_boundary_${index + 1}`,
     message,
     reason: 'UNSUPPORTED_CLAIM',
@@ -734,7 +823,9 @@ const buildGenerationBoundaries = ({
   if (!inputSummary) {
     boundaries.push({
       boundaryKey: 'no_customer_section_context',
-      message: 'No customer-added section context has been provided.',
+      message: useVerificationLanguage
+        ? 'Add section-specific customer context if it is needed to complete this interpretation.'
+        : 'No customer-added section context has been provided.',
       reason: 'NO_USER_CONTEXT',
     })
   }
@@ -826,6 +917,202 @@ const buildSourceRefs = ({ acceptedEvidenceObjects = [], acceptedSectionEvidence
   }
 
   return refs.slice(0, 10)
+}
+
+const SECTION_PROFILE_THEME_SUBJECTS = Object.freeze({
+  workflow_automation: 'assisted or automated ways of working',
+  governed_execution: 'controlled and repeatable business activity',
+  structured_output: 'consistent creation of customer-facing material',
+  speed_efficiency: 'reduced friction and faster delivery',
+  consistency_reuse: 'reusable and consistent outputs',
+  offer_context: 'the accepted offer context',
+  market_region: 'the stated market and regional setting',
+  accepted_upstream_truth: 'conclusions already accepted in preceding sections',
+})
+
+const getProfileThemeSubject = (theme = {}) => {
+  const mappedSubject = SECTION_PROFILE_THEME_SUBJECTS[theme.key]
+  if (mappedSubject) return mappedSubject
+
+  const fallback = normalizeEvidenceString(theme.label)
+  return fallback
+    ? fallback.charAt(0).toLowerCase() + fallback.slice(1)
+    : 'the available business context'
+}
+
+const buildProfileSupplementalSections = ({
+  acceptedSectionEvidenceObjects = [],
+  boundaries = [],
+  inputSummary,
+}) => {
+  const sectionEvidenceBullets = acceptedSectionEvidenceObjects
+    .map((evidenceObject) => normalizeEvidenceString(evidenceObject?.extractedFact))
+    .filter(Boolean)
+    .slice(0, 6)
+
+  return {
+    customerContextSection: inputSummary
+      ? {
+          heading: 'Customer-Provided Section Context',
+          body: 'The customer-added context below informed this interpretation but is not treated as independent proof.',
+          bullets: [inputSummary],
+        }
+      : null,
+    customerSectionEvidenceSection: sectionEvidenceBullets.length > 0
+      ? {
+          heading: 'Customer-Provided Section Evidence',
+          body: 'The reviewed supporting-file evidence below informed this interpretation.',
+          bullets: sectionEvidenceBullets,
+        }
+      : null,
+    evidenceBoundariesSection: {
+      heading: 'Evidence Boundaries',
+      body: 'The interpretation does not claim facts that are absent from the reviewed material.',
+      bullets: boundaries.slice(0, 5).map((boundary) => boundary.message),
+    },
+  }
+}
+
+const buildProfileGeneratedSections = ({
+  acceptedSectionEvidenceObjects = [],
+  boundaries = [],
+  inputSummary,
+  profile,
+  themes = [],
+}) => {
+  const themeSubjects = themes.slice(0, 5).map(getProfileThemeSubject)
+  const {
+    customerContextSection,
+    customerSectionEvidenceSection,
+    evidenceBoundariesSection,
+  } = buildProfileSupplementalSections({
+    acceptedSectionEvidenceObjects,
+    boundaries,
+    inputSummary,
+  })
+  const supplementalSections = [
+    customerContextSection,
+    customerSectionEvidenceSection,
+  ].filter(Boolean)
+
+  const sectionsBySemanticType = {
+    CUSTOMER_CONTEXT: [
+      {
+        heading: 'Customer and Offer Context',
+        body: 'The reviewed material establishes the business setting that frames this value narrative.',
+        bullets: themeSubjects.map((subject) =>
+          `Context signal: ${subject} helps describe the customer situation and offer setting.`),
+      },
+      ...supplementalSections,
+      {
+        heading: 'Operating Context Checks',
+        body: 'Use these questions to confirm the conditions that should be explicit before tailoring the narrative.',
+        bullets: [
+          'Confirm the decision audience and buying situation.',
+          'Check whether regional or segment differences require tailored treatment.',
+          'Record the source for each customer-specific constraint used in the narrative.',
+        ],
+      },
+      evidenceBoundariesSection,
+    ],
+    STRATEGIC_OBJECTIVES: [
+      {
+        heading: 'Strategic Priorities',
+        body: 'The reviewed material identifies priority directions for the value narrative; commitment status should be taken only from explicit evidence.',
+        bullets: themeSubjects.map((subject) =>
+          `Priority direction: assess how ${subject} could advance the desired business outcome.`),
+      },
+      ...supplementalSections,
+      {
+        heading: 'Objective Definition Checks',
+        body: 'Use these questions to make each candidate priority decision-ready without contradicting details already present in the evidence.',
+        bullets: [
+          'Confirm the intended result and how success will be measured.',
+          'Confirm the accountable owner for each objective.',
+          'Confirm the delivery horizon or target date.',
+        ],
+      },
+      evidenceBoundariesSection,
+    ],
+    CURRENT_STATE_ASSESSMENT: [
+      {
+        heading: 'Observed Current State',
+        body: 'The reviewed material describes present operating conditions without assigning an unsupported maturity rating.',
+        bullets: themeSubjects.map((subject) =>
+          `Present-state observation: the evidence references ${subject}; confirm its scale and performance impact against the available baseline.`),
+      },
+      ...supplementalSections,
+      {
+        heading: 'Assessment Checks',
+        body: 'Use these questions to test whether the available description is sufficient for a defensible current-state diagnosis.',
+        bullets: [
+          'Confirm the performance baseline used for comparison.',
+          'Confirm the frequency, scale and cost of the observed friction.',
+          'Confirm the operational, technical and organisational constraints.',
+        ],
+      },
+      evidenceBoundariesSection,
+    ],
+    STAKEHOLDER_REGISTER: [
+      {
+        heading: 'Known Stakeholder Groups',
+        body: 'The reviewed material identifies business topics that require named participants and clear decision ownership.',
+        bullets: themeSubjects.map((subject) =>
+          `Participation question: identify who sponsors, decides on or operates work connected with ${subject}.`),
+      },
+      ...supplementalSections,
+      {
+        heading: 'Roles to Confirm',
+        body: 'Use these questions to turn topic-level participation cues into explicit decision ownership.',
+        bullets: [
+          'Name the executive sponsor where one is evidenced.',
+          'Confirm the final decision maker and approval authority.',
+          'Identify the operational users and subject-matter contributors.',
+        ],
+      },
+      evidenceBoundariesSection,
+    ],
+    EVIDENCE_REGISTER: [
+      {
+        heading: 'Accepted Evidence Record',
+        body: 'The reviewed material is organised by the business topics it can support, while direct facts remain distinct from inferred implications.',
+        bullets: themes.slice(0, 5).map((theme) =>
+          `Coverage item: ${getProfileThemeSubject(theme)} is ${theme.supportLevel === 'DIRECT' ? 'directly supported' : 'derived from supported context'}.`),
+      },
+      ...supplementalSections,
+      {
+        heading: 'Proof Checks',
+        body: 'Use these checks before treating topical coverage as proof of an outcome, comparison or quantified commercial result.',
+        bullets: [
+          'Verify the source and method for each outcome measure.',
+          'Confirm whether named customer examples can be used.',
+          'Attach direct support for every comparative or financial claim.',
+        ],
+      },
+      evidenceBoundariesSection,
+    ],
+    OUTPUT_REQUIREMENTS: [
+      {
+        heading: 'Known Output Requirements',
+        body: 'The reviewed material provides subject matter and any explicit delivery constraints carried in the evidence.',
+        bullets: themeSubjects.map((subject) =>
+          `Available subject matter: ${subject}; confirm how it applies to the intended audience, format and channel.`),
+      },
+      ...supplementalSections,
+      {
+        heading: 'Delivery Brief Checks',
+        body: 'Use these questions to confirm that the delivery brief is complete without assuming what the evidence already specifies.',
+        bullets: [
+          'Confirm the primary audience and decision moment.',
+          'Confirm the required format, channel and length.',
+          'Confirm the tone, deadline and approval expectations.',
+        ],
+      },
+      evidenceBoundariesSection,
+    ],
+  }
+
+  return sectionsBySemanticType[profile.semanticType] || []
 }
 
 const buildGeneratedSections = ({
@@ -972,6 +1259,16 @@ const getSimilarityPeerSource = (sectionObject) => {
   return null
 }
 
+const getSimilarityPolicyForCandidate = (candidate = {}) => {
+  const usesCurrentProfileAdapter =
+    normalizeSectionText(candidate?.generator?.adapter)
+      === GSIL_PROFILE_ENRICHMENT_VERSION
+
+  return usesCurrentProfileAdapter
+    ? CURRENT_SECTION_INTERPRETATION_SIMILARITY_POLICY
+    : SECTION_INTERPRETATION_SIMILARITY_POLICY
+}
+
 export const evaluateSectionInterpretationSimilarity = ({
   candidate,
   frameworkPackage,
@@ -979,6 +1276,7 @@ export const evaluateSectionInterpretationSimilarity = ({
   section,
   sectionLabel,
 } = {}) => {
+  const similarityPolicy = getSimilarityPolicyForCandidate(candidate)
   const targetSectionKey = normalizeSectionText(section?.sectionKey || section?.key)
   const targetRuntimePath = normalizeSectionText(section?.runtimePath)
   const sectionRootPrefix = 'framework_state.sections.'
@@ -1016,7 +1314,7 @@ export const evaluateSectionInterpretationSimilarity = ({
     }))
     .filter((row) => row.peerSource)
     .sort((left, right) => left.stateKey.localeCompare(right.stateKey))
-    .slice(0, SECTION_INTERPRETATION_SIMILARITY_POLICY.maxPeerCount)
+    .slice(0, similarityPolicy.maxPeerCount)
     .map(({ stateKey, peerSource }) => {
       const peerLabel = labelByStateKey.get(stateKey) || titleFromSectionKey(stateKey)
       const identityTokens = getSectionIdentityTokens(
@@ -1039,7 +1337,7 @@ export const evaluateSectionInterpretationSimilarity = ({
       const normalizedScore = Number(score.toFixed(6))
       const passed =
         !exactMatch
-        && score < SECTION_INTERPRETATION_SIMILARITY_POLICY.threshold
+        && score < similarityPolicy.threshold
 
       return {
         sectionKey: stateKey,
@@ -1059,10 +1357,10 @@ export const evaluateSectionInterpretationSimilarity = ({
   const passed = peerRows.every((row) => row.passed)
 
   return {
-    algorithm: SECTION_INTERPRETATION_SIMILARITY_POLICY.algorithm,
-    version: SECTION_INTERPRETATION_SIMILARITY_POLICY.version,
-    threshold: SECTION_INTERPRETATION_SIMILARITY_POLICY.threshold,
-    excludedFields: [...SECTION_INTERPRETATION_SIMILARITY_POLICY.excludedFields],
+    algorithm: similarityPolicy.algorithm,
+    version: similarityPolicy.version,
+    threshold: similarityPolicy.threshold,
+    excludedFields: [...similarityPolicy.excludedFields],
     comparisonCount: peerRows.length,
     maximumScore: topMatch?.score || 0,
     topMatchSectionKey: topMatch?.sectionKey || '',
@@ -1106,6 +1404,7 @@ const getTruthEligibility = ({ businessContextAvailable, discoveryAccepted, them
 
 const buildSectionIntelligenceParts = ({
   dependencySectionKeys = [],
+  enrichmentVersion = GSIL_ENRICHMENT_VERSION,
   frameworkPackage,
   frameworkState = {},
   generatedAt = new Date().toISOString(),
@@ -1113,6 +1412,7 @@ const buildSectionIntelligenceParts = ({
   runtimeInstance,
   section,
   sectionExecutionContract,
+  interpretationProfile = null,
 } = {}) => {
   const evidencePack = getEvidencePackFromFrameworkState(frameworkState)
   const sectionKey = normalizeSectionText(section?.sectionKey || section?.key)
@@ -1177,6 +1477,7 @@ const buildSectionIntelligenceParts = ({
     dependencySectionKeys,
     dependencyTruths,
     inputSummary,
+    useVerificationLanguage: Boolean(interpretationProfile),
     truthEligible: truthEligibility.eligible,
   })
   const inputHash = hashSectionInput(input)
@@ -1210,7 +1511,7 @@ const buildSectionIntelligenceParts = ({
     packageKey: runtimeInstance?.packageKey || frameworkPackage?.packageKey || '',
     packageVersion: runtimeInstance?.packageVersion || frameworkPackage?.version || '',
     sectionKey,
-    version: GSIL_ENRICHMENT_VERSION,
+    version: enrichmentVersion,
   })
 
   return {
@@ -1224,6 +1525,7 @@ const buildSectionIntelligenceParts = ({
     discoveryAccepted,
     evidenceHash,
     evidencePack,
+    enrichmentVersion,
     generatedAt,
     generationBoundaries,
     inputHash,
@@ -1343,7 +1645,7 @@ const buildIntelligenceFromParts = ({
       usedFullEvidenceCorpus: false,
       sectionOnly: true,
     },
-    enrichmentVersion: GSIL_ENRICHMENT_VERSION,
+    enrichmentVersion: parts.enrichmentVersion,
     updatedAt: parts.generatedAt,
     updatedBy: actorUserId ? String(actorUserId) : '',
   }
@@ -1385,8 +1687,14 @@ export const buildEnrichedGeneratedSection = ({
   sectionExecutionContract,
   generatedAt = new Date().toISOString(),
 } = {}) => {
+  const interpretationProfile =
+    resolveSectionInterpretationProfile(sectionExecutionContract)
+  const enrichmentVersion = interpretationProfile
+    ? GSIL_PROFILE_ENRICHMENT_VERSION
+    : GSIL_ENRICHMENT_VERSION
   const parts = buildSectionIntelligenceParts({
     dependencySectionKeys,
+    enrichmentVersion,
     frameworkPackage,
     frameworkState,
     generatedAt,
@@ -1394,17 +1702,26 @@ export const buildEnrichedGeneratedSection = ({
     runtimeInstance,
     section,
     sectionExecutionContract,
+    interpretationProfile,
   })
   const sections = parts.truthEligibility.eligible
-    ? buildGeneratedSections({
-        acceptedSectionEvidenceObjects: parts.acceptedSectionEvidenceObjects,
-        category: parts.category,
-        inputSummary: parts.inputSummary,
-        label: parts.label,
-        sectionExecutionContract: parts.sectionExecutionContract,
-        themes: parts.themes,
-        boundaries: parts.generationBoundaries,
-      })
+    ? interpretationProfile
+      ? buildProfileGeneratedSections({
+          acceptedSectionEvidenceObjects: parts.acceptedSectionEvidenceObjects,
+          boundaries: parts.generationBoundaries,
+          inputSummary: parts.inputSummary,
+          profile: interpretationProfile,
+          themes: parts.themes,
+        })
+      : buildGeneratedSections({
+          acceptedSectionEvidenceObjects: parts.acceptedSectionEvidenceObjects,
+          category: parts.category,
+          inputSummary: parts.inputSummary,
+          label: parts.label,
+          sectionExecutionContract: parts.sectionExecutionContract,
+          themes: parts.themes,
+          boundaries: parts.generationBoundaries,
+        })
     : [{
         heading: 'Insufficient Evidence',
         body: 'Evidence not sufficient to derive this section safely.',
@@ -1434,7 +1751,7 @@ export const buildEnrichedGeneratedSection = ({
     truthEligibility: parts.truthEligibility,
     generator: {
       mode: 'DETERMINISTIC_PLUS_BOUNDED_SYNTHESIS',
-      adapter: GSIL_ENRICHMENT_VERSION,
+      adapter: enrichmentVersion,
       packageKey: runtimeInstance?.packageKey || frameworkPackage?.packageKey || '',
       packageVersion: runtimeInstance?.packageVersion || frameworkPackage?.version || '',
       contractVersion: sectionExecutionContract?.contractVersion || '',
