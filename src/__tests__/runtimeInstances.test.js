@@ -546,6 +546,14 @@ const makeFrameworkPackage = (overrides = {}) => ({
         componentVersion: 1,
       },
       {
+        collectionKey: 'WorkflowPolicy',
+        id: 'policy-section-generation-binding',
+        key: 'section-generation-binding',
+        status: 'ACTIVE',
+        versionStatus: 'ACTIVE',
+        componentVersion: 1,
+      },
+      {
         collectionKey: 'ValidationRegistry',
         id: 'validation-completeness-check',
         key: 'completeness-check',
@@ -1248,6 +1256,8 @@ const makeWorkflowPolicy = (overrides = {}) => ({
   key: 'submit-for-review-policy',
   name: 'Submit for Review',
   status: 'ACTIVE',
+  versionStatus: 'ACTIVE',
+  componentVersion: 1,
   frameworkKeys: ['VMF'],
   governedAction: 'SUBMIT_FOR_REVIEW',
   triggerEvent: 'ON_SUBMIT',
@@ -1265,9 +1275,39 @@ const makeWorkflowPolicy = (overrides = {}) => ({
   ...overrides,
 })
 
+const sectionGenerationRuntimePaths = [
+  'framework_state.sections.customer_context',
+  'framework_state.sections.customer_problem',
+  'framework_state.sections.value_drivers',
+  'framework_state.sections.strategic_objectives',
+  'framework_state.sections.current_state_assessment',
+  'framework_state.sections.stakeholder_register',
+  'framework_state.sections.evidence_register',
+  'framework_state.sections.output_requirements',
+  'framework_state.sections.executive_summary',
+  'framework_state.sections.section_1_executive_summary',
+  'framework_state.sections.business_case_economics',
+  'framework_state.sections.competitive_trap_map',
+  'framework_state.sections.positioning_differentiation',
+]
+
 const makeActionWorkflowPolicy = (actionKey, overrides = {}) => makeWorkflowPolicy({
-  stableId: `policy-${makeActionPolicyKey(actionKey)}`,
-  key: makeActionPolicyKey(actionKey),
+  ...(actionKey === 'GENERATE_SECTION' || actionKey === 'REGENERATE_SECTION'
+    ? {
+        stableId: 'policy-section-generation-binding',
+        key: 'section-generation-binding',
+        steps: sectionGenerationRuntimePaths.map((targetPath, index) => ({
+          stepKey: `generate-section-${index + 1}`,
+          type: 'SKILL_EXECUTION',
+          order: index + 1,
+          targetPath,
+          skillId: 'skill-vmf-section-generator',
+        })),
+      }
+    : {
+        stableId: `policy-${makeActionPolicyKey(actionKey)}`,
+        key: makeActionPolicyKey(actionKey),
+      }),
   name: actionLabels[actionKey] || actionKey,
   governedAction: actionKey,
   triggerEvent: 'MANUAL_RUN',
@@ -1395,6 +1435,7 @@ let mockRedisClient
 let hashSectionInput
 let buildEnrichedGeneratedSection
 let evaluateSectionInterpretationSimilarity
+let resolveSectionExecutionContract
 
 const getAccessTokenForUser = async (user) => {
   const tokens = await tokenService.generateTokens(user)
@@ -1462,6 +1503,8 @@ beforeAll(async () => {
   buildEnrichedGeneratedSection = runtimeSectionModelService.buildEnrichedGeneratedSection
   evaluateSectionInterpretationSimilarity =
     runtimeSectionModelService.evaluateSectionInterpretationSimilarity
+  resolveSectionExecutionContract =
+    (await import('../services/sectionExecutionContractService.js')).resolveSectionExecutionContract
 })
 
 beforeEach(() => {
@@ -21446,6 +21489,200 @@ describe('Runtime Instance API', () => {
       'Interprets accepted evidence through the locked purpose of the target section.',
     )
   })
+
+  test('section execution contract accepts repeated exact-path policy bindings deterministically', async () => {
+    const runtimePath = 'framework_state.sections.customer_problem'
+    const makeBindingPolicy = ({
+      stableId,
+      key,
+      stepKey,
+    }) => makeWorkflowPolicy({
+      stableId,
+      key,
+      name: key,
+      steps: [{
+        stepKey,
+        type: 'SKILL_EXECUTION',
+        order: 1,
+        targetPath: runtimePath,
+        skillId: 'skill-vmf-section-generator',
+      }],
+    })
+    const policies = [
+      makeBindingPolicy({
+        stableId: 'policy-zeta-section-binding',
+        key: 'zeta-section-binding',
+        stepKey: 'zeta-generate',
+      }),
+      makeBindingPolicy({
+        stableId: 'policy-alpha-section-binding',
+        key: 'alpha-section-binding',
+        stepKey: 'alpha-generate',
+      }),
+    ]
+    const frameworkPackage = makeRendererFrameworkPackage({
+      dependencyLock: {
+        ...makeFrameworkPackage().dependencyLock,
+        references: [
+          ...makeFrameworkPackage().dependencyLock.references
+            .filter((reference) => reference.collectionKey !== 'WorkflowPolicy'),
+          ...policies.map((policy) => ({
+            collectionKey: 'WorkflowPolicy',
+            id: policy.stableId,
+            key: policy.key,
+            status: 'ACTIVE',
+            versionStatus: 'ACTIVE',
+            componentVersion: policy.componentVersion,
+          })),
+        ],
+      },
+    })
+    const section = frameworkPackage.sections[0]
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
+
+    WorkflowPolicy.find.mockReturnValueOnce(buildLeanQuery(policies))
+    const first = await resolveSectionExecutionContract({ frameworkPackage, section })
+    WorkflowPolicy.find.mockReturnValueOnce(buildLeanQuery([...policies].reverse()))
+    const second = await resolveSectionExecutionContract({ frameworkPackage, section })
+
+    expect(first.runtimeInstructions.stableId).toBe('skill-vmf-section-generator')
+    expect(first.dependencyIdentity.workflowPolicyBindings).toEqual([
+      {
+        stableId: 'policy-alpha-section-binding',
+        componentVersion: 1,
+        key: 'alpha-section-binding',
+        stepKey: 'alpha-generate',
+        skillId: 'skill-vmf-section-generator',
+      },
+      {
+        stableId: 'policy-zeta-section-binding',
+        componentVersion: 1,
+        key: 'zeta-section-binding',
+        stepKey: 'zeta-generate',
+        skillId: 'skill-vmf-section-generator',
+      },
+    ])
+    expect(second.dependencyIdentity.workflowPolicyBindings)
+      .toEqual(first.dependencyIdentity.workflowPolicyBindings)
+    expect(second.sectionContractHash).toBe(first.sectionContractHash)
+  })
+
+  test.each([
+    [
+      'missing exact-path Workflow Policy binding',
+      'WORKFLOW_POLICY_SKILL_BINDING_MISSING',
+      { steps: [] },
+      {},
+    ],
+    [
+      'multiple distinct exact-path Workflow Policy skill ids',
+      'WORKFLOW_POLICY_SKILL_BINDING_AMBIGUOUS',
+      {
+        steps: [
+          {
+            stepKey: 'first-generator',
+            type: 'SKILL_EXECUTION',
+            order: 1,
+            targetPath: 'framework_state.sections.customer_problem',
+            skillId: 'skill-vmf-section-generator',
+          },
+          {
+            stepKey: 'second-generator',
+            type: 'SKILL_EXECUTION',
+            order: 2,
+            targetPath: 'framework_state.sections.customer_problem',
+            skillId: 'skill-other-section-generator',
+          },
+        ],
+      },
+      {},
+    ],
+    [
+      'Workflow Policy-selected skill absent from dependency lock',
+      'RUNTIME_SKILL_LOCK_REFERENCE_MISSING',
+      {
+        steps: [{
+          stepKey: 'unlocked-generator',
+          type: 'SKILL_EXECUTION',
+          order: 1,
+          targetPath: 'framework_state.sections.customer_problem',
+          skillId: 'skill-unlocked-section-generator',
+        }],
+      },
+      {},
+    ],
+    [
+      'Workflow Policy lock and live component drift',
+      'LOCKED_DEPENDENCY_MISMATCH',
+      { componentVersion: 2 },
+      {},
+    ],
+    [
+      'Workflow Policy-selected skill write-path mismatch',
+      'RUNTIME_SKILL_TARGET_NOT_ALLOWED',
+      {},
+      { allowedWritePaths: ['framework_state.sections.value_drivers'] },
+    ],
+  ])(
+    'GENERATE_SECTION fails closed on %s without mutation or success audit',
+    async (_label, expectedContractIssue, policyOverrides, skillOverrides) => {
+      const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+        updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+        framework_state: {
+          lifecycle: { stage: 'DRAFT' },
+          evidence_pack: makeReadyDiscoveryEvidencePack({
+            accepted: true,
+            state: {
+              status: 'ACCEPTED',
+              inputComplete: true,
+              evidenceReady: true,
+              accepted: true,
+              needsRefresh: false,
+            },
+          }),
+          sections: {
+            customer_problem: 'Proposal creation is slow.',
+          },
+          validation: {},
+          readiness: {},
+          policy: {},
+          attachments: {},
+          artifacts: {},
+        },
+      })
+      mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+      FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+        workflowBindings: [makeWorkflowBinding('GENERATE_SECTION')],
+      }))
+      RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+      UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+        actions: [makeUIAction('GENERATE_SECTION')],
+      })))
+      WorkflowPolicy.find.mockReturnValue(buildLeanQuery([
+        makeActionWorkflowPolicy('GENERATE_SECTION', policyOverrides),
+      ]))
+      RuntimeSkill.find.mockReturnValue(buildLeanQuery([
+        makeSectionRuntimeSkill(skillOverrides),
+      ]))
+      const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+      const res = await request
+        .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/GENERATE_SECTION`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+          runtimePath: 'framework_state.sections.customer_problem',
+        })
+
+      expect(res.status).toBe(409)
+      expect(res.body.error.details).toEqual(expect.objectContaining({
+        reason: 'DEPENDENCY_LOCK_EVIDENCE_MISMATCH',
+        contractIssue: expectedContractIssue,
+      }))
+      expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+      expect(AuditLog.createLog).not.toHaveBeenCalled()
+    },
+  )
 
   test('GENERATE_SECTION fails closed on dependency-lock component drift without mutation or audit', async () => {
     const runtimeInstanceDoc = makeRuntimeInstanceDocument({

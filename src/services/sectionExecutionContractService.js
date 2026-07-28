@@ -2,6 +2,7 @@ import {
   RuntimeSkill,
   UIContract,
   ValidationRegistry,
+  WorkflowPolicy,
 } from '../models/index.js'
 import { generateChecksum } from './governanceAudit/checksumService.js'
 import {
@@ -106,6 +107,105 @@ const assertFrameworkCompatibility = ({
   }
 }
 
+const compareCanonicalPolicyBindings = (left, right) => {
+  const textFields = ['stableId', 'key', 'stepKey', 'skillId']
+  for (const field of textFields) {
+    if (field === 'key') {
+      const versionDifference =
+        toComponentVersion(left.componentVersion) - toComponentVersion(right.componentVersion)
+      if (versionDifference !== 0) return versionDifference
+    }
+
+    const comparison = normalizeToken(left[field]).localeCompare(normalizeToken(right[field]))
+    if (comparison !== 0) return comparison
+  }
+
+  return 0
+}
+
+const resolveWorkflowPolicySkillBinding = async ({
+  frameworkPackage,
+  runtimePath,
+}) => {
+  const references = getDependencyReferences(frameworkPackage, 'WorkflowPolicy')
+  const ids = [...new Set(references
+    .map((reference) => normalizeToken(reference?.id || reference?.stableId))
+    .filter(Boolean))]
+  const rows = ids.length > 0
+    ? await WorkflowPolicy.find({ stableId: { $in: ids } }).lean()
+    : []
+  const rowsByStableId = rows.reduce((result, row) => {
+    const stableId = normalizeToken(row?.stableId)
+    if (!result.has(stableId)) result.set(stableId, [])
+    result.get(stableId).push(row)
+    return result
+  }, new Map())
+
+  for (const reference of references) {
+    const stableId = normalizeToken(reference?.id || reference?.stableId)
+    const matches = rowsByStableId.get(stableId) || []
+    if (matches.length !== 1) {
+      throw buildContractError({
+        issue: matches.length === 0
+          ? 'WORKFLOW_POLICY_NOT_FOUND'
+          : 'WORKFLOW_POLICY_REFERENCE_AMBIGUOUS',
+        message: matches.length === 0
+          ? 'A dependency-locked Workflow Policy was not found.'
+          : 'A dependency-locked Workflow Policy resolved more than once.',
+        details: { stableId, matchCount: matches.length },
+      })
+    }
+
+    assertLockedReferenceMatches({
+      reference,
+      row: matches[0],
+      label: 'Workflow Policy',
+    })
+    assertFrameworkCompatibility({
+      frameworkKeys: matches[0].frameworkKeys,
+      frameworkPackage,
+      label: 'Workflow Policy',
+    })
+  }
+
+  const policyBindings = rows
+    .flatMap((row) => (Array.isArray(row.steps) ? row.steps : [])
+      .filter((step) =>
+        normalizeText(step?.type).toUpperCase() === 'SKILL_EXECUTION'
+        && normalizePath(step?.targetPath) === runtimePath
+        && normalizeToken(step?.skillId))
+      .map((step) => ({
+        stableId: normalizeToken(row.stableId),
+        componentVersion: toComponentVersion(row.componentVersion),
+        key: normalizeToken(row.key),
+        stepKey: normalizeToken(step.stepKey),
+        skillId: normalizeToken(step.skillId),
+      })))
+    .sort(compareCanonicalPolicyBindings)
+  const skillIds = [...new Set(policyBindings.map((binding) => binding.skillId))]
+
+  if (skillIds.length !== 1) {
+    throw buildContractError({
+      issue: skillIds.length === 0
+        ? 'WORKFLOW_POLICY_SKILL_BINDING_MISSING'
+        : 'WORKFLOW_POLICY_SKILL_BINDING_AMBIGUOUS',
+      message: skillIds.length === 0
+        ? 'Section generation requires an exact-path Workflow Policy skill binding.'
+        : 'Section generation requires one unique exact-path Workflow Policy skill binding.',
+      details: {
+        runtimePath,
+        skillIds: skillIds.sort(),
+        bindingCount: policyBindings.length,
+      },
+    })
+  }
+
+  return {
+    skillId: skillIds[0],
+    policyBindings,
+  }
+}
+
 const resolveUIContract = async ({
   frameworkPackage,
   sectionKey,
@@ -190,6 +290,7 @@ const resolveUIContract = async ({
 const resolveRuntimeSkill = async ({
   frameworkPackage,
   runtimePath,
+  skillId,
 }) => {
   const references = getDependencyReferences(frameworkPackage, 'RuntimeSkill')
   const ids = [...new Set(references
@@ -218,25 +319,44 @@ const resolveRuntimeSkill = async ({
     })
   }
 
-  const matches = rows.filter((row) =>
-    Array.isArray(row.allowedWritePaths)
-    && row.allowedWritePaths.some((path) => normalizePath(path) === runtimePath))
-
-  if (matches.length !== 1) {
+  const selectedReferences = references.filter((reference) =>
+    normalizeToken(reference?.id || reference?.stableId) === normalizeToken(skillId))
+  if (selectedReferences.length !== 1) {
     throw buildContractError({
-      issue: 'RUNTIME_SKILL_TARGET_AMBIGUOUS',
-      message: 'Section generation requires one dependency-locked Runtime Skill for the target path.',
+      issue: 'RUNTIME_SKILL_LOCK_REFERENCE_MISSING',
+      message: 'The Workflow Policy-selected Runtime Skill must have one dependency-lock reference.',
       details: {
         runtimePath,
-        matchCount: matches.length,
-        matchingSkillIds: matches.map((row) => normalizeToken(row.stableId)).sort(),
+        stableId: normalizeToken(skillId),
+        matchCount: selectedReferences.length,
       },
     })
   }
 
-  const row = matches[0]
-  const reference = references.find((candidate) =>
-    normalizeToken(candidate?.id || candidate?.stableId) === normalizeToken(row.stableId))
+  const row = rowsByStableId.get(normalizeToken(skillId))
+  const reference = selectedReferences[0]
+  if (!row) {
+    throw buildContractError({
+      issue: 'RUNTIME_SKILL_NOT_FOUND',
+      message: 'The Workflow Policy-selected Runtime Skill was not found.',
+      details: { stableId: normalizeToken(skillId) },
+    })
+  }
+
+  if (
+    !Array.isArray(row.allowedWritePaths)
+    || !row.allowedWritePaths.some((path) => normalizePath(path) === runtimePath)
+  ) {
+    throw buildContractError({
+      issue: 'RUNTIME_SKILL_TARGET_NOT_ALLOWED',
+      message: 'The Workflow Policy-selected Runtime Skill cannot write the target path.',
+      details: {
+        runtimePath,
+        stableId: normalizeToken(row.stableId),
+      },
+    })
+  }
+
   const description = normalizeText(row.description)
   const skillRoleKey = normalizeText(row.skillRoleKey)
   const category = normalizeText(row.category)
@@ -246,8 +366,18 @@ const resolveRuntimeSkill = async ({
   const outputContract = row.outputContract && typeof row.outputContract === 'object'
     ? row.outputContract
     : null
+  const constraintsComplete = Array.isArray(row.allowedReadPaths)
+    && Array.isArray(row.allowedWritePaths)
+    && Array.isArray(row.forbiddenWritePaths)
 
-  if (!description || !skillRoleKey || !category || !inputContract || !outputContract) {
+  if (
+    !description
+    || !skillRoleKey
+    || !category
+    || !inputContract
+    || !outputContract
+    || !constraintsComplete
+  ) {
     throw buildContractError({
       issue: 'RUNTIME_SKILL_INSTRUCTION_ENVELOPE_INCOMPLETE',
       message: 'The dependency-locked Runtime Skill instruction envelope is incomplete.',
@@ -364,14 +494,19 @@ export const resolveSectionExecutionContract = async ({
     })
   }
 
-  const [uiContract, runtimeSkill, validationRules] = await Promise.all([
+  const [uiContract, workflowPolicyBinding, validationRules] = await Promise.all([
     resolveUIContract({ frameworkPackage, sectionKey, runtimePath }),
-    resolveRuntimeSkill({ frameworkPackage, runtimePath }),
+    resolveWorkflowPolicySkillBinding({ frameworkPackage, runtimePath }),
     resolveValidationRules({
       frameworkPackage,
       validationKeys: Array.isArray(section.validationKeys) ? section.validationKeys : [],
     }),
   ])
+  const runtimeSkill = await resolveRuntimeSkill({
+    frameworkPackage,
+    runtimePath,
+    skillId: workflowPolicyBinding.skillId,
+  })
 
   const contract = {
     contractVersion: SECTION_EXECUTION_CONTRACT_VERSION,
@@ -413,6 +548,7 @@ export const resolveSectionExecutionContract = async ({
         key: normalizeToken(uiContract.row.uiContractKey),
         componentVersion: toComponentVersion(uiContract.row.componentVersion),
       },
+      workflowPolicyBindings: workflowPolicyBinding.policyBindings,
     },
   }
 
