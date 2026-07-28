@@ -1209,12 +1209,22 @@ const makeSectionRuntimeSkill = (overrides = {}) => ({
   skillRoleKey: 'SECTION_MODELLER',
   category: 'BUSINESS',
   inputContract: {
-    frameworkVersions: ['2.3.1', '3.1.1'],
-    fields: ['acceptedEvidence'],
+    type: 'object',
+    required: ['frameworkKey', 'frameworkVersion', 'frameworkState'],
+    properties: {
+      frameworkKey: { type: 'string' },
+      frameworkVersion: { type: 'string' },
+      frameworkState: { type: 'object' },
+    },
   },
   outputContract: {
-    format: 'STRUCTURED_TEXT',
-    fields: ['content', 'sections'],
+    type: 'object',
+    required: ['is_valid', 'result', 'traceability'],
+    properties: {
+      is_valid: { type: 'boolean' },
+      result: { type: 'object' },
+      traceability: { type: 'array' },
+    },
   },
   allowedReadPaths: ['framework_state.evidence_pack'],
   allowedWritePaths: [
@@ -1235,6 +1245,49 @@ const makeSectionRuntimeSkill = (overrides = {}) => ({
   forbiddenWritePaths: [],
   ...overrides,
 })
+
+const makeValidationProducerRuntimeSkill = (overrides = {}) =>
+  makeSectionRuntimeSkill({
+    stableId: 'skill-truth-integrity-validator',
+    key: 'truth-integrity-validator',
+    name: 'Truth Integrity Validator',
+    description: 'Validates truth continuity, causal coherence and evidence support.',
+    skillRoleKey: 'VALIDATOR',
+    category: 'VALIDATION',
+    type: 'DETERMINISTIC',
+    executionMode: 'SYSTEM',
+    inputContract: {
+      type: 'object',
+      required: [
+        'frameworkKey',
+        'frameworkVersion',
+        'executionId',
+        'runId',
+        'frameworkState',
+      ],
+      properties: {
+        frameworkKey: { type: 'string' },
+        frameworkVersion: { type: 'string' },
+        executionId: { type: 'string' },
+        runId: { type: 'string' },
+        frameworkState: { type: 'object' },
+      },
+    },
+    outputContract: {
+      type: 'object',
+      required: ['is_valid', 'message', 'result', 'traceability'],
+      properties: {
+        is_valid: { type: 'boolean' },
+        message: { type: 'string' },
+        result: { type: 'object' },
+        traceability: { type: 'array' },
+      },
+    },
+    allowedReadPaths: ['framework_state.*'],
+    allowedWritePaths: ['framework_state.validation.summary'],
+    forbiddenWritePaths: ['vmf_state.*'],
+    ...overrides,
+  })
 
 const currentSectionProfileFixtures = [
   {
@@ -1304,7 +1357,7 @@ const makeCurrentProfileSection = (fixture) => ({
   runtimePath: `framework_state.sections.${fixture.sectionKey}`,
   label: fixture.label,
   required: true,
-  validationKeys: ['required-sections-check'],
+  validationKeys: ['completeness-check'],
 })
 
 const makeCurrentProfileExecutionContract = (fixture, overrides = {}) => ({
@@ -1324,12 +1377,22 @@ const makeCurrentProfileExecutionContract = (fixture, overrides = {}) => ({
     skillRoleKey: 'SECTION_MODELLER',
     category: 'BUSINESS',
     inputContract: {
-      frameworkVersions: ['3.1.2'],
-      fields: ['acceptedEvidence'],
+      type: 'object',
+      required: ['frameworkKey', 'frameworkVersion', 'frameworkState'],
+      properties: {
+        frameworkKey: { type: 'string' },
+        frameworkVersion: { type: 'string' },
+        frameworkState: { type: 'object' },
+      },
     },
     outputContract: {
-      format: 'STRUCTURED_TEXT',
-      fields: ['content', 'sections'],
+      type: 'object',
+      required: ['is_valid', 'result', 'traceability'],
+      properties: {
+        is_valid: { type: 'boolean' },
+        result: { type: 'object' },
+        traceability: { type: 'array' },
+      },
     },
     constraints: {
       allowedReadPaths: ['framework_state.evidence_pack'],
@@ -1338,6 +1401,49 @@ const makeCurrentProfileExecutionContract = (fixture, overrides = {}) => ({
     },
     ...overrides,
   },
+  validationRules: [{
+    stableId: 'validation-completeness-check',
+    key: 'completeness-check',
+    componentVersion: 1,
+    category: 'VALIDATION',
+    severity: 'ERROR',
+    executionMode: 'SYNC',
+    packageUsable: true,
+    producerSkillId: 'skill-truth-integrity-validator',
+    resultType: 'OBJECT',
+    outputPath: 'framework_state.validation.completeness',
+    passFieldPath: 'framework_state.validation.completeness.is_valid',
+    detailsFieldPath: 'framework_state.validation.completeness.details',
+    messageFieldPath: 'framework_state.validation.completeness.message',
+    retryPolicy: {
+      maxAttempts: 1,
+      retryableErrorCodes: [],
+      backoffSeconds: 0,
+    },
+    blockingDefault: true,
+    warningOnlyDefault: false,
+    producerSkill: {
+      stableId: 'skill-truth-integrity-validator',
+      key: 'truth-integrity-validator',
+      componentVersion: 1,
+      skillRoleKey: 'VALIDATOR',
+      category: 'VALIDATION',
+      type: 'DETERMINISTIC',
+      executionMode: 'SYSTEM',
+    },
+    executionBinding: {
+      selectionKey:
+        'validation-completeness-check@1::skill-truth-integrity-validator@1',
+      executorVersion: 'section-completeness-check-v1',
+      mode: 'SERVER_SYSTEM_DETERMINISTIC',
+      producerSkill: {
+        stableId: 'skill-truth-integrity-validator',
+        key: 'truth-integrity-validator',
+        componentVersion: 1,
+      },
+    },
+    metadataOnlyDuringGeneration: false,
+  }],
 })
 
 const makeCurrentProfileFrameworkPackage = (
@@ -1359,16 +1465,25 @@ const makeCurrentProfileFrameworkPackage = (
       ...frameworkPackage.dependencyLock,
       packageKey,
       packageVersion: version,
-      references: frameworkPackage.dependencyLock.references.map((reference) =>
-        reference.collectionKey === 'RuntimeSkill'
+      references: [
+        ...frameworkPackage.dependencyLock.references.map((reference) =>
+          reference.collectionKey === 'RuntimeSkill'
           ? {
               ...reference,
               id: fixture.stableId,
               key: fixture.skillKey,
               componentVersion: skillComponentVersion,
             }
-          : reference,
-      ),
+            : reference),
+        {
+          collectionKey: 'RuntimeSkill',
+          id: 'skill-truth-integrity-validator',
+          key: 'truth-integrity-validator',
+          status: 'ACTIVE',
+          versionStatus: 'ACTIVE',
+          componentVersion: 1,
+        },
+      ],
     },
   }
 }
@@ -1429,6 +1544,19 @@ const makeSectionValidation = (overrides = {}) => ({
   severity: 'ERROR',
   executionMode: 'SYNC',
   packageUsable: true,
+  producerSkillId: 'skill-truth-integrity-validator',
+  outputPath: 'framework_state.validation.completeness',
+  resultType: 'OBJECT',
+  passFieldPath: 'framework_state.validation.completeness.is_valid',
+  detailsFieldPath: 'framework_state.validation.completeness.details',
+  messageFieldPath: 'framework_state.validation.completeness.message',
+  retryPolicy: {
+    maxAttempts: 1,
+    retryableErrorCodes: [],
+    backoffSeconds: 0,
+  },
+  blockingDefault: true,
+  warningOnlyDefault: false,
   ...overrides,
 })
 
@@ -1616,7 +1744,9 @@ let mockRedisClient
 let hashSectionInput
 let buildEnrichedGeneratedSection
 let evaluateSectionInterpretationSimilarity
+let executeSectionValidationRules
 let resolveSectionExecutionContract
+let performanceCacheService
 
 const getAccessTokenForUser = async (user) => {
   const tokens = await tokenService.generateTokens(user)
@@ -1686,9 +1816,15 @@ beforeAll(async () => {
     runtimeSectionModelService.evaluateSectionInterpretationSimilarity
   resolveSectionExecutionContract =
     (await import('../services/sectionExecutionContractService.js')).resolveSectionExecutionContract
+  executeSectionValidationRules =
+    (await import('../services/sectionValidationExecutorService.js'))
+      .executeSectionValidationRules
+  performanceCacheService =
+    (await import('../services/performanceCacheService.js')).default
 })
 
-beforeEach(() => {
+beforeEach(async () => {
+  await performanceCacheService.resetForTests()
   globalThis.fetch = originalFetch
   globalThis.__STORYLINEOS_DISCOVERY_DNS_LOOKUP__ = originalDiscoveryDnsLookup
   app.locals.outcomeStudioReasoningDeps = { executionMode: 'LEGACY' }
@@ -21661,7 +21797,13 @@ describe('Runtime Instance API', () => {
       runtimePath: 'framework_state.sections.customer_problem',
       revisionCount: 0,
     }))
+    const legacyGeneratedSection =
+      RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set
+        .framework_state.sections.customer_problem
+    expect(legacyGeneratedSection.generated).not.toHaveProperty('validationResults')
+    expect(legacyGeneratedSection.lineage).not.toHaveProperty('validationResultKeys')
     const auditPayload = AuditLog.createLog.mock.calls.at(-1)[0]
+    expect(auditPayload.diff.generation).not.toHaveProperty('validationResults')
     expect(auditPayload.diff.generation.similarityResult).not.toHaveProperty('comparisons')
     expect(JSON.stringify(auditPayload.diff.generation.similarityResult)).not.toMatch(
       /content|tokens|sourceRefs|supportingEvidence/i,
@@ -21747,6 +21889,388 @@ describe('Runtime Instance API', () => {
       .toEqual(first.dependencyIdentity.workflowPolicyBindings)
     expect(second.sectionContractHash).toBe(first.sectionContractHash)
   })
+
+  test('section execution contract binds the exact locked completeness validator deterministically', async () => {
+    const fixture = currentSectionProfileFixtures.find(
+      (candidate) => candidate.sectionKey === 'strategic_objectives',
+    )
+    const frameworkPackage = makeCurrentProfileFrameworkPackage(fixture)
+    const section = makeCurrentProfileSection(fixture)
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      sections: [{
+        sectionKey: fixture.sectionKey,
+        runtimePath: section.runtimePath,
+        label: fixture.label,
+        helpText: 'Capture the strategic outcomes this value narrative should support.',
+        isVisible: true,
+        isEditable: true,
+        isRequiredDisplay: true,
+      }],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([
+      makeCurrentProfileActionPolicy(fixture),
+    ]))
+    RuntimeSkill.find.mockReturnValue(buildLeanQuery([
+      makeSectionRuntimeSkill({
+        stableId: fixture.stableId,
+        key: fixture.skillKey,
+        allowedWritePaths: [section.runtimePath],
+      }),
+      makeValidationProducerRuntimeSkill(),
+    ]))
+
+    const first = await resolveSectionExecutionContract({
+      frameworkPackage,
+      section,
+    })
+    const second = await resolveSectionExecutionContract({
+      frameworkPackage,
+      section,
+    })
+
+    expect(second).toEqual(first)
+    expect(first.validationRules).toEqual([expect.objectContaining({
+      stableId: 'validation-completeness-check',
+      key: 'completeness-check',
+      componentVersion: 1,
+      producerSkillId: 'skill-truth-integrity-validator',
+      blockingDefault: true,
+      warningOnlyDefault: false,
+      metadataOnlyDuringGeneration: false,
+      producerSkill: expect.objectContaining({
+        stableId: 'skill-truth-integrity-validator',
+        key: 'truth-integrity-validator',
+        componentVersion: 1,
+        type: 'DETERMINISTIC',
+        executionMode: 'SYSTEM',
+      }),
+      executionBinding: {
+        selectionKey:
+          'validation-completeness-check@1::skill-truth-integrity-validator@1',
+        executorVersion: 'section-completeness-check-v1',
+        mode: 'SERVER_SYSTEM_DETERMINISTIC',
+        producerSkill: {
+          stableId: 'skill-truth-integrity-validator',
+          key: 'truth-integrity-validator',
+          componentVersion: 1,
+        },
+      },
+    })])
+  })
+
+  test('section execution contract fails closed when the completeness producer lock is missing', async () => {
+    const fixture = currentSectionProfileFixtures.find(
+      (candidate) => candidate.sectionKey === 'strategic_objectives',
+    )
+    const basePackage = makeCurrentProfileFrameworkPackage(fixture)
+    const frameworkPackage = {
+      ...basePackage,
+      dependencyLock: {
+        ...basePackage.dependencyLock,
+        references: basePackage.dependencyLock.references.filter((reference) =>
+          reference.id !== 'skill-truth-integrity-validator'),
+      },
+    }
+    const section = makeCurrentProfileSection(fixture)
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      sections: [{
+        sectionKey: fixture.sectionKey,
+        runtimePath: section.runtimePath,
+        label: fixture.label,
+        helpText: 'Capture the strategic outcomes this value narrative should support.',
+      }],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([
+      makeCurrentProfileActionPolicy(fixture),
+    ]))
+    RuntimeSkill.find.mockReturnValue(buildLeanQuery([
+      makeSectionRuntimeSkill({
+        stableId: fixture.stableId,
+        key: fixture.skillKey,
+        allowedWritePaths: [section.runtimePath],
+      }),
+    ]))
+
+    await expect(resolveSectionExecutionContract({
+      frameworkPackage,
+      section,
+    })).rejects.toEqual(expect.objectContaining({
+      status: 409,
+      details: expect.objectContaining({
+        reason: 'DEPENDENCY_LOCK_EVIDENCE_MISMATCH',
+        contractIssue: 'VALIDATION_PRODUCER_SKILL_LOCK_REFERENCE_MISSING',
+        stableId: 'skill-truth-integrity-validator',
+        matchCount: 0,
+      }),
+    }))
+  })
+
+  test('section execution contract fails closed when the completeness producer is not deterministic SYSTEM execution', async () => {
+    const fixture = currentSectionProfileFixtures.find(
+      (candidate) => candidate.sectionKey === 'strategic_objectives',
+    )
+    const frameworkPackage = makeCurrentProfileFrameworkPackage(fixture)
+    const section = makeCurrentProfileSection(fixture)
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      sections: [{
+        sectionKey: fixture.sectionKey,
+        runtimePath: section.runtimePath,
+        label: fixture.label,
+        helpText: 'Capture the strategic outcomes this value narrative should support.',
+      }],
+    })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([
+      makeCurrentProfileActionPolicy(fixture),
+    ]))
+    RuntimeSkill.find.mockReturnValue(buildLeanQuery([
+      makeSectionRuntimeSkill({
+        stableId: fixture.stableId,
+        key: fixture.skillKey,
+        allowedWritePaths: [section.runtimePath],
+      }),
+      makeValidationProducerRuntimeSkill({
+        executionMode: 'AGENT',
+      }),
+    ]))
+
+    await expect(resolveSectionExecutionContract({
+      frameworkPackage,
+      section,
+    })).rejects.toEqual(expect.objectContaining({
+      status: 409,
+      details: expect.objectContaining({
+        reason: 'DEPENDENCY_LOCK_EVIDENCE_MISMATCH',
+        contractIssue: 'SECTION_VALIDATION_BINDING_MISMATCH',
+        validationKey: 'completeness-check',
+        mismatchFields: expect.arrayContaining([
+          'PRODUCER_SKILL_EXECUTION_MODE_MISMATCH',
+        ]),
+      }),
+    }))
+  })
+
+  test.each([
+    {
+      name: 'Validation Registry stable-id drift',
+      validationOverrides: {
+        stableId: 'validation-completeness-check-drifted',
+      },
+      expectedIssue: 'VALIDATION_NOT_FOUND',
+    },
+    {
+      name: 'Validation Registry key drift',
+      validationOverrides: {
+        stableId: 'validation-completeness-check',
+        key: 'completeness-check-v2',
+      },
+      expectedIssue: 'VALIDATION_CONTRACT_MISMATCH',
+    },
+    {
+      name: 'Validation Registry component drift',
+      validationOverrides: {
+        componentVersion: 2,
+      },
+      expectedIssue: 'LOCKED_DEPENDENCY_MISMATCH',
+      expectedDependencyType: 'Validation Registry',
+    },
+    {
+      name: 'Validation Registry inactive status',
+      validationOverrides: {
+        status: 'DISABLED',
+      },
+      expectedIssue: 'LOCKED_DEPENDENCY_MISMATCH',
+      expectedDependencyType: 'Validation Registry',
+    },
+    {
+      name: 'Validation Registry inactive version status',
+      validationOverrides: {
+        versionStatus: 'SUPERSEDED',
+      },
+      expectedIssue: 'LOCKED_DEPENDENCY_MISMATCH',
+      expectedDependencyType: 'Validation Registry',
+    },
+    {
+      name: 'Validation Registry asynchronous execution',
+      validationOverrides: {
+        executionMode: 'ASYNC',
+      },
+      expectedIssue: 'SECTION_VALIDATION_BINDING_MISMATCH',
+      expectedMismatchFields: ['VALIDATION_EXECUTION_MODE_MISMATCH'],
+    },
+    {
+      name: 'Validation Registry non-blocking execution',
+      validationOverrides: {
+        blockingDefault: false,
+      },
+      expectedIssue: 'SECTION_VALIDATION_BINDING_MISMATCH',
+      expectedMismatchFields: ['VALIDATION_BLOCKING_REQUIRED'],
+    },
+    {
+      name: 'Validation Registry warning-only execution',
+      validationOverrides: {
+        warningOnlyDefault: true,
+      },
+      expectedIssue: 'SECTION_VALIDATION_BINDING_MISMATCH',
+      expectedMismatchFields: ['VALIDATION_WARNING_ONLY_NOT_ALLOWED'],
+    },
+    {
+      name: 'Validation Registry retry policy drift',
+      validationOverrides: {
+        retryPolicy: {
+          maxAttempts: 2,
+          retryableErrorCodes: ['TEMPORARY_FAILURE'],
+          backoffSeconds: 3,
+        },
+      },
+      expectedIssue: 'SECTION_VALIDATION_BINDING_MISMATCH',
+      expectedMismatchFields: [
+        'VALIDATION_SINGLE_ATTEMPT_REQUIRED',
+        'VALIDATION_BACKOFF_NOT_ALLOWED',
+        'VALIDATION_RETRY_CODES_NOT_ALLOWED',
+      ],
+    },
+    {
+      name: 'Validation Registry result and output path drift',
+      validationOverrides: {
+        resultType: 'BOOLEAN',
+        outputPath: 'framework_state.validation.completeness_v2',
+        passFieldPath: 'framework_state.validation.completeness_v2.pass',
+        detailsFieldPath: 'framework_state.validation.completeness_v2.reasons',
+        messageFieldPath: 'framework_state.validation.completeness_v2.summary',
+      },
+      expectedIssue: 'SECTION_VALIDATION_BINDING_MISMATCH',
+      expectedMismatchFields: [
+        'VALIDATION_RESULT_TYPE_MISMATCH',
+        'VALIDATION_OUTPUT_PATH_MISMATCH',
+        'VALIDATION_PASS_PATH_MISMATCH',
+        'VALIDATION_DETAILS_PATH_MISMATCH',
+        'VALIDATION_MESSAGE_PATH_MISMATCH',
+      ],
+    },
+    {
+      name: 'Validation Registry producer id drift',
+      validationOverrides: {
+        producerSkillId: 'skill-other-validator',
+      },
+      expectedIssue: 'VALIDATION_PRODUCER_SKILL_LOCK_REFERENCE_MISSING',
+    },
+    {
+      name: 'validation producer stable-id drift',
+      producerOverrides: {
+        stableId: 'skill-truth-integrity-validator-drifted',
+      },
+      expectedIssue: 'RUNTIME_SKILL_NOT_FOUND',
+    },
+    {
+      name: 'validation producer key drift',
+      producerOverrides: {
+        key: 'truth-integrity-validator-v2',
+      },
+      expectedIssue: 'SECTION_VALIDATION_BINDING_MISMATCH',
+      expectedMismatchFields: ['PRODUCER_SKILL_KEY_MISMATCH'],
+    },
+    {
+      name: 'validation producer component drift',
+      producerOverrides: {
+        componentVersion: 2,
+      },
+      expectedIssue: 'LOCKED_DEPENDENCY_MISMATCH',
+      expectedDependencyType: 'Runtime Skill',
+    },
+    {
+      name: 'validation producer inactive status',
+      producerOverrides: {
+        status: 'DISABLED',
+      },
+      expectedIssue: 'LOCKED_DEPENDENCY_MISMATCH',
+      expectedDependencyType: 'Runtime Skill',
+    },
+    {
+      name: 'validation producer inactive version status',
+      producerOverrides: {
+        versionStatus: 'SUPERSEDED',
+      },
+      expectedIssue: 'LOCKED_DEPENDENCY_MISMATCH',
+      expectedDependencyType: 'Runtime Skill',
+    },
+    {
+      name: 'validation producer non-deterministic type',
+      producerOverrides: {
+        type: 'AGENT_ASSISTED',
+      },
+      expectedIssue: 'SECTION_VALIDATION_BINDING_MISMATCH',
+      expectedMismatchFields: ['PRODUCER_SKILL_TYPE_MISMATCH'],
+    },
+    {
+      name: 'validation producer non-system execution',
+      producerOverrides: {
+        executionMode: 'AGENT',
+      },
+      expectedIssue: 'SECTION_VALIDATION_BINDING_MISMATCH',
+      expectedMismatchFields: ['PRODUCER_SKILL_EXECUTION_MODE_MISMATCH'],
+    },
+  ])(
+    'section execution contract fails closed for $name',
+    async ({
+      validationOverrides = {},
+      producerOverrides = {},
+      expectedIssue,
+      expectedDependencyType,
+      expectedMismatchFields = [],
+    }) => {
+      const fixture = currentSectionProfileFixtures.find(
+        (candidate) => candidate.sectionKey === 'strategic_objectives',
+      )
+      const frameworkPackage = makeCurrentProfileFrameworkPackage(fixture)
+      const section = makeCurrentProfileSection(fixture)
+      UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+        sections: [{
+          sectionKey: fixture.sectionKey,
+          runtimePath: section.runtimePath,
+          label: fixture.label,
+          helpText: 'Capture the strategic outcomes this value narrative should support.',
+        }],
+      })))
+      WorkflowPolicy.find.mockReturnValue(buildLeanQuery([
+        makeCurrentProfileActionPolicy(fixture),
+      ]))
+      ValidationRegistry.find.mockReturnValue(buildLeanQuery([
+        makeSectionValidation(validationOverrides),
+      ]))
+      RuntimeSkill.find.mockReturnValue(buildLeanQuery([
+        makeSectionRuntimeSkill({
+          stableId: fixture.stableId,
+          key: fixture.skillKey,
+          allowedWritePaths: [section.runtimePath],
+        }),
+        makeValidationProducerRuntimeSkill(producerOverrides),
+      ]))
+
+      try {
+        await resolveSectionExecutionContract({
+          frameworkPackage,
+          section,
+        })
+        throw new Error('Expected section execution contract resolution to fail.')
+      } catch (error) {
+        expect(error).toEqual(expect.objectContaining({
+          status: 409,
+          details: expect.objectContaining({
+            reason: 'DEPENDENCY_LOCK_EVIDENCE_MISMATCH',
+            contractIssue: expectedIssue,
+          }),
+        }))
+        if (expectedDependencyType) {
+          expect(error.details.dependencyType).toBe(expectedDependencyType)
+        }
+        if (expectedMismatchFields.length > 0) {
+          expect(error.details.mismatchFields).toEqual(
+            expect.arrayContaining(expectedMismatchFields),
+          )
+        }
+      }
+    },
+  )
 
   test.each([
     [
@@ -22073,6 +22597,9 @@ describe('Runtime Instance API', () => {
       }))
       expect(generated.generator.interpretationProfile).toBeUndefined()
       expect(intelligence.enrichmentVersion).toBe('gsil-section-enrichment-v2')
+      expect(generated.content).toContain(
+        `Capture the business meaning required for ${fixture.label}.`,
+      )
       const customerProjection = JSON.stringify({
         generated: generated.sections,
         accepted: {
@@ -22115,6 +22642,176 @@ describe('Runtime Instance API', () => {
       generated: strategicRow.generated,
       intelligence: strategicRow.intelligence,
     })
+  })
+
+  test('current completeness validation is deterministic and retains bounded traceability', () => {
+    const fixture = currentSectionProfileFixtures.find(
+      (candidate) => candidate.sectionKey === 'strategic_objectives',
+    )
+    const section = makeCurrentProfileSection(fixture)
+    const sectionExecutionContract = makeCurrentProfileExecutionContract(fixture)
+    const frameworkPackage = makeRendererFrameworkPackage({
+      packageKey: 'vmf-standard-3-1-2',
+      version: '3.1.2',
+      sections: [section],
+    })
+    const frameworkState = {
+      evidence_pack: makeReadyDiscoveryEvidencePack({
+        accepted: true,
+        inputs: {
+          companyName: 'StorylineOS',
+          targetOffer: 'AI-assisted value narrative platform',
+        },
+        state: {
+          status: 'ACCEPTED',
+          inputComplete: true,
+          evidenceReady: true,
+          accepted: true,
+          needsRefresh: false,
+        },
+      }),
+      sections: {
+        strategic_objectives: '',
+      },
+    }
+    const runtimeInstance = makeRuntimeInstanceDocument({
+      packageKey: frameworkPackage.packageKey,
+      packageVersion: frameworkPackage.version,
+      framework_state: frameworkState,
+    })
+    const checkedAt = '2026-07-28T10:00:00.000Z'
+    const { generated } = buildEnrichedGeneratedSection({
+      actionKey: 'GENERATE_SECTION',
+      actorUserId: CUSTOMER_ADMIN_ID,
+      dependencySectionKeys: [],
+      frameworkPackage,
+      frameworkState,
+      input: '',
+      runtimeInstance,
+      section,
+      sectionExecutionContract,
+      generatedAt: checkedAt,
+    })
+
+    const first = executeSectionValidationRules({
+      candidate: generated,
+      checkedAt,
+      sectionExecutionContract,
+    })
+    const second = executeSectionValidationRules({
+      candidate: structuredClone(generated),
+      checkedAt,
+      sectionExecutionContract: structuredClone(sectionExecutionContract),
+    })
+
+    expect(second).toEqual(first)
+    expect(first).toEqual([expect.objectContaining({
+      stableId: 'validation-completeness-check',
+      key: 'completeness-check',
+      componentVersion: 1,
+      executorVersion: 'section-completeness-check-v1',
+      status: 'PASS',
+      is_valid: true,
+      message: expect.stringContaining('structurally complete'),
+      result: {
+        totalChecks: 9,
+        passedChecks: 9,
+        outcome: 'COMPLETE',
+      },
+      details: {
+        failedCheckKeys: [],
+        generatedSectionCount: generated.sections.length,
+        supportingEvidenceRefCount: generated.supportingEvidenceRefs.length,
+      },
+      traceability: [expect.objectContaining({
+        sectionKey: fixture.sectionKey,
+        runtimePath: section.runtimePath,
+        contractVersion: sectionExecutionContract.contractVersion,
+        sectionContractHash: sectionExecutionContract.sectionContractHash,
+        inputHash: generated.inputHash,
+        evidenceHash: generated.evidenceHash,
+      })],
+      checkedAt,
+      resultHash: expect.any(String),
+    })])
+    expect(JSON.stringify(first)).not.toMatch(
+      /systemPrompt|developerInstructions|outputContract|inputContract|evidenceObjects/,
+    )
+  })
+
+  test('current completeness validation blocks malformed generated content', () => {
+    const fixture = currentSectionProfileFixtures.find(
+      (candidate) => candidate.sectionKey === 'strategic_objectives',
+    )
+    const sectionExecutionContract = makeCurrentProfileExecutionContract(fixture)
+    const checkedAt = '2026-07-28T10:00:00.000Z'
+    const candidate = {
+      format: 'STRUCTURED_TEXT',
+      content: '',
+      summary: '',
+      sections: [],
+      supportingEvidenceRefs: [],
+      generatedAt: checkedAt,
+      inputHash: 'input-hash',
+      evidenceHash: 'evidence-hash',
+      sectionEvidenceHash: 'section-evidence-hash',
+      dependencyHash: 'dependency-hash',
+      boundedContextHash: 'context-hash',
+      truthEligibility: {
+        eligible: false,
+        status: 'INSUFFICIENT_EVIDENCE',
+      },
+      generator: {
+        adapter: 'gsil-section-enrichment-v2',
+        contractVersion: sectionExecutionContract.contractVersion,
+        sectionContractHash: sectionExecutionContract.sectionContractHash,
+      },
+    }
+
+    expect(() => executeSectionValidationRules({
+      candidate,
+      checkedAt,
+      sectionExecutionContract,
+    })).toThrow(expect.objectContaining({
+      status: 409,
+      code: 'CONFLICT',
+      details: expect.objectContaining({
+        reason: 'RUNTIME_ACTION_NOT_AVAILABLE',
+        contractIssue: 'SECTION_VALIDATION_FAILED',
+        validationKey: 'completeness-check',
+        validationStatus: 'FAIL',
+        failedCheckKeys: expect.arrayContaining([
+          'generated_content',
+          'generated_summary',
+          'generated_sections',
+        ]),
+      }),
+    }))
+  })
+
+  test('section validation fails closed when an executable binding is unavailable', () => {
+    const fixture = currentSectionProfileFixtures.find(
+      (candidate) => candidate.sectionKey === 'strategic_objectives',
+    )
+    const sectionExecutionContract = structuredClone(
+      makeCurrentProfileExecutionContract(fixture),
+    )
+    sectionExecutionContract.validationRules[0].executionBinding.selectionKey =
+      'validation-completeness-check@2::skill-truth-integrity-validator@1'
+
+    expect(() => executeSectionValidationRules({
+      candidate: {},
+      checkedAt: '2026-07-28T10:00:00.000Z',
+      sectionExecutionContract,
+    })).toThrow(expect.objectContaining({
+      status: 409,
+      code: 'CONFLICT',
+      details: expect.objectContaining({
+        reason: 'RUNTIME_ACTION_NOT_AVAILABLE',
+        contractIssue: 'SECTION_VALIDATION_EXECUTOR_UNAVAILABLE',
+        validationKey: 'completeness-check',
+      }),
+    }))
   })
 
   test('renderer full payload does not expose current profile or Runtime Skill identifiers', async () => {
@@ -22344,21 +23041,21 @@ describe('Runtime Instance API', () => {
     }
 
     expect(pairwiseScores).toEqual([
-      { pair: 'customer_context:strategic_objectives', score: 0.317647 },
-      { pair: 'customer_context:current_state_assessment', score: 0.277108 },
-      { pair: 'customer_context:stakeholder_register', score: 0.27907 },
-      { pair: 'customer_context:evidence_register', score: 0.290698 },
-      { pair: 'customer_context:output_requirements', score: 0.2875 },
-      { pair: 'strategic_objectives:current_state_assessment', score: 0.268817 },
-      { pair: 'strategic_objectives:stakeholder_register', score: 0.270833 },
-      { pair: 'strategic_objectives:evidence_register', score: 0.257732 },
-      { pair: 'strategic_objectives:output_requirements', score: 0.337209 },
-      { pair: 'current_state_assessment:stakeholder_register', score: 0.247312 },
-      { pair: 'current_state_assessment:evidence_register', score: 0.26087 },
-      { pair: 'current_state_assessment:output_requirements', score: 0.313253 },
-      { pair: 'stakeholder_register:evidence_register', score: 0.247423 },
-      { pair: 'stakeholder_register:output_requirements', score: 0.313953 },
-      { pair: 'evidence_register:output_requirements', score: 0.228261 },
+      { pair: 'customer_context:strategic_objectives', score: 0.136842 },
+      { pair: 'customer_context:current_state_assessment', score: 0.142857 },
+      { pair: 'customer_context:stakeholder_register', score: 0.136842 },
+      { pair: 'customer_context:evidence_register', score: 0.130952 },
+      { pair: 'customer_context:output_requirements', score: 0.140845 },
+      { pair: 'strategic_objectives:current_state_assessment', score: 0.142857 },
+      { pair: 'strategic_objectives:stakeholder_register', score: 0.326316 },
+      { pair: 'strategic_objectives:evidence_register', score: 0.132653 },
+      { pair: 'strategic_objectives:output_requirements', score: 0.2125 },
+      { pair: 'current_state_assessment:stakeholder_register', score: 0.142857 },
+      { pair: 'current_state_assessment:evidence_register', score: 0.125 },
+      { pair: 'current_state_assessment:output_requirements', score: 0.171875 },
+      { pair: 'stakeholder_register:evidence_register', score: 0.087379 },
+      { pair: 'stakeholder_register:output_requirements', score: 0.182927 },
+      { pair: 'evidence_register:output_requirements', score: 0.108108 },
     ])
   })
 
@@ -22434,12 +23131,12 @@ describe('Runtime Instance API', () => {
     )
   })
 
-  test('current profiles do not contradict supplied owners, measures, baselines, stakeholders, audiences, or formats', () => {
+  test('current profiles interpret strong supplied facts only into relevant section truth', () => {
     const suppliedDetails = [
       'Alex Morgan is the executive sponsor and Casey Lee owns the objective.',
       'Success means a 20 percent cycle-time reduction by Q4.',
-      'The current baseline is 12 hours per proposal.',
-      'The primary audience is the CFO.',
+      'The current baseline is 12 hours per proposal and teams report manual rework.',
+      'The primary audience for the deliverable is the CFO.',
       'The required deliverable is a two-page PDF sent by email.',
     ].join(' ')
     const frameworkPackage = makeRendererFrameworkPackage({
@@ -22472,25 +23169,240 @@ describe('Runtime Instance API', () => {
       packageVersion: '3.1.2',
       framework_state: frameworkState,
     })
-    const contradictedAbsenceClaims = [
-      'no quantified success measure is yet established',
-      'no accountable objective owner is yet named',
-      'no delivery horizon or target date is yet confirmed',
-      'no measured performance baseline is yet available',
-      'the executive sponsor is not yet named',
-      'the final decision maker and approver are not yet confirmed',
-      'the primary audience and decision moment are not yet specified',
-      'the required format, channel and length are not yet specified',
-      'no quantified commercial proof has been provided',
-      'no named customer proof has been provided',
-      'no external market validation has been provided',
-      'not committed targets',
-      'performance impact are not yet measured',
-      'does not by itself define the delivery brief',
-      'does not determine the intended audience, format or channel',
-    ]
+    const generatedBySectionKey = Object.fromEntries(
+      currentSectionProfileFixtures.map((fixture) => {
+        const { generated } = buildEnrichedGeneratedSection({
+          actionKey: 'GENERATE_SECTION',
+          actorUserId: CUSTOMER_ADMIN_ID,
+          dependencySectionKeys: [],
+          frameworkPackage,
+          frameworkState,
+          input: suppliedDetails,
+          runtimeInstance,
+          section: makeCurrentProfileSection(fixture),
+          sectionExecutionContract: makeCurrentProfileExecutionContract(fixture),
+          generatedAt: '2026-07-28T10:00:00.000Z',
+        })
+        return [fixture.sectionKey, generated]
+      }),
+    )
+    const strategic = generatedBySectionKey.strategic_objectives.content.toLowerCase()
+    const current = generatedBySectionKey.current_state_assessment.content.toLowerCase()
+    const stakeholder = generatedBySectionKey.stakeholder_register.content.toLowerCase()
+    const evidence = generatedBySectionKey.evidence_register.content.toLowerCase()
+    const output = generatedBySectionKey.output_requirements.content.toLowerCase()
 
-    currentSectionProfileFixtures.forEach((fixture) => {
+    expect(strategic).toContain('alex morgan')
+    expect(strategic).toContain('casey lee')
+    expect(strategic).toContain('20 percent')
+    expect(strategic).toContain('q4')
+    expect(strategic).not.toContain('12 hours per proposal')
+    expect(strategic).not.toContain('manual rework')
+    expect(strategic).not.toContain('two-page pdf')
+    expect(strategic).not.toContain('sent by email')
+    expect(strategic).not.toContain('ai-assisted value narrative platform')
+
+    expect(current).toContain('12 hours per proposal')
+    expect(current).toContain('manual rework')
+    expect(current).not.toContain('20 percent')
+    expect(current).not.toContain('q4')
+    expect(current).not.toContain('two-page pdf')
+    expect(current).not.toContain('sent by email')
+
+    expect(stakeholder).toContain('alex morgan')
+    expect(stakeholder).toContain('casey lee')
+    expect(stakeholder).toContain('cfo')
+    expect(stakeholder).not.toContain('12 hours per proposal')
+    expect(stakeholder).not.toContain('two-page pdf')
+
+    expect(output).toContain('cfo')
+    expect(output).toContain('two-page pdf')
+    expect(output).toContain('sent by email')
+    expect(output).not.toContain('alex morgan')
+    expect(output).not.toContain('casey lee')
+    expect(output).not.toContain('12 hours per proposal')
+
+    expect(evidence).toMatch(/evidence coverage|supporting source coverage/)
+    expect(evidence).not.toContain('alex morgan')
+    expect(evidence).not.toContain('two-page pdf')
+
+    Object.values(generatedBySectionKey).forEach((generated) => {
+      expect(generated.content).not.toContain(suppliedDetails)
+      expect(generated.sections.map((section) => section.heading)).not.toEqual(
+        expect.arrayContaining([
+          'Customer-Provided Section Context',
+          'Customer-Provided Section Evidence',
+        ]),
+      )
+    })
+  })
+
+  test('current profiles project mixed-sentence facts only into their relevant sections', () => {
+    const frameworkPackage = makeRendererFrameworkPackage({
+      packageKey: 'vmf-standard-3-1-2',
+      version: '3.1.2',
+      sections: currentSectionProfileFixtures.map(makeCurrentProfileSection),
+    })
+    const buildForInput = (suppliedDetails) => {
+      const frameworkState = {
+        evidence_pack: makeReadyDiscoveryEvidencePack({
+          accepted: true,
+          inputs: {
+            companyName: 'StorylineOS',
+            targetOffer: 'AI-assisted value narrative platform',
+            notes: suppliedDetails,
+          },
+          state: {
+            status: 'ACCEPTED',
+            inputComplete: true,
+            evidenceReady: true,
+            accepted: true,
+            needsRefresh: false,
+          },
+        }),
+        sections: Object.fromEntries(
+          currentSectionProfileFixtures.map((fixture) => [fixture.sectionKey, '']),
+        ),
+      }
+      const runtimeInstance = makeRuntimeInstanceDocument({
+        packageKey: 'vmf-standard-3-1-2',
+        packageVersion: '3.1.2',
+        framework_state: frameworkState,
+      })
+      return Object.fromEntries(
+        currentSectionProfileFixtures.map((fixture) => {
+          const result = buildEnrichedGeneratedSection({
+            actionKey: 'GENERATE_SECTION',
+            actorUserId: CUSTOMER_ADMIN_ID,
+            dependencySectionKeys: [],
+            frameworkPackage,
+            frameworkState,
+            input: suppliedDetails,
+            runtimeInstance,
+            section: makeCurrentProfileSection(fixture),
+            sectionExecutionContract: makeCurrentProfileExecutionContract(fixture),
+            generatedAt: '2026-07-28T10:00:00.000Z',
+          })
+          return [fixture.sectionKey, result]
+        }),
+      )
+    }
+    const expectRawSourceSeparated = (generatedBySectionKey, suppliedDetails) => {
+      const evidence =
+        generatedBySectionKey.evidence_register.generated.content.toLowerCase()
+      expect(evidence).not.toContain(suppliedDetails.toLowerCase())
+      expect(
+        generatedBySectionKey.current_state_assessment.intelligence.supportingEvidence
+          .some((item) => item.summary === suppliedDetails),
+      ).toBe(true)
+    }
+
+    const commaCustomerObjective =
+      'For the company, success means a 20 percent reduction by Q4.'
+    const commaResult = buildForInput(commaCustomerObjective)
+    expect(commaResult.customer_context.generated.content).toContain('For the company')
+    expect(commaResult.customer_context.generated.content).not.toContain('20 percent')
+    expect(commaResult.customer_context.generated.content).not.toContain('Q4')
+    expect(commaResult.strategic_objectives.generated.content).toContain(
+      'success means a 20 percent reduction by Q4',
+    )
+    expectRawSourceSeparated(commaResult, commaCustomerObjective)
+
+    const unsplitCustomerObjective =
+      'The company targets a 15 percent growth objective by Q3.'
+    const unsplitResult = buildForInput(unsplitCustomerObjective)
+    expect(unsplitResult.customer_context.generated.content).not.toContain(
+      unsplitCustomerObjective,
+    )
+    expect(unsplitResult.customer_context.generated.content).not.toContain('15 percent')
+    expect(unsplitResult.customer_context.generated.content).not.toContain('Q3')
+    expect(unsplitResult.strategic_objectives.generated.content).toContain(
+      unsplitCustomerObjective.replace(/\.$/, ''),
+    )
+    expectRawSourceSeparated(unsplitResult, unsplitCustomerObjective)
+
+    const stakeholderAndOutput =
+      'The primary audience for the deliverable is the CFO and the required deliverable is a two-page PDF sent by email.'
+    const stakeholderResult = buildForInput(stakeholderAndOutput)
+    expect(stakeholderResult.stakeholder_register.generated.content).toContain(
+      'CFO \u2014 audience',
+    )
+    expect(stakeholderResult.stakeholder_register.generated.content).not.toContain(
+      'two-page PDF',
+    )
+    expect(stakeholderResult.stakeholder_register.generated.content).not.toContain(
+      'email',
+    )
+    expect(stakeholderResult.output_requirements.generated.content).toContain(
+      'CFO \u2014 audience',
+    )
+    expect(stakeholderResult.output_requirements.generated.content).toContain(
+      'two-page PDF',
+    )
+    expect(stakeholderResult.output_requirements.generated.content).toContain('email')
+    expectRawSourceSeparated(stakeholderResult, stakeholderAndOutput)
+
+    const baselineAndOutput =
+      'The current baseline is 12 hours per proposal and the required deliverable is a two-page PDF sent by email.'
+    const baselineResult = buildForInput(baselineAndOutput)
+    expect(baselineResult.current_state_assessment.generated.content).toContain(
+      '12 hours per proposal',
+    )
+    expect(baselineResult.current_state_assessment.generated.content).not.toContain(
+      'two-page PDF',
+    )
+    expect(baselineResult.current_state_assessment.generated.content).not.toContain(
+      'email',
+    )
+    expect(baselineResult.output_requirements.generated.content).toContain(
+      'two-page PDF',
+    )
+    expect(baselineResult.output_requirements.generated.content).toContain('email')
+    expect(baselineResult.output_requirements.generated.content).not.toContain(
+      '12 hours per proposal',
+    )
+    expectRawSourceSeparated(baselineResult, baselineAndOutput)
+  })
+
+  test('current profiles do not promote negated or unconfirmed details as positive facts', () => {
+    const suppliedDetails = [
+      'No executive sponsor has been confirmed.',
+      'The output format is not yet approved.',
+    ].join(' ')
+    const fixtures = currentSectionProfileFixtures.filter((fixture) =>
+      ['strategic_objectives', 'stakeholder_register', 'output_requirements']
+        .includes(fixture.sectionKey),
+    )
+    const frameworkPackage = makeRendererFrameworkPackage({
+      packageKey: 'vmf-standard-3-1-2',
+      version: '3.1.2',
+      sections: fixtures.map(makeCurrentProfileSection),
+    })
+    const frameworkState = {
+      evidence_pack: makeReadyDiscoveryEvidencePack({
+        accepted: true,
+        inputs: {
+          companyName: 'StorylineOS',
+          targetOffer: 'AI-assisted value narrative platform',
+          notes: 'Teams want a governed and repeatable workflow.',
+        },
+        state: {
+          status: 'ACCEPTED',
+          inputComplete: true,
+          evidenceReady: true,
+          accepted: true,
+          needsRefresh: false,
+        },
+      }),
+      sections: Object.fromEntries(fixtures.map((fixture) => [fixture.sectionKey, ''])),
+    }
+    const runtimeInstance = makeRuntimeInstanceDocument({
+      packageKey: 'vmf-standard-3-1-2',
+      packageVersion: '3.1.2',
+      framework_state: frameworkState,
+    })
+
+    fixtures.forEach((fixture) => {
       const { generated } = buildEnrichedGeneratedSection({
         actionKey: 'GENERATE_SECTION',
         actorUserId: CUSTOMER_ADMIN_ID,
@@ -22503,13 +23415,415 @@ describe('Runtime Instance API', () => {
         sectionExecutionContract: makeCurrentProfileExecutionContract(fixture),
         generatedAt: '2026-07-28T10:00:00.000Z',
       })
-      const visibleContent = generated.content.toLowerCase()
-
-      contradictedAbsenceClaims.forEach((claim) => {
-        expect(visibleContent).not.toContain(claim)
-      })
-      expect(visibleContent).toMatch(/confirm|check|verify|identify|record|attach/)
+      expect(generated.content.toLowerCase()).not.toContain(
+        'no executive sponsor has been confirmed',
+      )
+      expect(generated.content.toLowerCase()).not.toContain(
+        'output format is not yet approved',
+      )
+      expect(generated.content).not.toMatch(/Objective ownership:|Format or length:/)
+      expect(generated.content).toMatch(/confirm|check|verify|identify|record|attach/)
     })
+  })
+
+  test('current profile contract compatibility fails closed for every incomplete or mismatched owner field', () => {
+    const fixture = currentSectionProfileFixtures.find(
+      (candidate) => candidate.sectionKey === 'strategic_objectives',
+    )
+    const frameworkPackage = makeRendererFrameworkPackage({
+      packageKey: 'vmf-standard-3-1-2',
+      version: '3.1.2',
+      sections: [makeCurrentProfileSection(fixture)],
+    })
+    const frameworkState = {
+      evidence_pack: makeReadyDiscoveryEvidencePack({
+        accepted: true,
+        inputs: {
+          companyName: 'StorylineOS',
+          targetOffer: 'AI-assisted value narrative platform',
+        },
+        state: {
+          status: 'ACCEPTED',
+          inputComplete: true,
+          evidenceReady: true,
+          accepted: true,
+          needsRefresh: false,
+        },
+      }),
+      sections: { strategic_objectives: '' },
+    }
+    const runtimeInstance = makeRuntimeInstanceDocument({
+      packageKey: 'vmf-standard-3-1-2',
+      packageVersion: '3.1.2',
+      framework_state: frameworkState,
+    })
+    const cases = [
+      ['CONTRACT_VERSION_REQUIRED', (contract) => { contract.contractVersion = '' }],
+      ['CONTRACT_HASH_REQUIRED', (contract) => { contract.sectionContractHash = '' }],
+      ['CONTRACT_SECTION_KEY_REQUIRED', (contract) => { contract.sectionIdentity.sectionKey = '' }],
+      ['CONTRACT_RUNTIME_PATH_REQUIRED', (contract) => { contract.sectionIdentity.runtimePath = '' }],
+      ['PROFILE_CONTRACT_SECTION_KEY_MISMATCH', (contract) => { contract.sectionIdentity.sectionKey = 'current_state_assessment' }],
+      ['PROFILE_CONTRACT_RUNTIME_PATH_MISMATCH', (contract) => { contract.sectionIdentity.runtimePath = 'framework_state.sections.current_state_assessment' }],
+      ['SECTION_PURPOSE_REQUIRED', (contract) => { contract.sectionIdentity.purpose = '' }],
+      ['RUNTIME_DESCRIPTION_REQUIRED', (contract) => { contract.runtimeInstructions.description = '' }],
+      ['RUNTIME_SKILL_ROLE_REQUIRED', (contract) => { contract.runtimeInstructions.skillRoleKey = '' }],
+      ['RUNTIME_CATEGORY_REQUIRED', (contract) => { contract.runtimeInstructions.category = '' }],
+      ['INPUT_CONTRACT_INCOMPLETE', (contract) => { contract.runtimeInstructions.inputContract = {} }],
+      ['OUTPUT_CONTRACT_INCOMPLETE', (contract) => { contract.runtimeInstructions.outputContract = {} }],
+      ['ALLOWED_READ_PATHS_REQUIRED', (contract) => { contract.runtimeInstructions.constraints.allowedReadPaths = [] }],
+      ['TARGET_WRITE_PATH_REQUIRED', (contract) => { contract.runtimeInstructions.constraints.allowedWritePaths = [] }],
+      ['FORBIDDEN_WRITE_PATHS_REQUIRED', (contract) => { delete contract.runtimeInstructions.constraints.forbiddenWritePaths }],
+      ['VALIDATION_RULE_REQUIRED', (contract) => { contract.validationRules = [] }],
+      ['VALIDATION_RULE_INCOMPLETE', (contract) => { contract.validationRules[0].packageUsable = false }],
+      ['EXECUTABLE_VALIDATION_RULE_REQUIRED', (contract) => { contract.validationRules[0].metadataOnlyDuringGeneration = true }],
+      ['VALIDATION_EXECUTION_BINDING_INCOMPLETE', (contract) => { contract.validationRules[0].executionBinding.executorVersion = 'unsupported-executor' }],
+      ['ACTUAL_SECTION_KEY_REQUIRED', null, (section) => { section.sectionKey = '' }],
+      ['ACTUAL_RUNTIME_PATH_REQUIRED', null, (section) => { section.runtimePath = '' }],
+      ['PROFILE_ACTUAL_SECTION_KEY_MISMATCH', null, (section) => { section.sectionKey = 'current_state_assessment' }],
+      ['PROFILE_ACTUAL_RUNTIME_PATH_MISMATCH', null, (section) => { section.runtimePath = 'framework_state.sections.current_state_assessment' }],
+      ['CONTRACT_ACTUAL_SECTION_KEY_MISMATCH', (contract) => { contract.sectionIdentity.sectionKey = 'current_state_assessment' }],
+      ['CONTRACT_ACTUAL_RUNTIME_PATH_MISMATCH', (contract) => { contract.sectionIdentity.runtimePath = 'framework_state.sections.current_state_assessment' }],
+    ]
+
+    cases.forEach(([expectedMismatch, mutateContract, mutateSection]) => {
+      const contract = structuredClone(makeCurrentProfileExecutionContract(fixture))
+      const section = structuredClone(makeCurrentProfileSection(fixture))
+      mutateContract?.(contract)
+      mutateSection?.(section)
+
+      expect(() => buildEnrichedGeneratedSection({
+        actionKey: 'GENERATE_SECTION',
+        actorUserId: CUSTOMER_ADMIN_ID,
+        dependencySectionKeys: [],
+        frameworkPackage,
+        frameworkState,
+        input: '',
+        runtimeInstance,
+        section,
+        sectionExecutionContract: contract,
+        generatedAt: '2026-07-28T10:00:00.000Z',
+      })).toThrow(expect.objectContaining({
+        status: 409,
+        code: 'CONFLICT',
+        details: expect.objectContaining({
+          reason: 'RUNTIME_ACTION_NOT_AVAILABLE',
+          contractIssue: 'SECTION_INTERPRETATION_CONTRACT_MISMATCH',
+          mismatchFields: expect.arrayContaining([expectedMismatch]),
+        }),
+      }))
+    })
+  })
+
+  test('supporting evidence preserves source-class representatives beyond ten candidates while interpretation reads the bounded pre-cap stream', () => {
+    const fixture = currentSectionProfileFixtures.find(
+      (candidate) => candidate.sectionKey === 'strategic_objectives',
+    )
+    const dependencyFixture = currentSectionProfileFixtures.find(
+      (candidate) => candidate.sectionKey === 'customer_context',
+    )
+    const section = makeCurrentProfileSection(fixture)
+    const dependencySection = makeCurrentProfileSection(dependencyFixture)
+    const frameworkPackage = makeRendererFrameworkPackage({
+      packageKey: 'vmf-standard-3-1-2',
+      version: '3.1.2',
+      sections: [dependencySection, section],
+    })
+    const acceptedDiscoveryEvidence = Array.from({ length: 10 }, (_value, index) =>
+      makeDiscoveryEvidenceObject({
+        evidenceObjectId: `discovery-evidence-${index + 1}`,
+        sourceId: `discovery-source-${index + 1}`,
+        extractedFact: [
+          'Company name: StorylineOS',
+          'Target offer: AI-assisted value narrative platform',
+          'Market or region: UK enterprise software',
+          'Intelligence Hub note: Governed workflow notes support strategic review',
+          'Accepted discovery observation 5 supports governed workflow review.',
+          'Accepted discovery observation 6 supports governed workflow review.',
+          'Accepted discovery observation 7 supports governed workflow review.',
+          'Accepted discovery observation 8 supports governed workflow review.',
+          'Accepted discovery observation 9 supports governed workflow review.',
+          'Success target is a 30 percent reduction by Q3.',
+        ][index],
+        reviewStatus: 'ACCEPTED',
+        acceptedBy: CUSTOMER_ADMIN_ID,
+        acceptanceTimestamp: '2026-07-28T09:00:00.000Z',
+      }))
+    const acceptedSectionEvidence = Array.from({ length: 2 }, (_value, index) =>
+      makeSectionEvidenceObject({
+        evidenceObjectId: `section-evidence-${index + 1}`,
+        sectionKey: fixture.sectionKey,
+        runtimePath: section.runtimePath,
+        sourceId: `section-source-${index + 1}`,
+        extractedFact: `Accepted section observation ${index + 1} supports objective review.`,
+        reviewStatus: 'ACCEPTED',
+        acceptedBy: CUSTOMER_ADMIN_ID,
+        acceptanceTimestamp: '2026-07-28T09:00:00.000Z',
+      }))
+    const frameworkState = {
+      evidence_pack: makeReadyDiscoveryEvidencePack({
+        accepted: true,
+        evidenceObjects: acceptedDiscoveryEvidence,
+        inputs: {
+          companyName: 'StorylineOS',
+          targetOffer: 'AI-assisted value narrative platform',
+          marketRegion: 'UK enterprise software',
+          notes: 'Governed workflow notes support strategic review.',
+        },
+        scoped_views: {
+          strategic_objectives: {
+            summary: 'The accepted scoped view supports a governed objective review.',
+            sourceRefs: ['scoped-strategic-objectives'],
+          },
+        },
+        state: {
+          status: 'ACCEPTED',
+          inputComplete: true,
+          evidenceReady: true,
+          accepted: true,
+          needsRefresh: false,
+        },
+      }),
+      sections: {
+        customer_context: {
+          accepted: {
+            content: 'The customer operates a governed enterprise workflow.',
+            acceptedAt: '2026-07-28T08:00:00.000Z',
+            truthHash: 'accepted-customer-context-hash',
+          },
+        },
+        strategic_objectives: {
+          evidenceObjects: acceptedSectionEvidence,
+        },
+      },
+    }
+    const runtimeInstance = makeRuntimeInstanceDocument({
+      packageKey: 'vmf-standard-3-1-2',
+      packageVersion: '3.1.2',
+      framework_state: frameworkState,
+    })
+    const { generated, intelligence } = buildEnrichedGeneratedSection({
+      actionKey: 'GENERATE_SECTION',
+      actorUserId: CUSTOMER_ADMIN_ID,
+      dependencySectionKeys: ['customer_context'],
+      frameworkPackage,
+      frameworkState,
+      input: 'The customer explicitly prioritises controlled growth.',
+      runtimeInstance,
+      section,
+      sectionExecutionContract: makeCurrentProfileExecutionContract(fixture),
+      generatedAt: '2026-07-28T10:00:00.000Z',
+    })
+    const supportingEvidence = intelligence.supportingEvidence
+    const sourceRefs = intelligence.scopedEvidence.sourceRefs
+
+    expect(supportingEvidence).toHaveLength(10)
+    expect(sourceRefs).toHaveLength(10)
+    expect(sourceRefs.map((ref) => ref.refKey)).toEqual(
+      supportingEvidence.map((item) => item.refKey),
+    )
+    expect(supportingEvidence.map((item) => item.refKey)).toEqual(
+      expect.arrayContaining([
+        'section-evidence-1',
+        'discovery-evidence-1',
+        'accepted_customer_context',
+        'section_input',
+        'scoped_view',
+        'input_companyName',
+        'input_targetOffer',
+        'input_marketRegion',
+        'input_notes',
+      ]),
+    )
+    expect(supportingEvidence.map((item) => item.refKey)).not.toContain(
+      'discovery-evidence-10',
+    )
+    expect(generated.content).toContain('30 percent reduction by Q3')
+  })
+
+  test('GENERATE_SECTION persists exact completeness validation under the section with compact lineage and audit', async () => {
+    const fixture = currentSectionProfileFixtures.find(
+      (candidate) => candidate.sectionKey === 'strategic_objectives',
+    )
+    const section = makeCurrentProfileSection(fixture)
+    const frameworkPackage = makeCurrentProfileFrameworkPackage(fixture)
+    const frameworkState = {
+      lifecycle: { stage: 'DRAFT' },
+      evidence_pack: makeReadyDiscoveryEvidencePack({
+        accepted: true,
+        inputs: {
+          companyName: 'StorylineOS',
+          targetOffer: 'AI-assisted value narrative platform',
+          notes: 'Teams want faster delivery with less manual effort.',
+        },
+        state: {
+          status: 'ACCEPTED',
+          inputComplete: true,
+          evidenceReady: true,
+          accepted: true,
+          needsRefresh: false,
+        },
+      }),
+      sections: {
+        strategic_objectives: '',
+      },
+      validation: {},
+      readiness: {},
+      policy: {},
+      attachments: {},
+      artifacts: {},
+    }
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      packageKey: frameworkPackage.packageKey,
+      packageVersion: frameworkPackage.version,
+      dependencyLockId: frameworkPackage.dependencyLock.snapshotId,
+      updatedAt: new Date('2026-07-28T10:00:00.000Z'),
+      framework_state: frameworkState,
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+    RuntimeDeployment.findOne.mockReturnValue(buildLeanQuery(makeRuntimeDeployment({
+      packageKey: frameworkPackage.packageKey,
+      frameworkVersion: frameworkPackage.version,
+    })))
+    RuntimeActivationSnapshot.findOne.mockReturnValue(buildLeanQuery(
+      makeRuntimeActivationSnapshot({
+        packageKey: frameworkPackage.packageKey,
+        frameworkVersion: frameworkPackage.version,
+      }),
+    ))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([
+      makeRuntimePathRecord({
+        stableId: 'path-framework-state-sections-strategic-objectives',
+        pathKey: section.runtimePath,
+        label: fixture.label,
+      }),
+    ]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      sections: [{
+        sectionKey: fixture.sectionKey,
+        runtimePath: section.runtimePath,
+        label: fixture.label,
+        helpText: 'Capture the strategic outcomes this value narrative should support.',
+        isVisible: true,
+        isEditable: true,
+        isRequiredDisplay: true,
+      }],
+      actions: [makeUIAction('GENERATE_SECTION')],
+    })))
+    RuntimeSkill.find.mockReturnValue(buildLeanQuery([
+      makeSectionRuntimeSkill({
+        stableId: fixture.stableId,
+        key: fixture.skillKey,
+        name: 'Strategic Objective Modeller',
+        allowedWritePaths: [section.runtimePath],
+      }),
+      makeValidationProducerRuntimeSkill(),
+    ]))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([
+      makeCurrentProfileActionPolicy(fixture),
+    ]))
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) =>
+      makeRuntimeInstanceDocument({
+        ...runtimeInstanceDoc,
+        ...(update?.$set || {}),
+        updatedAt: new Date('2026-07-28T10:01:00.000Z'),
+      }))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/GENERATE_SECTION`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-07-28T10:00:00.000Z',
+        runtimePath: section.runtimePath,
+      })
+
+    expect(res.status).toBe(200)
+    const persistedFrameworkState =
+      RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state
+    const persistedSection =
+      persistedFrameworkState.sections.strategic_objectives
+    expect(persistedSection.generated.validationResults).toEqual([
+      expect.objectContaining({
+        stableId: 'validation-completeness-check',
+        key: 'completeness-check',
+        componentVersion: 1,
+        status: 'PASS',
+        is_valid: true,
+        executorVersion: 'section-completeness-check-v1',
+        checkedAt: persistedSection.generated.generatedAt,
+        resultHash: expect.any(String),
+      }),
+    ])
+    expect(persistedSection.lineage).toEqual(expect.objectContaining({
+      validationResultKeys: ['completeness-check@1'],
+      validationResultHashes: [
+        persistedSection.generated.validationResults[0].resultHash,
+      ],
+      validationCheckedAt: persistedSection.generated.generatedAt,
+    }))
+    expect(persistedFrameworkState.validation).toEqual({})
+    expect(persistedFrameworkState.validation).not.toHaveProperty('completeness')
+
+    const auditGeneration = AuditLog.createLog.mock.calls.at(-1)[0].diff.generation
+    expect(auditGeneration.validationResults).toEqual([{
+      key: 'completeness-check',
+      componentVersion: 1,
+      status: 'PASS',
+      is_valid: true,
+      executorVersion: 'section-completeness-check-v1',
+      resultHash: persistedSection.generated.validationResults[0].resultHash,
+    }])
+    expect(JSON.stringify(auditGeneration)).not.toMatch(
+      /systemPrompt|developerInstructions|inputContract|outputContract|evidenceObjects/,
+    )
+    expect(res.body.data.state.generation.generated.validationResults).toEqual(
+      persistedSection.generated.validationResults,
+    )
+
+    const blockedRuntimeInstanceDoc = makeRuntimeInstanceDocument({
+      packageKey: frameworkPackage.packageKey,
+      packageVersion: frameworkPackage.version,
+      dependencyLockId: frameworkPackage.dependencyLock.snapshotId,
+      updatedAt: new Date('2026-07-28T10:00:00.000Z'),
+      framework_state: structuredClone(frameworkState),
+    })
+    mockRuntimeInstanceForActionExecution({
+      document: blockedRuntimeInstanceDoc,
+    })
+    RuntimeSkill.find.mockReturnValue(buildLeanQuery([
+      makeSectionRuntimeSkill({
+        stableId: fixture.stableId,
+        key: fixture.skillKey,
+        name: 'Strategic Objective Modeller',
+        allowedWritePaths: [section.runtimePath],
+      }),
+      makeValidationProducerRuntimeSkill({
+        type: 'AGENT_ASSISTED',
+      }),
+    ]))
+    RuntimeInstance.findOneAndUpdate = jest.fn()
+    AuditLog.createLog.mockClear()
+
+    const blockedRes = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/GENERATE_SECTION`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-07-28T10:00:00.000Z',
+        runtimePath: section.runtimePath,
+      })
+
+    expect(blockedRes.status).toBe(409)
+    expect(blockedRes.body.error.details).toEqual(expect.objectContaining({
+      reason: 'DEPENDENCY_LOCK_EVIDENCE_MISMATCH',
+      contractIssue: 'SECTION_VALIDATION_BINDING_MISMATCH',
+      validationKey: 'completeness-check',
+      mismatchFields: expect.arrayContaining([
+        'PRODUCER_SKILL_TYPE_MISMATCH',
+      ]),
+    }))
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 
   test('GENERATE_SECTION fails closed when a current skill version has no registered interpretation profile', async () => {
@@ -22589,12 +23903,9 @@ describe('Runtime Instance API', () => {
         key: fixture.skillKey,
         name: 'Strategic Objective Modeller',
         componentVersion: 2,
-        inputContract: {
-          frameworkVersions: ['3.1.2'],
-          fields: ['acceptedEvidence'],
-        },
         allowedWritePaths: ['framework_state.sections.strategic_objectives'],
       }),
+      makeValidationProducerRuntimeSkill(),
     ]))
     WorkflowPolicy.find.mockReturnValue(buildLeanQuery([
       makeCurrentProfileActionPolicy(fixture),
@@ -22617,6 +23928,145 @@ describe('Runtime Instance API', () => {
       skillComponentVersion: 2,
       supportedSelectionKeys: [`${fixture.stableId}@1`],
     }))
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('GENERATE_SECTION rejects a current profile bound to the wrong section before mutation or success audit', async () => {
+    const targetFixture = currentSectionProfileFixtures.find(
+      (candidate) => candidate.sectionKey === 'strategic_objectives',
+    )
+    const wrongProfileFixture = currentSectionProfileFixtures.find(
+      (candidate) => candidate.sectionKey === 'current_state_assessment',
+    )
+    const targetSection = makeCurrentProfileSection(targetFixture)
+    const basePackage = makeCurrentProfileFrameworkPackage(targetFixture)
+    const frameworkPackage = {
+      ...basePackage,
+      dependencyLock: {
+        ...basePackage.dependencyLock,
+        references: basePackage.dependencyLock.references.map((reference) =>
+          reference.collectionKey === 'RuntimeSkill'
+            && reference.id !== 'skill-truth-integrity-validator'
+            ? {
+                ...reference,
+                id: wrongProfileFixture.stableId,
+                key: wrongProfileFixture.skillKey,
+                componentVersion: 1,
+              }
+            : reference),
+      },
+    }
+    const frameworkState = {
+      lifecycle: { stage: 'DRAFT' },
+      evidence_pack: makeReadyDiscoveryEvidencePack({
+        accepted: true,
+        inputs: {
+          companyName: 'StorylineOS',
+          targetOffer: 'AI-assisted value narrative platform',
+        },
+        state: {
+          status: 'ACCEPTED',
+          inputComplete: true,
+          evidenceReady: true,
+          accepted: true,
+          needsRefresh: false,
+        },
+      }),
+      sections: {
+        strategic_objectives: '',
+      },
+      validation: {},
+      readiness: {},
+      policy: {},
+      attachments: {},
+      artifacts: {},
+    }
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      packageKey: frameworkPackage.packageKey,
+      packageVersion: frameworkPackage.version,
+      dependencyLockId: frameworkPackage.dependencyLock.snapshotId,
+      updatedAt: new Date('2026-07-28T10:00:00.000Z'),
+      framework_state: frameworkState,
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+    RuntimeDeployment.findOne.mockReturnValue(buildLeanQuery(makeRuntimeDeployment({
+      packageKey: frameworkPackage.packageKey,
+      frameworkVersion: frameworkPackage.version,
+    })))
+    RuntimeActivationSnapshot.findOne.mockReturnValue(buildLeanQuery(
+      makeRuntimeActivationSnapshot({
+        packageKey: frameworkPackage.packageKey,
+        frameworkVersion: frameworkPackage.version,
+      }),
+    ))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([
+      makeRuntimePathRecord({
+        stableId: 'path-framework-state-sections-strategic-objectives',
+        pathKey: targetSection.runtimePath,
+        label: targetFixture.label,
+      }),
+    ]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({
+      sections: [{
+        sectionKey: targetFixture.sectionKey,
+        runtimePath: targetSection.runtimePath,
+        label: targetFixture.label,
+        helpText: 'Capture the strategic outcomes this value narrative should support.',
+        isVisible: true,
+        isEditable: true,
+        isRequiredDisplay: true,
+      }],
+      actions: [makeUIAction('GENERATE_SECTION')],
+    })))
+    RuntimeSkill.find.mockReturnValue(buildLeanQuery([
+      makeSectionRuntimeSkill({
+        stableId: wrongProfileFixture.stableId,
+        key: wrongProfileFixture.skillKey,
+        name: 'Current State Diagnoser',
+        allowedWritePaths: [targetSection.runtimePath],
+      }),
+      makeValidationProducerRuntimeSkill(),
+    ]))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([
+      makeActionWorkflowPolicy('GENERATE_SECTION', {
+        steps: [{
+          stepKey: 'generate-strategic-objectives-with-wrong-profile',
+          type: 'SKILL_EXECUTION',
+          order: 1,
+          targetPath: targetSection.runtimePath,
+          skillId: wrongProfileFixture.stableId,
+        }],
+      }),
+    ]))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/GENERATE_SECTION`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-07-28T10:00:00.000Z',
+        runtimePath: targetSection.runtimePath,
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error).toEqual(expect.objectContaining({
+      code: 'CONFLICT',
+      message: 'Runtime section generation is blocked because the section interpretation contract is incomplete or incompatible.',
+      details: expect.objectContaining({
+        reason: 'RUNTIME_ACTION_NOT_AVAILABLE',
+        contractIssue: 'SECTION_INTERPRETATION_CONTRACT_MISMATCH',
+        mismatchFields: expect.arrayContaining([
+          'PROFILE_CONTRACT_SECTION_KEY_MISMATCH',
+          'PROFILE_CONTRACT_RUNTIME_PATH_MISMATCH',
+          'PROFILE_ACTUAL_SECTION_KEY_MISMATCH',
+          'PROFILE_ACTUAL_RUNTIME_PATH_MISMATCH',
+        ]),
+      }),
+    }))
+    expect(JSON.stringify(res.body.error)).not.toContain('framework_state.sections')
+    expect(JSON.stringify(res.body.error)).not.toContain(wrongProfileFixture.stableId)
     expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
     expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
@@ -22721,6 +24171,10 @@ describe('Runtime Instance API', () => {
       updatedAt: new Date('2026-07-28T10:00:00.000Z'),
       framework_state: baseFrameworkState,
     })
+    const apiSectionPurpose =
+      'Capture the strategic outcomes this value narrative should support.'
+    const candidateExecutionContract = makeCurrentProfileExecutionContract(fixture)
+    candidateExecutionContract.sectionIdentity.purpose = apiSectionPurpose
     const { generated: candidateGenerated } = buildEnrichedGeneratedSection({
       actionKey: 'GENERATE_SECTION',
       actorUserId: CUSTOMER_ADMIN_ID,
@@ -22730,7 +24184,7 @@ describe('Runtime Instance API', () => {
       input: '',
       runtimeInstance: runtimeInstanceSeed,
       section: targetSection,
-      sectionExecutionContract: makeCurrentProfileExecutionContract(fixture),
+      sectionExecutionContract: candidateExecutionContract,
       generatedAt: '2026-07-28T09:59:00.000Z',
     })
     const similarityStopWords = new Set([
@@ -22801,7 +24255,7 @@ describe('Runtime Instance API', () => {
     expect(calibration).toEqual(expect.objectContaining({
       version: 'business-interpretation-token-jaccard-v2',
       threshold: 0.75,
-      maximumScore: 0.80597,
+      maximumScore: 0.771429,
       topMatchSectionKey: 'released_clone',
       passed: false,
     }))
@@ -22841,7 +24295,7 @@ describe('Runtime Instance API', () => {
         sectionKey: 'strategic_objectives',
         runtimePath: 'framework_state.sections.strategic_objectives',
         label: 'Strategic Objectives',
-        helpText: 'Capture the strategic outcomes this value narrative should support.',
+        helpText: apiSectionPurpose,
         isVisible: true,
         isEditable: true,
         isRequiredDisplay: true,
@@ -22853,12 +24307,9 @@ describe('Runtime Instance API', () => {
         stableId: fixture.stableId,
         key: fixture.skillKey,
         name: 'Strategic Objective Modeller',
-        inputContract: {
-          frameworkVersions: ['3.1.2'],
-          fields: ['acceptedEvidence'],
-        },
         allowedWritePaths: ['framework_state.sections.strategic_objectives'],
       }),
+      makeValidationProducerRuntimeSkill(),
     ]))
     WorkflowPolicy.find.mockReturnValue(buildLeanQuery([
       makeCurrentProfileActionPolicy(fixture),
@@ -22879,7 +24330,7 @@ describe('Runtime Instance API', () => {
       similarityResult: expect.objectContaining({
         version: 'business-interpretation-token-jaccard-v2',
         threshold: 0.75,
-        maximumScore: 0.80597,
+        maximumScore: 0.771429,
         topMatchSectionKey: 'released_clone',
         passed: false,
       }),
@@ -24055,6 +25506,15 @@ describe('Runtime Instance API', () => {
       generatedAt: '2026-05-19T07:55:00.000Z',
       actionKey: 'GENERATE_SECTION',
       inputHash: 'old-input-hash',
+      validationResults: [{
+        stableId: 'validation-completeness-check',
+        key: 'completeness-check',
+        componentVersion: 1,
+        status: 'PASS',
+        is_valid: true,
+        checkedAt: '2026-05-19T07:55:00.000Z',
+        resultHash: 'sha256:previous-completeness-result',
+      }],
     }
     const runtimeInstanceDoc = makeRuntimeInstanceDocument({
       updatedAt: new Date('2026-05-19T08:00:00.000Z'),
@@ -24168,6 +25628,10 @@ describe('Runtime Instance API', () => {
         }),
       ],
     }))
+    expect(
+      persistedFrameworkState.sections.customer_problem
+        .revisions[0].generated.validationResults,
+    ).toEqual(previousGenerated.validationResults)
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       diff: expect.objectContaining({
         actionKey: 'REGENERATE_SECTION',

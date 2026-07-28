@@ -9,6 +9,10 @@ import {
   RUNTIME_INSTANCE_ERROR_REASONS,
   createRuntimeInstanceError,
 } from './runtimeInstanceService.js'
+import {
+  evaluateSectionValidationBindingCompatibility,
+  targetsSectionCompletenessBinding,
+} from './sectionValidationExecutorService.js'
 
 export const SECTION_EXECUTION_CONTRACT_VERSION = 'section-execution-contract-v1'
 
@@ -288,6 +292,7 @@ const resolveUIContract = async ({
 }
 
 const resolveRuntimeSkill = async ({
+  additionalSkillIds = [],
   frameworkPackage,
   runtimePath,
   skillId,
@@ -385,7 +390,45 @@ const resolveRuntimeSkill = async ({
     })
   }
 
-  return { reference, row, description, skillRoleKey, category, inputContract, outputContract }
+  const additionalSkills = new Map()
+  for (const additionalSkillId of [...new Set(additionalSkillIds
+    .map(normalizeToken)
+    .filter(Boolean))]) {
+    const additionalReferences = references.filter((candidateReference) =>
+      normalizeToken(candidateReference?.id || candidateReference?.stableId)
+        === additionalSkillId)
+    if (additionalReferences.length !== 1) {
+      throw buildContractError({
+        issue: 'VALIDATION_PRODUCER_SKILL_LOCK_REFERENCE_MISSING',
+        message: 'An executable section validation producer must have one dependency-lock reference.',
+        details: {
+          stableId: additionalSkillId,
+          matchCount: additionalReferences.length,
+        },
+      })
+    }
+
+    const additionalRow = rowsByStableId.get(additionalSkillId)
+    if (!additionalRow) {
+      throw buildContractError({
+        issue: 'VALIDATION_PRODUCER_SKILL_NOT_FOUND',
+        message: 'An executable section validation producer was not found.',
+        details: { stableId: additionalSkillId },
+      })
+    }
+    additionalSkills.set(additionalSkillId, additionalRow)
+  }
+
+  return {
+    reference,
+    row,
+    description,
+    skillRoleKey,
+    category,
+    inputContract,
+    outputContract,
+    additionalSkills,
+  }
 }
 
 const resolveValidationRules = async ({
@@ -444,6 +487,22 @@ const resolveValidationRules = async ({
       severity: normalizeText(row.severity),
       executionMode: normalizeText(row.executionMode),
       packageUsable: row.packageUsable !== false,
+      producerSkillId: normalizeToken(row.producerSkillId),
+      resultType: normalizeText(row.resultType),
+      outputPath: normalizeText(row.outputPath),
+      passFieldPath: normalizeText(row.passFieldPath),
+      detailsFieldPath: normalizeText(row.detailsFieldPath),
+      messageFieldPath: normalizeText(row.messageFieldPath),
+      retryPolicy: {
+        maxAttempts: Number(row.retryPolicy?.maxAttempts || 1),
+        retryableErrorCodes: Array.isArray(row.retryPolicy?.retryableErrorCodes)
+          ? row.retryPolicy.retryableErrorCodes.map((value) =>
+              normalizeText(value).toUpperCase()).filter(Boolean)
+          : [],
+        backoffSeconds: Number(row.retryPolicy?.backoffSeconds || 0),
+      },
+      blockingDefault: row.blockingDefault === true,
+      warningOnlyDefault: row.warningOnlyDefault === true,
       metadataOnlyDuringGeneration: true,
     }
   })
@@ -503,9 +562,51 @@ export const resolveSectionExecutionContract = async ({
     }),
   ])
   const runtimeSkill = await resolveRuntimeSkill({
+    additionalSkillIds: validationRules
+      .filter(targetsSectionCompletenessBinding)
+      .map((rule) => rule.producerSkillId),
     frameworkPackage,
     runtimePath,
     skillId: workflowPolicyBinding.skillId,
+  })
+  const boundValidationRules = validationRules.map((rule) => {
+    if (!targetsSectionCompletenessBinding(rule)) {
+      return rule
+    }
+
+    const producerSkill = runtimeSkill.additionalSkills.get(
+      normalizeToken(rule.producerSkillId),
+    )
+    const compatibility = evaluateSectionValidationBindingCompatibility({
+      producerSkill,
+      rule,
+    })
+    if (compatibility.mismatchFields.length > 0) {
+      throw buildContractError({
+        issue: 'SECTION_VALIDATION_BINDING_MISMATCH',
+        message: 'A dependency-locked section validation cannot be bound to the supported deterministic executor.',
+        details: {
+          validationKey: rule.key,
+          producerSkillId: rule.producerSkillId,
+          mismatchFields: compatibility.mismatchFields,
+        },
+      })
+    }
+
+    return {
+      ...rule,
+      producerSkill: {
+        stableId: normalizeToken(producerSkill.stableId),
+        key: normalizeToken(producerSkill.key),
+        componentVersion: toComponentVersion(producerSkill.componentVersion),
+        skillRoleKey: normalizeText(producerSkill.skillRoleKey),
+        category: normalizeText(producerSkill.category),
+        type: normalizeText(producerSkill.type),
+        executionMode: normalizeText(producerSkill.executionMode),
+      },
+      executionBinding: compatibility.executionBinding,
+      metadataOnlyDuringGeneration: false,
+    }
   })
 
   const contract = {
@@ -541,7 +642,7 @@ export const resolveSectionExecutionContract = async ({
         forbiddenWritePaths: runtimeSkill.row.forbiddenWritePaths || [],
       },
     },
-    validationRules,
+    validationRules: boundValidationRules,
     dependencyIdentity: {
       uiContract: {
         stableId: normalizeToken(uiContract.row.stableId),

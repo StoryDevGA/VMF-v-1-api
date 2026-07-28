@@ -4,6 +4,9 @@ import {
   isGovernedDiscoveryEvidenceFact,
   normalizeDiscoveryEvidenceObjects,
 } from './discoveryIntelligenceService.js'
+import {
+  SECTION_COMPLETENESS_BINDING,
+} from './sectionValidationExecutorService.js'
 
 export const RUNTIME_SECTION_STATES = Object.freeze({
   DRAFT: 'DRAFT',
@@ -189,26 +192,38 @@ const CURRENT_SECTION_INTERPRETATION_PROFILES = Object.freeze({
   'skill-customer-context-interpreter@1': Object.freeze({
     key: 'customer-context',
     semanticType: 'CUSTOMER_CONTEXT',
+    sectionKey: 'customer_context',
+    runtimePath: 'framework_state.sections.customer_context',
   }),
   'skill-strategic-objective-modeller@1': Object.freeze({
     key: 'strategic-objectives',
     semanticType: 'STRATEGIC_OBJECTIVES',
+    sectionKey: 'strategic_objectives',
+    runtimePath: 'framework_state.sections.strategic_objectives',
   }),
   'skill-current-state-diagnoser@1': Object.freeze({
     key: 'current-state-assessment',
     semanticType: 'CURRENT_STATE_ASSESSMENT',
+    sectionKey: 'current_state_assessment',
+    runtimePath: 'framework_state.sections.current_state_assessment',
   }),
   'skill-stakeholder-register-builder@1': Object.freeze({
     key: 'stakeholder-register',
     semanticType: 'STAKEHOLDER_REGISTER',
+    sectionKey: 'stakeholder_register',
+    runtimePath: 'framework_state.sections.stakeholder_register',
   }),
   'skill-evidence-register-curator@1': Object.freeze({
     key: 'evidence-register',
     semanticType: 'EVIDENCE_REGISTER',
+    sectionKey: 'evidence_register',
+    runtimePath: 'framework_state.sections.evidence_register',
   }),
   'skill-output-requirements-capturer@1': Object.freeze({
     key: 'output-requirements',
     semanticType: 'OUTPUT_REQUIREMENTS',
+    sectionKey: 'output_requirements',
+    runtimePath: 'framework_state.sections.output_requirements',
   }),
 })
 
@@ -308,7 +323,172 @@ const normalizeEvidenceString = (value) => {
   return ''
 }
 
-const resolveSectionInterpretationProfile = (sectionExecutionContract = {}) => {
+const isCompleteObjectContract = (value) =>
+  isPlainObject(value)
+  && normalizeSectionText(value.type).toLowerCase() === 'object'
+  && Array.isArray(value.required)
+  && value.required.some((field) => normalizeSectionText(field))
+  && isPlainObject(value.properties)
+  && Object.keys(value.properties).length > 0
+
+const buildSectionInterpretationContractMismatch = (mismatchFields = []) => {
+  const err = new Error(
+    'Runtime section generation is blocked because the section interpretation contract is incomplete or incompatible.',
+  )
+  err.status = 409
+  err.code = 'CONFLICT'
+  err.details = {
+    reason: 'RUNTIME_ACTION_NOT_AVAILABLE',
+    contractIssue: 'SECTION_INTERPRETATION_CONTRACT_MISMATCH',
+    mismatchFields: [...new Set(mismatchFields)].sort(),
+  }
+  return err
+}
+
+const validateCurrentSectionInterpretationContract = ({
+  profile,
+  section = {},
+  sectionExecutionContract = {},
+}) => {
+  const mismatchFields = []
+  const sectionIdentity = isPlainObject(sectionExecutionContract.sectionIdentity)
+    ? sectionExecutionContract.sectionIdentity
+    : {}
+  const runtimeInstructions = isPlainObject(sectionExecutionContract.runtimeInstructions)
+    ? sectionExecutionContract.runtimeInstructions
+    : {}
+  const constraints = isPlainObject(runtimeInstructions.constraints)
+    ? runtimeInstructions.constraints
+    : {}
+  const contractSectionKey = normalizeSectionText(sectionIdentity.sectionKey).toLowerCase()
+  const contractRuntimePath = normalizeSectionText(sectionIdentity.runtimePath).toLowerCase()
+  const actualSectionKey = normalizeSectionText(section?.sectionKey || section?.key).toLowerCase()
+  const actualRuntimePath = normalizeSectionText(section?.runtimePath).toLowerCase()
+
+  if (!normalizeSectionText(sectionExecutionContract.contractVersion)) {
+    mismatchFields.push('CONTRACT_VERSION_REQUIRED')
+  }
+  if (!normalizeSectionText(sectionExecutionContract.sectionContractHash)) {
+    mismatchFields.push('CONTRACT_HASH_REQUIRED')
+  }
+  if (!contractSectionKey) mismatchFields.push('CONTRACT_SECTION_KEY_REQUIRED')
+  if (!contractRuntimePath) mismatchFields.push('CONTRACT_RUNTIME_PATH_REQUIRED')
+  if (!actualSectionKey) mismatchFields.push('ACTUAL_SECTION_KEY_REQUIRED')
+  if (!actualRuntimePath) mismatchFields.push('ACTUAL_RUNTIME_PATH_REQUIRED')
+  if (contractSectionKey && contractSectionKey !== profile.sectionKey) {
+    mismatchFields.push('PROFILE_CONTRACT_SECTION_KEY_MISMATCH')
+  }
+  if (contractRuntimePath && contractRuntimePath !== profile.runtimePath) {
+    mismatchFields.push('PROFILE_CONTRACT_RUNTIME_PATH_MISMATCH')
+  }
+  if (actualSectionKey && actualSectionKey !== profile.sectionKey) {
+    mismatchFields.push('PROFILE_ACTUAL_SECTION_KEY_MISMATCH')
+  }
+  if (actualRuntimePath && actualRuntimePath !== profile.runtimePath) {
+    mismatchFields.push('PROFILE_ACTUAL_RUNTIME_PATH_MISMATCH')
+  }
+  if (contractSectionKey && actualSectionKey && contractSectionKey !== actualSectionKey) {
+    mismatchFields.push('CONTRACT_ACTUAL_SECTION_KEY_MISMATCH')
+  }
+  if (contractRuntimePath && actualRuntimePath && contractRuntimePath !== actualRuntimePath) {
+    mismatchFields.push('CONTRACT_ACTUAL_RUNTIME_PATH_MISMATCH')
+  }
+  if (!normalizeSectionText(sectionIdentity.purpose)) {
+    mismatchFields.push('SECTION_PURPOSE_REQUIRED')
+  }
+  if (!normalizeSectionText(runtimeInstructions.description)) {
+    mismatchFields.push('RUNTIME_DESCRIPTION_REQUIRED')
+  }
+  if (!normalizeSectionText(runtimeInstructions.skillRoleKey)) {
+    mismatchFields.push('RUNTIME_SKILL_ROLE_REQUIRED')
+  }
+  if (!normalizeSectionText(runtimeInstructions.category)) {
+    mismatchFields.push('RUNTIME_CATEGORY_REQUIRED')
+  }
+  if (!isCompleteObjectContract(runtimeInstructions.inputContract)) {
+    mismatchFields.push('INPUT_CONTRACT_INCOMPLETE')
+  }
+  if (!isCompleteObjectContract(runtimeInstructions.outputContract)) {
+    mismatchFields.push('OUTPUT_CONTRACT_INCOMPLETE')
+  }
+  if (
+    !Array.isArray(constraints.allowedReadPaths)
+    || !constraints.allowedReadPaths.some((path) => normalizeSectionText(path))
+  ) {
+    mismatchFields.push('ALLOWED_READ_PATHS_REQUIRED')
+  }
+  if (!Array.isArray(constraints.allowedWritePaths)) {
+    mismatchFields.push('ALLOWED_WRITE_PATHS_REQUIRED')
+  } else if (!constraints.allowedWritePaths.some((path) =>
+    normalizeSectionText(path).toLowerCase() === profile.runtimePath)) {
+    mismatchFields.push('TARGET_WRITE_PATH_REQUIRED')
+  }
+  if (!Array.isArray(constraints.forbiddenWritePaths)) {
+    mismatchFields.push('FORBIDDEN_WRITE_PATHS_REQUIRED')
+  }
+
+  const validationRules = Array.isArray(sectionExecutionContract.validationRules)
+    ? sectionExecutionContract.validationRules
+    : []
+  if (validationRules.length === 0) {
+    mismatchFields.push('VALIDATION_RULE_REQUIRED')
+  } else if (validationRules.some((rule) =>
+    !normalizeSectionText(rule?.stableId)
+    || !normalizeSectionText(rule?.key)
+    || !Number.isInteger(Number(rule?.componentVersion))
+    || Number(rule?.componentVersion) <= 0
+    || !normalizeSectionText(rule?.category)
+    || !normalizeSectionText(rule?.severity)
+    || !normalizeSectionText(rule?.executionMode)
+    || rule?.packageUsable !== true)) {
+    mismatchFields.push('VALIDATION_RULE_INCOMPLETE')
+  }
+
+  const executableCompletenessRules = validationRules.filter((rule) =>
+    normalizeSectionText(rule?.stableId).toLowerCase()
+      === SECTION_COMPLETENESS_BINDING.validationStableId
+    && normalizeSectionText(rule?.key).toLowerCase()
+      === SECTION_COMPLETENESS_BINDING.validationKey
+    && Number(rule?.componentVersion)
+      === SECTION_COMPLETENESS_BINDING.validationComponentVersion
+    && rule?.metadataOnlyDuringGeneration === false)
+  if (executableCompletenessRules.length !== 1) {
+    mismatchFields.push('EXECUTABLE_VALIDATION_RULE_REQUIRED')
+  } else {
+    const executableRule = executableCompletenessRules[0]
+    const executionBinding = isPlainObject(executableRule.executionBinding)
+      ? executableRule.executionBinding
+      : {}
+    const producerSkill = isPlainObject(executableRule.producerSkill)
+      ? executableRule.producerSkill
+      : {}
+    if (
+      normalizeSectionText(executionBinding.selectionKey)
+        !== SECTION_COMPLETENESS_BINDING.selectionKey
+      || normalizeSectionText(executionBinding.executorVersion)
+        !== SECTION_COMPLETENESS_BINDING.executorVersion
+      || normalizeSectionText(executionBinding.mode)
+        !== 'SERVER_SYSTEM_DETERMINISTIC'
+      || normalizeSectionText(producerSkill.stableId).toLowerCase()
+        !== SECTION_COMPLETENESS_BINDING.producerSkillStableId
+      || normalizeSectionText(producerSkill.key).toLowerCase()
+        !== SECTION_COMPLETENESS_BINDING.producerSkillKey
+      || Number(producerSkill.componentVersion)
+        !== SECTION_COMPLETENESS_BINDING.producerSkillComponentVersion
+    ) {
+      mismatchFields.push('VALIDATION_EXECUTION_BINDING_INCOMPLETE')
+    }
+  }
+
+  if (mismatchFields.length > 0) {
+    throw buildSectionInterpretationContractMismatch(mismatchFields)
+  }
+}
+
+const resolveSectionInterpretationProfile = (
+  sectionExecutionContract = {},
+  section = {},
+) => {
   const stableId = normalizeSectionText(
     sectionExecutionContract?.runtimeInstructions?.stableId,
   ).toLowerCase()
@@ -340,12 +520,18 @@ const resolveSectionInterpretationProfile = (sectionExecutionContract = {}) => {
     throw err
   }
 
-  return {
+  const profile = {
     ...registeredProfile,
     selectionKey,
     skillStableId: stableId,
     skillComponentVersion: componentVersion,
   }
+  validateCurrentSectionInterpretationContract({
+    profile,
+    section,
+    sectionExecutionContract,
+  })
+  return profile
 }
 
 const getEvidencePackFromFrameworkState = (frameworkState = {}) =>
@@ -713,93 +899,119 @@ const buildSupportingEvidence = ({
   scopedEvidenceSummary,
   seedProfile,
 }) => {
-  const items = []
   const companyName = normalizeEvidenceString(seedProfile.companyName)
   const marketRegion = normalizeEvidenceString(seedProfile.marketRegion)
   const targetOffer = normalizeEvidenceString(seedProfile.targetOffer)
   const notes = normalizeEvidenceString(seedProfile.notes)
-
-  acceptedEvidenceObjects.slice(0, 6).forEach((evidenceObject) => {
-    const summary = normalizeEvidenceString(evidenceObject.extractedFact)
-    if (!summary) return
-    items.push({
-      label: evidenceObject.category || 'Accepted evidence',
-      summary,
-      sourceType: 'DISCOVERY_EVIDENCE_OBJECT',
-      refKey: evidenceObject.evidenceObjectId || evidenceObject.lineageRef || evidenceObject.sourceId,
-    })
-  })
-
-  acceptedSectionEvidenceObjects.slice(0, 6).forEach((evidenceObject) => {
-    const summary = normalizeEvidenceString(evidenceObject.extractedFact)
-    if (!summary) return
-    items.push({
-      label: evidenceObject.category || 'Accepted section evidence',
-      summary,
-      sourceType: 'SECTION_EVIDENCE_OBJECT',
-      refKey: evidenceObject.evidenceObjectId || evidenceObject.lineageRef || evidenceObject.sourceId,
-    })
-  })
-
-  if (companyName) {
-    items.push({
+  const sourceGroups = [
+    {
+      sourceClass: 'ACCEPTED_SECTION_EVIDENCE',
+      items: acceptedSectionEvidenceObjects.map((evidenceObject) => ({
+        label: evidenceObject.category || 'Accepted section evidence',
+        summary: normalizeEvidenceString(evidenceObject.extractedFact),
+        sourceType: 'SECTION_EVIDENCE_OBJECT',
+        refKey: evidenceObject.evidenceObjectId || evidenceObject.lineageRef || evidenceObject.sourceId,
+      })),
+    },
+    {
+      sourceClass: 'ACCEPTED_DISCOVERY_EVIDENCE',
+      items: acceptedEvidenceObjects.map((evidenceObject) => ({
+        label: evidenceObject.category || 'Accepted evidence',
+        summary: normalizeEvidenceString(evidenceObject.extractedFact),
+        sourceType: 'DISCOVERY_EVIDENCE_OBJECT',
+        refKey: evidenceObject.evidenceObjectId || evidenceObject.lineageRef || evidenceObject.sourceId,
+      })),
+    },
+    {
+      sourceClass: 'ACCEPTED_DEPENDENCY_TRUTH',
+      items: dependencyTruths.map((dependency) => ({
+        label: `Accepted truth: ${dependency.label}`,
+        summary: dependency.content,
+        sourceType: 'DEPENDENCY',
+        refKey: `accepted_${dependency.sectionKey}`,
+      })),
+    },
+    {
+      sourceClass: 'EXPLICIT_SECTION_INPUT',
+      items: inputSummary ? [{
+        label: 'Customer section context',
+        summary: inputSummary,
+        sourceType: 'USER_CONTEXT',
+        refKey: 'section_input',
+      }] : [],
+    },
+    {
+      sourceClass: 'SCOPED_EVIDENCE_VIEW',
+      items: scopedEvidenceSummary ? [{
+        label: 'Section-scoped evidence view',
+        summary: scopedEvidenceSummary,
+        sourceType: 'DISCOVERY',
+        refKey: 'scoped_view',
+      }] : [],
+    },
+    {
+      sourceClass: 'COMPANY_NAME',
+      items: companyName ? [{
       label: 'Company context',
       summary: companyName,
       sourceType: 'DISCOVERY',
       refKey: 'input_companyName',
-    })
-  }
-  if (targetOffer) {
-    items.push({
+      }] : [],
+    },
+    {
+      sourceClass: 'TARGET_OFFER',
+      items: targetOffer ? [{
       label: 'Target offer',
       summary: targetOffer,
       sourceType: 'DISCOVERY',
       refKey: 'input_targetOffer',
-    })
-  }
-  if (marketRegion) {
-    items.push({
+      }] : [],
+    },
+    {
+      sourceClass: 'MARKET_REGION',
+      items: marketRegion ? [{
       label: 'Market / region',
       summary: marketRegion,
       sourceType: 'DISCOVERY',
       refKey: 'input_marketRegion',
-    })
-  }
-  if (notes) {
-    items.push({
+      }] : [],
+    },
+    {
+      sourceClass: 'INTELLIGENCE_NOTES',
+      items: notes ? [{
       label: 'Intelligence Hub notes',
       summary: notes,
       sourceType: 'DISCOVERY',
       refKey: 'input_notes',
-    })
-  }
-  if (inputSummary) {
-    items.push({
-      label: 'Customer section context',
-      summary: inputSummary,
-      sourceType: 'USER_CONTEXT',
-      refKey: 'section_input',
-    })
-  }
-  if (scopedEvidenceSummary) {
-    items.push({
-      label: 'Section-scoped evidence view',
-      summary: scopedEvidenceSummary,
-      sourceType: 'DISCOVERY',
-      refKey: 'scoped_view',
-    })
+      }] : [],
+    },
+  ]
+  const seen = new Set()
+  const selected = []
+  const addItem = (sourceClass, item) => {
+    const summary = normalizeEvidenceString(item?.summary)
+    const refKey = normalizeSectionText(item?.refKey)
+    if (!summary || !refKey || selected.length >= 10) return
+    const dedupeKey = [
+      sourceClass,
+      refKey.toLowerCase(),
+      normalizeSimilarityText(summary),
+    ].join('|')
+    if (seen.has(dedupeKey)) return
+    seen.add(dedupeKey)
+    selected.push({ ...item, summary, refKey })
   }
 
-  dependencyTruths.forEach((dependency) => {
-    items.push({
-      label: `Accepted truth: ${dependency.label}`,
-      summary: dependency.content,
-      sourceType: 'DEPENDENCY',
-      refKey: `accepted_${dependency.sectionKey}`,
-    })
+  sourceGroups.forEach(({ sourceClass, items }) => {
+    const first = items.find((item) =>
+      normalizeEvidenceString(item?.summary) && normalizeSectionText(item?.refKey))
+    if (first) addItem(sourceClass, first)
+  })
+  sourceGroups.forEach(({ sourceClass, items }) => {
+    items.slice(1).forEach((item) => addItem(sourceClass, item))
   })
 
-  return items.slice(0, 10)
+  return selected
 }
 
 const buildGenerationBoundaries = ({
@@ -852,71 +1064,398 @@ const buildGenerationBoundaries = ({
   return boundaries
 }
 
-const buildSourceRefs = ({ acceptedEvidenceObjects = [], acceptedSectionEvidenceObjects = [], scopedView, seedProfile }) => {
-  const refs = []
-  const addRef = ({ refKey, label, type, safeDisplay }) => {
-    if (!safeDisplay) return
-    if (refs.some((ref) => ref.refKey === refKey)) return
-    refs.push({ refKey, label, type, safeDisplay })
+const buildSourceRefs = ({ supportingEvidence = [] }) =>
+  supportingEvidence.map((item) => ({
+    refKey: item.refKey,
+    label: item.label,
+    type: item.sourceType === 'DISCOVERY'
+      ? 'DISCOVERY_FIELD'
+      : item.sourceType,
+    safeDisplay: item.summary,
+  }))
+
+const PROFILE_EVIDENCE_SOURCE_LIMITS = Object.freeze({
+  ACCEPTED_SECTION_EVIDENCE: 8,
+  ACCEPTED_DISCOVERY_EVIDENCE: 10,
+  ACCEPTED_DEPENDENCY_TRUTH: 8,
+  EXPLICIT_SECTION_INPUT: 6,
+  SCOPED_EVIDENCE_VIEW: 4,
+  COMPANY_NAME: 1,
+  TARGET_OFFER: 1,
+  MARKET_REGION: 1,
+  INTELLIGENCE_NOTES: 1,
+})
+
+const PROFILE_FACT_CATEGORY_ORDER = Object.freeze([
+  'CUSTOMER_CONTEXT',
+  'OBJECTIVE_OWNER',
+  'OBJECTIVE_OUTCOME',
+  'OBJECTIVE_HORIZON',
+  'CURRENT_BASELINE',
+  'CURRENT_FRICTION',
+  'STAKEHOLDER_ROLE',
+  'OUTPUT_AUDIENCE',
+  'OUTPUT_FORMAT',
+  'OUTPUT_CHANNEL',
+  'OUTPUT_TIMING_APPROVAL',
+])
+
+const getProfileEvidenceSignals = (text = '') => {
+  const hasCustomerContext =
+    /\b(customer|company|account|business model|operating context|offer|product|market|region|segment|industry)\b/i.test(text)
+  const hasObjectiveOwner = /\b(owner|owns|sponsor|accountable|responsible)\b/i.test(text)
+  const hasObjectiveOutcome =
+    /\b(success|outcome|goal|objective|priority|metric|percent|reduction|increase)\b|%/i.test(text)
+    || (/\btarget\b/i.test(text) && !/\btarget offer\b/i.test(text))
+  const hasObjectiveHorizon =
+    /\b(q[1-4]|quarter|deadline|horizon|within\s+\d+|by\s+(?:\d{4}|[a-z]+\s+\d{1,2}))\b/i.test(text)
+  const hasCurrentBaseline =
+    /\b(current|currently|today|existing|baseline|capability|maturity|status quo)\b/i.test(text)
+  const hasCurrentFriction =
+    /\b(manual|rework|slow|friction|delay|bottleneck|constraint|risk|weakness|limitation|cost|effort)\b/i.test(text)
+  const hasExecutiveRole = /\b(cfo|ceo|coo|cto|cio)\b/i.test(text)
+  const hasNamedPerson =
+    /\b[A-Z][a-z]+(?:[-'][A-Z]?[a-z]+)?\s+[A-Z][a-z]+(?:[-'][A-Z]?[a-z]+)?\b/.test(text)
+  const hasStakeholderRole =
+    /\b(owner|owns|sponsor|stakeholder|buyer|approver|decision maker|user)\b/i.test(text)
+    || (hasExecutiveRole && /\b(audience|recipient|reader|decision|approve|buyer)\b/i.test(text))
+  const hasExplicitOutputContext =
+    /\b(output|deliverable|delivery|brief|presentation|format|audience|recipient|reader)\b/i.test(text)
+  const hasOutputAudience =
+    /\b(audience|reader|recipient)\b/i.test(text)
+    || (hasExecutiveRole && /\b(output|deliverable|delivery|brief|report|presentation)\b/i.test(text))
+  const hasOutputFormat =
+    /\b(pdf|docx|ppt|presentation|brief|page|two-page|format|length)\b/i.test(text)
+    || (/\breport\b/i.test(text) && hasExplicitOutputContext)
+  const hasOutputChannel = /\b(email|portal|download|channel|send|sent|deliver|delivery)\b/i.test(text)
+  const hasOutputTimingApproval = /\b(tone|deadline|due|approval|approved|sign-off)\b/i.test(text)
+
+  return {
+    hasCustomerContext,
+    hasExecutiveRole,
+    hasExplicitOutputContext,
+    hasNamedPerson,
+    hasObjectiveHorizon,
+    hasObjectiveOutcome,
+    hasObjectiveOwner,
+    hasCurrentBaseline,
+    hasCurrentFriction,
+    hasOutputAudience,
+    hasOutputChannel,
+    hasOutputFormat,
+    hasOutputTimingApproval,
+    hasStakeholderRole,
   }
+}
 
-  acceptedEvidenceObjects.forEach((evidenceObject) => {
-    addRef({
-      refKey: evidenceObject.evidenceObjectId || evidenceObject.lineageRef || evidenceObject.sourceId,
-      label: evidenceObject.category || 'Accepted evidence',
-      type: 'DISCOVERY_EVIDENCE_OBJECT',
-      safeDisplay: normalizeEvidenceString(evidenceObject.extractedFact),
-    })
-  })
+const getProfileEvidenceSemanticFamilies = (text = '') => {
+  const signals = getProfileEvidenceSignals(text)
+  return new Set([
+    signals.hasCustomerContext ? 'CUSTOMER' : '',
+    signals.hasObjectiveOwner || signals.hasObjectiveOutcome ? 'OBJECTIVE' : '',
+    signals.hasCurrentBaseline || signals.hasCurrentFriction ? 'CURRENT_STATE' : '',
+    signals.hasStakeholderRole
+      && (signals.hasNamedPerson || signals.hasExecutiveRole)
+      ? 'STAKEHOLDER'
+      : '',
+    signals.hasOutputAudience
+      || signals.hasOutputFormat
+      || (signals.hasOutputChannel && signals.hasExplicitOutputContext)
+      || (signals.hasOutputTimingApproval && signals.hasExplicitOutputContext)
+      ? 'OUTPUT'
+      : '',
+  ].filter(Boolean))
+}
 
-  acceptedSectionEvidenceObjects.forEach((evidenceObject) => {
-    addRef({
-      refKey: evidenceObject.evidenceObjectId || evidenceObject.lineageRef || evidenceObject.sourceId,
-      label: evidenceObject.category || 'Accepted section evidence',
-      type: 'SECTION_EVIDENCE_OBJECT',
-      safeDisplay: normalizeEvidenceString(evidenceObject.extractedFact),
-    })
-  })
+const splitIndependentProfileClauses = (candidate = '') => {
+  const clauses = candidate
+    .split(/\s*(?:,|\band\b|\bbut\b|\bwhile\b|\bwhereas\b)\s*/i)
+    .map((clause) => clause.trim())
+    .filter(Boolean)
+  if (clauses.length < 2) return [candidate]
 
-  addRef({
-    refKey: 'input_companyName',
-    label: 'Company context',
-    type: 'DISCOVERY_FIELD',
-    safeDisplay: normalizeEvidenceString(seedProfile.companyName),
-  })
-  addRef({
-    refKey: 'input_marketRegion',
-    label: 'Market / region',
-    type: 'DISCOVERY_FIELD',
-    safeDisplay: normalizeEvidenceString(seedProfile.marketRegion),
-  })
-  addRef({
-    refKey: 'input_targetOffer',
-    label: 'Target offer',
-    type: 'DISCOVERY_FIELD',
-    safeDisplay: normalizeEvidenceString(seedProfile.targetOffer),
-  })
-  addRef({
-    refKey: 'input_notes',
-    label: 'Intelligence Hub notes',
-    type: 'DISCOVERY_FIELD',
-    safeDisplay: normalizeEvidenceString(seedProfile.notes),
-  })
+  const familySets = clauses.map(getProfileEvidenceSemanticFamilies)
+  const signalledClauseCount = familySets.filter((families) => families.size > 0).length
 
-  if (Array.isArray(scopedView?.sourceRefs)) {
-    scopedView.sourceRefs.forEach((refKey) => {
-      if (!refs.some((ref) => ref.refKey === refKey)) {
-        refs.push({
-          refKey,
-          label: 'Scoped Intelligence Hub source',
-          type: 'DISCOVERY_FIELD',
-          safeDisplay: 'Accepted Intelligence Hub evidence',
+  return signalledClauseCount >= 2 ? clauses : [candidate]
+}
+
+const splitProfileEvidenceSentences = (value) => {
+  const normalized = normalizeEvidenceString(value)
+    .normalize('NFKC')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!normalized) return []
+  return normalized
+    .split(/(?:\r?\n|[.?!;])+/)
+    .map((candidate) => candidate.trim())
+    .filter(Boolean)
+}
+
+const buildProfileEvidenceCandidates = ({
+  acceptedEvidenceObjects = [],
+  acceptedSectionEvidenceObjects = [],
+  dependencyTruths = [],
+  inputSummary,
+  scopedEvidenceSummary,
+  seedProfile = {},
+}) => {
+  const groups = [
+    {
+      sourceClass: 'ACCEPTED_SECTION_EVIDENCE',
+      values: acceptedSectionEvidenceObjects.flatMap((evidenceObject) =>
+        splitProfileEvidenceSentences(evidenceObject?.extractedFact)),
+      fragment: true,
+    },
+    {
+      sourceClass: 'ACCEPTED_DISCOVERY_EVIDENCE',
+      values: acceptedEvidenceObjects.flatMap((evidenceObject) =>
+        splitProfileEvidenceSentences(evidenceObject?.extractedFact)),
+      fragment: true,
+    },
+    {
+      sourceClass: 'ACCEPTED_DEPENDENCY_TRUTH',
+      values: dependencyTruths.flatMap((dependency) =>
+        splitProfileEvidenceSentences(dependency?.content)),
+      fragment: true,
+    },
+    {
+      sourceClass: 'EXPLICIT_SECTION_INPUT',
+      values: splitProfileEvidenceSentences(inputSummary),
+      fragment: true,
+    },
+    {
+      sourceClass: 'SCOPED_EVIDENCE_VIEW',
+      values: splitProfileEvidenceSentences(scopedEvidenceSummary),
+      fragment: true,
+    },
+    {
+      sourceClass: 'COMPANY_NAME',
+      values: [normalizeEvidenceString(seedProfile.companyName)].filter(Boolean),
+      fragment: false,
+    },
+    {
+      sourceClass: 'TARGET_OFFER',
+      values: [normalizeEvidenceString(seedProfile.targetOffer)].filter(Boolean),
+      fragment: false,
+    },
+    {
+      sourceClass: 'MARKET_REGION',
+      values: [normalizeEvidenceString(seedProfile.marketRegion)].filter(Boolean),
+      fragment: false,
+    },
+    {
+      sourceClass: 'INTELLIGENCE_NOTES',
+      values: splitProfileEvidenceSentences(seedProfile.notes),
+      fragment: true,
+    },
+  ]
+  const seen = new Set()
+  const candidates = []
+
+  groups.forEach(({ fragment, sourceClass, values }) => {
+    const limit = PROFILE_EVIDENCE_SOURCE_LIMITS[sourceClass] || 0
+    values.slice(0, limit).forEach((value, sourceIndex) => {
+      const fragments = fragment ? splitIndependentProfileClauses(value) : [value]
+      fragments.forEach((text) => {
+        const boundedText = text.slice(0, 400)
+        const normalizedText = normalizeSimilarityText(boundedText)
+        if (!normalizedText || seen.has(normalizedText) || candidates.length >= 40) return
+        seen.add(normalizedText)
+        candidates.push({
+          sourceClass,
+          sourceIndex,
+          text: boundedText,
         })
-      }
+      })
     })
+  })
+
+  return candidates
+}
+
+const isNegatedOrUnconfirmedProfileFact = (text) =>
+  /\b(no|not|without|never|unknown|unconfirmed|pending|tbc)\b|not yet/i.test(text)
+
+const PROFILE_PRIMARY_SEMANTIC_FAMILIES = Object.freeze([
+  'OBJECTIVE',
+  'CURRENT_STATE',
+  'OUTPUT',
+])
+
+const profileFamiliesAreAllowed = (families, allowedFamilies = []) =>
+  [...families].every((family) => allowedFamilies.includes(family))
+
+const hasAmbiguousPrimaryProfileFamilies = (families) =>
+  PROFILE_PRIMARY_SEMANTIC_FAMILIES
+    .filter((family) => families.has(family))
+    .length >= 2
+
+const buildProfileIdentityRoleProjection = (candidate) => {
+  const text = candidate?.text || ''
+  const collectMatches = (pattern, normalize = (value) => value) =>
+    [...text.matchAll(pattern)].map((match) => ({
+      index: match.index || 0,
+      value: normalize(match[0]),
+    }))
+  const dedupeInSourceOrder = (values = [], limit = 3) => {
+    const seen = new Set()
+    return values
+      .sort((left, right) => left.index - right.index)
+      .filter(({ value }) => {
+        const normalized = normalizeSimilarityText(value)
+        if (!normalized || seen.has(normalized)) return false
+        seen.add(normalized)
+        return true
+      })
+      .slice(0, limit)
+  }
+  const identities = dedupeInSourceOrder([
+    ...collectMatches(
+      /\b[A-Z][a-z]+(?:[-'][A-Z]?[a-z]+)?\s+[A-Z][a-z]+(?:[-'][A-Z]?[a-z]+)?\b/g,
+    ),
+    ...collectMatches(/\b(?:CFO|CEO|COO|CTO|CIO)\b/g),
+  ])
+  const roles = dedupeInSourceOrder(
+    collectMatches(
+      /\b(?:decision maker|owner|owns|sponsor|stakeholder|buyer|approver|user|audience|reader|recipient)\b/gi,
+      (value) => value.toLowerCase() === 'owns' ? 'owner' : value.toLowerCase(),
+    ),
+  )
+  if (identities.length === 0 || roles.length === 0) return null
+
+  const seenAssociations = new Set()
+  const associations = identities.flatMap((identity) => {
+    const nearestRole = roles
+      .map((role) => ({
+        ...role,
+        distance: Math.abs(identity.index - role.index),
+      }))
+      .sort((left, right) =>
+        left.distance - right.distance || left.index - right.index)[0]
+    if (!nearestRole) return []
+    const textProjection = `${identity.value} \u2014 ${nearestRole.value}`
+    const normalizedProjection = normalizeSimilarityText(textProjection)
+    if (!normalizedProjection || seenAssociations.has(normalizedProjection)) return []
+    seenAssociations.add(normalizedProjection)
+    return [{
+      ...candidate,
+      text: textProjection,
+    }]
+  })
+
+  return associations.length > 0 ? associations : null
+}
+
+const classifyProfileEvidenceCandidates = (candidates = []) => {
+  const categories = Object.fromEntries(
+    PROFILE_FACT_CATEGORY_ORDER.map((category) => [category, []]),
+  )
+  const add = (category, candidate) => {
+    if (!categories[category] || categories[category].length >= 3) return
+    const normalizedText = normalizeSimilarityText(candidate.text)
+    if (categories[category].some((row) =>
+      normalizeSimilarityText(row.text) === normalizedText)) return
+    categories[category].push(candidate)
   }
 
-  return refs.slice(0, 10)
+  candidates.forEach((candidate) => {
+    const text = candidate.text
+    if (isNegatedOrUnconfirmedProfileFact(text)) return
+    const sourceClass = candidate.sourceClass
+    const signals = getProfileEvidenceSignals(text)
+    const families = getProfileEvidenceSemanticFamilies(text)
+    if (['COMPANY_NAME', 'TARGET_OFFER', 'MARKET_REGION'].includes(sourceClass)) {
+      families.add('CUSTOMER')
+    }
+    const ambiguousPrimaryFamilies = hasAmbiguousPrimaryProfileFamilies(families)
+    const objectiveEligible =
+      !ambiguousPrimaryFamilies
+      && profileFamiliesAreAllowed(
+        families,
+        ['CUSTOMER', 'OBJECTIVE', 'STAKEHOLDER'],
+      )
+    const currentStateEligible =
+      !ambiguousPrimaryFamilies
+      && profileFamiliesAreAllowed(families, ['CUSTOMER', 'CURRENT_STATE'])
+    const stakeholderEligible =
+      profileFamiliesAreAllowed(
+        families,
+        ['CUSTOMER', 'OBJECTIVE', 'STAKEHOLDER', 'OUTPUT'],
+      )
+    const outputEligible =
+      !ambiguousPrimaryFamilies
+      && profileFamiliesAreAllowed(families, ['CUSTOMER', 'STAKEHOLDER', 'OUTPUT'])
+    const hasCustomerContext =
+      ['COMPANY_NAME', 'TARGET_OFFER', 'MARKET_REGION'].includes(sourceClass)
+      || signals.hasCustomerContext
+    const identityRoleProjection =
+      signals.hasStakeholderRole || signals.hasOutputAudience
+        ? buildProfileIdentityRoleProjection(candidate)
+        : null
+
+    if (
+      hasCustomerContext
+      && families.size === 1
+      && families.has('CUSTOMER')
+    ) {
+      add('CUSTOMER_CONTEXT', candidate)
+    }
+    if (signals.hasObjectiveOwner && objectiveEligible) {
+      add('OBJECTIVE_OWNER', candidate)
+    }
+    if (signals.hasObjectiveOutcome && objectiveEligible) {
+      add('OBJECTIVE_OUTCOME', candidate)
+    }
+    if (
+      signals.hasObjectiveHorizon
+      && signals.hasObjectiveOutcome
+      && objectiveEligible
+    ) {
+      add('OBJECTIVE_HORIZON', candidate)
+    }
+    if (signals.hasCurrentBaseline && currentStateEligible) {
+      add('CURRENT_BASELINE', candidate)
+    }
+    if (signals.hasCurrentFriction && currentStateEligible) {
+      add('CURRENT_FRICTION', candidate)
+    }
+    if (
+      signals.hasStakeholderRole
+      && stakeholderEligible
+      && identityRoleProjection
+    ) {
+      identityRoleProjection.forEach((projection) =>
+        add('STAKEHOLDER_ROLE', projection))
+    }
+    if (
+      signals.hasOutputAudience
+      && outputEligible
+      && identityRoleProjection
+    ) {
+      identityRoleProjection.forEach((projection) =>
+        add('OUTPUT_AUDIENCE', projection))
+    }
+    if (signals.hasOutputFormat && outputEligible) {
+      add('OUTPUT_FORMAT', candidate)
+    }
+    if (
+      signals.hasOutputChannel
+      && signals.hasExplicitOutputContext
+      && outputEligible
+    ) {
+      add('OUTPUT_CHANNEL', candidate)
+    }
+    if (
+      signals.hasOutputTimingApproval
+      && signals.hasExplicitOutputContext
+      && outputEligible
+    ) {
+      add('OUTPUT_TIMING_APPROVAL', candidate)
+    }
+  })
+
+  return categories
 }
 
 const SECTION_PROFILE_THEME_SUBJECTS = Object.freeze({
@@ -940,70 +1479,83 @@ const getProfileThemeSubject = (theme = {}) => {
     : 'the available business context'
 }
 
-const buildProfileSupplementalSections = ({
-  acceptedSectionEvidenceObjects = [],
-  boundaries = [],
-  inputSummary,
-}) => {
-  const sectionEvidenceBullets = acceptedSectionEvidenceObjects
-    .map((evidenceObject) => normalizeEvidenceString(evidenceObject?.extractedFact))
-    .filter(Boolean)
-    .slice(0, 6)
-
-  return {
-    customerContextSection: inputSummary
-      ? {
-          heading: 'Customer-Provided Section Context',
-          body: 'The customer-added context below informed this interpretation but is not treated as independent proof.',
-          bullets: [inputSummary],
-        }
-      : null,
-    customerSectionEvidenceSection: sectionEvidenceBullets.length > 0
-      ? {
-          heading: 'Customer-Provided Section Evidence',
-          body: 'The reviewed supporting-file evidence below informed this interpretation.',
-          bullets: sectionEvidenceBullets,
-        }
-      : null,
-    evidenceBoundariesSection: {
-      heading: 'Evidence Boundaries',
-      body: 'The interpretation does not claim facts that are absent from the reviewed material.',
-      bullets: boundaries.slice(0, 5).map((boundary) => boundary.message),
-    },
-  }
+const buildProfileFactBullets = (groups = []) => {
+  const seen = new Set()
+  return groups.flatMap(({ category, prefix }) =>
+    (category || []).flatMap((candidate) => {
+      const normalizedText = normalizeSimilarityText(candidate.text)
+      if (!normalizedText || seen.has(normalizedText)) return []
+      seen.add(normalizedText)
+      return [`${prefix}: ${candidate.text}.`]
+    }))
 }
 
 const buildProfileGeneratedSections = ({
+  acceptedEvidenceObjects = [],
   acceptedSectionEvidenceObjects = [],
   boundaries = [],
-  inputSummary,
+  dependencyTruths = [],
+  facts = {},
   profile,
+  purpose,
+  supportingEvidence = [],
   themes = [],
 }) => {
   const themeSubjects = themes.slice(0, 5).map(getProfileThemeSubject)
-  const {
-    customerContextSection,
-    customerSectionEvidenceSection,
-    evidenceBoundariesSection,
-  } = buildProfileSupplementalSections({
-    acceptedSectionEvidenceObjects,
-    boundaries,
-    inputSummary,
-  })
-  const supplementalSections = [
-    customerContextSection,
-    customerSectionEvidenceSection,
+  const purposeText = normalizeEvidenceString(purpose)
+  const purposeLead = purposeText ? `${purposeText} ` : ''
+  const evidenceBoundariesSection = {
+    heading: 'Evidence Boundaries',
+    body: 'The interpretation does not promote unsupported or unconfirmed details as facts.',
+    bullets: boundaries.slice(0, 5).map((boundary) => boundary.message),
+  }
+  const customerBullets = buildProfileFactBullets([
+    { category: facts.CUSTOMER_CONTEXT, prefix: 'Business context' },
+  ])
+  const strategicBullets = buildProfileFactBullets([
+    { category: facts.OBJECTIVE_OWNER, prefix: 'Objective ownership' },
+    { category: facts.OBJECTIVE_OUTCOME, prefix: 'Desired outcome or measure' },
+    { category: facts.OBJECTIVE_HORIZON, prefix: 'Delivery horizon' },
+  ])
+  const currentStateBullets = buildProfileFactBullets([
+    { category: facts.CURRENT_BASELINE, prefix: 'Current baseline or capability' },
+    { category: facts.CURRENT_FRICTION, prefix: 'Observed friction, constraint, or risk' },
+  ])
+  const stakeholderBullets = buildProfileFactBullets([
+    { category: facts.STAKEHOLDER_ROLE, prefix: 'Named participant and role' },
+  ])
+  const outputBullets = buildProfileFactBullets([
+    { category: facts.OUTPUT_AUDIENCE, prefix: 'Audience' },
+    { category: facts.OUTPUT_FORMAT, prefix: 'Format or length' },
+    { category: facts.OUTPUT_CHANNEL, prefix: 'Delivery channel' },
+    { category: facts.OUTPUT_TIMING_APPROVAL, prefix: 'Timing or approval' },
+  ])
+  const sourceClassCount = new Set(
+    supportingEvidence.map((item) => item.sourceType).filter(Boolean),
+  ).size
+  const evidenceCoverageBullets = [
+    acceptedSectionEvidenceObjects.length > 0
+      ? `Accepted section evidence coverage: ${acceptedSectionEvidenceObjects.length} reviewed item(s).`
+      : '',
+    acceptedEvidenceObjects.length > 0
+      ? `Accepted discovery evidence coverage: ${acceptedEvidenceObjects.length} reviewed item(s).`
+      : '',
+    dependencyTruths.length > 0
+      ? `Accepted dependency truth coverage: ${dependencyTruths.length} upstream section(s).`
+      : '',
+    `Supporting source coverage: ${supportingEvidence.length} item(s) across ${sourceClassCount} source type(s).`,
   ].filter(Boolean)
 
   const sectionsBySemanticType = {
     CUSTOMER_CONTEXT: [
       {
         heading: 'Customer and Offer Context',
-        body: 'The reviewed material establishes the business setting that frames this value narrative.',
-        bullets: themeSubjects.map((subject) =>
-          `Context signal: ${subject} helps describe the customer situation and offer setting.`),
+        body: `${purposeLead}The reviewed material is interpreted only for the customer, offer, market, and operating setting.`,
+        bullets: customerBullets.length > 0
+          ? customerBullets
+          : themeSubjects.map((subject) =>
+            `Context direction: confirm how ${subject} describes the customer situation or offer setting.`),
       },
-      ...supplementalSections,
       {
         heading: 'Operating Context Checks',
         body: 'Use these questions to confirm the conditions that should be explicit before tailoring the narrative.',
@@ -1018,11 +1570,12 @@ const buildProfileGeneratedSections = ({
     STRATEGIC_OBJECTIVES: [
       {
         heading: 'Strategic Priorities',
-        body: 'The reviewed material identifies priority directions for the value narrative; commitment status should be taken only from explicit evidence.',
-        bullets: themeSubjects.map((subject) =>
-          `Priority direction: assess how ${subject} could advance the desired business outcome.`),
+        body: `${purposeLead}Only evidenced priorities, desired outcomes, ownership, measures, and horizons are promoted into this section.`,
+        bullets: strategicBullets.length > 0
+          ? strategicBullets
+          : themeSubjects.map((subject) =>
+            `Priority direction: assess how ${subject} could advance the desired business outcome.`),
       },
-      ...supplementalSections,
       {
         heading: 'Objective Definition Checks',
         body: 'Use these questions to make each candidate priority decision-ready without contradicting details already present in the evidence.',
@@ -1037,11 +1590,12 @@ const buildProfileGeneratedSections = ({
     CURRENT_STATE_ASSESSMENT: [
       {
         heading: 'Observed Current State',
-        body: 'The reviewed material describes present operating conditions without assigning an unsupported maturity rating.',
-        bullets: themeSubjects.map((subject) =>
-          `Present-state observation: the evidence references ${subject}; confirm its scale and performance impact against the available baseline.`),
+        body: `${purposeLead}Only evidenced present capability, baselines, friction, constraints, risks, and observations are promoted into this section.`,
+        bullets: currentStateBullets.length > 0
+          ? currentStateBullets
+          : themeSubjects.map((subject) =>
+            `Present-state direction: verify the current scale and impact of ${subject}.`),
       },
-      ...supplementalSections,
       {
         heading: 'Assessment Checks',
         body: 'Use these questions to test whether the available description is sufficient for a defensible current-state diagnosis.',
@@ -1056,11 +1610,12 @@ const buildProfileGeneratedSections = ({
     STAKEHOLDER_REGISTER: [
       {
         heading: 'Known Stakeholder Groups',
-        body: 'The reviewed material identifies business topics that require named participants and clear decision ownership.',
-        bullets: themeSubjects.map((subject) =>
-          `Participation question: identify who sponsors, decides on or operates work connected with ${subject}.`),
+        body: `${purposeLead}Only evidenced people, roles, decision rights, influence, and ownership are promoted into this section.`,
+        bullets: stakeholderBullets.length > 0
+          ? stakeholderBullets
+          : themeSubjects.map((subject) =>
+            `Participation question: identify who sponsors, decides on, or operates work connected with ${subject}.`),
       },
-      ...supplementalSections,
       {
         heading: 'Roles to Confirm',
         body: 'Use these questions to turn topic-level participation cues into explicit decision ownership.',
@@ -1075,11 +1630,9 @@ const buildProfileGeneratedSections = ({
     EVIDENCE_REGISTER: [
       {
         heading: 'Accepted Evidence Record',
-        body: 'The reviewed material is organised by the business topics it can support, while direct facts remain distinct from inferred implications.',
-        bullets: themes.slice(0, 5).map((theme) =>
-          `Coverage item: ${getProfileThemeSubject(theme)} is ${theme.supportLevel === 'DIRECT' ? 'directly supported' : 'derived from supported context'}.`),
+        body: `${purposeLead}This section records support coverage and proof gaps without copying the evidence corpus into accepted truth.`,
+        bullets: evidenceCoverageBullets,
       },
-      ...supplementalSections,
       {
         heading: 'Proof Checks',
         body: 'Use these checks before treating topical coverage as proof of an outcome, comparison or quantified commercial result.',
@@ -1094,11 +1647,12 @@ const buildProfileGeneratedSections = ({
     OUTPUT_REQUIREMENTS: [
       {
         heading: 'Known Output Requirements',
-        body: 'The reviewed material provides subject matter and any explicit delivery constraints carried in the evidence.',
-        bullets: themeSubjects.map((subject) =>
-          `Available subject matter: ${subject}; confirm how it applies to the intended audience, format and channel.`),
+        body: `${purposeLead}Only evidenced audience, format, length, channel, tone, deadline, and approval requirements are promoted into this section.`,
+        bullets: outputBullets.length > 0
+          ? outputBullets
+          : themeSubjects.map((subject) =>
+            `Delivery question: confirm how ${subject} applies to the intended audience, format, and channel.`),
       },
-      ...supplementalSections,
       {
         heading: 'Delivery Brief Checks',
         body: 'Use these questions to confirm that the delivery brief is complete without assuming what the evidence already specifies.',
@@ -1472,6 +2026,19 @@ const buildSectionIntelligenceParts = ({
     scopedEvidenceSummary,
     seedProfile,
   })
+  const profileEvidenceCandidates = interpretationProfile
+    ? buildProfileEvidenceCandidates({
+        acceptedEvidenceObjects,
+        acceptedSectionEvidenceObjects,
+        dependencyTruths,
+        inputSummary,
+        scopedEvidenceSummary,
+        seedProfile,
+      })
+    : []
+  const profileFacts = interpretationProfile
+    ? classifyProfileEvidenceCandidates(profileEvidenceCandidates)
+    : {}
   const generationBoundaries = buildGenerationBoundaries({
     category,
     dependencySectionKeys,
@@ -1481,7 +2048,7 @@ const buildSectionIntelligenceParts = ({
     truthEligible: truthEligibility.eligible,
   })
   const inputHash = hashSectionInput(input)
-  const sourceRefs = buildSourceRefs({ acceptedEvidenceObjects, acceptedSectionEvidenceObjects, scopedView, seedProfile })
+  const sourceRefs = buildSourceRefs({ supportingEvidence })
   const sectionEvidenceHash = hashSectionInput({
     acceptedSectionEvidenceObjectIds: acceptedSectionEvidenceObjects.map((evidenceObject) => evidenceObject.evidenceObjectId),
     acceptedSectionEvidenceSummaries: acceptedSectionEvidenceObjects.map((evidenceObject) => normalizeEvidenceString(evidenceObject.extractedFact)),
@@ -1531,6 +2098,8 @@ const buildSectionIntelligenceParts = ({
     inputHash,
     inputSummary,
     label,
+    profileEvidenceCandidates,
+    profileFacts,
     runtimePath,
     scopedEvidenceSummary,
     scopedView,
@@ -1688,7 +2257,7 @@ export const buildEnrichedGeneratedSection = ({
   generatedAt = new Date().toISOString(),
 } = {}) => {
   const interpretationProfile =
-    resolveSectionInterpretationProfile(sectionExecutionContract)
+    resolveSectionInterpretationProfile(sectionExecutionContract, section)
   const enrichmentVersion = interpretationProfile
     ? GSIL_PROFILE_ENRICHMENT_VERSION
     : GSIL_ENRICHMENT_VERSION
@@ -1707,10 +2276,14 @@ export const buildEnrichedGeneratedSection = ({
   const sections = parts.truthEligibility.eligible
     ? interpretationProfile
       ? buildProfileGeneratedSections({
+          acceptedEvidenceObjects: parts.acceptedEvidenceObjects,
           acceptedSectionEvidenceObjects: parts.acceptedSectionEvidenceObjects,
           boundaries: parts.generationBoundaries,
-          inputSummary: parts.inputSummary,
+          dependencyTruths: parts.dependencyTruths,
+          facts: parts.profileFacts,
           profile: interpretationProfile,
+          purpose: parts.sectionExecutionContract?.sectionIdentity?.purpose,
+          supportingEvidence: parts.supportingEvidence,
           themes: parts.themes,
         })
       : buildGeneratedSections({

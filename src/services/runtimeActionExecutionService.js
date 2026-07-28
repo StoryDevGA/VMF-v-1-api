@@ -42,6 +42,7 @@ import {
   normalizeRuntimeSectionObject,
 } from './runtimeSectionModelService.js'
 import { resolveSectionExecutionContract } from './sectionExecutionContractService.js'
+import { executeSectionValidationRules } from './sectionValidationExecutorService.js'
 import {
   acceptPendingDiscoveryEvidenceObjects,
   buildAcceptedDiscoveryScopedViews,
@@ -741,6 +742,14 @@ const applyRuntimeSectionGeneration = async ({
     sectionExecutionContract,
     generatedAt: actionedAt,
   })
+  const validationResults = executeSectionValidationRules({
+    candidate: generated,
+    checkedAt: actionedAt,
+    sectionExecutionContract,
+  })
+  if (validationResults.length > 0) {
+    generated.validationResults = validationResults
+  }
   const similarityResult = evaluateSectionInterpretationSimilarity({
     candidate: generated,
     frameworkPackage,
@@ -839,6 +848,13 @@ const applyRuntimeSectionGeneration = async ({
       evidenceHash: generated.evidenceHash,
       dependencyHash: generated.dependencyHash,
       boundedContextHash: generated.boundedContextHash,
+      ...(validationResults.length > 0 ? {
+        validationResultKeys: validationResults.map((result) =>
+          `${result.key}@${result.componentVersion}`),
+        validationResultHashes: validationResults.map((result) =>
+          result.resultHash),
+        validationCheckedAt: validationResults[0].checkedAt,
+      } : {}),
     },
     dependencies: {
       ...(sectionObject.dependencies || {}),
@@ -1137,6 +1153,18 @@ const buildActionAuditPayload = ({
         dependencyHash: generationResult.generated?.dependencyHash,
         boundedContextHash: generationResult.generated?.boundedContextHash,
         sectionContractHash: generationResult.generated?.generator?.sectionContractHash,
+        ...(Array.isArray(generationResult.generated?.validationResults)
+          && generationResult.generated.validationResults.length > 0
+          ? { validationResults: generationResult.generated.validationResults
+            .map((result) => ({
+              key: result.key,
+              componentVersion: result.componentVersion,
+              status: result.status,
+              is_valid: result.is_valid === true,
+              executorVersion: result.executorVersion,
+              resultHash: result.resultHash,
+            })) }
+          : {}),
         similarityResult: generationResult.generated?.similarityResult
           ? {
               version: generationResult.generated.similarityResult.version,
