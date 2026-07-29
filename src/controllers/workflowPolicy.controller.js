@@ -3,7 +3,6 @@ import { isDeepStrictEqual } from 'node:util'
 import mongoose from 'mongoose'
 import WorkflowPolicy, {
   WORKFLOW_POLICY_ACTOR_SCOPES,
-  WORKFLOW_POLICY_ALLOWED_STEPS_BY_FRAMEWORK,
   WORKFLOW_POLICY_CONDITION_OPERATORS,
   WORKFLOW_POLICY_DECISION_MODES,
   WORKFLOW_POLICY_DEFAULTS,
@@ -460,13 +459,6 @@ const getWorkflowStepValidationMessage = (frameworkKeys = [], orderedSteps = [])
   const positions = new Map(orderedSteps.map((step, index) => [step, index]))
 
   for (const frameworkKey of frameworkKeys) {
-    const allowedSteps = WORKFLOW_POLICY_ALLOWED_STEPS_BY_FRAMEWORK[frameworkKey] || []
-    for (const step of orderedSteps) {
-      if (!allowedSteps.includes(step)) {
-        return `Workflow step "${step}" is not valid for framework key "${frameworkKey}".`
-      }
-    }
-
     const orderConstraints = WORKFLOW_POLICY_STEP_ORDER_CONSTRAINTS_BY_FRAMEWORK[frameworkKey] || []
     for (const [beforeStep, afterStep] of orderConstraints) {
       if (!positions.has(beforeStep) || !positions.has(afterStep)) continue

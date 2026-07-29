@@ -22,6 +22,14 @@ const seedDir = path.resolve(workspaceRoot, 'docs/seed-data')
 const importScript = path.resolve(apiRoot, 'src/scripts/importFrameworkSeed.js')
 const r3SeedDir = path.resolve(seedDir, 'vmf-v3-1-1-rkm-r3-action-alignment')
 const executionStatusPathKey = 'framework_state.runtime.execution_status'
+const sectionSkillBindingMatrix = Object.freeze({
+  'framework_state.sections.customer_context': 'skill-customer-context-interpreter',
+  'framework_state.sections.strategic_objectives': 'skill-strategic-objective-modeller',
+  'framework_state.sections.current_state_assessment': 'skill-current-state-diagnoser',
+  'framework_state.sections.stakeholder_register': 'skill-stakeholder-register-builder',
+  'framework_state.sections.evidence_register': 'skill-evidence-register-curator',
+  'framework_state.sections.output_requirements': 'skill-output-requirements-capturer',
+})
 
 jest.setTimeout(30_000)
 
@@ -44,10 +52,11 @@ const validateR3CrossReferences = (mutate) => {
   const bundle = loadR3Bundle()
   const runtimePaths = findBundleRecords(bundle, 'runtime_path_registry.json')
   const workflowPolicies = findBundleRecords(bundle, 'workflow_policies.json')
-  mutate?.({ runtimePaths, workflowPolicies })
+  const frameworkPackages = findBundleRecords(bundle, 'framework_package.json')
+  mutate?.({ frameworkPackages, runtimePaths, workflowPolicies })
   const notes = []
   validateCrossReferences(bundle, notes)
-  return { bundle, notes, runtimePaths, workflowPolicies }
+  return { bundle, frameworkPackages, notes, runtimePaths, workflowPolicies }
 }
 
 describe('framework seed import guard', () => {
@@ -428,6 +437,149 @@ describe('framework seed import guard', () => {
       expect.objectContaining({
         policyKey: 'lock-record-policy',
         executionContext: 'ON_LOCK',
+      }),
+    ]))
+  })
+
+  test('staged v3.1.1 R3 binds every package section to one exact Runtime Skill', () => {
+    const bundle = loadR3Bundle()
+    const frameworkPackage = findBundleRecords(bundle, 'framework_package.json')[0]
+    const workflowPolicies = findBundleRecords(bundle, 'workflow_policies.json')
+    const runtimeSkills = findBundleRecords(bundle, 'runtime_skills.json')
+    const boundPolicyKeys = new Set(
+      frameworkPackage.workflowBindings.map((binding) => binding.policyKey),
+    )
+    const boundPolicies = workflowPolicies.filter((policy) =>
+      boundPolicyKeys.has(policy.key))
+    const generateSectionPolicy = boundPolicies.find((policy) =>
+      policy.key === 'generate-section-gate')
+
+    expect(generateSectionPolicy).toBeDefined()
+    expect(generateSectionPolicy.requiredSkillIds.sort()).toEqual(
+      Object.values(sectionSkillBindingMatrix).sort(),
+    )
+
+    for (const section of frameworkPackage.sections) {
+      const expectedSkillId = sectionSkillBindingMatrix[section.runtimePath]
+      const skillIds = [
+        ...new Set(boundPolicies
+          .flatMap((policy) => policy.steps || [])
+          .filter((step) =>
+            step.type === 'SKILL_EXECUTION'
+            && step.targetPath === section.runtimePath)
+          .map((step) => step.skillId)),
+      ]
+      const runtimeSkill = runtimeSkills.find((skill) =>
+        skill.stableId === expectedSkillId)
+
+      expect(expectedSkillId).toBeDefined()
+      expect(skillIds).toEqual([expectedSkillId])
+      expect(runtimeSkill).toEqual(expect.objectContaining({
+        status: 'ACTIVE',
+        versionStatus: 'ACTIVE',
+        supportedFrameworkKeys: expect.arrayContaining(['VMF']),
+        allowedWritePaths: expect.arrayContaining([section.runtimePath]),
+      }))
+    }
+  })
+
+  test('workflow step normalization does not promote generic writePaths to exact bindings', () => {
+    const bundle = loadR3Bundle()
+    const workflowPolicies = findBundleRecords(bundle, 'workflow_policies.json')
+    const runtimeSavePolicy = workflowPolicies.find((policy) =>
+      policy.key === 'runtime-instance-save-policy')
+    const genericWriteStep = runtimeSavePolicy.steps.find((step) =>
+      step.skillId === 'skill-evidence-register-curator')
+
+    expect(genericWriteStep.writePaths).toEqual([
+      'framework_state.sections.evidence_register',
+    ])
+    expect(genericWriteStep.targetPath).toBe('')
+  })
+
+  test('seed guard ignores exact-path steps on policies not bound to the package', () => {
+    const { notes } = validateR3CrossReferences(({ workflowPolicies }) => {
+      const template = workflowPolicies.find((policy) =>
+        policy.key === 'generate-section-gate')
+      workflowPolicies.push({
+        ...template,
+        key: 'qa-unbound-section-policy',
+        stableId: 'policy-qa-unbound-section-policy',
+        lineageId: 'policy-qa-unbound-section-policy',
+        steps: [{
+          stepKey: 'qa-unbound-output-requirements',
+          type: 'SKILL_EXECUTION',
+          order: 1,
+          targetPath: 'framework_state.sections.output_requirements',
+          skillId: 'skill-evidence-register-curator',
+          required: true,
+        }],
+      })
+    })
+
+    expect(notes.filter((note) =>
+      note.source.includes('output-requirements')
+      && note.message.includes('unique exact-path'),
+    )).toEqual([])
+  })
+
+  test('seed guard rejects a missing exact section skill binding', () => {
+    const { notes } = validateR3CrossReferences(({ workflowPolicies }) => {
+      const policy = workflowPolicies.find((row) =>
+        row.key === 'generate-section-gate')
+      policy.steps = policy.steps.filter((step) =>
+        step.targetPath !== 'framework_state.sections.output_requirements')
+    })
+
+    expect(notes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        level: 'error',
+        source: expect.stringContaining('output-requirements'),
+        message: expect.stringMatching(/requires one unique exact-path.*found 0/i),
+      }),
+    ]))
+  })
+
+  test('seed guard rejects multiple distinct exact section skill bindings', () => {
+    const { notes } = validateR3CrossReferences(({ workflowPolicies }) => {
+      const policy = workflowPolicies.find((row) =>
+        row.key === 'generate-section-gate')
+      policy.steps.push({
+        stepKey: 'qa-ambiguous-output-requirements',
+        type: 'SKILL_EXECUTION',
+        order: 70,
+        targetPath: 'framework_state.sections.output_requirements',
+        skillId: 'skill-evidence-register-curator',
+        required: true,
+      })
+    })
+
+    expect(notes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        level: 'error',
+        source: expect.stringContaining('output-requirements'),
+        message: expect.stringMatching(/requires one unique exact-path.*found 2/i),
+      }),
+    ]))
+  })
+
+  test('seed guard rejects a missing binding after replacement maps the package key', () => {
+    const { notes } = validateR3CrossReferences(({
+      frameworkPackages,
+      workflowPolicies,
+    }) => {
+      frameworkPackages[0].packageKey = 'standard-package-vmf-3-1-1-rkm'
+      const policy = workflowPolicies.find((row) =>
+        row.key === 'generate-section-gate')
+      policy.steps = policy.steps.filter((step) =>
+        step.targetPath !== 'framework_state.sections.output_requirements')
+    })
+
+    expect(notes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        level: 'error',
+        source: expect.stringContaining('output-requirements'),
+        message: expect.stringMatching(/requires one unique exact-path.*found 0/i),
       }),
     ]))
   })

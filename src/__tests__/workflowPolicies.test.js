@@ -667,6 +667,38 @@ describe('Workflow Policy Routes', () => {
     expect(res.body.error.details.orderedSteps).toContain('"publish"')
   })
 
+  test('POST /api/v1/super-admin/runtime-control/workflow-policies accepts governed operational step keys', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    mockFindOneSelect(null)
+    mockRegistryLookups({})
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/workflow-policies')
+      .set('Authorization', `Bearer ${token}`)
+      .send(buildPhaseOneWorkflowPolicyPayload({
+        key: 'vmf-operational-step',
+        name: 'VMF Operational Step Policy',
+        executionType: 'ORDERED_STEPS',
+        steps: [{
+          stepKey: 'pre-validation',
+          type: 'EVENT_EMIT',
+          order: 1,
+          eventKey: 'pre-validation',
+        }],
+      }))
+
+    expect(res.status).toBe(201)
+    expect(res.body.data.steps).toEqual([
+      expect.objectContaining({
+        stepKey: 'pre-validation',
+        type: 'EVENT_EMIT',
+        order: 1,
+        eventKey: 'pre-validation',
+      }),
+    ])
+    expect(res.body.data.orderedSteps).toEqual(['pre-validation'])
+  })
+
   test('POST /api/v1/super-admin/runtime-control/workflow-policies creates a workflow policy and writes an audit log', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     mockFindOneSelect(null)

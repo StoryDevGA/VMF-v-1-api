@@ -700,12 +700,7 @@ const normalizeWorkflowStepRows = (steps) => {
       if (!isPlainObject(step)) return null
       const order = Number(step.order)
       const stepType = normalizeEnumToken(step.type || step.stepType)
-      const targetPath = String(
-        step.targetPath
-        || (Array.isArray(step.targetPaths) ? step.targetPaths[0] : '')
-        || (Array.isArray(step.writePaths) ? step.writePaths[0] : '')
-        || '',
-      ).trim()
+      const targetPath = String(step.targetPath || '').trim()
       const bindingKeys = [
         ...normalizeList(step.bindingKeys),
         ...normalizeList(step.validationKeys),
@@ -1654,6 +1649,112 @@ const validateUiContracts = (records, indexes, notes) => {
   }
 }
 
+const validateFrameworkPackageSectionSkillBindings = ({
+  frameworkPackage,
+  indexes,
+  notes,
+}) => {
+  const workflowBindings = Array.isArray(frameworkPackage.workflowBindings)
+    ? frameworkPackage.workflowBindings
+    : []
+  const boundPolicies = workflowBindings
+    .map((binding) => indexes.policiesByKey.get(normalizeToken(binding?.policyKey)))
+    .filter(Boolean)
+  const supportsSectionGeneration = boundPolicies.some((policy) =>
+    normalizeToken(policy.key) === 'generate-section-gate'
+    && normalizeEnumToken(policy.governedAction) === 'GENERATE_SECTION')
+
+  const sectionTruthPackageKeys = [
+    'standard-package-vmf-3-1-1-rkm-canonical',
+    'standard-package-vmf-3-1-1-rkm',
+  ]
+  if (
+    !sectionTruthPackageKeys.includes(normalizeToken(frameworkPackage.packageKey))
+    || !supportsSectionGeneration
+  ) return
+
+  for (const section of frameworkPackage.sections || []) {
+    const runtimePath = String(section?.runtimePath || '').trim()
+    if (!runtimePath) continue
+
+    const skillIds = [
+      ...new Set(boundPolicies
+        .flatMap((policy) => Array.isArray(policy.steps) ? policy.steps : [])
+        .filter((step) =>
+          normalizeEnumToken(step?.type || step?.stepType)
+            === WORKFLOW_POLICY_STEP_TYPES.SKILL_EXECUTION
+          && String(step?.targetPath || '').trim() === runtimePath)
+        .map((step) => normalizeToken(step?.skillId))
+        .filter(Boolean)),
+    ]
+    const source =
+      `Framework Package ${frameworkPackage.packageKey} section `
+      + `"${section?.sectionKey || runtimePath}"`
+
+    if (skillIds.length !== 1) {
+      notes.push({
+        level: 'error',
+        source,
+        message:
+          `Section runtime path "${runtimePath}" requires one unique exact-path `
+          + `Workflow Policy skill binding; found ${skillIds.length}.`,
+      })
+      continue
+    }
+
+    const skillId = skillIds[0]
+    const skill = indexes.skills.get(skillId)
+    if (!skill) {
+      notes.push({
+        level: 'error',
+        source,
+        message: `Section binding references unknown Runtime Skill "${skillId}".`,
+      })
+      continue
+    }
+
+    if (
+      normalizeEnumToken(skill.status) !== 'ACTIVE'
+      || normalizeEnumToken(skill.versionStatus) !== 'ACTIVE'
+    ) {
+      notes.push({
+        level: 'error',
+        source,
+        message: `Section binding Runtime Skill "${skillId}" must be ACTIVE.`,
+      })
+    }
+
+    if (
+      !Array.isArray(skill.supportedFrameworkKeys)
+      || !skill.supportedFrameworkKeys.includes(
+        normalizeEnumToken(frameworkPackage.frameworkKey),
+      )
+    ) {
+      notes.push({
+        level: 'error',
+        source,
+        message:
+          `Section binding Runtime Skill "${skillId}" is not compatible with `
+          + `framework "${frameworkPackage.frameworkKey}".`,
+      })
+    }
+
+    if (
+      !Array.isArray(skill.allowedWritePaths)
+      || !skill.allowedWritePaths.some((pathKey) =>
+        String(pathKey || '').trim() === runtimePath)
+    ) {
+      notes.push({
+        level: 'error',
+        source,
+        message:
+          `Section binding Runtime Skill "${skillId}" cannot write `
+          + `"${runtimePath}".`,
+      })
+    }
+  }
+}
+
 const validateFrameworkPackages = (records, indexes, notes) => {
   for (const frameworkPackage of records) {
     const source = `Framework Package ${frameworkPackage.packageKey}`
@@ -1690,6 +1791,11 @@ const validateFrameworkPackages = (records, indexes, notes) => {
         })
       }
     }
+    validateFrameworkPackageSectionSkillBindings({
+      frameworkPackage,
+      indexes,
+      notes,
+    })
   }
 }
 
