@@ -8,6 +8,8 @@ import WorkflowPolicy, {
   WORKFLOW_POLICY_DECISION_MODES,
   WORKFLOW_POLICY_DEFAULTS,
   WORKFLOW_POLICY_EFFECT_TYPES,
+  WORKFLOW_POLICY_EFFECT_TYPES_REQUIRING_TARGET_PATH,
+  WORKFLOW_POLICY_EFFECT_TYPES_REQUIRING_VALUE,
   WORKFLOW_POLICY_ESCALATION_ROLE_KEYS,
   WORKFLOW_POLICY_EXECUTION_TYPES,
   WORKFLOW_POLICY_ROUTING_MODES,
@@ -38,6 +40,12 @@ import {
   LOCKED_RUNTIME_CONTROL_EDIT_MESSAGE,
   RUNTIME_CONTROL_VERSION_STATUSES,
 } from '../utils/runtimeControlVersioning.js'
+import {
+  isWorkflowPolicyValueMissing,
+  normalizeRuntimePathCommaList as normalizeCommaList,
+  normalizeRuntimePathConditionOperator as normalizeConditionOperator,
+  validateRuntimePathLiteralValue,
+} from '../utils/runtimePathLiteralValidation.js'
 
 const DUPLICATE_WORKFLOW_POLICY_KEY_MESSAGE = 'Workflow policy key must be unique.'
 const WORKFLOW_POLICY_NOT_FOUND_MESSAGE = 'Workflow policy was not found.'
@@ -59,20 +67,6 @@ const WORKFLOW_POLICY_FIELD_DEFAULTS = Object.freeze({
   lastActivatedAt: null,
 })
 
-const normalizeConditionOperator = (value) => {
-  const normalized = String(value ?? '')
-    .trim()
-    .toLowerCase()
-    .replace(/[_\s]+/g, ' ')
-
-  if (!normalized) return ''
-  if (normalized === 'exists') return WORKFLOW_POLICY_CONDITION_OPERATORS.EXISTS
-  if (normalized === 'not exists') return WORKFLOW_POLICY_CONDITION_OPERATORS.NOT_EXISTS
-  if (normalized === 'in') return WORKFLOW_POLICY_CONDITION_OPERATORS.IN
-  if (normalized === 'not in') return WORKFLOW_POLICY_CONDITION_OPERATORS.NOT_IN
-  return normalized
-}
-
 const VALID_WORKFLOW_POLICY_CONDITION_OPERATORS = new Set(
   Object.values(WORKFLOW_POLICY_CONDITION_OPERATORS).map((value) => normalizeConditionOperator(value)),
 )
@@ -86,189 +80,7 @@ const ROUTING_MODES_REQUIRING_PRIMARY_AGENT = new Set([
   WORKFLOW_POLICY_ROUTING_MODES.FIXED_AGENT,
 ])
 
-const EFFECT_TYPES_REQUIRING_TARGET_PATH = new Set([
-  WORKFLOW_POLICY_EFFECT_TYPES.SET_VALUE,
-  WORKFLOW_POLICY_EFFECT_TYPES.INCREMENT_COUNTER,
-  WORKFLOW_POLICY_EFFECT_TYPES.CLEAR_FIELD,
-])
-
-const EFFECT_TYPES_REQUIRING_VALUE = new Set([
-  WORKFLOW_POLICY_EFFECT_TYPES.SET_VALUE,
-  WORKFLOW_POLICY_EFFECT_TYPES.APPEND_AUDIT_ENTRY,
-  WORKFLOW_POLICY_EFFECT_TYPES.TRIGGER_POLICY_GROUP,
-  WORKFLOW_POLICY_EFFECT_TYPES.QUEUE_NOTIFICATION,
-])
-
-const normalizeCommaList = (value) =>
-  [...new Set(
-    String(value ?? '')
-      .split(',')
-      .map((item) => item.trim())
-      .filter(Boolean),
-  )]
-
-const isNumericString = (value) => /^-?\d+(\.\d+)?$/.test(String(value ?? '').trim())
-
-const RUNTIME_PATH_REGEX_CACHE_MAX = 100
-const runtimePathRegexCache = new Map()
 const WORKFLOW_POLICY_TEST_AUDIT_RESOURCE_PREFIX = 'workflow-policy-test'
-
-const getCachedRuntimePathRegex = (pattern) => {
-  const normalizedPattern = String(pattern ?? '').trim()
-  if (!normalizedPattern) return null
-
-  if (runtimePathRegexCache.has(normalizedPattern)) {
-    return runtimePathRegexCache.get(normalizedPattern)
-  }
-
-  try {
-    // Cached regex instances are reused across requests, so keep them flagless and stateless.
-    const regex = new RegExp(normalizedPattern)
-    runtimePathRegexCache.set(normalizedPattern, regex)
-    if (runtimePathRegexCache.size > RUNTIME_PATH_REGEX_CACHE_MAX) {
-      const oldestKey = runtimePathRegexCache.keys().next().value
-      runtimePathRegexCache.delete(oldestKey)
-    }
-    return regex
-  } catch {
-    return null
-  }
-}
-
-const parseJsonLikeRuntimePathValue = (rawValue) => {
-  if (rawValue === null || rawValue === undefined) {
-    return { ok: true, value: rawValue }
-  }
-
-  if (typeof rawValue === 'string') {
-    const trimmed = rawValue.trim()
-    if (!trimmed) {
-      return { ok: false, message: 'Expected valid JSON.' }
-    }
-
-    try {
-      return { ok: true, value: JSON.parse(trimmed) }
-    } catch {
-      return { ok: false, message: 'Expected valid JSON.' }
-    }
-  }
-
-  if (typeof rawValue === 'object') {
-    return { ok: true, value: rawValue }
-  }
-
-  return { ok: false, message: 'Expected valid JSON.' }
-}
-
-const validateRuntimePathLiteralValue = ({
-  runtimePath,
-  operator,
-  value,
-} = {}) => {
-  if (!runtimePath) return null
-
-  const dataType = String(runtimePath?.dataType ?? '').trim().toUpperCase()
-  const allowedValues = Array.isArray(runtimePath?.allowedValues)
-    ? runtimePath.allowedValues.map((item) => String(item ?? '').trim()).filter(Boolean)
-    : []
-  const hasAllowedValues = allowedValues.length > 0
-  const allowedSet = hasAllowedValues ? new Set(allowedValues) : null
-  const regexPattern = String(runtimePath?.regexPattern ?? '').trim()
-  const minLength = Number.isFinite(runtimePath?.minLength) ? runtimePath.minLength : null
-  const maxLength = Number.isFinite(runtimePath?.maxLength) ? runtimePath.maxLength : null
-  const minValue = Number.isFinite(runtimePath?.minValue) ? runtimePath.minValue : null
-  const maxValue = Number.isFinite(runtimePath?.maxValue) ? runtimePath.maxValue : null
-  const isNullable = runtimePath?.isNullable
-  const uiControl = String(runtimePath?.uiControl ?? '').trim().toUpperCase()
-  const cachedRegex = regexPattern ? getCachedRuntimePathRegex(regexPattern) : null
-  const expectsWholeJsonLiteral =
-    dataType === 'OBJECT'
-    || dataType === 'ARRAY'
-    || (dataType === 'MIXED' && uiControl === 'JSON')
-
-  const normalizedOperator = normalizeConditionOperator(operator)
-  const valuesToValidate = expectsWholeJsonLiteral
-    ? [value]
-    : Array.isArray(value)
-    ? value
-    : normalizedOperator === normalizeConditionOperator(WORKFLOW_POLICY_CONDITION_OPERATORS.IN)
-      || normalizedOperator === normalizeConditionOperator(WORKFLOW_POLICY_CONDITION_OPERATORS.NOT_IN)
-      ? normalizeCommaList(value)
-      : [value]
-
-  for (const raw of valuesToValidate) {
-    if (raw === null) {
-      if (isNullable === false) return 'Null is not allowed for this runtime path.'
-      continue
-    }
-
-    if (raw === undefined) continue
-
-    if (dataType === 'BOOLEAN') {
-      if (typeof raw === 'boolean') continue
-      const normalized = String(raw ?? '').trim().toLowerCase()
-      if (normalized === 'true' || normalized === 'false') continue
-      return 'Expected a boolean value.'
-    }
-
-    if (dataType === 'NUMBER') {
-      const numeric = typeof raw === 'number' ? raw : (isNumericString(raw) ? Number(String(raw).trim()) : NaN)
-      if (Number.isNaN(numeric)) return 'Expected a numeric value.'
-      if (minValue !== null && numeric < minValue) return `Value must be >= ${minValue}.`
-      if (maxValue !== null && numeric > maxValue) return `Value must be <= ${maxValue}.`
-      continue
-    }
-
-    if (
-      dataType === 'OBJECT'
-      || dataType === 'ARRAY'
-      || (dataType === 'MIXED' && uiControl === 'JSON')
-    ) {
-      const parsed = parseJsonLikeRuntimePathValue(raw)
-      if (!parsed.ok) return parsed.message
-
-      if (dataType === 'OBJECT') {
-        if (!parsed.value || typeof parsed.value !== 'object' || Array.isArray(parsed.value)) {
-          return 'Expected a JSON object.'
-        }
-      }
-
-      if (dataType === 'ARRAY' && !Array.isArray(parsed.value)) {
-        return 'Expected a JSON array.'
-      }
-
-      continue
-    }
-
-    const stringValue = typeof raw === 'string' ? raw : null
-    if (stringValue === null) {
-      return 'Expected a string value.'
-    }
-
-    const normalizedStringValue = stringValue.trim()
-
-    if (hasAllowedValues && allowedSet && !allowedSet.has(normalizedStringValue)) {
-      return 'Value must be one of the allowed values for this runtime path.'
-    }
-
-    if (minLength !== null && normalizedStringValue.length < minLength) {
-      return `Value must be at least ${minLength} characters.`
-    }
-
-    if (maxLength !== null && normalizedStringValue.length > maxLength) {
-      return `Value must be at most ${maxLength} characters.`
-    }
-
-    if (regexPattern) {
-      if (!cachedRegex) {
-        return 'Runtime path validation pattern is invalid.'
-      }
-      if (!cachedRegex.test(normalizedStringValue)) return 'Value does not match the required pattern.'
-    }
-  }
-
-  return null
-}
 
 const WORKFLOW_POLICY_MUTABLE_FIELDS = Object.freeze([
   'key',
@@ -711,10 +523,10 @@ const normalizeEffectRows = (effects = []) =>
         const type = String(effect?.type ?? '').trim().toUpperCase()
         return {
           type,
-          targetPath: EFFECT_TYPES_REQUIRING_TARGET_PATH.has(type)
+          targetPath: WORKFLOW_POLICY_EFFECT_TYPES_REQUIRING_TARGET_PATH.has(type)
             ? String(effect?.targetPath ?? '').trim()
             : '',
-          value: EFFECT_TYPES_REQUIRING_VALUE.has(type)
+          value: WORKFLOW_POLICY_EFFECT_TYPES_REQUIRING_VALUE.has(type)
             ? (
                 Array.isArray(effect?.value)
                   ? effect.value.map((item) => String(item ?? '').trim()).filter(Boolean)
@@ -906,7 +718,7 @@ const validateWorkflowPolicyEffects = async ({
   }
 
   const firstMissingTargetPath = normalizedEffects.find((effect) =>
-    EFFECT_TYPES_REQUIRING_TARGET_PATH.has(effect.type) && !effect.targetPath,
+    WORKFLOW_POLICY_EFFECT_TYPES_REQUIRING_TARGET_PATH.has(effect.type) && !effect.targetPath,
   )
   if (firstMissingTargetPath) {
     details[label] = `Effect "${firstMissingTargetPath.type}" requires a writable runtime path.`
@@ -914,11 +726,8 @@ const validateWorkflowPolicyEffects = async ({
   }
 
   const firstMissingValue = normalizedEffects.find((effect) => {
-    if (!EFFECT_TYPES_REQUIRING_VALUE.has(effect.type)) return false
-    if (Array.isArray(effect.value)) return effect.value.length === 0
-    if (typeof effect.value === 'boolean') return false
-    if (typeof effect.value === 'number') return false
-    return String(effect.value ?? '').trim() === ''
+    if (!WORKFLOW_POLICY_EFFECT_TYPES_REQUIRING_VALUE.has(effect.type)) return false
+    return isWorkflowPolicyValueMissing(effect.value)
   })
   if (firstMissingValue) {
     details[label] = `Effect "${firstMissingValue.type}" requires a value.`
@@ -992,7 +801,7 @@ const validateWorkflowPolicyEffects = async ({
 
   const byPathKey = new Map(pathSelections.rows.map((row) => [String(row?.pathKey ?? '').trim(), row]))
   const firstInvalidLiteral = normalizedEffects.find((effect) => {
-    if (!EFFECT_TYPES_REQUIRING_VALUE.has(effect.type)) return false
+    if (!WORKFLOW_POLICY_EFFECT_TYPES_REQUIRING_VALUE.has(effect.type)) return false
     if (!effect.targetPath) return false
     const runtimePath = byPathKey.get(effect.targetPath)
     const message = validateRuntimePathLiteralValue({
@@ -1074,6 +883,13 @@ const validateWorkflowPolicySteps = async ({
     }
     if (step.type === WORKFLOW_POLICY_STEP_TYPES.STATE_UPDATE && !step.targetPath) {
       details.steps = `State update step "${step.stepKey}" requires a writable runtime path.`
+      return details
+    }
+    if (
+      step.type === WORKFLOW_POLICY_STEP_TYPES.STATE_UPDATE
+      && isWorkflowPolicyValueMissing(step.value)
+    ) {
+      details.steps = `State update step "${step.stepKey}" requires a value.`
       return details
     }
     if (step.type === WORKFLOW_POLICY_STEP_TYPES.AGENT_EXECUTION && !step.agentId) {

@@ -926,6 +926,99 @@ describe('Workflow Policy Routes', () => {
     expect(Object.values(res.body.error.details)).toContain('Workflow step order values must be unique.')
   })
 
+  test.each([
+    ['omitted', undefined],
+    ['blank', '   '],
+    ['empty array', []],
+  ])('POST /api/v1/super-admin/runtime-control/workflow-policies rejects %s STATE_UPDATE values', async (
+    _label,
+    value,
+  ) => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const step = {
+      stepKey: 'snapshot',
+      type: 'STATE_UPDATE',
+      order: 1,
+      targetPath: 'framework_state.runtime.execution_status',
+    }
+    if (value !== undefined) step.value = value
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/workflow-policies')
+      .set('Authorization', `Bearer ${token}`)
+      .send(buildPhaseOneWorkflowPolicyPayload({
+        key: `vmf-state-update-missing-${_label.replace(/\s+/g, '-')}`,
+        name: `VMF State Update Missing ${_label}`,
+        executionType: 'SINGLE_STEP',
+        steps: [step],
+      }))
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details.steps).toBe(
+      'State update step "snapshot" requires a value.',
+    )
+  })
+
+  test.each([
+    ['boolean false', false],
+    ['numeric zero', 0],
+  ])('POST /api/v1/super-admin/runtime-control/workflow-policies accepts present %s STATE_UPDATE values', async (
+    _label,
+    value,
+  ) => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    mockFindOneSelect(null)
+    RuntimePathRegistry.find.mockReturnValue(buildRuntimePathLookupChain([{
+      pathKey: 'framework_state.runtime.execution_status',
+      status: 'ACTIVE',
+      frameworkKeys: ['VMF'],
+      allowedOperations: ['WRITE'],
+      isProtected: false,
+      scope: 'FRAMEWORK_STATE',
+    }]))
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/workflow-policies')
+      .set('Authorization', `Bearer ${token}`)
+      .send(buildPhaseOneWorkflowPolicyPayload({
+        key: `vmf-state-update-${String(value)}`,
+        name: `VMF State Update ${_label}`,
+        executionType: 'SINGLE_STEP',
+        steps: [{
+          stepKey: 'snapshot',
+          type: 'STATE_UPDATE',
+          order: 1,
+          targetPath: 'framework_state.runtime.execution_status',
+          value,
+        }],
+      }))
+
+    expect(res.status).toBe(201)
+    expect(res.body.data.steps[0].value).toBe(value)
+  })
+
+  test('POST /api/v1/super-admin/runtime-control/workflow-policies retains required effect-value validation', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/runtime-control/workflow-policies')
+      .set('Authorization', `Bearer ${token}`)
+      .send(buildPhaseOneWorkflowPolicyPayload({
+        key: 'vmf-effect-missing-value',
+        name: 'VMF Effect Missing Value',
+        onPassEffects: [{
+          type: 'SET_VALUE',
+          targetPath: 'framework_state.runtime.execution_status',
+          value: '   ',
+        }],
+      }))
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details.onPassEffects).toBe('Effect "SET_VALUE" requires a value.')
+  })
+
   test('POST /api/v1/super-admin/runtime-control/workflow-policies strips fields not used by the effect type', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     mockFindOneSelect(null)

@@ -10,6 +10,7 @@ import {
   importRecord,
   loadSeedBundle,
   parseArgs,
+  validateCrossReferences,
 } from '../scripts/importFrameworkSeed.js'
 
 const execFileAsync = promisify(execFile)
@@ -19,6 +20,8 @@ const apiRoot = path.resolve(__dirname, '../..')
 const workspaceRoot = path.resolve(apiRoot, '..')
 const seedDir = path.resolve(workspaceRoot, 'docs/seed-data')
 const importScript = path.resolve(apiRoot, 'src/scripts/importFrameworkSeed.js')
+const r3SeedDir = path.resolve(seedDir, 'vmf-v3-1-1-rkm-r3-action-alignment')
+const executionStatusPathKey = 'framework_state.runtime.execution_status'
 
 jest.setTimeout(30_000)
 
@@ -31,6 +34,21 @@ const runSeedGuard = (args = []) =>
     },
     maxBuffer: 1024 * 1024 * 5,
   })
+
+const loadR3Bundle = () => loadSeedBundle(r3SeedDir, '3.1.1')
+
+const findBundleRecords = (bundle, fileName) =>
+  bundle.find((step) => String(step.fileName || '').endsWith(fileName))?.records || []
+
+const validateR3CrossReferences = (mutate) => {
+  const bundle = loadR3Bundle()
+  const runtimePaths = findBundleRecords(bundle, 'runtime_path_registry.json')
+  const workflowPolicies = findBundleRecords(bundle, 'workflow_policies.json')
+  mutate?.({ runtimePaths, workflowPolicies })
+  const notes = []
+  validateCrossReferences(bundle, notes)
+  return { bundle, notes, runtimePaths, workflowPolicies }
+}
 
 describe('framework seed import guard', () => {
   test('suggests help for unknown script arguments', () => {
@@ -412,6 +430,290 @@ describe('framework seed import guard', () => {
         executionContext: 'ON_LOCK',
       }),
     ]))
+  })
+
+  test('staged v3.1.1 R3 execution status metadata matches all 48 scalar policy writes', () => {
+    const { notes, runtimePaths, workflowPolicies } = validateR3CrossReferences()
+    const executionStatusPath = runtimePaths.find((row) => row.pathKey === executionStatusPathKey)
+    const stateUpdateWrites = workflowPolicies.flatMap((policy) =>
+      (policy.steps || []).filter((step) =>
+        step.type === 'STATE_UPDATE' && step.targetPath === executionStatusPathKey,
+      ),
+    )
+    const onPassWrites = workflowPolicies.flatMap((policy) =>
+      (policy.onPassEffects || []).filter((effect) =>
+        effect.type === 'SET_VALUE' && effect.targetPath === executionStatusPathKey,
+      ),
+    )
+
+    expect(workflowPolicies).toHaveLength(28)
+    expect(stateUpdateWrites).toHaveLength(24)
+    expect(onPassWrites).toHaveLength(24)
+    expect([...stateUpdateWrites, ...onPassWrites]).toHaveLength(48)
+    expect([...stateUpdateWrites, ...onPassWrites].every((write) => typeof write.value === 'string')).toBe(true)
+    expect(executionStatusPath).toEqual(expect.objectContaining({
+      dataType: 'STRING',
+      uiControl: 'TEXT',
+      exampleValue: 'truth-generation-policy:COMPLETED',
+    }))
+    expect(notes.filter((note) => note.level === 'error')).toEqual([])
+  })
+
+  test.each([
+    ['onPassEffects', 'truth-generation-policy', undefined],
+    ['onPassEffects', 'truth-generation-policy', '   '],
+    ['onFailEffects', 'truth-generation-policy', []],
+  ])('seed cross-reference guard rejects missing required %s values', (
+    effectGroup,
+    policyKey,
+    value,
+  ) => {
+    const { notes } = validateR3CrossReferences(({ workflowPolicies }) => {
+      const policy = workflowPolicies.find((row) => row.key === policyKey)
+      const effect = policy[effectGroup].find((row) => row.type === 'SET_VALUE')
+      if (value === undefined) delete effect.value
+      else effect.value = value
+    })
+
+    expect(notes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        level: 'error',
+        source: expect.stringContaining(effectGroup),
+        message: 'Effect "SET_VALUE" requires a value.',
+      }),
+    ]))
+  })
+
+  test.each([
+    ['omitted', undefined],
+    ['null', null],
+    ['blank', '   '],
+    ['empty array', []],
+  ])('seed cross-reference guard rejects %s STATE_UPDATE values', (_label, value) => {
+    const { notes } = validateR3CrossReferences(({ workflowPolicies }) => {
+      const policy = workflowPolicies.find((row) => row.key === 'truth-generation-policy')
+      const step = policy.steps.find((row) => row.targetPath === executionStatusPathKey)
+      if (value === undefined) delete step.value
+      else step.value = value
+    })
+
+    expect(notes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        level: 'error',
+        source: expect.stringContaining('steps['),
+        message: expect.stringMatching(/STATE_UPDATE step ".*" requires a value/),
+      }),
+    ]))
+  })
+
+  test.each([
+    ['value-bearing effect', ({ workflowPolicies, targetPath }) => {
+      const policy = workflowPolicies.find((row) => row.key === 'truth-generation-policy')
+      const effect = policy.onPassEffects.find((row) => row.type === 'SET_VALUE')
+      effect.targetPath = targetPath
+      delete effect.value
+    }, 'Effect "SET_VALUE" requires a value.'],
+    ['STATE_UPDATE step', ({ workflowPolicies, targetPath }) => {
+      const policy = workflowPolicies.find((row) => row.key === 'truth-generation-policy')
+      const step = policy.steps.find((row) => row.targetPath === executionStatusPathKey)
+      step.targetPath = targetPath
+      delete step.value
+    }, expect.stringMatching(/STATE_UPDATE step ".*" requires a value/)],
+  ])('seed cross-reference guard reports a missing %s value before path lookup', (
+    _label,
+    mutateRecord,
+    expectedMessage,
+  ) => {
+    const targetPath = 'framework_state.runtime.review_missing_value_path'
+    const { notes } = validateR3CrossReferences(({ workflowPolicies }) => {
+      mutateRecord({ workflowPolicies, targetPath })
+    })
+
+    expect(notes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        level: 'error',
+        message: expectedMessage,
+      }),
+    ]))
+    expect(notes).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        message: `Runtime path "${targetPath}" is not present in the seed registry.`,
+      }),
+    ]))
+  })
+
+  test.each([
+    ['BOOLEAN', false],
+    ['NUMBER', 0],
+  ])('seed cross-reference guard preserves present %s falsey values', (dataType, value) => {
+    const { notes } = validateR3CrossReferences(({ runtimePaths, workflowPolicies }) => {
+      const runtimePathTemplate = runtimePaths.find((row) => row.pathKey === executionStatusPathKey)
+      const falseyPathKey = `framework_state.runtime.review_falsey_${dataType.toLowerCase()}`
+      runtimePaths.push({
+        ...runtimePathTemplate,
+        pathKey: falseyPathKey,
+        stableId: `runtime-path-review-falsey-${dataType.toLowerCase()}`,
+        dataType,
+        uiControl: 'TEXT',
+      })
+      const policy = workflowPolicies.find((row) => row.key === 'truth-generation-policy')
+      const effect = policy.onPassEffects.find((row) => row.targetPath === executionStatusPathKey)
+      effect.targetPath = falseyPathKey
+      effect.value = value
+      const step = policy.steps.find((row) => row.targetPath === executionStatusPathKey)
+      step.targetPath = falseyPathKey
+      step.value = value
+    })
+
+    expect(notes.filter((note) =>
+      note.level === 'error' && note.message.includes(`review_falsey_${dataType.toLowerCase()}`),
+    )).toEqual([])
+  })
+
+  test('seed cross-reference guard does not require values for CLEAR_FIELD effects', () => {
+    const { notes } = validateR3CrossReferences(({ workflowPolicies }) => {
+      const policy = workflowPolicies.find((row) => row.key === 'truth-generation-policy')
+      policy.onPassEffects.push({
+        type: 'CLEAR_FIELD',
+        targetPath: executionStatusPathKey,
+      })
+    })
+
+    expect(notes.filter((note) =>
+      note.level === 'error' && note.source.includes('onPassEffects'),
+    )).toEqual([])
+  })
+
+  test('seed cross-reference guard rejects incompatible onPass effect literals', () => {
+    const { notes } = validateR3CrossReferences(({ runtimePaths }) => {
+      const runtimePath = runtimePaths.find((row) => row.pathKey === executionStatusPathKey)
+      runtimePath.dataType = 'ARRAY'
+      runtimePath.uiControl = 'JSON'
+    })
+
+    expect(notes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        level: 'error',
+        source: expect.stringContaining('onPassEffects'),
+        message: expect.stringMatching(/execution_status.*declares ARRAY.*effect value is invalid.*Expected valid JSON/i),
+      }),
+    ]))
+  })
+
+  test('seed cross-reference guard rejects incompatible onFail effect literals', () => {
+    const { notes } = validateR3CrossReferences(({ workflowPolicies }) => {
+      const policy = workflowPolicies.find((row) => row.key === 'truth-generation-policy')
+      policy.onFailEffects[0].value = { status: 'FAIL' }
+    })
+
+    expect(notes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        level: 'error',
+        source: expect.stringContaining('onFailEffects'),
+        message: expect.stringMatching(/declares STRING.*effect value is invalid.*Expected a string value/i),
+      }),
+    ]))
+  })
+
+  test('seed cross-reference guard rejects list values for scalar effect paths', () => {
+    const { notes } = validateR3CrossReferences(({ workflowPolicies }) => {
+      const policy = workflowPolicies.find((row) => row.key === 'truth-generation-policy')
+      const effect = policy.onPassEffects.find((row) => row.targetPath === executionStatusPathKey)
+      effect.value = ['truth-generation-policy:COMPLETED']
+    })
+
+    expect(notes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        level: 'error',
+        source: expect.stringContaining('onPassEffects'),
+        message: expect.stringMatching(/declares STRING.*effect value is invalid.*Expected a string value/i),
+      }),
+    ]))
+  })
+
+  test.each([
+    ['NUMBER', [42], /declares NUMBER.*Expected a numeric value/i],
+    ['BOOLEAN', [true], /declares BOOLEAN.*Expected a boolean value/i],
+  ])('seed cross-reference guard rejects list values for scalar %s effect paths', (
+    dataType,
+    value,
+    expectedMessage,
+  ) => {
+    const { notes } = validateR3CrossReferences(({ runtimePaths, workflowPolicies }) => {
+      const runtimePath = runtimePaths.find((row) => row.pathKey === executionStatusPathKey)
+      runtimePath.dataType = dataType
+      runtimePath.uiControl = 'TEXT'
+      const policy = workflowPolicies.find((row) => row.key === 'truth-generation-policy')
+      const effect = policy.onPassEffects.find((row) => row.targetPath === executionStatusPathKey)
+      effect.value = value
+    })
+
+    expect(notes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        level: 'error',
+        source: expect.stringContaining('onPassEffects'),
+        message: expect.stringMatching(expectedMessage),
+      }),
+    ]))
+  })
+
+  test('seed cross-reference guard rejects incompatible STATE_UPDATE literals', () => {
+    const { notes } = validateR3CrossReferences(({ runtimePaths }) => {
+      const runtimePath = runtimePaths.find((row) => row.pathKey === executionStatusPathKey)
+      runtimePath.dataType = 'ARRAY'
+      runtimePath.uiControl = 'JSON'
+    })
+
+    expect(notes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        level: 'error',
+        source: expect.stringContaining('steps['),
+        message: expect.stringMatching(/execution_status.*declares ARRAY.*STATE_UPDATE value is invalid.*Expected valid JSON/i),
+      }),
+    ]))
+  })
+
+  test('seed cross-reference guard retains missing and non-writable path failures', () => {
+    const missing = validateR3CrossReferences(({ workflowPolicies }) => {
+      const policy = workflowPolicies.find((row) => row.key === 'truth-generation-policy')
+      policy.onPassEffects[0].targetPath = 'framework_state.missing.seed_guard_path'
+    })
+    expect(missing.notes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        level: 'error',
+        message: expect.stringContaining('is not present in the seed registry'),
+      }),
+    ]))
+
+    const nonWritable = validateR3CrossReferences(({ runtimePaths, workflowPolicies }) => {
+      const readOnlyPath = runtimePaths.find((row) => row.pathKey === executionStatusPathKey)
+      readOnlyPath.allowedOperations = ['READ']
+      const policy = workflowPolicies.find((row) => row.key === 'truth-generation-policy')
+      policy.onPassEffects[0].targetPath = readOnlyPath.pathKey
+    })
+    expect(nonWritable.notes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        level: 'error',
+        message: expect.stringContaining('does not allow WRITE'),
+      }),
+    ]))
+  })
+
+  test('type-only seed guard defers the separate truth-status allowedValues mismatch', () => {
+    const { notes, runtimePaths, workflowPolicies } = validateR3CrossReferences()
+    const truthStatusPath = runtimePaths.find(
+      (row) => row.pathKey === 'framework_state.governance.truth_status',
+    )
+    const truthAcceptancePolicy = workflowPolicies.find((row) => row.key === 'truth-acceptance-policy')
+    const truthStatusStep = truthAcceptancePolicy.steps.find(
+      (step) => step.targetPath === truthStatusPath.pathKey,
+    )
+
+    expect(truthStatusPath.allowedValues).not.toContain('ACCEPTED')
+    expect(truthStatusStep.value).toBe('ACCEPTED')
+    expect(notes.filter((note) =>
+      note.level === 'error' && note.message.includes('framework_state.governance.truth_status'),
+    )).toEqual([])
   })
 
   test('passes RKM compatibility values used by the v3.1 runtime knowledge model seed', async () => {

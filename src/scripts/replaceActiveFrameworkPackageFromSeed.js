@@ -584,8 +584,8 @@ const assertActiveReplacementTarget = async ({ plan, models, session }) => {
   if (existingPackage.frameworkKey !== plan.seedRecords.package.frameworkKey) {
     throw new Error(`Seed framework ${plan.seedRecords.package.frameworkKey} does not match active package framework ${existingPackage.frameworkKey} during apply.`)
   }
-  if (existingPackage.isDefault !== true || existingPackage.isLocked !== true) {
-    throw new Error('Target Framework Package must remain default and locked during governed in-place replacement.')
+  if (existingPackage.isLocked !== true) {
+    throw new Error('Target Framework Package must remain locked during governed in-place replacement.')
   }
 
   const duplicateVersion = await findOneDocument(

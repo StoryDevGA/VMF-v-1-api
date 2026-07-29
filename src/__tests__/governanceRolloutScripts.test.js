@@ -1001,6 +1001,78 @@ describe('replaceActiveFrameworkPackageFromSeed helpers', () => {
     },
   })
 
+  const makeApplyHarness = ({
+    packageOverrides = {},
+    duplicatePackage = null,
+    runtimePathSaveError = null,
+  } = {}) => {
+    const packageDoc = makePersistedDoc({
+      frameworkKey: 'VMF',
+      packageKey: 'standard-package-vmf-3-1-1-rkm',
+      version: '3.1.1',
+      status: 'ACTIVE',
+      isDefault: false,
+      isLocked: true,
+      stableId: 'package-existing',
+      ...packageOverrides,
+    })
+    const uiContractDoc = makePersistedDoc({
+      uiContractKey: 'standard-ui-contract-vmf-3-1-1-rkm',
+      status: 'ACTIVE',
+      stableId: 'ui-contract-existing',
+    })
+    const runtimePathDoc = makePersistedDoc({
+      pathKey: 'framework_state.runtime.truth_projection',
+      stableId: 'path-existing-runtime-truth-projection',
+    })
+    const workflowPolicyDoc = makePersistedDoc({
+      key: 'truth-generation-policy',
+      stableId: 'policy-truth-generation-policy',
+    })
+    if (runtimePathSaveError) {
+      runtimePathDoc.save.mockRejectedValueOnce(runtimePathSaveError)
+    }
+
+    const models = {
+      FrameworkPackage: makeModel({
+        findOne: (query) => (query?.packageKey?.$ne ? duplicatePackage : packageDoc),
+      }),
+      RuntimePathRegistry: makeModel({
+        keyField: 'pathKey',
+        docs: [runtimePathDoc],
+      }),
+      WorkflowPolicy: makeModel({
+        keyField: 'key',
+        docs: [workflowPolicyDoc],
+      }),
+      UIContract: makeModel({
+        keyField: 'uiContractKey',
+        docs: [uiContractDoc],
+      }),
+    }
+
+    return {
+      docs: {
+        packageDoc,
+        uiContractDoc,
+        runtimePathDoc,
+        workflowPolicyDoc,
+      },
+      models,
+    }
+  }
+
+  const expectNoReplacementWrites = ({ docs, models }) => {
+    expect(docs.runtimePathDoc.save).not.toHaveBeenCalled()
+    expect(docs.workflowPolicyDoc.save).not.toHaveBeenCalled()
+    expect(docs.uiContractDoc.save).not.toHaveBeenCalled()
+    expect(docs.packageDoc.save).not.toHaveBeenCalled()
+    expect(models.RuntimePathRegistry.createdDocs).toHaveLength(0)
+    expect(models.WorkflowPolicy.createdDocs).toHaveLength(0)
+    expect(models.UIContract.createdDocs).toHaveLength(0)
+    expect(models.FrameworkPackage.createdDocs).toHaveLength(0)
+  }
+
   test('maps canonical r3 package and UI keys without mutating BSON-like ids', () => {
     const bsonLikeId = { toHexString: () => '698b3800f83b3257365fd7a3' }
     const bundle = [
@@ -1186,71 +1258,93 @@ describe('replaceActiveFrameworkPackageFromSeed helpers', () => {
     expect(String(legacyPayload.updatedBy)).toBe('000000000000000000000001')
   })
 
-  test('applies replacement through hydrated document saves and preserves existing stable ids', async () => {
+  test.each([false, true])(
+    'applies replacement through hydrated document saves and preserves isDefault=%s',
+    async (isDefault) => {
     const session = {}
-    const packageDoc = makePersistedDoc({
-      frameworkKey: 'VMF',
-      packageKey: 'standard-package-vmf-3-1-1-rkm',
-      version: '3.1.1',
-      status: 'ACTIVE',
-      isDefault: true,
-      isLocked: true,
-      stableId: 'package-existing',
-    })
-    const uiContractDoc = makePersistedDoc({
-      uiContractKey: 'standard-ui-contract-vmf-3-1-1-rkm',
-      status: 'ACTIVE',
-      stableId: 'ui-contract-existing',
-    })
-    const runtimePathDoc = makePersistedDoc({
-      pathKey: 'framework_state.runtime.truth_projection',
-      stableId: 'path-existing-runtime-truth-projection',
-    })
-    const workflowPolicyDoc = makePersistedDoc({
-      key: 'truth-generation-policy',
-      stableId: 'policy-truth-generation-policy',
-    })
-    const frameworkPackageModel = makeModel({
-      findOne: (query) => (query?.packageKey?.$ne ? null : packageDoc),
-    })
-    const runtimePathModel = makeModel({
-      keyField: 'pathKey',
-      docs: [runtimePathDoc],
-    })
-    const workflowPolicyModel = makeModel({
-      keyField: 'key',
-      docs: [workflowPolicyDoc],
-    })
-    const uiContractModel = makeModel({
-      keyField: 'uiContractKey',
-      docs: [uiContractDoc],
+    const { docs, models } = makeApplyHarness({
+      packageOverrides: { isDefault },
     })
 
     await applyReplacementPlan({
       plan: makeReplacementPlan(),
-      models: {
-        FrameworkPackage: frameworkPackageModel,
-        RuntimePathRegistry: runtimePathModel,
-        WorkflowPolicy: workflowPolicyModel,
-        UIContract: uiContractModel,
-      },
+      models,
       session,
       targetPackageKey: 'standard-package-vmf-3-1-1-rkm',
     })
 
-    expect(runtimePathDoc.save).toHaveBeenCalledWith({ session })
-    expect(workflowPolicyDoc.save).toHaveBeenCalledWith({ session })
-    expect(uiContractDoc.save).toHaveBeenCalledWith({ session })
-    expect(packageDoc.save).toHaveBeenCalledWith({ session })
-    expect(runtimePathDoc.set.mock.calls[0][0]).not.toHaveProperty('stableId')
-    expect(String(runtimePathDoc.set.mock.calls[0][0].createdBy)).toBe('000000000000000000000001')
-    expect(String(runtimePathDoc.set.mock.calls[0][0].updatedBy)).toBe('000000000000000000000001')
-    expect(runtimePathDoc.$locals.allowLockedRuntimeControlWrite).toBe(true)
-    expect(runtimePathDoc.stableId).toBe('path-existing-runtime-truth-projection')
-    expect(runtimePathModel.updateOne).not.toHaveBeenCalled()
-    expect(workflowPolicyModel.updateOne).not.toHaveBeenCalled()
-    expect(uiContractModel.updateOne).not.toHaveBeenCalled()
-    expect(frameworkPackageModel.updateOne).not.toHaveBeenCalled()
+    expect(docs.runtimePathDoc.save).toHaveBeenCalledWith({ session })
+    expect(docs.workflowPolicyDoc.save).toHaveBeenCalledWith({ session })
+    expect(docs.uiContractDoc.save).toHaveBeenCalledWith({ session })
+    expect(docs.packageDoc.save).toHaveBeenCalledWith({ session })
+    expect(docs.packageDoc.set.mock.calls[0][0].isDefault).toBe(isDefault)
+    expect(docs.runtimePathDoc.set.mock.calls[0][0]).not.toHaveProperty('stableId')
+    expect(String(docs.runtimePathDoc.set.mock.calls[0][0].createdBy)).toBe('000000000000000000000001')
+    expect(String(docs.runtimePathDoc.set.mock.calls[0][0].updatedBy)).toBe('000000000000000000000001')
+    expect(docs.runtimePathDoc.$locals.allowLockedRuntimeControlWrite).toBe(true)
+    expect(docs.runtimePathDoc.stableId).toBe('path-existing-runtime-truth-projection')
+    expect(models.RuntimePathRegistry.updateOne).not.toHaveBeenCalled()
+    expect(models.WorkflowPolicy.updateOne).not.toHaveBeenCalled()
+    expect(models.UIContract.updateOne).not.toHaveBeenCalled()
+    expect(models.FrameworkPackage.updateOne).not.toHaveBeenCalled()
+  })
+
+  test.each([
+    ['unlocked target', { isLocked: false }, /must remain locked during governed in-place replacement/],
+    ['inactive target', { status: 'DEPRECATED' }, /must still be ACTIVE during apply/],
+    ['version mismatch', { version: '3.1.0' }, /does not match active package version 3.1.0 during apply/],
+    ['framework mismatch', { frameworkKey: 'DEAL' }, /does not match active package framework DEAL during apply/],
+  ])('rejects %s before any replacement writes', async (_label, packageOverrides, expectedError) => {
+    const harness = makeApplyHarness({ packageOverrides })
+
+    await expect(applyReplacementPlan({
+      plan: makeReplacementPlan(),
+      models: harness.models,
+      session: {},
+      targetPackageKey: 'standard-package-vmf-3-1-1-rkm',
+    })).rejects.toThrow(expectedError)
+
+    expectNoReplacementWrites(harness)
+  })
+
+  test('rejects a duplicate framework version before any replacement writes', async () => {
+    const harness = makeApplyHarness({
+      duplicatePackage: {
+        frameworkKey: 'VMF',
+        version: '3.1.1',
+        packageKey: 'duplicate-vmf-3-1-1',
+      },
+    })
+
+    await expect(applyReplacementPlan({
+      plan: makeReplacementPlan(),
+      models: harness.models,
+      session: {},
+      targetPackageKey: 'standard-package-vmf-3-1-1-rkm',
+    })).rejects.toThrow(/A second VMF \/ 3.1.1 package exists during apply: duplicate-vmf-3-1-1/)
+
+    expectNoReplacementWrites(harness)
+  })
+
+  test('propagates a first control-record save failure without later writes', async () => {
+    const persistenceError = new Error('runtime path save failed')
+    const harness = makeApplyHarness({ runtimePathSaveError: persistenceError })
+
+    await expect(applyReplacementPlan({
+      plan: makeReplacementPlan(),
+      models: harness.models,
+      session: {},
+      targetPackageKey: 'standard-package-vmf-3-1-1-rkm',
+    })).rejects.toBe(persistenceError)
+
+    expect(harness.docs.runtimePathDoc.save).toHaveBeenCalledTimes(1)
+    expect(harness.docs.workflowPolicyDoc.save).not.toHaveBeenCalled()
+    expect(harness.docs.uiContractDoc.save).not.toHaveBeenCalled()
+    expect(harness.docs.packageDoc.save).not.toHaveBeenCalled()
+    expect(harness.models.RuntimePathRegistry.createdDocs).toHaveLength(0)
+    expect(harness.models.WorkflowPolicy.createdDocs).toHaveLength(0)
+    expect(harness.models.UIContract.createdDocs).toHaveLength(0)
+    expect(harness.models.FrameworkPackage.createdDocs).toHaveLength(0)
   })
 
   test('rechecks the target package active invariant inside the apply transaction', async () => {

@@ -35,13 +35,23 @@ import {
 } from '../models/RuntimePathRegistry.js'
 import { RUNTIME_SKILL_CATEGORIES } from '../models/RuntimeSkill.js'
 import { VALIDATION_REGISTRY_CATEGORIES } from '../models/ValidationRegistry.js'
-import { buildWorkflowPolicyStableId, WORKFLOW_POLICY_TYPES } from '../models/WorkflowPolicy.js'
+import {
+  buildWorkflowPolicyStableId,
+  WORKFLOW_POLICY_EFFECT_TYPES_REQUIRING_VALUE,
+  WORKFLOW_POLICY_STEP_TYPES,
+  WORKFLOW_POLICY_TYPES,
+} from '../models/WorkflowPolicy.js'
 import { AUDIT_ACTIONS, RESOURCE_TYPES } from '../services/auditService.js'
 import {
   GOVERNANCE_AUDIT_EVENT_CATEGORIES,
   GOVERNANCE_AUDIT_EVENTS,
   GOVERNANCE_AUDIT_SEVERITIES,
 } from '../services/governanceAudit/governanceAuditEvents.js'
+import {
+  RUNTIME_PATH_LITERAL_VALIDATION_MODES,
+  isWorkflowPolicyValueMissing,
+  validateRuntimePathLiteralValue,
+} from '../utils/runtimePathLiteralValidation.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -1522,8 +1532,108 @@ const validateWorkflowPolicies = (records, indexes, notes) => {
     for (const condition of policy.conditions || []) {
       validatePathReference({ notes, level: 'error', source, pathKey: condition.path, indexes, operation: 'READ' })
     }
-    for (const effect of [...(policy.onPassEffects || []), ...(policy.onFailEffects || [])]) {
-      validatePathReference({ notes, level: 'error', source, pathKey: effect.targetPath, indexes, operation: 'WRITE' })
+
+    for (const [effectGroup, effects] of [
+      ['onPassEffects', policy.onPassEffects || []],
+      ['onFailEffects', policy.onFailEffects || []],
+    ]) {
+      for (const [index, effect] of effects.entries()) {
+        const effectSource = `${source} ${effectGroup}[${index}]`
+        const requiresValue =
+          WORKFLOW_POLICY_EFFECT_TYPES_REQUIRING_VALUE.has(normalizeEnumToken(effect.type))
+        if (requiresValue && isWorkflowPolicyValueMissing(effect.value)) {
+          notes.push({
+            level: 'error',
+            source: effectSource,
+            message: `Effect "${normalizeEnumToken(effect.type)}" requires a value.`,
+          })
+          continue
+        }
+
+        validatePathReference({
+          notes,
+          level: 'error',
+          source: effectSource,
+          pathKey: effect.targetPath,
+          indexes,
+          operation: 'WRITE',
+        })
+
+        const runtimePath = findRuntimePath(indexes, effect.targetPath)
+        if (
+          !runtimePath
+          || !requiresValue
+        ) {
+          continue
+        }
+
+        // Seed preflight intentionally checks representation and nullability only.
+        // FULL Runtime Path constraints are enforced by controller conditions/effects;
+        // full STATE_UPDATE constraint enforcement remains a separate legacy follow-up.
+        const validationMessage = validateRuntimePathLiteralValue({
+          runtimePath,
+          operator: effect.type,
+          value: effect.value,
+          validationMode: RUNTIME_PATH_LITERAL_VALIDATION_MODES.TYPE_AND_NULLABILITY,
+          allowListValues: false,
+        })
+        if (validationMessage) {
+          notes.push({
+            level: 'error',
+            source: effectSource,
+            message:
+              `Runtime path "${effect.targetPath}" declares ${runtimePath.dataType}; `
+              + `effect value is invalid. ${validationMessage}`,
+          })
+        }
+      }
+    }
+
+    for (const [index, step] of (policy.steps || []).entries()) {
+      if (normalizeEnumToken(step.type || step.stepType) !== WORKFLOW_POLICY_STEP_TYPES.STATE_UPDATE) {
+        continue
+      }
+
+      const stepSource = `${source} steps[${index}] (${step.stepKey || 'state-update'})`
+      if (isWorkflowPolicyValueMissing(step.value)) {
+        notes.push({
+          level: 'error',
+          source: stepSource,
+          message: `STATE_UPDATE step "${step.stepKey || 'state-update'}" requires a value.`,
+        })
+        continue
+      }
+
+      validatePathReference({
+        notes,
+        level: 'error',
+        source: stepSource,
+        pathKey: step.targetPath,
+        indexes,
+        operation: 'WRITE',
+      })
+
+      const runtimePath = findRuntimePath(indexes, step.targetPath)
+      if (!runtimePath) {
+        continue
+      }
+
+      const validationMessage = validateRuntimePathLiteralValue({
+        runtimePath,
+        operator: step.type || step.stepType,
+        value: step.value,
+        validationMode: RUNTIME_PATH_LITERAL_VALIDATION_MODES.TYPE_AND_NULLABILITY,
+        allowListValues: false,
+      })
+      if (validationMessage) {
+        notes.push({
+          level: 'error',
+          source: stepSource,
+          message:
+            `Runtime path "${step.targetPath}" declares ${runtimePath.dataType}; `
+            + `STATE_UPDATE value is invalid. ${validationMessage}`,
+        })
+      }
     }
   }
 }
