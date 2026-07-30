@@ -22644,6 +22644,74 @@ describe('Runtime Instance API', () => {
     })
   })
 
+  test('released hyphenated package section keys resolve all six current interpretation profiles', () => {
+    const releasedRows = currentSectionProfileFixtures.map((fixture) => {
+      const releasedSectionKey = fixture.sectionKey.replace(/_/g, '-')
+      const section = {
+        ...makeCurrentProfileSection(fixture),
+        sectionKey: releasedSectionKey,
+      }
+      const baseContract = makeCurrentProfileExecutionContract(fixture)
+      const sectionExecutionContract = {
+        ...baseContract,
+        sectionIdentity: {
+          ...baseContract.sectionIdentity,
+          sectionKey: releasedSectionKey,
+        },
+      }
+      return { fixture, section, sectionExecutionContract }
+    })
+    const frameworkPackage = makeRendererFrameworkPackage({
+      packageKey: 'standard-package-vmf-3-1-3-rkm',
+      version: '3.1.3',
+      sections: releasedRows.map(({ section }) => section),
+    })
+    const frameworkState = {
+      lifecycle: { stage: 'DRAFT' },
+      evidence_pack: makeReadyDiscoveryEvidencePack({
+        accepted: true,
+        inputs: {
+          companyName: 'StorylineOS',
+          targetOffer: 'AI-assisted value narrative platform',
+        },
+        state: {
+          status: 'ACCEPTED',
+          inputComplete: true,
+          evidenceReady: true,
+          accepted: true,
+          needsRefresh: false,
+        },
+      }),
+      sections: Object.fromEntries(
+        currentSectionProfileFixtures.map((fixture) => [fixture.sectionKey, '']),
+      ),
+    }
+    const runtimeInstance = makeRuntimeInstanceDocument({
+      packageKey: frameworkPackage.packageKey,
+      packageVersion: frameworkPackage.version,
+      framework_state: frameworkState,
+    })
+
+    releasedRows.forEach(({ fixture, section, sectionExecutionContract }) => {
+      const { generated } = buildEnrichedGeneratedSection({
+        actionKey: 'GENERATE_SECTION',
+        actorUserId: CUSTOMER_ADMIN_ID,
+        dependencySectionKeys: [],
+        frameworkPackage,
+        frameworkState,
+        input: '',
+        runtimeInstance,
+        section,
+        sectionExecutionContract,
+        generatedAt: '2026-07-30T10:00:00.000Z',
+      })
+
+      expect(generated.sections.map(({ heading }) => heading)).toEqual(
+        expect.arrayContaining(fixture.expectedHeadings),
+      )
+    })
+  })
+
   test('current completeness validation is deterministic and retains bounded traceability', () => {
     const fixture = currentSectionProfileFixtures.find(
       (candidate) => candidate.sectionKey === 'strategic_objectives',

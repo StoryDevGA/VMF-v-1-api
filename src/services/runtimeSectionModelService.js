@@ -297,6 +297,9 @@ const SECTION_CATEGORY_RULES = Object.freeze({
 
 const normalizeSectionText = (value) => String(value || '').trim()
 
+const normalizeSectionIdentityKey = (value) =>
+  normalizeSectionText(value).toLowerCase().replace(/-/g, '_')
+
 const normalizeSectionToken = (value) =>
   normalizeSectionText(value).replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '').toUpperCase()
 
@@ -360,9 +363,10 @@ const validateCurrentSectionInterpretationContract = ({
   const constraints = isPlainObject(runtimeInstructions.constraints)
     ? runtimeInstructions.constraints
     : {}
-  const contractSectionKey = normalizeSectionText(sectionIdentity.sectionKey).toLowerCase()
+  const profileSectionKey = normalizeSectionIdentityKey(profile.sectionKey)
+  const contractSectionKey = normalizeSectionIdentityKey(sectionIdentity.sectionKey)
   const contractRuntimePath = normalizeSectionText(sectionIdentity.runtimePath).toLowerCase()
-  const actualSectionKey = normalizeSectionText(section?.sectionKey || section?.key).toLowerCase()
+  const actualSectionKey = normalizeSectionIdentityKey(section?.sectionKey || section?.key)
   const actualRuntimePath = normalizeSectionText(section?.runtimePath).toLowerCase()
 
   if (!normalizeSectionText(sectionExecutionContract.contractVersion)) {
@@ -375,13 +379,13 @@ const validateCurrentSectionInterpretationContract = ({
   if (!contractRuntimePath) mismatchFields.push('CONTRACT_RUNTIME_PATH_REQUIRED')
   if (!actualSectionKey) mismatchFields.push('ACTUAL_SECTION_KEY_REQUIRED')
   if (!actualRuntimePath) mismatchFields.push('ACTUAL_RUNTIME_PATH_REQUIRED')
-  if (contractSectionKey && contractSectionKey !== profile.sectionKey) {
+  if (contractSectionKey && contractSectionKey !== profileSectionKey) {
     mismatchFields.push('PROFILE_CONTRACT_SECTION_KEY_MISMATCH')
   }
   if (contractRuntimePath && contractRuntimePath !== profile.runtimePath) {
     mismatchFields.push('PROFILE_CONTRACT_RUNTIME_PATH_MISMATCH')
   }
-  if (actualSectionKey && actualSectionKey !== profile.sectionKey) {
+  if (actualSectionKey && actualSectionKey !== profileSectionKey) {
     mismatchFields.push('PROFILE_ACTUAL_SECTION_KEY_MISMATCH')
   }
   if (actualRuntimePath && actualRuntimePath !== profile.runtimePath) {
