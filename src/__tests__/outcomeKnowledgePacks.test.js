@@ -2,6 +2,7 @@ import mongoose from 'mongoose'
 import zlib from 'node:zlib'
 import crypto from 'node:crypto'
 import { describe, test, expect, beforeAll, beforeEach, afterAll, jest } from '@jest/globals'
+import { buildKnowledgePackRelationshipChecksum } from '../services/knowledgePackRelationshipContract.js'
 
 beforeAll(() => {
   process.env.NODE_ENV = 'test'
@@ -171,6 +172,24 @@ endobj
 
 const buildTestContentHash = (content) =>
   `sha256:${crypto.createHash('sha256').update(String(content || ''), 'utf8').digest('hex')}`
+const EMPTY_RELATIONSHIP_CHECKSUM = crypto
+  .createHash('sha256')
+  .update('[]')
+  .digest('hex')
+const makeKnowledgeAssetId = (packType, packKey) => (
+  `QA-${String(packType)}-${String(packKey)}`
+    .replace(/[^a-z0-9]+/gi, '-')
+    .replace(/^-+|-+$/g, '')
+    .toUpperCase()
+)
+const runtimeDependency = (targetKnowledgeLayer, targetCapabilityKey) => ({
+  relationshipType: 'REQUIRED_AT_RUNTIME',
+  targetKnowledgeLayer,
+  targetCapabilityKey,
+  requiredAt: 'RUNTIME',
+  cardinality: 'ONE',
+})
+const relationshipChecksum = (relationships) => buildKnowledgePackRelationshipChecksum(relationships)
 
 const DEFAULT_SOURCE_DOCUMENT_TEXT =
   'Output Schemas source document with required sections, schema guidance, and prohibited unsupported claims.'
@@ -341,9 +360,14 @@ const makeKnowledgePackVersion = (overrides = {}) => ({
   packCategory: 'OUTCOME',
   packType: 'OUTPUT_SCHEMA',
   packKey: 'output-schemas-pack',
+  knowledgeAssetId: 'OSC-QA-001',
   knowledgeLayer: 'OUTPUT_SCHEMA',
   capabilityKey: 'output-schemas-pack',
+  knowledgeAssetId: 'OSC-QA-001',
   workspaceCompatibility: ['OUTCOME'],
+  dependencyReferences: [],
+  relationshipContractVersion: 'SS002_RELATIONSHIP_V1',
+  relationshipChecksum: EMPTY_RELATIONSHIP_CHECKSUM,
   semanticVersion: '1.0.0',
   schemaVersion: '1.0.0',
   status: 'VALIDATED',
@@ -435,6 +459,7 @@ const makeActivation = (pack, overrides = {}) => ({
   purposeCategory: pack.purposeCategory || 'GOVERNANCE',
   packType: pack.packType,
   packKey: pack.packKey,
+  knowledgeAssetId: pack.knowledgeAssetId || makeKnowledgeAssetId(pack.packType, pack.packKey),
   label: pack.label || pack.packKey,
   semanticVersion: '1.0.0',
   schemaVersion: '1.0.0',
@@ -446,6 +471,9 @@ const makeActivation = (pack, overrides = {}) => ({
   customerId: pack.customerId || null,
   tenantId: pack.tenantId || null,
   contentHash: `sha256:${pack.packKey}`,
+  dependencyReferences: [],
+  relationshipContractVersion: 'SS002_RELATIONSHIP_V1',
+  relationshipChecksum: EMPTY_RELATIONSHIP_CHECKSUM,
   content: {
     hidden: 'Activation content must not leak from preview responses.',
   },
@@ -459,6 +487,10 @@ const makeVersionForActivation = (activation, overrides = {}) => makeKnowledgePa
   packCategory: activation.packCategory,
   packType: activation.packType,
   packKey: activation.packKey,
+  knowledgeAssetId: activation.knowledgeAssetId,
+  dependencyReferences: activation.dependencyReferences || [],
+  relationshipContractVersion: activation.relationshipContractVersion,
+  relationshipChecksum: activation.relationshipChecksum,
   semanticVersion: activation.semanticVersion,
   schemaVersion: activation.schemaVersion,
   status: 'VALIDATED',
@@ -2237,6 +2269,13 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       }),
     }))
     expect(binding.activePacks).toHaveLength(7)
+    expect(binding.requiredPacks).toContainEqual(expect.objectContaining({
+      packId: 'kp-arl-adaptive-reasoning-layer',
+      knowledgeAssetId: makeKnowledgeAssetId('ARL', 'adaptive-reasoning-layer'),
+      relationshipContractVersion: 'SS002_RELATIONSHIP_V1',
+      relationshipChecksum: EMPTY_RELATIONSHIP_CHECKSUM,
+      dependencyReferences: [],
+    }))
     expect(binding.activePacks.map((pack) => pack.packKey)).not.toEqual(expect.arrayContaining([
       'discovery-only-domain',
       'other-tenant-brand',
@@ -2251,6 +2290,10 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
   })
 
   test('request-specific registry resolution excludes stale version hash evidence and blocks the required layer', async () => {
+    const outputTypeRelationships = [
+      runtimeDependency('OUTPUT_SCHEMA', 'executive-brief-schema'),
+      runtimeDependency('STYLE', 'executive'),
+    ]
     const outputType = makeActivation({
       packCategory: 'OUTCOME',
       purposeCategory: 'OUTPUT',
@@ -2261,10 +2304,8 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       knowledgeLayer: 'OUTPUT_TYPE',
       capabilityKey: 'executive-brief',
       workspaceCompatibility: ['OUTCOME'],
-      dependencyReferences: [
-        { knowledgeLayer: 'OUTPUT_SCHEMA', requirement: 'REQUIRED', capabilityKey: 'executive-brief-schema' },
-        { knowledgeLayer: 'STYLE', requirement: 'REQUIRED', capabilityKey: 'executive' },
-      ],
+      dependencyReferences: outputTypeRelationships,
+      relationshipChecksum: relationshipChecksum(outputTypeRelationships),
     })
     const outputSchema = makeActivation({
       packCategory: 'OUTCOME',
@@ -2321,14 +2362,90 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       activationId: style.activationId,
       blockedReason: 'VERSION_CONTENT_HASH_MISMATCH',
     }))
-    expect(binding.missingDependencies).toContainEqual(expect.objectContaining({
-      reason: 'DEPENDENCY_MISSING',
-      requirement: 'REQUIRED',
-      selector: { knowledgeLayer: 'STYLE', capabilityKey: 'executive' },
+    expect(binding.relationshipFailures).toContainEqual(expect.objectContaining({
+      code: 'MISSING_RELATIONSHIP',
+      relationship: expect.objectContaining({ targetKnowledgeLayer: 'STYLE' }),
     }))
     expect(binding.providerContextPacks).not.toContainEqual(expect.objectContaining({
       activationId: style.activationId,
     }))
+  })
+
+  test('request-specific registry resolution rejects identity, contract and checksum snapshot drift', async () => {
+    const outputTypeRelationships = [
+      runtimeDependency('OUTPUT_SCHEMA', 'executive-brief-schema'),
+      runtimeDependency('STYLE', 'executive'),
+    ]
+    const outputType = makeActivation({
+      packCategory: 'OUTCOME',
+      purposeCategory: 'OUTPUT',
+      packType: 'OUTPUT_TYPE_DEFINITION',
+      packKey: 'executive-brief-output',
+    }, {
+      knowledgeLayer: 'OUTPUT_TYPE',
+      capabilityKey: 'executive-brief',
+      workspaceCompatibility: ['OUTCOME'],
+      dependencyReferences: outputTypeRelationships,
+      relationshipChecksum: relationshipChecksum(outputTypeRelationships),
+    })
+    const outputSchema = makeActivation({
+      packCategory: 'OUTCOME',
+      purposeCategory: 'OUTPUT',
+      packType: 'OUTPUT_SCHEMA',
+      packKey: 'executive-brief-schema',
+    }, {
+      knowledgeLayer: 'OUTPUT_SCHEMA',
+      capabilityKey: 'executive-brief-schema',
+      workspaceCompatibility: ['OUTCOME'],
+    })
+    const style = makeActivation({
+      packCategory: 'CONTEXT',
+      purposeCategory: 'STYLE',
+      packType: 'STYLE',
+      packKey: 'executive-style',
+    }, {
+      knowledgeLayer: 'STYLE',
+      capabilityKey: 'executive',
+      workspaceCompatibility: ['OUTCOME'],
+    })
+    const activations = [...makeAllRequiredActivations(), outputType, outputSchema, style]
+    const versions = makeVersionsForActivations(activations).map((version) => ({
+      ...version,
+      status: 'ACTIVE',
+    }))
+    versions.find((row) => row.versionId === outputType.versionId).relationshipChecksum = '0'.repeat(64)
+    versions.find((row) => row.versionId === outputSchema.versionId).relationshipContractVersion = 'SS002-LEGACY'
+    versions.find((row) => row.versionId === style.versionId).knowledgeAssetId = 'QA-DIFFERENT-STYLE'
+    KnowledgePackActivation.find.mockReturnValue(buildFindChain(activations))
+    KnowledgePackVersion.find.mockReturnValue(buildFindChain(versions))
+
+    const binding = await resolveOutcomeStudioKnowledgePacks({
+      frameworkKey: 'VMF',
+      runtimeType: 'VALUE_NARRATIVE',
+      workspaceType: 'OUTCOME',
+      requestedOutputTypeKey: 'executive-brief',
+      resolvedAt: '2026-07-14T12:00:00.000Z',
+    })
+
+    expect(binding.status).toBe('BLOCKED')
+    expect(binding.relationshipFailures).toContainEqual(expect.objectContaining({
+      code: 'MISSING_GOVERNANCE_METADATA',
+      observedState: 'VERSION_RELATIONSHIP_CHECKSUM_MISMATCH',
+    }))
+    expect(binding.blockedPacks).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        activationId: outputType.activationId,
+        blockedReason: 'VERSION_RELATIONSHIP_CHECKSUM_MISMATCH',
+      }),
+      expect.objectContaining({
+        activationId: outputSchema.activationId,
+        blockedReason: 'VERSION_RELATIONSHIP_CONTRACT_MISMATCH',
+      }),
+      expect.objectContaining({
+        activationId: style.activationId,
+        blockedReason: 'VERSION_KNOWLEDGE_ASSET_ID_MISMATCH',
+      }),
+    ]))
   })
 
   test('GET /api/v1/super-admin/outcome-studio/knowledge-packs/:packId returns detail without version content', async () => {
@@ -2724,17 +2841,21 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       .send({
         packType: 'STYLE',
         packKey: 'board-executive-style',
+        knowledgeAssetId: 'STY-QA-001',
         label: 'Board Executive Style',
         purposeCategory: 'STYLE',
         knowledgeLayer: 'STYLE',
         capabilityKey: 'executive-board',
         workspaceCompatibility: ['OUTCOME'],
         dependencyReferences: [{
-          knowledgeLayer: 'OUTPUT_SCHEMA',
-          requirement: 'REQUIRED',
-          packType: 'OUTPUT_SCHEMA',
-          packKey: 'board-summary',
+          relationshipType: 'REQUIRED_AT_RUNTIME',
+          targetKnowledgeLayer: 'OUTPUT_SCHEMA',
+          targetPackType: 'OUTPUT_SCHEMA',
+          targetPackKey: 'board-summary',
+          requiredAt: 'RUNTIME',
+          cardinality: 'ONE',
         }],
+        relationshipContractVersion: 'SS002_RELATIONSHIP_V1',
         semanticVersion: '1.0.0',
         sourceAuthority: 'StorylineOS Methodology',
         contentFormat: 'MARKDOWN',
@@ -2784,10 +2905,12 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       capabilityKey: 'executive-board',
       workspaceCompatibility: ['OUTCOME'],
       dependencyReferences: [{
-        knowledgeLayer: 'OUTPUT_SCHEMA',
-        requirement: 'REQUIRED',
-        packType: 'OUTPUT_SCHEMA',
-        packKey: 'board-summary',
+        relationshipType: 'REQUIRED_AT_RUNTIME',
+        targetKnowledgeLayer: 'OUTPUT_SCHEMA',
+        targetPackType: 'OUTPUT_SCHEMA',
+        targetPackKey: 'board-summary',
+        requiredAt: 'RUNTIME',
+        cardinality: 'ONE',
       }],
       status: 'DRAFT',
       contentFormat: 'MARKDOWN',
@@ -2812,10 +2935,12 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
     expect(savedVersion.get('workspaceCompatibility')).toEqual(['OUTCOME'])
     expect(savedVersion.get('dependencyReferences')).toEqual([
       expect.objectContaining({
-        knowledgeLayer: 'OUTPUT_SCHEMA',
-        requirement: 'REQUIRED',
-        packType: 'OUTPUT_SCHEMA',
-        packKey: 'board-summary',
+        relationshipType: 'REQUIRED_AT_RUNTIME',
+        targetKnowledgeLayer: 'OUTPUT_SCHEMA',
+        targetPackType: 'OUTPUT_SCHEMA',
+        targetPackKey: 'board-summary',
+        requiredAt: 'RUNTIME',
+        cardinality: 'ONE',
       }),
     ])
     expect(savedVersion).toEqual(expect.objectContaining({
@@ -2913,6 +3038,7 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       .send({
         packType: 'SYSTEM',
         packKey: 'enterprise-technology',
+        knowledgeAssetId: 'SYS-QA-001',
         label: 'Enterprise Technology',
         purposeCategory: 'FRAMEWORK',
         knowledgeLayer: 'FRAMEWORK',
@@ -3008,6 +3134,7 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       .send({
         packType: 'SYSTEM',
         packKey: 'enterprise-technology-lazy-docx',
+        knowledgeAssetId: 'SYS-QA-002',
         label: 'Enterprise Technology Lazy DOCX',
         purposeCategory: 'FRAMEWORK',
         semanticVersion: '5.0.0',
@@ -3051,6 +3178,7 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       .send({
         packType: 'SYSTEM',
         packKey: 'enterprise-technology-bomb-docx',
+        knowledgeAssetId: 'SYS-QA-003',
         label: 'Enterprise Technology Bomb DOCX',
         purposeCategory: 'FRAMEWORK',
         semanticVersion: '5.0.0',
@@ -3101,6 +3229,7 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       .send({
         packType: 'SYSTEM',
         packKey: 'enterprise-technology-pdf',
+        knowledgeAssetId: 'SYS-QA-004',
         label: 'Enterprise Technology PDF',
         purposeCategory: 'FRAMEWORK',
         semanticVersion: '5.0.0',
@@ -3279,6 +3408,7 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
         sourceDocument: {
           filename: 'Board Executive Style.md',
         },
+        knowledgeAssetId: 'STY-QA-001',
         extractedText: 'Board executive style source text.',
       })
 
@@ -3323,6 +3453,7 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       .send({
         packType: 'STYLE',
         packKey: 'board-executive-style',
+        knowledgeAssetId: 'STY-QA-001',
         label: 'Board Executive Style',
         semanticVersion: '1.0.0',
         contentFormat: 'MARKDOWN',
@@ -3390,6 +3521,7 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       .send({
         packType: 'STYLE',
         packKey: 'board-executive-style',
+        knowledgeAssetId: 'STY-QA-001',
         label: 'Board Executive Style',
         semanticVersion: '1.0.0',
         contentFormat: 'MARKDOWN',
@@ -3439,6 +3571,7 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       packId: 'kp-style-board-executive-style',
       packType: 'STYLE',
       packKey: 'board-executive-style',
+      knowledgeAssetId: 'STY-QA-001',
       label: 'Board Executive Style',
       status: 'DRAFT',
     }))
@@ -3449,6 +3582,7 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       .send({
         packType: 'STYLE',
         packKey: 'board-executive-style',
+        knowledgeAssetId: 'STY-QA-001',
         label: 'Board Executive Style',
         semanticVersion: '1.0.0',
         contentFormat: 'MARKDOWN',
@@ -3515,6 +3649,7 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       .send({
         packType: 'STYLE',
         packKey: 'board-executive-style',
+        knowledgeAssetId: 'STY-QA-001',
         label: 'Board Executive Style',
         semanticVersion: '1.0.0',
         contentFormat: 'MARKDOWN',
@@ -3558,6 +3693,7 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
     })
     KnowledgePackVersion.findOne.mockReturnValueOnce(buildVersionFindOneChain(null))
     KnowledgePack.findOne
+      .mockReturnValueOnce(buildFindOneChain(null))
       .mockReturnValueOnce(buildFindOneChain(previousPackRecord))
       .mockReturnValueOnce(buildFindOneChain(null))
     KnowledgePack.findOneAndUpdate.mockResolvedValueOnce(failedImportPackRecord)
@@ -3569,6 +3705,7 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       .send({
         packType: 'STYLE',
         packKey: 'board-executive-style',
+        knowledgeAssetId: 'STY-QA-001',
         label: 'Board Executive Style',
         semanticVersion: '1.0.0',
         contentFormat: 'MARKDOWN',
@@ -3595,6 +3732,7 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       .send({
         packType: 'STYLE',
         packKey: 'standalone-style',
+        knowledgeAssetId: 'STY-QA-002',
         label: 'Standalone Style',
         semanticVersion: '1.0.0',
         contentFormat: 'MARKDOWN',
@@ -3626,6 +3764,7 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       .send({
         packType: 'STYLE',
         packKey: 'board-executive-style',
+        knowledgeAssetId: 'STY-QA-001',
         label: 'Board Executive Style',
         semanticVersion: '1.0.0',
         contentFormat: 'MARKDOWN',
@@ -3669,6 +3808,7 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       .send({
         packType: 'STYLE',
         packKey: 'board-executive-style',
+        knowledgeAssetId: 'STY-QA-001',
         label: 'Board Executive Style',
         semanticVersion: '1.0.0',
         contentFormat: 'MARKDOWN',
@@ -3695,6 +3835,7 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       .send({
         packType: 'STYLE',
         packKey: 'board-executive-style',
+        knowledgeAssetId: 'STY-QA-001',
         label: 'Board Executive Style',
         semanticVersion: '1.0.0',
         contentFormat: 'MARKDOWN',

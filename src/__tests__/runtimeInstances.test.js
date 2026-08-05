@@ -4,6 +4,7 @@ import { createRequire } from 'node:module'
 import zlib from 'node:zlib'
 import JSZip from 'jszip'
 import { evaluateRuntimeSectionTruthReadiness } from '../services/runtimeSectionTruthReadinessService.js'
+import { buildKnowledgePackRelationshipChecksum } from '../services/knowledgePackRelationshipContract.js'
 
 const moduleRequire = createRequire(import.meta.url)
 const { createCanvas } = moduleRequire('@napi-rs/canvas')
@@ -5769,6 +5770,97 @@ describe('Runtime Instance API', () => {
     ])
   })
 
+  test('PATCH /api/v1/runtime-instances/:id/discovery-acceptance retains all accepted evidence facts beyond twelve and excludes rejected objects', async () => {
+    const acceptedEvidenceObjects = Array.from({ length: 14 }, (_, index) => makeDiscoveryEvidenceObject({
+      evidenceObjectId: `evidence_document_complete_lineage_${index + 1}`,
+      sourceId: `document_complete_lineage_${index + 1}`,
+      category: 'Value Drivers',
+      coverageArea: 'Decision Context',
+      extractedFact: `Accepted evidence fact ${index + 1}.`,
+      reviewStatus: 'ACCEPTED',
+      acquisitionMethod: 'DOCUMENT_INGESTION',
+      acceptedBy: CUSTOMER_ADMIN_ID,
+      acceptanceTimestamp: '2026-05-19T08:00:45.000Z',
+      lineageRef: `lineage:document_complete_lineage_${index + 1}:value`,
+    }))
+    const rejectedEvidenceObject = makeDiscoveryEvidenceObject({
+      evidenceObjectId: 'evidence_document_complete_lineage_rejected',
+      sourceId: 'document_complete_lineage_rejected',
+      category: 'Proof',
+      coverageArea: 'Proof',
+      extractedFact: 'Rejected evidence fact must not enter accepted scoped lineage.',
+      reviewStatus: 'REJECTED',
+      acquisitionMethod: 'DOCUMENT_INGESTION',
+      rejectedBy: CUSTOMER_ADMIN_ID,
+      rejectionTimestamp: '2026-05-19T08:00:45.000Z',
+      lineageRef: 'lineage:document_complete_lineage_rejected:proof',
+    })
+    const evidencePack = makeReviewableDiscoveryEvidencePack({
+      evidenceObjects: [...acceptedEvidenceObjects, rejectedEvidenceObject],
+      scoped_views: {
+        value_drivers: {
+          source: 'DISCOVERY_EVIDENCE_PACK',
+          summary: 'Accepted scoped evidence must be rebuilt during acceptance.',
+        },
+      },
+    })
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+      framework_state: {
+        lifecycle: { stage: 'DRAFT' },
+        evidence_pack: evidencePack,
+        sections: {},
+        validation: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...runtimeInstanceDoc,
+      ...(update?.$set || {}),
+      updatedAt: new Date('2026-05-19T08:02:00.000Z'),
+    }))
+    RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeEvidencePackRuntimePathRecord()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/discovery-acceptance`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-05-19T08:01:00.000Z',
+      })
+
+    expect(res.status).toBe(200)
+    const persistedEvidencePack = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state.evidence_pack
+    const scopedView = persistedEvidencePack.scoped_views.value_drivers
+    const acceptedEvidenceObjectIds = acceptedEvidenceObjects.map((evidenceObject) => evidenceObject.evidenceObjectId)
+    expect(scopedView.evidenceObjectIds).toEqual(acceptedEvidenceObjectIds)
+    expect(scopedView.evidenceFacts).toHaveLength(14)
+    expect(scopedView.evidenceFacts.map((fact) => fact.evidenceObjectId)).toEqual(acceptedEvidenceObjectIds)
+    expect(scopedView.evidenceFacts[12]).toEqual(expect.objectContaining({
+      evidenceObjectId: 'evidence_document_complete_lineage_13',
+      sourceId: 'document_complete_lineage_13',
+      category: 'Value Drivers',
+      coverageArea: 'Decision Context',
+      extractedFact: 'Accepted evidence fact 13.',
+    }))
+    expect(scopedView.evidenceFacts[13]).toEqual(expect.objectContaining({
+      evidenceObjectId: 'evidence_document_complete_lineage_14',
+      extractedFact: 'Accepted evidence fact 14.',
+    }))
+    expect(scopedView.evidenceObjectIds).not.toContain(rejectedEvidenceObject.evidenceObjectId)
+    expect(scopedView.evidenceFacts).toEqual(expect.not.arrayContaining([
+      expect.objectContaining({ evidenceObjectId: rejectedEvidenceObject.evidenceObjectId }),
+    ]))
+    expect(scopedView.sourceRefs).not.toContain(rejectedEvidenceObject.sourceId)
+    expect(scopedView.summary).toContain('Accepted evidence fact 6.')
+    expect(scopedView.summary).not.toContain('Accepted evidence fact 7.')
+    expect(scopedView.summary).not.toContain(rejectedEvidenceObject.extractedFact)
+    expect(persistedEvidencePack.scopedViews.value_drivers).toEqual(scopedView)
+  })
+
   test('PATCH /api/v1/runtime-instances/:id/discovery-evidence/:evidenceObjectId/review rejects invalid review status before mutation lookup', async () => {
     RuntimeInstance.findOne = jest.fn()
     const token = await getAccessTokenForUser(makeCustomerAdmin())
@@ -9465,27 +9557,37 @@ describe('Runtime Instance API', () => {
     semanticVersion = '1.0.0',
     activatedAt = '2026-06-15T09:30:00.000Z',
     workspaceCompatibility = [],
-  }) => ({
-    activationId: `kpa-${packKey}-${scopeKey.toLowerCase().replace(/[^a-z0-9-]+/g, '-')}`,
-    packId: `kp-${packType.toLowerCase().replace(/_/g, '-')}-${packKey}`,
-    versionId: `kpv-${packKey}-${semanticVersion.replace(/\./g, '-')}`,
-    packCategory: getOutcomeKnowledgePackCategory(packType),
-    knowledgeLayer,
-    capabilityKey,
-    workspaceCompatibility,
-    dependencyReferences,
-    packType,
-    packKey,
-    label,
-    semanticVersion,
-    schemaVersion: '1.0.0',
-    status: 'ACTIVE',
-    executionMode,
-    scopeType,
-    scopeKey,
-    contentHash: `sha256:${packKey}`,
-    activatedAt,
-  })
+  }) => {
+    const knowledgeAssetId = `QA-${createHash('sha256')
+      .update(`${packType}:${packKey}`)
+      .digest('hex')
+      .slice(0, 16)
+      .toUpperCase()}`
+    return {
+      activationId: `kpa-${packKey}-${scopeKey.toLowerCase().replace(/[^a-z0-9-]+/g, '-')}`,
+      packId: `kp-${packType.toLowerCase().replace(/_/g, '-')}-${packKey}`,
+      versionId: `kpv-${packKey}-${semanticVersion.replace(/\./g, '-')}`,
+      packCategory: getOutcomeKnowledgePackCategory(packType),
+      knowledgeLayer,
+      capabilityKey,
+      knowledgeAssetId,
+      workspaceCompatibility,
+      dependencyReferences,
+      relationshipContractVersion: 'SS002_RELATIONSHIP_V1',
+      relationshipChecksum: buildKnowledgePackRelationshipChecksum(dependencyReferences),
+      packType,
+      packKey,
+      label,
+      semanticVersion,
+      schemaVersion: '1.0.0',
+      status: 'ACTIVE',
+      executionMode,
+      scopeType,
+      scopeKey,
+      contentHash: `sha256:${packKey}`,
+      activatedAt,
+    }
+  }
 
   const makeActiveOutcomeKnowledgePackActivations = () => ([
     makeOutcomeKnowledgePackActivation({
@@ -9531,14 +9633,18 @@ describe('Runtime Instance API', () => {
       workspaceCompatibility: ['OUTCOME'],
       dependencyReferences: [
         {
-          knowledgeLayer: 'OUTPUT_SCHEMA',
-          capabilityKey: outputSchemaKey,
-          requirement: 'REQUIRED',
+          relationshipType: 'REQUIRED_AT_RUNTIME',
+          targetKnowledgeLayer: 'OUTPUT_SCHEMA',
+          targetCapabilityKey: outputSchemaKey,
+          requiredAt: 'RUNTIME',
+          cardinality: 'ONE',
         },
         {
-          knowledgeLayer: 'STYLE',
-          capabilityKey: styleKey,
-          requirement: 'REQUIRED',
+          relationshipType: 'REQUIRED_AT_RUNTIME',
+          targetKnowledgeLayer: 'STYLE',
+          targetCapabilityKey: styleKey,
+          requiredAt: 'RUNTIME',
+          cardinality: 'ONE',
         },
       ],
       packType: 'OUTPUT_TYPE_DEFINITION',
@@ -9570,8 +9676,11 @@ describe('Runtime Instance API', () => {
     purposeCategory: activation.purposeCategory,
     knowledgeLayer: activation.knowledgeLayer,
     capabilityKey: activation.capabilityKey,
+    knowledgeAssetId: activation.knowledgeAssetId,
     workspaceCompatibility: activation.workspaceCompatibility,
     dependencyReferences: activation.dependencyReferences,
+    relationshipContractVersion: activation.relationshipContractVersion,
+    relationshipChecksum: activation.relationshipChecksum,
     packType: activation.packType,
     packKey: activation.packKey,
     semanticVersion: activation.semanticVersion,
@@ -9596,6 +9705,24 @@ describe('Runtime Instance API', () => {
       ].join('\n'),
     } : {}),
   }))
+
+  test('keeps Outcome Knowledge Pack activation and version relationship fixtures in SS-002 parity', () => {
+    const activations = makeRequestReadyOutcomeKnowledgePackActivations()
+    const versions = makeOutcomeKnowledgePackVersions(activations)
+
+    for (const activation of activations) {
+      const version = versions.find((candidate) => candidate.versionId === activation.versionId)
+      expect(version).toEqual(expect.objectContaining({
+        knowledgeAssetId: activation.knowledgeAssetId,
+        dependencyReferences: activation.dependencyReferences,
+        relationshipContractVersion: 'SS002_RELATIONSHIP_V1',
+        relationshipChecksum: buildKnowledgePackRelationshipChecksum(activation.dependencyReferences),
+      }))
+      expect(activation.relationshipChecksum).toBe(
+        buildKnowledgePackRelationshipChecksum(activation.dependencyReferences),
+      )
+    }
+  })
 
   const mockRequestReadyOutcomeKnowledgePacks = (options = {}) => {
     const layerByPackType = {
@@ -11809,6 +11936,17 @@ describe('Runtime Instance API', () => {
   })
 
   test('PATCH /api/v1/runtime-instances/:id/section-acceptance persists accepted section truth with audit', async () => {
+    const generatedSections = [{
+      heading: 'Evidence Boundaries',
+      body: 'The interpretation retains material customer-provided qualifications.',
+      bullets: ['Customer-provided qualification: QA fixture only'],
+    }]
+    const generatedContent = [
+      'Customer Problem: Proposal creation is slow.',
+      'Evidence Boundaries',
+      'The interpretation retains material customer-provided qualifications.',
+      '- Customer-provided qualification: QA fixture only',
+    ].join('\n\n')
     const runtimeInstanceDoc = makeRuntimeInstanceDocument({
       updatedAt: new Date('2026-05-19T08:00:00.000Z'),
       framework_state: {
@@ -11828,7 +11966,8 @@ describe('Runtime Instance API', () => {
             input: 'Proposal creation is slow.',
             generated: {
               format: 'TEXT',
-              content: 'Customer Problem: Proposal creation is slow.',
+              content: generatedContent,
+              sections: generatedSections,
               summary: 'Generated from current runtime input.',
               generatedAt: '2026-05-19T08:01:00.000Z',
               actionKey: 'GENERATE_SECTION',
@@ -11880,7 +12019,8 @@ describe('Runtime Instance API', () => {
     const persistedSection = persistedFrameworkState.sections.customer_problem
     const persistedGraph = persistedFrameworkState.intelligence_graph
     expect(persistedSection.accepted).toEqual(expect.objectContaining({
-      content: 'Customer Problem: Proposal creation is slow.',
+      content: generatedContent,
+      sections: generatedSections,
       truthHash: expect.stringMatching(/^sha256:/),
       acceptedBy: CUSTOMER_ADMIN_ID,
       sourceActionKey: 'GENERATE_SECTION',
@@ -11934,7 +12074,8 @@ describe('Runtime Instance API', () => {
         operation: 'WRITE',
         previousValue: null,
         nextValue: expect.objectContaining({
-          content: 'Customer Problem: Proposal creation is slow.',
+          content: generatedContent,
+          sections: generatedSections,
           sourceGeneratedAt: '2026-05-19T08:01:00.000Z',
         }),
         autoRebuilt: true,
@@ -11947,7 +12088,8 @@ describe('Runtime Instance API', () => {
       sectionKey: 'customer_problem',
       runtimePath: 'framework_state.sections.customer_problem',
       accepted: expect.objectContaining({
-        content: 'Customer Problem: Proposal creation is slow.',
+        content: generatedContent,
+        sections: generatedSections,
         truthHash: acceptedTruthHash,
       }),
       previousAccepted: null,
@@ -22523,6 +22665,7 @@ describe('Runtime Instance API', () => {
   )
 
   test('current VMF guided sections use exact versioned profiles with distinct customer-safe structures', () => {
+    const websiteUrl = 'https://storylineos.example/platform/v2/?region=uk&mode=full'
     const frameworkPackage = makeRendererFrameworkPackage({
       packageKey: 'vmf-standard-3-1-2',
       version: '3.1.2',
@@ -22533,7 +22676,7 @@ describe('Runtime Instance API', () => {
       evidence_pack: makeReadyDiscoveryEvidencePack({
         accepted: true,
         inputs: {
-          companyWebsite: 'https://storylineos.example',
+          companyWebsite: websiteUrl,
           companyName: 'StorylineOS',
           marketRegion: 'UK enterprise software',
           targetOffer: 'AI-assisted value narrative platform',
@@ -22623,6 +22766,72 @@ describe('Runtime Instance API', () => {
       generatedRows.map(({ generated }) =>
         generated.sections.map((section) => section.heading).join('|')),
     ).size).toBe(currentSectionProfileFixtures.length)
+
+    const sentenceBoundaryFact =
+      `Company website: ${websiteUrl}. Company market: Regulated UK enterprise software.`
+    const boundaryFrameworkState = {
+      lifecycle: { stage: 'DRAFT' },
+      evidence_pack: makeReadyDiscoveryEvidencePack({
+        accepted: true,
+        inputs: {
+          companyWebsite: '',
+          companyName: '',
+          marketRegion: '',
+          targetOffer: '',
+          notes: '',
+        },
+        evidenceObjects: [
+          makeDiscoveryEvidenceObject({
+            evidenceObjectId: 'evidence_url_sentence_boundary_fixture',
+            extractedFact: sentenceBoundaryFact,
+            reviewStatus: 'ACCEPTED',
+            acceptedBy: CUSTOMER_ADMIN_ID,
+            acceptanceTimestamp: '2026-07-28T09:59:00.000Z',
+          }),
+        ],
+        scoped_views: {},
+        state: {
+          status: 'ACCEPTED',
+          inputComplete: true,
+          evidenceReady: true,
+          accepted: true,
+          needsRefresh: false,
+        },
+      }),
+      sections: { customer_context: '' },
+    }
+    const customerContextFixture = currentSectionProfileFixtures.find(
+      (fixture) => fixture.sectionKey === 'customer_context',
+    )
+    const sentenceBoundaryGeneration = buildEnrichedGeneratedSection({
+      actionKey: 'GENERATE_SECTION',
+      actorUserId: CUSTOMER_ADMIN_ID,
+      dependencySectionKeys: [],
+      frameworkPackage,
+      frameworkState: boundaryFrameworkState,
+      input: '',
+      runtimeInstance: makeRuntimeInstanceDocument({
+        packageKey: 'vmf-standard-3-1-2',
+        packageVersion: '3.1.2',
+        framework_state: boundaryFrameworkState,
+      }),
+      section: makeCurrentProfileSection(customerContextFixture),
+      sectionExecutionContract: makeCurrentProfileExecutionContract(customerContextFixture),
+      generatedAt: '2026-07-28T10:00:00.000Z',
+    })
+    const boundarySection = sentenceBoundaryGeneration.generated.sections.find(
+      ({ heading }) => heading === 'Customer and Offer Context',
+    )
+    expect(boundarySection.bullets).toEqual(expect.arrayContaining([
+      `Business context: Company website: ${websiteUrl}.`,
+      'Business context: Company market: Regulated UK enterprise software.',
+    ]))
+    expect(boundarySection.bullets).not.toContain(
+      'Business context: Company website: https://storylineos.',
+    )
+    expect(boundarySection.bullets).not.toContain(
+      `Business context: ${sentenceBoundaryFact}.`,
+    )
 
     const strategicRow = generatedRows.find(({ fixture }) =>
       fixture.sectionKey === 'strategic_objectives')
@@ -23305,6 +23514,340 @@ describe('Runtime Instance API', () => {
     })
   })
 
+  test('current Stakeholder profile preserves only bounded explicit-input QA qualifications', () => {
+    const fixture = currentSectionProfileFixtures.find(
+      (candidate) => candidate.sectionKey === 'stakeholder_register',
+    )
+    const buildStakeholder = ({ input, notes = 'Teams use a governed workflow.' }) => {
+      const frameworkPackage = makeRendererFrameworkPackage({
+        packageKey: 'vmf-standard-3-1-2',
+        version: '3.1.2',
+        sections: [makeCurrentProfileSection(fixture)],
+      })
+      const frameworkState = {
+        evidence_pack: makeReadyDiscoveryEvidencePack({
+          accepted: true,
+          inputs: {
+            companyName: 'StorylineOS',
+            targetOffer: 'AI-assisted value narrative platform',
+            notes,
+          },
+          state: {
+            status: 'ACCEPTED',
+            inputComplete: true,
+            evidenceReady: true,
+            accepted: true,
+            needsRefresh: false,
+          },
+        }),
+        sections: { stakeholder_register: '' },
+      }
+      const runtimeInstance = makeRuntimeInstanceDocument({
+        packageKey: 'vmf-standard-3-1-2',
+        packageVersion: '3.1.2',
+        framework_state: frameworkState,
+      })
+      return buildEnrichedGeneratedSection({
+        actionKey: 'GENERATE_SECTION',
+        actorUserId: CUSTOMER_ADMIN_ID,
+        dependencySectionKeys: [],
+        frameworkPackage,
+        frameworkState,
+        input,
+        runtimeInstance,
+        section: makeCurrentProfileSection(fixture),
+        sectionExecutionContract: makeCurrentProfileExecutionContract(fixture),
+        generatedAt: '2026-07-28T10:00:00.000Z',
+      }).generated
+    }
+
+    const qualifiedInput = [
+      'QA fixture only.',
+      'User-authorized fictitious stakeholders for this runtime.',
+      'They are not real customer people.',
+      'Quinn Fixture QA is the sponsor.',
+      'Quinn Fixture QA is the final budget approver and has high influence.',
+      'Riley Fixture QA is the user.',
+    ].join(' ')
+    const qualified = buildStakeholder({ input: qualifiedInput })
+    const qualifiedBoundaries = qualified.sections.find(
+      (section) => section.heading === 'Evidence Boundaries',
+    )
+
+    expect(qualified.content).toContain('Quinn Fixture QA \u2014 sponsor')
+    expect(qualified.content).toContain('Riley Fixture QA \u2014 user')
+    expect(qualifiedBoundaries.bullets).toEqual(expect.arrayContaining([
+      'Customer-provided qualification: QA fixture only',
+      'Customer-provided qualification: User-authorized fictitious stakeholders for this runtime',
+      'Customer-provided qualification: They are not real customer people',
+    ]))
+    expect(qualifiedBoundaries.bullets.join(' ')).not.toMatch(
+      /final budget|high influence|Riley Fixture/i,
+    )
+    expect(qualified.content).not.toContain(qualifiedInput)
+
+    const adjacentClaims = buildStakeholder({
+      input: [
+        'QA fixture only.',
+        'These are fictitious stakeholders with high influence and final budget authority.',
+        'Quinn Fixture QA is the sponsor.',
+      ].join(' '),
+    })
+    const adjacentClaimBoundaries = adjacentClaims.sections.find(
+      (section) => section.heading === 'Evidence Boundaries',
+    )
+    expect(adjacentClaimBoundaries.bullets).toContain(
+      'Customer-provided qualification: fictitious stakeholders',
+    )
+    expect(adjacentClaimBoundaries.bullets.join(' ')).not.toMatch(
+      /high influence|final budget authority/i,
+    )
+
+    const ordinary = buildStakeholder({
+      input: 'Taylor Morgan is the sponsor.',
+    })
+    expect(ordinary.content).not.toContain('Customer-provided qualification:')
+
+    const nonExplicit = buildStakeholder({
+      input: 'Quinn Fixture QA is the sponsor.',
+      notes: 'QA fixture only. These are synthetic stakeholders and not real customer people.',
+    })
+    expect(nonExplicit.content).toContain('Quinn Fixture \u2014 sponsor')
+    expect(nonExplicit.content).not.toContain('Quinn Fixture QA \u2014 sponsor')
+    expect(nonExplicit.content).not.toContain('Customer-provided qualification:')
+
+    const roleAcronym = buildStakeholder({
+      input: 'QA fixture only. Alex Morgan CFO is the sponsor.',
+    })
+    expect(roleAcronym.content).toContain('Alex Morgan \u2014 sponsor')
+    expect(roleAcronym.content).not.toContain('Alex Morgan CFO')
+    expect(roleAcronym.content).not.toContain('CFO \u2014 sponsor')
+  })
+
+  test('current Output Requirements profile projects only explicit named reviewers', () => {
+    const fixtures = currentSectionProfileFixtures.filter((fixture) =>
+      ['stakeholder_register', 'output_requirements'].includes(fixture.sectionKey),
+    )
+    const buildForInput = (input) => {
+      const frameworkPackage = makeRendererFrameworkPackage({
+        packageKey: 'vmf-standard-3-1-2',
+        version: '3.1.2',
+        sections: fixtures.map(makeCurrentProfileSection),
+      })
+      const frameworkState = {
+        evidence_pack: makeReadyDiscoveryEvidencePack({
+          accepted: true,
+          inputs: {
+            companyName: 'StorylineOS',
+            targetOffer: 'AI-assisted value narrative platform',
+            notes: 'Teams use a governed workflow.',
+          },
+          state: {
+            status: 'ACCEPTED',
+            inputComplete: true,
+            evidenceReady: true,
+            accepted: true,
+            needsRefresh: false,
+          },
+        }),
+        sections: Object.fromEntries(fixtures.map((fixture) => [fixture.sectionKey, ''])),
+      }
+      const runtimeInstance = makeRuntimeInstanceDocument({
+        packageKey: 'vmf-standard-3-1-2',
+        packageVersion: '3.1.2',
+        framework_state: frameworkState,
+      })
+
+      return Object.fromEntries(fixtures.map((fixture) => [
+        fixture.sectionKey,
+        buildEnrichedGeneratedSection({
+          actionKey: 'GENERATE_SECTION',
+          actorUserId: CUSTOMER_ADMIN_ID,
+          dependencySectionKeys: [],
+          frameworkPackage,
+          frameworkState,
+          input,
+          runtimeInstance,
+          section: makeCurrentProfileSection(fixture),
+          sectionExecutionContract: makeCurrentProfileExecutionContract(fixture),
+          generatedAt: '2026-07-28T10:00:00.000Z',
+        }).generated,
+      ]))
+    }
+
+    const reviewer = buildForInput(
+      'QA fixture only. Riley Fixture QA is the operational reviewer.',
+    )
+    const reviewerBoundaries = reviewer.output_requirements.sections.find(
+      (section) => section.heading === 'Evidence Boundaries',
+    )
+    expect(reviewer.output_requirements.content).toContain('Riley Fixture QA \u2014 reviewer')
+    expect(reviewerBoundaries.bullets).toContain(
+      'Customer-provided qualification: QA fixture only',
+    )
+    expect(reviewer.stakeholder_register.content).not.toContain('reviewer')
+
+    const user = buildForInput(
+      'QA fixture only. Riley Fixture QA is the operational user.',
+    )
+    expect(user.output_requirements.content).not.toContain('Riley Fixture QA')
+    expect(user.output_requirements.content).not.toContain('\u2014 reviewer')
+    expect(user.stakeholder_register.content).toContain('Riley Fixture QA \u2014 user')
+
+    const mixed = buildForInput(
+      'QA fixture only. Riley Fixture QA is the operational reviewer and user.',
+    )
+    expect(mixed.output_requirements.content).toContain('Riley Fixture QA \u2014 reviewer')
+    expect(mixed.output_requirements.content).not.toContain('Riley Fixture QA \u2014 user')
+    expect(mixed.stakeholder_register.content).toContain('Riley Fixture QA \u2014 user')
+    expect(mixed.stakeholder_register.content).not.toContain('reviewer')
+
+    const negated = buildForInput('Riley Fixture QA is not the reviewer.')
+    expect(negated.output_requirements.content).not.toContain('\u2014 reviewer')
+
+    const unnamed = buildForInput('The operational reviewer will check the brief.')
+    expect(unnamed.output_requirements.content).not.toContain('\u2014 reviewer')
+
+    const complete = buildForInput([
+      'QA fixture only.',
+      'The only generated acceptance asset is one Executive Brief.',
+      'Primary audience: Quinn Fixture QA, executive sponsor and final approver.',
+      'Riley Fixture QA is the operational reviewer.',
+      'The brief must retain searchable and accessible text, editable structure where supported, and element-level lineage.',
+      'Exact delivery file type and channel are not yet specified and must remain visible gaps.',
+      'Output shaping occurs only after ARL-approved meaning.',
+      'Publication, presentation generation, and infographic work are out of scope.',
+    ].join(' '))
+    const completeRequirements = complete.output_requirements.sections.find(
+      (section) => section.heading === 'Known Output Requirements',
+    )
+    const completeBoundaries = complete.output_requirements.sections.find(
+      (section) => section.heading === 'Evidence Boundaries',
+    )
+    expect(completeRequirements.bullets).toEqual(expect.arrayContaining([
+      'Audience: Quinn Fixture QA \u2014 primary audience, executive sponsor, final approver.',
+      'Audience: Riley Fixture QA \u2014 reviewer.',
+      'Format or length: The only generated acceptance asset is one Executive Brief.',
+      'Format or length: The brief must retain searchable and accessible text, editable structure where supported, and element-level lineage.',
+      'Unresolved requirement: Exact delivery file type and channel are not yet specified and must remain visible gaps.',
+      'Governance constraint: Output shaping occurs only after ARL-approved meaning.',
+      'Scope exclusion: Publication, presentation generation, and infographic work are out of scope.',
+    ]))
+    expect(completeBoundaries.bullets).toContain(
+      'Customer-provided qualification: QA fixture only',
+    )
+    expect(complete.output_requirements.content).not.toMatch(/\b(?:PDF|DOCX|email|portal)\b/i)
+    expect(complete.stakeholder_register.content).not.toContain('reviewer')
+    expect(completeRequirements.bullets.filter((bullet) =>
+      bullet.startsWith('Unresolved requirement:'))).toHaveLength(1)
+    expect(completeRequirements.bullets.filter((bullet) =>
+      bullet.startsWith('Governance constraint:'))).toHaveLength(1)
+    expect(completeRequirements.bullets.filter((bullet) =>
+      bullet.startsWith('Scope exclusion:'))).toHaveLength(1)
+
+    const remainExclusion = buildForInput(
+      'Publication, presentation generation, and infographic work remain out of scope.',
+    )
+    const remainExclusionRequirements = remainExclusion.output_requirements.sections.find(
+      (section) => section.heading === 'Known Output Requirements',
+    )
+    expect(remainExclusionRequirements.bullets).toContain(
+      'Scope exclusion: Publication, presentation generation, and infographic work are out of scope.',
+    )
+
+    const singularExclusion = buildForInput('Publication remains out of scope.')
+    const singularExclusionRequirements = singularExclusion.output_requirements.sections.find(
+      (section) => section.heading === 'Known Output Requirements',
+    )
+    expect(singularExclusionRequirements.bullets).toContain(
+      'Scope exclusion: Publication is out of scope.',
+    )
+
+    const isolatedApprovalRoles = buildForInput(
+      'Quinn Fixture QA is the executive sponsor and final approver.',
+    )
+    expect(isolatedApprovalRoles.output_requirements.content).not.toContain(
+      'Quinn Fixture QA',
+    )
+
+    const twoIdentities = buildForInput(
+      'QA fixture only. Quinn Fixture QA is the primary audience and Riley Fixture QA is the reviewer.',
+    )
+    const twoIdentityRequirements = twoIdentities.output_requirements.sections.find(
+      (section) => section.heading === 'Known Output Requirements',
+    )
+    expect(twoIdentityRequirements.bullets).toEqual(expect.arrayContaining([
+      'Audience: Quinn Fixture QA \u2014 audience.',
+      'Audience: Riley Fixture QA \u2014 reviewer.',
+    ]))
+    expect(twoIdentityRequirements.bullets.join(' ')).not.toContain(
+      'primary audience, reviewer',
+    )
+
+    const mixedExclusion = buildForInput(
+      'Publication and infographic work are out of scope, while Taylor Morgan is the stakeholder.',
+    )
+    const mixedExclusionRequirements = mixedExclusion.output_requirements.sections.find(
+      (section) => section.heading === 'Known Output Requirements',
+    )
+    expect(mixedExclusionRequirements.bullets).toContain(
+      'Scope exclusion: Publication and infographic work are out of scope.',
+    )
+    expect(mixedExclusionRequirements.bullets.join(' ')).not.toMatch(
+      /Taylor Morgan|stakeholder/i,
+    )
+    expect(mixedExclusion.stakeholder_register.content).toContain(
+      'Taylor Morgan \u2014 stakeholder',
+    )
+
+    const mixedGap = buildForInput(
+      'The customer is Acme Corp, while exact delivery channel is not yet specified.',
+    )
+    const mixedGapRequirements = mixedGap.output_requirements.sections.find(
+      (section) => section.heading === 'Known Output Requirements',
+    )
+    expect(mixedGapRequirements.bullets).toContain(
+      'Unresolved requirement: exact delivery channel is not yet specified.',
+    )
+    expect(mixedGapRequirements.bullets.join(' ')).not.toMatch(/Acme Corp|customer/i)
+
+    const negatedExclusion = buildForInput('Presentation is not out of scope.')
+    expect(negatedExclusion.output_requirements.content).not.toContain(
+      'Scope exclusion:',
+    )
+
+    const laterInfographicExclusion = buildForInput(
+      'Presentation is in scope, while infographic work is out of scope.',
+    )
+    const laterInfographicRequirements = laterInfographicExclusion.output_requirements.sections.find(
+      (section) => section.heading === 'Known Output Requirements',
+    )
+    const laterInfographicScopeBullets = laterInfographicRequirements.bullets.filter((bullet) =>
+      bullet.startsWith('Scope exclusion:'))
+    expect(laterInfographicScopeBullets).toEqual([
+      'Scope exclusion: infographic work is out of scope.',
+    ])
+
+    const laterPublicationExclusion = buildForInput(
+      'Delivery is scheduled, while publication is out of scope.',
+    )
+    const laterPublicationRequirements = laterPublicationExclusion.output_requirements.sections.find(
+      (section) => section.heading === 'Known Output Requirements',
+    )
+    const laterPublicationScopeBullets = laterPublicationRequirements.bullets.filter((bullet) =>
+      bullet.startsWith('Scope exclusion:'))
+    expect(laterPublicationScopeBullets).toEqual([
+      'Scope exclusion: publication is out of scope.',
+    ])
+
+    const negatedGap = buildForInput(
+      'The file type is not unknown. The format is not unspecified.',
+    )
+    expect(negatedGap.output_requirements.content).not.toContain(
+      'Unresolved requirement:',
+    )
+  })
+
   test('current profiles project mixed-sentence facts only into their relevant sections', () => {
     const frameworkPackage = makeRendererFrameworkPackage({
       packageKey: 'vmf-standard-3-1-2',
@@ -23402,7 +23945,7 @@ describe('Runtime Instance API', () => {
       'email',
     )
     expect(stakeholderResult.output_requirements.generated.content).toContain(
-      'CFO \u2014 audience',
+      'CFO \u2014 primary audience',
     )
     expect(stakeholderResult.output_requirements.generated.content).toContain(
       'two-page PDF',
@@ -23436,9 +23979,15 @@ describe('Runtime Instance API', () => {
     const suppliedDetails = [
       'No executive sponsor has been confirmed.',
       'The output format is not yet approved.',
+      'Public company-authored material establishes positioning only; product capability, deployment maturity, outcomes, quantitative claims and competitive superiority require corroboration.',
     ].join(' ')
     const fixtures = currentSectionProfileFixtures.filter((fixture) =>
-      ['strategic_objectives', 'stakeholder_register', 'output_requirements']
+      [
+        'strategic_objectives',
+        'current_state_assessment',
+        'stakeholder_register',
+        'output_requirements',
+      ]
         .includes(fixture.sectionKey),
     )
     const frameworkPackage = makeRendererFrameworkPackage({
@@ -23488,6 +24037,9 @@ describe('Runtime Instance API', () => {
       )
       expect(generated.content.toLowerCase()).not.toContain(
         'output format is not yet approved',
+      )
+      expect(generated.content).not.toMatch(
+        /Current baseline or capability: (?:product capability|deployment maturity)/i,
       )
       expect(generated.content).not.toMatch(/Objective ownership:|Format or length:/)
       expect(generated.content).toMatch(/confirm|check|verify|identify|record|attach/)

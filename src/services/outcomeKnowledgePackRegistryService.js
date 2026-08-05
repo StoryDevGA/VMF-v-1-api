@@ -28,6 +28,9 @@ import {
   KNOWLEDGE_PACK_AUTHORING_MODES,
   KNOWLEDGE_PACK_EXECUTION_MODES,
   KNOWLEDGE_PACK_PURPOSE_CATEGORIES,
+  KNOWLEDGE_PACK_RELATIONSHIP_CONTRACT_VERSION,
+  KNOWLEDGE_PACK_RELATIONSHIP_FAILURES,
+  KNOWLEDGE_PACK_RELATIONSHIP_TYPES,
   KNOWLEDGE_PACK_REVIEW_STATUSES,
   KNOWLEDGE_PACK_VISIBILITY_SCOPES,
 } from '../constants/knowledgeRuntime.js'
@@ -52,6 +55,15 @@ import {
   discoverRequestSpecificOutputTypes,
   resolveRequestSpecificKnowledgePacks,
 } from './knowledgePackRequestResolutionService.js'
+import {
+  assertCanonicalRelationshipSourcesEqual,
+  buildKnowledgePackRelationshipChecksum,
+  evaluateRelationshipCardinality,
+  KnowledgePackRelationshipContractError,
+  normalizeKnowledgePackRelationships,
+  parseKnowledgePackFrontMatter,
+  semanticVersionSatisfies,
+} from './knowledgePackRelationshipContract.js'
 
 const normalizeText = (value) => String(value || '').trim()
 const normalizeToken = (value) => normalizeText(value).toUpperCase()
@@ -71,17 +83,28 @@ const normalizePackCategory = (value, packType) =>
 const normalizeTokenList = (values) => Array.isArray(values)
   ? [...new Set(values.map(normalizeToken).filter(Boolean))]
   : []
-const normalizeDependencyReferences = (references) => Array.isArray(references)
-  ? references.map((reference) => ({
-    knowledgeLayer: normalizeToken(reference?.knowledgeLayer),
-    requirement: normalizeToken(reference?.requirement || 'REQUIRED'),
-    ...(normalizeToken(reference?.packType) ? { packType: normalizeToken(reference.packType) } : {}),
-    ...(normalizeLowerKey(reference?.packKey) ? { packKey: normalizeLowerKey(reference.packKey) } : {}),
-    ...(normalizeLowerKey(reference?.capabilityKey)
-      ? { capabilityKey: normalizeLowerKey(reference.capabilityKey) }
-      : {}),
-  }))
-  : []
+const normalizeDependencyReferences = (references) => normalizeKnowledgePackRelationships(
+  references === undefined ? [] : references,
+)
+const serializeDependencyReferences = (references) => {
+  try {
+    return {
+      values: normalizeDependencyReferences(references),
+      governanceStatus: 'CURRENT',
+    }
+  } catch (_error) {
+    return {
+      values: Array.isArray(references)
+        ? references.map((reference) => (
+          typeof reference?.toObject === 'function'
+            ? reference.toObject({ transform: false })
+            : { ...reference }
+        ))
+        : [],
+      governanceStatus: 'MIGRATION_REQUIRED',
+    }
+  }
+}
 
 export const OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS = Object.freeze({
   AUDIT_PERSISTENCE_FAILED: 'AUDIT_PERSISTENCE_FAILED',
@@ -96,6 +119,8 @@ export const OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS = Object.freeze({
   PACK_ACTIVE_CAPABILITY_CONFLICT: 'PACK_ACTIVE_CAPABILITY_CONFLICT',
   PACK_ACTIVATION_GOVERNANCE_METADATA_REQUIRED: 'PACK_ACTIVATION_GOVERNANCE_METADATA_REQUIRED',
   PACK_ACTIVATION_GOVERNANCE_METADATA_MISMATCH: 'PACK_ACTIVATION_GOVERNANCE_METADATA_MISMATCH',
+  MISSING_GOVERNANCE_METADATA: 'MISSING_GOVERNANCE_METADATA',
+  KNOWLEDGE_ASSET_ID_CONFLICT: 'KNOWLEDGE_ASSET_ID_CONFLICT',
   PACK_DUPLICATE_REVIEW_REQUIRED: 'PACK_DUPLICATE_REVIEW_REQUIRED',
   PACK_VERSION_ALREADY_EXISTS: 'PACK_VERSION_ALREADY_EXISTS',
   PACK_VERSION_NOT_FOUND: 'PACK_VERSION_NOT_FOUND',
@@ -380,6 +405,7 @@ const ensureSourceDocumentDraftPackRecord = async ({
       purposeCategory: packDefinition.purposeCategory,
       ...(packDefinition.knowledgeLayer ? { knowledgeLayer: packDefinition.knowledgeLayer } : {}),
       ...(packDefinition.capabilityKey ? { capabilityKey: packDefinition.capabilityKey } : {}),
+      knowledgeAssetId: packDefinition.knowledgeAssetId,
       ...(packDefinition.workspaceCompatibility?.length > 0
         ? { workspaceCompatibility: packDefinition.workspaceCompatibility }
         : {}),
@@ -423,6 +449,7 @@ const SOURCE_DOCUMENT_IMPORT_PACK_FIELDS = [
   'purposeCategory',
   'knowledgeLayer',
   'capabilityKey',
+  'knowledgeAssetId',
   'workspaceCompatibility',
   'packType',
   'packKey',
@@ -836,6 +863,7 @@ const serializeKnowledgePack = (pack) => {
     purposeCategory: normalizeToken(plain.purposeCategory || KNOWLEDGE_PACK_PURPOSE_CATEGORIES.SYSTEM),
     knowledgeLayer: normalizeToken(plain.knowledgeLayer),
     capabilityKey: normalizeLowerKey(plain.capabilityKey),
+    knowledgeAssetId: normalizeToken(plain.knowledgeAssetId),
     workspaceCompatibility: normalizeTokenList(plain.workspaceCompatibility),
     packType: normalizeToken(plain.packType),
     packKey: normalizeLowerKey(plain.packKey),
@@ -857,6 +885,7 @@ const serializeKnowledgePackVersion = (version) => {
   const versionId = plain.versionId || plain.id || ''
   delete plain._id
   delete plain.__v
+  const serializedRelationships = serializeDependencyReferences(plain.dependencyReferences)
   return {
     ...plain,
     id: versionId,
@@ -865,8 +894,13 @@ const serializeKnowledgePackVersion = (version) => {
     purposeCategory: normalizeToken(plain.purposeCategory || KNOWLEDGE_PACK_PURPOSE_CATEGORIES.SYSTEM),
     knowledgeLayer: normalizeToken(plain.knowledgeLayer),
     capabilityKey: normalizeLowerKey(plain.capabilityKey),
+    knowledgeAssetId: normalizeToken(plain.knowledgeAssetId),
     workspaceCompatibility: normalizeTokenList(plain.workspaceCompatibility),
-    dependencyReferences: normalizeDependencyReferences(plain.dependencyReferences),
+    dependencyReferences: serializedRelationships.values,
+    relationshipContractVersion: normalizeToken(plain.relationshipContractVersion),
+    relationshipChecksum: normalizeText(plain.relationshipChecksum),
+    relationshipGovernanceStatus: serializedRelationships.governanceStatus,
+    relationshipGovernanceError: normalizeText(plain.relationshipGovernanceError),
     packType: normalizeToken(plain.packType),
     packKey: normalizeLowerKey(plain.packKey),
     status: normalizeToken(plain.status || OUTCOME_KNOWLEDGE_PACK_STATUSES.DRAFT),
@@ -889,6 +923,7 @@ const serializeKnowledgePackContentPreview = ({ version, packDefinition }) => {
     ? plain.content
     : JSON.stringify(plain.content ?? '', null, 2)
   const versionId = plain.versionId || plain.id || ''
+  const serializedRelationships = serializeDependencyReferences(plain.dependencyReferences)
 
   return {
     id: versionId,
@@ -898,10 +933,14 @@ const serializeKnowledgePackContentPreview = ({ version, packDefinition }) => {
     purposeCategory: normalizeToken(plain.purposeCategory || KNOWLEDGE_PACK_PURPOSE_CATEGORIES.SYSTEM),
     knowledgeLayer: normalizeToken(plain.knowledgeLayer || packDefinition?.knowledgeLayer),
     capabilityKey: normalizeLowerKey(plain.capabilityKey || packDefinition?.capabilityKey),
+    knowledgeAssetId: normalizeToken(plain.knowledgeAssetId || packDefinition?.knowledgeAssetId),
     workspaceCompatibility: normalizeTokenList(
       plain.workspaceCompatibility || packDefinition?.workspaceCompatibility,
     ),
-    dependencyReferences: normalizeDependencyReferences(plain.dependencyReferences),
+    dependencyReferences: serializedRelationships.values,
+    relationshipContractVersion: normalizeToken(plain.relationshipContractVersion),
+    relationshipChecksum: normalizeText(plain.relationshipChecksum),
+    relationshipGovernanceStatus: serializedRelationships.governanceStatus,
     packType: normalizeToken(plain.packType || packDefinition?.packType),
     packKey: normalizeLowerKey(plain.packKey || packDefinition?.packKey),
     semanticVersion: normalizeText(plain.semanticVersion),
@@ -933,6 +972,7 @@ const serializeKnowledgePackActivation = (activation) => {
   const activationId = plain.activationId || plain.id || ''
   delete plain._id
   delete plain.__v
+  const serializedRelationships = serializeDependencyReferences(plain.dependencyReferences)
   return {
     activationId,
     packId: normalizeText(plain.packId),
@@ -941,8 +981,13 @@ const serializeKnowledgePackActivation = (activation) => {
     purposeCategory: normalizeToken(plain.purposeCategory || KNOWLEDGE_PACK_PURPOSE_CATEGORIES.SYSTEM),
     knowledgeLayer: normalizeToken(plain.knowledgeLayer),
     capabilityKey: normalizeLowerKey(plain.capabilityKey),
+    knowledgeAssetId: normalizeToken(plain.knowledgeAssetId),
     workspaceCompatibility: normalizeTokenList(plain.workspaceCompatibility),
-    dependencyReferences: normalizeDependencyReferences(plain.dependencyReferences),
+    dependencyReferences: serializedRelationships.values,
+    relationshipContractVersion: normalizeToken(plain.relationshipContractVersion),
+    relationshipChecksum: normalizeText(plain.relationshipChecksum),
+    relationshipGovernanceStatus: serializedRelationships.governanceStatus,
+    relationshipGovernanceError: normalizeText(plain.relationshipGovernanceError),
     packType: normalizeToken(plain.packType),
     packKey: normalizeLowerKey(plain.packKey),
     label: normalizeText(plain.label || plain.packKey),
@@ -1094,12 +1139,18 @@ const selectActiveActivations = ({ activations = [], scopeCandidates = [] }) => 
 }
 
 const buildActivePackProjection = (pack, activation) => ({
+  packId: normalizeText(activation.packId || pack.packId),
   packCategory: normalizePackCategory(pack.packCategory || activation.packCategory, pack.packType),
   purposeCategory: normalizeToken(activation.purposeCategory || pack.purposeCategory),
   knowledgeLayer: normalizeToken(activation.knowledgeLayer),
   capabilityKey: normalizeLowerKey(activation.capabilityKey),
+  knowledgeAssetId: normalizeToken(activation.knowledgeAssetId),
   workspaceCompatibility: normalizeTokenList(activation.workspaceCompatibility),
   dependencyReferences: normalizeDependencyReferences(activation.dependencyReferences),
+  relationshipContractVersion: normalizeToken(activation.relationshipContractVersion),
+  relationshipChecksum: normalizeText(activation.relationshipChecksum),
+  relationshipGovernanceStatus: normalizeToken(activation.relationshipGovernanceStatus),
+  relationshipGovernanceError: normalizeText(activation.relationshipGovernanceError),
   packType: normalizeToken(pack.packType || activation.packType),
   packKey: normalizeLowerKey(pack.packKey || activation.packKey),
   label: normalizeText(pack.label || activation.label || activation.packKey),
@@ -1241,6 +1292,14 @@ const resolveRequestRuntimeVersionEvidence = async ({ activations = [] } = {}) =
     })
   }
 
+  const diagnoseGovernance = (activation, blockedReason) => {
+    exclude(activation, blockedReason)
+    eligible.push({
+      ...activation,
+      relationshipGovernanceError: blockedReason,
+    })
+  }
+
   for (const activation of activationRows) {
     const version = versionById.get(activation.versionId)
     if (!version) {
@@ -1260,12 +1319,73 @@ const resolveRequestRuntimeVersionEvidence = async ({ activations = [] } = {}) =
       continue
     }
 
+    if (
+      normalizeToken(version.relationshipGovernanceStatus) !== 'CURRENT'
+      || normalizeToken(activation.relationshipGovernanceStatus) !== 'CURRENT'
+    ) {
+      diagnoseGovernance(activation, 'VERSION_RELATIONSHIP_GOVERNANCE_INVALID')
+      continue
+    }
+
+    const versionKnowledgeAssetId = normalizeToken(version.knowledgeAssetId)
+    const activationKnowledgeAssetId = normalizeToken(activation.knowledgeAssetId)
+    const versionRelationshipContract = normalizeToken(version.relationshipContractVersion)
+    const activationRelationshipContract = normalizeToken(activation.relationshipContractVersion)
+    const versionRelationshipChecksum = normalizeText(version.relationshipChecksum).toLowerCase()
+    const activationRelationshipChecksum = normalizeText(activation.relationshipChecksum).toLowerCase()
+    const hasCanonicalRelationshipEvidence = Boolean(
+      versionKnowledgeAssetId
+      || activationKnowledgeAssetId
+      || versionRelationshipContract
+      || activationRelationshipContract
+      || versionRelationshipChecksum
+      || activationRelationshipChecksum
+    )
+    if (
+      hasCanonicalRelationshipEvidence
+      && (
+        !versionKnowledgeAssetId
+        || versionKnowledgeAssetId !== activationKnowledgeAssetId
+      )
+    ) {
+      diagnoseGovernance(activation, 'VERSION_KNOWLEDGE_ASSET_ID_MISMATCH')
+      continue
+    }
+    if (
+      hasCanonicalRelationshipEvidence
+      && (
+        versionRelationshipContract !== KNOWLEDGE_PACK_RELATIONSHIP_CONTRACT_VERSION
+        || activationRelationshipContract !== KNOWLEDGE_PACK_RELATIONSHIP_CONTRACT_VERSION
+      )
+    ) {
+      diagnoseGovernance(activation, 'VERSION_RELATIONSHIP_CONTRACT_MISMATCH')
+      continue
+    }
+    if (
+      hasCanonicalRelationshipEvidence
+      && (
+        !versionRelationshipChecksum
+        || versionRelationshipChecksum !== activationRelationshipChecksum
+      )
+    ) {
+      diagnoseGovernance(activation, 'VERSION_RELATIONSHIP_CHECKSUM_MISMATCH')
+      continue
+    }
+
     const mandatorySafeguard = requiredPackKeys.has(buildRequiredPackKey(activation))
     if (!mandatorySafeguard) {
       const versionLayer = normalizeToken(version.knowledgeLayer)
       const versionCapability = normalizeLowerKey(version.capabilityKey)
       const versionCompatibility = normalizeTokenList(version.workspaceCompatibility)
-      const versionDependencies = normalizeDependencyReferences(version.dependencyReferences)
+      let versionDependencies
+      let activationDependencies
+      try {
+        versionDependencies = normalizeDependencyReferences(version.dependencyReferences)
+        activationDependencies = normalizeDependencyReferences(activation.dependencyReferences)
+      } catch (_error) {
+        diagnoseGovernance(activation, 'VERSION_RELATIONSHIP_GOVERNANCE_INVALID')
+        continue
+      }
       if (!versionLayer || versionLayer !== normalizeToken(activation.knowledgeLayer)) {
         exclude(activation, 'VERSION_LAYER_EVIDENCE_MISMATCH')
         continue
@@ -1283,9 +1403,9 @@ const resolveRequestRuntimeVersionEvidence = async ({ activations = [] } = {}) =
       }
       if (
         canonicalizeGovernanceList(versionDependencies)
-        !== canonicalizeGovernanceList(normalizeDependencyReferences(activation.dependencyReferences))
+        !== canonicalizeGovernanceList(activationDependencies)
       ) {
-        exclude(activation, 'VERSION_DEPENDENCY_EVIDENCE_MISMATCH')
+        diagnoseGovernance(activation, 'VERSION_DEPENDENCY_EVIDENCE_MISMATCH')
         continue
       }
     }
@@ -1462,6 +1582,7 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
       sourceBundle: buildOutcomeKnowledgePackSourceBundle(),
       selectedByLayer: requestResolution.selectedByLayer,
       missingDependencies: requestResolution.missingDependencies,
+      relationshipFailures: requestResolution.relationshipFailures,
       ambiguousCandidates: requestResolution.ambiguousCandidates,
       excludedCandidates: requestResolution.excludedCandidates,
       warnings: requestResolution.warnings,
@@ -1478,6 +1599,7 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
         validationCount: validationPacks.length,
         blockedCount: versionEvidenceExclusions.length
           + requestResolution.missingDependencies.length
+          + requestResolution.relationshipFailures.length
           + requestResolution.ambiguousCandidates.length,
         requestedContextCategories: contextCategories.map(normalizeToken).filter(Boolean),
         unboundRequiredPacks: requestResolution.mandatorySafeguards
@@ -1859,6 +1981,38 @@ export const importOutcomeKnowledgePackSourceDocumentDraft = async ({
       },
     })
   }
+  let sourceRelationshipMetadata = {
+    knowledgeAssetId: '',
+  }
+  try {
+    if (/^(?:\uFEFF)?---\r?\n/.test(extractedText)) {
+      sourceRelationshipMetadata = parseKnowledgePackFrontMatter(extractedText, {
+        packType: body.packType,
+      })
+    }
+    sourceRelationshipMetadata = assertCanonicalRelationshipSourcesEqual({
+      request: {
+        knowledgeAssetId: body.knowledgeAssetId,
+        dependencyReferences: body.dependencyReferences,
+      },
+      source: sourceRelationshipMetadata,
+    })
+    if (!sourceRelationshipMetadata.knowledgeAssetId) {
+      throw new KnowledgePackRelationshipContractError(
+        'A governed knowledgeAssetId is required in source front matter or the import request.',
+        { field: 'knowledgeAssetId' },
+      )
+    }
+  } catch (err) {
+    if (!(err instanceof KnowledgePackRelationshipContractError)) throw err
+    throw createKnowledgePackError({
+      status: 422,
+      code: 'VALIDATION_FAILED',
+      message: err.message,
+      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.MISSING_GOVERNANCE_METADATA,
+      details: err.details,
+    })
+  }
   const scope = buildSourceImportScope({
     visibility: body.visibility,
     customerId: body.customerId,
@@ -1875,8 +2029,11 @@ export const importOutcomeKnowledgePackSourceDocumentDraft = async ({
     }),
     knowledgeLayer: normalizeToken(body.knowledgeLayer),
     capabilityKey: normalizeLowerKey(body.capabilityKey),
+    knowledgeAssetId: sourceRelationshipMetadata.knowledgeAssetId,
     workspaceCompatibility: normalizeTokenList(body.workspaceCompatibility),
-    dependencyReferences: normalizeDependencyReferences(body.dependencyReferences),
+    relationshipContractVersion: KNOWLEDGE_PACK_RELATIONSHIP_CONTRACT_VERSION,
+    dependencyReferences: sourceRelationshipMetadata.dependencyReferences,
+    relationshipChecksum: sourceRelationshipMetadata.relationshipChecksum,
     sourceAuthority: normalizeText(body.sourceAuthority),
     executionMode: normalizeToken(body.executionMode || KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT),
     sourceDocument: sourceDocumentInput,
@@ -1934,6 +2091,27 @@ export const importOutcomeKnowledgePackSourceDocumentDraft = async ({
     sourceHash,
     scopeKey: scope.scopeKey,
   })
+  const governedIdentityConflict = await KnowledgePack.findOne({
+    knowledgeAssetId: packDefinition.knowledgeAssetId,
+    packId: { $ne: canonicalPackId },
+  }).lean()
+  if (
+    governedIdentityConflict
+    && normalizeToken(governedIdentityConflict.knowledgeAssetId) === packDefinition.knowledgeAssetId
+  ) {
+    throw createKnowledgePackError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'The governed Knowledge Asset identity is already assigned to another pack.',
+      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.KNOWLEDGE_ASSET_ID_CONFLICT,
+      details: {
+        knowledgeAssetId: packDefinition.knowledgeAssetId,
+        existingPackId: governedIdentityConflict.packId,
+        requestedPackId: canonicalPackId,
+        conflictSource: 'PRECHECK',
+      },
+    })
+  }
   const duplicateOverrideReason = normalizeText(body.duplicateOverrideReason)
   if (duplicateWarnings.length > 0 && !duplicateOverrideReason) {
     throw createKnowledgePackError({
@@ -1969,12 +2147,13 @@ export const importOutcomeKnowledgePackSourceDocumentDraft = async ({
       purposeCategory: packDefinition.purposeCategory,
       knowledgeLayer: versionKnowledgeLayer || undefined,
       capabilityKey: versionCapabilityKey || undefined,
+      knowledgeAssetId: packDefinition.knowledgeAssetId,
       workspaceCompatibility: versionWorkspaceCompatibility.length > 0
         ? versionWorkspaceCompatibility
         : undefined,
-      dependencyReferences: packDefinition.dependencyReferences.length > 0
-        ? packDefinition.dependencyReferences
-        : undefined,
+      relationshipContractVersion: packDefinition.relationshipContractVersion,
+      dependencyReferences: packDefinition.dependencyReferences,
+      relationshipChecksum: packDefinition.relationshipChecksum,
       packType: packDefinition.packType,
       packKey: packDefinition.packKey,
       semanticVersion,
@@ -2002,6 +2181,8 @@ export const importOutcomeKnowledgePackSourceDocumentDraft = async ({
         extractionAdapter: extraction.extractionAdapter || 'knowledge-pack-text-import-v1',
         sourceSizeBytes: extraction.sourceSizeBytes,
         contentPersisted: true,
+        relationshipContractVersion: packDefinition.relationshipContractVersion,
+        relationshipChecksum: packDefinition.relationshipChecksum,
       },
       validationSummary: {
         status: 'NOT_RUN',
@@ -2666,6 +2847,126 @@ export const updateOutcomeKnowledgePackVersionReview = async ({
   }
 }
 
+const activationMatchesRelationship = (candidate, relationship) => (
+  (!relationship.targetPackType
+    || normalizeToken(candidate.packType) === relationship.targetPackType)
+  && (!relationship.targetPackKey
+    || normalizeLowerKey(candidate.packKey) === relationship.targetPackKey)
+  && (!relationship.targetCapabilityKey
+    || normalizeLowerKey(candidate.capabilityKey) === relationship.targetCapabilityKey)
+  && (!relationship.targetKnowledgeAssetId
+    || normalizeToken(candidate.knowledgeAssetId) === relationship.targetKnowledgeAssetId)
+  && (!relationship.targetKnowledgeLayer
+    || normalizeToken(candidate.knowledgeLayer) === relationship.targetKnowledgeLayer)
+)
+
+const throwActivationRelationshipError = ({
+  code,
+  version,
+  relationship,
+  observedState,
+  requiredState,
+}) => {
+  throw createKnowledgePackError({
+    status: 409,
+    code: 'CONFLICT',
+    message: 'A required activation-time Knowledge Pack relationship is not satisfied.',
+    reason: code,
+    details: {
+      packId: version.packId,
+      versionId: version.versionId,
+      failedRule: relationship.relationshipType,
+      relationship,
+      observedState,
+      requiredState,
+      resolutionResult: 'BLOCKED',
+    },
+  })
+}
+
+const assertActivationTimeRelationships = async ({ version, scope, session = null }) => {
+  const relationships = normalizeDependencyReferences(version.dependencyReferences)
+    .filter((relationship) => (
+      relationship.relationshipType
+        === KNOWLEDGE_PACK_RELATIONSHIP_TYPES.REQUIRED_AT_ACTIVATION
+    ))
+  if (relationships.length === 0) return
+
+  const eligibleScopeKeys = [...new Set([
+    normalizeToken(scope.scopeKey),
+    OUTCOME_KNOWLEDGE_PACK_SCOPE_TYPES.GLOBAL,
+  ].filter(Boolean))]
+  const query = KnowledgePackActivation.find({
+    status: OUTCOME_KNOWLEDGE_PACK_ACTIVATION_STATUSES.ACTIVE,
+    scopeKey: { $in: eligibleScopeKeys },
+  })
+  const activeCandidates = await resolveLeanQuery(withOptionalSession(query, session))
+
+  for (const relationship of relationships) {
+    const identityMatches = activeCandidates.filter((candidate) => (
+      activationMatchesRelationship(candidate, relationship)
+    ))
+    if (identityMatches.length === 0) {
+      throwActivationRelationshipError({
+        code: KNOWLEDGE_PACK_RELATIONSHIP_FAILURES.MISSING_RELATIONSHIP,
+        version,
+        relationship,
+        observedState: 'NO_ACTIVE_TARGET',
+        requiredState: relationship.cardinality,
+      })
+    }
+    const versionMatches = identityMatches.filter((candidate) => (
+      semanticVersionSatisfies(candidate.semanticVersion, relationship.versionConstraint)
+    ))
+    if (versionMatches.length === 0) {
+      throwActivationRelationshipError({
+        code: KNOWLEDGE_PACK_RELATIONSHIP_FAILURES.INCOMPATIBLE_VERSION,
+        version,
+        relationship,
+        observedState: identityMatches.map((candidate) => candidate.semanticVersion),
+        requiredState: relationship.versionConstraint || 'ANY_VALID_SEMVER',
+      })
+    }
+    const distinctIdentities = new Set(versionMatches.map((candidate) => (
+      normalizeToken(candidate.knowledgeAssetId)
+      || `${normalizeToken(candidate.packType)}:${normalizeLowerKey(candidate.packKey)}`
+    )))
+    const cardinality = evaluateRelationshipCardinality(
+      relationship.cardinality,
+      distinctIdentities.size,
+    )
+    if (!cardinality.success) {
+      throwActivationRelationshipError({
+        code: KNOWLEDGE_PACK_RELATIONSHIP_FAILURES.AMBIGUOUS_DEPENDENCY,
+        version,
+        relationship,
+        observedState: cardinality,
+        requiredState: relationship.cardinality,
+      })
+    }
+    const createsDirectCycle = versionMatches.some((candidate) => {
+      try {
+        return normalizeDependencyReferences(candidate.dependencyReferences).some((candidateRelation) => (
+          candidateRelation.relationshipType
+            === KNOWLEDGE_PACK_RELATIONSHIP_TYPES.REQUIRED_AT_ACTIVATION
+          && activationMatchesRelationship(version, candidateRelation)
+        ))
+      } catch (_error) {
+        return false
+      }
+    })
+    if (createsDirectCycle) {
+      throwActivationRelationshipError({
+        code: KNOWLEDGE_PACK_RELATIONSHIP_FAILURES.CIRCULAR_DEPENDENCY,
+        version,
+        relationship,
+        observedState: versionMatches.map((candidate) => candidate.activationId),
+        requiredState: 'ACYCLIC_ACTIVATION_GRAPH',
+      })
+    }
+  }
+}
+
 const applyKnowledgePackActivationMutation = async ({
   activationTime,
   activationIdSuffix = '',
@@ -2683,10 +2984,43 @@ const applyKnowledgePackActivationMutation = async ({
 }) => {
   const knowledgeLayer = normalizeToken(version.knowledgeLayer)
   const capabilityKey = normalizeLowerKey(version.capabilityKey)
+  const knowledgeAssetId = normalizeToken(version.knowledgeAssetId)
   const workspaceCompatibility = normalizeTokenList(version.workspaceCompatibility)
+  let dependencyReferences = []
+  let relationshipChecksum = ''
+  try {
+    if (
+      normalizeToken(version.relationshipContractVersion)
+      !== KNOWLEDGE_PACK_RELATIONSHIP_CONTRACT_VERSION
+    ) {
+      throw new KnowledgePackRelationshipContractError(
+        `relationshipContractVersion must be ${KNOWLEDGE_PACK_RELATIONSHIP_CONTRACT_VERSION}.`,
+      )
+    }
+    dependencyReferences = normalizeDependencyReferences(version.dependencyReferences)
+    relationshipChecksum = buildKnowledgePackRelationshipChecksum(dependencyReferences)
+    if (relationshipChecksum !== normalizeText(version.relationshipChecksum)) {
+      throw new KnowledgePackRelationshipContractError(
+        'Knowledge Pack relationship checksum does not match the canonical relationships.',
+      )
+    }
+  } catch (err) {
+    throw createKnowledgePackError({
+      status: 409,
+      code: 'CONFLICT',
+      message: err.message,
+      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.MISSING_GOVERNANCE_METADATA,
+      details: {
+        packId: version.packId,
+        versionId: version.versionId,
+        field: 'dependencyReferences',
+      },
+    })
+  }
   const missingFields = [
     ...(!knowledgeLayer ? ['knowledgeLayer'] : []),
     ...(!capabilityKey ? ['capabilityKey'] : []),
+    ...(!knowledgeAssetId ? ['knowledgeAssetId'] : []),
     ...(workspaceCompatibility.length === 0 ? ['workspaceCompatibility'] : []),
   ]
 
@@ -2706,10 +3040,16 @@ const applyKnowledgePackActivationMutation = async ({
 
   const packKnowledgeLayer = normalizeToken(packRecord?.knowledgeLayer)
   const packCapabilityKey = normalizeLowerKey(packRecord?.capabilityKey)
+  const packKnowledgeAssetId = normalizeToken(packRecord?.knowledgeAssetId)
   const packWorkspaceCompatibility = normalizeTokenList(packRecord?.workspaceCompatibility)
   const mismatchFields = [
     ...(packKnowledgeLayer && packKnowledgeLayer !== knowledgeLayer ? ['knowledgeLayer'] : []),
     ...(packCapabilityKey && packCapabilityKey !== capabilityKey ? ['capabilityKey'] : []),
+    ...(
+      packKnowledgeAssetId && packKnowledgeAssetId !== knowledgeAssetId
+        ? ['knowledgeAssetId']
+        : []
+    ),
     ...(
       packWorkspaceCompatibility.length > 0
       && canonicalizeGovernanceList(packWorkspaceCompatibility)
@@ -2732,6 +3072,8 @@ const applyKnowledgePackActivationMutation = async ({
       },
     })
   }
+
+  await assertActivationTimeRelationships({ version, scope, session })
 
   const capabilityConflict = await findActiveCapabilityConflict({
     capabilityKey,
@@ -2782,10 +3124,11 @@ const applyKnowledgePackActivationMutation = async ({
     ),
     knowledgeLayer,
     capabilityKey,
+    knowledgeAssetId,
     workspaceCompatibility,
-    ...(Array.isArray(version.dependencyReferences)
-      ? { dependencyReferences: normalizeDependencyReferences(version.dependencyReferences) }
-      : {}),
+    relationshipContractVersion: KNOWLEDGE_PACK_RELATIONSHIP_CONTRACT_VERSION,
+    relationshipChecksum,
+    dependencyReferences,
     packType: version.packType,
     packKey: version.packKey,
     label: packDefinition?.label || packRecord?.label || version.packKey,

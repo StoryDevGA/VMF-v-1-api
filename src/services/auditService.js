@@ -94,6 +94,8 @@ export const AUDIT_ACTIONS = Object.freeze({
   OUTCOME_SESSION_CREATED: 'OUTCOME_SESSION_CREATED',
   TRUTH_SIGNATURE_BOUND: 'TRUTH_SIGNATURE_BOUND',
   KNOWLEDGE_PACK_BOUND_TO_SESSION: 'KNOWLEDGE_PACK_BOUND_TO_SESSION',
+  OUTCOME_KNOWLEDGE_COMPOSITION_PLAN_CREATED: 'OUTCOME_KNOWLEDGE_COMPOSITION_PLAN_CREATED',
+  OUTCOME_QUALITY_STAGE_RECORDED: 'OUTCOME_QUALITY_STAGE_RECORDED',
   PROMPT_SUBMITTED: 'PROMPT_SUBMITTED',
   OUTCOME_RESPONSE_GENERATED: 'OUTCOME_RESPONSE_GENERATED',
   OUTCOME_DRAFT_GENERATED: 'OUTCOME_DRAFT_GENERATED',
@@ -222,6 +224,8 @@ export const RESOURCE_TYPES = Object.freeze({
   RuntimeOutputRequest: 'RuntimeOutputRequest',
   OutcomeSession: 'OutcomeSession',
   OutcomeMessage: 'OutcomeMessage',
+  OutcomeKnowledgeCompositionPlan: 'OutcomeKnowledgeCompositionPlan',
+  OutcomeQualityStageExecution: 'OutcomeQualityStageExecution',
   OutcomeDraft: 'OutcomeDraft',
   OutcomeAsset: 'OutcomeAsset',
   KnowledgePack: 'KnowledgePack',
@@ -514,6 +518,10 @@ const buildAuditSummary = ({ action, resourceType, resourceId, diff, display }) 
       return clampSummary(`${actorLabel} bound Truth Signature for ${targetLabel}`)
     case AUDIT_ACTIONS.KNOWLEDGE_PACK_BOUND_TO_SESSION:
       return clampSummary(`${actorLabel} bound Knowledge Packs for ${targetLabel}`)
+    case AUDIT_ACTIONS.OUTCOME_KNOWLEDGE_COMPOSITION_PLAN_CREATED:
+      return clampSummary(`${actorLabel} created Knowledge Composition Plan ${targetLabel}`)
+    case AUDIT_ACTIONS.OUTCOME_QUALITY_STAGE_RECORDED:
+      return clampSummary(`${actorLabel} recorded governed quality stage ${targetLabel}`)
     case AUDIT_ACTIONS.PROMPT_SUBMITTED:
       return clampSummary(`${actorLabel} submitted Outcome Studio prompt ${targetLabel}`)
     case AUDIT_ACTIONS.OUTCOME_RESPONSE_GENERATED:

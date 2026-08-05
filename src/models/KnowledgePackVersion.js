@@ -10,6 +10,7 @@ import {
   KNOWLEDGE_PACK_EXECUTION_MODES,
   KNOWLEDGE_PACK_PURPOSE_CATEGORIES,
   KNOWLEDGE_PACK_REVIEW_STATUSES,
+  KNOWLEDGE_PACK_RELATIONSHIP_CONTRACT_VERSION,
   KNOWLEDGE_PACK_VISIBILITY_SCOPES,
 } from '../constants/knowledgeRuntime.js'
 import {
@@ -21,6 +22,7 @@ import { containsForbiddenProviderContextKey } from '../utils/knowledgePackSafet
 import {
   knowledgePackCapabilityKeyField,
   knowledgePackDependencyReferenceSchema,
+  knowledgePackKnowledgeAssetIdField,
   knowledgePackLayerField,
   knowledgePackWorkspaceCompatibilityField,
   normalizeKnowledgePackGovernanceFields,
@@ -77,10 +79,25 @@ const knowledgePackVersionSchema = new mongoose.Schema(
     },
     knowledgeLayer: knowledgePackLayerField,
     capabilityKey: knowledgePackCapabilityKeyField,
+    knowledgeAssetId: knowledgePackKnowledgeAssetIdField,
     workspaceCompatibility: knowledgePackWorkspaceCompatibilityField,
     dependencyReferences: {
       type: [knowledgePackDependencyReferenceSchema],
-      default: undefined,
+      default: [],
+    },
+    relationshipContractVersion: {
+      type: String,
+      required: true,
+      uppercase: true,
+      enum: [KNOWLEDGE_PACK_RELATIONSHIP_CONTRACT_VERSION],
+      default: KNOWLEDGE_PACK_RELATIONSHIP_CONTRACT_VERSION,
+    },
+    relationshipChecksum: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 64,
+      default: '',
     },
     packType: {
       type: String,
@@ -292,6 +309,7 @@ knowledgePackVersionSchema.index({ scopeKey: 1, packType: 1, packKey: 1, status:
 knowledgePackVersionSchema.index({ 'sourceDocuments.sourceHash': 1, scopeKey: 1 })
 knowledgePackVersionSchema.index({ purposeCategory: 1, status: 1, updatedAt: -1 })
 knowledgePackVersionSchema.index({ visibility: 1, customerId: 1, tenantId: 1, status: 1 })
+knowledgePackVersionSchema.index({ knowledgeAssetId: 1, semanticVersion: 1, scopeKey: 1 })
 
 knowledgePackVersionSchema.pre('validate', function normalizeKnowledgePackVersion(next) {
   this.packType = normalizeToken(this.packType)

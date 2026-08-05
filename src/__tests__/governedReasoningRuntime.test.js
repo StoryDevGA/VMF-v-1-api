@@ -1241,8 +1241,8 @@ describe('Governed Reasoning Runtime models and service', () => {
       safeRequest: makeLiveSafeRequest(),
       truthSource: {
         acceptedTruth: [
-          { label: 'Situation', content: 'The customer needs a governed value narrative.' },
-          { label: 'Commercial Problem', content: 'The commercial problem is fragmented proof and unclear value.' },
+          { label: 'situation', content: 'The customer needs a governed value narrative.' },
+          { label: 'commercial_problem', content: 'The commercial problem is fragmented proof and unclear value.' },
         ],
       },
       knowledgeSelection: [{ versionId: 'kpv-reasoning', knowledgeLayer: 'REASONING', executionMode: 'PROVIDER_CONTEXT' }],
@@ -1255,6 +1255,43 @@ describe('Governed Reasoning Runtime models and service', () => {
     expect(GovernedReasoningExecution.prototype.save).toHaveBeenCalled()
     expect(GovernedRuntimeArtifact.prototype.save).toHaveBeenCalled()
     expect(deps.logAudit).toHaveBeenCalledTimes(1)
+  })
+
+  test('fails closed before provider context when accepted truth has no stable section key', async () => {
+    const frameworkPackage = makeFrameworkPackage()
+    frameworkPackage.sections[0] = {
+      ...frameworkPackage.sections[0],
+      sectionKey: '',
+    }
+    const deps = makeLiveDeps({
+      resolveFrameworkPackage: jest.fn().mockResolvedValue(frameworkPackage),
+    })
+
+    let caught
+    try {
+      await createGovernedReasoningExecution({
+        actorUserId: ACTOR_ID,
+        deps,
+        payload: makeLivePayload({ idempotencyKey: 'missing-truth-section-key' }),
+        runtimeInstanceId: RUNTIME_INSTANCE_ID,
+        scopes: {},
+      })
+    } catch (error) {
+      caught = error
+    }
+    expect(caught).toMatchObject({
+      status: 409,
+      code: 'GRR_CERTIFIED_TRUTH_BLOCKED',
+      details: {
+        reason: 'CERTIFIED_TRUTH_MISSING',
+        blockers: expect.arrayContaining([expect.objectContaining({
+          code: 'CERTIFIED_TRUTH_IDENTITY_MISSING',
+          field: 'acceptedTruth.sectionKey',
+        })]),
+      },
+    })
+    expect(deps.buildProviderSafeContext).not.toHaveBeenCalled()
+    expect(deps.providerAdapter).not.toHaveBeenCalled()
   })
 
   test('persists LIVE_TEST provider evidence from governed authority without aliasing adapter output', async () => {
@@ -1414,6 +1451,96 @@ describe('Governed Reasoning Runtime models and service', () => {
     expect(first.requestFingerprint).toMatch(/^sha256:[a-f0-9]{64}$/)
     expect(second.requestFingerprint).toMatch(/^sha256:[a-f0-9]{64}$/)
     expect(second.requestFingerprint).not.toBe(first.requestFingerprint)
+  })
+
+  test('uses an injected strict provider-context assertion and expected contract identity', async () => {
+    const providerContextContractVersion = 'fs-003-quality-stage-provider-safe-context.v0.2'
+    const providerContext = {
+      ...makeLiveProviderContext(),
+      contractVersion: providerContextContractVersion,
+      targetStage: 'WORKING_DRAFT',
+      sourceCandidate: { title: 'Complete semantic source' },
+    }
+    const assertProviderSafeContext = jest.fn((value) => {
+      if (value !== providerContext || value.targetStage !== 'WORKING_DRAFT') throw new TypeError('invalid')
+      return value
+    })
+    const deps = makeLiveDeps({
+      assertProviderSafeContext,
+      buildProviderSafeContext: jest.fn().mockResolvedValue(providerContext),
+      providerContextBindingFingerprint: 'a'.repeat(64),
+      providerContextContractVersion,
+    })
+
+    const result = await createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      deps,
+      payload: makeLivePayload({ idempotencyKey: 'live-test-custom-context' }),
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })
+
+    expect(assertProviderSafeContext).toHaveBeenCalledWith(providerContext)
+    expect(deps.providerAdapter).toHaveBeenCalledWith({ providerContext })
+    expect(result.requestFingerprint).toMatch(/^sha256:[a-f0-9]{64}$/)
+    const execution = GovernedReasoningExecution.prototype.save.mock.instances.at(-1)
+    const artifact = GovernedRuntimeArtifact.prototype.save.mock.instances.at(-1)
+    expect(JSON.stringify(execution)).not.toContain('Complete semantic source')
+    expect(JSON.stringify(artifact)).not.toContain('Complete semantic source')
+    expect(JSON.stringify(deps.logAudit.mock.calls)).not.toContain('Complete semantic source')
+  })
+
+  test('rejects an injected provider context with the wrong contract identity and reports both identities', async () => {
+    const providerContextContractVersion = 'fs-003-quality-stage-provider-safe-context.v0.2'
+    const context = { ...makeLiveProviderContext(), contractVersion: 'wrong-context-version' }
+    const deps = makeLiveDeps({
+      assertProviderSafeContext: jest.fn((value) => value),
+      buildProviderSafeContext: jest.fn().mockResolvedValue(context),
+      providerContextContractVersion,
+    })
+
+    await expect(createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      deps,
+      payload: makeLivePayload({ idempotencyKey: 'live-test-wrong-context-version' }),
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })).rejects.toMatchObject({
+      status: 422,
+      code: 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED',
+      details: {
+        safeContextPolicyKey: 'OUTCOME_STUDIO_PROVIDER_SAFE_CONTEXT_V1',
+        providerContextContractVersion,
+      },
+    })
+    expect(deps.providerAdapter).not.toHaveBeenCalled()
+  })
+
+  test('binds idempotency to the internal provider-context source fingerprint', async () => {
+    const payload = makeLivePayload({ idempotencyKey: 'live-test-source-binding' })
+    const firstDeps = makeLiveDeps({ providerContextBindingFingerprint: 'a'.repeat(64) })
+    const first = await createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      deps: firstDeps,
+      payload,
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })
+    GovernedReasoningExecution.findOne = jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue(first) })
+    const changedDeps = makeLiveDeps({ providerContextBindingFingerprint: 'b'.repeat(64) })
+
+    await expect(createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      deps: changedDeps,
+      payload,
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })).rejects.toMatchObject({
+      status: 409,
+      code: 'GRR_IDEMPOTENCY_REQUEST_CONFLICT',
+      details: { fingerprintState: 'MISMATCHED' },
+    })
+    expect(changedDeps.providerAdapter).not.toHaveBeenCalled()
   })
 
   test('returns a cached LIVE_TEST execution only after current authorization and exact provider evidence', async () => {
@@ -1580,6 +1707,9 @@ describe('Governed Reasoning Runtime models and service', () => {
     ['authorization function', { authorizeLiveTest: null }],
     ['safe-request builder', { buildProviderSafeRequest: null }],
     ['safe-context builder', { buildProviderSafeContext: null }],
+    ['safe-context assertion', { assertProviderSafeContext: null }],
+    ['blank context contract version', { providerContextContractVersion: ' ' }],
+    ['invalid context binding fingerprint', { providerContextBindingFingerprint: 'not-a-sha256' }],
   ])('rejects an invalid LIVE_TEST %s dependency before runtime work', async (_label, override) => {
     const deps = makeLiveDeps(override)
     await expect(createGovernedReasoningExecution({

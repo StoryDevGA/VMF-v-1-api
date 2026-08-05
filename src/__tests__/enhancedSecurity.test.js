@@ -510,7 +510,82 @@ describe('Rate limiting exports', () => {
 })
 
 /* ================================================================== */
-/*  6. Request Correlation Tracking                                   */
+/*  6. Request Logger Secret Redaction                                */
+/* ================================================================== */
+
+describe('Request logger secret redaction', () => {
+  let buildLoggerOptions
+  let pino
+  let sanitizeRequestHeaders
+  let serializeRequest
+
+  beforeAll(async () => {
+    pino = (await import('pino')).default
+    ;({ buildLoggerOptions } = await import('../config/logger.js'))
+    ;({ sanitizeRequestHeaders, serializeRequest } = await import(
+      '../middleware/requestLogger.js'
+    ))
+  })
+
+  test('redacts Authorization and step-up headers case-insensitively without mutating source headers', () => {
+    const sourceHeaders = {
+      Authorization: 'Bearer synthetic-authorization-sentinel',
+      'X-Step-Up-Token': 'synthetic-step-up-sentinel',
+      'x-request-id': 'qa-request-id',
+    }
+
+    const sanitized = sanitizeRequestHeaders(sourceHeaders)
+
+    expect(sanitized).toEqual({
+      Authorization: '[REDACTED]',
+      'X-Step-Up-Token': '[REDACTED]',
+      'x-request-id': 'qa-request-id',
+    })
+    expect(JSON.stringify(sanitized)).not.toContain('synthetic-authorization-sentinel')
+    expect(JSON.stringify(sanitized)).not.toContain('synthetic-step-up-sentinel')
+    expect(sourceHeaders.Authorization).toBe('Bearer synthetic-authorization-sentinel')
+    expect(sourceHeaders['X-Step-Up-Token']).toBe('synthetic-step-up-sentinel')
+  })
+
+  test('serializes absent headers as an empty object', () => {
+    expect(serializeRequest({ id: 'request-without-headers' }).headers).toEqual({})
+    expect(sanitizeRequestHeaders()).toEqual({})
+  })
+
+  test('base logger redacts canonical Node header paths from emitted JSON', async () => {
+    const chunks = []
+    const destination = {
+      write(chunk) {
+        chunks.push(String(chunk))
+      },
+    }
+    const testLogger = pino(buildLoggerOptions(), destination)
+
+    testLogger.error({
+      req: {
+        headers: {
+          authorization: 'Bearer synthetic-pino-authorization-sentinel',
+          'x-step-up-token': 'synthetic-pino-step-up-sentinel',
+          'x-request-id': 'qa-pino-request-id',
+        },
+      },
+    }, 'request redaction test')
+
+    await new Promise((resolve) => setImmediate(resolve))
+
+    const emitted = chunks.join('')
+    expect(emitted).not.toBe('')
+    const parsed = JSON.parse(emitted.trim())
+    expect(emitted).not.toContain('synthetic-pino-authorization-sentinel')
+    expect(emitted).not.toContain('synthetic-pino-step-up-sentinel')
+    expect(parsed.req.headers.authorization).toBe('[REDACTED]')
+    expect(parsed.req.headers['x-step-up-token']).toBe('[REDACTED]')
+    expect(parsed.req.headers['x-request-id']).toBe('qa-pino-request-id')
+  })
+})
+
+/* ================================================================== */
+/*  7. Request Correlation Tracking                                   */
 /* ================================================================== */
 
 describe('Request correlation', () => {
@@ -573,7 +648,7 @@ describe('Request correlation', () => {
 })
 
 /* ================================================================== */
-/*  7. Correlation enricher unit tests                                */
+/*  8. Correlation enricher unit tests                                */
 /* ================================================================== */
 
 describe('correlationEnricher middleware', () => {
@@ -675,7 +750,7 @@ describe('correlationEnricher middleware', () => {
 })
 
 /* ================================================================== */
-/*  8. Environment config new fields                                  */
+/*  9. Environment config new fields                                  */
 /* ================================================================== */
 
 describe('Environment config (4.3 additions)', () => {

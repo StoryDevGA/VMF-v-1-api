@@ -3074,7 +3074,7 @@ export const buildAcceptedDiscoveryScopedViews = ({
   const evidenceObjectIds = acceptedEvidenceObjects
     .map((evidenceObject) => String(evidenceObject.evidenceObjectId || '').trim())
     .filter(Boolean)
-  const evidenceFacts = acceptedEvidenceObjects.slice(0, 12).map((evidenceObject) => ({
+  const evidenceFacts = acceptedEvidenceObjects.map((evidenceObject) => ({
     evidenceObjectId: String(evidenceObject.evidenceObjectId || '').trim(),
     sourceId: String(evidenceObject.sourceId || '').trim(),
     category: String(evidenceObject.category || '').trim(),

@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "1.0.0",
+  "policyVersion": "SS-003-PARLON-METADATA-QA-V1",
+  "relationshipContractVersion": "SS002_RELATIONSHIP_V1",
+  "relationshipChecksum": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "authority": "USER_AUTHORIZED_QA_FIXTURE_AND_SOURCE_BACKED_PACK_IDENTITY",
+  "environmentGuard": {
+    "allowedNodeEnvs": ["development", "test"],
+    "allowedDatabaseNames": ["test"]
+  },
+  "expectedSemanticVersion": "1.0.0",
+  "expectedScopeKey": "GLOBAL",
+  "packs": [
+    {
+      "packType": "ARL",
+      "packKey": "adaptive-reasoning-layer",
+      "packId": "kp-arl-adaptive-reasoning-layer",
+      "versionId": "kpv-arl-adaptive-reasoning-layer-1-0-0-global",
+      "activationId": "kpa-arl-adaptive-reasoning-layer-kpv-arl-adaptive-reasoning-layer-1-0-0-global-global",
+      "knowledgeAssetId": "QA-SS003-ARL-ADAPTIVE-REASONING-LAYER",
+      "expectedContentHash": "sha256:45e7863824e8abaa4530cfee27f91613d14415be537d463037e9cfe181016953"
+    },
+    {
+      "packType": "OUTPUT_SCHEMA",
+      "packKey": "output-schemas-pack",
+      "packId": "kp-output-schema-output-schemas-pack",
+      "versionId": "kpv-output-schema-output-schemas-pack-1-0-0-global",
+      "activationId": "kpa-output-schema-output-schemas-pack-kpv-output-schema-output-schemas-pack-1-0-0-global-global",
+      "knowledgeAssetId": "QA-SS003-OUTPUT-SCHEMA-OUTPUT-SCHEMAS-PACK",
+      "expectedContentHash": "sha256:6d1c422889a47f682f1b164ab9fa46c330c44b9b027cf523c1792bd8422a75a5"
+    },
+    {
+      "packType": "OUTPUT_TYPE_DEFINITION",
+      "packKey": "outcome-output-types",
+      "packId": "kp-output-type-definition-outcome-output-types",
+      "versionId": "kpv-output-type-definition-outcome-output-types-1-0-0-global",
+      "activationId": "kpa-output-type-definition-outcome-output-types-kpv-output-type-definition-outcome-output-types-1-0-0-global-global",
+      "knowledgeAssetId": "QA-SS003-OUTPUT-TYPE-DEFINITION-OUTCOME-OUTPUT-TYPES",
+      "expectedContentHash": "sha256:5d33a6c6034c8219b3a68197789a86f588e109b93c6a895d5c9b666f935fe10b"
+    },
+    {
+      "packType": "RL",
+      "packKey": "rendering-layer",
+      "packId": "kp-rl-rendering-layer",
+      "versionId": "kpv-rl-rendering-layer-1-0-0-global",
+      "activationId": "kpa-rl-rendering-layer-kpv-rl-rendering-layer-1-0-0-global-global",
+      "knowledgeAssetId": "QA-SS003-RL-RENDERING-LAYER",
+      "expectedContentHash": "sha256:cb7f3f55c9ef1e5d4013dec1add125adb3ef876518a257c4f16a3848a8812ceb"
+    }
+  ]
+}

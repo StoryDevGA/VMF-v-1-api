@@ -248,25 +248,30 @@ describe('Knowledge Runtime model contracts', () => {
     await expect(activation.validate()).resolves.toBeUndefined()
   })
 
-  test('normalizes KP-004 classification and governed dependency metadata', async () => {
+  test('normalizes SS-002 classification, identity and governed relationship metadata', async () => {
     const version = new KnowledgePackVersion({
       packType: 'STYLE',
       packKey: 'executive-board-style',
       semanticVersion: '1.0.0',
+      knowledgeAssetId: ' sty-001 ',
       knowledgeLayer: ' style ',
       capabilityKey: ' Executive-Board ',
       workspaceCompatibility: [' outcome ', 'OUTCOME', ' advisor '],
       dependencyReferences: [
         {
-          knowledgeLayer: ' output_schema ',
-          requirement: ' required ',
-          packType: ' output_schema ',
-          packKey: ' Board-Summary ',
+          relationshipType: ' required_at_runtime ',
+          targetKnowledgeLayer: ' output_schema ',
+          targetPackType: ' output_schema ',
+          targetPackKey: ' Board-Summary ',
+          requiredAt: ' runtime ',
+          cardinality: ' one ',
         },
         {
-          knowledgeLayer: ' audience ',
-          requirement: ' optional ',
-          capabilityKey: ' Board-Audience ',
+          relationshipType: ' optional ',
+          targetKnowledgeLayer: ' audience ',
+          targetCapabilityKey: ' Board-Audience ',
+          requiredAt: ' runtime ',
+          cardinality: ' zero_or_one ',
         },
       ],
     })
@@ -275,18 +280,25 @@ describe('Knowledge Runtime model contracts', () => {
 
     expect(version.knowledgeLayer).toBe('STYLE')
     expect(version.capabilityKey).toBe('executive-board')
+    expect(version.knowledgeAssetId).toBe('STY-001')
+    expect(version.relationshipContractVersion).toBe('SS002_RELATIONSHIP_V1')
+    expect(version.relationshipChecksum).toMatch(/^[a-f0-9]{64}$/)
     expect(version.workspaceCompatibility).toEqual(['OUTCOME', 'ADVISOR'])
     expect(version.dependencyReferences.map((reference) => reference.toObject())).toEqual([
       {
-        knowledgeLayer: 'OUTPUT_SCHEMA',
-        requirement: 'REQUIRED',
-        packType: 'OUTPUT_SCHEMA',
-        packKey: 'board-summary',
+        relationshipType: 'REQUIRED_AT_RUNTIME',
+        targetPackType: 'OUTPUT_SCHEMA',
+        targetPackKey: 'board-summary',
+        targetKnowledgeLayer: 'OUTPUT_SCHEMA',
+        requiredAt: 'RUNTIME',
+        cardinality: 'ONE',
       },
       {
-        knowledgeLayer: 'AUDIENCE',
-        requirement: 'OPTIONAL',
-        capabilityKey: 'board-audience',
+        relationshipType: 'OPTIONAL',
+        targetCapabilityKey: 'board-audience',
+        targetKnowledgeLayer: 'AUDIENCE',
+        requiredAt: 'RUNTIME',
+        cardinality: 'ZERO_OR_ONE',
       },
     ])
   })
@@ -295,23 +307,29 @@ describe('Knowledge Runtime model contracts', () => {
     {
       name: 'partial exact identity',
       dependency: {
-        knowledgeLayer: 'OUTPUT_SCHEMA',
-        packType: 'OUTPUT_SCHEMA',
+        relationshipType: 'REQUIRED_AT_RUNTIME',
+        targetPackKey: 'board-summary',
+        requiredAt: 'RUNTIME',
+        cardinality: 'ONE',
       },
     },
     {
       name: 'both exact identity and capability selectors',
       dependency: {
-        knowledgeLayer: 'OUTPUT_SCHEMA',
-        packType: 'OUTPUT_SCHEMA',
-        packKey: 'board-summary',
-        capabilityKey: 'board-summary',
+        relationshipType: 'REQUIRED_AT_RUNTIME',
+        targetPackType: 'OUTPUT_SCHEMA',
+        targetPackKey: 'board-summary',
+        targetCapabilityKey: 'board-summary',
+        requiredAt: 'RUNTIME',
+        cardinality: 'ONE',
       },
     },
     {
       name: 'no selector',
       dependency: {
-        knowledgeLayer: 'OUTPUT_SCHEMA',
+        relationshipType: 'REQUIRED_AT_RUNTIME',
+        requiredAt: 'RUNTIME',
+        cardinality: 'ONE',
       },
     },
   ])('rejects a KP-004 dependency with $name', async ({ dependency }) => {
@@ -322,7 +340,7 @@ describe('Knowledge Runtime model contracts', () => {
       dependencyReferences: [dependency],
     })
 
-    await expect(version.validate()).rejects.toThrow(/dependency/i)
+    await expect(version.validate()).rejects.toThrow(/dependency|relationship|selector/i)
   })
 
   test('fails closed for customer or tenant scoped packs without owning scope ids', async () => {

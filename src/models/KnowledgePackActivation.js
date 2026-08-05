@@ -7,6 +7,7 @@ import {
 import {
   KNOWLEDGE_PACK_EXECUTION_MODES,
   KNOWLEDGE_PACK_PURPOSE_CATEGORIES,
+  KNOWLEDGE_PACK_RELATIONSHIP_CONTRACT_VERSION,
   KNOWLEDGE_PACK_VISIBILITY_SCOPES,
 } from '../constants/knowledgeRuntime.js'
 import {
@@ -17,6 +18,7 @@ import { buildKnowledgePackId } from './KnowledgePack.js'
 import {
   knowledgePackCapabilityKeyField,
   knowledgePackDependencyReferenceSchema,
+  knowledgePackKnowledgeAssetIdField,
   knowledgePackLayerField,
   knowledgePackWorkspaceCompatibilityField,
   normalizeKnowledgePackGovernanceFields,
@@ -117,10 +119,25 @@ const knowledgePackActivationSchema = new mongoose.Schema(
     },
     knowledgeLayer: knowledgePackLayerField,
     capabilityKey: knowledgePackCapabilityKeyField,
+    knowledgeAssetId: knowledgePackKnowledgeAssetIdField,
     workspaceCompatibility: knowledgePackWorkspaceCompatibilityField,
     dependencyReferences: {
       type: [knowledgePackDependencyReferenceSchema],
-      default: undefined,
+      default: [],
+    },
+    relationshipContractVersion: {
+      type: String,
+      required: true,
+      uppercase: true,
+      enum: [KNOWLEDGE_PACK_RELATIONSHIP_CONTRACT_VERSION],
+      default: KNOWLEDGE_PACK_RELATIONSHIP_CONTRACT_VERSION,
+    },
+    relationshipChecksum: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 64,
+      default: '',
     },
     packType: {
       type: String,
@@ -312,6 +329,7 @@ knowledgePackActivationSchema.index({ status: 1, scopeKey: 1, packType: 1, packK
 knowledgePackActivationSchema.index({ packId: 1, status: 1, activatedAt: -1 })
 knowledgePackActivationSchema.index({ purposeCategory: 1, status: 1, activatedAt: -1 })
 knowledgePackActivationSchema.index({ visibility: 1, customerId: 1, tenantId: 1, status: 1 })
+knowledgePackActivationSchema.index({ status: 1, scopeKey: 1, packType: 1, knowledgeAssetId: 1 })
 
 knowledgePackActivationSchema.pre('validate', function normalizeKnowledgePackActivation(next) {
   this.packType = normalizeToken(this.packType)

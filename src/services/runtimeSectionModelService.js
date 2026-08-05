@@ -1082,7 +1082,7 @@ const PROFILE_EVIDENCE_SOURCE_LIMITS = Object.freeze({
   ACCEPTED_SECTION_EVIDENCE: 8,
   ACCEPTED_DISCOVERY_EVIDENCE: 10,
   ACCEPTED_DEPENDENCY_TRUTH: 8,
-  EXPLICIT_SECTION_INPUT: 6,
+  EXPLICIT_SECTION_INPUT: 10,
   SCOPED_EVIDENCE_VIEW: 4,
   COMPANY_NAME: 1,
   TARGET_OFFER: 1,
@@ -1102,6 +1102,9 @@ const PROFILE_FACT_CATEGORY_ORDER = Object.freeze([
   'OUTPUT_FORMAT',
   'OUTPUT_CHANNEL',
   'OUTPUT_TIMING_APPROVAL',
+  'OUTPUT_GAP',
+  'OUTPUT_GOVERNANCE',
+  'OUTPUT_EXCLUSION',
 ])
 
 const getProfileEvidenceSignals = (text = '') => {
@@ -1124,12 +1127,12 @@ const getProfileEvidenceSignals = (text = '') => {
     /\b(owner|owns|sponsor|stakeholder|buyer|approver|decision maker|user)\b/i.test(text)
     || (hasExecutiveRole && /\b(audience|recipient|reader|decision|approve|buyer)\b/i.test(text))
   const hasExplicitOutputContext =
-    /\b(output|deliverable|delivery|brief|presentation|format|audience|recipient|reader)\b/i.test(text)
+    /\b(output|deliverable|delivery|brief|presentation|publication|infographic|format|audience|recipient|reader)\b/i.test(text)
   const hasOutputAudience =
-    /\b(audience|reader|recipient)\b/i.test(text)
+    /\b(audience|reader|recipient|reviewer)\b/i.test(text)
     || (hasExecutiveRole && /\b(output|deliverable|delivery|brief|report|presentation)\b/i.test(text))
   const hasOutputFormat =
-    /\b(pdf|docx|ppt|presentation|brief|page|two-page|format|length)\b/i.test(text)
+    /\b(pdf|docx|ppt|presentation|publication|infographic|brief|page|two-page|format|length)\b/i.test(text)
     || (/\breport\b/i.test(text) && hasExplicitOutputContext)
   const hasOutputChannel = /\b(email|portal|download|channel|send|sent|deliver|delivery)\b/i.test(text)
   const hasOutputTimingApproval = /\b(tone|deadline|due|approval|approved|sign-off)\b/i.test(text)
@@ -1171,7 +1174,12 @@ const getProfileEvidenceSemanticFamilies = (text = '') => {
   ].filter(Boolean))
 }
 
+const hasUnconfirmedProfileEvidenceQualifier = (text = '') =>
+  /\b(?:require|requires|required|requiring|need|needs|needed|needing)\s+(?:further\s+)?(?:corroboration|confirmation|validation|verification)\b|\bmust\s+be\s+(?:corroborated|confirmed|validated|verified)\b/i.test(text)
+
 const splitIndependentProfileClauses = (candidate = '') => {
+  if (hasUnconfirmedProfileEvidenceQualifier(candidate)) return [candidate]
+
   const clauses = candidate
     .split(/\s*(?:,|\band\b|\bbut\b|\bwhile\b|\bwhereas\b)\s*/i)
     .map((clause) => clause.trim())
@@ -1190,20 +1198,85 @@ const splitProfileEvidenceSentences = (value) => {
     .replace(/\s+/g, ' ')
     .trim()
   if (!normalized) return []
-  return normalized
+
+  let tokenPrefix = '__PROFILE_EVIDENCE_URL_'
+  while (normalized.includes(tokenPrefix)) tokenPrefix = `_${tokenPrefix}`
+  const protectedUrls = []
+  const protectedValue = normalized.replace(/\bhttps?:\/\/[^\s<>"']+/gi, (matchedValue) => {
+    const trailingPunctuation = matchedValue.match(/[.?!;]+$/)?.[0] || ''
+    const url = trailingPunctuation
+      ? matchedValue.slice(0, -trailingPunctuation.length)
+      : matchedValue
+    if (!url) return matchedValue
+
+    const token = `${tokenPrefix}${protectedUrls.length}__`
+    protectedUrls.push({ token, url })
+    return `${token}${trailingPunctuation}`
+  })
+  const restoreProtectedUrls = (candidate) => protectedUrls.reduce(
+    (restored, { token, url }) => restored.split(token).join(url),
+    candidate,
+  )
+
+  return protectedValue
     .split(/(?:\r?\n|[.?!;])+/)
-    .map((candidate) => candidate.trim())
+    .map((candidate) => restoreProtectedUrls(candidate).trim())
     .filter(Boolean)
 }
+
+const PROFILE_GOVERNANCE_QUALIFICATION_PATTERNS = Object.freeze([
+  /\bmust\s+never\s+be\s+presented\s+as\s+verified\s+(?:(?:customer|client)\s+|(?:[A-Z][\p{L}\p{N}_-]{1,63})\s+)?(?:facts?|stakeholders?|people|persons?|users?|records?|data|identities|personas?)(?:\s+outside\s+(?:this|the)\s+(?:qa\s+)?runtime)?\b/iu,
+  /\b(?:they|these|those)?\s*(?:are\s+)?not\s+(?:a\s+)?real\s+(?:(?:customer|client)\s+|(?:[A-Z][\p{L}\p{N}_-]{1,63})\s+)?(?:facts?|stakeholders?|people|persons?|users?|records?|data|identities|personas?)\b/iu,
+  /\b(?:(?:user[- ]authorized|customer[- ]provided)\s+)?(?:fictitious|synthetic)\s+(?:facts?|stakeholders?|people|persons?|users?|records?|data|content|identities|personas?|fixtures?)(?:\s+for\s+(?:(?:this|the)\s+(?:qa\s+)?runtime|runtime\s+[A-Za-z0-9_-]+))?\b/iu,
+  /\b(?:qa\s+(?:fixture|runtime)(?:\s+only)?|test[- ]only|demo(?:nstration)?[- ]only)\b/iu,
+])
+
+const buildProfileInputQualifications = (inputSummary) => {
+  const seen = new Set()
+  return splitProfileEvidenceSentences(inputSummary)
+    .flatMap((sentence) => sentence
+      .split(/\s*(?:,|;|\b(?:and|but|however|whereas)\b)\s*/i)
+      .map((clause) => clause.trim())
+      .filter(Boolean))
+    .flatMap((clause) => PROFILE_GOVERNANCE_QUALIFICATION_PATTERNS
+      .map((pattern) => clause.match(pattern))
+      .filter(Boolean)
+      .map((match) => ({
+        index: match.index || 0,
+        text: match[0].trim(),
+      }))
+      .sort((left, right) => left.index - right.index || right.text.length - left.text.length)
+      .filter((candidate, index, candidates) => !candidates
+        .slice(0, index)
+        .some((previous) => normalizeSimilarityText(previous.text)
+          .includes(normalizeSimilarityText(candidate.text))))
+      .map((candidate) => candidate.text))
+    .filter((qualification) => {
+      const normalizedQualification = normalizeSimilarityText(qualification)
+      if (!normalizedQualification || seen.has(normalizedQualification)) return false
+      seen.add(normalizedQualification)
+      return true
+    })
+    .map((qualification) => qualification.slice(0, 240))
+    .slice(0, 3)
+}
+
+const getProfileIdentityQualifierTokens = (qualifications = []) => new Set(
+  qualifications.flatMap((qualification) =>
+    [...qualification.matchAll(/\b([A-Z][A-Z0-9_-]{1,15})\s+(?:fixture|runtime|test)\b/g)]
+      .map((match) => match[1])),
+)
 
 const buildProfileEvidenceCandidates = ({
   acceptedEvidenceObjects = [],
   acceptedSectionEvidenceObjects = [],
   dependencyTruths = [],
   inputSummary,
+  profileQualifications = [],
   scopedEvidenceSummary,
   seedProfile = {},
 }) => {
+  const identityQualifierTokens = getProfileIdentityQualifierTokens(profileQualifications)
   const groups = [
     {
       sourceClass: 'ACCEPTED_SECTION_EVIDENCE',
@@ -1260,6 +1333,7 @@ const buildProfileEvidenceCandidates = ({
   groups.forEach(({ fragment, sourceClass, values }) => {
     const limit = PROFILE_EVIDENCE_SOURCE_LIMITS[sourceClass] || 0
     values.slice(0, limit).forEach((value, sourceIndex) => {
+      const boundedSourceSentence = value.slice(0, 400)
       const fragments = fragment ? splitIndependentProfileClauses(value) : [value]
       fragments.forEach((text) => {
         const boundedText = text.slice(0, 400)
@@ -1270,6 +1344,10 @@ const buildProfileEvidenceCandidates = ({
           sourceClass,
           sourceIndex,
           text: boundedText,
+          sourceSentence: boundedSourceSentence,
+          ...(sourceClass === 'EXPLICIT_SECTION_INPUT' && identityQualifierTokens.size > 0
+            ? { identityQualifierTokens: [...identityQualifierTokens] }
+            : {}),
         })
       })
     })
@@ -1280,6 +1358,7 @@ const buildProfileEvidenceCandidates = ({
 
 const isNegatedOrUnconfirmedProfileFact = (text) =>
   /\b(no|not|without|never|unknown|unconfirmed|pending|tbc)\b|not yet/i.test(text)
+  || hasUnconfirmedProfileEvidenceQualifier(text)
 
 const PROFILE_PRIMARY_SEMANTIC_FAMILIES = Object.freeze([
   'OBJECTIVE',
@@ -1295,8 +1374,18 @@ const hasAmbiguousPrimaryProfileFamilies = (families) =>
     .filter((family) => families.has(family))
     .length >= 2
 
-const buildProfileIdentityRoleProjection = (candidate) => {
-  const text = candidate?.text || ''
+const buildProfileIdentityRoleProjection = (
+  candidate,
+  { allowReviewer = false, coordinatedOutput = false } = {},
+) => {
+  const text = coordinatedOutput
+    ? candidate?.sourceSentence || candidate?.text || ''
+    : candidate?.text || ''
+  const identityQualifierTokens = new Set(
+    Array.isArray(candidate?.identityQualifierTokens)
+      ? candidate.identityQualifierTokens
+      : [],
+  )
   const collectMatches = (pattern, normalize = (value) => value) =>
     [...text.matchAll(pattern)].map((match) => ({
       index: match.index || 0,
@@ -1314,19 +1403,43 @@ const buildProfileIdentityRoleProjection = (candidate) => {
       })
       .slice(0, limit)
   }
-  const identities = dedupeInSourceOrder([
-    ...collectMatches(
-      /\b[A-Z][a-z]+(?:[-'][A-Z]?[a-z]+)?\s+[A-Z][a-z]+(?:[-'][A-Z]?[a-z]+)?\b/g,
+  const namedIdentities = [
+    ...text.matchAll(
+      /\b([A-Z][a-z]+(?:[-'][A-Z]?[a-z]+)?\s+[A-Z][a-z]+(?:[-'][A-Z]?[a-z]+)?)(?:\s+([A-Z][A-Z0-9_-]{1,15}))?\b/g,
     ),
-    ...collectMatches(/\b(?:CFO|CEO|COO|CTO|CIO)\b/g),
-  ])
+  ].map((match) => ({
+    index: match.index || 0,
+    value: match[2] && identityQualifierTokens.has(match[2])
+      ? `${match[1]} ${match[2]}`
+      : match[1],
+  }))
+  const acronymIdentities = collectMatches(/\b(?:CFO|CEO|COO|CTO|CIO)\b/g)
+  const identities = dedupeInSourceOrder(
+    namedIdentities.length > 0 ? namedIdentities : acronymIdentities,
+  )
+  const rolePattern = coordinatedOutput
+    ? /\b(?:primary audience|executive sponsor|final approver|audience|reader|recipient|reviewer)\b/gi
+    : allowReviewer
+      ? /\b(?:decision maker|owner|owns|sponsor|stakeholder|buyer|approver|user|audience|reader|recipient|reviewer)\b/gi
+      : /\b(?:decision maker|owner|owns|sponsor|stakeholder|buyer|approver|user|audience|reader|recipient)\b/gi
   const roles = dedupeInSourceOrder(
     collectMatches(
-      /\b(?:decision maker|owner|owns|sponsor|stakeholder|buyer|approver|user|audience|reader|recipient)\b/gi,
+      rolePattern,
       (value) => value.toLowerCase() === 'owns' ? 'owner' : value.toLowerCase(),
     ),
   )
   if (identities.length === 0 || roles.length === 0) return null
+
+  if (coordinatedOutput) {
+    const hasExplicitOutputAudienceAnchor =
+      /\b(?:primary\s+)?(?:audience|reader|recipient|reviewer)\b/i.test(text)
+    if (!hasExplicitOutputAudienceAnchor || identities.length !== 1) return null
+
+    return [{
+      ...candidate,
+      text: `${identities[0].value} \u2014 ${roles.map((role) => role.value).join(', ')}`,
+    }]
+  }
 
   const seenAssociations = new Set()
   const associations = identities.flatMap((identity) => {
@@ -1351,6 +1464,71 @@ const buildProfileIdentityRoleProjection = (candidate) => {
   return associations.length > 0 ? associations : null
 }
 
+const buildOutputGapProjection = (candidate) => {
+  const sourceSentence = candidate?.sourceSentence || candidate?.text || ''
+  if (!/\b(?:file\s+type|format|channel)\b/i.test(candidate?.text || '')) return null
+  const matchedClause = sourceSentence.match(
+    /\b(?:exact\s+)?(?:delivery\s+)?(?:file\s+type|format|channel)(?:\s+and\s+(?:delivery\s+)?(?:file\s+type|format|channel))?\s+(?:(?:is|are|remain|remains)\s+)?(?:not\s+yet\s+specified|unspecified|unresolved|unknown|to\s+be\s+(?:confirmed|specified|decided))(?:\s+and\s+must\s+remain\s+visible\s+gaps?)?\b/i,
+  )
+  if (!matchedClause) return null
+  return { ...candidate, text: matchedClause[0].slice(0, 240) }
+}
+
+const buildOutputGovernanceProjection = (candidate) => {
+  const sourceSentence = candidate?.sourceSentence || candidate?.text || ''
+  if (!/\b(?:output\s+)?shap(?:e|ing)\b/i.test(candidate?.text || '')) return null
+  const matchedClause = sourceSentence.match(
+    /\b(?:output\s+)?shap(?:e|ing)\b[^,;.]{0,80}\b(?:only\s+)?after\s+(?:[A-Za-z0-9-]+-)?(?:approved|accepted)\s+(?:meaning|truth)\b/i,
+  )
+  return matchedClause
+    ? { ...candidate, text: matchedClause[0].slice(0, 240) }
+    : null
+}
+
+const OUTPUT_EXCLUSION_SUBJECT_PATTERN =
+  String.raw`(?:publication|presentation(?:\s+generation)?|infographic(?:\s+work)?|output|delivery|deliverable|export)`
+const OUTPUT_EXCLUSION_SUBJECT_REGEX = new RegExp(
+  String.raw`\b${OUTPUT_EXCLUSION_SUBJECT_PATTERN}\b`,
+  'gi',
+)
+const OUTPUT_EXCLUSION_CLAUSE_REGEX = new RegExp(
+  String.raw`(?:^|[.;]|\b(?:but|while|whereas)\b)\s*(?<subjects>${OUTPUT_EXCLUSION_SUBJECT_PATTERN}(?:(?:\s*,\s*(?:and\s+)?|\s+and\s+)${OUTPUT_EXCLUSION_SUBJECT_PATTERN})*)\s+(?:is|are|remain|remains)\s+(?<negated>not\s+)?out\s+of\s+scope\b`,
+  'gi',
+)
+
+const buildOutputExclusionProjection = (candidate) => {
+  const sourceSentence = candidate?.sourceSentence || candidate?.text || ''
+  const candidateSubjects = new Set(
+    [...String(candidate?.text || '').matchAll(OUTPUT_EXCLUSION_SUBJECT_REGEX)]
+      .map((match) => normalizeSimilarityText(match[0]))
+      .filter(Boolean),
+  )
+  if (candidateSubjects.size === 0) return null
+
+  for (const clauseMatch of sourceSentence.matchAll(OUTPUT_EXCLUSION_CLAUSE_REGEX)) {
+    if (clauseMatch.groups?.negated) continue
+    const explicitSubjects = [
+      ...String(clauseMatch.groups?.subjects || '').matchAll(OUTPUT_EXCLUSION_SUBJECT_REGEX),
+    ]
+      .map((match) => match[0].trim())
+      .filter((subject, index, subjects) => subjects.findIndex((candidateSubject) =>
+        normalizeSimilarityText(candidateSubject) === normalizeSimilarityText(subject)) === index)
+      .slice(0, 5)
+    if (!explicitSubjects.some((subject) =>
+      candidateSubjects.has(normalizeSimilarityText(subject)))) continue
+
+    const subjectList = explicitSubjects.length === 1
+      ? explicitSubjects[0]
+      : explicitSubjects.length === 2
+        ? `${explicitSubjects[0]} and ${explicitSubjects[1]}`
+        : `${explicitSubjects.slice(0, -1).join(', ')}, and ${explicitSubjects.at(-1)}`
+    const predicate = explicitSubjects.length === 1 ? 'is' : 'are'
+    return { ...candidate, text: `${subjectList} ${predicate} out of scope` }
+  }
+
+  return null
+}
+
 const classifyProfileEvidenceCandidates = (candidates = []) => {
   const categories = Object.fromEntries(
     PROFILE_FACT_CATEGORY_ORDER.map((category) => [category, []]),
@@ -1365,6 +1543,16 @@ const classifyProfileEvidenceCandidates = (candidates = []) => {
 
   candidates.forEach((candidate) => {
     const text = candidate.text
+    const outputGapProjection = buildOutputGapProjection(candidate)
+    if (outputGapProjection) {
+      add('OUTPUT_GAP', outputGapProjection)
+      return
+    }
+    const outputExclusionProjection = buildOutputExclusionProjection(candidate)
+    if (outputExclusionProjection) {
+      add('OUTPUT_EXCLUSION', outputExclusionProjection)
+      return
+    }
     if (isNegatedOrUnconfirmedProfileFact(text)) return
     const sourceClass = candidate.sourceClass
     const signals = getProfileEvidenceSignals(text)
@@ -1393,10 +1581,16 @@ const classifyProfileEvidenceCandidates = (candidates = []) => {
     const hasCustomerContext =
       ['COMPANY_NAME', 'TARGET_OFFER', 'MARKET_REGION'].includes(sourceClass)
       || signals.hasCustomerContext
-    const identityRoleProjection =
-      signals.hasStakeholderRole || signals.hasOutputAudience
-        ? buildProfileIdentityRoleProjection(candidate)
-        : null
+    const stakeholderIdentityRoleProjection = signals.hasStakeholderRole
+      ? buildProfileIdentityRoleProjection(candidate)
+      : null
+    const outputIdentityRoleProjection = signals.hasOutputAudience
+      ? buildProfileIdentityRoleProjection(candidate, {
+          allowReviewer: true,
+          coordinatedOutput: true,
+        }) || buildProfileIdentityRoleProjection(candidate, { allowReviewer: true })
+      : null
+    const outputGovernanceProjection = buildOutputGovernanceProjection(candidate)
 
     if (
       hasCustomerContext
@@ -1427,17 +1621,17 @@ const classifyProfileEvidenceCandidates = (candidates = []) => {
     if (
       signals.hasStakeholderRole
       && stakeholderEligible
-      && identityRoleProjection
+      && stakeholderIdentityRoleProjection
     ) {
-      identityRoleProjection.forEach((projection) =>
+      stakeholderIdentityRoleProjection.forEach((projection) =>
         add('STAKEHOLDER_ROLE', projection))
     }
     if (
       signals.hasOutputAudience
       && outputEligible
-      && identityRoleProjection
+      && outputIdentityRoleProjection
     ) {
-      identityRoleProjection.forEach((projection) =>
+      outputIdentityRoleProjection.forEach((projection) =>
         add('OUTPUT_AUDIENCE', projection))
     }
     if (signals.hasOutputFormat && outputEligible) {
@@ -1454,8 +1648,12 @@ const classifyProfileEvidenceCandidates = (candidates = []) => {
       signals.hasOutputTimingApproval
       && signals.hasExplicitOutputContext
       && outputEligible
+      && !outputGovernanceProjection
     ) {
       add('OUTPUT_TIMING_APPROVAL', candidate)
+    }
+    if (outputGovernanceProjection && outputEligible) {
+      add('OUTPUT_GOVERNANCE', outputGovernanceProjection)
     }
   })
 
@@ -1500,6 +1698,7 @@ const buildProfileGeneratedSections = ({
   boundaries = [],
   dependencyTruths = [],
   facts = {},
+  inputQualifications = [],
   profile,
   purpose,
   supportingEvidence = [],
@@ -1508,10 +1707,16 @@ const buildProfileGeneratedSections = ({
   const themeSubjects = themes.slice(0, 5).map(getProfileThemeSubject)
   const purposeText = normalizeEvidenceString(purpose)
   const purposeLead = purposeText ? `${purposeText} ` : ''
+  const qualificationBullets = inputQualifications
+    .slice(0, 3)
+    .map((qualification) => `Customer-provided qualification: ${qualification}`)
   const evidenceBoundariesSection = {
     heading: 'Evidence Boundaries',
     body: 'The interpretation does not promote unsupported or unconfirmed details as facts.',
-    bullets: boundaries.slice(0, 5).map((boundary) => boundary.message),
+    bullets: [
+      ...qualificationBullets,
+      ...boundaries.map((boundary) => boundary.message),
+    ].slice(0, 5),
   }
   const customerBullets = buildProfileFactBullets([
     { category: facts.CUSTOMER_CONTEXT, prefix: 'Business context' },
@@ -1533,6 +1738,9 @@ const buildProfileGeneratedSections = ({
     { category: facts.OUTPUT_FORMAT, prefix: 'Format or length' },
     { category: facts.OUTPUT_CHANNEL, prefix: 'Delivery channel' },
     { category: facts.OUTPUT_TIMING_APPROVAL, prefix: 'Timing or approval' },
+    { category: facts.OUTPUT_GAP, prefix: 'Unresolved requirement' },
+    { category: facts.OUTPUT_GOVERNANCE, prefix: 'Governance constraint' },
+    { category: facts.OUTPUT_EXCLUSION, prefix: 'Scope exclusion' },
   ])
   const sourceClassCount = new Set(
     supportingEvidence.map((item) => item.sourceType).filter(Boolean),
@@ -2030,12 +2238,16 @@ const buildSectionIntelligenceParts = ({
     scopedEvidenceSummary,
     seedProfile,
   })
+  const profileQualifications = interpretationProfile
+    ? buildProfileInputQualifications(inputSummary)
+    : []
   const profileEvidenceCandidates = interpretationProfile
     ? buildProfileEvidenceCandidates({
         acceptedEvidenceObjects,
         acceptedSectionEvidenceObjects,
         dependencyTruths,
         inputSummary,
+        profileQualifications,
         scopedEvidenceSummary,
         seedProfile,
       })
@@ -2104,6 +2316,7 @@ const buildSectionIntelligenceParts = ({
     label,
     profileEvidenceCandidates,
     profileFacts,
+    profileQualifications,
     runtimePath,
     scopedEvidenceSummary,
     scopedView,
@@ -2285,6 +2498,7 @@ export const buildEnrichedGeneratedSection = ({
           boundaries: parts.generationBoundaries,
           dependencyTruths: parts.dependencyTruths,
           facts: parts.profileFacts,
+          inputQualifications: parts.profileQualifications,
           profile: interpretationProfile,
           purpose: parts.sectionExecutionContract?.sectionIdentity?.purpose,
           supportingEvidence: parts.supportingEvidence,

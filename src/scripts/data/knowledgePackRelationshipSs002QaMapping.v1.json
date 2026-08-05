@@ -1,0 +1,135 @@
+{
+  "schemaVersion": "1.0.0",
+  "policyVersion": "SS-002-QA-MIGRATION-V1",
+  "relationshipContractVersion": "SS002_RELATIONSHIP_V1",
+  "authority": "USER_AUTHORIZED_QA_FIXTURE",
+  "environmentGuard": {
+    "allowedNodeEnvs": ["development", "test"],
+    "allowedDatabaseNames": ["test"]
+  },
+  "expectedSemanticVersion": "1.0.0",
+  "expectedScopeKey": "GLOBAL",
+  "outputTypes": [
+    {
+      "packKey": "customer-proposal",
+      "knowledgeAssetId": "QA-SS002-OUTPUT-TYPE-CUSTOMER-PROPOSAL",
+      "schemaPackKey": "customer-proposal-schema",
+      "schemaKnowledgeAssetId": "QA-SS002-OUTPUT-SCHEMA-CUSTOMER-PROPOSAL",
+      "styleCapabilityKey": "professional-marketing-style",
+      "stylePackKey": "professional-marketing-style",
+      "styleKnowledgeAssetId": "QA-SS002-STYLE-PROFESSIONAL-MARKETING"
+    },
+    {
+      "packKey": "one-pager",
+      "knowledgeAssetId": "QA-SS002-OUTPUT-TYPE-ONE-PAGER",
+      "schemaPackKey": "one-pager-schema",
+      "schemaKnowledgeAssetId": "QA-SS002-OUTPUT-SCHEMA-ONE-PAGER",
+      "styleCapabilityKey": "executive-brief-style",
+      "stylePackKey": "executive-briefing-style",
+      "styleKnowledgeAssetId": "QA-SS002-STYLE-EXECUTIVE-BRIEFING"
+    },
+    {
+      "packKey": "website-copy",
+      "knowledgeAssetId": "QA-SS002-OUTPUT-TYPE-WEBSITE-COPY",
+      "schemaPackKey": "website-copy-schema",
+      "schemaKnowledgeAssetId": "QA-SS002-OUTPUT-SCHEMA-WEBSITE-COPY",
+      "styleCapabilityKey": "website-content-style",
+      "stylePackKey": "website-content-style",
+      "styleKnowledgeAssetId": "QA-SS002-STYLE-WEBSITE-CONTENT"
+    },
+    {
+      "packKey": "sales-email",
+      "knowledgeAssetId": "QA-SS002-OUTPUT-TYPE-SALES-EMAIL",
+      "schemaPackKey": "sales-email-schema",
+      "schemaKnowledgeAssetId": "QA-SS002-OUTPUT-SCHEMA-SALES-EMAIL",
+      "styleCapabilityKey": "consultative-sales-style",
+      "stylePackKey": "consultative-sales-style",
+      "styleKnowledgeAssetId": "QA-SS002-STYLE-CONSULTATIVE-SALES"
+    },
+    {
+      "packKey": "executive-infographic",
+      "knowledgeAssetId": "QA-SS002-OUTPUT-TYPE-EXECUTIVE-INFOGRAPHIC",
+      "schemaPackKey": "executive-infographic-schema",
+      "schemaKnowledgeAssetId": "QA-SS002-OUTPUT-SCHEMA-EXECUTIVE-INFOGRAPHIC",
+      "styleCapabilityKey": "executive-consulting-visual-style",
+      "stylePackKey": "executive-consulting-visual-style",
+      "styleKnowledgeAssetId": "QA-SS002-STYLE-EXECUTIVE-CONSULTING-VISUAL"
+    },
+    {
+      "packKey": "process-diagram",
+      "knowledgeAssetId": "QA-SS002-OUTPUT-TYPE-PROCESS-DIAGRAM",
+      "schemaPackKey": "process-diagram-schema",
+      "schemaKnowledgeAssetId": "QA-SS002-OUTPUT-SCHEMA-PROCESS-DIAGRAM",
+      "styleCapabilityKey": "executive-consulting-visual-style",
+      "stylePackKey": "executive-consulting-visual-style",
+      "styleKnowledgeAssetId": "QA-SS002-STYLE-EXECUTIVE-CONSULTING-VISUAL"
+    },
+    {
+      "packKey": "framework-diagram",
+      "knowledgeAssetId": "QA-SS002-OUTPUT-TYPE-FRAMEWORK-DIAGRAM",
+      "schemaPackKey": "framework-diagram-schema",
+      "schemaKnowledgeAssetId": "QA-SS002-OUTPUT-SCHEMA-FRAMEWORK-DIAGRAM",
+      "styleCapabilityKey": "executive-consulting-visual-style",
+      "stylePackKey": "executive-consulting-visual-style",
+      "styleKnowledgeAssetId": "QA-SS002-STYLE-EXECUTIVE-CONSULTING-VISUAL"
+    },
+    {
+      "packKey": "one-page-visual-summary",
+      "knowledgeAssetId": "QA-SS002-OUTPUT-TYPE-ONE-PAGE-VISUAL-SUMMARY",
+      "schemaPackKey": "one-page-visual-summary-schema",
+      "schemaKnowledgeAssetId": "QA-SS002-OUTPUT-SCHEMA-ONE-PAGE-VISUAL-SUMMARY",
+      "styleCapabilityKey": "storylineos-corporate-visual-style",
+      "stylePackKey": "storylineos-corporate-visual-style",
+      "styleKnowledgeAssetId": "QA-SS002-STYLE-STORYLINEOS-CORPORATE-VISUAL"
+    },
+    {
+      "packKey": "executive-brief",
+      "knowledgeAssetId": "QA-SS002-OUTPUT-TYPE-EXECUTIVE-BRIEF",
+      "schemaPackKey": "executive-brief-schema",
+      "schemaKnowledgeAssetId": "QA-SS002-OUTPUT-SCHEMA-EXECUTIVE-BRIEF",
+      "styleCapabilityKey": "executive-brief-style",
+      "stylePackKey": "executive-briefing-style",
+      "styleKnowledgeAssetId": "QA-SS002-STYLE-EXECUTIVE-BRIEFING"
+    },
+    {
+      "packKey": "sales-narrative",
+      "knowledgeAssetId": "QA-SS002-OUTPUT-TYPE-SALES-NARRATIVE",
+      "schemaPackKey": "sales-narrative-schema",
+      "schemaKnowledgeAssetId": "QA-SS002-OUTPUT-SCHEMA-SALES-NARRATIVE",
+      "styleCapabilityKey": "customer-value-narrative-style",
+      "stylePackKey": "sales-narrative-style",
+      "styleKnowledgeAssetId": "QA-SS002-STYLE-SALES-NARRATIVE"
+    },
+    {
+      "packKey": "commercial-assessment",
+      "knowledgeAssetId": "QA-SS002-OUTPUT-TYPE-COMMERCIAL-ASSESSMENT",
+      "schemaPackKey": "commercial-assessment-schema",
+      "schemaKnowledgeAssetId": "QA-SS002-OUTPUT-SCHEMA-COMMERCIAL-ASSESSMENT",
+      "styleCapabilityKey": "commercial-assessment-style",
+      "stylePackKey": "commercial-assessment-style",
+      "styleKnowledgeAssetId": "QA-SS002-STYLE-COMMERCIAL-ASSESSMENT"
+    },
+    {
+      "packKey": "board-summary",
+      "knowledgeAssetId": "QA-SS002-OUTPUT-TYPE-BOARD-SUMMARY",
+      "schemaPackKey": "board-summary-schema",
+      "schemaKnowledgeAssetId": "QA-SS002-OUTPUT-SCHEMA-BOARD-SUMMARY",
+      "styleCapabilityKey": "board-executive-style",
+      "stylePackKey": "board-governance-style",
+      "styleKnowledgeAssetId": "QA-SS002-STYLE-BOARD-GOVERNANCE"
+    }
+  ],
+  "truthCertification": {
+    "packKey": "truth-certification-pack",
+    "knowledgeAssetId": "QA-SS002-TRUTH-CERTIFICATION-PACK",
+    "dependencies": [
+      { "packKey": "blocking-rules", "knowledgeAssetId": "QA-SS002-TRUTH-BLOCKING-RULES" },
+      { "packKey": "certification-levels", "knowledgeAssetId": "QA-SS002-TRUTH-CERTIFICATION-LEVELS" },
+      { "packKey": "export-metadata-rules", "knowledgeAssetId": "QA-SS002-TRUTH-EXPORT-METADATA-RULES" },
+      { "packKey": "prohibited-output-claims", "knowledgeAssetId": "QA-SS002-TRUTH-PROHIBITED-OUTPUT-CLAIMS" },
+      { "packKey": "runtime-warning-rules", "knowledgeAssetId": "QA-SS002-TRUTH-RUNTIME-WARNING-RULES" },
+      { "packKey": "truth-certification-framework", "knowledgeAssetId": "QA-SS002-TRUTH-CERTIFICATION-FRAMEWORK" },
+      { "packKey": "truth-quality-dimensions", "knowledgeAssetId": "QA-SS002-TRUTH-QUALITY-DIMENSIONS" }
+    ]
+  }
+}

@@ -20,6 +20,8 @@
     "knowledge-packs:rehearse-metadata": "node src/scripts/rehearseKnowledgePackMetadataReconciliation.js",
     "knowledge-packs:audit-layer-readiness": "node src/scripts/auditKnowledgePackLayerReadiness.js",
     "knowledge-packs:apply-governance-mapping": "node src/scripts/applyKnowledgePackGovernanceMapping.js",
+    "knowledge-packs:migrate-ss002-relationships": "node src/scripts/migrateKnowledgePackRelationshipsSs002.js",
+    "knowledge-packs:repair-ss002-missing-arrays": "node src/scripts/repairKnowledgePackRelationshipArraysSs002.js",
     "knowledge-packs:author-v1-assets": "node src/scripts/authorKnowledgePackV1Assets.js",
     "framework-packages:unset-legacy-fields": "node src/scripts/unsetDeprecatedFrameworkPackageFields.js",
     "framework-packages:drop-legacy-active-index": "node src/scripts/dropLegacyFrameworkPackageActiveIndex.js",
@@ -60,8 +62,10 @@
     "prom-client": "^15.1.3",
     "redis": "^5.10.0",
     "saxes": "6.0.0",
+    "semver": "7.8.5",
     "tesseract.js": "^7.0.0",
     "uuid": "^13.0.0",
+    "yaml": "2.9.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {

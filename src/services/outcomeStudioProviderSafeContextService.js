@@ -48,7 +48,8 @@ const IPV4_PATTERN = /\b(?:\d{1,3}\.){3}\d{1,3}\b/
 const UK_NI_PATTERN = /\b[A-CEGHJ-PR-TW-Z]{2}\s?\d{2}\s?\d{2}\s?\d{2}\s?[A-D]\b/i
 const US_SSN_PATTERN = /\b\d{3}-\d{2}-\d{4}\b/
 const UK_POSTCODE_PATTERN = /\b(?:GIR\s?0AA|[A-Z]{1,2}\d[A-Z\d]?\s?\d[A-Z]{2})\b/i
-const AUTH_PATTERN = /\b(?:bearer|basic)\s+[A-Za-z0-9._~+\/-]+=*/i
+const BEARER_AUTH_PATTERN = /\bbearer\s+[A-Za-z0-9._~+\/-]+=*/i
+const BASIC_AUTH_CANDIDATE_PATTERN = /\bbasic\s+([A-Za-z0-9+/]+={0,2})(?=$|[\s,.;)])/gi
 const PRIVATE_KEY_PATTERN = /-----BEGIN [A-Z ]*PRIVATE KEY-----/
 const SECRET_ASSIGNMENT_PATTERN = /\b(?:api[_ -]?key|secret|token|password)\s*[:=]\s*\S+/i
 const OPENAI_KEY_PATTERN = /\bsk-[A-Za-z0-9_-]{16,}\b/
@@ -70,6 +71,21 @@ const GUIDANCE_KEYS = Object.freeze([
   'validationCriteria',
   'prohibitedOutputBoundaries',
 ])
+const FRAMEWORK_GUIDANCE_REFERENCE_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,178}[a-z0-9])?$/
+const FRAMEWORK_GUIDANCE_APPLICATION_GUIDANCE = Object.freeze({
+  businessInstructions: Object.freeze([
+    'Decision analysis. Assess only the verified business information supplied, distinguish observations from implications, and retain material qualifications and uncertainty.',
+  ]),
+  reasoningGuidance: Object.freeze([
+    'Framework and guidance analysis. Explain decision relevance, material implications, practical recommendations, assumptions, gaps, priorities, risks, and the next analytical step without changing the verified facts.',
+  ]),
+  outputSchema: Object.freeze([
+    'Analysis structure. Return a title, ordered analytical sections, decision usefulness, and assumptions. Each section must include analysis, implications, recommendations, qualification, source reference keys, guidance reference tokens, assumptions, and gaps.',
+  ]),
+  styleGuidance: Object.freeze([
+    'Analytical style. Use concise, precise, neutral business language. Preserve uncertainty, avoid unsupported certainty, and do not present the analysis as an approved draft, final asset, publication, presentation, or infographic.',
+  ]),
+})
 
 const SAFE_CONTEXT_DIAGNOSTIC_REASONS = Object.freeze({
   REQUEST_VALIDATION: 'SAFE_REQUEST_INVALID',
@@ -184,11 +200,30 @@ const passesLuhn = (value) => {
   return sum % 10 === 0
 }
 
+const isCanonicalBasicAuthCredential = (candidate) => {
+  try {
+    const decoded = Buffer.from(candidate, 'base64')
+    if (!decoded.length) return false
+    const decodedText = decoded.toString('utf8')
+    if (!Buffer.from(decodedText, 'utf8').equals(decoded)) return false
+    const canonical = decoded.toString('base64')
+    if (candidate !== canonical && candidate !== canonical.replace(/=+$/u, '')) return false
+    return decodedText.includes(':')
+  } catch {
+    return false
+  }
+}
+
+const containsBasicAuthCredential = (value) => [...value.matchAll(BASIC_AUTH_CANDIDATE_PATTERN)]
+  .some((match) => isCanonicalBasicAuthCredential(match[1]))
+
 const containsDirectPiiOrCredential = (value) => [
   EMAIL_PATTERN, PHONE_PATTERN, IPV4_PATTERN, UK_NI_PATTERN, US_SSN_PATTERN,
-  UK_POSTCODE_PATTERN, AUTH_PATTERN, PRIVATE_KEY_PATTERN, SECRET_ASSIGNMENT_PATTERN,
+  UK_POSTCODE_PATTERN, BEARER_AUTH_PATTERN, PRIVATE_KEY_PATTERN, SECRET_ASSIGNMENT_PATTERN,
   OPENAI_KEY_PATTERN, CONNECTION_STRING_PATTERN,
-].some((pattern) => pattern.test(value)) || digitRuns(value).some(passesLuhn)
+].some((pattern) => pattern.test(value))
+  || containsBasicAuthCredential(value)
+  || digitRuns(value).some(passesLuhn)
 
 const containsDirectIdentifier = (value) => OBJECT_ID_PATTERN.test(value) || UUID_PATTERN.test(value)
 const withoutDirectIdentifiers = (value) => value
@@ -208,6 +243,21 @@ const containsWholeContextViolation = (value) => hasMalformedUtf16(value)
 
 const assertSafeRawString = (value) => {
   if (typeof value !== 'string' || containsWholeContextViolation(value)) fail()
+}
+
+export const assertOutcomeStudioProviderSafeValue = (value) => {
+  if (typeof value === 'string') {
+    assertSafeRawString(value)
+    return value
+  }
+  if (Array.isArray(value)) {
+    value.forEach(assertOutcomeStudioProviderSafeValue)
+    return value
+  }
+  if (isPlainObject(value)) {
+    Object.values(value).forEach(assertOutcomeStudioProviderSafeValue)
+  }
+  return value
 }
 
 const boundText = (value, maximum, boundaryStart, normalizer = normalizedWhitespace) => {
@@ -489,6 +539,74 @@ const loadSelectedVersions = async (knowledgeSelection) => {
   return versionIds.map((versionId) => byId.get(versionId))
 }
 
+const assertFrameworkGuidanceReferences = (values, { field, maxLength }) => {
+  if (!Array.isArray(values) || values.length === 0 || values.length > 100) fail()
+  const seen = new Set()
+  for (const value of values) {
+    if (typeof value !== 'string'
+      || value !== value.trim()
+      || value.length > maxLength
+      || !FRAMEWORK_GUIDANCE_REFERENCE_PATTERN.test(value)
+      || seen.has(value)) fail()
+    assertSafeRawString(value)
+    seen.add(value)
+  }
+  return values
+}
+
+const assertFrameworkGuidancePackBindings = ({ expectedPackBindings, knowledgeSelection }) => {
+  if (!Array.isArray(expectedPackBindings)
+    || expectedPackBindings.length === 0
+    || expectedPackBindings.length > MAX_SELECTED_VERSIONS
+    || !Array.isArray(knowledgeSelection)
+    || expectedPackBindings.length !== knowledgeSelection.length) fail()
+  const versionIds = new Set()
+  for (const binding of expectedPackBindings) {
+    if (!isPlainObject(binding)
+      || !hasExactKeys(binding, ['versionId', 'contentHash', 'knowledgeLayer', 'executionMode'])
+      || !safeToken(binding.versionId)
+      || typeof binding.contentHash !== 'string'
+      || !/^sha256:[a-f0-9]{64}$/.test(binding.contentHash)
+      || !Object.values(KNOWLEDGE_PACK_LAYERS).includes(binding.knowledgeLayer)
+      || !Object.values(KNOWLEDGE_PACK_EXECUTION_MODES).includes(binding.executionMode)
+      || binding.executionMode === KNOWLEDGE_PACK_EXECUTION_MODES.SYSTEM_ONLY
+      || versionIds.has(binding.versionId)) fail()
+    versionIds.add(binding.versionId)
+  }
+  if (JSON.stringify(expectedPackBindings.map(({ versionId, knowledgeLayer, executionMode }) => ({
+    versionId,
+    knowledgeLayer,
+    executionMode,
+  }))) !== JSON.stringify(knowledgeSelection)) fail()
+  return expectedPackBindings
+}
+
+const assertFrameworkGuidanceTruthBindings = ({ expectedTruthBindings, truthSource }) => {
+  if (!Array.isArray(expectedTruthBindings)
+    || expectedTruthBindings.length === 0
+    || expectedTruthBindings.length > 20
+    || !hasExactKeys(truthSource, TRUTH_SOURCE_KEYS)
+    || !Array.isArray(truthSource.acceptedTruth)
+    || expectedTruthBindings.length !== truthSource.acceptedTruth.length) fail()
+  const seen = new Set()
+  for (const binding of expectedTruthBindings) {
+    if (!isPlainObject(binding)
+      || !hasExactKeys(binding, ['sectionKey', 'content'])
+      || typeof binding.content !== 'string'
+      || !binding.content.trim()
+      || seen.has(binding.sectionKey)) fail()
+    assertFrameworkGuidanceReferences([binding.sectionKey], { field: 'sectionKey', maxLength: 140 })
+    assertSafeRawString(binding.content.replace(new RegExp(URL_PATTERN.source, 'gi'), ' '))
+    seen.add(binding.sectionKey)
+  }
+  const expectedContents = expectedTruthBindings.map((binding) => binding.content).sort()
+  const suppliedContents = truthSource.acceptedTruth.map((item) => item?.content).sort()
+  if (JSON.stringify(expectedContents) !== JSON.stringify(suppliedContents)) fail()
+  return {
+    acceptedTruth: expectedTruthBindings.map(({ sectionKey, content }) => ({ label: sectionKey, content })),
+  }
+}
+
 export const buildOutcomeStudioProviderSafeContext = async ({
   providerDescriptor,
   safeRequest,
@@ -568,6 +686,78 @@ export const buildOutcomeStudioProviderSafeContext = async ({
   }
 }
 
+export const buildOutcomeFrameworkGuidanceProviderSafeContext = async ({
+  providerDescriptor,
+  safeRequest,
+  truthSource,
+  knowledgeSelection,
+  expectedTruthBindings,
+  expectedPackBindings,
+  truthReferenceKeys,
+  activationReferenceIds,
+} = {}) => {
+  let stage = 'REQUEST_VALIDATION'
+  let selectedCount = 0
+  let foundCount = 0
+  let discardedCountsByReason = emptyDiscardCounts()
+  let admittedCountsByCategory = emptyCategoryCounts()
+  const diagnosticState = { observedCount: 0 }
+  try {
+    assertProviderDescriptor(providerDescriptor)
+    assertOutcomeStudioProviderSafeRequest(safeRequest)
+    assertFrameworkGuidanceReferences(truthReferenceKeys, { field: 'truthReferenceKeys', maxLength: 140 })
+    assertFrameworkGuidanceReferences(activationReferenceIds, { field: 'activationReferenceIds', maxLength: 180 })
+    stage = 'TRUTH_PROJECTION'
+    const boundTruthSource = assertFrameworkGuidanceTruthBindings({ expectedTruthBindings, truthSource })
+    if (JSON.stringify(truthReferenceKeys) !== JSON.stringify(expectedTruthBindings.map(({ sectionKey }) => sectionKey))) fail()
+    const truthSummaries = projectTruthSummaries(boundTruthSource)
+    stage = 'KNOWLEDGE_SELECTION_VALIDATION'
+    selectedCount = Array.isArray(knowledgeSelection) ? knowledgeSelection.length : 0
+    const packBindings = assertFrameworkGuidancePackBindings({ expectedPackBindings, knowledgeSelection })
+    stage = 'SELECTED_VERSION_LOOKUP'
+    const versions = await loadSelectedVersions(knowledgeSelection)
+    foundCount = versions.length
+    if (versions.some((version, index) => version.contentHash !== packBindings[index].contentHash)) fail()
+    stage = 'GUIDANCE_PROJECTION'
+    const selectionById = new Map(knowledgeSelection.map((selection) => [selection.versionId, selection]))
+    const projection = projectGuidanceCandidates(versions, selectionById, diagnosticState)
+    discardedCountsByReason = projection.discardedCountsByReason
+    const candidates = Object.fromEntries(GUIDANCE_KEYS.map((key) => [
+      key,
+      [
+        ...(FRAMEWORK_GUIDANCE_APPLICATION_GUIDANCE[key] || []),
+        ...(projection.guidance[key] || []),
+      ],
+    ]))
+    admittedCountsByCategory = Object.fromEntries(GUIDANCE_KEYS.map((key) => [key, candidates[key].length]))
+    stage = 'REQUIRED_GUIDANCE_ADMISSION'
+    if (!candidates.validationCriteria.length) fail()
+    const context = admitGuidance({
+      contractVersion: OUTCOME_STUDIO_PROVIDER_SAFE_CONTEXT_POLICY,
+      businessRequest: { ...safeRequest.businessRequest },
+      draftContext: { ...safeRequest.draftContext },
+      truthSummaries,
+      safeguards: [...OUTCOME_STUDIO_PROVIDER_SAFEGUARDS],
+    }, candidates)
+    admittedCountsByCategory = Object.fromEntries(GUIDANCE_KEYS.map((key) => [key, context.guidance[key].length]))
+    stage = 'CONTEXT_VALIDATION'
+    return assertOutcomeStudioProviderSafeContext(context)
+  } catch (error) {
+    logSafeContextFailure({
+      admittedCountsByCategory,
+      discardedCountsByReason,
+      foundCount,
+      missingCategories: [],
+      observedCount: diagnosticState.observedCount,
+      reasonCode: error?.internalSafeContextReasonCode,
+      selectedCount,
+      stage,
+    })
+    if (error?.code === 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED') throw error
+    throw appError()
+  }
+}
+
 export const assertOutcomeStudioProviderSafeContext = (providerContext) => {
   if (!hasExactKeys(providerContext, ['contractVersion', 'businessRequest', 'draftContext', 'truthSummaries', 'guidance', 'safeguards'])
     || providerContext.contractVersion !== OUTCOME_STUDIO_PROVIDER_SAFE_CONTEXT_POLICY
@@ -614,6 +804,7 @@ export const assertOutcomeStudioProviderSafeContext = (providerContext) => {
 export default {
   assertOutcomeStudioProviderSafeContext,
   assertOutcomeStudioProviderSafeRequest,
+  buildOutcomeFrameworkGuidanceProviderSafeContext,
   buildOutcomeStudioProviderSafeRequest,
   buildOutcomeStudioProviderSafeContext,
 }

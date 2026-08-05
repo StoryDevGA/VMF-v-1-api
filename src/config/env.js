@@ -98,6 +98,10 @@ const env = {
     process.env.OUTCOME_STUDIO_PROVIDER_TIMEOUT_MS,
     60000,
   ),
+  outcomeFrameworkGuidanceProviderCompletionTimeoutMs: toPositiveNumber(
+    process.env.OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_COMPLETION_TIMEOUT_MS,
+    300000,
+  ),
   outcomeStudioProviderMaxRetries: toNumber(
     process.env.OUTCOME_STUDIO_PROVIDER_MAX_RETRIES,
     2,
@@ -265,6 +269,10 @@ env.outcomeStudioProviderMaxRetries = Math.min(
 env.outcomeStudioProviderTimeoutMs = Math.min(
   120000,
   Math.max(5000, env.outcomeStudioProviderTimeoutMs),
+)
+env.outcomeFrameworkGuidanceProviderCompletionTimeoutMs = Math.min(
+  600000,
+  Math.max(60000, env.outcomeFrameworkGuidanceProviderCompletionTimeoutMs),
 )
 env.outcomeStudioProviderMaxOutputTokens = Math.min(
   32000,

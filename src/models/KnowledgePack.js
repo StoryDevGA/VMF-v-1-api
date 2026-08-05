@@ -17,6 +17,7 @@ import {
 import { containsForbiddenProviderContextKey } from '../utils/knowledgePackSafety.js'
 import {
   knowledgePackCapabilityKeyField,
+  knowledgePackKnowledgeAssetIdField,
   knowledgePackLayerField,
   knowledgePackWorkspaceCompatibilityField,
   normalizeKnowledgePackGovernanceFields,
@@ -60,6 +61,7 @@ const knowledgePackSchema = new mongoose.Schema(
     },
     knowledgeLayer: knowledgePackLayerField,
     capabilityKey: knowledgePackCapabilityKeyField,
+    knowledgeAssetId: knowledgePackKnowledgeAssetIdField,
     workspaceCompatibility: knowledgePackWorkspaceCompatibilityField,
     packType: {
       type: String,
@@ -200,6 +202,14 @@ knowledgePackSchema.index({ status: 1, packType: 1, packKey: 1 })
 knowledgePackSchema.index({ updatedAt: -1, packType: 1 })
 knowledgePackSchema.index({ purposeCategory: 1, status: 1, updatedAt: -1 })
 knowledgePackSchema.index({ visibility: 1, customerId: 1, tenantId: 1, status: 1 })
+knowledgePackSchema.index(
+  { knowledgeAssetId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { knowledgeAssetId: { $type: 'string' } },
+    name: 'uniq_governed_knowledge_asset_id',
+  },
+)
 
 knowledgePackSchema.pre('validate', function normalizeKnowledgePack(next) {
   this.packType = normalizeToken(this.packType)

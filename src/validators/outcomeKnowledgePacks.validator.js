@@ -13,12 +13,15 @@ import {
 import {
   KNOWLEDGE_PACK_AUTHORING_MODES,
   KNOWLEDGE_PACK_EXECUTION_MODES,
-  KNOWLEDGE_PACK_DEPENDENCY_REQUIREMENTS,
   KNOWLEDGE_PACK_LAYERS,
   KNOWLEDGE_PACK_MANIFEST_STATUSES,
   KNOWLEDGE_PACK_MANIFEST_TYPES,
   KNOWLEDGE_PACK_PURPOSE_CATEGORIES,
   KNOWLEDGE_PACK_REVIEW_STATUSES,
+  KNOWLEDGE_PACK_RELATIONSHIP_CARDINALITIES,
+  KNOWLEDGE_PACK_RELATIONSHIP_CONTRACT_VERSION,
+  KNOWLEDGE_PACK_RELATIONSHIP_TIMINGS,
+  KNOWLEDGE_PACK_RELATIONSHIP_TYPES,
   KNOWLEDGE_PACK_VISIBILITY_SCOPES,
 } from '../constants/knowledgeRuntime.js'
 import {
@@ -367,37 +370,45 @@ const sourceDocumentSchema = z.object({
     .optional(),
 }).strict()
 
-const knowledgePackDependencyReferenceSchema = z.object({
-  knowledgeLayer: z.enum(Object.values(KNOWLEDGE_PACK_LAYERS), {
-    required_error: 'dependency knowledgeLayer is required',
-  }),
-  requirement: z
-    .enum(Object.values(KNOWLEDGE_PACK_DEPENDENCY_REQUIREMENTS))
-    .default(KNOWLEDGE_PACK_DEPENDENCY_REQUIREMENTS.REQUIRED),
-  packType: z.enum(Object.values(OUTCOME_KNOWLEDGE_PACK_TYPES)).optional(),
-  packKey: optionalKeySchema('Dependency pack key'),
-  capabilityKey: optionalKeySchema('Dependency capability key'),
-}).strict().superRefine((value, ctx) => {
-  const hasPackType = Boolean(value.packType)
-  const hasPackKey = Boolean(value.packKey)
-  const hasExactIdentity = hasPackType && hasPackKey
-  const hasCapability = Boolean(value.capabilityKey)
+const governedKnowledgeAssetIdSchema = z
+  .string()
+  .trim()
+  .transform((value) => value.normalize('NFKC').toUpperCase())
+  .refine(
+    (value) => /^[A-Z0-9]+(?:-[A-Z0-9]+)+$/.test(value),
+    'knowledgeAssetId must be a governed uppercase hyphenated identity',
+  )
 
-  if (hasPackType !== hasPackKey) {
+const knowledgePackVersionConstraintSchema = z.object({
+  exactVersion: z.string().trim().regex(semanticVersionRegex).optional(),
+  minimumVersionInclusive: z.string().trim().regex(semanticVersionRegex).optional(),
+  maximumVersionExclusive: z.string().trim().regex(semanticVersionRegex).optional(),
+}).strict().superRefine((value, ctx) => {
+  if (value.exactVersion && (value.minimumVersionInclusive || value.maximumVersionExclusive)) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      path: ['packKey'],
-      message: 'Dependency identity requires both packType and packKey',
+      message: 'versionConstraint cannot mix exact and range fields',
     })
   }
-  if (hasExactIdentity === hasCapability) {
+  if (!value.exactVersion && !value.minimumVersionInclusive && !value.maximumVersionExclusive) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      path: ['capabilityKey'],
-      message: 'Dependency must use exactly one selector: packType plus packKey, or capabilityKey',
+      message: 'versionConstraint must include an exact or range field',
     })
   }
 })
+
+const knowledgePackDependencyReferenceSchema = z.object({
+  relationshipType: z.enum(Object.values(KNOWLEDGE_PACK_RELATIONSHIP_TYPES)),
+  targetPackType: z.enum(Object.values(OUTCOME_KNOWLEDGE_PACK_TYPES)).optional(),
+  targetPackKey: optionalKeySchema('Relationship target pack key'),
+  targetCapabilityKey: optionalKeySchema('Relationship target capability key'),
+  targetKnowledgeAssetId: governedKnowledgeAssetIdSchema.optional(),
+  targetKnowledgeLayer: z.enum(Object.values(KNOWLEDGE_PACK_LAYERS)).optional(),
+  requiredAt: z.enum(Object.values(KNOWLEDGE_PACK_RELATIONSHIP_TIMINGS)),
+  cardinality: z.enum(Object.values(KNOWLEDGE_PACK_RELATIONSHIP_CARDINALITIES)),
+  versionConstraint: knowledgePackVersionConstraintSchema.optional(),
+}).strict()
 
 const importSourceDocumentDraftBodySchema = z.object({
   packType: z.enum(Object.values(OUTCOME_KNOWLEDGE_PACK_TYPES), {
@@ -421,13 +432,17 @@ const importSourceDocumentDraftBodySchema = z.object({
   purposeCategory: z.enum(Object.values(KNOWLEDGE_PACK_PURPOSE_CATEGORIES)).optional(),
   knowledgeLayer: z.enum(Object.values(KNOWLEDGE_PACK_LAYERS)).optional(),
   capabilityKey: optionalKeySchema('Capability key'),
+  knowledgeAssetId: governedKnowledgeAssetIdSchema.optional(),
   workspaceCompatibility: z
     .array(z.enum(Object.values(WORKSPACE_TYPES)))
     .max(Object.values(WORKSPACE_TYPES).length, 'workspaceCompatibility contains too many entries')
     .optional(),
   dependencyReferences: z
     .array(knowledgePackDependencyReferenceSchema)
-    .max(50, 'dependencyReferences can contain at most 50 entries')
+    .max(100, 'dependencyReferences can contain at most 100 entries')
+    .optional(),
+  relationshipContractVersion: z
+    .literal(KNOWLEDGE_PACK_RELATIONSHIP_CONTRACT_VERSION)
     .optional(),
   semanticVersion: z
     .string({ required_error: 'semanticVersion is required' })
@@ -494,6 +509,17 @@ const importSourceDocumentDraftBodySchema = z.object({
       code: z.ZodIssueCode.custom,
       path: ['tenantId'],
       message: 'tenantId is required for TENANT visibility',
+    })
+  }
+
+  if (
+    value.dependencyReferences !== undefined
+    && value.relationshipContractVersion !== KNOWLEDGE_PACK_RELATIONSHIP_CONTRACT_VERSION
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['relationshipContractVersion'],
+      message: `relationshipContractVersion must be ${KNOWLEDGE_PACK_RELATIONSHIP_CONTRACT_VERSION}`,
     })
   }
 })

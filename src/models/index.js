@@ -33,6 +33,8 @@ import OutcomeDraft from './OutcomeDraft.js'
 import OutcomeDraftIteration from './OutcomeDraftIteration.js'
 import OutcomeSession from './OutcomeSession.js'
 import OutcomeMessage from './OutcomeMessage.js'
+import OutcomeKnowledgeCompositionPlan from './OutcomeKnowledgeCompositionPlan.js'
+import OutcomeQualityStageExecution from './OutcomeQualityStageExecution.js'
 import KnowledgePack from './KnowledgePack.js'
 import KnowledgePackVersion from './KnowledgePackVersion.js'
 import KnowledgePackActivation from './KnowledgePackActivation.js'
@@ -81,6 +83,8 @@ export {
   OutcomeDraftIteration,
   OutcomeSession,
   OutcomeMessage,
+  OutcomeKnowledgeCompositionPlan,
+  OutcomeQualityStageExecution,
   KnowledgePack,
   KnowledgePackVersion,
   KnowledgePackActivation,
@@ -130,6 +134,8 @@ export default {
   OutcomeDraftIteration,
   OutcomeSession,
   OutcomeMessage,
+  OutcomeKnowledgeCompositionPlan,
+  OutcomeQualityStageExecution,
   KnowledgePack,
   KnowledgePackVersion,
   KnowledgePackActivation,

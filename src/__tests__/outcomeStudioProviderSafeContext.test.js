@@ -112,6 +112,9 @@ describe('Outcome Studio provider-safe projection', () => {
     ['prefixed UUID', 'outcome_draft_iteration_123e4567-e89b-12d3-a456-426614174000'],
     ['email', 'director@example.com'],
     ['credential', 'api_key=not-safe-at-all'],
+    ['padded Basic credential', 'Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ=='],
+    ['unpadded Basic credential', 'Basic dXNlcjpwYXNz'],
+    ['Bearer credential', 'Bearer live-test-access-token'],
     ['URL', 'https://internal.example.test/source'],
     ['hash', 'a'.repeat(64)],
     ['internal term', 'provider context'],
@@ -123,6 +126,31 @@ describe('Outcome Studio provider-safe projection', () => {
       status: 422,
       code: 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED',
       details: expect.objectContaining({ reason: 'PROVIDER_SAFE_CONTEXT_BLOCKED' }),
+    }))
+  })
+
+  test.each([
+    ['ordinary certification prose', 'Basic evidence exists'],
+    ['ordinary business prose', 'Basic business guidance'],
+    ['canonical Base64 without a colon', 'Basic ZXZpZGVuY2U='],
+    ['invalid alphabet suffix', 'Basic dXNlcjpwYXNz!suffix'],
+    ['invalid padding', 'Basic dXNlcjpwYXNz==='],
+  ])('does not classify %s as a Basic-auth credential', (_label, text) => {
+    expect(() => buildOutcomeStudioProviderSafeRequest({
+      providerDescriptor: descriptor,
+      providerInput: providerInput({ customerPrompt: `Review ${text} for the executive brief.` }),
+    })).not.toThrow()
+  })
+
+  test('still rejects an independent unsafe signal beside malformed Basic-auth text', () => {
+    expect(() => buildOutcomeStudioProviderSafeRequest({
+      providerDescriptor: descriptor,
+      providerInput: providerInput({
+        customerPrompt: 'Review Basic dXNlcjpwYXNz!suffix for director@example.com.',
+      }),
+    })).toThrow(expect.objectContaining({
+      status: 422,
+      code: 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED',
     }))
   })
 
@@ -218,6 +246,42 @@ describe('Outcome Studio provider-safe projection', () => {
     })
     expect(JSON.stringify(result)).not.toMatch(/kpv-reasoning-v1|versionId|contentHash|manifest/i)
     expect(assertOutcomeStudioProviderSafeContext(result)).toBe(result)
+  })
+
+  test('admits ordinary Basic certification prose from selected Knowledge Pack content', async () => {
+    mockVersions([{
+      versionId: 'kpv-reasoning-v1',
+      content: `${governedContent}\n# Evidence Guidance\nBasic evidence exists, but truth remains early-stage and qualified.`,
+    }])
+
+    await expect(buildOutcomeStudioProviderSafeContext({
+      providerDescriptor: descriptor,
+      safeRequest: safeRequest(),
+      truthSource: { acceptedTruth: [] },
+      knowledgeSelection: [{ versionId: 'kpv-reasoning-v1', knowledgeLayer: 'REASONING', executionMode: 'PROVIDER_CONTEXT' }],
+    })).resolves.toEqual(expect.objectContaining({
+      contractVersion: 'OUTCOME_STUDIO_PROVIDER_SAFE_CONTEXT_V1',
+    }))
+  })
+
+  test.each([
+    ['padded', 'Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ=='],
+    ['unpadded', 'Basic dXNlcjpwYXNz'],
+  ])('rejects %s Basic credentials from selected Knowledge Pack content', async (_label, credential) => {
+    mockVersions([{
+      versionId: 'kpv-reasoning-v1',
+      content: `${governedContent}\n# Evidence Guidance\n${credential}`,
+    }])
+
+    await expect(buildOutcomeStudioProviderSafeContext({
+      providerDescriptor: descriptor,
+      safeRequest: safeRequest(),
+      truthSource: { acceptedTruth: [] },
+      knowledgeSelection: [{ versionId: 'kpv-reasoning-v1', knowledgeLayer: 'REASONING', executionMode: 'PROVIDER_CONTEXT' }],
+    })).rejects.toMatchObject({
+      status: 422,
+      code: 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED',
+    })
   })
 
   test('removes URLs from accepted truth summaries without exposing or discarding the surrounding business statement', async () => {

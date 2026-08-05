@@ -77,6 +77,100 @@ const AUDIT_SIGNATURE_V2_FIELDS = Object.freeze([
   'checksum',
 ])
 
+const CURRENT_AUDIT_SIGNATURE_VERSION = 3
+const SUPPORTED_AUDIT_SIGNATURE_VERSIONS = new Set([1, 2, CURRENT_AUDIT_SIGNATURE_VERSION])
+
+const LEGACY_RUNTIME_ACTION_DIFF_FIELDS = new Set([
+  'actionKey',
+  'governedAction',
+  'policyKey',
+  'expectedUpdatedAt',
+  'updatedAtBefore',
+  'updatedAtAfter',
+  'runtimeType',
+  'frameworkKey',
+  'packageKey',
+  'packageVersion',
+  'executionStatus',
+  'runtimeStatus',
+  'lock',
+  'publish',
+  'lifecycle',
+  'readiness',
+  'validation',
+  'generation',
+  'discovery',
+  'intelligenceGraph',
+  'actionedAt',
+])
+
+const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(Object(value), key)
+
+const isPlainObject = (value) => (
+  value !== null
+  && typeof value === 'object'
+  && !Array.isArray(value)
+  && Object.getPrototypeOf(value) === Object.prototype
+)
+
+const copyPresentFields = (source, fields) => {
+  const result = {}
+  fields.forEach((field) => {
+    if (hasOwn(source, field)) result[field] = source[field]
+  })
+  return result
+}
+
+const rebuildLegacyTransition = (value) => ({
+  from: isPlainObject(value?.from) ? value.from : {},
+  to: isPlainObject(value?.to) ? value.to : {},
+})
+
+const rebuildLegacyLockTransition = (value) => ({
+  from: {
+    lockedAt: hasOwn(value?.from, 'lockedAt') ? value.from.lockedAt : null,
+    state: isPlainObject(value?.from?.state) ? value.from.state : {},
+  },
+  to: {
+    lockedAt: hasOwn(value?.to, 'lockedAt') ? value.to.lockedAt : null,
+    state: isPlainObject(value?.to?.state) ? value.to.state : {},
+  },
+})
+
+const rebuildLegacyRuntimeActionDiff = (diff) => {
+  if (!isPlainObject(diff)) return null
+  if (Object.keys(diff).some((field) => !LEGACY_RUNTIME_ACTION_DIFF_FIELDS.has(field))) return null
+  if (!diff.actionKey || !diff.governedAction || !diff.actionedAt) return null
+
+  return {
+    ...copyPresentFields(diff, [
+      'actionKey',
+      'governedAction',
+      'policyKey',
+      'expectedUpdatedAt',
+      'updatedAtBefore',
+      'updatedAtAfter',
+      'runtimeType',
+      'frameworkKey',
+      'packageKey',
+      'packageVersion',
+    ]),
+    executionStatus: copyPresentFields(diff.executionStatus, ['from', 'to']),
+    runtimeStatus: copyPresentFields(diff.runtimeStatus, ['from', 'to']),
+    lock: rebuildLegacyLockTransition(diff.lock),
+    publish: rebuildLegacyTransition(diff.publish),
+    lifecycle: rebuildLegacyTransition(diff.lifecycle),
+    readiness: rebuildLegacyTransition(diff.readiness),
+    ...copyPresentFields(diff, [
+      'validation',
+      'generation',
+      'discovery',
+      'intelligenceGraph',
+      'actionedAt',
+    ]),
+  }
+}
+
 const buildSignatureData = (doc) => {
   const data = {
     ts: doc.ts,
@@ -103,6 +197,26 @@ const buildSignatureData = (doc) => {
 
   return data
 }
+
+const buildPersistableSignatureData = (doc) => {
+  const persistableDocument = typeof doc?.toObject === 'function'
+    ? doc.toObject({
+        depopulate: true,
+        flattenMaps: true,
+        getters: false,
+        minimize: true,
+        transform: false,
+        virtuals: false,
+      })
+    : doc
+
+  return buildSignatureData(persistableDocument)
+}
+
+const calculateSignature = (data) => crypto
+  .createHmac('sha256', env.auditSignatureSecret)
+  .update(JSON.stringify(data, null, 0))
+  .digest('hex')
 
 const auditLogSchema = new mongoose.Schema({
   ts: {
@@ -183,7 +297,8 @@ const auditLogSchema = new mongoose.Schema({
   signatureVersion: {
     type: Number,
     min: 1,
-    default: 1
+    enum: [...SUPPORTED_AUDIT_SIGNATURE_VERSIONS],
+    default: CURRENT_AUDIT_SIGNATURE_VERSION
   },
   actorType: {
     type: String,
@@ -373,27 +488,40 @@ auditLogSchema.statics.createLog = function(logData, options = {}) {
 
 // Instance methods
 auditLogSchema.methods.generateSignature = function() {
-  const data = buildSignatureData(this)
-  const dataString = JSON.stringify(data, null, 0)
-  const secret = env.auditSignatureSecret
-  
-  this.signature = crypto
-    .createHmac('sha256', secret)
-    .update(dataString)
-    .digest('hex')
+  const signatureVersion = Number(this.signatureVersion || 1)
+  if (!SUPPORTED_AUDIT_SIGNATURE_VERSIONS.has(signatureVersion)) {
+    throw new Error(`Unsupported audit signature version: ${signatureVersion}`)
+  }
+
+  const data = signatureVersion === CURRENT_AUDIT_SIGNATURE_VERSION
+    ? buildPersistableSignatureData(this)
+    : buildSignatureData(this)
+
+  this.signature = calculateSignature(data)
 }
 
 auditLogSchema.methods.verifySignature = function() {
-  const data = buildSignatureData(this)
-  const dataString = JSON.stringify(data, null, 0)
-  const secret = env.auditSignatureSecret
+  const signatureVersion = Number(this.signatureVersion || 1)
+  if (!SUPPORTED_AUDIT_SIGNATURE_VERSIONS.has(signatureVersion)) return false
 
-  const expectedSignature = crypto
-    .createHmac('sha256', secret)
-    .update(dataString)
-    .digest('hex')
+  const data = signatureVersion === CURRENT_AUDIT_SIGNATURE_VERSION
+    ? buildPersistableSignatureData(this)
+    : buildSignatureData(this)
 
-  return this.signature === expectedSignature
+  if (this.signature === calculateSignature(data)) return true
+
+  if (
+    signatureVersion >= CURRENT_AUDIT_SIGNATURE_VERSION
+    || this.action !== 'RUNTIME_ACTION_EXECUTED'
+  ) return false
+
+  const legacyDiff = rebuildLegacyRuntimeActionDiff(this.diff)
+  if (!legacyDiff) return false
+
+  return this.signature === calculateSignature({
+    ...buildSignatureData(this),
+    diff: legacyDiff,
+  })
 }
 
 // Pre-save middleware to ensure integrity

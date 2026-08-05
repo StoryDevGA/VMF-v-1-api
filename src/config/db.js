@@ -16,7 +16,7 @@ mongoose.connection.on('error', (err) => {
   logger.error({ err }, 'mongo connection error')
 })
 
-export const connectDb = async () => {
+export const connectDb = async ({ autoIndex = !env.isProduction } = {}) => {
   if (mongoose.connection.readyState === 1) {
     logger.info('already connected to mongo')
     return
@@ -27,7 +27,7 @@ export const connectDb = async () => {
   }
 
   await mongoose.connect(env.mongoUri, {
-    autoIndex: !env.isProduction,
+    autoIndex,
     serverSelectionTimeoutMS: env.mongoServerSelectionTimeoutMs,
     connectTimeoutMS: env.mongoConnectTimeoutMs,
     socketTimeoutMS: env.mongoSocketTimeoutMs,

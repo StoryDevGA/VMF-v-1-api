@@ -1953,6 +1953,202 @@ describe('AuditLog signature versions - Unit', () => {
     logDoc.packageKey = 'tampered-package-key'
     expect(logDoc.verifySignature()).toBe(false)
   })
+
+  test('verifies fixed legacy v1 and v2 signature fixtures independently of current generation', () => {
+    const legacyV1 = new AuditLog({
+      ts: new Date('2026-01-02T03:04:05.006Z'),
+      actorUserId: CUSTOMER_ADMIN_ID,
+      action: 'ACCESS_DENIED',
+      resourceType: 'RuntimeInstance',
+      resourceId: RUNTIME_INSTANCE_ID,
+      summary: 'Fixed legacy v1 fixture',
+      display: {
+        actorLabel: 'Runtime Auditor QA',
+        permissionLabels: [],
+      },
+      scope: {
+        runtimeInstanceId: RUNTIME_INSTANCE_ID,
+        runtimeInstanceKey: 'value-narrative-signature-qa',
+      },
+      diff: {
+        requiredPermission: 'RUNTIME_VIEW',
+        nested: { status: 'DRAFT' },
+      },
+      ip: '127.0.0.1',
+      userAgent: 'fixed-v1-fixture',
+      requestId: 'fixed-v1-request',
+      signatureVersion: 1,
+      signature: 'ff91d5d856638c7777d2da7343625c9f082b5042f8aa42704a12abf64ab1bd54',
+    })
+
+    const legacyV2 = new AuditLog({
+      ts: new Date('2026-02-03T04:05:06.007Z'),
+      actorUserId: SUPER_ADMIN_ID,
+      action: 'FRAMEWORK_PACKAGE_VALIDATED',
+      resourceType: 'FrameworkPackage',
+      resourceId: VMF_ID,
+      summary: 'Fixed legacy v2 fixture',
+      display: {
+        actorLabel: 'Governance Auditor QA',
+        permissionLabels: [],
+      },
+      scope: {},
+      diff: { status: { from: 'DRAFT', to: 'VALIDATED' } },
+      ip: '127.0.0.2',
+      userAgent: 'fixed-v2-fixture',
+      requestId: 'fixed-v2-request',
+      auditSchemaVersion: 2,
+      signatureVersion: 2,
+      isSystemEvent: true,
+      systemEventType: 'PACKAGE_VALIDATED',
+      eventCategory: 'PACKAGE',
+      eventSeverity: 'HIGH',
+      actorType: 'USER',
+      frameworkKey: 'VMF',
+      frameworkVersion: '2.3.1',
+      packageKey: 'vmf-2-3-1',
+      dependencyGraph: { referenceCount: 300 },
+      snapshot: { package: { packageKey: 'vmf-2-3-1' } },
+      checksum: 'checksum-123',
+      signature: 'e4742c886ab9072744ab020647c0bfe75adacea1be5865c3a5e878f15d29f19c',
+    })
+
+    expect(legacyV1.verifySignature()).toBe(true)
+    expect(legacyV2.verifySignature()).toBe(true)
+
+    legacyV1.diff.nested.status = 'TAMPERED'
+    legacyV2.snapshot.package.packageKey = 'tampered-package'
+
+    expect(legacyV1.verifySignature()).toBe(false)
+    expect(legacyV2.verifySignature()).toBe(false)
+  })
+
+  test('signature v3 hashes the persistable shape and rejects nested and governance tampering', () => {
+    const logDoc = new AuditLog({
+      ts: new Date('2026-04-05T06:07:08.009Z'),
+      actorUserId: SUPER_ADMIN_ID,
+      action: 'RUNTIME_ACTION_EXECUTED',
+      resourceType: 'RuntimeInstance',
+      resourceId: RUNTIME_INSTANCE_ID,
+      scope: {
+        customerId: CUSTOMER_ID,
+        tenantId: TENANT_ID,
+        runtimeInstanceId: RUNTIME_INSTANCE_ID,
+        runtimeInstanceKey: 'value-narrative-signature-v3-qa',
+      },
+      diff: {
+        actionKey: 'REGENERATE_SECTION',
+        governedAction: 'REGENERATE_SECTION',
+        executionStatus: { from: 'IDLE', to: 'IDLE' },
+        runtimeStatus: { from: 'ACTIVE', to: 'ACTIVE' },
+        lock: {
+          from: { lockedAt: null, state: {} },
+          to: { lockedAt: null, state: {} },
+        },
+        publish: { from: {}, to: {} },
+        lifecycle: { from: { stage: 'DRAFT' }, to: { stage: 'DRAFT' } },
+        readiness: { from: { state: 'DRAFT' }, to: { state: 'DRAFT' } },
+        generation: {
+          sectionKey: 'current-state-assessment',
+          regeneration: { reasons: ['FORCED_REGENERATE_REASON'] },
+        },
+        actionedAt: '2026-04-05T06:07:08.009Z',
+      },
+      frameworkKey: 'VMF',
+      packageKey: 'vmf-signature-v3-qa',
+      dependencyGraph: { referenceCount: 3 },
+      snapshot: { package: { packageKey: 'vmf-signature-v3-qa' } },
+    })
+
+    expect(logDoc.signatureVersion).toBe(3)
+    logDoc.generateSignature()
+
+    const persistedShape = logDoc.toObject({ minimize: true })
+    expect(persistedShape.diff.publish).toBeUndefined()
+    expect(persistedShape.diff.lock.from.state).toBeUndefined()
+
+    const reloaded = new AuditLog(persistedShape)
+    expect(reloaded.verifySignature()).toBe(true)
+
+    reloaded.diff.generation.sectionKey = 'tampered-section'
+    expect(reloaded.verifySignature()).toBe(false)
+
+    const governanceTampered = new AuditLog(persistedShape)
+    governanceTampered.packageKey = 'tampered-package-key'
+    expect(governanceTampered.verifySignature()).toBe(false)
+  })
+
+  test('recovers only the fixed legacy Runtime Action shape and rejects fallback bypasses', () => {
+    const persistedLegacyDiff = {
+      actionKey: 'REGENERATE_SECTION',
+      governedAction: 'REGENERATE_SECTION',
+      policyKey: 'regenerate-section-gate',
+      expectedUpdatedAt: '2026-03-04T05:06:07.008Z',
+      updatedAtBefore: '2026-03-04T05:06:07.008Z',
+      updatedAtAfter: '2026-03-04T05:07:08.009Z',
+      runtimeType: 'VALUE_NARRATIVE',
+      frameworkKey: 'VMF',
+      packageKey: 'vmf-signature-qa',
+      packageVersion: '3.1.3',
+      executionStatus: { from: 'IDLE', to: 'IDLE' },
+      runtimeStatus: { from: 'ACTIVE', to: 'ACTIVE' },
+      lock: {
+        from: { lockedAt: null },
+        to: { lockedAt: null },
+      },
+      lifecycle: { from: { stage: 'DRAFT' }, to: { stage: 'DRAFT' } },
+      readiness: { from: { state: 'DRAFT' }, to: { state: 'DRAFT' } },
+      generation: {
+        sectionKey: 'current-state-assessment',
+        regeneration: { reasons: ['FORCED_REGENERATE_REASON'] },
+      },
+      actionedAt: '2026-03-04T05:07:08.009Z',
+    }
+    const legacyData = {
+      ts: new Date('2026-03-04T05:07:08.010Z'),
+      actorUserId: CUSTOMER_ADMIN_ID,
+      action: 'RUNTIME_ACTION_EXECUTED',
+      resourceType: 'RuntimeInstance',
+      resourceId: RUNTIME_INSTANCE_ID,
+      summary: 'Fixed legacy Runtime Action fixture',
+      display: {
+        actorLabel: 'Runtime Auditor QA',
+        permissionLabels: [],
+      },
+      scope: {
+        customerId: CUSTOMER_ID,
+        tenantId: TENANT_ID,
+        runtimeInstanceId: RUNTIME_INSTANCE_ID,
+        runtimeInstanceKey: 'value-narrative-signature-qa',
+      },
+      diff: persistedLegacyDiff,
+      ip: '127.0.0.3',
+      userAgent: 'fixed-runtime-action-fixture',
+      requestId: 'fixed-runtime-action-request',
+      signature: '587a71ec7733c97f923275e922cb3f1374f3c95394f4302adcedfaaa32cc0db7',
+    }
+
+    const legacyRuntimeAction = new AuditLog({ ...legacyData, signatureVersion: 1 })
+    expect(legacyRuntimeAction.verifySignature()).toBe(true)
+
+    const tamperedLegacy = new AuditLog({ ...legacyData, signatureVersion: 1 })
+    tamperedLegacy.diff.generation.sectionKey = 'tampered-section'
+    expect(tamperedLegacy.verifySignature()).toBe(false)
+
+    const nonRuntimeAction = new AuditLog({
+      ...legacyData,
+      action: 'ACCESS_DENIED',
+      signatureVersion: 1,
+    })
+    expect(nonRuntimeAction.verifySignature()).toBe(false)
+
+    const currentVersion = new AuditLog({ ...legacyData, signatureVersion: 3 })
+    expect(currentVersion.verifySignature()).toBe(false)
+
+    const unknownVersion = new AuditLog({ ...legacyData, signatureVersion: 99 })
+    expect(unknownVersion.verifySignature()).toBe(false)
+    expect(unknownVersion.validateSync()?.errors.signatureVersion).toBeDefined()
+  })
 })
 
 /* ================================================================== */
