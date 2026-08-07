@@ -1,8 +1,10 @@
+import crypto from 'crypto'
 import { afterEach, describe, expect, jest, test } from '@jest/globals'
 import KnowledgePackVersion from '../models/KnowledgePackVersion.js'
 import {
   assertOutcomeStudioProviderSafeContext,
   assertOutcomeStudioProviderSafeRequest,
+  buildOutcomeFrameworkGuidanceProviderSafeContext,
   buildOutcomeStudioProviderSafeContext,
   buildOutcomeStudioProviderSafeRequest,
   OUTCOME_STUDIO_PROVIDER_SAFEGUARDS,
@@ -52,6 +54,8 @@ const governedContent = [
   '# Validation Criteria',
   'Every material claim must be supported by the verified business context.',
 ].join('\n')
+
+const contentHash = (value) => `sha256:${crypto.createHash('sha256').update(value).digest('hex')}`
 
 const mockVersions = (versions) => {
   const lean = jest.fn().mockResolvedValue(versions)
@@ -248,10 +252,127 @@ describe('Outcome Studio provider-safe projection', () => {
     expect(assertOutcomeStudioProviderSafeContext(result)).toBe(result)
   })
 
+  test('projects SS-008 governance layers into provider-safe guidance buckets', async () => {
+    mockVersions([
+      { versionId: 'kpv-foundation-v1', content: `${governedContent}\n# General Guidance\nFoundation operating model.` },
+      { versionId: 'kpv-domain-v1', content: '# General Guidance\nDomain context model.' },
+      { versionId: 'kpv-solution-v1', content: '# General Guidance\nSolution design model.' },
+      { versionId: 'kpv-organisation-v1', content: '# General Guidance\nOrganisation operating model.' },
+      { versionId: 'kpv-runtime-v1', content: '# General Guidance\nRuntime behavior model.' },
+      { versionId: 'kpv-system-v1', content: '# General Guidance\nSystem governance model.' },
+    ])
+    const result = await buildOutcomeStudioProviderSafeContext({
+      providerDescriptor: descriptor,
+      safeRequest: safeRequest(),
+      truthSource: { acceptedTruth: [] },
+      knowledgeSelection: [
+        { versionId: 'kpv-foundation-v1', knowledgeLayer: 'FOUNDATION', executionMode: 'PROVIDER_CONTEXT' },
+        { versionId: 'kpv-domain-v1', knowledgeLayer: 'DOMAIN', executionMode: 'PROVIDER_CONTEXT' },
+        { versionId: 'kpv-solution-v1', knowledgeLayer: 'SOLUTION', executionMode: 'PROVIDER_CONTEXT' },
+        { versionId: 'kpv-organisation-v1', knowledgeLayer: 'ORGANISATION', executionMode: 'PROVIDER_CONTEXT' },
+        { versionId: 'kpv-runtime-v1', knowledgeLayer: 'RUNTIME', executionMode: 'PROVIDER_CONTEXT' },
+        { versionId: 'kpv-system-v1', knowledgeLayer: 'SYSTEM', executionMode: 'PROVIDER_CONTEXT' },
+      ],
+    })
+
+    expect(result.guidance.businessInstructions).toEqual(expect.arrayContaining([
+      expect.stringContaining('Foundation operating model'),
+      expect.stringContaining('Domain context model'),
+      expect.stringContaining('Solution design model'),
+      expect.stringContaining('Organisation operating model'),
+    ]))
+    expect(result.guidance.reasoningGuidance).toEqual(expect.arrayContaining([
+      expect.stringContaining('Runtime behavior model'),
+      expect.stringContaining('System governance model'),
+    ]))
+  })
+
   test('admits ordinary Basic certification prose from selected Knowledge Pack content', async () => {
     mockVersions([{
       versionId: 'kpv-reasoning-v1',
       content: `${governedContent}\n# Evidence Guidance\nBasic evidence exists, but truth remains early-stage and qualified.`,
+    }])
+
+    await expect(buildOutcomeStudioProviderSafeContext({
+      providerDescriptor: descriptor,
+      safeRequest: safeRequest(),
+      truthSource: { acceptedTruth: [] },
+      knowledgeSelection: [{ versionId: 'kpv-reasoning-v1', knowledgeLayer: 'REASONING', executionMode: 'PROVIDER_CONTEXT' }],
+    })).resolves.toEqual(expect.objectContaining({
+      contractVersion: 'OUTCOME_STUDIO_PROVIDER_SAFE_CONTEXT_V1',
+    }))
+  })
+
+  test('builds framework-guidance provider context only from bound truth and pack references', async () => {
+    const frameworkContent = [
+      '# Business Guidance',
+      'Prioritise the decision, commercial consequence, and evidence-based recommendation.',
+      '# Structure',
+      'Open with an executive summary, followed by priorities and recommended actions.',
+      '# Executive Style',
+      'Use concise business language, short sections, and decision-oriented headings.',
+      '# Validation Criteria',
+      'Use accepted reference tokens as scoped business inputs.',
+    ].join('\n')
+    const truthBinding = {
+      sectionKey: 'customer_problem',
+      content: 'The customer needs a clearer decision narrative for the leadership group.',
+    }
+    const knowledgeSelection = [
+      { versionId: 'kpv-framework-guidance-v1', knowledgeLayer: 'FRAMEWORK', executionMode: 'PROVIDER_CONTEXT' },
+    ]
+    mockVersions([{ versionId: 'kpv-framework-guidance-v1', content: frameworkContent, contentHash: contentHash(frameworkContent) }])
+
+    const result = await buildOutcomeFrameworkGuidanceProviderSafeContext({
+      providerDescriptor: descriptor,
+      safeRequest: safeRequest(),
+      truthSource: { acceptedTruth: [{ label: truthBinding.sectionKey, content: truthBinding.content }] },
+      knowledgeSelection,
+      expectedTruthBindings: [truthBinding],
+      expectedPackBindings: [{
+        ...knowledgeSelection[0],
+        contentHash: contentHash(frameworkContent),
+      }],
+      truthReferenceKeys: [truthBinding.sectionKey],
+      activationReferenceIds: ['actv-framework-guidance-v1'],
+    })
+
+    expect(result.truthSummaries).toEqual([{
+      label: truthBinding.sectionKey,
+      summary: truthBinding.content,
+    }])
+    expect(result.guidance.validationCriteria).toEqual(expect.arrayContaining([
+      expect.stringContaining('accepted reference tokens'),
+    ]))
+    expect(JSON.stringify(result)).not.toMatch(/actv-framework-guidance-v1|contentHash|versionId/i)
+  })
+
+  test('rejects framework-guidance context when expected pack binding hash is stale', async () => {
+    const frameworkContent = governedContent
+    const knowledgeSelection = [
+      { versionId: 'kpv-framework-guidance-v1', knowledgeLayer: 'FRAMEWORK', executionMode: 'PROVIDER_CONTEXT' },
+    ]
+    mockVersions([{ versionId: 'kpv-framework-guidance-v1', content: frameworkContent, contentHash: contentHash(frameworkContent) }])
+
+    await expect(buildOutcomeFrameworkGuidanceProviderSafeContext({
+      providerDescriptor: descriptor,
+      safeRequest: safeRequest(),
+      truthSource: { acceptedTruth: [{ label: 'customer_problem', content: 'The customer needs a clearer decision narrative.' }] },
+      knowledgeSelection,
+      expectedTruthBindings: [{ sectionKey: 'customer_problem', content: 'The customer needs a clearer decision narrative.' }],
+      expectedPackBindings: [{
+        ...knowledgeSelection[0],
+        contentHash: contentHash(`${frameworkContent} changed`),
+      }],
+      truthReferenceKeys: ['customer_problem'],
+      activationReferenceIds: ['actv-framework-guidance-v1'],
+    })).rejects.toMatchObject({ code: 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED' })
+  })
+
+  test('handles separator-heavy numeric lookalikes without rejecting provider-safe content', async () => {
+    mockVersions([{
+      versionId: 'kpv-reasoning-v1',
+      content: `${governedContent}\n# Optional Notes\n${'1'.padEnd(20000, '(')}`,
     }])
 
     await expect(buildOutcomeStudioProviderSafeContext({

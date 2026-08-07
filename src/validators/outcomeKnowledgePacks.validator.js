@@ -23,6 +23,7 @@ import {
   KNOWLEDGE_PACK_RELATIONSHIP_TIMINGS,
   KNOWLEDGE_PACK_RELATIONSHIP_TYPES,
   KNOWLEDGE_PACK_VISIBILITY_SCOPES,
+  KNOWLEDGE_ASSET_ID_PATTERN,
 } from '../constants/knowledgeRuntime.js'
 import {
   KNOWLEDGE_PACK_CATEGORIES,
@@ -375,7 +376,7 @@ const governedKnowledgeAssetIdSchema = z
   .trim()
   .transform((value) => value.normalize('NFKC').toUpperCase())
   .refine(
-    (value) => /^[A-Z0-9]+(?:-[A-Z0-9]+)+$/.test(value),
+    (value) => KNOWLEDGE_ASSET_ID_PATTERN.test(value),
     'knowledgeAssetId must be a governed uppercase hyphenated identity',
   )
 

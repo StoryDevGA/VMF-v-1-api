@@ -43,7 +43,7 @@ const UUID_PATTERN = /(?<![0-9A-Fa-f])[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[1-5][0-9A-F
 const OBJECT_ID_PATTERN = /(?<![A-Fa-f0-9])[A-Fa-f0-9]{24}(?![A-Fa-f0-9])/
 const CONTROL_PATTERN = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/
 const EMAIL_PATTERN = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i
-const PHONE_PATTERN = /(?<!\w)(?:\+?\d[\s().-]*){10,15}(?!\w)/
+const PHONE_PATTERN = /(?<!\w)\+?\d(?:[\s().-]{0,2}\d){9,14}(?!\w)/
 const IPV4_PATTERN = /\b(?:\d{1,3}\.){3}\d{1,3}\b/
 const UK_NI_PATTERN = /\b[A-CEGHJ-PR-TW-Z]{2}\s?\d{2}\s?\d{2}\s?\d{2}\s?[A-D]\b/i
 const US_SSN_PATTERN = /\b\d{3}-\d{2}-\d{4}\b/
@@ -182,7 +182,7 @@ const hasMalformedUtf16 = (value) => {
   return false
 }
 
-const digitRuns = (value) => value.match(/(?<!\d)(?:\d[\s-]*){13,19}(?!\d)/g) || []
+const digitRuns = (value) => value.match(/(?<!\d)\d(?:[\s-]{0,2}\d){12,18}(?!\d)/g) || []
 const passesLuhn = (value) => {
   const digits = value.replace(/\D/g, '')
   if (digits.length < 13 || digits.length > 19) return false
@@ -421,6 +421,36 @@ const cleanGuidance = (section) => boundText(
   540,
 )
 
+const KNOWLEDGE_LAYER_GUIDANCE_CATEGORY = Object.freeze({
+  [KNOWLEDGE_PACK_LAYERS.FOUNDATION]: 'businessInstructions',
+  [KNOWLEDGE_PACK_LAYERS.DOMAIN]: 'businessInstructions',
+  [KNOWLEDGE_PACK_LAYERS.SOLUTION]: 'businessInstructions',
+  [KNOWLEDGE_PACK_LAYERS.ORGANISATION]: 'businessInstructions',
+  [KNOWLEDGE_PACK_LAYERS.RUNTIME]: 'reasoningGuidance',
+  [KNOWLEDGE_PACK_LAYERS.SYSTEM]: 'reasoningGuidance',
+  [KNOWLEDGE_PACK_LAYERS.REASONING]: 'reasoningGuidance',
+  [KNOWLEDGE_PACK_LAYERS.FRAMEWORK]: 'reasoningGuidance',
+  [KNOWLEDGE_PACK_LAYERS.AUDIENCE]: 'businessInstructions',
+  [KNOWLEDGE_PACK_LAYERS.INDUSTRY]: 'businessInstructions',
+  [KNOWLEDGE_PACK_LAYERS.OUTPUT_TYPE]: 'businessInstructions',
+  [KNOWLEDGE_PACK_LAYERS.OUTPUT_SCHEMA]: 'outputSchema',
+  [KNOWLEDGE_PACK_LAYERS.COMMUNICATION_PATTERN]: 'reasoningGuidance',
+  [KNOWLEDGE_PACK_LAYERS.STYLE]: 'styleGuidance',
+  [KNOWLEDGE_PACK_LAYERS.CHANNEL]: 'styleGuidance',
+  [KNOWLEDGE_PACK_LAYERS.BRAND]: 'styleGuidance',
+  [KNOWLEDGE_PACK_LAYERS.LANGUAGE]: 'styleGuidance',
+  [KNOWLEDGE_PACK_LAYERS.VISUAL_SYSTEM]: 'styleGuidance',
+  [KNOWLEDGE_PACK_LAYERS.VALIDATION]: 'validationCriteria',
+})
+
+const missingKnowledgeLayerMappings = Object.values(KNOWLEDGE_PACK_LAYERS)
+  .filter((layer) => !KNOWLEDGE_LAYER_GUIDANCE_CATEGORY[layer])
+if (missingKnowledgeLayerMappings.length > 0) {
+  throw new Error(
+    `Knowledge Pack provider projection mapping missing: ${missingKnowledgeLayerMappings.join(', ')}`,
+  )
+}
+
 const categoryForSection = ({ heading, knowledgeLayer, executionMode }) => {
   const normalized = heading.toLowerCase().replace(/:$/, '').trim()
   if (METADATA_HEADINGS.has(normalized)) return null
@@ -429,10 +459,9 @@ const categoryForSection = ({ heading, knowledgeLayer, executionMode }) => {
   if (/validation|criteria|requirement|truth|evidence/.test(normalized)) return 'validationCriteria'
   if (/style|voice|tone|format|typography|brand|chart|composition/.test(normalized)) return 'styleGuidance'
   if (/schema|structure|section|presentation/.test(normalized)) return 'outputSchema'
-  if (knowledgeLayer === KNOWLEDGE_PACK_LAYERS.OUTPUT_TYPE) return 'businessInstructions'
-  if (knowledgeLayer === KNOWLEDGE_PACK_LAYERS.OUTPUT_SCHEMA) return 'outputSchema'
-  if ([KNOWLEDGE_PACK_LAYERS.STYLE, KNOWLEDGE_PACK_LAYERS.LANGUAGE, KNOWLEDGE_PACK_LAYERS.BRAND, KNOWLEDGE_PACK_LAYERS.VISUAL_SYSTEM].includes(knowledgeLayer)) return 'styleGuidance'
-  if ([KNOWLEDGE_PACK_LAYERS.REASONING, KNOWLEDGE_PACK_LAYERS.FRAMEWORK, KNOWLEDGE_PACK_LAYERS.COMMUNICATION_PATTERN].includes(knowledgeLayer)) return 'reasoningGuidance'
+  if (KNOWLEDGE_LAYER_GUIDANCE_CATEGORY[knowledgeLayer]) {
+    return KNOWLEDGE_LAYER_GUIDANCE_CATEGORY[knowledgeLayer]
+  }
   return null
 }
 

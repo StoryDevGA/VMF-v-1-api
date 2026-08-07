@@ -2,7 +2,11 @@ import mongoose from 'mongoose'
 import zlib from 'node:zlib'
 import crypto from 'node:crypto'
 import { describe, test, expect, beforeAll, beforeEach, afterAll, jest } from '@jest/globals'
-import { buildKnowledgePackRelationshipChecksum } from '../services/knowledgePackRelationshipContract.js'
+import {
+  KnowledgePackRelationshipContractError,
+  buildKnowledgePackRelationshipChecksum,
+  parseKnowledgePackFrontMatter,
+} from '../services/knowledgePackRelationshipContract.js'
 
 beforeAll(() => {
   process.env.NODE_ENV = 'test'
@@ -782,6 +786,87 @@ beforeEach(() => {
 })
 
 describe('Outcome Studio Knowledge Pack Registry API', () => {
+  test('Knowledge Pack front matter accepts snake_case and camelCase governed identity keys', () => {
+    const snakeCase = parseKnowledgePackFrontMatter(`---
+knowledge_asset_id: OT-009
+name: Statement of Work
+relationships:
+  - relationshipType: REQUIRES_COMPATIBLE_PACK
+    targetPackType: OUTPUT_SCHEMA
+    requiredAt: RUNTIME
+    cardinality: ONE_OR_MORE
+---
+
+# Statement of Work
+`, { packType: 'OUTPUT_TYPE_DEFINITION' })
+
+    expect(snakeCase.knowledgeAssetId).toBe('OT-009')
+    expect(snakeCase.dependencyReferences).toEqual([])
+    expect(snakeCase.inertMetadata).toEqual(expect.objectContaining({
+      name: 'Statement of Work',
+      relationships: [
+        expect.objectContaining({
+          relationshipType: 'REQUIRES_COMPATIBLE_PACK',
+          targetPackType: 'OUTPUT_SCHEMA',
+        }),
+      ],
+    }))
+    expect(snakeCase.inertMetadata).not.toHaveProperty('knowledge_asset_id')
+
+    const camelCase = parseKnowledgePackFrontMatter(`---
+knowledgeAssetId: OT-010
+name: Statement of Work
+---
+
+# Statement of Work
+`, { packType: 'OUTPUT_TYPE_DEFINITION' })
+
+    expect(camelCase.knowledgeAssetId).toBe('OT-010')
+    expect(camelCase.inertMetadata).not.toHaveProperty('knowledgeAssetId')
+  })
+
+  test('Knowledge Pack front matter accepts matching dual identity keys and rejects conflicts', () => {
+    const matching = parseKnowledgePackFrontMatter(`---
+knowledge_asset_id: ot-009
+knowledgeAssetId: OT-009
+name: Statement of Work
+---
+
+# Statement of Work
+`, { packType: 'OUTPUT_TYPE_DEFINITION' })
+
+    expect(matching.knowledgeAssetId).toBe('OT-009')
+    expect(matching.inertMetadata).not.toHaveProperty('knowledge_asset_id')
+    expect(matching.inertMetadata).not.toHaveProperty('knowledgeAssetId')
+
+    expect(() => parseKnowledgePackFrontMatter(`---
+knowledge_asset_id: OT-009
+knowledgeAssetId: OT-010
+name: Statement of Work
+---
+
+# Statement of Work
+`, { packType: 'OUTPUT_TYPE_DEFINITION' })).toThrow(KnowledgePackRelationshipContractError)
+
+    try {
+      parseKnowledgePackFrontMatter(`---
+knowledge_asset_id: OT-009
+knowledgeAssetId: OT-010
+name: Statement of Work
+---
+
+# Statement of Work
+`, { packType: 'OUTPUT_TYPE_DEFINITION' })
+    } catch (err) {
+      expect(err.message).toContain('Front matter knowledgeAssetId values conflict')
+      expect(err.details).toEqual(expect.objectContaining({
+        field: 'knowledgeAssetId',
+        snakeCaseKnowledgeAssetId: 'OT-009',
+        camelCaseKnowledgeAssetId: 'OT-010',
+      }))
+    }
+  })
+
   test('Knowledge Pack models accept SS-003 canonical types and legacy aliases', async () => {
     const acceptedTypes = [
       'VISUAL_SYSTEM',
@@ -2954,7 +3039,7 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
           filename: 'Board Executive Style.md',
           contentType: 'text/markdown',
         },
-        extractedText: 'pack:\n  key: board-executive-style\n\nProvider instructions hidden from list responses.',
+        extractedText: 'pack:\n\uFEFF  key:\u00A0board-executive-style\u2028\nProvider instructions hidden from list responses.',
       })
 
     expect(res.status).toBe(201)
@@ -3021,6 +3106,7 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
     const savedVersion = KnowledgePackVersion.prototype.save.mock.contexts[0]
     expect(savedVersion.get('content')).toContain('key: board-executive-style')
     expect(savedVersion.get('content')).toContain('Provider instructions hidden from list responses.')
+    expect(savedVersion.get('content')).not.toMatch(/[\u00A0\u2028\u2029\uFEFF]/u)
     expect(savedVersion.get('knowledgeLayer')).toBe('STYLE')
     expect(savedVersion.get('capabilityKey')).toBe('executive-board')
     expect(savedVersion.get('workspaceCompatibility')).toEqual(['OUTCOME'])
@@ -3062,6 +3148,66 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
         activationCreated: false,
       }),
     }))
+  })
+
+  test('POST source-document-import inherits canonical governance metadata for a new existing-pack version', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const existingPackRecord = makeKnowledgePack({
+      packId: 'kp-style-board-executive-style',
+      packType: 'STYLE',
+      packKey: 'board-executive-style',
+      label: 'Board Executive Style',
+      knowledgeLayer: 'STYLE',
+      capabilityKey: 'executive-board',
+      knowledgeAssetId: 'STY-QA-001',
+      workspaceCompatibility: ['OUTCOME'],
+      latestVersionId: 'kpv-style-board-executive-style-1-0-0-global',
+      latestSemanticVersion: '1.0.0',
+    })
+    KnowledgePack.findOne
+      .mockReturnValueOnce(buildFindOneChain(existingPackRecord))
+      .mockReturnValueOnce(buildFindOneChain(null))
+    KnowledgePack.findOneAndUpdate.mockResolvedValueOnce(makeKnowledgePack({
+      ...existingPackRecord,
+      status: 'DRAFT',
+      latestVersionId: 'kpv-style-board-executive-style-1-1-0-global',
+      latestSemanticVersion: '1.1.0',
+    }))
+
+    const res = await request
+      .post('/api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        packType: 'STYLE',
+        packKey: 'board-executive-style',
+        label: 'Board Executive Style',
+        semanticVersion: '1.1.0',
+        contentFormat: 'MARKDOWN',
+        sourceDocument: {
+          filename: 'Board Executive Style 1.1.md',
+          contentType: 'text/markdown',
+        },
+        extractedText: 'Board executive style source text for version 1.1.',
+      })
+
+    expect(res.status).toBe(201)
+    const savedVersion = KnowledgePackVersion.prototype.save.mock.contexts[0]
+    expect(savedVersion.get('knowledgeLayer')).toBe('STYLE')
+    expect(savedVersion.get('capabilityKey')).toBe('executive-board')
+    expect(savedVersion.get('knowledgeAssetId')).toBe('STY-QA-001')
+    expect(savedVersion.get('workspaceCompatibility')).toEqual(['OUTCOME'])
+    expect(KnowledgePack.findOneAndUpdate).toHaveBeenCalledWith(
+      { packId: 'kp-style-board-executive-style' },
+      expect.objectContaining({
+        $set: expect.not.objectContaining({
+          knowledgeLayer: expect.any(String),
+          capabilityKey: expect.any(String),
+          knowledgeAssetId: expect.any(String),
+          workspaceCompatibility: expect.any(Array),
+        }),
+      }),
+      expect.any(Object),
+    )
   })
 
   test('POST source-document-import rejects ambiguous KP-004 dependency selectors before persistence', async () => {
@@ -3226,6 +3372,9 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
         packType: 'SYSTEM',
         packKey: 'enterprise-technology-lazy-docx',
         knowledgeAssetId: 'SYS-QA-002',
+        knowledgeLayer: 'FRAMEWORK',
+        capabilityKey: 'enterprise-technology-lazy-docx',
+        workspaceCompatibility: ['OUTCOME'],
         label: 'Enterprise Technology Lazy DOCX',
         purposeCategory: 'FRAMEWORK',
         semanticVersion: '5.0.0',
@@ -3270,6 +3419,9 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
         packType: 'SYSTEM',
         packKey: 'enterprise-technology-bomb-docx',
         knowledgeAssetId: 'SYS-QA-003',
+        knowledgeLayer: 'FRAMEWORK',
+        capabilityKey: 'enterprise-technology-bomb-docx',
+        workspaceCompatibility: ['OUTCOME'],
         label: 'Enterprise Technology Bomb DOCX',
         purposeCategory: 'FRAMEWORK',
         semanticVersion: '5.0.0',
@@ -3321,6 +3473,9 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
         packType: 'SYSTEM',
         packKey: 'enterprise-technology-pdf',
         knowledgeAssetId: 'SYS-QA-004',
+        knowledgeLayer: 'FRAMEWORK',
+        capabilityKey: 'enterprise-technology-pdf',
+        workspaceCompatibility: ['OUTCOME'],
         label: 'Enterprise Technology PDF',
         purposeCategory: 'FRAMEWORK',
         semanticVersion: '5.0.0',
@@ -3452,6 +3607,37 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
     expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 
+  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import rejects unreadable text source content', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        packType: 'STYLE',
+        packKey: 'board-executive-style',
+        label: 'Board Executive Style',
+        semanticVersion: '1.0.0',
+        contentFormat: 'MARKDOWN',
+        knowledgeAssetId: 'STYLE-001',
+        knowledgeLayer: 'STYLE',
+        capabilityKey: 'board-executive-style',
+        workspaceCompatibility: ['OUTCOME'],
+        sourceDocument: {
+          filename: 'Board Executive Style.md',
+          contentType: 'text/markdown',
+        },
+        extractedText: '1(((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((',
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.reason).toBe('PACK_SOURCE_EXTRACTION_FAILED')
+    expect(res.body.error.details.extractionError).toBe('SOURCE_DOCUMENT_NO_READABLE_TEXT')
+    expect(KnowledgePack.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(KnowledgePackVersion.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
   test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import requires governed Knowledge Asset ID', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
 
@@ -3473,11 +3659,74 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
 
     expect(res.status).toBe(422)
     expect(res.body.error.code).toBe('VALIDATION_FAILED')
-    expect(res.body.error.message).toContain('Knowledge Asset ID is missing')
+    expect(res.body.error.message).toContain('Knowledge Pack import requires complete governance metadata')
     expect(res.body.error.details).toEqual(expect.objectContaining({
-      field: 'knowledgeAssetId',
       reason: 'MISSING_GOVERNANCE_METADATA',
+      missingFields: ['knowledgeLayer', 'capabilityKey', 'knowledgeAssetId', 'workspaceCompatibility'],
     }))
+    expect(KnowledgePack.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(KnowledgePackVersion.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('POST source-document-import reports missing governance metadata for valid legacy front matter', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const extractedText = `---
+knowledge_asset_id: OT-009
+name: Statement of Work
+version: 0.1
+status: Draft
+relationships:
+  - relationshipType: REQUIRES_COMPATIBLE_PACK
+    targetPackType: OUTPUT_SCHEMA
+    requiredAt: RUNTIME
+    cardinality: ONE_OR_MORE
+  - family: Audience
+    resolution: runtime
+  - family: Style
+    resolution: runtime
+  - family: Language
+    resolution: runtime
+  - family: Visual System
+    resolution: runtime_when_required
+runtime_consumers:
+  - Outcome Studio
+tags:
+  - statement-of-work
+  - delivery-agreement
+  - scope-control
+---
+
+# Statement of Work
+
+Statement of Work source text.
+`
+
+    const res = await request
+      .post('/api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        packType: 'OUTPUT_TYPE_DEFINITION',
+        packKey: 'statement-of-work',
+        label: 'Statement of Work',
+        semanticVersion: '0.1.0',
+        contentFormat: 'MARKDOWN',
+        sourceDocument: {
+          filename: 'Statement of Work.md',
+          contentType: 'text/markdown',
+        },
+        extractedText,
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.message).toContain('Knowledge Pack import requires complete governance metadata')
+    expect(res.body.error.message).not.toContain('invalid YAML')
+    expect(res.body.error.details).toEqual(expect.objectContaining({
+      reason: 'MISSING_GOVERNANCE_METADATA',
+      missingFields: ['knowledgeLayer', 'capabilityKey', 'workspaceCompatibility'],
+    }))
+    expect(res.body.error.details.missingFields).not.toContain('knowledgeAssetId')
     expect(KnowledgePack.findOneAndUpdate).not.toHaveBeenCalled()
     expect(KnowledgePackVersion.prototype.save).not.toHaveBeenCalled()
     expect(AuditLog.createLog).not.toHaveBeenCalled()
@@ -3525,12 +3774,18 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
         packType: 'STYLE',
         packKey: 'board-executive-style',
         label: 'Board Executive Style',
+        knowledgeLayer: 'STYLE',
+        capabilityKey: 'executive-board',
+        workspaceCompatibility: ['OUTCOME'],
         semanticVersion: '1.0.0',
         contentFormat: 'MARKDOWN',
         sourceDocument: {
           filename: 'Board Executive Style.md',
         },
         knowledgeAssetId: 'STY-QA-001',
+        knowledgeLayer: 'STYLE',
+        capabilityKey: 'executive-board',
+        workspaceCompatibility: ['OUTCOME'],
         extractedText: 'Board executive style source text.',
       })
 
@@ -3576,6 +3831,9 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
         packType: 'STYLE',
         packKey: 'board-executive-style',
         knowledgeAssetId: 'STY-QA-001',
+        knowledgeLayer: 'STYLE',
+        capabilityKey: 'executive-board',
+        workspaceCompatibility: ['OUTCOME'],
         label: 'Board Executive Style',
         semanticVersion: '1.0.0',
         contentFormat: 'MARKDOWN',
@@ -3644,6 +3902,9 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
         packType: 'STYLE',
         packKey: 'board-executive-style',
         knowledgeAssetId: 'STY-QA-001',
+        knowledgeLayer: 'STYLE',
+        capabilityKey: 'executive-board',
+        workspaceCompatibility: ['OUTCOME'],
         label: 'Board Executive Style',
         semanticVersion: '1.0.0',
         contentFormat: 'MARKDOWN',
@@ -3694,6 +3955,9 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       packType: 'STYLE',
       packKey: 'board-executive-style',
       knowledgeAssetId: 'STY-QA-001',
+      knowledgeLayer: 'STYLE',
+      capabilityKey: 'executive-board',
+      workspaceCompatibility: ['OUTCOME'],
       label: 'Board Executive Style',
       status: 'DRAFT',
     }))
@@ -3705,6 +3969,9 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
         packType: 'STYLE',
         packKey: 'board-executive-style',
         knowledgeAssetId: 'STY-QA-001',
+        knowledgeLayer: 'STYLE',
+        capabilityKey: 'executive-board',
+        workspaceCompatibility: ['OUTCOME'],
         label: 'Board Executive Style',
         semanticVersion: '1.0.0',
         contentFormat: 'MARKDOWN',
@@ -3733,6 +4000,10 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       packType: 'STYLE',
       packKey: 'board-executive-style',
       label: 'Board Executive Style',
+      knowledgeLayer: 'STYLE',
+      capabilityKey: 'executive-board',
+      knowledgeAssetId: 'STY-QA-001',
+      workspaceCompatibility: ['OUTCOME'],
       status: 'VALIDATED',
       latestVersionId: 'kpv-style-board-executive-style-0-9-0-global',
       latestSemanticVersion: '0.9.0',
@@ -3761,6 +4032,7 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       .mockReturnValueOnce(buildFindChain([]))
     KnowledgePack.findOne
       .mockReturnValueOnce(buildFindOneChain(previousPackRecord))
+      .mockReturnValueOnce(buildFindOneChain(null))
       .mockReturnValueOnce(buildFindOneChain(failedImportPackRecord))
     KnowledgePack.findOneAndUpdate.mockResolvedValueOnce(failedImportPackRecord)
     AuditLog.createLog.mockRejectedValueOnce(new Error('audit unavailable'))
@@ -3772,6 +4044,9 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
         packType: 'STYLE',
         packKey: 'board-executive-style',
         knowledgeAssetId: 'STY-QA-001',
+        knowledgeLayer: 'STYLE',
+        capabilityKey: 'executive-board',
+        workspaceCompatibility: ['OUTCOME'],
         label: 'Board Executive Style',
         semanticVersion: '1.0.0',
         contentFormat: 'MARKDOWN',
@@ -3803,6 +4078,10 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       packId: 'kp-style-board-executive-style',
       packType: 'STYLE',
       packKey: 'board-executive-style',
+      knowledgeLayer: 'STYLE',
+      capabilityKey: 'executive-board',
+      knowledgeAssetId: 'STY-QA-001',
+      workspaceCompatibility: ['OUTCOME'],
       updatedAt: '2026-07-14T10:00:00.000Z',
     })
     const failedImportPackRecord = makeKnowledgePack({
@@ -3816,7 +4095,7 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
     KnowledgePackVersion.findOne.mockReturnValueOnce(buildVersionFindOneChain(null))
     KnowledgePack.findOne
       .mockReturnValueOnce(buildFindOneChain(null))
-      .mockReturnValueOnce(buildFindOneChain(previousPackRecord))
+      .mockReturnValueOnce(buildFindOneChain(null))
       .mockReturnValueOnce(buildFindOneChain(null))
     KnowledgePack.findOneAndUpdate.mockResolvedValueOnce(failedImportPackRecord)
     AuditLog.createLog.mockRejectedValueOnce(new Error('audit unavailable'))
@@ -3828,6 +4107,9 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
         packType: 'STYLE',
         packKey: 'board-executive-style',
         knowledgeAssetId: 'STY-QA-001',
+        knowledgeLayer: 'STYLE',
+        capabilityKey: 'executive-board',
+        workspaceCompatibility: ['OUTCOME'],
         label: 'Board Executive Style',
         semanticVersion: '1.0.0',
         contentFormat: 'MARKDOWN',
@@ -3855,6 +4137,9 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
         packType: 'STYLE',
         packKey: 'standalone-style',
         knowledgeAssetId: 'STY-QA-002',
+        knowledgeLayer: 'STYLE',
+        capabilityKey: 'standalone-style',
+        workspaceCompatibility: ['OUTCOME'],
         label: 'Standalone Style',
         semanticVersion: '1.0.0',
         contentFormat: 'MARKDOWN',
@@ -3883,6 +4168,9 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
         packType: 'OUTPUT_SCHEMA',
         packKey: 'visual-system-schema',
         knowledgeAssetId: 'VS-001',
+        knowledgeLayer: 'OUTPUT_SCHEMA',
+        capabilityKey: 'visual-system-schema',
+        workspaceCompatibility: ['OUTCOME'],
         label: 'Visual System Schema',
         purposeCategory: 'VISUAL',
         semanticVersion: '1.0.0',
@@ -3920,6 +4208,9 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
         packType: 'STYLE',
         packKey: 'board-executive-style',
         knowledgeAssetId: 'STY-QA-001',
+        knowledgeLayer: 'STYLE',
+        capabilityKey: 'executive-board',
+        workspaceCompatibility: ['OUTCOME'],
         label: 'Board Executive Style',
         semanticVersion: '1.0.0',
         contentFormat: 'MARKDOWN',
@@ -3964,6 +4255,9 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
         packType: 'STYLE',
         packKey: 'board-executive-style',
         knowledgeAssetId: 'STY-QA-001',
+        knowledgeLayer: 'STYLE',
+        capabilityKey: 'executive-board',
+        workspaceCompatibility: ['OUTCOME'],
         label: 'Board Executive Style',
         semanticVersion: '1.0.0',
         contentFormat: 'MARKDOWN',
@@ -3991,6 +4285,9 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
         packType: 'STYLE',
         packKey: 'board-executive-style',
         knowledgeAssetId: 'STY-QA-001',
+        knowledgeLayer: 'STYLE',
+        capabilityKey: 'executive-board',
+        workspaceCompatibility: ['OUTCOME'],
         label: 'Board Executive Style',
         semanticVersion: '1.0.0',
         contentFormat: 'MARKDOWN',

@@ -19,6 +19,15 @@ const outputSchemaRequirement = (overrides = {}) => ({
   ...overrides,
 })
 
+const styleReference = (overrides = {}) => ({
+  relationshipType: 'REFERENCES',
+  targetPackType: 'STYLE',
+  targetPackKey: 'board-executive',
+  requiredAt: 'NONE',
+  cardinality: 'ZERO_OR_MORE',
+  ...overrides,
+})
+
 describe('SS-002 Knowledge Pack relationship contract', () => {
   test('normalizes governed identities and rejects unsafe identities', () => {
     expect(normalizeKnowledgeAssetId(' ot-002 ')).toBe('OT-002')
@@ -136,6 +145,24 @@ compatible_output_types:
     }])
   })
 
+  test('allows front matter without knowledgeAssetId when the registry owns governance completeness', () => {
+    const parsed = parseKnowledgePackFrontMatter(`---
+relationshipContractVersion: SS002_RELATIONSHIP_V1
+dependencyReferences:
+  - relationshipType: REQUIRES_COMPATIBLE_PACK
+    targetPackType: OUTPUT_SCHEMA
+    requiredAt: RUNTIME
+    cardinality: ONE_OR_MORE
+---
+# Board Paper
+`, { packType: 'OUTPUT_TYPE' })
+    expect(parsed).toMatchObject({
+      knowledgeAssetId: '',
+      relationshipContractVersion: 'SS002_RELATIONSHIP_V1',
+      dependencyReferences: [outputSchemaRequirement()],
+    })
+  })
+
   test.each([
     ['anchor', 'knowledge_asset_id: &id OT-002\ncopy: *id'],
     ['tag', 'knowledge_asset_id: !foo OT-002'],
@@ -169,7 +196,7 @@ compatible_output_types:
   test('requires canonical equality when request and source both govern relationships', () => {
     const source = {
       knowledgeAssetId: 'OT-002',
-      dependencyReferences: [outputSchemaRequirement()],
+      dependencyReferences: [outputSchemaRequirement(), styleReference()],
     }
     expect(assertCanonicalRelationshipSourcesEqual({
       request: { ...source, dependencyReferences: [...source.dependencyReferences].reverse() },
@@ -179,5 +206,31 @@ compatible_output_types:
       request: { knowledgeAssetId: 'OT-003' },
       source,
     })).toThrow('conflict')
+    expect(() => assertCanonicalRelationshipSourcesEqual({
+      request: {
+        knowledgeAssetId: 'OT-002',
+        dependencyReferences: [outputSchemaRequirement(), styleReference({
+          targetPackKey: 'board-executive-v2',
+        })],
+      },
+      source,
+    })).toThrow('conflict')
+  })
+
+  test('accepts legacy compatible output type metadata as non-executable compatibility without SS-002 opt-in', () => {
+    const result = parseKnowledgePackFrontMatter(`---
+knowledge_asset_id: OSC-001
+compatible_output_types:
+  - OT-001
+---
+# Output schema`, { packType: 'OUTPUT_SCHEMA' })
+
+    expect(result.relationshipContractVersion).toBe('SS002_RELATIONSHIP_V1')
+    expect(result.dependencyReferences).toEqual([expect.objectContaining({
+      relationshipType: 'COMPATIBLE_WITH',
+      targetKnowledgeAssetId: 'OT-001',
+      requiredAt: 'NONE',
+      cardinality: 'ZERO_OR_MORE',
+    })])
   })
 })

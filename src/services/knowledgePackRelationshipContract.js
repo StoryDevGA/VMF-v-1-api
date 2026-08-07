@@ -10,6 +10,7 @@ import {
   KNOWLEDGE_PACK_RELATIONSHIP_FAILURES,
   KNOWLEDGE_PACK_RELATIONSHIP_TIMINGS,
   KNOWLEDGE_PACK_RELATIONSHIP_TYPES,
+  KNOWLEDGE_ASSET_ID_PATTERN,
 } from '../constants/knowledgeRuntime.js'
 
 const MAX_FRONT_MATTER_BYTES = 64 * 1024
@@ -17,10 +18,10 @@ const MAX_DEPTH = 12
 const MAX_SCALAR_LENGTH = 8 * 1024
 const MAX_RELATIONSHIPS = 100
 const UNSAFE_KEYS = new Set(['__proto__', 'prototype', 'constructor'])
-const IDENTITY_PATTERN = /^[A-Z0-9]+(?:-[A-Z0-9]+)+$/
 const EXECUTABLE_TOP_LEVEL_KEYS = new Set([
   'relationshipContractVersion',
   'knowledge_asset_id',
+  'knowledgeAssetId',
   'dependencyReferences',
   'compatible_output_types',
 ])
@@ -52,7 +53,7 @@ export const normalizeKnowledgeAssetId = (value, { required = false } = {}) => {
     if (required) fail('knowledgeAssetId is required.', { field: 'knowledgeAssetId' })
     return ''
   }
-  if (normalized.length > 128 || !IDENTITY_PATTERN.test(normalized)) {
+  if (normalized.length > 128 || !KNOWLEDGE_ASSET_ID_PATTERN.test(normalized)) {
     fail('knowledgeAssetId must be a governed uppercase hyphenated identity.', {
       field: 'knowledgeAssetId',
       observedValue: normalized,
@@ -332,7 +333,10 @@ const extractFrontMatter = (source) => {
   return yamlText
 }
 
-export const parseKnowledgePackFrontMatter = (source, { packType = '' } = {}) => {
+export const parseKnowledgePackFrontMatter = (
+  source,
+  { packType = '', knowledgeAssetIdRequired = false } = {},
+) => {
   const yamlText = extractFrontMatter(source)
   const document = parseDocument(yamlText, {
     schema: 'core',
@@ -352,9 +356,25 @@ export const parseKnowledgePackFrontMatter = (source, { packType = '' } = {}) =>
   }
   inspectParsedValue(metadata)
 
-  const knowledgeAssetId = normalizeKnowledgeAssetId(metadata.knowledge_asset_id, {
-    required: true,
-  })
+  const snakeCaseKnowledgeAssetId = normalizeKnowledgeAssetId(metadata.knowledge_asset_id)
+  const camelCaseKnowledgeAssetId = normalizeKnowledgeAssetId(metadata.knowledgeAssetId)
+  if (
+    snakeCaseKnowledgeAssetId
+    && camelCaseKnowledgeAssetId
+    && snakeCaseKnowledgeAssetId !== camelCaseKnowledgeAssetId
+  ) {
+    fail('Front matter knowledgeAssetId values conflict.', {
+      field: 'knowledgeAssetId',
+      snakeCaseKnowledgeAssetId,
+      camelCaseKnowledgeAssetId,
+    })
+  }
+  const knowledgeAssetId = normalizeKnowledgeAssetId(
+    snakeCaseKnowledgeAssetId || camelCaseKnowledgeAssetId,
+    {
+      required: knowledgeAssetIdRequired,
+    },
+  )
   const relationshipContractVersion = normalizeToken(metadata.relationshipContractVersion)
   let dependencyReferences = metadata.dependencyReferences
 
@@ -368,6 +388,9 @@ export const parseKnowledgePackFrontMatter = (source, { packType = '' } = {}) =>
     if (metadata.compatible_output_types.length > MAX_RELATIONSHIPS) {
       fail(`compatible_output_types can contain at most ${MAX_RELATIONSHIPS} entries.`)
     }
+    // Legacy output-schema compatibility is non-executable metadata. It becomes
+    // COMPATIBLE_WITH/NONE and does not require the SS-002 opt-in version unless
+    // explicit dependencyReferences are also authored.
     const compatibilityRelationships = metadata.compatible_output_types.map((entry) => ({
       relationshipType: KNOWLEDGE_PACK_RELATIONSHIP_TYPES.COMPATIBLE_WITH,
       targetKnowledgeAssetId: typeof entry === 'string' ? entry : entry?.knowledge_asset_id,

@@ -39,11 +39,25 @@ const BINARY_SOURCE_DOCUMENT_FORMATS = new Set([
 
 const normalizeText = (value) => String(value ?? '').trim()
 
-const normalizeDocumentText = (value) => String(value ?? '')
-  .slice(0, SOURCE_DOCUMENT_IMPORT_LIMITS.maxTextCharacters)
+const normalizeInvisibleSeparators = (value) => String(value ?? '')
+  .replace(/[\u2028\u2029]/g, '\n')
+  .replace(/[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g, ' ')
+  .replace(/[\u200B-\u200F\u2060-\u206F\uFEFF]/g, '')
+
+const normalizeDocumentText = (value) => normalizeInvisibleSeparators(
+  String(value ?? '').slice(0, SOURCE_DOCUMENT_IMPORT_LIMITS.maxTextCharacters),
+)
   .replace(/\r\n?/g, '\n')
   .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\uFFFD]/g, ' ')
   .replace(/[^\S\n]+/g, ' ')
+  .replace(/\n{3,}/g, '\n\n')
+  .trim()
+
+const normalizeTextSourceDocument = (value) => normalizeInvisibleSeparators(
+  String(value ?? '').slice(0, SOURCE_DOCUMENT_IMPORT_LIMITS.maxTextCharacters),
+)
+  .replace(/\r\n?/g, '\n')
+  .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\uFFFD]/g, ' ')
   .replace(/\n{3,}/g, '\n\n')
   .trim()
 
@@ -493,12 +507,14 @@ export const extractKnowledgePackSourceDocumentText = async ({
   extractedText,
 } = {}) => {
   if (TEXT_SOURCE_DOCUMENT_FORMATS.has(contentFormat)) {
-    const text = normalizeDocumentText(extractedText)
-    if (!text) {
+    const normalizedText = normalizeTextSourceDocument(extractedText)
+    if (!normalizedText) {
       const err = new Error('Extracted source text is required for text source imports.')
       err.code = SOURCE_DOCUMENT_EXTRACTION_ERRORS.EXTRACTION_REQUIRED
       throw err
     }
+    requireReadableText({ text: normalizedText })
+    const text = normalizedText
     return {
       text,
       sourceHash: hashText(text),

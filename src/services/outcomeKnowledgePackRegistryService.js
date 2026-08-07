@@ -83,6 +83,87 @@ const normalizePackCategory = (value, packType) =>
 const normalizeTokenList = (values) => Array.isArray(values)
   ? [...new Set(values.map(normalizeToken).filter(Boolean))]
   : []
+const hasCompleteGovernanceMetadata = (value = {}) => Boolean(
+  normalizeToken(value.knowledgeLayer)
+    && normalizeLowerKey(value.capabilityKey)
+    && normalizeToken(value.knowledgeAssetId)
+    && normalizeTokenList(value.workspaceCompatibility).length > 0,
+)
+const getMissingGovernanceFields = (value = {}) => [
+  ...(!normalizeToken(value.knowledgeLayer) ? ['knowledgeLayer'] : []),
+  ...(!normalizeLowerKey(value.capabilityKey) ? ['capabilityKey'] : []),
+  ...(!normalizeToken(value.knowledgeAssetId) ? ['knowledgeAssetId'] : []),
+  ...(normalizeTokenList(value.workspaceCompatibility).length === 0
+    ? ['workspaceCompatibility']
+    : []),
+]
+const buildGovernanceMetadata = (primary = {}, fallback = {}) => ({
+  knowledgeLayer: normalizeToken(primary.knowledgeLayer) || normalizeToken(fallback.knowledgeLayer),
+  capabilityKey: normalizeLowerKey(primary.capabilityKey) || normalizeLowerKey(fallback.capabilityKey),
+  knowledgeAssetId: normalizeToken(primary.knowledgeAssetId) || normalizeToken(fallback.knowledgeAssetId),
+  workspaceCompatibility: normalizeTokenList(primary.workspaceCompatibility).length > 0
+    ? normalizeTokenList(primary.workspaceCompatibility)
+    : normalizeTokenList(fallback.workspaceCompatibility),
+})
+const buildGovernanceFieldDetails = (fields = [], { rule, source = 'REQUEST' } = {}) => Object.fromEntries(
+  fields.map((field) => [field, {
+    field,
+    rule,
+    source,
+    message: `${field} is required for governed Knowledge Pack import and activation.`,
+  }]),
+)
+const compactGovernanceMetadata = (value = {}) => Object.fromEntries(
+  Object.entries({
+    knowledgeLayer: normalizeToken(value.knowledgeLayer),
+    capabilityKey: normalizeLowerKey(value.capabilityKey),
+    knowledgeAssetId: normalizeToken(value.knowledgeAssetId),
+    workspaceCompatibility: normalizeTokenList(value.workspaceCompatibility),
+  }).filter(([, entry]) => (
+    Array.isArray(entry) ? entry.length > 0 : Boolean(entry)
+  )),
+)
+const buildSuppliedGovernanceMetadataSet = ({
+  packDefinition = {},
+  existingPackRecord = null,
+} = {}) => {
+  if (!existingPackRecord) return compactGovernanceMetadata(packDefinition)
+  const suppliedFields = new Set(packDefinition.governanceMetadataSuppliedFields || [])
+  return Object.fromEntries(
+    Object.entries(compactGovernanceMetadata(packDefinition))
+      .filter(([field]) => suppliedFields.has(field)),
+  )
+}
+const canonicalizeGovernanceTokenList = (values = []) => normalizeTokenList(values)
+  .sort((left, right) => left.localeCompare(right))
+  .join('|')
+const getSuppliedGovernanceMismatchFields = (request = {}, canonical = {}) => [
+  ...(
+    normalizeToken(request.knowledgeLayer)
+    && normalizeToken(request.knowledgeLayer) !== normalizeToken(canonical.knowledgeLayer)
+      ? ['knowledgeLayer']
+      : []
+  ),
+  ...(
+    normalizeLowerKey(request.capabilityKey)
+    && normalizeLowerKey(request.capabilityKey) !== normalizeLowerKey(canonical.capabilityKey)
+      ? ['capabilityKey']
+      : []
+  ),
+  ...(
+    normalizeToken(request.knowledgeAssetId)
+    && normalizeToken(request.knowledgeAssetId) !== normalizeToken(canonical.knowledgeAssetId)
+      ? ['knowledgeAssetId']
+      : []
+  ),
+  ...(
+    normalizeTokenList(request.workspaceCompatibility).length > 0
+    && canonicalizeGovernanceTokenList(request.workspaceCompatibility)
+      !== canonicalizeGovernanceTokenList(canonical.workspaceCompatibility)
+      ? ['workspaceCompatibility']
+      : []
+  ),
+]
 const normalizeDependencyReferences = (references) => normalizeKnowledgePackRelationships(
   references === undefined ? [] : references,
 )
@@ -119,6 +200,7 @@ export const OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS = Object.freeze({
   PACK_ACTIVE_CAPABILITY_CONFLICT: 'PACK_ACTIVE_CAPABILITY_CONFLICT',
   PACK_ACTIVATION_GOVERNANCE_METADATA_REQUIRED: 'PACK_ACTIVATION_GOVERNANCE_METADATA_REQUIRED',
   PACK_ACTIVATION_GOVERNANCE_METADATA_MISMATCH: 'PACK_ACTIVATION_GOVERNANCE_METADATA_MISMATCH',
+  PACK_GOVERNANCE_METADATA_MISMATCH: 'PACK_GOVERNANCE_METADATA_MISMATCH',
   MISSING_GOVERNANCE_METADATA: 'MISSING_GOVERNANCE_METADATA',
   KNOWLEDGE_ASSET_ID_CONFLICT: 'KNOWLEDGE_ASSET_ID_CONFLICT',
   PACK_DUPLICATE_REVIEW_REQUIRED: 'PACK_DUPLICATE_REVIEW_REQUIRED',
@@ -178,6 +260,27 @@ const createKnowledgePackError = ({
   }
   return err
 }
+
+const createGovernanceMetadataError = ({
+  status = 422,
+  message,
+  reason = OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.MISSING_GOVERNANCE_METADATA,
+  fields = [],
+  details = {},
+}) => createKnowledgePackError({
+  status,
+  code: status === 409 ? 'CONFLICT' : 'VALIDATION_FAILED',
+  message,
+  reason,
+  details: {
+    missingFields: fields,
+    fields: buildGovernanceFieldDetails(fields, {
+      rule: 'REQUIRED_GOVERNANCE_METADATA',
+      source: details.source || 'REQUEST',
+    }),
+    ...details,
+  },
+})
 
 const throwStarterAuthoringRetiredError = ({ packId } = {}) => {
   throw createKnowledgePackError({
@@ -385,16 +488,20 @@ const buildSourceDocumentId = ({
     .slice(0, 180)
 }
 
-const ensureSourceDocumentDraftPackRecord = async ({
+const buildSourceDocumentDraftPackUpdate = ({
   packDefinition,
   actorUserId,
   versionId,
   semanticVersion,
   scope,
-  session = null,
-} = {}) => KnowledgePack.findOneAndUpdate(
-  { packId: buildKnowledgePackId(packDefinition) },
-  {
+  existingPackRecord = null,
+} = {}) => {
+  const suppliedGovernanceSet = buildSuppliedGovernanceMetadataSet({
+    packDefinition,
+    existingPackRecord,
+  })
+
+  return {
     $setOnInsert: {
       packId: buildKnowledgePackId(packDefinition),
       createdBy: actorUserId || null,
@@ -403,12 +510,7 @@ const ensureSourceDocumentDraftPackRecord = async ({
     $set: {
       packCategory: normalizePackCategory(packDefinition.packCategory, packDefinition.packType),
       purposeCategory: packDefinition.purposeCategory,
-      ...(packDefinition.knowledgeLayer ? { knowledgeLayer: packDefinition.knowledgeLayer } : {}),
-      ...(packDefinition.capabilityKey ? { capabilityKey: packDefinition.capabilityKey } : {}),
-      knowledgeAssetId: packDefinition.knowledgeAssetId,
-      ...(packDefinition.workspaceCompatibility?.length > 0
-        ? { workspaceCompatibility: packDefinition.workspaceCompatibility }
-        : {}),
+      ...suppliedGovernanceSet,
       packType: normalizeToken(packDefinition.packType),
       packKey: normalizeLowerKey(packDefinition.packKey),
       label: normalizeText(packDefinition.label),
@@ -434,7 +536,27 @@ const ensureSourceDocumentDraftPackRecord = async ({
         contentPersisted: true,
       },
     },
-  },
+  }
+}
+
+const ensureInheritedSourceDocumentDraftPackRecord = async ({
+  packDefinition,
+  actorUserId,
+  versionId,
+  semanticVersion,
+  scope,
+  existingPackRecord = null,
+  session = null,
+} = {}) => KnowledgePack.findOneAndUpdate(
+  { packId: buildKnowledgePackId(packDefinition) },
+  buildSourceDocumentDraftPackUpdate({
+    packDefinition,
+    actorUserId,
+    versionId,
+    semanticVersion,
+    scope,
+    existingPackRecord,
+  }),
   {
     upsert: true,
     new: true,
@@ -1997,12 +2119,6 @@ export const importOutcomeKnowledgePackSourceDocumentDraft = async ({
       },
       source: sourceRelationshipMetadata,
     })
-    if (!sourceRelationshipMetadata.knowledgeAssetId) {
-      throw new KnowledgePackRelationshipContractError(
-        'Knowledge Asset ID is missing. Enter the governed ID in the import form, for example OT-001. Markdown and YAML sources may also provide knowledge_asset_id in front matter; Word and PDF documents cannot.',
-        { field: 'knowledgeAssetId' },
-      )
-    }
   } catch (err) {
     if (!(err instanceof KnowledgePackRelationshipContractError)) throw err
     throw createKnowledgePackError({
@@ -2038,6 +2154,16 @@ export const importOutcomeKnowledgePackSourceDocumentDraft = async ({
     executionMode: normalizeToken(body.executionMode || KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT),
     sourceDocument: sourceDocumentInput,
   }
+  packDefinition.governanceMetadataSuppliedFields = [
+    ...(normalizeToken(body.knowledgeLayer) ? ['knowledgeLayer'] : []),
+    ...(normalizeLowerKey(body.capabilityKey) ? ['capabilityKey'] : []),
+    ...(normalizeToken(body.knowledgeAssetId) || normalizeToken(sourceRelationshipMetadata.knowledgeAssetId)
+      ? ['knowledgeAssetId']
+      : []),
+    ...(normalizeTokenList(body.workspaceCompatibility).length > 0
+      ? ['workspaceCompatibility']
+      : []),
+  ]
   const canonicalPackId = buildKnowledgePackId(packDefinition)
   const versionId = buildKnowledgePackVersionId({
     packType: packDefinition.packType,
@@ -2061,6 +2187,51 @@ export const importOutcomeKnowledgePackSourceDocumentDraft = async ({
     }),
   })
   packDefinition.sourceDocument = sourceDocument
+
+  const existingPackCandidate = await resolveLeanQuery(KnowledgePack.findOne({ packId: canonicalPackId }))
+  const existingPackRecord = normalizeText(existingPackCandidate?.packId) === canonicalPackId
+    ? existingPackCandidate
+    : null
+  const governanceMetadata = buildGovernanceMetadata(packDefinition, existingPackRecord || {})
+  const missingGovernanceFields = getMissingGovernanceFields(governanceMetadata)
+  if (!hasCompleteGovernanceMetadata(governanceMetadata)) {
+    throw createGovernanceMetadataError({
+      status: 422,
+      message: 'Knowledge Pack import requires complete governance metadata.',
+      fields: missingGovernanceFields,
+      details: {
+        packId: canonicalPackId,
+        versionId,
+        source: existingPackRecord ? 'PACK' : 'REQUEST',
+      },
+    })
+  }
+  const governanceMismatchFields = existingPackRecord
+    ? getSuppliedGovernanceMismatchFields(packDefinition, existingPackRecord)
+    : []
+  if (governanceMismatchFields.length > 0) {
+    throw createKnowledgePackError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Imported Knowledge Pack version governance metadata must match the canonical pack.',
+      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_GOVERNANCE_METADATA_MISMATCH,
+      details: {
+        packId: canonicalPackId,
+        versionId,
+        mismatchFields: governanceMismatchFields,
+        fields: Object.fromEntries(governanceMismatchFields.map((field) => [field, {
+          field,
+          rule: 'CANONICAL_PACK_GOVERNANCE_METADATA_MATCH',
+          source: 'PACK',
+          message: `${field} must match the canonical Knowledge Pack governance metadata.`,
+        }])),
+      },
+    })
+  }
+  packDefinition.knowledgeLayer = governanceMetadata.knowledgeLayer
+  packDefinition.capabilityKey = governanceMetadata.capabilityKey
+  packDefinition.knowledgeAssetId = governanceMetadata.knowledgeAssetId
+  packDefinition.workspaceCompatibility = governanceMetadata.workspaceCompatibility
 
   const existingVersion = await KnowledgePackVersion.findOne({
     packType: packDefinition.packType,
@@ -2202,9 +2373,6 @@ export const importOutcomeKnowledgePackSourceDocumentDraft = async ({
   }
 
   const useTransaction = canUseSourceImportTransaction()
-  const existingPackRecord = useTransaction
-    ? null
-    : await resolveLeanQuery(KnowledgePack.findOne({ packId: canonicalPackId }))
   let packRecord = null
   let version = null
   let versionPersisted = false
@@ -2218,12 +2386,13 @@ export const importOutcomeKnowledgePackSourceDocumentDraft = async ({
       versionPersisted = true
     }
 
-    packRecord = await ensureSourceDocumentDraftPackRecord({
+    packRecord = await ensureInheritedSourceDocumentDraftPackRecord({
       packDefinition,
       actorUserId,
       versionId,
       semanticVersion,
       scope,
+      existingPackRecord,
       session: transactionSession,
     })
     packPersisted = true
@@ -2884,6 +3053,14 @@ const throwActivationRelationshipError = ({
   })
 }
 
+const buildRelationshipTargetIdentity = (relationship = {}) => ({
+  targetPackType: relationship.targetPackType || '',
+  targetPackKey: relationship.targetPackKey || '',
+  targetCapabilityKey: relationship.targetCapabilityKey || '',
+  targetKnowledgeAssetId: relationship.targetKnowledgeAssetId || '',
+  targetKnowledgeLayer: relationship.targetKnowledgeLayer || '',
+})
+
 const assertActivationTimeRelationships = async ({ version, scope, session = null }) => {
   const relationships = normalizeDependencyReferences(version.dependencyReferences)
     .filter((relationship) => (
@@ -2903,6 +3080,13 @@ const assertActivationTimeRelationships = async ({ version, scope, session = nul
   const activeCandidates = await resolveLeanQuery(withOptionalSession(query, session))
 
   for (const relationship of relationships) {
+    const requiredPack = buildRelationshipTargetIdentity(relationship)
+    const requiredActivationState = {
+      activationStatus: OUTCOME_KNOWLEDGE_PACK_ACTIVATION_STATUSES.ACTIVE,
+      cardinality: relationship.cardinality,
+      versionConstraint: relationship.versionConstraint || 'ANY_VALID_SEMVER',
+      scopeKeys: eligibleScopeKeys,
+    }
     const identityMatches = activeCandidates.filter((candidate) => (
       activationMatchesRelationship(candidate, relationship)
     ))
@@ -2911,8 +3095,12 @@ const assertActivationTimeRelationships = async ({ version, scope, session = nul
         code: KNOWLEDGE_PACK_RELATIONSHIP_FAILURES.MISSING_RELATIONSHIP,
         version,
         relationship,
-        observedState: 'NO_ACTIVE_TARGET',
-        requiredState: relationship.cardinality,
+        observedState: {
+          requiredPack,
+          currentStatus: 'MISSING',
+          matchingActivationCount: 0,
+        },
+        requiredState: requiredActivationState,
       })
     }
     const versionMatches = identityMatches.filter((candidate) => (
@@ -2923,8 +3111,13 @@ const assertActivationTimeRelationships = async ({ version, scope, session = nul
         code: KNOWLEDGE_PACK_RELATIONSHIP_FAILURES.INCOMPATIBLE_VERSION,
         version,
         relationship,
-        observedState: identityMatches.map((candidate) => candidate.semanticVersion),
-        requiredState: relationship.versionConstraint || 'ANY_VALID_SEMVER',
+        observedState: {
+          requiredPack,
+          currentStatus: OUTCOME_KNOWLEDGE_PACK_ACTIVATION_STATUSES.ACTIVE,
+          matchingActivationCount: identityMatches.length,
+          semanticVersions: identityMatches.map((candidate) => candidate.semanticVersion),
+        },
+        requiredState: requiredActivationState,
       })
     }
     const distinctIdentities = new Set(versionMatches.map((candidate) => (
@@ -2940,8 +3133,12 @@ const assertActivationTimeRelationships = async ({ version, scope, session = nul
         code: KNOWLEDGE_PACK_RELATIONSHIP_FAILURES.AMBIGUOUS_DEPENDENCY,
         version,
         relationship,
-        observedState: cardinality,
-        requiredState: relationship.cardinality,
+        observedState: {
+          requiredPack,
+          currentStatus: OUTCOME_KNOWLEDGE_PACK_ACTIVATION_STATUSES.ACTIVE,
+          ...cardinality,
+        },
+        requiredState: requiredActivationState,
       })
     }
     const createsDirectCycle = versionMatches.some((candidate) => {
@@ -2960,8 +3157,15 @@ const assertActivationTimeRelationships = async ({ version, scope, session = nul
         code: KNOWLEDGE_PACK_RELATIONSHIP_FAILURES.CIRCULAR_DEPENDENCY,
         version,
         relationship,
-        observedState: versionMatches.map((candidate) => candidate.activationId),
-        requiredState: 'ACYCLIC_ACTIVATION_GRAPH',
+        observedState: {
+          requiredPack,
+          currentStatus: OUTCOME_KNOWLEDGE_PACK_ACTIVATION_STATUSES.ACTIVE,
+          activationIds: versionMatches.map((candidate) => candidate.activationId),
+        },
+        requiredState: {
+          ...requiredActivationState,
+          graphRequirement: 'ACYCLIC_ACTIVATION_GRAPH',
+        },
       })
     }
   }
@@ -3025,15 +3229,15 @@ const applyKnowledgePackActivationMutation = async ({
   ]
 
   if (missingFields.length > 0) {
-    throw createKnowledgePackError({
+    throw createGovernanceMetadataError({
       status: 409,
-      code: 'CONFLICT',
       message: 'Knowledge pack activation requires complete governance metadata.',
       reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_ACTIVATION_GOVERNANCE_METADATA_REQUIRED,
+      fields: missingFields,
       details: {
         packId: version.packId,
         versionId: version.versionId,
-        missingFields,
+        source: 'VERSION',
       },
     })
   }
