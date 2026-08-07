@@ -18,6 +18,7 @@ import {
   exportRuntimeOutputAsset,
   generateRuntimeOutcomeResponse,
   getGovernedReasoningExecution,
+  getRuntimeCommercialStrategyDecisionPaperReadiness,
   getRuntimeOutcomeAsset,
   getRuntimeOutcomeAssetPreview,
   getRuntimeOutcomeAssetVersion,
@@ -93,6 +94,7 @@ import {
   validateRuntimeOutcomeDraftParams,
   validateRuntimeOutcomeInstanceId,
   validateRuntimeOutcomeMessageParams,
+  validateRuntimeOutcomeReadinessGateQuery,
   validateRuntimeOutputRequestParams,
   validateRuntimeOutcomeSessionParams,
   validateRuntimeActionParams,
@@ -209,6 +211,12 @@ router.get('/:runtimeInstanceId/output-lab/definitions', validateRuntimeInstance
 router.get('/:runtimeInstanceId/output-lab/readiness', validateRuntimeInstanceId, getRuntimeOutputLabReadiness)
 router.get('/:runtimeInstanceId/outcome-studio', validateRuntimeOutcomeInstanceId, getRuntimeOutcomeStudio)
 router.get('/:runtimeInstanceId/outcome-studio/readiness', validateRuntimeOutcomeInstanceId, getRuntimeOutcomeStudioReadiness)
+router.get(
+  '/:runtimeInstanceId/outcome-studio/commercial-strategy-decision-paper/readiness',
+  validateRuntimeOutcomeInstanceId,
+  validateRuntimeOutcomeReadinessGateQuery,
+  getRuntimeCommercialStrategyDecisionPaperReadiness,
+)
 router.get(
   '/:runtimeInstanceId/outcome-studio/sessions/:sessionId/assets',
   validateRuntimeOutcomeSessionParams,

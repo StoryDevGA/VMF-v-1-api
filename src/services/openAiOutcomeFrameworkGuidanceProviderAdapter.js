@@ -164,7 +164,7 @@ const buildOutputDiagnostic = ({ diagnosticClass, diagnosticSubcode, fields = {}
       ...safeFields,
       rawProviderBodyPersisted: false,
       rawProviderOutputPersisted: false,
-      rawParlonContentPersisted: false,
+      rawCustomerContentPersisted: false,
     })
   } catch {
     return null

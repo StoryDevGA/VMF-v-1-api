@@ -5,6 +5,9 @@ import zlib from 'node:zlib'
 import JSZip from 'jszip'
 import { evaluateRuntimeSectionTruthReadiness } from '../services/runtimeSectionTruthReadinessService.js'
 import { buildKnowledgePackRelationshipChecksum } from '../services/knowledgePackRelationshipContract.js'
+import {
+  COMMERCIAL_STRATEGY_DECISION_PAPER_OUTPUT_TYPE_KEY,
+} from '../constants/outcomeCommercialStrategyDecisionPaper.js'
 
 const moduleRequire = createRequire(import.meta.url)
 const { createCanvas } = moduleRequire('@napi-rs/canvas')
@@ -15765,6 +15768,81 @@ describe('Runtime Instance API', () => {
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'TRUTH_QUALITY_EVALUATED',
     }))
+  })
+
+  test('Commercial strategy decision-paper readiness validates runtime timestamp before lookup', async () => {
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/commercial-strategy-decision-paper/readiness`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
+  })
+
+  test('Commercial strategy decision-paper readiness exposes governed runtime gate without generating or comparing', async () => {
+    const buildKcpCandidate = jest.fn(async ({ consumerIntent }) => ({
+      status: 'READY',
+      planFingerprint: 'a'.repeat(64),
+      resolutionFingerprint: 'b'.repeat(64),
+      selectedPackCount: 0,
+      consideredPackCount: 0,
+      payload: {
+        resolution: {
+          selectedPacks: [],
+          consideredPacks: [],
+          missingDependencies: [],
+          relationshipFailures: [],
+          ambiguousCandidates: [],
+          blockedPacks: [],
+          warnings: [],
+        },
+        stagePlan: [],
+      },
+      consumerIntent,
+    }))
+    app.locals.outcomeStudioReasoningDeps = { buildKcpCandidate }
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/commercial-strategy-decision-paper/readiness?expectedRuntimeUpdatedAt=2026-05-19T08:00:00.000Z`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(buildKcpCandidate).toHaveBeenCalledWith(expect.objectContaining({
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      expectedRuntimeUpdatedAt: '2026-05-19T08:00:00.000Z',
+      consumerIntent: expect.objectContaining({
+        requestedOutputTypeKey: COMMERCIAL_STRATEGY_DECISION_PAPER_OUTPUT_TYPE_KEY,
+      }),
+    }))
+    expect(res.body.data).toMatchObject({
+      status: 'BLOCKED',
+      runGate: {
+        status: 'STOP',
+        nextAction: 'REPORT_MISSING_KNOWLEDGE_PACKS',
+        mayGenerate: false,
+        mayCompare: false,
+        mayReportVerdict: false,
+      },
+      exercisePlan: {
+        candidateGeneration: {
+          invoked: false,
+        },
+        comparison: {
+          invoked: false,
+        },
+      },
+      progressSummary: {
+        status: 'BLOCKED',
+        recommendedNext: {
+          action: 'RESOLVE_KNOWLEDGE_READINESS',
+          blocked: true,
+        },
+      },
+    })
   })
 
   test('Outcome Studio validation hides malformed runtime identifier details before lookup', async () => {

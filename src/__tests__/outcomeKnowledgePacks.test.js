@@ -611,6 +611,7 @@ let originalMongooseReadyStateDescriptor
 let originalMongooseClientDescriptor
 let resolveOutcomeStudioKnowledgePackBinding
 let resolveOutcomeStudioKnowledgePacks
+let validateImportSourceDocumentDraft
 
 const setMongooseReadyState = (readyState) => {
   Object.defineProperty(mongoose.connection, 'readyState', {
@@ -688,6 +689,9 @@ beforeAll(async () => {
     resolveOutcomeStudioKnowledgePackBinding,
     resolveOutcomeStudioKnowledgePacks,
   } = await import('../services/outcomeKnowledgePackRegistryService.js'))
+  ;({
+    validateImportSourceDocumentDraft,
+  } = await import('../validators/outcomeKnowledgePacks.validator.js'))
   originalMongooseReadyStateDescriptor = Object.getOwnPropertyDescriptor(
     mongoose.connection,
     'readyState',
@@ -778,6 +782,93 @@ beforeEach(() => {
 })
 
 describe('Outcome Studio Knowledge Pack Registry API', () => {
+  test('Knowledge Pack models accept SS-003 canonical types and legacy aliases', async () => {
+    const acceptedTypes = [
+      'VISUAL_SYSTEM',
+      'ASSESSMENT_MODEL',
+      'OUTPUT_PATTERN',
+      'ET_RT',
+      'OR',
+      'DX',
+      'VE',
+      'CR',
+    ]
+
+    for (const packType of acceptedTypes) {
+      const normalizedKey = packType.toLowerCase().replace(/_/g, '-')
+
+      await expect(new KnowledgePack({
+        packType,
+        packKey: `model-${normalizedKey}`,
+        knowledgeAssetId: `KP-${packType.replace(/_/g, '-')}`,
+        label: `Model ${packType}`,
+        purposeCategory: 'REFERENCE',
+      }).validate()).resolves.toBeUndefined()
+
+      await expect(new KnowledgePackVersion({
+        packType,
+        packKey: `version-${normalizedKey}`,
+        knowledgeAssetId: `KPV-${packType.replace(/_/g, '-')}`,
+        semanticVersion: '1.0.0',
+        purposeCategory: 'REFERENCE',
+        contentFormat: 'MARKDOWN',
+      }).validate()).resolves.toBeUndefined()
+
+      await expect(new KnowledgePackActivation({
+        packType,
+        packKey: `activation-${normalizedKey}`,
+        knowledgeAssetId: `KPA-${packType.replace(/_/g, '-')}`,
+        versionId: `kpv-${normalizedKey}-1-0-0-global`,
+        semanticVersion: '1.0.0',
+        purposeCategory: 'REFERENCE',
+        status: 'DISABLED',
+        scopeKey: 'GLOBAL',
+      }).validate()).resolves.toBeUndefined()
+    }
+  })
+
+  test('source import validator accepts SS-003 canonical types and mandatory legacy aliases', () => {
+    const acceptedTypes = [
+      'VISUAL_SYSTEM',
+      'ASSESSMENT_MODEL',
+      'OUTPUT_PATTERN',
+      'ET_RT',
+      'OR',
+      'DX',
+      'VE',
+      'CR',
+    ]
+
+    acceptedTypes.forEach((packType) => {
+      const req = {
+        requestId: `req-${packType}`,
+        body: {
+          packType,
+          packKey: `${packType.toLowerCase().replace(/_/g, '-')}-pack`,
+          knowledgeAssetId: `SRC-${packType.replace(/_/g, '-')}`,
+          label: `${packType} Pack`,
+          purposeCategory: 'REFERENCE',
+          semanticVersion: '1.0.0',
+          contentFormat: 'MARKDOWN',
+          sourceDocument: { filename: `${packType}.md` },
+          extractedText: `${packType} source text.`,
+        },
+      }
+      const res = {
+        status: jest.fn().mockReturnThis(),
+        json: jest.fn().mockReturnThis(),
+      }
+      const next = jest.fn()
+
+      validateImportSourceDocumentDraft(req, res, next)
+
+      expect(next).toHaveBeenCalledTimes(1)
+      expect(res.status).not.toHaveBeenCalled()
+      expect(req.body.packType).toBe(packType)
+      expect(req.body.purposeCategory).toBe('REFERENCE')
+    })
+  })
+
   test('GET /api/v1/super-admin/outcome-studio/knowledge-packs returns safe registry metadata and retired source bundle status', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
 
@@ -3361,6 +3452,37 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
     expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 
+  test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import requires governed Knowledge Asset ID', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+
+    const res = await request
+      .post('/api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        packType: 'STYLE',
+        packKey: 'board-executive-style',
+        label: 'Board Executive Style',
+        semanticVersion: '1.0.0',
+        contentFormat: 'MARKDOWN',
+        sourceDocument: {
+          filename: 'Board Executive Style.md',
+          contentType: 'text/markdown',
+        },
+        extractedText: 'Provider instructions without governed front matter.',
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.message).toContain('Knowledge Asset ID is missing')
+    expect(res.body.error.details).toEqual(expect.objectContaining({
+      field: 'knowledgeAssetId',
+      reason: 'MISSING_GOVERNANCE_METADATA',
+    }))
+    expect(KnowledgePack.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(KnowledgePackVersion.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
   test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import requires owner ids for scoped drafts', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
 
@@ -3748,6 +3870,39 @@ describe('Outcome Studio Knowledge Pack Registry API', () => {
       expect.any(Object),
       expect.not.objectContaining({ session: expect.anything() }),
     )
+  })
+
+  test('POST source-document-import preserves an explicit canonical purpose category instead of fallback inference', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    KnowledgePackVersion.findOne.mockReturnValueOnce(buildVersionFindOneChain(null))
+
+    const res = await request
+      .post('/api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        packType: 'OUTPUT_SCHEMA',
+        packKey: 'visual-system-schema',
+        knowledgeAssetId: 'VS-001',
+        label: 'Visual System Schema',
+        purposeCategory: 'VISUAL',
+        semanticVersion: '1.0.0',
+        contentFormat: 'MARKDOWN',
+        sourceDocument: { filename: 'Visual System Schema.md' },
+        extractedText: 'Visual system schema source text.',
+      })
+
+    expect(res.status).toBe(201)
+    const [, packUpdate] = KnowledgePack.findOneAndUpdate.mock.calls.at(-1)
+    expect(packUpdate).toEqual(expect.objectContaining({
+      $set: expect.objectContaining({
+        packType: 'OUTPUT_SCHEMA',
+        purposeCategory: 'VISUAL',
+      }),
+    }))
+    expect(KnowledgePackVersion.prototype.save.mock.contexts[0]).toEqual(expect.objectContaining({
+      packType: 'OUTPUT_SCHEMA',
+      purposeCategory: 'VISUAL',
+    }))
   })
 
   test('POST source-document-import binds pack, version, and override audit writes to one Mongo transaction', async () => {

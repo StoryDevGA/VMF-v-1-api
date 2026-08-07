@@ -24,6 +24,7 @@ import {
 } from './knowledgePackRelationshipContract.js'
 import { resolveOutcomeStudioKnowledgePackBinding } from './outcomeKnowledgePackRegistryService.js'
 import { resolveOutcomeStudioKnowledgeContext } from './outcomeStudioKnowledgeContextService.js'
+import { assertRuntimePermission } from './runtimeInstanceService.js'
 
 const TRANSACTION_TOPOLOGIES = new Set(['ReplicaSetWithPrimary', 'Sharded'])
 const SHA256_PATTERN = /^[a-f0-9]{64}$/
@@ -865,6 +866,8 @@ const readRuntime = async ({ model, runtimeInstanceId, session = null }) => {
 }
 
 export const buildOutcomeKnowledgeCompositionPlanForRuntime = async ({
+  actorUserId,
+  scopes,
   runtimeInstanceId,
   expectedRuntimeUpdatedAt,
   consumerIntent,
@@ -873,8 +876,16 @@ export const buildOutcomeKnowledgeCompositionPlanForRuntime = async ({
   const runtimeModel = deps.RuntimeInstance || RuntimeInstance
   const resolveBinding = deps.resolveBinding || resolveOutcomeStudioKnowledgePackBinding
   const resolveContext = deps.resolveContext || resolveOutcomeStudioKnowledgeContext
+  const assertPermission = deps.assertRuntimePermission || assertRuntimePermission
   const runtime = await readRuntime({ model: runtimeModel, runtimeInstanceId })
   if (!runtime) throw appError(404, OUTCOME_KCP_ERROR_CODES.INPUT_INVALID, 'Knowledge Composition Plan runtime was not found.')
+  await assertPermission({
+    actorUserId,
+    scopes,
+    customerId: runtime.customerId,
+    tenantId: runtime.tenantId,
+    permission: 'VMF_VIEW',
+  })
   if (!expectedRuntimeUpdatedAt || toIso(runtime.updatedAt) !== toIso(expectedRuntimeUpdatedAt)) {
     throw runtimeStale({ expectedRuntimeUpdatedAt, actualRuntimeUpdatedAt: toIso(runtime.updatedAt) })
   }

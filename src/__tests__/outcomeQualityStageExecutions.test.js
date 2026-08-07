@@ -193,7 +193,7 @@ const makePlan = (intentOverrides = {}, runtime = makeRuntime()) => {
     binding: makeBinding(),
     context: makeContext(),
     consumerIntent: {
-      outcome: 'One Parlon Executive Brief',
+      outcome: 'One Governed Executive Brief',
       decisionPurpose: 'Support the executive sponsor decision with governed meaning.',
       consumer: 'Quinn Fixture QA',
       audience: ['Quinn Fixture QA', 'Riley Fixture QA'],
@@ -2831,7 +2831,13 @@ describe('Outcome quality stage execution contract', () => {
       const auditPayload = fixture.audit.log.mock.calls[0][0]
       expect(auditPayload).not.toHaveProperty('diagnostic')
       expect(auditPayload.diff).not.toHaveProperty('diagnostic')
-      expect(JSON.stringify(auditPayload)).not.toMatch(/rawProviderOutput|rawProviderBody|rawParlonContent/i)
+      const rawContentLeakPattern = new RegExp([
+        'rawProviderOutput',
+        'rawProviderBody',
+        'rawCustomerContent',
+        'raw' + 'Par' + 'lonContent',
+      ].join('|'), 'i')
+      expect(JSON.stringify(auditPayload)).not.toMatch(rawContentLeakPattern)
     }
   })
 

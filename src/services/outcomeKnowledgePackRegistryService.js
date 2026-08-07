@@ -1999,7 +1999,7 @@ export const importOutcomeKnowledgePackSourceDocumentDraft = async ({
     })
     if (!sourceRelationshipMetadata.knowledgeAssetId) {
       throw new KnowledgePackRelationshipContractError(
-        'A governed knowledgeAssetId is required in source front matter or the import request.',
+        'Knowledge Asset ID is missing. Enter the governed ID in the import form, for example OT-001. Markdown and YAML sources may also provide knowledge_asset_id in front matter; Word and PDF documents cannot.',
         { field: 'knowledgeAssetId' },
       )
     }

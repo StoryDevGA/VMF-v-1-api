@@ -12,6 +12,9 @@ import {
   getGovernedReasoningExecution as getGovernedReasoningExecutionRecord,
 } from '../services/governedReasoningRuntimeService.js'
 import {
+  buildCommercialStrategyDecisionPaperRuntimeReadinessPackage,
+} from '../services/outcomeCommercialStrategyDecisionPaperRuntimeReadinessService.js'
+import {
   getRuntimeIntelligenceGraph as getRuntimeIntelligenceGraphRecord,
   getRuntimeIntelligenceGraphCoverage as getRuntimeIntelligenceGraphCoverageRecord,
   getRuntimeIntelligenceGraphHealth as getRuntimeIntelligenceGraphHealthRecord,
@@ -777,6 +780,32 @@ export const getRuntimeOutcomeStudioReadiness = async (req, res, next) => {
 
     return res.status(200).json({
       data: readiness,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeOutcomeErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const getRuntimeCommercialStrategyDecisionPaperReadiness = async (req, res, next) => {
+  try {
+    const readinessPackage = await buildCommercialStrategyDecisionPaperRuntimeReadinessPackage({
+      actorUserId: req.user?._id || req.user?.id,
+      auditRequest: req,
+      scopes: req.scopes,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+      expectedRuntimeUpdatedAt: req.query.expectedRuntimeUpdatedAt,
+      consumerIntent: {
+        source: 'RUNTIME_OUTCOME_STUDIO_READINESS_ROUTE',
+      },
+      deps: req.app.locals.outcomeStudioReasoningDeps || {},
+    })
+
+    return res.status(200).json({
+      data: readinessPackage,
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {

@@ -188,7 +188,7 @@ const makePlan = (runtime = makeRuntime()) => {
     binding: makeBinding(),
     context: makeContext(),
     consumerIntent: {
-      outcome: 'One Parlon Executive Brief',
+      outcome: 'One Governed Executive Brief',
       decisionPurpose: 'Support an executive sponsor decision with governed meaning.',
       consumer: 'Quinn Fixture QA',
       audience: ['Quinn Fixture QA', 'Riley Fixture QA'],
@@ -497,7 +497,7 @@ const expectSafeOutputDiagnostic = (error, expected) => {
         failureCode: 'FRAMEWORK_GUIDANCE_PROVIDER_OUTPUT_INVALID',
         rawProviderBodyPersisted: false,
         rawProviderOutputPersisted: false,
-        rawParlonContentPersisted: false,
+        rawCustomerContentPersisted: false,
         ...expected,
       },
     },
@@ -507,7 +507,7 @@ const expectSafeOutputDiagnostic = (error, expected) => {
   const commonKeys = [
     'diagnosticSchemaVersion', 'adapterConfigurationVersion', 'providerLifecycleStatus',
     'failureCode', 'diagnosticClass', 'diagnosticSubcode', 'rawProviderBodyPersisted',
-    'rawProviderOutputPersisted', 'rawParlonContentPersisted',
+    'rawProviderOutputPersisted', 'rawCustomerContentPersisted',
   ]
   const fieldKeysByClass = {
     OUTPUT_EXTRACTION: ['providerOutputTextCount', 'providerOutputTextLengthBucket'],
