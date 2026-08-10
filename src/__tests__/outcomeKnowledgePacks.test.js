@@ -2547,6 +2547,101 @@ name: Statement of Work
     }))
   })
 
+  test('request-specific registry resolution does not block a relationship-selected system provider-context pack', async () => {
+    const systemPackRelationship = {
+      relationshipType: 'REQUIRED_AT_RUNTIME',
+      targetPackType: 'SYSTEM_REFERENCE',
+      targetPackKey: 'cacr-runtime-pack',
+      requiredAt: 'RUNTIME',
+      cardinality: 'ONE',
+    }
+    const outputTypeRelationships = [
+      runtimeDependency('OUTPUT_SCHEMA', 'executive-brief-schema'),
+      runtimeDependency('STYLE', 'executive'),
+      systemPackRelationship,
+    ]
+    const outputType = makeActivation({
+      packCategory: 'OUTCOME',
+      purposeCategory: 'OUTPUT',
+      packType: 'OUTPUT_TYPE_DEFINITION',
+      packKey: 'executive-brief-output',
+    }, {
+      knowledgeLayer: 'OUTPUT_TYPE',
+      capabilityKey: 'executive-brief',
+      workspaceCompatibility: ['OUTCOME'],
+      dependencyReferences: outputTypeRelationships,
+      relationshipChecksum: relationshipChecksum(outputTypeRelationships),
+    })
+    const outputSchema = makeActivation({
+      packCategory: 'OUTCOME',
+      purposeCategory: 'OUTPUT',
+      packType: 'OUTPUT_SCHEMA',
+      packKey: 'executive-brief-schema',
+    }, {
+      knowledgeLayer: 'OUTPUT_SCHEMA',
+      capabilityKey: 'executive-brief-schema',
+      workspaceCompatibility: ['OUTCOME'],
+    })
+    const style = makeActivation({
+      packCategory: 'CONTEXT',
+      purposeCategory: 'STYLE',
+      packType: 'STYLE',
+      packKey: 'executive-style',
+    }, {
+      knowledgeLayer: 'STYLE',
+      capabilityKey: 'executive',
+      workspaceCompatibility: ['OUTCOME'],
+    })
+    const systemPack = makeActivation({
+      packCategory: 'OUTCOME',
+      purposeCategory: 'SYSTEM',
+      packType: 'SYSTEM_REFERENCE',
+      packKey: 'cacr-runtime-pack',
+    }, {
+      knowledgeLayer: 'FRAMEWORK',
+      capabilityKey: 'cacr-runtime-pack',
+      workspaceCompatibility: ['OUTCOME'],
+      executionMode: 'PROVIDER_CONTEXT',
+    })
+    const activations = [
+      ...makeAllRequiredActivations(),
+      outputType,
+      outputSchema,
+      style,
+      systemPack,
+    ]
+    KnowledgePackActivation.find.mockReturnValue(buildFindChain(activations))
+    KnowledgePackVersion.find.mockReturnValue(buildFindChain(
+      activations.map((activation) => makeVersionForActivation(activation, {
+        status: 'ACTIVE',
+        knowledgeLayer: activation.knowledgeLayer,
+        capabilityKey: activation.capabilityKey,
+        workspaceCompatibility: activation.workspaceCompatibility || [],
+        dependencyReferences: activation.dependencyReferences || [],
+        relationshipChecksum: activation.relationshipChecksum,
+      })),
+    ))
+
+    const binding = await resolveOutcomeStudioKnowledgePacks({
+      frameworkKey: 'VMF',
+      runtimeType: 'VALUE_NARRATIVE',
+      workspaceType: 'OUTCOME',
+      requestedOutputTypeKey: 'executive-brief',
+      resolvedAt: '2026-07-14T12:00:00.000Z',
+    })
+
+    expect(binding.status).toBe('READY')
+    expect(binding.providerContextPacks).toContainEqual(expect.objectContaining({
+      activationId: systemPack.activationId,
+      packKey: 'cacr-runtime-pack',
+    }))
+    expect(binding.blockedPacks).not.toContainEqual(expect.objectContaining({
+      activationId: systemPack.activationId,
+      blockedReason: 'SYSTEM_ONLY_PACK',
+    }))
+    expect(binding.resolution.blockedCount).toBe(0)
+  })
+
   test('request-specific registry resolution rejects identity, contract and checksum snapshot drift', async () => {
     const outputTypeRelationships = [
       runtimeDependency('OUTPUT_SCHEMA', 'executive-brief-schema'),

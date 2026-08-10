@@ -303,6 +303,7 @@ const makePersistenceDeps = ({ latest = null, auditError = null, saveError = nul
     OutcomeKnowledgeCompositionPlan: PlanModel,
     resolveBinding: jest.fn(async () => ({ binding: makeBinding() })),
     resolveContext: jest.fn(async () => ({ context: makeContext() })),
+    assertRuntimePermission: jest.fn(async () => {}),
     auditService: audit,
     mongoose: mongooseClient,
     assertTransactionSupport: jest.fn(),
@@ -639,6 +640,69 @@ describe('Outcome Knowledge Composition Plan contract', () => {
     })
     expect(candidate.payload.resolution.consideredPackCoverage).toMatchObject({
       missingDecisionCount: 1,
+      unclassifiedCandidateCount: 0,
+    })
+  })
+
+  it('keeps missing mandatory safeguard placeholders out of selected activation evidence', () => {
+    const binding = makeBinding()
+    binding.status = 'BLOCKED'
+    binding.mandatorySafeguards[0] = {
+      packCategory: 'OUTCOME',
+      packType: 'ARL',
+      packKey: 'adaptive-reasoning-layer',
+      label: 'Adaptive Reasoning Layer',
+      status: 'MISSING',
+      runtimeBindable: false,
+    }
+    binding.mandatorySafeguards[1] = {
+      packCategory: 'OUTCOME',
+      packType: 'RL',
+      packKey: 'rendering-layer',
+      label: 'Rendering Layer',
+      status: 'MISSING',
+      runtimeBindable: false,
+    }
+    binding.missingDependencies = [
+      {
+        requirement: 'REQUIRED',
+        reason: 'MANDATORY_SAFEGUARD_MISSING',
+        selector: { packType: 'ARL', packKey: 'adaptive-reasoning-layer' },
+        requiredBy: 'MANDATORY_SAFEGUARD_POLICY',
+      },
+      {
+        requirement: 'REQUIRED',
+        reason: 'MANDATORY_SAFEGUARD_MISSING',
+        selector: { packType: 'RL', packKey: 'rendering-layer' },
+        requiredBy: 'MANDATORY_SAFEGUARD_POLICY',
+      },
+    ]
+
+    const candidate = buildCandidate({ binding })
+    const selectedPackKeys = candidate.payload.resolution.selectedPacks.map((pack) => pack.packKey)
+    const missingDecisions = candidate.payload.resolution.consideredPacks.filter(
+      (decision) => decision.decision === 'MISSING',
+    )
+
+    expect(candidate.status).toBe(OUTCOME_KCP_STATUSES.BLOCKED)
+    expect(selectedPackKeys).not.toEqual(expect.arrayContaining([
+      'adaptive-reasoning-layer',
+      'rendering-layer',
+    ]))
+    expect(missingDecisions).toHaveLength(2)
+    expect(missingDecisions.map((decision) => decision.selector)).toEqual(expect.arrayContaining([
+      { packType: 'ARL', packKey: 'adaptive-reasoning-layer' },
+      { packType: 'RL', packKey: 'rendering-layer' },
+    ]))
+    expect(candidate.payload.stagePlan.find(
+      (stage) => stage.stageKey === OUTCOME_QUALITY_STAGES.ARL_MEANING_REVIEW,
+    ).assignedActivationIds).toEqual([])
+    expect(candidate.payload.stagePlan.find(
+      (stage) => stage.stageKey === OUTCOME_QUALITY_STAGES.RENDERED_EXPRESSION_RL,
+    ).assignedActivationIds).toEqual([])
+    expect(candidate.payload.stagePlan.flatMap((stage) => stage.assignedActivationIds)).not.toContain('')
+    expect(candidate.payload.resolution.consideredPackCoverage).toMatchObject({
+      missingDecisionCount: 2,
       unclassifiedCandidateCount: 0,
     })
   })

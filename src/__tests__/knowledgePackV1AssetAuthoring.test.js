@@ -1,8 +1,11 @@
 import {
   assertV1AssetWriteEnvironment,
+  buildImportBody,
   buildV1AssetCatalogueDigest,
   planV1Asset,
+  V1_KNOWLEDGE_ASSET_DEFINITIONS,
 } from '../scripts/authorKnowledgePackV1Assets.js'
+import { normalizeKnowledgePackRelationships } from '../services/knowledgePackRelationshipContract.js'
 
 const asset = Object.freeze({
   packType: 'OUTPUT_TYPE_DEFINITION',
@@ -14,10 +17,10 @@ const asset = Object.freeze({
   expectedContentHash: 'sha256:source',
   dependencyReferences: [
     {
-      knowledgeLayer: 'OUTPUT_SCHEMA',
-      requirement: 'REQUIRED',
-      packType: 'OUTPUT_SCHEMA',
-      packKey: 'executive-brief-schema',
+      relationshipType: 'REQUIRES_COMPATIBLE_PACK',
+      targetPackType: 'OUTPUT_SCHEMA',
+      requiredAt: 'RUNTIME',
+      cardinality: 'ONE_OR_MORE',
     },
   ],
 })
@@ -64,7 +67,34 @@ describe('KP-004 V1 Knowledge Asset authoring guard', () => {
     })).toEqual({ complete: true })
   })
 
-  test('fails closed on source drift, metadata drift, and non-development databases', () => {
+  test('recognizes canonical relationship equality independent of object key order', () => {
+    const semanticallySameRelationships = [
+      {
+        cardinality: 'ONE_OR_MORE',
+        requiredAt: 'RUNTIME',
+        targetPackType: 'OUTPUT_SCHEMA',
+        relationshipType: 'REQUIRES_COMPATIBLE_PACK',
+      },
+    ]
+
+    expect(planV1Asset({
+      asset,
+      state: {
+        pack: governedRow(),
+        version: governedRow({
+          status: 'ACTIVE',
+          contentHash: asset.expectedContentHash,
+          dependencyReferences: semanticallySameRelationships,
+        }),
+        activations: [governedRow({
+          status: 'ACTIVE',
+          dependencyReferences: semanticallySameRelationships,
+        })],
+      },
+    })).toEqual({ complete: true })
+  })
+
+  test('fails closed on source drift and plans governed metadata update for metadata drift', () => {
     expect(planV1Asset({
       asset,
       state: {
@@ -80,7 +110,10 @@ describe('KP-004 V1 Knowledge Asset authoring guard', () => {
         version: governedRow({ status: 'DRAFT', contentHash: asset.expectedContentHash }),
         activations: [],
       },
-    })).toEqual({ blocker: 'GOVERNANCE_METADATA_DRIFT' })
+    })).toEqual({ action: 'UPDATE_GOVERNANCE_METADATA' })
+  })
+
+  test('fails closed on non-development databases', () => {
     expect(() => assertV1AssetWriteEnvironment({ databaseName: 'production', nodeEnv: 'production' }))
       .toThrow('Refusing V1 Knowledge Asset authoring')
   })
@@ -89,5 +122,107 @@ describe('KP-004 V1 Knowledge Asset authoring guard', () => {
     const first = buildV1AssetCatalogueDigest([{ ...asset, extractedText: 'one', sourcePath: 'ignored' }])
     const second = buildV1AssetCatalogueDigest([{ ...asset, extractedText: 'two', sourcePath: 'ignored' }])
     expect(first).not.toBe(second)
+  })
+
+  test('catalogue includes the generic commercial strategy decision-paper triplet', () => {
+    const byPackKey = new Map(V1_KNOWLEDGE_ASSET_DEFINITIONS.map((definition) => [
+      definition.packKey,
+      definition,
+    ]))
+
+    expect(byPackKey.get('commercial-strategy-decision-paper')).toMatchObject({
+      packType: 'OUTPUT_TYPE_DEFINITION',
+      knowledgeLayer: 'OUTPUT_TYPE',
+      capabilityKey: 'commercial-strategy-decision-paper',
+      knowledgeAssetId: 'QA-SS007-OUTPUT-TYPE-COMMERCIAL-STRATEGY-DECISION-PAPER',
+      filename: 'commercial-strategy-decision-paper.md',
+    })
+    expect(byPackKey.get('commercial-strategy-decision-paper-schema')).toMatchObject({
+      packType: 'OUTPUT_SCHEMA',
+      knowledgeLayer: 'OUTPUT_SCHEMA',
+      capabilityKey: 'commercial-strategy-decision-paper-schema',
+      knowledgeAssetId: 'QA-SS007-OUTPUT-SCHEMA-COMMERCIAL-STRATEGY-DECISION-PAPER',
+      filename: 'commercial-strategy-decision-paper-schema.md',
+    })
+    expect(byPackKey.get('commercial-strategy-decision-paper-style')).toMatchObject({
+      packType: 'STYLE',
+      knowledgeLayer: 'STYLE',
+      capabilityKey: 'commercial-strategy-decision-paper-style',
+      knowledgeAssetId: 'QA-SS007-STYLE-COMMERCIAL-STRATEGY-DECISION-PAPER',
+      filename: 'commercial-strategy-decision-paper-style.md',
+    })
+    expect(byPackKey.get('commercial-strategy-decision-paper').dependencyReferences).toEqual(expect.arrayContaining([
+      {
+        relationshipType: 'REQUIRED_AT_RUNTIME',
+        targetPackType: 'OUTPUT_SCHEMA',
+        targetPackKey: 'commercial-strategy-decision-paper-schema',
+        requiredAt: 'RUNTIME',
+        cardinality: 'ONE',
+      },
+      {
+        relationshipType: 'REQUIRED_AT_RUNTIME',
+        targetKnowledgeLayer: 'STYLE',
+        targetCapabilityKey: 'commercial-strategy-decision-paper-style',
+        requiredAt: 'RUNTIME',
+        cardinality: 'ONE',
+      },
+      {
+        relationshipType: 'REQUIRED_AT_RUNTIME',
+        targetPackType: 'SYSTEM_REFERENCE',
+        targetPackKey: 'cacr-runtime-pack',
+        requiredAt: 'RUNTIME',
+        cardinality: 'ONE',
+        versionConstraint: { exactVersion: '1.0.0' },
+      },
+      {
+        relationshipType: 'REQUIRED_AT_RUNTIME',
+        targetPackType: 'ARL',
+        targetPackKey: 'adaptive-reasoning-layer',
+        requiredAt: 'RUNTIME',
+        cardinality: 'ONE',
+        versionConstraint: { exactVersion: '1.0.0' },
+      },
+      {
+        relationshipType: 'REQUIRED_AT_RUNTIME',
+        targetPackType: 'RL',
+        targetPackKey: 'rendering-layer',
+        requiredAt: 'RUNTIME',
+        cardinality: 'ONE',
+        versionConstraint: { exactVersion: '1.0.0' },
+      },
+    ]))
+    expect(byPackKey.get('commercial-strategy-decision-paper').dependencyReferences).toHaveLength(22)
+  })
+
+  test('CSDP import body sends governed knowledge asset identity', () => {
+    const definition = V1_KNOWLEDGE_ASSET_DEFINITIONS.find((entry) => (
+      entry.packKey === 'commercial-strategy-decision-paper'
+    ))
+    const body = buildImportBody({
+      ...definition,
+      extractedText: 'source text',
+    })
+
+    expect(body.knowledgeAssetId).toBe('QA-SS007-OUTPUT-TYPE-COMMERCIAL-STRATEGY-DECISION-PAPER')
+    expect(body.sourceDocument).toMatchObject({
+      filename: 'commercial-strategy-decision-paper.md',
+      contentType: 'text/markdown',
+      fileExtension: 'md',
+    })
+  })
+
+  test('catalogue uses canonical SS-002 relationship metadata', () => {
+    for (const definition of V1_KNOWLEDGE_ASSET_DEFINITIONS) {
+      expect(() => normalizeKnowledgePackRelationships(definition.dependencyReferences))
+        .not.toThrow()
+    }
+    expect(() => normalizeKnowledgePackRelationships([
+      {
+        knowledgeLayer: 'OUTPUT_SCHEMA',
+        requirement: 'REQUIRED',
+        packType: 'OUTPUT_SCHEMA',
+        packKey: 'legacy-shorthand',
+      },
+    ])).toThrow('Legacy dependency metadata requires the guarded SS-002 migration')
   })
 })

@@ -25,6 +25,7 @@ import {
 import { resolveOutcomeStudioKnowledgePackBinding } from './outcomeKnowledgePackRegistryService.js'
 import { resolveOutcomeStudioKnowledgeContext } from './outcomeStudioKnowledgeContextService.js'
 import { assertRuntimePermission } from './runtimeInstanceService.js'
+import { isSelectableResolverPack } from '../utils/knowledgePackPredicates.js'
 
 const TRANSACTION_TOPOLOGIES = new Set(['ReplicaSetWithPrimary', 'Sharded'])
 const SHA256_PATTERN = /^[a-f0-9]{64}$/
@@ -286,7 +287,9 @@ const buildConsideredPackEvidence = (binding = {}) => {
     selectedSources.get(activationId).add(source)
   }
 
-  for (const pack of binding.mandatorySafeguards || []) registerSelected(pack, 'MANDATORY_SAFEGUARD')
+  for (const pack of binding.mandatorySafeguards || []) {
+    if (isSelectableResolverPack(pack)) registerSelected(pack, 'MANDATORY_SAFEGUARD')
+  }
   for (const [layer, packs] of Object.entries(binding.selectedByLayer || {})) {
     for (const pack of packs || []) registerSelected(pack, `SELECTED_BY_LAYER:${upper(layer)}`)
   }

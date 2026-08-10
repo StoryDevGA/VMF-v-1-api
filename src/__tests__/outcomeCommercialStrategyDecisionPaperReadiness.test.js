@@ -212,6 +212,38 @@ describe('Commercial strategy decision paper readiness projection', () => {
     })
   })
 
+  it('does not treat missing mandatory safeguard placeholders from a binding as selected', () => {
+    const report = buildCommercialStrategyDecisionPaperReadinessReport({
+      binding: {
+        mandatorySafeguards: [
+          {
+            packType: 'ARL',
+            packKey: 'adaptive-reasoning-layer',
+            status: 'MISSING',
+            runtimeBindable: false,
+          },
+        ],
+        selectedByLayer: {},
+      },
+    })
+
+    expect(report.genericOutcomeStudioSafeguards.find(
+      (pack) => pack.packKey === 'adaptive-reasoning-layer',
+    )).toMatchObject({
+      selected: false,
+      blocker: {
+        code: COMMERCIAL_STRATEGY_DECISION_PAPER_BLOCKERS.GENERIC_OUTCOME_STUDIO_PACK_MISSING,
+        packKey: 'adaptive-reasoning-layer',
+        packType: 'ARL',
+      },
+    })
+    expect(report.blocked).toContainEqual({
+      code: COMMERCIAL_STRATEGY_DECISION_PAPER_BLOCKERS.GENERIC_OUTCOME_STUDIO_PACK_MISSING,
+      packKey: 'adaptive-reasoning-layer',
+      packType: 'ARL',
+    })
+  })
+
   it('propagates ambiguous, blocked and relationship-failure resolver evidence', () => {
     const candidate = makeCandidate(allSelectedPacks(), {
       resolution: {

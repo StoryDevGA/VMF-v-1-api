@@ -8,8 +8,14 @@ import mongoose from 'mongoose'
 import { connectDb, disconnectDb } from '../config/db.js'
 import {
   KNOWLEDGE_PACK_EXECUTION_MODES,
+  KNOWLEDGE_PACK_RELATIONSHIP_CARDINALITIES,
+  KNOWLEDGE_PACK_RELATIONSHIP_TIMINGS,
+  KNOWLEDGE_PACK_RELATIONSHIP_TYPES,
   KNOWLEDGE_PACK_REVIEW_STATUSES,
 } from '../constants/knowledgeRuntime.js'
+import {
+  ANDREW_DERIVED_COMMERCIAL_REASONING_PACKS,
+} from '../constants/outcomeCommercialStrategyDecisionPaper.js'
 import {
   OUTCOME_KNOWLEDGE_PACK_ACTIVATION_STATUSES,
   OUTCOME_KNOWLEDGE_PACK_STATUSES,
@@ -17,6 +23,7 @@ import {
 import { KnowledgePack, KnowledgePackActivation, KnowledgePackVersion } from '../models/index.js'
 import { buildKnowledgePackId } from '../models/KnowledgePack.js'
 import { buildKnowledgePackVersionId } from '../models/KnowledgePackVersion.js'
+import { buildKnowledgePackRelationshipChecksum } from '../services/knowledgePackRelationshipContract.js'
 import {
   activateOutcomeKnowledgePackVersion,
   importOutcomeKnowledgePackSourceDocumentDraft,
@@ -36,18 +43,54 @@ const SYSTEM_ACTOR_ID = '000000000000000000000001'
 const SEMANTIC_VERSION = '1.0.0'
 const SOURCE_AUTHORITY = 'StorylineOS Product and Architecture'
 
-const outputDependencies = (schemaPackKey, styleCapabilityKey) => [
+const outputDependencies = (_schemaPackKey, styleCapabilityKey) => [
   {
-    knowledgeLayer: 'OUTPUT_SCHEMA',
-    requirement: 'REQUIRED',
-    packType: 'OUTPUT_SCHEMA',
-    packKey: schemaPackKey,
+    relationshipType: KNOWLEDGE_PACK_RELATIONSHIP_TYPES.REQUIRES_COMPATIBLE_PACK,
+    targetPackType: 'OUTPUT_SCHEMA',
+    requiredAt: KNOWLEDGE_PACK_RELATIONSHIP_TIMINGS.RUNTIME,
+    cardinality: KNOWLEDGE_PACK_RELATIONSHIP_CARDINALITIES.ONE_OR_MORE,
   },
   {
-    knowledgeLayer: 'STYLE',
-    requirement: 'REQUIRED',
-    capabilityKey: styleCapabilityKey,
+    relationshipType: KNOWLEDGE_PACK_RELATIONSHIP_TYPES.REQUIRED_AT_RUNTIME,
+    targetKnowledgeLayer: 'STYLE',
+    targetCapabilityKey: styleCapabilityKey,
+    requiredAt: KNOWLEDGE_PACK_RELATIONSHIP_TIMINGS.RUNTIME,
+    cardinality: KNOWLEDGE_PACK_RELATIONSHIP_CARDINALITIES.ONE,
   },
+]
+
+const exactOutputDependencies = (schemaPackKey, styleCapabilityKey) => [
+  {
+    relationshipType: KNOWLEDGE_PACK_RELATIONSHIP_TYPES.REQUIRED_AT_RUNTIME,
+    targetPackType: 'OUTPUT_SCHEMA',
+    targetPackKey: schemaPackKey,
+    requiredAt: KNOWLEDGE_PACK_RELATIONSHIP_TIMINGS.RUNTIME,
+    cardinality: KNOWLEDGE_PACK_RELATIONSHIP_CARDINALITIES.ONE,
+  },
+  {
+    relationshipType: KNOWLEDGE_PACK_RELATIONSHIP_TYPES.REQUIRED_AT_RUNTIME,
+    targetKnowledgeLayer: 'STYLE',
+    targetCapabilityKey: styleCapabilityKey,
+    requiredAt: KNOWLEDGE_PACK_RELATIONSHIP_TIMINGS.RUNTIME,
+    cardinality: KNOWLEDGE_PACK_RELATIONSHIP_CARDINALITIES.ONE,
+  },
+]
+
+const requiredRuntimeDependency = ({ packType, packKey }) => ({
+  relationshipType: KNOWLEDGE_PACK_RELATIONSHIP_TYPES.REQUIRED_AT_RUNTIME,
+  targetPackType: packType,
+  targetPackKey: packKey,
+  requiredAt: KNOWLEDGE_PACK_RELATIONSHIP_TIMINGS.RUNTIME,
+  cardinality: KNOWLEDGE_PACK_RELATIONSHIP_CARDINALITIES.ONE,
+  versionConstraint: { exactVersion: SEMANTIC_VERSION },
+})
+
+const commercialStrategyDecisionPaperDependencies = [
+  ...exactOutputDependencies(
+    'commercial-strategy-decision-paper-schema',
+    'commercial-strategy-decision-paper-style',
+  ),
+  ...ANDREW_DERIVED_COMMERCIAL_REASONING_PACKS.map(requiredRuntimeDependency),
 ]
 
 const truthDependencies = [
@@ -59,10 +102,12 @@ const truthDependencies = [
   'truth-certification-framework',
   'truth-quality-dimensions',
 ].map((packKey) => ({
-  knowledgeLayer: 'VALIDATION',
-  requirement: 'REQUIRED',
-  packType: 'TRUTH_CERTIFICATION',
-  packKey,
+  relationshipType: KNOWLEDGE_PACK_RELATIONSHIP_TYPES.REQUIRED_AT_RUNTIME,
+  targetPackType: 'TRUTH_CERTIFICATION',
+  targetPackKey: packKey,
+  requiredAt: KNOWLEDGE_PACK_RELATIONSHIP_TIMINGS.RUNTIME,
+  cardinality: KNOWLEDGE_PACK_RELATIONSHIP_CARDINALITIES.ONE,
+  versionConstraint: { exactVersion: SEMANTIC_VERSION },
 }))
 
 export const V1_KNOWLEDGE_ASSET_DEFINITIONS = Object.freeze([
@@ -104,6 +149,19 @@ export const V1_KNOWLEDGE_ASSET_DEFINITIONS = Object.freeze([
   },
   {
     packType: 'OUTPUT_TYPE_DEFINITION',
+    packKey: 'commercial-strategy-decision-paper',
+    label: 'Commercial Strategy and Decision Paper',
+    description: 'Governed Outcome Studio output definition for commercial strategy and decision papers.',
+    purposeCategory: 'OUTPUT',
+    knowledgeLayer: 'OUTPUT_TYPE',
+    capabilityKey: 'commercial-strategy-decision-paper',
+    knowledgeAssetId: 'QA-SS007-OUTPUT-TYPE-COMMERCIAL-STRATEGY-DECISION-PAPER',
+    executionMode: KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT,
+    filename: 'commercial-strategy-decision-paper.md',
+    dependencyReferences: commercialStrategyDecisionPaperDependencies,
+  },
+  {
+    packType: 'OUTPUT_TYPE_DEFINITION',
     packKey: 'board-summary',
     label: 'Board Summary',
     description: 'Governed Outcome Studio output definition for board-level summaries.',
@@ -124,6 +182,32 @@ export const V1_KNOWLEDGE_ASSET_DEFINITIONS = Object.freeze([
     capabilityKey: 'commercial-assessment-style',
     executionMode: KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT,
     filename: 'commercial-assessment-style.md',
+    dependencyReferences: [],
+  },
+  {
+    packType: 'OUTPUT_SCHEMA',
+    packKey: 'commercial-strategy-decision-paper-schema',
+    label: 'Commercial Strategy and Decision Paper Schema',
+    description: 'Governed structure for commercial strategy and decision papers.',
+    purposeCategory: 'OUTPUT',
+    knowledgeLayer: 'OUTPUT_SCHEMA',
+    capabilityKey: 'commercial-strategy-decision-paper-schema',
+    knowledgeAssetId: 'QA-SS007-OUTPUT-SCHEMA-COMMERCIAL-STRATEGY-DECISION-PAPER',
+    executionMode: KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT,
+    filename: 'commercial-strategy-decision-paper-schema.md',
+    dependencyReferences: [],
+  },
+  {
+    packType: 'STYLE',
+    packKey: 'commercial-strategy-decision-paper-style',
+    label: 'Commercial Strategy and Decision Paper Style',
+    description: 'Governed communication style for evidence-led commercial strategy and decision papers.',
+    purposeCategory: 'STYLE',
+    knowledgeLayer: 'STYLE',
+    capabilityKey: 'commercial-strategy-decision-paper-style',
+    knowledgeAssetId: 'QA-SS007-STYLE-COMMERCIAL-STRATEGY-DECISION-PAPER',
+    executionMode: KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT,
+    filename: 'commercial-strategy-decision-paper-style.md',
     dependencyReferences: [],
   },
   {
@@ -151,6 +235,16 @@ const createScriptError = (code, message, details = {}) => {
   error.code = code
   error.details = details
   return error
+}
+
+const assertMutationResult = ({ result, operation }) => {
+  if (!result || Number(result.matchedCount) !== 1) {
+    throw createScriptError('V1_ASSET_MUTATION_NOT_MATCHED', `Mutation did not match ${operation}.`, {
+      operation,
+      matchedCount: Number(result?.matchedCount || 0),
+      modifiedCount: Number(result?.modifiedCount || 0),
+    })
+  }
 }
 
 export const loadV1KnowledgeAssets = async (
@@ -197,9 +291,11 @@ const governanceMatches = (row, asset, includeDependencies) => {
   if (!row) return false
   const baseMatches = normalizeToken(row.knowledgeLayer) === asset.knowledgeLayer
     && normalizeLowerKey(row.capabilityKey) === normalizeLowerKey(asset.capabilityKey)
+    && (!asset.knowledgeAssetId || normalizeToken(row.knowledgeAssetId) === asset.knowledgeAssetId)
     && JSON.stringify([...(row.workspaceCompatibility || [])].sort()) === JSON.stringify(['OUTCOME'])
   if (!baseMatches || !includeDependencies) return baseMatches
-  return JSON.stringify(row.dependencyReferences || []) === JSON.stringify(asset.dependencyReferences)
+  return buildKnowledgePackRelationshipChecksum(row.dependencyReferences || [])
+    === buildKnowledgePackRelationshipChecksum(asset.dependencyReferences)
 }
 
 export const planV1Asset = ({ asset, state }) => {
@@ -210,7 +306,7 @@ export const planV1Asset = ({ asset, state }) => {
     return { blocker: 'SOURCE_CONTENT_DRIFT' }
   }
   if (!governanceMatches(pack, asset, false) || !governanceMatches(version, asset, true)) {
-    return { blocker: 'GOVERNANCE_METADATA_DRIFT' }
+    return { action: 'UPDATE_GOVERNANCE_METADATA' }
   }
 
   const status = normalizeToken(version.status)
@@ -225,7 +321,7 @@ export const planV1Asset = ({ asset, state }) => {
   if (status === OUTCOME_KNOWLEDGE_PACK_STATUSES.ACTIVE) {
     if (activations.length !== 1) return { blocker: 'ACTIVE_ACTIVATION_CARDINALITY_INVALID' }
     if (!governanceMatches(activations[0], asset, true)) {
-      return { blocker: 'ACTIVATION_GOVERNANCE_DRIFT' }
+      return { action: 'UPDATE_GOVERNANCE_METADATA' }
     }
     return { complete: true }
   }
@@ -265,7 +361,7 @@ export const assertV1AssetWriteEnvironment = ({ databaseName, nodeEnv }) => {
   }
 }
 
-const buildImportBody = (asset) => ({
+export const buildImportBody = (asset) => ({
   packType: asset.packType,
   packKey: asset.packKey,
   label: asset.label,
@@ -273,6 +369,7 @@ const buildImportBody = (asset) => ({
   purposeCategory: asset.purposeCategory,
   knowledgeLayer: asset.knowledgeLayer,
   ...(asset.capabilityKey ? { capabilityKey: asset.capabilityKey } : {}),
+  ...(asset.knowledgeAssetId ? { knowledgeAssetId: asset.knowledgeAssetId } : {}),
   workspaceCompatibility: ['OUTCOME'],
   dependencyReferences: asset.dependencyReferences,
   semanticVersion: SEMANTIC_VERSION,
@@ -290,10 +387,67 @@ const buildImportBody = (asset) => ({
   extractedText: asset.extractedText,
 })
 
-const executeAssetAction = async ({ action, asset, services }) => {
+const buildPackGovernanceSet = (asset) => ({
+  purposeCategory: asset.purposeCategory,
+  knowledgeLayer: asset.knowledgeLayer,
+  ...(asset.capabilityKey ? { capabilityKey: asset.capabilityKey } : {}),
+  ...(asset.knowledgeAssetId ? { knowledgeAssetId: asset.knowledgeAssetId } : {}),
+  workspaceCompatibility: ['OUTCOME'],
+  executionMode: asset.executionMode,
+})
+
+const buildVersionGovernanceSet = (asset) => ({
+  ...buildPackGovernanceSet(asset),
+  dependencyReferences: asset.dependencyReferences,
+  relationshipChecksum: buildKnowledgePackRelationshipChecksum(asset.dependencyReferences),
+})
+
+const executeGovernanceMetadataUpdate = async ({ asset, models }) => {
+  const state = await resolveAssetState(asset, models)
+  const plan = planV1Asset({ asset, state })
+  if (plan.action !== 'UPDATE_GOVERNANCE_METADATA') {
+    throw createScriptError(
+      'V1_ASSET_METADATA_UPDATE_UNSUPPORTED',
+      `Cannot update metadata for ${asset.packKey}: expected UPDATE_GOVERNANCE_METADATA.`,
+      { packKey: asset.packKey, plan },
+    )
+  }
+  const packUpdate = await models.KnowledgePack.updateOne(
+    { packId: asset.packId },
+    { $set: buildPackGovernanceSet(asset) },
+    { runValidators: true },
+  )
+  assertMutationResult({ result: packUpdate, operation: `KnowledgePack:${asset.packId}` })
+
+  const versionUpdate = await models.KnowledgePackVersion.updateOne(
+    { versionId: asset.versionId, contentHash: asset.expectedContentHash },
+    { $set: buildVersionGovernanceSet(asset) },
+    { runValidators: true },
+  )
+  assertMutationResult({ result: versionUpdate, operation: `KnowledgePackVersion:${asset.versionId}` })
+
+  if (state.activations.length === 1) {
+    const activation = state.activations[0]
+    const activationUpdate = await models.KnowledgePackActivation.updateOne(
+      { activationId: activation.activationId, contentHash: asset.expectedContentHash },
+      { $set: buildVersionGovernanceSet(asset) },
+      { runValidators: true },
+    )
+    assertMutationResult({
+      result: activationUpdate,
+      operation: `KnowledgePackActivation:${activation.activationId}`,
+    })
+  }
+}
+
+const executeAssetAction = async ({ action, asset, models, services }) => {
   const common = { packId: asset.packId, versionId: asset.versionId, actorUserId: SYSTEM_ACTOR_ID }
   if (action === 'IMPORT') {
     await services.importDraft({ body: buildImportBody(asset), actorUserId: SYSTEM_ACTOR_ID })
+    return
+  }
+  if (action === 'UPDATE_GOVERNANCE_METADATA') {
+    await executeGovernanceMetadataUpdate({ asset, models })
     return
   }
   if (action === 'VALIDATE') {
@@ -326,7 +480,7 @@ export const convergeV1KnowledgeAssets = async ({ assets, models, services }) =>
       }
       if (plan.complete) break
       actions.push({ packKey: asset.packKey, action: plan.action })
-      await executeAssetAction({ action: plan.action, asset, services })
+      await executeAssetAction({ action: plan.action, asset, models, services })
       if (step === 5) {
         throw createScriptError('V1_ASSET_CONVERGENCE_LIMIT', `Convergence did not complete for ${asset.packKey}.`)
       }

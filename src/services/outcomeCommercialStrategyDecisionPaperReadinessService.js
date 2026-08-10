@@ -10,6 +10,7 @@ import {
   COMMERCIAL_STRATEGY_DECISION_PAPER_OUTPUT_TYPE_KEY,
   COMMERCIAL_STRATEGY_DECISION_PAPER_READINESS_STATUSES,
 } from '../constants/outcomeCommercialStrategyDecisionPaper.js'
+import { isSelectableResolverPack } from '../utils/knowledgePackPredicates.js'
 
 const lower = (value) => String(value || '').trim().toLowerCase()
 const upper = (value) => String(value || '').trim().toUpperCase()
@@ -34,7 +35,7 @@ const activeOrEligible = (pack = {}) => {
 const selectedPacksFromBinding = (binding = {}) => [
   ...asArray(binding.mandatorySafeguards),
   ...Object.values(binding.selectedByLayer || {}).flatMap(asArray),
-].map(plain)
+].map(plain).filter(isSelectableResolverPack)
 
 const selectedPacksFromCandidate = (candidate = {}) => asArray(candidate?.payload?.resolution?.selectedPacks).map(plain)
 

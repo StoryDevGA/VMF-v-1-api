@@ -270,6 +270,16 @@ const hasWorkspaceCompatibility = (pack, requestedWorkspaceType) => {
 
 const uniqueValues = (values) => [...new Set(values.filter(Boolean))]
 
+const uniqueCandidatesByNodeId = (values = []) => {
+  const byNodeId = new Map()
+  values.forEach((pack) => {
+    if (!pack) return
+    const nodeId = candidateNodeId(pack)
+    if (!byNodeId.has(nodeId)) byNodeId.set(nodeId, pack)
+  })
+  return [...byNodeId.values()]
+}
+
 export const resolveRequestSpecificKnowledgePacks = ({
   mandatorySafeguards = [],
   candidates = [],
@@ -327,6 +337,8 @@ export const resolveRequestSpecificKnowledgePacks = ({
   const mandatoryPool = buildEligiblePool(mandatorySafeguards, { requireWorkspace: false })
   const dynamicPool = buildEligiblePool(candidates, { requireWorkspace: true })
   const allDynamicCandidates = candidates.map(toSafePack)
+  const relationshipCandidatePool = uniqueCandidatesByNodeId([...mandatoryPool, ...dynamicPool])
+  const allRelationshipCandidates = uniqueCandidatesByNodeId([...mandatoryPool, ...allDynamicCandidates])
 
   const addRelationshipFailure = ({
     code,
@@ -546,8 +558,8 @@ export const resolveRequestSpecificKnowledgePacks = ({
 
   const selectRelationshipSet = ({ requester, relationship, selector, requiredBy }) => {
     const optional = relationship.relationshipType === KNOWLEDGE_PACK_RELATIONSHIP_TYPES.OPTIONAL
-    const rawMatches = allDynamicCandidates.filter((candidate) => selectorMatches(candidate, selector))
-    const activeMatches = dynamicPool.filter((candidate) => selectorMatches(candidate, selector))
+    const rawMatches = allRelationshipCandidates.filter((candidate) => selectorMatches(candidate, selector))
+    const activeMatches = relationshipCandidatePool.filter((candidate) => selectorMatches(candidate, selector))
     const versionMatches = activeMatches.filter((candidate) => (
       semanticVersionSatisfies(candidate.semanticVersion, relationship.versionConstraint)
     ))

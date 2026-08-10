@@ -86,6 +86,14 @@ const requiredDependency = (knowledgeLayer, capabilityKey) => ({
   cardinality: 'ONE',
 })
 
+const requiredPackDependency = (packType, packKey) => ({
+  relationshipType: 'REQUIRED_AT_RUNTIME',
+  targetPackType: packType,
+  targetPackKey: packKey,
+  requiredAt: 'RUNTIME',
+  cardinality: 'ONE',
+})
+
 const compatibleSchemaRequirement = (versionConstraint) => ({
   relationshipType: 'REQUIRES_COMPATIBLE_PACK',
   targetPackType: 'OUTPUT_SCHEMA',
@@ -219,6 +227,36 @@ describe('resolveRequestSpecificKnowledgePacks', () => {
       requiredAt: 'RUNTIME',
       cardinality: 'ONE',
     }))
+  })
+
+  test('resolves output dependencies that target mandatory safeguard identities', () => {
+    const outputDependencies = [
+      requiredDependency('OUTPUT_SCHEMA', 'board-summary-schema'),
+      requiredDependency('STYLE', 'executive'),
+      requiredPackDependency('ARL', 'adaptive-reasoning-layer'),
+      requiredPackDependency('RL', 'rendering-layer'),
+    ]
+
+    const result = resolve({ candidates: makeOutputCandidates({ outputDependencies }) })
+
+    expect(result.status).toBe('READY')
+    expect(result.relationshipFailures).toEqual([])
+    expect(result.selectedByLayer.REASONING).toEqual([
+      expect.objectContaining({ packType: 'ARL', packKey: 'adaptive-reasoning-layer' }),
+    ])
+    expect(result.selectedByLayer.COMMUNICATION_PATTERN).toEqual([
+      expect.objectContaining({ packType: 'RL', packKey: 'rendering-layer' }),
+    ])
+    expect(result.dependencyGraph.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        to: 'kpa-arl-adaptive-reasoning-layer',
+        selector: { knowledgeAssetId: 'QA-ADAPTIVE-REASONING-LAYER' },
+      }),
+      expect.objectContaining({
+        to: 'kpa-rl-rendering-layer',
+        selector: { knowledgeAssetId: 'QA-RENDERING-LAYER' },
+      }),
+    ]))
   })
 
   test('blocks when a selected mandatory safeguard lacks governed relationship metadata', () => {

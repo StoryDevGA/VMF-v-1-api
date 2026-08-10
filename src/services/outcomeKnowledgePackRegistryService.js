@@ -1667,6 +1667,7 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
       ...requestResolution.postValidationPacks,
       ...requestResolution.systemOnlyPacks,
     ])
+    const selectedActivationIds = new Set(selectedPacks.map((pack) => normalizeText(pack.activationId)))
     const providerContextPacks = requestResolution.providerContextPacks.filter(
       (pack) => !OUTCOME_STUDIO_REQUIRED_PACKS
         .some((requiredPack) => buildRequiredPackKey(requiredPack) === buildRequiredPackKey(pack)),
@@ -1699,7 +1700,8 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
       systemOnlyPacks: requestResolution.systemOnlyPacks,
       blockedPacks: [
         ...versionEvidenceExclusions,
-        ...additionalPacks.blockedPacks,
+        ...additionalPacks.blockedPacks.filter((pack) =>
+          !selectedActivationIds.has(normalizeText(pack.activationId))),
       ],
       sourceBundle: buildOutcomeKnowledgePackSourceBundle(),
       selectedByLayer: requestResolution.selectedByLayer,
@@ -1720,6 +1722,8 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
         optionalCount: providerContextPacks.length,
         validationCount: validationPacks.length,
         blockedCount: versionEvidenceExclusions.length
+          + additionalPacks.blockedPacks.filter((pack) =>
+            !selectedActivationIds.has(normalizeText(pack.activationId))).length
           + requestResolution.missingDependencies.length
           + requestResolution.relationshipFailures.length
           + requestResolution.ambiguousCandidates.length,
