@@ -287,6 +287,57 @@ describe('Outcome Studio provider-safe projection', () => {
     ]))
   })
 
+  test('admits CSDP-sized governed selections without exposing pack identifiers', async () => {
+    const knowledgeLayers = [
+      'FOUNDATION',
+      'DOMAIN',
+      'SOLUTION',
+      'ORGANISATION',
+      'RUNTIME',
+      'SYSTEM',
+      'REASONING',
+      'FRAMEWORK',
+      'AUDIENCE',
+      'INDUSTRY',
+      'OUTPUT_TYPE',
+      'OUTPUT_SCHEMA',
+      'COMMUNICATION_PATTERN',
+      'STYLE',
+      'CHANNEL',
+      'BRAND',
+      'LANGUAGE',
+      'VISUAL_SYSTEM',
+      'VALIDATION',
+    ]
+    const executionModes = ['PROVIDER_CONTEXT', 'PRE_VALIDATION', 'POST_VALIDATION']
+    const versions = Array.from({ length: 33 }, (_, index) => ({
+      versionId: `kpv-csdp-selection-${index + 1}`,
+      content: `${governedContent}\n# General Guidance\nCSDP selected guidance item ${index + 1}.`,
+    }))
+    const knowledgeSelection = versions.map((version, index) => ({
+      versionId: version.versionId,
+      knowledgeLayer: knowledgeLayers[index % knowledgeLayers.length],
+      executionMode: executionModes[index % executionModes.length],
+    }))
+    mockVersions(versions)
+
+    const result = await buildOutcomeStudioProviderSafeContext({
+      providerDescriptor: descriptor,
+      safeRequest: safeRequest(),
+      truthSource: { acceptedTruth: [] },
+      knowledgeSelection,
+    })
+
+    expect(result.contractVersion).toBe('OUTCOME_STUDIO_PROVIDER_SAFE_CONTEXT_V1')
+    expect(result.guidance.validationCriteria.length).toBeGreaterThan(0)
+    expect(result.guidance.outputSchema.length).toBeGreaterThan(0)
+    expect(result.guidance.styleGuidance.length).toBeGreaterThan(0)
+    expect(
+      result.guidance.businessInstructions.length + result.guidance.reasoningGuidance.length,
+    ).toBeGreaterThan(0)
+    expect(JSON.stringify(result)).not.toMatch(/kpv-csdp-selection|versionId|contentHash|manifest/i)
+  })
+
   test('admits ordinary Basic certification prose from selected Knowledge Pack content', async () => {
     mockVersions([{
       versionId: 'kpv-reasoning-v1',

@@ -4,7 +4,7 @@ import { OUTCOME_STUDIO_PROVIDER_SAFE_CONTEXT_POLICY } from '../constants/outcom
 import logger from '../config/logger.js'
 
 const SAFE_CONTEXT_LIMIT = 18000
-const MAX_SELECTED_VERSIONS = 24
+const MAX_SELECTED_VERSIONS = 48
 const MAX_PACK_CONTENT_LENGTH = 200000
 const MAX_PACK_NON_EMPTY_LINES = 2500
 const MAX_GUIDANCE_ENTRIES = 12
