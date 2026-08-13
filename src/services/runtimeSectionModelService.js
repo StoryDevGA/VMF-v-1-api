@@ -4,6 +4,7 @@ import {
   isGovernedDiscoveryEvidenceFact,
   normalizeDiscoveryEvidenceObjects,
 } from './discoveryIntelligenceService.js'
+import { buildSectionEvidenceProjection } from './sectionEvidenceProjectionService.js'
 import {
   SECTION_COMPLETENESS_BINDING,
 } from './sectionValidationExecutorService.js'
@@ -803,7 +804,6 @@ const extractEvidenceThemes = ({
   const notes = normalizeEvidenceString(seedProfile.notes)
   const marketRegion = normalizeEvidenceString(seedProfile.marketRegion)
   const evidenceText = [
-    normalizeEvidenceString(seedProfile.acceptedEvidenceText),
     ...acceptedEvidenceObjects.map((evidenceObject) => normalizeEvidenceString(evidenceObject.extractedFact)),
     normalizeEvidenceString(seedProfile.companyName),
     normalizeEvidenceString(seedProfile.companyWebsite),
@@ -2187,6 +2187,12 @@ const buildSectionIntelligenceParts = ({
     || titleFromSectionKey(section?.label || sectionKey || runtimePath)
   const category = getSectionCategory({ label, sectionKey })
   const acceptedEvidenceObjects = getAcceptedDiscoveryEvidenceObjects(evidencePack)
+  const rawEvidenceProjection = buildSectionEvidenceProjection({
+    evidenceObjects: acceptedEvidenceObjects,
+    maxItems: 10,
+    sectionKey,
+  })
+  const { selectedEvidenceObjects: projectedAcceptedEvidenceObjects, ...evidenceProjection } = rawEvidenceProjection
   const acceptedSectionEvidenceObjects = getAcceptedSectionEvidenceObjects({
     frameworkState,
     runtimePath,
@@ -2194,7 +2200,14 @@ const buildSectionIntelligenceParts = ({
   })
   const seedProfile = getDiscoverySeedProfile(evidencePack)
   const scopedView = getScopedEvidenceView({ evidencePack, runtimePath, sectionKey })
-  const scopedEvidenceSummary = normalizeScopedEvidenceSummary(scopedView?.summary)
+  const projectedScopedEvidenceSummary = projectedAcceptedEvidenceObjects
+    .map((evidenceObject) => normalizeScopedEvidenceSummary(evidenceObject.extractedFact))
+    .filter(Boolean)
+    .join(' ')
+  const scopedEvidenceSummary = projectedScopedEvidenceSummary
+    || (evidenceProjection.knownSection
+      ? ''
+      : normalizeScopedEvidenceSummary(scopedView?.summary))
   const sectionEvidenceSummary = acceptedSectionEvidenceObjects
     .map((evidenceObject) => normalizeEvidenceString(evidenceObject.extractedFact))
     .filter(Boolean)
@@ -2206,7 +2219,7 @@ const buildSectionIntelligenceParts = ({
     frameworkState,
   })
   const themes = extractEvidenceThemes({
-    acceptedEvidenceObjects,
+    acceptedEvidenceObjects: projectedAcceptedEvidenceObjects,
     category,
     dependencyTruths,
     inputSummary,
@@ -2231,7 +2244,7 @@ const buildSectionIntelligenceParts = ({
     themes,
   })
   const supportingEvidence = buildSupportingEvidence({
-    acceptedEvidenceObjects,
+    acceptedEvidenceObjects: projectedAcceptedEvidenceObjects,
     acceptedSectionEvidenceObjects,
     dependencyTruths,
     inputSummary,
@@ -2243,14 +2256,14 @@ const buildSectionIntelligenceParts = ({
     : []
   const profileEvidenceCandidates = interpretationProfile
     ? buildProfileEvidenceCandidates({
-        acceptedEvidenceObjects,
-        acceptedSectionEvidenceObjects,
-        dependencyTruths,
-        inputSummary,
-        profileQualifications,
-        scopedEvidenceSummary,
-        seedProfile,
-      })
+      acceptedEvidenceObjects: projectedAcceptedEvidenceObjects,
+      acceptedSectionEvidenceObjects,
+      dependencyTruths,
+      inputSummary,
+      profileQualifications,
+      scopedEvidenceSummary,
+      seedProfile,
+    })
     : []
   const profileFacts = interpretationProfile
     ? classifyProfileEvidenceCandidates(profileEvidenceCandidates)
@@ -2274,6 +2287,8 @@ const buildSectionIntelligenceParts = ({
   const evidenceHash = hashSectionInput({
     accepted: discoveryAccepted,
     acceptedEvidenceObjectIds: acceptedEvidenceObjects.map((evidenceObject) => evidenceObject.evidenceObjectId),
+    projectedAcceptedEvidenceObjectIds: projectedAcceptedEvidenceObjects
+      .map((evidenceObject) => evidenceObject.evidenceObjectId),
     acceptedSectionEvidenceObjectIds: acceptedSectionEvidenceObjects.map((evidenceObject) => evidenceObject.evidenceObjectId),
     scopedEvidenceSummary,
     sectionEvidenceHash,
@@ -2308,6 +2323,7 @@ const buildSectionIntelligenceParts = ({
     discoveryAccepted,
     evidenceHash,
     evidencePack,
+    evidenceProjection,
     enrichmentVersion,
     generatedAt,
     generationBoundaries,
@@ -2367,6 +2383,7 @@ const buildIntelligenceFromParts = ({
       sourceRefs: parts.sourceRefs,
       evidenceHash: parts.evidenceHash,
       sectionEvidenceHash: parts.sectionEvidenceHash,
+      projection: parts.evidenceProjection,
     },
     derivedSignals: confidenceSignals.map((description, index) => ({
       signalKey: `signal_${index + 1}`,
@@ -2530,6 +2547,7 @@ export const buildEnrichedGeneratedSection = ({
       : 'Evidence not sufficient to derive this section safely.',
     sections,
     supportingEvidenceRefs: parts.supportingEvidence.map((item) => item.refKey),
+    evidenceProjection: parts.evidenceProjection,
     generationBoundaries: parts.generationBoundaries.map((boundary) => boundary.message),
     generatedAt,
     generatedBy: actorUserId ? String(actorUserId) : '',

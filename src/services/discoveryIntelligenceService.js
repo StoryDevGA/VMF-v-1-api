@@ -7,6 +7,7 @@ import { promisify } from 'node:util'
 import zlib from 'node:zlib'
 import * as pdfjs from 'pdfjs-dist/build/pdf.mjs'
 import { DISCOVERY_ACQUISITION_PROFILES } from '../constants/discoveryAcquisitionProfiles.js'
+import { buildSectionEvidenceProjection } from './sectionEvidenceProjectionService.js'
 
 const moduleRequire = createRequire(import.meta.url)
 const { createCanvas } = moduleRequire('@napi-rs/canvas')
@@ -3089,24 +3090,53 @@ export const buildAcceptedDiscoveryScopedViews = ({
 
   return Object.keys(scopedViews).reduce((views, sectionKey) => {
     const previousScopedView = scopedViews[sectionKey]
+    const projection = buildSectionEvidenceProjection({
+      evidenceObjects: acceptedEvidenceObjects,
+      maxItems: null,
+      sectionKey,
+    })
+    const {
+      selectedEvidenceObjects,
+      ...projectionReceipt
+    } = projection
+    const scopedEvidenceObjects = projection.knownSection
+      ? selectedEvidenceObjects
+      : acceptedEvidenceObjects
     views[sectionKey] = {
       ...(isPlainObject(previousScopedView) ? previousScopedView : {}),
       source: 'DISCOVERY_EVIDENCE_OBJECTS',
-      summary,
+      summary: scopedEvidenceObjects.length > 0
+        ? scopedEvidenceObjects
+          .slice(0, 6)
+          .map((evidenceObject) => sanitizeFact(evidenceObject.extractedFact))
+          .filter(Boolean)
+          .join(' ')
+        : projection.knownSection ? '' : summary,
       reviewStatus: 'ACCEPTED_ONLY',
       evidenceKeys: ['evidenceObjects.accepted'],
-      sourceRefs,
-      evidenceObjectIds,
-      evidenceFacts,
+      sourceRefs: Array.from(new Set(scopedEvidenceObjects
+        .map((evidenceObject) => String(evidenceObject.sourceId || '').trim())
+        .filter(Boolean))),
+      evidenceObjectIds: scopedEvidenceObjects
+        .map((evidenceObject) => String(evidenceObject.evidenceObjectId || '').trim())
+        .filter(Boolean),
+      evidenceFacts: scopedEvidenceObjects.map((evidenceObject) => ({
+        evidenceObjectId: String(evidenceObject.evidenceObjectId || '').trim(),
+        sourceId: String(evidenceObject.sourceId || '').trim(),
+        category: String(evidenceObject.category || '').trim(),
+        coverageArea: String(evidenceObject.coverageArea || '').trim(),
+        extractedFact: sanitizeFact(evidenceObject.extractedFact),
+      })).filter((fact) => fact.evidenceObjectId && fact.extractedFact),
       refreshedAt,
       acquisitionProfile,
       evidenceHash: `sha256:${hashValue({
         sectionKey,
         inputHash,
-        sourceRefs,
-        evidenceObjectIds,
+        sourceRefs: scopedEvidenceObjects.map((evidenceObject) => evidenceObject.sourceId),
+        evidenceObjectIds: scopedEvidenceObjects.map((evidenceObject) => evidenceObject.evidenceObjectId),
         acquisitionProfile,
       })}`,
+      evidenceProjection: projectionReceipt,
     }
     return views
   }, {})

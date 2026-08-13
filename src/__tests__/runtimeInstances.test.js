@@ -24114,6 +24114,132 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     })
   })
 
+  test('rich accepted evidence produces section-specific refs and projection receipts across all six VMF sections', () => {
+    const richEvidence = [
+      makeDiscoveryEvidenceObject({
+        evidenceObjectId: 'rich-company-context',
+        category: 'Company',
+        coverageArea: 'Company',
+        extractedFact: 'Company context identifies the operating business and market setting.',
+        reviewStatus: 'ACCEPTED',
+      }),
+      makeDiscoveryEvidenceObject({
+        evidenceObjectId: 'rich-product-context',
+        category: 'Products',
+        coverageArea: 'Products',
+        extractedFact: 'The target product is an AI observability platform for enterprise teams.',
+        reviewStatus: 'ACCEPTED',
+      }),
+      makeDiscoveryEvidenceObject({
+        evidenceObjectId: 'rich-objective-context',
+        category: 'Value Drivers',
+        coverageArea: 'Economics',
+        extractedFact: 'The strategic objective is to reduce proposal cycle time by a measured target.',
+        reviewStatus: 'ACCEPTED',
+      }),
+      makeDiscoveryEvidenceObject({
+        evidenceObjectId: 'rich-current-context',
+        category: 'Technology',
+        coverageArea: 'Technology',
+        extractedFact: 'The current architecture has a manual telemetry integration bottleneck.',
+        reviewStatus: 'ACCEPTED',
+      }),
+      makeDiscoveryEvidenceObject({
+        evidenceObjectId: 'rich-stakeholder-context',
+        category: 'Proof',
+        coverageArea: 'Proof',
+        extractedFact: 'The enterprise buyer and accountable sponsor are the stakeholder roles to confirm.',
+        reviewStatus: 'ACCEPTED',
+      }),
+      makeDiscoveryEvidenceObject({
+        evidenceObjectId: 'rich-evidence-context',
+        category: 'Proof',
+        coverageArea: 'Proof',
+        extractedFact: 'The evidence record identifies the source and production deployment observation.',
+        reviewStatus: 'ACCEPTED',
+      }),
+      makeDiscoveryEvidenceObject({
+        evidenceObjectId: 'rich-output-context',
+        category: 'Value Drivers',
+        coverageArea: 'Decision Context',
+        extractedFact: 'The required output is a customer-facing brief with an audience, format and approval channel.',
+        reviewStatus: 'ACCEPTED',
+      }),
+    ]
+    const frameworkPackage = makeRendererFrameworkPackage({
+      packageKey: 'vmf-standard-3-1-3',
+      version: '3.1.3',
+      sections: currentSectionProfileFixtures.map(makeCurrentProfileSection),
+    })
+    const frameworkState = {
+      lifecycle: { stage: 'DRAFT' },
+      evidence_pack: makeReadyDiscoveryEvidencePack({
+        accepted: true,
+        evidenceObjects: richEvidence,
+        inputs: {
+          companyName: 'Parlon',
+          marketRegion: 'Global',
+          targetOffer: 'AI observability platform',
+          notes: 'The governed runtime keeps source-backed gaps visible.',
+        },
+        state: {
+          status: 'ACCEPTED',
+          inputComplete: true,
+          evidenceReady: true,
+          accepted: true,
+          needsRefresh: false,
+        },
+      }),
+      sections: Object.fromEntries(
+        currentSectionProfileFixtures.map((fixture) => [fixture.sectionKey, '']),
+      ),
+    }
+    const runtimeInstance = makeRuntimeInstanceDocument({
+      packageKey: frameworkPackage.packageKey,
+      packageVersion: frameworkPackage.version,
+      framework_state: frameworkState,
+    })
+
+    const generatedRows = currentSectionProfileFixtures.map((fixture) => {
+      const section = makeCurrentProfileSection(fixture)
+      const { generated, intelligence } = buildEnrichedGeneratedSection({
+        actionKey: 'GENERATE_SECTION',
+        actorUserId: CUSTOMER_ADMIN_ID,
+        dependencySectionKeys: [],
+        frameworkPackage,
+        frameworkState,
+        input: '',
+        runtimeInstance,
+        section,
+        sectionExecutionContract: makeCurrentProfileExecutionContract(fixture),
+        generatedAt: '2026-08-13T12:00:00.000Z',
+      })
+      return { fixture, generated, intelligence }
+    })
+
+    expect(new Set(
+      generatedRows.map(({ generated }) => generated.supportingEvidenceRefs.join('|')),
+    ).size).toBe(currentSectionProfileFixtures.length)
+    generatedRows.forEach(({ generated, intelligence }) => {
+      expect(generated.evidenceProjection).toEqual(expect.objectContaining({
+        algorithm: 'SECTION_DOMAIN_KEYWORD_RANKING',
+        knownSection: true,
+        includedCount: expect.any(Number),
+      }))
+      expect(generated.evidenceProjection).not.toHaveProperty('selectedEvidenceObjects')
+      expect(intelligence.scopedEvidence.projection).toEqual(generated.evidenceProjection)
+    })
+    expect(generatedRows.find(({ fixture }) => fixture.sectionKey === 'strategic_objectives')
+      .generated.evidenceProjection.included.map(({ evidenceObjectId }) => evidenceObjectId))
+      .toContain('rich-objective-context')
+    expect(generatedRows.find(({ fixture }) => fixture.sectionKey === 'current_state_assessment')
+      .generated.evidenceProjection.included.map(({ evidenceObjectId }) => evidenceObjectId))
+      .toContain('rich-current-context')
+    expect(generatedRows.find(({ fixture }) => fixture.sectionKey === 'output_requirements')
+      .generated.evidenceProjection.included.map(({ evidenceObjectId }) => evidenceObjectId))
+      .toContain('rich-output-context')
+  })
+
   test('released hyphenated package section keys resolve all six current interpretation profiles', () => {
     const releasedRows = currentSectionProfileFixtures.map((fixture) => {
       const releasedSectionKey = fixture.sectionKey.replace(/_/g, '-')
@@ -25505,7 +25631,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     expect(supportingEvidence.map((item) => item.refKey)).toEqual(
       expect.arrayContaining([
         'section-evidence-1',
-        'discovery-evidence-1',
+        'discovery-evidence-10',
         'accepted_customer_context',
         'section_input',
         'scoped_view',
@@ -25516,7 +25642,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       ]),
     )
     expect(supportingEvidence.map((item) => item.refKey)).not.toContain(
-      'discovery-evidence-10',
+      'discovery-evidence-1',
     )
     expect(generated.content).toContain('30 percent reduction by Q3')
   })
