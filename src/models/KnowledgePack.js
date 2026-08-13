@@ -17,6 +17,7 @@ import {
 import { containsForbiddenProviderContextKey } from '../utils/knowledgePackSafety.js'
 import {
   knowledgePackCapabilityKeyField,
+  knowledgePackBoundaryField,
   knowledgePackKnowledgeAssetIdField,
   knowledgePackLayerField,
   knowledgePackWorkspaceCompatibilityField,
@@ -128,6 +129,7 @@ const knowledgePackSchema = new mongoose.Schema(
       enum: Object.values(KNOWLEDGE_PACK_EXECUTION_MODES),
       default: KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT,
     },
+    boundary: knowledgePackBoundaryField,
     visibility: {
       type: String,
       required: true,

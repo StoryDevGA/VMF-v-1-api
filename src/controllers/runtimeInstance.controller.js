@@ -58,12 +58,14 @@ import {
   getRuntimeOutcomeAsset as getRuntimeOutcomeAssetRecord,
   getRuntimeOutcomeAssetPreview as getRuntimeOutcomeAssetPreviewRecord,
   getRuntimeOutcomeAssetVersion as getRuntimeOutcomeAssetVersionRecord,
+  getRuntimeOutcomeDraftCompare as getRuntimeOutcomeDraftCompareRecord,
   getRuntimeOutcomeDraftPreview as getRuntimeOutcomeDraftPreviewRecord,
   getRuntimeOutcomeSession as getRuntimeOutcomeSessionRecord,
   getRuntimeOutcomeStudio as getRuntimeOutcomeStudioRecord,
   getRuntimeOutcomeStudioReadiness as getRuntimeOutcomeStudioReadinessRecord,
   listRuntimeOutcomeSessionAssets as listRuntimeOutcomeSessionAssetsRecord,
   publishRuntimeOutcomeAsset as publishRuntimeOutcomeAssetRecord,
+  reviseRuntimeOutcomeAsset as reviseRuntimeOutcomeAssetRecord,
   updateRuntimeOutcomeSessionFromLatestTruth as updateRuntimeOutcomeSessionFromLatestTruthRecord,
 } from '../services/outcomeStudioService.js'
 import { isOutcomeCustomerLanguageSafe } from '../services/outcomeCustomerLanguageService.js'
@@ -80,6 +82,7 @@ const buildRuntimeInstanceErrorResponse = (req, err) => ({
 const OUTCOME_CUSTOMER_ERROR_STATE_KEYS = Object.freeze([
   'actionAvailable',
   'approvalAvailable',
+  'compareAvailable',
   'draftCreated',
   'exportAvailable',
   'previewAvailable',
@@ -99,8 +102,43 @@ const OUTCOME_CUSTOMER_ERROR_CODES = new Set([
   'VALIDATION_FAILED',
 ])
 
+const OUTCOME_PROVIDER_PUBLIC_FAILURES = Object.freeze({
+  LIVE_TEST_PROVIDER_CUSTOMER_LANGUAGE_BLOCKED: Object.freeze({
+    code: 'CUSTOMER_LANGUAGE_BLOCKED',
+    message: 'Outcome Studio blocked the draft because its customer-facing wording did not pass the content-safety language check. No changes were made.',
+  }),
+})
+
+const OUTCOME_PROVIDER_SAFE_CONTEXT_PUBLIC_STAGES = Object.freeze({
+  REQUEST_VALIDATION: 'REQUEST',
+  TRUTH_PROJECTION: 'TRUTH',
+  KNOWLEDGE_SELECTION_VALIDATION: 'KNOWLEDGE_SELECTION',
+  SELECTED_VERSION_LOOKUP: 'KNOWLEDGE_VERSION',
+  GUIDANCE_PROJECTION: 'GUIDANCE',
+  REQUIRED_GUIDANCE_ADMISSION: 'GUIDANCE',
+  CONTEXT_VALIDATION: 'SAFE_CONTEXT',
+})
+
+const OUTCOME_PROVIDER_SAFE_CONTEXT_PUBLIC_CODES = Object.freeze({
+  SAFE_REQUEST_INVALID: 'REQUEST_INVALID',
+  TRUTH_PROJECTION_REJECTED: 'TRUTH_UNUSABLE',
+  KNOWLEDGE_SELECTION_INVALID: 'KNOWLEDGE_SELECTION_INVALID',
+  SELECTED_VERSION_LOOKUP_FAILED: 'KNOWLEDGE_VERSION_UNAVAILABLE',
+  GUIDANCE_PROJECTION_REJECTED: 'GUIDANCE_NOT_USABLE',
+  REQUIRED_GUIDANCE_MISSING: 'REQUIRED_GUIDANCE_UNAVAILABLE',
+  CONTEXT_VALIDATION_REJECTED: 'SAFE_CONTEXT_VALIDATION_FAILED',
+  PACK_CONTENT_TYPE_INVALID: 'GUIDANCE_CONTENT_REJECTED',
+  PACK_CONTENT_TOO_LARGE: 'GUIDANCE_CONTENT_REJECTED',
+  PACK_CONTENT_TOO_MANY_LINES: 'GUIDANCE_CONTENT_REJECTED',
+  PACK_CONTENT_MALFORMED: 'GUIDANCE_CONTENT_REJECTED',
+  PACK_CONTENT_CONTROL_CHARACTER: 'GUIDANCE_CONTENT_REJECTED',
+  PACK_CONTENT_PII_OR_CREDENTIAL: 'GUIDANCE_CONTENT_REJECTED',
+})
+
 const getOutcomeCustomerErrorCode = (err = {}) => {
   if (OUTCOME_CUSTOMER_ERROR_CODES.has(err.code)) return err.code
+  const providerFailure = OUTCOME_PROVIDER_PUBLIC_FAILURES[err.details?.reason]
+  if (providerFailure) return providerFailure.code
   if ([400, 422].includes(err.status)) return 'INVALID_REQUEST'
   if ([401, 403].includes(err.status)) return 'FORBIDDEN'
   if (err.status === 404) return 'NOT_FOUND'
@@ -109,6 +147,8 @@ const getOutcomeCustomerErrorCode = (err = {}) => {
 }
 
 const getOutcomeCustomerErrorMessage = (err = {}) => {
+  const providerFailure = OUTCOME_PROVIDER_PUBLIC_FAILURES[err.details?.reason]
+  if (providerFailure) return providerFailure.message
   if (Number(err.status) >= 500) {
     return 'Outcome Studio could not complete this action. No changes were made.'
   }
@@ -130,13 +170,23 @@ const getOutcomeCustomerErrorState = (details = {}) => {
   return Object.keys(state).length > 0 ? state : null
 }
 
+const getOutcomeCustomerErrorDiagnostic = (err = {}) => {
+  if (err.code !== 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED') return null
+  const failureStage = OUTCOME_PROVIDER_SAFE_CONTEXT_PUBLIC_STAGES[err.internalFailureStage]
+  const diagnosticCode = OUTCOME_PROVIDER_SAFE_CONTEXT_PUBLIC_CODES[err.internalDiagnosticCode]
+  if (!failureStage || !diagnosticCode) return null
+  return { failureStage, diagnosticCode }
+}
+
 const buildRuntimeOutcomeErrorResponse = (req, err) => {
   const state = getOutcomeCustomerErrorState(err.details)
+  const diagnostic = getOutcomeCustomerErrorDiagnostic(err)
   return {
     error: {
       code: getOutcomeCustomerErrorCode(err),
       message: getOutcomeCustomerErrorMessage(err),
       ...(state ? { state } : {}),
+      ...(diagnostic ? { diagnostic } : {}),
       requestId: req.requestId,
     },
   }
@@ -938,6 +988,27 @@ export const getRuntimeOutcomeDraftPreview = async (req, res, next) => {
   }
 }
 
+export const getRuntimeOutcomeDraftCompare = async (req, res, next) => {
+  try {
+    const outcomeDraftCompare = await getRuntimeOutcomeDraftCompareRecord({
+      draftId: req.params.draftId,
+      scopes: req.scopes,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+      sessionId: req.params.sessionId,
+    })
+
+    return res.status(200).json({
+      data: outcomeDraftCompare,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeOutcomeErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
 export const publishRuntimeOutcomeAsset = async (req, res, next) => {
   try {
     const outcomeAsset = await publishRuntimeOutcomeAssetRecord({
@@ -1069,6 +1140,25 @@ export const approveRuntimeOutcomeDraft = async (req, res, next) => {
       data: approvedOutcomeDraft,
       meta: { requestId: req.requestId, version: 'v1' },
     })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeOutcomeErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const reviseRuntimeOutcomeAsset = async (req, res, next) => {
+  try {
+    const revisedOutcomeAsset = await reviseRuntimeOutcomeAssetRecord({
+      actorUserId: req.context?.userId || req.userId,
+      auditRequest: req,
+      outcomeAssetId: req.params.outcomeAssetId,
+      scopes: req.scopes,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+      sessionId: req.params.sessionId,
+    })
+    return res.status(201).json({ data: revisedOutcomeAsset })
   } catch (err) {
     if (err?.status && err?.code) {
       return res.status(err.status).json(buildRuntimeOutcomeErrorResponse(req, err))

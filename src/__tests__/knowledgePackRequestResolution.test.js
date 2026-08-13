@@ -20,6 +20,7 @@ const makePack = ({
   scopeType = 'GLOBAL',
   scopeKey = 'GLOBAL',
   executionMode = 'PROVIDER_CONTEXT',
+  boundary,
   workspaceCompatibility = ['OUTCOME'],
   dependencyReferences = [],
   activatedAt = '2026-07-14T10:00:00.000Z',
@@ -42,6 +43,7 @@ const makePack = ({
   scopeType,
   scopeKey,
   executionMode,
+  ...(boundary ? { boundary } : {}),
   workspaceCompatibility,
   dependencyReferences,
   relationshipContractVersion: 'SS002_RELATIONSHIP_V1',
@@ -576,6 +578,7 @@ describe('resolveRequestSpecificKnowledgePacks', () => {
       ...candidates[0].dependencyReferences,
       requiredDependency('VALIDATION', 'input-validator'),
       requiredDependency('VALIDATION', 'output-validator'),
+      requiredDependency('FRAMEWORK', 'source-lineage'),
       requiredDependency('FRAMEWORK', 'system-coordinator'),
     ])
     candidates.push(
@@ -592,6 +595,13 @@ describe('resolveRequestSpecificKnowledgePacks', () => {
         knowledgeLayer: 'VALIDATION',
         capabilityKey: 'output-validator',
         executionMode: 'POST_VALIDATION',
+      }),
+      makePack({
+        packType: 'LINEAGE',
+        packKey: 'source-lineage',
+        knowledgeLayer: 'FRAMEWORK',
+        capabilityKey: 'source-lineage',
+        boundary: 'LINEAGE_CERTIFICATION',
       }),
       makePack({
         packType: 'SYSTEM',
@@ -617,12 +627,17 @@ describe('resolveRequestSpecificKnowledgePacks', () => {
     expect(result.postValidationPacks).toContainEqual(expect.objectContaining({
       capabilityKey: 'output-validator',
     }))
+    expect(result.lineageCertificationPacks).toContainEqual(expect.objectContaining({
+      capabilityKey: 'source-lineage',
+      boundary: 'LINEAGE_CERTIFICATION',
+    }))
     expect(result.systemOnlyPacks).toContainEqual(expect.objectContaining({
       capabilityKey: 'system-coordinator',
     }))
     expect(result.providerContextPacks).not.toEqual(expect.arrayContaining([
       expect.objectContaining({ capabilityKey: 'input-validator' }),
       expect.objectContaining({ capabilityKey: 'output-validator' }),
+      expect.objectContaining({ capabilityKey: 'source-lineage' }),
       expect.objectContaining({ capabilityKey: 'system-coordinator' }),
     ]))
   })

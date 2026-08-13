@@ -22,6 +22,7 @@ import {
   getRuntimeOutcomeAsset,
   getRuntimeOutcomeAssetPreview,
   getRuntimeOutcomeAssetVersion,
+  getRuntimeOutcomeDraftCompare,
   getRuntimeOutcomeDraftPreview,
   getRuntimeInstance,
   getRuntimeEvidence,
@@ -47,6 +48,7 @@ import {
   listRuntimeInstances,
   mutateRuntimeState,
   publishRuntimeOutcomeAsset,
+  reviseRuntimeOutcomeAsset,
   publishRuntimeOutputAsset,
   rebuildRuntimeIntelligenceGraph,
   resetRuntimeDiscovery,
@@ -97,6 +99,7 @@ import {
   validateRuntimeOutcomeReadinessGateQuery,
   validateRuntimeOutputRequestParams,
   validateRuntimeOutcomeSessionParams,
+  validateRuntimeOutcomeSessionAssetParams,
   validateRuntimeActionParams,
   validateRuntimeInstanceId,
   validateRuntimeSectionEvidenceParams,
@@ -247,6 +250,11 @@ router.get(
   validateRuntimeOutcomeDraftParams,
   getRuntimeOutcomeDraftPreview,
 )
+router.get(
+  '/:runtimeInstanceId/outcome-studio/sessions/:sessionId/drafts/:draftId/compare',
+  validateRuntimeOutcomeDraftParams,
+  getRuntimeOutcomeDraftCompare,
+)
 router.post(
   '/:runtimeInstanceId/outcome-studio/assets/:outcomeAssetId/publish',
   validateRuntimeOutcomeAssetParams,
@@ -263,6 +271,11 @@ router.post(
   validateRuntimeOutcomeDraftParams,
   validateApproveRuntimeOutcomeDraft,
   approveRuntimeOutcomeDraft,
+)
+router.post(
+  '/:runtimeInstanceId/outcome-studio/sessions/:sessionId/assets/:outcomeAssetId/revise',
+  validateRuntimeOutcomeSessionAssetParams,
+  reviseRuntimeOutcomeAsset,
 )
 router.post(
   '/:runtimeInstanceId/outcome-studio/sessions/:sessionId/drafts/:draftId/discard',

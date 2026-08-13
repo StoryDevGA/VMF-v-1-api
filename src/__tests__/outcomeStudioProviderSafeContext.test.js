@@ -252,6 +252,308 @@ describe('Outcome Studio provider-safe projection', () => {
     expect(assertOutcomeStudioProviderSafeContext(result)).toBe(result)
   })
 
+  test('records exact load, projection, admission, and shared deduplicated attribution without changing provider context', async () => {
+    const versionIds = ['kpv-shared-one', 'kpv-shared-two']
+    mockVersions(versionIds.map((versionId) => ({
+      versionId,
+      content: governedContent,
+      contentHash: contentHash(governedContent),
+    })))
+    const captureExecutionEvidence = jest.fn()
+
+    const result = await buildOutcomeStudioProviderSafeContext({
+      providerDescriptor: descriptor,
+      safeRequest: safeRequest(),
+      truthSource: { acceptedTruth: [] },
+      knowledgeSelection: versionIds.map((versionId) => ({
+        versionId,
+        knowledgeLayer: 'REASONING',
+        executionMode: 'PROVIDER_CONTEXT',
+      })),
+      executionBindings: versionIds.map((versionId) => ({
+        versionId,
+        contentHash: contentHash(governedContent),
+      })),
+      captureExecutionEvidence,
+    })
+
+    expect(Object.keys(result)).toEqual([
+      'contractVersion',
+      'businessRequest',
+      'draftContext',
+      'truthSummaries',
+      'safeguards',
+      'guidance',
+    ])
+    expect(captureExecutionEvidence).toHaveBeenCalledTimes(1)
+    const receipt = captureExecutionEvidence.mock.calls[0][0]
+    expect(receipt.packs).toHaveLength(2)
+    expect(receipt.packs).toEqual(expect.arrayContaining(versionIds.map((versionId) => expect.objectContaining({
+      versionId,
+      contentHash: contentHash(governedContent),
+      sharedContribution: true,
+      safeCandidateEntryCount: 4,
+      projectionDisposition: 'PROJECTED',
+      admissionDisposition: 'ADMITTED',
+      suppliedEntryCount: 4,
+      checks: expect.arrayContaining([
+        expect.objectContaining({ key: 'RESOLUTION_VERIFIED', status: 'PASSED' }),
+        expect.objectContaining({ key: 'VERSION_CONTENT_LOADED', status: 'PASSED' }),
+        expect.objectContaining({ key: 'SAFE_GUIDANCE_PROJECTED', status: 'PASSED' }),
+        expect.objectContaining({ key: 'PROVIDER_CONTEXT_SUPPLIED', status: 'PASSED' }),
+        expect.objectContaining({ key: 'PROVIDER_COMPLETED', status: 'NOT_RECORDED' }),
+      ]),
+    }))))
+    expect(JSON.stringify(result)).not.toMatch(/kpv-shared|contentHash|executionEvidence/i)
+  })
+
+  test('projects at least one safe entry per selected validation pack before filling category capacity', async () => {
+    const validationHeavyContent = [
+      governedContent,
+      ...Array.from({ length: 20 }, (_item, index) => [
+        `# Validation Criteria ${index + 1}`,
+        `Check ${index + 1} must preserve verified business support.`,
+      ].join('\n')),
+    ].join('\n')
+    const laterValidationPacks = Array.from({ length: 6 }, (_item, index) => ({
+      versionId: `kpv-validation-later-${index + 1}`,
+      content: [
+        '# Validation Criteria',
+        `Later validation pack ${index + 1} must contribute one safe check.`,
+      ].join('\n'),
+    }))
+    const versions = [
+      { versionId: 'kpv-validation-heavy', content: validationHeavyContent },
+      ...laterValidationPacks,
+    ].map((version) => ({
+      ...version,
+      contentHash: contentHash(version.content),
+    }))
+    mockVersions(versions)
+    const captureExecutionEvidence = jest.fn()
+
+    const providerVersions = versions.slice(0, 1)
+    mockVersions(providerVersions)
+    await buildOutcomeStudioProviderSafeContext({
+      providerDescriptor: descriptor,
+      safeRequest: safeRequest(),
+      truthSource: { acceptedTruth: [] },
+      knowledgeSelection: providerVersions.map((version) => ({
+        versionId: version.versionId,
+        knowledgeLayer: 'REASONING',
+        executionMode: 'PROVIDER_CONTEXT',
+      })),
+      executionBindings: providerVersions.map((version) => ({
+        versionId: version.versionId,
+        contentHash: version.contentHash,
+      })),
+      captureExecutionEvidence,
+    })
+
+    const receipt = captureExecutionEvidence.mock.calls[0][0]
+    for (const version of providerVersions) {
+      expect(receipt.packs.find((pack) => pack.versionId === version.versionId)).toEqual(expect.objectContaining({
+        projectedEntryCount: expect.any(Number),
+        suppliedEntryCount: expect.any(Number),
+        checks: expect.arrayContaining([
+          expect.objectContaining({ key: 'SAFE_GUIDANCE_PROJECTED', status: 'PASSED' }),
+          expect.objectContaining({ key: 'PROVIDER_CONTEXT_SUPPLIED', status: 'PASSED' }),
+        ]),
+      }))
+    }
+    expect(receipt.packs.every((pack) => pack.projectedEntryCount >= 1 && pack.suppliedEntryCount >= 1)).toBe(true)
+  })
+
+  test('rejects validation-only selections before provider-safe projection', async () => {
+    const content = `${governedContent}\n# Validation Criteria\nReview the rendered draft.`
+    const hash = contentHash(content)
+    mockVersions([{ versionId: 'kpv-post-validation', content, contentHash: hash }])
+
+    await expect(buildOutcomeStudioProviderSafeContext({
+      providerDescriptor: descriptor,
+      safeRequest: safeRequest(),
+      truthSource: { acceptedTruth: [] },
+      knowledgeSelection: [{
+        versionId: 'kpv-post-validation',
+        knowledgeLayer: 'VALIDATION',
+        executionMode: 'POST_VALIDATION',
+      }],
+      executionBindings: [{ versionId: 'kpv-post-validation', contentHash: hash }],
+    })).rejects.toMatchObject({
+      code: 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED',
+    })
+  })
+
+  test('fails closed before provider-context completion when selected version content hash differs', async () => {
+    mockVersions([{
+      versionId: 'kpv-hash-mismatch',
+      content: governedContent,
+      contentHash: contentHash(governedContent),
+    }])
+    const captureExecutionEvidence = jest.fn()
+
+    await expect(buildOutcomeStudioProviderSafeContext({
+      providerDescriptor: descriptor,
+      safeRequest: safeRequest(),
+      truthSource: { acceptedTruth: [] },
+      knowledgeSelection: [{ versionId: 'kpv-hash-mismatch', knowledgeLayer: 'REASONING', executionMode: 'PROVIDER_CONTEXT' }],
+      executionBindings: [{
+        versionId: 'kpv-hash-mismatch',
+        contentHash: contentHash(`${governedContent} changed`),
+      }],
+      captureExecutionEvidence,
+    })).rejects.toMatchObject({ code: 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED' })
+    expect(captureExecutionEvidence).not.toHaveBeenCalled()
+  })
+
+  test('marks a selected metadata-only pack as not supplied while other packs satisfy required guidance', async () => {
+    const metadataOnly = '# Document Metadata\nVersion 1.0.0'
+    mockVersions([
+      { versionId: 'kpv-governed', content: governedContent, contentHash: contentHash(governedContent) },
+      { versionId: 'kpv-metadata-only', content: metadataOnly, contentHash: contentHash(metadataOnly) },
+    ])
+    const captureExecutionEvidence = jest.fn()
+
+    await buildOutcomeStudioProviderSafeContext({
+      providerDescriptor: descriptor,
+      safeRequest: safeRequest(),
+      truthSource: { acceptedTruth: [] },
+      knowledgeSelection: [
+        { versionId: 'kpv-governed', knowledgeLayer: 'REASONING', executionMode: 'PROVIDER_CONTEXT' },
+        { versionId: 'kpv-metadata-only', knowledgeLayer: 'REASONING', executionMode: 'PROVIDER_CONTEXT' },
+      ],
+      executionBindings: [
+        { versionId: 'kpv-governed', contentHash: contentHash(governedContent) },
+        { versionId: 'kpv-metadata-only', contentHash: contentHash(metadataOnly) },
+      ],
+      captureExecutionEvidence,
+    })
+
+    const metadataReceipt = captureExecutionEvidence.mock.calls[0][0].packs
+      .find((pack) => pack.versionId === 'kpv-metadata-only')
+    expect(metadataReceipt).toEqual(expect.objectContaining({
+      projectedEntryCount: 0,
+      safeCandidateEntryCount: 0,
+      suppliedEntryCount: 0,
+      projectionDisposition: 'NO_SAFE_GUIDANCE',
+      admissionDisposition: 'NOT_APPLICABLE',
+      status: 'NOT_SUPPLIED',
+      checks: expect.arrayContaining([
+        expect.objectContaining({ key: 'SAFE_GUIDANCE_PROJECTED', status: 'NOT_SUPPLIED' }),
+        expect.objectContaining({ key: 'PROVIDER_CONTEXT_SUPPLIED', status: 'NOT_SUPPLIED' }),
+      ]),
+    }))
+  })
+
+  test('records a bounded internal stage and reason when required guidance is missing', async () => {
+    mockVersions([{ versionId: 'kpv-metadata-only', content: '# Document Metadata\nVersion 1.0.0' }])
+
+    try {
+      await buildOutcomeStudioProviderSafeContext({
+        providerDescriptor: descriptor,
+        safeRequest: safeRequest(),
+        truthSource: { acceptedTruth: [] },
+        knowledgeSelection: [{ versionId: 'kpv-metadata-only', knowledgeLayer: 'REASONING', executionMode: 'PROVIDER_CONTEXT' }],
+      })
+      throw new Error('Expected provider-safe context construction to fail.')
+    } catch (error) {
+      expect(error).toMatchObject({ code: 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED' })
+      expect(error.internalFailureStage).toBe('REQUIRED_GUIDANCE_ADMISSION')
+      expect(error.internalDiagnosticCode).toBe('REQUIRED_GUIDANCE_MISSING')
+      expect(Object.keys(error.details)).not.toEqual(expect.arrayContaining([
+        'internalFailureStage',
+        'internalDiagnosticCode',
+      ]))
+    }
+  })
+
+  test('distinguishes safe candidates omitted by the per-category cap', async () => {
+    const laterReasoningPacks = Array.from({ length: 12 }, (_item, index) => ({
+      versionId: `kpv-reasoning-later-${index + 1}`,
+      content: `# Runtime Guidance ${index + 1}\nUnique reasoning guidance ${index + 1} preserves verified business support.`,
+    }))
+    const versions = [
+      { versionId: 'kpv-reasoning-base', content: governedContent },
+      ...laterReasoningPacks,
+    ].map((version) => ({
+      ...version,
+      contentHash: contentHash(version.content),
+    }))
+    mockVersions(versions)
+    const captureExecutionEvidence = jest.fn()
+
+    await buildOutcomeStudioProviderSafeContext({
+      providerDescriptor: descriptor,
+      safeRequest: safeRequest(),
+      truthSource: { acceptedTruth: [] },
+      knowledgeSelection: versions.map((version) => ({
+        versionId: version.versionId,
+        knowledgeLayer: 'REASONING',
+        executionMode: 'PROVIDER_CONTEXT',
+      })),
+      executionBindings: versions.map((version) => ({
+        versionId: version.versionId,
+        contentHash: version.contentHash,
+      })),
+      captureExecutionEvidence,
+    })
+
+    const cappedReceipt = captureExecutionEvidence.mock.calls[0][0].packs
+      .find((pack) => pack.versionId === 'kpv-reasoning-later-12')
+    expect(cappedReceipt).toEqual(expect.objectContaining({
+      safeCandidateEntryCount: 1,
+      projectedEntryCount: 0,
+      suppliedEntryCount: 0,
+      projectionDisposition: 'CATEGORY_LIMITED',
+      admissionDisposition: 'NOT_APPLICABLE',
+      status: 'NOT_SUPPLIED',
+    }))
+  })
+
+  test('records context-limit admission when a projected candidate cannot fit', async () => {
+    const longGuidance = 'Use only verified business context and preserve material qualification. '.repeat(10)
+    const versions = Array.from({ length: 20 }, (_item, index) => {
+      const content = [
+        `# Business Guidance ${index + 1}\n${longGuidance}`,
+        `# Reasoning Guidance ${index + 1}\n${longGuidance}`,
+        `# Output Schema ${index + 1}\n${longGuidance}`,
+        `# Executive Style ${index + 1}\n${longGuidance}`,
+        `# Validation Criteria ${index + 1}\n${longGuidance}`,
+        `# Prohibited Boundary ${index + 1}\n${longGuidance}`,
+      ].join('\n')
+      return {
+        versionId: `kpv-context-limit-${index + 1}`,
+        content,
+        contentHash: contentHash(content),
+      }
+    })
+    mockVersions(versions)
+    const captureExecutionEvidence = jest.fn()
+
+    await buildOutcomeStudioProviderSafeContext({
+      providerDescriptor: descriptor,
+      safeRequest: safeRequest(),
+      truthSource: { acceptedTruth: [] },
+      knowledgeSelection: versions.map((version) => ({
+        versionId: version.versionId,
+        knowledgeLayer: 'REASONING',
+        executionMode: 'PROVIDER_CONTEXT',
+      })),
+      executionBindings: versions.map((version) => ({
+        versionId: version.versionId,
+        contentHash: version.contentHash,
+      })),
+      captureExecutionEvidence,
+    })
+
+    const receipt = captureExecutionEvidence.mock.calls[0][0]
+    expect(receipt.packs.some((pack) => (
+      pack.projectionDisposition === 'PROJECTED'
+      && pack.admissionDisposition === 'CONTEXT_LIMIT'
+      && pack.suppliedEntryCount === 0
+    ))).toBe(true)
+  })
+
   test('projects SS-008 governance layers into provider-safe guidance buckets', async () => {
     mockVersions([
       { versionId: 'kpv-foundation-v1', content: `${governedContent}\n# General Guidance\nFoundation operating model.` },
@@ -309,7 +611,6 @@ describe('Outcome Studio provider-safe projection', () => {
       'VISUAL_SYSTEM',
       'VALIDATION',
     ]
-    const executionModes = ['PROVIDER_CONTEXT', 'PRE_VALIDATION', 'POST_VALIDATION']
     const versions = Array.from({ length: 33 }, (_, index) => ({
       versionId: `kpv-csdp-selection-${index + 1}`,
       content: `${governedContent}\n# General Guidance\nCSDP selected guidance item ${index + 1}.`,
@@ -317,7 +618,7 @@ describe('Outcome Studio provider-safe projection', () => {
     const knowledgeSelection = versions.map((version, index) => ({
       versionId: version.versionId,
       knowledgeLayer: knowledgeLayers[index % knowledgeLayers.length],
-      executionMode: executionModes[index % executionModes.length],
+      executionMode: 'PROVIDER_CONTEXT',
     }))
     mockVersions(versions)
 

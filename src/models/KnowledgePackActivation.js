@@ -17,6 +17,7 @@ import {
 import { buildKnowledgePackId } from './KnowledgePack.js'
 import {
   knowledgePackCapabilityKeyField,
+  knowledgePackBoundaryField,
   knowledgePackDependencyReferenceSchema,
   knowledgePackKnowledgeAssetIdField,
   knowledgePackLayerField,
@@ -248,6 +249,7 @@ const knowledgePackActivationSchema = new mongoose.Schema(
       enum: Object.values(KNOWLEDGE_PACK_EXECUTION_MODES),
       default: KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT,
     },
+    boundary: knowledgePackBoundaryField,
     visibility: {
       type: String,
       required: true,
@@ -348,9 +350,12 @@ knowledgePackActivationSchema.pre('validate', function normalizeKnowledgePackAct
     if (!this.knowledgeLayer) {
       this.invalidate('knowledgeLayer', 'Active Knowledge Pack activations require knowledgeLayer.')
     }
-    if (!this.capabilityKey) {
-      this.invalidate('capabilityKey', 'Active Knowledge Pack activations require capabilityKey.')
-    }
+      if (
+        this.packType !== OUTCOME_KNOWLEDGE_PACK_TYPES.TRUTH_CERTIFICATION
+        && !this.capabilityKey
+      ) {
+        this.invalidate('capabilityKey', 'Active Knowledge Pack activations require capabilityKey.')
+      }
     if (!Array.isArray(this.workspaceCompatibility) || this.workspaceCompatibility.length === 0) {
       this.invalidate(
         'workspaceCompatibility',

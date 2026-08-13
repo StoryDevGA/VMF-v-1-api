@@ -12,6 +12,7 @@ import {
 } from '../constants/outcomeKnowledgePacks.js'
 import {
   KNOWLEDGE_PACK_AUTHORING_MODES,
+  KNOWLEDGE_PACK_BOUNDARIES,
   KNOWLEDGE_PACK_EXECUTION_MODES,
   KNOWLEDGE_PACK_LAYERS,
   KNOWLEDGE_PACK_MANIFEST_STATUSES,
@@ -185,6 +186,7 @@ const manifestPackReferenceSchema = z.object({
   executionMode: z
     .enum(Object.values(KNOWLEDGE_PACK_EXECUTION_MODES))
     .default(KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT),
+  boundary: z.enum(Object.values(KNOWLEDGE_PACK_BOUNDARIES)).optional(),
   required: z.boolean().optional(),
   dependencyKeys: z
     .array(z.string().trim().min(1).max(180))
@@ -462,6 +464,7 @@ const importSourceDocumentDraftBodySchema = z.object({
   executionMode: z
     .enum(Object.values(KNOWLEDGE_PACK_EXECUTION_MODES))
     .default(KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT),
+  boundary: z.enum(Object.values(KNOWLEDGE_PACK_BOUNDARIES)).optional(),
   visibility: z
     .enum(Object.values(KNOWLEDGE_PACK_VISIBILITY_SCOPES))
     .default(KNOWLEDGE_PACK_VISIBILITY_SCOPES.PLATFORM),

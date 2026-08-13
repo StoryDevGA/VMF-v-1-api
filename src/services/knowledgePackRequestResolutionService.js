@@ -1,11 +1,13 @@
 import {
   KNOWLEDGE_PACK_DEPENDENCY_REQUIREMENTS,
+  KNOWLEDGE_PACK_BOUNDARIES,
   KNOWLEDGE_PACK_EXECUTION_MODES,
   KNOWLEDGE_PACK_RELATIONSHIP_CARDINALITIES,
   KNOWLEDGE_PACK_RELATIONSHIP_CONTRACT_VERSION,
   KNOWLEDGE_PACK_RELATIONSHIP_FAILURES,
   KNOWLEDGE_PACK_RELATIONSHIP_TIMINGS,
   KNOWLEDGE_PACK_RELATIONSHIP_TYPES,
+  resolveKnowledgePackBoundary,
 } from '../constants/knowledgeRuntime.js'
 import {
   OUTCOME_KNOWLEDGE_PACK_ACTIVATION_STATUSES,
@@ -93,6 +95,7 @@ const toSafePack = (value = {}) => {
     scopeType: normalizeToken(value.scopeType),
     scopeKey: normalizeToken(value.scopeKey),
     executionMode: normalizeToken(value.executionMode),
+    boundary: normalizeToken(value.boundary),
     visibility: normalizeToken(value.visibility),
     contentHash: normalizeText(value.contentHash),
     activatedAt: normalizeText(value.activatedAt),
@@ -968,20 +971,25 @@ export const resolveRequestSpecificKnowledgePacks = ({
   const providerContextPacks = []
   const preValidationPacks = []
   const postValidationPacks = []
+  const lineageCertificationPacks = []
   const systemOnlyPacks = []
   for (const pack of boundPacks) {
-    switch (pack.executionMode) {
-      case KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT:
+    if (!pack.boundary && pack.executionMode === KNOWLEDGE_PACK_EXECUTION_MODES.SYSTEM_ONLY) {
+      systemOnlyPacks.push(pack)
+      continue
+    }
+    switch (resolveKnowledgePackBoundary(pack)) {
+      case KNOWLEDGE_PACK_BOUNDARIES.GENERATION_CONTEXT:
         providerContextPacks.push(pack)
         break
-      case KNOWLEDGE_PACK_EXECUTION_MODES.PRE_VALIDATION:
+      case KNOWLEDGE_PACK_BOUNDARIES.PRE_GENERATION_VALIDATION:
         preValidationPacks.push(pack)
         break
-      case KNOWLEDGE_PACK_EXECUTION_MODES.POST_VALIDATION:
+      case KNOWLEDGE_PACK_BOUNDARIES.POST_GENERATION_VALIDATION:
         postValidationPacks.push(pack)
         break
-      case KNOWLEDGE_PACK_EXECUTION_MODES.SYSTEM_ONLY:
-        systemOnlyPacks.push(pack)
+      case KNOWLEDGE_PACK_BOUNDARIES.LINEAGE_CERTIFICATION:
+        lineageCertificationPacks.push(pack)
         break
       default:
         break
@@ -1038,6 +1046,7 @@ export const resolveRequestSpecificKnowledgePacks = ({
     providerContextPacks,
     preValidationPacks,
     postValidationPacks,
+    lineageCertificationPacks,
     systemOnlyPacks,
     missingDependencies,
     relationshipFailures,

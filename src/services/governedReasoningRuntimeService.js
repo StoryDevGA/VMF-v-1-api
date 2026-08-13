@@ -14,7 +14,12 @@ import {
   GRR_PROVIDER_MODES,
   GRR_RUNTIME_STATE_WRITE_STATUSES,
 } from '../constants/governedReasoningRuntime.js'
-import { KNOWLEDGE_PACK_EXECUTION_MODES } from '../constants/knowledgeRuntime.js'
+import {
+  KNOWLEDGE_PACK_BOUNDARIES,
+  KNOWLEDGE_PACK_EXECUTION_MODES,
+  resolveKnowledgePackBoundary,
+  resolveKnowledgePackReceiptType,
+} from '../constants/knowledgeRuntime.js'
 import {
   OUTCOME_STUDIO_READINESS_POLICY_VERSIONS,
   OUTCOME_STUDIO_REFERENCE_FAMILIES,
@@ -42,7 +47,13 @@ import {
   assertOutcomeStudioProviderSafeRequest,
   buildOutcomeStudioProviderSafeContext,
   buildOutcomeStudioProviderSafeRequest,
+  OUTCOME_STUDIO_EXECUTION_EVIDENCE_STATUSES,
 } from './outcomeStudioProviderSafeContextService.js'
+import {
+  PROVIDER_RESPONSE_SCHEMA_NAME,
+  PROVIDER_RESPONSE_SCHEMA_VERSION,
+} from './openAiOutcomeStudioProviderAdapter.js'
+import { OUTCOME_BOUNDARY_RECEIPT_CONTRACT_VERSION } from './outcomeBoundaryReceiptService.js'
 
 export const GRR_ERROR_REASONS = Object.freeze({
   RUNTIME_NOT_FOUND: 'RUNTIME_NOT_FOUND',
@@ -520,6 +531,7 @@ const sanitizePack = (pack = {}) => ({
     ? pack.dependencyReferences.map(sanitizeDependencyReference)
     : [],
   executionMode: normalizeToken(pack.executionMode),
+  boundary: normalizeToken(pack.boundary),
   scopeType: normalizeToken(pack.scopeType),
   scopeKey: normalizeText(pack.scopeKey),
 })
@@ -604,6 +616,9 @@ const buildKnowledgeContext = ({ manifest, binding, payload }) => ({
       : [],
     postValidationPacks: Array.isArray(binding?.postValidationPacks)
       ? binding.postValidationPacks.map(sanitizePack)
+      : [],
+    lineageCertificationPacks: Array.isArray(binding?.lineageCertificationPacks)
+      ? binding.lineageCertificationPacks.map(sanitizePack)
       : [],
     systemOnlyPacks: Array.isArray(binding?.systemOnlyPacks)
       ? binding.systemOnlyPacks.map(sanitizePack)
@@ -894,6 +909,16 @@ const assertProviderEvidence = ({ provider, providerDescriptor, conflict = false
   throw liveTestProviderResultInvalid()
 }
 
+const assertStrictProviderResponseSchema = (providerResult = {}) => {
+  const responseSchema = providerResult?.metadata?.responseSchema
+  const valid = responseSchema
+    && responseSchema.name === PROVIDER_RESPONSE_SCHEMA_NAME
+    && responseSchema.version === PROVIDER_RESPONSE_SCHEMA_VERSION
+    && responseSchema.strict === true
+    && responseSchema.parsed === true
+  if (!valid) throw liveTestProviderResultInvalid()
+}
+
 const buildPersistedProviderEvidence = ({ executionMode, providerDescriptor, providerResult }) => {
   if (executionMode === 'LIVE_TEST') {
     return {
@@ -949,12 +974,21 @@ const buildTruthSource = (truthContext = {}) => {
   return { acceptedTruth }
 }
 
-const buildKnowledgeSelection = (binding = {}) => {
-  const source = [
-    ...(Array.isArray(binding.providerContextPacks) ? binding.providerContextPacks : []),
-    ...(Array.isArray(binding.preValidationPacks) ? binding.preValidationPacks : []),
-    ...(Array.isArray(binding.postValidationPacks) ? binding.postValidationPacks : []),
-  ]
+const getProviderExecutionPacks = (binding = {}) => [
+  ...(Array.isArray(binding.providerContextPacks) ? binding.providerContextPacks : []),
+  ...(Array.isArray(binding.preValidationPacks) ? binding.preValidationPacks : []),
+  ...(Array.isArray(binding.postValidationPacks) ? binding.postValidationPacks : []),
+].filter((pack) => resolveKnowledgePackBoundary(pack) === KNOWLEDGE_PACK_BOUNDARIES.GENERATION_CONTEXT)
+
+const getBoundaryExecutionPacks = (binding = {}) => [
+  ...(Array.isArray(binding.preValidationPacks) ? binding.preValidationPacks : []),
+  ...(Array.isArray(binding.postValidationPacks) ? binding.postValidationPacks : []),
+  ...(Array.isArray(binding.lineageCertificationPacks) ? binding.lineageCertificationPacks : []),
+  ...(Array.isArray(binding.systemOnlyPacks) ? binding.systemOnlyPacks : []),
+].filter((pack) => resolveKnowledgePackBoundary(pack) !== KNOWLEDGE_PACK_BOUNDARIES.GENERATION_CONTEXT)
+
+export const buildGovernedReasoningProviderSelection = (binding = {}) => {
+  const source = getProviderExecutionPacks(binding)
   const seen = new Set()
   const selection = []
   for (const pack of source) {
@@ -965,9 +999,189 @@ const buildKnowledgeSelection = (binding = {}) => {
       versionId,
       knowledgeLayer: normalizeToken(pack?.knowledgeLayer),
       executionMode: normalizeToken(pack?.executionMode),
+      ...(normalizeToken(pack?.packType) ? { packType: normalizeToken(pack.packType) } : {}),
     })
   }
   return selection
+}
+
+export const buildGovernedReasoningBoundarySelection = (binding = {}) => {
+  const source = getBoundaryExecutionPacks(binding)
+  const seen = new Set()
+  const selection = []
+  for (const pack of source) {
+    const versionId = normalizeText(pack?.versionId)
+    if (!versionId || seen.has(versionId)) continue
+    seen.add(versionId)
+    selection.push({
+      versionId,
+      knowledgeLayer: normalizeToken(pack?.knowledgeLayer),
+      executionMode: normalizeToken(pack?.executionMode),
+      ...(normalizeToken(pack?.packType) ? { packType: normalizeToken(pack.packType) } : {}),
+    })
+  }
+  return selection
+}
+
+const buildKnowledgeExecutionBindings = (binding = {}) => {
+  const seen = new Set()
+  return getProviderExecutionPacks(binding).reduce((bindings, pack) => {
+    const versionId = normalizeText(pack?.versionId)
+    if (!versionId || seen.has(versionId)) return bindings
+    seen.add(versionId)
+    bindings.push({
+      versionId,
+      contentHash: normalizeText(pack?.contentHash),
+    })
+    return bindings
+  }, [])
+}
+
+const buildBoundaryExecutionBindings = (binding = {}) => {
+  const seen = new Set()
+  return getBoundaryExecutionPacks(binding).reduce((bindings, pack) => {
+    const versionId = normalizeText(pack?.versionId)
+    if (!versionId || seen.has(versionId)) return bindings
+    seen.add(versionId)
+    bindings.push({
+      versionId,
+      contentHash: normalizeText(pack?.contentHash),
+    })
+    return bindings
+  }, [])
+}
+
+const buildBoundaryReceiptPlaceholders = (binding = {}) => {
+  const source = [
+    ...(Array.isArray(binding.requiredPacks) ? binding.requiredPacks : []),
+    ...(Array.isArray(binding.optionalPacks) ? binding.optionalPacks : []),
+    ...(Array.isArray(binding.providerContextPacks) ? binding.providerContextPacks : []),
+    ...(Array.isArray(binding.preValidationPacks) ? binding.preValidationPacks : []),
+    ...(Array.isArray(binding.postValidationPacks) ? binding.postValidationPacks : []),
+    ...(Array.isArray(binding.lineageCertificationPacks) ? binding.lineageCertificationPacks : []),
+    ...(Array.isArray(binding.systemOnlyPacks) ? binding.systemOnlyPacks : []),
+  ]
+  const seen = new Set()
+  return source.reduce((receipts, pack) => {
+    const versionId = normalizeText(pack?.versionId)
+    const contentHash = normalizeText(pack?.contentHash)
+    const boundary = resolveKnowledgePackBoundary(pack)
+    if (!versionId || !contentHash || !boundary || seen.has(versionId)) return receipts
+    seen.add(versionId)
+    if (boundary === KNOWLEDGE_PACK_BOUNDARIES.GENERATION_CONTEXT) return receipts
+    receipts.push({
+      versionId,
+      contentHash,
+      knowledgeLayer: normalizeToken(pack?.knowledgeLayer),
+      executionMode: normalizeToken(pack?.executionMode),
+      packType: normalizeToken(pack?.packType),
+      boundary,
+      receiptType: resolveKnowledgePackReceiptType(pack),
+      contractVersion: OUTCOME_BOUNDARY_RECEIPT_CONTRACT_VERSION,
+      receiptKey: '',
+      validatorKey: '',
+      result: 'NOT_RECORDED',
+      evidenceReference: '',
+      projectedEntryCount: 0,
+      safeCandidateEntryCount: 0,
+      suppliedEntryCount: 0,
+      suppliedCategories: [],
+      sharedContribution: false,
+      projectionDisposition: 'NOT_RECORDED',
+      admissionDisposition: 'NOT_APPLICABLE',
+      status: OUTCOME_STUDIO_EXECUTION_EVIDENCE_STATUSES.NOT_RECORDED,
+      checks: [
+        {
+          key: 'BOUNDARY_DECLARED',
+          status: OUTCOME_STUDIO_EXECUTION_EVIDENCE_STATUSES.PASSED,
+          message: 'The governed binding declares a non-provider execution boundary.',
+        },
+        {
+          key: 'BOUNDARY_RECEIPT_RECORDED',
+          status: OUTCOME_STUDIO_EXECUTION_EVIDENCE_STATUSES.NOT_RECORDED,
+          message: 'The boundary executor has not yet recorded a receipt for this exact version.',
+        },
+      ],
+    })
+    return receipts
+  }, [])
+}
+
+const finalizeLiveExecutionEvidence = ({
+  executionEvidence,
+  executionId,
+  providerResult,
+  requestFingerprint,
+} = {}) => {
+  if (!executionEvidence || typeof executionEvidence !== 'object') return null
+  const passed = OUTCOME_STUDIO_EXECUTION_EVIDENCE_STATUSES.PASSED
+  const notRecorded = OUTCOME_STUDIO_EXECUTION_EVIDENCE_STATUSES.NOT_RECORDED
+  const responseSchema = providerResult?.metadata?.responseSchema || {}
+  const providerCompletedAt = providerResult?.generatedAt || new Date()
+  const packs = Array.isArray(executionEvidence.packs)
+    ? executionEvidence.packs.map((pack) => {
+        const providerContextSupplied = Number(pack?.suppliedEntryCount || 0) > 0
+        const checks = Array.isArray(pack.checks)
+          ? pack.checks.map((check) => {
+            if (check.key !== 'PROVIDER_COMPLETED') return check
+            return providerContextSupplied
+              ? { ...check, status: passed, message: 'Provider returned a structured response for this assembled context.' }
+              : {
+                ...check,
+                status: OUTCOME_STUDIO_EXECUTION_EVIDENCE_STATUSES.NOT_SUPPLIED,
+                message: 'Provider completion is not recorded because no entry from this version was admitted to provider context.',
+              }
+          })
+          : []
+        return {
+          ...pack,
+          status: checks.length > 0 && checks.every((check) => check.status === passed)
+            ? passed
+            : pack.status,
+          checks,
+        }
+      })
+    : []
+  return {
+    ...executionEvidence,
+    executionId,
+    requestFingerprint,
+    recordedAt: providerCompletedAt,
+    packs,
+    runtimeChecks: [
+      {
+        key: 'PROVIDER_REQUEST',
+        status: passed,
+        message: 'Provider request completed with recorded request identity and safe telemetry.',
+        providerKey: normalizeText(providerResult?.provider?.providerKey),
+        model: normalizeText(providerResult?.provider?.model),
+        configurationVersion: normalizeText(providerResult?.metadata?.configurationVersion),
+        requestId: normalizeText(providerResult?.metadata?.requestId),
+        responseId: normalizeText(providerResult?.metadata?.responseId),
+        latencyMs: Math.max(0, Number(providerResult?.metadata?.latencyMs || 0)),
+      },
+      {
+        key: 'PROVIDER_RESPONSE_SCHEMA',
+        status: responseSchema.strict === true && responseSchema.parsed === true ? passed : notRecorded,
+        message: responseSchema.strict === true && responseSchema.parsed === true
+          ? 'Strict provider response schema parsed successfully.'
+          : 'Strict provider response-schema completion was not recorded.',
+        schemaName: normalizeText(responseSchema.name),
+        schemaVersion: normalizeText(responseSchema.version),
+        strict: responseSchema.strict === true,
+      },
+      {
+        key: 'OUTCOME_CONTENT_NORMALIZATION',
+        status: notRecorded,
+        message: 'Outcome normalization is recorded only after customer draft content is built.',
+      },
+      {
+        key: 'OUTCOME_POST_VALIDATION',
+        status: notRecorded,
+        message: 'Outcome post-validation is recorded only after validators allow the draft.',
+      },
+    ],
+  }
 }
 
 const buildProviderTruthContext = ({ payload = {}, truthContext = {} } = {}) => {
@@ -1048,7 +1262,7 @@ const buildProviderContext = ({
   const projectedTruthContext = buildProviderTruthContext({ payload: request, truthContext })
   const binding = knowledgeContext.binding || {}
   const isProviderContextPack = (pack) => (
-    normalizeToken(pack?.executionMode) === KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT
+    resolveKnowledgePackBoundary(pack) === KNOWLEDGE_PACK_BOUNDARIES.GENERATION_CONTEXT
   )
   const projectProviderPack = (pack) => ({
     ...pack,
@@ -1239,6 +1453,7 @@ const UNSAFE_METADATA_KEYS = new Set([
 
 const scrubUnsafeMetadata = (value, seen = new WeakSet()) => {
   if (Array.isArray(value)) return value.map((entry) => scrubUnsafeMetadata(entry, seen))
+  if (value instanceof Date) return value.toISOString()
   if (!value || typeof value !== 'object') return value
   if (seen.has(value)) return {}
   seen.add(value)
@@ -1259,6 +1474,7 @@ const projectExecution = (execution) => {
     provider: scrubUnsafeMetadata(projected.provider || {}),
     knowledgeBinding: scrubUnsafeMetadata(projected.knowledgeBinding || {}),
     reasoningContext: scrubUnsafeMetadata(projected.reasoningContext || {}),
+    executionEvidence: scrubUnsafeMetadata(projected.executionEvidence || {}),
   }
 }
 
@@ -1575,13 +1791,20 @@ export const createGovernedReasoningExecution = async ({
   const knowledgeContext = buildKnowledgeContext({ manifest, binding, payload: effectivePayload })
   let providerContext
   let providerResult
+  let executionEvidence = null
   if (liveTest.executionMode === 'LIVE_TEST') {
     try {
       providerContext = assertProviderContextResult(await liveTest.buildProviderSafeContext({
         providerDescriptor: liveTest.providerDescriptor,
         safeRequest,
         truthSource: buildTruthSource(truthContext),
-        knowledgeSelection: buildKnowledgeSelection(binding),
+        knowledgeSelection: buildGovernedReasoningProviderSelection(binding),
+        executionBindings: buildKnowledgeExecutionBindings(binding),
+        boundarySelection: buildGovernedReasoningBoundarySelection(binding),
+        boundaryExecutionBindings: buildBoundaryExecutionBindings(binding),
+        captureExecutionEvidence: (receipt) => {
+          executionEvidence = receipt
+        },
       }), safeRequest, {
         assertProviderSafeContext: liveTest.assertProviderSafeContext,
         errorIdentity: providerContextErrorIdentity,
@@ -1594,6 +1817,7 @@ export const createGovernedReasoningExecution = async ({
     await authorizeCurrentLiveTest('PRE_ADAPTER')
     providerResult = await liveTest.providerAdapter({ providerContext })
     assertProviderEvidence({ provider: providerResult?.provider, providerDescriptor: liveTest.providerDescriptor })
+    assertStrictProviderResponseSchema(providerResult)
   } else {
     providerContext = buildProviderContext({ knowledgeContext, payload: effectivePayload, truthContext })
     providerResult = await executeProvider({ deps, providerContext })
@@ -1601,6 +1825,30 @@ export const createGovernedReasoningExecution = async ({
   const runtimeStateWrites = buildRuntimeStateWrites()
   const executionId = buildGrrId('grr_exec')
   const runtimeArtifactId = buildGrrId('grr_art')
+  executionEvidence = liveTest.executionMode === 'LIVE_TEST'
+    ? finalizeLiveExecutionEvidence({
+        executionEvidence,
+        executionId,
+        providerResult,
+        requestFingerprint,
+      })
+    : null
+  if (executionEvidence) {
+    const existingVersionIds = new Set(
+      Array.isArray(executionEvidence.packs)
+        ? executionEvidence.packs.map((pack) => normalizeText(pack?.versionId)).filter(Boolean)
+        : [],
+    )
+    const boundaryReceipts = buildBoundaryReceiptPlaceholders(binding)
+      .filter((pack) => !existingVersionIds.has(pack.versionId))
+    executionEvidence = {
+      ...executionEvidence,
+      packs: [
+        ...(Array.isArray(executionEvidence.packs) ? executionEvidence.packs : []),
+        ...boundaryReceipts,
+      ],
+    }
+  }
   const warnings = [
     ...(Array.isArray(providerResult?.warnings) ? providerResult.warnings : []),
     ...(liveTest.executionMode === 'LIVE_TEST' ? [] : ['KNOWLEDGE_PACK_CONTENT_NOT_EXPOSED_V1']),
@@ -1652,6 +1900,7 @@ export const createGovernedReasoningExecution = async ({
       contentVisible: false,
       packContentLoaded: false,
     },
+    executionEvidence,
     certifiedTruth: liveTest.executionMode === 'LIVE_TEST' ? truthContext.summary : providerContext.truthContext.summary,
     runtimeStateWrites,
     artifactIds: [runtimeArtifactId],

@@ -974,6 +974,14 @@ const runtimeOutcomeAssetParamsSchema = runtimeInstanceIdSchema.extend({
     .max(180, 'outcomeAssetId must be 180 characters or fewer'),
 })
 
+const runtimeOutcomeSessionAssetParamsSchema = runtimeOutcomeSessionParamsSchema.extend({
+  outcomeAssetId: z
+    .string({ required_error: 'outcomeAssetId is required' })
+    .trim()
+    .min(1, 'outcomeAssetId is required')
+    .max(180, 'outcomeAssetId must be 180 characters or fewer'),
+})
+
 const runtimeOutcomeAssetVersionParamsSchema = runtimeOutcomeAssetParamsSchema.extend({
   outcomeAssetVersionId: z
     .string({ required_error: 'outcomeAssetVersionId is required' })
@@ -1223,6 +1231,12 @@ export const validateRuntimeOutcomeDraftParams = createParamsValidator(runtimeOu
 })
 
 export const validateRuntimeOutcomeAssetParams = createParamsValidator(runtimeOutcomeAssetParamsSchema, {
+  message: 'Invalid request parameters.',
+  rootIssueKey: '_root',
+  includeDetails: false,
+})
+
+export const validateRuntimeOutcomeSessionAssetParams = createParamsValidator(runtimeOutcomeSessionAssetParamsSchema, {
   message: 'Invalid request parameters.',
   rootIssueKey: '_root',
   includeDetails: false,

@@ -13,6 +13,7 @@ import {
 import {
   OUTCOME_KNOWLEDGE_PACK_SCOPE_TYPES,
 } from '../constants/outcomeKnowledgePacks.js'
+import { knowledgePackBoundaryField } from './knowledgePackGovernanceSchemas.js'
 
 const normalizeText = (value) => String(value || '').trim()
 const normalizeToken = (value) => normalizeText(value).toUpperCase()
@@ -74,6 +75,7 @@ const knowledgePackManifestPackSchema = new mongoose.Schema(
       enum: Object.values(KNOWLEDGE_PACK_EXECUTION_MODES),
       default: KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT,
     },
+    boundary: knowledgePackBoundaryField,
     required: {
       type: Boolean,
       default: true,
@@ -106,6 +108,7 @@ knowledgePackManifestPackSchema.pre('validate', function normalizeManifestPack(n
   this.packKey = normalizeLowerKey(this.packKey)
   this.label = normalizeText(this.label)
   this.executionMode = normalizeToken(this.executionMode || KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT)
+  this.boundary = normalizeToken(this.boundary) || undefined
   this.dependencyKeys = Array.isArray(this.dependencyKeys)
     ? [...new Set(this.dependencyKeys.map(normalizeLowerKey).filter(Boolean))]
     : []

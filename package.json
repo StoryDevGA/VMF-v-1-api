@@ -19,6 +19,8 @@
     "knowledge-packs:reconcile-metadata": "node src/scripts/reconcileKnowledgePackMetadata.js",
     "knowledge-packs:rehearse-metadata": "node src/scripts/rehearseKnowledgePackMetadataReconciliation.js",
     "knowledge-packs:audit-layer-readiness": "node src/scripts/auditKnowledgePackLayerReadiness.js",
+    "knowledge-packs:audit-boundary-readiness": "node src/scripts/auditKnowledgePackBoundaryReadiness.js",
+    "knowledge-packs:apply-ss005-boundary-policy": "node src/scripts/applyKnowledgePackBoundaryPolicySs005.js",
     "knowledge-packs:apply-governance-mapping": "node src/scripts/applyKnowledgePackGovernanceMapping.js",
     "knowledge-packs:migrate-ss002-relationships": "node src/scripts/migrateKnowledgePackRelationshipsSs002.js",
     "knowledge-packs:repair-ss002-missing-arrays": "node src/scripts/repairKnowledgePackRelationshipArraysSs002.js",

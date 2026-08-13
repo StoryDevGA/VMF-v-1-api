@@ -11,6 +11,10 @@ import {
 } from '../constants/outcomeGovernedQuality.js'
 import { OUTCOME_STUDIO_PROVIDER_SAFE_CONTEXT_POLICY } from '../constants/outcomeStudioReadiness.js'
 import {
+  KNOWLEDGE_PACK_BOUNDARIES,
+  resolveKnowledgePackBoundary,
+} from '../constants/knowledgeRuntime.js'
+import {
   GovernedReasoningExecution,
   GovernedRuntimeArtifact,
   OutcomeKnowledgeCompositionPlan,
@@ -127,16 +131,16 @@ const buildBinding = (plan) => {
     || !text(pack.versionId)
     || !Array.isArray(pack.stageAssignments)
     || !pack.stageAssignments.includes(OUTCOME_QUALITY_STAGES.RENDERED_EXPRESSION_RL)) throw bindingInvalid('assignedPack')
+  if (resolveKnowledgePackBoundary(pack) !== KNOWLEDGE_PACK_BOUNDARIES.POST_GENERATION_VALIDATION) {
+    throw bindingInvalid('assignedPackBoundary')
+  }
   return { stage, pack }
 }
 
-const buildKnowledgeFacade = ({ plan, binding }) => {
+export const buildOutcomeRenderedExpressionRlKnowledgeFacade = ({ plan, binding }) => {
   const pack = { ...binding.pack }
   const layer = upper(pack.knowledgeLayer)
-  const mode = upper(pack.executionMode)
-  const providerContextPacks = mode === 'PROVIDER_CONTEXT' ? [pack] : []
-  const preValidationPacks = mode === 'PRE_VALIDATION' ? [pack] : []
-  const postValidationPacks = mode === 'POST_VALIDATION' ? [pack] : []
+  const postValidationPacks = [pack]
   return {
     manifest: {
       sourceType: 'KNOWLEDGE_COMPOSITION_PLAN',
@@ -153,9 +157,9 @@ const buildKnowledgeFacade = ({ plan, binding }) => {
       mode: 'KCP_RENDERED_EXPRESSION_RL_STAGE_BINDING',
       requiredPacks: [pack],
       optionalPacks: [],
-      validationPacks: mode === 'PROVIDER_CONTEXT' ? [] : [pack],
-      providerContextPacks,
-      preValidationPacks,
+      validationPacks: [pack],
+      providerContextPacks: [],
+      preValidationPacks: [],
       postValidationPacks,
       systemOnlyPacks: [],
       selectedByLayer: { [layer]: [pack] },
@@ -166,7 +170,7 @@ const buildKnowledgeFacade = ({ plan, binding }) => {
         resolvedCount: 1,
         requiredCount: 1,
         optionalCount: 0,
-        validationCount: mode === 'PROVIDER_CONTEXT' ? 0 : 1,
+        validationCount: 1,
         blockedCount: 0,
         requestedContextCategories: [],
         policyVersion: text(plan.payload.resolution.policyVersion),
@@ -383,9 +387,10 @@ export const executeOutcomeRenderedExpressionRl = async ({
         providerAdapter,
         providerDescriptor,
         providerInput: buildProviderInput(),
-        resolveKnowledgeBinding: async () => buildKnowledgeFacade({ plan, binding }),
-        buildProviderSafeContext: async (args) => buildOutcomeRenderedExpressionRlProviderSafeContext({
+        resolveKnowledgeBinding: async () => buildOutcomeRenderedExpressionRlKnowledgeFacade({ plan, binding }),
+        buildProviderSafeContext: async ({ boundarySelection, ...args }) => buildOutcomeRenderedExpressionRlProviderSafeContext({
           ...args,
+          knowledgeSelection: boundarySelection,
           sourceStageExecution: source,
           targetStageKey: OUTCOME_QUALITY_STAGES.RENDERED_EXPRESSION_RL,
         }),

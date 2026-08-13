@@ -197,6 +197,12 @@ const makeProviderResult = () => ({
   },
   metadata: {
     deterministic: true,
+    responseSchema: {
+      name: 'governed_deliverable_v1',
+      version: '1',
+      strict: true,
+      parsed: true,
+    },
   },
 })
 
@@ -1257,6 +1263,268 @@ describe('Governed Reasoning Runtime models and service', () => {
     expect(deps.logAudit).toHaveBeenCalledTimes(1)
   })
 
+  test('persists a safe execution receipt only after provider and strict response-schema completion', async () => {
+    const contentHash = `sha256:${'a'.repeat(64)}`
+    const knowledge = makeKnowledgeBinding()
+    knowledge.binding.providerContextPacks = [{
+      versionId: 'kpv-reasoning',
+      contentHash,
+      knowledgeLayer: 'REASONING',
+      executionMode: 'PROVIDER_CONTEXT',
+    }]
+    const buildProviderSafeContext = jest.fn(async ({ captureExecutionEvidence }) => {
+      captureExecutionEvidence({
+        contractVersion: 'outcome-studio.component-execution-evidence.v2',
+        providerContextContractVersion: 'OUTCOME_STUDIO_PROVIDER_SAFE_CONTEXT_V1',
+        packs: [{
+          versionId: 'kpv-reasoning',
+          contentHash,
+          knowledgeLayer: 'REASONING',
+          executionMode: 'PROVIDER_CONTEXT',
+          projectedEntryCount: 1,
+          suppliedEntryCount: 1,
+          suppliedCategories: ['reasoningGuidance'],
+          sharedContribution: false,
+          status: 'NOT_RECORDED',
+          checks: [
+            { key: 'RESOLUTION_VERIFIED', status: 'PASSED', message: 'Verified.' },
+            { key: 'VERSION_CONTENT_LOADED', status: 'PASSED', message: 'Loaded.' },
+            { key: 'SAFE_GUIDANCE_PROJECTED', status: 'PASSED', message: 'Projected.' },
+            { key: 'PROVIDER_CONTEXT_SUPPLIED', status: 'PASSED', message: 'Supplied.' },
+            { key: 'PROVIDER_COMPLETED', status: 'NOT_RECORDED', message: 'Pending.' },
+          ],
+        }],
+      })
+      return makeLiveProviderContext()
+    })
+    const deps = makeLiveDeps({
+      buildProviderSafeContext,
+      resolveKnowledgeBinding: jest.fn().mockResolvedValue(knowledge),
+      providerAdapter: jest.fn().mockResolvedValue({
+        ...makeProviderResult(),
+        provider: {
+          providerKey: liveDescriptor.providerKey,
+          model: liveDescriptor.model,
+          providerMode: 'LIVE_TEST',
+          liveProvider: true,
+        },
+        metadata: {
+          configurationVersion: 'OUTCOME_STUDIO_OPENAI_RESPONSES_V1',
+          requestId: 'req-provider',
+          responseId: 'resp-provider',
+          latencyMs: 42,
+          responseSchema: {
+            name: 'governed_deliverable_v1',
+            version: '1',
+            strict: true,
+            parsed: true,
+          },
+        },
+      }),
+    })
+
+    const result = await createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      deps,
+      payload: makeLivePayload({ idempotencyKey: 'live-test-execution-receipt' }),
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })
+
+    expect(result.executionEvidence).toEqual(expect.objectContaining({
+      contractVersion: 'outcome-studio.component-execution-evidence.v2',
+      executionId: result.executionId,
+      requestFingerprint: result.requestFingerprint,
+      packs: [expect.objectContaining({
+        versionId: 'kpv-reasoning',
+        status: 'PASSED',
+        checks: expect.arrayContaining([
+          expect.objectContaining({ key: 'PROVIDER_COMPLETED', status: 'PASSED' }),
+        ]),
+      })],
+      runtimeChecks: expect.arrayContaining([
+        expect.objectContaining({ key: 'PROVIDER_REQUEST', status: 'PASSED', latencyMs: 42 }),
+        expect.objectContaining({
+          key: 'PROVIDER_RESPONSE_SCHEMA',
+          status: 'PASSED',
+          schemaName: 'governed_deliverable_v1',
+          strict: true,
+        }),
+        expect.objectContaining({ key: 'OUTCOME_CONTENT_NORMALIZATION', status: 'NOT_RECORDED' }),
+        expect.objectContaining({ key: 'OUTCOME_POST_VALIDATION', status: 'NOT_RECORDED' }),
+      ]),
+    }))
+    expect(JSON.stringify(result.executionEvidence)).not.toMatch(/activationId|tenantId|customerId|prompt|rawContent/i)
+    expect(GovernedReasoningExecution.prototype.save).toHaveBeenCalled()
+  })
+
+  test('keeps RL out of provider selection when legacy binding metadata lists it as provider context', async () => {
+    const deps = makeLiveDeps()
+    const knowledge = makeKnowledgeBinding()
+    knowledge.binding.providerContextPacks = [
+      {
+        versionId: 'kpv-arl',
+        contentHash: `sha256:${'a'.repeat(64)}`,
+        packType: 'ARL',
+        knowledgeLayer: 'REASONING',
+        executionMode: 'PROVIDER_CONTEXT',
+      },
+      {
+        versionId: 'kpv-rl',
+        contentHash: `sha256:${'b'.repeat(64)}`,
+        packType: 'RL',
+        knowledgeLayer: 'COMMUNICATION_PATTERN',
+        executionMode: 'PROVIDER_CONTEXT',
+      },
+    ]
+    deps.resolveKnowledgeBinding.mockResolvedValue(knowledge)
+
+    await createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      auditRequest: { requestId: 'req-rl-boundary' },
+      deps,
+      payload: makeLivePayload({ idempotencyKey: 'live-test-rl-boundary' }),
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })
+
+    const providerCall = deps.buildProviderSafeContext.mock.calls[0][0]
+    expect(providerCall.knowledgeSelection).toEqual([expect.objectContaining({
+      versionId: 'kpv-arl',
+      packType: 'ARL',
+    })])
+    expect(providerCall.knowledgeSelection).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ versionId: 'kpv-rl' }),
+    ]))
+    expect(providerCall.executionBindings).toEqual([
+      { versionId: 'kpv-arl', contentHash: `sha256:${'a'.repeat(64)}` },
+    ])
+  })
+
+  test('does not mark provider completion passed for a selected pack with no supplied context', async () => {
+    const suppliedHash = `sha256:${'b'.repeat(64)}`
+    const unsuppliedHash = `sha256:${'c'.repeat(64)}`
+    const knowledge = makeKnowledgeBinding()
+    knowledge.binding.providerContextPacks = [
+      {
+        versionId: 'kpv-supplied',
+        contentHash: suppliedHash,
+        knowledgeLayer: 'REASONING',
+        executionMode: 'PROVIDER_CONTEXT',
+      },
+      {
+        versionId: 'kpv-unsupplied',
+        contentHash: unsuppliedHash,
+        knowledgeLayer: 'REASONING',
+        executionMode: 'PROVIDER_CONTEXT',
+      },
+    ]
+    const buildProviderSafeContext = jest.fn(async ({ captureExecutionEvidence }) => {
+      captureExecutionEvidence({
+        contractVersion: 'outcome-studio.component-execution-evidence.v2',
+        providerContextContractVersion: 'OUTCOME_STUDIO_PROVIDER_SAFE_CONTEXT_V1',
+        packs: [
+          {
+            versionId: 'kpv-supplied',
+            contentHash: suppliedHash,
+            knowledgeLayer: 'REASONING',
+            executionMode: 'PROVIDER_CONTEXT',
+            projectedEntryCount: 1,
+            suppliedEntryCount: 1,
+            status: 'NOT_RECORDED',
+            checks: [
+              { key: 'RESOLUTION_VERIFIED', status: 'PASSED' },
+              { key: 'VERSION_CONTENT_LOADED', status: 'PASSED' },
+              { key: 'SAFE_GUIDANCE_PROJECTED', status: 'PASSED' },
+              { key: 'PROVIDER_CONTEXT_SUPPLIED', status: 'PASSED' },
+              { key: 'PROVIDER_COMPLETED', status: 'NOT_RECORDED' },
+            ],
+          },
+          {
+            versionId: 'kpv-unsupplied',
+            contentHash: unsuppliedHash,
+            knowledgeLayer: 'REASONING',
+            executionMode: 'PROVIDER_CONTEXT',
+            projectedEntryCount: 1,
+            suppliedEntryCount: 0,
+            status: 'NOT_SUPPLIED',
+            checks: [
+              { key: 'RESOLUTION_VERIFIED', status: 'PASSED' },
+              { key: 'VERSION_CONTENT_LOADED', status: 'PASSED' },
+              { key: 'SAFE_GUIDANCE_PROJECTED', status: 'PASSED' },
+              { key: 'PROVIDER_CONTEXT_SUPPLIED', status: 'NOT_SUPPLIED' },
+              { key: 'PROVIDER_COMPLETED', status: 'NOT_RECORDED' },
+            ],
+          },
+        ],
+      })
+      return makeLiveProviderContext()
+    })
+    const deps = makeLiveDeps({
+      buildProviderSafeContext,
+      resolveKnowledgeBinding: jest.fn().mockResolvedValue(knowledge),
+    })
+
+    const result = await createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      deps,
+      payload: makeLivePayload({ idempotencyKey: 'live-test-unsupplied-provider-completion' }),
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })
+
+    expect(result.executionEvidence.packs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        versionId: 'kpv-supplied',
+        status: 'PASSED',
+        checks: expect.arrayContaining([
+          expect.objectContaining({ key: 'PROVIDER_COMPLETED', status: 'PASSED' }),
+        ]),
+      }),
+      expect.objectContaining({
+        versionId: 'kpv-unsupplied',
+        status: 'NOT_SUPPLIED',
+        checks: expect.arrayContaining([
+          expect.objectContaining({ key: 'PROVIDER_COMPLETED', status: 'NOT_SUPPLIED' }),
+        ]),
+      }),
+    ]))
+  })
+
+  test('fails closed when a LIVE_TEST adapter does not prove strict response-schema parsing', async () => {
+    const providerResult = makeProviderResult()
+    providerResult.provider = {
+      providerKey: liveDescriptor.providerKey,
+      model: liveDescriptor.model,
+      providerMode: 'LIVE_TEST',
+      liveProvider: true,
+    }
+    providerResult.metadata.responseSchema = {
+      name: 'governed_deliverable_v1',
+      version: '1',
+      strict: false,
+      parsed: true,
+    }
+    const deps = makeLiveDeps({
+      providerAdapter: jest.fn().mockResolvedValue(providerResult),
+    })
+
+    await expect(createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      deps,
+      payload: makeLivePayload({ idempotencyKey: 'live-test-unproved-schema' }),
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })).rejects.toMatchObject({
+      status: 502,
+      code: 'GRR_LIVE_TEST_PROVIDER_RESULT_INVALID',
+      details: { reason: 'LIVE_TEST_PROVIDER_RESULT_INVALID' },
+    })
+    expect(GovernedReasoningExecution.prototype.save).not.toHaveBeenCalled()
+    expect(GovernedRuntimeArtifact.prototype.save).not.toHaveBeenCalled()
+    expect(deps.logAudit).not.toHaveBeenCalled()
+  })
+
   test('fails closed before provider context when accepted truth has no stable section key', async () => {
     const frameworkPackage = makeFrameworkPackage()
     frameworkPackage.sections[0] = {
@@ -1700,6 +1968,49 @@ describe('Governed Reasoning Runtime models and service', () => {
     expect(deps.resolveRuntimeInstance).not.toHaveBeenCalled()
     expect(GovernedReasoningExecution.findOne).not.toHaveBeenCalled()
     expect(deps.providerAdapter).not.toHaveBeenCalled()
+  })
+
+  test('propagates only a bounded genuine safe-context diagnostic before provider execution', async () => {
+    const safeContextError = Object.assign(
+      new Error('Provider-safe context could not be created.'),
+      {
+        status: 422,
+        code: 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED',
+        details: {
+          reason: 'PROVIDER_SAFE_CONTEXT_BLOCKED',
+          safeContextPolicyKey: 'OUTCOME_STUDIO_PROVIDER_SAFE_CONTEXT_V1',
+        },
+      },
+    )
+    Object.defineProperties(safeContextError, {
+      internalFailureStage: { value: 'REQUIRED_GUIDANCE_ADMISSION', enumerable: false },
+      internalDiagnosticCode: { value: 'REQUIRED_GUIDANCE_MISSING', enumerable: false },
+    })
+    const deps = makeLiveDeps({
+      buildProviderSafeContext: jest.fn().mockRejectedValue(safeContextError),
+    })
+
+    try {
+      await createGovernedReasoningExecution({
+        actorUserId: ACTOR_ID,
+        deps,
+        payload: makeLivePayload({ idempotencyKey: 'live-test-safe-context-diagnostic' }),
+        runtimeInstanceId: RUNTIME_INSTANCE_ID,
+        scopes: {},
+      })
+      throw new Error('Expected governed reasoning execution to fail closed.')
+    } catch (error) {
+      expect(error).toMatchObject({ status: 422, code: 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED' })
+      expect(error.internalFailureStage).toBe('REQUIRED_GUIDANCE_ADMISSION')
+      expect(error.internalDiagnosticCode).toBe('REQUIRED_GUIDANCE_MISSING')
+      expect(Object.keys(error.details)).not.toEqual(expect.arrayContaining([
+        'internalFailureStage',
+        'internalDiagnosticCode',
+      ]))
+    }
+    expect(deps.providerAdapter).not.toHaveBeenCalled()
+    expect(GovernedReasoningExecution.prototype.save).not.toHaveBeenCalled()
+    expect(deps.logAudit).not.toHaveBeenCalled()
   })
 
   test.each([

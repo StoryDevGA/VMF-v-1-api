@@ -74,6 +74,7 @@ export const AUDIT_ACTIONS = Object.freeze({
   GOVERNANCE_OVERRIDE_APPLIED: 'GOVERNANCE_OVERRIDE_APPLIED',
   GOVERNANCE_OVERRIDE_DENIED: 'GOVERNANCE_OVERRIDE_DENIED',
   KNOWLEDGE_PACK_GOVERNANCE_MAPPING_APPLIED: 'KNOWLEDGE_PACK_GOVERNANCE_MAPPING_APPLIED',
+  SS005_BOUNDARY_POLICY_APPLIED: 'SS005_BOUNDARY_POLICY_APPLIED',
   FRAMEWORK_PACKAGE_CREATED: 'FRAMEWORK_PACKAGE_CREATED',
   FRAMEWORK_PACKAGE_UPDATED: 'FRAMEWORK_PACKAGE_UPDATED',
   FRAMEWORK_PACKAGE_VALIDATED: 'FRAMEWORK_PACKAGE_VALIDATED',
@@ -100,6 +101,7 @@ export const AUDIT_ACTIONS = Object.freeze({
   OUTCOME_RESPONSE_GENERATED: 'OUTCOME_RESPONSE_GENERATED',
   OUTCOME_DRAFT_GENERATED: 'OUTCOME_DRAFT_GENERATED',
   OUTCOME_DRAFT_REFINED: 'OUTCOME_DRAFT_REFINED',
+  OUTCOME_DRAFT_REVISED_FROM_APPROVED: 'OUTCOME_DRAFT_REVISED_FROM_APPROVED',
   OUTCOME_DRAFT_APPROVED: 'OUTCOME_DRAFT_APPROVED',
   OUTCOME_DRAFT_DISCARDED: 'OUTCOME_DRAFT_DISCARDED',
   ASSET_GENERATED: 'ASSET_GENERATED',
@@ -530,6 +532,8 @@ const buildAuditSummary = ({ action, resourceType, resourceId, diff, display }) 
       return clampSummary(`${actorLabel} generated Outcome Studio draft ${targetLabel}`)
     case AUDIT_ACTIONS.OUTCOME_DRAFT_REFINED:
       return clampSummary(`${actorLabel} refined Outcome Studio draft ${targetLabel}`)
+    case AUDIT_ACTIONS.OUTCOME_DRAFT_REVISED_FROM_APPROVED:
+      return clampSummary(`${actorLabel} reopened Outcome Studio approved output ${targetLabel} as a new draft`)
     case AUDIT_ACTIONS.OUTCOME_DRAFT_DISCARDED:
       return clampSummary(`${actorLabel} discarded Outcome Studio draft ${targetLabel}`)
     case AUDIT_ACTIONS.ASSET_GENERATED:
@@ -562,6 +566,8 @@ const buildAuditSummary = ({ action, resourceType, resourceId, diff, display }) 
       return clampSummary(`${actorLabel} deleted Knowledge Pack ${targetLabel}`)
     case AUDIT_ACTIONS.KNOWLEDGE_PACK_GOVERNANCE_MAPPING_APPLIED:
       return clampSummary(`${actorLabel} applied governed Knowledge Pack metadata ${targetLabel}`)
+    case AUDIT_ACTIONS.SS005_BOUNDARY_POLICY_APPLIED:
+      return clampSummary(`${actorLabel} applied SS-005 Knowledge Pack boundary policy ${targetLabel}`)
     case AUDIT_ACTIONS.VALIDATION_STARTED:
       return clampSummary(`${actorLabel} started validation for ${targetLabel}`)
     case AUDIT_ACTIONS.VALIDATION_PASSED:

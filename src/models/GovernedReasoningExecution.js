@@ -153,6 +153,10 @@ const governedReasoningExecutionSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.Mixed,
       default: () => ({}),
     },
+    executionEvidence: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null,
+    },
     certifiedTruth: {
       type: mongoose.Schema.Types.Mixed,
       default: () => ({}),

@@ -229,6 +229,11 @@ describe('OpenAI Outcome Studio provider adapter', () => {
       signal: expect.any(AbortSignal),
     }))
     const body = JSON.parse(request.body)
+    expect(body.instructions).toContain('customer-visible')
+    expect(body.instructions).toContain('ordinary business language')
+    expect(body.instructions).toContain('internal governance')
+    expect(body.instructions).toContain('knowledge packs')
+    expect(body.instructions).not.toMatch(/\bprompts?\b/i)
     expect(body).toEqual(expect.objectContaining({
       model: 'approved-test-model',
       store: false,
@@ -278,6 +283,12 @@ describe('OpenAI Outcome Studio provider adapter', () => {
           totalTokens: 1850,
         },
         storedByProvider: false,
+        responseSchema: {
+          name: 'governed_deliverable_v1',
+          version: '1',
+          strict: true,
+          parsed: true,
+        },
       }),
     }))
     expect(JSON.stringify(result)).not.toContain('test-secret-not-real')
@@ -328,9 +339,53 @@ describe('OpenAI Outcome Studio provider adapter', () => {
   })
 
   test('rejects internal implementation language before returning provider content', async () => {
+    const warn = jest.spyOn(logger, 'warn').mockImplementation(() => {})
     const unsafe = {
       ...validStructuredOutput,
       summary: 'The Knowledge Pack and provider context confirm this recommendation.',
+    }
+    const adapter = makeAdapter({
+      fetchImpl: jest.fn().mockResolvedValue(makeResponse({
+        body: makeProviderBody({
+          output: [{
+            type: 'message',
+            content: [{ type: 'output_text', text: JSON.stringify(unsafe) }],
+          }],
+        }),
+      })),
+    })
+
+    await expect(adapter({ providerContext })).rejects.toMatchObject({
+      code: 'GRR_LIVE_TEST_PROVIDER_REQUEST_FAILED',
+      details: {
+        reason: 'LIVE_TEST_PROVIDER_CUSTOMER_LANGUAGE_BLOCKED',
+        violation: {
+          code: 'CUSTOMER_LANGUAGE_PROHIBITED_TERM',
+          path: 'providerOutput.summary',
+          termKey: 'KNOWLEDGE_PACK',
+        },
+      },
+    })
+    expect(warn).toHaveBeenCalledWith({
+      reasonCode: 'LIVE_TEST_PROVIDER_CUSTOMER_LANGUAGE_BLOCKED',
+      violation: {
+        code: 'CUSTOMER_LANGUAGE_PROHIBITED_TERM',
+        path: 'providerOutput.summary',
+        termKey: 'KNOWLEDGE_PACK',
+      },
+    }, 'outcome studio live provider request failed')
+  })
+
+  test('rejects prompt terminology before returning provider content', async () => {
+    const unsafe = {
+      ...validStructuredOutput,
+      sections: [
+        ...validStructuredOutput.sections,
+        {
+          heading: 'Internal note',
+          narrative: 'The prompt asked the system to produce this recommendation.',
+        },
+      ],
     }
     const adapter = makeAdapter({
       fetchImpl: jest.fn().mockResolvedValue(makeResponse({

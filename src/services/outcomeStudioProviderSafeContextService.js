@@ -1,5 +1,12 @@
 import KnowledgePackVersion from '../models/KnowledgePackVersion.js'
-import { KNOWLEDGE_PACK_EXECUTION_MODES, KNOWLEDGE_PACK_LAYERS } from '../constants/knowledgeRuntime.js'
+import {
+  KNOWLEDGE_PACK_BOUNDARIES,
+  KNOWLEDGE_PACK_EXECUTION_MODES,
+  KNOWLEDGE_PACK_LAYERS,
+  KNOWLEDGE_PACK_RECEIPT_TYPES,
+  resolveKnowledgePackBoundary,
+  resolveKnowledgePackReceiptType,
+} from '../constants/knowledgeRuntime.js'
 import { OUTCOME_STUDIO_PROVIDER_SAFE_CONTEXT_POLICY } from '../constants/outcomeStudioReadiness.js'
 import logger from '../config/logger.js'
 
@@ -30,6 +37,16 @@ const EFFECTIVE_REQUEST_KEYS = Object.freeze(['executionIntent', 'draftContext']
 const TRUTH_SOURCE_KEYS = Object.freeze(['acceptedTruth'])
 const TRUTH_ITEM_KEYS = Object.freeze(['label', 'content'])
 const KNOWLEDGE_SELECTION_KEYS = Object.freeze(['versionId', 'knowledgeLayer', 'executionMode'])
+const EXECUTION_BINDING_KEYS = Object.freeze(['versionId', 'contentHash'])
+
+export const OUTCOME_STUDIO_EXECUTION_EVIDENCE_CONTRACT = 'outcome-studio.component-execution-evidence.v2'
+export const OUTCOME_STUDIO_EXECUTION_EVIDENCE_STATUSES = Object.freeze({
+  PASSED: 'PASSED',
+  FAILED: 'FAILED',
+  NOT_SUPPLIED: 'NOT_SUPPLIED',
+  SKIPPED: 'SKIPPED',
+  NOT_RECORDED: 'NOT_RECORDED',
+})
 
 export const OUTCOME_STUDIO_PROVIDER_SAFEGUARDS = Object.freeze([
   'CUSTOMER_LANGUAGE_ONLY',
@@ -71,6 +88,19 @@ const GUIDANCE_KEYS = Object.freeze([
   'validationCriteria',
   'prohibitedOutputBoundaries',
 ])
+const SAFE_CANDIDATE_DISPOSITIONS = Object.freeze({
+  PROJECTED: 'PROJECTED',
+  CATEGORY_LIMITED: 'CATEGORY_LIMITED',
+  NO_SAFE_GUIDANCE: 'NO_SAFE_GUIDANCE',
+})
+const EXECUTION_EVIDENCE_BOUNDARIES = new Set(Object.values(KNOWLEDGE_PACK_BOUNDARIES))
+const EXECUTION_EVIDENCE_RECEIPT_TYPES = new Set(Object.values(KNOWLEDGE_PACK_RECEIPT_TYPES))
+const ADMISSION_DISPOSITIONS = Object.freeze({
+  ADMITTED: 'ADMITTED',
+  CONTEXT_LIMIT: 'CONTEXT_LIMIT',
+  NOT_APPLICABLE: 'NOT_APPLICABLE',
+  NOT_ADMITTED: 'NOT_ADMITTED',
+})
 const FRAMEWORK_GUIDANCE_REFERENCE_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,178}[a-z0-9])?$/
 const FRAMEWORK_GUIDANCE_APPLICATION_GUIDANCE = Object.freeze({
   businessInstructions: Object.freeze([
@@ -141,7 +171,20 @@ const logSafeContextFailure = ({
   }, 'outcome studio provider safe context blocked')
 }
 
-const appError = () => {
+const getInternalDiagnostic = ({ stage, reasonCode } = {}) => {
+  const failureStage = Object.prototype.hasOwnProperty.call(SAFE_CONTEXT_DIAGNOSTIC_REASONS, stage)
+    ? stage
+    : undefined
+  const diagnosticCode = GUIDANCE_PROJECTION_REASONS.has(reasonCode)
+    ? reasonCode
+    : SAFE_CONTEXT_DIAGNOSTIC_REASONS[failureStage]
+  return {
+    ...(failureStage ? { internalFailureStage: failureStage } : {}),
+    ...(diagnosticCode ? { internalDiagnosticCode: diagnosticCode } : {}),
+  }
+}
+
+const appError = ({ stage, reasonCode } = {}) => {
   const error = new Error('Provider-safe context could not be created.')
   error.status = 422
   error.code = 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED'
@@ -149,6 +192,32 @@ const appError = () => {
     reason: 'PROVIDER_SAFE_CONTEXT_BLOCKED',
     safeContextPolicyKey: OUTCOME_STUDIO_PROVIDER_SAFE_CONTEXT_POLICY,
   }
+  const diagnostic = getInternalDiagnostic({ stage, reasonCode })
+  Object.entries(diagnostic).forEach(([key, value]) => {
+    Object.defineProperty(error, key, {
+      configurable: false,
+      enumerable: false,
+      value,
+      writable: false,
+    })
+  })
+  return error
+}
+
+const enrichAppError = (error, { stage, reasonCode } = {}) => {
+  if (error?.code !== 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED') return appError({ stage, reasonCode })
+  const diagnostic = getInternalDiagnostic({
+    stage,
+    reasonCode: reasonCode || error.internalSafeContextReasonCode,
+  })
+  Object.entries(diagnostic).forEach(([key, value]) => {
+    Object.defineProperty(error, key, {
+      configurable: true,
+      enumerable: false,
+      value,
+      writable: true,
+    })
+  })
   return error
 }
 
@@ -466,8 +535,13 @@ const categoryForSection = ({ heading, knowledgeLayer, executionMode }) => {
 }
 
 const projectGuidanceCandidates = (versions, selectionById, diagnosticState) => {
-  const guidance = Object.fromEntries(GUIDANCE_KEYS.map((key) => [key, []]))
+  const candidatesByCategory = Object.fromEntries(GUIDANCE_KEYS.map((key) => [key, []]))
   const seen = Object.fromEntries(GUIDANCE_KEYS.map((key) => [key, new Set()]))
+  const indexByIdentity = Object.fromEntries(GUIDANCE_KEYS.map((key) => [key, new Map()]))
+  const safeCandidateEntryCountsByVersionId = new Map(
+    versions.map((version) => [version.versionId, 0]),
+  )
+  const originsByCandidate = new Map()
   const discardedCountsByReason = emptyDiscardCounts()
   for (const version of versions) {
     const selection = selectionById.get(version.versionId)
@@ -490,10 +564,6 @@ const projectGuidanceCandidates = (versions, selectionById, diagnosticState) => 
         discardedCountsByReason.unclassifiedSection += 1
         continue
       }
-      if (guidance[category].length >= MAX_GUIDANCE_ENTRIES) {
-        discardedCountsByReason.categoryLimit += 1
-        continue
-      }
       const entry = cleanGuidance(section)
       const identity = entry.toLowerCase()
       if (!entry) {
@@ -501,20 +571,68 @@ const projectGuidanceCandidates = (versions, selectionById, diagnosticState) => 
         continue
       }
       if (seen[category].has(identity)) {
+        const candidateIndex = indexByIdentity[category].get(identity)
+        const candidate = candidatesByCategory[category][candidateIndex]
+        if (candidate && !candidate.origins.has(version.versionId)) {
+          candidate.origins.add(version.versionId)
+          safeCandidateEntryCountsByVersionId.set(
+            version.versionId,
+            (safeCandidateEntryCountsByVersionId.get(version.versionId) || 0) + 1,
+          )
+        }
         discardedCountsByReason.duplicateSection += 1
         continue
       }
       seen[category].add(identity)
-      guidance[category].push(entry)
+      indexByIdentity[category].set(identity, candidatesByCategory[category].length)
+      candidatesByCategory[category].push({
+        entry,
+        origins: new Set([version.versionId]),
+      })
+      safeCandidateEntryCountsByVersionId.set(
+        version.versionId,
+        (safeCandidateEntryCountsByVersionId.get(version.versionId) || 0) + 1,
+      )
     }
   }
-  return { discardedCountsByReason, guidance }
+  const guidance = Object.fromEntries(GUIDANCE_KEYS.map((key) => [key, []]))
+  const versionOrder = versions.map((version) => version.versionId)
+  for (const category of GUIDANCE_KEYS) {
+    const candidates = candidatesByCategory[category]
+    const selectedIndexes = []
+    const selected = new Set()
+    const selectCandidate = (candidateIndex) => {
+      if (candidateIndex < 0 || selected.has(candidateIndex) || selectedIndexes.length >= MAX_GUIDANCE_ENTRIES) return
+      selected.add(candidateIndex)
+      selectedIndexes.push(candidateIndex)
+    }
+    for (const versionId of versionOrder) {
+      selectCandidate(candidates.findIndex((candidate, candidateIndex) => (
+        !selected.has(candidateIndex) && candidate.origins.has(versionId)
+      )))
+    }
+    for (let index = 0; index < candidates.length && selectedIndexes.length < MAX_GUIDANCE_ENTRIES; index += 1) {
+      selectCandidate(index)
+    }
+    discardedCountsByReason.categoryLimit += Math.max(0, candidates.length - selectedIndexes.length)
+    for (const candidateIndex of selectedIndexes) {
+      const targetIndex = guidance[category].length
+      guidance[category].push(candidates[candidateIndex].entry)
+      originsByCandidate.set(`${category}:${targetIndex}`, candidates[candidateIndex].origins)
+    }
+  }
+  return {
+    discardedCountsByReason,
+    guidance,
+    originsByCandidate,
+    safeCandidateEntryCountsByVersionId,
+  }
 }
 
 const cloneGuidance = () => Object.fromEntries(GUIDANCE_KEYS.map((key) => [key, []]))
 const fits = (context) => JSON.stringify(context).length <= SAFE_CONTEXT_LIMIT
 
-const admitGuidance = (baseContext, candidates) => {
+const admitGuidance = (baseContext, candidates, evidenceState = null) => {
   const context = { ...baseContext, guidance: cloneGuidance() }
   if (!fits(context)) fail()
   const admitted = new Set()
@@ -522,6 +640,7 @@ const admitGuidance = (baseContext, candidates) => {
     const value = candidates[category]?.[index]
     if (!value) {
       if (required) fail()
+      evidenceState?.rejectedCandidateKeys?.add(`${category}:${index}`)
       return false
     }
     const candidate = {
@@ -530,10 +649,12 @@ const admitGuidance = (baseContext, candidates) => {
     }
     if (!fits(candidate)) {
       if (required) fail()
+      evidenceState?.rejectedCandidateKeys?.add(`${category}:${index}`)
       return false
     }
     context.guidance = candidate.guidance
     admitted.add(`${category}:${index}`)
+    evidenceState?.admittedCandidateKeys?.add(`${category}:${index}`)
     return true
   }
 
@@ -553,6 +674,101 @@ const admitGuidance = (baseContext, candidates) => {
     }
   }
   return context
+}
+
+const assertExecutionBindings = ({ executionBindings, knowledgeSelection, versions }) => {
+  if (!Array.isArray(executionBindings)
+    || executionBindings.length !== knowledgeSelection.length
+    || executionBindings.length !== versions.length) fail()
+  const bindingByVersionId = new Map()
+  for (const binding of executionBindings) {
+    if (!hasExactKeys(binding, EXECUTION_BINDING_KEYS)
+      || !safeToken(binding.versionId)
+      || !/^sha256:[a-f0-9]{64}$/.test(binding.contentHash)
+      || bindingByVersionId.has(binding.versionId)) fail()
+    bindingByVersionId.set(binding.versionId, binding)
+  }
+  for (const selection of knowledgeSelection) {
+    const binding = bindingByVersionId.get(selection.versionId)
+    const version = versions.find((candidate) => candidate.versionId === selection.versionId)
+    if (!binding || !version || version.contentHash !== binding.contentHash) fail()
+  }
+  return bindingByVersionId
+}
+
+const buildExecutionEvidenceReceipt = ({
+  executionBindings,
+  knowledgeSelection,
+  originsByCandidate,
+  admittedCandidateKeys,
+  rejectedCandidateKeys,
+  safeCandidateEntryCountsByVersionId,
+} = {}) => {
+  const status = OUTCOME_STUDIO_EXECUTION_EVIDENCE_STATUSES
+  return {
+    contractVersion: OUTCOME_STUDIO_EXECUTION_EVIDENCE_CONTRACT,
+    providerContextContractVersion: OUTCOME_STUDIO_PROVIDER_SAFE_CONTEXT_POLICY,
+    packs: knowledgeSelection.map((selection) => {
+      const projectedCandidateKeys = Array.from(originsByCandidate.entries())
+        .filter(([, origins]) => origins.has(selection.versionId))
+        .map(([key]) => key)
+      const admittedKeys = projectedCandidateKeys.filter((key) => admittedCandidateKeys.has(key))
+      const categories = Array.from(new Set(admittedKeys.map((key) => key.split(':')[0])))
+      const sharedContribution = admittedKeys.some((key) => originsByCandidate.get(key)?.size > 1)
+      const projected = projectedCandidateKeys.length > 0
+      const supplied = admittedKeys.length > 0
+      const safeCandidateEntryCount = Math.max(
+        0,
+        Number(safeCandidateEntryCountsByVersionId?.get(selection.versionId) || 0),
+      )
+      const projectionDisposition = projected
+        ? SAFE_CANDIDATE_DISPOSITIONS.PROJECTED
+        : safeCandidateEntryCount > 0
+          ? SAFE_CANDIDATE_DISPOSITIONS.CATEGORY_LIMITED
+          : SAFE_CANDIDATE_DISPOSITIONS.NO_SAFE_GUIDANCE
+      const admissionDisposition = supplied
+        ? ADMISSION_DISPOSITIONS.ADMITTED
+        : projectedCandidateKeys.some((key) => rejectedCandidateKeys?.has(key))
+          ? ADMISSION_DISPOSITIONS.CONTEXT_LIMIT
+          : ADMISSION_DISPOSITIONS.NOT_APPLICABLE
+      const checks = [
+        ['RESOLUTION_VERIFIED', status.PASSED, 'Selected activation/version content hash verified.'],
+        ['VERSION_CONTENT_LOADED', status.PASSED, 'Exact selected version content loaded.'],
+        ['SAFE_GUIDANCE_PROJECTED', projected ? status.PASSED : status.NOT_SUPPLIED,
+          projected ? `${projectedCandidateKeys.length} safe guidance entries projected.` : 'No safe guidance entry was projected from this version.'],
+        ['PROVIDER_CONTEXT_SUPPLIED', supplied ? status.PASSED : status.NOT_SUPPLIED,
+          supplied
+            ? `${admittedKeys.length} guidance entries supplied${sharedContribution ? ' with shared/deduplicated attribution' : ''}.`
+            : 'No guidance entry from this version was admitted to provider context.'],
+        ['PROVIDER_COMPLETED', status.NOT_RECORDED, 'Provider completion is recorded only after the adapter returns.'],
+      ].map(([key, checkStatus, message]) => ({ key, status: checkStatus, message }))
+      const overallStatus = checks.every((check) => check.status === status.PASSED)
+        ? status.PASSED
+        : checks.some((check) => check.status === status.FAILED)
+          ? status.FAILED
+          : checks.some((check) => check.status === status.NOT_SUPPLIED)
+            ? status.NOT_SUPPLIED
+            : status.NOT_RECORDED
+      return {
+        versionId: selection.versionId,
+        contentHash: executionBindings.find((binding) => binding.versionId === selection.versionId)?.contentHash || '',
+        knowledgeLayer: selection.knowledgeLayer,
+        executionMode: selection.executionMode,
+        packType: selection.packType || '',
+        boundary: resolveKnowledgePackBoundary(selection),
+        receiptType: resolveKnowledgePackReceiptType(selection),
+        projectedEntryCount: projectedCandidateKeys.length,
+        safeCandidateEntryCount,
+        suppliedEntryCount: admittedKeys.length,
+        suppliedCategories: categories,
+        sharedContribution,
+        projectionDisposition,
+        admissionDisposition,
+        status: overallStatus,
+        checks,
+      }
+    }),
+  }
 }
 
 const loadSelectedVersions = async (knowledgeSelection) => {
@@ -641,6 +857,8 @@ export const buildOutcomeStudioProviderSafeContext = async ({
   safeRequest,
   truthSource,
   knowledgeSelection,
+  executionBindings,
+  captureExecutionEvidence,
 } = {}) => {
   let stage = 'REQUEST_VALIDATION'
   let selectedCount = 0
@@ -659,17 +877,22 @@ export const buildOutcomeStudioProviderSafeContext = async ({
     selectedCount = knowledgeSelection.length
     const versionIds = new Set()
     for (const selection of knowledgeSelection) {
-      if (!hasExactKeys(selection, KNOWLEDGE_SELECTION_KEYS)
+      const selectionHasBaseKeys = hasExactKeys(selection, KNOWLEDGE_SELECTION_KEYS)
+      const selectionHasOptionalPackType = hasExactKeys(selection, [...KNOWLEDGE_SELECTION_KEYS, 'packType'])
+      if ((!selectionHasBaseKeys && !selectionHasOptionalPackType)
         || !safeToken(selection.versionId)
         || !Object.values(KNOWLEDGE_PACK_LAYERS).includes(selection.knowledgeLayer)
         || !Object.values(KNOWLEDGE_PACK_EXECUTION_MODES).includes(selection.executionMode)
-        || selection.executionMode === KNOWLEDGE_PACK_EXECUTION_MODES.SYSTEM_ONLY
+        || resolveKnowledgePackBoundary(selection) !== KNOWLEDGE_PACK_BOUNDARIES.GENERATION_CONTEXT
         || versionIds.has(selection.versionId)) fail()
       versionIds.add(selection.versionId)
     }
     stage = 'SELECTED_VERSION_LOOKUP'
     const versions = await loadSelectedVersions(knowledgeSelection)
     foundCount = versions.length
+    if (executionBindings !== undefined || typeof captureExecutionEvidence === 'function') {
+      assertExecutionBindings({ executionBindings, knowledgeSelection, versions })
+    }
     const selectionById = new Map(knowledgeSelection.map((selection) => [selection.versionId, selection]))
     stage = 'GUIDANCE_PROJECTION'
     const projection = projectGuidanceCandidates(versions, selectionById, diagnosticState)
@@ -687,18 +910,33 @@ export const buildOutcomeStudioProviderSafeContext = async ({
     ]
     stage = 'REQUIRED_GUIDANCE_ADMISSION'
     if (missingCategories.length) fail()
+    const evidenceState = {
+      admittedCandidateKeys: new Set(),
+      rejectedCandidateKeys: new Set(),
+    }
     const context = admitGuidance({
       contractVersion: OUTCOME_STUDIO_PROVIDER_SAFE_CONTEXT_POLICY,
       businessRequest: { ...safeRequest.businessRequest },
       draftContext: { ...safeRequest.draftContext },
       truthSummaries,
       safeguards: [...OUTCOME_STUDIO_PROVIDER_SAFEGUARDS],
-    }, candidates)
+    }, candidates, evidenceState)
     admittedCountsByCategory = Object.fromEntries(
       GUIDANCE_KEYS.map((key) => [key, context.guidance[key].length]),
     )
     stage = 'CONTEXT_VALIDATION'
-    return assertOutcomeStudioProviderSafeContext(context)
+    const validatedContext = assertOutcomeStudioProviderSafeContext(context)
+    if (typeof captureExecutionEvidence === 'function') {
+      captureExecutionEvidence(buildExecutionEvidenceReceipt({
+        executionBindings,
+        knowledgeSelection,
+        originsByCandidate: projection.originsByCandidate,
+        admittedCandidateKeys: evidenceState.admittedCandidateKeys,
+        rejectedCandidateKeys: evidenceState.rejectedCandidateKeys,
+        safeCandidateEntryCountsByVersionId: projection.safeCandidateEntryCountsByVersionId,
+      }))
+    }
+    return validatedContext
   } catch (error) {
     logSafeContextFailure({
       admittedCountsByCategory,
@@ -710,8 +948,10 @@ export const buildOutcomeStudioProviderSafeContext = async ({
       selectedCount,
       stage,
     })
-    if (error?.code === 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED') throw error
-    throw appError()
+    if (error?.code === 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED') {
+      throw enrichAppError(error, { stage, reasonCode: error.internalSafeContextReasonCode })
+    }
+    throw appError({ stage })
   }
 }
 
@@ -782,8 +1022,10 @@ export const buildOutcomeFrameworkGuidanceProviderSafeContext = async ({
       selectedCount,
       stage,
     })
-    if (error?.code === 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED') throw error
-    throw appError()
+    if (error?.code === 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED') {
+      throw enrichAppError(error, { stage, reasonCode: error.internalSafeContextReasonCode })
+    }
+    throw appError({ stage })
   }
 }
 

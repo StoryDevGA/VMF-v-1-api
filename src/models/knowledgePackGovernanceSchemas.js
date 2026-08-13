@@ -3,6 +3,7 @@ import mongoose from 'mongoose'
 import { OUTCOME_KNOWLEDGE_PACK_TYPES } from '../constants/outcomeKnowledgePacks.js'
 import {
   KNOWLEDGE_PACK_LAYERS,
+  KNOWLEDGE_PACK_BOUNDARIES,
   KNOWLEDGE_PACK_RELATIONSHIP_CARDINALITIES,
   KNOWLEDGE_PACK_RELATIONSHIP_CONTRACT_VERSION,
   KNOWLEDGE_PACK_RELATIONSHIP_TIMINGS,
@@ -24,6 +25,13 @@ export const knowledgePackLayerField = {
   type: String,
   uppercase: true,
   enum: Object.values(KNOWLEDGE_PACK_LAYERS),
+  default: undefined,
+}
+
+export const knowledgePackBoundaryField = {
+  type: String,
+  uppercase: true,
+  enum: Object.values(KNOWLEDGE_PACK_BOUNDARIES),
   default: undefined,
 }
 
@@ -128,6 +136,9 @@ export const normalizeKnowledgePackGovernanceFields = (
 ) => {
   if (document.knowledgeLayer !== undefined) {
     document.knowledgeLayer = normalizeToken(document.knowledgeLayer) || undefined
+  }
+  if (document.boundary !== undefined) {
+    document.boundary = normalizeToken(document.boundary) || undefined
   }
   if (document.capabilityKey !== undefined) {
     document.capabilityKey = normalizeLowerKey(document.capabilityKey) || undefined

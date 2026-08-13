@@ -96,6 +96,65 @@ export const KNOWLEDGE_PACK_EXECUTION_MODES = Object.freeze({
   SYSTEM_ONLY: 'SYSTEM_ONLY',
 })
 
+export const KNOWLEDGE_PACK_BOUNDARIES = Object.freeze({
+  GENERATION_CONTEXT: 'GENERATION_CONTEXT',
+  PRE_GENERATION_VALIDATION: 'PRE_GENERATION_VALIDATION',
+  POST_GENERATION_VALIDATION: 'POST_GENERATION_VALIDATION',
+  LINEAGE_CERTIFICATION: 'LINEAGE_CERTIFICATION',
+})
+
+export const KNOWLEDGE_PACK_RECEIPT_TYPES = Object.freeze({
+  PROVIDER_EXECUTION: 'PROVIDER_EXECUTION',
+  PRE_VALIDATION: 'PRE_VALIDATION',
+  POST_VALIDATION: 'POST_VALIDATION',
+  LINEAGE_CERTIFICATION: 'LINEAGE_CERTIFICATION',
+})
+
+const normalizeKnowledgeRuntimeToken = (value) => String(value ?? '').trim().toUpperCase()
+
+export const resolveKnowledgePackBoundary = (pack = {}) => {
+  const explicitBoundary = normalizeKnowledgeRuntimeToken(pack.boundary || pack.executionBoundary)
+  if (Object.values(KNOWLEDGE_PACK_BOUNDARIES).includes(explicitBoundary)) return explicitBoundary
+
+  const packType = normalizeKnowledgeRuntimeToken(pack.packType)
+  const executionMode = normalizeKnowledgeRuntimeToken(pack.executionMode)
+  // RL is a rendering/review concern and must not be admitted to the provider
+  // writing context merely because older activation metadata still says
+  // PROVIDER_CONTEXT. Explicit PRE/POST/SYSTEM metadata remains authoritative.
+  if (packType === 'RL' && executionMode === KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT) {
+    return KNOWLEDGE_PACK_BOUNDARIES.POST_GENERATION_VALIDATION
+  }
+
+  switch (executionMode) {
+    case KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT:
+      return KNOWLEDGE_PACK_BOUNDARIES.GENERATION_CONTEXT
+    case KNOWLEDGE_PACK_EXECUTION_MODES.PRE_VALIDATION:
+    case KNOWLEDGE_PACK_EXECUTION_MODES.SYSTEM_ONLY:
+      return KNOWLEDGE_PACK_BOUNDARIES.PRE_GENERATION_VALIDATION
+    case KNOWLEDGE_PACK_EXECUTION_MODES.POST_VALIDATION:
+      return KNOWLEDGE_PACK_BOUNDARIES.POST_GENERATION_VALIDATION
+    default:
+      if (packType === 'ARL') return KNOWLEDGE_PACK_BOUNDARIES.GENERATION_CONTEXT
+      if (packType === 'RL') return KNOWLEDGE_PACK_BOUNDARIES.POST_GENERATION_VALIDATION
+      return ''
+  }
+}
+
+export const resolveKnowledgePackReceiptType = (pack = {}) => {
+  switch (resolveKnowledgePackBoundary(pack)) {
+    case KNOWLEDGE_PACK_BOUNDARIES.GENERATION_CONTEXT:
+      return KNOWLEDGE_PACK_RECEIPT_TYPES.PROVIDER_EXECUTION
+    case KNOWLEDGE_PACK_BOUNDARIES.PRE_GENERATION_VALIDATION:
+      return KNOWLEDGE_PACK_RECEIPT_TYPES.PRE_VALIDATION
+    case KNOWLEDGE_PACK_BOUNDARIES.POST_GENERATION_VALIDATION:
+      return KNOWLEDGE_PACK_RECEIPT_TYPES.POST_VALIDATION
+    case KNOWLEDGE_PACK_BOUNDARIES.LINEAGE_CERTIFICATION:
+      return KNOWLEDGE_PACK_RECEIPT_TYPES.LINEAGE_CERTIFICATION
+    default:
+      return ''
+  }
+}
+
 export const KNOWLEDGE_PACK_VISIBILITY_SCOPES = Object.freeze({
   PLATFORM: 'PLATFORM',
   CUSTOMER: 'CUSTOMER',

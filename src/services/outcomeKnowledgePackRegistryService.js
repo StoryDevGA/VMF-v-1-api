@@ -83,15 +83,22 @@ const normalizePackCategory = (value, packType) =>
 const normalizeTokenList = (values) => Array.isArray(values)
   ? [...new Set(values.map(normalizeToken).filter(Boolean))]
   : []
-const hasCompleteGovernanceMetadata = (value = {}) => Boolean(
+const requiresCapabilityKey = (packType) => (
+  normalizeToken(packType) !== OUTCOME_KNOWLEDGE_PACK_TYPES.TRUTH_CERTIFICATION
+)
+const hasCompleteGovernanceMetadata = (value = {}, { packType } = {}) => Boolean(
   normalizeToken(value.knowledgeLayer)
-    && normalizeLowerKey(value.capabilityKey)
+    && (!requiresCapabilityKey(packType) || normalizeLowerKey(value.capabilityKey))
     && normalizeToken(value.knowledgeAssetId)
     && normalizeTokenList(value.workspaceCompatibility).length > 0,
 )
-const getMissingGovernanceFields = (value = {}) => [
+const getMissingGovernanceFields = (value = {}, { packType } = {}) => [
   ...(!normalizeToken(value.knowledgeLayer) ? ['knowledgeLayer'] : []),
-  ...(!normalizeLowerKey(value.capabilityKey) ? ['capabilityKey'] : []),
+  ...(
+    requiresCapabilityKey(packType) && !normalizeLowerKey(value.capabilityKey)
+      ? ['capabilityKey']
+      : []
+  ),
   ...(!normalizeToken(value.knowledgeAssetId) ? ['knowledgeAssetId'] : []),
   ...(normalizeTokenList(value.workspaceCompatibility).length === 0
     ? ['workspaceCompatibility']
@@ -520,6 +527,7 @@ const buildSourceDocumentDraftPackUpdate = ({
       latestSemanticVersion: semanticVersion,
       sourceAuthority: normalizeText(packDefinition.sourceAuthority),
       executionMode: normalizeToken(packDefinition.executionMode || KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT),
+      boundary: normalizeToken(packDefinition.boundary),
       visibility: scope.visibility,
       customerId: scope.customerId || null,
       tenantId: scope.tenantId || null,
@@ -582,6 +590,7 @@ const SOURCE_DOCUMENT_IMPORT_PACK_FIELDS = [
   'latestSemanticVersion',
   'sourceAuthority',
   'executionMode',
+  'boundary',
   'visibility',
   'customerId',
   'tenantId',
@@ -837,6 +846,49 @@ const findKnowledgePackVersionWithContent = async ({ packId, versionId, session 
     : query
 }
 
+// Server-side execution seam only. Callers must keep the returned raw content
+// inside a governed validator and must never project it to provider context or
+// customer-visible Outcome Studio evidence.
+export const loadOutcomeKnowledgePackVersionContent = async ({
+  packId = '',
+  versionId = '',
+} = {}) => {
+  const normalizedPackId = normalizeText(packId)
+  const normalizedVersionId = normalizeText(versionId)
+  if (!normalizedVersionId) return null
+
+  const filter = { versionId: normalizedVersionId }
+  if (normalizedPackId) filter.packId = normalizedPackId
+  const query = KnowledgePackVersion.findOne(filter)
+  const version = query && typeof query.select === 'function'
+    ? await query.select('+content')
+    : await query
+  if (!version) return null
+
+  const plain = toRawPlainObject(version) || {}
+  if (typeof plain.content !== 'string' || !plain.content.trim()) {
+    return {
+      available: false,
+      reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS.PACK_VERSION_CONTENT_NOT_AVAILABLE,
+      packId: normalizeText(plain.packId),
+      versionId: normalizeText(plain.versionId),
+      packKey: normalizeLowerKey(plain.packKey),
+      contentHash: normalizeText(plain.contentHash),
+      contentFormat: normalizeToken(plain.contentFormat),
+    }
+  }
+
+  return {
+    available: true,
+    packId: normalizeText(plain.packId),
+    versionId: normalizeText(plain.versionId),
+    packKey: normalizeLowerKey(plain.packKey),
+    contentHash: normalizeText(plain.contentHash),
+    contentFormat: normalizeToken(plain.contentFormat),
+    content: plain.content,
+  }
+}
+
 const saveDocument = async (doc, session = null) => (
   session ? doc.save({ session }) : doc.save()
 )
@@ -993,6 +1045,7 @@ const serializeKnowledgePack = (pack) => {
     status: normalizeToken(plain.status || OUTCOME_KNOWLEDGE_PACK_STATUSES.DRAFT),
     sourceAuthority: normalizeText(plain.sourceAuthority),
     executionMode: normalizeToken(plain.executionMode || KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT),
+    boundary: normalizeToken(plain.boundary),
     visibility: normalizeToken(plain.visibility || KNOWLEDGE_PACK_VISIBILITY_SCOPES.PLATFORM),
     customerId: plain.customerId ? normalizeText(plain.customerId) : null,
     tenantId: plain.tenantId ? normalizeText(plain.tenantId) : null,
@@ -1075,6 +1128,7 @@ const serializeKnowledgePackContentPreview = ({ version, packDefinition }) => {
     sourceFilename: normalizeText(plain.sourceFilename || plain.sourceMetadata?.sourceFilename || packDefinition?.sourceFilename),
     sourceDocuments: Array.isArray(plain.sourceDocuments) ? plain.sourceDocuments : [],
     executionMode: normalizeToken(plain.executionMode || KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT),
+    boundary: normalizeToken(plain.boundary || packDefinition?.boundary),
     visibility: normalizeToken(plain.visibility || KNOWLEDGE_PACK_VISIBILITY_SCOPES.PLATFORM),
     customerId: plain.customerId ? normalizeText(plain.customerId) : null,
     tenantId: plain.tenantId ? normalizeText(plain.tenantId) : null,
@@ -1124,6 +1178,7 @@ const serializeKnowledgePackActivation = (activation) => {
     packageVersion: normalizeText(plain.packageVersion),
     environmentKey: normalizeToken(plain.environmentKey),
     executionMode: normalizeToken(plain.executionMode || KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT),
+    boundary: normalizeToken(plain.boundary),
     visibility: normalizeToken(plain.visibility || KNOWLEDGE_PACK_VISIBILITY_SCOPES.PLATFORM),
     customerId: plain.customerId ? normalizeText(plain.customerId) : null,
     tenantId: plain.tenantId ? normalizeText(plain.tenantId) : null,
@@ -1285,6 +1340,7 @@ const buildActivePackProjection = (pack, activation) => ({
   scopeType: activation.scopeType,
   scopeKey: activation.scopeKey,
   executionMode: activation.executionMode,
+  boundary: normalizeToken(activation.boundary || pack.boundary),
   visibility: activation.visibility,
   customerId: activation.customerId,
   tenantId: activation.tenantId,
@@ -1665,6 +1721,7 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
       ...requestResolution.providerContextPacks,
       ...requestResolution.preValidationPacks,
       ...requestResolution.postValidationPacks,
+      ...requestResolution.lineageCertificationPacks,
       ...requestResolution.systemOnlyPacks,
     ])
     const selectedActivationIds = new Set(selectedPacks.map((pack) => normalizeText(pack.activationId)))
@@ -1697,6 +1754,7 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
       providerContextPacks: requestResolution.providerContextPacks,
       preValidationPacks: requestResolution.preValidationPacks,
       postValidationPacks: requestResolution.postValidationPacks,
+      lineageCertificationPacks: requestResolution.lineageCertificationPacks,
       systemOnlyPacks: requestResolution.systemOnlyPacks,
       blockedPacks: [
         ...versionEvidenceExclusions,
@@ -2156,6 +2214,7 @@ export const importOutcomeKnowledgePackSourceDocumentDraft = async ({
     relationshipChecksum: sourceRelationshipMetadata.relationshipChecksum,
     sourceAuthority: normalizeText(body.sourceAuthority),
     executionMode: normalizeToken(body.executionMode || KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT),
+    boundary: normalizeToken(body.boundary),
     sourceDocument: sourceDocumentInput,
   }
   packDefinition.governanceMetadataSuppliedFields = [
@@ -2197,8 +2256,12 @@ export const importOutcomeKnowledgePackSourceDocumentDraft = async ({
     ? existingPackCandidate
     : null
   const governanceMetadata = buildGovernanceMetadata(packDefinition, existingPackRecord || {})
-  const missingGovernanceFields = getMissingGovernanceFields(governanceMetadata)
-  if (!hasCompleteGovernanceMetadata(governanceMetadata)) {
+  const missingGovernanceFields = getMissingGovernanceFields(governanceMetadata, {
+    packType: packDefinition.packType,
+  })
+  if (!hasCompleteGovernanceMetadata(governanceMetadata, {
+    packType: packDefinition.packType,
+  })) {
     throw createGovernanceMetadataError({
       status: 422,
       message: 'Knowledge Pack import requires complete governance metadata.',
@@ -2367,6 +2430,7 @@ export const importOutcomeKnowledgePackSourceDocumentDraft = async ({
         issues: [],
       },
       executionMode: packDefinition.executionMode,
+      boundary: packDefinition.boundary,
       visibility: scope.visibility,
       customerId: scope.customerId,
       tenantId: scope.tenantId,
@@ -3227,7 +3291,7 @@ const applyKnowledgePackActivationMutation = async ({
   }
   const missingFields = [
     ...(!knowledgeLayer ? ['knowledgeLayer'] : []),
-    ...(!capabilityKey ? ['capabilityKey'] : []),
+    ...(requiresCapabilityKey(version.packType) && !capabilityKey ? ['capabilityKey'] : []),
     ...(!knowledgeAssetId ? ['knowledgeAssetId'] : []),
     ...(workspaceCompatibility.length === 0 ? ['workspaceCompatibility'] : []),
   ]
@@ -3354,6 +3418,11 @@ const applyKnowledgePackActivationMutation = async ({
       version.executionMode
       || packRecord?.executionMode
       || KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT,
+    ),
+    boundary: normalizeToken(
+      version.boundary
+      || packRecord?.boundary
+      || packDefinition?.boundary,
     ),
     visibility: normalizeToken(
       version.visibility

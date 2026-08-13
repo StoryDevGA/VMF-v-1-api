@@ -31,6 +31,12 @@ import {
   resolveKnowledgePackCategory,
 } from '../constants/workspaceGovernance.js'
 import {
+  KNOWLEDGE_PACK_BOUNDARIES,
+  KNOWLEDGE_PACK_RECEIPT_TYPES,
+  resolveKnowledgePackBoundary,
+  resolveKnowledgePackReceiptType,
+} from '../constants/knowledgeRuntime.js'
+import {
   OutcomeAsset,
   OutcomeAssetVersion,
   OutcomeDraft,
@@ -39,7 +45,10 @@ import {
   OutcomeSession,
   TruthSignature,
 } from '../models/index.js'
-import { resolveOutcomeStudioKnowledgePackBinding } from './outcomeKnowledgePackRegistryService.js'
+import {
+  loadOutcomeKnowledgePackVersionContent,
+  resolveOutcomeStudioKnowledgePackBinding,
+} from './outcomeKnowledgePackRegistryService.js'
 import {
   projectOutcomeStudioDeliverableDiscovery,
   resolveOutcomeStudioKnowledgeContext,
@@ -56,7 +65,10 @@ import {
   getRuntimeInstance,
   toIdString,
 } from './runtimeInstanceService.js'
-import { getRuntimeTruthQuality } from './runtimeTruthQualityService.js'
+import {
+  evaluateRuntimeTruthQuality,
+  getRuntimeTruthQuality,
+} from './runtimeTruthQualityService.js'
 import {
   createRuntimeGraphRelationshipDocuments,
   deleteRuntimeGraphRelationshipDocuments,
@@ -68,7 +80,52 @@ import {
   isOutcomePostValidationAllowed,
   sanitizeOutcomePostValidationSnapshot,
 } from './outcomePostValidationService.js'
+import {
+  OUTCOME_BOUNDARY_RECEIPT_CONTRACT_VERSION,
+  validateOutcomeBoundaryReceipt,
+} from './outcomeBoundaryReceiptService.js'
 import { validateOutcomeCustomerLanguage } from './outcomeCustomerLanguageService.js'
+import {
+  executeTruthCertificationPack,
+  TRUTH_CERTIFICATION_EXECUTOR_KEY,
+} from './truthCertificationExecutorService.js'
+import {
+  executeProhibitedOutputClaimsPack,
+  PROHIBITED_OUTPUT_CLAIMS_EXECUTOR_KEY,
+} from './prohibitedOutputClaimsExecutorService.js'
+import {
+  executeBlockingRulesPack,
+  BLOCKING_RULES_EXECUTOR_KEY,
+} from './blockingRulesExecutorService.js'
+import {
+  executeCertificationLevelsPack,
+  CERTIFICATION_LEVELS_EXECUTOR_KEY,
+} from './certificationLevelsExecutorService.js'
+import {
+  executeTruthQualityDimensionsPack,
+  TRUTH_QUALITY_DIMENSIONS_EXECUTOR_KEY,
+  TRUTH_QUALITY_DIMENSIONS_RECEIPT_KEY,
+} from './truthQualityDimensionsExecutorService.js'
+import {
+  buildRuntimeWarningProofEvidence,
+  executeRuntimeWarningRulesPack,
+  RUNTIME_WARNING_RULES_EXECUTOR_KEY,
+} from './runtimeWarningRulesExecutorService.js'
+import {
+  executeRenderingLayerPack,
+  RENDERING_LAYER_EXECUTOR_KEY,
+} from './renderingLayerExecutorService.js'
+import {
+  buildExportMetadataSnapshot,
+  executeExportMetadataRulesPack,
+  EXPORT_METADATA_RULES_EXECUTOR_KEY,
+} from './exportMetadataRulesExecutorService.js'
+import {
+  executeTruthCertificationFramework,
+  TRUTH_CERTIFICATION_FRAMEWORK_EXECUTOR_KEY,
+  TRUTH_CERTIFICATION_FRAMEWORK_REQUIRED_VALIDATORS,
+} from './truthCertificationFrameworkExecutorService.js'
+import { sanitizeOutcomeEvidenceKind } from './outcomeEvidenceKindService.js'
 import auditService from './auditService.js'
 import {
   createGovernedReasoningExecution,
@@ -122,6 +179,8 @@ export const OUTCOME_STUDIO_ERROR_REASONS = Object.freeze({
   OUTCOME_DRAFT_PREVIEW_CONTENT_UNAVAILABLE: 'OUTCOME_DRAFT_PREVIEW_CONTENT_UNAVAILABLE',
   OUTCOME_DRAFT_REFINEMENT_AUDIT_FAILED: 'OUTCOME_DRAFT_REFINEMENT_AUDIT_FAILED',
   OUTCOME_DRAFT_REFINEMENT_BLOCKED: 'OUTCOME_DRAFT_REFINEMENT_BLOCKED',
+  OUTCOME_DRAFT_REVISION_AUDIT_FAILED: 'OUTCOME_DRAFT_REVISION_AUDIT_FAILED',
+  OUTCOME_DRAFT_REVISION_BLOCKED: 'OUTCOME_DRAFT_REVISION_BLOCKED',
   OUTCOME_CUSTOMER_CONTENT_BLOCKED: 'OUTCOME_CUSTOMER_CONTENT_BLOCKED',
   OUTCOME_DRAFTING_SERVICE_UNAVAILABLE: 'OUTCOME_DRAFTING_SERVICE_UNAVAILABLE',
   OUTCOME_GRAPH_RELATIONSHIP_FAILED: 'OUTCOME_GRAPH_RELATIONSHIP_FAILED',
@@ -374,6 +433,303 @@ const buildGeneratedOutcomeDraftCustomerContent = ({
   }
 }
 
+const EXECUTION_EVIDENCE_STATUSES = new Set([
+  'PASSED',
+  'FAILED',
+  'NOT_SUPPLIED',
+  'SKIPPED',
+  'NOT_RECORDED',
+])
+const EXECUTION_EVIDENCE_PROJECTION_DISPOSITIONS = new Set([
+  'PROJECTED',
+  'CATEGORY_LIMITED',
+  'NO_SAFE_GUIDANCE',
+  'NOT_RECORDED',
+])
+const EXECUTION_EVIDENCE_ADMISSION_DISPOSITIONS = new Set([
+  'ADMITTED',
+  'CONTEXT_LIMIT',
+  'NOT_APPLICABLE',
+  'NOT_ADMITTED',
+  'NOT_RECORDED',
+])
+const OUTCOME_EXECUTION_EVIDENCE_CONTRACT_VERSION = 'outcome-studio.component-execution-evidence.v2'
+const OUTCOME_EXECUTION_APPROVAL_READINESS_CONTRACT_VERSION = 'outcome-studio.execution-approval-readiness.v2'
+const REQUIRED_OUTCOME_PACK_EXECUTION_CHECKS = Object.freeze([
+  'RESOLUTION_VERIFIED',
+  'VERSION_CONTENT_LOADED',
+  'SAFE_GUIDANCE_PROJECTED',
+  'PROVIDER_CONTEXT_SUPPLIED',
+  'PROVIDER_COMPLETED',
+])
+const REQUIRED_OUTCOME_BOUNDARY_RECEIPT_CHECKS = Object.freeze({
+  [KNOWLEDGE_PACK_BOUNDARIES.PRE_GENERATION_VALIDATION]: Object.freeze(['PRE_VALIDATION_PASSED']),
+  [KNOWLEDGE_PACK_BOUNDARIES.POST_GENERATION_VALIDATION]: Object.freeze(['POST_VALIDATION_PASSED']),
+  [KNOWLEDGE_PACK_BOUNDARIES.LINEAGE_CERTIFICATION]: Object.freeze(['LINEAGE_RETAINED']),
+})
+const REQUIRED_OUTCOME_RUNTIME_EXECUTION_CHECKS = Object.freeze([
+  'PROVIDER_REQUEST',
+  'PROVIDER_RESPONSE_SCHEMA',
+  'OUTCOME_CONTENT_NORMALIZATION',
+  'OUTCOME_POST_VALIDATION',
+])
+
+const sanitizeExecutionEvidenceStatus = (value) => {
+  const normalized = normalizeToken(value)
+  return EXECUTION_EVIDENCE_STATUSES.has(normalized) ? normalized : 'NOT_RECORDED'
+}
+
+const sanitizeExecutionEvidenceDisposition = (value, allowed) => {
+  const normalized = normalizeToken(value)
+  return allowed.has(normalized) ? normalized : 'NOT_RECORDED'
+}
+
+const sanitizeExecutionEvidenceBoundary = (value) => {
+  const normalized = normalizeToken(value)
+  return Object.values(KNOWLEDGE_PACK_BOUNDARIES).includes(normalized) ? normalized : 'NOT_RECORDED'
+}
+
+const sanitizeExecutionEvidenceReceiptType = (value) => {
+  const normalized = normalizeToken(value)
+  return Object.values(KNOWLEDGE_PACK_RECEIPT_TYPES).includes(normalized) ? normalized : 'NOT_RECORDED'
+}
+
+const sanitizeOutcomeExecutionCheck = (check = {}, { validatorKey = '' } = {}) => ({
+  key: normalizeToken(check.key),
+  status: sanitizeExecutionEvidenceStatus(check.status),
+  message: normalizeText(check.message),
+  providerKey: normalizeText(check.providerKey),
+  model: normalizeText(check.model),
+  configurationVersion: normalizeText(check.configurationVersion),
+  requestId: normalizeText(check.requestId),
+  responseId: normalizeText(check.responseId),
+  latencyMs: Math.max(0, Number(check.latencyMs || 0)),
+  schemaName: normalizeText(check.schemaName),
+  schemaVersion: normalizeText(check.schemaVersion),
+  strict: check.strict === true,
+  evidenceKind: sanitizeOutcomeEvidenceKind(check.evidenceKind, check.key, { validatorKey }),
+})
+
+const sanitizeOutcomeExecutionEvidence = (evidence) => {
+  if (!evidence || typeof evidence !== 'object') return null
+  return {
+    contractVersion: normalizeText(evidence.contractVersion),
+    providerContextContractVersion: normalizeText(evidence.providerContextContractVersion),
+    executionId: normalizeText(evidence.executionId),
+    requestFingerprint: normalizeText(evidence.requestFingerprint),
+    draftId: normalizeText(evidence.draftId),
+    draftIterationId: normalizeText(evidence.draftIterationId),
+    draftIterationNumber: Math.max(0, Number(evidence.draftIterationNumber || 0)),
+    recordedAt: normalizeDateValue(evidence.recordedAt),
+    packs: Array.isArray(evidence.packs)
+      ? evidence.packs.map((pack) => ({
+          versionId: normalizeText(pack?.versionId),
+          contentHash: normalizeText(pack?.contentHash),
+          knowledgeLayer: normalizeToken(pack?.knowledgeLayer),
+          executionMode: normalizeToken(pack?.executionMode),
+          packType: normalizeToken(pack?.packType),
+          boundary: sanitizeExecutionEvidenceBoundary(
+            pack?.boundary || resolveKnowledgePackBoundary(pack),
+          ),
+          receiptType: sanitizeExecutionEvidenceReceiptType(
+            pack?.receiptType || resolveKnowledgePackReceiptType(pack),
+          ),
+          contractVersion: normalizeText(pack?.contractVersion),
+          receiptKey: normalizeText(pack?.receiptKey),
+          validatorKey: normalizeText(pack?.validatorKey).toLowerCase(),
+          result: normalizeToken(pack?.result),
+          evidenceReference: normalizeText(pack?.evidenceReference),
+          projectedEntryCount: Math.max(0, Number(pack?.projectedEntryCount || 0)),
+          safeCandidateEntryCount: Math.max(0, Number(pack?.safeCandidateEntryCount || 0)),
+          suppliedEntryCount: Math.max(0, Number(pack?.suppliedEntryCount || 0)),
+          suppliedCategories: Array.isArray(pack?.suppliedCategories)
+            ? pack.suppliedCategories.map(normalizeText).filter(Boolean)
+            : [],
+          sharedContribution: pack?.sharedContribution === true,
+          projectionDisposition: sanitizeExecutionEvidenceDisposition(
+            pack?.projectionDisposition,
+            EXECUTION_EVIDENCE_PROJECTION_DISPOSITIONS,
+          ),
+          admissionDisposition: sanitizeExecutionEvidenceDisposition(
+            pack?.admissionDisposition,
+            EXECUTION_EVIDENCE_ADMISSION_DISPOSITIONS,
+          ),
+          status: sanitizeExecutionEvidenceStatus(pack?.status),
+          diagnosticOnly: pack?.diagnosticOnly === true,
+          checks: Array.isArray(pack?.checks)
+            ? pack.checks.map((check) => sanitizeOutcomeExecutionCheck(check, {
+                validatorKey: pack?.validatorKey,
+              }))
+            : [],
+        }))
+      : [],
+    runtimeChecks: Array.isArray(evidence.runtimeChecks)
+      ? evidence.runtimeChecks.map((check) => sanitizeOutcomeExecutionCheck(check))
+      : [],
+  }
+}
+
+const completeOutcomeExecutionEvidence = ({
+  boundaryReceipts = [],
+  diagnosticBoundaryEvidence = [],
+  draftId,
+  draftIterationId,
+  draftIterationNumber,
+  evidence,
+  knowledgePackBinding = {},
+  postValidation,
+} = {}) => {
+  const safeEvidence = sanitizeOutcomeExecutionEvidence(evidence)
+  if (!safeEvidence) return null
+  const receiptByVersionId = new Map(
+    [
+      ...(Array.isArray(diagnosticBoundaryEvidence) ? diagnosticBoundaryEvidence : []),
+      ...(Array.isArray(boundaryReceipts) ? boundaryReceipts : []),
+    ]
+      .map((receipt) => [normalizeText(receipt?.versionId), receipt])
+      .filter(([versionId, receipt]) => versionId && receipt),
+  )
+  const mergeChecks = (existingChecks = [], receiptChecks = []) => {
+    const checksByKey = new Map()
+    for (const check of [...existingChecks, ...receiptChecks]) {
+      const key = normalizeToken(check?.key)
+      if (key) checksByKey.set(key, check)
+    }
+    return [...checksByKey.values()]
+  }
+  const evidenceWithBoundaryReceipts = {
+    ...safeEvidence,
+    packs: safeEvidence.packs.map((pack) => {
+      const receipt = receiptByVersionId.get(normalizeText(pack.versionId))
+      if (!receipt || normalizeText(receipt.contentHash) !== normalizeText(pack.contentHash)) {
+        return pack
+      }
+      return {
+        ...pack,
+        ...receipt,
+        checks: mergeChecks(
+          pack.checks,
+          Array.isArray(receipt.checks)
+            ? receipt.checks.map((check) => sanitizeOutcomeExecutionCheck(check, {
+                validatorKey: receipt.validatorKey,
+              }))
+            : [],
+        ),
+      }
+    }),
+  }
+  const postValidationPassed = isOutcomePostValidationAllowed(postValidation)
+  const boundPackLists = [
+    'requiredPacks',
+    'optionalPacks',
+    'providerContextPacks',
+    'preValidationPacks',
+    'postValidationPacks',
+    'lineageCertificationPacks',
+    'systemOnlyPacks',
+  ]
+  const findBoundPack = (versionId) => boundPackLists
+    .flatMap((listKey) => (Array.isArray(knowledgePackBinding[listKey])
+      ? knowledgePackBinding[listKey]
+      : []))
+    .find((candidate) => candidate.versionId === versionId)
+  const packs = evidenceWithBoundaryReceipts.packs.map((pack) => {
+    const boundPack = findBoundPack(pack.versionId)
+    const boundary = resolveKnowledgePackBoundary({
+      ...pack,
+      ...(boundPack || {}),
+    })
+    if (boundary !== KNOWLEDGE_PACK_BOUNDARIES.POST_GENERATION_VALIDATION) return pack
+    const checks = Array.isArray(pack.checks) ? [...pack.checks] : []
+    const receiptType = resolveKnowledgePackReceiptType({ ...pack, boundary })
+    const receiptValidation = validateOutcomeBoundaryReceipt({
+      expectedPack: {
+        ...(boundPack || { versionId: '', contentHash: '' }),
+        boundary,
+        receiptType,
+      },
+      receipt: pack,
+    })
+    const recordedPackReceipt = checks.some((check) => check.key === 'BOUNDARY_RECEIPT_RECORDED' && check.status === 'PASSED')
+      && checks.some((check) => check.key === 'POST_VALIDATION_PASSED' && check.status === 'PASSED')
+    if (recordedPackReceipt && receiptValidation.valid) {
+      return {
+        ...pack,
+        boundary: KNOWLEDGE_PACK_BOUNDARIES.POST_GENERATION_VALIDATION,
+        receiptType,
+      }
+    }
+    if (pack.diagnosticOnly === true && pack.status === 'FAILED') {
+      return {
+        ...pack,
+        boundary: KNOWLEDGE_PACK_BOUNDARIES.POST_GENERATION_VALIDATION,
+        receiptType,
+        status: 'FAILED',
+        checks,
+      }
+    }
+    // The asset-level validator proves the candidate was checked, but it does
+    // not identify which individual pack version supplied each validation
+    // rule. Do not promote a placeholder into a pack receipt here.
+    const packReceiptStatus = postValidationPassed ? 'NOT_RECORDED' : 'FAILED'
+    const packReceiptMessage = postValidationPassed
+      ? 'Asset-level post-validation completed, but this pack version has no individual validation receipt.'
+      : 'Post-generation validation did not allow this exact asset version.'
+    const boundaryCheck = {
+      key: 'POST_VALIDATION_PASSED',
+      status: packReceiptStatus,
+      message: packReceiptMessage,
+    }
+    const existingBoundaryCheckIndex = checks.findIndex((check) => check.key === boundaryCheck.key)
+    if (existingBoundaryCheckIndex >= 0) checks[existingBoundaryCheckIndex] = boundaryCheck
+    else checks.push(boundaryCheck)
+    const receiptRecorded = {
+      key: 'BOUNDARY_RECEIPT_RECORDED',
+      status: packReceiptStatus,
+      message: receiptValidation.valid
+        ? packReceiptMessage
+        : `${packReceiptMessage} Receipt contract: ${receiptValidation.failures.join(', ')}.`,
+    }
+    const existingReceiptIndex = checks.findIndex((check) => check.key === receiptRecorded.key)
+    if (existingReceiptIndex >= 0) checks[existingReceiptIndex] = receiptRecorded
+    else checks.push(receiptRecorded)
+    return {
+      ...pack,
+      boundary: KNOWLEDGE_PACK_BOUNDARIES.POST_GENERATION_VALIDATION,
+      receiptType,
+      status: packReceiptStatus,
+      checks,
+    }
+  })
+  const runtimeChecks = evidenceWithBoundaryReceipts.runtimeChecks.map((check) => {
+    if (check.key === 'OUTCOME_CONTENT_NORMALIZATION') {
+      return { ...check, status: 'PASSED', message: 'Provider output was normalized into the persisted customer draft structure.' }
+    }
+    if (check.key === 'OUTCOME_POST_VALIDATION') {
+      const validationStatus = normalizeToken(postValidation?.status)
+      const validationResult = normalizeToken(postValidation?.result)
+      const passed = ['PASS', 'PASSED', 'COMPLETED'].includes(validationStatus)
+        && ['ALLOW', 'PASS', 'PASSED'].includes(validationResult)
+      return {
+        ...check,
+        status: passed ? 'PASSED' : 'FAILED',
+        message: passed
+          ? 'Outcome post-validation completed and allowed this draft.'
+          : 'Outcome post-validation did not allow this draft.',
+      }
+    }
+    return check
+  })
+  return {
+    ...safeEvidence,
+    draftId: normalizeText(draftId),
+    draftIterationId: normalizeText(draftIterationId),
+    draftIterationNumber: Math.max(0, Number(draftIterationNumber || 0)),
+    packs,
+    runtimeChecks,
+  }
+}
+
 const buildGeneratedOutcomeAssetLineageSummary = ({
   generatedAt = '',
   grrExecution = null,
@@ -429,6 +785,7 @@ const buildGeneratedOutcomeAssetLineageSummary = ({
       requiresSeparateCertificationBeforeTruthReuse:
         grrCertification.requiresSeparateCertificationBeforeTruthReuse === true,
     },
+    componentExecutionEvidence: sanitizeOutcomeExecutionEvidence(grrExecution?.executionEvidence),
   }
 }
 
@@ -611,6 +968,7 @@ const getFrameworkState = (runtimeInstance = {}) =>
 
 const buildRuntimeTruthEvidence = (runtimeInstance = {}) => {
   const frameworkState = getFrameworkState(runtimeInstance)
+  const revision = getObjectValue(runtimeInstance, 'revision') || {}
   const publish = getObjectValue(frameworkState, 'publish') || {}
   const lock = getObjectValue(frameworkState, 'lock') || {}
   const publishSnapshot = getObjectValue(publish, 'snapshot') || getObjectValue(lock, 'publish') || {}
@@ -631,8 +989,492 @@ const buildRuntimeTruthEvidence = (runtimeInstance = {}) => {
       getObjectValue(replayAnchor, 'replayAnchorHash')
       || getObjectValue(replayAnchor, 'anchorHash'),
     ),
+    runtimeRevision: normalizeText(
+      getObjectValue(revision, 'revisionNumber')
+      ?? getObjectValue(runtimeInstance, 'currentRevisionNumber'),
+    ),
     graphVersion: normalizeText(getObjectValue(graph, 'graphVersion')),
     graphHash: normalizeText(getObjectValue(graph, 'graphHash')),
+  }
+}
+
+const deriveTruthQualityBandFromScore = (value) => {
+  const score = Number(value)
+  if (!Number.isFinite(score) || score < 0 || score > 100) return ''
+  if (score < 40) return 'LOW'
+  if (score < 70) return 'MEDIUM'
+  if (score < 90) return 'HIGH'
+  return 'VERY_HIGH'
+}
+
+const resolveTruthQualityBand = ({ explicitBand, score } = {}) => (
+  deriveTruthQualityBandFromScore(score) || normalizeToken(explicitBand)
+)
+
+export const buildTruthCertificationCandidate = ({
+  grrExecution = null,
+  runtimeInstance = {},
+  truthSignature = {},
+  customerContent = {},
+} = {}) => {
+  const artifact = grrExecution?.artifact && typeof grrExecution.artifact === 'object'
+    ? grrExecution.artifact
+    : {}
+  const artifactEvidence = artifact.truthEvidence && typeof artifact.truthEvidence === 'object'
+    ? artifact.truthEvidence
+    : {}
+  const artifactQuality = artifact.truthQuality && typeof artifact.truthQuality === 'object'
+    ? artifact.truthQuality
+    : {}
+  const quality = artifactQuality.quality && typeof artifactQuality.quality === 'object'
+    ? artifactQuality.quality
+    : artifactQuality
+  const certifiedTruth = grrExecution?.certifiedTruth && typeof grrExecution.certifiedTruth === 'object'
+    ? grrExecution.certifiedTruth
+    : {}
+  const signatureEvidence = truthSignature?.evidence && typeof truthSignature.evidence === 'object'
+    ? truthSignature.evidence
+    : {}
+  const runtimeEvidence = buildRuntimeTruthEvidence(runtimeInstance)
+  const customerLanguageSafe = validateOutcomeCustomerLanguage(customerContent).safe
+  const candidate = {
+    ...signatureEvidence,
+    ...runtimeEvidence,
+    ...certifiedTruth,
+    ...artifactEvidence,
+    ...quality,
+    acceptedTruthCount: certifiedTruth.acceptedTruthCount
+      ?? signatureEvidence.acceptedTruthCount
+      ?? quality.confidence?.acceptedTruthCount,
+    requiredTruthCount: certifiedTruth.requiredTruthCount
+      ?? signatureEvidence.requiredTruthCount,
+    evidenceCount: signatureEvidence.evidenceCount
+      ?? quality.confidence?.acceptedEvidenceCount,
+    sourceCount: signatureEvidence.sourceCount
+      ?? quality.sourceDiversity?.sourceRecordCount,
+    coverageScore: artifactEvidence.coverageScore
+      ?? quality.coverageScore
+      ?? quality.coverage?.score
+      ?? signatureEvidence.coverageScore,
+    confidenceScore: artifactEvidence.confidenceScore
+      ?? quality.confidenceScore
+      ?? quality.confidence?.score
+      ?? signatureEvidence.confidenceScore,
+    sourceDiversityScore: artifactEvidence.sourceDiversityScore
+      ?? quality.sourceDiversityScore
+      ?? quality.sourceDiversity?.score
+      ?? signatureEvidence.sourceDiversityScore,
+    confidenceBand: resolveTruthQualityBand({
+      explicitBand: artifactEvidence.confidenceBand
+        ?? quality.confidenceBand
+        ?? quality.confidence?.band
+        ?? signatureEvidence.confidenceBand,
+      score: artifactEvidence.confidenceScore
+        ?? quality.confidenceScore
+        ?? quality.confidence?.score
+        ?? signatureEvidence.confidenceScore,
+    }),
+    sourceDiversityBand: normalizeToken(
+      artifactEvidence.sourceDiversityBand
+        ?? quality.sourceDiversityBand
+        ?? quality.sourceDiversity?.band
+        ?? signatureEvidence.sourceDiversityBand,
+    ),
+    contradictionCount: artifactEvidence.contradictionCount
+      ?? quality.contradictionCount
+      ?? quality.contradictions?.count
+      ?? signatureEvidence.contradictionCount,
+    unresolvedContradictionCount: artifactEvidence.unresolvedContradictionCount
+      ?? quality.unresolvedContradictionCount
+      ?? quality.contradictions?.unresolvedCount
+      ?? signatureEvidence.unresolvedContradictionCount,
+    contradictionRisk: artifactEvidence.contradictionRisk
+      ?? quality.contradictionRisk
+      ?? quality.contradictionRisk?.level
+      ?? signatureEvidence.contradictionRisk,
+    limitations: Array.isArray(grrExecution?.limitations)
+      ? grrExecution.limitations.map(normalizeText).filter(Boolean)
+      : [],
+    rawGraphLeakageDetected: artifactEvidence.rawGraphLeakageDetected
+      ?? artifact.rawGraphLeakageDetected
+      ?? signatureEvidence.rawGraphLeakageDetected
+      ?? !customerLanguageSafe,
+  }
+  const proofEvidence = buildRuntimeWarningProofEvidence({
+    runtimeInstance,
+    explicitSources: [artifactEvidence, certifiedTruth, signatureEvidence],
+  })
+  delete candidate.customerProofPresent
+  delete candidate.economicProofPresent
+  return {
+    ...candidate,
+    ...proofEvidence,
+  }
+}
+
+export const buildOutcomeStudioTruthCertificationCandidate = ({
+  baseCandidate = {},
+  runtimeQuality = {},
+} = {}) => ({
+  ...baseCandidate,
+  acceptedTruthCount: runtimeQuality.confidence?.acceptedTruthCount
+    ?? baseCandidate.acceptedTruthCount,
+  evidenceCount: runtimeQuality.confidence?.acceptedEvidenceCount
+    ?? baseCandidate.evidenceCount,
+  coverageScore: runtimeQuality.coverage?.score
+    ?? baseCandidate.coverageScore,
+  confidenceScore: runtimeQuality.confidence?.score
+    ?? baseCandidate.confidenceScore,
+  sourceDiversityScore: runtimeQuality.sourceDiversity?.score
+    ?? baseCandidate.sourceDiversityScore,
+  confidenceBand: resolveTruthQualityBand({
+    explicitBand: runtimeQuality.confidence?.band
+      ?? baseCandidate.confidenceBand,
+    score: runtimeQuality.confidence?.score
+      ?? baseCandidate.confidenceScore,
+  }),
+  sourceDiversityBand: normalizeToken(
+    runtimeQuality.sourceDiversity?.band
+      ?? baseCandidate.sourceDiversityBand,
+  ),
+  contradictionCount: runtimeQuality.contradictionRisk?.count
+    ?? baseCandidate.contradictionCount,
+  unresolvedContradictionCount: runtimeQuality.contradictionRisk?.unresolvedCount
+    ?? baseCandidate.unresolvedContradictionCount,
+  contradictionRisk: runtimeQuality.contradictionRisk?.level
+    ?? baseCandidate.contradictionRisk,
+})
+
+const findPostValidationPack = (knowledgePackBinding = {}, packKey) => [
+  ...(Array.isArray(knowledgePackBinding.postValidationPacks)
+    ? knowledgePackBinding.postValidationPacks
+    : []),
+  ...(Array.isArray(knowledgePackBinding.validationPacks)
+    ? knowledgePackBinding.validationPacks
+    : []),
+].find((pack) => (
+  normalizeText(pack?.packKey).toLowerCase() === normalizeText(packKey).toLowerCase()
+    && resolveKnowledgePackBoundary(pack) === KNOWLEDGE_PACK_BOUNDARIES.POST_GENERATION_VALIDATION
+))
+
+const executeTruthCertificationBoundary = async ({
+  asset = {},
+  candidate = {},
+  customerContent = {},
+  knowledgePackBinding = {},
+  version = {},
+} = {}) => {
+  const pack = findPostValidationPack(knowledgePackBinding, TRUTH_CERTIFICATION_EXECUTOR_KEY)
+  if (!pack?.versionId) return null
+
+  try {
+    const loaded = await loadOutcomeKnowledgePackVersionContent({
+      packId: pack.packId,
+      versionId: pack.versionId,
+    })
+    if (!loaded?.available || loaded.packKey !== TRUTH_CERTIFICATION_EXECUTOR_KEY) return null
+    const result = executeTruthCertificationPack({
+      pack,
+      packContent: loaded.content,
+      candidate,
+      customerContent,
+      asset,
+      version,
+    })
+    return result.status === 'PASSED' ? result.receipt : null
+  } catch (_error) {
+    // The existing Outcome Studio asset-level validator remains authoritative
+    // for candidate content. A loader or executor failure must leave the exact
+    // pack receipt absent so approval stays fail-closed.
+    return null
+  }
+}
+
+const executeProhibitedOutputClaimsBoundary = async ({
+  asset = {},
+  customerContent = {},
+  knowledgePackBinding = {},
+  version = {},
+} = {}) => {
+  const pack = findPostValidationPack(knowledgePackBinding, PROHIBITED_OUTPUT_CLAIMS_EXECUTOR_KEY)
+  if (!pack?.versionId) return null
+
+  try {
+    const loaded = await loadOutcomeKnowledgePackVersionContent({
+      packId: pack.packId,
+      versionId: pack.versionId,
+    })
+    if (!loaded?.available || loaded.packKey !== PROHIBITED_OUTPUT_CLAIMS_EXECUTOR_KEY) return null
+    const result = executeProhibitedOutputClaimsPack({
+      pack,
+      packContent: loaded.content,
+      customerContent,
+      asset,
+      version,
+    })
+    return result.status === 'PASSED' ? result.receipt : null
+  } catch (_error) {
+    // A loader or executor failure must leave the exact pack receipt absent so
+    // the approval gate remains fail-closed.
+    return null
+  }
+}
+
+const executeBlockingRulesBoundary = async ({
+  asset = {},
+  candidate = {},
+  knowledgePackBinding = {},
+  version = {},
+} = {}) => {
+  const pack = findPostValidationPack(knowledgePackBinding, BLOCKING_RULES_EXECUTOR_KEY)
+  if (!pack?.versionId) return null
+
+  try {
+    const loaded = await loadOutcomeKnowledgePackVersionContent({
+      packId: pack.packId,
+      versionId: pack.versionId,
+    })
+    if (!loaded?.available || loaded.packKey !== BLOCKING_RULES_EXECUTOR_KEY) return null
+    const result = executeBlockingRulesPack({
+      pack,
+      packContent: loaded.content,
+      candidate,
+      asset,
+      version,
+    })
+    return result.status === 'PASSED' ? result.receipt : null
+  } catch (_error) {
+    // A loader or executor failure leaves the exact pack receipt absent so the
+    // approval gate remains fail-closed.
+    return null
+  }
+}
+
+const executeCertificationLevelsBoundary = async ({
+  asset = {},
+  candidate = {},
+  knowledgePackBinding = {},
+  version = {},
+} = {}) => {
+  const pack = findPostValidationPack(knowledgePackBinding, CERTIFICATION_LEVELS_EXECUTOR_KEY)
+  if (!pack?.versionId) return null
+
+  try {
+    const loaded = await loadOutcomeKnowledgePackVersionContent({
+      packId: pack.packId,
+      versionId: pack.versionId,
+    })
+    if (!loaded?.available || loaded.packKey !== CERTIFICATION_LEVELS_EXECUTOR_KEY) return null
+    const result = executeCertificationLevelsPack({
+      pack,
+      packContent: loaded.content,
+      candidate,
+      asset,
+      version,
+    })
+    return result.status === 'PASSED' ? result : null
+  } catch (_error) {
+    // A loader or executor failure leaves the exact pack receipt absent so the
+    // approval gate remains fail-closed.
+    return null
+  }
+}
+
+const buildTruthQualityDimensionsDiagnosticEvidence = ({
+  pack = {},
+  result = {},
+  asset = {},
+  version = {},
+} = {}) => {
+  const assetId = normalizeText(asset.outcomeAssetId || asset.assetId)
+  const assetVersionId = normalizeText(version.outcomeAssetVersionId || version.versionId)
+  return {
+    contractVersion: OUTCOME_BOUNDARY_RECEIPT_CONTRACT_VERSION,
+    versionId: normalizeText(pack.versionId),
+    contentHash: normalizeText(pack.contentHash),
+    boundary: KNOWLEDGE_PACK_BOUNDARIES.POST_GENERATION_VALIDATION,
+    receiptType: KNOWLEDGE_PACK_RECEIPT_TYPES.POST_VALIDATION,
+    receiptKey: TRUTH_QUALITY_DIMENSIONS_RECEIPT_KEY,
+    validatorKey: TRUTH_QUALITY_DIMENSIONS_EXECUTOR_KEY,
+    result: 'BLOCK',
+    evidenceReference: `outcome:${assetId}:${assetVersionId}:${TRUTH_QUALITY_DIMENSIONS_EXECUTOR_KEY}:${result.executionId}`,
+    status: result.status,
+    checks: Array.isArray(result.checks) ? result.checks : [],
+    diagnosticOnly: true,
+  }
+}
+
+const executeTruthQualityDimensionsBoundary = async ({
+  asset = {},
+  candidate = {},
+  knowledgePackBinding = {},
+  version = {},
+} = {}) => {
+  const pack = findPostValidationPack(knowledgePackBinding, TRUTH_QUALITY_DIMENSIONS_EXECUTOR_KEY)
+  if (!pack?.versionId) return null
+  try {
+    const loaded = await loadOutcomeKnowledgePackVersionContent({ packId: pack.packId, versionId: pack.versionId })
+    if (!loaded?.available || loaded.packKey !== TRUTH_QUALITY_DIMENSIONS_EXECUTOR_KEY) return null
+    const result = executeTruthQualityDimensionsPack({ pack, packContent: loaded.content, candidate, asset, version })
+    if (result.status === 'PASSED') return result
+    if (result.status !== 'FAILED') return result
+    return {
+      ...result,
+      diagnosticEvidence: buildTruthQualityDimensionsDiagnosticEvidence({ pack, result, asset, version }),
+    }
+  } catch (_error) {
+    return null
+  }
+}
+
+const executeRuntimeWarningRulesBoundary = async ({
+  asset = {},
+  candidate = {},
+  knowledgePackBinding = {},
+  version = {},
+} = {}) => {
+  const pack = findPostValidationPack(knowledgePackBinding, RUNTIME_WARNING_RULES_EXECUTOR_KEY)
+  if (!pack?.versionId) return null
+  try {
+    const loaded = await loadOutcomeKnowledgePackVersionContent({ packId: pack.packId, versionId: pack.versionId })
+    if (!loaded?.available || loaded.packKey !== RUNTIME_WARNING_RULES_EXECUTOR_KEY) return null
+    const result = executeRuntimeWarningRulesPack({ pack, packContent: loaded.content, candidate, asset, version })
+    return result.status === 'PASSED' ? result : null
+  } catch (_error) {
+    return null
+  }
+}
+
+const executeRenderingLayerBoundary = async ({
+  asset = {},
+  customerContent = {},
+  evidenceBoundaries = [],
+  knowledgePackBinding = {},
+  limitations = [],
+  lineageSummary = {},
+  outputFormat = OUTCOME_STUDIO_EXPORT_FORMATS.MARKDOWN,
+  runtimeRevisionReference = '',
+  truthSignature = {},
+  truthSignatureReference = '',
+  version = {},
+} = {}) => {
+  const pack = findPostValidationPack(knowledgePackBinding, RENDERING_LAYER_EXECUTOR_KEY)
+  if (!pack?.versionId) return null
+  try {
+    const loaded = await loadOutcomeKnowledgePackVersionContent({ packId: pack.packId, versionId: pack.versionId })
+    if (!loaded?.available || loaded.packKey !== RENDERING_LAYER_EXECUTOR_KEY) return null
+    const result = executeRenderingLayerPack({
+      pack,
+      packContent: loaded.content,
+      customerContent,
+      evidenceBoundaries,
+      limitations,
+      lineageSummary,
+      truthSignatureReference,
+      truthSignature,
+      runtimeRevisionReference,
+      outputFormat,
+      asset,
+      version,
+    })
+    return result.status === 'PASSED' ? result.receipt : null
+  } catch (_error) {
+    return null
+  }
+}
+
+const executeExportMetadataRulesBoundary = async ({
+  asset = {},
+  customerContent = {},
+  expected = {},
+  knowledgePackBinding = {},
+  metadataSnapshot = {},
+  version = {},
+} = {}) => {
+  const pack = findPostValidationPack(knowledgePackBinding, EXPORT_METADATA_RULES_EXECUTOR_KEY)
+  if (!pack?.versionId) return null
+  try {
+    const loaded = await loadOutcomeKnowledgePackVersionContent({
+      packId: pack.packId,
+      versionId: pack.versionId,
+    })
+    if (!loaded?.available || loaded.packKey !== EXPORT_METADATA_RULES_EXECUTOR_KEY) return null
+    const effectivePack = {
+      ...pack,
+      packId: loaded.packId,
+    }
+    const result = executeExportMetadataRulesPack({
+      pack: effectivePack,
+      packContent: loaded.content,
+      metadataSnapshot: {
+        ...metadataSnapshot,
+        packId: loaded.packId,
+      },
+      customerContent,
+      expected,
+      asset,
+      version,
+    })
+    return result.status === 'PASSED' ? result : null
+  } catch (_error) {
+    return null
+  }
+}
+
+const buildExpectedFrameworkDependencyPacks = (knowledgePackBinding = {}) => Object.freeze(
+  Object.fromEntries(TRUTH_CERTIFICATION_FRAMEWORK_REQUIRED_VALIDATORS.map((validatorKey) => [
+    validatorKey,
+    findPostValidationPack(knowledgePackBinding, validatorKey) || null,
+  ])),
+)
+
+const executeTruthCertificationFrameworkBoundary = async ({
+  asset = {},
+  certificationLevelsExecution = null,
+  dependencyReceipts = [],
+  knowledgePackBinding = {},
+  lineageEvidence = {},
+  postValidation = {},
+  runtimeWarningExecution = null,
+  version = {},
+} = {}) => {
+  const pack = findPostValidationPack(
+    knowledgePackBinding,
+    TRUTH_CERTIFICATION_FRAMEWORK_EXECUTOR_KEY,
+  )
+  if (!pack?.versionId) return null
+  try {
+    const loaded = await loadOutcomeKnowledgePackVersionContent({
+      packId: pack.packId,
+      versionId: pack.versionId,
+    })
+    if (!loaded?.available || loaded.packKey !== TRUTH_CERTIFICATION_FRAMEWORK_EXECUTOR_KEY) {
+      return executeTruthCertificationFramework({
+        pack,
+        packContent: '',
+        asset,
+        version,
+      })
+    }
+    return executeTruthCertificationFramework({
+      pack,
+      packContent: loaded.content,
+      expectedPacksByValidatorKey: buildExpectedFrameworkDependencyPacks(knowledgePackBinding),
+      dependencyReceipts,
+      certificationLevelsExecution,
+      runtimeWarningExecution,
+      lineageEvidence,
+      postValidation,
+      asset,
+      version,
+    })
+  } catch (_error) {
+    return executeTruthCertificationFramework({
+      pack,
+      packContent: '',
+      asset,
+      version,
+    })
   }
 }
 
@@ -718,6 +1560,9 @@ const sanitizeKnowledgePackActivation = (pack = {}) => ({
   packKey: normalizeText(pack.packKey),
   label: normalizeText(pack.label),
   executionMode: normalizeToken(pack.executionMode),
+  boundary: sanitizeExecutionEvidenceBoundary(
+    pack.boundary || resolveKnowledgePackBoundary(pack),
+  ),
   visibility: normalizeToken(pack.visibility),
   status: normalizeToken(pack.status || 'ACTIVE'),
   activationId: normalizeText(pack.activationId),
@@ -730,19 +1575,42 @@ const sanitizeKnowledgePackActivation = (pack = {}) => ({
   activatedAt: normalizeText(pack.activatedAt),
 })
 
+const buildRequiredKnowledgePack = (pack = {}, activePacks = []) => {
+  const matchingActivePack = activePacks.find((candidate) => (
+    normalizeText(candidate?.packKey) === normalizeText(pack?.packKey)
+      && (!pack?.packType || normalizeToken(candidate?.packType) === normalizeToken(pack.packType))
+  ))
+  const source = {
+    ...(matchingActivePack || {}),
+    ...pack,
+  }
+  return {
+    packCategory: normalizePackCategory(source.packCategory, source.packType),
+    packType: normalizeToken(source.packType),
+    packKey: normalizeText(source.packKey),
+    label: normalizeText(source.label),
+    status: normalizeToken(source.status),
+    runtimeBindable: source.runtimeBindable === true,
+    knowledgeLayer: normalizeToken(source.knowledgeLayer),
+    executionMode: normalizeToken(source.executionMode),
+    boundary: sanitizeExecutionEvidenceBoundary(
+      source.boundary || resolveKnowledgePackBoundary(source),
+    ),
+    activationId: normalizeText(source.activationId),
+    versionId: normalizeText(source.versionId),
+    semanticVersion: normalizeText(source.semanticVersion),
+    schemaVersion: normalizeText(source.schemaVersion),
+    contentHash: normalizeText(source.contentHash),
+    activatedAt: normalizeText(source.activatedAt),
+  }
+}
+
 const buildSessionKnowledgePackBinding = (packBinding = {}, boundAt) => {
   const activePacks = Array.isArray(packBinding.activePacks)
     ? packBinding.activePacks.map(sanitizeKnowledgePackActivation)
     : []
   const requiredPacks = Array.isArray(packBinding.requiredPacks)
-    ? packBinding.requiredPacks.map((pack) => ({
-        packCategory: normalizePackCategory(pack.packCategory, pack.packType),
-        packType: normalizeToken(pack.packType),
-        packKey: normalizeText(pack.packKey),
-        label: normalizeText(pack.label),
-        status: normalizeToken(pack.status),
-        runtimeBindable: pack.runtimeBindable === true,
-      }))
+    ? packBinding.requiredPacks.map((pack) => buildRequiredKnowledgePack(pack, activePacks))
     : []
   const sanitizePackList = (packs) => Array.isArray(packs)
     ? packs.map(sanitizeKnowledgePackActivation)
@@ -781,7 +1649,9 @@ const buildSessionKnowledgePackBinding = (packBinding = {}, boundAt) => {
     providerContextPacks: sanitizePackList(packBinding.providerContextPacks),
     preValidationPacks: sanitizePackList(packBinding.preValidationPacks),
     postValidationPacks: sanitizePackList(packBinding.postValidationPacks),
+    lineageCertificationPacks: sanitizePackList(packBinding.lineageCertificationPacks),
     systemOnlyPacks: sanitizePackList(packBinding.systemOnlyPacks),
+    sourceDocumentPacks: sanitizePackList(packBinding.sourceDocumentPacks),
     lineage: sanitizeLineage(packBinding.lineage || packBinding.resolution?.lineage),
     resolution: {
       status: normalizeToken(packBinding.resolution?.status || packBinding.status),
@@ -926,14 +1796,10 @@ const sanitizePersistedKnowledgePackBinding = (binding = {}) => {
     ? binding.activePacks.slice(0, OUTCOME_CONTEXT_BINDING_LIST_LIMIT).map(sanitizeKnowledgePackActivation)
     : []
   const requiredPacks = Array.isArray(binding.requiredPacks)
-    ? binding.requiredPacks.slice(0, OUTCOME_CONTEXT_BINDING_LIST_LIMIT).map((pack) => ({
-        packCategory: normalizePackCategory(pack?.packCategory, pack?.packType),
-        packType: normalizeToken(pack?.packType),
-        packKey: normalizeText(pack?.packKey),
-        label: normalizeText(pack?.label),
-        status: normalizeToken(pack?.status),
-        runtimeBindable: pack?.runtimeBindable === true,
-      })).filter((pack) => pack.packType || pack.packKey)
+    ? binding.requiredPacks
+      .slice(0, OUTCOME_CONTEXT_BINDING_LIST_LIMIT)
+      .map((pack) => buildRequiredKnowledgePack(pack, activePacks))
+      .filter((pack) => pack.packType || pack.packKey)
     : []
   const sanitizePackList = (packs) => Array.isArray(packs)
     ? packs.slice(0, OUTCOME_CONTEXT_BINDING_LIST_LIMIT).map(sanitizeKnowledgePackActivation)
@@ -959,7 +1825,9 @@ const sanitizePersistedKnowledgePackBinding = (binding = {}) => {
     providerContextPacks: sanitizePackList(binding.providerContextPacks),
     preValidationPacks: sanitizePackList(binding.preValidationPacks),
     postValidationPacks: sanitizePackList(binding.postValidationPacks),
+    lineageCertificationPacks: sanitizePackList(binding.lineageCertificationPacks),
     systemOnlyPacks: sanitizePackList(binding.systemOnlyPacks),
+    sourceDocumentPacks: sanitizePackList(binding.sourceDocumentPacks),
     lineage: {
       resolvedAt: normalizeText(binding.lineage?.resolvedAt),
       activationIds: Array.isArray(binding.lineage?.activationIds)
@@ -989,6 +1857,206 @@ const sanitizePersistedKnowledgePackBinding = (binding = {}) => {
           }))
         : [],
     },
+  }
+}
+
+const getOutcomeExecutionPacks = (knowledgePackBinding = {}) => [
+  ...(Array.isArray(knowledgePackBinding.providerContextPacks)
+    ? knowledgePackBinding.providerContextPacks
+    : []),
+  ...(Array.isArray(knowledgePackBinding.preValidationPacks)
+    ? knowledgePackBinding.preValidationPacks
+    : []),
+  ...(Array.isArray(knowledgePackBinding.postValidationPacks)
+    ? knowledgePackBinding.postValidationPacks
+    : []),
+  ...(Array.isArray(knowledgePackBinding.lineageCertificationPacks)
+    ? knowledgePackBinding.lineageCertificationPacks
+    : []),
+  ...(Array.isArray(knowledgePackBinding.systemOnlyPacks)
+    ? knowledgePackBinding.systemOnlyPacks
+    : []),
+]
+
+const indexUniqueExecutionChecks = (checks = []) => {
+  const indexed = new Map()
+  let malformed = !Array.isArray(checks)
+  for (const check of Array.isArray(checks) ? checks : []) {
+    const key = normalizeToken(check?.key)
+    if (!key || indexed.has(key)) {
+      malformed = true
+      continue
+    }
+    indexed.set(key, sanitizeExecutionEvidenceStatus(check?.status))
+  }
+  return { indexed, malformed }
+}
+
+const buildOutcomeExecutionApprovalReadiness = ({
+  draft = {},
+  iteration = null,
+  knowledgePackBinding = null,
+} = {}) => {
+  const safeDraft = toPlainObject(draft)
+  const safeIteration = iteration ? toPlainObject(iteration) : null
+  const draftId = normalizeText(safeDraft.draftId)
+  const currentIterationId = normalizeText(safeDraft.currentIterationId)
+  const currentIterationNumber = Number(safeDraft.currentIterationNumber || 0)
+  const draftEvidence = sanitizeOutcomeExecutionEvidence(
+    safeDraft.lineageSummary?.componentExecutionEvidence,
+  )
+  const iterationEvidence = safeIteration
+    ? sanitizeOutcomeExecutionEvidence(safeIteration.lineageSummary?.componentExecutionEvidence)
+    : null
+  const evidence = safeIteration ? iterationEvidence : draftEvidence
+  const binding = sanitizePersistedKnowledgePackBinding(
+    knowledgePackBinding || safeDraft.knowledgePackBinding || {},
+  )
+  const blockerReasons = []
+  const block = (reason) => {
+    if (!blockerReasons.includes(reason)) blockerReasons.push(reason)
+  }
+
+  if (!evidence) {
+    block('EXECUTION_EVIDENCE_NOT_RECORDED')
+  } else {
+    if (evidence.contractVersion !== OUTCOME_EXECUTION_EVIDENCE_CONTRACT_VERSION) {
+      block('EXECUTION_EVIDENCE_CONTRACT_UNSUPPORTED')
+    }
+    if (
+      !draftId
+      || !currentIterationId
+      || currentIterationNumber < 1
+      || evidence.draftId !== draftId
+      || evidence.draftIterationId !== currentIterationId
+      || evidence.draftIterationNumber !== currentIterationNumber
+    ) {
+      block('EXECUTION_EVIDENCE_DRAFT_POINTER_MISMATCH')
+    }
+  }
+
+  if (safeIteration) {
+    if (
+      normalizeText(safeIteration.draftId) !== draftId
+      || normalizeText(safeIteration.draftIterationId) !== currentIterationId
+      || Number(safeIteration.iterationNumber || 0) !== currentIterationNumber
+    ) {
+      block('EXECUTION_EVIDENCE_CURRENT_ITERATION_MISMATCH')
+    }
+    if (draftEvidence && iterationEvidence && JSON.stringify(draftEvidence) !== JSON.stringify(iterationEvidence)) {
+      block('EXECUTION_EVIDENCE_SNAPSHOT_CONFLICT')
+    }
+  }
+
+  const expectedByVersionId = new Map()
+  for (const pack of getOutcomeExecutionPacks(binding)) {
+    const versionId = normalizeText(pack?.versionId)
+    const contentHash = normalizeText(pack?.contentHash)
+    if (!versionId || !contentHash) {
+      block('EXECUTION_PACK_BINDING_MALFORMED')
+      continue
+    }
+    const existing = expectedByVersionId.get(versionId)
+    if (existing && existing.contentHash !== contentHash) {
+      block('EXECUTION_PACK_BINDING_CONFLICT')
+      continue
+    }
+    const boundary = resolveKnowledgePackBoundary(pack)
+    if (!boundary) block('EXECUTION_PACK_BOUNDARY_NOT_DECLARED')
+    expectedByVersionId.set(versionId, {
+      versionId,
+      contentHash,
+      boundary,
+      receiptType: resolveKnowledgePackReceiptType(pack),
+    })
+  }
+  if (expectedByVersionId.size === 0) block('EXECUTION_PACK_BINDING_NOT_RECORDED')
+
+  const receiptByVersionId = new Map()
+  let receiptPacksMalformed = false
+  for (const pack of Array.isArray(evidence?.packs) ? evidence.packs : []) {
+    const versionId = normalizeText(pack?.versionId)
+    const contentHash = normalizeText(pack?.contentHash)
+    if (!versionId || !contentHash || receiptByVersionId.has(versionId)) {
+      receiptPacksMalformed = true
+      continue
+    }
+    receiptByVersionId.set(versionId, pack)
+  }
+  if (receiptPacksMalformed) block('EXECUTION_PACK_RECEIPTS_MALFORMED')
+
+  let passedPackCount = 0
+  for (const expectedPack of expectedByVersionId.values()) {
+    const receipt = receiptByVersionId.get(expectedPack.versionId)
+    if (!receipt) {
+      block('EXECUTION_PACK_RECEIPT_MISSING')
+      continue
+    }
+    if (normalizeText(receipt.contentHash) !== expectedPack.contentHash) {
+      block('EXECUTION_PACK_IDENTITY_MISMATCH')
+      continue
+    }
+    const receiptBoundary = sanitizeExecutionEvidenceBoundary(
+      receipt.boundary || resolveKnowledgePackBoundary(receipt),
+    )
+    const receiptType = sanitizeExecutionEvidenceReceiptType(
+      receipt.receiptType || resolveKnowledgePackReceiptType(receipt),
+    )
+    if (receiptBoundary !== expectedPack.boundary || receiptType !== expectedPack.receiptType) {
+      block('EXECUTION_PACK_BOUNDARY_RECEIPT_MISMATCH')
+      continue
+    }
+    if (expectedPack.boundary !== KNOWLEDGE_PACK_BOUNDARIES.GENERATION_CONTEXT) {
+      const receiptValidation = validateOutcomeBoundaryReceipt({
+        expectedPack,
+        receipt,
+      })
+      if (!receiptValidation.valid) {
+        block('EXECUTION_PACK_RECEIPT_CONTRACT_INVALID')
+        continue
+      }
+    }
+    const { indexed: checks, malformed } = indexUniqueExecutionChecks(receipt.checks)
+    if (malformed) block('EXECUTION_PACK_CHECKS_MALFORMED')
+    const requiredChecks = expectedPack.boundary === KNOWLEDGE_PACK_BOUNDARIES.GENERATION_CONTEXT
+      ? REQUIRED_OUTCOME_PACK_EXECUTION_CHECKS
+      : REQUIRED_OUTCOME_BOUNDARY_RECEIPT_CHECKS[expectedPack.boundary] || []
+    const requiredChecksPassed = requiredChecks.every(
+      (key) => checks.get(key) === 'PASSED',
+    )
+    if (sanitizeExecutionEvidenceStatus(receipt.status) !== 'PASSED') {
+      block('EXECUTION_PACK_NOT_PASSED')
+    }
+    if (!requiredChecksPassed) block('EXECUTION_PACK_CHECK_NOT_PASSED')
+    if (!malformed && requiredChecksPassed && sanitizeExecutionEvidenceStatus(receipt.status) === 'PASSED') {
+      passedPackCount += 1
+    }
+  }
+
+  const { indexed: runtimeChecks, malformed: runtimeChecksMalformed } = indexUniqueExecutionChecks(
+    evidence?.runtimeChecks,
+  )
+  if (runtimeChecksMalformed) block('EXECUTION_RUNTIME_CHECKS_MALFORMED')
+  const passedRuntimeCheckCount = REQUIRED_OUTCOME_RUNTIME_EXECUTION_CHECKS.filter(
+    (key) => runtimeChecks.get(key) === 'PASSED',
+  ).length
+  if (passedRuntimeCheckCount !== REQUIRED_OUTCOME_RUNTIME_EXECUTION_CHECKS.length) {
+    block('EXECUTION_RUNTIME_CHECK_NOT_PASSED')
+  }
+
+  const approvalAvailable = blockerReasons.length === 0
+  return {
+    contractVersion: OUTCOME_EXECUTION_APPROVAL_READINESS_CONTRACT_VERSION,
+    status: approvalAvailable ? 'PASSED' : 'BLOCKED',
+    approvalAvailable,
+    blockerReason: blockerReasons[0] || '',
+    message: approvalAvailable
+      ? 'All required execution evidence passed for this exact draft version.'
+      : 'Approval is blocked until all required execution evidence passes for this exact draft version.',
+    expectedPackCount: expectedByVersionId.size,
+    passedPackCount,
+    requiredRuntimeCheckCount: REQUIRED_OUTCOME_RUNTIME_EXECUTION_CHECKS.length,
+    passedRuntimeCheckCount,
   }
 }
 
@@ -1356,6 +2424,14 @@ const serializeOutcomeSessionSummary = (session, options = {}) => {
     requestedOutputTypeLabel: serialized.requestedOutputTypeLabel,
     informationStatus: buildCustomerInformationStatus(serialized.truthSignature),
     businessGuidance: buildCustomerBusinessGuidance(serialized.knowledgePackBinding),
+    governanceEvidence: buildCustomerGovernanceEvidence({
+      knowledgePackBinding: serialized.knowledgePackBinding,
+      recordId: serialized.sessionId,
+      recordType: 'SESSION',
+      runtimeContext: serialized,
+      sourceOutput: serialized.sourceOutput,
+      truthSignature: serialized.truthSignature,
+    }),
     requestText: serialized.prompt,
     startedAt: serialized.startedAt,
     lastActivityAt: serialized.lastActivityAt,
@@ -1430,11 +2506,29 @@ const sanitizeDraftApprovalLineage = (lineage = {}) => {
     operation: normalizeToken(approval.operation),
     draftId: normalizeText(approval.draftId),
     draftIterationId: normalizeText(approval.draftIterationId),
+    draftIterationNumber: Number(approval.draftIterationNumber || 0),
     approvedAt: normalizeDateValue(approval.approvedAt),
     approvedBy: normalizeText(approval.approvedBy),
     outcomeAssetId: normalizeText(approval.outcomeAssetId),
     outcomeAssetVersionId: normalizeText(approval.outcomeAssetVersionId),
     versionNumber: Number(approval.versionNumber || 0),
+  }
+}
+
+const sanitizeApprovedBaselineLineage = (lineage = {}) => {
+  const baseline = lineage.approvedBaseline && typeof lineage.approvedBaseline === 'object'
+    ? lineage.approvedBaseline
+    : null
+  if (!baseline) return null
+
+  return {
+    sourceDraftId: normalizeText(baseline.sourceDraftId),
+    sourceDraftIterationId: normalizeText(baseline.sourceDraftIterationId),
+    outcomeAssetId: normalizeText(baseline.outcomeAssetId),
+    outcomeAssetVersionId: normalizeText(baseline.outcomeAssetVersionId),
+    versionNumber: Number(baseline.versionNumber || 0),
+    approvedAt: normalizeDateValue(baseline.approvedAt),
+    approvedBy: normalizeText(baseline.approvedBy),
   }
 }
 
@@ -1470,11 +2564,28 @@ const buildOutcomeAssetLineageSummary = (lineage = {}) => {
       requiresSeparateCertificationBeforeTruthReuse:
         lineage.grrCertification?.requiresSeparateCertificationBeforeTruthReuse === true,
     },
+    componentExecutionEvidence: sanitizeOutcomeExecutionEvidence(lineage.componentExecutionEvidence),
+    knowledgeResolution: {
+      status: normalizeToken(lineage.knowledgeResolution?.status),
+      policyVersion: normalizeText(lineage.knowledgeResolution?.policyVersion),
+      resolvedAt: normalizeDateValue(lineage.knowledgeResolution?.resolvedAt),
+      activationIds: Array.isArray(lineage.knowledgeResolution?.activationIds)
+        ? lineage.knowledgeResolution.activationIds.map(normalizeText).filter(Boolean)
+        : [],
+      versionIds: Array.isArray(lineage.knowledgeResolution?.versionIds)
+        ? lineage.knowledgeResolution.versionIds.map(normalizeText).filter(Boolean)
+        : [],
+      contentHashes: Array.isArray(lineage.knowledgeResolution?.contentHashes)
+        ? lineage.knowledgeResolution.contentHashes.map(normalizeText).filter(Boolean)
+        : [],
+    },
   }
   const draftRefinement = sanitizeDraftRefinementLineage(lineage)
   if (draftRefinement) summary.draftRefinement = draftRefinement
   const draftApproval = sanitizeDraftApprovalLineage(lineage)
   if (draftApproval) summary.draftApproval = draftApproval
+  const approvedBaseline = sanitizeApprovedBaselineLineage(lineage)
+  if (approvedBaseline) summary.approvedBaseline = approvedBaseline
   return summary
 }
 
@@ -1690,6 +2801,16 @@ const serializeOutcomeAssetSummary = (asset, options = {}) => {
     currentVersionNumber: serialized.currentVersionNumber,
     informationStatus: buildCustomerInformationStatus(serialized.truthSignature),
     businessGuidance: buildCustomerBusinessGuidance(serialized.knowledgePackBinding),
+    governanceEvidence: buildCustomerGovernanceEvidence({
+      knowledgePackBinding: serialized.knowledgePackBinding,
+      lineageSummary: serialized.lineageSummary,
+      recordId: serialized.outcomeAssetId,
+      recordType: 'ASSET',
+      runtimeContext: { ...serialized, versionNumber: serialized.currentVersionNumber },
+      sourceOutput: serialized.sourceOutput,
+      truthSignature: serialized.truthSignature,
+      validationSummary: serialized.postValidation,
+    }),
     contentReview,
     previewAvailable: customerReady && contentReview.result === 'ALLOW',
     distributionAvailable: customerReady && contentReview.result === 'ALLOW',
@@ -1723,6 +2844,14 @@ const serializeCustomerOutcomeMessage = (message, options = {}) => {
     responseStatus: serialized.responseStatus,
     requestedOutputTypeKey: serialized.requestedOutputTypeKey,
     requestedOutputTypeLabel: serialized.requestedOutputTypeLabel,
+    governanceEvidence: buildCustomerGovernanceEvidence({
+      knowledgePackBinding: serialized.knowledgePackBinding,
+      recordId: serialized.messageId,
+      recordType: 'MESSAGE',
+      runtimeContext: serialized,
+      sourceOutput: serialized.sourceOutput,
+      truthSignature: serialized.truthSignature,
+    }),
     content: projectCustomerOutcomeMessageContent(serialized),
     submittedAt: serialized.submittedAt,
     createdAt: serialized.createdAt,
@@ -1734,6 +2863,11 @@ const serializeCustomerOutcomeDraft = (draft, options = {}) => {
   const serialized = serializeOutcomeDraft(draft, options)
   const contentReview = buildCustomerContentReview(serialized.validationSummary)
   const customerReady = !isNonCustomerReadyGeneration(toPlainObject(draft))
+  const approvalReadiness = buildOutcomeExecutionApprovalReadiness({
+    draft,
+    iteration: options.currentIteration || null,
+    knowledgePackBinding: serialized.knowledgePackBinding,
+  })
   return {
     draftId: serialized.draftId,
     sessionId: serialized.sessionId,
@@ -1748,10 +2882,26 @@ const serializeCustomerOutcomeDraft = (draft, options = {}) => {
     approvedAssetVersionId: serialized.approvedAssetVersionId,
     informationStatus: buildCustomerInformationStatus(serialized.truthSignature),
     businessGuidance: buildCustomerBusinessGuidance(serialized.knowledgePackBinding),
+    governanceEvidence: buildCustomerGovernanceEvidence({
+      knowledgePackBinding: serialized.knowledgePackBinding,
+      lineageSummary: serialized.lineageSummary,
+      recordId: serialized.draftId,
+      recordType: 'DRAFT',
+      runtimeContext: { ...serialized, versionNumber: serialized.currentIterationNumber },
+      sourceOutput: {
+        outputAssetId: serialized.sourceOutputAssetId,
+        outputTypeKey: serialized.outputTypeKey,
+        outputTypeLabel: serialized.outputTypeLabel,
+      },
+      truthSignature: serialized.truthSignature,
+      validationSummary: serialized.validationSummary,
+    }),
     contentReview,
+    approvalReadiness,
     approvalAvailable: serialized.status === OUTCOME_STUDIO_DRAFT_STATUSES.ACTIVE
       && customerReady
-      && contentReview.result === 'ALLOW',
+      && contentReview.result === 'ALLOW'
+      && approvalReadiness.approvalAvailable,
     warnings: serialized.warnings,
     limitations: serialized.limitations,
     approvedAt: serialized.approvedAt,
@@ -1761,10 +2911,20 @@ const serializeCustomerOutcomeDraft = (draft, options = {}) => {
   }
 }
 
-const serializeCustomerOutcomeDraftIteration = (iteration) => {
+const serializeCustomerOutcomeDraftIteration = (iteration, options = {}) => {
   const serialized = serializeOutcomeDraftIteration(iteration)
   const contentReview = buildCustomerContentReview(serialized.validationSummary)
   const customerReady = !isNonCustomerReadyGeneration(toPlainObject(iteration))
+  const approvalReadiness = buildOutcomeExecutionApprovalReadiness({
+    draft: options.draft || {
+      draftId: serialized.draftId,
+      currentIterationId: serialized.draftIterationId,
+      currentIterationNumber: serialized.iterationNumber,
+      knowledgePackBinding: options.knowledgePackBinding || {},
+    },
+    iteration,
+    knowledgePackBinding: options.knowledgePackBinding || options.draft?.knowledgePackBinding || {},
+  })
   return {
     draftIterationId: serialized.draftIterationId,
     draftId: serialized.draftId,
@@ -1780,9 +2940,11 @@ const serializeCustomerOutcomeDraftIteration = (iteration) => {
     customerContent: projectOutcomeCustomerContent(serialized.customerContent),
     contentAvailable: serialized.contentAvailable,
     contentReview,
+    approvalReadiness,
     approvalAvailable: serialized.status === OUTCOME_STUDIO_DRAFT_ITERATION_STATUSES.CURRENT
       && customerReady
-      && contentReview.result === 'ALLOW',
+      && contentReview.result === 'ALLOW'
+      && approvalReadiness.approvalAvailable,
     warnings: serialized.warnings,
     limitations: serialized.limitations,
     generatedAt: serialized.generatedAt,
@@ -1807,6 +2969,16 @@ const serializeCustomerOutcomeAssetVersion = (version, options = {}) => {
     title: serialized.title,
     informationStatus: buildCustomerInformationStatus(serialized.truthSignature),
     businessGuidance: buildCustomerBusinessGuidance(serialized.knowledgePackBinding),
+    governanceEvidence: buildCustomerGovernanceEvidence({
+      knowledgePackBinding: serialized.knowledgePackBinding,
+      lineageSummary: serialized.lineageSummary,
+      recordId: serialized.outcomeAssetVersionId,
+      recordType: 'ASSET_VERSION',
+      runtimeContext: { ...serialized, versionNumber: serialized.versionNumber },
+      sourceOutput: serialized.sourceOutput,
+      truthSignature: serialized.truthSignature,
+      validationSummary: serialized.postValidation,
+    }),
     contentReview,
     distributionAvailable: customerReady && contentReview.result === 'ALLOW',
     contentAvailable: serialized.contentAvailable,
@@ -1822,6 +2994,14 @@ const serializeCustomerOutcomeSession = (session, options = {}) => {
   const serialized = serializeOutcomeSession(session, options)
   return {
     ...serializeOutcomeSessionSummary(session, options),
+    governanceEvidence: buildCustomerGovernanceEvidence({
+      knowledgePackBinding: serialized.knowledgePackBinding,
+      recordId: serialized.sessionId,
+      recordType: 'SESSION',
+      runtimeContext: serialized,
+      sourceOutput: serialized.sourceOutput,
+      truthSignature: serialized.truthSignature,
+    }),
     sourceOutput: {
       outputAssetId: serialized.sourceOutput.outputAssetId,
       outputTypeKey: serialized.sourceOutput.outputTypeKey,
@@ -1994,8 +3174,32 @@ const buildOutcomeDraftApprovalBlockedError = ({
     },
   })
 
+const buildOutcomeDraftRevisionBlockedError = ({
+  blockerReason = 'OUTCOME_DRAFT_REVISION_BLOCKED',
+  outcomeAssetId = '',
+  sessionId = '',
+} = {}) =>
+  createOutcomeStudioError({
+    status: 409,
+    code: 'CONFLICT',
+    message: 'Outcome Studio revision requires an immutable approved asset version and no active working draft.',
+    reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_DRAFT_REVISION_BLOCKED,
+    details: {
+      sessionId: normalizeText(sessionId),
+      outcomeAssetId: normalizeText(outcomeAssetId),
+      draftCreated: false,
+      actionAvailable: false,
+      blockerReason,
+      safetyGate: {
+        code: OUTCOME_STUDIO_SAFETY_GATE_CODES.ASSET_APPROVAL,
+        status: OUTCOME_STUDIO_SAFETY_GATE_STATUSES.BLOCKED,
+      },
+    },
+  })
+
 const buildOutcomeDraftPreviewBlockedError = ({
   blockerReason = 'OUTCOME_DRAFT_PREVIEW_BLOCKED',
+  compareAvailable,
   currentIterationId = '',
   draftId = '',
   message = 'Outcome Studio draft preview requires an active draft with a current validated iteration.',
@@ -2011,6 +3215,7 @@ const buildOutcomeDraftPreviewBlockedError = ({
       draftId: normalizeText(draftId),
       currentIterationId: normalizeText(currentIterationId),
       previewAvailable: false,
+      ...(typeof compareAvailable === 'boolean' ? { compareAvailable } : {}),
       blockerReason,
     },
   })
@@ -2277,6 +3482,28 @@ const getOutcomeDraftIterationPreviewContent = ({
       blockerReason: 'OUTCOME_DRAFT_CUSTOMER_CONTENT_NOT_AVAILABLE',
     },
   })
+}
+
+const serializeDraftCompareVersion = ({
+  draftId = '',
+  iteration = {},
+  sessionId = '',
+} = {}) => {
+  const serializedIteration = serializeOutcomeDraftIteration(iteration)
+  const content = getOutcomeDraftIterationPreviewContent({
+    draftId,
+    iteration,
+    sessionId,
+  })
+  return {
+    draftIterationId: serializedIteration.draftIterationId,
+    iterationNumber: serializedIteration.iterationNumber,
+    title: normalizeText(serializedIteration.title) || 'Working draft',
+    contentFormat: content.markdown ? 'MARKDOWN' : 'SECTIONS',
+    markdown: content.markdown,
+    sections: content.sections,
+    generatedAt: serializedIteration.generatedAt,
+  }
 }
 
 const buildApprovedOutcomeAssetVersionCustomerContent = ({
@@ -2908,6 +4135,20 @@ const failDraftRefinementAuditClosed = (err, details = {}) =>
     },
   })
 
+const failDraftRevisionAuditClosed = (err, details = {}) =>
+  createOutcomeStudioError({
+    status: 500,
+    code: 'OUTCOME_DRAFT_REVISION_AUDIT_FAILED',
+    message: 'Outcome Studio approved-output revision audit could not be persisted.',
+    reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_DRAFT_REVISION_AUDIT_FAILED,
+    details: {
+      auditError: {
+        message: err?.message || 'Audit persistence failed.',
+      },
+      ...details,
+    },
+  })
+
 const failDraftApprovalAuditClosed = (err, details = {}) =>
   createOutcomeStudioError({
     status: 500,
@@ -3161,6 +4402,11 @@ const buildTruthBinding = ({
   truthQuality,
 }) => {
   const sourceSnapshot = sourceOutput?.sourceSnapshot || {}
+  const quality = truthQuality?.quality || {}
+  const confidence = quality.confidence || {}
+  const sourceDiversity = quality.sourceDiversity || {}
+  const coverage = quality.coverage || {}
+  const contradictionRisk = quality.contradictionRisk || {}
   const graph = truthQuality?.graph
     ? {
         graphVersion: normalizeText(truthQuality.graph.graphVersion),
@@ -3179,6 +4425,17 @@ const buildTruthBinding = ({
     certificationLevel: normalizeToken(certification?.level),
     certificationLabel: normalizeText(certification?.label),
     qualityBand: normalizeToken(truthQuality?.quality?.qualityBand),
+    acceptedTruthCount: Number(confidence.acceptedTruthCount || 0),
+    evidenceCount: Number(confidence.acceptedEvidenceCount || 0),
+    sourceCount: Number(sourceDiversity.sourceRecordCount || 0),
+    coverageScore: Number(coverage.score || 0),
+    confidenceScore: Number(confidence.score || 0),
+    sourceDiversityScore: Number(sourceDiversity.score || 0),
+    confidenceBand: normalizeToken(confidence.band),
+    sourceDiversityBand: normalizeToken(sourceDiversity.band),
+    contradictionCount: Number(contradictionRisk.count || 0),
+    unresolvedContradictionCount: Number(contradictionRisk.unresolvedCount || 0),
+    contradictionRisk: normalizeToken(contradictionRisk.level),
     sourceOutputAssetId: normalizeText(sourceOutput?.outputAssetId),
     sourceOutputTypeKey: normalizeToken(sourceOutput?.outputTypeKey),
     publishSnapshotId: normalizeText(sourceSnapshot.publishSnapshotId),
@@ -3394,6 +4651,15 @@ const buildOutcomeStudioProjection = async ({
   return {
     contractVersion: OUTCOME_STUDIO_CONTRACT_VERSION,
     phase: OUTCOME_STUDIO_PHASE,
+    runtimeContext: {
+      runtimeInstanceKey: normalizeText(outputLab?.runtimeScope?.runtimeInstanceKey),
+      runtimeType: normalizeToken(outputLab?.runtimeScope?.runtimeType),
+      frameworkKey: normalizeToken(outputLab?.runtimeScope?.frameworkKey),
+      packageKey: normalizeText(outputLab?.runtimeScope?.packageKey),
+      packageVersion: normalizeText(outputLab?.runtimeScope?.packageVersion),
+      projectId: normalizeText(outputLab?.runtimeScope?.projectId),
+      outcomeId: normalizeText(outputLab?.runtimeScope?.outcomeId),
+    },
     readiness: readinessWithSafetyGates,
     truthBinding,
     packBinding,
@@ -3457,6 +4723,448 @@ const buildCustomerSafetyGates = (safetyGates = {}) => ({
       })
     : [],
 })
+
+const CUSTOMER_GOVERNANCE_EVIDENCE_VERSION = 'outcome-studio.governance-evidence.v1'
+const CUSTOMER_GOVERNANCE_EVIDENCE_NOTICE =
+  'A tick means the named runtime boundary passed for this exact asset version. Resolved or recorded bindings alone do not count as execution; missing historical receipts remain not recorded.'
+
+const CUSTOMER_GOVERNANCE_STAGE_PACK_SOURCES = Object.freeze({
+  CLARIFICATION: [
+    ['preValidationPacks', 'Pre-validation'],
+    ['providerContextPacks', 'Provider context'],
+    ['sourceDocumentPacks', 'Source document context'],
+  ],
+  GUARDRAILS: [
+    ['requiredPacks', 'Required business guidance'],
+    ['systemOnlyPacks', 'System guardrails'],
+  ],
+  VALIDATION: [
+    ['validationPacks', 'Validation'],
+    ['postValidationPacks', 'Post-validation'],
+  ],
+  OUTCOME_READINESS: [
+    ['activePacks', 'Active Outcome Studio binding'],
+    ['lineageCertificationPacks', 'Lineage & certification'],
+    ['postValidationPacks', 'Post-validation'],
+  ],
+})
+
+const buildCustomerGovernancePack = ({
+  assignmentStatus = 'STAGE_ASSIGNED',
+  evidenceLabel = 'Resolved for this stage',
+  evidenceStatus = 'RESOLVED',
+  pack = {},
+  role = '',
+  roles = [],
+  executionEvidence = null,
+} = {}) => {
+  const safePack = sanitizeKnowledgePackActivation(pack)
+  const receipt = executionEvidence?.packs?.find((candidate) =>
+    candidate.versionId === safePack.versionId
+      && candidate.contentHash === safePack.contentHash)
+  const boundary = sanitizeExecutionEvidenceBoundary(
+    receipt?.boundary || resolveKnowledgePackBoundary(safePack),
+  )
+  const receiptType = sanitizeExecutionEvidenceReceiptType(
+    receipt?.receiptType || resolveKnowledgePackReceiptType(safePack),
+  )
+  return {
+    packKey: safePack.packKey,
+    label: safePack.label || safePack.packKey,
+    packType: safePack.packType,
+    packCategory: safePack.packCategory,
+    knowledgeLayer: safePack.knowledgeLayer,
+    capabilityKey: safePack.capabilityKey,
+    semanticVersion: safePack.semanticVersion,
+    schemaVersion: safePack.schemaVersion,
+    versionId: safePack.versionId,
+    status: safePack.status,
+    contentHash: safePack.contentHash,
+    activatedAt: safePack.activatedAt,
+    role: role || roles[0] || '',
+    roles: Array.from(new Set([role, ...roles].filter(Boolean))),
+    assignmentStatus,
+    evidenceStatus,
+    evidenceLabel,
+    executionStatus: receipt?.status || 'NOT_RECORDED',
+    boundary,
+    receiptType,
+    receiptContractVersion: normalizeText(receipt?.contractVersion),
+    receiptKey: normalizeText(receipt?.receiptKey),
+    validatorKey: normalizeText(receipt?.validatorKey).toLowerCase(),
+    result: normalizeToken(receipt?.result),
+    evidenceReference: normalizeText(receipt?.evidenceReference),
+    receiptStatus: receipt?.status || 'NOT_RECORDED',
+    executionChecks: Array.isArray(receipt?.checks) ? receipt.checks : [],
+    projectedEntryCount: Number(receipt?.projectedEntryCount || 0),
+    safeCandidateEntryCount: Number(receipt?.safeCandidateEntryCount || 0),
+    suppliedEntryCount: Number(receipt?.suppliedEntryCount || 0),
+    suppliedCategories: Array.isArray(receipt?.suppliedCategories) ? receipt.suppliedCategories : [],
+    sharedContribution: receipt?.sharedContribution === true,
+    projectionDisposition: receipt?.projectionDisposition || 'NOT_RECORDED',
+    admissionDisposition: receipt?.admissionDisposition || 'NOT_RECORDED',
+  }
+}
+
+const buildCustomerGovernanceStagePacks = ({
+  evidenceLabel,
+  evidenceStatus,
+  knowledgePackBinding = {},
+  stageKey,
+  executionEvidence = null,
+} = {}) => {
+  const packsByIdentity = new Map()
+  const addPacks = (packs, role) => {
+    if (!Array.isArray(packs)) return
+    packs.forEach((pack) => {
+      const safePack = sanitizeKnowledgePackActivation(pack)
+      if (!safePack.packKey && !safePack.versionId && !safePack.activationId) return
+      const identity = [safePack.packKey, safePack.versionId, safePack.activationId].filter(Boolean).join(':')
+      const existing = packsByIdentity.get(identity)
+      if (existing) {
+        existing.roles = Array.from(new Set([...existing.roles, role].filter(Boolean)))
+        return
+      }
+      packsByIdentity.set(identity, {
+        pack: safePack,
+        roles: role ? [role] : [],
+        assignmentStatus: 'STAGE_ASSIGNED',
+      })
+    })
+  }
+
+  ;(CUSTOMER_GOVERNANCE_STAGE_PACK_SOURCES[stageKey] || []).forEach(([sourceKey, role]) => {
+    addPacks(knowledgePackBinding[sourceKey], role)
+  })
+
+  const activePacks = Array.isArray(knowledgePackBinding.activePacks)
+    ? knowledgePackBinding.activePacks
+    : []
+  const stageBoundaryMap = {
+    CLARIFICATION: new Set([
+      KNOWLEDGE_PACK_BOUNDARIES.GENERATION_CONTEXT,
+      KNOWLEDGE_PACK_BOUNDARIES.PRE_GENERATION_VALIDATION,
+    ]),
+    GUARDRAILS: new Set([KNOWLEDGE_PACK_BOUNDARIES.PRE_GENERATION_VALIDATION]),
+    VALIDATION: new Set([KNOWLEDGE_PACK_BOUNDARIES.POST_GENERATION_VALIDATION]),
+    OUTCOME_READINESS: new Set(Object.values(KNOWLEDGE_PACK_BOUNDARIES)),
+  }
+  const boundaryLabels = {
+    [KNOWLEDGE_PACK_BOUNDARIES.GENERATION_CONTEXT]: 'Generation context',
+    [KNOWLEDGE_PACK_BOUNDARIES.PRE_GENERATION_VALIDATION]: 'Pre-generation validation',
+    [KNOWLEDGE_PACK_BOUNDARIES.POST_GENERATION_VALIDATION]: 'Post-generation validation',
+    [KNOWLEDGE_PACK_BOUNDARIES.LINEAGE_CERTIFICATION]: 'Lineage and certification',
+  }
+  const allowedBoundaries = stageBoundaryMap[stageKey] || new Set()
+  activePacks.forEach((pack) => {
+    const boundary = resolveKnowledgePackBoundary(pack)
+    if (allowedBoundaries.has(boundary)) addPacks([pack], boundaryLabels[boundary])
+  })
+
+  const stageAssigned = packsByIdentity.size > 0
+  if (!stageAssigned && Array.isArray(knowledgePackBinding.activePacks)) {
+    addPacks(knowledgePackBinding.activePacks, 'Active binding; stage assignment not recorded')
+    packsByIdentity.forEach((entry) => {
+      entry.assignmentStatus = 'NOT_STAGE_TAGGED'
+    })
+  }
+
+  return Array.from(packsByIdentity.values()).map((entry) => buildCustomerGovernancePack({
+    assignmentStatus: entry.assignmentStatus,
+    evidenceLabel,
+    evidenceStatus,
+    pack: entry.pack,
+    roles: entry.roles,
+    executionEvidence,
+  }))
+}
+
+const buildCustomerGovernanceInput = ({ key, label, status = 'NOT_RECORDED', value = '' } = {}) => ({
+  key,
+  label,
+  status: normalizeToken(status || 'NOT_RECORDED'),
+  value: normalizeText(value),
+})
+
+const buildCustomerGovernanceEvidence = ({
+  contextBindings = {},
+  knowledgePackBinding = {},
+  lineageSummary = {},
+  recordId = '',
+  recordType = 'READINESS',
+  runtimeContext = {},
+  safetyGates = {},
+  sourceOutput = {},
+  truthSignature = {},
+  validationSummary = null,
+} = {}) => {
+  const normalizedRecordType = normalizeToken(recordType || 'READINESS')
+  const persistedRecord = !['READINESS', ''].includes(normalizedRecordType)
+  const bindingStatus = normalizeToken(knowledgePackBinding.status)
+  const bindingAvailable = ['ACTIVE', 'BOUND', 'PROJECTED', 'READY', 'READY_WITH_GAPS'].includes(bindingStatus)
+  const evidenceStatus = persistedRecord
+    ? bindingAvailable ? 'RECORDED' : 'PARTIAL'
+    : bindingAvailable ? 'RESOLVED' : 'UNAVAILABLE'
+  const evidenceLabel = persistedRecord
+    ? `Binding recorded on this ${normalizedRecordType.toLowerCase().replaceAll('_', ' ')}`
+    : 'Resolved for this stage'
+  const safeTruthSignature = sanitizePersistedTruthSignature(truthSignature || {})
+  const safeSourceOutput = sanitizePersistedSourceOutput(sourceOutput || {})
+  const safeSafetyGates = buildCustomerSafetyGates(safetyGates)
+  const safeValidation = sanitizeOutcomePostValidationSnapshot(validationSummary)
+  const safeLineage = buildOutcomeAssetLineageSummary(lineageSummary || {})
+  const governedReasoning = contextBindings?.governedReasoning || {}
+  const grrExecutionId = normalizeText(governedReasoning.executionId || safeLineage.grrExecutionId)
+  const grrRuntimeArtifactId = normalizeText(governedReasoning.runtimeArtifactId || safeLineage.grrRuntimeArtifactId)
+  const grrProviderMode = normalizeToken(governedReasoning.providerMode || safeLineage.grrProviderMode)
+  const runtimeStateWriteStatus = normalizeToken(
+    governedReasoning.runtimeStateWriteStatus || safeLineage.grrRuntimeStateWrites?.status,
+  )
+  const safeRuntimeContext = {
+    runtimeInstanceKey: normalizeText(runtimeContext.runtimeInstanceKey),
+    runtimeType: normalizeToken(runtimeContext.runtimeType),
+    frameworkKey: normalizeToken(runtimeContext.frameworkKey),
+    packageKey: normalizeText(runtimeContext.packageKey),
+    packageVersion: normalizeText(runtimeContext.packageVersion),
+    projectId: normalizeText(runtimeContext.projectId),
+    outcomeId: normalizeText(runtimeContext.outcomeId),
+  }
+  const safeRecord = {
+    type: normalizedRecordType,
+    id: normalizeText(recordId),
+    iterationId: normalizeText(runtimeContext.currentIterationId || runtimeContext.draftIterationId),
+    versionNumber: Number(runtimeContext.versionNumber || 0),
+  }
+  const candidateExecutionEvidence = safeLineage.componentExecutionEvidence
+  const approvalLineage = safeLineage.draftApproval || {}
+  const evidenceVersionMatches = candidateExecutionEvidence
+    && candidateExecutionEvidence.contractVersion === OUTCOME_EXECUTION_EVIDENCE_CONTRACT_VERSION
+    && (
+      (normalizedRecordType === 'DRAFT'
+        && candidateExecutionEvidence.draftId === safeRecord.id
+        && candidateExecutionEvidence.draftIterationId === safeRecord.iterationId
+        && candidateExecutionEvidence.draftIterationNumber === safeRecord.versionNumber)
+      || (normalizedRecordType === 'DRAFT_ITERATION'
+        && candidateExecutionEvidence.draftIterationId === safeRecord.id
+        && candidateExecutionEvidence.draftIterationNumber === safeRecord.versionNumber)
+      || (normalizedRecordType === 'ASSET_VERSION'
+        && approvalLineage.outcomeAssetVersionId === safeRecord.id
+        && approvalLineage.draftId === candidateExecutionEvidence.draftId
+        && approvalLineage.draftIterationId === candidateExecutionEvidence.draftIterationId
+        && approvalLineage.draftIterationNumber === candidateExecutionEvidence.draftIterationNumber)
+    )
+  const executionEvidence = evidenceVersionMatches ? candidateExecutionEvidence : null
+  const knowledgeResolution = {
+    status: normalizeToken(knowledgePackBinding.status || knowledgePackBinding.resolution?.status),
+    mode: normalizeText(knowledgePackBinding.mode),
+    resolutionSource: normalizeToken(knowledgePackBinding.resolutionSource),
+    policyKey: normalizeText(knowledgePackBinding.policyKey),
+    policyVersion: normalizeText(
+      knowledgePackBinding.policyVersion || knowledgePackBinding.resolution?.policyVersion,
+    ),
+    manifestId: normalizeText(knowledgePackBinding.manifestId),
+    manifestKey: normalizeText(knowledgePackBinding.manifestKey),
+    manifestVersion: normalizeText(knowledgePackBinding.manifestVersion),
+    boundAt: normalizeDateValue(knowledgePackBinding.boundAt),
+    activeCount: Number(knowledgePackBinding.activeCount || 0),
+    requiredCount: Number(knowledgePackBinding.requiredCount || 0),
+    resolvedCount: Number(knowledgePackBinding.resolvedCount || 0),
+    lineage: {
+      resolvedAt: normalizeDateValue(knowledgePackBinding.lineage?.resolvedAt),
+      versionIds: Array.isArray(knowledgePackBinding.lineage?.versionIds)
+        ? knowledgePackBinding.lineage.versionIds.map(normalizeText).filter(Boolean)
+        : [],
+      contentHashes: Array.isArray(knowledgePackBinding.lineage?.contentHashes)
+        ? knowledgePackBinding.lineage.contentHashes.map(normalizeText).filter(Boolean)
+        : [],
+    },
+  }
+  const sourceValue = [safeSourceOutput.outputTypeLabel || safeSourceOutput.outputTypeKey, safeSourceOutput.outputAssetId]
+    .filter(Boolean)
+    .join(' · ')
+  const truthValue = [safeTruthSignature.status, safeTruthSignature.currentness, safeTruthSignature.truthSignatureId]
+    .filter(Boolean)
+    .join(' · ')
+  const runtimeValue = [safeRuntimeContext.runtimeType, safeRuntimeContext.frameworkKey, safeRuntimeContext.packageKey, safeRuntimeContext.packageVersion]
+    .filter(Boolean)
+    .join(' · ')
+  const knowledgeValue = [knowledgeResolution.manifestKey, knowledgeResolution.manifestVersion]
+    .filter(Boolean)
+    .join(' · ')
+  const knowledgeDisplayValue = knowledgeValue
+    || (knowledgeResolution.status ? `Binding status ${knowledgeResolution.status}; manifest and policy not recorded.` : '')
+  const commonInputs = [
+    buildCustomerGovernanceInput({
+      key: 'source-output',
+      label: 'Source deliverable',
+      status: safeSourceOutput.outputAssetId ? 'BOUND' : 'NOT_RECORDED',
+      value: sourceValue || 'No governed source deliverable recorded.',
+    }),
+    buildCustomerGovernanceInput({
+      key: 'truth-binding',
+      label: 'Verified information',
+      status: safeTruthSignature.currentness || safeTruthSignature.status || 'NOT_RECORDED',
+      value: truthValue || 'No verified-information binding recorded.',
+    }),
+    buildCustomerGovernanceInput({
+      key: 'runtime-context',
+      label: 'Runtime context',
+      status: runtimeValue ? 'RECORDED' : 'NOT_RECORDED',
+      value: runtimeValue || 'Runtime context not recorded.',
+    }),
+    buildCustomerGovernanceInput({
+      key: 'knowledge-resolution',
+      label: 'Knowledge resolution',
+      status: knowledgeResolution.status || 'NOT_RECORDED',
+      value: knowledgeDisplayValue || 'Knowledge manifest and policy not recorded.',
+    }),
+  ]
+  const validationInputs = safeValidation
+    ? [
+        buildCustomerGovernanceInput({
+          key: 'validation-result',
+          label: 'Content validation',
+          status: safeValidation.result || safeValidation.status || 'NOT_RECORDED',
+          value: [safeValidation.validationId, safeValidation.status, safeValidation.result]
+            .filter(Boolean)
+            .join(' · ') || 'Validation result recorded without an identifier.',
+        }),
+        buildCustomerGovernanceInput({
+          key: 'validation-manifest',
+          label: 'Validation manifest',
+          status: safeValidation.manifestId || safeValidation.manifestKey ? 'RECORDED' : 'NOT_RECORDED',
+          value: [safeValidation.manifestKey || safeValidation.manifestId, safeValidation.manifestVersion]
+            .filter(Boolean)
+            .join(' · ') || 'Validation manifest not recorded.',
+        }),
+        buildCustomerGovernanceInput({
+          key: 'pack-content-boundary',
+          label: 'Raw Knowledge Pack content',
+          status: safeValidation.rawPackContentIncluded ? 'BLOCKED' : 'PASSED',
+          value: safeValidation.rawPackContentIncluded
+            ? 'Raw pack content was included in validation.'
+            : 'Raw pack content was not included in validation.',
+        }),
+      ]
+    : [buildCustomerGovernanceInput({
+        key: 'validation-result',
+        label: 'Content validation',
+        value: 'Validation evidence has not been persisted for this record.',
+      })]
+  const reasoningInputs = [
+    buildCustomerGovernanceInput({
+      key: 'governed-reasoning-chain',
+      label: 'Governed reasoning chain',
+      status: grrExecutionId || grrRuntimeArtifactId ? 'RECORDED' : 'NOT_RECORDED',
+      value: [grrExecutionId, grrRuntimeArtifactId, grrProviderMode]
+        .filter(Boolean)
+        .join(' · ') || 'No governed reasoning-chain execution is recorded for this item.',
+    }),
+    buildCustomerGovernanceInput({
+      key: 'runtime-state-write',
+      label: 'Runtime state write',
+      status: runtimeStateWriteStatus || 'NOT_RECORDED',
+      value: runtimeStateWriteStatus || 'Runtime state write status not recorded.',
+    }),
+  ]
+  const stages = [
+    ['CLARIFICATION', 'Clarification', [...commonInputs]],
+    ['GUARDRAILS', 'Guardrails', [
+      ...commonInputs,
+      buildCustomerGovernanceInput({
+        key: 'safety-gates',
+        label: 'Safety gates',
+        status: safeSafetyGates.status,
+        value: `${safeSafetyGates.passedCount}/${safeSafetyGates.totalCount} checks passed`,
+      }),
+    ]],
+    ['VALIDATION', 'Validation', [...commonInputs, ...validationInputs, ...reasoningInputs]],
+    ['OUTCOME_READINESS', 'Outcome readiness', [
+      ...commonInputs,
+      ...reasoningInputs,
+      buildCustomerGovernanceInput({
+        key: 'record-identity',
+        label: normalizedRecordType === 'READINESS' ? 'Asset identity' : `${normalizedRecordType.toLowerCase().replaceAll('_', ' ')} identity`,
+        status: safeRecord.id ? 'RECORDED' : 'NOT_RECORDED',
+        value: safeRecord.id || 'No versioned asset identity is recorded yet.',
+      }),
+    ]],
+  ].map(([key, label, inputs]) => ({
+    key,
+    label,
+    evidenceStatus,
+    evidenceLabel,
+    knowledgePacks: buildCustomerGovernanceStagePacks({
+      evidenceLabel,
+      evidenceStatus,
+      knowledgePackBinding,
+      stageKey: key,
+      executionEvidence,
+    }),
+    inputs,
+    checks: key === 'GUARDRAILS'
+      ? safeSafetyGates.gates.map((gate) => ({
+          key: gate.key,
+          label: gate.label,
+          status: gate.status,
+          message: gate.message,
+        }))
+      : key === 'VALIDATION'
+        ? [
+            ...(executionEvidence?.runtimeChecks || []),
+            ...(safeValidation?.validators || []).map((validator) => ({
+              key: validator.validatorKey,
+              label: validator.validatorKey,
+              status: validator.status,
+              message: validator.message,
+            })),
+            ...(safeValidation?.issues || []).map((issue) => ({
+              key: issue.code,
+              label: issue.code,
+              status: issue.severity,
+              message: issue.message,
+            })),
+          ]
+        : key === 'OUTCOME_READINESS'
+          ? (executionEvidence?.runtimeChecks || [])
+          : [],
+  }))
+
+  return {
+    version: CUSTOMER_GOVERNANCE_EVIDENCE_VERSION,
+    status: evidenceStatus,
+    notice: CUSTOMER_GOVERNANCE_EVIDENCE_NOTICE,
+    record: safeRecord,
+    runtimeContext: safeRuntimeContext,
+    knowledgeResolution,
+    governedReasoning: {
+      executionId: grrExecutionId,
+      runtimeArtifactId: grrRuntimeArtifactId,
+      providerMode: grrProviderMode,
+      runtimeStateWriteStatus,
+      runtimeArtifactIsCertifiedTruth:
+        governedReasoning.runtimeArtifactIsCertifiedTruth === true
+        || safeLineage.grrCertification.runtimeArtifactIsCertifiedTruth === true,
+      executionEvidenceRecorded: Boolean(executionEvidence),
+      executionEvidenceContractVersion: executionEvidence?.contractVersion || '',
+    },
+    truthBinding: {
+      truthSignatureId: safeTruthSignature.truthSignatureId,
+      status: safeTruthSignature.status,
+      currentness: safeTruthSignature.currentness,
+      boundAt: safeTruthSignature.boundAt,
+    },
+    sourceOutput: {
+      outputAssetId: safeSourceOutput.outputAssetId,
+      outputTypeKey: safeSourceOutput.outputTypeKey,
+      outputTypeLabel: safeSourceOutput.outputTypeLabel,
+      status: safeSourceOutput.status,
+      generatedAt: safeSourceOutput.generatedAt,
+      publishedAt: safeSourceOutput.publishedAt,
+    },
+    stages,
+  }
+}
 
 const buildOutcomeStudioCustomerProjection = (projection = {}) => {
   const readiness = projection.readiness || {}
@@ -3531,6 +5239,14 @@ const buildOutcomeStudioCustomerProjection = (projection = {}) => {
         : [],
     },
     safetyGates,
+    governanceEvidence: buildCustomerGovernanceEvidence({
+      knowledgePackBinding: projection.packBinding,
+      recordType: 'READINESS',
+      runtimeContext: projection.runtimeContext,
+      safetyGates: projection.safetyGates,
+      sourceOutput: sourceOutputs[0],
+      truthSignature,
+    }),
     conversation: {
       enabled: projection.conversation?.enabled === true,
       disabledReason: canStartSession
@@ -3886,6 +5602,126 @@ export const getRuntimeOutcomeDraftPreview = async ({
     markdown: previewContent.markdown,
     sections: previewContent.sections,
     generatedAt: serializedIteration.generatedAt,
+  }
+}
+
+export const getRuntimeOutcomeDraftCompare = async ({
+  draftId,
+  runtimeInstanceId,
+  scopes,
+  sessionId,
+} = {}) => {
+  const runtimeInstance = await getRuntimeInstance({ runtimeInstanceId, scopes })
+  const runtimeObjectId = runtimeInstance._id || runtimeInstance.id
+  const session = await findOutcomeSessionForRuntime({
+    detailsRuntimeInstanceId: runtimeInstanceId,
+    runtimeInstanceId: runtimeObjectId,
+    sessionId,
+  })
+  const currentEvidence = buildRuntimeTruthEvidence(runtimeInstance)
+  const serializedSession = serializeOutcomeSession(session, { currentEvidence })
+
+  if (serializedSession.status !== OUTCOME_STUDIO_SESSION_STATUSES.ACTIVE) {
+    throw buildOutcomeDraftPreviewBlockedError({
+      blockerReason: 'OUTCOME_SESSION_NOT_ACTIVE',
+      draftId,
+      message: 'Outcome Studio draft comparison cannot run for a non-active session.',
+      sessionId: serializedSession.sessionId,
+    })
+  }
+
+  assertOutcomeSessionTruthCurrent({
+    actionLabel: 'draft comparison',
+    availabilityKey: 'previewAvailable',
+    session: serializedSession,
+  })
+
+  const activeDraft = await findActiveOutcomeDraftForPreview({
+    draftId,
+    runtimeInstanceId: runtimeObjectId,
+    sessionId: serializedSession.sessionId,
+  })
+  const currentIteration = await findCurrentOutcomeDraftIterationForPreview({
+    activeDraft,
+    runtimeInstanceId: runtimeObjectId,
+    sessionId: serializedSession.sessionId,
+  })
+  const serializedDraft = serializeOutcomeDraft(activeDraft, { currentEvidence })
+  const serializedCurrentIteration = serializeOutcomeDraftIteration(currentIteration)
+
+  if (serializedCurrentIteration.iterationNumber !== serializedDraft.currentIterationNumber) {
+    throw buildOutcomeDraftPreviewBlockedError({
+      blockerReason: 'OUTCOME_DRAFT_ITERATION_NUMBER_MISMATCH',
+      currentIterationId: serializedCurrentIteration.draftIterationId,
+      draftId: serializedDraft.draftId,
+      sessionId: serializedSession.sessionId,
+    })
+  }
+
+  assertOutcomeDraftPreviewCurrentTruth({
+    draft: serializedDraft,
+    iteration: serializedCurrentIteration,
+    session: serializedSession,
+  })
+  assertCustomerReadyGeneration(currentIteration)
+  assertOutcomeDraftPreviewValidation({
+    draft: activeDraft,
+    iteration: currentIteration,
+    sessionId: serializedSession.sessionId,
+  })
+
+  const previousIterationId = normalizeText(currentIteration.previousIterationId)
+  if (!previousIterationId || previousIterationId === serializedCurrentIteration.draftIterationId) {
+    throw buildOutcomeDraftPreviewBlockedError({
+      blockerReason: 'OUTCOME_DRAFT_PREVIOUS_ITERATION_MISSING',
+      compareAvailable: false,
+      currentIterationId: serializedCurrentIteration.draftIterationId,
+      draftId: serializedDraft.draftId,
+      message: 'Compare is unavailable until this draft has a previous version.',
+      sessionId: serializedSession.sessionId,
+    })
+  }
+
+  const previousQuery = OutcomeDraftIteration.findOne({
+    runtimeInstanceId: runtimeObjectId,
+    sessionId: serializedSession.sessionId,
+    draftId: serializedDraft.draftId,
+    draftIterationId: previousIterationId,
+  })
+  const previousIteration = typeof previousQuery?.lean === 'function'
+    ? await previousQuery.lean()
+    : await previousQuery
+
+  if (!previousIteration || Number(previousIteration.iterationNumber || 0) !== serializedCurrentIteration.iterationNumber - 1) {
+    throw buildOutcomeDraftPreviewBlockedError({
+      blockerReason: 'OUTCOME_DRAFT_PREVIOUS_ITERATION_INVALID',
+      currentIterationId: serializedCurrentIteration.draftIterationId,
+      draftId: serializedDraft.draftId,
+      message: 'Compare is unavailable because the immediate previous draft version could not be verified.',
+      sessionId: serializedSession.sessionId,
+    })
+  }
+
+  assertCustomerReadyGeneration(previousIteration)
+  assertOutcomeDraftPreviewValidation({
+    draft: activeDraft,
+    iteration: previousIteration,
+    sessionId: serializedSession.sessionId,
+  })
+
+  return {
+    draftId: serializedDraft.draftId,
+    compareAvailable: true,
+    from: serializeDraftCompareVersion({
+      draftId: serializedDraft.draftId,
+      iteration: previousIteration,
+      sessionId: serializedSession.sessionId,
+    }),
+    to: serializeDraftCompareVersion({
+      draftId: serializedDraft.draftId,
+      iteration: currentIteration,
+      sessionId: serializedSession.sessionId,
+    }),
   }
 }
 
@@ -4653,6 +6489,176 @@ export const generateRuntimeOutcomeResponse = async ({
   })
   const warnings = buildOutcomeWarningsFromGrr({ grrExecution })
   const limitations = buildOutcomeLimitationsFromGrr({ grrExecution })
+  const renderingFrameworkState = getFrameworkState(runtimeInstance)
+  const renderingRevision = getObjectValue(renderingFrameworkState, 'revision')
+    || getObjectValue(runtimeInstance, 'revision')
+    || {}
+  const runtimeRevisionNumber = Number(
+    lineageSummary.runtimeRevisionNumber
+    || getObjectValue(renderingRevision, 'revisionNumber')
+    || getObjectValue(runtimeInstance, 'currentRevisionNumber')
+    || 0,
+  )
+  const runtimeRevisionReference = normalizeText(
+    lineageSummary.runtimeRevisionId
+    || getObjectValue(renderingRevision, 'revisionId')
+    || getObjectValue(runtimeInstance, 'currentRevisionId'),
+  ) || (Number.isSafeInteger(runtimeRevisionNumber) && runtimeRevisionNumber > 0
+      ? String(runtimeRevisionNumber)
+      : '')
+  let runtimeTruthQualityProjection = null
+  try {
+    runtimeTruthQualityProjection = await evaluateRuntimeTruthQuality({
+      actorUserId,
+      auditMode: 'none',
+      runtimeInstanceId: runtimeObjectId,
+      scopes,
+    })
+  } catch (_error) {
+    // The draft may still be persisted, but metadata validation remains absent.
+    runtimeTruthQualityProjection = null
+  }
+  const runtimeQuality = runtimeTruthQualityProjection?.quality || {}
+  const baseTruthCertificationCandidate = buildTruthCertificationCandidate({
+    grrExecution,
+    runtimeInstance,
+    truthSignature: serializedSession.truthSignature,
+    customerContent,
+  })
+  const truthCertificationCandidate = buildOutcomeStudioTruthCertificationCandidate({
+    baseCandidate: baseTruthCertificationCandidate,
+    runtimeQuality,
+  })
+  const renderingLayerReceipt = await executeRenderingLayerBoundary({
+    asset: {
+      outcomeAssetId: draftId,
+    },
+    customerContent,
+    evidenceBoundaries: limitations,
+    knowledgePackBinding: generationKnowledgePackBinding,
+    limitations,
+    lineageSummary,
+    outputFormat: OUTCOME_STUDIO_EXPORT_FORMATS.MARKDOWN,
+    runtimeRevisionReference,
+    truthSignature: serializedSession.truthSignature,
+    truthSignatureReference: serializedSession.truthSignatureId,
+    version: {
+      outcomeAssetVersionId: draftIterationId,
+    },
+  })
+  const truthCertificationReceipt = await executeTruthCertificationBoundary({
+    asset: {
+      outcomeAssetId: draftId,
+    },
+    candidate: truthCertificationCandidate,
+    customerContent,
+    knowledgePackBinding: generationKnowledgePackBinding,
+    version: {
+      outcomeAssetVersionId: draftIterationId,
+    },
+  })
+  const prohibitedOutputClaimsReceipt = await executeProhibitedOutputClaimsBoundary({
+    asset: {
+      outcomeAssetId: draftId,
+    },
+    customerContent,
+    knowledgePackBinding: generationKnowledgePackBinding,
+    version: {
+      outcomeAssetVersionId: draftIterationId,
+    },
+  })
+  const blockingRulesReceipt = await executeBlockingRulesBoundary({
+    asset: {
+      outcomeAssetId: draftId,
+    },
+    candidate: truthCertificationCandidate,
+    knowledgePackBinding: generationKnowledgePackBinding,
+    version: {
+      outcomeAssetVersionId: draftIterationId,
+    },
+  })
+  const certificationLevelsExecution = await executeCertificationLevelsBoundary({
+    asset: {
+      outcomeAssetId: draftId,
+    },
+    candidate: truthCertificationCandidate,
+    knowledgePackBinding: generationKnowledgePackBinding,
+    version: {
+      outcomeAssetVersionId: draftIterationId,
+    },
+  })
+  const truthQualityDimensionsExecution = await executeTruthQualityDimensionsBoundary({
+    asset: {
+      outcomeAssetId: draftId,
+    },
+    candidate: truthCertificationCandidate,
+    knowledgePackBinding: generationKnowledgePackBinding,
+    version: {
+      outcomeAssetVersionId: draftIterationId,
+    },
+  })
+  const runtimeWarningRulesExecution = await executeRuntimeWarningRulesBoundary({
+    asset: {
+      outcomeAssetId: draftId,
+    },
+    candidate: truthCertificationCandidate,
+    knowledgePackBinding: generationKnowledgePackBinding,
+    version: {
+      outcomeAssetVersionId: draftIterationId,
+    },
+  })
+  const exportMetadataPack = findPostValidationPack(
+    generationKnowledgePackBinding,
+    EXPORT_METADATA_RULES_EXECUTOR_KEY,
+  )
+  const knownGapMessages = Array.isArray(runtimeTruthQualityProjection?.quality?.knownGaps)
+    ? runtimeTruthQualityProjection.quality.knownGaps
+      .map((gap) => normalizeText(gap?.message))
+      .filter(Boolean)
+    : null
+  const exportMetadataExpected = {
+    certificationLevel: certificationLevelsExecution?.assignedLevel,
+    truthQuality: {
+      coverageScore: truthCertificationCandidate.coverageScore,
+      confidenceScore: truthCertificationCandidate.confidenceScore,
+      sourceDiversityScore: truthCertificationCandidate.sourceDiversityScore,
+      contradictionRisk: truthCertificationCandidate.contradictionRisk,
+    },
+    truthSignatureId: serializedSession.truthSignatureId,
+    truthSignature: serializedSession.truthSignature,
+    runtimeRevision: runtimeRevisionReference,
+    graphVersion: runtimeTruthQualityProjection?.graph?.graphVersion,
+    knownGaps: knownGapMessages,
+    activeWarnings: runtimeWarningRulesExecution?.warnings,
+    limitations,
+    generatedAt,
+    sourceOutputAssetId: lineageSummary.sourceOutputAssetId,
+    lineage: {
+      grrExecutionId: lineageSummary.grrExecutionId,
+      grrRuntimeArtifactId: lineageSummary.grrRuntimeArtifactId,
+    },
+  }
+  const exportMetadataSnapshot = buildExportMetadataSnapshot({
+    pack: exportMetadataPack || {},
+    draft: {
+      draftId,
+      draftIterationId,
+      draftIterationNumber,
+    },
+    customerContent,
+    ...exportMetadataExpected,
+  })
+  const exportMetadataExecution = await executeExportMetadataRulesBoundary({
+    asset: { outcomeAssetId: draftId },
+    customerContent,
+    expected: exportMetadataExpected,
+    knowledgePackBinding: generationKnowledgePackBinding,
+    metadataSnapshot: exportMetadataSnapshot,
+    version: { outcomeAssetVersionId: draftIterationId },
+  })
+  if (exportMetadataExecution?.metadataSnapshot) {
+    lineageSummary.exportMetadataSnapshot = exportMetadataExecution.metadataSnapshot
+  }
   const postValidation = buildOutcomeAssetPostValidationSnapshot({
     asset: {
       outcomeAssetId: draftId,
@@ -4672,6 +6678,59 @@ export const generateRuntimeOutcomeResponse = async ({
   if (!isOutcomePostValidationAllowed(postValidation)) {
     throw buildCustomerContentReviewError({ action: 'create this draft' })
   }
+  const truthCertificationFrameworkExecution = await executeTruthCertificationFrameworkBoundary({
+    asset: { outcomeAssetId: draftId },
+    certificationLevelsExecution,
+    dependencyReceipts: [
+      truthQualityDimensionsExecution?.receipt,
+      certificationLevelsExecution?.receipt,
+      blockingRulesReceipt,
+      runtimeWarningRulesExecution?.receipt,
+      prohibitedOutputClaimsReceipt,
+      truthCertificationReceipt,
+    ].filter(Boolean),
+    knowledgePackBinding: generationKnowledgePackBinding,
+    lineageEvidence: {
+      truthSignatureId: serializedSession.truthSignatureId,
+      truthSignatureStatus: serializedSession.truthSignature?.status,
+      truthSignatureCurrentness: serializedSession.truthSignature?.currentness,
+      runtimeRevision: runtimeRevisionReference,
+      graphVersion: runtimeTruthQualityProjection?.graph?.graphVersion
+        || truthCertificationCandidate.graphVersion,
+      publishSnapshotId: truthCertificationCandidate.publishSnapshotId,
+      lockSnapshotId: truthCertificationCandidate.lockSnapshotId,
+      replayAnchorId: truthCertificationCandidate.replayAnchorId,
+      sourceOutputAssetId: lineageSummary.sourceOutputAssetId,
+      grrExecutionId: lineageSummary.grrExecutionId,
+      grrRuntimeArtifactId: lineageSummary.grrRuntimeArtifactId,
+    },
+    postValidation,
+    runtimeWarningExecution: runtimeWarningRulesExecution,
+    version: { outcomeAssetVersionId: draftIterationId },
+  })
+  lineageSummary.componentExecutionEvidence = completeOutcomeExecutionEvidence({
+    boundaryReceipts: [
+      truthCertificationReceipt,
+      prohibitedOutputClaimsReceipt,
+      blockingRulesReceipt,
+      certificationLevelsExecution?.receipt,
+      truthQualityDimensionsExecution?.receipt,
+      runtimeWarningRulesExecution?.receipt,
+      renderingLayerReceipt,
+      exportMetadataExecution?.receipt,
+      truthCertificationFrameworkExecution?.receipt,
+    ].filter(Boolean),
+    diagnosticBoundaryEvidence: [
+      truthCertificationFrameworkExecution?.diagnosticEvidence,
+      truthQualityDimensionsExecution?.diagnosticEvidence,
+    ].filter(Boolean),
+    draftId,
+    draftIterationId,
+    draftIterationNumber,
+    evidence: grrExecution?.executionEvidence,
+    knowledgePackBinding: generationKnowledgePackBinding,
+    postValidation,
+  })
   const draftValidationSummary = {
     ...postValidation,
     validationScope: 'OUTCOME_DRAFT_ITERATION',
@@ -5077,8 +7136,391 @@ export const generateRuntimeOutcomeResponse = async ({
 
   return {
     ...serializeCustomerOutcomeMessage(responseMessage),
-    draft: serializeCustomerOutcomeDraft(outcomeDraft, { currentEvidence }),
-    draftIteration: serializeCustomerOutcomeDraftIteration(outcomeDraftIteration),
+    draft: serializeCustomerOutcomeDraft(outcomeDraft, {
+      currentEvidence,
+      currentIteration: outcomeDraftIteration,
+    }),
+    draftIteration: serializeCustomerOutcomeDraftIteration(outcomeDraftIteration, {
+      draft: outcomeDraft,
+      knowledgePackBinding: outcomeDraft.knowledgePackBinding,
+    }),
+  }
+}
+
+export const reviseRuntimeOutcomeAsset = async ({
+  actorUserId,
+  auditRequest,
+  outcomeAssetId,
+  runtimeInstanceId,
+  scopes,
+  sessionId,
+} = {}) => {
+  const runtimeInstance = await assertOutcomeSessionMutationPermission({
+    actorUserId,
+    runtimeInstanceId,
+    scopes,
+  })
+  const runtimeObjectId = runtimeInstance._id || runtimeInstance.id
+  const session = await findOutcomeSessionForRuntime({
+    detailsRuntimeInstanceId: runtimeInstanceId,
+    runtimeInstanceId: runtimeObjectId,
+    sessionId,
+  })
+  const currentEvidence = buildRuntimeTruthEvidence(runtimeInstance)
+  const serializedSession = serializeOutcomeSession(session, { currentEvidence })
+
+  if (serializedSession.status !== OUTCOME_STUDIO_SESSION_STATUSES.ACTIVE) {
+    throw buildOutcomeDraftRevisionBlockedError({
+      blockerReason: 'OUTCOME_SESSION_NOT_ACTIVE',
+      outcomeAssetId,
+      sessionId: serializedSession.sessionId,
+    })
+  }
+  assertOutcomeSessionTruthCurrent({
+    actionLabel: 'approved-output revision',
+    availabilityKey: 'actionAvailable',
+    session: serializedSession,
+  })
+
+  const approvedAsset = await findOutcomeAssetForRuntime({
+    detailsRuntimeInstanceId: runtimeInstanceId,
+    outcomeAssetId,
+    runtimeInstanceId: runtimeObjectId,
+  })
+  if (normalizeText(approvedAsset.sessionId) !== normalizeText(serializedSession.sessionId)) {
+    throw buildOutcomeDraftRevisionBlockedError({
+      blockerReason: 'OUTCOME_ASSET_SESSION_MISMATCH',
+      outcomeAssetId,
+      sessionId: serializedSession.sessionId,
+    })
+  }
+  if (normalizeToken(approvedAsset.status) === OUTCOME_STUDIO_ASSET_STATUSES.PUBLISHED) {
+    throw buildOutcomeDraftRevisionBlockedError({
+      blockerReason: 'OUTCOME_ASSET_PUBLISHED_REVISION_BLOCKED',
+      outcomeAssetId,
+      sessionId: serializedSession.sessionId,
+    })
+  }
+
+  const approvedVersionId = normalizeText(approvedAsset.currentVersionId)
+  if (!approvedVersionId || Number(approvedAsset.currentVersionNumber || 0) < 1) {
+    throw buildOutcomeDraftRevisionBlockedError({
+      blockerReason: 'OUTCOME_ASSET_CURRENT_VERSION_NOT_FOUND',
+      outcomeAssetId,
+      sessionId: serializedSession.sessionId,
+    })
+  }
+  const approvedVersion = await findOutcomeAssetVersionForRuntime({
+    detailsRuntimeInstanceId: runtimeInstanceId,
+    outcomeAssetId,
+    outcomeAssetVersionId: approvedVersionId,
+    runtimeInstanceId: runtimeObjectId,
+  })
+  if (
+    normalizeToken(approvedVersion.status) !== OUTCOME_STUDIO_ASSET_VERSION_STATUSES.CURRENT
+    || normalizeText(approvedVersion.outcomeAssetId) !== normalizeText(approvedAsset.outcomeAssetId)
+    || normalizeText(approvedVersion.outcomeAssetVersionId) !== approvedVersionId
+    || Number(approvedVersion.versionNumber || 0) !== Number(approvedAsset.currentVersionNumber || 0)
+  ) {
+    throw buildOutcomeDraftRevisionBlockedError({
+      blockerReason: 'OUTCOME_ASSET_CURRENT_VERSION_POINTER_MISMATCH',
+      outcomeAssetId,
+      sessionId: serializedSession.sessionId,
+    })
+  }
+
+  const approvedLineage = approvedVersion.lineageSummary?.draftApproval
+    || approvedAsset.lineageSummary?.draftApproval
+    || null
+  const sourceDraftId = normalizeText(approvedLineage?.draftId)
+  const sourceDraftIterationId = normalizeText(approvedLineage?.draftIterationId)
+  if (
+    !sourceDraftId
+    || !sourceDraftIterationId
+    || normalizeText(approvedLineage?.outcomeAssetId) !== normalizeText(approvedAsset.outcomeAssetId)
+    || normalizeText(approvedLineage?.outcomeAssetVersionId) !== approvedVersionId
+  ) {
+    throw buildOutcomeDraftRevisionBlockedError({
+      blockerReason: 'OUTCOME_APPROVED_BASELINE_LINEAGE_MISSING',
+      outcomeAssetId,
+      sessionId: serializedSession.sessionId,
+    })
+  }
+
+  const sourceDraftQuery = OutcomeDraft.findOne({
+    runtimeInstanceId: runtimeObjectId,
+    sessionId: normalizeText(serializedSession.sessionId),
+    draftId: sourceDraftId,
+  })
+  const sourceDraft = typeof sourceDraftQuery?.lean === 'function'
+    ? await sourceDraftQuery.lean()
+    : await sourceDraftQuery
+  const sourceIterationQuery = OutcomeDraftIteration.findOne({
+    runtimeInstanceId: runtimeObjectId,
+    sessionId: normalizeText(serializedSession.sessionId),
+    draftId: sourceDraftId,
+    draftIterationId: sourceDraftIterationId,
+    status: OUTCOME_STUDIO_DRAFT_ITERATION_STATUSES.APPROVED,
+  })
+  const sourceIteration = typeof sourceIterationQuery?.lean === 'function'
+    ? await sourceIterationQuery.lean()
+    : await sourceIterationQuery
+  if (
+    !sourceDraft
+    || normalizeToken(sourceDraft.status) !== OUTCOME_STUDIO_DRAFT_STATUSES.APPROVED
+    || normalizeText(sourceDraft.approvedIterationId) !== sourceDraftIterationId
+    || normalizeText(sourceDraft.approvedAssetVersionId) !== approvedVersionId
+    || !sourceIteration
+  ) {
+    throw buildOutcomeDraftRevisionBlockedError({
+      blockerReason: 'OUTCOME_APPROVED_BASELINE_DRAFT_LINKAGE_INVALID',
+      outcomeAssetId,
+      sessionId: serializedSession.sessionId,
+    })
+  }
+
+  const activeDraft = await findActiveOutcomeDraftForSession({
+    runtimeInstanceId: runtimeObjectId,
+    sessionId: serializedSession.sessionId,
+  })
+  if (activeDraft) {
+    throw buildOutcomeDraftRevisionBlockedError({
+      blockerReason: 'OUTCOME_DRAFT_ACTIVE_FORK_EXISTS',
+      outcomeAssetId,
+      sessionId: serializedSession.sessionId,
+    })
+  }
+
+  const draftId = buildOutcomeDraftId()
+  const draftIterationId = buildOutcomeDraftIterationId()
+  const generatedAt = new Date()
+  const generatedAtIso = generatedAt.toISOString()
+  const runtimeScope = getRuntimeScope(runtimeInstance)
+  const sourceContent = buildApprovedOutcomeAssetVersionCustomerContent({
+    customerContent: approvedVersion.customerContent,
+  })
+  if (!Object.keys(sourceContent).length) {
+    throw buildOutcomeDraftRevisionBlockedError({
+      blockerReason: 'OUTCOME_APPROVED_BASELINE_CONTENT_MISSING',
+      outcomeAssetId,
+      sessionId: serializedSession.sessionId,
+    })
+  }
+  const baselineValidation = sanitizeOutcomePostValidationSnapshot(approvedVersion.postValidation)
+  if (!baselineValidation || !isOutcomePostValidationAllowed(baselineValidation)) {
+    throw buildOutcomeDraftRevisionBlockedError({
+      blockerReason: 'OUTCOME_APPROVED_BASELINE_VALIDATION_MISSING',
+      outcomeAssetId,
+      sessionId: serializedSession.sessionId,
+    })
+  }
+  const draftValidationSummary = {
+    ...cloneValue(baselineValidation),
+    validationId: `outcome_post_val_baseline_${randomUUID()}`,
+    mode: 'APPROVED_BASELINE_COPY',
+    validationScope: 'OUTCOME_DRAFT_ITERATION',
+    outcomeAssetId: '',
+    outcomeAssetVersionId: '',
+    draftId,
+    draftIterationId,
+    validatedAt: generatedAtIso,
+  }
+  const lineageSummary = buildOutcomeAssetLineageSummary({
+    ...(approvedVersion.lineageSummary || approvedAsset.lineageSummary || {}),
+    parentVersionId: approvedVersionId,
+    generatedAt: generatedAtIso,
+    componentExecutionEvidence: null,
+  })
+  lineageSummary.approvedBaseline = {
+    sourceDraftId,
+    sourceDraftIterationId,
+    outcomeAssetId: normalizeText(approvedAsset.outcomeAssetId),
+    outcomeAssetVersionId: approvedVersionId,
+    versionNumber: Number(approvedVersion.versionNumber || 0),
+    approvedAt: normalizeDateValue(approvedLineage.approvedAt),
+    approvedBy: normalizeText(approvedLineage.approvedBy),
+  }
+  lineageSummary.draftRefinement = {
+    operation: 'APPROVED_ASSET_REVISION_FORK',
+    mode: 'APPROVED_BASELINE',
+    intentType: 'REFINEMENT_REQUEST',
+    sourceIterationId: sourceDraftIterationId,
+    sourceIterationNumber: Number(sourceIteration.iterationNumber || approvedVersion.versionNumber || 0),
+    compare: {
+      available: true,
+      fromIterationId: sourceDraftIterationId,
+      toIterationId: draftIterationId,
+    },
+    revert: {
+      available: false,
+      targetIterationId: '',
+    },
+    preservedPreviousContent: true,
+  }
+  const knowledgePackBinding = sanitizePersistedKnowledgePackBinding(
+    approvedVersion.knowledgePackBinding || approvedAsset.knowledgePackBinding,
+  )
+  const draftContextBindings = buildOutcomeContextBindings({
+    assetType: DEFAULT_OUTCOME_ASSET_TYPE,
+    contextType: 'DRAFT',
+    knowledgePackBinding,
+    runtimeScope,
+    sessionId: serializedSession.sessionId,
+    sourceOutput: approvedVersion.sourceOutputSnapshot || serializedSession.sourceOutput,
+    truthSignature: approvedVersion.truthSignature || serializedSession.truthSignature,
+  })
+  const draftTitle = normalizeText(approvedVersion.title || approvedAsset.title)
+    || buildOutcomeDraftTitle({ outputTypeLabel: approvedVersion.outputTypeLabel, session: serializedSession })
+  const warnings = Array.isArray(approvedVersion.warnings) ? approvedVersion.warnings : []
+  const limitations = Array.isArray(approvedVersion.limitations) ? approvedVersion.limitations : []
+  const outcomeDraft = new OutcomeDraft({
+    draftId,
+    sessionId: serializedSession.sessionId,
+    ...runtimeScope,
+    workspaceType: DEFAULT_OUTCOME_WORKSPACE_TYPE,
+    assetType: DEFAULT_OUTCOME_ASSET_TYPE,
+    contractVersion: OUTCOME_STUDIO_CONTRACT_VERSION,
+    phase: OUTCOME_STUDIO_PHASE,
+    status: OUTCOME_STUDIO_DRAFT_STATUSES.ACTIVE,
+    outputTypeKey: approvedVersion.outputTypeKey,
+    outputTypeCapabilityKey: approvedVersion.outputTypeCapabilityKey,
+    outputTypeLabel: approvedVersion.outputTypeLabel,
+    title: draftTitle,
+    sourceOutputAssetId: approvedVersion.sourceOutputAssetId || serializedSession.sourceOutputAssetId,
+    truthSignature: cloneValue(approvedVersion.truthSignature || serializedSession.truthSignature),
+    truthSignatureId: normalizeText(
+      approvedVersion.truthSignature?.truthSignatureId
+      || serializedSession.truthSignatureId
+      || serializedSession.truthSignature?.truthSignatureId,
+    ),
+    knowledgePackBinding,
+    currentIterationId: draftIterationId,
+    currentIterationNumber: 1,
+    contextBindings: draftContextBindings,
+    lineageSummary,
+    validationSummary: draftValidationSummary,
+    warnings,
+    limitations,
+    createdBy: actorUserId,
+  })
+  const outcomeDraftIteration = new OutcomeDraftIteration({
+    draftIterationId,
+    draftId,
+    previousIterationId: '',
+    iterationNumber: 1,
+    sessionId: serializedSession.sessionId,
+    ...runtimeScope,
+    workspaceType: DEFAULT_OUTCOME_WORKSPACE_TYPE,
+    assetType: DEFAULT_OUTCOME_ASSET_TYPE,
+    contractVersion: OUTCOME_STUDIO_CONTRACT_VERSION,
+    phase: OUTCOME_STUDIO_PHASE,
+    iterationType: OUTCOME_STUDIO_DRAFT_ITERATION_TYPES.INITIAL,
+    status: OUTCOME_STUDIO_DRAFT_ITERATION_STATUSES.CURRENT,
+    outputTypeKey: approvedVersion.outputTypeKey,
+    outputTypeCapabilityKey: approvedVersion.outputTypeCapabilityKey,
+    outputTypeLabel: approvedVersion.outputTypeLabel,
+    title: draftTitle,
+    truthSignatureId: normalizeText(
+      approvedVersion.truthSignature?.truthSignatureId
+      || serializedSession.truthSignatureId
+      || serializedSession.truthSignature?.truthSignatureId,
+    ),
+    customerContent: sourceContent,
+    validationSummary: draftValidationSummary,
+    lineageSummary,
+    warnings,
+    limitations,
+    generatedBy: actorUserId,
+    generatedAt,
+  })
+  let failureStage = 'write'
+  const persistRevisionAndAudit = async (dbSession = null) => {
+    const saveOptions = dbSession ? { session: dbSession } : undefined
+    await outcomeDraft.save(saveOptions)
+    await outcomeDraftIteration.save(saveOptions)
+    try {
+      failureStage = 'draftRevisionAudit'
+      await logOutcomeDraftGeneratedAudit({
+        action: auditService.AUDIT_ACTIONS.OUTCOME_DRAFT_REVISED_FROM_APPROVED,
+        auditRequest,
+        dbSession,
+        draft: outcomeDraft,
+        runtimeInstance,
+        summary: 'Outcome Studio approved output forked into a new unapproved working draft.',
+        diff: {
+          actorUserId,
+          sessionId: serializedSession.sessionId,
+          runtimeInstanceId: toIdString(runtimeObjectId),
+          draftId,
+          draftIterationId,
+          outcomeAssetId: approvedAsset.outcomeAssetId,
+          approvedAssetVersionId: approvedVersionId,
+          approvedVersionNumber: Number(approvedVersion.versionNumber || 0),
+          previousDraftStatus: OUTCOME_STUDIO_DRAFT_STATUSES.APPROVED,
+          nextDraftStatus: OUTCOME_STUDIO_DRAFT_STATUSES.ACTIVE,
+          preservedApprovedBaseline: true,
+          executionEvidenceReset: true,
+          baselineValidationMode: 'APPROVED_BASELINE_COPY',
+        },
+      })
+    } catch (err) {
+      err.outcomeDraftRevisionAuditFailure = failureStage
+      throw err
+    }
+  }
+
+  if (canUseMongoTransaction()) {
+    const dbSession = await mongoose.startSession()
+    try {
+      await dbSession.withTransaction(async () => {
+        await persistRevisionAndAudit(dbSession)
+      })
+    } catch (err) {
+      if (err?.outcomeDraftRevisionAuditFailure === 'draftRevisionAudit') {
+        throw failDraftRevisionAuditClosed(err, {
+          draftId,
+          draftIterationId,
+          outcomeAssetId: approvedAsset.outcomeAssetId,
+          approvedAssetVersionId: approvedVersionId,
+        })
+      }
+      throw err
+    } finally {
+      await dbSession.endSession()
+    }
+  } else {
+    try {
+      await persistRevisionAndAudit()
+    } catch (err) {
+      await OutcomeDraftIteration.deleteOne({ _id: outcomeDraftIteration._id })
+      await OutcomeDraft.deleteOne({ _id: outcomeDraft._id })
+      if (err?.outcomeDraftRevisionAuditFailure === 'draftRevisionAudit') {
+        throw failDraftRevisionAuditClosed(err, {
+          draftId,
+          draftIterationId,
+          outcomeAssetId: approvedAsset.outcomeAssetId,
+          approvedAssetVersionId: approvedVersionId,
+        })
+      }
+      throw err
+    }
+  }
+
+  return {
+    draft: serializeCustomerOutcomeDraft(outcomeDraft, {
+      currentEvidence,
+      currentIteration: outcomeDraftIteration,
+    }),
+    draftIteration: serializeCustomerOutcomeDraftIteration(outcomeDraftIteration, {
+      draft: outcomeDraft,
+      knowledgePackBinding,
+    }),
+    approvedBaseline: {
+      outcomeAssetId: normalizeText(approvedAsset.outcomeAssetId),
+      outcomeAssetVersionId: approvedVersionId,
+      versionNumber: Number(approvedVersion.versionNumber || 0),
+      preserved: true,
+    },
   }
 }
 
@@ -5134,6 +7576,19 @@ export const approveRuntimeOutcomeDraft = async ({
     runtimeInstanceId: runtimeObjectId,
     sessionId: serializedSession.sessionId,
   })
+  const approvalReadiness = buildOutcomeExecutionApprovalReadiness({
+    draft: activeDraft,
+    iteration: currentDraftIteration,
+    knowledgePackBinding: activeDraft.knowledgePackBinding,
+  })
+  if (!approvalReadiness.approvalAvailable) {
+    throw buildOutcomeDraftApprovalBlockedError({
+      blockerReason: approvalReadiness.blockerReason,
+      currentIterationId: normalizeText(activeDraft.currentIterationId),
+      draftId: activeDraft.draftId,
+      sessionId: serializedSession.sessionId,
+    })
+  }
   assertCustomerReadyGeneration(currentDraftIteration, { action: 'approve this draft' })
   assertOutcomeCustomerLanguage({
     action: 'approve this draft',
@@ -5142,18 +7597,66 @@ export const approveRuntimeOutcomeDraft = async ({
     warnings: currentDraftIteration.warnings || activeDraft.warnings,
   })
   const approvedKnowledgePackBinding = sanitizePersistedKnowledgePackBinding(
-    activeDraft.knowledgePackBinding || serializedSession.knowledgePackBinding,
+    activeDraft.knowledgePackBinding,
   )
 
   const approvedAt = new Date()
   const approvedAtIso = approvedAt.toISOString()
   const runtimeScope = getRuntimeScope(runtimeInstance)
-  const outcomeAssetId = buildOutcomeAssetId()
+  const approvedBaseline = activeDraft.lineageSummary?.approvedBaseline || null
+  let approvedBaselineAsset = null
+  let approvedBaselineVersion = null
+  if (approvedBaseline) {
+    const baselineAssetId = normalizeText(approvedBaseline.outcomeAssetId)
+    const baselineVersionId = normalizeText(approvedBaseline.outcomeAssetVersionId)
+    if (!baselineAssetId || !baselineVersionId) {
+      throw buildOutcomeDraftApprovalBlockedError({
+        blockerReason: 'OUTCOME_APPROVED_BASELINE_LINKAGE_MISSING',
+        currentIterationId: normalizeText(activeDraft.currentIterationId),
+        draftId: activeDraft.draftId,
+        sessionId: serializedSession.sessionId,
+      })
+    }
+    approvedBaselineAsset = await findOutcomeAssetForRuntime({
+      detailsRuntimeInstanceId: runtimeInstanceId,
+      outcomeAssetId: baselineAssetId,
+      runtimeInstanceId: runtimeObjectId,
+    })
+    approvedBaselineVersion = await findOutcomeAssetVersionForRuntime({
+      detailsRuntimeInstanceId: runtimeInstanceId,
+      outcomeAssetId: baselineAssetId,
+      outcomeAssetVersionId: baselineVersionId,
+      runtimeInstanceId: runtimeObjectId,
+    })
+    if (
+      normalizeText(approvedBaselineAsset.sessionId) !== normalizeText(serializedSession.sessionId)
+      || normalizeText(approvedBaselineAsset.currentVersionId) !== baselineVersionId
+      || Number(approvedBaselineAsset.currentVersionNumber || 0) !== Number(approvedBaseline.versionNumber || 0)
+      || normalizeToken(approvedBaselineVersion.status) !== OUTCOME_STUDIO_ASSET_VERSION_STATUSES.CURRENT
+      || normalizeText(approvedBaselineVersion.outcomeAssetId) !== baselineAssetId
+      || Number(approvedBaselineVersion.versionNumber || 0) !== Number(approvedBaseline.versionNumber || 0)
+    ) {
+      throw buildOutcomeDraftApprovalBlockedError({
+        blockerReason: 'OUTCOME_APPROVED_BASELINE_POINTER_STALE',
+        currentIterationId: normalizeText(activeDraft.currentIterationId),
+        draftId: activeDraft.draftId,
+        sessionId: serializedSession.sessionId,
+      })
+    }
+  }
+  const assetVersionIsAppend = Boolean(approvedBaselineAsset && approvedBaselineVersion)
+  const outcomeAssetId = assetVersionIsAppend
+    ? normalizeText(approvedBaselineAsset.outcomeAssetId)
+    : buildOutcomeAssetId()
   const outcomeAssetVersionId = buildOutcomeAssetVersionId()
-  const versionNumber = 1
+  const versionNumber = assetVersionIsAppend
+    ? Number(approvedBaselineAsset.currentVersionNumber || 0) + 1
+    : 1
   const parentVersionId = normalizeText(
-    activeDraft.lineageSummary?.parentVersionId
-    || currentDraftIteration.lineageSummary?.parentVersionId,
+    assetVersionIsAppend
+      ? approvedBaselineVersion.outcomeAssetVersionId
+      : activeDraft.lineageSummary?.parentVersionId
+        || currentDraftIteration.lineageSummary?.parentVersionId,
   )
   const outputTypeKey = normalizeToken(activeDraft.outputTypeKey || serializedSession.sourceOutputTypeKey)
   const outputTypeCapabilityKey = assertPersistedOutputTypeCapabilityKey({
@@ -5193,6 +7696,7 @@ export const approveRuntimeOutcomeDraft = async ({
       operation: 'DRAFT_APPROVAL',
       draftId: normalizeText(activeDraft.draftId),
       draftIterationId: normalizeText(currentDraftIteration.draftIterationId),
+      draftIterationNumber: Number(currentDraftIteration.iterationNumber || 0),
       approvedAt: approvedAtIso,
       approvedBy: actorUserId,
       outcomeAssetId,
@@ -5273,7 +7777,7 @@ export const approveRuntimeOutcomeDraft = async ({
   const limitations = Array.isArray(currentDraftIteration.limitations) && currentDraftIteration.limitations.length
     ? currentDraftIteration.limitations
     : Array.isArray(activeDraft.limitations) ? activeDraft.limitations : []
-  const outcomeAsset = new OutcomeAsset({
+  const outcomeAssetFields = {
     outcomeAssetId,
     sessionId: serializedSession.sessionId,
     ...runtimeScope,
@@ -5299,7 +7803,14 @@ export const approveRuntimeOutcomeDraft = async ({
     limitations,
     generatedBy: actorUserId,
     generatedAt: approvedAt,
-  })
+  }
+  const outcomeAsset = assetVersionIsAppend
+    ? {
+        ...approvedBaselineAsset,
+        ...outcomeAssetFields,
+        _id: approvedBaselineAsset._id,
+      }
+    : new OutcomeAsset(outcomeAssetFields)
   const outcomeAssetVersion = new OutcomeAssetVersion({
     outcomeAssetVersionId,
     outcomeAssetId,
@@ -5361,6 +7872,8 @@ export const approveRuntimeOutcomeDraft = async ({
     const draftClaimFilter = {
       _id: activeDraft._id || activeDraft.id,
       status: OUTCOME_STUDIO_DRAFT_STATUSES.ACTIVE,
+      currentIterationId: currentDraftIteration.draftIterationId,
+      currentIterationNumber: Number(currentDraftIteration.iterationNumber || 0),
     }
     const draftApprovalUpdate = {
       $set: {
@@ -5402,7 +7915,66 @@ export const approveRuntimeOutcomeDraft = async ({
       await OutcomeDraftIteration.updateMany(iterationFilter, iterationApprovalUpdate)
     }
 
-    await outcomeAsset.save(saveOptions)
+    if (assetVersionIsAppend) {
+      const assetClaimResult = updateOptions
+        ? await OutcomeAsset.updateOne(
+            {
+              _id: approvedBaselineAsset._id,
+              runtimeInstanceId: runtimeObjectId,
+              outcomeAssetId,
+              currentVersionId: approvedBaselineVersion.outcomeAssetVersionId,
+              currentVersionNumber: Number(approvedBaselineVersion.versionNumber || 0),
+            },
+            {
+              $set: {
+                status: outcomeAssetFields.status,
+                currentVersionId: outcomeAssetVersionId,
+                currentVersionNumber: versionNumber,
+                postValidation,
+                contextBindings: assetContextBindings,
+                lineageSummary,
+                warnings,
+                limitations,
+                generatedBy: actorUserId,
+                generatedAt: approvedAt,
+              },
+            },
+            updateOptions,
+          )
+        : await OutcomeAsset.updateOne(
+            {
+              _id: approvedBaselineAsset._id,
+              runtimeInstanceId: runtimeObjectId,
+              outcomeAssetId,
+              currentVersionId: approvedBaselineVersion.outcomeAssetVersionId,
+              currentVersionNumber: Number(approvedBaselineVersion.versionNumber || 0),
+            },
+            {
+              $set: {
+                status: outcomeAssetFields.status,
+                currentVersionId: outcomeAssetVersionId,
+                currentVersionNumber: versionNumber,
+                postValidation,
+                contextBindings: assetContextBindings,
+                lineageSummary,
+                warnings,
+                limitations,
+                generatedBy: actorUserId,
+                generatedAt: approvedAt,
+              },
+            },
+          )
+      if (Number(assetClaimResult?.modifiedCount || 0) !== 1) {
+        throw buildOutcomeDraftApprovalBlockedError({
+          blockerReason: 'OUTCOME_APPROVED_BASELINE_POINTER_STALE',
+          currentIterationId: currentDraftIteration.draftIterationId,
+          draftId: activeDraft.draftId,
+          sessionId: serializedSession.sessionId,
+        })
+      }
+    } else {
+      await outcomeAsset.save(saveOptions)
+    }
     await outcomeAssetVersion.save(saveOptions)
     try {
       await saveRuntimeGraphRelationshipDocuments(assetRelationshipDocuments, { dbSession })
@@ -5431,7 +8003,8 @@ export const approveRuntimeOutcomeDraft = async ({
           outcomeAssetId,
           outcomeAssetVersionId,
           versionNumber,
-          approvalCreatedAssetVersion: true,
+          approvalCreatedAssetVersion: !assetVersionIsAppend,
+          assetVersionAppendedToExistingAsset: assetVersionIsAppend,
           truthSignatureStatus: serializedSession.truthSignature.status,
           truthSignatureCurrentness: serializedSession.truthSignature.currentness,
           postValidation: buildOutcomePostValidationAuditSummary(postValidation),
@@ -5455,6 +8028,7 @@ export const approveRuntimeOutcomeDraft = async ({
           outcomeAssetVersionId,
           parentVersionId,
           versionNumber,
+          assetVersionAppendedToExistingAsset: assetVersionIsAppend,
           sourceOutputAssetId,
           sourceOutputTypeKey: outputTypeKey,
           truthSignatureStatus: serializedSession.truthSignature.status,
@@ -5516,7 +8090,32 @@ export const approveRuntimeOutcomeDraft = async ({
       if (approvalClaimAcquired) {
         await deleteRuntimeGraphRelationshipDocuments(assetRelationshipDocuments)
         await OutcomeAssetVersion.deleteOne({ _id: outcomeAssetVersion._id })
-        await OutcomeAsset.deleteOne({ _id: outcomeAsset._id })
+        if (assetVersionIsAppend) {
+          await OutcomeAsset.updateOne(
+            {
+              _id: approvedBaselineAsset._id,
+              runtimeInstanceId: runtimeObjectId,
+              outcomeAssetId,
+              currentVersionId: outcomeAssetVersionId,
+            },
+            {
+              $set: {
+                status: approvedBaselineAsset.status,
+                currentVersionId: approvedBaselineAsset.currentVersionId,
+                currentVersionNumber: approvedBaselineAsset.currentVersionNumber,
+                postValidation: approvedBaselineAsset.postValidation,
+                contextBindings: approvedBaselineAsset.contextBindings,
+                lineageSummary: approvedBaselineAsset.lineageSummary,
+                warnings: approvedBaselineAsset.warnings || [],
+                limitations: approvedBaselineAsset.limitations || [],
+                generatedBy: approvedBaselineAsset.generatedBy,
+                generatedAt: approvedBaselineAsset.generatedAt,
+              },
+            },
+          )
+        } else {
+          await OutcomeAsset.deleteOne({ _id: outcomeAsset._id })
+        }
         await OutcomeDraftIteration.updateMany(
           {
             runtimeInstanceId: runtimeObjectId,
@@ -5573,8 +8172,14 @@ export const approveRuntimeOutcomeDraft = async ({
   }
 
   return {
-    draft: serializeCustomerOutcomeDraft(approvedDraft, { currentEvidence }),
-    draftIteration: serializeCustomerOutcomeDraftIteration(approvedDraftIteration),
+    draft: serializeCustomerOutcomeDraft(approvedDraft, {
+      currentEvidence,
+      currentIteration: approvedDraftIteration,
+    }),
+    draftIteration: serializeCustomerOutcomeDraftIteration(approvedDraftIteration, {
+      draft: approvedDraft,
+      knowledgePackBinding: approvedKnowledgePackBinding,
+    }),
     asset: serializeOutcomeAssetSummary(outcomeAsset, { currentEvidence }),
     assetVersion: serializeCustomerOutcomeAssetVersion(outcomeAssetVersion, { currentEvidence }),
   }

@@ -325,6 +325,18 @@ export const GOVERNANCE_AUDIT_EVENTS = Object.freeze({
     requiresDependencyGraph: false,
     isActive: true,
   }),
+  SS005_BOUNDARY_POLICY_APPLIED: Object.freeze({
+    eventKey: 'SS005_BOUNDARY_POLICY_APPLIED',
+    action: AUDIT_ACTIONS.SS005_BOUNDARY_POLICY_APPLIED,
+    resourceType: RESOURCE_TYPES.KnowledgePack,
+    category: GOVERNANCE_AUDIT_EVENT_CATEGORIES.KNOWLEDGE_PACK,
+    description: 'SS-005 Knowledge Pack boundary policy applied.',
+    severity: GOVERNANCE_AUDIT_SEVERITIES.HIGH,
+    requiresSnapshot: true,
+    requiresChecksum: true,
+    requiresDependencyGraph: false,
+    isActive: true,
+  }),
 })
 
 export const getGovernanceAuditEvent = (eventKey) =>

@@ -1,0 +1,92 @@
+{
+  "schemaVersion": "1.0.0",
+  "policyVersion": "ss-005-boundary-classification-v1-dev-approved",
+  "status": "APPROVED_FOR_DEVELOPMENT_TEST_APPLY",
+  "sourceAuthority": {
+    "core": "OES-002 starter-pack and current registry metadata",
+    "reasoning": "ANDREW_DERIVED_COMMERCIAL_REASONING_PACKS",
+    "truth": "KP-004 truth-certification governance"
+  },
+  "environmentGuard": {
+    "allowedNodeEnvs": [
+      "development",
+      "test"
+    ],
+    "allowedDatabaseNames": [
+      "test"
+    ]
+  },
+  "applyPosture": "DEVELOPMENT_TEST_ONLY_WITH_EXPLICIT_CONFIRMATION",
+  "approvalNote": "The Product Owner explicitly approved continuing with boundary-aware classification in the active SS-005 development session on 2026-08-13. The three Executive Brief scoped additions were identified by the controlled resolver inspection and are limited to this vertical slice.",
+  "expectedMatches": {
+    "KnowledgePack": 36,
+    "KnowledgePackVersion": 38,
+    "KnowledgePackActivation": 36
+  },
+  "boundaries": {
+    "GENERATION_CONTEXT": [
+      "adaptive-reasoning-layer",
+      "output-schemas-pack",
+      "outcome-output-types",
+      "executive-brief",
+      "executive-brief-schema",
+      "executive-briefing-style",
+      "commercial-strategy-decision-paper",
+      "commercial-strategy-decision-paper-schema",
+      "commercial-strategy-decision-paper-style",
+      "canonical-runtime-model",
+      "commercial-clarity-dashboard",
+      "commercial-clarity-review",
+      "ec-runtime-pack",
+      "fx-runtime-pack",
+      "gx-runtime-pack",
+      "commercial-constraint-diagnostics"
+    ],
+    "PRE_GENERATION_VALIDATION": [
+      "cacr-runtime-pack",
+      "contradiction-register",
+      "observation-register",
+      "scr-runtime-pack",
+      "validation-evidence"
+    ],
+    "LINEAGE_CERTIFICATION": [
+      "execution-translation",
+      "execution-translation-runtime",
+      "etl-runtime-pack",
+      "state-runtime-pack",
+      "st-runtime-pack"
+    ],
+    "POST_GENERATION_VALIDATION": [
+      "rendering-layer",
+      "render-governance-state",
+      "truth-certification-pack",
+      "blocking-rules",
+      "certification-levels",
+      "export-metadata-rules",
+      "prohibited-output-claims",
+      "runtime-warning-rules",
+      "truth-certification-framework",
+      "truth-quality-dimensions"
+    ]
+  },
+  "requiredPackCount": 36,
+  "scopeNotes": {
+    "baselineGovernedPackCount": 33,
+    "deliverableScopedAdditions": {
+      "executiveBrief": [
+        "executive-brief",
+        "executive-brief-schema",
+        "executive-briefing-style"
+      ],
+      "boundary": "GENERATION_CONTEXT",
+      "reason": "These packs directly shape the selected Executive Brief type, schema, and style and must be admitted to provider context for this vertical slice."
+    },
+    "futureDeliverables": "Other output-specific pack sets require their own bounded classification before use."
+  },
+  "reviewRequired": [
+    "Confirm every packKey is the exact active binding identity before apply.",
+    "Confirm source authority and owner for every boundary group.",
+    "Confirm per-pack executor keys for validation and lineage receipts.",
+    "Run a guarded development-only apply with backup and readback after approval."
+  ]
+}
