@@ -9262,6 +9262,29 @@ describe('Runtime Instance API', () => {
     })
   }
 
+  const makeOutputLabSectionProjection = (sectionKey) => ({
+    evidenceProjection: {
+      algorithm: 'SECTION_DOMAIN_KEYWORD_RANKING',
+      version: 'vmf-section-evidence-projection-v1',
+      sectionKey,
+      knownSection: true,
+      candidateCount: 1,
+      eligibleAcceptedCount: 1,
+      includedCount: 1,
+      included: [{
+        evidenceObjectId: `fixture-evidence-${sectionKey}`,
+        coverageArea: 'Decision Context',
+        category: 'Value Drivers',
+        relevanceScore: 100,
+        reasonCodes: ['FIXTURE_ACCEPTED_PROJECTION'],
+      }],
+      excludedCount: 0,
+      excludedReasonCounts: {},
+      selectedCoverageAreas: ['Decision Context'],
+      gaps: [],
+    },
+  })
+
   const makeOutputLabReadyRuntime = (overrides = {}) => makeRuntimeInstance({
     status: 'LOCKED',
     executionStatus: 'COMPLETE',
@@ -9285,6 +9308,7 @@ describe('Runtime Instance API', () => {
             acceptedBy: CUSTOMER_ADMIN_ID,
             truthHash: 'sha256:situation-truth',
           },
+          generated: makeOutputLabSectionProjection('situation'),
         },
         commercial_problem: {
           accepted: {
@@ -9293,6 +9317,7 @@ describe('Runtime Instance API', () => {
             acceptedBy: CUSTOMER_ADMIN_ID,
             truthHash: 'sha256:problem-truth',
           },
+          generated: makeOutputLabSectionProjection('commercial_problem'),
         },
         value_drivers: {
           accepted: {
@@ -9301,6 +9326,7 @@ describe('Runtime Instance API', () => {
             acceptedBy: CUSTOMER_ADMIN_ID,
             truthHash: 'sha256:value-truth',
           },
+          generated: makeOutputLabSectionProjection('value_drivers'),
         },
         recommended_focus: {
           accepted: {
@@ -9309,6 +9335,7 @@ describe('Runtime Instance API', () => {
             acceptedBy: CUSTOMER_ADMIN_ID,
             truthHash: 'sha256:focus-truth',
           },
+          generated: makeOutputLabSectionProjection('recommended_focus'),
         },
       },
       publish: {
@@ -16090,6 +16117,116 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     }))
   })
 
+  test('Outcome Studio readiness uses the locked Framework handoff when Output Lab has no asset', async () => {
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    RuntimeOutputAsset.find.mockReturnValue(buildRuntimeInstanceFindChain([]))
+    mockRequestReadyOutcomeKnowledgePacks()
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/readiness`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toEqual(expect.objectContaining({
+      state: expect.stringMatching(/^(READY|READY_WITH_GAPS)$/),
+      canStartSession: true,
+      blockerCount: 0,
+    }))
+    expect(res.body.data.safetyGates).toEqual(expect.objectContaining({
+      status: 'PASSED',
+      responseGenerationAvailable: true,
+      passedCount: 5,
+      blockedCount: 0,
+      totalCount: 5,
+    }))
+    expect(res.body.data.frameworkHandoff).toEqual(expect.objectContaining({
+      status: expect.stringMatching(/^(READY|READY_WITH_GAPS)$/),
+      currentness: 'CURRENT',
+      contractVersion: 'ss-011.framework-to-outcome-studio.evidence-to-knowledge.v1',
+    }))
+    expect(RuntimeOutputAsset.find).toHaveBeenCalledWith({ runtimeInstanceId: RUNTIME_INSTANCE_ID })
+  })
+
+  test('Outcome Studio creates a handoff-bound session without an Output Lab asset', async () => {
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    RuntimeOutputAsset.find.mockReturnValue(buildRuntimeInstanceFindChain([]))
+    mockRequestReadyOutcomeKnowledgePacks()
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        prompt: 'Create a governed executive brief from the verified runtime context.',
+        requestedOutputTypeKey: 'executive-brief',
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data).toEqual(expect.objectContaining({
+      status: 'ACTIVE',
+      sourceOutputTypeKey: 'EXECUTIVE_BRIEF',
+      requestedOutputTypeKey: 'executive-brief',
+    }))
+    expect(res.body.data.sourceOutput).toEqual(expect.objectContaining({
+      outputAssetId: expect.stringMatching(/^framework_handoff_[a-f0-9]{64}$/),
+      outputTypeKey: 'EXECUTIVE_BRIEF',
+      sourceType: 'FRAMEWORK_HANDOFF',
+      status: 'HANDOFF_BOUND',
+    }))
+    const savedTruthSignature = TruthSignature.prototype.save.mock.contexts[0].toJSON()
+    expect(savedTruthSignature.sourceOutputAssetId).toMatch(/^framework_handoff_[a-f0-9]{64}$/)
+    expect(savedTruthSignature.evidence).toEqual(expect.objectContaining({
+      sourceType: 'FRAMEWORK_HANDOFF',
+      lockSnapshotId: 'runtime-truth-lock-output-lab-fixture',
+      replayAnchorId: 'runtime-replay-anchor-output-lab',
+      graphHash: 'sha256:graph-hash',
+    }))
+    const savedSession = OutcomeSession.prototype.save.mock.contexts[0]
+    expect(savedSession.sourceOutputSnapshot).toEqual(expect.objectContaining({
+      sourceType: 'FRAMEWORK_HANDOFF',
+      sourceHandoff: expect.objectContaining({
+        contractVersion: 'ss-011.framework-to-outcome-studio.evidence-to-knowledge.v1',
+        handoffHash: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+      }),
+      sourceSnapshot: expect.objectContaining({
+        lockSnapshotId: 'runtime-truth-lock-output-lab-fixture',
+        replayAnchorId: 'runtime-replay-anchor-output-lab',
+      }),
+    }))
+    expect(savedSession.contextBindings.sourceOutputBinding).toEqual(expect.objectContaining({
+      sourceType: 'FRAMEWORK_HANDOFF',
+      outputTypeKey: 'EXECUTIVE_BRIEF',
+    }))
+  })
+
+  test('Outcome Studio rejects an arbitrary client source identity for a handoff-bound session', async () => {
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    RuntimeOutputAsset.find.mockReturnValue(buildRuntimeInstanceFindChain([]))
+    mockRequestReadyOutcomeKnowledgePacks()
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        sourceOutputAssetId: 'client-authored-source-id',
+        prompt: 'Create a governed executive brief from the verified runtime context.',
+        requestedOutputTypeKey: 'executive-brief',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(TruthSignature.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeSession.prototype.save).not.toHaveBeenCalled()
+  })
+
   test('Commercial strategy decision-paper readiness validates runtime timestamp before lookup', async () => {
     const token = await getAccessTokenForUser(makeCustomerAdmin())
 
@@ -16218,7 +16355,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       capabilityKey: 'x'.repeat(140),
       capabilityLabel: 'Boundary Deliverable',
     },
-  ])('Outcome Studio preserves a $caseLabel through session and generation while approval remains blocked without pack receipts', async ({
+  ])('Outcome Studio preserves a $caseLabel through session, generation, and receipt-backed approval', async ({
     capabilityKey,
     capabilityLabel,
   }) => {
@@ -16337,8 +16474,13 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       savedArtifact.validate(),
     ])).resolves.toBeDefined()
 
-    expect(generationRes.body.data.draft.approvalAvailable).toBe(false)
-    expect(generationRes.body.data.draftIteration.approvalAvailable).toBe(false)
+    expect(generationRes.body.data.draft.approvalAvailable).toBe(true)
+    expect(generationRes.body.data.draft.approvalReadiness).toEqual(expect.objectContaining({
+      status: 'PASSED',
+      expectedPackCount: expect.any(Number),
+      passedPackCount: expect.any(Number),
+    }))
+    expect(generationRes.body.data.draftIteration.approvalAvailable).toBe(true)
     OutcomeSession.findOne.mockReturnValue(buildLeanQuery(savedSession.toObject()))
     OutcomeDraft.findOne.mockReturnValue(buildLeanQuery(savedDraft.toObject()))
     OutcomeDraftIteration.findOne.mockReturnValue(buildLeanQuery(savedIteration.toObject()))
@@ -16347,10 +16489,22 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       .set('Authorization', `Bearer ${token}`)
       .send({})
 
-    expect(approvalRes.status).toBe(409)
-    expect(approvalRes.body.error.code).toBe('CONFLICT')
-    expect(OutcomeAsset.prototype.save).not.toHaveBeenCalled()
-    expect(OutcomeAssetVersion.prototype.save).not.toHaveBeenCalled()
+    expect(approvalRes.status).toBe(201)
+    expect(approvalRes.body.data.draft).toEqual(expect.objectContaining({
+      status: 'APPROVED',
+      outputTypeCapabilityKey: capabilityKey,
+      approvedAssetVersionId: expect.stringMatching(/^outcome_asset_version_/),
+    }))
+    expect(approvalRes.body.data.asset).toEqual(expect.objectContaining({
+      outputTypeCapabilityKey: capabilityKey,
+    }))
+    expect(approvalRes.body.data.assetVersion).toEqual(expect.objectContaining({
+      outputTypeCapabilityKey: capabilityKey,
+    }))
+    expect(OutcomeAsset.prototype.save).toHaveBeenCalledTimes(1)
+    expect(OutcomeAssetVersion.prototype.save).toHaveBeenCalledTimes(1)
+    expect(OutcomeAsset.prototype.save.mock.contexts[0].outputTypeCapabilityKey).toBe(capabilityKey)
+    expect(OutcomeAssetVersion.prototype.save.mock.contexts[0].outputTypeCapabilityKey).toBe(capabilityKey)
   })
 
   test('Outcome Studio session creation persists a governed session with truth and pack binding audits', async () => {
@@ -17399,10 +17553,17 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       .set('Authorization', `Bearer ${token}`)
       .send({})
 
-    expect(approvalRes.status).toBe(409)
-    expect(approvalRes.body.error.code).toBe('CONFLICT')
-    expect(OutcomeAsset.prototype.save).not.toHaveBeenCalled()
-    expect(OutcomeAssetVersion.prototype.save).not.toHaveBeenCalled()
+    expect(approvalRes.status).toBe(201)
+    expect(approvalRes.body.data.asset).toEqual(expect.objectContaining({
+      title: 'Executive Brief',
+    }))
+    expect(approvalRes.body.data.assetVersion).toEqual(expect.objectContaining({
+      title: 'Executive Brief',
+    }))
+    expect(OutcomeAsset.prototype.save).toHaveBeenCalledTimes(1)
+    expect(OutcomeAssetVersion.prototype.save).toHaveBeenCalledTimes(1)
+    expect(OutcomeAsset.prototype.save.mock.contexts[0].title).toBe('Executive Brief')
+    expect(OutcomeAssetVersion.prototype.save.mock.contexts[0].title).toBe('Executive Brief')
   })
 
   test('Outcome Studio response generation persists a governed assistant response and first draft iteration', async () => {
@@ -17456,7 +17617,8 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       currentIterationNumber: 1,
       approvedIterationId: '',
       approvedAssetVersionId: '',
-      approvalAvailable: false,
+      approvalAvailable: true,
+      approvalReadiness: expect.objectContaining({ status: 'PASSED' }),
       warnings: ['Review the draft with the account owner before external use.'],
       limitations: expect.arrayContaining([
         'Do not strengthen claims beyond the available business information.',
@@ -17477,7 +17639,8 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       outputTypeKey: 'EXECUTIVE_BRIEF',
       title: 'Executive Brief Draft',
       contentAvailable: true,
-      approvalAvailable: false,
+      approvalAvailable: true,
+      approvalReadiness: expect.objectContaining({ status: 'PASSED' }),
       customerContent: expect.objectContaining({
         markdown: expect.stringContaining('# Executive Brief Draft'),
         sections: expect.arrayContaining([
@@ -17724,7 +17887,8 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       currentIterationNumber: 2,
       approvedIterationId: '',
       approvedAssetVersionId: '',
-      approvalAvailable: false,
+      approvalAvailable: true,
+      approvalReadiness: expect.objectContaining({ status: 'PASSED' }),
       contentReview: expect.objectContaining({ status: 'PASS', result: 'ALLOW' }),
     }))
     expect(res.body.data.draft).not.toHaveProperty('lineageSummary')
@@ -20009,7 +20173,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       }),
       conversation: expect.objectContaining({
         enabled: false,
-        disabledReason: 'Additional business information is required before a session can start.',
+        disabledReason: expect.stringContaining('Resolve the governed Framework-to-Outcome handoff boundary'),
       }),
     }))
     expect(res.body.data.safetyGates.gates).toEqual(expect.arrayContaining([

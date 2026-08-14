@@ -54,6 +54,11 @@ import {
   resolveOutcomeStudioKnowledgeContext,
 } from './outcomeStudioKnowledgeContextService.js'
 import {
+  FRAMEWORK_OUTCOME_HANDOFF_BLOCKER_CODES,
+  FRAMEWORK_OUTCOME_HANDOFF_STATUSES,
+  resolveFrameworkOutcomeStudioHandoff,
+} from './outcomeFrameworkHandoffService.js'
+import {
   describeOutputDerivative,
   isOutputServiceError,
   OUTPUT_SERVICE_ERROR_CODES,
@@ -201,6 +206,8 @@ const OUTCOME_STUDIO_DRAFT_LIST_LIMIT = 20
 const OUTCOME_STUDIO_MESSAGE_LIST_LIMIT = 20
 const OUTCOME_STUDIO_SESSION_LIST_LIMIT = 10
 const OUTCOME_CONTEXT_BINDING_LIST_LIMIT = 50
+const FRAMEWORK_HANDOFF_SOURCE_TYPE = 'FRAMEWORK_HANDOFF'
+const FRAMEWORK_HANDOFF_SOURCE_STATUS = 'HANDOFF_BOUND'
 const TRUTH_SIGNATURE_CURRENTNESS_FIELDS = Object.freeze([
   'sourceOutputAssetId',
   'publishSnapshotId',
@@ -1761,6 +1768,7 @@ const sanitizePersistedSourceOutput = (sourceOutput = {}) => ({
   outputTypeKey: normalizeToken(sourceOutput.outputTypeKey),
   outputTypeLabel: normalizeText(sourceOutput.outputTypeLabel),
   status: normalizeToken(sourceOutput.status || 'UNKNOWN'),
+  sourceType: normalizeToken(sourceOutput.sourceType || 'OUTPUT_LAB'),
   stale: sourceOutput.stale === true,
   exportable: sourceOutput.exportable === true,
   generatedAt: normalizeText(sourceOutput.generatedAt),
@@ -1768,6 +1776,15 @@ const sanitizePersistedSourceOutput = (sourceOutput = {}) => ({
   supportedFormats: Array.isArray(sourceOutput.supportedFormats)
     ? sourceOutput.supportedFormats.map(normalizeToken).filter(Boolean)
     : [],
+  sourceHandoff: sourceOutput.sourceHandoff && typeof sourceOutput.sourceHandoff === 'object'
+    ? {
+        handoffId: normalizeText(sourceOutput.sourceHandoff.handoffId),
+        contractVersion: normalizeText(sourceOutput.sourceHandoff.contractVersion),
+        policyVersion: normalizeText(sourceOutput.sourceHandoff.policyVersion),
+        status: normalizeToken(sourceOutput.sourceHandoff.status),
+        handoffHash: normalizeText(sourceOutput.sourceHandoff.handoffHash),
+      }
+    : null,
   sourceSnapshot: getSourceSnapshot(sourceOutput, {}),
 })
 
@@ -2111,11 +2128,13 @@ const buildOutcomeContextBindings = ({
       outputTypeKey: safeSourceOutput.outputTypeKey,
       outputTypeLabel: safeSourceOutput.outputTypeLabel,
       status: safeSourceOutput.status,
+      sourceType: safeSourceOutput.sourceType,
       stale: safeSourceOutput.stale,
       exportable: safeSourceOutput.exportable,
       generatedAt: safeSourceOutput.generatedAt,
       publishedAt: safeSourceOutput.publishedAt,
       supportedFormats: safeSourceOutput.supportedFormats,
+      sourceHandoff: safeSourceOutput.sourceHandoff,
       sourceSnapshot: safeSourceOutput.sourceSnapshot,
     },
     truthBinding: {
@@ -3008,6 +3027,8 @@ const serializeCustomerOutcomeSession = (session, options = {}) => {
       outputTypeLabel: serialized.sourceOutput.outputTypeLabel,
       formats: serialized.sourceOutput.supportedFormats,
       status: serialized.sourceOutput.status,
+      sourceType: serialized.sourceOutput.sourceType,
+      sourceHandoff: serialized.sourceOutput.sourceHandoff,
     },
   }
 }
@@ -4253,6 +4274,51 @@ const getSourceSnapshot = (asset = {}, readiness = {}) => {
   }
 }
 
+const buildFrameworkHandoffSourceOutput = ({
+  handoff = null,
+  outputTypeKey = '',
+  outputTypeLabel = '',
+} = {}) => {
+  const handoffStatus = normalizeToken(handoff?.status)
+  const handoffHash = normalizeText(handoff?.currentness?.handoffHash)
+  const handoffIdentity = handoffHash.replace(/^sha256:/i, '')
+  if (!handoffHash || ![
+    FRAMEWORK_OUTCOME_HANDOFF_STATUSES.READY,
+    FRAMEWORK_OUTCOME_HANDOFF_STATUSES.READY_WITH_GAPS,
+  ].includes(handoffStatus)) return null
+
+  const eligibility = handoff?.canonicalEligibility || {}
+  return {
+    outputAssetId: `framework_handoff_${handoffIdentity}`,
+    outputTypeKey: normalizeToken(outputTypeKey).replace(/-/g, '_'),
+    outputTypeLabel: normalizeText(outputTypeLabel) || normalizeText(
+      handoff?.knowledgeResolution?.context?.outputTypeKey,
+    ),
+    status: FRAMEWORK_HANDOFF_SOURCE_STATUS,
+    sourceType: FRAMEWORK_HANDOFF_SOURCE_TYPE,
+    stale: false,
+    exportable: false,
+    generatedAt: '',
+    publishedAt: '',
+    supportedFormats: [],
+    sourceHandoff: {
+      handoffId: normalizeText(handoff?.handoffId),
+      contractVersion: normalizeText(handoff?.contractVersion),
+      policyVersion: normalizeText(handoff?.policyVersion),
+      status: handoffStatus,
+      handoffHash,
+    },
+    sourceSnapshot: {
+      publishSnapshotId: normalizeText(eligibility.publishSnapshotId),
+      publishSnapshotHash: normalizeText(eligibility.publishSnapshotHash),
+      lockSnapshotId: normalizeText(eligibility.lockSnapshotId),
+      lockSnapshotHash: normalizeText(eligibility.lockSnapshotHash),
+      replayAnchorId: normalizeText(eligibility.replayAnchorId),
+      replayAnchorHash: normalizeText(eligibility.replayAnchorHash),
+    },
+  }
+}
+
 const sanitizeSourceOutputAsset = ({ asset, readiness }) => {
   if (!asset) return null
   return {
@@ -4260,6 +4326,7 @@ const sanitizeSourceOutputAsset = ({ asset, readiness }) => {
     outputTypeKey: normalizeToken(asset.outputTypeKey),
     outputTypeLabel: normalizeText(asset.outputTypeLabel),
     status: normalizeToken(asset.status || 'UNKNOWN'),
+    sourceType: normalizeToken(asset.sourceType || 'OUTPUT_LAB'),
     stale: asset.stale === true,
     exportable: asset.exportable === true,
     generatedAt: normalizeText(asset.generatedAt),
@@ -4267,6 +4334,15 @@ const sanitizeSourceOutputAsset = ({ asset, readiness }) => {
     supportedFormats: Array.isArray(asset.supportedFormats)
       ? asset.supportedFormats.map(normalizeToken).filter(Boolean)
       : [],
+    sourceHandoff: asset.sourceHandoff && typeof asset.sourceHandoff === 'object'
+      ? {
+          handoffId: normalizeText(asset.sourceHandoff.handoffId),
+          contractVersion: normalizeText(asset.sourceHandoff.contractVersion),
+          policyVersion: normalizeText(asset.sourceHandoff.policyVersion),
+          status: normalizeToken(asset.sourceHandoff.status),
+          handoffHash: normalizeText(asset.sourceHandoff.handoffHash),
+        }
+      : null,
     sourceSnapshot: getSourceSnapshot(asset, readiness),
   }
 }
@@ -4294,8 +4370,8 @@ const selectSourceOutputAsset = (assets = []) => {
   return eligibleAssets[0] || null
 }
 
-const buildPackBlockers = (packBinding) =>
-  packBinding.requiredPacks
+const buildPackBlockers = (packBinding = {}) =>
+  (Array.isArray(packBinding.requiredPacks) ? packBinding.requiredPacks : [])
     .filter((pack) => pack.runtimeBindable !== true)
     .map((pack) => {
       const codeByPackType = {
@@ -4322,6 +4398,7 @@ const buildReadiness = ({
   outputLab,
   packBinding,
   sourceOutput,
+  frameworkHandoff = null,
 }) => {
   const outputLabReadiness = outputLab?.readiness || {}
   const outputLabBlockers = Array.isArray(outputLabReadiness.blockers)
@@ -4342,20 +4419,53 @@ const buildReadiness = ({
         message: 'A governed Output Lab source asset is required before Outcome Studio sessions can start.',
       }
   const packBlockers = buildPackBlockers(packBinding)
+  const handoffBlockers = (Array.isArray(frameworkHandoff?.blockers)
+    ? frameworkHandoff.blockers
+    : [])
+    .filter((blocker) => {
+      const code = normalizeToken(blocker?.code)
+      const knowledgeBoundaryCodes = [
+        FRAMEWORK_OUTCOME_HANDOFF_BLOCKER_CODES.KNOWLEDGE_RESOLUTION_MISSING,
+        FRAMEWORK_OUTCOME_HANDOFF_BLOCKER_CODES.KNOWLEDGE_BINDING_BLOCKED,
+        FRAMEWORK_OUTCOME_HANDOFF_BLOCKER_CODES.KNOWLEDGE_CONTEXT_MISSING,
+        FRAMEWORK_OUTCOME_HANDOFF_BLOCKER_CODES.KNOWLEDGE_CONTEXT_BLOCKED,
+      ]
+      if (knowledgeBoundaryCodes.includes(code)) return packBlockers.length === 0
+      return true
+    })
+    .map((blocker) => ({
+      code: normalizeToken(blocker?.code || 'FRAMEWORK_OUTCOME_HANDOFF_BLOCKED'),
+      source: 'FRAMEWORK_OUTCOME_HANDOFF',
+      message: normalizeText(blocker?.message) || 'The governed Framework-to-Outcome handoff is blocking Outcome Studio.',
+    }))
   const blockers = [
     ...outputLabBlockers,
     ...(sourceOutputBlocker ? [sourceOutputBlocker] : []),
     ...packBlockers,
+    ...handoffBlockers,
   ]
   const outputLabCanGenerate = outputLabReadiness.canGenerate === true
   const hasPackBlockers = packBlockers.length > 0
+  const hasHandoffBlockers = handoffBlockers.length > 0
   const summary = !outputLabCanGenerate && outputLabReadiness.summary
     ? normalizeText(outputLabReadiness.summary)
     : !sourceOutput
       ? 'Outcome Studio requires a governed Output Lab source asset before sessions can start.'
+      : hasHandoffBlockers
+        ? 'Outcome Studio requires a current governed Framework-to-Outcome handoff before sessions can start.'
       : hasPackBlockers
         ? 'Outcome Studio requires active Outcome Studio knowledge pack bindings before sessions can start.'
         : 'Outcome Studio is ready to start a governed reasoning session.'
+  const handoffSafe = frameworkHandoff?.customerSafe || {
+    status: FRAMEWORK_OUTCOME_HANDOFF_STATUSES.BLOCKED,
+    contractVersion: '',
+    currentness: 'BLOCKED',
+    gapCount: 0,
+    contradictionWarningCount: 0,
+    blockerCount: 1,
+    blockedBoundary: 'FRAMEWORK_OUTCOME_HANDOFF_BLOCKED',
+    nextAction: 'Resolve the governed Framework-to-Outcome handoff boundary before starting Outcome Studio.',
+  }
 
   return {
     state: blockers.length > 0
@@ -4366,8 +4476,15 @@ const buildReadiness = ({
     canStartSession: blockers.length === 0,
     canReason: blockers.length === 0,
     summary,
+    customerSummary: hasHandoffBlockers
+      ? 'Outcome Studio is blocked by a governed Framework-to-Outcome handoff boundary.'
+      : '',
+    nextAction: blockers.length > 0
+      ? handoffSafe.nextAction || 'Resolve the Outcome Studio readiness blockers before starting a session.'
+      : '',
     blockers,
     warnings,
+    frameworkHandoff: handoffSafe,
     outputLab: {
       state: normalizeToken(outputLabReadiness.state || 'UNKNOWN'),
       canGenerate: outputLabCanGenerate,
@@ -4400,6 +4517,7 @@ const buildTruthBinding = ({
   readiness,
   sourceOutput,
   truthQuality,
+  frameworkHandoff = null,
 }) => {
   const sourceSnapshot = sourceOutput?.sourceSnapshot || {}
   const quality = truthQuality?.quality || {}
@@ -4419,6 +4537,10 @@ const buildTruthBinding = ({
         evaluatedAt: '',
       }
   const certification = truthQuality?.certification ? cloneValue(truthQuality.certification) : null
+  const handoffReady = [
+    FRAMEWORK_OUTCOME_HANDOFF_STATUSES.READY,
+    FRAMEWORK_OUTCOME_HANDOFF_STATUSES.READY_WITH_GAPS,
+  ].includes(normalizeToken(frameworkHandoff?.status))
   const evidence = {
     runtimeInstanceId: normalizeText(truthQuality?.runtimeInstanceId),
     runtimeInstanceKey: normalizeText(truthQuality?.runtimeInstanceKey),
@@ -4438,6 +4560,8 @@ const buildTruthBinding = ({
     contradictionRisk: normalizeToken(contradictionRisk.level),
     sourceOutputAssetId: normalizeText(sourceOutput?.outputAssetId),
     sourceOutputTypeKey: normalizeToken(sourceOutput?.outputTypeKey),
+    sourceType: normalizeToken(sourceOutput?.sourceType),
+    handoffHash: normalizeText(sourceOutput?.sourceHandoff?.handoffHash),
     publishSnapshotId: normalizeText(sourceSnapshot.publishSnapshotId),
     publishSnapshotHash: normalizeText(sourceSnapshot.publishSnapshotHash),
     lockSnapshotId: normalizeText(sourceSnapshot.lockSnapshotId),
@@ -4447,6 +4571,12 @@ const buildTruthBinding = ({
     graphVersion: normalizeText(graph.graphVersion || sourceSnapshot.graphVersion),
     graphHash: normalizeText(graph.graphHash || sourceSnapshot.graphHash),
     evaluatedAt: normalizeText(graph.evaluatedAt),
+    frameworkHandoff: {
+      contractVersion: normalizeText(frameworkHandoff?.contractVersion),
+      status: normalizeToken(frameworkHandoff?.status),
+      currentness: normalizeToken(frameworkHandoff?.currentness?.status || frameworkHandoff?.customerSafe?.currentness),
+      handoffHash: normalizeText(frameworkHandoff?.currentness?.handoffHash),
+    },
   }
   const missingEvidence = [
     ['sourceOutputAssetId', 'Source output asset'],
@@ -4455,6 +4585,7 @@ const buildTruthBinding = ({
     ['lockSnapshotId', 'Lock snapshot'],
     ['replayAnchorId', 'Replay anchor'],
     ['graphHash', 'Intelligence graph hash'],
+    ...(!handoffReady ? [['frameworkHandoff', 'Framework-to-Outcome handoff']] : []),
   ]
     .filter(([key]) => !evidence[key])
     .map(([key, label]) => ({
@@ -4510,6 +4641,7 @@ const buildSafetyGates = ({
   const activeCount = Array.isArray(packBinding?.activePacks) ? packBinding.activePacks.length : 0
   const requiredCount = Array.isArray(packBinding?.requiredPacks) ? packBinding.requiredPacks.length : 0
   const sourceOutputBound = Boolean(sourceOutput?.outputAssetId)
+  const sourceIsFrameworkHandoff = sourceOutput?.sourceType === FRAMEWORK_HANDOFF_SOURCE_TYPE
   const truthSignatureBound =
     truthBinding?.truthSignature?.status === OUTCOME_STUDIO_BINDING_STATUSES.PROJECTED
   const knowledgePacksBound =
@@ -4529,8 +4661,10 @@ const buildSafetyGates = ({
       label: 'Source Output Binding',
       passed: sourceOutputBound,
       message: sourceOutputBound
-        ? 'A governed Output Lab source asset is bound for the session.'
-        : 'A governed Output Lab source asset is required before Outcome Studio can start.',
+        ? sourceIsFrameworkHandoff
+          ? 'The locked Framework Runtime handoff is bound as the governed source context.'
+          : 'A governed Output Lab source asset is bound for the session.'
+        : 'A governed Framework Runtime handoff or Output Lab source asset is required before Outcome Studio can start.',
       blockerReason: OUTCOME_STUDIO_BLOCKER_CODES.SOURCE_OUTPUT_MISSING,
     }),
     buildSafetyGate({
@@ -4602,8 +4736,10 @@ const buildOutcomeStudioProjection = async ({
   outputLab,
   sessions = [],
   truthQuality = null,
+  requestedOutputTypeKey: requestedOutputTypeKeyOverride = '',
+  scopes,
 }) => {
-  const sourceOutput = sanitizeSourceOutputAsset({
+  const sourceOutputAsset = sanitizeSourceOutputAsset({
     asset: selectSourceOutputAsset(Array.isArray(outputLab?.assets) ? outputLab.assets : []),
     readiness: outputLab?.readiness || {},
   })
@@ -4611,15 +4747,42 @@ const buildOutcomeStudioProjection = async ({
     query: outputLab?.runtimeScope || {},
   })
   const deliverables = projectOutcomeStudioDeliverableDiscovery(packBinding)
+  const normalizedSourceOutputType = normalizeToken(sourceOutputAsset?.outputTypeKey).replace(/[-_]/g, '')
+  const matchingDeliverable = deliverables.available?.find((deliverable) =>
+    normalizeToken(deliverable.key).replace(/[-_]/g, '') === normalizedSourceOutputType,
+  )
+  const requestedOutputTypeKey = normalizeCapabilityKey(
+    requestedOutputTypeKeyOverride
+      || matchingDeliverable?.key
+      || deliverables.available?.[0]?.key
+      || sourceOutputAsset?.outputTypeKey,
+  )
+  const sourceDeliverable = deliverables.available?.find((deliverable) =>
+    normalizeCapabilityKey(deliverable.key) === requestedOutputTypeKey,
+  ) || matchingDeliverable
+  const handoffResolution = await resolveFrameworkOutcomeStudioHandoff({
+    runtimeInstanceId: outputLab?.runtimeScope?.runtimeInstanceId,
+    scopes,
+    packBinding,
+    requestedOutputTypeKey,
+  })
+  const frameworkHandoff = handoffResolution.handoff
+  const sourceOutput = sourceOutputAsset || buildFrameworkHandoffSourceOutput({
+    handoff: frameworkHandoff,
+    outputTypeKey: requestedOutputTypeKey,
+    outputTypeLabel: sourceDeliverable?.label,
+  })
   const readiness = buildReadiness({
     outputLab,
     packBinding,
     sourceOutput,
+    frameworkHandoff,
   })
   const truthBinding = buildTruthBinding({
     readiness: outputLab?.readiness || {},
     sourceOutput,
     truthQuality,
+    frameworkHandoff,
   })
   const safetyGates = buildSafetyGates({
     packBinding,
@@ -4661,6 +4824,7 @@ const buildOutcomeStudioProjection = async ({
       outcomeId: normalizeText(outputLab?.runtimeScope?.outcomeId),
     },
     readiness: readinessWithSafetyGates,
+    frameworkHandoff,
     truthBinding,
     packBinding,
     deliverables,
@@ -5169,6 +5333,7 @@ const buildCustomerGovernanceEvidence = ({
 const buildOutcomeStudioCustomerProjection = (projection = {}) => {
   const readiness = projection.readiness || {}
   const safetyGates = buildCustomerSafetyGates(projection.safetyGates || readiness.safetyGates)
+  const frameworkHandoff = readiness.frameworkHandoff || {}
   const canStartSession = readiness.canStartSession === true
   const canReason = readiness.canReason === true && safetyGates.responseGenerationAvailable === true
   const truthSignature = projection.truthBinding?.truthSignature || {}
@@ -5177,6 +5342,15 @@ const buildOutcomeStudioCustomerProjection = (projection = {}) => {
         outputAssetId: normalizeText(source.outputAssetId),
         outputTypeKey: normalizeToken(source.outputTypeKey),
         outputTypeLabel: normalizeText(source.outputTypeLabel),
+        sourceType: normalizeToken(source.sourceType || 'OUTPUT_LAB'),
+        sourceHandoff: source.sourceHandoff && typeof source.sourceHandoff === 'object'
+          ? {
+              handoffId: normalizeText(source.sourceHandoff.handoffId),
+              contractVersion: normalizeText(source.sourceHandoff.contractVersion),
+              status: normalizeToken(source.sourceHandoff.status),
+              handoffHash: normalizeText(source.sourceHandoff.handoffHash),
+            }
+          : null,
         formats: Array.isArray(source.supportedFormats)
           ? source.supportedFormats.map(normalizeToken).filter(Boolean)
           : [],
@@ -5193,8 +5367,20 @@ const buildOutcomeStudioCustomerProjection = (projection = {}) => {
         ? 'Outcome Studio is ready to prepare drafts.'
         : canStartSession
           ? 'A session can start, but draft generation is not currently available.'
-          : 'Outcome Studio requires additional business information before a session can start.',
+          : readiness.customerSummary
+            || 'Outcome Studio requires additional business information before a session can start.',
       blockerCount: Array.isArray(readiness.blockers) ? readiness.blockers.length : 0,
+      nextAction: normalizeText(readiness.nextAction),
+      frameworkHandoff: {
+        status: normalizeToken(frameworkHandoff.status || 'BLOCKED'),
+        contractVersion: normalizeText(frameworkHandoff.contractVersion),
+        currentness: normalizeToken(frameworkHandoff.currentness || 'BLOCKED'),
+        gapCount: Number(frameworkHandoff.gapCount || 0),
+        contradictionWarningCount: Number(frameworkHandoff.contradictionWarningCount || 0),
+        blockerCount: Number(frameworkHandoff.blockerCount || 0),
+        blockedBoundary: normalizeToken(frameworkHandoff.blockedBoundary),
+        nextAction: normalizeText(frameworkHandoff.nextAction),
+      },
       safetyGates: {
         status: safetyGates.status,
         responseGenerationAvailable: safetyGates.responseGenerationAvailable,
@@ -5251,7 +5437,8 @@ const buildOutcomeStudioCustomerProjection = (projection = {}) => {
       enabled: projection.conversation?.enabled === true,
       disabledReason: canStartSession
         ? ''
-        : 'Additional business information is required before a session can start.',
+        : normalizeText(readiness.nextAction)
+          || 'Additional business information is required before a session can start.',
       requestMaxLength: Number(projection.conversation?.promptMaxLength || 2000),
     },
     sourceOutputs,
@@ -5348,6 +5535,7 @@ export const getRuntimeOutcomeStudio = async ({
     outputLab,
     sessions,
     truthQuality,
+    scopes,
   })
   return buildOutcomeStudioCustomerProjection(projection)
 }
@@ -5738,7 +5926,7 @@ export const getRuntimeOutcomeStudioReadiness = async ({
     runtimeInstanceId,
     scopes,
   })
-  const outcomeStudio = await buildOutcomeStudioProjection({ outputLab, truthQuality })
+  const outcomeStudio = await buildOutcomeStudioProjection({ outputLab, truthQuality, scopes })
   return buildOutcomeStudioCustomerProjection(outcomeStudio).readiness
 }
 
@@ -5756,7 +5944,12 @@ export const createRuntimeOutcomeSession = async ({
   })
 
   const outputLab = await getRuntimeOutputLab({ includeRuntimeScope: true, runtimeInstanceId, scopes })
-  let outcomeStudio = await buildOutcomeStudioProjection({ outputLab })
+  const requestedOutputTypeKey = normalizeCapabilityKey(payload?.requestedOutputTypeKey)
+  let outcomeStudio = await buildOutcomeStudioProjection({
+    outputLab,
+    requestedOutputTypeKey,
+    scopes,
+  })
 
   if (outcomeStudio.readiness.canStartSession !== true) {
     throw createOutcomeStudioError({
@@ -5777,7 +5970,12 @@ export const createRuntimeOutcomeSession = async ({
     runtimeInstanceId,
     scopes,
   })
-  outcomeStudio = await buildOutcomeStudioProjection({ outputLab, truthQuality })
+  outcomeStudio = await buildOutcomeStudioProjection({
+    outputLab,
+    requestedOutputTypeKey,
+    truthQuality,
+    scopes,
+  })
 
   if (outcomeStudio.truthBinding?.truthSignature?.status !== OUTCOME_STUDIO_BINDING_STATUSES.PROJECTED) {
     throw createOutcomeStudioError({
@@ -5811,15 +6009,13 @@ export const createRuntimeOutcomeSession = async ({
   const sessionId = buildOutcomeSessionId()
   const truthSignatureId = buildTruthSignatureId()
   const runtimeScope = getRuntimeScope(runtimeInstance)
-  const requestedOutputTypeKey = normalizeCapabilityKey(
-    payload?.requestedOutputTypeKey || sourceOutput?.outputTypeKey,
-  )
+  const resolvedRequestedOutputTypeKey = requestedOutputTypeKey || sourceOutput?.outputTypeKey
   const knowledgeContextResult = await resolveOutcomeStudioKnowledgeContext({
     query: {
       ...runtimeScope,
       environmentKey: 'PRODUCTION',
       workspaceType: DEFAULT_OUTCOME_WORKSPACE_TYPE,
-      requestedOutputTypeKey,
+      requestedOutputTypeKey: resolvedRequestedOutputTypeKey,
       resolvedAt: boundAt,
     },
   })
@@ -5878,7 +6074,7 @@ export const createRuntimeOutcomeSession = async ({
     truthSignatureId,
     sourceOutputTypeKey: sourceOutput.outputTypeKey,
     sourceOutputTypeLabel: sourceOutput.outputTypeLabel,
-    requestedOutputTypeKey,
+    requestedOutputTypeKey: resolvedRequestedOutputTypeKey,
     requestedOutputTypeLabel,
     sourceOutputSnapshot: sourceOutput,
     truthSignature,
