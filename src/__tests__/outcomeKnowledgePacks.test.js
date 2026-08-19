@@ -2408,11 +2408,16 @@ name: Statement of Work
       sourceType: 'KNOWLEDGE_PACK_REGISTRY',
       policyKey: 'outcome-studio-v1-required-packs',
       policyVersion: '1.0.0',
+      manifestId: 'kpm-outcome-studio-default-1-0-0-global',
+      manifestKey: 'outcome-studio-default',
+      manifestVersion: '1.0.0',
       status: 'PROJECTED',
     })
-    expect(resolutionResult.manifest).not.toHaveProperty('manifestId')
     expect(binding).toEqual(expect.objectContaining({
       status: 'PROJECTED',
+      manifestId: 'kpm-outcome-studio-default-1-0-0-global',
+      manifestKey: 'outcome-studio-default',
+      manifestVersion: '1.0.0',
       resolutionSource: 'KNOWLEDGE_PACK_REGISTRY',
       optionalPacks: [expect.objectContaining({
         packKey: 'executive-board-style',
@@ -2444,6 +2449,8 @@ name: Statement of Work
         blockedCount: 2,
       }),
     }))
+    expect(resolutionResult.manifest.manifestVersion).not.toBe('outcome-studio.provider-request-manifest.v1')
+    expect(JSON.stringify(resolutionResult.manifest)).not.toContain('safetyManifest')
     expect(binding.activePacks).toHaveLength(7)
     expect(binding.requiredPacks).toContainEqual(expect.objectContaining({
       packId: 'kp-arl-adaptive-reasoning-layer',
@@ -2634,6 +2641,22 @@ name: Statement of Work
     expect(binding.providerContextPacks).toContainEqual(expect.objectContaining({
       activationId: systemPack.activationId,
       packKey: 'cacr-runtime-pack',
+    }))
+    expect(binding.requiredPacks).toContainEqual(expect.objectContaining({
+      packKey: 'output-schemas-pack',
+    }))
+    expect(binding.activePacks).toContainEqual(expect.objectContaining({
+      packKey: 'output-schemas-pack',
+    }))
+    expect(binding.providerContextPacks).toContainEqual(expect.objectContaining({
+      activationId: outputSchema.activationId,
+      packKey: 'executive-brief-schema',
+    }))
+    expect(binding.providerContextPacks).not.toContainEqual(expect.objectContaining({
+      packKey: 'output-schemas-pack',
+    }))
+    expect(binding.resolution.providerContextPacks).not.toContainEqual(expect.objectContaining({
+      packKey: 'output-schemas-pack',
     }))
     expect(binding.blockedPacks).not.toContainEqual(expect.objectContaining({
       activationId: systemPack.activationId,

@@ -168,9 +168,33 @@ export const resolveOutcomeStudioKnowledgeContext = async ({ query = {} } = {}) 
 }
 
 export const projectOutcomeStudioDeliverableDiscovery = (binding = {}) => {
+  const selectedByLayer = binding?.selectedByLayer || {}
+  const selectedOutputType = Array.isArray(selectedByLayer.OUTPUT_TYPE)
+    && selectedByLayer.OUTPUT_TYPE.length === 1
+    ? selectedByLayer.OUTPUT_TYPE[0]
+    : null
+  const selectedOutputSchema = Array.isArray(selectedByLayer.OUTPUT_SCHEMA)
+    && selectedByLayer.OUTPUT_SCHEMA.length === 1
+    ? selectedByLayer.OUTPUT_SCHEMA[0]
+    : null
+  const selectedStyle = Array.isArray(selectedByLayer.STYLE)
+    && selectedByLayer.STYLE.length === 1
+    ? selectedByLayer.STYLE[0]
+    : null
   const discovered = Array.isArray(binding.availableOutputTypes)
+    && binding.availableOutputTypes.length > 0
     ? binding.availableOutputTypes
-    : []
+    : selectedOutputType && selectedOutputSchema && selectedStyle
+      ? [{
+        capabilityKey: selectedOutputType.capabilityKey,
+        status: normalizeToken(selectedOutputType.status) === 'ACTIVE'
+          ? 'READY'
+          : selectedOutputType.status,
+        outputType: selectedOutputType,
+        outputSchema: selectedOutputSchema,
+        style: selectedStyle,
+      }]
+      : []
   const available = []
 
   for (const entry of discovered) {

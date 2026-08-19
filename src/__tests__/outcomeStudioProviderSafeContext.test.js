@@ -3,10 +3,14 @@ import { afterEach, describe, expect, jest, test } from '@jest/globals'
 import KnowledgePackVersion from '../models/KnowledgePackVersion.js'
 import {
   assertOutcomeStudioProviderSafeContext,
+  assertOutcomeStudioProviderSafeComposition,
   assertOutcomeStudioProviderSafeRequest,
   buildOutcomeFrameworkGuidanceProviderSafeContext,
+  buildOutcomeStudioProviderSafeComposition,
   buildOutcomeStudioProviderSafeContext,
+  buildOutcomeStudioGenerationContextConsumption,
   buildOutcomeStudioProviderSafeRequest,
+  OUTCOME_STUDIO_PROVIDER_SAFE_COMPOSITION_CONTRACT,
   OUTCOME_STUDIO_PROVIDER_SAFEGUARDS,
 } from '../services/outcomeStudioProviderSafeContextService.js'
 
@@ -44,6 +48,80 @@ const safeRequest = () => buildOutcomeStudioProviderSafeRequest({
   providerInput: providerInput(),
 })
 
+const compositionPackage = (overrides = {}) => ({
+  contractVersion: 'outcome-studio.evidence-to-composition.v1',
+  status: 'READY',
+  outputBinding: {
+    outputTypeKey: 'BOARD_REVIEW',
+    outputTypeVersion: '1.0.0',
+    outputTypeStructure: [
+      'Executive context',
+      'Material findings grounded in Certified Truth',
+      'Business implications',
+      'Recommended decisions',
+      'Immediate actions and accountable owners',
+    ],
+    outputSchemaKey: 'BOARD_REVIEW_SCHEMA',
+    outputSchemaVersion: '1.0.0',
+    styleKey: 'EXECUTIVE',
+    styleVersion: '1.0.0',
+    requiredSections: ['Executive summary', 'Priorities'],
+    optionalSections: ['Truth certification'],
+  },
+  businessFactLedger: {
+    facts: [{
+      evidenceObjectId: 'evidence-object-1',
+      sourceId: 'source-1',
+      sectionKeys: ['customer_context'],
+      statement: 'The customer has a governed decision process.',
+      extractedFact: 'The customer has a governed decision process.',
+      reviewStatus: 'ACCEPTED',
+      validationStatus: 'VALIDATED',
+      confidence: 'HIGH',
+      materiality: 'HIGH',
+      currentness: 'CURRENT',
+      provenance: {
+        lineageRef: 'lineage:source-1:1',
+        sourceRegistryRef: 'source-1',
+      },
+      claimPermission: 'SUPPORTED_FACT_ONLY',
+      qualification: ['Use as supplied business information.'],
+      selectionReason: 'ACCEPTED_VALIDATED_TYPED_REFERENCE',
+      factId: 'fact_abc123',
+    }],
+    omitted: [],
+    contradictions: [],
+  },
+  ...overrides,
+})
+
+const methodGuidance = [{
+  role: 'ARL',
+  boundary: 'GENERATION_CONTEXT',
+  version: 'arl-v1',
+  guidance: 'Keep interpretation tied to supplied business information and retain material uncertainty.',
+}]
+
+const governanceConstraints = [
+  'Do not invent unsupported claims or convert uncertainty into certainty.',
+]
+
+const directPackContents = Object.freeze({
+  'kpv-direct-output-type': '# Document Metadata\nOutput type metadata only.',
+  'kpv-direct-output-schema': '# Document Metadata\nOutput schema metadata only.',
+  'kpv-direct-arl': '# Document Metadata\nARL metadata only.',
+})
+
+const buildDirectConsumptionFixture = (bindings = [
+  { role: 'OUTPUT_TYPE', versionId: 'kpv-direct-output-type', contentHash: contentHash(directPackContents['kpv-direct-output-type']) },
+  { role: 'OUTPUT_SCHEMA', versionId: 'kpv-direct-output-schema', contentHash: contentHash(directPackContents['kpv-direct-output-schema']) },
+  { role: 'ARL', versionId: 'kpv-direct-arl', contentHash: contentHash(directPackContents['kpv-direct-arl']) },
+]) => buildOutcomeStudioGenerationContextConsumption({
+  compositionPackage: compositionPackage(),
+  directBindings: bindings,
+  methodGuidance,
+})
+
 const governedContent = [
   '# Business Guidance',
   'Prioritise the decision, commercial consequence, and evidence-based recommendation.',
@@ -67,6 +145,371 @@ const mockVersions = (versions) => {
 afterEach(() => jest.restoreAllMocks())
 
 describe('Outcome Studio provider-safe projection', () => {
+  test('attributes exact direct composition items while keeping loaded-only candidate attribution unchanged', async () => {
+    const supportContent = governedContent
+    const versions = [
+      ...Object.entries(directPackContents).map(([versionId, content]) => ({
+        versionId,
+        content,
+        contentHash: contentHash(content),
+      })),
+      { versionId: 'kpv-guidance-support', content: supportContent, contentHash: contentHash(supportContent) },
+    ]
+    mockVersions(versions)
+    const consumption = buildDirectConsumptionFixture()
+    const captureExecutionEvidence = jest.fn()
+    const knowledgeSelection = [
+      { versionId: 'kpv-direct-output-type', knowledgeLayer: 'OUTPUT_TYPE', executionMode: 'PROVIDER_CONTEXT', packType: 'OUTPUT_TYPE_DEFINITION' },
+      { versionId: 'kpv-direct-output-schema', knowledgeLayer: 'OUTPUT_SCHEMA', executionMode: 'PROVIDER_CONTEXT', packType: 'OUTPUT_SCHEMA' },
+      { versionId: 'kpv-direct-arl', knowledgeLayer: 'REASONING', executionMode: 'PROVIDER_CONTEXT', packType: 'ARL' },
+      { versionId: 'kpv-guidance-support', knowledgeLayer: 'FOUNDATION', executionMode: 'PROVIDER_CONTEXT', packType: 'FOUNDATION' },
+    ]
+    const executionBindings = versions.map(({ versionId, contentHash: hash }) => ({
+      versionId,
+      contentHash: hash,
+    }))
+
+    const result = await buildOutcomeStudioProviderSafeContext({
+      providerDescriptor: descriptor,
+      safeRequest: safeRequest(),
+      truthSource: { acceptedTruth: [] },
+      knowledgeSelection,
+      executionBindings,
+      compositionPackage: compositionPackage(),
+      methodGuidance,
+      governanceConstraints,
+      ...consumption,
+      captureExecutionEvidence,
+    })
+
+    const receipt = captureExecutionEvidence.mock.calls[0][0]
+    for (const versionId of Object.keys(directPackContents)) {
+      expect(receipt.packs.find((pack) => pack.versionId === versionId)).toEqual(expect.objectContaining({
+        suppliedEntryCount: expect.any(Number),
+        checks: expect.arrayContaining([
+          expect.objectContaining({ key: 'PROVIDER_CONTEXT_SUPPLIED', status: 'PASSED' }),
+        ]),
+      }))
+      expect(receipt.packs.find((pack) => pack.versionId === versionId).suppliedEntryCount)
+        .toBeGreaterThan(0)
+    }
+    expect(JSON.stringify(result)).not.toMatch(/generationContextConsumption|itemFingerprints|kpv-direct-output-type/i)
+  })
+
+  test('canonical direct-consumption identity is stable across equivalent binding order', () => {
+    const first = buildDirectConsumptionFixture()
+    const second = buildDirectConsumptionFixture([
+      { role: 'ARL', versionId: 'kpv-direct-arl', contentHash: contentHash(directPackContents['kpv-direct-arl']) },
+      { role: 'OUTPUT_SCHEMA', versionId: 'kpv-direct-output-schema', contentHash: contentHash(directPackContents['kpv-direct-output-schema']) },
+      { role: 'OUTPUT_TYPE', versionId: 'kpv-direct-output-type', contentHash: contentHash(directPackContents['kpv-direct-output-type']) },
+    ])
+
+    expect(second).toEqual(first)
+  })
+
+  test('fails closed when an exact direct contribution is missing from the final provider composition', async () => {
+    const supportContent = governedContent
+    const versions = [
+      ...Object.entries(directPackContents).map(([versionId, content]) => ({
+        versionId,
+        content,
+        contentHash: contentHash(content),
+      })),
+      { versionId: 'kpv-guidance-support', content: supportContent, contentHash: contentHash(supportContent) },
+    ]
+    mockVersions(versions)
+    const consumption = buildDirectConsumptionFixture()
+    consumption.generationContextConsumption[0].contributions[0].itemFingerprints[0] = contentHash('not supplied')
+
+    await expect(buildOutcomeStudioProviderSafeContext({
+      providerDescriptor: descriptor,
+      safeRequest: safeRequest(),
+      truthSource: { acceptedTruth: [] },
+      knowledgeSelection: [
+        { versionId: 'kpv-direct-output-type', knowledgeLayer: 'OUTPUT_TYPE', executionMode: 'PROVIDER_CONTEXT', packType: 'OUTPUT_TYPE_DEFINITION' },
+        { versionId: 'kpv-direct-output-schema', knowledgeLayer: 'OUTPUT_SCHEMA', executionMode: 'PROVIDER_CONTEXT', packType: 'OUTPUT_SCHEMA' },
+        { versionId: 'kpv-direct-arl', knowledgeLayer: 'REASONING', executionMode: 'PROVIDER_CONTEXT', packType: 'ARL' },
+        { versionId: 'kpv-guidance-support', knowledgeLayer: 'FOUNDATION', executionMode: 'PROVIDER_CONTEXT', packType: 'FOUNDATION' },
+      ],
+      executionBindings: versions.map(({ versionId, contentHash: hash }) => ({ versionId, contentHash: hash })),
+      compositionPackage: compositionPackage(),
+      methodGuidance,
+      governanceConstraints,
+      ...consumption,
+    })).rejects.toMatchObject({
+      code: 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED',
+      internalFailureStage: 'DIRECT_CONSUMPTION_VALIDATION',
+    })
+  })
+
+  test('projects a READY composition package into explicit safe provider blocks and a redacted manifest', () => {
+    const result = buildOutcomeStudioProviderSafeComposition({
+      compositionPackage: compositionPackage(),
+      governanceConstraints,
+      methodGuidance,
+      providerDescriptor: descriptor,
+      safeRequest: safeRequest(),
+      styleGuidance: ['Use concise, neutral business language.'],
+    })
+
+    expect(result).toEqual(expect.objectContaining({
+      contractVersion: OUTCOME_STUDIO_PROVIDER_SAFE_COMPOSITION_CONTRACT,
+      businessFacts: [expect.objectContaining({
+        statement: 'The customer has a governed decision process.',
+        sourceAttribution: {
+          sourceType: 'GOVERNED_SOURCE',
+          sourceLabel: 'Accepted business source',
+        },
+      })],
+      outputStructure: expect.objectContaining({
+        requiredSections: ['Executive summary', 'Priorities'],
+      }),
+      safetyManifest: expect.objectContaining({
+        contentSafetyStatus: 'PASSED',
+        businessFactCount: 1,
+        requiredEvidenceRefs: [expect.stringMatching(/^ref_[a-f0-9]{16}$/)],
+      }),
+      readiness: {
+        status: 'READY',
+        draftOnly: false,
+        gapCount: 0,
+        notice: '',
+      },
+    }))
+    expect(JSON.stringify(result)).not.toContain('evidence-object-1')
+    expect(JSON.stringify(result)).not.toContain('source-1')
+    expect(JSON.stringify(result)).not.toContain('lineage:source-1:1')
+    expect(assertOutcomeStudioProviderSafeComposition(result)).toBe(result)
+  })
+
+  test('derives evidence handles from the corresponding raw fact when safe statement text is normalized', () => {
+    const result = buildOutcomeStudioProviderSafeComposition({
+      compositionPackage: compositionPackage({
+        businessFactLedger: {
+          ...compositionPackage().businessFactLedger,
+          facts: [{
+            ...compositionPackage().businessFactLedger.facts[0],
+            statement: '  The customer has a governed decision process.   ',
+          }],
+        },
+      }),
+      governanceConstraints,
+      methodGuidance,
+      providerDescriptor: descriptor,
+      safeRequest: safeRequest(),
+      styleGuidance: ['Use concise, neutral business language.'],
+    })
+
+    expect(result.businessFacts[0].statement).toBe('The customer has a governed decision process.')
+    expect(result.safetyManifest.requiredEvidenceRefs).toHaveLength(1)
+    expect(result.safetyManifest.requiredEvidenceRefs[0]).toMatch(/^ref_[a-f0-9]{16}$/)
+  })
+
+  test('rejects duplicate raw evidence identities instead of emitting duplicate redacted handles', () => {
+    const fact = compositionPackage().businessFactLedger.facts[0]
+    expect(() => buildOutcomeStudioProviderSafeComposition({
+      compositionPackage: compositionPackage({
+        businessFactLedger: {
+          facts: [
+            fact,
+            { ...fact, statement: 'A second statement with the same evidence identity.' },
+          ],
+          omitted: [],
+          contradictions: [],
+        },
+      }),
+      governanceConstraints,
+      methodGuidance,
+      providerDescriptor: descriptor,
+      safeRequest: safeRequest(),
+      styleGuidance: ['Use concise, neutral business language.'],
+    })).toThrow(expect.objectContaining({
+      code: 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED',
+    }))
+  })
+
+  test.each([null, false, 0])('rejects primitive generation-composition inputs: %p', (invalidComposition) => {
+    expect(() => buildOutcomeStudioGenerationContextConsumption({
+      compositionPackage: invalidComposition,
+      directBindings: [
+        { role: 'OUTPUT_TYPE', versionId: 'output-type', contentHash: contentHash('type') },
+        { role: 'OUTPUT_SCHEMA', versionId: 'output-schema', contentHash: contentHash('schema') },
+        { role: 'ARL', versionId: 'arl', contentHash: contentHash('arl') },
+      ],
+      methodGuidance,
+    })).toThrow(expect.objectContaining({
+      code: 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED',
+    }))
+  })
+
+  test('rejects empty method guidance before generation-context fingerprints are built', () => {
+    expect(() => buildOutcomeStudioGenerationContextConsumption({
+      compositionPackage: compositionPackage(),
+      directBindings: [
+        { role: 'OUTPUT_TYPE', versionId: 'output-type', contentHash: contentHash('type') },
+        { role: 'OUTPUT_SCHEMA', versionId: 'output-schema', contentHash: contentHash('schema') },
+        { role: 'ARL', versionId: 'arl', contentHash: contentHash('arl') },
+      ],
+      methodGuidance: [],
+    })).toThrow(expect.objectContaining({
+      code: 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED',
+    }))
+  })
+
+  test('preserves a bounded READY_WITH_GAPS draft state in provider-safe composition and manifest', () => {
+    const result = buildOutcomeStudioProviderSafeComposition({
+      compositionPackage: compositionPackage({
+        readiness: {
+          status: 'READY_WITH_GAPS',
+          draftOnly: true,
+          gapCount: 2,
+          notice: 'This draft uses current governed information with unresolved source or framework gaps. Keep unsupported claims qualified and do not treat this draft as final.',
+        },
+      }),
+      governanceConstraints,
+      methodGuidance,
+      providerDescriptor: descriptor,
+      safeRequest: safeRequest(),
+      styleGuidance: ['Use concise, neutral business language.'],
+    })
+
+    expect(result.readiness).toEqual(expect.objectContaining({
+      status: 'READY_WITH_GAPS',
+      draftOnly: true,
+      gapCount: 2,
+    }))
+    expect(result.safetyManifest).toEqual(expect.objectContaining({
+      readinessStatus: 'READY_WITH_GAPS',
+      readinessGapCount: 2,
+      draftOnly: true,
+    }))
+    expect(assertOutcomeStudioProviderSafeComposition(result)).toBe(result)
+  })
+
+  test('preserves the inferred output contract and method roles in the provider-safe manifest', () => {
+    const inferredOutputContract = {
+      contractVersion: 'outcome-studio.conversation-output-resolution.v1',
+      status: 'RESOLVED',
+      source: 'CONVERSATION_INFERENCE',
+      confidence: 'HIGH',
+      inferenceReason: 'Matched the available output phrase "Board Review" in the customer request.',
+      outputIntent: { key: 'BOARD_REVIEW', label: 'Board Review', version: '' },
+      audience: { key: 'EXECUTIVE', label: 'Executive', version: '' },
+      purpose: { key: 'DECISION_SUPPORT', label: 'Decision support', version: '' },
+      selectedOutputType: { key: 'BOARD_REVIEW', label: 'Board Review', version: '1.0.0' },
+      selectedOutputSchema: { key: 'BOARD_REVIEW_SCHEMA', label: 'Board Review Schema', version: '1.0.0' },
+      selectedStyle: { key: 'EXECUTIVE', label: 'Executive', version: '1.0.0' },
+      knowledgePackRoles: [
+        { role: 'OUTPUT_TYPE', classification: 'OUTPUT_TYPE', key: 'BOARD_REVIEW', label: 'Board Review', version: '1.0.0' },
+        { role: 'OUTPUT_SCHEMA', classification: 'OUTPUT_SCHEMA', key: 'BOARD_REVIEW_SCHEMA', label: 'Board Review Schema', version: '1.0.0' },
+        { role: 'STYLE', classification: 'STYLE', key: 'EXECUTIVE', label: 'Executive', version: '1.0.0' },
+        { role: 'ARL', classification: 'METHOD', key: 'adaptive-reasoning-layer', label: 'Adaptive Reasoning Layer', version: 'arl-v1' },
+        { role: 'RL', classification: 'METHOD', key: 'rendering-layer', label: 'Rendering Layer', version: 'rl-v1' },
+        { role: 'VMF', classification: 'FRAMEWORK', key: 'VMF', label: 'Value Management Framework', version: '2.3.1' },
+      ],
+      clarificationPath: { required: false, reason: '', question: '' },
+    }
+    const expandedMethodGuidance = [
+      ...methodGuidance,
+      {
+        role: 'RL',
+        boundary: 'POST_GENERATION_VALIDATION',
+        version: 'rl-v1',
+        guidance: 'Preserve the selected structure and validate the rendered output.',
+      },
+    ]
+    const result = buildOutcomeStudioProviderSafeComposition({
+      compositionPackage: compositionPackage({
+        outputContractResolution: inferredOutputContract,
+      }),
+      governanceConstraints,
+      methodGuidance: expandedMethodGuidance,
+      providerDescriptor: descriptor,
+      safeRequest: safeRequest(),
+      styleGuidance: ['Use concise, neutral business language.'],
+    })
+
+    expect(result.outputContract).toEqual(inferredOutputContract)
+    expect(result.outputContract.knowledgePackRoles).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: 'ARL', version: 'arl-v1' }),
+      expect.objectContaining({ role: 'RL', version: 'rl-v1' }),
+      expect.objectContaining({ role: 'VMF', version: '2.3.1' }),
+    ]))
+    expect(result.safetyManifest).not.toHaveProperty('outputContractResolution')
+    expect(assertOutcomeStudioProviderSafeComposition(result)).toBe(result)
+  })
+
+  test('blocks when the composition package is unsafe or the output selector does not match', () => {
+    expect(() => buildOutcomeStudioProviderSafeComposition({
+      compositionPackage: compositionPackage({
+        outputBinding: {
+          ...compositionPackage().outputBinding,
+          outputTypeKey: 'DIFFERENT_OUTPUT',
+        },
+      }),
+      governanceConstraints,
+      methodGuidance,
+      providerDescriptor: descriptor,
+      safeRequest: safeRequest(),
+      styleGuidance: ['Use concise, neutral business language.'],
+    })).toThrow()
+
+    expect(() => buildOutcomeStudioProviderSafeComposition({
+      compositionPackage: compositionPackage({
+        businessFactLedger: {
+          ...compositionPackage().businessFactLedger,
+          facts: [{
+            ...compositionPackage().businessFactLedger.facts[0],
+            statement: 'Use the secret=not-safe value.',
+          }],
+        },
+      }),
+      governanceConstraints,
+      methodGuidance,
+      providerDescriptor: descriptor,
+      safeRequest: safeRequest(),
+      styleGuidance: ['Use concise, neutral business language.'],
+    })).toThrow()
+  })
+
+  test('adds the composition block and manifest receipt only when the explicit seam is supplied', async () => {
+    const versionRows = [
+      ...Object.entries(directPackContents).map(([versionId, content]) => ({
+        versionId,
+        contentHash: contentHash(content),
+        content,
+      })),
+      { versionId: 'pack-1', contentHash: contentHash(governedContent), content: governedContent },
+    ]
+    const versions = mockVersions(versionRows)
+    const consumption = buildDirectConsumptionFixture()
+    const captureExecutionEvidence = jest.fn()
+    const context = await buildOutcomeStudioProviderSafeContext({
+      providerDescriptor: descriptor,
+      safeRequest: safeRequest(),
+      truthSource: { acceptedTruth: [{ label: 'Situation', content: 'The customer has a governed decision process.' }] },
+      knowledgeSelection: [
+        { versionId: 'kpv-direct-output-type', knowledgeLayer: 'OUTPUT_TYPE', executionMode: 'PROVIDER_CONTEXT', packType: 'OUTPUT_TYPE_DEFINITION' },
+        { versionId: 'kpv-direct-output-schema', knowledgeLayer: 'OUTPUT_SCHEMA', executionMode: 'PROVIDER_CONTEXT', packType: 'OUTPUT_SCHEMA' },
+        { versionId: 'kpv-direct-arl', knowledgeLayer: 'REASONING', executionMode: 'PROVIDER_CONTEXT', packType: 'ARL' },
+        { versionId: 'pack-1', knowledgeLayer: 'FOUNDATION', executionMode: 'PROVIDER_CONTEXT', packType: 'FOUNDATION' },
+      ],
+      executionBindings: versionRows.map(({ versionId, contentHash: hash }) => ({ versionId, contentHash: hash })),
+      compositionPackage: compositionPackage(),
+      methodGuidance,
+      governanceConstraints,
+      ...consumption,
+      captureExecutionEvidence,
+    })
+
+    expect(context.composition).toBeDefined()
+    expect(captureExecutionEvidence).toHaveBeenCalledWith(expect.objectContaining({
+      providerRequestManifest: context.composition,
+    }))
+    expect(assertOutcomeStudioProviderSafeContext(context)).toBe(context)
+    versions.lean.mockClear()
+  })
+
   test('builds the exact bounded ID-free safe request from one canonical input', () => {
     const result = safeRequest()
     expect(result).toEqual({

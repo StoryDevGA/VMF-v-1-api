@@ -294,6 +294,76 @@ describe('OpenAI Outcome Studio provider adapter', () => {
     expect(JSON.stringify(result)).not.toContain('test-secret-not-real')
   })
 
+  test('transports an explicit safe composition block without flattening or rewriting it', async () => {
+    const fetchImpl = jest.fn().mockResolvedValue(makeResponse())
+    const composition = {
+      contractVersion: 'outcome-studio.provider-request-manifest.v1',
+      businessRequest: providerContext.businessRequest,
+      businessFacts: [{
+        statement: 'The customer has a governed decision process.',
+        qualification: [],
+        claimPermission: 'SUPPORTED_FACT_ONLY',
+        currentness: 'CURRENT',
+        sectionKeys: ['situation'],
+        sourceAttribution: {
+          sourceType: 'GOVERNED_SOURCE',
+          sourceLabel: 'Accepted business source',
+        },
+      }],
+      outputStructure: {
+        outputTypeKey: 'EXECUTIVE_BRIEF',
+        outputTypeVersion: '1.0.0',
+        outputTypeStructure: ['Executive context', 'Findings', 'Implications', 'Decisions', 'Actions'],
+        outputSchemaKey: 'EXECUTIVE_BRIEF_SCHEMA',
+        outputSchemaVersion: '1.0.0',
+        styleKey: 'EXECUTIVE',
+        styleVersion: '1.0.0',
+        requiredSections: ['Executive summary'],
+        optionalSections: [],
+      },
+      styleGuidance: ['Use concise business language.'],
+      methodGuidance: [{ role: 'ARL', boundary: 'GENERATION_CONTEXT', version: 'arl-v1', guidance: 'Stay tied to supplied information.' }],
+      governanceConstraints: ['Do not invent unsupported claims.'],
+      readiness: {
+        status: 'READY',
+        draftOnly: false,
+        gapCount: 0,
+        notice: '',
+      },
+      safetyManifest: {
+        manifestVersion: 'outcome-studio.provider-request-manifest.v1',
+        providerKey: 'openai',
+        model: 'approved-test-model',
+        providerMode: 'LIVE_TEST',
+        environment: 'TEST',
+        contentSafetyStatus: 'PASSED',
+        secretAndPiiCheck: 'PASSED',
+        rawEvidenceCheck: 'PASSED',
+        internalTermCheck: 'PASSED',
+        requiredEvidenceRefs: ['ref_0123456789abcdef'],
+        businessFactCount: 1,
+        omittedReferenceCount: 0,
+        contradictionCount: 0,
+        requiredSectionCount: 1,
+        styleGuidanceCount: 1,
+        methodGuidanceCount: 1,
+        governanceConstraintCount: 1,
+        readinessStatus: 'READY',
+        readinessGapCount: 0,
+        draftOnly: false,
+      },
+    }
+    const adapter = makeAdapter({ fetchImpl })
+    await adapter({ providerContext: { ...providerContext, composition } })
+
+    const [, request] = fetchImpl.mock.calls[0]
+    const body = JSON.parse(request.body)
+    const providerInput = JSON.parse(body.input)
+    expect(providerInput.composition).toEqual(composition)
+    expect(providerInput.composition).not.toHaveProperty('evidenceObjectId')
+    expect(providerInput.composition).not.toHaveProperty('sourceId')
+  })
+
   test.each([
     ['incomplete response', makeProviderBody({ status: 'incomplete' }), 'LIVE_TEST_PROVIDER_RESPONSE_INCOMPLETE'],
     ['missing output', makeProviderBody({ output: [] }), 'LIVE_TEST_PROVIDER_OUTPUT_MISSING'],

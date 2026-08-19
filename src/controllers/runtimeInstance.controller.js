@@ -98,6 +98,7 @@ const OUTCOME_CUSTOMER_ERROR_CODES = new Set([
   'DRAFTING_SERVICE_UNAVAILABLE',
   'FORBIDDEN',
   'NOT_FOUND',
+  'OUTCOME_OUTPUT_CONTRACT_CLARIFICATION_REQUIRED',
   'VALIDATION_ERROR',
   'VALIDATION_FAILED',
 ])
@@ -1104,6 +1105,7 @@ export const generateRuntimeOutcomeResponse = async (req, res, next) => {
     const outcomeResponse = await generateRuntimeOutcomeResponseRecord({
       actorUserId: req.context?.userId || req.userId,
       auditRequest: req,
+      allowReadyWithGaps: req.body?.allowReadyWithGaps,
       executionMode: req.app.locals.outcomeStudioReasoningDeps?.executionMode,
       providerAdapter: req.app.locals.outcomeStudioReasoningDeps?.providerAdapter,
       providerDescriptor: req.app.locals.outcomeStudioReasoningDeps?.providerDescriptor,

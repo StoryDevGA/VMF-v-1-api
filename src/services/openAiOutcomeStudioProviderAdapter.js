@@ -167,13 +167,17 @@ const parseStructuredOutput = (responseBody) => {
   return { ...result.data, markdown }
 }
 
-const buildProviderInput = (providerContext) => ({
-  request: providerContext.businessRequest,
-  currentDraft: providerContext.draftContext,
-  verifiedBusinessInformation: providerContext.truthSummaries,
-  businessGuidance: providerContext.guidance,
-  safeguards: providerContext.safeguards,
-})
+const buildProviderInput = (providerContext) => {
+  const input = {
+    request: providerContext.businessRequest,
+    currentDraft: providerContext.draftContext,
+    verifiedBusinessInformation: providerContext.truthSummaries,
+    businessGuidance: providerContext.guidance,
+    safeguards: providerContext.safeguards,
+  }
+  if (providerContext.composition) input.composition = providerContext.composition
+  return input
+}
 
 const buildRequestBody = ({ maxOutputTokens, model, providerContext }) => ({
   model,

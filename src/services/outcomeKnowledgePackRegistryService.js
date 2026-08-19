@@ -7,6 +7,7 @@ import {
   KnowledgePackVersion,
 } from '../models/index.js'
 import { buildKnowledgePackId } from '../models/KnowledgePack.js'
+import { buildKnowledgePackManifestId } from '../models/KnowledgePackManifest.js'
 import { buildKnowledgePackVersionId } from '../models/KnowledgePackVersion.js'
 import {
   buildKnowledgePackActivationId,
@@ -25,6 +26,7 @@ import {
   OUTCOME_STUDIO_REQUIRED_PACKS,
 } from '../constants/runtimeOutcomeStudio.js'
 import {
+  DEFAULT_OUTCOME_STUDIO_MANIFEST,
   KNOWLEDGE_PACK_AUTHORING_MODES,
   KNOWLEDGE_PACK_EXECUTION_MODES,
   KNOWLEDGE_PACK_PURPOSE_CATEGORIES,
@@ -246,6 +248,16 @@ const OUTCOME_STUDIO_REGISTRY_POLICY = Object.freeze({
   sourceType: 'KNOWLEDGE_PACK_REGISTRY',
   policyKey: 'outcome-studio-v1-required-packs',
   policyVersion: '1.0.0',
+})
+const OUTCOME_STUDIO_COMPATIBILITY_MANIFEST = Object.freeze({
+  ...OUTCOME_STUDIO_REGISTRY_POLICY,
+  manifestId: buildKnowledgePackManifestId({
+    manifestKey: DEFAULT_OUTCOME_STUDIO_MANIFEST.manifestKey,
+    semanticVersion: DEFAULT_OUTCOME_STUDIO_MANIFEST.semanticVersion,
+    scopeKey: OUTCOME_KNOWLEDGE_PACK_SCOPE_TYPES.GLOBAL,
+  }),
+  manifestKey: DEFAULT_OUTCOME_STUDIO_MANIFEST.manifestKey,
+  manifestVersion: DEFAULT_OUTCOME_STUDIO_MANIFEST.semanticVersion,
 })
 const REQUEST_RESOLUTION_VERSION_STATUSES = new Set([
   OUTCOME_KNOWLEDGE_PACK_STATUSES.ACTIVE,
@@ -873,6 +885,8 @@ export const loadOutcomeKnowledgePackVersionContent = async ({
       packId: normalizeText(plain.packId),
       versionId: normalizeText(plain.versionId),
       packKey: normalizeLowerKey(plain.packKey),
+      semanticVersion: normalizeText(plain.semanticVersion),
+      status: normalizeToken(plain.status),
       contentHash: normalizeText(plain.contentHash),
       contentFormat: normalizeToken(plain.contentFormat),
     }
@@ -883,6 +897,8 @@ export const loadOutcomeKnowledgePackVersionContent = async ({
     packId: normalizeText(plain.packId),
     versionId: normalizeText(plain.versionId),
     packKey: normalizeLowerKey(plain.packKey),
+    semanticVersion: normalizeText(plain.semanticVersion),
+    status: normalizeToken(plain.status),
     contentHash: normalizeText(plain.contentHash),
     contentFormat: normalizeToken(plain.contentFormat),
     content: plain.content,
@@ -1725,7 +1741,18 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
       ...requestResolution.systemOnlyPacks,
     ])
     const selectedActivationIds = new Set(selectedPacks.map((pack) => normalizeText(pack.activationId)))
-    const providerContextPacks = requestResolution.providerContextPacks.filter(
+    const selectedOutputSchemas = Array.isArray(requestResolution.selectedByLayer?.OUTPUT_SCHEMA)
+      ? requestResolution.selectedByLayer.OUTPUT_SCHEMA
+      : []
+    const exactSchemaSupersedesGeneric = selectedOutputSchemas.some(
+      (pack) => normalizeLowerKey(pack?.packKey) !== 'output-schemas-pack',
+    )
+    const executionProviderContextPacks = requestResolution.providerContextPacks.filter(
+      (pack) => !(exactSchemaSupersedesGeneric
+        && normalizeToken(pack?.packType) === 'OUTPUT_SCHEMA'
+        && normalizeLowerKey(pack?.packKey) === 'output-schemas-pack'),
+    )
+    const providerContextPacks = executionProviderContextPacks.filter(
       (pack) => !OUTCOME_STUDIO_REQUIRED_PACKS
         .some((requiredPack) => buildRequiredPackKey(requiredPack) === buildRequiredPackKey(pack)),
     )
@@ -1751,7 +1778,7 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
       mandatorySafeguards: requestResolution.mandatorySafeguards,
       optionalPacks: providerContextPacks,
       validationPacks,
-      providerContextPacks: requestResolution.providerContextPacks,
+      providerContextPacks: executionProviderContextPacks,
       preValidationPacks: requestResolution.preValidationPacks,
       postValidationPacks: requestResolution.postValidationPacks,
       lineageCertificationPacks: requestResolution.lineageCertificationPacks,
@@ -1772,6 +1799,7 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
       lineage: requestResolution.lineage,
       resolution: {
         ...requestResolution,
+        providerContextPacks: executionProviderContextPacks,
         scopeCandidates,
         activeCount: requestResolution.mandatorySafeguards
           .filter((pack) => pack.runtimeBindable === true).length,
@@ -1857,11 +1885,14 @@ export const resolveOutcomeStudioKnowledgePackBinding = async ({ query = {} } = 
 
   return {
     manifest: {
-      ...OUTCOME_STUDIO_REGISTRY_POLICY,
+      ...OUTCOME_STUDIO_COMPATIBILITY_MANIFEST,
       status: binding.status,
     },
     binding: {
       ...binding,
+      manifestId: OUTCOME_STUDIO_COMPATIBILITY_MANIFEST.manifestId,
+      manifestKey: OUTCOME_STUDIO_COMPATIBILITY_MANIFEST.manifestKey,
+      manifestVersion: OUTCOME_STUDIO_COMPATIBILITY_MANIFEST.manifestVersion,
       resolutionSource: OUTCOME_STUDIO_REGISTRY_POLICY.sourceType,
       policyKey: OUTCOME_STUDIO_REGISTRY_POLICY.policyKey,
       policyVersion: OUTCOME_STUDIO_REGISTRY_POLICY.policyVersion,

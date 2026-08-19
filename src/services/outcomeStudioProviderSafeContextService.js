@@ -1,4 +1,6 @@
 import KnowledgePackVersion from '../models/KnowledgePackVersion.js'
+import { createHash } from 'node:crypto'
+
 import {
   KNOWLEDGE_PACK_BOUNDARIES,
   KNOWLEDGE_PACK_EXECUTION_MODES,
@@ -9,6 +11,10 @@ import {
 } from '../constants/knowledgeRuntime.js'
 import { OUTCOME_STUDIO_PROVIDER_SAFE_CONTEXT_POLICY } from '../constants/outcomeStudioReadiness.js'
 import logger from '../config/logger.js'
+import {
+  OUTCOME_STUDIO_CONVERSATION_OUTPUT_RESOLUTION_VERSION,
+  assertOutcomeStudioOutputContractResolution,
+} from './outcomeStudioOutputContractResolutionService.js'
 
 const SAFE_CONTEXT_LIMIT = 18000
 const MAX_SELECTED_VERSIONS = 48
@@ -38,6 +44,80 @@ const TRUTH_SOURCE_KEYS = Object.freeze(['acceptedTruth'])
 const TRUTH_ITEM_KEYS = Object.freeze(['label', 'content'])
 const KNOWLEDGE_SELECTION_KEYS = Object.freeze(['versionId', 'knowledgeLayer', 'executionMode'])
 const EXECUTION_BINDING_KEYS = Object.freeze(['versionId', 'contentHash'])
+export const OUTCOME_STUDIO_PROVIDER_SAFE_COMPOSITION_CONTRACT = 'outcome-studio.provider-request-manifest.v1'
+const COMPOSITION_PACKAGE_CONTRACT = 'outcome-studio.evidence-to-composition.v1'
+const COMPOSITION_KEYS = Object.freeze([
+  'contractVersion',
+  'businessRequest',
+  'businessFacts',
+  'outputContract',
+  'outputStructure',
+  'styleGuidance',
+  'methodGuidance',
+  'governanceConstraints',
+  'readiness',
+  'safetyManifest',
+])
+const COMPOSITION_READINESS_KEYS = Object.freeze(['status', 'draftOnly', 'gapCount', 'notice'])
+const COMPOSITION_FACT_KEYS = Object.freeze([
+  'statement',
+  'qualification',
+  'claimPermission',
+  'currentness',
+  'sectionKeys',
+  'sourceAttribution',
+])
+const COMPOSITION_SOURCE_ATTRIBUTION_KEYS = Object.freeze(['sourceType', 'sourceLabel'])
+const COMPOSITION_OUTPUT_KEYS = Object.freeze([
+  'outputTypeKey',
+  'outputTypeVersion',
+  'outputTypeStructure',
+  'outputSchemaKey',
+  'outputSchemaVersion',
+  'styleKey',
+  'styleVersion',
+  'requiredSections',
+  'optionalSections',
+])
+const COMPOSITION_METHOD_KEYS = Object.freeze(['role', 'boundary', 'version', 'guidance'])
+const COMPOSITION_SAFETY_KEYS = Object.freeze([
+  'manifestVersion',
+  'providerKey',
+  'model',
+  'providerMode',
+  'environment',
+  'contentSafetyStatus',
+  'secretAndPiiCheck',
+  'rawEvidenceCheck',
+  'internalTermCheck',
+  'requiredEvidenceRefs',
+  'businessFactCount',
+  'omittedReferenceCount',
+  'contradictionCount',
+  'requiredSectionCount',
+  'styleGuidanceCount',
+  'methodGuidanceCount',
+  'governanceConstraintCount',
+  'readinessStatus',
+  'readinessGapCount',
+  'draftOnly',
+])
+const COMPOSITION_SAFE_CHECK_STATUS = 'PASSED'
+const GENERATION_CONTEXT_CONSUMPTION_KEYS = Object.freeze([
+  'versionId',
+  'contentHash',
+  'boundary',
+  'role',
+  'contributions',
+])
+const GENERATION_CONTEXT_CONTRIBUTION_KEYS = Object.freeze(['surface', 'itemFingerprints'])
+const GENERATION_CONTEXT_ROLE_SURFACES = Object.freeze({
+  ARL: 'METHOD_GUIDANCE',
+  OUTPUT_SCHEMA: 'REQUIRED_SECTIONS',
+  OUTPUT_TYPE: 'OUTPUT_STRUCTURE',
+})
+const GENERATION_CONTEXT_ROLES = Object.freeze(Object.keys(GENERATION_CONTEXT_ROLE_SURFACES).sort())
+const ITEM_FINGERPRINT_PATTERN = /^sha256:[a-f0-9]{64}$/
 
 export const OUTCOME_STUDIO_EXECUTION_EVIDENCE_CONTRACT = 'outcome-studio.component-execution-evidence.v2'
 export const OUTCOME_STUDIO_EXECUTION_EVIDENCE_STATUSES = Object.freeze({
@@ -124,6 +204,7 @@ const SAFE_CONTEXT_DIAGNOSTIC_REASONS = Object.freeze({
   SELECTED_VERSION_LOOKUP: 'SELECTED_VERSION_LOOKUP_FAILED',
   GUIDANCE_PROJECTION: 'GUIDANCE_PROJECTION_REJECTED',
   REQUIRED_GUIDANCE_ADMISSION: 'REQUIRED_GUIDANCE_MISSING',
+  DIRECT_CONSUMPTION_VALIDATION: 'DIRECT_CONSUMPTION_VALIDATION_REJECTED',
   CONTEXT_VALIDATION: 'CONTEXT_VALIDATION_REJECTED',
 })
 const GUIDANCE_PROJECTION_REASONS = new Set([
@@ -237,6 +318,7 @@ const hasExactKeys = (value, keys) => isPlainObject(value)
   && Object.keys(value).length === keys.length
   && keys.every((key) => Object.prototype.hasOwnProperty.call(value, key))
 const normalizedWhitespace = (value) => value.replace(/\s+/g, ' ').trim()
+const normalizedIdentity = (value) => normalizedWhitespace(value.normalize('NFKC'))
 const normalizedDraft = (value) => value.replace(/\r\n?/g, '\n').trim()
 
 const hasMalformedUtf16 = (value) => {
@@ -431,6 +513,677 @@ export const assertOutcomeStudioProviderSafeRequest = (safeRequest) => {
   Object.values(safeRequest.businessRequest).forEach(assertSafeRawString)
   assertSafeRawString(safeRequest.draftContext.content)
   return safeRequest
+}
+
+const buildRedactedEvidenceHandle = (fact = {}) => {
+  if (!isPlainObject(fact)
+    || typeof fact.evidenceObjectId !== 'string'
+    || !normalizedIdentity(fact.evidenceObjectId)
+    || typeof fact.sourceId !== 'string'
+    || !normalizedIdentity(fact.sourceId)
+    || !isPlainObject(fact.provenance)
+    || typeof fact.provenance.lineageRef !== 'string'
+    || !normalizedIdentity(fact.provenance.lineageRef)) fail()
+  return `ref_${createHash('sha256')
+    .update(JSON.stringify({
+      evidenceObjectId: normalizedIdentity(fact.evidenceObjectId),
+      sourceId: normalizedIdentity(fact.sourceId),
+      lineageRef: normalizedIdentity(fact.provenance.lineageRef),
+    }), 'utf8')
+    .digest('hex')
+    .slice(0, 16)}`
+}
+
+const assertSafeBoundedArray = (values, { maxLength, itemMaximum = 600 } = {}) => {
+  if (!Array.isArray(values) || values.length > maxLength) fail()
+  values.forEach((value) => {
+    if (typeof value !== 'string' || !value.trim() || value.length > itemMaximum) fail()
+    assertSafeRawString(value)
+  })
+  return values
+}
+
+const buildSafeCompositionFact = (fact = {}) => {
+  if (!isPlainObject(fact)
+    || !hasExactKeys(fact, [
+      'evidenceObjectId',
+      'sourceId',
+      'sectionKeys',
+      'statement',
+      'extractedFact',
+      'reviewStatus',
+      'validationStatus',
+      'confidence',
+      'materiality',
+      'currentness',
+      'provenance',
+      'claimPermission',
+      'qualification',
+      'selectionReason',
+      'factId',
+    ])
+    || !isPlainObject(fact.provenance)
+    || !hasExactKeys(fact.provenance, ['lineageRef', 'sourceRegistryRef'])
+    || typeof fact.evidenceObjectId !== 'string'
+    || !fact.evidenceObjectId.trim()
+    || typeof fact.sourceId !== 'string'
+    || !fact.sourceId.trim()
+    || typeof fact.factId !== 'string'
+    || !fact.factId.trim()
+    || typeof fact.statement !== 'string'
+    || !fact.statement.trim()
+    || typeof fact.currentness !== 'string'
+    || !fact.currentness.trim()
+    || typeof fact.claimPermission !== 'string'
+    || !fact.claimPermission.trim()
+    || !Array.isArray(fact.sectionKeys)
+    || fact.sectionKeys.length === 0
+    || fact.sectionKeys.length > 24
+    || fact.sectionKeys.some((key) => !safeToken(key))
+    || !Array.isArray(fact.qualification)
+    || fact.qualification.length > 8
+    || fact.qualification.some((item) => typeof item !== 'string' || item.length > 240)
+    || typeof fact.provenance.lineageRef !== 'string'
+    || !fact.provenance.lineageRef.trim()
+    || typeof fact.provenance.sourceRegistryRef !== 'string'
+    || !fact.provenance.sourceRegistryRef.trim()) fail()
+
+  const statement = boundText(fact.statement, 1200, 80)
+  const qualification = fact.qualification.map((item) => boundText(item, 240, 1)).filter(Boolean)
+  if (!statement) fail()
+  assertSafeRawString(statement)
+  assertSafeBoundedArray(qualification, { maxLength: 8, itemMaximum: 240 })
+  assertSafeRawString(fact.currentness)
+  assertSafeRawString(fact.claimPermission)
+  fact.sectionKeys.forEach((key) => assertSafeRawString(key))
+
+  return {
+    statement,
+    qualification,
+    claimPermission: normalizedWhitespace(fact.claimPermission),
+    currentness: normalizedWhitespace(fact.currentness),
+    sectionKeys: [...new Set(fact.sectionKeys.map(normalizedWhitespace))].sort(),
+    sourceAttribution: {
+      sourceType: 'GOVERNED_SOURCE',
+      sourceLabel: 'Accepted business source',
+    },
+  }
+}
+
+const buildSafeCompositionOutput = (outputBinding = {}) => {
+  if (!isPlainObject(outputBinding)
+    || !safeToken(outputBinding.outputTypeKey)
+    || !safeToken(outputBinding.outputTypeVersion)
+    || !safeToken(outputBinding.outputTypeStructure?.[0])
+    || !safeToken(outputBinding.outputSchemaKey)
+    || !safeToken(outputBinding.outputSchemaVersion)
+    || !safeToken(outputBinding.styleKey)
+    || !safeToken(outputBinding.styleVersion)
+    || !Array.isArray(outputBinding.outputTypeStructure)
+    || outputBinding.outputTypeStructure.length !== 5
+    || !Array.isArray(outputBinding.requiredSections)
+    || outputBinding.requiredSections.length === 0
+    || outputBinding.requiredSections.length > 24
+    || new Set(outputBinding.requiredSections.map(normalizedWhitespace)).size !== outputBinding.requiredSections.length) fail()
+
+  const projectSafeStructureText = (value) => normalizedWhitespace(value)
+    .replace(/knowledge\s+packs?/gi, 'governed guidance')
+    .replace(/certified\s+(?:runtime\s+)?truth/gi, 'verified business information')
+    .replace(/activation/gi, 'selection')
+    .replace(/manifest/gi, 'safety checklist')
+  const outputTypeStructure = outputBinding.outputTypeStructure
+    .map((item) => boundText(projectSafeStructureText(item), 240, 1))
+  const requiredSections = outputBinding.requiredSections.map((item) => boundText(item, 160, 1))
+  const optionalSections = Array.isArray(outputBinding.optionalSections)
+    ? outputBinding.optionalSections.map((item) => boundText(item, 160, 1)).filter(Boolean)
+    : []
+  assertSafeBoundedArray(outputTypeStructure, { maxLength: 5, itemMaximum: 240 })
+  assertSafeBoundedArray(requiredSections, { maxLength: 24, itemMaximum: 160 })
+  assertSafeBoundedArray(optionalSections, { maxLength: 12, itemMaximum: 160 })
+  return {
+    outputTypeKey: normalizedWhitespace(outputBinding.outputTypeKey),
+    outputTypeVersion: normalizedWhitespace(outputBinding.outputTypeVersion),
+    outputTypeStructure,
+    outputSchemaKey: normalizedWhitespace(outputBinding.outputSchemaKey),
+    outputSchemaVersion: normalizedWhitespace(outputBinding.outputSchemaVersion),
+    styleKey: normalizedWhitespace(outputBinding.styleKey),
+    styleVersion: normalizedWhitespace(outputBinding.styleVersion),
+    requiredSections,
+    optionalSections,
+  }
+}
+
+const buildSafeMethodGuidance = (methodGuidance = []) => {
+  if (!Array.isArray(methodGuidance) || methodGuidance.length === 0 || methodGuidance.length > 12) fail()
+  const roles = new Set()
+  return methodGuidance.map((entry) => {
+    if (!isPlainObject(entry) || !hasExactKeys(entry, COMPOSITION_METHOD_KEYS)
+      || !safeToken(entry.role)
+      || !safeToken(entry.boundary)
+      || !safeToken(entry.version)
+      || typeof entry.guidance !== 'string'
+      || !entry.guidance.trim()
+      || roles.has(normalizedWhitespace(entry.role).toUpperCase())) fail()
+    roles.add(normalizedWhitespace(entry.role).toUpperCase())
+    const safeEntry = {
+      role: normalizedWhitespace(entry.role),
+      boundary: normalizedWhitespace(entry.boundary),
+      version: normalizedWhitespace(entry.version),
+      guidance: boundText(entry.guidance, 600, 80),
+    }
+    Object.values(safeEntry).forEach(assertSafeRawString)
+    return safeEntry
+  })
+}
+
+const normalizeConsumptionItem = (value) => String(value ?? '')
+  .normalize('NFKC')
+  .trim()
+  .replace(/\s+/g, ' ')
+
+const fingerprintConsumptionItem = (value, collisionMap) => {
+  const normalized = normalizeConsumptionItem(value)
+  if (!normalized) fail()
+  const fingerprint = `sha256:${createHash('sha256').update(normalized, 'utf8').digest('hex')}`
+  const previous = collisionMap.get(fingerprint)
+  if (previous !== undefined && previous !== normalized) fail()
+  collisionMap.set(fingerprint, normalized)
+  return fingerprint
+}
+
+const canonicalizeGenerationContextConsumption = (entries) => {
+  if (!Array.isArray(entries) || entries.length !== GENERATION_CONTEXT_ROLES.length) fail()
+  const identities = new Set()
+  const roles = new Set()
+  const canonical = entries.map((entry) => {
+    if (!isPlainObject(entry)
+      || !hasExactKeys(entry, GENERATION_CONTEXT_CONSUMPTION_KEYS)
+      || !safeToken(entry.versionId)
+      || !ITEM_FINGERPRINT_PATTERN.test(entry.contentHash)
+      || entry.boundary !== KNOWLEDGE_PACK_BOUNDARIES.GENERATION_CONTEXT
+      || !GENERATION_CONTEXT_ROLES.includes(entry.role)
+      || roles.has(entry.role)
+      || !Array.isArray(entry.contributions)
+      || entry.contributions.length !== 1) fail()
+    const identity = `${entry.role}:${entry.versionId}`
+    if (identities.has(identity)) fail()
+    identities.add(identity)
+    roles.add(entry.role)
+    const contribution = entry.contributions[0]
+    const expectedSurface = GENERATION_CONTEXT_ROLE_SURFACES[entry.role]
+    if (!isPlainObject(contribution)
+      || !hasExactKeys(contribution, GENERATION_CONTEXT_CONTRIBUTION_KEYS)
+      || contribution.surface !== expectedSurface
+      || !Array.isArray(contribution.itemFingerprints)
+      || contribution.itemFingerprints.length === 0
+      || contribution.itemFingerprints.some((value) => !ITEM_FINGERPRINT_PATTERN.test(value))) fail()
+    const itemFingerprints = [...new Set(contribution.itemFingerprints)].sort()
+    if (itemFingerprints.length !== contribution.itemFingerprints.length) fail()
+    return {
+      versionId: entry.versionId,
+      contentHash: entry.contentHash,
+      boundary: entry.boundary,
+      role: entry.role,
+      contributions: [{ surface: expectedSurface, itemFingerprints }],
+    }
+  }).sort((left, right) => (
+    left.role.localeCompare(right.role)
+      || left.versionId.localeCompare(right.versionId)
+      || left.contentHash.localeCompare(right.contentHash)
+      || left.contributions[0].surface.localeCompare(right.contributions[0].surface)
+      || JSON.stringify(left.contributions[0].itemFingerprints)
+        .localeCompare(JSON.stringify(right.contributions[0].itemFingerprints))
+  ))
+  if (roles.size !== GENERATION_CONTEXT_ROLES.length
+    || GENERATION_CONTEXT_ROLES.some((role) => !roles.has(role))) fail()
+  return canonical
+}
+
+const fingerprintGenerationContextConsumption = (consumption) => (
+  `sha256:${createHash('sha256').update(JSON.stringify(consumption), 'utf8').digest('hex')}`
+)
+
+const buildDirectConsumptionBindings = ({
+  executionBindings,
+  generationContextConsumption,
+  knowledgeSelection,
+} = {}) => {
+  if (!Array.isArray(knowledgeSelection)
+    || !Array.isArray(executionBindings)
+    || !Array.isArray(generationContextConsumption)) fail()
+  const bindingByVersionId = new Map(executionBindings.map((binding) => [binding.versionId, binding]))
+  const selectionByVersionId = new Map(knowledgeSelection.map((selection) => [selection.versionId, selection]))
+  const roleForSelection = (selection) => {
+    const layer = normalizedWhitespace(selection.knowledgeLayer).toUpperCase()
+    const packType = normalizedWhitespace(selection.packType).toUpperCase()
+    if (layer === 'OUTPUT_TYPE' && packType === 'OUTPUT_TYPE_DEFINITION') return 'OUTPUT_TYPE'
+    if (layer === 'OUTPUT_SCHEMA' && packType === 'OUTPUT_SCHEMA') return 'OUTPUT_SCHEMA'
+    if (layer === 'REASONING' && packType === 'ARL') return 'ARL'
+    return ''
+  }
+  const directBindings = generationContextConsumption.map((consumption) => {
+    const selection = selectionByVersionId.get(consumption.versionId)
+    const role = selection ? roleForSelection(selection) : ''
+    const binding = bindingByVersionId.get(consumption.versionId)
+    if (!selection || !role || role !== consumption.role || !binding
+      || binding.contentHash !== consumption.contentHash) fail()
+    return {
+      role,
+      versionId: selection.versionId,
+      contentHash: binding.contentHash,
+    }
+  })
+  if (directBindings.length !== GENERATION_CONTEXT_ROLES.length
+    || new Set(directBindings.map((binding) => binding.role)).size !== GENERATION_CONTEXT_ROLES.length) fail()
+  return directBindings
+}
+
+const buildConsumptionFromProviderSurfaces = ({ directBindings, methodGuidance, outputStructure }) => {
+  if (!Array.isArray(directBindings) || directBindings.length !== GENERATION_CONTEXT_ROLES.length) fail()
+  const collisionMap = new Map()
+  const surfaceItems = {
+    ARL: methodGuidance
+      .filter((entry) => normalizedWhitespace(entry?.role).toUpperCase() === 'ARL')
+      .map((entry) => entry.guidance),
+    OUTPUT_SCHEMA: outputStructure.requiredSections,
+    OUTPUT_TYPE: outputStructure.outputTypeStructure,
+  }
+  const entries = directBindings.map((binding) => {
+    if (!GENERATION_CONTEXT_ROLES.includes(binding.role)
+      || !safeToken(binding.versionId)
+      || !ITEM_FINGERPRINT_PATTERN.test(binding.contentHash)) fail()
+    const itemFingerprints = [...new Set(
+      (surfaceItems[binding.role] || []).map((item) => fingerprintConsumptionItem(item, collisionMap)),
+    )].sort()
+    if (itemFingerprints.length === 0) fail()
+    return {
+      versionId: binding.versionId,
+      contentHash: binding.contentHash,
+      boundary: KNOWLEDGE_PACK_BOUNDARIES.GENERATION_CONTEXT,
+      role: binding.role,
+      contributions: [{
+        surface: GENERATION_CONTEXT_ROLE_SURFACES[binding.role],
+        itemFingerprints,
+      }],
+    }
+  })
+  const consumption = canonicalizeGenerationContextConsumption(entries)
+  return {
+    generationContextConsumption: consumption,
+    generationContextConsumptionFingerprint: fingerprintGenerationContextConsumption(consumption),
+  }
+}
+
+export const buildOutcomeStudioGenerationContextConsumption = ({
+  compositionPackage,
+  directBindings,
+  methodGuidance,
+} = {}) => {
+  if (!isPlainObject(compositionPackage)) fail()
+  return buildConsumptionFromProviderSurfaces({
+    directBindings,
+    methodGuidance: buildSafeMethodGuidance(methodGuidance),
+    outputStructure: buildSafeCompositionOutput(compositionPackage.outputBinding),
+  })
+}
+
+export const assertOutcomeStudioGenerationContextConsumption = ({
+  compositionPackage,
+  executionBindings,
+  generationContextConsumption,
+  generationContextConsumptionFingerprint,
+  knowledgeSelection,
+  methodGuidance,
+  providerComposition,
+} = {}) => {
+  if (compositionPackage !== undefined && !isPlainObject(compositionPackage)) fail()
+  if (providerComposition !== undefined && !isPlainObject(providerComposition)) fail()
+  const canonical = canonicalizeGenerationContextConsumption(generationContextConsumption)
+  if (JSON.stringify(canonical) !== JSON.stringify(generationContextConsumption)
+    || generationContextConsumptionFingerprint !== fingerprintGenerationContextConsumption(canonical)) fail()
+  const directBindings = buildDirectConsumptionBindings({
+    executionBindings,
+    generationContextConsumption,
+    knowledgeSelection,
+  })
+  const expected = providerComposition !== undefined
+    ? buildConsumptionFromProviderSurfaces({
+        directBindings,
+        methodGuidance: buildSafeMethodGuidance(providerComposition.methodGuidance),
+        outputStructure: buildSafeCompositionOutput(providerComposition.outputStructure),
+      })
+    : buildOutcomeStudioGenerationContextConsumption({
+        compositionPackage,
+        directBindings,
+        methodGuidance,
+      })
+  if (expected.generationContextConsumptionFingerprint !== generationContextConsumptionFingerprint
+    || JSON.stringify(expected.generationContextConsumption) !== JSON.stringify(canonical)) fail()
+  return expected
+}
+
+const comparableOutputContractKey = (value) => normalizedIdentity(value)
+  .toLowerCase()
+  .replace(/[-_]+/g, '')
+
+const safeOutputContractDescriptor = (key, label, version = '') => ({
+  key: normalizedWhitespace(key),
+  label: normalizedWhitespace(label || key),
+  version: normalizedWhitespace(version),
+})
+
+const buildLegacyOutputContractResolution = ({ methodGuidance, outputStructure }) => ({
+  contractVersion: OUTCOME_STUDIO_CONVERSATION_OUTPUT_RESOLUTION_VERSION,
+  status: 'RESOLVED',
+  source: 'LEGACY_BOUND_SESSION',
+  confidence: 'HIGH',
+  inferenceReason: 'LEGACY_PROVIDER_MANIFEST_PROJECTION',
+  outputIntent: safeOutputContractDescriptor(
+    outputStructure.outputTypeKey,
+    outputStructure.outputTypeKey,
+    outputStructure.outputTypeVersion,
+  ),
+  audience: null,
+  purpose: null,
+  selectedOutputType: safeOutputContractDescriptor(
+    outputStructure.outputTypeKey,
+    outputStructure.outputTypeKey,
+    outputStructure.outputTypeVersion,
+  ),
+  selectedOutputSchema: safeOutputContractDescriptor(
+    outputStructure.outputSchemaKey,
+    outputStructure.outputSchemaKey,
+    outputStructure.outputSchemaVersion,
+  ),
+  selectedStyle: safeOutputContractDescriptor(
+    outputStructure.styleKey,
+    outputStructure.styleKey,
+    outputStructure.styleVersion,
+  ),
+  knowledgePackRoles: [
+    {
+      role: 'OUTPUT_TYPE',
+      classification: 'OUTPUT_TYPE',
+      ...safeOutputContractDescriptor(
+        outputStructure.outputTypeKey,
+        outputStructure.outputTypeKey,
+        outputStructure.outputTypeVersion,
+      ),
+    },
+    {
+      role: 'OUTPUT_SCHEMA',
+      classification: 'OUTPUT_SCHEMA',
+      ...safeOutputContractDescriptor(
+        outputStructure.outputSchemaKey,
+        outputStructure.outputSchemaKey,
+        outputStructure.outputSchemaVersion,
+      ),
+    },
+    {
+      role: 'STYLE',
+      classification: 'STYLE',
+      ...safeOutputContractDescriptor(
+        outputStructure.styleKey,
+        outputStructure.styleKey,
+        outputStructure.styleVersion,
+      ),
+    },
+    ...methodGuidance.map((entry) => ({
+      role: normalizedWhitespace(entry.role),
+      classification: 'METHOD',
+      key: normalizedWhitespace(entry.role).toLowerCase(),
+      label: normalizedWhitespace(entry.role),
+      version: normalizedWhitespace(entry.version),
+    })),
+  ],
+  clarificationPath: { required: false, reason: '', question: '' },
+})
+
+const buildSafeOutputContractResolution = ({
+  compositionPackage,
+  methodGuidance,
+  outputStructure,
+} = {}) => {
+  const supplied = compositionPackage.outputContractResolution
+    || buildLegacyOutputContractResolution({ methodGuidance, outputStructure })
+  const resolution = assertOutcomeStudioOutputContractResolution(supplied)
+  if (resolution.status !== 'RESOLVED'
+    || resolution.clarificationPath.required
+    || comparableOutputContractKey(resolution.selectedOutputType.key)
+      !== comparableOutputContractKey(outputStructure.outputTypeKey)
+    || comparableOutputContractKey(resolution.selectedOutputSchema.key)
+      !== comparableOutputContractKey(outputStructure.outputSchemaKey)
+    || comparableOutputContractKey(resolution.selectedStyle.key)
+      !== comparableOutputContractKey(outputStructure.styleKey)
+    || normalizedWhitespace(resolution.selectedOutputType.version) !== outputStructure.outputTypeVersion
+    || normalizedWhitespace(resolution.selectedOutputSchema.version) !== outputStructure.outputSchemaVersion
+    || normalizedWhitespace(resolution.selectedStyle.version) !== outputStructure.styleVersion) fail()
+
+  const roles = new Map(resolution.knowledgePackRoles.map((entry) => [normalizedWhitespace(entry.role).toUpperCase(), entry]))
+  for (const requiredRole of ['OUTPUT_TYPE', 'OUTPUT_SCHEMA', 'STYLE']) {
+    if (!roles.has(requiredRole)) fail()
+  }
+  methodGuidance.forEach((entry) => {
+    const role = roles.get(normalizedWhitespace(entry.role).toUpperCase())
+    if (!role || normalizedWhitespace(role.version) !== normalizedWhitespace(entry.version)) fail()
+  })
+  const visitStrings = (value) => {
+    if (typeof value === 'string') {
+      assertSafeRawString(value)
+      return
+    }
+    if (Array.isArray(value)) {
+      value.forEach(visitStrings)
+      return
+    }
+    if (isPlainObject(value)) Object.values(value).forEach(visitStrings)
+  }
+  visitStrings(resolution)
+  return resolution
+}
+
+const buildSafeCompositionManifest = ({
+  businessFacts,
+  compositionPackage,
+  governanceConstraints,
+  methodGuidance,
+  outputStructure,
+  providerDescriptor,
+  readiness,
+  styleGuidance,
+} = {}) => {
+  const sourceFacts = compositionPackage?.businessFactLedger?.facts
+  if (!Array.isArray(sourceFacts) || sourceFacts.length !== businessFacts.length) fail()
+  const requiredEvidenceRefs = sourceFacts.map(buildRedactedEvidenceHandle)
+  if (new Set(requiredEvidenceRefs).size !== requiredEvidenceRefs.length) fail()
+  return {
+    manifestVersion: OUTCOME_STUDIO_PROVIDER_SAFE_COMPOSITION_CONTRACT,
+    providerKey: normalizedWhitespace(providerDescriptor.providerKey),
+    model: normalizedWhitespace(providerDescriptor.model),
+    providerMode: normalizedWhitespace(providerDescriptor.providerMode),
+    environment: normalizedWhitespace(providerDescriptor.environment),
+    contentSafetyStatus: COMPOSITION_SAFE_CHECK_STATUS,
+    secretAndPiiCheck: COMPOSITION_SAFE_CHECK_STATUS,
+    rawEvidenceCheck: COMPOSITION_SAFE_CHECK_STATUS,
+    internalTermCheck: COMPOSITION_SAFE_CHECK_STATUS,
+    requiredEvidenceRefs,
+    businessFactCount: businessFacts.length,
+    omittedReferenceCount: Array.isArray(compositionPackage.businessFactLedger.omitted)
+      ? compositionPackage.businessFactLedger.omitted.length
+      : 0,
+    contradictionCount: Array.isArray(compositionPackage.businessFactLedger.contradictions)
+      ? compositionPackage.businessFactLedger.contradictions.length
+      : 0,
+    requiredSectionCount: outputStructure.requiredSections.length,
+    styleGuidanceCount: styleGuidance.length,
+    methodGuidanceCount: methodGuidance.length,
+    governanceConstraintCount: governanceConstraints.length,
+    readinessStatus: readiness.status,
+    readinessGapCount: readiness.gapCount,
+    draftOnly: readiness.draftOnly,
+  }
+}
+
+const buildSafeCompositionReadiness = (readiness = {}) => {
+  const supplied = isPlainObject(readiness) ? readiness : {}
+  const safeReadiness = {
+    status: normalizedWhitespace(typeof supplied.status === 'string' ? supplied.status : 'READY'),
+    draftOnly: supplied.draftOnly === true,
+    gapCount: Number.isInteger(supplied.gapCount) ? supplied.gapCount : 0,
+    notice: normalizedWhitespace(typeof supplied.notice === 'string' ? supplied.notice : ''),
+  }
+  if (!hasExactKeys(safeReadiness, COMPOSITION_READINESS_KEYS)
+    || !['READY', 'READY_WITH_GAPS'].includes(safeReadiness.status)
+    || safeReadiness.gapCount < 0
+    || safeReadiness.gapCount > 24
+    || safeReadiness.draftOnly !== (safeReadiness.status === 'READY_WITH_GAPS')
+    || (safeReadiness.status === 'READY_WITH_GAPS' && !safeReadiness.notice)) fail()
+  assertSafeRawString(safeReadiness.notice)
+  return safeReadiness
+}
+
+export const buildOutcomeStudioProviderSafeComposition = ({
+  compositionPackage,
+  governanceConstraints = [],
+  methodGuidance = [],
+  providerDescriptor,
+  safeRequest,
+  styleGuidance = [],
+} = {}) => {
+  assertProviderDescriptor(providerDescriptor)
+  assertOutcomeStudioProviderSafeRequest(safeRequest)
+  if (!safeToken(providerDescriptor.providerKey)
+    || !safeToken(providerDescriptor.model)
+    || !safeToken(providerDescriptor.providerMode)
+    || !safeToken(providerDescriptor.environment)) fail()
+  if (!isPlainObject(compositionPackage)
+    || compositionPackage.contractVersion !== COMPOSITION_PACKAGE_CONTRACT
+    || compositionPackage.status !== 'READY'
+    || !isPlainObject(compositionPackage.businessFactLedger)
+    || !Array.isArray(compositionPackage.businessFactLedger.facts)
+    || compositionPackage.businessFactLedger.facts.length === 0) fail()
+  const businessFacts = compositionPackage.businessFactLedger.facts.map(buildSafeCompositionFact)
+  const outputStructure = buildSafeCompositionOutput(compositionPackage.outputBinding)
+  const readiness = buildSafeCompositionReadiness(compositionPackage.readiness)
+  if (comparableOutputContractKey(outputStructure.outputTypeKey)
+    !== comparableOutputContractKey(safeRequest.businessRequest.outputTypeKey)) fail()
+  const safeStyleGuidance = assertSafeBoundedArray(styleGuidance, { maxLength: 12, itemMaximum: 600 })
+  const safeMethodGuidance = buildSafeMethodGuidance(methodGuidance)
+  const safeGovernanceConstraints = assertSafeBoundedArray(governanceConstraints, { maxLength: 16, itemMaximum: 600 })
+  const outputContract = buildSafeOutputContractResolution({
+    compositionPackage,
+    methodGuidance: safeMethodGuidance,
+    outputStructure,
+  })
+  const composition = {
+    contractVersion: OUTCOME_STUDIO_PROVIDER_SAFE_COMPOSITION_CONTRACT,
+    businessRequest: {
+      ...safeRequest.businessRequest,
+    },
+    businessFacts,
+    outputContract,
+    outputStructure,
+    styleGuidance: safeStyleGuidance.map((entry) => boundText(entry, 600, 80)),
+    methodGuidance: safeMethodGuidance,
+    governanceConstraints: safeGovernanceConstraints.map((entry) => boundText(entry, 600, 80)),
+    readiness,
+    safetyManifest: buildSafeCompositionManifest({
+      businessFacts,
+      compositionPackage,
+      governanceConstraints: safeGovernanceConstraints,
+      methodGuidance: safeMethodGuidance,
+      outputStructure,
+      providerDescriptor,
+      readiness,
+      styleGuidance: safeStyleGuidance,
+    }),
+  }
+  return assertOutcomeStudioProviderSafeComposition(composition)
+}
+
+export const assertOutcomeStudioProviderSafeComposition = (composition) => {
+  if (!hasExactKeys(composition, COMPOSITION_KEYS)
+    || composition.contractVersion !== OUTCOME_STUDIO_PROVIDER_SAFE_COMPOSITION_CONTRACT
+    || !Array.isArray(composition.businessFacts)
+    || composition.businessFacts.length === 0
+    || !composition.outputContract
+    || !hasExactKeys(composition.outputStructure, COMPOSITION_OUTPUT_KEYS)
+    || !Array.isArray(composition.styleGuidance)
+    || !Array.isArray(composition.methodGuidance)
+    || !Array.isArray(composition.governanceConstraints)
+    || !hasExactKeys(composition.readiness, COMPOSITION_READINESS_KEYS)
+    || !hasExactKeys(composition.safetyManifest, COMPOSITION_SAFETY_KEYS)) fail()
+  assertOutcomeStudioProviderSafeRequest({
+    businessRequest: composition.businessRequest,
+    draftContext: { content: '' },
+    effectiveRequest: {
+      executionIntent: composition.businessRequest.instruction,
+      draftContext: { content: '' },
+    },
+  })
+  composition.businessFacts.forEach((fact) => {
+    if (!hasExactKeys(fact, COMPOSITION_FACT_KEYS)
+      || !hasExactKeys(fact.sourceAttribution, COMPOSITION_SOURCE_ATTRIBUTION_KEYS)
+      || typeof fact.statement !== 'string'
+      || !fact.statement.trim()
+      || typeof fact.claimPermission !== 'string'
+      || typeof fact.currentness !== 'string'
+      || !Array.isArray(fact.qualification)
+      || !Array.isArray(fact.sectionKeys)
+      || fact.sectionKeys.length === 0) fail()
+    assertSafeRawString(fact.statement)
+    assertSafeRawString(fact.claimPermission)
+    assertSafeRawString(fact.currentness)
+    assertSafeBoundedArray(fact.qualification, { maxLength: 8, itemMaximum: 240 })
+    assertSafeBoundedArray(fact.sectionKeys, { maxLength: 24, itemMaximum: 160 })
+    Object.values(fact.sourceAttribution).forEach(assertSafeRawString)
+  })
+  buildSafeOutputContractResolution({
+    compositionPackage: { outputContractResolution: composition.outputContract },
+    methodGuidance: composition.methodGuidance,
+    outputStructure: composition.outputStructure,
+  })
+  const outputStructure = composition.outputStructure
+  assertSafeBoundedArray(outputStructure.outputTypeStructure, { maxLength: 5, itemMaximum: 240 })
+  assertSafeBoundedArray(outputStructure.requiredSections, { maxLength: 24, itemMaximum: 160 })
+  assertSafeBoundedArray(outputStructure.optionalSections, { maxLength: 12, itemMaximum: 160 })
+  Object.entries(outputStructure)
+    .filter(([, value]) => typeof value === 'string')
+    .forEach(([, value]) => assertSafeRawString(value))
+  assertSafeBoundedArray(composition.styleGuidance, { maxLength: 12, itemMaximum: 600 })
+  buildSafeMethodGuidance(composition.methodGuidance)
+  assertSafeBoundedArray(composition.governanceConstraints, { maxLength: 16, itemMaximum: 600 })
+  buildSafeCompositionReadiness(composition.readiness)
+  const safetyManifest = composition.safetyManifest
+  if (safetyManifest.manifestVersion !== OUTCOME_STUDIO_PROVIDER_SAFE_COMPOSITION_CONTRACT
+    || !safeToken(safetyManifest.providerKey)
+    || !safeToken(safetyManifest.model)
+    || !safeToken(safetyManifest.providerMode)
+    || !safeToken(safetyManifest.environment)
+    || !Object.entries(safetyManifest)
+      .filter(([key]) => key.endsWith('Check') || key === 'contentSafetyStatus')
+      .every(([, value]) => value === COMPOSITION_SAFE_CHECK_STATUS)
+    || !Array.isArray(safetyManifest.requiredEvidenceRefs)
+    || safetyManifest.requiredEvidenceRefs.length !== composition.businessFacts.length
+    || safetyManifest.requiredEvidenceRefs.some((value) => !/^ref_[a-f0-9]{16}$/.test(value))
+    || new Set(safetyManifest.requiredEvidenceRefs).size !== safetyManifest.requiredEvidenceRefs.length
+    || safetyManifest.businessFactCount !== composition.businessFacts.length
+    || !Number.isInteger(safetyManifest.omittedReferenceCount)
+    || safetyManifest.omittedReferenceCount < 0
+    || !Number.isInteger(safetyManifest.contradictionCount)
+    || safetyManifest.contradictionCount < 0
+    || safetyManifest.requiredSectionCount !== outputStructure.requiredSections.length
+    || !Number.isInteger(safetyManifest.styleGuidanceCount)
+    || safetyManifest.styleGuidanceCount !== composition.styleGuidance.length
+    || !Number.isInteger(safetyManifest.methodGuidanceCount)
+    || safetyManifest.methodGuidanceCount !== composition.methodGuidance.length
+    || !Number.isInteger(safetyManifest.governanceConstraintCount)
+    || safetyManifest.governanceConstraintCount !== composition.governanceConstraints.length
+    || safetyManifest.readinessStatus !== composition.readiness.status
+    || safetyManifest.readinessGapCount !== composition.readiness.gapCount
+    || safetyManifest.draftOnly !== composition.readiness.draftOnly) fail()
+  if (JSON.stringify(composition).length > SAFE_CONTEXT_LIMIT) fail()
+  return composition
 }
 
 const projectTruthSummaries = (truthSource) => {
@@ -703,8 +1456,10 @@ const buildExecutionEvidenceReceipt = ({
   admittedCandidateKeys,
   rejectedCandidateKeys,
   safeCandidateEntryCountsByVersionId,
+  generationContextConsumption = [],
 } = {}) => {
   const status = OUTCOME_STUDIO_EXECUTION_EVIDENCE_STATUSES
+  const directByVersionId = new Map(generationContextConsumption.map((entry) => [entry.versionId, entry]))
   return {
     contractVersion: OUTCOME_STUDIO_EXECUTION_EVIDENCE_CONTRACT,
     providerContextContractVersion: OUTCOME_STUDIO_PROVIDER_SAFE_CONTEXT_POLICY,
@@ -713,10 +1468,18 @@ const buildExecutionEvidenceReceipt = ({
         .filter(([, origins]) => origins.has(selection.versionId))
         .map(([key]) => key)
       const admittedKeys = projectedCandidateKeys.filter((key) => admittedCandidateKeys.has(key))
-      const categories = Array.from(new Set(admittedKeys.map((key) => key.split(':')[0])))
+      const directContribution = directByVersionId.get(selection.versionId)
+      const directItemCount = directContribution?.contributions.reduce(
+        (count, contribution) => count + contribution.itemFingerprints.length,
+        0,
+      ) || 0
+      const categories = Array.from(new Set([
+        ...admittedKeys.map((key) => key.split(':')[0]),
+        ...(directContribution?.contributions.map((contribution) => contribution.surface) || []),
+      ]))
       const sharedContribution = admittedKeys.some((key) => originsByCandidate.get(key)?.size > 1)
-      const projected = projectedCandidateKeys.length > 0
-      const supplied = admittedKeys.length > 0
+      const projected = projectedCandidateKeys.length > 0 || directItemCount > 0
+      const supplied = admittedKeys.length > 0 || directItemCount > 0
       const safeCandidateEntryCount = Math.max(
         0,
         Number(safeCandidateEntryCountsByVersionId?.get(selection.versionId) || 0),
@@ -735,10 +1498,10 @@ const buildExecutionEvidenceReceipt = ({
         ['RESOLUTION_VERIFIED', status.PASSED, 'Selected activation/version content hash verified.'],
         ['VERSION_CONTENT_LOADED', status.PASSED, 'Exact selected version content loaded.'],
         ['SAFE_GUIDANCE_PROJECTED', projected ? status.PASSED : status.NOT_SUPPLIED,
-          projected ? `${projectedCandidateKeys.length} safe guidance entries projected.` : 'No safe guidance entry was projected from this version.'],
+          projected ? `${projectedCandidateKeys.length + directItemCount} exact safe entries projected.` : 'No safe guidance entry was projected from this version.'],
         ['PROVIDER_CONTEXT_SUPPLIED', supplied ? status.PASSED : status.NOT_SUPPLIED,
           supplied
-            ? `${admittedKeys.length} guidance entries supplied${sharedContribution ? ' with shared/deduplicated attribution' : ''}.`
+            ? `${admittedKeys.length + directItemCount} exact entries supplied${sharedContribution ? ' with shared/deduplicated attribution' : ''}.`
             : 'No guidance entry from this version was admitted to provider context.'],
         ['PROVIDER_COMPLETED', status.NOT_RECORDED, 'Provider completion is recorded only after the adapter returns.'],
       ].map(([key, checkStatus, message]) => ({ key, status: checkStatus, message }))
@@ -757,9 +1520,9 @@ const buildExecutionEvidenceReceipt = ({
         packType: selection.packType || '',
         boundary: resolveKnowledgePackBoundary(selection),
         receiptType: resolveKnowledgePackReceiptType(selection),
-        projectedEntryCount: projectedCandidateKeys.length,
+        projectedEntryCount: projectedCandidateKeys.length + directItemCount,
         safeCandidateEntryCount,
-        suppliedEntryCount: admittedKeys.length,
+        suppliedEntryCount: admittedKeys.length + directItemCount,
         suppliedCategories: categories,
         sharedContribution,
         projectionDisposition,
@@ -859,6 +1622,11 @@ export const buildOutcomeStudioProviderSafeContext = async ({
   knowledgeSelection,
   executionBindings,
   captureExecutionEvidence,
+  compositionPackage,
+  methodGuidance = [],
+  governanceConstraints = [],
+  generationContextConsumption,
+  generationContextConsumptionFingerprint,
 } = {}) => {
   let stage = 'REQUEST_VALIDATION'
   let selectedCount = 0
@@ -925,16 +1693,44 @@ export const buildOutcomeStudioProviderSafeContext = async ({
       GUIDANCE_KEYS.map((key) => [key, context.guidance[key].length]),
     )
     stage = 'CONTEXT_VALIDATION'
-    const validatedContext = assertOutcomeStudioProviderSafeContext(context)
+    const providerComposition = compositionPackage === undefined
+      ? null
+      : buildOutcomeStudioProviderSafeComposition({
+          compositionPackage,
+          governanceConstraints,
+          methodGuidance,
+          providerDescriptor,
+          safeRequest,
+          styleGuidance: context.guidance.styleGuidance,
+        })
+    let validatedConsumption = { generationContextConsumption: [] }
+    if (providerComposition) {
+      stage = 'DIRECT_CONSUMPTION_VALIDATION'
+      validatedConsumption = assertOutcomeStudioGenerationContextConsumption({
+        executionBindings,
+        generationContextConsumption,
+        generationContextConsumptionFingerprint,
+        knowledgeSelection,
+        methodGuidance,
+        providerComposition,
+      })
+    }
+    const contextWithComposition = providerComposition
+      ? { ...context, composition: providerComposition }
+      : context
+    const validatedContext = assertOutcomeStudioProviderSafeContext(contextWithComposition)
     if (typeof captureExecutionEvidence === 'function') {
-      captureExecutionEvidence(buildExecutionEvidenceReceipt({
+      const receipt = buildExecutionEvidenceReceipt({
         executionBindings,
         knowledgeSelection,
         originsByCandidate: projection.originsByCandidate,
         admittedCandidateKeys: evidenceState.admittedCandidateKeys,
         rejectedCandidateKeys: evidenceState.rejectedCandidateKeys,
         safeCandidateEntryCountsByVersionId: projection.safeCandidateEntryCountsByVersionId,
-      }))
+        generationContextConsumption: validatedConsumption.generationContextConsumption,
+      })
+      if (providerComposition) receipt.providerRequestManifest = providerComposition
+      captureExecutionEvidence(receipt)
     }
     return validatedContext
   } catch (error) {
@@ -1030,7 +1826,9 @@ export const buildOutcomeFrameworkGuidanceProviderSafeContext = async ({
 }
 
 export const assertOutcomeStudioProviderSafeContext = (providerContext) => {
-  if (!hasExactKeys(providerContext, ['contractVersion', 'businessRequest', 'draftContext', 'truthSummaries', 'guidance', 'safeguards'])
+  const baseKeys = ['contractVersion', 'businessRequest', 'draftContext', 'truthSummaries', 'guidance', 'safeguards']
+  const hasComposition = hasExactKeys(providerContext, [...baseKeys, 'composition'])
+  if ((!hasExactKeys(providerContext, baseKeys) && !hasComposition)
     || providerContext.contractVersion !== OUTCOME_STUDIO_PROVIDER_SAFE_CONTEXT_POLICY
     || !hasExactKeys(providerContext.guidance, GUIDANCE_KEYS)
     || !Array.isArray(providerContext.truthSummaries)
@@ -1064,18 +1862,25 @@ export const assertOutcomeStudioProviderSafeContext = (providerContext) => {
       assertSafeRawString(entry)
     }
   }
+  if (hasComposition) assertOutcomeStudioProviderSafeComposition(providerContext.composition)
   if ((!providerContext.guidance.businessInstructions.length && !providerContext.guidance.reasoningGuidance.length)
     || !providerContext.guidance.outputSchema.length
     || !providerContext.guidance.styleGuidance.length
     || !providerContext.guidance.validationCriteria.length
-    || !fits(providerContext)) fail()
+    || !fits(providerContext)) {
+    fail()
+  }
   return providerContext
 }
 
 export default {
   assertOutcomeStudioProviderSafeContext,
+  assertOutcomeStudioProviderSafeComposition,
   assertOutcomeStudioProviderSafeRequest,
   buildOutcomeFrameworkGuidanceProviderSafeContext,
+  buildOutcomeStudioProviderSafeComposition,
   buildOutcomeStudioProviderSafeRequest,
   buildOutcomeStudioProviderSafeContext,
+  buildOutcomeStudioGenerationContextConsumption,
+  assertOutcomeStudioGenerationContextConsumption,
 }

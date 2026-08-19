@@ -140,7 +140,14 @@ import { authorizeOutcomeStudioLiveTestExecution } from './outcomeStudioReadines
 import {
   assertOutcomeStudioRequestResolution,
   buildResolvedOutcomeStudioExecutionIntent,
+  classifyOutcomeStudioRequestIntent,
 } from './outcomeStudioResolutionService.js'
+import { buildOutcomeStudioLiveComposition } from './outcomeStudioLiveCompositionBridgeService.js'
+import {
+  assertOutcomeStudioOutputContractResolution,
+  completeOutcomeStudioOutputContractResolution,
+  resolveOutcomeStudioConversationOutputContract,
+} from './outcomeStudioOutputContractResolutionService.js'
 
 const normalizeText = (value) => String(value ?? '').trim()
 const normalizeToken = (value) => normalizeText(value).toUpperCase()
@@ -244,6 +251,143 @@ const createOutcomeStudioError = ({
     ...details,
   }
   return err
+}
+
+const OUTPUT_CONTRACT_CLARIFICATION_CODE = 'OUTCOME_OUTPUT_CONTRACT_CLARIFICATION_REQUIRED'
+const OUTPUT_CONTRACT_STALE_CODE = 'OUTCOME_OUTPUT_CONTRACT_STALE'
+
+const outputContractRolePack = (binding = {}, packKey = '') => {
+  const pack = (Array.isArray(binding.activePacks) ? binding.activePacks : [])
+    .find((candidate) => normalizeText(candidate?.packKey) === packKey)
+  if (!pack) return null
+  return {
+    key: normalizeText(pack.packKey),
+    label: normalizeText(pack.label || pack.packKey),
+    version: normalizeText(pack.semanticVersion),
+    selected: true,
+    status: normalizeToken(pack.status || 'ACTIVE'),
+  }
+}
+
+const outputContractContextDescriptor = (value = {}) => {
+  const key = normalizeText(value.key)
+  return {
+    key,
+    label: normalizeText(value.label) || key
+      .split(/[-_\s]+/)
+      .filter(Boolean)
+      .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
+      .join(' '),
+    version: normalizeText(value.version),
+  }
+}
+
+const buildOutputContractKnowledgeContext = ({
+  binding = {},
+  context = {},
+  frameworkKey = '',
+  frameworkVersion = '',
+} = {}) => ({
+  outputType: outputContractContextDescriptor(context.outputType),
+  outputSchema: outputContractContextDescriptor(context.outputSchema),
+  style: outputContractContextDescriptor(context.style),
+  framework: {
+    key: normalizeToken(frameworkKey),
+    label: normalizeToken(frameworkKey) === 'VMF' ? 'Value Management Framework' : normalizeText(frameworkKey),
+    version: normalizeText(frameworkVersion),
+  },
+  knowledgePacks: [
+    outputContractRolePack(binding, 'adaptive-reasoning-layer'),
+    outputContractRolePack(binding, 'rendering-layer'),
+  ].filter(Boolean),
+})
+
+const buildOutputContractBindingSnapshot = (resolution = {}) => Object.fromEntries(
+  [
+    ['outputType', resolution.selectedOutputType],
+    ['outputSchema', resolution.selectedOutputSchema],
+    ['style', resolution.selectedStyle],
+  ].filter(([, descriptor]) => normalizeText(descriptor?.version)),
+)
+
+const completeOutputContractResolution = ({
+  binding = {},
+  context = {},
+  frameworkKey = '',
+  frameworkVersion = '',
+  resolution,
+} = {}) => completeOutcomeStudioOutputContractResolution({
+  resolution,
+  knowledgeContext: buildOutputContractKnowledgeContext({
+    binding,
+    context,
+    frameworkKey,
+    frameworkVersion,
+  }),
+  binding: buildOutputContractBindingSnapshot(resolution),
+  frameworkKey: normalizeToken(frameworkKey),
+})
+
+const throwOutputContractClarification = (resolution) => {
+  throw createOutcomeStudioError({
+    status: 409,
+    code: OUTPUT_CONTRACT_CLARIFICATION_CODE,
+    message: normalizeText(resolution?.clarificationPath?.question)
+      || 'Which output would you like Outcome Studio to prepare?',
+    reason: OUTPUT_CONTRACT_CLARIFICATION_CODE,
+    details: {
+      clarificationReason: normalizeToken(resolution?.clarificationPath?.reason),
+    },
+  })
+}
+
+const preservesUnavailableExplicitOutputConflict = ({
+  explicitRequestedOutputTypeKey = '',
+  resolution,
+} = {}) => Boolean(explicitRequestedOutputTypeKey)
+  && resolution?.status === 'CLARIFICATION_REQUIRED'
+  && resolution?.inferenceReason === 'EXPLICIT_OUTPUT_TYPE_UNAVAILABLE'
+
+const withOutputContractSource = (resolution, source) => assertOutcomeStudioOutputContractResolution({
+  ...resolution,
+  source,
+})
+
+const getPersistedOutputContractResolution = (contextBindings = {}) => {
+  const resolution = contextBindings?.outputContractResolution
+  if (!resolution) return null
+  return assertOutcomeStudioOutputContractResolution(resolution)
+}
+
+const assertOutputContractMethodRolesCurrent = ({
+  frameworkKey = '',
+  methodGuidance = [],
+  resolution,
+} = {}) => {
+  const roles = new Map((resolution?.knowledgePackRoles || []).map((entry) => [entry.role, entry]))
+  for (const methodRole of ['ARL', 'RL']) {
+    const expected = roles.get(methodRole)
+    const actual = methodGuidance.find((entry) => normalizeToken(entry?.role) === methodRole)
+    if (!expected || !actual || normalizeText(expected.version) !== normalizeText(actual.version)) {
+      throw createOutcomeStudioError({
+        status: 409,
+        code: 'CONFLICT',
+        message: 'Outcome Studio must refresh the inferred output contract before generating this request.',
+        reason: OUTPUT_CONTRACT_STALE_CODE,
+        details: { staleRole: methodRole },
+      })
+    }
+  }
+  const expectedFramework = roles.get('VMF')
+  if ((normalizeToken(frameworkKey) === 'VMF') !== Boolean(expectedFramework)) {
+    throw createOutcomeStudioError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Outcome Studio must refresh the inferred output contract before generating this request.',
+      reason: OUTPUT_CONTRACT_STALE_CODE,
+      details: { staleRole: 'VMF' },
+    })
+  }
 }
 
 const assertPersistedOutputTypeCapabilityKey = ({
@@ -1934,6 +2078,29 @@ const buildOutcomeExecutionApprovalReadiness = ({
     if (!blockerReasons.includes(reason)) blockerReasons.push(reason)
   }
 
+  const compositionReadiness = safeIteration?.lineageSummary?.outcomeStudioReadiness
+    || safeDraft.lineageSummary?.outcomeStudioReadiness
+  if (compositionReadiness !== undefined) {
+    const readinessStatus = normalizeToken(compositionReadiness?.status)
+    const draftOnly = compositionReadiness?.draftOnly
+    const sources = compositionReadiness?.sources
+    const sourcesAreObject = Boolean(
+      sources
+      && typeof sources === 'object'
+      && !Array.isArray(sources),
+    )
+    if (!['READY', 'READY_WITH_GAPS'].includes(readinessStatus)
+      || typeof draftOnly !== 'boolean'
+      || !Number.isInteger(compositionReadiness?.gapCount)
+      || compositionReadiness.gapCount < 0
+      || typeof compositionReadiness?.notice !== 'string'
+      || !sourcesAreObject) {
+      block('OUTCOME_DRAFT_READINESS_MALFORMED')
+    } else if (readinessStatus === 'READY_WITH_GAPS' || draftOnly === true) {
+      block('OUTCOME_DRAFT_READINESS_NOT_APPROVAL_READY')
+    }
+  }
+
   if (!evidence) {
     block('EXECUTION_EVIDENCE_NOT_RECORDED')
   } else {
@@ -2398,6 +2565,7 @@ const serializeOutcomeSession = (session, options = {}) => {
     sourceOutput,
     truthSignature,
     knowledgePackBinding,
+    outputContractResolution: getPersistedOutputContractResolution(plain.contextBindings || {}),
     prompt: normalizeText(plain.prompt),
     startedBy: toIdString(plain.startedBy),
     startedAt: normalizeDateValue(plain.startedAt),
@@ -2441,6 +2609,7 @@ const serializeOutcomeSessionSummary = (session, options = {}) => {
     sourceOutputTypeLabel: serialized.sourceOutputTypeLabel,
     requestedOutputTypeKey: serialized.requestedOutputTypeKey,
     requestedOutputTypeLabel: serialized.requestedOutputTypeLabel,
+    outputContract: serialized.outputContractResolution,
     informationStatus: buildCustomerInformationStatus(serialized.truthSignature),
     businessGuidance: buildCustomerBusinessGuidance(serialized.knowledgePackBinding),
     governanceEvidence: buildCustomerGovernanceEvidence({
@@ -2483,6 +2652,7 @@ const serializeOutcomeMessage = (message, options = {}) => {
     sourceOutput: sanitizePersistedSourceOutput(plain.sourceOutputSnapshot || {}),
     truthSignature: sanitizePersistedTruthSignature(plain.truthSignature || {}, options),
     knowledgePackBinding: sanitizePersistedKnowledgePackBinding(plain.knowledgePackBinding || {}),
+    outputContractResolution: getPersistedOutputContractResolution(plain.contextBindings || {}),
     submittedBy: toIdString(plain.submittedBy),
     submittedAt: normalizeDateValue(plain.submittedAt),
     createdAt: normalizeDateValue(plain.createdAt),
@@ -2863,6 +3033,7 @@ const serializeCustomerOutcomeMessage = (message, options = {}) => {
     responseStatus: serialized.responseStatus,
     requestedOutputTypeKey: serialized.requestedOutputTypeKey,
     requestedOutputTypeLabel: serialized.requestedOutputTypeLabel,
+    outputContract: serialized.outputContractResolution,
     governanceEvidence: buildCustomerGovernanceEvidence({
       knowledgePackBinding: serialized.knowledgePackBinding,
       recordId: serialized.messageId,
@@ -4734,6 +4905,7 @@ const buildConversationState = (readiness) => ({
 const buildOutcomeStudioProjection = async ({
   assets = [],
   outputLab,
+  packBinding: packBindingOverride = null,
   sessions = [],
   truthQuality = null,
   requestedOutputTypeKey: requestedOutputTypeKeyOverride = '',
@@ -4743,9 +4915,9 @@ const buildOutcomeStudioProjection = async ({
     asset: selectSourceOutputAsset(Array.isArray(outputLab?.assets) ? outputLab.assets : []),
     readiness: outputLab?.readiness || {},
   })
-  const { binding: packBinding } = await resolveOutcomeStudioKnowledgePackBinding({
+  const packBinding = packBindingOverride || (await resolveOutcomeStudioKnowledgePackBinding({
     query: outputLab?.runtimeScope || {},
-  })
+  })).binding
   const deliverables = projectOutcomeStudioDeliverableDiscovery(packBinding)
   const normalizedSourceOutputType = normalizeToken(sourceOutputAsset?.outputTypeKey).replace(/[-_]/g, '')
   const matchingDeliverable = deliverables.available?.find((deliverable) =>
@@ -5944,9 +6116,30 @@ export const createRuntimeOutcomeSession = async ({
   })
 
   const outputLab = await getRuntimeOutputLab({ includeRuntimeScope: true, runtimeInstanceId, scopes })
-  const requestedOutputTypeKey = normalizeCapabilityKey(payload?.requestedOutputTypeKey)
+  const explicitRequestedOutputTypeKey = normalizeCapabilityKey(payload?.requestedOutputTypeKey)
+  const { binding: discoveryPackBinding } = await resolveOutcomeStudioKnowledgePackBinding({
+    query: outputLab?.runtimeScope || {},
+  })
+  const discoveredDeliverables = projectOutcomeStudioDeliverableDiscovery(discoveryPackBinding)
+  const initialOutputContractResolution = resolveOutcomeStudioConversationOutputContract({
+    prompt: normalizeText(payload?.prompt),
+    deliverables: discoveredDeliverables.available,
+    requestedOutputTypeKey: explicitRequestedOutputTypeKey,
+  })
+  if (
+    initialOutputContractResolution.status !== 'RESOLVED'
+    && !preservesUnavailableExplicitOutputConflict({
+      explicitRequestedOutputTypeKey,
+      resolution: initialOutputContractResolution,
+    })
+  ) {
+    throwOutputContractClarification(initialOutputContractResolution)
+  }
+  const requestedOutputTypeKey = explicitRequestedOutputTypeKey
+    || normalizeCapabilityKey(initialOutputContractResolution.selectedOutputType?.key)
   let outcomeStudio = await buildOutcomeStudioProjection({
     outputLab,
+    packBinding: discoveryPackBinding,
     requestedOutputTypeKey,
     scopes,
   })
@@ -5972,6 +6165,7 @@ export const createRuntimeOutcomeSession = async ({
   })
   outcomeStudio = await buildOutcomeStudioProjection({
     outputLab,
+    packBinding: discoveryPackBinding,
     requestedOutputTypeKey,
     truthQuality,
     scopes,
@@ -6029,19 +6223,29 @@ export const createRuntimeOutcomeSession = async ({
     knowledgeContextResult.reasoningBinding,
     boundAt,
   )
+  const outputContractResolution = completeOutputContractResolution({
+    binding: knowledgeContextResult.reasoningBinding,
+    context: resolvedKnowledgeContext,
+    frameworkKey: runtimeScope.frameworkKey,
+    frameworkVersion: runtimeScope.packageVersion,
+    resolution: initialOutputContractResolution,
+  })
   const truthSignature = buildSessionTruthSignature(
     outcomeStudio.truthBinding.truthSignature,
     boundAt,
     truthSignatureId,
   )
-  const contextBindings = buildOutcomeContextBindings({
-    contextType: 'SESSION',
-    knowledgePackBinding,
-    runtimeScope,
-    sessionId,
-    sourceOutput,
-    truthSignature,
-  })
+  const contextBindings = {
+    ...buildOutcomeContextBindings({
+      contextType: 'SESSION',
+      knowledgePackBinding,
+      runtimeScope,
+      sessionId,
+      sourceOutput,
+      truthSignature,
+    }),
+    outputContractResolution,
+  }
   const truthSignatureRecord = new TruthSignature({
     truthSignatureId,
     sessionId,
@@ -6120,7 +6324,14 @@ export const createRuntimeOutcomeSession = async ({
           runtimeInstanceId: toIdString(runtimeInstance._id || runtimeInstance.id),
           sourceOutputAssetId: sourceOutput.outputAssetId,
           sourceOutputTypeKey: sourceOutput.outputTypeKey,
-          requestedOutputTypeKey,
+          requestedOutputTypeKey: resolvedRequestedOutputTypeKey,
+          outputContractResolution: {
+            contractVersion: outputContractResolution.contractVersion,
+            source: outputContractResolution.source,
+            outputTypeKey: outputContractResolution.selectedOutputType.key,
+            outputSchemaKey: outputContractResolution.selectedOutputSchema.key,
+            styleKey: outputContractResolution.selectedStyle.key,
+          },
           truthSignatureId,
           truthSignatureStatus: truthSignature.status,
           knowledgePackBindingStatus: knowledgePackBinding.status,
@@ -6277,11 +6488,72 @@ export const createRuntimeOutcomeMessage = async ({
   const submittedAt = new Date().toISOString()
   const prompt = normalizeText(payload?.prompt)
   const runtimeScope = getRuntimeScope(runtimeInstance)
-  const requestedOutputTypeKey = normalizeCapabilityKey(
-    payload?.requestedOutputTypeKey
-    || serializedSession.requestedOutputTypeKey
-    || serializedSession.sourceOutputTypeKey,
+  const activeDraft = await findActiveOutcomeDraftForSession({
+    runtimeInstanceId: runtimeObjectId,
+    sessionId: serializedSession.sessionId,
+  })
+  const { binding: discoveryPackBinding } = await resolveOutcomeStudioKnowledgePackBinding({
+    query: {
+      ...runtimeScope,
+      environmentKey: 'PRODUCTION',
+      workspaceType: DEFAULT_OUTCOME_WORKSPACE_TYPE,
+    },
+  })
+  const discoveredDeliverables = projectOutcomeStudioDeliverableDiscovery(discoveryPackBinding)
+  const explicitRequestedOutputTypeKey = normalizeCapabilityKey(payload?.requestedOutputTypeKey)
+  const sessionOutputTypeKey = normalizeCapabilityKey(
+    serializedSession.requestedOutputTypeKey || serializedSession.sourceOutputTypeKey,
   )
+  let outputContractResolution = resolveOutcomeStudioConversationOutputContract({
+    prompt,
+    deliverables: discoveredDeliverables.available,
+    requestedOutputTypeKey: explicitRequestedOutputTypeKey,
+  })
+  if (outputContractResolution.status !== 'RESOLVED') {
+    const preserveUnavailableConflict = preservesUnavailableExplicitOutputConflict({
+      explicitRequestedOutputTypeKey,
+      resolution: outputContractResolution,
+    })
+    if (!preserveUnavailableConflict) {
+      const intent = classifyOutcomeStudioRequestIntent({
+        prompt,
+        hasActiveDraft: Boolean(activeDraft),
+      })
+      if (explicitRequestedOutputTypeKey || intent.refinement !== true || !activeDraft) {
+        throwOutputContractClarification(outputContractResolution)
+      }
+      const boundResolution = serializedSession.outputContractResolution
+        || resolveOutcomeStudioConversationOutputContract({
+          prompt,
+          deliverables: discoveredDeliverables.available,
+          requestedOutputTypeKey: sessionOutputTypeKey,
+        })
+      outputContractResolution = withOutputContractSource(
+        boundResolution,
+        serializedSession.outputContractResolution ? 'BOUND_SESSION_REFINEMENT' : 'LEGACY_BOUND_SESSION',
+      )
+    }
+  }
+  const requestedOutputTypeKey = normalizeCapabilityKey(
+    outputContractResolution.selectedOutputType?.key
+    || explicitRequestedOutputTypeKey
+    || sessionOutputTypeKey,
+  )
+  if (
+    !explicitRequestedOutputTypeKey
+    && requestedOutputTypeKey !== sessionOutputTypeKey
+  ) {
+    throw createOutcomeStudioError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'This active Outcome Studio session is bound to a different output. Start a new session before changing the output type.',
+      reason: 'OUTCOME_OUTPUT_CONTRACT_SESSION_MISMATCH',
+      details: {
+        requestedOutputTypeKey,
+        sessionOutputTypeKey,
+      },
+    })
+  }
   const knowledgeContextResult = await resolveOutcomeStudioKnowledgeContext({
     query: {
       ...runtimeScope,
@@ -6301,16 +6573,26 @@ export const createRuntimeOutcomeMessage = async ({
     knowledgeContextResult.reasoningBinding,
     submittedAt,
   )
-  const messageId = buildOutcomeMessageId()
-  const contextBindings = buildOutcomeContextBindings({
-    contextType: 'MESSAGE',
-    knowledgePackBinding: requestKnowledgePackBinding,
-    messageId,
-    runtimeScope,
-    sessionId: serializedSession.sessionId,
-    sourceOutput: serializedSession.sourceOutput,
-    truthSignature: serializedSession.truthSignature,
+  outputContractResolution = completeOutputContractResolution({
+    binding: knowledgeContextResult.reasoningBinding,
+    context: resolvedKnowledgeContext,
+    frameworkKey: runtimeScope.frameworkKey,
+    frameworkVersion: runtimeScope.packageVersion,
+    resolution: outputContractResolution,
   })
+  const messageId = buildOutcomeMessageId()
+  const contextBindings = {
+    ...buildOutcomeContextBindings({
+      contextType: 'MESSAGE',
+      knowledgePackBinding: requestKnowledgePackBinding,
+      messageId,
+      runtimeScope,
+      sessionId: serializedSession.sessionId,
+      sourceOutput: serializedSession.sourceOutput,
+      truthSignature: serializedSession.truthSignature,
+    }),
+    outputContractResolution,
+  }
   const message = new OutcomeMessage({
     messageId,
     sessionId: serializedSession.sessionId,
@@ -6350,6 +6632,13 @@ export const createRuntimeOutcomeMessage = async ({
           sourceOutputAssetId: serializedSession.sourceOutputAssetId,
           sourceOutputTypeKey: serializedSession.sourceOutputTypeKey,
           requestedOutputTypeKey,
+          outputContractResolution: {
+            contractVersion: outputContractResolution.contractVersion,
+            source: outputContractResolution.source,
+            outputTypeKey: outputContractResolution.selectedOutputType.key,
+            outputSchemaKey: outputContractResolution.selectedOutputSchema.key,
+            styleKey: outputContractResolution.selectedStyle.key,
+          },
           truthSignatureStatus: serializedSession.truthSignature.status,
           knowledgePackBindingStatus: serializedSession.knowledgePackBinding.status,
           promptLength: prompt.length,
@@ -6396,6 +6685,7 @@ export const createRuntimeOutcomeMessage = async ({
 export const generateRuntimeOutcomeResponse = async ({
   actorUserId,
   auditRequest,
+  allowReadyWithGaps = false,
   executionMode,
   providerAdapter,
   providerDescriptor,
@@ -6510,6 +6800,38 @@ export const generateRuntimeOutcomeResponse = async ({
   const resolvedKnowledgeContext = assertOutcomeStudioKnowledgeContextReady({
     result: knowledgeContextResult,
   })
+  const generationDeliverables = projectOutcomeStudioDeliverableDiscovery(
+    knowledgeContextResult.reasoningBinding,
+  )
+  let generationOutputContractResolution = serializedMessage.outputContractResolution
+    || serializedSession.outputContractResolution
+  if (!generationOutputContractResolution) {
+    generationOutputContractResolution = withOutputContractSource(
+      resolveOutcomeStudioConversationOutputContract({
+        prompt: serializedMessage.prompt,
+        deliverables: generationDeliverables.available,
+        requestedOutputTypeKey,
+      }),
+      'LEGACY_BOUND_SESSION',
+    )
+  }
+  try {
+    generationOutputContractResolution = completeOutputContractResolution({
+      binding: knowledgeContextResult.reasoningBinding,
+      context: resolvedKnowledgeContext,
+      frameworkKey: runtimeScope.frameworkKey,
+      frameworkVersion: runtimeScope.packageVersion,
+      resolution: generationOutputContractResolution,
+    })
+  } catch (error) {
+    throw createOutcomeStudioError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Outcome Studio must refresh the inferred output contract before generating this request.',
+      reason: OUTPUT_CONTRACT_STALE_CODE,
+      details: { cause: error.message },
+    })
+  }
   const requestResolution = assertOutcomeStudioRequestResolution({
     activeDraft,
     message: serializedMessage,
@@ -6517,6 +6839,21 @@ export const generateRuntimeOutcomeResponse = async ({
     resolvedKnowledgeContext,
     session: serializedSession,
   })
+  const outcomeExecutionMode = executionMode === undefined ? 'LIVE_TEST' : executionMode
+  if (outcomeExecutionMode === 'LEGACY' && typeof providerAdapter !== 'function') {
+    throw buildDraftingServiceUnavailableError()
+  }
+  const liveTestConfiguration = resolveLiveTestConfiguration({
+    executionMode: outcomeExecutionMode,
+    providerAdapter,
+    providerDescriptor,
+  })
+  if (liveTestConfiguration.executionMode === 'LIVE_TEST') {
+    await authorizeOutcomeStudioLiveTestExecution({
+      providerDescriptor: liveTestConfiguration.providerDescriptor,
+      stage: 'PRE_IDEMPOTENCY',
+    })
+  }
   const isDraftRefinement = requestResolution?.intent?.refinement === true
   const currentDraftIteration = isDraftRefinement
     ? await findCurrentOutcomeDraftIterationForRefinement({
@@ -6549,20 +6886,42 @@ export const generateRuntimeOutcomeResponse = async ({
     knowledgeContextResult.reasoningBinding,
     generatedAt,
   )
+  const frameworkHandoffResolution = await resolveFrameworkOutcomeStudioHandoff({
+    runtimeInstance,
+    scopes,
+    packBinding: knowledgeContextResult.reasoningBinding,
+    knowledgeContextResult,
+    requestedOutputTypeKey: resolvedOutputTypeCapabilityKey,
+  })
+  const liveComposition = await buildOutcomeStudioLiveComposition({
+    runtimeInstance,
+    frameworkState: getFrameworkState(runtimeInstance),
+    frameworkHandoff: frameworkHandoffResolution.handoff,
+    knowledgeContextResult,
+    knowledgeContext: resolvedKnowledgeContext,
+    binding: knowledgeContextResult.reasoningBinding,
+    requestedOutputTypeKey: resolvedOutputTypeCapabilityKey,
+    requestedFormat: normalizeToken(
+      requestResolution?.format?.format
+        || requestResolution?.formatKey
+        || requestResolution?.outputFormat
+        || '',
+    ),
+    userPrompt: serializedMessage.prompt,
+    truthSignature: serializedSession.truthSignature,
+    sourceOutput: serializedSession.sourceOutput,
+    allowReadyWithGaps,
+  })
+  assertOutputContractMethodRolesCurrent({
+    frameworkKey: runtimeScope.frameworkKey,
+    methodGuidance: liveComposition.methodPackBindings,
+    resolution: generationOutputContractResolution,
+  })
   const grrEnabled = isOutcomeStudioGrrEnabled()
   if (!grrEnabled) throw buildDraftingServiceUnavailableError()
-  const outcomeExecutionMode = executionMode === undefined ? 'LIVE_TEST' : executionMode
-  if (outcomeExecutionMode === 'LEGACY' && typeof providerAdapter !== 'function') throw buildDraftingServiceUnavailableError()
-  const liveTestConfiguration = resolveLiveTestConfiguration({
-    executionMode: outcomeExecutionMode,
-    providerAdapter,
-    providerDescriptor,
-  })
-  if (liveTestConfiguration.executionMode === 'LIVE_TEST') {
-    await authorizeOutcomeStudioLiveTestExecution({
-      providerDescriptor: liveTestConfiguration.providerDescriptor,
-      stage: 'PRE_IDEMPOTENCY',
-    })
+  const evidenceComposition = {
+    ...liveComposition.compositionPackage,
+    outputContractResolution: generationOutputContractResolution,
   }
   const providerInput = {
     customerPrompt: serializedMessage.prompt,
@@ -6573,9 +6932,7 @@ export const generateRuntimeOutcomeResponse = async ({
       outputTypeKey: resolvedOutputTypeKey,
       outputTypeLabel: resolvedOutputTypeLabel,
       outputSchemaKey: normalizeCapabilityKey(requestResolution?.outputSchema?.schemaKey),
-      requiredSections: Array.isArray(requestResolution?.outputSchema?.requiredSections)
-        ? requestResolution.outputSchema.requiredSections.map(normalizeText)
-        : [],
+      requiredSections: liveComposition.compositionPackage.outputBinding.requiredSections.map(normalizeText),
       styleKey: resolvedStyleKey,
       styleLabel: normalizeText(requestResolution?.style?.label),
       requestedOutputTypeKey: resolvedOutputTypeCapabilityKey,
@@ -6609,6 +6966,12 @@ export const generateRuntimeOutcomeResponse = async ({
       providerAdapter,
       providerDescriptor,
       providerInput,
+      evidenceComposition,
+      methodGuidance: liveComposition.methodGuidance,
+      governanceConstraints: liveComposition.governanceConstraints,
+      generationContextConsumption: liveComposition.generationContextConsumption,
+      generationContextConsumptionFingerprint: liveComposition.generationContextConsumptionFingerprint,
+      requireGenerationContextConsumption: true,
       resolveKnowledgeBinding: async () => knowledgeContextResult.reasoningResolution,
     },
     runtimeInstanceId,
@@ -6667,6 +7030,13 @@ export const generateRuntimeOutcomeResponse = async ({
     runtimeInstance,
     session: serializedSession,
   })
+  lineageSummary.outcomeStudioReadiness = {
+    status: liveComposition.readiness.status,
+    draftOnly: liveComposition.readiness.draftOnly === true,
+    gapCount: liveComposition.readiness.gapCount,
+    notice: liveComposition.readiness.notice,
+    sources: liveComposition.readinessSources,
+  }
   lineageSummary.knowledgeResolution = {
     status: generationKnowledgePackBinding.status,
     policyVersion: generationKnowledgePackBinding.resolution.policyVersion,

@@ -136,7 +136,7 @@ const getDraftOutputType = (activeDraft = {}) => {
 const detectUnsafeRequest = (prompt) =>
   UNSAFE_REQUEST_PATTERNS.some((pattern) => pattern.test(prompt))
 
-const classifyIntent = ({ prompt, hasActiveDraft = false } = {}) => {
+export const classifyOutcomeStudioRequestIntent = ({ prompt, hasActiveDraft = false } = {}) => {
   if (!prompt) {
     return {
       type: OUTCOME_STUDIO_REQUEST_INTENT_TYPES.AMBIGUOUS,
@@ -454,7 +454,7 @@ export const resolveOutcomeStudioRequestContext = ({
   const blockers = []
   const draft = getDraftReference(activeDraft)
   const hasActiveDraft = Boolean(draft.draftId && normalizeToken(draft.status || 'ACTIVE') !== 'DISCARDED')
-  const intent = classifyIntent({
+  const intent = classifyOutcomeStudioRequestIntent({
     prompt: normalizedPrompt,
     hasActiveDraft,
   })

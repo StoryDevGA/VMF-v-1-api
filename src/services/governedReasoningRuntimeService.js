@@ -47,6 +47,7 @@ import {
   assertOutcomeStudioProviderSafeRequest,
   buildOutcomeStudioProviderSafeContext,
   buildOutcomeStudioProviderSafeRequest,
+  assertOutcomeStudioGenerationContextConsumption,
   OUTCOME_STUDIO_EXECUTION_EVIDENCE_STATUSES,
 } from './outcomeStudioProviderSafeContextService.js'
 import {
@@ -78,6 +79,12 @@ const normalizeCapabilityKeys = (values) => Array.isArray(values)
   ? [...new Set(values.map(normalizeLegacyCapabilitySelectorKey).filter(Boolean))]
   : []
 const normalizeText = (value) => String(value ?? '').trim()
+const isStrictPlainObject = (value) => Boolean(
+  value
+  && typeof value === 'object'
+  && !Array.isArray(value)
+  && Object.getPrototypeOf(value) === Object.prototype,
+)
 const buildGrrId = (prefix) => `${prefix}_${randomUUID()}`
 const canUseMongoTransaction = () => mongoose.connection.readyState === 1
 
@@ -938,6 +945,7 @@ const buildLiveTestRequestFingerprint = ({
   providerDescriptor,
   runtimeInstance,
   safeRequest,
+  generationContextConsumptionFingerprint = '',
 }) => hashSafeValue({
   fingerprintVersion: 'GRR_REQUEST_V2',
   manifestQuery: buildManifestQuery({ payload, runtimeInstance }),
@@ -953,6 +961,7 @@ const buildLiveTestRequestFingerprint = ({
   draftContext: safeRequest.draftContext,
   providerContextContractVersion,
   providerContextBindingFingerprint,
+  ...(generationContextConsumptionFingerprint ? { generationContextConsumptionFingerprint } : {}),
 })
 
 const buildTruthSource = (truthContext = {}) => {
@@ -1701,6 +1710,37 @@ const buildRequestFingerprint = ({ payload = {}, runtimeInstance = {} } = {}) =>
   providerRequest: buildProviderRequestProjection(payload),
 })
 
+const assertOutcomeStudioGenerationCompositionContract = ({
+  composition,
+  methodGuidance,
+  errorIdentity,
+} = {}) => {
+  const outputBinding = composition?.outputBinding
+  const ledger = composition?.businessFactLedger
+  const validOutputBinding = isStrictPlainObject(outputBinding)
+    && typeof outputBinding.outputTypeKey === 'string'
+    && outputBinding.outputTypeKey.trim()
+    && typeof outputBinding.outputSchemaKey === 'string'
+    && outputBinding.outputSchemaKey.trim()
+    && typeof outputBinding.styleKey === 'string'
+    && outputBinding.styleKey.trim()
+    && Array.isArray(outputBinding.outputTypeStructure)
+    && outputBinding.outputTypeStructure.length > 0
+    && Array.isArray(outputBinding.requiredSections)
+    && outputBinding.requiredSections.length > 0
+  if (!isStrictPlainObject(composition)
+    || composition.contractVersion !== 'outcome-studio.evidence-to-composition.v1'
+    || composition.status !== 'READY'
+    || !isStrictPlainObject(ledger)
+    || !Array.isArray(ledger.facts)
+    || ledger.facts.length === 0
+    || !validOutputBinding
+    || !Array.isArray(methodGuidance)
+    || methodGuidance.length === 0) {
+    throw providerSafeContextBlocked(errorIdentity)
+  }
+}
+
 export const createGovernedReasoningExecution = async ({
   actorUserId,
   auditRequest,
@@ -1716,6 +1756,23 @@ export const createGovernedReasoningExecution = async ({
         providerContextContractVersion: liveTest.providerContextContractVersion,
       }
     : undefined
+  if (deps.requireGenerationContextConsumption !== undefined
+    && typeof deps.requireGenerationContextConsumption !== 'boolean') {
+    throw providerSafeContextBlocked(providerContextErrorIdentity)
+  }
+  const compositionSupplied = deps.evidenceComposition !== undefined
+  if (deps.requireGenerationContextConsumption === true && !compositionSupplied) {
+    throw providerSafeContextBlocked(providerContextErrorIdentity)
+  }
+  const usesGenerationContextConsumption = liveTest.executionMode === 'LIVE_TEST'
+    && (compositionSupplied || deps.requireGenerationContextConsumption === true)
+  if (usesGenerationContextConsumption) {
+    assertOutcomeStudioGenerationCompositionContract({
+      composition: deps.evidenceComposition,
+      methodGuidance: deps.methodGuidance,
+      errorIdentity: providerContextErrorIdentity,
+    })
+  }
   const idempotencyKey = normalizeText(payload.idempotencyKey)
   let effectivePayload = payload
   let safeRequest = null
@@ -1753,6 +1810,38 @@ export const createGovernedReasoningExecution = async ({
         scopes,
         permission: 'VMF_UPDATE',
       })
+  let frameworkPackage
+  let truthContext
+  let manifest
+  let binding
+  let validatedGenerationContextConsumption = null
+  if (usesGenerationContextConsumption) {
+    frameworkPackage = typeof deps.resolveFrameworkPackage === 'function'
+      ? await deps.resolveFrameworkPackage(runtimeInstance)
+      : await resolveFrameworkPackage(runtimeInstance)
+    truthContext = buildCertifiedTruthContext({ frameworkPackage, runtimeInstance })
+    assertCertifiedTruthReady(truthContext)
+    const manifestQuery = buildManifestQuery({ payload: effectivePayload, runtimeInstance })
+    ;({ manifest, binding } = await resolveKnowledgeBinding({
+      deps,
+      manifestId: payload.manifestId,
+      query: manifestQuery,
+    }))
+    assertKnowledgeBindingReady({ manifest, binding })
+    try {
+      validatedGenerationContextConsumption = assertOutcomeStudioGenerationContextConsumption({
+        compositionPackage: deps.evidenceComposition,
+        executionBindings: buildKnowledgeExecutionBindings(binding),
+        generationContextConsumption: deps.generationContextConsumption,
+        generationContextConsumptionFingerprint: deps.generationContextConsumptionFingerprint,
+        knowledgeSelection: buildGovernedReasoningProviderSelection(binding),
+        methodGuidance: deps.methodGuidance,
+      })
+    } catch (error) {
+      if (error?.code === 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED') throw error
+      throw providerSafeContextBlocked(providerContextErrorIdentity)
+    }
+  }
   let requestFingerprint
   if (liveTest.executionMode === 'LIVE_TEST') {
     requestFingerprint = buildLiveTestRequestFingerprint({
@@ -1762,6 +1851,8 @@ export const createGovernedReasoningExecution = async ({
       providerDescriptor: liveTest.providerDescriptor,
       runtimeInstance,
       safeRequest,
+      generationContextConsumptionFingerprint: validatedGenerationContextConsumption
+        ?.generationContextConsumptionFingerprint,
     })
   } else {
     requestFingerprint = buildRequestFingerprint({ payload, runtimeInstance })
@@ -1774,19 +1865,20 @@ export const createGovernedReasoningExecution = async ({
   })
   if (existingExecution) return existingExecution
 
-  const frameworkPackage = typeof deps.resolveFrameworkPackage === 'function'
-    ? await deps.resolveFrameworkPackage(runtimeInstance)
-    : await resolveFrameworkPackage(runtimeInstance)
-  const truthContext = buildCertifiedTruthContext({ frameworkPackage, runtimeInstance })
-  assertCertifiedTruthReady(truthContext)
-
-  const manifestQuery = buildManifestQuery({ payload: effectivePayload, runtimeInstance })
-  const { manifest, binding } = await resolveKnowledgeBinding({
-    deps,
-    manifestId: payload.manifestId,
-    query: manifestQuery,
-  })
-  assertKnowledgeBindingReady({ manifest, binding })
+  if (!usesGenerationContextConsumption) {
+    frameworkPackage = typeof deps.resolveFrameworkPackage === 'function'
+      ? await deps.resolveFrameworkPackage(runtimeInstance)
+      : await resolveFrameworkPackage(runtimeInstance)
+    truthContext = buildCertifiedTruthContext({ frameworkPackage, runtimeInstance })
+    assertCertifiedTruthReady(truthContext)
+    const manifestQuery = buildManifestQuery({ payload: effectivePayload, runtimeInstance })
+    ;({ manifest, binding } = await resolveKnowledgeBinding({
+      deps,
+      manifestId: payload.manifestId,
+      query: manifestQuery,
+    }))
+    assertKnowledgeBindingReady({ manifest, binding })
+  }
 
   const knowledgeContext = buildKnowledgeContext({ manifest, binding, payload: effectivePayload })
   let providerContext
@@ -1802,6 +1894,13 @@ export const createGovernedReasoningExecution = async ({
         executionBindings: buildKnowledgeExecutionBindings(binding),
         boundarySelection: buildGovernedReasoningBoundarySelection(binding),
         boundaryExecutionBindings: buildBoundaryExecutionBindings(binding),
+        compositionPackage: deps.evidenceComposition,
+        methodGuidance: deps.methodGuidance,
+        governanceConstraints: deps.governanceConstraints,
+        generationContextConsumption: validatedGenerationContextConsumption
+          ?.generationContextConsumption,
+        generationContextConsumptionFingerprint: validatedGenerationContextConsumption
+          ?.generationContextConsumptionFingerprint,
         captureExecutionEvidence: (receipt) => {
           executionEvidence = receipt
         },

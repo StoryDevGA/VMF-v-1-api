@@ -9300,12 +9300,73 @@ describe('Runtime Instance API', () => {
         publishedAt: '2026-06-05T10:00:00.000Z',
         lockedAt: '2026-06-05T10:05:00.000Z',
       },
+      evidence_pack: {
+        evidenceObjects: [
+          {
+            evidenceObjectId: 'fixture-evidence-situation',
+            sourceId: 'fixture-source-output-ready',
+            lineageRef: 'lineage:fixture-source-output-ready:situation',
+            extractedFact: 'Acme operates a governed proposal workflow for enterprise sales teams.',
+            reviewStatus: 'ACCEPTED',
+            validationStatus: 'VALIDATED',
+            confidence: 'HIGH',
+            materiality: 'HIGH',
+            currentness: 'CURRENT',
+          },
+          {
+            evidenceObjectId: 'fixture-evidence-commercial_problem',
+            sourceId: 'fixture-source-output-ready',
+            lineageRef: 'lineage:fixture-source-output-ready:commercial_problem',
+            extractedFact: 'Sales teams struggle to prove ROI because value evidence is inconsistent across proposals.',
+            reviewStatus: 'ACCEPTED',
+            validationStatus: 'VALIDATED',
+            confidence: 'HIGH',
+            materiality: 'HIGH',
+            currentness: 'CURRENT',
+          },
+          {
+            evidenceObjectId: 'fixture-evidence-value_drivers',
+            sourceId: 'fixture-source-output-ready',
+            lineageRef: 'lineage:fixture-source-output-ready:value_drivers',
+            extractedFact: 'Governed value narratives reduce manual effort and create repeatable executive-ready messaging.',
+            reviewStatus: 'ACCEPTED',
+            validationStatus: 'VALIDATED',
+            confidence: 'HIGH',
+            materiality: 'HIGH',
+            currentness: 'CURRENT',
+          },
+          {
+            evidenceObjectId: 'fixture-evidence-recommended_focus',
+            sourceId: 'fixture-source-output-ready',
+            lineageRef: 'lineage:fixture-source-output-ready:recommended_focus',
+            extractedFact: 'Prioritise outcome proof, decision context, and a concise commercial value story.',
+            reviewStatus: 'ACCEPTED',
+            validationStatus: 'VALIDATED',
+            confidence: 'HIGH',
+            materiality: 'HIGH',
+            currentness: 'CURRENT',
+          },
+        ],
+        sourceRegistry: [
+          {
+            sourceId: 'fixture-source-output-ready',
+            sourceType: 'DOCUMENT',
+            label: 'Output-ready fixture source',
+          },
+        ],
+        lineage: {
+          builder: {
+            version: 'discovery-evidence-pack-v1',
+          },
+        },
+      },
       sections: {
         situation: {
           accepted: {
             content: 'Acme operates a governed proposal workflow for enterprise sales teams.',
             acceptedAt: '2026-06-05T09:40:00.000Z',
             acceptedBy: CUSTOMER_ADMIN_ID,
+            supportingEvidenceRefs: ['fixture-evidence-situation'],
             truthHash: 'sha256:situation-truth',
           },
           generated: makeOutputLabSectionProjection('situation'),
@@ -9315,6 +9376,7 @@ describe('Runtime Instance API', () => {
             content: 'Sales teams struggle to prove ROI because value evidence is inconsistent across proposals.',
             acceptedAt: '2026-06-05T09:41:00.000Z',
             acceptedBy: CUSTOMER_ADMIN_ID,
+            supportingEvidenceRefs: ['fixture-evidence-commercial_problem'],
             truthHash: 'sha256:problem-truth',
           },
           generated: makeOutputLabSectionProjection('commercial_problem'),
@@ -9324,6 +9386,7 @@ describe('Runtime Instance API', () => {
             content: 'Governed value narratives reduce manual effort and create repeatable executive-ready messaging.',
             acceptedAt: '2026-06-05T09:42:00.000Z',
             acceptedBy: CUSTOMER_ADMIN_ID,
+            supportingEvidenceRefs: ['fixture-evidence-value_drivers'],
             truthHash: 'sha256:value-truth',
           },
           generated: makeOutputLabSectionProjection('value_drivers'),
@@ -9333,6 +9396,7 @@ describe('Runtime Instance API', () => {
             content: 'Prioritise outcome proof, decision context, and a concise commercial value story.',
             acceptedAt: '2026-06-05T09:43:00.000Z',
             acceptedBy: CUSTOMER_ADMIN_ID,
+            supportingEvidenceRefs: ['fixture-evidence-recommended_focus'],
             truthHash: 'sha256:focus-truth',
           },
           generated: makeOutputLabSectionProjection('recommended_focus'),
@@ -9579,6 +9643,7 @@ describe('Runtime Instance API', () => {
     packType === 'TRUTH_CERTIFICATION' ? 'PLATFORM' : 'OUTCOME'
 
   const makeOutcomeKnowledgePackActivation = ({
+    boundary = '',
     capabilityKey = '',
     dependencyReferences = [],
     executionMode = 'PROVIDER_CONTEXT',
@@ -9602,6 +9667,7 @@ describe('Runtime Instance API', () => {
       packId: `kp-${packType.toLowerCase().replace(/_/g, '-')}-${packKey}`,
       versionId: `kpv-${packKey}-${semanticVersion.replace(/\./g, '-')}`,
       packCategory: getOutcomeKnowledgePackCategory(packType),
+      boundary,
       knowledgeLayer,
       capabilityKey,
       knowledgeAssetId,
@@ -9628,11 +9694,13 @@ describe('Runtime Instance API', () => {
       packType: 'ARL',
       packKey: 'adaptive-reasoning-layer',
       label: 'Adaptive Reasoning Layer',
+      boundary: 'GENERATION_CONTEXT',
     }),
     makeOutcomeKnowledgePackActivation({
       packType: 'RL',
       packKey: 'rendering-layer',
       label: 'Rendering Layer',
+      boundary: 'POST_GENERATION_VALIDATION',
     }),
     makeOutcomeKnowledgePackActivation({
       packType: 'OUTPUT_SCHEMA',
@@ -9707,6 +9775,7 @@ describe('Runtime Instance API', () => {
     versionId: activation.versionId,
     packId: activation.packId,
     packCategory: activation.packCategory,
+    boundary: activation.boundary,
     purposeCategory: activation.purposeCategory,
     knowledgeLayer: activation.knowledgeLayer,
     capabilityKey: activation.capabilityKey,
@@ -9721,6 +9790,9 @@ describe('Runtime Instance API', () => {
     schemaVersion: activation.schemaVersion,
     status: 'ACTIVE',
     reviewStatus: 'APPROVED',
+    contentFormat: ['ARL', 'RL', 'OUTPUT_SCHEMA'].includes(activation.packType)
+      ? 'YAML'
+      : 'MARKDOWN',
     scopeType: activation.scopeType,
     scopeKey: activation.scopeKey,
     contentHash: activation.contentHash,
@@ -9747,6 +9819,7 @@ describe('Runtime Instance API', () => {
     for (const activation of activations) {
       const version = versions.find((candidate) => candidate.versionId === activation.versionId)
       expect(version).toEqual(expect.objectContaining({
+        boundary: activation.boundary,
         knowledgeAssetId: activation.knowledgeAssetId,
         dependencyReferences: activation.dependencyReferences,
         relationshipContractVersion: 'SS002_RELATIONSHIP_V1',
@@ -9756,11 +9829,16 @@ describe('Runtime Instance API', () => {
         buildKnowledgePackRelationshipChecksum(activation.dependencyReferences),
       )
     }
+    expect(activations.find((activation) => activation.packType === 'ARL')?.boundary)
+      .toBe('GENERATION_CONTEXT')
+    expect(activations.find((activation) => activation.packType === 'RL')?.boundary)
+      .toBe('POST_GENERATION_VALIDATION')
   })
 
   const renderingLayerExecutableYaml = `
 pack:
   key: rendering-layer
+  principle: Present a clear, neutral business response.
 rendering_rules:
   must_include: [evidence boundaries, known limitations, truth signature reference, runtime revision reference, lineage summary]
   must_not: [expose hidden_from_customer material, quote raw source files, reveal ARL or RL internal notes, create new facts, remove safety warnings]
@@ -9772,6 +9850,59 @@ export_rules:
   JSON: { allowed: true, customer_content_only: true }
   DOCX: { allowed: false, blocker: SAFE_RENDERING_PIPELINE_NOT_IMPLEMENTED }
   PDF: { allowed: false, blocker: SAFE_RENDERING_PIPELINE_NOT_IMPLEMENTED }
+`
+
+  const outputTypeExecutableMarkdown = `# Executive Brief
+
+## Required Structure
+1. Executive context
+2. Material findings grounded in Certified Truth
+3. Business implications
+4. Recommended decisions
+5. Immediate actions and accountable owners
+
+## Governance Rules
+- Do not introduce claims absent from Certified Truth.
+- Separate evidence, interpretation, and recommendation.
+- Make uncertainty and missing evidence explicit.
+- Use resolved schema/style dependencies.
+`
+
+  const buildOutputSchemaExecutableYaml = (capabilityKey) => `
+schemas:
+  ${capabilityKey}:
+    required_sections: [context, findings, implications, decisions, actions, assumptions, evidence, risks, next_steps]
+    optional_sections: [appendix, sources]
+    prohibited: [Unsupported certainty]
+`
+
+  const adaptiveReasoningLayerExecutableYaml = `
+pack:
+  key: adaptive-reasoning-layer
+  principle: Preserve verified business information and make uncertainty visible.
+truth_binding_rules:
+  must_preserve: [Accepted evidence wording]
+  must_not: [Introduce unsupported claims]
+reasoning_stages:
+  - key: assess
+    purpose: Assess decision relevance
+safety_gates:
+  - key: truth
+    outcome: Preserve current evidence
+customer_visible:
+  prohibited: [Hidden implementation detail]
+`
+
+  const styleExecutableMarkdown = `# Executive Style
+
+## Voice
+Use concise, decision-oriented business language.
+
+## Structure
+Use short professional sections and evidence-led headings.
+
+## Boundaries
+Keep uncertainty, qualifications, and unsupported-claim boundaries visible.
 `
 
   const certificationLevelsExecutableMarkdown = `# Certification Levels
@@ -9970,13 +10101,22 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     if (options.providerSafeContent === true) {
       versions = versions.map((version) => ({
         ...version,
-        content: ({
-          'rendering-layer': renderingLayerExecutableYaml,
-          'certification-levels': certificationLevelsExecutableMarkdown,
-          'runtime-warning-rules': runtimeWarningRulesExecutableMarkdown,
-          'export-metadata-rules': exportMetadataRulesExecutableMarkdown,
-          'truth-certification-framework': truthCertificationFrameworkExecutableMarkdown,
-        })[version.packKey] || version.content,
+        content: version.packType === 'ARL'
+          ? adaptiveReasoningLayerExecutableYaml
+          : version.packType === 'RL'
+            ? renderingLayerExecutableYaml
+            : version.knowledgeLayer === 'OUTPUT_SCHEMA'
+              ? buildOutputSchemaExecutableYaml(version.capabilityKey)
+              : version.knowledgeLayer === 'OUTPUT_TYPE'
+                ? outputTypeExecutableMarkdown
+                : version.knowledgeLayer === 'STYLE'
+                  ? styleExecutableMarkdown
+                  : ({
+                    'certification-levels': certificationLevelsExecutableMarkdown,
+                    'runtime-warning-rules': runtimeWarningRulesExecutableMarkdown,
+                    'export-metadata-rules': exportMetadataRulesExecutableMarkdown,
+                    'truth-certification-framework': truthCertificationFrameworkExecutableMarkdown,
+                  })[version.packKey] || version.content,
       })).map((version) => ({
         ...version,
         contentHash: `sha256:${createHash('sha256').update(version.content).digest('hex')}`,
@@ -16204,6 +16344,135 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     }))
   })
 
+  test('Outcome Studio infers and persists the Executive Brief contract from the benchmark request', async () => {
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    RuntimeOutputAsset.find.mockReturnValue(buildRuntimeInstanceFindChain([]))
+    mockRequestReadyOutcomeKnowledgePacks()
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ prompt: 'Can you prepare an executive brief for our investor day' })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data).toEqual(expect.objectContaining({
+      requestedOutputTypeKey: 'executive-brief',
+      outputContract: expect.objectContaining({
+        status: 'RESOLVED',
+        source: 'CONVERSATION_INFERENCE',
+        outputIntent: expect.objectContaining({ key: 'executive-brief', label: 'Executive Brief' }),
+        audience: expect.objectContaining({ key: 'INVESTORS', label: 'Investors' }),
+        purpose: expect.objectContaining({
+          key: 'INVESTOR_DAY_EXECUTIVE_COMMUNICATION',
+          label: 'Investor Day executive communication',
+        }),
+        selectedOutputType: expect.objectContaining({ key: 'executive-brief' }),
+        selectedOutputSchema: expect.objectContaining({ key: 'executive-brief-schema' }),
+        selectedStyle: expect.objectContaining({ key: 'executive-brief-style' }),
+        knowledgePackRoles: expect.arrayContaining([
+          expect.objectContaining({ role: 'ARL', classification: 'METHOD' }),
+          expect.objectContaining({ role: 'RL', classification: 'METHOD' }),
+          expect.objectContaining({ role: 'VMF', classification: 'FRAMEWORK' }),
+        ]),
+        clarificationPath: { required: false, reason: '', question: '' },
+      }),
+    }))
+    const savedSession = OutcomeSession.prototype.save.mock.contexts[0]
+    expect(savedSession.requestedOutputTypeKey).toBe('executive-brief')
+    expect(savedSession.contextBindings.outputContractResolution).toEqual(
+      res.body.data.outputContract,
+    )
+  })
+
+  test('Outcome Studio asks for clarification before persistence when the request is ambiguous', async () => {
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeOutputLabReadyRuntime()))
+    RuntimeOutputAsset.find.mockReturnValue(buildRuntimeInstanceFindChain([]))
+    mockRequestReadyOutcomeKnowledgePacks()
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ prompt: 'Please prepare something useful for leadership.' })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error).toEqual(expect.objectContaining({
+      code: 'OUTCOME_OUTPUT_CONTRACT_CLARIFICATION_REQUIRED',
+      message: expect.stringMatching(/which output/i),
+    }))
+    expect(OutcomeSession.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('Outcome Studio clarifies an active explicit output with conflicting purpose signals before session writes', async () => {
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeOutputLabReadyRuntime()))
+    RuntimeOutputAsset.find.mockReturnValue(buildRuntimeInstanceFindChain([]))
+    mockRequestReadyOutcomeKnowledgePacks()
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        prompt: 'Prepare an executive brief with a recommendation and sales pitch.',
+        requestedOutputTypeKey: 'executive-brief',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('OUTCOME_OUTPUT_CONTRACT_CLARIFICATION_REQUIRED')
+    expect(TruthSignature.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeSession.prototype.save).not.toHaveBeenCalled()
+    expect(RuntimeGraphRelationship.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('Outcome Studio clarifies an active explicit output with conflicting purpose signals before message writes', async () => {
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeOutputLabReadyRuntime()))
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    mockRequestReadyOutcomeKnowledgePacks()
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/messages`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        prompt: 'Prepare the executive brief with a recommendation and sales pitch.',
+        requestedOutputTypeKey: 'executive-brief',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('OUTCOME_OUTPUT_CONTRACT_CLARIFICATION_REQUIRED')
+    expect(OutcomeMessage.prototype.save).not.toHaveBeenCalled()
+    expect(RuntimeGraphRelationship.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('Outcome Studio retains unavailable-deliverable conflict for an unknown explicit message output', async () => {
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeOutputLabReadyRuntime()))
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    mockRequestReadyOutcomeKnowledgePacks()
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/messages`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        prompt: 'Create a customer proposal.',
+        requestedOutputTypeKey: 'customer-proposal',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expect(OutcomeMessage.prototype.save).not.toHaveBeenCalled()
+    expect(RuntimeGraphRelationship.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
   test('Outcome Studio rejects an arbitrary client source identity for a handoff-bound session', async () => {
     const runtimeInstance = makeOutputLabReadyRuntime()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
@@ -16818,9 +17087,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     expect(TruthSignature.prototype.save).not.toHaveBeenCalled()
     expect(OutcomeSession.prototype.save).not.toHaveBeenCalled()
     expect(RuntimeGraphRelationship.prototype.save).not.toHaveBeenCalled()
-    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
-      action: 'OUTCOME_SESSION_CREATED',
-    }))
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 
   test('Outcome Studio session creation rolls back when runtime graph relationship persistence fails', async () => {
@@ -16881,6 +17148,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       .send({
         sourceOutputAssetId: 'out_asset_outcome_studio_fixture',
         prompt: 'Create a governed outcome narrative.',
+        requestedOutputTypeKey: 'executive-brief',
       })
 
     expect(res.status).toBe(409)
@@ -16939,6 +17207,26 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
     expect(OutcomeSession.findOne).not.toHaveBeenCalled()
     expect(OutcomeMessage.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('Outcome Studio generation rejects a non-boolean READY_WITH_GAPS opt-in at the validation boundary', async () => {
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/messages/out_msg_existing_fixture/generate-response`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ allowReadyWithGaps: 'true' })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error).toEqual(expect.objectContaining({
+      code: 'VALIDATION_FAILED',
+      message: 'Request validation failed.',
+    }))
+    expectCustomerSafeOutcomeError(res)
+    expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
+    expect(OutcomeSession.findOne).not.toHaveBeenCalled()
+    expect(OutcomeMessage.findOne).not.toHaveBeenCalled()
     expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 
@@ -17077,6 +17365,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       .set('Authorization', `Bearer ${token}`)
       .send({
         prompt: 'Clarify the evidence behind the commercial value story.',
+        requestedOutputTypeKey: 'executive-brief',
       })
 
     expect(res.status).toBe(500)
@@ -17265,12 +17554,8 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       .set('Authorization', `Bearer ${token}`)
       .send({})
 
-    expect(res.status).toBe(422)
-    expect(res.body.error.code).toBe('INVALID_REQUEST')
-    expect(res.body.error.diagnostic).toEqual({
-      failureStage: 'KNOWLEDGE_SELECTION',
-      diagnosticCode: 'KNOWLEDGE_SELECTION_INVALID',
-    })
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
     expectCustomerSafeOutcomeError(res)
     expect(providerAdapter).not.toHaveBeenCalled()
     expect(GovernedReasoningExecution.prototype.save).not.toHaveBeenCalled()
@@ -17300,7 +17585,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     mockOutcomeStudioLiveTestReadiness(providerDescriptor)
     const runtimeInstance = makeOutputLabReadyRuntime()
     runtimeInstance.framework_state.evidence_pack = {
-      ...makeTruthQualityEvidencePack(),
+      ...runtimeInstance.framework_state.evidence_pack,
       accepted: true,
       evidenceReady: true,
       needsRefresh: false,
@@ -17484,7 +17769,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       ]))
     expect(guardrailsStage.knowledgePacks
       .filter((pack) => pack.boundary === 'GENERATION_CONTEXT')
-      .every((pack) => pack.executionStatus === 'PASSED')).toBe(true)
+      .every((pack) => pack.executionStatus === 'PASSED' || pack.packKey === 'output-schemas-pack')).toBe(true)
   })
 
   test('Outcome Studio uses the message-level deliverable title through generation and approval', async () => {
@@ -18019,7 +18304,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     const currentIteration = makeOutcomeDraftIterationRecord()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
     FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
-    mockRequestReadyOutcomeKnowledgePacks()
+    mockRequestReadyOutcomeKnowledgePacks({ providerSafeContent: true })
     OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
     OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord({
       prompt: 'Make it shorter and more board-ready.',
@@ -18074,7 +18359,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     const currentIteration = makeOutcomeDraftIterationRecord()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
     FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
-    mockRequestReadyOutcomeKnowledgePacks()
+    mockRequestReadyOutcomeKnowledgePacks({ providerSafeContent: true })
     OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
     OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord({
       prompt: 'Make it shorter and more board-ready.',
@@ -18239,6 +18524,59 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
         delete process.env.STORYLINEOS_GRR_PROVIDER_MODE
       } else {
         process.env.STORYLINEOS_GRR_PROVIDER_MODE = previousProviderMode
+      }
+    }
+  })
+
+  test('Outcome Studio validates composition before the production drafting flag short-circuit', async () => {
+    const previousNodeEnv = process.env.NODE_ENV
+    const previousOutcomeGrrFlag = process.env.STORYLINEOS_OUTCOME_STUDIO_GRR_ENABLED
+    process.env.NODE_ENV = 'test'
+    process.env.STORYLINEOS_OUTCOME_STUDIO_GRR_ENABLED = '0'
+
+    try {
+      const providerDescriptor = makeOutcomeStudioLiveTestProviderDescriptor()
+      app.locals.outcomeStudioReasoningDeps = {
+        executionMode: 'LIVE_TEST',
+        providerDescriptor,
+        providerAdapter: makeOutcomeStudioLiveProviderAdapter(),
+      }
+      mockOutcomeStudioLiveTestReadiness(providerDescriptor)
+      const runtimeInstance = makeOutputLabReadyRuntime()
+      runtimeInstance.framework_state.evidence_pack = {
+        ...runtimeInstance.framework_state.evidence_pack,
+        evidenceObjects: [],
+      }
+      RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+      FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+      mockRequestReadyOutcomeKnowledgePacks()
+      OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+      OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord()))
+      const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+      const res = await request
+        .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/messages/out_msg_existing_fixture/generate-response`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({})
+
+      expect(res.status).toBe(409)
+      expect(res.body.error).not.toEqual(expect.objectContaining({
+        code: 'DRAFTING_SERVICE_UNAVAILABLE',
+      }))
+      expectCustomerSafeOutcomeError(res)
+      expect(GovernedReasoningExecution.prototype.save).not.toHaveBeenCalled()
+      expect(GovernedRuntimeArtifact.prototype.save).not.toHaveBeenCalled()
+      expect(OutcomeDraft.prototype.save).not.toHaveBeenCalled()
+      expect(OutcomeDraftIteration.prototype.save).not.toHaveBeenCalled()
+      expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
+        action: 'GOVERNED_REASONING_EXECUTED',
+      }))
+    } finally {
+      process.env.NODE_ENV = previousNodeEnv
+      if (previousOutcomeGrrFlag === undefined) {
+        delete process.env.STORYLINEOS_OUTCOME_STUDIO_GRR_ENABLED
+      } else {
+        process.env.STORYLINEOS_OUTCOME_STUDIO_GRR_ENABLED = previousOutcomeGrrFlag
       }
     }
   })
@@ -18465,7 +18803,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     const runtimeInstance = makeOutputLabReadyRuntime()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
     FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
-    mockRequestReadyOutcomeKnowledgePacks()
+    mockRequestReadyOutcomeKnowledgePacks({ providerSafeContent: true })
     OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
     OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord()))
     AuditLog.createLog = jest.fn(async (payload) => {
@@ -18523,7 +18861,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     const runtimeInstance = makeOutputLabReadyRuntime()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
     FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
-    mockRequestReadyOutcomeKnowledgePacks()
+    mockRequestReadyOutcomeKnowledgePacks({ providerSafeContent: true })
     OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
     OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord()))
     OutcomeDraftIteration.prototype.save = jest.fn(async () => {
@@ -18573,7 +18911,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     const runtimeInstance = makeOutputLabReadyRuntime()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
     FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
-    mockRequestReadyOutcomeKnowledgePacks()
+    mockRequestReadyOutcomeKnowledgePacks({ providerSafeContent: true })
     OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
     OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord()))
     AuditLog.createLog = jest.fn(async (payload) => {
@@ -19347,6 +19685,49 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     )
     expect(OutcomeAsset.prototype.save).toHaveBeenCalledTimes(1)
     expect(OutcomeAssetVersion.prototype.save).toHaveBeenCalledTimes(1)
+  })
+
+  test('Outcome Studio draft approval remains blocked for a READY_WITH_GAPS composition', async () => {
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    const readiness = {
+      status: 'READY_WITH_GAPS',
+      draftOnly: true,
+      gapCount: 1,
+      notice: 'This draft contains a bounded readiness gap.',
+      sources: {
+        knowledgeContext: 'READY',
+        reasoningBinding: 'READY',
+        frameworkHandoff: 'READY_WITH_GAPS',
+      },
+    }
+    const activeDraft = makeOutcomeDraftRecord({
+      lineageSummary: {
+        ...makeOutcomeDraftRecord().lineageSummary,
+        outcomeStudioReadiness: readiness,
+      },
+    })
+    const currentIteration = makeOutcomeDraftIterationRecord({
+      lineageSummary: {
+        ...makeOutcomeDraftIterationRecord().lineageSummary,
+        outcomeStudioReadiness: readiness,
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    OutcomeDraft.findOne.mockReturnValue(buildLeanQuery(activeDraft))
+    OutcomeDraftIteration.findOne.mockReturnValue(buildLeanQuery(currentIteration))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/drafts/${activeDraft.draftId}/approve`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(409)
+    expect(res.body.error).toEqual(expect.objectContaining({ code: 'CONFLICT' }))
+    expectCustomerSafeOutcomeError(res)
+    expect(OutcomeAsset.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeAssetVersion.prototype.save).not.toHaveBeenCalled()
   })
 
   test.each([

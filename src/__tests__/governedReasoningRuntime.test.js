@@ -7,6 +7,7 @@ import {
   createGovernedReasoningExecution,
 } from '../services/governedReasoningRuntimeService.js'
 import {
+  buildOutcomeStudioGenerationContextConsumption,
   buildOutcomeStudioProviderSafeContext,
 } from '../services/outcomeStudioProviderSafeContextService.js'
 
@@ -292,6 +293,111 @@ const makeLiveProviderContext = () => ({
     'NO_SECRETS_OR_PERSONAL_DATA',
     'FAIL_CLOSED_ON_UNSAFE_CONTEXT',
   ],
+})
+
+const makeLiveProviderComposition = () => ({
+  contractVersion: 'outcome-studio.provider-request-manifest.v1',
+  businessRequest: { ...makeLiveSafeRequest().businessRequest },
+  businessFacts: [{
+    statement: 'The customer has a governed decision process.',
+    qualification: ['Use as supplied business information.'],
+    claimPermission: 'SUPPORTED_FACT_ONLY',
+    currentness: 'CURRENT',
+    sectionKeys: ['situation'],
+    sourceAttribution: {
+      sourceType: 'GOVERNED_SOURCE',
+      sourceLabel: 'Accepted business source',
+    },
+  }],
+  outputContract: {
+    contractVersion: 'outcome-studio.conversation-output-resolution.v1',
+    status: 'RESOLVED',
+    source: 'LEGACY_BOUND_SESSION',
+    confidence: 'HIGH',
+    inferenceReason: 'Legacy session fixture resolution.',
+    outputIntent: { key: 'CUSTOMER_PROPOSAL', label: 'Customer Proposal', version: '1.0.0' },
+    audience: null,
+    purpose: null,
+    selectedOutputType: { key: 'CUSTOMER_PROPOSAL', label: 'Customer Proposal', version: '1.0.0' },
+    selectedOutputSchema: { key: 'CUSTOMER_PROPOSAL_SCHEMA', label: 'Customer Proposal Schema', version: '1.0.0' },
+    selectedStyle: { key: 'EXECUTIVE', label: 'Executive', version: '1.0.0' },
+    knowledgePackRoles: [
+      { role: 'OUTPUT_TYPE', classification: 'OUTPUT_TYPE', key: 'CUSTOMER_PROPOSAL', label: 'Customer Proposal', version: '1.0.0' },
+      { role: 'OUTPUT_SCHEMA', classification: 'OUTPUT_SCHEMA', key: 'CUSTOMER_PROPOSAL_SCHEMA', label: 'Customer Proposal Schema', version: '1.0.0' },
+      { role: 'STYLE', classification: 'STYLE', key: 'EXECUTIVE', label: 'Executive', version: '1.0.0' },
+      { role: 'ARL', classification: 'METHOD', key: 'arl', label: 'ARL', version: 'arl-v1' },
+    ],
+    clarificationPath: { required: false, reason: '', question: '' },
+  },
+  outputStructure: {
+    outputTypeKey: 'CUSTOMER_PROPOSAL',
+    outputTypeVersion: '1.0.0',
+    outputTypeStructure: [
+      'Executive context',
+      'Material findings grounded in supplied business information',
+      'Business implications',
+      'Recommended decisions',
+      'Immediate actions and accountable owners',
+    ],
+    outputSchemaKey: 'CUSTOMER_PROPOSAL_SCHEMA',
+    outputSchemaVersion: '1.0.0',
+    styleKey: 'EXECUTIVE',
+    styleVersion: '1.0.0',
+    requiredSections: ['Executive summary', 'Priorities'],
+    optionalSections: [],
+  },
+  styleGuidance: ['Use concise, neutral business language.'],
+  methodGuidance: [{
+    role: 'ARL',
+    boundary: 'GENERATION_CONTEXT',
+    version: 'arl-v1',
+    guidance: 'Keep interpretation tied to supplied business information.',
+  }],
+  governanceConstraints: ['Do not invent unsupported claims.'],
+  readiness: {
+    status: 'READY',
+    draftOnly: false,
+    gapCount: 0,
+    notice: '',
+  },
+  safetyManifest: {
+    manifestVersion: 'outcome-studio.provider-request-manifest.v1',
+    providerKey: 'approved-provider',
+    model: 'approved-model',
+    providerMode: 'LIVE_TEST',
+    environment: 'TEST',
+    contentSafetyStatus: 'PASSED',
+    secretAndPiiCheck: 'PASSED',
+    rawEvidenceCheck: 'PASSED',
+    internalTermCheck: 'PASSED',
+    requiredEvidenceRefs: ['ref_0123456789abcdef'],
+    businessFactCount: 1,
+    omittedReferenceCount: 0,
+    contradictionCount: 0,
+    requiredSectionCount: 2,
+    styleGuidanceCount: 1,
+    methodGuidanceCount: 1,
+    governanceConstraintCount: 1,
+    readinessStatus: 'READY',
+    readinessGapCount: 0,
+    draftOnly: false,
+  },
+})
+
+const makeGenerationCompositionPackage = (overrides = {}) => ({
+  contractVersion: 'outcome-studio.evidence-to-composition.v1',
+  status: 'READY',
+  businessFactLedger: {
+    facts: [{
+      evidenceObjectId: 'evidence-object-1',
+      sourceId: 'source-1',
+      provenance: { lineageRef: 'lineage-1' },
+    }],
+    omitted: [],
+    contradictions: [],
+  },
+  outputBinding: makeLiveProviderComposition().outputStructure,
+  ...overrides,
 })
 
 const makeLiveAuthorization = (providerDescriptor = liveDescriptor, overrides = {}) => ({
@@ -1356,6 +1462,238 @@ describe('Governed Reasoning Runtime models and service', () => {
     }))
     expect(JSON.stringify(result.executionEvidence)).not.toMatch(/activationId|tenantId|customerId|prompt|rawContent/i)
     expect(GovernedReasoningExecution.prototype.save).toHaveBeenCalled()
+  })
+
+  test('passes an explicit composition seam to the provider context and persists only its safe manifest', async () => {
+    const methodGuidance = [{ role: 'ARL', boundary: 'GENERATION_CONTEXT', version: 'arl-v1', guidance: 'Keep interpretation tied to supplied business information.' }]
+    const providerComposition = makeLiveProviderComposition()
+    const compositionPackage = {
+      contractVersion: 'outcome-studio.evidence-to-composition.v1',
+      status: 'READY',
+      businessFactLedger: {
+        facts: [{
+          evidenceObjectId: 'evidence-object-1',
+          sourceId: 'source-1',
+          provenance: { lineageRef: 'lineage-1' },
+        }],
+        omitted: [],
+        contradictions: [],
+      },
+      outputBinding: providerComposition.outputStructure,
+    }
+    const directPacks = [
+      { role: 'OUTPUT_TYPE', versionId: 'kpv-output-type', contentHash: `sha256:${'a'.repeat(64)}`, knowledgeLayer: 'OUTPUT_TYPE', packType: 'OUTPUT_TYPE_DEFINITION' },
+      { role: 'OUTPUT_SCHEMA', versionId: 'kpv-output-schema', contentHash: `sha256:${'b'.repeat(64)}`, knowledgeLayer: 'OUTPUT_SCHEMA', packType: 'OUTPUT_SCHEMA' },
+      { role: 'ARL', versionId: 'kpv-arl', contentHash: `sha256:${'c'.repeat(64)}`, knowledgeLayer: 'REASONING', packType: 'ARL' },
+    ]
+    const consumption = buildOutcomeStudioGenerationContextConsumption({
+      compositionPackage,
+      directBindings: directPacks.map(({ role, versionId, contentHash }) => ({ role, versionId, contentHash })),
+      methodGuidance,
+    })
+    const knowledge = makeKnowledgeBinding()
+    knowledge.binding.providerContextPacks = directPacks.map((pack) => ({
+      versionId: pack.versionId,
+      contentHash: pack.contentHash,
+      knowledgeLayer: pack.knowledgeLayer,
+      executionMode: 'PROVIDER_CONTEXT',
+      packType: pack.packType,
+    }))
+    const buildProviderSafeContext = jest.fn(async ({ captureExecutionEvidence, compositionPackage: suppliedPackage, methodGuidance: suppliedGuidance, governanceConstraints, generationContextConsumption, generationContextConsumptionFingerprint }) => {
+      expect(suppliedPackage).toBe(compositionPackage)
+      expect(suppliedGuidance).toEqual(methodGuidance)
+      expect(governanceConstraints).toEqual(['Do not invent unsupported claims.'])
+      expect(generationContextConsumption).toEqual(consumption.generationContextConsumption)
+      expect(generationContextConsumptionFingerprint).toBe(consumption.generationContextConsumptionFingerprint)
+      captureExecutionEvidence({
+        contractVersion: 'outcome-studio.component-execution-evidence.v2',
+        providerContextContractVersion: 'OUTCOME_STUDIO_PROVIDER_SAFE_CONTEXT_V1',
+        providerRequestManifest: providerComposition,
+        packs: [],
+      })
+      return {
+        ...makeLiveProviderContext(),
+        composition: providerComposition,
+      }
+    })
+    const deps = makeLiveDeps({
+      buildProviderSafeContext,
+      evidenceComposition: compositionPackage,
+      methodGuidance,
+      governanceConstraints: ['Do not invent unsupported claims.'],
+      ...consumption,
+      resolveKnowledgeBinding: jest.fn().mockResolvedValue(knowledge),
+    })
+
+    const result = await createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      deps,
+      payload: makeLivePayload({ idempotencyKey: 'live-test-composition-manifest' }),
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })
+
+    expect(result.executionEvidence.providerRequestManifest).toEqual(providerComposition)
+    expect(JSON.stringify(result.executionEvidence)).not.toContain('evidenceObjectId')
+    expect(JSON.stringify(result.executionEvidence)).not.toContain('sourceId')
+    expect(deps.providerAdapter).toHaveBeenCalledWith({ providerContext: expect.objectContaining({ composition: providerComposition }) })
+    expect(GovernedReasoningExecution.prototype.save).toHaveBeenCalled()
+  })
+
+  test('rejects stale direct-consumption binding before live idempotency lookup', async () => {
+    const providerComposition = makeLiveProviderComposition()
+    const compositionPackage = {
+      contractVersion: 'outcome-studio.evidence-to-composition.v1',
+      status: 'READY',
+      businessFactLedger: {
+        facts: [{
+          evidenceObjectId: 'evidence-object-1',
+          sourceId: 'source-1',
+          provenance: { lineageRef: 'lineage-1' },
+        }],
+        omitted: [],
+        contradictions: [],
+      },
+      outputBinding: providerComposition.outputStructure,
+    }
+    const methodGuidance = [{ role: 'ARL', boundary: 'GENERATION_CONTEXT', version: 'arl-v1', guidance: 'Keep interpretation tied to supplied business information.' }]
+    const directPacks = [
+      { role: 'OUTPUT_TYPE', versionId: 'kpv-output-type', contentHash: `sha256:${'a'.repeat(64)}`, knowledgeLayer: 'OUTPUT_TYPE', packType: 'OUTPUT_TYPE_DEFINITION' },
+      { role: 'OUTPUT_SCHEMA', versionId: 'kpv-output-schema', contentHash: `sha256:${'b'.repeat(64)}`, knowledgeLayer: 'OUTPUT_SCHEMA', packType: 'OUTPUT_SCHEMA' },
+      { role: 'ARL', versionId: 'kpv-arl', contentHash: `sha256:${'c'.repeat(64)}`, knowledgeLayer: 'REASONING', packType: 'ARL' },
+    ]
+    const staleConsumption = buildOutcomeStudioGenerationContextConsumption({
+      compositionPackage,
+      directBindings: directPacks.map(({ role, versionId, contentHash }) => ({ role, versionId, contentHash })),
+      methodGuidance,
+    })
+    const knowledge = makeKnowledgeBinding()
+    knowledge.binding.providerContextPacks = directPacks.map((pack) => ({
+      versionId: pack.versionId,
+      contentHash: pack.role === 'OUTPUT_SCHEMA' ? `sha256:${'d'.repeat(64)}` : pack.contentHash,
+      knowledgeLayer: pack.knowledgeLayer,
+      executionMode: 'PROVIDER_CONTEXT',
+      packType: pack.packType,
+    }))
+    const deps = makeLiveDeps({
+      evidenceComposition: compositionPackage,
+      methodGuidance,
+      governanceConstraints: ['Do not invent unsupported claims.'],
+      ...staleConsumption,
+      resolveKnowledgeBinding: jest.fn().mockResolvedValue(knowledge),
+    })
+    GovernedReasoningExecution.findOne = jest.fn()
+
+    await expect(createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      deps,
+      payload: makeLivePayload({ idempotencyKey: 'stale-consumption-before-idempotency' }),
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })).rejects.toMatchObject({ code: 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED' })
+    expect(GovernedReasoningExecution.findOne).not.toHaveBeenCalled()
+    expect(deps.buildProviderSafeContext).not.toHaveBeenCalled()
+    expect(deps.providerAdapter).not.toHaveBeenCalled()
+  })
+
+  test.each([null, false, 0])('rejects primitive evidence composition %p before live authorization and persistence', async (evidenceComposition) => {
+    const deps = makeLiveDeps({
+      evidenceComposition,
+      methodGuidance: [{
+        role: 'ARL',
+        boundary: 'GENERATION_CONTEXT',
+        version: 'arl-v1',
+        guidance: 'Keep interpretation tied to supplied business information.',
+      }],
+    })
+
+    await expect(createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      deps,
+      payload: makeLivePayload({ idempotencyKey: `primitive-composition-${String(evidenceComposition)}` }),
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })).rejects.toMatchObject({ code: 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED' })
+
+    expect(deps.authorizeLiveTest).not.toHaveBeenCalled()
+    expect(deps.resolveRuntimeInstance).not.toHaveBeenCalled()
+    expect(GovernedReasoningExecution.findOne).not.toHaveBeenCalled()
+    expect(deps.buildProviderSafeContext).not.toHaveBeenCalled()
+    expect(deps.providerAdapter).not.toHaveBeenCalled()
+    expect(GovernedReasoningExecution.prototype.save).not.toHaveBeenCalled()
+  })
+
+  test('rejects partial evidence composition before live authorization and persistence', async () => {
+    const deps = makeLiveDeps({
+      evidenceComposition: {
+        contractVersion: 'outcome-studio.evidence-to-composition.v1',
+        status: 'READY',
+      },
+      methodGuidance: [{
+        role: 'ARL',
+        boundary: 'GENERATION_CONTEXT',
+        version: 'arl-v1',
+        guidance: 'Keep interpretation tied to supplied business information.',
+      }],
+    })
+
+    await expect(createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      deps,
+      payload: makeLivePayload({ idempotencyKey: 'partial-composition' }),
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })).rejects.toMatchObject({ code: 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED' })
+
+    expect(deps.authorizeLiveTest).not.toHaveBeenCalled()
+    expect(deps.resolveRuntimeInstance).not.toHaveBeenCalled()
+    expect(GovernedReasoningExecution.findOne).not.toHaveBeenCalled()
+    expect(deps.providerAdapter).not.toHaveBeenCalled()
+  })
+
+  test('rejects empty method guidance before live authorization and persistence', async () => {
+    const deps = makeLiveDeps({
+      evidenceComposition: makeGenerationCompositionPackage(),
+      methodGuidance: [],
+    })
+
+    await expect(createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      deps,
+      payload: makeLivePayload({ idempotencyKey: 'empty-method-guidance' }),
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })).rejects.toMatchObject({ code: 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED' })
+
+    expect(deps.authorizeLiveTest).not.toHaveBeenCalled()
+    expect(deps.resolveRuntimeInstance).not.toHaveBeenCalled()
+    expect(GovernedReasoningExecution.findOne).not.toHaveBeenCalled()
+    expect(deps.providerAdapter).not.toHaveBeenCalled()
+  })
+
+  test('requires the strict composition seam when the Outcome Studio generation path opts in', async () => {
+    const deps = makeLiveDeps({
+      requireGenerationContextConsumption: true,
+      methodGuidance: [{
+        role: 'ARL',
+        boundary: 'GENERATION_CONTEXT',
+        version: 'arl-v1',
+        guidance: 'Keep interpretation tied to supplied business information.',
+      }],
+    })
+
+    await expect(createGovernedReasoningExecution({
+      actorUserId: ACTOR_ID,
+      deps,
+      payload: makeLivePayload({ idempotencyKey: 'required-composition-missing' }),
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      scopes: {},
+    })).rejects.toMatchObject({ code: 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED' })
+
+    expect(deps.authorizeLiveTest).not.toHaveBeenCalled()
+    expect(deps.resolveRuntimeInstance).not.toHaveBeenCalled()
+    expect(GovernedReasoningExecution.findOne).not.toHaveBeenCalled()
+    expect(deps.providerAdapter).not.toHaveBeenCalled()
   })
 
   test('keeps RL out of provider selection when legacy binding metadata lists it as provider context', async () => {

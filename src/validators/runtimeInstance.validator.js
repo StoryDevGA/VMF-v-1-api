@@ -1001,6 +1001,12 @@ const runtimeOutcomeAssetExportParamsSchema = runtimeOutcomeAssetParamsSchema.ex
 })
 
 const emptyRuntimeOutputMutationSchema = z.object({}).strict()
+const generateRuntimeOutcomeResponseSchema = z.object({
+  allowReadyWithGaps: z
+    .boolean({ invalid_type_error: 'allowReadyWithGaps must be a boolean' })
+    .optional()
+    .default(false),
+}).strict()
 const discardRuntimeOutcomeDraftSchema = z.object({
   expectedUpdatedAt: expectedUpdatedAtSchema,
 }).strict()
@@ -1254,7 +1260,7 @@ export const validateRuntimeOutcomeAssetExportParams = createParamsValidator(run
   includeDetails: false,
 })
 
-export const validateGenerateRuntimeOutcomeResponse = createBodyValidator(emptyRuntimeOutputMutationSchema, {
+export const validateGenerateRuntimeOutcomeResponse = createBodyValidator(generateRuntimeOutcomeResponseSchema, {
   message: 'Request validation failed.',
   rootIssueKey: '_root',
   includeDetails: false,
