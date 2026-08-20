@@ -8,6 +8,7 @@
     "start": "node src/server.js",
     "seed": "node src/seeds/index.js",
     "db:clean:keep-super-admin": "node src/scripts/cleanDbKeepSuperAdmin.js",
+    "db:reset:development-customer-vmfs": "node src/scripts/resetDevelopmentCustomerVmfs.js",
     "framework-seed:guard": "node src/scripts/importFrameworkSeed.js --json --no-report",
     "framework-seed:import": "node src/scripts/importFrameworkSeed.js",
     "framework-seed:replace-active": "node src/scripts/replaceActiveFrameworkPackageFromSeed.js",
