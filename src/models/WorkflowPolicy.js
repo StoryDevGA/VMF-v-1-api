@@ -662,7 +662,7 @@ const workflowPolicySchema = new mongoose.Schema(
     description: {
       type: String,
       trim: true,
-      maxlength: 500,
+      maxlength: 600,
       default: '',
     },
     status: {

@@ -10,6 +10,7 @@ import {
   importRecord,
   loadSeedBundle,
   parseArgs,
+  readConformanceAudit,
   validateCrossReferences,
 } from '../scripts/importFrameworkSeed.js'
 
@@ -21,6 +22,7 @@ const workspaceRoot = path.resolve(apiRoot, '..')
 const seedDir = path.resolve(workspaceRoot, 'docs/seed-data')
 const importScript = path.resolve(apiRoot, 'src/scripts/importFrameworkSeed.js')
 const r3SeedDir = path.resolve(seedDir, 'vmf-v3-1-1-rkm-r3-action-alignment')
+const v312SeedDir = path.resolve(workspaceRoot, '.tmp/ss-013-source')
 const executionStatusPathKey = 'framework_state.runtime.execution_status'
 const sectionSkillBindingMatrix = Object.freeze({
   'framework_state.sections.customer_context': 'skill-customer-context-interpreter',
@@ -75,6 +77,7 @@ describe('framework seed import guard', () => {
   test.each([
     ['3.1', seedDir, 'vmf_v3_1_seed_pack_audit.json'],
     ['3.1.1', path.resolve(seedDir, 'vmf-v3-1-1-rkm'), 'seed_pack_audit.json'],
+    ['3.1.2', path.resolve(workspaceRoot, '.tmp/ss-013-source'), 'validation_report.md'],
   ])('uses the selected %s seed version to resolve the default audit file', (
     seedVersion,
     selectedSeedDir,
@@ -84,6 +87,95 @@ describe('framework seed import guard', () => {
 
     expect(parsed.seedVersion).toBe(seedVersion)
     expect(path.basename(parsed.auditFile)).toBe(expectedAuditFile)
+  })
+
+  test('reads the v3.1.2 Markdown validation report as a compatibility audit', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'framework-seed-markdown-audit-'))
+    const auditFile = path.join(tempRoot, 'validation_report.md')
+    fs.writeFileSync(auditFile, [
+      '# VMF Schema-Faithful Seed Pack Validation Report',
+      'Result: PASS',
+      'Framework version: 3.1.2',
+      'Package key: `standard-package-value-mapping-framework-3-1-2-runtime-knowledge-model`',
+      '',
+    ].join('\n'), 'utf8')
+
+    expect(readConformanceAudit(auditFile)).toEqual(expect.objectContaining({
+      documentType: 'markdown_validation_report',
+      schemaSet: 'VMF Schema-Faithful Seed Pack',
+      status: 'PASS',
+      frameworkVersion: '3.1.2',
+      packageKey: 'standard-package-value-mapping-framework-3-1-2-runtime-knowledge-model',
+    }))
+  })
+
+  test('normalizes the v3.1.2 source compatibility gaps without editing source files', () => {
+    const runtimePathFile = path.join(v312SeedDir, '02_seed_data/runtime_path_registry.json')
+    const packageFile = path.join(v312SeedDir, '02_seed_data/framework_package.json')
+    const uiContractFile = path.join(v312SeedDir, '02_seed_data/ui_contract.json')
+    const sourceSnapshots = [runtimePathFile, packageFile, uiContractFile]
+      .map((filePath) => [filePath, fs.readFileSync(filePath)])
+
+    const bundle = loadSeedBundle(v312SeedDir, '3.1.2')
+    const runtimePaths = findBundleRecords(bundle, 'runtime_path_registry.json')
+    const frameworkPackage = findBundleRecords(bundle, 'framework_package.json')[0]
+    const uiContract = findBundleRecords(bundle, 'ui_contract.json')[0]
+
+    expect(runtimePaths).toHaveLength(295)
+    expect(runtimePaths.find((record) => record.pathKey === executionStatusPathKey)).toEqual(
+      expect.objectContaining({
+        scope: 'FRAMEWORK_STATE',
+        dataType: 'STRING',
+        uiControl: 'TEXT',
+        exampleValue: 'truth-generation-policy:COMPLETED',
+      }),
+    )
+    expect(runtimePaths.map((record) => record.pathKey)).toEqual(expect.arrayContaining([
+      'framework_state.sections.contradiction_register',
+      'framework_state.sections.economic_model',
+      'framework_state.sections.commercial_clarity_model',
+      'framework_state.sections.decision_framework',
+      'framework_state.sections.outcome_map',
+      'framework_state.sections.target_state_assessment',
+      'framework_state.runtime.truth_acceptance.status',
+      'framework_state.runtime.truth_projection.status',
+    ]))
+    expect(frameworkPackage).toEqual(expect.objectContaining({
+      uiContractKey: 'standard-ui-contract-vmf-3-1-1-rkm-canonical',
+      uiContractBinding: expect.objectContaining({
+        key: 'standard-ui-contract-vmf-3-1-1-rkm-canonical',
+      }),
+    }))
+    expect(uiContract).toEqual(expect.objectContaining({
+      uiContractKey: 'standard-ui-contract-vmf-3-1-1-rkm-canonical',
+      stableId: 'ui-contract-standard-ui-contract-vmf-3-1-1-rkm-canonical',
+    }))
+
+    sourceSnapshots.forEach(([filePath, contents]) => {
+      expect(fs.readFileSync(filePath)).toEqual(contents)
+    })
+  })
+
+  test('does not report uiContractBinding normalization when the binding is absent', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'framework-seed-ui-binding-'))
+    const tempSeedDir = path.join(tempRoot, 'seed-data')
+    fs.cpSync(v312SeedDir, tempSeedDir, { recursive: true })
+
+    const packageFile = path.join(tempSeedDir, '02_seed_data/framework_package.json')
+    const frameworkPackage = JSON.parse(fs.readFileSync(packageFile, 'utf8'))
+    delete frameworkPackage.uiContractBinding
+    fs.writeFileSync(packageFile, `${JSON.stringify(frameworkPackage, null, 2)}\n`, 'utf8')
+
+    const bundle = loadSeedBundle(tempSeedDir, '3.1.2')
+    const packageRecord = findBundleRecords(bundle, 'framework_package.json')[0]
+    const notes = bundle.find((entry) => entry.notes)?.notes || []
+
+    expect(packageRecord.uiContractBinding).toBeUndefined()
+    expect(notes).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        message: expect.stringContaining('uiContractBinding.key'),
+      }),
+    ]))
   })
 
   test('passes when seeded Framework Package dropdown values are exposed by the editor contract', async () => {

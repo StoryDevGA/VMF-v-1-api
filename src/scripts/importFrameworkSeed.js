@@ -33,6 +33,7 @@ import {
   RUNTIME_PATH_REGISTRY_CATEGORIES,
   RUNTIME_PATH_REGISTRY_SECTION_BINDING_CATEGORIES,
 } from '../models/RuntimePathRegistry.js'
+import { buildUIContractStableId } from '../models/UIContract.js'
 import { RUNTIME_SKILL_CATEGORIES } from '../models/RuntimeSkill.js'
 import { VALIDATION_REGISTRY_CATEGORIES } from '../models/ValidationRegistry.js'
 import {
@@ -152,6 +153,74 @@ const WORKFLOW_POLICY_TYPE_MAP = Object.freeze({
   VALIDATION_GATE: 'VALIDATION',
 })
 const SECTION_BINDING_CATEGORY_SET = new Set(RUNTIME_PATH_REGISTRY_SECTION_BINDING_CATEGORIES)
+const V3_1_2_CANONICAL_UI_CONTRACT_KEY = 'standard-ui-contract-vmf-3-1-1-rkm-canonical'
+const V3_1_2_EXECUTION_STATUS_PATH_KEY = 'framework_state.runtime.execution_status'
+const V3_1_2_COMPATIBILITY_RUNTIME_PATHS = Object.freeze([
+  Object.freeze({
+    pathKey: 'framework_state.sections.contradiction_register',
+    label: 'Contradiction Register',
+    dataType: 'OBJECT',
+    category: 'SECTION',
+    uiControl: 'JSON',
+    exampleValue: {},
+  }),
+  Object.freeze({
+    pathKey: 'framework_state.sections.economic_model',
+    label: 'Economic Model',
+    dataType: 'OBJECT',
+    category: 'SECTION',
+    uiControl: 'JSON',
+    exampleValue: {},
+  }),
+  Object.freeze({
+    pathKey: 'framework_state.sections.commercial_clarity_model',
+    label: 'Commercial Clarity Model',
+    dataType: 'OBJECT',
+    category: 'SECTION',
+    uiControl: 'JSON',
+    exampleValue: {},
+  }),
+  Object.freeze({
+    pathKey: 'framework_state.sections.decision_framework',
+    label: 'Decision Framework',
+    dataType: 'OBJECT',
+    category: 'SECTION',
+    uiControl: 'JSON',
+    exampleValue: {},
+  }),
+  Object.freeze({
+    pathKey: 'framework_state.sections.outcome_map',
+    label: 'Outcome Map',
+    dataType: 'OBJECT',
+    category: 'SECTION',
+    uiControl: 'JSON',
+    exampleValue: {},
+  }),
+  Object.freeze({
+    pathKey: 'framework_state.sections.target_state_assessment',
+    label: 'Target State Assessment',
+    dataType: 'OBJECT',
+    category: 'SECTION',
+    uiControl: 'JSON',
+    exampleValue: {},
+  }),
+  Object.freeze({
+    pathKey: 'framework_state.runtime.truth_acceptance.status',
+    label: 'Truth Acceptance Status',
+    dataType: 'STRING',
+    category: 'RUNTIME',
+    uiControl: 'TEXT',
+    exampleValue: '',
+  }),
+  Object.freeze({
+    pathKey: 'framework_state.runtime.truth_projection.status',
+    label: 'Truth Projection Status',
+    dataType: 'STRING',
+    category: 'RUNTIME',
+    uiControl: 'TEXT',
+    exampleValue: '',
+  }),
+])
 const buildImportSteps = (fileNames) => Object.freeze([
   Object.freeze({
     label: 'Runtime Paths',
@@ -248,6 +317,25 @@ const SEED_PACKS = Object.freeze({
   '3.1.1': Object.freeze({
     version: '3.1.1',
     auditFileName: '04_audits/seed_pack_audit.json',
+    acceptCompatibilityAuditWithoutCounts: true,
+    importSteps: buildImportSteps({
+      runtimePaths: '02_seed_data/runtime_path_registry.json',
+      skillRoles: '02_seed_data/skill_role_registry.json',
+      skills: '02_seed_data/runtime_skills.json',
+      validations: '02_seed_data/validation_registry.json',
+      agents: '02_seed_data/runtime_agents.json',
+      policies: '02_seed_data/workflow_policies.json',
+      uiContract: '02_seed_data/ui_contract.json',
+      frameworkPackage: '02_seed_data/framework_package.json',
+    }),
+    supportAssetManifest: Object.freeze({
+      fileName: '02_seed_data/supporting_asset_records.json',
+      arrayKey: 'supportingAssets',
+    }),
+  }),
+  '3.1.2': Object.freeze({
+    version: '3.1.2',
+    auditFileName: '04_audits/validation_report.md',
     acceptCompatibilityAuditWithoutCounts: true,
     importSteps: buildImportSteps({
       runtimePaths: '02_seed_data/runtime_path_registry.json',
@@ -629,7 +717,7 @@ const normalizeRuntimeSkillOutputBindings = (record, notes, sourceLabel) => {
   })
 }
 
-const normalizeRuntimePath = (record, notes, sourceLabel) => {
+const normalizeRuntimePath = (record, notes, sourceLabel, seedContext = {}) => {
   normalizeMappedEnum({
     record,
     field: 'category',
@@ -644,6 +732,20 @@ const normalizeRuntimePath = (record, notes, sourceLabel) => {
       level: 'warning',
       source: sourceLabel,
       message: `${recordName(record)} scope "RUNTIME" normalized to "FRAMEWORK_STATE".`,
+    })
+  }
+  if (seedContext.seedVersion === '3.1.2' && record.pathKey === V3_1_2_EXECUTION_STATUS_PATH_KEY) {
+    const previousDataType = record.dataType
+    const previousUiControl = record.uiControl
+    record.dataType = 'STRING'
+    record.uiControl = 'TEXT'
+    record.exampleValue = 'truth-generation-policy:COMPLETED'
+    notes.push({
+      level: 'warning',
+      source: sourceLabel,
+      message:
+        `${record.pathKey} compatibility normalized dataType ${previousDataType} -> STRING and `
+        + `uiControl ${previousUiControl} -> TEXT for scalar workflow status writes.`,
     })
   }
   const derivedStableId = record.pathKey ? buildRuntimePathRegistryStableId(record.pathKey) : ''
@@ -815,18 +917,51 @@ const normalizeSeedSemanticVersionFields = (record, fields, notes, sourceLabel) 
   }
 }
 
-const normalizeUiContract = (record, notes, sourceLabel) => {
+const normalizeUiContract = (record, notes, sourceLabel, seedContext = {}) => {
   normalizeSeedSemanticVersionFields(
     record,
     ['introducedInVersion', 'deprecatedInVersion', 'sourcePackageVersion'],
     notes,
     sourceLabel,
   )
+  if (seedContext.seedVersion === '3.1.2') {
+    const expectedStableId = buildUIContractStableId(record.uiContractKey)
+    if (record.stableId !== expectedStableId) {
+      const previousStableId = record.stableId
+      record.stableId = expectedStableId
+      notes.push({
+        level: 'warning',
+        source: sourceLabel,
+        message: `${record.uiContractKey} stableId "${previousStableId}" normalized to "${expectedStableId}".`,
+      })
+    }
+  }
   return record
 }
 
-const normalizeFrameworkPackage = (record, notes, sourceLabel) => {
+const normalizeFrameworkPackage = (record, notes, sourceLabel, seedContext = {}) => {
   normalizeSeedSemanticVersionFields(record, ['version', 'stateModelVersion'], notes, sourceLabel)
+
+  if (seedContext.seedVersion === '3.1.2') {
+    if (record.uiContractKey !== V3_1_2_CANONICAL_UI_CONTRACT_KEY) {
+      const previousKey = record.uiContractKey
+      record.uiContractKey = V3_1_2_CANONICAL_UI_CONTRACT_KEY
+      notes.push({
+        level: 'warning',
+        source: sourceLabel,
+        message: `uiContractKey "${previousKey}" normalized to "${V3_1_2_CANONICAL_UI_CONTRACT_KEY}".`,
+      })
+    }
+    if (record.uiContractBinding && record.uiContractBinding.key !== V3_1_2_CANONICAL_UI_CONTRACT_KEY) {
+      const previousKey = record.uiContractBinding?.key
+      record.uiContractBinding.key = V3_1_2_CANONICAL_UI_CONTRACT_KEY
+      notes.push({
+        level: 'warning',
+        source: sourceLabel,
+        message: `uiContractBinding.key "${previousKey || ''}" normalized to "${V3_1_2_CANONICAL_UI_CONTRACT_KEY}".`,
+      })
+    }
+  }
 
   if (record.lastCheckpointStatus && !record.lastCheckpointResult) {
     notes.push({
@@ -870,13 +1005,60 @@ const normalizeRecord = (step, rawRecord, notes, seedContext = {}) => {
     normalizeVersioningFields(stripImportOnlyFields(convertExtendedJson(rawRecord)), seedContext),
   )
 
-  if (step.model === RuntimePathRegistry) return normalizeRuntimePath(record, notes, sourceLabel)
+  if (step.model === RuntimePathRegistry) return normalizeRuntimePath(record, notes, sourceLabel, seedContext)
   if (step.model === RuntimeSkill) return normalizeRuntimeSkill(record, notes, sourceLabel)
   if (step.model === ValidationRegistry) return normalizeValidationRegistry(record, notes, sourceLabel)
   if (step.model === WorkflowPolicy) return normalizeWorkflowPolicy(record, notes, sourceLabel)
-  if (step.model === UIContract) return normalizeUiContract(record, notes, sourceLabel)
-  if (step.model === FrameworkPackage) return normalizeFrameworkPackage(record, notes, sourceLabel)
+  if (step.model === UIContract) return normalizeUiContract(record, notes, sourceLabel, seedContext)
+  if (step.model === FrameworkPackage) return normalizeFrameworkPackage(record, notes, sourceLabel, seedContext)
   return record
+}
+
+const buildV3_1_2CompatibilityRuntimePath = (definition, seedContext) =>
+  stampSeedActorFields(normalizeVersioningFields({
+    pathKey: definition.pathKey,
+    stableId: buildRuntimePathRegistryStableId(definition.pathKey),
+    label: definition.label,
+    description: `${definition.label} runtime path for VMF v3.1.2 canonical runtime orchestration.`,
+    status: 'ACTIVE',
+    frameworkKeys: [VMF_FRAMEWORK_KEY],
+    scope: 'FRAMEWORK_STATE',
+    allowedOperations: ['READ', 'WRITE', 'BIND'],
+    dataType: definition.dataType,
+    category: definition.category,
+    sourceType: 'RUNTIME_STATE',
+    isProtected: false,
+    isSystem: true,
+    introducedInVersion: '3.1.1',
+    exampleValue: definition.exampleValue,
+    compatibilityTags: ['VMF', '3.1.2', 'RUNTIME_KNOWLEDGE_MODEL', 'CANONICAL_EXECUTABLE_ORCHESTRATION'],
+    uiControl: definition.uiControl,
+    allowedValues: [],
+    componentVersion: 1,
+    versionStatus: 'ACTIVE',
+    compatibilityMode: 'INHERITED_MINOR',
+  }, seedContext))
+
+const addV3_1_2CompatibilityRuntimePaths = (importEntries, seedContext, notes) => {
+  if (seedContext.seedVersion !== '3.1.2') return
+  const runtimePathStep = importEntries.find((step) => step.model === RuntimePathRegistry)
+  if (!runtimePathStep) return
+
+  const existingPathKeys = new Set(runtimePathStep.records.map((record) => record.pathKey))
+  const missingDefinitions = V3_1_2_COMPATIBILITY_RUNTIME_PATHS
+    .filter((definition) => !existingPathKeys.has(definition.pathKey))
+
+  if (missingDefinitions.length === 0) return
+  runtimePathStep.records.push(
+    ...missingDefinitions.map((definition) => buildV3_1_2CompatibilityRuntimePath(definition, seedContext)),
+  )
+  notes.push({
+    level: 'warning',
+    source: 'Runtime Paths',
+    message:
+      `v3.1.2 compatibility added ${missingDefinitions.length} canonical runtime paths missing from the `
+      + 'generated registry; source files remain unchanged.',
+  })
 }
 
 const getRecordsFromSeed = (step, parsedSeed) => {
@@ -1109,6 +1291,7 @@ const loadSeedBundle = (seedDir, seedVersion = DEFAULT_SEED_VERSION) => {
       records: rawRecords.map((record) => normalizeRecord(step, record, notes, seedContext)),
     }
   })
+  addV3_1_2CompatibilityRuntimePaths(importEntries, seedContext, notes)
   const supportAssetManifest = loadSupportAssetManifest(seedDir, seedPack, notes)
   hydrateRuntimeSkillReferenceAssets(importEntries, supportAssetManifest, notes)
   return [
@@ -1287,6 +1470,23 @@ const resolveConformanceExpected = (audit, seedPack, notes) => {
   return null
 }
 
+const readConformanceAudit = (auditFile) => {
+  const source = fs.readFileSync(auditFile, 'utf8')
+  if (!/\.md$/i.test(auditFile)) return JSON.parse(source)
+
+  const status = source.match(/^Result:\s*([^\r\n]+)/im)?.[1]?.trim() || ''
+  const frameworkVersion = source.match(/^Framework version:\s*([^\r\n]+)/im)?.[1]?.trim() || ''
+  const packageKey = source.match(/^Package key:\s*`?([^`\r\n]+)`?/im)?.[1]?.trim() || ''
+
+  return {
+    documentType: 'markdown_validation_report',
+    schemaSet: 'VMF Schema-Faithful Seed Pack',
+    status,
+    frameworkVersion,
+    packageKey,
+  }
+}
+
 const validateConformanceAudit = (bundle, options, notes) => {
   if (options.noAudit) {
     return { skipped: true, reason: '--no-audit supplied' }
@@ -1301,7 +1501,7 @@ const validateConformanceAudit = (bundle, options, notes) => {
     return { skipped: false, auditFile: options.auditFile, missing: true }
   }
 
-  const audit = JSON.parse(fs.readFileSync(options.auditFile, 'utf8'))
+  const audit = readConformanceAudit(options.auditFile)
   const seedPack = resolveSeedPack(options.seedVersion)
   const expected = resolveConformanceExpected(audit, seedPack, notes)
   if (!isPlainObject(expected)) {
@@ -2655,6 +2855,7 @@ export {
   importRecord,
   loadSeedBundle,
   parseArgs,
+  readConformanceAudit,
   validateCrossReferences,
   validateWithMongoose,
 }
