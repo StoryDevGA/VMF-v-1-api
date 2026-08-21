@@ -24,6 +24,18 @@
 - Real manifest persistence/readback is locally verified only for the existing GRR writer through the separate isolated harness `docs/generated/harness-runs/ss-012/2026-08-15-real-manifest-persistence-readback/`, using an exact generated `vmf_ss012_qa_*` cloud Development/Test database that was dropped after verification; the configured `test` database was not written. Any future structured-pack parsing contract, route-level service readback, provider, browser, deployment, production, and release claims remain separate gates. Explicit user-approved read-only cloud Development/Test queries are permitted for source evidence; any future cloud write requires a fresh bounded contract, exact temporary-target guard, evaluator PASS, and explicit authorization.
 - `outcomeStudioEvidenceCompositionService.js` is the bounded composition owner; `outcomeStudioProviderSafeContextService.js` owns provider safety; `governedReasoningRuntimeService.js` is the sole manifest writer. The seam preserves the no-composition path and does not claim full SS-012 closure.
 
+## SS-013 seed-import closeout — 2026-08-20
+
+- The authorized VMF v3.1.2 seed import completed against Development/Test `test` with exit `0`, zero failed writes, and direct readback matching the targeted counts. Use `../docs/generated/harness-runs/ss-013/2026-08-20-vmf-v3-1-2-import/` and the completed closeout at `../docs/exec-plans/completed/runtime-control/shared/storylineos-ss-013-vmf-v3-1-2-seed-import-closeout.md` as the evidence source.
+- The importer review repair only suppresses a false `uiContractBinding` normalization note when the binding is absent; it does not change the already-seeded data. The final focused importer suite passed `54/54`; no re-import is required.
+- Preserve the recorded support-linking, UI Contract schema, browser, deployment, and production evidence boundaries when reusing this seed result.
+
+## SS-013 amended section-generation seed compatibility — 2026-08-21
+
+- The amended Drive pack adds section-generation UI actions, workflow bindings, policies, and eight generated parent Runtime Paths. `src/scripts/importFrameworkSeed.js` now canonicalizes the generator's `FRAMEWORK`, `RUNTIME`, and `EVIDENCE` path tokens to the existing Runtime Path Registry enums.
+- The amended-pack dry-run passed with exit `0` and zero errors. The focused importer suite passed `55/55`; source immutability and Mongoose preflight passed. Use `../docs/generated/harness-runs/ss-013/2026-08-21-section-generation-seed-amendment/` for the evidence.
+- The source has 295 raw Runtime Paths and the compatibility layer reports 296 normalized paths because it adds the still-missing canonical target-state parent path. No database apply or reset was performed; any persistence promotion requires fresh guarded authorization.
+
 ## Skills
 A skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and file path so you can open the source for full instructions when using a specific skill.
 

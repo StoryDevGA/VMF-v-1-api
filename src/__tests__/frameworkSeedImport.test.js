@@ -23,6 +23,7 @@ const seedDir = path.resolve(workspaceRoot, 'docs/seed-data')
 const importScript = path.resolve(apiRoot, 'src/scripts/importFrameworkSeed.js')
 const r3SeedDir = path.resolve(seedDir, 'vmf-v3-1-1-rkm-r3-action-alignment')
 const v312SeedDir = path.resolve(workspaceRoot, '.tmp/ss-013-source')
+const v312AmendedSeedDir = path.resolve(workspaceRoot, '.tmp/ss-013-amended-source')
 const executionStatusPathKey = 'framework_state.runtime.execution_status'
 const sectionSkillBindingMatrix = Object.freeze({
   'framework_state.sections.customer_context': 'skill-customer-context-interpreter',
@@ -150,6 +151,81 @@ describe('framework seed import guard', () => {
       uiContractKey: 'standard-ui-contract-vmf-3-1-1-rkm-canonical',
       stableId: 'ui-contract-standard-ui-contract-vmf-3-1-1-rkm-canonical',
     }))
+
+    sourceSnapshots.forEach(([filePath, contents]) => {
+      expect(fs.readFileSync(filePath)).toEqual(contents)
+    })
+  })
+
+  test('normalizes the v3.1.2 section-generation parent paths without editing amended source files', () => {
+    const runtimePathFile = path.join(v312AmendedSeedDir, '02_seed_data/runtime_path_registry.json')
+    const sourceSnapshots = [
+      runtimePathFile,
+      path.join(v312AmendedSeedDir, '02_seed_data/ui_contract.json'),
+      path.join(v312AmendedSeedDir, '02_seed_data/framework_package.json'),
+      path.join(v312AmendedSeedDir, '02_seed_data/workflow_policies.json'),
+    ]
+      .map((filePath) => [filePath, fs.readFileSync(filePath)])
+    const bundle = loadSeedBundle(v312AmendedSeedDir, '3.1.2')
+    const runtimePaths = findBundleRecords(bundle, 'runtime_path_registry.json')
+    const byPath = new Map(runtimePaths.map((record) => [record.pathKey, record]))
+    const uiContract = findBundleRecords(bundle, 'ui_contract.json')[0]
+    const frameworkPackage = findBundleRecords(bundle, 'framework_package.json')[0]
+    const workflowPolicies = findBundleRecords(bundle, 'workflow_policies.json')
+
+    expect(runtimePaths).toHaveLength(296)
+    expect(uiContract.actions.filter((action) => action.actionKey === 'GENERATE_SECTION' && action.isVisible)).toHaveLength(1)
+    expect(uiContract.actions.filter((action) => action.actionKey === 'REGENERATE_SECTION' && action.isVisible)).toHaveLength(1)
+    expect(frameworkPackage.workflowBindings.map((binding) => binding.policyKey)).toEqual(expect.arrayContaining([
+      'runtime-instance-save-policy-v3-1-2',
+      'generate-section-gate-v3-1-2',
+      'regenerate-section-gate-v3-1-2',
+      'run-validation-policy',
+      'mark-ready-policy',
+      'truth-acceptance-policy',
+      'lock-record-policy',
+    ]))
+    expect(workflowPolicies.map((policy) => policy.key)).toEqual(expect.arrayContaining([
+      'generate-section-gate-v3-1-2',
+      'regenerate-section-gate-v3-1-2',
+      'run-validation-policy',
+      'mark-ready-policy',
+      'truth-acceptance-policy',
+      'lock-record-policy',
+    ]))
+    expect(byPath.get('framework_state.evidence_pack')).toEqual(expect.objectContaining({
+      scope: 'FRAMEWORK_STATE',
+      sourceType: 'RUNTIME_STATE',
+      category: 'STATE',
+      dataType: 'OBJECT',
+    }))
+
+    for (const pathKey of [
+      'framework_state.sections.commercial_clarity_model',
+      'framework_state.sections.contradiction_register',
+      'framework_state.sections.decision_framework',
+      'framework_state.sections.economic_model',
+      'framework_state.sections.outcome_map',
+    ]) {
+      expect(byPath.get(pathKey)).toEqual(expect.objectContaining({
+        scope: 'FRAMEWORK_STATE',
+        sourceType: 'RUNTIME_STATE',
+        category: 'SECTION',
+        dataType: 'OBJECT',
+      }))
+    }
+
+    for (const pathKey of [
+      'framework_state.runtime.truth_acceptance.status',
+      'framework_state.runtime.truth_projection.status',
+    ]) {
+      expect(byPath.get(pathKey)).toEqual(expect.objectContaining({
+        scope: 'FRAMEWORK_STATE',
+        sourceType: 'RUNTIME_STATE',
+        category: 'RUNTIME',
+        dataType: 'STRING',
+      }))
+    }
 
     sourceSnapshots.forEach(([filePath, contents]) => {
       expect(fs.readFileSync(filePath)).toEqual(contents)

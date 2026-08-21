@@ -31,7 +31,9 @@ import FrameworkPackage, {
 import {
   buildRuntimePathRegistryStableId,
   RUNTIME_PATH_REGISTRY_CATEGORIES,
+  RUNTIME_PATH_REGISTRY_SCOPES,
   RUNTIME_PATH_REGISTRY_SECTION_BINDING_CATEGORIES,
+  RUNTIME_PATH_REGISTRY_SOURCE_TYPES,
 } from '../models/RuntimePathRegistry.js'
 import { buildUIContractStableId } from '../models/UIContract.js'
 import { RUNTIME_SKILL_CATEGORIES } from '../models/RuntimeSkill.js'
@@ -97,6 +99,14 @@ const RUNTIME_PATH_CATEGORY_MAP = Object.freeze({
   OUTPUTS: 'OUTPUT',
   ROOT: 'STATE',
   SECTIONS: 'SECTION',
+  EVIDENCE: 'STATE',
+})
+const RUNTIME_PATH_SCOPE_MAP = Object.freeze({
+  FRAMEWORK: 'FRAMEWORK_STATE',
+  RUNTIME: 'FRAMEWORK_STATE',
+})
+const RUNTIME_PATH_SOURCE_TYPE_MAP = Object.freeze({
+  RUNTIME: 'RUNTIME_STATE',
 })
 const RUNTIME_SKILL_CATEGORY_MAP = Object.freeze({
   BOUNDARY: 'GOVERNANCE',
@@ -726,14 +736,22 @@ const normalizeRuntimePath = (record, notes, sourceLabel, seedContext = {}) => {
     notes,
     sourceLabel,
   })
-  if (normalizeEnumToken(record.scope) === 'RUNTIME') {
-    record.scope = 'FRAMEWORK_STATE'
-    notes.push({
-      level: 'warning',
-      source: sourceLabel,
-      message: `${recordName(record)} scope "RUNTIME" normalized to "FRAMEWORK_STATE".`,
-    })
-  }
+  normalizeMappedEnum({
+    record,
+    field: 'scope',
+    map: RUNTIME_PATH_SCOPE_MAP,
+    allowedValues: new Set(Object.values(RUNTIME_PATH_REGISTRY_SCOPES)),
+    notes,
+    sourceLabel,
+  })
+  normalizeMappedEnum({
+    record,
+    field: 'sourceType',
+    map: RUNTIME_PATH_SOURCE_TYPE_MAP,
+    allowedValues: new Set(Object.values(RUNTIME_PATH_REGISTRY_SOURCE_TYPES)),
+    notes,
+    sourceLabel,
+  })
   if (seedContext.seedVersion === '3.1.2' && record.pathKey === V3_1_2_EXECUTION_STATUS_PATH_KEY) {
     const previousDataType = record.dataType
     const previousUiControl = record.uiControl
