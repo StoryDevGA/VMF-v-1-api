@@ -27,6 +27,7 @@ export const RUNTIME_STATE_V2_ERROR_CODES = Object.freeze({
   SECTION_DUPLICATE: 'RUNTIME_STATE_V2_SECTION_DUPLICATE',
   EVIDENCE_MISSING: 'RUNTIME_STATE_V2_EVIDENCE_MISSING',
   GRAPH_MANIFEST_MISSING: 'RUNTIME_STATE_V2_GRAPH_MANIFEST_MISSING',
+  GRAPH_SOURCE_HASH_INVALID: 'RUNTIME_STATE_V2_GRAPH_SOURCE_HASH_INVALID',
   GRAPH_NOT_CURRENT: 'RUNTIME_STATE_V2_GRAPH_NOT_CURRENT',
   HANDOFF_PROJECTION_MISSING: 'RUNTIME_STATE_V2_HANDOFF_PROJECTION_MISSING',
 })
@@ -92,6 +93,7 @@ const RUNTIME_STATE_V2_CHILD_PROJECTION = Object.freeze({
   summary: 1,
   graphVersion: 1,
   sourceStateVersion: 1,
+  sourceHash: 1,
   snapshotId: 1,
   graphHash: 1,
   counts: 1,
@@ -758,12 +760,20 @@ export const getRuntimeStateGraphManifest = async ({ scopes, runtimeInstanceId }
       details: { statuses: uniqueStatuses },
     })
   }
+  const sourceHash = normalizeText(row.sourceHash)
+  if (!/^sha256:[0-9a-f]{64}$/.test(sourceHash)) {
+    throw createRuntimeStateV2Error({
+      code: RUNTIME_STATE_V2_ERROR_CODES.GRAPH_SOURCE_HASH_INVALID,
+      message: 'The Runtime State Storage V2 graph manifest has no valid source digest.',
+    })
+  }
   return withBoundedReadReceipt({
     control,
     manifest: {
       snapshotId: normalizeText(row.snapshotId || row._id),
       stateVersion,
       sourceStateVersion,
+      sourceHash,
       graphVersion: normalizeText(row.graphVersion),
       status: normalizeText(row.status || row.stateStatus),
       graphHash: normalizeText(row.graphHash),

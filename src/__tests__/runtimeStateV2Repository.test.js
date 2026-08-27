@@ -553,6 +553,7 @@ describe('runtime State Storage V2 repository', () => {
       snapshotId: 'snapshot-1',
       stateStatus: 'CURRENT',
       sourceStateVersion: 'runtime-revision:1',
+      sourceHash: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
       graphVersion: '2.2',
     }]))
     collections.set(RUNTIME_STATE_V2_COLLECTIONS.GRAPH_SNAPSHOTS, { find })
@@ -565,6 +566,7 @@ describe('runtime State Storage V2 repository', () => {
     expect(result.manifest).toMatchObject({
       stateVersion: 'runtime-revision:1',
       sourceStateVersion: 'runtime-revision:1',
+      sourceHash: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
       status: 'CURRENT',
     })
     expect(result.source).toBe('runtime_state_v2.graph_manifest')
@@ -577,11 +579,31 @@ describe('runtime State Storage V2 repository', () => {
     })
   })
 
+  test.each([
+    ['missing', undefined],
+    ['malformed', 'sha256:not-a-digest'],
+  ])('fails closed when a current graph manifest has a %s source hash', async (_label, sourceHash) => {
+    const find = jest.fn(() => makeCursor([{
+      snapshotId: 'snapshot-1',
+      stateStatus: 'CURRENT',
+      sourceStateVersion: 'runtime-revision:1',
+      ...(sourceHash === undefined ? {} : { sourceHash }),
+      graphVersion: '2.2',
+    }]))
+    collections.set(RUNTIME_STATE_V2_COLLECTIONS.GRAPH_SNAPSHOTS, { find })
+
+    await expect(getRuntimeStateGraphManifest({
+      scopes: SCOPES,
+      runtimeInstanceId: RUNTIME_ID,
+    })).rejects.toMatchObject({ code: RUNTIME_STATE_V2_ERROR_CODES.GRAPH_SOURCE_HASH_INVALID })
+  })
+
   test('sanitizes nested graph counts while preserving bounded logical counts', async () => {
     const find = jest.fn(() => makeCursor([{
       snapshotId: 'snapshot-1',
       status: 'CURRENT',
       sourceStateVersion: 'runtime-revision:1',
+      sourceHash: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
       graphVersion: '2.2',
       counts: {
         nodes: 3,
