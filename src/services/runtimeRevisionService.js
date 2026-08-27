@@ -14,6 +14,10 @@ import {
   serializeRuntimeInstance,
   toIdString,
 } from './runtimeInstanceService.js'
+import {
+  createRuntimeStateVersion,
+  requireCanonicalRuntimeStateVersion,
+} from './runtimeStateVersionService.js'
 
 const VMF_UPDATE_PERMISSION = 'VMF_UPDATE'
 const EXPECTED_UPDATED_AT_TOLERANCE_MS = 1000
@@ -236,6 +240,18 @@ const buildRevisionRuntimeInstance = ({
   sourceRuntimeInstance,
   now,
 }) => {
+  try {
+    requireCanonicalRuntimeStateVersion(sourceRuntimeInstance)
+  } catch (error) {
+    throw buildRevisionError({
+      status: error.status || 409,
+      code: 'CONFLICT',
+      message: error.message,
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_STATE_VERSION_REQUIRED,
+      details: error.details || {},
+    })
+  }
+
   const targetId = new mongoose.Types.ObjectId()
   const nowIso = now.toISOString()
   const sourceRevision = sourceRuntimeInstance.revision || {}
@@ -267,6 +283,7 @@ const buildRevisionRuntimeInstance = ({
     activationId: sourceRuntimeInstance.activationId,
     deploymentId: sourceRuntimeInstance.deploymentId,
     evidence: deepClone(sourceRuntimeInstance.evidence || {}),
+    stateVersion: createRuntimeStateVersion(),
     revision: {
       revisionNumber,
       parentRuntimeId: sourceRuntimeInstance._id,

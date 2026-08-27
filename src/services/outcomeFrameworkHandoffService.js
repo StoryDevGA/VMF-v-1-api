@@ -15,6 +15,75 @@ export const FRAMEWORK_OUTCOME_HANDOFF_STATUSES = Object.freeze({
   BLOCKED: 'BLOCKED',
 })
 
+export const FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_POLICY_VERSION =
+  'ss-014.runtime-state-v2.handoff-dependencies.v1'
+
+export const FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_COMMANDS = Object.freeze({
+  CONTROL: 'HANDOFF_CONTROL_READ',
+  FRAMEWORK_PACKAGE: 'HANDOFF_FRAMEWORK_PACKAGE_READ',
+  KNOWLEDGE_ACTIVATION: 'HANDOFF_KNOWLEDGE_ACTIVATION_READ',
+  KNOWLEDGE_VERSION: 'HANDOFF_KNOWLEDGE_VERSION_READ',
+  RENDERER_CAPABILITY: 'HANDOFF_RENDERER_CAPABILITY_READ',
+})
+
+export const FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_READ_POLICY = Object.freeze({
+  policyVersion: FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_POLICY_VERSION,
+  maxTimeMS: 2000,
+  packageLimit: 2,
+  activationLimit: 501,
+  versionLimit: 501,
+  commandIds: Object.freeze(Object.values(FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_COMMANDS)),
+})
+
+const FRAMEWORK_PACKAGE_BOUNDED_PROJECTION = [
+  '_id',
+  'packageKey',
+  'version',
+  'frameworkKey',
+  'status',
+  'visibility',
+  'customerAccessMode',
+  'assignedCustomerIds',
+  'sections.sectionKey',
+  'sections.runtimePath',
+  'sections.required',
+  'sections.notes',
+].join(' ')
+
+const RUNTIME_STATE_V2_CONTROL_PROJECTION_FIELDS = Object.freeze([
+  '_id',
+  'runtimeInstanceKey',
+  'customerId',
+  'tenantId',
+  'workspaceId',
+  'runtimeType',
+  'frameworkKey',
+  'packageId',
+  'packageKey',
+  'packageVersion',
+  'dependencyLockId',
+  'activationId',
+  'deploymentId',
+  'evidence.dependencySnapshotId',
+  'evidence.dependencySnapshotHash',
+  'status',
+  'executionStatus',
+  'runtimeMode',
+  'name',
+  'description',
+  'lockedAt',
+  'lockedBy',
+  'lockedReason',
+  'revision.revisionNumber',
+  'stateVersion',
+  'runtimeStateVersion',
+  'createdAt',
+  'updatedAt',
+])
+
+const FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_RECEIPT_MAX_DEPENDENCIES = 8
+const FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_RECEIPT_MAX_PROJECTION_FIELDS = 64
+
 export const FRAMEWORK_OUTCOME_HANDOFF_BLOCKER_CODES = Object.freeze({
   RUNTIME_REQUIRED: 'HANDOFF_RUNTIME_REQUIRED',
   RUNTIME_NOT_LOCKED: 'HANDOFF_RUNTIME_NOT_LOCKED',
@@ -59,6 +128,102 @@ const toIdString = (value) => normalizeText(value?.toString?.() || value)
 const isObject = (value) => Boolean(value && typeof value === 'object' && !Array.isArray(value))
 const uniqueSorted = (values = []) => [...new Set(values.map(normalizeText).filter(Boolean))].sort()
 const sha256 = (value) => `sha256:${createHash('sha256').update(JSON.stringify(value), 'utf8').digest('hex')}`
+
+const createBoundedHandoffError = (message, code = 'HANDOFF_BOUNDED_DEPENDENCY_UNAVAILABLE') => {
+  const error = new Error(message)
+  error.code = code
+  return error
+}
+
+const validateBoundedHandoffPolicy = (policy) => {
+  if (!policy || policy.policyVersion !== FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_POLICY_VERSION
+    || policy.maxTimeMS !== 2000
+    || policy.packageLimit !== 2
+    || policy.activationLimit !== 501
+    || policy.versionLimit !== 501
+    || !Array.isArray(policy.commandIds)
+    || policy.commandIds.length !== Object.values(FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_COMMANDS).length
+    || [...policy.commandIds].sort().join('|')
+      !== [...Object.values(FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_COMMANDS)].sort().join('|')) {
+    throw createBoundedHandoffError('The bounded handoff dependency policy is invalid.', 'HANDOFF_BOUNDED_POLICY_INVALID')
+  }
+  return FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_READ_POLICY
+}
+
+const buildBoundedDependencyReceipt = ({ policy, dependencies = [] } = {}) => ({
+  policyVersion: policy.policyVersion,
+  dependencies: dependencies
+    .slice(0, FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_RECEIPT_MAX_DEPENDENCIES)
+    .map((dependency) => ({
+      dependencyKey: normalizeText(dependency.dependencyKey),
+      commandKey: normalizeText(dependency.commandKey),
+      maxTimeMS: Number(dependency.maxTimeMS || policy.maxTimeMS),
+      limit: dependency.limit === null || dependency.limit === undefined
+        ? null
+        : Number(dependency.limit),
+      sortKeys: Array.isArray(dependency.sortKeys)
+        ? dependency.sortKeys.slice(0, 8).map(normalizeText).filter(Boolean)
+        : [],
+      projectionFields: Array.isArray(dependency.projectionFields)
+        ? dependency.projectionFields
+          .slice(0, FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_RECEIPT_MAX_PROJECTION_FIELDS)
+          .map(normalizeText)
+          .filter(Boolean)
+        : [],
+      resultCount: Number(dependency.resultCount || 0),
+      overflowed: dependency.overflowed === true,
+      providerAccessed: false,
+      networkAccessed: false,
+      fullRuntimeFetched: false,
+    })),
+  providerAccessed: false,
+  networkAccessed: false,
+  fullRuntimeFetched: false,
+})
+
+const isFrameworkPackageAccessibleToCustomer = ({ frameworkPackage, customerId } = {}) => {
+  const visibility = normalizeToken(frameworkPackage?.visibility)
+  const accessMode = normalizeToken(frameworkPackage?.customerAccessMode)
+  const normalizedCustomerId = normalizeText(customerId)
+  if (visibility === 'INTERNAL_ONLY') return false
+  if (visibility !== 'CUSTOMER_VISIBLE' || !normalizedCustomerId) return false
+  if (accessMode === 'ALL_CUSTOMERS') return true
+  if (accessMode === 'SELECTED_CUSTOMERS') {
+    return Array.isArray(frameworkPackage?.assignedCustomerIds)
+      && frameworkPackage.assignedCustomerIds.map(normalizeText).includes(normalizedCustomerId)
+  }
+  return false
+}
+
+const loadBoundedFrameworkPackage = async ({ runtimeInstance, policy } = {}) => {
+  if (!runtimeInstance?.packageId || !runtimeInstance?.frameworkKey) return null
+  const query = FrameworkPackage.find({
+    _id: runtimeInstance.packageId,
+    frameworkKey: runtimeInstance.frameworkKey,
+    status: 'ACTIVE',
+  })
+  if (!query || typeof query.select !== 'function'
+    || typeof query.sort !== 'function'
+    || typeof query.limit !== 'function'
+    || typeof query.maxTimeMS !== 'function'
+    || typeof query.lean !== 'function') {
+    throw createBoundedHandoffError('The bounded Framework Package reader is unavailable.')
+  }
+  const rows = await query
+    .select(FRAMEWORK_PACKAGE_BOUNDED_PROJECTION)
+    .sort({ _id: 1 })
+    .limit(policy.packageLimit)
+    .maxTimeMS(policy.maxTimeMS)
+    .lean()
+  if (!Array.isArray(rows) || rows.length !== 1) return null
+  const frameworkPackage = rows[0]
+  return isFrameworkPackageAccessibleToCustomer({
+    frameworkPackage,
+    customerId: runtimeInstance.customerId,
+  })
+    ? frameworkPackage
+    : null
+}
 
 const getObject = (value, key) => (isObject(value) ? value[key] : undefined)
 const getFrameworkState = (runtimeInstance = {}) =>
@@ -707,6 +872,7 @@ export const resolveFrameworkOutcomeStudioHandoff = async ({
   knowledgeContext = null,
   knowledgeContextResult = null,
   requestedOutputTypeKey = '',
+  boundedDependencyPolicy = null,
   loadRuntime = getRuntimeInstance,
   loadPackage = null,
   resolvePack = resolveOutcomeStudioKnowledgePackBinding,
@@ -716,12 +882,49 @@ export const resolveFrameworkOutcomeStudioHandoff = async ({
   let resolvedPackage = frameworkPackage
   let resolvedBinding = packBinding
   let resolvedContext = knowledgeContext
+  let boundedPolicy = null
+  const boundedDependencies = []
   try {
+    boundedPolicy = boundedDependencyPolicy
+      ? validateBoundedHandoffPolicy(boundedDependencyPolicy)
+      : null
+    if (boundedPolicy && (loadPackage
+      || loadRuntime !== getRuntimeInstance
+      || resolvePack !== resolveOutcomeStudioKnowledgePackBinding
+      || resolveContext !== resolveOutcomeStudioKnowledgeContext)) {
+      throw createBoundedHandoffError('Bounded handoff reader overrides are not permitted.', 'HANDOFF_BOUNDED_READER_OVERRIDE')
+    }
+    if (boundedPolicy && !resolvedRuntime) {
+      throw createBoundedHandoffError('Bounded handoff readiness requires a bounded control projection.', 'HANDOFF_BOUNDED_CONTROL_REQUIRED')
+    }
     if (!resolvedRuntime && runtimeInstanceId) resolvedRuntime = await loadRuntime({ runtimeInstanceId, scopes })
+    if (boundedPolicy) {
+      boundedDependencies.push({
+        dependencyKey: 'runtime_state_v2_control',
+        commandKey: FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_COMMANDS.CONTROL,
+        maxTimeMS: boundedPolicy.maxTimeMS,
+        limit: 1,
+        sortKeys: [],
+        projectionFields: RUNTIME_STATE_V2_CONTROL_PROJECTION_FIELDS,
+        resultCount: resolvedRuntime ? 1 : 0,
+      })
+    }
     const resolvedPackageId = resolvedRuntime?.packageId || resolvedRuntime?.frameworkPackageId
     if (!resolvedPackage && resolvedPackageId) {
-      if (loadPackage) {
-        resolvedPackage = await loadPackage({ runtimeInstance: resolvedRuntime })
+      if (boundedPolicy) {
+        resolvedPackage = await loadBoundedFrameworkPackage({
+          runtimeInstance: resolvedRuntime,
+          policy: boundedPolicy,
+        })
+        boundedDependencies.push({
+          dependencyKey: 'framework_package',
+          commandKey: FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_COMMANDS.FRAMEWORK_PACKAGE,
+          maxTimeMS: boundedPolicy.maxTimeMS,
+          limit: boundedPolicy.packageLimit,
+          sortKeys: ['_id:1'],
+          projectionFields: FRAMEWORK_PACKAGE_BOUNDED_PROJECTION.split(' '),
+          resultCount: resolvedPackage ? 1 : 0,
+        })
       } else {
         const query = FrameworkPackage.findById(resolvedPackageId)
         resolvedPackage = typeof query?.lean === 'function' ? await query.lean() : await query
@@ -733,8 +936,16 @@ export const resolveFrameworkOutcomeStudioHandoff = async ({
           ...(resolvedRuntime || {}),
           ...(resolvedRuntime?.runtimeInstanceKey ? { runtimeInstanceKey: resolvedRuntime.runtimeInstanceKey } : {}),
         },
+        ...(boundedPolicy ? { boundedReadPolicy: boundedPolicy } : {}),
       })
       resolvedBinding = bindingResult?.binding || null
+      if (boundedPolicy) {
+        const bindingReceipt = bindingResult?.boundedReadReceipt
+        if (!bindingReceipt || !Array.isArray(bindingReceipt.dependencies)) {
+          throw createBoundedHandoffError('Bounded Knowledge Pack readers did not return a dependency receipt.')
+        }
+        boundedDependencies.push(...bindingReceipt.dependencies)
+      }
     }
     if (!resolvedContext && knowledgeContextResult?.context) resolvedContext = knowledgeContextResult.context
     if (!resolvedContext && requestedOutputTypeKey) {
@@ -744,22 +955,47 @@ export const resolveFrameworkOutcomeStudioHandoff = async ({
           requestedOutputTypeKey,
           resolvedAt: new Date().toISOString(),
         },
+        ...(boundedPolicy ? { boundedReadPolicy: boundedPolicy } : {}),
       })
       resolvedContext = contextResult?.context || null
+      if (boundedPolicy && Array.isArray(contextResult?.boundedReadReceipt?.dependencies)) {
+        boundedDependencies.push(...contextResult.boundedReadReceipt.dependencies)
+      }
     }
-    const handoff = buildFrameworkOutcomeStudioHandoff({
+    let handoff = buildFrameworkOutcomeStudioHandoff({
       runtimeInstance: resolvedRuntime,
       frameworkPackage: resolvedPackage,
       packBinding: resolvedBinding,
       knowledgeContext: resolvedContext,
       requestedOutputTypeKey,
     })
+    if (boundedPolicy && handoff.status !== FRAMEWORK_OUTCOME_HANDOFF_STATUSES.BLOCKED) {
+      handoff = buildBlockedHandoff({
+        runtimeInstance: resolvedRuntime || {},
+        blockers: [{
+          code: 'HANDOFF_BOUNDED_BLOCKED_ONLY',
+          message: 'Bounded Runtime State V2 handoff dependency readiness is blocked until section/evidence parity is separately proven.',
+        }],
+        packageIdentity: {},
+        canonicalEligibility: getCanonicalOutputEligibility(getFrameworkState(resolvedRuntime || {})),
+        currentness: {},
+        knowledgeResolution: {},
+        sectionTruth: [],
+        evidenceRefs: [],
+      })
+    }
     return {
       handoff,
       runtimeInstance: resolvedRuntime,
       frameworkPackage: resolvedPackage,
       packBinding: resolvedBinding,
       knowledgeContext: resolvedContext,
+      ...(boundedPolicy
+        ? { boundedDependencyReceipt: buildBoundedDependencyReceipt({
+            policy: boundedPolicy,
+            dependencies: boundedDependencies,
+          }) }
+        : {}),
     }
   } catch (error) {
     const handoff = buildBlockedHandoff({
@@ -771,7 +1007,9 @@ export const resolveFrameworkOutcomeStudioHandoff = async ({
       diagnostics: [{
         code: FRAMEWORK_OUTCOME_HANDOFF_BLOCKER_CODES.HANDOFF_RESOLUTION_FAILED,
         severity: 'ERROR',
-        message: normalizeText(error?.message) || 'Handoff resolution failed.',
+        message: boundedPolicy
+          ? 'Bounded handoff dependency resolution failed.'
+          : (normalizeText(error?.message) || 'Handoff resolution failed.'),
       }],
       packageIdentity: {},
       canonicalEligibility: getCanonicalOutputEligibility(getFrameworkState(resolvedRuntime || {})),
@@ -786,6 +1024,12 @@ export const resolveFrameworkOutcomeStudioHandoff = async ({
       frameworkPackage: resolvedPackage,
       packBinding: resolvedBinding,
       knowledgeContext: resolvedContext,
+      ...(boundedPolicy
+        ? { boundedDependencyReceipt: buildBoundedDependencyReceipt({
+            policy: boundedPolicy,
+            dependencies: boundedDependencies,
+          }) }
+        : {}),
     }
   }
 }

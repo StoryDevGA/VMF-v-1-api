@@ -41,7 +41,11 @@ import {
   isRuntimeLocked,
   normalizeFrameworkStateForAction,
 } from './runtimeActionPolicyService.js'
-import { assertRuntimePermission, getRuntimeInstance } from './runtimeInstanceService.js'
+import {
+  assertRuntimePermission,
+  getRuntimeInstance,
+  RUNTIME_INSTANCE_RENDERER_PROJECTION,
+} from './runtimeInstanceService.js'
 import { evaluateRuntimeSectionTruthReadiness } from './runtimeSectionTruthReadinessService.js'
 import {
   buildSectionIntelligenceDisplayProjection,
@@ -2518,7 +2522,11 @@ export const getRuntimeRenderer = async ({
   scopes,
   runtimeInstanceId,
 } = {}) => {
-  const runtimeInstance = await getRuntimeInstance({ scopes, runtimeInstanceId })
+  const runtimeInstance = await getRuntimeInstance({
+    scopes,
+    runtimeInstanceId,
+    projection: RUNTIME_INSTANCE_RENDERER_PROJECTION,
+  })
   await assertRuntimeTypeRenderable(runtimeInstance)
 
   const frameworkPackage = await resolvePackage({ runtimeInstance })

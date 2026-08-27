@@ -41,6 +41,11 @@ import {
   getRuntimeOutcomeStudio,
   getRuntimeOutcomeStudioReadiness,
   getRuntimeRenderer,
+  getRuntimeStateBootstrap,
+  getRuntimeStateEvidencePage,
+  getRuntimeStateGraphManifest,
+  getRuntimeStateOutcomeHandoffReadiness,
+  getRuntimeStateSectionSummary,
   getRuntimeTruthQuality,
   generateRuntimeOutputRequest,
   listRuntimeOutputAssets,
@@ -129,6 +134,15 @@ router.use((req, res, next) => (
 
 router.get('/', validateListRuntimeInstances, listRuntimeInstances)
 router.post('/', validateCreateRuntimeInstance, createRuntimeInstance)
+router.get('/:runtimeInstanceId/state/bootstrap', validateRuntimeInstanceId, getRuntimeStateBootstrap)
+router.get('/:runtimeInstanceId/state/sections/:sectionKey', validateRuntimeInstanceId, getRuntimeStateSectionSummary)
+router.get('/:runtimeInstanceId/state/evidence', validateRuntimeInstanceId, getRuntimeStateEvidencePage)
+router.get('/:runtimeInstanceId/state/graph-manifest', validateRuntimeInstanceId, getRuntimeStateGraphManifest)
+router.get(
+  '/:runtimeInstanceId/state/outcome-handoff/readiness',
+  validateRuntimeInstanceId,
+  getRuntimeStateOutcomeHandoffReadiness,
+)
 router.patch('/:runtimeInstanceId/discovery-acceptance', validateRuntimeInstanceId, validateAcceptRuntimeDiscovery, acceptRuntimeDiscovery)
 router.patch(
   '/:runtimeInstanceId/discovery-evidence/:evidenceObjectId/review',

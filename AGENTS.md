@@ -34,7 +34,9 @@
 
 - The amended Drive pack adds section-generation UI actions, workflow bindings, policies, and eight generated parent Runtime Paths. `src/scripts/importFrameworkSeed.js` now canonicalizes the generator's `FRAMEWORK`, `RUNTIME`, and `EVIDENCE` path tokens to the existing Runtime Path Registry enums.
 - The amended-pack dry-run passed with exit `0` and zero errors. The focused importer suite passed `55/55`; source immutability and Mongoose preflight passed. Use `../docs/generated/harness-runs/ss-013/2026-08-21-section-generation-seed-amendment/` for the evidence.
-- The source has 295 raw Runtime Paths and the compatibility layer reports 296 normalized paths because it adds the still-missing canonical target-state parent path. No database apply or reset was performed; any persistence promotion requires fresh guarded authorization.
+- The source has 295 raw Runtime Paths and the compatibility layer reports 296 normalized paths because it adds the still-missing canonical target-state parent path.
+- The user-authorized `replaceActiveFrameworkPackageFromSeed.js --apply --confirm-replace-active-framework-package` run completed transactionally with exit `0` and `applied=true`. It persisted the amended active package/UI Contract contents without reset, unlock, delete, lifecycle promotion, or runtime-instance mutation. Final readback confirms 28 package workflow bindings, 10 UI actions, 28 active policies, and the expected Runtime Control counts.
+- The replacement deliberately preserves the active release dependency lock at 227 stored references. A fresh non-mutating checkpoint passed 27/27 and resolved 236 live package-reachable references; the seed pack's 415 embedded dependency references are a broader source-audit metric. If dependency snapshot rotation is required, use a separately governed lifecycle task rather than an ad hoc repair.
 
 ## Skills
 A skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and file path so you can open the source for full instructions when using a specific skill.

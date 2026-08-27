@@ -636,6 +636,7 @@ const makeRuntimeInstance = (overrides = {}) => ({
   status: 'ACTIVE',
   executionStatus: 'IDLE',
   runtimeMode: 'INTERACTIVE',
+  stateVersion: 'rsv2:00000000-0000-4000-8000-000000000001',
   name: 'Acme Value Narrative',
   description: '',
   lockedAt: null,
@@ -1653,11 +1654,14 @@ const buildUserQueryChain = (value) => {
 }
 
 const buildLeanQuery = (value) => ({
+  select: jest.fn().mockReturnThis(),
+  maxTimeMS: jest.fn().mockReturnThis(),
   lean: jest.fn().mockResolvedValue(value),
 })
 
 const buildSelectableLeanQuery = (value) => ({
   select: jest.fn().mockReturnThis(),
+  maxTimeMS: jest.fn().mockReturnThis(),
   lean: jest.fn().mockResolvedValue(value),
 })
 
@@ -1751,6 +1755,7 @@ let evaluateSectionInterpretationSimilarity
 let executeSectionValidationRules
 let resolveSectionExecutionContract
 let performanceCacheService
+let getRuntimeInstance
 
 const getAccessTokenForUser = async (user) => {
   const tokens = await tokenService.generateTokens(user)
@@ -1825,6 +1830,7 @@ beforeAll(async () => {
       .executeSectionValidationRules
   performanceCacheService =
     (await import('../services/performanceCacheService.js')).default
+  getRuntimeInstance = (await import('../services/runtimeInstanceService.js')).getRuntimeInstance
 })
 
 beforeEach(async () => {
@@ -2004,6 +2010,7 @@ describe('Runtime Instance API', () => {
       executionStatus: 'IDLE',
       runtimeMode: 'INTERACTIVE',
       name: 'Acme Value Narrative',
+      stateVersion: expect.stringMatching(/^rsv2:[0-9a-f-]{36}$/),
     }))
     expect(res.body.data.framework_state).toEqual({
       lifecycle: { stage: 'DRAFT' },
@@ -2035,6 +2042,8 @@ describe('Runtime Instance API', () => {
       runtimeCapacitySlot: { $type: 'number' },
     })
     expect(RuntimeInstance.prototype.save.mock.contexts[0].runtimeCapacitySlot).toBe(2)
+    expect(RuntimeInstance.prototype.save.mock.contexts[0].stateVersion)
+      .toMatch(/^rsv2:[0-9a-f-]{36}$/)
     expect(RuntimeDeployment.findOne).toHaveBeenCalledWith({
       packageId: expect.anything(),
       frameworkKey: 'VMF',
@@ -2517,6 +2526,8 @@ describe('Runtime Instance API', () => {
     expect(savedRevision.status).toBe('ACTIVE')
     expect(savedRevision.lockedAt).toBeNull()
     expect(savedRevision.revision.revisionNumber).toBe(2)
+    expect(savedRevision.stateVersion).toMatch(/^rsv2:[0-9a-f-]{36}$/)
+    expect(savedRevision.stateVersion).not.toBe(sourceRuntimeInstance.stateVersion)
     expect(savedRevision.revision.parentRuntimeId.toString()).toBe(RUNTIME_INSTANCE_ID)
     expect(savedRevision.revision.parentRuntimeInstanceKey).toBe('value-narrative-439111')
     expect(savedRevision.revision.rootRuntimeId.toString()).toBe(RUNTIME_INSTANCE_ID)
@@ -2536,6 +2547,7 @@ describe('Runtime Instance API', () => {
     expect(res.body.data).toEqual(expect.objectContaining({
       runtimeType: 'VALUE_NARRATIVE',
       status: 'ACTIVE',
+      stateVersion: expect.stringMatching(/^rsv2:[0-9a-f-]{36}$/),
       revision: expect.objectContaining({
         revisionNumber: 2,
         parentRuntimeId: RUNTIME_INSTANCE_ID,
@@ -2580,6 +2592,34 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(201)
     expect(RuntimeInstance.prototype.save).toHaveBeenCalledTimes(1)
+  })
+
+  test('rejects revision creation from an alias-only legacy runtime before writing a child', async () => {
+    const sourceRuntimeInstance = makeLockedPublishedRuntimeInstance({
+      stateVersion: undefined,
+      runtimeStateVersion: 'legacy-runtime-state-v1',
+    })
+    RuntimeInstance.findOne = jest.fn().mockImplementation((query) => {
+      if (query?.['revision.parentRuntimeId']) {
+        return buildLeanQuery(null)
+      }
+
+      return buildLeanQuery(sourceRuntimeInstance)
+    })
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/revisions`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+        reason: 'Do not bootstrap legacy state implicitly.',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('RUNTIME_STATE_VERSION_REQUIRED')
+    expect(RuntimeInstance.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 
   test('fails closed and rolls back a runtime revision when audit write fails', async () => {
@@ -2669,6 +2709,10 @@ describe('Runtime Instance API', () => {
       tenantId: TENANT_ID,
       runtimeType: 'VALUE_NARRATIVE',
     })
+    const listQuery = RuntimeInstance.find.mock.results[0]?.value
+    expect(listQuery.select).toHaveBeenCalledWith(expect.stringContaining('framework_state.readiness.submittedForReview'))
+    expect(listQuery.select.mock.calls[0][0]).not.toContain('framework_state.evidence_pack')
+    expect(listQuery.select.mock.calls[0][0]).not.toContain('framework_state.sections')
     expect(RuntimeInstance.countDocuments).toHaveBeenCalledWith({
       customerId: CUSTOMER_ID,
       tenantId: TENANT_ID,
@@ -2685,7 +2729,15 @@ describe('Runtime Instance API', () => {
       customerId: CUSTOMER_ID,
       tenantId: TENANT_ID,
       runtimeType: 'VALUE_NARRATIVE',
+      frameworkLifecycleStage: 'DRAFT',
+      validationStatus: null,
+      readinessState: null,
+      lockStatus: null,
+      submittedForReview: false,
     }))
+    expect(res.body.data[0].framework_state).toBeUndefined()
+    expect(res.body.data[0].evidence).toBeUndefined()
+    expect(res.body.data[0].anchors).toBeUndefined()
     expect(res.body.meta).toEqual(expect.objectContaining({
       page: 1,
       pageSize: 5,
@@ -2736,6 +2788,52 @@ describe('Runtime Instance API', () => {
       runtimeType: 'VALUE_NARRATIVE',
       $or: expect.any(Array),
     }))
+  })
+
+  test('projects governed runtime state into bounded list summary fields without returning framework state', async () => {
+    RuntimeInstance.find.mockReturnValue(buildRuntimeInstanceFindChain([
+      makeRuntimeInstance({
+        status: 'ACTIVE',
+        framework_state: {
+          lifecycle: { stage: 'IN_REVIEW' },
+          validation: { state: 'PENDING' },
+          readiness: {
+            state: 'IN_REVIEW',
+            submittedForReview: true,
+          },
+          lock: { state: 'UNLOCKED' },
+          sections: {
+            customer_context: {
+              accepted: { content: 'This large branch must not be returned by the list endpoint.' },
+            },
+          },
+          evidence_pack: { objects: [{ evidenceObjectId: 'evidence-1' }] },
+          intelligence_graph: { nodes: [{ nodeId: 'node-1' }] },
+        },
+      }),
+    ]))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get('/api/v1/runtime-instances')
+      .query({
+        customerId: CUSTOMER_ID,
+        tenantId: TENANT_ID,
+        runtimeType: 'VALUE_NARRATIVE',
+      })
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data[0]).toEqual(expect.objectContaining({
+      frameworkLifecycleStage: 'IN_REVIEW',
+      validationStatus: 'PENDING',
+      readinessState: 'IN_REVIEW',
+      lockStatus: 'UNLOCKED',
+      submittedForReview: true,
+    }))
+    expect(res.body.data[0].framework_state).toBeUndefined()
+    expect(res.body.data[0].evidence).toBeUndefined()
+    expect(res.body.data[0].intelligence_graph).toBeUndefined()
   })
 
   test('requires runtimeType when listing runtime instances instead of falling back to VMF entitlement', async () => {
@@ -2877,6 +2975,115 @@ describe('Runtime Instance API', () => {
       customerId: CUSTOMER_ID,
       tenantId: TENANT_ID,
     }))
+    expect(res.body.data.framework_state).toBeDefined()
+    expect(res.body.data.evidence).toBeDefined()
+  })
+
+  test('binds a bounded Runtime State V2 control lookup to the selected customer and tenant', async () => {
+    const scopes = {
+      customer: { _id: CUSTOMER_ID },
+      tenant: { _id: TENANT_ID, customerId: CUSTOMER_ID },
+      resolvedPermissions: {
+        platform: { roleKeys: ['SUPER_ADMIN'] },
+        customers: [],
+        tenants: [],
+      },
+    }
+
+    await getRuntimeInstance({
+      scopes,
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      customerId: CUSTOMER_ID,
+      tenantId: TENANT_ID,
+      projection: '_id customerId tenantId',
+      maxTimeMS: 2000,
+    })
+
+    expect(RuntimeInstance.findOne).toHaveBeenCalledWith({
+      $and: [
+        {
+          $or: [
+            { _id: RUNTIME_INSTANCE_ID },
+            { runtimeInstanceKey: RUNTIME_INSTANCE_ID },
+          ],
+        },
+        { customerId: CUSTOMER_ID },
+        { tenantId: TENANT_ID },
+      ],
+    })
+    const query = RuntimeInstance.findOne.mock.results.at(-1).value
+    expect(query.maxTimeMS).toHaveBeenCalledWith(2000)
+  })
+
+  test('rejects a bounded Runtime State V2 lookup before RuntimeInstance.findOne when scope is absent', async () => {
+    await expect(getRuntimeInstance({
+      scopes: {},
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      customerId: CUSTOMER_ID,
+      tenantId: TENANT_ID,
+      maxTimeMS: 2000,
+    })).rejects.toMatchObject({
+      details: { reason: 'RUNTIME_INSTANCE_BOUNDED_SCOPE_REQUIRED' },
+    })
+    expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
+  })
+
+  test.each([
+    ['tenant.customerId', { customerId: OTHER_CUSTOMER_ID }],
+    ['tenant.customer._id', { customer: { _id: OTHER_CUSTOMER_ID } }],
+    ['tenant.customer.id', { customer: { id: OTHER_CUSTOMER_ID } }],
+  ])('rejects a bounded lookup when %s contradicts the selected customer', async (_label, tenantCustomer) => {
+    const scopes = {
+      customer: { _id: CUSTOMER_ID },
+      tenant: { _id: TENANT_ID, ...tenantCustomer },
+    }
+
+    await expect(getRuntimeInstance({
+      scopes,
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      customerId: CUSTOMER_ID,
+      tenantId: TENANT_ID,
+      maxTimeMS: 2000,
+    })).rejects.toMatchObject({
+      details: { reason: 'RUNTIME_INSTANCE_BOUNDED_SCOPE_REQUIRED' },
+    })
+    expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
+  })
+
+  test.each([
+    ['customerId', { customerId: OTHER_CUSTOMER_ID, tenantId: TENANT_ID }],
+    ['tenantId', { customerId: CUSTOMER_ID, tenantId: OTHER_TENANT_ID }],
+  ])('rejects a bounded lookup when caller %s mismatches the selected scope', async (_label, callerScope) => {
+    const scopes = {
+      customer: { _id: CUSTOMER_ID },
+      tenant: { _id: TENANT_ID, customerId: CUSTOMER_ID },
+    }
+
+    await expect(getRuntimeInstance({
+      scopes,
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      ...callerScope,
+      maxTimeMS: 2000,
+    })).rejects.toMatchObject({
+      details: { reason: 'RUNTIME_INSTANCE_BOUNDED_SCOPE_REQUIRED' },
+    })
+    expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
+  })
+
+  test.each([
+    ['customer._id', { customer: { _id: 'not-an-object-id' }, tenant: { _id: TENANT_ID } }],
+    ['tenant._id', { customer: { _id: CUSTOMER_ID }, tenant: { _id: 'not-an-object-id' } }],
+  ])('rejects a bounded lookup when selected %s is malformed', async (_label, scopes) => {
+    await expect(getRuntimeInstance({
+      scopes,
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      customerId: CUSTOMER_ID,
+      tenantId: TENANT_ID,
+      maxTimeMS: 2000,
+    })).rejects.toMatchObject({
+      details: { reason: 'RUNTIME_INSTANCE_BOUNDED_SCOPE_REQUIRED' },
+    })
+    expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
   })
 
   test('PATCH /api/v1/runtime-instances/:id/data writes a section value through runtime state mutation audit', async () => {
@@ -2927,6 +3134,7 @@ describe('Runtime Instance API', () => {
       {
         _id: RUNTIME_INSTANCE_ID,
         updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+        stateVersion: expect.any(String),
       },
       {
         $set: expect.objectContaining({
@@ -5450,10 +5658,12 @@ describe('Runtime Instance API', () => {
       {
         _id: RUNTIME_INSTANCE_ID,
         updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+        stateVersion: expect.any(String),
       },
       {
         $set: {
           framework_state: runtimeInstanceDoc.framework_state,
+          stateVersion: 'rsv2:00000000-0000-4000-8000-000000000001',
           updatedBy: CUSTOMER_ADMIN_ID,
         },
       },
@@ -6125,10 +6335,12 @@ describe('Runtime Instance API', () => {
       {
         _id: RUNTIME_INSTANCE_ID,
         updatedAt: new Date('2026-05-19T08:02:00.000Z'),
+        stateVersion: expect.any(String),
       },
       {
         $set: {
           framework_state: runtimeInstanceDoc.framework_state,
+          stateVersion: 'rsv2:00000000-0000-4000-8000-000000000001',
           updatedBy: CUSTOMER_ADMIN_ID,
         },
       },
@@ -7363,10 +7575,12 @@ describe('Runtime Instance API', () => {
       {
         _id: RUNTIME_INSTANCE_ID,
         updatedAt: new Date('2026-05-19T08:04:00.000Z'),
+        stateVersion: expect.any(String),
       },
       {
         $set: {
           framework_state: runtimeInstanceDoc.framework_state,
+          stateVersion: 'rsv2:00000000-0000-4000-8000-000000000001',
           updatedBy: CUSTOMER_ADMIN_ID,
         },
       },
@@ -7892,10 +8106,12 @@ describe('Runtime Instance API', () => {
       {
         _id: RUNTIME_INSTANCE_ID,
         updatedAt: new Date('2026-05-19T08:04:00.000Z'),
+        stateVersion: expect.any(String),
       },
       {
         $set: {
           framework_state: runtimeInstanceDoc.framework_state,
+          stateVersion: 'rsv2:00000000-0000-4000-8000-000000000001',
           updatedBy: CUSTOMER_ADMIN_ID,
         },
       },
@@ -8071,10 +8287,12 @@ describe('Runtime Instance API', () => {
       {
         _id: RUNTIME_INSTANCE_ID,
         updatedAt: new Date('2026-05-19T08:04:00.000Z'),
+        stateVersion: expect.any(String),
       },
       {
         $set: {
           framework_state: runtimeInstanceDoc.framework_state,
+          stateVersion: 'rsv2:00000000-0000-4000-8000-000000000001',
           updatedBy: CUSTOMER_ADMIN_ID,
         },
       },
@@ -8432,10 +8650,12 @@ describe('Runtime Instance API', () => {
       {
         _id: RUNTIME_INSTANCE_ID,
         updatedAt: new Date('2026-05-19T08:02:00.000Z'),
+        stateVersion: expect.any(String),
       },
       {
         $set: {
           framework_state: runtimeInstanceDoc.framework_state,
+          stateVersion: 'rsv2:00000000-0000-4000-8000-000000000001',
           updatedBy: CUSTOMER_ADMIN_ID,
         },
       },
@@ -8884,10 +9104,12 @@ describe('Runtime Instance API', () => {
       {
         _id: RUNTIME_INSTANCE_ID,
         updatedAt: new Date('2026-05-19T08:06:00.000Z'),
+        stateVersion: expect.any(String),
       },
       {
         $set: {
           framework_state: runtimeInstanceDoc.framework_state,
+          stateVersion: 'rsv2:00000000-0000-4000-8000-000000000001',
           updatedBy: CUSTOMER_ADMIN_ID,
         },
       },
@@ -12411,10 +12633,12 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       {
         _id: RUNTIME_INSTANCE_ID,
         updatedAt: new Date('2026-05-19T08:06:00.000Z'),
+        stateVersion: expect.any(String),
       },
       {
         $set: {
           framework_state: runtimeInstanceDoc.framework_state,
+          stateVersion: 'rsv2:00000000-0000-4000-8000-000000000001',
           updatedBy: CUSTOMER_ADMIN_ID,
         },
       },
@@ -13340,10 +13564,12 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       {
         _id: RUNTIME_INSTANCE_ID,
         updatedAt: new Date('2026-05-19T08:02:00.000Z'),
+        stateVersion: expect.any(String),
       },
       {
         $set: {
           framework_state: runtimeInstanceDoc.framework_state,
+          stateVersion: 'rsv2:00000000-0000-4000-8000-000000000001',
           updatedBy: CUSTOMER_ADMIN_ID,
         },
       },
@@ -13699,6 +13925,31 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 
+  test('rejects alias-only legacy runtime mutation without writing state or audit', async () => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      stateVersion: undefined,
+      runtimeStateVersion: 'legacy-runtime-state-v1',
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+    })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/data`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        runtimePath: 'framework_state.sections.customer_problem',
+        operation: 'WRITE',
+        value: 'Updated problem',
+        expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('RUNTIME_STATE_VERSION_REQUIRED')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
   test('rejects runtime state mutation when the atomic updatedAt guard loses a write race', async () => {
     const runtimeInstanceDoc = makeRuntimeInstanceDocument({
       updatedAt: new Date('2026-05-19T08:00:00.000Z'),
@@ -13723,6 +13974,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       {
         _id: RUNTIME_INSTANCE_ID,
         updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+        stateVersion: expect.any(String),
       },
       expect.objectContaining({
         $set: expect.objectContaining({
@@ -13838,10 +14090,12 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       {
         _id: RUNTIME_INSTANCE_ID,
         updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+        stateVersion: expect.any(String),
       },
       {
         $set: {
           framework_state: runtimeInstanceDoc.framework_state,
+          stateVersion: 'rsv2:00000000-0000-4000-8000-000000000001',
           updatedBy: CUSTOMER_ADMIN_ID,
         },
       },
@@ -13902,6 +14156,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       {
         _id: RUNTIME_INSTANCE_ID,
         updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+        stateVersion: expect.any(String),
       },
       {
         $set: expect.objectContaining({
@@ -14688,10 +14943,12 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       {
         _id: RUNTIME_INSTANCE_ID,
         updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+        stateVersion: expect.any(String),
       },
       {
         $set: {
           framework_state: runtimeInstanceDoc.framework_state,
+          stateVersion: 'rsv2:00000000-0000-4000-8000-000000000001',
           executionStatus: runtimeInstanceDoc.executionStatus,
           status: runtimeInstanceDoc.status,
           lockedAt: null,
@@ -29439,10 +29696,12 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       {
         _id: RUNTIME_INSTANCE_ID,
         updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+        stateVersion: expect.any(String),
       },
       {
         $set: {
           framework_state: runtimeInstanceDoc.framework_state,
+          stateVersion: 'rsv2:00000000-0000-4000-8000-000000000001',
           executionStatus: runtimeInstanceDoc.executionStatus,
           status: runtimeInstanceDoc.status,
           lockedAt: null,
@@ -29642,10 +29901,12 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       {
         _id: RUNTIME_INSTANCE_ID,
         updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+        stateVersion: expect.any(String),
       },
       {
         $set: {
           framework_state: publishedFrameworkState,
+          stateVersion: 'rsv2:00000000-0000-4000-8000-000000000001',
           executionStatus: 'IDLE',
           status: 'ACTIVE',
           lockedAt: null,

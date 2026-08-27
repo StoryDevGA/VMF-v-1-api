@@ -27,6 +27,10 @@ import {
   normalizeRuntimeActionToken,
 } from './runtimeActionPolicyService.js'
 import {
+  createNextRuntimeStateVersion,
+  requireCanonicalRuntimeStateVersion,
+} from './runtimeStateVersionService.js'
+import {
   RUNTIME_SECTION_STATES,
   buildEnrichedGeneratedSection,
   evaluateSectionInterpretationSimilarity,
@@ -1303,8 +1307,10 @@ const logRuntimeActionRollbackFailure = async ({
 const atomicPersistRuntimeAction = async ({
   actorUserId,
   expectedUpdatedAt,
+  expectedStateVersion,
   nextExecutionStatus,
   nextFrameworkState,
+  nextStateVersion,
   nextRuntimeUpdate = {},
   runtimeInstance,
   session = null,
@@ -1314,10 +1320,31 @@ const atomicPersistRuntimeAction = async ({
     throw buildStaleActionError({ runtimeInstance, expectedUpdatedAt })
   }
 
+  let canonicalStateVersion
+  try {
+    canonicalStateVersion = requireCanonicalRuntimeStateVersion(runtimeInstance)
+  } catch (error) {
+    throw buildActionError({
+      status: error.status || 409,
+      code: 'CONFLICT',
+      message: error.message,
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_STATE_VERSION_REQUIRED,
+      details: {
+        ...(error.details || {}),
+        expectedStateVersion: expectedStateVersion || null,
+      },
+    })
+  }
+
+  if (canonicalStateVersion !== expectedStateVersion || !nextStateVersion) {
+    throw buildStaleActionError({ runtimeInstance, expectedUpdatedAt })
+  }
+
   const updatedRuntimeInstance = await RuntimeInstance.findOneAndUpdate(
     {
       _id: runtimeInstance._id,
       updatedAt: expectedUpdatedAtDate,
+      stateVersion: expectedStateVersion,
     },
     {
       $set: {
@@ -1325,6 +1352,7 @@ const atomicPersistRuntimeAction = async ({
         executionStatus: nextExecutionStatus,
         updatedBy: actorUserId || runtimeInstance.updatedBy || null,
         ...nextRuntimeUpdate,
+        stateVersion: nextStateVersion,
       },
     },
     {
@@ -1344,12 +1372,14 @@ const atomicPersistRuntimeAction = async ({
 const rollbackRuntimeAction = async ({
   previousExecutionStatus,
   previousFrameworkState,
+  previousStateVersion,
   previousRuntimeStatus,
   previousLockedAt,
   previousLockedBy,
   previousLockedReason,
   previousUpdatedBy,
   runtimeInstance,
+  nextStateVersion,
   updatedRuntimeInstance,
 }) => {
   const rollbackUpdatedAt = normalizeUpdatedAtDate(updatedRuntimeInstance?.updatedAt)
@@ -1359,10 +1389,12 @@ const rollbackRuntimeAction = async ({
     {
       _id: runtimeInstance._id,
       updatedAt: rollbackUpdatedAt,
+      stateVersion: nextStateVersion || updatedRuntimeInstance?.stateVersion,
     },
     {
       $set: {
         framework_state: previousFrameworkState,
+        stateVersion: previousStateVersion,
         executionStatus: previousExecutionStatus,
         status: previousRuntimeStatus,
         lockedAt: previousLockedAt || null,
@@ -1391,6 +1423,7 @@ const persistActionWithAudit = async ({
   nextRuntimeUpdate,
   previousExecutionStatus,
   previousFrameworkState,
+  previousStateVersion,
   previousRuntimeStatus,
   previousLockedAt,
   previousLockedBy,
@@ -1403,6 +1436,20 @@ const persistActionWithAudit = async ({
   discoveryResult,
   intelligenceGraphResult,
 }) => {
+  let nextStateVersion
+  try {
+    previousStateVersion = requireCanonicalRuntimeStateVersion(runtimeInstance)
+    nextStateVersion = createNextRuntimeStateVersion(previousStateVersion)
+  } catch (error) {
+    throw buildActionError({
+      status: error.status || 409,
+      code: 'CONFLICT',
+      message: error.message,
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_STATE_VERSION_REQUIRED,
+      details: error.details || {},
+    })
+  }
+
   if (mongoose.connection.readyState === 1) {
     const session = await mongoose.startSession()
     let updatedRuntimeInstance = null
@@ -1411,8 +1458,10 @@ const persistActionWithAudit = async ({
         updatedRuntimeInstance = await atomicPersistRuntimeAction({
           actorUserId,
           expectedUpdatedAt,
+          expectedStateVersion: previousStateVersion,
           nextExecutionStatus,
           nextFrameworkState,
+          nextStateVersion,
           nextRuntimeUpdate,
           runtimeInstance,
           session,
@@ -1447,8 +1496,10 @@ const persistActionWithAudit = async ({
   const updatedRuntimeInstance = await atomicPersistRuntimeAction({
     actorUserId,
     expectedUpdatedAt,
+    expectedStateVersion: previousStateVersion,
     nextExecutionStatus,
     nextFrameworkState,
+    nextStateVersion,
     nextRuntimeUpdate,
     runtimeInstance,
   })
@@ -1479,12 +1530,14 @@ const persistActionWithAudit = async ({
       const rollbackSucceeded = await rollbackRuntimeAction({
         previousExecutionStatus,
         previousFrameworkState,
+        previousStateVersion,
         previousRuntimeStatus,
         previousLockedAt,
         previousLockedBy,
         previousLockedReason,
         previousUpdatedBy,
         runtimeInstance,
+        nextStateVersion,
         updatedRuntimeInstance,
       })
       if (!rollbackSucceeded) {

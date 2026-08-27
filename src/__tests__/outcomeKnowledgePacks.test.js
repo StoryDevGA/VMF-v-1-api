@@ -260,9 +260,11 @@ const buildDefaultRoleRows = () => ([
 ])
 
 const buildFindChain = (rows) => ({
+  select: jest.fn().mockReturnThis(),
   sort: jest.fn().mockReturnThis(),
   skip: jest.fn().mockReturnThis(),
   limit: jest.fn().mockReturnThis(),
+  maxTimeMS: jest.fn().mockReturnThis(),
   session: jest.fn().mockReturnThis(),
   lean: jest.fn().mockResolvedValue(rows),
 })
@@ -506,6 +508,21 @@ const makeVersionForActivation = (activation, overrides = {}) => makeKnowledgePa
 
 const makeVersionsForActivations = (activations = []) =>
   activations.map((activation) => makeVersionForActivation(activation))
+
+const BOUNDED_HANDOFF_READ_POLICY = Object.freeze({
+  policyVersion: 'ss-014.runtime-state-v2.handoff-dependencies.v1',
+  maxTimeMS: 2000,
+  packageLimit: 2,
+  activationLimit: 501,
+  versionLimit: 501,
+  commandIds: Object.freeze([
+    'HANDOFF_CONTROL_READ',
+    'HANDOFF_FRAMEWORK_PACKAGE_READ',
+    'HANDOFF_KNOWLEDGE_ACTIVATION_READ',
+    'HANDOFF_KNOWLEDGE_VERSION_READ',
+    'HANDOFF_RENDERER_CAPABILITY_READ',
+  ]),
+})
 
 const OUTPUT_SCHEMAS_YAML = `
 pack:
@@ -5859,5 +5876,109 @@ Statement of Work source text.
     expect(res.body.error.code).toBe('FORBIDDEN')
     expect(KnowledgePackVersion.findOne).not.toHaveBeenCalled()
     expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('bounded Outcome Studio registry reads apply exact projections, sort, ceiling, and timeout', async () => {
+    const activations = makeAllRequiredActivations()
+    KnowledgePackActivation.find.mockReturnValue(buildFindChain(activations))
+    KnowledgePackVersion.find.mockReturnValue(buildFindChain(makeVersionsForActivations(activations)))
+
+    const result = await resolveOutcomeStudioKnowledgePacks({
+      frameworkKey: 'VMF',
+      runtimeType: 'VALUE_NARRATIVE',
+      packageKey: 'standard-package-vmf-3-1-rkm',
+      packageVersion: '3.1',
+      requestedOutputTypeKey: 'executive-brief',
+      boundedReadPolicy: BOUNDED_HANDOFF_READ_POLICY,
+    })
+
+    const activationQuery = KnowledgePackActivation.find.mock.results[0].value
+    const versionQuery = KnowledgePackVersion.find.mock.results[0].value
+    expect(activationQuery.select).toHaveBeenCalledWith(expect.stringContaining('activationId'))
+    expect(activationQuery.select).toHaveBeenCalledWith(expect.stringContaining('dependencyReferences.relationshipType'))
+    expect(activationQuery.sort).toHaveBeenCalledWith({ activatedAt: -1, _id: 1 })
+    expect(activationQuery.limit).toHaveBeenCalledWith(501)
+    expect(activationQuery.maxTimeMS).toHaveBeenCalledWith(2000)
+    expect(versionQuery.select).toHaveBeenCalledWith(expect.stringContaining('contentHash'))
+    expect(versionQuery.select).toHaveBeenCalledWith(expect.stringContaining('dependencyReferences.versionConstraint'))
+    expect(versionQuery.sort).toHaveBeenCalledWith({ versionId: 1, _id: 1 })
+    expect(versionQuery.limit).toHaveBeenCalledWith(501)
+    expect(versionQuery.maxTimeMS).toHaveBeenCalledWith(2000)
+    expect(result.boundedReadReceipt).toEqual(expect.objectContaining({
+      policyVersion: BOUNDED_HANDOFF_READ_POLICY.policyVersion,
+      providerAccessed: false,
+      networkAccessed: false,
+      fullRuntimeFetched: false,
+      dependencies: expect.arrayContaining([
+        expect.objectContaining({
+          dependencyKey: 'knowledge_pack_activations',
+          commandKey: 'HANDOFF_KNOWLEDGE_ACTIVATION_READ',
+          limit: 501,
+          overflowed: false,
+        }),
+        expect.objectContaining({
+          dependencyKey: 'knowledge_pack_versions',
+          commandKey: 'HANDOFF_KNOWLEDGE_VERSION_READ',
+          limit: 501,
+          overflowed: false,
+        }),
+      ]),
+    }))
+    expect(JSON.stringify(result)).not.toContain('Activation content must not leak')
+    expect(JSON.stringify(result)).not.toContain('Version content must not leak')
+    expect(JSON.stringify(result)).not.toContain('relationshipGovernanceStatus')
+    expect(JSON.stringify(result)).not.toContain('relationshipGovernanceError')
+  })
+
+  test('bounded Outcome Studio registry reads fail closed on activation overflow', async () => {
+    const overflowRows = Array.from({ length: 501 }, (_, index) => ({
+      ...makeAllRequiredActivations()[0],
+      activationId: `overflow-activation-${index}`,
+    }))
+    KnowledgePackActivation.find.mockReturnValue(buildFindChain(overflowRows))
+
+    await expect(resolveOutcomeStudioKnowledgePacks({
+      frameworkKey: 'VMF',
+      runtimeType: 'VALUE_NARRATIVE',
+      packageKey: 'standard-package-vmf-3-1-rkm',
+      packageVersion: '3.1',
+      boundedReadPolicy: BOUNDED_HANDOFF_READ_POLICY,
+    })).rejects.toMatchObject({
+      code: 'HANDOFF_BOUNDED_RESULT_OVERFLOW',
+    })
+  })
+
+  test('bounded Outcome Studio registry reads reject extra capability identifiers', async () => {
+    await expect(resolveOutcomeStudioKnowledgePacks({
+      frameworkKey: 'VMF',
+      runtimeType: 'VALUE_NARRATIVE',
+      packageKey: 'standard-package-vmf-3-1-rkm',
+      packageVersion: '3.1',
+      boundedReadPolicy: {
+        ...BOUNDED_HANDOFF_READ_POLICY,
+        commandIds: [
+          ...BOUNDED_HANDOFF_READ_POLICY.commandIds,
+          'UNRECOGNIZED_READER',
+        ],
+      },
+    })).rejects.toMatchObject({
+      code: 'HANDOFF_BOUNDED_POLICY_INVALID',
+    })
+  })
+
+  test('bounded Outcome Studio registry reads fail closed when query capabilities are incomplete', async () => {
+    const query = buildFindChain(makeAllRequiredActivations())
+    delete query.maxTimeMS
+    KnowledgePackActivation.find.mockReturnValue(query)
+
+    await expect(resolveOutcomeStudioKnowledgePacks({
+      frameworkKey: 'VMF',
+      runtimeType: 'VALUE_NARRATIVE',
+      packageKey: 'standard-package-vmf-3-1-rkm',
+      packageVersion: '3.1',
+      boundedReadPolicy: BOUNDED_HANDOFF_READ_POLICY,
+    })).rejects.toMatchObject({
+      code: 'HANDOFF_BOUNDED_QUERY_UNAVAILABLE',
+    })
   })
 })

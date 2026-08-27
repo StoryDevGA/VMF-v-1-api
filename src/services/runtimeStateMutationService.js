@@ -69,6 +69,10 @@ import {
   buildRuntimeIntelligenceGraphProjection,
   RUNTIME_INTELLIGENCE_GRAPH_BUILD_TRIGGERS,
 } from './runtimeIntelligenceGraphService.js'
+import {
+  createNextRuntimeStateVersion,
+  requireCanonicalRuntimeStateVersion,
+} from './runtimeStateVersionService.js'
 
 const SECTION_WRITE_SCOPE = 'framework_state.sections.*'
 export const DISCOVERY_EVIDENCE_PACK_PATH = 'framework_state.evidence_pack'
@@ -2792,7 +2796,9 @@ const logRuntimeStateRollbackFailure = async ({
 const atomicPersistRuntimeState = async ({
   actorUserId,
   expectedUpdatedAt,
+  expectedStateVersion,
   nextFrameworkState,
+  nextStateVersion,
   runtimeInstance,
   session = null,
 }) => {
@@ -2801,14 +2807,45 @@ const atomicPersistRuntimeState = async ({
     throw buildStaleMutationError({ runtimeInstance, expectedUpdatedAt })
   }
 
+  let canonicalStateVersion
+  try {
+    canonicalStateVersion = requireCanonicalRuntimeStateVersion(runtimeInstance)
+  } catch (error) {
+    throw buildMutationError({
+      status: error.status || 409,
+      code: 'CONFLICT',
+      message: error.message,
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_STATE_VERSION_REQUIRED,
+      details: {
+        ...(error.details || {}),
+        expectedStateVersion: expectedStateVersion || null,
+      },
+    })
+  }
+
+  if (canonicalStateVersion !== expectedStateVersion || !nextStateVersion) {
+    throw buildMutationError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Runtime instance has changed since the renderer projection was loaded.',
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_MUTATION_STALE,
+      details: {
+        expectedStateVersion,
+        currentStateVersion: canonicalStateVersion,
+      },
+    })
+  }
+
   const updatedRuntimeInstance = await RuntimeInstance.findOneAndUpdate(
     {
       _id: runtimeInstance._id,
       updatedAt: expectedUpdatedAtDate,
+      stateVersion: expectedStateVersion,
     },
     {
       $set: {
         framework_state: nextFrameworkState,
+        stateVersion: nextStateVersion,
         updatedBy: actorUserId || runtimeInstance.updatedBy || null,
       },
     },
@@ -2828,8 +2865,10 @@ const atomicPersistRuntimeState = async ({
 
 const rollbackRuntimeStateMutation = async ({
   previousFrameworkState,
+  previousStateVersion,
   previousUpdatedBy,
   runtimeInstance,
+  nextStateVersion,
   updatedRuntimeInstance,
 }) => {
   const rollbackUpdatedAt = normalizeUpdatedAtDate(updatedRuntimeInstance?.updatedAt)
@@ -2839,10 +2878,12 @@ const rollbackRuntimeStateMutation = async ({
     {
       _id: runtimeInstance._id,
       updatedAt: rollbackUpdatedAt,
+      stateVersion: nextStateVersion || updatedRuntimeInstance?.stateVersion,
     },
     {
       $set: {
         framework_state: previousFrameworkState,
+        stateVersion: previousStateVersion,
         updatedBy: previousUpdatedBy || null,
       },
     },
@@ -2869,6 +2910,21 @@ const persistMutationWithAudit = async ({
   expectedUpdatedAt,
   updatedAtBefore,
 }) => {
+  let previousStateVersion
+  let nextStateVersion
+  try {
+    previousStateVersion = requireCanonicalRuntimeStateVersion(runtimeInstance)
+    nextStateVersion = createNextRuntimeStateVersion(previousStateVersion)
+  } catch (error) {
+    throw buildMutationError({
+      status: error.status || 409,
+      code: 'CONFLICT',
+      message: error.message,
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_STATE_VERSION_REQUIRED,
+      details: error.details || {},
+    })
+  }
+
   if (mongoose.connection.readyState === 1) {
     const session = await mongoose.startSession()
     let updatedRuntimeInstance = null
@@ -2877,7 +2933,9 @@ const persistMutationWithAudit = async ({
         updatedRuntimeInstance = await atomicPersistRuntimeState({
           actorUserId,
           expectedUpdatedAt,
+          expectedStateVersion: previousStateVersion,
           nextFrameworkState,
+          nextStateVersion,
           runtimeInstance,
           session,
         })
@@ -2903,7 +2961,9 @@ const persistMutationWithAudit = async ({
   const updatedRuntimeInstance = await atomicPersistRuntimeState({
     actorUserId,
     expectedUpdatedAt,
+    expectedStateVersion: previousStateVersion,
     nextFrameworkState,
+    nextStateVersion,
     runtimeInstance,
   })
 
@@ -2923,8 +2983,10 @@ const persistMutationWithAudit = async ({
     try {
       const rollbackSucceeded = await rollbackRuntimeStateMutation({
         previousFrameworkState,
+        previousStateVersion,
         previousUpdatedBy,
         runtimeInstance,
+        nextStateVersion,
         updatedRuntimeInstance,
       })
       if (!rollbackSucceeded) {

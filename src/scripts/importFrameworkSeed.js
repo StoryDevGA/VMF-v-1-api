@@ -1878,97 +1878,111 @@ const validateFrameworkPackageSectionSkillBindings = ({
   const boundPolicies = workflowBindings
     .map((binding) => indexes.policiesByKey.get(normalizeToken(binding?.policyKey)))
     .filter(Boolean)
-  const supportsSectionGeneration = boundPolicies.some((policy) =>
-    normalizeToken(policy.key) === 'generate-section-gate'
-    && normalizeEnumToken(policy.governedAction) === 'GENERATE_SECTION')
+  const isV312SectionTruthPackage = normalizeToken(frameworkPackage.packageKey)
+    === 'standard-package-value-mapping-framework-3-1-2-runtime-knowledge-model'
+  const sectionGenerationPolicyActions = new Map([
+    ['generate-section-gate', 'GENERATE_SECTION'],
+    ...(isV312SectionTruthPackage
+      ? [
+        ['generate-section-gate-v3-1-2', 'GENERATE_SECTION'],
+        ['regenerate-section-gate', 'REGENERATE_SECTION'],
+        ['regenerate-section-gate-v3-1-2', 'REGENERATE_SECTION'],
+      ]
+      : []),
+  ])
+  const sectionGenerationPolicies = boundPolicies.filter((policy) =>
+    sectionGenerationPolicyActions.get(normalizeToken(policy.key))
+    === normalizeEnumToken(policy.governedAction))
 
   const sectionTruthPackageKeys = [
     'standard-package-vmf-3-1-1-rkm-canonical',
     'standard-package-vmf-3-1-1-rkm',
+    'standard-package-value-mapping-framework-3-1-2-runtime-knowledge-model',
   ]
   if (
     !sectionTruthPackageKeys.includes(normalizeToken(frameworkPackage.packageKey))
-    || !supportsSectionGeneration
+    || sectionGenerationPolicies.length === 0
   ) return
 
   for (const section of frameworkPackage.sections || []) {
     const runtimePath = String(section?.runtimePath || '').trim()
     if (!runtimePath) continue
 
-    const skillIds = [
-      ...new Set(boundPolicies
-        .flatMap((policy) => Array.isArray(policy.steps) ? policy.steps : [])
-        .filter((step) =>
-          normalizeEnumToken(step?.type || step?.stepType)
-            === WORKFLOW_POLICY_STEP_TYPES.SKILL_EXECUTION
-          && String(step?.targetPath || '').trim() === runtimePath)
-        .map((step) => normalizeToken(step?.skillId))
-        .filter(Boolean)),
-    ]
-    const source =
-      `Framework Package ${frameworkPackage.packageKey} section `
-      + `"${section?.sectionKey || runtimePath}"`
+    for (const policy of sectionGenerationPolicies) {
+      const skillIds = [
+        ...new Set((Array.isArray(policy.steps) ? policy.steps : [])
+          .filter((step) =>
+            normalizeEnumToken(step?.type || step?.stepType)
+              === WORKFLOW_POLICY_STEP_TYPES.SKILL_EXECUTION
+            && String(step?.targetPath || '').trim() === runtimePath)
+          .map((step) => normalizeToken(step?.skillId))
+          .filter(Boolean)),
+      ]
+      const source =
+        `Framework Package ${frameworkPackage.packageKey} section `
+        + `"${section?.sectionKey || runtimePath}" policy "${policy.key}"`
 
-    if (skillIds.length !== 1) {
-      notes.push({
-        level: 'error',
-        source,
-        message:
-          `Section runtime path "${runtimePath}" requires one unique exact-path `
-          + `Workflow Policy skill binding; found ${skillIds.length}.`,
-      })
-      continue
-    }
+      if (skillIds.length !== 1) {
+        notes.push({
+          level: 'error',
+          source,
+          message:
+            `Section runtime path "${runtimePath}" requires one unique exact-path `
+            + `Workflow Policy skill binding; found ${skillIds.length}.`,
+        })
+        continue
+      }
 
-    const skillId = skillIds[0]
-    const skill = indexes.skills.get(skillId)
-    if (!skill) {
-      notes.push({
-        level: 'error',
-        source,
-        message: `Section binding references unknown Runtime Skill "${skillId}".`,
-      })
-      continue
-    }
+      const skillId = skillIds[0]
+      const skill = indexes.skills.get(skillId)
+      if (!skill) {
+        notes.push({
+          level: 'error',
+          source,
+          message: `Section binding references unknown Runtime Skill "${skillId}".`,
+        })
+        continue
+      }
 
-    if (
-      normalizeEnumToken(skill.status) !== 'ACTIVE'
-      || normalizeEnumToken(skill.versionStatus) !== 'ACTIVE'
-    ) {
-      notes.push({
-        level: 'error',
-        source,
-        message: `Section binding Runtime Skill "${skillId}" must be ACTIVE.`,
-      })
-    }
+      if (
+        normalizeEnumToken(skill.status) !== 'ACTIVE'
+        || normalizeEnumToken(skill.versionStatus) !== 'ACTIVE'
+      ) {
+        notes.push({
+          level: 'error',
+          source,
+          message: `Section binding Runtime Skill "${skillId}" must be ACTIVE.`,
+        })
+      }
 
-    if (
-      !Array.isArray(skill.supportedFrameworkKeys)
-      || !skill.supportedFrameworkKeys.includes(
-        normalizeEnumToken(frameworkPackage.frameworkKey),
-      )
-    ) {
-      notes.push({
-        level: 'error',
-        source,
-        message:
-          `Section binding Runtime Skill "${skillId}" is not compatible with `
-          + `framework "${frameworkPackage.frameworkKey}".`,
-      })
-    }
+      if (
+        !Array.isArray(skill.supportedFrameworkKeys)
+        || !skill.supportedFrameworkKeys.includes(
+          normalizeEnumToken(frameworkPackage.frameworkKey),
+        )
+      ) {
+        notes.push({
+          level: 'error',
+          source,
+          message:
+            `Section binding Runtime Skill "${skillId}" is not compatible with `
+            + `framework "${frameworkPackage.frameworkKey}".`,
+        })
+      }
 
-    if (
-      !Array.isArray(skill.allowedWritePaths)
-      || !skill.allowedWritePaths.some((pathKey) =>
-        String(pathKey || '').trim() === runtimePath)
-    ) {
-      notes.push({
-        level: 'error',
-        source,
-        message:
-          `Section binding Runtime Skill "${skillId}" cannot write `
-          + `"${runtimePath}".`,
-      })
+      if (
+        !Array.isArray(skill.allowedWritePaths)
+        || !skill.allowedWritePaths.some((pathKey) =>
+          String(pathKey || '').trim() === runtimePath)
+      ) {
+        notes.push({
+          level: 'error',
+          source,
+          message:
+            `Section binding Runtime Skill "${skillId}" cannot write `
+            + `"${runtimePath}".`,
+        })
+      }
     }
   }
 }

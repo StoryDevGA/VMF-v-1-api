@@ -69,6 +69,13 @@ import {
   updateRuntimeOutcomeSessionFromLatestTruth as updateRuntimeOutcomeSessionFromLatestTruthRecord,
 } from '../services/outcomeStudioService.js'
 import { isOutcomeCustomerLanguageSafe } from '../services/outcomeCustomerLanguageService.js'
+import {
+  getRuntimeStateControl,
+  getRuntimeStateGraphManifest as readRuntimeStateGraphManifest,
+  getRuntimeStateOutcomeHandoffReadiness as readRuntimeStateOutcomeHandoffReadiness,
+  getRuntimeStateSectionSummary as readRuntimeStateSectionSummary,
+  listRuntimeStateEvidenceObjects,
+} from '../services/runtimeStateV2Repository.js'
 
 const buildRuntimeInstanceErrorResponse = (req, err) => ({
   error: {
@@ -277,6 +284,76 @@ export const getRuntimeInstance = async (req, res, next) => {
     return next(err)
   }
 }
+
+const sendRuntimeStateV2Read = async ({ req, res, next, read }) => {
+  try {
+    const data = await read()
+    return res.status(200).json({
+      data,
+      meta: { requestId: req.requestId, version: 'v1', storage: 'runtime-state-v2-read-only' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const getRuntimeStateBootstrap = async (req, res, next) => sendRuntimeStateV2Read({
+  req,
+  res,
+  next,
+  read: () => getRuntimeStateControl({
+    scopes: req.scopes,
+    runtimeInstanceId: req.params.runtimeInstanceId,
+  }),
+})
+
+export const getRuntimeStateSectionSummary = async (req, res, next) => sendRuntimeStateV2Read({
+  req,
+  res,
+  next,
+  read: () => readRuntimeStateSectionSummary({
+    scopes: req.scopes,
+    runtimeInstanceId: req.params.runtimeInstanceId,
+    sectionKey: req.params.sectionKey,
+  }),
+})
+
+export const getRuntimeStateEvidencePage = async (req, res, next) => sendRuntimeStateV2Read({
+  req,
+  res,
+  next,
+  read: () => listRuntimeStateEvidenceObjects({
+    scopes: req.scopes,
+    runtimeInstanceId: req.params.runtimeInstanceId,
+    page: req.query.page,
+    pageSize: req.query.pageSize,
+    reviewStatus: req.query.reviewStatus,
+    acceptanceState: req.query.acceptanceState,
+  }),
+})
+
+export const getRuntimeStateGraphManifest = async (req, res, next) => sendRuntimeStateV2Read({
+  req,
+  res,
+  next,
+  read: () => readRuntimeStateGraphManifest({
+    scopes: req.scopes,
+    runtimeInstanceId: req.params.runtimeInstanceId,
+  }),
+})
+
+export const getRuntimeStateOutcomeHandoffReadiness = async (req, res, next) => sendRuntimeStateV2Read({
+  req,
+  res,
+  next,
+  read: () => readRuntimeStateOutcomeHandoffReadiness({
+    scopes: req.scopes,
+    runtimeInstanceId: req.params.runtimeInstanceId,
+  }),
+})
 
 export const getRuntimeRenderer = async (req, res, next) => {
   try {
