@@ -5,6 +5,7 @@ import {
   acceptRuntimeDiscovery,
   acceptRuntimeSection,
   approveRuntimeOutcomeDraft,
+  buildRuntimeStateRequestScopes,
   clearRuntimeSectionEvidence,
   createGovernedReasoningExecution,
   createRuntimeInstance,
@@ -41,6 +42,12 @@ import {
   getRuntimeOutcomeStudio,
   getRuntimeOutcomeStudioReadiness,
   getRuntimeRenderer,
+  getRuntimeStateBootstrap,
+  getRuntimeStateEvidencePage,
+  getRuntimeStateGraphManifest,
+  getRuntimeStateGraphProjection,
+  getRuntimeStateOutcomeHandoffReadiness,
+  getRuntimeStateSectionSummary,
   getRuntimeTruthQuality,
   generateRuntimeOutputRequest,
   listRuntimeOutputAssets,
@@ -129,6 +136,16 @@ router.use((req, res, next) => (
 
 router.get('/', validateListRuntimeInstances, listRuntimeInstances)
 router.post('/', validateCreateRuntimeInstance, createRuntimeInstance)
+router.get('/:runtimeInstanceId/state/bootstrap', validateRuntimeInstanceId, getRuntimeStateBootstrap)
+router.get('/:runtimeInstanceId/state/sections/:sectionKey', validateRuntimeInstanceId, getRuntimeStateSectionSummary)
+router.get('/:runtimeInstanceId/state/evidence', validateRuntimeInstanceId, getRuntimeStateEvidencePage)
+router.get('/:runtimeInstanceId/state/graph-manifest', validateRuntimeInstanceId, getRuntimeStateGraphManifest)
+router.get('/:runtimeInstanceId/state/graph-projection', validateRuntimeInstanceId, getRuntimeStateGraphProjection)
+router.get(
+  '/:runtimeInstanceId/state/outcome-handoff/readiness',
+  validateRuntimeInstanceId,
+  getRuntimeStateOutcomeHandoffReadiness,
+)
 router.patch('/:runtimeInstanceId/discovery-acceptance', validateRuntimeInstanceId, validateAcceptRuntimeDiscovery, acceptRuntimeDiscovery)
 router.patch(
   '/:runtimeInstanceId/discovery-evidence/:evidenceObjectId/review',
@@ -212,6 +229,14 @@ router.get(
 router.get('/:runtimeInstanceId/output-lab', validateRuntimeInstanceId, getRuntimeOutputLab)
 router.get('/:runtimeInstanceId/output-lab/definitions', validateRuntimeInstanceId, getRuntimeOutputLabDefinitions)
 router.get('/:runtimeInstanceId/output-lab/readiness', validateRuntimeInstanceId, getRuntimeOutputLabReadiness)
+router.use('/:runtimeInstanceId/outcome-studio', (req, _res, next) => {
+  const hasRequestedScope = Object.prototype.hasOwnProperty.call(req.query || {}, 'customerId')
+    || Object.prototype.hasOwnProperty.call(req.query || {}, 'tenantId')
+  if (hasRequestedScope) {
+    req.scopes = buildRuntimeStateRequestScopes({ scopes: req.scopes, query: req.query })
+  }
+  next()
+})
 router.get('/:runtimeInstanceId/outcome-studio', validateRuntimeOutcomeInstanceId, getRuntimeOutcomeStudio)
 router.get('/:runtimeInstanceId/outcome-studio/readiness', validateRuntimeOutcomeInstanceId, getRuntimeOutcomeStudioReadiness)
 router.get(

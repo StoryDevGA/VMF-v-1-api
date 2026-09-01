@@ -2,6 +2,7 @@ import { describe, test, expect, beforeEach, afterEach, jest } from '@jest/globa
 import { Customer, User } from '../models/index.js'
 import LicenseLevel from '../models/LicenseLevel.js'
 import WorkflowPolicy from '../models/WorkflowPolicy.js'
+import { generateChecksum } from '../services/governanceAudit/checksumService.js'
 import {
   buildBackfillPlan,
   runBackfillCustomerLicenseGovernance,
@@ -27,8 +28,10 @@ import {
   applyReplacementPlan,
   assertDeterministicSeedStableIds,
   assertExistingStableIds,
+  assertPackageWorkflowPolicyDependencyReferences,
   buildControlRecordPayload,
   buildPackageReplacementPayload,
+  buildReplacementDependencyLock,
   cloneBundleWithMappedKeys,
   withRequiredActorFields,
 } from '../scripts/replaceActiveFrameworkPackageFromSeed.js'
@@ -972,6 +975,21 @@ describe('replaceActiveFrameworkPackageFromSeed helpers', () => {
         isLocked: false,
         uiContractKey: 'standard-ui-contract-vmf-3-1-1-rkm',
         workflowBindings: [{ policyKey: 'truth-generation-policy' }],
+        dependencyLock: {
+          snapshotId: 'seed-lock-standard-package-vmf-3-1-1-rkm',
+          status: 'PASS',
+          packageKey: 'standard-package-vmf-3-1-1-rkm',
+          packageVersion: '3.1.1',
+          references: [{
+            collectionKey: 'WorkflowPolicy',
+            id: 'policy-truth-generation-policy',
+            key: 'truth-generation-policy',
+            status: 'ACTIVE',
+            versionStatus: 'ACTIVE',
+            componentVersion: 1,
+            lineageId: 'policy-truth-generation-policy',
+          }],
+        },
       },
       uiContract: {
         uiContractKey: 'standard-ui-contract-vmf-3-1-1-rkm',
@@ -987,6 +1005,10 @@ describe('replaceActiveFrameworkPackageFromSeed helpers', () => {
         key: 'truth-generation-policy',
         stableId: 'policy-truth-generation-policy',
         name: 'Truth Generation Policy',
+        status: 'ACTIVE',
+        versionStatus: 'ACTIVE',
+        componentVersion: 1,
+        lineageId: 'policy-truth-generation-policy',
       }],
     },
     existingRecords: {
@@ -1146,11 +1168,11 @@ describe('replaceActiveFrameworkPackageFromSeed helpers', () => {
     ])
   })
 
-  test('builds package payloads that preserve the active package identity', () => {
+  test('builds package payloads that preserve active identity while adopting the amended seed lock', () => {
     const payload = buildPackageReplacementPayload({
       seedPackage: {
         frameworkKey: 'VMF',
-        packageKey: 'standard-package-vmf-3-1-1-rkm-canonical',
+        packageKey: 'standard-package-vmf-3-1-1-rkm',
         version: '3.1.1',
         status: 'DRAFT',
         versionStatus: 'DRAFT',
@@ -1164,12 +1186,20 @@ describe('replaceActiveFrameworkPackageFromSeed helpers', () => {
         },
         workflowBindings: [{ policyKey: 'truth-generation-policy' }],
         dependencyLock: {
-          snapshotId: '',
-          snapshotHash: '',
+          snapshotId: 'seed-lock-standard-package-vmf-3-1-1-rkm',
+          snapshotHash: 'stale-seed-hash',
           status: 'PASS',
-          packageKey: 'standard-package-vmf-3-1-rkm',
-          packageVersion: '3.1',
-          references: [{ targetKey: 'truth-generation-policy' }],
+          packageKey: 'standard-package-vmf-3-1-1-rkm',
+          packageVersion: '3.1.1',
+          references: [{
+            collectionKey: 'WorkflowPolicy',
+            id: 'policy-truth-generation-policy',
+            key: 'truth-generation-policy',
+            status: 'ACTIVE',
+            versionStatus: 'ACTIVE',
+            componentVersion: 1,
+            lineageId: 'policy-truth-generation-policy',
+          }],
         },
       },
       existingPackage: {
@@ -1196,6 +1226,15 @@ describe('replaceActiveFrameworkPackageFromSeed helpers', () => {
           resolvedAt: new Date('2026-07-01T12:43:53.000Z'),
         },
       },
+      workflowPolicies: [{
+        key: 'truth-generation-policy',
+        stableId: 'policy-truth-generation-policy',
+        name: 'Truth Generation Policy',
+        status: 'ACTIVE',
+        versionStatus: 'ACTIVE',
+        componentVersion: 1,
+        lineageId: 'policy-truth-generation-policy',
+      }],
     })
 
     expect(payload.packageKey).toBe('standard-package-vmf-3-1-1-rkm')
@@ -1212,14 +1251,190 @@ describe('replaceActiveFrameworkPackageFromSeed helpers', () => {
       resolvedAt: new Date('2026-07-01T12:43:53.000Z'),
     })
     expect(payload.workflowBindings).toEqual([{ policyKey: 'truth-generation-policy' }])
-    expect(payload.dependencyLock).toEqual({
-      snapshotId: 'dep-lock-standard-package-vmf-3-1-1-rkm-3-1-1-20260701124144',
-      snapshotHash: '621c63f74b2ff7a53a3a19e727fd45c6f88a885f126fa3e0e7ddbd21a8d417c5',
+    expect(payload.dependencyLock).toEqual(expect.objectContaining({
+      snapshotId: 'seed-lock-standard-package-vmf-3-1-1-rkm',
       status: 'PASS',
       packageKey: 'standard-package-vmf-3-1-1-rkm',
       packageVersion: '3.1.1',
-      references: [{ key: 'active-reference' }],
+      references: [{
+        collectionKey: 'WorkflowPolicy',
+        id: 'policy-truth-generation-policy',
+        key: 'truth-generation-policy',
+        name: 'Truth Generation Policy',
+        status: 'ACTIVE',
+        versionStatus: 'ACTIVE',
+        componentVersion: 1,
+        lineageId: 'policy-truth-generation-policy',
+      }],
+    }))
+    expect(payload.dependencyLock.snapshotHash).toMatch(/^[a-f0-9]{64}$/)
+    expect(payload.dependencyLock.snapshotHash).toBe(generateChecksum({
+      status: payload.dependencyLock.status,
+      resolvedAt: payload.dependencyLock.resolvedAt,
+      resolvedBy: payload.dependencyLock.resolvedBy,
+      packageKey: payload.dependencyLock.packageKey,
+      packageVersion: payload.dependencyLock.packageVersion,
+      references: payload.dependencyLock.references,
+    }))
+    expect(payload.dependencyLock.references).not.toEqual([{ key: 'active-reference' }])
+  })
+
+  test('normalizes missing Workflow Policy lock metadata without mutating the seed package', () => {
+    const seedPackage = {
+      packageKey: 'standard-package-value-mapping-framework-3-1-2-runtime-knowledge-model',
+      version: '3.1.2',
+      workflowBindings: [{ policyKey: 'generate-section-gate-v3-1-2' }],
+      dependencyLock: {
+        snapshotId: '',
+        resolvedAt: '2026-08-21T00:00:00.000Z',
+        status: 'PASS',
+        packageKey: 'standard-package-value-mapping-framework-3-1-2-runtime-knowledge-model',
+        packageVersion: '3.1.2',
+        references: [{
+          collectionKey: 'WorkflowPolicy',
+          id: 'policy-generate-section-gate-v3-1-2',
+          key: 'generate-section-gate-v3-1-2',
+          status: 'DRAFT',
+          versionStatus: 'DRAFT',
+          componentVersion: 2,
+          lineageId: 'policy-wrong-lineage',
+        }],
+      },
+    }
+    const before = JSON.stringify(seedPackage)
+    const lock = buildReplacementDependencyLock({
+      seedPackage,
+      workflowPolicies: [{
+        key: 'generate-section-gate-v3-1-2',
+        stableId: 'policy-generate-section-gate-v3-1-2',
+        status: 'ACTIVE',
+        versionStatus: 'ACTIVE',
+        componentVersion: 1,
+        lineageId: 'policy-generate-section-gate',
+      }],
     })
+
+    expect(lock.references[0]).toEqual(expect.objectContaining({
+      versionStatus: 'ACTIVE',
+      componentVersion: 1,
+      lineageId: 'policy-generate-section-gate',
+    }))
+    expect(lock.snapshotId).toBe(
+      'dep-lock-standard-package-value-mapping-framework-3-1-2-runtime-knowledge-model-3-1-2-20260821000000',
+    )
+    expect(JSON.stringify(seedPackage)).toBe(before)
+  })
+
+  test.each([
+    ['missing', [], /found 0/],
+    ['duplicate', [
+      {
+        collectionKey: 'WorkflowPolicy',
+        id: 'policy-generate-section-gate-v3-1-2',
+        key: 'generate-section-gate-v3-1-2',
+        status: 'ACTIVE',
+        versionStatus: 'ACTIVE',
+        componentVersion: 1,
+        lineageId: 'policy-generate-section-gate',
+      },
+      {
+        collectionKey: 'WorkflowPolicy',
+        id: 'policy-generate-section-gate-v3-1-2',
+        key: 'generate-section-gate-v3-1-2',
+        status: 'ACTIVE',
+        versionStatus: 'ACTIVE',
+        componentVersion: 1,
+        lineageId: 'policy-generate-section-gate',
+      },
+    ], /found 2/],
+    ['mismatched stable id', [{
+      collectionKey: 'WorkflowPolicy',
+      id: 'policy-stale',
+      key: 'generate-section-gate-v3-1-2',
+      status: 'ACTIVE',
+      versionStatus: 'ACTIVE',
+      componentVersion: 1,
+      lineageId: 'policy-stale',
+    }], /does not match/],
+  ])('fails closed for %s package-bound Workflow Policy lock reference', (_label, references, expectedError) => {
+    expect(() => assertPackageWorkflowPolicyDependencyReferences({
+      packageRecord: {
+        workflowBindings: [{ policyKey: 'generate-section-gate-v3-1-2' }],
+      },
+      workflowPolicies: [{
+        key: 'generate-section-gate-v3-1-2',
+        stableId: 'policy-generate-section-gate-v3-1-2',
+      }],
+      references,
+    })).toThrow(expectedError)
+  })
+
+  test('fails closed when a package-bound Workflow Policy is absent from the seed records', () => {
+    expect(() => assertPackageWorkflowPolicyDependencyReferences({
+      packageRecord: {
+        workflowBindings: [{ policyKey: 'generate-section-gate-v3-1-2' }],
+      },
+      workflowPolicies: [],
+      references: [{
+        collectionKey: 'WorkflowPolicy',
+        id: 'policy-generate-section-gate-v3-1-2',
+        key: 'generate-section-gate-v3-1-2',
+        status: 'ACTIVE',
+        versionStatus: 'ACTIVE',
+        componentVersion: 1,
+        lineageId: 'policy-generate-section-gate',
+      }],
+    })).toThrow(/no matching seeded Workflow Policy record/)
+  })
+
+  test.each([
+    ['status', { status: 'DRAFT' }],
+    ['version status', { versionStatus: 'DRAFT' }],
+    ['component version', { componentVersion: 2 }],
+    ['lineage', { lineageId: 'policy-wrong-lineage' }],
+  ])('fails closed when Workflow Policy lock %s does not match the source policy', (_label, override) => {
+    expect(() => assertPackageWorkflowPolicyDependencyReferences({
+      packageRecord: {
+        workflowBindings: [{ policyKey: 'generate-section-gate-v3-1-2' }],
+      },
+      workflowPolicies: [{
+        key: 'generate-section-gate-v3-1-2',
+        stableId: 'policy-generate-section-gate-v3-1-2',
+        status: 'ACTIVE',
+        versionStatus: 'ACTIVE',
+        componentVersion: 1,
+        lineageId: 'policy-generate-section-gate',
+      }],
+      references: [{
+        collectionKey: 'WorkflowPolicy',
+        id: 'policy-generate-section-gate-v3-1-2',
+        key: 'generate-section-gate-v3-1-2',
+        status: 'ACTIVE',
+        versionStatus: 'ACTIVE',
+        componentVersion: 1,
+        lineageId: 'policy-generate-section-gate',
+        ...override,
+      }],
+    })).toThrow(/incomplete active component metadata/)
+  })
+
+  test('fails closed when dependency-lock identity does not match the target package', () => {
+    expect(() => buildReplacementDependencyLock({
+      seedPackage: {
+        packageKey: 'source-package',
+        version: '3.1.2',
+        workflowBindings: [],
+        dependencyLock: {
+          snapshotId: 'seed-lock',
+          status: 'PASS',
+          packageKey: 'source-package',
+          packageVersion: '3.1.2',
+          references: [],
+        },
+      },
+      expectedPackageKey: 'target-package',
+      expectedPackageVersion: '3.1.2',
+    })).toThrow(/identity does not match/)
   })
 
   test('rejects seed control records whose stable ids do not match deterministic identities', () => {

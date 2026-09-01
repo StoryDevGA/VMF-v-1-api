@@ -5,6 +5,7 @@ import FrameworkPackage from '../models/FrameworkPackage.js'
 import UIContract, { buildUIContractStableId } from '../models/UIContract.js'
 import WorkflowPolicy, { buildWorkflowPolicyStableId } from '../models/WorkflowPolicy.js'
 import RuntimePathRegistry, { buildRuntimePathRegistryStableId } from '../models/RuntimePathRegistry.js'
+import { generateChecksum } from '../services/governanceAudit/checksumService.js'
 import { RUNTIME_CONTROL_VERSION_STATUSES } from '../utils/runtimeControlVersioning.js'
 import {
   loadSeedBundle,
@@ -48,7 +49,6 @@ const PACKAGE_PRESERVED_FIELDS = new Set([
   'lockedAt',
   'lockedBy',
   'lockedReason',
-  'dependencyLock',
   'visibility',
   'customerAccessMode',
   'lastCheckpointAt',
@@ -276,7 +276,158 @@ const resolveActiveUiContractBindingStatus = (existingPackage) =>
     ? RUNTIME_CONTROL_VERSION_STATUSES.ACTIVE
     : existingPackage?.uiContractBinding?.status || RUNTIME_CONTROL_VERSION_STATUSES.DRAFT
 
-const buildPackageReplacementPayload = ({ seedPackage, existingPackage }) => ({
+const normalizeDependencyKey = (value) => String(value || '').trim().toLowerCase()
+
+const normalizeWorkflowPolicyDependencyReference = ({ reference, workflowPolicy }) => {
+  if (!workflowPolicy) return { ...reference }
+
+  return {
+    ...reference,
+    id: reference.id || reference.stableId || workflowPolicy.stableId || buildWorkflowPolicyStableId(workflowPolicy.key),
+    key: reference.key || workflowPolicy.key,
+    name: reference.name || workflowPolicy.name || workflowPolicy.key,
+    status: workflowPolicy.status || reference.status || RUNTIME_CONTROL_VERSION_STATUSES.ACTIVE,
+    versionStatus: workflowPolicy.versionStatus || reference.versionStatus || RUNTIME_CONTROL_VERSION_STATUSES.ACTIVE,
+    componentVersion: Number(workflowPolicy.componentVersion) || Number(reference.componentVersion) || 1,
+    lineageId: workflowPolicy.lineageId || reference.lineageId || workflowPolicy.stableId || buildWorkflowPolicyStableId(workflowPolicy.key),
+  }
+}
+
+const assertPackageWorkflowPolicyDependencyReferences = ({
+  packageRecord,
+  workflowPolicies = [],
+  references = [],
+}) => {
+  const policiesByKey = new Map(
+    workflowPolicies.map((policy) => [normalizeDependencyKey(policy.key), policy]),
+  )
+  const workflowPolicyReferences = references.filter((reference) =>
+    normalizeDependencyKey(reference.collectionKey || reference.componentType) === 'workflowpolicy')
+
+  for (const binding of Array.isArray(packageRecord.workflowBindings) ? packageRecord.workflowBindings : []) {
+    const policyKey = normalizeDependencyKey(binding?.policyKey)
+    if (!policyKey) continue
+
+    const matches = workflowPolicyReferences.filter((reference) =>
+      normalizeDependencyKey(reference.key) === policyKey)
+    if (matches.length !== 1) {
+      throw new Error(
+        `Framework Package workflow binding "${policyKey}" requires exactly one `
+        + `dependency-locked Workflow Policy reference; found ${matches.length}.`,
+      )
+    }
+
+    const policy = policiesByKey.get(policyKey)
+    if (!policy) {
+      throw new Error(
+        `Framework Package workflow binding "${policyKey}" has no matching seeded Workflow Policy record.`,
+      )
+    }
+    const expectedStableId = normalizeDependencyKey(
+      policy?.stableId || buildWorkflowPolicyStableId(policyKey),
+    )
+    const reference = matches[0]
+    const actualStableId = normalizeDependencyKey(reference.id || reference.stableId)
+    if (actualStableId !== expectedStableId) {
+      throw new Error(
+        `Framework Package workflow binding "${policyKey}" dependency reference stableId `
+        + `"${actualStableId}" does not match "${expectedStableId}".`,
+      )
+    }
+
+    const expectedStatus = normalizeDependencyKey(policy.status || RUNTIME_CONTROL_VERSION_STATUSES.ACTIVE)
+    const expectedVersionStatus = normalizeDependencyKey(
+      policy.versionStatus || RUNTIME_CONTROL_VERSION_STATUSES.ACTIVE,
+    )
+    const expectedComponentVersion = Number(policy.componentVersion) || 1
+    const expectedLineageId = String(
+      policy.lineageId || policy.stableId || buildWorkflowPolicyStableId(policyKey),
+    ).trim()
+
+    if (
+      normalizeDependencyKey(reference.status) !== expectedStatus
+      || normalizeDependencyKey(reference.versionStatus) !== expectedVersionStatus
+      || Number(reference.componentVersion) !== expectedComponentVersion
+      || String(reference.lineageId || '').trim() !== expectedLineageId
+      || (Array.isArray(reference.issues) && reference.issues.length > 0)
+    ) {
+      throw new Error(
+        `Framework Package workflow binding "${policyKey}" dependency reference has incomplete active component metadata.`,
+      )
+    }
+  }
+}
+
+const buildReplacementDependencyLock = ({
+  seedPackage,
+  workflowPolicies = [],
+  expectedPackageKey = seedPackage?.packageKey,
+  expectedPackageVersion = seedPackage?.version,
+}) => {
+  const sourceLock = seedPackage?.dependencyLock
+  if (!sourceLock || !Array.isArray(sourceLock.references)) {
+    throw new Error('Replacement seed Framework Package must contain a dependency lock with references.')
+  }
+  if (
+    normalizeDependencyKey(sourceLock.status) !== 'pass'
+  ) {
+    throw new Error('Replacement seed Framework Package dependency lock must have PASS status.')
+  }
+  if (
+    normalizeDependencyKey(seedPackage.packageKey) !== normalizeDependencyKey(expectedPackageKey)
+    || String(seedPackage.version || '').trim() !== String(expectedPackageVersion || '').trim()
+  ) {
+    throw new Error('Replacement seed Framework Package identity does not match the target package identity.')
+  }
+
+  const policiesByKey = new Map(
+    workflowPolicies.map((policy) => [normalizeDependencyKey(policy.key), policy]),
+  )
+  const references = sourceLock.references.map((reference) => {
+    const policyKey = normalizeDependencyKey(reference.key)
+    if (normalizeDependencyKey(reference.collectionKey || reference.componentType) !== 'workflowpolicy') {
+      return { ...reference }
+    }
+    return normalizeWorkflowPolicyDependencyReference({
+      reference,
+      workflowPolicy: policiesByKey.get(policyKey),
+    })
+  })
+  const resolvedAtDate = new Date(sourceLock.resolvedAt || Date.now())
+  const lockTimestamp = Number.isNaN(resolvedAtDate.getTime()) ? new Date() : resolvedAtDate
+  const normalizedLock = {
+    ...sourceLock,
+    snapshotId: String(sourceLock.snapshotId || '').trim()
+      || `dep-lock-${normalizeDependencyKey(seedPackage.packageKey).replace(/[^a-z0-9]+/g, '-')}-${String(seedPackage.version || '').replace(/[^0-9]+/g, '-')}-${lockTimestamp.toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}`,
+    packageKey: seedPackage.packageKey,
+    packageVersion: seedPackage.version,
+    references,
+  }
+  const hashableSnapshot = {
+    status: normalizedLock.status,
+    resolvedAt: normalizedLock.resolvedAt,
+    resolvedBy: normalizedLock.resolvedBy,
+    packageKey: normalizedLock.packageKey,
+    packageVersion: normalizedLock.packageVersion,
+    references: normalizedLock.references,
+    ...(normalizedLock.uiContractSnapshot
+      ? { uiContractSnapshot: normalizedLock.uiContractSnapshot }
+      : {}),
+  }
+
+  assertPackageWorkflowPolicyDependencyReferences({
+    packageRecord: seedPackage,
+    workflowPolicies,
+    references,
+  })
+
+  return {
+    ...normalizedLock,
+    snapshotHash: generateChecksum(hashableSnapshot),
+  }
+}
+
+const buildPackageReplacementPayload = ({ seedPackage, existingPackage, workflowPolicies = [] }) => ({
   ...removePreservedFields(seedPackage, PACKAGE_PRESERVED_FIELDS),
   frameworkKey: existingPackage.frameworkKey,
   packageKey: existingPackage.packageKey,
@@ -285,7 +436,12 @@ const buildPackageReplacementPayload = ({ seedPackage, existingPackage }) => ({
   versionStatus: resolveActiveReplacementVersionStatus(existingPackage),
   isDefault: existingPackage.isDefault === true,
   isLocked: existingPackage.isLocked === true,
-  dependencyLock: existingPackage.dependencyLock || null,
+  dependencyLock: buildReplacementDependencyLock({
+    seedPackage,
+    workflowPolicies,
+    expectedPackageKey: existingPackage.packageKey,
+    expectedPackageVersion: existingPackage.version,
+  }),
   uiContractKey: seedPackage.uiContractKey,
   uiContractBinding: {
     ...(seedPackage.uiContractBinding || {}),
@@ -681,6 +837,7 @@ const applyReplacementPlan = async ({ plan, models, session, targetPackageKey })
     payload: buildPackageReplacementPayload({
       seedPackage: plan.seedRecords.package,
       existingPackage,
+      workflowPolicies: plan.seedRecords.workflowPolicies,
     }),
     session,
   })
@@ -794,6 +951,8 @@ export {
   assertExistingStableIds,
   buildControlRecordPayload,
   buildPackageReplacementPayload,
+  buildReplacementDependencyLock,
+  assertPackageWorkflowPolicyDependencyReferences,
   buildReplacementPlan,
   buildUiContractReplacementPayload,
   cloneBundleWithMappedKeys,

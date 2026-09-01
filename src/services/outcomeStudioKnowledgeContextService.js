@@ -9,6 +9,36 @@ const normalizeText = (value) => String(value ?? '').trim()
 const normalizeToken = (value) => normalizeText(value).toUpperCase()
 const normalizeCapabilityKey = (value) => normalizeText(value).toLowerCase()
 
+const buildBoundedContextReceipt = ({
+  policy,
+  resolution,
+  rendererResultCount = null,
+} = {}) => {
+  if (!policy) return null
+  const dependencies = Array.isArray(resolution?.boundedReadReceipt?.dependencies)
+    ? resolution.boundedReadReceipt.dependencies.map((dependency) => ({ ...dependency }))
+    : []
+  if (rendererResultCount !== null) {
+    dependencies.push({
+      dependencyKey: 'renderer_capability_registry',
+      commandKey: 'HANDOFF_RENDERER_CAPABILITY_READ',
+      maxTimeMS: policy.maxTimeMS,
+      limit: 1,
+      sortKeys: [],
+      projectionFields: ['in_process_renderer_capability'],
+      resultCount: rendererResultCount,
+      overflowed: false,
+    })
+  }
+  return {
+    policyVersion: policy.policyVersion,
+    dependencies,
+    providerAccessed: false,
+    networkAccessed: false,
+    fullRuntimeFetched: false,
+  }
+}
+
 const formatCapabilityLabel = (value, fallback = '') => {
   const label = normalizeText(value).replace(/\s+output\s+type$/i, '')
   if (label) return label
@@ -55,6 +85,7 @@ const blockedContextResult = ({
   reason,
   requestedOutputTypeKey = '',
   status = 'BLOCKED',
+  boundedReadReceipt = null,
 } = {}) => ({
   context: {
     contractVersion: OUTCOME_STUDIO_KNOWLEDGE_CONTEXT_VERSION,
@@ -72,9 +103,13 @@ const blockedContextResult = ({
   },
   reasoningBinding: null,
   reasoningResolution: null,
+  ...(boundedReadReceipt ? { boundedReadReceipt } : {}),
 })
 
-export const resolveOutcomeStudioKnowledgeContext = async ({ query = {} } = {}) => {
+export const resolveOutcomeStudioKnowledgeContext = async ({
+  query = {},
+  boundedReadPolicy = null,
+} = {}) => {
   const requestedOutputTypeKey = normalizeCapabilityKey(query.requestedOutputTypeKey)
   if (!requestedOutputTypeKey) {
     return blockedContextResult({
@@ -87,8 +122,13 @@ export const resolveOutcomeStudioKnowledgeContext = async ({ query = {} } = {}) 
       ...query,
       requestedOutputTypeKey,
     },
+    boundedReadPolicy,
   })
   const { binding } = resolution
+  const boundedReceipt = buildBoundedContextReceipt({
+    policy: boundedReadPolicy,
+    resolution,
+  })
   const status = normalizeToken(binding?.status)
   if (!READY_STATUSES.has(status)) {
     return blockedContextResult({
@@ -98,6 +138,7 @@ export const resolveOutcomeStudioKnowledgeContext = async ({ query = {} } = {}) 
         : 'DELIVERABLE_GUIDANCE_BLOCKED',
       requestedOutputTypeKey,
       status: status || 'BLOCKED',
+      boundedReadReceipt: boundedReceipt,
     })
   }
 
@@ -118,6 +159,7 @@ export const resolveOutcomeStudioKnowledgeContext = async ({ query = {} } = {}) 
       binding,
       reason: 'DELIVERABLE_BINDING_INCOMPLETE',
       requestedOutputTypeKey,
+      boundedReadReceipt: boundedReceipt,
     })
   }
 
@@ -131,6 +173,11 @@ export const resolveOutcomeStudioKnowledgeContext = async ({ query = {} } = {}) 
       binding,
       reason: rendererResolution.reason,
       requestedOutputTypeKey,
+      boundedReadReceipt: buildBoundedContextReceipt({
+        policy: boundedReadPolicy,
+        resolution,
+        rendererResultCount: 0,
+      }),
     })
   }
 
@@ -164,6 +211,13 @@ export const resolveOutcomeStudioKnowledgeContext = async ({ query = {} } = {}) 
     context,
     reasoningBinding: binding,
     reasoningResolution: resolution,
+    ...(boundedReadPolicy
+      ? { boundedReadReceipt: buildBoundedContextReceipt({
+          policy: boundedReadPolicy,
+          resolution,
+          rendererResultCount: 1,
+        }) }
+      : {}),
   }
 }
 

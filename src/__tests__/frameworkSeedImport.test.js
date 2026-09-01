@@ -62,6 +62,17 @@ const validateR3CrossReferences = (mutate) => {
   return { bundle, frameworkPackages, notes, runtimePaths, workflowPolicies }
 }
 
+const validateV312AmendedCrossReferences = (mutate) => {
+  const bundle = loadSeedBundle(v312AmendedSeedDir, '3.1.2')
+  const runtimePaths = findBundleRecords(bundle, 'runtime_path_registry.json')
+  const workflowPolicies = findBundleRecords(bundle, 'workflow_policies.json')
+  const frameworkPackages = findBundleRecords(bundle, 'framework_package.json')
+  mutate?.({ frameworkPackages, runtimePaths, workflowPolicies })
+  const notes = []
+  validateCrossReferences(bundle, notes)
+  return { bundle, frameworkPackages, notes, runtimePaths, workflowPolicies }
+}
+
 describe('framework seed import guard', () => {
   test('suggests help for unknown script arguments', () => {
     expect(() => parseArgs(['--no-edditor-contract'])).toThrow(/--help/i)
@@ -649,6 +660,87 @@ describe('framework seed import guard', () => {
         allowedWritePaths: expect.arrayContaining([section.runtimePath]),
       }))
     }
+  })
+
+  test('staged v3.1.2 amended package binds all six sections exactly for Generate and Regenerate', () => {
+    const { frameworkPackages, notes, workflowPolicies } = validateV312AmendedCrossReferences()
+    const frameworkPackage = frameworkPackages[0]
+    const boundPolicyKeys = new Set(
+      frameworkPackage.workflowBindings.map((binding) => binding.policyKey),
+    )
+    const sectionPolicies = workflowPolicies.filter((policy) =>
+      boundPolicyKeys.has(policy.key)
+      && ['GENERATE_SECTION', 'REGENERATE_SECTION'].includes(policy.governedAction),
+    )
+
+    expect(notes.filter((note) => note.level === 'error')).toEqual([])
+    expect(frameworkPackage.sections).toHaveLength(6)
+    expect(sectionPolicies).toHaveLength(2)
+
+    for (const policy of sectionPolicies) {
+      for (const section of frameworkPackage.sections) {
+        const bindings = (policy.steps || []).filter((step) =>
+          step.type === 'SKILL_EXECUTION'
+          && step.targetPath === section.runtimePath,
+        )
+
+        expect(bindings).toHaveLength(1)
+        expect(bindings[0].skillId).toBe(sectionSkillBindingMatrix[section.runtimePath])
+      }
+    }
+  })
+
+  test('v3.1.2 guard rejects a writePaths-only section binding', () => {
+    const { notes } = validateV312AmendedCrossReferences(({ workflowPolicies }) => {
+      const policy = workflowPolicies.find((row) => row.key === 'generate-section-gate-v3-1-2')
+      const step = policy.steps.find((row) => row.skillId === 'skill-customer-context-interpreter')
+      step.targetPath = ''
+    })
+
+    expect(notes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        level: 'error',
+        source: expect.stringContaining('customer-context'),
+        message: expect.stringMatching(/requires one unique exact-path.*found 0/i),
+      }),
+    ]))
+  })
+
+  test('v3.1.2 guard rejects a missing exact section binding', () => {
+    const { notes } = validateV312AmendedCrossReferences(({ workflowPolicies }) => {
+      const policy = workflowPolicies.find((row) => row.key === 'regenerate-section-gate-v3-1-2')
+      policy.steps = policy.steps.filter((step) => step.skillId !== 'skill-customer-context-interpreter')
+    })
+
+    expect(notes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        level: 'error',
+        source: expect.stringContaining('customer-context'),
+        message: expect.stringMatching(/requires one unique exact-path.*found 0/i),
+      }),
+    ]))
+  })
+
+  test('v3.1.2 guard rejects multiple distinct exact section skill bindings', () => {
+    const { notes } = validateV312AmendedCrossReferences(({ workflowPolicies }) => {
+      const policy = workflowPolicies.find((row) => row.key === 'generate-section-gate-v3-1-2')
+      policy.steps.push({
+        stepKey: 'qa-ambiguous-customer-context',
+        type: 'SKILL_EXECUTION',
+        order: 90,
+        targetPath: 'framework_state.sections.customer_context',
+        skillId: 'skill-strategic-objective-modeller',
+        required: true,
+      })
+    })
+
+    expect(notes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        level: 'error',
+        source: expect.stringContaining('customer-context'),
+        message: expect.stringMatching(/requires one unique exact-path.*found 2/i),
+      }),
+    ]))
   })
 
   test('workflow step normalization does not promote generic writePaths to exact bindings', () => {

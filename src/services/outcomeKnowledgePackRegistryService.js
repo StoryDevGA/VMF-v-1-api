@@ -70,6 +70,166 @@ import {
 const normalizeText = (value) => String(value || '').trim()
 const normalizeToken = (value) => normalizeText(value).toUpperCase()
 const normalizeLowerKey = (value) => normalizeText(value).toLowerCase()
+
+const BOUNDED_HANDOFF_POLICY_VERSION = 'ss-014.runtime-state-v2.handoff-dependencies.v1'
+const BOUNDED_HANDOFF_COMMANDS = Object.freeze({
+  ACTIVATION: 'HANDOFF_KNOWLEDGE_ACTIVATION_READ',
+  VERSION: 'HANDOFF_KNOWLEDGE_VERSION_READ',
+})
+const BOUNDED_HANDOFF_COMMAND_IDS = Object.freeze([
+  'HANDOFF_CONTROL_READ',
+  'HANDOFF_FRAMEWORK_PACKAGE_READ',
+  'HANDOFF_KNOWLEDGE_ACTIVATION_READ',
+  'HANDOFF_KNOWLEDGE_VERSION_READ',
+  'HANDOFF_RENDERER_CAPABILITY_READ',
+])
+const BOUNDED_ACTIVATION_PROJECTION_FIELDS = Object.freeze([
+  'activationId',
+  'packId',
+  'versionId',
+  'packCategory',
+  'purposeCategory',
+  'knowledgeLayer',
+  'capabilityKey',
+  'knowledgeAssetId',
+  'workspaceCompatibility',
+  'dependencyReferences',
+  'relationshipContractVersion',
+  'relationshipChecksum',
+  'packType',
+  'packKey',
+  'label',
+  'semanticVersion',
+  'schemaVersion',
+  'status',
+  'scopeType',
+  'scopeKey',
+  'frameworkKey',
+  'runtimeType',
+  'packageKey',
+  'packageVersion',
+  'environmentKey',
+  'executionMode',
+  'boundary',
+  'visibility',
+  'customerId',
+  'tenantId',
+  'contentHash',
+  'activatedAt',
+])
+const BOUNDED_VERSION_PROJECTION_FIELDS = Object.freeze([
+  'versionId',
+  'packId',
+  'packCategory',
+  'purposeCategory',
+  'knowledgeLayer',
+  'capabilityKey',
+  'knowledgeAssetId',
+  'workspaceCompatibility',
+  'dependencyReferences',
+  'relationshipContractVersion',
+  'relationshipChecksum',
+  'packType',
+  'packKey',
+  'semanticVersion',
+  'schemaVersion',
+  'status',
+  'scopeType',
+  'scopeKey',
+  'sourceAuthority',
+  'executionMode',
+  'visibility',
+  'customerId',
+  'tenantId',
+  'authoringMode',
+  'reviewStatus',
+  'validatedAt',
+  'contentHash',
+])
+const BOUNDED_RELATIONSHIP_PROJECTION_FIELDS = Object.freeze([
+  'dependencyReferences.relationshipType',
+  'dependencyReferences.targetPackType',
+  'dependencyReferences.targetPackKey',
+  'dependencyReferences.targetCapabilityKey',
+  'dependencyReferences.targetKnowledgeAssetId',
+  'dependencyReferences.targetKnowledgeLayer',
+  'dependencyReferences.requiredAt',
+  'dependencyReferences.cardinality',
+  'dependencyReferences.versionConstraint',
+])
+const BOUNDED_VERSION_SERIALIZED_FIELDS = new Set([
+  ...BOUNDED_VERSION_PROJECTION_FIELDS,
+  'id',
+  'versionId',
+  'dependencyReferences',
+  'relationshipGovernanceStatus',
+  'relationshipGovernanceError',
+])
+const boundedProjectionFields = (fields) => [
+  ...fields.filter((field) => field !== 'dependencyReferences'),
+  ...BOUNDED_RELATIONSHIP_PROJECTION_FIELDS,
+]
+const boundedProjection = (fields) => boundedProjectionFields(fields).join(' ')
+
+const validateBoundedReadPolicy = (policy) => {
+  if (!policy
+    || policy.policyVersion !== BOUNDED_HANDOFF_POLICY_VERSION
+    || policy.maxTimeMS !== 2000
+    || policy.packageLimit !== 2
+    || policy.activationLimit !== 501
+    || policy.versionLimit !== 501
+    || !Array.isArray(policy.commandIds)
+    || policy.commandIds.length !== BOUNDED_HANDOFF_COMMAND_IDS.length
+    || [...policy.commandIds].sort().join('|') !== [...BOUNDED_HANDOFF_COMMAND_IDS].sort().join('|')) {
+    const error = new Error('The bounded Knowledge Pack read policy is invalid.')
+    error.code = 'HANDOFF_BOUNDED_POLICY_INVALID'
+    throw error
+  }
+  return policy
+}
+
+const executeBoundedRead = async ({
+  model,
+  filter,
+  projection,
+  sort,
+  limit,
+  maxTimeMS,
+} = {}) => {
+  const query = model.find(filter)
+  if (!query || typeof query.select !== 'function'
+    || typeof query.sort !== 'function'
+    || typeof query.limit !== 'function'
+    || typeof query.maxTimeMS !== 'function'
+    || typeof query.lean !== 'function') {
+    const error = new Error('Bounded Knowledge Pack query support is unavailable.')
+    error.code = 'HANDOFF_BOUNDED_QUERY_UNAVAILABLE'
+    throw error
+  }
+  const rows = await query
+    .select(projection)
+    .sort(sort)
+    .limit(limit)
+    .maxTimeMS(maxTimeMS)
+    .lean()
+  if (!Array.isArray(rows)) {
+    const error = new Error('Bounded Knowledge Pack query returned an invalid result.')
+    error.code = 'HANDOFF_BOUNDED_QUERY_INVALID'
+    throw error
+  }
+  return {
+    rows,
+    overflowed: rows.length >= limit,
+  }
+}
+
+const buildBoundedReadReceipt = ({ policy, dependencies = [] } = {}) => ({
+  policyVersion: policy.policyVersion,
+  dependencies,
+  providerAccessed: false,
+  networkAccessed: false,
+  fullRuntimeFetched: false,
+})
 const MONGO_TRANSACTION_TOPOLOGY_TYPES = new Set([
   'ReplicaSetWithPrimary',
   'Sharded',
@@ -1107,6 +1267,14 @@ const serializeKnowledgePackVersion = (version) => {
   }
 }
 
+const serializeBoundedKnowledgePackVersion = (version) => {
+  const serialized = serializeKnowledgePackVersion(version)
+  if (!serialized) return null
+  return Object.fromEntries(
+    Object.entries(serialized).filter(([key]) => BOUNDED_VERSION_SERIALIZED_FIELDS.has(key)),
+  )
+}
+
 const serializeKnowledgePackContentPreview = ({ version, packDefinition }) => {
   if (!version) return null
   const plain = toRawPlainObject(version) || {}
@@ -1462,15 +1630,47 @@ const canonicalizeGovernanceList = (values = []) => JSON.stringify(
   )).sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))),
 )
 
-const resolveRequestRuntimeVersionEvidence = async ({ activations = [] } = {}) => {
+const resolveRequestRuntimeVersionEvidence = async ({
+  activations = [],
+  boundedReadPolicy = null,
+} = {}) => {
   const activationRows = activations.map(serializeKnowledgePackActivation).filter(Boolean)
   const versionIds = [...new Set(activationRows.map((activation) => activation.versionId).filter(Boolean))]
-  const versionRows = versionIds.length > 0
-    ? await KnowledgePackVersion.find({ versionId: { $in: versionIds } }).lean()
-    : []
+  let versionRows = []
+  let boundedReadReceipt = null
+  if (versionIds.length > 0) {
+    if (boundedReadPolicy) {
+      const boundedResult = await executeBoundedRead({
+        model: KnowledgePackVersion,
+        filter: { versionId: { $in: versionIds } },
+        projection: boundedProjection(BOUNDED_VERSION_PROJECTION_FIELDS),
+        sort: { versionId: 1, _id: 1 },
+        limit: boundedReadPolicy.versionLimit,
+        maxTimeMS: boundedReadPolicy.maxTimeMS,
+      })
+      if (boundedResult.overflowed) {
+        const error = new Error('Bounded Knowledge Pack version resolution exceeded its result ceiling.')
+        error.code = 'HANDOFF_BOUNDED_RESULT_OVERFLOW'
+        throw error
+      }
+      versionRows = boundedResult.rows
+      boundedReadReceipt = {
+        dependencyKey: 'knowledge_pack_versions',
+        commandKey: BOUNDED_HANDOFF_COMMANDS.VERSION,
+        maxTimeMS: boundedReadPolicy.maxTimeMS,
+        limit: boundedReadPolicy.versionLimit,
+        sortKeys: ['versionId:1', '_id:1'],
+        projectionFields: boundedProjectionFields(BOUNDED_VERSION_PROJECTION_FIELDS),
+        resultCount: versionRows.length,
+        overflowed: false,
+      }
+    } else {
+      versionRows = await KnowledgePackVersion.find({ versionId: { $in: versionIds } }).lean()
+    }
+  }
   const versionById = new Map(
     versionRows
-      .map(serializeKnowledgePackVersion)
+      .map(boundedReadPolicy ? serializeBoundedKnowledgePackVersion : serializeKnowledgePackVersion)
       .filter(Boolean)
       .map((version) => [version.versionId, version]),
   )
@@ -1607,7 +1807,7 @@ const resolveRequestRuntimeVersionEvidence = async ({ activations = [] } = {}) =
     eligible.push(activation)
   }
 
-  return { eligible, excluded }
+  return { eligible, excluded, boundedReadReceipt }
 }
 
 const hasRequestSpecificSelectors = ({
@@ -1636,6 +1836,30 @@ const uniquePacksByActivation = (packs = []) => {
   return [...selected.values()]
 }
 
+const BOUNDED_PUBLIC_PROHIBITED_KEYS = new Set([
+  '_id',
+  '__v',
+  'id',
+  'content',
+  'rawContent',
+  'compiledContent',
+  'relationshipGovernanceStatus',
+  'relationshipGovernanceError',
+])
+
+const sanitizeBoundedPublicProjection = (value) => {
+  if (Array.isArray(value)) return value.map(sanitizeBoundedPublicProjection)
+  if (!value || typeof value !== 'object') return value
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => !BOUNDED_PUBLIC_PROHIBITED_KEYS.has(key))
+      .map(([key, childValue]) => [key, sanitizeBoundedPublicProjection(childValue)]),
+  )
+}
+
+const maybeSanitizeBoundedPublicProjection = (value, boundedPolicy) =>
+  boundedPolicy ? sanitizeBoundedPublicProjection(value) : value
+
 export const resolveOutcomeStudioKnowledgePacks = async ({
   frameworkKey,
   runtimeType,
@@ -1654,7 +1878,12 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
   languageKey,
   channelKey,
   resolvedAt,
+  boundedReadPolicy = null,
 } = {}) => {
+  const boundedPolicy = boundedReadPolicy
+    ? validateBoundedReadPolicy(boundedReadPolicy)
+    : null
+  const boundedDependencies = []
   const scopeCandidates = buildOutcomeKnowledgePackScopeCandidates({
     frameworkKey,
     runtimeType,
@@ -1666,12 +1895,41 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
     runtimeInstanceId,
   })
   const scopeKeys = scopeCandidates.map((candidate) => candidate.scopeKey)
-  const activations = await KnowledgePackActivation.find({
+  const activationFilter = {
     status: OUTCOME_KNOWLEDGE_PACK_ACTIVATION_STATUSES.ACTIVE,
     scopeKey: { $in: scopeKeys },
-  })
-    .sort({ activatedAt: -1 })
-    .lean()
+  }
+  let activations
+  if (boundedPolicy) {
+    const boundedResult = await executeBoundedRead({
+      model: KnowledgePackActivation,
+      filter: activationFilter,
+      projection: boundedProjection(BOUNDED_ACTIVATION_PROJECTION_FIELDS),
+      sort: { activatedAt: -1, _id: 1 },
+      limit: boundedPolicy.activationLimit,
+      maxTimeMS: boundedPolicy.maxTimeMS,
+    })
+    if (boundedResult.overflowed) {
+      const error = new Error('Bounded Knowledge Pack activation resolution exceeded its result ceiling.')
+      error.code = 'HANDOFF_BOUNDED_RESULT_OVERFLOW'
+      throw error
+    }
+    activations = boundedResult.rows
+    boundedDependencies.push({
+      dependencyKey: 'knowledge_pack_activations',
+      commandKey: BOUNDED_HANDOFF_COMMANDS.ACTIVATION,
+      maxTimeMS: boundedPolicy.maxTimeMS,
+      limit: boundedPolicy.activationLimit,
+      sortKeys: ['activatedAt:-1', '_id:1'],
+      projectionFields: boundedProjectionFields(BOUNDED_ACTIVATION_PROJECTION_FIELDS),
+      resultCount: activations.length,
+      overflowed: false,
+    })
+  } else {
+    activations = await KnowledgePackActivation.find(activationFilter)
+      .sort({ activatedAt: -1 })
+      .lean()
+  }
   let eligibleActivations = activations
     .map(serializeKnowledgePackActivation)
     .filter(Boolean)
@@ -1694,9 +1952,11 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
   if (requestSpecific || hasDiscoverableOutputTypes) {
     const versionEvidence = await resolveRequestRuntimeVersionEvidence({
       activations: eligibleActivations,
+      boundedReadPolicy: boundedPolicy,
     })
     eligibleActivations = versionEvidence.eligible
     versionEvidenceExclusions = versionEvidence.excluded
+    if (versionEvidence.boundedReadReceipt) boundedDependencies.push(versionEvidence.boundedReadReceipt)
   }
   const activeActivationByPackKey = selectActiveActivations({
     activations: eligibleActivations,
@@ -1767,7 +2027,7 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
       AMBIGUOUS: 'Request-specific Knowledge Pack resolution found multiple equally eligible candidates.',
     }
 
-    return {
+    return maybeSanitizeBoundedPublicProjection({
       status: requestResolution.status,
       mode: OUTCOME_KNOWLEDGE_PACK_RESOLUTION_MODE,
       summary: summaryByStatus[requestResolution.status],
@@ -1824,7 +2084,13 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
             status: pack.status,
           })),
       },
-    }
+      ...(boundedPolicy
+        ? { boundedReadReceipt: buildBoundedReadReceipt({
+            policy: boundedPolicy,
+            dependencies: boundedDependencies,
+          }) }
+        : {}),
+    }, boundedPolicy)
   }
 
   const status = unboundRequiredPacks.length === 0
@@ -1843,7 +2109,7 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
     scopeCandidates,
   })
 
-  return {
+  return maybeSanitizeBoundedPublicProjection({
     status,
     mode: OUTCOME_KNOWLEDGE_PACK_RESOLUTION_MODE,
     summary: status === OUTCOME_STUDIO_BINDING_STATUSES.PROJECTED
@@ -1877,11 +2143,23 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
         status: pack.status,
       })),
     },
-  }
+    ...(boundedPolicy
+      ? { boundedReadReceipt: buildBoundedReadReceipt({
+          policy: boundedPolicy,
+          dependencies: boundedDependencies,
+        }) }
+      : {}),
+  }, boundedPolicy)
 }
 
-export const resolveOutcomeStudioKnowledgePackBinding = async ({ query = {} } = {}) => {
-  const binding = await resolveOutcomeStudioKnowledgePacks(query)
+export const resolveOutcomeStudioKnowledgePackBinding = async ({
+  query = {},
+  boundedReadPolicy = null,
+} = {}) => {
+  const binding = await resolveOutcomeStudioKnowledgePacks({
+    ...query,
+    boundedReadPolicy,
+  })
 
   return {
     manifest: {
@@ -1899,6 +2177,9 @@ export const resolveOutcomeStudioKnowledgePackBinding = async ({ query = {} } = 
       previewOnly: false,
       contentVisible: false,
     },
+    ...(boundedReadPolicy
+      ? { boundedReadReceipt: binding.boundedReadReceipt }
+      : {}),
   }
 }
 

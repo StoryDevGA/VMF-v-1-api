@@ -26,6 +26,12 @@ import RuntimeInstance from './RuntimeInstance.js'
 import RuntimeOutputAsset from './RuntimeOutputAsset.js'
 import RuntimeOutputRequest from './RuntimeOutputRequest.js'
 import RuntimeGraphRelationship from './RuntimeGraphRelationship.js'
+import RuntimeStateSection from './RuntimeStateSection.js'
+import RuntimeEvidenceSource from './RuntimeEvidenceSource.js'
+import RuntimeEvidenceObject from './RuntimeEvidenceObject.js'
+import RuntimeGraphSnapshot from './RuntimeGraphSnapshot.js'
+import RuntimeGraphElement from './RuntimeGraphElement.js'
+import RuntimeStateMigrationReceipt from './RuntimeStateMigrationReceipt.js'
 import TruthSignature from './TruthSignature.js'
 import OutcomeAsset from './OutcomeAsset.js'
 import OutcomeAssetVersion from './OutcomeAssetVersion.js'
@@ -76,6 +82,12 @@ export {
   RuntimeOutputAsset,
   RuntimeOutputRequest,
   RuntimeGraphRelationship,
+  RuntimeStateSection,
+  RuntimeEvidenceSource,
+  RuntimeEvidenceObject,
+  RuntimeGraphSnapshot,
+  RuntimeGraphElement,
+  RuntimeStateMigrationReceipt,
   TruthSignature,
   OutcomeAsset,
   OutcomeAssetVersion,
@@ -127,6 +139,12 @@ export default {
   RuntimeOutputAsset,
   RuntimeOutputRequest,
   RuntimeGraphRelationship,
+  RuntimeStateSection,
+  RuntimeEvidenceSource,
+  RuntimeEvidenceObject,
+  RuntimeGraphSnapshot,
+  RuntimeGraphElement,
+  RuntimeStateMigrationReceipt,
   TruthSignature,
   OutcomeAsset,
   OutcomeAssetVersion,

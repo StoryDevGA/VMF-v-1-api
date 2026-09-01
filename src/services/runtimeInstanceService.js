@@ -21,6 +21,8 @@ import { resolveCustomerFeatureEntitlements } from './licenseEntitlementService.
 import { isFrameworkPackageAvailableToCustomer } from './frameworkPackageAvailabilityService.js'
 import customerGovernanceService from './customerGovernanceService.js'
 import auditService from './auditService.js'
+import { createRuntimeStateVersion } from './runtimeStateVersionService.js'
+import { stageRuntimeStateNativeInitialization } from './runtimeStateNativeInitializationService.js'
 
 export const RUNTIME_INSTANCE_ERROR_REASONS = Object.freeze({
   CUSTOMER_NOT_FOUND: 'CUSTOMER_NOT_FOUND',
@@ -67,6 +69,8 @@ export const RUNTIME_INSTANCE_ERROR_REASONS = Object.freeze({
   RUNTIME_REVISION_SOURCE_NOT_PUBLISHED: 'RUNTIME_REVISION_SOURCE_NOT_PUBLISHED',
   RUNTIME_REVISION_STALE: 'RUNTIME_REVISION_STALE',
   RUNTIME_REVISION_UNSUPPORTED_RUNTIME_TYPE: 'RUNTIME_REVISION_UNSUPPORTED_RUNTIME_TYPE',
+  RUNTIME_STATE_VERSION_REQUIRED: 'RUNTIME_STATE_VERSION_REQUIRED',
+  RUNTIME_STATE_V2_TRANSACTION_REQUIRED: 'RUNTIME_STATE_V2_TRANSACTION_REQUIRED',
   DOCUMENT_INGESTION_FAILED: 'DOCUMENT_INGESTION_FAILED',
   WEBSITE_ACQUISITION_FAILED: 'WEBSITE_ACQUISITION_FAILED',
 })
@@ -87,6 +91,118 @@ export const normalizeToken = (value) => String(value || '').trim().toUpperCase(
 const normalizeRuntimeInstanceKey = (value) => String(value || '').trim().toLowerCase()
 
 const escapeRegExp = (value) => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+export const RUNTIME_INSTANCE_LIST_PROJECTION = [
+  '_id',
+  'runtimeInstanceKey',
+  'customerId',
+  'tenantId',
+  'workspaceId',
+  'runtimeType',
+  'frameworkKey',
+  'packageId',
+  'packageKey',
+  'packageVersion',
+  'status',
+  'executionStatus',
+  'runtimeMode',
+  'name',
+  'description',
+  'lockedAt',
+  'lockedBy',
+  'lockedReason',
+  'createdAt',
+  'updatedAt',
+  'framework_state.lifecycle.stage',
+  'framework_state.lifecycle.status',
+  'framework_state.lifecycle.lockStatus',
+  'framework_state.lifecycle.lockState',
+  'framework_state.lifecycle.locked',
+  'framework_state.validation.state',
+  'framework_state.validation.status',
+  'framework_state.validation.result',
+  'framework_state.readiness.state',
+  'framework_state.readiness.validationState',
+  'framework_state.readiness.completionState',
+  'framework_state.readiness.completionStatus',
+  'framework_state.readiness.lockStatus',
+  'framework_state.readiness.snapshotStatus',
+  'framework_state.readiness.submittedForReview',
+  'framework_state.lock.state',
+  'framework_state.lock.status',
+  'framework_state.lock.locked',
+].join(' ')
+
+// The renderer needs the governed runtime state used to build its customer-safe
+// projection, but it does not need the full intelligence graph payload. Keep
+// node/edge types for the renderer's summaries and leave graph elements out of
+// the initial read. Detail and mutation paths intentionally continue to use the
+// full runtime document.
+export const RUNTIME_INSTANCE_RENDERER_PROJECTION = [
+  '_id',
+  'runtimeInstanceKey',
+  'customerId',
+  'tenantId',
+  'workspaceId',
+  'runtimeType',
+  'frameworkKey',
+  'packageId',
+  'packageKey',
+  'packageVersion',
+  'deploymentId',
+  'activationId',
+  'dependencyLockId',
+  'evidence.dependencySnapshotId',
+  'evidence.dependencySnapshotHash',
+  'status',
+  'executionStatus',
+  'runtimeMode',
+  'name',
+  'description',
+  'lockedAt',
+  'lockedBy',
+  'lockedReason',
+  'createdAt',
+  'updatedAt',
+  'createdBy',
+  'updatedBy',
+  'assignedTo',
+  'anchors',
+  'revision',
+  'stateVersion',
+  'framework_state.lifecycle',
+  'framework_state.evidence_pack.state',
+  'framework_state.evidence_pack.status',
+  'framework_state.evidence_pack.inputs',
+  'framework_state.evidence_pack.inputComplete',
+  'framework_state.evidence_pack.input_complete',
+  'framework_state.evidence_pack.evidenceReady',
+  'framework_state.evidence_pack.evidence_ready',
+  'framework_state.evidence_pack.needsRefresh',
+  'framework_state.evidence_pack.needs_refresh',
+  'framework_state.evidence_pack.accepted',
+  'framework_state.evidence_pack.acquisitionProfile',
+  'framework_state.evidence_pack.acquisition.profile',
+  'framework_state.evidence_pack.acquisition.coverage',
+  'framework_state.evidence_pack.acquisition.confidence',
+  'framework_state.evidence_pack.acquisition.completedAt',
+  'framework_state.evidence_pack.acquisition.effectiveness',
+  'framework_state.evidence_pack.acquisitionEffectiveness',
+  'framework_state.evidence_pack.evidence.coverage',
+  'framework_state.evidence_pack.evidence.confidence',
+  'framework_state.evidence_pack.lineage.builder.mode',
+  'framework_state.evidence_pack.resetSummary',
+  'framework_state.evidence_pack.acceptedAt',
+  'framework_state.evidence_pack.acceptedBy',
+  'framework_state.evidence_pack.refreshedAt',
+  'framework_state.validation',
+  'framework_state.readiness',
+  'framework_state.publish',
+  'framework_state.lock',
+  'framework_state.policy',
+  'framework_state.attachments',
+  'framework_state.artifacts',
+].join(' ')
 
 const idsEqual = (left, right) => {
   const normalizedLeft = toIdString(left)
@@ -721,6 +837,11 @@ const persistRuntimeInstanceWithAudit = async ({
     try {
       await session.withTransaction(async () => {
         await saveRuntimeInstance({ runtimeInstance, session, capacityConflictContext })
+        await stageRuntimeStateNativeInitialization({
+          actorUserId,
+          runtimeInstance,
+          session,
+        })
         await logRuntimeInstanceCreated({
           auditRequest,
           actorUserId,
@@ -734,6 +855,15 @@ const persistRuntimeInstanceWithAudit = async ({
     }
 
     return serializedRuntimeInstance
+  }
+
+  if (process.env.NODE_ENV !== 'test') {
+    throw createRuntimeInstanceError({
+      status: 503,
+      code: 'SERVICE_UNAVAILABLE',
+      message: 'Runtime instance creation requires an active database transaction.',
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_STATE_V2_TRANSACTION_REQUIRED,
+    })
   }
 
   await saveRuntimeInstance({ runtimeInstance, capacityConflictContext })
@@ -806,6 +936,93 @@ export const serializeRuntimeInstance = (runtimeInstance) => {
         }))
       : [],
     framework_state: normalizeFrameworkState(plain.framework_state),
+  }
+}
+
+const getRuntimeInstanceListState = (runtimeInstance) => {
+  const frameworkState = runtimeInstance?.framework_state || runtimeInstance?.frameworkState || {}
+  const lifecycle = frameworkState.lifecycle || {}
+  const validation = frameworkState.validation || {}
+  const readiness = frameworkState.readiness || {}
+  const lock = frameworkState.lock || {}
+  const firstToken = (...values) => values.map(normalizeToken).find(Boolean) || null
+
+  return {
+    frameworkLifecycleStage: firstToken(
+      typeof lifecycle === 'string' ? lifecycle : lifecycle.stage,
+      lifecycle.status,
+    ),
+    validationStatus: firstToken(
+      runtimeInstance?.validationStatus,
+      runtimeInstance?.runtimeValidationStatus,
+      readiness.validationState,
+      validation.state,
+      validation.status,
+      validation.result,
+    ),
+    readinessState: firstToken(
+      runtimeInstance?.readinessState,
+      runtimeInstance?.runtimeReadinessState,
+      readiness.state,
+    ),
+    lockStatus: firstToken(
+      runtimeInstance?.lockStatus,
+      runtimeInstance?.runtimeLockStatus,
+      runtimeInstance?.lockState,
+      readiness.lockStatus,
+      lock.state,
+      lock.status,
+      lifecycle.lockStatus,
+      lifecycle.lockState,
+      runtimeInstance?.status === RUNTIME_INSTANCE_STATUSES.LOCKED || runtimeInstance?.lockedAt
+        ? RUNTIME_INSTANCE_STATUSES.LOCKED
+        : null,
+    ),
+    completionState: firstToken(
+      runtimeInstance?.completionState,
+      readiness.completionState,
+      readiness.completionStatus,
+    ),
+    snapshotStatus: firstToken(
+      runtimeInstance?.snapshotStatus,
+      readiness.snapshotStatus,
+    ),
+    submittedForReview: readiness.submittedForReview === true,
+  }
+}
+
+export const serializeRuntimeInstanceSummary = (runtimeInstance) => {
+  if (!runtimeInstance) return null
+
+  const plain = typeof runtimeInstance.toJSON === 'function'
+    ? runtimeInstance.toJSON()
+    : typeof runtimeInstance.toObject === 'function'
+      ? runtimeInstance.toObject()
+      : { ...runtimeInstance }
+  const id = toIdString(plain.id || plain._id)
+
+  return {
+    id,
+    runtimeInstanceKey: plain.runtimeInstanceKey || '',
+    customerId: toIdString(plain.customerId),
+    tenantId: toIdString(plain.tenantId),
+    workspaceId: plain.workspaceId || '',
+    runtimeType: plain.runtimeType || '',
+    frameworkKey: plain.frameworkKey || '',
+    packageId: toIdString(plain.packageId),
+    packageKey: plain.packageKey || '',
+    packageVersion: plain.packageVersion || '',
+    status: plain.status || '',
+    executionStatus: plain.executionStatus || '',
+    runtimeMode: plain.runtimeMode || '',
+    name: plain.name || '',
+    description: plain.description || '',
+    lockedAt: plain.lockedAt || null,
+    lockedBy: plain.lockedBy ? toIdString(plain.lockedBy) : null,
+    lockedReason: plain.lockedReason || '',
+    createdAt: plain.createdAt || null,
+    updatedAt: plain.updatedAt || null,
+    ...getRuntimeInstanceListState(plain),
   }
 }
 
@@ -886,6 +1103,7 @@ export const createRuntimeInstance = async ({
     activationId: evidence.activationId,
     deploymentId: evidence.deploymentId,
     evidence,
+    stateVersion: createRuntimeStateVersion(),
     status: RUNTIME_INSTANCE_STATUSES.ACTIVE,
     executionStatus: RUNTIME_EXECUTION_STATUSES.IDLE,
     runtimeMode: RUNTIME_MODES.INTERACTIVE,
@@ -953,6 +1171,7 @@ export const listRuntimeInstances = async ({
 
   const [rows, total, activeRuntimeCount] = await Promise.all([
     RuntimeInstance.find(filter)
+      .select(RUNTIME_INSTANCE_LIST_PROJECTION)
       .sort({ updatedAt: -1, createdAt: -1 })
       .skip(skip)
       .limit(pageSize)
@@ -968,7 +1187,7 @@ export const listRuntimeInstances = async ({
   ])
 
   return {
-    data: rows.map(serializeRuntimeInstance),
+    data: rows.map(serializeRuntimeInstanceSummary),
     meta: {
       page,
       pageSize,
@@ -988,16 +1207,105 @@ export const listRuntimeInstances = async ({
   }
 }
 
-export const getRuntimeInstance = async ({
-  scopes,
+const buildRuntimeInstanceLookupFilter = ({
   runtimeInstanceId,
+  customerId,
+  tenantId,
 } = {}) => {
-  const runtimeInstance = await RuntimeInstance.findOne({
+  const identityFilter = {
     $or: [
       ...(mongoose.isValidObjectId(runtimeInstanceId) ? [{ _id: runtimeInstanceId }] : []),
       { runtimeInstanceKey: String(runtimeInstanceId || '').trim().toLowerCase() },
     ],
-  }).lean()
+  }
+  const normalizedCustomerId = toIdString(customerId)
+  const normalizedTenantId = toIdString(tenantId)
+  if (!normalizedCustomerId || !normalizedTenantId) return identityFilter
+  return {
+    $and: [
+      identityFilter,
+      { customerId: normalizedCustomerId },
+      { tenantId: normalizedTenantId },
+    ],
+  }
+}
+
+const getPresentScopeValues = (values = []) => values
+  .filter((value) => value !== undefined && value !== null)
+  .map(toIdString)
+
+const getBoundedRuntimeScope = (scopes = {}) => {
+  const customerIds = getPresentScopeValues([
+    scopes.customer?._id,
+    scopes.customer?.id,
+  ])
+  const tenantIds = getPresentScopeValues([
+    scopes.tenant?._id,
+    scopes.tenant?.id,
+  ])
+  const tenantCustomerIds = getPresentScopeValues([
+    scopes.tenant?.customerId,
+    scopes.tenant?.customer?._id,
+    scopes.tenant?.customer?.id,
+  ])
+  return {
+    customerId: customerIds[0] || '',
+    tenantId: tenantIds[0] || '',
+    customerIds,
+    tenantIds,
+    tenantCustomerIds,
+  }
+}
+
+export const getRuntimeInstance = async ({
+  scopes,
+  runtimeInstanceId,
+  customerId: scopedCustomerId,
+  tenantId: scopedTenantId,
+  projection = '',
+  maxTimeMS,
+} = {}) => {
+  let effectiveCustomerId = scopedCustomerId
+  let effectiveTenantId = scopedTenantId
+  if (maxTimeMS !== undefined) {
+    const boundedScope = getBoundedRuntimeScope(scopes)
+    if (!mongoose.isValidObjectId(boundedScope.customerId)
+      || !mongoose.isValidObjectId(boundedScope.tenantId)
+      || boundedScope.customerIds.some((value) => value !== boundedScope.customerId)
+      || boundedScope.tenantIds.some((value) => value !== boundedScope.tenantId)
+      || boundedScope.tenantCustomerIds.some((value) => value !== boundedScope.customerId)
+      || (scopedCustomerId && toIdString(scopedCustomerId) !== boundedScope.customerId)
+      || (scopedTenantId && toIdString(scopedTenantId) !== boundedScope.tenantId)) {
+      throw createRuntimeInstanceError({
+        status: 403,
+        code: 'BOUNDED_SCOPE_REQUIRED',
+        message: 'A selected customer and tenant scope is required for bounded runtime reads.',
+        reason: 'RUNTIME_INSTANCE_BOUNDED_SCOPE_REQUIRED',
+      })
+    }
+    effectiveCustomerId = boundedScope.customerId
+    effectiveTenantId = boundedScope.tenantId
+  }
+  const query = RuntimeInstance.findOne(buildRuntimeInstanceLookupFilter({
+    runtimeInstanceId,
+    customerId: effectiveCustomerId,
+    tenantId: effectiveTenantId,
+  }))
+  if (projection && typeof query?.select === 'function') query.select(projection)
+  if (maxTimeMS !== undefined) {
+    const normalizedMaxTimeMS = Number(maxTimeMS)
+    if (!Number.isInteger(normalizedMaxTimeMS) || normalizedMaxTimeMS <= 0
+      || typeof query?.maxTimeMS !== 'function') {
+      throw createRuntimeInstanceError({
+        status: 503,
+        code: 'BOUNDED_READ_UNAVAILABLE',
+        message: 'Runtime instance bounded-read support is unavailable.',
+        reason: 'RUNTIME_INSTANCE_BOUNDED_READ_UNAVAILABLE',
+      })
+    }
+    query.maxTimeMS(normalizedMaxTimeMS)
+  }
+  const runtimeInstance = await query.lean()
 
   if (!runtimeInstance) {
     throw createRuntimeInstanceError({

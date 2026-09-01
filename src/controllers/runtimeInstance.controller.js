@@ -69,6 +69,15 @@ import {
   updateRuntimeOutcomeSessionFromLatestTruth as updateRuntimeOutcomeSessionFromLatestTruthRecord,
 } from '../services/outcomeStudioService.js'
 import { isOutcomeCustomerLanguageSafe } from '../services/outcomeCustomerLanguageService.js'
+import {
+  getRuntimeStateBootstrap as readRuntimeStateBootstrap,
+  getRuntimeStateControl,
+  getRuntimeStateGraphManifest as readRuntimeStateGraphManifest,
+  getRuntimeStateGraphProjection as readRuntimeStateGraphProjection,
+  getRuntimeStateOutcomeHandoffReadiness as readRuntimeStateOutcomeHandoffReadiness,
+  getRuntimeStateSectionSummary as readRuntimeStateSectionSummary,
+  listRuntimeStateEvidenceObjects,
+} from '../services/runtimeStateRepository.js'
 
 const buildRuntimeInstanceErrorResponse = (req, err) => ({
   error: {
@@ -278,10 +287,110 @@ export const getRuntimeInstance = async (req, res, next) => {
   }
 }
 
+const sendRuntimeStateRead = async ({ req, res, next, read }) => {
+  try {
+    const data = await read()
+    return res.status(200).json({
+      data,
+      meta: { requestId: req.requestId, version: 'v1', storage: 'runtime-state-v2-read-only' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const buildRuntimeStateRequestScopes = ({ scopes = {}, query = {} } = {}) => ({
+  ...scopes,
+  customer: {
+    ...scopes.customer,
+    _id: query.customerId,
+  },
+  tenant: {
+    ...scopes.tenant,
+    _id: query.tenantId,
+    customerId: query.customerId,
+  },
+})
+
+const getRuntimeStateRequestScopes = (req) => buildRuntimeStateRequestScopes({
+  scopes: req.scopes,
+  query: req.query,
+})
+
+export const getRuntimeStateBootstrap = async (req, res, next) => sendRuntimeStateRead({
+  req,
+  res,
+  next,
+  read: () => readRuntimeStateBootstrap({
+    scopes: getRuntimeStateRequestScopes(req),
+    runtimeInstanceId: req.params.runtimeInstanceId,
+  }),
+})
+
+export const getRuntimeStateSectionSummary = async (req, res, next) => sendRuntimeStateRead({
+  req,
+  res,
+  next,
+  read: () => readRuntimeStateSectionSummary({
+    scopes: getRuntimeStateRequestScopes(req),
+    runtimeInstanceId: req.params.runtimeInstanceId,
+    sectionKey: req.params.sectionKey,
+  }),
+})
+
+export const getRuntimeStateEvidencePage = async (req, res, next) => sendRuntimeStateRead({
+  req,
+  res,
+  next,
+  read: () => listRuntimeStateEvidenceObjects({
+    scopes: getRuntimeStateRequestScopes(req),
+    runtimeInstanceId: req.params.runtimeInstanceId,
+    page: req.query.page,
+    pageSize: req.query.pageSize,
+    reviewStatus: req.query.reviewStatus,
+    acceptanceState: req.query.acceptanceState,
+  }),
+})
+
+export const getRuntimeStateGraphManifest = async (req, res, next) => sendRuntimeStateRead({
+  req,
+  res,
+  next,
+  read: () => readRuntimeStateGraphManifest({
+    scopes: getRuntimeStateRequestScopes(req),
+    runtimeInstanceId: req.params.runtimeInstanceId,
+  }),
+})
+
+export const getRuntimeStateGraphProjection = async (req, res, next) => sendRuntimeStateRead({
+  req,
+  res,
+  next,
+  read: () => readRuntimeStateGraphProjection({
+    scopes: getRuntimeStateRequestScopes(req),
+    runtimeInstanceId: req.params.runtimeInstanceId,
+  }),
+})
+
+export const getRuntimeStateOutcomeHandoffReadiness = async (req, res, next) => sendRuntimeStateRead({
+  req,
+  res,
+  next,
+  read: () => readRuntimeStateOutcomeHandoffReadiness({
+    scopes: getRuntimeStateRequestScopes(req),
+    runtimeInstanceId: req.params.runtimeInstanceId,
+  }),
+})
+
 export const getRuntimeRenderer = async (req, res, next) => {
   try {
+    const hasRequestedScope = Object.prototype.hasOwnProperty.call(req.query || {}, 'customerId')
+      || Object.prototype.hasOwnProperty.call(req.query || {}, 'tenantId')
     const renderer = await getRuntimeRendererProjection({
-      scopes: req.scopes,
+      scopes: hasRequestedScope ? getRuntimeStateRequestScopes(req) : req.scopes,
       runtimeInstanceId: req.params.runtimeInstanceId,
     })
 
@@ -1363,11 +1472,13 @@ export const exportRuntimeOutputAsset = async (req, res, next) => {
 
 export const executeRuntimeAction = async (req, res, next) => {
   try {
+    const hasRequestedScope = Object.prototype.hasOwnProperty.call(req.query || {}, 'customerId')
+      || Object.prototype.hasOwnProperty.call(req.query || {}, 'tenantId')
     const action = await executeRuntimeActionRecord({
       actionKey: req.params.actionKey,
       actorUserId: req.context?.userId || req.userId,
       auditRequest: req,
-      scopes: req.scopes,
+      scopes: hasRequestedScope ? getRuntimeStateRequestScopes(req) : req.scopes,
       runtimeInstanceId: req.params.runtimeInstanceId,
       payload: req.body,
     })

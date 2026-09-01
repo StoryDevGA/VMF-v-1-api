@@ -336,6 +336,19 @@ const runtimeInstanceSchema = new mongoose.Schema(
       type: runtimeRevisionSchema,
       default: () => ({ revisionNumber: 1 }),
     },
+    stateVersion: {
+      type: String,
+      trim: true,
+      maxlength: 200,
+      default: undefined,
+    },
+    runtimeStateVersion: {
+      type: String,
+      trim: true,
+      maxlength: 200,
+      immutable: true,
+      default: undefined,
+    },
     status: {
       type: String,
       required: true,
