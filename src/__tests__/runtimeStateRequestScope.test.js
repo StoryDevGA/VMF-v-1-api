@@ -41,6 +41,38 @@ describe('Runtime State V2 request scope adapter', () => {
     expect(scopes.tenant._id).toBe('old-tenant')
   })
 
+  test('preserves authenticated customer and tenant scope when query scope is omitted', () => {
+    const scopes = {
+      customer: { _id: '507f1f77bcf86cd799439012', permissions: ['VMF_VIEW'] },
+      tenant: {
+        _id: '507f1f77bcf86cd799439013',
+        customerId: '507f1f77bcf86cd799439012',
+        permissions: ['VMF_VIEW'],
+      },
+      platformRoles: ['SUPER_ADMIN'],
+    }
+
+    const result = buildRuntimeStateRequestScopes({ scopes, query: {} })
+
+    expect(result.customer).toEqual(scopes.customer)
+    expect(result.tenant).toEqual(scopes.tenant)
+    expect(result.platformRoles).toEqual(scopes.platformRoles)
+  })
+
+  test('keeps an explicitly supplied partial scope authoritative', () => {
+    const result = buildRuntimeStateRequestScopes({
+      scopes: {
+        customer: { _id: '507f1f77bcf86cd799439012' },
+        tenant: { _id: '507f1f77bcf86cd799439013', customerId: '507f1f77bcf86cd799439012' },
+      },
+      query: { tenantId: '' },
+    })
+
+    expect(result.customer._id).toBe('507f1f77bcf86cd799439012')
+    expect(result.tenant._id).toBe('')
+    expect(result.tenant.customerId).toBe('507f1f77bcf86cd799439012')
+  })
+
   test('leaves missing request scope invalid for the repository guard', () => {
     const result = buildRuntimeStateRequestScopes({
       scopes: { platformRoles: ['SUPER_ADMIN'] },

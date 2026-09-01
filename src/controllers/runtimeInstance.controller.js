@@ -302,18 +302,30 @@ const sendRuntimeStateRead = async ({ req, res, next, read }) => {
   }
 }
 
-export const buildRuntimeStateRequestScopes = ({ scopes = {}, query = {} } = {}) => ({
-  ...scopes,
-  customer: {
-    ...scopes.customer,
-    _id: query.customerId,
-  },
-  tenant: {
-    ...scopes.tenant,
-    _id: query.tenantId,
-    customerId: query.customerId,
-  },
-})
+export const buildRuntimeStateRequestScopes = ({ scopes = {}, query = {} } = {}) => {
+  const hasCustomerScopeQuery = Object.prototype.hasOwnProperty.call(query, 'customerId')
+  const hasTenantScopeQuery = Object.prototype.hasOwnProperty.call(query, 'tenantId')
+  const customerId = hasCustomerScopeQuery ? query.customerId : scopes.customer?._id
+  const tenantId = hasTenantScopeQuery ? query.tenantId : scopes.tenant?._id
+  const tenantCustomerId = hasCustomerScopeQuery
+    ? query.customerId
+    : scopes.tenant?.customerId
+      ?? scopes.tenant?.customer?._id
+      ?? scopes.customer?._id
+
+  return {
+    ...scopes,
+    customer: {
+      ...scopes.customer,
+      _id: customerId,
+    },
+    tenant: {
+      ...scopes.tenant,
+      _id: tenantId,
+      customerId: tenantCustomerId,
+    },
+  }
+}
 
 const getRuntimeStateRequestScopes = (req) => buildRuntimeStateRequestScopes({
   scopes: req.scopes,
