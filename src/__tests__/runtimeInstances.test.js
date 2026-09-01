@@ -665,6 +665,11 @@ const makeRuntimeInstance = (overrides = {}) => ({
   ...overrides,
 })
 
+const makeLegacyRendererRuntimeInstance = (overrides = {}) => makeRuntimeInstance({
+  stateVersion: '',
+  ...overrides,
+})
+
 const makeRuntimeInstanceDocument = (overrides = {}) => {
   const document = {
     ...makeRuntimeInstance(overrides),
@@ -1670,6 +1675,7 @@ const buildRuntimeInstanceFindChain = (rows) => ({
   sort: jest.fn().mockReturnThis(),
   skip: jest.fn().mockReturnThis(),
   limit: jest.fn().mockReturnThis(),
+  maxTimeMS: jest.fn().mockReturnThis(),
   lean: jest.fn().mockResolvedValue(rows),
 })
 
@@ -1754,12 +1760,120 @@ let buildEnrichedGeneratedSection
 let evaluateSectionInterpretationSimilarity
 let executeSectionValidationRules
 let resolveSectionExecutionContract
+let normalizeRuntimeSectionObject
 let performanceCacheService
 let getRuntimeInstance
 
 const getAccessTokenForUser = async (user) => {
   const tokens = await tokenService.generateTokens(user)
   return tokens.accessToken
+}
+
+const withDefaultRuntimeStateScope = (requestClient) => {
+  const scopedPathPattern = /\/runtime-instances\/[^/]+\/(?:renderer(?:$|\/)|actions\/|outcome-studio(?!\/commercial-strategy-decision-paper\/readiness)(?:$|\/))/
+  const methods = ['get', 'post', 'patch', 'put', 'delete']
+
+  return methods.reduce((client, method) => {
+    client[method] = (path) => {
+      const test = requestClient[method](path)
+      if (!scopedPathPattern.test(String(path))) {
+        return test
+      }
+
+      let hasExplicitScope = false
+      const originalQuery = test.query.bind(test)
+      const ensureScope = () => {
+        if (hasExplicitScope) return
+        hasExplicitScope = true
+        originalQuery({ customerId: CUSTOMER_ID, tenantId: TENANT_ID })
+      }
+
+      test.query = (query) => {
+        if (Object.prototype.hasOwnProperty.call(query || {}, 'customerId')
+          || Object.prototype.hasOwnProperty.call(query || {}, 'tenantId')) {
+          hasExplicitScope = true
+        }
+        return originalQuery(query)
+      }
+
+      const originalEnd = test.end.bind(test)
+      test.end = (...args) => {
+        ensureScope()
+        return originalEnd(...args)
+      }
+
+      return test
+    }
+    return client
+  }, {})
+}
+
+const RUNTIME_STATE_V2_TEST_COLLECTIONS = new Set([
+  'runtime_section_states',
+  'runtime_evidence_sources',
+  'runtime_evidence_objects',
+  'runtime_graph_snapshots',
+  'runtime_graph_elements',
+])
+
+const installDefaultRuntimeStateCollections = () => {
+  const originalCollection = mongoose.connection.collection
+  mongoose.connection.collection = (name) => {
+    if (!RUNTIME_STATE_V2_TEST_COLLECTIONS.has(name)) {
+      return originalCollection.call(mongoose.connection, name)
+    }
+
+    const getLatestRuntimeFixture = async () => {
+      const results = RuntimeInstance?.findOne?.mock?.results || []
+      const latest = results[results.length - 1]?.value
+      if (latest && typeof latest.lean === 'function') return latest.lean()
+      return latest ? await latest : makeRuntimeInstance()
+    }
+    const getFixtureRows = async () => {
+      const runtime = await getLatestRuntimeFixture()
+      const stateVersion = String(runtime?.stateVersion || runtime?.runtimeStateVersion || '').trim()
+      if (name === 'runtime_section_states') {
+        return Object.entries(runtime?.framework_state?.sections || {}).map(([sectionKey, value]) => ({
+          sectionKey,
+          stateVersion,
+          sourceStateVersion: stateVersion,
+          current: true,
+          sectionDetail: normalizeRuntimeSectionObject({
+            value,
+            sectionKey,
+            runtimePath: `framework_state.sections.${sectionKey}`,
+            initializedAt: runtime?.updatedAt instanceof Date
+              ? runtime.updatedAt.toISOString()
+              : runtime?.updatedAt || new Date().toISOString(),
+          }),
+        }))
+      }
+      if (name === 'runtime_evidence_objects') {
+        const evidenceObjects = runtime?.framework_state?.evidence_pack?.evidenceObjects
+          || runtime?.framework_state?.evidence_pack?.objects
+          || []
+        return evidenceObjects.map((value, index) => ({
+          ...value,
+          evidenceObjectId: value?.evidenceObjectId || value?._id || `evidence-fixture-${index + 1}`,
+          stateVersion,
+          sourceStateVersion: stateVersion,
+          current: true,
+        }))
+      }
+      return []
+    }
+    const cursor = {
+      maxTimeMS: jest.fn().mockReturnThis(),
+      sort: jest.fn().mockReturnThis(),
+      skip: jest.fn().mockReturnThis(),
+      limit: jest.fn().mockReturnThis(),
+      toArray: jest.fn(() => getFixtureRows()),
+    }
+    return {
+      find: jest.fn(() => cursor),
+      countDocuments: jest.fn(async () => (await getFixtureRows()).length),
+    }
+  }
 }
 
 beforeAll(async () => {
@@ -1781,7 +1895,7 @@ beforeAll(async () => {
   mongoose = (await import('mongoose')).default
   app = (await import('../app.js')).default
   tokenService = (await import('../services/tokenService.js')).default
-  request = supertest(app)
+  request = withDefaultRuntimeStateScope(supertest(app))
 
   const models = await import('../models/index.js')
   User = models.User
@@ -1821,6 +1935,7 @@ beforeAll(async () => {
   const runtimeSectionModelService = await import('../services/runtimeSectionModelService.js')
   hashSectionInput = runtimeSectionModelService.hashSectionInput
   buildEnrichedGeneratedSection = runtimeSectionModelService.buildEnrichedGeneratedSection
+  normalizeRuntimeSectionObject = runtimeSectionModelService.normalizeRuntimeSectionObject
   evaluateSectionInterpretationSimilarity =
     runtimeSectionModelService.evaluateSectionInterpretationSimilarity
   resolveSectionExecutionContract =
@@ -1860,6 +1975,31 @@ beforeEach(async () => {
   Customer.findById = jest.fn().mockResolvedValue(makeCustomer())
   Tenant.findById = jest.fn().mockResolvedValue(makeTenant())
   FrameworkPackage.findById = jest.fn().mockResolvedValue(makeFrameworkPackage())
+  FrameworkPackage.find = jest.fn().mockReturnValue(buildRuntimeInstanceFindChain([makeFrameworkPackage({
+    visibility: 'CUSTOMER_VISIBLE',
+    sections: [
+      {
+        sectionKey: 'situation',
+        runtimePath: 'framework_state.sections.situation',
+        required: true,
+      },
+      {
+        sectionKey: 'commercial_problem',
+        runtimePath: 'framework_state.sections.commercial_problem',
+        required: true,
+      },
+      {
+        sectionKey: 'value_drivers',
+        runtimePath: 'framework_state.sections.value_drivers',
+        required: true,
+      },
+      {
+        sectionKey: 'recommended_focus',
+        runtimePath: 'framework_state.sections.recommended_focus',
+        required: true,
+      },
+    ],
+  })]))
   FrameworkPackage.findOne = jest.fn()
   RuntimeDeployment.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeDeployment()))
   RuntimeActivationSnapshot.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeActivationSnapshot()))
@@ -1949,9 +2089,129 @@ beforeEach(async () => {
   KnowledgePackVersion.find = jest.fn().mockReturnValue(buildRuntimeInstanceFindChain([]))
   AuditLog.find = jest.fn().mockReturnValue(buildAuditLogFindChain([]))
   AuditLog.createLog = jest.fn(async () => ({}))
+  installDefaultRuntimeStateCollections()
 })
 
 describe('Runtime Instance API', () => {
+  describe('Runtime State V2 bootstrap API chain evidence', () => {
+    const installSectionCatalogueCollection = (rows = []) => {
+      const cursor = {
+        maxTimeMS: jest.fn().mockReturnThis(),
+        sort: jest.fn().mockReturnThis(),
+        limit: jest.fn().mockReturnThis(),
+        toArray: jest.fn().mockResolvedValue(rows),
+      }
+      const find = jest.fn(() => cursor)
+      const collection = jest.spyOn(mongoose.connection, 'collection')
+        .mockImplementation((name) => {
+          if (name === 'runtime_section_states') return { find }
+          throw new Error(`Unexpected V2 collection read: ${name}`)
+        })
+      return { collection, find }
+    }
+
+    test('returns 401 before V2 repository access when unauthenticated', async () => {
+      const nativeCollection = jest.spyOn(mongoose.connection, 'collection')
+
+      try {
+        const res = await request
+          .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/state/bootstrap`)
+          .query({ customerId: CUSTOMER_ID, tenantId: TENANT_ID })
+
+        expect(res.status).toBe(401)
+        expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
+        expect(nativeCollection).not.toHaveBeenCalled()
+      } finally {
+        nativeCollection.mockRestore()
+      }
+    })
+
+    test('returns 200 after explicit scope, VMF_VIEW and feature entitlement pass', async () => {
+      const token = await getAccessTokenForUser(makeCustomerAdmin())
+      const nativeCollection = installSectionCatalogueCollection([])
+
+      try {
+        const res = await request
+          .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/state/bootstrap`)
+          .query({ customerId: CUSTOMER_ID, tenantId: TENANT_ID })
+          .set('Authorization', `Bearer ${token}`)
+
+        expect(res.status).toBe(200)
+        expect(res.body.data).toEqual(expect.objectContaining({
+          sectionCount: 0,
+          stateVersion: 'rsv2:00000000-0000-4000-8000-000000000001',
+          source: 'runtime_state_v2.bootstrap',
+        }))
+        expect(RuntimeInstance.findOne).toHaveBeenCalledWith({
+          $and: [
+            {
+              $or: [
+                { _id: RUNTIME_INSTANCE_ID },
+                { runtimeInstanceKey: RUNTIME_INSTANCE_ID },
+              ],
+            },
+            { customerId: CUSTOMER_ID },
+            { tenantId: TENANT_ID },
+          ],
+        })
+        expect(Customer.findById).toHaveBeenCalledWith(CUSTOMER_ID)
+        expect(Tenant.findById).toHaveBeenCalledWith(TENANT_ID)
+        expect(nativeCollection.find).toHaveBeenCalledTimes(1)
+      } finally {
+        nativeCollection.collection.mockRestore()
+      }
+    })
+
+    test('returns 403 FORBIDDEN before V2 child reads when VMF_VIEW is absent', async () => {
+      Role.find = jest.fn().mockReturnValue(buildRoleQueryChain([{
+        key: 'USER',
+        scope: 'VMF',
+        permissions: [],
+        isActive: true,
+      }]))
+      const token = await getAccessTokenForUser(makeRegularUser())
+      const nativeCollection = jest.spyOn(mongoose.connection, 'collection')
+
+      try {
+        const res = await request
+          .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/state/bootstrap`)
+          .query({ customerId: CUSTOMER_ID, tenantId: TENANT_ID })
+          .set('Authorization', `Bearer ${token}`)
+
+        expect(res.status).toBe(403)
+        expect(res.body.error).toEqual(expect.objectContaining({
+          code: 'FORBIDDEN',
+          details: expect.objectContaining({ reason: 'FORBIDDEN', permission: 'VMF_VIEW' }),
+        }))
+        expect(nativeCollection).not.toHaveBeenCalled()
+      } finally {
+        nativeCollection.mockRestore()
+      }
+    })
+
+    test('returns 403 LICENSE_FEATURE_NOT_ENABLED before V2 child reads when VMF is not entitled', async () => {
+      Customer.findById = jest.fn().mockResolvedValue(makeCustomer({ entitlements: ['DEALS'] }))
+      const token = await getAccessTokenForUser(makeCustomerAdmin())
+      const nativeCollection = jest.spyOn(mongoose.connection, 'collection')
+
+      try {
+        const res = await request
+          .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/state/bootstrap`)
+          .query({ customerId: CUSTOMER_ID, tenantId: TENANT_ID })
+          .set('Authorization', `Bearer ${token}`)
+
+        expect(res.status).toBe(403)
+        expect(res.body.error).toEqual(expect.objectContaining({
+          code: 'LICENSE_FEATURE_NOT_ENABLED',
+          details: expect.objectContaining({ reason: 'FEATURE_NOT_ENABLED', feature: 'VMF' }),
+        }))
+        expect(nativeCollection).not.toHaveBeenCalled()
+      } finally {
+        nativeCollection.mockRestore()
+      }
+    })
+  })
+
   test('POST /api/v1/runtime-instances returns 401 without auth token', async () => {
     const res = await request.post('/api/v1/runtime-instances').send({})
     expect(res.status).toBe(401)
@@ -2544,6 +2804,13 @@ describe('Runtime Instance API', () => {
     expect(savedRevision.framework_state.lock.replayAnchor).toEqual({})
     expect(savedRevision.framework_state.policy).toEqual({})
     expect(savedRevision.framework_state.artifacts).toEqual({})
+    expect(savedRevision.framework_state.intelligence_graph).toEqual(expect.objectContaining({
+      runtimeInstanceId: savedRevision._id.toString(),
+      runtimeId: savedRevision._id.toString(),
+      runtimeInstanceKey: savedRevision.runtimeInstanceKey,
+      validation: expect.objectContaining({ status: 'VALID', issues: [] }),
+      scope: expect.objectContaining({ runtimeId: savedRevision._id.toString() }),
+    }))
     expect(res.body.data).toEqual(expect.objectContaining({
       runtimeType: 'VALUE_NARRATIVE',
       status: 'ACTIVE',
@@ -2908,9 +3175,24 @@ describe('Runtime Instance API', () => {
     const detailRes = await request
       .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}`)
       .set('Authorization', `Bearer ${token}`)
+    const rendererCursor = {
+      maxTimeMS: jest.fn().mockReturnThis(),
+      sort: jest.fn().mockReturnThis(),
+      limit: jest.fn().mockReturnThis(),
+      toArray: jest.fn().mockResolvedValue([]),
+    }
+    const nativeCollection = jest.spyOn(mongoose.connection, 'collection')
+      .mockImplementation((name) => {
+        if (name === 'runtime_section_states') return {
+          find: jest.fn(() => rendererCursor),
+        }
+        throw new Error(`Unexpected V2 collection read: ${name}`)
+      })
     const rendererRes = await request
       .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/renderer`)
+      .query({ customerId: CUSTOMER_ID, tenantId: TENANT_ID })
       .set('Authorization', `Bearer ${token}`)
+    nativeCollection.mockRestore()
 
     expect(listRes.status).toBe(200)
     expect(detailRes.status).toBe(200)
@@ -9249,6 +9531,7 @@ describe('Runtime Instance API', () => {
   })
 
   const makeOutputLabFrameworkPackage = (overrides = {}) => makeFrameworkPackage({
+    visibility: 'CUSTOMER_VISIBLE',
     sections: [
       {
         sectionKey: 'situation',
@@ -17038,7 +17321,12 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
     RuntimeOutputAsset.find.mockReturnValue(buildRuntimeInstanceFindChain([makeRuntimeOutputAsset()]))
     mockRequestReadyOutcomeKnowledgePacks()
-    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage({
+      visibility: 'CUSTOMER_VISIBLE',
+    }))
+    FrameworkPackage.find.mockReturnValue(buildRuntimeInstanceFindChain([makeOutputLabFrameworkPackage({
+      visibility: 'CUSTOMER_VISIBLE',
+    })]))
     const token = await getAccessTokenForUser(makeCustomerAdmin())
 
     const readinessRes = await request
@@ -25317,7 +25605,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       attachments: {},
       artifacts: {},
     }
-    const runtimeInstanceSeed = makeRuntimeInstance({
+    const runtimeInstanceSeed = makeLegacyRendererRuntimeInstance({
       packageKey: frameworkPackage.packageKey,
       packageVersion: frameworkPackage.version,
       framework_state: baseFrameworkState,
@@ -25344,7 +25632,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       sourceSectionContractHash: generated.generator.sectionContractHash,
       truthHash: 'accepted-strategic-truth-hash',
     }
-    const runtimeInstance = makeRuntimeInstance({
+    const runtimeInstance = makeLegacyRendererRuntimeInstance({
       packageKey: frameworkPackage.packageKey,
       packageVersion: frameworkPackage.version,
       framework_state: {
@@ -29109,7 +29397,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     }))
   })
 
-  test('allows forced REGENERATE_SECTION with a bounded server-recorded reason', async () => {
+  test('allows forced REGENERATE_SECTION when a canonical V2 key aliases the package kebab key', async () => {
     const unchangedInput = 'Proposal creation is slow.'
     const previousGenerated = {
       content: 'Customer Problem: Proposal creation is slow.',
@@ -29166,6 +29454,12 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     })
     mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
     FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      sections: [{
+        sectionKey: 'customer-problem',
+        runtimePath: 'framework_state.sections.customer_problem',
+        required: true,
+        validationKeys: ['required-sections-check'],
+      }],
       workflowBindings: [makeWorkflowBinding('REGENERATE_SECTION')],
     }))
     RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
@@ -29186,6 +29480,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       .send({
         expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
         sectionKey: 'customer_problem',
+        runtimePath: 'framework_state.sections.customer_problem',
         forceRegenerateReason: 'Customer requested wording review.',
       })
 
@@ -29193,11 +29488,17 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       diff: expect.objectContaining({
         generation: expect.objectContaining({
-          sectionKey: 'customer_problem',
+          sectionKey: 'customer-problem',
+          stateSectionKey: 'customer_problem',
           regeneration: expect.objectContaining({
             forceRegenerateReason: 'Customer requested wording review.',
             reasons: ['FORCED_REGENERATE_REASON'],
           }),
+        }),
+        intelligenceGraph: expect.objectContaining({
+          autoRebuilt: true,
+          buildTrigger: 'SECTION_GENERATED',
+          validationResult: 'VALID',
         }),
       }),
     }))
@@ -29927,7 +30228,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
     UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
     WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
-    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeLegacyRendererRuntimeInstance({
       framework_state: {
         lifecycle: { stage: 'DRAFT' },
         sections: {
@@ -30037,15 +30338,9 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
         sourceCount: 0,
         builderMode: '',
       },
-      intelligenceGraph: expect.objectContaining({
-        available: false,
-        artifactType: 'runtime_intelligence_graph',
-        graphVersion: '2.2',
-      }),
       inputValues: {},
     }))
-    expect(res.body.data.discovery.intelligenceGraph.scope).toBeUndefined()
-    expect(res.body.data.discovery.intelligenceGraph.registries).toBeUndefined()
+    expect(res.body.data.discovery).not.toHaveProperty('intelligenceGraph')
     expect(res.body.data.actions).toEqual([
       expect.objectContaining({
         actionKey: 'SUBMIT_FOR_REVIEW',
@@ -30083,7 +30378,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
     UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
     WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
-    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeLegacyRendererRuntimeInstance({
       status: 'LOCKED',
       executionStatus: 'COMPLETE',
       lockedAt: '2026-05-22T10:00:00.000Z',
@@ -30334,7 +30629,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
     UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
     WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
-    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeLegacyRendererRuntimeInstance({
       framework_state: {
         lifecycle: { stage: 'DRAFT' },
         sections: {
@@ -30417,7 +30712,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     RuntimePathRegistry.find.mockReturnValue(buildLeanQuery(makeSectionEvidenceRuntimePathRecords()))
     UIContract.findOne.mockReturnValue(buildLeanQuery(makeSectionEvidenceUIContract()))
     WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
-    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeLegacyRendererRuntimeInstance({
       framework_state: {
         lifecycle: { stage: 'DRAFT' },
         sections: {
@@ -30554,7 +30849,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
     UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
     WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
-    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeLegacyRendererRuntimeInstance({
       framework_state: {
         lifecycle: { stage: 'DRAFT' },
         evidence_pack: makeReadyDiscoveryEvidencePack({
@@ -30678,7 +30973,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
     UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
     WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
-    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeLegacyRendererRuntimeInstance({
       framework_state: {
         lifecycle: { stage: 'DRAFT' },
         sections: {
@@ -30782,7 +31077,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       ],
     })))
     WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
-    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeLegacyRendererRuntimeInstance({
       framework_state: {
         lifecycle: { stage: 'DRAFT' },
         sections: {
@@ -30937,7 +31232,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       ],
     })))
     WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
-    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeLegacyRendererRuntimeInstance({
       framework_state: {
         lifecycle: { stage: 'DRAFT' },
         sections: {
@@ -31016,7 +31311,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
     UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
     WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
-    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeLegacyRendererRuntimeInstance({
       framework_state: {
         lifecycle: { stage: 'DRAFT' },
         evidence_pack: {
@@ -31105,7 +31400,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
     UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
     WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
-    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeLegacyRendererRuntimeInstance({
       framework_state: {
         lifecycle: { stage: 'APPROVED' },
         evidence_pack: {
@@ -31235,7 +31530,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
     UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
     WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
-    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeLegacyRendererRuntimeInstance({
       framework_state: {
         lifecycle: { stage: 'DRAFT' },
         evidence_pack: {
@@ -31346,7 +31641,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       },
       acquisitionProfile: 'ENHANCED',
     })
-    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeLegacyRendererRuntimeInstance({
       framework_state: {
         lifecycle: { stage: 'DRAFT' },
         evidence_pack: staleEvidencePack,
@@ -31402,7 +31697,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
     const positiveClaim = 'Acme delivers governed proposal workflows for enterprise revenue teams.'
     const negativeClaim = 'Acme does not provide governed proposal workflows for enterprise revenue teams.'
-    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeLegacyRendererRuntimeInstance({
       framework_state: {
         lifecycle: { stage: 'DRAFT' },
         evidence_pack: makeReadyDiscoveryEvidencePack({
@@ -31474,7 +31769,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
     UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
     WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
-    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeLegacyRendererRuntimeInstance({
       framework_state: {
         lifecycle: { stage: 'DRAFT' },
         evidence_pack: makeReadyDiscoveryEvidencePack({
@@ -31542,7 +31837,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       actions: [makeUIAction('GENERATE_SECTION')],
     })))
     WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('GENERATE_SECTION')]))
-    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeLegacyRendererRuntimeInstance({
       framework_state: {
         lifecycle: { stage: 'DRAFT' },
         sections: {
@@ -31620,7 +31915,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       actions: [makeUIAction('GENERATE_SECTION')],
     })))
     WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('GENERATE_SECTION')]))
-    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeLegacyRendererRuntimeInstance({
       framework_state: {
         lifecycle: { stage: 'DRAFT' },
         sections: {
@@ -31694,7 +31989,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       actions: [makeUIAction('GENERATE_SECTION')],
     })))
     WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('GENERATE_SECTION')]))
-    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeLegacyRendererRuntimeInstance({
       framework_state: {
         lifecycle: { stage: 'DRAFT' },
         sections: {
@@ -31728,7 +32023,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
     UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
     WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
-    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeLegacyRendererRuntimeInstance({
       framework_state: {
         lifecycle: { stage: 'DRAFT' },
         sections: {
@@ -31773,7 +32068,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
     UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
     WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
-    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeLegacyRendererRuntimeInstance({
       framework_state: {
         lifecycle: { stage: 'DRAFT' },
         sections: {
@@ -31808,7 +32103,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
     UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
     WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
-    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeLegacyRendererRuntimeInstance({
       framework_state: {
         lifecycle: { stage: 'DRAFT' },
         sections: {
@@ -31914,7 +32209,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       makeActionWorkflowPolicy('GENERATE_SECTION'),
       makeActionWorkflowPolicy('REGENERATE_SECTION'),
     ]))
-    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeLegacyRendererRuntimeInstance({
       framework_state: {
         lifecycle: { stage: 'DRAFT' },
         evidence_pack: makeReadyDiscoveryEvidencePack({
@@ -31998,7 +32293,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
 
   test('does not expose child revision identifiers to actors without VMF_UPDATE access', async () => {
     const sourceRuntimeInstance = makeLockedPublishedRuntimeInstance()
-    const childRevision = makeRuntimeInstance({
+    const childRevision = makeLegacyRendererRuntimeInstance({
       _id: '6a2be3e65352125f1a3bb034',
       id: '6a2be3e65352125f1a3bb034',
       runtimeInstanceKey: 'value-narrative-439111-rev-2-1a3bb034',
@@ -32081,7 +32376,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     ]))
     UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract()))
     WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeWorkflowPolicy()]))
-    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeLegacyRendererRuntimeInstance({
       framework_state: {
         lifecycle: { stage: 'DRAFT' },
         sections: {
@@ -32357,7 +32652,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
   })
 
   test('fails closed when runtime deployment snapshot evidence is missing', async () => {
-    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeLegacyRendererRuntimeInstance({
       evidence: {
         activationId: 'activation-vmf-2-3-1-001',
         deploymentId: 'deployment-vmf-global-production-001',
@@ -32381,7 +32676,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
 
   test('fails closed for Deal Analysis renderer requests without a locked runtime anchor', async () => {
     Customer.findById = jest.fn().mockResolvedValue(makeCustomer({ entitlements: ['DEALS'] }))
-    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimeInstance({
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeLegacyRendererRuntimeInstance({
       runtimeType: 'DEAL_ANALYSIS',
       anchors: [],
     })))
@@ -32402,7 +32697,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
   test('fails closed for Deal Analysis renderer requests whose anchor is not a locked VMF runtime in scope', async () => {
     Customer.findById = jest.fn().mockResolvedValue(makeCustomer({ entitlements: ['DEALS'] }))
     RuntimeInstance.findOne = jest.fn()
-      .mockReturnValueOnce(buildLeanQuery(makeRuntimeInstance({
+      .mockReturnValueOnce(buildLeanQuery(makeLegacyRendererRuntimeInstance({
         runtimeType: 'DEAL_ANALYSIS',
         frameworkKey: 'DEALS',
         anchors: [
@@ -32415,7 +32710,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
           },
         ],
       })))
-      .mockReturnValueOnce(buildLeanQuery(makeRuntimeInstance({
+      .mockReturnValueOnce(buildLeanQuery(makeLegacyRendererRuntimeInstance({
         _id: 'b37f1f77bcf86cd799439222',
         id: 'b37f1f77bcf86cd799439222',
         runtimeInstanceKey: 'value-narrative-anchor',

@@ -1,10 +1,12 @@
 import { describe, expect, jest, test } from '@jest/globals'
-import { FrameworkPackage } from '../models/index.js'
+import { AuditLog, FrameworkPackage } from '../models/index.js'
 
 import {
   FRAMEWORK_OUTCOME_CLAIM_TYPES,
   FRAMEWORK_OUTCOME_HANDOFF_BLOCKER_CODES,
   FRAMEWORK_OUTCOME_HANDOFF_STATUSES,
+  FRAMEWORK_OUTCOME_HANDOFF_V2_PARITY_CONTRACT_VERSION,
+  buildFrameworkOutcomeHandoffV2ParityDigest,
   buildFrameworkOutcomeStudioHandoff,
   checkFrameworkOutcomeStudioHandoffCurrentness,
   evaluateFrameworkOutcomeClaimBoundary,
@@ -404,6 +406,7 @@ describe('Framework-to-Outcome Studio Evidence-to-Knowledge handoff', () => {
     FrameworkPackage.find = jest.fn().mockReturnValue(query)
 
     try {
+      fixture.runtimeInstance.stateVersion = 'rsv2:11111111-1111-4111-8111-111111111111'
       const result = await resolveFrameworkOutcomeStudioHandoff({
         runtimeInstance: fixture.runtimeInstance,
         packBinding: fixture.packBinding,
@@ -442,8 +445,107 @@ describe('Framework-to-Outcome Studio Evidence-to-Knowledge handoff', () => {
           }),
         ]),
       }))
+
+      const parityResult = await resolveFrameworkOutcomeStudioHandoff({
+        runtimeInstance: fixture.runtimeInstance,
+        packBinding: fixture.packBinding,
+        boundedDependencyPolicy: {
+          policyVersion: 'ss-014.runtime-state-v2.handoff-dependencies.v1',
+          maxTimeMS: 2000,
+          packageLimit: 2,
+          activationLimit: 501,
+          versionLimit: 501,
+          commandIds: [
+            'HANDOFF_CONTROL_READ',
+            'HANDOFF_FRAMEWORK_PACKAGE_READ',
+            'HANDOFF_KNOWLEDGE_ACTIVATION_READ',
+            'HANDOFF_KNOWLEDGE_VERSION_READ',
+            'HANDOFF_RENDERER_CAPABILITY_READ',
+          ],
+        },
+        boundedStateParityReceipt: {
+          contractVersion: FRAMEWORK_OUTCOME_HANDOFF_V2_PARITY_CONTRACT_VERSION,
+          stateVersion: fixture.runtimeInstance.stateVersion,
+          sectionCount: Object.keys(fixture.runtimeInstance.framework_state.sections).length,
+          evidenceObjectCount: fixture.runtimeInstance.framework_state.evidence_pack.evidenceObjects.length,
+          sectionKeys: Object.keys(fixture.runtimeInstance.framework_state.sections),
+          stateDigest: buildFrameworkOutcomeHandoffV2ParityDigest(fixture.runtimeInstance),
+        },
+      })
+
+      expect([
+        FRAMEWORK_OUTCOME_HANDOFF_STATUSES.READY,
+        FRAMEWORK_OUTCOME_HANDOFF_STATUSES.READY_WITH_GAPS,
+      ]).toContain(parityResult.handoff.status)
     } finally {
       FrameworkPackage.find = originalFind
+    }
+  })
+
+  test('records an access-denied audit event when a bounded package is not customer accessible', async () => {
+    const fixture = makeFixture()
+    fixture.runtimeInstance.customerId = 'customer_1'
+    const inaccessiblePackage = {
+      _id: 'package_1',
+      packageKey: fixture.frameworkPackage.packageKey,
+      version: fixture.frameworkPackage.version,
+      frameworkKey: 'VMF',
+      status: 'ACTIVE',
+      visibility: 'CUSTOMER_VISIBLE',
+      customerAccessMode: 'SELECTED_CUSTOMERS',
+      assignedCustomerIds: ['another_customer'],
+      sections: fixture.frameworkPackage.sections,
+    }
+    const query = {
+      select: jest.fn().mockReturnThis(),
+      sort: jest.fn().mockReturnThis(),
+      limit: jest.fn().mockReturnThis(),
+      maxTimeMS: jest.fn().mockReturnThis(),
+      lean: jest.fn().mockResolvedValue([inaccessiblePackage]),
+    }
+    const originalFind = FrameworkPackage.find
+    const originalCreateLog = AuditLog.createLog
+    FrameworkPackage.find = jest.fn().mockReturnValue(query)
+    AuditLog.createLog = jest.fn().mockResolvedValue({})
+
+    try {
+      const result = await resolveFrameworkOutcomeStudioHandoff({
+        runtimeInstance: fixture.runtimeInstance,
+        scopes: { user: { id: 'user_1' } },
+        packBinding: fixture.packBinding,
+        boundedDependencyPolicy: {
+          policyVersion: 'ss-014.runtime-state-v2.handoff-dependencies.v1',
+          maxTimeMS: 2000,
+          packageLimit: 2,
+          activationLimit: 501,
+          versionLimit: 501,
+          commandIds: [
+            'HANDOFF_CONTROL_READ',
+            'HANDOFF_FRAMEWORK_PACKAGE_READ',
+            'HANDOFF_KNOWLEDGE_ACTIVATION_READ',
+            'HANDOFF_KNOWLEDGE_VERSION_READ',
+            'HANDOFF_RENDERER_CAPABILITY_READ',
+          ],
+        },
+      })
+
+      expect(result.handoff.status).toBe(FRAMEWORK_OUTCOME_HANDOFF_STATUSES.BLOCKED)
+      expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+        actorUserId: 'user_1',
+        action: 'ACCESS_DENIED',
+        resourceType: 'FrameworkPackage',
+        resourceId: 'package_1',
+        scope: expect.objectContaining({
+          customerId: 'customer_1',
+          runtimeInstanceId: 'runtime_1',
+        }),
+        diff: expect.objectContaining({
+          reason: 'FRAMEWORK_PACKAGE_CUSTOMER_ACCESS_DENIED',
+        }),
+      }))
+    } finally {
+      FrameworkPackage.find = originalFind
+      AuditLog.createLog = originalCreateLog
     }
   })
 

@@ -8,14 +8,15 @@ import RuntimeStateSection from '../models/RuntimeStateSection.js'
 import {
   RUNTIME_STATE_VERSION_PATTERN,
   SHA256_PATTERN,
-} from '../models/runtimeStateV2Schemas.js'
+} from '../models/runtimeStateSchemas.js'
 import {
-  SS014_LEGACY_CANONICAL_ALGORITHM,
-  SS014_LEGACY_CANONICAL_ERROR_CODES,
-  createSs014LegacyCanonicalMappingManifest,
-} from './ss014LegacyDomainCanonicalSerializer.js'
+  RUNTIME_STATE_V2_CANONICAL_ALGORITHM,
+  RUNTIME_STATE_V2_CANONICAL_ERROR_CODES,
+  createRuntimeStateCanonicalMappingManifest,
+} from './runtimeStateCanonicalSerializer.js'
+import { normalizeRuntimeSectionObject } from './runtimeSectionModelService.js'
 
-export const SS014_V2_MAPPING_ERROR_CODES = Object.freeze({
+export const RUNTIME_STATE_V2_MAPPING_ERROR_CODES = Object.freeze({
   INPUT_INVALID: 'SS014_V2_MAPPING_INPUT_INVALID',
   SCHEMA_INVALID: 'SS014_V2_MAPPING_SCHEMA_INVALID',
 })
@@ -33,12 +34,12 @@ const fail = (code, reason) => {
   throw error
 }
 
-const inputFailure = (reason) => fail(SS014_V2_MAPPING_ERROR_CODES.INPUT_INVALID, reason)
+const inputFailure = (reason) => fail(RUNTIME_STATE_V2_MAPPING_ERROR_CODES.INPUT_INVALID, reason)
 
 const serializerFailureReason = (code) => ({
-  [SS014_LEGACY_CANONICAL_ERROR_CODES.REDACTION_FAILED]: 'Legacy source failed canonical admission.',
-  [SS014_LEGACY_CANONICAL_ERROR_CODES.CAP_EXCEEDED]: 'Legacy source exceeded canonical caps.',
-  [SS014_LEGACY_CANONICAL_ERROR_CODES.MAPPING_REQUIRED]: 'Legacy source mapping is incomplete or ambiguous.',
+  [RUNTIME_STATE_V2_CANONICAL_ERROR_CODES.REDACTION_FAILED]: 'Legacy source failed canonical admission.',
+  [RUNTIME_STATE_V2_CANONICAL_ERROR_CODES.CAP_EXCEEDED]: 'Legacy source exceeded canonical caps.',
+  [RUNTIME_STATE_V2_CANONICAL_ERROR_CODES.MAPPING_REQUIRED]: 'Legacy source mapping is incomplete or ambiguous.',
 }[code])
 
 const exactKeys = (value, expected) => isPlainRecord(value)
@@ -119,13 +120,13 @@ const validateDto = (Model, dto, family) => {
     if (!error) return
     const path = Object.keys(error.errors || {}).sort()[0] || error.path || 'document'
     fail(
-      SS014_V2_MAPPING_ERROR_CODES.SCHEMA_INVALID,
+      RUNTIME_STATE_V2_MAPPING_ERROR_CODES.SCHEMA_INVALID,
       `V2 ${family} row failed schema validation at ${sanitizeSchemaPath(path)}.`,
     )
   } catch (error) {
-    if (error?.code === SS014_V2_MAPPING_ERROR_CODES.SCHEMA_INVALID) throw error
+    if (error?.code === RUNTIME_STATE_V2_MAPPING_ERROR_CODES.SCHEMA_INVALID) throw error
     fail(
-      SS014_V2_MAPPING_ERROR_CODES.SCHEMA_INVALID,
+      RUNTIME_STATE_V2_MAPPING_ERROR_CODES.SCHEMA_INVALID,
       `V2 ${family} row failed schema validation at ${sanitizeSchemaPath(error?.path)}.`,
     )
   }
@@ -198,6 +199,12 @@ const mapSections = ({ manifest, common }) => {
     }
     if ([summary, truthStatus, truthHash, contentHash].includes(null)) inputFailure('Section mapping is invalid.')
     const legacyPath = `framework_state.sections.${sectionKey}`
+    const sectionDetail = clonePlain(normalizeRuntimeSectionObject({
+      value,
+      sectionKey,
+      runtimePath: legacyPath,
+      initializedAt: common.updatedAt,
+    }))
     const row = {
       ...common,
       sectionKey,
@@ -208,8 +215,9 @@ const mapSections = ({ manifest, common }) => {
       contentHash,
       summary,
       evidenceRefs,
+      sectionDetail,
       projectionReceipt: {
-        algorithm: SS014_LEGACY_CANONICAL_ALGORITHM,
+        algorithm: RUNTIME_STATE_V2_CANONICAL_ALGORITHM,
         logicalPath: legacyPath,
         sourceHash: common.sourceHash,
         stateVersion: common.stateVersion,
@@ -533,23 +541,27 @@ const mapGraph = ({ graph, common }) => {
   return { snapshot, nodeRows, edgeRows }
 }
 
-export const createSs014LegacyV2RowSet = (input) => {
+const createMappingContext = (input) => {
   let authority
   try {
     authority = normalizeInput(input)
   } catch (error) {
-    if (Object.values(SS014_V2_MAPPING_ERROR_CODES).includes(error?.code)) throw error
+    if (Object.values(RUNTIME_STATE_V2_MAPPING_ERROR_CODES).includes(error?.code)) throw error
     inputFailure('Mapper envelope is invalid.')
   }
   let canonical
   try {
-    canonical = createSs014LegacyCanonicalMappingManifest(input.legacyInput)
+    canonical = createRuntimeStateCanonicalMappingManifest(input.legacyInput)
   } catch (error) {
     const reason = serializerFailureReason(error?.code)
     if (reason) fail(error.code, reason)
     inputFailure('Mapper envelope is invalid.')
   }
   const { serializerResult, mappingManifest } = canonical
+  return { authority, serializerResult, mappingManifest }
+}
+
+const createSourceRows = ({ authority, serializerResult, mappingManifest }) => {
   const sectionCommon = commonRow({
     ...authority,
     sourceHash: serializerResult.domains.sections.sourceHash,
@@ -569,6 +581,35 @@ export const createSs014LegacyV2RowSet = (input) => {
     manifest: mappingManifest.evidenceObjects,
     common: evidenceCommon,
     sourceIds,
+  })
+  return { evidenceObjects, evidenceSources, sections }
+}
+
+export const createRuntimeStateLegacySourceRowSet = (input) => {
+  const context = createMappingContext(input)
+  const { authority, serializerResult } = context
+  const { evidenceObjects, evidenceSources, sections } = createSourceRows(context)
+  return {
+    schemaVersion: 'ss014-v2-source-row-set-v1',
+    algorithm: serializerResult.algorithm,
+    sourceSetHash: serializerResult.sourceSetHash,
+    stateVersion: authority.stateVersion,
+    counts: {
+      sectionCount: sections.length,
+      sourceCount: evidenceSources.length,
+      evidenceObjectCount: evidenceObjects.length,
+    },
+    rows: { sections, evidenceSources, evidenceObjects },
+  }
+}
+
+export const createRuntimeStateLegacyRowSet = (input) => {
+  const context = createMappingContext(input)
+  const { authority, serializerResult, mappingManifest } = context
+  const { evidenceObjects, evidenceSources, sections } = createSourceRows(context)
+  const graphCommon = commonRow({
+    ...authority,
+    sourceHash: serializerResult.domains.intelligenceGraph.sourceHash,
   })
   const { snapshot, nodeRows, edgeRows } = mapGraph({ graph: mappingManifest.graph, common: graphCommon })
   return {

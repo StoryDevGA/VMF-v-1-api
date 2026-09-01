@@ -5,6 +5,7 @@ import {
   acceptRuntimeDiscovery,
   acceptRuntimeSection,
   approveRuntimeOutcomeDraft,
+  buildRuntimeStateRequestScopes,
   clearRuntimeSectionEvidence,
   createGovernedReasoningExecution,
   createRuntimeInstance,
@@ -44,6 +45,7 @@ import {
   getRuntimeStateBootstrap,
   getRuntimeStateEvidencePage,
   getRuntimeStateGraphManifest,
+  getRuntimeStateGraphProjection,
   getRuntimeStateOutcomeHandoffReadiness,
   getRuntimeStateSectionSummary,
   getRuntimeTruthQuality,
@@ -138,6 +140,7 @@ router.get('/:runtimeInstanceId/state/bootstrap', validateRuntimeInstanceId, get
 router.get('/:runtimeInstanceId/state/sections/:sectionKey', validateRuntimeInstanceId, getRuntimeStateSectionSummary)
 router.get('/:runtimeInstanceId/state/evidence', validateRuntimeInstanceId, getRuntimeStateEvidencePage)
 router.get('/:runtimeInstanceId/state/graph-manifest', validateRuntimeInstanceId, getRuntimeStateGraphManifest)
+router.get('/:runtimeInstanceId/state/graph-projection', validateRuntimeInstanceId, getRuntimeStateGraphProjection)
 router.get(
   '/:runtimeInstanceId/state/outcome-handoff/readiness',
   validateRuntimeInstanceId,
@@ -226,6 +229,14 @@ router.get(
 router.get('/:runtimeInstanceId/output-lab', validateRuntimeInstanceId, getRuntimeOutputLab)
 router.get('/:runtimeInstanceId/output-lab/definitions', validateRuntimeInstanceId, getRuntimeOutputLabDefinitions)
 router.get('/:runtimeInstanceId/output-lab/readiness', validateRuntimeInstanceId, getRuntimeOutputLabReadiness)
+router.use('/:runtimeInstanceId/outcome-studio', (req, _res, next) => {
+  const hasRequestedScope = Object.prototype.hasOwnProperty.call(req.query || {}, 'customerId')
+    || Object.prototype.hasOwnProperty.call(req.query || {}, 'tenantId')
+  if (hasRequestedScope) {
+    req.scopes = buildRuntimeStateRequestScopes({ scopes: req.scopes, query: req.query })
+  }
+  next()
+})
 router.get('/:runtimeInstanceId/outcome-studio', validateRuntimeOutcomeInstanceId, getRuntimeOutcomeStudio)
 router.get('/:runtimeInstanceId/outcome-studio/readiness', validateRuntimeOutcomeInstanceId, getRuntimeOutcomeStudioReadiness)
 router.get(

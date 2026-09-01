@@ -1,13 +1,13 @@
 import mongoose from 'mongoose'
 
 import {
-  createRuntimeStateV2Schema,
+  createRuntimeStateSchema,
   sha256Field,
   scopedCurrentIndex,
   scopedVersionIndex,
-} from './runtimeStateV2Schemas.js'
+} from './runtimeStateSchemas.js'
 
-const runtimeEvidenceSourceSchema = createRuntimeStateV2Schema({
+const runtimeEvidenceSourceSchema = createRuntimeStateSchema({
   collection: 'runtime_evidence_sources',
   fields: {
     sourceId: {

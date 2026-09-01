@@ -3,12 +3,12 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, test, jest } from '@jest/globals'
 import { reconcileSs014DryRunArtifact } from '../services/ss014DryRunArtifactReconciler.js'
-import { prepareSs014NativeReadPlanInputV2 } from '../services/ss014NativeReadResultBoundaryV2.js'
+import { prepareRuntimeStateNativeReadPlanInput } from '../services/runtimeStateNativeReadResultBoundary.js'
 import { runSs014ReadOnlyDryRunPlan } from '../services/ss014ReadOnlyDryRunPlan.js'
 import { serializeNormalizedPlan } from '../services/ss014StablePlanSerializer.js'
 
 const apiRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
-const servicePath = resolve(apiRoot, 'src/services/ss014NativeReadResultBoundaryV2.js')
+const servicePath = resolve(apiRoot, 'src/services/runtimeStateNativeReadResultBoundary.js')
 
 const scope = Object.freeze({
   schemaVersion: 'ss014-scope-v1',
@@ -71,14 +71,14 @@ const incomplete = (errorCode) => ({
   planHash: null,
 })
 
-describe('prepareSs014NativeReadPlanInputV2', () => {
+describe('prepareRuntimeStateNativeReadPlanInput', () => {
   test('exports exactly the intended helper', async () => {
-    const module = await import('../services/ss014NativeReadResultBoundaryV2.js')
-    expect(Object.keys(module)).toEqual(['prepareSs014NativeReadPlanInputV2'])
+    const module = await import('../services/runtimeStateNativeReadResultBoundary.js')
+    expect(Object.keys(module)).toEqual(['prepareRuntimeStateNativeReadPlanInput'])
   })
 
   test('builds exact READY output and downstream consumers accept it', () => {
-    const result = prepareSs014NativeReadPlanInputV2(input())
+    const result = prepareRuntimeStateNativeReadPlanInput(input())
     expect(result.status).toBe('READY')
     expect(result.planInput.observation.readReceipts).toEqual([
       { operation: 'ROOT_CONTROL_FIND', outcome: 'READ', bounded: true },
@@ -105,7 +105,7 @@ describe('prepareSs014NativeReadPlanInputV2', () => {
   })
 
   test('builds ABSENT receipts without admitting unavailable collection states', () => {
-    const result = prepareSs014NativeReadPlanInputV2(input({
+    const result = prepareRuntimeStateNativeReadPlanInput(input({
       v2Collections: collections({
         EVIDENCE_OBJECTS: collection('EVIDENCE_OBJECTS', {
           presence: 'ABSENT',
@@ -133,7 +133,7 @@ describe('prepareSs014NativeReadPlanInputV2', () => {
     })],
   ])('accepts resolver source %s exactly once', (_label, resolved) => {
     const stateVersionResolver = jest.fn(() => resolved)
-    const result = prepareSs014NativeReadPlanInputV2(input({ stateVersionResolver }))
+    const result = prepareRuntimeStateNativeReadPlanInput(input({ stateVersionResolver }))
     expect(result.status).toBe('READY')
     expect(stateVersionResolver).toHaveBeenCalledTimes(1)
     expect(stateVersionResolver).toHaveBeenCalledWith(versionView)
@@ -147,7 +147,7 @@ describe('prepareSs014NativeReadPlanInputV2', () => {
       compatibilityStateVersion: 'rsv2:b',
       errorCode: 'RUNTIME_STATE_VERSION_MIXED',
     }))
-    const result = prepareSs014NativeReadPlanInputV2(input({
+    const result = prepareRuntimeStateNativeReadPlanInput(input({
       stateVersionResolver,
       v2Collections: null,
       execution: null,
@@ -160,7 +160,7 @@ describe('prepareSs014NativeReadPlanInputV2', () => {
     ['CAP_EXCEEDED', { countStatus: 'CAP_EXCEEDED', scopedCount: 1001 }],
     ['READ_FAILED', { countStatus: 'READ_FAILED', scopedCount: 0 }],
   ])('fails closed for %s before receipt construction', (_label, state) => {
-    const result = prepareSs014NativeReadPlanInputV2(input({
+    const result = prepareRuntimeStateNativeReadPlanInput(input({
       v2Collections: collections({ SECTIONS: collection('SECTIONS', state) }),
     }))
     expect(result).toEqual(incomplete('SS014_DRY_RUN_COLLECTION_READ_UNAVAILABLE'))
@@ -171,7 +171,7 @@ describe('prepareSs014NativeReadPlanInputV2', () => {
     ['READ_FAILED', { countStatus: 'READ_FAILED', scopedCount: 0 }],
   ])('checks every collection descriptor before %s semantic failure', (_label, semanticState) => {
     const malformedLater = collection('EVIDENCE_SOURCES', { extra: true })
-    const result = prepareSs014NativeReadPlanInputV2(input({
+    const result = prepareRuntimeStateNativeReadPlanInput(input({
       v2Collections: [
         collection('SECTIONS', semanticState),
         malformedLater,
@@ -191,7 +191,7 @@ describe('prepareSs014NativeReadPlanInputV2', () => {
     { presence: 'PRESENT', countStatus: 'EXACT', scopedCount: 1001 },
     { name: 'WRONG_NAME' },
   ])('fails closed for contradictory collection state %#', (state) => {
-    expect(prepareSs014NativeReadPlanInputV2(input({
+    expect(prepareRuntimeStateNativeReadPlanInput(input({
       v2Collections: collections({ SECTIONS: collection('SECTIONS', state) }),
     }))).toEqual(incomplete('SS014_DRY_RUN_COLLECTION_READ_UNAVAILABLE'))
   })
@@ -204,7 +204,7 @@ describe('prepareSs014NativeReadPlanInputV2', () => {
     ['wrong selector', { selector: 'KEY' }],
     ['monitor failure', { execution: execution({ monitorRemoved: false }) }],
   ])('returns the correct redacted or governed failure for %s', (_label, overrides) => {
-    const result = prepareSs014NativeReadPlanInputV2(input(overrides))
+    const result = prepareRuntimeStateNativeReadPlanInput(input(overrides))
     const expected = overrides.execution
       ? 'SS014_DRY_RUN_COMMAND_MONITOR_UNAVAILABLE'
       : overrides.scope || overrides.selector
@@ -216,7 +216,7 @@ describe('prepareSs014NativeReadPlanInputV2', () => {
   test('rejects structural descriptors before resolver invocation', () => {
     const stateVersionResolver = jest.fn(() => resolverResult())
     const malformed = input({ stateVersionResolver, versionView: { stateVersion: 'x' } })
-    expect(prepareSs014NativeReadPlanInputV2(malformed))
+    expect(prepareRuntimeStateNativeReadPlanInput(malformed))
       .toEqual(incomplete('SS014_DRY_RUN_REDACTION_FAILED'))
     expect(stateVersionResolver).not.toHaveBeenCalled()
   })
@@ -226,7 +226,7 @@ describe('prepareSs014NativeReadPlanInputV2', () => {
     const before = JSON.parse(JSON.stringify(supplied, (_key, value) => (
       typeof value === 'function' ? '[function]' : value
     )))
-    const result = prepareSs014NativeReadPlanInputV2(supplied)
+    const result = prepareRuntimeStateNativeReadPlanInput(supplied)
 
     expect(Object.isFrozen(result)).toBe(true)
     expect(Object.isFrozen(result.planInput)).toBe(false)

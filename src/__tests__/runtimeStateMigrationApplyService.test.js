@@ -3,14 +3,14 @@ import mongoose from 'mongoose'
 
 import {
   SS014_V2_APPLY_ERROR_CODES,
-  applySs014V2RowSetTransaction,
-  assertSs014V2RowSet,
-  castSs014V2RowSetForNativePersistence,
-  createSs014V2ApplyCommandMonitor,
-  createSs014V2ShadowParityReport,
-  getSs014V2CollectionSpecs,
-  readBackSs014V2Rows,
-} from '../services/ss014V2MigrationApplyService.js'
+  applyRuntimeStateMigrationRowSetTransaction,
+  assertRuntimeStateMigrationRowSet,
+  castRuntimeStateMigrationRowSetForNativePersistence,
+  createRuntimeStateMigrationApplyCommandMonitor,
+  createRuntimeStateMigrationShadowParityReport,
+  getRuntimeStateMigrationCollectionSpecs,
+  readBackRuntimeStateMigrationRows,
+} from '../services/runtimeStateMigrationApplyService.js'
 
 const ids = {
   runtimeInstanceId: '64b000000000000000000001',
@@ -65,6 +65,26 @@ const createPersistenceRowSet = () => {
   })
   Object.assign(rowSet.rows.sections[0], {
     legacyPath: 'framework_state.sections.overview', stateStatus: 'CURRENT',
+    sectionDetail: {
+      input: 'Migrated section input',
+      generated: {
+        content: 'Generated section content',
+        sections: [{ heading: 'Heading', body: 'Body', text: 'Text' }],
+      },
+      accepted: null,
+      review: { status: 'PENDING' },
+      state: { status: 'CURRENT' },
+      lineage: { sectionKey: 'overview', runtimePath: 'framework_state.sections.overview' },
+      revisions: [],
+      dependencies: {},
+      validation: {},
+      confidence: {},
+      intelligence: {},
+      metrics: {},
+      additionalEvidence: {},
+      evidenceObjects: [],
+      gsilContext: {},
+    },
     projectionReceipt: {
       algorithm: 'ss014-legacy-domain-canonical-json-v1',
       logicalPath: 'framework_state.sections.overview', sourceHash: hashes.sections,
@@ -107,7 +127,7 @@ const beginObservedTransaction = (monitor) => {
 
 describe('SS-014 V2 migration apply service', () => {
   test('reports exact shadow parity across BSON ObjectId and Date representations', () => {
-    const expected = castSs014V2RowSetForNativePersistence(createPersistenceRowSet())
+    const expected = castRuntimeStateMigrationRowSetForNativePersistence(createPersistenceRowSet())
     const asWireValue = (value) => {
       if (value instanceof Date) return value.toISOString()
       if (value instanceof mongoose.Types.ObjectId) return value.toHexString()
@@ -119,49 +139,69 @@ describe('SS-014 V2 migration apply service', () => {
     }
     const observedRows = Object.fromEntries(Object.entries(expected.rows)
       .map(([key, rows]) => [key, rows.map((row) => ({ _id: new mongoose.Types.ObjectId(), ...asWireValue(row) }))]))
-    const report = createSs014V2ShadowParityReport({ expectedRowSet: expected, observedRows })
+    const report = createRuntimeStateMigrationShadowParityReport({ expectedRowSet: expected, observedRows })
     expect(report.parity).toBe(true)
     expect(report.mismatchCount).toBe(0)
     expect(Object.values(report.collections).every((entry) => entry.digestMatch)).toBe(true)
     expect(JSON.stringify(report)).not.toMatch(/runtime-one|overview|source-1|evidence-1|snapshot-1|node-1|edge-1/)
 
+    const promotedRows = Object.fromEntries(Object.entries(observedRows)
+      .map(([key, rows]) => [key, rows.map((row) => ({
+        ...row,
+        current: true,
+        ...(key === 'graphSnapshots' ? { stateStatus: 'CURRENT' } : {}),
+      }))]))
+    const promoted = createRuntimeStateMigrationShadowParityReport({ expectedRowSet: expected, observedRows: promotedRows })
+    expect(promoted).toMatchObject({ parity: true, mismatchCount: 0 })
+
     observedRows.evidenceObjects[0].summary = 'changed'
-    const changed = createSs014V2ShadowParityReport({ expectedRowSet: expected, observedRows })
+    const changed = createRuntimeStateMigrationShadowParityReport({ expectedRowSet: expected, observedRows })
     expect(changed).toMatchObject({ parity: false, mismatchCount: 1 })
     expect(changed.collections.evidenceObjects.digestMatch).toBe(false)
 
     observedRows.evidenceObjects = []
-    const missing = createSs014V2ShadowParityReport({ expectedRowSet: expected, observedRows })
+    const missing = createRuntimeStateMigrationShadowParityReport({ expectedRowSet: expected, observedRows })
     expect(missing.collections.evidenceObjects).toMatchObject({ expectedCount: 1, observedCount: 0, digestMatch: false })
   })
 
+  test('keeps section state status parity-significant', () => {
+    const expected = castRuntimeStateMigrationRowSetForNativePersistence(createPersistenceRowSet())
+    const observedRows = Object.fromEntries(Object.entries(expected.rows)
+      .map(([key, rows]) => [key, rows.map((row) => ({ ...row }))]))
+    observedRows.sections[0].stateStatus = 'GENERATED'
+
+    const report = createRuntimeStateMigrationShadowParityReport({ expectedRowSet: expected, observedRows })
+    expect(report).toMatchObject({ parity: false, mismatchCount: 1 })
+    expect(report.collections.sections.digestMatch).toBe(false)
+  })
+
   test('rejects duplicate or missing shadow identity keys and unsafe values', () => {
-    const expected = castSs014V2RowSetForNativePersistence(createPersistenceRowSet())
+    const expected = castRuntimeStateMigrationRowSetForNativePersistence(createPersistenceRowSet())
     const duplicate = { ...expected.rows, sections: [...expected.rows.sections, { ...expected.rows.sections[0] }] }
     expectCode(
-      () => createSs014V2ShadowParityReport({ expectedRowSet: expected, observedRows: duplicate }),
+      () => createRuntimeStateMigrationShadowParityReport({ expectedRowSet: expected, observedRows: duplicate }),
       SS014_V2_APPLY_ERROR_CODES.INPUT,
     )
     const missing = { ...expected.rows, graphElements: [{ ...expected.rows.graphElements[0], elementKey: '' }] }
     expectCode(
-      () => createSs014V2ShadowParityReport({ expectedRowSet: expected, observedRows: missing }),
+      () => createRuntimeStateMigrationShadowParityReport({ expectedRowSet: expected, observedRows: missing }),
       SS014_V2_APPLY_ERROR_CODES.INPUT,
     )
     const unsafe = { ...expected.rows, evidenceSources: [{ ...expected.rows.evidenceSources[0], unsafe: Number.NaN }] }
     expectCode(
-      () => createSs014V2ShadowParityReport({ expectedRowSet: expected, observedRows: unsafe }),
+      () => createRuntimeStateMigrationShadowParityReport({ expectedRowSet: expected, observedRows: unsafe }),
       SS014_V2_APPLY_ERROR_CODES.INPUT,
     )
     const extraCollection = { ...expected.rows, unexpectedRows: [] }
     expectCode(
-      () => createSs014V2ShadowParityReport({ expectedRowSet: expected, observedRows: extraCollection }),
+      () => createRuntimeStateMigrationShadowParityReport({ expectedRowSet: expected, observedRows: extraCollection }),
       SS014_V2_APPLY_ERROR_CODES.INPUT,
     )
   })
 
   test('casts validated mapper DTOs to BSON-ready identities without semantic drift', () => {
     const canonical = createPersistenceRowSet()
-    const persisted = castSs014V2RowSetForNativePersistence(canonical)
+    const persisted = castRuntimeStateMigrationRowSetForNativePersistence(canonical)
     expect(persisted).not.toBe(canonical)
     expect(persisted.counts).toEqual(canonical.counts)
     expect(persisted.sourceSetHash).toBe(canonical.sourceSetHash)
@@ -176,29 +216,29 @@ describe('SS-014 V2 migration apply service', () => {
     expect(canonical.rows.sections[0].runtimeInstanceId).toBe(ids.runtimeInstanceId)
     const invalid = createPersistenceRowSet()
     invalid.rows.graphElements[0].runtimeInstanceId = 'not-an-object-id'
-    expectCode(() => castSs014V2RowSetForNativePersistence(invalid), SS014_V2_APPLY_ERROR_CODES.INPUT)
+    expectCode(() => castRuntimeStateMigrationRowSetForNativePersistence(invalid), SS014_V2_APPLY_ERROR_CODES.INPUT)
   })
 
   test('validates the exact scoped five-collection row set', () => {
     const rowSet = createRowSet()
-    expect(assertSs014V2RowSet({ rowSet, scope, migrationReceiptId: ids.migrationReceiptId, sourceHashes: hashes }))
+    expect(assertRuntimeStateMigrationRowSet({ rowSet, scope, migrationReceiptId: ids.migrationReceiptId, sourceHashes: hashes }))
       .toEqual({ sectionCount: 1, sourceCount: 1, evidenceObjectCount: 1, graphSnapshotCount: 1, graphElementCount: 2 })
     rowSet.rows.evidenceObjects[0].tenantId = ids.customerId
     expectCode(
-      () => assertSs014V2RowSet({ rowSet, scope, migrationReceiptId: ids.migrationReceiptId, sourceHashes: hashes }),
+      () => assertRuntimeStateMigrationRowSet({ rowSet, scope, migrationReceiptId: ids.migrationReceiptId, sourceHashes: hashes }),
       SS014_V2_APPLY_ERROR_CODES.INPUT,
     )
   })
 
   test('admits exactly five ordered transactional insert commands and one commit', () => {
     const rowSet = createRowSet()
-    const monitor = createSs014V2ApplyCommandMonitor({
+    const monitor = createRuntimeStateMigrationApplyCommandMonitor({
       databaseName: 'test', rowSet, scope,
       migrationReceiptId: ids.migrationReceiptId, sourceHashes: hashes,
     })
     beginObservedTransaction(monitor)
     monitor.setPhase('TRANSACTION_INSERT')
-    getSs014V2CollectionSpecs().forEach((spec) => monitor.observe({
+    getRuntimeStateMigrationCollectionSpecs().forEach((spec) => monitor.observe({
       commandName: 'insert', databaseName: 'test', command: {
         insert: spec.collection, ordered: true, lsid: { id: 'session' }, txnNumber: 1,
         autocommit: false, documents: rowSet.rows[spec.key],
@@ -220,7 +260,7 @@ describe('SS-014 V2 migration apply service', () => {
     ['aggregate', { aggregate: 'runtime_section_states', pipeline: [{ $out: 'x' }] }],
     ['aggregate', { aggregate: 'runtime_section_states', pipeline: [{ $merge: 'x' }] }],
   ])('rejects forbidden command %s', (commandName, command) => {
-    const monitor = createSs014V2ApplyCommandMonitor({
+    const monitor = createRuntimeStateMigrationApplyCommandMonitor({
       databaseName: 'test', rowSet: createRowSet(), scope,
       migrationReceiptId: ids.migrationReceiptId, sourceHashes: hashes,
     })
@@ -240,7 +280,7 @@ describe('SS-014 V2 migration apply service', () => {
     ]
     variants.forEach((mutate) => {
       const rowSet = createRowSet()
-      const monitor = createSs014V2ApplyCommandMonitor({
+      const monitor = createRuntimeStateMigrationApplyCommandMonitor({
         databaseName: 'test', rowSet, scope,
         migrationReceiptId: ids.migrationReceiptId, sourceHashes: hashes,
       })
@@ -257,7 +297,7 @@ describe('SS-014 V2 migration apply service', () => {
   })
 
   test('admits an implicit readback lsid but rejects transaction fields', () => {
-    const makeMonitor = () => createSs014V2ApplyCommandMonitor({
+    const makeMonitor = () => createRuntimeStateMigrationApplyCommandMonitor({
       databaseName: 'test', rowSet: createRowSet(), scope,
       migrationReceiptId: ids.migrationReceiptId, sourceHashes: hashes,
     })
@@ -289,7 +329,7 @@ describe('SS-014 V2 migration apply service', () => {
 
   test('commits only after transaction-local empty precheck, inserts and reconciliation', async () => {
     const rowSet = createRowSet()
-    const rows = Object.fromEntries(getSs014V2CollectionSpecs().map((spec) => [spec.collection, []]))
+    const rows = Object.fromEntries(getRuntimeStateMigrationCollectionSpecs().map((spec) => [spec.collection, []]))
     const session = {
       startTransaction: jest.fn(), commitTransaction: jest.fn(), abortTransaction: jest.fn(),
       inTransaction: jest.fn(() => true), endSession: jest.fn(),
@@ -302,7 +342,7 @@ describe('SS-014 V2 migration apply service', () => {
       }),
     })) }
     const monitor = { setPhase: jest.fn(), expectFind: jest.fn() }
-    await expect(applySs014V2RowSetTransaction({
+    await expect(applyRuntimeStateMigrationRowSetTransaction({
       client: { startSession: () => session }, database, rowSet, filter: { stateVersion: scope.stateVersion },
       scope, migrationReceiptId: ids.migrationReceiptId, sourceHashes: hashes, monitor,
       transactionPrecondition: jest.fn(),
@@ -331,7 +371,7 @@ describe('SS-014 V2 migration apply service', () => {
         return { acknowledged: true, insertedCount: documents.length }
       }),
     })) }
-    await expect(applySs014V2RowSetTransaction({
+    await expect(applyRuntimeStateMigrationRowSetTransaction({
       client: { startSession: () => session }, database, rowSet, filter: {}, scope,
       migrationReceiptId: ids.migrationReceiptId, sourceHashes: hashes,
       monitor: { setPhase: jest.fn(), expectFind: jest.fn() }, transactionPrecondition: jest.fn(),
@@ -344,7 +384,7 @@ describe('SS-014 V2 migration apply service', () => {
 
   test('does not abort or retry an ambiguous commit result', async () => {
     const rowSet = createRowSet()
-    const rows = Object.fromEntries(getSs014V2CollectionSpecs().map((spec) => [spec.collection, []]))
+    const rows = Object.fromEntries(getRuntimeStateMigrationCollectionSpecs().map((spec) => [spec.collection, []]))
     const ambiguous = Object.assign(new Error('unknown commit'), {
       errorLabels: ['UnknownTransactionCommitResult'],
     })
@@ -359,7 +399,7 @@ describe('SS-014 V2 migration apply service', () => {
         return { acknowledged: true, insertedCount: documents.length }
       },
     }) }
-    await expect(applySs014V2RowSetTransaction({
+    await expect(applyRuntimeStateMigrationRowSetTransaction({
       client: { startSession: () => session }, database, rowSet, filter: {}, scope,
       migrationReceiptId: ids.migrationReceiptId, sourceHashes: hashes,
       monitor: { setPhase: jest.fn(), expectFind: jest.fn() }, transactionPrecondition: jest.fn(),
@@ -373,7 +413,7 @@ describe('SS-014 V2 migration apply service', () => {
 
   test('preserves ambiguous commit when session cleanup also fails', async () => {
     const rowSet = createRowSet()
-    const rows = Object.fromEntries(getSs014V2CollectionSpecs().map((spec) => [spec.collection, []]))
+    const rows = Object.fromEntries(getRuntimeStateMigrationCollectionSpecs().map((spec) => [spec.collection, []]))
     const session = {
       startTransaction: jest.fn(),
       commitTransaction: jest.fn().mockRejectedValue(Object.assign(new Error('unknown'), {
@@ -382,7 +422,7 @@ describe('SS-014 V2 migration apply service', () => {
       abortTransaction: jest.fn(), inTransaction: jest.fn(() => true),
       endSession: jest.fn().mockRejectedValue(new Error('cleanup failed')),
     }
-    await expect(applySs014V2RowSetTransaction({
+    await expect(applyRuntimeStateMigrationRowSetTransaction({
       client: { startSession: () => session },
       database: { collection: (name) => ({
         find: () => ({ toArray: async () => rows[name] }),
@@ -400,12 +440,12 @@ describe('SS-014 V2 migration apply service', () => {
 
   test('marks successful commit when session cleanup fails', async () => {
     const rowSet = createRowSet()
-    const rows = Object.fromEntries(getSs014V2CollectionSpecs().map((spec) => [spec.collection, []]))
+    const rows = Object.fromEntries(getRuntimeStateMigrationCollectionSpecs().map((spec) => [spec.collection, []]))
     const session = {
       startTransaction: jest.fn(), commitTransaction: jest.fn(), abortTransaction: jest.fn(),
       inTransaction: jest.fn(() => false), endSession: jest.fn().mockRejectedValue(new Error('cleanup failed')),
     }
-    await expect(applySs014V2RowSetTransaction({
+    await expect(applyRuntimeStateMigrationRowSetTransaction({
       client: { startSession: () => session },
       database: { collection: (name) => ({
         find: () => ({ toArray: async () => rows[name] }),
@@ -424,17 +464,17 @@ describe('SS-014 V2 migration apply service', () => {
 
   test('readback proves exact counts and graph node/edge reconciliation', async () => {
     const rowSet = createRowSet()
-    const byCollection = Object.fromEntries(getSs014V2CollectionSpecs().map((spec) => [spec.collection,
+    const byCollection = Object.fromEntries(getRuntimeStateMigrationCollectionSpecs().map((spec) => [spec.collection,
       rowSet.rows[spec.key].map((row, index) => ({ _id: index + 1, ...row })),
     ]))
-    const result = await readBackSs014V2Rows({
+    const result = await readBackRuntimeStateMigrationRows({
       database: { collection: (name) => ({ find: () => ({ toArray: async () => byCollection[name] }) }) },
       filter: {}, rowSet, scope, migrationReceiptId: ids.migrationReceiptId, sourceHashes: hashes,
       monitor: { setPhase: jest.fn(), expectFind: jest.fn() },
     })
     expect(result.runtime_graph_elements).toHaveLength(2)
     byCollection.runtime_graph_elements[1].elementType = 'NODE'
-    await expect(readBackSs014V2Rows({
+    await expect(readBackRuntimeStateMigrationRows({
       database: { collection: (name) => ({ find: () => ({ toArray: async () => byCollection[name] }) }) },
       filter: {}, rowSet, scope, migrationReceiptId: ids.migrationReceiptId, sourceHashes: hashes,
       monitor: { setPhase: jest.fn(), expectFind: jest.fn() },

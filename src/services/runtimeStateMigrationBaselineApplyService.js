@@ -162,12 +162,6 @@ const assertRootReadyForBaseline = ({ runtime, receipt, assignedStateVersion }) 
       assignedStateVersion,
     })
   }
-  if (hasCanonicalField || hasCompatibilityField) {
-    throw createApplyError(
-      RUNTIME_STATE_MIGRATION_RECEIPT_ERROR_CODES.ASSIGNED_VERSION_ALREADY_PRESENT,
-      'The selected RuntimeInstance is not an absent-version baseline target.',
-    )
-  }
 }
 
 const assertBackupVerification = async ({ verifyBackupManifest, receipt, plan }) => {

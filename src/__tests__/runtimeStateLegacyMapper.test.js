@@ -4,14 +4,15 @@ import { describe, expect, test } from '@jest/globals'
 import mongoose from 'mongoose'
 
 import {
-  SS014_V2_MAPPING_ERROR_CODES,
-  createSs014LegacyV2RowSet,
-} from '../services/ss014LegacyToV2Mapper.js'
+  RUNTIME_STATE_V2_MAPPING_ERROR_CODES,
+  createRuntimeStateLegacySourceRowSet,
+  createRuntimeStateLegacyRowSet,
+} from '../services/runtimeStateLegacyMapper.js'
 import {
-  SS014_LEGACY_CANONICAL_ALGORITHM,
-  SS014_LEGACY_CANONICAL_ERROR_CODES,
-  createSs014LegacyCanonicalMappingManifest,
-} from '../services/ss014LegacyDomainCanonicalSerializer.js'
+  RUNTIME_STATE_V2_CANONICAL_ALGORITHM,
+  RUNTIME_STATE_V2_CANONICAL_ERROR_CODES,
+  createRuntimeStateCanonicalMappingManifest,
+} from '../services/runtimeStateCanonicalSerializer.js'
 
 const hash = (character) => `sha256:${character.repeat(64)}`
 const stateVersion = 'rsv2:123e4567-e89b-42d3-a456-426614174000'
@@ -127,18 +128,43 @@ const expectStringFields = (value, fields) => {
 }
 
 describe('SS-014 pure legacy-to-V2 mapper', () => {
+  test('projects section and evidence rollover rows without constructing graph rows', () => {
+    const input = makeInput()
+    const sourceResult = createRuntimeStateLegacySourceRowSet(input)
+    const completeResult = createRuntimeStateLegacyRowSet(input)
+
+    expect(sourceResult).toEqual({
+      schemaVersion: 'ss014-v2-source-row-set-v1',
+      algorithm: completeResult.algorithm,
+      sourceSetHash: completeResult.sourceSetHash,
+      stateVersion: completeResult.stateVersion,
+      counts: {
+        sectionCount: completeResult.counts.sectionCount,
+        sourceCount: completeResult.counts.sourceCount,
+        evidenceObjectCount: completeResult.counts.evidenceObjectCount,
+      },
+      rows: {
+        sections: completeResult.rows.sections,
+        evidenceSources: completeResult.rows.evidenceSources,
+        evidenceObjects: completeResult.rows.evidenceObjects,
+      },
+    })
+    expect(sourceResult.rows).not.toHaveProperty('graphSnapshots')
+    expect(sourceResult.rows).not.toHaveProperty('graphElements')
+  })
+
   test('emits exact deterministic plain DTO rows for all six row families', () => {
-    const result = createSs014LegacyV2RowSet(makeInput())
+    const result = createRuntimeStateLegacyRowSet(makeInput())
 
     expect(Object.keys(result)).toEqual(['schemaVersion', 'algorithm', 'sourceSetHash', 'stateVersion', 'counts', 'rows'])
     expect(result.schemaVersion).toBe('ss014-v2-row-set-v1')
-    expect(result.algorithm).toBe(SS014_LEGACY_CANONICAL_ALGORITHM)
+    expect(result.algorithm).toBe(RUNTIME_STATE_V2_CANONICAL_ALGORITHM)
     expect(typeof result.schemaVersion).toBe('string')
     expect(typeof result.algorithm).toBe('string')
     expect(typeof result.stateVersion).toBe('string')
     expect(typeof result.sourceSetHash).toBe('string')
     expect(result.sourceSetHash).toMatch(/^sha256:[0-9a-f]{64}$/)
-    const canonical = createSs014LegacyCanonicalMappingManifest(makeLegacy()).serializerResult
+    const canonical = createRuntimeStateCanonicalMappingManifest(makeLegacy()).serializerResult
     expect(result.sourceSetHash).toBe(canonical.sourceSetHash)
     expect(result.counts).toEqual({
       sectionCount: 3,
@@ -156,7 +182,7 @@ describe('SS-014 pure legacy-to-V2 mapper', () => {
     const [snapshot] = result.rows.graphSnapshots
     const [node] = result.rows.graphElements
     const edge = result.rows.graphElements.at(-1)
-    expect(Object.keys(section)).toEqual([...commonKeys, 'sectionKey', 'legacyPath', 'stateStatus', 'truthStatus', 'truthHash', 'contentHash', 'summary', 'evidenceRefs', 'projectionReceipt'])
+    expect(Object.keys(section)).toEqual([...commonKeys, 'sectionKey', 'legacyPath', 'stateStatus', 'truthStatus', 'truthHash', 'contentHash', 'summary', 'evidenceRefs', 'sectionDetail', 'projectionReceipt'])
     expect(Object.keys(source)).toEqual([...commonKeys, 'sourceId', 'sourceType', 'title', 'sourceRef', 'contentHash', 'acquisitionStatus', 'acquisitionProfile', 'lineageRef', 'reviewStatus'])
     expect(Object.keys(evidence)).toEqual([...commonKeys, 'evidenceObjectId', 'sourceId', 'sourceType', 'lineageRef', 'extractedFact', 'reviewStatus', 'acceptanceState', 'validationStatus', 'confidence', 'materiality', 'materialityScore', 'title', 'summary', 'contentHash', 'truthHash', 'lineageHash'])
     expect(Object.keys(snapshot)).toEqual([...commonKeys, 'snapshotId', 'graphVersion', 'graphHash', 'stateStatus', 'counts', 'metadata'])
@@ -187,6 +213,26 @@ describe('SS-014 pure legacy-to-V2 mapper', () => {
     ])
     expect(Array.isArray(section.evidenceRefs)).toBe(true)
     for (const evidenceRef of section.evidenceRefs) expect(typeof evidenceRef).toBe('string')
+    expect(Object.keys(section.sectionDetail)).toEqual([
+      'input', 'generated', 'accepted', 'review', 'state', 'lineage',
+      'revisions', 'dependencies', 'validation', 'confidence', 'intelligence',
+      'metrics', 'additionalEvidence', 'evidenceObjects', 'gsilContext',
+    ])
+    expect(section.sectionDetail).toMatchObject({
+      input: null,
+      accepted: {
+        summary: ' Accepted summary ',
+        truthStatus: 'certified',
+        truthHash: hash('a'),
+        contentHash: hash('b'),
+        evidenceRefs: [' evidence-1 '],
+      },
+      lineage: {
+        sectionKey: 'accepted',
+        runtimePath: 'framework_state.sections.accepted',
+      },
+    })
+    expect(section.sectionDetail).not.toBe(section)
     expect(Object.getPrototypeOf(section.projectionReceipt)).toBe(Object.prototype)
     expectStringFields(section.projectionReceipt, [
       'algorithm', 'logicalPath', 'sourceHash', 'stateVersion', 'mappingVersion',
@@ -234,7 +280,7 @@ describe('SS-014 pure legacy-to-V2 mapper', () => {
       evidenceRefs: ['evidence-1'],
     })
     expect(section.projectionReceipt).toEqual({
-      algorithm: SS014_LEGACY_CANONICAL_ALGORITHM,
+      algorithm: RUNTIME_STATE_V2_CANONICAL_ALGORITHM,
       logicalPath: 'framework_state.sections.accepted',
       sourceHash: section.sourceHash,
       stateVersion,
@@ -275,7 +321,7 @@ describe('SS-014 pure legacy-to-V2 mapper', () => {
   })
 
   test('applies accepted, generated and legacy section precedence by own property', () => {
-    const rows = createSs014LegacyV2RowSet(makeInput()).rows.sections
+    const rows = createRuntimeStateLegacyRowSet(makeInput()).rows.sections
     expect(rows.map(({ sectionKey, stateStatus, summary }) => ({ sectionKey, stateStatus, summary }))).toEqual([
       { sectionKey: 'accepted', stateStatus: 'ACCEPTED', summary: 'Accepted summary' },
       { sectionKey: 'generated', stateStatus: 'GENERATED', summary: 'Generated summary' },
@@ -283,9 +329,23 @@ describe('SS-014 pure legacy-to-V2 mapper', () => {
     ])
 
     const wrongAccepted = makeLegacy({ sections: { bad: { accepted: 'not-record', generated: { summary: 'fallback' } } } })
-    expectCode(() => createSs014LegacyV2RowSet(makeInput(wrongAccepted)), SS014_V2_MAPPING_ERROR_CODES.INPUT_INVALID, 'Section mapping is invalid.')
+    expectCode(() => createRuntimeStateLegacyRowSet(makeInput(wrongAccepted)), RUNTIME_STATE_V2_MAPPING_ERROR_CODES.INPUT_INVALID, 'Section mapping is invalid.')
     const wrongSummary = makeLegacy({ sections: { bad: { accepted: { summary: 42 } } } })
-    expectCode(() => createSs014LegacyV2RowSet(makeInput(wrongSummary)), SS014_V2_MAPPING_ERROR_CODES.INPUT_INVALID, 'Section mapping is invalid.')
+    expectCode(() => createRuntimeStateLegacyRowSet(makeInput(wrongSummary)), RUNTIME_STATE_V2_MAPPING_ERROR_CODES.INPUT_INVALID, 'Section mapping is invalid.')
+  })
+
+  test('preserves renderer-facing logical content keys in normalized section detail', () => {
+    const legacy = makeLegacy()
+    legacy.sections.accepted.accepted.content = 'accepted content'
+    legacy.sections.accepted.accepted.body = 'accepted body'
+    legacy.sections.accepted.accepted.text = 'accepted text'
+
+    const section = createRuntimeStateLegacyRowSet(makeInput(legacy)).rows.sections[0]
+    expect(section.sectionDetail.accepted).toMatchObject({
+      content: 'accepted content',
+      body: 'accepted body',
+      text: 'accepted text',
+    })
   })
 
   test('uses own-field alias precedence and rejects wrong higher-priority types', () => {
@@ -299,7 +359,7 @@ describe('SS-014 pure legacy-to-V2 mapper', () => {
     legacy.sections.accepted.accepted.truthStatus = ''
     legacy.sections.accepted.accepted.status = 'fallback'
     legacy.intelligenceGraph.edges[0].relationshipType = ''
-    const result = createSs014LegacyV2RowSet(makeInput(legacy))
+    const result = createRuntimeStateLegacyRowSet(makeInput(legacy))
     expect(result.rows.evidenceSources[0]).toMatchObject({
       title: '', sourceRef: '', contentHash: '', lineageRef: '',
     })
@@ -319,7 +379,7 @@ describe('SS-014 pure legacy-to-V2 mapper', () => {
     ]) {
       const badSource = makeLegacy()
       mutate(badSource.evidencePack.sourceRegistry[0])
-      expectCode(() => createSs014LegacyV2RowSet(makeInput(badSource)), SS014_V2_MAPPING_ERROR_CODES.INPUT_INVALID, 'Source mapping is invalid.')
+      expectCode(() => createRuntimeStateLegacyRowSet(makeInput(badSource)), RUNTIME_STATE_V2_MAPPING_ERROR_CODES.INPUT_INVALID, 'Source mapping is invalid.')
     }
 
     for (const mutate of [
@@ -337,12 +397,12 @@ describe('SS-014 pure legacy-to-V2 mapper', () => {
     ]) {
       const badEvidence = makeLegacy()
       mutate(badEvidence.evidencePack.evidenceObjects[0])
-      expectCode(() => createSs014LegacyV2RowSet(makeInput(badEvidence)), SS014_V2_MAPPING_ERROR_CODES.INPUT_INVALID, 'Evidence mapping is invalid.')
+      expectCode(() => createRuntimeStateLegacyRowSet(makeInput(badEvidence)), RUNTIME_STATE_V2_MAPPING_ERROR_CODES.INPUT_INVALID, 'Evidence mapping is invalid.')
     }
 
     const badEdge = makeLegacy()
     badEdge.intelligenceGraph.edges[0].relationshipType = 42
-    expectCode(() => createSs014LegacyV2RowSet(makeInput(badEdge)), SS014_V2_MAPPING_ERROR_CODES.INPUT_INVALID, 'Edge mapping is invalid.')
+    expectCode(() => createRuntimeStateLegacyRowSet(makeInput(badEdge)), RUNTIME_STATE_V2_MAPPING_ERROR_CODES.INPUT_INVALID, 'Edge mapping is invalid.')
   })
 
   test('maps numeric confidence/materiality and rejects score conflicts', () => {
@@ -350,24 +410,24 @@ describe('SS-014 pure legacy-to-V2 mapper', () => {
     legacy.evidencePack.evidenceObjects[0].confidence = 0.6
     legacy.evidencePack.evidenceObjects[0].materiality = 0.7
     legacy.evidencePack.evidenceObjects[0].materialityScore = 0.7
-    const row = createSs014LegacyV2RowSet(makeInput(legacy)).rows.evidenceObjects[0]
+    const row = createRuntimeStateLegacyRowSet(makeInput(legacy)).rows.evidenceObjects[0]
     expect(row.confidence).toEqual({ level: 'LEGACY_SCORE_ONLY', score: 0.6, basis: [] })
     expect(row).toMatchObject({ materiality: 'LEGACY_SCORE_ONLY', materialityScore: 0.7 })
 
     legacy.evidencePack.evidenceObjects[0].materialityScore = 0.8
-    expectCode(() => createSs014LegacyV2RowSet(makeInput(legacy)), SS014_V2_MAPPING_ERROR_CODES.INPUT_INVALID, 'Evidence mapping is invalid.')
+    expectCode(() => createRuntimeStateLegacyRowSet(makeInput(legacy)), RUNTIME_STATE_V2_MAPPING_ERROR_CODES.INPUT_INVALID, 'Evidence mapping is invalid.')
 
     const scoreOnly = makeLegacy()
     delete scoreOnly.evidencePack.evidenceObjects[0].materiality
     scoreOnly.evidencePack.evidenceObjects[0].materialityScore = 1
-    expect(createSs014LegacyV2RowSet(makeInput(scoreOnly)).rows.evidenceObjects[0]).toMatchObject({
+    expect(createRuntimeStateLegacyRowSet(makeInput(scoreOnly)).rows.evidenceObjects[0]).toMatchObject({
       materiality: 'LEGACY_SCORE_ONLY', materialityScore: 1,
     })
 
     const stringAndScore = makeLegacy()
     stringAndScore.evidencePack.evidenceObjects[0].materiality = 'high'
     stringAndScore.evidencePack.evidenceObjects[0].materialityScore = 0
-    expect(createSs014LegacyV2RowSet(makeInput(stringAndScore)).rows.evidenceObjects[0]).toMatchObject({
+    expect(createRuntimeStateLegacyRowSet(makeInput(stringAndScore)).rows.evidenceObjects[0]).toMatchObject({
       materiality: 'HIGH', materialityScore: 0,
     })
 
@@ -382,13 +442,13 @@ describe('SS-014 pure legacy-to-V2 mapper', () => {
     ]) {
       const invalid = makeLegacy()
       invalid.evidencePack.evidenceObjects[0].confidence = confidence
-      expectCode(() => createSs014LegacyV2RowSet(makeInput(invalid)), SS014_V2_MAPPING_ERROR_CODES.INPUT_INVALID, 'Evidence mapping is invalid.')
+      expectCode(() => createRuntimeStateLegacyRowSet(makeInput(invalid)), RUNTIME_STATE_V2_MAPPING_ERROR_CODES.INPUT_INVALID, 'Evidence mapping is invalid.')
     }
 
     for (const score of [0, 1]) {
       const boundary = makeLegacy()
       boundary.evidencePack.evidenceObjects[0].confidence = { level: 'bounded', score, basis: [] }
-      expect(createSs014LegacyV2RowSet(makeInput(boundary)).rows.evidenceObjects[0].confidence.score).toBe(score)
+      expect(createRuntimeStateLegacyRowSet(makeInput(boundary)).rows.evidenceObjects[0].confidence.score).toBe(score)
     }
 
     for (const [score, expected] of [[1.01, 0.0101], [72, 0.72], [100, 1]]) {
@@ -396,7 +456,7 @@ describe('SS-014 pure legacy-to-V2 mapper', () => {
       percentage.evidencePack.evidenceObjects[0].confidence = {
         level: ' high ', score, basis: [' source agreement '],
       }
-      expect(createSs014LegacyV2RowSet(makeInput(percentage)).rows.evidenceObjects[0].confidence).toEqual({
+      expect(createRuntimeStateLegacyRowSet(makeInput(percentage)).rows.evidenceObjects[0].confidence).toEqual({
         level: 'HIGH', score: expected, basis: ['source agreement'],
       })
     }
@@ -404,15 +464,15 @@ describe('SS-014 pure legacy-to-V2 mapper', () => {
     for (const score of [-1, 100.1]) {
       const invalidPercentage = makeLegacy()
       invalidPercentage.evidencePack.evidenceObjects[0].confidence = { level: 'HIGH', score, basis: [] }
-      expectCode(() => createSs014LegacyV2RowSet(makeInput(invalidPercentage)), SS014_V2_MAPPING_ERROR_CODES.INPUT_INVALID, 'Evidence mapping is invalid.')
+      expectCode(() => createRuntimeStateLegacyRowSet(makeInput(invalidPercentage)), RUNTIME_STATE_V2_MAPPING_ERROR_CODES.INPUT_INVALID, 'Evidence mapping is invalid.')
     }
 
     for (const score of [Number.NaN, Number.POSITIVE_INFINITY]) {
       const nonCanonicalPercentage = makeLegacy()
       nonCanonicalPercentage.evidencePack.evidenceObjects[0].confidence = { level: 'HIGH', score, basis: [] }
       expectCode(
-        () => createSs014LegacyV2RowSet(makeInput(nonCanonicalPercentage)),
-        SS014_LEGACY_CANONICAL_ERROR_CODES.REDACTION_FAILED,
+        () => createRuntimeStateLegacyRowSet(makeInput(nonCanonicalPercentage)),
+        RUNTIME_STATE_V2_CANONICAL_ERROR_CODES.REDACTION_FAILED,
         'Legacy source failed canonical admission.',
       )
     }
@@ -421,7 +481,7 @@ describe('SS-014 pure legacy-to-V2 mapper', () => {
       const invalid = makeLegacy()
       invalid.evidencePack.evidenceObjects[0].materiality = materiality
       delete invalid.evidencePack.evidenceObjects[0].materialityScore
-      expectCode(() => createSs014LegacyV2RowSet(makeInput(invalid)), SS014_V2_MAPPING_ERROR_CODES.INPUT_INVALID, 'Evidence mapping is invalid.')
+      expectCode(() => createRuntimeStateLegacyRowSet(makeInput(invalid)), RUNTIME_STATE_V2_MAPPING_ERROR_CODES.INPUT_INVALID, 'Evidence mapping is invalid.')
     }
   })
 
@@ -429,21 +489,21 @@ describe('SS-014 pure legacy-to-V2 mapper', () => {
     const absent = makeLegacy()
     delete absent.evidencePack.sourceRegistry[0].sourceHash
     delete absent.evidencePack.evidenceObjects[0].contentHash
-    const absentRows = createSs014LegacyV2RowSet(makeInput(absent)).rows
+    const absentRows = createRuntimeStateLegacyRowSet(makeInput(absent)).rows
     expect(absentRows.evidenceSources[0].contentHash).toBeUndefined()
     expect(absentRows.evidenceObjects[0].contentHash).toBeUndefined()
 
     const empty = makeLegacy()
     empty.evidencePack.sourceRegistry[0].contentHash = ''
     empty.evidencePack.evidenceObjects[0].truthHash = ''
-    const emptyRows = createSs014LegacyV2RowSet(makeInput(empty)).rows
+    const emptyRows = createRuntimeStateLegacyRowSet(makeInput(empty)).rows
     expect(emptyRows.evidenceSources[0].contentHash).toBe('')
     expect(emptyRows.evidenceObjects[0].truthHash).toBe('')
 
     const normalized = makeLegacy()
     normalized.evidencePack.sourceRegistry[0].contentHash = `  ${hash('A')}  `
     normalized.evidencePack.evidenceObjects[0].truthHash = `  ${hash('B')}  `
-    const normalizedRows = createSs014LegacyV2RowSet(makeInput(normalized)).rows
+    const normalizedRows = createRuntimeStateLegacyRowSet(makeInput(normalized)).rows
     expect(normalizedRows.evidenceSources[0].contentHash).toBe(hash('a'))
     expect(normalizedRows.evidenceObjects[0].truthHash).toBe(hash('b'))
 
@@ -453,7 +513,7 @@ describe('SS-014 pure legacy-to-V2 mapper', () => {
     ]) {
       const invalid = makeLegacy()
       mutate(invalid)
-      expectCode(() => createSs014LegacyV2RowSet(makeInput(invalid)), SS014_V2_MAPPING_ERROR_CODES.INPUT_INVALID, reason)
+      expectCode(() => createRuntimeStateLegacyRowSet(makeInput(invalid)), RUNTIME_STATE_V2_MAPPING_ERROR_CODES.INPUT_INVALID, reason)
       expect(family).toBeDefined()
     }
   })
@@ -471,7 +531,7 @@ describe('SS-014 pure legacy-to-V2 mapper', () => {
       delete graph.nodeCount
       delete graph.edgeCount
       Object.assign(graph, counts)
-      expect(() => createSs014LegacyV2RowSet(makeInput(makeLegacy({ intelligenceGraph: graph })))).not.toThrow()
+      expect(() => createRuntimeStateLegacyRowSet(makeInput(makeLegacy({ intelligenceGraph: graph })))).not.toThrow()
     }
     for (const counts of [
       { counts: { nodeCount: 2, edgeCount: 1, total: 3 } },
@@ -489,8 +549,8 @@ describe('SS-014 pure legacy-to-V2 mapper', () => {
       delete graph.edgeCount
       Object.assign(graph, counts)
       expectCode(
-        () => createSs014LegacyV2RowSet(makeInput(makeLegacy({ intelligenceGraph: graph }))),
-        SS014_V2_MAPPING_ERROR_CODES.INPUT_INVALID,
+        () => createRuntimeStateLegacyRowSet(makeInput(makeLegacy({ intelligenceGraph: graph }))),
+        RUNTIME_STATE_V2_MAPPING_ERROR_CODES.INPUT_INVALID,
         'Snapshot mapping is invalid.',
       )
     }
@@ -505,8 +565,8 @@ describe('SS-014 pure legacy-to-V2 mapper', () => {
       delete graph.edgeCount
       Object.assign(graph, counts)
       expectCode(
-        () => createSs014LegacyV2RowSet(makeInput(makeLegacy({ intelligenceGraph: graph }))),
-        SS014_LEGACY_CANONICAL_ERROR_CODES.REDACTION_FAILED,
+        () => createRuntimeStateLegacyRowSet(makeInput(makeLegacy({ intelligenceGraph: graph }))),
+        RUNTIME_STATE_V2_CANONICAL_ERROR_CODES.REDACTION_FAILED,
         'Legacy source failed canonical admission.',
       )
     }
@@ -531,8 +591,8 @@ describe('SS-014 pure legacy-to-V2 mapper', () => {
       frameworkId: ' framework-1 ',
       runtimeId: ' runtime-object-id ',
     }
-    const canonical = createSs014LegacyCanonicalMappingManifest(legacy)
-    const snapshot = createSs014LegacyV2RowSet(makeInput(legacy)).rows.graphSnapshots[0]
+    const canonical = createRuntimeStateCanonicalMappingManifest(legacy)
+    const snapshot = createRuntimeStateLegacyRowSet(makeInput(legacy)).rows.graphSnapshots[0]
     expect(snapshot.metadata.scope).toEqual({ frameworkId: 'framework-1', runtimeId: 'runtime-object-id' })
     for (const key of ['runtimeInstanceId', 'runtimeInstanceKey', 'runtimeId', 'customerId', 'tenantId', 'projectId', 'outcomeId']) {
       expect(snapshot.metadata).not.toHaveProperty(key)
@@ -543,8 +603,8 @@ describe('SS-014 pure legacy-to-V2 mapper', () => {
       const invalid = makeLegacy()
       invalid.intelligenceGraph.scope = scope
       expectCode(
-        () => createSs014LegacyV2RowSet(makeInput(invalid)),
-        SS014_V2_MAPPING_ERROR_CODES.INPUT_INVALID,
+        () => createRuntimeStateLegacyRowSet(makeInput(invalid)),
+        RUNTIME_STATE_V2_MAPPING_ERROR_CODES.INPUT_INVALID,
         'Snapshot mapping is invalid.',
       )
     }
@@ -559,8 +619,8 @@ describe('SS-014 pure legacy-to-V2 mapper', () => {
       const legacy = makeLegacy()
       mutate(legacy.intelligenceGraph)
       expectCode(
-        () => createSs014LegacyV2RowSet(makeInput(legacy)),
-        SS014_V2_MAPPING_ERROR_CODES.INPUT_INVALID,
+        () => createRuntimeStateLegacyRowSet(makeInput(legacy)),
+        RUNTIME_STATE_V2_MAPPING_ERROR_CODES.INPUT_INVALID,
         reason,
       )
     }
@@ -588,7 +648,7 @@ describe('SS-014 pure legacy-to-V2 mapper', () => {
     })
     delete legacy.intelligenceGraph.edges[0].relationshipType
     legacy.intelligenceGraph.edges[0].edgeType = 'supports'
-    const rows = createSs014LegacyV2RowSet(makeInput(legacy)).rows
+    const rows = createRuntimeStateLegacyRowSet(makeInput(legacy)).rows
     const node = rows.graphElements.find(({ elementType, elementKey }) => elementType === 'NODE' && elementKey === 'node-2')
     const edge = rows.graphElements.find(({ elementType }) => elementType === 'EDGE')
     expect(node.attributes).toMatchObject({
@@ -616,8 +676,8 @@ describe('SS-014 pure legacy-to-V2 mapper', () => {
       const invalid = makeLegacy()
       invalid.intelligenceGraph.nodes[0].scope = scope
       expectCode(
-        () => createSs014LegacyV2RowSet(makeInput(invalid)),
-        SS014_V2_MAPPING_ERROR_CODES.INPUT_INVALID,
+        () => createRuntimeStateLegacyRowSet(makeInput(invalid)),
+        RUNTIME_STATE_V2_MAPPING_ERROR_CODES.INPUT_INVALID,
         'Node mapping is invalid.',
       )
     }
@@ -626,8 +686,8 @@ describe('SS-014 pure legacy-to-V2 mapper', () => {
     invalidAlias.intelligenceGraph.edges[0].edgeType = 42
     invalidAlias.intelligenceGraph.edges[0].relationshipType = 'SUPPORTS'
     expectCode(
-      () => createSs014LegacyV2RowSet(makeInput(invalidAlias)),
-      SS014_V2_MAPPING_ERROR_CODES.INPUT_INVALID,
+      () => createRuntimeStateLegacyRowSet(makeInput(invalidAlias)),
+      RUNTIME_STATE_V2_MAPPING_ERROR_CODES.INPUT_INVALID,
       'Edge mapping is invalid.',
     )
   })
@@ -635,28 +695,28 @@ describe('SS-014 pure legacy-to-V2 mapper', () => {
   test('rejects every post-trim identity collision and unresolved normalized reference', () => {
     const sourceCollision = makeLegacy()
     sourceCollision.evidencePack.sourceRegistry.push({ sourceId: ' source-1 ', sourceType: 'FILE' })
-    expectCode(() => createSs014LegacyV2RowSet(makeInput(sourceCollision)), SS014_V2_MAPPING_ERROR_CODES.INPUT_INVALID, 'Source mapping is invalid.')
+    expectCode(() => createRuntimeStateLegacyRowSet(makeInput(sourceCollision)), RUNTIME_STATE_V2_MAPPING_ERROR_CODES.INPUT_INVALID, 'Source mapping is invalid.')
 
     const evidenceCollision = makeLegacy()
     evidenceCollision.evidencePack.evidenceObjects.push({ evidenceObjectId: ' evidence-1 ', sourceId: 'source-1' })
-    expectCode(() => createSs014LegacyV2RowSet(makeInput(evidenceCollision)), SS014_V2_MAPPING_ERROR_CODES.INPUT_INVALID, 'Evidence mapping is invalid.')
+    expectCode(() => createRuntimeStateLegacyRowSet(makeInput(evidenceCollision)), RUNTIME_STATE_V2_MAPPING_ERROR_CODES.INPUT_INVALID, 'Evidence mapping is invalid.')
 
     const nodeCollision = makeLegacy()
     nodeCollision.intelligenceGraph.nodes.push({ id: ' node-1 ' })
     nodeCollision.intelligenceGraph.counts.nodeCount = 3
     nodeCollision.intelligenceGraph.nodeCount = 3
-    expectCode(() => createSs014LegacyV2RowSet(makeInput(nodeCollision)), SS014_V2_MAPPING_ERROR_CODES.INPUT_INVALID, 'Node mapping is invalid.')
+    expectCode(() => createRuntimeStateLegacyRowSet(makeInput(nodeCollision)), RUNTIME_STATE_V2_MAPPING_ERROR_CODES.INPUT_INVALID, 'Node mapping is invalid.')
 
     const crossFamily = makeLegacy()
     crossFamily.intelligenceGraph.edges[0].id = ' node-1 '
-    expectCode(() => createSs014LegacyV2RowSet(makeInput(crossFamily)), SS014_V2_MAPPING_ERROR_CODES.INPUT_INVALID, 'Edge mapping is invalid.')
+    expectCode(() => createRuntimeStateLegacyRowSet(makeInput(crossFamily)), RUNTIME_STATE_V2_MAPPING_ERROR_CODES.INPUT_INVALID, 'Edge mapping is invalid.')
 
     const endpoint = makeLegacy()
     endpoint.intelligenceGraph.nodes.find((node) => node.nodeId === 'node-1').nodeId = ' node-1 '
     endpoint.intelligenceGraph.edges[0].from = ' node-1 '
-    expect(() => createSs014LegacyV2RowSet(makeInput(endpoint))).not.toThrow()
+    expect(() => createRuntimeStateLegacyRowSet(makeInput(endpoint))).not.toThrow()
     endpoint.intelligenceGraph.edges[0].from = ' unknown '
-    expectCode(() => createSs014LegacyV2RowSet(makeInput(endpoint)), SS014_LEGACY_CANONICAL_ERROR_CODES.MAPPING_REQUIRED, 'Legacy source mapping is incomplete or ambiguous.')
+    expectCode(() => createRuntimeStateLegacyRowSet(makeInput(endpoint)), RUNTIME_STATE_V2_CANONICAL_ERROR_CODES.MAPPING_REQUIRED, 'Legacy source mapping is incomplete or ambiguous.')
   })
 
   test('uses canonical stable and fallback graph keys', () => {
@@ -667,7 +727,7 @@ describe('SS-014 pure legacy-to-V2 mapper', () => {
     const legacy = makeLegacy({
       intelligenceGraph: { graphVersion: 'g-derived', nodes: [nodeValue], edges: [edgeValue] },
     })
-    const elements = createSs014LegacyV2RowSet(makeInput(legacy)).rows.graphElements
+    const elements = createRuntimeStateLegacyRowSet(makeInput(legacy)).rows.graphElements
     expect(elements.map(({ elementKey }) => elementKey)).toEqual([nodeKey, edgeKey])
   })
 
@@ -675,22 +735,22 @@ describe('SS-014 pure legacy-to-V2 mapper', () => {
     const cases = []
     const duplicateSource = makeLegacy()
     duplicateSource.evidencePack.sourceRegistry.push({ sourceId: 'source-1' })
-    cases.push([duplicateSource, SS014_LEGACY_CANONICAL_ERROR_CODES.MAPPING_REQUIRED, 'Legacy source mapping is incomplete or ambiguous.'])
+    cases.push([duplicateSource, RUNTIME_STATE_V2_CANONICAL_ERROR_CODES.MAPPING_REQUIRED, 'Legacy source mapping is incomplete or ambiguous.'])
     const unknownSource = makeLegacy()
     unknownSource.evidencePack.evidenceObjects[0].sourceId = 'secret-source'
-    cases.push([unknownSource, SS014_LEGACY_CANONICAL_ERROR_CODES.MAPPING_REQUIRED, 'Legacy source mapping is incomplete or ambiguous.'])
+    cases.push([unknownSource, RUNTIME_STATE_V2_CANONICAL_ERROR_CODES.MAPPING_REQUIRED, 'Legacy source mapping is incomplete or ambiguous.'])
     const duplicateGraph = makeLegacy()
     duplicateGraph.intelligenceGraph.nodes.push({ id: 'node-1' })
-    cases.push([duplicateGraph, SS014_LEGACY_CANONICAL_ERROR_CODES.MAPPING_REQUIRED, 'Legacy source mapping is incomplete or ambiguous.'])
+    cases.push([duplicateGraph, RUNTIME_STATE_V2_CANONICAL_ERROR_CODES.MAPPING_REQUIRED, 'Legacy source mapping is incomplete or ambiguous.'])
     const invalidScalar = makeLegacy()
     invalidScalar.sections.bad = { value: Number.NaN }
-    cases.push([invalidScalar, SS014_LEGACY_CANONICAL_ERROR_CODES.REDACTION_FAILED, 'Legacy source failed canonical admission.'])
+    cases.push([invalidScalar, RUNTIME_STATE_V2_CANONICAL_ERROR_CODES.REDACTION_FAILED, 'Legacy source failed canonical admission.'])
     const capExceeded = makeLegacy()
     capExceeded.rawBsonBytes = (12 * 1024 * 1024) + 1
-    cases.push([capExceeded, SS014_LEGACY_CANONICAL_ERROR_CODES.CAP_EXCEEDED, 'Legacy source exceeded canonical caps.'])
+    cases.push([capExceeded, RUNTIME_STATE_V2_CANONICAL_ERROR_CODES.CAP_EXCEEDED, 'Legacy source exceeded canonical caps.'])
 
     for (const [legacy, code, reason] of cases) {
-      const error = expectCode(() => createSs014LegacyV2RowSet(makeInput(legacy)), code, reason)
+      const error = expectCode(() => createRuntimeStateLegacyRowSet(makeInput(legacy)), code, reason)
       expect(error.details.reason.length).toBeLessThanOrEqual(120)
       expect(error.details.reason).not.toMatch(/source-1|secret-source|node-1|NaN|canonicalJson/)
     }
@@ -707,63 +767,63 @@ describe('SS-014 pure legacy-to-V2 mapper', () => {
     const legacy = makeLegacy()
     mutate(legacy)
     expectCode(
-      () => createSs014LegacyV2RowSet(makeInput(legacy)),
-      SS014_V2_MAPPING_ERROR_CODES.SCHEMA_INVALID,
+      () => createRuntimeStateLegacyRowSet(makeInput(legacy)),
+      RUNTIME_STATE_V2_MAPPING_ERROR_CODES.SCHEMA_INVALID,
       `V2 ${family} row failed schema validation at ${path}.`,
     )
   })
 
   test('rejects exact input envelope, authority and timestamp drift', () => {
-    expectCode(() => createSs014LegacyV2RowSet({ ...makeInput(), extra: true }), SS014_V2_MAPPING_ERROR_CODES.INPUT_INVALID, 'Mapper envelope is invalid.')
-    expectCode(() => createSs014LegacyV2RowSet(makeInput(makeLegacy(), { stateVersion: 'revision-1' })), SS014_V2_MAPPING_ERROR_CODES.INPUT_INVALID, 'Mapper state version is invalid.')
-    expectCode(() => createSs014LegacyV2RowSet(makeInput(makeLegacy(), { migrationReceiptId: 'bad' })), SS014_V2_MAPPING_ERROR_CODES.INPUT_INVALID, 'Mapper receipt identity is invalid.')
-    expectCode(() => createSs014LegacyV2RowSet(makeInput(makeLegacy(), { migrationTimestamp: '2026-08-26' })), SS014_V2_MAPPING_ERROR_CODES.INPUT_INVALID, 'Mapper timestamp is invalid.')
+    expectCode(() => createRuntimeStateLegacyRowSet({ ...makeInput(), extra: true }), RUNTIME_STATE_V2_MAPPING_ERROR_CODES.INPUT_INVALID, 'Mapper envelope is invalid.')
+    expectCode(() => createRuntimeStateLegacyRowSet(makeInput(makeLegacy(), { stateVersion: 'revision-1' })), RUNTIME_STATE_V2_MAPPING_ERROR_CODES.INPUT_INVALID, 'Mapper state version is invalid.')
+    expectCode(() => createRuntimeStateLegacyRowSet(makeInput(makeLegacy(), { migrationReceiptId: 'bad' })), RUNTIME_STATE_V2_MAPPING_ERROR_CODES.INPUT_INVALID, 'Mapper receipt identity is invalid.')
+    expectCode(() => createRuntimeStateLegacyRowSet(makeInput(makeLegacy(), { migrationTimestamp: '2026-08-26' })), RUNTIME_STATE_V2_MAPPING_ERROR_CODES.INPUT_INVALID, 'Mapper timestamp is invalid.')
 
     const revoked = Proxy.revocable(makeInput().scope, {})
     revoked.revoke()
     expectCode(
-      () => createSs014LegacyV2RowSet(makeInput(makeLegacy(), { scope: revoked.proxy })),
-      SS014_V2_MAPPING_ERROR_CODES.INPUT_INVALID,
+      () => createRuntimeStateLegacyRowSet(makeInput(makeLegacy(), { scope: revoked.proxy })),
+      RUNTIME_STATE_V2_MAPPING_ERROR_CODES.INPUT_INVALID,
       'Mapper envelope is invalid.',
     )
 
     const badGraphHash = makeLegacy()
     badGraphHash.intelligenceGraph.graphHash = 'not-a-hash'
     expectCode(
-      () => createSs014LegacyV2RowSet(makeInput(badGraphHash)),
-      SS014_V2_MAPPING_ERROR_CODES.INPUT_INVALID,
+      () => createRuntimeStateLegacyRowSet(makeInput(badGraphHash)),
+      RUNTIME_STATE_V2_MAPPING_ERROR_CODES.INPUT_INVALID,
       'Snapshot mapping is invalid.',
     )
 
     const absentGraphHash = makeLegacy()
     delete absentGraphHash.intelligenceGraph.graphHash
-    expect(createSs014LegacyV2RowSet(makeInput(absentGraphHash)).rows.graphSnapshots[0].graphHash).toBe('')
+    expect(createRuntimeStateLegacyRowSet(makeInput(absentGraphHash)).rows.graphSnapshots[0].graphHash).toBe('')
 
     const emptyGraphHash = makeLegacy()
     emptyGraphHash.intelligenceGraph.graphHash = ''
     expectCode(
-      () => createSs014LegacyV2RowSet(makeInput(emptyGraphHash)),
-      SS014_V2_MAPPING_ERROR_CODES.INPUT_INVALID,
+      () => createRuntimeStateLegacyRowSet(makeInput(emptyGraphHash)),
+      RUNTIME_STATE_V2_MAPPING_ERROR_CODES.INPUT_INVALID,
       'Snapshot mapping is invalid.',
     )
 
     const normalizedGraphHash = makeLegacy()
     normalizedGraphHash.intelligenceGraph.graphHash = `  ${hash('F')}  `
-    expect(createSs014LegacyV2RowSet(makeInput(normalizedGraphHash)).rows.graphSnapshots[0].graphHash).toBe(hash('f'))
+    expect(createRuntimeStateLegacyRowSet(makeInput(normalizedGraphHash)).rows.graphSnapshots[0].graphHash).toBe(hash('f'))
 
     const objectIdInput = makeInput()
     objectIdInput.scope.runtimeInstanceId = new mongoose.Types.ObjectId(objectIdInput.scope.runtimeInstanceId)
     objectIdInput.scope.customerId = new mongoose.Types.ObjectId(objectIdInput.scope.customerId)
     objectIdInput.scope.tenantId = new mongoose.Types.ObjectId(objectIdInput.scope.tenantId)
     objectIdInput.migrationReceiptId = new mongoose.Types.ObjectId(objectIdInput.migrationReceiptId)
-    const objectIdRow = createSs014LegacyV2RowSet(objectIdInput).rows.sections[0]
+    const objectIdRow = createRuntimeStateLegacyRowSet(objectIdInput).rows.sections[0]
     expect(objectIdRow.runtimeInstanceId).toBe('64b7f7a4e1e5f8320c000001')
     expect(objectIdRow.migrationReceiptId).toBe('64b7f7a4e1e5f8320c000004')
   })
 
   test('is deterministic under permutation and detached from input and prior results', () => {
     const legacy = makeLegacy()
-    const first = createSs014LegacyV2RowSet(makeInput(legacy))
+    const first = createRuntimeStateLegacyRowSet(makeInput(legacy))
     const permuted = makeLegacy({
       sections: Object.fromEntries(Object.entries(legacy.sections).reverse()),
       evidencePack: {
@@ -775,10 +835,10 @@ describe('SS-014 pure legacy-to-V2 mapper', () => {
         nodes: [...legacy.intelligenceGraph.nodes].reverse(),
       },
     })
-    expect(createSs014LegacyV2RowSet(makeInput(permuted))).toEqual(first)
+    expect(createRuntimeStateLegacyRowSet(makeInput(permuted))).toEqual(first)
 
     first.rows.sections[0].summary = 'mutated-result'
     legacy.sections.accepted.accepted.summary = 'mutated-input'
-    expect(createSs014LegacyV2RowSet(makeInput(makeLegacy())).rows.sections[0].summary).toBe('Accepted summary')
+    expect(createRuntimeStateLegacyRowSet(makeInput(makeLegacy())).rows.sections[0].summary).toBe('Accepted summary')
   })
 })

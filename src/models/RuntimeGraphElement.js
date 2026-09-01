@@ -1,12 +1,12 @@
 import mongoose from 'mongoose'
 
 import {
-  createRuntimeStateV2Schema,
+  createRuntimeStateSchema,
   isBoundedSafeJson,
   isValidUnicodeScalarString,
   scopedCurrentIndex,
   scopedVersionIndex,
-} from './runtimeStateV2Schemas.js'
+} from './runtimeStateSchemas.js'
 
 const NODE_ATTRIBUTE_KEYS = [
   'consumerType',
@@ -35,6 +35,7 @@ const NODE_ATTRIBUTE_KEYS = [
   'sectionKey',
   'signalType',
   'snapshotHash',
+  'snapshotId',
   'snippet',
   'sourceEvidenceNodeIds',
   'sourceId',
@@ -70,7 +71,7 @@ const isNodeScope = (value) => (
   || isMinimalScope(value)
 )
 
-const runtimeGraphElementSchema = createRuntimeStateV2Schema({
+const runtimeGraphElementSchema = createRuntimeStateSchema({
   collection: 'runtime_graph_elements',
   fields: {
     snapshotId: {
@@ -152,6 +153,17 @@ const runtimeGraphElementSchema = createRuntimeStateV2Schema({
   indexes: [
     scopedVersionIndex('elementKey', 'unique_runtime_graph_element_version'),
     scopedCurrentIndex('elementKey', 'unique_current_runtime_graph_element'),
+    {
+      keys: {
+        customerId: 1,
+        tenantId: 1,
+        runtimeInstanceId: 1,
+        current: 1,
+        snapshotId: 1,
+        stateVersion: 1,
+      },
+      options: { name: 'runtime_graph_elements_scope_current_snapshot_version' },
+    },
   ],
 })
 

@@ -46,6 +46,7 @@ import {
   getRuntimeInstance,
   RUNTIME_INSTANCE_RENDERER_PROJECTION,
 } from './runtimeInstanceService.js'
+import { getRuntimeStateRendererSections } from './runtimeStateRepository.js'
 import { evaluateRuntimeSectionTruthReadiness } from './runtimeSectionTruthReadinessService.js'
 import {
   buildSectionIntelligenceDisplayProjection,
@@ -67,7 +68,6 @@ import {
   DISCOVERY_EVIDENCE_REVIEW_STATUSES,
   normalizeDiscoveryEvidenceObjects,
 } from './discoveryIntelligenceService.js'
-import { buildRuntimeIntelligenceGraphProjection } from './runtimeIntelligenceGraphService.js'
 
 export const RUNTIME_RENDERER_ERROR_REASONS = Object.freeze({
   PACKAGE_NOT_FOUND: 'PACKAGE_NOT_FOUND',
@@ -632,8 +632,6 @@ export const buildDiscoveryProjection = (frameworkState = {}, { includeInputValu
         sourceRegistry,
       })
     : cloneProjectionValue(evidencePack.acquisitionEffectiveness || acquisition.effectiveness || {})
-  const intelligenceGraph = buildRuntimeIntelligenceGraphProjection(frameworkState.intelligence_graph)
-
   return {
     state: {
       ...(evidencePack.state && typeof evidencePack.state === 'object' && !Array.isArray(evidencePack.state)
@@ -671,7 +669,6 @@ export const buildDiscoveryProjection = (frameworkState = {}, { includeInputValu
     evidenceObjectSummary: buildDiscoveryEvidenceReviewSummary(evidenceObjects),
     discoveryHealth: stripRendererContradictionClaims(discoveryHealth),
     acquisitionEffectiveness: cloneProjectionValue(acquisitionEffectiveness),
-    intelligenceGraph,
     ...(isProjectionObject(evidencePack.resetSummary) ? { resetSummary: cloneProjectionValue(evidencePack.resetSummary) } : {}),
     ...(includeInputValues ? { inputValues: cloneProjectionValue(evidencePack.inputs || {}) } : {}),
     ...(evidencePack.acceptedAt ? { acceptedAt: evidencePack.acceptedAt } : {}),
@@ -1989,6 +1986,7 @@ const buildRendererActions = async ({
   runtimeContext,
   runtimeInstance,
   scopes,
+  frameworkState = runtimeInstance?.framework_state || {},
   configWarnings,
 }) => {
   const uiActions = Array.isArray(uiContract?.actions)
@@ -2037,7 +2035,7 @@ const buildRendererActions = async ({
       }),
       frameworkPackage,
       runtimeInstance,
-      frameworkState: runtimeInstance.framework_state || {},
+      frameworkState,
     })
   }))
 
@@ -2518,6 +2516,18 @@ const buildRevisionProjection = async ({
   }
 }
 
+const buildRendererFrameworkState = ({ runtimeInstance, rendererState }) => {
+  const legacyFrameworkState = runtimeInstance?.framework_state || {}
+  if (!rendererState) return legacyFrameworkState
+
+  return {
+    ...legacyFrameworkState,
+    sections: Object.fromEntries(
+      rendererState.sections.map((section) => [section.sectionKey, section.sectionDetail]),
+    ),
+  }
+}
+
 export const getRuntimeRenderer = async ({
   scopes,
   runtimeInstanceId,
@@ -2538,7 +2548,17 @@ export const getRuntimeRenderer = async ({
   const configWarnings = []
   const runtimeContext = buildRuntimeContext(runtimeInstance)
   const mutationAccess = await resolveSectionMutationAccess({ runtimeInstance, scopes })
-  const frameworkState = runtimeInstance.framework_state || {}
+  const rendererState = String(runtimeInstance?.stateVersion || '').trim()
+    ? await getRuntimeStateRendererSections({ scopes, runtimeInstanceId })
+    : null
+  if (rendererState && rendererState.stateVersion !== String(runtimeInstance.stateVersion).trim()) {
+    throw createRuntimeRendererError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Runtime State Storage V2 renderer state changed during projection.',
+    })
+  }
+  const frameworkState = buildRendererFrameworkState({ runtimeInstance, rendererState })
   const discovery = buildDiscoveryProjection(frameworkState, {
     includeInputValues: mutationAccess?.allowed === true,
   })
@@ -2559,6 +2579,7 @@ export const getRuntimeRenderer = async ({
     runtimeContext,
     runtimeInstance,
     scopes,
+    frameworkState,
     configWarnings,
   })
   const workspaceId = runtimeInstance.workspaceId || runtimeInstance.id
@@ -2580,6 +2601,7 @@ export const getRuntimeRenderer = async ({
 
   return {
     rendererContractVersion: RUNTIME_RENDERER_CONTRACT_VERSION,
+    sectionStateSource: 'runtime_state_v2',
     runtimeInstanceKey: runtimeInstance.runtimeInstanceKey,
     projectionGeneratedAt: new Date().toISOString(),
     runtimeInstance: buildRendererRuntimeInstance(runtimeInstance),

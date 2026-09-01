@@ -66,9 +66,9 @@ const stable = (value) => {
 }
 const same = (left, right) => stable(left) === stable(right)
 
-export const getSs014V2CollectionSpecs = () => COLLECTION_SPECS
+export const getRuntimeStateMigrationCollectionSpecs = () => COLLECTION_SPECS
 
-export const getSs014V2ExpectedCounts = (rowSet) => ({
+export const getRuntimeStateMigrationExpectedCounts = (rowSet) => ({
   sectionCount: rowSet?.counts?.sectionCount,
   sourceCount: rowSet?.counts?.sourceCount,
   evidenceObjectCount: rowSet?.counts?.evidenceObjectCount,
@@ -76,7 +76,7 @@ export const getSs014V2ExpectedCounts = (rowSet) => ({
   graphElementCount: Number(rowSet?.counts?.graphNodeCount) + Number(rowSet?.counts?.graphEdgeCount),
 })
 
-export const castSs014V2RowSetForNativePersistence = (rowSet) => {
+export const castRuntimeStateMigrationRowSetForNativePersistence = (rowSet) => {
   if (!rowSet || rowSet.schemaVersion !== 'ss014-v2-row-set-v1' || !rowSet.rows) {
     fail(SS014_V2_APPLY_ERROR_CODES.INPUT)
   }
@@ -141,7 +141,11 @@ const canonicalShadowRows = ({ rows, identityKey }) => {
     if (typeof identity !== 'string' || identity.length === 0 || identity.length > 240
       || identity !== identity.trim() || identities.has(identity)) fail(SS014_V2_APPLY_ERROR_CODES.INPUT)
     identities.add(identity)
-    const withoutMongoId = Object.fromEntries(Object.entries(row).filter(([key]) => key !== '_id'))
+    const withoutMongoId = Object.fromEntries(Object.entries(row).filter(([key]) => (
+      key !== '_id'
+      && key !== 'current'
+      && !(identityKey === 'snapshotId' && key === 'stateStatus')
+    )))
     return { identity, row: canonicalShadowValue(withoutMongoId) }
   })
   normalized.sort((left, right) => (left.identity < right.identity ? -1 : left.identity > right.identity ? 1 : 0))
@@ -150,7 +154,7 @@ const canonicalShadowRows = ({ rows, identityKey }) => {
 
 const shadowDigest = (rows) => `sha256:${createHash('sha256').update(JSON.stringify(rows)).digest('hex')}`
 
-export const createSs014V2ShadowParityReport = ({ expectedRowSet, observedRows }) => {
+export const createRuntimeStateMigrationShadowParityReport = ({ expectedRowSet, observedRows }) => {
   if (!expectedRowSet?.rows || !observedRows || typeof observedRows !== 'object' || Array.isArray(observedRows)) {
     fail(SS014_V2_APPLY_ERROR_CODES.INPUT)
   }
@@ -186,11 +190,11 @@ export const createSs014V2ShadowParityReport = ({ expectedRowSet, observedRows }
   }
 }
 
-export const assertSs014V2RowSet = ({ rowSet, scope, migrationReceiptId, sourceHashes }) => {
+export const assertRuntimeStateMigrationRowSet = ({ rowSet, scope, migrationReceiptId, sourceHashes }) => {
   if (!rowSet || rowSet.schemaVersion !== 'ss014-v2-row-set-v1' || !rowSet.rows) {
     fail(SS014_V2_APPLY_ERROR_CODES.INPUT)
   }
-  const counts = getSs014V2ExpectedCounts(rowSet)
+  const counts = getRuntimeStateMigrationExpectedCounts(rowSet)
   for (const spec of COLLECTION_SPECS) {
     const rows = rowSet.rows[spec.key]
     const expectedCount = counts[spec.countKey]
@@ -214,8 +218,8 @@ export const assertSs014V2RowSet = ({ rowSet, scope, migrationReceiptId, sourceH
   return counts
 }
 
-export const createSs014V2ApplyCommandMonitor = ({ databaseName, rowSet, scope, migrationReceiptId, sourceHashes }) => {
-  const counts = assertSs014V2RowSet({ rowSet, scope, migrationReceiptId, sourceHashes })
+export const createRuntimeStateMigrationApplyCommandMonitor = ({ databaseName, rowSet, scope, migrationReceiptId, sourceHashes }) => {
+  const counts = assertRuntimeStateMigrationRowSet({ rowSet, scope, migrationReceiptId, sourceHashes })
   const expectedFinds = []
   let findIndex = 0
   let insertIndex = 0
@@ -271,7 +275,7 @@ export const createSs014V2ApplyCommandMonitor = ({ databaseName, rowSet, scope, 
           || !Array.isArray(command.documents)
           || command.documents.length !== counts[spec.countKey]) { mark(); return }
         try {
-          assertSs014V2RowSet({
+          assertRuntimeStateMigrationRowSet({
             rowSet: {
               schemaVersion: rowSet.schemaVersion,
               counts: {
@@ -362,11 +366,11 @@ const readIds = async ({ database, spec, filter, expectedCount, session, monitor
   }).toArray(), SS014_V2_APPLY_ERROR_CODES.DEADLINE)
 }
 
-export const applySs014V2RowSetTransaction = async ({
+export const applyRuntimeStateMigrationRowSetTransaction = async ({
   client, database, rowSet, filter, scope, migrationReceiptId, sourceHashes,
   monitor, transactionPrecondition, bounded = identityBound, maxTimeMS = 15_000,
 }) => {
-  const counts = assertSs014V2RowSet({ rowSet, scope, migrationReceiptId, sourceHashes })
+  const counts = assertRuntimeStateMigrationRowSet({ rowSet, scope, migrationReceiptId, sourceHashes })
   const session = client.startSession()
   let committed = false
   let commitStarted = false
@@ -440,11 +444,11 @@ export const applySs014V2RowSetTransaction = async ({
   }
 }
 
-export const readBackSs014V2Rows = async ({
+export const readBackRuntimeStateMigrationRows = async ({
   database, filter, rowSet, scope, migrationReceiptId, sourceHashes, monitor,
   bounded = identityBound, maxTimeMS = 15_000,
 }) => {
-  const counts = getSs014V2ExpectedCounts(rowSet)
+  const counts = getRuntimeStateMigrationExpectedCounts(rowSet)
   monitor.setPhase('READBACK')
   const result = {}
   for (const spec of COLLECTION_SPECS) {

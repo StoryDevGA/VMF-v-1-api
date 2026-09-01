@@ -73,6 +73,11 @@ import {
   createNextRuntimeStateVersion,
   requireCanonicalRuntimeStateVersion,
 } from './runtimeStateVersionService.js'
+import {
+  finalizeRuntimeStateGraphSourceMutation,
+  stageRuntimeStateGraphSourceMutation,
+} from './runtimeStateGraphSourceMutationService.js'
+import { stageRuntimeStateSourceRollover } from './runtimeStateSourceRolloverService.js'
 
 const SECTION_WRITE_SCOPE = 'framework_state.sections.*'
 export const DISCOVERY_EVIDENCE_PACK_PATH = 'framework_state.evidence_pack'
@@ -2907,6 +2912,7 @@ const persistMutationWithAudit = async ({
   runtimePath,
   previousValue,
   nextValue,
+  rebuiltIntelligenceGraph = null,
   expectedUpdatedAt,
   updatedAtBefore,
 }) => {
@@ -2924,12 +2930,38 @@ const persistMutationWithAudit = async ({
       details: error.details || {},
     })
   }
+  const stateMutationTimestamp = updatedAtBefore || new Date()
 
   if (mongoose.connection.readyState === 1) {
     const session = await mongoose.startSession()
     let updatedRuntimeInstance = null
+    let graphLifecycle = null
+    let sourceRollover = null
     try {
       await session.withTransaction(async () => {
+        sourceRollover = await stageRuntimeStateSourceRollover({
+          runtimeInstance,
+          expectedStateVersion: previousStateVersion,
+          nextStateVersion,
+          nextFrameworkState,
+          mutationTimestamp: stateMutationTimestamp,
+          session,
+        })
+        graphLifecycle = await stageRuntimeStateGraphSourceMutation({
+          runtimeInstance,
+          expectedStateVersion: previousStateVersion,
+          graphWillRebuild: Boolean(rebuiltIntelligenceGraph),
+          session,
+        })
+        if (String(graphLifecycle.migrationReceiptId || '')
+          !== String(sourceRollover.migrationReceiptId || '')) {
+          throw buildMutationError({
+            status: 409,
+            code: 'CONFLICT',
+            message: 'Runtime V2 source and graph receipt lineage do not match.',
+            reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_STATE_VERSION_REQUIRED,
+          })
+        }
         updatedRuntimeInstance = await atomicPersistRuntimeState({
           actorUserId,
           expectedUpdatedAt,
@@ -2941,7 +2973,17 @@ const persistMutationWithAudit = async ({
         })
         await logRuntimeStateMutated({
           actorUserId,
-          additionalDiff,
+          additionalDiff: {
+            ...additionalDiff,
+            runtimeStateGraph: {
+              previousSnapshotId: graphLifecycle.previousSnapshotId,
+              stateStatus: graphLifecycle.status,
+            },
+            runtimeStateSource: {
+              counts: sourceRollover.counts,
+              sourceSetHash: sourceRollover.sourceSetHash,
+            },
+          },
           auditRequest,
           runtimeInstance: updatedRuntimeInstance,
           runtimePath,
@@ -2955,7 +2997,13 @@ const persistMutationWithAudit = async ({
     } finally {
       await session.endSession()
     }
-    return updatedRuntimeInstance
+    const finalized = await finalizeRuntimeStateGraphSourceMutation({
+      actorUserId,
+      graph: rebuiltIntelligenceGraph,
+      migrationReceiptId: graphLifecycle?.migrationReceiptId,
+      runtimeInstance: updatedRuntimeInstance,
+    })
+    return finalized.runtimeInstance
   }
 
   const updatedRuntimeInstance = await atomicPersistRuntimeState({
@@ -3345,6 +3393,7 @@ export const updateRuntimeDiscoveryInputs = async ({
     auditRequest,
     runtimeInstance,
     nextFrameworkState: graphRebuild.nextFrameworkState,
+    rebuiltIntelligenceGraph: graphRebuild.graph,
     previousFrameworkState,
     previousUpdatedBy,
     runtimePath: DISCOVERY_EVIDENCE_PACK_PATH,
@@ -3505,6 +3554,7 @@ export const acceptRuntimeDiscovery = async ({
     auditRequest,
     runtimeInstance,
     nextFrameworkState: graphRebuild.nextFrameworkState,
+    rebuiltIntelligenceGraph: graphRebuild.graph,
     previousFrameworkState,
     previousUpdatedBy,
     runtimePath: DISCOVERY_EVIDENCE_PACK_PATH,
@@ -3673,6 +3723,7 @@ export const reviewRuntimeDiscoveryEvidence = async ({
     auditRequest,
     runtimeInstance,
     nextFrameworkState: graphRebuild.nextFrameworkState,
+    rebuiltIntelligenceGraph: graphRebuild.graph,
     previousFrameworkState,
     previousUpdatedBy,
     runtimePath: DISCOVERY_EVIDENCE_PACK_PATH,
@@ -3832,6 +3883,7 @@ export const resetRuntimeDiscovery = async ({
     auditRequest,
     runtimeInstance,
     nextFrameworkState: graphRebuild.nextFrameworkState,
+    rebuiltIntelligenceGraph: graphRebuild.graph,
     previousFrameworkState,
     previousUpdatedBy,
     runtimePath: DISCOVERY_EVIDENCE_PACK_PATH,
@@ -3960,6 +4012,7 @@ export const rebuildRuntimeIntelligenceGraph = async ({
     auditRequest,
     runtimeInstance,
     nextFrameworkState,
+    rebuiltIntelligenceGraph: nextGraph,
     previousFrameworkState,
     previousUpdatedBy,
     runtimePath: RUNTIME_INTELLIGENCE_GRAPH_PATH,
@@ -4130,6 +4183,7 @@ export const updateRuntimeSectionEvidence = async ({
     auditRequest,
     runtimeInstance,
     nextFrameworkState: graphRebuild.nextFrameworkState,
+    rebuiltIntelligenceGraph: graphRebuild.graph,
     previousFrameworkState,
     previousUpdatedBy,
     runtimePath: target.runtimePath,
@@ -4302,6 +4356,7 @@ export const reviewRuntimeSectionEvidence = async ({
     auditRequest,
     runtimeInstance,
     nextFrameworkState: graphRebuild.nextFrameworkState,
+    rebuiltIntelligenceGraph: graphRebuild.graph,
     previousFrameworkState,
     previousUpdatedBy,
     runtimePath: target.runtimePath,
@@ -4479,6 +4534,7 @@ export const reviewAllRuntimeSectionEvidence = async ({
     auditRequest,
     runtimeInstance,
     nextFrameworkState: graphRebuild.nextFrameworkState,
+    rebuiltIntelligenceGraph: graphRebuild.graph,
     previousFrameworkState,
     previousUpdatedBy,
     runtimePath: target.runtimePath,
@@ -4643,6 +4699,7 @@ export const clearRuntimeSectionEvidence = async ({
     auditRequest,
     runtimeInstance,
     nextFrameworkState: graphRebuild.nextFrameworkState,
+    rebuiltIntelligenceGraph: graphRebuild.graph,
     previousFrameworkState,
     previousUpdatedBy,
     runtimePath: target.runtimePath,
@@ -4956,6 +5013,7 @@ export const acceptRuntimeSection = async ({
     auditRequest,
     runtimeInstance,
     nextFrameworkState: graphRebuild.nextFrameworkState,
+    rebuiltIntelligenceGraph: graphRebuild.graph,
     previousFrameworkState,
     previousUpdatedBy,
     runtimePath: target.runtimePath,

@@ -67,6 +67,7 @@ export const isBoundedSafeJson = (value, {
   rootAllowedKeys,
   rootForbiddenKeys = [],
   forbiddenKeys = [],
+  allowedForbiddenKeys = [],
   validateSpecialValue = () => true,
 }) => {
   try {
@@ -78,6 +79,7 @@ export const isBoundedSafeJson = (value, {
   const seen = new WeakSet()
   const forbiddenRootKeys = new Set(rootForbiddenKeys.map((key) => key.toLowerCase()))
   const additionalForbiddenKeys = new Set(forbiddenKeys.map((key) => key.toLowerCase()))
+  const allowedGenericForbiddenKeys = new Set(allowedForbiddenKeys.map((key) => key.toLowerCase()))
   let entryCount = 0
 
   const serialize = (current, depth, path) => {
@@ -131,7 +133,8 @@ export const isBoundedSafeJson = (value, {
     for (const key of keys) {
       if (!isValidUnicodeScalarString(key, maxStringScalars)) throw new Error('key-string')
       const normalizedKey = key.toLowerCase()
-      if (FORBIDDEN_SAFE_JSON_KEYS.has(normalizedKey) || additionalForbiddenKeys.has(normalizedKey)) {
+      if ((FORBIDDEN_SAFE_JSON_KEYS.has(normalizedKey) && !allowedGenericForbiddenKeys.has(normalizedKey))
+        || additionalForbiddenKeys.has(normalizedKey)) {
         throw new Error('forbidden-key')
       }
       if (depth === 0 && forbiddenRootKeys.has(normalizedKey)) throw new Error('forbidden-root-key')
@@ -227,7 +230,7 @@ const versionFields = {
   },
 }
 
-export const createRuntimeStateV2Schema = ({ collection, fields, indexes }) => {
+export const createRuntimeStateSchema = ({ collection, fields, indexes }) => {
   const schema = new mongoose.Schema(
     {
       ...scopedIdentityFields,

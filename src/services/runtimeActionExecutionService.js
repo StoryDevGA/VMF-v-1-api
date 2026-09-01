@@ -65,6 +65,11 @@ import {
   buildRuntimeIntelligenceGraphForFrameworkState,
   RUNTIME_INTELLIGENCE_GRAPH_BUILD_TRIGGERS,
 } from './runtimeIntelligenceGraphService.js'
+import {
+  finalizeRuntimeStateGraphSourceMutation,
+  stageRuntimeStateGraphSourceMutation,
+} from './runtimeStateGraphSourceMutationService.js'
+import { stageRuntimeStateSourceRollover } from './runtimeStateSourceRolloverService.js'
 
 const buildActionError = ({
   status,
@@ -92,6 +97,11 @@ const serializeErrorDetails = (err) => ({
 })
 
 const normalizeActionString = (value) => String(value || '').trim()
+
+const normalizeRuntimeSectionIdentity = (value) => normalizeActionString(value)
+  .toLowerCase()
+  .replace(/[^a-z0-9]+/g, '_')
+  .replace(/^_+|_+$/g, '')
 
 const parseRuntimeTimestamp = (value) => {
   if (!value) return 0
@@ -193,9 +203,9 @@ const getSectionTruthTimestamp = ({ accepted, generated } = {}) => {
 }
 
 const getPackageSectionByKey = ({ frameworkPackage, sectionKey } = {}) => {
-  const normalizedSectionKey = normalizeActionString(sectionKey)
+  const normalizedSectionKey = normalizeRuntimeSectionIdentity(sectionKey)
   return (Array.isArray(frameworkPackage?.sections) ? frameworkPackage.sections : [])
-    .find((section) => normalizeActionString(section?.sectionKey || section?.key) === normalizedSectionKey)
+    .find((section) => normalizeRuntimeSectionIdentity(section?.sectionKey || section?.key) === normalizedSectionKey)
 }
 
 const getFrameworkStateSectionValue = ({ frameworkPackage, frameworkState, sectionKey } = {}) => {
@@ -470,6 +480,9 @@ const isDiscoveryAction = (actionKey) => [
 
 const getRuntimeActionGraphTrigger = (actionKey) => {
   const normalizedActionKey = normalizeRuntimeActionToken(actionKey)
+  if (isGenerationAction(normalizedActionKey)) {
+    return RUNTIME_INTELLIGENCE_GRAPH_BUILD_TRIGGERS.SECTION_GENERATED
+  }
   if (normalizedActionKey === RUNTIME_ACTION_KEYS.ACCEPT_EVIDENCE) {
     return RUNTIME_INTELLIGENCE_GRAPH_BUILD_TRIGGERS.EVIDENCE_ACCEPTED
   }
@@ -548,7 +561,8 @@ const resolveGenerationTargetSection = ({ frameworkPackage, payload }) => {
   const runtimePath = String(payload?.runtimePath || '').trim()
   const sections = Array.isArray(frameworkPackage?.sections) ? frameworkPackage.sections : []
   const sectionByKey = sectionKey
-    ? sections.find((candidate) => String(candidate?.sectionKey || '').trim() === sectionKey)
+    ? sections.find((candidate) => normalizeRuntimeSectionIdentity(candidate?.sectionKey)
+      === normalizeRuntimeSectionIdentity(sectionKey))
     : null
   const sectionByPath = runtimePath
     ? sections.find((candidate) => String(candidate?.runtimePath || '').trim() === runtimePath)
@@ -1080,6 +1094,8 @@ const buildActionAuditPayload = ({
   generationResult,
   discoveryResult,
   intelligenceGraphResult,
+  graphLifecycle,
+  sourceRollover,
   nextRuntimeUpdate = {},
   previousRuntimeStatus,
   previousLockedAt,
@@ -1204,6 +1220,18 @@ const buildActionAuditPayload = ({
     ...(intelligenceGraphResult ? {
       intelligenceGraph: intelligenceGraphResult,
     } : {}),
+    ...(graphLifecycle ? {
+      runtimeStateGraph: {
+        previousSnapshotId: graphLifecycle.previousSnapshotId,
+        stateStatus: graphLifecycle.status,
+      },
+    } : {}),
+    ...(sourceRollover ? {
+      runtimeStateSource: {
+        counts: sourceRollover.counts,
+        sourceSetHash: sourceRollover.sourceSetHash,
+      },
+    } : {}),
     actionedAt,
   },
 })
@@ -1224,6 +1252,8 @@ const logRuntimeActionExecuted = async ({
   generationResult,
   discoveryResult,
   intelligenceGraphResult,
+  graphLifecycle,
+  sourceRollover,
   nextRuntimeUpdate,
   previousRuntimeStatus,
   previousLockedAt,
@@ -1244,6 +1274,8 @@ const logRuntimeActionExecuted = async ({
     generationResult,
     discoveryResult,
     intelligenceGraphResult,
+    graphLifecycle,
+    sourceRollover,
     nextRuntimeUpdate,
     previousRuntimeStatus,
     previousLockedAt,
@@ -1435,6 +1467,7 @@ const persistActionWithAudit = async ({
   generationResult,
   discoveryResult,
   intelligenceGraphResult,
+  rebuiltIntelligenceGraph = null,
 }) => {
   let nextStateVersion
   try {
@@ -1449,12 +1482,38 @@ const persistActionWithAudit = async ({
       details: error.details || {},
     })
   }
+  const stateMutationTimestamp = updatedAtBefore || new Date()
 
   if (mongoose.connection.readyState === 1) {
     const session = await mongoose.startSession()
     let updatedRuntimeInstance = null
+    let graphLifecycle = null
+    let sourceRollover = null
     try {
       await session.withTransaction(async () => {
+        sourceRollover = await stageRuntimeStateSourceRollover({
+          runtimeInstance,
+          expectedStateVersion: previousStateVersion,
+          nextStateVersion,
+          nextFrameworkState,
+          mutationTimestamp: stateMutationTimestamp,
+          session,
+        })
+        graphLifecycle = await stageRuntimeStateGraphSourceMutation({
+          runtimeInstance,
+          expectedStateVersion: previousStateVersion,
+          graphWillRebuild: Boolean(rebuiltIntelligenceGraph),
+          session,
+        })
+        if (String(graphLifecycle.migrationReceiptId || '')
+          !== String(sourceRollover.migrationReceiptId || '')) {
+          throw buildActionError({
+            status: 409,
+            code: 'CONFLICT',
+            message: 'Runtime V2 source and graph receipt lineage do not match.',
+            reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_STATE_VERSION_REQUIRED,
+          })
+        }
         updatedRuntimeInstance = await atomicPersistRuntimeAction({
           actorUserId,
           expectedUpdatedAt,
@@ -1484,13 +1543,21 @@ const persistActionWithAudit = async ({
           generationResult,
           discoveryResult,
           intelligenceGraphResult,
+          graphLifecycle,
+          sourceRollover,
           session,
         })
       })
     } finally {
       await session.endSession()
     }
-    return updatedRuntimeInstance
+    const finalized = await finalizeRuntimeStateGraphSourceMutation({
+      actorUserId,
+      graph: rebuiltIntelligenceGraph,
+      migrationReceiptId: graphLifecycle?.migrationReceiptId,
+      runtimeInstance: updatedRuntimeInstance,
+    })
+    return finalized.runtimeInstance
   }
 
   const updatedRuntimeInstance = await atomicPersistRuntimeAction({
@@ -1704,6 +1771,9 @@ export const executeRuntimeAction = async ({
     generationResult: resolvedTransition.generationResult,
     discoveryResult: resolvedTransition.discoveryResult,
     intelligenceGraphResult: resolvedTransition.intelligenceGraphResult,
+    rebuiltIntelligenceGraph: resolvedTransition.intelligenceGraphResult
+      ? resolvedTransition.nextFrameworkState?.intelligence_graph
+      : null,
   })
 
   return {

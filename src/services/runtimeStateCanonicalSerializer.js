@@ -2,24 +2,24 @@ import { createHash } from 'node:crypto'
 
 import mongoose from 'mongoose'
 
-export const SS014_LEGACY_CANONICAL_ALGORITHM = 'ss014-legacy-domain-canonical-json-v1'
-export const SS014_LEGACY_SOURCE_HASH_STATUS = 'APPLY_CANDIDATE_NOT_PERSISTED'
-export const SS014_LEGACY_CANONICAL_MAX_BYTES = 12 * 1024 * 1024
+export const RUNTIME_STATE_V2_CANONICAL_ALGORITHM = 'ss014-legacy-domain-canonical-json-v1'
+export const RUNTIME_STATE_V2_SOURCE_HASH_STATUS = 'APPLY_CANDIDATE_NOT_PERSISTED'
+export const RUNTIME_STATE_V2_CANONICAL_MAX_BYTES = 12 * 1024 * 1024
 
-export const SS014_LEGACY_CANONICAL_CAPS = Object.freeze({
+export const RUNTIME_STATE_V2_CANONICAL_CAPS = Object.freeze({
   sections: 2000,
   evidenceObjects: 10000,
   graphNodes: 20000,
   graphEdges: 40000,
 })
 
-export const SS014_LEGACY_CANONICAL_LOGICAL_PATHS = Object.freeze({
+export const RUNTIME_STATE_V2_CANONICAL_LOGICAL_PATHS = Object.freeze({
   sections: 'framework_state.sections',
   evidencePack: 'framework_state.evidence_pack',
   intelligenceGraph: 'framework_state.intelligence_graph',
 })
 
-export const SS014_LEGACY_CANONICAL_ERROR_CODES = Object.freeze({
+export const RUNTIME_STATE_V2_CANONICAL_ERROR_CODES = Object.freeze({
   REDACTION_FAILED: 'SS014_LEGACY_CANONICAL_REDACTION_FAILED',
   MAPPING_REQUIRED: 'SS014_LEGACY_CANONICAL_MAPPING_REQUIRED',
   CAP_EXCEEDED: 'SS014_LEGACY_CANONICAL_CAP_EXCEEDED',
@@ -36,9 +36,9 @@ const fail = (code, reason) => {
   throw error
 }
 
-const redactionFailure = (reason) => fail(SS014_LEGACY_CANONICAL_ERROR_CODES.REDACTION_FAILED, reason)
-const mappingFailure = (reason) => fail(SS014_LEGACY_CANONICAL_ERROR_CODES.MAPPING_REQUIRED, reason)
-const capFailure = (reason) => fail(SS014_LEGACY_CANONICAL_ERROR_CODES.CAP_EXCEEDED, reason)
+const redactionFailure = (reason) => fail(RUNTIME_STATE_V2_CANONICAL_ERROR_CODES.REDACTION_FAILED, reason)
+const mappingFailure = (reason) => fail(RUNTIME_STATE_V2_CANONICAL_ERROR_CODES.MAPPING_REQUIRED, reason)
+const capFailure = (reason) => fail(RUNTIME_STATE_V2_CANONICAL_ERROR_CODES.CAP_EXCEEDED, reason)
 
 const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key)
 
@@ -72,7 +72,7 @@ const getOwnNames = (value, path) => {
     if (Object.getOwnPropertySymbols(value).length > 0) redactionFailure(`${path} contains symbols.`)
     return Object.getOwnPropertyNames(value)
   } catch (error) {
-    if (error?.code === SS014_LEGACY_CANONICAL_ERROR_CODES.REDACTION_FAILED) throw error
+    if (error?.code === RUNTIME_STATE_V2_CANONICAL_ERROR_CODES.REDACTION_FAILED) throw error
     redactionFailure(`${path} cannot be inspected.`)
   }
 }
@@ -111,7 +111,7 @@ const assertPlainRecord = (value, path) => {
     prototype = Object.getPrototypeOf(value)
     names = getOwnNames(value, path)
   } catch (error) {
-    if (error?.code === SS014_LEGACY_CANONICAL_ERROR_CODES.REDACTION_FAILED) throw error
+    if (error?.code === RUNTIME_STATE_V2_CANONICAL_ERROR_CODES.REDACTION_FAILED) throw error
     redactionFailure(`${path} cannot be inspected.`)
   }
   if (prototype !== Object.prototype && prototype !== null) {
@@ -189,7 +189,7 @@ const normalizeDate = (value, path) => {
     if (Number.isNaN(value.getTime())) redactionFailure(`${path} is an invalid Date.`)
     return value.toISOString()
   } catch (error) {
-    if (error?.code === SS014_LEGACY_CANONICAL_ERROR_CODES.REDACTION_FAILED) throw error
+    if (error?.code === RUNTIME_STATE_V2_CANONICAL_ERROR_CODES.REDACTION_FAILED) throw error
     redactionFailure(`${path} Date cannot be encoded.`)
   }
 }
@@ -288,17 +288,17 @@ const sortAndRejectDuplicateIdentities = (entries, identityKey, path) => {
 }
 
 const normalizeSections = (value) => {
-  const keys = assertPlainRecord(value, SS014_LEGACY_CANONICAL_LOGICAL_PATHS.sections).sort(compareUnicodeScalars)
-  if (keys.length > SS014_LEGACY_CANONICAL_CAPS.sections) capFailure('Section cap exceeded.')
+  const keys = assertPlainRecord(value, RUNTIME_STATE_V2_CANONICAL_LOGICAL_PATHS.sections).sort(compareUnicodeScalars)
+  if (keys.length > RUNTIME_STATE_V2_CANONICAL_CAPS.sections) capFailure('Section cap exceeded.')
   for (const key of keys) {
     if (key.length === 0) mappingFailure('Section key must be non-empty.')
-    assertValidString(key, `${SS014_LEGACY_CANONICAL_LOGICAL_PATHS.sections}.${key}`)
+    assertValidString(key, `${RUNTIME_STATE_V2_CANONICAL_LOGICAL_PATHS.sections}.${key}`)
   }
-  return normalizeValue(value, SS014_LEGACY_CANONICAL_LOGICAL_PATHS.sections)
+  return normalizeValue(value, RUNTIME_STATE_V2_CANONICAL_LOGICAL_PATHS.sections)
 }
 
 const normalizeEvidencePack = (value) => {
-  const path = SS014_LEGACY_CANONICAL_LOGICAL_PATHS.evidencePack
+  const path = RUNTIME_STATE_V2_CANONICAL_LOGICAL_PATHS.evidencePack
   const keys = assertPlainRecord(value, path)
   if (!hasOwn(value, 'sourceRegistry') || !hasOwn(value, 'evidenceObjects')) {
     mappingFailure(`${path} requires sourceRegistry and evidenceObjects.`)
@@ -308,7 +308,7 @@ const normalizeEvidencePack = (value) => {
   }
   assertDenseArray(value.sourceRegistry, `${path}.sourceRegistry`)
   assertDenseArray(value.evidenceObjects, `${path}.evidenceObjects`)
-  if (value.evidenceObjects.length > SS014_LEGACY_CANONICAL_CAPS.evidenceObjects) {
+  if (value.evidenceObjects.length > RUNTIME_STATE_V2_CANONICAL_CAPS.evidenceObjects) {
     capFailure('Evidence object cap exceeded.')
   }
   const normalized = normalizeValue(value, path)
@@ -373,7 +373,7 @@ const normalizeGraphElements = (value, path, aliases, label) => {
 }
 
 const normalizeIntelligenceGraphResult = (value) => {
-  const path = SS014_LEGACY_CANONICAL_LOGICAL_PATHS.intelligenceGraph
+  const path = RUNTIME_STATE_V2_CANONICAL_LOGICAL_PATHS.intelligenceGraph
   assertPlainRecord(value, path)
   if (!hasOwn(value, 'nodes') || !hasOwn(value, 'edges')
     || !Array.isArray(value.nodes) || !Array.isArray(value.edges)) {
@@ -381,8 +381,8 @@ const normalizeIntelligenceGraphResult = (value) => {
   }
   assertDenseArray(value.nodes, `${path}.nodes`)
   assertDenseArray(value.edges, `${path}.edges`)
-  if (value.nodes.length > SS014_LEGACY_CANONICAL_CAPS.graphNodes) capFailure('Graph node cap exceeded.')
-  if (value.edges.length > SS014_LEGACY_CANONICAL_CAPS.graphEdges) capFailure('Graph edge cap exceeded.')
+  if (value.nodes.length > RUNTIME_STATE_V2_CANONICAL_CAPS.graphNodes) capFailure('Graph node cap exceeded.')
+  if (value.edges.length > RUNTIME_STATE_V2_CANONICAL_CAPS.graphEdges) capFailure('Graph edge cap exceeded.')
   const normalized = normalizeValue(value, path)
   const nodes = normalizeGraphElements(value.nodes, `${path}.nodes`, GRAPH_NODE_ID_ALIASES, 'node')
   const edges = []
@@ -412,7 +412,7 @@ const normalizeIntelligenceGraphResult = (value) => {
 const serializeDomain = (value, path) => {
   const canonicalJson = stableStringify(value)
   const byteLength = Buffer.byteLength(canonicalJson, 'utf8')
-  if (byteLength > SS014_LEGACY_CANONICAL_MAX_BYTES) capFailure(`${path} serialized-domain cap exceeded.`)
+  if (byteLength > RUNTIME_STATE_V2_CANONICAL_MAX_BYTES) capFailure(`${path} serialized-domain cap exceeded.`)
   return {
     logicalPath: path,
     canonicalJson,
@@ -433,7 +433,7 @@ const assertRawBsonBytes = (value) => {
   if (!Number.isSafeInteger(value) || value < 0 || Object.is(value, -0)) {
     redactionFailure('rawBsonBytes must be a non-negative safe integer.')
   }
-  if (value > SS014_LEGACY_CANONICAL_MAX_BYTES) capFailure('Aggregate raw BSON cap exceeded.')
+  if (value > RUNTIME_STATE_V2_CANONICAL_MAX_BYTES) capFailure('Aggregate raw BSON cap exceeded.')
 }
 
 const normalizeLegacyInput = (input) => {
@@ -447,35 +447,43 @@ const normalizeLegacyInput = (input) => {
 
 const serializeNormalizedDomains = ({ input, sections, evidencePack, intelligenceGraphResult }) => {
   const domains = {
-    sections: serializeDomain(sections, SS014_LEGACY_CANONICAL_LOGICAL_PATHS.sections),
-    evidencePack: serializeDomain(evidencePack, SS014_LEGACY_CANONICAL_LOGICAL_PATHS.evidencePack),
-    intelligenceGraph: serializeDomain(intelligenceGraphResult.normalized, SS014_LEGACY_CANONICAL_LOGICAL_PATHS.intelligenceGraph),
+    sections: serializeDomain(sections, RUNTIME_STATE_V2_CANONICAL_LOGICAL_PATHS.sections),
+    evidencePack: serializeDomain(evidencePack, RUNTIME_STATE_V2_CANONICAL_LOGICAL_PATHS.evidencePack),
+    intelligenceGraph: serializeDomain(intelligenceGraphResult.normalized, RUNTIME_STATE_V2_CANONICAL_LOGICAL_PATHS.intelligenceGraph),
   }
   const sourceSetLines = Object.values(domains)
     .map(({ logicalPath, sourceHash }) => `${logicalPath}=${sourceHash}\n`)
     .sort((left, right) => compareUnicodeScalars(left, right))
     .join('')
   return {
-    algorithm: SS014_LEGACY_CANONICAL_ALGORITHM,
+    algorithm: RUNTIME_STATE_V2_CANONICAL_ALGORITHM,
     rawBsonBytes: input.rawBsonBytes,
     domains,
     sourceSetHash: hashUtf8(sourceSetLines),
-    sourceHashStatus: SS014_LEGACY_SOURCE_HASH_STATUS,
+    sourceHashStatus: RUNTIME_STATE_V2_SOURCE_HASH_STATUS,
   }
 }
 
-export const serializeSs014LegacyDomains = (input) => {
+export const serializeRuntimeStateLegacyDomains = (input) => {
   const normalized = normalizeLegacyInput(input)
   return serializeNormalizedDomains({ input, ...normalized })
 }
 
-export const createSs014LegacyCanonicalMappingManifest = (input) => {
+export const serializeRuntimeStateIntelligenceGraphDomain = (intelligenceGraph) => {
+  const result = normalizeIntelligenceGraphResult(intelligenceGraph)
+  return serializeDomain(
+    result.normalized,
+    RUNTIME_STATE_V2_CANONICAL_LOGICAL_PATHS.intelligenceGraph,
+  )
+}
+
+export const createRuntimeStateCanonicalMappingManifest = (input) => {
   const normalized = normalizeLegacyInput(input)
   const serializerResult = serializeNormalizedDomains({ input, ...normalized })
   const { sections, evidencePack, intelligenceGraphResult } = normalized
   const graphVersion = normalizedIdentity(
     intelligenceGraphResult.normalized.graphVersion,
-    `${SS014_LEGACY_CANONICAL_LOGICAL_PATHS.intelligenceGraph}.graphVersion`,
+    `${RUNTIME_STATE_V2_CANONICAL_LOGICAL_PATHS.intelligenceGraph}.graphVersion`,
   )
   for (const edge of intelligenceGraphResult.edges) {
     if (intelligenceGraphResult.nodeKeys.has(edge.key)) {
@@ -511,6 +519,6 @@ export const createSs014LegacyCanonicalMappingManifest = (input) => {
   }
 }
 
-export const SS014_LEGACY_CANONICAL_FAILURE_CODES = Object.freeze([
-  ...Object.values(SS014_LEGACY_CANONICAL_ERROR_CODES),
+export const RUNTIME_STATE_V2_CANONICAL_FAILURE_CODES = Object.freeze([
+  ...Object.values(RUNTIME_STATE_V2_CANONICAL_ERROR_CODES),
 ])

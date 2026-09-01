@@ -13,6 +13,7 @@ export const RUNTIME_STATE_MIGRATION_RECEIPT_STATUSES = Object.freeze({
 
 export const RUNTIME_STATE_MIGRATION_OPERATION_TYPES = Object.freeze({
   LEGACY_BASELINE: 'LEGACY_BASELINE',
+  NATIVE_INITIALIZATION: 'NATIVE_INITIALIZATION',
 })
 
 export const RUNTIME_STATE_MIGRATION_MODEL_ERROR_CODES = Object.freeze({
@@ -34,7 +35,13 @@ export const RUNTIME_STATE_MIGRATION_TARGET_COLLECTIONS = Object.freeze({
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/
 const STATE_VERSION_PATTERN = /^rsv2:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 const AUTHORITY_TOKEN_DIGEST_PATTERN = SHA256_PATTERN
-const IDEMPOTENCY_KEY_PATTERN = /^ss014:legacy-baseline:sha256:[0-9a-f]{64}$/
+const IDEMPOTENCY_KEY_PATTERN = /^ss014:(legacy-baseline|native-initialization):sha256:[0-9a-f]{64}$/
+const LEGACY_BASELINE_IDEMPOTENCY_KEY_PATTERN = /^ss014:legacy-baseline:sha256:[0-9a-f]{64}$/
+const NATIVE_INITIALIZATION_IDEMPOTENCY_KEY_PATTERN = /^ss014:native-initialization:sha256:[0-9a-f]{64}$/
+
+const isLegacyBaselineReceipt = function isLegacyBaselineReceipt() {
+  return this.operationType === RUNTIME_STATE_MIGRATION_OPERATION_TYPES.LEGACY_BASELINE
+}
 
 const targetSelectionRefSchema = new mongoose.Schema(
   {
@@ -257,19 +264,19 @@ const runtimeStateMigrationReceiptSchema = new mongoose.Schema(
     },
     environmentClass: {
       type: String,
-      required: true,
+      required: isLegacyBaselineReceipt,
       enum: ['DEVELOPMENT_TEST'],
       immutable: true,
     },
     databaseName: {
       type: String,
-      required: true,
+      required: isLegacyBaselineReceipt,
       trim: true,
       immutable: true,
     },
     clusterRef: {
       type: String,
-      required: true,
+      required: isLegacyBaselineReceipt,
       trim: true,
       maxlength: 240,
       immutable: true,
@@ -324,21 +331,24 @@ const runtimeStateMigrationReceiptSchema = new mongoose.Schema(
     },
     dryRunObservationRefs: {
       type: [dryRunObservationRefSchema],
-      required: true,
+      required: isLegacyBaselineReceipt,
+      default: undefined,
       validate: {
-        validator: validateDryRunObservationRefs,
+        validator(refs) {
+          return !isLegacyBaselineReceipt.call(this) || validateDryRunObservationRefs(refs)
+        },
         message: 'Exactly two distinct SS-014 dry-run observation references are required.',
       },
       immutable: true,
     },
     planHashRef: {
       type: planHashRefSchema,
-      required: true,
+      required: isLegacyBaselineReceipt,
       immutable: true,
     },
     authority: {
       type: authoritySchema,
-      required: true,
+      required: isLegacyBaselineReceipt,
     },
     assignedStateVersion: {
       type: String,
@@ -353,7 +363,7 @@ const runtimeStateMigrationReceiptSchema = new mongoose.Schema(
     },
     backupManifestRef: {
       type: String,
-      required: true,
+      required: isLegacyBaselineReceipt,
       trim: true,
       match: SHA256_PATTERN,
       immutable: true,
@@ -416,11 +426,39 @@ runtimeStateMigrationReceiptSchema.index(
 )
 
 runtimeStateMigrationReceiptSchema.pre('validate', function validateReceipt(next) {
+  const nativeInitialization = this.operationType
+    === RUNTIME_STATE_MIGRATION_OPERATION_TYPES.NATIVE_INITIALIZATION
   if (
     this.isNew
+    && !nativeInitialization
     && (this.status !== RUNTIME_STATE_MIGRATION_RECEIPT_STATUSES.PLANNED || this.assignedStateVersion != null)
   ) {
     this.invalidate('assignedStateVersion', 'New SS-014 receipts must begin PLANNED without an assigned state version.')
+  }
+  const operationKeyValid = (
+    this.operationType === RUNTIME_STATE_MIGRATION_OPERATION_TYPES.LEGACY_BASELINE
+    && LEGACY_BASELINE_IDEMPOTENCY_KEY_PATTERN.test(String(this.idempotencyKey || ''))
+  ) || (
+    nativeInitialization
+    && NATIVE_INITIALIZATION_IDEMPOTENCY_KEY_PATTERN.test(String(this.idempotencyKey || ''))
+  )
+  if (!operationKeyValid) {
+    this.invalidate('idempotencyKey', 'Receipt idempotency key must match its operation type.')
+  }
+  if (
+    this.isNew
+    && nativeInitialization
+    && (
+      this.status !== RUNTIME_STATE_MIGRATION_RECEIPT_STATUSES.VERIFIED
+      || !this.assignedStateVersion
+      || !this.assignedAt
+      || !this.verifiedAt
+    )
+  ) {
+    this.invalidate(
+      'assignedStateVersion',
+      'Native Runtime State V2 initialization receipts must be created VERIFIED with assignment timestamps.',
+    )
   }
   if (this.targetSelectionRef?.scopeDigest !== this.scopeDigest) {
     this.invalidate('targetSelectionRef.scopeDigest', 'Target scope digest must match the receipt scope digest.')

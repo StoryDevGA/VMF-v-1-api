@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, jest, test } from '@jest/globals'
 
-import { runSs014NativeReadSessionRunnerV2 } from '../services/ss014NativeReadSessionRunnerV2.js'
+import { runRuntimeStateNativeReadSession } from '../services/runtimeStateNativeReadSessionRunner.js'
 import { createSs014TopologyReadPrimitives } from '../services/ss014TopologyReadPrimitives.js'
 
 const CUSTOMER_ID = '507f1f77bcf86cd799439011'
@@ -183,7 +183,7 @@ afterEach(() => {
 describe('SS-014 native read-session runner V2', () => {
   test('returns a redacted ready plan input with one-client/one-database binding', async () => {
     const input = makeInput()
-    const result = await runSs014NativeReadSessionRunnerV2(input)
+    const result = await runRuntimeStateNativeReadSession(input)
 
     expect(result.status).toBe('READY')
     expect(result.sessionBinding).toBe('ONE_CLIENT_ONE_DATABASE')
@@ -211,7 +211,7 @@ describe('SS-014 native read-session runner V2', () => {
     })
     input.clientFactory = jest.fn(() => client)
 
-    const result = await runSs014NativeReadSessionRunnerV2(input)
+    const result = await runRuntimeStateNativeReadSession(input)
 
     expect(result.status).toBe('READY')
     expect(result.planInput.observation.v2Collections).toHaveLength(5)
@@ -247,7 +247,7 @@ describe('SS-014 native read-session runner V2', () => {
     })
     input.clientFactory = jest.fn(() => client)
 
-    const result = await runSs014NativeReadSessionRunnerV2(input)
+    const result = await runRuntimeStateNativeReadSession(input)
 
     expect(result.status).toBe('READY')
     expect(result.planInput.observation.v2Collections).toEqual(expect.arrayContaining([
@@ -270,7 +270,7 @@ describe('SS-014 native read-session runner V2', () => {
       input.clientFactory = jest.fn(() => client)
 
       await expectIncomplete(
-        runSs014NativeReadSessionRunnerV2(input),
+        runRuntimeStateNativeReadSession(input),
         'SS014_DRY_RUN_COLLECTION_READ_UNAVAILABLE',
       )
       expect(database.listCollections).not.toHaveBeenCalled()
@@ -293,7 +293,7 @@ describe('SS-014 native read-session runner V2', () => {
     input.clientFactory = jest.fn(() => client)
 
     await expectIncomplete(
-      runSs014NativeReadSessionRunnerV2(input),
+      runRuntimeStateNativeReadSession(input),
       'SS014_DRY_RUN_COMMAND_MONITOR_UNAVAILABLE',
     )
   })
@@ -321,7 +321,7 @@ describe('SS-014 native read-session runner V2', () => {
       input.clientFactory = jest.fn(() => client)
 
       await expectIncomplete(
-        runSs014NativeReadSessionRunnerV2(input),
+        runRuntimeStateNativeReadSession(input),
         'SS014_DRY_RUN_REDACTION_FAILED',
       )
       expect(database.listCollections).not.toHaveBeenCalled()
@@ -349,7 +349,7 @@ describe('SS-014 native read-session runner V2', () => {
     input.clientFactory = jest.fn(() => client)
 
     await expectIncomplete(
-      runSs014NativeReadSessionRunnerV2(input),
+      runRuntimeStateNativeReadSession(input),
       'SS014_DRY_RUN_COLLECTION_READ_UNAVAILABLE',
     )
   })
@@ -375,7 +375,7 @@ describe('SS-014 native read-session runner V2', () => {
     }).client
     input.clientFactory = jest.fn(() => client)
 
-    const result = await runSs014NativeReadSessionRunnerV2(input)
+    const result = await runRuntimeStateNativeReadSession(input)
 
     expect(result.status).toBe('READY')
     expect(result.planInput.selector).toBe('KEY')
@@ -398,7 +398,7 @@ describe('SS-014 native read-session runner V2', () => {
     })
     input.clientFactory = jest.fn(() => client)
 
-    await expectIncomplete(runSs014NativeReadSessionRunnerV2(input), 'SS014_DRY_RUN_STATE_VERSION_MIXED')
+    await expectIncomplete(runRuntimeStateNativeReadSession(input), 'SS014_DRY_RUN_STATE_VERSION_MIXED')
     expect(database.listCollections).not.toHaveBeenCalled()
   })
 
@@ -412,7 +412,7 @@ describe('SS-014 native read-session runner V2', () => {
     })
     input.clientFactory = jest.fn(() => client)
 
-    await expectIncomplete(runSs014NativeReadSessionRunnerV2(input), 'SS014_DRY_RUN_WRITE_COMMAND_OBSERVED')
+    await expectIncomplete(runRuntimeStateNativeReadSession(input), 'SS014_DRY_RUN_WRITE_COMMAND_OBSERVED')
     expect(client.db).not.toHaveBeenCalled()
   })
 
@@ -435,7 +435,7 @@ describe('SS-014 native read-session runner V2', () => {
       })
       input.clientFactory = jest.fn(() => client)
 
-      await expectIncomplete(runSs014NativeReadSessionRunnerV2(input), errorCode)
+      await expectIncomplete(runRuntimeStateNativeReadSession(input), errorCode)
       expect(client.db).not.toHaveBeenCalled()
     }
   })
@@ -449,7 +449,7 @@ describe('SS-014 native read-session runner V2', () => {
     })
     input.clientFactory = jest.fn(() => client)
 
-    await expectIncomplete(runSs014NativeReadSessionRunnerV2(input), 'SS014_DRY_RUN_FULL_STATE_BLOCKED')
+    await expectIncomplete(runRuntimeStateNativeReadSession(input), 'SS014_DRY_RUN_FULL_STATE_BLOCKED')
   })
 
   test('fails closed on cross-scope child identity and restores both guards', async () => {
@@ -466,7 +466,7 @@ describe('SS-014 native read-session runner V2', () => {
     }).client
     input.clientFactory = jest.fn(() => client)
 
-    await expectIncomplete(runSs014NativeReadSessionRunnerV2(input), 'SS014_DRY_RUN_COLLECTION_READ_UNAVAILABLE')
+    await expectIncomplete(runRuntimeStateNativeReadSession(input), 'SS014_DRY_RUN_COLLECTION_READ_UNAVAILABLE')
     expect(input.autoCreateGuard.restore).toHaveBeenCalledWith(true)
     expect(input.autoIndexGuard.restore).toHaveBeenCalledWith(true)
   })
@@ -481,7 +481,7 @@ describe('SS-014 native read-session runner V2', () => {
     })
     input.clientFactory = jest.fn(() => client)
 
-    await expectIncomplete(runSs014NativeReadSessionRunnerV2(input), 'SS014_DRY_RUN_COMMAND_MONITOR_UNAVAILABLE')
+    await expectIncomplete(runRuntimeStateNativeReadSession(input), 'SS014_DRY_RUN_COMMAND_MONITOR_UNAVAILABLE')
     expect(client.off).toHaveBeenCalledWith('commandStarted', expect.any(Function))
     expect(client.listenerCount('commandStarted')).toBe(0)
   })
@@ -490,13 +490,13 @@ describe('SS-014 native read-session runner V2', () => {
     const input = makeInput()
     input.autoIndexGuard.setFalse = jest.fn(() => { throw new Error('index guard failed') })
 
-    await expectIncomplete(runSs014NativeReadSessionRunnerV2(input), 'SS014_DRY_RUN_AUTO_CREATE_GUARD_UNAVAILABLE')
+    await expectIncomplete(runRuntimeStateNativeReadSession(input), 'SS014_DRY_RUN_AUTO_CREATE_GUARD_UNAVAILABLE')
     expect(input.autoCreateGuard.restore).toHaveBeenCalledWith(true)
     expect(input.autoIndexGuard.restore).toHaveBeenCalledWith(true)
 
     const restoration = makeInput()
     restoration.autoCreateGuard.restore = jest.fn(() => { throw new Error('restore failed') })
-    await expectIncomplete(runSs014NativeReadSessionRunnerV2(restoration), 'SS014_DRY_RUN_AUTO_CREATE_GUARD_UNAVAILABLE')
+    await expectIncomplete(runRuntimeStateNativeReadSession(restoration), 'SS014_DRY_RUN_AUTO_CREATE_GUARD_UNAVAILABLE')
   })
 
   test('fails closed when a cursor operation rejects without leaking an unhandled rejection', async () => {
@@ -525,7 +525,7 @@ describe('SS-014 native read-session runner V2', () => {
     const onUnhandled = (reason) => unhandled.push(reason)
     process.on('unhandledRejection', onUnhandled)
     try {
-      await expectIncomplete(runSs014NativeReadSessionRunnerV2(input), 'SS014_DRY_RUN_COMMAND_MONITOR_UNAVAILABLE')
+      await expectIncomplete(runRuntimeStateNativeReadSession(input), 'SS014_DRY_RUN_COMMAND_MONITOR_UNAVAILABLE')
       await Promise.resolve()
       expect(unhandled).toEqual([])
     } finally {
@@ -545,7 +545,7 @@ describe('SS-014 native read-session runner V2', () => {
     input.clientFactory = jest.fn(() => client)
 
     jest.useFakeTimers()
-    const promise = runSs014NativeReadSessionRunnerV2(input)
+    const promise = runRuntimeStateNativeReadSession(input)
     await jest.advanceTimersByTimeAsync(15000)
     await expectIncomplete(promise, 'SS014_DRY_RUN_TIMEOUT')
     expect(client.close).toHaveBeenCalledTimes(1)
@@ -559,15 +559,15 @@ describe('SS-014 native read-session runner V2', () => {
       rootQuery: () => Object.freeze({ ...rootQuery, filter: { ...rootQuery.filter } }),
     }
 
-    await expectIncomplete(runSs014NativeReadSessionRunnerV2(input), 'SS014_DRY_RUN_REDACTION_FAILED')
+    await expectIncomplete(runRuntimeStateNativeReadSession(input), 'SS014_DRY_RUN_REDACTION_FAILED')
   })
 
   test('rejects raw row size and sizer failures without returning row content', async () => {
     const oversized = makeInput({ bsonSizer: jest.fn(() => 65537) })
-    await expectIncomplete(runSs014NativeReadSessionRunnerV2(oversized), 'SS014_DRY_RUN_SIZE_CAP_EXCEEDED')
+    await expectIncomplete(runRuntimeStateNativeReadSession(oversized), 'SS014_DRY_RUN_SIZE_CAP_EXCEEDED')
 
     const rejectedSizer = makeInput({ bsonSizer: jest.fn(() => Promise.reject(new Error('sizer failed'))) })
-    await expectIncomplete(runSs014NativeReadSessionRunnerV2(rejectedSizer), 'SS014_DRY_RUN_SIZE_CAP_EXCEEDED')
+    await expectIncomplete(runRuntimeStateNativeReadSession(rejectedSizer), 'SS014_DRY_RUN_SIZE_CAP_EXCEEDED')
   })
 
   test('rejects root cardinality, root identity and invalid version-view branches', async () => {
@@ -579,27 +579,27 @@ describe('SS-014 native read-session runner V2', () => {
       ],
     })
     cardinality.clientFactory = jest.fn(() => cardinalityClient)
-    await expectIncomplete(runSs014NativeReadSessionRunnerV2(cardinality), 'SS014_DRY_RUN_COLLECTION_READ_UNAVAILABLE')
+    await expectIncomplete(runRuntimeStateNativeReadSession(cardinality), 'SS014_DRY_RUN_COLLECTION_READ_UNAVAILABLE')
 
     const identity = makeInput()
     const { client: identityClient } = makeClient({
       rootRows: [{ _id: { hex: RUNTIME_ID }, runtimeInstanceKey: RUNTIME_KEY, customerId: { hex: '507f1f77bcf86cd799439099' }, tenantId: { hex: TENANT_ID }, stateVersion: 'a', runtimeStateVersion: 'a' }],
     })
     identity.clientFactory = jest.fn(() => identityClient)
-    await expectIncomplete(runSs014NativeReadSessionRunnerV2(identity), 'SS014_DRY_RUN_COLLECTION_READ_UNAVAILABLE')
+    await expectIncomplete(runRuntimeStateNativeReadSession(identity), 'SS014_DRY_RUN_COLLECTION_READ_UNAVAILABLE')
 
     const invalidVersion = makeInput()
     const { client: invalidVersionClient } = makeClient({
       rootRows: [{ _id: { hex: RUNTIME_ID }, runtimeInstanceKey: RUNTIME_KEY, customerId: { hex: CUSTOMER_ID }, tenantId: { hex: TENANT_ID }, stateVersion: { secret: true }, runtimeStateVersion: undefined }],
     })
     invalidVersion.clientFactory = jest.fn(() => invalidVersionClient)
-    await expectIncomplete(runSs014NativeReadSessionRunnerV2(invalidVersion), 'SS014_DRY_RUN_REDACTION_FAILED')
+    await expectIncomplete(runRuntimeStateNativeReadSession(invalidVersion), 'SS014_DRY_RUN_REDACTION_FAILED')
   })
 
   test('rejects malformed outer descriptors before calling guards or the client factory', async () => {
     const input = makeInput()
     input.extra = true
-    await expectIncomplete(runSs014NativeReadSessionRunnerV2(input), 'SS014_DRY_RUN_REDACTION_FAILED')
+    await expectIncomplete(runRuntimeStateNativeReadSession(input), 'SS014_DRY_RUN_REDACTION_FAILED')
     expect(input.clientFactory).not.toHaveBeenCalled()
     expect(input.autoCreateGuard.setFalse).not.toHaveBeenCalled()
   })
@@ -610,7 +610,7 @@ describe('SS-014 native read-session runner V2', () => {
         read: jest.fn(() => ({ environmentClass: 'PRODUCTION', isProduction: true, isAppProduction: true })),
       },
     })
-    await expectIncomplete(runSs014NativeReadSessionRunnerV2(input), 'SS014_DRY_RUN_PRODUCTION_BLOCKED')
+    await expectIncomplete(runRuntimeStateNativeReadSession(input), 'SS014_DRY_RUN_PRODUCTION_BLOCKED')
     expect(input.autoCreateGuard.setFalse).not.toHaveBeenCalled()
     expect(input.autoIndexGuard.setFalse).not.toHaveBeenCalled()
   })
@@ -628,6 +628,6 @@ describe('SS-014 native read-session runner V2', () => {
     }).client
     input.clientFactory = jest.fn(() => client)
 
-    await expectIncomplete(runSs014NativeReadSessionRunnerV2(input), 'SS014_DRY_RUN_COLLECTION_READ_UNAVAILABLE')
+    await expectIncomplete(runRuntimeStateNativeReadSession(input), 'SS014_DRY_RUN_COLLECTION_READ_UNAVAILABLE')
   })
 })

@@ -1,11 +1,11 @@
 import mongoose from 'mongoose'
 
 import {
-  createRuntimeStateV2Schema,
+  createRuntimeStateSchema,
   sha256Field,
   scopedCurrentIndex,
   scopedVersionIndex,
-} from './runtimeStateV2Schemas.js'
+} from './runtimeStateSchemas.js'
 
 const confidenceSchema = new mongoose.Schema({
   level: {
@@ -31,7 +31,7 @@ const confidenceSchema = new mongoose.Schema({
   },
 }, { _id: false, strict: 'throw' })
 
-const runtimeEvidenceObjectSchema = createRuntimeStateV2Schema({
+const runtimeEvidenceObjectSchema = createRuntimeStateSchema({
   collection: 'runtime_evidence_objects',
   fields: {
     evidenceObjectId: {

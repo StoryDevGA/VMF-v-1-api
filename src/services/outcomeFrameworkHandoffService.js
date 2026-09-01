@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 
 import { FrameworkPackage } from '../models/index.js'
+import auditService from './auditService.js'
 import { getRuntimeInstance } from './runtimeInstanceService.js'
 import { resolveOutcomeStudioKnowledgePackBinding } from './outcomeKnowledgePackRegistryService.js'
 import { resolveOutcomeStudioKnowledgeContext } from './outcomeStudioKnowledgeContextService.js'
@@ -34,6 +35,9 @@ export const FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_READ_POLICY = Object.freeze({
   versionLimit: 501,
   commandIds: Object.freeze(Object.values(FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_COMMANDS)),
 })
+
+export const FRAMEWORK_OUTCOME_HANDOFF_V2_PARITY_CONTRACT_VERSION =
+  'ss-014.runtime-state-v2.handoff-state-parity.v1'
 
 const FRAMEWORK_PACKAGE_BOUNDED_PROJECTION = [
   '_id',
@@ -150,6 +154,32 @@ const validateBoundedHandoffPolicy = (policy) => {
   return FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_READ_POLICY
 }
 
+const validateBoundedStateParityReceipt = ({ receipt, runtimeInstance } = {}) => {
+  const frameworkState = getFrameworkState(runtimeInstance || {})
+  const sectionKeys = getSectionsEntries(frameworkState)
+    .map(([sectionKey]) => normalizeKey(sectionKey))
+    .filter(Boolean)
+    .sort()
+  const evidenceObjects = getEvidenceObjects(frameworkState).evidenceObjects
+  const runtimeStateVersion = normalizeText(runtimeInstance?.stateVersion)
+  const receiptSectionKeys = Array.isArray(receipt?.sectionKeys)
+    ? receipt.sectionKeys.map(normalizeKey).filter(Boolean).sort()
+    : []
+  if (normalizeText(receipt?.contractVersion) !== FRAMEWORK_OUTCOME_HANDOFF_V2_PARITY_CONTRACT_VERSION
+    || !runtimeStateVersion
+    || normalizeText(receipt?.stateVersion) !== runtimeStateVersion
+    || Number(receipt?.sectionCount) !== sectionKeys.length
+    || Number(receipt?.evidenceObjectCount) !== evidenceObjects.length
+    || receiptSectionKeys.join('|') !== sectionKeys.join('|')
+    || normalizeText(receipt?.stateDigest) !== buildFrameworkOutcomeHandoffV2ParityDigest(runtimeInstance)) {
+    throw createBoundedHandoffError(
+      'The bounded Runtime State V2 handoff parity receipt is invalid.',
+      'HANDOFF_BOUNDED_STATE_PARITY_INVALID',
+    )
+  }
+  return receipt
+}
+
 const buildBoundedDependencyReceipt = ({ policy, dependencies = [] } = {}) => ({
   policyVersion: policy.policyVersion,
   dependencies: dependencies
@@ -195,7 +225,34 @@ const isFrameworkPackageAccessibleToCustomer = ({ frameworkPackage, customerId }
   return false
 }
 
-const loadBoundedFrameworkPackage = async ({ runtimeInstance, policy } = {}) => {
+const getScopedActorUserId = (scopes = {}) => toIdString(
+  scopes.user?.id || scopes.user?._id || scopes.userId,
+)
+
+const logFrameworkPackageAccessDenied = async ({ runtimeInstance, frameworkPackage, scopes } = {}) => {
+  const actorUserId = getScopedActorUserId(scopes)
+  if (!actorUserId) return
+
+  await auditService.log({
+    actorUserId,
+    action: auditService.AUDIT_ACTIONS.ACCESS_DENIED,
+    resourceType: auditService.RESOURCE_TYPES.FrameworkPackage,
+    resourceId: frameworkPackage?._id || runtimeInstance?.packageId,
+    summary: 'Framework Package access denied during the governed Outcome Studio handoff.',
+    scope: {
+      customerId: runtimeInstance?.customerId,
+      tenantId: runtimeInstance?.tenantId,
+      runtimeInstanceId: runtimeInstance?._id || runtimeInstance?.id,
+    },
+    diff: {
+      reason: 'FRAMEWORK_PACKAGE_CUSTOMER_ACCESS_DENIED',
+      visibility: normalizeToken(frameworkPackage?.visibility),
+      customerAccessMode: normalizeToken(frameworkPackage?.customerAccessMode),
+    },
+  })
+}
+
+const loadBoundedFrameworkPackage = async ({ runtimeInstance, policy, scopes } = {}) => {
   if (!runtimeInstance?.packageId || !runtimeInstance?.frameworkKey) return null
   const query = FrameworkPackage.find({
     _id: runtimeInstance.packageId,
@@ -217,12 +274,13 @@ const loadBoundedFrameworkPackage = async ({ runtimeInstance, policy } = {}) => 
     .lean()
   if (!Array.isArray(rows) || rows.length !== 1) return null
   const frameworkPackage = rows[0]
-  return isFrameworkPackageAccessibleToCustomer({
+  if (isFrameworkPackageAccessibleToCustomer({
     frameworkPackage,
     customerId: runtimeInstance.customerId,
-  })
-    ? frameworkPackage
-    : null
+  })) return frameworkPackage
+
+  await logFrameworkPackageAccessDenied({ runtimeInstance, frameworkPackage, scopes })
+  return null
 }
 
 const getObject = (value, key) => (isObject(value) ? value[key] : undefined)
@@ -355,6 +413,28 @@ const getEvidenceObjects = (frameworkState = {}) => {
     evidencePack,
     evidenceObjects: Array.isArray(evidencePack.evidenceObjects) ? evidencePack.evidenceObjects : [],
   }
+}
+
+export const buildFrameworkOutcomeHandoffV2ParityDigest = (runtimeInstance = {}) => {
+  const frameworkState = getFrameworkState(runtimeInstance)
+  const sections = getSectionsEntries(frameworkState)
+    .map(([sectionKey, section]) => [normalizeKey(sectionKey), section])
+    .sort(([left], [right]) => left.localeCompare(right))
+  const evidenceObjects = getEvidenceObjects(frameworkState).evidenceObjects
+    .map((evidenceObject) => ({
+      evidenceObjectId: normalizeText(evidenceObject?.evidenceObjectId),
+      sourceId: normalizeText(evidenceObject?.sourceId),
+      lineageRef: normalizeText(evidenceObject?.lineageRef),
+      reviewStatus: normalizeToken(evidenceObject?.reviewStatus),
+    }))
+    .sort((left, right) => left.evidenceObjectId.localeCompare(right.evidenceObjectId))
+  return sha256({
+    stateVersion: normalizeText(runtimeInstance?.stateVersion),
+    lock: getObject(frameworkState, 'lock') || {},
+    publish: getObject(frameworkState, 'publish') || {},
+    sections,
+    evidenceObjects,
+  })
 }
 
 const isAcceptedEvidence = (evidenceObject = {}) => normalizeToken(evidenceObject.reviewStatus) === 'ACCEPTED'
@@ -873,6 +953,7 @@ export const resolveFrameworkOutcomeStudioHandoff = async ({
   knowledgeContextResult = null,
   requestedOutputTypeKey = '',
   boundedDependencyPolicy = null,
+  boundedStateParityReceipt = null,
   loadRuntime = getRuntimeInstance,
   loadPackage = null,
   resolvePack = resolveOutcomeStudioKnowledgePackBinding,
@@ -888,6 +969,12 @@ export const resolveFrameworkOutcomeStudioHandoff = async ({
     boundedPolicy = boundedDependencyPolicy
       ? validateBoundedHandoffPolicy(boundedDependencyPolicy)
       : null
+    if (boundedPolicy && boundedStateParityReceipt) {
+      validateBoundedStateParityReceipt({
+        receipt: boundedStateParityReceipt,
+        runtimeInstance: resolvedRuntime,
+      })
+    }
     if (boundedPolicy && (loadPackage
       || loadRuntime !== getRuntimeInstance
       || resolvePack !== resolveOutcomeStudioKnowledgePackBinding
@@ -915,6 +1002,7 @@ export const resolveFrameworkOutcomeStudioHandoff = async ({
         resolvedPackage = await loadBoundedFrameworkPackage({
           runtimeInstance: resolvedRuntime,
           policy: boundedPolicy,
+          scopes,
         })
         boundedDependencies.push({
           dependencyKey: 'framework_package',
@@ -969,7 +1057,9 @@ export const resolveFrameworkOutcomeStudioHandoff = async ({
       knowledgeContext: resolvedContext,
       requestedOutputTypeKey,
     })
-    if (boundedPolicy && handoff.status !== FRAMEWORK_OUTCOME_HANDOFF_STATUSES.BLOCKED) {
+    if (boundedPolicy
+      && handoff.status !== FRAMEWORK_OUTCOME_HANDOFF_STATUSES.BLOCKED
+      && !boundedStateParityReceipt) {
       handoff = buildBlockedHandoff({
         runtimeInstance: resolvedRuntime || {},
         blockers: [{

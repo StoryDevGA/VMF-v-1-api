@@ -7,7 +7,7 @@ import RuntimeEvidenceSource, { runtimeEvidenceSourceSchema } from '../models/Ru
 import RuntimeEvidenceObject, { runtimeEvidenceObjectSchema } from '../models/RuntimeEvidenceObject.js'
 import RuntimeGraphSnapshot, { runtimeGraphSnapshotSchema } from '../models/RuntimeGraphSnapshot.js'
 import RuntimeGraphElement, { runtimeGraphElementSchema } from '../models/RuntimeGraphElement.js'
-import { SS014_LEGACY_CANONICAL_ALGORITHM } from '../services/ss014LegacyDomainCanonicalSerializer.js'
+import { RUNTIME_STATE_V2_CANONICAL_ALGORITHM } from '../services/runtimeStateCanonicalSerializer.js'
 
 const stateVersion = 'rsv2:123e4567-e89b-42d3-a456-426614174000'
 const sourceHash = `sha256:${'a'.repeat(64)}`
@@ -32,8 +32,28 @@ const validDocuments = () => ({
     legacyPath: 'framework_state.sections.overview',
     stateStatus: 'ready',
     evidenceRefs: ['evidence-1'],
+    sectionDetail: {
+      input: 'Customer context',
+      generated: {
+        content: 'Generated content',
+        sections: [{ heading: 'Heading', body: 'Body', text: 'Text' }],
+      },
+      accepted: null,
+      review: { status: 'PENDING' },
+      state: { status: 'DRAFT' },
+      lineage: { sectionKey: 'overview', runtimePath: 'framework_state.sections.overview' },
+      revisions: [],
+      dependencies: {},
+      validation: {},
+      confidence: {},
+      intelligence: {},
+      metrics: {},
+      additionalEvidence: {},
+      evidenceObjects: [],
+      gsilContext: {},
+    },
     projectionReceipt: {
-      algorithm: SS014_LEGACY_CANONICAL_ALGORITHM,
+      algorithm: RUNTIME_STATE_V2_CANONICAL_ALGORITHM,
       logicalPath: 'framework_state.sections.overview',
       sourceHash,
       stateVersion,
@@ -151,6 +171,7 @@ describe('Runtime State Storage V2 physical foundations', () => {
     expect(indexNames(schema)).toEqual([
       `unique_runtime_${keyField === 'graphVersion' ? 'graph_snapshot' : keyField === 'elementKey' ? 'graph_element' : keyField === 'sectionKey' ? 'state_section' : keyField === 'sourceId' ? 'evidence_source' : 'evidence_object'}_version`,
       `unique_current_runtime_${keyField === 'graphVersion' ? 'graph_snapshot' : keyField === 'elementKey' ? 'graph_element' : keyField === 'sectionKey' ? 'state_section' : keyField === 'sourceId' ? 'evidence_source' : 'evidence_object'}`,
+      ...(keyField === 'elementKey' ? ['runtime_graph_elements_scope_current_snapshot_version'] : []),
     ])
   })
 
@@ -214,6 +235,41 @@ describe('Runtime State Storage V2 physical foundations', () => {
       ...validDocuments().section.toObject(),
       framework_state: { raw: true },
     }))
+  })
+
+  test('enforces the exact bounded renderer-facing section detail contract', () => {
+    const section = validDocuments().section
+    expect(section.validateSync()).toBeUndefined()
+    expect(section.schema.path('sectionDetail').options.required).toBe(true)
+    expect(section.schema.options.minimize).toBe(false)
+
+    const missingRootKey = validDocuments().section
+    delete missingRootKey.sectionDetail.gsilContext
+    expectInvalid(missingRootKey, 'sectionDetail')
+
+    for (const key of ['constructor', 'framework_state', 'runtime_section_states']) {
+      const invalid = validDocuments().section
+      invalid.sectionDetail.intelligence = { [key]: true }
+      expectInvalid(invalid, 'sectionDetail')
+    }
+
+    const tooDeep = validDocuments().section
+    let nested = true
+    for (let depth = 0; depth < 13; depth += 1) nested = { child: nested }
+    tooDeep.sectionDetail.intelligence = { nested }
+    expectInvalid(tooDeep, 'sectionDetail')
+
+    const tooManyEntries = validDocuments().section
+    tooManyEntries.sectionDetail.revisions = Array.from({ length: 10000 }, () => ({}))
+    expectInvalid(tooManyEntries, 'sectionDetail')
+
+    const tooLong = validDocuments().section
+    tooLong.sectionDetail.generated.content = 'x'.repeat(8001)
+    expectInvalid(tooLong, 'sectionDetail')
+
+    const tooManyBytes = validDocuments().section
+    tooManyBytes.sectionDetail.generated.sections = Array.from({ length: 40 }, () => ({ body: 'x'.repeat(8000) }))
+    expectInvalid(tooManyBytes, 'sectionDetail')
   })
 
   test('enforces evidence normalization, confidence, materiality and hash bounds', () => {
@@ -408,9 +464,9 @@ describe('Runtime State Storage V2 physical foundations', () => {
     edgeWithNodeField.attributes = { nodeType: 'COMPANY' }
     expectInvalid(edgeWithNodeField, 'attributes')
 
-    const duplicatedTypedIdentity = validDocuments().graphNode
-    duplicatedTypedIdentity.attributes = { snapshotId: 'snapshot-1' }
-    expectInvalid(duplicatedTypedIdentity, 'attributes')
+    const sourceSnapshotIdentity = validDocuments().graphNode
+    sourceSnapshotIdentity.attributes = { snapshotId: 'source-snapshot-1' }
+    expect(sourceSnapshotIdentity.validateSync()).toBeUndefined()
 
     const invalidScope = validDocuments().graphNode
     invalidScope.attributes = { scope: { frameworkId: 'framework-1', sectionKey: 'overview' } }
@@ -458,7 +514,10 @@ describe('Runtime State Storage V2 physical foundations', () => {
         [{ customerId: 1, tenantId: 1, runtimeInstanceId: 1, graphVersion: 1, stateVersion: 1 }, { unique: true, name: 'unique_runtime_graph_snapshot_version', background: true }],
         [{ customerId: 1, tenantId: 1, runtimeInstanceId: 1, current: 1 }, { unique: true, name: 'unique_current_runtime_graph_snapshot', partialFilterExpression: { current: true }, background: true }],
       ],
-      graphElement: scopedIndexes('elementKey', 'unique_runtime_graph_element_version', 'unique_current_runtime_graph_element'),
+      graphElement: [
+        ...scopedIndexes('elementKey', 'unique_runtime_graph_element_version', 'unique_current_runtime_graph_element'),
+        [{ customerId: 1, tenantId: 1, runtimeInstanceId: 1, current: 1, snapshotId: 1, stateVersion: 1 }, { name: 'runtime_graph_elements_scope_current_snapshot_version', background: true }],
+      ],
     }
     expect(runtimeStateSectionSchema.indexes()).toEqual(expected.section)
     expect(runtimeEvidenceSourceSchema.indexes()).toEqual(expected.evidenceSource)

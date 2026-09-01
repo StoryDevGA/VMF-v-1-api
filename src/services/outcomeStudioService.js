@@ -56,8 +56,8 @@ import {
 import {
   FRAMEWORK_OUTCOME_HANDOFF_BLOCKER_CODES,
   FRAMEWORK_OUTCOME_HANDOFF_STATUSES,
-  resolveFrameworkOutcomeStudioHandoff,
 } from './outcomeFrameworkHandoffService.js'
+import { getRuntimeStateOutcomeHandoffReadiness } from './runtimeStateRepository.js'
 import {
   describeOutputDerivative,
   isOutputServiceError,
@@ -4932,7 +4932,7 @@ const buildOutcomeStudioProjection = async ({
   const sourceDeliverable = deliverables.available?.find((deliverable) =>
     normalizeCapabilityKey(deliverable.key) === requestedOutputTypeKey,
   ) || matchingDeliverable
-  const handoffResolution = await resolveFrameworkOutcomeStudioHandoff({
+  const handoffResolution = await getRuntimeStateOutcomeHandoffReadiness({
     runtimeInstanceId: outputLab?.runtimeScope?.runtimeInstanceId,
     scopes,
     packBinding,
@@ -6886,8 +6886,8 @@ export const generateRuntimeOutcomeResponse = async ({
     knowledgeContextResult.reasoningBinding,
     generatedAt,
   )
-  const frameworkHandoffResolution = await resolveFrameworkOutcomeStudioHandoff({
-    runtimeInstance,
+  const frameworkHandoffResolution = await getRuntimeStateOutcomeHandoffReadiness({
+    runtimeInstanceId: runtimeInstance?._id || runtimeInstance?.id,
     scopes,
     packBinding: knowledgeContextResult.reasoningBinding,
     knowledgeContextResult,

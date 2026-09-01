@@ -1,20 +1,76 @@
 import mongoose from 'mongoose'
 
 import {
-  createRuntimeStateV2Schema,
+  createRuntimeStateSchema,
   RUNTIME_STATE_VERSION_PATTERN,
   SHA256_PATTERN,
+  isBoundedSafeJson,
   sha256Field,
   scopedCurrentIndex,
   scopedVersionIndex,
-} from './runtimeStateV2Schemas.js'
-import { SS014_LEGACY_CANONICAL_ALGORITHM } from '../services/ss014LegacyDomainCanonicalSerializer.js'
+} from './runtimeStateSchemas.js'
+import { RUNTIME_STATE_V2_CANONICAL_ALGORITHM } from '../services/runtimeStateCanonicalSerializer.js'
+
+export const RUNTIME_SECTION_DETAIL_ROOT_KEYS = Object.freeze([
+  'input',
+  'generated',
+  'accepted',
+  'review',
+  'state',
+  'lineage',
+  'revisions',
+  'dependencies',
+  'validation',
+  'confidence',
+  'intelligence',
+  'metrics',
+  'additionalEvidence',
+  'evidenceObjects',
+  'gsilContext',
+])
+
+const RUNTIME_SECTION_DETAIL_FORBIDDEN_KEYS = Object.freeze([
+  'framework_state',
+  'mongodb',
+  'mongo',
+  'mongoose',
+  'collection',
+  'runtime_state_v2',
+  'runtime_instances',
+  'runtime_section_states',
+  'runtime_evidence_sources',
+  'runtime_evidence_objects',
+  'runtime_graph_snapshots',
+  'runtime_graph_elements',
+  'runtime_state_migration_receipts',
+  'runtime_activation_snapshots',
+  'runtime_deployments',
+  'runtime_output_requests',
+  'runtime_output_assets',
+  'runtime_validation_audit',
+])
+
+export const isBoundedRuntimeSectionDetail = (value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  if (!isBoundedSafeJson(value, {
+    maxDepth: 12,
+    maxEntries: 10000,
+    maxBytes: 256 * 1024,
+    maxStringScalars: 8000,
+    rootAllowedKeys: RUNTIME_SECTION_DETAIL_ROOT_KEYS,
+    forbiddenKeys: RUNTIME_SECTION_DETAIL_FORBIDDEN_KEYS,
+    allowedForbiddenKeys: ['content', 'body', 'text'],
+  })) return false
+
+  return Object.keys(value).length === RUNTIME_SECTION_DETAIL_ROOT_KEYS.length
+    && RUNTIME_SECTION_DETAIL_ROOT_KEYS.every((key) => Object.hasOwn(value, key))
+}
 
 const projectionReceiptSchema = new mongoose.Schema({
   algorithm: {
     type: String,
     required: true,
-    enum: [SS014_LEGACY_CANONICAL_ALGORITHM],
+    enum: [RUNTIME_STATE_V2_CANONICAL_ALGORITHM],
   },
   logicalPath: {
     type: String,
@@ -46,7 +102,7 @@ const projectionReceiptSchema = new mongoose.Schema({
   },
 }, { _id: false, strict: 'throw' })
 
-const runtimeStateSectionSchema = createRuntimeStateV2Schema({
+const runtimeStateSectionSchema = createRuntimeStateSchema({
   collection: 'runtime_section_states',
   fields: {
     sectionKey: {
@@ -97,6 +153,14 @@ const runtimeStateSectionSchema = createRuntimeStateV2Schema({
         message: 'evidenceRefs exceeds 10000 items',
       },
     },
+    sectionDetail: {
+      type: mongoose.Schema.Types.Mixed,
+      required: true,
+      validate: {
+        validator: isBoundedRuntimeSectionDetail,
+        message: 'sectionDetail must be a bounded renderer-facing section model',
+      },
+    },
     projectionReceipt: {
       type: projectionReceiptSchema,
       required: true,
@@ -107,6 +171,8 @@ const runtimeStateSectionSchema = createRuntimeStateV2Schema({
     scopedCurrentIndex('sectionKey', 'unique_current_runtime_state_section'),
   ],
 })
+
+runtimeStateSectionSchema.set('minimize', false)
 
 runtimeStateSectionSchema.path('legacyPath').validate(function validateLegacyPath(value) {
   return value === `framework_state.sections.${this.sectionKey}`

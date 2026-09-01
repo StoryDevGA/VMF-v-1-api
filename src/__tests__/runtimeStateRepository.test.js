@@ -3,6 +3,8 @@ import mongoose from 'mongoose'
 
 const getRuntimeInstance = jest.fn()
 const resolveFrameworkOutcomeStudioHandoff = jest.fn()
+const buildFrameworkOutcomeHandoffV2ParityDigest = jest.fn(() => 'sha256:bounded-state-digest')
+const FRAMEWORK_OUTCOME_HANDOFF_V2_PARITY_CONTRACT_VERSION = 'ss-014.runtime-state-v2.handoff-state-parity.v1'
 const FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_READ_POLICY = Object.freeze({
   policyVersion: 'ss-014.runtime-state-v2.handoff-dependencies.v1',
   maxTimeMS: 2000,
@@ -25,6 +27,8 @@ await jest.unstable_mockModule('../services/runtimeInstanceService.js', () => ({
 await jest.unstable_mockModule('../services/outcomeFrameworkHandoffService.js', () => ({
   resolveFrameworkOutcomeStudioHandoff,
   FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_READ_POLICY,
+  FRAMEWORK_OUTCOME_HANDOFF_V2_PARITY_CONTRACT_VERSION,
+  buildFrameworkOutcomeHandoffV2ParityDigest,
 }))
 
 const {
@@ -32,15 +36,20 @@ const {
   RUNTIME_STATE_V2_CONTROL_PROJECTION,
   RUNTIME_STATE_V2_ERROR_CODES,
   RUNTIME_STATE_V2_EVIDENCE_COUNT_LIMIT,
+  RUNTIME_STATE_V2_GRAPH_EDGE_LIMIT,
   RUNTIME_STATE_V2_MAX_SERIALIZED_READ_BYTES,
   RUNTIME_STATE_V2_READ_MAX_TIME_MS,
+  RUNTIME_STATE_V2_SECTION_CATALOGUE_LIMIT,
+  getRuntimeStateBootstrap,
   getRuntimeStateControl,
   getRuntimeStateGraphManifest,
+  getRuntimeStateGraphProjection,
   getRuntimeStateOutcomeHandoffReadiness,
+  getRuntimeStateRendererSections,
   getRuntimeStateSectionSummary,
   listRuntimeStateEvidenceObjects,
   __testables,
-} = await import('../services/runtimeStateV2Repository.js')
+} = await import('../services/runtimeStateRepository.js')
 
 const RUNTIME_ID = '507f1f77bcf86cd799439011'
 const CUSTOMER_ID = '507f1f77bcf86cd799439012'
@@ -49,6 +58,28 @@ const SCOPES = {
   customer: { _id: CUSTOMER_ID },
   tenant: { _id: TENANT_ID, customerId: CUSTOMER_ID },
 }
+
+const makeSectionDetail = (overrides = {}) => ({
+  input: 'Migrated section input',
+  generated: null,
+  accepted: null,
+  review: {},
+  state: { status: 'DRAFT' },
+  lineage: {
+    sectionKey: 'section_1_executive_summary',
+    runtimePath: 'framework_state.sections.section_1_executive_summary',
+  },
+  revisions: [],
+  dependencies: {},
+  validation: {},
+  confidence: {},
+  intelligence: {},
+  metrics: {},
+  additionalEvidence: {},
+  evidenceObjects: [],
+  gsilContext: {},
+  ...overrides,
+})
 
 const makeControl = (overrides = {}) => ({
   id: RUNTIME_ID,
@@ -95,6 +126,26 @@ beforeEach(() => {
   })
   collectionSpy.mockClear()
   collections.clear()
+  collections.set(RUNTIME_STATE_V2_COLLECTIONS.SECTIONS, {
+    find: jest.fn().mockReturnValue(makeCursor([])),
+  })
+  collections.set(RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_OBJECTS, {
+    find: jest.fn().mockReturnValue(makeCursor([])),
+  })
+  collections.set(RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_SOURCES, {
+    find: jest.fn().mockReturnValue(makeCursor([{
+      sourceId: 'source-1',
+      sourceType: 'WEBSITE',
+      title: 'Customer website',
+      sourceRef: 'https://acme.example',
+      acquisitionStatus: 'ACQUIRED',
+      lineageRef: 'framework_state.evidence_pack.sources[0]',
+      current: true,
+      stateStatus: 'CURRENT',
+      stateVersion: 'runtime-revision:1',
+      sourceStateVersion: 'runtime-revision:1',
+    }])),
+  })
 })
 
 afterAll(() => {
@@ -127,6 +178,40 @@ describe('runtime State Storage V2 repository', () => {
     }))
     expect(RUNTIME_STATE_V2_CONTROL_PROJECTION).not.toContain('framework_state')
     expect(collectionSpy).not.toHaveBeenCalled()
+  })
+
+  test('loads renderer sections from current V2 rows with bounded section details', async () => {
+    const section = {
+      sectionKey: 'section_1_executive_summary',
+      stateStatus: 'CURRENT',
+      current: true,
+      stateVersion: 'runtime-revision:1',
+      sourceStateVersion: 'runtime-revision:1',
+      sectionDetail: makeSectionDetail(),
+    }
+    collections.set(RUNTIME_STATE_V2_COLLECTIONS.SECTIONS, {
+      find: jest.fn(() => makeCursor([section])),
+    })
+
+    const result = await getRuntimeStateRendererSections({
+      scopes: SCOPES,
+      runtimeInstanceId: RUNTIME_ID,
+    })
+
+    expect(result).toMatchObject({
+      sectionCount: 1,
+      stateVersion: 'runtime-revision:1',
+      sections: [{
+        sectionKey: 'section_1_executive_summary',
+        sectionDetail: makeSectionDetail(),
+      }],
+      readReceipt: expect.objectContaining({
+        source: 'runtime_state_v2.renderer_sections',
+        bounded: true,
+        fullLegacyFrameworkStateFetched: false,
+      }),
+    })
+    expect(collectionSpy).toHaveBeenCalledWith(RUNTIME_STATE_V2_COLLECTIONS.SECTIONS)
   })
 
   test.each([
@@ -204,7 +289,7 @@ describe('runtime State Storage V2 repository', () => {
     })).rejects.toMatchObject({ code: RUNTIME_STATE_V2_ERROR_CODES.STATE_VERSION_MIXED })
   })
 
-  test('returns a bounded selected-section summary and excludes full content', async () => {
+  test('returns validated detail only for the bounded selected section', async () => {
     const find = jest.fn(() => makeCursor([{
       sectionKey: 'section_1_executive_summary',
       stateStatus: 'CURRENT',
@@ -214,6 +299,7 @@ describe('runtime State Storage V2 repository', () => {
       truthHash: 'sha256:truth',
       summary: 'bounded summary',
       content: 'large content must not be returned',
+      sectionDetail: makeSectionDetail(),
       evidenceRefs: [{ evidenceObjectId: 'evidence-1' }],
     }]))
     collections.set(RUNTIME_STATE_V2_COLLECTIONS.SECTIONS, { find })
@@ -228,6 +314,7 @@ describe('runtime State Storage V2 repository', () => {
       sectionKey: 'section_1_executive_summary',
       stateVersion: 'runtime-revision:1',
       summary: 'bounded summary',
+      sectionDetail: expect.objectContaining({ input: 'Migrated section input' }),
     })
     expect(result.section).not.toHaveProperty('content')
     expect(result.source).toBe('runtime_state_v2.section_summary')
@@ -246,6 +333,73 @@ describe('runtime State Storage V2 repository', () => {
         maxTimeMS: RUNTIME_STATE_V2_READ_MAX_TIME_MS,
       }),
     )
+    expect(find.mock.calls[0][1].projection).toHaveProperty('sectionDetail', 1)
+  })
+
+  test('restores empty object fields minimized by stored V2 section documents', async () => {
+    const minimizedDetail = makeSectionDetail()
+    delete minimizedDetail.validation
+    delete minimizedDetail.confidence
+    delete minimizedDetail.additionalEvidence
+    delete minimizedDetail.gsilContext
+    const find = jest.fn(() => makeCursor([{
+      sectionKey: 'section_1_executive_summary',
+      stateStatus: 'CURRENT',
+      stateVersion: 'runtime-revision:1',
+      sourceStateVersion: 'runtime-revision:1',
+      sectionDetail: minimizedDetail,
+    }]))
+    collections.set(RUNTIME_STATE_V2_COLLECTIONS.SECTIONS, { find })
+
+    const result = await getRuntimeStateSectionSummary({
+      scopes: SCOPES,
+      runtimeInstanceId: RUNTIME_ID,
+      sectionKey: 'section_1_executive_summary',
+    })
+
+    expect(result.section.sectionDetail).toMatchObject({
+      validation: {},
+      confidence: {},
+      additionalEvidence: {},
+      gsilContext: {},
+    })
+  })
+
+  test('fails closed when selected-section detail is missing or invalid', async () => {
+    const find = jest.fn(() => makeCursor([{
+      sectionKey: 'section_1_executive_summary',
+      stateStatus: 'CURRENT',
+      stateVersion: 'runtime-revision:1',
+      sourceStateVersion: 'runtime-revision:1',
+      summary: 'bounded summary',
+      sectionDetail: { input: 'incomplete detail' },
+    }]))
+    collections.set(RUNTIME_STATE_V2_COLLECTIONS.SECTIONS, { find })
+
+    await expect(getRuntimeStateSectionSummary({
+      scopes: SCOPES,
+      runtimeInstanceId: RUNTIME_ID,
+      sectionKey: 'section_1_executive_summary',
+    })).rejects.toMatchObject({ code: RUNTIME_STATE_V2_ERROR_CODES.SECTION_DETAIL_INVALID })
+  })
+
+  test('fails closed when selected-section detail exceeds the bounded payload limit', async () => {
+    const find = jest.fn(() => makeCursor([{
+      sectionKey: 'section_1_executive_summary',
+      stateStatus: 'ACCEPTED',
+      current: true,
+      stateVersion: 'runtime-revision:1',
+      sourceStateVersion: 'runtime-revision:1',
+      summary: 'bounded summary',
+      sectionDetail: makeSectionDetail({ input: 'x'.repeat((256 * 1024) + 1) }),
+    }]))
+    collections.set(RUNTIME_STATE_V2_COLLECTIONS.SECTIONS, { find })
+
+    await expect(getRuntimeStateSectionSummary({
+      scopes: SCOPES,
+      runtimeInstanceId: RUNTIME_ID,
+      sectionKey: 'section_1_executive_summary',
+    })).rejects.toMatchObject({ code: RUNTIME_STATE_V2_ERROR_CODES.SECTION_DETAIL_INVALID })
   })
 
   test('applies the direct-read maxTimeMS bound to V2 cursors', async () => {
@@ -255,6 +409,7 @@ describe('runtime State Storage V2 repository', () => {
       stateVersion: 'runtime-revision:1',
       sourceStateVersion: 'runtime-revision:1',
       summary: 'bounded summary',
+      sectionDetail: makeSectionDetail(),
     }])
     const find = jest.fn(() => cursor)
     collections.set(RUNTIME_STATE_V2_COLLECTIONS.SECTIONS, { find })
@@ -337,6 +492,7 @@ describe('runtime State Storage V2 repository', () => {
       stateStatus: 'CURRENT',
       stateVersion: 'runtime-revision:1',
       sourceStateVersion: 'runtime-revision:1',
+      sectionDetail: makeSectionDetail(),
       evidenceRefs: [{
         evidenceObjectId: 'evidence-1',
         source: 'runtime_evidence_objects',
@@ -406,9 +562,275 @@ describe('runtime State Storage V2 repository', () => {
     })).rejects.toMatchObject({ code: RUNTIME_STATE_V2_ERROR_CODES.STATE_VERSION_MIXED })
   })
 
+  test('returns a bounded current section catalogue from the bootstrap read', async () => {
+    const find = jest.fn(() => makeCursor([
+      {
+        sectionKey: 'section_b',
+        stateStatus: 'ACCEPTED',
+        current: true,
+        stateVersion: 'runtime-revision:1',
+        sourceStateVersion: 'runtime-revision:1',
+        truthStatus: 'ACCEPTED',
+        summary: 'second section',
+        content: 'full content must not be returned',
+      },
+      {
+        sectionKey: 'section_a',
+        stateStatus: 'GENERATED',
+        current: true,
+        stateVersion: 'runtime-revision:1',
+        sourceStateVersion: 'runtime-revision:1',
+        truthStatus: 'GENERATED',
+        summary: 'first section',
+      },
+    ]))
+    collections.set(RUNTIME_STATE_V2_COLLECTIONS.SECTIONS, { find })
+
+    const result = await getRuntimeStateBootstrap({
+      scopes: SCOPES,
+      runtimeInstanceId: RUNTIME_ID,
+    })
+
+    expect(result).toMatchObject({
+      control: expect.objectContaining({ stateVersion: 'runtime-revision:1' }),
+      sectionCount: 2,
+      stateVersion: 'runtime-revision:1',
+      source: 'runtime_state_v2.bootstrap',
+    })
+    expect(result.sections).toEqual([
+      expect.objectContaining({ sectionKey: 'section_b', summary: 'second section' }),
+      expect.objectContaining({ sectionKey: 'section_a', summary: 'first section' }),
+    ])
+    expect(result.sections[0]).not.toHaveProperty('content')
+    expect(result.readReceipt).toEqual(expect.objectContaining({
+      source: 'runtime_state_v2.bootstrap',
+      bounded: true,
+      fullLegacyFrameworkStateFetched: false,
+    }))
+    expect(find).toHaveBeenCalledWith(
+      expect.objectContaining({ $and: expect.any(Array) }),
+      expect.objectContaining({
+        projection: expect.any(Object),
+        maxTimeMS: RUNTIME_STATE_V2_READ_MAX_TIME_MS,
+      }),
+    )
+    expect(find.mock.calls[0][1].projection).not.toHaveProperty('sectionDetail')
+    expect(find.mock.results[0].value.limit).toHaveBeenCalledWith(RUNTIME_STATE_V2_SECTION_CATALOGUE_LIMIT + 1)
+  })
+
+  test('fails closed when the bootstrap catalogue has mixed state versions', async () => {
+    const find = jest.fn(() => makeCursor([
+      {
+        sectionKey: 'section_a',
+        stateStatus: 'ACCEPTED',
+        current: true,
+        stateVersion: 'runtime-revision:1',
+        sourceStateVersion: 'runtime-revision:1',
+      },
+      {
+        sectionKey: 'section_b',
+        stateStatus: 'GENERATED',
+        current: true,
+        stateVersion: 'runtime-revision:2',
+        sourceStateVersion: 'runtime-revision:2',
+      },
+    ]))
+    collections.set(RUNTIME_STATE_V2_COLLECTIONS.SECTIONS, { find })
+
+    await expect(getRuntimeStateBootstrap({ scopes: SCOPES, runtimeInstanceId: RUNTIME_ID }))
+      .rejects.toMatchObject({ code: RUNTIME_STATE_V2_ERROR_CODES.STATE_VERSION_MIXED })
+  })
+
+  test('fails closed when the bootstrap catalogue contains duplicate logical sections', async () => {
+    const find = jest.fn(() => makeCursor([
+      {
+        sectionKey: 'section_a',
+        stateStatus: 'ACCEPTED',
+        current: true,
+        stateVersion: 'runtime-revision:1',
+        sourceStateVersion: 'runtime-revision:1',
+      },
+      {
+        sectionKey: 'SECTION_A',
+        stateStatus: 'GENERATED',
+        current: true,
+        stateVersion: 'runtime-revision:1',
+        sourceStateVersion: 'runtime-revision:1',
+      },
+    ]))
+    collections.set(RUNTIME_STATE_V2_COLLECTIONS.SECTIONS, { find })
+
+    await expect(getRuntimeStateBootstrap({ scopes: SCOPES, runtimeInstanceId: RUNTIME_ID }))
+      .rejects.toMatchObject({ code: RUNTIME_STATE_V2_ERROR_CODES.SECTION_DUPLICATE })
+  })
+
+  test('fails closed when a bootstrap section lacks the canonical current marker', async () => {
+    const find = jest.fn(() => makeCursor([{
+      sectionKey: 'section_a',
+      stateStatus: 'ACCEPTED',
+      current: false,
+      stateVersion: 'runtime-revision:1',
+      sourceStateVersion: 'runtime-revision:1',
+    }]))
+    collections.set(RUNTIME_STATE_V2_COLLECTIONS.SECTIONS, { find })
+
+    await expect(getRuntimeStateBootstrap({ scopes: SCOPES, runtimeInstanceId: RUNTIME_ID }))
+      .rejects.toMatchObject({ code: RUNTIME_STATE_V2_ERROR_CODES.SECTION_CURRENTNESS_INVALID })
+  })
+
+  test('limits evidence page and bounded count reads to current rows', async () => {
+    const find = jest.fn(() => makeCursor([{
+      evidenceObjectId: 'evidence-current',
+      sourceId: 'source-1',
+      current: true,
+      stateStatus: 'CURRENT',
+      stateVersion: 'runtime-revision:1',
+      sourceStateVersion: 'runtime-revision:1',
+    }]))
+    const countDocuments = jest.fn().mockResolvedValue(1)
+    collections.set(RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_OBJECTS, { find, countDocuments })
+
+    await listRuntimeStateEvidenceObjects({
+      scopes: SCOPES,
+      runtimeInstanceId: RUNTIME_ID,
+      page: 1,
+      pageSize: 1,
+    })
+
+    const filter = find.mock.calls[0][0]
+    expect(filter).toEqual(expect.objectContaining({
+      $or: [
+        { stateStatus: 'CURRENT' },
+        { status: 'CURRENT' },
+        { current: true },
+        { isCurrent: true },
+      ],
+    }))
+    expect(countDocuments).toHaveBeenCalledWith(
+      filter,
+      expect.objectContaining({
+        maxTimeMS: RUNTIME_STATE_V2_READ_MAX_TIME_MS,
+        limit: RUNTIME_STATE_V2_EVIDENCE_COUNT_LIMIT,
+      }),
+    )
+  })
+
+  test('returns the bounded customer-safe evidence fields needed by the Runtime Workspace', async () => {
+    const find = jest.fn(() => makeCursor([{
+      evidenceObjectId: 'evidence-current',
+      sourceId: 'source-1',
+      lineageRef: 'framework_state.evidence_pack.evidenceObjects[0]',
+      sourceType: 'WEBSITE',
+      extractedFact: 'A bounded extracted fact.',
+      validationStatus: 'VALID',
+      confidence: { level: 'HIGH', score: 0.9, basis: ['source-backed'] },
+      materiality: 'HIGH',
+      materialityScore: 0.8,
+      title: 'Customer problem',
+      summary: 'A bounded summary.',
+      reviewStatus: 'PENDING',
+      acceptanceState: 'ELIGIBLE',
+      stateStatus: 'CURRENT',
+      stateVersion: 'runtime-revision:1',
+      sourceStateVersion: 'runtime-revision:1',
+    }]))
+    const countDocuments = jest.fn().mockResolvedValue(1)
+    collections.set(RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_OBJECTS, { find, countDocuments })
+
+    const result = await listRuntimeStateEvidenceObjects({
+      scopes: SCOPES,
+      runtimeInstanceId: RUNTIME_ID,
+      page: 1,
+      pageSize: 1,
+    })
+
+    expect(result.evidenceObjects).toEqual([expect.objectContaining({
+      evidenceObjectId: 'evidence-current',
+      sourceId: 'source-1',
+      lineageRef: 'framework_state.evidence_pack.evidenceObjects[0]',
+      sourceType: 'WEBSITE',
+      extractedFact: 'A bounded extracted fact.',
+      validationStatus: 'VALID',
+      confidence: { level: 'HIGH', score: 0.9, basis: ['source-backed'] },
+      materiality: 'HIGH',
+      materialityScore: 0.8,
+      title: 'Customer problem',
+      summary: 'A bounded summary.',
+    })])
+    expect(result.sourceRegistry).toEqual([expect.objectContaining({
+      sourceId: 'source-1',
+      sourceType: 'WEBSITE',
+      label: 'Customer website',
+      url: 'https://acme.example',
+      acquisitionStatus: 'ACQUIRED',
+      stateVersion: 'runtime-revision:1',
+    })])
+    expect(result.lineage.sources).toEqual(result.sourceRegistry)
+    const sourceFind = collections.get(RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_SOURCES).find
+    expect(sourceFind).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceId: { $in: ['source-1'] } }),
+      expect.objectContaining({ maxTimeMS: RUNTIME_STATE_V2_READ_MAX_TIME_MS }),
+    )
+    expect(JSON.stringify(result)).not.toMatch(/runtime_(?:instances|section_states|evidence_sources|evidence_objects|graph_snapshots|graph_elements)/)
+  })
+
+  test('fails closed when page evidence does not have matching current source lineage', async () => {
+    const find = jest.fn(() => makeCursor([{
+      evidenceObjectId: 'evidence-current',
+      sourceId: 'missing-source',
+      current: true,
+      stateStatus: 'CURRENT',
+      stateVersion: 'runtime-revision:1',
+      sourceStateVersion: 'runtime-revision:1',
+    }]))
+    const countDocuments = jest.fn().mockResolvedValue(1)
+    collections.set(RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_OBJECTS, { find, countDocuments })
+    collections.set(RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_SOURCES, {
+      find: jest.fn().mockReturnValue(makeCursor([])),
+    })
+
+    await expect(listRuntimeStateEvidenceObjects({
+      scopes: SCOPES,
+      runtimeInstanceId: RUNTIME_ID,
+      page: 1,
+      pageSize: 1,
+    })).rejects.toMatchObject({ code: RUNTIME_STATE_V2_ERROR_CODES.EVIDENCE_SOURCE_MISSING })
+  })
+
+  test('fails closed when an evidence source has contradictory currentness markers', async () => {
+    const find = jest.fn(() => makeCursor([{
+      evidenceObjectId: 'evidence-current',
+      sourceId: 'source-1',
+      current: true,
+      stateStatus: 'CURRENT',
+      stateVersion: 'runtime-revision:1',
+      sourceStateVersion: 'runtime-revision:1',
+    }]))
+    const countDocuments = jest.fn().mockResolvedValue(1)
+    collections.set(RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_OBJECTS, { find, countDocuments })
+    collections.set(RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_SOURCES, {
+      find: jest.fn().mockReturnValue(makeCursor([{
+        sourceId: 'source-1',
+        sourceType: 'WEBSITE',
+        current: false,
+        stateStatus: 'CURRENT',
+        stateVersion: 'runtime-revision:1',
+        sourceStateVersion: 'runtime-revision:1',
+      }])),
+    })
+
+    await expect(listRuntimeStateEvidenceObjects({
+      scopes: SCOPES,
+      runtimeInstanceId: RUNTIME_ID,
+      page: 1,
+      pageSize: 1,
+    })).rejects.toMatchObject({ code: RUNTIME_STATE_V2_ERROR_CODES.EVIDENCE_SOURCE_CURRENTNESS_INVALID })
+  })
+
   test('fails closed when an evidence object lacks a source-state receipt', async () => {
     const find = jest.fn(() => makeCursor([{
       evidenceObjectId: 'evidence-1',
+      sourceId: 'source-1',
       stateVersion: 'runtime-revision:1',
     }]))
     const countDocuments = jest.fn().mockResolvedValue(1)
@@ -462,6 +884,7 @@ describe('runtime State Storage V2 repository', () => {
   test('returns an explicit capped-count receipt without an unbounded count', async () => {
     const find = jest.fn(() => makeCursor([{
       evidenceObjectId: 'evidence-1',
+      sourceId: 'source-1',
       stateVersion: 'runtime-revision:1',
       sourceStateVersion: 'runtime-revision:1',
       createdAt: new Date('2026-08-22T00:00:00.000Z'),
@@ -577,6 +1000,196 @@ describe('runtime State Storage V2 repository', () => {
       bounded: true,
       fullLegacyFrameworkStateFetched: false,
     })
+  })
+
+  test('returns a bounded current V2 graph projection with deterministic edge and endpoint reads', async () => {
+    const snapshotFind = jest.fn(() => makeCursor([{
+      snapshotId: 'snapshot-1',
+      current: true,
+      stateStatus: 'CURRENT',
+      stateVersion: 'runtime-revision:1',
+      sourceStateVersion: 'runtime-revision:1',
+      sourceHash: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      graphVersion: '2.2',
+      graphHash: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      counts: { nodeCount: 10, edgeCount: 20 },
+      metadata: {
+        artifactType: 'runtime-intelligence-graph',
+        health: { state: 'HEALTHY' },
+      },
+    }]))
+    const edgeCursor = makeCursor([{
+      snapshotId: 'snapshot-1',
+      graphVersion: '2.2',
+      stateVersion: 'runtime-revision:1',
+      sourceStateVersion: 'runtime-revision:1',
+      elementType: 'EDGE',
+      elementKey: 'edge-1',
+      fromElementKey: 'node-1',
+      toElementKey: 'node-2',
+      relationshipType: 'SOURCE_PRODUCES_EVIDENCE',
+      attributes: { relationshipDisplayName: 'Source Produces Evidence', customerVisible: true },
+    }])
+    const nodeCursor = makeCursor([
+      {
+        snapshotId: 'snapshot-1',
+        graphVersion: '2.2',
+        stateVersion: 'runtime-revision:1',
+        sourceStateVersion: 'runtime-revision:1',
+        elementType: 'NODE',
+        elementKey: 'node-1',
+        label: 'Website source',
+        attributes: { nodeType: 'SOURCE', entityDisplayName: 'Source' },
+      },
+      {
+        snapshotId: 'snapshot-1',
+        graphVersion: '2.2',
+        stateVersion: 'runtime-revision:1',
+        sourceStateVersion: 'runtime-revision:1',
+        elementType: 'NODE',
+        elementKey: 'node-2',
+        label: 'Evidence',
+        attributes: { nodeType: 'EVIDENCE', entityDisplayName: 'Evidence' },
+      },
+    ])
+    const elementFind = jest.fn()
+      .mockReturnValueOnce(edgeCursor)
+      .mockReturnValueOnce(nodeCursor)
+    collections.set(RUNTIME_STATE_V2_COLLECTIONS.GRAPH_SNAPSHOTS, { find: snapshotFind })
+    collections.set(RUNTIME_STATE_V2_COLLECTIONS.GRAPH_ELEMENTS, { find: elementFind })
+
+    const result = await getRuntimeStateGraphProjection({
+      scopes: SCOPES,
+      runtimeInstanceId: RUNTIME_ID,
+    })
+
+    expect(result.graph).toMatchObject({
+      available: true,
+      graphVersion: '2.2',
+      totalNodeCount: 10,
+      totalEdgeCount: 20,
+      projection: { truncated: true, edgeLimit: 48, nodeLimit: 96 },
+      nodes: [
+        { nodeId: 'node-1', nodeType: 'SOURCE' },
+        { nodeId: 'node-2', nodeType: 'EVIDENCE' },
+      ],
+      edges: [{
+        edgeId: 'edge-1',
+        edgeType: 'SOURCE_PRODUCES_EVIDENCE',
+        fromNodeId: 'node-1',
+        toNodeId: 'node-2',
+      }],
+    })
+    expect(edgeCursor.sort).toHaveBeenCalledWith({ relationshipType: 1, elementKey: 1 })
+    expect(edgeCursor.limit).toHaveBeenCalledWith(RUNTIME_STATE_V2_GRAPH_EDGE_LIMIT)
+    expect(elementFind.mock.calls[0][0]).toMatchObject({
+      snapshotId: 'snapshot-1',
+      graphVersion: '2.2',
+      stateVersion: 'runtime-revision:1',
+      elementType: 'EDGE',
+    })
+    expect(JSON.stringify(elementFind.mock.calls[0][0])).toContain(CUSTOMER_ID)
+    expect(JSON.stringify(elementFind.mock.calls[0][0])).toContain(TENANT_ID)
+    expect(result.readReceipt).toMatchObject({
+      source: 'runtime_state_v2.graph_projection',
+      bounded: true,
+      fullLegacyFrameworkStateFetched: false,
+    })
+    expect(JSON.stringify(result)).not.toMatch(/runtime_(?:instances|section_states|evidence_sources|evidence_objects|graph_snapshots|graph_elements)/)
+  })
+
+  test('fails closed when a bounded graph edge endpoint is missing', async () => {
+    collections.set(RUNTIME_STATE_V2_COLLECTIONS.GRAPH_SNAPSHOTS, {
+      find: jest.fn(() => makeCursor([{
+        snapshotId: 'snapshot-1',
+        current: true,
+        stateStatus: 'CURRENT',
+        stateVersion: 'runtime-revision:1',
+        sourceStateVersion: 'runtime-revision:1',
+        sourceHash: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        graphVersion: '2.2',
+        counts: { nodeCount: 2, edgeCount: 1 },
+      }])),
+    })
+    collections.set(RUNTIME_STATE_V2_COLLECTIONS.GRAPH_ELEMENTS, {
+      find: jest.fn()
+        .mockReturnValueOnce(makeCursor([{
+          snapshotId: 'snapshot-1',
+          graphVersion: '2.2',
+          stateVersion: 'runtime-revision:1',
+          sourceStateVersion: 'runtime-revision:1',
+          elementType: 'EDGE',
+          elementKey: 'edge-1',
+          fromElementKey: 'node-1',
+          toElementKey: 'node-missing',
+          relationshipType: 'SOURCE_PRODUCES_EVIDENCE',
+        }]))
+        .mockReturnValueOnce(makeCursor([{
+          snapshotId: 'snapshot-1',
+          graphVersion: '2.2',
+          stateVersion: 'runtime-revision:1',
+          sourceStateVersion: 'runtime-revision:1',
+          elementType: 'NODE',
+          elementKey: 'node-1',
+          attributes: { nodeType: 'SOURCE' },
+        }])),
+    })
+
+    await expect(getRuntimeStateGraphProjection({
+      scopes: SCOPES,
+      runtimeInstanceId: RUNTIME_ID,
+    })).rejects.toMatchObject({ code: RUNTIME_STATE_V2_ERROR_CODES.GRAPH_ELEMENTS_INVALID })
+  })
+
+  test('fails closed when a current graph manifest has incomplete graph identity', async () => {
+    collections.set(RUNTIME_STATE_V2_COLLECTIONS.GRAPH_SNAPSHOTS, {
+      find: jest.fn(() => makeCursor([{
+        current: true,
+        stateStatus: 'CURRENT',
+        stateVersion: 'runtime-revision:1',
+        sourceStateVersion: 'runtime-revision:1',
+        sourceHash: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        graphVersion: '2.2',
+      }])),
+    })
+
+    await expect(getRuntimeStateGraphManifest({
+      scopes: SCOPES,
+      runtimeInstanceId: RUNTIME_ID,
+    })).rejects.toMatchObject({ code: RUNTIME_STATE_V2_ERROR_CODES.GRAPH_IDENTITY_INVALID })
+  })
+
+  test('fails closed when graph elements carry a mixed source-state version', async () => {
+    collections.set(RUNTIME_STATE_V2_COLLECTIONS.GRAPH_SNAPSHOTS, {
+      find: jest.fn(() => makeCursor([{
+        snapshotId: 'snapshot-1',
+        current: true,
+        stateStatus: 'CURRENT',
+        stateVersion: 'runtime-revision:1',
+        sourceStateVersion: 'runtime-revision:1',
+        sourceHash: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        graphVersion: '2.2',
+        counts: { nodeCount: 2, edgeCount: 1 },
+      }])),
+    })
+    collections.set(RUNTIME_STATE_V2_COLLECTIONS.GRAPH_ELEMENTS, {
+      find: jest.fn(() => makeCursor([{
+        snapshotId: 'snapshot-1',
+        graphVersion: '2.2',
+        stateVersion: 'runtime-revision:1',
+        sourceStateVersion: 'runtime-revision:2',
+        elementType: 'EDGE',
+        elementKey: 'edge-1',
+        fromElementKey: 'node-1',
+        toElementKey: 'node-2',
+        relationshipType: 'SOURCE_PRODUCES_EVIDENCE',
+      }])),
+    })
+
+    await expect(getRuntimeStateGraphProjection({
+      scopes: SCOPES,
+      runtimeInstanceId: RUNTIME_ID,
+    })).rejects.toMatchObject({ code: RUNTIME_STATE_V2_ERROR_CODES.GRAPH_ELEMENTS_INVALID })
   })
 
   test.each([
@@ -746,8 +1359,22 @@ describe('runtime State Storage V2 repository', () => {
       boundedDependencyPolicy: expect.objectContaining({
         policyVersion: FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_READ_POLICY.policyVersion,
       }),
+      boundedStateParityReceipt: {
+        contractVersion: FRAMEWORK_OUTCOME_HANDOFF_V2_PARITY_CONTRACT_VERSION,
+        stateVersion: 'runtime-revision:1',
+        sectionCount: 0,
+        evidenceObjectCount: 0,
+        sectionKeys: [],
+        stateDigest: 'sha256:bounded-state-digest',
+      },
     }))
-    expect(resolveFrameworkOutcomeStudioHandoff.mock.calls[0][0].runtimeInstance).not.toHaveProperty('framework_state')
+    expect(resolveFrameworkOutcomeStudioHandoff.mock.calls[0][0].runtimeInstance.framework_state).toEqual({
+      lock: {},
+      publish: {},
+      sections: {},
+      evidence_pack: { evidenceObjects: [] },
+    })
+    expect(result.control).not.toHaveProperty('handoffFrameworkState')
   })
 
   test('sanitizes delegated handoff diagnostics at the repository boundary', async () => {

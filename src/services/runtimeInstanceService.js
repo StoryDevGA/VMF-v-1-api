@@ -22,6 +22,7 @@ import { isFrameworkPackageAvailableToCustomer } from './frameworkPackageAvailab
 import customerGovernanceService from './customerGovernanceService.js'
 import auditService from './auditService.js'
 import { createRuntimeStateVersion } from './runtimeStateVersionService.js'
+import { stageRuntimeStateNativeInitialization } from './runtimeStateNativeInitializationService.js'
 
 export const RUNTIME_INSTANCE_ERROR_REASONS = Object.freeze({
   CUSTOMER_NOT_FOUND: 'CUSTOMER_NOT_FOUND',
@@ -69,6 +70,7 @@ export const RUNTIME_INSTANCE_ERROR_REASONS = Object.freeze({
   RUNTIME_REVISION_STALE: 'RUNTIME_REVISION_STALE',
   RUNTIME_REVISION_UNSUPPORTED_RUNTIME_TYPE: 'RUNTIME_REVISION_UNSUPPORTED_RUNTIME_TYPE',
   RUNTIME_STATE_VERSION_REQUIRED: 'RUNTIME_STATE_VERSION_REQUIRED',
+  RUNTIME_STATE_V2_TRANSACTION_REQUIRED: 'RUNTIME_STATE_V2_TRANSACTION_REQUIRED',
   DOCUMENT_INGESTION_FAILED: 'DOCUMENT_INGESTION_FAILED',
   WEBSITE_ACQUISITION_FAILED: 'WEBSITE_ACQUISITION_FAILED',
 })
@@ -167,9 +169,32 @@ export const RUNTIME_INSTANCE_RENDERER_PROJECTION = [
   'assignedTo',
   'anchors',
   'revision',
+  'stateVersion',
   'framework_state.lifecycle',
-  'framework_state.sections',
-  'framework_state.evidence_pack',
+  'framework_state.evidence_pack.state',
+  'framework_state.evidence_pack.status',
+  'framework_state.evidence_pack.inputs',
+  'framework_state.evidence_pack.inputComplete',
+  'framework_state.evidence_pack.input_complete',
+  'framework_state.evidence_pack.evidenceReady',
+  'framework_state.evidence_pack.evidence_ready',
+  'framework_state.evidence_pack.needsRefresh',
+  'framework_state.evidence_pack.needs_refresh',
+  'framework_state.evidence_pack.accepted',
+  'framework_state.evidence_pack.acquisitionProfile',
+  'framework_state.evidence_pack.acquisition.profile',
+  'framework_state.evidence_pack.acquisition.coverage',
+  'framework_state.evidence_pack.acquisition.confidence',
+  'framework_state.evidence_pack.acquisition.completedAt',
+  'framework_state.evidence_pack.acquisition.effectiveness',
+  'framework_state.evidence_pack.acquisitionEffectiveness',
+  'framework_state.evidence_pack.evidence.coverage',
+  'framework_state.evidence_pack.evidence.confidence',
+  'framework_state.evidence_pack.lineage.builder.mode',
+  'framework_state.evidence_pack.resetSummary',
+  'framework_state.evidence_pack.acceptedAt',
+  'framework_state.evidence_pack.acceptedBy',
+  'framework_state.evidence_pack.refreshedAt',
   'framework_state.validation',
   'framework_state.readiness',
   'framework_state.publish',
@@ -177,16 +202,6 @@ export const RUNTIME_INSTANCE_RENDERER_PROJECTION = [
   'framework_state.policy',
   'framework_state.attachments',
   'framework_state.artifacts',
-  'framework_state.intelligence_graph.artifactType',
-  'framework_state.intelligence_graph.graphVersion',
-  'framework_state.intelligence_graph.graphHash',
-  'framework_state.intelligence_graph.build',
-  'framework_state.intelligence_graph.validation',
-  'framework_state.intelligence_graph.health',
-  'framework_state.intelligence_graph.coverage',
-  'framework_state.intelligence_graph.dependencies',
-  'framework_state.intelligence_graph.nodes.nodeType',
-  'framework_state.intelligence_graph.edges.edgeType',
 ].join(' ')
 
 const idsEqual = (left, right) => {
@@ -822,6 +837,11 @@ const persistRuntimeInstanceWithAudit = async ({
     try {
       await session.withTransaction(async () => {
         await saveRuntimeInstance({ runtimeInstance, session, capacityConflictContext })
+        await stageRuntimeStateNativeInitialization({
+          actorUserId,
+          runtimeInstance,
+          session,
+        })
         await logRuntimeInstanceCreated({
           auditRequest,
           actorUserId,
@@ -835,6 +855,15 @@ const persistRuntimeInstanceWithAudit = async ({
     }
 
     return serializedRuntimeInstance
+  }
+
+  if (process.env.NODE_ENV !== 'test') {
+    throw createRuntimeInstanceError({
+      status: 503,
+      code: 'SERVICE_UNAVAILABLE',
+      message: 'Runtime instance creation requires an active database transaction.',
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_STATE_V2_TRANSACTION_REQUIRED,
+    })
   }
 
   await saveRuntimeInstance({ runtimeInstance, capacityConflictContext })

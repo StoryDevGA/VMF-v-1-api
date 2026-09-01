@@ -146,6 +146,74 @@ describe('Runtime State Migration Receipt contract', () => {
     expect(await validate()).toBeNull()
   })
 
+  test('accepts a verified native initialization receipt without migration-only authority fields', async () => {
+    const assignedStateVersion = 'rsv2:00000000-0000-4000-8000-000000000001'
+    const receipt = new RuntimeStateMigrationReceipt({
+      idempotencyKey: `ss014:native-initialization:${hash}`,
+      operationType: RUNTIME_STATE_MIGRATION_OPERATION_TYPES.NATIVE_INITIALIZATION,
+      targetSelectionRef: { bindingRef: 'native-runtime:runtime-one', scopeDigest: hash },
+      scopeDigest: hash,
+      customerId,
+      tenantId,
+      runtimeInstanceId,
+      runtimeInstanceKey: 'runtime-one',
+      logicalSources: RUNTIME_STATE_MIGRATION_LOGICAL_PATHS.map((logicalPath) => ({
+        logicalPath,
+        targetCollections: RUNTIME_STATE_MIGRATION_TARGET_COLLECTIONS[logicalPath],
+        sourceHash: hash,
+        recordCount: 0,
+      })),
+      sourceSetHash: hash,
+      assignedStateVersion,
+      actor: { actorRef: 'runtime-instance-service', actorType: 'SERVICE' },
+      status: RUNTIME_STATE_MIGRATION_RECEIPT_STATUSES.VERIFIED,
+      assignedAt: new Date('2026-08-29T12:00:00.000Z'),
+      verifiedAt: new Date('2026-08-29T12:00:00.000Z'),
+    })
+
+    await expect(receipt.validate()).resolves.toBeUndefined()
+    expect(receipt.authority).toBeUndefined()
+    expect(receipt.backupManifestRef).toBeUndefined()
+    expect(receipt.dryRunObservationRefs).toBeUndefined()
+  })
+
+  test('rejects an unverified or unassigned native initialization receipt', async () => {
+    expect(await validate({
+      operationType: RUNTIME_STATE_MIGRATION_OPERATION_TYPES.NATIVE_INITIALIZATION,
+      idempotencyKey: `ss014:native-initialization:${hash}`,
+      environmentClass: undefined,
+      databaseName: undefined,
+      clusterRef: undefined,
+      dryRunObservationRefs: undefined,
+      planHashRef: undefined,
+      authority: undefined,
+      backupManifestRef: undefined,
+      status: RUNTIME_STATE_MIGRATION_RECEIPT_STATUSES.PLANNED,
+      assignedStateVersion: null,
+    })).toBeInstanceOf(mongoose.Error.ValidationError)
+  })
+
+  test('binds each receipt operation to its own idempotency-key prefix', async () => {
+    expect(await validate({
+      idempotencyKey: `ss014:native-initialization:${hash}`,
+    })).toBeInstanceOf(mongoose.Error.ValidationError)
+    expect(await validate({
+      operationType: RUNTIME_STATE_MIGRATION_OPERATION_TYPES.NATIVE_INITIALIZATION,
+      idempotencyKey: `ss014:legacy-baseline:${hash}`,
+      environmentClass: undefined,
+      databaseName: undefined,
+      clusterRef: undefined,
+      dryRunObservationRefs: undefined,
+      planHashRef: undefined,
+      authority: undefined,
+      backupManifestRef: undefined,
+      status: RUNTIME_STATE_MIGRATION_RECEIPT_STATUSES.VERIFIED,
+      assignedStateVersion: 'rsv2:00000000-0000-4000-8000-000000000001',
+      assignedAt: new Date('2026-08-29T12:00:00.000Z'),
+      verifiedAt: new Date('2026-08-29T12:00:00.000Z'),
+    })).toBeInstanceOf(mongoose.Error.ValidationError)
+  })
+
   test('allows only the guarded APPLYING to ASSIGNED one-time state-version update', async () => {
     expect(runtimeStateMigrationReceiptSchema.path('assignedStateVersion').options.immutable).toBeUndefined()
     const assignedStateVersion = 'rsv2:00000000-0000-4000-8000-000000000001'

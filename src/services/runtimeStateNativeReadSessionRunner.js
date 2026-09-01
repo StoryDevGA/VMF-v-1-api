@@ -1,7 +1,7 @@
 import { resolveRuntimeStateVersion } from './runtimeStateVersionService.js'
 import { observeSs014SynchronousAdapter } from './ss014SynchronousAdapterObservation.js'
 import { createSs014NativeCommandMonitor } from './ss014NativeCommandMonitor.js'
-import { prepareSs014NativeReadPlanInputV2 } from './ss014NativeReadResultBoundaryV2.js'
+import { prepareRuntimeStateNativeReadPlanInput } from './runtimeStateNativeReadResultBoundary.js'
 
 const MAX_RUN_DURATION_MS = 15000
 const RAW_ROW_CAP = 65536
@@ -542,7 +542,7 @@ const safeSnapshot = (monitor) => {
   return result.value
 }
 
-const runSs014NativeReadSessionRunnerV2 = async (input) => {
+const runRuntimeStateNativeReadSession = async (input) => {
   if (!validateInput(input)) return incomplete(ERROR_CODES.REDACTION_FAILED)
   if (!validateScope(input.scope)) return incomplete(ERROR_CODES.SCOPE_INVALID)
   if (!hasExactDataKeys(input.primitives, PRIMITIVE_KEYS)
@@ -835,7 +835,7 @@ const runSs014NativeReadSessionRunnerV2 = async (input) => {
                         }
 
                         if (!primaryFailure && !timeoutFailure) {
-                          const prepared = prepareSs014NativeReadPlanInputV2({
+                          const prepared = prepareRuntimeStateNativeReadPlanInput({
                             scope: input.scope,
                             selector: input.scope.runtimeId ? 'ID' : 'KEY',
                             stateVersionResolver: resolveRuntimeStateVersion,
@@ -913,7 +913,7 @@ const runSs014NativeReadSessionRunnerV2 = async (input) => {
     },
     cleanDisconnect: true,
   }
-  const prepared = prepareSs014NativeReadPlanInputV2({
+  const prepared = prepareRuntimeStateNativeReadPlanInput({
     scope: input.scope,
     selector: input.scope.runtimeId ? 'ID' : 'KEY',
     stateVersionResolver: resolveRuntimeStateVersion,
@@ -929,4 +929,4 @@ const runSs014NativeReadSessionRunnerV2 = async (input) => {
   })
 }
 
-export { runSs014NativeReadSessionRunnerV2 }
+export { runRuntimeStateNativeReadSession }

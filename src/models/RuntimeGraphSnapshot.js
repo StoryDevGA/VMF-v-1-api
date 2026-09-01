@@ -1,10 +1,10 @@
 import mongoose from 'mongoose'
 
 import {
-  createRuntimeStateV2Schema,
+  createRuntimeStateSchema,
   isBoundedSafeJson,
   isValidUnicodeScalarString,
-} from './runtimeStateV2Schemas.js'
+} from './runtimeStateSchemas.js'
 
 const SNAPSHOT_METADATA_KEYS = [
   'artifactType',
@@ -59,7 +59,7 @@ const countsSchema = new mongoose.Schema({
   },
 }, { _id: false, strict: 'throw' })
 
-const runtimeGraphSnapshotSchema = createRuntimeStateV2Schema({
+const runtimeGraphSnapshotSchema = createRuntimeStateSchema({
   collection: 'runtime_graph_snapshots',
   fields: {
     snapshotId: {

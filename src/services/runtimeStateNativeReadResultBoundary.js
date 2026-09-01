@@ -295,7 +295,7 @@ const createReceipts = (collections) => RECEIPT_ORDER.map((operation, index) => 
   return { operation, outcome, bounded: true }
 })
 
-export const prepareSs014NativeReadPlanInputV2 = (input) => {
+export const prepareRuntimeStateNativeReadPlanInput = (input) => {
   const outerKeys = ['scope', 'selector', 'stateVersionResolver', 'versionView', 'v2Collections', 'execution']
   if (!hasExactDataKeys(input, outerKeys)) return incomplete(ERROR_CODES.REDACTION_FAILED)
 

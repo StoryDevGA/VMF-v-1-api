@@ -1,5 +1,5 @@
 import mongoose from 'mongoose'
-import { RuntimeInstance } from '../models/index.js'
+import { FrameworkPackage, RuntimeInstance } from '../models/index.js'
 import {
   RUNTIME_EXECUTION_STATUSES,
   RUNTIME_INSTANCE_STATUSES,
@@ -18,6 +18,11 @@ import {
   createRuntimeStateVersion,
   requireCanonicalRuntimeStateVersion,
 } from './runtimeStateVersionService.js'
+import { stageRuntimeStateRevisionProvisioning } from './runtimeStateRevisionProvisioningService.js'
+import {
+  RUNTIME_INTELLIGENCE_GRAPH_BUILD_TRIGGERS,
+  buildRuntimeIntelligenceGraphForFrameworkState,
+} from './runtimeIntelligenceGraphService.js'
 
 const VMF_UPDATE_PERMISSION = 'VMF_UPDATE'
 const EXPECTED_UPDATED_AT_TOLERANCE_MS = 1000
@@ -236,6 +241,7 @@ const resetRevisionFrameworkState = ({ sourceFrameworkState, nowIso }) => {
 
 const buildRevisionRuntimeInstance = ({
   actorUserId,
+  frameworkPackage,
   reason,
   sourceRuntimeInstance,
   now,
@@ -264,13 +270,18 @@ const buildRevisionRuntimeInstance = ({
   const rootRuntimeId = sourceRevision.rootRuntimeId || sourceRuntimeInstance._id
   const rootRuntimeInstanceKey = sourceRevision.rootRuntimeInstanceKey || sourceRuntimeInstance.runtimeInstanceKey || ''
 
-  return new RuntimeInstance({
+  const runtimeInstanceKey = buildRevisionKey({
+    sourceRuntimeInstance,
+    revisionNumber,
+    targetId,
+  })
+  const revisionFrameworkState = resetRevisionFrameworkState({
+    sourceFrameworkState: frameworkState,
+    nowIso,
+  })
+  const revisionRuntimeInstance = new RuntimeInstance({
     _id: targetId,
-    runtimeInstanceKey: buildRevisionKey({
-      sourceRuntimeInstance,
-      revisionNumber,
-      targetId,
-    }),
+    runtimeInstanceKey,
     customerId: sourceRuntimeInstance.customerId,
     tenantId: sourceRuntimeInstance.tenantId,
     workspaceId: sourceRuntimeInstance.workspaceId || '',
@@ -307,10 +318,7 @@ const buildRevisionRuntimeInstance = ({
     runtimeCapacitySlot: null,
     name: `${sourceRuntimeInstance.name || 'Value Narrative'} Revision ${revisionNumber}`.slice(0, 255),
     description: sourceRuntimeInstance.description || '',
-    framework_state: resetRevisionFrameworkState({
-      sourceFrameworkState: frameworkState,
-      nowIso,
-    }),
+    framework_state: revisionFrameworkState,
     lockedAt: null,
     lockedBy: null,
     lockedReason: '',
@@ -321,6 +329,18 @@ const buildRevisionRuntimeInstance = ({
     createdBy: actorUserId,
     updatedBy: actorUserId,
   })
+
+  revisionRuntimeInstance.framework_state.intelligence_graph = buildRuntimeIntelligenceGraphForFrameworkState({
+    actorUserId,
+    buildTrigger: RUNTIME_INTELLIGENCE_GRAPH_BUILD_TRIGGERS.EXPLICIT_REBUILD,
+    builtAt: nowIso,
+    frameworkPackage,
+    frameworkState: revisionFrameworkState,
+    runtimeInstance: revisionRuntimeInstance,
+  })
+  revisionRuntimeInstance.markModified('framework_state.intelligence_graph')
+
+  return revisionRuntimeInstance
 }
 
 const saveRevisionRuntimeInstance = async ({ runtimeInstance, session = null }) => {
@@ -440,6 +460,11 @@ const persistRevisionWithAudit = async ({
       await session.withTransaction(async () => {
         await assertNoExistingChildRevision(sourceRuntimeInstance, { session })
         await saveRevisionRuntimeInstance({ runtimeInstance: revisionRuntimeInstance, session })
+        await stageRuntimeStateRevisionProvisioning({
+          sourceRuntimeInstance,
+          revisionRuntimeInstance,
+          session,
+        })
         await logRuntimeRevisionCreated({
           actorUserId,
           auditRequest,
@@ -542,8 +567,20 @@ export const createRuntimeRevision = async ({
   })
   assertSourceCanCreateRevision(sourceRuntimeInstance)
 
+  const frameworkPackage = await resolveQueryValue(FrameworkPackage.findById(sourceRuntimeInstance.packageId))
+  if (!frameworkPackage) {
+    throw buildRevisionError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Runtime revision source Framework Package was not found.',
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_REVISION_SOURCE_NOT_FOUND,
+      details: { packageId: toIdString(sourceRuntimeInstance.packageId) },
+    })
+  }
+
   const revisionRuntimeInstance = buildRevisionRuntimeInstance({
     actorUserId,
+    frameworkPackage,
     reason: String(payload.reason || '').trim(),
     sourceRuntimeInstance,
     now: new Date(),
