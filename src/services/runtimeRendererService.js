@@ -1613,6 +1613,7 @@ const buildSectionIndex = (uiContract) => {
 const buildRendererSections = ({
   discovery,
   frameworkPackage,
+  frameworkState = {},
   mutationAccess,
   runtimeInstance,
   runtimePathRecords,
@@ -1622,7 +1623,6 @@ const buildRendererSections = ({
   const packageSections = Array.isArray(frameworkPackage.sections) ? frameworkPackage.sections : []
   const { byExactKey, sections: uiSections } = buildSectionIndex(uiContract)
   const packageSectionKeys = new Set()
-  const frameworkState = runtimeInstance.framework_state || {}
   const runtimeEditable = isRuntimeEditable(runtimeInstance)
   const runtimeLocked = isRuntimeLockedForInspection({ runtimeInstance, frameworkState })
   const renderedSections = []
@@ -2516,15 +2516,24 @@ const buildRevisionProjection = async ({
   }
 }
 
-const buildRendererFrameworkState = ({ runtimeInstance, rendererState }) => {
+export const buildRendererFrameworkState = ({ runtimeInstance, rendererState }) => {
   const legacyFrameworkState = runtimeInstance?.framework_state || {}
   if (!rendererState) return legacyFrameworkState
 
+  const sections = {}
+  rendererState.sections.forEach((section) => {
+    const sectionKey = String(section.sectionKey || '').trim().toLowerCase()
+    if (!sectionKey) return
+    const sectionDetail = section.sectionDetail
+    sections[sectionKey] = sectionDetail
+
+    const runtimePathSectionKey = sectionKey.replace(/-/g, '_')
+    if (runtimePathSectionKey !== sectionKey) sections[runtimePathSectionKey] = sectionDetail
+  })
+
   return {
     ...legacyFrameworkState,
-    sections: Object.fromEntries(
-      rendererState.sections.map((section) => [section.sectionKey, section.sectionDetail]),
-    ),
+    sections,
   }
 }
 
@@ -2565,6 +2574,7 @@ export const getRuntimeRenderer = async ({
   const sections = buildRendererSections({
     discovery,
     frameworkPackage,
+    frameworkState,
     mutationAccess,
     runtimeInstance,
     runtimePathRecords,

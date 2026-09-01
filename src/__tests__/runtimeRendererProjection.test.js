@@ -1,5 +1,5 @@
 import { RUNTIME_INSTANCE_RENDERER_PROJECTION } from '../services/runtimeInstanceService.js'
-import { buildDiscoveryProjection } from '../services/runtimeRendererService.js'
+import { buildDiscoveryProjection, buildRendererFrameworkState } from '../services/runtimeRendererService.js'
 
 describe('runtime renderer persistence projection', () => {
   it('keeps bounded governed state while excluding legacy sections and the legacy graph', () => {
@@ -58,5 +58,34 @@ describe('runtime renderer persistence projection', () => {
     expect(discovery).not.toHaveProperty('sourceRegistry')
     expect(discovery).not.toHaveProperty('evidenceObjects')
     expect(discovery).not.toHaveProperty('intelligenceGraph')
+  })
+
+  it('retains persisted V2 section detail when reconstructing renderer state', () => {
+    const sectionDetail = {
+      input: 'Customer problem context',
+      generated: { content: 'Generated customer problem' },
+      accepted: { content: 'Accepted customer problem' },
+      state: { status: 'GENERATED', stateVersion: 'runtime-revision:1' },
+    }
+
+    const frameworkState = buildRendererFrameworkState({
+      runtimeInstance: {
+        framework_state: { lifecycle: { stage: 'DRAFT' } },
+      },
+      rendererState: {
+        sections: [{
+          sectionKey: 'customer-problem',
+          sectionDetail,
+        }],
+      },
+    })
+
+    expect(frameworkState).toEqual(expect.objectContaining({
+      lifecycle: { stage: 'DRAFT' },
+      sections: {
+        'customer-problem': sectionDetail,
+        customer_problem: sectionDetail,
+      },
+    }))
   })
 })
