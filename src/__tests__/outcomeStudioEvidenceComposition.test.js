@@ -2,6 +2,8 @@ import {
   buildOutcomeStudioEvidenceComposition,
   OUTCOME_STUDIO_COMPOSITION_BLOCKERS,
 } from '../services/outcomeStudioEvidenceCompositionService.js'
+import { assertOutcomeStudioProviderSafeValue } from '../services/outcomeStudioProviderSafeContextService.js'
+import { DISCOVERY_CONTRADICTION_REVIEW_CONTRACT, getDiscoveryContradictionReview } from '../services/discoveryContradictionReviewService.js'
 
 const makeEvidence = (overrides = {}) => ({
   evidenceObjectId: 'evidence-1',
@@ -111,6 +113,54 @@ const makeInput = ({ evidenceObjects = [makeEvidence()], refs = ['evidence-1'], 
 })
 
 describe('Outcome Studio evidence composition', () => {
+  test('admits a current reviewed pair while retaining independent truth and validation blockers', () => {
+    const input = makeInput({ evidenceObjects: [makeEvidence(), makeEvidence({ evidenceObjectId: 'evidence-2' })] })
+    const pack = input.frameworkState.evidence_pack
+    const candidate = { contradictionId: 'pair-1', domain: 'Proof', severity: 'LOW', basis: 'Heuristic', evidenceObjectIds: ['evidence-1', 'evidence-2'] }
+    pack.discoveryHealth.contradictionCandidates = [candidate]
+    const expectBlocked = (reason) => expect(() => buildOutcomeStudioEvidenceComposition(input)).toThrow(expect.objectContaining({ reason }))
+    expectBlocked(OUTCOME_STUDIO_COMPOSITION_BLOCKERS.CONTRADICTION_UNRESOLVED)
+    pack.contradictionReviews = [{
+      contractVersion: DISCOVERY_CONTRADICTION_REVIEW_CONTRACT, runtimeInstanceId: 'runtime-id-1',
+      reviewId: 'human-decision-1', contradictionId: 'pair-1', disposition: 'NOT_CONTRADICTORY',
+      reviewEpoch: '',
+      evidencePairHash: getDiscoveryContradictionReview(candidate, pack.evidenceObjects).evidencePairHash,
+      rationale: 'Both statements describe the same compatible proposition.',
+      reviewedBy: 'reviewer', reviewedAt: '2026-09-03T08:00:00Z',
+    }]
+    expect(buildOutcomeStudioEvidenceComposition(input).status).toBe('READY')
+    input.truthBinding.unresolvedContradictionCount = 1
+    expectBlocked(OUTCOME_STUDIO_COMPOSITION_BLOCKERS.CONTRADICTION_UNRESOLVED)
+    input.truthBinding.unresolvedContradictionCount = 0
+    pack.evidenceObjects[1].extractedFact = 'A different statement now requires review.'
+    expectBlocked(OUTCOME_STUDIO_COMPOSITION_BLOCKERS.CONTRADICTION_UNRESOLVED)
+    pack.contradictionReviews[0].evidencePairHash = getDiscoveryContradictionReview(candidate, pack.evidenceObjects).evidencePairHash
+    pack.evidenceObjects[0].validationStatus = 'UNVALIDATED'
+    pack.contradictionReviews[0].evidencePairHash = getDiscoveryContradictionReview(candidate, pack.evidenceObjects).evidencePairHash
+    expectBlocked(OUTCOME_STUDIO_COMPOSITION_BLOCKERS.FACTS_UNAVAILABLE)
+  })
+
+  test('preserves optional schema sections without mutating the source context', () => {
+    const input = makeInput()
+    input.knowledgeContext.outputSchema.optionalSections = ['Truth Certification', 'Output Warnings']
+    const before = JSON.stringify(input)
+    expect(buildOutcomeStudioEvidenceComposition(input).outputBinding.optionalSections).toEqual(['truth certification', 'output warnings'])
+    expect(JSON.stringify(input)).toBe(before)
+    expect(buildOutcomeStudioEvidenceComposition(makeInput()).outputBinding.optionalSections).toEqual([])
+  })
+
+  test.each([
+    null, 'invalid', [''], [null], ['x'.repeat(161)],
+    ['Detail', ' detail '], ['Current  Situation'], ['Executive Summary'],
+    Array.from({ length: 13 }, (_, index) => `Detail ${index}`),
+  ])('rejects malformed, duplicate or overlapping optional headings %#', (optionalSections) => {
+    const input = makeInput()
+    input.knowledgeContext.outputSchema.optionalSections = optionalSections
+    expect(() => buildOutcomeStudioEvidenceComposition(input)).toThrow(expect.objectContaining({
+      reason: OUTCOME_STUDIO_COMPOSITION_BLOCKERS.OUTPUT_BINDING_INCOMPLETE,
+    }))
+  })
+
   test('builds a deterministic attributed fact ledger and preserves the schema sections', () => {
     const first = buildOutcomeStudioEvidenceComposition(makeInput())
     const second = buildOutcomeStudioEvidenceComposition(makeInput())
@@ -162,6 +212,56 @@ describe('Outcome Studio evidence composition', () => {
       code: 'OUTCOME_STUDIO_COMPOSITION_BLOCKED',
       reason: OUTCOME_STUDIO_COMPOSITION_BLOCKERS.FACTS_UNAVAILABLE,
     }))
+  })
+
+  test.each([
+    'https://example.com',
+    'http://example.com/source',
+    'Company website: https://example.com',
+    'COMPANY WEBSITE: https://example.com/path?region=uk',
+  ])('records a website-only pointer omission without changing evidence: %s', (statement) => {
+    const input = makeInput({
+      evidenceObjects: [makeEvidence(), makeEvidence({ evidenceObjectId: 'website-pointer', extractedFact: statement })],
+      refs: ['evidence-1', 'website-pointer'],
+    })
+    const original = structuredClone(input)
+    const result = buildOutcomeStudioEvidenceComposition(input)
+    expect(result.businessFactLedger.facts.map(fact => fact.evidenceObjectId)).toEqual(['evidence-1'])
+    expect(result.businessFactLedger.omitted).toContainEqual({
+      reference: 'website-pointer', sectionKeys: ['customer_context'], reason: 'SOURCE_POINTER_NOT_A_BUSINESS_FACT',
+    })
+    expect(result.diagnostics.omissionReasonCounts.SOURCE_POINTER_NOT_A_BUSINESS_FACT).toBe(1)
+    expect(input).toEqual(original)
+  })
+
+  test.each([
+    'Company website: https://example.com supports customer onboarding.',
+    'The customer uses https://example.com for onboarding.',
+    'Company website: https://example.com https://another.example.com',
+    'Company website: https://%',
+  ])('does not silently remove malformed pointers or URL-bearing business prose: %s', (statement) => {
+    const result = buildOutcomeStudioEvidenceComposition(makeInput({ evidenceObjects: [makeEvidence({ extractedFact: statement })] }))
+    expect(result.businessFactLedger.facts[0].statement).toBe(statement)
+    expect(result.businessFactLedger.omitted).toEqual([])
+    expect(() => assertOutcomeStudioProviderSafeValue(statement)).toThrow(expect.objectContaining({ code: 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED' }))
+  })
+
+  test('fails closed when only website pointers remain', () => {
+    expect(() => buildOutcomeStudioEvidenceComposition(makeInput({
+      evidenceObjects: [makeEvidence({ extractedFact: 'Company website: https://example.com' })],
+    }))).toThrow(expect.objectContaining({
+      reason: OUTCOME_STUDIO_COMPOSITION_BLOCKERS.FACTS_UNAVAILABLE,
+      details: expect.objectContaining({ omissionReasonCounts: { SOURCE_POINTER_NOT_A_BUSINESS_FACT: 1 } }),
+    }))
+  })
+
+  test.each([
+    [{ reviewStatus: 'PENDING' }, 'EVIDENCE_NOT_ACCEPTED'],
+    [{ validationStatus: 'UNVALIDATED' }, 'EVIDENCE_NOT_VALIDATED'],
+  ])('keeps existing admission gates ahead of pointer classification', (overrides, reason) => {
+    expect(() => buildOutcomeStudioEvidenceComposition(makeInput({
+      evidenceObjects: [makeEvidence({ extractedFact: 'Company website: https://example.com', ...overrides })],
+    }))).toThrow(expect.objectContaining({ details: expect.objectContaining({ omissionReasonCounts: { [reason]: 1 } }) }))
   })
 
   test('omits accepted evidence whose source is not registered', () => {

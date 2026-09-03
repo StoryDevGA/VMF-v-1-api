@@ -22,7 +22,11 @@ import { isFrameworkPackageAvailableToCustomer } from './frameworkPackageAvailab
 import customerGovernanceService from './customerGovernanceService.js'
 import auditService from './auditService.js'
 import { createRuntimeStateVersion } from './runtimeStateVersionService.js'
-import { stageRuntimeStateNativeInitialization } from './runtimeStateNativeInitializationService.js'
+import {
+  buildRuntimeStateNativeCreationFrameworkState,
+  stageRuntimeStateNativeInitialization,
+  validateRuntimeStateNativeCreationPaths,
+} from './runtimeStateNativeInitializationService.js'
 
 export const RUNTIME_INSTANCE_ERROR_REASONS = Object.freeze({
   CUSTOMER_NOT_FOUND: 'CUSTOMER_NOT_FOUND',
@@ -828,6 +832,7 @@ const persistRuntimeInstanceWithAudit = async ({
   actorUserId,
   auditRequest,
   runtimeInstance,
+  frameworkPackage,
   capacityConflictContext = null,
 }) => {
   if (mongoose.connection.readyState === 1) {
@@ -840,6 +845,7 @@ const persistRuntimeInstanceWithAudit = async ({
         await stageRuntimeStateNativeInitialization({
           actorUserId,
           runtimeInstance,
+          frameworkPackage,
           session,
         })
         await logRuntimeInstanceCreated({
@@ -1087,6 +1093,9 @@ export const createRuntimeInstance = async ({
   })
   const evidence = await resolveActivationEvidence({ frameworkPackage })
   const objectId = new mongoose.Types.ObjectId()
+  const stateVersion = createRuntimeStateVersion()
+  const initialState = buildRuntimeStateNativeCreationFrameworkState({ frameworkPackage, stateVersion })
+  await validateRuntimeStateNativeCreationPaths(frameworkPackage)
 
   const runtimeInstance = new RuntimeInstance({
     _id: objectId,
@@ -1103,14 +1112,14 @@ export const createRuntimeInstance = async ({
     activationId: evidence.activationId,
     deploymentId: evidence.deploymentId,
     evidence,
-    stateVersion: createRuntimeStateVersion(),
+    stateVersion,
     status: RUNTIME_INSTANCE_STATUSES.ACTIVE,
     executionStatus: RUNTIME_EXECUTION_STATUSES.IDLE,
     runtimeMode: RUNTIME_MODES.INTERACTIVE,
     runtimeCapacitySlot: runtimeCapacityReservation?.runtimeCapacitySlot ?? null,
     name: payload.name,
     description: payload.description || '',
-    framework_state: buildInitialFrameworkState(),
+    framework_state: { ...buildInitialFrameworkState(), ...initialState },
     assignedTo: [],
     anchors: [],
     createdBy: actorUserId,
@@ -1121,6 +1130,7 @@ export const createRuntimeInstance = async ({
     actorUserId,
     auditRequest,
     runtimeInstance,
+    frameworkPackage,
     capacityConflictContext: runtimeCapacityReservation
       ? { customer, tenantId }
       : null,
@@ -1170,12 +1180,19 @@ export const listRuntimeInstances = async ({
   }
 
   const [rows, total, activeRuntimeCount] = await Promise.all([
-    RuntimeInstance.find(filter)
-      .select(RUNTIME_INSTANCE_LIST_PROJECTION)
-      .sort({ updatedAt: -1, createdAt: -1 })
-      .skip(skip)
-      .limit(pageSize)
-      .lean(),
+    // Project before sorting so large legacy state does not enter the sort buffer.
+    // Aggregation does not perform Mongoose's normal query ObjectId casting.
+    RuntimeInstance.aggregate([
+      { $match: {
+        ...filter,
+        customerId: new mongoose.Types.ObjectId(customerId),
+        tenantId: new mongoose.Types.ObjectId(tenantId),
+      } },
+      { $project: Object.fromEntries(RUNTIME_INSTANCE_LIST_PROJECTION.split(' ').map((field) => [field, 1])) },
+      { $sort: { updatedAt: -1, createdAt: -1 } },
+      { $skip: skip },
+      { $limit: pageSize },
+    ]),
     RuntimeInstance.countDocuments(filter),
     runtimeType === RUNTIME_TYPES.VALUE_NARRATIVE
       ? RuntimeInstance.countDocuments(buildRuntimeCapacityFilter({

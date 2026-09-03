@@ -32,6 +32,8 @@ import {
   resetRuntimeDiscovery as resetRuntimeDiscoveryRecord,
   reviewAllRuntimeSectionEvidence as reviewAllRuntimeSectionEvidenceRecord,
   reviewRuntimeDiscoveryEvidence as reviewRuntimeDiscoveryEvidenceRecord,
+  getRuntimeDiscoveryContradictions as getRuntimeDiscoveryContradictionsRecord,
+  reviewRuntimeDiscoveryContradiction as reviewRuntimeDiscoveryContradictionRecord,
   reviewRuntimeSectionEvidence as reviewRuntimeSectionEvidenceRecord,
   updateRuntimeSectionEvidence as updateRuntimeSectionEvidenceRecord,
   updateRuntimeDiscoveryInputs as updateRuntimeDiscoveryInputsRecord,
@@ -547,6 +549,33 @@ export const acceptRuntimeDiscovery = async (req, res, next) => {
     if (err?.status && err?.code) {
       return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
     }
+    return next(err)
+  }
+}
+
+export const getRuntimeDiscoveryContradictions = async (req, res, next) => {
+  try {
+    const data = await getRuntimeDiscoveryContradictionsRecord({
+      actorUserId: req.context?.userId || req.userId,
+      scopes: req.scopes, runtimeInstanceId: req.params.runtimeInstanceId,
+    })
+    return res.status(200).json({ data, meta: { requestId: req.requestId, version: 'v1' } })
+  } catch (err) {
+    if (err?.status && err?.code) return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    return next(err)
+  }
+}
+
+export const reviewRuntimeDiscoveryContradiction = async (req, res, next) => {
+  try {
+    const data = await reviewRuntimeDiscoveryContradictionRecord({
+      actorUserId: req.context?.userId || req.userId, auditRequest: req,
+      scopes: req.scopes, runtimeInstanceId: req.params.runtimeInstanceId,
+      contradictionId: req.params.contradictionId, payload: req.body,
+    })
+    return res.status(200).json({ data, meta: { requestId: req.requestId, version: 'v1' } })
+  } catch (err) {
+    if (err?.status && err?.code) return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
     return next(err)
   }
 }

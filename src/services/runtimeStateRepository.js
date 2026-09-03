@@ -1,6 +1,11 @@
 import mongoose from 'mongoose'
 
-import { isBoundedRuntimeSectionDetail } from '../models/RuntimeStateSection.js'
+import {
+  isBoundedRuntimeSectionDetail,
+  RUNTIME_SECTION_DETAIL_ROOT_KEYS,
+  RUNTIME_SECTION_DETAIL_FORBIDDEN_KEYS,
+} from '../models/RuntimeStateSection.js'
+import { isBoundedSafeJson } from '../models/runtimeStateSchemas.js'
 import { getRuntimeInstance } from './runtimeInstanceService.js'
 import {
   FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_READ_POLICY,
@@ -133,6 +138,27 @@ const RUNTIME_STATE_V2_SELECTED_SECTION_PROJECTION = Object.freeze({
   sectionDetail: 1,
 })
 
+// Renderer gate inventory: canonical content and provenance, never rich intelligence caches.
+const RENDERER_TRUTH_FIELDS = Object.freeze([
+  'content', 'format', 'summary', 'generatedAt', 'generatedBy', 'acceptedAt', 'acceptedBy',
+  'sourceGeneratedAt', 'actionKey', 'inputHash', 'evidenceHash', 'sectionEvidenceHash',
+  'dependencyHash', 'boundedContextHash', 'contentHash', 'truthHash', 'truthEligibility', 'generator',
+])
+const RUNTIME_STATE_V2_RENDERER_SECTION_PROJECTION = Object.freeze({
+  sectionKey: 1, stateVersion: 1, sourceStateVersion: 1, stateStatus: 1, status: 1,
+  current: 1, isCurrent: 1, truthStatus: 1, truthHash: 1, contentHash: 1,
+  summary: 1, projectionReceipt: 1, evidenceRefs: 1, updatedAt: 1,
+  ...Object.fromEntries([
+    'input', 'state', 'review', 'dependencies', 'lineage', 'validation',
+    'additionalEvidence', 'evidenceObjects',
+    'revisions.revisionNumber', 'revisions.replacedAt', 'revisions.reason',
+    'accepted.revisions.revisionNumber', 'accepted.revisions.replacedAt', 'accepted.revisions.reason',
+  ].map((path) => [`sectionDetail.${path}`, 1])),
+  ...Object.fromEntries([
+    'generated', 'accepted', 'revisions.generated', 'revisions.accepted', 'accepted.revisions.accepted',
+  ].flatMap((path) => RENDERER_TRUTH_FIELDS.map((key) => [`sectionDetail.${path}.${key}`, 1]))),
+})
+
 const RUNTIME_STATE_V2_EVIDENCE_SOURCE_PROJECTION = Object.freeze({
   _id: 1,
   runtimeInstanceId: 1,
@@ -182,10 +208,25 @@ const RUNTIME_STATE_V2_GRAPH_ELEMENT_PROJECTION = Object.freeze({
 
 const RUNTIME_STATE_V2_HANDOFF_SECTION_PROJECTION = Object.freeze({
   ...RUNTIME_STATE_V2_CHILD_PROJECTION,
+  // Whole fallback objects preserve presence (including {}) and getter precedence.
+  // Accepted truth remains full fidelity, including its rich section intelligence.
   'sectionDetail.accepted': 1,
-  'sectionDetail.generated': 1,
-  'sectionDetail.intelligence': 1,
+  'sectionDetail.generated.evidenceProjection': 1,
+  'sectionDetail.generated.generationBoundaries': 1,
+  'sectionDetail.generated.intelligence.scopedEvidence': 1,
+  'sectionDetail.intelligence.scopedEvidence': 1,
+  'sectionDetail.intelligence.acceptedTruth.truthHash': 1,
+  'sectionDetail.evidenceProjection': 1,
+  'sectionDetail.scopedEvidence': 1,
   'sectionDetail.state': 1,
+  'sectionDetail.review': 1,
+  'sectionDetail.lineage': 1,
+  // Legacy accepted truth may live at the section root.
+  ...Object.fromEntries([
+    'sectionKey', 'content', 'summary', 'value', 'narrative', 'truthHash', 'acceptedAt',
+    'acceptedBy', 'sourceActionKey', 'sourceGeneratedAt', 'runtimePath',
+    'supportingEvidenceRefs', 'generationBoundaries', 'truthEligibility', 'sectionIntelligence',
+  ].map((key) => [`sectionDetail.${key}`, 1])),
 })
 
 const RUNTIME_STATE_V2_HANDOFF_EVIDENCE_PROJECTION = Object.freeze({
@@ -644,6 +685,27 @@ const serializeSelectedSection = (row, stateVersion) => {
   }
 }
 
+const serializeRendererSection = (row, stateVersion) => {
+  const rendererSummary = row.sectionDetail
+  if (!rendererSummary || typeof rendererSummary !== 'object' || Array.isArray(rendererSummary)
+    || !isBoundedSafeJson(rendererSummary, {
+      maxDepth: 12, maxEntries: 10000, maxBytes: 256 * 1024, maxStringScalars: 8000,
+      rootAllowedKeys: RUNTIME_SECTION_DETAIL_ROOT_KEYS,
+      forbiddenKeys: RUNTIME_SECTION_DETAIL_FORBIDDEN_KEYS,
+      allowedForbiddenKeys: ['content', 'body', 'text'],
+    })) {
+    throw createRuntimeStateError({
+      code: RUNTIME_STATE_V2_ERROR_CODES.SECTION_DETAIL_INVALID,
+      message: 'The Runtime State Storage V2 renderer summary is invalid.',
+    })
+  }
+  return {
+    ...serializeSectionSummary(row, stateVersion),
+    projectionScope: 'RENDERER_SUMMARY',
+    rendererSummary,
+  }
+}
+
 const serializeGraphNode = (row) => {
   const attributes = row.attributes && typeof row.attributes === 'object'
     ? sanitizeNestedProjectionValue(row.attributes)
@@ -879,7 +941,7 @@ export const getRuntimeStateRendererSections = async ({ scopes, runtimeInstanceI
       control,
       additional: { current: true },
     }),
-    projection: RUNTIME_STATE_V2_SELECTED_SECTION_PROJECTION,
+    projection: RUNTIME_STATE_V2_RENDERER_SECTION_PROJECTION,
     sort: { sectionKey: 1 },
     limit: RUNTIME_STATE_V2_SECTION_CATALOGUE_LIMIT + 1,
   })
@@ -909,7 +971,8 @@ export const getRuntimeStateRendererSections = async ({ scopes, runtimeInstanceI
     : control.stateVersion
 
   return withBoundedReadReceipt({
-    sections: rows.map((row) => serializeSelectedSection(row, stateVersion)),
+    projectionScope: 'RENDERER_SUMMARY',
+    sections: rows.map((row) => serializeRendererSection(row, stateVersion)),
     sectionCount: rows.length,
     stateVersion,
   }, 'runtime_state_v2.renderer_sections')
@@ -1445,6 +1508,8 @@ export const getRuntimeStateOutcomeHandoffReadiness = async ({
 }
 
 export const __testables = Object.freeze({
+  RUNTIME_STATE_V2_HANDOFF_SECTION_PROJECTION,
+  RUNTIME_STATE_V2_RENDERER_SECTION_PROJECTION,
   buildStateVersion,
   buildRuntimeIdentityFilter,
   buildCurrentStateFilter,

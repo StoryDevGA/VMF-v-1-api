@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
 
 import mongoose from 'mongoose'
 
@@ -9,6 +10,10 @@ import RuntimeStateMigrationReceipt, {
   RUNTIME_STATE_MIGRATION_TARGET_COLLECTIONS,
 } from '../models/RuntimeStateMigrationReceipt.js'
 import { createRuntimeStateCanonicalMappingManifest } from './runtimeStateCanonicalSerializer.js'
+import RuntimeStateSection from '../models/RuntimeStateSection.js'
+import { createRuntimeStateLegacySourceRowSet } from './runtimeStateLegacyMapper.js'
+import { normalizeRuntimeSectionObject } from './runtimeSectionModelService.js'
+import { resolveRuntimePathSelections } from './runtimePathRegistryService.js'
 
 export const RUNTIME_STATE_V2_NATIVE_INITIALIZATION_ERROR_CODE =
   'RUNTIME_STATE_V2_NATIVE_INITIALIZATION_INVALID'
@@ -59,11 +64,74 @@ export const buildRuntimeStateNativeInitialFrameworkState = ({ frameworkState, s
   }
 }
 
-const buildCanonicalInitialState = (runtimeInstance) => {
+// Only new runtime creation uses this package-derived catalogue. Legacy empty
+// initialization and rollover normalization retain their existing contracts.
+export const buildRuntimeStateNativeCreationFrameworkState = ({ frameworkPackage, stateVersion } = {}) => {
+  const declarations = frameworkPackage?.sections === undefined ? [] : frameworkPackage.sections
+  if (!Array.isArray(declarations) || declarations.length > 100) {
+    fail('Native runtime package sections must be a bounded section catalogue.')
+  }
+  const sections = {}
+  const identities = new Set()
+  for (const declaration of declarations) {
+    const { sectionKey, runtimePath } = declaration || {}
+    const match = typeof runtimePath === 'string'
+      ? /^framework_state\.sections\.([a-z][a-z0-9_-]*)$/.exec(runtimePath)
+      : null
+    const key = match?.[1]
+    const normalizedKey = typeof sectionKey === 'string' ? sectionKey.replaceAll('_', '-') : ''
+    if (!/^[a-z][a-z0-9_-]*$/.test(sectionKey || '') || !key
+      || ['constructor', 'prototype'].includes(key)
+      || key.replaceAll('_', '-') !== normalizedKey || identities.has(normalizedKey)) {
+      fail('Native runtime package section keys and root paths must be safe, unique and aligned.')
+    }
+    identities.add(normalizedKey)
+    const section = normalizeRuntimeSectionObject({
+      value: { input: null, generated: null, accepted: null, state: { status: 'DRAFT' } },
+      sectionKey,
+      runtimePath,
+    })
+    // Avoid empty metadata objects that MongoDB minimizes on root persistence.
+    sections[key] = Object.fromEntries(
+      ['input', 'generated', 'accepted', 'state', 'lineage', 'revisions', 'evidenceObjects']
+        .map((field) => [field, section[field]]),
+    )
+  }
+  return declarations.length ? {
+    sections,
+    evidence_pack: { sourceRegistry: [], evidenceObjects: [] },
+    intelligence_graph: { graphVersion: stateVersion, nodes: [], edges: [] },
+  } : { sections: {}, evidence_pack: {} }
+}
+
+export const validateRuntimeStateNativeCreationPaths = async (frameworkPackage) => {
+  const result = await resolveRuntimePathSelections({
+    pathKeys: (frameworkPackage.sections || []).map((section) => section.runtimePath),
+    frameworkKeys: [frameworkPackage.frameworkKey || 'VMF'],
+    operation: 'READ',
+    requireActive: true,
+    selectFields: 'pathKey status frameworkKeys allowedOperations dataType scope',
+  })
+  if (['missing', 'inactive', 'invalidOperation', 'incompatibleFramework'].some((key) => result[key].length)
+    || result.rows.some((row) => row.dataType !== 'OBJECT' || row.scope !== 'FRAMEWORK_STATE')) {
+    fail('Native runtime section paths must be active, readable framework-compatible section objects.')
+  }
+}
+
+const buildCanonicalInitialState = (runtimeInstance, frameworkPackage) => {
   const root = typeof runtimeInstance?.toObject === 'function'
     ? runtimeInstance.toObject({ depopulate: true, virtuals: false })
     : { ...runtimeInstance }
-  const frameworkState = buildRuntimeStateNativeInitialFrameworkState({
+  const expected = frameworkPackage && buildRuntimeStateNativeCreationFrameworkState({
+    frameworkPackage,
+    stateVersion: root.stateVersion,
+  })
+  const hasPackageSections = expected && Object.keys(expected.sections).length > 0
+  if (hasPackageSections && Object.keys(expected).some((key) =>
+    !isDeepStrictEqual(root.framework_state?.[key], expected[key]))) {
+    fail('Native runtime section initialization must exactly match the pristine package catalogue.')
+  }
+  const frameworkState = hasPackageSections ? expected : buildRuntimeStateNativeInitialFrameworkState({
     frameworkState: root.framework_state,
     stateVersion: root.stateVersion,
   })
@@ -76,16 +144,20 @@ const buildCanonicalInitialState = (runtimeInstance) => {
     fail('Native Runtime State V2 initialization could not serialize the runtime root.')
   }
 
-  return createRuntimeStateCanonicalMappingManifest({
+  const legacyInput = {
     rawBsonBytes,
     sections: frameworkState.sections,
     evidencePack: frameworkState.evidence_pack,
     intelligenceGraph: frameworkState.intelligence_graph,
-  }).serializerResult
+  }
+  return {
+    legacyInput,
+    serializerResult: createRuntimeStateCanonicalMappingManifest(legacyInput).serializerResult,
+  }
 }
 
-const logicalRecordCount = (logicalPath) => {
-  if (logicalPath === 'framework_state.sections') return 0
+const logicalRecordCount = (logicalPath, sectionCount) => {
+  if (logicalPath === 'framework_state.sections') return sectionCount
   if (logicalPath === 'framework_state.evidence_pack') return 0
   if (logicalPath === 'framework_state.intelligence_graph') return 0
   fail('Native Runtime State V2 initialization logical path is unsupported.')
@@ -94,6 +166,7 @@ const logicalRecordCount = (logicalPath) => {
 export const stageRuntimeStateNativeInitialization = async ({
   actorUserId,
   runtimeInstance,
+  frameworkPackage,
   session,
   now = new Date(),
   dependencies = {},
@@ -108,7 +181,7 @@ export const stageRuntimeStateNativeInitialization = async ({
     fail('Native Runtime State V2 initialization identity is incomplete.')
   }
 
-  const serializerResult = buildCanonicalInitialState(runtimeInstance)
+  const { serializerResult, legacyInput } = buildCanonicalInitialState(runtimeInstance, frameworkPackage)
   const scopeDigest = sha256([customerId, tenantId, runtimeInstanceId, runtimeInstanceKey].join('\n'))
   const timestamp = new Date(now)
   if (Number.isNaN(timestamp.valueOf())) fail('Native Runtime State V2 initialization timestamp is invalid.')
@@ -130,7 +203,7 @@ export const stageRuntimeStateNativeInitialization = async ({
       targetCollections: RUNTIME_STATE_MIGRATION_TARGET_COLLECTIONS[logicalPath],
       sourceHash: Object.values(serializerResult.domains)
         .find((domain) => domain.logicalPath === logicalPath).sourceHash,
-      recordCount: logicalRecordCount(logicalPath),
+      recordCount: logicalRecordCount(logicalPath, Object.keys(legacyInput.sections).length),
     })),
     sourceSetHash: serializerResult.sourceSetHash,
     assignedStateVersion: stateVersion,
@@ -142,6 +215,19 @@ export const stageRuntimeStateNativeInitialization = async ({
     assignedAt: timestamp,
     verifiedAt: timestamp,
   })
+  if (Object.keys(legacyInput.sections).length) {
+    const rowSet = createRuntimeStateLegacySourceRowSet({
+      legacyInput,
+      scope: { runtimeInstanceId, runtimeInstanceKey, customerId, tenantId },
+      stateVersion,
+      migrationReceiptId: identity(receipt.receiptId),
+      migrationTimestamp: timestamp.toISOString(),
+    })
+    const SectionModel = dependencies.RuntimeStateSection || RuntimeStateSection
+    await SectionModel.insertMany(rowSet.rows.sections.map((row) => ({
+      ...row, current: true, stateStatus: 'DRAFT',
+    })), { session })
+  }
   await receipt.save({ session })
   return receipt
 }

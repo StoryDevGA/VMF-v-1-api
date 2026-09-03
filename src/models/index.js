@@ -14,6 +14,7 @@ import FrameworkRegistry from './FrameworkRegistry.js'
 import FrameworkPackage from './FrameworkPackage.js'
 import RuntimeAgent from './RuntimeAgent.js'
 import RuntimeSkill from './RuntimeSkill.js'
+import RuntimeSupportAsset from './RuntimeSupportAsset.js'
 import RuntimePathRegistry from './RuntimePathRegistry.js'
 import SkillRoleRegistry from './SkillRoleRegistry.js'
 import ValidationRegistry from './ValidationRegistry.js'
@@ -70,6 +71,7 @@ export {
   FrameworkPackage,
   RuntimeAgent,
   RuntimeSkill,
+  RuntimeSupportAsset,
   RuntimePathRegistry,
   SkillRoleRegistry,
   ValidationRegistry,
@@ -127,6 +129,7 @@ export default {
   FrameworkPackage,
   RuntimeAgent,
   RuntimeSkill,
+  RuntimeSupportAsset,
   RuntimePathRegistry,
   SkillRoleRegistry,
   ValidationRegistry,

@@ -11,6 +11,13 @@ import RuntimeInstance, {
   RUNTIME_INSTANCE_STATUSES,
   RUNTIME_TYPES,
 } from '../models/RuntimeInstance.js'
+import RuntimeEvidenceObject from '../models/RuntimeEvidenceObject.js'
+import {
+  DISCOVERY_CONTRADICTION_REVIEW_CONTRACT,
+  DISCOVERY_CONTRADICTION_DISPOSITIONS,
+  getDiscoveryContradictionReview,
+  isBoundedContradictionReviewHistory,
+} from './discoveryContradictionReviewService.js'
 import UIContract, { UI_CONTRACT_STATUSES } from '../models/UIContract.js'
 import {
   DISCOVERY_ACQUISITION_PROFILE_ERROR_MESSAGE,
@@ -1198,6 +1205,7 @@ export const buildDiscoveryEvidencePack = async ({
   reason = 'BUILD_EVIDENCE_PACK',
   runtimeInstance,
 }) => {
+  const contradictionReviewEpoch = crypto.randomUUID()
   const {
     explicitWebsiteSources,
     normalizedInputs,
@@ -1390,6 +1398,9 @@ export const buildDiscoveryEvidencePack = async ({
     sourceCount: sources.length,
   })
   const baseDiscoveryHealth = buildDiscoveryHealth({
+    contradictionReviewEpoch,
+    contradictionReviews: previousEvidencePack.contradictionReviews,
+    runtimeInstanceId: toIdString(runtimeInstance?._id),
     acquisitionProfile: profile,
     coverage: baseCoverage,
     evidenceObjects,
@@ -1418,6 +1429,9 @@ export const buildDiscoveryEvidencePack = async ({
   })
   const discoveryHealth = buildDiscoveryHealth({
     acquisitionProfile: profile,
+    contradictionReviewEpoch,
+    contradictionReviews: previousEvidencePack.contradictionReviews,
+    runtimeInstanceId: toIdString(runtimeInstance?._id),
     coverage: { ...coverage, confidence },
     evidenceObjects,
     lastAcquisitionDate: refreshedAt,
@@ -1561,7 +1575,9 @@ export const buildDiscoveryEvidencePack = async ({
 
   return {
     acquisition,
+    contradictionReviewEpoch,
     acquisitionProfile: profile,
+    ...(previousEvidencePack.contradictionReviews ? { contradictionReviews: cloneValue(previousEvidencePack.contradictionReviews) } : {}),
     inputs: normalizedInputs,
     discovery: {
       seedProfile: {
@@ -1645,6 +1661,8 @@ const buildResetDiscoveryEvidencePack = ({
 
   return {
     acquisitionProfile: profile,
+    contradictionReviewEpoch: crypto.randomUUID(),
+    ...(previousEvidencePack.contradictionReviews ? { contradictionReviews: cloneValue(previousEvidencePack.contradictionReviews) } : {}),
     inputs: {},
     discovery: {
       seedProfile: {
@@ -2342,6 +2360,7 @@ const buildAcceptedSectionTruth = ({
   const content = cloneValue(generated.content ?? generated)
   const truthHash = hashSectionTruthValue({
     content,
+    sectionIntelligence: generated.sectionIntelligence || null,
     evidenceHash: generated.evidenceHash || '',
     inputHash: generated.inputHash || '',
     runtimePath,
@@ -2373,6 +2392,9 @@ const buildAcceptedSectionTruth = ({
     content,
     summary: generated.summary || '',
     ...(Array.isArray(generated.sections) ? { sections: cloneValue(generated.sections) } : {}),
+    ...(generated.sectionIntelligence && typeof generated.sectionIntelligence === 'object'
+      ? { sectionIntelligence: cloneValue(generated.sectionIntelligence) }
+      : {}),
     ...(Array.isArray(generated.supportingEvidenceRefs)
       ? { supportingEvidenceRefs: cloneValue(generated.supportingEvidenceRefs) }
       : {}),
@@ -2529,13 +2551,14 @@ const buildDependencyInvalidationAuditDiff = (dependencyInvalidations = []) => {
   }
 }
 
-const resolveRuntimeInstanceForMutation = async ({ actorUserId, runtimeInstanceId, scopes }) => {
-  const runtimeInstance = await RuntimeInstance.findOne({
+const resolveRuntimeInstanceForMutation = async ({ actorUserId, runtimeInstanceId, scopes, projection }) => {
+  const query = RuntimeInstance.findOne({
     $or: [
       ...(mongoose.isValidObjectId(runtimeInstanceId) ? [{ _id: runtimeInstanceId }] : []),
       { runtimeInstanceKey: String(runtimeInstanceId || '').trim().toLowerCase() },
     ],
   })
+  const runtimeInstance = await (projection ? query.select(projection).maxTimeMS(2000) : query)
 
   if (!runtimeInstance) {
     throw buildMutationError({
@@ -2939,11 +2962,38 @@ const persistMutationWithAudit = async ({
     let sourceRollover = null
     try {
       await session.withTransaction(async () => {
+        updatedRuntimeInstance = await atomicPersistRuntimeState({
+          actorUserId,
+          expectedUpdatedAt,
+          expectedStateVersion: previousStateVersion,
+          nextFrameworkState,
+          nextStateVersion,
+          runtimeInstance,
+          session,
+        })
+        // Mongoose may minimize empty metadata while casting the root update.
+        // Hash/project the exact saved representation, within the same transaction.
+        const persisted = await RuntimeInstance.collection.findOne({
+          _id: runtimeInstance._id,
+          customerId: runtimeInstance.customerId,
+          tenantId: runtimeInstance.tenantId,
+          runtimeInstanceKey: runtimeInstance.runtimeInstanceKey,
+          stateVersion: nextStateVersion,
+        }, { session, projection: { framework_state: 1 } })
+        if (!persisted?.framework_state || typeof persisted.framework_state !== 'object'
+          || Array.isArray(persisted.framework_state)) {
+          throw buildMutationError({
+            status: 409,
+            code: 'CONFLICT',
+            message: 'Saved runtime state could not be read for its V2 source projection.',
+            reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_STATE_VERSION_REQUIRED,
+          })
+        }
         sourceRollover = await stageRuntimeStateSourceRollover({
           runtimeInstance,
           expectedStateVersion: previousStateVersion,
           nextStateVersion,
-          nextFrameworkState,
+          nextFrameworkState: persisted.framework_state,
           mutationTimestamp: stateMutationTimestamp,
           session,
         })
@@ -2962,15 +3012,6 @@ const persistMutationWithAudit = async ({
             reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_STATE_VERSION_REQUIRED,
           })
         }
-        updatedRuntimeInstance = await atomicPersistRuntimeState({
-          actorUserId,
-          expectedUpdatedAt,
-          expectedStateVersion: previousStateVersion,
-          nextFrameworkState,
-          nextStateVersion,
-          runtimeInstance,
-          session,
-        })
         await logRuntimeStateMutated({
           actorUserId,
           additionalDiff: {
@@ -3437,6 +3478,7 @@ export const acceptRuntimeDiscovery = async ({
   assertDiscoveryEvidenceAcceptable(previousEvidencePack)
 
   const acceptedAt = new Date().toISOString()
+  const contradictionReviewEpoch = crypto.randomUUID()
   const acceptedEvidenceObjects = acceptPendingDiscoveryEvidenceObjects({
     acceptedAt,
     actorUserId,
@@ -3474,6 +3516,9 @@ export const acceptRuntimeDiscovery = async ({
     : null
   const discoveryHealth = buildDiscoveryHealth({
     acquisitionProfile: previousEvidencePack.acquisition?.profile || previousEvidencePack.acquisitionProfile,
+    contradictionReviewEpoch,
+    contradictionReviews: previousEvidencePack.contradictionReviews,
+    runtimeInstanceId: toIdString(runtimeInstance._id),
     coverage: {
       ...(acceptedCoverage || {}),
       confidence: previousEvidencePack.acquisition?.confidence || previousEvidencePack.evidence?.confidence,
@@ -3492,6 +3537,7 @@ export const acceptRuntimeDiscovery = async ({
   const nextEvidencePack = {
     ...previousEvidencePack,
     inputComplete: true,
+    contradictionReviewEpoch,
     evidenceReady: true,
     accepted: true,
     needsRefresh: false,
@@ -3571,6 +3617,124 @@ export const acceptRuntimeDiscovery = async ({
   })
 }
 
+const contradictionReviewError = (reason, message, status = 409) => buildMutationError({
+  status, code: status === 422 ? 'VALIDATION_FAILED' : status === 404 ? 'NOT_FOUND' : 'CONFLICT',
+  message, reason,
+})
+
+export const getRuntimeDiscoveryContradictions = async ({ actorUserId, runtimeInstanceId, scopes } = {}) => {
+  const runtimeInstance = await resolveRuntimeInstanceForMutation({
+    actorUserId, runtimeInstanceId, scopes,
+    projection: '_id runtimeInstanceKey customerId tenantId runtimeType frameworkKey status executionStatus lockedAt stateVersion updatedAt framework_state.lock.locked framework_state.lock.lockedAt framework_state.lifecycle.stage framework_state.evidence_pack.discoveryHealth.contradictionCandidates framework_state.evidence_pack.contradictionReviews framework_state.evidence_pack.contradictionReviewEpoch framework_state.evidence_pack.state framework_state.evidence_pack.evidenceReady framework_state.evidence_pack.needsRefresh',
+  })
+  const stateVersion = requireCanonicalRuntimeStateVersion(runtimeInstance)
+  const pack = runtimeInstance.framework_state?.evidence_pack || {}
+  const candidates = pack.discoveryHealth?.contradictionCandidates || []
+  if (!Array.isArray(candidates) || candidates.length > 8 || !isBoundedContradictionReviewHistory(pack.contradictionReviews || [])) {
+    throw contradictionReviewError('CONTRADICTION_REVIEW_LIMIT', 'Contradiction review data exceeds its bounded read contract.')
+  }
+  const ids = [...new Set(candidates.flatMap((candidate) => candidate.evidenceObjectIds || []))]
+  if (ids.length > 16) throw contradictionReviewError('CONTRADICTION_REVIEW_LIMIT', 'Too many evidence references to review.')
+  const evidenceObjects = ids.length ? await RuntimeEvidenceObject.find({
+    runtimeInstanceId: runtimeInstance._id, runtimeInstanceKey: runtimeInstance.runtimeInstanceKey,
+    customerId: runtimeInstance.customerId, tenantId: runtimeInstance.tenantId,
+    current: true, stateVersion, sourceStateVersion: stateVersion, evidenceObjectId: { $in: ids },
+  }).select('evidenceObjectId sourceId sourceType lineageRef extractedFact reviewStatus validationStatus')
+    .limit(17).maxTimeMS(2000).lean() : []
+  let canReview = getEvidencePackStateFlag(pack, 'evidenceReady') && !getEvidencePackNeedsRefresh(pack)
+  try { assertRuntimeEditable(runtimeInstance) } catch { canReview = false }
+  const result = {
+    runtimeUpdatedAt: runtimeInstance.updatedAt,
+    canReview,
+    candidates: candidates.map((candidate) => ({
+      ...candidate,
+      ...getDiscoveryContradictionReview(candidate, evidenceObjects, pack.contradictionReviews, toIdString(runtimeInstance._id), pack.contradictionReviewEpoch),
+    })),
+  }
+  if (Buffer.byteLength(JSON.stringify(result), 'utf8') > 512 * 1024) {
+    throw contradictionReviewError('CONTRADICTION_REVIEW_LIMIT', 'Contradiction review response exceeds the bounded read limit.')
+  }
+  return result
+}
+
+export const reviewRuntimeDiscoveryContradiction = async ({
+  actorUserId, auditRequest, contradictionId, scopes, runtimeInstanceId, payload = {},
+} = {}) => {
+  const { expectedUpdatedAt, expectedEvidencePairHash, disposition, confirm } = payload
+  const rationale = typeof payload.rationale === 'string' ? payload.rationale.trim() : ''
+  if (!toIdString(actorUserId) || confirm !== true || !DISCOVERY_CONTRADICTION_DISPOSITIONS.includes(disposition)
+    || rationale.length < 10 || rationale.length > 2000 || !/^sha256:[a-f0-9]{64}$/.test(expectedEvidencePairHash || '')) {
+    throw contradictionReviewError('CONTRADICTION_REVIEW_INVALID', 'An explicit reviewer decision, rationale and evidence-pair hash are required.', 422)
+  }
+  const runtimeInstance = await resolveRuntimeInstanceForMutation({ actorUserId, runtimeInstanceId, scopes })
+  assertRuntimeEditable(runtimeInstance)
+  assertExpectedUpdatedAt({ runtimeInstance, expectedUpdatedAt })
+  const previousFrameworkState = cloneValue(runtimeInstance.framework_state || {})
+  const pack = previousFrameworkState.evidence_pack || {}
+  if (!getEvidencePackStateFlag(pack, 'evidenceReady') || getEvidencePackNeedsRefresh(pack)) {
+    throw buildDiscoveryAcceptanceUnavailableError('Refresh Intelligence Hub evidence before reviewing a contradiction.')
+  }
+  const matches = (pack.discoveryHealth?.contradictionCandidates || []).filter((item) => item.contradictionId === contradictionId)
+  if (matches.length !== 1) throw contradictionReviewError('CONTRADICTION_REVIEW_NOT_FOUND', 'A unique current contradiction candidate was not found.', 404)
+  const reviews = pack.contradictionReviews === undefined ? [] : pack.contradictionReviews
+  if (!isBoundedContradictionReviewHistory(reviews)) {
+    throw contradictionReviewError('CONTRADICTION_REVIEW_LIMIT', 'Contradiction review history is invalid or full.')
+  }
+  const current = getDiscoveryContradictionReview(matches[0], pack.evidenceObjects, reviews, toIdString(runtimeInstance._id), pack.contradictionReviewEpoch)
+  if (!current.evidencePairHash || current.evidencePairHash !== expectedEvidencePairHash) {
+    throw contradictionReviewError('CONTRADICTION_REVIEW_STALE', 'The paired evidence has changed or is missing. Reload and review it again.')
+  }
+  const review = {
+    contractVersion: DISCOVERY_CONTRADICTION_REVIEW_CONTRACT,
+    reviewId: crypto.randomUUID(), runtimeInstanceId: toIdString(runtimeInstance._id),
+    contradictionId, evidencePairHash: current.evidencePairHash, disposition, rationale,
+    reviewEpoch: pack.contradictionReviewEpoch || '',
+    reviewedBy: toIdString(actorUserId), reviewedAt: new Date().toISOString(),
+    reviewedStateVersion: requireCanonicalRuntimeStateVersion(runtimeInstance),
+  }
+  const contradictionReviews = [...reviews, review]
+  if (!isBoundedContradictionReviewHistory(contradictionReviews)) {
+    throw contradictionReviewError('CONTRADICTION_REVIEW_LIMIT', 'Contradiction review history is full; no decision was appended.')
+  }
+  // Metadata-only review: do not normalize, accept, reject or revalidate any evidence.
+  const candidateProjection = pack.discoveryHealth.contradictionCandidates.map((candidate) => ({
+    ...candidate,
+    reviewStatus: getDiscoveryContradictionReview(candidate, pack.evidenceObjects, contradictionReviews, toIdString(runtimeInstance._id), pack.contradictionReviewEpoch).reviewStatus,
+  }))
+  const unresolvedCount = candidateProjection.filter((candidate) => candidate.reviewStatus !== 'NOT_CONTRADICTORY').length
+  const readiness = pack.discoveryHealth.readiness || {}
+  const blockerReasons = (readiness.blockerReasons || []).filter((reason) => reason !== 'CONTRADICTIONS_REQUIRE_REVIEW')
+  if (unresolvedCount) blockerReasons.push('CONTRADICTIONS_REQUIRE_REVIEW')
+  const discoveryHealth = {
+    ...pack.discoveryHealth, contradictionCandidates: candidateProjection,
+    readiness: {
+      ...readiness, blockerReasons, unresolvedContradictionCount: unresolvedCount,
+      state: blockerReasons.length ? 'NOT_READY'
+        : readiness.warningReasons?.length || Number(readiness.coveragePercent || 0) < 70 ? 'PARTIALLY_READY' : 'READY',
+    },
+  }
+  const nextEvidencePack = {
+    ...pack, contradictionReviews, discoveryHealth,
+    ...(isPlainObject(pack.acquisition) ? { acquisition: { ...pack.acquisition, discoveryHealth } } : {}),
+  }
+  await assertRuntimeEvidencePackWritable({ frameworkKey: runtimeInstance.frameworkKey, value: nextEvidencePack })
+  const graphRebuild = await rebuildRuntimeIntelligenceGraphForMutation({
+    actorUserId, buildTrigger: RUNTIME_INTELLIGENCE_GRAPH_BUILD_TRIGGERS.EVIDENCE_REVIEWED,
+    nextFrameworkState: { ...previousFrameworkState, evidence_pack: nextEvidencePack },
+    previousFrameworkState, runtimeInstance,
+  })
+  const updated = await persistMutationWithAudit({
+    actorUserId, auditRequest, runtimeInstance, previousFrameworkState,
+    previousUpdatedBy: runtimeInstance.updatedBy,
+    nextFrameworkState: graphRebuild.nextFrameworkState, rebuiltIntelligenceGraph: graphRebuild.graph,
+    additionalDiff: { ...graphRebuild.auditDiff, contradictionReview: review },
+    runtimePath: DISCOVERY_EVIDENCE_PACK_PATH,
+    previousValue: { reviewCount: reviews.length }, nextValue: { reviewCount: contradictionReviews.length, review },
+    expectedUpdatedAt, updatedAtBefore: runtimeInstance.updatedAt,
+  })
+  return { review, runtimeUpdatedAt: updated.updatedAt, unresolvedContradictionCount: unresolvedCount }
+}
+
 export const reviewRuntimeDiscoveryEvidence = async ({
   actorUserId,
   auditRequest,
@@ -3602,6 +3766,7 @@ export const reviewRuntimeDiscoveryEvidence = async ({
   }
 
   const reviewedAt = new Date().toISOString()
+  const contradictionReviewEpoch = crypto.randomUUID()
   const previousEvidenceObjects = normalizeDiscoveryEvidenceObjects({
     acquisitionProfile: previousEvidencePack.acquisition?.profile || previousEvidencePack.acquisitionProfile,
     createdAt: previousEvidencePack.refreshedAt || reviewedAt,
@@ -3650,6 +3815,9 @@ export const reviewRuntimeDiscoveryEvidence = async ({
     : previousCoverage
   const discoveryHealth = buildDiscoveryHealth({
     acquisitionProfile: previousEvidencePack.acquisition?.profile || previousEvidencePack.acquisitionProfile,
+    contradictionReviewEpoch,
+    contradictionReviews: previousEvidencePack.contradictionReviews,
+    runtimeInstanceId: toIdString(runtimeInstance._id),
     coverage: {
       ...nextCoverage,
       confidence: previousEvidencePack.acquisition?.confidence || previousEvidencePack.evidence?.confidence,
@@ -3668,6 +3836,7 @@ export const reviewRuntimeDiscoveryEvidence = async ({
   const nextEvidencePack = {
     ...previousEvidencePack,
     accepted: false,
+    contradictionReviewEpoch,
     needsRefresh: false,
     sourceRegistry,
     evidenceObjects: reviewResult.evidenceObjects,
@@ -4758,6 +4927,9 @@ export const getRuntimeDiscoveryEvidence = async ({
   })
   const discoveryHealth = buildDiscoveryHealth({
     acquisitionProfile: acquisition.profile || evidencePack.acquisitionProfile || DISCOVERY_ACQUISITION_PROFILES.STANDARD,
+    contradictionReviewEpoch: evidencePack.contradictionReviewEpoch,
+    contradictionReviews: evidencePack.contradictionReviews,
+    runtimeInstanceId: toIdString(runtimeInstance._id),
     coverage: {
       ...projectionCoverage,
       confidence: acquisition.confidence || evidence.confidence,

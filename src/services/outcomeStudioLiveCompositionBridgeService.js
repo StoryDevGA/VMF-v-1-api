@@ -440,12 +440,26 @@ const resolveSchemaProjection = ({ content, selection, schemaKey }) => {
       'schema metadata',
     ])
     const optionalHeadingPattern = /^(truth certification|output warnings)$/i
-    const parseSchemaList = (headings, { required = false } = {}) => {
+    const parseSchemaList = (headings, { required = false, sectionDefinitions = false } = {}) => {
+      if (headings.some((heading) => directHeadings.filter((value) => value.toLowerCase() === heading.toLowerCase()).length > 1)) {
+        block(OUTCOME_STUDIO_LIVE_COMPOSITION_BLOCKERS.KNOWLEDGE_CONTENT_SHAPE_INVALID, {
+          packKey: normalizeText(selection.packKey), field: headings[0], reason: 'DUPLICATE_CONTAINERS',
+        })
+      }
       const lines = headings
         .flatMap((heading) => extractMarkdownSection(content, heading))
         .map((line) => line.trim())
         .filter(Boolean)
-      const values = lines
+      const childHeadings = sectionDefinitions ? lines.filter((line) => /^###(?:\s|$)/.test(line)) : []
+      if (childHeadings.some((line) => !/^###\s+\S/.test(line))
+        || (childHeadings.length && lines.slice(0, lines.indexOf(childHeadings[0])).some((line) => /^(?:\d+\.|[-*])\s+/.test(line)))) {
+        block(OUTCOME_STUDIO_LIVE_COMPOSITION_BLOCKERS.KNOWLEDGE_CONTENT_SHAPE_INVALID, {
+          packKey: normalizeText(selection.packKey), field: headings[0], reason: 'AMBIGUOUS_SECTION_STRUCTURE',
+        })
+      }
+      const values = childHeadings.length
+        ? childHeadings.map((line) => safeText(line.replace(/^###\s+/, '')))
+        : lines
         .map((line) => line.match(/^(?:\d+\.|[-*])\s+(.+)$/)?.[1] || '')
         .map(safeText)
         .filter(Boolean)
@@ -458,8 +472,9 @@ const resolveSchemaProjection = ({ content, selection, schemaKey }) => {
       }
       return values
     }
-    let requiredSections = parseSchemaList(['Required Sections'])
-    if (requiredSections.length === 0) {
+    const hasRequiredContainer = directHeadings.some((heading) => heading.toLowerCase() === 'required sections')
+    let requiredSections = parseSchemaList(['Required Sections'], { required: hasRequiredContainer, sectionDefinitions: true })
+    if (!hasRequiredContainer) {
       requiredSections = directHeadings
         .filter((heading) => !metadataHeadings.has(heading.toLowerCase()))
         .filter((heading) => !optionalHeadingPattern.test(heading))
@@ -471,11 +486,12 @@ const resolveSchemaProjection = ({ content, selection, schemaKey }) => {
         field: 'Required Sections',
       })
     }
-    const optionalSections = parseSchemaList(['Optional Sections'])
+    const optionalSections = parseSchemaList(['Optional Sections'], { sectionDefinitions: true })
     const directOptionalSections = directHeadings.filter((heading) => optionalHeadingPattern.test(heading))
     const resolvedOptionalSections = optionalSections.length > 0 ? optionalSections : directOptionalSections
     const prohibited = parseSchemaList(['Prohibited', 'Prohibited Claims', 'Output Controls', 'Governance Rules'])
-    if (new Set(requiredSections.map(normalizeKey)).size !== requiredSections.length) {
+    const allSections = [...requiredSections, ...resolvedOptionalSections]
+    if (new Set(allSections.map(normalizeDuplicateIdentity)).size !== allSections.length) {
       block(OUTCOME_STUDIO_LIVE_COMPOSITION_BLOCKERS.KNOWLEDGE_CONTENT_SHAPE_INVALID, {
         packKey: normalizeText(selection.packKey),
         schemaKey,

@@ -29,7 +29,7 @@ export const RUNTIME_SECTION_DETAIL_ROOT_KEYS = Object.freeze([
   'gsilContext',
 ])
 
-const RUNTIME_SECTION_DETAIL_FORBIDDEN_KEYS = Object.freeze([
+export const RUNTIME_SECTION_DETAIL_FORBIDDEN_KEYS = Object.freeze([
   'framework_state',
   'mongodb',
   'mongo',

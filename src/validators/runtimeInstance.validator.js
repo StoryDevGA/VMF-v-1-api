@@ -586,6 +586,22 @@ const resetRuntimeDiscoverySchema = z.object({
     .default('USER_REQUESTED_DISCOVERY_RESET'),
 }).strict()
 
+const reviewRuntimeDiscoveryContradictionSchema = z.object({
+  expectedUpdatedAt: expectedUpdatedAtSchema,
+  expectedEvidencePairHash: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+  disposition: z.enum(['NOT_CONTRADICTORY', 'CONFIRMED', 'REOPENED']),
+  rationale: z.string().trim().min(10).max(2000),
+  confirm: z.literal(true),
+}).strict()
+
+export const validateRuntimeDiscoveryContradictionParams = createParamsValidator(runtimeInstanceIdSchema.extend({
+  contradictionId: z.string().trim().min(1).max(180),
+}), { message: 'Request validation failed.', rootIssueKey: '_root' })
+
+export const validateReviewRuntimeDiscoveryContradiction = createBodyValidator(reviewRuntimeDiscoveryContradictionSchema, {
+  message: 'Request validation failed.', rootIssueKey: '_root',
+})
+
 const reviewRuntimeDiscoveryEvidenceSchema = z.object({
   expectedUpdatedAt: expectedUpdatedAtSchema,
   reviewStatus: z

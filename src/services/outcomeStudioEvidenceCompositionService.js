@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { getUnresolvedDiscoveryContradictions } from './discoveryContradictionReviewService.js'
 
 export const OUTCOME_STUDIO_EVIDENCE_COMPOSITION_CONTRACT =
   'outcome-studio.evidence-to-composition.v1'
@@ -252,7 +253,7 @@ const assertTruthBinding = ({ runtimeInstance, frameworkState, truthBinding = {}
     truthBinding.unresolvedContradictionCount
       ?? truthBinding.evidence?.unresolvedContradictionCount,
   )
-  const contradictionCandidates = evidencePack.discoveryHealth?.contradictionCandidates
+  const contradictionCandidates = getUnresolvedDiscoveryContradictions(evidencePack, String(runtimeInstance?._id || runtimeInstance?.id || ''))
   if (currentness !== 'CURRENT' || evidencePack.needsRefresh === true) {
     block(OUTCOME_STUDIO_COMPOSITION_BLOCKERS.TRUTH_NOT_CURRENT, {
       currentness: currentness || 'UNSPECIFIED',
@@ -314,6 +315,12 @@ const assertOutputBinding = ({ knowledgeContext = {}, requestedOutputTypeKey }) 
   const requestedKey = normalizeKey(requestedOutputTypeKey)
   const sectionResolution = getRequiredSections(knowledgeContext)
   const requiredSections = sectionResolution.requiredSections
+  const rawOptionalSections = outputSchema.optionalSections === undefined ? [] : outputSchema.optionalSections
+  const optionalSectionsValid = Array.isArray(rawOptionalSections)
+    && rawOptionalSections.length <= 12
+    && rawOptionalSections.every((heading) => typeof heading === 'string' && heading.trim() && heading.length <= 160)
+  const optionalSections = optionalSectionsValid ? rawOptionalSections.map(normalizeKey) : []
+  const normalizedSections = [...requiredSections, ...optionalSections].map((heading) => heading.replace(/\s+/g, ' '))
   const outputTypeStructure = Array.isArray(knowledgeContext.outputTypeStructure)
     ? knowledgeContext.outputTypeStructure.map(normalizeText).filter(Boolean)
     : []
@@ -332,6 +339,8 @@ const assertOutputBinding = ({ knowledgeContext = {}, requestedOutputTypeKey }) 
     || !normalizeText(style.version)
     || !normalizeText(outputType.version)
     || sectionResolution.conflict
+    || !optionalSectionsValid
+    || new Set(normalizedSections).size !== normalizedSections.length
     || outputTypeStructure.length !== 5
     || requiredSections.length === 0
     || new Set(requiredSections).size !== requiredSections.length
@@ -352,6 +361,7 @@ const assertOutputBinding = ({ knowledgeContext = {}, requestedOutputTypeKey }) 
     styleKey: normalizeKey(style.key),
     styleVersion: normalizeText(style.version),
     requiredSections,
+    optionalSections,
     lineage,
   }
 }
@@ -392,9 +402,21 @@ const quantifiedClaimBoundary = /(?:\b\d+(?:\.\d+)?\s*%|\b(?:growth|grew|increas
 const administrativeContent = /\b(?:ignore previous|system prompt|developer message|administrative instruction|api key|password|secret|bearer token|upload this|database instruction)\b/i
 const fragmentClassification = new Set(['FRAGMENT', 'RAW_EXTRACTION', 'ADMINISTRATIVE'])
 
+const isWebsiteSourcePointer = (statement) => {
+  const match = /^(?:company website:\s*)?(https?:\/\/\S+)$/i.exec(statement)
+  if (!match) return false
+  try {
+    const url = new URL(match[1])
+    return ['http:', 'https:'].includes(url.protocol) && Boolean(url.hostname)
+  } catch {
+    return false
+  }
+}
+
 const classifyEvidence = (evidence, statement) => {
   const classification = normalizeToken(evidence.classification || evidence.category)
   if (fragmentClassification.has(classification)) return 'FRAGMENT_OR_ADMINISTRATIVE'
+  if (isWebsiteSourcePointer(statement)) return 'SOURCE_POINTER_NOT_A_BUSINESS_FACT'
   if (statement.length < 12 || !/\s/.test(statement)) return 'FRAGMENT_OR_ADMINISTRATIVE'
   if (administrativeContent.test(statement)) return 'ADMINISTRATIVE_CONTENT'
   if (claimBoundary.test(statement) || quantifiedClaimBoundary.test(statement)) return 'UNSUPPORTED_CLAIM_CATEGORY'

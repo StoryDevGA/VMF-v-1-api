@@ -299,7 +299,7 @@ const getAcceptedSection = (section = {}) => {
 }
 
 const getSectionContent = (section = {}) => normalizeText(
-  section.content || section.summary || section.value || section.narrative,
+  section?.content || section?.summary || section?.value || section?.narrative,
 )
 
 const getSectionProjection = (section = {}) =>
@@ -562,6 +562,9 @@ const buildSectionHandoff = ({ stateSectionKey, section, evidenceIndex } = {}) =
     ...(Array.isArray(projectionReceipt?.gaps) ? projectionReceipt.gaps : []),
     ...(Array.isArray(accepted?.truthEligibility?.messages) ? accepted.truthEligibility.messages : []),
   ])
+  const sectionIntelligence = isObject(accepted?.sectionIntelligence)
+    ? JSON.parse(JSON.stringify(accepted.sectionIntelligence))
+    : null
 
   return {
     sectionKey,
@@ -576,8 +579,16 @@ const buildSectionHandoff = ({ stateSectionKey, section, evidenceIndex } = {}) =
     ),
     acceptedEvidenceRefs: deduplicatedEvidenceRefs,
     generationBoundaries,
+    sectionIntelligence,
     gaps,
-    sectionHash: sha256({ sectionKey, truth, projectionReceipt, evidenceRefs: deduplicatedEvidenceRefs, gaps }),
+    sectionHash: sha256({
+      sectionKey,
+      truth,
+      projectionReceipt,
+      evidenceRefs: deduplicatedEvidenceRefs,
+      sectionIntelligence,
+      gaps,
+    }),
   }
 }
 

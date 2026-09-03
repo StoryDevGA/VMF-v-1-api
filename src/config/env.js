@@ -111,6 +111,28 @@ const env = {
     8000,
   ),
 
+  // VMF Section Intelligence Development/Test provider. Vendor and model have no defaults.
+  vmfSectionReasoningProviderEnabled: toBoolean(
+    process.env.VMF_SECTION_REASONING_PROVIDER_ENABLED,
+    false,
+  ),
+  vmfSectionReasoningProviderKey: process.env.VMF_SECTION_REASONING_PROVIDER_KEY || '',
+  vmfSectionReasoningProviderModel: process.env.VMF_SECTION_REASONING_PROVIDER_MODEL || '',
+  vmfSectionReasoningProviderApiKey:
+    process.env.VMF_SECTION_REASONING_PROVIDER_API_KEY || process.env.OPENAI_API_KEY || '',
+  vmfSectionReasoningProviderTimeoutMs: toPositiveNumber(
+    process.env.VMF_SECTION_REASONING_PROVIDER_TIMEOUT_MS,
+    60000,
+  ),
+  vmfSectionReasoningProviderMaxRetries: toNumber(
+    process.env.VMF_SECTION_REASONING_PROVIDER_MAX_RETRIES,
+    1,
+  ),
+  vmfSectionReasoningProviderMaxOutputTokens: toPositiveNumber(
+    process.env.VMF_SECTION_REASONING_PROVIDER_MAX_OUTPUT_TOKENS,
+    7000,
+  ),
+
   // Invitation and Step-Up Configuration
   invitationExpiryHours: toPositiveNumber(process.env.INVITATION_EXPIRY_HOURS, 168),
   appBaseUrl: process.env.APP_BASE_URL || 'http://localhost:8000',

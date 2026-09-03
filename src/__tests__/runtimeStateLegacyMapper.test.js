@@ -339,12 +339,20 @@ describe('SS-014 pure legacy-to-V2 mapper', () => {
     legacy.sections.accepted.accepted.content = 'accepted content'
     legacy.sections.accepted.accepted.body = 'accepted body'
     legacy.sections.accepted.accepted.text = 'accepted text'
+    legacy.sections.accepted.accepted.sectionIntelligence = {
+      commercialInterpretation: 'Governed commercial interpretation.',
+      restrictedClaims: [{ claim: 'Unverified ROI.' }],
+    }
 
     const section = createRuntimeStateLegacyRowSet(makeInput(legacy)).rows.sections[0]
     expect(section.sectionDetail.accepted).toMatchObject({
       content: 'accepted content',
       body: 'accepted body',
       text: 'accepted text',
+      sectionIntelligence: {
+        commercialInterpretation: 'Governed commercial interpretation.',
+        restrictedClaims: [{ claim: 'Unverified ROI.' }],
+      },
     })
   })
 

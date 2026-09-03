@@ -1,4 +1,5 @@
 import { generateChecksum } from './governanceAudit/checksumService.js'
+import { validateRuntimeSectionIntelligence } from './openAiRuntimeSectionReasoningAdapter.js'
 import {
   RUNTIME_INSTANCE_ERROR_REASONS,
   createRuntimeInstanceError,
@@ -239,7 +240,7 @@ const buildCompletenessChecks = ({
     ? candidate.truthEligibility
     : {}
 
-  return [
+  const checks = [
     {
       checkKey: 'generated_format',
       passed: Boolean(normalizeText(candidate.format)),
@@ -299,6 +300,40 @@ const buildCompletenessChecks = ({
         && normalizeText(checkedAt) === normalizeText(candidate.generatedAt),
     },
   ]
+  if (normalizeText(generator.adapter) === 'ss-016-vmf-section-reasoning-v1') {
+    const admittedEvidenceIds = Array.isArray(candidate.evidenceProjection?.included)
+      ? candidate.evidenceProjection.included
+        .map((item) => normalizeText(item?.evidenceObjectId))
+        .filter(Boolean)
+      : []
+    let sectionIntelligenceValid = false
+    try {
+      validateRuntimeSectionIntelligence(candidate.sectionIntelligence, {
+        allowedEvidenceIds: admittedEvidenceIds,
+      })
+      sectionIntelligenceValid = true
+    } catch {
+      sectionIntelligenceValid = false
+    }
+    checks.push({
+      checkKey: 'section_intelligence_semantics',
+      passed: sectionIntelligenceValid,
+    }, {
+      checkKey: 'section_reasoning_coverage',
+      passed: normalizeText(candidate.evidenceProjection?.algorithm) === 'SECTION_REASONING_COVERAGE'
+        && Number(candidate.evidenceProjection?.eligibleAcceptedCount || 0) > 0
+        && Number(candidate.evidenceProjection?.includedCount || 0) > 0
+        && admittedEvidenceIds.length === Number(candidate.evidenceProjection?.includedCount || 0)
+        && Boolean(normalizeText(candidate.evidenceProjection?.allEvidenceHash))
+        && Boolean(normalizeText(candidate.evidenceProjection?.selectedEvidenceHash)),
+    }, {
+      checkKey: 'section_reasoning_asset_traceability',
+      passed: Array.isArray(generator.supportAssetHashes)
+        && generator.supportAssetHashes.length > 0
+        && generator.supportAssetHashes.every((value) => /^[a-f0-9]{64}$/.test(normalizeText(value))),
+    })
+  }
+  return checks
 }
 
 const executeCompletenessCheck = ({

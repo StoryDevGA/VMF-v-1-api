@@ -10,6 +10,7 @@ import {
 } from '../constants/outcomeCommercialStrategyDecisionPaper.js'
 
 const moduleRequire = createRequire(import.meta.url)
+let sectionReasoningResultTransform = null
 const { createCanvas } = moduleRequire('@napi-rs/canvas')
 
 beforeAll(() => {
@@ -1727,6 +1728,7 @@ let FrameworkPackage
 let RuntimeDeployment
 let RuntimeActivationSnapshot
 let RuntimeInstance
+let RuntimeEvidenceObject
 let RuntimeOutputAsset
 let RuntimeOutputRequest
 let RuntimeGraphRelationship
@@ -1891,6 +1893,15 @@ beforeAll(async () => {
     disconnectRedis: jest.fn(),
   }))
 
+  const realSectionReasoning = await import('../services/runtimeSectionReasoningService.js')
+  await jest.unstable_mockModule('../services/runtimeSectionReasoningService.js', () => ({
+    ...realSectionReasoning,
+    buildReasonedGeneratedSection: async (args) => {
+      const result = await realSectionReasoning.buildReasonedGeneratedSection(args)
+      return sectionReasoningResultTransform ? sectionReasoningResultTransform(result) : result
+    },
+  }))
+
   const supertest = (await import('supertest')).default
   mongoose = (await import('mongoose')).default
   app = (await import('../app.js')).default
@@ -1906,6 +1917,7 @@ beforeAll(async () => {
   RuntimeDeployment = models.RuntimeDeployment
   RuntimeActivationSnapshot = models.RuntimeActivationSnapshot
   RuntimeInstance = models.RuntimeInstance
+  RuntimeEvidenceObject = (await import('../models/RuntimeEvidenceObject.js')).default
   RuntimeOutputAsset = models.RuntimeOutputAsset
   RuntimeOutputRequest = models.RuntimeOutputRequest
   RuntimeGraphRelationship = models.RuntimeGraphRelationship
@@ -1949,7 +1961,9 @@ beforeAll(async () => {
 })
 
 beforeEach(async () => {
+  sectionReasoningResultTransform = null
   await performanceCacheService.resetForTests()
+  RuntimeEvidenceObject.find = jest.fn()
   globalThis.fetch = originalFetch
   globalThis.__STORYLINEOS_DISCOVERY_DNS_LOOKUP__ = originalDiscoveryDnsLookup
   app.locals.outcomeStudioReasoningDeps = { executionMode: 'LEGACY' }
@@ -2013,6 +2027,7 @@ beforeEach(async () => {
   UIContract.findOne = jest.fn().mockReturnValue(buildLeanQuery(null))
   WorkflowPolicy.find = jest.fn().mockReturnValue(buildLeanQuery([]))
   RuntimeInstance.prototype.save = jest.fn(async function save() { return this })
+  RuntimeInstance.aggregate = jest.fn().mockResolvedValue([makeRuntimeInstance()])
   RuntimeInstance.find = jest.fn().mockReturnValue(buildRuntimeInstanceFindChain([makeRuntimeInstance()]))
   RuntimeInstance.findOne = jest.fn().mockImplementation((query) => {
     if (query?.runtimeInstanceKey) {
@@ -2319,6 +2334,163 @@ describe('Runtime Instance API', () => {
       resourceType: 'RuntimeInstance',
       resourceId: expect.anything(),
     }))
+  })
+
+  describe('native package section creation', () => {
+    const declaration = (sectionKey) => ({
+      sectionKey, runtimePath: `framework_state.sections.${sectionKey}`,
+    })
+    const expectedSection = ({ sectionKey, runtimePath }) => ({
+      input: null, generated: null, accepted: null, state: { status: 'DRAFT' },
+      lineage: { sectionKey, runtimePath }, revisions: [], evidenceObjects: [],
+    })
+    const registry = (sections, overrides = {}) => sections.map(({ runtimePath }) =>
+      makeRuntimePathRecord({ pathKey: runtimePath, dataType: 'OBJECT', ...overrides }))
+    const useRegistry = (rows) => {
+      const query = {
+        maxTimeMS: jest.fn().mockReturnThis(), select: jest.fn().mockReturnThis(),
+        lean: jest.fn().mockResolvedValue(rows),
+      }
+      RuntimePathRegistry.find.mockReturnValue(query)
+      return query
+    }
+    const create = async () => {
+      const token = await getAccessTokenForUser(makeCustomerAdmin())
+      return request.post('/api/v1/runtime-instances')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ customerId: CUSTOMER_ID, tenantId: TENANT_ID,
+          frameworkPackageId: FRAMEWORK_PACKAGE_ID, name: 'Native section creation proof' })
+    }
+
+    test.each([['smaller', ['customer_problem']], ['six-section', ['customer-context', 'evidence-register', 'customer_problem', 'value-proof', 'strategic-positioning', 'output_requirements']]])(
+      'initializes exactly the %s package declarations, including protected READ-only paths', async (_, keys) => {
+        const sections = keys.map(declaration)
+        const pkg = makeFrameworkPackage({ sections })
+        const before = JSON.stringify(pkg)
+        FrameworkPackage.findById.mockResolvedValue(pkg)
+        const query = useRegistry(registry(sections, { allowedOperations: ['READ'], isProtected: true }))
+        const res = await create()
+        expect(res.status).toBe(201)
+        const expected = Object.fromEntries(sections.map((section) => [section.sectionKey, expectedSection(section)]))
+        expect(res.body.data.framework_state.sections).toEqual(expected)
+        expect(RuntimeInstance.prototype.save.mock.contexts[0].framework_state.sections).toEqual(expected)
+        expect(res.body.data.framework_state.evidence_pack).toEqual({ sourceRegistry: [], evidenceObjects: [] })
+        expect(res.body.data.framework_state.intelligence_graph).toEqual({
+          graphVersion: res.body.data.stateVersion, nodes: [], edges: [],
+        })
+        expect(RuntimePathRegistry.find).toHaveBeenCalledWith({ pathKey: { $in: sections.map((section) => section.runtimePath) } })
+        expect(query.maxTimeMS).toHaveBeenCalledWith(3000)
+        expect(query.select).toHaveBeenCalledWith('pathKey status frameworkKeys allowedOperations dataType scope')
+        // Package declarations are initialized without renderer visibility/editability filtering.
+        expect(UIContract.findOne).not.toHaveBeenCalled()
+        expect(JSON.stringify(pkg)).toBe(before)
+        expect(AuditLog.createLog).toHaveBeenCalledTimes(1)
+      },
+    )
+
+    test.each([['missing', undefined], ['empty', []]])('preserves %s section declaration compatibility', async (_, sections) => {
+      FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackage({ sections }))
+      const res = await create()
+      expect(res.status).toBe(201)
+      expect(res.body.data.framework_state.sections).toEqual({})
+      expect(res.body.data.framework_state.evidence_pack).toEqual({})
+      expect(RuntimePathRegistry.find).not.toHaveBeenCalled()
+    })
+
+    test.each([
+      ['missing', null], ['inactive', { status: 'DEPRECATED' }],
+      ['wrong framework', { frameworkKeys: ['OTHER'] }],
+      ['non-READ', { allowedOperations: ['WRITE', 'BIND'] }],
+      ['wrong type', { dataType: 'STRING' }], ['wrong scope', { scope: 'EXECUTION_CONTEXT' }],
+    ])('rejects %s registry binding before root save or audit', async (_, override) => {
+      const sections = [declaration('customer_problem')]
+      FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackage({ sections }))
+      useRegistry(override === null ? [] : registry(sections, override))
+      const res = await create()
+      expect(res.status).toBe(409)
+      expect(res.body.error.code).toBe('RUNTIME_STATE_V2_NATIVE_INITIALIZATION_INVALID')
+      expect(RuntimeInstance.prototype.save).not.toHaveBeenCalled()
+      expect(RuntimeInstance.deleteOne).not.toHaveBeenCalled()
+      expect(AuditLog.createLog).not.toHaveBeenCalled()
+    })
+
+    test.each([
+      ['non-array', {}], ['duplicate', [declaration('customer_problem'), declaration('customer_problem')]],
+      ['normalized duplicate', [declaration('customer_problem'), declaration('customer-problem')]],
+      ['unsafe key', [declaration('constructor')]],
+      ['nested path', [{ sectionKey: 'customer_problem', runtimePath: 'framework_state.sections.customer_problem.accepted' }]],
+      ['mismatched key', [{ sectionKey: 'customer_problem', runtimePath: 'framework_state.sections.other' }]],
+    ])('rejects %s package declarations before registry, root save or audit', async (_, sections) => {
+      FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackage({ sections }))
+      const res = await create()
+      expect(res.status).toBe(409)
+      expect(res.body.error.code).toBe('RUNTIME_STATE_V2_NATIVE_INITIALIZATION_INVALID')
+      expect(RuntimePathRegistry.find).not.toHaveBeenCalled()
+      expect(RuntimeInstance.prototype.save).not.toHaveBeenCalled()
+      expect(AuditLog.createLog).not.toHaveBeenCalled()
+    })
+
+    test.each([false, true])('shares the connected create transaction across root/rows/receipt/audit (audit failure=%s)', async (auditFails) => {
+      const Section = (await import('../models/RuntimeStateSection.js')).default
+      const Receipt = (await import('../models/RuntimeStateMigrationReceipt.js')).default
+      const originalInsert = Section.insertMany
+      const originalReceiptSave = Receipt.prototype.save
+      const originalStart = mongoose.startSession
+      const descriptor = Object.getOwnPropertyDescriptor(mongoose.connection, 'readyState')
+      const staged = []
+      const committed = []
+      const order = []
+      const session = {
+        withTransaction: jest.fn(async (callback) => {
+          try { await callback(); committed.push(...staged) } finally { staged.length = 0 }
+        }),
+        endSession: jest.fn(),
+      }
+      const sections = [declaration('customer_problem')]
+      FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackage({ sections }))
+      useRegistry(registry(sections))
+      RuntimeInstance.prototype.save.mockImplementation(async function (options) {
+        expect(options.session).toBe(session)
+        order.push('root'); staged.push('root'); return this
+      })
+      Section.insertMany = jest.fn(async (rows, options) => {
+        expect(options.session).toBe(session)
+        expect(rows).toHaveLength(1)
+        expect(rows[0]).toEqual(expect.objectContaining({ current: true, stateStatus: 'DRAFT' }))
+        order.push('rows'); staged.push('rows'); return rows
+      })
+      Receipt.prototype.save = jest.fn(async function (options) {
+        expect(options.session).toBe(session)
+        expect(this.assignedStateVersion).toBe(RuntimeInstance.prototype.save.mock.contexts[0].stateVersion)
+        order.push('receipt'); staged.push('receipt'); return this
+      })
+      AuditLog.createLog.mockImplementation(async (event, options) => {
+        expect(options.session).toBe(session)
+        expect(event.action).toBe('RUNTIME_INSTANCE_CREATED')
+        order.push('audit')
+        if (auditFails) throw new Error('Test audit unavailable')
+        staged.push('audit'); return event
+      })
+      mongoose.startSession = jest.fn().mockResolvedValue(session)
+      Object.defineProperty(mongoose.connection, 'readyState', { configurable: true, value: 1 })
+      try {
+        const res = await create()
+        expect(res.status).toBe(auditFails ? 500 : 201)
+        expect(order).toEqual(['root', 'rows', 'receipt', 'audit'])
+        expect(committed).toEqual(auditFails ? [] : order)
+        expect(staged).toEqual([])
+        expect(session.withTransaction).toHaveBeenCalledTimes(1)
+        expect(session.endSession).toHaveBeenCalledTimes(1)
+        expect(RuntimeInstance.deleteOne).not.toHaveBeenCalled()
+        if (auditFails) expect(res.body.error.code).toBe('RUNTIME_INSTANCE_AUDIT_FAILED')
+      } finally {
+        Section.insertMany = originalInsert
+        Receipt.prototype.save = originalReceiptSave
+        mongoose.startSession = originalStart
+        if (descriptor) Object.defineProperty(mongoose.connection, 'readyState', descriptor)
+        else delete mongoose.connection.readyState
+      }
+    })
   })
 
   test('allows the default active VMF package even when visibility is internal-only', async () => {
@@ -2971,15 +3143,32 @@ describe('Runtime Instance API', () => {
       .set('Authorization', `Bearer ${token}`)
 
     expect(res.status).toBe(200)
-    expect(RuntimeInstance.find).toHaveBeenCalledWith({
-      customerId: CUSTOMER_ID,
-      tenantId: TENANT_ID,
-      runtimeType: 'VALUE_NARRATIVE',
-    })
-    const listQuery = RuntimeInstance.find.mock.results[0]?.value
-    expect(listQuery.select).toHaveBeenCalledWith(expect.stringContaining('framework_state.readiness.submittedForReview'))
-    expect(listQuery.select.mock.calls[0][0]).not.toContain('framework_state.evidence_pack')
-    expect(listQuery.select.mock.calls[0][0]).not.toContain('framework_state.sections')
+    expect(RuntimeInstance.aggregate).toHaveBeenCalledTimes(1)
+    const pipeline = RuntimeInstance.aggregate.mock.calls[0][0]
+    expect(pipeline).toEqual([
+      { $match: {
+        customerId: new mongoose.Types.ObjectId(CUSTOMER_ID),
+        tenantId: new mongoose.Types.ObjectId(TENANT_ID),
+        runtimeType: 'VALUE_NARRATIVE',
+      } },
+      { $project: Object.fromEntries([
+        '_id', 'runtimeInstanceKey', 'customerId', 'tenantId', 'workspaceId', 'runtimeType',
+        'frameworkKey', 'packageId', 'packageKey', 'packageVersion', 'status', 'executionStatus',
+        'runtimeMode', 'name', 'description', 'lockedAt', 'lockedBy', 'lockedReason', 'createdAt', 'updatedAt',
+        'framework_state.lifecycle.stage', 'framework_state.lifecycle.status',
+        'framework_state.lifecycle.lockStatus', 'framework_state.lifecycle.lockState', 'framework_state.lifecycle.locked',
+        'framework_state.validation.state', 'framework_state.validation.status', 'framework_state.validation.result',
+        'framework_state.readiness.state', 'framework_state.readiness.validationState',
+        'framework_state.readiness.completionState', 'framework_state.readiness.completionStatus',
+        'framework_state.readiness.lockStatus', 'framework_state.readiness.snapshotStatus',
+        'framework_state.readiness.submittedForReview', 'framework_state.lock.state',
+        'framework_state.lock.status', 'framework_state.lock.locked',
+      ].map((field) => [field, 1])) },
+      { $sort: { updatedAt: -1, createdAt: -1 } }, { $skip: 0 }, { $limit: 5 },
+    ])
+    expect(pipeline[0].$match.customerId).toBeInstanceOf(mongoose.Types.ObjectId)
+    expect(pipeline[0].$match.tenantId).toBeInstanceOf(mongoose.Types.ObjectId)
+    expect(RuntimeInstance.find).not.toHaveBeenCalled()
     expect(RuntimeInstance.countDocuments).toHaveBeenCalledWith({
       customerId: CUSTOMER_ID,
       tenantId: TENANT_ID,
@@ -3037,9 +3226,9 @@ describe('Runtime Instance API', () => {
       .set('Authorization', `Bearer ${token}`)
 
     expect(res.status).toBe(200)
-    expect(RuntimeInstance.find).toHaveBeenCalledWith(expect.objectContaining({
-      customerId: CUSTOMER_ID,
-      tenantId: TENANT_ID,
+    expect(RuntimeInstance.aggregate.mock.calls[0][0][0].$match).toEqual(expect.objectContaining({
+      customerId: new mongoose.Types.ObjectId(CUSTOMER_ID),
+      tenantId: new mongoose.Types.ObjectId(TENANT_ID),
       runtimeType: 'VALUE_NARRATIVE',
       $or: expect.arrayContaining([
         { name: expect.any(RegExp) },
@@ -3058,7 +3247,7 @@ describe('Runtime Instance API', () => {
   })
 
   test('projects governed runtime state into bounded list summary fields without returning framework state', async () => {
-    RuntimeInstance.find.mockReturnValue(buildRuntimeInstanceFindChain([
+    RuntimeInstance.aggregate.mockResolvedValue([
       makeRuntimeInstance({
         status: 'ACTIVE',
         framework_state: {
@@ -3078,7 +3267,7 @@ describe('Runtime Instance API', () => {
           intelligence_graph: { nodes: [{ nodeId: 'node-1' }] },
         },
       }),
-    ]))
+    ])
     const token = await getAccessTokenForUser(makeCustomerAdmin())
 
     const res = await request
@@ -3116,6 +3305,7 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(422)
     expect(res.body.error.details.runtimeType).toBe('runtimeType is required')
+    expect(RuntimeInstance.aggregate).not.toHaveBeenCalled()
     expect(RuntimeInstance.find).not.toHaveBeenCalled()
   })
 
@@ -3133,7 +3323,58 @@ describe('Runtime Instance API', () => {
 
     expect(res.status).toBe(403)
     expect(res.body.error.details.reason).toBe('FORBIDDEN')
+    expect(RuntimeInstance.aggregate).not.toHaveBeenCalled()
     expect(RuntimeInstance.find).not.toHaveBeenCalled()
+  })
+
+  test('list aggregation preserves status, literal escaped search and page two before returning summaries', async () => {
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+    RuntimeInstance.countDocuments.mockResolvedValueOnce(12).mockResolvedValueOnce(3)
+    const res = await request.get('/api/v1/runtime-instances')
+      .query({ customerId: CUSTOMER_ID, tenantId: TENANT_ID, runtimeType: 'VALUE_NARRATIVE',
+        status: 'LOCKED', q: '  Parlon.(v3)+[proof]  ', page: 2, pageSize: 5 })
+      .set('Authorization', `Bearer ${token}`)
+    expect(res.status).toBe(200)
+    const pipeline = RuntimeInstance.aggregate.mock.calls[0][0]
+    const escaped = /Parlon\.\(v3\)\+\[proof\]/i
+    const search = ['name', 'description', 'runtimeInstanceKey', 'packageKey', 'packageVersion', 'frameworkKey']
+      .map((field) => ({ [field]: escaped }))
+    expect(pipeline[0]).toEqual({ $match: {
+      customerId: new mongoose.Types.ObjectId(CUSTOMER_ID), tenantId: new mongoose.Types.ObjectId(TENANT_ID),
+      runtimeType: 'VALUE_NARRATIVE', status: 'LOCKED', $or: search,
+    } })
+    expect(pipeline.map((stage) => Object.keys(stage)[0])).toEqual(['$match', '$project', '$sort', '$skip', '$limit'])
+    expect(pipeline.slice(2)).toEqual([{ $sort: { updatedAt: -1, createdAt: -1 } }, { $skip: 5 }, { $limit: 5 }])
+    expect(RuntimeInstance.countDocuments).toHaveBeenNthCalledWith(1, {
+      customerId: CUSTOMER_ID, tenantId: TENANT_ID, runtimeType: 'VALUE_NARRATIVE', status: 'LOCKED', $or: search,
+    })
+    expect(RuntimeInstance.countDocuments).toHaveBeenNthCalledWith(2, {
+      customerId: CUSTOMER_ID, tenantId: TENANT_ID, runtimeType: 'VALUE_NARRATIVE', status: 'ACTIVE',
+    })
+    expect(res.body.meta).toEqual(expect.objectContaining({ page: 2, pageSize: 5, total: 12, totalPages: 3 }))
+    expect(RuntimeInstance.find).not.toHaveBeenCalled()
+  })
+
+  test('list aggregation propagates a database failure as 500 rather than a successful empty list', async () => {
+    RuntimeInstance.aggregate.mockRejectedValue(new Error('Test aggregate unavailable'))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+    const res = await request.get('/api/v1/runtime-instances')
+      .query({ customerId: CUSTOMER_ID, tenantId: TENANT_ID, runtimeType: 'VALUE_NARRATIVE' })
+      .set('Authorization', `Bearer ${token}`)
+    expect(res.status).toBe(500)
+    expect(res.body.error).toBeDefined()
+    expect(res.body.data).toBeUndefined()
+    expect(RuntimeInstance.aggregate).toHaveBeenCalledTimes(1)
+    expect(RuntimeInstance.find).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('list aggregation rejects unauthenticated access before querying runtimes', async () => {
+    const res = await request.get('/api/v1/runtime-instances')
+      .query({ customerId: CUSTOMER_ID, tenantId: TENANT_ID, runtimeType: 'VALUE_NARRATIVE' })
+    expect(res.status).toBe(401)
+    expect(RuntimeInstance.aggregate).not.toHaveBeenCalled()
+    expect(RuntimeInstance.countDocuments).not.toHaveBeenCalled()
   })
 
   test('allows assigned customer-scoped tenant admins to list, open, and render runtime instances', async () => {
@@ -6354,6 +6595,449 @@ describe('Runtime Instance API', () => {
     expect(scopedView.summary).not.toContain('Accepted evidence fact 7.')
     expect(scopedView.summary).not.toContain(rejectedEvidenceObject.extractedFact)
     expect(persistedEvidencePack.scopedViews.value_drivers).toEqual(scopedView)
+  })
+
+  describe('GET/PATCH discovery-contradictions review', () => {
+    const timestamp = '2026-05-19T08:01:00.000Z'
+    const rationale = 'These statements concern different propositions, not opposing facts.'
+    const prepare = async () => {
+      const { buildDiscoveryHealth } = await import('../services/discoveryIntelligenceService.js')
+      const { getDiscoveryContradictionReview } = await import('../services/discoveryContradictionReviewService.js')
+      const evidenceObjects = [
+        makeDiscoveryEvidenceObject({
+          extractedFact: 'Target offer: Managed proposal platform',
+          coverageArea: 'Products', category: 'Products', reviewStatus: 'ACCEPTED',
+          validationStatus: 'UNVALIDATED', graphReadyMetadata: { domain: 'Products', validationStatus: 'UNVALIDATED' },
+        }),
+        makeDiscoveryEvidenceObject({
+          evidenceObjectId: 'evidence_targetOffer_fixture', sourceId: 'input_targetOffer',
+          extractedFact: 'The proposal platform does not establish customer outcomes.',
+          coverageArea: 'Products', category: 'Products', reviewStatus: 'ACCEPTED',
+          validationStatus: 'VALIDATED', graphReadyMetadata: { domain: 'Products', validationStatus: 'VALIDATED' },
+          lineageRef: 'lineage:input_targetOffer:fixture',
+        }),
+      ]
+      const discoveryHealth = buildDiscoveryHealth({ evidenceObjects })
+      const candidate = discoveryHealth.contradictionCandidates[0]
+      expect(candidate).toBeDefined()
+      const evidencePack = makeReviewableDiscoveryEvidencePack({ evidenceObjects, discoveryHealth, contradictionReviews: [] })
+      let stored = makeRuntimeInstanceDocument({
+        updatedBy: CUSTOMER_ADMIN_ID, updatedAt: new Date(timestamp),
+        framework_state: {
+          lifecycle: { stage: 'DRAFT' }, evidence_pack: evidencePack,
+          sections: { situation: { accepted: { content: 'Preserved accepted section.' } } },
+          validation: {}, policy: {}, attachments: {}, artifacts: {},
+        },
+      })
+      RuntimeInstance.findOne = jest.fn(async () => stored)
+      // Model the existing disconnected CAS/compensation path, not a Mongo transaction.
+      RuntimeInstance.findOneAndUpdate = jest.fn(async (filter, update) => {
+        if (filter.stateVersion !== stored.stateVersion
+          || new Date(filter.updatedAt).valueOf() !== new Date(stored.updatedAt).valueOf()) return null
+        stored = makeRuntimeInstanceDocument({
+          ...stored, ...update.$set, updatedAt: new Date(new Date(stored.updatedAt).valueOf() + 1000),
+        })
+        return stored
+      })
+      RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeEvidencePackRuntimePathRecord()))
+      const review = getDiscoveryContradictionReview(candidate, evidenceObjects, [], RUNTIME_INSTANCE_ID)
+      return {
+        candidate, getStored: () => stored,
+        path: `/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/discovery-contradictions/${candidate.contradictionId}/review`,
+        body: { expectedUpdatedAt: timestamp, expectedEvidencePairHash: review.evidencePairHash,
+          disposition: 'NOT_CONTRADICTORY', rationale, confirm: true },
+      }
+    }
+    const send = async (fixture, body = fixture.body, user = makeCustomerAdmin()) => request
+      .patch(fixture.path).set('Authorization', `Bearer ${await getAccessTokenForUser(user)}`).send(body)
+    const assertNoWrite = () => {
+      expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+      expect(AuditLog.createLog).not.toHaveBeenCalled()
+    }
+
+    const prepareGet = async () => {
+      const fixture = await prepare()
+      const stored = fixture.getStored()
+      const pack = stored.framework_state.evidence_pack
+      // The read resolver receives only projected root metadata, never root evidence or sections.
+      const root = {
+        _id: stored._id, runtimeInstanceKey: stored.runtimeInstanceKey,
+        customerId: stored.customerId, tenantId: stored.tenantId,
+        runtimeType: stored.runtimeType, frameworkKey: stored.frameworkKey,
+        status: stored.status, executionStatus: stored.executionStatus,
+        stateVersion: stored.stateVersion, updatedAt: stored.updatedAt,
+        framework_state: {
+          lifecycle: { ...stored.framework_state.lifecycle },
+          evidence_pack: {
+            discoveryHealth: { contradictionCandidates: pack.discoveryHealth.contradictionCandidates },
+            contradictionReviews: [], state: { ...pack.state },
+            contradictionReviewEpoch: pack.contradictionReviewEpoch,
+            evidenceReady: pack.evidenceReady, needsRefresh: pack.needsRefresh,
+          },
+        },
+      }
+      const rootQuery = {
+        select: jest.fn().mockReturnThis(),
+        maxTimeMS: jest.fn(async () => root),
+      }
+      RuntimeInstance.findOne = jest.fn().mockReturnValue(rootQuery)
+      const fields = ['evidenceObjectId', 'sourceId', 'sourceType', 'lineageRef', 'extractedFact', 'reviewStatus', 'validationStatus']
+      const rows = pack.evidenceObjects.map((item) => Object.fromEntries(fields
+        .filter((key) => item[key] !== undefined).map((key) => [key, item[key]])))
+      const evidenceQuery = {
+        select: jest.fn().mockReturnThis(), limit: jest.fn().mockReturnThis(),
+        maxTimeMS: jest.fn().mockReturnThis(), lean: jest.fn(async () => rows),
+      }
+      RuntimeEvidenceObject.find = jest.fn().mockReturnValue(evidenceQuery)
+      return { ...fixture, root, rootQuery, rows, evidenceQuery,
+        path: `/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/discovery-contradictions` }
+    }
+    const get = async (fixture, user = makeCustomerAdmin()) => request.get(fixture.path)
+      .set('Authorization', `Bearer ${await getAccessTokenForUser(user)}`)
+
+    test('GET returns V2 pairs through bounded projections and exact current scope without full root state', async () => {
+      const f = await prepareGet()
+      const before = JSON.stringify(f.root)
+      const res = await get(f)
+      expect(res.status).toBe(200)
+      expect(res.body.data.canReview).toBe(true)
+      expect(res.body.data.candidates).toHaveLength(1)
+      expect(res.body.data.candidates[0]).toEqual(expect.objectContaining({
+        contradictionId: f.candidate.contradictionId, evidencePairHash: f.body.expectedEvidencePairHash,
+        reviewStatus: 'UNREVIEWED', evidence: expect.arrayContaining(f.rows.map((row) => expect.objectContaining(row))),
+      }))
+      expect(f.rootQuery.select).toHaveBeenCalledTimes(1)
+      const projection = f.rootQuery.select.mock.calls[0][0].split(/\s+/)
+      expect(projection).toEqual(expect.arrayContaining([
+        '_id', 'customerId', 'tenantId', 'runtimeInstanceKey', 'stateVersion',
+        'framework_state.evidence_pack.discoveryHealth.contradictionCandidates',
+        'framework_state.evidence_pack.contradictionReviews',
+      ]))
+      for (const field of ['framework_state', 'framework_state.sections', 'framework_state.evidence_pack',
+        'framework_state.evidence_pack.evidenceObjects', 'framework_state.evidence_pack.sourceRegistry']) {
+        expect(projection).not.toContain(field)
+      }
+      expect(f.rootQuery.maxTimeMS).toHaveBeenCalledWith(2000)
+      expect(RuntimeEvidenceObject.find).toHaveBeenCalledTimes(1)
+      expect(RuntimeEvidenceObject.find).toHaveBeenCalledWith({
+        runtimeInstanceId: RUNTIME_INSTANCE_ID, runtimeInstanceKey: f.root.runtimeInstanceKey,
+        customerId: CUSTOMER_ID, tenantId: TENANT_ID, current: true,
+        stateVersion: f.root.stateVersion, sourceStateVersion: f.root.stateVersion,
+        evidenceObjectId: { $in: f.candidate.evidenceObjectIds },
+      })
+      expect(f.evidenceQuery.select).toHaveBeenCalledWith('evidenceObjectId sourceId sourceType lineageRef extractedFact reviewStatus validationStatus')
+      expect(f.evidenceQuery.limit).toHaveBeenCalledWith(17)
+      expect(f.evidenceQuery.maxTimeMS).toHaveBeenCalledWith(2000)
+      expect(f.evidenceQuery.lean).toHaveBeenCalledTimes(1)
+      expect(JSON.stringify(f.root)).toBe(before)
+      assertNoWrite()
+    })
+
+    test('GET reads locked pairs but denies review without changing history', async () => {
+      const f = await prepareGet()
+      f.root.status = 'LOCKED'
+      f.root.framework_state.lifecycle.stage = 'LOCKED'
+      const res = await get(f)
+      expect(res.status).toBe(200)
+      expect(res.body.data.canReview).toBe(false)
+      expect(res.body.data.candidates[0].evidence).toHaveLength(2)
+      expect(res.body.data.candidates[0].evidencePairHash).toBe(f.body.expectedEvidencePairHash)
+      expect(f.root.framework_state.evidence_pack.contradictionReviews).toEqual([])
+      assertNoWrite()
+    })
+
+    test.each(['', '11111111-1111-4111-8111-111111111111'])('GET honors the exact review epoch %s without reviving mismatched history', async (reviewEpoch) => {
+      const f = await prepareGet()
+      const { getDiscoveryContradictionReview, DISCOVERY_CONTRADICTION_REVIEW_CONTRACT } =
+        await import('../services/discoveryContradictionReviewService.js')
+      const pack = f.root.framework_state.evidence_pack
+      if (reviewEpoch) pack.contradictionReviewEpoch = reviewEpoch
+      const { evidencePairHash } = getDiscoveryContradictionReview(f.candidate, f.rows, [], RUNTIME_INSTANCE_ID, reviewEpoch)
+      pack.contradictionReviews = [{
+        contractVersion: DISCOVERY_CONTRADICTION_REVIEW_CONTRACT,
+        reviewId: '22222222-2222-4222-8222-222222222222', runtimeInstanceId: RUNTIME_INSTANCE_ID,
+        contradictionId: f.candidate.contradictionId, evidencePairHash, reviewEpoch,
+        disposition: 'NOT_CONTRADICTORY', rationale, reviewedBy: CUSTOMER_ADMIN_ID, reviewedAt: timestamp,
+      }]
+      const current = await get(f)
+      expect(current.status).toBe(200)
+      expect(current.body.data.candidates[0].reviewStatus).toBe('NOT_CONTRADICTORY')
+      expect(f.rootQuery.select.mock.calls[0][0].split(/\s+/))
+        .toContain('framework_state.evidence_pack.contradictionReviewEpoch')
+      pack.contradictionReviewEpoch = '33333333-3333-4333-8333-333333333333'
+      const stale = await get(f)
+      expect(stale.status).toBe(200)
+      expect(stale.body.data.candidates[0].reviewStatus).toBe('STALE')
+      expect(stale.body.data.candidates[0].evidencePairHash).not.toBe(evidencePairHash)
+      expect(pack.contradictionReviews[0].reviewEpoch).toBe(reviewEpoch)
+      assertNoWrite()
+    })
+
+    test.each(['discovery-reset', 'discovery-inputs'])('%s rotates epoch and retains decisions without reviving an identical pair', async (boundary) => {
+      const f = await prepare()
+      // Keep this route regression focused on evidence history rather than section reset behavior.
+      f.getStored().framework_state.sections = {}
+      const originalPair = JSON.parse(JSON.stringify(f.getStored().framework_state.evidence_pack.evidenceObjects))
+      const { getDiscoveryContradictionReview } = await import('../services/discoveryContradictionReviewService.js')
+      expect((await send(f)).status).toBe(200)
+      const beforePack = f.getStored().framework_state.evidence_pack
+      const history = JSON.stringify(beforePack.contradictionReviews)
+      expect(beforePack.contradictionReviews[0].reviewEpoch).toBe('')
+      expect(getDiscoveryContradictionReview(f.candidate, originalPair, beforePack.contradictionReviews,
+        RUNTIME_INSTANCE_ID, beforePack.contradictionReviewEpoch).reviewStatus).toBe('NOT_CONTRADICTORY')
+      globalThis.fetch = jest.fn(() => { throw new Error('Standard input-only acquisition must not fetch a provider or website') })
+      const body = boundary === 'discovery-reset'
+        ? { confirmReset: true, reason: 'USER_REQUESTED_DISCOVERY_RESET' }
+        : { acquisitionProfile: 'STANDARD', inputs: {
+            companyWebsite: 'https://acme.example', companyName: 'Acme',
+            marketRegion: 'United Kingdom', targetOffer: 'Managed proposal platform',
+          } }
+      const res = await request.patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/${boundary}`)
+        .set('Authorization', `Bearer ${await getAccessTokenForUser(makeCustomerAdmin())}`)
+        .send({ ...body, expectedUpdatedAt: f.getStored().updatedAt.toISOString() })
+      expect(res.status).toBe(200)
+      const after = f.getStored().framework_state.evidence_pack
+      expect(after.contradictionReviewEpoch).toMatch(/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/)
+      expect(after.contradictionReviewEpoch).not.toBe(beforePack.contradictionReviewEpoch)
+      expect(JSON.stringify(after.contradictionReviews)).toBe(history)
+      // Re-evaluate identical original bytes against the actual persisted epoch; do not restore evidence.
+      const replay = getDiscoveryContradictionReview(f.candidate, originalPair, after.contradictionReviews,
+        RUNTIME_INSTANCE_ID, after.contradictionReviewEpoch)
+      expect(replay.reviewStatus).toBe('STALE')
+      expect(replay.evidencePairHash).not.toBe(f.body.expectedEvidencePairHash)
+      expect(globalThis.fetch).not.toHaveBeenCalled()
+      expect(RuntimeInstance.findOneAndUpdate).toHaveBeenCalledTimes(2)
+      expect(AuditLog.createLog).toHaveBeenCalledTimes(2)
+    })
+
+    test.each(['missing', 'duplicate'])('GET reports a %s V2 pair as STALE with empty hash', async (kind) => {
+      const f = await prepareGet()
+      if (kind === 'missing') f.rows.pop()
+      else f.rows.push({ ...f.rows[0] })
+      const res = await get(f)
+      expect(res.status).toBe(200)
+      expect(res.body.data.candidates[0]).toEqual(expect.objectContaining({
+        evidencePairHash: '', reviewStatus: 'STALE', evidence: [],
+      }))
+      assertNoWrite()
+    })
+
+    test('GET denies unauthenticated access before root or V2 lookup', async () => {
+      const f = await prepareGet()
+      const res = await request.get(f.path)
+      expect(res.status).toBe(401)
+      expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
+      expect(RuntimeEvidenceObject.find).not.toHaveBeenCalled()
+      assertNoWrite()
+    })
+
+    test('GET denies missing VMF_UPDATE before V2 lookup', async () => {
+      const f = await prepareGet()
+      const res = await get(f, makeRegularUser())
+      expect(res.status).toBe(403)
+      expect(RuntimeEvidenceObject.find).not.toHaveBeenCalled()
+      assertNoWrite()
+    })
+
+    test('GET denies wrong customer before V2 lookup', async () => {
+      const f = await prepareGet()
+      f.root.customerId = OTHER_CUSTOMER_ID
+      const res = await get(f)
+      expect(res.status).toBe(403)
+      expect(RuntimeEvidenceObject.find).not.toHaveBeenCalled()
+      assertNoWrite()
+    })
+
+    test('GET denies wrong tenant before V2 lookup even with own-tenant VMF_UPDATE', async () => {
+      const f = await prepareGet()
+      f.root.tenantId = OTHER_TENANT_ID
+      Role.find = jest.fn().mockReturnValue(buildRoleQueryChain(buildDefaultRoleRows().map((role) =>
+        role.key === 'USER' ? { ...role, permissions: [...role.permissions, 'VMF_UPDATE'] } : role)))
+      const res = await get(f, makeRegularUser())
+      expect(res.status).toBe(403)
+      expect(RuntimeEvidenceObject.find).not.toHaveBeenCalled()
+      assertNoWrite()
+    })
+
+    test('GET returns not found before V2 lookup for missing runtime', async () => {
+      const f = await prepareGet()
+      f.rootQuery.maxTimeMS.mockResolvedValue(null)
+      const res = await get(f)
+      expect(res.status).toBe(404)
+      expect(res.body.error.details.reason).toBe('RUNTIME_INSTANCE_NOT_FOUND')
+      expect(RuntimeEvidenceObject.find).not.toHaveBeenCalled()
+      assertNoWrite()
+    })
+
+    test.each(['NOT_CONTRADICTORY', 'CONFIRMED', 'REOPENED'])('appends %s with server attribution without changing evidence or sections', async (disposition) => {
+      const f = await prepare()
+      const before = JSON.stringify(f.getStored().framework_state.evidence_pack.evidenceObjects)
+      const sections = JSON.stringify(f.getStored().framework_state.sections)
+      const startedAt = Date.now()
+      const res = await send(f, { ...f.body, disposition })
+      expect(res.status).toBe(200)
+      const state = f.getStored().framework_state
+      expect(JSON.stringify(state.evidence_pack.evidenceObjects)).toBe(before)
+      expect(JSON.stringify(state.sections)).toBe(sections)
+      expect(state.evidence_pack.contradictionReviews).toHaveLength(1)
+      const entry = state.evidence_pack.contradictionReviews[0]
+      expect(entry).toEqual(expect.objectContaining({ disposition, rationale,
+        evidencePairHash: f.body.expectedEvidencePairHash, runtimeInstanceId: RUNTIME_INSTANCE_ID,
+        reviewedBy: CUSTOMER_ADMIN_ID, reviewEpoch: '' }))
+      expect(new Date(entry.reviewedAt).valueOf()).toBeGreaterThanOrEqual(startedAt)
+      expect(new Date(entry.reviewedAt).valueOf()).toBeLessThanOrEqual(Date.now())
+      expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+        action: 'RUNTIME_STATE_MUTATED', resourceId: RUNTIME_INSTANCE_ID,
+        diff: expect.objectContaining({ contradictionReview: expect.any(Object) }),
+      }))
+    })
+
+    test.each([
+      ['unconfirmed', { confirm: false }], ['short rationale', { rationale: 'short' }],
+      ['long rationale', { rationale: 'x'.repeat(2001) }], ['bad hash', { expectedEvidencePairHash: 'sha256:bad' }],
+      ['bad disposition', { disposition: 'DISMISSED' }], ['injected actor', { reviewedBy: SUPER_ADMIN_ID }],
+      ['missing timestamp', { expectedUpdatedAt: undefined }],
+    ])('rejects malformed request: %s', async (_label, patch) => {
+      const f = await prepare()
+      const res = await send(f, { ...f.body, ...patch })
+      expect(res.status).toBe(422)
+      expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
+      assertNoWrite()
+    })
+
+    test('rejects a missing candidate', async () => {
+      const f = await prepare()
+      f.path = f.path.replace(f.candidate.contradictionId, 'contradiction_missing')
+      const res = await send(f)
+      expect(res.status).toBe(404)
+      expect(res.body.error.details.reason).toBe('CONTRADICTION_REVIEW_NOT_FOUND')
+      assertNoWrite()
+    })
+
+    test.each(['missing', 'rejected', 'changed'])('rejects a %s evidence pair', async (kind) => {
+      const f = await prepare()
+      const pack = f.getStored().framework_state.evidence_pack
+      if (kind === 'missing') pack.evidenceObjects.pop()
+      if (kind === 'rejected') pack.evidenceObjects[1].reviewStatus = 'REJECTED'
+      if (kind === 'changed') pack.evidenceObjects[1].extractedFact += ' Additional source qualification.'
+      const res = await send(f)
+      expect(res.status).toBe(409)
+      expect(res.body.error.details.reason).toBe('CONTRADICTION_REVIEW_STALE')
+      assertNoWrite()
+    })
+
+    test('rejects stale expected timestamp', async () => {
+      const f = await prepare()
+      const res = await send(f, { ...f.body, expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+      expect(res.status).toBe(409)
+      expect(res.body.error.details.reason).toBe('RUNTIME_MUTATION_STALE')
+      assertNoWrite()
+    })
+
+    test('rejects a well-formed but stale pair hash', async () => {
+      const f = await prepare()
+      const res = await send(f, { ...f.body, expectedEvidencePairHash: `sha256:${'0'.repeat(64)}` })
+      expect(res.status).toBe(409)
+      expect(res.body.error.details.reason).toBe('CONTRADICTION_REVIEW_STALE')
+      assertNoWrite()
+    })
+
+    test.each(['needsRefresh', 'notReady'])('rejects evidence that is %s', async (condition) => {
+      const f = await prepare()
+      const pack = f.getStored().framework_state.evidence_pack
+      if (condition === 'needsRefresh') {
+        pack.needsRefresh = true
+        pack.state = { ...pack.state, needsRefresh: true }
+      } else {
+        pack.evidenceReady = false
+        pack.state = { ...pack.state, evidenceReady: false }
+      }
+      const res = await send(f)
+      expect(res.status).toBe(409)
+      assertNoWrite()
+    })
+
+    test('preserves earlier decisions when reopening with a fresh CAS token', async () => {
+      const f = await prepare()
+      expect((await send(f)).status).toBe(200)
+      const first = JSON.stringify(f.getStored().framework_state.evidence_pack.contradictionReviews[0])
+      const res = await send(f, { ...f.body, disposition: 'REOPENED', expectedUpdatedAt: f.getStored().updatedAt.toISOString() })
+      expect(res.status).toBe(200)
+      const history = f.getStored().framework_state.evidence_pack.contradictionReviews
+      expect(history).toHaveLength(2)
+      expect(JSON.stringify(history[0])).toBe(first)
+      expect(history[1].disposition).toBe('REOPENED')
+      expect(history[1].reviewId).not.toBe(history[0].reviewId)
+    })
+
+    test.each(['APPROVED', 'PUBLISHED', 'LOCKED'])('rejects immutable %s lifecycle', async (stage) => {
+      const f = await prepare()
+      f.getStored().framework_state.lifecycle.stage = stage
+      const res = await send(f)
+      expect(res.status).toBe(409)
+      assertNoWrite()
+    })
+
+    test('rejects unauthenticated review', async () => {
+      const f = await prepare()
+      const res = await request.patch(f.path).send(f.body)
+      expect(res.status).toBe(401)
+      assertNoWrite()
+    })
+
+    test('rejects a user without VMF_UPDATE', async () => {
+      const f = await prepare()
+      const res = await send(f, f.body, makeRegularUser())
+      expect(res.status).toBe(403)
+      assertNoWrite()
+    })
+
+    test('rejects a runtime belonging to another customer', async () => {
+      const f = await prepare()
+      f.getStored().customerId = OTHER_CUSTOMER_ID
+      const res = await send(f)
+      expect(res.status).toBe(403)
+      assertNoWrite()
+    })
+
+    test('rejects another tenant even when the user has VMF_UPDATE in their own tenant', async () => {
+      const f = await prepare()
+      f.getStored().tenantId = OTHER_TENANT_ID
+      Role.find = jest.fn().mockReturnValue(buildRoleQueryChain(buildDefaultRoleRows().map((role) =>
+        role.key === 'USER' ? { ...role, permissions: [...role.permissions, 'VMF_UPDATE'] } : role)))
+      const res = await send(f, f.body, makeRegularUser())
+      expect(res.status).toBe(403)
+      assertNoWrite()
+    })
+
+    test('compensates history append on audit failure and permits one fresh retry without duplicates', async () => {
+      const f = await prepare()
+      const before = JSON.stringify(f.getStored().framework_state)
+      const audit = AuditLog.createLog
+      AuditLog.createLog = jest.fn().mockRejectedValueOnce(new Error('audit unavailable')).mockImplementation(audit)
+      const failed = await send(f)
+      expect(failed.status).toBe(500)
+      expect(failed.body.error.code).toBe('RUNTIME_STATE_MUTATION_AUDIT_FAILED')
+      expect(RuntimeInstance.findOneAndUpdate).toHaveBeenCalledTimes(2)
+      expect(JSON.stringify(f.getStored().framework_state)).toBe(before)
+      const retried = await send(f, { ...f.body, expectedUpdatedAt: f.getStored().updatedAt.toISOString() })
+      expect(retried.status).toBe(200)
+      expect(f.getStored().framework_state.evidence_pack.contradictionReviews).toHaveLength(1)
+      const duplicate = await send(f)
+      expect(duplicate.status).toBe(409)
+      expect(duplicate.body.error.details.reason).toBe('RUNTIME_MUTATION_STALE')
+      expect(f.getStored().framework_state.evidence_pack.contradictionReviews).toHaveLength(1)
+    })
+
+    test('fails closed when root CAS loses a race without a success audit', async () => {
+      const f = await prepare()
+      RuntimeInstance.findOneAndUpdate = jest.fn().mockResolvedValue(null)
+      const res = await send(f)
+      expect(res.status).toBe(409)
+      expect(res.body.error.details.reason).toBe('RUNTIME_MUTATION_STALE')
+      expect(f.getStored().framework_state.evidence_pack.contradictionReviews).toEqual([])
+      expect(AuditLog.createLog).not.toHaveBeenCalled()
+    })
   })
 
   test('PATCH /api/v1/runtime-instances/:id/discovery-evidence/:evidenceObjectId/review rejects invalid review status before mutation lookup', async () => {
@@ -14318,6 +15002,392 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     expect(res.body.error.details.supportedRuntimeTypes).toEqual(['VALUE_NARRATIVE'])
     expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
     expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  describe('connected mutation raw snapshot', () => {
+    test.each([
+      ['empty minimized write', 'success', {}],
+      ['nonempty write', 'success', { summary: 'Retain this supplied input.' }],
+      ['stale CAS', 'cas', {}],
+      ['missing snapshot', 'missing', {}],
+      ['malformed snapshot', 'malformed', {}],
+      ['raw read failure', 'read', {}],
+      ['child stage failure', 'stage', {}],
+      ['audit failure', 'audit', {}],
+    ])('%s uses only the saved current-version source or aborts', async (_, failure, value) => {
+      const Section = (await import('../models/RuntimeStateSection.js')).default
+      const Source = (await import('../models/RuntimeEvidenceSource.js')).default
+      const Receipt = (await import('../models/RuntimeStateMigrationReceipt.js')).default
+      const Snapshot = (await import('../models/RuntimeGraphSnapshot.js')).default
+      const Element = (await import('../models/RuntimeGraphElement.js')).default
+      const { createRuntimeStateLegacySourceRowSet } = await import('../services/runtimeStateLegacyMapper.js')
+      const restore = []
+      const replace = (object, key, replacement) => {
+        const previous = object[key]
+        restore.push(() => { object[key] = previous })
+        object[key] = replacement
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(mongoose.connection, 'readyState')
+      const order = []
+      const staged = []
+      const committed = []
+      const session = {
+        withTransaction: jest.fn(async (callback) => {
+          try { await callback(); committed.push(...staged) } finally { staged.length = 0 }
+        }),
+        endSession: jest.fn(),
+      }
+      const runtime = makeRuntimeInstanceDocument({
+        updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+        framework_state: {
+          lifecycle: { stage: 'DRAFT' }, sections: {},
+          evidence_pack: { sourceRegistry: [], evidenceObjects: [] },
+          intelligence_graph: { graphVersion: 'initial', nodes: [], edges: [] },
+        },
+      })
+      runtime.framework_state.intelligence_graph.graphVersion = runtime.stateVersion
+      const before = JSON.stringify(runtime)
+      const receiptId = '64b000000000000000000004'
+      const receipt = { receiptId, operationType: 'NATIVE_INITIALIZATION',
+        assignedStateVersion: runtime.stateVersion, status: 'VERIFIED', verifiedAt: runtime.updatedAt }
+      let savedState
+      let newVersion
+      let insertedRows
+      // Explicitly model BSON minimization; this is not evidence of real MongoDB casting.
+      const minimize = (input) => {
+        if (Array.isArray(input)) return input.map(minimize)
+        if (!input || typeof input !== 'object') return input
+        return Object.fromEntries(Object.entries(input).map(([key, item]) => [key, minimize(item)])
+          .filter(([, item]) => !item || typeof item !== 'object' || Array.isArray(item) || Object.keys(item).length))
+      }
+      RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtime)
+      RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimePathRecord({ dataType: 'OBJECT' })))
+      RuntimeInstance.findOneAndUpdate = jest.fn(async (filter, update, options) => {
+        expect(filter).toEqual({ _id: runtime._id, updatedAt: runtime.updatedAt, stateVersion: runtime.stateVersion })
+        expect(options.session).toBe(session)
+        order.push('cas')
+        if (failure === 'cas') return null
+        newVersion = update.$set.stateVersion
+        expect(newVersion).not.toBe(runtime.stateVersion)
+        savedState = minimize(update.$set.framework_state)
+        staged.push('root')
+        return makeRuntimeInstanceDocument({ ...runtime, ...update.$set,
+          updatedAt: new Date('2026-05-19T08:01:00.000Z') })
+      })
+      replace(RuntimeInstance.collection, 'findOne', jest.fn(async (filter, options) => {
+        expect(filter).toEqual({ _id: runtime._id, customerId: runtime.customerId,
+          tenantId: runtime.tenantId, runtimeInstanceKey: runtime.runtimeInstanceKey, stateVersion: newVersion })
+        expect(options).toEqual({ session, projection: { framework_state: 1 } })
+        expect(order).toEqual(['cas'])
+        order.push('raw')
+        if (failure === 'read') throw new Error('Raw snapshot unavailable')
+        if (failure === 'missing') return null
+        if (failure === 'malformed') return { framework_state: [] }
+        return { framework_state: savedState }
+      }))
+      replace(Receipt, 'find', jest.fn(() => buildLeanQuery([receipt])))
+      for (const model of [Section, Source, RuntimeEvidenceObject]) {
+        replace(model, 'find', jest.fn(() => buildLeanQuery([])))
+      }
+      replace(Section, 'insertMany', jest.fn(async (rows, options) => {
+        expect(options).toEqual({ ordered: true, session })
+        expect(order).toEqual(['cas', 'raw'])
+        order.push('children')
+        insertedRows = rows
+        staged.push('children')
+        if (failure === 'stage') throw new Error('Child stage unavailable')
+        return rows
+      }))
+      replace(Section, 'updateMany', jest.fn(async (filter, update, options) => {
+        expect(filter.stateVersion).toBe(newVersion)
+        expect(filter.current).toBe(false)
+        expect(update).toEqual({ $set: { current: true } })
+        expect(options.session).toBe(session)
+        return { modifiedCount: 1 }
+      }))
+      replace(Snapshot, 'find', jest.fn(() => {
+        order.push('graph')
+        return buildLeanQuery([])
+      }))
+      replace(Element, 'findOne', jest.fn(() => buildLeanQuery(null)))
+      AuditLog.createLog = jest.fn(async (event, options) => {
+        expect(options.session).toBe(session)
+        expect(event.action).toBe('RUNTIME_STATE_MUTATED')
+        order.push('audit')
+        if (failure === 'audit') throw new Error('Audit unavailable')
+        staged.push('audit')
+        return event
+      })
+      replace(mongoose, 'startSession', jest.fn().mockResolvedValue(session))
+      Object.defineProperty(mongoose.connection, 'readyState', { configurable: true, value: 1 })
+      try {
+        const token = await getAccessTokenForUser(makeCustomerAdmin())
+        const res = await request.patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/data`)
+          .set('Authorization', `Bearer ${token}`)
+          .send({ runtimePath: 'framework_state.sections.customer_problem', operation: 'WRITE',
+            value, expectedUpdatedAt: runtime.updatedAt.toISOString() })
+        expect(res.status).toBe(failure === 'success' ? 200 : ['cas', 'missing', 'malformed'].includes(failure) ? 409 : 500)
+        expect(session.endSession).toHaveBeenCalledTimes(1)
+        expect(session.withTransaction).toHaveBeenCalledTimes(1)
+        expect(staged).toEqual([])
+        expect(committed).toEqual(failure === 'success' ? ['root', 'children', 'audit'] : [])
+        expect(JSON.stringify(runtime)).toBe(before)
+        if (failure === 'cas') expect(RuntimeInstance.collection.findOne).not.toHaveBeenCalled()
+        if (['cas', 'missing', 'malformed', 'read'].includes(failure)) {
+          expect(Receipt.find).not.toHaveBeenCalled()
+          expect(Section.insertMany).not.toHaveBeenCalled()
+        }
+        if (['missing', 'malformed'].includes(failure)) {
+          expect(res.body.error.code).toBe('CONFLICT')
+          expect(res.body.error.details.reason).toBe('RUNTIME_STATE_VERSION_REQUIRED')
+        }
+        if (!['success', 'audit'].includes(failure)) expect(AuditLog.createLog).not.toHaveBeenCalled()
+        if (failure === 'stage') expect(Snapshot.find).not.toHaveBeenCalled()
+        if (failure === 'audit') expect(res.body.error.code).toBe('RUNTIME_STATE_MUTATION_AUDIT_FAILED')
+        if (failure === 'success') {
+          expect(order).toEqual(['cas', 'raw', 'children', 'graph', 'audit'])
+          const preCast = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state
+          expect(preCast.sections.customer_problem.input).toEqual(value)
+          expect(preCast.sections.customer_problem.review).toEqual({})
+          expect(savedState.sections.customer_problem).not.toHaveProperty('review')
+          if (Object.keys(value).length) expect(savedState.sections.customer_problem.input).toEqual(value)
+          else expect(savedState.sections.customer_problem).not.toHaveProperty('input')
+          const map = (frameworkState) => createRuntimeStateLegacySourceRowSet({
+            legacyInput: { rawBsonBytes: 1000, sections: frameworkState.sections,
+              evidencePack: frameworkState.evidence_pack, intelligenceGraph: frameworkState.intelligence_graph },
+            scope: { runtimeInstanceId: String(runtime._id), runtimeInstanceKey: runtime.runtimeInstanceKey,
+              customerId: String(runtime.customerId), tenantId: String(runtime.tenantId) },
+            stateVersion: newVersion, migrationReceiptId: receiptId,
+            migrationTimestamp: runtime.updatedAt.toISOString(),
+          })
+          expect(insertedRows.map((row) => row.sourceHash)).toEqual(map(savedState).rows.sections.map((row) => row.sourceHash))
+          expect(insertedRows[0].sourceHash).not.toBe(map(preCast).rows.sections[0].sourceHash)
+          expect(insertedRows[0].stateVersion).toBe(newVersion)
+        }
+      } finally {
+        restore.reverse().forEach((undo) => undo())
+        if (descriptor) Object.defineProperty(mongoose.connection, 'readyState', descriptor)
+        else delete mongoose.connection.readyState
+      }
+    })
+  })
+
+  describe('connected action raw snapshot', () => {
+    test.each([
+      ['minimized section state', 'success', {}],
+      ['nonempty section state', 'success', { summary: 'Retain this supplied input.' }],
+      ['stale CAS', 'cas', {}],
+      ['missing snapshot', 'missing', {}],
+      ['malformed snapshot', 'malformed', {}],
+      ['raw read failure', 'read', {}],
+      ['child stage failure', 'stage', {}],
+      ['graph receipt mismatch', 'graph', {}],
+      ['audit failure', 'audit', {}],
+    ])('%s uses only the saved current-version source or aborts', async (_, failure, value) => {
+      const Section = (await import('../models/RuntimeStateSection.js')).default
+      const Source = (await import('../models/RuntimeEvidenceSource.js')).default
+      const Receipt = (await import('../models/RuntimeStateMigrationReceipt.js')).default
+      const Snapshot = (await import('../models/RuntimeGraphSnapshot.js')).default
+      const Element = (await import('../models/RuntimeGraphElement.js')).default
+      const { createRuntimeStateLegacySourceRowSet } = await import('../services/runtimeStateLegacyMapper.js')
+      const restore = []
+      const replace = (object, key, replacement) => {
+        const previous = object[key]
+        restore.push(() => { object[key] = previous })
+        object[key] = replacement
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(mongoose.connection, 'readyState')
+      const order = []
+      const staged = []
+      const committed = []
+      const session = {
+        withTransaction: jest.fn(async (callback) => {
+          try { await callback(); committed.push(...staged) } finally { staged.length = 0 }
+        }),
+        endSession: jest.fn(),
+      }
+      const runtime = makeRuntimeInstanceDocument({
+        updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+        framework_state: {
+          lifecycle: { stage: 'DRAFT' },
+          sections: { customer_problem: {
+            input: value, generated: { content: 'Preserved synthetic generated content.' },
+            accepted: null, review: {}, state: { status: 'DRAFT' },
+            lineage: { sectionKey: 'customer_problem', runtimePath: 'framework_state.sections.customer_problem' },
+            revisions: [], evidenceObjects: [], dependencies: {}, validation: {},
+            confidence: { label: 'Retained metadata' }, intelligence: {}, metrics: {},
+          } },
+          validation: { runtime_required_sections: { is_valid: true, status: 'PASSED' } },
+          readiness: { state: 'READY', ready: true, validationState: 'PASSED' },
+          evidence_pack: { sourceRegistry: [], evidenceObjects: [] },
+          intelligence_graph: { graphVersion: 'initial', nodes: [], edges: [] },
+        },
+      })
+      runtime.framework_state.intelligence_graph.graphVersion = runtime.stateVersion
+      const before = JSON.stringify(runtime)
+      const receiptId = '64b000000000000000000004'
+      const receipt = { receiptId, operationType: 'NATIVE_INITIALIZATION',
+        assignedStateVersion: runtime.stateVersion, status: 'VERIFIED', verifiedAt: runtime.updatedAt }
+      let savedState
+      let newVersion
+      let insertedRows
+      // Explicitly model BSON minimization; this is not evidence of real MongoDB casting.
+      const minimize = (input) => {
+        if (Array.isArray(input)) return input.map(minimize)
+        if (!input || typeof input !== 'object') return input
+        return Object.fromEntries(Object.entries(input).map(([key, item]) => [key, minimize(item)])
+          .filter(([, item]) => !item || typeof item !== 'object' || Array.isArray(item) || Object.keys(item).length))
+      }
+      mockRuntimeInstanceForActionExecution({ document: runtime })
+      FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+        workflowBindings: [makeWorkflowBinding('RUN_VALIDATION')],
+      }))
+      RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord({ dataType: 'OBJECT' })]))
+      UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({ actions: [makeUIAction('RUN_VALIDATION')] })))
+      WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('RUN_VALIDATION')]))
+      RuntimeInstance.findOneAndUpdate = jest.fn(async (filter, update, options) => {
+        expect(filter).toEqual({ _id: runtime._id, updatedAt: runtime.updatedAt, stateVersion: runtime.stateVersion })
+        expect(options.session).toBe(session)
+        expect(update.$set.executionStatus).toBe(runtime.executionStatus)
+        expect(update.$set.framework_state.lifecycle.stage).toBe(runtime.framework_state.lifecycle.stage)
+        expect(update.$set.status).toBeUndefined()
+        order.push('cas')
+        if (failure === 'cas') return null
+        newVersion = update.$set.stateVersion
+        expect(newVersion).not.toBe(runtime.stateVersion)
+        savedState = minimize(update.$set.framework_state)
+        staged.push('root')
+        return makeRuntimeInstanceDocument({ ...runtime, ...update.$set,
+          updatedAt: new Date('2026-05-19T08:01:00.000Z') })
+      })
+      replace(RuntimeInstance.collection, 'findOne', jest.fn(async (filter, options) => {
+        expect(filter).toEqual({ _id: runtime._id, customerId: runtime.customerId,
+          tenantId: runtime.tenantId, runtimeInstanceKey: runtime.runtimeInstanceKey, stateVersion: newVersion })
+        expect(options).toEqual({ session, projection: { framework_state: 1 } })
+        expect(order).toEqual(['cas'])
+        order.push('raw')
+        if (failure === 'read') throw new Error('Raw snapshot unavailable')
+        if (failure === 'missing') return null
+        if (failure === 'malformed') return { framework_state: [] }
+        return { framework_state: savedState }
+      }))
+      let receiptReads = 0
+      replace(Receipt, 'find', jest.fn(() => {
+        receiptReads += 1
+        const selected = failure === 'graph' && receiptReads === 2
+          ? { ...receipt, receiptId: '64b000000000000000000005' } : receipt
+        const query = buildLeanQuery([selected])
+        query.session = jest.fn((selectedSession) => { expect(selectedSession).toBe(session); return query })
+        return query
+      }))
+      const previousRowSet = createRuntimeStateLegacySourceRowSet({
+        legacyInput: { rawBsonBytes: 1000, sections: runtime.framework_state.sections,
+          evidencePack: runtime.framework_state.evidence_pack, intelligenceGraph: runtime.framework_state.intelligence_graph },
+        scope: { runtimeInstanceId: String(runtime._id), runtimeInstanceKey: runtime.runtimeInstanceKey,
+          customerId: String(runtime.customerId), tenantId: String(runtime.tenantId) },
+        stateVersion: runtime.stateVersion, migrationReceiptId: receiptId,
+        migrationTimestamp: runtime.updatedAt.toISOString(),
+      })
+      for (const model of [Section, Source, RuntimeEvidenceObject]) {
+        replace(model, 'find', jest.fn(() => {
+          const rows = model === Section ? previousRowSet.rows.sections.map((row) => ({ ...row, current: true })) : []
+          const query = buildLeanQuery(rows)
+          query.session = jest.fn((selectedSession) => { expect(selectedSession).toBe(session); return query })
+          return query
+        }))
+      }
+      replace(Section, 'insertMany', jest.fn(async (rows, options) => {
+        expect(options).toEqual({ ordered: true, session })
+        expect(order).toEqual(['cas', 'raw'])
+        order.push('children')
+        insertedRows = rows
+        staged.push('children')
+        if (failure === 'stage') throw new Error('Child stage unavailable')
+        return rows
+      }))
+      replace(Section, 'updateMany', jest.fn(async (filter, update, options) => {
+        const promoting = filter.stateVersion === newVersion
+        expect(filter.stateVersion).toBe(promoting ? newVersion : runtime.stateVersion)
+        expect(filter.current).toBe(!promoting)
+        expect(update).toEqual({ $set: { current: promoting } })
+        expect(options.session).toBe(session)
+        return { modifiedCount: 1 }
+      }))
+      replace(Snapshot, 'find', jest.fn(() => {
+        order.push('graph')
+        const query = buildLeanQuery([])
+        query.session = jest.fn((selectedSession) => { expect(selectedSession).toBe(session); return query })
+        return query
+      }))
+      replace(Snapshot, 'insertMany', jest.fn(() => { throw new Error('Unexpected graph finalization write') }))
+      replace(Element, 'findOne', jest.fn(() => buildLeanQuery(null)))
+      AuditLog.createLog = jest.fn(async (event, options) => {
+        expect(options.session).toBe(session)
+        expect(event.action).toBe('RUNTIME_ACTION_EXECUTED')
+        order.push('audit')
+        if (failure === 'audit') throw new Error('Audit unavailable')
+        staged.push('audit')
+        return event
+      })
+      replace(mongoose, 'startSession', jest.fn().mockResolvedValue(session))
+      Object.defineProperty(mongoose.connection, 'readyState', { configurable: true, value: 1 })
+      try {
+        const token = await getAccessTokenForUser(makeCustomerAdmin())
+        const res = await request.post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/RUN_VALIDATION`)
+          .set('Authorization', `Bearer ${token}`)
+          .send({ expectedUpdatedAt: runtime.updatedAt.toISOString() })
+        expect(res.status).toBe(failure === 'success' ? 200 : ['cas', 'missing', 'malformed', 'graph'].includes(failure) ? 409 : 500)
+        expect(session.endSession).toHaveBeenCalledTimes(1)
+        expect(session.withTransaction).toHaveBeenCalledTimes(1)
+        expect(staged).toEqual([])
+        expect(committed).toEqual(failure === 'success' ? ['root', 'children', 'audit'] : [])
+        expect(JSON.stringify(runtime)).toBe(before)
+        expect(RuntimeInstance.findOneAndUpdate).toHaveBeenCalledTimes(1)
+        expect(Snapshot.insertMany).not.toHaveBeenCalled()
+        if (failure === 'cas') expect(RuntimeInstance.collection.findOne).not.toHaveBeenCalled()
+        if (['cas', 'missing', 'malformed', 'read'].includes(failure)) {
+          expect(Receipt.find).not.toHaveBeenCalled()
+          expect(Section.insertMany).not.toHaveBeenCalled()
+        }
+        if (['missing', 'malformed', 'graph'].includes(failure)) {
+          expect(res.body.error.code).toBe('CONFLICT')
+          expect(res.body.error.details.reason).toBe('RUNTIME_STATE_VERSION_REQUIRED')
+        }
+        if (!['success', 'audit'].includes(failure)) expect(AuditLog.createLog).not.toHaveBeenCalled()
+        if (failure === 'stage') expect(Snapshot.find).not.toHaveBeenCalled()
+        if (failure === 'audit') expect(res.body.error.code).toBe('RUNTIME_ACTION_AUDIT_FAILED')
+        if (failure === 'success') {
+          expect(order).toEqual(['cas', 'raw', 'children', 'graph', 'audit'])
+          const preCast = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state
+          expect(preCast.sections.customer_problem.input).toEqual(value)
+          expect(preCast.sections.customer_problem.review).toEqual({})
+          expect(savedState.sections.customer_problem).not.toHaveProperty('review')
+          if (Object.keys(value).length) expect(savedState.sections.customer_problem.input).toEqual(value)
+          else expect(savedState.sections.customer_problem).not.toHaveProperty('input')
+          const map = (frameworkState) => createRuntimeStateLegacySourceRowSet({
+            legacyInput: { rawBsonBytes: 1000, sections: frameworkState.sections,
+              evidencePack: frameworkState.evidence_pack, intelligenceGraph: frameworkState.intelligence_graph },
+            scope: { runtimeInstanceId: String(runtime._id), runtimeInstanceKey: runtime.runtimeInstanceKey,
+              customerId: String(runtime.customerId), tenantId: String(runtime.tenantId) },
+            stateVersion: newVersion, migrationReceiptId: receiptId,
+            migrationTimestamp: runtime.updatedAt.toISOString(),
+          })
+          expect(insertedRows.map((row) => row.sourceHash)).toEqual(map(savedState).rows.sections.map((row) => row.sourceHash))
+          expect(insertedRows[0].sourceHash).not.toBe(map(preCast).rows.sections[0].sourceHash)
+          expect(insertedRows[0].stateVersion).toBe(newVersion)
+          expect(savedState.sections.customer_problem.generated).toEqual(runtime.framework_state.sections.customer_problem.generated)
+          expect(insertedRows[0].projectionReceipt).toEqual(map(savedState).rows.sections[0].projectionReceipt)
+          expect(insertedRows[0].projectionReceipt.sourceHash).not.toBe(map(preCast).rows.sections[0].projectionReceipt.sourceHash)
+          expect(AuditLog.createLog.mock.calls[0][0].diff.runtimeStateSource.sourceSetHash).toBe(map(savedState).sourceSetHash)
+          expect(savedState.sections.customer_problem.confidence).toEqual({ label: 'Retained metadata' })
+          expect(savedState.lifecycle.stage).toBe('DRAFT')
+        }
+      } finally {
+        restore.reverse().forEach((undo) => undo())
+        if (descriptor) Object.defineProperty(mongoose.connection, 'readyState', descriptor)
+        else delete mongoose.connection.readyState
+      }
+    })
   })
 
   test('rolls back a non-transactional runtime state mutation when audit persistence fails', async () => {
@@ -24097,7 +25167,12 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
   })
 
-  test('GENERATE_SECTION persists governed generated content and audit evidence', async () => {
+  test.each([false, true])('GENERATE_SECTION persists governed generated content and audit evidence (canonical rich=%s)', async (canonicalRich) => {
+    const oldAlias = { sectionNarrative: 'Previously stored intelligence alias.' }
+    const canonicalIntelligence = { sectionNarrative: 'New canonical generated intelligence.' }
+    if (canonicalRich) sectionReasoningResultTransform = (result) => ({
+      ...result, generated: { ...result.generated, sectionIntelligence: canonicalIntelligence },
+    })
     const runtimeInstanceDoc = makeRuntimeInstanceDocument({
       updatedAt: new Date('2026-05-19T08:00:00.000Z'),
       framework_state: {
@@ -24122,6 +25197,9 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
         artifacts: {},
       },
     })
+    runtimeInstanceDoc.framework_state.sections.customer_problem = {
+      input: 'Proposal creation is slow.', intelligence: { sectionIntelligence: oldAlias },
+    }
     mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
     FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
       workflowBindings: [makeWorkflowBinding('GENERATE_SECTION')],
@@ -24147,6 +25225,15 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       })
 
     expect(res.status).toBe(200)
+    const persistedSection = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state.sections.customer_problem
+    if (canonicalRich) {
+      expect(persistedSection.generated.sectionIntelligence).toEqual(canonicalIntelligence)
+      expect(persistedSection.intelligence).not.toHaveProperty('sectionIntelligence')
+    } else {
+      expect(persistedSection.generated).not.toHaveProperty('sectionIntelligence')
+      expect(persistedSection.intelligence.sectionIntelligence).toEqual(oldAlias)
+    }
+    expect(runtimeInstanceDoc.framework_state.sections.customer_problem.intelligence.sectionIntelligence).toEqual(oldAlias)
     expect(RuntimeInstance.findOneAndUpdate).toHaveBeenCalledWith(
       expect.any(Object),
       {

@@ -1,10 +1,12 @@
 import { describe, expect, jest, test } from '@jest/globals'
 import { AuditLog, FrameworkPackage } from '../models/index.js'
+import { __testables as repositoryTestables } from '../services/runtimeStateRepository.js'
 
 import {
   FRAMEWORK_OUTCOME_CLAIM_TYPES,
   FRAMEWORK_OUTCOME_HANDOFF_BLOCKER_CODES,
   FRAMEWORK_OUTCOME_HANDOFF_STATUSES,
+  FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_READ_POLICY,
   FRAMEWORK_OUTCOME_HANDOFF_V2_PARITY_CONTRACT_VERSION,
   buildFrameworkOutcomeHandoffV2ParityDigest,
   buildFrameworkOutcomeStudioHandoff,
@@ -13,6 +15,21 @@ import {
   resolveFrameworkOutcomeStudioHandoff,
   validateFrameworkOutcomeStudioHandoff,
 } from '../services/outcomeFrameworkHandoffService.js'
+
+const projectHandoffSection = (section) => {
+  const include = (value, paths) => {
+    if (paths.some((path) => path.length === 0)) return value
+    if (Array.isArray(value)) return value.map((entry) => include(entry, paths))
+    if (value === null || typeof value !== 'object') return value
+    return Object.fromEntries(Object.entries(value).flatMap(([key, child]) => {
+      const childPaths = paths.filter((path) => path[0] === key).map((path) => path.slice(1))
+      return childPaths.length ? [[key, include(child, childPaths)]] : []
+    }))
+  }
+  return include({ sectionDetail: JSON.parse(JSON.stringify(section)) },
+    Object.keys(repositoryTestables.RUNTIME_STATE_V2_HANDOFF_SECTION_PROJECTION)
+      .map((path) => path.split('.'))).sectionDetail
+}
 
 const makeEvidence = (index, evidenceObjectId = `evidence_object_${index}`) => ({
   evidenceObjectId,
@@ -169,6 +186,165 @@ const makeFixture = ({
 }
 
 describe('Framework-to-Outcome Studio Evidence-to-Knowledge handoff', () => {
+  test.each(['null', 'absent'])('returns ordinary missing-truth blockers for %s accepted content', (scenario) => {
+    const fixture = makeFixture()
+    const section = fixture.runtimeInstance.framework_state.sections.customer_context
+    if (scenario === 'null') section.accepted = null
+    else delete section.accepted
+    section.state = { status: 'GENERATED' }
+    section.review = { status: 'PENDING_REVIEW' }
+    section.generated.content = 'Generated content must not become accepted truth.'
+    const before = JSON.stringify(fixture)
+
+    const handoff = buildFrameworkOutcomeStudioHandoff(fixture)
+
+    expect(handoff.status).toBe(FRAMEWORK_OUTCOME_HANDOFF_STATUSES.BLOCKED)
+    expect(handoff.sectionTruth.find((item) => item.sectionKey === 'customer_context').truth)
+      .toEqual(expect.objectContaining({ contentPresent: false, contentHash: '', truthHash: '' }))
+    expect(handoff.blockers).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: FRAMEWORK_OUTCOME_HANDOFF_BLOCKER_CODES.SECTION_TRUTH_MISSING, sectionKey: 'customer_context' }),
+      expect.objectContaining({ code: FRAMEWORK_OUTCOME_HANDOFF_BLOCKER_CODES.PACKAGE_REQUIRED_SECTION_MISSING,
+        sectionKeys: expect.arrayContaining(['customer_context']) }),
+    ]))
+    expect(JSON.stringify(fixture)).toBe(before)
+  })
+
+  test.each(['content', 'summary', 'value', 'narrative'])('preserves accepted %s fallback and precedence', (field) => {
+    const fixture = makeFixture()
+    const baseline = buildFrameworkOutcomeStudioHandoff(fixture)
+    const accepted = fixture.runtimeInstance.framework_state.sections.customer_context.accepted
+    const originalContent = accepted.content
+    const fields = ['content', 'summary', 'value', 'narrative']
+    fields.forEach((key, index) => {
+      accepted[key] = index < fields.indexOf(field) ? '' : key === field ? originalContent : 'Lower-priority content.'
+    })
+    expect(buildFrameworkOutcomeStudioHandoff(fixture)).toEqual(baseline)
+  })
+
+  test.each(['null', 'absent'])('preserves legacy root-accepted fallback when accepted is %s', (scenario) => {
+    const fixture = makeFixture()
+    const baseline = buildFrameworkOutcomeStudioHandoff(fixture)
+    const section = fixture.runtimeInstance.framework_state.sections.customer_context
+    Object.assign(section, section.accepted)
+    if (scenario === 'null') section.accepted = null
+    else delete section.accepted
+    expect(buildFrameworkOutcomeStudioHandoff(fixture)).toEqual(baseline)
+  })
+
+  test.each([
+    'generated projection', 'intelligence projection', 'nested generated projection', 'root projection', 'accepted projection',
+    'empty generated projection', 'empty intelligence projection', 'empty nested generated projection', 'empty root projection',
+    'empty scoped evidence', 'empty nested scoped evidence', 'root scoped evidence',
+    'legacy root accepted', 'summary content', 'value content', 'narrative content', 'blocked refs',
+  ])('preserves the complete resolved handoff after projection: %s', async (scenario) => {
+    const fixture = makeFixture()
+    const section = fixture.runtimeInstance.framework_state.sections.customer_context
+    const receipt = section.generated.evidenceProjection
+    const refs = ['evidence_object_1', { refKey: 'evidence_object_1' }, { sourceId: 'source_1' }]
+    section.lineage = { sectionKey: 'customer_context', runtimePath: 'framework_state.sections.customer_context' }
+    section.accepted.sectionIntelligence = { sectionNarrative: 'Full accepted intelligence', restrictedClaims: [{ claim: 'Unproven ROI' }] }
+    section.accepted.supportingEvidenceRefs = refs
+    section.accepted.truthEligibility = { messages: ['Preserve qualification'] }
+    section.generated.generationBoundaries = ['Generated boundary']
+    section.generated.sections = [{ body: 'Duplicate narrative' }]
+    section.generated.sectionIntelligence = { sectionNarrative: 'Duplicate narrative' }
+    section.intelligence = { acceptedTruth: { truthHash: 'fallback-truth' }, displayProjection: { duplicate: 'cache' } }
+    delete section.accepted.truthHash
+    const scoped = { projection: receipt, sourceRefs: ['evidence_object_2', { sourceId: 'source_2' }], evidenceObjectIds: ['evidence_object_3'] }
+    const alternatives = [
+      [section.generated, 'evidenceProjection'],
+      [section.intelligence, 'scopedEvidence'],
+      [section.generated, 'intelligence'],
+      [section, 'evidenceProjection'],
+      [section.accepted, 'evidenceProjection'],
+    ]
+    delete section.generated.evidenceProjection
+    section.intelligence.scopedEvidence = scoped
+    section.generated.intelligence = { scopedEvidence: scoped }
+    section.evidenceProjection = receipt
+    section.accepted.evidenceProjection = receipt
+    section.scopedEvidence = scoped
+    const index = ['generated projection', 'intelligence projection', 'nested generated projection', 'root projection', 'accepted projection'].indexOf(scenario)
+    const emptyIndex = ['empty generated projection', 'empty intelligence projection', 'empty nested generated projection', 'empty root projection'].indexOf(scenario)
+    const selectedIndex = index >= 0 ? index : emptyIndex >= 0 ? emptyIndex : 0
+    section.generated.evidenceProjection = receipt
+    alternatives.slice(0, selectedIndex).forEach(([owner, key]) => { delete owner[key] })
+    if (emptyIndex === 0) section.generated.evidenceProjection = {}
+    if (emptyIndex === 1) section.intelligence.scopedEvidence = { projection: {} }
+    if (emptyIndex === 2) section.generated.intelligence = { scopedEvidence: { projection: {} } }
+    if (emptyIndex === 3) section.evidenceProjection = {}
+    if (scenario === 'empty scoped evidence') section.intelligence.scopedEvidence = {}
+    if (scenario === 'empty nested scoped evidence') {
+      delete section.intelligence.scopedEvidence
+      section.generated.intelligence.scopedEvidence = {}
+    }
+    if (scenario === 'root scoped evidence') {
+      delete section.intelligence.scopedEvidence
+      delete section.generated.intelligence.scopedEvidence
+    }
+    if (scenario === 'legacy root accepted') {
+      Object.assign(section, section.accepted)
+      delete section.accepted
+    }
+    if (['summary content', 'value content', 'narrative content'].includes(scenario)) {
+      section.accepted[scenario.split(' ')[0]] = section.accepted.content
+      delete section.accepted.content
+    }
+    if (scenario === 'blocked refs') section.generated.evidenceProjection = { ...receipt, included: [{ evidenceObjectId: 'missing-evidence' }] }
+    const full = await resolveFrameworkOutcomeStudioHandoff({ ...fixture, requestedOutputTypeKey: 'executive-brief' })
+    const projectedRuntime = JSON.parse(JSON.stringify(fixture.runtimeInstance))
+    projectedRuntime.framework_state.sections = Object.fromEntries(Object.entries(projectedRuntime.framework_state.sections)
+      .map(([key, value]) => [key, projectHandoffSection(value)]))
+    projectedRuntime.stateVersion = 'runtime-revision:1'
+    const projected = await resolveFrameworkOutcomeStudioHandoff({
+      ...fixture, runtimeInstance: projectedRuntime, requestedOutputTypeKey: 'executive-brief',
+      boundedDependencyPolicy: FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_READ_POLICY,
+      boundedStateParityReceipt: {
+        contractVersion: FRAMEWORK_OUTCOME_HANDOFF_V2_PARITY_CONTRACT_VERSION,
+        stateVersion: projectedRuntime.stateVersion,
+        sectionCount: Object.keys(projectedRuntime.framework_state.sections).length,
+        evidenceObjectCount: projectedRuntime.framework_state.evidence_pack.evidenceObjects.length,
+        sectionKeys: Object.keys(projectedRuntime.framework_state.sections),
+        stateDigest: buildFrameworkOutcomeHandoffV2ParityDigest(projectedRuntime),
+      },
+    })
+    // Entire result, including content/truth/section hashes, refs, gaps, boundaries and blockers.
+    expect(projected.handoff).toEqual(full.handoff)
+    expect(projected.handoff.sectionTruth.find((item) => item.sectionKey === 'customer_context').sectionIntelligence)
+      .toEqual({ sectionNarrative: 'Full accepted intelligence', restrictedClaims: [{ claim: 'Unproven ROI' }] })
+    expect(projectedRuntime.framework_state.sections.customer_context.generated).not.toHaveProperty('sections')
+    expect(projectedRuntime.framework_state.sections.customer_context.intelligence).not.toHaveProperty('displayProjection')
+  })
+
+  test('projects accepted VMF section intelligence into the governed handoff', () => {
+    const fixture = makeFixture()
+    fixture.runtimeInstance.framework_state.sections.customer_context.accepted.sectionIntelligence = {
+      sectionSummary: 'Governed customer context.',
+      commercialInterpretation: 'The offer connects observability to decision confidence.',
+      strategicTensions: [{ signal: 'Replacement versus broader category.' }],
+      supportedClaims: [{ claim: 'Infrastructure observability offer.' }],
+      representedClaims: [{ claim: 'Broader intelligence ambition.' }],
+      restrictedClaims: [{ claim: 'Quantified ROI.' }],
+      evidenceBoundaries: [{ boundary: 'Keep ROI qualified.' }],
+      contradictionSignals: [],
+      alternativeInterpretations: [],
+      downstreamHandoffSignals: [{ signal: 'Lead with operating reality.' }],
+      sourceTraceability: ['evidence_object_1'],
+      validationGaps: [],
+    }
+
+    const handoff = buildFrameworkOutcomeStudioHandoff({
+      ...fixture,
+      requestedOutputTypeKey: 'executive-brief',
+    })
+    const customerContext = handoff.sectionTruth.find((section) => section.sectionKey === 'customer_context')
+
+    expect(customerContext.sectionIntelligence).toEqual(
+      fixture.runtimeInstance.framework_state.sections.customer_context.accepted.sectionIntelligence,
+    )
+    expect(customerContext.sectionHash).toMatch(/^sha256:/)
+  })
+
   test('builds one current runtime-scoped handoff and treats nested lock eligibility as canonical', () => {
     const fixture = makeFixture()
     const handoff = buildFrameworkOutcomeStudioHandoff({

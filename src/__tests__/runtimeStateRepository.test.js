@@ -1,5 +1,6 @@
 import { afterAll, beforeEach, describe, expect, jest, test } from '@jest/globals'
 import mongoose from 'mongoose'
+import { RUNTIME_SECTION_DETAIL_FORBIDDEN_KEYS } from '../models/RuntimeStateSection.js'
 
 const getRuntimeInstance = jest.fn()
 const resolveFrameworkOutcomeStudioHandoff = jest.fn()
@@ -108,6 +109,19 @@ const makeCursor = (rows) => ({
 })
 
 const collections = new Map()
+// Model MongoDB inclusion projection, preserving array cardinality and nulls.
+const projectRendererRow = (row, projection) => {
+  const include = (value, paths) => {
+    if (paths.some((path) => path.length === 0)) return value
+    if (Array.isArray(value)) return value.map((entry) => include(entry, paths))
+    if (value === null || typeof value !== 'object') return value
+    return Object.fromEntries(Object.entries(value).flatMap(([key, child]) => {
+      const childPaths = paths.filter((path) => path[0] === key).map((path) => path.slice(1))
+      return childPaths.length ? [[key, include(child, childPaths)]] : []
+    }))
+  }
+  return include(JSON.parse(JSON.stringify(row)), Object.keys(projection).map((path) => path.split('.')))
+}
 const collectionSpy = jest.spyOn(mongoose.connection, 'collection').mockImplementation((name) => {
   const collection = collections.get(name)
   if (!collection) throw new Error(`Unexpected collection: ${name}`)
@@ -180,7 +194,7 @@ describe('runtime State Storage V2 repository', () => {
     expect(collectionSpy).not.toHaveBeenCalled()
   })
 
-  test('loads renderer sections from current V2 rows with bounded section details', async () => {
+  test('loads renderer summaries without pretending they are selected section details', async () => {
     const section = {
       sectionKey: 'section_1_executive_summary',
       stateStatus: 'CURRENT',
@@ -190,7 +204,7 @@ describe('runtime State Storage V2 repository', () => {
       sectionDetail: makeSectionDetail(),
     }
     collections.set(RUNTIME_STATE_V2_COLLECTIONS.SECTIONS, {
-      find: jest.fn(() => makeCursor([section])),
+      find: jest.fn((_filter, { projection }) => makeCursor([projectRendererRow(section, projection)])),
     })
 
     const result = await getRuntimeStateRendererSections({
@@ -203,7 +217,8 @@ describe('runtime State Storage V2 repository', () => {
       stateVersion: 'runtime-revision:1',
       sections: [{
         sectionKey: 'section_1_executive_summary',
-        sectionDetail: makeSectionDetail(),
+        projectionScope: 'RENDERER_SUMMARY',
+        rendererSummary: projectRendererRow(section, __testables.RUNTIME_STATE_V2_RENDERER_SECTION_PROJECTION).sectionDetail,
       }],
       readReceipt: expect.objectContaining({
         source: 'runtime_state_v2.renderer_sections',
@@ -212,6 +227,66 @@ describe('runtime State Storage V2 repository', () => {
       }),
     })
     expect(collectionSpy).toHaveBeenCalledWith(RUNTIME_STATE_V2_COLLECTIONS.SECTIONS)
+    expect(result.sections[0]).not.toHaveProperty('sectionDetail')
+  })
+
+  test('projects six rich rows below 512KB in MongoDB while selected detail stays full fidelity', async () => {
+    const narrative = Array.from({ length: 6 }, () => 'n'.repeat(4000))
+    const detail = JSON.parse(JSON.stringify(makeSectionDetail({
+      generated: { content: 'Canonical generated', sectionIntelligence: { narrative }, sections: narrative, futureCache: narrative },
+      accepted: { content: 'Canonical accepted', sections: narrative },
+      intelligence: {
+        sectionIntelligence: { sectionNarrative: 'Rich narrative', strategicTensions: narrative },
+        displayProjection: { generatedInsight: { sections: narrative }, supportingEvidence: { items: narrative } },
+        scopedEvidence: { sourceRefs: narrative.map((safeDisplay, index) => ({ refKey: `e${index}`, safeDisplay })), projection: { includedCount: 6 } },
+        reasoningCoverage: { includedCount: 6, dimensionCoverage: narrative },
+      },
+      gsilContext: { excerpts: narrative },
+    })))
+    const rows = Array.from({ length: 6 }, (_, index) => ({
+      sectionKey: `section_${index}`, current: true, stateStatus: 'CURRENT',
+      stateVersion: 'runtime-revision:1', sourceStateVersion: 'runtime-revision:1', sectionDetail: detail, futureCache: narrative,
+    }))
+    const original = structuredClone(rows)
+    expect(Buffer.byteLength(JSON.stringify(rows))).toBeGreaterThan(RUNTIME_STATE_V2_MAX_SERIALIZED_READ_BYTES)
+    const find = jest.fn((_filter, { projection }) => makeCursor(projection.sectionDetail === 1
+      ? [rows[0]] : rows.map((row) => projectRendererRow(row, projection))))
+    collections.set(RUNTIME_STATE_V2_COLLECTIONS.SECTIONS, { find })
+    const result = await getRuntimeStateRendererSections({ scopes: SCOPES, runtimeInstanceId: RUNTIME_ID })
+    expect(result.sectionCount).toBe(6)
+    expect(result.readReceipt.serializedPayloadBytes).toBeLessThan(RUNTIME_STATE_V2_MAX_SERIALIZED_READ_BYTES)
+    expect(Object.values(find.mock.calls[0][1].projection).every((value) => value === 1)).toBe(true)
+    expect(find.mock.calls[0][1].projection).not.toHaveProperty('sectionDetail.generated.sectionIntelligence')
+    expect(result.sections[0].rendererSummary.generated).toEqual({ content: 'Canonical generated' })
+    expect(result.sections[0].rendererSummary).not.toHaveProperty('intelligence')
+    expect(result.sections[0].rendererSummary).not.toHaveProperty('gsilContext')
+    expect(result.sections[0].rendererSummary.generated).not.toHaveProperty('futureCache')
+    expect(projectRendererRow(rows[0], find.mock.calls[0][1].projection)).not.toHaveProperty('futureCache')
+    const selected = await getRuntimeStateSectionSummary({ scopes: SCOPES, runtimeInstanceId: RUNTIME_ID, sectionKey: 'section_0' })
+    expect(selected.section.sectionDetail).toEqual(detail)
+    expect(rows).toEqual(original)
+  })
+
+  test('still rejects renderer rows exceeding the cap after projection', async () => {
+    const rows = Array.from({ length: 6 }, (_, index) => ({
+      sectionKey: `section_${index}`, sectionDetail: makeSectionDetail({ input: 'x'.repeat(100000) }),
+    }))
+    collections.set(RUNTIME_STATE_V2_COLLECTIONS.SECTIONS, { find: jest.fn(() => makeCursor(rows)) })
+    await expect(getRuntimeStateRendererSections({ scopes: SCOPES, runtimeInstanceId: RUNTIME_ID }))
+      .rejects.toMatchObject({ status: 503, code: RUNTIME_STATE_V2_ERROR_CODES.STORAGE_UNAVAILABLE })
+  })
+
+  test.each(RUNTIME_SECTION_DETAIL_FORBIDDEN_KEYS)('rejects nested forbidden section key %s in the summary', async (key) => {
+    const row = {
+      sectionKey: 'section_0', current: true, stateStatus: 'CURRENT',
+      stateVersion: 'runtime-revision:1', sourceStateVersion: 'runtime-revision:1',
+      sectionDetail: makeSectionDetail({ input: { nested: { [key]: 'forbidden' } } }),
+    }
+    collections.set(RUNTIME_STATE_V2_COLLECTIONS.SECTIONS, {
+      find: jest.fn((_filter, { projection }) => makeCursor([projectRendererRow(row, projection)])),
+    })
+    await expect(getRuntimeStateRendererSections({ scopes: SCOPES, runtimeInstanceId: RUNTIME_ID }))
+      .rejects.toMatchObject({ code: RUNTIME_STATE_V2_ERROR_CODES.SECTION_DETAIL_INVALID })
   })
 
   test.each([
@@ -1375,6 +1450,38 @@ describe('runtime State Storage V2 repository', () => {
       evidence_pack: { evidenceObjects: [] },
     })
     expect(result.control).not.toHaveProperty('handoffFrameworkState')
+  })
+
+  test('projects six rich handoff rows below the cap while retaining full accepted truth and empty fallbacks', async () => {
+    const narrative = Array.from({ length: 6 }, () => 'n'.repeat(4000))
+    const detail = {
+      accepted: { content: 'Accepted truth', sectionIntelligence: { narrative } },
+      generated: { content: narrative, sectionIntelligence: { narrative }, sections: narrative, evidenceProjection: {}, generationBoundaries: ['Boundary'], intelligence: { scopedEvidence: {} } },
+      intelligence: { sectionIntelligence: { narrative }, displayProjection: { narrative }, scopedEvidence: {}, acceptedTruth: { truthHash: 'truth-hash' } },
+      evidenceProjection: { included: [{ evidenceObjectId: 'fallback-must-not-win' }] },
+      scopedEvidence: { sourceRefs: ['source-ref'] }, state: { status: 'ACCEPTED' },
+    }
+    const rows = Array.from({ length: 6 }, (_, index) => ({
+      sectionKey: `section_${index}`, current: true, stateStatus: 'CURRENT',
+      stateVersion: 'runtime-revision:1', sourceStateVersion: 'runtime-revision:1', sectionDetail: detail,
+    }))
+    expect(Buffer.byteLength(JSON.stringify(rows))).toBeGreaterThan(RUNTIME_STATE_V2_MAX_SERIALIZED_READ_BYTES)
+    let projectedRows
+    const find = jest.fn((_filter, { projection }) => {
+      projectedRows = rows.map((row) => projectRendererRow(row, projection))
+      return makeCursor(projectedRows)
+    })
+    collections.set(RUNTIME_STATE_V2_COLLECTIONS.SECTIONS, { find })
+    await getRuntimeStateOutcomeHandoffReadiness({ scopes: SCOPES, runtimeInstanceId: RUNTIME_ID })
+    expect(Buffer.byteLength(JSON.stringify(projectedRows))).toBeLessThan(RUNTIME_STATE_V2_MAX_SERIALIZED_READ_BYTES)
+    expect(find.mock.calls[0][1].projection['sectionDetail.accepted']).toBe(1)
+    const passed = resolveFrameworkOutcomeStudioHandoff.mock.calls[0][0].runtimeInstance.framework_state.sections.section_0
+    expect(passed.accepted).toEqual(detail.accepted)
+    expect(passed.generated.evidenceProjection).toEqual({})
+    expect(passed.intelligence.scopedEvidence).toEqual({})
+    expect(passed.generated.intelligence.scopedEvidence).toEqual({})
+    expect(passed.generated).not.toHaveProperty('content')
+    expect(passed.intelligence).not.toHaveProperty('sectionIntelligence')
   })
 
   test('sanitizes delegated handoff diagnostics at the repository boundary', async () => {

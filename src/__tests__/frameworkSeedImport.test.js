@@ -5,6 +5,7 @@ import { execFile } from 'child_process'
 import { fileURLToPath } from 'url'
 import { promisify } from 'util'
 import { describe, expect, jest, test } from '@jest/globals'
+import RuntimeSupportAsset from '../models/RuntimeSupportAsset.js'
 import {
   buildImportUpdatePayload,
   importRecord,
@@ -90,6 +91,7 @@ describe('framework seed import guard', () => {
     ['3.1', seedDir, 'vmf_v3_1_seed_pack_audit.json'],
     ['3.1.1', path.resolve(seedDir, 'vmf-v3-1-1-rkm'), 'seed_pack_audit.json'],
     ['3.1.2', path.resolve(workspaceRoot, '.tmp/ss-013-source'), 'validation_report.md'],
+    ['3.1.5', path.resolve(workspaceRoot, '.tmp/ss-013-source'), 'validation_report.md'],
   ])('uses the selected %s seed version to resolve the default audit file', (
     seedVersion,
     selectedSeedDir,
@@ -163,6 +165,94 @@ describe('framework seed import guard', () => {
       stableId: 'ui-contract-standard-ui-contract-vmf-3-1-1-rkm-canonical',
     }))
 
+    sourceSnapshots.forEach(([filePath, contents]) => {
+      expect(fs.readFileSync(filePath)).toEqual(contents)
+    })
+  })
+
+  test('supports the v3.1.5 legacy pack mapping and section bindings without editing source files', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'framework-seed-v315-'))
+    const tempSeedDir = path.join(tempRoot, 'seed-data')
+    fs.cpSync(v312AmendedSeedDir, tempSeedDir, { recursive: true })
+
+    const packageFile = path.join(tempSeedDir, '02_seed_data/framework_package.json')
+    const packageRecord = JSON.parse(fs.readFileSync(packageFile, 'utf8'))
+    packageRecord.version = '3.1.5'
+    packageRecord.packageKey = 'standard-package-value-mapping-framework-3-1-5-runtime-knowledge-model'
+    packageRecord.packageName = 'Value Mapping Framework v3.1.5 Runtime Knowledge Model Seed Pack'
+    packageRecord.uiContractKey = 'standard-ui-contract-vmf-3-1-rkm'
+    packageRecord.uiContractBinding.key = 'standard-ui-contract-vmf-3-1-rkm'
+    fs.writeFileSync(packageFile, `${JSON.stringify(packageRecord, null, 2)}\n`, 'utf8')
+
+    const uiContractFile = path.join(tempSeedDir, '02_seed_data/ui_contract.json')
+    const uiContract = JSON.parse(fs.readFileSync(uiContractFile, 'utf8'))
+    uiContract.stableId = 'ui-contract-standard-ui-contract-vmf-3-1-rkm'
+    fs.writeFileSync(uiContractFile, `${JSON.stringify(uiContract, null, 2)}\n`, 'utf8')
+
+    const workflowPoliciesFile = path.join(tempSeedDir, '02_seed_data/workflow_policies.json')
+    const seededWorkflowPolicies = JSON.parse(fs.readFileSync(workflowPoliciesFile, 'utf8'))
+    seededWorkflowPolicies.workflowPolicies.forEach((policy) => {
+      policy.steps?.forEach((step) => {
+        if (!step.targetPath) return
+        step.runtimePath = step.targetPath
+        delete step.targetPath
+      })
+    })
+    fs.writeFileSync(workflowPoliciesFile, `${JSON.stringify(seededWorkflowPolicies, null, 2)}\n`, 'utf8')
+
+    const sourceSnapshots = [packageFile, uiContractFile, workflowPoliciesFile]
+      .map((filePath) => [filePath, fs.readFileSync(filePath)])
+    const bundle = loadSeedBundle(tempSeedDir, '3.1.5')
+    const notes = bundle.find((entry) => entry.notes)?.notes || []
+    validateCrossReferences(bundle, notes)
+
+    const runtimePaths = findBundleRecords(bundle, 'runtime_path_registry.json')
+    const skillRoles = findBundleRecords(bundle, 'skill_role_registry.json')
+    const runtimeSkills = findBundleRecords(bundle, 'runtime_skills.json')
+    const validations = findBundleRecords(bundle, 'validation_registry.json')
+    const agents = findBundleRecords(bundle, 'runtime_agents.json')
+    const workflowPolicies = findBundleRecords(bundle, 'workflow_policies.json')
+    const frameworkPackage = findBundleRecords(bundle, 'framework_package.json')[0]
+    const normalizedUiContract = findBundleRecords(bundle, 'ui_contract.json')[0]
+    const supportAssets = bundle.find((entry) => entry.label === 'Support Assets')?.assetRecords || []
+    const integrityValidator = runtimeSkills.find((skill) => skill.key === 'framework-package-integrity-validator')
+
+    expect(runtimePaths).toHaveLength(295)
+    expect(skillRoles).toHaveLength(20)
+    expect(runtimeSkills).toHaveLength(36)
+    expect(integrityValidator.allowedWritePaths).not.toContain(
+      'framework_state.sections.target_state_assessment',
+    )
+    expect(validations).toHaveLength(26)
+    expect(agents).toHaveLength(14)
+    expect(workflowPolicies).toHaveLength(28)
+    expect(supportAssets).toHaveLength(265)
+    expect(frameworkPackage).toEqual(expect.objectContaining({
+      version: '3.1.5',
+      packageKey: 'standard-package-value-mapping-framework-3-1-5-runtime-knowledge-model',
+      uiContractKey: 'standard-ui-contract-vmf-3-1-1-rkm-canonical',
+      uiContractBinding: expect.objectContaining({
+        key: 'standard-ui-contract-vmf-3-1-1-rkm-canonical',
+      }),
+    }))
+    expect(normalizedUiContract).toEqual(expect.objectContaining({
+      uiContractKey: 'standard-ui-contract-vmf-3-1-1-rkm-canonical',
+      stableId: 'ui-contract-standard-ui-contract-vmf-3-1-1-rkm-canonical',
+    }))
+    const sectionPolicies = workflowPolicies.filter((policy) =>
+      ['generate-section-gate-v3-1-2', 'regenerate-section-gate-v3-1-2'].includes(policy.key))
+    expect(sectionPolicies).toHaveLength(2)
+    for (const policy of sectionPolicies) {
+      for (const section of frameworkPackage.sections) {
+        const bindings = (policy.steps || []).filter((step) =>
+          step.type === 'SKILL_EXECUTION'
+          && step.targetPath === section.runtimePath)
+
+        expect(bindings).toHaveLength(1)
+        expect(bindings[0].skillId).toBe(sectionSkillBindingMatrix[section.runtimePath])
+      }
+    }
+    expect(notes.filter((note) => note.level === 'error')).toEqual([])
     sourceSnapshots.forEach(([filePath, contents]) => {
       expect(fs.readFileSync(filePath)).toEqual(contents)
     })
@@ -371,6 +461,8 @@ describe('framework seed import guard', () => {
 
   test('hydrates RuntimeSkill reference assets from the staged v3.1 RKM support asset manifest', async () => {
     const rkmSeedDir = path.resolve(seedDir, 'vmf-v3-1-rkm')
+    const bundle = loadSeedBundle(rkmSeedDir, '3.1')
+    const runtimeSupportAssets = bundle.find((entry) => entry.label === 'Runtime Support Assets')
     const { stdout } = await runSeedGuard([
       '--seed-version',
       '3.1',
@@ -400,6 +492,52 @@ describe('framework seed import guard', () => {
       ]),
     )
     expect(payload.notes.filter((note) => note.level === 'error')).toEqual([])
+    expect(runtimeSupportAssets.records.length).toBeGreaterThan(0)
+    expect(runtimeSupportAssets.records).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ assetType: 'TEST_ASSET' }),
+    ]))
+    expect(runtimeSupportAssets.records[0]).toEqual(expect.objectContaining({
+      stableId: expect.stringContaining('@3.1.0:'),
+      contentHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      content: expect.any(String),
+    }))
+  })
+
+  test('excludes non-runtime and administrative assets and rejects unsupported or oversized runtime files', () => {
+    const sourceDir = path.resolve(seedDir, 'vmf-v3-1-rkm')
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'framework-runtime-assets-'))
+    const tempSeedDir = path.join(tempRoot, 'seed-data')
+    fs.cpSync(sourceDir, tempSeedDir, { recursive: true })
+    const manifestPath = path.join(tempSeedDir, 'vmf_v3_1_support_asset_manifest.json')
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+    const candidates = manifest.assets
+      .filter((asset) => asset.targetType === 'RuntimeSkill' && asset.assetType !== 'TEST_ASSET')
+      .slice(0, 4)
+
+    candidates[0].runtimeAccessible = false
+    candidates[0].skillAccessible = true
+    candidates[1].isAdminOnly = true
+    candidates[2].fileName = '03_support_assets/skills/unsupported-runtime-asset.pdf'
+    fs.writeFileSync(path.join(tempSeedDir, candidates[2].fileName), 'not a supported text asset', 'utf8')
+    fs.writeFileSync(path.join(tempSeedDir, candidates[3].fileName), 'x'.repeat((64 * 1024) + 1), 'utf8')
+    fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
+
+    const bundle = loadSeedBundle(tempSeedDir, '3.1')
+    const runtimeSupportAssets = bundle.find((entry) => entry.label === 'Runtime Support Assets')
+    const notes = bundle.find((entry) => entry.notes).notes
+    const importedKeys = runtimeSupportAssets.records.map((asset) => asset.assetKey)
+
+    candidates.forEach((asset) => expect(importedKeys).not.toContain(asset.assetKey))
+    expect(notes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        level: 'error',
+        message: expect.stringContaining('unsupported runtime asset type'),
+      }),
+      expect.objectContaining({
+        level: 'error',
+        message: expect.stringContaining('runtime asset size must be between'),
+      }),
+    ]))
   })
 
   test('staged v3.1 RKM seed includes the governed Discovery evidence pack write path', () => {
@@ -1489,5 +1627,40 @@ describe('framework seed import guard', () => {
 
     expect(status).toBe('created')
     expect(saved).toHaveBeenCalled()
+  })
+
+  test('reuses an immutable runtime support asset only when its content hash matches', async () => {
+    const record = {
+      stableId: 'vmf@3.1.5:customer-context-guidance', frameworkKey: 'VMF', packageKey: 'vmf',
+      packageVersion: '3.1.5', assetKey: 'customer-context-guidance', ownerType: 'RuntimeSkill',
+      ownerKey: 'skill-context', assetType: 'GUIDANCE', mimeType: 'text/markdown', status: 'ACTIVE',
+      runtimeAccessible: true, storageKey: 'context.md', byteLength: 7, content: 'fixture',
+      contentHash: 'a'.repeat(64), createdBy: '64b000000000000000000001',
+    }
+    const existing = { ...record, set: jest.fn(), save: jest.fn() }
+    const findOne = jest.spyOn(RuntimeSupportAsset, 'findOne').mockReturnValue({
+      exec: jest.fn().mockResolvedValue(existing),
+    })
+    const step = {
+      label: 'Runtime Support Assets',
+      model: RuntimeSupportAsset,
+      identityFields: ['stableId'],
+    }
+    await expect(importRecord(step, record)).resolves.toBe('unchanged')
+    await expect(importRecord(step, { ...record, contentHash: 'b'.repeat(64) }))
+      .rejects.toThrow('Immutable runtime support asset hash conflict')
+    for (const [field, value] of Object.entries({ stableId: 'other', frameworkKey: 'OTHER', packageKey: 'other',
+      packageVersion: '3.1.6', assetKey: 'other', ownerType: 'Other', ownerKey: 'other', assetType: 'OTHER',
+      mimeType: 'text/plain', status: 'INACTIVE', runtimeAccessible: false, storageKey: 'other.md', byteLength: 8 })) {
+      await expect(importRecord(step, { ...record, [field]: value }))
+        .rejects.toThrow(`metadata conflict for ${field === 'assetKey' ? value : record.assetKey}: ${field}`)
+    }
+    await expect(importRecord(step, { ...record, frameworkKey: ' vmf ', packageKey: ' VMF ',
+      ownerKey: ' SKILL-CONTEXT ', assetType: ' guidance ', mimeType: ' TEXT/MARKDOWN ', status: ' active ',
+      storageKey: ' context.md ', byteLength: '7', runtimeAccessible: 'true',
+      createdBy: '64b000000000000000000002', createdAt: new Date() })).resolves.toBe('unchanged')
+    expect(existing.set).not.toHaveBeenCalled()
+    expect(existing.save).not.toHaveBeenCalled()
+    findOne.mockRestore()
   })
 })

@@ -1,9 +1,14 @@
 import { describe, test, expect, jest } from '@jest/globals'
+import { readFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 
 import {
   buildOutcomeStudioLiveComposition,
   OUTCOME_STUDIO_LIVE_COMPOSITION_BLOCKERS,
 } from '../services/outcomeStudioLiveCompositionBridgeService.js'
+
+// Captured active Development/Test schema v1.0.0, 2026-09-02; only file-ending whitespace differs.
+const capturedSchema = readFileSync(new URL('./fixtures/executive-brief-schema-v1-captured.md', import.meta.url), 'utf8').trimEnd()
 
 const makePack = ({ packKey, capabilityKey = packKey, boundary = '', format = 'YAML' } = {}) => ({
   packId: `pack-${packKey}`,
@@ -284,6 +289,46 @@ describe('Outcome Studio live composition bridge', () => {
       'lineage summary',
     ])
     expect(result.governanceConstraints.join(' ')).toMatch(/uncertain inference.*certified fact/i)
+  })
+
+  test('projects the exact captured H3 schema children, not document metadata', async () => {
+    expect(createHash('sha256').update(capturedSchema).digest('hex')).toBe('aacae5271db6bf3fdab28c3c15b0c29fb8590fec15c77a5d4899b0e4dee59dee')
+    const input = makeInput({ schemaFormat: 'MARKDOWN', schemaContent: capturedSchema })
+    const result = await buildOutcomeStudioLiveComposition(input)
+    expect(result.compositionPackage.outputBinding.requiredSections).toEqual([
+      'executive summary', 'current situation', 'strategic problem', 'value opportunity',
+      'supporting evidence', 'key risks and gaps', 'recommended focus', 'limitations', 'lineage summary',
+    ])
+    expect(result.compositionPackage.outputBinding.optionalSections).toEqual(['truth certification', 'output warnings'])
+  })
+
+  test('ignores narrative bullets beneath explicit H3 sections', async () => {
+    const input = makeInput({ schemaFormat: 'MARKDOWN', schemaContent: capturedSchema.replace(
+      '### Executive Summary', '### Executive Summary\n\n- Preserve uncertainty in this narrative.',
+    ) })
+    const result = await buildOutcomeStudioLiveComposition(input)
+    expect(result.compositionPackage.outputBinding.requiredSections).toHaveLength(9)
+    expect(result.compositionPackage.outputBinding.requiredSections).not.toContain('preserve uncertainty in this narrative.')
+  })
+
+  test('preserves governance bullets beneath their own descriptive H3 heading', async () => {
+    const input = makeInput({ schemaFormat: 'MARKDOWN', schemaContent: capturedSchema + '\n\n## Output Controls\n### Claim controls\n- Keep uncertain claims qualified.' })
+    const result = await buildOutcomeStudioLiveComposition(input)
+    expect(result.governanceConstraints.join(' ')).toContain('Keep uncertain claims qualified.')
+  })
+
+  test.each([
+    ['empty explicit container', '## Required Sections\n\n## Runtime Consumers\nMetadata only.'],
+    ['prose-only explicit container', '## Required Sections\nNo section definitions.\n## Runtime Consumers\nMetadata only.'],
+    ['duplicate required H3', '## Required Sections\n### Summary\n### Summary'],
+    ['duplicate optional H3', '## Required Sections\n### Summary\n## Optional Sections\n### Detail\n### Detail'],
+    ['overlapping headings', '## Required Sections\n### Summary\n## Optional Sections\n### Summary'],
+    ['duplicate containers', '## Required Sections\n### Summary\n## Required Sections\n### Detail'],
+    ['mixed top-level list and H3', '## Required Sections\n- Summary\n### Detail'],
+    ['blank H3', '## Required Sections\n### '],
+  ])('rejects %s rather than falling back to metadata', async (_label, schemaContent) => {
+    await expect(buildOutcomeStudioLiveComposition(makeInput({ schemaFormat: 'MARKDOWN', schemaContent })))
+      .rejects.toMatchObject({ reason: OUTCOME_STUDIO_LIVE_COMPOSITION_BLOCKERS.KNOWLEDGE_CONTENT_SHAPE_INVALID })
   })
 
   test('projects a Markdown schema whose required sections are direct headings', async () => {

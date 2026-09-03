@@ -1,4 +1,5 @@
 import fs from 'fs'
+import crypto from 'node:crypto'
 import path from 'path'
 import { fileURLToPath, pathToFileURL } from 'url'
 import mongoose from 'mongoose'
@@ -7,6 +8,7 @@ import {
   RuntimeAgent,
   RuntimePathRegistry,
   RuntimeSkill,
+  RuntimeSupportAsset,
   SkillRoleRegistry,
   UIContract,
   ValidationRegistry,
@@ -77,6 +79,12 @@ const DEFAULT_VMF_VERSION = '2.3.1'
 const VMF_FRAMEWORK_KEY = 'VMF'
 const SEED_ACTOR_ID = new mongoose.Types.ObjectId('000000000000000000000001')
 const WORKFLOW_POLICY_DEFAULT_TIMEOUT_MS = 10000
+const MAX_RUNTIME_SUPPORT_ASSET_BYTES = 64 * 1024
+const RUNTIME_SUPPORT_ASSET_MIME_TYPES = new Set([
+  'application/json',
+  'text/markdown',
+  'text/plain',
+])
 const RUNTIME_PATH_CATEGORY_MAP = Object.freeze({
   APPENDIX: 'ARTIFACT',
   DEAL: 'STATE',
@@ -164,6 +172,7 @@ const WORKFLOW_POLICY_TYPE_MAP = Object.freeze({
 })
 const SECTION_BINDING_CATEGORY_SET = new Set(RUNTIME_PATH_REGISTRY_SECTION_BINDING_CATEGORIES)
 const V3_1_2_CANONICAL_UI_CONTRACT_KEY = 'standard-ui-contract-vmf-3-1-1-rkm-canonical'
+const V3_1_5_PACKAGE_KEY = 'standard-package-value-mapping-framework-3-1-5-runtime-knowledge-model'
 const V3_1_2_EXECUTION_STATUS_PATH_KEY = 'framework_state.runtime.execution_status'
 const V3_1_2_COMPATIBILITY_RUNTIME_PATHS = Object.freeze([
   Object.freeze({
@@ -362,6 +371,25 @@ const SEED_PACKS = Object.freeze({
       arrayKey: 'supportingAssets',
     }),
   }),
+  '3.1.5': Object.freeze({
+    version: '3.1.5',
+    auditFileName: '04_audits/validation_report.md',
+    acceptCompatibilityAuditWithoutCounts: true,
+    importSteps: buildImportSteps({
+      runtimePaths: '02_seed_data/runtime_path_registry.json',
+      skillRoles: '02_seed_data/skill_role_registry.json',
+      skills: '02_seed_data/runtime_skills.json',
+      validations: '02_seed_data/validation_registry.json',
+      agents: '02_seed_data/runtime_agents.json',
+      policies: '02_seed_data/workflow_policies.json',
+      uiContract: '02_seed_data/ui_contract.json',
+      frameworkPackage: '02_seed_data/framework_package.json',
+    }),
+    supportAssetManifest: Object.freeze({
+      fileName: '02_seed_data/supporting_asset_records.json',
+      arrayKey: 'supportingAssets',
+    }),
+  }),
 })
 
 const resolveSeedPack = (seedVersion = DEFAULT_SEED_VERSION) => {
@@ -390,7 +418,10 @@ const resolveImportOptions = (args) => {
 }
 
 const IMPORT_STEPS = SEED_PACKS[DEFAULT_SEED_VERSION].importSteps
-const RESET_STEPS = [...IMPORT_STEPS].reverse()
+const RESET_STEPS = [
+  ...IMPORT_STEPS,
+  { model: RuntimeSupportAsset },
+].reverse()
 const IMPORT_MANAGED_UPDATE_FIELDS = new Set([
   '_id',
   '__v',
@@ -587,8 +618,8 @@ const buildRuntimeSkillReferenceAsset = (asset) => {
     purpose: assetType || 'AUTHORING_HELP',
     usageMode: assetType === 'TEST_ASSET' ? 'TEST_ONLY' : 'OPTIONAL',
     status: normalizeEnumToken(asset.status) || 'ACTIVE',
-    isRuntimeAccessible: Boolean(asset.runtimeAccessible || asset.skillAccessible),
-    isAdminOnly: false,
+    isRuntimeAccessible: asset.runtimeAccessible === true && asset.isAdminOnly !== true && asset.adminOnly !== true,
+    isAdminOnly: asset.isAdminOnly === true || asset.adminOnly === true,
     isTestOnly: assetType === 'TEST_ASSET',
     description: String(asset.description || '').trim(),
     storageKey: fileName,
@@ -779,7 +810,7 @@ const normalizeRuntimePath = (record, notes, sourceLabel, seedContext = {}) => {
   return record
 }
 
-const normalizeRuntimeSkill = (record, notes, sourceLabel) => {
+const normalizeRuntimeSkill = (record, notes, sourceLabel, seedContext = {}) => {
   normalizeMappedEnum({
     record,
     field: 'category',
@@ -795,6 +826,23 @@ const normalizeRuntimeSkill = (record, notes, sourceLabel) => {
       level: 'warning',
       source: sourceLabel,
       message: `${record.key || record.stableId} missing runtimeConfig.maxRetries; defaulted to 0.`,
+    })
+  }
+  if (
+    seedContext.seedVersion === '3.1.5'
+    && record.key === 'framework-package-integrity-validator'
+    && Array.isArray(record.allowedWritePaths)
+    && record.allowedWritePaths.includes('framework_state.sections.target_state_assessment')
+  ) {
+    record.allowedWritePaths = record.allowedWritePaths.filter(
+      (pathKey) => pathKey !== 'framework_state.sections.target_state_assessment',
+    )
+    notes.push({
+      level: 'warning',
+      source: sourceLabel,
+      message:
+        `${record.key} stale v3.1.5 write path "framework_state.sections.target_state_assessment" `
+        + 'removed; the package exposes six current guided sections.',
     })
   }
   normalizeRuntimeSkillOutputBindings(record, notes, sourceLabel)
@@ -820,7 +868,7 @@ const normalizeWorkflowStepRows = (steps) => {
       if (!isPlainObject(step)) return null
       const order = Number(step.order)
       const stepType = normalizeEnumToken(step.type || step.stepType)
-      const targetPath = String(step.targetPath || '').trim()
+      const targetPath = String(step.targetPath || step.runtimePath || '').trim()
       const bindingKeys = [
         ...normalizeList(step.bindingKeys),
         ...normalizeList(step.validationKeys),
@@ -942,7 +990,7 @@ const normalizeUiContract = (record, notes, sourceLabel, seedContext = {}) => {
     notes,
     sourceLabel,
   )
-  if (seedContext.seedVersion === '3.1.2') {
+  if (['3.1.2', '3.1.5'].includes(seedContext.seedVersion)) {
     const expectedStableId = buildUIContractStableId(record.uiContractKey)
     if (record.stableId !== expectedStableId) {
       const previousStableId = record.stableId
@@ -960,7 +1008,7 @@ const normalizeUiContract = (record, notes, sourceLabel, seedContext = {}) => {
 const normalizeFrameworkPackage = (record, notes, sourceLabel, seedContext = {}) => {
   normalizeSeedSemanticVersionFields(record, ['version', 'stateModelVersion'], notes, sourceLabel)
 
-  if (seedContext.seedVersion === '3.1.2') {
+  if (['3.1.2', '3.1.5'].includes(seedContext.seedVersion)) {
     if (record.uiContractKey !== V3_1_2_CANONICAL_UI_CONTRACT_KEY) {
       const previousKey = record.uiContractKey
       record.uiContractKey = V3_1_2_CANONICAL_UI_CONTRACT_KEY
@@ -1024,7 +1072,7 @@ const normalizeRecord = (step, rawRecord, notes, seedContext = {}) => {
   )
 
   if (step.model === RuntimePathRegistry) return normalizeRuntimePath(record, notes, sourceLabel, seedContext)
-  if (step.model === RuntimeSkill) return normalizeRuntimeSkill(record, notes, sourceLabel)
+  if (step.model === RuntimeSkill) return normalizeRuntimeSkill(record, notes, sourceLabel, seedContext)
   if (step.model === ValidationRegistry) return normalizeValidationRegistry(record, notes, sourceLabel)
   if (step.model === WorkflowPolicy) return normalizeWorkflowPolicy(record, notes, sourceLabel)
   if (step.model === UIContract) return normalizeUiContract(record, notes, sourceLabel, seedContext)
@@ -1195,7 +1243,40 @@ const loadSupportAssetManifest = (seedDir, seedPack, notes) => {
         source: 'Support Asset Manifest',
         message: `${assetKey} file does not exist: ${fileName}`,
       })
+      continue
     }
+
+    const assetType = normalizeEnumToken(asset.assetType) || 'OTHER'
+    const status = normalizeEnumToken(asset.status) || 'ACTIVE'
+    const runtimeAccessible = asset.runtimeAccessible === true
+      && asset.isAdminOnly !== true
+      && asset.adminOnly !== true
+    if (!runtimeAccessible || assetType === 'TEST_ASSET' || status !== 'ACTIVE') continue
+
+    const mimeType = mimeTypeForAssetFile(fileName)
+    if (!RUNTIME_SUPPORT_ASSET_MIME_TYPES.has(mimeType)) {
+      notes.push({
+        level: 'error',
+        source: 'Support Asset Manifest',
+        message: `${assetKey} uses unsupported runtime asset type: ${mimeType || 'unknown'}.`,
+      })
+      continue
+    }
+
+    const byteLength = fs.statSync(assetPath).size
+    if (byteLength < 1 || byteLength > MAX_RUNTIME_SUPPORT_ASSET_BYTES) {
+      notes.push({
+        level: 'error',
+        source: 'Support Asset Manifest',
+        message: `${assetKey} runtime asset size must be between 1 and ${MAX_RUNTIME_SUPPORT_ASSET_BYTES} bytes.`,
+      })
+      continue
+    }
+
+    const content = fs.readFileSync(assetPath, 'utf8')
+    asset.runtimeContent = content
+    asset.runtimeContentHash = crypto.createHash('sha256').update(content, 'utf8').digest('hex')
+    asset.runtimeByteLength = Buffer.byteLength(content, 'utf8')
   }
 
   return {
@@ -1203,6 +1284,47 @@ const loadSupportAssetManifest = (seedDir, seedPack, notes) => {
     fileName: manifest.fileName,
     filePath,
     assetRecords,
+  }
+}
+
+const buildRuntimeSupportAssetImportStep = ({
+  importEntries,
+  supportAssetManifest,
+} = {}) => {
+  if (!supportAssetManifest?.assetRecords?.length) return null
+  const packageStep = importEntries.find((entry) => entry.model === FrameworkPackage)
+  const frameworkPackage = packageStep?.records?.[0]
+  if (!frameworkPackage) return null
+
+  const records = supportAssetManifest.assetRecords
+    .filter((asset) => String(asset?.targetType || '').trim() === 'RuntimeSkill')
+    .filter((asset) => Boolean(asset.runtimeContent && asset.runtimeContentHash))
+    .map((asset) => ({
+      stableId: `${normalizeToken(frameworkPackage.packageKey)}@${String(frameworkPackage.version || '').trim()}:${normalizeToken(asset.assetKey)}`,
+      frameworkKey: frameworkPackage.frameworkKey,
+      packageKey: frameworkPackage.packageKey,
+      packageVersion: frameworkPackage.version,
+      assetKey: normalizeToken(asset.assetKey),
+      ownerType: 'RuntimeSkill',
+      ownerKey: normalizeToken(asset.targetKey),
+      assetType: normalizeEnumToken(asset.assetType) || 'OTHER',
+      mimeType: mimeTypeForAssetFile(asset.fileName),
+      status: 'ACTIVE',
+      runtimeAccessible: true,
+      storageKey: String(asset.fileName || '').trim(),
+      byteLength: asset.runtimeByteLength,
+      contentHash: asset.runtimeContentHash,
+      content: asset.runtimeContent,
+      createdBy: frameworkPackage.createdBy || SEED_ACTOR_ID,
+    }))
+
+  return {
+    label: 'Runtime Support Assets',
+    fileName: supportAssetManifest.fileName,
+    filePath: supportAssetManifest.filePath,
+    model: RuntimeSupportAsset,
+    identityFields: ['stableId'],
+    records,
   }
 }
 
@@ -1312,8 +1434,13 @@ const loadSeedBundle = (seedDir, seedVersion = DEFAULT_SEED_VERSION) => {
   addV3_1_2CompatibilityRuntimePaths(importEntries, seedContext, notes)
   const supportAssetManifest = loadSupportAssetManifest(seedDir, seedPack, notes)
   hydrateRuntimeSkillReferenceAssets(importEntries, supportAssetManifest, notes)
+  const runtimeSupportAssetStep = buildRuntimeSupportAssetImportStep({
+    importEntries,
+    supportAssetManifest,
+  })
   return [
     ...importEntries,
+    ...(runtimeSupportAssetStep ? [runtimeSupportAssetStep] : []),
     ...(supportAssetManifest ? [supportAssetManifest] : []),
     { notes, seedContext },
   ]
@@ -1424,7 +1551,7 @@ const buildConformanceActuals = (bundle) => {
     uiSectionCount: uiContracts.reduce((count, contract) => count + (contract.sections?.length || 0), 0),
     supportAssetCount: supportAssets.length,
     vmfStateNamespaceReferences: bundle
-      .filter((entry) => entry.records)
+      .filter((entry) => entry.records && entry.model !== RuntimeSupportAsset)
       .reduce((count, entry) => count + countVmfStateNamespaceReferences(entry.records), 0),
     objectTextareaViolations: runtimePaths.filter(
       (runtimePath) => runtimePath.dataType === 'OBJECT' && runtimePath.uiControl === 'TEXTAREA',
@@ -1878,11 +2005,13 @@ const validateFrameworkPackageSectionSkillBindings = ({
   const boundPolicies = workflowBindings
     .map((binding) => indexes.policiesByKey.get(normalizeToken(binding?.policyKey)))
     .filter(Boolean)
-  const isV312SectionTruthPackage = normalizeToken(frameworkPackage.packageKey)
-    === 'standard-package-value-mapping-framework-3-1-2-runtime-knowledge-model'
+  const supportsLegacySectionTruthPolicy = [
+    'standard-package-value-mapping-framework-3-1-2-runtime-knowledge-model',
+    V3_1_5_PACKAGE_KEY,
+  ].includes(normalizeToken(frameworkPackage.packageKey))
   const sectionGenerationPolicyActions = new Map([
     ['generate-section-gate', 'GENERATE_SECTION'],
-    ...(isV312SectionTruthPackage
+    ...(supportsLegacySectionTruthPolicy
       ? [
         ['generate-section-gate-v3-1-2', 'GENERATE_SECTION'],
         ['regenerate-section-gate', 'REGENERATE_SECTION'],
@@ -1898,6 +2027,7 @@ const validateFrameworkPackageSectionSkillBindings = ({
     'standard-package-vmf-3-1-1-rkm-canonical',
     'standard-package-vmf-3-1-1-rkm',
     'standard-package-value-mapping-framework-3-1-2-runtime-knowledge-model',
+    V3_1_5_PACKAGE_KEY,
   ]
   if (
     !sectionTruthPackageKeys.includes(normalizeToken(frameworkPackage.packageKey))
@@ -2626,6 +2756,21 @@ const importRecord = async (step, record, { session = null } = {}) => {
     const created = new step.model(record)
     await created.save(session ? { session } : undefined)
     return 'created'
+  }
+
+  if (step.model === RuntimeSupportAsset) {
+    if (String(existing.contentHash || '') !== String(record.contentHash || '')) {
+      throw new Error(`Immutable runtime support asset hash conflict for ${record.assetKey}.`)
+    }
+    const expectedAsset = new RuntimeSupportAsset(record)
+    const existingAsset = new RuntimeSupportAsset(typeof existing.toObject === 'function' ? existing.toObject() : existing)
+    for (const field of ['stableId', 'frameworkKey', 'packageKey', 'packageVersion', 'assetKey',
+      'ownerType', 'ownerKey', 'assetType', 'mimeType', 'status', 'runtimeAccessible', 'storageKey', 'byteLength']) {
+      if (existingAsset.get(field) !== expectedAsset.get(field)) {
+        throw new Error(`Immutable runtime support asset metadata conflict for ${record.assetKey}: ${field}.`)
+      }
+    }
+    return 'unchanged'
   }
 
   if (isLockedExistingRuntimeControlRecord(existing)) return 'skipped'

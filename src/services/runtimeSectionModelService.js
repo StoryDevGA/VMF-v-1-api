@@ -551,7 +551,7 @@ const isDiscoveryEvidenceAccepted = (evidencePack = {}) => {
   return !needsRefresh && (evidencePack.accepted === true || evidencePack.state?.accepted === true)
 }
 
-const getAcceptedDiscoveryEvidenceObjects = (evidencePack = {}) => {
+export const getAcceptedDiscoveryEvidenceObjects = (evidencePack = {}) => {
   if (!isDiscoveryEvidenceAccepted(evidencePack)) return []
 
   const evidenceObjects = normalizeDiscoveryEvidenceObjects({
@@ -2179,6 +2179,7 @@ const buildSectionIntelligenceParts = ({
   section,
   sectionExecutionContract,
   interpretationProfile = null,
+  evidenceProjectionMaxItems = 10,
 } = {}) => {
   const evidencePack = getEvidencePackFromFrameworkState(frameworkState)
   const sectionKey = normalizeSectionText(section?.sectionKey || section?.key)
@@ -2189,7 +2190,7 @@ const buildSectionIntelligenceParts = ({
   const acceptedEvidenceObjects = getAcceptedDiscoveryEvidenceObjects(evidencePack)
   const rawEvidenceProjection = buildSectionEvidenceProjection({
     evidenceObjects: acceptedEvidenceObjects,
-    maxItems: 10,
+    maxItems: evidenceProjectionMaxItems,
     sectionKey,
   })
   const { selectedEvidenceObjects: projectedAcceptedEvidenceObjects, ...evidenceProjection } = rawEvidenceProjection
@@ -2489,6 +2490,7 @@ export const buildEnrichedGeneratedSection = ({
   section,
   sectionExecutionContract,
   generatedAt = new Date().toISOString(),
+  evidenceProjectionMaxItems = 10,
 } = {}) => {
   const interpretationProfile =
     resolveSectionInterpretationProfile(sectionExecutionContract, section)
@@ -2506,6 +2508,7 @@ export const buildEnrichedGeneratedSection = ({
     section,
     sectionExecutionContract,
     interpretationProfile,
+    evidenceProjectionMaxItems,
   })
   const sections = parts.truthEligibility.eligible
     ? interpretationProfile

@@ -1,9 +1,12 @@
+import crypto from 'node:crypto'
 import {
   RuntimeSkill,
+  RuntimeSupportAsset,
   UIContract,
   ValidationRegistry,
   WorkflowPolicy,
 } from '../models/index.js'
+import semver from 'semver'
 import { generateChecksum } from './governanceAudit/checksumService.js'
 import {
   RUNTIME_INSTANCE_ERROR_REASONS,
@@ -17,6 +20,112 @@ import {
 export const SECTION_EXECUTION_CONTRACT_VERSION = 'section-execution-contract-v1'
 
 const normalizeText = (value) => String(value || '').trim()
+
+const MAX_RUNTIME_SUPPORT_ASSET_TOTAL_BYTES = 96 * 1024
+const VMF_SECTION_REASONING_MIN_VERSION = '3.1.5'
+
+export const requiresVmfSectionReasoning = ({ frameworkPackage, sectionKey, runtimePath } = {}) => {
+  const packageVersion = normalizeText(frameworkPackage?.version)
+  const normalizedSectionKey = normalizeText(sectionKey).toLowerCase().replace(/-/g, '_')
+  const normalizedRuntimePath = normalizePath(runtimePath)
+  const packageSection = (Array.isArray(frameworkPackage?.sections) ? frameworkPackage.sections : [])
+    .find((candidate) => (
+      normalizeText(candidate?.sectionKey).toLowerCase().replace(/-/g, '_') === normalizedSectionKey
+      && normalizePath(candidate?.runtimePath) === normalizedRuntimePath
+    ))
+  return normalizeText(frameworkPackage?.frameworkKey).toUpperCase() === 'VMF'
+    && Boolean(semver.valid(packageVersion))
+    && semver.gte(packageVersion, VMF_SECTION_REASONING_MIN_VERSION)
+    && Boolean(packageSection)
+}
+
+// Mirrors seed normalizeAssetId; assetKey itself legitimately retains dots/underscores.
+const assetIdForKey = (key) => `asset-${normalizeText(key).toLowerCase()
+  .replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') || 'seed-asset'}`
+const assetIdentityFromReference = (asset = {}) => {
+  const assetId = normalizeText(asset.assetId).toLowerCase()
+  if (assetId) return { assetId: assetIdForKey(assetId.replace(/^asset-/, '')) }
+  const storageKey = normalizeText(asset.storageKey)
+  if (storageKey) {
+    const fileName = storageKey.split(/[\\/]/).pop() || ''
+    return { assetKey: fileName.replace(/\.[^.]+$/, '').toLowerCase() }
+  }
+  return null
+}
+
+export const resolveRuntimeSupportAssets = async ({ frameworkPackage, runtimeSkill, sectionKey, runtimePath }) => {
+  if (!requiresVmfSectionReasoning({ frameworkPackage, sectionKey, runtimePath })) return []
+
+  const declaredAssets = (runtimeSkill.referenceAssets || [])
+    .filter((asset) => asset?.isRuntimeAccessible === true)
+    .filter((asset) => asset?.isAdminOnly !== true && asset?.isTestOnly !== true)
+    .filter((asset) => normalizeText(asset?.status).toUpperCase() === 'ACTIVE')
+    .map(assetIdentityFromReference)
+    .filter(Boolean)
+  if (declaredAssets.length === 0) {
+    throw buildContractError({
+      issue: 'RUNTIME_SUPPORT_ASSETS_MISSING',
+      message: 'The dependency-locked Runtime Skill has no executable support assets.',
+      details: { sectionKey, runtimePath },
+    })
+  }
+
+  const rows = await RuntimeSupportAsset.find({
+    packageKey: normalizeToken(frameworkPackage.packageKey),
+    packageVersion: normalizeText(frameworkPackage.version),
+    ownerKey: normalizeToken(runtimeSkill.key),
+    ownerType: 'RuntimeSkill',
+    status: 'ACTIVE',
+    runtimeAccessible: true,
+  }).select('+content').lean()
+  const selected = new Map()
+  for (const identity of declaredAssets) {
+    const matches = rows.filter((row) => identity.assetId
+      ? assetIdForKey(row.assetKey) === identity.assetId
+      : normalizeToken(row.assetKey) === identity.assetKey)
+    if (matches.length !== 1) {
+      throw buildContractError({
+        issue: 'RUNTIME_SUPPORT_ASSETS_MISSING',
+        message: 'The package-scoped Runtime Skill support asset identity is missing or ambiguous.',
+        details: { sectionKey, runtimePath, ...identity, matchCount: matches.length },
+      })
+    }
+    selected.set(normalizeToken(matches[0].assetKey), matches[0])
+  }
+
+  const supportAssets = [...selected.values()]
+    .map((row) => ({
+      assetKey: normalizeToken(row.assetKey),
+      assetType: normalizeText(row.assetType).toUpperCase(),
+      mimeType: normalizeText(row.mimeType).toLowerCase(),
+      storageKey: normalizeText(row.storageKey),
+      byteLength: Number(row.byteLength || 0),
+      contentHash: normalizeText(row.contentHash).toLowerCase(),
+      content: String(row.content || ''),
+    }))
+    .sort((left, right) => left.assetKey.localeCompare(right.assetKey))
+  const invalidAsset = supportAssets.find((asset) => (
+    asset.byteLength !== Buffer.byteLength(asset.content, 'utf8')
+    || asset.contentHash !== crypto.createHash('sha256').update(asset.content, 'utf8').digest('hex')
+  ))
+  if (invalidAsset) {
+    throw buildContractError({
+      issue: 'RUNTIME_SUPPORT_ASSET_HASH_MISMATCH',
+      message: 'A package-scoped Runtime Skill support asset failed integrity verification.',
+      details: { sectionKey, runtimePath, assetKey: invalidAsset.assetKey },
+    })
+  }
+  const totalBytes = supportAssets.reduce((total, asset) => total + asset.byteLength, 0)
+  if (totalBytes < 1 || totalBytes > MAX_RUNTIME_SUPPORT_ASSET_TOTAL_BYTES) {
+    throw buildContractError({
+      issue: 'RUNTIME_SUPPORT_ASSETS_OVERSIZED',
+      message: 'The package-scoped Runtime Skill support assets exceed the execution bound.',
+      details: { sectionKey, runtimePath, totalBytes },
+    })
+  }
+
+  return supportAssets
+}
 const normalizeToken = (value) => normalizeText(value).toLowerCase()
 const normalizeSectionKey = (value) => normalizeToken(value).replace(/-/g, '_')
 const normalizeCollectionKey = (value) => normalizeToken(value).replace(/[^a-z0-9]/g, '')
@@ -569,6 +678,12 @@ export const resolveSectionExecutionContract = async ({
     runtimePath,
     skillId: workflowPolicyBinding.skillId,
   })
+  const runtimeSupportAssets = await resolveRuntimeSupportAssets({
+    frameworkPackage,
+    runtimeSkill: runtimeSkill.row,
+    sectionKey,
+    runtimePath,
+  })
   const boundValidationRules = validationRules.map((rule) => {
     if (!targetsSectionCompletenessBinding(rule)) {
       return rule
@@ -641,6 +756,7 @@ export const resolveSectionExecutionContract = async ({
         allowedWritePaths: runtimeSkill.row.allowedWritePaths || [],
         forbiddenWritePaths: runtimeSkill.row.forbiddenWritePaths || [],
       },
+      supportAssetRefs: runtimeSupportAssets.map(({ content, ...asset }) => asset),
     },
     validationRules: boundValidationRules,
     dependencyIdentity: {
@@ -656,6 +772,7 @@ export const resolveSectionExecutionContract = async ({
   return {
     ...contract,
     sectionContractHash: generateChecksum(contract),
+    runtimeSupportAssets,
   }
 }
 

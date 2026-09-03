@@ -1610,7 +1610,7 @@ const buildSectionIndex = (uiContract) => {
   return { byExactKey, packageSectionKeys, sections }
 }
 
-const buildRendererSections = ({
+export const buildRendererSections = ({
   discovery,
   frameworkPackage,
   frameworkState = {},
@@ -1619,6 +1619,7 @@ const buildRendererSections = ({
   runtimePathRecords,
   uiContract,
   configWarnings,
+  projectionScope,
 }) => {
   const packageSections = Array.isArray(frameworkPackage.sections) ? frameworkPackage.sections : []
   const { byExactKey, sections: uiSections } = buildSectionIndex(uiContract)
@@ -1706,7 +1707,7 @@ const buildRendererSections = ({
     const persistedIntelligence = isRuntimeSectionObject(rawSectionValue) && isProjectionObject(rawSectionValue.intelligence)
       ? rawSectionValue.intelligence
       : {}
-    const projectedEnrichment = buildSectionIntelligenceDisplayProjection({
+    const projectedEnrichment = projectionScope === 'RENDERER_SUMMARY' ? {} : buildSectionIntelligenceDisplayProjection({
       dependencySectionKeys,
       frameworkPackage,
       frameworkState,
@@ -1720,7 +1721,7 @@ const buildRendererSections = ({
       runtimeInstance,
       section: packageSection,
     })
-    const sectionEnrichment = {
+    const sectionEnrichment = projectionScope === 'RENDERER_SUMMARY' ? persistedIntelligence : {
       ...projectedEnrichment,
       ...persistedIntelligence,
       displayProjection: {
@@ -1749,6 +1750,7 @@ const buildRendererSections = ({
     })
 
     renderedSections.push({
+      ...(projectionScope ? { projectionScope } : {}),
       key: sectionKey,
       sectionKey,
       runtimePath,
@@ -2524,7 +2526,9 @@ export const buildRendererFrameworkState = ({ runtimeInstance, rendererState }) 
   rendererState.sections.forEach((section) => {
     const sectionKey = String(section.sectionKey || '').trim().toLowerCase()
     if (!sectionKey) return
-    const sectionDetail = section.sectionDetail
+    const sectionDetail = section.projectionScope === 'RENDERER_SUMMARY'
+      ? section.rendererSummary
+      : section.sectionDetail
     sections[sectionKey] = sectionDetail
 
     const runtimePathSectionKey = sectionKey.replace(/-/g, '_')
@@ -2572,6 +2576,7 @@ export const getRuntimeRenderer = async ({
     includeInputValues: mutationAccess?.allowed === true,
   })
   const sections = buildRendererSections({
+    projectionScope: rendererState?.projectionScope,
     discovery,
     frameworkPackage,
     frameworkState,

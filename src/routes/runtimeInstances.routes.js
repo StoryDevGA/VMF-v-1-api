@@ -61,6 +61,8 @@ import {
   resetRuntimeDiscovery,
   reviewAllRuntimeSectionEvidence,
   reviewRuntimeDiscoveryEvidence,
+  getRuntimeDiscoveryContradictions,
+  reviewRuntimeDiscoveryContradiction,
   reviewRuntimeSectionEvidence,
   updateRuntimeOutcomeSessionFromLatestTruth,
   updateRuntimeSectionEvidence,
@@ -88,6 +90,8 @@ import {
   validateReviewAllRuntimeSectionEvidence,
   validateRebuildRuntimeIntelligenceGraph,
   validateReviewRuntimeDiscoveryEvidence,
+  validateRuntimeDiscoveryContradictionParams,
+  validateReviewRuntimeDiscoveryContradiction,
   validateReviewRuntimeSectionEvidence,
   validateResetRuntimeDiscovery,
   validateRuntimeIntelligenceGraphNodeParams,
@@ -147,6 +151,13 @@ router.get(
   getRuntimeStateOutcomeHandoffReadiness,
 )
 router.patch('/:runtimeInstanceId/discovery-acceptance', validateRuntimeInstanceId, validateAcceptRuntimeDiscovery, acceptRuntimeDiscovery)
+router.get('/:runtimeInstanceId/discovery-contradictions', validateRuntimeInstanceId, getRuntimeDiscoveryContradictions)
+router.patch(
+  '/:runtimeInstanceId/discovery-contradictions/:contradictionId/review',
+  validateRuntimeDiscoveryContradictionParams,
+  validateReviewRuntimeDiscoveryContradiction,
+  reviewRuntimeDiscoveryContradiction,
+)
 router.patch(
   '/:runtimeInstanceId/discovery-evidence/:evidenceObjectId/review',
   validateRuntimeDiscoveryEvidenceParams,

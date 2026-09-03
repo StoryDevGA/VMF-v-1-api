@@ -210,6 +210,78 @@ describe('Outcome Studio Development/Test provider configuration', () => {
 })
 
 describe('OpenAI Outcome Studio provider adapter', () => {
+  const withHeadings = (requiredSections = ['Situation', 'Recommendation'], optionalSections = []) => ({
+    ...providerContext,
+    composition: { outputStructure: { requiredSections, optionalSections } },
+  })
+  const responseWithSections = (sections) => makeResponse({ body: makeProviderBody({
+    output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify({ ...validStructuredOutput, sections }) }] }],
+  }) })
+
+  test('binds required and optional headings without rewriting the input or response', async () => {
+    const context = withHeadings(['Situation'], ['Recommendation'])
+    const before = JSON.stringify(context)
+    const fetchImpl = jest.fn().mockResolvedValue(makeResponse())
+    const result = await makeAdapter({ fetchImpl })({ providerContext: context })
+    const body = JSON.parse(fetchImpl.mock.calls[0][1].body)
+    expect(body.text.format.schema.properties.sections).toEqual(expect.objectContaining({
+      minItems: 1,
+      maxItems: 2,
+      items: expect.objectContaining({ properties: expect.objectContaining({
+        heading: expect.objectContaining({ enum: ['Situation', 'Recommendation'] }),
+      }) }),
+    }))
+    expect(JSON.parse(body.input).composition).toEqual(context.composition)
+    expect(JSON.stringify(context)).toBe(before)
+    expect(result.output.sections).toEqual(validStructuredOutput.sections)
+  })
+
+  test('allows optional headings to be omitted and does not impose a new order', async () => {
+    const sections = [...validStructuredOutput.sections].reverse()
+    const fetchImpl = jest.fn().mockResolvedValue(responseWithSections(sections))
+    const result = await makeAdapter({ fetchImpl })({ providerContext: withHeadings(undefined, ['Further reading']) })
+    expect(result.output.sections).toEqual(sections)
+  })
+
+  test.each([
+    ['missing required', [validStructuredOutput.sections[0]]],
+    ['duplicate', [validStructuredOutput.sections[0], validStructuredOutput.sections[0], validStructuredOutput.sections[1]]],
+    ['unexpected', [...validStructuredOutput.sections, { heading: 'Extra analysis', narrative: 'Additional commentary.' }]],
+  ])('rejects %s headings locally without repairing or retrying output', async (_label, sections) => {
+    const fetchImpl = jest.fn().mockResolvedValue(responseWithSections(sections))
+    await expect(makeAdapter({ fetchImpl, maxRetries: 2 })({ providerContext: withHeadings() }))
+      .rejects.toMatchObject({ details: { reason: 'LIVE_TEST_PROVIDER_OUTPUT_INVALID' } })
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+
+  test.each([
+    null,
+    {},
+    { outputStructure: { requiredSections: [], optionalSections: [] } },
+    { outputStructure: { requiredSections: ['Situation'], optionalSections: null } },
+    { outputStructure: { requiredSections: ['Current Situation', 'Current  Situation'], optionalSections: [] } },
+    { outputStructure: { requiredSections: ['Situation'], optionalSections: ['Situation'] } },
+    { outputStructure: { requiredSections: ['Runtime context'], optionalSections: [] } },
+    { outputStructure: { requiredSections: ['Situation'], optionalSections: ['Runtime context'] } },
+    { outputStructure: { requiredSections: ['x'.repeat(161)], optionalSections: [] } },
+    { outputStructure: { requiredSections: [null], optionalSections: [] } },
+    { outputStructure: { requiredSections: [' Situation '], optionalSections: [] } },
+    { outputStructure: { requiredSections: Array.from({ length: 25 }, (_, index) => `Section ${index}`), optionalSections: [] } },
+    { outputStructure: { requiredSections: ['Situation'], optionalSections: Array.from({ length: 13 }, (_, index) => `Section ${index}`) } },
+  ])('rejects malformed or unsafe heading contracts before fetching %#', async (composition) => {
+    const fetchImpl = jest.fn()
+    await expect(makeAdapter({ fetchImpl })({ providerContext: { ...providerContext, composition } }))
+      .rejects.toMatchObject({ details: { reason: 'LIVE_TEST_PROVIDER_OUTPUT_INVALID' } })
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  test('still rejects prohibited narrative language under valid governed headings', async () => {
+    const sections = validStructuredOutput.sections.map((section) => ({ ...section, narrative: 'The runtime confirms this.' }))
+    const fetchImpl = jest.fn().mockResolvedValue(responseWithSections(sections))
+    await expect(makeAdapter({ fetchImpl })({ providerContext: withHeadings() }))
+      .rejects.toMatchObject({ details: { reason: 'LIVE_TEST_PROVIDER_CUSTOMER_LANGUAGE_BLOCKED' } })
+  })
+
   test('sends one bounded strict Responses API request and returns validated customer content', async () => {
     const fetchImpl = jest.fn().mockResolvedValue(makeResponse())
     const adapter = makeAdapter({ fetchImpl })
@@ -229,8 +301,14 @@ describe('OpenAI Outcome Studio provider adapter', () => {
       signal: expect.any(AbortSignal),
     }))
     const body = JSON.parse(request.body)
+    expect(body.text.format.schema.properties.sections.minItems).toBe(1)
+    expect(body.text.format.schema.properties.sections.maxItems).toBe(24)
+    expect(body.text.format.schema.properties.sections.items.properties.heading).not.toHaveProperty('enum')
     expect(body.instructions).toContain('customer-visible')
     expect(body.instructions).toContain('ordinary business language')
+    expect(body.instructions).toContain('Do not quote prohibited internal terminology even when it appears in source information.')
+    expect(body.instructions).toContain('When source information describes synthetic runtime proof, describe it as synthetic application testing, preserving its test-only limitation.')
+    expect(body.instructions).toContain('Never imply actual customer validation or add facts.')
     expect(body.instructions).toContain('internal governance')
     expect(body.instructions).toContain('knowledge packs')
     expect(body.instructions).not.toMatch(/\bprompts?\b/i)
@@ -318,7 +396,7 @@ describe('OpenAI Outcome Studio provider adapter', () => {
         outputSchemaVersion: '1.0.0',
         styleKey: 'EXECUTIVE',
         styleVersion: '1.0.0',
-        requiredSections: ['Executive summary'],
+        requiredSections: ['Situation', 'Recommendation'],
         optionalSections: [],
       },
       styleGuidance: ['Use concise business language.'],
@@ -344,7 +422,7 @@ describe('OpenAI Outcome Studio provider adapter', () => {
         businessFactCount: 1,
         omittedReferenceCount: 0,
         contradictionCount: 0,
-        requiredSectionCount: 1,
+        requiredSectionCount: 2,
         styleGuidanceCount: 1,
         methodGuidanceCount: 1,
         governanceConstraintCount: 1,

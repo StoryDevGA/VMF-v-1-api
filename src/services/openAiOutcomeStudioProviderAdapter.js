@@ -132,7 +132,7 @@ const extractResponseText = (responseBody) => {
   return outputTexts[0]
 }
 
-const parseStructuredOutput = (responseBody) => {
+const parseStructuredOutput = (responseBody, headingContract) => {
   let parsed
   try {
     parsed = JSON.parse(extractResponseText(responseBody))
@@ -144,6 +144,15 @@ const parseStructuredOutput = (responseBody) => {
   const result = governedDeliverableSchema.safeParse(parsed)
   if (!result.success) {
     throw createProviderError({ reason: 'LIVE_TEST_PROVIDER_OUTPUT_INVALID' })
+  }
+
+  if (headingContract) {
+    const headings = result.data.sections.map((section) => section.heading)
+    if (new Set(headings).size !== headings.length
+      || headings.some((heading) => !headingContract.allowed.includes(heading))
+      || headingContract.required.some((heading) => !headings.includes(heading))) {
+      throw createProviderError({ reason: 'LIVE_TEST_PROVIDER_OUTPUT_INVALID' })
+    }
   }
 
   const markdown = buildMarkdown(result.data)
@@ -179,7 +188,48 @@ const buildProviderInput = (providerContext) => {
   return input
 }
 
-const buildRequestBody = ({ maxOutputTokens, model, providerContext }) => ({
+const resolveHeadingContract = (providerContext) => {
+  if (!Object.hasOwn(providerContext, 'composition')) return null
+  const structure = providerContext.composition?.outputStructure
+  const required = structure?.requiredSections
+  const optional = structure?.optionalSections
+  if (!Array.isArray(required) || required.length < 1 || required.length > 24
+    || !Array.isArray(optional) || optional.length > 12) {
+    throw createProviderError({ reason: 'LIVE_TEST_PROVIDER_OUTPUT_INVALID' })
+  }
+  const allowed = [...required, ...optional]
+  if (allowed.some((heading) => typeof heading !== 'string' || !heading.trim() || heading !== heading.trim() || heading.length > 160)
+    || new Set(allowed.map((heading) => heading.trim().replace(/\s+/g, ' '))).size !== allowed.length
+    || !validateOutcomeCustomerLanguage(allowed).safe) {
+    throw createProviderError({ reason: 'LIVE_TEST_PROVIDER_OUTPUT_INVALID' })
+  }
+  return { required: [...required], allowed }
+}
+
+const buildResponseSchema = (headingContract) => {
+  if (!headingContract) return governedDeliverableJsonSchema
+  const sections = governedDeliverableJsonSchema.properties.sections
+  return {
+    ...governedDeliverableJsonSchema,
+    properties: {
+      ...governedDeliverableJsonSchema.properties,
+      sections: {
+        ...sections,
+        minItems: headingContract.required.length,
+        maxItems: Math.min(24, headingContract.allowed.length),
+        items: {
+          ...sections.items,
+          properties: {
+            ...sections.items.properties,
+            heading: { ...sections.items.properties.heading, enum: headingContract.allowed },
+          },
+        },
+      },
+    },
+  }
+}
+
+const buildRequestBody = ({ maxOutputTokens, model, providerContext, headingContract }) => ({
   model,
   store: false,
   max_output_tokens: maxOutputTokens,
@@ -190,7 +240,9 @@ const buildRequestBody = ({ maxOutputTokens, model, providerContext }) => ({
     'Every title, summary, heading, narrative, and caveat is customer-visible. Use ordinary business language throughout; do not describe how this deliverable was produced or refer to internal implementation details or identifiers.',
     'Do not mention internal governance or implementation vocabulary in any customer-visible field. This includes runtime, knowledge packs, provider context, activation, binding, manifests, resolution, truth signatures, GRR, resolver, model or provider details, identifiers, and hashes. Translate internal controls into plain business language or leave them out.',
     'Do not invent facts. Preserve material caveats and uncertainty.',
+    'Do not quote prohibited internal terminology even when it appears in source information. When source information describes synthetic runtime proof, describe it as synthetic application testing, preserving its test-only limitation. Never imply actual customer validation or add facts.',
     'Return only the required structured response.',
+    ...(headingContract ? ['Use every required heading exactly once, with only the optional headings supplied in composition.outputStructure. Do not rename headings or derive extra headings from explanatory guidance.'] : []),
   ].join(' '),
   input: JSON.stringify(buildProviderInput(providerContext)),
   text: {
@@ -198,7 +250,7 @@ const buildRequestBody = ({ maxOutputTokens, model, providerContext }) => ({
       type: 'json_schema',
       name: PROVIDER_RESPONSE_SCHEMA_NAME,
       strict: true,
-      schema: governedDeliverableJsonSchema,
+      schema: buildResponseSchema(headingContract),
     },
   },
 })
@@ -273,10 +325,12 @@ export const createOpenAiOutcomeStudioProviderAdapter = ({
   }
 
   return async ({ providerContext } = {}) => {
+    const headingContract = resolveHeadingContract(providerContext)
     const requestBody = buildRequestBody({
       maxOutputTokens: normalizedMaxOutputTokens,
       model: normalizedModel,
       providerContext,
+      headingContract,
     })
     const requestIdentity = createHash('sha256')
       .update(JSON.stringify(requestBody))
@@ -329,7 +383,7 @@ export const createOpenAiOutcomeStudioProviderAdapter = ({
     }
 
     const responseBody = await readResponseBody(response)
-    const structured = parseStructuredOutput(responseBody)
+    const structured = parseStructuredOutput(responseBody, headingContract)
     const createdAt = Number(responseBody.created_at)
     const generatedAt = Number.isFinite(createdAt) && createdAt > 0
       ? new Date(createdAt * 1000)

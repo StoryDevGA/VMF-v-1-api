@@ -8,6 +8,7 @@ import zlib from 'node:zlib'
 import * as pdfjs from 'pdfjs-dist/build/pdf.mjs'
 import { DISCOVERY_ACQUISITION_PROFILES } from '../constants/discoveryAcquisitionProfiles.js'
 import { buildSectionEvidenceProjection } from './sectionEvidenceProjectionService.js'
+import { getDiscoveryContradictionReview } from './discoveryContradictionReviewService.js'
 
 const moduleRequire = createRequire(import.meta.url)
 const { createCanvas } = moduleRequire('@napi-rs/canvas')
@@ -496,6 +497,12 @@ const deriveGraphReadyEvidenceMetadata = (evidenceObject = {}) => {
         ? 'UNVALIDATED'
         : 'VALIDATED',
   }
+}
+
+const withGraphReadyEvidenceMetadata = (evidenceObject) => {
+  const graphReadyMetadata = deriveGraphReadyEvidenceMetadata(evidenceObject)
+  const { evidenceId, sourceId, confidence, ...mirroredMetadata } = graphReadyMetadata
+  return { ...evidenceObject, ...mirroredMetadata, graphReadyMetadata }
 }
 
 const normalizeDocumentExtractionText = (value) => String(value ?? '')
@@ -2480,26 +2487,7 @@ export const normalizeDiscoveryEvidenceObjects = ({
         ...(evidenceObject.sourceFileName ? { sourceFileName: String(evidenceObject.sourceFileName).trim() } : {}),
         ...(evidenceObject.documentAssetType ? { documentAssetType: String(evidenceObject.documentAssetType).trim() } : {}),
       }
-      const graphReadyMetadata = deriveGraphReadyEvidenceMetadata(normalizedEvidenceObject)
-
-      return {
-        ...normalizedEvidenceObject,
-        domain: graphReadyMetadata.domain,
-        classification: graphReadyMetadata.classification,
-        confidenceScore: graphReadyMetadata.confidenceScore,
-        confidenceFactors: graphReadyMetadata.confidenceFactors,
-        confidenceWarnings: graphReadyMetadata.confidenceWarnings,
-        materiality: graphReadyMetadata.materiality,
-        materialityScore: graphReadyMetadata.materialityScore,
-        decisionImpact: graphReadyMetadata.decisionImpact,
-        decisionImpactScore: graphReadyMetadata.decisionImpactScore,
-        signalStrength: graphReadyMetadata.signalStrength,
-        readinessContribution: graphReadyMetadata.readinessContribution,
-        readinessDomain: graphReadyMetadata.readinessDomain,
-        truthDomain: graphReadyMetadata.truthDomain,
-        validationStatus: graphReadyMetadata.validationStatus,
-        graphReadyMetadata,
-      }
+      return withGraphReadyEvidenceMetadata(normalizedEvidenceObject)
     })
     .filter(Boolean)
 }
@@ -2606,7 +2594,7 @@ export const applyDiscoveryEvidenceReview = ({
     if (evidenceObject.evidenceObjectId !== normalizedEvidenceObjectId) return evidenceObject
     found = true
 
-    return {
+    return withGraphReadyEvidenceMetadata({
       ...evidenceObject,
       reviewStatus: normalizedReviewStatus,
       acceptedBy: normalizedReviewStatus === DISCOVERY_EVIDENCE_REVIEW_STATUSES.ACCEPTED
@@ -2621,7 +2609,7 @@ export const applyDiscoveryEvidenceReview = ({
       rejectionTimestamp: normalizedReviewStatus === DISCOVERY_EVIDENCE_REVIEW_STATUSES.REJECTED
         ? reviewedAt
         : '',
-    }
+    })
   })
 
   return {
@@ -2635,21 +2623,18 @@ export const acceptPendingDiscoveryEvidenceObjects = ({
   actorUserId,
   evidenceObjects = [],
 } = {}) => evidenceObjects.map((evidenceObject) => {
-  if (normalizeReviewStatus(evidenceObject?.reviewStatus) === DISCOVERY_EVIDENCE_REVIEW_STATUSES.REJECTED) {
-    return {
-      ...evidenceObject,
-      reviewStatus: DISCOVERY_EVIDENCE_REVIEW_STATUSES.REJECTED,
-    }
+  if (normalizeReviewStatus(evidenceObject?.reviewStatus) !== DISCOVERY_EVIDENCE_REVIEW_STATUSES.PENDING) {
+    return evidenceObject
   }
 
-  return {
+  return withGraphReadyEvidenceMetadata({
     ...evidenceObject,
     reviewStatus: DISCOVERY_EVIDENCE_REVIEW_STATUSES.ACCEPTED,
     acceptedBy: toIdString(actorUserId),
     acceptanceTimestamp: acceptedAt,
     rejectedBy: '',
     rejectionTimestamp: '',
-  }
+  })
 })
 
 export const buildDiscoveryCoverageAreas = (evidenceObjects = []) => {
@@ -2813,7 +2798,7 @@ const buildDiscoveryReadinessAssessment = ({
   if (!evidenceReady) blockerReasons.push('DISCOVERY_EVIDENCE_NOT_READY')
   if (reviewSummary.acceptedEvidenceCount === 0) blockerReasons.push('NO_ACCEPTED_EVIDENCE')
   if (coveragePercent < 40) blockerReasons.push('COVERAGE_BELOW_READINESS_THRESHOLD')
-  if (contradictionCandidates.some((candidate) => candidate.severity !== 'LOW')) {
+  if (contradictionCandidates.some((candidate) => candidate.reviewStatus !== 'NOT_CONTRADICTORY')) {
     blockerReasons.push('CONTRADICTIONS_REQUIRE_REVIEW')
   }
 
@@ -2837,6 +2822,7 @@ const buildDiscoveryReadinessAssessment = ({
     pendingReviewCount: reviewSummary.pendingReviewCount,
     rejectedEvidenceCount: reviewSummary.rejectedEvidenceCount,
     contradictionCount: contradictionCandidates.length,
+    unresolvedContradictionCount: contradictionCandidates.filter((candidate) => candidate.reviewStatus !== 'NOT_CONTRADICTORY').length,
     blockerReasons,
     warningReasons,
     assessedAt: '',
@@ -2845,6 +2831,9 @@ const buildDiscoveryReadinessAssessment = ({
 
 export const buildDiscoveryHealth = ({
   acquisitionProfile,
+  contradictionReviews = [],
+  contradictionReviewEpoch = '',
+  runtimeInstanceId = '',
   coverage,
   evidenceReady,
   evidenceObjects = [],
@@ -2862,7 +2851,10 @@ export const buildDiscoveryHealth = ({
     .filter((area) => area.state === 'MISSING')
     .map((area) => area.area)
   const signalCandidates = buildDiscoverySignalCandidates({ evidenceObjects, sourceRegistry })
-  const contradictionCandidates = buildDiscoveryContradictionCandidates(evidenceObjects)
+  const contradictionCandidates = buildDiscoveryContradictionCandidates(evidenceObjects).map((candidate) => ({
+    ...candidate,
+    reviewStatus: getDiscoveryContradictionReview(candidate, evidenceObjects, contradictionReviews, runtimeInstanceId, contradictionReviewEpoch).reviewStatus,
+  }))
   const normalizedNeedsRefresh = needsRefresh === true
   const normalizedEvidenceReady = normalizedNeedsRefresh
     ? false

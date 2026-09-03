@@ -32,7 +32,6 @@ import {
 } from './runtimeStateVersionService.js'
 import {
   RUNTIME_SECTION_STATES,
-  buildEnrichedGeneratedSection,
   evaluateSectionInterpretationSimilarity,
   buildRuntimeSectionRevision,
   buildSectionIntelligenceDisplayProjection,
@@ -45,6 +44,7 @@ import {
   invalidateRuntimeSectionEvidence,
   normalizeRuntimeSectionObject,
 } from './runtimeSectionModelService.js'
+import { buildReasonedGeneratedSection } from './runtimeSectionReasoningService.js'
 import { resolveSectionExecutionContract } from './sectionExecutionContractService.js'
 import { executeSectionValidationRules } from './sectionValidationExecutorService.js'
 import {
@@ -748,7 +748,7 @@ const applyRuntimeSectionGeneration = async ({
     }
   }
 
-  const { generated, intelligence } = buildEnrichedGeneratedSection({
+  const { generated, intelligence } = await buildReasonedGeneratedSection({
     actionKey: normalizedActionKey,
     actorUserId: toIdString(actorUserId),
     dependencySectionKeys: targetDependencySectionKeys,
@@ -805,6 +805,7 @@ const applyRuntimeSectionGeneration = async ({
       ]
     : existingRevisions
   const baseIntelligence = clearRuntimeSectionRegenerationIntelligence(sectionObject.intelligence)
+  if (generated.sectionIntelligence) delete baseIntelligence.sectionIntelligence
   const baseLineage = clearRuntimeSectionRegenerationLineage(sectionObject.lineage)
   const baseState = clearRuntimeSectionRegenerationState(sectionObject.state)
 
@@ -1491,11 +1492,40 @@ const persistActionWithAudit = async ({
     let sourceRollover = null
     try {
       await session.withTransaction(async () => {
+        updatedRuntimeInstance = await atomicPersistRuntimeAction({
+          actorUserId,
+          expectedUpdatedAt,
+          expectedStateVersion: previousStateVersion,
+          nextExecutionStatus,
+          nextFrameworkState,
+          nextStateVersion,
+          nextRuntimeUpdate,
+          runtimeInstance,
+          session,
+        })
+        // Match mutation persistence: hash the exact saved representation, not
+        // pre-cast empty metadata that Mongoose may minimize during the update.
+        const persisted = await RuntimeInstance.collection.findOne({
+          _id: runtimeInstance._id,
+          customerId: runtimeInstance.customerId,
+          tenantId: runtimeInstance.tenantId,
+          runtimeInstanceKey: runtimeInstance.runtimeInstanceKey,
+          stateVersion: nextStateVersion,
+        }, { session, projection: { framework_state: 1 } })
+        if (!persisted?.framework_state || typeof persisted.framework_state !== 'object'
+          || Array.isArray(persisted.framework_state)) {
+          throw buildActionError({
+            status: 409,
+            code: 'CONFLICT',
+            message: 'Saved runtime state could not be read for its V2 action source projection.',
+            reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_STATE_VERSION_REQUIRED,
+          })
+        }
         sourceRollover = await stageRuntimeStateSourceRollover({
           runtimeInstance,
           expectedStateVersion: previousStateVersion,
           nextStateVersion,
-          nextFrameworkState,
+          nextFrameworkState: persisted.framework_state,
           mutationTimestamp: stateMutationTimestamp,
           session,
         })
@@ -1514,17 +1544,6 @@ const persistActionWithAudit = async ({
             reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_STATE_VERSION_REQUIRED,
           })
         }
-        updatedRuntimeInstance = await atomicPersistRuntimeAction({
-          actorUserId,
-          expectedUpdatedAt,
-          expectedStateVersion: previousStateVersion,
-          nextExecutionStatus,
-          nextFrameworkState,
-          nextStateVersion,
-          nextRuntimeUpdate,
-          runtimeInstance,
-          session,
-        })
         await logRuntimeActionExecuted({
           action,
           actionedAt,
