@@ -529,6 +529,9 @@ const getControl = async ({ scopes, runtimeInstanceId, includeHandoffEligibility
     name: normalizeText(runtime.name),
     lockedAt: runtime.lockedAt || null,
     lockedBy: normalizeText(runtime.lockedBy),
+    revision: {
+      revisionNumber: Number(runtime.revision?.revisionNumber || 0),
+    },
     stateVersion: buildStateVersion(runtime),
     updatedAt: runtime.updatedAt || null,
     source: 'runtime_state_v2.control_projection',
@@ -760,6 +763,104 @@ const assertCurrentSectionRows = (rows) => {
       })
     }
   })
+}
+
+const readHandoffSectionRows = async ({ control }) => {
+  const catalogueRows = await readMany({
+    collectionName: RUNTIME_STATE_V2_COLLECTIONS.SECTIONS,
+    projection: RUNTIME_STATE_V2_CHILD_PROJECTION,
+    filter: buildChildFilter({ control, additional: { current: true } }),
+    sort: { sectionKey: 1 },
+    limit: RUNTIME_STATE_V2_SECTION_CATALOGUE_LIMIT + 1,
+  })
+  if (catalogueRows.length > RUNTIME_STATE_V2_SECTION_CATALOGUE_LIMIT) {
+    throw createRuntimeStateError({
+      code: RUNTIME_STATE_V2_ERROR_CODES.SECTION_CATALOGUE_LIMIT,
+      status: 503,
+      message: 'Runtime State Storage V2 handoff section catalogue exceeds its bounded read limit.',
+    })
+  }
+  assertCurrentSectionRows(catalogueRows)
+  const catalogueKeys = catalogueRows.map((row) => normalizeKey(row.sectionKey))
+  if (catalogueKeys.some((sectionKey) => !sectionKey)
+    || new Set(catalogueKeys).size !== catalogueKeys.length) {
+    throw createRuntimeStateError({
+      code: RUNTIME_STATE_V2_ERROR_CODES.SECTION_DUPLICATE,
+      message: 'Runtime State Storage V2 handoff sections are not uniquely current.',
+    })
+  }
+  if (catalogueRows.length > 0) {
+    assertStateVersions({
+      control,
+      rows: catalogueRows,
+      missingMessage: 'Runtime State Storage V2 handoff section catalogue has no state-version receipt.',
+      requireSourceStateVersion: true,
+    })
+  }
+
+  const partitions = await Promise.all(catalogueKeys.map(async (sectionKey) => {
+    const rows = await readMany({
+      collectionName: RUNTIME_STATE_V2_COLLECTIONS.SECTIONS,
+      projection: RUNTIME_STATE_V2_HANDOFF_SECTION_PROJECTION,
+      filter: buildChildFilter({
+        control,
+        additional: { current: true, sectionKey },
+      }),
+      limit: 2,
+    })
+    if (rows.length === 0) {
+      throw createRuntimeStateError({
+        code: RUNTIME_STATE_V2_ERROR_CODES.SECTION_MISSING,
+        message: 'Runtime State Storage V2 handoff section is unavailable.',
+      })
+    }
+    if (rows.length > 1) {
+      throw createRuntimeStateError({
+        code: RUNTIME_STATE_V2_ERROR_CODES.SECTION_DUPLICATE,
+        message: 'Runtime State Storage V2 handoff section is not uniquely current.',
+      })
+    }
+    assertStateVersions({
+      control,
+      rows,
+      missingMessage: 'Runtime State Storage V2 handoff section has no state-version receipt.',
+      requireSourceStateVersion: true,
+    })
+    return {
+      row: rows[0],
+      serializedPayloadBytes: measureSerializedPayloadBytes(rows),
+    }
+  }))
+  const rows = partitions
+    .map(({ row }) => row)
+    .sort((left, right) => normalizeKey(left.sectionKey).localeCompare(normalizeKey(right.sectionKey)))
+  assertCurrentSectionRows(rows)
+  if (rows.length !== catalogueKeys.length
+    || rows.some((row, index) => normalizeKey(row.sectionKey) !== catalogueKeys[index])) {
+    throw createRuntimeStateError({
+      code: RUNTIME_STATE_V2_ERROR_CODES.SECTION_MISSING,
+      message: 'Runtime State Storage V2 handoff sections changed during the bounded read.',
+    })
+  }
+  if (rows.length > 0) {
+    assertStateVersions({
+      control,
+      rows,
+      missingMessage: 'Runtime State Storage V2 handoff sections have no state-version receipt.',
+      requireSourceStateVersion: true,
+    })
+  }
+  return {
+    rows,
+    readReceipt: {
+      mode: 'CATALOGUE_PLUS_SECTION_PARTITIONS',
+      sectionCount: rows.length,
+      maxSectionPartitionSerializedPayloadBytes: Math.max(
+        0,
+        ...partitions.map(({ serializedPayloadBytes }) => serializedPayloadBytes),
+      ),
+    },
+  }
 }
 
 const assertCurrentEvidenceSourceRows = (rows) => {
@@ -1397,14 +1498,8 @@ export const getRuntimeStateOutcomeHandoffReadiness = async ({
   requestedOutputTypeKey = '',
 } = {}) => {
   const control = await getControl({ scopes, runtimeInstanceId, includeHandoffEligibility: true })
-  const [sectionRows, evidenceRows] = await Promise.all([
-    readMany({
-      collectionName: RUNTIME_STATE_V2_COLLECTIONS.SECTIONS,
-      projection: RUNTIME_STATE_V2_HANDOFF_SECTION_PROJECTION,
-      filter: buildChildFilter({ control, additional: { current: true } }),
-      sort: { sectionKey: 1 },
-      limit: RUNTIME_STATE_V2_SECTION_CATALOGUE_LIMIT + 1,
-    }),
+  const [sectionRead, evidenceRows] = await Promise.all([
+    readHandoffSectionRows({ control }),
     readMany({
       collectionName: RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_OBJECTS,
       projection: RUNTIME_STATE_V2_HANDOFF_EVIDENCE_PROJECTION,
@@ -1413,6 +1508,7 @@ export const getRuntimeStateOutcomeHandoffReadiness = async ({
       limit: RUNTIME_STATE_V2_EVIDENCE_COUNT_LIMIT,
     }),
   ])
+  const sectionRows = sectionRead.rows
   if (sectionRows.length > RUNTIME_STATE_V2_SECTION_CATALOGUE_LIMIT
     || evidenceRows.length >= RUNTIME_STATE_V2_EVIDENCE_COUNT_LIMIT) {
     throw createRuntimeStateError({
@@ -1504,11 +1600,13 @@ export const getRuntimeStateOutcomeHandoffReadiness = async ({
     control: publicControl,
     status: handoff.status || 'BLOCKED',
     handoff: sanitizeHandoffProjection(handoff),
+    handoffRead: sectionRead.readReceipt,
   }, 'runtime_state_v2.bounded_handoff_projection')
 }
 
 export const __testables = Object.freeze({
   RUNTIME_STATE_V2_HANDOFF_SECTION_PROJECTION,
+  RUNTIME_STATE_V2_CHILD_PROJECTION,
   RUNTIME_STATE_V2_RENDERER_SECTION_PROJECTION,
   buildStateVersion,
   buildRuntimeIdentityFilter,
@@ -1516,6 +1614,7 @@ export const __testables = Object.freeze({
   assertCurrentSectionRows,
   materializeStoredRuntimeSectionDetail,
   readMany,
+  readHandoffSectionRows,
   getRuntimeStateBootstrap,
   serializeSectionSummary,
   serializeEvidenceObject,

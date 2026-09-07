@@ -1,4 +1,7 @@
 import { randomUUID } from 'node:crypto'
+import mongoose from 'mongoose'
+import { loadRuntimeCertificationPackage, captureRuntimeReleaseCertification } from '../runtimeReleaseCertificationCaptureService.js'
+import { buildRuntimeReleaseCertificationBinding } from '../runtimeReleaseCertificationService.js'
 import { RUNTIME_PATH_REGISTRY_OPERATIONS } from '../../models/RuntimePathRegistry.js'
 import logger from '../../config/logger.js'
 import { RUNTIME_VALIDATION_CODES, buildRuntimeValidationIssue } from './runtimeValidationCodes.js'
@@ -98,9 +101,28 @@ const buildAuditFailureContext = (validationResult) => ({
   packageResolved: validationResult.packageResolved,
 })
 
-export const validateRuntimeOperation = async (input) => {
+export const validateRuntimeOperation = async (input, { session } = {}) => {
+  if (input.isPackageLevelValidation === true && input.persistAudit !== false && !session) {
+    const ownedSession = await mongoose.startSession()
+    try {
+      return await ownedSession.withTransaction(() => validateRuntimeOperation(input, { session: ownedSession }), {
+        readConcern: { level: 'snapshot' }, writeConcern: { w: 'majority' },
+      })
+    } finally {
+      await ownedSession.endSession()
+    }
+  }
+  const capturedPackage = input.isPackageLevelValidation === true && session
+    ? await loadRuntimeCertificationPackage({ packageId: input.packageId, session })
+    : undefined
   const operationType = String(input.operationType || '').trim().toUpperCase()
   const mode = normalizeRuntimeValidationMode(input.mode)
+  // Raw lean reads: missing persisted lock status must never become a schema-default PASS.
+  const certificationInput = capturedPackage
+    && ['PASS', 'PASS_WITH_WARNINGS'].includes(capturedPackage.dependencyLock?.status)
+    && ![RUNTIME_VALIDATION_MODES.DISABLED, RUNTIME_VALIDATION_MODES.AUDIT_ONLY].includes(mode)
+    ? await captureRuntimeReleaseCertification({ frameworkPackage: capturedPackage, session })
+    : null
   const operation = deriveOperation({ operationType, operation: input.operation })
   const timestamp = new Date().toISOString()
   const validationId = randomUUID()
@@ -112,10 +134,13 @@ export const validateRuntimeOperation = async (input) => {
     issues.push(...await validateRuntimeDependencyState({
       packageId: input.packageId,
       frameworkKey: input.frameworkKey,
+      session,
+      capturedPackage,
     }))
 
     if (MUTATION_OPERATION_TYPES.has(operationType)) {
       issues.push(...await validateRuntimeMutation({
+        session,
         runtimePath: input.runtimePath,
         operation,
         frameworkKey: input.frameworkKey,
@@ -170,10 +195,10 @@ export const validateRuntimeOperation = async (input) => {
   }
   const summary = summarizeRuntimeValidationIssues(validationIssues)
   const highestSeverity = getHighestRuntimeValidationSeverity(validationIssues)
-  const packageResolved = !validationIssues.some((issue) =>
+  const packageResolved = capturedPackage !== null && !validationIssues.some((issue) =>
     issue.code === RUNTIME_VALIDATION_CODES.DEPENDENCY_INVALID && issue.packageResolved === false)
   const dependencyLockState = input.packageId && packageResolved
-    ? await getRuntimeDependencyLockState({ packageId: input.packageId })
+    ? await getRuntimeDependencyLockState({ packageId: input.packageId, session, capturedPackage })
     : 'NOT_LOCKED'
 
   const validationResult = {
@@ -205,7 +230,25 @@ export const validateRuntimeOperation = async (input) => {
 
   if (input.persistAudit !== false) {
     try {
-      await persistRuntimeValidationAudit(validationResult)
+      const certificationBinding = validationResult.isPackageLevelValidation
+        && result === 'ALLOW' && ![RUNTIME_VALIDATION_MODES.DISABLED, RUNTIME_VALIDATION_MODES.AUDIT_ONLY].includes(mode)
+        && packageResolved && dependencyLockState === 'LOCKED'
+        ? buildRuntimeReleaseCertificationBinding({
+            frameworkPackage: certificationInput.frameworkPackage,
+            dependencies: certificationInput.dependencies,
+          })
+        : null
+      await persistRuntimeValidationAudit(validationResult, {
+        session,
+        capturedPackage,
+        certificationBinding,
+        certificationDependencySnapshot: certificationBinding
+          ? certificationInput.certificationDependencySnapshot
+          : undefined,
+        certificationDependencyLockObservation: certificationBinding
+          ? certificationInput.certificationDependencyLockObservation
+          : undefined,
+      })
     } catch (err) {
       logger.error(
         { err, validation: buildAuditFailureContext(validationResult) },

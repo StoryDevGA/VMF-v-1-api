@@ -104,6 +104,25 @@ const runtimeValidationSummarySchema = new mongoose.Schema(
 
 const runtimeValidationAuditSchema = new mongoose.Schema(
   {
+    certificationBinding: {
+      type: new mongoose.Schema({
+        version: { type: String, required: true, enum: ['runtime-release-certification.v1'] },
+        digest: { type: String, required: true, match: /^[a-f0-9]{64}$/ },
+      }, { _id: false }),
+      default: null,
+    },
+    // Server-owned dependency snapshot used to reproduce legacy release certification.
+    // It is never accepted from the validation HTTP contract.
+    certificationDependencySnapshot: {
+      type: mongoose.Schema.Types.Mixed,
+      default: undefined,
+    },
+    certificationDependencyLockObservation: {
+      type: mongoose.Schema.Types.Mixed,
+      default: undefined,
+    },
+    isPackageLevelValidation: { type: Boolean, default: false },
+    dependencyLockState: { type: String, enum: ['LOCKED', 'NOT_LOCKED', 'STALE', 'FAILED'], default: null },
     validationCode: {
       type: String,
       required: true,

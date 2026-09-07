@@ -1834,8 +1834,15 @@ const installDefaultRuntimeStateCollections = () => {
     const getFixtureRows = async () => {
       const runtime = await getLatestRuntimeFixture()
       const stateVersion = String(runtime?.stateVersion || runtime?.runtimeStateVersion || '').trim()
+      const scope = {
+        runtimeInstanceId: runtime?._id,
+        runtimeInstanceKey: runtime?.runtimeInstanceKey,
+        customerId: runtime?.customerId,
+        tenantId: runtime?.tenantId,
+      }
       if (name === 'runtime_section_states') {
         return Object.entries(runtime?.framework_state?.sections || {}).map(([sectionKey, value]) => ({
+          ...scope,
           sectionKey,
           stateVersion,
           sourceStateVersion: stateVersion,
@@ -1856,6 +1863,7 @@ const installDefaultRuntimeStateCollections = () => {
           || []
         return evidenceObjects.map((value, index) => ({
           ...value,
+          ...scope,
           evidenceObjectId: value?.evidenceObjectId || value?._id || `evidence-fixture-${index + 1}`,
           stateVersion,
           sourceStateVersion: stateVersion,
@@ -1864,16 +1872,59 @@ const installDefaultRuntimeStateCollections = () => {
       }
       return []
     }
-    const cursor = {
-      maxTimeMS: jest.fn().mockReturnThis(),
-      sort: jest.fn().mockReturnThis(),
-      skip: jest.fn().mockReturnThis(),
-      limit: jest.fn().mockReturnThis(),
-      toArray: jest.fn(() => getFixtureRows()),
+    // Only the equality/conjunction filters used by the bounded V2 readers.
+    const matches = (row, filter) => Object.entries(filter).every(([key, value]) => {
+      if (key === '$and') return value.every((part) => matches(row, part))
+      if (key === '$or') return value.some((part) => matches(row, part))
+      if (key.startsWith('$')) throw new Error(`Unsupported fixture filter: ${key}`)
+      return row[key] === value || (row[key] != null && value != null && String(row[key]) === String(value))
+    })
+    const project = (value, paths) => {
+      if (paths.some((path) => path.length === 0)) {
+        if (value instanceof Date) return new Date(value.getTime())
+        if (value instanceof mongoose.Types.ObjectId) return new mongoose.Types.ObjectId(value.toHexString())
+        if (Array.isArray(value)) return value.map((item) => project(item, [[]]))
+        if (value && typeof value === 'object') {
+          return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, project(item, [[]])]))
+        }
+        return value
+      }
+      if (Array.isArray(value)) return value.map((item) => project(item, paths))
+      if (!value || typeof value !== 'object') return value
+      const result = {}
+      for (const key of new Set(paths.map(([head]) => head))) {
+        if (Object.prototype.hasOwnProperty.call(value, key)) {
+          result[key] = project(value[key], paths.filter(([head]) => head === key).map((path) => path.slice(1)))
+        }
+      }
+      return result
     }
     return {
-      find: jest.fn(() => cursor),
-      countDocuments: jest.fn(async () => (await getFixtureRows()).length),
+      find: jest.fn((filter = {}, { projection } = {}) => {
+        let sort = {}, skip = 0, limit = 0
+        const cursor = {
+          maxTimeMS: jest.fn().mockReturnThis(),
+          sort: jest.fn((value) => { sort = value; return cursor }),
+          skip: jest.fn((value) => { skip = value; return cursor }),
+          limit: jest.fn((value) => { limit = value; return cursor }),
+          toArray: jest.fn(async () => {
+            let rows = (await getFixtureRows()).filter((row) => matches(row, filter))
+            rows.sort((left, right) => {
+              for (const [key, direction] of Object.entries(sort)) {
+                if (left[key] < right[key]) return -direction
+                if (left[key] > right[key]) return direction
+              }
+              return 0
+            })
+            rows = rows.slice(skip, limit ? skip + limit : undefined)
+            if (!projection) return rows
+            const paths = Object.entries(projection).filter(([, include]) => include).map(([key]) => key.split('.'))
+            return rows.map((row) => project(row, paths))
+          }),
+        }
+        return cursor
+      }),
+      countDocuments: jest.fn(async (filter = {}) => (await getFixtureRows()).filter((row) => matches(row, filter)).length),
     }
   }
 }
@@ -2108,6 +2159,76 @@ beforeEach(async () => {
 })
 
 describe('Runtime Instance API', () => {
+  describe('default V2 collection query contract', () => {
+    test('preserves BSON IDs and Dates in independent projection copies', async () => {
+      const id = new mongoose.Types.ObjectId(RUNTIME_INSTANCE_ID)
+      const date = new Date('2026-09-04T10:00:00.000Z')
+      const runtime = makeRuntimeInstance({ _id: id, framework_state: { sections: {
+        alpha: { accepted: { content: 'Synthetic truth', acceptedBy: id, acceptedAt: date } },
+      } } })
+      RuntimeInstance.findOne.mockReturnValue(buildLeanQuery(runtime))
+      RuntimeInstance.findOne()
+      const collection = mongoose.connection.collection('runtime_section_states')
+      const projection = { runtimeInstanceId: 1, 'sectionDetail.accepted': 1 }
+      const [first, second] = await Promise.all([
+        collection.find({ runtimeInstanceId: id }, { projection }).limit(1).toArray(),
+        collection.find({ runtimeInstanceId: id }, { projection }).limit(1).toArray(),
+      ])
+      expect(first[0].runtimeInstanceId).toBeInstanceOf(mongoose.Types.ObjectId)
+      expect(first[0].runtimeInstanceId.toHexString()).toBe(id.toHexString())
+      expect(first[0].runtimeInstanceId).not.toBe(id)
+      expect(first[0].sectionDetail.accepted.acceptedBy).toBeInstanceOf(mongoose.Types.ObjectId)
+      expect(first[0].sectionDetail.accepted.acceptedAt).toBeInstanceOf(Date)
+      first[0].sectionDetail.accepted.acceptedAt.setUTCFullYear(2000)
+      first[0].sectionDetail.accepted.content = 'Changed copy'
+      expect(second[0].sectionDetail.accepted.acceptedAt.toISOString()).toBe('2026-09-04T10:00:00.000Z')
+      expect(runtime.framework_state.sections.alpha.accepted.content).toBe('Synthetic truth')
+      expect(date.toISOString()).toBe('2026-09-04T10:00:00.000Z')
+    })
+
+    const prepare = () => {
+      const runtime = makeRuntimeInstance({ framework_state: { sections: {
+        beta: { generated: { content: 'Beta', sectionIntelligence: { privateDetail: true } } },
+        alpha: { generated: { content: 'Alpha' }, revisions: [{ revisionNumber: 1, reason: 'old', secret: 'omit' }] },
+      } } })
+      RuntimeInstance.findOne.mockReturnValue(buildLeanQuery(runtime))
+      RuntimeInstance.findOne()
+      return { runtime, collection: mongoose.connection.collection('runtime_section_states') }
+    }
+
+    test.each([
+      ['customerId', 'other'], ['tenantId', 'other'], ['runtimeInstanceId', 'other'],
+      ['runtimeInstanceKey', 'other'], ['current', false], ['stateVersion', 'stale'], ['sectionKey', 'missing'],
+    ])('rejects mismatched %s without inventing a row', async (key, value) => {
+      const { collection } = prepare()
+      const filter = { $and: [{ customerId: CUSTOMER_ID }, { tenantId: TENANT_ID }], [key]: value }
+      expect(await collection.find(filter).limit(2).toArray()).toEqual([])
+      expect(await collection.countDocuments(filter)).toBe(0)
+    })
+
+    test('keeps concurrent cursors, nested projections, sort and bounds independent', async () => {
+      const { runtime, collection } = prepare()
+      const filter = { $and: [
+        { $or: [{ runtimeInstanceId: new mongoose.Types.ObjectId(RUNTIME_INSTANCE_ID) }, { runtimeInstanceKey: 'wrong' }] },
+        { customerId: CUSTOMER_ID }, { tenantId: TENANT_ID },
+      ], current: true, stateVersion: runtime.stateVersion }
+      const first = collection.find(filter, { projection: { sectionKey: 1, 'sectionDetail.generated.content': 1 } })
+        .sort({ sectionKey: 1 }).limit(1)
+      const second = collection.find({ ...filter, sectionKey: 'alpha' }, {
+        projection: { sectionKey: 1, 'sectionDetail.revisions.revisionNumber': 1 },
+      }).limit(2)
+      const third = collection.find(filter, { projection: { sectionKey: 1 } }).sort({ sectionKey: 1 }).skip(1).limit(1)
+      expect(first).not.toBe(second)
+      expect(await Promise.all([first.toArray(), second.toArray(), third.toArray()])).toEqual([
+        [{ sectionKey: 'alpha', sectionDetail: { generated: { content: 'Alpha' } } }],
+        [{ sectionKey: 'alpha', sectionDetail: { revisions: [{ revisionNumber: 1 }] } }],
+        [{ sectionKey: 'beta' }],
+      ])
+      expect(await collection.countDocuments(filter)).toBe(2)
+      expect(await collection.find({ ...filter, sectionKey: 'beta' }).limit(2).toArray()).toHaveLength(1)
+    })
+  })
+
   describe('Runtime State V2 bootstrap API chain evidence', () => {
     const installSectionCatalogueCollection = (rows = []) => {
       const cursor = {
@@ -10474,6 +10595,26 @@ describe('Runtime Instance API', () => {
     },
   })
 
+  // Synthetic contract fixture only: no Andrew, customer-quality or live-provider proof.
+  const makeSyntheticAcceptedIntelligence = (sectionKey) => ({
+    sectionSummary: `Synthetic accepted ${sectionKey} context.`,
+    sectionNarrative: `Synthetic ${sectionKey} narrative bounded to its fixture evidence.`,
+    commercialInterpretation: 'Consider the supported workflow implication; quantified benefit is unproven.',
+    strategicTensions: [{ signal: 'Scope versus proof', interpretation: 'Keep the decision within available evidence.' }],
+    supportedClaims: [{ claim: 'The fixture describes a proposal workflow.', evidenceRefs: [`fixture-evidence-${sectionKey}`] }],
+    representedClaims: [],
+    restrictedClaims: [{ claim: 'Quantified benefit is established.', interpretation: 'Not established by this fixture.' }],
+    evidenceBoundaries: [{ boundary: 'No quantified benefit claim.', rationale: 'No measurement is supplied.' }],
+    contradictionSignals: [],
+    alternativeInterpretations: [],
+    decisionRelevance: 'Review the bounded workflow implication.',
+    downstreamHandoffSignals: [{ signal: 'Retain the proof boundary.', relevance: 'Avoid unsupported certainty.' }],
+    sourceTraceability: [`fixture-evidence-${sectionKey}`],
+    validationGaps: [],
+    fxGxAssessmentSignals: { signal: 'Synthetic assessment: workflow relevance only; value remains unmeasured.' },
+    arlRlReviewChangeRationale: { rationale: 'Synthetic review: preserve evidence wording and uncertainty.' },
+  })
+
   const makeOutputLabReadyRuntime = (overrides = {}) => makeRuntimeInstance({
     status: 'LOCKED',
     executionStatus: 'COMPLETE',
@@ -10552,6 +10693,7 @@ describe('Runtime Instance API', () => {
       sections: {
         situation: {
           accepted: {
+            sectionIntelligence: makeSyntheticAcceptedIntelligence('situation'),
             content: 'Acme operates a governed proposal workflow for enterprise sales teams.',
             acceptedAt: '2026-06-05T09:40:00.000Z',
             acceptedBy: CUSTOMER_ADMIN_ID,
@@ -10562,6 +10704,7 @@ describe('Runtime Instance API', () => {
         },
         commercial_problem: {
           accepted: {
+            sectionIntelligence: makeSyntheticAcceptedIntelligence('commercial_problem'),
             content: 'Sales teams struggle to prove ROI because value evidence is inconsistent across proposals.',
             acceptedAt: '2026-06-05T09:41:00.000Z',
             acceptedBy: CUSTOMER_ADMIN_ID,
@@ -10572,6 +10715,7 @@ describe('Runtime Instance API', () => {
         },
         value_drivers: {
           accepted: {
+            sectionIntelligence: makeSyntheticAcceptedIntelligence('value_drivers'),
             content: 'Governed value narratives reduce manual effort and create repeatable executive-ready messaging.',
             acceptedAt: '2026-06-05T09:42:00.000Z',
             acceptedBy: CUSTOMER_ADMIN_ID,
@@ -10582,6 +10726,7 @@ describe('Runtime Instance API', () => {
         },
         recommended_focus: {
           accepted: {
+            sectionIntelligence: makeSyntheticAcceptedIntelligence('recommended_focus'),
             content: 'Prioritise outcome proof, decision context, and a concise commercial value story.',
             acceptedAt: '2026-06-05T09:43:00.000Z',
             acceptedBy: CUSTOMER_ADMIN_ID,
@@ -17896,6 +18041,24 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       status: expect.stringMatching(/^(READY|READY_WITH_GAPS)$/),
       currentness: 'CURRENT',
       contractVersion: 'ss-011.framework-to-outcome-studio.evidence-to-knowledge.v1',
+      reasoningBoundary: expect.objectContaining({
+        contractVersion: 'outcome-studio.intermediate-reasoning-boundary.v1',
+        requiredFor: 'COMMERCIAL_STRATEGY_DECISION_PAPER',
+        status: 'BLOCKED',
+        missingArtefacts: ['outputSpecificCompositionGuidance'],
+        artefacts: expect.arrayContaining([
+          expect.objectContaining({
+            key: 'claimHypothesisMatrix',
+            classification: 'CONSUMED_FROM_FRAMEWORK_RUNTIME',
+            present: true,
+          }),
+          expect.objectContaining({
+            key: 'outputSpecificCompositionGuidance',
+            classification: 'MISSING',
+            present: false,
+          }),
+        ]),
+      }),
     }))
     expect(RuntimeOutputAsset.find).toHaveBeenCalledWith({ runtimeInstanceId: RUNTIME_INSTANCE_ID })
   })
@@ -19465,6 +19628,39 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     expect(OutcomeAsset.prototype.save.mock.contexts[0].title).toBe('Executive Brief')
     expect(OutcomeAssetVersion.prototype.save.mock.contexts[0].title).toBe('Executive Brief')
   })
+
+  test.each(['missing', 'incomplete', 'generated-only', 'missing-explicit-artifacts'])(
+    'Outcome Studio blocks %s accepted intelligence before provider execution', async (variant) => {
+      const providerDescriptor = makeOutcomeStudioLiveTestProviderDescriptor()
+      const providerAdapter = makeOutcomeStudioLiveProviderAdapter()
+      app.locals.outcomeStudioReasoningDeps = { executionMode: 'LIVE_TEST', providerDescriptor, providerAdapter }
+      mockOutcomeStudioLiveTestReadiness(providerDescriptor)
+      const runtime = makeOutputLabReadyRuntime()
+      for (const section of Object.values(runtime.framework_state.sections)) {
+        if (variant === 'generated-only') section.generated.sectionIntelligence = section.accepted.sectionIntelligence
+        if (variant === 'missing' || variant === 'generated-only') delete section.accepted.sectionIntelligence
+        if (variant === 'incomplete') delete section.accepted.sectionIntelligence.evidenceBoundaries
+        if (variant === 'missing-explicit-artifacts') {
+          delete section.accepted.sectionIntelligence.fxGxAssessmentSignals
+          delete section.accepted.sectionIntelligence.arlRlReviewChangeRationale
+        }
+      }
+      RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtime))
+      FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+      mockRequestReadyOutcomeKnowledgePacks({ providerSafeContent: true })
+      OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+      OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord()))
+      const token = await getAccessTokenForUser(makeCustomerAdmin())
+      const res = await request
+        .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/messages/out_msg_existing_fixture/generate-response`)
+        .set('Authorization', `Bearer ${token}`).send({})
+      expect(res.status).toBe(409)
+      expect(res.body.error).toEqual(expect.objectContaining({ code: 'CONFLICT', message: 'Outcome Studio evidence composition is blocked.' }))
+      expect(providerAdapter).not.toHaveBeenCalled()
+      expect(OutcomeDraft.prototype.save).not.toHaveBeenCalled()
+      expect(OutcomeDraftIteration.prototype.save).not.toHaveBeenCalled()
+    },
+  )
 
   test('Outcome Studio response generation persists a governed assistant response and first draft iteration', async () => {
     const providerDescriptor = makeOutcomeStudioLiveTestProviderDescriptor()
@@ -21722,6 +21918,9 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       {
         runtimeInstanceId: RUNTIME_INSTANCE_ID,
         sessionId: 'out_sess_existing_fixture',
+        status: { $nin: ['PUBLISHED', 'SUPERSEDED', 'ARCHIVED'] },
+        publishedAt: null,
+        'lineageSummary.draftApproval': { $exists: false },
       },
       {
         $set: expect.objectContaining({
@@ -21741,6 +21940,8 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
         runtimeInstanceId: RUNTIME_INSTANCE_ID,
         sessionId: 'out_sess_existing_fixture',
         status: 'CURRENT',
+        publishedAt: null,
+        'lineageSummary.draftApproval': { $exists: false },
       },
       {
         $set: expect.objectContaining({
@@ -21908,6 +22109,9 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       {
         runtimeInstanceId: RUNTIME_INSTANCE_ID,
         sessionId: 'out_sess_existing_fixture',
+        status: { $nin: ['PUBLISHED', 'SUPERSEDED', 'ARCHIVED'] },
+        publishedAt: null,
+        'lineageSummary.draftApproval': { $exists: false },
       },
       {
         $set: expect.objectContaining({
@@ -21927,6 +22131,8 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
         runtimeInstanceId: RUNTIME_INSTANCE_ID,
         sessionId: 'out_sess_existing_fixture',
         status: 'CURRENT',
+        publishedAt: null,
+        'lineageSummary.draftApproval': { $exists: false },
       },
       {
         $set: expect.objectContaining({
@@ -21994,6 +22200,9 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       {
         runtimeInstanceId: RUNTIME_INSTANCE_ID,
         sessionId: 'out_sess_existing_fixture',
+        status: { $nin: ['PUBLISHED', 'SUPERSEDED', 'ARCHIVED'] },
+        publishedAt: null,
+        'lineageSummary.draftApproval': { $exists: false },
       },
       {
         $set: expect.objectContaining({
@@ -22011,6 +22220,8 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
         runtimeInstanceId: RUNTIME_INSTANCE_ID,
         sessionId: 'out_sess_existing_fixture',
         status: 'CURRENT',
+        publishedAt: null,
+        'lineageSummary.draftApproval': { $exists: false },
       },
       {
         $set: expect.objectContaining({

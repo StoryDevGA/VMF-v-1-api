@@ -372,15 +372,16 @@ const getRolePermissions = (role) =>
     ? role.permissions.map((permission) => normalizeToken(permission)).filter(Boolean)
     : []
 
-const loadPermissionGrantingRoles = async ({ roleKeys, permission }) => {
+const loadPermissionGrantingRoles = async ({ roleKeys, permission, session }) => {
   const uniqueRoleKeys = [
     ...new Set(roleKeys.map((roleKey) => normalizeToken(roleKey)).filter(Boolean)),
   ]
   if (uniqueRoleKeys.length === 0) return []
 
-  const roleRows = await Role.find({ key: { $in: uniqueRoleKeys } })
+  const roleQuery = Role.find({ key: { $in: uniqueRoleKeys } })
     .select('key scope permissions isActive')
     .lean()
+  const roleRows = await (session ? roleQuery.session(session) : roleQuery)
 
   const roleByKey = new Map(
     (Array.isArray(roleRows) ? roleRows : []).map((role) => [normalizeToken(role?.key), role]),
@@ -436,12 +437,13 @@ const hasCustomerRuntimePermission = async ({
   customerId,
   tenantId,
   permission,
+  session,
 }) => {
   const customerBucket = getCustomerBucket(scopes, customerId)
   if (!hasBucketPermission(customerBucket, permission)) return false
 
   const roleKeys = getBucketRoleKeys(customerBucket)
-  const permissionGrantingRoles = await loadPermissionGrantingRoles({ roleKeys, permission })
+  const permissionGrantingRoles = await loadPermissionGrantingRoles({ roleKeys, permission, session })
 
   if (permissionGrantingRoles.some((role) => normalizeToken(role.scope) === 'CUSTOMER')) {
     return true
@@ -453,7 +455,8 @@ const hasCustomerRuntimePermission = async ({
   const hasCustomerScopedTenantAdminRole = roleKeys.includes('TENANT_ADMIN')
 
   if (hasTenantScopedCustomerRole && hasCustomerScopedTenantAdminRole) {
-    const tenant = await Tenant.findById(tenantId)
+    const tenantQuery = Tenant.findById(tenantId)
+    const tenant = await (session ? tenantQuery.session(session) : tenantQuery)
 
     if (
       tenant
@@ -470,11 +473,12 @@ const hasCustomerRuntimePermission = async ({
     }
   }
 
-  const customer = await Customer.findById(customerId)
+  const customerQuery = Customer.findById(customerId)
+  const customer = await (session ? customerQuery.session(session) : customerQuery)
   return customer?.topology === 'SINGLE_TENANT'
 }
 
-export const assertRuntimePermission = async ({ actorUserId, scopes, customerId, tenantId, permission }) => {
+export const assertRuntimePermission = async ({ actorUserId, scopes, customerId, tenantId, permission, session }) => {
   const normalizedPermission = normalizeToken(permission)
   const resolved = getResolvedPermissionsSnapshot(scopes)
 
@@ -490,6 +494,7 @@ export const assertRuntimePermission = async ({ actorUserId, scopes, customerId,
     customerId,
     tenantId,
     permission: normalizedPermission,
+    session,
   })) return
 
   throw createRuntimeInstanceError({
@@ -501,10 +506,11 @@ export const assertRuntimePermission = async ({ actorUserId, scopes, customerId,
   })
 }
 
-export const assertFeatureEntitlement = async ({ customerId, customer, feature }) => {
+export const assertFeatureEntitlement = async ({ customerId, customer, feature, session }) => {
   const entitlementContext = await resolveCustomerFeatureEntitlements({
     customerId,
     customer,
+    ...(session ? { session } : {}),
   })
 
   if (!entitlementContext) {
@@ -533,11 +539,16 @@ export const assertFeatureEntitlement = async ({ customerId, customer, feature }
   }
 }
 
-export const assertCustomerTenantContext = async ({ customerId, tenantId }) => {
-  const [customer, tenant] = await Promise.all([
-    Customer.findById(customerId),
-    Tenant.findById(tenantId),
-  ])
+export const assertCustomerTenantContext = async ({ customerId, tenantId, session }) => {
+  const [customer, tenant] = session
+    ? [
+        await Customer.findById(customerId).session(session),
+        await Tenant.findById(tenantId).session(session),
+      ]
+    : await Promise.all([
+        Customer.findById(customerId),
+        Tenant.findById(tenantId),
+      ])
 
   if (!customer) {
     throw createRuntimeInstanceError({

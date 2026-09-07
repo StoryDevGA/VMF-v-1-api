@@ -3,6 +3,8 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import mongoose from 'mongoose'
 import { describe, test, expect, beforeAll, beforeEach, afterAll, jest } from '@jest/globals'
+import { generateChecksum } from '../services/governanceAudit/checksumService.js'
+import { buildRuntimeReleaseCertificationBinding } from '../services/runtimeReleaseCertificationService.js'
 
 beforeAll(() => {
   process.env.NODE_ENV = 'test'
@@ -42,6 +44,7 @@ const expectFrameworkPackageCloneReleaseFieldsCleared = (frameworkPackage) => {
 }
 
 const buildSession = () => ({
+  inTransaction: () => true,
   withTransaction: jest.fn(async (callback) => callback()),
   endSession: jest.fn(async () => {}),
 })
@@ -76,6 +79,7 @@ const restoreFrameworkPackageState = (frameworkPackage, snapshot) => {
 }
 
 const buildRollbackSession = (frameworkPackages = []) => ({
+  inTransaction: () => true,
   withTransaction: jest.fn(async (callback) => {
     const snapshots = frameworkPackages.map((frameworkPackage) => ({
       frameworkPackage,
@@ -123,6 +127,8 @@ const buildFrameworkPackageQueryChain = (rows) => {
     skip: jest.fn().mockReturnThis(),
     limit: jest.fn().mockReturnThis(),
     populate: jest.fn().mockReturnThis(),
+    select: jest.fn().mockReturnThis(),
+    session: jest.fn().mockReturnThis(),
     lean: jest.fn().mockResolvedValue(rows),
   }
   return chain
@@ -138,6 +144,7 @@ const buildRoleQueryChain = (rows) => {
 
 const buildFrameworkRegistryLookupChain = (rows) => ({
   select: jest.fn().mockReturnValue({
+    session: jest.fn().mockReturnThis(),
     lean: jest.fn().mockResolvedValue(rows),
   }),
 })
@@ -156,11 +163,54 @@ const buildUserQueryChain = (value, { reject = false } = {}) => {
 const buildSessionQueryChain = (value) => {
   const promise = Promise.resolve(value)
   return {
-    session: jest.fn().mockResolvedValue(value),
+    session: jest.fn().mockReturnThis(),
+    select: jest.fn().mockReturnThis(),
+    lean: jest.fn().mockResolvedValue(value),
     then: promise.then.bind(promise),
     catch: promise.catch.bind(promise),
     finally: promise.finally.bind(promise),
   }
+}
+
+const buildCertificationPackageQuery = (doc) => {
+  const promise = Promise.resolve(doc)
+  return {
+    select: jest.fn().mockReturnThis(),
+    session: jest.fn().mockReturnThis(),
+    lean: jest.fn().mockResolvedValue(doc?.toObject ? doc.toObject({ minimize: false }) : doc),
+    then: promise.then.bind(promise),
+    catch: promise.catch.bind(promise),
+    finally: promise.finally.bind(promise),
+  }
+}
+
+const buildCertifiedUIContractQuery = (frameworkPackage = makeFrameworkPackageDoc({ certificationFixture: true })) => {
+  const row = buildCertificationDependencies(frameworkPackage.toObject({ minimize: false })).UIContract[0]
+  return { session: jest.fn().mockReturnThis(), select: jest.fn().mockReturnThis(), lean: jest.fn().mockResolvedValue(row) }
+}
+
+const installCertifiedPackageLookups = (frameworkPackage, { packageKey = false } = {}) => {
+  const raw = frameworkPackage.toObject({ minimize: false })
+  const query = buildCertificationPackageQuery(frameworkPackage)
+  if (packageKey) FrameworkPackage.findOne.mockReturnValue(query)
+  else FrameworkPackage.findById.mockReturnValue(query)
+  FrameworkPackage.findOne.mockReturnValue(buildCertificationPackageQuery(frameworkPackage))
+  FrameworkPackage.hydrate = jest.fn().mockReturnValue(frameworkPackage)
+  if (!mongoose.isValidObjectId(raw.runtimeVerdict?.auditId)) return
+  RuntimeValidationAudit.findById.mockReturnValue(buildSessionQueryChain({
+    _id: new mongoose.Types.ObjectId(raw.runtimeVerdict.auditId),
+    packageId: String(raw._id), frameworkKey: raw.frameworkKey,
+    status: raw.runtimeVerdict.status, result: raw.runtimeVerdict.result,
+    mode: raw.runtimeVerdict.mode, createdAt: raw.runtimeVerdict.lastValidatedAt,
+    packageResolved: true, isPackageLevelValidation: true, dependencyLockState: 'LOCKED',
+    certificationBinding: raw.runtimeVerdict.certificationBinding,
+    certificationDependencySnapshot: raw.dependencyLock,
+    certificationDependencyLockObservation: {
+      snapshotId: raw.dependencyLock.snapshotId,
+      snapshotHash: raw.dependencyLock.snapshotHash,
+      resolvedAt: new Date(raw.dependencyLock.resolvedAt).toISOString(),
+    },
+  }))
 }
 
 const buildDefaultRoleRows = () => ([
@@ -214,6 +264,7 @@ let UIContract
 let RuntimePathRegistry
 let RuntimeActivationSnapshot
 let RuntimeDeployment
+let RuntimeValidationAudit
 let AuditLog
 let mockRedisClient
 let frameworkPackageController
@@ -246,6 +297,21 @@ const makeCheckpointResult = (overrides = {}) => ({
   runBy: SUPER_ADMIN_ID,
   ...overrides,
 })
+
+const certificationKeys = { RuntimePathRegistry: 'pathKey', ValidationRegistry: 'key', WorkflowPolicy: 'key',
+  RuntimeAgent: 'key', RuntimeSkill: 'key', SkillRoleRegistry: 'roleKey', UIContract: 'uiContractKey' }
+const buildCertificationDependencies = (pkg) => {
+  const dependencies = Object.fromEntries(Object.entries(certificationKeys).map(([type, key], index) => [type, [{
+    _id: (index + 10).toString(16).padStart(24, '0'), stableId: `cert-${type}`, [key]: `cert-${type}`,
+    componentVersion: 1, status: 'ACTIVE', versionStatus: 'ACTIVE', isLocked: true,
+  }]]))
+  Object.assign(dependencies.RuntimePathRegistry[0], { pathKey: pkg.sections[0].runtimePath,
+    frameworkKeys: ['VMF'], scope: 'FRAMEWORK_STATE', category: 'SECTION_CONTENT', allowedOperations: ['BIND'] })
+  Object.assign(dependencies.UIContract[0], { uiContractKey: pkg.uiContractKey,
+    sourcePackageVersion: pkg.version, compatibilityMode: 'STRICT', frameworkKeys: ['VMF'],
+    sections: pkg.sections.map(({ sectionKey, runtimePath }) => ({ sectionKey, runtimePath })), actions: [], lifecycleStages: [] })
+  return dependencies
+}
 
 const getAccessTokenForUser = async (user) => {
   const tokens = await tokenService.generateTokens(user)
@@ -352,6 +418,31 @@ const makeFrameworkPackageDoc = (overrides = {}) => {
     return this
   })
 
+  if (overrides.certificationFixture === true && !Object.hasOwn(overrides, 'runtimeVerdict')
+    && frameworkPackage.uiContractKey && frameworkPackage.dependencyLock && frameworkPackage.sections.length > 0) {
+    const packageRaw = frameworkPackage.toObject({ minimize: false })
+    packageRaw.uiContractBinding = { key: packageRaw.uiContractKey, version: packageRaw.version,
+      status: 'ACTIVE', compatibilityMode: 'STRICT', resolvedAt: new Date('2026-05-07T13:42:00.000Z') }
+    const dependencies = buildCertificationDependencies(packageRaw)
+    packageRaw.dependencyLock.references = Object.entries(dependencies).flatMap(([collectionKey, rows]) => rows.map((row) => ({
+      collectionKey, id: row.stableId, key: row[certificationKeys[collectionKey]], componentVersion: 1,
+      status: 'ACTIVE', versionStatus: 'ACTIVE',
+    })))
+    packageRaw.dependencyLock.uiContractSnapshot = { uiContractKey: packageRaw.uiContractKey,
+      stableId: dependencies.UIContract[0].stableId, componentVersion: 1, actionCount: 0,
+      lifecycleStageCount: 0, sectionMapping: { mapped: ['customer_problem'] } }
+    frameworkPackage.dependencyLock = packageRaw.dependencyLock
+    frameworkPackage.uiContractBinding = packageRaw.uiContractBinding
+    const castPackage = frameworkPackage.toObject({ minimize: false })
+    const { snapshotId, snapshotHash, ...snapshotPayload } = castPackage.dependencyLock
+    frameworkPackage.dependencyLock.snapshotHash = generateChecksum(JSON.parse(JSON.stringify(snapshotPayload)))
+    const finalPackage = frameworkPackage.toObject({ minimize: false })
+    const certificationBinding = buildRuntimeReleaseCertificationBinding({ frameworkPackage: finalPackage, dependencies })
+    frameworkPackage.runtimeVerdict = { validationId: '000000000000000000000050', auditId: '000000000000000000000050',
+      status: 'PASS', result: 'ALLOW', mode: 'STRICT', lastValidatedAt: new Date('2026-05-07T13:45:00.000Z'),
+      auditPersisted: true, dependencyLockState: 'LOCKED', blockingIssues: 0, warnings: 0, certificationBinding }
+  }
+
   return frameworkPackage
 }
 
@@ -389,6 +480,7 @@ beforeAll(async () => {
   RuntimePathRegistry = models.RuntimePathRegistry
   RuntimeActivationSnapshot = models.RuntimeActivationSnapshot
   RuntimeDeployment = models.RuntimeDeployment
+  RuntimeValidationAudit = models.RuntimeValidationAudit
   AuditLog = models.AuditLog
   frameworkPackageController = await import('../controllers/frameworkPackage.controller.js')
 
@@ -503,6 +595,26 @@ beforeEach(() => {
       lean: jest.fn().mockResolvedValue(null),
     }),
   })
+  const certificationPackage = makeFrameworkPackageDoc({ certificationFixture: true })
+  const certificationDependencies = buildCertificationDependencies(certificationPackage.toObject({ minimize: false }))
+  const certificationModels = { RuntimePathRegistry, ValidationRegistry, WorkflowPolicy,
+    RuntimeAgent, RuntimeSkill, SkillRoleRegistry, UIContract }
+  for (const [type, rows] of Object.entries(certificationDependencies)) {
+    certificationModels[type].findOne = jest.fn().mockReturnValue(buildSessionQueryChain(rows[0]))
+  }
+  RuntimeValidationAudit.findById = jest.fn().mockReturnValue(buildSessionQueryChain({
+    _id: new mongoose.Types.ObjectId('000000000000000000000050'),
+    packageId: FRAMEWORK_PACKAGE_ID, frameworkKey: 'VMF', status: 'PASS', result: 'ALLOW', mode: 'STRICT',
+    createdAt: new Date('2026-05-07T13:45:00.000Z'), packageResolved: true,
+    isPackageLevelValidation: true, dependencyLockState: 'LOCKED',
+    certificationBinding: certificationPackage.runtimeVerdict.certificationBinding.toObject(),
+    certificationDependencySnapshot: certificationPackage.dependencyLock.toObject(),
+    certificationDependencyLockObservation: {
+      snapshotId: certificationPackage.dependencyLock.snapshotId,
+      snapshotHash: certificationPackage.dependencyLock.snapshotHash,
+      resolvedAt: certificationPackage.dependencyLock.resolvedAt.toISOString(),
+    },
+  }))
 
   AuditLog.createLog = jest.fn(async () => ({}))
   AuditLog.find = jest.fn().mockReturnValue(buildFrameworkPackageQueryChain([]))
@@ -3204,8 +3316,24 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
 
   test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/activate rejects non-validated packages', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
-    FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackageDoc({
+    FrameworkPackage.findById.mockReturnValue(buildCertificationPackageQuery(makeFrameworkPackageDoc({ certificationFixture: true,
       status: 'DRAFT',
+    })))
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/activate`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('FRAMEWORK_PACKAGE_ACTIVATION_REQUIRES_VALIDATED')
+  })
+
+  test.each([null, 'false', 0])('POST activation rejects ACTIVE packages with non-boolean false default state (%s)', async (isDefault) => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    FrameworkPackage.findById.mockReturnValue(buildCertificationPackageQuery({
+      _id: FRAMEWORK_PACKAGE_ID,
+      status: 'ACTIVE',
+      isDefault,
     }))
 
     const res = await request
@@ -3218,10 +3346,10 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
 
   test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/activate enforces runtime package readiness', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
-    FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackageDoc({
+    FrameworkPackage.findById.mockReturnValue(buildCertificationPackageQuery(makeFrameworkPackageDoc({ certificationFixture: true,
       status: 'VALIDATED',
       uiContractKey: '',
-    }))
+    })))
 
     const res = await request
       .post(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/activate`)
@@ -3235,10 +3363,10 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
 
   test('GET /api/v1/super-admin/runtime-control/runtime-activation/packages/:packageId/readiness returns activation readiness', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
-    FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackageDoc({
+    FrameworkPackage.findById.mockReturnValue(buildCertificationPackageQuery(makeFrameworkPackageDoc({ certificationFixture: true,
       status: 'VALIDATED',
       lastCheckpointStatus: 'PASS',
-    }))
+    })))
 
     const res = await request
       .get(`/api/v1/super-admin/runtime-control/runtime-activation/packages/${FRAMEWORK_PACKAGE_ID}/readiness`)
@@ -3255,13 +3383,54 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     }))
   })
 
+  test('GET runtime activation readiness allows an active non-default package', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    FrameworkPackage.findById.mockReturnValue(buildCertificationPackageQuery(makeFrameworkPackageDoc({ certificationFixture: true,
+      status: 'ACTIVE',
+      isDefault: false,
+      lastCheckpointStatus: 'PASS',
+    })))
+
+    const res = await request
+      .get(`/api/v1/super-admin/runtime-control/runtime-activation/packages/${FRAMEWORK_PACKAGE_ID}/readiness`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.ready).toBe(true)
+    expect(res.body.data.requirements).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        key: 'packageStatus', status: 'PASS',
+        reason: runtimeActivationParity.packageStatusEligibility.activeNonDefault.reason,
+      }),
+    ]))
+  })
+
+  test('GET runtime activation readiness blocks the current active default package', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    FrameworkPackage.findById.mockReturnValue(buildCertificationPackageQuery(makeFrameworkPackageDoc({ certificationFixture: true,
+      status: 'ACTIVE',
+      isDefault: true,
+      lastCheckpointStatus: 'PASS',
+    })))
+
+    const res = await request
+      .get(`/api/v1/super-admin/runtime-control/runtime-activation/packages/${FRAMEWORK_PACKAGE_ID}/readiness`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.ready).toBe(false)
+    expect(res.body.data.blockingReasons).toContain(
+      runtimeActivationParity.packageStatusEligibility.activeDefault.reason,
+    )
+  })
+
   test('GET /api/v1/super-admin/runtime-control/runtime-activation/packages/:packageId/readiness accepts package keys', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
-    FrameworkPackage.findOne.mockResolvedValueOnce(makeFrameworkPackageDoc({
+    FrameworkPackage.findOne.mockReturnValueOnce(buildCertificationPackageQuery(makeFrameworkPackageDoc({ certificationFixture: true,
       status: 'VALIDATED',
       lastCheckpointStatus: 'PASS',
       packageKey: 'vmf-2-3-1',
-    }))
+    })))
 
     const res = await request
       .get('/api/v1/super-admin/runtime-control/runtime-activation/packages/vmf-2-3-1/readiness')
@@ -3275,10 +3444,10 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
 
   test('GET /api/v1/super-admin/runtime-control/runtime-activation/packages/:packageId/readiness accepts PASS_WITH_WARNINGS checkpoint evidence', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
-    FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackageDoc({
+    FrameworkPackage.findById.mockReturnValue(buildCertificationPackageQuery(makeFrameworkPackageDoc({ certificationFixture: true,
       status: 'VALIDATED',
       lastCheckpointStatus: 'PASS_WITH_WARNINGS',
-    }))
+    })))
 
     const res = await request
       .get(`/api/v1/super-admin/runtime-control/runtime-activation/packages/${FRAMEWORK_PACKAGE_ID}/readiness`)
@@ -3298,21 +3467,11 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
 
   test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/activate rejects missing runtime validation verdict', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
-    FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackageDoc({
+    FrameworkPackage.findById.mockReturnValue(buildCertificationPackageQuery(makeFrameworkPackageDoc({ certificationFixture: true,
       status: 'VALIDATED',
       runtimeVerdict: null,
-    }))
-    UIContract.findOne.mockReturnValue({
-      select: jest.fn().mockReturnValue({
-        lean: jest.fn().mockResolvedValue({
-          uiContractKey: 'vmf-ui-contract-v1',
-          status: 'ACTIVE',
-          versionStatus: 'ACTIVE',
-          frameworkKeys: ['VMF'],
-          sections: [{ sectionKey: 'customer_problem', runtimePath: 'framework_state.sections.customer_problem' }],
-        }),
-      }),
-    })
+    })))
+    UIContract.findOne.mockReturnValue(buildCertifiedUIContractQuery())
 
     const res = await request
       .post(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/activate`)
@@ -3327,7 +3486,7 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
 
   test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/activate rejects blocked runtime validation verdict', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
-    FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackageDoc({
+    FrameworkPackage.findById.mockReturnValue(buildCertificationPackageQuery(makeFrameworkPackageDoc({ certificationFixture: true,
       status: 'VALIDATED',
       runtimeVerdict: {
         validationId: 'rvl-vmf-blocked',
@@ -3341,18 +3500,8 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
         blockingIssues: 1,
         warnings: 0,
       },
-    }))
-    UIContract.findOne.mockReturnValue({
-      select: jest.fn().mockReturnValue({
-        lean: jest.fn().mockResolvedValue({
-          uiContractKey: 'vmf-ui-contract-v1',
-          status: 'ACTIVE',
-          versionStatus: 'ACTIVE',
-          frameworkKeys: ['VMF'],
-          sections: [{ sectionKey: 'customer_problem', runtimePath: 'framework_state.sections.customer_problem' }],
-        }),
-      }),
-    })
+    })))
+    UIContract.findOne.mockReturnValue(buildCertifiedUIContractQuery())
 
     const res = await request
       .post(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/activate`)
@@ -3367,7 +3516,7 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
 
   test('GET /api/v1/super-admin/runtime-control/runtime-activation/packages/:packageId/readiness blocks uncertified runtime validation verdicts', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
-    const frameworkPackage = makeFrameworkPackageDoc({
+    const frameworkPackage = makeFrameworkPackageDoc({ certificationFixture: true,
       _id: FRAMEWORK_PACKAGE_ID,
       status: 'VALIDATED',
       runtimeVerdict: {
@@ -3382,7 +3531,7 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
       },
     })
 
-    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+    installCertifiedPackageLookups(frameworkPackage)
 
     const res = await request
       .get(`/api/v1/super-admin/runtime-control/runtime-activation/packages/${FRAMEWORK_PACKAGE_ID}/readiness`)
@@ -3395,54 +3544,39 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     )
   })
 
-  test('GET /api/v1/super-admin/runtime-control/runtime-activation/packages/:packageId/readiness blocks stale runtime validation verdicts', async () => {
+  test('GET /api/v1/super-admin/runtime-control/runtime-activation/packages/:packageId/readiness allows later operational timestamps when the certification binding is unchanged', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
-    const frameworkPackage = makeFrameworkPackageDoc({
+    const frameworkPackage = makeFrameworkPackageDoc({ certificationFixture: true,
       _id: FRAMEWORK_PACKAGE_ID,
       status: 'VALIDATED',
       updatedAt: new Date('2026-05-07T14:00:00.000Z'),
-      runtimeVerdict: {
-        validationId: 'rvl-vmf-2-3-1',
-        auditId: 'rvl-vmf-2-3-1',
-        status: 'PASS',
-        result: 'ALLOW',
-        mode: 'STRICT',
-        lastValidatedAt: new Date('2026-05-07T13:45:00.000Z'),
-        auditPersisted: true,
-        dependencyLockState: 'LOCKED',
-      },
+      lastCheckpointStatus: 'PASS',
+      lastCheckpointAt: new Date('2026-05-07T14:00:00.000Z'),
+      lastCheckpointResult: { id: 'operational-checkpoint', status: 'PASS', timestamp: new Date('2026-05-07T14:00:00.000Z') },
     })
 
-    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+    installCertifiedPackageLookups(frameworkPackage)
 
     const res = await request
       .get(`/api/v1/super-admin/runtime-control/runtime-activation/packages/${FRAMEWORK_PACKAGE_ID}/readiness`)
       .set('Authorization', `Bearer ${token}`)
 
     expect(res.status).toBe(200)
-    expect(res.body.data.ready).toBe(false)
-    expect(res.body.data.blockingReasons).toContain(
-      runtimeActivationParity.readinessBlockedRuntimeVerdictStale.reason,
-    )
+    expect(res.body.data.ready).toBe(true)
+    expect(res.body.data.runtimeVerdict.stale).toBe(false)
+    expect(res.body.data.requirements).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'runtimeVerdict', status: 'PASS' }),
+      expect.objectContaining({ key: 'certificationBinding', status: 'PASS' }),
+    ]))
   })
 
   test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/activate rejects missing dependency lock evidence', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
-    FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackageDoc({
+    FrameworkPackage.findById.mockReturnValue(buildCertificationPackageQuery(makeFrameworkPackageDoc({ certificationFixture: true,
       status: 'VALIDATED',
       dependencyLock: null,
-    }))
-    UIContract.findOne.mockReturnValue({
-      select: jest.fn().mockReturnValue({
-        lean: jest.fn().mockResolvedValue({
-          uiContractKey: 'vmf-ui-contract-v1',
-          status: 'ACTIVE',
-          versionStatus: 'ACTIVE',
-          frameworkKeys: ['VMF'],
-          sections: [{ sectionKey: 'customer_problem', runtimePath: 'framework_state.sections.customer_problem' }],
-        }),
-      }),
-    })
+    })))
+    UIContract.findOne.mockReturnValue(buildCertifiedUIContractQuery())
 
     const res = await request
       .post(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/activate`)
@@ -3458,33 +3592,23 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
     )
   })
 
-  const mockActiveUIContractLookup = () => {
-    UIContract.findOne.mockReturnValue({
-      select: jest.fn().mockReturnValue({
-        lean: jest.fn().mockResolvedValue({
-          uiContractKey: 'vmf-ui-contract-v1',
-          status: 'ACTIVE',
-          versionStatus: 'ACTIVE',
-          frameworkKeys: ['VMF'],
-          sections: [{ sectionKey: 'customer_problem', runtimePath: 'framework_state.sections.customer_problem' }],
-        }),
-      }),
-    })
+  const mockActiveUIContractLookup = (frameworkPackage) => {
+    UIContract.findOne.mockReturnValue(buildCertifiedUIContractQuery(frameworkPackage))
   }
 
   const runActivationWithFailingGovernanceAudit = async (failingAction) => {
     const token = await getAccessTokenForUser(makeFakeUser())
-    const frameworkPackage = makeFrameworkPackageDoc({
+    const frameworkPackage = makeFrameworkPackageDoc({ certificationFixture: true,
       _id: FRAMEWORK_PACKAGE_ID,
       status: 'VALIDATED',
     })
     const rollbackSession = buildRollbackSession([frameworkPackage])
 
-    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+    installCertifiedPackageLookups(frameworkPackage)
     FrameworkPackage.find.mockReturnValue({
       session: jest.fn().mockResolvedValue([]),
     })
-    mockActiveUIContractLookup()
+    mockActiveUIContractLookup(frameworkPackage)
     startSessionSpy.mockResolvedValueOnce(rollbackSession)
     AuditLog.createLog.mockImplementation(async (payload) => {
       if (payload.action === failingAction) {
@@ -3507,7 +3631,7 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
 
   test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/activate activates a validated package and clears the previous default pointer', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
-    const frameworkPackage = makeFrameworkPackageDoc({
+    const frameworkPackage = makeFrameworkPackageDoc({ certificationFixture: true,
       _id: FRAMEWORK_PACKAGE_ID,
       status: 'VALIDATED',
     })
@@ -3519,21 +3643,11 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
       isDefault: true,
     })
 
-    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+    installCertifiedPackageLookups(frameworkPackage)
     FrameworkPackage.find.mockReturnValue({
       session: jest.fn().mockResolvedValue([activePackage]),
     })
-    UIContract.findOne.mockReturnValue({
-      select: jest.fn().mockReturnValue({
-        lean: jest.fn().mockResolvedValue({
-          uiContractKey: 'vmf-ui-contract-v1',
-          status: 'ACTIVE',
-          versionStatus: 'ACTIVE',
-          frameworkKeys: ['VMF'],
-          sections: [{ sectionKey: 'customer_problem', runtimePath: 'framework_state.sections.customer_problem' }],
-        }),
-      }),
-    })
+    UIContract.findOne.mockReturnValue(buildCertifiedUIContractQuery(frameworkPackage))
 
     const res = await request
       .post(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/activate`)
@@ -3567,7 +3681,9 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
         activationId: expect.any(String),
         deploymentId: expect.stringMatching(/^deployment-vmf-global-production-/),
         dependencySnapshotId: 'dep-lock-vmf-2-3-1',
-        dependencySnapshotHash: 'sha256-dep-lock-vmf-2-3-1',
+        dependencySnapshotHash: frameworkPackage.dependencyLock.snapshotHash,
+        certificationBinding: frameworkPackage.runtimeVerdict.certificationBinding.toObject(),
+        packageStatusAtActivation: 'VALIDATED',
         activationStatus: runtimeActivationParity.activationResult.activationStatus,
         runtimeVerdictResult: runtimeActivationParity.readinessReady.runtimeVerdictResult,
         tenantScope: runtimeActivationParity.activationResult.tenantScope,
@@ -3586,7 +3702,8 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
       activationId: expect.any(String),
       deploymentId: expect.stringMatching(/^deployment-vmf-global-production-/),
       dependencySnapshotId: 'dep-lock-vmf-2-3-1',
-      dependencySnapshotHash: 'sha256-dep-lock-vmf-2-3-1',
+      dependencySnapshotHash: frameworkPackage.dependencyLock.snapshotHash,
+      certificationBinding: frameworkPackage.runtimeVerdict.certificationBinding.toObject(),
       activationStatus: runtimeActivationParity.activationResult.activationStatus,
     }))
     expect(res.body.meta.runtimeActivation.deployment).toEqual(expect.objectContaining({
@@ -3663,6 +3780,39 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
       sharedChecksum,
       sharedChecksum,
     ])
+  })
+
+  test('POST activation reactivates an active non-default package with truthful status provenance', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const frameworkPackage = makeFrameworkPackageDoc({ certificationFixture: true,
+      _id: FRAMEWORK_PACKAGE_ID,
+      status: 'ACTIVE',
+      isDefault: false,
+    })
+    const currentDefault = makeFrameworkPackageDoc({
+      _id: ACTIVE_FRAMEWORK_PACKAGE_ID,
+      version: '2.3.2',
+      packageKey: '',
+      status: 'ACTIVE',
+      isDefault: true,
+    })
+    installCertifiedPackageLookups(frameworkPackage)
+    FrameworkPackage.find.mockReturnValue({ session: jest.fn().mockResolvedValue([currentDefault]) })
+    UIContract.findOne.mockReturnValue(buildCertifiedUIContractQuery(frameworkPackage))
+
+    const res = await request
+      .post(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/activate`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(frameworkPackage.isDefault).toBe(true)
+    expect(RuntimeActivationSnapshot.create).toHaveBeenCalledWith([
+      expect.objectContaining({
+        packageId: frameworkPackage._id,
+        packageStatusAtActivation: 'ACTIVE',
+        activationStatus: 'ACTIVE',
+      }),
+    ], expect.objectContaining({ session: expect.any(Object) }))
   })
 
   test('GET /api/v1/super-admin/runtime-control/runtime-activation/packages/:packageId/history includes resolved deployment identifiers', async () => {
@@ -3788,7 +3938,7 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
 
   test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/activate leaves other package deployments active for version selection', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
-    const frameworkPackage = makeFrameworkPackageDoc({
+    const frameworkPackage = makeFrameworkPackageDoc({ certificationFixture: true,
       _id: FRAMEWORK_PACKAGE_ID,
       status: 'VALIDATED',
     })
@@ -3800,22 +3950,12 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
       isDefault: true,
     })
 
-    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+    installCertifiedPackageLookups(frameworkPackage)
     FrameworkPackage.find.mockReturnValue({
       session: jest.fn().mockResolvedValue([activePackage]),
     })
     RuntimeDeployment.findOne.mockReturnValue(buildSessionQueryChain(null))
-    UIContract.findOne.mockReturnValue({
-      select: jest.fn().mockReturnValue({
-        lean: jest.fn().mockResolvedValue({
-          uiContractKey: 'vmf-ui-contract-v1',
-          status: 'ACTIVE',
-          versionStatus: 'ACTIVE',
-          frameworkKeys: ['VMF'],
-          sections: [{ sectionKey: 'customer_problem', runtimePath: 'framework_state.sections.customer_problem' }],
-        }),
-      }),
-    })
+    UIContract.findOne.mockReturnValue(buildCertifiedUIContractQuery(frameworkPackage))
 
     const res = await request
       .post(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/activate`)
@@ -3855,7 +3995,7 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
 
   test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/activate supersedes the previous runtime deployment record for the same package', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
-    const frameworkPackage = makeFrameworkPackageDoc({
+    const frameworkPackage = makeFrameworkPackageDoc({ certificationFixture: true,
       _id: FRAMEWORK_PACKAGE_ID,
       status: 'VALIDATED',
     })
@@ -3870,22 +4010,12 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
       deploymentMode: 'PRODUCTION',
     }
 
-    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+    installCertifiedPackageLookups(frameworkPackage)
     FrameworkPackage.find.mockReturnValue({
       session: jest.fn().mockResolvedValue([]),
     })
     RuntimeDeployment.findOne.mockReturnValue(buildSessionQueryChain(previousDeployment))
-    UIContract.findOne.mockReturnValue({
-      select: jest.fn().mockReturnValue({
-        lean: jest.fn().mockResolvedValue({
-          uiContractKey: 'vmf-ui-contract-v1',
-          status: 'ACTIVE',
-          versionStatus: 'ACTIVE',
-          frameworkKeys: ['VMF'],
-          sections: [{ sectionKey: 'customer_problem', runtimePath: 'framework_state.sections.customer_problem' }],
-        }),
-      }),
-    })
+    UIContract.findOne.mockReturnValue(buildCertifiedUIContractQuery(frameworkPackage))
 
     const res = await request
       .post(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/activate`)
@@ -3940,12 +4070,12 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
 
   test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/activate reports concurrent runtime activation conflicts as 409', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
-    const frameworkPackage = makeFrameworkPackageDoc({
+    const frameworkPackage = makeFrameworkPackageDoc({ certificationFixture: true,
       _id: FRAMEWORK_PACKAGE_ID,
       status: 'VALIDATED',
     })
 
-    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+    installCertifiedPackageLookups(frameworkPackage)
     FrameworkPackage.find.mockReturnValue({
       session: jest.fn().mockResolvedValue([]),
     })
@@ -3953,17 +4083,7 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
       code: 11000,
       keyPattern: { deploymentId: 1 },
     })
-    UIContract.findOne.mockReturnValue({
-      select: jest.fn().mockReturnValue({
-        lean: jest.fn().mockResolvedValue({
-          uiContractKey: 'vmf-ui-contract-v1',
-          status: 'ACTIVE',
-          versionStatus: 'ACTIVE',
-          frameworkKeys: ['VMF'],
-          sections: [{ sectionKey: 'customer_problem', runtimePath: 'framework_state.sections.customer_problem' }],
-        }),
-      }),
-    })
+    UIContract.findOne.mockReturnValue(buildCertifiedUIContractQuery(frameworkPackage))
 
     const res = await request
       .post(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/activate`)
@@ -3976,26 +4096,16 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
 
   test('POST /api/v1/super-admin/runtime-control/framework-packages/:packageId/activate records empty previous active ids for first activation', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
-    const frameworkPackage = makeFrameworkPackageDoc({
+    const frameworkPackage = makeFrameworkPackageDoc({ certificationFixture: true,
       _id: FRAMEWORK_PACKAGE_ID,
       status: 'VALIDATED',
     })
 
-    FrameworkPackage.findById.mockResolvedValue(frameworkPackage)
+    installCertifiedPackageLookups(frameworkPackage)
     FrameworkPackage.find.mockReturnValue({
       session: jest.fn().mockResolvedValue([]),
     })
-    UIContract.findOne.mockReturnValue({
-      select: jest.fn().mockReturnValue({
-        lean: jest.fn().mockResolvedValue({
-          uiContractKey: 'vmf-ui-contract-v1',
-          status: 'ACTIVE',
-          versionStatus: 'ACTIVE',
-          frameworkKeys: ['VMF'],
-          sections: [{ sectionKey: 'customer_problem', runtimePath: 'framework_state.sections.customer_problem' }],
-        }),
-      }),
-    })
+    UIContract.findOne.mockReturnValue(buildCertifiedUIContractQuery(frameworkPackage))
 
     const res = await request
       .post(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/activate`)

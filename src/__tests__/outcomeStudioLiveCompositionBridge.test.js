@@ -221,6 +221,31 @@ describe('Outcome Studio live composition bridge', () => {
     expect(input.loadPackContent).toHaveBeenCalledTimes(4)
   })
 
+  test('fails closed when the rich Framework handoff lacks required intermediate reasoning', async () => {
+    const input = makeInput()
+    input.frameworkHandoff.sectionTruth = [{
+      sectionKey: 'customer_context',
+      sectionHash: 'sha256:section-1',
+      sectionIntelligence: {},
+    }]
+
+    await expect(buildOutcomeStudioLiveComposition(input)).rejects.toMatchObject({
+      code: 'OUTCOME_STUDIO_COMPOSITION_BLOCKED',
+      reason: 'COMPOSITION_INTERMEDIATE_REASONING_MISSING',
+      details: expect.objectContaining({
+        missingArtefacts: expect.arrayContaining([
+          'claimHypothesisMatrix',
+          'fxGxAssessmentSignals',
+          'arlRlReviewChangeRationale',
+        ]),
+        intermediateReasoning: expect.objectContaining({
+          status: 'BLOCKED',
+          artefacts: expect.any(Array),
+        }),
+      }),
+    })
+  })
+
   test('blocks READY_WITH_GAPS before active content loading', async () => {
     const input = makeInput({ contextStatus: 'READY_WITH_GAPS' })
 

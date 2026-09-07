@@ -12,6 +12,17 @@ export const OUTCOME_STUDIO_COMPOSITION_BLOCKERS = Object.freeze({
   OUTPUT_BINDING_INCOMPLETE: 'COMPOSITION_OUTPUT_BINDING_INCOMPLETE',
   EVIDENCE_UNAVAILABLE: 'COMPOSITION_EVIDENCE_UNAVAILABLE',
   FACTS_UNAVAILABLE: 'COMPOSITION_FACTS_UNAVAILABLE',
+  INTERMEDIATE_REASONING_MISSING: 'COMPOSITION_INTERMEDIATE_REASONING_MISSING',
+})
+
+export const OUTCOME_STUDIO_INTERMEDIATE_REASONING_CONTRACT =
+  'outcome-studio.intermediate-reasoning-boundary.v1'
+
+export const OUTCOME_STUDIO_INTERMEDIATE_REASONING_CLASSIFICATIONS = Object.freeze({
+  FRAMEWORK_RUNTIME: 'CONSUMED_FROM_FRAMEWORK_RUNTIME',
+  OUTCOME_STUDIO: 'GENERATED_IN_OUTCOME_STUDIO',
+  VALIDATION_LINEAGE: 'VALIDATION_LINEAGE_ONLY',
+  MISSING: 'MISSING',
 })
 
 const normalizeText = (value) => String(value ?? '').trim()
@@ -27,6 +38,12 @@ const isPlainObject = (value) => Boolean(
   && Object.getPrototypeOf(value) === Object.prototype,
 )
 
+const hasNonEmptyString = (value) => typeof value === 'string' && Boolean(normalizeText(value))
+const hasNonEmptyArray = (value) => Array.isArray(value) && value.length > 0
+const hasPresentValue = (value) => hasNonEmptyString(value)
+  || hasNonEmptyArray(value)
+  || (isPlainObject(value) && Object.keys(value).length > 0)
+
 const hashValue = (value) => createHash('sha256')
   .update(JSON.stringify(value), 'utf8')
   .digest('hex')
@@ -38,6 +55,162 @@ const block = (reason, details = {}) => {
   error.reason = reason
   error.details = details
   throw error
+}
+
+const getHandoffSectionTruth = (frameworkHandoff = {}) => (
+  Array.isArray(frameworkHandoff?.sectionTruth) ? frameworkHandoff.sectionTruth : []
+)
+
+const getAcceptedFrameworkIntelligence = (frameworkHandoff = {}) => getHandoffSectionTruth(frameworkHandoff)
+  .map((section) => ({
+    sectionKey: normalizeKey(section?.sectionKey),
+    sectionHash: normalizeText(section?.sectionHash),
+    sectionIntelligence: isPlainObject(section?.sectionIntelligence)
+      ? JSON.parse(JSON.stringify(section.sectionIntelligence))
+      : null,
+  }))
+  .filter((section) => section.sectionKey)
+
+const hasCompleteFrameworkIntelligence = (sections) => sections.length > 0
+  && sections.every(({ sectionIntelligence }) => isPlainObject(sectionIntelligence)
+    && hasNonEmptyString(sectionIntelligence.sectionSummary)
+    && hasNonEmptyString(sectionIntelligence.sectionNarrative)
+    && hasNonEmptyString(sectionIntelligence.commercialInterpretation)
+    && hasNonEmptyArray(sectionIntelligence.strategicTensions)
+    && hasNonEmptyArray(sectionIntelligence.supportedClaims)
+    && Array.isArray(sectionIntelligence.representedClaims)
+    && hasNonEmptyArray(sectionIntelligence.restrictedClaims)
+    && hasNonEmptyArray(sectionIntelligence.evidenceBoundaries)
+    && Array.isArray(sectionIntelligence.contradictionSignals)
+    && Array.isArray(sectionIntelligence.alternativeInterpretations)
+    && hasNonEmptyString(sectionIntelligence.decisionRelevance)
+    && hasNonEmptyArray(sectionIntelligence.downstreamHandoffSignals)
+    && hasNonEmptyArray(sectionIntelligence.sourceTraceability)
+    && Array.isArray(sectionIntelligence.validationGaps))
+
+const getExplicitIntermediateArtifact = ({ frameworkHandoff, sections, key }) => {
+  const boundary = frameworkHandoff?.intermediateReasoning
+  if (isPlainObject(boundary) && hasPresentValue(boundary[key])) {
+    return { value: boundary[key], source: 'framework_runtime.intermediateReasoning' }
+  }
+  const sectionArtifact = sections
+    .map(({ sectionIntelligence }) => sectionIntelligence?.[key])
+    .find(hasPresentValue)
+  if (sectionArtifact !== undefined) {
+    return { value: sectionArtifact, source: 'framework_runtime.accepted.sectionIntelligence' }
+  }
+  return null
+}
+
+export const buildIntermediateReasoningManifest = ({
+  frameworkHandoff = {},
+  knowledgeContext = {},
+  enforceMissing = true,
+} = {}) => {
+  const resolvedKnowledgeContext = knowledgeContext || {}
+  const rawSections = getHandoffSectionTruth(frameworkHandoff)
+  if (!Array.isArray(frameworkHandoff?.sectionTruth)) return null
+  const sections = getAcceptedFrameworkIntelligence(frameworkHandoff)
+  const completeIntelligence = hasCompleteFrameworkIntelligence(sections)
+  const frameworkSource = 'framework_runtime.accepted.sectionIntelligence'
+  const frameworkArtifacts = [
+    {
+      key: 'claimHypothesisMatrix',
+      present: completeIntelligence,
+      reason: completeIntelligence
+        ? 'Accepted supported, represented and restricted claims retain their evidence boundaries.'
+        : 'Accepted section intelligence does not contain the complete claim and boundary set.',
+    },
+    {
+      key: 'contradictionAlternativeHandling',
+      present: completeIntelligence,
+      reason: completeIntelligence
+        ? 'Accepted contradiction and alternative-interpretation fields are present, including explicit empty results.'
+        : 'Accepted section intelligence does not contain contradiction and alternative-interpretation fields.',
+    },
+    {
+      key: 'evidenceToKnowledgeHandoff',
+      present: completeIntelligence,
+      reason: completeIntelligence
+        ? 'Accepted downstream handoff signals and source traceability are present.'
+        : 'Accepted section intelligence does not contain the downstream handoff and traceability fields.',
+    },
+    {
+      key: 'restrictedCommercialSystemAnalysis',
+      present: completeIntelligence,
+      reason: completeIntelligence
+        ? 'Accepted commercial interpretation, strategic tensions, decision relevance and restricted claims are present.'
+        : 'Accepted section intelligence does not contain the complete restricted commercial analysis set.',
+    },
+  ].map((artifact) => ({
+    ...artifact,
+    classification: artifact.present
+      ? OUTCOME_STUDIO_INTERMEDIATE_REASONING_CLASSIFICATIONS.FRAMEWORK_RUNTIME
+      : OUTCOME_STUDIO_INTERMEDIATE_REASONING_CLASSIFICATIONS.MISSING,
+    source: frameworkSource,
+    required: true,
+  }))
+
+  const explicitArtifacts = ['fxGxAssessmentSignals', 'arlRlReviewChangeRationale'].map((key) => {
+    const resolved = getExplicitIntermediateArtifact({ frameworkHandoff, sections, key })
+    return {
+      key,
+      classification: resolved
+        ? OUTCOME_STUDIO_INTERMEDIATE_REASONING_CLASSIFICATIONS.FRAMEWORK_RUNTIME
+        : OUTCOME_STUDIO_INTERMEDIATE_REASONING_CLASSIFICATIONS.MISSING,
+      source: resolved?.source || 'framework_runtime.intermediateReasoning',
+      required: true,
+      present: Boolean(resolved),
+      reason: resolved
+        ? 'An explicit Framework Runtime reasoning artefact was supplied.'
+        : 'No explicit Framework Runtime artefact was supplied; pack names do not satisfy this boundary.',
+    }
+  })
+
+  const outputTypeStructure = resolvedKnowledgeContext.outputTypeStructure
+  const outputSchema = resolvedKnowledgeContext.outputSchema
+  const style = resolvedKnowledgeContext.style
+  const outputGuidancePresent = hasNonEmptyArray(outputTypeStructure)
+    && outputTypeStructure.length === 5
+    && isPlainObject(outputSchema)
+    && hasNonEmptyString(outputSchema.key)
+    && hasNonEmptyString(outputSchema.version)
+    && hasNonEmptyArray(outputSchema.requiredSections)
+    && isPlainObject(style)
+    && hasNonEmptyString(style.key)
+    && hasNonEmptyString(style.version)
+  const outputGuidance = {
+    key: 'outputSpecificCompositionGuidance',
+    classification: outputGuidancePresent
+      ? OUTCOME_STUDIO_INTERMEDIATE_REASONING_CLASSIFICATIONS.OUTCOME_STUDIO
+      : OUTCOME_STUDIO_INTERMEDIATE_REASONING_CLASSIFICATIONS.MISSING,
+    source: 'outcome_studio.output_contract_and_resolved_packs',
+    required: true,
+    present: outputGuidancePresent,
+    reason: outputGuidancePresent
+      ? 'Outcome Studio assembled the output structure, schema and style guidance from resolved pack content.'
+      : 'Resolved output structure, schema and style guidance is incomplete.',
+  }
+  const artefacts = [...frameworkArtifacts, ...explicitArtifacts, outputGuidance]
+  const missingArtefacts = artefacts.filter((artifact) => artifact.required && !artifact.present)
+    .map((artifact) => artifact.key)
+  const manifest = {
+    contractVersion: OUTCOME_STUDIO_INTERMEDIATE_REASONING_CONTRACT,
+    requiredFor: 'COMMERCIAL_STRATEGY_DECISION_PAPER',
+    status: missingArtefacts.length > 0 ? 'BLOCKED' : 'READY',
+    artefacts,
+  }
+  if (enforceMissing && missingArtefacts.length > 0) {
+    block(OUTCOME_STUDIO_COMPOSITION_BLOCKERS.INTERMEDIATE_REASONING_MISSING, {
+      missingArtefacts,
+      intermediateReasoning: manifest,
+      sectionCount: rawSections.length,
+    })
+  }
+  return {
+    manifest,
+    frameworkIntelligence: sections,
+  }
 }
 
 const getEvidencePack = (frameworkState = {}) => frameworkState.evidence_pack || {}
@@ -656,6 +829,7 @@ const composeFacts = ({ frameworkState, truthBinding }) => {
 export const buildOutcomeStudioEvidenceComposition = ({
   runtimeInstance = {},
   frameworkState = runtimeInstance.framework_state || {},
+  frameworkHandoff = null,
   truthBinding = {},
   knowledgeContext = {},
   requestedOutputTypeKey = '',
@@ -676,6 +850,10 @@ export const buildOutcomeStudioEvidenceComposition = ({
       omissionReasonCounts: ledger.diagnostics.omissionReasonCounts,
     })
   }
+  const intermediateReasoning = buildIntermediateReasoningManifest({
+    frameworkHandoff,
+    knowledgeContext,
+  })
   return {
     contractVersion: OUTCOME_STUDIO_EVIDENCE_COMPOSITION_CONTRACT,
     status: 'READY',
@@ -698,5 +876,16 @@ export const buildOutcomeStudioEvidenceComposition = ({
     },
     diagnostics: ledger.diagnostics,
     nextBoundary: 'PROVIDER_SAFE_REQUEST_ASSEMBLY_PENDING',
+    ...(intermediateReasoning
+      ? {
+          intermediateReasoning: intermediateReasoning.manifest,
+          frameworkIntelligence: intermediateReasoning.frameworkIntelligence,
+        }
+      : {}),
   }
 }
+
+export const __testables = Object.freeze({
+  buildIntermediateReasoningManifest,
+  getAcceptedFrameworkIntelligence,
+})

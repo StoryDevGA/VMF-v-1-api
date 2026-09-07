@@ -1,5 +1,6 @@
 import env from './env.js'
 import { createOpenAiRuntimeSectionReasoningAdapter } from '../services/openAiRuntimeSectionReasoningAdapter.js'
+import { VMF_SECTION_REASONING_CONTRACT_VERSION } from '../constants/runtimeSectionReasoningContract.js'
 
 const LIVE_TEST_APP_ENVIRONMENTS = new Set(['development', 'test'])
 const STABLE_KEY_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,138}[a-z0-9])?$/
@@ -32,7 +33,7 @@ export const buildRuntimeSectionReasoningProviderRuntime = ({
     model,
     providerMode: 'LIVE_TEST',
     environment: 'TEST',
-    contractVersion: 'ss-016-vmf-section-reasoning-v1',
+    contractVersion: VMF_SECTION_REASONING_CONTRACT_VERSION,
     failurePosture: 'FAIL_CLOSED',
   }
   return {

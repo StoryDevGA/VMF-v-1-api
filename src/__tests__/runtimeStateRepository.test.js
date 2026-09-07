@@ -1467,14 +1467,25 @@ describe('runtime State Storage V2 repository', () => {
     }))
     expect(Buffer.byteLength(JSON.stringify(rows))).toBeGreaterThan(RUNTIME_STATE_V2_MAX_SERIALIZED_READ_BYTES)
     let projectedRows
-    const find = jest.fn((_filter, { projection }) => {
-      projectedRows = rows.map((row) => projectRendererRow(row, projection))
-      return makeCursor(projectedRows)
+    const partitionRows = []
+    const find = jest.fn((filter, { projection }) => {
+      const selectedRows = filter?.sectionKey
+        ? rows.filter((row) => row.sectionKey === filter.sectionKey)
+        : rows
+      const projected = selectedRows.map((row) => projectRendererRow(row, projection))
+      if (filter?.sectionKey) partitionRows.push(projected)
+      else projectedRows = projected
+      return makeCursor(projected)
     })
     collections.set(RUNTIME_STATE_V2_COLLECTIONS.SECTIONS, { find })
     await getRuntimeStateOutcomeHandoffReadiness({ scopes: SCOPES, runtimeInstanceId: RUNTIME_ID })
     expect(Buffer.byteLength(JSON.stringify(projectedRows))).toBeLessThan(RUNTIME_STATE_V2_MAX_SERIALIZED_READ_BYTES)
-    expect(find.mock.calls[0][1].projection['sectionDetail.accepted']).toBe(1)
+    expect(find).toHaveBeenCalledTimes(7)
+    expect(partitionRows).toHaveLength(6)
+    expect(partitionRows.every((partition) => (
+      Buffer.byteLength(JSON.stringify(partition)) < RUNTIME_STATE_V2_MAX_SERIALIZED_READ_BYTES
+    ))).toBe(true)
+    expect(find.mock.calls[1][1].projection['sectionDetail.accepted']).toBe(1)
     const passed = resolveFrameworkOutcomeStudioHandoff.mock.calls[0][0].runtimeInstance.framework_state.sections.section_0
     expect(passed.accepted).toEqual(detail.accepted)
     expect(passed.generated.evidenceProjection).toEqual({})

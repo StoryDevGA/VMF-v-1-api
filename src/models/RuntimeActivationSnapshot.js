@@ -1,4 +1,5 @@
 import mongoose from 'mongoose'
+import FrameworkPackage from './FrameworkPackage.js'
 
 export const RUNTIME_ACTIVATION_STATUSES = Object.freeze({
   ACTIVATING: 'ACTIVATING',
@@ -12,6 +13,10 @@ export const RUNTIME_ACTIVATION_STATUSES = Object.freeze({
 
 const runtimeActivationSnapshotSchema = new mongoose.Schema(
   {
+    certificationBinding: {
+      type: FrameworkPackage.schema.path('runtimeVerdict').schema.path('certificationBinding').schema,
+      default: null,
+    },
     activationId: {
       type: String,
       required: true,

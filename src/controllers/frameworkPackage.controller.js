@@ -22,6 +22,8 @@ import RuntimePathRegistry, {
   RUNTIME_PATH_REGISTRY_STATUSES,
 } from '../models/RuntimePathRegistry.js'
 import User from '../models/User.js'
+import FrameworkRegistry from '../models/FrameworkRegistry.js'
+import { loadRuntimeCertificationPackage, buildRuntimeCertificationPackageCas, verifyRuntimeReleaseCertification } from '../services/runtimeReleaseCertificationCaptureService.js'
 import {
   RUNTIME_CONTROL_VERSION_STATUSES,
 } from '../utils/runtimeControlVersioning.js'
@@ -32,6 +34,7 @@ import {
 } from '../services/frameworkRegistryService.js'
 import {
   assertRuntimeActivationReadiness,
+  buildFrameworkPackageActivationStatusRequirement,
   getRuntimeActivationReadiness,
   registerRuntimeActivation,
 } from '../services/runtimeActivation/runtimeActivationService.js'
@@ -47,7 +50,6 @@ const DUPLICATE_FRAMEWORK_PACKAGE_MESSAGE = 'Framework key and version must be u
 const DUPLICATE_FRAMEWORK_PACKAGE_KEY_MESSAGE = 'Package key must be unique.'
 const FRAMEWORK_PACKAGE_NOT_FOUND_MESSAGE = 'Framework package not found.'
 const ACTIVE_DEFAULT_CONFLICT_MESSAGE = 'Only one active default package is allowed per framework.'
-const ACTIVATION_REQUIRES_VALIDATED_MESSAGE = 'Only validated framework packages can be activated.'
 const ACTIVATION_ENDPOINT_REQUIRED_MESSAGE = 'Use the activation endpoint to mark a framework package active.'
 const ACTIVE_PACKAGE_STATUS_CHANGE_MESSAGE =
   'Active framework packages cannot change lifecycle in place. Activate another validated package instead.'
@@ -832,11 +834,11 @@ const validateFrameworkPackageStateContract = ({
   return details
 }
 
-const resolveUIContractBinding = async ({ uiContractKey = '', frameworkPackage = {} } = {}) => {
+const resolveUIContractBinding = async ({ uiContractKey = '', frameworkPackage = {}, session } = {}) => {
   const normalizedUiContractKey = String(uiContractKey || '').trim().toLowerCase()
   if (!normalizedUiContractKey) return null
 
-  const uiContract = await UIContract.findOne({ uiContractKey: normalizedUiContractKey })
+  const uiContract = await applySession(UIContract.findOne({ uiContractKey: normalizedUiContractKey }), session)
     .select('uiContractKey status sourcePackageVersion introducedInVersion compatibilityMode')
     .lean()
 
@@ -855,7 +857,7 @@ const resolveUIContractBinding = async ({ uiContractKey = '', frameworkPackage =
   }
 }
 
-const validateSectionRuntimePaths = async ({ sections = [], frameworkKey }) => {
+const validateSectionRuntimePaths = async ({ sections = [], frameworkKey, session }) => {
   const runtimePaths = [
     ...new Set(
       getStructuralSections(sections)
@@ -866,7 +868,7 @@ const validateSectionRuntimePaths = async ({ sections = [], frameworkKey }) => {
 
   if (runtimePaths.length === 0) return null
 
-  const rows = await RuntimePathRegistry.find({ pathKey: { $in: runtimePaths } })
+  const rows = await applySession(RuntimePathRegistry.find({ pathKey: { $in: runtimePaths } }), session)
     .select('pathKey status frameworkKeys scope category allowedOperations')
     .lean()
   const byPath = new Map(rows.map((row) => [row.pathKey, row]))
@@ -1055,6 +1057,7 @@ const buildAssignedCustomerIdDelta = (previousValue = [], nextValue = []) => {
 }
 
 const validateFrameworkPackageRegistryReferences = async ({
+  session,
   frameworkKey,
   validationBindings = [],
   workflowBindings = [],
@@ -1064,7 +1067,9 @@ const validateFrameworkPackageRegistryReferences = async ({
   validateUiContractSections = false,
 }) => {
   const details = {}
-  const { missingKeys } = await resolveKnownFrameworkKeys([frameworkKey])
+  const { missingKeys } = session
+    ? { missingKeys: (await FrameworkRegistry.find({ frameworkKey }).select('frameworkKey').session(session).lean()).length ? [] : [frameworkKey] }
+    : await resolveKnownFrameworkKeys([frameworkKey])
 
   if (missingKeys.length > 0) {
     details.frameworkKey = buildUnknownFrameworkKeyMessage(missingKeys)
@@ -1077,7 +1082,7 @@ const validateFrameworkPackageRegistryReferences = async ({
     ].filter(Boolean)),
   ]
   if (validationKeys.length > 0) {
-    const validationRows = await ValidationRegistry.find({ key: { $in: validationKeys } })
+    const validationRows = await applySession(ValidationRegistry.find({ key: { $in: validationKeys } }), session)
       .select('key status supportedFrameworkKeys packageUsable parameterSchema')
       .lean()
     const validationByKey = new Map(validationRows.map((row) => [row.key, row]))
@@ -1117,7 +1122,7 @@ const validateFrameworkPackageRegistryReferences = async ({
     ].filter(Boolean)),
   ]
   if (policyKeys.length > 0) {
-    const policyRows = await WorkflowPolicy.find({ key: { $in: policyKeys } })
+    const policyRows = await applySession(WorkflowPolicy.find({ key: { $in: policyKeys } }), session)
       .select('key status frameworkKeys steps')
       .lean()
     const policyByKey = new Map(policyRows.map((row) => [row.key, row]))
@@ -1154,7 +1159,7 @@ const validateFrameworkPackageRegistryReferences = async ({
 
   const normalizedUiContractKey = String(uiContractKey || '').trim().toLowerCase()
   if (normalizedUiContractKey) {
-    const uiContract = await UIContract.findOne({ uiContractKey: normalizedUiContractKey })
+    const uiContract = await applySession(UIContract.findOne({ uiContractKey: normalizedUiContractKey }), session)
       .select('uiContractKey status versionStatus frameworkKeys introducedInVersion deprecatedInVersion compatibilityMode sections.sectionKey sections.runtimePath sections.source sections.isCustom')
       .lean()
 
@@ -1175,7 +1180,7 @@ const validateFrameworkPackageRegistryReferences = async ({
   }
 
   if (validateSections) {
-    const runtimePathMessage = await validateSectionRuntimePaths({ sections, frameworkKey })
+    const runtimePathMessage = await validateSectionRuntimePaths({ sections, frameworkKey, session })
     if (runtimePathMessage) {
       details.sections = details.sections
         ? `${details.sections} ${runtimePathMessage}`
@@ -1617,7 +1622,7 @@ const serializeUIContractDependencyReference = ({
   })
 }
 
-const fetchFrameworkPackageDependencies = async (frameworkPackage) => {
+const fetchFrameworkPackageDependencies = async (frameworkPackage, session) => {
   const frameworkKey = String(frameworkPackage.frameworkKey || '').trim().toUpperCase()
   const sectionRuntimePathKeys = [
     ...new Set((Array.isArray(frameworkPackage.sections) ? frameworkPackage.sections : [])
@@ -1633,7 +1638,7 @@ const fetchFrameworkPackageDependencies = async (frameworkPackage) => {
   const workflowPolicyKeys = getUniqueWorkflowPolicyKeys(frameworkPackage)
   const uiContractKey = String(frameworkPackage.uiContractKey || '').trim().toLowerCase()
 
-  const [validationRows, workflowRows, uiContract] = await Promise.all([
+  const [validationRows, workflowRows, uiContract] = await resolveCheckpointReads(session, [
     validationKeys.length > 0
       ? ValidationRegistry.find({ key: { $in: validationKeys } })
         .select('stableId key label status supportedFrameworkKeys packageUsable producerSkillId defaultAgentIds outputPath passFieldPath detailsFieldPath messageFieldPath parameterSchema defaultParameters retryPolicy componentVersion versionStatus lineageId isLocked lockedAt lockedByPackageKeys')
@@ -1750,7 +1755,7 @@ const fetchFrameworkPackageDependencies = async (frameworkPackage) => {
     ])
   const validationSkillIds = validationRows.map((validation) => validation.producerSkillId)
   const agentRows = agentIds.length > 0
-    ? await RuntimeAgent.find({ stableId: { $in: agentIds } })
+    ? await applySession(RuntimeAgent.find({ stableId: { $in: agentIds } }), session)
       .select('stableId key name status supportedFrameworkKeys requiredSkillRoleKeys defaultSkillIds primarySkillIds optionalSkillIds executionPlan componentVersion versionStatus lineageId isLocked lockedAt lockedByPackageKeys')
       .lean()
     : []
@@ -1765,7 +1770,7 @@ const fetchFrameworkPackageDependencies = async (frameworkPackage) => {
     .map((value) => String(value || '').trim().toLowerCase())
     .filter(Boolean))]
   const skillRows = skillIds.length > 0
-    ? await RuntimeSkill.find({ stableId: { $in: skillIds } })
+    ? await applySession(RuntimeSkill.find({ stableId: { $in: skillIds } }), session)
       .select('stableId key name status supportedFrameworkKeys skillRoleKey category componentVersion versionStatus lineageId isLocked lockedAt lockedByPackageKeys')
       .lean()
     : []
@@ -1777,7 +1782,7 @@ const fetchFrameworkPackageDependencies = async (frameworkPackage) => {
     .map((value) => String(value || '').trim().toUpperCase())
     .filter(Boolean))]
   const skillRoleRows = skillRoleKeys.length > 0
-    ? await SkillRoleRegistry.find({ roleKey: { $in: skillRoleKeys } })
+    ? await applySession(SkillRoleRegistry.find({ roleKey: { $in: skillRoleKeys } }), session)
       .select('stableId roleKey label status componentVersion versionStatus lineageId isLocked lockedAt lockedByPackageKeys')
       .lean()
     : []
@@ -1798,7 +1803,7 @@ const fetchFrameworkPackageDependencies = async (frameworkPackage) => {
     .map((value) => String(value || '').trim())
     .filter(Boolean))]
   const runtimePathRows = runtimePathKeys.length > 0
-    ? await RuntimePathRegistry.find({ pathKey: { $in: runtimePathKeys } })
+    ? await applySession(RuntimePathRegistry.find({ pathKey: { $in: runtimePathKeys } }), session)
       .select('stableId pathKey label status frameworkKeys scope category isProtected componentVersion versionStatus lineageId isLocked lockedAt lockedByPackageKeys')
       .lean()
     : []
@@ -2155,11 +2160,12 @@ const recomputeRuntimeControlDependencyLockState = async ({
 }
 
 const prepareFrameworkPackageDependencyLock = async ({
+  session,
   frameworkPackage,
   actorUserId,
 }) => {
   const lockedAt = new Date()
-  const dependencies = await fetchFrameworkPackageDependencies(frameworkPackage)
+  const dependencies = await fetchFrameworkPackageDependencies(frameworkPackage, session)
   const issueDetails = buildDependencyLockIssueDetails(dependencies)
   const status = Object.keys(issueDetails).length > 0 ? 'FAIL' : 'PASS'
   const snapshot = buildDependencyLockSnapshot({
@@ -2337,7 +2343,7 @@ const resolveUIContractIntegrity = ({ frameworkPackage, uiContract }) => {
   return checks
 }
 
-const buildFrameworkPackageIntegrity = async (frameworkPackage) => {
+const buildFrameworkPackageIntegrity = async (frameworkPackage, session) => {
   const checks = []
   const frameworkKey = String(frameworkPackage.frameworkKey || '').trim().toUpperCase()
   const readyStatus = isReadyFrameworkPackageStatus(frameworkPackage.status)
@@ -2396,7 +2402,7 @@ const buildFrameworkPackageIntegrity = async (frameworkPackage) => {
     field: 'sections',
   }))
 
-  const runtimePathMessage = await validateSectionRuntimePaths({ sections, frameworkKey })
+  const runtimePathMessage = await validateSectionRuntimePaths({ sections, frameworkKey, session })
   checks.push(buildIntegrityCheck({
     key: 'sections.runtimePaths',
     group: 'Sections Integrity',
@@ -2405,7 +2411,7 @@ const buildFrameworkPackageIntegrity = async (frameworkPackage) => {
     field: 'sections',
   }))
 
-  const [validationRows, workflowRows, uiContract] = await Promise.all([
+  const [validationRows, workflowRows, uiContract] = await resolveCheckpointReads(session, [
     validationKeys.length > 0
       ? ValidationRegistry.find({ key: { $in: validationKeys } })
         .select('key status supportedFrameworkKeys packageUsable')
@@ -2530,7 +2536,15 @@ const buildCheckpointPackageProjection = ({ frameworkPackage, mode }) => {
   }
 }
 
+const resolveCheckpointReads = async (session, queries) => {
+  if (!session) return Promise.all(queries)
+  const results = []
+  for (const query of queries) results.push(await applySession(query, session))
+  return results
+}
+
 const runFrameworkPackageCheckpoint = async ({
+  session,
   frameworkPackage,
   actorUserId,
   actorSummary = null,
@@ -2541,9 +2555,10 @@ const runFrameworkPackageCheckpoint = async ({
     frameworkPackage,
     mode: normalizedMode,
   })
-  const [integrity, registryDetails, dependencyLockResult] = await Promise.all([
-    buildFrameworkPackageIntegrity(checkpointPackage),
-    validateFrameworkPackageRegistryReferences({
+  const operations = [
+    () => buildFrameworkPackageIntegrity(checkpointPackage, session),
+    () => validateFrameworkPackageRegistryReferences({
+      session,
       frameworkKey: checkpointPackage.frameworkKey,
       validationBindings: checkpointPackage.validationBindings,
       workflowBindings: checkpointPackage.workflowBindings,
@@ -2552,11 +2567,16 @@ const runFrameworkPackageCheckpoint = async ({
       validateSections: true,
       validateUiContractSections: true,
     }),
-    prepareFrameworkPackageDependencyLock({
+    () => prepareFrameworkPackageDependencyLock({
+      session,
       frameworkPackage: checkpointPackage,
       actorUserId,
     }),
-  ])
+  ]
+  const results = []
+  if (session) { for (const operation of operations) results.push(await operation()) }
+  else results.push(...await Promise.all(operations.map((operation) => operation())))
+  const [integrity, registryDetails, dependencyLockResult] = results
   const readinessDetails = validateFrameworkPackageReadiness(checkpointPackage)
   const stateContractDetails = validateFrameworkPackageStateContract(checkpointPackage)
   const extraIssues = mapDetailsToCheckpointIssues({
@@ -4179,53 +4199,78 @@ export const getFrameworkPackageDiff = async (req, res, next) => {
 
 export const activateFrameworkPackage = async (req, res, next) => {
   const session = await mongoose.startSession()
+  let frameworkPackage = null
+  let runtimeActivation = null
+  let activationGovernanceFields = null
+  const previousActivePackageIds = []
   try {
-    const frameworkPackage = await findFrameworkPackageByIdentifier(req.params.packageId)
-
-    if (!frameworkPackage) {
-      return res.status(404).json({
-        error: {
-          code: 'NOT_FOUND',
-          message: FRAMEWORK_PACKAGE_NOT_FOUND_MESSAGE,
-          requestId: req.requestId,
-        },
-      })
-    }
-
-    if (frameworkPackage.status !== FRAMEWORK_PACKAGE_STATUSES.VALIDATED) {
-      return sendConflict(res, req, ACTIVATION_REQUIRES_VALIDATED_MESSAGE, {
-        field: 'status',
-        reason: 'FRAMEWORK_PACKAGE_ACTIVATION_REQUIRES_VALIDATED',
-      })
-    }
-
-    const actorUserId = req.context?.userId || req.userId
-    const actorSummary = buildActorSummary(req)
-    const checkpointRun = await runFrameworkPackageCheckpoint({
-      frameworkPackage,
-      actorUserId,
-      actorSummary,
-      mode: FRAMEWORK_PACKAGE_CHECKPOINT_MODES.ACTIVATION,
-    })
-    if (checkpointRun.checkpoint.status === FRAMEWORK_PACKAGE_CHECKPOINT_STATUSES.FAIL) {
-      return sendCheckpointValidationFailed(res, req, checkpointRun.checkpoint)
-    }
-    const dependencyLockResult = checkpointRun.dependencyLockResult
-    const activationReadiness = await getRuntimeActivationReadiness({
-      packageId: frameworkPackage._id,
-      frameworkPackage,
-      checkpoint: checkpointRun.checkpoint,
-    })
-    assertRuntimeActivationReadiness(activationReadiness)
-
-    const shouldRefreshDependencyLock =
-      !frameworkPackage.dependencyLock
-      || String(frameworkPackage.dependencyLock.status || '').trim().toUpperCase() !== 'PASS'
-    const previousActivePackageIds = []
-    let runtimeActivation = null
-    let activationGovernanceFields = null
-
     await session.withTransaction(async () => {
+      const capturedPackage = await loadRuntimeCertificationPackage({
+        packageId: req.params.packageId, session,
+      })
+      if (!capturedPackage) {
+        throw Object.assign(new Error(FRAMEWORK_PACKAGE_NOT_FOUND_MESSAGE), { code: 'NOT_FOUND', status: 404 })
+      }
+      const packageStatusRequirement = buildFrameworkPackageActivationStatusRequirement(capturedPackage)
+      if (packageStatusRequirement.status !== 'PASS') {
+        throw Object.assign(new Error(packageStatusRequirement.message), {
+          code: 'RUNTIME_ACTIVATION_READINESS_BLOCKED',
+          details: { field: 'status', reason: packageStatusRequirement.reason },
+        })
+      }
+
+      const actorUserId = req.context?.userId || req.userId
+      const actorSummary = buildActorSummary(req)
+      const checkpointRun = await runFrameworkPackageCheckpoint({
+        frameworkPackage: capturedPackage, actorUserId, actorSummary, session,
+        mode: FRAMEWORK_PACKAGE_CHECKPOINT_MODES.ACTIVATION,
+      })
+      if (checkpointRun.checkpoint.status === FRAMEWORK_PACKAGE_CHECKPOINT_STATUSES.FAIL) {
+        throw Object.assign(new Error('Framework package checkpoint failed.'), {
+          code: 'FRAMEWORK_PACKAGE_CHECKPOINT_FAILED', checkpoint: checkpointRun.checkpoint,
+        })
+      }
+      const activationReadiness = await getRuntimeActivationReadiness({
+        packageId: capturedPackage._id, frameworkPackage: capturedPackage,
+        checkpoint: checkpointRun.checkpoint, session,
+      })
+      assertRuntimeActivationReadiness(activationReadiness)
+      const certifiedBinding = await verifyRuntimeReleaseCertification({ frameworkPackage: capturedPackage, session })
+      const persistedCandidate = await FrameworkPackage.findOne(buildRuntimeCertificationPackageCas(capturedPackage))
+        .select('+validationConfig +workflowPolicyConfig +compatibleWorkflowKeys +defaultAgentIds +requiredSkillIds +validationRules')
+        .session(session)
+        .lean()
+      if (!persistedCandidate) {
+        throw Object.assign(new Error('Certified package changed before activation.'), {
+          code: 'RUNTIME_RELEASE_CERTIFICATION_INVALID',
+          details: { reason: 'RUNTIME_RELEASE_CERTIFICATION_PACKAGE_CHANGED' },
+        })
+      }
+      const packageStatusAtActivation = persistedCandidate.status
+      const finalCertifiedBinding = await verifyRuntimeReleaseCertification({
+        frameworkPackage: persistedCandidate, session,
+      })
+      if (!isDeepStrictEqual(finalCertifiedBinding, certifiedBinding)) {
+        throw Object.assign(new Error('Runtime release certification changed before activation.'), {
+          code: 'RUNTIME_RELEASE_CERTIFICATION_INVALID',
+          details: { reason: 'RUNTIME_RELEASE_CERTIFICATION_BINDING_CHANGED' },
+        })
+      }
+      const resolvedUIBinding = await resolveUIContractBinding({
+        uiContractKey: persistedCandidate.uiContractKey, frameworkPackage: persistedCandidate, session,
+      })
+      const comparableUi = (value) => value && ({
+        key: value.key, version: value.version, status: value.status, compatibilityMode: value.compatibilityMode,
+      })
+      if (!isDeepStrictEqual(comparableUi(resolvedUIBinding), comparableUi(persistedCandidate.uiContractBinding))) {
+        throw Object.assign(new Error('Certified UI binding changed before activation.'), {
+          code: 'RUNTIME_RELEASE_CERTIFICATION_INVALID',
+          details: { reason: 'RUNTIME_RELEASE_CERTIFICATION_UI_BINDING_CHANGED' },
+        })
+      }
+      frameworkPackage = FrameworkPackage.hydrate(persistedCandidate)
+      frameworkPackage.uiContractBinding = resolvedUIBinding
+      const dependencyLockResult = checkpointRun.dependencyLockResult
       const activationTime = new Date()
       const relatedPackages = await applySession(
         FrameworkPackage.find({
@@ -4274,27 +4319,10 @@ export const activateFrameworkPackage = async (req, res, next) => {
       frameworkPackage.isLocked = true
       frameworkPackage.lockedAt = frameworkPackage.lockedAt || activationTime
       frameworkPackage.lockedReason = frameworkPackage.lockedReason || 'Framework package reached a governed runtime release boundary.'
-      frameworkPackage.uiContractBinding = await resolveUIContractBinding({
-        uiContractKey: frameworkPackage.uiContractKey,
-        frameworkPackage,
-      })
       frameworkPackage.updatedBy = actorUserId
       frameworkPackage.activatedAt = activationTime
       frameworkPackage.activatedBy = actorUserId
-      if (shouldRefreshDependencyLock) {
-        frameworkPackage.dependencyLock = dependencyLockResult.snapshot
-        frameworkPackage.lockedBy = actorUserId
 
-        // Legacy validated packages may predate dependency snapshots; activation verifies and repairs that state.
-        await updateRuntimeControlDependencyLocks({
-          dependencies: dependencyLockResult.dependencies,
-          packageKey: frameworkPackage.packageKey,
-          packageVersion: frameworkPackage.version,
-          actorUserId,
-          lockedAt: dependencyLockResult.lockedAt,
-          session,
-        })
-      }
       persistFrameworkPackageCheckpointMetadata({
         frameworkPackage,
         checkpoint: checkpointRun.checkpoint,
@@ -4302,10 +4330,12 @@ export const activateFrameworkPackage = async (req, res, next) => {
       await frameworkPackage.save({ session })
       runtimeActivation = await registerRuntimeActivation({
         frameworkPackage,
+        packageStatusAtActivation,
         actorUserId,
         activatedAt: activationTime,
         checkpoint: checkpointRun.checkpoint,
         readiness: activationReadiness,
+        certificationBinding: finalCertifiedBinding,
         session,
       })
       activationGovernanceFields = buildPackageGovernanceAuditFields({
@@ -4333,7 +4363,7 @@ export const activateFrameworkPackage = async (req, res, next) => {
             runtimeVerdictId: runtimeActivation?.activationSnapshot?.runtimeVerdictId,
             runtimeVerdictResult: runtimeActivation?.activationSnapshot?.runtimeVerdictResult,
           },
-          ...(shouldRefreshDependencyLock ? { dependencyLock: frameworkPackage.dependencyLock } : {}),
+
         },
       }, { session, throwOnError: true })
 
@@ -4396,6 +4426,15 @@ export const activateFrameworkPackage = async (req, res, next) => {
       },
     })
   } catch (err) {
+    if (err?.code === 'NOT_FOUND') {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: err.message, requestId: req.requestId } })
+    }
+    if (err?.code === 'FRAMEWORK_PACKAGE_CHECKPOINT_FAILED') {
+      return sendCheckpointValidationFailed(res, req, err.checkpoint)
+    }
+    if (err?.code === 'RUNTIME_RELEASE_CERTIFICATION_INVALID') {
+      return sendConflict(res, req, err.message, err.details)
+    }
     if (err?.code === 'RUNTIME_ACTIVATION_READINESS_BLOCKED') {
       return sendConflict(res, req, err.message, err.details)
     }

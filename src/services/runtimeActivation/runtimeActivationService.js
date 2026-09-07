@@ -1,4 +1,5 @@
 import mongoose from 'mongoose'
+import { assertRuntimeCertificationTransaction, loadRuntimeCertificationPackage, verifyRuntimeReleaseCertification } from '../runtimeReleaseCertificationCaptureService.js'
 import FrameworkPackage, { FRAMEWORK_PACKAGE_STATUSES } from '../../models/FrameworkPackage.js'
 import RuntimeActivationSnapshot, {
   RUNTIME_ACTIVATION_STATUSES,
@@ -70,6 +71,44 @@ const buildActivationId = ({ frameworkKey, version, activatedAt, packageId }) =>
 const buildDeploymentId = ({ frameworkKey, tenantScope, deploymentMode, activationId }) =>
   `deployment-${String(frameworkKey || '').toLowerCase()}-${String(tenantScope || '').toLowerCase()}-${String(deploymentMode || '').toLowerCase()}-${String(activationId || '').slice(-24)}`
 
+export const buildFrameworkPackageActivationStatusRequirement = (frameworkPackage) => {
+  const packageStatus = normalizeStatus(frameworkPackage?.status)
+
+  if (packageStatus === FRAMEWORK_PACKAGE_STATUSES.VALIDATED) {
+    return {
+      key: 'packageStatus',
+      status: 'PASS',
+      reason: 'FRAMEWORK_PACKAGE_VALIDATED',
+      message: 'Package is validated.',
+    }
+  }
+
+  if (packageStatus === FRAMEWORK_PACKAGE_STATUSES.ACTIVE && frameworkPackage?.isDefault === false) {
+    return {
+      key: 'packageStatus',
+      status: 'PASS',
+      reason: 'FRAMEWORK_PACKAGE_REACTIVATION_ELIGIBLE',
+      message: 'Active non-default package is eligible for governed reactivation.',
+    }
+  }
+
+  if (packageStatus === FRAMEWORK_PACKAGE_STATUSES.ACTIVE && frameworkPackage?.isDefault === true) {
+    return {
+      key: 'packageStatus',
+      status: 'FAIL',
+      reason: 'FRAMEWORK_PACKAGE_ACTIVE_DEFAULT_CONFLICT',
+      message: 'Package is already the active default.',
+    }
+  }
+
+  return {
+    key: 'packageStatus',
+    status: 'FAIL',
+    reason: 'FRAMEWORK_PACKAGE_ACTIVATION_REQUIRES_VALIDATED',
+    message: 'Only validated or active non-default framework packages can be activated.',
+  }
+}
+
 export const normalizeRuntimeActivationReadiness = ({
   frameworkPackage,
   checkpoint = null,
@@ -82,26 +121,19 @@ export const normalizeRuntimeActivationReadiness = ({
   const runtimeVerdictDependencyLockState = normalizeStatus(runtimeVerdict?.dependencyLockState)
   const runtimeVerdictAuditPersisted = runtimeVerdict?.auditPersisted === true
   const runtimeVerdictLastValidatedAt = toValidDate(runtimeVerdict?.lastValidatedAt)
-  const packageUpdatedAt = toValidDate(frameworkPackage?.updatedAt)
   const dependencyLock = frameworkPackage?.dependencyLock || null
   const dependencyLockStatus = normalizeStatus(dependencyLock?.status)
-  const dependencyLockResolvedAt = toValidDate(dependencyLock?.resolvedAt || dependencyLock?.lockedAt)
   const dependencyLockReferences = Array.isArray(dependencyLock?.references)
     ? dependencyLock.references
     : []
-  const runtimeVerdictStale =
-    runtimeVerdictResult === 'ALLOW'
-    && runtimeVerdictLastValidatedAt
-    && (
-      (packageUpdatedAt && packageUpdatedAt > runtimeVerdictLastValidatedAt)
-      || (dependencyLockResolvedAt && dependencyLockResolvedAt > runtimeVerdictLastValidatedAt)
-    )
+  // Exact certification binding verification is the currentness contract.
+  // Operational package/checkpoint timestamps remain factual metadata only.
+  const runtimeVerdictStale = false
   const runtimeVerdictCertified =
     runtimeVerdictResult === 'ALLOW'
     && runtimeVerdictAuditPersisted
     && runtimeVerdictDependencyLockState === 'LOCKED'
     && Boolean(runtimeVerdictLastValidatedAt)
-    && !runtimeVerdictStale
   let runtimeVerdictReason = 'RUNTIME_VERDICT_MISSING'
   if (runtimeVerdictCertified) {
     runtimeVerdictReason = 'RUNTIME_VERDICT_ALLOW'
@@ -111,21 +143,10 @@ export const normalizeRuntimeActivationReadiness = ({
     runtimeVerdictReason = 'RUNTIME_VERDICT_NOT_CERTIFIED'
   } else if (runtimeVerdictResult === 'ALLOW' && runtimeVerdictDependencyLockState !== 'LOCKED') {
     runtimeVerdictReason = 'RUNTIME_VERDICT_DEPENDENCY_LOCK_NOT_CERTIFIED'
-  } else if (runtimeVerdictStale) {
-    runtimeVerdictReason = 'RUNTIME_VERDICT_STALE'
   }
 
   const requirements = [
-    {
-      key: 'packageStatus',
-      status: packageStatus === FRAMEWORK_PACKAGE_STATUSES.VALIDATED ? 'PASS' : 'FAIL',
-      reason: packageStatus === FRAMEWORK_PACKAGE_STATUSES.VALIDATED
-        ? 'FRAMEWORK_PACKAGE_VALIDATED'
-        : 'FRAMEWORK_PACKAGE_ACTIVATION_REQUIRES_VALIDATED',
-      message: packageStatus === FRAMEWORK_PACKAGE_STATUSES.VALIDATED
-        ? 'Package is validated.'
-        : 'Only validated framework packages can be activated.',
-    },
+    buildFrameworkPackageActivationStatusRequirement(frameworkPackage),
     {
       key: 'checkpoint',
       status: CHECKPOINT_ALLOWED_STATUSES.has(checkpointStatus) ? 'PASS' : 'FAIL',
@@ -222,20 +243,45 @@ export const getRuntimeActivationReadiness = async ({
   packageId,
   frameworkPackage = null,
   checkpoint = null,
+  session = null,
 } = {}) => {
-  const packageRecord = frameworkPackage || await findFrameworkPackageByActivationIdentifier(packageId)
+  if (!session) {
+    const ownedSession = await mongoose.startSession()
+    try {
+      return await ownedSession.withTransaction(() => getRuntimeActivationReadiness({
+        packageId: packageId || frameworkPackage?._id, checkpoint, session: ownedSession,
+      }), { readConcern: { level: 'snapshot' } })
+    } finally { await ownedSession.endSession() }
+  }
+  assertRuntimeCertificationTransaction(session)
+  const packageRecord = frameworkPackage || await loadRuntimeCertificationPackage({ packageId, session })
   if (!packageRecord) return null
 
   const activeDeployment = await getActiveRuntimeDeployment({
     frameworkKey: packageRecord.frameworkKey,
     packageId: packageRecord._id,
+    session,
   })
 
-  return normalizeRuntimeActivationReadiness({
+  const readiness = normalizeRuntimeActivationReadiness({
     frameworkPackage: packageRecord,
     checkpoint,
     activeDeployment,
   })
+  try {
+    readiness.certificationBinding = await verifyRuntimeReleaseCertification({ frameworkPackage: packageRecord, session })
+    readiness.requirements.push({ key: 'certificationBinding', status: 'PASS',
+      reason: 'RUNTIME_RELEASE_CERTIFICATION_VERIFIED',
+      message: 'Runtime release certification binding is verified.' })
+  } catch (err) {
+    if (err.code !== 'RUNTIME_RELEASE_CERTIFICATION_INVALID') throw err
+    readiness.ready = false
+    readiness.status = 'BLOCKED'
+    readiness.blockingReasons.push(err.reason)
+    readiness.requirements.push({ key: 'certificationBinding', status: 'FAIL', reason: err.reason,
+      message: err.message, ...(err.details?.inputReason ? { inputReason: err.details.inputReason } : {}) })
+  }
+  return readiness
 }
 
 export const assertRuntimeActivationReadiness = (readiness) => {
@@ -251,12 +297,42 @@ export const assertRuntimeActivationReadiness = (readiness) => {
 
 export const registerRuntimeActivation = async ({
   frameworkPackage,
+  packageStatusAtActivation,
   actorUserId,
   activatedAt,
   checkpoint,
   readiness,
+  certificationBinding: expectedBinding,
   session,
 } = {}) => {
+  assertRuntimeCertificationTransaction(session)
+  const normalizedPackageStatusAtActivation = normalizeStatus(packageStatusAtActivation)
+  if (![FRAMEWORK_PACKAGE_STATUSES.VALIDATED, FRAMEWORK_PACKAGE_STATUSES.ACTIVE]
+    .includes(normalizedPackageStatusAtActivation)) {
+    const error = new Error('Runtime activation package status provenance is invalid.')
+    error.code = 'RUNTIME_RELEASE_CERTIFICATION_INVALID'
+    error.status = 409
+    error.reason = 'RUNTIME_ACTIVATION_PACKAGE_STATUS_INVALID'
+    error.details = { reason: error.reason }
+    throw error
+  }
+  const normalizeBinding = (value) => value?.toObject
+    ? value.toObject({ transform: false, virtuals: false })
+    : value && typeof value === 'object' ? { version: value.version, digest: value.digest } : null
+  const certificationBinding = normalizeBinding(expectedBinding)
+  const persistedBinding = normalizeBinding(frameworkPackage?.runtimeVerdict?.certificationBinding)
+  const validBinding = (value) => value?.version === 'runtime-release-certification.v1'
+    && /^[a-f0-9]{64}$/.test(value?.digest || '')
+  if (!validBinding(certificationBinding) || !validBinding(persistedBinding)
+    || certificationBinding.version !== persistedBinding.version
+    || certificationBinding.digest !== persistedBinding.digest) {
+    const error = new Error('Runtime release certification changed before activation.')
+    error.code = 'RUNTIME_RELEASE_CERTIFICATION_INVALID'
+    error.status = 409
+    error.reason = 'RUNTIME_RELEASE_CERTIFICATION_BINDING_CHANGED'
+    error.details = { reason: error.reason }
+    throw error
+  }
   const tenantScope = RUNTIME_ACTIVATION_TENANT_SCOPE
   const deploymentMode = RUNTIME_ACTIVATION_DEPLOYMENT_MODE
   const previousDeployment = await getActiveRuntimeDeployment({
@@ -304,13 +380,14 @@ export const registerRuntimeActivation = async ({
   }
 
   const snapshotPayload = {
+    certificationBinding,
     activationId,
     deploymentId,
     packageId: frameworkPackage._id,
     packageKey: frameworkPackage.packageKey || '',
     frameworkKey: frameworkPackage.frameworkKey,
     frameworkVersion: frameworkPackage.version,
-    packageStatusAtActivation: FRAMEWORK_PACKAGE_STATUSES.VALIDATED,
+    packageStatusAtActivation: normalizedPackageStatusAtActivation,
     activationStatus: RUNTIME_ACTIVATION_STATUSES.ACTIVE,
     dependencySnapshotId: frameworkPackage.dependencyLock?.snapshotId || '',
     dependencySnapshotHash: frameworkPackage.dependencyLock?.snapshotHash || frameworkPackage.dependencyLock?.hash || '',

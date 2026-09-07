@@ -5,8 +5,10 @@ import {
   hashSectionInput,
 } from './runtimeSectionModelService.js'
 import { requiresVmfSectionReasoning } from './sectionExecutionContractService.js'
+import { VMF_SECTION_REASONING_CONTRACT_VERSION } from '../constants/runtimeSectionReasoningContract.js'
 
-export const VMF_SECTION_REASONING_CONTRACT_VERSION = 'ss-016-vmf-section-reasoning-v1'
+export { VMF_SECTION_REASONING_CONTRACT_VERSION }
+
 const VMF_SECTION_REASONING_COVERAGE_VERSION = 'ss-016-vmf-full-evidence-v2'
 const MAX_ADDITIONAL_CONTEXT_CHARS = 4000
 const MAX_SECTION_INTELLIGENCE_BYTES = 56 * 1024

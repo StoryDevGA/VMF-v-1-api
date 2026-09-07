@@ -33,7 +33,7 @@ const normalizeCustomerTopology = (value) => {
     : null
 }
 
-const resolveCustomerContext = async ({ customerId, customer = null } = {}) => {
+const resolveCustomerContext = async ({ customerId, customer = null, session } = {}) => {
   const normalizedCustomerId = toIdString(customerId || customer?._id || customer?.id)
   if (!normalizedCustomerId) return null
 
@@ -47,7 +47,7 @@ const resolveCustomerContext = async ({ customerId, customer = null } = {}) => {
     }
   }
 
-  const cachedCustomer = await performanceCacheService.getCustomerTopology(normalizedCustomerId)
+  const cachedCustomer = session ? null : await performanceCacheService.getCustomerTopology(normalizedCustomerId)
   if (cachedCustomer) {
     return {
       customerId: normalizedCustomerId,
@@ -58,13 +58,14 @@ const resolveCustomerContext = async ({ customerId, customer = null } = {}) => {
     }
   }
 
-  const customerDoc = await Customer.findById(normalizedCustomerId).select(
+  const customerQuery = Customer.findById(normalizedCustomerId).select(
     '_id topology vmfPolicy defaultTenantId status isServiceProvider licenseLevelId entitlements governance',
   )
+  const customerDoc = await (session ? customerQuery.session(session) : customerQuery)
 
   if (!customerDoc) return null
 
-  await performanceCacheService.setCustomerTopology(
+  if (!session) await performanceCacheService.setCustomerTopology(
     customerDoc._id,
     buildCustomerTopologySnapshot(customerDoc),
   )
@@ -78,7 +79,7 @@ const resolveCustomerContext = async ({ customerId, customer = null } = {}) => {
   }
 }
 
-const resolveLicenseLevelEntitlements = async (licenseLevelId) => {
+const resolveLicenseLevelEntitlements = async (licenseLevelId, session) => {
   const normalizedLicenseLevelId = toIdString(licenseLevelId)
   if (!normalizedLicenseLevelId) {
     return {
@@ -88,7 +89,7 @@ const resolveLicenseLevelEntitlements = async (licenseLevelId) => {
     }
   }
 
-  const cachedLicense = await performanceCacheService.getLicenseLevelEntitlements(
+  const cachedLicense = session ? null : await performanceCacheService.getLicenseLevelEntitlements(
     normalizedLicenseLevelId,
   )
 
@@ -100,9 +101,10 @@ const resolveLicenseLevelEntitlements = async (licenseLevelId) => {
     }
   }
 
-  const licenseLevel = await LicenseLevel.findById(normalizedLicenseLevelId).select(
+  const licenseQuery = LicenseLevel.findById(normalizedLicenseLevelId).select(
     '_id isActive featureEntitlements',
   )
+  const licenseLevel = await (session ? licenseQuery.session(session) : licenseQuery)
 
   if (!licenseLevel) {
     return {
@@ -113,7 +115,7 @@ const resolveLicenseLevelEntitlements = async (licenseLevelId) => {
   }
 
   const snapshot = buildLicenseLevelEntitlementSnapshot(licenseLevel)
-  await performanceCacheService.setLicenseLevelEntitlements(licenseLevel._id, snapshot)
+  if (!session) await performanceCacheService.setLicenseLevelEntitlements(licenseLevel._id, snapshot)
 
   return {
     licenseLevelId: normalizedLicenseLevelId,
@@ -122,11 +124,11 @@ const resolveLicenseLevelEntitlements = async (licenseLevelId) => {
   }
 }
 
-export const resolveCustomerFeatureEntitlements = async ({ customerId, customer = null } = {}) => {
-  const customerContext = await resolveCustomerContext({ customerId, customer })
+export const resolveCustomerFeatureEntitlements = async ({ customerId, customer = null, session } = {}) => {
+  const customerContext = await resolveCustomerContext({ customerId, customer, session })
   if (!customerContext) return null
 
-  const licenseContext = await resolveLicenseLevelEntitlements(customerContext.licenseLevelId)
+  const licenseContext = await resolveLicenseLevelEntitlements(customerContext.licenseLevelId, session)
 
   const licenseEntitlements = normalizeFeatureEntitlements(licenseContext.featureEntitlements)
   if (licenseEntitlements.length > 0) {

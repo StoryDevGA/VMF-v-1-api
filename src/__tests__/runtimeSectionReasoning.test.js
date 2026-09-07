@@ -4,6 +4,7 @@ import {
   buildCustomerContextReasoningCoverage,
   buildReasonedGeneratedSection,
   buildVmfSectionReasoningCoverage,
+  VMF_SECTION_REASONING_CONTRACT_VERSION,
 } from '../services/runtimeSectionReasoningService.js'
 import {
   createOpenAiRuntimeSectionReasoningAdapter,
@@ -18,7 +19,10 @@ import { requiresVmfSectionReasoning } from '../services/sectionExecutionContrac
 import { buildRuntimeSectionRevision, getAcceptedDiscoveryEvidenceObjects, hashSectionInput, normalizeRuntimeSectionObject } from '../services/runtimeSectionModelService.js'
 import RuntimeStateSection from '../models/RuntimeStateSection.js'
 import { createRuntimeStateLegacySourceRowSet } from '../services/runtimeStateLegacyMapper.js'
-import { buildFrameworkOutcomeStudioHandoff } from '../services/outcomeFrameworkHandoffService.js'
+import {
+  FRAMEWORK_OUTCOME_HANDOFF_EVIDENCE_REFERENCE_PREVIEW_LIMIT,
+  buildFrameworkOutcomeStudioHandoff,
+} from '../services/outcomeFrameworkHandoffService.js'
 import { __testables as repositoryTestables } from '../services/runtimeStateRepository.js'
 
 const makeEvidence = (index) => ({
@@ -65,6 +69,37 @@ const makeOutput = () => ({
   downstreamHandoffSignals: [{ signal: 'Lead with decision confidence.', relevance: 'This connects technical context to commercial relevance.', evidenceRefs: ['evidence_1', 'evidence_2'] }],
   sourceTraceability: ['evidence_1', 'evidence_2', 'evidence_3'],
   validationGaps: [],
+  fxGxAssessmentSignals: [
+    {
+      dimension: 'FX',
+      signal: 'The financial value case remains decision-relevant but unquantified.',
+      interpretation: 'Use the operating problem and preserve the absence of direct financial proof.',
+      evidenceRefs: ['evidence_1'],
+    },
+    {
+      dimension: 'GX',
+      signal: 'The go-to-market case depends on clear replacement-led positioning.',
+      interpretation: 'Lead with the supported commercial use case before broader expansion language.',
+      evidenceRefs: ['evidence_2'],
+    },
+  ],
+  arlRlReviewChangeRationale: [
+    {
+      reviewKey: 'ARL_MEANING',
+      rationale: 'Preserve the supported operating problem as the primary commercial meaning.',
+      evidenceRefs: ['evidence_1'],
+    },
+    {
+      reviewKey: 'RL_REPRESENTATION',
+      rationale: 'Represent broader ambition as qualified positioning rather than proven capability.',
+      evidenceRefs: ['evidence_2'],
+    },
+    {
+      reviewKey: 'CHANGE_RATIONALE',
+      rationale: 'Any downstream change must retain the explicit proof boundary around quantified ROI.',
+      evidenceRefs: ['evidence_3'],
+    },
+  ],
 })
 
 const makeExecutionContract = () => ({
@@ -254,7 +289,7 @@ describe('VMF Customer Context section reasoning', () => {
     expect(providerAdapter).toHaveBeenCalledTimes(1)
     expect(result.generated.generator).toEqual(expect.objectContaining({
       mode: 'GOVERNED_PROVIDER_SECTION_REASONING',
-      adapter: 'ss-016-vmf-section-reasoning-v1',
+      adapter: VMF_SECTION_REASONING_CONTRACT_VERSION,
     }))
     expect(result.generated.evidenceProjection.includedCount).toBeGreaterThan(10)
     expect(result.intelligence.scopedEvidence.projection.algorithm).toBe('SECTION_REASONING_COVERAGE')
@@ -413,7 +448,8 @@ describe('VMF Customer Context section reasoning', () => {
     expect(boundedHandoff.sectionTruth[0].projectionReceipt).toEqual(fullHandoff.sectionTruth[0].projectionReceipt)
     expect(boundedHandoff.sectionTruth[0].projectionReceipt.includedCount).toBe(803)
     expect(boundedHandoff.sectionTruth[0].projectionReceipt.selectedEvidenceRefs.map((item) => item.evidenceObjectId))
-      .toEqual(included.map((item) => item.evidenceObjectId))
+      .toEqual(included.map((item) => item.evidenceObjectId).sort()
+        .slice(0, FRAMEWORK_OUTCOME_HANDOFF_EVIDENCE_REFERENCE_PREVIEW_LIMIT))
   })
 
   test('maps long valid provider fields with twelve handoff signals, accepted truth and one prior revision within unchanged model limits', async () => {
@@ -754,9 +790,9 @@ describe('VMF Customer Context section reasoning', () => {
     expect(sleep).not.toHaveBeenCalled()
   })
 
-  test('retains the strict fourteen-field output and 120-item traceability boundary', () => {
+  test('requires the SS-018 reasoning artefacts while retaining the 120-item traceability boundary', () => {
     const output = makeOutput()
-    expect(Object.keys(output)).toHaveLength(14)
+    expect(Object.keys(output)).toHaveLength(16)
     expect(() => validateRuntimeSectionIntelligence({ ...output, extraField: 'Not permitted' }, {
       allowedEvidenceIds: ['evidence_1', 'evidence_2', 'evidence_3'],
     })).toThrow(expect.objectContaining({ code: 'VMF_SECTION_REASONING_PROVIDER_FAILED' }))
@@ -764,6 +800,44 @@ describe('VMF Customer Context section reasoning', () => {
     expect(() => validateRuntimeSectionIntelligence({ ...output, sourceTraceability: ids }, {
       allowedEvidenceIds: ids,
     })).toThrow(expect.objectContaining({ code: 'VMF_SECTION_REASONING_PROVIDER_FAILED' }))
+  })
+
+  test('fails closed when SS-018 reasoning artefacts are missing, duplicated or cite unknown evidence', () => {
+    const missing = makeOutput()
+    delete missing.fxGxAssessmentSignals
+    expect(() => validateRuntimeSectionIntelligence(missing, {
+      allowedEvidenceIds: ['evidence_1', 'evidence_2', 'evidence_3'],
+    })).toThrow(expect.objectContaining({ details: { reason: 'PROVIDER_OUTPUT_SCHEMA_INVALID' } }))
+
+    const duplicateDimension = makeOutput()
+    duplicateDimension.fxGxAssessmentSignals[1].dimension = 'FX'
+    expect(() => validateRuntimeSectionIntelligence(duplicateDimension, {
+      allowedEvidenceIds: ['evidence_1', 'evidence_2', 'evidence_3'],
+    })).toThrow(expect.objectContaining({ details: { reason: 'PROVIDER_OUTPUT_SCHEMA_INVALID' } }))
+
+    const duplicateRationale = makeOutput()
+    duplicateRationale.arlRlReviewChangeRationale[2].reviewKey = 'ARL_MEANING'
+    expect(() => validateRuntimeSectionIntelligence(duplicateRationale, {
+      allowedEvidenceIds: ['evidence_1', 'evidence_2', 'evidence_3'],
+    })).toThrow(expect.objectContaining({ details: { reason: 'PROVIDER_OUTPUT_SCHEMA_INVALID' } }))
+
+    const unknownReference = makeOutput()
+    unknownReference.fxGxAssessmentSignals[0].evidenceRefs = ['unknown_evidence']
+    expect(() => validateRuntimeSectionIntelligence(unknownReference, {
+      allowedEvidenceIds: ['evidence_1', 'evidence_2', 'evidence_3'],
+    })).toThrow(expect.objectContaining({ details: { reason: 'PROVIDER_OUTPUT_TRACEABILITY_INVALID' } }))
+  })
+
+  test('keeps historical SS-016 provider outputs readable under the legacy contract', () => {
+    const legacyOutput = makeOutput()
+    delete legacyOutput.fxGxAssessmentSignals
+    delete legacyOutput.arlRlReviewChangeRationale
+    expect(validateRuntimeSectionIntelligence(legacyOutput, {
+      allowedEvidenceIds: ['evidence_1', 'evidence_2', 'evidence_3'],
+      requireIntermediateReasoning: false,
+    })).toEqual(expect.objectContaining({
+      sectionSummary: legacyOutput.sectionSummary,
+    }))
   })
 
   test(

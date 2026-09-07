@@ -102,6 +102,42 @@ const COMPOSITION_SAFETY_KEYS = Object.freeze([
   'readinessGapCount',
   'draftOnly',
 ])
+const COMPOSITION_INTERMEDIATE_REASONING_KEYS = Object.freeze([
+  'contractVersion',
+  'requiredFor',
+  'status',
+  'artefacts',
+])
+const COMPOSITION_INTERMEDIATE_ARTEFACT_KEYS = Object.freeze([
+  'key',
+  'classification',
+  'source',
+  'required',
+  'present',
+  'reason',
+])
+const COMPOSITION_INTELLIGENCE_KEYS = Object.freeze([
+  'sectionKey',
+  'sectionSummary',
+  'sectionNarrative',
+  'commercialInterpretation',
+  'strategicTensions',
+  'supportedClaims',
+  'representedClaims',
+  'restrictedClaims',
+  'evidenceBoundaries',
+  'contradictionSignals',
+  'alternativeInterpretations',
+  'decisionRelevance',
+  'downstreamHandoffSignals',
+  'validationGaps',
+])
+const INTERMEDIATE_REASONING_CLASSIFICATIONS = new Set([
+  'CONSUMED_FROM_FRAMEWORK_RUNTIME',
+  'GENERATED_IN_OUTCOME_STUDIO',
+  'VALIDATION_LINEAGE_ONLY',
+  'MISSING',
+])
 const COMPOSITION_SAFE_CHECK_STATUS = 'PASSED'
 const GENERATION_CONTEXT_CONSUMPTION_KEYS = Object.freeze([
   'versionId',
@@ -653,6 +689,139 @@ const buildSafeCompositionOutput = (outputBinding = {}) => {
   }
 }
 
+const projectIntelligenceText = (value) => normalizedWhitespace(String(value ?? ''))
+  .replace(new RegExp(URL_PATTERN.source, 'gi'), ' ')
+  .replace(new RegExp(UUID_PATTERN.source, 'gi'), ' ')
+  .replace(new RegExp(OBJECT_ID_PATTERN.source, 'gi'), ' ')
+  .replace(new RegExp(HASH_PATTERN.source, 'gi'), ' ')
+  .replace(/\b(?:evidence|source)_[a-z0-9_-]+\b/gi, ' ')
+  .replace(/\b(?:knowledge\s+packs?|manifest|activation|dependency\s+graph|database\s+identifier|runtime\s+graph|provider\s+context|system\s+prompt|certified\s+truth)\b/gi, 'governed guidance')
+  .replace(/\s+/g, ' ')
+  .trim()
+
+const buildSafeIntelligenceList = (value, fields, maximum = 2) => {
+  if (!Array.isArray(value)) fail()
+  return value.slice(0, maximum)
+    .map((entry) => {
+      const raw = isPlainObject(entry)
+        ? fields.map((field) => entry[field]).filter((item) => typeof item === 'string').join(' — ')
+        : entry
+      return boundText(projectIntelligenceText(raw), 220, 80)
+    })
+    .filter(Boolean)
+}
+
+const buildSafeFrameworkIntelligence = (frameworkIntelligence = []) => {
+  if (!Array.isArray(frameworkIntelligence)
+    || frameworkIntelligence.length === 0
+    || frameworkIntelligence.length > 20) fail()
+  return frameworkIntelligence.map((entry) => {
+    if (!isPlainObject(entry)
+      || !safeToken(entry.sectionKey)
+      || !isPlainObject(entry.sectionIntelligence)) fail()
+    const intelligence = entry.sectionIntelligence
+    const safeEntry = {
+      sectionKey: normalizedWhitespace(entry.sectionKey),
+      sectionSummary: boundText(projectIntelligenceText(intelligence.sectionSummary), 360, 80),
+      sectionNarrative: boundText(projectIntelligenceText(intelligence.sectionNarrative), 500, 80),
+      commercialInterpretation: boundText(projectIntelligenceText(intelligence.commercialInterpretation), 500, 80),
+      strategicTensions: buildSafeIntelligenceList(intelligence.strategicTensions, ['signal', 'interpretation']),
+      supportedClaims: buildSafeIntelligenceList(intelligence.supportedClaims, ['claim', 'interpretation']),
+      representedClaims: buildSafeIntelligenceList(intelligence.representedClaims, ['claim', 'interpretation']),
+      restrictedClaims: buildSafeIntelligenceList(intelligence.restrictedClaims, ['claim', 'interpretation']),
+      evidenceBoundaries: buildSafeIntelligenceList(intelligence.evidenceBoundaries, ['boundary', 'rationale']),
+      contradictionSignals: buildSafeIntelligenceList(intelligence.contradictionSignals, ['signal', 'interpretation']),
+      alternativeInterpretations: buildSafeIntelligenceList(intelligence.alternativeInterpretations, ['signal', 'interpretation']),
+      decisionRelevance: boundText(projectIntelligenceText(intelligence.decisionRelevance), 420, 80),
+      downstreamHandoffSignals: buildSafeIntelligenceList(intelligence.downstreamHandoffSignals, ['signal', 'relevance']),
+      validationGaps: buildSafeIntelligenceList(intelligence.validationGaps, ['gap']),
+    }
+    if (!hasExactKeys(safeEntry, COMPOSITION_INTELLIGENCE_KEYS)
+      || !safeEntry.sectionSummary
+      || !safeEntry.sectionNarrative
+      || !safeEntry.commercialInterpretation
+      || !safeEntry.decisionRelevance) fail()
+    assertSafeRawString(safeEntry.sectionKey)
+    Object.values(safeEntry).forEach((value) => {
+      if (Array.isArray(value)) assertSafeBoundedArray(value, { maxLength: 2, itemMaximum: 220 })
+      else assertSafeRawString(value)
+    })
+    return safeEntry
+  })
+}
+
+const assertSafeFrameworkIntelligence = (frameworkIntelligence = []) => {
+  if (!Array.isArray(frameworkIntelligence)
+    || frameworkIntelligence.length === 0
+    || frameworkIntelligence.length > 20) fail()
+  frameworkIntelligence.forEach((entry) => {
+    if (!isPlainObject(entry) || !hasExactKeys(entry, COMPOSITION_INTELLIGENCE_KEYS)) fail()
+    assertSafeRawString(entry.sectionKey)
+    const requiredStrings = [
+      entry.sectionSummary,
+      entry.sectionNarrative,
+      entry.commercialInterpretation,
+      entry.decisionRelevance,
+    ]
+    requiredStrings.forEach((value) => {
+      if (typeof value !== 'string' || !value.trim()) fail()
+      assertSafeRawString(value)
+    })
+    const listValues = [
+      entry.strategicTensions,
+      entry.supportedClaims,
+      entry.representedClaims,
+      entry.restrictedClaims,
+      entry.evidenceBoundaries,
+      entry.contradictionSignals,
+      entry.alternativeInterpretations,
+      entry.downstreamHandoffSignals,
+      entry.validationGaps,
+    ]
+    listValues.forEach((value) => assertSafeBoundedArray(value, { maxLength: 2, itemMaximum: 220 }))
+  })
+  return frameworkIntelligence
+}
+
+const buildSafeIntermediateReasoning = (intermediateReasoning = {}) => {
+  if (!isPlainObject(intermediateReasoning)
+    || !hasExactKeys(intermediateReasoning, COMPOSITION_INTERMEDIATE_REASONING_KEYS)
+    || intermediateReasoning.contractVersion !== 'outcome-studio.intermediate-reasoning-boundary.v1'
+    || intermediateReasoning.requiredFor !== 'COMMERCIAL_STRATEGY_DECISION_PAPER'
+    || intermediateReasoning.status !== 'READY'
+    || !Array.isArray(intermediateReasoning.artefacts)
+    || intermediateReasoning.artefacts.length !== 7) fail()
+  const keys = new Set()
+  const artefacts = intermediateReasoning.artefacts.map((entry) => {
+    if (!isPlainObject(entry)
+      || !hasExactKeys(entry, COMPOSITION_INTERMEDIATE_ARTEFACT_KEYS)
+      || !INTERMEDIATE_REASONING_CLASSIFICATIONS.has(entry.classification)
+      || !safeToken(entry.key)
+      || !safeToken(entry.source)
+      || typeof entry.required !== 'boolean'
+      || typeof entry.present !== 'boolean'
+      || typeof entry.reason !== 'string'
+      || !entry.reason.trim()
+      || keys.has(entry.key)) fail()
+    keys.add(entry.key)
+    const safeEntry = {
+      ...entry,
+      reason: boundText(projectIntelligenceText(entry.reason), 240, 80),
+    }
+    Object.values(safeEntry)
+      .filter((value) => typeof value === 'string')
+      .forEach(assertSafeRawString)
+    return safeEntry
+  })
+  if (keys.size !== 7) fail()
+  return {
+    contractVersion: intermediateReasoning.contractVersion,
+    requiredFor: intermediateReasoning.requiredFor,
+    status: intermediateReasoning.status,
+    artefacts,
+  }
+}
+
 const buildSafeMethodGuidance = (methodGuidance = []) => {
   if (!Array.isArray(methodGuidance) || methodGuidance.length === 0 || methodGuidance.length > 12) fail()
   const roles = new Set()
@@ -1098,11 +1267,24 @@ export const buildOutcomeStudioProviderSafeComposition = ({
       styleGuidance: safeStyleGuidance,
     }),
   }
+  if (compositionPackage.frameworkIntelligence !== undefined
+    || compositionPackage.intermediateReasoning !== undefined) {
+    if (compositionPackage.frameworkIntelligence === undefined
+      || compositionPackage.intermediateReasoning === undefined) fail()
+    composition.frameworkIntelligence = buildSafeFrameworkIntelligence(compositionPackage.frameworkIntelligence)
+    composition.intermediateReasoning = buildSafeIntermediateReasoning(compositionPackage.intermediateReasoning)
+  }
   return assertOutcomeStudioProviderSafeComposition(composition)
 }
 
 export const assertOutcomeStudioProviderSafeComposition = (composition) => {
-  if (!hasExactKeys(composition, COMPOSITION_KEYS)
+  const hasIntermediateReasoning = isPlainObject(composition)
+    && Object.prototype.hasOwnProperty.call(composition, 'frameworkIntelligence')
+    && Object.prototype.hasOwnProperty.call(composition, 'intermediateReasoning')
+  const expectedCompositionKeys = hasIntermediateReasoning
+    ? [...COMPOSITION_KEYS, 'frameworkIntelligence', 'intermediateReasoning']
+    : COMPOSITION_KEYS
+  if (!hasExactKeys(composition, expectedCompositionKeys)
     || composition.contractVersion !== OUTCOME_STUDIO_PROVIDER_SAFE_COMPOSITION_CONTRACT
     || !Array.isArray(composition.businessFacts)
     || composition.businessFacts.length === 0
@@ -1154,6 +1336,10 @@ export const assertOutcomeStudioProviderSafeComposition = (composition) => {
   buildSafeMethodGuidance(composition.methodGuidance)
   assertSafeBoundedArray(composition.governanceConstraints, { maxLength: 16, itemMaximum: 600 })
   buildSafeCompositionReadiness(composition.readiness)
+  if (hasIntermediateReasoning) {
+    assertSafeFrameworkIntelligence(composition.frameworkIntelligence)
+    buildSafeIntermediateReasoning(composition.intermediateReasoning)
+  }
   const safetyManifest = composition.safetyManifest
   if (safetyManifest.manifestVersion !== OUTCOME_STUDIO_PROVIDER_SAFE_COMPOSITION_CONTRACT
     || !safeToken(safetyManifest.providerKey)

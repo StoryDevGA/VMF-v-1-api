@@ -235,6 +235,19 @@ const createRuntimeRevisionSchema = z.object({
     .default(''),
 }).strict()
 
+const runtimeReleaseReasonSchema = z.string().trim().min(1).max(1000)
+const adoptRuntimeReleaseSchema = z.object({
+  targetPackageId: z.string().regex(objectIdRegex, 'Target package id must be an ObjectId'),
+  targetDeploymentId: z.string().trim().min(1).max(180),
+  expectedUpdatedAt: expectedUpdatedAtSchema,
+  reason: runtimeReleaseReasonSchema,
+}).strict()
+const rollbackRuntimeReleaseSchema = z.object({
+  operationId: z.string().uuid(),
+  expectedUpdatedAt: expectedUpdatedAtSchema,
+  reason: runtimeReleaseReasonSchema,
+}).strict()
+
 const mutateRuntimeStateSchema = z.object({
   runtimePath: z
     .string({ required_error: 'runtimePath is required' })
@@ -1035,6 +1048,13 @@ export const validateCreateRuntimeInstance = createBodyValidator(createRuntimeIn
 export const validateCreateRuntimeRevision = createBodyValidator(createRuntimeRevisionSchema, {
   message: 'Request validation failed.',
   rootIssueKey: '_root',
+})
+
+export const validateAdoptRuntimeRelease = createBodyValidator(adoptRuntimeReleaseSchema, {
+  message: 'Request validation failed.', rootIssueKey: '_root',
+})
+export const validateRollbackRuntimeRelease = createBodyValidator(rollbackRuntimeReleaseSchema, {
+  message: 'Request validation failed.', rootIssueKey: '_root',
 })
 
 export const validateMutateRuntimeState = createBodyValidator(mutateRuntimeStateSchema, {

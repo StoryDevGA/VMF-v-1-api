@@ -2,8 +2,9 @@ import mongoose from 'mongoose'
 import FrameworkPackage from '../../models/FrameworkPackage.js'
 import { RUNTIME_VALIDATION_CODES, buildRuntimeValidationIssue } from './runtimeValidationCodes.js'
 
-const leanQuery = async (query) => {
+const leanQuery = async (query, session) => {
   if (!query) return null
+  if (session) query = query.session(session)
   if (typeof query.lean === 'function') return query.lean()
   return query
 }
@@ -23,7 +24,7 @@ const buildDependencyIssue = (message, path = 'packageId', extra = {}) => ({
   ...extra,
 })
 
-const resolveFrameworkPackage = async (packageId) => {
+const resolveFrameworkPackage = async (packageId, session) => {
   const normalizedPackageId = normalizeToken(packageId)
   if (!normalizedPackageId) return null
 
@@ -31,14 +32,14 @@ const resolveFrameworkPackage = async (packageId) => {
     ? FrameworkPackage.findById(normalizedPackageId)
     : FrameworkPackage.findOne({ packageKey: normalizedPackageId })
 
-  return leanQuery(query)
+  return leanQuery(query, session)
 }
 
-export const validateRuntimeDependencyState = async ({ packageId, frameworkKey }) => {
+export const validateRuntimeDependencyState = async ({ packageId, frameworkKey, session, capturedPackage }) => {
   const normalizedPackageId = normalizeToken(packageId)
   if (!normalizedPackageId) return []
 
-  const frameworkPackage = await resolveFrameworkPackage(normalizedPackageId)
+  const frameworkPackage = capturedPackage !== undefined ? capturedPackage : await resolveFrameworkPackage(normalizedPackageId, session)
   if (!frameworkPackage) {
     return [buildDependencyIssue(`Framework package "${normalizedPackageId}" was not found.`, 'packageId', { packageResolved: false })]
   }
@@ -67,8 +68,8 @@ export const validateRuntimeDependencyState = async ({ packageId, frameworkKey }
   return []
 }
 
-export const getRuntimeDependencyLockState = async ({ packageId } = {}) => {
-  const frameworkPackage = await resolveFrameworkPackage(packageId)
+export const getRuntimeDependencyLockState = async ({ packageId, session, capturedPackage } = {}) => {
+  const frameworkPackage = capturedPackage !== undefined ? capturedPackage : await resolveFrameworkPackage(packageId, session)
   const dependencyLock = frameworkPackage?.dependencyLock && typeof frameworkPackage.dependencyLock === 'object'
     ? frameworkPackage.dependencyLock
     : null

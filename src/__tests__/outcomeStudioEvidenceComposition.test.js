@@ -17,7 +17,30 @@ const makeEvidence = (overrides = {}) => ({
   ...overrides,
 })
 
-const makeInput = ({ evidenceObjects = [makeEvidence()], refs = ['evidence-1'], truthBinding = {}, knowledgeContext = {} } = {}) => ({
+const makeFrameworkSectionIntelligence = () => ({
+  sectionSummary: 'The accepted section establishes the customer decision context.',
+  sectionNarrative: 'The accepted narrative connects the operating context to a material commercial choice.',
+  commercialInterpretation: 'The commercial implication is a focused opportunity with a visible proof boundary.',
+  strategicTensions: [{ signal: 'Focus versus breadth.', interpretation: 'Lead with the supported decision.' }],
+  supportedClaims: [{ claim: 'The offer addresses a governed decision process.', interpretation: 'Supported by accepted evidence.' }],
+  representedClaims: [],
+  restrictedClaims: [{ claim: 'Quantified value is proven.', interpretation: 'Keep this qualified.' }],
+  evidenceBoundaries: [{ boundary: 'Do not assert quantified value.', rationale: 'Direct proof is not present.' }],
+  contradictionSignals: [],
+  alternativeInterpretations: [],
+  decisionRelevance: 'Use the operating problem as the decision anchor.',
+  downstreamHandoffSignals: [{ signal: 'Lead with decision confidence.', relevance: 'Keeps the outcome commercially useful.' }],
+  sourceTraceability: ['evidence-1'],
+  validationGaps: [],
+})
+
+const makeInput = ({
+  evidenceObjects = [makeEvidence()],
+  refs = ['evidence-1'],
+  truthBinding = {},
+  knowledgeContext = {},
+  frameworkHandoffOverrides = null,
+} = {}) => ({
   runtimeInstance: {
     _id: 'runtime-id-1',
     runtimeInstanceKey: 'value-narrative-test',
@@ -108,6 +131,7 @@ const makeInput = ({ evidenceObjects = [makeEvidence()], refs = ['evidence-1'], 
     lineage: { versionIds: ['schema-1'] },
     ...knowledgeContext,
   },
+  ...(frameworkHandoffOverrides ? { frameworkHandoff: frameworkHandoffOverrides } : {}),
   requestedOutputTypeKey: 'executive-brief',
   userPrompt: 'Can you prepare an executive brief for our investor day',
 })
@@ -192,6 +216,64 @@ describe('Outcome Studio evidence composition', () => {
       validationStatus: 'VALIDATED',
       claimPermission: 'SUPPORTED_FACT_ONLY',
       currentness: 'CURRENT',
+    }))
+  })
+
+  test('records all seven intermediate reasoning boundaries when supplied explicitly', () => {
+    const input = makeInput({
+      frameworkHandoffOverrides: {
+        sectionTruth: [{
+          sectionKey: 'customer_context',
+          sectionHash: 'sha256:section-1',
+          sectionIntelligence: makeFrameworkSectionIntelligence(),
+        }],
+        intermediateReasoning: {
+          fxGxAssessmentSignals: { signal: 'FX/GX assessment is bounded to the accepted context.' },
+          arlRlReviewChangeRationale: { rationale: 'Review changes preserve the accepted evidence boundary.' },
+        },
+      },
+    })
+
+    const result = buildOutcomeStudioEvidenceComposition(input)
+    expect(result.frameworkIntelligence).toEqual([expect.objectContaining({
+      sectionKey: 'customer_context',
+      sectionIntelligence: makeFrameworkSectionIntelligence(),
+    })])
+    expect(result.intermediateReasoning).toEqual(expect.objectContaining({
+      status: 'READY',
+      artefacts: expect.arrayContaining([
+        expect.objectContaining({
+          key: 'claimHypothesisMatrix',
+          classification: 'CONSUMED_FROM_FRAMEWORK_RUNTIME',
+          present: true,
+        }),
+        expect.objectContaining({
+          key: 'outputSpecificCompositionGuidance',
+          classification: 'GENERATED_IN_OUTCOME_STUDIO',
+          present: true,
+        }),
+      ]),
+    }))
+    expect(result.intermediateReasoning.artefacts).toHaveLength(7)
+  })
+
+  test('fails closed with a complete manifest when explicit Andrew-style boundaries are missing', () => {
+    const input = makeInput({
+      frameworkHandoffOverrides: {
+        sectionTruth: [{
+          sectionKey: 'customer_context',
+          sectionHash: 'sha256:section-1',
+          sectionIntelligence: makeFrameworkSectionIntelligence(),
+        }],
+      },
+    })
+
+    expect(() => buildOutcomeStudioEvidenceComposition(input)).toThrow(expect.objectContaining({
+      reason: OUTCOME_STUDIO_COMPOSITION_BLOCKERS.INTERMEDIATE_REASONING_MISSING,
+      details: expect.objectContaining({
+        missingArtefacts: ['fxGxAssessmentSignals', 'arlRlReviewChangeRationale'],
+        intermediateReasoning: expect.objectContaining({ status: 'BLOCKED', artefacts: expect.any(Array) }),
+      }),
     }))
   })
 

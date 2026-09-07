@@ -1,12 +1,16 @@
 import { describe, expect, jest, test } from '@jest/globals'
 import { AuditLog, FrameworkPackage } from '../models/index.js'
-import { __testables as repositoryTestables } from '../services/runtimeStateRepository.js'
+import {
+  __testables as repositoryTestables,
+  RUNTIME_STATE_V2_MAX_SERIALIZED_READ_BYTES,
+} from '../services/runtimeStateRepository.js'
 
 import {
   FRAMEWORK_OUTCOME_CLAIM_TYPES,
   FRAMEWORK_OUTCOME_HANDOFF_BLOCKER_CODES,
   FRAMEWORK_OUTCOME_HANDOFF_STATUSES,
   FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_READ_POLICY,
+  FRAMEWORK_OUTCOME_HANDOFF_EVIDENCE_REFERENCE_PREVIEW_LIMIT,
   FRAMEWORK_OUTCOME_HANDOFF_V2_PARITY_CONTRACT_VERSION,
   buildFrameworkOutcomeHandoffV2ParityDigest,
   buildFrameworkOutcomeStudioHandoff,
@@ -343,6 +347,279 @@ describe('Framework-to-Outcome Studio Evidence-to-Knowledge handoff', () => {
       fixture.runtimeInstance.framework_state.sections.customer_context.accepted.sectionIntelligence,
     )
     expect(customerContext.sectionHash).toMatch(/^sha256:/)
+  })
+
+  test('exposes the Draft 0.2 reasoning boundary and keeps missing explicit artefacts blocked', () => {
+    const fixture = makeFixture({ sectionKeys: ['customer_context'] })
+    fixture.knowledgeContext.outputTypeStructure = [
+      'Executive context',
+      'Material findings',
+      'Business implications',
+      'Recommended decisions',
+      'Immediate actions',
+    ]
+    fixture.knowledgeContext.outputSchema.version = '1.0.0'
+    fixture.knowledgeContext.outputSchema.requiredSections = ['Executive Summary']
+    fixture.knowledgeContext.style.version = '1.0.0'
+    fixture.runtimeInstance.framework_state.sections.customer_context.accepted.sectionIntelligence = {
+      sectionSummary: 'Accepted section summary.',
+      sectionNarrative: 'Accepted section narrative.',
+      commercialInterpretation: 'Bounded commercial interpretation.',
+      strategicTensions: [{ signal: 'Scope tension.' }],
+      supportedClaims: [{ claim: 'Supported claim.' }],
+      representedClaims: [],
+      restrictedClaims: [{ claim: 'Restricted claim.' }],
+      evidenceBoundaries: [{ boundary: 'Keep the claim qualified.' }],
+      contradictionSignals: [],
+      alternativeInterpretations: [],
+      decisionRelevance: 'Use the section as the decision anchor.',
+      downstreamHandoffSignals: [{ signal: 'Decision signal.' }],
+      sourceTraceability: ['evidence_object_1'],
+      validationGaps: [],
+    }
+
+    const handoff = buildFrameworkOutcomeStudioHandoff(fixture)
+
+    expect(handoff.intermediateReasoning).toEqual(expect.objectContaining({
+      contractVersion: 'outcome-studio.intermediate-reasoning-boundary.v1',
+      requiredFor: 'COMMERCIAL_STRATEGY_DECISION_PAPER',
+      status: 'BLOCKED',
+      artefacts: expect.arrayContaining([
+        expect.objectContaining({
+          key: 'claimHypothesisMatrix',
+          classification: 'CONSUMED_FROM_FRAMEWORK_RUNTIME',
+          present: true,
+        }),
+        expect.objectContaining({
+          key: 'outputSpecificCompositionGuidance',
+          classification: 'GENERATED_IN_OUTCOME_STUDIO',
+          present: true,
+        }),
+        expect.objectContaining({
+          key: 'fxGxAssessmentSignals',
+          classification: 'MISSING',
+          present: false,
+        }),
+        expect.objectContaining({
+          key: 'arlRlReviewChangeRationale',
+          classification: 'MISSING',
+          present: false,
+        }),
+      ]),
+    }))
+  })
+
+  test('consumes explicit Framework FX/GX and ARL/RL artefacts through the accepted handoff', () => {
+    const fixture = makeFixture({ sectionKeys: ['customer_context'] })
+    fixture.runtimeInstance.framework_state.sections.customer_context.accepted.sectionIntelligence = {
+      sectionSummary: 'Accepted section summary.',
+      sectionNarrative: 'Accepted section narrative.',
+      commercialInterpretation: 'Bounded commercial interpretation.',
+      strategicTensions: [{ signal: 'Scope tension.' }],
+      supportedClaims: [{ claim: 'Supported claim.' }],
+      representedClaims: [],
+      restrictedClaims: [{ claim: 'Restricted claim.' }],
+      evidenceBoundaries: [{ boundary: 'Keep the claim qualified.' }],
+      contradictionSignals: [],
+      alternativeInterpretations: [],
+      decisionRelevance: 'Use the section as the decision anchor.',
+      downstreamHandoffSignals: [{ signal: 'Decision signal.' }],
+      sourceTraceability: ['evidence_object_1'],
+      validationGaps: [],
+      fxGxAssessmentSignals: [
+        { dimension: 'FX', signal: 'Financial signal.', interpretation: 'Financial interpretation.', evidenceRefs: ['evidence_object_1'] },
+        { dimension: 'GX', signal: 'GTM signal.', interpretation: 'GTM interpretation.', evidenceRefs: ['evidence_object_1'] },
+      ],
+      arlRlReviewChangeRationale: [
+        { reviewKey: 'ARL_MEANING', rationale: 'Meaning rationale.', evidenceRefs: ['evidence_object_1'] },
+        { reviewKey: 'RL_REPRESENTATION', rationale: 'Representation rationale.', evidenceRefs: ['evidence_object_1'] },
+        { reviewKey: 'CHANGE_RATIONALE', rationale: 'Change rationale.', evidenceRefs: ['evidence_object_1'] },
+      ],
+    }
+
+    const handoff = buildFrameworkOutcomeStudioHandoff(fixture)
+    expect(handoff.intermediateReasoning.artefacts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        key: 'fxGxAssessmentSignals',
+        classification: 'CONSUMED_FROM_FRAMEWORK_RUNTIME',
+        source: 'framework_runtime.accepted.sectionIntelligence',
+        present: true,
+      }),
+      expect.objectContaining({
+        key: 'arlRlReviewChangeRationale',
+        classification: 'CONSUMED_FROM_FRAMEWORK_RUNTIME',
+        source: 'framework_runtime.accepted.sectionIntelligence',
+        present: true,
+      }),
+    ]))
+    expect(handoff.sectionTruth[0].sectionIntelligence.fxGxAssessmentSignals).toHaveLength(2)
+    expect(handoff.sectionTruth[0].sectionIntelligence.arlRlReviewChangeRationale).toHaveLength(3)
+  })
+
+  test.each([0, 99, 100, 101, 803])(
+    'keeps the evidence preview bounded while preserving the full reference receipt for %i references',
+    (referenceCount) => {
+      const fixture = makeFixture()
+      const evidenceObjects = Array.from({ length: Math.max(referenceCount, 6) }, (_value, index) =>
+        makeEvidence(index + 1),
+      )
+      fixture.runtimeInstance.framework_state.evidence_pack.evidenceObjects = evidenceObjects
+      const section = fixture.runtimeInstance.framework_state.sections.customer_context
+      section.generated.evidenceProjection.included = Array.from(
+        { length: referenceCount },
+        (_value, index) => ({ evidenceObjectId: `evidence_object_${index + 1}` }),
+      )
+      section.generated.evidenceProjection.includedCount = referenceCount
+      section.generated.evidenceProjection.eligibleAcceptedCount = referenceCount
+
+      const handoff = buildFrameworkOutcomeStudioHandoff(fixture)
+      const projectedSection = handoff.sectionTruth.find((item) => item.sectionKey === 'customer_context')
+      const receipt = projectedSection.projectionReceipt.selectedEvidenceRefsReceipt
+
+      expect(projectedSection.projectionReceipt.selectedEvidenceRefs).toHaveLength(
+        Math.min(referenceCount, FRAMEWORK_OUTCOME_HANDOFF_EVIDENCE_REFERENCE_PREVIEW_LIMIT),
+      )
+      expect(receipt).toEqual(expect.objectContaining({
+        totalCount: referenceCount,
+        retainedCount: Math.min(referenceCount, FRAMEWORK_OUTCOME_HANDOFF_EVIDENCE_REFERENCE_PREVIEW_LIMIT),
+        limit: FRAMEWORK_OUTCOME_HANDOFF_EVIDENCE_REFERENCE_PREVIEW_LIMIT,
+        omittedCount: Math.max(0, referenceCount - FRAMEWORK_OUTCOME_HANDOFF_EVIDENCE_REFERENCE_PREVIEW_LIMIT),
+        truncated: referenceCount > FRAMEWORK_OUTCOME_HANDOFF_EVIDENCE_REFERENCE_PREVIEW_LIMIT,
+        fullReferenceHash: expect.stringMatching(/^sha256:/),
+      }))
+      expect(projectedSection.projectionReceipt.includedCount).toBe(referenceCount)
+    },
+  )
+
+  test('validates an unresolved reference in the omitted tail before exposing the bounded preview', () => {
+    const fixture = makeFixture()
+    fixture.runtimeInstance.framework_state.evidence_pack.evidenceObjects = Array.from(
+      { length: 100 },
+      (_value, index) => makeEvidence(index + 1),
+    )
+    const section = fixture.runtimeInstance.framework_state.sections.customer_context
+    section.generated.evidenceProjection.included = [
+      ...Array.from({ length: 100 }, (_value, index) => ({ evidenceObjectId: `evidence_object_${index + 1}` })),
+      { evidenceObjectId: 'missing_tail' },
+    ]
+    section.generated.evidenceProjection.includedCount = 101
+    section.generated.evidenceProjection.eligibleAcceptedCount = 101
+
+    const handoff = buildFrameworkOutcomeStudioHandoff(fixture)
+    const projectedSection = handoff.sectionTruth.find((item) => item.sectionKey === 'customer_context')
+
+    expect(projectedSection.projectionReceipt.selectedEvidenceRefs).toHaveLength(100)
+    expect(projectedSection.projectionReceipt.selectedEvidenceRefs).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ reference: 'missing_tail' })]),
+    )
+    expect(projectedSection.projectionReceipt.selectedEvidenceRefsReceipt).toEqual(expect.objectContaining({
+      totalCount: 101,
+      omittedCount: 1,
+      truncated: true,
+    }))
+    expect(handoff.blockers).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: FRAMEWORK_OUTCOME_HANDOFF_BLOCKER_CODES.EVIDENCE_REF_UNRESOLVED,
+        message: expect.stringContaining('missing_tail'),
+      }),
+    ]))
+  })
+
+  test('canonicalizes evidence order and changes the full receipt when an omitted reference changes', () => {
+    const fixture = makeFixture()
+    fixture.runtimeInstance.framework_state.evidence_pack.evidenceObjects = Array.from(
+      { length: 101 },
+      (_value, index) => makeEvidence(index + 1),
+    )
+    const section = fixture.runtimeInstance.framework_state.sections.customer_context
+    const included = Array.from(
+      { length: 101 },
+      (_value, index) => ({ evidenceObjectId: `evidence_object_${index + 1}` }),
+    )
+    section.generated.evidenceProjection.included = included
+    section.generated.evidenceProjection.includedCount = included.length
+    section.generated.evidenceProjection.eligibleAcceptedCount = included.length
+
+    const baseline = buildFrameworkOutcomeStudioHandoff(fixture)
+    const reversedFixture = JSON.parse(JSON.stringify(fixture))
+    reversedFixture.runtimeInstance.framework_state.sections.customer_context.generated.evidenceProjection.included = [
+      ...included,
+    ].reverse()
+    const reversed = buildFrameworkOutcomeStudioHandoff(reversedFixture)
+    const baselineSection = baseline.sectionTruth.find((item) => item.sectionKey === 'customer_context')
+    const reversedSection = reversed.sectionTruth.find((item) => item.sectionKey === 'customer_context')
+
+    expect(reversedSection.projectionReceipt.selectedEvidenceRefs).toEqual(
+      baselineSection.projectionReceipt.selectedEvidenceRefs,
+    )
+    expect(reversedSection.projectionReceipt.selectedEvidenceRefsReceipt.fullReferenceHash).toBe(
+      baselineSection.projectionReceipt.selectedEvidenceRefsReceipt.fullReferenceHash,
+    )
+
+    const changedFixture = JSON.parse(JSON.stringify(fixture))
+    changedFixture.runtimeInstance.framework_state.evidence_pack.evidenceObjects[98].sourceId = 'changed_source_99'
+    const changed = buildFrameworkOutcomeStudioHandoff(changedFixture)
+    const changedSection = changed.sectionTruth.find((item) => item.sectionKey === 'customer_context')
+
+    expect(changedSection.projectionReceipt.selectedEvidenceRefs).toEqual(
+      baselineSection.projectionReceipt.selectedEvidenceRefs,
+    )
+    expect(changedSection.projectionReceipt.selectedEvidenceRefsReceipt.fullReferenceHash).not.toBe(
+      baselineSection.projectionReceipt.selectedEvidenceRefsReceipt.fullReferenceHash,
+    )
+  })
+
+  test('keeps the six-section 803-evidence handoff under the existing read guard without thinning truth or intelligence', () => {
+    const fixture = makeFixture()
+    const baseline = buildFrameworkOutcomeStudioHandoff(fixture)
+    fixture.runtimeInstance.framework_state.evidence_pack.evidenceObjects = Array.from(
+      { length: 803 },
+      (_value, index) => makeEvidence(index + 1),
+    )
+    Object.values(fixture.runtimeInstance.framework_state.sections).forEach((section) => {
+      section.accepted.sectionIntelligence = {
+        sectionSummary: 'Rich accepted section intelligence remains in the handoff.',
+        commercialInterpretation: 'Customer context is connected to the governed decision boundary.',
+        supportedClaims: [{ claim: 'Supported operating reality.' }],
+        restrictedClaims: [{ claim: 'Unproven quantified impact.' }],
+      }
+      const included = Array.from(
+        { length: 803 },
+        (_value, index) => ({ evidenceObjectId: `evidence_object_${index + 1}` }),
+      )
+      section.generated.evidenceProjection.included = included
+      section.generated.evidenceProjection.includedCount = included.length
+      section.generated.evidenceProjection.eligibleAcceptedCount = included.length
+    })
+
+    const handoff = buildFrameworkOutcomeStudioHandoff(fixture)
+    const serializedBytes = Buffer.byteLength(JSON.stringify(handoff), 'utf8')
+
+    expect(serializedBytes).toBeLessThan(RUNTIME_STATE_V2_MAX_SERIALIZED_READ_BYTES)
+    expect(handoff.sectionTruth).toHaveLength(6)
+    expect(handoff.evidenceRefs).toHaveLength(803)
+    expect(typeof handoff.evidenceRefs[0]).toBe('string')
+    handoff.sectionTruth.forEach((section, index) => {
+      const baselineSection = baseline.sectionTruth.find((item) => item.sectionKey === section.sectionKey)
+      expect(section.truth).toEqual(baselineSection.truth)
+      expect(section.sectionIntelligence).toEqual(expect.objectContaining({
+        sectionSummary: 'Rich accepted section intelligence remains in the handoff.',
+      }))
+      expect(section.projectionReceipt.selectedEvidenceRefs).toHaveLength(100)
+      expect(section.projectionReceipt.selectedEvidenceRefsReceipt).toEqual(expect.objectContaining({
+        totalCount: 803,
+        retainedCount: 100,
+        omittedCount: 703,
+        truncated: true,
+      }))
+      expect(section.acceptedEvidenceRefsReceipt).toEqual(expect.objectContaining({
+        totalCount: 803,
+        omittedCount: 703,
+        truncated: true,
+      }))
+      expect(section.sectionHash).toMatch(/^sha256:/)
+      expect(index).toBeLessThan(6)
+    })
   })
 
   test('builds one current runtime-scoped handoff and treats nested lock eligibility as canonical', () => {

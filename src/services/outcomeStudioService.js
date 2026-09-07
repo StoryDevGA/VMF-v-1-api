@@ -4565,6 +4565,27 @@ const mapOutputLabBlocker = (blocker) => ({
   message: normalizeText(blocker?.message) || 'Output Lab readiness is blocking Outcome Studio.',
 })
 
+const buildReasoningBoundarySummary = (intermediateReasoning = null) => {
+  if (!intermediateReasoning
+    || typeof intermediateReasoning !== 'object'
+    || !Array.isArray(intermediateReasoning.artefacts)) return null
+  const artefacts = intermediateReasoning.artefacts.map((artefact) => ({
+    key: normalizeText(artefact?.key),
+    classification: normalizeToken(artefact?.classification),
+    required: artefact?.required === true,
+    present: artefact?.present === true,
+  }))
+  return {
+    contractVersion: normalizeText(intermediateReasoning.contractVersion),
+    requiredFor: normalizeText(intermediateReasoning.requiredFor),
+    status: normalizeToken(intermediateReasoning.status),
+    artefacts,
+    missingArtefacts: artefacts
+      .filter((artefact) => artefact.required && !artefact.present)
+      .map((artefact) => artefact.key),
+  }
+}
+
 const buildReadiness = ({
   outputLab,
   packBinding,
@@ -4637,6 +4658,7 @@ const buildReadiness = ({
     blockedBoundary: 'FRAMEWORK_OUTCOME_HANDOFF_BLOCKED',
     nextAction: 'Resolve the governed Framework-to-Outcome handoff boundary before starting Outcome Studio.',
   }
+  const reasoningBoundary = buildReasoningBoundarySummary(frameworkHandoff?.intermediateReasoning)
 
   return {
     state: blockers.length > 0
@@ -4655,7 +4677,10 @@ const buildReadiness = ({
       : '',
     blockers,
     warnings,
-    frameworkHandoff: handoffSafe,
+    frameworkHandoff: {
+      ...handoffSafe,
+      ...(reasoningBoundary ? { reasoningBoundary } : {}),
+    },
     outputLab: {
       state: normalizeToken(outputLabReadiness.state || 'UNKNOWN'),
       canGenerate: outputLabCanGenerate,
@@ -5552,6 +5577,9 @@ const buildOutcomeStudioCustomerProjection = (projection = {}) => {
         blockerCount: Number(frameworkHandoff.blockerCount || 0),
         blockedBoundary: normalizeToken(frameworkHandoff.blockedBoundary),
         nextAction: normalizeText(frameworkHandoff.nextAction),
+        ...(frameworkHandoff.reasoningBoundary
+          ? { reasoningBoundary: frameworkHandoff.reasoningBoundary }
+          : {}),
       },
       safetyGates: {
         status: safetyGates.status,
@@ -9562,6 +9590,15 @@ export const updateRuntimeOutcomeSessionFromLatestTruth = async ({
   const assetRebindFilter = {
     runtimeInstanceId: runtimeObjectId,
     sessionId: serializedSession.sessionId,
+    status: {
+      $nin: [
+        OUTCOME_STUDIO_ASSET_STATUSES.PUBLISHED,
+        OUTCOME_STUDIO_ASSET_STATUSES.SUPERSEDED,
+        OUTCOME_STUDIO_ASSET_STATUSES.ARCHIVED,
+      ],
+    },
+    publishedAt: null,
+    'lineageSummary.draftApproval': { $exists: false },
   }
   const assetVersionRebindFilter = {
     ...assetRebindFilter,

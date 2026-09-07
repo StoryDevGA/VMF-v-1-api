@@ -1,6 +1,10 @@
 import { generateChecksum } from './governanceAudit/checksumService.js'
 import { validateRuntimeSectionIntelligence } from './openAiRuntimeSectionReasoningAdapter.js'
 import {
+  VMF_SECTION_REASONING_CONTRACT_VERSION,
+  VMF_SECTION_REASONING_CONTRACT_VERSIONS,
+} from '../constants/runtimeSectionReasoningContract.js'
+import {
   RUNTIME_INSTANCE_ERROR_REASONS,
   createRuntimeInstanceError,
 } from './runtimeInstanceService.js'
@@ -300,7 +304,8 @@ const buildCompletenessChecks = ({
         && normalizeText(checkedAt) === normalizeText(candidate.generatedAt),
     },
   ]
-  if (normalizeText(generator.adapter) === 'ss-016-vmf-section-reasoning-v1') {
+  const reasoningAdapter = normalizeText(generator.adapter)
+  if (VMF_SECTION_REASONING_CONTRACT_VERSIONS.includes(reasoningAdapter)) {
     const admittedEvidenceIds = Array.isArray(candidate.evidenceProjection?.included)
       ? candidate.evidenceProjection.included
         .map((item) => normalizeText(item?.evidenceObjectId))
@@ -310,6 +315,7 @@ const buildCompletenessChecks = ({
     try {
       validateRuntimeSectionIntelligence(candidate.sectionIntelligence, {
         allowedEvidenceIds: admittedEvidenceIds,
+        requireIntermediateReasoning: reasoningAdapter === VMF_SECTION_REASONING_CONTRACT_VERSION,
       })
       sectionIntelligenceValid = true
     } catch {

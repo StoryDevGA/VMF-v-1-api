@@ -106,6 +106,49 @@ const governanceConstraints = [
   'Do not invent unsupported claims or convert uncertainty into certainty.',
 ]
 
+const intermediateReasoning = {
+  contractVersion: 'outcome-studio.intermediate-reasoning-boundary.v1',
+  requiredFor: 'COMMERCIAL_STRATEGY_DECISION_PAPER',
+  status: 'READY',
+  artefacts: [
+    ['claimHypothesisMatrix', 'CONSUMED_FROM_FRAMEWORK_RUNTIME'],
+    ['contradictionAlternativeHandling', 'CONSUMED_FROM_FRAMEWORK_RUNTIME'],
+    ['evidenceToKnowledgeHandoff', 'CONSUMED_FROM_FRAMEWORK_RUNTIME'],
+    ['restrictedCommercialSystemAnalysis', 'CONSUMED_FROM_FRAMEWORK_RUNTIME'],
+    ['fxGxAssessmentSignals', 'CONSUMED_FROM_FRAMEWORK_RUNTIME'],
+    ['arlRlReviewChangeRationale', 'CONSUMED_FROM_FRAMEWORK_RUNTIME'],
+    ['outputSpecificCompositionGuidance', 'GENERATED_IN_OUTCOME_STUDIO'],
+  ].map(([key, classification]) => ({
+    key,
+    classification,
+    source: key === 'outputSpecificCompositionGuidance'
+      ? 'outcome_studio.output_contract_and_resolved_packs'
+      : 'framework_runtime.accepted.sectionIntelligence',
+    required: true,
+    present: true,
+    reason: 'Explicit governed reasoning boundary is available.',
+  })),
+}
+
+const frameworkIntelligence = [{
+  sectionKey: 'customer_context',
+  sectionIntelligence: {
+    sectionSummary: 'The accepted section establishes the customer decision context.',
+    sectionNarrative: 'The accepted narrative connects the operating context to the commercial choice.',
+    commercialInterpretation: 'The commercial implication remains bounded to supported information.',
+    strategicTensions: ['Focus versus breadth.'],
+    supportedClaims: ['The offer addresses a governed decision process.'],
+    representedClaims: [],
+    restrictedClaims: ['Quantified value is not proven.'],
+    evidenceBoundaries: ['Keep quantified value qualified.'],
+    contradictionSignals: [],
+    alternativeInterpretations: [],
+    decisionRelevance: 'Lead with decision confidence.',
+    downstreamHandoffSignals: ['Preserve the evidence boundary.'],
+    validationGaps: [],
+  },
+}]
+
 const directPackContents = Object.freeze({
   'kpv-direct-output-type': '# Document Metadata\nOutput type metadata only.',
   'kpv-direct-output-schema': '# Document Metadata\nOutput schema metadata only.',
@@ -280,6 +323,32 @@ describe('Outcome Studio provider-safe projection', () => {
     expect(JSON.stringify(result)).not.toContain('source-1')
     expect(JSON.stringify(result)).not.toContain('lineage:source-1:1')
     expect(assertOutcomeStudioProviderSafeComposition(result)).toBe(result)
+  })
+
+  test('projects accepted Framework intelligence and the seven-boundary manifest into safe provider context', () => {
+    const result = buildOutcomeStudioProviderSafeComposition({
+      compositionPackage: compositionPackage({ frameworkIntelligence, intermediateReasoning }),
+      governanceConstraints,
+      methodGuidance,
+      providerDescriptor: descriptor,
+      safeRequest: safeRequest(),
+      styleGuidance: ['Use concise, neutral business language.'],
+    })
+
+    expect(result.frameworkIntelligence).toEqual([expect.objectContaining({
+      sectionKey: 'customer_context',
+      sectionSummary: expect.stringContaining('accepted section'),
+      supportedClaims: ['The offer addresses a governed decision process.'],
+    })])
+    expect(result.intermediateReasoning).toEqual(expect.objectContaining({
+      status: 'READY',
+      artefacts: expect.arrayContaining([
+        expect.objectContaining({ key: 'fxGxAssessmentSignals', present: true }),
+        expect.objectContaining({ key: 'outputSpecificCompositionGuidance', classification: 'GENERATED_IN_OUTCOME_STUDIO' }),
+      ]),
+    }))
+    expect(assertOutcomeStudioProviderSafeComposition(result)).toBe(result)
+    expect(JSON.stringify(result)).not.toMatch(/evidence-object-1|source-1|framework graph/i)
   })
 
   test('derives evidence handles from the corresponding raw fact when safe statement text is normalized', () => {

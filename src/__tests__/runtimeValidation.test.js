@@ -1,7 +1,9 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import mongoose from 'mongoose'
 import { describe, test, expect, beforeAll, beforeEach, afterAll, jest } from '@jest/globals'
+import { generateChecksum } from '../services/governanceAudit/checksumService.js'
 
 beforeAll(() => {
   process.env.NODE_ENV = 'test'
@@ -90,6 +92,8 @@ const buildUserQueryChain = (value) => {
 }
 
 const buildLeanQuery = (value) => ({
+  select: jest.fn().mockReturnThis(),
+  session: jest.fn().mockReturnThis(),
   lean: jest.fn().mockResolvedValue(value),
 })
 
@@ -101,11 +105,30 @@ const buildAuditFindChain = (rows) => ({
 })
 
 const makeRuntimePath = (overrides = {}) => ({
+  _id: '607f1f77bcf86cd799439024',
+  stableId: 'runtime-validation-test-path',
   pathKey: 'framework_state.sections.executive_summary',
+  componentVersion: 1,
   status: 'ACTIVE',
+  versionStatus: 'ACTIVE',
+  isLocked: true,
   frameworkKeys: ['VMF'],
   allowedOperations: ['READ', 'WRITE', 'BIND'],
   isProtected: false,
+  ...overrides,
+})
+
+const makeUiContract = (overrides = {}) => ({
+  _id: '607f1f77bcf86cd799439023',
+  stableId: 'runtime-validation-test-ui',
+  uiContractKey: 'runtime-validation-test-ui',
+  componentVersion: 1,
+  status: 'ACTIVE',
+  versionStatus: 'ACTIVE',
+  isLocked: true,
+  sections: [{ sectionKey: 'executive_summary' }],
+  actions: [],
+  lifecycleStages: [],
   ...overrides,
 })
 
@@ -118,18 +141,59 @@ const makeSkillRole = (overrides = {}) => ({
   ...overrides,
 })
 
-const makeFrameworkPackage = (overrides = {}) => ({
-  _id: '607f1f77bcf86cd799439022',
-  packageKey: 'standard-package-2-3-1',
-  frameworkKey: 'VMF',
-  status: 'ACTIVE',
-  dependencyLock: {
+const makeFrameworkPackage = (overrides = {}) => {
+  const dependencyLock = {
+    snapshotId: 'runtime-validation-test-snapshot',
+    packageKey: 'standard-package-2-3-1',
+    packageVersion: '2.3.1',
     status: 'PASS',
-    lockedAt: '2026-05-08T10:00:00.000Z',
-    references: [],
-  },
-  ...overrides,
-})
+    resolvedAt: '2026-05-08T10:00:00.000Z',
+    references: [
+      {
+        collectionKey: 'RuntimePathRegistry',
+        id: 'runtime-validation-test-path',
+        key: 'framework_state.sections.executive_summary',
+        componentVersion: 1,
+        status: 'ACTIVE',
+        versionStatus: 'ACTIVE',
+      },
+      {
+        collectionKey: 'UIContract',
+        id: 'runtime-validation-test-ui',
+        key: 'runtime-validation-test-ui',
+        componentVersion: 1,
+        status: 'ACTIVE',
+        versionStatus: 'ACTIVE',
+      },
+    ],
+    uiContractSnapshot: {
+      uiContractKey: 'runtime-validation-test-ui',
+      stableId: 'runtime-validation-test-ui',
+      componentVersion: 1,
+      actionCount: 0,
+      lifecycleStageCount: 0,
+      sectionMapping: { mapped: ['executive_summary'] },
+    },
+  }
+  const { snapshotId, ...snapshotPayload } = dependencyLock
+  dependencyLock.snapshotHash = generateChecksum(snapshotPayload)
+  return {
+    _id: '607f1f77bcf86cd799439022',
+    packageKey: 'standard-package-2-3-1',
+    version: '2.3.1',
+    frameworkKey: 'VMF',
+    status: 'ACTIVE',
+    sections: [{ sectionKey: 'executive_summary' }],
+    validationBindings: [],
+    workflowBindings: [],
+    runtimeSettings: {},
+    executionModel: {},
+    uiContractKey: 'runtime-validation-test-ui',
+    uiContractBinding: { key: 'runtime-validation-test-ui' },
+    dependencyLock,
+    ...overrides,
+  }
+}
 
 let app
 let request
@@ -138,11 +202,17 @@ let User
 let Role
 let FrameworkPackage
 let RuntimePathRegistry
+let UIContract
 let RuntimeSkill
 let SkillRoleRegistry
 let RuntimeValidationAudit
 let AuditLog
 let mockRedisClient
+const validationSession = {
+  inTransaction: () => true,
+  withTransaction: jest.fn(async (callback) => callback()),
+  endSession: jest.fn(),
+}
 
 const getAccessTokenForUser = async (user) => {
   const tokens = await tokenService.generateTokens(user)
@@ -174,6 +244,7 @@ beforeAll(async () => {
   Role = models.Role
   FrameworkPackage = models.FrameworkPackage
   RuntimePathRegistry = models.RuntimePathRegistry
+  UIContract = models.UIContract
   RuntimeSkill = models.RuntimeSkill
   SkillRoleRegistry = models.SkillRoleRegistry
   RuntimeValidationAudit = models.RuntimeValidationAudit
@@ -183,6 +254,7 @@ beforeAll(async () => {
 afterAll(() => {})
 
 beforeEach(() => {
+  mongoose.startSession = jest.fn().mockResolvedValue(validationSession)
   User.findById = jest.fn().mockImplementation((userId) => {
     if (userId === SUPER_ADMIN_ID) {
       return buildUserQueryChain(makeFakeUser())
@@ -205,9 +277,11 @@ beforeEach(() => {
   FrameworkPackage.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeFrameworkPackage()))
   FrameworkPackage.updateOne = jest.fn().mockResolvedValue({ matchedCount: 1, modifiedCount: 1 })
   RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimePath()))
+  UIContract.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeUiContract()))
   RuntimeSkill.findOne = jest.fn().mockReturnValue(buildLeanQuery(null))
   SkillRoleRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeSkillRole()))
-  RuntimeValidationAudit.create = jest.fn().mockImplementation(async (payload) => payload)
+  RuntimeValidationAudit.create = jest.fn().mockImplementation(async (payload) => Array.isArray(payload)
+    ? payload.map((row) => ({ ...row, _id: '607f1f77bcf86cd799439033' })) : payload)
   RuntimeValidationAudit.find = jest.fn().mockReturnValue(buildAuditFindChain([]))
   RuntimeValidationAudit.countDocuments = jest.fn().mockResolvedValue(0)
   AuditLog.createLog = jest.fn(async () => ({}))
@@ -689,23 +763,25 @@ describe('Runtime Validation API', () => {
         runtimeVerdict: expect.objectContaining({
           result: 'ALLOW',
           auditPersisted: true,
-          dependencyLockState: 'NOT_LOCKED',
+          dependencyLockState: 'LOCKED',
         }),
       }),
       checksum: expect.any(String),
-    }))
+    }), { session: validationSession })
     expect(FrameworkPackage.updateOne).toHaveBeenCalledWith(
-      { _id: '607f1f77bcf86cd799439022' },
+      expect.objectContaining({ _id: '607f1f77bcf86cd799439022', updatedAt: { $exists: false }, __v: { $exists: false },
+        runtimeVerdict: { $exists: false }, 'dependencyLock.snapshotId': 'runtime-validation-test-snapshot',
+        'dependencyLock.snapshotHash': expect.any(String) }),
       {
         $set: {
           runtimeVerdict: expect.objectContaining({
             result: 'ALLOW',
             auditPersisted: true,
-            dependencyLockState: 'NOT_LOCKED',
+            dependencyLockState: 'LOCKED',
           }),
         },
       },
-      { timestamps: false },
+      { session: validationSession, timestamps: false, runValidators: true },
     )
   })
 
@@ -743,9 +819,11 @@ describe('Runtime Validation API', () => {
         }),
       }),
       checksum: expect.any(String),
-    }))
+    }), { session: validationSession })
     expect(FrameworkPackage.updateOne).toHaveBeenCalledWith(
-      { _id: '607f1f77bcf86cd799439022' },
+      expect.objectContaining({ _id: '607f1f77bcf86cd799439022', updatedAt: { $exists: false }, __v: { $exists: false },
+        runtimeVerdict: { $exists: false }, 'dependencyLock.snapshotId': 'runtime-validation-test-snapshot',
+        'dependencyLock.snapshotHash': expect.any(String) }),
       expect.objectContaining({
         $set: {
           runtimeVerdict: expect.objectContaining({
@@ -754,7 +832,7 @@ describe('Runtime Validation API', () => {
           }),
         },
       }),
-      { timestamps: false },
+      { session: validationSession, timestamps: false, runValidators: true },
     )
   })
 
@@ -780,11 +858,9 @@ describe('Runtime Validation API', () => {
     expect(FrameworkPackage.updateOne).not.toHaveBeenCalled()
   })
 
-  test('returns 500 when package-level runtime validation package lookup matches no package', async () => {
+  test('blocks when the captured package is missing without rereading or writing a verdict', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
     FrameworkPackage.findOne
-      .mockReturnValueOnce(buildLeanQuery(makeFrameworkPackage()))
-      .mockReturnValueOnce(buildLeanQuery(makeFrameworkPackage()))
       .mockReturnValueOnce(buildLeanQuery(null))
 
     const res = await request
@@ -799,8 +875,9 @@ describe('Runtime Validation API', () => {
         isPackageLevelValidation: true,
       })
 
-    expect(res.status).toBe(500)
-    expect(res.body.error.code).toBe('RUNTIME_VALIDATION_EVIDENCE_PERSISTENCE_FAILED')
+    expect(res.status).toBe(422)
+    expect(res.body.error.validation.result).toBe('BLOCK')
+    expect(FrameworkPackage.findOne).toHaveBeenCalledTimes(1)
     expect(RuntimeValidationAudit.create).toHaveBeenCalled()
     expect(AuditLog.createLog).not.toHaveBeenCalled()
     expect(FrameworkPackage.updateOne).not.toHaveBeenCalled()

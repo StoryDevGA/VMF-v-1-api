@@ -148,6 +148,28 @@ const runtimeEvidenceSchema = new mongoose.Schema(
   { _id: false },
 )
 
+const releaseBindingSchema = new mongoose.Schema({
+  packageId: { type: mongoose.Schema.Types.ObjectId, ref: 'FrameworkPackage', required: true },
+  packageKey: { type: String, required: true },
+  packageVersion: { type: String, required: true },
+  dependencyLockId: { type: String, required: true },
+  activationId: { type: String, required: true },
+  deploymentId: { type: String, required: true },
+  evidence: { type: runtimeEvidenceSchema, required: true },
+}, { _id: false, strict: 'throw' })
+
+const releaseBindingHistorySchema = new mongoose.Schema({
+  operationId: { type: String, required: true, match: /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i },
+  kind: { type: String, required: true, enum: ['ADOPT', 'ROLLBACK'] },
+  revertsOperationId: { type: String, default: undefined },
+  from: { type: releaseBindingSchema, required: true },
+  to: { type: releaseBindingSchema, required: true },
+  stateVersion: { type: String, required: true },
+  changedAt: { type: Date, required: true },
+  changedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  reason: { type: String, required: true, maxlength: 1000 },
+}, { _id: false, strict: 'throw' })
+
 const runtimeRevisionSchema = new mongoose.Schema(
   {
     revisionNumber: {
@@ -335,6 +357,10 @@ const runtimeInstanceSchema = new mongoose.Schema(
     revision: {
       type: runtimeRevisionSchema,
       default: () => ({ revisionNumber: 1 }),
+    },
+    releaseBindingHistory: {
+      type: [releaseBindingHistorySchema],
+      default: undefined,
     },
     stateVersion: {
       type: String,

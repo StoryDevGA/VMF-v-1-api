@@ -4,6 +4,10 @@ import {
   listRuntimeInstances as listRuntimeInstanceRecords,
 } from '../services/runtimeInstanceService.js'
 import { createRuntimeRevision as createRuntimeRevisionRecord } from '../services/runtimeRevisionService.js'
+import {
+  adoptRuntimeRelease as adoptRuntimeReleaseRecord,
+  rollbackRuntimeRelease as rollbackRuntimeReleaseRecord,
+} from '../services/runtimeReleaseAdoptionService.js'
 import { executeRuntimeAction as executeRuntimeActionRecord } from '../services/runtimeActionExecutionService.js'
 import { getRuntimeRenderer as getRuntimeRendererProjection } from '../services/runtimeRendererService.js'
 import { getRuntimeTruthQuality as getRuntimeTruthQualityProjection } from '../services/runtimeTruthQualityService.js'
@@ -328,6 +332,25 @@ export const buildRuntimeStateRequestScopes = ({ scopes = {}, query = {} } = {})
     },
   }
 }
+
+const handleRuntimeReleaseChange = (operation) => async (req, res, next) => {
+  try {
+    const receipt = await operation({
+      actorUserId: req.context?.userId || req.userId,
+      auditRequest: req,
+      scopes: req.scopes,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+      payload: req.body,
+    })
+    return res.status(200).json({ data: receipt, meta: { requestId: req.requestId, version: 'v1' } })
+  } catch (err) {
+    if (err?.status && err?.code) return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    return next(err)
+  }
+}
+
+export const adoptRuntimeRelease = handleRuntimeReleaseChange(adoptRuntimeReleaseRecord)
+export const rollbackRuntimeRelease = handleRuntimeReleaseChange(rollbackRuntimeReleaseRecord)
 
 const getRuntimeStateRequestScopes = (req) => buildRuntimeStateRequestScopes({
   scopes: req.scopes,

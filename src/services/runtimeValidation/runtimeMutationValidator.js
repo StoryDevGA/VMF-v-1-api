@@ -7,8 +7,9 @@ import SkillRoleRegistry, { SKILL_ROLE_REGISTRY_STATUSES } from '../../models/Sk
 import { RUNTIME_VALIDATION_CODES, buildRuntimeValidationIssue } from './runtimeValidationCodes.js'
 import { mergeRuntimeScopeLists, validateRuntimePathScopes } from './runtimeScopeValidator.js'
 
-const leanQuery = async (query) => {
+const leanQuery = async (query, session) => {
   if (!query) return null
+  if (session) query = query.session(session)
   if (typeof query.lean === 'function') return query.lean()
   return query
 }
@@ -16,7 +17,7 @@ const leanQuery = async (query) => {
 const normalizeToken = (value) => String(value || '').trim()
 const normalizeUpperToken = (value) => normalizeToken(value).toUpperCase()
 
-const resolveRuntimeSkill = async (skillId) => {
+const resolveRuntimeSkill = async (skillId, session) => {
   const normalizedSkillId = normalizeToken(skillId)
   if (!normalizedSkillId) return null
 
@@ -29,13 +30,13 @@ const resolveRuntimeSkill = async (skillId) => {
       { stableId: normalizedSkillId },
       { key: skillKey },
     ],
-  }))
+  }), session)
 }
 
-const resolveSkillRole = async (skillRoleKey) => {
+const resolveSkillRole = async (skillRoleKey, session) => {
   const normalizedSkillRoleKey = normalizeUpperToken(skillRoleKey)
   if (!normalizedSkillRoleKey) return null
-  return leanQuery(SkillRoleRegistry.findOne({ roleKey: normalizedSkillRoleKey }))
+  return leanQuery(SkillRoleRegistry.findOne({ roleKey: normalizedSkillRoleKey }), session)
 }
 
 const buildPathIssue = (message, path = 'runtimePath') => buildRuntimeValidationIssue({
@@ -163,6 +164,7 @@ const validateRequestBoundary = ({
 })
 
 export const validateRuntimeMutation = async ({
+  session,
   runtimePath,
   operation,
   frameworkKey,
@@ -181,7 +183,7 @@ export const validateRuntimeMutation = async ({
     return [buildPathIssue('Runtime path is required for state mutation validation.')]
   }
 
-  const runtimePathEntry = await leanQuery(RuntimePathRegistry.findOne({ pathKey: normalizedRuntimePath }))
+  const runtimePathEntry = await leanQuery(RuntimePathRegistry.findOne({ pathKey: normalizedRuntimePath }), session)
   issues.push(...validateRuntimePathRegistryEntry({
     runtimePathEntry,
     runtimePath: normalizedRuntimePath,
@@ -189,7 +191,7 @@ export const validateRuntimeMutation = async ({
     operation: normalizedOperation,
   }))
 
-  const skill = await resolveRuntimeSkill(skillId)
+  const skill = await resolveRuntimeSkill(skillId, session)
   if (normalizeToken(skillId) && !skill) {
     issues.push(buildSkillIssue(`Runtime skill "${skillId}" was not found.`))
   }
@@ -199,7 +201,7 @@ export const validateRuntimeMutation = async ({
   }
 
   const roleKey = normalizeUpperToken(skillRoleKey || skill?.skillRoleKey)
-  const skillRole = await resolveSkillRole(roleKey)
+  const skillRole = await resolveSkillRole(roleKey, session)
   if (roleKey && !skillRole) {
     issues.push(buildSkillIssue(`Skill role "${roleKey}" was not found.`, 'skillRoleKey'))
   }

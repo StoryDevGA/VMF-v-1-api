@@ -604,6 +604,13 @@ const frameworkPackageDependencyLockReferenceSchema = new mongoose.Schema(
       type: [String],
       default: [],
     },
+    // Preserve optional inputs emitted by buildDependencyLockSnapshot before hashing.
+    outputPaths: { type: mongoose.Schema.Types.Mixed, default: undefined },
+    bindingKeys: { type: [String], default: undefined },
+    producerSkillId: { type: String, default: undefined },
+    hasParameterSchema: { type: Boolean, default: undefined },
+    governedAction: { type: String, default: undefined },
+    stepCount: { type: Number, default: undefined },
   },
   { _id: false },
 )
@@ -650,12 +657,20 @@ const frameworkPackageDependencyLockSchema = new mongoose.Schema(
       type: [frameworkPackageDependencyLockReferenceSchema],
       default: [],
     },
+    uiContractSnapshot: { type: mongoose.Schema.Types.Mixed, default: undefined },
   },
   { _id: false },
 )
 
 const frameworkPackageRuntimeVerdictSchema = new mongoose.Schema(
   {
+    certificationBinding: {
+      type: new mongoose.Schema({
+        version: { type: String, required: true, enum: ['runtime-release-certification.v1'] },
+        digest: { type: String, required: true, match: /^[a-f0-9]{64}$/ },
+      }, { _id: false }),
+      default: null,
+    },
     validationId: {
       type: String,
       trim: true,

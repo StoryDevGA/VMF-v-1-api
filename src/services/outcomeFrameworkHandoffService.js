@@ -5,6 +5,7 @@ import auditService from './auditService.js'
 import { getRuntimeInstance } from './runtimeInstanceService.js'
 import { resolveOutcomeStudioKnowledgePackBinding } from './outcomeKnowledgePackRegistryService.js'
 import { resolveOutcomeStudioKnowledgeContext } from './outcomeStudioKnowledgeContextService.js'
+import { buildIntermediateReasoningManifest } from './outcomeStudioEvidenceCompositionService.js'
 
 export const FRAMEWORK_OUTCOME_HANDOFF_CONTRACT_VERSION =
   'ss-011.framework-to-outcome-studio.evidence-to-knowledge.v1'
@@ -87,6 +88,7 @@ const RUNTIME_STATE_V2_CONTROL_PROJECTION_FIELDS = Object.freeze([
 
 const FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_RECEIPT_MAX_DEPENDENCIES = 8
 const FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_RECEIPT_MAX_PROJECTION_FIELDS = 64
+export const FRAMEWORK_OUTCOME_HANDOFF_EVIDENCE_REFERENCE_PREVIEW_LIMIT = 100
 
 export const FRAMEWORK_OUTCOME_HANDOFF_BLOCKER_CODES = Object.freeze({
   RUNTIME_REQUIRED: 'HANDOFF_RUNTIME_REQUIRED',
@@ -132,6 +134,38 @@ const toIdString = (value) => normalizeText(value?.toString?.() || value)
 const isObject = (value) => Boolean(value && typeof value === 'object' && !Array.isArray(value))
 const uniqueSorted = (values = []) => [...new Set(values.map(normalizeText).filter(Boolean))].sort()
 const sha256 = (value) => `sha256:${createHash('sha256').update(JSON.stringify(value), 'utf8').digest('hex')}`
+const getEvidenceReferenceKey = (reference) => normalizeText(
+  isObject(reference)
+    ? reference.evidenceObjectId || reference.sourceId || reference.lineageRef || reference.reference
+    : reference,
+)
+const canonicalizeEvidenceReferences = (references = []) => {
+  const sorted = references
+    .filter((reference) => getEvidenceReferenceKey(reference))
+    .sort((left, right) => {
+      const keyDifference = getEvidenceReferenceKey(left).localeCompare(getEvidenceReferenceKey(right))
+      return keyDifference || JSON.stringify(left).localeCompare(JSON.stringify(right))
+    })
+  const seen = new Set()
+  return sorted.filter((reference) => {
+    const key = getEvidenceReferenceKey(reference)
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+const buildEvidenceReferenceReceipt = (references = []) => {
+  const totalCount = references.length
+  const retainedCount = Math.min(totalCount, FRAMEWORK_OUTCOME_HANDOFF_EVIDENCE_REFERENCE_PREVIEW_LIMIT)
+  return {
+    totalCount,
+    retainedCount,
+    limit: FRAMEWORK_OUTCOME_HANDOFF_EVIDENCE_REFERENCE_PREVIEW_LIMIT,
+    omittedCount: Math.max(0, totalCount - retainedCount),
+    truncated: totalCount > retainedCount,
+    fullReferenceHash: sha256(references),
+  }
+}
 
 const createBoundedHandoffError = (message, code = 'HANDOFF_BOUNDED_DEPENDENCY_UNAVAILABLE') => {
   const error = new Error(message)
@@ -476,9 +510,11 @@ const normalizeEvidenceReference = (reference, evidenceIndex, acceptanceFallback
 const buildProjectionReceipt = ({ projection, sectionKey, evidenceIndex } = {}) => {
   if (!isObject(projection)) return null
   const included = Array.isArray(projection.included) ? projection.included : []
-  const selectedEvidenceRefs = included
+  const canonicalSelectedEvidenceRefs = canonicalizeEvidenceReferences(included
     .map((entry) => normalizeEvidenceReference(entry, evidenceIndex, 'PROJECTION_RECEIPT_ACCEPTED'))
-    .filter((entry) => entry.reference || entry.evidenceObjectId)
+    .filter((entry) => entry.reference || entry.evidenceObjectId))
+  const selectedEvidenceRefs = canonicalSelectedEvidenceRefs
+    .slice(0, FRAMEWORK_OUTCOME_HANDOFF_EVIDENCE_REFERENCE_PREVIEW_LIMIT)
   const safeReceipt = {
     algorithm: normalizeText(projection.algorithm),
     version: normalizeText(projection.version),
@@ -486,8 +522,9 @@ const buildProjectionReceipt = ({ projection, sectionKey, evidenceIndex } = {}) 
     knownSection: projection.knownSection === true,
     candidateCount: Number(projection.candidateCount || 0),
     eligibleAcceptedCount: Number(projection.eligibleAcceptedCount || 0),
-    includedCount: Number(projection.includedCount ?? selectedEvidenceRefs.length),
+    includedCount: Number(projection.includedCount ?? canonicalSelectedEvidenceRefs.length),
     selectedEvidenceRefs,
+    selectedEvidenceRefsReceipt: buildEvidenceReferenceReceipt(canonicalSelectedEvidenceRefs),
     excludedCount: Number(projection.excludedCount || 0),
     excludedReasonCounts: isObject(projection.excludedReasonCounts) ? { ...projection.excludedReasonCounts } : {},
     selectedCoverageAreas: uniqueSorted(projection.selectedCoverageAreas),
@@ -496,6 +533,7 @@ const buildProjectionReceipt = ({ projection, sectionKey, evidenceIndex } = {}) 
   return {
     ...safeReceipt,
     receiptHash: sha256(safeReceipt),
+    canonicalSelectedEvidenceRefs,
   }
 }
 
@@ -508,7 +546,11 @@ const buildSectionHandoff = ({ stateSectionKey, section, evidenceIndex } = {}) =
   const accepted = getAcceptedSection(section)
   const projection = getSectionProjection(section)
   const scopedEvidence = getSectionScopedEvidence(section)
-  const projectionReceipt = buildProjectionReceipt({ projection, sectionKey, evidenceIndex })
+  const projectionReceiptResult = buildProjectionReceipt({ projection, sectionKey, evidenceIndex })
+  const canonicalSelectedEvidenceRefs = projectionReceiptResult?.canonicalSelectedEvidenceRefs || []
+  const projectionReceipt = projectionReceiptResult
+    ? (({ canonicalSelectedEvidenceRefs: _canonicalSelectedEvidenceRefs, ...receipt }) => receipt)(projectionReceiptResult)
+    : null
   const acceptedEvidenceRefs = [
     ...(Array.isArray(accepted?.supportingEvidenceRefs) ? accepted.supportingEvidenceRefs : []),
     ...(Array.isArray(scopedEvidence?.sourceRefs) ? scopedEvidence.sourceRefs : []),
@@ -526,17 +568,13 @@ const buildSectionHandoff = ({ stateSectionKey, section, evidenceIndex } = {}) =
         || evidenceIndex.has(reference.evidenceObjectId)
         || evidenceIndex.has(reference.sourceId)
     })
+  const canonicalAcceptedEvidenceRefs = canonicalizeEvidenceReferences([
+    ...canonicalSelectedEvidenceRefs,
+    ...acceptedEvidenceRefs,
+  ])
   const selectedEvidenceRefs = projectionReceipt?.selectedEvidenceRefs || []
-  const allEvidenceRefs = [...selectedEvidenceRefs, ...acceptedEvidenceRefs]
-  const evidenceRefKeys = new Set()
-  const deduplicatedEvidenceRefs = allEvidenceRefs.filter((reference) => {
-    const key = reference.evidenceObjectId || reference.sourceId || reference.lineageRef || reference.reference
-    if (!key || evidenceRefKeys.has(key)) return false
-    evidenceRefKeys.add(key)
-    return true
-  }).sort((left, right) => (
-    (left.evidenceObjectId || left.reference).localeCompare(right.evidenceObjectId || right.reference)
-  ))
+  const deduplicatedEvidenceRefs = canonicalAcceptedEvidenceRefs
+    .slice(0, FRAMEWORK_OUTCOME_HANDOFF_EVIDENCE_REFERENCE_PREVIEW_LIMIT)
   const truth = {
     contentPresent: Boolean(getSectionContent(accepted)),
     contentHash: getSectionContent(accepted) ? sha256(getSectionContent(accepted)) : '',
@@ -572,12 +610,9 @@ const buildSectionHandoff = ({ stateSectionKey, section, evidenceIndex } = {}) =
     state: normalizeToken(section?.state?.status || section?.review?.status || (accepted ? 'ACCEPTED' : 'MISSING')),
     truth,
     projectionReceipt,
-    selectedEvidenceRefs: deduplicatedEvidenceRefs.filter((reference) =>
-      selectedEvidenceRefs.some((selected) => (
-        (selected.evidenceObjectId || selected.reference) === (reference.evidenceObjectId || reference.reference)
-      )),
-    ),
+    selectedEvidenceRefs,
     acceptedEvidenceRefs: deduplicatedEvidenceRefs,
+    acceptedEvidenceRefsReceipt: buildEvidenceReferenceReceipt(canonicalAcceptedEvidenceRefs),
     generationBoundaries,
     sectionIntelligence,
     gaps,
@@ -585,10 +620,11 @@ const buildSectionHandoff = ({ stateSectionKey, section, evidenceIndex } = {}) =
       sectionKey,
       truth,
       projectionReceipt,
-      evidenceRefs: deduplicatedEvidenceRefs,
+      evidenceRefs: canonicalAcceptedEvidenceRefs,
       sectionIntelligence,
       gaps,
     }),
+    canonicalEvidenceRefs: canonicalAcceptedEvidenceRefs,
   }
 }
 
@@ -692,6 +728,7 @@ const buildBlockedHandoff = ({
   knowledgeResolution = {},
   sectionTruth = [],
   evidenceRefs = [],
+  intermediateReasoning = null,
 } = {}) => {
   const normalizedBlockers = blockers.filter(Boolean)
   const status = normalizedBlockers.length > 0
@@ -729,6 +766,7 @@ const buildBlockedHandoff = ({
     evidenceRefs,
     knowledgeResolution,
     claimBoundaries: buildClaimBoundaries(),
+    ...(intermediateReasoning ? { intermediateReasoning } : {}),
     gaps: uniqueSorted(sectionTruth.flatMap((section) => section.gaps || [])),
     contradictions: diagnostics,
     blockers: normalizedBlockers,
@@ -769,10 +807,16 @@ export const buildFrameworkOutcomeStudioHandoff = ({
   const { evidencePack, evidenceObjects } = getEvidenceObjects(frameworkState)
   const evidenceIndex = buildEvidenceIndex(evidenceObjects)
   const sectionEntries = getSectionsEntries(frameworkState)
-  const sectionTruth = sectionEntries
+  const resolvedSectionTruth = sectionEntries
     .map(([stateSectionKey, section]) => buildSectionHandoff({ stateSectionKey, section, evidenceIndex }))
     .filter((section) => section.truth.contentPresent || section.truth.truthHash || section.projectionReceipt)
     .sort((left, right) => left.sectionKey.localeCompare(right.sectionKey))
+  const sectionTruth = resolvedSectionTruth.map(({ canonicalEvidenceRefs: _canonicalEvidenceRefs, ...section }) => section)
+  const intermediateReasoning = buildIntermediateReasoningManifest({
+    frameworkHandoff: { sectionTruth },
+    knowledgeContext,
+    enforceMissing: false,
+  })?.manifest || null
   const sectionByKey = new Map(sectionTruth.map((section) => [section.sectionKey, section]))
   const runtimeIdentity = buildRuntimeIdentity(runtime)
 
@@ -850,23 +894,25 @@ export const buildFrameworkOutcomeStudioHandoff = ({
     message: 'Accepted Framework section truth is required for the governed handoff.',
   })
 
-  const evidenceRefs = sectionTruth.flatMap((section) => section.acceptedEvidenceRefs)
+  const canonicalEvidenceRefs = resolvedSectionTruth.flatMap((section) => section.canonicalEvidenceRefs || [])
+  const evidenceRefs = [...new Set(canonicalEvidenceRefs.map(getEvidenceReferenceKey).filter(Boolean))].sort()
   const hasEvidencePack = evidenceObjects.length > 0 || Object.keys(evidencePack).length > 0
-  evidenceRefs.forEach((reference) => {
-    const hasIdentity = Boolean(reference.evidenceObjectId || reference.sourceId || reference.lineageRef || reference.reference)
+  canonicalEvidenceRefs.forEach((reference) => {
+    const referenceKey = getEvidenceReferenceKey(reference)
+    const known = evidenceIndex.get(referenceKey)
+    const hasIdentity = Boolean(referenceKey)
     if (!hasIdentity) blockers.push({
       code: FRAMEWORK_OUTCOME_HANDOFF_BLOCKER_CODES.EVIDENCE_REF_UNRESOLVED,
       message: 'A selected evidence reference has no stable evidence or source identity.',
     })
-    if (hasEvidencePack && reference.reference && !evidenceIndex.has(reference.reference)
-      && !evidenceIndex.has(reference.evidenceObjectId)
-      && !evidenceIndex.has(reference.sourceId)) blockers.push({
-        code: FRAMEWORK_OUTCOME_HANDOFF_BLOCKER_CODES.EVIDENCE_REF_UNRESOLVED,
-        message: `Selected evidence reference ${reference.reference} is not present in the accepted evidence pack.`,
-      })
-    if (reference.acceptanceState && !ACCEPTED_EVIDENCE_STATES.has(normalizeToken(reference.acceptanceState))) blockers.push({
+    if (hasEvidencePack && referenceKey && !known) blockers.push({
+      code: FRAMEWORK_OUTCOME_HANDOFF_BLOCKER_CODES.EVIDENCE_REF_UNRESOLVED,
+      message: `Selected evidence reference ${referenceKey} is not present in the accepted evidence pack.`,
+    })
+    const acceptanceState = reference.acceptanceState || known?.acceptanceState
+    if (acceptanceState && !ACCEPTED_EVIDENCE_STATES.has(normalizeToken(acceptanceState))) blockers.push({
       code: FRAMEWORK_OUTCOME_HANDOFF_BLOCKER_CODES.EVIDENCE_REF_NOT_ACCEPTED,
-      message: `Selected evidence reference ${reference.reference || reference.evidenceObjectId} is not accepted.`,
+      message: `Selected evidence reference ${referenceKey} is not accepted.`,
     })
   })
 
@@ -925,6 +971,7 @@ export const buildFrameworkOutcomeStudioHandoff = ({
     knowledgeResolution,
     sectionTruth,
     evidenceRefs,
+    intermediateReasoning,
   })
 }
 

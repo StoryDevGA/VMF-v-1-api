@@ -14,6 +14,8 @@ import {
   createRuntimeOutputRequest,
   discardRuntimeOutcomeDraft,
   createRuntimeRevision,
+  adoptRuntimeRelease,
+  rollbackRuntimeRelease,
   executeRuntimeAction,
   exportRuntimeOutcomeAsset,
   exportRuntimeOutputAsset,
@@ -78,6 +80,8 @@ import {
   validateCreateRuntimeOutputRequest,
   validateCreateRuntimeInstance,
   validateCreateRuntimeRevision,
+  validateAdoptRuntimeRelease,
+  validateRollbackRuntimeRelease,
   validateExecuteRuntimeAction,
   validateGenerateRuntimeOutcomeResponse,
   validateDiscardRuntimeOutcomeDraft,
@@ -384,6 +388,8 @@ router.post(
   createRuntimeRevision,
 )
 router.get('/:runtimeInstanceId/truth-quality', validateRuntimeInstanceId, getRuntimeTruthQuality)
+router.post('/:runtimeInstanceId/release-adoption', validateRuntimeInstanceId, validateAdoptRuntimeRelease, adoptRuntimeRelease)
+router.post('/:runtimeInstanceId/release-adoption/rollback', validateRuntimeInstanceId, validateRollbackRuntimeRelease, rollbackRuntimeRelease)
 router.get('/:runtimeInstanceId/renderer', validateRuntimeInstanceId, getRuntimeRenderer)
 router.get('/:runtimeInstanceId', validateRuntimeInstanceId, getRuntimeInstance)
 

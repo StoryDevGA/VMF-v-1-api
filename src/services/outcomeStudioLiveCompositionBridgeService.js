@@ -1010,6 +1010,7 @@ export const buildOutcomeStudioLiveComposition = async ({
     compositionPackage = buildComposition({
       runtimeInstance,
       frameworkState: projectedFrameworkState,
+      frameworkHandoff,
       truthBinding: projectedTruthBinding,
       knowledgeContext: buildKnowledgeContextForComposition({
         knowledgeContext,
