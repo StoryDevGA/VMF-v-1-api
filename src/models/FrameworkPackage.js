@@ -287,6 +287,112 @@ const frameworkPackageSectionSchema = new mongoose.Schema(
   { _id: false },
 )
 
+const frameworkPackageReasoningArtefactSchema = new mongoose.Schema(
+  {
+    artefactKey: {
+      type: String,
+      trim: true,
+      maxlength: 120,
+      match: [/^[A-Za-z][A-Za-z0-9_-]*$/, 'Reasoning artefact key must use letters, numbers, underscores or hyphens'],
+      required: true,
+    },
+    label: {
+      type: String,
+      trim: true,
+      maxlength: 160,
+      required: true,
+    },
+    purpose: {
+      type: String,
+      trim: true,
+      maxlength: 500,
+      required: true,
+    },
+    required: {
+      type: Boolean,
+      default: true,
+    },
+    lifecycleStage: {
+      type: String,
+      enum: ['GENERATED'],
+      default: 'GENERATED',
+    },
+    sectionKeys: {
+      type: [sectionKeyField],
+      required: true,
+      validate: (value) => Array.isArray(value) && value.length === 1,
+    },
+    workflowActionKeys: {
+      type: [String],
+      default: [],
+    },
+    sourcePath: {
+      type: String,
+      trim: true,
+      maxlength: 240,
+      required: true,
+    },
+    writePath: {
+      type: String,
+      trim: true,
+      maxlength: 240,
+      required: true,
+    },
+    validation: {
+      currentnessFields: {
+        type: [String],
+        enum: [
+          'packageVersion',
+          'inputHash',
+          'evidenceHash',
+          'dependencyHash',
+          'sectionContractHash',
+          'generatedAt',
+        ],
+        default: [
+          'packageVersion',
+          'inputHash',
+          'evidenceHash',
+          'dependencyHash',
+          'sectionContractHash',
+          'generatedAt',
+        ],
+      },
+      maxAgeSeconds: {
+        type: Number,
+        min: 1,
+        default: null,
+      },
+      maxBytes: {
+        type: Number,
+        min: 1,
+        max: 65536,
+        default: 65536,
+      },
+    },
+    handoff: {
+      eligible: {
+        type: Boolean,
+        default: false,
+      },
+      mappingKey: {
+        ...stringTokenField,
+        default: '',
+      },
+      targetPath: {
+        type: String,
+        trim: true,
+        maxlength: 240,
+        default: '',
+      },
+    },
+  },
+  // `schema` is a JSON Schema payload. Mongoose reserves the nested path name
+  // `schema`, so keep this small package-owned envelope open and validate the
+  // payload at the request/import/runtime contract boundaries instead.
+  { _id: false, strict: false },
+)
+
 const frameworkPackageExecutionModelSchema = new mongoose.Schema(
   {
     mode: {
@@ -848,6 +954,7 @@ const frameworkPackageSchema = new mongoose.Schema(
     },
     assignedCustomerIds: [customerIdField],
     sections: [frameworkPackageSectionSchema],
+    reasoningArtefacts: [frameworkPackageReasoningArtefactSchema],
     runtimeSettings: {
       type: frameworkPackageRuntimeSettingsSchema,
       default: () => ({}),

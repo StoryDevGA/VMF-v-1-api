@@ -258,6 +258,31 @@ describe('framework seed import guard', () => {
     })
   })
 
+  test('blocks malformed package-declared reasoning artefacts during seed preflight', () => {
+    const { notes } = validateR3CrossReferences(({ frameworkPackages }) => {
+      frameworkPackages[0].reasoningArtefacts = [{
+        artefactKey: 'riskNarrative',
+        label: 'Risk narrative',
+        purpose: 'Fixture reasoning output.',
+        required: true,
+        lifecycleStage: 'GENERATED',
+        sectionKeys: ['customer-context'],
+        workflowActionKeys: ['GENERATE_SECTION'],
+        sourcePath: 'sectionIntelligence.riskNarrative',
+        writePath: 'framework_state.runtime.riskNarrative',
+        schema: { type: 'object' },
+        handoff: { eligible: false },
+      }]
+    })
+
+    expect(notes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        level: 'error',
+        message: expect.stringContaining('DECLARATION_WRITE_PATH_INVALID'),
+      }),
+    ]))
+  })
+
   test('normalizes the v3.1.2 section-generation parent paths without editing amended source files', () => {
     const runtimePathFile = path.join(v312AmendedSeedDir, '02_seed_data/runtime_path_registry.json')
     const sourceSnapshots = [

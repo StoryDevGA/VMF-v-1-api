@@ -68,6 +68,12 @@ const getAcceptedFrameworkIntelligence = (frameworkHandoff = {}) => getHandoffSe
     sectionIntelligence: isPlainObject(section?.sectionIntelligence)
       ? JSON.parse(JSON.stringify(section.sectionIntelligence))
       : null,
+    reasoningArtefacts: isPlainObject(section?.reasoningArtefacts)
+      ? JSON.parse(JSON.stringify(section.reasoningArtefacts))
+      : {},
+    reasoningArtefactReceipts: isPlainObject(section?.reasoningArtefactReceipts)
+      ? JSON.parse(JSON.stringify(section.reasoningArtefactReceipts))
+      : {},
   }))
   .filter((section) => section.sectionKey)
 
@@ -102,6 +108,18 @@ const getExplicitIntermediateArtifact = ({ frameworkHandoff, sections, key }) =>
   return null
 }
 
+const hasCurrentHandoffArtefact = ({ section, declaration }) => {
+  const mappingKey = declaration?.handoff?.mappingKey || declaration?.artefactKey
+  if (!mappingKey
+    || !isPlainObject(section?.reasoningArtefacts)
+    || !Object.prototype.hasOwnProperty.call(section.reasoningArtefacts, mappingKey)) return false
+  const receipt = section.reasoningArtefactReceipts?.[mappingKey]
+  return isPlainObject(receipt)
+    && receipt.currentnessStatus === 'CURRENT'
+    && receipt.handoffEligible === true
+    && receipt.mappingKey === mappingKey
+}
+
 export const buildIntermediateReasoningManifest = ({
   frameworkHandoff = {},
   knowledgeContext = {},
@@ -113,6 +131,71 @@ export const buildIntermediateReasoningManifest = ({
   const sections = getAcceptedFrameworkIntelligence(frameworkHandoff)
   const completeIntelligence = hasCompleteFrameworkIntelligence(sections)
   const frameworkSource = 'framework_runtime.accepted.sectionIntelligence'
+  const packageDeclarations = Array.isArray(frameworkHandoff?.reasoningArtefactDeclarations)
+    ? frameworkHandoff.reasoningArtefactDeclarations.filter((declaration) => declaration?.handoff?.eligible === true)
+    : []
+  if (frameworkHandoff?.reasoningArtefactsContractActive === true) {
+    const declaredArtifacts = packageDeclarations.map((declaration) => {
+      const mappingKey = declaration.handoff?.mappingKey || declaration.artefactKey
+      const section = sections.find((candidate) => hasCurrentHandoffArtefact({ section: candidate, declaration }))
+      const present = Boolean(section)
+      return {
+        key: mappingKey,
+        classification: present
+          ? OUTCOME_STUDIO_INTERMEDIATE_REASONING_CLASSIFICATIONS.FRAMEWORK_RUNTIME
+          : OUTCOME_STUDIO_INTERMEDIATE_REASONING_CLASSIFICATIONS.MISSING,
+        source: present
+          ? 'framework_runtime.accepted.reasoningArtefacts'
+          : 'framework_runtime.accepted.reasoningArtefacts',
+        required: declaration.required === true,
+        present,
+        reason: present
+          ? 'A package-declared handoff-eligible reasoning artefact was supplied from accepted Framework truth.'
+          : 'The package-declared reasoning artefact is missing from accepted Framework truth.',
+      }
+    })
+    const outputTypeStructure = resolvedKnowledgeContext.outputTypeStructure
+    const outputSchema = resolvedKnowledgeContext.outputSchema
+    const style = resolvedKnowledgeContext.style
+    const outputGuidancePresent = hasNonEmptyArray(outputTypeStructure)
+      && outputTypeStructure.length === 5
+      && isPlainObject(outputSchema)
+      && hasNonEmptyString(outputSchema.key)
+      && hasNonEmptyString(outputSchema.version)
+      && hasNonEmptyArray(outputSchema.requiredSections)
+      && isPlainObject(style)
+      && hasNonEmptyString(style.key)
+      && hasNonEmptyString(style.version)
+    const outputGuidance = {
+      key: 'outputSpecificCompositionGuidance',
+      classification: outputGuidancePresent
+        ? OUTCOME_STUDIO_INTERMEDIATE_REASONING_CLASSIFICATIONS.OUTCOME_STUDIO
+        : OUTCOME_STUDIO_INTERMEDIATE_REASONING_CLASSIFICATIONS.MISSING,
+      source: 'outcome_studio.output_contract_and_resolved_packs',
+      required: true,
+      present: outputGuidancePresent,
+      reason: outputGuidancePresent
+        ? 'Outcome Studio assembled the output structure, schema and style guidance from resolved pack content.'
+        : 'Resolved output structure, schema and style guidance is incomplete.',
+    }
+    const artefacts = [...declaredArtifacts, outputGuidance]
+    const missingArtefacts = artefacts.filter((artifact) => artifact.required && !artifact.present)
+      .map((artifact) => artifact.key)
+    const manifest = {
+      contractVersion: OUTCOME_STUDIO_INTERMEDIATE_REASONING_CONTRACT,
+      requiredFor: 'COMMERCIAL_STRATEGY_DECISION_PAPER',
+      status: missingArtefacts.length > 0 ? 'BLOCKED' : 'READY',
+      artefacts,
+    }
+    if (enforceMissing && missingArtefacts.length > 0) {
+      block(OUTCOME_STUDIO_COMPOSITION_BLOCKERS.INTERMEDIATE_REASONING_MISSING, {
+        missingArtefacts,
+        intermediateReasoning: manifest,
+        sectionCount: rawSections.length,
+      })
+    }
+    return { manifest, frameworkIntelligence: sections }
+  }
   const frameworkArtifacts = [
     {
       key: 'claimHypothesisMatrix',

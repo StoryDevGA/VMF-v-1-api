@@ -43,6 +43,7 @@ export const resolveKnownFrameworkKeys = async (
   frameworkKeys = [],
   projection = 'frameworkKey name supportedWorkflowKeys status',
   options = {},
+  session = null,
 ) => {
   const normalizedKeys = normalizeFrameworkKeyList(frameworkKeys)
   const requireActive = options?.requireActive === true
@@ -57,11 +58,11 @@ export const resolveKnownFrameworkKeys = async (
     }
   }
 
-  const registryEntries = await FrameworkRegistry.find({
+  const query = FrameworkRegistry.find({
     frameworkKey: { $in: normalizedKeys },
   })
     .select(projection)
-    .lean()
+  const registryEntries = await (session ? query.session(session).lean() : query.lean())
 
   const registryByKey = new Map(
     registryEntries.map((entry) => [normalizeFrameworkKey(entry.frameworkKey), entry]),

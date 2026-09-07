@@ -85,6 +85,10 @@ import {
   stageRuntimeStateGraphSourceMutation,
 } from './runtimeStateGraphSourceMutationService.js'
 import { stageRuntimeStateSourceRollover } from './runtimeStateSourceRolloverService.js'
+import {
+  buildReasoningArtefactOutputs,
+  resolvePackageReasoningArtefacts,
+} from './reasoningArtefactContractService.js'
 
 const SECTION_WRITE_SCOPE = 'framework_state.sections.*'
 export const DISCOVERY_EVIDENCE_PACK_PATH = 'framework_state.evidence_pack'
@@ -2361,6 +2365,8 @@ const buildAcceptedSectionTruth = ({
   const truthHash = hashSectionTruthValue({
     content,
     sectionIntelligence: generated.sectionIntelligence || null,
+    reasoningArtefacts: generated.reasoningArtefacts || null,
+    reasoningArtefactReceipts: generated.reasoningArtefactReceipts || null,
     evidenceHash: generated.evidenceHash || '',
     inputHash: generated.inputHash || '',
     runtimePath,
@@ -2395,6 +2401,12 @@ const buildAcceptedSectionTruth = ({
     ...(generated.sectionIntelligence && typeof generated.sectionIntelligence === 'object'
       ? { sectionIntelligence: cloneValue(generated.sectionIntelligence) }
       : {}),
+    ...(generated.reasoningArtefacts && typeof generated.reasoningArtefacts === 'object'
+      ? { reasoningArtefacts: cloneValue(generated.reasoningArtefacts) }
+      : {}),
+    ...(generated.reasoningArtefactReceipts && typeof generated.reasoningArtefactReceipts === 'object'
+      ? { reasoningArtefactReceipts: cloneValue(generated.reasoningArtefactReceipts) }
+      : {}),
     ...(Array.isArray(generated.supportingEvidenceRefs)
       ? { supportingEvidenceRefs: cloneValue(generated.supportingEvidenceRefs) }
       : {}),
@@ -2408,6 +2420,8 @@ const buildAcceptedSectionTruth = ({
     sourceGeneratedAt: generated.generatedAt || '',
     inputHash: generated.inputHash || '',
     evidenceHash: generated.evidenceHash || '',
+    dependencyHash: generated.dependencyHash || '',
+    sectionContractHash: generated.generator?.sectionContractHash || '',
     sectionEvidenceHash: generated.sectionEvidenceHash || '',
     sectionKey,
     runtimePath,
@@ -5027,6 +5041,55 @@ export const getRuntimeDiscoveryEvidence = async ({
   }
 }
 
+export const validateGeneratedReasoningArtefactsForAcceptance = ({
+  frameworkPackage,
+  generated,
+  sectionKey,
+  stateSectionKey,
+} = {}) => {
+  const declarations = resolvePackageReasoningArtefacts({
+    frameworkPackage,
+    sectionKey,
+    // REGENERATE_SECTION reuses the same package-owned generated artefact
+    // declarations as GENERATE_SECTION. Keep acceptance validation bound to
+    // the generation contract rather than allowing the action label to skip it.
+    actionKey: 'GENERATE_SECTION',
+  })
+  if (declarations.length === 0) return
+  const candidate = {
+    ...generated,
+    sectionIntelligence: {
+      ...(isPlainObject(generated?.sectionIntelligence) ? generated.sectionIntelligence : {}),
+      ...(isPlainObject(generated?.reasoningArtefacts) ? generated.reasoningArtefacts : {}),
+    },
+    reasoningArtefacts: generated?.reasoningArtefacts || {},
+  }
+  const rebuilt = buildReasoningArtefactOutputs({
+    candidate,
+    declarations,
+    packageKey: frameworkPackage?.packageKey,
+    packageVersion: frameworkPackage?.version,
+    sectionKey,
+    stateSectionKey,
+    inputHash: generated?.inputHash,
+    evidenceHash: generated?.evidenceHash,
+    dependencyHash: generated?.dependencyHash,
+    sectionContractHash: generated?.generator?.sectionContractHash,
+    generatedAt: generated?.generatedAt,
+  })
+  if (stableStringify(rebuilt.values) !== stableStringify(generated?.reasoningArtefacts || {})
+    || stableStringify(rebuilt.receipts) !== stableStringify(generated?.reasoningArtefactReceipts || {})) {
+    const error = new Error('Runtime section reasoning artefacts no longer match the active package contract.')
+    error.status = 409
+    error.code = 'CONFLICT'
+    error.details = {
+      reason: 'REASONING_ARTEFACT_ACCEPTANCE_INVALID',
+      sectionKey,
+    }
+    throw error
+  }
+}
+
 export const acceptRuntimeSection = async ({
   actorUserId,
   auditRequest,
@@ -5073,6 +5136,13 @@ export const acceptRuntimeSection = async ({
       sectionKey: target.sectionKey,
     })
   }
+
+  validateGeneratedReasoningArtefactsForAcceptance({
+    frameworkPackage,
+    generated,
+    sectionKey: target.sectionKey,
+    stateSectionKey: target.stateSectionKey,
+  })
 
   const truthEligibility = generated.truthEligibility || sectionObject.intelligence?.truthEligibility || null
   if (truthEligibility && truthEligibility.eligible === false) {

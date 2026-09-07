@@ -21,6 +21,7 @@ import {
   FRAMEWORK_PACKAGE_WORKFLOW_EXECUTION_CONTEXTS,
 } from '../models/FrameworkPackage.js'
 import { DEPRECATED_FRAMEWORK_PACKAGE_FIELD_MESSAGES } from '../constants/frameworkPackageContract.js'
+import { validateReasoningArtefactSchema } from '../services/reasoningArtefactContractService.js'
 
 const objectIdRegex = /^[a-f\d]{24}$/i
 const frameworkKeyRegex = /^[A-Z][A-Z0-9_]*$/
@@ -31,6 +32,10 @@ const runtimePathRegex = /^\S+$/
 const customerIdRegex = /^[A-Za-z0-9][A-Za-z0-9_-]{1,119}$/
 const validationParametersMaxCharacters = 4096
 const validationParametersMaxDepth = 5
+const lastPathSegment = (value, fallback = '') => {
+  const segments = String(value || '').trim().split('.').map((segment) => segment.trim()).filter(Boolean)
+  return segments.at(-1) || String(fallback || '').trim()
+}
 
 const createStatusValues = [
   FRAMEWORK_PACKAGE_STATUSES.DRAFT,
@@ -225,6 +230,83 @@ const sectionSchema = z.object({
   validationKeys: tokenListSchema.default([]),
   notes: z.string().trim().max(500, 'Section notes must be 500 characters or fewer').default(''),
 })
+
+const reasoningArtefactKeySchema = z.string().trim().min(1).max(120)
+  .refine((value) => /^[A-Za-z][A-Za-z0-9_-]*$/.test(value), 'Reasoning artefact key must use letters, numbers, underscores or hyphens.')
+
+const reasoningArtefactSchema = z.object({
+  artefactKey: reasoningArtefactKeySchema,
+  label: z.string().trim().min(1).max(160),
+  purpose: z.string().trim().min(1).max(500),
+  required: z.boolean().default(true),
+  lifecycleStage: z.enum(['GENERATED']).default('GENERATED'),
+  sectionKeys: z.array(sectionKeySchema).length(1),
+  workflowActionKeys: z.array(z.string().trim().min(1).max(80)
+    .refine((value) => /^[A-Z][A-Z0-9_]*$/.test(value), 'Workflow action keys must use uppercase action tokens.')).default([]),
+  sourcePath: z.string().trim().min(1).max(240),
+  writePath: z.string().trim().min(1).max(240),
+  schema: z.record(z.string(), z.unknown()).superRefine((value, ctx) => {
+    try {
+      validateReasoningArtefactSchema(value)
+    } catch (error) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: error.message })
+    }
+  }),
+  validation: z.object({
+    currentnessFields: z.array(z.enum([
+      'packageVersion',
+      'inputHash',
+      'evidenceHash',
+      'dependencyHash',
+      'sectionContractHash',
+      'generatedAt',
+    ])).min(1).default([
+      'packageVersion',
+      'inputHash',
+      'evidenceHash',
+      'dependencyHash',
+      'sectionContractHash',
+      'generatedAt',
+    ]),
+    maxAgeSeconds: z.number().int().min(1).nullable().default(null),
+    maxBytes: z.number().int().min(1).max(65536).default(65536),
+  }).default({
+    currentnessFields: [
+      'packageVersion',
+      'inputHash',
+      'evidenceHash',
+      'dependencyHash',
+      'sectionContractHash',
+      'generatedAt',
+    ],
+    maxAgeSeconds: null,
+    maxBytes: 65536,
+  }),
+  handoff: z.object({
+    eligible: z.boolean().default(false),
+    mappingKey: tokenListItemSchema.optional(),
+    targetPath: z.string().trim().max(240).optional(),
+  }).default({ eligible: false }),
+}).strict()
+
+// An empty declaration list is intentional: it means this package has no
+// reasoning artefacts, so the generic runtime must not infer VMF requirements.
+const reasoningArtefactsSchema = z.array(reasoningArtefactSchema)
+  .max(100, 'Reasoning artefacts must contain 100 items or fewer')
+  .superRefine((items, ctx) => {
+    applyUniqueBy(items, ctx, (item) => item.artefactKey, 'artefactKey', 'Reasoning artefact keys must be unique.')
+    applyUniqueBy(items, ctx, (item) => item.sourcePath, 'sourcePath', 'Reasoning artefact source paths must be unique.')
+    applyUniqueBy(items, ctx, (item) => item.writePath, 'writePath', 'Reasoning artefact write paths must be unique.')
+    items.forEach((item, index) => {
+      if (item.handoff?.eligible && (!item.handoff.mappingKey || !item.handoff.targetPath)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: [index, 'handoff'], message: 'Handoff-eligible artefacts require mappingKey and targetPath.' })
+      }
+      if (item.handoff?.eligible && item.handoff.mappingKey && item.handoff.targetPath
+        && lastPathSegment(item.handoff.targetPath).toLowerCase() !== item.handoff.mappingKey) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: [index, 'handoff', 'targetPath'], message: 'Handoff targetPath must end with mappingKey.' })
+      }
+    })
+  })
 
 const sectionsSchema = z
   .array(sectionSchema)
@@ -434,6 +516,7 @@ const createFrameworkPackageSchema = z.object({
     .default(FRAMEWORK_PACKAGE_CUSTOMER_ACCESS_MODES.ALL_CUSTOMERS),
   assignedCustomerIds: customerIdListSchema.default([]),
   sections: sectionsSchema.default([]),
+  reasoningArtefacts: reasoningArtefactsSchema.default([]),
   runtimeSettings: runtimeSettingsSchema.default({
     enablePreviewMode: true,
     enableRuntimeValidation: true,
@@ -534,6 +617,7 @@ const updateFrameworkPackageSchema = z.object({
     .optional(),
   assignedCustomerIds: customerIdListSchema.optional(),
   sections: sectionsSchema.optional(),
+  reasoningArtefacts: reasoningArtefactsSchema.optional(),
   runtimeSettings: runtimeSettingsSchema.optional(),
   executionModel: executionModelSchema.optional(),
   validationConfig: deprecatedFrameworkPackageFieldSchema(DEPRECATED_FRAMEWORK_PACKAGE_FIELD_MESSAGES.validationConfig),

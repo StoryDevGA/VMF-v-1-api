@@ -4,6 +4,7 @@ import {
   VMF_SECTION_REASONING_CONTRACT_VERSION,
   VMF_SECTION_REASONING_CONTRACT_VERSIONS,
 } from '../constants/runtimeSectionReasoningContract.js'
+import { buildReasoningArtefactOutputs } from './reasoningArtefactContractService.js'
 import {
   RUNTIME_INSTANCE_ERROR_REASONS,
   createRuntimeInstanceError,
@@ -48,6 +49,14 @@ const toComponentVersion = (value) => {
 }
 const isPlainObject = (value) =>
   Boolean(value && typeof value === 'object' && !Array.isArray(value))
+
+const getLastPathSegment = (value, fallback = '') => {
+  const segments = normalizeText(value)
+    .split('.')
+    .map((segment) => segment.trim())
+    .filter(Boolean)
+  return segments.at(-1) || normalizeText(fallback)
+}
 
 const hasCompleteObjectContract = (contract, requiredFields = []) => {
   if (
@@ -337,6 +346,54 @@ const buildCompletenessChecks = ({
       passed: Array.isArray(generator.supportAssetHashes)
         && generator.supportAssetHashes.length > 0
         && generator.supportAssetHashes.every((value) => /^[a-f0-9]{64}$/.test(normalizeText(value))),
+    })
+  }
+  const declaredReasoningArtefacts = Array.isArray(sectionExecutionContract?.reasoningArtefacts)
+    ? sectionExecutionContract.reasoningArtefacts
+    : []
+  if (declaredReasoningArtefacts.length > 0) {
+    const sectionIdentity = isPlainObject(sectionExecutionContract?.sectionIdentity)
+      ? sectionExecutionContract.sectionIdentity
+      : {}
+    const reasoningArtefactCandidate = {
+      ...candidate,
+      sectionIntelligence: {
+        ...(isPlainObject(candidate?.sectionIntelligence)
+          ? candidate.sectionIntelligence
+          : {}),
+        ...(isPlainObject(candidate?.reasoningArtefacts)
+          ? candidate.reasoningArtefacts
+          : {}),
+      },
+      reasoningArtefacts: isPlainObject(candidate?.reasoningArtefacts)
+        ? candidate.reasoningArtefacts
+        : {},
+    }
+    let reasoningArtefactsValid = false
+    try {
+      buildReasoningArtefactOutputs({
+        candidate: reasoningArtefactCandidate,
+        declarations: declaredReasoningArtefacts,
+        packageKey: sectionExecutionContract?.packageIdentity?.packageKey,
+        packageVersion: sectionExecutionContract?.packageIdentity?.packageVersion,
+        sectionKey: sectionIdentity.sectionKey,
+        stateSectionKey: getLastPathSegment(
+          sectionIdentity.runtimePath,
+          sectionIdentity.sectionKey,
+        ),
+        inputHash: candidate.inputHash,
+        evidenceHash: candidate.evidenceHash,
+        dependencyHash: candidate.dependencyHash,
+        sectionContractHash: sectionExecutionContract?.sectionContractHash,
+        generatedAt: candidate.generatedAt,
+      })
+      reasoningArtefactsValid = true
+    } catch {
+      reasoningArtefactsValid = false
+    }
+    checks.push({
+      checkKey: 'package_reasoning_artefacts',
+      passed: reasoningArtefactsValid,
     })
   }
   return checks

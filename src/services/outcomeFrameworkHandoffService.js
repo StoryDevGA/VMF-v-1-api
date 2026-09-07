@@ -6,6 +6,10 @@ import { getRuntimeInstance } from './runtimeInstanceService.js'
 import { resolveOutcomeStudioKnowledgePackBinding } from './outcomeKnowledgePackRegistryService.js'
 import { resolveOutcomeStudioKnowledgeContext } from './outcomeStudioKnowledgeContextService.js'
 import { buildIntermediateReasoningManifest } from './outcomeStudioEvidenceCompositionService.js'
+import {
+  projectHandoffReasoningArtefacts,
+  validateReasoningArtefactDeclarations,
+} from './reasoningArtefactContractService.js'
 
 export const FRAMEWORK_OUTCOME_HANDOFF_CONTRACT_VERSION =
   'ss-011.framework-to-outcome-studio.evidence-to-knowledge.v1'
@@ -53,6 +57,7 @@ const FRAMEWORK_PACKAGE_BOUNDED_PROJECTION = [
   'sections.runtimePath',
   'sections.required',
   'sections.notes',
+  'reasoningArtefacts',
 ].join(' ')
 
 const RUNTIME_STATE_V2_CONTROL_PROJECTION_FIELDS = Object.freeze([
@@ -399,7 +404,7 @@ const buildRuntimeIdentity = (runtimeInstance = {}) => ({
   updatedAt: normalizeText(runtimeInstance.updatedAt?.toISOString?.() || runtimeInstance.updatedAt),
 })
 
-const buildPackageIdentity = ({ runtimeInstance = {}, frameworkPackage = null, requiredSections = [] } = {}) => {
+const buildPackageIdentity = ({ runtimeInstance = {}, frameworkPackage = null, requiredSections = [], reasoningArtefactDeclarations = [] } = {}) => {
   const packageId = toIdString(
     runtimeInstance.packageId
       || runtimeInstance.frameworkPackageId
@@ -418,13 +423,25 @@ const buildPackageIdentity = ({ runtimeInstance = {}, frameworkPackage = null, r
     runtimePath,
     label,
   }))
+  const reasoningArtefactManifest = reasoningArtefactDeclarations.map((declaration) => ({
+    artefactKey: declaration.artefactKey,
+    lifecycleStage: declaration.lifecycleStage,
+    sectionKeys: declaration.sectionKeys,
+    sourcePath: declaration.sourcePath,
+    writePath: declaration.writePath,
+    validation: declaration.validation,
+    handoff: declaration.handoff,
+    schema: declaration.schema,
+  }))
   return {
     packageId,
     packageKey,
     packageVersion,
     requiredSections: requiredSectionManifest,
+    reasoningArtefacts: reasoningArtefactManifest,
     requiredSectionManifestHash: sha256(requiredSectionManifest),
-    packageIdentityHash: sha256({ packageId, packageKey, packageVersion, requiredSectionManifest }),
+    reasoningArtefactManifestHash: sha256(reasoningArtefactManifest),
+    packageIdentityHash: sha256({ packageId, packageKey, packageVersion, requiredSectionManifest, reasoningArtefactManifest }),
   }
 }
 
@@ -537,7 +554,7 @@ const buildProjectionReceipt = ({ projection, sectionKey, evidenceIndex } = {}) 
   }
 }
 
-const buildSectionHandoff = ({ stateSectionKey, section, evidenceIndex } = {}) => {
+const buildSectionHandoff = ({ stateSectionKey, section, evidenceIndex, frameworkPackage = null } = {}) => {
   const sectionKey = normalizeKey(
     section?.lineage?.sectionKey
       || section?.sectionKey
@@ -603,6 +620,24 @@ const buildSectionHandoff = ({ stateSectionKey, section, evidenceIndex } = {}) =
   const sectionIntelligence = isObject(accepted?.sectionIntelligence)
     ? JSON.parse(JSON.stringify(accepted.sectionIntelligence))
     : null
+  let reasoningArtefacts = {}
+  let reasoningArtefactReceipts = {}
+  let reasoningArtefactError = null
+  try {
+    const projection = projectHandoffReasoningArtefacts({
+      frameworkPackage,
+      sectionKey,
+      acceptedSection: accepted || {},
+    })
+    reasoningArtefacts = projection.values
+    reasoningArtefactReceipts = projection.receipts
+  } catch (error) {
+    reasoningArtefactError = {
+      reason: error.reason || 'REASONING_ARTEFACT_HANDOFF_INVALID',
+      message: error.message,
+      details: error.details || {},
+    }
+  }
 
   return {
     sectionKey,
@@ -615,6 +650,9 @@ const buildSectionHandoff = ({ stateSectionKey, section, evidenceIndex } = {}) =
     acceptedEvidenceRefsReceipt: buildEvidenceReferenceReceipt(canonicalAcceptedEvidenceRefs),
     generationBoundaries,
     sectionIntelligence,
+    reasoningArtefacts,
+    reasoningArtefactReceipts,
+    ...(reasoningArtefactError ? { reasoningArtefactError } : {}),
     gaps,
     sectionHash: sha256({
       sectionKey,
@@ -622,6 +660,8 @@ const buildSectionHandoff = ({ stateSectionKey, section, evidenceIndex } = {}) =
       projectionReceipt,
       evidenceRefs: canonicalAcceptedEvidenceRefs,
       sectionIntelligence,
+      reasoningArtefacts,
+      reasoningArtefactReceipts,
       gaps,
     }),
     canonicalEvidenceRefs: canonicalAcceptedEvidenceRefs,
@@ -803,17 +843,37 @@ export const buildFrameworkOutcomeStudioHandoff = ({
   const frameworkState = getFrameworkState(runtime)
   const canonicalEligibility = getCanonicalOutputEligibility(frameworkState)
   const requiredSections = resolveRequiredSections(frameworkPackage)
-  const packageIdentity = buildPackageIdentity({ runtimeInstance: runtime, frameworkPackage, requiredSections })
+  let reasoningArtefactDeclarations = []
+  try {
+    reasoningArtefactDeclarations = validateReasoningArtefactDeclarations({ frameworkPackage })
+  } catch (error) {
+    blockers.push({
+      code: FRAMEWORK_OUTCOME_HANDOFF_BLOCKER_CODES.HANDOFF_INTEGRITY_INVALID,
+      message: error.message,
+      reason: error.reason || 'DECLARATION_INVALID',
+    })
+  }
+  const packageIdentity = buildPackageIdentity({
+    runtimeInstance: runtime,
+    frameworkPackage,
+    requiredSections,
+    reasoningArtefactDeclarations,
+  })
   const { evidencePack, evidenceObjects } = getEvidenceObjects(frameworkState)
   const evidenceIndex = buildEvidenceIndex(evidenceObjects)
   const sectionEntries = getSectionsEntries(frameworkState)
   const resolvedSectionTruth = sectionEntries
-    .map(([stateSectionKey, section]) => buildSectionHandoff({ stateSectionKey, section, evidenceIndex }))
+    .map(([stateSectionKey, section]) => buildSectionHandoff({ stateSectionKey, section, evidenceIndex, frameworkPackage }))
     .filter((section) => section.truth.contentPresent || section.truth.truthHash || section.projectionReceipt)
     .sort((left, right) => left.sectionKey.localeCompare(right.sectionKey))
   const sectionTruth = resolvedSectionTruth.map(({ canonicalEvidenceRefs: _canonicalEvidenceRefs, ...section }) => section)
   const intermediateReasoning = buildIntermediateReasoningManifest({
-    frameworkHandoff: { sectionTruth },
+    frameworkHandoff: {
+      sectionTruth,
+      reasoningArtefactDeclarations,
+      reasoningArtefactsContractActive: reasoningArtefactDeclarations.length > 0
+        || normalizeText(runtime.frameworkKey || frameworkPackage?.frameworkKey).toUpperCase() !== 'VMF',
+    },
     knowledgeContext,
     enforceMissing: false,
   })?.manifest || null
@@ -887,6 +947,12 @@ export const buildFrameworkOutcomeStudioHandoff = ({
       code: FRAMEWORK_OUTCOME_HANDOFF_BLOCKER_CODES.PROJECTION_RECEIPT_INCONSISTENT,
       message: `Evidence projection receipt does not match section ${section.sectionKey}.`,
       sectionKey: section.sectionKey,
+    })
+    if (section.reasoningArtefactError) blockers.push({
+      code: FRAMEWORK_OUTCOME_HANDOFF_BLOCKER_CODES.HANDOFF_INTEGRITY_INVALID,
+      message: `Reasoning artefact handoff is invalid for section ${section.sectionKey}.`,
+      sectionKey: section.sectionKey,
+      reason: section.reasoningArtefactError.reason,
     })
   })
   if (sectionTruth.length === 0) blockers.push({

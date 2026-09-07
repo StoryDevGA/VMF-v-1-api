@@ -57,6 +57,7 @@ import {
   isWorkflowPolicyValueMissing,
   validateRuntimePathLiteralValue,
 } from '../utils/runtimePathLiteralValidation.js'
+import { validateReasoningArtefactDeclarations } from '../services/reasoningArtefactContractService.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -2120,6 +2121,15 @@ const validateFrameworkPackageSectionSkillBindings = ({
 const validateFrameworkPackages = (records, indexes, notes) => {
   for (const frameworkPackage of records) {
     const source = `Framework Package ${frameworkPackage.packageKey}`
+    try {
+      validateReasoningArtefactDeclarations({ frameworkPackage })
+    } catch (error) {
+      notes.push({
+        level: 'error',
+        source,
+        message: `Invalid reasoningArtefacts declaration (${error.reason || error.code || 'CONTRACT_INVALID'}): ${error.message}`,
+      })
+    }
     if (!indexes.uiContractsByKey.has(normalizeToken(frameworkPackage.uiContractKey))) {
       notes.push({ level: 'error', source, message: `Unknown uiContractKey "${frameworkPackage.uiContractKey}".` })
     }

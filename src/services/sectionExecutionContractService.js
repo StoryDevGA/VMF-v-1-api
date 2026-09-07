@@ -16,10 +16,12 @@ import {
   evaluateSectionValidationBindingCompatibility,
   targetsSectionCompletenessBinding,
 } from './sectionValidationExecutorService.js'
+import { resolvePackageReasoningArtefacts } from './reasoningArtefactContractService.js'
 
 export const SECTION_EXECUTION_CONTRACT_VERSION = 'section-execution-contract-v1'
 
 const normalizeText = (value) => String(value || '').trim()
+const normalizePath = (value) => normalizeText(value)
 
 const MAX_RUNTIME_SUPPORT_ASSET_TOTAL_BYTES = 96 * 1024
 const VMF_SECTION_REASONING_MIN_VERSION = '3.1.5'
@@ -54,7 +56,13 @@ const assetIdentityFromReference = (asset = {}) => {
 }
 
 export const resolveRuntimeSupportAssets = async ({ frameworkPackage, runtimeSkill, sectionKey, runtimePath }) => {
-  if (!requiresVmfSectionReasoning({ frameworkPackage, sectionKey, runtimePath })) return []
+  const declaredReasoningArtefacts = resolvePackageReasoningArtefacts({
+    frameworkPackage,
+    sectionKey,
+    actionKey: 'GENERATE_SECTION',
+  })
+  if (!requiresVmfSectionReasoning({ frameworkPackage, sectionKey, runtimePath })
+    && declaredReasoningArtefacts.length === 0) return []
 
   const declaredAssets = (runtimeSkill.referenceAssets || [])
     .filter((asset) => asset?.isRuntimeAccessible === true)
@@ -129,7 +137,6 @@ export const resolveRuntimeSupportAssets = async ({ frameworkPackage, runtimeSki
 const normalizeToken = (value) => normalizeText(value).toLowerCase()
 const normalizeSectionKey = (value) => normalizeToken(value).replace(/-/g, '_')
 const normalizeCollectionKey = (value) => normalizeToken(value).replace(/[^a-z0-9]/g, '')
-const normalizePath = (value) => normalizeText(value)
 const normalizeFrameworkKey = (value) => normalizeText(value).toUpperCase()
 const toComponentVersion = (value) => {
   const version = Number(value)
@@ -767,6 +774,11 @@ export const resolveSectionExecutionContract = async ({
       },
       workflowPolicyBindings: workflowPolicyBinding.policyBindings,
     },
+    reasoningArtefacts: resolvePackageReasoningArtefacts({
+      frameworkPackage,
+      sectionKey,
+      actionKey: 'GENERATE_SECTION',
+    }),
   }
 
   return {

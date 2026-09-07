@@ -45,6 +45,7 @@ import {
   DEPRECATED_FRAMEWORK_PACKAGE_FIELD_MESSAGES,
   DEPRECATED_FRAMEWORK_PACKAGE_FIELDS,
 } from '../constants/frameworkPackageContract.js'
+import { validateReasoningArtefactDeclarations } from '../services/reasoningArtefactContractService.js'
 
 const DUPLICATE_FRAMEWORK_PACKAGE_MESSAGE = 'Framework key and version must be unique.'
 const DUPLICATE_FRAMEWORK_PACKAGE_KEY_MESSAGE = 'Package key must be unique.'
@@ -99,6 +100,7 @@ const STRUCTURAL_LOCK_FIELDS = Object.freeze([
   'version',
   'packageKey',
   'sections',
+  'reasoningArtefacts',
   'runtimeSettings',
   'executionModel',
   'validationBindings',
@@ -191,6 +193,7 @@ const CHECKPOINT_CATEGORY_BY_INTEGRITY_GROUP = Object.freeze({
 const CHECKPOINT_CATEGORY_BY_FIELD = Object.freeze({
   packageKey: 'PACKAGE_STRUCTURE',
   sections: 'RUNTIME_PATHS',
+  reasoningArtefacts: 'PACKAGE_STRUCTURE',
   uiContractKey: 'UI_CONTRACT',
   validationBindings: 'VALIDATION_BINDINGS',
   workflowBindings: 'WORKFLOW_BINDINGS',
@@ -215,6 +218,7 @@ const FRAMEWORK_PACKAGE_AUDITED_FIELDS = Object.freeze([
   'customerAccessMode',
   'assignedCustomerIds',
   'sections',
+  'reasoningArtefacts',
   'runtimeSettings',
   'executionModel',
   'validationBindings',
@@ -795,9 +799,18 @@ const validateFrameworkPackageReadiness = ({
   status,
   packageKey,
   sections = [],
+  reasoningArtefacts,
   uiContractKey = '',
 }) => {
   const details = {}
+  try {
+    validateReasoningArtefactDeclarations({
+      frameworkPackage: { sections },
+      declarations: reasoningArtefacts,
+    })
+  } catch (error) {
+    details.reasoningArtefacts = `${error.reason || error.code || 'CONTRACT_INVALID'}: ${error.message}`
+  }
   if (!isReadyFrameworkPackageStatus(status)) return details
 
   if (!normalizeKeyValue(packageKey)) {
@@ -1067,9 +1080,7 @@ const validateFrameworkPackageRegistryReferences = async ({
   validateUiContractSections = false,
 }) => {
   const details = {}
-  const { missingKeys } = session
-    ? { missingKeys: (await FrameworkRegistry.find({ frameworkKey }).select('frameworkKey').session(session).lean()).length ? [] : [frameworkKey] }
-    : await resolveKnownFrameworkKeys([frameworkKey])
+  const { missingKeys } = await resolveKnownFrameworkKeys([frameworkKey], 'frameworkKey', {}, session)
 
   if (missingKeys.length > 0) {
     details.frameworkKey = buildUnknownFrameworkKeyMessage(missingKeys)
@@ -2661,6 +2672,7 @@ const buildPackageGovernanceSnapshot = ({
     status: frameworkPackage?.status || '',
     isDefault: Boolean(frameworkPackage?.isDefault),
     uiContractKey: frameworkPackage?.uiContractKey || '',
+    reasoningArtefacts: cloneAuditValue(frameworkPackage?.reasoningArtefacts || []),
     stateModelKey: frameworkPackage?.stateModelKey || '',
     stateModelVersion: frameworkPackage?.stateModelVersion || '',
     stateBindingMode: frameworkPackage?.stateBindingMode || '',
@@ -2956,6 +2968,7 @@ export const createFrameworkPackage = async (req, res, next) => {
         customerAccessMode: frameworkPackage.customerAccessMode,
         assignedCustomerIds: frameworkPackage.assignedCustomerIds,
         sections: frameworkPackage.sections,
+        reasoningArtefacts: frameworkPackage.reasoningArtefacts,
         runtimeSettings: frameworkPackage.runtimeSettings,
         executionModel: frameworkPackage.executionModel,
         validationBindings: frameworkPackage.validationBindings,
@@ -3158,6 +3171,10 @@ export const cloneFrameworkPackage = async (req, res, next) => {
     }
 
     const stateContractDetails = validateFrameworkPackageStateContract(clonedPackagePayload)
+    const readinessDetails = validateFrameworkPackageReadiness(clonedPackagePayload)
+    if (Object.keys(readinessDetails).length > 0) {
+      return sendValidationFailed(res, req, readinessDetails)
+    }
     if (Object.keys(stateContractDetails).length > 0) {
       return sendValidationFailed(res, req, stateContractDetails)
     }
@@ -3199,6 +3216,7 @@ export const cloneFrameworkPackage = async (req, res, next) => {
         version: clonedPackage.version,
         status: clonedPackage.status,
         derivedFromPackageId: clonedPackage.derivedFromPackageId,
+        reasoningArtefacts: clonedPackage.reasoningArtefacts,
       },
     })
 
@@ -3456,6 +3474,7 @@ export const updateFrameworkPackage = async (req, res, next) => {
     const nextValidationBindings = canonicalPackagePayload.validationBindings ?? frameworkPackage.validationBindings
     const nextWorkflowBindings = canonicalPackagePayload.workflowBindings ?? frameworkPackage.workflowBindings
     const nextSections = canonicalPackagePayload.sections ?? frameworkPackage.sections
+    const nextReasoningArtefacts = canonicalPackagePayload.reasoningArtefacts ?? frameworkPackage.reasoningArtefacts
     const nextUiContractKey = canonicalPackagePayload.uiContractKey ?? frameworkPackage.uiContractKey
     const nextStateModelKey = canonicalPackagePayload.stateModelKey ?? frameworkPackage.stateModelKey
     const nextStateModelVersion = canonicalPackagePayload.stateModelVersion ?? frameworkPackage.stateModelVersion
@@ -3491,6 +3510,7 @@ export const updateFrameworkPackage = async (req, res, next) => {
       status: nextStatus,
       packageKey: nextPackageKey,
       sections: nextSections,
+      reasoningArtefacts: nextReasoningArtefacts,
       uiContractKey: nextUiContractKey,
     })
     if (Object.keys(readinessDetails).length > 0) {
@@ -4202,9 +4222,10 @@ export const activateFrameworkPackage = async (req, res, next) => {
   let frameworkPackage = null
   let runtimeActivation = null
   let activationGovernanceFields = null
-  const previousActivePackageIds = []
+  let previousActivePackageIds = null
   try {
     await session.withTransaction(async () => {
+      previousActivePackageIds = []
       const capturedPackage = await loadRuntimeCertificationPackage({
         packageId: req.params.packageId, session,
       })

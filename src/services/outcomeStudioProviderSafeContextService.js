@@ -784,13 +784,16 @@ const assertSafeFrameworkIntelligence = (frameworkIntelligence = []) => {
 }
 
 const buildSafeIntermediateReasoning = (intermediateReasoning = {}) => {
+  const isPackageDeclared = Array.isArray(intermediateReasoning?.artefacts)
+    && intermediateReasoning.artefacts.some((entry) => entry?.source === 'framework_runtime.accepted.reasoningArtefacts')
   if (!isPlainObject(intermediateReasoning)
     || !hasExactKeys(intermediateReasoning, COMPOSITION_INTERMEDIATE_REASONING_KEYS)
     || intermediateReasoning.contractVersion !== 'outcome-studio.intermediate-reasoning-boundary.v1'
     || intermediateReasoning.requiredFor !== 'COMMERCIAL_STRATEGY_DECISION_PAPER'
     || intermediateReasoning.status !== 'READY'
     || !Array.isArray(intermediateReasoning.artefacts)
-    || intermediateReasoning.artefacts.length !== 7) fail()
+    || intermediateReasoning.artefacts.length < 1
+    || (!isPackageDeclared && intermediateReasoning.artefacts.length !== 7)) fail()
   const keys = new Set()
   const artefacts = intermediateReasoning.artefacts.map((entry) => {
     if (!isPlainObject(entry)
@@ -813,7 +816,7 @@ const buildSafeIntermediateReasoning = (intermediateReasoning = {}) => {
       .forEach(assertSafeRawString)
     return safeEntry
   })
-  if (keys.size !== 7) fail()
+  if (keys.size !== (isPackageDeclared ? intermediateReasoning.artefacts.length : 7)) fail()
   return {
     contractVersion: intermediateReasoning.contractVersion,
     requiredFor: intermediateReasoning.requiredFor,

@@ -6,7 +6,14 @@ import {
 } from './runtimeSectionModelService.js'
 import { requiresVmfSectionReasoning } from './sectionExecutionContractService.js'
 import { VMF_SECTION_REASONING_CONTRACT_VERSION } from '../constants/runtimeSectionReasoningContract.js'
+import {
+  buildReasoningArtefactOutputs,
+  resolvePackageReasoningArtefacts,
+  REASONING_ARTEFACT_CONTRACT_VERSION,
+  validateReasoningArtefactDeclarations,
+} from './reasoningArtefactContractService.js'
 
+// Preserve the historical public export while the generic contract owns the implementation.
 export { VMF_SECTION_REASONING_CONTRACT_VERSION }
 
 const VMF_SECTION_REASONING_COVERAGE_VERSION = 'ss-016-vmf-full-evidence-v2'
@@ -16,6 +23,10 @@ const MAX_SECTION_INTELLIGENCE_BYTES = 56 * 1024
 const text = (value) => String(value || '').trim()
 const normalized = (value) => text(value).normalize('NFKC').toLowerCase()
 const byteLength = (value) => Buffer.byteLength(JSON.stringify(value), 'utf8')
+const lastPathSegment = (value, fallback = '') => {
+  const segments = text(value).split('.').map((segment) => segment.trim()).filter(Boolean)
+  return segments.at(-1) || text(fallback)
+}
 
 const COMMON_DIMENSIONS = Object.freeze([
   Object.freeze({ key: 'commercial_context', keywords: ['commercial', 'market', 'position', 'proposition', 'revenue', 'growth', 'value'] }),
@@ -171,6 +182,101 @@ const providerConfigurationError = (status) => {
   return error
 }
 
+const buildPackageReasonedGeneratedSection = async ({
+  actionKey,
+  actorUserId,
+  dependencySectionKeys = [],
+  frameworkPackage,
+  frameworkState = {},
+  generatedAt,
+  input,
+  providerRuntime,
+  runtimeInstance,
+  section,
+  sectionExecutionContract,
+  declarations,
+} = {}) => {
+  const runtime = providerRuntime || buildRuntimeSectionReasoningProviderRuntime()
+  if (runtime?.status?.configured !== true || typeof runtime.providerAdapter !== 'function') {
+    throw providerConfigurationError(runtime?.status)
+  }
+  const base = buildEnrichedGeneratedSection({
+    actionKey,
+    actorUserId,
+    dependencySectionKeys,
+    frameworkPackage,
+    frameworkState,
+    generatedAt,
+    input,
+    runtimeInstance,
+    section,
+    sectionExecutionContract,
+  })
+  const evidenceIds = Array.isArray(base.generated.evidenceProjection?.included)
+    ? base.generated.evidenceProjection.included.map((item) => text(item?.evidenceObjectId)).filter(Boolean)
+    : []
+  const providerResult = await runtime.providerAdapter({
+    providerContext: {
+      contractVersion: REASONING_ARTEFACT_CONTRACT_VERSION,
+      framework: {
+        frameworkKey: text(frameworkPackage?.frameworkKey),
+        packageKey: text(frameworkPackage?.packageKey),
+        packageVersion: text(frameworkPackage?.version),
+      },
+      section: {
+        sectionKey: text(section?.sectionKey || section?.key),
+        runtimePath: text(section?.runtimePath),
+        label: text(sectionExecutionContract?.sectionIdentity?.label),
+        purpose: text(sectionExecutionContract?.sectionIdentity?.purpose),
+      },
+      additionalContext: text(input).slice(0, MAX_ADDITIONAL_CONTEXT_CHARS),
+      reasoningArtefactDeclarations: declarations,
+      baseGenerated: {
+        content: base.generated.content,
+        summary: base.generated.summary,
+        inputHash: base.generated.inputHash,
+        evidenceHash: base.generated.evidenceHash,
+        dependencyHash: base.generated.dependencyHash,
+      },
+    },
+    allowedEvidenceIds: evidenceIds,
+    reasoningArtefactDeclarations: declarations,
+  })
+  const artefacts = buildReasoningArtefactOutputs({
+    candidate: providerResult.output,
+    declarations,
+    packageKey: frameworkPackage?.packageKey,
+    packageVersion: frameworkPackage?.version,
+    sectionKey: section?.sectionKey || section?.key,
+    stateSectionKey: lastPathSegment(section?.runtimePath, section?.sectionKey || section?.key),
+    inputHash: base.generated.inputHash,
+    evidenceHash: base.generated.evidenceHash,
+    dependencyHash: base.generated.dependencyHash,
+    sectionContractHash: sectionExecutionContract?.sectionContractHash,
+    generatedAt,
+  })
+  const generated = {
+    ...base.generated,
+    reasoningArtefacts: artefacts.values,
+    reasoningArtefactReceipts: artefacts.receipts,
+    generator: {
+      ...base.generated.generator,
+      mode: 'GOVERNED_PACKAGE_REASONING',
+      adapter: REASONING_ARTEFACT_CONTRACT_VERSION,
+      provider: runtime.providerDescriptor || providerResult.provider,
+      reasoningArtefactKeys: declarations.map((declaration) => declaration.artefactKey),
+      providerMetadata: providerResult.metadata,
+    },
+  }
+  return {
+    generated,
+    intelligence: {
+      ...base.intelligence,
+      reasoningArtefacts: Object.keys(artefacts.receipts).map((artefactKey) => artefacts.receipts[artefactKey]),
+    },
+  }
+}
+
 export const buildReasonedGeneratedSection = async ({
   actionKey,
   actorUserId,
@@ -186,7 +292,30 @@ export const buildReasonedGeneratedSection = async ({
 } = {}) => {
   const sectionKey = text(section?.sectionKey || section?.key).toLowerCase()
   const runtimePath = text(section?.runtimePath).toLowerCase()
-  if (!requiresVmfSectionReasoning({ frameworkPackage, sectionKey, runtimePath })) {
+  const declaredArtefacts = Array.isArray(sectionExecutionContract?.reasoningArtefacts)
+    ? validateReasoningArtefactDeclarations({
+      frameworkPackage,
+      declarations: sectionExecutionContract.reasoningArtefacts,
+    })
+    : resolvePackageReasoningArtefacts({ frameworkPackage, sectionKey, actionKey })
+  const requiresLegacyVmfReasoning = requiresVmfSectionReasoning({ frameworkPackage, sectionKey, runtimePath })
+  if (declaredArtefacts.length > 0) {
+    return buildPackageReasonedGeneratedSection({
+      actionKey,
+      actorUserId,
+      dependencySectionKeys,
+      frameworkPackage,
+      frameworkState,
+      generatedAt,
+      input,
+      providerRuntime,
+      runtimeInstance,
+      section,
+      sectionExecutionContract,
+      declarations: declaredArtefacts,
+    })
+  }
+  if (!requiresLegacyVmfReasoning) {
     return buildEnrichedGeneratedSection({
       actionKey,
       actorUserId,
@@ -294,6 +423,24 @@ export const buildReasonedGeneratedSection = async ({
     summary: sectionIntelligence.sectionSummary,
     sections,
     sectionIntelligence,
+    ...(declaredArtefacts.length > 0
+      ? (() => {
+          const artefacts = buildReasoningArtefactOutputs({
+            candidate: sectionIntelligence,
+            declarations: declaredArtefacts,
+            packageKey: frameworkPackage?.packageKey,
+            packageVersion: frameworkPackage?.version,
+            sectionKey,
+            stateSectionKey: lastPathSegment(runtimePath, sectionKey),
+            inputHash: base.generated.inputHash,
+            evidenceHash,
+            dependencyHash: base.generated.dependencyHash,
+            sectionContractHash: sectionExecutionContract.sectionContractHash,
+            generatedAt,
+          })
+          return { reasoningArtefacts: artefacts.values, reasoningArtefactReceipts: artefacts.receipts }
+        })()
+      : {}),
     supportingEvidenceRefs: sectionIntelligence.sourceTraceability,
     evidenceProjection: {
       algorithm: coverage.algorithm,

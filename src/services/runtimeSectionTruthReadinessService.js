@@ -5,8 +5,22 @@ import {
   hashSectionInput,
   isRuntimeSectionObject,
 } from './runtimeSectionModelService.js'
+import {
+  buildReasoningArtefactOutputs,
+  projectHandoffReasoningArtefacts,
+  resolvePackageReasoningArtefacts,
+} from './reasoningArtefactContractService.js'
 
 const normalizeKey = (value) => String(value || '').trim().toLowerCase()
+
+const getLastPathSegment = (value, fallback = '') => {
+  const segments = String(value || '')
+    .trim()
+    .split('.')
+    .map((segment) => segment.trim())
+    .filter(Boolean)
+  return segments.at(-1) || String(fallback || '').trim()
+}
 
 const parseRuntimeTimestamp = (value) => {
   if (!value) return 0
@@ -198,6 +212,45 @@ export const evaluateRuntimeSectionTruthReadiness = ({
         reason: hasProjectionValue(accepted?.content ?? accepted)
           ? 'Accepted section truth is not aligned with current generated content.'
           : 'Accepted section truth is missing.',
+      }))
+      return
+    }
+
+    try {
+      const reasoningArtefacts = resolvePackageReasoningArtefacts({
+        frameworkPackage,
+        sectionKey: section.sectionKey,
+        actionKey: 'GENERATE_SECTION',
+      })
+      if (reasoningArtefacts.length > 0) {
+        buildReasoningArtefactOutputs({
+          candidate: generated,
+          declarations: reasoningArtefacts,
+          packageKey: frameworkPackage?.packageKey,
+          packageVersion: frameworkPackage?.version,
+          sectionKey: section.sectionKey,
+          stateSectionKey: getLastPathSegment(
+            section.runtimePath,
+            section.sectionKey,
+          ),
+          inputHash: generated?.inputHash,
+          evidenceHash: generated?.evidenceHash,
+          dependencyHash: generated?.dependencyHash,
+          sectionContractHash: generated?.generator?.sectionContractHash,
+          generatedAt: generated?.generatedAt,
+        })
+        projectHandoffReasoningArtefacts({
+          frameworkPackage,
+          sectionKey: section.sectionKey,
+          acceptedSection: accepted,
+        })
+      }
+    } catch (error) {
+      blockers.push(createBlocker({
+        sectionKey: section.sectionKey,
+        state: 'REASONING_ARTEFACT_BLOCKED',
+        reason: error.message,
+        contractReason: error.reason || 'REASONING_ARTEFACT_INVALID',
       }))
       return
     }
