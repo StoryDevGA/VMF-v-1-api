@@ -418,24 +418,54 @@ const cloneValue = (value) => {
   return JSON.parse(JSON.stringify(value))
 }
 
-const stableStringify = (value) => {
-  if (value === null || value === undefined) return ''
-  if (!isPlainObject(value) && !Array.isArray(value)) return String(value)
-  const normalize = (candidate) => {
-    if (Array.isArray(candidate)) return candidate.map(normalize)
-    if (!isPlainObject(candidate)) return candidate
-    return Object.keys(candidate)
-      .sort()
-      .reduce((acc, key) => ({
-        ...acc,
-        [key]: normalize(candidate[key]),
-      }), {})
+const updateStableHash = (hash, value) => {
+  if (Array.isArray(value)) {
+    hash.update('[')
+    value.forEach((item, index) => {
+      if (index > 0) hash.update(',')
+      if (!updateStableHash(hash, item)) hash.update('null')
+    })
+    hash.update(']')
+    return true
   }
-  return JSON.stringify(normalize(value))
+
+  if (!isPlainObject(value)) {
+    const serialized = JSON.stringify(value)
+    if (serialized !== undefined) {
+      hash.update(serialized)
+      return true
+    }
+    return false
+  }
+
+  hash.update('{')
+  let wroteEntry = false
+  for (const key of Object.keys(value).sort()) {
+    const child = value[key]
+    if (!Array.isArray(child)
+      && !isPlainObject(child)
+      && JSON.stringify(child) === undefined) continue
+    if (wroteEntry) hash.update(',')
+    hash.update(JSON.stringify(key))
+    hash.update(':')
+    updateStableHash(hash, child)
+    wroteEntry = true
+  }
+  hash.update('}')
+  return true
 }
 
-export const hashRuntimeIntelligenceGraphValue = (value) =>
-  `sha256:${crypto.createHash('sha256').update(stableStringify(value)).digest('hex')}`
+export const hashRuntimeIntelligenceGraphValue = (value) => {
+  const hash = crypto.createHash('sha256')
+  if (value === null || value === undefined) {
+    hash.update('')
+  } else if (!isPlainObject(value) && !Array.isArray(value)) {
+    hash.update(String(value))
+  } else {
+    updateStableHash(hash, value)
+  }
+  return `sha256:${hash.digest('hex')}`
+}
 
 const toIdString = (value) => {
   if (!value) return ''
@@ -490,8 +520,8 @@ const getFrameworkState = (runtimeInstance = {}) =>
   runtimeInstance.framework_state || runtimeInstance.frameworkState || {}
 
 const getGraphSourceFrameworkState = (frameworkState = {}) => {
-  const sourceFrameworkState = cloneValue(frameworkState || {})
-  if (!isPlainObject(sourceFrameworkState)) return {}
+  if (!isPlainObject(frameworkState)) return {}
+  const sourceFrameworkState = { ...frameworkState }
 
   delete sourceFrameworkState.intelligence_graph
   delete sourceFrameworkState.intelligenceGraph
