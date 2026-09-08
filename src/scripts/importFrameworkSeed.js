@@ -174,6 +174,7 @@ const WORKFLOW_POLICY_TYPE_MAP = Object.freeze({
 const SECTION_BINDING_CATEGORY_SET = new Set(RUNTIME_PATH_REGISTRY_SECTION_BINDING_CATEGORIES)
 const V3_1_2_CANONICAL_UI_CONTRACT_KEY = 'standard-ui-contract-vmf-3-1-1-rkm-canonical'
 const V3_1_5_PACKAGE_KEY = 'standard-package-value-mapping-framework-3-1-5-runtime-knowledge-model'
+const V3_1_6_PACKAGE_KEY = 'standard-package-value-mapping-framework-3-1-6-runtime-knowledge-model'
 const V3_1_2_EXECUTION_STATUS_PATH_KEY = 'framework_state.runtime.execution_status'
 const V3_1_2_COMPATIBILITY_RUNTIME_PATHS = Object.freeze([
   Object.freeze({
@@ -375,6 +376,27 @@ const SEED_PACKS = Object.freeze({
   '3.1.5': Object.freeze({
     version: '3.1.5',
     auditFileName: '04_audits/validation_report.md',
+    acceptCompatibilityAuditWithoutCounts: true,
+    importSteps: buildImportSteps({
+      runtimePaths: '02_seed_data/runtime_path_registry.json',
+      skillRoles: '02_seed_data/skill_role_registry.json',
+      skills: '02_seed_data/runtime_skills.json',
+      validations: '02_seed_data/validation_registry.json',
+      agents: '02_seed_data/runtime_agents.json',
+      policies: '02_seed_data/workflow_policies.json',
+      uiContract: '02_seed_data/ui_contract.json',
+      frameworkPackage: '02_seed_data/framework_package.json',
+    }),
+    supportAssetManifest: Object.freeze({
+      fileName: '02_seed_data/supporting_asset_records.json',
+      arrayKey: 'supportingAssets',
+    }),
+  }),
+  '3.1.6': Object.freeze({
+    version: '3.1.6',
+    auditFileName: '04_audits/validation_report.md',
+    exclusionGuardFileName: '04_audits/deal_mode_exclusion_guard.json',
+    reasoningArtefactMatrixFileName: '04_audits/internal_reasoning_artefact_matrix.json',
     acceptCompatibilityAuditWithoutCounts: true,
     importSteps: buildImportSteps({
       runtimePaths: '02_seed_data/runtime_path_registry.json',
@@ -991,7 +1013,7 @@ const normalizeUiContract = (record, notes, sourceLabel, seedContext = {}) => {
     notes,
     sourceLabel,
   )
-  if (['3.1.2', '3.1.5'].includes(seedContext.seedVersion)) {
+  if (['3.1.2', '3.1.5', '3.1.6'].includes(seedContext.seedVersion)) {
     const expectedStableId = buildUIContractStableId(record.uiContractKey)
     if (record.stableId !== expectedStableId) {
       const previousStableId = record.stableId
@@ -1009,7 +1031,7 @@ const normalizeUiContract = (record, notes, sourceLabel, seedContext = {}) => {
 const normalizeFrameworkPackage = (record, notes, sourceLabel, seedContext = {}) => {
   normalizeSeedSemanticVersionFields(record, ['version', 'stateModelVersion'], notes, sourceLabel)
 
-  if (['3.1.2', '3.1.5'].includes(seedContext.seedVersion)) {
+  if (['3.1.2', '3.1.5', '3.1.6'].includes(seedContext.seedVersion)) {
     if (record.uiContractKey !== V3_1_2_CANONICAL_UI_CONTRACT_KEY) {
       const previousKey = record.uiContractKey
       record.uiContractKey = V3_1_2_CANONICAL_UI_CONTRACT_KEY
@@ -1677,6 +1699,268 @@ const validateConformanceAudit = (bundle, options, notes) => {
   }
 }
 
+const validateDealModeExclusionGuard = (options, notes) => {
+  const seedPack = resolveSeedPack(options.seedVersion)
+  if (!seedPack.exclusionGuardFileName) {
+    return { skipped: true, reason: `No Deal Analysis exclusion guard required for ${seedPack.version}.` }
+  }
+
+  const guardFile = path.resolve(options.seedDir, seedPack.exclusionGuardFileName)
+  if (!fs.existsSync(guardFile)) {
+    notes.push({
+      level: 'error',
+      source: 'Deal Analysis Exclusion Guard',
+      message: `Missing Deal Analysis exclusion guard: ${guardFile}`,
+    })
+    return { skipped: false, guardFile, missing: true }
+  }
+
+  let guard
+  try {
+    guard = JSON.parse(fs.readFileSync(guardFile, 'utf8'))
+  } catch (error) {
+    notes.push({
+      level: 'error',
+      source: 'Deal Analysis Exclusion Guard',
+      message: `Could not parse ${guardFile}: ${error.message}`,
+    })
+    return { skipped: false, guardFile, invalid: true }
+  }
+
+  const guardFailures = []
+  if (String(guard.status || '').trim().toUpperCase() !== 'PASS') {
+    guardFailures.push(`status=${guard.status || 'missing'}`)
+  }
+  if (String(guard.excludedFolder || '').trim() !== '02_Deal_Mode') {
+    guardFailures.push(`excludedFolder=${guard.excludedFolder || 'missing'}`)
+  }
+  for (const field of ['includedSourceCatalogDealModeHits', 'generatedSeedDealModeDerivationHits']) {
+    if (!Array.isArray(guard[field]) || guard[field].length !== 0) {
+      guardFailures.push(`${field} must be an empty array`)
+    }
+  }
+
+  const sourceFiles = [
+    ...seedPack.importSteps.map((step) => step.fileName),
+    seedPack.supportAssetManifest?.fileName,
+  ].filter(Boolean)
+  const pathHits = sourceFiles.filter((fileName) => /02_Deal_Mode|Deal Analysis/i.test(fileName))
+  if (pathHits.length > 0) {
+    guardFailures.push(`importable seed file paths include Deal Analysis: ${pathHits.join(', ')}`)
+  }
+
+  for (const failure of guardFailures) {
+    notes.push({
+      level: 'error',
+      source: 'Deal Analysis Exclusion Guard',
+      message: failure,
+    })
+  }
+
+  return {
+    skipped: false,
+    guardFile,
+    status: guardFailures.length > 0 ? 'fail' : 'pass',
+    excludedFolder: guard.excludedFolder,
+    excludedDealModeFiles: Array.isArray(guard.excludedDealModeFiles)
+      ? guard.excludedDealModeFiles.length
+      : 0,
+    pathHits,
+    failures: guardFailures,
+  }
+}
+
+const hasRuntimeAccessibleSupportAsset = (skill) =>
+  (Array.isArray(skill?.referenceAssets) ? skill.referenceAssets : []).some((asset) =>
+    normalizeEnumToken(asset?.status) === 'ACTIVE'
+    && asset?.isRuntimeAccessible === true
+    && asset?.isAdminOnly !== true
+    && asset?.isTestOnly !== true)
+
+const validateReasoningArtefactMatrix = ({
+  frameworkPackage = {},
+  matrix,
+  indexes = {},
+  notes = [],
+} = {}) => {
+  const source = `Framework Package ${frameworkPackage.packageKey} reasoning artefact matrix`
+  const failures = []
+  const fail = (message) => {
+    failures.push(message)
+    notes.push({ level: 'error', source, message })
+  }
+
+  if (!matrix || typeof matrix !== 'object' || Array.isArray(matrix)) {
+    fail('Matrix must be an object.')
+    return { status: 'fail', failures }
+  }
+
+  const declarations = Array.isArray(frameworkPackage.reasoningArtefacts)
+    ? frameworkPackage.reasoningArtefacts
+    : []
+  const rows = matrix.matrix
+  const requiredKeys = matrix.requiredInternalReasoningArtefacts
+  if (!Array.isArray(rows)) fail('Matrix must contain a matrix array.')
+  if (!Array.isArray(requiredKeys)) {
+    fail('Matrix must contain a requiredInternalReasoningArtefacts array.')
+  }
+  if (failures.length > 0) return { status: 'fail', failures }
+
+  const declarationByKey = new Map()
+  const declarationKeys = []
+  for (const declaration of declarations) {
+    const key = String(declaration?.artefactKey || '').trim()
+    if (!key) continue
+    declarationKeys.push(key)
+    if (declarationByKey.has(key)) fail(`Package declarations contain duplicate artefactKey "${key}".`)
+    declarationByKey.set(key, declaration)
+  }
+
+  const requiredLabelSet = new Set()
+  for (const keyValue of requiredKeys) {
+    const label = String(keyValue || '').trim()
+    if (!label) {
+      fail('Matrix requiredInternalReasoningArtefacts contains an empty key.')
+      continue
+    }
+    if (requiredLabelSet.has(label)) fail(`Matrix requiredInternalReasoningArtefacts contains duplicate label "${label}".`)
+    requiredLabelSet.add(label)
+  }
+
+  const rowsByKey = new Map()
+  for (const row of rows) {
+    const key = String(row?.artefactKey || '').trim()
+    if (!key) {
+      fail('Matrix contains a row with no artefactKey.')
+      continue
+    }
+    if (rowsByKey.has(key)) fail(`Matrix contains duplicate artefactKey "${key}".`)
+    rowsByKey.set(key, row)
+
+    const declaration = declarationByKey.get(key)
+    if (!declaration) {
+      fail(`Matrix contains stale artefactKey "${key}" not declared by the Framework Package.`)
+      continue
+    }
+
+    const expectedSectionKey = Array.isArray(declaration.sectionKeys)
+      ? String(declaration.sectionKeys[0] || '').trim()
+      : ''
+    if (String(row.sectionKey || '').trim() !== expectedSectionKey) {
+      fail(`Matrix artefact "${key}" sectionKey must exactly match its package declaration.`)
+    }
+    if (String(row.writePath || '').trim() !== String(declaration.writePath || '').trim()) {
+      fail(`Matrix artefact "${key}" writePath must exactly match its package declaration.`)
+    }
+    if (String(row.status || '').trim().toUpperCase() !== 'PASS') {
+      fail(`Matrix artefact "${key}" must have status PASS.`)
+    }
+    if (String(row.visibility || '').trim() !== 'HIDDEN_RUNTIME_MANAGED') {
+      fail(`Matrix artefact "${key}" must be HIDDEN_RUNTIME_MANAGED.`)
+    }
+    if (row.definitionExists !== true) {
+      fail(`Matrix artefact "${key}" must have definitionExists=true.`)
+    }
+
+    const ownerKey = String(row.owningRuntimeSkill || '').trim()
+    const skill = indexes.skillsByKey?.get(normalizeToken(ownerKey))
+    if (!ownerKey || !skill) {
+      fail(`Matrix artefact "${key}" references unknown owning Runtime Skill "${ownerKey || 'missing'}".`)
+      continue
+    }
+    if (
+      normalizeEnumToken(skill.status) !== 'ACTIVE'
+      || normalizeEnumToken(skill.versionStatus) !== 'ACTIVE'
+    ) {
+      fail(`Matrix artefact "${key}" owning Runtime Skill "${ownerKey}" must be ACTIVE.`)
+    }
+    if (
+      !Array.isArray(skill.supportedFrameworkKeys)
+      || !skill.supportedFrameworkKeys.includes(normalizeEnumToken(frameworkPackage.frameworkKey))
+    ) {
+      fail(`Matrix artefact "${key}" owning Runtime Skill "${ownerKey}" is not compatible with framework "${frameworkPackage.frameworkKey}".`)
+    }
+    if (!hasRuntimeAccessibleSupportAsset(skill)) {
+      fail(`Matrix artefact "${key}" owning Runtime Skill "${ownerKey}" has no active runtime-accessible support asset.`)
+    }
+  }
+
+  for (const key of declarationKeys) {
+    if (!rowsByKey.has(key)) fail(`Matrix is missing a row for declared artefactKey "${key}".`)
+  }
+
+  const rowLabels = new Set()
+  for (const row of rows) {
+    const label = String(row?.label || '').trim()
+    if (!label) {
+      fail('Matrix contains a row with no label.')
+      continue
+    }
+    if (rowLabels.has(label)) fail(`Matrix contains duplicate label "${label}".`)
+    rowLabels.add(label)
+  }
+  for (const label of requiredLabelSet) {
+    if (!rowLabels.has(label)) fail(`Matrix references stale required artefact label "${label}".`)
+  }
+  for (const label of rowLabels) {
+    if (!requiredLabelSet.has(label)) fail(`Matrix is missing required artefact label "${label}".`)
+  }
+
+  return {
+    status: failures.length > 0 ? 'fail' : 'pass',
+    failures,
+    artefactCount: declarationKeys.length,
+    matrixRowCount: rows.length,
+  }
+}
+
+const validateReasoningArtefactMatrixFile = (bundle, options, notes) => {
+  const seedPack = resolveSeedPack(options.seedVersion)
+  if (!seedPack.reasoningArtefactMatrixFileName) {
+    return { skipped: true, reason: `No reasoning artefact matrix required for ${seedPack.version}.` }
+  }
+
+  const matrixFile = path.resolve(options.seedDir, seedPack.reasoningArtefactMatrixFileName)
+  if (!fs.existsSync(matrixFile)) {
+    notes.push({
+      level: 'error',
+      source: 'Reasoning Artefact Matrix',
+      message: `Missing reasoning artefact matrix: ${matrixFile}`,
+    })
+    return { skipped: false, matrixFile, missing: true, status: 'fail' }
+  }
+
+  let matrix
+  try {
+    matrix = JSON.parse(fs.readFileSync(matrixFile, 'utf8'))
+  } catch (error) {
+    notes.push({
+      level: 'error',
+      source: 'Reasoning Artefact Matrix',
+      message: `Could not parse ${matrixFile}: ${error.message}`,
+    })
+    return { skipped: false, matrixFile, invalid: true, status: 'fail' }
+  }
+
+  const bundlePackages = recordsForModel(bundle, FrameworkPackage)
+  const indexes = buildIndexes(bundle)
+  const results = bundlePackages.map((frameworkPackage) => validateReasoningArtefactMatrix({
+    frameworkPackage,
+    matrix,
+    indexes,
+    notes,
+  }))
+  const failures = results.flatMap((result) => result.failures || [])
+  return {
+    skipped: false,
+    matrixFile,
+    status: failures.length > 0 ? 'fail' : 'pass',
+    artefactCount: results.reduce((count, result) => count + (result.artefactCount || 0), 0),
+    matrixRowCount: results.reduce((count, result) => count + (result.matrixRowCount || 0), 0),
+    failures,
+  }
+}
+
 const hasOperation = (record, operation) =>
   Array.isArray(record?.allowedOperations) && record.allowedOperations.includes(operation)
 
@@ -2009,6 +2293,7 @@ const validateFrameworkPackageSectionSkillBindings = ({
   const supportsLegacySectionTruthPolicy = [
     'standard-package-value-mapping-framework-3-1-2-runtime-knowledge-model',
     V3_1_5_PACKAGE_KEY,
+    V3_1_6_PACKAGE_KEY,
   ].includes(normalizeToken(frameworkPackage.packageKey))
   const sectionGenerationPolicyActions = new Map([
     ['generate-section-gate', 'GENERATE_SECTION'],
@@ -2029,6 +2314,7 @@ const validateFrameworkPackageSectionSkillBindings = ({
     'standard-package-vmf-3-1-1-rkm',
     'standard-package-value-mapping-framework-3-1-2-runtime-knowledge-model',
     V3_1_5_PACKAGE_KEY,
+    V3_1_6_PACKAGE_KEY,
   ]
   if (
     !sectionTruthPackageKeys.includes(normalizeToken(frameworkPackage.packageKey))
@@ -2121,6 +2407,16 @@ const validateFrameworkPackageSectionSkillBindings = ({
 const validateFrameworkPackages = (records, indexes, notes) => {
   for (const frameworkPackage of records) {
     const source = `Framework Package ${frameworkPackage.packageKey}`
+    if (
+      normalizeToken(frameworkPackage.packageKey) === normalizeToken(V3_1_6_PACKAGE_KEY)
+      && (!Array.isArray(frameworkPackage.reasoningArtefacts) || frameworkPackage.reasoningArtefacts.length === 0)
+    ) {
+      notes.push({
+        level: 'error',
+        source,
+        message: 'VMF v3.1.6 requires a non-empty package-declared reasoningArtefacts array.',
+      })
+    }
     try {
       validateReasoningArtefactDeclarations({ frameworkPackage })
     } catch (error) {
@@ -2978,9 +3274,11 @@ const importFrameworkSeed = async (optionOverrides = {}) => {
   const notes = metadata?.notes || []
   const frameworkVersion = metadata?.seedContext?.frameworkVersion || DEFAULT_VMF_VERSION
   validateCrossReferences(bundle, notes)
+  const reasoningArtefactMatrix = validateReasoningArtefactMatrixFile(bundle, options, notes)
   const editorOptionContract = await validateFrameworkPackageEditorContract(bundle, options, notes)
   const auditRegistryContract = await validateAuditRegistryContract(options, notes)
   const audit = validateConformanceAudit(bundle, options, notes)
+  const dealModeExclusionGuard = validateDealModeExclusionGuard(options, notes)
   await validateWithMongoose(bundle, notes)
 
   const hasErrors = notes.some((note) => note.level === 'error')
@@ -3008,6 +3306,8 @@ const importFrameworkSeed = async (optionOverrides = {}) => {
     audit,
     auditRegistryContract,
     editorOptionContract,
+    reasoningArtefactMatrix,
+    dealModeExclusionGuard,
     summary,
     notes,
   }
@@ -3044,6 +3344,9 @@ export {
   parseArgs,
   readConformanceAudit,
   validateCrossReferences,
+  validateDealModeExclusionGuard,
+  validateReasoningArtefactMatrix,
+  validateReasoningArtefactMatrixFile,
   validateWithMongoose,
 }
 

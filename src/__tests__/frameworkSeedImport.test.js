@@ -4,7 +4,7 @@ import path from 'path'
 import { execFile } from 'child_process'
 import { fileURLToPath } from 'url'
 import { promisify } from 'util'
-import { describe, expect, jest, test } from '@jest/globals'
+import { afterEach, describe, expect, jest, test } from '@jest/globals'
 import RuntimeSupportAsset from '../models/RuntimeSupportAsset.js'
 import {
   buildImportUpdatePayload,
@@ -13,6 +13,7 @@ import {
   parseArgs,
   readConformanceAudit,
   validateCrossReferences,
+  validateReasoningArtefactMatrix,
 } from '../scripts/importFrameworkSeed.js'
 
 const execFileAsync = promisify(execFile)
@@ -25,6 +26,10 @@ const importScript = path.resolve(apiRoot, 'src/scripts/importFrameworkSeed.js')
 const r3SeedDir = path.resolve(seedDir, 'vmf-v3-1-1-rkm-r3-action-alignment')
 const v312SeedDir = path.resolve(workspaceRoot, '.tmp/ss-013-source')
 const v312AmendedSeedDir = path.resolve(workspaceRoot, '.tmp/ss-013-amended-source')
+const v316SeedDir = path.resolve(
+  workspaceRoot,
+  '.tmp/ss-020-v3-1-6-drive-source-2026-09-07/zip-extract/vmf_framework_seed_pack_v3-1-6_excluding_deal_analysis_schema_faithful',
+)
 const executionStatusPathKey = 'framework_state.runtime.execution_status'
 const sectionSkillBindingMatrix = Object.freeze({
   'framework_state.sections.customer_context': 'skill-customer-context-interpreter',
@@ -36,6 +41,24 @@ const sectionSkillBindingMatrix = Object.freeze({
 })
 
 jest.setTimeout(30_000)
+
+const tempRoots = new Set()
+
+const createTempRoot = (prefix) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), prefix))
+  tempRoots.add(tempRoot)
+  return tempRoot
+}
+
+afterEach(() => {
+  try {
+    for (const tempRoot of tempRoots) {
+      fs.rmSync(tempRoot, { recursive: true, force: true })
+    }
+  } finally {
+    tempRoots.clear()
+  }
+})
 
 const runSeedGuard = (args = []) =>
   execFileAsync(process.execPath, [importScript, '--json', '--no-report', ...args], {
@@ -92,6 +115,7 @@ describe('framework seed import guard', () => {
     ['3.1.1', path.resolve(seedDir, 'vmf-v3-1-1-rkm'), 'seed_pack_audit.json'],
     ['3.1.2', path.resolve(workspaceRoot, '.tmp/ss-013-source'), 'validation_report.md'],
     ['3.1.5', path.resolve(workspaceRoot, '.tmp/ss-013-source'), 'validation_report.md'],
+    ['3.1.6', path.resolve(workspaceRoot, '.tmp/ss-020-v3-1-6-drive-source-2026-09-07'), 'validation_report.md'],
   ])('uses the selected %s seed version to resolve the default audit file', (
     seedVersion,
     selectedSeedDir,
@@ -104,7 +128,7 @@ describe('framework seed import guard', () => {
   })
 
   test('reads the v3.1.2 Markdown validation report as a compatibility audit', () => {
-    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'framework-seed-markdown-audit-'))
+    const tempRoot = createTempRoot('framework-seed-markdown-audit-')
     const auditFile = path.join(tempRoot, 'validation_report.md')
     fs.writeFileSync(auditFile, [
       '# VMF Schema-Faithful Seed Pack Validation Report',
@@ -171,7 +195,7 @@ describe('framework seed import guard', () => {
   })
 
   test('supports the v3.1.5 legacy pack mapping and section bindings without editing source files', () => {
-    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'framework-seed-v315-'))
+    const tempRoot = createTempRoot('framework-seed-v315-')
     const tempSeedDir = path.join(tempRoot, 'seed-data')
     fs.cpSync(v312AmendedSeedDir, tempSeedDir, { recursive: true })
 
@@ -258,6 +282,23 @@ describe('framework seed import guard', () => {
     })
   })
 
+  test('normalizes the v3.1.6 legacy UI contract identity during bundle load', () => {
+    const bundle = loadSeedBundle(v316SeedDir, '3.1.6')
+    const frameworkPackage = findBundleRecords(bundle, 'framework_package.json')[0]
+    const uiContract = findBundleRecords(bundle, 'ui_contract.json')[0]
+
+    expect(frameworkPackage).toEqual(expect.objectContaining({
+      uiContractKey: 'standard-ui-contract-vmf-3-1-1-rkm-canonical',
+      uiContractBinding: expect.objectContaining({
+        key: 'standard-ui-contract-vmf-3-1-1-rkm-canonical',
+      }),
+    }))
+    expect(uiContract).toEqual(expect.objectContaining({
+      uiContractKey: 'standard-ui-contract-vmf-3-1-1-rkm-canonical',
+      stableId: 'ui-contract-standard-ui-contract-vmf-3-1-1-rkm-canonical',
+    }))
+  })
+
   test('blocks malformed package-declared reasoning artefacts during seed preflight', () => {
     const { notes } = validateR3CrossReferences(({ frameworkPackages }) => {
       frameworkPackages[0].reasoningArtefacts = [{
@@ -279,6 +320,75 @@ describe('framework seed import guard', () => {
       expect.objectContaining({
         level: 'error',
         message: expect.stringContaining('DECLARATION_WRITE_PATH_INVALID'),
+      }),
+    ]))
+  })
+
+  test('blocks the v3.1.6 package when declarations are absent', () => {
+    const { notes } = validateR3CrossReferences(({ frameworkPackages }) => {
+      frameworkPackages[0].packageKey = 'standard-package-value-mapping-framework-3-1-6-runtime-knowledge-model'
+      delete frameworkPackages[0].reasoningArtefacts
+    })
+
+    expect(notes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        level: 'error',
+        message: expect.stringContaining('requires a non-empty package-declared reasoningArtefacts array'),
+      }),
+    ]))
+  })
+
+  test('requires each v3.1.6 reasoning artefact matrix owner to be active and runtime-accessible', () => {
+    const frameworkPackage = {
+      packageKey: 'standard-package-value-mapping-framework-3-1-6-runtime-knowledge-model',
+      frameworkKey: 'VMF',
+      reasoningArtefacts: [{
+        artefactKey: 'customer-context-reasoning',
+        sectionKeys: ['customer-context'],
+        writePath: 'framework_state.sections.customer_context.generated.reasoningArtefacts.customer-context-reasoning',
+      }],
+    }
+    const matrix = {
+      requiredInternalReasoningArtefacts: ['Customer Context Reasoning'],
+      matrix: [{
+        artefactKey: 'customer-context-reasoning',
+        label: 'Customer Context Reasoning',
+        sectionKey: 'customer-context',
+        writePath: frameworkPackage.reasoningArtefacts[0].writePath,
+        owningRuntimeSkill: 'customer-context-interpreter',
+        visibility: 'HIDDEN_RUNTIME_MANAGED',
+        definitionExists: true,
+        status: 'PASS',
+      }],
+    }
+    const activeSkill = {
+      status: 'ACTIVE',
+      versionStatus: 'ACTIVE',
+      supportedFrameworkKeys: ['VMF'],
+      referenceAssets: [{
+        status: 'ACTIVE',
+        isRuntimeAccessible: true,
+        isAdminOnly: false,
+        isTestOnly: false,
+      }],
+    }
+    const indexes = { skillsByKey: new Map([['customer-context-interpreter', activeSkill]]) }
+    const notes = []
+
+    expect(validateReasoningArtefactMatrix({ frameworkPackage, matrix, indexes, notes })).toEqual(
+      expect.objectContaining({ status: 'pass', artefactCount: 1, matrixRowCount: 1 }),
+    )
+    expect(notes).toEqual([])
+
+    activeSkill.status = 'INACTIVE'
+    const failedNotes = []
+    expect(validateReasoningArtefactMatrix({ frameworkPackage, matrix, indexes, notes: failedNotes })).toEqual(
+      expect.objectContaining({ status: 'fail' }),
+    )
+    expect(failedNotes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        level: 'error',
+        message: expect.stringContaining('must be ACTIVE'),
       }),
     ]))
   })
@@ -359,7 +469,7 @@ describe('framework seed import guard', () => {
   })
 
   test('does not report uiContractBinding normalization when the binding is absent', () => {
-    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'framework-seed-ui-binding-'))
+    const tempRoot = createTempRoot('framework-seed-ui-binding-')
     const tempSeedDir = path.join(tempRoot, 'seed-data')
     fs.cpSync(v312SeedDir, tempSeedDir, { recursive: true })
 
@@ -412,7 +522,7 @@ describe('framework seed import guard', () => {
   })
 
   test('reports the framework version from the seed package instead of a hardcoded importer value', async () => {
-    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'framework-seed-version-contract-'))
+    const tempRoot = createTempRoot('framework-seed-version-contract-')
     const tempSeedDir = path.join(tempRoot, 'seed-data')
     fs.cpSync(seedDir, tempSeedDir, { recursive: true })
 
@@ -428,7 +538,7 @@ describe('framework seed import guard', () => {
   })
 
   test('normalizes workflow step binding keys before Mongoose validation and persistence', () => {
-    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'framework-seed-binding-keys-'))
+    const tempRoot = createTempRoot('framework-seed-binding-keys-')
     const tempSeedDir = path.join(tempRoot, 'seed-data')
     fs.cpSync(seedDir, tempSeedDir, { recursive: true })
 
@@ -530,7 +640,7 @@ describe('framework seed import guard', () => {
 
   test('excludes non-runtime and administrative assets and rejects unsupported or oversized runtime files', () => {
     const sourceDir = path.resolve(seedDir, 'vmf-v3-1-rkm')
-    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'framework-runtime-assets-'))
+    const tempRoot = createTempRoot('framework-runtime-assets-')
     const tempSeedDir = path.join(tempRoot, 'seed-data')
     fs.cpSync(sourceDir, tempSeedDir, { recursive: true })
     const manifestPath = path.join(tempSeedDir, 'vmf_v3_1_support_asset_manifest.json')
@@ -1292,7 +1402,7 @@ describe('framework seed import guard', () => {
   })
 
   test('passes RKM compatibility values used by the v3.1 runtime knowledge model seed', async () => {
-    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'framework-seed-rkm-contract-'))
+    const tempRoot = createTempRoot('framework-seed-rkm-contract-')
     const tempSeedDir = path.join(tempRoot, 'seed-data')
     fs.cpSync(seedDir, tempSeedDir, { recursive: true })
 
@@ -1490,7 +1600,7 @@ describe('framework seed import guard', () => {
   })
 
   test('blocks audit-shaped seed data that references an unregistered audit action', async () => {
-    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'framework-seed-audit-contract-'))
+    const tempRoot = createTempRoot('framework-seed-audit-contract-')
     const tempSeedDir = path.join(tempRoot, 'seed-data')
     fs.cpSync(seedDir, tempSeedDir, { recursive: true })
 
@@ -1512,7 +1622,7 @@ describe('framework seed import guard', () => {
   })
 
   test('blocks generated seed data that contains an output key missing from the editor options', async () => {
-    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'framework-seed-contract-'))
+    const tempRoot = createTempRoot('framework-seed-contract-')
     const tempSeedDir = path.join(tempRoot, 'seed-data')
     fs.cpSync(seedDir, tempSeedDir, { recursive: true })
 
