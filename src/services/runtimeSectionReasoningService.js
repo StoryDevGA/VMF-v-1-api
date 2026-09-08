@@ -257,6 +257,14 @@ const buildPackageReasonedGeneratedSection = async ({
   })
   const generated = {
     ...base.generated,
+    // Package-declared artefacts may be authored against the existing
+    // sectionIntelligence envelope. Preserve that source location alongside
+    // the canonical reasoningArtefacts projection so generation, readiness,
+    // and handoff resolve the same contract.
+    sectionIntelligence: {
+      ...(base.generated.sectionIntelligence || {}),
+      ...(providerResult.output && typeof providerResult.output === 'object' ? providerResult.output : {}),
+    },
     reasoningArtefacts: artefacts.values,
     reasoningArtefactReceipts: artefacts.receipts,
     generator: {

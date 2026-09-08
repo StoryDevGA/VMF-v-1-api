@@ -542,6 +542,9 @@ describe('package-declared reasoning artefact runtime contract', () => {
     expect(providerAdapter).toHaveBeenCalledWith(expect.objectContaining({
       reasoningArtefactDeclarations: declarations,
     }))
+    expect(result.generated.sectionIntelligence).toEqual({
+      riskNarrative: { value: 'Generated from the custom package contract.' },
+    })
     expect(result.generated.reasoningArtefacts).toEqual({ riskNarrative: { value: 'Generated from the custom package contract.' } })
     expect(result.generated.reasoningArtefactReceipts.riskNarrative.statePath)
       .toBe('framework_state.sections.customer_context.generated.reasoningArtefacts.riskNarrative')

@@ -144,7 +144,7 @@ const RUNTIME_STATE_V2_SELECTED_SECTION_PROJECTION = Object.freeze({
 const RENDERER_TRUTH_FIELDS = Object.freeze([
   'content', 'format', 'summary', 'generatedAt', 'generatedBy', 'acceptedAt', 'acceptedBy',
   'sourceGeneratedAt', 'actionKey', 'inputHash', 'evidenceHash', 'sectionEvidenceHash',
-  'dependencyHash', 'boundedContextHash', 'contentHash', 'truthHash', 'truthEligibility', 'generator',
+  'sectionContractHash', 'dependencyHash', 'boundedContextHash', 'contentHash', 'truthHash', 'truthEligibility', 'generator',
   'reasoningArtefacts', 'reasoningArtefactReceipts', 'runtimeManagedSourceReceipt',
 ])
 const RUNTIME_STATE_V2_RENDERER_SECTION_PROJECTION = Object.freeze({
@@ -216,7 +216,8 @@ const RUNTIME_STATE_V2_HANDOFF_SECTION_PROJECTION = Object.freeze({
   'sectionDetail.evidenceObjects': 1,
   'sectionDetail.dependencies': 1,
   ...Object.fromEntries(['content', 'generatedAt', 'inputHash', 'evidenceHash', 'dependencyHash',
-    'generator', 'reasoningArtefacts', 'reasoningArtefactReceipts', 'runtimeManagedSourceReceipt']
+    'generator', 'reasoningArtefacts', 'reasoningArtefactReceipts', 'runtimeManagedSourceReceipt',
+    'sectionIntelligence']
     .map((field) => [`sectionDetail.generated.${field}`, 1])),
   // Whole fallback objects preserve presence (including {}) and getter precedence.
   // Accepted truth remains full fidelity, including its rich section intelligence.

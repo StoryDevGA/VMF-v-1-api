@@ -107,6 +107,12 @@ describe('SS-022 runtime-managed sections', () => {
     expect(fixture).toEqual(before)
   })
 
+  test('treats an empty Runtime State V2 evidence envelope as equivalent to an omitted section evidence envelope', () => {
+    const fixture = makeRuntimeManagedFixture({ frameworkKey: 'CUSTOM' })
+    firstValue(fixture).additionalEvidence = {}
+    expect(evaluate(fixture)).toMatchObject({ readySectionCount: 1, blockers: [] })
+  })
+
   test('fails closed for duplicate artefact receipts even with a recomputed source receipt', () => {
     const fixture = makeRuntimeManagedFixture({ frameworkKey: 'CUSTOM' })
     const generated = firstValue(fixture).generated

@@ -51,6 +51,12 @@ const sourceContext = ({ frameworkPackage, frameworkState, section, input }) => 
     fail('RUNTIME_MANAGED_PACKAGE_PROOF_MISSING', 'Internal completion requires the package identity and locked dependency snapshot.')
   }
   const state = sectionValue(frameworkState, section) || {}
+  const additionalEvidence = Array.isArray(state.additionalEvidence)
+    ? state.additionalEvidence
+    : (state.additionalEvidence && typeof state.additionalEvidence === 'object'
+        && Object.keys(state.additionalEvidence).length > 0
+      ? state.additionalEvidence
+      : [])
   const dependencies = dependencyKeys(section).map((id) => {
     const matches = sectionsOf(frameworkPackage).filter((candidate) => key(candidate.sectionKey) === key(id))
     if (matches.length !== 1 || isRuntimeManagedSection(matches[0])) invalid('Internal proof has an unresolved or cyclic source dependency.')
@@ -68,7 +74,7 @@ const sourceContext = ({ frameworkPackage, frameworkState, section, input }) => 
     package: packageContext(frameworkPackage),
     inputHash: hashSectionInput(input === undefined ? getRuntimeSectionInput(state) : input),
     dependencies,
-    sectionEvidence: { additionalEvidence: state.additionalEvidence || [], evidenceObjects: state.evidenceObjects || [] },
+    sectionEvidence: { additionalEvidence, evidenceObjects: Array.isArray(state.evidenceObjects) ? state.evidenceObjects : [] },
     // Governed review clears acceptance; reacceptance advances acceptedAt. This
     // boundary is also available to bounded renderer reads without bulk evidence.
     evidence: { accepted: evidence.accepted, acceptedAt: evidence.acceptedAt,

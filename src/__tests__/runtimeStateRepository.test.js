@@ -1541,6 +1541,7 @@ describe('runtime State Storage V2 repository', () => {
     const passed = resolveFrameworkOutcomeStudioHandoff.mock.calls[0][0].runtimeInstance.framework_state.sections.section_0
     expect(passed.accepted).toEqual(detail.accepted)
     expect(passed.generated.evidenceProjection).toEqual({})
+    expect(passed.generated.sectionIntelligence).toEqual(detail.generated.sectionIntelligence)
     expect(passed.intelligence.scopedEvidence).toEqual({})
     expect(passed.generated.intelligence.scopedEvidence).toEqual({})
     expect(passed.generated.content).toEqual(detail.generated.content)
