@@ -231,7 +231,10 @@ const listContainsValue = (value, needle) => {
 }
 
 const findUnmappedSourceReferences = (bundle, options) => {
-  const needles = [options.sourcePackageKey, options.sourceUiContractKey]
+  const needles = [
+    options.sourcePackageKey !== options.targetPackageKey ? options.sourcePackageKey : '',
+    options.sourceUiContractKey !== options.targetUiContractKey ? options.sourceUiContractKey : '',
+  ].filter(Boolean)
   const findings = []
   for (const entry of bundle.filter((step) => step.records)) {
     entry.records.forEach((record, index) => {
