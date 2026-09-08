@@ -607,6 +607,57 @@ describe('VMF Customer Context section reasoning', () => {
     }))
   })
 
+  test.each(['context', 'escaped request'])('losslessly fits 912 accepted records after the %s limit is exceeded', async (limit) => {
+    const evidenceObjects = Array.from({ length: 912 }, (_, index) => ({
+      ...makeEvidence(index + 1),
+      extractedFact: `Exact fact ${index}: "quoted" \\ source 漢. ${'x'.repeat(65)}`,
+      validationStatus: index % 2 ? 'VALIDATED' : 'UNVALIDATED',
+    }))
+    const reasoningCoverage = buildCustomerContextReasoningCoverage({ evidenceObjects })
+    const providerContext = { reasoningCoverage, supportAssets: [{ content: '' }] }
+    const initialBytes = Buffer.byteLength(JSON.stringify(providerContext), 'utf8')
+    // Match the measured live context size, or exceed only the escaped HTTP limit.
+    providerContext.supportAssets[0].content = limit === 'context'
+      ? 'g'.repeat(236810 - initialBytes)
+      : '"'.repeat(Math.floor((220 * 1024 - initialBytes - 20000) / 2))
+    const original = structuredClone(providerContext)
+    const fetchImpl = jest.fn().mockResolvedValue({ ok: true, headers: { get: () => '' },
+      json: async () => ({ status: 'completed', output: [{ type: 'message', content: [
+        { type: 'output_text', text: JSON.stringify(makeOutput()) },
+      ] }] }),
+    })
+    const adapter = createOpenAiRuntimeSectionReasoningAdapter({ apiKey: 'test-key', model: 'test-model', fetchImpl })
+    await adapter({ providerContext, allowedEvidenceIds: evidenceObjects.map((row) => row.evidenceObjectId) })
+    const bodyText = fetchImpl.mock.calls[0][1].body
+    const body = JSON.parse(bodyText)
+    const transported = JSON.parse(body.input)
+    const table = transported.reasoningCoverage.evidence
+    expect(table.rows).toHaveLength(912)
+    transported.reasoningCoverage.evidence = table.rows.map((row) => Object.fromEntries(
+      table.columns.map((column, index) => [column, row[index]]),
+    ))
+    expect(transported).toEqual(original)
+    expect(providerContext).toEqual(original)
+    expect(body.instructions).toContain('lossless table')
+    expect(Buffer.byteLength(body.input, 'utf8')).toBeLessThanOrEqual(220 * 1024)
+    expect(Buffer.byteLength(bodyText, 'utf8')).toBeLessThanOrEqual(256 * 1024)
+    if (limit === 'escaped request') {
+      expect(Buffer.byteLength(JSON.stringify(original), 'utf8')).toBeLessThan(220 * 1024)
+      expect(Buffer.byteLength(JSON.stringify({ ...body, input: JSON.stringify(original) }), 'utf8'))
+        .toBeGreaterThan(256 * 1024)
+    }
+  })
+
+  test('does not discard unknown evidence fields to make an oversized context fit', async () => {
+    const providerContext = { reasoningCoverage: buildCustomerContextReasoningCoverage({ evidenceObjects: [makeEvidence(1)] }) }
+    providerContext.reasoningCoverage.evidence[0].extra = 'x'.repeat(230 * 1024)
+    const fetchImpl = jest.fn()
+    const adapter = createOpenAiRuntimeSectionReasoningAdapter({ apiKey: 'test-key', model: 'test-model', fetchImpl })
+    await expect(adapter({ providerContext, allowedEvidenceIds: ['evidence_1'] }))
+      .rejects.toMatchObject({ details: { reason: 'PROVIDER_CONTEXT_TOO_LARGE' } })
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
   describe('admitted evidence reference schema', () => {
     const fakeResponse = (output = makeOutput()) => ({
       ok: true, headers: { get: () => 'test-request' },

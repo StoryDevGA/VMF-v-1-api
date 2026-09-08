@@ -360,10 +360,24 @@ const buildDeclaredReasoningSchema = (declarations = []) => {
   }
 }
 
-const buildRequestBody = ({ maxOutputTokens, model, providerContext, allowedEvidenceIds, reasoningArtefactDeclarations = [] }) => {
-  if (byteLength(providerContext) > MAX_PROVIDER_CONTEXT_BYTES) {
-    throw createProviderError('PROVIDER_CONTEXT_TOO_LARGE', 409)
+// Transport only: keep the persisted coverage, hashes and original evidence intact.
+const compactEvidenceContext = (context) => {
+  const coverage = context?.reasoningCoverage
+  const columns = ['evidenceObjectId', 'sourceId', 'excerpt']
+  if (coverage?.algorithm !== 'SECTION_REASONING_COVERAGE'
+    || !Array.isArray(coverage.evidence) || coverage.evidence.length === 0
+    || !coverage.evidence.every((row) => row && Object.keys(row).length === columns.length
+      && columns.every((column) => Object.hasOwn(row, column) && typeof row[column] === 'string'))) return context
+  return {
+    ...context,
+    reasoningCoverage: {
+      ...coverage,
+      evidence: { columns, rows: coverage.evidence.map((row) => columns.map((column) => row[column])) },
+    },
   }
+}
+
+const buildRequestBody = ({ maxOutputTokens, model, providerContext, allowedEvidenceIds, reasoningArtefactDeclarations = [] }) => {
   const requestBody = {
     model,
     store: false,
@@ -391,6 +405,20 @@ const buildRequestBody = ({ maxOutputTokens, model, providerContext, allowedEvid
           : buildAdmittedEvidenceSchema(allowedEvidenceIds),
       },
     },
+  }
+  // Try a lossless table only when the original request would be rejected.
+  // Package-declared contexts have their own schemas and must not be rewritten.
+  if (reasoningArtefactDeclarations.length === 0
+    && (Buffer.byteLength(requestBody.input, 'utf8') > MAX_PROVIDER_CONTEXT_BYTES
+      || byteLength(requestBody) > MAX_REQUEST_BODY_BYTES)) {
+    const compact = compactEvidenceContext(providerContext)
+    if (compact !== providerContext) {
+      requestBody.input = JSON.stringify(compact)
+      requestBody.instructions += ' reasoningCoverage.evidence is a lossless table: columns names each field in every rows entry, in order. Each row is one complete evidence record. validationStatusByEvidenceIndex[i] still belongs to rows[i]. Cite the exact evidenceObjectId values, never row numbers. Consider every row; the table does not reduce evidence coverage.'
+    }
+  }
+  if (Buffer.byteLength(requestBody.input, 'utf8') > MAX_PROVIDER_CONTEXT_BYTES) {
+    throw createProviderError('PROVIDER_CONTEXT_TOO_LARGE', 409)
   }
   if (byteLength(requestBody) > MAX_REQUEST_BODY_BYTES) {
     throw createProviderError('PROVIDER_REQUEST_TOO_LARGE', 409)
