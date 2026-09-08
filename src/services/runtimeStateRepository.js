@@ -89,6 +89,8 @@ const RUNTIME_STATE_V2_HANDOFF_CONTROL_PROJECTION = [
   RUNTIME_STATE_V2_CONTROL_PROJECTION,
   'framework_state.lock',
   'framework_state.publish',
+  ...['accepted', 'acceptedAt', 'refreshedAt', 'inputs', 'needsRefresh', 'needs_refresh']
+    .map((field) => `framework_state.evidence_pack.${field}`),
 ].join(' ')
 
 const RUNTIME_STATE_V2_CHILD_PROJECTION = Object.freeze({
@@ -143,6 +145,7 @@ const RENDERER_TRUTH_FIELDS = Object.freeze([
   'content', 'format', 'summary', 'generatedAt', 'generatedBy', 'acceptedAt', 'acceptedBy',
   'sourceGeneratedAt', 'actionKey', 'inputHash', 'evidenceHash', 'sectionEvidenceHash',
   'dependencyHash', 'boundedContextHash', 'contentHash', 'truthHash', 'truthEligibility', 'generator',
+  'reasoningArtefacts', 'reasoningArtefactReceipts', 'runtimeManagedSourceReceipt',
 ])
 const RUNTIME_STATE_V2_RENDERER_SECTION_PROJECTION = Object.freeze({
   sectionKey: 1, stateVersion: 1, sourceStateVersion: 1, stateStatus: 1, status: 1,
@@ -208,6 +211,13 @@ const RUNTIME_STATE_V2_GRAPH_ELEMENT_PROJECTION = Object.freeze({
 
 const RUNTIME_STATE_V2_HANDOFF_SECTION_PROJECTION = Object.freeze({
   ...RUNTIME_STATE_V2_CHILD_PROJECTION,
+  'sectionDetail.input': 1,
+  'sectionDetail.additionalEvidence': 1,
+  'sectionDetail.evidenceObjects': 1,
+  'sectionDetail.dependencies': 1,
+  ...Object.fromEntries(['content', 'generatedAt', 'inputHash', 'evidenceHash', 'dependencyHash',
+    'generator', 'reasoningArtefacts', 'reasoningArtefactReceipts', 'runtimeManagedSourceReceipt']
+    .map((field) => [`sectionDetail.generated.${field}`, 1])),
   // Whole fallback objects preserve presence (including {}) and getter precedence.
   // Accepted truth remains full fidelity, including its rich section intelligence.
   'sectionDetail.accepted': 1,
@@ -540,6 +550,11 @@ const getControl = async ({ scopes, runtimeInstanceId, includeHandoffEligibility
           handoffFrameworkState: {
             lock: structuredClone(runtime.framework_state?.lock || {}),
             publish: structuredClone(runtime.framework_state?.publish || {}),
+            evidence_pack: Object.fromEntries(
+              ['accepted', 'acceptedAt', 'refreshedAt', 'inputs', 'needsRefresh', 'needs_refresh']
+                .filter((field) => runtime.framework_state?.evidence_pack?.[field] !== undefined)
+                .map((field) => [field, structuredClone(runtime.framework_state.evidence_pack[field])]),
+            ),
           },
         }
       : {}),
@@ -1562,6 +1577,7 @@ export const getRuntimeStateOutcomeHandoffReadiness = async ({
       ...control.handoffFrameworkState,
       sections: Object.fromEntries(sectionRows.map((row) => [row.sectionKey, row.sectionDetail || {}])),
       evidence_pack: {
+        ...control.handoffFrameworkState?.evidence_pack,
         evidenceObjects: evidenceRows.map((row) => ({
           evidenceObjectId: normalizeText(row.evidenceObjectId),
           sourceId: normalizeText(row.sourceId),

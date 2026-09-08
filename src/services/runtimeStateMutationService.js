@@ -1,4 +1,5 @@
 import crypto from 'node:crypto'
+import { assertCustomerSectionTarget, assertRuntimeManagedCustomerWrite, isRuntimeManagedSection } from './runtimeManagedSectionService.js'
 import mongoose from 'mongoose'
 import FrameworkPackage from '../models/FrameworkPackage.js'
 import RuntimePathRegistry, {
@@ -2211,6 +2212,7 @@ const resolveSectionAcceptanceTarget = ({ frameworkPackage, payload }) => {
   }
 
   const resolvedRuntimePath = normalizeRuntimePath(section.runtimePath)
+  assertCustomerSectionTarget(section)
   const resolvedSectionKey = normalizeSectionKey(section.sectionKey || section.key)
 
   return {
@@ -2257,6 +2259,7 @@ const resolveSectionEvidenceTarget = ({ frameworkPackage, payload }) => {
   }
 
   const resolvedRuntimePath = normalizeRuntimePath(section.runtimePath)
+  assertCustomerSectionTarget(section)
   const resolvedSectionKey = normalizeSectionKey(section.sectionKey || section.key)
 
   return {
@@ -2353,7 +2356,7 @@ const isCurrentGeneratedAlreadyAccepted = ({ accepted, generated }) => {
   return normalizeComparableSectionContent(accepted) === normalizeComparableSectionContent(generated)
 }
 
-const buildAcceptedSectionTruth = ({
+export const buildAcceptedSectionTruth = ({
   actorUserId,
   acceptedAt,
   generated,
@@ -3180,6 +3183,7 @@ const buildProjectableSectionsForAdvance = ({ frameworkPackage, runtimePathRecor
   const uiSectionsByExactKey = buildUISectionIndexForAdvance(uiContract)
 
   return packageSections
+    .filter((section) => !isRuntimeManagedSection(section))
     .map((packageSection, packageIndex) => {
       const sectionKey = normalizeSectionKey(packageSection?.sectionKey || packageSection?.key)
       const runtimePath = normalizeRuntimePath(packageSection?.runtimePath)
@@ -3332,6 +3336,12 @@ export const mutateRuntimeState = async ({
     runtimePath,
     value,
   })
+
+  const writePackage = await resolvePackageForAdvance(runtimeInstance.packageId)
+  if (!writePackage) throw buildMutationError({ status: 409, code: 'CONFLICT',
+    message: 'The package must resolve before customer section input can be changed.',
+    reason: 'RUNTIME_MANAGED_PACKAGE_PROOF_MISSING' })
+  assertRuntimeManagedCustomerWrite({ frameworkPackage: writePackage, runtimePath })
 
   const previousFrameworkState = cloneValue(runtimeInstance.framework_state || {})
   const previousUpdatedBy = runtimeInstance.updatedBy

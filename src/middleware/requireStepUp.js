@@ -1,3 +1,4 @@
+import { asyncMiddleware } from './asyncMiddleware.js'
 import crypto from 'crypto'
 import { getRedis } from '../config/redis.js'
 import auditService from '../services/auditService.js'
@@ -44,7 +45,7 @@ const logStepUpDenied = async (req, reason, code) => {
   }
 }
 
-const requireStepUp = async (req, res, next) => {
+const requireStepUp = asyncMiddleware(async (req, res, next) => {
   const rawToken = req.headers['x-step-up-token']
   if (!rawToken) {
     await logStepUpDenied(req, 'missing_step_up_token', 'STEP_UP_REQUIRED')
@@ -87,6 +88,6 @@ const requireStepUp = async (req, res, next) => {
 
   await redis.del(key)
   return next()
-}
+})
 
 export default requireStepUp

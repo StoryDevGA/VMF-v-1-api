@@ -1,3 +1,4 @@
+import { escapeRegex } from '../utils/controllerUtils.js'
 /**
  * Tenant Controller
  *
@@ -284,7 +285,7 @@ export const listTenants = async (req, res, next) => {
     }
 
     if (status) filter.status = status
-    if (q) filter.name = { $regex: q, $options: 'i' }
+    if (q) filter.name = { $regex: escapeRegex(q), $options: 'i' }
 
     const pageNum = Math.max(1, parseInt(page, 10) || 1)
     const limit = Math.min(100, Math.max(1, parseInt(pageSize, 10) || 20))

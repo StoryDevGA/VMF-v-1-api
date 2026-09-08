@@ -10,6 +10,7 @@
 import { Router } from 'express'
 import authJwt from '../middleware/authJwt.js'
 import loadScopes from '../middleware/loadScopes.js'
+import requireStepUp from '../middleware/requireStepUp.js'
 import { requirePlatformRole } from '../middleware/authorize.js'
 import { auditRateLimit, userManagementRateLimit } from '../middleware/rateLimits.js'
 import {
@@ -54,12 +55,13 @@ gdprRouter.get(
 gdprRouter.post(
   '/deletion-requests/:requestId/process',
   userManagementRateLimit,
+  requireStepUp,
   validateRequestIdParams,
   validateProcessDeletionRequest,
   processDeletionRequest,
 )
 
 gdprRouter.get('/retention', auditRateLimit, getRetentionInfo)
-gdprRouter.post('/retention/cleanup', userManagementRateLimit, runRetentionCleanup)
+gdprRouter.post('/retention/cleanup', userManagementRateLimit, requireStepUp, runRetentionCleanup)
 
 export default gdprRouter

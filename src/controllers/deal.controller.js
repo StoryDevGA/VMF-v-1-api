@@ -1,3 +1,4 @@
+import { escapeRegex } from '../utils/controllerUtils.js'
 /**
  * Deal Controller
  *
@@ -40,8 +41,8 @@ export const listDeals = async (req, res, next) => {
     if (status) filter.status = status
     if (q) {
       filter.$or = [
-        { title: { $regex: q, $options: 'i' } },
-        { stage: { $regex: q, $options: 'i' } },
+        { title: { $regex: escapeRegex(q), $options: 'i' } },
+        { stage: { $regex: escapeRegex(q), $options: 'i' } },
       ]
     }
 

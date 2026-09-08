@@ -40,6 +40,6 @@ router.post('/refresh', authRateLimit, validateRefresh, refresh)
 
 router.post('/logout', authJwt, logout)
 router.get('/me', authJwt, getMe)
-router.post('/step-up', authJwt, validateStepUp, stepUp)
+router.post('/step-up', authJwt, authRateLimit, authHourlyRateLimit, validateStepUp, stepUp)
 
 export default router

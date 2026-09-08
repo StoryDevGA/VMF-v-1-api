@@ -1,6 +1,24 @@
+import crypto from 'node:crypto'
 import jwt from 'jsonwebtoken'
 import { getRedis } from '../config/redis.js'
 import env from '../config/env.js'
+
+export class TokenAuthenticationError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'TokenAuthenticationError'
+    this.code = 'AUTH_TOKEN_REJECTED'
+  }
+}
+
+export const isTokenAuthenticationError = (error) =>
+  error instanceof TokenAuthenticationError
+  || error instanceof jwt.JsonWebTokenError
+  || error instanceof jwt.TokenExpiredError
+  || error instanceof jwt.NotBeforeError
+
+const blacklistKey = (token) =>
+  `blacklist:sha256:${crypto.createHash('sha256').update(token).digest('hex')}`
 
 class TokenService {
   constructor() {
@@ -56,28 +74,20 @@ class TokenService {
    * Verify and decode access token
    */
   verifyAccessToken(token) {
-    try {
-      return jwt.verify(token, env.jwtSecret, {
-        issuer: 'storylineos-vmf-api',
-        audience: 'storylineos-vmf-client'
-      })
-    } catch (error) {
-      throw new Error('Invalid access token')
-    }
+    return jwt.verify(token, env.jwtSecret, {
+      issuer: 'storylineos-vmf-api',
+      audience: 'storylineos-vmf-client'
+    })
   }
 
   /**
    * Verify and decode refresh token
    */
   verifyRefreshToken(token) {
-    try {
-      return jwt.verify(token, env.jwtRefreshSecret, {
-        issuer: 'storylineos-vmf-api',
-        audience: 'storylineos-vmf-client'
-      })
-    } catch (error) {
-      throw new Error('Invalid refresh token')
-    }
+    return jwt.verify(token, env.jwtRefreshSecret, {
+      issuer: 'storylineos-vmf-api',
+      audience: 'storylineos-vmf-client'
+    })
   }
 
   /**
@@ -93,7 +103,7 @@ class TokenService {
       const storedToken = await redis.get(refreshKey)
       
       if (storedToken !== refreshToken) {
-        throw new Error('Invalid or expired refresh token')
+        throw new TokenAuthenticationError('Invalid or expired refresh token')
       }
     }
 
@@ -102,7 +112,7 @@ class TokenService {
     const user = await User.findById(decoded.userId)
     
     if (!user || !user.isActive) {
-      throw new Error('User not found or inactive')
+      throw new TokenAuthenticationError('User not found or inactive')
     }
 
     return this.generateTokens(user)
@@ -121,7 +131,7 @@ class TokenService {
       if (decoded && decoded.exp) {
         const ttl = decoded.exp - Math.floor(Date.now() / 1000)
         if (ttl > 0) {
-          await redis.setex(`blacklist:${token}`, ttl, 'true')
+          await redis.setex(blacklistKey(token), ttl, 'true')
         }
       }
     } catch (error) {
@@ -137,8 +147,11 @@ class TokenService {
     try {
       const redis = getRedis()
       if (!redis) return false // Redis unavailable — assume not blacklisted
-      const result = await redis.get(`blacklist:${token}`)
-      return result === 'true'
+      const result = await redis.get(blacklistKey(token))
+      if (result === 'true') return true
+      // Read-only transition: honor revocations written before hashed keys shipped.
+      // Remove this fallback after the maximum pre-deployment access-token TTL.
+      return (await redis.get(`blacklist:${token}`)) === 'true'
     } catch (error) {
       // If Redis is down, assume token is not blacklisted to avoid breaking auth
       console.error('Failed to check token blacklist:', error.message)

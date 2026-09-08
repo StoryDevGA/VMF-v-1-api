@@ -25,6 +25,7 @@ import crypto from 'crypto'
 
 beforeAll(() => {
   process.env.NODE_ENV = 'test'
+  process.env.IDENTITY_PLUS_WEBHOOK_SECRET = WEBHOOK_SECRET
   process.env.JWT_SECRET =
     'test-jwt-secret-for-unit-tests-should-be-long-and-complex-in-production'
   process.env.JWT_REFRESH_SECRET =
@@ -238,8 +239,15 @@ describe('Circuit breaker', () => {
 /* ================================================================== */
 
 describe('Webhook signature verification', () => {
+  test('missing raw bytes and malformed hex signatures fail closed', () => {
+    const body = Buffer.from('{"email":"a@b.com"}')
+    const signature = crypto.createHmac('sha256', WEBHOOK_SECRET).update(body).digest('hex')
+    expect(identityPlusService.verifyWebhookSignature(undefined, signature, WEBHOOK_SECRET)).toBe(false)
+    expect(identityPlusService.verifyWebhookSignature(body.toString(), signature, WEBHOOK_SECRET)).toBe(false)
+    expect(identityPlusService.verifyWebhookSignature(body, `${signature}zz`, WEBHOOK_SECRET)).toBe(false)
+  })
   test('valid signature returns true', () => {
-    const body = '{"email":"a@b.com"}'
+    const body = Buffer.from('{"email":"a@b.com"}')
     const sig = crypto
       .createHmac('sha256', WEBHOOK_SECRET)
       .update(body)
@@ -251,24 +259,24 @@ describe('Webhook signature verification', () => {
   })
 
   test('wrong signature returns false', () => {
-    const body = '{"email":"a@b.com"}'
+    const body = Buffer.from('{"email":"a@b.com"}')
     expect(
       identityPlusService.verifyWebhookSignature(body, 'badbadbadbad', WEBHOOK_SECRET),
     ).toBe(false)
   })
 
   test('missing signature returns false', () => {
-    const body = '{"email":"a@b.com"}'
+    const body = Buffer.from('{"email":"a@b.com"}')
     expect(
       identityPlusService.verifyWebhookSignature(body, undefined, WEBHOOK_SECRET),
     ).toBe(false)
   })
 
-  test('returns true when no secret configured (dev mode)', () => {
-    const body = '{"email":"a@b.com"}'
+  test('returns false when no secret is configured', () => {
+    const body = Buffer.from('{"email":"a@b.com"}')
     expect(
       identityPlusService.verifyWebhookSignature(body, undefined, ''),
-    ).toBe(true)
+    ).toBe(false)
   })
 })
 
@@ -279,26 +287,48 @@ describe('Webhook signature verification', () => {
 describe('POST /api/v1/webhooks/identity-plus/registration-complete', () => {
   const ENDPOINT = '/api/v1/webhooks/identity-plus/registration-complete'
 
-  test('returns 401 when signature is invalid and secret is configured', async () => {
-    // Temporarily set the webhook secret env var
-    const origSecret = process.env.IDENTITY_PLUS_WEBHOOK_SECRET
-    process.env.IDENTITY_PLUS_WEBHOOK_SECRET = WEBHOOK_SECRET
+  test('missing configured secret denies before user or audit access', async () => {
+    const env = (await import('../config/env.js')).default
+    const original = env.identityPlusWebhookSecret
+    env.identityPlusWebhookSecret = ''
+    try {
+      const payload = { externalId: 'ext_1', email: 'jane@example.com' }
+      const response = await request.post(ENDPOINT).set('X-Identity-Plus-Signature', signPayload(payload)).send(payload)
+      expect(response.status).toBe(401)
+      expect(User.findOne).not.toHaveBeenCalled()
+      expect(AuditLog.createLog).not.toHaveBeenCalled()
+    } finally { env.identityPlusWebhookSecret = original }
+  })
 
-    // Force the env module to pick up the new value by importing fresh
-    // Since env is already cached, we patch the service directly instead
-    const payload = { externalId: 'ext_1', email: 'jane@example.com' }
-
-    const res = await request
-      .post(ENDPOINT)
+  test('rejects invalid signatures before model lookup or audit', async () => {
+    const res = await request.post(ENDPOINT)
       .set('X-Identity-Plus-Signature', 'invalidsig')
-      .send(payload)
+      .send({ externalId: 'ext_1', email: 'jane@example.com' })
+    expect(res.status).toBe(401)
+    expect(res.body.error.code).toBe('WEBHOOK_SIGNATURE_INVALID')
+    expect(User.findOne).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
 
-    // Restore
-    process.env.IDENTITY_PLUS_WEBHOOK_SECRET = origSecret
+  test('verifies exact noncanonical JSON bytes instead of reserializing', async () => {
+    User.findOne.mockResolvedValue(null)
+    const raw = '{  "externalId":"ext_1", "email":"nobody@example.com", "unused":1e2 }'
+    const signature = crypto.createHmac('sha256', WEBHOOK_SECRET).update(raw).digest('hex')
+    const accepted = await request.post(ENDPOINT).type('json')
+      .set('X-Identity-Plus-Signature', signature).send(raw)
+    expect(accepted.status).toBe(200)
+    User.findOne.mockClear()
+    const rejected = await request.post(ENDPOINT).type('json')
+      .set('X-Identity-Plus-Signature', signature).send(JSON.stringify(JSON.parse(raw)))
+    expect(rejected.status).toBe(401)
+    expect(User.findOne).not.toHaveBeenCalled()
+  })
 
-    // Without env module reload, the service sees empty string → skips verification
-    // This test validates the route is reachable; signature test covered in unit tests above
-    expect([200, 401, 422]).toContain(res.status)
+  test('rejects an unsigned request even in test mode', async () => {
+    const res = await request.post(ENDPOINT).send({ externalId: 'ext_1', email: 'jane@example.com' })
+    expect(res.status).toBe(401)
+    expect(User.findOne).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 
   test('returns 422 when externalId is missing', async () => {

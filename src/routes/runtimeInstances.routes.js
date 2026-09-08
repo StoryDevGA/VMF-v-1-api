@@ -1,6 +1,7 @@
 import express, { Router } from 'express'
 import authJwt from '../middleware/authJwt.js'
 import loadScopes from '../middleware/loadScopes.js'
+import { documentIngestionRateLimit } from '../middleware/rateLimits.js'
 import {
   acceptRuntimeDiscovery,
   acceptRuntimeSection,
@@ -136,6 +137,9 @@ const isDocumentIngestionMutation = (req) => {
 }
 
 router.use(authJwt, loadScopes)
+router.use((req, res, next) => (
+  isDocumentIngestionMutation(req) ? documentIngestionRateLimit(req, res, next) : next()
+))
 router.use((req, res, next) => (
   isDocumentIngestionMutation(req)
     ? documentIngestionJsonParser(req, res, next)

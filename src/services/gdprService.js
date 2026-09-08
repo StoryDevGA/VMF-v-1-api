@@ -8,7 +8,8 @@
  *   - GDPR record retention cleanup
  */
 
-import crypto from 'crypto'
+import mongoose from 'mongoose'
+import auditService from './auditService.js'
 import { AuditLog, DataDeletionRequest, Tenant, User } from '../models/index.js'
 import auditRetentionService from './auditRetentionService.js'
 import env from '../config/env.js'
@@ -17,6 +18,8 @@ import logger from '../config/logger.js'
 /* ------------------------------------------------------------------ */
 /*  Constants & helpers                                               */
 /* ------------------------------------------------------------------ */
+
+const withSession = (query, session) => session ? query.session(session) : query
 
 const DAY_MS = 24 * 60 * 60 * 1000
 
@@ -49,23 +52,10 @@ const redactSensitiveData = (value) => {
   return result
 }
 
-const computeAuditSignature = (doc, diff) => {
-  const data = {
-    ts: doc.ts,
-    actorUserId: doc.actorUserId,
-    action: doc.action,
-    resourceType: doc.resourceType,
-    resourceId: doc.resourceId,
-    scope: doc.scope,
-    diff,
-    ip: doc.ip,
-    userAgent: doc.userAgent,
-    requestId: doc.requestId,
-  }
-  return crypto
-    .createHmac('sha256', env.auditSignatureSecret)
-    .update(JSON.stringify(data, null, 0))
-    .digest('hex')
+const resealAudit = (doc, diff) => {
+  const audit = AuditLog.hydrate({ ...doc, diff, signatureVersion: doc.signatureVersion || 1 })
+  audit.generateSignature()
+  return { signature: audit.signature, signatureVersion: audit.signatureVersion }
 }
 
 /* ------------------------------------------------------------------ */
@@ -81,7 +71,7 @@ const computeAuditSignature = (doc, diff) => {
  * @param {string|import('mongoose').Types.ObjectId} userId
  * @returns {Promise<{matchedCount: number, updatedCount: number}>}
  */
-const anonymizeUserAuditTrail = async (userId) => {
+const anonymizeUserAuditTrail = async (userId, session) => {
   const query = {
     $or: [
       { resourceType: 'User', resourceId: userId },
@@ -89,7 +79,7 @@ const anonymizeUserAuditTrail = async (userId) => {
     ],
   }
 
-  const logs = await AuditLog.find(query).lean()
+  const logs = await withSession(AuditLog.find(query), session).lean()
   if (logs.length === 0) {
     return { matchedCount: 0, updatedCount: 0 }
   }
@@ -108,7 +98,7 @@ const anonymizeUserAuditTrail = async (userId) => {
         update: {
           $set: {
             diff: sanitizedDiff,
-            signature: computeAuditSignature(logDoc, sanitizedDiff),
+            ...resealAudit(logDoc, sanitizedDiff),
           },
         },
       },
@@ -116,7 +106,7 @@ const anonymizeUserAuditTrail = async (userId) => {
   }
 
   if (operations.length > 0) {
-    await AuditLog.collection.bulkWrite(operations, { ordered: false })
+    await AuditLog.collection.bulkWrite(operations, { ordered: true, ...(session ? { session } : {}) })
   }
 
   return {
@@ -138,8 +128,8 @@ const anonymizeUserAuditTrail = async (userId) => {
  * @param {string|import('mongoose').Types.ObjectId} userId
  * @returns {Promise<Object>} Export bundle with `user`, `auditLogs`, `deletionRequests`, `meta`
  */
-const exportUserData = async (userId) => {
-  const userDoc = await User.findById(userId)
+const exportUserData = async (userId, session) => {
+  const userDoc = await withSession(User.findById(userId), session)
   if (!userDoc) {
     throw makeHttpError(404, 'NOT_FOUND', 'User not found.')
   }
@@ -152,14 +142,12 @@ const exportUserData = async (userId) => {
     ],
   }
 
-  const [auditLogs, totalAuditLogs, deletionRequests] = await Promise.all([
-    AuditLog.find(auditQuery)
-      .sort({ ts: -1 })
-      .limit(env.gdprExportAuditLimit)
-      .lean(),
-    AuditLog.countDocuments(auditQuery),
-    DataDeletionRequest.find({ userId }).sort({ createdAt: -1 }).lean(),
-  ])
+  // Transactions cannot safely run parallel operations on the same session.
+  const auditLogs = await withSession(AuditLog.find(auditQuery), session)
+    .sort({ ts: -1 }).limit(env.gdprExportAuditLimit).lean()
+  const totalAuditLogs = await withSession(AuditLog.countDocuments(auditQuery), session)
+  const deletionRequests = await withSession(DataDeletionRequest.find({ userId }), session)
+    .sort({ createdAt: -1 }).lean()
 
   return {
     exportedAt: new Date().toISOString(),
@@ -295,7 +283,7 @@ const getDeletionRequest = async (requestId) => {
  *   1. Exports a snapshot of the user's data.
  *   2. Removes the user from tenant admin arrays.
  *   3. Anonymizes the user's audit trail and re-seals signatures.
- *   4. Scrubs the user document, then hard-deletes it.
+ *   4. Hard-deletes the disabled user and commits completion plus audit atomically.
  *
  * @param {Object} params
  * @param {string} params.requestId      — the deletion-request ObjectId
@@ -305,107 +293,78 @@ const getDeletionRequest = async (requestId) => {
  * @returns {Promise<{request: Object, summary: Object}>}
  */
 const processDeletionRequest = async ({
-  requestId,
-  reviewerUserId,
-  decision,
-  reviewerNotes,
+  requestId, reviewerUserId, decision, reviewerNotes, auditContext,
 }) => {
-  const requestDoc = await DataDeletionRequest.findById(requestId)
-  if (!requestDoc) {
-    throw makeHttpError(404, 'NOT_FOUND', 'Deletion request not found.')
+  if (!['APPROVE', 'REJECT'].includes(decision)) {
+    throw makeHttpError(422, 'VALIDATION_FAILED', 'Invalid deletion decision.')
   }
-  if (requestDoc.status !== 'PENDING') {
-    throw makeHttpError(
-      409,
-      'CONFLICT',
-      `Deletion request is already ${requestDoc.status.toLowerCase()}.`,
-    )
-  }
-
-  const now = new Date()
-  requestDoc.reviewedByUserId = reviewerUserId
-  requestDoc.reviewedAt = now
-  requestDoc.reviewerNotes = reviewerNotes || ''
-
-  if (decision === 'REJECT') {
-    requestDoc.status = 'REJECTED'
-    await requestDoc.save()
-    return {
-      request: requestDoc.toJSON(),
-      summary: { action: 'REJECTED' },
-    }
-  }
-
-  const user = await User.findById(requestDoc.userId)
-  if (!user) {
-    throw makeHttpError(404, 'NOT_FOUND', 'Target user no longer exists.')
-  }
-  if (user.isActive) {
-    throw makeHttpError(
-      422,
-      'VALIDATION_FAILED',
-      'Target user must be disabled before GDPR deletion processing.',
-    )
-  }
-
-  const exportBundle = await exportUserData(user._id)
-
-  await Tenant.updateMany(
-    { tenantAdminUserIds: user._id },
-    { $pull: { tenantAdminUserIds: user._id } },
-  )
-
-  const anonymizedAudit = await anonymizeUserAuditTrail(user._id)
-
-  const anonymizedProfile = {
-    email: redactedEmail(user._id),
-    name: redactedName(user._id),
-  }
-
-  await User.updateOne(
-    { _id: user._id },
-    {
-      $set: {
-        email: anonymizedProfile.email,
-        name: anonymizedProfile.name,
-        isActive: false,
-        memberships: [],
-        tenantMemberships: [],
-        vmfGrants: [],
-        'identityPlus.trustStatus': 'REVOKED',
-      },
-      $unset: {
-        passwordHash: 1,
-        'identityPlus.externalId': 1,
-        'identityPlus.invitedAt': 1,
-        'identityPlus.trustedAt': 1,
-      },
-    },
-  )
-
-  await User.deleteOne({ _id: user._id })
-
-  requestDoc.status = 'COMPLETED'
-  requestDoc.processedAt = now
-  requestDoc.exportSnapshot = {
-    exportedAt: exportBundle.exportedAt,
-    auditLogCount: exportBundle.meta.auditLogCount,
-    deletionRequestCount: exportBundle.meta.deletionRequestCount,
-  }
-  requestDoc.executionSummary = {
-    deletedUserId: user._id,
-    anonymizedProfile,
-    anonymizedAuditLogs: anonymizedAudit.updatedCount,
-  }
-  await requestDoc.save()
-
-  return {
-    request: requestDoc.toJSON(),
-    summary: {
-      action: 'COMPLETED',
-      deletedUserId: user._id,
-      anonymizedAuditLogs: anonymizedAudit.updatedCount,
-    },
+  const session = await mongoose.startSession()
+  try {
+    return await session.withTransaction(async () => {
+      const requestDoc = await DataDeletionRequest.findById(requestId).session(session)
+      if (!requestDoc) throw makeHttpError(404, 'NOT_FOUND', 'Deletion request not found.')
+      if (requestDoc.status !== 'PENDING') {
+        throw makeHttpError(409, 'CONFLICT', 'Deletion request has already been processed.')
+      }
+      const now = new Date()
+      requestDoc.reviewedByUserId = reviewerUserId
+      requestDoc.reviewedAt = now
+      requestDoc.reviewerNotes = reviewerNotes || ''
+      if (decision === 'REJECT') {
+        requestDoc.status = 'REJECTED'
+        await requestDoc.save({ session })
+        return { request: requestDoc.toJSON(), summary: { action: 'REJECTED' } }
+      }
+      const user = await User.findById(requestDoc.userId).session(session)
+      if (!user) throw makeHttpError(404, 'NOT_FOUND', 'Target user no longer exists.')
+      if (user.isActive !== false) {
+        throw makeHttpError(422, 'VALIDATION_FAILED', 'Target user must be disabled before GDPR deletion processing.')
+      }
+      const tenants = await Tenant.find({ tenantAdminUserIds: user._id }).session(session).lean()
+      for (const tenant of tenants) {
+        if (tenant.status !== 'ENABLED') continue
+        const remainingIds = tenant.tenantAdminUserIds.filter((id) => String(id) !== String(user._id))
+        const replacement = remainingIds.length ? await User.findOne({
+          _id: { $in: remainingIds }, isActive: true, 'memberships.customerId': tenant.customerId,
+        }).session(session) : null
+        if (!replacement) {
+          throw makeHttpError(409, 'TENANT_ADMIN_REQUIRED', 'Assign an active tenant administrator before deleting this user.')
+        }
+      }
+      const exportBundle = await exportUserData(user._id, session)
+      await Tenant.updateMany(
+        { tenantAdminUserIds: user._id },
+        { $pull: { tenantAdminUserIds: user._id } },
+        { session },
+      )
+      const anonymizedAudit = await anonymizeUserAuditTrail(user._id, session)
+      const deleted = await User.deleteOne({ _id: user._id, isActive: false }, { session })
+      if (deleted.deletedCount !== 1) throw makeHttpError(409, 'CONFLICT', 'Target user changed during deletion.')
+      requestDoc.status = 'COMPLETED'
+      requestDoc.processedAt = now
+      requestDoc.exportSnapshot = {
+        exportedAt: exportBundle.exportedAt,
+        auditLogCount: exportBundle.meta.auditLogCount,
+        deletionRequestCount: exportBundle.meta.deletionRequestCount,
+      }
+      requestDoc.executionSummary = {
+        deletedUserId: user._id,
+        anonymizedProfile: { email: redactedEmail(user._id), name: redactedName(user._id) },
+        anonymizedAuditLogs: anonymizedAudit.updatedCount,
+      }
+      await requestDoc.save({ session })
+      await auditService.logFromRequest(auditContext, {
+        actorUserId: reviewerUserId,
+        action: 'USER_DELETED', resourceType: 'User', resourceId: user._id,
+        diff: { source: 'GDPR_DELETION_REQUEST', requestId, anonymizedAuditLogs: anonymizedAudit.updatedCount },
+      }, { session, throwOnError: true })
+      return {
+        request: requestDoc.toJSON(),
+        summary: { action: 'COMPLETED', deletedUserId: user._id, anonymizedAuditLogs: anonymizedAudit.updatedCount },
+      }
+    })
+  } finally {
+    await session.endSession()
   }
 }
 

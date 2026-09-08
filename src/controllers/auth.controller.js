@@ -11,8 +11,10 @@
  */
 
 import crypto from 'crypto'
+import bcrypt from 'bcryptjs'
 import { Customer, User } from '../models/index.js'
-import tokenService from '../services/tokenService.js'
+import tokenService, { isTokenAuthenticationError } from '../services/tokenService.js'
+import { isPlatformMembership } from '../utils/platformMembership.js'
 import { getRedis } from '../config/redis.js'
 import env from '../config/env.js'
 import logger from '../config/logger.js'
@@ -25,6 +27,9 @@ import performanceCacheService, {
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                           */
 /* ------------------------------------------------------------------ */
+
+// Cost matches User.setPassword; this hash belongs to no account.
+const DUMMY_PASSWORD_HASH = '$2b$12$VHf0dH4YZ9qqlwaEMSamWO9R211e8bAM0n25h7iNJyV6hmxfkSEXm'
 
 const buildAuthenticatedUserResponseData = async (user) => {
   const [scopeSnapshotResult, customerScopesResult] = await Promise.allSettled([
@@ -46,7 +51,6 @@ const buildAuthenticatedUserResponseData = async (user) => {
       {
         err: customerScopesResult.reason,
         userId: user._id,
-        email: user.email,
       },
       'auth customer scope enrichment failed; continuing with empty customerScopes',
     )
@@ -85,8 +89,15 @@ const performLogin = async (req, res, { requiredRole } = {}) => {
   // findByEmail selects +passwordHash
   const user = await User.findByEmail(email)
 
-  if (!user) {
-    logger.warn({ email, requestId: req.requestId }, 'login failed — unknown email')
+  let passwordValid = false
+  if (user?.passwordHash) {
+    passwordValid = await user.comparePassword(password)
+  } else {
+    await bcrypt.compare(password, DUMMY_PASSWORD_HASH)
+  }
+
+  if (!user || !passwordValid) {
+    logger.warn({ requestId: req.requestId }, 'login failed — invalid credentials')
     return res.status(401).json({
       error: {
         code: 'AUTH_INVALID_CREDENTIALS',
@@ -108,23 +119,10 @@ const performLogin = async (req, res, { requiredRole } = {}) => {
     })
   }
 
-  // Password check
-  const passwordValid = await user.comparePassword(password)
-  if (!passwordValid) {
-    logger.warn({ userId: user._id, requestId: req.requestId }, 'login failed — wrong password')
-    return res.status(401).json({
-      error: {
-        code: 'AUTH_INVALID_CREDENTIALS',
-        message: 'Invalid email or password.',
-        requestId: req.requestId,
-      },
-    })
-  }
-
   // Role gate (Super Admin endpoint only)
   if (requiredRole) {
-    const hasPlatformRole = user.memberships.some(
-      (m) => m.customerId === null && m.roles.includes(requiredRole),
+    const hasPlatformRole = (user.memberships || []).some(
+      (m) => isPlatformMembership(m) && m.roles?.includes(requiredRole),
     )
     if (!hasPlatformRole) {
       logger.warn(
@@ -241,13 +239,7 @@ export const refresh = async (req, res, next) => {
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
-    // Specific error messages from tokenService
-    if (
-      err.message.includes('Invalid') ||
-      err.message.includes('expired') ||
-      err.message.includes('not found') ||
-      err.message.includes('inactive')
-    ) {
+    if (isTokenAuthenticationError(err)) {
       return res.status(401).json({
         error: {
           code: 'AUTH_REFRESH_FAILED',
@@ -256,7 +248,7 @@ export const refresh = async (req, res, next) => {
         },
       })
     }
-    next(err)
+    next(err instanceof Error ? err : new Error('Token refresh failed', { cause: err }))
   }
 }
 

@@ -17,7 +17,6 @@ import { createCustomerWithDefaults } from '../services/provisioningService.js'
 import auditService from '../services/auditService.js'
 import performanceCacheService from '../services/performanceCacheService.js'
 import customerGovernanceService from '../services/customerGovernanceService.js'
-import monitoringService from '../services/monitoringService.js'
 import emailService from '../services/emailService.js'
 import invitationService from '../services/invitationService.js'
 import { applyManualTestPasswordBootstrap } from '../services/manualTestPasswordBootstrapService.js'
@@ -412,7 +411,7 @@ export const listCustomers = async (req, res, next) => {
       filter.status = status === 'INACTIVE' ? 'DISABLED' : status
     }
     if (topology) filter.topology = topology
-    if (q) filter.name = { $regex: q, $options: 'i' }
+    if (q) filter.name = { $regex: escapeRegex(q), $options: 'i' }
 
     const pageNum = Math.max(1, parseInt(page, 10) || 1)
     const limit = Math.min(100, Math.max(1, parseInt(pageSize, 10) || 20))
@@ -739,45 +738,7 @@ export const updateCustomerStatus = async (req, res, next) => {
     await customer.save()
     await performanceCacheService.invalidateCustomerTopology(customer._id)
 
-    /* -------------------------------------------------------------- */
-    /*  Cascade: disable tenants and deactivate users when INACTIVE   */
-    /* -------------------------------------------------------------- */
-
-    let cascadeSummary = null
-
-    if (nextStatus === 'DISABLED' || nextStatus === 'ARCHIVED') {
-      const tenantResult = await Tenant.updateMany(
-        { customerId: customer._id, status: { $nin: ['DISABLED', 'ARCHIVED'] } },
-        { status: 'DISABLED' },
-      )
-
-      const affectedUsers = await User.find(
-        { 'memberships.customerId': customer._id, isActive: true },
-        { _id: 1 },
-      ).lean()
-
-      const userResult = await User.updateMany(
-        { 'memberships.customerId': customer._id, isActive: true },
-        { isActive: false },
-      )
-
-      // Invalidate permission caches for all affected users
-      await Promise.all(
-        affectedUsers.map((u) => performanceCacheService.invalidateUserPermissions(u._id)),
-      )
-
-      monitoringService.recordInactiveCustomerBlock({ surface: 'customer_status_cascade' })
-
-      cascadeSummary = {
-        tenantsDisabled: tenantResult.modifiedCount,
-        usersDeactivated: userResult.modifiedCount,
-      }
-
-      logger.info(
-        { customerId: customer._id, ...cascadeSummary, requestId: req.requestId },
-        'customer status cascade — tenants disabled and users deactivated',
-      )
-    }
+    // Access is denied by the customer status gates; shared identities and tenant flags are preserved.
 
     await auditService.logFromRequest(req, {
       action: 'CUSTOMER_STATUS_CHANGED',
@@ -786,7 +747,6 @@ export const updateCustomerStatus = async (req, res, next) => {
       scope: { customerId: customer._id },
       diff: {
         status: { from: previousStatus, to: nextStatus },
-        ...(cascadeSummary && { cascade: cascadeSummary }),
       },
     })
 

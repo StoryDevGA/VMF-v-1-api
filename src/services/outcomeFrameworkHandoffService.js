@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { evaluateRuntimeManagedSections, isRuntimeManagedSection } from './runtimeManagedSectionService.js'
 
 import { FrameworkPackage } from '../models/index.js'
 import auditService from './auditService.js'
@@ -56,6 +57,14 @@ const FRAMEWORK_PACKAGE_BOUNDED_PROJECTION = [
   'sections.sectionKey',
   'sections.runtimePath',
   'sections.required',
+  'sections.sectionMode',
+  'sections.runtimeRole',
+  'sections.runtimeManagedCompletion',
+  'sections.dependsOnSectionKeys',
+  'sections.validationKeys',
+  'dependencyLock.snapshotId',
+  'dependencyLock.snapshotHash',
+  'workflowBindings',
   'sections.notes',
   'reasoningArtefacts',
 ].join(' ')
@@ -433,22 +442,27 @@ const buildPackageIdentity = ({ runtimeInstance = {}, frameworkPackage = null, r
     handoff: declaration.handoff,
     schema: declaration.schema,
   }))
+  const internalSectionManifest = (frameworkPackage?.sections || []).filter(isRuntimeManagedSection)
+    .map((section) => ({ sectionKey: section.sectionKey, runtimePath: section.runtimePath,
+      required: section.required, sectionMode: section.sectionMode, runtimeRole: section.runtimeRole,
+      runtimeManagedCompletion: section.runtimeManagedCompletion }))
   return {
     packageId,
     packageKey,
     packageVersion,
     requiredSections: requiredSectionManifest,
+    internalSections: internalSectionManifest,
     reasoningArtefacts: reasoningArtefactManifest,
     requiredSectionManifestHash: sha256(requiredSectionManifest),
     reasoningArtefactManifestHash: sha256(reasoningArtefactManifest),
-    packageIdentityHash: sha256({ packageId, packageKey, packageVersion, requiredSectionManifest, reasoningArtefactManifest }),
+    packageIdentityHash: sha256({ packageId, packageKey, packageVersion, requiredSectionManifest, reasoningArtefactManifest, internalSectionManifest }),
   }
 }
 
 const resolveRequiredSections = (frameworkPackage = null) => {
   const sections = Array.isArray(frameworkPackage?.sections) ? frameworkPackage.sections : []
   return sections
-    .filter((section) => section?.required === true)
+    .filter((section) => section?.required === true && !isRuntimeManagedSection(section))
     .map((section) => ({
       sectionKey: normalizeKey(section.sectionKey || section.key),
       runtimePath: normalizeText(section.runtimePath),
@@ -767,6 +781,7 @@ const buildBlockedHandoff = ({
   currentness = {},
   knowledgeResolution = {},
   sectionTruth = [],
+  internalCompletion = [],
   evidenceRefs = [],
   intermediateReasoning = null,
 } = {}) => {
@@ -786,6 +801,7 @@ const buildBlockedHandoff = ({
     currentness,
     knowledgeResolution,
     sectionTruth,
+    internalCompletion,
     evidenceRefs,
     status,
   })
@@ -803,6 +819,7 @@ const buildBlockedHandoff = ({
     package: packageIdentity,
     canonicalEligibility,
     sectionTruth,
+    internalCompletion,
     evidenceRefs,
     knowledgeResolution,
     claimBoundaries: buildClaimBoundaries(),
@@ -843,6 +860,13 @@ export const buildFrameworkOutcomeStudioHandoff = ({
   const frameworkState = getFrameworkState(runtime)
   const canonicalEligibility = getCanonicalOutputEligibility(frameworkState)
   const requiredSections = resolveRequiredSections(frameworkPackage)
+  const runtimeManaged = evaluateRuntimeManagedSections({ frameworkPackage, frameworkState })
+  blockers.push(...runtimeManaged.blockers.map((blocker) => ({
+    code: 'RUNTIME_MANAGED_HANDOFF_BLOCKED', sectionKey: blocker.sectionKey,
+    reason: blocker.state, message: blocker.reason,
+  })))
+  const internalStateKeys = new Set((frameworkPackage?.sections || []).filter(isRuntimeManagedSection)
+    .flatMap((section) => [normalizeKey(section.sectionKey), normalizeKey(section.runtimePath?.split('.').at(-1))]))
   let reasoningArtefactDeclarations = []
   try {
     reasoningArtefactDeclarations = validateReasoningArtefactDeclarations({ frameworkPackage })
@@ -863,6 +887,7 @@ export const buildFrameworkOutcomeStudioHandoff = ({
   const evidenceIndex = buildEvidenceIndex(evidenceObjects)
   const sectionEntries = getSectionsEntries(frameworkState)
   const resolvedSectionTruth = sectionEntries
+    .filter(([stateSectionKey]) => !internalStateKeys.has(normalizeKey(stateSectionKey)))
     .map(([stateSectionKey, section]) => buildSectionHandoff({ stateSectionKey, section, evidenceIndex, frameworkPackage }))
     .filter((section) => section.truth.contentPresent || section.truth.truthHash || section.projectionReceipt)
     .sort((left, right) => left.sectionKey.localeCompare(right.sectionKey))
@@ -1012,6 +1037,7 @@ export const buildFrameworkOutcomeStudioHandoff = ({
     packageIdentityHash: packageIdentity.packageIdentityHash,
     eligibilityHash: sha256(canonicalEligibility),
     sectionTruthHash: sha256(sectionTruth.map((section) => section.sectionHash)),
+    internalCompletionHash: sha256(runtimeManaged.receipts),
     projectionHash: sha256(sectionTruth.map((section) => section.projectionReceipt?.receiptHash || '')),
     evidenceHash: sha256(evidenceRefs),
     knowledgeResolutionHash: knowledgeResolution.resolutionHash,
@@ -1038,6 +1064,7 @@ export const buildFrameworkOutcomeStudioHandoff = ({
     sectionTruth,
     evidenceRefs,
     intermediateReasoning,
+    internalCompletion: runtimeManaged.receipts,
   })
 }
 

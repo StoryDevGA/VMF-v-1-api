@@ -157,8 +157,7 @@ const evaluateActiveCustomerAccess = async ({
 }
 
 const shouldBypassInactiveCustomerEvaluation = (req) =>
-  typeof req.originalUrl === 'string' &&
-  req.originalUrl.startsWith('/api/v1/super-admin/')
+  req.skipInactiveCustomerCheck === true
 
 const loadScopes = async (req, res, next) => {
   try {

@@ -1,6 +1,9 @@
 import { afterAll, beforeEach, describe, expect, jest, test } from '@jest/globals'
 import mongoose from 'mongoose'
 import { RUNTIME_SECTION_DETAIL_FORBIDDEN_KEYS } from '../models/RuntimeStateSection.js'
+import { buildRuntimeManagedSourceReceipt, evaluateRuntimeManagedSections } from '../services/runtimeManagedSectionService.js'
+import { buildReasoningArtefactOutputs } from '../services/reasoningArtefactContractService.js'
+import { hashSectionInput } from '../services/runtimeSectionModelService.js'
 
 const getRuntimeInstance = jest.fn()
 const resolveFrameworkOutcomeStudioHandoff = jest.fn()
@@ -1452,6 +1455,55 @@ describe('runtime State Storage V2 repository', () => {
     expect(result.control).not.toHaveProperty('handoffFrameworkState')
   })
 
+  test('preserves Discovery currentness through the actual bounded handoff reader and rejects changed acceptance', async () => {
+    const section = { sectionKey: 'survey_findings', runtimePath: 'framework_state.sections.survey_findings', required: true }
+    const declaration = {
+      artefactKey: 'assuranceRecord', label: 'Assurance record', purpose: 'Internal completion proof.', required: true,
+      lifecycleStage: 'GENERATED', sectionKeys: [section.sectionKey], workflowActionKeys: ['GENERATE_SECTION'],
+      sourcePath: 'reasoningArtefacts.assuranceRecord', writePath: `${section.runtimePath}.generated.reasoningArtefacts.assuranceRecord`,
+      schema: { type: 'object', required: ['value'], properties: { value: { type: 'string' } }, additionalProperties: false },
+      validation: { currentnessFields: ['inputHash', 'generatedAt'], maxBytes: 4096 },
+      handoff: { eligible: true, mappingKey: 'assuranceRecord', targetPath: 'outcome_studio.intermediate_reasoning.assuranceRecord' },
+    }
+    const frameworkPackage = {
+      packageKey: 'custom-reader-proof', version: '1.0.0', dependencyLock: { snapshotId: 'snapshot-1', snapshotHash: hashSectionInput('dependencies') },
+      sections: [section, { sectionKey: 'internal_packet', runtimePath: 'framework_state.sections.internal_packet', required: true, sectionMode: 'RUNTIME_MANAGED',
+        runtimeManagedCompletion: { sourceSectionKeys: [section.sectionKey], reasoningArtefactKeys: ['assuranceRecord'] } }], reasoningArtefacts: [declaration],
+    }
+    const generated = { content: 'Accepted survey findings.', generatedAt: '2026-09-08T09:00:00.000Z', inputHash: hashSectionInput('Survey input') }
+    const output = buildReasoningArtefactOutputs({ candidate: { reasoningArtefacts: { assuranceRecord: { value: 'Survey proof.' } } }, declarations: [declaration],
+      packageKey: frameworkPackage.packageKey, packageVersion: frameworkPackage.version, sectionKey: section.sectionKey,
+      inputHash: generated.inputHash, generatedAt: generated.generatedAt })
+    Object.assign(generated, { reasoningArtefacts: output.values, reasoningArtefactReceipts: output.receipts })
+    const detail = makeSectionDetail({ input: 'Survey input', generated, review: { status: 'ACCEPTED' }, state: { status: 'ACCEPTED' }, accepted: { content: generated.content, truthHash: 'fixture-truth', acceptedAt: '2026-09-08T09:01:00.000Z',
+      inputHash: generated.inputHash, sourceGeneratedAt: generated.generatedAt, reasoningArtefacts: structuredClone(output.values), reasoningArtefactReceipts: structuredClone(output.receipts) } })
+    const discovery = { accepted: true, acceptedAt: '2026-09-08T08:00:00.000Z', refreshedAt: '2026-09-08T07:00:00.000Z', inputs: { researchScope: 'Survey' }, needsRefresh: false, needs_refresh: false }
+    const frameworkState = { sections: { survey_findings: detail }, evidence_pack: discovery }
+    generated.runtimeManagedSourceReceipt = buildRuntimeManagedSourceReceipt({ frameworkPackage, frameworkState, section, generated })
+    const expected = evaluateRuntimeManagedSections({ frameworkPackage, frameworkState })
+    expect(expected).toMatchObject({ readySectionCount: 1, blockers: [] })
+    const storedControl = makeControl({ _id: RUNTIME_ID, framework_state: { evidence_pack: { ...discovery, rawPayload: 'must-not-be-read' }, sections: { forbiddenLegacyPayload: true } } })
+    getRuntimeInstance.mockImplementation(async ({ projection }) => {
+      const projected = projectRendererRow(storedControl, Object.fromEntries(projection.split(/\s+/).filter(Boolean).map((path) => [path, 1])))
+      // Match getRuntimeInstance's normal _id-to-id serialization after projection.
+      return { ...projected, id: projected._id }
+    })
+    const row = { sectionKey: section.sectionKey, current: true, stateStatus: 'CURRENT', stateVersion: 'runtime-revision:1', sourceStateVersion: 'runtime-revision:1', sectionDetail: detail }
+    collections.set(RUNTIME_STATE_V2_COLLECTIONS.SECTIONS, { find: jest.fn((_filter, { projection }) => makeCursor([projectRendererRow(row, projection)])) })
+    await getRuntimeStateOutcomeHandoffReadiness({ scopes: SCOPES, runtimeInstanceId: RUNTIME_ID })
+    const delegated = resolveFrameworkOutcomeStudioHandoff.mock.calls[0][0].runtimeInstance
+    expect(delegated.framework_state.evidence_pack).toEqual({ ...discovery, evidenceObjects: [] })
+    expect(delegated.framework_state.sections).not.toHaveProperty('forbiddenLegacyPayload')
+    expect(evaluateRuntimeManagedSections({ frameworkPackage, frameworkState: delegated.framework_state })).toEqual(expected)
+    expect(getRuntimeInstance.mock.calls[0][0].projection.split(/\s+/)).not.toContain('framework_state')
+    storedControl.framework_state.evidence_pack.acceptedAt = '2026-09-08T10:00:00.000Z'
+    await getRuntimeStateOutcomeHandoffReadiness({ scopes: SCOPES, runtimeInstanceId: RUNTIME_ID })
+    const changed = resolveFrameworkOutcomeStudioHandoff.mock.calls[1][0].runtimeInstance
+    expect(evaluateRuntimeManagedSections({ frameworkPackage, frameworkState: changed.framework_state })).toMatchObject({
+      readySectionCount: 0, blockers: [expect.objectContaining({ state: 'RUNTIME_MANAGED_PROOF_STALE' })],
+    })
+  })
+
   test('projects six rich handoff rows below the cap while retaining full accepted truth and empty fallbacks', async () => {
     const narrative = Array.from({ length: 6 }, () => 'n'.repeat(4000))
     const detail = {
@@ -1491,7 +1543,7 @@ describe('runtime State Storage V2 repository', () => {
     expect(passed.generated.evidenceProjection).toEqual({})
     expect(passed.intelligence.scopedEvidence).toEqual({})
     expect(passed.generated.intelligence.scopedEvidence).toEqual({})
-    expect(passed.generated).not.toHaveProperty('content')
+    expect(passed.generated.content).toEqual(detail.generated.content)
     expect(passed.intelligence).not.toHaveProperty('sectionIntelligence')
   })
 

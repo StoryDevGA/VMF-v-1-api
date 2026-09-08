@@ -131,21 +131,6 @@ userSchema.methods.comparePassword = async function(password) {
   return bcrypt.compare(password, this.passwordHash)
 }
 
-userSchema.methods.hasCustomerRole = function(customerId, role) {
-  const membership = this.memberships.find(m => 
-    m.customerId.toString() === customerId.toString()
-  )
-  return membership ? membership.roles.includes(role) : false
-}
-
-userSchema.methods.hasTenantRole = function(customerId, tenantId, role) {
-  const membership = this.tenantMemberships.find(m => 
-    m.customerId.toString() === customerId.toString() &&
-    m.tenantId.toString() === tenantId.toString()
-  )
-  return membership ? membership.roles.includes(role) : false
-}
-
 userSchema.methods.hasVmfPermission = function(customerId, tenantId, vmfId, permission) {
   const grant = this.vmfGrants.find(g => 
     g.customerId.toString() === customerId.toString() &&

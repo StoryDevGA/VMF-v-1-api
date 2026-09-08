@@ -16,12 +16,11 @@
  */
 
 import gdprService from '../services/gdprService.js'
-import auditService from '../services/auditService.js'
+import { normalizeHttpError } from '../middleware/errorHandler.js'
 import logger from '../config/logger.js'
 
 const handleError = (req, res, err, fallbackMessage) => {
-  const status = err.status || 500
-  const code = err.code || 'INTERNAL_ERROR'
+  const { status, code, message } = normalizeHttpError(err)
 
   if (status >= 500) {
     logger.error({ err, requestId: req.requestId }, fallbackMessage)
@@ -30,8 +29,8 @@ const handleError = (req, res, err, fallbackMessage) => {
   return res.status(status).json({
     error: {
       code,
-      message: err.message || fallbackMessage,
-      details: err.details,
+      message,
+      ...(status < 500 && err?.details ? { details: err.details } : {}),
       requestId: req.requestId,
     },
   })
@@ -96,20 +95,8 @@ export const processDeletionRequest = async (req, res) => {
       reviewerUserId: req.context?.userId || req.userId,
       decision: req.validatedBody.decision,
       reviewerNotes: req.validatedBody.reviewerNotes,
+      auditContext: req,
     })
-
-    if (result.summary.action === 'COMPLETED') {
-      await auditService.logFromRequest(req, {
-        action: 'USER_DELETED',
-        resourceType: 'User',
-        resourceId: result.summary.deletedUserId,
-        diff: {
-          source: 'GDPR_DELETION_REQUEST',
-          requestId: req.validatedParams.requestId,
-          anonymizedAuditLogs: result.summary.anonymizedAuditLogs,
-        },
-      })
-    }
 
     return res.status(200).json({
       data: result,

@@ -22,7 +22,8 @@ const loginSchema = z.object({
     .max(255, 'Email must be 255 characters or fewer'),
   password: z
     .string({ required_error: 'Password is required' })
-    .min(1, 'Password is required'),
+    .min(1, 'Password is required')
+    .max(200, 'Password must be 200 characters or fewer'),
 })
 
 const refreshSchema = z.object({
@@ -34,7 +35,8 @@ const refreshSchema = z.object({
 const stepUpSchema = z.object({
   password: z
     .string({ required_error: 'Password is required' })
-    .min(1, 'Password is required'),
+    .min(1, 'Password is required')
+    .max(200, 'Password must be 200 characters or fewer'),
 })
 
 /* ------------------------------------------------------------------ */

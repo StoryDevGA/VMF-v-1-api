@@ -1,4 +1,4 @@
-import tokenService from '../services/tokenService.js'
+import tokenService, { isTokenAuthenticationError } from '../services/tokenService.js'
 
 const authJwt = async (req, res, next) => {
   try {
@@ -38,6 +38,9 @@ const authJwt = async (req, res, next) => {
 
     next()
   } catch (error) {
+    if (!isTokenAuthenticationError(error)) {
+      return next(error instanceof Error ? error : new Error('Authentication failed', { cause: error }))
+    }
     let message = 'Invalid token'
     
     if (error.name === 'TokenExpiredError') {

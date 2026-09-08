@@ -1,3 +1,4 @@
+import { validateTenantList } from '../validators/resourceList.validator.js'
 /**
  * Tenant Routes
  *
@@ -43,6 +44,7 @@ customerTenantRouter.get(
     allowCustomerScopedTenantPermission: true,
   }),
   requireCustomerActive(),
+  validateTenantList,
   listTenants,
 )
 customerTenantRouter.post(

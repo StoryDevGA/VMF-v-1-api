@@ -1,3 +1,4 @@
+import { validateVmfList } from '../validators/resourceList.validator.js'
 /**
  * VMF Routes
  *
@@ -76,6 +77,7 @@ tenantVmfRouter.get(
   requireCustomerActive(),
   requireTenantEnabled,
   topologyGuard,
+  validateVmfList,
   listVmfs,
 )
 

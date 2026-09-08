@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { validateRuntimeManagedSectionDeclarations } from '../services/runtimeManagedSectionContract.js'
 import {
   createBodyValidator,
   createParamsValidator,
@@ -227,6 +228,13 @@ const sectionSchema = z.object({
   sectionKey: sectionKeySchema,
   runtimePath: runtimePathSchema,
   required: z.boolean().default(true),
+  sectionMode: z.string().trim().regex(/^[A-Z][A-Z0-9_]*$/).max(80).optional(),
+  runtimeRole: z.string().trim().regex(/^[A-Z][A-Z0-9_]*$/).max(80).optional(),
+  dependsOnSectionKeys: z.array(sectionKeySchema).max(100).optional(),
+  runtimeManagedCompletion: z.object({
+    sourceSectionKeys: z.array(sectionKeySchema).min(1).max(100),
+    reasoningArtefactKeys: z.array(z.string().trim().min(1).max(120)).min(1).max(100),
+  }).strict().optional(),
   validationKeys: tokenListSchema.default([]),
   notes: z.string().trim().max(500, 'Section notes must be 500 characters or fewer').default(''),
 })
@@ -413,6 +421,12 @@ const workflowBindingsSchema = z
   })
 
 const applyAccessRules = (value, ctx) => {
+  // PATCH cross-reference validation is repeated against merged state by the model.
+  if (value.sections && value.reasoningArtefacts) {
+    try { validateRuntimeManagedSectionDeclarations(value) } catch (error) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['sections'], message: error.message })
+    }
+  }
   if (
     value.visibility === FRAMEWORK_PACKAGE_VISIBILITY.CUSTOMER_VISIBLE
     && value.customerAccessMode === FRAMEWORK_PACKAGE_CUSTOMER_ACCESS_MODES.SELECTED_CUSTOMERS

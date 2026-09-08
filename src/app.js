@@ -95,7 +95,14 @@ app.use(helmet({
 
 app.use(cors(corsOptions))
 app.options('*', cors(corsOptions))
-const defaultJsonParser = express.json({ limit: '1mb' })
+const defaultJsonParser = express.json({
+  limit: '1mb',
+  verify: (req, _res, body) => {
+    if (/^\/api\/v1\/webhooks\/identity-plus\/(?:registration-complete|trust-updated)\/?$/.test(req.path)) {
+      req.rawBody = Buffer.from(body)
+    }
+  },
+})
 const outcomeStudioTestReferenceUploadPath = '/api/v1/super-admin/runtime-control/outcome-studio-readiness/references'
 const usesRouteScopedJsonParser = (path = '', method = 'GET') =>
   path.startsWith('/api/v1/runtime-instances')
@@ -120,6 +127,11 @@ app.use('/health', healthRoutes)
 app.use('/metrics', monitoringRoutes)
 app.use('/api/v1/auth', authRoutes)
 app.use('/api/v1/webhooks/identity-plus', identityPlusRoutes)
+// Server-owned routing context; each router still enforces its platform permissions.
+app.use('/api/v1/super-admin', (req, _res, next) => {
+  req.skipInactiveCustomerCheck = true
+  next()
+})
 app.use('/api/v1/super-admin/invitations', invitationAuthRoutes)
 app.use('/api/v1/super-admin/invitations', invitationRoutes)
 app.use('/api/v1/super-admin/system-versioning-policy', systemVersioningPolicyRoutes)
@@ -167,8 +179,8 @@ app.use('/api/v1/audit-logs', auditRouter)
 app.use('/api/v1/gdpr', gdprRouter)
 app.use('/api/v1/fake-auth/invitations', fakeAuthRoutes)
 
-app.use((_req, res) => {
-  res.status(404).json({ error: 'Not Found' })
+app.use((req, res) => {
+  res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Not Found', requestId: req.requestId } })
 })
 
 app.use(errorHandler)

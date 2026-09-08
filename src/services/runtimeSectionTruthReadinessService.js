@@ -11,6 +11,8 @@ import {
   resolvePackageReasoningArtefacts,
 } from './reasoningArtefactContractService.js'
 
+import { evaluateRuntimeManagedSections, isRuntimeManagedSection } from './runtimeManagedSectionService.js'
+
 const normalizeKey = (value) => String(value || '').trim().toLowerCase()
 
 const getLastPathSegment = (value, fallback = '') => {
@@ -167,7 +169,7 @@ export const evaluateRuntimeSectionTruthReadiness = ({
 } = {}) => {
   const packageSections = Array.isArray(frameworkPackage?.sections) ? frameworkPackage.sections : []
   const requiredSections = packageSections
-    .filter((section) => getObjectValue(section, 'required') === true)
+    .filter((section) => getObjectValue(section, 'required') === true && !isRuntimeManagedSection(section))
     .map((section) => ({
       sectionKey: normalizeKey(getObjectValue(section, 'sectionKey')),
       runtimePath: String(getObjectValue(section, 'runtimePath') || '').trim(),
@@ -300,12 +302,15 @@ export const evaluateRuntimeSectionTruthReadiness = ({
     readySectionKeys.push(section.sectionKey)
   })
 
+  const runtimeManaged = evaluateRuntimeManagedSections({ frameworkPackage, frameworkState })
+  blockers.push(...runtimeManaged.blockers)
   const requiredSectionCount = requiredSections.length
   const blockingSectionCount = blockers.length
-  const publishEligible = requiredSectionCount > 0 && blockingSectionCount === 0
+  const publishEligible = (requiredSectionCount > 0 || runtimeManaged.requiredSectionCount > 0) && blockingSectionCount === 0
 
   return {
-    state: requiredSectionCount === 0
+    runtimeManaged,
+    state: requiredSectionCount === 0 && runtimeManaged.requiredSectionCount === 0
       ? 'SECTION_TRUTH_NOT_CONFIGURED'
       : publishEligible
         ? 'SECTION_TRUTH_READY'
@@ -317,7 +322,7 @@ export const evaluateRuntimeSectionTruthReadiness = ({
     blockingSectionCount,
     readySectionKeys,
     blockers,
-    reason: requiredSectionCount === 0
+    reason: requiredSectionCount === 0 && runtimeManaged.requiredSectionCount === 0
       ? 'Required section truth is not configured.'
       : publishEligible
         ? ''

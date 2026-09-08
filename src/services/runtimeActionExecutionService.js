@@ -1,4 +1,5 @@
 import mongoose from 'mongoose'
+import { assertCustomerSectionTarget, buildRuntimeManagedSourceReceipt } from './runtimeManagedSectionService.js'
 import { FrameworkPackage, RuntimeInstance } from '../models/index.js'
 import { RUNTIME_TYPES } from '../models/RuntimeInstance.js'
 import auditService from './auditService.js'
@@ -621,6 +622,7 @@ const applyRuntimeSectionGeneration = async ({
   nextFrameworkState.sections = nextFrameworkState.sections || {}
 
   const target = resolveGenerationTargetSection({ frameworkPackage, payload })
+  assertCustomerSectionTarget(target.section)
   const sectionExecutionContract = await resolveSectionExecutionContract({
     frameworkPackage,
     section: target.section,
@@ -765,6 +767,10 @@ const applyRuntimeSectionGeneration = async ({
     checkedAt: actionedAt,
     sectionExecutionContract,
   })
+  const internalSourceReceipt = buildRuntimeManagedSourceReceipt({
+    frameworkPackage, frameworkState: nextFrameworkState, section: target.section, generated, input,
+  })
+  if (internalSourceReceipt) generated.runtimeManagedSourceReceipt = internalSourceReceipt
   if (validationResults.length > 0) {
     generated.validationResults = validationResults
   }

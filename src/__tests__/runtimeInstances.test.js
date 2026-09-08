@@ -14932,6 +14932,43 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     }))
   })
 
+  test.each([
+    'framework_state.sections.internal_packet',
+    'framework_state.sections.internal_packet.input',
+    'framework_state.sections.survey_findings.generated.runtimeManagedSourceReceipt',
+  ])('SS-022 rejects customer PATCH of %s before state write or success audit', async (runtimePath) => {
+    const sourceKey = 'survey_findings'
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({ updatedAt: new Date('2026-05-19T08:00:00.000Z') })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+    RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeRuntimePathRecord({ pathKey: runtimePath })))
+    FrameworkPackage.findById = jest.fn().mockResolvedValue(makeFrameworkPackage({
+      sections: [
+        { sectionKey: sourceKey, runtimePath: `framework_state.sections.${sourceKey}`, required: true },
+        { sectionKey: 'internal_packet', runtimePath: 'framework_state.sections.internal_packet', required: true, sectionMode: 'RUNTIME_MANAGED',
+          runtimeManagedCompletion: { sourceSectionKeys: [sourceKey], reasoningArtefactKeys: ['assuranceRecord'] } },
+      ],
+      reasoningArtefacts: [{
+        artefactKey: 'assuranceRecord', label: 'Assurance record', purpose: 'Internal completion proof.', required: true,
+        lifecycleStage: 'GENERATED', sectionKeys: [sourceKey], workflowActionKeys: ['GENERATE_SECTION'],
+        sourcePath: 'reasoningArtefacts.assuranceRecord', writePath: `framework_state.sections.${sourceKey}.generated.reasoningArtefacts.assuranceRecord`,
+        schema: { type: 'object', required: ['value'], properties: { value: { type: 'string' } }, additionalProperties: false },
+        validation: { currentnessFields: ['inputHash', 'generatedAt'], maxBytes: 4096 },
+        handoff: { eligible: true, mappingKey: 'assuranceRecord', targetPath: 'outcome_studio.intermediate_reasoning.assuranceRecord' },
+      }],
+    }))
+    const previousState = JSON.stringify(runtimeInstanceDoc.framework_state)
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+    const res = await request.patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/data`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ runtimePath, operation: 'WRITE', value: 'Customer supplied proof', expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('RUNTIME_MANAGED_CUSTOMER_WRITE_FORBIDDEN')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(RuntimeInstance.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+    expect(JSON.stringify(runtimeInstanceDoc.framework_state)).toBe(previousState)
+  })
+
   test('rejects runtime state mutation outside framework_state.sections scope', async () => {
     const token = await getAccessTokenForUser(makeCustomerAdmin())
 

@@ -1,4 +1,5 @@
 import mongoose from 'mongoose'
+import { validateRuntimeManagedSectionDeclarations } from '../services/runtimeManagedSectionContract.js'
 import {
   DEPRECATED_FRAMEWORK_PACKAGE_FIELD_MESSAGES,
   DEPRECATED_FRAMEWORK_PACKAGE_FIELDS,
@@ -262,6 +263,16 @@ const customerIdField = {
 
 const frameworkPackageSectionSchema = new mongoose.Schema(
   {
+    sectionMode: { type: String, trim: true, maxlength: 80, match: /^[A-Z][A-Z0-9_]*$/, default: undefined },
+    runtimeRole: { type: String, trim: true, maxlength: 80, match: /^[A-Z][A-Z0-9_]*$/, default: undefined },
+    dependsOnSectionKeys: { type: [sectionKeyField], default: undefined },
+    runtimeManagedCompletion: {
+      type: new mongoose.Schema({
+        sourceSectionKeys: { type: [sectionKeyField], required: true },
+        reasoningArtefactKeys: { type: [String], required: true },
+      }, { _id: false }),
+      default: undefined,
+    },
     sectionKey: {
       ...sectionKeyField,
       required: true,
@@ -1146,6 +1157,9 @@ frameworkPackageSchema.statics.findActiveByFrameworkKey = function findActiveByF
 }
 
 frameworkPackageSchema.pre('validate', function normalizeFrameworkPackage(next) {
+  try { validateRuntimeManagedSectionDeclarations(this) } catch (error) {
+    this.invalidate('sections', error.message)
+  }
   if (this.isNew || this.isModified('frameworkKey')) {
     this.frameworkKey = normalizeFrameworkKey(this.frameworkKey)
   }

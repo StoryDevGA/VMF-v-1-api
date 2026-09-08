@@ -1,3 +1,4 @@
+import { asyncMiddleware } from './asyncMiddleware.js'
 /**
  * Authorization Middleware
  *
@@ -872,7 +873,7 @@ export const requirePlatformPermission = (permission) => (req, res, next) => {
  *   (i.e. accessibleTenantIds.length > 0). Intended for read-only
  *   customer-scoped routes where tenant members need catalogue access.
  */
-export const requireCustomerAccess = (options = {}) => async (req, res, next) => {
+export const requireCustomerAccess = (options = {}) => asyncMiddleware(async (req, res, next) => {
   if (!ensureScopes(req, res)) return
 
   const {
@@ -1014,7 +1015,7 @@ export const requireCustomerAccess = (options = {}) => async (req, res, next) =>
   }
 
   next()
-}
+})
 
 /* ------------------------------------------------------------------ */
 /*  requireCustomerPermission                                         */
@@ -1035,7 +1036,7 @@ export const requireCustomerAccess = (options = {}) => async (req, res, next) =>
  * @param {boolean} [options.allowTenantMember] – Preserve tenant-member catalogue access (default false)
  * @param {boolean} [options.allowInactiveCustomer] – Allow disabled customers through this guard (default false)
  */
-export const requireCustomerPermission = (permission, options = {}) => async (req, res, next) => {
+export const requireCustomerPermission = (permission, options = {}) => asyncMiddleware(async (req, res, next) => {
   if (!ensureScopes(req, res)) return
 
   const {
@@ -1197,7 +1198,7 @@ export const requireCustomerPermission = (permission, options = {}) => async (re
   }
 
   return next()
-}
+})
 
 /* ------------------------------------------------------------------ */
 /*  requireTenantAccess                                               */
@@ -1214,7 +1215,7 @@ export const requireCustomerPermission = (permission, options = {}) => async (re
  *   Allow any customer membership when the resolved customer topology is
  *   `SINGLE_TENANT`. Intended for read-only tenant-scoped routes.
  */
-export const requireTenantAccess = (options = {}) => async (req, res, next) => {
+export const requireTenantAccess = (options = {}) => asyncMiddleware(async (req, res, next) => {
   if (!ensureScopes(req, res)) return
 
   const {
@@ -1337,7 +1338,7 @@ export const requireTenantAccess = (options = {}) => async (req, res, next) => {
   }
 
   next()
-}
+})
 
 /* ------------------------------------------------------------------ */
 /*  requireTenantPermission                                           */
@@ -1355,7 +1356,7 @@ export const requireTenantAccess = (options = {}) => async (req, res, next) => {
  * @param {boolean} [options.allowCustomerScopedTenantPermission] – Allow legacy customer-membership TENANT/VMF roles when the actor is the administered tenant admin
  * @param {boolean} [options.allowInactiveCustomer] – Allow disabled customers through this guard (default false)
  */
-export const requireTenantPermission = (permission, options = {}) => async (req, res, next) => {
+export const requireTenantPermission = (permission, options = {}) => asyncMiddleware(async (req, res, next) => {
   if (!ensureScopes(req, res)) return
 
   const {
@@ -1458,7 +1459,7 @@ export const requireTenantPermission = (permission, options = {}) => async (req,
   req.scopes.tenant = tenant
 
   return next()
-}
+})
 
 /* ------------------------------------------------------------------ */
 /*  requireVmfAccess                                                  */
@@ -1474,7 +1475,7 @@ export const requireTenantPermission = (permission, options = {}) => async (req,
  * @param {boolean}  [options.allowTenantAdmin]    – Allow Tenant Admins (default true)
  * @param {boolean}  [options.requireVmfGrant]     – Require a VMF object grant for non-admin users (default true)
  */
-export const requireVmfAccess = (permission, options = {}) => async (req, res, next) => {
+export const requireVmfAccess = (permission, options = {}) => asyncMiddleware(async (req, res, next) => {
   if (!ensureScopes(req, res)) return
 
   const {
@@ -1516,13 +1517,13 @@ export const requireVmfAccess = (permission, options = {}) => async (req, res, n
   if (!hasAccess) return
 
   next()
-}
+})
 
 export const requireDealAccess = (
   capabilityPermission,
   vmfGrantPermission,
   options = {},
-) => async (req, res, next) => {
+) => asyncMiddleware(async (req, res, next) => {
   if (!ensureScopes(req, res)) return
 
   const dealId = req.params.dealId
@@ -1558,4 +1559,4 @@ export const requireDealAccess = (
   if (!hasAccess) return
 
   next()
-}
+})

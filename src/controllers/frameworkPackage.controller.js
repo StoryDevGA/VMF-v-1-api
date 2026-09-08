@@ -710,6 +710,10 @@ const normalizeSectionStructureForLock = (sections = []) =>
       sectionKey: normalizeSectionKey(section?.sectionKey),
       runtimePath: normalizeRuntimePath(section?.runtimePath),
       required: section?.required !== false,
+      sectionMode: section?.sectionMode,
+      runtimeRole: section?.runtimeRole,
+      dependsOnSectionKeys: section?.dependsOnSectionKeys,
+      runtimeManagedCompletion: section?.runtimeManagedCompletion,
       validationKeys: Array.isArray(section?.validationKeys)
         ? [...new Set(section.validationKeys.map((value) => String(value || '').trim().toLowerCase()).filter(Boolean))]
         : [],

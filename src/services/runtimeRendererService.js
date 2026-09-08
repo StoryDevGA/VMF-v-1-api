@@ -48,6 +48,7 @@ import {
 } from './runtimeInstanceService.js'
 import { getRuntimeStateRendererSections } from './runtimeStateRepository.js'
 import { evaluateRuntimeSectionTruthReadiness } from './runtimeSectionTruthReadinessService.js'
+import { isRuntimeManagedSection } from './runtimeManagedSectionService.js'
 import {
   buildSectionIntelligenceDisplayProjection,
   getRuntimeSectionGenerated,
@@ -1634,6 +1635,7 @@ export const buildRendererSections = ({
     if (sectionKey) packageSectionKeys.add(sectionKey)
 
     if (!sectionKey) return
+    if (isRuntimeManagedSection(packageSection)) return
 
     if (!runtimePath) {
       configWarnings.push(createConfigWarning({

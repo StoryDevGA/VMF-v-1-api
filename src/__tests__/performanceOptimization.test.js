@@ -384,37 +384,12 @@ describe('Snapshot builders', () => {
     expect(snap.memberships).toEqual([])
   })
 
-  test('buildUserPermissionsSnapshot falls back to empty resolvedPermissions when role lookup fails', async () => {
-    const loggerError = jest.spyOn(logger, 'error').mockImplementation(() => undefined)
-    const user = {
-      _id: USER_ID,
-      email: 'super@test.com',
-      name: 'Super',
-      isActive: true,
+  test('buildUserPermissionsSnapshot rejects failed role lookup instead of a cacheable denial', async () => {
+    const user = { _id: USER_ID, isActive: true,
       memberships: [{ customerId: null, roles: ['SUPER_ADMIN'] }],
-      tenantMemberships: [{ customerId: CUSTOMER_ID, tenantId: TENANT_ID, roles: ['USER'] }],
-      vmfGrants: [],
-    }
-
+      tenantMemberships: [], vmfGrants: [] }
     Role.find.mockRejectedValue(new Error('role lookup failed'))
-
-    const snap = await buildUserPermissionsSnapshot(user)
-
-    expect(snap.resolvedPermissions).toEqual({
-      platform: {
-        roleKeys: [],
-        permissions: [],
-      },
-      customers: [],
-      tenants: [],
-    })
-    expect(loggerError).toHaveBeenCalledWith(
-      expect.objectContaining({
-        userId: USER_ID,
-        email: 'super@test.com',
-      }),
-      'resolved permission snapshot build failed; falling back to empty permissions',
-    )
+    await expect(buildUserPermissionsSnapshot(user)).rejects.toThrow('role lookup failed')
   })
 
   test('buildTenantStatusSnapshot returns correct shape', () => {

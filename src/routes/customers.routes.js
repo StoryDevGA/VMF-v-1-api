@@ -1,3 +1,4 @@
+import { validateCustomerList } from '../validators/resourceList.validator.js'
 /**
  * Customer Routes
  *
@@ -52,7 +53,7 @@ router.use(authJwt, loadScopes)
 /*  Routes                                                            */
 /* ------------------------------------------------------------------ */
 
-router.get('/', requirePlatformPermission('CUSTOMER_VIEW'), listCustomers)
+router.get('/', requirePlatformPermission('CUSTOMER_VIEW'), validateCustomerList, listCustomers)
 router.post(
   '/',
   requirePlatformPermission('CUSTOMER_CREATE'),

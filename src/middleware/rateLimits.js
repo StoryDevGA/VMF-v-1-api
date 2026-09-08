@@ -87,9 +87,9 @@ export const authHourlyRateLimit = rateLimit({
   legacyHeaders: false,
   handler: standardHandler,
   keyGenerator: (req) => {
-    // Key by email (from login body) + IP to scope per-account
-    const email = req.body?.email || 'unknown'
-    return `auth-hourly:${email.toLowerCase()}:${req.ip}`
+    const userId = req.context?.userId || req.userId
+    const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : 'unknown'
+    return `auth-hourly:${userId ? `user:${userId}` : `email:${email}`}:${req.ip}`
   },
   skip: () => env.nodeEnv === 'test',
 })
@@ -97,6 +97,16 @@ export const authHourlyRateLimit = rateLimit({
 /* ------------------------------------------------------------------ */
 /*  User management — per-admin, per-minute                           */
 /* ------------------------------------------------------------------ */
+
+export const documentIngestionRateLimit = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 10,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  handler: standardHandler,
+  keyGenerator: (req) => `document-ingestion:${req.context?.userId || req.userId}:${req.ip}`,
+  skip: () => env.nodeEnv === 'test',
+})
 
 export const userManagementRateLimit = rateLimit({
   windowMs: 60 * 1000, // 1 minute

@@ -1,3 +1,4 @@
+import { validateDealList } from '../validators/resourceList.validator.js'
 /**
  * Deal Routes
  *
@@ -46,6 +47,7 @@ vmfDealRouter.get(
   requireVmfAccess('READ', { requiredPermission: 'DEAL_VIEW' }),
   requireFeatureEntitlement('DEALS'),
   requireCustomerActive(),
+  validateDealList,
   listDeals,
 )
 vmfDealRouter.post(

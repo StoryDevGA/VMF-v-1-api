@@ -140,6 +140,47 @@ beforeEach(() => {
 /* ================================================================== */
 
 describe('POST /api/v1/auth/login', () => {
+  test('unknown account performs one cost-12 bcrypt comparison without logging submitted email', async () => {
+    const bcrypt = (await import('bcryptjs')).default
+    const logger = (await import('../config/logger.js')).default
+    const compare = jest.spyOn(bcrypt, 'compare').mockResolvedValue(false)
+    const warn = jest.spyOn(logger, 'warn').mockImplementation(() => {})
+    User.findByEmail.mockResolvedValue(null)
+    try {
+      const res = await request.post('/api/v1/auth/login').send({ email: 'mistyped@example.com', password: 'wrong' })
+      expect(res.status).toBe(401)
+      expect(compare).toHaveBeenCalledTimes(1)
+      expect(compare).toHaveBeenCalledWith('wrong', expect.stringMatching(/^\$2b\$12\$/))
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('mistyped@example.com')
+    } finally { compare.mockRestore(); warn.mockRestore() }
+  })
+
+  test('disabled account with incorrect password has the ordinary invalid credentials response', async () => {
+    const user = makeFakeUser({ isActive: false })
+    User.findByEmail.mockResolvedValue(user)
+    const res = await request.post('/api/v1/auth/login').send({ email: user.email, password: 'wrong' })
+    expect(user.comparePassword).toHaveBeenCalledWith('wrong')
+    expect(res.status).toBe(401)
+    expect(res.body.error.code).toBe('AUTH_INVALID_CREDENTIALS')
+  })
+
+  test('oversized password rejects before account lookup', async () => {
+    const res = await request.post('/api/v1/auth/login').send({ email: 'user@example.com', password: 'x'.repeat(201) })
+    expect(res.status).toBe(422)
+    expect(User.findByEmail).not.toHaveBeenCalled()
+  })
+
+  test('role lookup failure returns an error without caching an empty permission snapshot, then retries', async () => {
+    const user = makeFakeUser()
+    User.findByEmail.mockResolvedValue(user)
+    Role.find.mockRejectedValueOnce(new Error('temporary role lookup outage'))
+    const failed = await request.post('/api/v1/auth/login').send({ email: user.email, password: 'CorrectPassword1!' })
+    expect(failed.status).toBe(500)
+    expect(performanceCacheService.setUserPermissions).not.toHaveBeenCalled()
+    const retried = await request.post('/api/v1/auth/login').send({ email: user.email, password: 'CorrectPassword1!' })
+    expect(retried.status).toBe(200)
+    expect(performanceCacheService.setUserPermissions).toHaveBeenCalledTimes(1)
+  })
   test('returns 422 when email is missing', async () => {
     const res = await request
       .post('/api/v1/auth/login')
@@ -256,37 +297,14 @@ describe('POST /api/v1/auth/login', () => {
     expect(res.body.meta.requestId).toBeDefined()
   })
 
-  test('returns 200 with empty resolvedPermissions when role resolution fails', async () => {
-    const user = makeFakeUser()
-    User.findByEmail.mockResolvedValue(user)
+  test('role-resolution failure denies token issuance and never caches empty permissions', async () => {
+    User.findByEmail.mockResolvedValue(makeFakeUser())
     Role.find.mockRejectedValue(new Error('role lookup failed'))
-
-    const res = await request
-      .post('/api/v1/auth/login')
+    const res = await request.post('/api/v1/auth/login')
       .send({ email: 'admin@storylineos.com', password: 'CorrectPassword1!' })
-
-    expect(res.status).toBe(200)
-    expect(res.body.data.resolvedPermissions).toEqual({
-      platform: {
-        roleKeys: [],
-        permissions: [],
-      },
-      customers: [],
-      tenants: [],
-    })
-    expect(performanceCacheService.setUserPermissions).toHaveBeenCalledWith(
-      user._id,
-      expect.objectContaining({
-        resolvedPermissions: {
-          platform: {
-            roleKeys: [],
-            permissions: [],
-          },
-          customers: [],
-          tenants: [],
-        },
-      }),
-    )
+    expect(res.status).toBe(500)
+    expect(res.body.data).toBeUndefined()
+    expect(performanceCacheService.setUserPermissions).not.toHaveBeenCalled()
   })
 
   test('returns customerScopes with featureEntitlements when customer memberships exist', async () => {
@@ -441,6 +459,13 @@ describe('POST /api/v1/auth/login', () => {
 /* ------------------------------------------------------------------ */
 
 describe('POST /api/v1/auth/super-admin/login', () => {
+  test('accepts legacy platform membership with missing customerId consistently with scope loading', async () => {
+    User.findByEmail.mockResolvedValue(makeFakeUser({ memberships: [{ roles: ['SUPER_ADMIN'] }] }))
+    const res = await request.post('/api/v1/auth/super-admin/login')
+      .send({ email: 'admin@storylineos.com', password: 'CorrectPassword1!' })
+    expect(res.status).toBe(200)
+    expect(res.body.data.resolvedPermissions.platform.roleKeys).toContain('SUPER_ADMIN')
+  })
   test('returns 403 when user lacks SUPER_ADMIN role', async () => {
     const user = makeFakeUser({
       memberships: [{ customerId: null, roles: ['USER'] }],

@@ -1,3 +1,4 @@
+import { escapeRegex } from '../utils/controllerUtils.js'
 /**
  * VMF Controller
  *
@@ -412,8 +413,8 @@ export const listVmfs = async (req, res, next) => {
 
     if (q) {
       filter.$or = [
-        { name: { $regex: q, $options: 'i' } },
-        { description: { $regex: q, $options: 'i' } },
+        { name: { $regex: escapeRegex(q), $options: 'i' } },
+        { description: { $regex: escapeRegex(q), $options: 'i' } },
       ]
     }
 

@@ -1,3 +1,4 @@
+import { isPlatformMembership } from '../utils/platformMembership.js'
 /**
  * Performance Cache Service (Phase 5.3)
  *
@@ -27,7 +28,6 @@ import logger from '../config/logger.js'
 import { getRedis } from '../config/redis.js'
 import { Customer, LicenseLevel, Tenant, User } from '../models/index.js'
 import {
-  createEmptyResolvedPermissions,
   resolveRolePermissions,
 } from './rolePermissionResolutionService.js'
 
@@ -303,7 +303,7 @@ export const buildLegacyUserPermissionsSnapshot = (user) => {
   const vmfGrants = Array.isArray(user.vmfGrants) ? user.vmfGrants : []
 
   const platformRoles = memberships
-    .filter((membership) => membership.customerId === null || membership.customerId === undefined)
+    .filter(isPlatformMembership)
     .flatMap((membership) => membership.roles || [])
 
   return {
@@ -334,24 +334,13 @@ export const buildLegacyUserPermissionsSnapshot = (user) => {
 export const buildUserPermissionsSnapshot = async (user) => {
   const baseSnapshot = buildLegacyUserPermissionsSnapshot(user)
 
-  let resolvedPermissions = createEmptyResolvedPermissions()
-
-  try {
-    resolvedPermissions = await resolveRolePermissions({
-      user,
-      memberships: baseSnapshot.memberships,
-      tenantMemberships: baseSnapshot.tenantMemberships,
-    })
-  } catch (err) {
-    logger.error(
-      {
-        err,
-        userId: normalizeId(user?._id || user?.id),
-        email: user?.email || null,
-      },
-      'resolved permission snapshot build failed; falling back to empty permissions',
-    )
-  }
+  // Infrastructure failures are not valid empty permission snapshots. Let the
+  // request fail so neither login nor scope hydration caches a transient denial.
+  const resolvedPermissions = await resolveRolePermissions({
+    user,
+    memberships: baseSnapshot.memberships,
+    tenantMemberships: baseSnapshot.tenantMemberships,
+  })
 
   return {
     ...baseSnapshot,

@@ -6,6 +6,7 @@ import {
   isRuntimeSectionObject,
 } from './runtimeSectionModelService.js'
 import { evaluateRuntimeSectionTruthReadiness } from './runtimeSectionTruthReadinessService.js'
+import { evaluateRuntimeManagedSections, isRuntimeManagedSection } from './runtimeManagedSectionService.js'
 
 export const RUNTIME_ACTION_KEYS = Object.freeze({
   SAVE_DISCOVERY_INPUTS: 'SAVE_DISCOVERY_INPUTS',
@@ -309,6 +310,7 @@ const buildAcceptedSectionSnapshot = ({ frameworkPackage, frameworkState }) => {
   const sections = getObjectValue(state, 'sections') || {}
 
   return packageSections
+    .filter((section) => !isRuntimeManagedSection(section))
     .map((section) => {
       const sectionKey = String(getObjectValue(section, 'sectionKey') || '').trim()
       const runtimePath = String(getObjectValue(section, 'runtimePath') || '').trim()
@@ -386,6 +388,7 @@ const buildRuntimeTruthSnapshot = ({
     },
     sectionTruth: {
       state: sectionTruth.state,
+      runtimeManaged: sectionTruth.runtimeManaged,
       publishEligible: sectionTruth.publishEligible === true,
       lockEligible: sectionTruth.lockEligible === true,
       readySectionKeys: sectionTruth.readySectionKeys || [],
@@ -666,7 +669,7 @@ export const applyRuntimeActionStateGate = ({
 export const validateRuntimeRequiredSections = ({ frameworkPackage, frameworkState } = {}) => {
   const normalizedState = normalizeFrameworkStateForAction(frameworkState)
   const requiredSections = (Array.isArray(frameworkPackage?.sections) ? frameworkPackage.sections : [])
-    .filter((section) => getObjectValue(section, 'required') === true)
+    .filter((section) => getObjectValue(section, 'required') === true && !isRuntimeManagedSection(section))
   const missingSections = requiredSections
     .map((section) => ({
       sectionKey: String(getObjectValue(section, 'sectionKey') || '').trim(),
@@ -675,23 +678,25 @@ export const validateRuntimeRequiredSections = ({ frameworkPackage, frameworkSta
     }))
     .filter((section) => section.sectionKey && isEmptyRequiredValue(section.value))
 
-  const isValid = missingSections.length === 0
+  const runtimeManaged = evaluateRuntimeManagedSections({ frameworkPackage, frameworkState: normalizedState })
+  const isValid = missingSections.length === 0 && runtimeManaged.blockers.length === 0
   const checkedAt = new Date().toISOString()
 
   return {
     key: 'runtime_required_sections',
+    runtimeManaged,
     is_valid: isValid,
     blocking: !isValid,
     status: isValid ? RUNTIME_VALIDATION_STATES.PASSED : RUNTIME_VALIDATION_STATES.FAILED,
     message: isValid
       ? 'Required runtime sections are complete.'
       : 'Required runtime sections must be completed before this runtime can be marked ready.',
-    messages: missingSections.map((section) => ({
+    messages: [...missingSections.map((section) => ({
       severity: 'ERROR',
       message: `${section.sectionKey} is required before this runtime can be marked ready.`,
       sectionKey: section.sectionKey,
       runtimePath: section.runtimePath,
-    })),
+    })), ...runtimeManaged.blockers.map((blocker) => ({ severity: 'ERROR', message: blocker.reason, sectionKey: blocker.sectionKey, reason: blocker.state }))],
     requiredSectionCount: requiredSections.length,
     missingRequiredSections: missingSections.map((section) => ({
       sectionKey: section.sectionKey,

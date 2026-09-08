@@ -38,6 +38,7 @@ const CUSTOMER_ID = '507f1f77bcf86cd799439044'
 let request
 let tokenService
 let User
+let Role
 let Customer
 let Tenant
 let AuditLog
@@ -82,7 +83,31 @@ const makeRegularUser = (overrides = {}) => ({
   ...overrides,
 })
 
+// Session-aware query doubles verify routing only; real rollback is tested separately.
+const queryMock = () => {
+  const mock = jest.fn()
+  const implementation = mock.mockImplementation.bind(mock)
+  mock.mockImplementation = (fn) => implementation((...args) => {
+    const result = Promise.resolve(fn(...args))
+    result.session = () => result
+    return result
+  })
+  mock.mockResolvedValue = (value) => mock.mockImplementation(() => value)
+  return mock
+}
+
+jest.unstable_mockModule('../config/redis.js', () => ({
+  isRedisConnected: () => true,
+  connectRedis: async () => null,
+  disconnectRedis: async () => {},
+  getRedis: () => ({
+    get: async (key) => key.startsWith('stepup:') ? '1' : null,
+    del: async () => 1, set: async () => 'OK', setex: async () => 'OK', exists: async () => 0,
+  }),
+}))
+
 const makeFindChain = (data) => ({
+  session() { return this },
   lean: jest.fn().mockResolvedValue(data),
   sort: jest.fn().mockReturnValue({
     lean: jest.fn().mockResolvedValue(data),
@@ -103,11 +128,14 @@ const getSuperAdminToken = async () => {
 }
 
 beforeAll(async () => {
+  mongoose = (await import('mongoose')).default
+  mongoose.startSession = jest.fn().mockResolvedValue({ withTransaction: (fn) => fn(), endSession: async () => {} })
   const supertest = (await import('supertest')).default
   const { default: app } = await import('../app.js')
   tokenService = (await import('../services/tokenService.js')).default
   const models = await import('../models/index.js')
   User = models.User
+  Role = models.Role
   Customer = models.Customer
   Tenant = models.Tenant
   AuditLog = models.AuditLog
@@ -116,7 +144,12 @@ beforeAll(async () => {
 })
 
 beforeEach(() => {
-  User.findById = jest.fn()
+  Role.find = jest.fn().mockResolvedValue([
+    { key: 'SUPER_ADMIN', scope: 'PLATFORM', permissions: ['PLATFORM_MANAGE'], isActive: true },
+    { key: 'CUSTOMER_ADMIN', scope: 'CUSTOMER', permissions: ['CUSTOMER_VIEW'], isActive: true },
+    { key: 'USER', scope: 'CUSTOMER', permissions: [], isActive: true },
+  ])
+  User.findById = queryMock()
   User.updateOne = jest.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 1 })
   User.deleteOne = jest.fn().mockResolvedValue({ acknowledged: true, deletedCount: 1 })
   Customer.findById = jest.fn().mockImplementation((id) => {
@@ -126,10 +159,11 @@ beforeEach(() => {
     return Promise.resolve(null)
   })
 
+  Tenant.find = jest.fn().mockReturnValue(makeFindChain([]))
   Tenant.updateMany = jest.fn().mockResolvedValue({ acknowledged: true, modifiedCount: 0 })
 
   AuditLog.find = jest.fn().mockReturnValue(makeFindChain([]))
-  AuditLog.countDocuments = jest.fn().mockResolvedValue(0)
+  AuditLog.countDocuments = queryMock().mockResolvedValue(0)
   AuditLog.createLog = jest.fn().mockResolvedValue({ _id: '507f1f77bcf86cd799439055' })
   AuditLog.collection = {
     bulkWrite: jest.fn().mockResolvedValue({ modifiedCount: 0 }),
@@ -146,9 +180,9 @@ beforeEach(() => {
       status: 'PENDING',
     }),
   })
-  DataDeletionRequest.findById = jest.fn()
+  DataDeletionRequest.findById = queryMock()
   DataDeletionRequest.find = jest.fn().mockReturnValue(makeFindChain([]))
-  DataDeletionRequest.countDocuments = jest.fn().mockResolvedValue(0)
+  DataDeletionRequest.countDocuments = queryMock().mockResolvedValue(0)
   DataDeletionRequest.deleteMany = jest.fn().mockResolvedValue({ deletedCount: 0 })
 })
 
@@ -201,6 +235,7 @@ describe('GET /api/v1/gdpr/export/users/:userId', () => {
     const res = await request
       .get(`/api/v1/gdpr/export/users/${TARGET_USER_ID}`)
       .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', 'synthetic-gdpr-step-up')
 
     expect(res.status).toBe(200)
     expect(res.body.data.user.email).toBe('target.user@example.com')
@@ -223,6 +258,7 @@ describe('POST /api/v1/gdpr/deletion-requests', () => {
     const res = await request
       .post('/api/v1/gdpr/deletion-requests')
       .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', 'synthetic-gdpr-step-up')
       .send({
         userId: TARGET_USER_ID,
         legalBasis: 'USER_REQUEST',
@@ -251,6 +287,7 @@ describe('POST /api/v1/gdpr/deletion-requests', () => {
     const res = await request
       .post('/api/v1/gdpr/deletion-requests')
       .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', 'synthetic-gdpr-step-up')
       .send({ userId: TARGET_USER_ID })
 
     expect(res.status).toBe(409)
@@ -259,6 +296,19 @@ describe('POST /api/v1/gdpr/deletion-requests', () => {
 })
 
 describe('POST /api/v1/gdpr/deletion-requests/:requestId/process', () => {
+  test.each([
+    `/api/v1/gdpr/deletion-requests/${GDPR_REQUEST_ID}/process`,
+    '/api/v1/gdpr/retention/cleanup',
+  ])('requires step-up before destructive processing at %s', async (path) => {
+    User.findById.mockResolvedValue(makeSuperAdmin())
+    const token = await getSuperAdminToken()
+    const result = await request.post(path).set('Authorization', `Bearer ${token}`).send({ decision: 'APPROVE' })
+    expect(result.status).toBe(403)
+    expect(result.body.error.code).toBe('STEP_UP_REQUIRED')
+    expect(DataDeletionRequest.findById).not.toHaveBeenCalled()
+    expect(DataDeletionRequest.deleteMany).not.toHaveBeenCalled()
+    expect(User.deleteOne).not.toHaveBeenCalled()
+  })
   test('rejects deletion request', async () => {
     const token = await getSuperAdminToken()
     const requestDoc = {
@@ -278,6 +328,7 @@ describe('POST /api/v1/gdpr/deletion-requests/:requestId/process', () => {
     const res = await request
       .post(`/api/v1/gdpr/deletion-requests/${GDPR_REQUEST_ID}/process`)
       .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', 'synthetic-gdpr-step-up')
       .send({ decision: 'REJECT', reviewerNotes: 'Insufficient legal basis' })
 
     expect(res.status).toBe(200)
@@ -332,12 +383,13 @@ describe('POST /api/v1/gdpr/deletion-requests/:requestId/process', () => {
     const res = await request
       .post(`/api/v1/gdpr/deletion-requests/${GDPR_REQUEST_ID}/process`)
       .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', 'synthetic-gdpr-step-up')
       .send({ decision: 'APPROVE', reviewerNotes: 'Approved' })
 
     expect(res.status).toBe(200)
     expect(res.body.data.summary.action).toBe('COMPLETED')
-    expect(User.updateOne).toHaveBeenCalled()
-    expect(User.deleteOne).toHaveBeenCalledWith({ _id: TARGET_USER_ID })
+    expect(User.updateOne).not.toHaveBeenCalled()
+    expect(User.deleteOne).toHaveBeenCalledWith({ _id: TARGET_USER_ID, isActive: false }, { session: expect.any(Object) })
     expect(AuditLog.collection.bulkWrite).toHaveBeenCalled()
     expect(AuditLog.createLog).toHaveBeenCalled()
   })
@@ -363,6 +415,7 @@ describe('POST /api/v1/gdpr/deletion-requests/:requestId/process', () => {
     const res = await request
       .post(`/api/v1/gdpr/deletion-requests/${GDPR_REQUEST_ID}/process`)
       .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', 'synthetic-gdpr-step-up')
       .send({ decision: 'APPROVE' })
 
     expect(res.status).toBe(422)
@@ -387,6 +440,7 @@ describe('POST /api/v1/gdpr/retention/cleanup', () => {
     const res = await request
       .post('/api/v1/gdpr/retention/cleanup')
       .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', 'synthetic-gdpr-step-up')
 
     expect(res.status).toBe(200)
     expect(res.body.data.status).toBe('completed')
@@ -412,6 +466,7 @@ describe('GET /api/v1/gdpr/export/users/:userId — edge cases', () => {
     const res = await request
       .get(`/api/v1/gdpr/export/users/${bogusId}`)
       .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', 'synthetic-gdpr-step-up')
 
     expect(res.status).toBe(404)
     expect(res.body.error.code).toBe('NOT_FOUND')
@@ -428,6 +483,7 @@ describe('GET /api/v1/gdpr/export/users/:userId — edge cases', () => {
     const res = await request
       .get('/api/v1/gdpr/export/users/not-an-objectid')
       .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', 'synthetic-gdpr-step-up')
 
     expect(res.status).toBe(422)
     expect(res.body.error.code).toBe('VALIDATION_FAILED')
@@ -453,6 +509,7 @@ describe('GET /api/v1/gdpr/deletion-requests', () => {
     const res = await request
       .get('/api/v1/gdpr/deletion-requests')
       .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', 'synthetic-gdpr-step-up')
 
     expect(res.status).toBe(200)
     expect(Array.isArray(res.body.data)).toBe(true)
@@ -474,6 +531,7 @@ describe('GET /api/v1/gdpr/deletion-requests', () => {
     const res = await request
       .get('/api/v1/gdpr/deletion-requests?status=COMPLETED')
       .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', 'synthetic-gdpr-step-up')
 
     expect(res.status).toBe(200)
     expect(res.body.data).toEqual([])
@@ -505,6 +563,7 @@ describe('GET /api/v1/gdpr/deletion-requests/:requestId', () => {
     const res = await request
       .get(`/api/v1/gdpr/deletion-requests/${GDPR_REQUEST_ID}`)
       .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', 'synthetic-gdpr-step-up')
 
     expect(res.status).toBe(200)
     expect(res.body.data.status).toBe('PENDING')
@@ -524,6 +583,7 @@ describe('GET /api/v1/gdpr/deletion-requests/:requestId', () => {
     const res = await request
       .get(`/api/v1/gdpr/deletion-requests/${bogusId}`)
       .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', 'synthetic-gdpr-step-up')
 
     expect(res.status).toBe(404)
     expect(res.body.error.code).toBe('NOT_FOUND')
@@ -540,6 +600,7 @@ describe('GET /api/v1/gdpr/deletion-requests/:requestId', () => {
     const res = await request
       .get('/api/v1/gdpr/deletion-requests/bad-id')
       .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', 'synthetic-gdpr-step-up')
 
     expect(res.status).toBe(422)
     expect(res.body.error.code).toBe('VALIDATION_FAILED')
@@ -558,6 +619,7 @@ describe('POST /api/v1/gdpr/deletion-requests — validation', () => {
     const res = await request
       .post('/api/v1/gdpr/deletion-requests')
       .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', 'synthetic-gdpr-step-up')
       .send({ reason: 'no userId provided' })
 
     expect(res.status).toBe(422)
@@ -575,6 +637,7 @@ describe('POST /api/v1/gdpr/deletion-requests — validation', () => {
     const res = await request
       .post('/api/v1/gdpr/deletion-requests')
       .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', 'synthetic-gdpr-step-up')
       .send({ userId: 'not-valid' })
 
     expect(res.status).toBe(422)
@@ -602,6 +665,7 @@ describe('POST /api/v1/gdpr/deletion-requests/:requestId/process — edge cases'
     const res = await request
       .post(`/api/v1/gdpr/deletion-requests/${GDPR_REQUEST_ID}/process`)
       .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', 'synthetic-gdpr-step-up')
       .send({ decision: 'APPROVE' })
 
     expect(res.status).toBe(409)
@@ -619,6 +683,7 @@ describe('POST /api/v1/gdpr/deletion-requests/:requestId/process — edge cases'
     const res = await request
       .post(`/api/v1/gdpr/deletion-requests/${GDPR_REQUEST_ID}/process`)
       .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', 'synthetic-gdpr-step-up')
       .send({})
 
     expect(res.status).toBe(422)
@@ -640,6 +705,7 @@ describe('GET /api/v1/gdpr/retention', () => {
     const res = await request
       .get('/api/v1/gdpr/retention')
       .set('Authorization', `Bearer ${token}`)
+      .set('X-Step-Up-Token', 'synthetic-gdpr-step-up')
 
     expect(res.status).toBe(200)
     expect(res.body.data.policy).toHaveProperty('retentionDays')

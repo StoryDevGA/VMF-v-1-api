@@ -260,18 +260,18 @@ class IdentityPlusService {
   /**
    * Verify the HMAC-SHA256 signature of an incoming webhook payload.
    *
-   * @param {string} rawBody      - Raw request body string
+   * @param {Buffer} rawBody      - Exact bytes captured by the JSON parser
    * @param {string} signature    - Value from `X-Identity-Plus-Signature` header
    * @param {string} [secret]     - Override for testing; defaults to env var
    * @returns {boolean}
    */
   verifyWebhookSignature(rawBody, signature, secret) {
-    const key = secret || env.identityPlusWebhookSecret
+    const key = secret === undefined ? env.identityPlusWebhookSecret : secret
     if (!key) {
-      logger.warn('No Identity Plus webhook secret configured — skipping verification')
-      return true // Allow in dev when no secret configured
+      logger.warn('No Identity Plus webhook secret configured — rejecting webhook')
+      return false
     }
-    if (!signature) return false
+    if (!Buffer.isBuffer(rawBody) || typeof signature !== 'string' || !/^[a-fA-F0-9]{64}$/.test(signature)) return false
 
     const expected = crypto
       .createHmac('sha256', key)

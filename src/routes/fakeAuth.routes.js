@@ -5,9 +5,9 @@ import { getFakeAuthInvitation, completeFakeAuth } from '../controllers/fakeAuth
 const router = Router()
 
 // Gate: return 404 if fake auth is not allowed
-router.use((_req, res, next) => {
+router.use((req, res, next) => {
   if (!env.fakeAuthAllowed) {
-    return res.status(404).json({ error: 'Not Found' })
+    return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Not Found', requestId: req.requestId } })
   }
   next()
 })

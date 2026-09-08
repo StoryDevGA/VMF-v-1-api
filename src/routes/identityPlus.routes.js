@@ -8,8 +8,7 @@
  *   POST /registration-complete  — User finished sign-up
  *   POST /trust-updated          — Trust status changed externally
  *
- * All routes are protected by HMAC signature verification when
- * `IDENTITY_PLUS_WEBHOOK_SECRET` is configured.
+ * All routes require HMAC signature verification. Missing configuration denies access.
  */
 
 import { Router } from 'express'
@@ -30,23 +29,10 @@ const router = Router()
 /*  Webhook signature verification middleware                         */
 /* ------------------------------------------------------------------ */
 
-/**
- * Capture the raw body for HMAC verification.
- * This middleware must run BEFORE express.json() parses the body,
- * so the route file stores it on `req.rawBody`.
- *
- * Note: The app-level express.json() has already parsed the body by
- * the time we reach routes. To work around this, we reconstruct the
- * raw body from `req.body`. For production, consider using a custom
- * body parser at the app level that preserves `req.rawBody`.
- */
+// The app parser captures raw bytes before JSON parsing; never reserialize signed data.
 const verifyWebhookSignature = (req, res, next) => {
   const signature = req.get('X-Identity-Plus-Signature')
-
-  // Reconstruct raw body from parsed body
-  const rawBody = JSON.stringify(req.body)
-
-  const valid = identityPlusService.verifyWebhookSignature(rawBody, signature)
+  const valid = identityPlusService.verifyWebhookSignature(req.rawBody, signature)
 
   if (!valid) {
     logger.warn(
