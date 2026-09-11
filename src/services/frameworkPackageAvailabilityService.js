@@ -9,6 +9,18 @@ import RuntimeActivationSnapshot, {
 import RuntimeDeployment, {
   RUNTIME_DEPLOYMENT_STATUSES,
 } from '../models/RuntimeDeployment.js'
+import { resolveCustomerFeatureEntitlements } from './licenseEntitlementService.js'
+
+export const FRAMEWORK_PACKAGE_PRESENTATION_MODES = Object.freeze({
+  FULL: 'FULL',
+  PREVIEW: 'PREVIEW',
+  HIDDEN: 'HIDDEN',
+})
+
+const RUNTIME_TYPE_ENTITLEMENT_FEATURES = Object.freeze({
+  DEAL_ANALYSIS: 'DEALS',
+  VALUE_NARRATIVE: 'VMF',
+})
 
 const toIdString = (value) => {
   if (!value) return null
@@ -101,6 +113,95 @@ export const buildRuntimeCreationFrameworkPackageFilter = ({ customerId, framewo
   'dependencyLock.snapshotId': { $exists: true, $nin: [null, ''] },
   'dependencyLock.references.0': { $exists: true },
 })
+
+// Package families are intentionally resolved through the existing runtime
+// capability entitlements. A new framework key therefore cannot silently
+// become a new licence key. Value Narrative package families (including a
+// future Website Analysis package) use the existing VMF capability; Deal
+// Analysis uses the existing DEALS capability.
+export const resolveFrameworkPackageEntitlementFeature = ({ runtimeType } = {}) =>
+  RUNTIME_TYPE_ENTITLEMENT_FEATURES[normalizeToken(runtimeType)] || 'VMF'
+
+export const resolveFrameworkPackageCustomerPresentation = async ({
+  frameworkPackage,
+  customerId,
+  customer = null,
+  runtimeType = 'VALUE_NARRATIVE',
+} = {}) => {
+  const entitlementContext = await resolveCustomerFeatureEntitlements({
+    customerId,
+    customer,
+  })
+  const frameworkKey = normalizeToken(frameworkPackage?.frameworkKey)
+  const entitlementFeature = resolveFrameworkPackageEntitlementFeature({ runtimeType })
+  const packageAccessible = isFrameworkPackageAvailableToCustomer({
+    frameworkPackage,
+    customerId,
+    frameworkKey,
+  })
+  const featureEnabled = Boolean(
+    entitlementContext?.featureEntitlements?.includes(entitlementFeature),
+  )
+  const supportsPreview = frameworkPackage?.capabilities?.supportsPreviewMode === true
+
+  return {
+    available: packageAccessible && featureEnabled,
+    packageAccessible,
+    featureEnabled,
+    presentationMode: !packageAccessible
+      ? FRAMEWORK_PACKAGE_PRESENTATION_MODES.HIDDEN
+      : featureEnabled
+        ? FRAMEWORK_PACKAGE_PRESENTATION_MODES.FULL
+        : supportsPreview
+          ? FRAMEWORK_PACKAGE_PRESENTATION_MODES.PREVIEW
+          : FRAMEWORK_PACKAGE_PRESENTATION_MODES.HIDDEN,
+    availabilityReason: !packageAccessible
+      ? 'PACKAGE_NOT_AVAILABLE_TO_CUSTOMER'
+      : !featureEnabled
+        ? 'FEATURE_NOT_ENABLED'
+        : null,
+    entitlementFeature,
+    licenseLevelId: entitlementContext?.licenseLevelId || null,
+    entitlementSource: entitlementContext?.entitlementSource || null,
+    licenseLevelActive: entitlementContext?.licenseLevelActive ?? null,
+  }
+}
+
+export const serializeCustomerFrameworkPackage = ({
+  frameworkPackage,
+  presentation,
+} = {}) => {
+  if (!frameworkPackage) return null
+
+  const id = getFrameworkPackageId(frameworkPackage)
+  const uiContractKey = String(
+    frameworkPackage?.uiContractBinding?.key || frameworkPackage?.uiContractKey || '',
+  ).trim().toLowerCase() || null
+
+  return {
+    id,
+    packageKey: frameworkPackage.packageKey || null,
+    packageName: frameworkPackage.packageName || null,
+    frameworkKey: normalizeToken(frameworkPackage.frameworkKey),
+    frameworkName: frameworkPackage.frameworkName || null,
+    version: frameworkPackage.version || null,
+    status: normalizeToken(frameworkPackage.status),
+    isDefault: frameworkPackage.isDefault === true,
+    uiContractKey,
+    sections: (Array.isArray(frameworkPackage.sections) ? frameworkPackage.sections : [])
+      .map((section) => ({
+        sectionKey: String(section?.sectionKey || '').trim(),
+        runtimePath: String(section?.runtimePath || '').trim(),
+        required: section?.required !== false,
+      }))
+      .filter((section) => section.sectionKey || section.runtimePath),
+    capabilities: {
+      supportsPreviewMode: frameworkPackage?.capabilities?.supportsPreviewMode === true,
+      supportsFullReport: frameworkPackage?.capabilities?.supportsFullReport === true,
+    },
+    ...(presentation || {}),
+  }
+}
 
 export const filterRuntimeCreationReadyFrameworkPackages = async ({
   frameworkPackages,

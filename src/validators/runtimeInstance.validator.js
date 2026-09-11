@@ -844,6 +844,31 @@ const listRuntimeInstancesSchema = z.object({
   pageSize: z.coerce.number().int().min(1).max(100).optional().default(20),
 }).strict()
 
+const listFrameworkPackagesSchema = z.object({
+  customerId: z
+    .string({ required_error: 'customerId is required' })
+    .regex(objectIdRegex, 'customerId must be a valid ObjectId'),
+  tenantId: z
+    .string({ required_error: 'tenantId is required' })
+    .regex(objectIdRegex, 'tenantId must be a valid ObjectId'),
+  frameworkKey: z
+    .string()
+    .trim()
+    .min(1, 'frameworkKey must not be empty')
+    .max(80, 'frameworkKey must be 80 characters or fewer')
+    .transform((value) => value.toUpperCase())
+    .optional()
+    .default('VMF'),
+  runtimeType: z
+    .enum(Object.values(RUNTIME_TYPES), {
+      invalid_type_error: 'runtimeType must be a supported runtime type',
+    })
+    .optional()
+    .default(RUNTIME_TYPES.VALUE_NARRATIVE),
+  page: z.coerce.number().int().min(1).optional().default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).optional().default(100),
+}).strict()
+
 const createRuntimeOutputRequestSchema = z.object({
   outputTypeKey: z
     .string({ required_error: 'outputTypeKey is required' })
@@ -1171,6 +1196,11 @@ export const validateExecuteRuntimeAction = (req, res, next) => {
 }
 
 export const validateListRuntimeInstances = createQueryValidator(listRuntimeInstancesSchema, {
+  message: 'Invalid query parameters.',
+  rootIssueKey: '_root',
+})
+
+export const validateListFrameworkPackages = createQueryValidator(listFrameworkPackagesSchema, {
   message: 'Invalid query parameters.',
   rootIssueKey: '_root',
 })

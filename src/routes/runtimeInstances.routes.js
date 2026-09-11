@@ -56,6 +56,7 @@ import {
   listRuntimeOutputAssets,
   listRuntimeOutcomeSessionAssets,
   listRuntimeInstances,
+  listAvailableFrameworkPackages,
   mutateRuntimeState,
   publishRuntimeOutcomeAsset,
   reviseRuntimeOutcomeAsset,
@@ -90,6 +91,7 @@ import {
   validateApproveRuntimeOutcomeDraft,
   validateGovernedReasoningExecutionParams,
   validateListRuntimeInstances,
+  validateListFrameworkPackages,
   validateMutateRuntimeState,
   validatePublishRuntimeOutputAsset,
   validateReviewAllRuntimeSectionEvidence,
@@ -146,6 +148,9 @@ router.use((req, res, next) => (
     : defaultRuntimeInstanceJsonParser(req, res, next)
 ))
 
+// Generic package catalogue for customer runtime entry. Keep this before the
+// `/:runtimeInstanceId` route so "framework-packages" is never treated as an id.
+router.get('/framework-packages', validateListFrameworkPackages, listAvailableFrameworkPackages)
 router.get('/', validateListRuntimeInstances, listRuntimeInstances)
 router.post('/', validateCreateRuntimeInstance, createRuntimeInstance)
 router.get('/:runtimeInstanceId/state/bootstrap', validateRuntimeInstanceId, getRuntimeStateBootstrap)

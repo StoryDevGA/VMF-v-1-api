@@ -19,7 +19,13 @@ import {
   RUNTIME_TYPES,
 } from '../models/RuntimeInstance.js'
 import { resolveCustomerFeatureEntitlements } from './licenseEntitlementService.js'
-import { isFrameworkPackageAvailableToCustomer } from './frameworkPackageAvailabilityService.js'
+import {
+  buildRuntimeCreationFrameworkPackageFilter,
+  filterRuntimeCreationReadyFrameworkPackages,
+  isFrameworkPackageAvailableToCustomer,
+  resolveFrameworkPackageCustomerPresentation,
+  serializeCustomerFrameworkPackage,
+} from './frameworkPackageAvailabilityService.js'
 import customerGovernanceService from './customerGovernanceService.js'
 import auditService from './auditService.js'
 import { createRuntimeStateVersion } from './runtimeStateVersionService.js'
@@ -1080,7 +1086,15 @@ export const createRuntimeInstance = async ({
   })
 
   const { customer } = await assertCustomerTenantContext({ customerId, tenantId })
-  await assertFeatureEntitlement({ customerId, customer, feature: frameworkKey })
+  // Runtime capability entitlements are governed by the existing runtime
+  // type mapping. Do not turn an arbitrary package/framework key into a new
+  // licence key (for example, WEBSITE_ANALYSIS must use the VMF capability
+  // for a Value Narrative runtime).
+  await assertFeatureEntitlement({
+    customerId,
+    customer,
+    feature: getFeatureForRuntimeType(runtimeType),
+  })
 
   const runtimeCapacityReservation = runtimeType === RUNTIME_TYPES.VALUE_NARRATIVE
     ? await selectRuntimeCapacitySlot({
@@ -1239,6 +1253,66 @@ export const listRuntimeInstances = async ({
   }
 }
 
+export const listAvailableFrameworkPackages = async ({
+  scopes,
+  query = {},
+} = {}) => {
+  const customerId = query.customerId
+  const tenantId = query.tenantId
+  const runtimeType = normalizeToken(query.runtimeType || RUNTIME_TYPES.VALUE_NARRATIVE)
+  const frameworkKey = normalizeToken(query.frameworkKey || VMF_FRAMEWORK_KEY)
+  const page = Math.max(1, Number(query.page) || 1)
+  const pageSize = Math.min(100, Math.max(1, Number(query.pageSize) || 100))
+
+  await assertRuntimePermission({
+    scopes,
+    customerId,
+    tenantId,
+    permission: runtimeType === RUNTIME_TYPES.DEAL_ANALYSIS ? 'DEAL_VIEW' : 'VMF_VIEW',
+  })
+
+  const { customer } = await assertCustomerTenantContext({ customerId, tenantId })
+  const filter = buildRuntimeCreationFrameworkPackageFilter({ customerId, frameworkKey })
+  const candidateItems = await FrameworkPackage.find(filter)
+    .sort({ isDefault: -1, updatedAt: -1, packageName: 1 })
+    .lean()
+  const runtimeReadyItems = await filterRuntimeCreationReadyFrameworkPackages({
+    frameworkPackages: candidateItems,
+    frameworkKey,
+  })
+  const projectedItems = (await Promise.all(runtimeReadyItems.map(async (frameworkPackage) => {
+    const presentation = await resolveFrameworkPackageCustomerPresentation({
+      frameworkPackage,
+      customerId,
+      customer,
+      runtimeType,
+    })
+    if (!presentation.packageAccessible) return null
+    return serializeCustomerFrameworkPackage({ frameworkPackage, presentation })
+  }))).filter(Boolean)
+
+  const total = projectedItems.length
+  const totalPages = Math.max(1, Math.ceil(total / pageSize))
+  const normalizedPage = Math.min(page, totalPages)
+  const skip = (normalizedPage - 1) * pageSize
+
+  return {
+    data: projectedItems.slice(skip, skip + pageSize),
+    meta: {
+      page: normalizedPage,
+      pageSize,
+      total,
+      totalPages,
+      customerId: String(customerId),
+      tenantId: String(tenantId),
+      runtimeType,
+      frameworkKey,
+      requestId: query.requestId || null,
+      version: 'v1',
+    },
+  }
+}
+
 const buildRuntimeInstanceLookupFilter = ({
   runtimeInstanceId,
   customerId,
@@ -1371,6 +1445,7 @@ export const getRuntimeInstance = async ({
 
 const runtimeInstanceService = {
   createRuntimeInstance,
+  listAvailableFrameworkPackages,
   getRuntimeInstance,
   listRuntimeInstances,
   serializeRuntimeInstance,

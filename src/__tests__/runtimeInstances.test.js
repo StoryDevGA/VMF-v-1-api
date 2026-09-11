@@ -2161,6 +2161,63 @@ beforeEach(async () => {
 })
 
 describe('Runtime Instance API', () => {
+  test('lists a distinct customer Framework Package through the generic catalogue path', async () => {
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+    const websitePackage = makeFrameworkPackage({
+      frameworkKey: 'WEBSITE_ANALYSIS',
+      frameworkName: 'Website Analysis',
+      packageName: 'Website Analysis',
+      packageKey: 'website-analysis-1-0-0',
+      version: '1.0.0',
+      isDefault: false,
+      visibility: 'CUSTOMER_VISIBLE',
+      uiContractKey: 'website-analysis-ui-v1',
+      capabilities: { supportsPreviewMode: true },
+      sections: [{
+        sectionKey: 'website_url',
+        runtimePath: 'framework_state.sections.website_url',
+        required: true,
+      }],
+    })
+    FrameworkPackage.find.mockReturnValue({
+      sort: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue([websitePackage]),
+      }),
+    })
+    RuntimeDeployment.find = jest.fn()
+    RuntimeDeployment.find.mockReturnValue({
+      lean: jest.fn().mockResolvedValue([makeRuntimeDeployment({
+        packageId: FRAMEWORK_PACKAGE_ID,
+        frameworkKey: 'WEBSITE_ANALYSIS',
+        packageKey: 'website-analysis-1-0-0',
+        frameworkVersion: '1.0.0',
+      })]),
+    })
+    RuntimeActivationSnapshot.find = jest.fn()
+    RuntimeActivationSnapshot.find.mockReturnValue({
+      lean: jest.fn().mockResolvedValue([makeRuntimeActivationSnapshot({
+        packageId: FRAMEWORK_PACKAGE_ID,
+        frameworkKey: 'WEBSITE_ANALYSIS',
+        packageKey: 'website-analysis-1-0-0',
+        frameworkVersion: '1.0.0',
+      })]),
+    })
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/framework-packages?customerId=${CUSTOMER_ID}&tenantId=${TENANT_ID}&frameworkKey=WEBSITE_ANALYSIS&runtimeType=VALUE_NARRATIVE`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toEqual([
+      expect.objectContaining({
+        frameworkKey: 'WEBSITE_ANALYSIS',
+        uiContractKey: 'website-analysis-ui-v1',
+        presentationMode: 'FULL',
+        entitlementFeature: 'VMF',
+      }),
+    ])
+  })
+
   describe('default V2 collection query contract', () => {
     test('preserves BSON IDs and Dates in independent projection copies', async () => {
       const id = new mongoose.Types.ObjectId(RUNTIME_INSTANCE_ID)

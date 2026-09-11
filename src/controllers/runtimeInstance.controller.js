@@ -1,6 +1,7 @@
 import {
   createRuntimeInstance as createRuntimeInstanceRecord,
   getRuntimeInstance as getRuntimeInstanceRecord,
+  listAvailableFrameworkPackages as listAvailableFrameworkPackageRecords,
   listRuntimeInstances as listRuntimeInstanceRecords,
 } from '../services/runtimeInstanceService.js'
 import { createRuntimeRevision as createRuntimeRevisionRecord } from '../services/runtimeRevisionService.js'
@@ -330,6 +331,29 @@ export const buildRuntimeStateRequestScopes = ({ scopes = {}, query = {} } = {})
       _id: tenantId,
       customerId: tenantCustomerId,
     },
+  }
+}
+
+export const listAvailableFrameworkPackages = async (req, res, next) => {
+  try {
+    const { data, meta } = await listAvailableFrameworkPackageRecords({
+      scopes: req.scopes,
+      query: { ...req.query, requestId: req.requestId },
+    })
+
+    return res.status(200).json({
+      data,
+      meta: {
+        ...meta,
+        requestId: req.requestId,
+        version: 'v1',
+      },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    }
+    return next(err)
   }
 }
 
