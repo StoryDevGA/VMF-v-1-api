@@ -23,6 +23,7 @@ const makePack = ({
   boundary,
   workspaceCompatibility = ['OUTCOME'],
   dependencyReferences = [],
+  compatibleOutputTypes,
   activatedAt = '2026-07-14T10:00:00.000Z',
   status = 'ACTIVE',
   runtimeBindable = true,
@@ -46,6 +47,7 @@ const makePack = ({
   ...(boundary ? { boundary } : {}),
   workspaceCompatibility,
   dependencyReferences,
+  ...(compatibleOutputTypes !== undefined ? { compatibleOutputTypes } : {}),
   relationshipContractVersion: 'SS002_RELATIONSHIP_V1',
   relationshipChecksum: buildKnowledgePackRelationshipChecksum(dependencyReferences),
   activatedAt,
@@ -174,6 +176,7 @@ describe('resolveRequestSpecificKnowledgePacks', () => {
       industryKeys: [],
       languageKey: '',
       channelKey: '',
+      visualSystemKey: '',
     })
     expect(result.mandatorySafeguards).toHaveLength(5)
     expect(result.selectedByLayer.OUTPUT_TYPE).toHaveLength(1)
@@ -326,7 +329,7 @@ describe('resolveRequestSpecificKnowledgePacks', () => {
     }))
   })
 
-  test('requires resulting output schema and style coverage for an output request', () => {
+  test('requires resulting output schema while allowing style to remain context-optional', () => {
     const noSchema = resolve({
       candidates: makeOutputCandidates({
         outputDependencies: [requiredDependency('STYLE', 'executive')],
@@ -343,11 +346,113 @@ describe('resolveRequestSpecificKnowledgePacks', () => {
       reason: 'REQUIRED_LAYER_COVERAGE_MISSING',
       selector: { knowledgeLayer: 'OUTPUT_SCHEMA' },
     }))
-    expect(noStyle.status).toBe('BLOCKED')
-    expect(noStyle.missingDependencies).toContainEqual(expect.objectContaining({
-      reason: 'REQUIRED_LAYER_COVERAGE_MISSING',
-      selector: { knowledgeLayer: 'STYLE' },
+    expect(noStyle.status).toBe('READY')
+    expect(noStyle.selectedByLayer.STYLE).toBeUndefined()
+  })
+
+  test('selects the commercial assessment schema from structured compatibility metadata', () => {
+    const outputType = makePack({
+      packType: 'OUTPUT_TYPE_DEFINITION',
+      packKey: 'commercial-assessment',
+      knowledgeLayer: 'OUTPUT_TYPE',
+      capabilityKey: 'commercial-assessment',
+      knowledgeAssetId: 'OT-005',
+      dependencyReferences: [compatibleSchemaRequirement()],
+    })
+    const outputSchema = makePack({
+      packType: 'OUTPUT_SCHEMA',
+      packKey: 'commercial-assessment-schema',
+      knowledgeLayer: 'OUTPUT_SCHEMA',
+      capabilityKey: 'commercial-assessment',
+      knowledgeAssetId: 'OSC-002',
+      dependencyReferences: [],
+      compatibleOutputTypes: ['OT-005'],
+    })
+
+    const result = resolve({
+      candidates: [outputType, outputSchema],
+      request: {
+        workspaceType: 'OUTCOME',
+        requestedOutputTypeKey: 'commercial-assessment',
+        resolvedAt: RESOLVED_AT,
+      },
+    })
+
+    expect(result.status).toBe('READY')
+    expect(result.selectedByLayer.OUTPUT_TYPE).toEqual([
+      expect.objectContaining({ knowledgeAssetId: 'OT-005', capabilityKey: 'commercial-assessment' }),
+    ])
+    expect(result.selectedByLayer.OUTPUT_SCHEMA).toEqual([
+      expect.objectContaining({
+        knowledgeAssetId: 'OSC-002',
+        capabilityKey: 'commercial-assessment',
+        compatibleOutputTypes: ['OT-005'],
+      }),
+    ])
+    expect(result.relationshipFailures).toEqual([])
+  })
+
+  test('does not treat a display label as output schema compatibility', () => {
+    const outputType = makePack({
+      packType: 'OUTPUT_TYPE_DEFINITION',
+      packKey: 'commercial-assessment',
+      knowledgeLayer: 'OUTPUT_TYPE',
+      capabilityKey: 'commercial-assessment',
+      knowledgeAssetId: 'OT-005',
+      dependencyReferences: [compatibleSchemaRequirement()],
+    })
+    const outputSchema = makePack({
+      packType: 'OUTPUT_SCHEMA',
+      packKey: 'Commercial Assessment',
+      knowledgeLayer: 'OUTPUT_SCHEMA',
+      capabilityKey: 'commercial-assessment',
+      knowledgeAssetId: 'OSC-002',
+      dependencyReferences: [],
+      compatibleOutputTypes: ['Commercial Assessment'],
+    })
+
+    const result = resolve({
+      candidates: [outputType, outputSchema],
+      request: {
+        workspaceType: 'OUTCOME',
+        requestedOutputTypeKey: 'commercial-assessment',
+        resolvedAt: RESOLVED_AT,
+      },
+    })
+
+    expect(result.status).toBe('BLOCKED')
+    expect(result.relationshipFailures).toContainEqual(expect.objectContaining({
+      code: 'MISSING_RELATIONSHIP',
+      observedState: 'DIRECT_COMPATIBILITY_MISSING',
     }))
+  })
+
+  test('resolves a requested visual system from structured metadata', () => {
+    const result = resolve({
+      candidates: makeOutputCandidates({
+        extra: [makePack({
+          packType: 'VISUAL_SYSTEM',
+          packKey: 'commercial-assessment-visual-system',
+          knowledgeLayer: 'VISUAL_SYSTEM',
+          capabilityKey: 'commercial-assessment-visual-system',
+        })],
+      }),
+      request: {
+        workspaceType: 'OUTCOME',
+        requestedOutputTypeKey: 'board-summary',
+        visualSystemKey: 'commercial-assessment-visual-system',
+        resolvedAt: RESOLVED_AT,
+      },
+    })
+
+    expect(result.status).toBe('READY')
+    expect(result.request.visualSystemKey).toBe('commercial-assessment-visual-system')
+    expect(result.selectedByLayer.VISUAL_SYSTEM).toEqual([
+      expect.objectContaining({
+        packKey: 'commercial-assessment-visual-system',
+        knowledgeLayer: 'VISUAL_SYSTEM',
+      }),
+    ])
   })
 
   test('returns AMBIGUOUS for candidates tied on scope, semantic version, and activation time', () => {
@@ -902,8 +1007,10 @@ describe('discoverRequestSpecificOutputTypes', () => {
     expect(JSON.stringify(discovered)).not.toContain('must never leak')
   })
 
-  test('retains blocked discovery evidence when required deliverable guidance is missing', () => {
-    const candidates = makeOutputCandidates()
+  test('retains incomplete discovery evidence when optional style guidance is absent', () => {
+    const candidates = makeOutputCandidates({
+      outputDependencies: [requiredDependency('OUTPUT_SCHEMA', 'board-summary-schema')],
+    })
       .filter((candidate) => candidate.knowledgeLayer !== 'STYLE')
 
     const discovered = discoverRequestSpecificOutputTypes({
@@ -919,12 +1026,9 @@ describe('discoverRequestSpecificOutputTypes', () => {
     expect(discovered).toHaveLength(1)
     expect(discovered[0]).toEqual(expect.objectContaining({
       capabilityKey: 'board-summary',
-      status: 'BLOCKED',
+      status: 'READY',
       style: null,
     }))
-    expect(discovered[0].missingDependencies).toContainEqual(expect.objectContaining({
-      reason: 'REQUIRED_LAYER_COVERAGE_MISSING',
-      selector: expect.objectContaining({ knowledgeLayer: 'STYLE' }),
-    }))
+    expect(discovered[0].missingDependencies).toEqual([])
   })
 })

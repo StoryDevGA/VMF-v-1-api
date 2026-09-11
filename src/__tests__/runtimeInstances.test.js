@@ -18230,6 +18230,24 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
           contentHash: 'sha256:executive-brief-output-type',
         }),
       ]),
+      resolutionReceipt: expect.objectContaining({
+        contractVersion: 'outcome-studio.knowledge-pack-resolution-receipt.v1',
+        source: 'KNOWLEDGE_PACK_REGISTRY',
+        manifest: expect.objectContaining({
+          key: 'outcome-studio-default',
+          version: '1.0.0',
+        }),
+        selectedContract: expect.objectContaining({
+          outputType: expect.objectContaining({ packKey: 'executive-brief-output-type' }),
+          outputSchema: expect.objectContaining({ packKey: 'executive-brief-schema' }),
+          style: expect.objectContaining({ packKey: 'executive-brief-style' }),
+        }),
+        blockers: {
+          missingDependencies: 0,
+          relationshipFailures: 0,
+          ambiguousCandidates: 0,
+        },
+      }),
     }))
   })
 

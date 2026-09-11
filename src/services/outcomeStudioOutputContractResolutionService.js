@@ -36,7 +36,56 @@ const MAX_KEY_OR_LABEL_LENGTH = 140;
 const MAX_DESCRIPTOR_VALUE_LENGTH = 160;
 const MAX_REASON_LENGTH = 240;
 const MAX_CLARIFICATION_LENGTH = 240;
-const MAX_ROLES = 6;
+const MAX_ROLES = 32;
+
+const PACK_ROLE_BY_KEY = new Map([
+  ['adaptive-reasoning-layer', 'ARL'],
+  ['rendering-layer', 'RL'],
+  ['observation-register', 'OR'],
+  ['or-runtime-pack', 'OR'],
+  ['validation-evidence', 'VE'],
+  ['ve-runtime-pack', 'VE'],
+  ['contradiction-register', 'CR'],
+  ['cr-runtime-pack', 'CR'],
+  ['cacr-runtime-pack', 'CACR'],
+  ['scr-runtime-pack', 'SCR'],
+  ['execution-translation', 'ET'],
+  ['et-runtime-pack', 'ET'],
+  ['execution-translation-runtime', 'ET_RT'],
+  ['et-rt-runtime-pack', 'ET_RT'],
+  ['etl-runtime-pack', 'ETL'],
+  ['commercial-clarity-review', 'CCR'],
+  ['ccr-runtime-pack', 'CCR'],
+  ['commercial-constraint-diagnostics', 'DX'],
+  ['dx-runtime-pack', 'DX'],
+  ['canonical-runtime-model', 'CDRM'],
+  ['cdrm-runtime-pack', 'CDRM'],
+  ['commercial-clarity-dashboard', 'CCD'],
+  ['ccd-runtime-pack', 'CCD'],
+  ['fx-runtime-pack', 'FX'],
+  ['gx-runtime-pack', 'GX'],
+  ['ec-runtime-pack', 'EC'],
+  ['state-runtime-pack', 'STATE'],
+  ['st-runtime-pack', 'ST'],
+  ['render-governance-state', 'RGS'],
+  ['rgs-runtime-pack', 'RGS'],
+]);
+
+const PACK_ROLE_BY_TYPE = new Map([
+  ['ARL', 'ARL'],
+  ['RL', 'RL'],
+  ['OR', 'OR'],
+  ['OBSERVATION_REGISTER', 'OR'],
+  ['VE', 'VE'],
+  ['VALIDATION_EVIDENCE', 'VE'],
+  ['CR', 'CR'],
+  ['CONTRADICTION_REGISTER', 'CR'],
+  ['CCR', 'CCR'],
+  ['DX', 'DX'],
+  ['CDRM', 'CDRM'],
+  ['CCD', 'CCD'],
+  ['RGS', 'RGS'],
+]);
 
 const AUDIENCE_SIGNALS = new Map([
   ['investor', ['INVESTORS', 'Investors']],
@@ -683,6 +732,18 @@ function selectedActivePack(pack, key) {
   );
 }
 
+function knowledgePackRole(pack) {
+  const explicitRole = typeof pack?.role === 'string'
+    ? pack.role.trim().toUpperCase()
+    : '';
+  if (explicitRole && /^[A-Z][A-Z0-9_]{0,31}$/.test(explicitRole)) {
+    return explicitRole;
+  }
+  return PACK_ROLE_BY_KEY.get(normalizeCapabilityIdentity(pack?.key || ''))
+    || PACK_ROLE_BY_TYPE.get(String(pack?.packType || '').trim().toUpperCase())
+    || '';
+}
+
 function role(roleName, classification, value) {
   return {
     role: roleName,
@@ -758,6 +819,19 @@ export function completeOutcomeStudioOutputContractResolution({
       ),
     );
   }
+
+  const roleNames = new Set(roles.map((entry) => entry.role));
+  for (const pack of packs) {
+    if (!selectedActivePack(pack, pack?.key)) continue;
+    const packRole = knowledgePackRole(pack);
+    if (!packRole || roleNames.has(packRole) || ['ARL', 'RL', 'VMF'].includes(packRole)) continue;
+    roles.push(role(packRole, 'METHOD', descriptorFromContext(
+      pack,
+      `knowledgeContext.knowledgePacks.${packRole}`,
+    )));
+    roleNames.add(packRole);
+  }
+
   if (frameworkKey === 'VMF') {
     const framework = isPlainObject(knowledgeContext.framework)
       ? descriptorFromContext(knowledgeContext.framework, 'knowledgeContext.framework')

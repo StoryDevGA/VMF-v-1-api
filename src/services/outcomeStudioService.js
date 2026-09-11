@@ -256,16 +256,33 @@ const createOutcomeStudioError = ({
 const OUTPUT_CONTRACT_CLARIFICATION_CODE = 'OUTCOME_OUTPUT_CONTRACT_CLARIFICATION_REQUIRED'
 const OUTPUT_CONTRACT_STALE_CODE = 'OUTCOME_OUTPUT_CONTRACT_STALE'
 
+const OUTPUT_CONTRACT_PACK_LIST_KEYS = Object.freeze([
+  'activePacks',
+  'requiredPacks',
+  'optionalPacks',
+  'validationPacks',
+  'providerContextPacks',
+  'preValidationPacks',
+  'postValidationPacks',
+  'lineageCertificationPacks',
+  'systemOnlyPacks',
+])
+
+const outputContractBindingPacks = (binding = {}) => OUTPUT_CONTRACT_PACK_LIST_KEYS
+  .flatMap((listKey) => (Array.isArray(binding[listKey]) ? binding[listKey] : []))
+
 const outputContractRolePack = (binding = {}, packKey = '') => {
-  const pack = (Array.isArray(binding.activePacks) ? binding.activePacks : [])
-    .find((candidate) => normalizeText(candidate?.packKey) === packKey)
+  const pack = outputContractBindingPacks(binding)
+    .find((candidate) => normalizeText(candidate?.packKey).toLowerCase() === packKey)
   if (!pack) return null
   return {
-    key: normalizeText(pack.packKey),
+    key: normalizeText(pack.packKey).toLowerCase(),
     label: normalizeText(pack.label || pack.packKey),
     version: normalizeText(pack.semanticVersion),
     selected: true,
     status: normalizeToken(pack.status || 'ACTIVE'),
+    ...(normalizeToken(pack.packType) ? { packType: normalizeToken(pack.packType) } : {}),
+    ...(normalizeText(pack.role) ? { role: normalizeText(pack.role) } : {}),
   }
 }
 
@@ -287,20 +304,31 @@ const buildOutputContractKnowledgeContext = ({
   context = {},
   frameworkKey = '',
   frameworkVersion = '',
-} = {}) => ({
-  outputType: outputContractContextDescriptor(context.outputType),
-  outputSchema: outputContractContextDescriptor(context.outputSchema),
-  style: outputContractContextDescriptor(context.style),
-  framework: {
-    key: normalizeToken(frameworkKey),
-    label: normalizeToken(frameworkKey) === 'VMF' ? 'Value Management Framework' : normalizeText(frameworkKey),
-    version: normalizeText(frameworkVersion),
-  },
-  knowledgePacks: [
-    outputContractRolePack(binding, 'adaptive-reasoning-layer'),
-    outputContractRolePack(binding, 'rendering-layer'),
-  ].filter(Boolean),
-})
+} = {}) => {
+  const packs = []
+  const seenPackKeys = new Set()
+  for (const candidate of outputContractBindingPacks(binding)) {
+    const packKey = normalizeText(candidate?.packKey).toLowerCase()
+    if (!packKey || seenPackKeys.has(packKey)) continue
+    const projected = outputContractRolePack(binding, packKey)
+    if (projected) {
+      packs.push(projected)
+      seenPackKeys.add(packKey)
+    }
+  }
+
+  return {
+    outputType: outputContractContextDescriptor(context.outputType),
+    outputSchema: outputContractContextDescriptor(context.outputSchema),
+    style: outputContractContextDescriptor(context.style),
+    framework: {
+      key: normalizeToken(frameworkKey),
+      label: normalizeToken(frameworkKey) === 'VMF' ? 'Value Management Framework' : normalizeText(frameworkKey),
+      version: normalizeText(frameworkVersion),
+    },
+    knowledgePacks: packs,
+  }
+}
 
 const buildOutputContractBindingSnapshot = (resolution = {}) => Object.fromEntries(
   [
@@ -1690,23 +1718,34 @@ const resolveTruthSignatureCurrentness = ({
   return drifted ? 'OUT_OF_DATE' : 'CURRENT'
 }
 
+const sanitizeKnowledgePackDependencyReference = (reference = {}) => ({
+  relationshipType: normalizeToken(reference.relationshipType),
+  targetPackType: normalizeToken(reference.targetPackType),
+  targetPackKey: normalizeText(reference.targetPackKey).toLowerCase(),
+  targetCapabilityKey: normalizeText(reference.targetCapabilityKey).toLowerCase(),
+  targetKnowledgeAssetId: normalizeToken(reference.targetKnowledgeAssetId),
+  targetKnowledgeLayer: normalizeToken(reference.targetKnowledgeLayer),
+  requiredAt: normalizeToken(reference.requiredAt),
+  cardinality: normalizeToken(reference.cardinality),
+  ...(reference.versionConstraint && typeof reference.versionConstraint === 'object'
+    ? { versionConstraint: cloneValue(reference.versionConstraint) }
+    : {}),
+})
+
 const sanitizeKnowledgePackActivation = (pack = {}) => ({
   packCategory: normalizePackCategory(pack.packCategory, pack.packType),
   purposeCategory: normalizeToken(pack.purposeCategory),
   knowledgeLayer: normalizeToken(pack.knowledgeLayer),
   capabilityKey: normalizeText(pack.capabilityKey).toLowerCase(),
+  knowledgeAssetId: normalizeToken(pack.knowledgeAssetId),
   workspaceCompatibility: Array.isArray(pack.workspaceCompatibility)
     ? pack.workspaceCompatibility.map(normalizeToken).filter(Boolean)
     : [],
   dependencyReferences: Array.isArray(pack.dependencyReferences)
-    ? pack.dependencyReferences.map((reference) => ({
-        knowledgeLayer: normalizeToken(reference?.knowledgeLayer),
-        requirement: normalizeToken(reference?.requirement),
-        packType: normalizeToken(reference?.packType),
-        packKey: normalizeText(reference?.packKey).toLowerCase(),
-        capabilityKey: normalizeText(reference?.capabilityKey).toLowerCase(),
-      }))
+    ? pack.dependencyReferences.map(sanitizeKnowledgePackDependencyReference)
     : [],
+  relationshipContractVersion: normalizeToken(pack.relationshipContractVersion),
+  relationshipChecksum: normalizeText(pack.relationshipChecksum),
   packType: normalizeToken(pack.packType),
   packKey: normalizeText(pack.packKey),
   label: normalizeText(pack.label),
@@ -1725,6 +1764,125 @@ const sanitizeKnowledgePackActivation = (pack = {}) => ({
   contentHash: normalizeText(pack.contentHash),
   activatedAt: normalizeText(pack.activatedAt),
 })
+
+const resolutionReceiptPack = (pack = {}) => ({
+  knowledgeAssetId: normalizeToken(pack.knowledgeAssetId),
+  packType: normalizeToken(pack.packType),
+  packKey: normalizeText(pack.packKey).toLowerCase(),
+  capabilityKey: normalizeText(pack.capabilityKey).toLowerCase(),
+  activationId: normalizeText(pack.activationId),
+  versionId: normalizeText(pack.versionId),
+  semanticVersion: normalizeText(pack.semanticVersion),
+  contentHash: normalizeText(pack.contentHash),
+})
+
+const sanitizeKnowledgePackResolutionReceipt = (receipt = null) => {
+  if (!receipt || typeof receipt !== 'object') return null
+  const sanitizeCount = (value) => Math.max(Number(value) || 0, 0)
+  const sanitizePack = (pack) => (pack && typeof pack === 'object'
+    ? resolutionReceiptPack(pack)
+    : null)
+  return {
+    contractVersion: normalizeText(receipt.contractVersion),
+    status: normalizeToken(receipt.status),
+    source: normalizeToken(receipt.source),
+    manifest: {
+      id: normalizeText(receipt.manifest?.id),
+      key: normalizeText(receipt.manifest?.key),
+      version: normalizeText(receipt.manifest?.version),
+    },
+    policy: {
+      key: normalizeText(receipt.policy?.key),
+      version: normalizeText(receipt.policy?.version),
+    },
+    selectedContract: {
+      outputType: sanitizePack(receipt.selectedContract?.outputType),
+      outputSchema: sanitizePack(receipt.selectedContract?.outputSchema),
+      style: sanitizePack(receipt.selectedContract?.style),
+    },
+    counts: {
+      active: sanitizeCount(receipt.counts?.active),
+      resolved: sanitizeCount(receipt.counts?.resolved),
+      required: sanitizeCount(receipt.counts?.required),
+      optional: sanitizeCount(receipt.counts?.optional),
+      validation: sanitizeCount(receipt.counts?.validation),
+      blocked: sanitizeCount(receipt.counts?.blocked),
+    },
+    blockers: {
+      missingDependencies: sanitizeCount(receipt.blockers?.missingDependencies),
+      relationshipFailures: sanitizeCount(receipt.blockers?.relationshipFailures),
+      ambiguousCandidates: sanitizeCount(receipt.blockers?.ambiguousCandidates),
+    },
+    lineage: {
+      activationIds: Array.isArray(receipt.lineage?.activationIds)
+        ? receipt.lineage.activationIds.map(normalizeText).filter(Boolean)
+        : [],
+      versionIds: Array.isArray(receipt.lineage?.versionIds)
+        ? receipt.lineage.versionIds.map(normalizeText).filter(Boolean)
+        : [],
+      contentHashes: Array.isArray(receipt.lineage?.contentHashes)
+        ? receipt.lineage.contentHashes.map(normalizeText).filter(Boolean)
+        : [],
+    },
+  }
+}
+
+const buildKnowledgePackResolutionReceipt = (packBinding = {}) => {
+  const resolution = packBinding.resolution || {}
+  const selectedByLayer = packBinding.selectedByLayer || resolution.selectedByLayer || {}
+  const allPacks = [
+    ...(Array.isArray(packBinding.activePacks) ? packBinding.activePacks : []),
+    ...(Array.isArray(packBinding.requiredPacks) ? packBinding.requiredPacks : []),
+    ...(Array.isArray(packBinding.providerContextPacks) ? packBinding.providerContextPacks : []),
+    ...(Array.isArray(packBinding.validationPacks) ? packBinding.validationPacks : []),
+  ]
+  const firstPackForLayer = (layer) => (
+    Array.isArray(selectedByLayer[layer]) && selectedByLayer[layer].length === 1
+      ? selectedByLayer[layer][0]
+      : allPacks.find((pack) => normalizeToken(pack?.knowledgeLayer) === layer) || null
+  )
+  const hasEvidence = Boolean(
+    packBinding.manifestId
+    || packBinding.policyKey
+    || packBinding.resolution
+    || packBinding.lineage
+    || packBinding.selectedByLayer,
+  )
+  if (!hasEvidence) return null
+  return sanitizeKnowledgePackResolutionReceipt({
+    contractVersion: 'outcome-studio.knowledge-pack-resolution-receipt.v1',
+    status: packBinding.status || resolution.status,
+    source: packBinding.resolutionSource || 'KNOWLEDGE_PACK_REGISTRY',
+    manifest: {
+      id: packBinding.manifestId,
+      key: packBinding.manifestKey,
+      version: packBinding.manifestVersion,
+    },
+    policy: {
+      key: packBinding.policyKey,
+      version: packBinding.policyVersion || resolution.policyVersion,
+    },
+    selectedContract: {
+      outputType: firstPackForLayer('OUTPUT_TYPE'),
+      outputSchema: firstPackForLayer('OUTPUT_SCHEMA'),
+      style: firstPackForLayer('STYLE'),
+    },
+    counts: {
+      active: resolution.activeCount ?? packBinding.activeCount,
+      resolved: resolution.resolvedCount ?? packBinding.resolvedCount,
+      required: resolution.requiredCount ?? packBinding.requiredCount,
+      optional: resolution.optionalCount,
+      validation: resolution.validationCount,
+      blocked: resolution.blockedCount,
+    },
+    blockers: {
+      missingDependencies: packBinding.missingDependencies?.length,
+      relationshipFailures: packBinding.relationshipFailures?.length,
+      ambiguousCandidates: packBinding.ambiguousCandidates?.length,
+    },
+    lineage: packBinding.lineage || resolution.lineage,
+  })
+}
 
 const buildRequiredKnowledgePack = (pack = {}, activePacks = []) => {
   const matchingActivePack = activePacks.find((candidate) => (
@@ -1803,6 +1961,7 @@ const buildSessionKnowledgePackBinding = (packBinding = {}, boundAt) => {
     lineageCertificationPacks: sanitizePackList(packBinding.lineageCertificationPacks),
     systemOnlyPacks: sanitizePackList(packBinding.systemOnlyPacks),
     sourceDocumentPacks: sanitizePackList(packBinding.sourceDocumentPacks),
+    resolutionReceipt: buildKnowledgePackResolutionReceipt(packBinding),
     lineage: sanitizeLineage(packBinding.lineage || packBinding.resolution?.lineage),
     resolution: {
       status: normalizeToken(packBinding.resolution?.status || packBinding.status),
@@ -1896,6 +2055,9 @@ const assertOutcomeStudioKnowledgeContextReady = ({
       blockerReason: normalizeToken(context.blockerReason || 'DELIVERABLE_UNAVAILABLE'),
       resolutionStatus: status || 'BLOCKED',
       requestedOutputTypeKey: normalizeCapabilityKey(context.requestedOutputTypeKey),
+      ...(context.resolutionEvidence && typeof context.resolutionEvidence === 'object'
+        ? { resolutionEvidence: cloneValue(context.resolutionEvidence) }
+        : {}),
     },
   })
 }
@@ -1989,6 +2151,8 @@ const sanitizePersistedKnowledgePackBinding = (binding = {}) => {
     lineageCertificationPacks: sanitizePackList(binding.lineageCertificationPacks),
     systemOnlyPacks: sanitizePackList(binding.systemOnlyPacks),
     sourceDocumentPacks: sanitizePackList(binding.sourceDocumentPacks),
+    resolutionReceipt: sanitizeKnowledgePackResolutionReceipt(binding.resolutionReceipt)
+      || buildKnowledgePackResolutionReceipt(binding),
     lineage: {
       resolvedAt: normalizeText(binding.lineage?.resolvedAt),
       activationIds: Array.isArray(binding.lineage?.activationIds)
@@ -2329,6 +2493,7 @@ const buildOutcomeContextBindings = ({
       requiredCount: safeKnowledgeBinding.requiredCount,
       activePacks: safeKnowledgeBinding.activePacks,
       requiredPacks: safeKnowledgeBinding.requiredPacks,
+      resolutionReceipt: safeKnowledgeBinding.resolutionReceipt,
       resolution: safeKnowledgeBinding.resolution,
     },
     // Intentionally duplicated as a compact evidence access path for audit/support review.
@@ -6420,6 +6585,7 @@ export const createRuntimeOutcomeSession = async ({
             resolvedCount: knowledgePackBinding.resolvedCount,
             requiredCount: knowledgePackBinding.requiredCount,
             activePacks: knowledgePackBinding.activePacks,
+            resolutionReceipt: knowledgePackBinding.resolutionReceipt,
           },
           runtimeGraphRelationshipCount: Math.max(sessionRelationshipDocuments.length - 1, 0),
         },

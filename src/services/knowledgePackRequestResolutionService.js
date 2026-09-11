@@ -45,6 +45,20 @@ const normalizeLowerKeyList = (values) => Array.isArray(values)
   ? [...new Set(values.map(normalizeLowerKey).filter(Boolean))]
   : []
 
+const normalizeCompatibilityValues = (value) => {
+  const values = Array.isArray(value) ? value : []
+  return [...new Set(values.flatMap((entry) => {
+    if (typeof entry === 'string') return [entry]
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return []
+    return [
+      entry.knowledgeAssetId,
+      entry.targetKnowledgeAssetId,
+      entry.capabilityKey,
+      entry.targetCapabilityKey,
+    ]
+  }).map(normalizeText).filter(Boolean))]
+}
+
 const toSafePack = (value = {}) => {
   let dependencyReferences = []
   let relationshipGovernanceError = normalizeText(value.relationshipGovernanceError)
@@ -86,6 +100,13 @@ const toSafePack = (value = {}) => {
     relationshipChecksum: normalizeText(value.relationshipChecksum),
     relationshipGovernanceError,
     dependencyReferences,
+    compatibleOutputTypes: normalizeCompatibilityValues(
+      value.compatibleOutputTypes ?? value.compatible_output_types,
+    ),
+    hasDirectCompatibilityMetadata: (
+      value.compatibleOutputTypes !== undefined
+      || value.compatible_output_types !== undefined
+    ),
     packType: normalizeToken(value.packType),
     packKey: normalizeLowerKey(value.packKey),
     label: normalizeText(value.label || value.packKey),
@@ -134,6 +155,17 @@ const candidateDiagnosticId = (pack) => candidateNodeId(pack)
   || `${pack.knowledgeLayer}:${pack.capabilityKey}`
 
 const candidateTraversalIdentity = (pack) => pack.knowledgeAssetId || candidateNodeId(pack)
+
+const hasDirectCompatibility = (candidate, requester) => {
+  if (!candidate.hasDirectCompatibilityMetadata) return null
+  const requestedValues = new Set([
+    normalizeToken(requester.knowledgeAssetId),
+    normalizeLowerKey(requester.capabilityKey),
+  ].filter(Boolean))
+  return candidate.compatibleOutputTypes.some((value) => (
+    requestedValues.has(normalizeToken(value)) || requestedValues.has(normalizeLowerKey(value))
+  ))
+}
 
 const compareNumericIdentifier = (left, right) => {
   const normalizedLeft = left.replace(/^0+(?=\d)/, '')
@@ -471,39 +503,45 @@ export const resolveRequestSpecificKnowledgePacks = ({
       return []
     }
 
-    const reciprocal = versionCompatible.filter((candidate) => candidate.dependencyReferences.some(
-      (candidateRelationship) => (
-        candidateRelationship.relationshipType
-          === KNOWLEDGE_PACK_RELATIONSHIP_TYPES.COMPATIBLE_WITH
-        && candidateRelationship.targetKnowledgeAssetId === requester.knowledgeAssetId
-        && (
-          !candidateRelationship.targetPackType
-          || candidateRelationship.targetPackType === requester.packType
-        )
-        && (
-          !candidateRelationship.targetKnowledgeLayer
-          || candidateRelationship.targetKnowledgeLayer === requester.knowledgeLayer
-        )
-        && semanticVersionSatisfies(
-          requester.semanticVersion,
-          candidateRelationship.versionConstraint,
-        )
+    const compatible = versionCompatible.filter((candidate) => {
+      const directCompatibility = hasDirectCompatibility(candidate, requester)
+      if (directCompatibility !== null) return directCompatibility
+      return candidate.dependencyReferences.some(
+        (candidateRelationship) => (
+          candidateRelationship.relationshipType
+            === KNOWLEDGE_PACK_RELATIONSHIP_TYPES.COMPATIBLE_WITH
+          && candidateRelationship.targetKnowledgeAssetId === requester.knowledgeAssetId
+          && (
+            !candidateRelationship.targetPackType
+            || candidateRelationship.targetPackType === requester.packType
+          )
+          && (
+            !candidateRelationship.targetKnowledgeLayer
+            || candidateRelationship.targetKnowledgeLayer === requester.knowledgeLayer
+          )
+          && semanticVersionSatisfies(
+            requester.semanticVersion,
+            candidateRelationship.versionConstraint,
+          )
+        ),
       )
-    ))
-    if (reciprocal.length === 0) {
+    })
+    if (compatible.length === 0) {
       addRelationshipFailure({
         code: KNOWLEDGE_PACK_RELATIONSHIP_FAILURES.MISSING_RELATIONSHIP,
         pack: requester,
         relationship,
-        observedState: 'RECIPROCAL_COMPATIBLE_WITH_MISSING',
-        requiredState: requester.knowledgeAssetId,
+        observedState: versionCompatible.some((candidate) => candidate.hasDirectCompatibilityMetadata)
+          ? 'DIRECT_COMPATIBILITY_MISSING'
+          : 'RECIPROCAL_COMPATIBLE_WITH_MISSING',
+        requiredState: [requester.knowledgeAssetId, requester.capabilityKey].filter(Boolean),
         resolutionResult: 'BLOCKED',
       })
       return []
     }
 
     const byIdentity = new Map()
-    for (const candidate of reciprocal) {
+    for (const candidate of compatible) {
       if (!candidate.knowledgeAssetId || candidate.relationshipGovernanceError) {
         addRelationshipFailure({
           code: KNOWLEDGE_PACK_RELATIONSHIP_FAILURES.MISSING_GOVERNANCE_METADATA,
@@ -917,6 +955,14 @@ export const resolveRequestSpecificKnowledgePacks = ({
     })
   }
 
+  const visualSystemKey = normalizeLowerKey(request.visualSystemKey)
+  if (visualSystemKey) {
+    requestSelectors.push({
+      selector: { knowledgeLayer: 'VISUAL_SYSTEM', capabilityKey: visualSystemKey },
+      requiredBy: 'REQUESTED_VISUAL_SYSTEM',
+    })
+  }
+
   resolvedMandatorySafeguards
     .filter((pack) => pack.status === OUTCOME_KNOWLEDGE_PACK_ACTIVATION_STATUSES.ACTIVE)
     .forEach((pack) => {
@@ -943,17 +989,13 @@ export const resolveRequestSpecificKnowledgePacks = ({
     selectedByLayer[layer].push(pack)
   }
 
-  if (requestedOutputTypeKey) {
-    for (const requiredLayer of ['OUTPUT_SCHEMA', 'STYLE']) {
-      if (!selectedByLayer[requiredLayer]?.length) {
-        addMissing({
-          reason: 'REQUIRED_LAYER_COVERAGE_MISSING',
-          requirement: KNOWLEDGE_PACK_DEPENDENCY_REQUIREMENTS.REQUIRED,
-          selector: { knowledgeLayer: requiredLayer },
-          requiredBy: 'REQUESTED_OUTPUT_TYPE',
-        })
-      }
-    }
+  if (requestedOutputTypeKey && !selectedByLayer.OUTPUT_SCHEMA?.length) {
+    addMissing({
+      reason: 'REQUIRED_LAYER_COVERAGE_MISSING',
+      requirement: KNOWLEDGE_PACK_DEPENDENCY_REQUIREMENTS.REQUIRED,
+      selector: { knowledgeLayer: 'OUTPUT_SCHEMA' },
+      requiredBy: 'REQUESTED_OUTPUT_TYPE',
+    })
   }
 
   const boundPacks = []
@@ -1040,6 +1082,7 @@ export const resolveRequestSpecificKnowledgePacks = ({
       industryKeys: normalizeLowerKeyList(request.industryKeys),
       languageKey: normalizeLowerKey(request.languageKey),
       channelKey: normalizeLowerKey(request.channelKey),
+      visualSystemKey,
     },
     mandatorySafeguards: resolvedMandatorySafeguards,
     selectedByLayer,

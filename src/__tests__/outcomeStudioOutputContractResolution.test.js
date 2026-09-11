@@ -373,6 +373,71 @@ describe('Outcome Studio conversation output contract resolution', () => {
     ]);
   });
 
+  test('preserves structured VMF reasoning roles beyond ARL and RL', () => {
+    const resolution = resolveOutcomeStudioConversationOutputContract({
+      prompt: 'Prepare an executive brief.',
+      deliverables,
+    })
+    const knowledgeContext = {
+      outputType: { key: 'executive-brief', label: 'Executive Brief', version: '2.1.0' },
+      outputSchema: { key: 'executive-brief-schema', label: 'Executive Brief Schema', version: '3.0.0' },
+      style: { key: 'investor-executive', label: 'Investor Executive Style', version: '1.4.0' },
+      framework: { key: 'VMF', label: 'Value Management Framework', version: '2.3.1' },
+      knowledgePacks: [
+        {
+          key: 'adaptive-reasoning-layer',
+          label: 'Adaptive Reasoning Layer',
+          version: '1.0.0',
+          selected: true,
+          status: 'ACTIVE',
+        },
+        {
+          key: 'rendering-layer',
+          label: 'Rendering Layer',
+          version: '1.1.0',
+          selected: true,
+          status: 'ACTIVE',
+        },
+        {
+          key: 'fx-runtime-pack',
+          label: 'FX Runtime Knowledge Pack',
+          version: '2.6.0',
+          selected: true,
+          status: 'ACTIVE',
+          packType: 'SYSTEM',
+        },
+        {
+          key: 'gx-runtime-pack',
+          label: 'GX Runtime Knowledge Pack',
+          version: '2.7.0',
+          selected: true,
+          status: 'ACTIVE',
+          packType: 'SYSTEM',
+        },
+      ],
+    }
+
+    const result = completeOutcomeStudioOutputContractResolution({
+      resolution,
+      knowledgeContext,
+      binding: {
+        outputType: { key: 'executive-brief', label: 'Executive Brief', version: '2.1.0' },
+        outputSchema: {
+          key: 'executive-brief-schema',
+          label: 'Executive Brief Schema',
+          version: '3.0.0',
+        },
+        style: { key: 'investor-executive', label: 'Investor Executive Style', version: '1.4.0' },
+      },
+      frameworkKey: 'VMF',
+    })
+
+    expect(result.knowledgePackRoles).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: 'FX', key: 'fx-runtime-pack', version: '2.6.0' }),
+      expect.objectContaining({ role: 'GX', key: 'gx-runtime-pack', version: '2.7.0' }),
+    ]))
+  });
+
   test('reports currentness mismatches without throwing', () => {
     const resolution = resolveOutcomeStudioConversationOutputContract({
       prompt: 'Prepare an executive brief.',

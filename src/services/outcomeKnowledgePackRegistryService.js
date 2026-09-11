@@ -1818,6 +1818,7 @@ const hasRequestSpecificSelectors = ({
   industryKeys,
   languageKey,
   channelKey,
+  visualSystemKey,
 } = {}) => Boolean(
   normalizeLowerKey(requestedOutputTypeKey)
   || normalizeLowerKey(requestedStyleKey)
@@ -1825,6 +1826,7 @@ const hasRequestSpecificSelectors = ({
   || normalizeTokenList(industryKeys).length
   || normalizeLowerKey(languageKey)
   || normalizeLowerKey(channelKey)
+  || normalizeLowerKey(visualSystemKey)
 )
 
 const uniquePacksByActivation = (packs = []) => {
@@ -1878,6 +1880,7 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
   industryKeys = [],
   languageKey,
   channelKey,
+  visualSystemKey,
   resolvedAt,
   boundedReadPolicy = null,
 } = {}) => {
@@ -1943,6 +1946,7 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
     industryKeys,
     languageKey,
     channelKey,
+    visualSystemKey,
   })
   const hasDiscoverableOutputTypes = eligibleActivations.some((activation) => (
     normalizeToken(activation.knowledgeLayer) === 'OUTPUT_TYPE'
@@ -1990,6 +1994,7 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
         industryKeys,
         languageKey,
         channelKey,
+        visualSystemKey,
         resolvedAt,
       },
       scopeCandidates,

@@ -1,4 +1,8 @@
 import { createHash } from 'node:crypto'
+import {
+  OUTCOME_STUDIO_BLOCKER_CODES,
+  OUTCOME_STUDIO_REQUEST_RESOLUTION_BLOCKER_CODES,
+} from '../constants/runtimeOutcomeStudio.js'
 import { resolveOutcomeStudioKnowledgePackBinding } from './outcomeKnowledgePackRegistryService.js'
 import { resolveOutcomeRendererCapability } from './outcomeRendererCapabilityRegistryService.js'
 
@@ -69,6 +73,107 @@ const projectLineage = (binding = {}) => ({
     : [],
 })
 
+const projectSelector = (selector = {}) => ({
+  ...(normalizeToken(selector.knowledgeLayer)
+    ? { knowledgeLayer: normalizeToken(selector.knowledgeLayer) }
+    : {}),
+  ...(normalizeToken(selector.packType)
+    ? { packType: normalizeToken(selector.packType) }
+    : {}),
+  ...(normalizeCapabilityKey(selector.packKey)
+    ? { packKey: normalizeCapabilityKey(selector.packKey) }
+    : {}),
+  ...(normalizeCapabilityKey(selector.capabilityKey)
+    ? { capabilityKey: normalizeCapabilityKey(selector.capabilityKey) }
+    : {}),
+})
+
+const projectResolutionEvidence = (binding = {}) => ({
+  status: normalizeToken(binding.status || binding.resolution?.status),
+  manifest: {
+    id: normalizeText(binding.manifestId),
+    key: normalizeText(binding.manifestKey),
+    version: normalizeText(binding.manifestVersion),
+  },
+  policy: {
+    key: normalizeText(binding.policyKey),
+    version: normalizeText(binding.policyVersion || binding.resolution?.policyVersion),
+  },
+  missingDependencies: Array.isArray(binding.missingDependencies)
+    ? binding.missingDependencies.slice(0, 24).map((entry) => ({
+        reason: normalizeToken(entry?.reason),
+        requirement: normalizeToken(entry?.requirement),
+        requiredBy: normalizeText(entry?.requiredBy),
+        selector: projectSelector(entry?.selector),
+      }))
+    : [],
+  relationshipFailures: Array.isArray(binding.relationshipFailures)
+    ? binding.relationshipFailures.slice(0, 24).map((entry) => ({
+        code: normalizeToken(entry?.code),
+        packType: normalizeToken(entry?.pack?.packType),
+        packKey: normalizeCapabilityKey(entry?.pack?.packKey),
+        relationshipType: normalizeToken(entry?.relationship?.relationshipType),
+        targetPackType: normalizeToken(entry?.relationship?.targetPackType),
+        targetKnowledgeLayer: normalizeToken(entry?.relationship?.targetKnowledgeLayer),
+        targetPackKey: normalizeCapabilityKey(entry?.relationship?.targetPackKey),
+        targetCapabilityKey: normalizeCapabilityKey(entry?.relationship?.targetCapabilityKey),
+        targetKnowledgeAssetId: normalizeToken(entry?.relationship?.targetKnowledgeAssetId),
+        observedState: normalizeText(entry?.observedState),
+      }))
+    : [],
+  ambiguousCandidates: Array.isArray(binding.ambiguousCandidates)
+    ? binding.ambiguousCandidates.slice(0, 24).map((entry) => ({
+        requiredBy: normalizeText(entry?.requiredBy),
+        selector: projectSelector(entry?.selector),
+        candidateCount: Array.isArray(entry?.candidates) ? entry.candidates.length : 0,
+      }))
+    : [],
+})
+
+const reasonForLayer = (layer) => ({
+  OUTPUT_TYPE: OUTCOME_STUDIO_REQUEST_RESOLUTION_BLOCKER_CODES.OUTPUT_TYPE_UNRESOLVED,
+  OUTPUT_SCHEMA: OUTCOME_STUDIO_REQUEST_RESOLUTION_BLOCKER_CODES.OUTPUT_SCHEMA_UNRESOLVED,
+  STYLE: OUTCOME_STUDIO_REQUEST_RESOLUTION_BLOCKER_CODES.STYLE_UNRESOLVED,
+}[normalizeToken(layer)] || '')
+
+const reasonForMandatoryPack = (packType) => ({
+  ARL: OUTCOME_STUDIO_BLOCKER_CODES.ARL_PACK_MISSING,
+  RL: OUTCOME_STUDIO_BLOCKER_CODES.RL_PACK_MISSING,
+  OUTPUT_SCHEMA: OUTCOME_STUDIO_BLOCKER_CODES.OUTPUT_SCHEMA_PACK_MISSING,
+  TRUTH_CERTIFICATION: OUTCOME_STUDIO_BLOCKER_CODES.TRUTH_CERTIFICATION_PACK_MISSING,
+  OUTPUT_TYPE_DEFINITION: OUTCOME_STUDIO_BLOCKER_CODES.OUTPUT_TYPE_PACK_MISSING,
+}[normalizeToken(packType)] || '')
+
+const resolveBindingBlockerReason = (binding = {}, status = '') => {
+  if (status === 'AMBIGUOUS') {
+    const ambiguousLayer = binding.ambiguousCandidates?.[0]?.selector?.knowledgeLayer
+    return reasonForLayer(ambiguousLayer)
+      || OUTCOME_STUDIO_REQUEST_RESOLUTION_BLOCKER_CODES.OUTPUT_TYPE_AMBIGUOUS
+  }
+
+  const missing = Array.isArray(binding.missingDependencies)
+    ? binding.missingDependencies
+    : []
+  for (const entry of missing) {
+    const layerReason = reasonForLayer(entry?.selector?.knowledgeLayer)
+    if (layerReason) return layerReason
+    const packReason = reasonForMandatoryPack(entry?.selector?.packType)
+    if (packReason) return packReason
+  }
+
+  const failures = Array.isArray(binding.relationshipFailures)
+    ? binding.relationshipFailures
+    : []
+  for (const entry of failures) {
+    const layerReason = reasonForLayer(entry?.relationship?.targetKnowledgeLayer)
+    if (layerReason) return layerReason
+    const packReason = reasonForMandatoryPack(entry?.pack?.packType)
+    if (packReason) return packReason
+  }
+
+  return OUTCOME_STUDIO_BLOCKER_CODES.KNOWLEDGE_PACK_BINDING_MISSING
+}
+
 const buildContextId = ({ binding, outputSchema, outputType, style }) => createHash('sha256')
   .update(JSON.stringify({
     policyVersion: normalizeText(binding?.resolution?.policyVersion || binding?.policyVersion),
@@ -100,6 +205,7 @@ const blockedContextResult = ({
     renderer: null,
     warnings: [],
     lineage: projectLineage(binding || {}),
+    resolutionEvidence: projectResolutionEvidence(binding || {}),
   },
   reasoningBinding: null,
   reasoningResolution: null,
@@ -113,7 +219,7 @@ export const resolveOutcomeStudioKnowledgeContext = async ({
   const requestedOutputTypeKey = normalizeCapabilityKey(query.requestedOutputTypeKey)
   if (!requestedOutputTypeKey) {
     return blockedContextResult({
-      reason: 'DELIVERABLE_TYPE_REQUIRED',
+      reason: OUTCOME_STUDIO_REQUEST_RESOLUTION_BLOCKER_CODES.OUTPUT_TYPE_UNRESOLVED,
     })
   }
 
@@ -134,8 +240,8 @@ export const resolveOutcomeStudioKnowledgeContext = async ({
     return blockedContextResult({
       binding,
       reason: status === 'AMBIGUOUS'
-        ? 'DELIVERABLE_GUIDANCE_AMBIGUOUS'
-        : 'DELIVERABLE_GUIDANCE_BLOCKED',
+        ? OUTCOME_STUDIO_REQUEST_RESOLUTION_BLOCKER_CODES.OUTPUT_TYPE_AMBIGUOUS
+        : resolveBindingBlockerReason(binding, status || 'BLOCKED'),
       requestedOutputTypeKey,
       status: status || 'BLOCKED',
       boundedReadReceipt: boundedReceipt,
@@ -155,9 +261,16 @@ export const resolveOutcomeStudioKnowledgeContext = async ({
     || !outputSchema.key
     || !style.key
   ) {
+    const reason = !selectedOutputType || outputType.key !== requestedOutputTypeKey
+      ? OUTCOME_STUDIO_REQUEST_RESOLUTION_BLOCKER_CODES.OUTPUT_TYPE_UNRESOLVED
+      : !outputSchema.key
+        ? OUTCOME_STUDIO_REQUEST_RESOLUTION_BLOCKER_CODES.OUTPUT_SCHEMA_UNRESOLVED
+        : !style.key
+          ? OUTCOME_STUDIO_REQUEST_RESOLUTION_BLOCKER_CODES.STYLE_UNRESOLVED
+          : OUTCOME_STUDIO_BLOCKER_CODES.KNOWLEDGE_PACK_BINDING_MISSING
     return blockedContextResult({
       binding,
-      reason: 'DELIVERABLE_BINDING_INCOMPLETE',
+      reason,
       requestedOutputTypeKey,
       boundedReadReceipt: boundedReceipt,
     })
@@ -205,6 +318,7 @@ export const resolveOutcomeStudioKnowledgeContext = async ({
       ? binding.warnings.map((warning) => normalizeText(warning?.message || warning)).filter(Boolean)
       : [],
     lineage,
+    resolutionEvidence: projectResolutionEvidence(binding),
   }
 
   return {
