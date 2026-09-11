@@ -107,6 +107,7 @@ const outcomeStudioTestReferenceUploadPath = '/api/v1/super-admin/runtime-contro
 const usesRouteScopedJsonParser = (path = '', method = 'GET') =>
   path.startsWith('/api/v1/runtime-instances')
   || path === '/api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import'
+  || path === '/api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import/metadata'
   || (method === 'POST' && (path === outcomeStudioTestReferenceUploadPath || path === `${outcomeStudioTestReferenceUploadPath}/`))
 app.use((req, res, next) => (
   usesRouteScopedJsonParser(req.path, req.method)

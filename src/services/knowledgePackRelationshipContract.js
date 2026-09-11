@@ -424,6 +424,9 @@ export const parseKnowledgePackFrontMatter = (
     dependencyReferences: normalizedRelationships,
     relationshipChecksum: buildKnowledgePackRelationshipChecksum(normalizedRelationships),
     inertMetadata,
+    // Preserve validated YAML declarations for import-form type/conflict checks.
+    // Relationship normalization and execution continue to use the fields above.
+    declaredMetadata: metadata,
   }
 }
 

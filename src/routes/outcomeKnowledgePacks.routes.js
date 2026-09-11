@@ -17,6 +17,7 @@ import {
   getKnowledgePackVersion,
   importKnowledgePackStarterVersion,
   importKnowledgePackSourceDocumentDraft,
+  previewKnowledgePackImportMetadataController,
   listKnowledgePackManifestsController,
   listKnowledgePacks,
   previewKnowledgePackReasoningContextController,
@@ -36,6 +37,7 @@ import {
   validateCreateKnowledgePackVersion,
   validateImportKnowledgePackStarterVersion,
   validateImportSourceDocumentDraft,
+  validateImportSourceMetadata,
   validateKnowledgePackId,
   validateKnowledgePackManifestId,
   validateKnowledgePackResolutionPreview,
@@ -65,6 +67,12 @@ router.post('/manifests/:manifestId/clone', validateKnowledgePackManifestId, val
 router.put('/manifests/:manifestId', validateKnowledgePackManifestId, validateUpdateKnowledgePackManifest, updateKnowledgePackManifestController)
 router.get('/manifests/:manifestId', validateKnowledgePackManifestId, getKnowledgePackManifestController)
 router.get('/resolution-preview', validateKnowledgePackResolutionPreview, previewKnowledgePackResolution)
+router.post(
+  '/source-document-import/metadata',
+  sourceDocumentImportJsonParser,
+  validateImportSourceMetadata,
+  previewKnowledgePackImportMetadataController,
+)
 router.post(
   '/source-document-import',
   sourceDocumentImportJsonParser,

@@ -1,4 +1,5 @@
 import crypto from 'node:crypto'
+import { assertKnowledgePackImportMetadata } from './knowledgePackImportMetadataService.js'
 import mongoose from 'mongoose'
 import {
   KnowledgePack,
@@ -699,7 +700,7 @@ const buildSourceDocumentDraftPackUpdate = ({
       latestSemanticVersion: semanticVersion,
       sourceAuthority: normalizeText(packDefinition.sourceAuthority),
       executionMode: normalizeToken(packDefinition.executionMode || KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT),
-      boundary: normalizeToken(packDefinition.boundary),
+      boundary: normalizeToken(packDefinition.boundary) || undefined,
       visibility: scope.visibility,
       customerId: scope.customerId || null,
       tenantId: scope.tenantId || null,
@@ -2423,6 +2424,13 @@ export const importOutcomeKnowledgePackSourceDocumentDraft = async ({
     contentFormat: body.contentFormat,
     sourceDocument: sourceDocumentInput,
   })
+  const isMarkdownSource = contentFormat === OUTCOME_KNOWLEDGE_PACK_CONTENT_FORMATS.MARKDOWN
+    || /\.(md|markdown)$/i.test(sourceDocumentInput.filename)
+    || ['md', 'markdown'].includes(getFileExtension(sourceDocumentInput))
+  const importMetadata = isMarkdownSource
+    ? assertKnowledgePackImportMetadata(body)
+    : null
+  if (importMetadata) body = { ...body, ...importMetadata.metadata }
   if (CLIENT_TEXT_SOURCE_DOCUMENT_FORMATS.has(contentFormat) && !normalizeText(body.extractedText)) {
     throw createKnowledgePackError({
       status: 422,
@@ -2719,6 +2727,11 @@ export const importOutcomeKnowledgePackSourceDocumentDraft = async ({
       content: extractedText,
       sourceMetadata: {
         importMode: 'SOURCE_DOCUMENT_IMPORT_DRAFT',
+        ...(importMetadata ? { importMetadata: {
+          source: importMetadata.sourceMetadata,
+          effective: importMetadata.metadata,
+          overrides: body.metadataOverrides || [],
+        } } : {}),
         sourceStatus: SOURCE_DOCUMENT_PRESENT_STATUS,
         sourceFilename: sourceDocument.filename,
         sourceDocumentId: sourceDocument.sourceDocumentId,

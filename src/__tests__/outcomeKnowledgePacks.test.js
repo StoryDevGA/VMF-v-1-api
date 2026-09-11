@@ -3773,6 +3773,56 @@ name: Statement of Work
     expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 
+  test('SS003 metadata preview is authenticated, read-only and returns actionable errors', async () => {
+    const path = '/api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import/metadata'
+    expect((await request.post(path).send({ extractedText: '# source' })).status).toBe(401)
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const res = await request.post(path).set('Authorization', `Bearer ${token}`).send({
+      extractedText: '---\nname: Source name\nruntime_consumers: [Outcome Studio]\n---\n# Source',
+    })
+    expect(res.status).toBe(200)
+    expect(res.body.data.metadata).toEqual({ label: 'Source name', runtimeConsumers: ['Outcome Studio'] })
+    expect(res.body.data.fieldErrors.knowledgeAssetId).toMatch(/missing/)
+    expect(KnowledgePack.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(KnowledgePackVersion.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('SS003 creation rechecks source metadata before any persistence and retains inert consumers', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const body = {
+      packType: 'STYLE', packKey: 'board-executive-style', label: 'Board Executive Style',
+      knowledgeAssetId: 'STY-QA-001', knowledgeLayer: 'STYLE', capabilityKey: 'executive-board',
+      workspaceCompatibility: ['OUTCOME'], purposeCategory: 'STYLE', semanticVersion: '1.0.0',
+      contentFormat: 'MARKDOWN', sourceDocument: { filename: 'board.md' },
+      extractedText: '---\nname: Board Executive Style\nknowledge_asset_id: STY-QA-001\npack_type: STYLE\npurpose_category: STYLE\nknowledge_layer: STYLE\ncapability_key: executive-board\nworkspace_compatibility: [OUTCOME]\nruntime_consumers: [Outcome Studio]\n---\n# Source\nCanonical style guidance for executive board presentations.',
+    }
+    const path = '/api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import'
+    const rejected = await request.post(path).set('Authorization', `Bearer ${token}`).send({ ...body, label: 'Unacknowledged override' })
+    expect(rejected.status).toBe(422)
+    expect(rejected.body.error.details.label).toMatch(/conflicts/)
+    const disguised = await request.post(path).set('Authorization', `Bearer ${token}`).send({
+      ...body, label: 'Unacknowledged override', contentFormat: 'YAML',
+      sourceDocument: { filename: 'board.md', fileExtension: 'yaml' },
+    })
+    expect(disguised.status).toBe(422)
+    expect(disguised.body.error.details.label).toMatch(/conflicts/)
+    expect(KnowledgePackVersion.prototype.save).not.toHaveBeenCalled()
+    expect(KnowledgePack.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+    const accepted = await request.post(path).set('Authorization', `Bearer ${token}`).send({
+      ...body, label: 'Valid explicit override', metadataOverrides: ['label'],
+    })
+    expect(accepted.status).toBe(201)
+    const saved = KnowledgePackVersion.prototype.save.mock.contexts[0]
+    expect(saved.sourceMetadata.importMetadata).toMatchObject({
+      source: { label: 'Board Executive Style', runtimeConsumers: ['Outcome Studio'] },
+      effective: { label: 'Valid explicit override', runtimeConsumers: ['Outcome Studio'] }, overrides: ['label'],
+    })
+    expect(saved.dependencyReferences).toEqual([])
+    expect(saved.content).toBe(body.extractedText)
+  })
+
   test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import requires governed Knowledge Asset ID', async () => {
     const token = await getAccessTokenForUser(makeFakeUser())
 

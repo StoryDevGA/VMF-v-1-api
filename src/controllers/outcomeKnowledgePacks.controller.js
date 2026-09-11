@@ -1,3 +1,4 @@
+import { previewKnowledgePackImportMetadata } from '../services/knowledgePackImportMetadataService.js'
 import {
   activateOutcomeKnowledgePackVersion,
   createOutcomeKnowledgePackVersion,
@@ -210,6 +211,10 @@ export const importKnowledgePackSourceDocumentDraft = async (req, res) => {
   } catch (err) {
     sendControllerError(res, req, err)
   }
+}
+
+export const previewKnowledgePackImportMetadataController = (req, res) => {
+  res.status(200).json({ data: previewKnowledgePackImportMetadata(req.body) })
 }
 
 export const getKnowledgePackVersion = async (req, res) => {

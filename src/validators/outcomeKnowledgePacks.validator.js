@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { IMPORT_METADATA_FIELDS } from '../services/knowledgePackImportMetadataService.js'
 import {
   createBodyValidator,
   createParamsValidator,
@@ -414,6 +415,8 @@ const knowledgePackDependencyReferenceSchema = z.object({
 }).strict()
 
 const importSourceDocumentDraftBodySchema = z.object({
+  runtimeConsumers: z.array(z.string().trim().min(1).max(160)).max(100).optional(),
+  metadataOverrides: z.array(z.enum(IMPORT_METADATA_FIELDS)).max(11).optional(),
   packType: z.enum(Object.values(OUTCOME_KNOWLEDGE_PACK_TYPES), {
     required_error: 'packType is required',
   }),
@@ -623,6 +626,11 @@ export const validateUpdateKnowledgePackManifest = createBodyValidator(updateKno
 export const validateCloneKnowledgePackManifest = createBodyValidator(cloneKnowledgePackManifestBodySchema)
 export const validateCreateKnowledgePackVersion = createBodyValidator(createKnowledgePackVersionBodySchema)
 export const validateImportSourceDocumentDraft = createBodyValidator(importSourceDocumentDraftBodySchema)
+export const validateImportSourceMetadata = createBodyValidator(z.object({
+  extractedText: z.string().max(750000),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+  metadataOverrides: z.array(z.enum(IMPORT_METADATA_FIELDS)).max(11).optional(),
+}).strict())
 export const validateImportKnowledgePackStarterVersion = createBodyValidator(emptyBodySchema)
 export const validateKnowledgePackVersionActionBody = createBodyValidator(emptyBodySchema)
 export const validateActivateKnowledgePackVersion = createBodyValidator(activateKnowledgePackVersionBodySchema)
