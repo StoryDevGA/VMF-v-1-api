@@ -62,6 +62,42 @@ describe('Outcome Studio conversation output contract resolution', () => {
     expect(result.clarificationPath.question.length).toBeLessThanOrEqual(240);
   });
 
+  test('infers a unique active Knowledge Pack deliverable from a meaningful multi-token request phrase', () => {
+    const result = resolveOutcomeStudioConversationOutputContract({
+      prompt: 'Please prepare a commercial strategy for Parlon.',
+      deliverables: [
+        {
+          key: 'commercial-strategy-decision-paper',
+          label: 'Commercial Strategy and Decision Paper',
+          active: true,
+        },
+      ],
+    });
+
+    expect(result).toMatchObject({
+      status: 'RESOLVED',
+      source: 'CONVERSATION_INFERENCE',
+      inferenceReason: 'MATCHED_OUTPUT_TYPE_TERM_OVERLAP',
+      selectedOutputType: {
+        key: 'commercial-strategy-decision-paper',
+        label: 'Commercial Strategy and Decision Paper',
+      },
+    });
+  });
+
+  test('keeps overlapping active deliverables ambiguous instead of selecting by legacy order', () => {
+    const result = resolveOutcomeStudioConversationOutputContract({
+      prompt: 'Please prepare a commercial strategy for Parlon.',
+      deliverables: [
+        { key: 'commercial-strategy-decision-paper', label: 'Commercial Strategy and Decision Paper' },
+        { key: 'commercial-strategy-plan', label: 'Commercial Strategy Plan' },
+      ],
+    });
+
+    expect(result.status).toBe('CLARIFICATION_REQUIRED');
+    expect(result.inferenceReason).toBe('MULTIPLE_OUTPUT_TYPE_MATCHES');
+  });
+
   test('requires clarification when multiple output types match', () => {
     const result = resolveOutcomeStudioConversationOutputContract({
       prompt: 'Prepare an executive brief and a sales proposal.',

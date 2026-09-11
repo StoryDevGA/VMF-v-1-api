@@ -18055,6 +18055,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       blockedCount: 3,
       totalCount: 5,
     }))
+    expect(JSON.stringify(res.body.data)).not.toContain('Output Lab')
     expect(res.body.data).not.toHaveProperty('blockers')
     expect(res.body.data).not.toHaveProperty('knowledgePacks')
     expect(RuntimeOutputAsset.find).toHaveBeenCalledWith({ runtimeInstanceId: RUNTIME_INSTANCE_ID })
@@ -18209,6 +18210,99 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     expect(savedSession.contextBindings.outputContractResolution).toEqual(
       res.body.data.outputContract,
     )
+    expect(savedSession.knowledgePackBinding).toEqual(expect.objectContaining({
+      lineage: expect.objectContaining({
+        versionIds: expect.arrayContaining([
+          expect.stringContaining('kpv-executive-brief-'),
+          expect.stringContaining('kpv-executive-brief-schema-'),
+          expect.stringContaining('kpv-executive-brief-style-'),
+        ]),
+        contentHashes: expect.arrayContaining([
+          'sha256:executive-brief-output-type',
+          'sha256:executive-brief-schema',
+          'sha256:executive-brief-style',
+        ]),
+      }),
+      activePacks: expect.arrayContaining([
+        expect.objectContaining({
+          packKey: 'executive-brief-output-type',
+          versionId: expect.stringContaining('kpv-executive-brief-'),
+          contentHash: 'sha256:executive-brief-output-type',
+        }),
+      ]),
+    }))
+  })
+
+  test('Outcome Studio infers the Parlon Commercial Strategy contract without a document-type selector', async () => {
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    RuntimeOutputAsset.find.mockReturnValue(buildRuntimeInstanceFindChain([]))
+    mockRequestReadyOutcomeKnowledgePacks({
+      capabilityKey: 'commercial-strategy-decision-paper',
+      label: 'Commercial Strategy and Decision Paper',
+    })
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ prompt: 'Please prepare a commercial strategy for Parlon.' })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data).toEqual(expect.objectContaining({
+      requestedOutputTypeKey: 'commercial-strategy-decision-paper',
+      outputContract: expect.objectContaining({
+        status: 'RESOLVED',
+        source: 'CONVERSATION_INFERENCE',
+        inferenceReason: 'MATCHED_OUTPUT_TYPE_TERM_OVERLAP',
+        selectedOutputType: expect.objectContaining({
+          key: 'commercial-strategy-decision-paper',
+          label: 'Commercial Strategy and Decision Paper',
+        }),
+        selectedOutputSchema: expect.objectContaining({
+          key: 'commercial-strategy-decision-paper-schema',
+        }),
+        selectedStyle: expect.objectContaining({
+          key: 'commercial-strategy-decision-paper-style',
+        }),
+      }),
+    }))
+  })
+
+  test('Outcome Studio keeps a legacy source asset from overriding the current handoff and Knowledge Pack contract', async () => {
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    RuntimeOutputAsset.find.mockReturnValue(buildRuntimeInstanceFindChain([
+      makeRuntimeOutputAsset({
+        exportable: true,
+        outputTypeKey: 'LEGACY_OUTPUT_TYPE',
+        outputTypeLabel: 'Legacy Output Lab Type',
+      }),
+    ]))
+    mockRequestReadyOutcomeKnowledgePacks()
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ prompt: 'Can you prepare an executive brief for our investor day?' })
+
+    expect(res.status).toBe(201)
+    expect(res.body.data).toEqual(expect.objectContaining({
+      requestedOutputTypeKey: 'executive-brief',
+      sourceOutput: expect.objectContaining({
+        sourceType: 'FRAMEWORK_HANDOFF',
+        outputTypeKey: 'EXECUTIVE_BRIEF',
+      }),
+      outputContract: expect.objectContaining({
+        selectedOutputType: expect.objectContaining({ key: 'executive-brief' }),
+        selectedOutputSchema: expect.objectContaining({ key: 'executive-brief-schema' }),
+        selectedStyle: expect.objectContaining({ key: 'executive-brief-style' }),
+      }),
+    }))
+    expect(JSON.stringify(res.body.data)).not.toContain('LEGACY_OUTPUT_TYPE')
   })
 
   test('Outcome Studio asks for clarification before persistence when the request is ambiguous', async () => {
@@ -19833,6 +19927,16 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
         truthSignatureId: 'truth_sig_existing_fixture',
         currentness: 'CURRENT',
       }),
+      outputContractResolution: expect.objectContaining({
+        status: 'RESOLVED',
+        selectedOutputType: expect.objectContaining({ key: 'executive-brief' }),
+        selectedOutputSchema: expect.objectContaining({ key: 'executive-brief-schema' }),
+        selectedStyle: expect.objectContaining({ key: 'executive-brief-style' }),
+        knowledgePackRoles: expect.arrayContaining([
+          expect.objectContaining({ role: 'ARL', version: expect.any(String) }),
+          expect.objectContaining({ role: 'RL', version: expect.any(String) }),
+        ]),
+      }),
       governedReasoning: expect.objectContaining({
         executionId: expect.stringMatching(/^grr_exec_/),
         runtimeArtifactId: expect.stringMatching(/^grr_art_/),
@@ -19873,6 +19977,12 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
             packType: 'TRUTH_CERTIFICATION',
           }),
         ]),
+      }),
+      outputContractResolution: expect.objectContaining({
+        status: 'RESOLVED',
+        selectedOutputType: expect.objectContaining({ key: 'executive-brief' }),
+        selectedOutputSchema: expect.objectContaining({ key: 'executive-brief-schema' }),
+        selectedStyle: expect.objectContaining({ key: 'executive-brief-style' }),
       }),
       governedReasoning: expect.objectContaining({
         executionId: expect.stringMatching(/^grr_exec_/),

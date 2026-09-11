@@ -29,6 +29,7 @@ const VALID_SOURCES = new Set([
 ]);
 const VALID_CONFIDENCE = new Set(['HIGH', 'NONE']);
 const NEGATION_TOKENS = new Set(['no', 'not', 'never', 'without', 'instead']);
+const INFERENCE_STOP_TOKENS = new Set(['a', 'an', 'and', 'for', 'of', 'the', 'to', 'with']);
 const MAX_PROMPT_LENGTH = 2000;
 const MAX_DELIVERABLES = 48;
 const MAX_KEY_OR_LABEL_LENGTH = 140;
@@ -325,18 +326,40 @@ function phraseOccurrences(tokens, phraseTokens) {
 
 function findDeliverableMatches(promptTokens, deliverables) {
   return deliverables.flatMap((deliverable) => {
-    const phrases = new Map();
+    const fullPhrases = new Map();
     for (const rawPhrase of [deliverable.label, deliverable.key]) {
       const phraseTokens = tokenize(rawPhrase);
       if (phraseTokens.length >= 2) {
-        phrases.set(phraseTokens.join(' '), phraseTokens);
+        fullPhrases.set(phraseTokens.join(' '), phraseTokens);
       }
     }
 
-    const occurrences = [...phrases.values()].flatMap((phraseTokens) =>
+    const fullOccurrences = [...fullPhrases.values()].flatMap((phraseTokens) =>
       phraseOccurrences(promptTokens, phraseTokens),
     );
-    return occurrences.length ? [{ deliverable, occurrences }] : [];
+    if (fullOccurrences.length) {
+      return [{ deliverable, occurrences: fullOccurrences, matchStrength: 2 }];
+    }
+
+    const partialPhrases = new Map();
+    for (const rawPhrase of [deliverable.label, deliverable.key]) {
+      const phraseTokens = tokenize(rawPhrase);
+      if (phraseTokens.length >= 2) {
+        const meaningfulTokens = phraseTokens.filter((token) => !INFERENCE_STOP_TOKENS.has(token));
+        for (let length = meaningfulTokens.length - 1; length >= 2; length -= 1) {
+          for (let start = 0; start <= meaningfulTokens.length - length; start += 1) {
+            const candidate = meaningfulTokens.slice(start, start + length);
+            partialPhrases.set(candidate.join(' '), candidate);
+          }
+        }
+      }
+    }
+    const partialOccurrences = [...partialPhrases.values()].flatMap((phraseTokens) =>
+      phraseOccurrences(promptTokens, phraseTokens),
+    );
+    return partialOccurrences.length
+      ? [{ deliverable, occurrences: partialOccurrences, matchStrength: 1 }]
+      : [];
   });
 }
 
@@ -513,8 +536,13 @@ export function resolveOutcomeStudioConversationOutputContract({
     };
   } else {
     const matches = findDeliverableMatches(promptTokens, candidates);
+    const strongestMatch = matches.reduce(
+      (strength, match) => Math.max(strength, match.matchStrength || 0),
+      0,
+    );
+    const strongestMatches = matches.filter((match) => match.matchStrength === strongestMatch);
     const distinctKeys = new Set(
-      matches.map((match) => normalizeCapabilityIdentity(match.deliverable.key)),
+      strongestMatches.map((match) => normalizeCapabilityIdentity(match.deliverable.key)),
     );
     if (distinctKeys.size === 0) {
       return clarificationResolution({
@@ -530,7 +558,8 @@ export function resolveOutcomeStudioConversationOutputContract({
         deliverables: candidates,
       });
     }
-    selectedMatch = matches[0];
+    selectedMatch = strongestMatches[0];
+    if (strongestMatch === 1) inferenceReason = 'MATCHED_OUTPUT_TYPE_TERM_OVERLAP';
   }
 
   const audienceResult = resolveAudience(promptTokens, selectedMatch.occurrences);

@@ -4518,7 +4518,7 @@ const sanitizeSourceOutputAsset = ({ asset, readiness }) => {
   }
 }
 
-const selectSourceOutputAsset = (assets = []) => {
+const selectSourceOutputAsset = (assets = [], requestedOutputAssetId = '') => {
   const eligibleAssets = assets
     .filter((asset) => {
       const status = normalizeToken(asset?.status)
@@ -4538,7 +4538,10 @@ const selectSourceOutputAsset = (assets = []) => {
       return 0
     })
 
-  return eligibleAssets[0] || null
+  const requestedId = normalizeText(requestedOutputAssetId)
+  return (requestedId
+    ? eligibleAssets.find((asset) => normalizeText(asset?.outputAssetId || asset?.id || asset?._id) === requestedId)
+    : null) || eligibleAssets[0] || null
 }
 
 const buildPackBlockers = (packBinding = {}) =>
@@ -4561,7 +4564,7 @@ const buildPackBlockers = (packBinding = {}) =>
 
 const mapOutputLabBlocker = (blocker) => ({
   code: normalizeToken(blocker?.code || 'OUTPUT_LAB_BLOCKED'),
-  source: 'OUTPUT_LAB',
+  source: 'LEGACY_OUTPUT_LAB_COMPATIBILITY',
   message: normalizeText(blocker?.message) || 'Output Lab readiness is blocking Outcome Studio.',
 })
 
@@ -4596,10 +4599,10 @@ const buildReadiness = ({
   const outputLabBlockers = Array.isArray(outputLabReadiness.blockers)
     ? outputLabReadiness.blockers.map(mapOutputLabBlocker)
     : []
-  const warnings = Array.isArray(outputLabReadiness.warnings)
+  const outputLabWarnings = Array.isArray(outputLabReadiness.warnings)
     ? outputLabReadiness.warnings.map((warning) => ({
         code: normalizeToken(warning?.code || 'OUTPUT_LAB_WARNING'),
-        source: 'OUTPUT_LAB',
+        source: 'LEGACY_OUTPUT_LAB_COMPATIBILITY',
         message: normalizeText(warning?.message) || 'Output Lab reported a warning.',
       }))
     : []
@@ -4607,8 +4610,8 @@ const buildReadiness = ({
     ? null
     : {
         code: OUTCOME_STUDIO_BLOCKER_CODES.SOURCE_OUTPUT_MISSING,
-        source: 'OUTPUT_LAB',
-        message: 'A governed Output Lab source asset is required before Outcome Studio sessions can start.',
+        source: 'FRAMEWORK_OUTCOME_HANDOFF',
+        message: 'A current governed Framework Runtime handoff is required before Outcome Studio sessions can start.',
       }
   const packBlockers = buildPackBlockers(packBinding)
   const handoffBlockers = (Array.isArray(frameworkHandoff?.blockers)
@@ -4631,19 +4634,15 @@ const buildReadiness = ({
       message: normalizeText(blocker?.message) || 'The governed Framework-to-Outcome handoff is blocking Outcome Studio.',
     }))
   const blockers = [
-    ...outputLabBlockers,
     ...(sourceOutputBlocker ? [sourceOutputBlocker] : []),
     ...packBlockers,
     ...handoffBlockers,
   ]
-  const outputLabCanGenerate = outputLabReadiness.canGenerate === true
   const hasPackBlockers = packBlockers.length > 0
   const hasHandoffBlockers = handoffBlockers.length > 0
-  const summary = !outputLabCanGenerate && outputLabReadiness.summary
-    ? normalizeText(outputLabReadiness.summary)
-    : !sourceOutput
-      ? 'Outcome Studio requires a governed Output Lab source asset before sessions can start.'
-      : hasHandoffBlockers
+  const summary = !sourceOutput
+    ? 'Outcome Studio requires a current governed Framework Runtime handoff before sessions can start.'
+    : hasHandoffBlockers
         ? 'Outcome Studio requires a current governed Framework-to-Outcome handoff before sessions can start.'
       : hasPackBlockers
         ? 'Outcome Studio requires active Outcome Studio knowledge pack bindings before sessions can start.'
@@ -4663,9 +4662,7 @@ const buildReadiness = ({
   return {
     state: blockers.length > 0
       ? OUTCOME_STUDIO_READINESS_STATES.BLOCKED
-      : warnings.length > 0
-        ? OUTCOME_STUDIO_READINESS_STATES.READY_WITH_GAPS
-        : OUTCOME_STUDIO_READINESS_STATES.READY,
+      : OUTCOME_STUDIO_READINESS_STATES.READY,
     canStartSession: blockers.length === 0,
     canReason: blockers.length === 0,
     summary,
@@ -4676,15 +4673,17 @@ const buildReadiness = ({
       ? handoffSafe.nextAction || 'Resolve the Outcome Studio readiness blockers before starting a session.'
       : '',
     blockers,
-    warnings,
+    warnings: [],
     frameworkHandoff: {
       ...handoffSafe,
       ...(reasoningBoundary ? { reasoningBoundary } : {}),
     },
     outputLab: {
       state: normalizeToken(outputLabReadiness.state || 'UNKNOWN'),
-      canGenerate: outputLabCanGenerate,
+      canGenerate: outputLabReadiness.canGenerate === true,
       summary: normalizeText(outputLabReadiness.summary),
+      compatibilityBlockers: outputLabBlockers,
+      compatibilityWarnings: outputLabWarnings,
     },
     knowledgePacks: {
       status: packBinding.status,
@@ -4859,8 +4858,8 @@ const buildSafetyGates = ({
       message: sourceOutputBound
         ? sourceIsFrameworkHandoff
           ? 'The locked Framework Runtime handoff is bound as the governed source context.'
-          : 'A governed Output Lab source asset is bound for the session.'
-        : 'A governed Framework Runtime handoff or Output Lab source asset is required before Outcome Studio can start.',
+          : 'A retained governed source asset is bound for compatibility.'
+        : 'A current governed Framework Runtime handoff is required before Outcome Studio can start.',
       blockerReason: OUTCOME_STUDIO_BLOCKER_CODES.SOURCE_OUTPUT_MISSING,
     }),
     buildSafetyGate({
@@ -4933,30 +4932,29 @@ const buildOutcomeStudioProjection = async ({
   packBinding: packBindingOverride = null,
   sessions = [],
   truthQuality = null,
+  sourceOutputAssetId = '',
   requestedOutputTypeKey: requestedOutputTypeKeyOverride = '',
   scopes,
 }) => {
   const sourceOutputAsset = sanitizeSourceOutputAsset({
-    asset: selectSourceOutputAsset(Array.isArray(outputLab?.assets) ? outputLab.assets : []),
+    asset: selectSourceOutputAsset(
+      Array.isArray(outputLab?.assets) ? outputLab.assets : [],
+      sourceOutputAssetId,
+    ),
     readiness: outputLab?.readiness || {},
   })
   const packBinding = packBindingOverride || (await resolveOutcomeStudioKnowledgePackBinding({
     query: outputLab?.runtimeScope || {},
   })).binding
   const deliverables = projectOutcomeStudioDeliverableDiscovery(packBinding)
-  const normalizedSourceOutputType = normalizeToken(sourceOutputAsset?.outputTypeKey).replace(/[-_]/g, '')
-  const matchingDeliverable = deliverables.available?.find((deliverable) =>
-    normalizeToken(deliverable.key).replace(/[-_]/g, '') === normalizedSourceOutputType,
-  )
   const requestedOutputTypeKey = normalizeCapabilityKey(
     requestedOutputTypeKeyOverride
-      || matchingDeliverable?.key
       || deliverables.available?.[0]?.key
-      || sourceOutputAsset?.outputTypeKey,
+      || '',
   )
   const sourceDeliverable = deliverables.available?.find((deliverable) =>
     normalizeCapabilityKey(deliverable.key) === requestedOutputTypeKey,
-  ) || matchingDeliverable
+  )
   const handoffResolution = await getRuntimeStateOutcomeHandoffReadiness({
     runtimeInstanceId: outputLab?.runtimeScope?.runtimeInstanceId,
     scopes,
@@ -4964,11 +4962,14 @@ const buildOutcomeStudioProjection = async ({
     requestedOutputTypeKey,
   })
   const frameworkHandoff = handoffResolution.handoff
-  const sourceOutput = sourceOutputAsset || buildFrameworkHandoffSourceOutput({
+  const frameworkHandoffSourceOutput = buildFrameworkHandoffSourceOutput({
     handoff: frameworkHandoff,
     outputTypeKey: requestedOutputTypeKey,
     outputTypeLabel: sourceDeliverable?.label,
   })
+  const sourceOutput = sourceOutputAssetId
+    ? sourceOutputAsset || frameworkHandoffSourceOutput
+    : frameworkHandoffSourceOutput || sourceOutputAsset
   const readiness = buildReadiness({
     outputLab,
     packBinding,
@@ -6168,6 +6169,7 @@ export const createRuntimeOutcomeSession = async ({
   let outcomeStudio = await buildOutcomeStudioProjection({
     outputLab,
     packBinding: discoveryPackBinding,
+    sourceOutputAssetId: normalizeText(payload?.sourceOutputAssetId),
     requestedOutputTypeKey,
     scopes,
   })
@@ -6194,6 +6196,7 @@ export const createRuntimeOutcomeSession = async ({
   outcomeStudio = await buildOutcomeStudioProjection({
     outputLab,
     packBinding: discoveryPackBinding,
+    sourceOutputAssetId: normalizeText(payload?.sourceOutputAssetId),
     requestedOutputTypeKey,
     truthQuality,
     scopes,
@@ -7349,6 +7352,7 @@ export const generateRuntimeOutcomeResponse = async ({
     sourceOutput: serializedSession.sourceOutput,
     truthSignature: serializedSession.truthSignature,
   })
+  responseContextBindings.outputContractResolution = generationOutputContractResolution
   const draftContextBindings = buildOutcomeContextBindings({
     assetType: DEFAULT_OUTCOME_ASSET_TYPE,
     contextType: 'DRAFT',
@@ -7359,6 +7363,7 @@ export const generateRuntimeOutcomeResponse = async ({
     sourceOutput: serializedSession.sourceOutput,
     truthSignature: serializedSession.truthSignature,
   })
+  draftContextBindings.outputContractResolution = generationOutputContractResolution
   const responseMessage = new OutcomeMessage({
     messageId: responseMessageId,
     sessionId: serializedSession.sessionId,
@@ -7386,6 +7391,7 @@ export const generateRuntimeOutcomeResponse = async ({
         outputTypeCapabilityKey: resolvedOutputTypeCapabilityKey,
         outputTypeLabel: resolvedOutputTypeLabel,
         knowledgePackBinding: generationKnowledgePackBinding,
+        contextBindings: draftContextBindings,
         currentIterationId: draftIterationId,
         currentIterationNumber: draftIterationNumber,
         lineageSummary,
@@ -7482,6 +7488,7 @@ export const generateRuntimeOutcomeResponse = async ({
           outputTypeCapabilityKey: resolvedOutputTypeCapabilityKey,
           outputTypeLabel: resolvedOutputTypeLabel,
           knowledgePackBinding: generationKnowledgePackBinding,
+          contextBindings: draftContextBindings,
           currentIterationId: draftIterationId,
           currentIterationNumber: draftIterationNumber,
           lineageSummary,
