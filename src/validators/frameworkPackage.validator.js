@@ -775,3 +775,7 @@ export const validateListFrameworkPackages = createQueryValidator(listFrameworkP
 export const validateRunFrameworkPackageCheckpoint = createBodyValidator(
   runFrameworkPackageCheckpointBodySchema,
 )
+export const validateUIContractDisplayCheckpoint = createBodyValidator(z.object({
+  uiContractKey: z.string().trim().min(1).max(140).transform((value) => value.toLowerCase())
+    .refine((value) => /^[a-z][a-z0-9-]*$/.test(value), 'UI Contract key must use lowercase letters, numbers, or hyphens.'),
+}).strict())

@@ -1,3 +1,4 @@
+import { resolveRuntimeUIContractKey } from './runtimeDisplayBindingService.js'
 import { randomUUID } from 'node:crypto'
 import mongoose from 'mongoose'
 import {
@@ -1534,9 +1535,9 @@ const resolvePackage = async ({ runtimeInstance }) => {
   return frameworkPackage
 }
 
-const resolveUIContract = async ({ frameworkPackage }) => {
+const resolveUIContract = async ({ frameworkPackage, runtimeInstance }) => {
   const packageSections = Array.isArray(frameworkPackage.sections) ? frameworkPackage.sections : []
-  const uiContractKey = normalizeKey(frameworkPackage.uiContractBinding?.key || frameworkPackage.uiContractKey)
+  const uiContractKey = normalizeKey(resolveRuntimeUIContractKey(frameworkPackage, runtimeInstance))
 
   if (packageSections.length > 0 && !uiContractKey) {
     throw createRuntimeRendererError({
@@ -2556,7 +2557,7 @@ export const getRuntimeRenderer = async ({
 
   const frameworkPackage = await resolvePackage({ runtimeInstance })
   const [uiContract, runtimePathRecords, workflowPolicyContext] = await Promise.all([
-    resolveUIContract({ frameworkPackage }),
+    resolveUIContract({ frameworkPackage, runtimeInstance }),
     resolveRuntimePathRecords({ frameworkPackage }),
     resolveWorkflowPolicies({ frameworkPackage }),
   ])
@@ -2636,7 +2637,7 @@ export const getRuntimeRenderer = async ({
       deploymentId: runtimeInstance.deploymentId,
       activationId: runtimeInstance.activationId,
       snapshotId: runtimeInstance.dependencyLockId || runtimeInstance.evidence?.dependencySnapshotId || '',
-      uiContractKey: normalizeKey(frameworkPackage.uiContractBinding?.key || frameworkPackage.uiContractKey),
+      uiContractKey: normalizeKey(resolveRuntimeUIContractKey(frameworkPackage, runtimeInstance)),
     },
     lifecycle: {
       runtimeStatus: runtimeInstance.status,

@@ -290,6 +290,7 @@ const buildRevisionRuntimeInstance = ({
     packageId: sourceRuntimeInstance.packageId,
     packageKey: sourceRuntimeInstance.packageKey,
     packageVersion: sourceRuntimeInstance.packageVersion,
+    ...(sourceRuntimeInstance.uiContractDisplayKey !== undefined ? { uiContractDisplayKey: sourceRuntimeInstance.uiContractDisplayKey } : {}),
     dependencyLockId: sourceRuntimeInstance.dependencyLockId,
     activationId: sourceRuntimeInstance.activationId,
     deploymentId: sourceRuntimeInstance.deploymentId,

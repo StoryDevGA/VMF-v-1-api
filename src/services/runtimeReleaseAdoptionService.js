@@ -1,3 +1,4 @@
+import { selectRuntimeDisplayPin } from './runtimeDisplayBindingService.js'
 import mongoose from 'mongoose'
 import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
@@ -35,7 +36,8 @@ const json = (value) => JSON.parse(JSON.stringify(value))
 const text = (value) => typeof value === 'string' && value.trim().length > 0
 const date = (value) => value ? new Date(value).getTime() : NaN
 const pass = (value) => ['PASS', 'PASS_WITH_WARNINGS'].includes(value)
-const binding = (runtime) => Object.fromEntries(bindingKeys.map((key) => [key, runtime[key]]))
+const binding = (runtime) => ({ ...Object.fromEntries(bindingKeys.map((key) => [key, runtime[key]])),
+  ...(runtime.uiContractDisplayKey !== undefined ? { uiContractDisplayKey: runtime.uiContractDisplayKey } : {}) })
 const same = (a, b) => isDeepStrictEqual(json(a), json(b))
 const fail = (reason, status = 409) => {
   throw createRuntimeInstanceError({ status, code: status === 422 ? 'VALIDATION_FAILED'
@@ -99,7 +101,7 @@ const readRelease = async ({ packageId, deploymentId, frameworkKey, session, act
     evidence: { activationId: activation.activationId, deploymentId: deployment.deploymentId,
       dependencySnapshotId: snapshot.snapshotId, dependencySnapshotHash: snapshot.snapshotHash } }
   requireBinding(nextBinding)
-  if (expected && !same(nextBinding, expected)) fail('BINDING_EVIDENCE_MISMATCH')
+  if (expected && !same(nextBinding, Object.fromEntries(bindingKeys.map((key) => [key, expected[key]])))) fail('BINDING_EVIDENCE_MISMATCH')
   return { pkg, snapshot, binding: nextBinding }
 }
 
@@ -197,7 +199,7 @@ const changeRelease = async ({ actorUserId, auditRequest, scopes, runtimeInstanc
       const selector = mongoose.isValidObjectId(runtimeInstanceId) ? { _id: runtimeInstanceId }
         : { runtimeInstanceKey: runtimeInstanceId.trim().toLowerCase() }
       const runtime = await RuntimeInstance.findOne(selector).select([
-        '_id', 'customerId', 'tenantId', 'frameworkKey', 'runtimeType', ...bindingKeys, 'stateVersion', 'updatedAt',
+        '_id', 'customerId', 'tenantId', 'frameworkKey', 'runtimeType', ...bindingKeys, 'uiContractDisplayKey', 'stateVersion', 'updatedAt',
         'status', 'executionStatus', 'lockedAt', 'releaseBindingHistory',
         'framework_state.lifecycle', 'framework_state.readiness', 'framework_state.lock', 'framework_state.publish',
       ].join(' ')).session(session).lean()
@@ -228,7 +230,8 @@ const changeRelease = async ({ actorUserId, auditRequest, scopes, runtimeInstanc
           frameworkKey, session, active: true })
         if (!isFrameworkPackageAvailableToCustomer({ frameworkPackage: target.pkg, customerId, frameworkKey })) fail('PACKAGE_NOT_AVAILABLE', 403)
         await checkForward(source, target, session)
-        to = target.binding
+        const pin = await selectRuntimeDisplayPin({ packageId: target.pkg._id, session })
+        to = { ...target.binding, ...(pin !== undefined ? { uiContractDisplayKey: pin } : {}) }
       } else {
         const latest = runtime.releaseBindingHistory?.at(-1)
         if (!latest || latest.kind !== 'ADOPT' || latest.operationId !== payload.operationId
@@ -247,8 +250,10 @@ const changeRelease = async ({ actorUserId, auditRequest, scopes, runtimeInstanc
       const history = { operationId, kind, ...(kind === 'ROLLBACK' ? { revertsOperationId: payload.operationId } : {}),
         from, to, stateVersion: runtime.stateVersion, changedAt, changedBy: actorUserId, reason: payload.reason.trim() }
       const result = await RuntimeInstance.updateOne({ _id: runtime._id, customerId, tenantId, ...from,
+        uiContractDisplayKey: from.uiContractDisplayKey ?? { $exists: false },
         stateVersion: runtime.stateVersion, updatedAt: runtime.updatedAt },
-      { $set: { ...to, updatedAt: changedAt, updatedBy: actorUserId }, $push: { releaseBindingHistory: history } },
+      { $set: { ...to, updatedAt: changedAt, updatedBy: actorUserId },
+        ...(to.uiContractDisplayKey === undefined && from.uiContractDisplayKey !== undefined ? { $unset: { uiContractDisplayKey: 1 } } : {}), $push: { releaseBindingHistory: history } },
       { session, timestamps: false, runValidators: true })
       if (result.modifiedCount !== 1) fail('STALE_RUNTIME')
       // Release binding and its audit are one atomic operation; audit failure must abort.

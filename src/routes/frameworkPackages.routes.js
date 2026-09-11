@@ -1,4 +1,6 @@
+import { getDisplayBinding, applyDisplayBinding } from '../controllers/frameworkPackageDisplayBinding.controller.js'
 import { Router } from 'express'
+import { runUIContractDisplayCheckpointEndpoint } from '../controllers/uiContractDisplayCheckpoint.controller.js'
 import authJwt from '../middleware/authJwt.js'
 import loadScopes from '../middleware/loadScopes.js'
 import { requirePlatformRole } from '../middleware/authorize.js'
@@ -9,6 +11,7 @@ import {
   validateFrameworkPackageId,
   validateListFrameworkPackages,
   validateRunFrameworkPackageCheckpoint,
+  validateUIContractDisplayCheckpoint,
   validateUpdateFrameworkPackage,
   validateUpdateFrameworkPackageSafeMetadata,
 } from '../validators/frameworkPackage.validator.js'
@@ -34,6 +37,11 @@ import {
 const router = Router()
 
 router.use(authJwt, loadScopes, requirePlatformRole('SUPER_ADMIN'))
+router.post('/:packageId/ui-contract-display-checkpoint', validateFrameworkPackageId,
+  validateUIContractDisplayCheckpoint, runUIContractDisplayCheckpointEndpoint)
+
+router.get('/:packageId/ui-contract-display-binding', validateFrameworkPackageId, getDisplayBinding)
+router.post('/:packageId/ui-contract-display-binding', validateFrameworkPackageId, applyDisplayBinding)
 
 router.get('/', validateListFrameworkPackages, listFrameworkPackages)
 router.post('/', validateCreateFrameworkPackage, createFrameworkPackage)

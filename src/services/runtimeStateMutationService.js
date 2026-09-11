@@ -1,3 +1,4 @@
+import { resolveRuntimeUIContractKey } from './runtimeDisplayBindingService.js'
 import crypto from 'node:crypto'
 import { assertCustomerSectionTarget, assertRuntimeManagedCustomerWrite, isRuntimeManagedSection } from './runtimeManagedSectionService.js'
 import mongoose from 'mongoose'
@@ -1232,7 +1233,7 @@ export const buildDiscoveryEvidencePack = async ({
   const frameworkPackage = await resolvePackageForAdvance(runtimeInstance?.packageId)
   const [uiContract, runtimePathRecords] = frameworkPackage
     ? await Promise.all([
-        resolveUIContractForAdvance({ frameworkPackage }),
+        resolveUIContractForAdvance({ frameworkPackage, runtimeInstance }),
         resolveRuntimePathRecordsForAdvance({ frameworkPackage }),
       ])
     : [null, new Map()]
@@ -2273,9 +2274,9 @@ const resolveSectionEvidenceTarget = ({ frameworkPackage, payload }) => {
   }
 }
 
-const assertSectionEvidenceTargetProjectable = async ({ frameworkPackage, target }) => {
+const assertSectionEvidenceTargetProjectable = async ({ frameworkPackage, runtimeInstance, target }) => {
   const [uiContract, runtimePathRecords] = await Promise.all([
-    resolveUIContractForAdvance({ frameworkPackage }),
+    resolveUIContractForAdvance({ frameworkPackage, runtimeInstance }),
     resolveRuntimePathRecordsForAdvance({ frameworkPackage }),
   ])
   const projectableSections = buildProjectableSectionsForAdvance({
@@ -3135,8 +3136,8 @@ const resolvePackageForAdvance = async (packageId) => {
   return packageRecord
 }
 
-const resolveUIContractForAdvance = async ({ frameworkPackage }) => {
-  const uiContractKey = normalizeSectionKey(frameworkPackage?.uiContractBinding?.key || frameworkPackage?.uiContractKey)
+const resolveUIContractForAdvance = async ({ frameworkPackage, runtimeInstance }) => {
+  const uiContractKey = normalizeSectionKey(resolveRuntimeUIContractKey(frameworkPackage, runtimeInstance))
   if (!uiContractKey) return null
 
   return UIContract.findOne({
@@ -3234,7 +3235,7 @@ const buildSaveAndNextAdvance = async ({ runtimeInstance, runtimePath, requested
   try {
     const frameworkPackage = await resolvePackageForAdvance(runtimeInstance?.packageId)
     const [uiContract, runtimePathRecords] = await Promise.all([
-      resolveUIContractForAdvance({ frameworkPackage }),
+      resolveUIContractForAdvance({ frameworkPackage, runtimeInstance }),
       resolveRuntimePathRecordsForAdvance({ frameworkPackage }),
     ])
     const packageSections = Array.isArray(frameworkPackage?.sections) ? frameworkPackage.sections : []
@@ -4250,7 +4251,7 @@ export const updateRuntimeSectionEvidence = async ({
   const frameworkPackage = await resolvePackageForAdvance(runtimeInstance?.packageId)
   const target = resolveSectionEvidenceTarget({ frameworkPackage, payload })
 
-  await assertSectionEvidenceTargetProjectable({ frameworkPackage, target })
+  await assertSectionEvidenceTargetProjectable({ frameworkPackage, runtimeInstance, target })
   await assertRuntimeSectionPathWritable({
     frameworkKey: runtimeInstance.frameworkKey,
     runtimePath: target.runtimePath,
@@ -4416,7 +4417,7 @@ export const reviewRuntimeSectionEvidence = async ({
   const frameworkPackage = await resolvePackageForAdvance(runtimeInstance?.packageId)
   const target = resolveSectionEvidenceTarget({ frameworkPackage, payload })
 
-  await assertSectionEvidenceTargetProjectable({ frameworkPackage, target })
+  await assertSectionEvidenceTargetProjectable({ frameworkPackage, runtimeInstance, target })
   await assertRuntimeSectionPathWritable({
     frameworkKey: runtimeInstance.frameworkKey,
     runtimePath: target.runtimePath,
@@ -4588,7 +4589,7 @@ export const reviewAllRuntimeSectionEvidence = async ({
   const frameworkPackage = await resolvePackageForAdvance(runtimeInstance?.packageId)
   const target = resolveSectionEvidenceTarget({ frameworkPackage, payload })
 
-  await assertSectionEvidenceTargetProjectable({ frameworkPackage, target })
+  await assertSectionEvidenceTargetProjectable({ frameworkPackage, runtimeInstance, target })
   await assertRuntimeSectionPathWritable({
     frameworkKey: runtimeInstance.frameworkKey,
     runtimePath: target.runtimePath,
@@ -4777,7 +4778,7 @@ export const clearRuntimeSectionEvidence = async ({
   const frameworkPackage = await resolvePackageForAdvance(runtimeInstance?.packageId)
   const target = resolveSectionEvidenceTarget({ frameworkPackage, payload })
 
-  await assertSectionEvidenceTargetProjectable({ frameworkPackage, target })
+  await assertSectionEvidenceTargetProjectable({ frameworkPackage, runtimeInstance, target })
   await assertRuntimeSectionPathWritable({
     frameworkKey: runtimeInstance.frameworkKey,
     runtimePath: target.runtimePath,

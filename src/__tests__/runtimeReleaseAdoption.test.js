@@ -1,3 +1,4 @@
+import FrameworkPackageDisplayBinding from '../models/FrameworkPackageDisplayBinding.js'
 import { beforeEach, describe, expect, jest, test } from '@jest/globals'
 import mongoose from 'mongoose'
 import RuntimeInstance from '../models/RuntimeInstance.js'
@@ -121,7 +122,7 @@ const args = () => ({ actorUserId: id(4), auditRequest: { requestId: 'request' }
 const reverseArgs = (receipt) => ({ ...args(), payload: { operationId: receipt.operationId,
   expectedUpdatedAt: receipt.updatedAt, reason: 'Undo adoption' } })
 const matches = (row, filter) => row && Object.entries(filter).every(([key, value]) =>
-  JSON.stringify(row[key]) === JSON.stringify(value))
+  (value?.$exists === false ? row[key] === undefined : JSON.stringify(row[key]) === JSON.stringify(value)))
 const resealTarget = () => {
   sign(db.packages[1].dependencyLock)
   db.activations[1].dependencySnapshotHash = db.packages[1].dependencyLock.snapshotHash
@@ -129,6 +130,7 @@ const resealTarget = () => {
 
 beforeEach(() => {
   jest.restoreAllMocks(); jest.clearAllMocks()
+  jest.spyOn(FrameworkPackageDisplayBinding, 'findOne').mockImplementation(() => query(() => db.displayBinding || null))
   db = fixture(); reads = 0; writes = []; auditRows = []; selections = []
   permission.mockResolvedValue(); context.mockResolvedValue({ customer: { _id: id(2) } }); entitlement.mockResolvedValue()
   verifyCertification.mockImplementation(async ({ frameworkPackage, session: value, activation }) => {
@@ -165,6 +167,7 @@ beforeEach(() => {
     writes.push(clone({ filter, update }))
     if (!matches(db.runtime, filter)) return { modifiedCount: 0 }
     Object.assign(db.runtime, clone(update.$set))
+    for (const key of Object.keys(update.$unset || {})) delete db.runtime[key]
     db.runtime.releaseBindingHistory ??= []
     db.runtime.releaseBindingHistory.push(clone(update.$push.releaseBindingHistory))
     return { modifiedCount: 1 }
@@ -185,7 +188,7 @@ describe('same-runtime release adoption core (fake transactional persistence)', 
       'dependencyLockId', 'activationId', 'deploymentId', 'evidence', 'updatedAt', 'updatedBy'].sort())
     expect(writes[0].filter).toEqual({ _id: id(1), customerId: id(2), tenantId: id(3),
       ...Object.fromEntries(['packageId', 'packageKey', 'packageVersion', 'dependencyLockId', 'activationId', 'deploymentId', 'evidence']
-        .map((key) => [key, before.runtime[key]])), stateVersion: before.runtime.stateVersion, updatedAt: before.runtime.updatedAt })
+        .map((key) => [key, before.runtime[key]])), uiContractDisplayKey: { $exists: false }, stateVersion: before.runtime.stateVersion, updatedAt: before.runtime.updatedAt })
     expect(db.runtime.framework_state).toEqual(before.runtime.framework_state)
     expect(db.runtime.stateVersion).toBe(before.runtime.stateVersion)
     expect(db.packages).toEqual(before.packages); expect(db.dependencies).toEqual(before.dependencies)
@@ -443,4 +446,17 @@ describe('release rollback', () => {
     await expect(rollback(reverseArgs(receipt))).rejects.toThrow('audit failure')
     expect(db).toEqual(before); expect(db.runtime.releaseBindingHistory).toHaveLength(1); expect(auditRows).toHaveLength(1)
   })
+})
+
+test.each([undefined, 'source-display'])('adoption and rollback preserve exact optional source pin %s', async (pin) => {
+  if (pin !== undefined) db.runtime.uiContractDisplayKey = pin
+  db.displayBinding = { uiContractKey: 'target-display' }
+  db.dependencies.UIContract.push({ uiContractKey: 'target-display', status: 'ACTIVE', versionStatus: 'ACTIVE', isLocked: true })
+  const receipt = await adopt(args())
+  expect(db.runtime.uiContractDisplayKey).toBe('target-display')
+  expect(db.runtime.releaseBindingHistory.at(-1).from.uiContractDisplayKey).toBe(pin)
+  expect(writes[0].filter.uiContractDisplayKey).toEqual(pin ?? { $exists: false })
+  await rollback(reverseArgs(receipt))
+  expect(db.runtime.uiContractDisplayKey).toBe(pin)
+  if (pin === undefined) expect(writes[1].update.$unset).toEqual({ uiContractDisplayKey: 1 })
 })

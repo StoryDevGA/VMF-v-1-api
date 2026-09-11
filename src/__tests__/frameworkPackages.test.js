@@ -627,6 +627,65 @@ beforeEach(() => {
 })
 
 describe('Framework Package Routes', () => {
+  test.each(['get', 'post'])('display binding %s requires authentication', async (method) => {
+    const res = await request[method]('/api/v1/super-admin/runtime-control/framework-packages/website/ui-contract-display-binding')
+    expect(res.status).toBe(401)
+    expect(FrameworkPackage.findOne).not.toHaveBeenCalled()
+  })
+  test.each(['get', 'post'])('display binding %s requires SUPER_ADMIN', async (method) => {
+    const token = await getAccessTokenForUser(makeFakeUser({ _id: NON_ADMIN_ID, id: NON_ADMIN_ID,
+      memberships: [{ customerId: '607f1f77bcf86cd799439099', roles: ['USER'] }] }))
+    const res = await request[method]('/api/v1/super-admin/runtime-control/framework-packages/website/ui-contract-display-binding')
+      .set('Authorization', `Bearer ${token}`)
+    expect(res.status).toBe(403)
+    expect(FrameworkPackage.findOne).not.toHaveBeenCalled()
+  })
+  test.each([{}, { uiContractKey: 'new' }, { uiContractKey: 'new', expectedUiContractKey: 'old', checkpointHash: 'bad' },
+    { uiContractKey: 'new', expectedUiContractKey: 'old', checkpointHash: 'a'.repeat(64), persist: true }])('display binding rejects invalid payload before persistence %j', async (body) => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const res = await request.post('/api/v1/super-admin/runtime-control/framework-packages/website/ui-contract-display-binding')
+      .set('Authorization', `Bearer ${token}`).send(body)
+    expect(res.status).toBe(422)
+    expect(FrameworkPackage.findOne).not.toHaveBeenCalled()
+    expect(FrameworkPackage.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+  test('display checkpoint requires authentication', async () => {
+    const res = await request.post('/api/v1/super-admin/runtime-control/framework-packages/website/ui-contract-display-checkpoint').send({ uiContractKey: 'new' })
+    expect(res.status).toBe(401)
+    expect(FrameworkPackage.findOne).not.toHaveBeenCalled()
+  })
+  test('display checkpoint requires SUPER_ADMIN', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser({ _id: NON_ADMIN_ID, id: NON_ADMIN_ID,
+      memberships: [{ customerId: '607f1f77bcf86cd799439099', roles: ['USER'] }] }))
+    const res = await request.post('/api/v1/super-admin/runtime-control/framework-packages/website/ui-contract-display-checkpoint')
+      .set('Authorization', `Bearer ${token}`).send({ uiContractKey: 'new' })
+    expect(res.status).toBe(403)
+    expect(FrameworkPackage.findOne).not.toHaveBeenCalled()
+  })
+  test.each([{}, { uiContractKey: '' }, { uiContractKey: 'bad/key' }, { uiContractKey: 'new', persist: true },
+    { uiContractKey: 'new', mode: 'FULL' }, { uiContractKey: 'new', sections: [] }])('display checkpoint rejects strict invalid body %j', async (body) => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const res = await request.post('/api/v1/super-admin/runtime-control/framework-packages/website/ui-contract-display-checkpoint')
+      .set('Authorization', `Bearer ${token}`).send(body)
+    expect(res.status).toBe(422)
+    expect(FrameworkPackage.findOne).not.toHaveBeenCalled()
+    expect(FrameworkPackage.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+  test('display checkpoint returns read-only failure result for missing contracts', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    FrameworkPackage.findOne.mockReturnValue({ lean: async () => ({ packageKey: 'website', status: 'ACTIVE', isLocked: true, uiContractKey: 'old' }) })
+    UIContract.findOne.mockReturnValue({ lean: async () => null })
+    const res = await request.post('/api/v1/super-admin/runtime-control/framework-packages/website/ui-contract-display-checkpoint')
+      .set('Authorization', `Bearer ${token}`).send({ uiContractKey: 'new' })
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ compatible: false, persisted: false, status: 'FAIL' })
+    expect(FrameworkPackage.prototype.save).not.toHaveBeenCalled()
+    expect(FrameworkPackage.updateOne).not.toHaveBeenCalled()
+    expect(UIContract.updateMany).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
   test('GET /api/v1/super-admin/runtime-control/framework-packages returns 401 without auth token', async () => {
     const res = await request.get('/api/v1/super-admin/runtime-control/framework-packages')
     expect(res.status).toBe(401)

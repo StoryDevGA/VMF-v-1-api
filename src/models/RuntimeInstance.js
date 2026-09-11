@@ -149,6 +149,7 @@ const runtimeEvidenceSchema = new mongoose.Schema(
 )
 
 const releaseBindingSchema = new mongoose.Schema({
+  uiContractDisplayKey: { type: String, trim: true, default: undefined },
   packageId: { type: mongoose.Schema.Types.ObjectId, ref: 'FrameworkPackage', required: true },
   packageKey: { type: String, required: true },
   packageVersion: { type: String, required: true },
@@ -323,6 +324,7 @@ const runtimeInstanceSchema = new mongoose.Schema(
       maxlength: 120,
       required: true,
     },
+    uiContractDisplayKey: { type: String, trim: true, default: undefined },
     packageVersion: {
       type: String,
       trim: true,

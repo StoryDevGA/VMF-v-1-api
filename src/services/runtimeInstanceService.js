@@ -1,3 +1,4 @@
+import { selectRuntimeDisplayPin } from './runtimeDisplayBindingService.js'
 import mongoose from 'mongoose'
 import {
   Customer,
@@ -107,6 +108,7 @@ export const RUNTIME_INSTANCE_LIST_PROJECTION = [
   'packageId',
   'packageKey',
   'packageVersion',
+  'uiContractDisplayKey',
   'status',
   'executionStatus',
   'runtimeMode',
@@ -153,6 +155,7 @@ export const RUNTIME_INSTANCE_RENDERER_PROJECTION = [
   'packageId',
   'packageKey',
   'packageVersion',
+  'uiContractDisplayKey',
   'deploymentId',
   'activationId',
   'dependencyLockId',
@@ -852,6 +855,7 @@ const persistRuntimeInstanceWithAudit = async ({
 
     try {
       await session.withTransaction(async () => {
+        runtimeInstance.uiContractDisplayKey = await selectRuntimeDisplayPin({ packageId: frameworkPackage._id, session })
         await saveRuntimeInstance({ runtimeInstance, session, capacityConflictContext })
         await stageRuntimeStateNativeInitialization({
           actorUserId,

@@ -1,3 +1,4 @@
+import FrameworkPackageDisplayBinding from '../models/FrameworkPackageDisplayBinding.js'
 import { describe, test, expect, beforeAll, beforeEach, jest } from '@jest/globals'
 import { createHash, randomBytes } from 'node:crypto'
 import { createRequire } from 'node:module'
@@ -2012,6 +2013,7 @@ beforeAll(async () => {
 })
 
 beforeEach(async () => {
+  FrameworkPackageDisplayBinding.findOne = jest.fn(() => ({ session() { return this }, lean: async () => null }))
   sectionReasoningResultTransform = null
   await performanceCacheService.resetForTests()
   RuntimeEvidenceObject.find = jest.fn()
@@ -2570,8 +2572,11 @@ describe('Runtime Instance API', () => {
       const sections = [declaration('customer_problem')]
       FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackage({ sections }))
       useRegistry(registry(sections))
+      FrameworkPackageDisplayBinding.findOne.mockImplementation(() => ({ session() { return this }, lean: async () => ({ uiContractKey: 'corrected-display' }) }))
+      UIContract.findOne.mockImplementation(() => ({ session() { return this }, lean: async () => ({ uiContractKey: 'corrected-display', status: 'ACTIVE', versionStatus: 'ACTIVE', isLocked: true }) }))
       RuntimeInstance.prototype.save.mockImplementation(async function (options) {
         expect(options.session).toBe(session)
+        expect(this.uiContractDisplayKey).toBe('corrected-display')
         order.push('root'); staged.push('root'); return this
       })
       Section.insertMany = jest.fn(async (rows, options) => {
@@ -3054,8 +3059,9 @@ describe('Runtime Instance API', () => {
     expect(RuntimeInstance.deleteOne).toHaveBeenCalledWith({ _id: expect.anything() })
   })
 
-  test('creates an editable revision from a published locked runtime with lineage proof', async () => {
+  test.each([undefined, 'retained-display'])('creates an editable revision with preserved optional display pin %s and lineage proof', async (pin) => {
     const sourceRuntimeInstance = makeLockedPublishedRuntimeInstance()
+    if (pin !== undefined) sourceRuntimeInstance.uiContractDisplayKey = pin
     RuntimeInstance.findOne = jest.fn().mockImplementation((query) => {
       if (query?.['revision.parentRuntimeId']) {
         return buildLeanQuery(null)
@@ -3076,6 +3082,7 @@ describe('Runtime Instance API', () => {
     expect(res.status).toBe(201)
     expect(RuntimeInstance.prototype.save).toHaveBeenCalledTimes(1)
     const savedRevision = RuntimeInstance.prototype.save.mock.contexts[0]
+    expect(savedRevision.uiContractDisplayKey).toBe(pin)
     expect(savedRevision.status).toBe('ACTIVE')
     expect(savedRevision.lockedAt).toBeNull()
     expect(savedRevision.revision.revisionNumber).toBe(2)
@@ -3274,7 +3281,7 @@ describe('Runtime Instance API', () => {
       } },
       { $project: Object.fromEntries([
         '_id', 'runtimeInstanceKey', 'customerId', 'tenantId', 'workspaceId', 'runtimeType',
-        'frameworkKey', 'packageId', 'packageKey', 'packageVersion', 'status', 'executionStatus',
+        'frameworkKey', 'packageId', 'packageKey', 'packageVersion', 'uiContractDisplayKey', 'status', 'executionStatus',
         'runtimeMode', 'name', 'description', 'lockedAt', 'lockedBy', 'lockedReason', 'createdAt', 'updatedAt',
         'framework_state.lifecycle.stage', 'framework_state.lifecycle.status',
         'framework_state.lifecycle.lockStatus', 'framework_state.lifecycle.lockState', 'framework_state.lifecycle.locked',
@@ -3498,7 +3505,8 @@ describe('Runtime Instance API', () => {
     expect(RuntimeInstance.countDocuments).not.toHaveBeenCalled()
   })
 
-  test('allows assigned customer-scoped tenant admins to list, open, and render runtime instances', async () => {
+  test.each([undefined, 'retained-display'])('allows assigned tenant admins to render using retained display pin %s', async (pin) => {
+    RuntimeInstance.findOne.mockImplementation(() => buildLeanQuery(makeRuntimeInstance({ ...(pin ? { uiContractDisplayKey: pin } : {}) })))
     const tenantAdmin = makeCustomerScopedTenantAdmin({
       tenantMemberships: [],
     })
@@ -3560,6 +3568,9 @@ describe('Runtime Instance API', () => {
     expect(detailRes.status).toBe(200)
     expect(rendererRes.status).toBe(200)
     expect(rendererRes.body.data.runtimeInstance.runtimeInstanceKey).toBe('value-narrative-439111')
+    expect(UIContract.findOne).toHaveBeenCalledWith(expect.objectContaining({ uiContractKey: pin || UI_CONTRACT_KEY }))
+    expect(rendererRes.body.data.package.uiContractKey).toBe(pin || UI_CONTRACT_KEY)
+    expect(FrameworkPackageDisplayBinding.findOne).not.toHaveBeenCalled()
   })
 
   test('rejects unassigned customer-scoped tenant admins on list, detail, and renderer access', async () => {
@@ -3836,6 +3847,7 @@ describe('Runtime Instance API', () => {
 
   test('PATCH /api/v1/runtime-instances/:id/data returns server-owned advance when Save and Next is requested', async () => {
     const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      uiContractDisplayKey: 'retained-display',
       updatedAt: new Date('2026-05-19T08:00:00.000Z'),
       framework_state: {
         lifecycle: { stage: 'DRAFT' },
@@ -3942,6 +3954,8 @@ describe('Runtime Instance API', () => {
       })
 
     expect(res.status).toBe(200)
+    expect(UIContract.findOne).toHaveBeenCalledWith(expect.objectContaining({ uiContractKey: 'retained-display' }))
+    expect(FrameworkPackageDisplayBinding.findOne).not.toHaveBeenCalled()
     expect(FrameworkPackage.findById).toHaveBeenCalledWith(FRAMEWORK_PACKAGE_ID)
     expect(res.body.data.advance).toEqual({
       requested: true,
