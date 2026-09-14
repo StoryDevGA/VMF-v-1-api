@@ -117,6 +117,7 @@ describe('framework seed import guard', () => {
     ['3.1.5', path.resolve(workspaceRoot, '.tmp/ss-013-source'), 'validation_report.md'],
     ['3.1.6', path.resolve(workspaceRoot, '.tmp/ss-020-v3-1-6-drive-source-2026-09-07'), 'validation_report.md'],
     ['3.1.7', path.resolve(workspaceRoot, '.tmp/ss-020-v3-1-6-drive-source-2026-09-07'), 'validation_report.md'],
+    ['3.1.8', path.resolve(workspaceRoot, 'docs/seed-data/vmf-v3-1-8-rkm'), 'validation_report.md'],
   ])('uses the selected %s seed version to resolve the default audit file', (
     seedVersion,
     selectedSeedDir,

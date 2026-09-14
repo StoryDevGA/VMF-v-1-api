@@ -12,6 +12,7 @@
     "framework-seed:guard": "node src/scripts/importFrameworkSeed.js --json --no-report",
     "framework-seed:import": "node src/scripts/importFrameworkSeed.js",
     "framework-package:create-v3-1-7": "node src/scripts/createVmfV317PackageData.js",
+    "framework-package:create-v3-1-8": "node src/scripts/createVmfV318PackageData.js",
     "framework-seed:replace-active": "node src/scripts/replaceActiveFrameworkPackageFromSeed.js",
     "framework-packages:repair-release-metadata": "node src/scripts/repairActiveFrameworkPackageReleaseMetadata.js",
     "framework-packages:repair-section-generation-actions": "node src/scripts/repairActiveFrameworkPackageSectionGenerationActions.js",
