@@ -1,5 +1,6 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import mongoose from 'mongoose'
+import { parse as parseYaml } from 'yaml'
 import {
   OUTPUT_LAB_ASSET_STATUSES,
 } from '../constants/runtimeOutputLab.js'
@@ -14,6 +15,8 @@ import {
   OUTCOME_STUDIO_DRAFT_DISCARD_BLOCKER_REASONS,
   OUTCOME_STUDIO_DRAFT_STATUSES,
   OUTCOME_STUDIO_EXPORT_FORMATS,
+  OUTCOME_STUDIO_RENDER_FORMATS,
+  OUTCOME_STUDIO_RENDER_OUTPUT_STATUSES,
   OUTCOME_STUDIO_MESSAGE_ROLES,
   OUTCOME_STUDIO_MESSAGE_STATUSES,
   OUTCOME_STUDIO_PHASE,
@@ -39,6 +42,7 @@ import {
 import {
   OutcomeAsset,
   OutcomeAssetVersion,
+  OutcomeRenderOutput,
   OutcomeDraft,
   OutcomeDraftIteration,
   OutcomeMessage,
@@ -64,6 +68,10 @@ import {
   OUTPUT_SERVICE_ERROR_CODES,
   renderOutputDerivative,
 } from './outputService.js'
+import {
+  OUTCOME_STUDIO_ASSET_RENDERING_ERROR_CODES,
+  renderOutcomeStudioAsset,
+} from './outcomeStudioAssetRenderingService.js'
 import { getRuntimeOutputLab } from './runtimeOutputLabService.js'
 import {
   assertRuntimePermission,
@@ -8538,6 +8546,20 @@ export const approveRuntimeOutcomeDraft = async ({
     sourceOutput: serializedSession.sourceOutput,
     truthSignature: serializedSession.truthSignature,
   })
+  const approvedSelectedByLayer = activeDraft.knowledgePackBinding?.selectedByLayer || {}
+  const approvedVisualSystem = Array.isArray(approvedSelectedByLayer.VISUAL_SYSTEM)
+    && approvedSelectedByLayer.VISUAL_SYSTEM.length === 1
+    ? approvedSelectedByLayer.VISUAL_SYSTEM[0]
+    : null
+  const renderingProfile = {
+    outputContractResolution: cloneValue(versionContextBindings.outputContractResolution || null),
+    visualSystemKey: normalizeCapabilityKey(
+      activeDraft.visualSystemKey
+      || activeDraft.contextBindings?.visualSystemKey
+      || approvedVisualSystem?.capabilityKey,
+    ),
+    audience: normalizeText(activeDraft.audience || 'Leadership'),
+  }
   const warnings = Array.isArray(currentDraftIteration.warnings) && currentDraftIteration.warnings.length
     ? currentDraftIteration.warnings
     : Array.isArray(activeDraft.warnings) ? activeDraft.warnings : []
@@ -8600,6 +8622,7 @@ export const approveRuntimeOutcomeDraft = async ({
     knowledgePackBinding: approvedKnowledgePackBinding,
     postValidation,
     contextBindings: versionContextBindings,
+    renderingProfile,
     lineageSummary,
     customerContent,
     warnings,
@@ -9601,6 +9624,519 @@ export const exportRuntimeOutcomeAsset = async ({
     })
   }
   return renderedDerivative.delivery
+}
+
+const createAssetRenderingRuntimeError = ({
+  status = 409,
+  message = 'Outcome Studio could not prepare this governed render.',
+  reason = 'OUTCOME_STUDIO_RENDER_BLOCKED',
+  details = {},
+} = {}) => createOutcomeStudioError({
+  status,
+  code: status >= 500 ? 'OUTCOME_ACTION_FAILED' : 'CONFLICT',
+  message,
+  reason,
+  details: {
+    exportAvailable: false,
+    contentIncludedInError: false,
+    ...details,
+  },
+})
+
+const isStructuredRenderingObject = (value) => Boolean(
+  value
+  && typeof value === 'object'
+  && !Array.isArray(value),
+)
+
+const getStructuredRenderingValue = (source, paths = []) => {
+  for (const path of paths) {
+    const value = path.split('.').reduce((current, key) => (
+      current && typeof current === 'object' ? current[key] : undefined
+    ), source)
+    if (value !== undefined && value !== null) return value
+  }
+  return undefined
+}
+
+const parseRenderingPackContent = ({ content, pack }) => {
+  try {
+    const parsed = parseYaml(String(content || ''))
+    return isStructuredRenderingObject(parsed) ? parsed : {}
+  } catch (error) {
+    throw createAssetRenderingRuntimeError({
+      status: 409,
+      reason: 'OUTCOME_STUDIO_RENDER_PACK_CONTENT_INVALID',
+      message: 'A selected rendering pack could not be used safely.',
+      details: {
+        packKey: normalizeText(pack?.packKey),
+        versionId: normalizeText(pack?.versionId),
+      },
+    })
+  }
+}
+
+const renderingPackContentHash = (content) => `sha256:${createHash('sha256')
+  .update(String(content || ''), 'utf8')
+  .digest('hex')}`
+
+const normalizeRenderingPackTokenKey = (value) => normalizeText(value)
+  .replace(/[-_\s]/g, '')
+  .toLowerCase()
+
+const STYLE_RENDER_TOKEN_KEYS = Object.freeze({
+  accentcolor: 'accentColor',
+  calloutbackground: 'calloutBackground',
+  headingcolor: 'headingColor',
+  bodycolor: 'bodyColor',
+  mutedcolor: 'mutedColor',
+  bordercolor: 'borderColor',
+  surfacecolor: 'surfaceColor',
+})
+
+const extractStyleRenderingTokens = (content) => {
+  const source = getStructuredRenderingValue(content, [
+    'tokens',
+    'style.tokens',
+    'theme.tokens',
+    'rendering.tokens',
+    'designTokens',
+  ])
+  if (!isStructuredRenderingObject(source)) return {}
+
+  return Object.entries(source).reduce((result, [key, value]) => {
+    const canonicalKey = STYLE_RENDER_TOKEN_KEYS[normalizeRenderingPackTokenKey(key)]
+    const normalizedValue = normalizeText(value)
+    if (!canonicalKey || !normalizedValue || normalizedValue.length > 32) return result
+    if (!/^#[0-9a-f]{6}$/i.test(normalizedValue)) return result
+    result[canonicalKey] = normalizedValue
+    return result
+  }, {})
+}
+
+const extractVisualSystemComponents = (content) => {
+  const source = getStructuredRenderingValue(content, [
+    'allowedComponents',
+    'allowed_components',
+    'components.allowed',
+    'components.allowedComponents',
+    'rendering.allowedComponents',
+    'rendering.allowed_components',
+    'visual.allowedComponents',
+    'componentPolicy.allowed',
+  ])
+  const values = Array.isArray(source)
+    ? source
+    : Array.isArray(content.components) ? content.components : []
+  return [...new Set(values.map(normalizeToken).filter(Boolean))]
+}
+
+const loadRuntimeRenderingPackReceipt = async ({ pack, role }) => {
+  const packKey = normalizeText(pack?.packKey).toLowerCase()
+  const versionId = normalizeText(pack?.versionId)
+  if (!packKey || !versionId || !normalizeText(pack?.contentHash)) {
+    throw createAssetRenderingRuntimeError({
+      reason: `${role}_PACK_IDENTITY_INCOMPLETE`,
+      message: 'A selected rendering pack is missing governed identity evidence.',
+      details: { role },
+    })
+  }
+  const loaded = await loadOutcomeKnowledgePackVersionContent({
+    packId: pack.packId,
+    versionId,
+  })
+  if (!loaded?.available || normalizeText(loaded.packKey).toLowerCase() !== packKey) {
+    throw createAssetRenderingRuntimeError({
+      reason: `${role}_PACK_CONTENT_UNAVAILABLE`,
+      message: 'A selected rendering pack is not available for this governed asset.',
+      details: { role, packKey, versionId },
+    })
+  }
+  const expectedHash = renderingPackContentHash(loaded.content)
+  if (expectedHash !== normalizeText(loaded.contentHash)
+    || expectedHash !== normalizeText(pack.contentHash)) {
+    throw createAssetRenderingRuntimeError({
+      reason: `${role}_PACK_CONTENT_HASH_MISMATCH`,
+      message: 'A selected rendering pack changed and cannot be used for this render.',
+      details: { role, packKey, versionId },
+    })
+  }
+  const content = parseRenderingPackContent({ content: loaded.content, pack })
+  const receipt = {
+    packKey,
+    versionId,
+    version: normalizeText(pack.semanticVersion || loaded.semanticVersion),
+    contentHash: expectedHash,
+    status: normalizeToken(pack.status || 'ACTIVE'),
+  }
+  if (role === 'STYLE') {
+    const tokens = extractStyleRenderingTokens(content)
+    if (Object.keys(tokens).length > 0) receipt.tokens = tokens
+    return receipt
+  }
+
+  const allowedComponents = extractVisualSystemComponents(content)
+  if (!allowedComponents.length) {
+    throw createAssetRenderingRuntimeError({
+      reason: 'VISUAL_SYSTEM_COMPONENTS_MISSING',
+      message: 'The selected Visual System pack does not define an allowed component set.',
+      details: { packKey, versionId },
+    })
+  }
+  return { ...receipt, allowedComponents }
+}
+
+const buildRuntimeRenderEvidenceReferences = ({
+  currentVersion,
+  currentEvidence,
+} = {}) => {
+  const explicit = currentVersion.evidenceReferences
+    || currentVersion.truthSignature?.evidence?.references
+    || currentVersion.truthSignature?.evidence?.items
+    || currentVersion.truthSignature?.evidence?.sources
+  if (Array.isArray(explicit) && explicit.length > 0) return explicit
+
+  const truthEvidence = currentVersion.truthSignature?.evidence
+  const scalarEvidence = truthEvidence && typeof truthEvidence === 'object' && !Array.isArray(truthEvidence)
+    ? truthEvidence
+    : {}
+  const runtimeEvidence = currentEvidence && typeof currentEvidence === 'object' ? currentEvidence : {}
+  const values = [
+    ...Object.entries(scalarEvidence),
+    ...Object.entries(runtimeEvidence).map(([key, value]) => [`runtime.${key}`, value]),
+  ].filter(([, value]) => normalizeText(value))
+  const sourceId = normalizeText(
+    currentVersion.sourceOutputAssetId
+    || currentVersion.truthSignature?.truthSignatureId
+    || currentVersion.outcomeAssetVersionId,
+  )
+  // Compatibility fallback preserves only the evidence locator identity. The
+  // value may be customer-specific or narrative and must not be copied into a
+  // Render Output receipt.
+  return values.map(([key]) => ({
+    sourceId,
+    locator: key,
+    status: 'ACCEPTED',
+  }))
+}
+
+const buildRuntimeRenderGovernanceMarkers = ({
+  currentVersion,
+  runtimeRevisionId,
+} = {}) => {
+  const source = currentVersion.governanceMarkers && typeof currentVersion.governanceMarkers === 'object'
+    ? currentVersion.governanceMarkers
+    : {}
+  const evidenceBoundary = normalizeText(
+    source.evidenceBoundary
+    || currentVersion.evidenceBoundary
+    || currentVersion.truthSignature?.evidenceBoundary,
+  ) || `Current accepted evidence bound to runtime revision ${runtimeRevisionId}.`
+  const claimRestrictions = Array.isArray(source.claimRestrictions) && source.claimRestrictions.length
+    ? source.claimRestrictions
+    : Array.isArray(currentVersion.claimRestrictions) && currentVersion.claimRestrictions.length
+      ? currentVersion.claimRestrictions
+      : [
+          'Do not invent quantified impact, ROI or named-customer proof.',
+          'Do not create facts outside the recorded accepted evidence.',
+        ]
+  return {
+    evidenceBoundary,
+    claimRestrictions: claimRestrictions.map(normalizeText).filter(Boolean),
+    warnings: Array.isArray(source.warnings) ? source.warnings : currentVersion.warnings,
+    limitations: Array.isArray(source.limitations) ? source.limitations : currentVersion.limitations,
+  }
+}
+
+const selectedRenderingPack = (binding, layer) => {
+  const selected = binding?.selectedByLayer?.[layer]
+  return Array.isArray(selected) && selected.length === 1 ? selected[0] : null
+}
+
+const buildRuntimeRenderingProfile = ({ currentVersion, context }) => {
+  const profile = currentVersion.renderingProfile && typeof currentVersion.renderingProfile === 'object'
+    ? currentVersion.renderingProfile
+    : {}
+  const contextBindings = currentVersion.contextBindings && typeof currentVersion.contextBindings === 'object'
+    ? currentVersion.contextBindings
+    : {}
+  return {
+    ...profile,
+    visualSystemKey: normalizeText(
+      profile.visualSystemKey
+      || contextBindings.visualSystemKey
+      || currentVersion.visualSystemKey,
+    ).toLowerCase(),
+    audience: normalizeText(profile.audience || currentVersion.audience || 'Leadership'),
+    outputContractResolution: profile.outputContractResolution
+      || contextBindings.outputContractResolution
+      || null,
+    context,
+  }
+}
+
+const mapAssetRenderingError = (error, { format = '' } = {}) => {
+  if (error?.status && error?.code) return error
+  const reason = normalizeText(error?.reason || 'OUTCOME_STUDIO_RENDER_FAILED')
+  const isConflict = [
+    OUTCOME_STUDIO_ASSET_RENDERING_ERROR_CODES.INPUT_INVALID,
+    OUTCOME_STUDIO_ASSET_RENDERING_ERROR_CODES.VISUAL_UNSUPPORTED,
+    OUTCOME_STUDIO_ASSET_RENDERING_ERROR_CODES.CONTENT_CHANGED_REQUIRES_NEW_VERSION,
+    OUTCOME_STUDIO_ASSET_RENDERING_ERROR_CODES.VALIDATION_FAILED,
+  ].includes(error?.code)
+  return createAssetRenderingRuntimeError({
+    status: isConflict ? 409 : 500,
+    reason,
+    message: isConflict
+      ? 'This governed render is not currently available.'
+      : 'Outcome Studio could not complete the governed render. No download was created.',
+    details: {
+      format: normalizeToken(format),
+      ...(error?.details && typeof error.details === 'object'
+        ? Object.fromEntries(Object.entries(error.details).filter(([key]) => key !== 'content'))
+        : {}),
+    },
+  })
+}
+
+const projectRuntimeRenderOutput = (output = {}) => {
+  const plain = toPlainObject(output)
+  return {
+    renderOutputId: normalizeText(plain.renderOutputId),
+    outcomeAssetId: normalizeText(plain.outcomeAssetId),
+    outcomeAssetVersionId: normalizeText(plain.outcomeAssetVersionId),
+    versionNumber: Number(plain.versionNumber || 0),
+    format: normalizeToken(plain.format),
+    status: normalizeToken(plain.status),
+    sourceContentChecksum: normalizeText(plain.sourceContentChecksum),
+    outputContract: cloneValue(plain.outputContract || {}),
+    renderer: cloneValue(plain.renderer || {}),
+    stylePackReceipt: cloneValue(plain.stylePackReceipt || {}),
+    visualSystemPackReceipt: cloneValue(plain.visualSystemPackReceipt || {}),
+    visualResolution: cloneValue(plain.visualResolution || {}),
+    artifact: cloneValue(plain.artifact || {}),
+    renderReceipt: cloneValue(plain.renderReceipt || {}),
+    createdAt: normalizeDateValue(plain.createdAt),
+    updatedAt: normalizeDateValue(plain.updatedAt),
+  }
+}
+
+export const renderRuntimeOutcomeAsset = async ({
+  actorUserId,
+  auditRequest,
+  format,
+  outcomeAssetId,
+  runtimeInstanceId,
+  scopes,
+} = {}) => {
+  const normalizedFormat = normalizeToken(format)
+  if (!Object.values(OUTCOME_STUDIO_RENDER_FORMATS).includes(normalizedFormat)) {
+    throw createAssetRenderingRuntimeError({
+      status: 422,
+      reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_ASSET_EXPORT_FORMAT_UNSUPPORTED,
+      message: 'Outcome Studio render format is not supported.',
+      details: { format: normalizedFormat },
+    })
+  }
+
+  const runtimeInstance = await getRuntimeInstance({ runtimeInstanceId, scopes })
+  const runtimeObjectId = runtimeInstance._id || runtimeInstance.id
+  const asset = await findOutcomeAssetForRuntime({
+    detailsRuntimeInstanceId: runtimeInstanceId,
+    outcomeAssetId,
+    runtimeInstanceId: runtimeObjectId,
+  })
+  const currentEvidence = buildRuntimeTruthEvidence(runtimeInstance)
+  const currentVersion = await findCurrentOutcomeAssetVersion({
+    actionLabel: 'render',
+    asset,
+    availabilityKey: 'exportAvailable',
+    missingReason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_ASSET_EXPORT_CONTENT_UNAVAILABLE,
+    runtimeInstanceId: runtimeObjectId,
+  })
+  const serializedAsset = serializeOutcomeAsset(asset, { currentEvidence })
+  const serializedVersion = serializeOutcomeAssetVersion(currentVersion, { currentEvidence })
+  assertCustomerReadyGeneration(currentVersion, { action: 'render this content' })
+  assertOutcomeAssetCurrentTruth({
+    actionLabel: 'render this content',
+    asset: serializedAsset,
+    availabilityKey: 'exportAvailable',
+    reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_ASSET_EXPORT_BLOCKED,
+    version: serializedVersion,
+  })
+  const postValidation = assertOutcomeAssetPostValidation({
+    actionLabel: 'render this content',
+    asset: serializedAsset,
+    availabilityKey: 'exportAvailable',
+    safetyGateCode: OUTCOME_STUDIO_SAFETY_GATE_CODES.EXPORT_RENDERER,
+    version: serializedVersion,
+  })
+  const outputTypeCapabilityKey = assertPersistedOutputTypeCapabilityKey({
+    actionLabel: 'render this content',
+    availabilityKey: 'exportAvailable',
+    customerMessage: 'This approved deliverable cannot be rendered until its output type is confirmed.',
+    reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_ASSET_EXPORT_BLOCKED,
+    records: [serializedVersion, serializedAsset],
+  })
+
+  const renderingProfile = buildRuntimeRenderingProfile({ currentVersion })
+  if (!renderingProfile.visualSystemKey) {
+    throw createAssetRenderingRuntimeError({
+      reason: 'VISUAL_SYSTEM_NOT_BOUND_TO_ASSET_VERSION',
+      message: 'This governed asset version does not have a Visual System pack bound for rendering.',
+      details: { exportAvailable: false },
+    })
+  }
+  const knowledgeContextResult = await resolveOutcomeStudioKnowledgeContext({
+    query: {
+      ...getRuntimeScope(runtimeInstance),
+      environmentKey: 'PRODUCTION',
+      workspaceType: DEFAULT_OUTCOME_WORKSPACE_TYPE,
+      requestedOutputTypeKey: outputTypeCapabilityKey,
+      visualSystemKey: renderingProfile.visualSystemKey,
+      resolvedAt: new Date().toISOString(),
+    },
+  })
+  const knowledgeContext = assertOutcomeStudioKnowledgeContextReady({
+    availabilityKey: 'exportAvailable',
+    result: knowledgeContextResult,
+    reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_ASSET_EXPORT_BLOCKED,
+  })
+  const stylePack = selectedRenderingPack(knowledgeContextResult.reasoningBinding, 'STYLE')
+  const visualSystemPack = selectedRenderingPack(knowledgeContextResult.reasoningBinding, 'VISUAL_SYSTEM')
+  if (!stylePack || !visualSystemPack) {
+    throw createAssetRenderingRuntimeError({
+      reason: 'RENDERING_PACK_SELECTION_INCOMPLETE',
+      message: 'The governed Style and Visual System packs could not be resolved for rendering.',
+      details: { exportAvailable: false },
+    })
+  }
+  let stylePackReceipt
+  let visualSystemPackReceipt
+  try {
+    stylePackReceipt = await loadRuntimeRenderingPackReceipt({ pack: stylePack, role: 'STYLE' })
+    visualSystemPackReceipt = await loadRuntimeRenderingPackReceipt({ pack: visualSystemPack, role: 'VISUAL_SYSTEM' })
+  } catch (error) {
+    throw error?.status ? error : mapAssetRenderingError(error, { format: normalizedFormat })
+  }
+
+  const runtimeRevisionId = normalizeText(
+    currentVersion.runtimeRevisionId
+    || currentVersion.lineageSummary?.runtimeRevisionId,
+  )
+  const runtimeRevisionNumber = Number(
+    currentVersion.runtimeRevisionNumber
+    || currentVersion.lineageSummary?.runtimeRevisionNumber
+    || currentEvidence.runtimeRevision,
+  )
+  const evidenceReferences = buildRuntimeRenderEvidenceReferences({ currentVersion, currentEvidence })
+  const governanceMarkers = buildRuntimeRenderGovernanceMarkers({ currentVersion, runtimeRevisionId })
+  const visualIntent = currentVersion.visualIntent
+    || renderingProfile.visualIntent
+    || { layoutPattern: 'DOCUMENT', components: [{ type: 'CALLOUT', fallbackType: 'PARAGRAPH' }] }
+  const outputContract = {
+    outputTypeKey: normalizeText(knowledgeContext.outputType?.key),
+    outputSchemaKey: normalizeText(knowledgeContext.outputSchema?.key),
+    styleKey: normalizeText(knowledgeContext.style?.key),
+    audience: renderingProfile.audience,
+  }
+  if (!runtimeRevisionId || !Number.isSafeInteger(runtimeRevisionNumber) || runtimeRevisionNumber < 1) {
+    throw createAssetRenderingRuntimeError({
+      reason: 'RUNTIME_REVISION_NOT_BOUND_TO_ASSET_VERSION',
+      message: 'This governed asset version is missing its runtime revision evidence.',
+      details: { exportAvailable: false },
+    })
+  }
+
+  let existingQuery = OutcomeRenderOutput.find({
+    runtimeInstanceId: runtimeObjectId,
+    outcomeAssetId: serializedAsset.outcomeAssetId,
+    outcomeAssetVersionId: serializedVersion.outcomeAssetVersionId,
+  }).sort({ createdAt: -1 })
+  const existingRenderOutputs = typeof existingQuery?.lean === 'function'
+    ? await existingQuery.lean()
+    : await existingQuery
+
+  try {
+    const rendered = await renderOutcomeStudioAsset({
+      assetVersion: currentVersion,
+      runtimeRevision: { id: runtimeRevisionId, number: runtimeRevisionNumber },
+      outputContract,
+      stylePackReceipt,
+      visualSystemPackReceipt,
+      evidenceReferences,
+      governanceMarkers,
+      visualIntent,
+      formats: [normalizedFormat],
+      existingRenderOutputs,
+      persistRenderOutput: async (record) => {
+        const saved = await new OutcomeRenderOutput(record).save()
+        await OutcomeRenderOutput.updateMany(
+          {
+            runtimeInstanceId: runtimeObjectId,
+            outcomeAssetId: serializedAsset.outcomeAssetId,
+            outcomeAssetVersionId: serializedVersion.outcomeAssetVersionId,
+            format: normalizedFormat,
+            status: OUTCOME_STUDIO_RENDER_OUTPUT_STATUSES.READY,
+            renderOutputId: { $ne: record.renderOutputId },
+          },
+          { $set: { status: OUTCOME_STUDIO_RENDER_OUTPUT_STATUSES.SUPERSEDED } },
+        )
+        return saved
+      },
+    })
+    const first = rendered.renderOutputs[0]
+    return {
+      ...first.delivery,
+      renderOutput: projectRuntimeRenderOutput(first.record),
+      sourceContentChecksum: rendered.model.sourceContentChecksum,
+      contentIncludedInReceipt: false,
+      audit: {
+        action: 'ASSET_RENDERED',
+        actorUserId: actorUserId || null,
+        requestBound: Boolean(auditRequest),
+        postValidation: buildOutcomePostValidationAuditSummary(postValidation),
+      },
+    }
+  } catch (error) {
+    throw mapAssetRenderingError(error, { format: normalizedFormat })
+  }
+}
+
+export const listRuntimeOutcomeAssetRenderOutputs = async ({
+  outcomeAssetId,
+  runtimeInstanceId,
+  scopes,
+} = {}) => {
+  const runtimeInstance = await getRuntimeInstance({ runtimeInstanceId, scopes })
+  const runtimeObjectId = runtimeInstance._id || runtimeInstance.id
+  const asset = await findOutcomeAssetForRuntime({
+    detailsRuntimeInstanceId: runtimeInstanceId,
+    outcomeAssetId,
+    runtimeInstanceId: runtimeObjectId,
+  })
+  const currentEvidence = buildRuntimeTruthEvidence(runtimeInstance)
+  const currentVersion = await findCurrentOutcomeAssetVersion({
+    actionLabel: 'list render outputs for',
+    asset,
+    availabilityKey: 'exportAvailable',
+    missingReason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_ASSET_EXPORT_CONTENT_UNAVAILABLE,
+    runtimeInstanceId: runtimeObjectId,
+  })
+  const serializedVersion = serializeOutcomeAssetVersion(currentVersion, { currentEvidence })
+  const query = OutcomeRenderOutput.find({
+    runtimeInstanceId: runtimeObjectId,
+    outcomeAssetId: normalizeText(outcomeAssetId),
+    outcomeAssetVersionId: serializedVersion.outcomeAssetVersionId,
+  }).sort({ createdAt: -1 })
+  const outputs = typeof query?.lean === 'function' ? await query.lean() : await query
+  return {
+    outcomeAssetId: normalizeText(outcomeAssetId),
+    outcomeAssetVersionId: serializedVersion.outcomeAssetVersionId,
+    versionNumber: serializedVersion.versionNumber,
+    outputs: outputs.map(projectRuntimeRenderOutput),
+    contentIncludedInResponse: false,
+  }
 }
 
 export const updateRuntimeOutcomeSessionFromLatestTruth = async ({

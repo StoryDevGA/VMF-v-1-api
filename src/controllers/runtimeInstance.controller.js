@@ -71,7 +71,9 @@ import {
   getRuntimeOutcomeStudio as getRuntimeOutcomeStudioRecord,
   getRuntimeOutcomeStudioReadiness as getRuntimeOutcomeStudioReadinessRecord,
   listRuntimeOutcomeSessionAssets as listRuntimeOutcomeSessionAssetsRecord,
+  listRuntimeOutcomeAssetRenderOutputs as listRuntimeOutcomeAssetRenderOutputsRecord,
   publishRuntimeOutcomeAsset as publishRuntimeOutcomeAssetRecord,
+  renderRuntimeOutcomeAsset as renderRuntimeOutcomeAssetRecord,
   reviseRuntimeOutcomeAsset as reviseRuntimeOutcomeAssetRecord,
   updateRuntimeOutcomeSessionFromLatestTruth as updateRuntimeOutcomeSessionFromLatestTruthRecord,
 } from '../services/outcomeStudioService.js'
@@ -1242,6 +1244,49 @@ export const exportRuntimeOutcomeAsset = async (req, res, next) => {
 
     return res.status(200).json({
       data: outcomeAssetExport,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeOutcomeErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const renderRuntimeOutcomeAsset = async (req, res, next) => {
+  try {
+    const outcomeAssetRender = await renderRuntimeOutcomeAssetRecord({
+      actorUserId: req.context?.userId || req.userId,
+      auditRequest: req,
+      format: req.params.format,
+      outcomeAssetId: req.params.outcomeAssetId,
+      scopes: req.scopes,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+    })
+
+    return res.status(201).json({
+      data: outcomeAssetRender,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeOutcomeErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const listRuntimeOutcomeAssetRenderOutputs = async (req, res, next) => {
+  try {
+    const renderOutputs = await listRuntimeOutcomeAssetRenderOutputsRecord({
+      outcomeAssetId: req.params.outcomeAssetId,
+      scopes: req.scopes,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+    })
+
+    return res.status(200).json({
+      data: renderOutputs,
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {

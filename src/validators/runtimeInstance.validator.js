@@ -8,7 +8,10 @@ import {
   OUTPUT_LAB_EXPORT_FORMATS,
   OUTPUT_LAB_OUTPUT_TYPE_KEYS,
 } from '../constants/runtimeOutputLab.js'
-import { OUTCOME_STUDIO_EXPORT_FORMATS } from '../constants/runtimeOutcomeStudio.js'
+import {
+  OUTCOME_STUDIO_EXPORT_FORMATS,
+  OUTCOME_STUDIO_RENDER_FORMATS,
+} from '../constants/runtimeOutcomeStudio.js'
 import { RUNTIME_INSTANCE_STATUSES, RUNTIME_TYPES } from '../models/RuntimeInstance.js'
 import { createBodyValidator, createParamsValidator, createQueryValidator } from './shared.js'
 
@@ -1054,6 +1057,16 @@ const runtimeOutcomeAssetExportParamsSchema = runtimeOutcomeAssetParamsSchema.ex
     }),
 })
 
+const runtimeOutcomeAssetRenderParamsSchema = runtimeOutcomeAssetParamsSchema.extend({
+  format: z
+    .string({ required_error: 'format is required' })
+    .trim()
+    .transform((value) => value.toUpperCase())
+    .refine((value) => Object.values(OUTCOME_STUDIO_RENDER_FORMATS).includes(value), {
+      message: 'format must be MARKDOWN, HTML, DOCX, PDF, or PPTX',
+    }),
+})
+
 const emptyRuntimeOutputMutationSchema = z.object({}).strict()
 const generateRuntimeOutcomeResponseSchema = z.object({
   allowReadyWithGaps: z
@@ -1321,6 +1334,12 @@ export const validateRuntimeOutcomeAssetVersionParams = createParamsValidator(ru
 })
 
 export const validateRuntimeOutcomeAssetExportParams = createParamsValidator(runtimeOutcomeAssetExportParamsSchema, {
+  message: 'Invalid request parameters.',
+  rootIssueKey: '_root',
+  includeDetails: false,
+})
+
+export const validateRuntimeOutcomeAssetRenderParams = createParamsValidator(runtimeOutcomeAssetRenderParamsSchema, {
   message: 'Invalid request parameters.',
   rootIssueKey: '_root',
   includeDetails: false,

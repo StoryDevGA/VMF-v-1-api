@@ -101,6 +101,20 @@ export const OUTCOME_STUDIO_EXPORT_FORMATS = Object.freeze({
   PDF: 'PDF',
 })
 
+export const OUTCOME_STUDIO_RENDER_FORMATS = Object.freeze({
+  MARKDOWN: 'MARKDOWN',
+  HTML: 'HTML',
+  DOCX: 'DOCX',
+  PDF: 'PDF',
+  PPTX: 'PPTX',
+})
+
+export const OUTCOME_STUDIO_RENDER_OUTPUT_STATUSES = Object.freeze({
+  READY: 'READY',
+  FAILED: 'FAILED',
+  SUPERSEDED: 'SUPERSEDED',
+})
+
 export const OUTCOME_STUDIO_ASSET_STATUSES = Object.freeze({
   GENERATED: 'GENERATED',
   PUBLISHED: 'PUBLISHED',

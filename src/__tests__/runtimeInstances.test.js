@@ -1738,6 +1738,7 @@ let GovernedRuntimeArtifact
 let TruthSignature
 let OutcomeAsset
 let OutcomeAssetVersion
+let OutcomeRenderOutput
 let OutcomeDraft
 let OutcomeDraftIteration
 let OutcomeMessage
@@ -1978,6 +1979,7 @@ beforeAll(async () => {
   TruthSignature = models.TruthSignature
   OutcomeAsset = models.OutcomeAsset
   OutcomeAssetVersion = models.OutcomeAssetVersion
+  OutcomeRenderOutput = models.OutcomeRenderOutput
   OutcomeDraft = models.OutcomeDraft
   OutcomeDraftIteration = models.OutcomeDraftIteration
   OutcomeMessage = models.OutcomeMessage
@@ -2127,6 +2129,9 @@ beforeEach(async () => {
   OutcomeAssetVersion.findOne = jest.fn().mockReturnValue(buildLeanQuery(null))
   OutcomeAssetVersion.updateMany = jest.fn().mockResolvedValue({ matchedCount: 0, modifiedCount: 0 })
   OutcomeAssetVersion.deleteOne = jest.fn().mockResolvedValue({ deletedCount: 1 })
+  OutcomeRenderOutput.prototype.save = jest.fn(async function save() { return this })
+  OutcomeRenderOutput.find = jest.fn().mockReturnValue(buildRuntimeInstanceFindChain([]))
+  OutcomeRenderOutput.updateMany = jest.fn().mockResolvedValue({ matchedCount: 0, modifiedCount: 0 })
   OutcomeDraft.prototype.save = jest.fn(async function save() { return this })
   OutcomeDraft.find = jest.fn().mockReturnValue(buildRuntimeInstanceFindChain([]))
   OutcomeDraft.findOne = jest.fn().mockReturnValue(buildLeanQuery(null))
@@ -11132,49 +11137,64 @@ describe('Runtime Instance API', () => {
     outputTypePackKey = capabilityKey.length <= 100
       ? `${capabilityKey}-output-type`
       : 'boundary-output-type',
-  } = {}) => ([
-    ...makeActiveOutcomeKnowledgePackActivations(),
-    makeOutcomeKnowledgePackActivation({
-      knowledgeLayer: 'OUTPUT_TYPE',
-      capabilityKey,
-      workspaceCompatibility: ['OUTCOME'],
-      dependencyReferences: [
-        {
-          relationshipType: 'REQUIRED_AT_RUNTIME',
-          targetKnowledgeLayer: 'OUTPUT_SCHEMA',
-          targetCapabilityKey: outputSchemaKey,
-          requiredAt: 'RUNTIME',
-          cardinality: 'ONE',
-        },
-        {
-          relationshipType: 'REQUIRED_AT_RUNTIME',
-          targetKnowledgeLayer: 'STYLE',
-          targetCapabilityKey: styleKey,
-          requiredAt: 'RUNTIME',
-          cardinality: 'ONE',
-        },
-      ],
-      packType: 'OUTPUT_TYPE_DEFINITION',
-      packKey: outputTypePackKey,
-      label: `${label} Output Type`,
-    }),
-    makeOutcomeKnowledgePackActivation({
-      knowledgeLayer: 'OUTPUT_SCHEMA',
-      capabilityKey: outputSchemaKey,
-      workspaceCompatibility: ['OUTCOME'],
-      packType: 'OUTPUT_SCHEMA',
-      packKey: outputSchemaKey,
-      label: `${label} Schema`,
-    }),
-    makeOutcomeKnowledgePackActivation({
-      knowledgeLayer: 'STYLE',
-      capabilityKey: styleKey,
-      workspaceCompatibility: ['OUTCOME'],
-      packType: 'STYLE',
-      packKey: styleKey,
-      label: `${label} Style`,
-    }),
-  ])
+    includeVisualSystem = false,
+    visualSystemKey = `${capabilityKey}-visual-system`,
+  } = {}) => {
+    const activations = [
+      ...makeActiveOutcomeKnowledgePackActivations(),
+      makeOutcomeKnowledgePackActivation({
+        knowledgeLayer: 'OUTPUT_TYPE',
+        capabilityKey,
+        workspaceCompatibility: ['OUTCOME'],
+        dependencyReferences: [
+          {
+            relationshipType: 'REQUIRED_AT_RUNTIME',
+            targetKnowledgeLayer: 'OUTPUT_SCHEMA',
+            targetCapabilityKey: outputSchemaKey,
+            requiredAt: 'RUNTIME',
+            cardinality: 'ONE',
+          },
+          {
+            relationshipType: 'REQUIRED_AT_RUNTIME',
+            targetKnowledgeLayer: 'STYLE',
+            targetCapabilityKey: styleKey,
+            requiredAt: 'RUNTIME',
+            cardinality: 'ONE',
+          },
+        ],
+        packType: 'OUTPUT_TYPE_DEFINITION',
+        packKey: outputTypePackKey,
+        label: `${label} Output Type`,
+      }),
+      makeOutcomeKnowledgePackActivation({
+        knowledgeLayer: 'OUTPUT_SCHEMA',
+        capabilityKey: outputSchemaKey,
+        workspaceCompatibility: ['OUTCOME'],
+        packType: 'OUTPUT_SCHEMA',
+        packKey: outputSchemaKey,
+        label: `${label} Schema`,
+      }),
+      makeOutcomeKnowledgePackActivation({
+        knowledgeLayer: 'STYLE',
+        capabilityKey: styleKey,
+        workspaceCompatibility: ['OUTCOME'],
+        packType: 'STYLE',
+        packKey: styleKey,
+        label: `${label} Style`,
+      }),
+    ]
+    if (includeVisualSystem) {
+      activations.push(makeOutcomeKnowledgePackActivation({
+        knowledgeLayer: 'VISUAL_SYSTEM',
+        capabilityKey: visualSystemKey,
+        workspaceCompatibility: ['OUTCOME'],
+        packType: 'VISUAL_SYSTEM',
+        packKey: visualSystemKey,
+        label: `${label} Visual System`,
+      }))
+    }
+    return activations
+  }
 
   const makeOutcomeKnowledgePackVersions = (activations = [], { providerSafeContent = false } = {}) => activations.map((activation) => ({
     versionId: activation.versionId,
@@ -11308,6 +11328,16 @@ Use short professional sections and evidence-led headings.
 
 ## Boundaries
 Keep uncertainty, qualifications, and unsupported-claim boundaries visible.
+`
+
+  const renderingStyleExecutableYaml = `
+tokens:
+  accentColor: '#2c7db9'
+  calloutBackground: '#eef6fb'
+`
+
+  const visualSystemExecutableYaml = `
+allowedComponents: [HEADING, PARAGRAPH, CALLOUT, METRIC]
 `
 
   const certificationLevelsExecutableMarkdown = `# Certification Levels
@@ -11512,10 +11542,12 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
             ? renderingLayerExecutableYaml
             : version.knowledgeLayer === 'OUTPUT_SCHEMA'
               ? buildOutputSchemaExecutableYaml(version.capabilityKey)
-              : version.knowledgeLayer === 'OUTPUT_TYPE'
+            : version.knowledgeLayer === 'OUTPUT_TYPE'
                 ? outputTypeExecutableMarkdown
-                : version.knowledgeLayer === 'STYLE'
-                  ? styleExecutableMarkdown
+              : version.knowledgeLayer === 'STYLE'
+                  ? renderingStyleExecutableYaml
+                  : version.knowledgeLayer === 'VISUAL_SYSTEM'
+                    ? visualSystemExecutableYaml
                   : ({
                     'certification-levels': certificationLevelsExecutableMarkdown,
                     'runtime-warning-rules': runtimeWarningRulesExecutableMarkdown,
@@ -24593,6 +24625,93 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     }))
     expect(JSON.stringify(docxAuditPayload)).not.toContain('Governed binary export narrative.')
     expect(JSON.stringify(pdfAuditPayload)).not.toContain('Governed binary export narrative.')
+  })
+
+  test('Outcome Studio SS-027 render endpoint persists one governed Render Output under the current version', async () => {
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    OutcomeAsset.findOne.mockReturnValue(buildLeanQuery(makeOutcomeAssetRecord()))
+    OutcomeAssetVersion.findOne.mockReturnValue(buildLeanQuery(makeOutcomeAssetVersionRecord({
+      renderingProfile: { visualSystemKey: 'executive-brief-visual-system' },
+    })))
+    mockRequestReadyOutcomeKnowledgePacks({
+      providerSafeContent: true,
+      includeVisualSystem: true,
+    })
+    const persisted = []
+    OutcomeRenderOutput.find = jest.fn().mockReturnValue(buildRuntimeInstanceFindChain([]))
+    OutcomeRenderOutput.prototype.save = jest.fn(async function save() {
+      persisted.push(this)
+      return this
+    })
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/assets/outcome_asset_existing_fixture/render/html`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(201)
+    expect(res.body.data).toEqual(expect.objectContaining({
+      format: 'HTML',
+      mimeType: 'text/html',
+      encoding: 'base64',
+      contentIncludedInReceipt: false,
+      renderOutput: expect.objectContaining({
+        format: 'HTML',
+        status: 'READY',
+        outcomeAssetVersionId: 'outcome_asset_version_existing_fixture',
+      }),
+    }))
+    expect(persisted).toHaveLength(1)
+    expect(persisted[0].stylePackReceipt).toEqual(expect.objectContaining({
+      packKey: 'executive-brief-style',
+      tokens: expect.objectContaining({ accentColor: '#2c7db9' }),
+    }))
+    expect(persisted[0].visualSystemPackReceipt.allowedComponents).toContain('CALLOUT')
+    expect(persisted[0]).not.toHaveProperty('customerContent')
+    expect(persisted[0].renderReceipt.contentIncludedInReceipt).toBe(false)
+  })
+
+  test('Outcome Studio SS-027 render-output read groups child outputs without returning artifact content', async () => {
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    OutcomeAsset.findOne.mockReturnValue(buildLeanQuery(makeOutcomeAssetRecord()))
+    OutcomeAssetVersion.findOne.mockReturnValue(buildLeanQuery(makeOutcomeAssetVersionRecord()))
+    const output = {
+      renderOutputId: 'render-output-html-fixture',
+      outcomeAssetId: 'outcome_asset_existing_fixture',
+      outcomeAssetVersionId: 'outcome_asset_version_existing_fixture',
+      versionNumber: 1,
+      runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      format: 'HTML',
+      status: 'READY',
+      sourceContentChecksum: 'sha256:source',
+      outputContract: { outputTypeKey: 'executive-brief', outputSchemaKey: 'executive-brief-schema', styleKey: 'executive-brief-style' },
+      renderer: { adapterKey: 'outcome-studio-governed-html-adapter' },
+      stylePackReceipt: { packKey: 'executive-brief-style' },
+      visualSystemPackReceipt: { packKey: 'executive-brief-visual-system', allowedComponents: ['CALLOUT'] },
+      visualResolution: { effective: ['CALLOUT'] },
+      artifact: { filename: 'executive-brief-v1.html', mimeType: 'text/html', byteLength: 10, outputChecksum: 'sha256:artifact' },
+      renderReceipt: { contentIncludedInReceipt: false },
+      createdAt: '2026-06-15T11:20:00.000Z',
+      updatedAt: '2026-06-15T11:20:00.000Z',
+    }
+    OutcomeRenderOutput.find = jest.fn().mockReturnValue(buildRuntimeInstanceFindChain([output]))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/assets/outcome_asset_existing_fixture/render-outputs`)
+      .set('Authorization', `Bearer ${token}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toEqual(expect.objectContaining({
+      outcomeAssetId: 'outcome_asset_existing_fixture',
+      outcomeAssetVersionId: 'outcome_asset_version_existing_fixture',
+      outputs: [expect.objectContaining({ format: 'HTML', status: 'READY' })],
+      contentIncludedInResponse: false,
+    }))
+    expect(JSON.stringify(res.body)).not.toContain('contentBase64')
+    expect(JSON.stringify(res.body)).not.toContain('Governed outcome narrative')
   })
 
   test('Outcome Studio asset export fails closed when export audit persistence fails', async () => {

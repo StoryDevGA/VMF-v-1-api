@@ -27,6 +27,24 @@ const COLORS = Object.freeze({
   white: '#FFFFFF',
 })
 
+const resolveColor = (value, fallback) => {
+  const normalized = String(value ?? '').trim()
+  return /^#[0-9a-f]{6}$/i.test(normalized) ? normalized : fallback
+}
+
+const resolveCandidateColors = (styleTokens = {}) => Object.freeze({
+  ...COLORS,
+  navy: resolveColor(styleTokens.headingColor || styleTokens.accentColor, COLORS.navy),
+  blue: resolveColor(styleTokens.accentColor, COLORS.blue),
+  paleBlue: resolveColor(styleTokens.calloutBackground, COLORS.paleBlue),
+  paleGray: resolveColor(styleTokens.surfaceColor, COLORS.paleGray),
+  border: resolveColor(styleTokens.borderColor, COLORS.border),
+  body: resolveColor(styleTokens.bodyColor, COLORS.body),
+  muted: resolveColor(styleTokens.mutedColor, COLORS.muted),
+})
+
+const colorsOf = (doc) => doc.__outcomeStudioColors || COLORS
+
 export const PROFESSIONAL_PDF_CANDIDATE_PROFILE = Object.freeze({
   profileKey: 'outcome-professional-pdf-engineering-candidate',
   profileVersion: '0.1.0',
@@ -87,7 +105,7 @@ const normalizeInlineText = (value) => String(value ?? '')
 const setBodyStyle = (doc) => doc
   .font('Helvetica')
   .fontSize(10.5)
-  .fillColor(COLORS.body)
+  .fillColor(colorsOf(doc).body)
 
 const addBodyPage = (doc) => {
   doc.addPage()
@@ -106,18 +124,19 @@ const ensureSpace = (doc, requiredHeight) => {
 }
 
 const drawCover = (doc, metadata) => {
+  const colors = colorsOf(doc)
   doc.addPage()
-  doc.rect(0, 0, PAGE.width, 18).fill(COLORS.navy)
-  doc.font('Helvetica-Bold').fontSize(9).fillColor(COLORS.blue)
+  doc.rect(0, 0, PAGE.width, 18).fill(colors.navy)
+  doc.font('Helvetica-Bold').fontSize(9).fillColor(colors.blue)
     .text('STORYLINEOS OUTCOME STUDIO', PAGE.marginLeft, 74, { characterSpacing: 0.6 })
-  doc.font('Helvetica-Bold').fontSize(26).fillColor(COLORS.navy)
+  doc.font('Helvetica-Bold').fontSize(26).fillColor(colors.navy)
     .text(metadata.title, PAGE.marginLeft, 166, { width: CONTENT_WIDTH, lineGap: 4 })
-  doc.font('Helvetica').fontSize(13).fillColor(COLORS.blue)
+  doc.font('Helvetica').fontSize(13).fillColor(colors.blue)
     .text(metadata.deliverableType, PAGE.marginLeft, doc.y + 14, { width: CONTENT_WIDTH })
 
   const panelY = Math.max(doc.y + 52, 320)
   doc.roundedRect(PAGE.marginLeft, panelY, CONTENT_WIDTH, 104, 3)
-    .fillAndStroke(COLORS.paleGray, COLORS.border)
+    .fillAndStroke(colors.paleGray, colors.border)
   const rows = [
     ['VERSION', String(metadata.versionNumber)],
     ['DOCUMENT STATUS', metadata.status],
@@ -125,20 +144,20 @@ const drawCover = (doc, metadata) => {
   ]
   rows.forEach(([label, value], index) => {
     const y = panelY + 18 + (index * 27)
-    doc.font('Helvetica-Bold').fontSize(8).fillColor(COLORS.muted)
+    doc.font('Helvetica-Bold').fontSize(8).fillColor(colors.muted)
       .text(label, PAGE.marginLeft + 18, y, { width: 135 })
-    doc.font('Helvetica-Bold').fontSize(9.5).fillColor(COLORS.navy)
+    doc.font('Helvetica-Bold').fontSize(9.5).fillColor(colors.navy)
       .text(value, PAGE.marginLeft + 165, y - 1, { width: CONTENT_WIDTH - 183 })
   })
 
   const noticeY = panelY + 144
-  doc.rect(PAGE.marginLeft, noticeY, CONTENT_WIDTH, 62).fill(COLORS.paleBlue)
-  doc.rect(PAGE.marginLeft, noticeY, 5, 62).fill(COLORS.blue)
-  doc.font('Helvetica-Bold').fontSize(9).fillColor(COLORS.navy)
+  doc.rect(PAGE.marginLeft, noticeY, CONTENT_WIDTH, 62).fill(colors.paleBlue)
+  doc.rect(PAGE.marginLeft, noticeY, 5, 62).fill(colors.blue)
+  doc.font('Helvetica-Bold').fontSize(9).fillColor(colors.navy)
     .text('ENGINEERING CANDIDATE - NOT CUSTOMER APPROVED', PAGE.marginLeft + 18, noticeY + 14, {
       width: CONTENT_WIDTH - 36,
     })
-  doc.font('Helvetica').fontSize(8.5).fillColor(COLORS.body)
+  doc.font('Helvetica').fontSize(8.5).fillColor(colors.body)
     .text('Product approval, customer activation, accessibility certification, and production readiness are not implied.', PAGE.marginLeft + 18, noticeY + 32, {
       width: CONTENT_WIDTH - 36,
       lineGap: 2,
@@ -146,10 +165,11 @@ const drawCover = (doc, metadata) => {
 }
 
 const drawHeading = (doc, block, followingHeight = 28) => {
+  const colors = colorsOf(doc)
   const styles = {
-    1: { size: 18, color: COLORS.blue, before: 17, after: 7 },
-    2: { size: 14, color: COLORS.blue, before: 14, after: 6 },
-    3: { size: 11.5, color: COLORS.navy, before: 12, after: 5 },
+    1: { size: 18, color: colors.blue, before: 17, after: 7 },
+    2: { size: 14, color: colors.blue, before: 14, after: 6 },
+    3: { size: 11.5, color: colors.navy, before: 12, after: 5 },
   }
   const style = styles[block.level] || styles[3]
   const text = normalizeInlineText(block.text)
@@ -174,12 +194,13 @@ const drawParagraph = (doc, text) => {
 }
 
 const drawListItem = (doc, text, marker) => {
+  const colors = colorsOf(doc)
   const normalized = normalizeInlineText(text)
   setBodyStyle(doc)
   const textHeight = doc.heightOfString(normalized, { width: CONTENT_WIDTH - 30, lineGap: 2 })
   ensureSpace(doc, textHeight + 8)
   const startY = doc.y
-  doc.font('Helvetica-Bold').fillColor(COLORS.blue)
+  doc.font('Helvetica-Bold').fillColor(colors.blue)
     .text(marker, PAGE.marginLeft, startY, { width: 20, align: 'right' })
   setBodyStyle(doc).text(normalized, PAGE.marginLeft + 30, startY, {
     width: CONTENT_WIDTH - 30,
@@ -189,14 +210,15 @@ const drawListItem = (doc, text, marker) => {
 }
 
 const drawCallout = (doc, text) => {
+  const colors = colorsOf(doc)
   const normalized = normalizeInlineText(text)
   doc.font('Helvetica-Oblique').fontSize(10.5)
   const height = doc.heightOfString(normalized, { width: CONTENT_WIDTH - 38, lineGap: 3 }) + 26
   ensureSpace(doc, height + 8)
   const startY = doc.y
-  doc.rect(PAGE.marginLeft, startY, CONTENT_WIDTH, height).fill(COLORS.paleBlue)
-  doc.rect(PAGE.marginLeft, startY, 5, height).fill(COLORS.blue)
-  doc.fillColor(COLORS.body).text(normalized, PAGE.marginLeft + 19, startY + 13, {
+  doc.rect(PAGE.marginLeft, startY, CONTENT_WIDTH, height).fill(colors.paleBlue)
+  doc.rect(PAGE.marginLeft, startY, 5, height).fill(colors.blue)
+  doc.fillColor(colors.body).text(normalized, PAGE.marginLeft + 19, startY + 13, {
     width: CONTENT_WIDTH - 38,
     lineGap: 3,
   })
@@ -204,13 +226,14 @@ const drawCallout = (doc, text) => {
 }
 
 const drawCode = (doc, text) => {
+  const colors = colorsOf(doc)
   const normalized = String(text ?? '')
   doc.font('Courier').fontSize(8.5)
   const height = doc.heightOfString(normalized || ' ', { width: CONTENT_WIDTH - 28, lineGap: 2 }) + 24
   ensureSpace(doc, height + 8)
   const startY = doc.y
-  doc.rect(PAGE.marginLeft, startY, CONTENT_WIDTH, height).fill(COLORS.paleGray)
-  doc.fillColor(COLORS.navy).text(normalized || ' ', PAGE.marginLeft + 14, startY + 12, {
+  doc.rect(PAGE.marginLeft, startY, CONTENT_WIDTH, height).fill(colors.paleGray)
+  doc.fillColor(colors.navy).text(normalized || ' ', PAGE.marginLeft + 14, startY + 12, {
     width: CONTENT_WIDTH - 28,
     lineGap: 2,
   })
@@ -241,14 +264,15 @@ const measureTableRow = (doc, row, widths, { heading = false } = {}) => {
 }
 
 const drawTableRow = (doc, row, widths, height, { heading = false, alternate = false } = {}) => {
+  const colors = colorsOf(doc)
   const startY = doc.y
   let x = PAGE.marginLeft
   row.forEach((value, index) => {
-    const fill = heading ? COLORS.navy : alternate ? COLORS.paleGray : COLORS.white
-    doc.rect(x, startY, widths[index], height).fillAndStroke(fill, COLORS.border)
+    const fill = heading ? colors.navy : alternate ? colors.paleGray : colors.white
+    doc.rect(x, startY, widths[index], height).fillAndStroke(fill, colors.border)
     doc.font(heading ? 'Helvetica-Bold' : 'Helvetica')
       .fontSize(heading ? 8.5 : 8.25)
-      .fillColor(heading ? COLORS.white : COLORS.body)
+      .fillColor(heading ? colors.white : colors.body)
       .text(normalizeInlineText(value), x + 7, startY + 6, {
         width: widths[index] - 14,
         height: height - 12,
@@ -312,11 +336,12 @@ const measureMinimumFollowingHeight = (doc, block) => {
 }
 
 const drawDivider = (doc) => {
+  const colors = colorsOf(doc)
   ensureSpace(doc, 20)
   doc.moveTo(PAGE.marginLeft, doc.y + 7)
     .lineTo(PAGE.marginLeft + CONTENT_WIDTH, doc.y + 7)
     .lineWidth(0.7)
-    .strokeColor(COLORS.border)
+    .strokeColor(colors.border)
     .stroke()
   doc.y += 20
 }
@@ -341,6 +366,7 @@ const renderBody = (doc, parsed) => {
 }
 
 const drawPageFurniture = (doc, metadata) => {
+  const colors = colorsOf(doc)
   const range = doc.bufferedPageRange()
   if (range.count > PROFESSIONAL_PDF_CANDIDATE_PROFILE.limits.maxPages) {
     failLimit('PDF_PAGE_LIMIT_EXCEEDED', {
@@ -353,7 +379,7 @@ const drawPageFurniture = (doc, metadata) => {
     const originalBottomMargin = doc.page.margins.bottom
     doc.page.margins.bottom = 0
     if (index > range.start) {
-      doc.font('Helvetica-Bold').fontSize(7.5).fillColor(COLORS.muted)
+      doc.font('Helvetica-Bold').fontSize(7.5).fillColor(colors.muted)
         .text(metadata.deliverableType.toUpperCase(), PAGE.marginLeft, 34, {
           width: CONTENT_WIDTH,
           characterSpacing: 0.4,
@@ -362,20 +388,20 @@ const drawPageFurniture = (doc, metadata) => {
       doc.moveTo(PAGE.marginLeft, 51)
         .lineTo(PAGE.marginLeft + CONTENT_WIDTH, 51)
         .lineWidth(0.6)
-        .strokeColor(COLORS.border)
+        .strokeColor(colors.border)
         .stroke()
     }
     doc.moveTo(PAGE.marginLeft, PAGE.height - 44)
       .lineTo(PAGE.marginLeft + CONTENT_WIDTH, PAGE.height - 44)
       .lineWidth(0.6)
-      .strokeColor(COLORS.border)
+      .strokeColor(colors.border)
       .stroke()
-    doc.font('Helvetica').fontSize(7).fillColor(COLORS.muted)
+    doc.font('Helvetica').fontSize(7).fillColor(colors.muted)
       .text('ENGINEERING CANDIDATE - NOT CUSTOMER APPROVED', PAGE.marginLeft, PAGE.height - 34, {
         width: CONTENT_WIDTH - 50,
         lineBreak: false,
       })
-    doc.font('Helvetica-Bold').fontSize(7).fillColor(COLORS.navy)
+    doc.font('Helvetica-Bold').fontSize(7).fillColor(colors.navy)
       .text(`${index - range.start + 1} / ${range.count}`, PAGE.width - PAGE.marginRight - 46, PAGE.height - 34, {
         width: 46,
         align: 'right',
@@ -386,7 +412,7 @@ const drawPageFurniture = (doc, metadata) => {
   return range.count
 }
 
-const renderPdfBuffer = ({ documentMetadata, parsed }) => new Promise((resolve, reject) => {
+const renderPdfBuffer = ({ documentMetadata, parsed, colors = COLORS }) => new Promise((resolve, reject) => {
   const chunks = []
   const doc = new PDFDocument({
     autoFirstPage: false,
@@ -415,6 +441,7 @@ const renderPdfBuffer = ({ documentMetadata, parsed }) => new Promise((resolve, 
   doc.on('end', () => resolve(Buffer.concat(chunks)))
 
   try {
+    doc.__outcomeStudioColors = colors
     drawCover(doc, documentMetadata)
     renderBody(doc, parsed)
     drawPageFurniture(doc, documentMetadata)
@@ -586,12 +613,13 @@ export const validateProfessionalPdfCandidate = async (buffer) => {
 export const renderProfessionalPdfCandidate = async ({
   documentMetadata = {},
   markdown = '',
+  styleTokens = {},
 } = {}) => {
   const input = parseProfessionalDocumentCandidateInput({ documentMetadata, markdown })
   const startedAt = Date.now()
   let buffer
   try {
-    buffer = await renderPdfBuffer(input)
+    buffer = await renderPdfBuffer({ ...input, colors: resolveCandidateColors(styleTokens) })
   } catch (error) {
     if (error?.name === 'ProfessionalDocumentCandidateError' || error?.name === 'ProfessionalPdfCandidateError') {
       throw error

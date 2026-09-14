@@ -55,10 +55,12 @@ import {
   generateRuntimeOutputRequest,
   listRuntimeOutputAssets,
   listRuntimeOutcomeSessionAssets,
+  listRuntimeOutcomeAssetRenderOutputs,
   listRuntimeInstances,
   listAvailableFrameworkPackages,
   mutateRuntimeState,
   publishRuntimeOutcomeAsset,
+  renderRuntimeOutcomeAsset,
   reviseRuntimeOutcomeAsset,
   publishRuntimeOutputAsset,
   rebuildRuntimeIntelligenceGraph,
@@ -109,6 +111,7 @@ import {
   validateRuntimeOutputAssetParams,
   validatePublishRuntimeOutcomeAsset,
   validateRuntimeOutcomeAssetExportParams,
+  validateRuntimeOutcomeAssetRenderParams,
   validateRuntimeOutcomeAssetParams,
   validateRuntimeOutcomeAssetVersionParams,
   validateRuntimeOutcomeDraftParams,
@@ -283,6 +286,16 @@ router.get(
   '/:runtimeInstanceId/outcome-studio/assets/:outcomeAssetId/versions/:outcomeAssetVersionId',
   validateRuntimeOutcomeAssetVersionParams,
   getRuntimeOutcomeAssetVersion,
+)
+router.get(
+  '/:runtimeInstanceId/outcome-studio/assets/:outcomeAssetId/render-outputs',
+  validateRuntimeOutcomeAssetParams,
+  listRuntimeOutcomeAssetRenderOutputs,
+)
+router.post(
+  '/:runtimeInstanceId/outcome-studio/assets/:outcomeAssetId/render/:format',
+  validateRuntimeOutcomeAssetRenderParams,
+  renderRuntimeOutcomeAsset,
 )
 router.get(
   '/:runtimeInstanceId/outcome-studio/assets/:outcomeAssetId/preview',

@@ -202,6 +202,12 @@ const outcomeAssetVersionSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.Mixed,
       default: () => ({}),
     },
+    // Rendering profile is governed presentation intent only. It never stores
+    // raw Knowledge Pack content or a second copy of customer content.
+    renderingProfile: {
+      type: mongoose.Schema.Types.Mixed,
+      default: () => ({}),
+    },
     lineageSummary: {
       type: mongoose.Schema.Types.Mixed,
       default: () => ({}),

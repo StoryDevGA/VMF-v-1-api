@@ -36,6 +36,7 @@ import RuntimeStateMigrationReceipt from './RuntimeStateMigrationReceipt.js'
 import TruthSignature from './TruthSignature.js'
 import OutcomeAsset from './OutcomeAsset.js'
 import OutcomeAssetVersion from './OutcomeAssetVersion.js'
+import OutcomeRenderOutput from './OutcomeRenderOutput.js'
 import OutcomeDraft from './OutcomeDraft.js'
 import OutcomeDraftIteration from './OutcomeDraftIteration.js'
 import OutcomeSession from './OutcomeSession.js'
@@ -93,6 +94,7 @@ export {
   TruthSignature,
   OutcomeAsset,
   OutcomeAssetVersion,
+  OutcomeRenderOutput,
   OutcomeDraft,
   OutcomeDraftIteration,
   OutcomeSession,
@@ -151,6 +153,7 @@ export default {
   TruthSignature,
   OutcomeAsset,
   OutcomeAssetVersion,
+  OutcomeRenderOutput,
   OutcomeDraft,
   OutcomeDraftIteration,
   OutcomeSession,
