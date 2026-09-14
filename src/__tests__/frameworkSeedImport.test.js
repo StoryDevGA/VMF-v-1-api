@@ -116,6 +116,7 @@ describe('framework seed import guard', () => {
     ['3.1.2', path.resolve(workspaceRoot, '.tmp/ss-013-source'), 'validation_report.md'],
     ['3.1.5', path.resolve(workspaceRoot, '.tmp/ss-013-source'), 'validation_report.md'],
     ['3.1.6', path.resolve(workspaceRoot, '.tmp/ss-020-v3-1-6-drive-source-2026-09-07'), 'validation_report.md'],
+    ['3.1.7', path.resolve(workspaceRoot, '.tmp/ss-020-v3-1-6-drive-source-2026-09-07'), 'validation_report.md'],
   ])('uses the selected %s seed version to resolve the default audit file', (
     seedVersion,
     selectedSeedDir,
@@ -334,6 +335,43 @@ describe('framework seed import guard', () => {
       expect.objectContaining({
         level: 'error',
         message: expect.stringContaining('requires a non-empty package-declared reasoningArtefacts array'),
+      }),
+    ]))
+  })
+
+  test('blocks the v3.1.7 package when declarations are absent', () => {
+    const { notes } = validateR3CrossReferences(({ frameworkPackages }) => {
+      frameworkPackages[0].version = '3.1.7'
+      frameworkPackages[0].packageKey = 'standard-package-value-mapping-framework-3-1-7-runtime-knowledge-model'
+      delete frameworkPackages[0].reasoningArtefacts
+    })
+
+    expect(notes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        level: 'error',
+        message: expect.stringContaining('VMF v3.1.7 requires a non-empty package-declared reasoningArtefacts array'),
+      }),
+    ]))
+  })
+
+  test('v3.1.7 uses legacy section-truth policies for exact section skill binding validation', () => {
+    const { notes } = validateV312AmendedCrossReferences(({ frameworkPackages, workflowPolicies }) => {
+      const frameworkPackage = frameworkPackages[0]
+      frameworkPackage.version = '3.1.7'
+      frameworkPackage.packageKey = 'standard-package-value-mapping-framework-3-1-7-runtime-knowledge-model'
+      frameworkPackage.dependencyLock.packageKey = frameworkPackage.packageKey
+      frameworkPackage.dependencyLock.packageVersion = frameworkPackage.version
+
+      const policy = workflowPolicies.find((row) => row.key === 'generate-section-gate-v3-1-2')
+      policy.steps = policy.steps.filter((step) =>
+        step.targetPath !== 'framework_state.sections.customer_context')
+    })
+
+    expect(notes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        level: 'error',
+        source: expect.stringContaining('customer-context'),
+        message: expect.stringMatching(/requires one unique exact-path.*found 0/i),
       }),
     ]))
   })

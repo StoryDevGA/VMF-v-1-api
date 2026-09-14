@@ -175,6 +175,7 @@ const SECTION_BINDING_CATEGORY_SET = new Set(RUNTIME_PATH_REGISTRY_SECTION_BINDI
 const V3_1_2_CANONICAL_UI_CONTRACT_KEY = 'standard-ui-contract-vmf-3-1-1-rkm-canonical'
 const V3_1_5_PACKAGE_KEY = 'standard-package-value-mapping-framework-3-1-5-runtime-knowledge-model'
 const V3_1_6_PACKAGE_KEY = 'standard-package-value-mapping-framework-3-1-6-runtime-knowledge-model'
+const V3_1_7_PACKAGE_KEY = 'standard-package-value-mapping-framework-3-1-7-runtime-knowledge-model'
 const V3_1_2_EXECUTION_STATUS_PATH_KEY = 'framework_state.runtime.execution_status'
 const V3_1_2_COMPATIBILITY_RUNTIME_PATHS = Object.freeze([
   Object.freeze({
@@ -394,6 +395,27 @@ const SEED_PACKS = Object.freeze({
   }),
   '3.1.6': Object.freeze({
     version: '3.1.6',
+    auditFileName: '04_audits/validation_report.md',
+    exclusionGuardFileName: '04_audits/deal_mode_exclusion_guard.json',
+    reasoningArtefactMatrixFileName: '04_audits/internal_reasoning_artefact_matrix.json',
+    acceptCompatibilityAuditWithoutCounts: true,
+    importSteps: buildImportSteps({
+      runtimePaths: '02_seed_data/runtime_path_registry.json',
+      skillRoles: '02_seed_data/skill_role_registry.json',
+      skills: '02_seed_data/runtime_skills.json',
+      validations: '02_seed_data/validation_registry.json',
+      agents: '02_seed_data/runtime_agents.json',
+      policies: '02_seed_data/workflow_policies.json',
+      uiContract: '02_seed_data/ui_contract.json',
+      frameworkPackage: '02_seed_data/framework_package.json',
+    }),
+    supportAssetManifest: Object.freeze({
+      fileName: '02_seed_data/supporting_asset_records.json',
+      arrayKey: 'supportingAssets',
+    }),
+  }),
+  '3.1.7': Object.freeze({
+    version: '3.1.7',
     auditFileName: '04_audits/validation_report.md',
     exclusionGuardFileName: '04_audits/deal_mode_exclusion_guard.json',
     reasoningArtefactMatrixFileName: '04_audits/internal_reasoning_artefact_matrix.json',
@@ -1013,7 +1035,7 @@ const normalizeUiContract = (record, notes, sourceLabel, seedContext = {}) => {
     notes,
     sourceLabel,
   )
-  if (['3.1.2', '3.1.5', '3.1.6'].includes(seedContext.seedVersion)) {
+  if (['3.1.2', '3.1.5', '3.1.6', '3.1.7'].includes(seedContext.seedVersion)) {
     const expectedStableId = buildUIContractStableId(record.uiContractKey)
     if (record.stableId !== expectedStableId) {
       const previousStableId = record.stableId
@@ -1031,7 +1053,7 @@ const normalizeUiContract = (record, notes, sourceLabel, seedContext = {}) => {
 const normalizeFrameworkPackage = (record, notes, sourceLabel, seedContext = {}) => {
   normalizeSeedSemanticVersionFields(record, ['version', 'stateModelVersion'], notes, sourceLabel)
 
-  if (['3.1.2', '3.1.5', '3.1.6'].includes(seedContext.seedVersion)) {
+  if (['3.1.2', '3.1.5', '3.1.6', '3.1.7'].includes(seedContext.seedVersion)) {
     if (record.uiContractKey !== V3_1_2_CANONICAL_UI_CONTRACT_KEY) {
       const previousKey = record.uiContractKey
       record.uiContractKey = V3_1_2_CANONICAL_UI_CONTRACT_KEY
@@ -2294,6 +2316,7 @@ const validateFrameworkPackageSectionSkillBindings = ({
     'standard-package-value-mapping-framework-3-1-2-runtime-knowledge-model',
     V3_1_5_PACKAGE_KEY,
     V3_1_6_PACKAGE_KEY,
+    V3_1_7_PACKAGE_KEY,
   ].includes(normalizeToken(frameworkPackage.packageKey))
   const sectionGenerationPolicyActions = new Map([
     ['generate-section-gate', 'GENERATE_SECTION'],
@@ -2315,6 +2338,7 @@ const validateFrameworkPackageSectionSkillBindings = ({
     'standard-package-value-mapping-framework-3-1-2-runtime-knowledge-model',
     V3_1_5_PACKAGE_KEY,
     V3_1_6_PACKAGE_KEY,
+    V3_1_7_PACKAGE_KEY,
   ]
   if (
     !sectionTruthPackageKeys.includes(normalizeToken(frameworkPackage.packageKey))
@@ -2408,13 +2432,15 @@ const validateFrameworkPackages = (records, indexes, notes) => {
   for (const frameworkPackage of records) {
     const source = `Framework Package ${frameworkPackage.packageKey}`
     if (
-      normalizeToken(frameworkPackage.packageKey) === normalizeToken(V3_1_6_PACKAGE_KEY)
+      [V3_1_6_PACKAGE_KEY, V3_1_7_PACKAGE_KEY]
+        .map(normalizeToken)
+        .includes(normalizeToken(frameworkPackage.packageKey))
       && (!Array.isArray(frameworkPackage.reasoningArtefacts) || frameworkPackage.reasoningArtefacts.length === 0)
     ) {
       notes.push({
         level: 'error',
         source,
-        message: 'VMF v3.1.6 requires a non-empty package-declared reasoningArtefacts array.',
+        message: `VMF v${frameworkPackage.version || '3.1.6'} requires a non-empty package-declared reasoningArtefacts array.`,
       })
     }
     try {
