@@ -1,5 +1,19 @@
 import { describe, test, expect, beforeAll, beforeEach, afterEach, jest } from '@jest/globals'
 
+// Authorization caching now uses only the shared store; this is a Redis boundary
+// fixture, not evidence of live Redis persistence or cross-process concurrency.
+const cacheEntries = new Map()
+const cacheRedis = {
+  get: async key => cacheEntries.get(key) ?? null,
+  set: async (key, value) => { cacheEntries.set(key, value); return 'OK' },
+  del: async (...keys) => keys.reduce((count, key) => count + Number(cacheEntries.delete(key)), 0),
+  scan: async (_cursor, _match, pattern) => ['0', [...cacheEntries.keys()].filter(key => key.startsWith(pattern.slice(0, -1)))],
+}
+await jest.unstable_mockModule('../config/redis.js', () => ({
+  getRedis: () => cacheRedis,
+  isRedisConnected: () => true,
+}))
+
 beforeAll(() => {
   process.env.NODE_ENV = 'test'
   process.env.JWT_SECRET =
@@ -100,6 +114,7 @@ beforeAll(async () => {
 })
 
 beforeEach(async () => {
+  cacheEntries.clear()
   await performanceCacheService.resetForTests()
   jobQueueService.resetForTests()
   monitoringService.resetForTests()

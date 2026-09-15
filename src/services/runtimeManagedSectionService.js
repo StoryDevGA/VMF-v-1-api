@@ -131,7 +131,9 @@ export const evaluateRuntimeManagedSections = ({ frameworkPackage, frameworkStat
         const declarations = validateReasoningArtefactDeclarations({ frameworkPackage })
           .filter((item) => completion.reasoningArtefactKeys.includes(item.artefactKey)
             && item.sectionKeys.some((id) => key(id) === key(source.sectionKey)))
-        const rebuilt = buildReasoningArtefactOutputs({ candidate: generated,
+        // Validate persisted canonical artefacts; bounded reads omit generation-only source fields.
+        const rebuilt = buildReasoningArtefactOutputs({ candidate: generated.reasoningArtefacts,
+          canonicalCandidate: true,
           declarations: declarations.map((item) => ({ ...item, required: true })),
           packageKey: frameworkPackage.packageKey, packageVersion: frameworkPackage.version,
           sectionKey: source.sectionKey, stateSectionKey: stateKey(source),
@@ -150,7 +152,8 @@ export const evaluateRuntimeManagedSections = ({ frameworkPackage, frameworkStat
             fail('RUNTIME_MANAGED_PROOF_DUPLICATED', 'Accepted internal proof receipts must resolve exactly once per artefact.')
           }
           // Validate using the original declaration (including its authored required flag).
-          const original = buildReasoningArtefactOutputs({ candidate: generated, declarations: [declaration],
+          const original = buildReasoningArtefactOutputs({ candidate: generated.reasoningArtefacts, declarations: [declaration],
+            canonicalCandidate: true,
             packageKey: frameworkPackage.packageKey, packageVersion: frameworkPackage.version,
             sectionKey: source.sectionKey, stateSectionKey: stateKey(source), inputHash: generated.inputHash,
             evidenceHash: generated.evidenceHash, dependencyHash: generated.dependencyHash,

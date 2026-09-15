@@ -1,6 +1,7 @@
 import { Customer, LicenseLevel } from '../models/index.js'
 import auditService from '../services/auditService.js'
 import performanceCacheService from '../services/performanceCacheService.js'
+import { escapeRegex } from '../utils/controllerUtils.js'
 
 const DUPLICATE_LICENSE_LEVEL_NAME_MESSAGE = 'A licence level with this name already exists.'
 
@@ -27,8 +28,8 @@ export const listLicenseLevels = async (req, res, next) => {
 
     if (q) {
       filter.$or = [
-        { name: { $regex: q, $options: 'i' } },
-        { description: { $regex: q, $options: 'i' } },
+        { name: { $regex: escapeRegex(q), $options: 'i' } },
+        { description: { $regex: escapeRegex(q), $options: 'i' } },
       ]
     }
 

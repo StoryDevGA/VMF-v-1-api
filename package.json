@@ -36,12 +36,17 @@
     "governance:backfill": "node src/scripts/backfillCustomerLicenseGovernance.js",
     "governance:report-admin-invariants": "node src/scripts/reportCustomerAdminInvariantViolations.js",
     "knowledge-packs:retire-starter": "node src/scripts/retireOutcomeStarterKnowledgePacks.js",
-    "test": "set NODE_ENV=test && node --experimental-vm-modules node_modules/jest/bin/jest.js",
+    "test": "node scripts/runTests.js",
     "test:watch": "jest --watch",
-    "test:coverage": "jest --coverage"
+    "test:coverage": "jest --coverage",
+    "lint": "eslint src scripts",
+    "format:check": "prettier --check",
+    "format": "prettier --write",
+    "test:isolated": "node scripts/runIsolatedTests.js",
+    "test:review": "node scripts/runIsolatedTests.js --review"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.13.0"
   },
   "dependencies": {
     "@napi-rs/canvas": "^1.0.0",
@@ -74,9 +79,13 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@jest/globals": "^30.2.0",
+    "eslint": "^10.10.0",
     "jest": "^30.2.0",
+    "mongodb-memory-server": "^11.2.0",
     "nodemon": "^3.1.7",
+    "prettier": "^3.9.6",
     "supertest": "^7.2.2"
   },
   "jest": {
@@ -87,7 +96,6 @@
     },
     "transform": {},
     "testMatch": [
-      "**/__tests__/**/*.js",
       "**/?(*.)+(spec|test).js"
     ],
     "collectCoverageFrom": [
@@ -96,7 +104,8 @@
       "!src/config/**",
       "!src/**/*.test.js",
       "!src/**/*.spec.js"
-    ]
+    ],
+    "workerIdleMemoryLimit": "512MB"
   },
   "description": "This folder contains the production-ready Node/Express API server. It defaults to port 8000 and includes hardened middleware (security headers, CORS, rate limiting, request logging) plus a health endpoint.",
   "main": "index.js",

@@ -66,6 +66,21 @@ const context = {
 }
 
 describe('package-declared reasoning artefact runtime contract', () => {
+  test('canonical validation uses exact artefact keys when generation source paths collide with other keys', () => {
+    const declarations = [
+      declaration('proof', { sourcePath: 'sectionIntelligence.other' }),
+      declaration('other', { sourcePath: 'sectionIntelligence.original' }),
+    ]
+    const args = { ...context, declarations, sectionKey: 'customer-context', stateSectionKey: 'customer_context' }
+    const generated = buildReasoningArtefactOutputs({ ...args,
+      candidate: { sectionIntelligence: { other: { value: 'A' }, original: { value: 'B' } } },
+    })
+    expect(generated.values).toEqual({ proof: { value: 'A' }, other: { value: 'B' } })
+    expect(buildReasoningArtefactOutputs({ ...args, candidate: generated.values, canonicalCandidate: true })).toEqual(generated)
+    expect(() => buildReasoningArtefactOutputs({ ...args, candidate: { other: { value: 'B' } }, canonicalCandidate: true }))
+      .toThrow(expect.objectContaining({ reason: 'REASONING_ARTEFACT_REQUIRED_MISSING' }))
+  })
+
   test('resolves VMF declarations by section and workflow without framework constants', () => {
     const frameworkPackage = packageWith([
       declaration('fxGxAssessmentSignals'),

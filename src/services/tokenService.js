@@ -1,6 +1,6 @@
 import crypto from 'node:crypto'
 import jwt from 'jsonwebtoken'
-import { getRedis } from '../config/redis.js'
+import { getSecurityRedis } from './securityRedis.js'
 import env from '../config/env.js'
 
 export class TokenAuthenticationError extends Error {
@@ -56,7 +56,7 @@ class TokenService {
     })
 
     // Store refresh token in Redis (if available)
-    const redis = getRedis()
+    const redis = getSecurityRedis()
     if (redis) {
       const refreshKey = `refresh_token:${user._id || user.id}`
       await redis.setex(refreshKey, 7 * 24 * 60 * 60, refreshToken) // 7 days
@@ -97,7 +97,7 @@ class TokenService {
     const decoded = this.verifyRefreshToken(refreshToken)
     
     // Check if refresh token exists in Redis (if available)
-    const redis = getRedis()
+    const redis = getSecurityRedis()
     if (redis) {
       const refreshKey = `refresh_token:${decoded.userId}`
       const storedToken = await redis.get(refreshKey)
@@ -122,21 +122,14 @@ class TokenService {
    * Blacklist access token
    */
   async blacklistToken(token) {
-    try {
-      const decoded = jwt.decode(token)
-      const redis = getRedis()
-      
-      if (!redis) return // Redis unavailable — blacklisting skipped
-
-      if (decoded && decoded.exp) {
-        const ttl = decoded.exp - Math.floor(Date.now() / 1000)
-        if (ttl > 0) {
-          await redis.setex(blacklistKey(token), ttl, 'true')
-        }
-      }
-    } catch (error) {
-      // If token is already invalid, no need to blacklist
-      console.warn('Failed to blacklist token:', error.message)
+    const decoded = jwt.decode(token)
+    if (!Number.isFinite(decoded?.exp)) return
+    const ttl = decoded.exp - Math.floor(Date.now() / 1000)
+    if (ttl <= 0) return
+    const redis = getSecurityRedis()
+    if (redis) {
+      // A rejected write (including noeviction/OOM) must not report logout success.
+      await redis.setex(blacklistKey(token), ttl, 'true')
     }
   }
 
@@ -144,26 +137,20 @@ class TokenService {
    * Check if token is blacklisted
    */
   async isTokenBlacklisted(token) {
-    try {
-      const redis = getRedis()
-      if (!redis) return false // Redis unavailable — assume not blacklisted
-      const result = await redis.get(blacklistKey(token))
-      if (result === 'true') return true
-      // Read-only transition: honor revocations written before hashed keys shipped.
-      // Remove this fallback after the maximum pre-deployment access-token TTL.
-      return (await redis.get(`blacklist:${token}`)) === 'true'
-    } catch (error) {
-      // If Redis is down, assume token is not blacklisted to avoid breaking auth
-      console.error('Failed to check token blacklist:', error.message)
-      return false
-    }
+    const redis = getSecurityRedis()
+    if (!redis) return false // Optional development mode only.
+    const result = await redis.get(blacklistKey(token))
+    if (result === 'true') return true
+    // Read-only transition: honor revocations written before hashed keys shipped.
+    // Remove this fallback after the maximum pre-deployment access-token TTL.
+    return (await redis.get(`blacklist:${token}`)) === 'true'
   }
 
   /**
    * Revoke refresh token
    */
   async revokeRefreshToken(userId) {
-    const redis = getRedis()
+    const redis = getSecurityRedis()
     if (!redis) return // Redis unavailable — nothing to revoke
     const refreshKey = `refresh_token:${userId}`
     await redis.del(refreshKey)
@@ -173,7 +160,7 @@ class TokenService {
    * Revoke all user tokens
    */
   async revokeAllUserTokens(userId) {
-    const redis = getRedis()
+    const redis = getSecurityRedis()
     if (!redis) return // Redis unavailable — nothing to revoke
     const refreshKey = `refresh_token:${userId}`
     await redis.del(refreshKey)

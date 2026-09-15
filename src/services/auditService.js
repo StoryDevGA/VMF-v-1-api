@@ -17,6 +17,7 @@
 
 import { AuditLog } from '../models/index.js'
 import logger from '../config/logger.js'
+import monitoringService from './monitoringService.js'
 
 /* ------------------------------------------------------------------ */
 /*  Canonical action & resourceType registries                        */
@@ -761,6 +762,7 @@ const log = async (data, options = {}) => {
       ? await AuditLog.createLog(payload, { session: options.session })
       : await AuditLog.createLog(payload)
   } catch (err) {
+    monitoringService.recordAuditWriteFailure()
     logger.error({ err, action: data.action, resourceType: data.resourceType, resourceId: data.resourceId }, 'audit log write failed')
     // Never throw — audit failures must not break business operations
     if (options.throwOnError) throw err

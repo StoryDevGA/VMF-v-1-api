@@ -1,4 +1,7 @@
 import { beforeAll, beforeEach, describe, expect, jest, test } from '@jest/globals'
+import mongoose from 'mongoose'
+
+let session
 
 beforeAll(() => {
   process.env.NODE_ENV = 'test'
@@ -46,9 +49,11 @@ beforeAll(async () => {
 })
 
 beforeEach(() => {
+  session = { withTransaction: jest.fn(async (fn) => fn()), endSession: jest.fn() }
+  mongoose.startSession = jest.fn().mockResolvedValue(session)
   VMF.find = jest.fn()
   VMF.deleteOne = jest.fn().mockResolvedValue({ deletedCount: 1 })
-  Deal.countDocuments = jest.fn().mockResolvedValue(0)
+  Deal.countDocuments = jest.fn().mockReturnValue({ session: jest.fn().mockResolvedValue(0) })
   Deal.updateMany = jest.fn().mockResolvedValue({ modifiedCount: 0 })
   User.updateMany = jest.fn().mockResolvedValue({ modifiedCount: 0 })
   performanceCacheService.invalidateAllUserPermissions = jest.fn().mockResolvedValue(undefined)
@@ -71,7 +76,6 @@ describe('vmfRetentionService.purgeExpiredSoftDeletedVmfs', () => {
 
   test('purges eligible VMFs and invalidates permission cache', async () => {
     mockVmfQuery(VMF, [makeSoftDeletedVmf()])
-    Deal.countDocuments.mockResolvedValue(0)
 
     const result = await vmfRetentionService.purgeExpiredSoftDeletedVmfs({
       now: new Date('2026-03-24T00:00:00.000Z'),
@@ -82,18 +86,20 @@ describe('vmfRetentionService.purgeExpiredSoftDeletedVmfs', () => {
     expect(Deal.updateMany).toHaveBeenCalledWith(
       { vmfId: VMF_ID },
       { $set: { status: 'ARCHIVED' } },
+      { session },
     )
     expect(User.updateMany).toHaveBeenCalledWith(
       { 'vmfGrants.vmfId': VMF_ID },
       { $pull: { vmfGrants: { vmfId: VMF_ID } } },
+      { session },
     )
-    expect(VMF.deleteOne).toHaveBeenCalledWith({ _id: VMF_ID })
+    expect(VMF.deleteOne).toHaveBeenCalledWith(expect.objectContaining({ _id: VMF_ID, deletedAt: { $type: 'date' } }), { session })
     expect(performanceCacheService.invalidateAllUserPermissions).toHaveBeenCalled()
   })
 
   test('skips purge when active deals still exist', async () => {
     mockVmfQuery(VMF, [makeSoftDeletedVmf()])
-    Deal.countDocuments.mockResolvedValue(2)
+    Deal.countDocuments.mockReturnValue({ session: jest.fn().mockResolvedValue(2) })
 
     const result = await vmfRetentionService.purgeExpiredSoftDeletedVmfs({
       now: new Date('2026-03-24T00:00:00.000Z'),
@@ -102,7 +108,27 @@ describe('vmfRetentionService.purgeExpiredSoftDeletedVmfs', () => {
     expect(result.scannedCount).toBe(1)
     expect(result.purgedCount).toBe(0)
     expect(result.skippedDueToActiveDeals).toBe(1)
-    expect(VMF.deleteOne).not.toHaveBeenCalled()
+    expect(Deal.updateMany).not.toHaveBeenCalled()
+    expect(performanceCacheService.invalidateAllUserPermissions).not.toHaveBeenCalled()
+  })
+
+  test('does not count or clean up a candidate restored before the transaction', async () => {
+    mockVmfQuery(VMF, [makeSoftDeletedVmf()])
+    VMF.deleteOne.mockResolvedValue({ deletedCount: 0 })
+    const result = await vmfRetentionService.purgeExpiredSoftDeletedVmfs()
+    expect(result.purgedCount).toBe(0)
+    expect(Deal.countDocuments).not.toHaveBeenCalled()
+    expect(User.updateMany).not.toHaveBeenCalled()
+    expect(session.endSession).toHaveBeenCalledTimes(1)
+  })
+
+  test('reports write failure and releases session without claiming purge', async () => {
+    mockVmfQuery(VMF, [makeSoftDeletedVmf()])
+    User.updateMany.mockRejectedValue(new Error('write failed'))
+    const result = await vmfRetentionService.purgeExpiredSoftDeletedVmfs()
+    expect(result.failedCount).toBe(1)
+    expect(result.purgedCount).toBe(0)
+    expect(session.endSession).toHaveBeenCalledTimes(1)
     expect(performanceCacheService.invalidateAllUserPermissions).not.toHaveBeenCalled()
   })
 })

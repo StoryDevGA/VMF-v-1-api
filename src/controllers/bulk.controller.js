@@ -16,6 +16,7 @@ import identityPlusService from '../services/identityPlusService.js'
 import logger from '../config/logger.js'
 import auditService from '../services/auditService.js'
 import performanceCacheService from '../services/performanceCacheService.js'
+import { buildBulkUserReader } from '../services/bulkUserReadService.js'
 import {
   CUSTOMER_USER_ASSIGNABLE_ROLE_SCOPES,
   IMPLICIT_TENANT_MEMBERSHIP_ROLE_KEYS,
@@ -393,6 +394,7 @@ export const bulkUpdateUsers = async (req, res, next) => {
     }
 
     // 3. Process each user update
+    const readUser = await buildBulkUserReader(users.map((entry) => entry.userId))
     const results = []
     let successCount = 0
     let failureCount = 0
@@ -401,7 +403,7 @@ export const bulkUpdateUsers = async (req, res, next) => {
       const entry = users[i]
 
       try {
-        const user = await User.findById(entry.userId)
+        const user = await readUser(entry.userId)
 
         if (!user) {
           failureCount++
@@ -615,6 +617,7 @@ export const bulkDisableUsers = async (req, res, next) => {
     }
 
     // 2. Process each user
+    const readUser = await buildBulkUserReader(userIds)
     const results = []
     let successCount = 0
     let failureCount = 0
@@ -623,7 +626,7 @@ export const bulkDisableUsers = async (req, res, next) => {
       const userId = userIds[i]
 
       try {
-        const user = await User.findById(userId)
+        const user = await readUser(userId)
 
         if (!user) {
           failureCount++

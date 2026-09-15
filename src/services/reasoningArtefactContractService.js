@@ -365,6 +365,7 @@ export const buildReasoningArtefactOutputs = ({
   generatedAt = '',
   now = generatedAt || new Date().toISOString(),
   validateCurrentness = true,
+  canonicalCandidate = false,
 } = {}) => {
   const normalizedSectionKey = sectionToken(sectionKey)
   const normalizedStateSectionKey = sectionToken(stateSectionKey || sectionKey)
@@ -375,7 +376,9 @@ export const buildReasoningArtefactOutputs = ({
   const context = { packageVersion: text(packageVersion), inputHash: text(inputHash), evidenceHash: text(evidenceHash), dependencyHash: text(dependencyHash), sectionContractHash: text(sectionContractHash), generatedAt: text(generatedAt) }
   normalizedDeclarations.forEach((declaration) => {
     if (!declaration.sectionKeys.includes(normalizedSectionKey)) return
-    const value = sourceValue(candidate, declaration.sourcePath, declaration.artefactKey)
+    const value = canonicalCandidate
+      ? candidate?.[declaration.artefactKey]
+      : sourceValue(candidate, declaration.sourcePath, declaration.artefactKey)
     if (value === undefined || value === null) {
       if (declaration.required) throw contractError('REASONING_ARTEFACT_REQUIRED_MISSING', 'A required package-declared reasoning artefact is missing.', { artefactKey: declaration.artefactKey, sectionKey: normalizedSectionKey })
       return

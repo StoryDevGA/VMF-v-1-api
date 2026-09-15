@@ -731,7 +731,7 @@ export const cloneUIContractRecord = async (req, res, next) => {
   }
 }
 
-export const updateUIContract = async (req, res, next) => {
+const applyUIContractUpdate = async (req, res, next, payload, auditAction) => {
   try {
     const uiContract = await findUIContractById(req.params.uiContractId)
     if (!uiContract) {
@@ -754,19 +754,19 @@ export const updateUIContract = async (req, res, next) => {
       })
     }
 
-    const nextFrameworkKeys = req.body.frameworkKeys ?? uiContract.frameworkKeys
+    const nextFrameworkKeys = payload.frameworkKeys ?? uiContract.frameworkKeys
     const frameworkDetails = await validateFrameworkKeys(nextFrameworkKeys)
     if (Object.keys(frameworkDetails).length > 0) {
       return sendValidationFailed(res, req, frameworkDetails)
     }
 
-    const nextSourcePackageKey = req.body.sourcePackageKey ?? uiContract.sourcePackageKey
-    const nextSourcePackageVersion = req.body.sourcePackageVersion ?? uiContract.sourcePackageVersion
-    const nextSourceFrameworkKey = req.body.sourceFrameworkKey ?? uiContract.sourceFrameworkKey
-    const nextSections = req.body.sections ?? uiContract.sections
-    const nextLifecycleStages = req.body.lifecycleStages ?? uiContract.lifecycleStages
-    const nextActions = req.body.actions ?? uiContract.actions
-    const nextStatus = req.body.status ?? uiContract.status
+    const nextSourcePackageKey = payload.sourcePackageKey ?? uiContract.sourcePackageKey
+    const nextSourcePackageVersion = payload.sourcePackageVersion ?? uiContract.sourcePackageVersion
+    const nextSourceFrameworkKey = payload.sourceFrameworkKey ?? uiContract.sourceFrameworkKey
+    const nextSections = payload.sections ?? uiContract.sections
+    const nextLifecycleStages = payload.lifecycleStages ?? uiContract.lifecycleStages
+    const nextActions = payload.actions ?? uiContract.actions
+    const nextStatus = payload.status ?? uiContract.status
 
     const sourcePackageResult = await resolveSourcePackage({
       sourcePackageKey: nextSourcePackageKey,
@@ -812,12 +812,12 @@ export const updateUIContract = async (req, res, next) => {
     ]
 
     for (const field of fields) {
-      if (req.body[field] === undefined) continue
+      if (payload[field] === undefined) continue
       const previousValue = cloneAuditValue(uiContract[field])
-      const nextValue = cloneAuditValue(req.body[field])
+      const nextValue = cloneAuditValue(payload[field])
       if (isDeepStrictEqual(previousValue, nextValue)) continue
       diff[field] = { from: previousValue, to: nextValue }
-      uiContract[field] = req.body[field]
+      uiContract[field] = payload[field]
     }
 
     uiContract.updatedBy = req.context?.userId || req.userId
@@ -830,7 +830,7 @@ export const updateUIContract = async (req, res, next) => {
 
     if (Object.keys(diff).length > 0) {
       await auditService.logFromRequest(req, {
-        action: req.uiContractAuditAction || auditService.AUDIT_ACTIONS.UI_CONTRACT_UPDATED,
+        action: auditAction || auditService.AUDIT_ACTIONS.UI_CONTRACT_UPDATED,
         resourceType: auditService.RESOURCE_TYPES.UIContract,
         resourceId: uiContract._id,
         scope: { frameworkKey: uiContract.frameworkKeys?.[0] },
@@ -889,6 +889,8 @@ export const getUIContractDependencies = async (req, res, next) => {
     next(err)
   }
 }
+
+export const updateUIContract = (req, res, next) => applyUIContractUpdate(req, res, next, req.body)
 
 export const validateUIContract = async (req, res, next) => {
   try {
@@ -955,19 +957,11 @@ export const validateUIContract = async (req, res, next) => {
   }
 }
 
-export const activateUIContract = async (req, res, next) => {
-  req.body = { status: UI_CONTRACT_STATUSES.ACTIVE }
-  return updateUIContract(req, res, next)
-}
+export const activateUIContract = (req, res, next) =>
+  applyUIContractUpdate(req, res, next, { status: UI_CONTRACT_STATUSES.ACTIVE })
 
-export const deprecateUIContract = async (req, res, next) => {
-  req.uiContractAuditAction = auditService.AUDIT_ACTIONS.UI_CONTRACT_DEPRECATED
-  req.body = { status: UI_CONTRACT_STATUSES.DEPRECATED }
-  return updateUIContract(req, res, next)
-}
+export const deprecateUIContract = (req, res, next) =>
+  applyUIContractUpdate(req, res, next, { status: UI_CONTRACT_STATUSES.DEPRECATED }, auditService.AUDIT_ACTIONS.UI_CONTRACT_DEPRECATED)
 
-export const archiveUIContract = async (req, res, next) => {
-  req.uiContractAuditAction = auditService.AUDIT_ACTIONS.UI_CONTRACT_ARCHIVED
-  req.body = { status: UI_CONTRACT_STATUSES.ARCHIVED }
-  return updateUIContract(req, res, next)
-}
+export const archiveUIContract = (req, res, next) =>
+  applyUIContractUpdate(req, res, next, { status: UI_CONTRACT_STATUSES.ARCHIVED }, auditService.AUDIT_ACTIONS.UI_CONTRACT_ARCHIVED)

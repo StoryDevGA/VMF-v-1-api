@@ -21,6 +21,7 @@
 
 import rateLimit from 'express-rate-limit'
 import env from '../config/env.js'
+import { createRateLimitStore } from '../services/rateLimitStore.js'
 
 /* ------------------------------------------------------------------ */
 /*  Shared handler                                                    */
@@ -32,12 +33,13 @@ import env from '../config/env.js'
  * number of seconds until the client can retry.
  */
 const standardHandler = (req, res) => {
+  const remainingMs = Number(req.rateLimit?.resetTime) - Date.now()
   res.status(429).json({
     error: {
       code: 'RATE_LIMIT_EXCEEDED',
       message: 'Too many requests, please try again later',
       requestId: req.requestId,
-      retryAfter: Math.ceil(req.rateLimit.resetTime / 1000),
+      retryAfter: Number.isFinite(remainingMs) ? Math.max(0, Math.ceil(remainingMs / 1000)) : 0,
     },
   })
 }
@@ -51,6 +53,7 @@ const standardHandler = (req, res) => {
  * Applied to login, super-admin login, and token refresh endpoints.
  */
 export const authRateLimit = rateLimit({
+  store: createRateLimitStore('authRateLimit'),
   windowMs: 60 * 1000, // 1 minute (spec: 5 attempts/minute per IP)
   limit: env.authRateLimit, // default 5
   message: {
@@ -75,6 +78,7 @@ export const authRateLimit = rateLimit({
  * to prevent brute-force across many IPs for a single account.
  */
 export const authHourlyRateLimit = rateLimit({
+  store: createRateLimitStore('authHourlyRateLimit'),
   windowMs: 60 * 60 * 1000, // 1 hour (spec: 10 attempts/hour per user)
   limit: env.authHourlyRateLimit, // default 10
   message: {
@@ -99,6 +103,7 @@ export const authHourlyRateLimit = rateLimit({
 /* ------------------------------------------------------------------ */
 
 export const documentIngestionRateLimit = rateLimit({
+  store: createRateLimitStore('documentIngestionRateLimit'),
   windowMs: 60 * 1000,
   limit: 10,
   standardHeaders: 'draft-7',
@@ -109,6 +114,7 @@ export const documentIngestionRateLimit = rateLimit({
 })
 
 export const userManagementRateLimit = rateLimit({
+  store: createRateLimitStore('userManagementRateLimit'),
   windowMs: 60 * 1000, // 1 minute
   limit: env.userMgmtRateLimit, // default 100
   message: {
@@ -128,6 +134,7 @@ export const userManagementRateLimit = rateLimit({
 /* ------------------------------------------------------------------ */
 
 export const tenantManagementRateLimit = rateLimit({
+  store: createRateLimitStore('tenantManagementRateLimit'),
   windowMs: 60 * 1000, // 1 minute
   limit: env.tenantRateLimit, // default 50
   message: {
@@ -147,6 +154,7 @@ export const tenantManagementRateLimit = rateLimit({
 /* ------------------------------------------------------------------ */
 
 export const vmfManagementRateLimit = rateLimit({
+  store: createRateLimitStore('vmfManagementRateLimit'),
   windowMs: 60 * 1000, // 1 minute
   limit: env.tenantRateLimit, // default 50; dedicated bucket for VMF flows
   message: {
@@ -166,6 +174,7 @@ export const vmfManagementRateLimit = rateLimit({
 /* ------------------------------------------------------------------ */
 
 export const bulkOperationsRateLimit = rateLimit({
+  store: createRateLimitStore('bulkOperationsRateLimit'),
   windowMs: 60 * 1000, // 1 minute
   limit: env.bulkRateLimit, // default 10
   message: {
@@ -186,6 +195,7 @@ export const bulkOperationsRateLimit = rateLimit({
 /* ------------------------------------------------------------------ */
 
 export const auditRateLimit = rateLimit({
+  store: createRateLimitStore('auditRateLimit'),
   windowMs: 60 * 1000, // 1 minute
   limit: env.auditRateLimit, // default 30
   message: {
@@ -206,6 +216,7 @@ export const auditRateLimit = rateLimit({
 /* ------------------------------------------------------------------ */
 
 export const superAdminInvitationRateLimit = rateLimit({
+  store: createRateLimitStore('superAdminInvitationRateLimit'),
   windowMs: 60 * 1000, // 1 minute
   limit: env.superAdminInvRateLimit, // default 10
   message: {
@@ -222,6 +233,7 @@ export const superAdminInvitationRateLimit = rateLimit({
 })
 
 export const superAdminInvitationAuthRateLimit = rateLimit({
+  store: createRateLimitStore('superAdminInvitationAuthRateLimit'),
   windowMs: 60 * 1000, // 1 minute
   limit: env.superAdminInvRateLimit, // default 10
   message: {
@@ -238,6 +250,7 @@ export const superAdminInvitationAuthRateLimit = rateLimit({
 })
 
 export const generalApiRateLimit = rateLimit({
+  store: createRateLimitStore('generalApiRateLimit'),
   windowMs: 60 * 60 * 1000, // 1 hour
   limit: 1000, // 1000 requests per hour per authenticated user
   message: {
@@ -250,4 +263,17 @@ export const generalApiRateLimit = rateLimit({
   legacyHeaders: false,
   handler: standardHandler,
   keyGenerator: (req) => `api:${req.ip}:${req.userId || 'anonymous'}`,
+  skip: () => env.nodeEnv === 'test',
+})
+
+// Applied only after authJwt has established a verified, server-owned identity.
+export const authenticatedApiRateLimit = rateLimit({
+  store: createRateLimitStore('authenticatedApiRateLimit'),
+  windowMs: 60 * 60 * 1000,
+  limit: 1000,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  handler: standardHandler,
+  keyGenerator: (req) => `user:${req.context.userId}`,
+  skip: () => env.nodeEnv === 'test',
 })

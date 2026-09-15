@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, jest, test } from '@jest/globals'
 import express from 'express'
 import request from 'supertest'
+import jwt from 'jsonwebtoken'
+
+const { isTokenAuthenticationError } = await import('../services/tokenService.js')
 
 const adopt = jest.fn()
 const rollback = jest.fn()
@@ -10,10 +13,10 @@ jest.unstable_mockModule('../services/runtimeReleaseAdoptionService.js', () => (
   adoptRuntimeRelease: adopt, rollbackRuntimeRelease: rollback,
 }))
 // Exercise the real JWT middleware; token verification and scope-loading I/O are isolated here.
-jest.unstable_mockModule('../services/tokenService.js', () => ({ default: {
+jest.unstable_mockModule('../services/tokenService.js', () => ({ isTokenAuthenticationError, default: {
   isTokenBlacklisted: async (token) => token === 'revoked',
   verifyAccessToken: (token) => {
-    if (token !== 'valid') throw new Error('invalid token')
+    if (token !== 'valid') throw new jwt.JsonWebTokenError('invalid token')
     return { userId: actorId, email: 'test@example.test' }
   },
 } }))

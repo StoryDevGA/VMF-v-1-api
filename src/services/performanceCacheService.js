@@ -16,10 +16,9 @@ import { isPlatformMembership } from '../utils/platformMembership.js'
  *   - Snapshot builders exported for use by middleware and controllers
  *
  * Cache reads:
- *   - user-permissions namespace: Redis only when Redis is available, to keep
- *     permission invalidations consistent across horizontally-scaled instances.
- *   - all other namespaces: local Map → Redis → null (performance reads).
- * Cache writes: local Map + Redis.
+ *   - Authorization namespaces use Redis only, so invalidation is shared across
+ *     instances. Unavailable Redis is a cache miss and callers resolve the DB.
+ * Cache writes: Redis only for authorization namespaces.
  * All operations are no-op when `PERF_CACHE_ENABLED=false` (default in test).
  */
 
@@ -409,12 +408,11 @@ const CUSTOMER_TOPOLOGY_NAMESPACE = 'customer-topology'
 const LICENSE_LEVEL_ENTITLEMENTS_NAMESPACE = 'license-level-entitlements'
 
 const getUserPermissions = async (userId) =>
-  // Bypass the local tier for auth-permission data when Redis is available so that
-  // role-invalidation from any horizontally-scaled instance takes effect immediately.
+  // Never revive a process-local authorization entry when Redis disconnects.
   getCachedValue(
     buildKey(USER_PERMISSIONS_NAMESPACE, userId),
     env.userPermissionsCacheTtlSec,
-    { skipLocalCache: Boolean(getRedis()) },
+    { skipLocalCache: true },
   )
 
 const setUserPermissions = async (userId, snapshot) =>
@@ -422,7 +420,7 @@ const setUserPermissions = async (userId, snapshot) =>
     buildKey(USER_PERMISSIONS_NAMESPACE, userId),
     snapshot,
     env.userPermissionsCacheTtlSec,
-    { skipLocalCache: Boolean(getRedis()) },
+    { skipLocalCache: true },
   )
 
 const invalidateUserPermissions = async (userId) =>
@@ -619,10 +617,12 @@ const invalidateAllUserPermissions = async (_options = {}) => {
 }
 
 const getTenantStatus = async (tenantId) =>
-  getCachedValue(buildKey(TENANT_STATUS_NAMESPACE, tenantId), env.tenantStatusCacheTtlSec)
+  getCachedValue(buildKey(TENANT_STATUS_NAMESPACE, tenantId), env.tenantStatusCacheTtlSec,
+    { skipLocalCache: true })
 
 const setTenantStatus = async (tenantId, snapshot) =>
-  setCachedValue(buildKey(TENANT_STATUS_NAMESPACE, tenantId), snapshot, env.tenantStatusCacheTtlSec)
+  setCachedValue(buildKey(TENANT_STATUS_NAMESPACE, tenantId), snapshot, env.tenantStatusCacheTtlSec,
+    { skipLocalCache: true })
 
 const invalidateTenantStatus = async (tenantId) =>
   invalidateCachedValue(buildKey(TENANT_STATUS_NAMESPACE, tenantId))
@@ -631,6 +631,7 @@ const getCustomerTopology = async (customerId) =>
   getCachedValue(
     buildKey(CUSTOMER_TOPOLOGY_NAMESPACE, customerId),
     env.customerTopologyCacheTtlSec,
+    { skipLocalCache: true },
   )
 
 const setCustomerTopology = async (customerId, snapshot) =>
@@ -638,6 +639,7 @@ const setCustomerTopology = async (customerId, snapshot) =>
     buildKey(CUSTOMER_TOPOLOGY_NAMESPACE, customerId),
     snapshot,
     env.customerTopologyCacheTtlSec,
+    { skipLocalCache: true },
   )
 
 const invalidateCustomerTopology = async (customerId) =>
@@ -647,6 +649,7 @@ const getLicenseLevelEntitlements = async (licenseLevelId) =>
   getCachedValue(
     buildKey(LICENSE_LEVEL_ENTITLEMENTS_NAMESPACE, licenseLevelId),
     env.customerTopologyCacheTtlSec,
+    { skipLocalCache: true },
   )
 
 const setLicenseLevelEntitlements = async (licenseLevelId, snapshot) =>
@@ -654,6 +657,7 @@ const setLicenseLevelEntitlements = async (licenseLevelId, snapshot) =>
     buildKey(LICENSE_LEVEL_ENTITLEMENTS_NAMESPACE, licenseLevelId),
     snapshot,
     env.customerTopologyCacheTtlSec,
+    { skipLocalCache: true },
   )
 
 const invalidateLicenseLevelEntitlements = async (licenseLevelId) =>

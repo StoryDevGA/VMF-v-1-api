@@ -1,4 +1,5 @@
 import logger from '../config/logger.js'
+import { asyncMiddleware } from './asyncMiddleware.js'
 import auditService from '../services/auditService.js'
 import {
   normalizeFeatureEntitlements,
@@ -46,7 +47,7 @@ const buildFeatureDeniedResponse = (req, feature, details = {}) => ({
   },
 })
 
-export const requireFeatureEntitlement = (featureKey, options = {}) => async (req, res, next) => {
+export const requireFeatureEntitlement = (featureKey, options = {}) => asyncMiddleware(async (req, res, next) => {
   const normalizedFeatureKey = normalizeFeatureEntitlements([featureKey])[0]
   if (!normalizedFeatureKey) {
     return res.status(500).json({
@@ -131,7 +132,6 @@ export const requireFeatureEntitlement = (featureKey, options = {}) => async (re
       reason: 'LICENSE_FEATURE_NOT_ENABLED',
     }),
   )
-}
+})
 
 export default requireFeatureEntitlement
-

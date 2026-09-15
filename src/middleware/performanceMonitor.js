@@ -16,11 +16,9 @@ import monitoringService from '../services/monitoringService.js'
 /* ------------------------------------------------------------------ */
 
 const getRouteLabel = (req) => {
-  if (req.baseUrl && req.route?.path) return `${req.baseUrl}${req.route.path}`
+  // Express baseUrl contains concrete mount parameters; only the route pattern is bounded.
   if (req.route?.path) return req.route.path
-  if (req.baseUrl) return req.baseUrl
-  if (req.path) return req.path
-  return 'unknown'
+  return 'unmatched'
 }
 
 const performanceMonitor = (req, res, next) => {

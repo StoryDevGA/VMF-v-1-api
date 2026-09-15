@@ -102,6 +102,9 @@ jest.unstable_mockModule('../config/redis.js', () => ({
   disconnectRedis: async () => {},
   getRedis: () => ({
     get: async (key) => key.startsWith('stepup:') ? '1' : null,
+    // Rate limiting is covered by its own real-Redis suite; this route fixture
+    // supplies the shared store's increment/TTL tuple without bypassing routes.
+    eval: async (_script, _keyCount, _key, windowMs) => windowMs ? [1, windowMs] : 0,
     del: async () => 1, set: async () => 'OK', setex: async () => 'OK', exists: async () => 0,
   }),
 }))

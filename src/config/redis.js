@@ -14,11 +14,15 @@ let attempted = false
  * or null if the initial attempt failed.
  */
 export const connectRedis = async () => {
+  const required = env.nodeEnv === 'production' || env.redisRequired
   // Already connected — return existing client
   if (redis && connected) return redis
 
   // Already attempted and failed — don't retry
-  if (attempted && !connected) return null
+  if (attempted && !connected) {
+    if (required) throw new Error('Required Redis connection unavailable')
+    return null
+  }
 
   attempted = true
 
@@ -28,7 +32,7 @@ export const connectRedis = async () => {
       maxRetriesPerRequest: 3,
       lazyConnect: true,
       // Only enable automatic reconnection when Redis is explicitly required
-      retryStrategy: env.redisRequired
+      retryStrategy: required
         ? (times) => Math.min(times * 200, 5000)
         : () => null,
     })
@@ -52,9 +56,9 @@ export const connectRedis = async () => {
   } catch (error) {
     connected = false
     redis = null
-    // Fatal only when REDIS_REQUIRED=true
-    if (env.redisRequired) {
-      logger.error({ error }, 'Failed to connect to Redis (REDIS_REQUIRED=true — fatal)')
+    // Production auth must never start without its revocation store.
+    if (required) {
+      logger.error({ error }, 'Failed to connect to required Redis')
       throw error
     }
     logger.warn('Redis unavailable — running without Redis. Token blacklisting and refresh-token storage are disabled.')

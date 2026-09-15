@@ -609,7 +609,7 @@ describe('Request correlation', () => {
   })
 
   test('uses client-provided X-Request-ID header', async () => {
-    const customId = 'custom-correlation-id-12345'
+    const customId = '66a3b1d4-f07b-4a90-bf64-13380cf32150'
     const res = await request.get('/').set('X-Request-ID', customId)
     expect(res.headers['x-request-id']).toBe(customId)
   })

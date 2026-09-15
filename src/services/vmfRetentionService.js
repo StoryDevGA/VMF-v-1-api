@@ -1,4 +1,5 @@
 import logger from '../config/logger.js'
+import mongoose from 'mongoose'
 import { Deal, User, VMF } from '../models/index.js'
 import performanceCacheService from './performanceCacheService.js'
 
@@ -25,21 +26,38 @@ export const purgeExpiredSoftDeletedVmfs = async ({ now = new Date(), limit = 20
   let failedCount = 0
 
   for (const vmf of candidates) {
+    let session
     try {
-      const activeDeals = await Deal.countDocuments({ vmfId: vmf._id, status: 'ACTIVE' })
-      if (activeDeals > 0) {
+      session = await mongoose.startSession()
+      const purged = await session.withTransaction(async () => {
+        // Claim the parent first. Deal writers touch the same document inside
+        // their transaction, so an old validation read cannot race this purge.
+        const deleted = await VMF.deleteOne({
+          _id: vmf._id,
+          deletedAt: { $type: 'date' },
+          purgeAfter: { $type: 'date', $lte: cutoff },
+        }, { session })
+        if (deleted.deletedCount !== 1) return false
+        const activeDeals = await Deal.countDocuments({ vmfId: vmf._id, status: 'ACTIVE' }).session(session)
+        if (activeDeals > 0) {
+          const error = new Error('Active deals prevent retention purge')
+          error.code = 'VMF_RETENTION_ACTIVE_DEALS'
+          throw error
+        }
+        await Deal.updateMany({ vmfId: vmf._id }, { $set: { status: 'ARCHIVED' } }, { session })
+        await User.updateMany(
+          { 'vmfGrants.vmfId': vmf._id },
+          { $pull: { vmfGrants: { vmfId: vmf._id } } },
+          { session },
+        )
+        return true
+      })
+      if (purged) purgedCount += 1
+    } catch (err) {
+      if (err.code === 'VMF_RETENTION_ACTIVE_DEALS') {
         skippedDueToActiveDeals += 1
         continue
       }
-
-      await Deal.updateMany({ vmfId: vmf._id }, { $set: { status: 'ARCHIVED' } })
-      await User.updateMany(
-        { 'vmfGrants.vmfId': vmf._id },
-        { $pull: { vmfGrants: { vmfId: vmf._id } } },
-      )
-      await VMF.deleteOne({ _id: vmf._id })
-      purgedCount += 1
-    } catch (err) {
       failedCount += 1
       logger.warn(
         {
@@ -50,6 +68,8 @@ export const purgeExpiredSoftDeletedVmfs = async ({ now = new Date(), limit = 20
         },
         'vmf retention purge failed for VMF',
       )
+    } finally {
+      if (session) await session.endSession()
     }
   }
 

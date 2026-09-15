@@ -57,6 +57,8 @@ let Tenant
 let VMF
 let AuditLog
 let LicenseLevel
+let Role
+let systemRoles
 let monitoringService
 
 let superAdminToken
@@ -127,11 +129,18 @@ beforeAll(async () => {
   VMF = models.VMF
   AuditLog = models.AuditLog
   LicenseLevel = models.LicenseLevel
+  Role = models.Role
+  ;({ systemRoles } = await import('../seeds/systemRoles.js'))
   monitoringService = (await import('../services/monitoringService.js')).default
 })
 
 beforeEach(() => {
   monitoringService.resetForTests()
+  jest.spyOn(Role, 'find').mockImplementation((filter) => {
+    const rows = systemRoles.filter((role) => !filter?.key?.$in || filter.key.$in.includes(role.key))
+      .map((role) => ({ ...role, isActive: true }))
+    return { select() { return this }, lean: async () => rows }
+  })
   persisted = { customers: [], users: [], tenants: [], vmfs: [] }
   shouldFailUserSave = false
 

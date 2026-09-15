@@ -1,4 +1,5 @@
 import { describe, test, expect, beforeAll, beforeEach, afterAll, jest } from '@jest/globals'
+import { SUPER_ADMIN_LOCKED_PERMISSION_KEYS } from '../constants/permissionCatalogue.js'
 
 beforeAll(() => {
   process.env.NODE_ENV = 'test'
@@ -69,6 +70,7 @@ let app
 let request
 let tokenService
 let User
+let Role
 let LicenseLevel
 let Customer
 let AuditLog
@@ -93,6 +95,7 @@ beforeAll(async () => {
 
   const models = await import('../models/index.js')
   User = models.User
+  Role = models.Role
   LicenseLevel = models.LicenseLevel
   Customer = models.Customer
   AuditLog = models.AuditLog
@@ -105,6 +108,10 @@ afterAll(() => {
 })
 
 beforeEach(() => {
+  Role.find = jest.fn(() => ({ select: () => ({ lean: async () => [
+    { key: 'SUPER_ADMIN', scope: 'PLATFORM', permissions: [...SUPER_ADMIN_LOCKED_PERMISSION_KEYS], isActive: true },
+    { key: 'USER', scope: 'VMF', permissions: ['VMF_VIEW'], isActive: true },
+  ] }) }))
   User.findById = jest.fn().mockImplementation((userId) => {
     if (userId === SUPER_ADMIN_ID) {
       return Promise.resolve(makeFakeUser())

@@ -1,4 +1,7 @@
 import tokenService, { isTokenAuthenticationError } from '../services/tokenService.js'
+import { authenticatedApiRateLimit } from './rateLimits.js'
+
+const identityRateLimited = Symbol('identityRateLimited')
 
 const authJwt = async (req, res, next) => {
   try {
@@ -36,7 +39,9 @@ const authJwt = async (req, res, next) => {
     req.userId = decoded.userId // Legacy support
     req.userEmail = decoded.email
 
-    next()
+    if (req[identityRateLimited]) return next()
+    req[identityRateLimited] = true
+    return authenticatedApiRateLimit(req, res, next)
   } catch (error) {
     if (!isTokenAuthenticationError(error)) {
       return next(error instanceof Error ? error : new Error('Authentication failed', { cause: error }))

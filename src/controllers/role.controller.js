@@ -142,9 +142,9 @@ export const listRoles = async (req, res, next) => {
 
     if (q) {
       filter.$or = [
-        { key: { $regex: q, $options: 'i' } },
-        { name: { $regex: q, $options: 'i' } },
-        { description: { $regex: q, $options: 'i' } },
+        { key: { $regex: escapeRegexForRoleKey(q), $options: 'i' } },
+        { name: { $regex: escapeRegexForRoleKey(q), $options: 'i' } },
+        { description: { $regex: escapeRegexForRoleKey(q), $options: 'i' } },
       ]
     }
 

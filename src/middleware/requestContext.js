@@ -1,8 +1,9 @@
-import { v4 as uuidv4 } from 'uuid'
+import { v4 as uuidv4, validate as isUuid } from 'uuid'
 
 const requestContext = (req, res, next) => {
   // Generate or use existing request ID
-  req.requestId = req.headers['x-request-id'] || uuidv4()
+  const suppliedId = req.headers['x-request-id']
+  req.requestId = typeof suppliedId === 'string' && isUuid(suppliedId) ? suppliedId : uuidv4()
   
   // Add request ID to response headers
   res.setHeader('x-request-id', req.requestId)

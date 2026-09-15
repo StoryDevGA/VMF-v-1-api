@@ -65,6 +65,13 @@ const activeAlertsGauge = new client.Gauge({
   registers: [register],
 })
 
+const auditWriteFailuresTotal = new client.Counter({
+  name: `${env.metricsPrefix}audit_write_failures_total`,
+  help: 'Total failed audit persistence attempts.',
+  registers: [register],
+})
+let lastAuditWriteFailureAt = null
+
 const governanceInactiveCustomerBlocksTotal = new client.Counter({
   name: `${env.metricsPrefix}governance_inactive_customer_blocks_total`,
   help: 'Total inactive-customer enforcement blocks.',
@@ -205,6 +212,17 @@ const getPerformanceSnapshot = () => {
 
 const evaluateAlerts = (metrics) => {
   const alerts = []
+
+  if (lastAuditWriteFailureAt !== null && Date.now() - lastAuditWriteFailureAt < env.monitoringWindowMs) {
+    alerts.push({
+      code: 'AUDIT_WRITE_FAILURE',
+      severity: 'critical',
+      metric: 'auditWriteFailure',
+      threshold: 0,
+      value: 1,
+      message: 'Audit persistence failed within the monitoring window.',
+    })
+  }
 
   if (metrics.p95ResponseTimeMs > env.monitoringLatencyP95ThresholdMs) {
     alerts.push({
@@ -482,6 +500,11 @@ const buildTrends = ({ windowMs, bucketMs }) => {
 }
 
 const monitoringService = {
+  recordAuditWriteFailure() {
+    auditWriteFailuresTotal.inc()
+    lastAuditWriteFailureAt = Date.now()
+  },
+
   onRequestStart() {
     inFlightRequests += 1
     httpInFlightRequests.set(inFlightRequests)
@@ -648,6 +671,8 @@ const monitoringService = {
   },
 
   resetForTests() {
+    auditWriteFailuresTotal.reset()
+    lastAuditWriteFailureAt = null
     requestSamples.length = 0
     alertLifecycle.clear()
     inFlightRequests = 0

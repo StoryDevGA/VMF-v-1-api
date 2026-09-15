@@ -8,7 +8,7 @@ const USER_ID = '507f1f77bcf86cd799439011'
 const CUSTOMER_ID = '607f1f77bcf86cd799439022'
 const TENANT_ID = '707f1f77bcf86cd799439033'
 const VMF_ID = '807f1f77bcf86cd799439055'
-const redis = { get: jest.fn(), del: jest.fn(), setex: jest.fn(), set: jest.fn() }
+const redis = { get: jest.fn(), del: jest.fn(), setex: jest.fn(), set: jest.fn(), eval: jest.fn() }
 let tokenService, env, requireStepUp, authorize, User, Customer, Tenant, VMF, Deal, Role
 let loadScopes, cache, authController, authJwt, request
 const req = () => ({ context: { userId: USER_ID }, userId: USER_ID,
@@ -42,6 +42,12 @@ beforeEach(() => {
   redis.del.mockReset().mockResolvedValue(1)
   redis.setex.mockReset().mockResolvedValue('OK')
   redis.set.mockReset().mockResolvedValue('OK')
+  const rateCounts = new Map()
+  redis.eval.mockReset().mockImplementation(async (_script, _keyCount, key, windowMs) => {
+    const hits = (rateCounts.get(key) || 0) + 1
+    rateCounts.set(key, hits)
+    return [hits, windowMs]
+  })
   env.nodeEnv = 'test'
 })
 afterEach(() => { env.nodeEnv = 'test'; jest.restoreAllMocks() })

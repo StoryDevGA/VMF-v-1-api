@@ -1,4 +1,5 @@
 import mongoose from 'mongoose'
+import { saveDealWithVmfGuard } from '../services/dealPersistenceService.js'
 
 const dealSchema = new mongoose.Schema({
   customerId: {
@@ -121,12 +122,12 @@ dealSchema.methods.isActive = function() {
 
 dealSchema.methods.archive = function() {
   this.status = 'ARCHIVED'
-  return this.save()
+  return saveDealWithVmfGuard(this)
 }
 
 dealSchema.methods.restore = function() {
   this.status = 'ACTIVE'
-  return this.save()
+  return saveDealWithVmfGuard(this)
 }
 
 // Pre-save validation
@@ -134,19 +135,19 @@ dealSchema.pre('save', async function(next) {
   try {
     // Verify VMF exists and is active
     const VMF = mongoose.model('VMF')
-    const vmf = await VMF.findById(this.vmfId)
+    const vmf = await VMF.findById(this.vmfId).session(this.$session())
     
     if (!vmf) {
       return next(new Error('VMF not found'))
     }
     
-    if (vmf.status !== 'ACTIVE') {
+    if (vmf.status !== 'ACTIVE' || vmf.deletedAt) {
       return next(new Error('Cannot create deals in inactive VMF'))
     }
     
     // Verify tenant is enabled
     const Tenant = mongoose.model('Tenant')
-    const tenant = await Tenant.findById(this.tenantId)
+    const tenant = await Tenant.findById(this.tenantId).session(this.$session())
     
     if (!tenant) {
       return next(new Error('Tenant not found'))

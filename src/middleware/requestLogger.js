@@ -18,20 +18,30 @@ const SENSITIVE_REQUEST_HEADER_NAMES = new Set([
   'x-step-up-token',
 ])
 
+const stripUrlQuery = (value) => typeof value === 'string' ? value.split(/[?#]/, 1)[0] : value
+const SAFE_QUERY_KEYS = new Set(['page', 'pageSize', 'limit', 'offset'])
+export const sanitizeRequestQuery = (query = {}) => Object.fromEntries(
+  Object.entries(query || {}).map(([key, value]) => [key,
+    SAFE_QUERY_KEYS.has(key) && /^\d{1,9}$/.test(String(value)) && !Array.isArray(value)
+      ? value
+      : REDACTED_HEADER_VALUE,
+  ]),
+)
+
 export const sanitizeRequestHeaders = (headers = {}) => Object.fromEntries(
   Object.entries(headers || {}).map(([name, value]) => [
     name,
     SENSITIVE_REQUEST_HEADER_NAMES.has(String(name).toLowerCase())
       ? REDACTED_HEADER_VALUE
-      : value,
+      : ['referer', 'referrer'].includes(String(name).toLowerCase()) ? stripUrlQuery(value) : value,
   ]),
 )
 
 export const serializeRequest = (req = {}) => ({
   id: req.id,
   method: req.method,
-  url: req.url,
-  query: req.query,
+  url: stripUrlQuery(req.url),
+  query: sanitizeRequestQuery(req.query),
   params: req.params,
   headers: sanitizeRequestHeaders(req.headers),
   remoteAddress: req.socket?.remoteAddress,

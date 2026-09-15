@@ -8,7 +8,7 @@ import { buildAcceptedSectionTruth, validateGeneratedReasoningArtefactsForAccept
 export const FIXTURE_NOW = '2026-09-08T12:00:00.000Z'
 export const VMF_GUIDED_SECTION_KEYS = ['customer_context', 'customer_problem', 'value_drivers', 'current_state_assessment', 'stakeholder_register', 'target_state']
 
-export const makeRuntimeManagedFixture = ({ frameworkKey = 'VMF', completed = true } = {}) => {
+export const makeRuntimeManagedFixture = ({ frameworkKey = 'VMF', completed = true, sourceRoot = 'reasoningArtefacts' } = {}) => {
   const guidedKeys = frameworkKey === 'VMF' ? VMF_GUIDED_SECTION_KEYS : ['survey_findings', 'risk_analysis']
   const hiddenKey = frameworkKey === 'VMF' ? 'output_requirements' : 'internal_compliance_packet'
   const sections = guidedKeys.map((sectionKey, index) => ({
@@ -21,7 +21,7 @@ export const makeRuntimeManagedFixture = ({ frameworkKey = 'VMF', completed = tr
     return {
       artefactKey, label: artefactKey, purpose: `Internal completion proof for ${section.sectionKey}.`,
       required: true, lifecycleStage: 'GENERATED', sectionKeys: [section.sectionKey],
-      workflowActionKeys: ['GENERATE_SECTION'], sourcePath: `reasoningArtefacts.${artefactKey}`,
+      workflowActionKeys: ['GENERATE_SECTION'], sourcePath: `${sourceRoot}.${artefactKey}`,
       writePath: `${section.runtimePath}.generated.reasoningArtefacts.${artefactKey}`,
       schema: { type: 'object', additionalProperties: false, required: ['value'], properties: { value: { type: 'string', minLength: 1 } } },
       validation: { currentnessFields: ['packageVersion', 'inputHash', 'evidenceHash', 'dependencyHash', 'sectionContractHash', 'generatedAt'], maxBytes: 4096 },
@@ -83,12 +83,16 @@ export const generateAndAcceptFixtureSection = (fixture, sectionKey, index = 0) 
   })
   const declarations = resolvePackageReasoningArtefacts({ frameworkPackage, sectionKey, actionKey: 'GENERATE_SECTION' })
   const candidate = { reasoningArtefacts: Object.fromEntries(declarations.map((item) => [item.artefactKey, { value: `Derived completion proof for ${sectionKey}.` }])) }
+  candidate.sectionIntelligence = candidate.reasoningArtefacts
   const outputs = buildReasoningArtefactOutputs({
     candidate, declarations, packageKey: frameworkPackage.packageKey, packageVersion: frameworkPackage.version,
     sectionKey, stateSectionKey: sectionKey, inputHash: generated.inputHash, evidenceHash: generated.evidenceHash,
     dependencyHash: generated.dependencyHash, sectionContractHash, generatedAt,
   })
   generated.reasoningArtefacts = outputs.values
+  if (declarations.some((item) => item.sourcePath.startsWith('sectionIntelligence.'))) {
+    generated.sectionIntelligence = candidate.sectionIntelligence
+  }
   generated.reasoningArtefactReceipts = outputs.receipts
   generated.runtimeManagedSourceReceipt = buildRuntimeManagedSourceReceipt({ frameworkPackage, frameworkState, section, generated })
   validateGeneratedReasoningArtefactsForAcceptance({ frameworkPackage, generated, sectionKey, stateSectionKey: sectionKey })

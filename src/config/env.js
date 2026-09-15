@@ -1,8 +1,12 @@
 import dotenv from 'dotenv'
+import { validateEnvironment } from './environmentValidation.js'
+import { parseAuditSigningConfig } from './auditSigningConfig.js'
 
 // Load appropriate environment file
 const envFile = process.env.NODE_ENV === 'test' ? '.env.test' : '.env'
 dotenv.config({ path: envFile })
+validateEnvironment(process.env)
+const auditSigningConfig = parseAuditSigningConfig(process.env)
 
 const toNumber = (value, fallback) => {
   const parsed = Number.parseInt(value, 10)
@@ -180,6 +184,8 @@ const env = {
 
   // Audit Configuration
   auditSignatureSecret: process.env.AUDIT_SIGNATURE_SECRET || 'default-secret-change-in-production',
+  auditSignatureKeyring: auditSigningConfig.keyring,
+  auditSignatureActiveKeyId: auditSigningConfig.activeKeyId,
 
   // Field-Level Encryption
   fieldEncryptionKey: process.env.FIELD_ENCRYPTION_KEY || '',

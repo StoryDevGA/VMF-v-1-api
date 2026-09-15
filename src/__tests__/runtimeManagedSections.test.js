@@ -27,6 +27,37 @@ const transition = (fixture, actionKey) => {
 }
 
 describe('SS-022 runtime-managed sections', () => {
+  test('generation-only source paths preserve hidden readiness and Mark Ready on bounded renderer reads', () => {
+    const fixture = makeRuntimeManagedFixture({ sourceRoot: 'sectionIntelligence' })
+    transition(fixture, 'RUN_VALIDATION')
+    const full = evaluate(fixture)
+    const projected = structuredClone(fixture)
+    for (const value of Object.values(projected.frameworkState.sections)) {
+      delete value.generated.sectionIntelligence
+      delete value.accepted.sectionIntelligence
+    }
+    expect(evaluate(projected)).toEqual(full)
+    expect(full).toMatchObject({ readySectionCount: 1, blockers: [] })
+    expect(getRuntimeActionStateGate({ ...projected, actionKey: 'MARK_READY' })).toEqual({ allowed: true, reason: '' })
+  })
+
+  test.each(['missing', 'tampered', 'tampered-with-refreshed-source-receipt'])(
+    'canonical proof remains required with generation-only source paths: %s', (mutation) => {
+      const fixture = makeRuntimeManagedFixture({ sourceRoot: 'sectionIntelligence' })
+      const value = firstValue(fixture)
+      const artefactKey = fixture.frameworkPackage.reasoningArtefacts[0].artefactKey
+      if (mutation === 'missing') delete value.generated.reasoningArtefacts[artefactKey]
+      else value.generated.reasoningArtefacts[artefactKey] = { value: 'Changed canonical proof' }
+      if (mutation !== 'tampered') refreshSourceReceipt(fixture)
+      expect(value.generated.sectionIntelligence[artefactKey]).toBeDefined()
+      expect(evaluate(fixture).readySectionCount).toBe(0)
+      expect(evaluate(fixture).blockers[0].state).toBe(mutation === 'missing'
+        ? 'REASONING_ARTEFACT_REQUIRED_MISSING'
+        : mutation === 'tampered' ? 'RUNTIME_MANAGED_PROOF_STALE' : 'RUNTIME_MANAGED_PROOF_INCOMPATIBLE')
+      expect(getRuntimeActionStateGate({ ...fixture, actionKey: 'MARK_READY' }).allowed).toBe(false)
+    },
+  )
+
   test.each(['VMF', 'CUSTOM'])('deterministic %s smoke: guided generation and acceptance produce internal proof without hidden customer truth', (frameworkKey) => {
     const fixture = makeRuntimeManagedFixture({ frameworkKey, completed: false })
     expect(evaluate(fixture).readySectionCount).toBe(0)

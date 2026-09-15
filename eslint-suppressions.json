@@ -1,0 +1,248 @@
+{
+  "src/__tests__/outcomeKnowledgePacks.test.js": {
+    "no-dupe-keys": {
+      "count": 4
+    }
+  },
+  "src/__tests__/outcomeQualityStageExecutions.test.js": {
+    "no-unexpected-multiline": {
+      "count": 1
+    }
+  },
+  "src/__tests__/professionalPresentationPdfCandidateRenderer.test.js": {
+    "no-useless-escape": {
+      "count": 1
+    }
+  },
+  "src/__tests__/runtimeInstances.test.js": {
+    "no-dupe-keys": {
+      "count": 1
+    }
+  },
+  "src/__tests__/runtimeReleaseAdoption.test.js": {
+    "no-unexpected-multiline": {
+      "count": 2
+    }
+  },
+  "src/controllers/workflowPolicy.controller.js": {
+    "no-useless-assignment": {
+      "count": 1
+    }
+  },
+  "src/scripts/importFrameworkSeed.js": {
+    "preserve-caught-error": {
+      "count": 2
+    }
+  },
+  "src/scripts/migrateKnowledgePackRelationshipsSs002.js": {
+    "no-useless-assignment": {
+      "count": 1
+    }
+  },
+  "src/scripts/resetDevelopmentCustomerVmfs.js": {
+    "no-unsafe-finally": {
+      "count": 1
+    }
+  },
+  "src/seeds/runtimePathRegistryVmf231.js": {
+    "preserve-caught-error": {
+      "count": 2
+    }
+  },
+  "src/services/discoveryIntelligenceService.js": {
+    "no-control-regex": {
+      "count": 2
+    },
+    "no-useless-assignment": {
+      "count": 1
+    },
+    "no-useless-escape": {
+      "count": 1
+    },
+    "preserve-caught-error": {
+      "count": 2
+    }
+  },
+  "src/services/governedReasoningRuntimeService.js": {
+    "no-control-regex": {
+      "count": 1
+    }
+  },
+  "src/services/knowledgePackSourceDocumentExtractionService.js": {
+    "no-control-regex": {
+      "count": 3
+    },
+    "no-useless-assignment": {
+      "count": 1
+    },
+    "no-useless-escape": {
+      "count": 1
+    }
+  },
+  "src/services/openAiOutcomeRenderedExpressionRlProviderAdapter.js": {
+    "no-useless-assignment": {
+      "count": 1
+    }
+  },
+  "src/services/outcomeKnowledgeCompositionPlanService.js": {
+    "no-useless-assignment": {
+      "count": 1
+    }
+  },
+  "src/services/outcomeKnowledgePackRegistryService.js": {
+    "no-useless-assignment": {
+      "count": 2
+    }
+  },
+  "src/services/outcomeQualityStageExecutionService.js": {
+    "no-control-regex": {
+      "count": 2
+    }
+  },
+  "src/services/outcomeQualityStageProviderSafeContextService.js": {
+    "no-control-regex": {
+      "count": 1
+    },
+    "no-useless-escape": {
+      "count": 1
+    }
+  },
+  "src/services/outcomeRenderedExpressionRlProviderSafeContextService.js": {
+    "no-control-regex": {
+      "count": 1
+    }
+  },
+  "src/services/outcomeStudioAssetRenderingService.js": {
+    "no-useless-escape": {
+      "count": 1
+    }
+  },
+  "src/services/outcomeStudioProviderSafeContextService.js": {
+    "no-control-regex": {
+      "count": 1
+    },
+    "no-useless-escape": {
+      "count": 3
+    }
+  },
+  "src/services/outcomeStudioService.js": {
+    "no-useless-assignment": {
+      "count": 3
+    }
+  },
+  "src/services/outcomeWorkingDraftExecutionService.js": {
+    "no-control-regex": {
+      "count": 2
+    }
+  },
+  "src/services/outputService.js": {
+    "no-useless-assignment": {
+      "count": 2
+    }
+  },
+  "src/services/professionalInfographicPdfCandidateRenderer.js": {
+    "no-control-regex": {
+      "count": 1
+    },
+    "no-useless-escape": {
+      "count": 1
+    }
+  },
+  "src/services/professionalInfographicSvgCandidateRenderer.js": {
+    "no-control-regex": {
+      "count": 3
+    }
+  },
+  "src/services/professionalPdfCandidateRenderer.js": {
+    "no-control-regex": {
+      "count": 1
+    },
+    "no-useless-escape": {
+      "count": 1
+    }
+  },
+  "src/services/professionalPresentationCandidateRenderer.js": {
+    "no-control-regex": {
+      "count": 1
+    },
+    "no-useless-assignment": {
+      "count": 1
+    }
+  },
+  "src/services/professionalPresentationPdfCandidateRenderer.js": {
+    "no-control-regex": {
+      "count": 1
+    },
+    "no-useless-escape": {
+      "count": 1
+    }
+  },
+  "src/services/reasoningArtefactContractService.js": {
+    "no-useless-assignment": {
+      "count": 2
+    }
+  },
+  "src/services/runtimeStateCurrentnessPromotionService.js": {
+    "no-unsafe-finally": {
+      "count": 2
+    }
+  },
+  "src/services/runtimeStateGraphPromotionService.js": {
+    "no-useless-assignment": {
+      "count": 3
+    }
+  },
+  "src/services/runtimeStateGraphSourceMutationService.js": {
+    "preserve-caught-error": {
+      "count": 1
+    }
+  },
+  "src/services/runtimeStateMigrationApplyService.js": {
+    "no-unsafe-finally": {
+      "count": 1
+    }
+  },
+  "src/services/runtimeStateMutationService.js": {
+    "no-useless-assignment": {
+      "count": 3
+    }
+  },
+  "src/services/runtimeStateRepository.js": {
+    "no-dupe-keys": {
+      "count": 1
+    }
+  },
+  "src/services/sectionValidationExecutorService.js": {
+    "no-useless-assignment": {
+      "count": 2
+    }
+  },
+  "src/services/ss014LegacyMigrationDryRun.js": {
+    "no-unsafe-finally": {
+      "count": 2
+    },
+    "no-useless-assignment": {
+      "count": 1
+    }
+  },
+  "src/validators/frameworkPackage.validator.js": {
+    "no-useless-assignment": {
+      "count": 1
+    }
+  },
+  "src/validators/outcomeStudioReadiness.validator.js": {
+    "no-control-regex": {
+      "count": 1
+    }
+  },
+  "src/validators/outcomeStudioTestReference.validator.js": {
+    "no-control-regex": {
+      "count": 1
+    }
+  },
+  "src/validators/workflowPolicy.validator.js": {
+    "no-useless-assignment": {
+      "count": 1
+    }
+  }
+}

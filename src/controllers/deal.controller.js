@@ -17,6 +17,7 @@ import { escapeRegex } from '../utils/controllerUtils.js'
 import { VMF, Deal } from '../models/index.js'
 import logger from '../config/logger.js'
 import auditService from '../services/auditService.js'
+import { saveDealWithVmfGuard } from '../services/dealPersistenceService.js'
 
 /* ------------------------------------------------------------------ */
 /*  GET /api/v1/vmfs/:vmfId/deals                                     */
@@ -120,7 +121,7 @@ export const createDeal = async (req, res, next) => {
       createdBy: actorUserId,
     })
 
-    await deal.save()
+    await saveDealWithVmfGuard(deal)
 
     await auditService.logFromRequest(req, {
       action: 'DEAL_CREATED',
@@ -228,7 +229,7 @@ export const updateDeal = async (req, res, next) => {
       deal.status = req.body.status
     }
 
-    await deal.save()
+    await saveDealWithVmfGuard(deal)
 
     await auditService.logFromRequest(req, {
       action: 'DEAL_UPDATED',
@@ -280,7 +281,7 @@ export const archiveDeal = async (req, res, next) => {
 
     const actorUserId = req.context?.userId || req.userId
     deal.status = 'ARCHIVED'
-    await deal.save()
+    await saveDealWithVmfGuard(deal)
 
     await auditService.logFromRequest(req, {
       action: 'DEAL_ARCHIVED',

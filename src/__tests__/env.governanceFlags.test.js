@@ -100,6 +100,7 @@ describe('env governance rollout flags', () => {
       NODE_ENV: 'test',
       APP_ENV: 'production',
       FAKE_AUTH_ENABLED: 'true',
+      AUDIT_SIGNATURE_SECRET: 'synthetic-test-production-audit-secret',
     }
 
     const env = await loadEnv()
@@ -112,6 +113,7 @@ describe('env governance rollout flags', () => {
       ...ORIGINAL_ENV,
       NODE_ENV: 'production',
       APP_ENV: 'development',
+      AUDIT_SIGNATURE_SECRET: 'synthetic-test-production-audit-secret',
     }
 
     const env = await loadEnv()
@@ -126,6 +128,7 @@ describe('env governance rollout flags', () => {
       ...ORIGINAL_ENV,
       NODE_ENV: 'production',
       APP_ENV: 'production',
+      AUDIT_SIGNATURE_SECRET: 'synthetic-test-production-audit-secret',
     }
 
     const env = await loadEnv()

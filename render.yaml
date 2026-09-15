@@ -40,4 +40,4 @@ services:
     plan: starter
     region: ohio
     ipAllowList: []
-    maxmemoryPolicy: allkeys-lru
+    maxmemoryPolicy: noeviction

@@ -31,6 +31,7 @@
  */
 
 import { describe, test, expect, beforeAll, beforeEach, jest } from '@jest/globals'
+import mongoose from 'mongoose'
 
 /* ------------------------------------------------------------------ */
 /*  Environment setup (must run before any app imports)               */
@@ -433,6 +434,7 @@ const getRegularUserToken = async () => {
 /* ------------------------------------------------------------------ */
 
 beforeEach(() => {
+  mongoose.connection.transaction = jest.fn(async (fn) => fn({}))
   performanceCacheService.resetForTests()
 
   User.findById = jest.fn()
@@ -442,6 +444,7 @@ beforeEach(() => {
   Customer.findById.mockResolvedValue(makeFakeCustomer())
   Tenant.findById = jest.fn()
   VMF.findById = jest.fn()
+  VMF.updateOne = jest.fn().mockResolvedValue({ matchedCount: 1 })
   VMF.findById.mockResolvedValue(makeFakeVmf())
   VMF.find = jest.fn()
   VMF.countDocuments = jest.fn()

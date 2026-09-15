@@ -1,0 +1,37 @@
+name: API checks
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      redis:
+        image: redis:7
+        ports: ['6379:6379']
+        options: --health-cmd "redis-cli ping" --health-interval 10s --health-timeout 5s --health-retries 5
+    env:
+      VMF_REDIS_TEST_URI: redis://127.0.0.1:6379/15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - name: Required review regressions
+        run: npm run test:review
+      - name: Full suite diagnostic (legacy failures tracked separately)
+        continue-on-error: true
+        run: npm run test:isolated -- --json --outputFile=full-test-results.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: full-suite-diagnostic
+          path: full-test-results.json
+          if-no-files-found: warn

@@ -1,6 +1,7 @@
 import mongoose from 'mongoose'
 import crypto from 'crypto'
 import env from '../config/env.js'
+import { AUDIT_SIGNATURE_KEY_ID_PATTERN } from '../config/auditSigningConfig.js'
 
 const auditDisplaySchema = new mongoose.Schema({
   actorLabel: {
@@ -195,6 +196,9 @@ const buildSignatureData = (doc) => {
     })
   }
 
+  // Absence preserves the exact legacy material for all supported versions.
+  if (doc.signatureKeyId !== undefined) data.signatureKeyId = doc.signatureKeyId
+
   return data
 }
 
@@ -213,8 +217,20 @@ const buildPersistableSignatureData = (doc) => {
   return buildSignatureData(persistableDocument)
 }
 
-const calculateSignature = (data) => crypto
-  .createHmac('sha256', env.auditSignatureSecret)
+const resolveSignatureKey = (doc) => {
+  if (doc.signatureKeyId === undefined) return env.auditSignatureSecret
+  const id = doc.signatureKeyId
+  const keyring = env.auditSignatureKeyring
+  if (typeof id !== 'string' || !AUDIT_SIGNATURE_KEY_ID_PATTERN.test(id)
+    || !keyring || !Object.hasOwn(keyring, id)
+    || typeof keyring[id] !== 'string' || keyring[id].trim().length < 32) {
+    throw new Error('Audit signing key unavailable')
+  }
+  return keyring[id]
+}
+
+const calculateSignature = (data, key) => crypto
+  .createHmac('sha256', key)
   .update(JSON.stringify(data, null, 0))
   .digest('hex')
 
@@ -299,6 +315,11 @@ const auditLogSchema = new mongoose.Schema({
     min: 1,
     enum: [...SUPPORTED_AUDIT_SIGNATURE_VERSIONS],
     default: CURRENT_AUDIT_SIGNATURE_VERSION
+  },
+  signatureKeyId: {
+    type: String,
+    maxlength: 64,
+    match: AUDIT_SIGNATURE_KEY_ID_PATTERN,
   },
   actorType: {
     type: String,
@@ -488,6 +509,10 @@ auditLogSchema.statics.createLog = function(logData, options = {}) {
 
 // Instance methods
 auditLogSchema.methods.generateSignature = function() {
+  if (this.isNew && this.signatureKeyId === undefined && env.auditSignatureActiveKeyId !== undefined) {
+    this.signatureKeyId = env.auditSignatureActiveKeyId
+  }
+  const key = resolveSignatureKey(this)
   const signatureVersion = Number(this.signatureVersion || 1)
   if (!SUPPORTED_AUDIT_SIGNATURE_VERSIONS.has(signatureVersion)) {
     throw new Error(`Unsupported audit signature version: ${signatureVersion}`)
@@ -497,10 +522,12 @@ auditLogSchema.methods.generateSignature = function() {
     ? buildPersistableSignatureData(this)
     : buildSignatureData(this)
 
-  this.signature = calculateSignature(data)
+  this.signature = calculateSignature(data, key)
 }
 
 auditLogSchema.methods.verifySignature = function() {
+  let key
+  try { key = resolveSignatureKey(this) } catch { return false }
   const signatureVersion = Number(this.signatureVersion || 1)
   if (!SUPPORTED_AUDIT_SIGNATURE_VERSIONS.has(signatureVersion)) return false
 
@@ -508,7 +535,7 @@ auditLogSchema.methods.verifySignature = function() {
     ? buildPersistableSignatureData(this)
     : buildSignatureData(this)
 
-  if (this.signature === calculateSignature(data)) return true
+  if (this.signature === calculateSignature(data, key)) return true
 
   if (
     signatureVersion >= CURRENT_AUDIT_SIGNATURE_VERSION
@@ -521,7 +548,7 @@ auditLogSchema.methods.verifySignature = function() {
   return this.signature === calculateSignature({
     ...buildSignatureData(this),
     diff: legacyDiff,
-  })
+  }, key)
 }
 
 // Pre-save middleware to ensure integrity
