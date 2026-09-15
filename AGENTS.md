@@ -7,6 +7,14 @@
 3. Touch only what you must. Clean up only your own mess.
 4. Define success criteria. Loop until verified.
 
+## New Sprint Thread Preflight (Mandatory)
+
+- Every new API or cross-layer sprint thread starts with the root [Sprint Engineering Preflight Standard](../docs/references/sprint-engineering-preflight-standard.md), not with backend code edits.
+- A prior thread summary, existing build, or frontend-only preflight does not replace the API review. Record the backend scope, source authority, contract boundaries, and evidence plan in the shared preflight record under `../docs/generated/harness-runs/<workstream>/<date>-<slug>/`.
+- Before implementation, inspect the relevant routes, controllers, services, models, validators, serializers, authorization, audit events, persistence/indexes, fixtures, focused tests, and client contract dependencies. Identify whether the change is API-only or cross-layer and state the negative and failure paths.
+- Do not add or change API behavior until the pre-edit evaluator records `PASS`. Escalate only material conflicts, missing authority, unsafe data mutations, or decisions that genuinely require Product Owner input.
+- Close every API or cross-layer sprint with the shared closeout template, separating local tests, persistence/API evidence, client/browser evidence, deployment, production, and Product acceptance claims.
+
 ## Runtime Control Contract Quality Gate
 
 - For governance, audit, lifecycle, activation, validation, dependency-lock, seed, or mock/API work, apply `../docs/references/runtime-control/runtime-control-contract-quality-gate.md` before coding and again before handoff.
