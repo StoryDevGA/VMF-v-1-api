@@ -5,15 +5,21 @@ import { execFile } from 'child_process'
 import { fileURLToPath } from 'url'
 import { promisify } from 'util'
 import { afterEach, describe, expect, jest, test } from '@jest/globals'
+import mongoose from 'mongoose'
 import RuntimeSupportAsset from '../models/RuntimeSupportAsset.js'
 import {
   buildImportUpdatePayload,
   importRecord,
+  importFrameworkSeed,
   loadSeedBundle,
   parseArgs,
   readConformanceAudit,
+  resolveSeedPack,
   validateCrossReferences,
+  validateDealModeExclusionGuard,
   validateReasoningArtefactMatrix,
+  validateReasoningArtefactMatrixFile,
+  validateWithMongoose,
 } from '../scripts/importFrameworkSeed.js'
 
 const execFileAsync = promisify(execFile)
@@ -96,6 +102,178 @@ const validateV312AmendedCrossReferences = (mutate) => {
   validateCrossReferences(bundle, notes)
   return { bundle, frameworkPackages, notes, runtimePaths, workflowPolicies }
 }
+
+// Synthetic compatibility fixture, never an authoritative replacement seed pack.
+const createV320Fixture = () => {
+  const root = createTempRoot('framework-seed-v320-')
+  const source = path.resolve(seedDir, 'vmf-v3-1-8-rkm')
+  fs.cpSync(source, root, { recursive: true })
+  const packageFile = path.join(root, '02_seed_data/framework_package.json')
+  const uiFile = path.join(root, '02_seed_data/ui_contract.json')
+  const pkg = JSON.parse(fs.readFileSync(packageFile, 'utf8'))
+  const ui = JSON.parse(fs.readFileSync(uiFile, 'utf8'))
+  pkg.frameworkKey = 'VMF'
+  pkg.version = '3.2.0'
+  pkg.packageKey = 'synthetic-vmf-v320-compatibility'
+  pkg.uiContractKey = 'synthetic-vmf-v320-ui'
+  pkg.uiContractBinding = { ...pkg.uiContractBinding, key: pkg.uiContractKey, version: '3.2.0' }
+  ui.uiContractKey = pkg.uiContractKey
+  ui.sourcePackageKey = pkg.packageKey
+  ui.sourcePackageVersion = '3.2.0'
+  fs.writeFileSync(packageFile, JSON.stringify(pkg))
+  fs.writeFileSync(uiFile, JSON.stringify(ui))
+  return { root, packageFile, uiFile }
+}
+
+const validateV320Fixture = (mutate) => {
+  const fixture = createV320Fixture()
+  const bundle = loadSeedBundle(fixture.root, '3.2.0')
+  const pkg = findBundleRecords(bundle, 'framework_package.json')[0]
+  const ui = findBundleRecords(bundle, 'ui_contract.json')[0]
+  const policies = findBundleRecords(bundle, 'workflow_policies.json')
+  const skills = findBundleRecords(bundle, 'runtime_skills.json')
+  mutate?.({ pkg, ui, policies, skills })
+  const notes = []
+  validateCrossReferences(bundle, notes)
+  return { ...fixture, bundle, pkg, ui, notes }
+}
+
+describe('VMF 3.2.0 importer compatibility', () => {
+  test('registers the existing import structure and mandatory guard files', () => {
+    const pack = resolveSeedPack('3.2.0')
+    expect(pack.version).toBe('3.2.0')
+    expect(pack.importSteps.map((step) => step.fileName))
+      .toEqual(resolveSeedPack('3.1.8').importSteps.map((step) => step.fileName))
+    expect(pack).toMatchObject({
+      auditFileName: '04_audits/validation_report.md',
+      exclusionGuardFileName: '04_audits/deal_mode_exclusion_guard.json',
+      reasoningArtefactMatrixFileName: '04_audits/internal_reasoning_artefact_matrix.json',
+    })
+    expect(() => resolveSeedPack('3.2.99')).toThrow()
+  })
+
+  test('preserves generated package and nested UI identities without changing source bytes', () => {
+    const fixture = createV320Fixture()
+    const before = [fixture.packageFile, fixture.uiFile].map((file) => fs.readFileSync(file))
+    const bundle = loadSeedBundle(fixture.root, '3.2.0')
+    const pkg = findBundleRecords(bundle, 'framework_package.json')[0]
+    const ui = findBundleRecords(bundle, 'ui_contract.json')[0]
+    const notes = []
+    validateCrossReferences(bundle, notes)
+    expect(notes.filter((note) => note.level === 'error')).toEqual([])
+    expect(pkg.packageKey).toBe('synthetic-vmf-v320-compatibility')
+    expect(pkg.uiContractKey).toBe('synthetic-vmf-v320-ui')
+    expect(pkg.uiContractBinding).toMatchObject({ key: ui.uiContractKey, version: '3.2.0' })
+    expect(ui.stableId).toBe('ui-contract-synthetic-vmf-v320-ui')
+    expect([fixture.packageFile, fixture.uiFile].map((file) => fs.readFileSync(file))).toEqual(before)
+  })
+
+  test.each([
+    ['missing binding', ({ pkg }) => { delete pkg.uiContractBinding }],
+    ['stale nested key', ({ pkg }) => { pkg.uiContractBinding.key = 'legacy-ui' }],
+    ['stale nested version', ({ pkg }) => { pkg.uiContractBinding.version = '3.1.8' }],
+    ['stale UI source version', ({ ui }) => { ui.sourcePackageVersion = '3.1.8' }],
+    ['missing top-level key', ({ pkg }) => { delete pkg.uiContractKey }],
+  ])('rejects %s', (_name, mutate) => {
+    expect(validateV320Fixture(mutate).notes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ level: 'error', message: expect.stringContaining('matching generated uiContractKey') }),
+    ]))
+  })
+
+  test.each([['version', '3.1.8'], ['frameworkKey', 'OTHER']])(
+    'rejects mismatched selected seed %s', (field, value) => {
+      const fixture = createV320Fixture()
+      const pkg = JSON.parse(fs.readFileSync(fixture.packageFile, 'utf8'))
+      pkg[field] = value
+      fs.writeFileSync(fixture.packageFile, JSON.stringify(pkg))
+      const notes = loadSeedBundle(fixture.root, '3.2.0').find((entry) => entry.notes).notes
+      expect(notes).toEqual(expect.arrayContaining([
+        expect.objectContaining({ level: 'error', message: expect.stringContaining('requires frameworkKey VMF') }),
+      ]))
+    },
+  )
+
+  test.each([undefined, []])('rejects absent or empty reasoning declarations (%s)', (value) => {
+    const { notes } = validateV320Fixture(({ pkg }) => { pkg.reasoningArtefacts = value })
+    expect(notes.some((note) => note.level === 'error' && /non-empty package-declared/.test(note.message))).toBe(true)
+  })
+
+  test('rejects a package without a generation policy even with a different generated key', () => {
+    const { notes } = validateV320Fixture(({ pkg }) => {
+      pkg.packageKey = 'another-valid-generated-key'
+      pkg.workflowBindings = []
+    })
+    expect(notes.some((note) => note.level === 'error' && /bound GENERATE_SECTION/.test(note.message))).toBe(true)
+  })
+
+  test.each(['missing', 'duplicate', 'inactive', 'write-path'])(
+    'rejects %s exact section-skill binding', (failure) => {
+      const { notes } = validateV320Fixture(({ policies, skills }) => {
+        const policy = policies.find((item) => item.governedAction === 'GENERATE_SECTION')
+        const step = policy.steps.find((item) => item.targetPath === 'framework_state.sections.customer_context')
+        const skill = skills.find((item) => [item.stableId, item.key].includes(step.skillId))
+        if (failure === 'missing') policy.steps = policy.steps.filter((item) => item !== step)
+        if (failure === 'duplicate') policy.steps.push({ ...step, skillId: 'different-skill' })
+        if (failure === 'inactive') skill.status = 'DRAFT'
+        if (failure === 'write-path') skill.allowedWritePaths = []
+      })
+      expect(notes.some((note) => note.level === 'error' && /exact-path|must be ACTIVE|cannot write/.test(note.message))).toBe(true)
+    },
+  )
+
+  test('requires reasoning and exclusion certificates for 3.2.0', () => {
+    const { root, bundle } = validateV320Fixture()
+    const options = { seedDir: root, seedVersion: '3.2.0' }
+    for (const file of ['internal_reasoning_artefact_matrix.json', 'deal_mode_exclusion_guard.json']) {
+      fs.unlinkSync(path.join(root, '04_audits', file))
+    }
+    const notes = []
+    validateReasoningArtefactMatrixFile(bundle, options, notes)
+    validateDealModeExclusionGuard(options, notes)
+    expect(notes.filter((note) => note.level === 'error')).toHaveLength(2)
+  })
+
+  test('rejects failed exclusion and invalid reasoning certificates', () => {
+    const { root, bundle } = validateV320Fixture()
+    const options = { seedDir: root, seedVersion: '3.2.0' }
+    fs.writeFileSync(path.join(root, '04_audits/deal_mode_exclusion_guard.json'), JSON.stringify({ status: 'FAIL' }))
+    fs.writeFileSync(path.join(root, '04_audits/internal_reasoning_artefact_matrix.json'), JSON.stringify({ matrix: [] }))
+    const notes = []
+    validateReasoningArtefactMatrixFile(bundle, options, notes)
+    validateDealModeExclusionGuard(options, notes)
+    expect(notes.filter((note) => note.level === 'error').length).toBeGreaterThanOrEqual(2)
+  })
+
+  test('retains model rejection of digit-leading generated package keys', async () => {
+    const { bundle } = validateV320Fixture(({ pkg, ui }) => {
+      pkg.packageKey = '3-2-0-invalid-synthetic-key'
+      ui.sourcePackageKey = pkg.packageKey
+    })
+    const notes = []
+    await validateWithMongoose(bundle, notes)
+    expect(notes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ level: 'error', source: 'Framework Packages', message: expect.stringContaining('packageKey') }),
+      expect.objectContaining({ level: 'error', source: 'UI Contracts', message: expect.stringContaining('sourcePackageKey') }),
+    ]))
+  })
+
+  test('blocks apply before connecting when generated UI binding is invalid', async () => {
+    const fixture = createV320Fixture()
+    const pkg = JSON.parse(fs.readFileSync(fixture.packageFile, 'utf8'))
+    pkg.uiContractBinding.version = '3.1.8'
+    fs.writeFileSync(fixture.packageFile, JSON.stringify(pkg))
+    const connect = jest.spyOn(mongoose, 'connect').mockRejectedValue(new Error('Unexpected database connection'))
+    try {
+      const result = await importFrameworkSeed({ seedDir: fixture.root, seedVersion: '3.2.0', apply: true, noReport: true })
+      expect(result.hasErrors).toBe(true)
+      expect(result.payload.summary.mode).toBe('apply-blocked')
+      expect(result.payload.summary.collections.every((row) => row.created === 0 && row.updated === 0)).toBe(true)
+      expect(connect).not.toHaveBeenCalled()
+    } finally {
+      connect.mockRestore()
+    }
+  })
+})
 
 describe('framework seed import guard', () => {
   test('suggests help for unknown script arguments', () => {

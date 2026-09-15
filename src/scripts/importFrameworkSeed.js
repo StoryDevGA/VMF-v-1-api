@@ -177,6 +177,7 @@ const V3_1_5_PACKAGE_KEY = 'standard-package-value-mapping-framework-3-1-5-runti
 const V3_1_6_PACKAGE_KEY = 'standard-package-value-mapping-framework-3-1-6-runtime-knowledge-model'
 const V3_1_7_PACKAGE_KEY = 'standard-package-value-mapping-framework-3-1-7-runtime-knowledge-model'
 const V3_1_8_PACKAGE_KEY = 'standard-package-value-mapping-framework-3-1-8-runtime-knowledge-model'
+const isV320FrameworkPackage = (record) => record.frameworkKey === VMF_FRAMEWORK_KEY && record.version === '3.2.0'
 const V3_1_2_EXECUTION_STATUS_PATH_KEY = 'framework_state.runtime.execution_status'
 const V3_1_2_COMPATIBILITY_RUNTIME_PATHS = Object.freeze([
   Object.freeze({
@@ -438,6 +439,27 @@ const SEED_PACKS = Object.freeze({
   }),
   '3.1.8': Object.freeze({
     version: '3.1.8',
+    auditFileName: '04_audits/validation_report.md',
+    exclusionGuardFileName: '04_audits/deal_mode_exclusion_guard.json',
+    reasoningArtefactMatrixFileName: '04_audits/internal_reasoning_artefact_matrix.json',
+    acceptCompatibilityAuditWithoutCounts: true,
+    importSteps: buildImportSteps({
+      runtimePaths: '02_seed_data/runtime_path_registry.json',
+      skillRoles: '02_seed_data/skill_role_registry.json',
+      skills: '02_seed_data/runtime_skills.json',
+      validations: '02_seed_data/validation_registry.json',
+      agents: '02_seed_data/runtime_agents.json',
+      policies: '02_seed_data/workflow_policies.json',
+      uiContract: '02_seed_data/ui_contract.json',
+      frameworkPackage: '02_seed_data/framework_package.json',
+    }),
+    supportAssetManifest: Object.freeze({
+      fileName: '02_seed_data/supporting_asset_records.json',
+      arrayKey: 'supportingAssets',
+    }),
+  }),
+  '3.2.0': Object.freeze({
+    version: '3.2.0',
     auditFileName: '04_audits/validation_report.md',
     exclusionGuardFileName: '04_audits/deal_mode_exclusion_guard.json',
     reasoningArtefactMatrixFileName: '04_audits/internal_reasoning_artefact_matrix.json',
@@ -1057,7 +1079,7 @@ const normalizeUiContract = (record, notes, sourceLabel, seedContext = {}) => {
     notes,
     sourceLabel,
   )
-  if (['3.1.2', '3.1.5', '3.1.6', '3.1.7', '3.1.8'].includes(seedContext.seedVersion)) {
+  if (['3.1.2', '3.1.5', '3.1.6', '3.1.7', '3.1.8', '3.2.0'].includes(seedContext.seedVersion)) {
     const expectedStableId = buildUIContractStableId(record.uiContractKey)
     if (record.stableId !== expectedStableId) {
       const previousStableId = record.stableId
@@ -1074,6 +1096,14 @@ const normalizeUiContract = (record, notes, sourceLabel, seedContext = {}) => {
 
 const normalizeFrameworkPackage = (record, notes, sourceLabel, seedContext = {}) => {
   normalizeSeedSemanticVersionFields(record, ['version', 'stateModelVersion'], notes, sourceLabel)
+
+  if (seedContext.seedVersion === '3.2.0'
+    && (!isV320FrameworkPackage(record))) {
+    notes.push({
+      level: 'error', source: sourceLabel,
+      message: 'Seed version 3.2.0 requires frameworkKey VMF and package version 3.2.0.',
+    })
+  }
 
   if (['3.1.2', '3.1.5', '3.1.6', '3.1.7', '3.1.8'].includes(seedContext.seedVersion)) {
     if (record.uiContractKey !== V3_1_2_CANONICAL_UI_CONTRACT_KEY) {
@@ -2334,7 +2364,7 @@ const validateFrameworkPackageSectionSkillBindings = ({
   const boundPolicies = workflowBindings
     .map((binding) => indexes.policiesByKey.get(normalizeToken(binding?.policyKey)))
     .filter(Boolean)
-  const supportsLegacySectionTruthPolicy = [
+  const supportsLegacySectionTruthPolicy = isV320FrameworkPackage(frameworkPackage) || [
     'standard-package-value-mapping-framework-3-1-2-runtime-knowledge-model',
     V3_1_5_PACKAGE_KEY,
     V3_1_6_PACKAGE_KEY,
@@ -2355,6 +2385,14 @@ const validateFrameworkPackageSectionSkillBindings = ({
     sectionGenerationPolicyActions.get(normalizeToken(policy.key))
     === normalizeEnumToken(policy.governedAction))
 
+  if (isV320FrameworkPackage(frameworkPackage)
+    && !sectionGenerationPolicies.some((policy) => policy.governedAction === 'GENERATE_SECTION')) {
+    notes.push({
+      level: 'error', source: `Framework Package ${frameworkPackage.packageKey}`,
+      message: 'VMF v3.2.0 requires a bound GENERATE_SECTION policy.',
+    })
+  }
+
   const sectionTruthPackageKeys = [
     'standard-package-vmf-3-1-1-rkm-canonical',
     'standard-package-vmf-3-1-1-rkm',
@@ -2365,7 +2403,8 @@ const validateFrameworkPackageSectionSkillBindings = ({
     V3_1_8_PACKAGE_KEY,
   ]
   if (
-    !sectionTruthPackageKeys.includes(normalizeToken(frameworkPackage.packageKey))
+    (!isV320FrameworkPackage(frameworkPackage)
+      && !sectionTruthPackageKeys.includes(normalizeToken(frameworkPackage.packageKey)))
     || sectionGenerationPolicies.length === 0
   ) return
 
@@ -2456,9 +2495,9 @@ const validateFrameworkPackages = (records, indexes, notes) => {
   for (const frameworkPackage of records) {
     const source = `Framework Package ${frameworkPackage.packageKey}`
     if (
-      [V3_1_6_PACKAGE_KEY, V3_1_7_PACKAGE_KEY, V3_1_8_PACKAGE_KEY]
+      (isV320FrameworkPackage(frameworkPackage) || [V3_1_6_PACKAGE_KEY, V3_1_7_PACKAGE_KEY, V3_1_8_PACKAGE_KEY]
         .map(normalizeToken)
-        .includes(normalizeToken(frameworkPackage.packageKey))
+        .includes(normalizeToken(frameworkPackage.packageKey)))
       && (!Array.isArray(frameworkPackage.reasoningArtefacts) || frameworkPackage.reasoningArtefacts.length === 0)
     ) {
       notes.push({
@@ -2478,6 +2517,19 @@ const validateFrameworkPackages = (records, indexes, notes) => {
     }
     if (!indexes.uiContractsByKey.has(normalizeToken(frameworkPackage.uiContractKey))) {
       notes.push({ level: 'error', source, message: `Unknown uiContractKey "${frameworkPackage.uiContractKey}".` })
+    }
+    if (isV320FrameworkPackage(frameworkPackage)) {
+      const uiContract = indexes.uiContractsByKey.get(normalizeToken(frameworkPackage.uiContractKey))
+      if (!uiContract
+        || frameworkPackage.uiContractKey !== uiContract.uiContractKey
+        || frameworkPackage.uiContractBinding?.key !== uiContract.uiContractKey
+        || frameworkPackage.uiContractBinding?.version !== '3.2.0'
+        || uiContract.sourcePackageVersion !== '3.2.0') {
+        notes.push({
+          level: 'error', source,
+          message: 'VMF v3.2.0 requires matching generated uiContractKey, uiContractBinding.key and version 3.2.0.',
+        })
+      }
     }
     for (const section of frameworkPackage.sections || []) {
       validateSectionRuntimePathReference({
@@ -3393,6 +3445,7 @@ export {
   loadSeedBundle,
   parseArgs,
   readConformanceAudit,
+  resolveSeedPack,
   validateCrossReferences,
   validateDealModeExclusionGuard,
   validateReasoningArtefactMatrix,
