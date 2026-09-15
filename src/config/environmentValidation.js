@@ -47,7 +47,7 @@ const environmentSchema = z.object(shape).passthrough()
 
 /** Validate configured infrastructure values without printing configuration secrets. */
 export const validateEnvironment = (source) => {
-  parseAuditSigningConfig(source)
+  const auditSigning = parseAuditSigningConfig(source)
   const result = environmentSchema.safeParse(source)
   const invalidFields = new Set(result.success ? [] : result.error.issues.map((issue) => issue.path[0]))
   if (source.NODE_ENV !== 'test' && Number(source.RATE_LIMIT_WINDOW_MS) === 0) {
@@ -59,9 +59,13 @@ export const validateEnvironment = (source) => {
   }
   const production = source.NODE_ENV === 'production'
     || String(source.APP_ENV || '').trim().toLowerCase() === 'production'
+  // The exact historical default may verify old unkeyed records only when
+  // new records are signed with a validated private key. Never silently opt in.
+  const legacyVerificationOnly = source.AUDIT_SIGNATURE_SECRET === 'default-secret-change-in-production'
+    && auditSigning.activeKeyId !== undefined
   if (production && (typeof source.AUDIT_SIGNATURE_SECRET !== 'string'
     || !source.AUDIT_SIGNATURE_SECRET.trim()
-    || source.AUDIT_SIGNATURE_SECRET.trim() === 'default-secret-change-in-production')) {
+    || (source.AUDIT_SIGNATURE_SECRET.trim() === 'default-secret-change-in-production' && !legacyVerificationOnly))) {
     invalidFields.add('AUDIT_SIGNATURE_SECRET')
   }
   if (invalidFields.size) {

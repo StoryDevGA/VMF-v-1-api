@@ -107,3 +107,36 @@ test('keyring configuration does not waive the production legacy-secret requirem
     AUDIT_SIGNATURE_KEYRING: JSON.stringify({ a: keyA }), AUDIT_SIGNATURE_ACTIVE_KEY_ID: 'a' }))
     .toThrow('AUDIT_SIGNATURE_SECRET')
 })
+
+test.each([{ NODE_ENV: 'production' }, { APP_ENV: 'production' }])('explicit historical default is verification-only with an active private key: %j', production => {
+  const legacySecret = 'default-secret-change-in-production'
+  const configured = { ...production, AUDIT_SIGNATURE_SECRET: legacySecret,
+    AUDIT_SIGNATURE_KEYRING: JSON.stringify({ a: keyA }), AUDIT_SIGNATURE_ACTIVE_KEY_ID: 'a' }
+  expect(() => validateEnvironment(configured)).not.toThrow()
+  for (const invalid of [undefined, '', ' ', ` ${legacySecret} `]) {
+    expect(() => validateEnvironment({ ...configured, AUDIT_SIGNATURE_SECRET: invalid })).toThrow('AUDIT_SIGNATURE_SECRET')
+  }
+  expect(() => validateEnvironment({ ...configured, AUDIT_SIGNATURE_ACTIVE_KEY_ID: undefined })).toThrow('AUDIT_SIGNATURE_SECRET')
+  expect(() => validateEnvironment({ ...configured, AUDIT_SIGNATURE_ACTIVE_KEY_ID: 'missing' })).toThrow('AUDIT_SIGNATURE_ACTIVE_KEY_ID')
+})
+
+test.each(['default-secret-change-in-production', ' default-secret-change-in-production '])('public default cannot be a named signing key', value => {
+  expect(() => parseAuditSigningConfig({ AUDIT_SIGNATURE_KEYRING: JSON.stringify({ a: keyA, old: value }),
+    AUDIT_SIGNATURE_ACTIVE_KEY_ID: 'a' })).toThrow('AUDIT_SIGNATURE_KEYRING')
+})
+
+test.each([1, 2, 3])('historical default version %i still verifies while new records use a private key', version => {
+  env.auditSignatureSecret = 'default-secret-change-in-production'
+  const originalLog = new AuditLog(fixture(version)); originalLog.generateSignature()
+  const historical = AuditLog.hydrate(originalLog.toObject())
+  const originalSignature = historical.signature
+  env.auditSignatureKeyring = { a: keyA }; env.auditSignatureActiveKeyId = 'a'
+  expect(historical.verifySignature()).toBe(true)
+  expect(historical.signature).toBe(originalSignature)
+  const nextLog = new AuditLog(fixture(version)); nextLog.generateSignature()
+  expect(nextLog.signatureKeyId).toBe('a')
+  expect(nextLog.verifySignature()).toBe(true)
+  env.auditSignatureKeyring = { a: env.auditSignatureSecret }
+  expect(nextLog.verifySignature()).toBe(false)
+  expect(historical.verifySignature()).toBe(true)
+})

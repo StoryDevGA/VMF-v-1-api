@@ -12,7 +12,8 @@ export const parseAuditSigningConfig = (source) => {
     } catch { throw invalidKeyring() }
     if (!keyring || Array.isArray(keyring) || Object.getPrototypeOf(keyring) !== Object.prototype
       || Object.entries(keyring).some(([id, secret]) => !AUDIT_SIGNATURE_KEY_ID_PATTERN.test(id)
-        || typeof secret !== 'string' || secret.trim().length < 32)) {
+        || typeof secret !== 'string' || secret.trim().length < 32
+        || secret.trim() === 'default-secret-change-in-production')) {
       throw invalidKeyring()
     }
   }
