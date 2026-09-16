@@ -5005,6 +5005,8 @@ const buildSafetyGates = ({
   readiness,
   sourceOutput,
   truthBinding,
+  knowledgeContext,
+  deliverableCount = 0,
 }) => {
   const activeCount = Array.isArray(packBinding?.activePacks) ? packBinding.activePacks.length : 0
   const requiredCount = Array.isArray(packBinding?.requiredPacks) ? packBinding.requiredPacks.length : 0
@@ -5017,11 +5019,16 @@ const buildSafetyGates = ({
     && requiredCount > 0
     && activeCount >= requiredCount
   const promptPersistenceReady = readiness?.canStartSession === true
+  // A resolved metadata contract does not prove executable composition content.
+  const compositionReady = knowledgeContext?.available === true
+    && knowledgeContext.metadataOnly !== true
+    && deliverableCount > 0
   const responseGenerationAvailable =
     sourceOutputBound
     && truthSignatureBound
     && knowledgePacksBound
     && promptPersistenceReady
+    && compositionReady
 
   const gates = [
     buildSafetyGate({
@@ -5068,8 +5075,10 @@ const buildSafetyGates = ({
       passed: responseGenerationAvailable,
       message: responseGenerationAvailable
         ? 'Governed response generation can run for active current sessions.'
-        : 'Assistant response generation is blocked until source, truth, knowledge-pack, and session gates pass.',
-      blockerReason: 'PRE_GENERATION_GATES_BLOCKED',
+        : !compositionReady
+          ? 'Knowledge Pack metadata does not yet establish executable composition readiness.'
+          : 'Assistant response generation is blocked until source, truth, knowledge-pack, and session gates pass.',
+      blockerReason: !compositionReady ? 'COMPOSITION_READINESS_PENDING' : 'PRE_GENERATION_GATES_BLOCKED',
     }),
   ]
   const passedCount = gates.filter((gate) => gate.status === OUTCOME_STUDIO_SAFETY_GATE_STATUSES.PASSED).length
@@ -5160,6 +5169,8 @@ const buildOutcomeStudioProjection = async ({
     readiness,
     sourceOutput,
     truthBinding,
+    knowledgeContext: frameworkHandoff?.knowledgeResolution?.context,
+    deliverableCount: deliverables.availableCount,
   })
   const readinessWithSafetyGates = {
     ...readiness,

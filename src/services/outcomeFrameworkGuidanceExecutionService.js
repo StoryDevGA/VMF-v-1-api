@@ -17,7 +17,7 @@ import {
   resolveLiveTestConfiguration,
 } from './governedReasoningRuntimeService.js'
 import {
-  assertOutcomeKnowledgeCompositionPlanIntegrity,
+  assertLegacyOutcomeKnowledgeCompositionPlan,
   assertOutcomeKnowledgeCompositionPlanMatchesRuntime,
   resolveOutcomeAcceptedTruthSectionIdentity,
 } from './outcomeKnowledgeCompositionPlanService.js'
@@ -115,10 +115,10 @@ const lineageInvalid = (details) => appError(
 const execQuery = async (query) => (typeof query?.lean === 'function' ? query.lean() : query)
 
 const readSelectedPlan = ({ model, planRecordId, runtimeInstanceId }) => execQuery(
-  model.findOne({ _id: planRecordId, runtimeInstanceId }),
+  model.findOne({ _id: planRecordId, runtimeInstanceId, requestId: { $exists: false } }),
 )
 const readLatestPlan = ({ model, runtimeInstanceId }) => {
-  const query = model.findOne({ runtimeInstanceId })
+  const query = model.findOne({ runtimeInstanceId, requestId: { $exists: false } })
   return execQuery(typeof query?.sort === 'function' ? query.sort({ planVersion: -1 }) : query)
 }
 const readRuntime = ({ model, runtimeInstanceId }) => execQuery(model.findOne({ _id: runtimeInstanceId }))
@@ -135,8 +135,8 @@ const assertCurrentPlan = ({ selectedPlan, latestPlan, runtime, runtimeInstanceI
   let selected
   let latest
   try {
-    selected = assertOutcomeKnowledgeCompositionPlanIntegrity(selectedPlan)
-    latest = assertOutcomeKnowledgeCompositionPlanIntegrity(latestPlan)
+    selected = assertLegacyOutcomeKnowledgeCompositionPlan(selectedPlan)
+    latest = assertLegacyOutcomeKnowledgeCompositionPlan(latestPlan)
     assertOutcomeKnowledgeCompositionPlanMatchesRuntime(selected, runtime)
   } catch (error) {
     throw bindingInvalid({ causeCode: error?.code || '' })

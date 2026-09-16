@@ -1370,6 +1370,7 @@ export const getRuntimeInstance = async ({
   tenantId: scopedTenantId,
   projection = '',
   maxTimeMS,
+  session = null,
 } = {}) => {
   let effectiveCustomerId = scopedCustomerId
   let effectiveTenantId = scopedTenantId
@@ -1398,6 +1399,7 @@ export const getRuntimeInstance = async ({
     tenantId: effectiveTenantId,
   }))
   if (projection && typeof query?.select === 'function') query.select(projection)
+  if (session && typeof query?.session === 'function') query.session(session)
   if (maxTimeMS !== undefined) {
     const normalizedMaxTimeMS = Number(maxTimeMS)
     if (!Number.isInteger(normalizedMaxTimeMS) || normalizedMaxTimeMS <= 0
@@ -1431,13 +1433,15 @@ export const getRuntimeInstance = async ({
     customerId,
     tenantId,
     permission: runtimeInstance.runtimeType === RUNTIME_TYPES.DEAL_ANALYSIS ? 'DEAL_VIEW' : 'VMF_VIEW',
+    session,
   })
 
-  const { customer } = await assertCustomerTenantContext({ customerId, tenantId })
+  const { customer } = await assertCustomerTenantContext({ customerId, tenantId, session })
   await assertFeatureEntitlement({
     customerId,
     customer,
     feature: getFeatureForRuntimeType(runtimeInstance.runtimeType),
+    session,
   })
 
   return serializeRuntimeInstance(runtimeInstance)

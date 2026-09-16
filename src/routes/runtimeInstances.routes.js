@@ -1,7 +1,9 @@
 import express, { Router } from 'express'
 import authJwt from '../middleware/authJwt.js'
 import loadScopes from '../middleware/loadScopes.js'
-import { documentIngestionRateLimit } from '../middleware/rateLimits.js'
+import { planRuntimeOutcomeRequest, confirmRuntimeOutcomeRequestPlan, retrieveRuntimeOutcomeRequestPlan } from '../controllers/runtimeInstance.controller.js'
+import { validateOutcomePlanningBody, validateOutcomePlanningConfirmation, validateOutcomePlanningRequestParams } from '../validators/runtimeInstance.validator.js'
+import { documentIngestionRateLimit, vmfManagementRateLimit } from '../middleware/rateLimits.js'
 import {
   acceptRuntimeDiscovery,
   acceptRuntimeSection,
@@ -265,6 +267,9 @@ router.use('/:runtimeInstanceId/outcome-studio', (req, _res, next) => {
   next()
 })
 router.get('/:runtimeInstanceId/outcome-studio', validateRuntimeOutcomeInstanceId, getRuntimeOutcomeStudio)
+router.post('/:runtimeInstanceId/outcome-studio/planning', vmfManagementRateLimit, validateRuntimeOutcomeInstanceId, validateOutcomePlanningBody, planRuntimeOutcomeRequest)
+router.post('/:runtimeInstanceId/outcome-studio/requests/:requestId/plans', vmfManagementRateLimit, validateOutcomePlanningRequestParams, validateOutcomePlanningConfirmation, confirmRuntimeOutcomeRequestPlan)
+router.get('/:runtimeInstanceId/outcome-studio/requests/:requestId/plans/:planId', validateOutcomePlanningRequestParams, retrieveRuntimeOutcomeRequestPlan)
 router.get('/:runtimeInstanceId/outcome-studio/readiness', validateRuntimeOutcomeInstanceId, getRuntimeOutcomeStudioReadiness)
 router.get(
   '/:runtimeInstanceId/outcome-studio/commercial-strategy-decision-paper/readiness',

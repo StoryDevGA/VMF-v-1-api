@@ -121,13 +121,11 @@ const makePack = ({ packType, packKey, knowledgeLayer, capabilityKey = '', suffi
 const makeBinding = () => {
   const mandatory = [
     makePack({ packType: 'ARL', packKey: 'adaptive-reasoning-layer', knowledgeLayer: 'REASONING', suffix: '1' }),
-    makePack({ packType: 'RL', packKey: 'rendering-layer', knowledgeLayer: 'COMMUNICATION_PATTERN', suffix: '2' }),
-    makePack({ packType: 'OUTPUT_SCHEMA', packKey: 'output-schemas-pack', knowledgeLayer: 'OUTPUT_SCHEMA', suffix: '3' }),
     makePack({ packType: 'TRUTH_CERTIFICATION', packKey: 'truth-certification-pack', knowledgeLayer: 'VALIDATION', suffix: '4' }),
-    makePack({ packType: 'OUTPUT_TYPE_DEFINITION', packKey: 'outcome-output-types', knowledgeLayer: 'OUTPUT_TYPE', suffix: '5' }),
   ]
   const selected = [
     ...mandatory,
+    makePack({ packType: 'RL', packKey: 'expression-review', knowledgeLayer: 'COMMUNICATION_PATTERN', suffix: '2' }),
     makePack({ packType: 'TRUTH_CERTIFICATION', packKey: 'blocking-rules', knowledgeLayer: 'VALIDATION', suffix: '6' }),
     makePack({ packType: 'OUTPUT_TYPE_DEFINITION', packKey: 'executive-brief', knowledgeLayer: 'OUTPUT_TYPE', capabilityKey: 'executive-brief', suffix: '7' }),
     makePack({ packType: 'OUTPUT_SCHEMA', packKey: 'executive-brief-schema', knowledgeLayer: 'OUTPUT_SCHEMA', capabilityKey: 'executive-brief-schema', suffix: '8' }),
@@ -137,13 +135,14 @@ const makeBinding = () => {
     status: 'READY',
     mode: 'REQUEST_SPECIFIC',
     policyKey: 'outcome-studio-v1-required-packs',
-    policyVersion: '1.0.0',
+    policyVersion: '2.0.0',
     mandatorySafeguards: mandatory,
     selectedByLayer: {
-      VALIDATION: [selected[5]],
-      OUTPUT_TYPE: [selected[6]],
-      OUTPUT_SCHEMA: [selected[7]],
-      STYLE: [selected[8]],
+      COMMUNICATION_PATTERN: [selected[2]],
+      VALIDATION: [selected[3]],
+      OUTPUT_TYPE: [selected[4]],
+      OUTPUT_SCHEMA: [selected[5]],
+      STYLE: [selected[6]],
     },
     excludedCandidates: [],
     blockedPacks: [],

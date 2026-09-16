@@ -29,6 +29,7 @@ import { isSelectableResolverPack } from '../utils/knowledgePackPredicates.js'
 
 const TRANSACTION_TOPOLOGIES = new Set(['ReplicaSetWithPrimary', 'Sharded'])
 const SHA256_PATTERN = /^[a-f0-9]{64}$/
+const REQUEST_ID_PATTERN = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/
 const CONTENT_HASH_PATTERN = /^sha256:[a-f0-9]{64}$/
 const STABLE_KEY_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,138}[a-z0-9])?$/
 const SECTION_ROOT_PATTERN = /^framework_state\.sections\.([a-z0-9](?:[a-z0-9_-]{0,138}[a-z0-9])?)$/
@@ -614,8 +615,11 @@ export const buildOutcomeKnowledgeCompositionPlanCandidate = ({
   binding,
   context,
   consumerIntent,
+  requestScope,
+  requestAssociation,
 } = {}) => {
   if (!runtime || !binding || !context) throw invalid('Knowledge Composition Plan inputs are incomplete.')
+  assertRequestScope(requestScope, runtime)
   const lockedTruth = buildLockedTruthManifest(runtime)
   const intent = buildConsumerIntent(consumerIntent, binding)
   const packEvidence = buildConsideredPackEvidence(binding)
@@ -625,6 +629,15 @@ export const buildOutcomeKnowledgeCompositionPlanCandidate = ({
   }
   const resolution = projectResolution(binding)
   const governedContext = projectContext(context)
+  if (requestScope) {
+    // Mixed payload persistence minimizes empty objects. Represent absent optional
+    // style explicitly so the saved payload retains its approved fingerprint.
+    if (!Object.keys(governedContext.style).length) governedContext.style = null
+    // Resolver contextId includes observation time. Request confirmation must bind
+    // semantic evidence, not a new clock sample; legacy fingerprints stay intact.
+    const { contextId: _observationId, ...semanticContext } = governedContext
+    governedContext.contextId = hashSemanticFingerprintValue(semanticContext)
+  }
   const requiredGap = hasRequiredGap(resolution)
     || governedContext.status !== 'READY'
     || governedContext.available !== true
@@ -654,6 +667,9 @@ export const buildOutcomeKnowledgeCompositionPlanCandidate = ({
   })
   const contextFingerprint = hashSemanticFingerprintValue(governedContext)
   const payload = {
+    ...(requestScope ? { requestId: requestScope.requestId } : {}),
+    ...(requestScope && requestAssociation ? { requestAssociation: canonicalize(requestAssociation) } : {}),
+    ...(requestScope && runtime.planningEvidence ? { planningEvidence: canonicalize(runtime.planningEvidence) } : {}),
     contractVersion: OUTCOME_GOVERNED_QUALITY_CONTRACT_VERSION,
     status,
     runtime: {
@@ -702,6 +718,11 @@ export const assertOutcomeKnowledgeCompositionPlanIntegrity = (value) => {
   const payload = plan?.payload
   if (!plan || !payload || typeof payload !== 'object' || Array.isArray(payload)) {
     throw resolutionInvalid({ field: 'payload' })
+  }
+  const hasRequest = Object.prototype.hasOwnProperty.call(plan, 'requestId')
+  if (hasRequest !== Object.prototype.hasOwnProperty.call(payload, 'requestId')
+    || (hasRequest && (!REQUEST_ID_PATTERN.test(plan.requestId) || plan.requestId !== payload.requestId))) {
+    throw resolutionInvalid({ field: 'requestId' })
   }
   if (plan.contractVersion !== OUTCOME_GOVERNED_QUALITY_CONTRACT_VERSION
     || payload.contractVersion !== OUTCOME_GOVERNED_QUALITY_CONTRACT_VERSION
@@ -868,29 +889,83 @@ const readRuntime = async ({ model, runtimeInstanceId, session = null }) => {
   return typeof query.lean === 'function' ? query.lean() : query
 }
 
+// Internal orchestration boundary, not a request-body contract. Runtime permissions
+// are always checked independently; knowing a request UUID grants no authority.
+const assertRequestScope = (scope, runtime) => {
+  if (scope === undefined) return
+  if (!scope || typeof scope !== 'object' || !REQUEST_ID_PATTERN.test(scope.requestId)
+    || Object.keys(scope).sort().join(',') !== 'customerId,requestId,runtimeInstanceId,tenantId'
+    || ['tenantId', 'customerId', 'runtimeInstanceId'].some((key) => !mongoose.isValidObjectId(scope[key]))
+    || toId(scope.runtimeInstanceId) !== toId(runtime._id || runtime.id)
+    || toId(scope.tenantId) !== toId(runtime.tenantId)
+    || toId(scope.customerId) !== toId(runtime.customerId)) {
+    throw invalid('Knowledge Composition Plan request scope is invalid.')
+  }
+}
+
+export const assertLegacyOutcomeKnowledgeCompositionPlan = (value) => {
+  const plan = toPlain(value)
+  if (plan && (Object.prototype.hasOwnProperty.call(plan, 'requestId')
+    || Object.prototype.hasOwnProperty.call(plan.payload || {}, 'requestId'))) {
+    throw resolutionBlocked({ field: 'requestId', executionBlocked: true })
+  }
+  return assertOutcomeKnowledgeCompositionPlanIntegrity(value)
+}
+
+const assertKcpIndexes = async (model, requestScoped) => {
+  let indexes
+  try { indexes = await model.collection.listIndexes().toArray() } catch {
+    throw appError(503, OUTCOME_KCP_ERROR_CODES.PERSISTENCE_FAILED, 'KCP request indexes are unavailable.', { field: 'requestIndexes' })
+  }
+  const key = (index) => JSON.stringify(Object.entries(index.key || {}))
+  const required = JSON.stringify([['runtimeInstanceId', 1], ['requestId', 1], ['planVersion', 1]])
+  const old = JSON.stringify([['runtimeInstanceId', 1], ['planVersion', 1]])
+  const fullUnique = (index) => index.unique === true && !index.partialFilterExpression
+    && !index.sparse && !index.hidden && !index.collation
+  const hasNew = indexes.some((index) => key(index) === required && fullUnique(index))
+  const hasOld = indexes.some((index) => key(index) === old && fullUnique(index))
+  if (requestScoped
+    ? !hasNew || indexes.some((index) => index.name === 'uniq_outcome_kcp_runtime_version' || key(index) === old)
+    : !hasNew && !hasOld) {
+    throw appError(503, OUTCOME_KCP_ERROR_CODES.PERSISTENCE_FAILED, 'KCP request indexes require a separately governed migration.', { field: 'requestIndexes' })
+  }
+}
+
+export const assertOutcomeKcpRequestIndexes = (model = OutcomeKnowledgeCompositionPlan) => assertKcpIndexes(model, true)
+export const assertOutcomeKcpLegacyIndexes = (model = OutcomeKnowledgeCompositionPlan) => assertKcpIndexes(model, false)
+
 export const buildOutcomeKnowledgeCompositionPlanForRuntime = async ({
   actorUserId,
   scopes,
   runtimeInstanceId,
   expectedRuntimeUpdatedAt,
   consumerIntent,
+  requestScope,
+  requestAssociation,
+  session = null,
   deps = {},
 } = {}) => {
   const runtimeModel = deps.RuntimeInstance || RuntimeInstance
   const resolveBinding = deps.resolveBinding || resolveOutcomeStudioKnowledgePackBinding
   const resolveContext = deps.resolveContext || resolveOutcomeStudioKnowledgeContext
   const assertPermission = deps.assertRuntimePermission || assertRuntimePermission
-  const runtime = await readRuntime({ model: runtimeModel, runtimeInstanceId })
+  const runtime = requestScope && deps.readKcpRuntimeEvidence
+    ? await deps.readKcpRuntimeEvidence({ runtimeInstanceId, scopes, session })
+    : await readRuntime({ model: runtimeModel, runtimeInstanceId, session })
   if (!runtime) throw appError(404, OUTCOME_KCP_ERROR_CODES.INPUT_INVALID, 'Knowledge Composition Plan runtime was not found.')
   await assertPermission({
     actorUserId,
     scopes,
     customerId: runtime.customerId,
     tenantId: runtime.tenantId,
-    permission: 'VMF_VIEW',
+    permission: requestScope && upper(runtime.runtimeType) === 'DEAL_ANALYSIS' ? 'DEAL_VIEW' : 'VMF_VIEW',
   })
+  assertRequestScope(requestScope, runtime)
   if (!expectedRuntimeUpdatedAt || toIso(runtime.updatedAt) !== toIso(expectedRuntimeUpdatedAt)) {
     throw runtimeStale({ expectedRuntimeUpdatedAt, actualRuntimeUpdatedAt: toIso(runtime.updatedAt) })
+  }
+  if (requestScope && deps.readKcpRuntimeEvidence && !runtime.planningEvidence) {
+    throw runtimeStale({ field: 'planningEvidence' })
   }
   const query = {
     tenantId: runtime.tenantId,
@@ -913,6 +988,8 @@ export const buildOutcomeKnowledgeCompositionPlanForRuntime = async ({
     binding,
     context: contextResult?.context,
     consumerIntent,
+    requestScope,
+    requestAssociation,
   })
 }
 
@@ -929,8 +1006,8 @@ export const assertOutcomeKnowledgeCompositionPlanTransactionSupport = (mongoose
     || !TRANSACTION_TOPOLOGIES.has(currentTopologyType(mongooseClient))) throw transactionRequired()
 }
 
-const readLatestPlan = async ({ model, runtimeInstanceId, session }) => {
-  let query = model.findOne({ runtimeInstanceId }).sort({ planVersion: -1 })
+const readLatestPlan = async ({ model, runtimeInstanceId, scope = {}, session }) => {
+  let query = model.findOne({ runtimeInstanceId, requestId: { $exists: false }, ...scope }).sort({ planVersion: -1 })
   if (session && typeof query.session === 'function') query = query.session(session)
   return query
 }
@@ -940,6 +1017,7 @@ const serializePlan = (value) => {
   if (!plan) return null
   return {
     id: toId(plan._id || plan.id),
+    ...(plan.requestId !== undefined ? { requestId: plan.requestId } : {}),
     planId: plan.planId,
     planVersion: plan.planVersion,
     contractVersion: plan.contractVersion,
@@ -987,6 +1065,7 @@ const auditPlanCreation = async ({ audit, session, plan, actorUserId }) => {
         runtimeInstanceKey: plan.runtimeInstanceKey,
       },
       diff: {
+        ...(plan.requestId !== undefined ? { requestId: plan.requestId } : {}),
         operation: plan.operation,
         planId: plan.planId,
         planVersion: plan.planVersion,
@@ -1014,11 +1093,73 @@ const isWriteConflict = (error) => error?.code === 11000
   || error?.codeName === 'WriteConflict'
   || /E11000|WriteConflict|write conflict/i.test(error?.message || '')
 
+const authorizeRequestPlan = async ({ actorUserId, scopes, runtimeInstanceId, requestScope, deps, permission }) => {
+  if (!mongoose.isValidObjectId(actorUserId) || !mongoose.isValidObjectId(runtimeInstanceId) || !requestScope) {
+    throw invalid('Knowledge Composition Plan request identity is incomplete.')
+  }
+  const runtime = deps.readRuntimeControl
+    ? await deps.readRuntimeControl({ runtimeInstanceId, scopes })
+    : await readRuntime({ model: deps.RuntimeInstance || RuntimeInstance, runtimeInstanceId })
+  if (!runtime) throw appError(404, OUTCOME_KCP_ERROR_CODES.INPUT_INVALID, 'Knowledge Composition Plan runtime was not found.')
+  await (deps.assertRuntimePermission || assertRuntimePermission)({
+    actorUserId, scopes, customerId: runtime.customerId, tenantId: runtime.tenantId,
+    permission: upper(runtime.runtimeType) === 'DEAL_ANALYSIS' ? permission.replace('VMF_', 'DEAL_') : permission,
+  })
+  assertRequestScope(requestScope, runtime)
+  return {
+    tenantId: runtime.tenantId, customerId: runtime.customerId,
+    runtimeInstanceId: runtime._id || runtime.id, requestId: requestScope.requestId,
+  }
+}
+
+const requestEvidenceResult = (plan, latest, idempotent) => ({
+  plan: serializePlan(assertOutcomeKnowledgeCompositionPlanIntegrity(plan)),
+  idempotent,
+  currentness: {
+    latestInRequest: text(plan.planId) === text(latest?.planId),
+    evidenceStatus: 'NOT_REVALIDATED',
+    current: false,
+  },
+  execution: { status: 'BLOCKED', canExecute: false, reason: 'REQUEST_EXECUTION_NOT_ENABLED' },
+})
+
+// Retrieval returns immutable evidence, never an execution/currentness grant.
+export const getOutcomeRequestKnowledgeCompositionPlan = async ({
+  actorUserId, scopes, runtimeInstanceId, requestScope, planId, deps = {},
+} = {}) => {
+  if (!text(planId)) throw invalid('Knowledge Composition Plan identity is required.')
+  const scope = await authorizeRequestPlan({ actorUserId, scopes, runtimeInstanceId, requestScope, deps, permission: 'VMF_VIEW' })
+  const model = deps.OutcomeKnowledgeCompositionPlan || OutcomeKnowledgeCompositionPlan
+  const plan = toPlain(await model.findOne({ ...scope, planId: text(planId) }))
+  if (!plan) throw appError(404, OUTCOME_KCP_ERROR_CODES.INPUT_INVALID, 'Knowledge Composition Plan was not found in this request.')
+  const latest = toPlain(await readLatestPlan({ model, runtimeInstanceId, scope }))
+  return requestEvidenceResult(plan, latest, false)
+}
+
+const readExactRequestRetry = async ({ model, scope, operation, expectedVersion, expectedPlanFingerprint,
+  sourcePlanId, sourcePlanFingerprint, reResolutionReason, consumerIntent, session }) => {
+  let query = model.findOne({
+    ...scope, operation, planVersion: expectedVersion + 1, planFingerprint: lower(expectedPlanFingerprint),
+    sourcePlanId: text(sourcePlanId), sourcePlanFingerprint: lower(sourcePlanFingerprint),
+    reResolutionReason: text(reResolutionReason),
+  })
+  if (session && typeof query.session === 'function') query = query.session(session)
+  const plan = toPlain(await query)
+  if (!plan) return null
+  assertOutcomeKnowledgeCompositionPlanIntegrity(plan)
+  if (hashOutcomeKnowledgeCompositionValue(buildConsumerIntent(consumerIntent))
+    !== hashOutcomeKnowledgeCompositionValue(plan.payload.consumerIntent)) throw fingerprintMismatch({ field: 'consumerIntent' })
+  return plan
+}
+
 export const createOutcomeKnowledgeCompositionPlan = async ({
   runtimeInstanceId,
   expectedRuntimeUpdatedAt,
   consumerIntent,
   actorUserId,
+  scopes,
+  requestScope,
+  requestAssociation,
   expectedPlanFingerprint,
   expectedCurrentPlanVersion = 0,
   operation = OUTCOME_KCP_OPERATIONS.INITIAL,
@@ -1034,7 +1175,28 @@ export const createOutcomeKnowledgeCompositionPlan = async ({
   const expectedVersion = Number(expectedCurrentPlanVersion)
   if (!Number.isInteger(expectedVersion) || expectedVersion < 0) throw invalid('Knowledge Composition Plan expected current version is invalid.')
 
+  const mongooseClient = deps.mongoose || mongoose
+  const planModel = deps.OutcomeKnowledgeCompositionPlan || OutcomeKnowledgeCompositionPlan
+  const runtimeModel = deps.RuntimeInstance || RuntimeInstance
+  let scope = {}
+  let retryArgs
+  if (requestScope !== undefined) {
+    scope = await authorizeRequestPlan({ actorUserId, scopes, runtimeInstanceId, requestScope, deps, permission: 'VMF_UPDATE' })
+    // No defaults from output bindings for request intent, including output type.
+    buildConsumerIntent(consumerIntent)
+    if (normalizedOperation === OUTCOME_KCP_OPERATIONS.INITIAL
+      && (expectedVersion !== 0 || sourcePlanId || sourcePlanFingerprint || reResolutionReason)) throw predecessorInvalid()
+    if (normalizedOperation === OUTCOME_KCP_OPERATIONS.RE_RESOLUTION
+      && (expectedVersion < 1 || !text(sourcePlanId) || !SHA256_PATTERN.test(lower(sourcePlanFingerprint)) || !text(reResolutionReason))) throw predecessorInvalid()
+    retryArgs = { model: planModel, scope, operation: normalizedOperation, expectedVersion, expectedPlanFingerprint,
+      sourcePlanId, sourcePlanFingerprint, reResolutionReason, consumerIntent }
+    const retry = await readExactRequestRetry(retryArgs)
+    if (retry) return requestEvidenceResult(retry, toPlain(await readLatestPlan({ model: planModel, runtimeInstanceId, scope })), true)
+    await assertOutcomeKcpRequestIndexes(planModel)
+  }
+
   const initialCandidate = await buildOutcomeKnowledgeCompositionPlanForRuntime({
+    actorUserId, scopes, requestScope, requestAssociation,
     runtimeInstanceId,
     expectedRuntimeUpdatedAt,
     consumerIntent,
@@ -1046,10 +1208,8 @@ export const createOutcomeKnowledgeCompositionPlan = async ({
   if (initialCandidate.planFingerprint !== lower(expectedPlanFingerprint)) {
     throw fingerprintMismatch({ expectedPlanFingerprint, actualPlanFingerprint: initialCandidate.planFingerprint })
   }
+  if (!requestScope) await assertOutcomeKcpLegacyIndexes(planModel)
 
-  const mongooseClient = deps.mongoose || mongoose
-  const planModel = deps.OutcomeKnowledgeCompositionPlan || OutcomeKnowledgeCompositionPlan
-  const runtimeModel = deps.RuntimeInstance || RuntimeInstance
   const audit = deps.auditService || auditService
   const assertTransactionSupport = deps.assertTransactionSupport
     || assertOutcomeKnowledgeCompositionPlanTransactionSupport
@@ -1064,7 +1224,16 @@ export const createOutcomeKnowledgeCompositionPlan = async ({
       throw transactionRequired()
     }
     await session.withTransaction(async () => {
+      // withTransaction may rerun after a write conflict. Do not retain a prior attempt's result.
+      created = null
+      idempotentPlan = null
+      if (requestScope) {
+        await assertOutcomeKcpRequestIndexes(planModel)
+        const retry = await readExactRequestRetry({ ...retryArgs, session })
+        if (retry) { idempotentPlan = retry; return }
+      }
       const candidate = await buildOutcomeKnowledgeCompositionPlanForRuntime({
+        actorUserId, scopes, requestScope, requestAssociation, session,
         runtimeInstanceId,
         expectedRuntimeUpdatedAt,
         consumerIntent,
@@ -1080,18 +1249,28 @@ export const createOutcomeKnowledgeCompositionPlan = async ({
         })
       }
 
-      const lockedRuntime = await readRuntime({ model: runtimeModel, runtimeInstanceId, session })
+      const lockedRuntime = requestScope && deps.readKcpRuntimeEvidence
+        ? await deps.readKcpRuntimeEvidence({ runtimeInstanceId, scopes, session })
+        : await readRuntime({ model: runtimeModel, runtimeInstanceId, session })
       if (!lockedRuntime || toIso(lockedRuntime.updatedAt) !== toIso(expectedRuntimeUpdatedAt)) {
         throw runtimeStale({ expectedRuntimeUpdatedAt, actualRuntimeUpdatedAt: toIso(lockedRuntime?.updatedAt) })
       }
-      const latest = await readLatestPlan({ model: planModel, runtimeInstanceId, session })
+      if (requestScope && deps.readKcpRuntimeEvidence
+        && (!lockedRuntime.planningEvidence || !candidate.payload.planningEvidence
+          || hashSemanticFingerprintValue(lockedRuntime.planningEvidence) !== hashSemanticFingerprintValue(candidate.payload.planningEvidence)
+          || hashSemanticFingerprintValue(buildLockedTruthManifest(lockedRuntime)) !== hashSemanticFingerprintValue(candidate.payload.lockedTruth))) {
+        throw runtimeStale({ field: 'planningEvidence' })
+      }
+      const latest = await readLatestPlan({ model: planModel, runtimeInstanceId, scope, session })
       const latestPlain = toPlain(latest)
       if (latestPlain
+        && !requestScope
         && normalizedOperation === OUTCOME_KCP_OPERATIONS.INITIAL
         && latestPlain.planFingerprint === candidate.planFingerprint) {
         idempotentPlan = latestPlain
         return
       }
+      if (!requestScope) await assertOutcomeKcpLegacyIndexes(planModel)
       const currentVersion = Number(latestPlain?.planVersion || 0)
       if (currentVersion !== expectedVersion) {
         throw versionConflict({ expectedCurrentPlanVersion: expectedVersion, actualCurrentPlanVersion: currentVersion })
@@ -1116,6 +1295,7 @@ export const createOutcomeKnowledgeCompositionPlan = async ({
       const runtimePayload = candidate.payload.runtime
       const truth = candidate.payload.lockedTruth
       created = new planModel({
+        ...(requestScope ? { requestId: requestScope.requestId } : {}),
         planId: `outcome_kcp_${randomUUID()}`,
         planVersion: currentVersion + 1,
         contractVersion: OUTCOME_GOVERNED_QUALITY_CONTRACT_VERSION,
@@ -1149,12 +1329,22 @@ export const createOutcomeKnowledgeCompositionPlan = async ({
       await created.save({ session })
       await auditPlanCreation({ audit, session, plan: created, actorUserId })
     })
+    if (requestScope) return requestEvidenceResult(toPlain(idempotentPlan || created),
+      toPlain(await readLatestPlan({ model: planModel, runtimeInstanceId, scope })), Boolean(idempotentPlan))
     return idempotentPlan
       ? { plan: serializePlan(idempotentPlan), idempotent: true }
       : { plan: serializePlan(created), idempotent: false }
   } catch (error) {
     if (Object.values(OUTCOME_KCP_ERROR_CODES).includes(error?.code)) throw error
-    if (isWriteConflict(error)) throw versionConflict()
+    if (isWriteConflict(error)) {
+      // A concurrent exact operation may already have committed. Never retry a
+      // different operation or advance its predecessor automatically.
+      if (retryArgs) {
+        const retry = await readExactRequestRetry(retryArgs)
+        if (retry) return requestEvidenceResult(retry, toPlain(await readLatestPlan({ model: planModel, runtimeInstanceId, scope })), true)
+      }
+      throw versionConflict()
+    }
     throw persistenceFailed()
   } finally {
     if (typeof session?.endSession === 'function') await session.endSession()

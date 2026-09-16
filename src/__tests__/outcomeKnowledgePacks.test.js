@@ -760,6 +760,7 @@ beforeEach(() => {
   KnowledgePack.find = jest.fn().mockReturnValue(buildFindChain([makeKnowledgePack()]))
   KnowledgePack.findOne = jest.fn().mockReturnValue(buildFindOneChain(makeKnowledgePack()))
   KnowledgePack.findOneAndUpdate = jest.fn().mockResolvedValue(makeKnowledgePack())
+  KnowledgePack.prototype.save = jest.fn(async function save() { return this })
   KnowledgePack.updateOne = jest.fn().mockResolvedValue({ modifiedCount: 1 })
   KnowledgePack.deleteOne = jest.fn().mockResolvedValue({ deletedCount: 1 })
   KnowledgePackVersion.find = jest.fn().mockImplementation((filter = {}) => {
@@ -1707,8 +1708,8 @@ name: Statement of Work
         previewOnly: true,
         contentVisible: false,
         resolution: expect.objectContaining({
-          activeCount: 5,
-          requiredCount: 5,
+          activeCount: 2,
+          requiredCount: 2,
         }),
       }),
     }))
@@ -2271,13 +2272,10 @@ name: Statement of Work
       contentVisible: false,
       activePacks: [],
     }))
-    expect(res.body.data.requiredPacks).toHaveLength(5)
+    expect(res.body.data.requiredPacks).toHaveLength(2)
     expect(res.body.data.resolution.unboundRequiredPacks.map((pack) => pack.packType)).toEqual([
       'ARL',
-      'RL',
-      'OUTPUT_SCHEMA',
       'TRUTH_CERTIFICATION',
-      'OUTPUT_TYPE_DEFINITION',
     ])
     expect(res.body.data.requiredPacks).toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -2286,22 +2284,7 @@ name: Statement of Work
         runtimeBindable: false,
       }),
       expect.objectContaining({
-        packType: 'RL',
-        status: 'MISSING',
-        runtimeBindable: false,
-      }),
-      expect.objectContaining({
-        packType: 'OUTPUT_SCHEMA',
-        status: 'MISSING',
-        runtimeBindable: false,
-      }),
-      expect.objectContaining({
         packType: 'TRUTH_CERTIFICATION',
-        status: 'MISSING',
-        runtimeBindable: false,
-      }),
-      expect.objectContaining({
-        packType: 'OUTPUT_TYPE_DEFINITION',
         status: 'MISSING',
         runtimeBindable: false,
       }),
@@ -2424,7 +2407,7 @@ name: Statement of Work
     expect(resolutionResult.manifest).toEqual({
       sourceType: 'KNOWLEDGE_PACK_REGISTRY',
       policyKey: 'outcome-studio-v1-required-packs',
-      policyVersion: '1.0.0',
+      policyVersion: '2.0.0',
       manifestId: 'kpm-outcome-studio-default-1-0-0-global',
       manifestKey: 'outcome-studio-default',
       manifestVersion: '1.0.0',
@@ -2436,12 +2419,12 @@ name: Statement of Work
       manifestKey: 'outcome-studio-default',
       manifestVersion: '1.0.0',
       resolutionSource: 'KNOWLEDGE_PACK_REGISTRY',
-      optionalPacks: [expect.objectContaining({
+      optionalPacks: expect.arrayContaining([expect.objectContaining({
         packKey: 'executive-board-style',
         label: 'Executive Board Style',
         purposeCategory: 'STYLE',
         executionMode: 'PROVIDER_CONTEXT',
-      })],
+      })]),
       validationPacks: [expect.objectContaining({
         packKey: 'contradiction-review',
         executionMode: 'POST_VALIDATION',
@@ -2458,10 +2441,10 @@ name: Statement of Work
         }),
       ]),
       resolution: expect.objectContaining({
-        activeCount: 5,
+        activeCount: 2,
         resolvedCount: 7,
-        requiredCount: 5,
-        optionalCount: 1,
+        requiredCount: 2,
+        optionalCount: 4,
         validationCount: 1,
         blockedCount: 2,
       }),
@@ -2659,10 +2642,10 @@ name: Statement of Work
       activationId: systemPack.activationId,
       packKey: 'cacr-runtime-pack',
     }))
-    expect(binding.requiredPacks).toContainEqual(expect.objectContaining({
+    expect(binding.requiredPacks).not.toContainEqual(expect.objectContaining({
       packKey: 'output-schemas-pack',
     }))
-    expect(binding.activePacks).toContainEqual(expect.objectContaining({
+    expect(binding.activePacks).not.toContainEqual(expect.objectContaining({
       packKey: 'output-schemas-pack',
     }))
     expect(binding.providerContextPacks).toContainEqual(expect.objectContaining({
@@ -2679,7 +2662,8 @@ name: Statement of Work
       activationId: systemPack.activationId,
       blockedReason: 'SYSTEM_ONLY_PACK',
     }))
-    expect(binding.resolution.blockedCount).toBe(0)
+    // Legacy fixture groups lack individual metadata; they are excluded, not mandatory.
+    expect(binding.resolution.blockedCount).toBe(3)
   })
 
   test('request-specific registry resolution rejects identity, contract and checksum snapshot drift', async () => {
@@ -3178,21 +3162,15 @@ name: Statement of Work
       })
 
     expect(res.status).toBe(201)
-    expect(KnowledgePack.findOneAndUpdate).toHaveBeenCalledWith(
-      expect.objectContaining({
+    expect(KnowledgePack.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(KnowledgePack.prototype.save.mock.contexts[0]).toEqual(expect.objectContaining({
         packId: 'kp-style-board-executive-style',
-      }),
-      expect.objectContaining({
-        $set: expect.objectContaining({
           sourceMetadata: expect.objectContaining({
             sourceStatus: 'SOURCE_DOCUMENT_PRESENT',
             sourceFilename: 'Board Executive Style.md',
             contentPersisted: true,
           }),
-        }),
-      }),
-      expect.any(Object),
-    )
+    }))
     expect(res.body.data.pack).toEqual(expect.objectContaining({
       packId: 'kp-style-board-executive-style',
       packType: 'STYLE',
@@ -3332,7 +3310,7 @@ name: Statement of Work
     expect(savedVersion.get('knowledgeAssetId')).toBe('STY-QA-001')
     expect(savedVersion.get('workspaceCompatibility')).toEqual(['OUTCOME'])
     expect(KnowledgePack.findOneAndUpdate).toHaveBeenCalledWith(
-      { packId: 'kp-style-board-executive-style' },
+      expect.objectContaining({ packId: 'kp-style-board-executive-style', status: { $eq: existingPackRecord.status } }),
       expect.objectContaining({
         $set: expect.not.objectContaining({
           knowledgeLayer: expect.any(String),
@@ -3343,6 +3321,43 @@ name: Statement of Work
       }),
       expect.any(Object),
     )
+  })
+
+  test.each(['success', 'standalone', 'scope mismatch', 'stale parent'])('ACTIVE successor import %s preserves the parent write boundary', async (scenario) => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const parent = makeKnowledgePack({ status: 'ACTIVE', visibility: 'PLATFORM', customerId: null, tenantId: null,
+      knowledgeAssetId: 'OSC-QA-001', knowledgeLayer: 'OUTPUT_SCHEMA', capabilityKey: 'output-schemas-pack', workspaceCompatibility: ['OUTCOME'] })
+    setMongooseReadyState(1)
+    setMongooseTopologyType(scenario === 'standalone' ? 'Single' : 'ReplicaSetWithPrimary')
+    KnowledgePack.find.mockReturnValue(buildFindChain([]))
+    KnowledgePack.findOne
+      .mockReturnValueOnce(buildFindOneChain(parent))
+      .mockReturnValueOnce(buildFindOneChain(null))
+      .mockReturnValueOnce(buildFindOneChain(scenario === 'stale parent' ? null : parent))
+    const res = await request.post('/api/v1/super-admin/outcome-studio/knowledge-packs/source-document-import')
+      .set('Authorization', `Bearer ${token}`).send({
+        packType: parent.packType, packKey: parent.packKey, label: parent.label,
+        semanticVersion: '1.0.1', contentFormat: 'MARKDOWN',
+        sourceDocument: { filename: 'successor.md' }, extractedText: 'Successor source remains an unactivated draft.',
+        ...(scenario === 'scope mismatch' ? { visibility: 'CUSTOMER', customerId: SUPER_ADMIN_ID } : {}),
+      })
+    expect(KnowledgePack.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(KnowledgePack.prototype.save).not.toHaveBeenCalled()
+    expect(KnowledgePack.updateOne).not.toHaveBeenCalled()
+    expect(KnowledgePackActivation.prototype.save).not.toHaveBeenCalled()
+    expect(KnowledgePackActivation.updateMany).not.toHaveBeenCalled()
+    if (scenario === 'success') {
+      expect(res.status).toBe(201)
+      expect(res.body.data.pack).toMatchObject({ status: 'ACTIVE', latestVersionId: parent.latestVersionId })
+      expect(res.body.data.version).toMatchObject({ status: 'DRAFT', semanticVersion: '1.0.1' })
+      expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({ action: 'OUTCOME_KNOWLEDGE_PACK_VERSION_UPLOADED' }), expect.objectContaining({ session: expect.anything() }))
+    } else {
+      expect(res.status).toBe(409)
+      expect(res.body.error.details.reason).toBe({ standalone: 'PACK_SOURCE_IMPORT_TRANSACTION_REQUIRED',
+        'scope mismatch': 'PACK_SOURCE_IMPORT_SCOPE_MISMATCH', 'stale parent': 'PACK_SOURCE_IMPORT_PARENT_CHANGED' }[scenario])
+      expect(KnowledgePackVersion.prototype.save).not.toHaveBeenCalled()
+      expect(AuditLog.createLog).not.toHaveBeenCalled()
+    }
   })
 
   test('POST source-document-import rejects ambiguous KP-004 dependency selectors before persistence', async () => {
@@ -4244,11 +4259,12 @@ Statement of Work source text.
     expect(res.body.error.code).toBe('OUTCOME_KNOWLEDGE_PACK_AUDIT_FAILED')
     expect(res.body.error.details.reason).toBe('AUDIT_PERSISTENCE_FAILED')
     expect(KnowledgePack.updateOne).toHaveBeenCalledWith(
-      {
+      expect.objectContaining({
         packId: 'kp-style-board-executive-style',
-        _id: failedImportPackRecord._id,
-        updatedAt: failedImportPackRecord.updatedAt,
-      },
+        _id: { $eq: failedImportPackRecord._id },
+        updatedAt: { $eq: failedImportPackRecord.updatedAt },
+        status: { $eq: 'DRAFT' },
+      }),
       expect.objectContaining({ $set: expect.any(Object) }),
       { runValidators: true },
     )
@@ -4335,11 +4351,8 @@ Statement of Work source text.
     expect(res.status).toBe(201)
     expect(startSessionSpy).not.toHaveBeenCalled()
     expect(KnowledgePackVersion.prototype.save).toHaveBeenCalledWith()
-    expect(KnowledgePack.findOneAndUpdate).toHaveBeenCalledWith(
-      expect.any(Object),
-      expect.any(Object),
-      expect.not.objectContaining({ session: expect.anything() }),
-    )
+    expect(KnowledgePack.prototype.save).toHaveBeenCalledWith()
+    expect(KnowledgePack.findOneAndUpdate).not.toHaveBeenCalled()
   })
 
   test('POST source-document-import preserves an explicit canonical purpose category instead of fallback inference', async () => {
@@ -4365,12 +4378,9 @@ Statement of Work source text.
       })
 
     expect(res.status).toBe(201)
-    const [, packUpdate] = KnowledgePack.findOneAndUpdate.mock.calls.at(-1)
-    expect(packUpdate).toEqual(expect.objectContaining({
-      $set: expect.objectContaining({
+    expect(KnowledgePack.prototype.save.mock.contexts[0]).toEqual(expect.objectContaining({
         packType: 'OUTPUT_SCHEMA',
         purposeCategory: 'VISUAL',
-      }),
     }))
     expect(KnowledgePackVersion.prototype.save.mock.contexts[0]).toEqual(expect.objectContaining({
       packType: 'OUTPUT_SCHEMA',
@@ -4405,11 +4415,8 @@ Statement of Work source text.
 
     expect(res.status).toBe(201)
     expect(transactionSession.withTransaction).toHaveBeenCalledTimes(1)
-    expect(KnowledgePack.findOneAndUpdate).toHaveBeenCalledWith(
-      expect.any(Object),
-      expect.any(Object),
-      expect.objectContaining({ session: transactionSession }),
-    )
+    expect(KnowledgePack.prototype.save).toHaveBeenCalledWith({ session: transactionSession })
+    expect(KnowledgePack.findOneAndUpdate).not.toHaveBeenCalled()
     expect(KnowledgePackVersion.prototype.save).toHaveBeenCalledWith({
       session: transactionSession,
     })
@@ -5859,13 +5866,11 @@ Statement of Work source text.
     expect(res.body.data.status).toBe('BLOCKED')
     expect(res.body.data.activePacks).toHaveLength(2)
     expect(res.body.data.resolution).toEqual(expect.objectContaining({
-      activeCount: 2,
-      requiredCount: 5,
+      activeCount: 1,
+      requiredCount: 2,
     }))
     expect(res.body.data.resolution.unboundRequiredPacks.map((pack) => pack.packType)).toEqual([
       'ARL',
-      'RL',
-      'OUTPUT_TYPE_DEFINITION',
     ])
   })
 

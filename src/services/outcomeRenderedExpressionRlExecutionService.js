@@ -23,7 +23,7 @@ import {
 } from '../models/index.js'
 import { createGovernedReasoningExecution } from './governedReasoningRuntimeService.js'
 import {
-  assertOutcomeKnowledgeCompositionPlanIntegrity,
+  assertLegacyOutcomeKnowledgeCompositionPlan,
   assertOutcomeKnowledgeCompositionPlanMatchesRuntime,
 } from './outcomeKnowledgeCompositionPlanService.js'
 import { persistOutcomeRenderedExpressionRl } from './outcomePostArlQualityChainService.js'
@@ -87,8 +87,8 @@ const assertCurrentPlan = ({ selectedPlan, latestPlan, runtime, runtimeInstanceI
   let selected
   let latest
   try {
-    selected = assertOutcomeKnowledgeCompositionPlanIntegrity(selectedPlan)
-    latest = assertOutcomeKnowledgeCompositionPlanIntegrity(latestPlan)
+    selected = assertLegacyOutcomeKnowledgeCompositionPlan(selectedPlan)
+    latest = assertLegacyOutcomeKnowledgeCompositionPlan(latestPlan)
     assertOutcomeKnowledgeCompositionPlanMatchesRuntime(selected, runtime)
   } catch {
     throw bindingInvalid('planIntegrity')
@@ -324,8 +324,8 @@ export const executeOutcomeRenderedExpressionRl = async ({
   }
   ;(deps.assertOutcomeQualityStageTransactionSupport || assertOutcomeQualityStageTransactionSupport)(deps.mongoose || mongoose)
   const [selectedPlan, latestPlan, runtime] = await Promise.all([
-    execQuery(models.OutcomeKnowledgeCompositionPlan.findOne({ _id: planRecordId, runtimeInstanceId })),
-    readLatest(models.OutcomeKnowledgeCompositionPlan, { runtimeInstanceId }, { planVersion: -1 }),
+    execQuery(models.OutcomeKnowledgeCompositionPlan.findOne({ _id: planRecordId, runtimeInstanceId, requestId: { $exists: false } })),
+    readLatest(models.OutcomeKnowledgeCompositionPlan, { runtimeInstanceId, requestId: { $exists: false } }, { planVersion: -1 }),
     execQuery(models.RuntimeInstance.findOne({ _id: runtimeInstanceId })),
   ])
   const plan = assertCurrentPlan({ selectedPlan, latestPlan, runtime, runtimeInstanceId, expectedPlanFingerprint })

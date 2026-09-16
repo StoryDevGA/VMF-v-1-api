@@ -190,6 +190,21 @@ const makeFixture = ({
 }
 
 describe('Framework-to-Outcome Studio Evidence-to-Knowledge handoff', () => {
+  test.each([
+    ['renderer metadata flag', { renderer: { metadataOnly: true } }],
+    ['renderer generation denial', { renderer: { generationEligible: false } }],
+    ['resolved metadata receipt', { outputSpecificCompositionGuidance: { status: 'RESOLVED_METADATA' } }],
+    ['receipt generation denial', { outputSpecificCompositionGuidance: { generationEligible: false } }],
+  ])('preserves %s as metadata-only in the hashed handoff context', (_label, denial) => {
+    const fixture = makeFixture()
+    const legacy = buildFrameworkOutcomeStudioHandoff(fixture)
+    Object.assign(fixture.knowledgeContext, denial)
+    const handoff = buildFrameworkOutcomeStudioHandoff(fixture)
+    expect(legacy.knowledgeResolution.context).toMatchObject({ available: true, metadataOnly: false })
+    expect(handoff.knowledgeResolution.context).toMatchObject({ available: true, metadataOnly: true })
+    expect(handoff.knowledgeResolution.resolutionHash).not.toBe(legacy.knowledgeResolution.resolutionHash)
+  })
+
   test.each(['null', 'absent'])('returns ordinary missing-truth blockers for %s accepted content', (scenario) => {
     const fixture = makeFixture()
     const section = fixture.runtimeInstance.framework_state.sections.customer_context

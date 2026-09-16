@@ -717,6 +717,10 @@ const buildKnowledgeResolution = ({ packBinding, knowledgeContext } = {}) => {
     contextId: normalizeText(context.contextId),
     status: normalizeToken(context.status),
     available: context.available === true,
+    metadataOnly: context.renderer?.metadataOnly === true
+      || context.renderer?.generationEligible === false
+      || context.outputSpecificCompositionGuidance?.status === 'RESOLVED_METADATA'
+      || context.outputSpecificCompositionGuidance?.generationEligible === false,
     blockerReason: normalizeToken(context.blockerReason),
     requestedOutputTypeKey: normalizeText(context.requestedOutputTypeKey),
     outputTypeKey: normalizeText(context.outputType?.key),
@@ -846,6 +850,43 @@ const buildBlockedHandoff = ({
   }
 }
 
+// Internal planning evidence only: package declarations classify sections, never
+// hardcoded names or a filter which silently drops unaccepted customer truth.
+export const buildOutcomePlanningRuntimeEvidence = ({ runtimeInstance, frameworkPackage }) => {
+  const runtime = runtimeInstance
+  const sections = frameworkPackage?.sections
+  const fail = () => { throw Object.assign(new Error('Canonical planning evidence is unavailable.'), { status: 409, code: 'OUTCOME_PLANNING_TRUTH_BLOCKED' }) }
+  if (!runtime || !Array.isArray(sections) || !sections.length
+    || normalizeText(frameworkPackage.packageKey) !== normalizeText(runtime.packageKey)
+    || normalizeText(frameworkPackage.version) !== normalizeText(runtime.packageVersion)) fail()
+  const state = getFrameworkState(runtime)
+  const managed = evaluateRuntimeManagedSections({ frameworkPackage, frameworkState: state })
+  if (managed.blockers.length) fail()
+  const internalKeys = new Set(sections.filter(isRuntimeManagedSection)
+    .map((section) => normalizeKey(section.runtimePath?.split('.').at(-1) || section.sectionKey)))
+  const guided = sections.filter((section) => !isRuntimeManagedSection(section))
+  const keys = guided.map((section) => normalizeKey(section.runtimePath?.split('.').at(-1) || section.sectionKey))
+  if (new Set(keys).size !== keys.length || keys.some((key) => !key || internalKeys.has(key))) fail()
+  for (const [index, section] of guided.entries()) {
+    if (section.required === true && !state.sections?.[keys[index]]) fail()
+  }
+  const truthSections = Object.fromEntries(Object.entries(state.sections || {}).filter(([key]) => !internalKeys.has(normalizeKey(key))))
+  if (Object.keys(truthSections).some((key) => !keys.includes(normalizeKey(key)))) fail()
+  return {
+    ...runtime, _id: runtime._id || runtime.id,
+    framework_state: { ...state, sections: truthSections },
+    planningEvidence: {
+      contractVersion: 'outcome-planning-evidence.v1',
+      stateVersion: normalizeText(runtime.stateVersion || runtime.runtimeStateVersion),
+      packageKey: runtime.packageKey, packageVersion: runtime.packageVersion,
+      sectionDeclarations: sections.map((section) => ({ sectionKey: section.sectionKey, runtimePath: section.runtimePath,
+        required: section.required === true, sectionMode: section.sectionMode || '', runtimeRole: section.runtimeRole || '',
+        runtimeManagedCompletion: section.runtimeManagedCompletion || null })),
+      runtimeManaged: managed,
+    },
+  }
+}
+
 export const buildFrameworkOutcomeStudioHandoff = ({
   runtimeInstance,
   frameworkPackage = null,
@@ -901,6 +942,7 @@ export const buildFrameworkOutcomeStudioHandoff = ({
     },
     knowledgeContext,
     enforceMissing: false,
+    metadataOnly: true,
   })?.manifest || null
   const sectionByKey = new Map(sectionTruth.map((section) => [section.sectionKey, section]))
   const runtimeIdentity = buildRuntimeIdentity(runtime)

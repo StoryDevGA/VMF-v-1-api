@@ -408,7 +408,7 @@ const OUTCOME_STUDIO_RESOLUTION_PACK_CATEGORIES = new Set([
 const OUTCOME_STUDIO_REGISTRY_POLICY = Object.freeze({
   sourceType: 'KNOWLEDGE_PACK_REGISTRY',
   policyKey: 'outcome-studio-v1-required-packs',
-  policyVersion: '1.0.0',
+  policyVersion: '2.0.0',
 })
 const OUTCOME_STUDIO_COMPATIBILITY_MANIFEST = Object.freeze({
   ...OUTCOME_STUDIO_REGISTRY_POLICY,
@@ -728,24 +728,41 @@ const ensureInheritedSourceDocumentDraftPackRecord = async ({
   scope,
   existingPackRecord = null,
   session = null,
-} = {}) => KnowledgePack.findOneAndUpdate(
-  { packId: buildKnowledgePackId(packDefinition) },
-  buildSourceDocumentDraftPackUpdate({
+} = {}) => {
+  const update = buildSourceDocumentDraftPackUpdate({
     packDefinition,
     actorUserId,
     versionId,
     semanticVersion,
     scope,
     existingPackRecord,
-  }),
-  {
-    upsert: true,
-    new: true,
-    runValidators: true,
-    setDefaultsOnInsert: true,
-    ...(session ? { session } : {}),
-  },
-)
+  })
+  if (!existingPackRecord) {
+    // Insert only: a concurrently created canonical parent must never be overwritten.
+    const pack = new KnowledgePack({ ...update.$setOnInsert, ...update.$set })
+    await saveDocument(pack, session)
+    return pack
+  }
+  const pack = await KnowledgePack.findOneAndUpdate(
+    buildSourceDocumentImportRollbackGuard({ failedImportPackRecord: existingPackRecord,
+      packId: buildKnowledgePackId(packDefinition) }),
+    { $set: update.$set },
+    {
+      upsert: false,
+      new: true,
+      runValidators: true,
+      ...(session ? { session } : {}),
+    },
+  )
+  if (!pack) throwSourceImportParentConflict(buildKnowledgePackId(packDefinition))
+  return pack
+}
+
+const throwSourceImportParentConflict = (packId, reason = 'PACK_SOURCE_IMPORT_PARENT_CHANGED') => {
+  throw createKnowledgePackError({ status: 409, code: 'CONFLICT',
+    message: 'Source import cannot safely preserve the canonical Knowledge Pack parent.',
+    reason, details: { packId } })
+}
 
 const SOURCE_DOCUMENT_IMPORT_PACK_FIELDS = [
   'packCategory',
@@ -774,18 +791,12 @@ const SOURCE_DOCUMENT_IMPORT_PACK_FIELDS = [
 ]
 
 const buildSourceDocumentImportRollbackGuard = ({ failedImportPackRecord, packId }) => {
+  const snapshot = toRawPlainObject(failedImportPackRecord)
   const guard = { packId }
-  const recordId = failedImportPackRecord?._id
-  const updatedAt = failedImportPackRecord?.updatedAt
-  if (recordId) guard._id = recordId
-  if (updatedAt) guard.updatedAt = updatedAt
-  if (!updatedAt) {
-    guard.latestVersionId = normalizeText(failedImportPackRecord?.latestVersionId)
-    guard.latestSemanticVersion = normalizeText(failedImportPackRecord?.latestSemanticVersion)
-    guard.reviewStatus = normalizeToken(failedImportPackRecord?.reviewStatus)
-    guard['sourceMetadata.sourceDocumentId'] = normalizeText(
-      failedImportPackRecord?.sourceMetadata?.sourceDocumentId,
-    )
+  // Include persisted state as well as timestamps: two writes can share a millisecond.
+  for (const field of new Set([...SOURCE_DOCUMENT_IMPORT_PACK_FIELDS, ...Object.keys(snapshot)])) {
+    if (field === 'packId') continue
+    guard[field] = snapshot[field] === undefined ? { $exists: false } : { $eq: snapshot[field] }
   }
   return guard
 }
@@ -2771,6 +2782,15 @@ export const importOutcomeKnowledgePackSourceDocumentDraft = async ({
   }
 
   const useTransaction = canUseSourceImportTransaction()
+  const preserveActiveParent = existingPackRecord?.status === OUTCOME_KNOWLEDGE_PACK_STATUSES.ACTIVE
+  if (preserveActiveParent) {
+    if (normalizeToken(existingPackRecord.visibility) !== scope.visibility
+      || normalizeText(existingPackRecord.customerId) !== normalizeText(scope.customerId)
+      || normalizeText(existingPackRecord.tenantId) !== normalizeText(scope.tenantId)) {
+      throwSourceImportParentConflict(canonicalPackId, 'PACK_SOURCE_IMPORT_SCOPE_MISMATCH')
+    }
+    if (!useTransaction) throwSourceImportParentConflict(canonicalPackId, 'PACK_SOURCE_IMPORT_TRANSACTION_REQUIRED')
+  }
   let packRecord = null
   let version = null
   let versionPersisted = false
@@ -2778,22 +2798,32 @@ export const importOutcomeKnowledgePackSourceDocumentDraft = async ({
   let session = null
 
   const persistSourceImport = async ({ transactionSession = null, versionFirst = false } = {}) => {
+    if (preserveActiveParent) {
+      packRecord = await resolveLeanQuery(withOptionalSession(KnowledgePack.findOne(
+        buildSourceDocumentImportRollbackGuard({ failedImportPackRecord: existingPackRecord, packId: canonicalPackId }),
+      ), transactionSession))
+      if (!packRecord) throwSourceImportParentConflict(canonicalPackId)
+      // No parent writes, including timestamps or pointer updates. Snapshot reads
+      // do not claim to detect transitions committed after this read.
+    }
     if (versionFirst) {
       version = buildSourceImportVersion(existingPackRecord)
       await saveDocument(version)
       versionPersisted = true
     }
 
-    packRecord = await ensureInheritedSourceDocumentDraftPackRecord({
-      packDefinition,
-      actorUserId,
-      versionId,
-      semanticVersion,
-      scope,
-      existingPackRecord,
-      session: transactionSession,
-    })
-    packPersisted = true
+    if (!preserveActiveParent) {
+      packRecord = await ensureInheritedSourceDocumentDraftPackRecord({
+        packDefinition,
+        actorUserId,
+        versionId,
+        semanticVersion,
+        scope,
+        existingPackRecord,
+        session: transactionSession,
+      })
+      packPersisted = true
+    }
 
     if (!versionFirst) {
       version = buildSourceImportVersion(packRecord)
@@ -2883,6 +2913,7 @@ export const importOutcomeKnowledgePackSourceDocumentDraft = async ({
         },
       })
     }
+    if (err?.code === 11000) throwSourceImportParentConflict(canonicalPackId)
     throw err
   } finally {
     await session?.endSession()

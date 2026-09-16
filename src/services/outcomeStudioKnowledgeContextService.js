@@ -5,6 +5,7 @@ import {
 } from '../constants/runtimeOutcomeStudio.js'
 import { resolveOutcomeStudioKnowledgePackBinding } from './outcomeKnowledgePackRegistryService.js'
 import { resolveOutcomeRendererCapability } from './outcomeRendererCapabilityRegistryService.js'
+import { buildIndividualPackMetadataGuidance, projectIndividualPackBindingEvidence } from './outcomeStudioIndividualContractService.js'
 
 export const OUTCOME_STUDIO_KNOWLEDGE_CONTEXT_VERSION = 'oes-004-resolved-knowledge-context.v1'
 
@@ -89,6 +90,7 @@ const projectSelector = (selector = {}) => ({
 })
 
 const projectResolutionEvidence = (binding = {}) => ({
+  bindingEvidence: projectIndividualPackBindingEvidence(binding),
   status: normalizeToken(binding.status || binding.resolution?.status),
   manifest: {
     id: normalizeText(binding.manifestId),
@@ -180,7 +182,7 @@ const buildContextId = ({ binding, outputSchema, outputType, style }) => createH
     status: normalizeToken(binding?.status),
     outputType: outputType.key,
     outputSchema: outputSchema.key,
-    style: style.key,
+    style: style?.key || '',
     lineage: projectLineage(binding),
   }))
   .digest('hex')
@@ -253,19 +255,20 @@ export const resolveOutcomeStudioKnowledgeContext = async ({
   const selectedStyle = selectSingleLayer(binding, 'STYLE')
   const outputType = projectLayerDescriptor(selectedOutputType, requestedOutputTypeKey)
   const outputSchema = projectLayerDescriptor(selectedOutputSchema)
-  const style = projectLayerDescriptor(selectedStyle)
+  const style = selectedStyle ? projectLayerDescriptor(selectedStyle) : null
 
   if (
     !selectedOutputType
     || outputType.key !== requestedOutputTypeKey
     || !outputSchema.key
-    || !style.key
+    || (selectedStyle && !style?.key)
+    || (binding.selectedByLayer?.STYLE?.length || 0) > 1
   ) {
     const reason = !selectedOutputType || outputType.key !== requestedOutputTypeKey
       ? OUTCOME_STUDIO_REQUEST_RESOLUTION_BLOCKER_CODES.OUTPUT_TYPE_UNRESOLVED
       : !outputSchema.key
         ? OUTCOME_STUDIO_REQUEST_RESOLUTION_BLOCKER_CODES.OUTPUT_SCHEMA_UNRESOLVED
-        : !style.key
+        : !style?.key
           ? OUTCOME_STUDIO_REQUEST_RESOLUTION_BLOCKER_CODES.STYLE_UNRESOLVED
           : OUTCOME_STUDIO_BLOCKER_CODES.KNOWLEDGE_PACK_BINDING_MISSING
     return blockedContextResult({
@@ -279,7 +282,8 @@ export const resolveOutcomeStudioKnowledgeContext = async ({
   const rendererResolution = resolveOutcomeRendererCapability({
     outputTypeKey: outputType.key,
     outputSchemaKey: outputSchema.key,
-    styleKey: style.key,
+    styleKey: style?.key || '',
+    metadataOnly: true,
   })
   if (rendererResolution.status !== 'SUPPORTED') {
     return blockedContextResult({
@@ -310,6 +314,8 @@ export const resolveOutcomeStudioKnowledgeContext = async ({
     outputSchema,
     style,
     renderer: {
+      metadataOnly: true,
+      generationEligible: false,
       capabilityKey: renderer.capabilityKey,
       capabilityVersion: renderer.capabilityVersion,
       formats: renderer.formats.map((entry) => ({ ...entry })),
@@ -319,6 +325,15 @@ export const resolveOutcomeStudioKnowledgeContext = async ({
       : [],
     lineage,
     resolutionEvidence: projectResolutionEvidence(binding),
+  }
+  context.outputSpecificCompositionGuidance = buildIndividualPackMetadataGuidance({ binding, context })
+  if (!context.outputSpecificCompositionGuidance) {
+    return blockedContextResult({
+      binding,
+      reason: OUTCOME_STUDIO_BLOCKER_CODES.KNOWLEDGE_PACK_BINDING_MISSING,
+      requestedOutputTypeKey,
+      boundedReadReceipt: boundedReceipt,
+    })
   }
 
   return {
@@ -352,30 +367,43 @@ export const projectOutcomeStudioDeliverableDiscovery = (binding = {}) => {
   const discovered = Array.isArray(binding.availableOutputTypes)
     && binding.availableOutputTypes.length > 0
     ? binding.availableOutputTypes
-    : selectedOutputType && selectedOutputSchema && selectedStyle
+    : selectedOutputType && selectedOutputSchema
       ? [{
         capabilityKey: selectedOutputType.capabilityKey,
-        status: normalizeToken(selectedOutputType.status) === 'ACTIVE'
-          ? 'READY'
-          : selectedOutputType.status,
+        status: binding.status || binding.resolution?.status,
         outputType: selectedOutputType,
         outputSchema: selectedOutputSchema,
         style: selectedStyle,
+        missingDependencies: binding.missingDependencies,
+        ambiguousCandidates: binding.ambiguousCandidates,
+        relationshipFailures: binding.relationshipFailures,
       }]
       : []
   const available = []
+  const hasFailures = (value) => value?.missingDependencies?.some((item) => item.requirement !== 'OPTIONAL')
+    || value?.relationshipFailures?.length || value?.ambiguousCandidates?.length
+    || value?.resolution?.unboundRequiredPacks?.length
+  const aggregateStatuses = [binding.status, binding.resolution?.status].map(normalizeToken).filter(Boolean)
 
   for (const entry of discovered) {
+    // Standalone discovered-entry DTOs have no aggregate status; their own READY
+    // verdict remains required. Any supplied aggregate failure takes precedence.
+    if (aggregateStatuses.some((status) => !['READY', 'READY_WITH_GAPS', 'PROJECTED'].includes(status))
+      || hasFailures(binding) || hasFailures(binding.resolution) || hasFailures(entry)
+      || (selectedByLayer.STYLE?.length || 0) > 1
+      || (entry.selectedByLayer?.STYLE?.length || 0) > 1
+      || Array.isArray(entry.style)) continue
     if (!READY_STATUSES.has(normalizeToken(entry?.status))) continue
     const outputType = projectLayerDescriptor(entry.outputType, entry.capabilityKey)
     const outputSchema = projectLayerDescriptor(entry.outputSchema)
     const style = projectLayerDescriptor(entry.style)
-    if (!outputType.key || !outputSchema.key || !style.key) continue
+    if (!outputType.key || !outputSchema.key) continue
 
     const rendererResolution = resolveOutcomeRendererCapability({
       outputTypeKey: outputType.key,
       outputSchemaKey: outputSchema.key,
       styleKey: style.key,
+      metadataOnly: true,
     })
     if (rendererResolution.status !== 'SUPPORTED') continue
 

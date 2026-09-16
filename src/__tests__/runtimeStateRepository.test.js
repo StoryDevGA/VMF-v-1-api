@@ -7,6 +7,7 @@ import { hashSectionInput } from '../services/runtimeSectionModelService.js'
 
 const getRuntimeInstance = jest.fn()
 const resolveFrameworkOutcomeStudioHandoff = jest.fn()
+const buildOutcomePlanningRuntimeEvidence = jest.fn(({ runtimeInstance }) => runtimeInstance)
 const buildFrameworkOutcomeHandoffV2ParityDigest = jest.fn(() => 'sha256:bounded-state-digest')
 const FRAMEWORK_OUTCOME_HANDOFF_V2_PARITY_CONTRACT_VERSION = 'ss-014.runtime-state-v2.handoff-state-parity.v1'
 const FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_READ_POLICY = Object.freeze({
@@ -33,6 +34,7 @@ await jest.unstable_mockModule('../services/outcomeFrameworkHandoffService.js', 
   FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_READ_POLICY,
   FRAMEWORK_OUTCOME_HANDOFF_V2_PARITY_CONTRACT_VERSION,
   buildFrameworkOutcomeHandoffV2ParityDigest,
+  buildOutcomePlanningRuntimeEvidence,
 }))
 
 const {
@@ -49,6 +51,7 @@ const {
   getRuntimeStateGraphManifest,
   getRuntimeStateGraphProjection,
   getRuntimeStateOutcomeHandoffReadiness,
+  getRuntimeOutcomePlanningEvidence,
   getRuntimeStateRendererSections,
   getRuntimeStateSectionSummary,
   listRuntimeStateEvidenceObjects,
@@ -133,6 +136,7 @@ const collectionSpy = jest.spyOn(mongoose.connection, 'collection').mockImplemen
 
 beforeEach(() => {
   getRuntimeInstance.mockReset()
+  buildOutcomePlanningRuntimeEvidence.mockClear()
   getRuntimeInstance.mockResolvedValue(makeControl())
   resolveFrameworkOutcomeStudioHandoff.mockReset()
   resolveFrameworkOutcomeStudioHandoff.mockResolvedValue({
@@ -1407,6 +1411,44 @@ describe('runtime State Storage V2 repository', () => {
     expect(error.details).not.toHaveProperty('collection')
   })
 
+  test('planning V2 reads use bounded canonical section reconstruction, never full legacy state', async () => {
+    const frameworkPackage = { packageKey: 'standard-package', version: '3.1.1', sections: [] }
+    resolveFrameworkOutcomeStudioHandoff.mockResolvedValueOnce({ frameworkPackage, handoff: { status: 'BLOCKED' } })
+    const result = await getRuntimeOutcomePlanningEvidence({ scopes: SCOPES, runtimeInstanceId: RUNTIME_ID })
+    expect(result.stateVersion).toBe('runtime-revision:1')
+    expect(buildOutcomePlanningRuntimeEvidence).toHaveBeenCalledWith({ runtimeInstance: expect.objectContaining({
+      framework_state: expect.objectContaining({ sections: {} }),
+    }), frameworkPackage })
+    for (const [call] of getRuntimeInstance.mock.calls) {
+      expect(call.projection.split(' ')).not.toContain('framework_state')
+      expect(call.projection).not.toContain('framework_state.sections')
+      expect(call.maxTimeMS).toBe(2000)
+    }
+  })
+  test.each(['stale-version', 'missing-source', 'not-current'])('planning rejects %s V2 section without legacy fallback', async (mode) => {
+    const row = { sectionKey: 'section_1_executive_summary', current: true, stateStatus: 'CURRENT',
+      stateVersion: 'runtime-revision:1', sourceStateVersion: 'runtime-revision:1', sectionDetail: makeSectionDetail() }
+    if (mode === 'stale-version') row.stateVersion = 'runtime-revision:old'
+    if (mode === 'missing-source') delete row.sourceStateVersion
+    if (mode === 'not-current') row.current = false
+    collections.set(RUNTIME_STATE_V2_COLLECTIONS.SECTIONS, { find: jest.fn(() => makeCursor([row])) })
+    await expect(getRuntimeOutcomePlanningEvidence({ scopes: SCOPES, runtimeInstanceId: RUNTIME_ID })).rejects.toMatchObject({ status: expect.any(Number) })
+    expect(buildOutcomePlanningRuntimeEvidence).not.toHaveBeenCalled()
+    expect(resolveFrameworkOutcomeStudioHandoff).not.toHaveBeenCalled()
+    for (const [call] of getRuntimeInstance.mock.calls) expect(call.projection).not.toContain('framework_state.sections')
+  })
+  test('legacy planning selects a bounded sections projection only when V2 identity is absent', async () => {
+    getRuntimeInstance.mockResolvedValue(makeControl({ stateVersion: undefined }))
+    await getRuntimeOutcomePlanningEvidence({ scopes: SCOPES, runtimeInstanceId: RUNTIME_ID })
+    expect(getRuntimeInstance.mock.calls[1][0].projection.split(' ')).toContain('framework_state.sections')
+    expect(getRuntimeInstance.mock.calls[1][0].projection.split(' ')).not.toContain('framework_state')
+    expect(collectionSpy).not.toHaveBeenCalled()
+  })
+  test('planning fails closed on legacy-to-V2 identity change between reads', async () => {
+    getRuntimeInstance.mockResolvedValueOnce(makeControl({ stateVersion: undefined })).mockResolvedValueOnce(makeControl())
+    await expect(getRuntimeOutcomePlanningEvidence({ scopes: SCOPES, runtimeInstanceId: RUNTIME_ID })).rejects.toMatchObject({ code: RUNTIME_STATE_V2_ERROR_CODES.STATE_VERSION_MIXED })
+    expect(buildOutcomePlanningRuntimeEvidence).not.toHaveBeenCalled()
+  })
   test('returns a governed blocked handoff projection without legacy state retrieval', async () => {
     const result = await getRuntimeStateOutcomeHandoffReadiness({
       scopes: SCOPES,
@@ -1453,6 +1495,15 @@ describe('runtime State Storage V2 repository', () => {
       evidence_pack: { evidenceObjects: [] },
     })
     expect(result.control).not.toHaveProperty('handoffFrameworkState')
+  })
+
+  test.each([true, false])('preserves metadata-only %s through bounded handoff sanitization', async (metadataOnly) => {
+    resolveFrameworkOutcomeStudioHandoff.mockResolvedValueOnce({
+      handoff: { status: 'READY', knowledgeResolution: { context: { available: true, metadataOnly } } },
+    })
+    const result = await getRuntimeStateOutcomeHandoffReadiness({ scopes: SCOPES, runtimeInstanceId: RUNTIME_ID })
+    expect(result.handoff.knowledgeResolution.context).toEqual({ available: true, metadataOnly })
+    expect(result.readReceipt.fullLegacyFrameworkStateFetched).toBe(false)
   })
 
   test('preserves Discovery currentness through the actual bounded handoff reader and rejects changed acceptance', async () => {

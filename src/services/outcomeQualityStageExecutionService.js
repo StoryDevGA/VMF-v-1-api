@@ -27,7 +27,7 @@ import {
 import { containsOutcomeWorkingDraftProhibitedStageClaim } from '../utils/outcomeWorkingDraftStageClaims.js'
 import auditService from './auditService.js'
 import {
-  assertOutcomeKnowledgeCompositionPlanIntegrity,
+  assertLegacyOutcomeKnowledgeCompositionPlan,
   assertOutcomeKnowledgeCompositionPlanMatchesRuntime,
 } from './outcomeKnowledgeCompositionPlanService.js'
 import { findOutcomeFrameworkGuidanceStageClaim } from '../utils/outcomeFrameworkGuidanceStageClaims.js'
@@ -1095,7 +1095,7 @@ const normalizeFailure = (value) => {
 const validatePlan = (value, { runtimeInstanceId, expectedPlanFingerprint }) => {
   let plan
   try {
-    plan = assertOutcomeKnowledgeCompositionPlanIntegrity(value)
+    plan = assertLegacyOutcomeKnowledgeCompositionPlan(value)
   } catch (error) {
     throw kcpInvalid({ causeCode: error?.code || '' })
   }
@@ -1285,13 +1285,13 @@ export const assertOutcomeQualityStageTransactionSupport = (mongooseClient = mon
 }
 
 const readPlan = async ({ model, planRecordId, runtimeInstanceId, session = null }) => {
-  let query = model.findOne({ _id: planRecordId, runtimeInstanceId })
+  let query = model.findOne({ _id: planRecordId, runtimeInstanceId, requestId: { $exists: false } })
   if (session && typeof query.session === 'function') query = query.session(session)
   return typeof query.lean === 'function' ? query.lean() : query
 }
 
 const readLatestPlan = async ({ model, runtimeInstanceId, session = null }) => {
-  let query = model.findOne({ runtimeInstanceId }).sort({ planVersion: -1 })
+  let query = model.findOne({ runtimeInstanceId, requestId: { $exists: false } }).sort({ planVersion: -1 })
   if (session && typeof query.session === 'function') query = query.session(session)
   return typeof query.lean === 'function' ? query.lean() : query
 }
@@ -1306,7 +1306,7 @@ const assertCurrentKcpAndRuntime = ({ selectedPlan, latestPlan, runtime, runtime
   const selected = validatePlan(selectedPlan, { runtimeInstanceId, expectedPlanFingerprint })
   let latest
   try {
-    latest = assertOutcomeKnowledgeCompositionPlanIntegrity(latestPlan)
+    latest = assertLegacyOutcomeKnowledgeCompositionPlan(latestPlan)
   } catch (error) {
     throw kcpInvalid({ field: 'latestPlan', causeCode: error?.code || '' })
   }

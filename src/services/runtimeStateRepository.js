@@ -12,6 +12,7 @@ import {
   FRAMEWORK_OUTCOME_HANDOFF_V2_PARITY_CONTRACT_VERSION,
   buildFrameworkOutcomeHandoffV2ParityDigest,
   resolveFrameworkOutcomeStudioHandoff,
+  buildOutcomePlanningRuntimeEvidence,
 } from './outcomeFrameworkHandoffService.js'
 import { resolveRuntimeStateVersion } from './runtimeStateVersionService.js'
 
@@ -430,6 +431,7 @@ const readMany = async ({
   skip,
   limit,
   maxTimeMS = RUNTIME_STATE_V2_READ_MAX_TIME_MS,
+  session = null,
 }) => {
   const collection = getCollection(collectionName)
   try {
@@ -437,6 +439,7 @@ const readMany = async ({
     let cursor = collection.find(filter, {
       projection,
       maxTimeMS: boundedMaxTimeMS,
+      ...(session ? { session } : {}),
     })
     if (typeof cursor.maxTimeMS !== 'function') throw new Error('Cursor maxTimeMS is unavailable.')
     cursor = cursor.maxTimeMS(boundedMaxTimeMS)
@@ -470,6 +473,7 @@ const readCount = async ({
   filter,
   limit = null,
   maxTimeMS = RUNTIME_STATE_V2_READ_MAX_TIME_MS,
+  session = null,
 }) => {
   const collection = getCollection(collectionName)
   if (typeof collection.countDocuments !== 'function') {
@@ -488,6 +492,7 @@ const readCount = async ({
     const count = await collection.countDocuments(filter, {
       maxTimeMS: boundedMaxTimeMS,
       ...(boundedLimit === null ? {} : { limit: boundedLimit }),
+      ...(session ? { session } : {}),
     })
     return {
       value: count,
@@ -503,7 +508,7 @@ const readCount = async ({
   }
 }
 
-const getControl = async ({ scopes, runtimeInstanceId, includeHandoffEligibility = false }) => {
+const getControl = async ({ scopes, runtimeInstanceId, includeHandoffEligibility = false, session = null }) => {
   const scope = getControlScope(scopes)
   const runtime = await getRuntimeInstance({
     scopes,
@@ -511,6 +516,7 @@ const getControl = async ({ scopes, runtimeInstanceId, includeHandoffEligibility
     customerId: scope.customerId,
     tenantId: scope.tenantId,
     maxTimeMS: RUNTIME_STATE_V2_READ_MAX_TIME_MS,
+    session,
     projection: includeHandoffEligibility
       ? RUNTIME_STATE_V2_HANDOFF_CONTROL_PROJECTION
       : RUNTIME_STATE_V2_CONTROL_PROJECTION,
@@ -781,13 +787,14 @@ const assertCurrentSectionRows = (rows) => {
   })
 }
 
-const readHandoffSectionRows = async ({ control }) => {
+const readHandoffSectionRows = async ({ control, session = null }) => {
   const catalogueRows = await readMany({
     collectionName: RUNTIME_STATE_V2_COLLECTIONS.SECTIONS,
     projection: RUNTIME_STATE_V2_CHILD_PROJECTION,
     filter: buildChildFilter({ control, additional: { current: true } }),
     sort: { sectionKey: 1 },
     limit: RUNTIME_STATE_V2_SECTION_CATALOGUE_LIMIT + 1,
+    session,
   })
   if (catalogueRows.length > RUNTIME_STATE_V2_SECTION_CATALOGUE_LIMIT) {
     throw createRuntimeStateError({
@@ -823,6 +830,7 @@ const readHandoffSectionRows = async ({ control }) => {
         additional: { current: true, sectionKey },
       }),
       limit: 2,
+      session,
     })
     if (rows.length === 0) {
       throw createRuntimeStateError({
@@ -1505,23 +1513,26 @@ export const getRuntimeStateGraphProjection = async ({ scopes, runtimeInstanceId
   }, 'runtime_state_v2.graph_projection')
 }
 
-export const getRuntimeStateOutcomeHandoffReadiness = async ({
+const readRuntimeStateOutcomeHandoff = async ({
   scopes,
   runtimeInstanceId,
   packBinding = null,
   knowledgeContext = null,
   knowledgeContextResult = null,
   requestedOutputTypeKey = '',
+  planningEvidence = false,
+  session = null,
 } = {}) => {
-  const control = await getControl({ scopes, runtimeInstanceId, includeHandoffEligibility: true })
+  const control = await getControl({ scopes, runtimeInstanceId, includeHandoffEligibility: true, session })
   const [sectionRead, evidenceRows] = await Promise.all([
-    readHandoffSectionRows({ control }),
+    readHandoffSectionRows({ control, session }),
     readMany({
       collectionName: RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_OBJECTS,
       projection: RUNTIME_STATE_V2_HANDOFF_EVIDENCE_PROJECTION,
       filter: buildChildFilter({ control, additional: { current: true } }),
       sort: { evidenceObjectId: 1, _id: 1 },
       limit: RUNTIME_STATE_V2_EVIDENCE_COUNT_LIMIT,
+      session,
     }),
   ])
   const sectionRows = sectionRead.rows
@@ -1606,6 +1617,9 @@ export const getRuntimeStateOutcomeHandoffReadiness = async ({
     },
   })
   const handoff = handoffResolution?.handoff
+  if (planningEvidence) return buildOutcomePlanningRuntimeEvidence({
+    runtimeInstance, frameworkPackage: handoffResolution?.frameworkPackage,
+  })
   if (!handoff || typeof handoff !== 'object') {
     throw createRuntimeStateError({
       code: RUNTIME_STATE_V2_ERROR_CODES.HANDOFF_PROJECTION_MISSING,
@@ -1619,6 +1633,24 @@ export const getRuntimeStateOutcomeHandoffReadiness = async ({
     handoff: sanitizeHandoffProjection(handoff),
     handoffRead: sectionRead.readReceipt,
   }, 'runtime_state_v2.bounded_handoff_projection')
+}
+
+export const getRuntimeStateOutcomeHandoffReadiness = (args = {}) => readRuntimeStateOutcomeHandoff({ ...args, planningEvidence: false })
+
+export const getRuntimeOutcomePlanningEvidence = async ({ scopes, runtimeInstanceId, session = null } = {}) => {
+  const control = await getRuntimeInstance({ scopes, runtimeInstanceId,
+    projection: RUNTIME_STATE_V2_CONTROL_PROJECTION, maxTimeMS: RUNTIME_STATE_V2_READ_MAX_TIME_MS, session })
+  if (control.stateVersion || control.runtimeStateVersion) {
+    return readRuntimeStateOutcomeHandoff({ scopes, runtimeInstanceId, planningEvidence: true, session })
+  }
+  // Legacy is selected only by absence of V2 identity; never a failed-V2 fallback.
+  const runtime = await getRuntimeInstance({ scopes, runtimeInstanceId,
+    projection: `${RUNTIME_STATE_V2_HANDOFF_CONTROL_PROJECTION} framework_state.sections`, maxTimeMS: RUNTIME_STATE_V2_READ_MAX_TIME_MS, session })
+  assertSerializedPayloadSize(runtime)
+  if (runtime.stateVersion || runtime.runtimeStateVersion) throw createRuntimeStateError({ code: RUNTIME_STATE_V2_ERROR_CODES.STATE_VERSION_MIXED, message: 'Runtime storage identity changed.' })
+  const resolved = await resolveFrameworkOutcomeStudioHandoff({ runtimeInstance: { ...runtime, _id: runtime.id }, scopes,
+    boundedDependencyPolicy: FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_READ_POLICY })
+  return buildOutcomePlanningRuntimeEvidence({ runtimeInstance: { ...runtime, _id: runtime.id }, frameworkPackage: resolved.frameworkPackage })
 }
 
 export const __testables = Object.freeze({

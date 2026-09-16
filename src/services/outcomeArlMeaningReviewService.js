@@ -12,7 +12,7 @@ import {
   RuntimeInstance,
 } from '../models/index.js'
 import {
-  assertOutcomeKnowledgeCompositionPlanIntegrity,
+  assertLegacyOutcomeKnowledgeCompositionPlan,
   assertOutcomeKnowledgeCompositionPlanMatchesRuntime,
 } from './outcomeKnowledgeCompositionPlanService.js'
 import {
@@ -54,8 +54,8 @@ const assertCurrentPlan = ({ selectedPlan, latestPlan, runtime, runtimeInstanceI
   let selected
   let latest
   try {
-    selected = assertOutcomeKnowledgeCompositionPlanIntegrity(selectedPlan)
-    latest = assertOutcomeKnowledgeCompositionPlanIntegrity(latestPlan)
+    selected = assertLegacyOutcomeKnowledgeCompositionPlan(selectedPlan)
+    latest = assertLegacyOutcomeKnowledgeCompositionPlan(latestPlan)
     assertOutcomeKnowledgeCompositionPlanMatchesRuntime(selected, runtime)
   } catch {
     throw error('The current Knowledge Composition Plan is unavailable or stale.')
@@ -158,8 +158,8 @@ export const approveOutcomeWorkingDraftMeaning = async ({
     RuntimeInstance: deps.RuntimeInstance || RuntimeInstance,
   }
   const [selectedPlan, latestPlan, runtime] = await Promise.all([
-    execQuery(models.OutcomeKnowledgeCompositionPlan.findOne({ _id: planRecordId, runtimeInstanceId })),
-    readLatest({ model: models.OutcomeKnowledgeCompositionPlan, filter: { runtimeInstanceId }, sort: { planVersion: -1 } }),
+    execQuery(models.OutcomeKnowledgeCompositionPlan.findOne({ _id: planRecordId, runtimeInstanceId, requestId: { $exists: false } })),
+    readLatest({ model: models.OutcomeKnowledgeCompositionPlan, filter: { runtimeInstanceId, requestId: { $exists: false } }, sort: { planVersion: -1 } }),
     execQuery(models.RuntimeInstance.findOne({ _id: runtimeInstanceId })),
   ])
   if (!selectedPlan || !latestPlan || !runtime) throw error('ARL source records are unavailable.')

@@ -27,5 +27,11 @@
   "src/__tests__/runtimeManagedSections.test.js",
   "src/__tests__/runtimeStateRepository.test.js",
   "src/__tests__/reasoningArtefactContract.test.js",
-  "src/__tests__/runtimeRendererProjection.test.js"
+  "src/__tests__/runtimeRendererProjection.test.js",
+  "src/__tests__/outcomeIndividualPackMetadata.test.js",
+  "src/__tests__/outcomeIndividualPackResolution.test.js",
+  "src/__tests__/outcomeKcpRequestIsolation.test.js",
+  "src/__tests__/outcomeStudioRequestPlanResponses.test.js",
+  "src/__tests__/outcomeStudioRequestPlanRoutes.test.js",
+  "src/__tests__/outcomeStudioRequestPlans.test.js"
 ]

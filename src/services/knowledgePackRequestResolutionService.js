@@ -12,7 +12,7 @@ import {
 import {
   OUTCOME_KNOWLEDGE_PACK_ACTIVATION_STATUSES,
 } from '../constants/outcomeKnowledgePacks.js'
-import { OUTCOME_STUDIO_REQUIRED_PACKS } from '../constants/runtimeOutcomeStudio.js'
+import { OUTCOME_STUDIO_REQUIRED_PACKS, OUTCOME_STUDIO_LEGACY_GROUP_KEYS } from '../constants/runtimeOutcomeStudio.js'
 import {
   buildKnowledgePackRelationshipChecksum,
   evaluateRelationshipCardinality,
@@ -1125,6 +1125,7 @@ export const discoverRequestSpecificOutputTypes = ({
       .filter(isActivePack)
       .filter((pack) => hasWorkspaceCompatibility(pack, requestedWorkspaceType))
       .filter((pack) => pack.knowledgeLayer === 'OUTPUT_TYPE')
+      .filter((pack) => !OUTCOME_STUDIO_LEGACY_GROUP_KEYS.includes(pack.packKey))
       .map((pack) => pack.capabilityKey),
   ).sort()
 

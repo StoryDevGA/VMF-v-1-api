@@ -18153,7 +18153,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     }))
   })
 
-  test('Outcome Studio readiness uses the locked Framework handoff when Output Lab has no asset', async () => {
+  test('Outcome Studio readiness allows metadata handoff sessions but denies generation when Output Lab has no asset', async () => {
     const runtimeInstance = makeOutputLabReadyRuntime()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
     RuntimeOutputAsset.find.mockReturnValue(buildRuntimeInstanceFindChain([]))
@@ -18169,13 +18169,14 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     expect(res.body.data).toEqual(expect.objectContaining({
       state: expect.stringMatching(/^(READY|READY_WITH_GAPS)$/),
       canStartSession: true,
+      canReason: false,
       blockerCount: 0,
     }))
     expect(res.body.data.safetyGates).toEqual(expect.objectContaining({
-      status: 'PASSED',
-      responseGenerationAvailable: true,
-      passedCount: 5,
-      blockedCount: 0,
+      status: 'BLOCKED',
+      responseGenerationAvailable: false,
+      passedCount: 4,
+      blockedCount: 1,
       totalCount: 5,
     }))
     expect(res.body.data.frameworkHandoff).toEqual(expect.objectContaining({
@@ -18185,8 +18186,8 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       reasoningBoundary: expect.objectContaining({
         contractVersion: 'outcome-studio.intermediate-reasoning-boundary.v1',
         requiredFor: 'COMMERCIAL_STRATEGY_DECISION_PAPER',
-        status: 'BLOCKED',
-        missingArtefacts: ['outputSpecificCompositionGuidance'],
+        status: 'READY',
+        missingArtefacts: [],
         artefacts: expect.arrayContaining([
           expect.objectContaining({
             key: 'claimHypothesisMatrix',
@@ -18195,8 +18196,8 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
           }),
           expect.objectContaining({
             key: 'outputSpecificCompositionGuidance',
-            classification: 'MISSING',
-            present: false,
+            classification: 'GENERATED_IN_OUTCOME_STUDIO',
+            present: true,
           }),
         ]),
       }),
@@ -18822,15 +18823,15 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     expect(readinessRes.body.data).toEqual(expect.objectContaining({
       state: 'READY',
       canStartSession: true,
-      canReason: true,
-      summary: 'Outcome Studio is ready to prepare drafts.',
+      canReason: false,
+      summary: 'A session can start, but draft generation is not currently available.',
       blockerCount: 0,
     }))
     expect(readinessRes.body.data.safetyGates).toEqual(expect.objectContaining({
-      status: 'PASSED',
-      responseGenerationAvailable: true,
-      passedCount: 5,
-      blockedCount: 0,
+      status: 'BLOCKED',
+      responseGenerationAvailable: false,
+      passedCount: 4,
+      blockedCount: 1,
       totalCount: 5,
     }))
 
@@ -18927,10 +18928,10 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       knowledgeBindings: expect.objectContaining({
         resolutionSource: 'KNOWLEDGE_PACK_REGISTRY',
         policyKey: 'outcome-studio-v1-required-packs',
-        policyVersion: '1.0.0',
-        activeCount: 5,
-        resolvedCount: 8,
-        requiredCount: 5,
+        policyVersion: '2.0.0',
+        activeCount: 2,
+        resolvedCount: 5,
+        requiredCount: 2,
         activePacks: expect.arrayContaining([
           expect.objectContaining({
             packCategory: 'PLATFORM',
@@ -18947,7 +18948,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       decisionBindings: [],
     }))
     expect(OutcomeSession.deleteOne).not.toHaveBeenCalled()
-    expect(RuntimeGraphRelationship.prototype.save).toHaveBeenCalledTimes(9)
+    expect(RuntimeGraphRelationship.prototype.save).toHaveBeenCalledTimes(6)
     const savedSessionRelationships = RuntimeGraphRelationship.prototype.save.mock.contexts
     expect(savedSessionRelationships[0]).toEqual(expect.objectContaining({
       relationshipId: expect.stringMatching(/^rt_graph_rel_/),
@@ -19005,9 +19006,9 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
         truthSignatureId: persistedTruthSignatureId,
         truthSignatureStatus: 'PROJECTED',
         knowledgePackBindingStatus: 'READY',
-        activeKnowledgePackCount: 5,
-        requiredKnowledgePackCount: 5,
-        runtimeGraphRelationshipCount: 9,
+        activeKnowledgePackCount: 2,
+        requiredKnowledgePackCount: 2,
+        runtimeGraphRelationshipCount: 6,
       }),
     }))
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
@@ -19035,10 +19036,10 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
           status: 'READY',
           resolutionSource: 'KNOWLEDGE_PACK_REGISTRY',
           policyKey: 'outcome-studio-v1-required-packs',
-          policyVersion: '1.0.0',
-          activeCount: 5,
-          resolvedCount: 8,
-          requiredCount: 5,
+          policyVersion: '2.0.0',
+          activeCount: 2,
+          resolvedCount: 5,
+          requiredCount: 2,
         }),
       }),
     }))

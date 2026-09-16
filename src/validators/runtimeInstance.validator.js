@@ -1333,6 +1333,20 @@ export const validateRuntimeOutcomeAssetVersionParams = createParamsValidator(ru
   includeDetails: false,
 })
 
+const planningReceipt = z.string().min(1).max(32768)
+export const validateOutcomePlanningBody = createBodyValidator(z.object({
+  prompt: z.string().trim().min(1).max(2000),
+  continuation: planningReceipt.optional(),
+  sessionId: z.string().trim().min(1).max(180).optional(),
+  action: z.enum(['ANSWER', 'RE_RESOLVE']).optional(),
+}).strict(), { message: 'Invalid outcome planning request.', rootIssueKey: '_root', includeDetails: false })
+export const validateOutcomePlanningConfirmation = createBodyValidator(z.object({
+  continuation: planningReceipt, confirm: z.literal(true),
+}).strict(), { message: 'Explicit plan confirmation is required.', rootIssueKey: '_root', includeDetails: false })
+export const validateOutcomePlanningRequestParams = createParamsValidator(runtimeInstanceIdSchema.extend({
+  requestId: z.string().uuid(), planId: z.string().regex(/^outcome_kcp_[a-f0-9-]{36}$/).optional(),
+}), { message: 'Invalid planning identity.', rootIssueKey: '_root', includeDetails: false })
+
 export const validateRuntimeOutcomeAssetExportParams = createParamsValidator(runtimeOutcomeAssetExportParamsSchema, {
   message: 'Invalid request parameters.',
   rootIssueKey: '_root',

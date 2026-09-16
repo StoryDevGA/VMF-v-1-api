@@ -178,7 +178,7 @@ describe('resolveRequestSpecificKnowledgePacks', () => {
       channelKey: '',
       visualSystemKey: '',
     })
-    expect(result.mandatorySafeguards).toHaveLength(5)
+    expect(result.mandatorySafeguards).toHaveLength(2)
     expect(result.selectedByLayer.OUTPUT_TYPE).toHaveLength(1)
     expect(result.selectedByLayer.OUTPUT_SCHEMA).toHaveLength(1)
     expect(result.selectedByLayer.STYLE).toHaveLength(1)
@@ -191,7 +191,7 @@ describe('resolveRequestSpecificKnowledgePacks', () => {
       depthOverflows: [],
     }))
     expect(result.lineage.resolvedAt).toBe(RESOLVED_AT)
-    expect(result.lineage.activationIds).toHaveLength(8)
+    expect(result.lineage.activationIds).toHaveLength(5)
     expect(resolve()).toEqual(result)
 
     const serialized = JSON.stringify(result)
@@ -310,13 +310,13 @@ describe('resolveRequestSpecificKnowledgePacks', () => {
   test('returns BLOCKED when a required dependency or mandatory safeguard is missing', () => {
     const candidates = makeOutputCandidates().filter((pack) =>
       pack.knowledgeLayer !== 'OUTPUT_SCHEMA')
-    const safeguards = makeMandatorySafeguards().filter((pack) => pack.packType !== 'RL')
+    const safeguards = makeMandatorySafeguards().filter((pack) => pack.packType !== 'ARL')
 
     const result = resolve({ mandatorySafeguards: safeguards, candidates })
 
     expect(result.status).toBe('BLOCKED')
     expect(result.mandatorySafeguards).toContainEqual(expect.objectContaining({
-      packType: 'RL',
+      packType: 'ARL',
       status: 'MISSING',
       runtimeBindable: false,
     }))

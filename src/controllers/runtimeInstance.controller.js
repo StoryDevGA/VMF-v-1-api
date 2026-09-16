@@ -5,6 +5,8 @@ import {
   listRuntimeInstances as listRuntimeInstanceRecords,
 } from '../services/runtimeInstanceService.js'
 import { createRuntimeRevision as createRuntimeRevisionRecord } from '../services/runtimeRevisionService.js'
+import logger from '../config/logger.js'
+import { planOutcomeStudioRequest, confirmOutcomeStudioRequestPlan, retrieveOutcomeStudioRequestPlan } from '../services/outcomeStudioRequestPlanService.js'
 import {
   adoptRuntimeRelease as adoptRuntimeReleaseRecord,
   rollbackRuntimeRelease as rollbackRuntimeReleaseRecord,
@@ -962,6 +964,41 @@ export const getRuntimeOutputLab = async (req, res, next) => {
     return next(err)
   }
 }
+
+const publicOutcomePlanningCodes = new Set([
+  'OUTCOME_PLANNING_RECEIPT_UNAVAILABLE', 'OUTCOME_PLANNING_RECEIPT_INVALID',
+  'OUTCOME_PLANNING_UNAUTHORIZED', 'OUTCOME_PLANNING_SCOPE_MISMATCH',
+  'OUTCOME_PLANNING_SESSION_MISMATCH', 'OUTCOME_PLANNING_ANSWER_REQUIRED',
+  'OUTCOME_PLANNING_PREDECESSOR_REQUIRED', 'OUTCOME_PLANNING_EXPLICIT_RERESOLUTION_REQUIRED',
+  'OUTCOME_PLANNING_CONFIRMATION_REQUIRED', 'OUTCOME_PLANNING_IDENTITY_INVALID',
+  'OUTCOME_PLANNING_TRUTH_BLOCKED',
+])
+const outcomePlanningHandler = (operation) => async (req, res) => {
+  try {
+    const data = await operation({ actorUserId: req.context?.userId || req.userId, scopes: req.scopes,
+      runtimeInstanceId: req.params.runtimeInstanceId, requestId: req.params.requestId,
+      planId: req.params.planId, payload: req.body || {} })
+    return res.status(200).json({ data, meta: { requestId: req.requestId, version: 'v1' } })
+  } catch (error) {
+    // Never expose underlying resolver diagnostics, database identities or receipts.
+    if (![401, 403, 404, 409, 422, 503].includes(error?.status) || !error?.code) {
+      ;(req.log || logger).error({ err: error, requestId: req.requestId }, 'Outcome Studio planning failed unexpectedly')
+      return res.status(500).json({ error: {
+        code: 'OUTCOME_PLANNING_UNAVAILABLE',
+        message: 'Outcome planning is temporarily unavailable. Retry after the required evidence is available.',
+        details: { reason: 'OUTCOME_PLANNING_UNAVAILABLE', execution: { status: 'BLOCKED', canExecute: false } },
+      }, meta: { requestId: req.requestId, version: 'v1' } })
+    }
+    const status = error.status
+    const code = publicOutcomePlanningCodes.has(error?.code)
+      ? error.code : 'OUTCOME_PLANNING_UNAVAILABLE'
+    return res.status(status).json({ error: { code, message: 'Outcome planning is blocked. Check the request or retry after the required evidence is available.',
+      details: { reason: code, execution: { status: 'BLOCKED', canExecute: false } } }, meta: { requestId: req.requestId, version: 'v1' } })
+  }
+}
+export const planRuntimeOutcomeRequest = outcomePlanningHandler(planOutcomeStudioRequest)
+export const confirmRuntimeOutcomeRequestPlan = outcomePlanningHandler(confirmOutcomeStudioRequestPlan)
+export const retrieveRuntimeOutcomeRequestPlan = outcomePlanningHandler(retrieveOutcomeStudioRequestPlan)
 
 export const getRuntimeOutputLabDefinitions = async (req, res, next) => {
   try {

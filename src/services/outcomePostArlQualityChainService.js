@@ -17,7 +17,7 @@ import {
 } from '../models/index.js'
 import { buildExpressionOnlyRevisionSection } from '../utils/outcomeRenderedExpressionRevision.js'
 import {
-  assertOutcomeKnowledgeCompositionPlanIntegrity,
+  assertLegacyOutcomeKnowledgeCompositionPlan,
   assertOutcomeKnowledgeCompositionPlanMatchesRuntime,
 } from './outcomeKnowledgeCompositionPlanService.js'
 import {
@@ -75,14 +75,14 @@ const readBoundState = async ({ actorUserId, expectedPlanFingerprint, planRecord
     GovernedRuntimeArtifact: deps.GovernedRuntimeArtifact || GovernedRuntimeArtifact,
   }
   const [selectedPlan, latestPlan, runtime] = await Promise.all([
-    execQuery(models.OutcomeKnowledgeCompositionPlan.findOne({ _id: planRecordId, runtimeInstanceId })),
-    readLatest({ model: models.OutcomeKnowledgeCompositionPlan, filter: { runtimeInstanceId }, sort: { planVersion: -1 } }),
+    execQuery(models.OutcomeKnowledgeCompositionPlan.findOne({ _id: planRecordId, runtimeInstanceId, requestId: { $exists: false } })),
+    readLatest({ model: models.OutcomeKnowledgeCompositionPlan, filter: { runtimeInstanceId, requestId: { $exists: false } }, sort: { planVersion: -1 } }),
     execQuery(models.RuntimeInstance.findOne({ _id: runtimeInstanceId })),
   ])
   let plan
   try {
-    plan = assertOutcomeKnowledgeCompositionPlanIntegrity(selectedPlan)
-    const latest = assertOutcomeKnowledgeCompositionPlanIntegrity(latestPlan)
+    plan = assertLegacyOutcomeKnowledgeCompositionPlan(selectedPlan)
+    const latest = assertLegacyOutcomeKnowledgeCompositionPlan(latestPlan)
     assertOutcomeKnowledgeCompositionPlanMatchesRuntime(plan, runtime)
     if (toId(plan._id || plan.id) !== toId(latest._id || latest.id)
       || lower(plan.planFingerprint) !== lower(expectedPlanFingerprint)) throw new Error('stale')

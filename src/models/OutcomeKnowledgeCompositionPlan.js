@@ -12,6 +12,10 @@ const sha256Pattern = /^[a-f0-9]{64}$/
 const schema = new mongoose.Schema({
   planId: { type: String, required: true, immutable: true, trim: true, maxlength: 180 },
   planVersion: { type: Number, required: true, immutable: true, min: 1 },
+  requestId: {
+    type: String, immutable: true,
+    validate: { validator: (value) => value === undefined || (typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(value)), message: 'Invalid orchestration request identity.' },
+  },
   contractVersion: {
     type: String,
     required: true,
@@ -57,6 +61,8 @@ const schema = new mongoose.Schema({
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, immutable: true },
 }, {
   collection: 'outcome_knowledge_composition_plans',
+  // Index replacement is an explicitly governed operation, never an app-start side effect.
+  autoIndex: false,
   strict: 'throw',
   timestamps: { createdAt: true, updatedAt: false },
   toJSON: {
@@ -71,8 +77,8 @@ const schema = new mongoose.Schema({
 
 schema.index({ planId: 1 }, { unique: true, name: 'uniq_outcome_kcp_plan_id' })
 schema.index(
-  { runtimeInstanceId: 1, planVersion: 1 },
-  { unique: true, name: 'uniq_outcome_kcp_runtime_version' },
+  { runtimeInstanceId: 1, requestId: 1, planVersion: 1 },
+  { unique: true, name: 'uniq_outcome_kcp_request_version' },
 )
 schema.index(
   { tenantId: 1, customerId: 1, runtimeInstanceId: 1, createdAt: -1 },

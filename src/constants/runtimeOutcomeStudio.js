@@ -167,6 +167,12 @@ export const OUTCOME_STUDIO_BLOCKER_CODES = Object.freeze({
   OUTPUT_TYPE_PACK_MISSING: 'OUTPUT_TYPE_PACK_MISSING',
 })
 
+// Aggregate V1 catalogues are not individual deliverables or mandatory bindings.
+// Explicit dependencies on them still resolve (or fail) through the normal graph.
+export const OUTCOME_STUDIO_LEGACY_GROUP_KEYS = Object.freeze([
+  'rendering-layer', 'output-schemas-pack', 'outcome-output-types',
+])
+
 export const OUTCOME_STUDIO_REQUIRED_PACKS = Object.freeze([
   Object.freeze({
     packCategory: KNOWLEDGE_PACK_CATEGORIES.OUTCOME,
@@ -175,27 +181,9 @@ export const OUTCOME_STUDIO_REQUIRED_PACKS = Object.freeze([
     label: 'Adaptive Reasoning Layer',
   }),
   Object.freeze({
-    packCategory: KNOWLEDGE_PACK_CATEGORIES.OUTCOME,
-    packType: 'RL',
-    packKey: 'rendering-layer',
-    label: 'Rendering Layer',
-  }),
-  Object.freeze({
-    packCategory: KNOWLEDGE_PACK_CATEGORIES.OUTCOME,
-    packType: 'OUTPUT_SCHEMA',
-    packKey: 'output-schemas-pack',
-    label: 'Output Schemas',
-  }),
-  Object.freeze({
     packCategory: KNOWLEDGE_PACK_CATEGORIES.PLATFORM,
     packType: 'TRUTH_CERTIFICATION',
     packKey: 'truth-certification-pack',
     label: 'Truth Certification',
-  }),
-  Object.freeze({
-    packCategory: KNOWLEDGE_PACK_CATEGORIES.OUTCOME,
-    packType: 'OUTPUT_TYPE_DEFINITION',
-    packKey: 'outcome-output-types',
-    label: 'Outcome Output Types',
   }),
 ])

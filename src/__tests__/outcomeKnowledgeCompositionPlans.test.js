@@ -142,12 +142,13 @@ const makeBinding = () => {
     status: 'READY',
     mode: 'REQUEST_SPECIFIC',
     policyKey: 'outcome-studio-v1-required-packs',
-    policyVersion: '1.0.0',
-    mandatorySafeguards: safeguards,
+    policyVersion: '2.0.0',
+    mandatorySafeguards: safeguards.filter((pack) => ['ARL', 'TRUTH_CERTIFICATION'].includes(pack.packType)),
     selectedByLayer: {
+      COMMUNICATION_PATTERN: [safeguards[1]],
       VALIDATION: [packs.truthDependency],
-      OUTPUT_TYPE: [packs.outputType],
-      OUTPUT_SCHEMA: [packs.outputSchema],
+      OUTPUT_TYPE: [safeguards[4], packs.outputType],
+      OUTPUT_SCHEMA: [safeguards[2], packs.outputSchema],
       STYLE: [packs.style],
     },
     excludedCandidates: [{ reason: 'NOT_SELECTED', candidate: packs.excluded }],
@@ -285,6 +286,9 @@ const makePersistenceDeps = ({ latest = null, auditError = null, saveError = nul
       session: jest.fn(async () => latest),
     })),
   }))
+  PlanModel.collection = { listIndexes: jest.fn(() => ({ toArray: async () => [
+    { key: { runtimeInstanceId: 1, planVersion: 1 }, unique: true, name: 'uniq_outcome_kcp_runtime_version' },
+  ] })) }
   const audit = {
     AUDIT_ACTIONS: { OUTCOME_KNOWLEDGE_COMPOSITION_PLAN_CREATED: 'OUTCOME_KNOWLEDGE_COMPOSITION_PLAN_CREATED' },
     RESOURCE_TYPES: { OutcomeKnowledgeCompositionPlan: 'OutcomeKnowledgeCompositionPlan' },
@@ -656,10 +660,10 @@ describe('Outcome Knowledge Composition Plan contract', () => {
       runtimeBindable: false,
     }
     binding.mandatorySafeguards[1] = {
-      packCategory: 'OUTCOME',
-      packType: 'RL',
-      packKey: 'rendering-layer',
-      label: 'Rendering Layer',
+      packCategory: 'PLATFORM',
+      packType: 'TRUTH_CERTIFICATION',
+      packKey: 'truth-certification-pack',
+      label: 'Truth Certification',
       status: 'MISSING',
       runtimeBindable: false,
     }
@@ -673,7 +677,7 @@ describe('Outcome Knowledge Composition Plan contract', () => {
       {
         requirement: 'REQUIRED',
         reason: 'MANDATORY_SAFEGUARD_MISSING',
-        selector: { packType: 'RL', packKey: 'rendering-layer' },
+        selector: { packType: 'TRUTH_CERTIFICATION', packKey: 'truth-certification-pack' },
         requiredBy: 'MANDATORY_SAFEGUARD_POLICY',
       },
     ]
@@ -692,14 +696,14 @@ describe('Outcome Knowledge Composition Plan contract', () => {
     expect(missingDecisions).toHaveLength(2)
     expect(missingDecisions.map((decision) => decision.selector)).toEqual(expect.arrayContaining([
       { packType: 'ARL', packKey: 'adaptive-reasoning-layer' },
-      { packType: 'RL', packKey: 'rendering-layer' },
+      { packType: 'TRUTH_CERTIFICATION', packKey: 'truth-certification-pack' },
     ]))
     expect(candidate.payload.stagePlan.find(
       (stage) => stage.stageKey === OUTCOME_QUALITY_STAGES.ARL_MEANING_REVIEW,
     ).assignedActivationIds).toEqual([])
     expect(candidate.payload.stagePlan.find(
       (stage) => stage.stageKey === OUTCOME_QUALITY_STAGES.RENDERED_EXPRESSION_RL,
-    ).assignedActivationIds).toEqual([])
+    ).assignedActivationIds).toEqual(['activation-rendering-layer'])
     expect(candidate.payload.stagePlan.flatMap((stage) => stage.assignedActivationIds)).not.toContain('')
     expect(candidate.payload.resolution.consideredPackCoverage).toMatchObject({
       missingDecisionCount: 2,
@@ -783,7 +787,7 @@ describe('Outcome Knowledge Composition Plan contract', () => {
     const indexes = OutcomeKnowledgeCompositionPlan.schema.indexes()
     expect(indexes).toEqual(expect.arrayContaining([
       [{ planId: 1 }, expect.objectContaining({ unique: true, name: 'uniq_outcome_kcp_plan_id' })],
-      [{ runtimeInstanceId: 1, planVersion: 1 }, expect.objectContaining({ unique: true, name: 'uniq_outcome_kcp_runtime_version' })],
+      [{ runtimeInstanceId: 1, requestId: 1, planVersion: 1 }, expect.objectContaining({ unique: true, name: 'uniq_outcome_kcp_request_version' })],
     ]))
   })
 

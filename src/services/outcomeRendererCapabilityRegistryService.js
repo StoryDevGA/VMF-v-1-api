@@ -476,6 +476,7 @@ export const resolveOutcomeRendererCapability = ({
   outputSchemaKey = '',
   outputTypeKey = '',
   styleKey = '',
+  metadataOnly = false,
 } = {}) => {
   const normalizedFormat = normalizeToken(format)
   const normalizedAppEnvironment = normalizeText(appEnvironment).toLowerCase()
@@ -483,7 +484,7 @@ export const resolveOutcomeRendererCapability = ({
   const requiredBindingsPresent = Boolean(
     normalizedOutputTypeKey
     && normalizeText(outputSchemaKey)
-    && normalizeText(styleKey),
+    && (normalizeText(styleKey) || metadataOnly === true),
   )
   if (!requiredBindingsPresent) {
     return {

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { getUnresolvedDiscoveryContradictions } from './discoveryContradictionReviewService.js'
+import { hasCurrentIndividualPackMetadataGuidance } from './outcomeStudioIndividualContractService.js'
 
 export const OUTCOME_STUDIO_EVIDENCE_COMPOSITION_CONTRACT =
   'outcome-studio.evidence-to-composition.v1'
@@ -124,8 +125,11 @@ export const buildIntermediateReasoningManifest = ({
   frameworkHandoff = {},
   knowledgeContext = {},
   enforceMissing = true,
+  metadataOnly = false,
 } = {}) => {
   const resolvedKnowledgeContext = knowledgeContext || {}
+  const metadataGuidancePresent = metadataOnly === true
+    && hasCurrentIndividualPackMetadataGuidance(resolvedKnowledgeContext)
   const rawSections = getHandoffSectionTruth(frameworkHandoff)
   if (!Array.isArray(frameworkHandoff?.sectionTruth)) return null
   const sections = getAcceptedFrameworkIntelligence(frameworkHandoff)
@@ -157,7 +161,7 @@ export const buildIntermediateReasoningManifest = ({
     const outputTypeStructure = resolvedKnowledgeContext.outputTypeStructure
     const outputSchema = resolvedKnowledgeContext.outputSchema
     const style = resolvedKnowledgeContext.style
-    const outputGuidancePresent = hasNonEmptyArray(outputTypeStructure)
+    const outputGuidancePresent = metadataGuidancePresent || (hasNonEmptyArray(outputTypeStructure)
       && outputTypeStructure.length === 5
       && isPlainObject(outputSchema)
       && hasNonEmptyString(outputSchema.key)
@@ -165,7 +169,7 @@ export const buildIntermediateReasoningManifest = ({
       && hasNonEmptyArray(outputSchema.requiredSections)
       && isPlainObject(style)
       && hasNonEmptyString(style.key)
-      && hasNonEmptyString(style.version)
+      && hasNonEmptyString(style.version))
     const outputGuidance = {
       key: 'outputSpecificCompositionGuidance',
       classification: outputGuidancePresent
@@ -174,7 +178,10 @@ export const buildIntermediateReasoningManifest = ({
       source: 'outcome_studio.output_contract_and_resolved_packs',
       required: true,
       present: outputGuidancePresent,
-      reason: outputGuidancePresent
+      ...(metadataGuidancePresent ? { metadataOnly: true, contentValidated: false, generationEligible: false } : {}),
+      reason: metadataGuidancePresent
+        ? 'Individual output contract metadata is resolved; content validation is still required before generation.'
+        : outputGuidancePresent
         ? 'Outcome Studio assembled the output structure, schema and style guidance from resolved pack content.'
         : 'Resolved output structure, schema and style guidance is incomplete.',
     }
@@ -253,7 +260,7 @@ export const buildIntermediateReasoningManifest = ({
   const outputTypeStructure = resolvedKnowledgeContext.outputTypeStructure
   const outputSchema = resolvedKnowledgeContext.outputSchema
   const style = resolvedKnowledgeContext.style
-  const outputGuidancePresent = hasNonEmptyArray(outputTypeStructure)
+  const outputGuidancePresent = metadataGuidancePresent || (hasNonEmptyArray(outputTypeStructure)
     && outputTypeStructure.length === 5
     && isPlainObject(outputSchema)
     && hasNonEmptyString(outputSchema.key)
@@ -261,7 +268,7 @@ export const buildIntermediateReasoningManifest = ({
     && hasNonEmptyArray(outputSchema.requiredSections)
     && isPlainObject(style)
     && hasNonEmptyString(style.key)
-    && hasNonEmptyString(style.version)
+    && hasNonEmptyString(style.version))
   const outputGuidance = {
     key: 'outputSpecificCompositionGuidance',
     classification: outputGuidancePresent
@@ -270,7 +277,10 @@ export const buildIntermediateReasoningManifest = ({
     source: 'outcome_studio.output_contract_and_resolved_packs',
     required: true,
     present: outputGuidancePresent,
-    reason: outputGuidancePresent
+    ...(metadataGuidancePresent ? { metadataOnly: true, contentValidated: false, generationEligible: false } : {}),
+    reason: metadataGuidancePresent
+      ? 'Individual output contract metadata is resolved; content validation is still required before generation.'
+      : outputGuidancePresent
       ? 'Outcome Studio assembled the output structure, schema and style guidance from resolved pack content.'
       : 'Resolved output structure, schema and style guidance is incomplete.',
   }
