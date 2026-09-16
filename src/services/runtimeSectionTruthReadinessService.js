@@ -226,7 +226,12 @@ export const evaluateRuntimeSectionTruthReadiness = ({
       })
       if (reasoningArtefacts.length > 0) {
         buildReasoningArtefactOutputs({
-          candidate: generated,
+          // Package sourcePath describes the generation input, while the
+          // canonical persisted output is stored by exact artefact key.
+          // Bounded renderer reads intentionally omit generation-only
+          // sectionIntelligence, so validate the canonical projection here.
+          candidate: generated?.reasoningArtefacts,
+          canonicalCandidate: true,
           declarations: reasoningArtefacts,
           packageKey: frameworkPackage?.packageKey,
           packageVersion: frameworkPackage?.version,

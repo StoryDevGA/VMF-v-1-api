@@ -41,6 +41,21 @@ describe('SS-022 runtime-managed sections', () => {
     expect(getRuntimeActionStateGate({ ...projected, actionKey: 'MARK_READY' })).toEqual({ allowed: true, reason: '' })
   })
 
+  test('Publish readiness validates canonical artefacts when bounded reads omit generation-only source fields', () => {
+    const fixture = makeRuntimeManagedFixture({ sourceRoot: 'sectionIntelligence' })
+    const projected = structuredClone(fixture)
+    for (const value of Object.values(projected.frameworkState.sections)) {
+      delete value.generated.sectionIntelligence
+      delete value.accepted.sectionIntelligence
+    }
+
+    expect(evaluateRuntimeSectionTruthReadiness(projected)).toMatchObject({
+      publishEligible: true,
+      lockEligible: true,
+      blockers: [],
+    })
+  })
+
   test.each(['missing', 'tampered', 'tampered-with-refreshed-source-receipt'])(
     'canonical proof remains required with generation-only source paths: %s', (mutation) => {
       const fixture = makeRuntimeManagedFixture({ sourceRoot: 'sectionIntelligence' })
