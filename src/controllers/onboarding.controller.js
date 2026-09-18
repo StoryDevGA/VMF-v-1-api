@@ -4,6 +4,7 @@ import performanceCacheService from '../services/performanceCacheService.js'
 import monitoringService from '../services/monitoringService.js'
 import {
   onboardCustomerWithAdmin,
+  logStartingCreditAudits,
   isProvisioningError,
 } from '../services/provisioningService.js'
 
@@ -102,8 +103,16 @@ export const onboardCustomer = async (req, res, next) => {
         source: 'external_onboarding',
         licenseLevelId: customer.licenseLevelId,
         governance: customer.governance,
+        creditBalances: {
+          websiteAnalysis: customer.creditBalances?.websiteAnalysis ?? 0,
+          documentImprovement: customer.creditBalances?.documentImprovement ?? 0,
+        },
+        creditSource: 'CUSTOMER_CREATE',
+        creditReason: 'Starting credits at customer creation',
       },
     })
+
+    await logStartingCreditAudits(customer, req)
 
     await auditService.logFromRequest(req, {
       action: auditService.AUDIT_ACTIONS.CUSTOMER_ADMIN_ASSIGNED,

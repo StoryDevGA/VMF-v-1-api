@@ -5,6 +5,7 @@ import {
   normalizeFeatureEntitlements,
   resolveCustomerFeatureEntitlements,
 } from '../services/licenseEntitlementService.js'
+import { isKnownLicenseEntitlement } from '../constants/licenseEntitlements.js'
 
 const toIdString = (value) => {
   if (!value) return null
@@ -54,6 +55,16 @@ export const requireFeatureEntitlement = (featureKey, options = {}) => asyncMidd
       error: {
         code: 'SERVER_ERROR',
         message: 'Feature entitlement middleware was configured without a valid feature key.',
+        requestId: req.requestId,
+      },
+    })
+  }
+
+  if (!isKnownLicenseEntitlement(normalizedFeatureKey)) {
+    return res.status(500).json({
+      error: {
+        code: 'SERVER_ERROR',
+        message: 'Feature entitlement middleware was configured with an unregistered key.',
         requestId: req.requestId,
       },
     })

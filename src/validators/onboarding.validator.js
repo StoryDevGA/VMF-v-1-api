@@ -1,11 +1,23 @@
 import { z } from 'zod'
 import { createBodyValidator } from './shared.js'
+import { isKnownLicenseEntitlement } from '../constants/licenseEntitlements.js'
 
 const objectIdRegex = /^[a-f\d]{24}$/i
 
 const objectIdString = z
   .string()
   .regex(objectIdRegex, 'Must be a valid ObjectId')
+
+const entitlementKeySchema = z
+  .string()
+  .trim()
+  .min(1, 'Feature entitlement key is required')
+  .max(100, 'Feature entitlement key must be 100 characters or fewer')
+  .transform((value) => value.toUpperCase())
+  .refine(
+    (value) => isKnownLicenseEntitlement(value),
+    'Feature entitlement key must exist in the licence catalogue',
+  )
 
 const topologyEnum = z.enum(['SINGLE_TENANT', 'MULTI_TENANT'])
 const vmfPolicyEnum = z.enum(['SINGLE', 'MULTI', 'PER_TENANT_SINGLE', 'PER_TENANT_MULTI'])
@@ -46,7 +58,7 @@ const onboardingCustomerSchema = z
     maxVmfsPerTenant: z.number().int().min(1).max(10000).default(1),
     topology: topologyEnum.default('MULTI_TENANT'),
     vmfPolicy: vmfPolicyEnum.optional(),
-    entitlements: z.array(z.string().trim()).default([]),
+    entitlements: z.array(entitlementKeySchema).max(500).default([]),
     trial: trialSchema.optional(),
   })
   .superRefine((value, ctx) => {

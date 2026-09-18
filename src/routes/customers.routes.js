@@ -19,7 +19,7 @@ import { validateCustomerList } from '../validators/resourceList.validator.js'
 import { Router } from 'express'
 import authJwt from '../middleware/authJwt.js'
 import loadScopes from '../middleware/loadScopes.js'
-import { requirePlatformPermission } from '../middleware/authorize.js'
+import { requireCustomerAccess, requirePlatformPermission } from '../middleware/authorize.js'
 import { tenantManagementRateLimit } from '../middleware/rateLimits.js'
 import requireStepUp from '../middleware/requireStepUp.js'
 import {
@@ -29,6 +29,8 @@ import {
   validateAssignAdmin,
   validateCreateAdminInvitation,
   validateReplaceAdmin,
+  validateAdjustCredit,
+  validateCustomerId,
 } from '../validators/customer.validator.js'
 import {
   listCustomers,
@@ -39,6 +41,8 @@ import {
   assignAdmin,
   createAdminInvitation,
   replaceAdmin,
+  getCustomerCredits,
+  adjustCustomerCredits,
 } from '../controllers/customer.controller.js'
 
 const router = Router()
@@ -62,6 +66,24 @@ router.post(
   createCustomer,
 )
 router.get('/:customerId', requirePlatformPermission('CUSTOMER_VIEW'), getCustomer)
+router.get(
+  '/:customerId/credits',
+  validateCustomerId,
+  requireCustomerAccess({
+    allowPlatform: true,
+    allowCustomerMembershipWhenSingleTenant: true,
+    allowTenantMember: true,
+  }),
+  getCustomerCredits,
+)
+router.post(
+  '/:customerId/credits/adjust',
+  requirePlatformPermission('CUSTOMER_UPDATE'),
+  tenantManagementRateLimit,
+  validateCustomerId,
+  validateAdjustCredit,
+  adjustCustomerCredits,
+)
 router.patch(
   '/:customerId',
   requirePlatformPermission('CUSTOMER_UPDATE'),

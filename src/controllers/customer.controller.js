@@ -12,6 +12,7 @@
  *   - POST   /api/v1/customers/:customerId/admins/replace  Replace CUSTOMER_ADMIN
  */
 
+import mongoose from 'mongoose'
 import { Customer, Invitation, LicenseLevel, Tenant, User } from '../models/index.js'
 import { createCustomerWithDefaults } from '../services/provisioningService.js'
 import auditService from '../services/auditService.js'
@@ -20,6 +21,7 @@ import customerGovernanceService from '../services/customerGovernanceService.js'
 import emailService from '../services/emailService.js'
 import invitationService from '../services/invitationService.js'
 import { applyManualTestPasswordBootstrap } from '../services/manualTestPasswordBootstrapService.js'
+import { adjustCustomerCredit, normalizeCreditBalances } from '../services/customerCreditService.js'
 import logger from '../config/logger.js'
 import env from '../config/env.js'
 
@@ -451,13 +453,33 @@ export const listCustomers = async (req, res, next) => {
  */
 export const createCustomer = async (req, res, next) => {
   try {
-    if (req.body.licenseLevelId !== undefined) {
+    if (req.body.licenseLevelId !== undefined && req.body.licenseLevelId !== null) {
       const licenseLevelExists = await validateLicenseLevelExists(req.body.licenseLevelId)
       if (!licenseLevelExists) {
         return res.status(422).json({
           error: {
             code: 'VALIDATION_FAILED',
             message: 'licenseLevelId must reference an existing licence level.',
+            requestId: req.requestId,
+          },
+        })
+      }
+    }
+
+    const startingCredits = req.body.startingCredits || { websiteAnalysis: 0, documentImprovement: 0 }
+    if (startingCredits.websiteAnalysis > 0 || startingCredits.documentImprovement > 0) {
+      const selectedLicense = req.body.licenseLevelId
+        ? await LicenseLevel.findById(req.body.licenseLevelId).select('homeExperience')
+        : null
+      if (selectedLicense?.homeExperience !== 'SIGNAL') {
+        return res.status(422).json({
+          error: {
+            code: 'VALIDATION_FAILED',
+            message: 'Starting credits are only available for Signal licence levels.',
+            details: {
+              'startingCredits.websiteAnalysis': 'Starting credits are only available for Signal licence levels.',
+              'startingCredits.documentImprovement': 'Starting credits are only available for Signal licence levels.',
+            },
             requestId: req.requestId,
           },
         })
@@ -578,7 +600,7 @@ export const updateCustomer = async (req, res, next) => {
       }
     }
 
-    if (req.body.licenseLevelId !== undefined) {
+    if (req.body.licenseLevelId !== undefined && req.body.licenseLevelId !== null) {
       const licenseLevelExists = await validateLicenseLevelExists(req.body.licenseLevelId)
       if (!licenseLevelExists) {
         return res.status(422).json({
@@ -604,7 +626,6 @@ export const updateCustomer = async (req, res, next) => {
     const allowedFields = [
       'name',
       'website',
-      'isServiceProvider',
       'licenseLevelId',
       'governance',
       'entitlements',
@@ -628,6 +649,12 @@ export const updateCustomer = async (req, res, next) => {
         diff.governance = { from: currentGovernance, to: nextGovernance }
         customer.governance = nextGovernance
         continue
+      }
+
+      if (field === 'licenseLevelId') {
+        const currentLicenseLevelId = customer[field]?.toString?.() || customer[field] || null
+        const nextLicenseLevelId = req.body[field]?.toString?.() || req.body[field] || null
+        if (currentLicenseLevelId === nextLicenseLevelId) continue
       }
 
       diff[field] = { from: customer[field], to: req.body[field] }
@@ -708,6 +735,90 @@ export const updateCustomer = async (req, res, next) => {
       })
     }
     next(err)
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  GET /api/v1/customers/:customerId/credits                         */
+/* ------------------------------------------------------------------ */
+
+export const getCustomerCredits = async (req, res, next) => {
+  try {
+    const customer = await Customer.findById(req.params.customerId).select('_id creditBalances')
+    if (!customer) {
+      return res.status(404).json({
+        error: { code: 'NOT_FOUND', message: 'Customer not found.', requestId: req.requestId },
+      })
+    }
+
+    return res.status(200).json({
+      data: {
+        customerId: customer._id,
+        balances: normalizeCreditBalances(customer.creditBalances),
+      },
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    next(err)
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  POST /api/v1/customers/:customerId/credits/adjust                 */
+/* ------------------------------------------------------------------ */
+
+export const adjustCustomerCredits = async (req, res, next) => {
+  let session
+  try {
+    session = await mongoose.startSession()
+    let result
+    await session.withTransaction(async () => {
+      result = await adjustCustomerCredit({
+        customerId: req.params.customerId,
+        productKey: req.body.productKey,
+        delta: req.body.delta,
+        session,
+      })
+      const balanceField = result.productKey === 'WEBSITE' ? 'websiteAnalysis' : 'documentImprovement'
+      const resultingBalance = result.balances[balanceField]
+
+      await auditService.logFromRequest(req, {
+        action: auditService.AUDIT_ACTIONS.CUSTOMER_CREDIT_ADJUSTED,
+        resourceType: auditService.RESOURCE_TYPES.Customer,
+        resourceId: result.customer._id,
+        scope: { customerId: result.customer._id },
+        diff: {
+          productKey: result.productKey,
+          delta: result.delta,
+          resultingBalance,
+          reason: req.body.reason,
+          source: req.body.source,
+        },
+      }, { throwOnError: true, session })
+    })
+
+    const balanceField = result.productKey === 'WEBSITE' ? 'websiteAnalysis' : 'documentImprovement'
+    const resultingBalance = result.balances[balanceField]
+
+    return res.status(200).json({
+      data: {
+        customerId: result.customer._id,
+        productKey: result.productKey,
+        delta: result.delta,
+        resultingBalance,
+        balances: result.balances,
+      },
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status) {
+      return res.status(err.status).json({
+        error: { code: err.code || 'VALIDATION_FAILED', message: err.message, requestId: req.requestId },
+      })
+    }
+    next(err)
+  } finally {
+    if (session) await session.endSession()
   }
 }
 

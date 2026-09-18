@@ -3,7 +3,13 @@ import performanceCacheService, {
   buildCustomerTopologySnapshot,
   buildLicenseLevelEntitlementSnapshot,
 } from './performanceCacheService.js'
+import {
+  LICENSE_HOME_EXPERIENCES,
+  normalizeLicenseHomeExperience,
+} from '../constants/licenseEntitlements.js'
 
+// Legacy-unrestricted customers retain the historical set until the bounded
+// SS-031 backfill assigns them an explicit licence level.
 export const KNOWN_FEATURE_ENTITLEMENTS = Object.freeze(['VMF', 'DEALS', 'VIEWS'])
 
 const toIdString = (value) => {
@@ -37,7 +43,14 @@ const resolveCustomerContext = async ({ customerId, customer = null, session } =
   const normalizedCustomerId = toIdString(customerId || customer?._id || customer?.id)
   if (!normalizedCustomerId) return null
 
-  if (customer) {
+  const hasCompleteCustomerContext = customer
+    && Object.prototype.hasOwnProperty.call(customer, 'licenseLevelId')
+    && Object.prototype.hasOwnProperty.call(customer, 'entitlements')
+    && Object.prototype.hasOwnProperty.call(customer, 'topology')
+
+  // A partial customer projection must not reach the legacy-unrestricted
+  // fallback. Re-resolve the canonical customer record instead.
+  if (customer && hasCompleteCustomerContext) {
     return {
       customerId: normalizedCustomerId,
       licenseLevelId: toIdString(customer.licenseLevelId),
@@ -86,6 +99,7 @@ const resolveLicenseLevelEntitlements = async (licenseLevelId, session) => {
       licenseLevelId: null,
       featureEntitlements: [],
       licenseLevelActive: null,
+      homeExperience: null,
     }
   }
 
@@ -98,11 +112,12 @@ const resolveLicenseLevelEntitlements = async (licenseLevelId, session) => {
       licenseLevelId: normalizedLicenseLevelId,
       featureEntitlements: normalizeFeatureEntitlements(cachedLicense.featureEntitlements),
       licenseLevelActive: Boolean(cachedLicense.isActive),
+      homeExperience: normalizeLicenseHomeExperience(cachedLicense.homeExperience),
     }
   }
 
   const licenseQuery = LicenseLevel.findById(normalizedLicenseLevelId).select(
-    '_id isActive featureEntitlements',
+    '_id isActive featureEntitlements homeExperience',
   )
   const licenseLevel = await (session ? licenseQuery.session(session) : licenseQuery)
 
@@ -121,6 +136,7 @@ const resolveLicenseLevelEntitlements = async (licenseLevelId, session) => {
     licenseLevelId: normalizedLicenseLevelId,
     featureEntitlements: normalizeFeatureEntitlements(snapshot.featureEntitlements),
     licenseLevelActive: Boolean(snapshot.isActive),
+    homeExperience: normalizeLicenseHomeExperience(snapshot.homeExperience),
   }
 }
 
@@ -130,14 +146,35 @@ export const resolveCustomerFeatureEntitlements = async ({ customerId, customer 
 
   const licenseContext = await resolveLicenseLevelEntitlements(customerContext.licenseLevelId, session)
 
-  const licenseEntitlements = normalizeFeatureEntitlements(licenseContext.featureEntitlements)
-  if (licenseEntitlements.length > 0) {
+  if (licenseContext.licenseLevelId && licenseContext.licenseLevelActive !== true) {
     return {
       customerId: customerContext.customerId,
       licenseLevelId: licenseContext.licenseLevelId,
-      featureEntitlements: licenseEntitlements,
+      featureEntitlements: [],
+      entitlementSource: 'LICENSE_LEVEL',
+      licenseLevelActive: false,
+      homeExperience: null,
+      topology: customerContext.topology,
+      defaultTenantId: customerContext.defaultTenantId,
+    }
+  }
+
+  const licenseEntitlements = normalizeFeatureEntitlements(licenseContext.featureEntitlements)
+  const compatibleLicenseEntitlements = licenseContext.homeExperience === LICENSE_HOME_EXPERIENCES.CORE
+    ? licenseEntitlements.filter((key) => key !== 'WEBSITE')
+    : licenseEntitlements
+
+  // Once a customer has an explicit active licence level, that level is the
+  // sole entitlement source. Customer-level legacy overrides must not elevate
+  // or replace an explicit catalogue configuration.
+  if (licenseContext.licenseLevelId) {
+    return {
+      customerId: customerContext.customerId,
+      licenseLevelId: licenseContext.licenseLevelId,
+      featureEntitlements: compatibleLicenseEntitlements,
       entitlementSource: 'LICENSE_LEVEL',
       licenseLevelActive: licenseContext.licenseLevelActive,
+      homeExperience: licenseContext.homeExperience,
       topology: customerContext.topology,
       defaultTenantId: customerContext.defaultTenantId,
     }
@@ -150,6 +187,7 @@ export const resolveCustomerFeatureEntitlements = async ({ customerId, customer 
       featureEntitlements: customerContext.customerEntitlements,
       entitlementSource: 'CUSTOMER_OVERRIDE',
       licenseLevelActive: licenseContext.licenseLevelActive,
+      homeExperience: licenseContext.homeExperience,
       topology: customerContext.topology,
       defaultTenantId: customerContext.defaultTenantId,
     }
@@ -161,6 +199,7 @@ export const resolveCustomerFeatureEntitlements = async ({ customerId, customer 
     featureEntitlements: [...KNOWN_FEATURE_ENTITLEMENTS],
     entitlementSource: 'LEGACY_UNRESTRICTED',
     licenseLevelActive: licenseContext.licenseLevelActive,
+    homeExperience: licenseContext.homeExperience,
     topology: customerContext.topology,
     defaultTenantId: customerContext.defaultTenantId,
   }
@@ -191,6 +230,7 @@ export const listUserCustomerFeatureScopes = async (user) => {
       licenseLevelId: scope.licenseLevelId || null,
       featureEntitlements: scope.featureEntitlements,
       entitlementSource: scope.entitlementSource,
+      ...(scope.homeExperience ? { homeExperience: scope.homeExperience } : {}),
       ...(scope.topology ? { topology: scope.topology } : {}),
       ...(scope.defaultTenantId ? { defaultTenantId: scope.defaultTenantId } : {}),
     }))

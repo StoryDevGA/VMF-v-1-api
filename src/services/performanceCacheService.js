@@ -389,13 +389,14 @@ export const buildCustomerTopologySnapshot = (customer) => ({
 /**
  * Build a cacheable entitlement snapshot from a LicenseLevel document.
  * @param {import('../models/LicenseLevel.js').default} licenseLevel - Mongoose LicenseLevel document
- * @returns {{ _id: string, isActive: boolean, featureEntitlements: string[] }}
+ * @returns {{ _id: string, isActive: boolean, featureEntitlements: string[], homeExperience: string|null }}
  */
 export const buildLicenseLevelEntitlementSnapshot = (licenseLevel) => ({
   _id: licenseLevel._id,
   id: licenseLevel.id || normalizeId(licenseLevel._id),
   isActive: Boolean(licenseLevel.isActive),
   featureEntitlements: normalizeFeatureEntitlements(licenseLevel.featureEntitlements),
+  homeExperience: licenseLevel.homeExperience || null,
 })
 
 /* ------------------------------------------------------------------ */
@@ -700,7 +701,7 @@ const warmAuthorizationCaches = async (options = {}) => {
     LicenseLevel.find({ isActive: true })
       .sort({ updatedAt: -1 })
       .limit(customerLimit)
-      .select('_id isActive featureEntitlements')
+      .select('_id isActive featureEntitlements homeExperience')
       .lean(),
   ])
 

@@ -4,6 +4,11 @@ import {
   createParamsValidator,
   createQueryValidator,
 } from './shared.js'
+import {
+  LICENSE_HOME_EXPERIENCES,
+  isKnownLicenseEntitlement,
+  isLicenseEntitlementCompatible,
+} from '../constants/licenseEntitlements.js'
 
 const objectIdRegex = /^[a-f\d]{24}$/i
 const entitlementRegex = /^[A-Z][A-Z0-9_]*$/
@@ -37,9 +42,17 @@ const createLicenseLevelSchema = z.object({
     .refine(
       (entitlements) => new Set(entitlements).size === entitlements.length,
       'Feature entitlement keys must be unique',
+    )
+    .refine(
+      (entitlements) => entitlements.every(isKnownLicenseEntitlement),
+      'Feature entitlement keys must exist in the licence catalogue',
     ),
+  homeExperience: z.enum(Object.values(LICENSE_HOME_EXPERIENCES)).default(LICENSE_HOME_EXPERIENCES.SIGNAL),
   isActive: z.boolean().default(true),
-})
+}).refine(
+  (value) => isLicenseEntitlementCompatible(value),
+  { message: 'Core licence levels cannot include WEBSITE.', path: ['featureEntitlements'] },
+)
 
 const updateLicenseLevelSchema = z
   .object({
@@ -58,23 +71,34 @@ const updateLicenseLevelSchema = z
       .array(entitlementSchema)
       .max(500, 'Feature entitlement list must contain 500 items or fewer')
       .refine(
-        (entitlements) => new Set(entitlements).size === entitlements.length,
+      (entitlements) => new Set(entitlements).size === entitlements.length,
         'Feature entitlement keys must be unique',
       )
+      .refine(
+        (entitlements) => entitlements.every(isKnownLicenseEntitlement),
+        'Feature entitlement keys must exist in the licence catalogue',
+      )
       .optional(),
+    homeExperience: z.enum(Object.values(LICENSE_HOME_EXPERIENCES)).optional(),
     isActive: z.boolean().optional(),
+    deactivationConfirmation: z.string().trim().max(255).optional(),
   })
   .refine(
     (value) =>
       value.name !== undefined ||
       value.description !== undefined ||
       value.featureEntitlements !== undefined ||
+      value.homeExperience !== undefined ||
       value.isActive !== undefined,
     {
       message:
-        'At least one updatable field is required: name, description, featureEntitlements, or isActive',
+        'At least one updatable field is required: name, description, featureEntitlements, homeExperience, or isActive',
       path: ['name'],
     },
+  )
+  .refine(
+    (value) => isLicenseEntitlementCompatible(value),
+    { message: 'Core licence levels cannot include WEBSITE.', path: ['featureEntitlements'] },
   )
 
 const listLicenseLevelsQuerySchema = z.object({

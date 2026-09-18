@@ -2,6 +2,7 @@ import { Customer, LicenseLevel } from '../models/index.js'
 import auditService from '../services/auditService.js'
 import performanceCacheService from '../services/performanceCacheService.js'
 import { escapeRegex } from '../utils/controllerUtils.js'
+import { isLicenseEntitlementCompatible } from '../constants/licenseEntitlements.js'
 
 const DUPLICATE_LICENSE_LEVEL_NAME_MESSAGE = 'A licence level with this name already exists.'
 
@@ -14,6 +15,17 @@ const normalizeLicenseLevelName = (value) =>
 
 const isDuplicateLicenseLevelNameError = (err) =>
   err?.code === 11000 && (err?.keyPattern?.nameNormalized || err?.keyPattern?.name)
+
+const licenseLevelFieldsEqual = (current, next) => {
+  if (Array.isArray(current) || Array.isArray(next)) {
+    const currentValues = Array.isArray(current) ? current : []
+    const nextValues = Array.isArray(next) ? next : []
+    return currentValues.length === nextValues.length
+      && currentValues.every((value, index) => String(value) === String(nextValues[index]))
+  }
+
+  return String(current ?? '') === String(next ?? '')
+}
 
 export const listLicenseLevels = async (req, res, next) => {
   try {
@@ -116,6 +128,7 @@ export const createLicenseLevel = async (req, res, next) => {
         name: licenseLevel.name,
         description: licenseLevel.description,
         featureEntitlements: licenseLevel.featureEntitlements,
+        homeExperience: licenseLevel.homeExperience,
         isActive: licenseLevel.isActive,
       },
     })
@@ -163,8 +176,10 @@ export const getLicenseLevel = async (req, res, next) => {
       })
     }
 
+    const customerCount = await Customer.countDocuments({ licenseLevelId: licenseLevel._id })
+
     return res.status(200).json({
-      data: licenseLevel.toJSON(),
+      data: { ...licenseLevel.toJSON(), customerCount },
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
@@ -204,18 +219,56 @@ export const updateLicenseLevel = async (req, res, next) => {
       }
     }
 
+    if (!isLicenseEntitlementCompatible({
+      homeExperience: req.body.homeExperience ?? licenseLevel.homeExperience,
+      featureEntitlements: req.body.featureEntitlements ?? licenseLevel.featureEntitlements,
+    })) {
+      return res.status(422).json({
+        error: {
+          code: 'VALIDATION_FAILED',
+          message: 'Core licence levels cannot include WEBSITE.',
+          requestId: req.requestId,
+        },
+      })
+    }
+
     const diff = {}
-    const fields = ['name', 'description', 'featureEntitlements', 'isActive']
+    const wasActive = Boolean(licenseLevel.isActive)
+    const existingLicenseLevelName = licenseLevel.name.trim()
+    const fields = ['name', 'description', 'featureEntitlements', 'homeExperience', 'isActive']
     for (const field of fields) {
-      if (req.body[field] !== undefined) {
+      if (req.body[field] !== undefined && !licenseLevelFieldsEqual(licenseLevel[field], req.body[field])) {
         diff[field] = { from: licenseLevel[field], to: req.body[field] }
         licenseLevel[field] = req.body[field]
+      }
+    }
+
+    const isDeactivation = wasActive && licenseLevel.isActive === false
+    let affectedCustomerCount = 0
+    if (isDeactivation) {
+      affectedCustomerCount = await Customer.countDocuments({ licenseLevelId: licenseLevel._id })
+      if (affectedCustomerCount > 0 && req.body.deactivationConfirmation !== existingLicenseLevelName) {
+        return res.status(422).json({
+          error: {
+            code: 'VALIDATION_FAILED',
+            message: `Type the licence level name "${existingLicenseLevelName}" to deactivate it while customers are assigned.`,
+            details: { isActive: 'Confirmation does not match the licence level name.' },
+            requestId: req.requestId,
+          },
+        })
       }
     }
 
     const actorUserId = req.context?.userId || req.userId
     if (actorUserId) {
       licenseLevel.updatedBy = actorUserId
+    }
+
+    if (Object.keys(diff).length === 0) {
+      return res.status(200).json({
+        data: { ...licenseLevel.toJSON(), customerCount: await Customer.countDocuments({ licenseLevelId: licenseLevel._id }) },
+        meta: { requestId: req.requestId, version: 'v1' },
+      })
     }
 
     await licenseLevel.save()
@@ -229,8 +282,21 @@ export const updateLicenseLevel = async (req, res, next) => {
       diff,
     })
 
+    if (isDeactivation) {
+      await auditService.logFromRequest(req, {
+        action: auditService.AUDIT_ACTIONS.LICENSE_LEVEL_DEACTIVATED,
+        resourceType: auditService.RESOURCE_TYPES.LicenseLevel,
+        resourceId: licenseLevel._id,
+        scope: {},
+        diff: {
+          affectedCustomerCount,
+          confirmationRequired: affectedCustomerCount > 0,
+        },
+      })
+    }
+
     return res.status(200).json({
-      data: licenseLevel.toJSON(),
+      data: { ...licenseLevel.toJSON(), customerCount: await Customer.countDocuments({ licenseLevelId: licenseLevel._id }) },
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {

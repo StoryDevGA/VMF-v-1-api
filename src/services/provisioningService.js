@@ -52,6 +52,33 @@ const saveDocument = async (doc, session) => {
   return doc.save({ session })
 }
 
+export const logStartingCreditAudits = async (customer, req) => {
+  if (!customer || !req) return
+
+  const balances = {
+    websiteAnalysis: customer.creditBalances?.websiteAnalysis ?? 0,
+    documentImprovement: customer.creditBalances?.documentImprovement ?? 0,
+  }
+  const grants = [
+    { productKey: 'WEBSITE', balance: balances.websiteAnalysis },
+    { productKey: 'DOCUMENTS', balance: balances.documentImprovement },
+  ].filter(({ balance }) => Number(balance) > 0)
+
+  await Promise.all(grants.map(({ productKey, balance }) => auditService.logFromRequest(req, {
+    action: auditService.AUDIT_ACTIONS.CUSTOMER_CREDIT_ADJUSTED,
+    resourceType: auditService.RESOURCE_TYPES.Customer,
+    resourceId: customer._id,
+    scope: { customerId: customer._id },
+    diff: {
+      productKey,
+      delta: Number(balance),
+      resultingBalance: Number(balance),
+      reason: 'Starting credits at customer creation',
+      source: 'CUSTOMER_CREATE',
+    },
+  })))
+}
+
 const findCustomerByNormalizedName = async (normalizedName, session) => {
   if (!normalizedName) return null
   const query = Customer.findOne({ nameNormalized: normalizedName }).select('_id')
@@ -158,6 +185,10 @@ export const createCustomerWithDefaults = async (payload, actorUserId, req, opti
     governance: payload.governance || undefined,
     status: 'ACTIVE',
     entitlements: payload.entitlements || [],
+    creditBalances: {
+      websiteAnalysis: payload.startingCredits?.websiteAnalysis ?? 0,
+      documentImprovement: payload.startingCredits?.documentImprovement ?? 0,
+    },
     billing: payload.billing || DEFAULT_BILLING,
     trial: payload.trial || { isTrial: false },
     createdBy: actorUserId,
@@ -196,7 +227,14 @@ export const createCustomerWithDefaults = async (payload, actorUserId, req, opti
         resourceType: 'Customer',
         resourceId: customer._id,
         scope: { customerId: customer._id },
-        diff: null,
+        diff: {
+          creditBalances: {
+            websiteAnalysis: customer.creditBalances?.websiteAnalysis ?? 0,
+            documentImprovement: customer.creditBalances?.documentImprovement ?? 0,
+          },
+          creditSource: 'CUSTOMER_CREATE',
+          creditReason: 'Starting credits at customer creation',
+        },
       })
       await auditService.logFromRequest(req, {
         action: 'TENANT_CREATED',
@@ -242,7 +280,14 @@ export const createCustomerWithDefaults = async (payload, actorUserId, req, opti
         resourceType: 'Customer',
         resourceId: customer._id,
         scope: { customerId: customer._id },
-        diff: null,
+        diff: {
+          creditBalances: {
+            websiteAnalysis: customer.creditBalances?.websiteAnalysis ?? 0,
+            documentImprovement: customer.creditBalances?.documentImprovement ?? 0,
+          },
+          creditSource: 'CUSTOMER_CREATE',
+          creditReason: 'Starting credits at customer creation',
+        },
       })
     }
 
@@ -251,6 +296,8 @@ export const createCustomerWithDefaults = async (payload, actorUserId, req, opti
       'provisioning - multi-tenant customer created (no default tenant)',
     )
   }
+
+  if (!skipAudit) await logStartingCreditAudits(result.customer, req)
 
   return result
 }

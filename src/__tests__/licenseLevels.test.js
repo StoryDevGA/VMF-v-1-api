@@ -45,7 +45,7 @@ const makeFakeLicenseLevel = (overrides = {}) => ({
   id: LICENSE_LEVEL_ID,
   name: 'Standard',
   description: 'Standard tier',
-  featureEntitlements: ['FEATURE_A'],
+  featureEntitlements: ['VMF'],
   isActive: true,
   createdBy: SUPER_ADMIN_ID,
   updatedBy: SUPER_ADMIN_ID,
@@ -138,6 +138,7 @@ beforeEach(() => {
   LicenseLevel.prototype.save = jest.fn(async function save() {
     return this
   })
+  Customer.countDocuments = jest.fn().mockResolvedValue(0)
   Customer.aggregate = jest.fn().mockResolvedValue([])
 
   AuditLog.createLog = jest.fn(async () => ({}))
@@ -176,7 +177,7 @@ describe('Licence Level Routes', () => {
       .set('Authorization', `Bearer ${token}`)
       .send({
         description: 'Tier without name',
-        featureEntitlements: ['FEATURE_A'],
+        featureEntitlements: ['VMF'],
       })
 
     expect(res.status).toBe(422)
@@ -194,15 +195,35 @@ describe('Licence Level Routes', () => {
       .send({
         name: 'Enterprise',
         description: 'Top tier',
-        featureEntitlements: ['FEATURE_A', 'FEATURE_B'],
+        featureEntitlements: ['VMF', 'DEALS'],
         isActive: true,
       })
 
     expect(res.status).toBe(201)
     expect(res.body.data.name).toBe('Enterprise')
-    expect(res.body.data.featureEntitlements).toEqual(['FEATURE_A', 'FEATURE_B'])
+    expect(res.body.data.featureEntitlements).toEqual(['VMF', 'DEALS'])
     expect(LicenseLevel.prototype.save).toHaveBeenCalled()
     expect(AuditLog.createLog).toHaveBeenCalled()
+  })
+
+  test('POST /api/v1/super-admin/licence-levels rejects an unknown entitlement key', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    mockFindOneSelect(null)
+
+    const res = await request
+      .post('/api/v1/super-admin/licence-levels')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        name: 'Unregistered entitlement tier',
+        description: 'Must not be persisted',
+        featureEntitlements: ['NOT_REGISTERED'],
+        isActive: true,
+      })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.details).toHaveProperty('featureEntitlements')
+    expect(LicenseLevel.prototype.save).not.toHaveBeenCalled()
   })
 
   test('POST /api/v1/super-admin/licence-levels returns 409 for duplicate name', async () => {
@@ -229,7 +250,7 @@ describe('Licence Level Routes', () => {
         _id: LICENSE_LEVEL_ID,
         name: 'Standard',
         description: 'Standard tier',
-        featureEntitlements: ['FEATURE_A'],
+        featureEntitlements: ['VMF'],
         isActive: true,
       },
     ]
@@ -304,13 +325,29 @@ describe('Licence Level Routes', () => {
       .set('Authorization', `Bearer ${token}`)
       .send({
         description: 'Updated tier description',
-        featureEntitlements: ['FEATURE_A', 'FEATURE_C'],
+        featureEntitlements: ['VMF', 'VIEWS'],
       })
 
     expect(res.status).toBe(200)
     expect(licenseLevel.save).toHaveBeenCalled()
     expect(res.body.data.description).toBe('Updated tier description')
-    expect(res.body.data.featureEntitlements).toEqual(['FEATURE_A', 'FEATURE_C'])
+    expect(res.body.data.featureEntitlements).toEqual(['VMF', 'VIEWS'])
     expect(AuditLog.createLog).toHaveBeenCalled()
+  })
+
+  test('PATCH deactivation requires typed confirmation when customers are assigned', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const licenseLevel = makeFakeLicenseLevel()
+    LicenseLevel.findById.mockResolvedValue(licenseLevel)
+    Customer.countDocuments.mockResolvedValue(14)
+
+    const res = await request
+      .patch(`/api/v1/super-admin/licence-levels/${LICENSE_LEVEL_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ isActive: false })
+
+    expect(res.status).toBe(422)
+    expect(res.body.error.details.isActive).toContain('Confirmation does not match')
+    expect(licenseLevel.save).not.toHaveBeenCalled()
   })
 })

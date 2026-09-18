@@ -7,7 +7,8 @@
  */
 
 import { z } from 'zod'
-import { createBodyValidator } from './shared.js'
+import { createBodyValidator, createParamsValidator } from './shared.js'
+import { isKnownLicenseEntitlement } from '../constants/licenseEntitlements.js'
 
 /* ------------------------------------------------------------------ */
 /*  Schemas                                                           */
@@ -62,6 +63,17 @@ const objectIdString = z
   .string()
   .regex(objectIdRegex, 'Must be a valid ObjectId')
 
+const entitlementKeySchema = z
+  .string()
+  .trim()
+  .min(1, 'Feature entitlement key is required')
+  .max(100, 'Feature entitlement key must be 100 characters or fewer')
+  .transform((value) => value.toUpperCase())
+  .refine(
+    (value) => isKnownLicenseEntitlement(value),
+    'Feature entitlement key must exist in the licence catalogue',
+  )
+
 const governanceSchema = z
   .object({
     maxTenants: z
@@ -98,6 +110,17 @@ const governanceUpdateSchema = z
   .strict()
   .optional()
 
+const creditAmountSchema = z
+  .number({ invalid_type_error: 'Credit balance must be a number' })
+  .int('Credit balance must be a whole number')
+  .min(0, 'Credit balance cannot be negative')
+  .max(1000000000, 'Credit balance is too large')
+
+const startingCreditsSchema = z.object({
+  websiteAnalysis: creditAmountSchema.default(0),
+  documentImprovement: creditAmountSchema.default(0),
+}).default({ websiteAnalysis: 0, documentImprovement: 0 })
+
 const createCustomerSchema = z
   .object({
     name: z
@@ -111,7 +134,8 @@ const createCustomerSchema = z
     isServiceProvider: z.boolean().default(false),
     licenseLevelId: objectIdString.optional(),
     governance: governanceSchema,
-    entitlements: z.array(z.string().trim()).default([]),
+    entitlements: z.array(entitlementKeySchema).max(500).default([]),
+    startingCredits: startingCreditsSchema,
     billing: billingSchema,
     trial: trialSchema.optional(),
   })
@@ -137,12 +161,15 @@ const updateCustomerSchema = z.object({
     .max(255, 'Name must be 255 characters or fewer')
     .optional(),
   website: websiteSchema.optional(),
-  isServiceProvider: z.boolean().optional(),
-  licenseLevelId: objectIdString.optional(),
+  licenseLevelId: objectIdString.nullable().optional(),
   governance: governanceUpdateSchema,
-  entitlements: z.array(z.string().trim()).optional(),
+  entitlements: z.array(entitlementKeySchema).max(500).optional(),
   billing: billingSchema.optional(),
   trial: trialSchema.optional(),
+}).strict()
+
+const customerIdParamsSchema = z.object({
+  customerId: objectIdString,
 })
 
 const updateStatusSchema = z.object({
@@ -150,6 +177,21 @@ const updateStatusSchema = z.object({
     required_error: 'Status is required',
     invalid_type_error: 'Status must be ACTIVE, INACTIVE, DISABLED, or ARCHIVED',
   }),
+})
+
+const adjustCreditSchema = z.object({
+  productKey: z.enum(['WEBSITE', 'DOCUMENTS'], {
+    required_error: 'productKey is required',
+    invalid_type_error: 'productKey must be WEBSITE or DOCUMENTS',
+  }),
+  delta: z
+    .number({ required_error: 'delta is required', invalid_type_error: 'delta must be a number' })
+    .int('delta must be a whole number')
+    .min(-1000000000, 'delta is too small')
+    .max(1000000000, 'delta is too large')
+    .refine((value) => value !== 0, 'delta must not be zero'),
+  reason: z.string({ required_error: 'reason is required' }).trim().min(1).max(500),
+  source: z.string().trim().min(1).max(100).default('MANUAL'),
 })
 
 const assignAdminSchema = z
@@ -238,7 +280,9 @@ const replaceAdminSchema = z.object({
 
 export const validateCreateCustomer = createBodyValidator(createCustomerSchema)
 export const validateUpdateCustomer = createBodyValidator(updateCustomerSchema)
+export const validateCustomerId = createParamsValidator(customerIdParamsSchema)
 export const validateUpdateStatus = createBodyValidator(updateStatusSchema)
+export const validateAdjustCredit = createBodyValidator(adjustCreditSchema)
 export const validateAssignAdmin = createBodyValidator(assignAdminSchema)
 export const validateCreateAdminInvitation = createBodyValidator(createAdminInvitationSchema)
 export const validateReplaceAdmin = createBodyValidator(replaceAdminSchema)

@@ -1,4 +1,5 @@
 import mongoose from 'mongoose'
+import { LICENSE_HOME_EXPERIENCES } from '../constants/licenseEntitlements.js'
 
 const normalizeLicenseLevelName = (value) =>
   String(value || '')
@@ -37,6 +38,11 @@ const licenseLevelSchema = new mongoose.Schema(
       trim: true,
       maxlength: 1000,
       default: '',
+    },
+    homeExperience: {
+      type: String,
+      enum: Object.values(LICENSE_HOME_EXPERIENCES),
+      required: true,
     },
     featureEntitlements: [
       {

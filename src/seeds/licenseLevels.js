@@ -14,6 +14,7 @@ const defaultLicenseLevelSeed = Object.freeze({
   description:
     'Default legacy licence level for customers migrated before strict governance rollout.',
   featureEntitlements: [],
+  homeExperience: 'SIGNAL',
   isActive: true,
 })
 

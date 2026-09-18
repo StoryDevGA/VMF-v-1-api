@@ -95,6 +95,18 @@ const customerSchema = new mongoose.Schema({
     type: String,
     trim: true
   }],
+  creditBalances: {
+    websiteAnalysis: {
+      type: Number,
+      min: 0,
+      default: 0,
+    },
+    documentImprovement: {
+      type: Number,
+      min: 0,
+      default: 0,
+    },
+  },
   billing: {
     planCode: {
       type: String,
