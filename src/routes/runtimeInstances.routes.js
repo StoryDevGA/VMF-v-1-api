@@ -31,6 +31,7 @@ import {
   getRuntimeOutcomeDraftCompare,
   getRuntimeOutcomeDraftPreview,
   getRuntimeInstance,
+  getRuntimeInstanceSummary,
   getRuntimeEvidence,
   getRuntimeIntelligenceGraph,
   getRuntimeIntelligenceGraphCoverage,
@@ -58,6 +59,7 @@ import {
   listRuntimeOutputAssets,
   listRuntimeOutcomeSessionAssets,
   listRuntimeOutcomeAssetRenderOutputs,
+  listRuntimeInstanceActivity,
   listRuntimeInstances,
   listAvailableFrameworkPackages,
   mutateRuntimeState,
@@ -95,6 +97,7 @@ import {
   validateApproveRuntimeOutcomeDraft,
   validateGovernedReasoningExecutionParams,
   validateListRuntimeInstances,
+  validateListRuntimeInstanceActivity,
   validateListFrameworkPackages,
   validateMutateRuntimeState,
   validatePublishRuntimeOutputAsset,
@@ -125,6 +128,7 @@ import {
   validateRuntimeOutcomeSessionAssetParams,
   validateRuntimeActionParams,
   validateRuntimeInstanceId,
+  validateRuntimeInstanceSummaryQuery,
   validateRuntimeSectionEvidenceParams,
   validateUpdateRuntimeOutcomeSessionFromLatestTruth,
   validateUpdateDiscoveryInputs,
@@ -157,6 +161,8 @@ router.use((req, res, next) => (
 // `/:runtimeInstanceId` route so "framework-packages" is never treated as an id.
 router.get('/framework-packages', validateListFrameworkPackages, listAvailableFrameworkPackages)
 router.get('/', validateListRuntimeInstances, listRuntimeInstances)
+router.get('/activity', validateListRuntimeInstanceActivity, listRuntimeInstanceActivity)
+router.get('/:runtimeInstanceId/summary', validateRuntimeInstanceId, validateRuntimeInstanceSummaryQuery, getRuntimeInstanceSummary)
 router.post('/', validateCreateRuntimeInstance, createRuntimeInstance)
 router.get('/:runtimeInstanceId/state/bootstrap', validateRuntimeInstanceId, getRuntimeStateBootstrap)
 router.get('/:runtimeInstanceId/state/sections/:sectionKey', validateRuntimeInstanceId, getRuntimeStateSectionSummary)

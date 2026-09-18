@@ -1,6 +1,7 @@
 import { selectRuntimeDisplayPin } from './runtimeDisplayBindingService.js'
 import mongoose from 'mongoose'
 import {
+  AuditLog,
   Customer,
   FrameworkPackage,
   RuntimeActivationSnapshot,
@@ -1174,6 +1175,7 @@ export const listRuntimeInstances = async ({
   const tenantId = query.tenantId
   const runtimeType = normalizeToken(query.runtimeType)
   const status = query.status ? normalizeToken(query.status) : null
+  const lifecycleStage = query.lifecycleStage ? normalizeToken(query.lifecycleStage) : null
   const searchQuery = String(query.q || '').trim()
   const page = Math.max(1, Number(query.page) || 1)
   const pageSize = Math.min(100, Math.max(1, Number(query.pageSize) || 20))
@@ -1196,6 +1198,7 @@ export const listRuntimeInstances = async ({
   const filter = { customerId, tenantId }
   filter.runtimeType = runtimeType
   if (status) filter.status = status
+  if (lifecycleStage) filter['framework_state.lifecycle.stage'] = lifecycleStage
   if (searchQuery) {
     const searchPattern = new RegExp(escapeRegExp(searchQuery), 'i')
     filter.$or = [
@@ -1253,6 +1256,47 @@ export const listRuntimeInstances = async ({
   }
 }
 
+export const getRuntimeInstanceSummary = async ({
+  scopes,
+  customerId,
+  tenantId,
+  runtimeInstanceId,
+} = {}) => {
+  await assertRuntimePermission({
+    scopes,
+    customerId,
+    tenantId,
+    permission: 'VMF_VIEW',
+  })
+
+  const { customer } = await assertCustomerTenantContext({ customerId, tenantId })
+  await assertFeatureEntitlement({
+    customerId,
+    customer,
+    feature: getFeatureForRuntimeType(RUNTIME_TYPES.VALUE_NARRATIVE),
+  })
+
+  const runtimeInstance = await RuntimeInstance.findOne({
+    _id: runtimeInstanceId,
+    customerId,
+    tenantId,
+    runtimeType: RUNTIME_TYPES.VALUE_NARRATIVE,
+  })
+    .select(RUNTIME_INSTANCE_LIST_PROJECTION)
+    .lean()
+
+  if (!runtimeInstance) {
+    throw createRuntimeInstanceError({
+      status: 404,
+      code: 'NOT_FOUND',
+      message: 'Runtime instance summary not found.',
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_INSTANCE_NOT_FOUND,
+    })
+  }
+
+  return serializeRuntimeInstanceSummary(runtimeInstance)
+}
+
 export const listAvailableFrameworkPackages = async ({
   scopes,
   query = {},
@@ -1260,6 +1304,7 @@ export const listAvailableFrameworkPackages = async ({
   const customerId = query.customerId
   const tenantId = query.tenantId
   const runtimeType = normalizeToken(query.runtimeType || RUNTIME_TYPES.VALUE_NARRATIVE)
+  const limit = Math.min(100, Math.max(1, Number(query.limit) || CUSTOMER_ACTIVITY_LIMIT))
   const frameworkKey = normalizeToken(query.frameworkKey || VMF_FRAMEWORK_KEY)
   const page = Math.max(1, Number(query.page) || 1)
   const pageSize = Math.min(100, Math.max(1, Number(query.pageSize) || 100))
@@ -1310,6 +1355,98 @@ export const listAvailableFrameworkPackages = async ({
       requestId: query.requestId || null,
       version: 'v1',
     },
+  }
+}
+
+const CUSTOMER_ACTIVITY_LIMIT = 5
+
+const clampCustomerActivityText = (value) => {
+  const text = String(value ?? '').trim()
+  if (!text) return ''
+  return text.length <= 240 ? text : `${text.slice(0, 237).trimEnd()}...`
+}
+
+export const serializeCustomerRuntimeActivity = (entry = {}) => {
+  const summary = clampCustomerActivityText(
+    entry.summary
+      || entry.display?.resourceLabel
+      || entry.display?.targetLabel
+      || entry.action,
+  )
+  if (!summary) return null
+
+  return {
+    id: toIdString(entry._id || entry.id),
+    runtimeInstanceId: toIdString(entry.scope?.runtimeInstanceId || entry.resourceId),
+    runtimeInstanceKey: String(entry.scope?.runtimeInstanceKey || '').trim(),
+    runtimeName: String(entry.runtimeName || '').trim(),
+    action: normalizeToken(entry.action),
+    summary,
+    occurredAt: entry.ts || null,
+  }
+}
+
+export const listRuntimeInstanceActivity = async ({
+  scopes,
+  query,
+} = {}) => {
+  const safeQuery = query || {}
+  const customerId = safeQuery.customerId
+  const tenantId = safeQuery.tenantId
+  const runtimeType = normalizeToken(safeQuery.runtimeType || RUNTIME_TYPES.VALUE_NARRATIVE)
+  const limit = Math.min(Math.max(Number(safeQuery.limit) || CUSTOMER_ACTIVITY_LIMIT, 1), 100)
+
+  await assertRuntimePermission({
+    scopes,
+    customerId,
+    tenantId,
+    permission: runtimeType === RUNTIME_TYPES.DEAL_ANALYSIS ? 'DEAL_VIEW' : 'VMF_VIEW',
+  })
+
+  const { customer } = await assertCustomerTenantContext({ customerId, tenantId })
+  await assertFeatureEntitlement({
+    customerId,
+    customer,
+    feature: getFeatureForRuntimeType(runtimeType),
+  })
+
+  const runtimeRows = await RuntimeInstance.find({
+    customerId: new mongoose.Types.ObjectId(customerId),
+    tenantId: new mongoose.Types.ObjectId(tenantId),
+    runtimeType,
+  })
+    .select('_id name runtimeInstanceKey')
+    .limit(1000)
+    .lean()
+
+  const runtimeIds = runtimeRows.map((runtime) => runtime._id)
+  if (runtimeIds.length === 0) return { data: [], meta: { limit } }
+
+  const runtimeById = new Map(runtimeRows.map((runtime) => [
+    toIdString(runtime._id),
+    runtime,
+  ]))
+
+  const rows = await AuditLog.find({
+    'scope.customerId': new mongoose.Types.ObjectId(customerId),
+    'scope.tenantId': new mongoose.Types.ObjectId(tenantId),
+    resourceType: 'RuntimeInstance',
+    $or: [
+      { 'scope.runtimeInstanceId': { $in: runtimeIds } },
+      { resourceId: { $in: runtimeIds } },
+    ],
+  })
+    .select('_id ts action summary display resourceId scope.runtimeInstanceId scope.runtimeInstanceKey')
+    .sort({ ts: -1, _id: -1 })
+    .limit(limit)
+    .lean()
+
+  return {
+    data: rows.map((row) => serializeCustomerRuntimeActivity({
+      ...row,
+      runtimeName: runtimeById.get(toIdString(row.scope?.runtimeInstanceId || row.resourceId))?.name || '',
+    })).filter(Boolean),
+    meta: { limit },
   }
 }
 

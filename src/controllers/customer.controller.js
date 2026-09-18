@@ -22,6 +22,7 @@ import emailService from '../services/emailService.js'
 import invitationService from '../services/invitationService.js'
 import { applyManualTestPasswordBootstrap } from '../services/manualTestPasswordBootstrapService.js'
 import { adjustCustomerCredit, normalizeCreditBalances } from '../services/customerCreditService.js'
+import { escapeRegex } from '../utils/controllerUtils.js'
 import logger from '../config/logger.js'
 import env from '../config/env.js'
 
@@ -31,8 +32,6 @@ const INVITATION_CONFLICT_REASONS = Object.freeze({
   OTHER_CUSTOMER: 'other-customer',
   DIFFERENT_USER: 'different-user',
 })
-
-const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 const normalizeCustomerName = (value) =>
   String(value || '')
@@ -453,9 +452,10 @@ export const listCustomers = async (req, res, next) => {
  */
 export const createCustomer = async (req, res, next) => {
   try {
+    let selectedLicense = null
     if (req.body.licenseLevelId !== undefined && req.body.licenseLevelId !== null) {
-      const licenseLevelExists = await validateLicenseLevelExists(req.body.licenseLevelId)
-      if (!licenseLevelExists) {
+      selectedLicense = await LicenseLevel.findById(req.body.licenseLevelId).select('_id homeExperience')
+      if (!selectedLicense) {
         return res.status(422).json({
           error: {
             code: 'VALIDATION_FAILED',
@@ -468,9 +468,6 @@ export const createCustomer = async (req, res, next) => {
 
     const startingCredits = req.body.startingCredits || { websiteAnalysis: 0, documentImprovement: 0 }
     if (startingCredits.websiteAnalysis > 0 || startingCredits.documentImprovement > 0) {
-      const selectedLicense = req.body.licenseLevelId
-        ? await LicenseLevel.findById(req.body.licenseLevelId).select('homeExperience')
-        : null
       if (selectedLicense?.homeExperience !== 'SIGNAL') {
         return res.status(422).json({
           error: {
@@ -611,16 +608,6 @@ export const updateCustomer = async (req, res, next) => {
           },
         })
       }
-    }
-
-    if (req.body.governance?.customerAdminUserId !== undefined) {
-      return res.status(422).json({
-        error: {
-          code: 'VALIDATION_FAILED',
-          message: 'governance.customerAdminUserId is managed by admin assignment and replacement endpoints.',
-          requestId: req.requestId,
-        },
-      })
     }
 
     const allowedFields = [
@@ -773,6 +760,27 @@ export const adjustCustomerCredits = async (req, res, next) => {
     session = await mongoose.startSession()
     let result
     await session.withTransaction(async () => {
+      const customerQuery = Customer.findById(req.params.customerId).select('_id licenseLevelId')
+      const customer = await customerQuery.session(session)
+      if (!customer) {
+        const error = new Error('Customer not found.')
+        error.status = 404
+        error.code = 'NOT_FOUND'
+        throw error
+      }
+
+      const licenseLevelQuery = customer.licenseLevelId
+        ? LicenseLevel.findById(customer.licenseLevelId).select('homeExperience')
+        : null
+      const licenseLevel = licenseLevelQuery ? await licenseLevelQuery.session(session) : null
+      if (licenseLevel?.homeExperience !== 'SIGNAL') {
+        const error = new Error('Credit adjustments are only available for Signal licence levels.')
+        error.status = 422
+        error.code = 'VALIDATION_FAILED'
+        error.details = { licenseLevelId: 'The customer must have a Signal licence level.' }
+        throw error
+      }
+
       result = await adjustCustomerCredit({
         customerId: req.params.customerId,
         productKey: req.body.productKey,
@@ -813,7 +821,12 @@ export const adjustCustomerCredits = async (req, res, next) => {
   } catch (err) {
     if (err?.status) {
       return res.status(err.status).json({
-        error: { code: err.code || 'VALIDATION_FAILED', message: err.message, requestId: req.requestId },
+        error: {
+          code: err.code || 'VALIDATION_FAILED',
+          message: err.message,
+          ...(err.details ? { details: err.details } : {}),
+          requestId: req.requestId,
+        },
       })
     }
     next(err)

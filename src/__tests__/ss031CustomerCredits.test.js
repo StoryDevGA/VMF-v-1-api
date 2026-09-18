@@ -79,4 +79,8 @@ describe('SS-031 customer credit boundaries', () => {
     expect(plan.licenseOperations[0].updateOne.update.$set.homeExperience).toBe('SIGNAL')
     expect(plan.customerOperations).toHaveLength(0)
   })
+
+  afterEach(() => {
+    jest.restoreAllMocks()
+  })
 })

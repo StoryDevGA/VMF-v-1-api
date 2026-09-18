@@ -838,6 +838,13 @@ const listRuntimeInstancesSchema = z.object({
       invalid_type_error: 'status must be a supported runtime instance status',
     })
     .optional(),
+  lifecycleStage: z
+    .string()
+    .trim()
+    .min(1)
+    .max(80)
+    .regex(/^[A-Za-z][A-Za-z0-9_ -]*$/, 'lifecycleStage must be a valid lifecycle token')
+    .optional(),
   q: z
     .string()
     .trim()
@@ -845,6 +852,22 @@ const listRuntimeInstancesSchema = z.object({
     .optional(),
   page: z.coerce.number().int().min(1).optional().default(1),
   pageSize: z.coerce.number().int().min(1).max(100).optional().default(20),
+}).strict()
+
+const listRuntimeInstanceActivitySchema = z.object({
+  customerId: z
+    .string({ required_error: 'customerId is required' })
+    .regex(objectIdRegex, 'customerId must be a valid ObjectId'),
+  tenantId: z
+    .string({ required_error: 'tenantId is required' })
+    .regex(objectIdRegex, 'tenantId must be a valid ObjectId'),
+  runtimeType: z
+    .enum(Object.values(RUNTIME_TYPES), {
+      invalid_type_error: 'runtimeType must be a supported runtime type',
+    })
+    .optional()
+    .default(RUNTIME_TYPES.VALUE_NARRATIVE),
+  limit: z.coerce.number().int().min(1).max(100).optional().default(5),
 }).strict()
 
 const listFrameworkPackagesSchema = z.object({
@@ -1219,6 +1242,11 @@ export const validateListRuntimeInstances = createQueryValidator(listRuntimeInst
   rootIssueKey: '_root',
 })
 
+export const validateListRuntimeInstanceActivity = createQueryValidator(listRuntimeInstanceActivitySchema, {
+  message: 'Invalid activity query parameters.',
+  rootIssueKey: '_root',
+})
+
 export const validateListFrameworkPackages = createQueryValidator(listFrameworkPackagesSchema, {
   message: 'Invalid query parameters.',
   rootIssueKey: '_root',
@@ -1226,6 +1254,16 @@ export const validateListFrameworkPackages = createQueryValidator(listFrameworkP
 
 export const validateRuntimeInstanceId = createParamsValidator(runtimeInstanceIdSchema, {
   message: 'Invalid request parameters.',
+  rootIssueKey: '_root',
+})
+
+const runtimeInstanceSummaryQuerySchema = z.object({
+  customerId: z.string({ required_error: 'customerId is required' }).regex(objectIdRegex),
+  tenantId: z.string({ required_error: 'tenantId is required' }).regex(objectIdRegex),
+}).strict()
+
+export const validateRuntimeInstanceSummaryQuery = createQueryValidator(runtimeInstanceSummaryQuerySchema, {
+  message: 'Invalid runtime summary query parameters.',
   rootIssueKey: '_root',
 })
 

@@ -227,6 +227,9 @@ export const updateLicenseLevel = async (req, res, next) => {
         error: {
           code: 'VALIDATION_FAILED',
           message: 'Core licence levels cannot include WEBSITE.',
+          // Field-scoped detail so the client maps this onto the entitlements field
+          // instead of only surfacing it as a toast.
+          details: { featureEntitlements: 'Core licence levels cannot include WEBSITE.' },
           requestId: req.requestId,
         },
       })
@@ -259,6 +262,10 @@ export const updateLicenseLevel = async (req, res, next) => {
       }
     }
 
+    const customerCount = isDeactivation
+      ? affectedCustomerCount
+      : await Customer.countDocuments({ licenseLevelId: licenseLevel._id })
+
     const actorUserId = req.context?.userId || req.userId
     if (actorUserId) {
       licenseLevel.updatedBy = actorUserId
@@ -266,7 +273,7 @@ export const updateLicenseLevel = async (req, res, next) => {
 
     if (Object.keys(diff).length === 0) {
       return res.status(200).json({
-        data: { ...licenseLevel.toJSON(), customerCount: await Customer.countDocuments({ licenseLevelId: licenseLevel._id }) },
+        data: { ...licenseLevel.toJSON(), customerCount },
         meta: { requestId: req.requestId, version: 'v1' },
       })
     }
@@ -296,7 +303,7 @@ export const updateLicenseLevel = async (req, res, next) => {
     }
 
     return res.status(200).json({
-      data: { ...licenseLevel.toJSON(), customerCount: await Customer.countDocuments({ licenseLevelId: licenseLevel._id }) },
+      data: { ...licenseLevel.toJSON(), customerCount },
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {

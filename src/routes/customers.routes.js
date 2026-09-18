@@ -65,7 +65,7 @@ router.post(
   validateCreateCustomer,
   createCustomer,
 )
-router.get('/:customerId', requirePlatformPermission('CUSTOMER_VIEW'), getCustomer)
+router.get('/:customerId', requirePlatformPermission('CUSTOMER_VIEW'), validateCustomerId, getCustomer)
 router.get(
   '/:customerId/credits',
   validateCustomerId,
@@ -88,6 +88,7 @@ router.patch(
   '/:customerId',
   requirePlatformPermission('CUSTOMER_UPDATE'),
   tenantManagementRateLimit,
+  validateCustomerId,
   validateUpdateCustomer,
   updateCustomer,
 )
@@ -95,6 +96,7 @@ router.patch(
   '/:customerId/status',
   requirePlatformPermission('CUSTOMER_UPDATE'),
   tenantManagementRateLimit,
+  validateCustomerId,
   validateUpdateStatus,
   updateCustomerStatus,
 )
@@ -102,6 +104,7 @@ router.post(
   '/:customerId/admins',
   requirePlatformPermission('CUSTOMER_UPDATE'),
   tenantManagementRateLimit,
+  validateCustomerId,
   validateAssignAdmin,
   assignAdmin,
 )
@@ -109,6 +112,7 @@ router.post(
   '/:customerId/admin-invitations',
   requirePlatformPermission('CUSTOMER_UPDATE'),
   tenantManagementRateLimit,
+  validateCustomerId,
   validateCreateAdminInvitation,
   createAdminInvitation,
 )
@@ -117,6 +121,7 @@ router.post(
   requirePlatformPermission('CUSTOMER_UPDATE'),
   tenantManagementRateLimit,
   requireStepUp,
+  validateCustomerId,
   validateReplaceAdmin,
   replaceAdmin,
 )

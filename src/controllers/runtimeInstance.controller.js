@@ -1,7 +1,9 @@
 import {
   createRuntimeInstance as createRuntimeInstanceRecord,
   getRuntimeInstance as getRuntimeInstanceRecord,
+  getRuntimeInstanceSummary as getRuntimeInstanceSummaryRecord,
   listAvailableFrameworkPackages as listAvailableFrameworkPackageRecords,
+  listRuntimeInstanceActivity as listRuntimeInstanceActivityRecords,
   listRuntimeInstances as listRuntimeInstanceRecords,
 } from '../services/runtimeInstanceService.js'
 import { createRuntimeRevision as createRuntimeRevisionRecord } from '../services/runtimeRevisionService.js'
@@ -335,6 +337,50 @@ export const buildRuntimeStateRequestScopes = ({ scopes = {}, query = {} } = {})
       _id: tenantId,
       customerId: tenantCustomerId,
     },
+  }
+}
+
+export const getRuntimeInstanceSummary = async (req, res, next) => {
+  try {
+    const runtimeInstance = await getRuntimeInstanceSummaryRecord({
+      scopes: req.scopes,
+      customerId: req.query.customerId,
+      tenantId: req.query.tenantId,
+      runtimeInstanceId: req.params.runtimeInstanceId,
+    })
+
+    return res.status(200).json({
+      data: runtimeInstance,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const listRuntimeInstanceActivity = async (req, res, next) => {
+  try {
+    const { data, meta } = await listRuntimeInstanceActivityRecords({
+      scopes: req.scopes,
+      query: req.query,
+    })
+
+    return res.status(200).json({
+      data,
+      meta: {
+        ...meta,
+        requestId: req.requestId,
+        version: 'v1',
+      },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
+    }
+    return next(err)
   }
 }
 
