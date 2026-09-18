@@ -42,6 +42,9 @@ import { buildCommercialStrategyDecisionPaperSourceIntakePlan } from '../service
 import { buildCommercialStrategyDecisionPaperSprintEvidenceSnapshot } from '../services/outcomeCommercialStrategyDecisionPaperSprintEvidenceService.js'
 
 const makePack = (packKey, overrides = {}) => ({
+  packType: ANDREW_DERIVED_COMMERCIAL_REASONING_PACKS.find((pack) => pack.packKey === packKey)?.packType,
+  executionMode: 'PROVIDER_CONTEXT',
+  contentHash: `sha256:${'a'.repeat(64)}`,
   activationId: `activation-${packKey}`,
   packId: `pack-${packKey}`,
   versionId: `version-${packKey}`,
@@ -145,6 +148,49 @@ const candidateReference = (overrides = {}) => ({
 })
 
 describe('Commercial strategy decision paper readiness projection', () => {
+  const renamedMethods = () => allSelectedPacks().map((pack) => ['ARL', 'RL'].includes(pack.packType)
+    ? { ...pack, packKey: `uploaded-${pack.packType.toLowerCase()}-method` } : pack)
+
+  it('accepts renamed ARL/RL and deduplicates repeated projections by exact activation identity', () => {
+    const packs = renamedMethods()
+    const report = buildCommercialStrategyDecisionPaperReadinessReport({ candidate: makeCandidate(packs),
+      binding: { mandatorySafeguards: packs.filter((pack) => pack.packType === 'ARL'),
+        selectedByLayer: { FRAMEWORK: packs.filter((pack) => pack.packType === 'RL') } } })
+    expect(report.status).toBe('READY')
+    for (const role of ['ARL', 'RL']) {
+      const source = packs.find((pack) => pack.packType === role)
+      expect(report.requiredPacks.find((pack) => pack.packType === role)).toMatchObject({
+        packKey: source.packKey, activationId: source.activationId, versionId: source.versionId,
+        contentHash: source.contentHash, eligible: true,
+      })
+    }
+  })
+
+  it.each(['ARL', 'RL'])('blocks missing and multiple distinct %s activations', (role) => {
+    const packs = renamedMethods()
+    const missing = packs.filter((pack) => pack.packType !== role)
+    expect(buildCommercialStrategyDecisionPaperReadinessReport({ candidate: makeCandidate(missing) }).status).toBe('BLOCKED')
+    const selected = packs.find((pack) => pack.packType === role)
+    const duplicate = [...packs, { ...selected, activationId: `${selected.activationId}-other` }]
+    const report = buildCommercialStrategyDecisionPaperReadinessReport({ candidate: makeCandidate(duplicate) })
+    expect(report.status).toBe('BLOCKED')
+    expect(report.requiredPacks.find((pack) => pack.packType === role).blockers)
+      .toContainEqual(expect.objectContaining({ code: 'REQUIRED_PACK_AMBIGUOUS' }))
+  })
+
+  it.each(['incompatibleCandidates', 'ambiguousCandidates'])('does not bypass renamed-method %s evidence', (field) => {
+    const packs = renamedMethods(), method = packs.find((pack) => pack.packType === 'ARL')
+    const candidate = makeCandidate(packs, { resolution: { [field]: [{ candidates: [method] }] } })
+    expect(buildCommercialStrategyDecisionPaperReadinessReport({ candidate }).status).toBe('BLOCKED')
+  })
+
+  it.each(['executionMode', 'boundary', 'status', 'contentHash'])('blocks invalid method %s without changing nonmethod requirements', (field) => {
+    const packs = renamedMethods().map((pack) => pack.packType === 'RL'
+      ? { ...pack, [field]: field === 'status' ? 'DISABLED' : field === 'contentHash' ? '' : 'INVALID',
+        ...(field === 'status' ? { lifecycleStatus: 'DISABLED' } : {}) } : pack)
+    expect(buildCommercialStrategyDecisionPaperReadinessReport({ candidate: makeCandidate(packs) }).status).toBe('BLOCKED')
+  })
+
   it('reports ready when every Andrew-derived and generic Outcome Studio pack is selected and eligible', () => {
     const report = buildCommercialStrategyDecisionPaperReadinessReport({ candidate: makeCandidate() })
 
@@ -228,18 +274,18 @@ describe('Commercial strategy decision paper readiness projection', () => {
     })
 
     expect(report.genericOutcomeStudioSafeguards.find(
-      (pack) => pack.packKey === 'adaptive-reasoning-layer',
+      (pack) => pack.packType === 'ARL',
     )).toMatchObject({
       selected: false,
       blocker: {
         code: COMMERCIAL_STRATEGY_DECISION_PAPER_BLOCKERS.GENERIC_OUTCOME_STUDIO_PACK_MISSING,
-        packKey: 'adaptive-reasoning-layer',
+        packKey: '',
         packType: 'ARL',
       },
     })
     expect(report.blocked).toContainEqual({
       code: COMMERCIAL_STRATEGY_DECISION_PAPER_BLOCKERS.GENERIC_OUTCOME_STUDIO_PACK_MISSING,
-      packKey: 'adaptive-reasoning-layer',
+      packKey: '',
       packType: 'ARL',
     })
   })

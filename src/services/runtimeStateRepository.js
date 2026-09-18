@@ -92,6 +92,17 @@ const RUNTIME_STATE_V2_HANDOFF_CONTROL_PROJECTION = [
   'framework_state.publish',
   ...['accepted', 'acceptedAt', 'refreshedAt', 'inputs', 'needsRefresh', 'needs_refresh']
     .map((field) => `framework_state.evidence_pack.${field}`),
+  // Handoff readiness is governed by the discovery projection inside the
+  // accepted evidence pack. Keep this bounded to the readiness receipt rather
+  // than pulling the full evidence payload into the control read. The
+  // contradiction projection is capped by the governed review contract and is
+  // required to prove current review dispositions at the handoff boundary.
+  'framework_state.evidence_pack.discoveryHealth.readiness',
+  'framework_state.evidence_pack.discoveryHealth.missingAreas',
+  'framework_state.evidence_pack.discoveryHealth.contradictionCandidates',
+  'framework_state.evidence_pack.contradictionReviews',
+  'framework_state.evidence_pack.contradictionReviewEpoch',
+  'framework_state.sections.output_requirements',
 ].join(' ')
 
 const RUNTIME_STATE_V2_CHILD_PROJECTION = Object.freeze({
@@ -255,6 +266,25 @@ const RUNTIME_STATE_V2_HANDOFF_EVIDENCE_PROJECTION = Object.freeze({
   lineageRef: 1,
   reviewStatus: 1,
   acceptanceState: 1,
+})
+
+const RUNTIME_STATE_V2_HANDOFF_CONTRADICTION_EVIDENCE_PROJECTION = Object.freeze({
+  _id: 1,
+  runtimeInstanceId: 1,
+  runtimeInstanceKey: 1,
+  customerId: 1,
+  tenantId: 1,
+  stateVersion: 1,
+  sourceStateVersion: 1,
+  current: 1,
+  evidenceObjectId: 1,
+  sourceId: 1,
+  sourceType: 1,
+  lineageRef: 1,
+  extractedFact: 1,
+  reviewStatus: 1,
+  acceptanceState: 1,
+  validationStatus: 1,
 })
 
 const normalizeText = (value) => String(value ?? '').trim()
@@ -557,6 +587,9 @@ const getControl = async ({ scopes, runtimeInstanceId, includeHandoffEligibility
           handoffFrameworkState: {
             lock: structuredClone(runtime.framework_state?.lock || {}),
             publish: structuredClone(runtime.framework_state?.publish || {}),
+            ...(runtime.framework_state?.sections?.output_requirements !== undefined
+              ? { output_requirements: structuredClone(runtime.framework_state.sections.output_requirements) }
+              : {}),
             evidence_pack: Object.fromEntries(
               ['accepted', 'acceptedAt', 'refreshedAt', 'inputs', 'needsRefresh', 'needs_refresh']
                 .filter((field) => runtime.framework_state?.evidence_pack?.[field] !== undefined)
@@ -565,6 +598,27 @@ const getControl = async ({ scopes, runtimeInstanceId, includeHandoffEligibility
           },
         }
       : {}),
+  }
+  if (includeHandoffEligibility && runtime.framework_state?.evidence_pack?.discoveryHealth) {
+    const discoveryHealth = runtime.framework_state.evidence_pack.discoveryHealth
+    control.handoffFrameworkState.evidence_pack.discoveryHealth = {
+      ...(discoveryHealth.readiness
+        ? { readiness: structuredClone(discoveryHealth.readiness) }
+        : {}),
+      ...(Array.isArray(discoveryHealth.missingAreas)
+        ? { missingAreas: structuredClone(discoveryHealth.missingAreas) }
+        : {}),
+      ...(Array.isArray(discoveryHealth.contradictionCandidates)
+        ? { contradictionCandidates: structuredClone(discoveryHealth.contradictionCandidates) }
+        : {}),
+    }
+    const evidencePack = runtime.framework_state.evidence_pack
+    if (Array.isArray(evidencePack.contradictionReviews)) {
+      control.handoffFrameworkState.evidence_pack.contradictionReviews = structuredClone(evidencePack.contradictionReviews)
+    }
+    if (evidencePack.contradictionReviewEpoch !== undefined) {
+      control.handoffFrameworkState.evidence_pack.contradictionReviewEpoch = structuredClone(evidencePack.contradictionReviewEpoch)
+    }
   }
   const invalidIdentity = !mongoose.isValidObjectId(control.id)
     || !RUNTIME_INSTANCE_KEY_PATTERN.test(control.runtimeInstanceKey)
@@ -1520,11 +1574,24 @@ const readRuntimeStateOutcomeHandoff = async ({
   knowledgeContext = null,
   knowledgeContextResult = null,
   requestedOutputTypeKey = '',
+  outputContractState = 'CANDIDATE',
   planningEvidence = false,
   session = null,
 } = {}) => {
   const control = await getControl({ scopes, runtimeInstanceId, includeHandoffEligibility: true, session })
-  const [sectionRead, evidenceRows] = await Promise.all([
+  const contradictionEvidenceObjectIds = [...new Set(
+    (control.handoffFrameworkState?.evidence_pack?.discoveryHealth?.contradictionCandidates || [])
+      .flatMap((candidate) => Array.isArray(candidate?.evidenceObjectIds) ? candidate.evidenceObjectIds : [])
+      .map(normalizeText)
+      .filter(Boolean),
+  )]
+  if (contradictionEvidenceObjectIds.length > 16) {
+    throw createRuntimeStateError({
+      code: RUNTIME_STATE_V2_ERROR_CODES.EVIDENCE_MISSING,
+      message: 'Runtime State Storage V2 contradiction evidence exceeds its bounded read limit.',
+    })
+  }
+  const [sectionRead, evidenceRows, contradictionEvidenceRows] = await Promise.all([
     readHandoffSectionRows({ control, session }),
     readMany({
       collectionName: RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_OBJECTS,
@@ -1534,6 +1601,19 @@ const readRuntimeStateOutcomeHandoff = async ({
       limit: RUNTIME_STATE_V2_EVIDENCE_COUNT_LIMIT,
       session,
     }),
+    contradictionEvidenceObjectIds.length > 0
+      ? readMany({
+          collectionName: RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_OBJECTS,
+          projection: RUNTIME_STATE_V2_HANDOFF_CONTRADICTION_EVIDENCE_PROJECTION,
+          filter: buildChildFilter({ control, additional: {
+            current: true,
+            evidenceObjectId: { $in: contradictionEvidenceObjectIds },
+          } }),
+          sort: { evidenceObjectId: 1, _id: 1 },
+          limit: contradictionEvidenceObjectIds.length,
+          session,
+        })
+      : [],
   ])
   const sectionRows = sectionRead.rows
   if (sectionRows.length > RUNTIME_STATE_V2_SECTION_CATALOGUE_LIMIT
@@ -1595,6 +1675,19 @@ const readRuntimeStateOutcomeHandoff = async ({
           sourceId: normalizeText(row.sourceId),
           lineageRef: normalizeText(row.lineageRef),
           reviewStatus: normalizeText(row.reviewStatus || row.acceptanceState),
+          ...(contradictionEvidenceRows.find((contradictionRow) =>
+            normalizeText(contradictionRow.evidenceObjectId) === normalizeText(row.evidenceObjectId),
+          )
+            ? (() => {
+                const contradictionRow = contradictionEvidenceRows.find((candidateRow) =>
+                  normalizeText(candidateRow.evidenceObjectId) === normalizeText(row.evidenceObjectId))
+                return {
+                  sourceType: normalizeText(contradictionRow.sourceType),
+                  extractedFact: normalizeText(contradictionRow.extractedFact),
+                  validationStatus: normalizeText(contradictionRow.validationStatus),
+                }
+              })()
+            : {}),
         })),
       },
     },
@@ -1606,6 +1699,7 @@ const readRuntimeStateOutcomeHandoff = async ({
     knowledgeContext,
     knowledgeContextResult,
     requestedOutputTypeKey,
+    outputContractState,
     boundedDependencyPolicy: FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_READ_POLICY,
     boundedStateParityReceipt: {
       contractVersion: FRAMEWORK_OUTCOME_HANDOFF_V2_PARITY_CONTRACT_VERSION,
@@ -1618,7 +1712,7 @@ const readRuntimeStateOutcomeHandoff = async ({
   })
   const handoff = handoffResolution?.handoff
   if (planningEvidence) return buildOutcomePlanningRuntimeEvidence({
-    runtimeInstance, frameworkPackage: handoffResolution?.frameworkPackage,
+    runtimeInstance, frameworkPackage: handoffResolution?.frameworkPackage, handoff,
   })
   if (!handoff || typeof handoff !== 'object') {
     throw createRuntimeStateError({
@@ -1650,7 +1744,8 @@ export const getRuntimeOutcomePlanningEvidence = async ({ scopes, runtimeInstanc
   if (runtime.stateVersion || runtime.runtimeStateVersion) throw createRuntimeStateError({ code: RUNTIME_STATE_V2_ERROR_CODES.STATE_VERSION_MIXED, message: 'Runtime storage identity changed.' })
   const resolved = await resolveFrameworkOutcomeStudioHandoff({ runtimeInstance: { ...runtime, _id: runtime.id }, scopes,
     boundedDependencyPolicy: FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_READ_POLICY })
-  return buildOutcomePlanningRuntimeEvidence({ runtimeInstance: { ...runtime, _id: runtime.id }, frameworkPackage: resolved.frameworkPackage })
+  return buildOutcomePlanningRuntimeEvidence({ runtimeInstance: { ...runtime, _id: runtime.id },
+    frameworkPackage: resolved.frameworkPackage, handoff: resolved.handoff })
 }
 
 export const __testables = Object.freeze({

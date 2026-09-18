@@ -963,6 +963,8 @@ const createGovernedReasoningExecutionSchema = z.object({
 }).strict()
 
 const createRuntimeOutcomeSessionSchema = z.object({
+  requestId: z.string().uuid().optional(),
+  planId: z.string().regex(/^outcome_kcp_[a-f0-9-]{36}$/).optional(),
   sourceOutputAssetId: z
     .string()
     .trim()
@@ -982,7 +984,11 @@ const createRuntimeOutcomeSessionSchema = z.object({
     .max(140, 'requestedOutputTypeKey must be 140 characters or fewer')
     .transform((value) => value.toLowerCase())
     .optional(),
-}).strict()
+}).strict().superRefine((value, ctx) => {
+  if (Boolean(value.requestId) !== Boolean(value.planId)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['planId'], message: 'requestId and planId must be supplied together' })
+  }
+})
 
 const createRuntimeOutcomeMessageSchema = z.object({
   prompt: z

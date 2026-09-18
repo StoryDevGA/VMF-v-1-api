@@ -770,7 +770,7 @@ const getScopedDiscoveryViewForSection = ({ discovery, runtimePath, sectionKey }
     runtimePathTail?.replace(/_/g, '-'),
   ]
     .map(normalizeKey)
-    .filter(Boolean)
+    .filter((candidate) => candidate && candidate !== 'undefined')
 
   for (const candidate of candidates) {
     if (Object.prototype.hasOwnProperty.call(scopedViews, candidate)) return scopedViews[candidate]

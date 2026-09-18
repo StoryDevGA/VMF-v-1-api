@@ -1079,6 +1079,7 @@ const buildBoundaryReceiptPlaceholders = (binding = {}) => {
     seen.add(versionId)
     if (boundary === KNOWLEDGE_PACK_BOUNDARIES.GENERATION_CONTEXT) return receipts
     receipts.push({
+      packId: normalizeText(pack?.packId),
       versionId,
       contentHash,
       knowledgeLayer: normalizeToken(pack?.knowledgeLayer),
@@ -1710,6 +1711,15 @@ const buildRequestFingerprint = ({ payload = {}, runtimeInstance = {} } = {}) =>
   providerRequest: buildProviderRequestProjection(payload),
 })
 
+export const assertNoMethodDocumentContentInEvidence = (value) => {
+  if (!value || typeof value !== 'object') return
+  if (!Array.isArray(value) && (Object.hasOwn(value, 'chunks') || Object.hasOwn(value, 'document'))
+    && (value.contractVersion === 'outcome-studio.method-document.v1' || Object.hasOwn(value, 'document'))) {
+    throw Object.assign(new Error('Raw method documents cannot be persisted in execution evidence.'), { code: 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED', status: 409 })
+  }
+  Object.values(value).forEach(assertNoMethodDocumentContentInEvidence)
+}
+
 const assertOutcomeStudioGenerationCompositionContract = ({
   composition,
   methodGuidance,
@@ -1723,7 +1733,8 @@ const assertOutcomeStudioGenerationCompositionContract = ({
     && typeof outputBinding.outputSchemaKey === 'string'
     && outputBinding.outputSchemaKey.trim()
     && typeof outputBinding.styleKey === 'string'
-    && outputBinding.styleKey.trim()
+    && typeof outputBinding.styleVersion === 'string'
+    && Boolean(outputBinding.styleKey.trim()) === Boolean(outputBinding.styleVersion.trim())
     && Array.isArray(outputBinding.outputTypeStructure)
     && outputBinding.outputTypeStructure.length > 0
     && Array.isArray(outputBinding.requiredSections)
@@ -1933,6 +1944,7 @@ export const createGovernedReasoningExecution = async ({
       })
     : null
   if (executionEvidence) {
+    assertNoMethodDocumentContentInEvidence(executionEvidence)
     const existingVersionIds = new Set(
       Array.isArray(executionEvidence.packs)
         ? executionEvidence.packs.map((pack) => normalizeText(pack?.versionId)).filter(Boolean)

@@ -31,6 +31,12 @@ const EXECUTION_MODES = new Set(Object.values(KNOWLEDGE_PACK_EXECUTION_MODES))
 const normalizeText = (value) => String(value || '').trim()
 const normalizeToken = (value) => normalizeText(value).toUpperCase()
 const normalizeLowerKey = (value) => normalizeText(value).toLowerCase()
+const compareCodePointStrings = (left, right) => {
+  const normalizedLeft = String(left ?? '')
+  const normalizedRight = String(right ?? '')
+  if (normalizedLeft === normalizedRight) return 0
+  return normalizedLeft < normalizedRight ? -1 : 1
+}
 
 const normalizeWorkspaceType = (value) => {
   const normalized = normalizeToken(value)
@@ -117,6 +123,9 @@ const toSafePack = (value = {}) => {
     scopeKey: normalizeToken(value.scopeKey),
     executionMode: normalizeToken(value.executionMode),
     boundary: normalizeToken(value.boundary),
+    ...(['ARL', 'RL'].includes(normalizeToken(value.packType)) && normalizeToken(value.executionBoundary)
+      ? { executionBoundary: normalizeToken(value.executionBoundary) } : {}),
+    ...(normalizeToken(value.contentFormat) ? { contentFormat: normalizeToken(value.contentFormat) } : {}),
     visibility: normalizeToken(value.visibility),
     contentHash: normalizeText(value.contentHash),
     activatedAt: normalizeText(value.activatedAt),
@@ -173,7 +182,7 @@ const compareNumericIdentifier = (left, right) => {
   if (normalizedLeft.length !== normalizedRight.length) {
     return normalizedLeft.length - normalizedRight.length
   }
-  return normalizedLeft.localeCompare(normalizedRight)
+  return compareCodePointStrings(normalizedLeft, normalizedRight)
 }
 
 const parseSemanticVersion = (value) => {
@@ -193,7 +202,7 @@ const compareSemanticVersions = (left, right) => {
   if (!leftVersion || !rightVersion) {
     if (leftVersion) return 1
     if (rightVersion) return -1
-    return normalizeText(left).localeCompare(normalizeText(right))
+    return compareCodePointStrings(normalizeText(left), normalizeText(right))
   }
 
   for (let index = 0; index < leftVersion.core.length; index += 1) {
@@ -226,7 +235,7 @@ const compareSemanticVersions = (left, right) => {
       return compareNumericIdentifier(leftIdentifier, rightIdentifier)
     }
     if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1
-    return leftIdentifier.localeCompare(rightIdentifier)
+    return compareCodePointStrings(leftIdentifier, rightIdentifier)
   }
 
   return 0
@@ -281,6 +290,7 @@ const compareCandidateRank = (left, right, scopePrecedence) => {
   const leftScope = scopePrecedence.get(left.scopeKey) ?? -Infinity
   const rightScope = scopePrecedence.get(right.scopeKey) ?? -Infinity
   if (leftScope !== rightScope) return leftScope - rightScope
+  if (['ARL', 'RL'].includes(left.packType) && left.packType === right.packType) return 0
 
   const semanticVersionComparison = compareSemanticVersions(
     left.semanticVersion,
@@ -321,6 +331,7 @@ export const resolveRequestSpecificKnowledgePacks = ({
   request = {},
   scopeCandidates = [],
   maxDepth = DEFAULT_MAX_DEPTH,
+  candidatesAreSafe = false,
 } = {}) => {
   const scopePrecedence = buildScopePrecedence(scopeCandidates)
   const requestedWorkspaceType = normalizeWorkspaceType(request.workspaceType)
@@ -347,8 +358,8 @@ export const resolveRequestSpecificKnowledgePacks = ({
     })
   }
 
-  const buildEligiblePool = (values, { requireWorkspace }) => values
-    .map(toSafePack)
+  const buildEligiblePool = (values, { requireWorkspace, alreadySafe = false }) => values
+    .map((value) => (alreadySafe ? value : toSafePack(value)))
     .filter((pack) => {
       if (!isActivePack(pack)) {
         exclude(pack, 'NOT_ACTIVE')
@@ -362,6 +373,10 @@ export const resolveRequestSpecificKnowledgePacks = ({
         exclude(pack, 'EXECUTION_MODE_UNSUPPORTED')
         return false
       }
+      if (['ARL', 'RL'].includes(pack.packType) && !resolveKnowledgePackBoundary(pack)) {
+        exclude(pack, 'METHOD_BOUNDARY_INVALID')
+        return false
+      }
       if (requireWorkspace && !hasWorkspaceCompatibility(pack, requestedWorkspaceType)) {
         exclude(pack, 'WORKSPACE_INCOMPATIBLE')
         return false
@@ -370,8 +385,8 @@ export const resolveRequestSpecificKnowledgePacks = ({
     })
 
   const mandatoryPool = buildEligiblePool(mandatorySafeguards, { requireWorkspace: false })
-  const dynamicPool = buildEligiblePool(candidates, { requireWorkspace: true })
-  const allDynamicCandidates = candidates.map(toSafePack)
+  const dynamicPool = buildEligiblePool(candidates, { requireWorkspace: true, alreadySafe: candidatesAreSafe })
+  const allDynamicCandidates = candidatesAreSafe ? candidates : candidates.map(toSafePack)
   const relationshipCandidatePool = uniqueCandidatesByNodeId([...mandatoryPool, ...dynamicPool])
   const allRelationshipCandidates = uniqueCandidatesByNodeId([...mandatoryPool, ...allDynamicCandidates])
 
@@ -573,9 +588,9 @@ export const resolveRequestSpecificKnowledgePacks = ({
     }
 
     const selected = [...byIdentity.values()].sort((left, right) => (
-      left.knowledgeAssetId.localeCompare(right.knowledgeAssetId)
+      compareCodePointStrings(left.knowledgeAssetId, right.knowledgeAssetId)
       || compareCandidateRank(right, left, scopePrecedence)
-      || candidateNodeId(left).localeCompare(candidateNodeId(right))
+      || compareCodePointStrings(candidateNodeId(left), candidateNodeId(right))
     ))
     const cardinality = evaluateRelationshipCardinality(
       relationship.cardinality,
@@ -678,9 +693,9 @@ export const resolveRequestSpecificKnowledgePacks = ({
       }
     }
     const selected = [...byIdentity.values()].sort((left, right) => (
-      left.knowledgeAssetId.localeCompare(right.knowledgeAssetId)
+      compareCodePointStrings(left.knowledgeAssetId, right.knowledgeAssetId)
       || compareCandidateRank(right, left, scopePrecedence)
-      || candidateNodeId(left).localeCompare(candidateNodeId(right))
+      || compareCodePointStrings(candidateNodeId(left), candidateNodeId(right))
     ))
     const cardinality = evaluateRelationshipCardinality(
       relationship.cardinality,
@@ -705,14 +720,14 @@ export const resolveRequestSpecificKnowledgePacks = ({
   const resolvedMandatorySafeguards = OUTCOME_STUDIO_REQUIRED_PACKS.map((requiredPack) => {
     const selector = {
       packType: requiredPack.packType,
-      packKey: requiredPack.packKey,
+      ...(requiredPack.packType === 'ARL' ? {} : { packKey: requiredPack.packKey }),
     }
     const result = selectBest({
       pool: mandatoryPool,
       selector,
       requiredBy: 'MANDATORY_SAFEGUARD_POLICY',
     })
-    if (result.type === 'SELECTED') return result.pack
+    if (result.type === 'SELECTED') return { ...result.pack, runtimeBindable: true }
 
     const status = result.type === 'AMBIGUOUS' ? AMBIGUOUS_STATUS : MISSING_STATUS
     if (result.type === 'MISSING') {
@@ -726,7 +741,7 @@ export const resolveRequestSpecificKnowledgePacks = ({
     return {
       packCategory: normalizeToken(requiredPack.packCategory),
       packType: normalizeToken(requiredPack.packType),
-      packKey: normalizeLowerKey(requiredPack.packKey),
+      ...(requiredPack.packType === 'ARL' ? {} : { packKey: normalizeLowerKey(requiredPack.packKey) }),
       label: normalizeText(requiredPack.label),
       status,
       runtimeBindable: false,
@@ -1011,6 +1026,10 @@ export const resolveRequestSpecificKnowledgePacks = ({
   }
 
   const providerContextPacks = []
+  for (const packType of ['ARL', 'RL']) {
+    const rolePacks = boundPacks.filter((pack) => pack.packType === packType)
+    if (rolePacks.length > 1) ambiguousCandidates.push({ selector: { packType }, requiredBy: 'SELECTED_METHOD_ROLE', candidates: rolePacks })
+  }
   const preValidationPacks = []
   const postValidationPacks = []
   const lineageCertificationPacks = []
@@ -1041,13 +1060,17 @@ export const resolveRequestSpecificKnowledgePacks = ({
   const selectedDynamicIds = new Set(
     [...selectedDynamic.values()].map((pack) => candidateNodeId(pack)),
   )
+  const diagnosedIds = new Set(
+    excludedCandidates.map((entry) => candidateDiagnosticId(entry.candidate)),
+  )
+  const ambiguousIds = new Set(
+    ambiguousCandidates.flatMap((entry) => entry.candidates.map(candidateDiagnosticId)),
+  )
   for (const candidate of dynamicPool) {
     if (!selectedDynamicIds.has(candidateNodeId(candidate))) {
-      const wasDiagnosed = excludedCandidates.some((entry) =>
-        candidateDiagnosticId(entry.candidate) === candidateDiagnosticId(candidate))
-      const wasAmbiguous = ambiguousCandidates.some((entry) =>
-        entry.candidates.some((ambiguous) =>
-          candidateDiagnosticId(ambiguous) === candidateDiagnosticId(candidate)))
+      const diagnosticId = candidateDiagnosticId(candidate)
+      const wasDiagnosed = diagnosedIds.has(diagnosticId)
+      const wasAmbiguous = ambiguousIds.has(diagnosticId)
       if (!wasDiagnosed && !wasAmbiguous) exclude(candidate, 'NOT_SELECTED')
     }
   }
@@ -1119,9 +1142,9 @@ export const discoverRequestSpecificOutputTypes = ({
   maxDepth = DEFAULT_MAX_DEPTH,
 } = {}) => {
   const requestedWorkspaceType = normalizeWorkspaceType(request.workspaceType)
+  const safeCandidates = candidates.map(toSafePack)
   const capabilityKeys = uniqueValues(
-    candidates
-      .map(toSafePack)
+    safeCandidates
       .filter(isActivePack)
       .filter((pack) => hasWorkspaceCompatibility(pack, requestedWorkspaceType))
       .filter((pack) => pack.knowledgeLayer === 'OUTPUT_TYPE')
@@ -1132,13 +1155,14 @@ export const discoverRequestSpecificOutputTypes = ({
   return capabilityKeys.map((capabilityKey) => {
     const resolution = resolveRequestSpecificKnowledgePacks({
       mandatorySafeguards,
-      candidates,
+      candidates: safeCandidates,
       request: {
         ...request,
         requestedOutputTypeKey: capabilityKey,
       },
       scopeCandidates,
       maxDepth,
+      candidatesAreSafe: true,
     })
     const outputTypes = resolution.selectedByLayer.OUTPUT_TYPE || []
     const outputSchemas = resolution.selectedByLayer.OUTPUT_SCHEMA || []

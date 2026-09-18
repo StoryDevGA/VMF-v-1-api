@@ -587,6 +587,27 @@ const renderMarkdown = (model, visualResolution = {}) => {
   return output
 }
 
+const renderHtmlSectionBlocks = (blocks = []) => {
+  const output = []
+  let listItems = []
+  const flushList = () => {
+    if (listItems.length === 0) return
+    output.push(`<ul>${listItems.join('')}</ul>`)
+    listItems = []
+  }
+
+  for (const block of blocks) {
+    if (block.type === 'LIST') {
+      listItems.push(`<li>${escapeHtml(block.text)}</li>`)
+      continue
+    }
+    flushList()
+    output.push(`<p>${escapeHtml(block.text).replace(/\n/g, '<br>')}</p>`)
+  }
+  flushList()
+  return output.join('')
+}
+
 const renderHtml = (model, visualResolution = {}) => {
   const styleTokens = isPlainObject(model.packReceipts.style.tokens) ? model.packReceipts.style.tokens : {}
   const accent = /^#[0-9a-f]{6}$/i.test(normalizeText(styleTokens.accentColor))
@@ -597,9 +618,7 @@ const renderHtml = (model, visualResolution = {}) => {
     : '#eef6fb'
   const effectiveComponents = Array.isArray(visualResolution.effective) ? visualResolution.effective : []
   const governanceComponent = effectiveComponents[0] || ''
-  const sections = model.sections.map((section) => `<section><h2>${escapeHtml(section.label)}</h2>${section.blocks.map((block) => (
-    block.type === 'LIST' ? `<ul><li>${escapeHtml(block.text)}</li></ul>` : `<p>${escapeHtml(block.text).replace(/\n/g, '<br>')}</p>`
-  )).join('')}</section>`).join('')
+  const sections = model.sections.map((section) => `<section><h2>${escapeHtml(section.label)}</h2>${renderHtmlSectionBlocks(section.blocks)}</section>`).join('')
   const governance = `<section aria-label="Governance boundary"${governanceComponent ? ` data-visual-component="${escapeHtml(governanceComponent)}"` : ''}${governanceComponent === 'CALLOUT' ? ' class="governance-callout"' : ''}><h2>Governance boundary</h2><p>Evidence boundary: ${escapeHtml(model.governanceMarkers.evidenceBoundary)}</p><h3>Claim restrictions</h3><ul>${model.governanceMarkers.claimRestrictions.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>${model.governanceMarkers.warnings.length ? `<h3>Warnings</h3><ul>${model.governanceMarkers.warnings.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>` : ''}${model.governanceMarkers.limitations.length ? `<h3>Limitations</h3><ul>${model.governanceMarkers.limitations.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>` : ''}</section>`
   const componentAttribute = effectiveComponents.length ? ` data-effective-visual-components="${escapeHtml(effectiveComponents.join(','))}"` : ''
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${escapeHtml(model.title)}</title><style>:root{--accent:${accent};--callout-background:${calloutBackground}}body{font-family:Arial,sans-serif;color:#24364a;max-width:960px;margin:0 auto;padding:32px;line-height:1.5}h1{color:var(--accent)}section{margin:24px 0;padding-top:8px;border-top:1px solid #d6dee6}.governance-callout{background:var(--callout-background);border-left:4px solid var(--accent);padding:16px 20px;border-top:0}</style></head><body><main data-asset-version="${escapeHtml(model.assetVersionId)}" data-style-pack="${escapeHtml(model.packReceipts.style.packKey)}" data-visual-system-pack="${escapeHtml(model.packReceipts.visualSystem.packKey)}"${componentAttribute}><h1>${escapeHtml(model.title)}</h1>${sections}${governance}</main></body></html>`
@@ -608,6 +627,17 @@ const renderHtml = (model, visualResolution = {}) => {
 const normalizeStyleHex = (value) => {
   const normalized = normalizeText(value)
   return /^#[0-9a-f]{6}$/i.test(normalized) ? normalized.slice(1).toUpperCase() : ''
+}
+
+const replaceOpenXmlColorAttributes = (source, replacements) => {
+  const replacementMap = new Map(replacements)
+  return source.replace(
+    /(<(?:w:color|w:shd|w:highlight|a:srgbClr)\b[^>]*?\s(?:w:val|w:fill|val)=["'])([0-9a-f]{6})(["'])/gi,
+    (match, prefix, hex, suffix) => {
+      const replacement = replacementMap.get(hex.toUpperCase())
+      return replacement ? `${prefix}${replacement}${suffix}` : match
+    },
+  )
 }
 
 const applyOpenXmlStyleTokens = async (buffer, styleTokens = {}) => {
@@ -627,10 +657,7 @@ const applyOpenXmlStyleTokens = async (buffer, styleTokens = {}) => {
   let changed = false
   for (const file of xmlFiles) {
     const source = await file.async('string')
-    const styled = replacements.reduce(
-      (value, [from, to]) => value.replace(new RegExp(from, 'gi'), to),
-      source,
-    )
+    const styled = replaceOpenXmlColorAttributes(source, replacements)
     if (styled !== source) {
       changed = true
       archive.file(file.name, styled)
@@ -661,7 +688,7 @@ const repairPresentationPackage = async (buffer) => {
 }
 
 const truncate = (value, max = 256) => normalizeText(value).slice(0, max)
-const customerSafeText = (value) => normalizeText(value).replace(/\bruntime\b/gi, 'source')
+const customerSafeText = (value) => normalizeText(value)
 
 const chunkText = (value, max = 420) => {
   const normalized = normalizeText(value)
@@ -1023,9 +1050,11 @@ export const renderOutcomeStudioAsset = async ({
 }
 
 export const __testables = Object.freeze({
+  applyOpenXmlStyleTokens,
   buildGovernanceMarkdown,
   buildPresentationInput,
   renderHtml,
+  renderHtmlSectionBlocks,
   renderMarkdown,
   resolveVisualComponents,
 })

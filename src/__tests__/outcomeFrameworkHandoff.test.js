@@ -190,6 +190,62 @@ const makeFixture = ({
 }
 
 describe('Framework-to-Outcome Studio Evidence-to-Knowledge handoff', () => {
+  test('projects persisted discovery readiness state and missing coverage areas', () => {
+    const fixture = makeFixture()
+    fixture.runtimeInstance.framework_state.evidence_pack.discoveryHealth = {
+      readiness: {
+        state: 'NOT_READY',
+        contradictionCount: 6,
+        unresolvedContradictionCount: 6,
+        blockerReasons: ['CONTRADICTIONS_REQUIRE_REVIEW'],
+        warningReasons: ['MISSING_COVERAGE_AREAS'],
+      },
+      missingAreas: ['Constraints'],
+    }
+
+    const handoff = buildFrameworkOutcomeStudioHandoff(fixture)
+
+    expect(handoff.evidenceReadiness).toEqual(expect.objectContaining({
+      status: 'NOT_READY',
+      unresolvedContradictionCount: 6,
+      missingDomains: ['Constraints'],
+    }))
+    expect(handoff.runtimeIntegrity.evidenceReadiness).toEqual(handoff.evidenceReadiness)
+  })
+
+  test('does not resurrect a stale contradiction count when the current candidate projection is present', () => {
+    const fixture = makeFixture()
+    fixture.runtimeInstance.framework_state.evidence_pack.discoveryHealth = {
+      contradictionCandidates: [],
+      readiness: {
+        state: 'NOT_READY',
+        contradictionCount: 6,
+        unresolvedContradictionCount: 6,
+        blockerReasons: ['CONTRADICTIONS_REQUIRE_REVIEW'],
+      },
+    }
+
+    const handoff = buildFrameworkOutcomeStudioHandoff(fixture)
+
+    expect(handoff.evidenceReadiness.unresolvedContradictionCount).toBe(0)
+    expect(handoff.runtimeIntegrity.evidenceReadiness.unresolvedContradictionCount).toBe(0)
+  })
+
+  test('preserves an explicit zero unresolved contradiction count', () => {
+    const fixture = makeFixture()
+    fixture.runtimeInstance.framework_state.evidence_pack.discoveryHealth = {
+      readiness: {
+        state: 'READY',
+        contradictionCount: 6,
+        unresolvedContradictionCount: 0,
+      },
+    }
+
+    const handoff = buildFrameworkOutcomeStudioHandoff(fixture)
+
+    expect(handoff.evidenceReadiness.unresolvedContradictionCount).toBe(0)
+  })
+
   test.each([
     ['renderer metadata flag', { renderer: { metadataOnly: true } }],
     ['renderer generation denial', { renderer: { generationEligible: false } }],
@@ -257,6 +313,7 @@ describe('Framework-to-Outcome Studio Evidence-to-Knowledge handoff', () => {
     'legacy root accepted', 'summary content', 'value content', 'narrative content', 'blocked refs',
   ])('preserves the complete resolved handoff after projection: %s', async (scenario) => {
     const fixture = makeFixture()
+    fixture.runtimeInstance.stateVersion = 'runtime-revision:1'
     const section = fixture.runtimeInstance.framework_state.sections.customer_context
     const receipt = section.generated.evidenceProjection
     const refs = ['evidence_object_1', { refKey: 'evidence_object_1' }, { sourceId: 'source_1' }]
@@ -644,7 +701,7 @@ describe('Framework-to-Outcome Studio Evidence-to-Knowledge handoff', () => {
       requestedOutputTypeKey: 'executive-brief',
     })
 
-    expect(handoff.status).toBe(FRAMEWORK_OUTCOME_HANDOFF_STATUSES.READY_WITH_GAPS)
+    expect(handoff.status).toBe(FRAMEWORK_OUTCOME_HANDOFF_STATUSES.READY)
     expect(handoff.runtime).toEqual(expect.objectContaining({
       runtimeInstanceKey: 'value-narrative-parlon-ss011',
       runtimeType: 'VALUE_NARRATIVE',
@@ -732,7 +789,7 @@ describe('Framework-to-Outcome Studio Evidence-to-Knowledge handoff', () => {
       requestedOutputTypeKey: 'executive-brief',
     })
 
-    expect(handoff.status).toBe(FRAMEWORK_OUTCOME_HANDOFF_STATUSES.READY_WITH_GAPS)
+    expect(handoff.status).toBe(FRAMEWORK_OUTCOME_HANDOFF_STATUSES.READY)
     expect(handoff.runtime).toEqual(expect.objectContaining({
       runtimeInstanceId: '6a7dea9c941bfa90798ba9b3',
       runtimeInstanceKey: 'value-narrative-7a21bd41f055-rev-2-798ba9b3',

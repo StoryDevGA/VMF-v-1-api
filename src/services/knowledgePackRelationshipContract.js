@@ -239,6 +239,10 @@ const stableValue = (value) => {
 }
 
 const stableStringify = (value) => JSON.stringify(stableValue(value))
+const compareCodePointStrings = (left, right) => {
+  if (left === right) return 0
+  return left < right ? -1 : 1
+}
 
 export const normalizeKnowledgePackRelationships = (values, { required = false } = {}) => {
   if (values === undefined) {
@@ -257,7 +261,7 @@ export const normalizeKnowledgePackRelationships = (values, { required = false }
     byCanonicalValue.set(key, relationship)
   }
   return [...byCanonicalValue.entries()]
-    .sort(([left], [right]) => left.localeCompare(right))
+    .sort(([left], [right]) => compareCodePointStrings(left, right))
     .map(([, relationship]) => relationship)
 }
 

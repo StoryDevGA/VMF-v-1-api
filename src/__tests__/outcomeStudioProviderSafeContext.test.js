@@ -1,6 +1,7 @@
 import crypto from 'crypto'
 import { afterEach, describe, expect, jest, test } from '@jest/globals'
 import KnowledgePackVersion from '../models/KnowledgePackVersion.js'
+import { buildOutcomeMethodDocument } from '../services/outcomeMethodDocumentService.js'
 import {
   assertOutcomeStudioProviderSafeContext,
   assertOutcomeStudioProviderSafeComposition,
@@ -188,6 +189,124 @@ const mockVersions = (versions) => {
 afterEach(() => jest.restoreAllMocks())
 
 describe('Outcome Studio provider-safe projection', () => {
+  test('delivers the complete Markdown method while persisting only its source receipt', async () => {
+    const content = '# Method source\r\n\r\n| Rule | Guidance |\r\n| --- | --- |\r\n| Truth | Preserve source evidence |\r\n' + 'Unique method prose remains complete.\n'.repeat(800)
+    const selection = { packId: 'new-method', packKey: 'any-compatible-name', versionId: 'kpv-direct-arl', semanticVersion: '8.0.0', contentHash: contentHash(content), contentFormat: 'MARKDOWN', packType: 'ARL', capabilityKey: 'arl', activationId: 'activation-new', status: 'ACTIVE', boundary: 'GENERATION_CONTEXT', executionMode: 'PROVIDER_CONTEXT' }
+    const document = buildOutcomeMethodDocument({ role: 'ARL', selection, loaded: { ...selection, available: true, content } })
+    const fullGuidance = [{ role: 'ARL', boundary: 'GENERATION_CONTEXT', version: '8.0.0', document }]
+    const rows = [
+      ...Object.entries(directPackContents).map(([versionId, original]) => ({ versionId, content: versionId === selection.versionId ? content : original, contentHash: contentHash(versionId === selection.versionId ? content : original) })),
+      { versionId: 'pack-1', contentHash: contentHash(governedContent), content: governedContent },
+    ]
+    mockVersions(rows)
+    const consumption = buildOutcomeStudioGenerationContextConsumption({ compositionPackage: compositionPackage(), methodGuidance: fullGuidance,
+      directBindings: rows.slice(0, 3).map((row, index) => ({ role: ['OUTPUT_TYPE', 'OUTPUT_SCHEMA', 'ARL'][index], versionId: row.versionId, contentHash: row.contentHash })) })
+    const captureExecutionEvidence = jest.fn()
+    const context = await buildOutcomeStudioProviderSafeContext({
+      providerDescriptor: descriptor, safeRequest: safeRequest(),
+      truthSource: { acceptedTruth: [{ label: 'Situation', content: 'The customer has a governed decision process.' }] },
+      knowledgeSelection: rows.map((row, index) => ({ versionId: row.versionId, knowledgeLayer: ['OUTPUT_TYPE', 'OUTPUT_SCHEMA', 'REASONING', 'FOUNDATION'][index], executionMode: 'PROVIDER_CONTEXT', packType: ['OUTPUT_TYPE_DEFINITION', 'OUTPUT_SCHEMA', 'ARL', 'FOUNDATION'][index] })),
+      executionBindings: rows.map(({ versionId, contentHash: hash }) => ({ versionId, contentHash: hash })),
+      compositionPackage: compositionPackage(), methodGuidance: fullGuidance, governanceConstraints, ...consumption, captureExecutionEvidence,
+    })
+    expect(context.composition.methodGuidance[0].document.chunks.map((chunk) => chunk.text).join('')).toBe(content)
+    expect(assertOutcomeStudioProviderSafeContext(context)).toBe(context)
+    const evidence = captureExecutionEvidence.mock.calls[0][0]
+    expect(evidence.providerRequestManifest.methodGuidance[0].sourceReceipt).toMatchObject({ packId: selection.packId, contentHash: selection.contentHash, characterCount: content.length })
+    expect(JSON.stringify(evidence)).not.toContain('Unique method prose')
+    expect(JSON.stringify(evidence)).not.toContain('"chunks"')
+    expect(consumption.generationContextConsumption.find((entry) => entry.role === 'ARL').contributions[0].itemFingerprints).toEqual([selection.contentHash])
+  })
+
+  test.each([null, undefined, ''])('does not invent style descriptors or roles when style is absent (%s)', (absent) => {
+    const input = compositionPackage()
+    input.outputBinding.styleKey = absent
+    input.outputBinding.styleVersion = absent
+    input.outputBinding.outputTypeStructure = Array.from({ length: 7 }, (_, i) => `Guidance ${i}`)
+    input.outputBinding.requiredSections = Array.from({ length: 14 }, (_, i) => `Section ${i}`)
+    const result = buildOutcomeStudioProviderSafeComposition({ compositionPackage: input,
+      governanceConstraints, methodGuidance, providerDescriptor: descriptor, safeRequest: safeRequest() })
+    expect(result.outputContract.selectedStyle).toBeNull()
+    expect(result.outputContract.knowledgePackRoles.some((entry) => entry.role === 'STYLE')).toBe(false)
+    expect(result.outputStructure.requiredSections).toHaveLength(14)
+    expect(assertOutcomeStudioProviderSafeComposition(result)).toBe(result)
+  })
+
+  test('admits a composition with no governed style pack when style guidance is not required', async () => {
+    const input = compositionPackage()
+    input.outputBinding.styleKey = ''
+    input.outputBinding.styleVersion = ''
+    const content = [
+      '# Business Guidance',
+      'Keep the decision analysis tied to supplied business information.',
+      '# Structure',
+      'Use the required decision-paper sections.',
+      '# Validation Criteria',
+      'Material claims must remain evidence bounded.',
+    ].join('\n')
+    const selectedContentHash = contentHash(content)
+    const versions = [
+      { versionId: 'kpv-no-style-output-type', content, contentHash: selectedContentHash },
+      { versionId: 'kpv-no-style-output-schema', content, contentHash: selectedContentHash },
+      { versionId: 'kpv-no-style-arl', content, contentHash: selectedContentHash },
+    ]
+    mockVersions(versions)
+    const consumption = buildOutcomeStudioGenerationContextConsumption({
+      compositionPackage: input,
+      directBindings: [
+        { role: 'OUTPUT_TYPE', versionId: 'kpv-no-style-output-type', contentHash: selectedContentHash },
+        { role: 'OUTPUT_SCHEMA', versionId: 'kpv-no-style-output-schema', contentHash: selectedContentHash },
+        { role: 'ARL', versionId: 'kpv-no-style-arl', contentHash: selectedContentHash },
+      ],
+      methodGuidance,
+    })
+
+    await expect(buildOutcomeStudioProviderSafeContext({
+      providerDescriptor: descriptor,
+      safeRequest: safeRequest(),
+      truthSource: { acceptedTruth: [] },
+      knowledgeSelection: [
+        { versionId: 'kpv-no-style-output-type', knowledgeLayer: 'OUTPUT_TYPE', executionMode: 'PROVIDER_CONTEXT', packType: 'OUTPUT_TYPE_DEFINITION' },
+        { versionId: 'kpv-no-style-output-schema', knowledgeLayer: 'OUTPUT_SCHEMA', executionMode: 'PROVIDER_CONTEXT', packType: 'OUTPUT_SCHEMA' },
+        { versionId: 'kpv-no-style-arl', knowledgeLayer: 'FRAMEWORK', executionMode: 'PROVIDER_CONTEXT', packType: 'ARL' },
+      ],
+      executionBindings: versions.map(({ versionId }) => ({ versionId, contentHash: selectedContentHash })),
+      compositionPackage: input,
+      methodGuidance,
+      governanceConstraints,
+      ...consumption,
+    })).resolves.toEqual(expect.objectContaining({
+      contractVersion: 'OUTCOME_STUDIO_PROVIDER_SAFE_CONTEXT_V1',
+      composition: expect.objectContaining({
+        styleGuidance: [],
+      }),
+    }))
+  })
+
+  test.each([{ styleKey: 'STYLE', styleVersion: null }, { styleKey: null, styleVersion: '1.0.0' }, { styleKey: {}, styleVersion: '' }])('rejects incomplete style bindings %#', (style) => {
+    const input = compositionPackage()
+    Object.assign(input.outputBinding, style)
+    expect(() => buildOutcomeStudioProviderSafeComposition({ compositionPackage: input,
+      governanceConstraints, methodGuidance, providerDescriptor: descriptor, safeRequest: safeRequest() })).toThrow()
+  })
+
+  test.each([1, 24])('preserves bounded output guidance and schema sections at %i', (count) => {
+    const input = compositionPackage()
+    input.outputBinding.outputTypeStructure = Array.from({ length: count }, (_, i) => `Guidance ${i}`)
+    input.outputBinding.requiredSections = Array.from({ length: count }, (_, i) => `Section ${i}`)
+    const result = buildOutcomeStudioProviderSafeComposition({ compositionPackage: input,
+      governanceConstraints, methodGuidance, providerDescriptor: descriptor, safeRequest: safeRequest() })
+    expect(assertOutcomeStudioProviderSafeComposition(result)).toBe(result)
+  })
+
+  test.each([0, 25])('rejects out-of-bound output guidance and schema sections %i', (count) => {
+    for (const field of ['outputTypeStructure', 'requiredSections']) {
+      const input = compositionPackage()
+      input.outputBinding[field] = Array.from({ length: count }, (_, i) => `Entry ${i}`)
+      expect(() => buildOutcomeStudioProviderSafeComposition({ compositionPackage: input,
+        governanceConstraints, methodGuidance, providerDescriptor: descriptor, safeRequest: safeRequest() })).toThrow()
+    }
+  })
   test('attributes exact direct composition items while keeping loaded-only candidate attribution unchanged', async () => {
     const supportContent = governedContent
     const versions = [

@@ -1,4 +1,5 @@
 import { describe, expect, test } from '@jest/globals'
+import JSZip from 'jszip'
 import models from '../models/index.js'
 import OutcomeRenderOutput from '../models/OutcomeRenderOutput.js'
 import {
@@ -59,7 +60,7 @@ const assetVersion = {
   },
   evidenceReferences: [{ sourceId: 'evidence-source-1', locator: 'framework_state.evidence_pack', status: 'ACCEPTED' }],
   governanceMarkers: {
-    evidenceBoundary: 'Current accepted evidence from the bound runtime revision only.',
+    evidenceBoundary: 'Current accepted evidence from the bound revision only.',
     claimRestrictions: ['Do not invent quantified impact, ROI or named-customer proof.'],
     warnings: ['Review the recommendation against current evidence before circulation.'],
     limitations: ['This foundation proof is not Parlon parity or Product acceptance.'],
@@ -169,6 +170,42 @@ describe('SS-027 Outcome Studio asset rendering foundation', () => {
       record.renderReceipt.appliedInputs.stylePack.appliedTo.length === 1
         && record.renderReceipt.appliedInputs.stylePack.tokenKeys.includes('accentColor')
     ))).toBe(true)
+  })
+
+  test('scopes OpenXML style replacement to color attributes and preserves governed text', async () => {
+    const archive = new JSZip()
+    archive.file('word/document.xml', '<w:document><w:t>F4F6F8</w:t><w:shd w:fill="F4F6F8"/></w:document>')
+    const source = await archive.generateAsync({ type: 'nodebuffer' })
+    const styled = await __testables.applyOpenXmlStyleTokens(source, { surfaceColor: '#ABCDEF' })
+    const result = await JSZip.loadAsync(styled.buffer)
+    const xml = await result.file('word/document.xml').async('string')
+
+    expect(xml).toContain('<w:t>F4F6F8</w:t>')
+    expect(xml).toContain('w:fill="ABCDEF"')
+  })
+
+  test('groups consecutive HTML list blocks and preserves governance wording', () => {
+    const model = buildOutcomeStudioRenderableAsset(buildInput({
+      customerContent: {
+        sections: [{
+          key: 'list',
+          label: 'List',
+          blocks: [
+            { type: 'LIST', text: 'First item' },
+            { type: 'LIST', text: 'Second item' },
+          ],
+        }],
+      },
+      governanceMarkers: {
+        ...assetVersion.governanceMarkers,
+        evidenceBoundary: 'Preserve runtime performance wording exactly.',
+      },
+    }))
+    const html = __testables.renderHtml(model)
+    const presentation = __testables.buildPresentationInput(model)
+
+    expect(html).toContain('<ul><li>First item</li><li>Second item</li></ul>')
+    expect(JSON.stringify(presentation)).toContain('runtime performance wording exactly')
   })
 
   test('honours explicit governed inputs on the plain-object render seam', async () => {

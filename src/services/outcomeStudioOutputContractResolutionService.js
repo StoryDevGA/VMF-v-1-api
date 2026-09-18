@@ -39,8 +39,6 @@ const MAX_CLARIFICATION_LENGTH = 240;
 const MAX_ROLES = 32;
 
 const PACK_ROLE_BY_KEY = new Map([
-  ['adaptive-reasoning-layer', 'ARL'],
-  ['rendering-layer', 'RL'],
   ['observation-register', 'OR'],
   ['or-runtime-pack', 'OR'],
   ['validation-evidence', 'VE'],
@@ -704,8 +702,19 @@ export function compareOutcomeStudioOutputContractCurrentness({
   }
 
   for (const field of ['outputType', 'outputSchema', 'style']) {
-    const expected = bindingDescriptor(binding, field);
+    const expected = field === 'style' && binding.style == null ? null : bindingDescriptor(binding, field);
     const actual = contextDescriptors[field];
+    if (field === 'style' && !actual && (expected || safeResolution.selectedStyle)) {
+      mismatches.push({ field: 'style.key', expected: (expected || safeResolution.selectedStyle).key, actual: null });
+      continue;
+    }
+    if (field === 'style' && actual && safeResolution.selectedStyle) {
+      for (const property of ['key', 'version']) {
+        if (safeResolution.selectedStyle[property] !== actual[property]) {
+          mismatches.push({ field: `style.${property}`, expected: safeResolution.selectedStyle[property], actual: actual[property] });
+        }
+      }
+    }
     if (!expected || !actual) {
       continue;
     }
@@ -776,7 +785,9 @@ export function completeOutcomeStudioOutputContractResolution({
     knowledgeContext.outputSchema,
     'knowledgeContext.outputSchema',
   );
-  const style = descriptorFromContext(knowledgeContext.style, 'knowledgeContext.style');
+  const style = knowledgeContext.style
+    ? descriptorFromContext(knowledgeContext.style, 'knowledgeContext.style')
+    : null;
   const currentness = compareOutcomeStudioOutputContractCurrentness({
     resolution: safeResolution,
     knowledgeContext,
@@ -793,13 +804,27 @@ export function completeOutcomeStudioOutputContractResolution({
   const roles = [
     role('OUTPUT_TYPE', 'OUTPUT_TYPE', outputType),
     role('OUTPUT_SCHEMA', 'OUTPUT_SCHEMA', outputSchema),
-    role('STYLE', 'STYLE', style),
   ];
+  if (style) roles.push(role('STYLE', 'STYLE', style));
   const packs = Array.isArray(knowledgeContext.knowledgePacks)
     ? knowledgeContext.knowledgePacks
     : [];
-  const arl = packs.find((pack) => selectedActivePack(pack, 'adaptive-reasoning-layer'));
-  const rl = packs.find((pack) => selectedActivePack(pack, 'rendering-layer'));
+  const selectedMethod = (packType) => {
+    const matches = packs.filter((pack) => selectedActivePack(pack, pack?.key)
+      && String(pack.packType || '').trim().toUpperCase() === packType);
+    if (matches.length > 1) throw new Error(`Outcome Studio method role is ambiguous: ${packType}`);
+    const selected = matches[0];
+    if (selected?.role && String(selected.role).trim().toUpperCase() !== packType) {
+      throw new Error(`Outcome Studio method role conflicts with pack type: ${packType}`);
+    }
+    const prior = safeResolution.knowledgePackRoles?.find((entry) => entry.role === packType);
+    if (prior && (!selected || prior.key !== selected.key || prior.version !== selected.version)) {
+      throw new Error(`Outcome Studio output contract is not current: ${packType}`);
+    }
+    return selected;
+  };
+  const arl = selectedMethod('ARL');
+  const rl = selectedMethod('RL');
 
   if (arl) {
     roles.push(

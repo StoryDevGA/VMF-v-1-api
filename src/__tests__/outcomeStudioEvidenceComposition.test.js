@@ -137,6 +137,35 @@ const makeInput = ({
 })
 
 describe('Outcome Studio evidence composition', () => {
+  test.each([null, undefined])('allows absent style and fourteen schema sections (%s)', (style) => {
+    const input = makeInput({ knowledgeContext: { style } })
+    input.knowledgeContext.outputTypeStructure = Array.from({ length: 7 }, (_, i) => `Semantic guidance ${i}`)
+    input.knowledgeContext.outputSchema.requiredSections = Array.from({ length: 14 }, (_, i) => `Section ${i}`)
+    const result = buildOutcomeStudioEvidenceComposition(input)
+    expect(result.status).toBe('READY')
+    expect(result.outputBinding).toMatchObject({ styleKey: '', styleVersion: '' })
+    expect(result.outputBinding.requiredSections).toHaveLength(14)
+  })
+
+  test.each([{}, { key: 'style' }, { version: '1.0.0' }, 'invalid'])('rejects incomplete authored style %#', (style) => {
+    expect(() => buildOutcomeStudioEvidenceComposition(makeInput({ knowledgeContext: { style } }))).toThrow()
+  })
+
+  test.each([1, 24])('accepts %i semantic guidance items and schema sections', (count) => {
+    const input = makeInput()
+    input.knowledgeContext.outputTypeStructure = Array.from({ length: count }, (_, i) => `Guidance ${i}`)
+    input.knowledgeContext.outputSchema.requiredSections = Array.from({ length: count }, (_, i) => `Section ${i}`)
+    expect(buildOutcomeStudioEvidenceComposition(input).status).toBe('READY')
+  })
+
+  test.each([0, 25])('rejects out-of-bound guidance and schema counts %i', (count) => {
+    const input = makeInput()
+    input.knowledgeContext.outputTypeStructure = Array.from({ length: count }, (_, i) => `Guidance ${i}`)
+    expect(() => buildOutcomeStudioEvidenceComposition(input)).toThrow()
+    const schemaInput = makeInput()
+    schemaInput.knowledgeContext.outputSchema.requiredSections = Array.from({ length: count }, (_, i) => `Section ${i}`)
+    expect(() => buildOutcomeStudioEvidenceComposition(schemaInput)).toThrow()
+  })
   test('admits a current reviewed pair while retaining independent truth and validation blockers', () => {
     const input = makeInput({ evidenceObjects: [makeEvidence(), makeEvidence({ evidenceObjectId: 'evidence-2' })] })
     const pack = input.frameworkState.evidence_pack
@@ -449,6 +478,18 @@ describe('Outcome Studio evidence composition', () => {
     }))).toThrow(expect.objectContaining({
       reason: OUTCOME_STUDIO_COMPOSITION_BLOCKERS.TRUTH_NOT_CURRENT,
     }))
+  })
+
+  test('retains the lineage-verified lock snapshot hash from the evidence fallback', () => {
+    const input = makeInput({
+      truthBinding: {
+        lockSnapshotHash: '',
+        evidence: { lockSnapshotHash: 'sha256:lock-snapshot-1' },
+      },
+    })
+
+    expect(buildOutcomeStudioEvidenceComposition(input).truthBinding.lockSnapshotHash)
+      .toBe('sha256:lock-snapshot-1')
   })
 
   test('blocks unresolved contradictions before fact admission', () => {

@@ -3,6 +3,7 @@ import { afterEach, describe, expect, jest, test } from '@jest/globals'
 import { buildOutcomeStudioProviderRuntime } from '../config/outcomeStudioProvider.js'
 import logger from '../config/logger.js'
 import { createOpenAiOutcomeStudioProviderAdapter } from '../services/openAiOutcomeStudioProviderAdapter.js'
+import { MAX_METHOD_CONTEXT_BYTES } from '../services/outcomeMethodDocumentService.js'
 
 const providerContext = {
   contractVersion: 'OUTCOME_STUDIO_PROVIDER_SAFE_CONTEXT_V1',
@@ -103,6 +104,34 @@ const makeAdapter = ({ fetchImpl, maxRetries = 0, sleep = jest.fn(), ...override
   })
 
 afterEach(() => jest.restoreAllMocks())
+
+test.each([
+  [400, 'context_length_exceeded', 'LIVE_TEST_PROVIDER_CONTEXT_OVERFLOW'],
+  [500, 'context_window_exceeded', 'LIVE_TEST_PROVIDER_CONTEXT_OVERFLOW'],
+  [200, 'context_overflow', 'LIVE_TEST_PROVIDER_CONTEXT_OVERFLOW'],
+  [400, 'invalid_request_error', 'LIVE_TEST_PROVIDER_REJECTED'],
+])('classifies explicit context overflow without retry or truncation (%s %s)', async (status, code, reason) => {
+  const fetchImpl = jest.fn(async () => makeResponse({ status, body: { error: { code } } }))
+  const sleep = jest.fn()
+  await expect(makeAdapter({ fetchImpl, sleep, maxRetries: 2 })({ providerContext }))
+    .rejects.toMatchObject({ details: { reason } })
+  expect(fetchImpl).toHaveBeenCalledTimes(1)
+  expect(sleep).not.toHaveBeenCalled()
+  expect(JSON.parse(fetchImpl.mock.calls[0][1].body).truncation).toBe('disabled')
+})
+
+test('rejects final serialized request overflow before any provider request or retry', async () => {
+  const context = structuredClone(providerContext)
+  context.draftContext.content = '"'.repeat(60000)
+  expect(Buffer.byteLength(JSON.stringify(context), 'utf8')).toBeLessThan(MAX_METHOD_CONTEXT_BYTES)
+  const fetchImpl = jest.fn()
+  const sleep = jest.fn()
+  await expect(makeAdapter({ fetchImpl, sleep, maxRetries: 2 })({ providerContext: context }))
+    .rejects.toMatchObject({ details: { field: 'methodDocument.contextBudget' } })
+  expect(fetchImpl).not.toHaveBeenCalled()
+  expect(sleep).not.toHaveBeenCalled()
+  expect(context.draftContext.content).toHaveLength(60000)
+})
 
 describe('Outcome Studio Development/Test provider configuration', () => {
   test.each([

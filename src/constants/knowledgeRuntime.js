@@ -114,6 +114,20 @@ const normalizeKnowledgeRuntimeToken = (value) => String(value ?? '').trim().toU
 
 export const resolveKnowledgePackBoundary = (pack = {}) => {
   const explicitBoundary = normalizeKnowledgeRuntimeToken(pack.boundary || pack.executionBoundary)
+  const methodType = normalizeKnowledgeRuntimeToken(pack.packType)
+  if (['ARL', 'RL'].includes(methodType)) {
+    const boundary = normalizeKnowledgeRuntimeToken(pack.boundary)
+    const executionBoundary = normalizeKnowledgeRuntimeToken(pack.executionBoundary)
+    if (boundary && executionBoundary && boundary !== executionBoundary) return ''
+    const mode = normalizeKnowledgeRuntimeToken(pack.executionMode)
+    const expected = mode === KNOWLEDGE_PACK_EXECUTION_MODES.PROVIDER_CONTEXT
+      ? (methodType === 'RL' ? KNOWLEDGE_PACK_BOUNDARIES.POST_GENERATION_VALIDATION : KNOWLEDGE_PACK_BOUNDARIES.GENERATION_CONTEXT)
+      : mode === KNOWLEDGE_PACK_EXECUTION_MODES.PRE_VALIDATION || mode === KNOWLEDGE_PACK_EXECUTION_MODES.SYSTEM_ONLY
+        ? KNOWLEDGE_PACK_BOUNDARIES.PRE_GENERATION_VALIDATION
+        : mode === KNOWLEDGE_PACK_EXECUTION_MODES.POST_VALIDATION
+          ? KNOWLEDGE_PACK_BOUNDARIES.POST_GENERATION_VALIDATION : ''
+    return expected && (!explicitBoundary || explicitBoundary === expected) ? expected : ''
+  }
   if (Object.values(KNOWLEDGE_PACK_BOUNDARIES).includes(explicitBoundary)) return explicitBoundary
 
   const packType = normalizeKnowledgeRuntimeToken(pack.packType)

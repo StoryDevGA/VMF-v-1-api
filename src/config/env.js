@@ -100,7 +100,7 @@ const env = {
     process.env.OUTCOME_STUDIO_PROVIDER_API_KEY || process.env.OPENAI_API_KEY || '',
   outcomeStudioProviderTimeoutMs: toPositiveNumber(
     process.env.OUTCOME_STUDIO_PROVIDER_TIMEOUT_MS,
-    60000,
+    120000,
   ),
   outcomeFrameworkGuidanceProviderCompletionTimeoutMs: toPositiveNumber(
     process.env.OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_COMPLETION_TIMEOUT_MS,

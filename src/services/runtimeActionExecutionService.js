@@ -312,6 +312,31 @@ const buildRegenerationEligibility = ({
     reasons.push('DEPENDENCY_CONTEXT_INVALIDATED')
   }
 
+  // Runtime-managed completion is derived from the accepted source section,
+  // the current evidence, and the package contract. A source receipt can
+  // therefore become stale even when the ordinary section input/evidence
+  // hashes do not change. Allow the governed regenerate action to repair that
+  // proof, while leaving unchanged regeneration blocked for other sections.
+  try {
+    const expectedRuntimeManagedReceipt = buildRuntimeManagedSourceReceipt({
+      frameworkPackage,
+      frameworkState,
+      section,
+      generated: previousGenerated,
+      input,
+    })
+    if (expectedRuntimeManagedReceipt) {
+      const actualRuntimeManagedReceipt = previousGenerated?.runtimeManagedSourceReceipt
+      if (!isPlainRuntimeActionObject(actualRuntimeManagedReceipt)
+        || hashSectionInput(actualRuntimeManagedReceipt) !== hashSectionInput(expectedRuntimeManagedReceipt)) {
+        reasons.push('RUNTIME_MANAGED_PROOF_STALE')
+      }
+    }
+  } catch {
+    // The authoritative runtime-managed evaluator reports missing or invalid
+    // source context. Do not turn that into a speculative regeneration gate.
+  }
+
   const timestampInvalidatedSectionKeys = getTimestampInvalidatedDependencySectionKeys({
     dependencySectionKeys,
     frameworkPackage,

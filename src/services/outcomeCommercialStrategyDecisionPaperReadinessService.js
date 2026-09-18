@@ -11,6 +11,7 @@ import {
   COMMERCIAL_STRATEGY_DECISION_PAPER_READINESS_STATUSES,
 } from '../constants/outcomeCommercialStrategyDecisionPaper.js'
 import { isSelectableResolverPack } from '../utils/knowledgePackPredicates.js'
+import { resolveKnowledgePackBoundary } from '../constants/knowledgeRuntime.js'
 
 const lower = (value) => String(value || '').trim().toLowerCase()
 const upper = (value) => String(value || '').trim().toUpperCase()
@@ -97,13 +98,36 @@ const hasRelationshipFailure = (packKey, relationshipFailures = []) => asArray(r
   return keys.includes(packKey)
 })
 
-const requiredOutcomeStudioSafeguards = (selectedIndex) => OUTCOME_STUDIO_REQUIRED_PACKS.map((pack) => {
-  const key = lower(pack.packKey)
+const selectedMethodRole = ({ role, candidate, binding }) => {
+  const projections = [...selectedPacksFromCandidate(candidate), ...selectedPacksFromBinding(binding)]
+    .filter((pack) => upper(pack.packType) === role)
+  const ids = new Set(projections.map((pack) => String(pack.activationId || '').trim()))
+  const selected = ids.size === 1 && !ids.has('') ? Object.assign({}, ...projections) : null
+  const identityConflict = ['packKey', 'packId', 'versionId', 'contentHash', 'executionMode', 'boundary', 'executionBoundary']
+    .some((field) => new Set(projections.map((pack) => String(pack[field] || '').trim()).filter(Boolean)).size > 1)
+  const resolution = candidate?.payload?.resolution || {}
+  const diagnostics = (field) => [...asArray(resolution[field]), ...asArray(binding[field])]
+    .some((entry) => [entry, entry.selector, entry.candidate, ...asArray(entry.candidates)].filter(Boolean)
+      .some((value) => upper(unwrapCandidate(value)?.packType) === role
+        || projections.some((pack) => packKeyOf(value) === lower(pack.packKey))))
+  return {
+    selected,
+    ambiguous: ids.size > 1 || identityConflict || diagnostics('ambiguousCandidates'),
+    eligible: Boolean(selected && projections.every((pack) => activeOrEligible(pack) && pack.runtimeBindable !== false)
+      && selected.packId && selected.versionId && selected.contentHash
+      && resolveKnowledgePackBoundary(selected) && !diagnostics('incompatibleCandidates')),
+  }
+}
+
+const requiredOutcomeStudioSafeguards = (selectedIndex, methods) => OUTCOME_STUDIO_REQUIRED_PACKS.map((pack) => {
+  const method = methods[upper(pack.packType)]
+  const key = method ? lower(method.selected?.packKey) : lower(pack.packKey)
+  const selected = method ? Boolean(method.selected && method.eligible && !method.ambiguous) : selectedIndex.has(key)
   return {
     packType: pack.packType,
     packKey: key,
-    selected: selectedIndex.has(key),
-    blocker: selectedIndex.has(key) ? null : {
+    selected,
+    blocker: selected ? null : {
       code: COMMERCIAL_STRATEGY_DECISION_PAPER_BLOCKERS.GENERIC_OUTCOME_STUDIO_PACK_MISSING,
       packKey: key,
       packType: pack.packType,
@@ -121,11 +145,15 @@ const classifyRequiredPack = ({
   blockedKeys,
   ambiguousKeys,
   relationshipFailures,
+  methods,
 }) => {
-  const packKey = lower(requirement.packKey)
-  const selected = selectedIndex.get(packKey) || null
+  const method = methods[upper(requirement.packType)]
+  const packKey = method ? lower(method.selected?.packKey) : lower(requirement.packKey)
+  const selected = method ? method.selected : selectedIndex.get(packKey) || null
   const considered = consideredIndex.get(packKey) || null
   const blockers = []
+  if (method?.ambiguous) blockers.push({ code: COMMERCIAL_STRATEGY_DECISION_PAPER_BLOCKERS.REQUIRED_PACK_AMBIGUOUS, packKey, packType: requirement.packType })
+  if (method?.selected && !method.eligible) blockers.push({ code: COMMERCIAL_STRATEGY_DECISION_PAPER_BLOCKERS.REQUIRED_PACK_NOT_ELIGIBLE, packKey })
   if (!selected && !considered) blockers.push({ code: COMMERCIAL_STRATEGY_DECISION_PAPER_BLOCKERS.REQUIRED_PACK_MISSING, packKey })
   if (!selected && considered) blockers.push({ code: COMMERCIAL_STRATEGY_DECISION_PAPER_BLOCKERS.REQUIRED_PACK_NOT_SELECTED, packKey })
   if (selected && !activeOrEligible(selected)) blockers.push({ code: COMMERCIAL_STRATEGY_DECISION_PAPER_BLOCKERS.REQUIRED_PACK_NOT_ELIGIBLE, packKey })
@@ -140,9 +168,10 @@ const classifyRequiredPack = ({
     loaded: Boolean(selected || considered),
     selected: Boolean(selected),
     excluded: excludedKeys.has(packKey),
-    eligible: Boolean(selected && activeOrEligible(selected)),
+    eligible: method ? method.eligible && !method.ambiguous : Boolean(selected && activeOrEligible(selected)),
     activationId: selected?.activationId || considered?.activationId || '',
     versionId: selected?.versionId || considered?.versionId || '',
+    ...(method ? { contentHash: selected?.contentHash || '' } : {}),
     lifecycleStatus: selected?.lifecycleStatus || selected?.status || considered?.lifecycleStatus || considered?.status || '',
     selectionSources: selected ? evidenceSourcesFor(packKey, selected, binding) : [],
     assignedKcpStages: selected ? stagePlanFor(candidate, selected) : [],
@@ -157,6 +186,7 @@ export const buildCommercialStrategyDecisionPaperReadinessReport = ({
 } = {}) => {
   const resolution = candidate?.payload?.resolution || binding || {}
   const selectedIndex = selectedPackIndex({ candidate, binding })
+  const methods = Object.fromEntries(['ARL', 'RL'].map((role) => [role, selectedMethodRole({ role, candidate, binding })]))
   const consideredIndex = consideredPackIndex({ candidate, binding })
   const excludedKeys = keySetFrom(resolution.excludedCandidates, binding.excludedCandidates)
   const blockedKeys = keySetFrom(resolution.blockedPacks, binding.blockedPacks)
@@ -175,8 +205,9 @@ export const buildCommercialStrategyDecisionPaperReadinessReport = ({
     blockedKeys,
     ambiguousKeys,
     relationshipFailures,
+    methods,
   }))
-  const genericOutcomeStudioSafeguards = requiredOutcomeStudioSafeguards(selectedIndex)
+  const genericOutcomeStudioSafeguards = requiredOutcomeStudioSafeguards(selectedIndex, methods)
   const blockers = [
     ...requiredPacks.flatMap((pack) => pack.blockers),
     ...genericOutcomeStudioSafeguards.map((pack) => pack.blocker).filter(Boolean),

@@ -542,6 +542,7 @@ const buildLockedTruthManifest = (runtime = {}, { identityMode = 'MARKED_V1' } =
 
 const buildConsumerIntent = (consumerIntent = {}, binding = {}) => {
   const normalized = {
+    originalRequest: text(consumerIntent.originalRequest),
     outcome: text(consumerIntent.outcome),
     decisionPurpose: text(consumerIntent.decisionPurpose),
     consumer: text(consumerIntent.consumer),
@@ -554,6 +555,13 @@ const buildConsumerIntent = (consumerIntent = {}, binding = {}) => {
     channel: text(consumerIntent.channel),
     requirements: [...new Set((consumerIntent.requirements || []).map(text).filter(Boolean))],
     unresolvedGaps: [...new Set((consumerIntent.unresolvedGaps || []).map(text).filter(Boolean))],
+    outputTypeLabel: text(consumerIntent.outputTypeLabel),
+    evidenceSource: text(consumerIntent.evidenceSource),
+    constraints: [...new Set((consumerIntent.constraints || []).map(text).filter(Boolean))],
+    resolutionBasis: canonicalize(consumerIntent.resolutionBasis || {}),
+    missingRequiredFields: [...new Set((consumerIntent.missingRequiredFields || []).map(text).filter(Boolean))],
+    clarificationQuestions: [...new Set((consumerIntent.clarificationQuestions || []).map(text).filter(Boolean))],
+    answeredClarificationQuestions: [...new Set((consumerIntent.answeredClarificationQuestions || []).map(text).filter(Boolean))],
   }
   if (!normalized.outcome
     || !normalized.decisionPurpose
@@ -563,7 +571,41 @@ const buildConsumerIntent = (consumerIntent = {}, binding = {}) => {
     || !normalized.format) {
     throw invalid('Knowledge Composition Plan consumer intent is incomplete.')
   }
+  if (consumerIntent.originalRequest !== undefined && !normalized.originalRequest) {
+    throw invalid('Knowledge Composition Plan original request is incomplete.')
+  }
   return normalized
+}
+
+const buildRequestPlanningEvidence = (planningEvidence, intent) => planningEvidence ? canonicalize({
+  ...planningEvidence,
+  frameworkHandoff: {
+    ...(planningEvidence.frameworkHandoff || {}),
+    outputContract: {
+      ...(planningEvidence.frameworkHandoff?.outputContract || {}),
+      state: 'CONFIRMED_REQUEST',
+      confirmedOutputTypeKey: intent.requestedOutputTypeKey,
+      confirmed: true,
+    },
+  },
+}) : null
+
+const buildClarificationReceipt = ({ intent, requestScope, planningEvidence } = {}) => {
+  if (!requestScope) return null
+  const requestHash = hashSemanticFingerprintValue(intent.originalRequest)
+  const intentFingerprint = hashSemanticFingerprintValue(intent)
+  const handoffFingerprint = hashSemanticFingerprintValue(planningEvidence || {})
+  const receiptIdentity = { requestId: requestScope.requestId, requestHash, intentFingerprint, handoffFingerprint }
+  return {
+    contractVersion: 'outcome-studio.clarification-execution-receipt.v1',
+    receiptId: `outcome_clarification_${hashSemanticFingerprintValue(receiptIdentity).slice(0, 32)}`,
+    stageKey: 'CLARIFICATION',
+    status: 'PASSED',
+    ...receiptIdentity,
+    explicitInferredDefaultedFields: canonicalize(intent.resolutionBasis || {}),
+    questionsAnswered: canonicalize(intent.answeredClarificationQuestions || []),
+    missingRequiredFields: canonicalize(intent.missingRequiredFields || []),
+  }
 }
 
 const projectContext = (context = {}) => ({
@@ -608,7 +650,8 @@ const hasRequiredGap = (resolution) => (
   || resolution.missingDependencies.some((gap) => upper(gap.requirement) !== 'OPTIONAL')
 )
 
-const mandatoryPackKeys = () => OUTCOME_STUDIO_REQUIRED_PACKS.map((pack) => lower(pack.packKey)).sort()
+const mandatoryRoleIdentity = (pack) => upper(pack.packType) === 'ARL'
+  ? 'ARL' : `${upper(pack.packType)}:${lower(pack.packKey)}`
 
 export const buildOutcomeKnowledgeCompositionPlanCandidate = ({
   runtime,
@@ -622,10 +665,14 @@ export const buildOutcomeKnowledgeCompositionPlanCandidate = ({
   assertRequestScope(requestScope, runtime)
   const lockedTruth = buildLockedTruthManifest(runtime)
   const intent = buildConsumerIntent(consumerIntent, binding)
+  const planningEvidence = requestScope
+    ? buildRequestPlanningEvidence(runtime.planningEvidence, intent)
+    : null
   const packEvidence = buildConsideredPackEvidence(binding)
-  const selectedMandatoryKeys = (binding.mandatorySafeguards || []).map((pack) => lower(pack.packKey)).sort()
-  if (JSON.stringify(selectedMandatoryKeys) !== JSON.stringify(mandatoryPackKeys())) {
-    throw resolutionInvalid({ expectedMandatoryKeys: mandatoryPackKeys(), selectedMandatoryKeys })
+  const expectedMandatoryRoles = OUTCOME_STUDIO_REQUIRED_PACKS.map(mandatoryRoleIdentity).sort()
+  const selectedMandatoryRoles = (binding.mandatorySafeguards || []).map(mandatoryRoleIdentity).sort()
+  if (JSON.stringify(selectedMandatoryRoles) !== JSON.stringify(expectedMandatoryRoles)) {
+    throw resolutionInvalid({ expectedMandatoryRoles, selectedMandatoryRoles })
   }
   const resolution = projectResolution(binding)
   const governedContext = projectContext(context)
@@ -669,7 +716,7 @@ export const buildOutcomeKnowledgeCompositionPlanCandidate = ({
   const payload = {
     ...(requestScope ? { requestId: requestScope.requestId } : {}),
     ...(requestScope && requestAssociation ? { requestAssociation: canonicalize(requestAssociation) } : {}),
-    ...(requestScope && runtime.planningEvidence ? { planningEvidence: canonicalize(runtime.planningEvidence) } : {}),
+    ...(planningEvidence ? { planningEvidence } : {}),
     contractVersion: OUTCOME_GOVERNED_QUALITY_CONTRACT_VERSION,
     status,
     runtime: {
@@ -684,6 +731,7 @@ export const buildOutcomeKnowledgeCompositionPlanCandidate = ({
     },
     lockedTruth,
     consumerIntent: intent,
+    ...(requestScope ? { clarificationReceipt: buildClarificationReceipt({ intent, requestScope, planningEvidence }) } : {}),
     resolution: {
       ...resolution,
       resolutionFingerprint,
@@ -1257,7 +1305,10 @@ export const createOutcomeKnowledgeCompositionPlan = async ({
       }
       if (requestScope && deps.readKcpRuntimeEvidence
         && (!lockedRuntime.planningEvidence || !candidate.payload.planningEvidence
-          || hashSemanticFingerprintValue(lockedRuntime.planningEvidence) !== hashSemanticFingerprintValue(candidate.payload.planningEvidence)
+          || hashSemanticFingerprintValue(buildRequestPlanningEvidence(
+            lockedRuntime.planningEvidence,
+            candidate.payload.consumerIntent,
+          )) !== hashSemanticFingerprintValue(candidate.payload.planningEvidence)
           || hashSemanticFingerprintValue(buildLockedTruthManifest(lockedRuntime)) !== hashSemanticFingerprintValue(candidate.payload.lockedTruth))) {
         throw runtimeStale({ field: 'planningEvidence' })
       }

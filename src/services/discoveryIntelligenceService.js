@@ -329,6 +329,11 @@ const DOCUMENT_TYPE_BY_EXTENSION = Object.freeze({
 
 const WEBSITE_EXTRACTION_RULES = Object.freeze([
   {
+    category: DISCOVERY_EVIDENCE_CATEGORIES.CONSTRAINTS,
+    coverageArea: 'Constraints',
+    pattern: /\b(constraint|constraints|limitation|limitations|boundary|boundaries|air[- ]?gapped|hipaa|regulatory|rack space|network access|deployment restriction|operating restriction)\b/i,
+  },
+  {
     category: DISCOVERY_EVIDENCE_CATEGORIES.PRODUCTS,
     coverageArea: 'Products',
     pattern: /\b(product|products|platform|offer|solution|solutions|capability|capabilities|feature|features|software|tool|tools)\b/i,
@@ -1258,7 +1263,7 @@ const extractDocumentSegments = (text, { documentType = '', prioritizeQuality = 
     }))
 }
 
-const classifyDocumentSegment = (segment) => {
+export const classifyDocumentSegment = (segment) => {
   const matchedRule = WEBSITE_EXTRACTION_RULES.find((rule) => rule.pattern.test(segment.text))
   return matchedRule || {
     category: DISCOVERY_EVIDENCE_CATEGORIES.VALUE_DRIVERS,

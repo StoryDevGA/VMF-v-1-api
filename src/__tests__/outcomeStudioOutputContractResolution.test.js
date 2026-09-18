@@ -287,6 +287,7 @@ describe('Outcome Studio conversation output contract resolution', () => {
       knowledgePacks: [
         {
           key: 'adaptive-reasoning-layer',
+          packType: 'ARL',
           label: 'Adaptive Reasoning Layer',
           version: '1.0.0',
           selected: true,
@@ -294,6 +295,7 @@ describe('Outcome Studio conversation output contract resolution', () => {
         },
         {
           key: 'rendering-layer',
+          packType: 'RL',
           label: 'Rendering Layer',
           version: '1.1.0',
           selected: true,
@@ -371,6 +373,56 @@ describe('Outcome Studio conversation output contract resolution', () => {
         version: '2.3.1',
       },
     ]);
+  });
+
+  test('completes a governed output contract when the optional style pack is unavailable', () => {
+    const resolution = resolveOutcomeStudioConversationOutputContract({
+      prompt: 'Prepare an executive brief for investor day.',
+      deliverables,
+    });
+    const result = completeOutcomeStudioOutputContractResolution({
+      resolution,
+      knowledgeContext: {
+        outputType: { key: 'executive-brief', label: 'Executive Brief', version: '2.1.0' },
+        outputSchema: { key: 'executive-brief-schema', label: 'Executive Brief Schema', version: '3.0.0' },
+        style: null,
+        framework: { key: 'VMF', label: 'Value Management Framework', version: '2.3.1' },
+        knowledgePacks: [],
+      },
+      binding: {
+        outputType: { key: 'executive-brief', label: 'Executive Brief', version: '2.1.0' },
+        outputSchema: { key: 'executive-brief-schema', label: 'Executive Brief Schema', version: '3.0.0' },
+      },
+      frameworkKey: 'VMF',
+    });
+
+    expect(result).toMatchObject({
+      status: 'RESOLVED',
+      selectedOutputType: { key: 'executive-brief' },
+      selectedOutputSchema: { key: 'executive-brief-schema' },
+      selectedStyle: null,
+    });
+  });
+
+  test.each(['binding', 'confirmed contract'])('rejects disappearance of style previously selected in %s', (source) => {
+    const style = { key: 'investor-executive', label: 'Investor Executive Style', version: '1.4.0' };
+    const resolution = resolveOutcomeStudioConversationOutputContract({ prompt: 'Prepare an executive brief.', deliverables });
+    const knowledgeContext = {
+      outputType: { key: 'executive-brief', label: 'Executive Brief', version: '2.1.0' },
+      outputSchema: { key: 'executive-brief-schema', label: 'Executive Brief Schema', version: '3.0.0' },
+      style: null,
+    };
+    const input = {
+      resolution: source === 'confirmed contract'
+        ? completeOutcomeStudioOutputContractResolution({ resolution, knowledgeContext: { ...knowledgeContext, style } })
+        : resolution,
+      knowledgeContext,
+      binding: source === 'binding' ? { style } : {},
+    };
+    expect(compareOutcomeStudioOutputContractCurrentness(input)).toMatchObject({
+      current: false, mismatches: [expect.objectContaining({ field: 'style.key', expected: style.key, actual: null })],
+    });
+    expect(() => completeOutcomeStudioOutputContractResolution(input)).toThrow('not current');
   });
 
   test('preserves structured VMF reasoning roles beyond ARL and RL', () => {

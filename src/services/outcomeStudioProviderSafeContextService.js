@@ -1,5 +1,6 @@
 import KnowledgePackVersion from '../models/KnowledgePackVersion.js'
 import { createHash } from 'node:crypto'
+import { assertOutcomeMethodDocument, readOutcomeMethodDocument, projectOutcomeMethodDocumentReceipt, MAX_METHOD_CONTEXT_BYTES } from './outcomeMethodDocumentService.js'
 
 import {
   KNOWLEDGE_PACK_BOUNDARIES,
@@ -416,6 +417,11 @@ const containsDirectIdentifier = (value) => OBJECT_ID_PATTERN.test(value) || UUI
 const withoutDirectIdentifiers = (value) => value
   .replace(new RegExp(UUID_PATTERN.source, 'gi'), ' ')
   .replace(new RegExp(OBJECT_ID_PATTERN.source, 'gi'), ' ')
+export const assertOutcomeMethodDocumentPrivacy = (document) => {
+  assertOutcomeMethodDocument(document)
+  if (containsDirectPiiOrCredential(withoutDirectIdentifiers(readOutcomeMethodDocument(document)))) fail()
+  return document
+}
 const containsDiscardablePackContent = (value) => URL_PATTERN.test(value)
   || HASH_PATTERN.test(value)
   || INTERNAL_TERM_PATTERN.test(value)
@@ -647,19 +653,23 @@ const buildSafeCompositionFact = (fact = {}) => {
 }
 
 const buildSafeCompositionOutput = (outputBinding = {}) => {
+  const styleAbsent = (outputBinding?.styleKey == null || outputBinding.styleKey === '')
+    && (outputBinding?.styleVersion == null || outputBinding.styleVersion === '')
   if (!isPlainObject(outputBinding)
     || !safeToken(outputBinding.outputTypeKey)
     || !safeToken(outputBinding.outputTypeVersion)
-    || !safeToken(outputBinding.outputTypeStructure?.[0])
     || !safeToken(outputBinding.outputSchemaKey)
     || !safeToken(outputBinding.outputSchemaVersion)
-    || !safeToken(outputBinding.styleKey)
-    || !safeToken(outputBinding.styleVersion)
+    || (!styleAbsent && (!safeToken(outputBinding.styleKey) || !safeToken(outputBinding.styleVersion)))
     || !Array.isArray(outputBinding.outputTypeStructure)
-    || outputBinding.outputTypeStructure.length !== 5
+    || outputBinding.outputTypeStructure.length < 1
+    || outputBinding.outputTypeStructure.length > 24
+    || outputBinding.outputTypeStructure.some((item) => typeof item !== 'string' || !item.trim() || item.length > 240)
+    || new Set(outputBinding.outputTypeStructure.map(normalizedWhitespace)).size !== outputBinding.outputTypeStructure.length
     || !Array.isArray(outputBinding.requiredSections)
     || outputBinding.requiredSections.length === 0
     || outputBinding.requiredSections.length > 24
+    || outputBinding.requiredSections.some((item) => typeof item !== 'string' || !item.trim() || item.length > 160)
     || new Set(outputBinding.requiredSections.map(normalizedWhitespace)).size !== outputBinding.requiredSections.length) fail()
 
   const projectSafeStructureText = (value) => normalizedWhitespace(value)
@@ -673,7 +683,7 @@ const buildSafeCompositionOutput = (outputBinding = {}) => {
   const optionalSections = Array.isArray(outputBinding.optionalSections)
     ? outputBinding.optionalSections.map((item) => boundText(item, 160, 1)).filter(Boolean)
     : []
-  assertSafeBoundedArray(outputTypeStructure, { maxLength: 5, itemMaximum: 240 })
+  assertSafeBoundedArray(outputTypeStructure, { maxLength: 24, itemMaximum: 240 })
   assertSafeBoundedArray(requiredSections, { maxLength: 24, itemMaximum: 160 })
   assertSafeBoundedArray(optionalSections, { maxLength: 12, itemMaximum: 160 })
   return {
@@ -682,8 +692,8 @@ const buildSafeCompositionOutput = (outputBinding = {}) => {
     outputTypeStructure,
     outputSchemaKey: normalizedWhitespace(outputBinding.outputSchemaKey),
     outputSchemaVersion: normalizedWhitespace(outputBinding.outputSchemaVersion),
-    styleKey: normalizedWhitespace(outputBinding.styleKey),
-    styleVersion: normalizedWhitespace(outputBinding.styleVersion),
+    styleKey: normalizedWhitespace(outputBinding.styleKey ?? ''),
+    styleVersion: normalizedWhitespace(outputBinding.styleVersion ?? ''),
     requiredSections,
     optionalSections,
   }
@@ -829,6 +839,16 @@ const buildSafeMethodGuidance = (methodGuidance = []) => {
   if (!Array.isArray(methodGuidance) || methodGuidance.length === 0 || methodGuidance.length > 12) fail()
   const roles = new Set()
   return methodGuidance.map((entry) => {
+    if (isPlainObject(entry) && Object.hasOwn(entry, 'document')) {
+      if (!hasExactKeys(entry, ['role', 'boundary', 'version', 'document'])
+        || entry.role !== 'ARL' || entry.boundary !== 'GENERATION_CONTEXT'
+        || !safeToken(entry.version) || roles.has(entry.role)) fail()
+      assertOutcomeMethodDocument(entry.document, { role: entry.role, boundary: entry.boundary })
+      assertOutcomeMethodDocumentPrivacy(entry.document)
+      if (entry.version !== entry.document.source.semanticVersion) fail()
+      roles.add(entry.role)
+      return { role: entry.role, boundary: entry.boundary, version: entry.version, document: structuredClone(entry.document) }
+    }
     if (!isPlainObject(entry) || !hasExactKeys(entry, COMPOSITION_METHOD_KEYS)
       || !safeToken(entry.role)
       || !safeToken(entry.boundary)
@@ -853,8 +873,8 @@ const normalizeConsumptionItem = (value) => String(value ?? '')
   .trim()
   .replace(/\s+/g, ' ')
 
-const fingerprintConsumptionItem = (value, collisionMap) => {
-  const normalized = normalizeConsumptionItem(value)
+const fingerprintConsumptionItem = (value, collisionMap, exactSource = false) => {
+  const normalized = exactSource ? value : normalizeConsumptionItem(value)
   if (!normalized) fail()
   const fingerprint = `sha256:${createHash('sha256').update(normalized, 'utf8').digest('hex')}`
   const previous = collisionMap.get(fingerprint)
@@ -930,7 +950,7 @@ const buildDirectConsumptionBindings = ({
     const packType = normalizedWhitespace(selection.packType).toUpperCase()
     if (layer === 'OUTPUT_TYPE' && packType === 'OUTPUT_TYPE_DEFINITION') return 'OUTPUT_TYPE'
     if (layer === 'OUTPUT_SCHEMA' && packType === 'OUTPUT_SCHEMA') return 'OUTPUT_SCHEMA'
-    if (layer === 'REASONING' && packType === 'ARL') return 'ARL'
+    if (packType === 'ARL') return 'ARL'
     return ''
   }
   const directBindings = generationContextConsumption.map((consumption) => {
@@ -956,7 +976,7 @@ const buildConsumptionFromProviderSurfaces = ({ directBindings, methodGuidance, 
   const surfaceItems = {
     ARL: methodGuidance
       .filter((entry) => normalizedWhitespace(entry?.role).toUpperCase() === 'ARL')
-      .map((entry) => entry.guidance),
+      .map((entry) => entry.document ? readOutcomeMethodDocument(entry.document) : entry.guidance),
     OUTPUT_SCHEMA: outputStructure.requiredSections,
     OUTPUT_TYPE: outputStructure.outputTypeStructure,
   }
@@ -964,8 +984,10 @@ const buildConsumptionFromProviderSurfaces = ({ directBindings, methodGuidance, 
     if (!GENERATION_CONTEXT_ROLES.includes(binding.role)
       || !safeToken(binding.versionId)
       || !ITEM_FINGERPRINT_PATTERN.test(binding.contentHash)) fail()
+    const document = methodGuidance.find((entry) => entry.role === binding.role)?.document
+    if (document && (document.source.versionId !== binding.versionId || document.source.contentHash !== binding.contentHash)) fail()
     const itemFingerprints = [...new Set(
-      (surfaceItems[binding.role] || []).map((item) => fingerprintConsumptionItem(item, collisionMap)),
+      (surfaceItems[binding.role] || []).map((item) => fingerprintConsumptionItem(item, collisionMap, Boolean(document))),
     )].sort()
     if (itemFingerprints.length === 0) fail()
     return {
@@ -1067,11 +1089,11 @@ const buildLegacyOutputContractResolution = ({ methodGuidance, outputStructure }
     outputStructure.outputSchemaKey,
     outputStructure.outputSchemaVersion,
   ),
-  selectedStyle: safeOutputContractDescriptor(
+  selectedStyle: outputStructure.styleKey ? safeOutputContractDescriptor(
     outputStructure.styleKey,
     outputStructure.styleKey,
     outputStructure.styleVersion,
-  ),
+  ) : null,
   knowledgePackRoles: [
     {
       role: 'OUTPUT_TYPE',
@@ -1091,7 +1113,7 @@ const buildLegacyOutputContractResolution = ({ methodGuidance, outputStructure }
         outputStructure.outputSchemaVersion,
       ),
     },
-    {
+    ...(outputStructure.styleKey ? [{
       role: 'STYLE',
       classification: 'STYLE',
       ...safeOutputContractDescriptor(
@@ -1099,7 +1121,7 @@ const buildLegacyOutputContractResolution = ({ methodGuidance, outputStructure }
         outputStructure.styleKey,
         outputStructure.styleVersion,
       ),
-    },
+    }] : []),
     ...methodGuidance.map((entry) => ({
       role: normalizedWhitespace(entry.role),
       classification: 'METHOD',
@@ -1125,14 +1147,15 @@ const buildSafeOutputContractResolution = ({
       !== comparableOutputContractKey(outputStructure.outputTypeKey)
     || comparableOutputContractKey(resolution.selectedOutputSchema.key)
       !== comparableOutputContractKey(outputStructure.outputSchemaKey)
-    || comparableOutputContractKey(resolution.selectedStyle.key)
+    || comparableOutputContractKey(resolution.selectedStyle?.key ?? '')
       !== comparableOutputContractKey(outputStructure.styleKey)
     || normalizedWhitespace(resolution.selectedOutputType.version) !== outputStructure.outputTypeVersion
     || normalizedWhitespace(resolution.selectedOutputSchema.version) !== outputStructure.outputSchemaVersion
-    || normalizedWhitespace(resolution.selectedStyle.version) !== outputStructure.styleVersion) fail()
+    || normalizedWhitespace(resolution.selectedStyle?.version ?? '') !== outputStructure.styleVersion) fail()
 
   const roles = new Map(resolution.knowledgePackRoles.map((entry) => [normalizedWhitespace(entry.role).toUpperCase(), entry]))
-  for (const requiredRole of ['OUTPUT_TYPE', 'OUTPUT_SCHEMA', 'STYLE']) {
+  if (roles.has('STYLE') !== Boolean(resolution.selectedStyle)) fail()
+  for (const requiredRole of ['OUTPUT_TYPE', 'OUTPUT_SCHEMA', ...(resolution.selectedStyle ? ['STYLE'] : [])]) {
     if (!roles.has(requiredRole)) fail()
   }
   methodGuidance.forEach((entry) => {
@@ -1329,7 +1352,8 @@ export const assertOutcomeStudioProviderSafeComposition = (composition) => {
     outputStructure: composition.outputStructure,
   })
   const outputStructure = composition.outputStructure
-  assertSafeBoundedArray(outputStructure.outputTypeStructure, { maxLength: 5, itemMaximum: 240 })
+  buildSafeCompositionOutput(outputStructure)
+  assertSafeBoundedArray(outputStructure.outputTypeStructure, { maxLength: 24, itemMaximum: 240 })
   assertSafeBoundedArray(outputStructure.requiredSections, { maxLength: 24, itemMaximum: 160 })
   assertSafeBoundedArray(outputStructure.optionalSections, { maxLength: 12, itemMaximum: 160 })
   Object.entries(outputStructure)
@@ -1371,7 +1395,7 @@ export const assertOutcomeStudioProviderSafeComposition = (composition) => {
     || safetyManifest.readinessStatus !== composition.readiness.status
     || safetyManifest.readinessGapCount !== composition.readiness.gapCount
     || safetyManifest.draftOnly !== composition.readiness.draftOnly) fail()
-  if (JSON.stringify(composition).length > SAFE_CONTEXT_LIMIT) fail()
+  if (!fitsComposition(composition)) fail()
   return composition
 }
 
@@ -1572,9 +1596,15 @@ const projectGuidanceCandidates = (versions, selectionById, diagnosticState) => 
 }
 
 const cloneGuidance = () => Object.fromEntries(GUIDANCE_KEYS.map((key) => [key, []]))
-const fits = (context) => JSON.stringify(context).length <= SAFE_CONTEXT_LIMIT
+const hasMethodDocuments = (composition) => composition?.methodGuidance?.some((entry) => entry.document)
+const fitsComposition = (composition) => hasMethodDocuments(composition)
+  ? Buffer.byteLength(JSON.stringify(composition), 'utf8') <= MAX_METHOD_CONTEXT_BYTES
+  : JSON.stringify(composition).length <= SAFE_CONTEXT_LIMIT
+const fits = (context) => hasMethodDocuments(context.composition)
+  ? Buffer.byteLength(JSON.stringify(context), 'utf8') <= MAX_METHOD_CONTEXT_BYTES
+  : JSON.stringify(context).length <= SAFE_CONTEXT_LIMIT
 
-const admitGuidance = (baseContext, candidates, evidenceState = null) => {
+const admitGuidance = (baseContext, candidates, evidenceState = null, { requireStyleGuidance = true } = {}) => {
   const context = { ...baseContext, guidance: cloneGuidance() }
   if (!fits(context)) fail()
   const admitted = new Set()
@@ -1603,7 +1633,7 @@ const admitGuidance = (baseContext, candidates, evidenceState = null) => {
   if (candidates.prohibitedOutputBoundaries.length) admit('prohibitedOutputBoundaries', 0, true)
   admit('validationCriteria', 0, true)
   admit('outputSchema', 0, true)
-  admit('styleGuidance', 0, true)
+  admit('styleGuidance', 0, requireStyleGuidance)
   const primary = candidates.businessInstructions.length ? 'businessInstructions' : 'reasoningGuidance'
   const secondary = primary === 'businessInstructions' ? 'reasoningGuidance' : 'businessInstructions'
   admit(primary, 0, true)
@@ -1702,6 +1732,7 @@ const buildExecutionEvidenceReceipt = ({
             ? status.NOT_SUPPLIED
             : status.NOT_RECORDED
       return {
+        packId: selection.packId || '',
         versionId: selection.versionId,
         contentHash: executionBindings.find((binding) => binding.versionId === selection.versionId)?.contentHash || '',
         knowledgeLayer: selection.knowledgeLayer,
@@ -1852,7 +1883,11 @@ export const buildOutcomeStudioProviderSafeContext = async ({
     }
     const selectionById = new Map(knowledgeSelection.map((selection) => [selection.versionId, selection]))
     stage = 'GUIDANCE_PROJECTION'
-    const projection = projectGuidanceCandidates(versions, selectionById, diagnosticState)
+    const documentVersionIds = new Set(methodGuidance.filter((entry) => entry.document)
+      .map((entry) => entry.document.source.versionId))
+    // Full method documents have their own lossless surface. Never also create
+    // a shortened, competing method extract through the generic guidance path.
+    const projection = projectGuidanceCandidates(versions.filter((version) => !documentVersionIds.has(version.versionId)), selectionById, diagnosticState)
     const candidates = projection.guidance
     discardedCountsByReason = projection.discardedCountsByReason
     admittedCountsByCategory = Object.fromEntries(
@@ -1862,7 +1897,7 @@ export const buildOutcomeStudioProviderSafeContext = async ({
       ...(!candidates.businessInstructions.length && !candidates.reasoningGuidance.length
         ? ['businessInstructionsOrReasoningGuidance']
         : []),
-      ...['validationCriteria', 'outputSchema', 'styleGuidance']
+      ...['validationCriteria', 'outputSchema', ...(compositionPackage?.outputBinding?.styleKey === '' ? [] : ['styleGuidance'])]
         .filter((key) => !candidates[key].length),
     ]
     stage = 'REQUIRED_GUIDANCE_ADMISSION'
@@ -1877,7 +1912,9 @@ export const buildOutcomeStudioProviderSafeContext = async ({
       draftContext: { ...safeRequest.draftContext },
       truthSummaries,
       safeguards: [...OUTCOME_STUDIO_PROVIDER_SAFEGUARDS],
-    }, candidates, evidenceState)
+    }, candidates, evidenceState, {
+      requireStyleGuidance: compositionPackage?.outputBinding?.styleKey !== '',
+    })
     admittedCountsByCategory = Object.fromEntries(
       GUIDANCE_KEYS.map((key) => [key, context.guidance[key].length]),
     )
@@ -1918,7 +1955,13 @@ export const buildOutcomeStudioProviderSafeContext = async ({
         safeCandidateEntryCountsByVersionId: projection.safeCandidateEntryCountsByVersionId,
         generationContextConsumption: validatedConsumption.generationContextConsumption,
       })
-      if (providerComposition) receipt.providerRequestManifest = providerComposition
+      if (providerComposition) {
+        receipt.providerRequestManifest = hasMethodDocuments(providerComposition)
+          ? { ...providerComposition, methodGuidance: providerComposition.methodGuidance.map((entry) => entry.document
+              ? { role: entry.role, boundary: entry.boundary, version: entry.version, sourceReceipt: projectOutcomeMethodDocumentReceipt(entry.document) }
+              : entry) }
+          : providerComposition
+      }
       captureExecutionEvidence(receipt)
     }
     return validatedContext
@@ -2054,7 +2097,7 @@ export const assertOutcomeStudioProviderSafeContext = (providerContext) => {
   if (hasComposition) assertOutcomeStudioProviderSafeComposition(providerContext.composition)
   if ((!providerContext.guidance.businessInstructions.length && !providerContext.guidance.reasoningGuidance.length)
     || !providerContext.guidance.outputSchema.length
-    || !providerContext.guidance.styleGuidance.length
+    || (!providerContext.guidance.styleGuidance.length && providerContext.composition?.outputStructure?.styleKey !== '')
     || !providerContext.guidance.validationCriteria.length
     || !fits(providerContext)) {
     fail()

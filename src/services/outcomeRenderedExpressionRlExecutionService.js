@@ -1,4 +1,6 @@
 import mongoose from 'mongoose'
+import { loadOutcomeMethodDocument } from './outcomeMethodDocumentService.js'
+import { loadOutcomeKnowledgePackVersionContent } from './outcomeKnowledgePackRegistryService.js'
 
 import {
   OUTCOME_QUALITY_STAGE_OUTPUT_TYPES,
@@ -53,6 +55,7 @@ const RETRYABLE_PROVIDER_REASONS = new Set([
 const PROVIDER_REASONS = new Set([
   ...RETRYABLE_PROVIDER_REASONS,
   'RENDERED_EXPRESSION_RL_PROVIDER_REJECTED',
+  'RENDERED_EXPRESSION_RL_PROVIDER_CONTEXT_OVERFLOW',
   'RENDERED_EXPRESSION_RL_PROVIDER_REFUSED',
   'RENDERED_EXPRESSION_RL_PROVIDER_RESPONSE_INVALID',
   'RENDERED_EXPRESSION_RL_PROVIDER_OUTPUT_INVALID',
@@ -117,6 +120,15 @@ const assertSource = ({ source, plan, runtimeInstanceId }) => {
     throw historyInvalid('renderedExpressionSource')
   }
   return stage
+}
+
+export const normalizeOutcomeRenderedExpressionRlMethodSelection = (pack) => {
+  if (!pack || (pack.lifecycleStatus !== undefined && pack.lifecycleStatus !== 'ACTIVE')
+    || (pack.status !== undefined && pack.status !== 'ACTIVE')
+    || (pack.lifecycleStatus === undefined && pack.status === undefined)) {
+    throw bindingInvalid('assignedPackLifecycle')
+  }
+  return { ...pack, status: 'ACTIVE' }
 }
 
 const buildBinding = (plan) => {
@@ -390,6 +402,10 @@ export const executeOutcomeRenderedExpressionRl = async ({
         resolveKnowledgeBinding: async () => buildOutcomeRenderedExpressionRlKnowledgeFacade({ plan, binding }),
         buildProviderSafeContext: async ({ boundarySelection, ...args }) => buildOutcomeRenderedExpressionRlProviderSafeContext({
           ...args,
+          methodDocument: await loadOutcomeMethodDocument({
+            role: 'RL', selection: normalizeOutcomeRenderedExpressionRlMethodSelection(binding.pack),
+            loadPackContent: deps.loadPackContent || loadOutcomeKnowledgePackVersionContent,
+          }),
           knowledgeSelection: boundarySelection,
           sourceStageExecution: source,
           targetStageKey: OUTCOME_QUALITY_STAGES.RENDERED_EXPRESSION_RL,

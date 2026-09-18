@@ -263,7 +263,7 @@ describe('Outcome Studio request resolution', () => {
     }))
   })
 
-  test('fails closed when required schema or style guidance is missing', () => {
+  test('fails closed when required schema is missing but allows unselected style', () => {
     const missingSchema = resolveOutcomeStudioRequestContext({
       prompt: 'Create a board summary.',
       requestedOutputTypeKey: 'board-summary',
@@ -278,9 +278,17 @@ describe('Outcome Studio request resolution', () => {
     expect(missingSchema.blockers).toContainEqual(expect.objectContaining({
       code: OUTCOME_STUDIO_REQUEST_RESOLUTION_BLOCKER_CODES.OUTPUT_SCHEMA_UNRESOLVED,
     }))
-    expect(missingStyle.blockers).toContainEqual(expect.objectContaining({
-      code: OUTCOME_STUDIO_REQUEST_RESOLUTION_BLOCKER_CODES.STYLE_UNRESOLVED,
-    }))
+    expect(missingStyle.canProceed).toBe(true)
+    expect(missingStyle.style).toBeNull()
+  })
+
+  test.each([{}, { key: 'style' }, { version: '1.0.0' }, { key: 'style', version: '' }, 'invalid'])('rejects partially authored style %#', (style) => {
+    const resolution = resolveOutcomeStudioRequestContext({
+      prompt: 'Create a board summary.', requestedOutputTypeKey: 'board-summary',
+      resolvedKnowledgeContext: { ...makeKnowledgeContext(), style },
+    })
+    expect(resolution.canProceed).toBe(false)
+    expect(resolution.blockers).toContainEqual(expect.objectContaining({ code: OUTCOME_STUDIO_REQUEST_RESOLUTION_BLOCKER_CODES.STYLE_UNRESOLVED }))
   })
 
   test('fails closed when the selected capability differs from the resolved output type', () => {
@@ -306,9 +314,6 @@ describe('Outcome Studio request resolution', () => {
     expect(resolution.blockers).toEqual(expect.arrayContaining([
       expect.objectContaining({
         code: OUTCOME_STUDIO_REQUEST_RESOLUTION_BLOCKER_CODES.OUTPUT_SCHEMA_UNRESOLVED,
-      }),
-      expect.objectContaining({
-        code: OUTCOME_STUDIO_REQUEST_RESOLUTION_BLOCKER_CODES.STYLE_UNRESOLVED,
       }),
     ]))
   })

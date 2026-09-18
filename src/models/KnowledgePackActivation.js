@@ -281,6 +281,13 @@ const knowledgePackActivationSchema = new mongoose.Schema(
       maxlength: 260,
       default: '',
     },
+    additionalScopeBaselineActivationId: {
+      type: String,
+      trim: true,
+      maxlength: 260,
+      immutable: true,
+      default: undefined,
+    },
     rolledBackAt: {
       type: Date,
       default: null,

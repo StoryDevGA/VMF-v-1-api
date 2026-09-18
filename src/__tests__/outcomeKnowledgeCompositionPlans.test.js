@@ -316,6 +316,41 @@ const makePersistenceDeps = ({ latest = null, auditError = null, saveError = nul
 }
 
 describe('Outcome Knowledge Composition Plan contract', () => {
+  const renamedArlBinding = () => {
+    const binding = makeBinding()
+    const arl = binding.mandatorySafeguards.find((pack) => pack.packType === 'ARL')
+    Object.assign(arl, { packKey: 'uploaded-canonical-reasoning-method', knowledgeLayer: 'FRAMEWORK', capabilityKey: 'arl' })
+    return binding
+  }
+
+  test('accepts an arbitrary governed ARL name without a legacy slug requirement', () => {
+    const candidate = buildCandidate({ binding: renamedArlBinding() })
+    expect(candidate.status).toBe(buildCandidate().status)
+    expect(candidate.payload.resolution.selectedPacks).toContainEqual(expect.objectContaining({
+      packType: 'ARL', packKey: 'uploaded-canonical-reasoning-method', capabilityKey: 'arl',
+    }))
+  })
+
+  test.each(['missing', 'duplicate', 'extra', 'wrong-truth', 'wrong-role'])(
+    'rejects %s mandatory role inventory despite an otherwise ready binding', (scenario) => {
+      const binding = renamedArlBinding()
+      const arl = binding.mandatorySafeguards.find((pack) => pack.packType === 'ARL')
+      if (scenario === 'missing') binding.mandatorySafeguards = binding.mandatorySafeguards.filter((pack) => pack !== arl)
+      if (scenario === 'duplicate') binding.mandatorySafeguards.push({ ...arl })
+      if (scenario === 'extra') binding.mandatorySafeguards.push(requestPacks().style)
+      if (scenario === 'wrong-truth') binding.mandatorySafeguards.find((pack) => pack.packType === 'TRUTH_CERTIFICATION').packKey = 'another-truth-pack'
+      if (scenario === 'wrong-role') arl.packType = 'RL'
+      expect(() => buildCandidate({ binding })).toThrow(expect.objectContaining({ code: OUTCOME_KCP_ERROR_CODES.RESOLUTION_INTEGRITY_INVALID }))
+    },
+  )
+
+  test.each(['incompatibleCandidates', 'ambiguousCandidates'])(
+    'renamed ARL does not bypass %s blockers', (field) => {
+      const binding = renamedArlBinding()
+      binding[field] = [{ reason: 'NOT_ELIGIBLE', candidates: [binding.mandatorySafeguards[0]] }]
+      expect(buildCandidate({ binding }).status).toBe(OUTCOME_KCP_STATUSES.BLOCKED)
+    },
+  )
   it('hashes canonical object key order while retaining governed IDs', () => {
     expect(hashOutcomeKnowledgeCompositionValue({ b: 2, a: { d: 4, c: 3 } }))
       .toBe(hashOutcomeKnowledgeCompositionValue({ a: { c: 3, d: 4 }, b: 2 }))

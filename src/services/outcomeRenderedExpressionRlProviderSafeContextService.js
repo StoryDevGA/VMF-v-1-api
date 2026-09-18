@@ -11,13 +11,16 @@ import {
   assertOutcomeStudioProviderSafeRequest,
   assertOutcomeStudioProviderSafeValue,
   OUTCOME_STUDIO_PROVIDER_SAFEGUARDS,
+  OUTCOME_STUDIO_EXECUTION_EVIDENCE_CONTRACT,
+  assertOutcomeMethodDocumentPrivacy,
 } from './outcomeStudioProviderSafeContextService.js'
 import { hashOutcomeQualityStageValue } from './outcomeQualityStageExecutionService.js'
+import { assertOutcomeMethodDocument, projectOutcomeMethodDocumentReceipt } from './outcomeMethodDocumentService.js'
 
 const MAX_CANDIDATE_BYTES = 140000
 const CONTEXT_KEYS = Object.freeze([
   'contractVersion', 'businessRequest', 'draftContext', 'guidance', 'safeguards',
-  'targetStage', 'candidate',
+  'targetStage', 'candidate', 'methodDocument',
 ])
 const CANDIDATE_KEYS = Object.freeze(['candidateType', 'title', 'sections', 'visibleGaps'])
 const SECTION_KEYS = Object.freeze(['order', 'heading', 'body', 'qualification', 'diagram'])
@@ -50,10 +53,7 @@ const guidance = Object.freeze({
   ]),
   reasoningGuidance: Object.freeze([
     'Evaluate statements, headings, diagrams, hierarchy, qualification, accessibility and brand expression against the supplied candidate and request context.',
-    'For diagrams, present false with empty description and accessible text is an intentional absence and is compliant without a reader-facing absence notice; when present is true, assess both description and accessible text.',
-    'Required changes are limited to explicit contract breaches: unsupported or contradictory statements; missing or misleading headings; inaccessible present diagrams; missing or misplaced hierarchy labels; hidden or contradictory qualifications; objective structural accessibility barriers; promotional, inappropriate or exposed internal implementation language.',
-    'Evidence limitations may appear under Evidence, section unknowns may repeat global visible gaps, and optional preferences about brevity, repetition, sentence density, skimmability or word choice are polish rather than required changes.',
-    'QA-suffixed fictitious names and a precise test-placeholder disclosure are permitted when supplied by the candidate; generic QA process commentary is not exempt from brand review.',
+    'Apply the complete selected canonical RL document to this expression review within the execution boundaries.',
   ]),
   outputSchema: Object.freeze([
     'Return exactly one finding for each required review dimension and an overall PASS only when no required expression change remains.',
@@ -63,8 +63,6 @@ const guidance = Object.freeze({
   ]),
   validationCriteria: Object.freeze([
     'Review the exact supplied statements and visible gaps. A meaning change is outside RL and must not be proposed as an expression fix.',
-    'Do not fail diagrams or accessibility merely because an intentionally absent diagram has empty diagram text.',
-    'Set requiredChange true only for an explicit contract breach. Optional polish may be mentioned only in a PASS finding with requiredChange false and must not make overallStatus FAIL.',
     'Do not introduce a new acceptance criterion during review.',
   ]),
   prohibitedOutputBoundaries: Object.freeze([
@@ -120,6 +118,8 @@ const projectCandidate = (sourceStageExecution) => {
 }
 
 export const assertOutcomeRenderedExpressionRlProviderSafeContext = (value) => {
+  assertOutcomeMethodDocument(value?.methodDocument, { role: 'RL', boundary: 'POST_GENERATION_VALIDATION' })
+  assertOutcomeMethodDocumentPrivacy(value.methodDocument)
   if (!exactKeys(value, CONTEXT_KEYS)
     || value.contractVersion !== OUTCOME_RENDERED_EXPRESSION_RL_PROVIDER_SAFE_CONTEXT_VERSION
     || value.targetStage !== OUTCOME_QUALITY_STAGES.RENDERED_EXPRESSION_RL
@@ -150,6 +150,8 @@ export const assertOutcomeRenderedExpressionRlProviderSafeContext = (value) => {
 }
 
 export const buildOutcomeRenderedExpressionRlProviderSafeContext = ({
+  methodDocument,
+  captureExecutionEvidence,
   knowledgeSelection,
   providerDescriptor,
   safeRequest,
@@ -161,6 +163,10 @@ export const buildOutcomeRenderedExpressionRlProviderSafeContext = ({
     || !Array.isArray(knowledgeSelection)
     || knowledgeSelection.length !== 1) throw new TypeError('Rendered-expression RL provider binding is invalid.')
   assertOutcomeStudioProviderSafeRequest(safeRequest)
+  assertOutcomeMethodDocument(methodDocument, { role: 'RL', boundary: 'POST_GENERATION_VALIDATION' })
+  if (knowledgeSelection[0]?.versionId !== methodDocument.source.versionId) {
+    throw new TypeError('Rendered-expression RL document binding is invalid.')
+  }
   const base = assertOutcomeStudioProviderSafeContext({
     contractVersion: OUTCOME_STUDIO_PROVIDER_SAFE_CONTEXT_POLICY,
     businessRequest: { ...safeRequest.businessRequest },
@@ -169,7 +175,7 @@ export const buildOutcomeRenderedExpressionRlProviderSafeContext = ({
     guidance: Object.fromEntries(Object.entries(guidance).map(([key, values]) => [key, [...values]])),
     safeguards: [...OUTCOME_STUDIO_PROVIDER_SAFEGUARDS],
   })
-  return assertOutcomeRenderedExpressionRlProviderSafeContext({
+  const context = assertOutcomeRenderedExpressionRlProviderSafeContext({
     contractVersion: OUTCOME_RENDERED_EXPRESSION_RL_PROVIDER_SAFE_CONTEXT_VERSION,
     businessRequest: base.businessRequest,
     draftContext: base.draftContext,
@@ -177,7 +183,23 @@ export const buildOutcomeRenderedExpressionRlProviderSafeContext = ({
     safeguards: base.safeguards,
     targetStage: OUTCOME_QUALITY_STAGES.RENDERED_EXPRESSION_RL,
     candidate: projectCandidate(sourceStageExecution),
+    methodDocument,
   })
+  if (typeof captureExecutionEvidence === 'function') captureExecutionEvidence({
+    contractVersion: OUTCOME_STUDIO_EXECUTION_EVIDENCE_CONTRACT,
+    providerContextContractVersion: OUTCOME_RENDERED_EXPRESSION_RL_PROVIDER_SAFE_CONTEXT_VERSION,
+    methodDocumentReceipts: [projectOutcomeMethodDocumentReceipt(methodDocument)],
+    packs: [{
+      ...projectOutcomeMethodDocumentReceipt(methodDocument),
+      packType: 'RL',
+      knowledgeLayer: knowledgeSelection[0].knowledgeLayer,
+      executionMode: knowledgeSelection[0].executionMode,
+      suppliedEntryCount: methodDocument.chunks.length,
+      status: 'NOT_RECORDED',
+      checks: [{ key: 'PROVIDER_COMPLETED', status: 'NOT_RECORDED', message: 'Awaiting provider completion.' }],
+    }],
+  })
+  return context
 }
 
 export default {

@@ -46,6 +46,7 @@ import {
   OutcomeDraft,
   OutcomeDraftIteration,
   OutcomeMessage,
+  OutcomeKnowledgeCompositionPlan,
   OutcomeSession,
   TruthSignature,
 } from '../models/index.js'
@@ -57,6 +58,7 @@ import {
   projectOutcomeStudioDeliverableDiscovery,
   resolveOutcomeStudioKnowledgeContext,
 } from './outcomeStudioKnowledgeContextService.js'
+import { assertOutcomeKnowledgeCompositionPlanIntegrity } from './outcomeKnowledgeCompositionPlanService.js'
 import {
   FRAMEWORK_OUTCOME_HANDOFF_BLOCKER_CODES,
   FRAMEWORK_OUTCOME_HANDOFF_STATUSES,
@@ -150,7 +152,8 @@ import {
   buildResolvedOutcomeStudioExecutionIntent,
   classifyOutcomeStudioRequestIntent,
 } from './outcomeStudioResolutionService.js'
-import { buildOutcomeStudioLiveComposition } from './outcomeStudioLiveCompositionBridgeService.js'
+import { buildOutcomeStudioLiveComposition, resolveOutcomeStudioCompositionInputs } from './outcomeStudioLiveCompositionBridgeService.js'
+import { buildOutcomeStudioProviderRuntime } from '../config/outcomeStudioProvider.js'
 import {
   assertOutcomeStudioOutputContractResolution,
   completeOutcomeStudioOutputContractResolution,
@@ -295,15 +298,16 @@ const outputContractRolePack = (binding = {}, packKey = '') => {
 }
 
 const outputContractContextDescriptor = (value = {}) => {
-  const key = normalizeText(value.key)
+  const descriptor = value && typeof value === 'object' ? value : {}
+  const key = normalizeText(descriptor.key)
   return {
     key,
-    label: normalizeText(value.label) || key
+    label: normalizeText(descriptor.label) || key
       .split(/[-_\s]+/)
       .filter(Boolean)
       .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
       .join(' '),
-    version: normalizeText(value.version),
+    version: normalizeText(descriptor.version),
   }
 }
 
@@ -328,7 +332,7 @@ const buildOutputContractKnowledgeContext = ({
   return {
     outputType: outputContractContextDescriptor(context.outputType),
     outputSchema: outputContractContextDescriptor(context.outputSchema),
-    style: outputContractContextDescriptor(context.style),
+    style: context.style ? outputContractContextDescriptor(context.style) : null,
     framework: {
       key: normalizeToken(frameworkKey),
       label: normalizeToken(frameworkKey) === 'VMF' ? 'Value Management Framework' : normalizeText(frameworkKey),
@@ -404,6 +408,7 @@ const assertOutputContractMethodRolesCurrent = ({
   for (const methodRole of ['ARL', 'RL']) {
     const expected = roles.get(methodRole)
     const actual = methodGuidance.find((entry) => normalizeToken(entry?.role) === methodRole)
+    if (methodRole === 'RL' && !expected && !actual) continue
     if (!expected || !actual || normalizeText(expected.version) !== normalizeText(actual.version)) {
       throw createOutcomeStudioError({
         status: 409,
@@ -563,6 +568,18 @@ const normalizeDateValue = (value) => {
 }
 
 const buildOutcomeMessageId = () => `out_msg_${randomUUID()}`
+const buildConfirmedPlanMessageId = ({ planId, requestId }) => `out_msg_plan_${createHash('sha256')
+  .update(`${normalizeText(requestId)}:${normalizeText(planId)}`)
+  .digest('hex')}`
+const buildConfirmedPlanMessageLookup = ({ planId, requestId, runtimeInstance, sessionId }) => ({
+  messageId: buildConfirmedPlanMessageId({ planId, requestId }),
+  tenantId: runtimeInstance.tenantId,
+  customerId: runtimeInstance.customerId,
+  runtimeInstanceId: runtimeInstance._id || runtimeInstance.id,
+  sessionId,
+  'contextBindings.requestPlan.requestId': requestId,
+  'contextBindings.requestPlan.planId': planId,
+})
 const buildOutcomeAssetId = () => `outcome_asset_${randomUUID()}`
 const buildOutcomeAssetVersionId = () => `outcome_asset_version_${randomUUID()}`
 const buildOutcomeDraftId = () => `outcome_draft_${randomUUID()}`
@@ -710,6 +727,7 @@ const sanitizeOutcomeExecutionEvidence = (evidence) => {
     recordedAt: normalizeDateValue(evidence.recordedAt),
     packs: Array.isArray(evidence.packs)
       ? evidence.packs.map((pack) => ({
+          packId: normalizeText(pack?.packId),
           versionId: normalizeText(pack?.versionId),
           contentHash: normalizeText(pack?.contentHash),
           knowledgeLayer: normalizeToken(pack?.knowledgeLayer),
@@ -822,33 +840,36 @@ const completeOutcomeExecutionEvidence = ({
     .find((candidate) => candidate.versionId === versionId)
   const packs = evidenceWithBoundaryReceipts.packs.map((pack) => {
     const boundPack = findBoundPack(pack.versionId)
+    const identifiedPack = pack.packId || !boundPack?.packId
+      ? pack
+      : { ...pack, packId: boundPack.packId }
     const boundary = resolveKnowledgePackBoundary({
-      ...pack,
+      ...identifiedPack,
       ...(boundPack || {}),
     })
-    if (boundary !== KNOWLEDGE_PACK_BOUNDARIES.POST_GENERATION_VALIDATION) return pack
-    const checks = Array.isArray(pack.checks) ? [...pack.checks] : []
-    const receiptType = resolveKnowledgePackReceiptType({ ...pack, boundary })
+    if (boundary !== KNOWLEDGE_PACK_BOUNDARIES.POST_GENERATION_VALIDATION) return identifiedPack
+    const checks = Array.isArray(identifiedPack.checks) ? [...identifiedPack.checks] : []
+    const receiptType = resolveKnowledgePackReceiptType({ ...identifiedPack, boundary })
     const receiptValidation = validateOutcomeBoundaryReceipt({
       expectedPack: {
         ...(boundPack || { versionId: '', contentHash: '' }),
         boundary,
         receiptType,
       },
-      receipt: pack,
+      receipt: identifiedPack,
     })
     const recordedPackReceipt = checks.some((check) => check.key === 'BOUNDARY_RECEIPT_RECORDED' && check.status === 'PASSED')
       && checks.some((check) => check.key === 'POST_VALIDATION_PASSED' && check.status === 'PASSED')
     if (recordedPackReceipt && receiptValidation.valid) {
       return {
-        ...pack,
+        ...identifiedPack,
         boundary: KNOWLEDGE_PACK_BOUNDARIES.POST_GENERATION_VALIDATION,
         receiptType,
       }
     }
-    if (pack.diagnosticOnly === true && pack.status === 'FAILED') {
+    if (identifiedPack.diagnosticOnly === true && identifiedPack.status === 'FAILED') {
       return {
-        ...pack,
+        ...identifiedPack,
         boundary: KNOWLEDGE_PACK_BOUNDARIES.POST_GENERATION_VALIDATION,
         receiptType,
         status: 'FAILED',
@@ -881,7 +902,7 @@ const completeOutcomeExecutionEvidence = ({
     if (existingReceiptIndex >= 0) checks[existingReceiptIndex] = receiptRecorded
     else checks.push(receiptRecorded)
     return {
-      ...pack,
+      ...identifiedPack,
       boundary: KNOWLEDGE_PACK_BOUNDARIES.POST_GENERATION_VALIDATION,
       receiptType,
       status: packReceiptStatus,
@@ -1741,6 +1762,7 @@ const sanitizeKnowledgePackDependencyReference = (reference = {}) => ({
 })
 
 const sanitizeKnowledgePackActivation = (pack = {}) => ({
+  packId: normalizeText(pack.packId),
   packCategory: normalizePackCategory(pack.packCategory, pack.packType),
   purposeCategory: normalizeToken(pack.purposeCategory),
   knowledgeLayer: normalizeToken(pack.knowledgeLayer),
@@ -1774,6 +1796,7 @@ const sanitizeKnowledgePackActivation = (pack = {}) => ({
 })
 
 const resolutionReceiptPack = (pack = {}) => ({
+  packId: normalizeText(pack.packId),
   knowledgeAssetId: normalizeToken(pack.knowledgeAssetId),
   packType: normalizeToken(pack.packType),
   packKey: normalizeText(pack.packKey).toLowerCase(),
@@ -1902,6 +1925,7 @@ const buildRequiredKnowledgePack = (pack = {}, activePacks = []) => {
     ...pack,
   }
   return {
+    packId: normalizeText(source.packId),
     packCategory: normalizePackCategory(source.packCategory, source.packType),
     packType: normalizeToken(source.packType),
     packKey: normalizeText(source.packKey),
@@ -2711,11 +2735,43 @@ const buildPublishedAssetRuntimeGraphRelationships = ({
   },
 ])
 
+const sanitizePersistedRequestPlan = (contextBindings = {}) => {
+  const requestPlan = contextBindings?.requestPlan
+  if (!requestPlan || typeof requestPlan !== 'object') return null
+  const projected = {
+    requestId: normalizeText(requestPlan.requestId),
+    planId: normalizeText(requestPlan.planId),
+    planFingerprint: normalizeText(requestPlan.planFingerprint),
+    clarificationReceiptId: normalizeText(requestPlan.clarificationReceiptId),
+  }
+  return projected.requestId && projected.planId ? projected : null
+}
+
+const sanitizePersistedClarificationReceipt = (contextBindings = {}) => {
+  const receipt = contextBindings?.clarificationReceipt
+  if (!receipt || typeof receipt !== 'object') return null
+  const projected = {
+    contractVersion: normalizeText(receipt.contractVersion),
+    receiptId: normalizeText(receipt.receiptId),
+    stageKey: normalizeToken(receipt.stageKey),
+    status: normalizeToken(receipt.status),
+    requestId: normalizeText(receipt.requestId),
+    requestHash: normalizeText(receipt.requestHash),
+    intentFingerprint: normalizeText(receipt.intentFingerprint),
+    handoffFingerprint: normalizeText(receipt.handoffFingerprint),
+    confirmedBy: toIdString(receipt.confirmedBy),
+    executedAt: normalizeDateValue(receipt.executedAt),
+  }
+  return projected.contractVersion && projected.receiptId && projected.requestId ? projected : null
+}
+
 const serializeOutcomeSession = (session, options = {}) => {
   const plain = toPlainObject(session)
   const sourceOutput = sanitizePersistedSourceOutput(plain.sourceOutputSnapshot || {})
   const truthSignature = sanitizePersistedTruthSignature(plain.truthSignature || {}, options)
   const knowledgePackBinding = sanitizePersistedKnowledgePackBinding(plain.knowledgePackBinding || {})
+  const requestPlan = sanitizePersistedRequestPlan(plain.contextBindings || {})
+  const clarificationReceipt = sanitizePersistedClarificationReceipt(plain.contextBindings || {})
   return {
     sessionId: normalizeText(plain.sessionId),
     contractVersion: normalizeText(plain.contractVersion || OUTCOME_STUDIO_CONTRACT_VERSION),
@@ -2739,6 +2795,8 @@ const serializeOutcomeSession = (session, options = {}) => {
     truthSignature,
     knowledgePackBinding,
     outputContractResolution: getPersistedOutputContractResolution(plain.contextBindings || {}),
+    ...(requestPlan ? { requestId: requestPlan.requestId, requestPlan } : {}),
+    ...(clarificationReceipt ? { clarificationReceipt } : {}),
     prompt: normalizeText(plain.prompt),
     startedBy: toIdString(plain.startedBy),
     startedAt: normalizeDateValue(plain.startedAt),
@@ -2783,6 +2841,8 @@ const serializeOutcomeSessionSummary = (session, options = {}) => {
     requestedOutputTypeKey: serialized.requestedOutputTypeKey,
     requestedOutputTypeLabel: serialized.requestedOutputTypeLabel,
     outputContract: serialized.outputContractResolution,
+    ...(serialized.requestPlan ? { requestId: serialized.requestId, requestPlan: serialized.requestPlan } : {}),
+    ...(serialized.clarificationReceipt ? { clarificationReceipt: serialized.clarificationReceipt } : {}),
     informationStatus: buildCustomerInformationStatus(serialized.truthSignature),
     businessGuidance: buildCustomerBusinessGuidance(serialized.knowledgePackBinding),
     governanceEvidence: buildCustomerGovernanceEvidence({
@@ -5007,6 +5067,7 @@ const buildSafetyGates = ({
   truthBinding,
   knowledgeContext,
   deliverableCount = 0,
+  compositionCheck = null,
 }) => {
   const activeCount = Array.isArray(packBinding?.activePacks) ? packBinding.activePacks.length : 0
   const requiredCount = Array.isArray(packBinding?.requiredPacks) ? packBinding.requiredPacks.length : 0
@@ -5020,8 +5081,8 @@ const buildSafetyGates = ({
     && activeCount >= requiredCount
   const promptPersistenceReady = readiness?.canStartSession === true
   // A resolved metadata contract does not prove executable composition content.
-  const compositionReady = knowledgeContext?.available === true
-    && knowledgeContext.metadataOnly !== true
+  const compositionReady = compositionCheck?.passed === true
+    && knowledgeContext?.available === true
     && deliverableCount > 0
   const responseGenerationAvailable =
     sourceOutputBound
@@ -5075,10 +5136,10 @@ const buildSafetyGates = ({
       passed: responseGenerationAvailable,
       message: responseGenerationAvailable
         ? 'Governed response generation can run for active current sessions.'
-        : !compositionReady
+        : compositionCheck?.message || (!compositionReady
           ? 'Knowledge Pack metadata does not yet establish executable composition readiness.'
-          : 'Assistant response generation is blocked until source, truth, knowledge-pack, and session gates pass.',
-      blockerReason: !compositionReady ? 'COMPOSITION_READINESS_PENDING' : 'PRE_GENERATION_GATES_BLOCKED',
+          : 'Assistant response generation is blocked until source, truth, knowledge-pack, and session gates pass.'),
+      blockerReason: compositionCheck?.reason || (!compositionReady ? 'COMPOSITION_READINESS_PENDING' : 'PRE_GENERATION_GATES_BLOCKED'),
     }),
   ]
   const passedCount = gates.filter((gate) => gate.status === OUTCOME_STUDIO_SAFETY_GATE_STATUSES.PASSED).length
@@ -5129,19 +5190,25 @@ const buildOutcomeStudioProjection = async ({
     query: outputLab?.runtimeScope || {},
   })).binding
   const deliverables = projectOutcomeStudioDeliverableDiscovery(packBinding)
+  const activeSession = sessions.find((session) => session.status === 'ACTIVE')
   const requestedOutputTypeKey = normalizeCapabilityKey(
     requestedOutputTypeKeyOverride
-      || deliverables.available?.[0]?.key
+      || activeSession?.requestedOutputTypeKey
       || '',
   )
+  // Framework knowledge may still expose a candidate context before a
+  // customer request is confirmed. Keep that context available for handoff
+  // diagnostics, but do not use it as the session/output contract.
+  const handoffOutputTypeKey = requestedOutputTypeKey || normalizeCapabilityKey(deliverables.available?.[0]?.key)
   const sourceDeliverable = deliverables.available?.find((deliverable) =>
-    normalizeCapabilityKey(deliverable.key) === requestedOutputTypeKey,
+    normalizeCapabilityKey(deliverable.key) === handoffOutputTypeKey,
   )
   const handoffResolution = await getRuntimeStateOutcomeHandoffReadiness({
     runtimeInstanceId: outputLab?.runtimeScope?.runtimeInstanceId,
     scopes,
     packBinding,
-    requestedOutputTypeKey,
+    requestedOutputTypeKey: handoffOutputTypeKey,
+    outputContractState: activeSession ? 'CONFIRMED' : 'UNSELECTED_CONTEXT',
   })
   const frameworkHandoff = handoffResolution.handoff
   const frameworkHandoffSourceOutput = buildFrameworkHandoffSourceOutput({
@@ -5164,6 +5231,74 @@ const buildOutcomeStudioProjection = async ({
     truthQuality,
     frameworkHandoff,
   })
+  let compositionCheck = null
+  const receipt = activeSession?.clarificationReceipt
+  if (readiness.canStartSession && receipt?.status === 'PASSED'
+    && receipt.requestId === activeSession.requestId
+    && activeSession.informationStatus?.currentness === 'CURRENT') {
+    try {
+      const resolved = await resolveOutcomeStudioKnowledgeContext({
+        query: { ...outputLab.runtimeScope, requestedOutputTypeKey },
+      })
+      const handoffContext = frameworkHandoff?.knowledgeResolution?.context || {}
+      // contextId includes resolvedAt; compare the governed identities, not read timestamps.
+      if (resolved.context?.available !== true
+        || resolved.context.outputType?.key !== handoffContext.outputTypeKey
+        || resolved.context.outputSchema?.key !== handoffContext.outputSchemaKey
+        || (resolved.context.style?.key || '') !== handoffContext.styleKey
+        || JSON.stringify([...(resolved.context.lineage?.contentHashes || [])].sort())
+          !== JSON.stringify([...(handoffContext.contentHashes || [])].sort())) {
+        throw Object.assign(new Error('Knowledge context changed.'), { reason: 'LIVE_COMPOSITION_KNOWLEDGE_CONTEXT_BLOCKED' })
+      }
+      completeOutputContractResolution({
+        binding: resolved.reasoningBinding,
+        context: resolved.context,
+        frameworkKey: outputLab.runtimeScope.frameworkKey,
+        frameworkVersion: outputLab.runtimeScope.packageVersion,
+        resolution: activeSession.outputContract,
+      })
+      await resolveOutcomeStudioCompositionInputs({
+        binding: resolved.reasoningBinding,
+        knowledgeContext: resolved.context,
+        requestedOutputTypeKey,
+        requestedFormat: normalizeToken(activeSession.outputContract?.format?.format
+          || activeSession.outputContract?.formatKey || activeSession.outputContract?.outputFormat),
+        frameworkHandoff,
+      })
+      const evidenceReadiness = frameworkHandoff?.evidenceReadiness
+        || frameworkHandoff?.customerSafe?.evidenceReadiness
+        || {}
+      if (Number(evidenceReadiness.unresolvedContradictionCount || 0) > 0) {
+        compositionCheck = {
+          passed: false,
+          reason: 'COMPOSITION_CONTRADICTION_UNRESOLVED',
+          message: `Draft generation is blocked because ${Number(evidenceReadiness.unresolvedContradictionCount)} governed evidence contradictions remain unresolved.`,
+        }
+      } else {
+        const provider = buildOutcomeStudioProviderRuntime().status
+        compositionCheck = !isOutcomeStudioGrrEnabled()
+          ? { passed: false, reason: 'DRAFTING_ENGINE_DISABLED', message: 'Draft generation is blocked because the governed drafting engine is disabled.' }
+          : provider.configured
+            ? { passed: true }
+            : { passed: false, reason: provider.reason, message: provider.reason === 'PRODUCTION_NOT_AUTHORIZED'
+              ? 'Draft generation is blocked because live drafting is not authorized in this environment.'
+              : provider.reason === 'PROVIDER_DISABLED'
+                ? 'Draft generation is blocked because the drafting provider is disabled.'
+                : 'Draft generation is blocked because the drafting provider configuration is incomplete.' }
+      }
+    } catch (error) {
+      const reason = normalizeToken(error.reason || error.code)
+      compositionCheck = {
+        passed: false,
+        reason: reason.startsWith('LIVE_COMPOSITION_') || reason.startsWith('COMPOSITION_')
+          ? reason
+          : 'COMPOSITION_READINESS_CHECK_FAILED',
+        message: reason.startsWith('LIVE_COMPOSITION_') || reason.startsWith('COMPOSITION_')
+          ? `Draft generation is blocked: ${reason.replace(/^LIVE_COMPOSITION_/, '').toLowerCase().replaceAll('_', ' ')}${normalizeText(error.details?.packKey) ? ` (${normalizeText(error.details.packKey)})` : ''}.`
+          : 'Draft generation is blocked because executable Knowledge Pack content could not be checked.',
+      }
+    }
+  }
   const safetyGates = buildSafetyGates({
     packBinding,
     readiness,
@@ -5171,6 +5306,7 @@ const buildOutcomeStudioProjection = async ({
     truthBinding,
     knowledgeContext: frameworkHandoff?.knowledgeResolution?.context,
     deliverableCount: deliverables.availableCount,
+    compositionCheck,
   })
   const readinessWithSafetyGates = {
     ...readiness,
@@ -5264,7 +5400,15 @@ const buildCustomerSafetyGates = (safetyGates = {}) => ({
           key: `check-${index + 1}`,
           label: presentation.label,
           status: passed ? OUTCOME_STUDIO_SAFETY_GATE_STATUSES.PASSED : OUTCOME_STUDIO_SAFETY_GATE_STATUSES.BLOCKED,
-          message: passed ? presentation.passed : presentation.blocked,
+          message: passed
+            ? presentation.passed
+            : normalizeToken(gate.blockerReason) === 'COMPOSITION_READINESS_PENDING'
+              ? 'Draft generation is blocked because executable Knowledge Pack composition has not been established; resolved metadata alone is insufficient.'
+              : normalizeToken(gate.blockerReason) === 'PRE_GENERATION_GATES_BLOCKED'
+                ? 'Draft generation is blocked until the source information, verified information, business guidance and session checks pass.'
+                : normalizeToken(gate.code) === OUTCOME_STUDIO_SAFETY_GATE_CODES.RESPONSE_GENERATION_ENGINE
+                  ? gate.message
+                  : presentation.blocked,
         }
       })
     : [],
@@ -5748,7 +5892,8 @@ const buildOutcomeStudioCustomerProjection = (projection = {}) => {
       summary: canReason
         ? 'Outcome Studio is ready to prepare drafts.'
         : canStartSession
-          ? 'A session can start, but draft generation is not currently available.'
+          ? safetyGates.gates.find((gate) => gate.status !== OUTCOME_STUDIO_SAFETY_GATE_STATUSES.PASSED)?.message
+            || 'A session can start, but draft generation readiness has not been established.'
           : readiness.customerSummary
             || 'Outcome Studio requires additional business information before a session can start.',
       blockerCount: Array.isArray(readiness.blockers) ? readiness.blockers.length : 0,
@@ -5757,22 +5902,56 @@ const buildOutcomeStudioCustomerProjection = (projection = {}) => {
         status: normalizeToken(frameworkHandoff.status || 'BLOCKED'),
         contractVersion: normalizeText(frameworkHandoff.contractVersion),
         currentness: normalizeToken(frameworkHandoff.currentness || 'BLOCKED'),
+        handoffId: normalizeText(frameworkHandoff.handoffId),
+        handoffHash: normalizeText(frameworkHandoff.currentness?.handoffHash),
         gapCount: Number(frameworkHandoff.gapCount || 0),
         contradictionWarningCount: Number(frameworkHandoff.contradictionWarningCount || 0),
         blockerCount: Number(frameworkHandoff.blockerCount || 0),
         blockedBoundary: normalizeToken(frameworkHandoff.blockedBoundary),
         nextAction: normalizeText(frameworkHandoff.nextAction),
+        evidenceReadiness: frameworkHandoff.evidenceReadiness && typeof frameworkHandoff.evidenceReadiness === 'object'
+          ? {
+              status: normalizeToken(frameworkHandoff.evidenceReadiness.status),
+              unresolvedContradictionCount: Number(frameworkHandoff.evidenceReadiness.unresolvedContradictionCount || 0),
+              missingDomains: Array.isArray(frameworkHandoff.evidenceReadiness.missingDomains)
+                ? frameworkHandoff.evidenceReadiness.missingDomains.map(normalizeText).filter(Boolean)
+                : [],
+            }
+          : null,
+        runtimeIntegrity: frameworkHandoff.runtimeIntegrity && typeof frameworkHandoff.runtimeIntegrity === 'object'
+          ? {
+              runtimeRevision: normalizeText(frameworkHandoff.runtimeIntegrity.runtimeRevision),
+              workspaceScope: frameworkHandoff.runtimeIntegrity.workspaceScope && typeof frameworkHandoff.runtimeIntegrity.workspaceScope === 'object'
+                ? {
+                    workspaceId: normalizeText(frameworkHandoff.runtimeIntegrity.workspaceScope.workspaceId),
+                    status: normalizeToken(frameworkHandoff.runtimeIntegrity.workspaceScope.status),
+                  }
+                : null,
+              outputRequirements: frameworkHandoff.runtimeIntegrity.outputRequirements && typeof frameworkHandoff.runtimeIntegrity.outputRequirements === 'object'
+                ? {
+                    status: normalizeToken(frameworkHandoff.runtimeIntegrity.outputRequirements.status),
+                    inputPresent: frameworkHandoff.runtimeIntegrity.outputRequirements.inputPresent === true,
+                    generatedPresent: frameworkHandoff.runtimeIntegrity.outputRequirements.generatedPresent === true,
+                    acceptedPresent: frameworkHandoff.runtimeIntegrity.outputRequirements.acceptedPresent === true,
+                  }
+                : null,
+              outputContract: frameworkHandoff.runtimeIntegrity.outputContract && typeof frameworkHandoff.runtimeIntegrity.outputContract === 'object'
+                ? {
+                    state: normalizeToken(frameworkHandoff.runtimeIntegrity.outputContract.state),
+                    candidateOutputTypeKey: normalizeCapabilityKey(frameworkHandoff.runtimeIntegrity.outputContract.candidateOutputTypeKey),
+                    confirmed: frameworkHandoff.runtimeIntegrity.outputContract.confirmed === true,
+                  }
+                : null,
+              malformedScopedViewKeys: Array.isArray(frameworkHandoff.runtimeIntegrity.malformedScopedViewKeys)
+                ? frameworkHandoff.runtimeIntegrity.malformedScopedViewKeys.map(normalizeText).filter(Boolean)
+                : [],
+            }
+          : null,
         ...(frameworkHandoff.reasoningBoundary
           ? { reasoningBoundary: frameworkHandoff.reasoningBoundary }
           : {}),
       },
-      safetyGates: {
-        status: safetyGates.status,
-        responseGenerationAvailable: safetyGates.responseGenerationAvailable,
-        passedCount: safetyGates.passedCount,
-        blockedCount: safetyGates.blockedCount,
-        totalCount: safetyGates.totalCount,
-      },
+      safetyGates,
     },
     information: {
       ...buildCustomerInformationStatus(truthSignature),
@@ -6311,7 +6490,16 @@ export const getRuntimeOutcomeStudioReadiness = async ({
     runtimeInstanceId,
     scopes,
   })
-  const outcomeStudio = await buildOutcomeStudioProjection({ outputLab, truthQuality, scopes })
+  const sessions = await listOutcomeSessionsForRuntime(outputLab?.runtimeScope?.runtimeInstanceId || runtimeInstanceId, {
+    currentEvidence: buildProjectionTruthEvidence({
+      readiness: outputLab?.readiness || {},
+      sourceOutput: sanitizeSourceOutputAsset({
+        asset: selectSourceOutputAsset(Array.isArray(outputLab?.assets) ? outputLab.assets : []),
+        readiness: outputLab?.readiness || {},
+      }),
+    }),
+  })
+  const outcomeStudio = await buildOutcomeStudioProjection({ outputLab, truthQuality, scopes, sessions })
   return buildOutcomeStudioCustomerProjection(outcomeStudio).readiness
 }
 
@@ -6328,14 +6516,78 @@ export const createRuntimeOutcomeSession = async ({
     scopes,
   })
 
+  let confirmedPlan = null
+  const requestedPlanId = normalizeText(payload?.planId)
+  const requestedRequestId = normalizeText(payload?.requestId)
+  if (requestedPlanId || requestedRequestId) {
+    if (!requestedPlanId || !requestedRequestId) {
+      throw createOutcomeStudioError({ status: 422, code: 'VALIDATION_ERROR',
+        message: 'A confirmed request plan identity is required.', reason: 'OUTCOME_CONFIRMED_PLAN_REQUIRED' })
+    }
+    confirmedPlan = await OutcomeKnowledgeCompositionPlan.findOne({
+      tenantId: runtimeInstance.tenantId,
+      customerId: runtimeInstance.customerId,
+      runtimeInstanceId: runtimeInstance._id || runtimeInstance.id,
+      requestId: requestedRequestId,
+      planId: requestedPlanId,
+    }).lean()
+    if (!confirmedPlan) {
+      throw createOutcomeStudioError({ status: 404, code: 'NOT_FOUND',
+        message: 'The confirmed request plan was not found for this runtime.', reason: 'OUTCOME_CONFIRMED_PLAN_NOT_FOUND' })
+    }
+    assertOutcomeKnowledgeCompositionPlanIntegrity(confirmedPlan)
+    if (confirmedPlan.payload?.clarificationReceipt?.status !== 'PASSED'
+      || confirmedPlan.payload?.clarificationReceipt?.stageKey !== 'CLARIFICATION'
+      || normalizeText(confirmedPlan.payload?.clarificationReceipt?.requestId) !== requestedRequestId) {
+      throw createOutcomeStudioError({ status: 409, code: 'CONFLICT',
+        message: 'The request plan has no matching Clarification execution receipt.', reason: 'OUTCOME_CLARIFICATION_RECEIPT_REQUIRED' })
+    }
+    const existingSession = await OutcomeSession.findOne({
+      tenantId: runtimeInstance.tenantId,
+      customerId: runtimeInstance.customerId,
+      runtimeInstanceId: runtimeInstance._id || runtimeInstance.id,
+      'contextBindings.requestPlan.requestId': requestedRequestId,
+      'contextBindings.requestPlan.planId': requestedPlanId,
+    }).lean()
+    if (existingSession) {
+      const initialMessageLookup = buildConfirmedPlanMessageLookup({
+        planId: requestedPlanId,
+        requestId: requestedRequestId,
+        runtimeInstance,
+        sessionId: existingSession.sessionId,
+      })
+      const existingMessage = await OutcomeMessage.findOne(initialMessageLookup).lean()
+      if (!existingMessage) {
+        try {
+          await createRuntimeOutcomeMessage({ actorUserId, auditRequest, runtimeInstanceId, scopes,
+            messageId: initialMessageLookup.messageId,
+            sessionId: existingSession.sessionId, payload: {
+              prompt: confirmedPlan.payload.consumerIntent.originalRequest,
+              requestedOutputTypeKey: confirmedPlan.requestedOutputTypeKey,
+            } })
+        } catch (err) {
+          if (err?.code !== 11000) throw err
+          const concurrentMessage = await OutcomeMessage.findOne(initialMessageLookup).lean()
+          if (!concurrentMessage) throw err
+        }
+      }
+      return serializeCustomerOutcomeSession(existingSession)
+    }
+  }
+  const sessionPayload = confirmedPlan ? {
+    ...payload,
+    prompt: confirmedPlan.payload.consumerIntent.originalRequest,
+    requestedOutputTypeKey: confirmedPlan.requestedOutputTypeKey,
+  } : payload
+
   const outputLab = await getRuntimeOutputLab({ includeRuntimeScope: true, runtimeInstanceId, scopes })
-  const explicitRequestedOutputTypeKey = normalizeCapabilityKey(payload?.requestedOutputTypeKey)
+  const explicitRequestedOutputTypeKey = normalizeCapabilityKey(sessionPayload?.requestedOutputTypeKey)
   const { binding: discoveryPackBinding } = await resolveOutcomeStudioKnowledgePackBinding({
     query: outputLab?.runtimeScope || {},
   })
   const discoveredDeliverables = projectOutcomeStudioDeliverableDiscovery(discoveryPackBinding)
   const initialOutputContractResolution = resolveOutcomeStudioConversationOutputContract({
-    prompt: normalizeText(payload?.prompt),
+    prompt: normalizeText(sessionPayload?.prompt),
     deliverables: discoveredDeliverables.available,
     requestedOutputTypeKey: explicitRequestedOutputTypeKey,
   })
@@ -6353,7 +6605,7 @@ export const createRuntimeOutcomeSession = async ({
   let outcomeStudio = await buildOutcomeStudioProjection({
     outputLab,
     packBinding: discoveryPackBinding,
-    sourceOutputAssetId: normalizeText(payload?.sourceOutputAssetId),
+    sourceOutputAssetId: normalizeText(sessionPayload?.sourceOutputAssetId),
     requestedOutputTypeKey,
     scopes,
   })
@@ -6366,7 +6618,7 @@ export const createRuntimeOutcomeSession = async ({
       reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_SESSION_BLOCKED,
       details: {
         readiness: outcomeStudio.readiness,
-        sourceOutputAssetId: normalizeText(payload?.sourceOutputAssetId),
+        sourceOutputAssetId: normalizeText(sessionPayload?.sourceOutputAssetId),
       },
     })
   }
@@ -6380,7 +6632,7 @@ export const createRuntimeOutcomeSession = async ({
   outcomeStudio = await buildOutcomeStudioProjection({
     outputLab,
     packBinding: discoveryPackBinding,
-    sourceOutputAssetId: normalizeText(payload?.sourceOutputAssetId),
+    sourceOutputAssetId: normalizeText(sessionPayload?.sourceOutputAssetId),
     requestedOutputTypeKey,
     truthQuality,
     scopes,
@@ -6400,7 +6652,7 @@ export const createRuntimeOutcomeSession = async ({
   }
 
   const sourceOutput = outcomeStudio.truthBinding?.sourceOutput || outcomeStudio.sourceOutputs[0]
-  const requestedSourceOutputAssetId = normalizeText(payload?.sourceOutputAssetId)
+  const requestedSourceOutputAssetId = normalizeText(sessionPayload?.sourceOutputAssetId)
   if (requestedSourceOutputAssetId && requestedSourceOutputAssetId !== sourceOutput?.outputAssetId) {
     throw createOutcomeStudioError({
       status: 409,
@@ -6460,6 +6712,16 @@ export const createRuntimeOutcomeSession = async ({
       truthSignature,
     }),
     outputContractResolution,
+    ...(confirmedPlan ? { requestPlan: {
+      requestId: requestedRequestId,
+      planId: requestedPlanId,
+      planFingerprint: confirmedPlan.planFingerprint,
+      clarificationReceiptId: confirmedPlan.payload.clarificationReceipt.receiptId,
+    }, clarificationReceipt: {
+      ...confirmedPlan.payload.clarificationReceipt,
+      confirmedBy: toIdString(confirmedPlan.createdBy),
+      executedAt: confirmedPlan.createdAt ? new Date(confirmedPlan.createdAt).toISOString() : boundAt,
+    } } : {}),
   }
   const truthSignatureRecord = new TruthSignature({
     truthSignatureId,
@@ -6499,7 +6761,7 @@ export const createRuntimeOutcomeSession = async ({
     truthSignature,
     knowledgePackBinding,
     contextBindings,
-    prompt: normalizeText(payload?.prompt),
+    prompt: normalizeText(sessionPayload?.prompt),
     startedBy: actorUserId,
     startedAt: boundAt,
     lastActivityAt: boundAt,
@@ -6513,11 +6775,46 @@ export const createRuntimeOutcomeSession = async ({
       truthSignature,
     }),
   )
-
+  const initialMessageId = confirmedPlan
+    ? buildConfirmedPlanMessageId({ planId: requestedPlanId, requestId: requestedRequestId })
+    : ''
+  const initialMessage = confirmedPlan ? new OutcomeMessage({
+    messageId: initialMessageId,
+    sessionId,
+    ...runtimeScope,
+    workspaceType: DEFAULT_OUTCOME_WORKSPACE_TYPE,
+    contractVersion: OUTCOME_STUDIO_CONTRACT_VERSION,
+    phase: OUTCOME_STUDIO_PHASE,
+    role: OUTCOME_STUDIO_MESSAGE_ROLES.USER,
+    status: OUTCOME_STUDIO_MESSAGE_STATUSES.SUBMITTED,
+    responseStatus: OUTCOME_STUDIO_RESPONSE_STATUSES.PENDING_RESPONSE,
+    prompt: confirmedPlan.payload.consumerIntent.originalRequest,
+    requestedOutputTypeKey: resolvedRequestedOutputTypeKey,
+    requestedOutputTypeLabel,
+    sourceOutputSnapshot: sourceOutput,
+    truthSignature,
+    knowledgePackBinding,
+    contextBindings: {
+      ...buildOutcomeContextBindings({
+        contextType: 'MESSAGE',
+        knowledgePackBinding,
+        messageId: initialMessageId,
+        runtimeScope,
+        sessionId,
+        sourceOutput,
+        truthSignature,
+      }),
+      outputContractResolution,
+      requestPlan: { ...contextBindings.requestPlan },
+    },
+    submittedBy: actorUserId,
+    submittedAt: boundAt,
+  }) : null
   const persistSessionAndAudit = async (dbSession = null) => {
     const saveOptions = dbSession ? { session: dbSession } : undefined
     await truthSignatureRecord.save(saveOptions)
     await session.save(saveOptions)
+    if (initialMessage) await initialMessage.save(saveOptions)
     try {
       await saveRuntimeGraphRelationshipDocuments(sessionRelationshipDocuments, { dbSession })
     } catch (err) {
@@ -6543,9 +6840,9 @@ export const createRuntimeOutcomeSession = async ({
           outputContractResolution: {
             contractVersion: outputContractResolution.contractVersion,
             source: outputContractResolution.source,
-            outputTypeKey: outputContractResolution.selectedOutputType.key,
-            outputSchemaKey: outputContractResolution.selectedOutputSchema.key,
-            styleKey: outputContractResolution.selectedStyle.key,
+            outputTypeKey: normalizeText(outputContractResolution.selectedOutputType?.key),
+            outputSchemaKey: normalizeText(outputContractResolution.selectedOutputSchema?.key),
+            styleKey: normalizeText(outputContractResolution.selectedStyle?.key),
           },
           truthSignatureId,
           truthSignatureStatus: truthSignature.status,
@@ -6609,6 +6906,35 @@ export const createRuntimeOutcomeSession = async ({
           runtimeGraphRelationshipCount: Math.max(sessionRelationshipDocuments.length - 1, 0),
         },
       })
+      if (initialMessage) {
+        await logOutcomeMessageAudit({
+          auditRequest,
+          dbSession,
+          runtimeInstance,
+          message: initialMessage,
+          summary: 'Outcome Studio confirmed request materialized with its governed session.',
+          diff: {
+            actorUserId,
+            sessionId,
+            messageId: initialMessage.messageId,
+            runtimeInstanceId: toIdString(runtimeInstance._id || runtimeInstance.id),
+            sourceOutputAssetId: sourceOutput.outputAssetId,
+            sourceOutputTypeKey: sourceOutput.outputTypeKey,
+            requestedOutputTypeKey: resolvedRequestedOutputTypeKey,
+            outputContractResolution: {
+              contractVersion: outputContractResolution.contractVersion,
+              source: outputContractResolution.source,
+              outputTypeKey: normalizeText(outputContractResolution.selectedOutputType?.key),
+              outputSchemaKey: normalizeText(outputContractResolution.selectedOutputSchema?.key),
+              styleKey: normalizeText(outputContractResolution.selectedStyle?.key),
+            },
+            truthSignatureStatus: truthSignature.status,
+            knowledgePackBindingStatus: knowledgePackBinding.status,
+            promptLength: initialMessage.prompt.length,
+            responseStatus: OUTCOME_STUDIO_RESPONSE_STATUSES.PENDING_RESPONSE,
+          },
+        })
+      }
     } catch (err) {
       err.outcomeSessionAuditFailure = true
       throw err
@@ -6622,6 +6948,16 @@ export const createRuntimeOutcomeSession = async ({
         await persistSessionAndAudit(dbSession)
       })
     } catch (err) {
+      if (confirmedPlan && err?.code === 11000) {
+        const concurrentSession = await OutcomeSession.findOne({
+          tenantId: runtimeInstance.tenantId,
+          customerId: runtimeInstance.customerId,
+          runtimeInstanceId: runtimeInstance._id || runtimeInstance.id,
+          'contextBindings.requestPlan.requestId': requestedRequestId,
+          'contextBindings.requestPlan.planId': requestedPlanId,
+        }).lean()
+        if (concurrentSession) return serializeCustomerOutcomeSession(concurrentSession)
+      }
       if (err?.outcomeGraphRelationshipFailure === 'session') {
         throw failGraphRelationshipClosed(err, {
           sessionId: session.sessionId,
@@ -6641,8 +6977,19 @@ export const createRuntimeOutcomeSession = async ({
       await persistSessionAndAudit()
     } catch (err) {
       await deleteRuntimeGraphRelationshipDocuments(sessionRelationshipDocuments)
+      if (initialMessage) await OutcomeMessage.deleteOne({ _id: initialMessage._id })
       await OutcomeSession.deleteOne({ _id: session._id })
       await TruthSignature.deleteOne({ _id: truthSignatureRecord._id })
+      if (confirmedPlan && err?.code === 11000) {
+        const concurrentSession = await OutcomeSession.findOne({
+          tenantId: runtimeInstance.tenantId,
+          customerId: runtimeInstance.customerId,
+          runtimeInstanceId: runtimeInstance._id || runtimeInstance.id,
+          'contextBindings.requestPlan.requestId': requestedRequestId,
+          'contextBindings.requestPlan.planId': requestedPlanId,
+        }).lean()
+        if (concurrentSession) return serializeCustomerOutcomeSession(concurrentSession)
+      }
       if (err?.outcomeGraphRelationshipFailure === 'session') {
         throw failGraphRelationshipClosed(err, {
           sessionId: session.sessionId,
@@ -6663,6 +7010,7 @@ export const createRuntimeOutcomeSession = async ({
 export const createRuntimeOutcomeMessage = async ({
   actorUserId,
   auditRequest,
+  messageId: suppliedMessageId = '',
   payload = {},
   runtimeInstanceId,
   scopes,
@@ -6796,7 +7144,7 @@ export const createRuntimeOutcomeMessage = async ({
     frameworkVersion: runtimeScope.packageVersion,
     resolution: outputContractResolution,
   })
-  const messageId = buildOutcomeMessageId()
+  const messageId = normalizeText(suppliedMessageId) || buildOutcomeMessageId()
   const contextBindings = {
     ...buildOutcomeContextBindings({
       contextType: 'MESSAGE',
@@ -6808,6 +7156,9 @@ export const createRuntimeOutcomeMessage = async ({
       truthSignature: serializedSession.truthSignature,
     }),
     outputContractResolution,
+    ...(serializedSession.requestPlan
+      ? { requestPlan: { ...serializedSession.requestPlan } }
+      : {}),
   }
   const message = new OutcomeMessage({
     messageId,
@@ -6851,9 +7202,9 @@ export const createRuntimeOutcomeMessage = async ({
           outputContractResolution: {
             contractVersion: outputContractResolution.contractVersion,
             source: outputContractResolution.source,
-            outputTypeKey: outputContractResolution.selectedOutputType.key,
-            outputSchemaKey: outputContractResolution.selectedOutputSchema.key,
-            styleKey: outputContractResolution.selectedStyle.key,
+            outputTypeKey: normalizeText(outputContractResolution.selectedOutputType?.key),
+            outputSchemaKey: normalizeText(outputContractResolution.selectedOutputSchema?.key),
+            styleKey: normalizeText(outputContractResolution.selectedStyle?.key),
           },
           truthSignatureStatus: serializedSession.truthSignature.status,
           knowledgePackBindingStatus: serializedSession.knowledgePackBinding.status,
@@ -7108,6 +7459,7 @@ export const generateRuntimeOutcomeResponse = async ({
     packBinding: knowledgeContextResult.reasoningBinding,
     knowledgeContextResult,
     requestedOutputTypeKey: resolvedOutputTypeCapabilityKey,
+    outputContractState: 'CONFIRMED',
   })
   const liveComposition = await buildOutcomeStudioLiveComposition({
     runtimeInstance,
@@ -7490,6 +7842,9 @@ export const generateRuntimeOutcomeResponse = async ({
     runtimeWarningExecution: runtimeWarningRulesExecution,
     version: { outcomeAssetVersionId: draftIterationId },
   })
+  const rlPostValidationReceipt = liveComposition.methodBoundaryReceipts
+    ?.find((receipt) => receipt.validatorKey === 'outcome-method-document'
+      && receipt.boundary === KNOWLEDGE_PACK_BOUNDARIES.POST_GENERATION_VALIDATION)
   lineageSummary.componentExecutionEvidence = completeOutcomeExecutionEvidence({
     boundaryReceipts: [
       truthCertificationReceipt,
@@ -7501,6 +7856,7 @@ export const generateRuntimeOutcomeResponse = async ({
       renderingLayerReceipt,
       exportMetadataExecution?.receipt,
       truthCertificationFrameworkExecution?.receipt,
+      rlPostValidationReceipt,
     ].filter(Boolean),
     diagnosticBoundaryEvidence: [
       truthCertificationFrameworkExecution?.diagnosticEvidence,
@@ -10430,3 +10786,8 @@ export const updateRuntimeOutcomeSessionFromLatestTruth = async ({
     },
   }
 }
+
+export const __testables = Object.freeze({
+  buildConfirmedPlanMessageLookup,
+  buildSafetyGates,
+})

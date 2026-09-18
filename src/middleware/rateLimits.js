@@ -113,6 +113,23 @@ export const documentIngestionRateLimit = rateLimit({
   skip: () => env.nodeEnv === 'test',
 })
 
+export const knowledgePackImportRateLimit = rateLimit({
+  store: createRateLimitStore('knowledgePackImportRateLimit'),
+  windowMs: 60 * 1000,
+  limit: 10,
+  message: {
+    error: {
+      code: 'KNOWLEDGE_PACK_IMPORT_RATE_LIMIT_EXCEEDED',
+      message: 'Too many Knowledge Pack import requests',
+    },
+  },
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  handler: standardHandler,
+  keyGenerator: (req) => `kp-import:${req.ip}:${req.context?.userId || req.userId || 'anonymous'}`,
+  skip: () => env.nodeEnv === 'test',
+})
+
 export const userManagementRateLimit = rateLimit({
   store: createRateLimitStore('userManagementRateLimit'),
   windowMs: 60 * 1000, // 1 minute

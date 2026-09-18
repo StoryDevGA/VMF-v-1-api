@@ -382,9 +382,12 @@ const resolveOutputSchema = ({ resolvedKnowledgeContext = {}, blockers } = {}) =
 }
 
 const resolveStyle = ({ resolvedKnowledgeContext = {}, blockers } = {}) => {
-  const style = (resolvedKnowledgeContext || {}).style || {}
+  const style = (resolvedKnowledgeContext || {}).style
+  if (style == null) return null
   const styleKey = normalizeCapabilityKey(style.key)
-  if (!styleKey) {
+  if (typeof style !== 'object' || Array.isArray(style)
+    || typeof style.key !== 'string' || !styleKey
+    || typeof style.version !== 'string' || !normalizeText(style.version)) {
     blockers.push({
       code: OUTCOME_STUDIO_REQUEST_RESOLUTION_BLOCKER_CODES.STYLE_UNRESOLVED,
       message: 'Outcome Studio could not resolve the required presentation guidance.',

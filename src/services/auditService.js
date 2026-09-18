@@ -124,6 +124,7 @@ export const AUDIT_ACTIONS = Object.freeze({
   KNOWLEDGE_PACK_MANIFEST_CLONED: 'KNOWLEDGE_PACK_MANIFEST_CLONED',
   KNOWLEDGE_PACK_DEPRECATED: 'KNOWLEDGE_PACK_DEPRECATED',
   KNOWLEDGE_PACK_DISABLED: 'KNOWLEDGE_PACK_DISABLED',
+  KNOWLEDGE_PACK_ACTIVATION_DISABLED: 'KNOWLEDGE_PACK_ACTIVATION_DISABLED',
   KNOWLEDGE_PACK_ROLLED_BACK: 'KNOWLEDGE_PACK_ROLLED_BACK',
   KNOWLEDGE_PACK_DELETED: 'KNOWLEDGE_PACK_DELETED',
   COMPONENT_CREATED: 'COMPONENT_CREATED',
@@ -563,6 +564,8 @@ const buildAuditSummary = ({ action, resourceType, resourceId, diff, display }) 
       return clampSummary(`${actorLabel} deprecated Knowledge Pack ${targetLabel}`)
     case AUDIT_ACTIONS.KNOWLEDGE_PACK_DISABLED:
       return clampSummary(`${actorLabel} disabled Knowledge Pack ${targetLabel}`)
+    case AUDIT_ACTIONS.KNOWLEDGE_PACK_ACTIVATION_DISABLED:
+      return clampSummary(`${actorLabel} disabled additional-scope Knowledge Pack activation ${targetLabel}`)
     case AUDIT_ACTIONS.KNOWLEDGE_PACK_ROLLED_BACK:
       return clampSummary(`${actorLabel} rolled back Knowledge Pack ${targetLabel}`)
     case AUDIT_ACTIONS.KNOWLEDGE_PACK_DELETED:

@@ -1418,10 +1418,10 @@ describe('runtime State Storage V2 repository', () => {
     expect(result.stateVersion).toBe('runtime-revision:1')
     expect(buildOutcomePlanningRuntimeEvidence).toHaveBeenCalledWith({ runtimeInstance: expect.objectContaining({
       framework_state: expect.objectContaining({ sections: {} }),
-    }), frameworkPackage })
+    }), frameworkPackage, handoff: { status: 'BLOCKED' } })
     for (const [call] of getRuntimeInstance.mock.calls) {
       expect(call.projection.split(' ')).not.toContain('framework_state')
-      expect(call.projection).not.toContain('framework_state.sections')
+      expect(call.projection.split(' ')).not.toContain('framework_state.sections')
       expect(call.maxTimeMS).toBe(2000)
     }
   })
@@ -1435,7 +1435,7 @@ describe('runtime State Storage V2 repository', () => {
     await expect(getRuntimeOutcomePlanningEvidence({ scopes: SCOPES, runtimeInstanceId: RUNTIME_ID })).rejects.toMatchObject({ status: expect.any(Number) })
     expect(buildOutcomePlanningRuntimeEvidence).not.toHaveBeenCalled()
     expect(resolveFrameworkOutcomeStudioHandoff).not.toHaveBeenCalled()
-    for (const [call] of getRuntimeInstance.mock.calls) expect(call.projection).not.toContain('framework_state.sections')
+    for (const [call] of getRuntimeInstance.mock.calls) expect(call.projection.split(' ')).not.toContain('framework_state.sections')
   })
   test('legacy planning selects a bounded sections projection only when V2 identity is absent', async () => {
     getRuntimeInstance.mockResolvedValue(makeControl({ stateVersion: undefined }))

@@ -6,6 +6,7 @@ import auditService from './auditService.js'
 import { getRuntimeInstance } from './runtimeInstanceService.js'
 import { resolveOutcomeStudioKnowledgePackBinding } from './outcomeKnowledgePackRegistryService.js'
 import { resolveOutcomeStudioKnowledgeContext } from './outcomeStudioKnowledgeContextService.js'
+import { getUnresolvedDiscoveryContradictions } from './discoveryContradictionReviewService.js'
 import { buildIntermediateReasoningManifest } from './outcomeStudioEvidenceCompositionService.js'
 import {
   projectHandoffReasoningArtefacts,
@@ -21,6 +22,13 @@ export const FRAMEWORK_OUTCOME_HANDOFF_STATUSES = Object.freeze({
   READY_WITH_GAPS: 'READY_WITH_GAPS',
   BLOCKED: 'BLOCKED',
 })
+
+// The nested lock eligibility record is the canonical readiness source. Keep
+// the legacy outer-field mismatch visible for diagnostics, but do not turn it
+// into a customer-facing evidence gap when the canonical record is complete.
+const NON_BLOCKING_HANDOFF_WARNING_CODES = new Set([
+  'OUTER_NESTED_OUTPUT_ELIGIBILITY_CONTRADICTION',
+])
 
 export const FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_POLICY_VERSION =
   'ss-014.runtime-state-v2.handoff-dependencies.v1'
@@ -788,11 +796,16 @@ const buildBlockedHandoff = ({
   internalCompletion = [],
   evidenceRefs = [],
   intermediateReasoning = null,
+  reasoningArtefactDeclarations = [],
+  outputContractState = 'CANDIDATE',
 } = {}) => {
   const normalizedBlockers = blockers.filter(Boolean)
+  const blockingWarnings = warnings.filter((warning) => !NON_BLOCKING_HANDOFF_WARNING_CODES.has(
+    normalizeText(warning?.code),
+  ))
   const status = normalizedBlockers.length > 0
     ? FRAMEWORK_OUTCOME_HANDOFF_STATUSES.BLOCKED
-    : warnings.length > 0
+    : blockingWarnings.length > 0
       ? FRAMEWORK_OUTCOME_HANDOFF_STATUSES.READY_WITH_GAPS
       : FRAMEWORK_OUTCOME_HANDOFF_STATUSES.READY
   const runtimeIdentity = buildRuntimeIdentity(runtimeInstance)
@@ -811,9 +824,83 @@ const buildBlockedHandoff = ({
   })
   const nextAction = normalizedBlockers.length > 0
     ? 'Resolve the governed Framework-to-Outcome handoff boundary before starting Outcome Studio.'
-    : warnings.length > 0
+    : blockingWarnings.length > 0
       ? 'Review the visible evidence gaps before relying on generated drafts.'
       : ''
+  const frameworkState = getFrameworkState(runtimeInstance)
+  const evidencePack = isObject(frameworkState.evidence_pack) ? frameworkState.evidence_pack : {}
+  const evidenceReadiness = evidencePack.discoveryHealth?.readiness
+    || runtimeInstance?.evidenceReadiness
+    || frameworkState.evidenceReadiness
+    || frameworkState.readiness
+    || {}
+  const unresolvedContradictions = getUnresolvedDiscoveryContradictions(
+    evidencePack,
+    normalizeText(runtimeIdentity.runtimeInstanceId || runtimeIdentity.runtimeInstanceKey),
+  )
+  const hasCurrentContradictionProjection = Array.isArray(evidencePack.discoveryHealth?.contradictionCandidates)
+  const missingDomains = [
+    ...(Array.isArray(evidenceReadiness.missingDomains) ? evidenceReadiness.missingDomains : []),
+    ...(Array.isArray(evidenceReadiness.missingCoverageDomains) ? evidenceReadiness.missingCoverageDomains : []),
+    ...(Array.isArray(evidenceReadiness.missingAreas) ? evidenceReadiness.missingAreas : []),
+    ...(Array.isArray(evidencePack.discoveryHealth?.missingAreas) ? evidencePack.discoveryHealth.missingAreas : []),
+  ].map(normalizeText).filter(Boolean)
+  const uniqueMissingDomains = [...new Set(missingDomains)].sort()
+  const evidenceReadinessProjection = {
+    status: normalizeToken(
+      evidenceReadiness.status
+      || evidenceReadiness.state
+      || (unresolvedContradictions.length > 0 ? 'NOT_READY' : 'READY'),
+    ),
+    // Once the current candidate projection exists, its review-derived count is
+    // authoritative. Do not resurrect a stale persisted count after all current
+    // candidates have been dispositioned.
+    unresolvedContradictionCount: hasCurrentContradictionProjection
+      ? unresolvedContradictions.length
+      : Number(evidenceReadiness.unresolvedContradictionCount
+        ?? evidenceReadiness.contradictionCount
+        ?? 0),
+    missingDomains: uniqueMissingDomains,
+  }
+  const outputRequirements = frameworkState.output_requirements
+    || frameworkState.outputRequirements
+    || frameworkState.sections?.output_requirements
+    || frameworkState.sections?.outputRequirements
+    || {}
+  const scopedViews = frameworkState.scopedViews && typeof frameworkState.scopedViews === 'object'
+    ? frameworkState.scopedViews
+    : evidencePack.scopedViews && typeof evidencePack.scopedViews === 'object'
+      ? evidencePack.scopedViews
+      : evidencePack.scoped_views && typeof evidencePack.scoped_views === 'object'
+        ? evidencePack.scoped_views
+        : {}
+  const malformedScopedViewKeys = Object.keys(scopedViews)
+    .filter((key) => !normalizeKey(key) || normalizeKey(key) === 'undefined')
+    .sort()
+  const runtimeType = normalizeToken(runtimeInstance?.runtimeType)
+  const workspaceId = normalizeText(runtimeInstance?.workspaceId)
+  const runtimeIntegrity = {
+    runtimeRevision: normalizeText(runtimeInstance?.stateVersion || runtimeInstance?.runtimeStateVersion),
+    workspaceScope: {
+      workspaceId,
+      status: workspaceId ? 'EXPLICIT' : runtimeType === 'VALUE_NARRATIVE' ? 'VALID_RUNTIME_SCOPE' : 'MISSING',
+      scopeKeys: ['tenantId', 'customerId', 'runtimeInstanceId'],
+    },
+    outputRequirements: {
+      status: normalizeToken(outputRequirements.state?.status || outputRequirements.status || 'NOT_RECORDED'),
+      inputPresent: outputRequirements.input !== null && outputRequirements.input !== undefined,
+      generatedPresent: outputRequirements.generated !== null && outputRequirements.generated !== undefined,
+      acceptedPresent: outputRequirements.accepted !== null && outputRequirements.accepted !== undefined,
+    },
+    outputContract: {
+      state: normalizeToken(outputContractState || 'UNSELECTED_CONTEXT'),
+      candidateOutputTypeKey: normalizeText(knowledgeResolution?.context?.outputTypeKey),
+      confirmedOutputTypeKey: '',
+      confirmed: false,
+    },
+    malformedScopedViewKeys,
+    evidenceReadiness: evidenceReadinessProjection,
+  }
   return {
     contractVersion: FRAMEWORK_OUTCOME_HANDOFF_CONTRACT_VERSION,
     policyVersion: FRAMEWORK_OUTCOME_HANDOFF_POLICY_VERSION,
@@ -828,8 +915,11 @@ const buildBlockedHandoff = ({
     knowledgeResolution,
     claimBoundaries: buildClaimBoundaries(),
     ...(intermediateReasoning ? { intermediateReasoning } : {}),
+    ...(reasoningArtefactDeclarations.length > 0 ? { reasoningArtefactDeclarations } : {}),
     gaps: uniqueSorted(sectionTruth.flatMap((section) => section.gaps || [])),
     contradictions: diagnostics,
+    evidenceReadiness: evidenceReadinessProjection,
+    runtimeIntegrity,
     blockers: normalizedBlockers,
     warnings,
     currentness: {
@@ -840,19 +930,23 @@ const buildBlockedHandoff = ({
     customerSafe: {
       status,
       contractVersion: FRAMEWORK_OUTCOME_HANDOFF_CONTRACT_VERSION,
+      handoffId: `framework-outcome-handoff-${runtimeIdentity.runtimeInstanceKey || runtimeIdentity.runtimeInstanceId || 'unresolved'}-${handoffHash.slice(-16)}`,
+      handoffHash,
       currentness: normalizedBlockers.length > 0 ? 'BLOCKED' : 'CURRENT',
       gapCount: uniqueSorted(sectionTruth.flatMap((section) => section.gaps || [])).length,
       contradictionWarningCount: diagnostics.length,
       blockerCount: normalizedBlockers.length,
       blockedBoundary: normalizedBlockers[0]?.code || '',
       nextAction,
+      evidenceReadiness: evidenceReadinessProjection,
+      runtimeIntegrity,
     },
   }
 }
 
 // Internal planning evidence only: package declarations classify sections, never
 // hardcoded names or a filter which silently drops unaccepted customer truth.
-export const buildOutcomePlanningRuntimeEvidence = ({ runtimeInstance, frameworkPackage }) => {
+export const buildOutcomePlanningRuntimeEvidence = ({ runtimeInstance, frameworkPackage, handoff = null }) => {
   const runtime = runtimeInstance
   const sections = frameworkPackage?.sections
   const fail = () => { throw Object.assign(new Error('Canonical planning evidence is unavailable.'), { status: 409, code: 'OUTCOME_PLANNING_TRUTH_BLOCKED' }) }
@@ -872,6 +966,33 @@ export const buildOutcomePlanningRuntimeEvidence = ({ runtimeInstance, framework
   }
   const truthSections = Object.fromEntries(Object.entries(state.sections || {}).filter(([key]) => !internalKeys.has(normalizeKey(key))))
   if (Object.keys(truthSections).some((key) => !keys.includes(normalizeKey(key)))) fail()
+  const workspaceId = normalizeText(runtime.workspaceId)
+  const runtimeType = normalizeToken(runtime.runtimeType)
+  const evidencePack = isObject(state.evidence_pack) ? state.evidence_pack : {}
+  const scopedViews = state.scopedViews && typeof state.scopedViews === 'object'
+    ? state.scopedViews
+    : evidencePack.scopedViews && typeof evidencePack.scopedViews === 'object'
+      ? evidencePack.scopedViews
+      : evidencePack.scoped_views && typeof evidencePack.scoped_views === 'object'
+        ? evidencePack.scoped_views
+        : {}
+  const malformedScopedViewKeys = Object.keys(scopedViews)
+    .filter((key) => !normalizeKey(key) || normalizeKey(key) === 'undefined')
+    .sort()
+  const readiness = evidencePack.discoveryHealth?.readiness
+    || runtime.evidenceReadiness
+    || state.evidenceReadiness
+    || state.readiness
+    || {}
+  const missingDomains = [
+    ...(Array.isArray(readiness.missingDomains) ? readiness.missingDomains : []),
+    ...(Array.isArray(readiness.missingCoverageDomains) ? readiness.missingCoverageDomains : []),
+    ...(Array.isArray(readiness.missingAreas) ? readiness.missingAreas : []),
+    ...(Array.isArray(evidencePack.discoveryHealth?.missingAreas) ? evidencePack.discoveryHealth.missingAreas : []),
+  ].map(normalizeText).filter(Boolean)
+  const handoffHash = normalizeText(handoff?.currentness?.handoffHash)
+  const handoffContext = handoff?.knowledgeResolution?.context || {}
+  const canonicalEligibility = handoff?.canonicalEligibility || getCanonicalOutputEligibility(state)
   return {
     ...runtime, _id: runtime._id || runtime.id,
     framework_state: { ...state, sections: truthSections },
@@ -879,6 +1000,41 @@ export const buildOutcomePlanningRuntimeEvidence = ({ runtimeInstance, framework
       contractVersion: 'outcome-planning-evidence.v1',
       stateVersion: normalizeText(runtime.stateVersion || runtime.runtimeStateVersion),
       packageKey: runtime.packageKey, packageVersion: runtime.packageVersion,
+      frameworkHandoff: {
+        outputAssetId: handoffHash ? `framework_handoff_${handoffHash.replace(/^sha256:/i, '')}` : '',
+        handoffId: normalizeText(handoff?.handoffId),
+        handoffHash,
+        status: normalizeToken(handoff?.status),
+        runtimeRevision: normalizeText(runtime.stateVersion || runtime.runtimeStateVersion),
+        runtimeInstanceId: normalizeText(runtime._id || runtime.id),
+        runtimeInstanceKey: normalizeText(runtime.runtimeInstanceKey),
+        packageIdentityHash: normalizeText(handoff?.package?.packageIdentityHash),
+        snapshots: {
+          publishSnapshotId: normalizeText(canonicalEligibility.publishSnapshotId),
+          publishSnapshotHash: normalizeText(canonicalEligibility.publishSnapshotHash),
+          lockSnapshotId: normalizeText(canonicalEligibility.lockSnapshotId),
+          lockSnapshotHash: normalizeText(canonicalEligibility.lockSnapshotHash),
+          replayAnchorId: normalizeText(canonicalEligibility.replayAnchorId),
+          replayAnchorHash: normalizeText(canonicalEligibility.replayAnchorHash),
+        },
+        outputContract: {
+          state: normalizeText(handoffContext.outputTypeKey) ? 'CANDIDATE' : 'UNSELECTED_CONTEXT',
+          candidateOutputTypeKey: normalizeText(handoffContext.outputTypeKey),
+          confirmedOutputTypeKey: '',
+          confirmed: false,
+        },
+      },
+      workspaceScope: {
+        workspaceId,
+        status: workspaceId ? 'EXPLICIT' : runtimeType === 'VALUE_NARRATIVE' ? 'VALID_RUNTIME_SCOPE' : 'MISSING',
+        scopeKeys: ['tenantId', 'customerId', 'runtimeInstanceId'],
+      },
+      malformedScopedViewKeys,
+      evidenceReadiness: {
+        status: normalizeToken(readiness.status || readiness.state),
+        contradictionCount: Number(readiness.contradictionCount || readiness.unresolvedContradictionCount || 0),
+        missingDomains: [...new Set(missingDomains)].sort(),
+      },
       sectionDeclarations: sections.map((section) => ({ sectionKey: section.sectionKey, runtimePath: section.runtimePath,
         required: section.required === true, sectionMode: section.sectionMode || '', runtimeRole: section.runtimeRole || '',
         runtimeManagedCompletion: section.runtimeManagedCompletion || null })),
@@ -893,6 +1049,7 @@ export const buildFrameworkOutcomeStudioHandoff = ({
   packBinding = null,
   knowledgeContext = null,
   requestedOutputTypeKey = '',
+  outputContractState = 'CANDIDATE',
 } = {}) => {
   const blockers = []
   const warnings = []
@@ -1106,6 +1263,8 @@ export const buildFrameworkOutcomeStudioHandoff = ({
     sectionTruth,
     evidenceRefs,
     intermediateReasoning,
+    reasoningArtefactDeclarations,
+    outputContractState,
     internalCompletion: runtimeManaged.receipts,
   })
 }
@@ -1145,6 +1304,7 @@ export const resolveFrameworkOutcomeStudioHandoff = async ({
   knowledgeContext = null,
   knowledgeContextResult = null,
   requestedOutputTypeKey = '',
+  outputContractState = 'CANDIDATE',
   boundedDependencyPolicy = null,
   boundedStateParityReceipt = null,
   loadRuntime = getRuntimeInstance,
@@ -1247,9 +1407,10 @@ export const resolveFrameworkOutcomeStudioHandoff = async ({
       runtimeInstance: resolvedRuntime,
       frameworkPackage: resolvedPackage,
       packBinding: resolvedBinding,
-      knowledgeContext: resolvedContext,
-      requestedOutputTypeKey,
-    })
+    knowledgeContext: resolvedContext,
+    requestedOutputTypeKey,
+    outputContractState,
+  })
     if (boundedPolicy
       && handoff.status !== FRAMEWORK_OUTCOME_HANDOFF_STATUSES.BLOCKED
       && !boundedStateParityReceipt) {

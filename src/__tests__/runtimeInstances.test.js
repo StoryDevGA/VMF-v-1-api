@@ -1767,6 +1767,7 @@ let resolveSectionExecutionContract
 let normalizeRuntimeSectionObject
 let performanceCacheService
 let getRuntimeInstance
+let outcomeStudioServiceTestables
 
 const getAccessTokenForUser = async (user) => {
   const tokens = await tokenService.generateTokens(user)
@@ -2012,6 +2013,7 @@ beforeAll(async () => {
   performanceCacheService =
     (await import('../services/performanceCacheService.js')).default
   getRuntimeInstance = (await import('../services/runtimeInstanceService.js')).getRuntimeInstance
+  outcomeStudioServiceTestables = (await import('../services/outcomeStudioService.js')).__testables
 })
 
 beforeEach(async () => {
@@ -18118,6 +18120,24 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     }))
   })
 
+  test('Outcome Studio readiness requires checked executable content, not metadata flags', () => {
+    const input = {
+      packBinding: { status: 'PROJECTED', activePacks: [{}], requiredPacks: [{}] },
+      readiness: { canStartSession: true },
+      sourceOutput: { outputAssetId: 'handoff' },
+      truthBinding: { truthSignature: { status: 'PROJECTED' } },
+      knowledgeContext: { available: true, metadataOnly: true },
+      deliverableCount: 1,
+    }
+    expect(outcomeStudioServiceTestables.buildSafetyGates(input).responseGenerationAvailable).toBe(false)
+    const checked = outcomeStudioServiceTestables.buildSafetyGates({ ...input, compositionCheck: { passed: true } })
+    expect(checked).toEqual(expect.objectContaining({ status: 'PASSED', passedCount: 5, responseGenerationAvailable: true }))
+    const blocked = outcomeStudioServiceTestables.buildSafetyGates({ ...input,
+      compositionCheck: { passed: false, reason: 'PROVIDER_DISABLED', message: 'The drafting provider is disabled.' } })
+    expect(blocked.responseGenerationAvailable).toBe(false)
+    expect(blocked.gates[4]).toEqual(expect.objectContaining({ status: 'BLOCKED', blockerReason: 'PROVIDER_DISABLED', message: 'The drafting provider is disabled.' }))
+  })
+
   test('Outcome Studio readiness blocks sessions until governed knowledge packs are active', async () => {
     const runtimeInstance = makeOutputLabReadyRuntime()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
@@ -18135,7 +18155,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       canStartSession: false,
       canReason: false,
       summary: 'Outcome Studio requires additional business information before a session can start.',
-      blockerCount: 5,
+      blockerCount: 2,
     }))
     expect(res.body.data.safetyGates).toEqual(expect.objectContaining({
       status: 'BLOCKED',
@@ -18179,6 +18199,19 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       blockedCount: 1,
       totalCount: 5,
     }))
+    expect(res.body.data.safetyGates.gates).toHaveLength(5)
+    expect(res.body.data.safetyGates.gates[4]).toEqual(expect.objectContaining({
+      key: 'check-5',
+      status: 'BLOCKED',
+      message: 'Draft generation is blocked because executable Knowledge Pack composition has not been established; resolved metadata alone is insufficient.',
+    }))
+    expect(res.body.data.summary).toBe(res.body.data.safetyGates.gates[4].message)
+    const studioRes = await request
+      .get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio`)
+      .set('Authorization', `Bearer ${token}`)
+    expect(studioRes.status).toBe(200)
+    expect(studioRes.body.data.readiness.safetyGates).toEqual(res.body.data.safetyGates)
+    expect(studioRes.body.data.safetyGates).toEqual(res.body.data.safetyGates)
     expect(res.body.data.frameworkHandoff).toEqual(expect.objectContaining({
       status: expect.stringMatching(/^(READY|READY_WITH_GAPS)$/),
       currentness: 'CURRENT',
@@ -18339,6 +18372,36 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
         },
       }),
     }))
+  })
+
+  test('Outcome Studio confirmed-plan repair ignores later messages when the initial message is missing', () => {
+    const requestId = '11111111-1111-4111-8111-111111111111'
+    const planId = 'outcome_kcp_22222222-2222-4222-8222-222222222222'
+    const sessionId = 'out_sess_confirmed_plan_fixture'
+    const lookup = outcomeStudioServiceTestables.buildConfirmedPlanMessageLookup({
+      requestId,
+      planId,
+      sessionId,
+      runtimeInstance: {
+        _id: RUNTIME_INSTANCE_ID,
+        tenantId: TENANT_ID,
+        customerId: CUSTOMER_ID,
+      },
+    })
+    const laterMessage = {
+      ...lookup,
+      messageId: 'out_msg_later_conversation_message',
+      contextBindings: { requestPlan: { requestId, planId } },
+    }
+    const readPath = (value, path) => path.split('.').reduce((current, key) => current?.[key], value)
+    const matchesLookup = (value) => Object.entries(lookup)
+      .every(([path, expected]) => readPath(value, path) === expected)
+
+    expect(lookup.messageId).toBe(`out_msg_plan_${createHash('sha256')
+      .update(`${requestId}:${planId}`)
+      .digest('hex')}`)
+    expect(matchesLookup(laterMessage)).toBe(false)
+    expect(matchesLookup({ ...laterMessage, messageId: lookup.messageId })).toBe(true)
   })
 
   test('Outcome Studio infers the Parlon Commercial Strategy contract without a document-type selector', async () => {
@@ -19148,7 +19211,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     expect(OutcomeSession.prototype.save).toHaveBeenCalledTimes(1)
     expect(RuntimeGraphRelationship.prototype.save).toHaveBeenCalledTimes(1)
     const relationshipRollbackFilter = RuntimeGraphRelationship.deleteMany.mock.calls[0][0]
-    expect(relationshipRollbackFilter._id.$in).toHaveLength(9)
+    expect(relationshipRollbackFilter._id.$in).toHaveLength(6)
     expect(OutcomeSession.deleteOne).toHaveBeenCalledWith({
       _id: expect.anything(),
     })
@@ -22866,7 +22929,28 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
   test('Outcome Studio session detail returns a scoped sanitized session', async () => {
     const runtimeInstance = makeOutputLabReadyRuntime()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
-    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord({
+      contextBindings: {
+        requestPlan: {
+          requestId: '11111111-1111-4111-8111-111111111111',
+          planId: 'outcome_kcp_22222222-2222-4222-8222-222222222222',
+          planFingerprint: 'a'.repeat(64),
+          clarificationReceiptId: 'outcome_clarification_fixture',
+        },
+        clarificationReceipt: {
+          contractVersion: 'outcome-studio.clarification-execution-receipt.v1',
+          receiptId: 'outcome_clarification_fixture',
+          stageKey: 'CLARIFICATION',
+          status: 'PASSED',
+          requestId: '11111111-1111-4111-8111-111111111111',
+          requestHash: 'b'.repeat(64),
+          intentFingerprint: 'c'.repeat(64),
+          handoffFingerprint: 'd'.repeat(64),
+          confirmedBy: CUSTOMER_ADMIN_ID,
+          executedAt: '2026-06-15T10:55:00.000Z',
+        },
+      },
+    })))
     OutcomeDraft.find.mockReturnValue(buildRuntimeInstanceFindChain([makeOutcomeDraftRecord()]))
     const token = await getAccessTokenForUser(makeCustomerAdmin())
 
@@ -22894,6 +22978,17 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       businessGuidance: expect.objectContaining({
         status: 'PROJECTED',
         ready: true,
+      }),
+      requestId: '11111111-1111-4111-8111-111111111111',
+      requestPlan: expect.objectContaining({
+        planId: 'outcome_kcp_22222222-2222-4222-8222-222222222222',
+        clarificationReceiptId: 'outcome_clarification_fixture',
+      }),
+      clarificationReceipt: expect.objectContaining({
+        receiptId: 'outcome_clarification_fixture',
+        stageKey: 'CLARIFICATION',
+        status: 'PASSED',
+        requestId: '11111111-1111-4111-8111-111111111111',
       }),
       governanceEvidence: expect.objectContaining({
         status: 'RECORDED',

@@ -1,6 +1,7 @@
 import { previewKnowledgePackImportMetadata } from '../services/knowledgePackImportMetadataService.js'
 import {
   activateOutcomeKnowledgePackVersion,
+  disableOutcomeKnowledgePackActivation,
   createOutcomeKnowledgePackVersion,
   deleteOutcomeKnowledgePack,
   deprecateOutcomeKnowledgePackVersion,
@@ -214,7 +215,11 @@ export const importKnowledgePackSourceDocumentDraft = async (req, res) => {
 }
 
 export const previewKnowledgePackImportMetadataController = (req, res) => {
-  res.status(200).json({ data: previewKnowledgePackImportMetadata(req.body) })
+  try {
+    res.status(200).json({ data: previewKnowledgePackImportMetadata(req.body) })
+  } catch (err) {
+    sendControllerError(res, req, err)
+  }
 }
 
 export const getKnowledgePackVersion = async (req, res) => {
@@ -270,6 +275,16 @@ export const activateKnowledgePackVersion = async (req, res) => {
   } catch (err) {
     sendControllerError(res, req, err)
   }
+}
+
+export const disableKnowledgePackActivation = async (req, res) => {
+  try {
+    const data = await disableOutcomeKnowledgePackActivation({
+      packId: req.params.packId, activationId: req.params.activationId, body: req.body,
+      actorUserId: req.context?.userId || req.userId, auditRequest: req,
+    })
+    res.status(200).json({ data })
+  } catch (err) { sendControllerError(res, req, err) }
 }
 
 export const updateKnowledgePackVersionReview = async (req, res) => {

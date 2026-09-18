@@ -7,7 +7,7 @@ import encryption from '../services/fieldEncryptionService.js'
 import { OUTCOME_KCP_OPERATIONS } from '../constants/outcomeGovernedQuality.js'
 import { buildOutcomeKnowledgeCompositionPlanCandidate } from '../services/outcomeKnowledgeCompositionPlanService.js'
 import { buildOutcomePlanningRuntimeEvidence } from '../services/outcomeFrameworkHandoffService.js'
-import { planOutcomeStudioRequest, confirmOutcomeStudioRequestPlan, retrieveOutcomeStudioRequestPlan } from '../services/outcomeStudioRequestPlanService.js'
+import { inferOutcomeStudioRequestIntent, planOutcomeStudioRequest, confirmOutcomeStudioRequestPlan, retrieveOutcomeStudioRequestPlan } from '../services/outcomeStudioRequestPlanService.js'
 const ids = {
   runtime: new mongoose.Types.ObjectId('6a6c8115bb9cebc18a1eca9c'),
   tenant: new mongoose.Types.ObjectId('6a6b14eca737c717e99b8069'),
@@ -297,7 +297,8 @@ const args = (state, payload) => ({ actorUserId: ids.actor, runtimeInstanceId: i
 const start = (state) => planOutcomeStudioRequest(args(state, { prompt: 'Prepare an executive brief' }))
 const complete = async (state, initial) => {
   let result = initial || await start(state)
-  for (const prompt of ['Explain the opportunity', 'Approve the next step', 'Sponsor', 'Board; Finance', 'Accessible PDF', 'skip', 'Lineage; Plain language']) {
+  for (const prompt of ['Support the executive sponsor decision', 'Board; Finance']) {
+    if (result.status === 'CONFIRMATION_REQUIRED') break
     result = await planOutcomeStudioRequest(args(state, { prompt, continuation: result.continuation }))
   }
   return result
@@ -305,24 +306,73 @@ const complete = async (state, initial) => {
 const confirm = (state, result) => confirmOutcomeStudioRequestPlan({ ...args(state, { continuation: result.continuation, confirm: true }), requestId: result.requestId })
 
 describe('prompt-only planning contract', () => {
-  it('collects explicit facts without writes, then confirms once with opaque continuation and blocked execution', async () => {
+  it('infers the exact Parlon request and reaches confirmation without unnecessary questions or writes', async () => {
+    const prompt = 'Create a Commercial Strategy and Decision Paper for Parlon leadership using the current governed Parlon evidence base. Focus on how Parlon should move from a coherent replacement proposition to a repeatable, evidence-backed buying decision system. Preserve all evidence boundaries, claim restrictions and governance gates.'
+    const resolution = {
+      selectedOutputType: { key: 'commercial-strategy-and-decision-paper', label: 'Commercial Strategy and Decision Paper' },
+      audience: { label: 'Executive leadership' },
+      purpose: { label: 'Decision or recommendation' },
+    }
+    expect(inferOutcomeStudioRequestIntent({ prompt, resolution, deliverables: [resolution.selectedOutputType] })).toMatchObject({
+      originalRequest: prompt,
+      requestedOutputTypeKey: 'commercial-strategy-and-decision-paper',
+      audience: ['Parlon leadership'],
+      decisionPurpose: 'how Parlon should move from a coherent replacement proposition to a repeatable, evidence-backed buying decision system',
+      evidenceSource: 'the current governed Parlon evidence base',
+      constraints: ['Preserve evidence boundaries', 'Preserve claim restrictions', 'Preserve governance gates'],
+      format: 'document', channel: '', missingRequiredFields: [], clarificationQuestions: [],
+    })
+
+    const state = fixture()
+    const commercial = requestPacks()
+    commercial.outputType = { ...commercial.outputType, capabilityKey: 'commercial-strategy-and-decision-paper', label: 'Commercial Strategy and Decision Paper' }
+    state.binding.availableOutputTypes = [{ status: 'READY', capabilityKey: 'commercial-strategy-and-decision-paper',
+      outputType: commercial.outputType, outputSchema: commercial.outputSchema }]
+    state.deps.buildKcpCandidate = jest.fn(async () => ({ status: 'READY', planFingerprint: 'a'.repeat(64) }))
+    const preview = await planOutcomeStudioRequest(args(state, { prompt }))
+    expect(preview).toMatchObject({ status: 'CONFIRMATION_REQUIRED', question: '',
+      intent: { requestedOutputTypeKey: 'commercial-strategy-and-decision-paper', audience: ['Parlon leadership'],
+        missingRequiredFields: [], clarificationQuestions: [] } })
+    expect(state.rows).toHaveLength(0); expect(state.audits).toHaveLength(0)
+  })
+
+  it('collects genuinely missing facts without writes, then confirms once with a persisted Clarification receipt', async () => {
     const state = fixture(), first = await start(state)
     expect(first.status).toBe('CLARIFICATION_REQUIRED')
-    expect(first.intent).toEqual({ requestedOutputTypeKey: 'executive-brief' })
+    expect(first.intent).toMatchObject({ requestedOutputTypeKey: 'executive-brief',
+      missingRequiredFields: ['decisionPurpose', 'audience'] })
     expect(first.continuation).toMatch(/^enc:v1:/)
     expect(first.continuation).not.toContain(String(ids.actor))
     expect(JSON.stringify(first)).not.toContain(String(ids.runtime))
     const preview = await complete(state, first)
     expect(preview.status).toBe('CONFIRMATION_REQUIRED')
-    expect(preview.intent).toMatchObject({ outcome: 'Explain the opportunity', audience: ['Board', 'Finance'], channel: '' })
+    expect(preview.intent).toMatchObject({ outcome: 'Prepare an executive brief',
+      decisionPurpose: 'Support the executive sponsor decision', audience: ['Board', 'Finance'], channel: '' })
     expect(state.rows).toHaveLength(0); expect(state.audits).toHaveLength(0)
     expect(state.deps.OutcomeSession.findOne).not.toHaveBeenCalled()
     const saved = await confirm(state, preview)
-    expect(saved).toMatchObject({ status: 'SAVED', execution: { canExecute: false }, plan: { planVersion: 1 } })
+    expect(saved).toMatchObject({ status: 'SAVED', execution: { canExecute: true }, plan: { planVersion: 1,
+      clarificationReceipt: { stageKey: 'CLARIFICATION', status: 'PASSED', requestId: saved.requestId } } })
     expect(saved.plan).not.toHaveProperty('payload')
     expect(JSON.stringify(saved)).not.toContain(String(ids.tenant))
     expect(state.rows[0].payload.requestAssociation).toEqual({ sessionId: '' })
+    expect(state.rows[0].payload.clarificationReceipt).toMatchObject({
+      contractVersion: 'outcome-studio.clarification-execution-receipt.v1',
+      stageKey: 'CLARIFICATION', status: 'PASSED', requestId: saved.requestId,
+    })
     expect(state.rows).toHaveLength(1); expect(state.audits).toHaveLength(1)
+  })
+  it('re-infers a natural-language amendment before confirmation without persisting the preview', async () => {
+    const state = fixture()
+    state.deps.buildKcpCandidate = jest.fn(async () => ({ status: 'READY', planFingerprint: 'b'.repeat(64) }))
+    const first = await complete(state)
+    const amended = await planOutcomeStudioRequest(args(state, {
+      action: 'RE_RESOLVE', continuation: first.continuation,
+      prompt: 'Prepare an Executive Brief for the Board to decide the next investment step using the current governed evidence base.',
+    }))
+    expect(amended).toMatchObject({ status: 'CONFIRMATION_REQUIRED',
+      intent: { audience: ['Board'], decisionPurpose: 'decide the next investment step using the current governed evidence base' } })
+    expect(state.rows).toHaveLength(0); expect(state.audits).toHaveLength(0)
   })
   it('samples the clock once per seal even when each sample advances', async () => {
     const state = fixture(); let clock = 100000
@@ -504,7 +554,7 @@ describe('isolated real planning orchestration persistence', () => {
     const preview = await complete(state)
     expect(await persistedCounts()).toEqual(before)
     const saved = await confirm(state, preview)
-    expect(saved.execution.canExecute).toBe(false)
+    expect(saved.execution.canExecute).toBe(true)
     expect(await persistedCounts()).toEqual(before.map((count) => count + 1))
     const retry = await confirm(state, preview)
     expect(retry.plan.planId).toBe(saved.plan.planId)

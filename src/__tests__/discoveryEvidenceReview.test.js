@@ -1,6 +1,8 @@
 import {
   acceptPendingDiscoveryEvidenceObjects,
   applyDiscoveryEvidenceReview,
+  buildDiscoveryCoverageAreas,
+  classifyDocumentSegment,
   normalizeDiscoveryEvidenceObjects,
 } from '../services/discoveryIntelligenceService.js'
 
@@ -30,6 +32,27 @@ const assertMetadata = (evidence, validationStatus) => {
 }
 
 describe('Discovery review derived metadata', () => {
+  test('classifies explicit constraint language into Constraints coverage', () => {
+    const classification = classifyDocumentSegment({
+      text: 'Deployment is fully air-gapped and requires rack space and network access.',
+    })
+
+    expect(classification).toEqual(expect.objectContaining({
+      category: 'Constraints',
+      coverageArea: 'Constraints',
+    }))
+    expect(buildDiscoveryCoverageAreas([{
+      coverageArea: classification.coverageArea,
+      reviewStatus: 'ACCEPTED',
+    }])).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        area: 'Constraints',
+        state: 'ADEQUATE',
+        acceptedEvidenceCount: 1,
+      }),
+    ]))
+  })
+
   test.each([
     ['PENDING', 'ACCEPTED', 'VALIDATED'],
     ['PENDING', 'REJECTED', 'REJECTED'],

@@ -4,11 +4,14 @@ import { createHash } from 'node:crypto'
 
 import {
   buildOutcomeStudioLiveComposition,
+  resolveOutcomeStudioCompositionInputs,
   OUTCOME_STUDIO_LIVE_COMPOSITION_BLOCKERS,
 } from '../services/outcomeStudioLiveCompositionBridgeService.js'
 
 // Captured active Development/Test schema v1.0.0, 2026-09-02; only file-ending whitespace differs.
 const capturedSchema = readFileSync(new URL('./fixtures/executive-brief-schema-v1-captured.md', import.meta.url), 'utf8').trimEnd()
+const capturedDecisionType = readFileSync(new URL('./fixtures/commercial-strategy-and-decision-paper-v1-captured.md', import.meta.url), 'utf8')
+const capturedDecisionSchema = readFileSync(new URL('./fixtures/commercial-strategy-and-decision-paper-schema-v1-captured.md', import.meta.url), 'utf8')
 
 const makePack = ({ packKey, capabilityKey = packKey, boundary = '', format = 'YAML' } = {}) => ({
   packId: `pack-${packKey}`,
@@ -18,7 +21,9 @@ const makePack = ({ packKey, capabilityKey = packKey, boundary = '', format = 'Y
   semanticVersion: '1.0.0',
   status: 'ACTIVE',
   packKey,
+  packType: packKey === 'adaptive-reasoning-layer' ? 'ARL' : packKey === 'rendering-layer' ? 'RL' : 'OUTPUT_TYPE',
   capabilityKey,
+  executionMode: 'PROVIDER_CONTEXT',
   contentFormat: format,
   ...(boundary ? { boundary } : {}),
 })
@@ -43,6 +48,7 @@ const makeInput = ({
   requestedFormat = '',
   outputTypeFormat = 'MARKDOWN',
   schemaFormat = 'YAML',
+  renderingFormat = 'YAML',
   outputTypeContent = contentByPack['executive-brief'],
   schemaContent = contentByPack['executive-brief-schema'],
   renderingContent = contentByPack['rendering-layer'],
@@ -54,7 +60,7 @@ const makeInput = ({
   const schema = makePack({ packKey: 'executive-brief-schema', capabilityKey: 'executive-brief-schema', format: schemaFormat })
   const style = makePack({ packKey: 'executive-briefing-style', capabilityKey: 'executive-brief-style' })
   const arl = makePack({ packKey: 'adaptive-reasoning-layer', boundary: arlBoundary })
-  const rl = makePack({ packKey: 'rendering-layer', boundary: 'POST_GENERATION_VALIDATION' })
+  const rl = makePack({ packKey: 'rendering-layer', boundary: 'POST_GENERATION_VALIDATION', format: renderingFormat })
   const packs = [outputType, schema, style, arl, rl]
   const frameworkState = {
     lock: {
@@ -190,6 +196,79 @@ const expectBlockedWithoutComposition = async (input, reason) => {
 }
 
 describe('Outcome Studio live composition bridge', () => {
+  test('consumes a renamed active Markdown ARL in full without a source-specific profile', async () => {
+    const input = makeInput()
+    const content = '# Future reasoning guidance\r\n\r\nProse must remain complete.\r\n\r\n| Rule | Meaning |\r\n| --- | --- |\r\n| Evidence | Preserve uncertainty |\r\n' + 'Additional guidance.\n'.repeat(700)
+    const selection = input.knowledgeContextResult.reasoningBinding.selectedByLayer.REASONING[0]
+    const oldVersion = selection.versionId
+    const oldHash = selection.contentHash
+    Object.assign(selection, { packId: 'future-arl', packKey: 'andrew-new-method', versionId: 'future-arl-v2', semanticVersion: '2.0.0', contentFormat: 'MARKDOWN', contentHash: `sha256:${createHash('sha256').update(content).digest('hex')}` })
+    const lineage = input.knowledgeContextResult.reasoningBinding.lineage
+    lineage.versionIds = lineage.versionIds.map((id) => id === oldVersion ? selection.versionId : id)
+    lineage.contentHashes = lineage.contentHashes.map((hash) => hash === oldHash ? selection.contentHash : hash)
+    const originalLoader = input.loadPackContent
+    input.loadPackContent = jest.fn((identity) => identity.versionId === selection.versionId
+      ? Promise.resolve({ ...selection, available: true, content }) : originalLoader(identity))
+    const result = await buildOutcomeStudioLiveComposition(input)
+    const document = result.methodGuidance.find((entry) => entry.role === 'ARL').document
+    expect(document.chunks.map((chunk) => chunk.text).join('')).toBe(content)
+    expect(document.source).toMatchObject({ packId: 'future-arl', semanticVersion: '2.0.0', contentHash: selection.contentHash })
+    expect(result.methodDocumentReceipts[0]).toMatchObject({ contentHash: selection.contentHash, characterCount: content.length })
+    expect(JSON.stringify(result.methodDocumentReceipts)).not.toContain('Additional guidance.')
+  })
+
+  test('composes individual packs with the actual fourteen-section schema and no legacy RL or style', async () => {
+    const input = makeInput({ outputTypeContent: capturedDecisionType, schemaContent: capturedDecisionSchema, schemaFormat: 'MARKDOWN' })
+    input.knowledgeContextResult.context.style = null
+    input.knowledgeContextResult.reasoningBinding.selectedByLayer.COMMUNICATION_PATTERN = []
+    const result = await buildOutcomeStudioLiveComposition(input)
+    expect(result.compositionPackage.outputBinding.requiredSections).toHaveLength(14)
+    expect(result.compositionPackage.outputBinding.requiredSections[0]).toBe('title and decision context')
+    expect(result.compositionPackage.outputBinding.requiredSections).not.toContain('scope')
+    expect(result.compositionPackage.outputBinding.outputTypeStructure).toHaveLength(8)
+    expect(result.methodPackBindings.map((item) => item.role)).toEqual(['ARL'])
+    expect(result.governanceConstraints.join(' ')).toContain('intended decision authority')
+    expect(result.governanceConstraints.join(' ')).toContain('otherwise identify the missing inputs')
+    expect(input.loadPackContent).toHaveBeenCalledTimes(3)
+  })
+
+  test.each([
+    ['out-of-order', '1. First\n3. Third'],
+    ['duplicate', '1. Same\n2. Same'],
+    ['oversized', Array.from({ length: 25 }, (_, i) => `${i + 1}. Section ${i + 1}`).join('\n')],
+    ['empty', ''],
+  ])('rejects %s individual schema structure', async (_label, entries) => {
+    const input = makeInput({ schemaFormat: 'MARKDOWN', schemaContent: `## Required structure\n${entries}` })
+    await expect(buildOutcomeStudioLiveComposition(input)).rejects.toMatchObject({
+      reason: OUTCOME_STUDIO_LIVE_COMPOSITION_BLOCKERS.KNOWLEDGE_CONTENT_SHAPE_INVALID,
+    })
+  })
+
+  test('readiness validates executable content without composing or needing an optional style', async () => {
+    const input = makeInput({ buildComposition: jest.fn() })
+    input.knowledgeContextResult.context.style = null
+    input.knowledgeContextResult.context.renderer = { metadataOnly: true, generationEligible: false }
+    const result = await resolveOutcomeStudioCompositionInputs({
+      ...input,
+      knowledgeContext: input.knowledgeContextResult.context,
+      binding: input.knowledgeContextResult.reasoningBinding,
+    })
+    expect(result.outputStructure).toHaveLength(5)
+    expect(result.styleSelection).toBeNull()
+    expect(input.loadPackContent).toHaveBeenCalledTimes(4)
+    expect(input.buildComposition).not.toHaveBeenCalled()
+    expect(result).not.toHaveProperty('receipt')
+  })
+
+  test('readiness fails closed on the same content identity mismatch as generation', async () => {
+    const input = makeInput({ loadedOverridesByPack: { 'executive-brief': { contentHash: 'changed' } } })
+    await expect(resolveOutcomeStudioCompositionInputs({
+      ...input,
+      knowledgeContext: input.knowledgeContextResult.context,
+      binding: input.knowledgeContextResult.reasoningBinding,
+    })).rejects.toMatchObject({ reason: OUTCOME_STUDIO_LIVE_COMPOSITION_BLOCKERS.KNOWLEDGE_CONTENT_IDENTITY_MISMATCH })
+  })
+
   test('projects active content and truth identities into the composition worker', async () => {
     const input = makeInput()
     const result = await buildOutcomeStudioLiveComposition(input)
@@ -219,6 +298,32 @@ describe('Outcome Studio live composition bridge', () => {
     expect(result.compositionPackage.truthBinding.evidenceVersion).toBe('evidence-v1')
     expect(result.compositionPackage.truthBinding.sectionTruthVersion).toBe('section-truth-v1')
     expect(input.loadPackContent).toHaveBeenCalledTimes(4)
+  })
+
+  test('records a governed RL boundary receipt when the active Markdown document is consumed', async () => {
+    const renderingContent = '# Rendering guidance\n\nPreserve the complete customer-safe document.\n'
+    const input = makeInput({
+      renderingFormat: 'MARKDOWN',
+      renderingContent,
+    })
+    const renderingPack = input.knowledgeContextResult.reasoningBinding.selectedByLayer.COMMUNICATION_PATTERN[0]
+    const renderingHash = `sha256:${createHash('sha256').update(renderingContent, 'utf8').digest('hex')}`
+    renderingPack.contentHash = renderingHash
+    input.knowledgeContextResult.reasoningBinding.lineage.contentHashes = [
+      ...input.knowledgeContextResult.reasoningBinding.lineage.contentHashes.map((value) => (
+        value === `sha256:${'72'.repeat(32)}` ? renderingHash : value
+      )),
+    ]
+    const result = await buildOutcomeStudioLiveComposition(input)
+
+    expect(result.methodBoundaryReceipts).toEqual([
+      expect.objectContaining({
+        boundary: 'POST_GENERATION_VALIDATION',
+        receiptType: 'POST_VALIDATION',
+        validatorKey: 'outcome-method-document',
+        status: 'PASSED',
+      }),
+    ])
   })
 
   test('fails closed when the rich Framework handoff lacks required intermediate reasoning', async () => {

@@ -133,6 +133,27 @@ const resolveCoverageAreaProofState = (coverageAreas, areaName) => {
   return state === 'MISSING' ? resolvedProofState(false) : unknownProofState()
 }
 
+const CANONICAL_CUSTOMER_PROOF_ABSENCE_PATTERN = /(?:\b(?:does not|do not|must not)\b.{0,220}\b(?:independently|externally)\b.{0,220}\b(?:customer outcomes?|customer proof|case stud(?:y|ies))\b|\b(?:customer outcomes?|customer proof|case stud(?:y|ies))\b.{0,220}\b(?:not treated as|require(?:s)? source verification|not independently|not externally)\b)/i
+const CANONICAL_ECONOMIC_PROOF_ABSENCE_PATTERN = /(?:\b(?:does not|do not|must not)\b.{0,240}\b(?:independently|externally)\b.{0,240}\b(?:economics?|financial claims?|financial impact|roi|return on investment|dollar.?cost|savings?)\b|\b(?:economics?|financial claims?|financial impact|roi|return on investment|dollar.?cost|savings?)\b.{0,240}\b(?:require(?:s)? source verification|subject to diligence|not treated as|not independently|not externally|unresolved)\b)/i
+
+const getEvidenceObjectStatement = (evidenceObject = {}) => normalizeText(
+  evidenceObject.extractedFact
+    || evidenceObject.statement
+    || evidenceObject.fact
+    || evidenceObject.text,
+)
+
+const resolveCanonicalEvidenceAbsenceState = (evidenceObjects, pattern) => {
+  if (!Array.isArray(evidenceObjects)) return unknownProofState()
+  const hasCanonicalAbsence = evidenceObjects.some((evidenceObject) => {
+    if (!isPlainObject(evidenceObject)) return false
+    if (normalizeToken(evidenceObject.reviewStatus) !== 'ACCEPTED') return false
+    if (normalizeToken(evidenceObject.validationStatus) !== 'VALIDATED') return false
+    return pattern.test(getEvidenceObjectStatement(evidenceObject))
+  })
+  return hasCanonicalAbsence ? resolvedProofState(false) : unknownProofState()
+}
+
 const resolveExplicitProofState = (sources, key) => {
   const values = []
   for (const source of sources) {
@@ -177,8 +198,20 @@ export const buildRuntimeWarningProofEvidence = ({
       customerRuntimeState = invalidProofState()
       economicRuntimeState = invalidProofState()
     } else {
-      customerRuntimeState = resolveCoverageAreaProofState(pack.discoveryHealth.coverageAreas, 'Proof')
-      economicRuntimeState = resolveCoverageAreaProofState(pack.discoveryHealth.coverageAreas, 'Economics')
+      customerRuntimeState = combineProofStates(
+        resolveCoverageAreaProofState(pack.discoveryHealth.coverageAreas, 'Proof'),
+        resolveCanonicalEvidenceAbsenceState(
+          pack.evidenceObjects,
+          CANONICAL_CUSTOMER_PROOF_ABSENCE_PATTERN,
+        ),
+      )
+      economicRuntimeState = combineProofStates(
+        resolveCoverageAreaProofState(pack.discoveryHealth.coverageAreas, 'Economics'),
+        resolveCanonicalEvidenceAbsenceState(
+          pack.evidenceObjects,
+          CANONICAL_ECONOMIC_PROOF_ABSENCE_PATTERN,
+        ),
+      )
     }
   }
 

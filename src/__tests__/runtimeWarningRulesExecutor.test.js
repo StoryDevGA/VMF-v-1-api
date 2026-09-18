@@ -173,6 +173,40 @@ describe('runtime-warning-rules executor', () => {
     })
   })
 
+  test('projects accepted source validation boundaries as resolved proof absence', () => {
+    const runtimeInstance = acceptedRuntime([
+      { area: 'Proof', state: 'STRONG', evidenceCount: 2, acceptedEvidenceCount: 2, pendingReviewCount: 0 },
+      { area: 'Economics', state: 'STRONG', evidenceCount: 2, acceptedEvidenceCount: 2, pendingReviewCount: 0 },
+    ])
+    runtimeInstance.framework_state.evidence_pack.evidenceObjects = [
+      {
+        extractedFact: 'Validation boundary: Does not independently verify customer outcomes.',
+        reviewStatus: 'ACCEPTED',
+        validationStatus: 'VALIDATED',
+      },
+      {
+        extractedFact: 'Claims including dollar-cost calculation require source verification before publication.',
+        reviewStatus: 'ACCEPTED',
+        validationStatus: 'VALIDATED',
+      },
+    ]
+
+    const proofEvidence = buildRuntimeWarningProofEvidence({ runtimeInstance })
+
+    expect(proofEvidence).toEqual({
+      customerProofEvidenceState: RUNTIME_WARNING_PROOF_EVIDENCE_STATES.RESOLVED,
+      customerProofPresent: false,
+      economicProofEvidenceState: RUNTIME_WARNING_PROOF_EVIDENCE_STATES.RESOLVED,
+      economicProofPresent: false,
+    })
+    const result = executeRuntimeWarningRulesPack({
+      ...baseArgs,
+      candidate: { ...baseArgs.candidate, ...proofEvidence },
+    })
+    expect(result.status).toBe('PASSED')
+    expect(result.warnings).toEqual(expect.arrayContaining(['NO_CUSTOMER_PROOF', 'NO_QUANTIFIED_ECONOMICS']))
+  })
+
   test.each([
     ['duplicate rows', acceptedRuntime([missingRow('Proof'), missingRow('proof'), missingRow('Economics')]), 'INVALID', 'RESOLVED'],
     ['numeric strings', acceptedRuntime([{ ...missingRow('Proof'), evidenceCount: '0' }, missingRow('Economics')]), 'INVALID', 'INVALID'],

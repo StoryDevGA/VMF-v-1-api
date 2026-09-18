@@ -205,6 +205,22 @@ outcomeSessionSchema.index({ runtimeInstanceId: 1, createdAt: -1 })
 outcomeSessionSchema.index({ tenantId: 1, customerId: 1, runtimeInstanceId: 1, status: 1, createdAt: -1 })
 outcomeSessionSchema.index({ sourceOutputAssetId: 1, createdAt: -1 })
 outcomeSessionSchema.index({ truthSignatureId: 1, createdAt: -1 })
+outcomeSessionSchema.index(
+  {
+    tenantId: 1,
+    customerId: 1,
+    runtimeInstanceId: 1,
+    'contextBindings.requestPlan.requestId': 1,
+    'contextBindings.requestPlan.planId': 1,
+  },
+  {
+    unique: true,
+    partialFilterExpression: {
+      'contextBindings.requestPlan.requestId': { $type: 'string' },
+      'contextBindings.requestPlan.planId': { $type: 'string' },
+    },
+  },
+)
 
 outcomeSessionSchema.pre('validate', function normalizeOutcomeSession(next) {
   this.sessionId = String(this.sessionId || '').trim()

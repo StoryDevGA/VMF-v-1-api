@@ -495,6 +495,10 @@ describe('Rate limiting exports', () => {
     expect(typeof rateLimits.vmfManagementRateLimit).toBe('function')
   })
 
+  test('knowledgePackImportRateLimit is a function', () => {
+    expect(typeof rateLimits.knowledgePackImportRateLimit).toBe('function')
+  })
+
   test('bulkOperationsRateLimit is a function', () => {
     expect(typeof rateLimits.bulkOperationsRateLimit).toBe('function')
   })

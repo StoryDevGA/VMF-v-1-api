@@ -32,6 +32,10 @@ const normalizeIdentity = (value) => typeof value === 'string'
   : ''
 const normalizeKey = (value) => normalizeText(value).toLowerCase()
 const normalizeToken = (value) => normalizeText(value).toUpperCase()
+const compareCodePointStrings = (left, right) => {
+  if (left === right) return 0
+  return left < right ? -1 : 1
+}
 const isPlainObject = (value) => Boolean(
   value
   && typeof value === 'object'
@@ -41,6 +45,37 @@ const isPlainObject = (value) => Boolean(
 
 const hasNonEmptyString = (value) => typeof value === 'string' && Boolean(normalizeText(value))
 const hasNonEmptyArray = (value) => Array.isArray(value) && value.length > 0
+const hasBoundedGuidance = (value, maximumLength = 240) => hasNonEmptyArray(value)
+  && value.length <= 24
+  && value.every((entry) => hasNonEmptyString(entry) && entry.length <= maximumLength)
+const hasValidOptionalStyle = (style) => style == null || (isPlainObject(style)
+  && hasNonEmptyString(style.key) && hasNonEmptyString(style.version))
+const buildOutputGuidanceArtifact = ({ resolvedKnowledgeContext = {}, metadataGuidancePresent = false } = {}) => {
+  const outputTypeStructure = resolvedKnowledgeContext.outputTypeStructure
+  const outputSchema = resolvedKnowledgeContext.outputSchema
+  const style = resolvedKnowledgeContext.style
+  const outputGuidancePresent = metadataGuidancePresent || (hasBoundedGuidance(outputTypeStructure)
+    && isPlainObject(outputSchema)
+    && hasNonEmptyString(outputSchema.key)
+    && hasNonEmptyString(outputSchema.version)
+    && hasBoundedGuidance(outputSchema.requiredSections, 160)
+    && hasValidOptionalStyle(style))
+  return {
+    key: 'outputSpecificCompositionGuidance',
+    classification: outputGuidancePresent
+      ? OUTCOME_STUDIO_INTERMEDIATE_REASONING_CLASSIFICATIONS.OUTCOME_STUDIO
+      : OUTCOME_STUDIO_INTERMEDIATE_REASONING_CLASSIFICATIONS.MISSING,
+    source: 'outcome_studio.output_contract_and_resolved_packs',
+    required: true,
+    present: outputGuidancePresent,
+    ...(metadataGuidancePresent ? { metadataOnly: true, contentValidated: false, generationEligible: false } : {}),
+    reason: metadataGuidancePresent
+      ? 'Individual output contract metadata is resolved; content validation is still required before generation.'
+      : outputGuidancePresent
+      ? 'Outcome Studio assembled the output structure, schema and style guidance from resolved pack content.'
+      : 'Resolved output structure, schema and style guidance is incomplete.',
+  }
+}
 const hasPresentValue = (value) => hasNonEmptyString(value)
   || hasNonEmptyArray(value)
   || (isPlainObject(value) && Object.keys(value).length > 0)
@@ -95,6 +130,9 @@ const hasCompleteFrameworkIntelligence = (sections) => sections.length > 0
     && hasNonEmptyArray(sectionIntelligence.sourceTraceability)
     && Array.isArray(sectionIntelligence.validationGaps))
 
+const projectProviderFrameworkIntelligence = (sections) => sections
+  .filter(({ sectionIntelligence }) => hasCompleteFrameworkIntelligence([{ sectionIntelligence }]))
+
 const getExplicitIntermediateArtifact = ({ frameworkHandoff, sections, key }) => {
   const boundary = frameworkHandoff?.intermediateReasoning
   if (isPlainObject(boundary) && hasPresentValue(boundary[key])) {
@@ -138,7 +176,9 @@ export const buildIntermediateReasoningManifest = ({
   const packageDeclarations = Array.isArray(frameworkHandoff?.reasoningArtefactDeclarations)
     ? frameworkHandoff.reasoningArtefactDeclarations.filter((declaration) => declaration?.handoff?.eligible === true)
     : []
-  if (frameworkHandoff?.reasoningArtefactsContractActive === true) {
+  const reasoningArtefactsContractActive = frameworkHandoff?.reasoningArtefactsContractActive === true
+    || packageDeclarations.length > 0
+  if (reasoningArtefactsContractActive) {
     const declaredArtifacts = packageDeclarations.map((declaration) => {
       const mappingKey = declaration.handoff?.mappingKey || declaration.artefactKey
       const section = sections.find((candidate) => hasCurrentHandoffArtefact({ section: candidate, declaration }))
@@ -158,33 +198,10 @@ export const buildIntermediateReasoningManifest = ({
           : 'The package-declared reasoning artefact is missing from accepted Framework truth.',
       }
     })
-    const outputTypeStructure = resolvedKnowledgeContext.outputTypeStructure
-    const outputSchema = resolvedKnowledgeContext.outputSchema
-    const style = resolvedKnowledgeContext.style
-    const outputGuidancePresent = metadataGuidancePresent || (hasNonEmptyArray(outputTypeStructure)
-      && outputTypeStructure.length === 5
-      && isPlainObject(outputSchema)
-      && hasNonEmptyString(outputSchema.key)
-      && hasNonEmptyString(outputSchema.version)
-      && hasNonEmptyArray(outputSchema.requiredSections)
-      && isPlainObject(style)
-      && hasNonEmptyString(style.key)
-      && hasNonEmptyString(style.version))
-    const outputGuidance = {
-      key: 'outputSpecificCompositionGuidance',
-      classification: outputGuidancePresent
-        ? OUTCOME_STUDIO_INTERMEDIATE_REASONING_CLASSIFICATIONS.OUTCOME_STUDIO
-        : OUTCOME_STUDIO_INTERMEDIATE_REASONING_CLASSIFICATIONS.MISSING,
-      source: 'outcome_studio.output_contract_and_resolved_packs',
-      required: true,
-      present: outputGuidancePresent,
-      ...(metadataGuidancePresent ? { metadataOnly: true, contentValidated: false, generationEligible: false } : {}),
-      reason: metadataGuidancePresent
-        ? 'Individual output contract metadata is resolved; content validation is still required before generation.'
-        : outputGuidancePresent
-        ? 'Outcome Studio assembled the output structure, schema and style guidance from resolved pack content.'
-        : 'Resolved output structure, schema and style guidance is incomplete.',
-    }
+    const outputGuidance = buildOutputGuidanceArtifact({
+      resolvedKnowledgeContext,
+      metadataGuidancePresent,
+    })
     const artefacts = [...declaredArtifacts, outputGuidance]
     const missingArtefacts = artefacts.filter((artifact) => artifact.required && !artifact.present)
       .map((artifact) => artifact.key)
@@ -201,7 +218,7 @@ export const buildIntermediateReasoningManifest = ({
         sectionCount: rawSections.length,
       })
     }
-    return { manifest, frameworkIntelligence: sections }
+    return { manifest, frameworkIntelligence: projectProviderFrameworkIntelligence(sections) }
   }
   const frameworkArtifacts = [
     {
@@ -257,33 +274,10 @@ export const buildIntermediateReasoningManifest = ({
     }
   })
 
-  const outputTypeStructure = resolvedKnowledgeContext.outputTypeStructure
-  const outputSchema = resolvedKnowledgeContext.outputSchema
-  const style = resolvedKnowledgeContext.style
-  const outputGuidancePresent = metadataGuidancePresent || (hasNonEmptyArray(outputTypeStructure)
-    && outputTypeStructure.length === 5
-    && isPlainObject(outputSchema)
-    && hasNonEmptyString(outputSchema.key)
-    && hasNonEmptyString(outputSchema.version)
-    && hasNonEmptyArray(outputSchema.requiredSections)
-    && isPlainObject(style)
-    && hasNonEmptyString(style.key)
-    && hasNonEmptyString(style.version))
-  const outputGuidance = {
-    key: 'outputSpecificCompositionGuidance',
-    classification: outputGuidancePresent
-      ? OUTCOME_STUDIO_INTERMEDIATE_REASONING_CLASSIFICATIONS.OUTCOME_STUDIO
-      : OUTCOME_STUDIO_INTERMEDIATE_REASONING_CLASSIFICATIONS.MISSING,
-    source: 'outcome_studio.output_contract_and_resolved_packs',
-    required: true,
-    present: outputGuidancePresent,
-    ...(metadataGuidancePresent ? { metadataOnly: true, contentValidated: false, generationEligible: false } : {}),
-    reason: metadataGuidancePresent
-      ? 'Individual output contract metadata is resolved; content validation is still required before generation.'
-      : outputGuidancePresent
-      ? 'Outcome Studio assembled the output structure, schema and style guidance from resolved pack content.'
-      : 'Resolved output structure, schema and style guidance is incomplete.',
-  }
+  const outputGuidance = buildOutputGuidanceArtifact({
+    resolvedKnowledgeContext,
+    metadataGuidancePresent,
+  })
   const artefacts = [...frameworkArtifacts, ...explicitArtifacts, outputGuidance]
   const missingArtefacts = artefacts.filter((artifact) => artifact.required && !artifact.present)
     .map((artifact) => artifact.key)
@@ -302,7 +296,7 @@ export const buildIntermediateReasoningManifest = ({
   }
   return {
     manifest,
-    frameworkIntelligence: sections,
+    frameworkIntelligence: projectProviderFrameworkIntelligence(sections),
   }
 }
 
@@ -546,7 +540,6 @@ const assertTruthBinding = ({ runtimeInstance, frameworkState, truthBinding = {}
     currentness: 'CURRENT',
     unresolvedContradictionCount,
     handoffVersion: normalizeText(truthBinding.handoffVersion),
-    lockSnapshotHash: normalizeText(truthBinding.lockSnapshotHash),
     evidenceVersion: lineageBinding.evidenceVersion,
     sectionTruthVersion: lineageBinding.sectionTruthVersion,
   }
@@ -569,14 +562,14 @@ const getRequiredSections = (knowledgeContext = {}) => {
   const requiredSections = contextRequiredSections || schemaRequiredSections || []
   return {
     requiredSections: requiredSections.map(normalizeKey).filter(Boolean),
-    conflict: false,
+    conflict: !hasBoundedGuidance(requiredSections, 160),
   }
 }
 
 const assertOutputBinding = ({ knowledgeContext = {}, requestedOutputTypeKey }) => {
   const outputType = knowledgeContext.outputType || {}
   const outputSchema = knowledgeContext.outputSchema || {}
-  const style = knowledgeContext.style || {}
+  const style = knowledgeContext.style
   const outputTypeKey = normalizeKey(outputType.key || requestedOutputTypeKey)
   const requestedKey = normalizeKey(requestedOutputTypeKey)
   const sectionResolution = getRequiredSections(knowledgeContext)
@@ -601,13 +594,13 @@ const assertOutputBinding = ({ knowledgeContext = {}, requestedOutputTypeKey }) 
     || outputTypeKey !== requestedKey
     || !normalizeText(outputSchema.key)
     || !normalizeText(outputSchema.version)
-    || !normalizeText(style.key)
-    || !normalizeText(style.version)
+    || !hasValidOptionalStyle(style)
     || !normalizeText(outputType.version)
     || sectionResolution.conflict
     || !optionalSectionsValid
     || new Set(normalizedSections).size !== normalizedSections.length
-    || outputTypeStructure.length !== 5
+    || !hasBoundedGuidance(knowledgeContext.outputTypeStructure)
+    || new Set(outputTypeStructure).size !== outputTypeStructure.length
     || requiredSections.length === 0
     || new Set(requiredSections).size !== requiredSections.length
     || lineageTokens.length === 0) {
@@ -624,8 +617,8 @@ const assertOutputBinding = ({ knowledgeContext = {}, requestedOutputTypeKey }) 
     outputTypeStructure,
     outputSchemaKey: normalizeKey(outputSchema.key),
     outputSchemaVersion: normalizeText(outputSchema.version),
-    styleKey: normalizeKey(style.key),
-    styleVersion: normalizeText(style.version),
+    styleKey: normalizeKey(style?.key),
+    styleVersion: normalizeText(style?.version),
     requiredSections,
     optionalSections,
     lineage,
@@ -900,8 +893,11 @@ const composeFacts = ({ frameworkState, truthBinding }) => {
     }
     facts.push(group[0])
   }
-  facts.sort((left, right) => left.factId.localeCompare(right.factId))
-  omissions.sort((left, right) => `${left.reference}:${left.reason}`.localeCompare(`${right.reference}:${right.reason}`))
+  facts.sort((left, right) => compareCodePointStrings(left.factId, right.factId))
+  omissions.sort((left, right) => compareCodePointStrings(
+    `${left.reference}:${left.reason}`,
+    `${right.reference}:${right.reason}`,
+  ))
   return {
     facts,
     omissions,

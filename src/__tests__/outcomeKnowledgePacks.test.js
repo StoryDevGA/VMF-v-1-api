@@ -488,6 +488,7 @@ const makeActivation = (pack, overrides = {}) => ({
 })
 
 const makeVersionForActivation = (activation, overrides = {}) => makeKnowledgePackVersion({
+  executionMode: activation.executionMode,
   versionId: activation.versionId,
   packId: activation.packId,
   packCategory: activation.packCategory,
@@ -2554,6 +2555,28 @@ name: Statement of Work
     }))
   })
 
+  test.each([
+    [{ packType: 'RL' }, {}, 'VERSION_METHOD_ROLE_MISMATCH'],
+    [{ executionMode: 'POST_VALIDATION' }, {}, 'VERSION_METHOD_EXECUTION_MODE_MISMATCH'],
+    [{ boundary: 'INVALID' }, {}, 'VERSION_METHOD_BOUNDARY_MISMATCH'],
+    [{ boundary: 'GENERATION_CONTEXT', executionBoundary: 'POST_GENERATION_VALIDATION' }, {}, 'VERSION_METHOD_BOUNDARY_MISMATCH'],
+    [{}, { boundary: 'GENERATION_CONTEXT', executionBoundary: 'POST_GENERATION_VALIDATION' }, 'VERSION_METHOD_BOUNDARY_MISMATCH'],
+    [{ boundary: 'POST_GENERATION_VALIDATION' }, {}, 'VERSION_METHOD_BOUNDARY_MISMATCH'],
+    [{ contentFormat: 'UNKNOWN' }, {}, 'VERSION_METHOD_CONTENT_FORMAT_MISMATCH'],
+    [{}, { contentFormat: 'JSON' }, 'VERSION_METHOD_CONTENT_FORMAT_MISMATCH'],
+  ])('rejects method activation/version integrity mismatch %j', async (versionChanges, activationChanges, reason) => {
+    const activation = { ...makeAllRequiredActivations().find((pack) => pack.packType === 'ARL'),
+      knowledgeLayer: 'FRAMEWORK', capabilityKey: 'arl', workspaceCompatibility: ['OUTCOME'], ...activationChanges }
+    const version = makeVersionForActivation(activation, { status: 'ACTIVE',
+      knowledgeLayer: 'FRAMEWORK', capabilityKey: 'arl', workspaceCompatibility: ['OUTCOME'], ...versionChanges })
+    KnowledgePackActivation.find.mockReturnValue(buildFindChain([activation]))
+    KnowledgePackVersion.find.mockReturnValue(buildFindChain([version]))
+    const result = await resolveOutcomeStudioKnowledgePacks({ frameworkKey: 'VMF',
+      runtimeType: 'VALUE_NARRATIVE', workspaceType: 'OUTCOME', requestedOutputTypeKey: 'executive-brief' })
+    expect(result.status).toBe('BLOCKED')
+    expect(result.blockedPacks).toContainEqual(expect.objectContaining({ blockedReason: reason }))
+  })
+
   test('request-specific registry resolution does not block a relationship-selected system provider-context pack', async () => {
     const systemPackRelationship = {
       relationshipType: 'REQUIRED_AT_RUNTIME',
@@ -2611,7 +2634,9 @@ name: Statement of Work
       executionMode: 'PROVIDER_CONTEXT',
     })
     const activations = [
-      ...makeAllRequiredActivations(),
+      ...makeAllRequiredActivations().map((activation) => activation.packType === 'ARL'
+        ? { ...activation, knowledgeLayer: 'FRAMEWORK', capabilityKey: 'arl', workspaceCompatibility: ['OUTCOME'] }
+        : activation),
       outputType,
       outputSchema,
       style,
@@ -4915,6 +4940,27 @@ Statement of Work source text.
     )
     expect(KnowledgePackVersion.updateOne).not.toHaveBeenCalled()
     expect(versionDoc.reviewStatus).toBe('DRAFT')
+  })
+
+  test('activation-specific undo requires authentication and strict expected identity', async () => {
+    const url = '/api/v1/super-admin/outcome-studio/knowledge-packs/kp-arl-test/activations/kpa-scope-test/disable'
+    expect((await request.post(url).send({})).status).toBe(401)
+    const token = await getAccessTokenForUser(makeFakeUser())
+    for (const body of [{}, { expectedVersionId: 'kpv-test', expectedContentHash: 'hash', status: 'DISABLED' }]) {
+      const response = await request.post(url).set('Authorization', `Bearer ${token}`).send(body)
+      expect(response.status).toBe(422)
+    }
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('activation-specific undo fails closed without a database transaction', async () => {
+    setMongooseReadyState(0)
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const response = await request.post('/api/v1/super-admin/outcome-studio/knowledge-packs/kp-arl-test/activations/kpa-scope-test/disable')
+      .set('Authorization', `Bearer ${token}`).send({ expectedVersionId: 'kpv-test', expectedContentHash: 'hash' })
+    expect(response.status).toBe(409)
+    expect(response.body.error.details.reason).toBe('ACTIVATION_TRANSACTION_REQUIRED')
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 
   test('POST /api/v1/super-admin/outcome-studio/knowledge-packs/:packId/versions/:versionId/activate rejects imported drafts before review approval', async () => {

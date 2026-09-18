@@ -416,7 +416,7 @@ const knowledgePackDependencyReferenceSchema = z.object({
 
 const importSourceDocumentDraftBodySchema = z.object({
   runtimeConsumers: z.array(z.string().trim().min(1).max(160)).max(100).optional(),
-  metadataOverrides: z.array(z.enum(IMPORT_METADATA_FIELDS)).max(11).optional(),
+  metadataOverrides: z.array(z.enum(IMPORT_METADATA_FIELDS)).max(IMPORT_METADATA_FIELDS.length).optional(),
   packType: z.enum(Object.values(OUTCOME_KNOWLEDGE_PACK_TYPES), {
     required_error: 'packType is required',
   }),
@@ -587,9 +587,17 @@ const validateActivationScope = (value, ctx) => {
 }
 
 const activateKnowledgePackVersionBodySchema = z
-  .object(activationScopeFields)
+  .object({ ...activationScopeFields, expectedContentHash: z.string().trim().min(1).max(140).optional() })
   .strict()
   .superRefine(validateActivationScope)
+
+export const validateKnowledgePackActivationParams = createParamsValidator(knowledgePackIdParamsSchema.extend({
+  activationId: z.string().trim().min(1).max(260).regex(/^[a-zA-Z0-9_-]+$/),
+}))
+export const validateDisableKnowledgePackActivation = createBodyValidator(z.object({
+  expectedVersionId: z.string().trim().min(1).max(240).regex(versionIdRegex),
+  expectedContentHash: z.string().trim().min(1).max(140),
+}).strict())
 
 const updateKnowledgePackReviewBodySchema = z.object({
   reviewStatus: z.enum([
@@ -629,7 +637,7 @@ export const validateImportSourceDocumentDraft = createBodyValidator(importSourc
 export const validateImportSourceMetadata = createBodyValidator(z.object({
   extractedText: z.string().max(750000),
   metadata: z.record(z.string(), z.unknown()).optional(),
-  metadataOverrides: z.array(z.enum(IMPORT_METADATA_FIELDS)).max(11).optional(),
+  metadataOverrides: z.array(z.enum(IMPORT_METADATA_FIELDS)).max(IMPORT_METADATA_FIELDS.length).optional(),
 }).strict())
 export const validateImportKnowledgePackStarterVersion = createBodyValidator(emptyBodySchema)
 export const validateKnowledgePackVersionActionBody = createBodyValidator(emptyBodySchema)

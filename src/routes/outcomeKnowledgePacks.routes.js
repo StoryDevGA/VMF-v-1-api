@@ -4,6 +4,7 @@ import loadScopes from '../middleware/loadScopes.js'
 import { requirePlatformRole } from '../middleware/authorize.js'
 import {
   activateKnowledgePackVersion,
+  disableKnowledgePackActivation,
   cloneKnowledgePackManifestController,
   compareKnowledgePackManifestsController,
   createKnowledgePackManifestController,
@@ -31,6 +32,8 @@ import {
 } from '../controllers/outcomeKnowledgePacks.controller.js'
 import {
   validateActivateKnowledgePackVersion,
+  validateKnowledgePackActivationParams,
+  validateDisableKnowledgePackActivation,
   validateCloneKnowledgePackManifest,
   validateCompareKnowledgePackManifestParams,
   validateCreateKnowledgePackManifest,
@@ -50,6 +53,7 @@ import {
   validateUpdateKnowledgePackReview,
   validateUpdateKnowledgePackManifest,
 } from '../validators/outcomeKnowledgePacks.validator.js'
+import { knowledgePackImportRateLimit } from '../middleware/rateLimits.js'
 
 const router = Router()
 const sourceDocumentImportJsonParser = express.json({ limit: '15mb' })
@@ -57,7 +61,7 @@ const sourceDocumentImportJsonParser = express.json({ limit: '15mb' })
 router.use(authJwt, loadScopes, requirePlatformRole('SUPER_ADMIN'))
 
 router.get('/', validateListKnowledgePacks, listKnowledgePacks)
-router.get('/duplicate-diagnostics', getKnowledgePackDuplicateDiagnostics)
+router.get('/duplicate-diagnostics', knowledgePackImportRateLimit, getKnowledgePackDuplicateDiagnostics)
 router.get('/manifests', validateListKnowledgePackManifests, listKnowledgePackManifestsController)
 router.post('/manifests', validateCreateKnowledgePackManifest, createKnowledgePackManifestController)
 router.get('/manifests/:manifestId/reasoning-context-preview', validateKnowledgePackManifestId, validateReasoningContextPreview, previewKnowledgePackReasoningContextController)
@@ -69,12 +73,14 @@ router.get('/manifests/:manifestId', validateKnowledgePackManifestId, getKnowled
 router.get('/resolution-preview', validateKnowledgePackResolutionPreview, previewKnowledgePackResolution)
 router.post(
   '/source-document-import/metadata',
+  knowledgePackImportRateLimit,
   sourceDocumentImportJsonParser,
   validateImportSourceMetadata,
   previewKnowledgePackImportMetadataController,
 )
 router.post(
   '/source-document-import',
+  knowledgePackImportRateLimit,
   sourceDocumentImportJsonParser,
   validateImportSourceDocumentDraft,
   importKnowledgePackSourceDocumentDraft,
@@ -86,6 +92,7 @@ router.get('/:packId/versions/:versionId', validateKnowledgePackVersionParams, g
 router.post('/:packId/versions/:versionId/validate', validateKnowledgePackVersionParams, validateKnowledgePackVersionActionBody, validateKnowledgePackVersion)
 router.post('/:packId/versions/:versionId/review', validateKnowledgePackVersionParams, validateUpdateKnowledgePackReview, updateKnowledgePackVersionReview)
 router.post('/:packId/versions/:versionId/activate', validateKnowledgePackVersionParams, validateActivateKnowledgePackVersion, activateKnowledgePackVersion)
+router.post('/:packId/activations/:activationId/disable', validateKnowledgePackActivationParams, validateDisableKnowledgePackActivation, disableKnowledgePackActivation)
 router.post('/:packId/versions/:versionId/deprecate', validateKnowledgePackVersionParams, validateKnowledgePackVersionActionBody, deprecateKnowledgePackVersion)
 router.post('/:packId/versions/:versionId/disable', validateKnowledgePackVersionParams, validateKnowledgePackVersionActionBody, disableKnowledgePackVersion)
 router.post('/:packId/rollback', validateKnowledgePackId, validateRollbackKnowledgePack, rollbackKnowledgePack)

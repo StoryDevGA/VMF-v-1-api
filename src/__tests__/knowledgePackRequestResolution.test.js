@@ -5,6 +5,7 @@ import {
   resolveRequestSpecificKnowledgePacks,
 } from '../services/knowledgePackRequestResolutionService.js'
 import { buildKnowledgePackRelationshipChecksum } from '../services/knowledgePackRelationshipContract.js'
+import { resolveKnowledgePackBoundary } from '../constants/knowledgeRuntime.js'
 
 const RESOLVED_AT = '2026-07-14T12:00:00.000Z'
 const GLOBAL_SCOPE = [{ scopeType: 'GLOBAL', scopeKey: 'GLOBAL', precedence: 0 }]
@@ -163,6 +164,98 @@ const resolve = (overrides = {}) => resolveRequestSpecificKnowledgePacks({
 })
 
 describe('resolveRequestSpecificKnowledgePacks', () => {
+  test('projects explicit mandatory bindability after selecting eligible raw activations', () => {
+    const mandatorySafeguards = makeMandatorySafeguards().map(({ runtimeBindable, ...pack }) => pack)
+    const result = resolve({ mandatorySafeguards })
+    expect(result.status).toBe('READY')
+    expect(result.mandatorySafeguards.map(({ packType, runtimeBindable }) => ({ packType, runtimeBindable })))
+      .toEqual([{ packType: 'ARL', runtimeBindable: true }, { packType: 'TRUTH_CERTIFICATION', runtimeBindable: true }])
+  })
+  test.each(['ARL', 'TRUTH_CERTIFICATION'])('does not promote explicitly unbindable %s', (packType) => {
+    const mandatorySafeguards = makeMandatorySafeguards().map((pack) => pack.packType === packType
+      ? { ...pack, runtimeBindable: false } : pack)
+    const result = resolve({ mandatorySafeguards })
+    expect(result.status).toBe('BLOCKED')
+    expect(result.mandatorySafeguards.find((pack) => pack.packType === packType).runtimeBindable).toBe(false)
+  })
+  test.each(['ARL', 'RL'])('method %s preserves governed mode mapping but rejects invalid boundaries', (packType) => {
+    const pack = { packType, executionMode: 'PROVIDER_CONTEXT' }
+    const expected = packType === 'ARL' ? 'GENERATION_CONTEXT' : 'POST_GENERATION_VALIDATION'
+    expect(resolveKnowledgePackBoundary(pack)).toBe(expected)
+    expect(resolveKnowledgePackBoundary({ ...pack, boundary: expected })).toBe(expected)
+    expect(resolveKnowledgePackBoundary({ ...pack, boundary: expected, executionBoundary: expected.toLowerCase() })).toBe(expected)
+    expect(resolveKnowledgePackBoundary({ ...pack, boundary: expected, executionBoundary: 'PRE_GENERATION_VALIDATION' })).toBe('')
+    expect(resolveKnowledgePackBoundary({ ...pack, boundary: 'INVALID' })).toBe('')
+    expect(resolveKnowledgePackBoundary({ ...pack, boundary: 'PRE_GENERATION_VALIDATION' })).toBe('')
+    expect(resolveKnowledgePackBoundary({ packType })).toBe('')
+  })
+  test('invalid explicit method boundary cannot resolve successfully', () => {
+    const mandatorySafeguards = makeMandatorySafeguards().map((pack) => pack.packType === 'ARL'
+      ? { ...pack, boundary: 'INVALID' } : pack)
+    expect(resolve({ mandatorySafeguards }).status).toBe('BLOCKED')
+    expect(resolveKnowledgePackBoundary({ packType: 'STYLE', executionMode: 'PROVIDER_CONTEXT', boundary: 'INVALID' }))
+      .toBe('GENERATION_CONTEXT')
+  })
+  test('contradictory method boundary aliases survive projection and block resolution', () => {
+    const mandatorySafeguards = makeMandatorySafeguards().map((pack) => pack.packType === 'ARL'
+      ? { ...pack, boundary: 'GENERATION_CONTEXT', executionBoundary: 'POST_GENERATION_VALIDATION' } : pack)
+    const result = resolve({ mandatorySafeguards })
+    expect(result.status).toBe('BLOCKED')
+    expect(result.excludedCandidates).toContainEqual(expect.objectContaining({ reason: 'METHOD_BOUNDARY_INVALID' }))
+  })
+  const uploadedArl = (overrides = {}) => makePack({
+    packType: 'ARL', packKey: 'uploaded-framework-reasoning-method',
+    knowledgeLayer: 'FRAMEWORK', capabilityKey: 'arl', ...overrides,
+  })
+  const withArl = (...packs) => [
+    ...makeMandatorySafeguards().filter((pack) => pack.packType !== 'ARL'), ...packs,
+  ]
+
+  test('selects mandatory ARL by governed type without legacy slug or capability alias', () => {
+    const arl = uploadedArl()
+    const result = resolve({ mandatorySafeguards: withArl(arl) })
+    expect(result.status).toBe('READY')
+    expect(result.providerContextPacks).toContainEqual(expect.objectContaining({
+      packKey: arl.packKey, capabilityKey: 'arl', versionId: arl.versionId,
+    }))
+    expect(result.postValidationPacks).not.toContainEqual(expect.objectContaining({ packType: 'RL' }))
+    expect(JSON.stringify(result)).not.toContain('must never leak')
+  })
+
+  test('fails closed for two winning-scope ARLs rather than selecting the newest', () => {
+    const result = resolve({ mandatorySafeguards: withArl(uploadedArl(), uploadedArl({
+      activationId: 'newer-activation', semanticVersion: '2.0.0', activatedAt: '2026-09-17T10:00:00.000Z',
+    })) })
+    expect(result.status).toBe('AMBIGUOUS')
+  })
+
+  test('uses scope precedence for ARL without version preference', () => {
+    const scoped = uploadedArl({ activationId: 'tenant-arl', scopeType: 'TENANT', scopeKey: 'tenant-a' })
+    const result = resolve({ mandatorySafeguards: withArl(uploadedArl({ semanticVersion: '9.0.0' }), scoped),
+      scopeCandidates: [{ scopeType: 'TENANT', scopeKey: 'tenant-a', precedence: 1 },
+        { scopeType: 'GLOBAL', scopeKey: 'GLOBAL', precedence: 0 }],
+    })
+    expect(result.status).toBe('READY')
+    expect(result.providerContextPacks).toContainEqual(expect.objectContaining({ versionId: scoped.versionId }))
+  })
+
+  test('does not substitute an inactive ARL or a misleading legacy slug', () => {
+    expect(resolve({ mandatorySafeguards: withArl(uploadedArl({ status: 'DEPRECATED' })) }).status).toBe('BLOCKED')
+    expect(resolve({ mandatorySafeguards: withArl(makePack({ packType: 'SYSTEM_REFERENCE',
+      packKey: 'adaptive-reasoning-layer', knowledgeLayer: 'FRAMEWORK', capabilityKey: 'arl' })) }).status).toBe('BLOCKED')
+  })
+
+  test('selects an uploaded RL only through its declared dependency and retains its boundary', () => {
+    const rl = makePack({ packType: 'RL', packKey: 'uploaded-expression-method',
+      knowledgeLayer: 'FRAMEWORK', capabilityKey: 'rl', boundary: 'POST_GENERATION_VALIDATION' })
+    const result = resolve({ candidates: makeOutputCandidates({ extra: [rl], outputDependencies: [
+      requiredDependency('OUTPUT_SCHEMA', 'board-summary-schema'), requiredPackDependency('RL', rl.packKey),
+    ] }) })
+    expect(result.status).toBe('READY')
+    expect(result.postValidationPacks).toContainEqual(expect.objectContaining({ packKey: rl.packKey }))
+    expect(result.providerContextPacks).not.toContainEqual(expect.objectContaining({ packType: 'RL' }))
+  })
+
   test('resolves a unique request and emits only sanitized deterministic lineage', () => {
     const result = resolve()
 

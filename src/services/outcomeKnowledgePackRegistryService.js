@@ -28,6 +28,8 @@ import {
 } from '../constants/runtimeOutcomeStudio.js'
 import {
   DEFAULT_OUTCOME_STUDIO_MANIFEST,
+  KNOWLEDGE_PACK_BOUNDARIES,
+  resolveKnowledgePackBoundary,
   KNOWLEDGE_PACK_AUTHORING_MODES,
   KNOWLEDGE_PACK_EXECUTION_MODES,
   KNOWLEDGE_PACK_PURPOSE_CATEGORIES,
@@ -85,6 +87,8 @@ const BOUNDED_HANDOFF_COMMAND_IDS = Object.freeze([
   'HANDOFF_RENDERER_CAPABILITY_READ',
 ])
 const BOUNDED_ACTIVATION_PROJECTION_FIELDS = Object.freeze([
+  'executionBoundary',
+  'contentFormat',
   'activationId',
   'packId',
   'versionId',
@@ -119,6 +123,9 @@ const BOUNDED_ACTIVATION_PROJECTION_FIELDS = Object.freeze([
   'activatedAt',
 ])
 const BOUNDED_VERSION_PROJECTION_FIELDS = Object.freeze([
+  'executionBoundary',
+  'boundary',
+  'contentFormat',
   'versionId',
   'packId',
   'packCategory',
@@ -358,6 +365,12 @@ const serializeDependencyReferences = (references) => {
 }
 
 export const OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS = Object.freeze({
+  ACTIVATION_SCOPE_OCCUPIED: 'ACTIVATION_SCOPE_OCCUPIED',
+  ACTIVATION_IDENTITY_STALE: 'ACTIVATION_IDENTITY_STALE',
+  ACTIVATION_UNDO_NOT_ALLOWED: 'ACTIVATION_UNDO_NOT_ALLOWED',
+  ACTIVATION_BASELINE_MISSING: 'ACTIVATION_BASELINE_MISSING',
+  ACTIVATION_ADDITIONAL_SCOPE_REQUIRED: 'ACTIVATION_ADDITIONAL_SCOPE_REQUIRED',
+  ACTIVATION_TRANSACTION_REQUIRED: 'ACTIVATION_TRANSACTION_REQUIRED',
   AUDIT_PERSISTENCE_FAILED: 'AUDIT_PERSISTENCE_FAILED',
   PACK_SOURCE_NOT_AVAILABLE: 'PACK_SOURCE_NOT_AVAILABLE',
   PACK_SOURCE_FORMAT_UNSUPPORTED: 'PACK_SOURCE_FORMAT_UNSUPPORTED',
@@ -1251,6 +1264,11 @@ const serializeKnowledgePackVersion = (version) => {
   const serializedRelationships = serializeDependencyReferences(plain.dependencyReferences)
   return {
     ...plain,
+    ...(['ARL', 'RL'].includes(normalizeToken(plain.packType)) ? {
+      boundary: normalizeToken(plain.boundary),
+      contentFormat: normalizeToken(plain.contentFormat),
+      executionBoundary: normalizeToken(plain.executionBoundary),
+    } : {}),
     id: versionId,
     versionId,
     packCategory: normalizePackCategory(plain.packCategory, plain.packType),
@@ -1276,6 +1294,8 @@ const serializeKnowledgePackVersion = (version) => {
     authoringMode: normalizeToken(plain.authoringMode || KNOWLEDGE_PACK_AUTHORING_MODES.IMPORT_SOURCE_DOCUMENT),
     reviewStatus: normalizeToken(plain.reviewStatus || KNOWLEDGE_PACK_REVIEW_STATUSES.DRAFT),
     validatedAt: toDateString(plain.validatedAt),
+    ...(['ARL', 'RL'].includes(normalizeToken(plain.packType))
+      ? { executionMode: normalizeToken(plain.executionMode) } : {}),
   }
 }
 
@@ -1347,6 +1367,12 @@ const serializeKnowledgePackActivation = (activation) => {
   const serializedRelationships = serializeDependencyReferences(plain.dependencyReferences)
   return {
     activationId,
+    canDisableAdditionalScope: normalizeToken(plain.status) === 'ACTIVE'
+      && normalizeToken(plain.scopeType) !== 'GLOBAL'
+      && Boolean(normalizeText(plain.additionalScopeBaselineActivationId)),
+    ...(plain.additionalScopeBaselineActivationId ? {
+      additionalScopeBaselineActivationId: normalizeText(plain.additionalScopeBaselineActivationId),
+    } : {}),
     packId: normalizeText(plain.packId),
     versionId: normalizeText(plain.versionId),
     packCategory: normalizePackCategory(plain.packCategory, plain.packType),
@@ -1380,6 +1406,11 @@ const serializeKnowledgePackActivation = (activation) => {
     tenantId: plain.tenantId ? normalizeText(plain.tenantId) : null,
     contentHash: normalizeText(plain.contentHash),
     activatedAt: toDateString(plain.activatedAt),
+    ...(['ARL', 'RL'].includes(normalizeToken(plain.packType)) ? {
+      executionBoundary: normalizeToken(plain.executionBoundary),
+      executionMode: normalizeToken(plain.executionMode),
+      contentFormat: normalizeToken(plain.contentFormat),
+    } : {}),
   }
 }
 
@@ -1480,7 +1511,9 @@ export const buildOutcomeKnowledgePackScopeCandidates = ({
 }
 
 const buildRequiredPackKey = (pack) =>
-  `${normalizeToken(pack?.packType)}:${normalizeLowerKey(pack?.packKey)}`
+  normalizeToken(pack?.packType) === 'ARL'
+    ? 'ARL'
+    : `${normalizeToken(pack?.packType)}:${normalizeLowerKey(pack?.packKey)}`
 
 const compareActivationSpecificity = (left, right, scopePrecedenceByKey) => {
   const leftScopeScore = scopePrecedenceByKey.get(normalizeToken(left?.scopeKey)) ?? -1
@@ -1500,6 +1533,13 @@ const selectActiveActivations = ({ activations = [], scopeCandidates = [] }) => 
 
   for (const activation of activations.map(serializeKnowledgePackActivation).filter(Boolean)) {
     if (activation.status !== OUTCOME_KNOWLEDGE_PACK_ACTIVATION_STATUSES.ACTIVE) continue
+    if (!scopePrecedenceByKey.has(normalizeToken(activation.scopeKey))) continue
+
+    // Keep method candidates intact: neither age nor version resolves a role collision.
+    if (['ARL', 'RL'].includes(normalizeToken(activation.packType))) {
+      selected.set(`${activation.packType}:${activation.activationId}`, activation)
+      continue
+    }
 
     const requiredPackKey = buildRequiredPackKey(activation)
     const existing = selected.get(requiredPackKey)
@@ -1536,6 +1576,9 @@ const buildActivePackProjection = (pack, activation) => ({
   scopeType: activation.scopeType,
   scopeKey: activation.scopeKey,
   executionMode: activation.executionMode,
+  ...(['ARL', 'RL'].includes(normalizeToken(activation.packType)) && normalizeToken(activation.executionBoundary)
+    ? { executionBoundary: normalizeToken(activation.executionBoundary) } : {}),
+  ...(activation.contentFormat ? { contentFormat: activation.contentFormat } : {}),
   boundary: normalizeToken(activation.boundary || pack.boundary),
   visibility: activation.visibility,
   customerId: activation.customerId,
@@ -1544,8 +1587,16 @@ const buildActivePackProjection = (pack, activation) => ({
   activatedAt: activation.activatedAt,
 })
 
-const buildRequiredPackProjection = ({ activeActivationByPackKey }) =>
+const buildRequiredPackProjection = ({ activeActivationByPackKey, scopeCandidates = [] }) =>
   OUTCOME_STUDIO_REQUIRED_PACKS.map((pack) => {
+    if (pack.packType === 'ARL') {
+      const precedence = new Map(scopeCandidates.map((scope) => [normalizeToken(scope.scopeKey), scope.precedence]))
+      const candidates = [...activeActivationByPackKey.values()].filter((entry) => entry.packType === 'ARL')
+      const winningScope = Math.max(...candidates.map((entry) => precedence.get(normalizeToken(entry.scopeKey)) ?? -Infinity))
+      const winners = candidates.filter((entry) => precedence.get(normalizeToken(entry.scopeKey)) === winningScope)
+      if (winners.length === 1) return buildActivePackProjection(winners[0], winners[0])
+      return { packType: 'ARL', label: pack.label, status: winners.length ? 'AMBIGUOUS' : MISSING_REQUIRED_PACK_STATUS, runtimeBindable: false }
+    }
     const activation = activeActivationByPackKey.get(buildRequiredPackKey(pack))
     if (activation) {
       return buildActivePackProjection(pack, activation)
@@ -1557,6 +1608,28 @@ const buildRequiredPackProjection = ({ activeActivationByPackKey }) =>
       runtimeBindable: false,
     }
   })
+
+const selectScopedMethodRole = ({
+  packType,
+  activations = [],
+  scopeCandidates = [],
+} = {}) => {
+  const candidates = activations.filter((activation) => normalizeToken(activation.packType) === packType)
+  if (candidates.length === 0) return { pack: null, winners: [] }
+  const precedence = new Map(scopeCandidates.map((scope) => [
+    normalizeToken(scope.scopeKey), Number(scope.precedence),
+  ]))
+  const highestPrecedence = Math.max(...candidates.map((candidate) => (
+    precedence.get(normalizeToken(candidate.scopeKey)) ?? -Infinity
+  )))
+  const winners = candidates.filter((candidate) => (
+    (precedence.get(normalizeToken(candidate.scopeKey)) ?? -Infinity) === highestPrecedence
+  ))
+  return {
+    pack: winners.length === 1 ? buildActivePackProjection(winners[0], winners[0]) : null,
+    winners,
+  }
+}
 
 const isActivationVisibleToRuntime = ({ activation, customerId, tenantId }) => {
   const visibility = normalizeToken(activation?.visibility)
@@ -1724,6 +1797,26 @@ const resolveRequestRuntimeVersionEvidence = async ({
       exclude(activation, 'VERSION_CONTENT_HASH_MISMATCH')
       continue
     }
+    if ([activation.packType, version.packType].some((type) => ['ARL', 'RL'].includes(normalizeToken(type)))) {
+      const activationBoundary = resolveKnowledgePackBoundary(activation)
+      const versionBoundary = resolveKnowledgePackBoundary(version)
+      const format = normalizeToken(version.contentFormat)
+      const reason = normalizeToken(activation.packType) !== normalizeToken(version.packType)
+        ? 'VERSION_METHOD_ROLE_MISMATCH'
+        : normalizeToken(activation.executionMode) !== normalizeToken(version.executionMode)
+          ? 'VERSION_METHOD_EXECUTION_MODE_MISMATCH'
+          : !activationBoundary || !versionBoundary || activationBoundary !== versionBoundary
+            ? 'VERSION_METHOD_BOUNDARY_MISMATCH'
+            : !Object.values(OUTCOME_KNOWLEDGE_PACK_CONTENT_FORMATS).includes(format)
+              || (normalizeToken(activation.contentFormat) && normalizeToken(activation.contentFormat) !== format)
+              ? 'VERSION_METHOD_CONTENT_FORMAT_MISMATCH' : ''
+      if (reason) {
+        exclude(activation, reason)
+        continue
+      }
+      // Activation records do not require a format field; the exact hash-bound version owns it.
+      activation.contentFormat = format
+    }
 
     if (
       normalizeToken(version.relationshipGovernanceStatus) !== 'CURRENT'
@@ -1779,6 +1872,7 @@ const resolveRequestRuntimeVersionEvidence = async ({
     }
 
     const mandatorySafeguard = requiredPackKeys.has(buildRequiredPackKey(activation))
+      && normalizeToken(activation.packType) !== 'ARL'
     if (!mandatorySafeguard) {
       const versionLayer = normalizeToken(version.knowledgeLayer)
       const versionCapability = normalizeLowerKey(version.capabilityKey)
@@ -1978,12 +2072,14 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
     activations: eligibleActivations,
     scopeCandidates,
   })
-  const requiredPacks = buildRequiredPackProjection({ activeActivationByPackKey })
+  const requiredPacks = buildRequiredPackProjection({ activeActivationByPackKey, scopeCandidates })
   const additionalPacks = classifyAdditionalActivePacks({
     activations: [...activeActivationByPackKey.values()],
     contextCategories,
   })
   const activeRequiredPacks = requiredPacks.filter((pack) => pack.runtimeBindable === true)
+  const mandatoryCandidates = [...activeActivationByPackKey.values()].filter((activation) =>
+    OUTCOME_STUDIO_REQUIRED_PACKS.some((required) => buildRequiredPackKey(required) === buildRequiredPackKey(activation)))
   const activePacks = [
     ...activeRequiredPacks,
     ...additionalPacks.optionalPacks,
@@ -1992,7 +2088,7 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
   const unboundRequiredPacks = requiredPacks.filter((pack) => pack.runtimeBindable !== true)
   if (requestSpecific) {
     const requestResolution = resolveRequestSpecificKnowledgePacks({
-      mandatorySafeguards: activeRequiredPacks,
+      mandatorySafeguards: mandatoryCandidates,
       candidates: [...activeActivationByPackKey.values()].filter(
         (activation) => !OUTCOME_STUDIO_REQUIRED_PACKS
           .some((requiredPack) => buildRequiredPackKey(requiredPack) === buildRequiredPackKey(activation)),
@@ -2010,16 +2106,71 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
       },
       scopeCandidates,
     })
-    const selectedPacks = uniquePacksByActivation([
+    const selectedMethodCandidates = [
       ...requestResolution.providerContextPacks,
       ...requestResolution.preValidationPacks,
       ...requestResolution.postValidationPacks,
-      ...requestResolution.lineageCertificationPacks,
-      ...requestResolution.systemOnlyPacks,
+    ].filter((pack) => normalizeToken(pack?.packType) === 'RL')
+    const resolvedRl = selectedMethodCandidates.length === 1
+      ? { pack: selectedMethodCandidates[0], winners: selectedMethodCandidates }
+      : selectScopedMethodRole({
+          packType: 'RL',
+          activations: [...activeActivationByPackKey.values()],
+          scopeCandidates,
+        })
+    const rlAmbiguity = resolvedRl.winners.length > 1 && !resolvedRl.pack
+      ? [{
+          selector: { packType: 'RL' },
+          requiredBy: 'SELECTED_METHOD_ROLE',
+          candidates: resolvedRl.winners,
+        }]
+      : []
+    const selectedByLayer = Object.fromEntries(
+      Object.entries(requestResolution.selectedByLayer || {}).map(([layer, packs]) => [layer, [...packs]]),
+    )
+    if (resolvedRl.pack) {
+      const layer = normalizeToken(resolvedRl.pack.knowledgeLayer)
+      selectedByLayer[layer] = uniquePacksByActivation([
+        ...(selectedByLayer[layer] || []),
+        resolvedRl.pack,
+      ])
+    }
+    const requestResolutionWithMethods = {
+      ...requestResolution,
+      status: rlAmbiguity.length > 0 ? 'AMBIGUOUS' : requestResolution.status,
+      selectedByLayer,
+      postValidationPacks: uniquePacksByActivation([
+        ...requestResolution.postValidationPacks,
+        ...(resolvedRl.pack && normalizeToken(resolveKnowledgePackBoundary(resolvedRl.pack))
+          === KNOWLEDGE_PACK_BOUNDARIES.POST_GENERATION_VALIDATION ? [resolvedRl.pack] : []),
+      ]),
+      ambiguousCandidates: [...requestResolution.ambiguousCandidates, ...rlAmbiguity],
+      lineage: {
+        ...requestResolution.lineage,
+        activationIds: [...new Set([
+          ...(requestResolution.lineage?.activationIds || []),
+          ...(resolvedRl.pack ? [resolvedRl.pack.activationId] : []),
+        ])],
+        versionIds: [...new Set([
+          ...(requestResolution.lineage?.versionIds || []),
+          ...(resolvedRl.pack ? [resolvedRl.pack.versionId] : []),
+        ])],
+        contentHashes: [...new Set([
+          ...(requestResolution.lineage?.contentHashes || []),
+          ...(resolvedRl.pack ? [resolvedRl.pack.contentHash] : []),
+        ])],
+      },
+    }
+    const selectedPacks = uniquePacksByActivation([
+      ...requestResolutionWithMethods.providerContextPacks,
+      ...requestResolutionWithMethods.preValidationPacks,
+      ...requestResolutionWithMethods.postValidationPacks,
+      ...requestResolutionWithMethods.lineageCertificationPacks,
+      ...requestResolutionWithMethods.systemOnlyPacks,
     ])
     const selectedActivationIds = new Set(selectedPacks.map((pack) => normalizeText(pack.activationId)))
-    const selectedOutputSchemas = Array.isArray(requestResolution.selectedByLayer?.OUTPUT_SCHEMA)
-      ? requestResolution.selectedByLayer.OUTPUT_SCHEMA
+    const selectedOutputSchemas = Array.isArray(requestResolutionWithMethods.selectedByLayer?.OUTPUT_SCHEMA)
+      ? requestResolutionWithMethods.selectedByLayer.OUTPUT_SCHEMA
       : []
     const exactSchemaSupersedesGeneric = selectedOutputSchemas.some(
       (pack) => normalizeLowerKey(pack?.packKey) !== 'output-schemas-pack',
@@ -2034,8 +2185,8 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
         .some((requiredPack) => buildRequiredPackKey(requiredPack) === buildRequiredPackKey(pack)),
     )
     const validationPacks = uniquePacksByActivation([
-      ...requestResolution.preValidationPacks,
-      ...requestResolution.postValidationPacks,
+      ...requestResolutionWithMethods.preValidationPacks,
+      ...requestResolutionWithMethods.postValidationPacks,
     ])
     const summaryByStatus = {
       READY: 'Request-specific Knowledge Pack resolution is ready.',
@@ -2045,53 +2196,53 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
     }
 
     return maybeSanitizeBoundedPublicProjection({
-      status: requestResolution.status,
+      status: requestResolutionWithMethods.status,
       mode: OUTCOME_KNOWLEDGE_PACK_RESOLUTION_MODE,
-      summary: summaryByStatus[requestResolution.status],
+      summary: summaryByStatus[requestResolutionWithMethods.status],
       activePacks: selectedPacks.filter(
         (pack) => normalizeToken(pack.executionMode) !== KNOWLEDGE_PACK_EXECUTION_MODES.SYSTEM_ONLY,
       ),
-      requiredPacks: requestResolution.mandatorySafeguards,
-      mandatorySafeguards: requestResolution.mandatorySafeguards,
+      requiredPacks: requestResolutionWithMethods.mandatorySafeguards,
+      mandatorySafeguards: requestResolutionWithMethods.mandatorySafeguards,
       optionalPacks: providerContextPacks,
       validationPacks,
       providerContextPacks: executionProviderContextPacks,
-      preValidationPacks: requestResolution.preValidationPacks,
-      postValidationPacks: requestResolution.postValidationPacks,
-      lineageCertificationPacks: requestResolution.lineageCertificationPacks,
-      systemOnlyPacks: requestResolution.systemOnlyPacks,
+      preValidationPacks: requestResolutionWithMethods.preValidationPacks,
+      postValidationPacks: requestResolutionWithMethods.postValidationPacks,
+      lineageCertificationPacks: requestResolutionWithMethods.lineageCertificationPacks,
+      systemOnlyPacks: requestResolutionWithMethods.systemOnlyPacks,
       blockedPacks: [
         ...versionEvidenceExclusions,
         ...additionalPacks.blockedPacks.filter((pack) =>
           !selectedActivationIds.has(normalizeText(pack.activationId))),
       ],
       sourceBundle: buildOutcomeKnowledgePackSourceBundle(),
-      selectedByLayer: requestResolution.selectedByLayer,
-      missingDependencies: requestResolution.missingDependencies,
-      relationshipFailures: requestResolution.relationshipFailures,
-      ambiguousCandidates: requestResolution.ambiguousCandidates,
-      excludedCandidates: requestResolution.excludedCandidates,
-      warnings: requestResolution.warnings,
-      dependencyGraph: requestResolution.dependencyGraph,
-      lineage: requestResolution.lineage,
+      selectedByLayer: requestResolutionWithMethods.selectedByLayer,
+      missingDependencies: requestResolutionWithMethods.missingDependencies,
+      relationshipFailures: requestResolutionWithMethods.relationshipFailures,
+      ambiguousCandidates: requestResolutionWithMethods.ambiguousCandidates,
+      excludedCandidates: requestResolutionWithMethods.excludedCandidates,
+      warnings: requestResolutionWithMethods.warnings,
+      dependencyGraph: requestResolutionWithMethods.dependencyGraph,
+      lineage: requestResolutionWithMethods.lineage,
       resolution: {
-        ...requestResolution,
+        ...requestResolutionWithMethods,
         providerContextPacks: executionProviderContextPacks,
         scopeCandidates,
-        activeCount: requestResolution.mandatorySafeguards
+        activeCount: requestResolutionWithMethods.mandatorySafeguards
           .filter((pack) => pack.runtimeBindable === true).length,
         resolvedCount: selectedPacks.length,
-        requiredCount: requestResolution.mandatorySafeguards.length,
+        requiredCount: requestResolutionWithMethods.mandatorySafeguards.length,
         optionalCount: providerContextPacks.length,
         validationCount: validationPacks.length,
         blockedCount: versionEvidenceExclusions.length
           + additionalPacks.blockedPacks.filter((pack) =>
             !selectedActivationIds.has(normalizeText(pack.activationId))).length
-          + requestResolution.missingDependencies.length
-          + requestResolution.relationshipFailures.length
-          + requestResolution.ambiguousCandidates.length,
+          + requestResolutionWithMethods.missingDependencies.length
+          + requestResolutionWithMethods.relationshipFailures.length
+          + requestResolutionWithMethods.ambiguousCandidates.length,
         requestedContextCategories: contextCategories.map(normalizeToken).filter(Boolean),
-        unboundRequiredPacks: requestResolution.mandatorySafeguards
+        unboundRequiredPacks: requestResolutionWithMethods.mandatorySafeguards
           .filter((pack) => pack.runtimeBindable !== true)
           .map((pack) => ({
             packCategory: normalizePackCategory(pack.packCategory, pack.packType),
@@ -2114,7 +2265,7 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
     ? OUTCOME_STUDIO_BINDING_STATUSES.PROJECTED
     : OUTCOME_STUDIO_BINDING_STATUSES.BLOCKED
   const availableOutputTypes = discoverRequestSpecificOutputTypes({
-    mandatorySafeguards: activeRequiredPacks,
+    mandatorySafeguards: mandatoryCandidates,
     candidates: [...activeActivationByPackKey.values()].filter(
       (activation) => !OUTCOME_STUDIO_REQUIRED_PACKS
         .some((requiredPack) => buildRequiredPackKey(requiredPack) === buildRequiredPackKey(activation)),
@@ -3601,6 +3752,7 @@ const assertActivationTimeRelationships = async ({ version, scope, session = nul
 }
 
 const applyKnowledgePackActivationMutation = async ({
+  additionalScopeBaselineActivationId = '',
   activationTime,
   activationIdSuffix = '',
   actorUserId,
@@ -3739,7 +3891,10 @@ const applyKnowledgePackActivationMutation = async ({
     status: OUTCOME_KNOWLEDGE_PACK_ACTIVATION_STATUSES.ACTIVE,
   }).sort({ activatedAt: -1 })
   const previousActivation = await resolveLeanQuery(withOptionalSession(previousActivationQuery, session))
-  const activationId = buildKnowledgePackActivationId({
+  if (additionalScopeBaselineActivationId && previousActivation) {
+    throw additionalScopeConflict('ACTIVATION_SCOPE_OCCUPIED', 'This Knowledge Pack already has an active binding in the requested scope.')
+  }
+  const activationId = additionalScopeBaselineActivationId ? `kpa-scope-${crypto.randomUUID()}` : buildKnowledgePackActivationId({
     packType: version.packType,
     packKey: version.packKey,
     versionId: version.versionId,
@@ -3796,9 +3951,10 @@ const applyKnowledgePackActivationMutation = async ({
     activatedBy: actorUserId || null,
     activatedAt: activationTime,
     replacedActivationId: previousActivation?.activationId || '',
+    ...(additionalScopeBaselineActivationId ? { additionalScopeBaselineActivationId } : {}),
   })
 
-  await KnowledgePackActivation.updateMany(
+  if (!additionalScopeBaselineActivationId) await KnowledgePackActivation.updateMany(
     {
       packType: version.packType,
       packKey: version.packKey,
@@ -3827,16 +3983,18 @@ const applyKnowledgePackActivationMutation = async ({
     throw err
   }
 
-  version.status = OUTCOME_KNOWLEDGE_PACK_STATUSES.ACTIVE
-  await saveDocument(version, session)
-  await updateKnowledgePackLatestVersion({
+  if (!additionalScopeBaselineActivationId) {
+    version.status = OUTCOME_KNOWLEDGE_PACK_STATUSES.ACTIVE
+    await saveDocument(version, session)
+    await updateKnowledgePackLatestVersion({
     packId: version.packId,
     status: OUTCOME_KNOWLEDGE_PACK_STATUSES.ACTIVE,
     versionId: version.versionId,
     semanticVersion: version.semanticVersion,
     actorUserId,
     session,
-  })
+    })
+  }
   const mutationResult = {
     activation,
     previousActivation,
@@ -3859,6 +4017,7 @@ const applyKnowledgePackActivationMutation = async ({
           to: OUTCOME_KNOWLEDGE_PACK_STATUSES.ACTIVE,
         },
         replacedActivationId: previousActivation?.activationId || '',
+        ...(additionalScopeBaselineActivationId ? { additionalScopeBaselineActivationId } : {}),
         ...auditDiff,
       },
     })
@@ -3977,6 +4136,117 @@ const assertImportedSourceDocumentReadyForActivation = ({
   }
 }
 
+const additionalScopeConflict = (reason, message) => createKnowledgePackError({
+  status: 409, code: 'CONFLICT', reason: OUTCOME_KNOWLEDGE_PACK_ERROR_REASONS[reason], message,
+})
+
+const withRequiredActivationTransaction = async (callback) => {
+  if (mongoose.connection.readyState !== 1) {
+    throw additionalScopeConflict('ACTIVATION_TRANSACTION_REQUIRED', 'This activation operation requires a database transaction.')
+  }
+  const session = await mongoose.startSession()
+  try {
+    let result
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await session.withTransaction(async () => { result = await callback(session) })
+        break
+      } catch (err) {
+        if (attempt === 0 && err?.code === 11000 && err?.keyPattern?.activationId) continue
+        throw err
+      }
+    }
+    return result
+  } catch (err) {
+    if (err?.outcomeKnowledgePackAuditFailure) throwKnowledgePackAuditError(err)
+    if (err?.code === 20 || err?.codeName === 'IllegalOperation') {
+      throw additionalScopeConflict('ACTIVATION_TRANSACTION_REQUIRED', 'This activation operation requires a replica-set transaction.')
+    }
+    if (err?.code === 11000) {
+      throw additionalScopeConflict('ACTIVATION_SCOPE_OCCUPIED', 'An active binding already occupies this scope.')
+    }
+    throw err
+  } finally {
+    await session.endSession()
+  }
+}
+
+// A real write lock makes concurrent lifecycle retirement conflict with the baseline check.
+// Only the concurrency revision changes; lifecycle, timestamps and source metadata are preserved.
+const lockAdditionalScopeBaseline = async ({ packId, versionId, contentHash, baselineId, session }) => {
+  const baseline = await KnowledgePackActivation.findOneAndUpdate({
+    packId, versionId, contentHash, status: 'ACTIVE',
+    additionalScopeBaselineActivationId: { $in: [null, ''] },
+    ...(baselineId ? { activationId: baselineId } : {}),
+  }, { $inc: { __v: 1 } }, { session, new: true, timestamps: false }).lean()
+  if (!baseline) throw additionalScopeConflict('ACTIVATION_BASELINE_MISSING', 'The original non-extension active binding must remain available.')
+  return baseline
+}
+
+const activateAdditionalKnowledgePackScope = async ({ packId, versionId, body, actorUserId, auditRequest }) => {
+  const scope = buildActivationScope(body)
+  if (scope.scopeType === 'GLOBAL') {
+    throw additionalScopeConflict('ACTIVATION_ADDITIONAL_SCOPE_REQUIRED', 'An active version can only be added to a new non-global scope.')
+  }
+  return withRequiredActivationTransaction(async (session) => {
+    const packRecord = await KnowledgePack.findOne({ packId }).session(session)
+    const version = await findKnowledgePackVersionWithContent({ packId, versionId, session })
+    if (!packRecord || !version || version.status !== 'ACTIVE') {
+      throw additionalScopeConflict('ACTIVATION_IDENTITY_STALE', 'The active Knowledge Pack version is no longer current.')
+    }
+    if (!normalizeText(body.expectedContentHash) || version.contentHash !== normalizeText(body.expectedContentHash)) {
+      throw additionalScopeConflict('ACTIVATION_IDENTITY_STALE', 'Confirm the current content hash before adding this active version to another scope.')
+    }
+    if (version.packType !== packRecord.packType || version.packKey !== packRecord.packKey
+      || !Object.values(KNOWLEDGE_PACK_EXECUTION_MODES).includes(version.executionMode)
+      || (['ARL', 'RL'].includes(version.packType) && !resolveKnowledgePackBoundary(version))) {
+      throw additionalScopeConflict('ACTIVATION_IDENTITY_STALE', 'The version role, identity or execution metadata is inconsistent.')
+    }
+    const packDefinition = { packType: packRecord.packType, packKey: packRecord.packKey, label: packRecord.label }
+    assertImportedSourceDocumentReadyForActivation({ canonicalPackId: packId, packDefinition, packRecord, version })
+    const locked = await KnowledgePackVersion.updateOne({ packId, versionId, status: 'ACTIVE',
+      reviewStatus: 'APPROVED', contentHash: version.contentHash }, { $inc: { __v: 1 } }, { session, timestamps: false })
+    if (locked.matchedCount !== 1) throw additionalScopeConflict('ACTIVATION_IDENTITY_STALE', 'The active version changed during activation.')
+    const baseline = await lockAdditionalScopeBaseline({ packId, versionId, contentHash: version.contentHash, session })
+    const result = await applyKnowledgePackActivationMutation({
+      activationTime: new Date(),
+      actorUserId, auditRequest, packDefinition, packRecord, scope, version, session,
+      statusFrom: 'ACTIVE', additionalScopeBaselineActivationId: baseline.activationId,
+    })
+    return { pack: serializeKnowledgePack(packRecord), version: serializeKnowledgePackVersion(version),
+      activation: serializeKnowledgePackActivation(result.activation), previousActivation: null }
+  })
+}
+
+export const disableOutcomeKnowledgePackActivation = async ({ packId, activationId, body = {}, actorUserId = null, auditRequest = null } = {}) =>
+  withRequiredActivationTransaction(async (session) => {
+    const activation = await KnowledgePackActivation.findOne({ packId: normalizeText(packId), activationId: normalizeText(activationId) }).session(session)
+    if (!activation) throw createKnowledgePackError({ status: 404, code: 'NOT_FOUND', message: 'Knowledge Pack activation was not found.', reason: 'ACTIVATION_NOT_FOUND' })
+    if (activation.scopeType === 'GLOBAL' || activation.status !== 'ACTIVE' || !activation.additionalScopeBaselineActivationId) {
+      throw additionalScopeConflict('ACTIVATION_UNDO_NOT_ALLOWED', 'Only an active additional non-global binding can be undone.')
+    }
+    if (!normalizeText(body.expectedVersionId) || !normalizeText(body.expectedContentHash)
+      || activation.versionId !== body.expectedVersionId || activation.contentHash !== body.expectedContentHash) {
+      throw additionalScopeConflict('ACTIVATION_IDENTITY_STALE', 'The activation no longer matches the expected version and hash.')
+    }
+    await lockAdditionalScopeBaseline({ packId: activation.packId, versionId: activation.versionId,
+      contentHash: activation.contentHash, baselineId: activation.additionalScopeBaselineActivationId, session })
+    const packRecord = await KnowledgePack.findOne({ packId: activation.packId }).session(session)
+    const version = await KnowledgePackVersion.findOne({ packId: activation.packId, versionId: activation.versionId }).session(session)
+    if (!packRecord || !version || version.status !== 'ACTIVE' || version.contentHash !== activation.contentHash) {
+      throw additionalScopeConflict('ACTIVATION_IDENTITY_STALE', 'The activation version is no longer active or its hash changed.')
+    }
+    activation.status = OUTCOME_KNOWLEDGE_PACK_ACTIVATION_STATUSES.DISABLED
+    await saveDocument(activation, session)
+    try {
+      await logKnowledgePackAudit({ auditRequest, actorUserId, packRecord, version, activation, session, throwOnError: true,
+        action: auditService.AUDIT_ACTIONS.KNOWLEDGE_PACK_ACTIVATION_DISABLED,
+        diff: { operation: 'ADDITIONAL_SCOPE_DISABLED', activationStatus: { from: 'ACTIVE', to: 'DISABLED' },
+          additionalScopeBaselineActivationId: activation.additionalScopeBaselineActivationId } })
+    } catch (err) { err.outcomeKnowledgePackAuditFailure = true; throw err }
+    return { pack: serializeKnowledgePack(packRecord), version: serializeKnowledgePackVersion(version), activation: serializeKnowledgePackActivation(activation) }
+  })
+
 export const activateOutcomeKnowledgePackVersion = async ({
   packId,
   versionId,
@@ -4005,6 +4275,9 @@ export const activateOutcomeKnowledgePackVersion = async ({
   }
 
   const previousStatus = normalizeToken(version.status)
+  if (previousStatus === OUTCOME_KNOWLEDGE_PACK_STATUSES.ACTIVE) {
+    return activateAdditionalKnowledgePackScope({ packId: canonicalPackId, versionId: version.versionId, body, actorUserId, auditRequest })
+  }
   if (previousStatus !== OUTCOME_KNOWLEDGE_PACK_STATUSES.VALIDATED) {
     throw createKnowledgePackError({
       status: 409,

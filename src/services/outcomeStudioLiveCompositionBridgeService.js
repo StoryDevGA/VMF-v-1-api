@@ -7,6 +7,11 @@ import {
 import { loadOutcomeKnowledgePackVersionContent } from './outcomeKnowledgePackRegistryService.js'
 import { buildOutcomeStudioEvidenceComposition } from './outcomeStudioEvidenceCompositionService.js'
 import { buildOutcomeStudioGenerationContextConsumption } from './outcomeStudioProviderSafeContextService.js'
+import {
+  buildOutcomeMethodDocument,
+  buildOutcomeMethodDocumentBoundaryReceipt,
+  projectOutcomeMethodDocumentReceipt,
+} from './outcomeMethodDocumentService.js'
 
 export const OUTCOME_STUDIO_LIVE_COMPOSITION_BRIDGE_CONTRACT =
   'outcome-studio.live-composition-bridge.v1'
@@ -28,11 +33,9 @@ export const OUTCOME_STUDIO_LIVE_COMPOSITION_BLOCKERS = Object.freeze({
 
 const ROLE_REGISTRY = Object.freeze({
   ARL: Object.freeze({
-    packKey: 'adaptive-reasoning-layer',
     boundary: 'GENERATION_CONTEXT',
   }),
   RL: Object.freeze({
-    packKey: 'rendering-layer',
     boundary: 'POST_GENERATION_VALIDATION',
   }),
 })
@@ -145,20 +148,24 @@ const extractMarkdownSection = (content, heading) => {
   return lines.slice(start + 1, end < 0 ? lines.length : end)
 }
 
-const parseMarkdownNumberedStructure = ({ content, selection }) => {
-  const lines = extractMarkdownSection(content, 'Required Structure')
+const parseMarkdownNumberedStructure = ({ content, selection, heading = 'Required Structure' }) => {
+  const headingCount = String(content).split(/\r?\n/).filter((line) => line.trim().toLowerCase() === `## ${heading.toLowerCase()}`).length
+  if (headingCount !== 1) block(OUTCOME_STUDIO_LIVE_COMPOSITION_BLOCKERS.KNOWLEDGE_CONTENT_SHAPE_INVALID, { field: heading, reason: 'MISSING_OR_DUPLICATE_CONTAINER' })
+  const lines = extractMarkdownSection(content, heading)
     .map((line) => line.trim())
     .filter(Boolean)
-  const entries = lines.map((line) => {
+  const entries = []
+  for (const line of lines) {
     const match = line.match(/^(\d+)\.\s+(.+)$/)
-    return match ? { number: Number(match[1]), value: safeText(match[2]) } : null
-  })
-  if (entries.length !== 5
+    if (match) entries.push({ number: Number(match[1]), value: safeText(match[2]) })
+    else if (entries.at(-1) && !/^(?:#|[-*]\s|\d+[.)])/.test(line)) entries.at(-1).value += ` ${safeText(line)}`
+    else entries.push(null)
+  }
+  if (entries.length < 1 || entries.length > 24
     || entries.some((entry, index) => !entry || entry.number !== index + 1 || !entry.value)) {
     block(OUTCOME_STUDIO_LIVE_COMPOSITION_BLOCKERS.KNOWLEDGE_CONTENT_SHAPE_INVALID, {
       packKey: normalizeText(selection.packKey),
-      field: 'Required Structure',
-      expectedCount: 5,
+      field: heading,
       actualCount: entries.length,
     })
   }
@@ -176,13 +183,16 @@ const parseMarkdownNumberedStructure = ({ content, selection }) => {
 }
 
 const parseMarkdownGovernanceRules = ({ content, selection }) => {
-  const lines = extractMarkdownSection(content, 'Governance Rules')
+  const lines = [...extractMarkdownSection(content, 'Governance Rules'),
+    ...extractMarkdownSection(content, 'Governance and prohibited behaviour')]
     .map((line) => line.trim())
     .filter(Boolean)
-  const rules = lines
-    .map((line) => line.match(/^[-*]\s+(.+)$/)?.[1] || '')
-    .map(safeText)
-    .filter(Boolean)
+  const rules = []
+  for (const line of lines) {
+    const match = line.match(/^[-*]\s+(.+)$/)
+    if (match) rules.push(safeText(match[1]))
+    else if (rules.length) rules[rules.length - 1] += ` ${safeText(line)}`
+  }
   if (rules.length === 0) {
     block(OUTCOME_STUDIO_LIVE_COMPOSITION_BLOCKERS.GOVERNANCE_CONSTRAINTS_INVALID, {
       packKey: normalizeText(selection.packKey),
@@ -283,6 +293,15 @@ const findPackSelection = ({ binding, packKey, layer, capabilityKey = '' }) => {
   return uniqueCandidates[0]
 }
 
+const findMethodSelection = (binding, role, required = true) => {
+  const candidates = [...new Map(collectBindingPackEntries(binding)
+    .filter((pack) => normalizeToken(pack.packType) === role)
+    .map((pack) => [normalizeText(pack.activationId), pack])).values()]
+  if (!candidates.length && !required) return null
+  if (candidates.length !== 1) block(OUTCOME_STUDIO_LIVE_COMPOSITION_BLOCKERS.KNOWLEDGE_CONTENT_UNAVAILABLE, { role, candidateCount: candidates.length })
+  return candidates[0]
+}
+
 const loadSelectedContent = async ({ selection, binding, loadPackContent }) => {
   assertPackSelection({ selection })
   assertActiveLineageMembership({ selection, binding })
@@ -361,7 +380,15 @@ const loadSelectedContent = async ({ selection, binding, loadPackContent }) => {
 
 const resolveOutputStructure = ({ content, selection, requestedOutputTypeKey }) => {
   if (normalizeToken(selection.contentFormat) === 'MARKDOWN') {
-    return parseMarkdownNumberedStructure({ content, selection })
+    if (extractMarkdownSection(content, 'Required Structure').length) {
+      return parseMarkdownNumberedStructure({ content, selection })
+    }
+    const outcome = safeText(extractMarkdownSection(content, 'Required outcome').join(' '))
+    const behaviour = parseMarkdownNumberedStructure({ content, selection, heading: 'Runtime behaviour' })
+    if (!outcome || behaviour.length >= 24) {
+      block(OUTCOME_STUDIO_LIVE_COMPOSITION_BLOCKERS.KNOWLEDGE_CONTENT_SHAPE_INVALID, { field: 'Required outcome', packKey: selection.packKey })
+    }
+    return [outcome, ...behaviour]
   }
   const document = parseStructuredContent({ content, selection })
   const requestedKey = normalizeKey(requestedOutputTypeKey)
@@ -388,11 +415,10 @@ const resolveOutputStructure = ({ content, selection, requestedOutputTypeKey }) 
         field: 'outputTypeStructure',
       })
     : []
-  if (values.length !== 5 || new Set(values.map(normalizeKey)).size !== 5) {
+  if (values.length < 1 || values.length > 24 || new Set(values.map(normalizeKey)).size !== values.length) {
     block(OUTCOME_STUDIO_LIVE_COMPOSITION_BLOCKERS.KNOWLEDGE_CONTENT_SHAPE_INVALID, {
       packKey: normalizeText(selection.packKey),
       field: 'outputTypeStructure',
-      expectedCount: 5,
       actualCount: values.length,
     })
   }
@@ -423,6 +449,20 @@ const resolveOutputTypeGovernance = ({ content, selection }) => {
 
 const resolveSchemaProjection = ({ content, selection, schemaKey }) => {
   if (normalizeToken(selection.contentFormat) === 'MARKDOWN') {
+    if (/^##\s+Required structure\s*$/im.test(content)) {
+      const sectionGuidance = parseMarkdownNumberedStructure({ content, selection })
+      const requiredSections = sectionGuidance.map((entry) => entry.match(/^\*\*([^*]+)\*\*(?:\s*[—–-]\s*.+)?$/)?.[1] || entry)
+      if (new Set(requiredSections.map(normalizeDuplicateIdentity)).size !== requiredSections.length) {
+        block(OUTCOME_STUDIO_LIVE_COMPOSITION_BLOCKERS.KNOWLEDGE_CONTENT_SHAPE_INVALID, { field: 'Required structure', reason: 'DUPLICATE_VALUES' })
+      }
+      const validation = safeText([...extractMarkdownSection(content, 'Validation rules'), ...extractMarkdownSection(content, 'Conditional logic')].join(' '))
+      const prohibited = safeText(extractMarkdownSection(content, 'Prohibited structure').join(' '))
+      return { requiredSections, optionalSections: [], governance: {
+        sectionGuidance,
+        schemaProhibited: prohibited ? [prohibited] : [],
+        validationRules: validation ? validation.split(/\s+-\s+/).map((value) => value.replace(/^-\s+/, '')) : [],
+      } }
+    }
     const directHeadings = [...String(content || '').matchAll(/^##\s+(.+)$/gm)]
       .map((match) => safeText(match[1]))
       .filter(Boolean)
@@ -438,6 +478,10 @@ const resolveSchemaProjection = ({ content, selection, schemaKey }) => {
       'prohibited claims',
       'output controls',
       'schema metadata',
+      'scope',
+      'conditional logic',
+      'validation rules',
+      'prohibited structure',
     ])
     const optionalHeadingPattern = /^(truth certification|output warnings)$/i
     const parseSchemaList = (headings, { required = false, sectionDefinitions = false } = {}) => {
@@ -479,7 +523,7 @@ const resolveSchemaProjection = ({ content, selection, schemaKey }) => {
         .filter((heading) => !metadataHeadings.has(heading.toLowerCase()))
         .filter((heading) => !optionalHeadingPattern.test(heading))
     }
-    if (requiredSections.length === 0) {
+    if (requiredSections.length === 0 || requiredSections.length > 24) {
       block(OUTCOME_STUDIO_LIVE_COMPOSITION_BLOCKERS.KNOWLEDGE_CONTENT_SHAPE_INVALID, {
         packKey: normalizeText(selection.packKey),
         schemaKey,
@@ -534,7 +578,7 @@ const resolveSchemaProjection = ({ content, selection, schemaKey }) => {
     schemaKey,
     field: 'prohibited',
   })
-  if (requiredSections.length === 0
+  if (requiredSections.length === 0 || requiredSections.length > 24
     || new Set(requiredSections.map(normalizeKey)).size !== requiredSections.length) {
     block(OUTCOME_STUDIO_LIVE_COMPOSITION_BLOCKERS.KNOWLEDGE_CONTENT_SHAPE_INVALID, {
       packKey: normalizeText(selection.packKey),
@@ -555,6 +599,13 @@ const resolveSchemaProjection = ({ content, selection, schemaKey }) => {
 }
 
 const buildMethodGuidance = ({ role, loaded, selectedFormat = '' }) => {
+  if (loaded.contentFormat === 'MARKDOWN') {
+    const selection = assertPackSelection({ selection: loaded.selection })
+    const document = buildOutcomeMethodDocument({
+      role, selection, loaded: { ...selection, available: true, content: loaded.content },
+    })
+    return { role, boundary: document.boundary, version: selection.semanticVersion, document }
+  }
   const selection = assertPackSelection({
     selection: loaded.selection,
     role,
@@ -647,6 +698,8 @@ const buildGovernanceConstraints = ({
     ...collectStrings(schema?.governance?.globalRules?.must_not_introduce),
     ...collectStrings(schema?.governance?.globalRules?.hidden_from_customer),
     ...collectStrings(schema?.governance?.schemaProhibited),
+    ...collectStrings(schema?.governance?.sectionGuidance),
+    ...collectStrings(schema?.governance?.validationRules),
     ...collectStrings(getPath(arl, ['truth_binding_rules', 'must_not'])),
     ...collectStrings(getPath(arl, ['customer_visible', 'prohibited'])),
     'Quantified, ROI, financial impact, customer proof, and named customer claims remain blocked unless accepted evidence and boundary pass.',
@@ -836,16 +889,84 @@ const buildKnowledgeContextForComposition = ({
       requiredSections: schemaProjection.requiredSections,
       optionalSections: schemaProjection.optionalSections,
     },
-    style: {
+    style: knowledgeContext.style ? {
       ...(knowledgeContext.style || {}),
-      version: normalizeText(styleSelection.semanticVersion || knowledgeContext.style?.version),
-    },
+      version: normalizeText(styleSelection?.semanticVersion || knowledgeContext.style?.version),
+    } : null,
     lineage: {
       ...lineage,
       versionIds,
       contentHashes,
     },
   }
+}
+
+// Shared read-only content validation; this does not execute a provider or record a receipt.
+export const resolveOutcomeStudioCompositionInputs = async ({
+  binding, knowledgeContext, requestedOutputTypeKey, requestedFormat = '', frameworkHandoff,
+  loadPackContent = loadOutcomeKnowledgePackVersionContent,
+}) => {
+  const outputSelection = findPackSelection({
+    binding,
+    packKey: normalizeText(knowledgeContext.outputType?.key || requestedOutputTypeKey),
+    layer: 'OUTPUT_TYPE',
+    capabilityKey: requestedOutputTypeKey,
+  })
+  const schemaSelection = findPackSelection({
+    binding,
+    packKey: normalizeText(knowledgeContext.outputSchema?.key),
+    layer: 'OUTPUT_SCHEMA',
+    capabilityKey: knowledgeContext.outputSchema?.key,
+  })
+  const styleSelection = knowledgeContext.style?.key ? findPackSelection({
+    binding,
+    packKey: normalizeText(knowledgeContext.style?.key),
+    layer: 'STYLE',
+    capabilityKey: knowledgeContext.style?.key,
+  }) : null
+  const arlSelection = findMethodSelection(binding, 'ARL')
+  const rlSelection = findMethodSelection(binding, 'RL', false)
+
+  const [outputType, schema, arl, rl] = await Promise.all([
+    loadSelectedContent({ selection: outputSelection, binding, loadPackContent }),
+    loadSelectedContent({ selection: schemaSelection, binding, loadPackContent }),
+    loadSelectedContent({ selection: arlSelection, binding, loadPackContent }),
+    rlSelection ? loadSelectedContent({ selection: rlSelection, binding, loadPackContent }) : null,
+  ])
+  const outputStructure = resolveOutputStructure({
+    content: outputType.content,
+    selection: outputType.selection,
+    requestedOutputTypeKey,
+  })
+  const outputGovernance = resolveOutputTypeGovernance({
+    content: outputType.content,
+    selection: outputType.selection,
+  })
+  const schemaProjection = resolveSchemaProjection({
+    content: schema.content,
+    selection: schema.selection,
+    schemaKey: knowledgeContext.outputSchema.key,
+  })
+  const arlDocument = arl.contentFormat === 'MARKDOWN' ? {} : parseStructuredContent({ content: arl.content, selection: arl.selection })
+  const arlGuidance = buildMethodGuidance({ role: 'ARL', loaded: arl })
+  const rlGuidance = rl ? buildMethodGuidance({ role: 'RL', loaded: rl, selectedFormat: normalizeToken(requestedFormat) }) : null
+  const methodGuidance = [arlGuidance]
+  const methodDocumentReceipts = [arlGuidance, rlGuidance].filter((entry) => entry?.document)
+    .map((entry) => projectOutcomeMethodDocumentReceipt(entry.document))
+  const methodBoundaryReceipts = [rlGuidance].filter((entry) => entry?.document)
+    .map((entry) => buildOutcomeMethodDocumentBoundaryReceipt(entry.document))
+  const methodPackBindings = [arlGuidance, rlGuidance].filter(Boolean).map(({ role, boundary, version }) => ({
+    role,
+    boundary,
+    version,
+  }))
+  const governanceConstraints = buildGovernanceConstraints({
+    outputType: outputGovernance,
+    schema: schemaProjection,
+    arl: arlDocument,
+    frameworkHandoff,
+  })
+  return { outputType, schema, arl, rl, styleSelection, outputStructure, schemaProjection, methodGuidance, methodPackBindings, methodDocumentReceipts, methodBoundaryReceipts, governanceConstraints }
 }
 
 export const buildOutcomeStudioLiveComposition = async ({
@@ -933,69 +1054,8 @@ export const buildOutcomeStudioLiveComposition = async ({
       : '',
   }
 
-  const outputSelection = findPackSelection({
-    binding,
-    packKey: normalizeText(knowledgeContext.outputType?.key || requestedOutputTypeKey),
-    layer: 'OUTPUT_TYPE',
-    capabilityKey: requestedOutputTypeKey,
-  })
-  const schemaSelection = findPackSelection({
-    binding,
-    packKey: normalizeText(knowledgeContext.outputSchema?.key),
-    layer: 'OUTPUT_SCHEMA',
-    capabilityKey: knowledgeContext.outputSchema?.key,
-  })
-  const styleSelection = findPackSelection({
-    binding,
-    packKey: normalizeText(knowledgeContext.style?.key),
-    layer: 'STYLE',
-    capabilityKey: knowledgeContext.style?.key,
-  })
-  const arlSelection = findPackSelection({
-    binding,
-    packKey: ROLE_REGISTRY.ARL.packKey,
-    layer: 'REASONING',
-  })
-  const rlSelection = findPackSelection({
-    binding,
-    packKey: ROLE_REGISTRY.RL.packKey,
-    layer: 'COMMUNICATION_PATTERN',
-  })
-
-  const [outputType, schema, arl, rl] = await Promise.all([
-    loadSelectedContent({ selection: outputSelection, binding, loadPackContent }),
-    loadSelectedContent({ selection: schemaSelection, binding, loadPackContent }),
-    loadSelectedContent({ selection: arlSelection, binding, loadPackContent }),
-    loadSelectedContent({ selection: rlSelection, binding, loadPackContent }),
-  ])
-  const outputStructure = resolveOutputStructure({
-    content: outputType.content,
-    selection: outputType.selection,
-    requestedOutputTypeKey,
-  })
-  const outputGovernance = resolveOutputTypeGovernance({
-    content: outputType.content,
-    selection: outputType.selection,
-  })
-  const schemaProjection = resolveSchemaProjection({
-    content: schema.content,
-    selection: schema.selection,
-    schemaKey: knowledgeContext.outputSchema.key,
-  })
-  const arlDocument = parseStructuredContent({ content: arl.content, selection: arl.selection })
-  const arlGuidance = buildMethodGuidance({ role: 'ARL', loaded: arl })
-  const rlGuidance = buildMethodGuidance({ role: 'RL', loaded: rl, selectedFormat: normalizeToken(requestedFormat) })
-  const methodGuidance = [arlGuidance]
-  const methodPackBindings = [arlGuidance, rlGuidance].map(({ role, boundary, version }) => ({
-    role,
-    boundary,
-    version,
-  }))
-  const governanceConstraints = buildGovernanceConstraints({
-    outputType: outputGovernance,
-    schema: schemaProjection,
-    arl: arlDocument,
-    frameworkHandoff,
+  const { outputType, schema, arl, rl, styleSelection, outputStructure, schemaProjection, methodGuidance, methodPackBindings, methodDocumentReceipts, methodBoundaryReceipts, governanceConstraints } = await resolveOutcomeStudioCompositionInputs({
+    binding, knowledgeContext, requestedOutputTypeKey, requestedFormat, frameworkHandoff, loadPackContent,
   })
   const projectedFrameworkState = getFrameworkStateProjection({ frameworkState, frameworkHandoff })
   const projectedTruthBinding = buildTruthBinding({
@@ -1020,7 +1080,7 @@ export const buildOutcomeStudioLiveComposition = async ({
         outputStructure,
         schemaProjection,
         styleSelection,
-        loadedPacks: [outputType, schema, arl, rl],
+        loadedPacks: [outputType, schema, arl, rl].filter(Boolean),
       }),
       requestedOutputTypeKey,
       userPrompt,
@@ -1049,6 +1109,8 @@ export const buildOutcomeStudioLiveComposition = async ({
     compositionPackage,
     methodGuidance,
     methodPackBindings,
+    methodDocumentReceipts,
+    methodBoundaryReceipts,
     governanceConstraints,
     readiness,
     readinessSources: {
@@ -1061,9 +1123,9 @@ export const buildOutcomeStudioLiveComposition = async ({
     knowledgeProjection: {
       outputTypeVersion: outputType.selection.semanticVersion,
       outputSchemaVersion: schema.selection.semanticVersion,
-      styleVersion: styleSelection.semanticVersion || knowledgeContext.style?.version,
-      versionIds: unique([outputType, schema, arl, rl].map((pack) => pack.selection.versionId)),
-      contentHashes: unique([outputType, schema, arl, rl].map((pack) => pack.contentHash)),
+      styleVersion: styleSelection?.semanticVersion || knowledgeContext.style?.version,
+      versionIds: unique([outputType, schema, arl, rl].filter(Boolean).map((pack) => pack.selection.versionId)),
+      contentHashes: unique([outputType, schema, arl, rl].filter(Boolean).map((pack) => pack.contentHash)),
     },
   }
 }
