@@ -29,6 +29,11 @@ import {
 } from '../constants/discoveryAcquisitionProfiles.js'
 import auditService from './auditService.js'
 import {
+  attachDiscoveryDecisionAuditRef,
+  attachDiscoveryRegistrationAuditRef,
+  attachRuntimeIntelligenceGraphAuditRef,
+} from './discoveryAuditReferenceService.js'
+import {
   RUNTIME_INSTANCE_ERROR_REASONS,
   assertCustomerTenantContext,
   assertFeatureEntitlement,
@@ -2957,6 +2962,18 @@ const persistMutationWithAudit = async ({
   expectedUpdatedAt,
   updatedAtBefore,
 }) => {
+  const auditRef = String(auditRequest?.requestId || '').trim()
+  if (auditRef && rebuiltIntelligenceGraph && isPlainObject(rebuiltIntelligenceGraph.build)) {
+    rebuiltIntelligenceGraph = attachRuntimeIntelligenceGraphAuditRef(
+      rebuiltIntelligenceGraph,
+      auditRef,
+    )
+    nextFrameworkState = {
+      ...nextFrameworkState,
+      intelligence_graph: rebuiltIntelligenceGraph,
+    }
+  }
+
   let previousStateVersion
   let nextStateVersion
   try {
@@ -3428,7 +3445,7 @@ export const updateRuntimeDiscoveryInputs = async ({
   const updatedAtBefore = runtimeInstance.updatedAt instanceof Date
     ? runtimeInstance.updatedAt.toISOString()
     : runtimeInstance.updatedAt
-  const nextEvidencePack = await buildDiscoveryEvidencePack({
+  const builtEvidencePack = await buildDiscoveryEvidencePack({
     acquisitionProfile: payload?.acquisitionProfile,
     actorUserId,
     documentSources: payload?.documentSources,
@@ -3437,6 +3454,11 @@ export const updateRuntimeDiscoveryInputs = async ({
     reason: 'SAVE_DISCOVERY_INPUTS',
     runtimeInstance,
   })
+  const nextEvidencePack = attachDiscoveryRegistrationAuditRef(
+    builtEvidencePack,
+    auditRequest?.requestId,
+    previousEvidencePack,
+  )
   await assertRuntimeEvidencePackWritable({
     frameworkKey: runtimeInstance.frameworkKey,
     value: nextEvidencePack,
@@ -3504,16 +3526,17 @@ export const acceptRuntimeDiscovery = async ({
 
   const acceptedAt = new Date().toISOString()
   const contradictionReviewEpoch = crypto.randomUUID()
+  const previousEvidenceObjects = normalizeDiscoveryEvidenceObjects({
+    acquisitionProfile: previousEvidencePack.acquisition?.profile || previousEvidencePack.acquisitionProfile,
+    createdAt: previousEvidencePack.refreshedAt || acceptedAt,
+    evidenceObjects: previousEvidencePack.evidenceObjects,
+    inputs: previousEvidencePack.inputs,
+    sources: previousEvidencePack.lineage?.sources || [],
+  })
   const acceptedEvidenceObjects = acceptPendingDiscoveryEvidenceObjects({
     acceptedAt,
     actorUserId,
-    evidenceObjects: normalizeDiscoveryEvidenceObjects({
-      acquisitionProfile: previousEvidencePack.acquisition?.profile || previousEvidencePack.acquisitionProfile,
-      createdAt: previousEvidencePack.refreshedAt || acceptedAt,
-      evidenceObjects: previousEvidencePack.evidenceObjects,
-      inputs: previousEvidencePack.inputs,
-      sources: previousEvidencePack.lineage?.sources || [],
-    }),
+    evidenceObjects: previousEvidenceObjects,
   })
   const sourceRegistry = buildDiscoverySourceRegistry({
     capturedAt: previousEvidencePack.refreshedAt || acceptedAt,
@@ -3559,7 +3582,7 @@ export const acceptRuntimeDiscovery = async ({
     inputs: previousEvidencePack.inputs || {},
     sourceRegistry,
   })
-  const nextEvidencePack = {
+  let nextEvidencePack = {
     ...previousEvidencePack,
     inputComplete: true,
     contradictionReviewEpoch,
@@ -3601,6 +3624,19 @@ export const acceptRuntimeDiscovery = async ({
       needsRefresh: false,
     },
   }
+
+  nextEvidencePack = attachDiscoveryDecisionAuditRef(
+    nextEvidencePack,
+    auditRequest?.requestId,
+    acceptedEvidenceObjects.filter((evidence) => {
+      const evidenceId = String(evidence?.evidenceObjectId || '').trim()
+      const previousEvidence = previousEvidenceObjects.find((item) =>
+        String(item?.evidenceObjectId || '').trim() === evidenceId,
+      )
+      return normalizeToken(previousEvidence?.reviewStatus) === DISCOVERY_EVIDENCE_REVIEW_STATUSES.PENDING
+        && normalizeToken(evidence?.reviewStatus) === DISCOVERY_EVIDENCE_REVIEW_STATUSES.ACCEPTED
+    }),
+  )
 
   await assertRuntimeEvidencePackWritable({
     frameworkKey: runtimeInstance.frameworkKey,
@@ -3738,7 +3774,7 @@ export const reviewRuntimeDiscoveryContradiction = async ({
         : readiness.warningReasons?.length || Number(readiness.coveragePercent || 0) < 70 ? 'PARTIALLY_READY' : 'READY',
     },
   }
-  const nextEvidencePack = {
+  let nextEvidencePack = {
     ...pack, contradictionReviews, discoveryHealth,
     ...(isPlainObject(pack.acquisition) ? { acquisition: { ...pack.acquisition, discoveryHealth } } : {}),
   }
@@ -3858,7 +3894,7 @@ export const reviewRuntimeDiscoveryEvidence = async ({
     inputs: previousEvidencePack.inputs || {},
     sourceRegistry,
   })
-  const nextEvidencePack = {
+  let nextEvidencePack = {
     ...previousEvidencePack,
     accepted: false,
     contradictionReviewEpoch,
@@ -3893,6 +3929,13 @@ export const reviewRuntimeDiscoveryEvidence = async ({
       lastReviewStatus: reviewStatus,
     },
   }
+
+  nextEvidencePack = attachDiscoveryDecisionAuditRef(
+    nextEvidencePack,
+    auditRequest?.requestId,
+    reviewResult.evidenceObjects.filter((evidence) =>
+      String(evidence?.evidenceObjectId || '').trim() === String(evidenceObjectId || '').trim()),
+  )
 
   await assertRuntimeEvidencePackWritable({
     frameworkKey: runtimeInstance.frameworkKey,

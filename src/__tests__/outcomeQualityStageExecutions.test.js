@@ -370,9 +370,16 @@ const makeWorkingDraftOutput = (plan, source) => {
       content: 'The governed evidence supports a bounded executive decision with explicit qualifications.',
       claims: [{
         claimKey: 'claim_governed_position',
-        statement: 'The current position is bounded by the six accepted truth sections.',
+        statement: 'The supplied summary presents Parlon as claiming this outcome; independent verification is not established in the supplied summaries.',
         truthReferences,
         evidence: ['All six accepted truth identities are retained in the draft lineage.'],
+        meaningClass: 'SOURCE_PRESENTED',
+        proofDependencies: [],
+        validationStatus: 'NOT_STATED',
+        proofDisposition: 'NOT_ESTABLISHED',
+        whatCanBeSaidNow: 'The supplied summary presents Parlon as claiming this outcome.',
+        blockedStrongerClaim: 'An achieved outcome is not established in the supplied summaries.',
+        evidenceRequiredToSubstantiate: ['Evidence identifying the measure, scope, baseline, method and measurement window.'],
       }],
       truthReferences,
       contributingActivationIds,
@@ -381,8 +388,11 @@ const makeWorkingDraftOutput = (plan, source) => {
     }],
     decisionLogic: [{
       decisionKey: 'preserve_evidence_boundary',
-      rationale: 'The executive recommendation must not outrun accepted evidence.',
-      priority: 'HIGH',
+      rationale: 'Interpretive placeholder: Source-presented framing: the supplied summary presents Parlon as expressing the claim. Recognition gap: recognition is not established in the supplied summaries. Understanding gap: measurement meaning is not established in the supplied summaries. Bounded interpretation now: the supplied summary presents Parlon as claiming this outcome. Qualified Reality: an achieved outcome is not established in the supplied summaries. Unresolved proof dependencies: Any proof questions not stated in accepted truth are author-added placeholders, not adopted Parlon requirements. Ordering is not established in the supplied evidence.',
+      priority: 'NOT_ESTABLISHED',
+      priorityBasis: 'NOT_ESTABLISHED',
+      closureState: 'INCOMPLETE',
+      actionAuthorization: 'NONE',
       truthReferences,
     }],
     compositionProvenance: {
@@ -883,6 +893,60 @@ describe('Outcome quality stage execution contract', () => {
     await expect(document.validate()).resolves.toBeUndefined()
   })
 
+  it('retains claim boundary fields in the versioned persisted Working Draft snapshot', () => {
+    const plan = makePlan()
+    const sourceStageExecution = makeFrameworkGuidanceSource(plan)
+    const output = makeWorkingDraftOutput(plan, sourceStageExecution)
+    output.sections[0].claims[0] = {
+      ...output.sections[0].claims[0],
+      statement: 'The supplied summary presents Parlon as claiming this outcome; independent verification is not established in the supplied summaries.',
+      validationStatus: 'NOT_STATED',
+      proofDisposition: 'NOT_ESTABLISHED',
+      whatCanBeSaidNow: 'The supplied summary presents Parlon as claiming this outcome.',
+      blockedStrongerClaim: 'An achieved outcome is not established in the supplied summaries.',
+      evidenceRequiredToSubstantiate: ['Evidence identifying the measure, scope, baseline, method and measurement window.'],
+    }
+    output.decisionLogic[0].rationale = 'Interpretive placeholder: Source-presented framing: the supplied summary presents Parlon as expressing the claim. Recognition gap: recognition is not established in the supplied summaries. Understanding gap: measurement meaning is not established in the supplied summaries. Bounded interpretation now: the supplied summary presents Parlon as claiming this outcome. Qualified Reality: an achieved outcome is not established in the supplied summaries. Unresolved proof dependencies: Any proof questions not stated in accepted truth are author-added placeholders, not adopted Parlon requirements. Ordering is not established in the supplied evidence.'
+
+    const candidate = buildWorkingDraft({ plan, sourceStageExecution, output })
+
+    expect(candidate.outputSnapshot.sections[0].claims[0]).toMatchObject({
+      meaningClass: 'SOURCE_PRESENTED',
+      truthReferences: output.sections[0].claims[0].truthReferences,
+      validationStatus: 'NOT_STATED',
+      proofDisposition: 'NOT_ESTABLISHED',
+      whatCanBeSaidNow: 'The supplied summary presents Parlon as claiming this outcome.',
+      blockedStrongerClaim: 'An achieved outcome is not established in the supplied summaries.',
+      evidenceRequiredToSubstantiate: ['Evidence identifying the measure, scope, baseline, method and measurement window.'],
+    })
+  })
+
+  it('persists a Framework-guided provisional proof sequence without treating it as customer priority', async () => {
+    const plan = makePlan()
+    const source = makeFrameworkGuidanceSource(plan)
+    const output = makeWorkingDraftOutput(plan, source)
+      output.decisionLogic[0].priority = 'PROVISIONAL_SEQUENCE_1'
+      output.decisionLogic[0].priorityBasis = 'FRAMEWORK_GUIDANCE'
+      output.decisionLogic[0].rationale = output.decisionLogic[0].rationale.replace(
+        'Ordering is not established in the supplied evidence.',
+        'Hypothetical next proof step: If pursued, this author-proposed proof step could follow the explicit Framework/process guidance as a hypothetical proof-work example. It is non-authorising, not Parlon evidence, and not a commercial priority.',
+      )
+    const candidate = buildWorkingDraft({ plan, sourceStageExecution: source, output })
+    const document = new OutcomeQualityStageExecution({
+      stageExecutionId: 'outcome_quality_stage_framework_guided_sequence',
+      ...candidate,
+      createdBy: ids.actor,
+    })
+
+    await expect(document.validate()).resolves.toBeUndefined()
+    expect(document.outputSnapshot.decisionLogic[0]).toMatchObject({
+      priority: 'PROVISIONAL_SEQUENCE_1',
+      priorityBasis: 'FRAMEWORK_GUIDANCE',
+      closureState: 'INCOMPLETE',
+      actionAuthorization: 'NONE',
+    })
+  })
+
   it('rejects Working Draft approval claims and invalid source-stage lineage', () => {
     const plan = makePlan()
     const source = makeFrameworkGuidanceSource(plan)
@@ -994,6 +1058,32 @@ describe('Outcome quality stage execution contract', () => {
       ...shaped,
       createdBy: ids.actor,
     }).validate()).resolves.toBeUndefined()
+
+    const plan = makePlan()
+    const sources = makeArlSource(plan)
+    const persistedNarrative = buildNarrativePlan({ plan, sources })
+    const persistence = makePersistenceDeps({ plan, sourceStage: sources.arlStage })
+    const persisted = await createOutcomeQualityStageExecution({
+      planRecordId: ids.plan,
+      runtimeInstanceId: ids.runtime,
+      expectedPlanFingerprint: plan.planFingerprint,
+      stageKey: OUTCOME_QUALITY_STAGES.OUTCOME_NARRATIVE_PLAN,
+      expectedLatestAttemptNumber: 0,
+      predecessorStageExecutionId: sources.arlStage.stageExecutionId,
+      predecessorAttemptFingerprint: sources.arlStage.attemptFingerprint,
+      sourceStageExecution: sources.arlStage,
+      status: OUTCOME_QUALITY_STAGE_STATUSES.SUCCEEDED,
+      output: persistedNarrative.outputSnapshot,
+      executionIdentity: internalExecutionIdentity(),
+      startedAt: persistedNarrative.startedAt,
+      completedAt: persistedNarrative.completedAt,
+      expectedAttemptFingerprint: persistedNarrative.attemptFingerprint,
+      actorUserId: ids.actor,
+      deps: persistence.deps,
+    })
+    expect(persisted.idempotent).toBe(false)
+    expect(persistence.saved).toHaveLength(1)
+    expect(persistence.committedAudits).toHaveLength(1)
   })
 
   it('splits long or multiline approved draft content into bounded ordered narrative messages', () => {
@@ -1785,6 +1875,30 @@ describe('Outcome quality stage execution contract', () => {
     await expect(document.validate()).resolves.toBeUndefined()
   })
 
+  it('binds a request-scoped stage to stable draft identities without changing legacy candidates', async () => {
+    const requestId = '557d3e2e-3adb-4cb4-b71a-a4c256f2f878'
+    const requestPlan = makePlan()
+    requestPlan.requestId = requestId
+    requestPlan.payload.requestId = requestId
+    requestPlan.planFingerprint = hashOutcomeKnowledgeCompositionSemanticValue(requestPlan.payload)
+    const requestBinding = {
+      requestId,
+      draftId: 'outcome_draft_4c8ec790-51c2-4a69-a371-9a32be91c520',
+      draftIterationId: 'outcome_draft_iteration_3f856bc1-8bb8-42e7-8bca-e81037c737db',
+    }
+    const candidate = buildSuccess({ plan: requestPlan, requestBinding })
+    expect(candidate).toEqual(expect.objectContaining(requestBinding))
+    expect(candidate.inputSnapshot.requestBindingFingerprint).toBe(
+      hashOutcomeQualityStageValue(requestBinding),
+    )
+    await expect(new OutcomeQualityStageExecution({
+      stageExecutionId: 'outcome_quality_stage_request_bound',
+      ...candidate,
+      createdBy: ids.actor,
+    }).validate()).resolves.toBeUndefined()
+    expect(serializeOutcomeQualityStageExecution(candidate)).toEqual(expect.objectContaining(requestBinding))
+  })
+
   it('accepts an exact marker-free legacy stage shape at the direct model boundary', async () => {
     const candidate = buildSuccess({ plan: makeLegacyPlan() })
     const document = new OutcomeQualityStageExecution({
@@ -2072,7 +2186,7 @@ describe('Outcome quality stage execution contract', () => {
 
   it('accepts only recognized provider configuration versions', () => {
     expect(OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSION)
-      .toBe(OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V6_ARL_BOUNDARY_DIAGNOSTICS)
+      .toBe(OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V8_SINGLE_LINE_TEXT)
     Object.values(OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSIONS).forEach((version) => {
       expect(() => buildSuccess({
         executionIdentity: executionIdentity({ providerConfigurationVersion: version }),
@@ -2085,7 +2199,7 @@ describe('Outcome quality stage execution contract', () => {
 
   it('accepts provider configuration identity only for its owning quality stage', async () => {
     expect(OUTCOME_WORKING_DRAFT_PROVIDER_CONFIG_VERSION)
-      .toBe(OUTCOME_WORKING_DRAFT_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V1)
+      .toBe(OUTCOME_WORKING_DRAFT_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V40_CLAIM_EVIDENCE_BOUNDARIES)
     const workingIdentity = executionIdentity({
       providerConfigurationVersion: OUTCOME_WORKING_DRAFT_PROVIDER_CONFIG_VERSION,
     })
@@ -2364,6 +2478,33 @@ describe('Outcome quality stage execution contract', () => {
     expect(auditPayload.diff.providerConfigurationVersion)
       .toBe(OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSION)
     expect(auditOptions).toEqual({ session: fixture.session, throwOnError: true })
+  })
+
+  it('rejects a request-bound attempt without its evidence contract inside the transaction', async () => {
+    const requestId = '557d3e2e-3adb-4cb4-b71a-a4c256f2f878'
+    const plan = makePlan()
+    plan.requestId = requestId
+    plan.payload.requestId = requestId
+    plan.planFingerprint = hashOutcomeKnowledgeCompositionSemanticValue(plan.payload)
+    const requestBinding = {
+      requestId,
+      draftId: 'outcome_draft_4c8ec790-51c2-4a69-a371-9a32be91c520',
+      draftIterationId: 'outcome_draft_iteration_3f856bc1-8bb8-42e7-8bca-e81037c737db',
+    }
+    const fixture = makePersistenceDeps({ plan })
+    const candidate = buildSuccess({ plan, requestBinding })
+    await expect(createOutcomeQualityStageExecution({
+      ...createArgs(plan, candidate),
+      requestBinding,
+      deps: fixture.deps,
+    })).rejects.toMatchObject({ code: 'EVIDENCE_TO_MEANING_CLARIFICATION_REQUIRED',
+      details: { reason: 'CONTRACT_REQUIRED_RE_RESOLVE_REQUEST' } })
+    expect(fixture.saved).toHaveLength(0)
+    expect(fixture.deps.OutcomeKnowledgeCompositionPlan.findOne).toHaveBeenCalledWith(
+      expect.objectContaining({ runtimeInstanceId: ids.runtime, requestId }),
+    )
+    expect(fixture.deps.OutcomeQualityStageExecution.findOne).not.toHaveBeenCalled()
+    expect(fixture.audit.log).not.toHaveBeenCalled()
   })
 
   it('persists a first Working Draft only from the exact successful Framework Guidance source', async () => {

@@ -82,6 +82,7 @@ import {
   updateRuntimeOutcomeSessionFromLatestTruth as updateRuntimeOutcomeSessionFromLatestTruthRecord,
 } from '../services/outcomeStudioService.js'
 import { isOutcomeCustomerLanguageSafe } from '../services/outcomeCustomerLanguageService.js'
+import { resolveOutcomeStudioCanonicalBinding } from '../services/discoveryContractReadinessService.js'
 import {
   getRuntimeStateBootstrap as readRuntimeStateBootstrap,
   getRuntimeStateControl,
@@ -158,6 +159,15 @@ const OUTCOME_PROVIDER_SAFE_CONTEXT_PUBLIC_CODES = Object.freeze({
   PACK_CONTENT_PII_OR_CREDENTIAL: 'GUIDANCE_CONTENT_REJECTED',
 })
 
+const OUTCOME_QUALITY_STAGE_PUBLIC_DIAGNOSTICS = Object.freeze({
+  FRAMEWORK_GUIDANCE: 'FRAMEWORK_GUIDANCE',
+  WORKING_DRAFT: 'WORKING_DRAFT',
+  ARL_MEANING_REVIEW: 'ARL_MEANING_REVIEW',
+  OUTCOME_NARRATIVE_PLAN: 'OUTCOME_NARRATIVE_PLAN',
+  OUTPUT_SHAPING: 'OUTPUT_SHAPING',
+  RENDERED_EXPRESSION_RL: 'RENDERED_EXPRESSION_RL',
+})
+
 const getOutcomeCustomerErrorCode = (err = {}) => {
   if (OUTCOME_CUSTOMER_ERROR_CODES.has(err.code)) return err.code
   const providerFailure = OUTCOME_PROVIDER_PUBLIC_FAILURES[err.details?.reason]
@@ -194,11 +204,23 @@ const getOutcomeCustomerErrorState = (details = {}) => {
 }
 
 const getOutcomeCustomerErrorDiagnostic = (err = {}) => {
-  if (err.code !== 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED') return null
-  const failureStage = OUTCOME_PROVIDER_SAFE_CONTEXT_PUBLIC_STAGES[err.internalFailureStage]
-  const diagnosticCode = OUTCOME_PROVIDER_SAFE_CONTEXT_PUBLIC_CODES[err.internalDiagnosticCode]
-  if (!failureStage || !diagnosticCode) return null
-  return { failureStage, diagnosticCode }
+  if (err.code === 'GRR_PROVIDER_SAFE_CONTEXT_BLOCKED') {
+    const failureStage = OUTCOME_PROVIDER_SAFE_CONTEXT_PUBLIC_STAGES[err.internalFailureStage]
+    const diagnosticCode = OUTCOME_PROVIDER_SAFE_CONTEXT_PUBLIC_CODES[err.internalDiagnosticCode]
+    if (!failureStage || !diagnosticCode) return null
+    return { failureStage, diagnosticCode }
+  }
+  const diagnosticCode = String(err.details?.blockerReason || '').trim().toUpperCase()
+  const failureStage = Object.keys(OUTCOME_QUALITY_STAGE_PUBLIC_DIAGNOSTICS)
+    .find((stage) => diagnosticCode.startsWith(stage))
+    || Object.keys(OUTCOME_QUALITY_STAGE_PUBLIC_DIAGNOSTICS)
+      .find((stage) => String(err.details?.stageKey || '').trim().toUpperCase() === stage)
+  if (!failureStage || !/^[A-Z0-9_]{3,120}$/.test(diagnosticCode)) return null
+  return {
+    failureStage: OUTCOME_QUALITY_STAGE_PUBLIC_DIAGNOSTICS[failureStage],
+    diagnosticCode,
+    stageExecutionId: String(err.details?.stageExecutionId || '').trim(),
+  }
 }
 
 const buildRuntimeOutcomeErrorResponse = (req, err) => {
@@ -1123,6 +1145,79 @@ export const getRuntimeOutcomeStudioReadiness = async (req, res, next) => {
   }
 }
 
+export const getRuntimeDiscoveryContractReadiness = async (req, res, next) => {
+  try {
+    const readinessResolver = req.app?.locals?.discoveryContractReadinessResolver
+    if (typeof readinessResolver !== 'function') {
+      return res.status(503).json({
+        error: {
+          code: 'DISCOVERY_CONTRACT_RESOLVER_UNAVAILABLE',
+          message: 'Discovery Contract readiness is unavailable.',
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    const resolved = await readinessResolver({
+      runtimeInstanceId: req.params.runtimeInstanceId,
+      scopes: req.scopes,
+    })
+    if (!resolved) {
+      return res.status(404).json({
+        error: {
+          code: 'RUNTIME_INSTANCE_NOT_FOUND',
+          message: 'Runtime instance was not found.',
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    return res.status(200).json({
+      data: resolved.proof,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeOutcomeErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
+export const getRuntimeOutcomeStudioCanonicalRevisionConsumption = async (req, res, next) => {
+  try {
+    const revisionResolver = req.app?.locals?.discoveryContractRevisionResolver
+    const binding = await resolveOutcomeStudioCanonicalBinding({
+      requestedRuntimeInstanceId: req.params.runtimeInstanceId,
+      requestedRevisionId: req.params.revisionId,
+      revisionResolver: typeof revisionResolver === 'function'
+        ? (identity) => revisionResolver({ ...identity, scopes: req.scopes })
+        : undefined,
+    })
+
+    if (binding.status !== 'READY') {
+      return res.status(409).json({
+        error: {
+          code: 'DISCOVERY_CONTRACT_BINDING_BLOCKED',
+          message: 'The exact locked canonical revision is not available for Outcome Studio consumption.',
+          details: binding,
+          requestId: req.requestId,
+        },
+      })
+    }
+
+    return res.status(200).json({
+      data: binding,
+      meta: { requestId: req.requestId, version: 'v1' },
+    })
+  } catch (err) {
+    if (err?.status && err?.code) {
+      return res.status(err.status).json(buildRuntimeOutcomeErrorResponse(req, err))
+    }
+    return next(err)
+  }
+}
+
 export const getRuntimeCommercialStrategyDecisionPaperReadiness = async (req, res, next) => {
   try {
     const readinessPackage = await buildCommercialStrategyDecisionPaperRuntimeReadinessPackage({
@@ -1432,12 +1527,20 @@ export const generateRuntimeOutcomeResponse = async (req, res, next) => {
       auditRequest: req,
       allowReadyWithGaps: req.body?.allowReadyWithGaps,
       executionMode: req.app.locals.outcomeStudioReasoningDeps?.executionMode,
+      arlMeaningReviewProviderAdapterFactory:
+        req.app.locals.outcomeStudioReasoningDeps?.arlMeaningReviewProviderAdapterFactory,
+      frameworkGuidanceProviderAdapterFactory:
+        req.app.locals.outcomeStudioReasoningDeps?.frameworkGuidanceProviderAdapterFactory,
       providerAdapter: req.app.locals.outcomeStudioReasoningDeps?.providerAdapter,
       providerDescriptor: req.app.locals.outcomeStudioReasoningDeps?.providerDescriptor,
+      renderedExpressionRlProviderAdapterFactory:
+        req.app.locals.outcomeStudioReasoningDeps?.renderedExpressionRlProviderAdapterFactory,
       scopes: req.scopes,
       runtimeInstanceId: req.params.runtimeInstanceId,
       sessionId: req.params.sessionId,
       messageId: req.params.messageId,
+      workingDraftProviderAdapterFactory:
+        req.app.locals.outcomeStudioReasoningDeps?.workingDraftProviderAdapterFactory,
     })
 
     return res.status(200).json({

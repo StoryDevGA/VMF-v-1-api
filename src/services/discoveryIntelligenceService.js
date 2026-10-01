@@ -2486,6 +2486,10 @@ export const normalizeDiscoveryEvidenceObjects = ({
           ? String(evidenceObject.rejectionTimestamp || '')
           : '',
         auditRef: String(evidenceObject.auditRef || ''),
+        auditRefs: [...new Set([
+          ...(Array.isArray(evidenceObject.auditRefs) ? evidenceObject.auditRefs : []),
+          evidenceObject.auditRef,
+        ].map((value) => String(value || '').trim()).filter(Boolean))],
         lineageRef: String(evidenceObject.lineageRef || `lineage:${sourceId}`),
         acquisitionProfile: evidenceObject.acquisitionProfile || acquisitionProfile || '',
         ...(evidenceObject.sourceUrl ? { sourceUrl: String(evidenceObject.sourceUrl).trim() } : {}),
@@ -2554,6 +2558,12 @@ export const buildDiscoverySourceRegistry = ({
       dateAdded: String(source?.dateAdded || source?.capturedAt || capturedAt || '').trim(),
       acquisitionStatus: String(source?.acquisitionStatus || 'CAPTURED').trim().toUpperCase(),
       evidenceProduced,
+      ...(source?.auditRef ? { auditRef: String(source.auditRef).trim() } : {}),
+      ...(Array.isArray(source?.auditRefs) && source.auditRefs.length > 0
+        ? { auditRefs: [...new Set(source.auditRefs.map((value) => String(value || '').trim()).filter(Boolean))] }
+        : source?.auditRef
+          ? { auditRefs: [String(source.auditRef).trim()] }
+          : {}),
       lastAcquisitionAt: String(source?.lastAcquisitionAt || source?.dateAdded || capturedAt || '').trim(),
       lineageRef: String(source?.lineageRef || `lineage:${sourceId}`).trim(),
       acquisitionProfile: String(source?.acquisitionProfile || '').trim(),

@@ -55,6 +55,16 @@ import {
   PROVIDER_RESPONSE_SCHEMA_VERSION,
 } from './openAiOutcomeStudioProviderAdapter.js'
 import { OUTCOME_BOUNDARY_RECEIPT_CONTRACT_VERSION } from './outcomeBoundaryReceiptService.js'
+import {
+  OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_RESPONSE_SCHEMA_NAME,
+  OUTCOME_FRAMEWORK_GUIDANCE_SCHEMA_VERSION,
+  OUTCOME_WORKING_DRAFT_PROVIDER_RESPONSE_SCHEMA_NAME,
+  OUTCOME_WORKING_DRAFT_SCHEMA_VERSION,
+  OUTCOME_ARL_MEANING_REVIEW_PROVIDER_RESPONSE_SCHEMA_NAME,
+  OUTCOME_ARL_MEANING_REVIEW_SCHEMA_VERSION,
+  OUTCOME_RENDERED_EXPRESSION_RL_PROVIDER_RESPONSE_SCHEMA_NAME,
+  OUTCOME_RENDERED_EXPRESSION_RL_SCHEMA_VERSION,
+} from '../constants/outcomeGovernedQuality.js'
 
 export const GRR_ERROR_REASONS = Object.freeze({
   RUNTIME_NOT_FOUND: 'RUNTIME_NOT_FOUND',
@@ -916,13 +926,39 @@ const assertProviderEvidence = ({ provider, providerDescriptor, conflict = false
   throw liveTestProviderResultInvalid()
 }
 
-const assertStrictProviderResponseSchema = (providerResult = {}) => {
+const SPECIALIZED_PROVIDER_RESPONSE_SCHEMAS = Object.freeze({
+  FRAMEWORK_GUIDANCE_ANALYSIS: Object.freeze({
+    name: OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_RESPONSE_SCHEMA_NAME,
+    version: OUTCOME_FRAMEWORK_GUIDANCE_SCHEMA_VERSION,
+  }),
+  WORKING_DRAFT: Object.freeze({
+    name: OUTCOME_WORKING_DRAFT_PROVIDER_RESPONSE_SCHEMA_NAME,
+    version: OUTCOME_WORKING_DRAFT_SCHEMA_VERSION,
+  }),
+  ARL_MEANING_REVIEW: Object.freeze({
+    name: OUTCOME_ARL_MEANING_REVIEW_PROVIDER_RESPONSE_SCHEMA_NAME,
+    version: OUTCOME_ARL_MEANING_REVIEW_SCHEMA_VERSION,
+  }),
+  RENDERED_EXPRESSION_RL: Object.freeze({
+    name: OUTCOME_RENDERED_EXPRESSION_RL_PROVIDER_RESPONSE_SCHEMA_NAME,
+    version: OUTCOME_RENDERED_EXPRESSION_RL_SCHEMA_VERSION,
+  }),
+})
+
+export const assertStrictProviderResponseSchema = (providerResult = {}, outputTypeKey = '') => {
   const responseSchema = providerResult?.metadata?.responseSchema
+  const expected = SPECIALIZED_PROVIDER_RESPONSE_SCHEMAS[normalizeToken(outputTypeKey)] || {
+    name: PROVIDER_RESPONSE_SCHEMA_NAME,
+    version: PROVIDER_RESPONSE_SCHEMA_VERSION,
+  }
   const valid = responseSchema
-    && responseSchema.name === PROVIDER_RESPONSE_SCHEMA_NAME
-    && responseSchema.version === PROVIDER_RESPONSE_SCHEMA_VERSION
+    && responseSchema.name === expected.name
+    && responseSchema.version === expected.version
     && responseSchema.strict === true
     && responseSchema.parsed === true
+    && (!SPECIALIZED_PROVIDER_RESPONSE_SCHEMAS[normalizeToken(outputTypeKey)]
+      || (providerResult.output?.outputType === normalizeToken(outputTypeKey)
+        && providerResult.output?.schemaVersion === expected.version))
   if (!valid) throw liveTestProviderResultInvalid()
 }
 
@@ -1927,7 +1963,7 @@ export const createGovernedReasoningExecution = async ({
     await authorizeCurrentLiveTest('PRE_ADAPTER')
     providerResult = await liveTest.providerAdapter({ providerContext })
     assertProviderEvidence({ provider: providerResult?.provider, providerDescriptor: liveTest.providerDescriptor })
-    assertStrictProviderResponseSchema(providerResult)
+    assertStrictProviderResponseSchema(providerResult, effectivePayload.outputTypeKey)
   } else {
     providerContext = buildProviderContext({ knowledgeContext, payload: effectivePayload, truthContext })
     providerResult = await executeProvider({ deps, providerContext })

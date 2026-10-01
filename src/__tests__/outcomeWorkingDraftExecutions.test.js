@@ -1,3 +1,4 @@
+import { attachSs040PlanFixtureContract, readSs040PlanFixtureSnapshot, ss040TargetHashFor } from './fixtures/ss040EvidenceToMeaningFixtures.js'
 import mongoose from 'mongoose'
 import { describe, expect, jest, test } from '@jest/globals'
 
@@ -111,7 +112,7 @@ const makePack = ({ packType, packKey, knowledgeLayer, capabilityKey = '', suffi
   executionMode: packType === 'TRUTH_CERTIFICATION' ? 'POST_VALIDATION' : 'PROVIDER_CONTEXT',
   visibility: 'PLATFORM',
   workspaceCompatibility: ['OUTCOME'],
-  contentHash: `sha256:${suffix.repeat(64).slice(0, 64)}`,
+  contentHash: ss040TargetHashFor(capabilityKey) || `sha256:${suffix.repeat(64).slice(0, 64)}`,
   relationshipContractVersion: 'SS002_RELATIONSHIP_V1',
   relationshipChecksum: emptyRelationshipHash,
   relationshipGovernanceError: '',
@@ -196,6 +197,8 @@ const makePlan = (runtime = makeRuntime()) => {
       unresolvedGaps: ['Exact delivery file type is not specified', 'Exact delivery channel is not specified'],
     },
   })
+  attachSs040PlanFixtureContract(candidate.payload)
+  candidate.planFingerprint = hashOutcomeKnowledgeCompositionSemanticValue(candidate.payload)
   return {
     _id: ids.plan,
     planId: 'outcome_kcp_qa',
@@ -318,9 +321,16 @@ const providerOutput = (plan = makePlan()) => {
       content: 'The governed evidence supports a bounded executive decision with explicit qualifications.',
       claims: [{
         claimKey: 'claim_governed_position',
-        statement: 'The current position is bounded by accepted truth.',
+        statement: 'The supplied summary presents Parlon as claiming this outcome; independent verification is not established in the supplied summaries.',
         truthReferences: truth,
         evidence: ['Accepted truth provides the bounded source for the decision.'],
+        meaningClass: 'SOURCE_PRESENTED',
+        proofDependencies: [],
+        validationStatus: 'NOT_STATED',
+        proofDisposition: 'NOT_ESTABLISHED',
+        whatCanBeSaidNow: 'The supplied summary presents Parlon as claiming this outcome.',
+        blockedStrongerClaim: 'An achieved outcome is not established in the supplied summaries.',
+        evidenceRequiredToSubstantiate: ['Evidence identifying the measure, scope, baseline, method and measurement window.'],
       }],
       truthReferences: truth,
       assumptions: [],
@@ -328,8 +338,11 @@ const providerOutput = (plan = makePlan()) => {
     }],
     decisionLogic: [{
       decisionKey: 'preserve_evidence_boundary',
-      rationale: 'The executive recommendation must not outrun accepted evidence.',
-      priority: 'HIGH',
+      rationale: 'Interpretive placeholder: Source-presented framing: the supplied summary presents Parlon as expressing the claim. Recognition gap: recognition is not established in the supplied summaries. Understanding gap: measurement meaning is not established in the supplied summaries. Bounded interpretation now: the supplied summary presents Parlon as claiming this outcome. Qualified Reality: an achieved outcome is not established in the supplied summaries. Unresolved proof dependencies: Any proof questions not stated in accepted truth are author-added placeholders, not adopted Parlon requirements. Ordering is not established in the supplied evidence.',
+      priority: 'NOT_ESTABLISHED',
+      priorityBasis: 'NOT_ESTABLISHED',
+      closureState: 'INCOMPLETE',
+      actionAuthorization: 'NONE',
       truthReferences: truth,
     }],
     assumptions: [],
@@ -385,6 +398,7 @@ const makeModels = ({
   grrExecution = null,
   grrArtifact = null,
 } = {}) => ({
+  readOutcomeEvidenceContractSnapshot: jest.fn(async () => readSs040PlanFixtureSnapshot(plan)),
   OutcomeKnowledgeCompositionPlan: {
     findOne: jest.fn((filter) => makeQuery(filter._id ? plan : (latestPlan || plan))),
   },
@@ -498,6 +512,7 @@ describe('executeOutcomeWorkingDraft', () => {
     const { contextFingerprint: _contextFingerprint, ...governedContext } = plan.payload.governedContext
     plan.contextFingerprint = hashOutcomeKnowledgeCompositionSemanticValue(governedContext)
     plan.payload.governedContext.contextFingerprint = plan.contextFingerprint
+    attachSs040PlanFixtureContract(plan.payload)
     plan.planFingerprint = hashOutcomeKnowledgeCompositionSemanticValue(plan.payload)
     const source = makeFrameworkGuidanceStage(plan)
 
@@ -555,6 +570,12 @@ describe('executeOutcomeWorkingDraft', () => {
       .toContain('bounded context for the executive decision')
     expect(grrCall.deps.assertProviderSafeContext(providerContext)).toBe(providerContext)
     expect(JSON.stringify(providerContext)).not.toMatch(/outcome_quality_stage_framework_source|activation-|sha256:/)
+    expect(grrCall.deps.providerAdapter).not.toBe(args.providerAdapter)
+    await grrCall.deps.providerAdapter({ providerContext })
+    expect(args.providerAdapter).toHaveBeenCalledWith({
+      providerContext,
+      providerAttemptIdentity: grrCall.deps.providerContextBindingFingerprint,
+    })
     const projectedLongTruth = await grrCall.deps.buildProviderSafeContext({
       providerDescriptor: descriptor,
       safeRequest: buildOutcomeStudioProviderSafeRequest({
@@ -564,12 +585,12 @@ describe('executeOutcomeWorkingDraft', () => {
       truthSource: {
         acceptedTruth: [{
           label: 'customer_context',
-          content: `Read https://example.com/source ${'x'.repeat(1000)}`,
+          content: `Read https://example.com/source ${'x'.repeat(1800)}`,
         }],
       },
       knowledgeSelection: [],
     })
-    expect(projectedLongTruth.truthSummaries[0].summary).toHaveLength(900)
+    expect(projectedLongTruth.truthSummaries[0].summary).toHaveLength(1600)
     expect(projectedLongTruth.truthSummaries[0].summary).not.toContain('https://')
     expect(projectedLongTruth.truthSummaries[0].summary).toContain('[source link omitted]')
     const stageCall = args.deps.createOutcomeQualityStageExecution.mock.calls[0][0]
@@ -682,7 +703,7 @@ describe('executeOutcomeWorkingDraft', () => {
     expect(retryDrift.deps.createGovernedReasoningExecution).not.toHaveBeenCalled()
   })
 
-  test('persists only enumerated provider failures as failed stages with declared retryability', async () => {
+  test.each(['RATIONALE_STRUCTURE', 'OPTIONAL_PROOF_PLACEHOLDER'])('persists enumerated provider failures including %s with declared retryability', async (validationRule) => {
     const plan = makePlan()
     const transient = new Error('provider timeout')
     transient.code = 'OUTCOME_WORKING_DRAFT_PROVIDER_FAILED'
@@ -705,6 +726,45 @@ describe('executeOutcomeWorkingDraft', () => {
       model: descriptor.model,
       grrExecutionId: '',
       grrRuntimeArtifactId: '',
+    })
+
+    const semanticMiss = new Error('provider output missed the governed meaning contract')
+    semanticMiss.code = 'OUTCOME_WORKING_DRAFT_PROVIDER_FAILED'
+    semanticMiss.details = {
+      reason: 'WORKING_DRAFT_PROVIDER_OUTPUT_INVALID',
+      validationField: 'decisionLogic[0].rationale',
+      validationRule,
+    }
+    const semanticStage = makeCreateStage()
+    const semanticArgs = executeArgs({
+      plan,
+      createGrr: jest.fn(async () => { throw semanticMiss }),
+      createStage: semanticStage,
+    })
+
+    await executeOutcomeWorkingDraft(semanticArgs)
+    expect(semanticStage.mock.calls[0][0].failure).toEqual({
+      failureCode: 'WORKING_DRAFT_PROVIDER_OUTPUT_INVALID',
+      safeReason: `The governed Working Draft provider output failed validation at decisionLogic[0].rationale (${validationRule}).`,
+      retryable: true,
+    })
+
+    const incomplete = new Error('provider response incomplete')
+    incomplete.code = 'OUTCOME_WORKING_DRAFT_PROVIDER_FAILED'
+    incomplete.details = {
+      reason: 'WORKING_DRAFT_PROVIDER_INCOMPLETE',
+      providerStatusReason: 'max_tokens',
+    }
+    const incompleteStage = makeCreateStage()
+    await executeOutcomeWorkingDraft(executeArgs({
+      plan,
+      createGrr: jest.fn(async () => { throw incomplete }),
+      createStage: incompleteStage,
+    }))
+    expect(incompleteStage.mock.calls[0][0].failure).toEqual({
+      failureCode: 'WORKING_DRAFT_PROVIDER_INCOMPLETE',
+      safeReason: 'The governed Working Draft provider did not complete this attempt (max_tokens).',
+      retryable: true,
     })
 
     const grrPersistence = new Error('grr audit failed')

@@ -1049,6 +1049,7 @@ const findKnowledgePackVersionWithContent = async ({ packId, versionId, session 
 export const loadOutcomeKnowledgePackVersionContent = async ({
   packId = '',
   versionId = '',
+  session = null,
 } = {}) => {
   const normalizedPackId = normalizeText(packId)
   const normalizedVersionId = normalizeText(versionId)
@@ -1056,7 +1057,8 @@ export const loadOutcomeKnowledgePackVersionContent = async ({
 
   const filter = { versionId: normalizedVersionId }
   if (normalizedPackId) filter.packId = normalizedPackId
-  const query = KnowledgePackVersion.findOne(filter)
+  let query = KnowledgePackVersion.findOne(filter)
+  if (session && typeof query?.session === 'function') query = query.session(session)
   const version = query && typeof query.select === 'function'
     ? await query.select('+content')
     : await query

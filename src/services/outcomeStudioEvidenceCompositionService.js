@@ -915,6 +915,15 @@ const composeFacts = ({ frameworkState, truthBinding }) => {
   }
 }
 
+export const projectOutcomeStudioBusinessFactLedger = ({ frameworkState = {}, truthBinding = {}, runtimeInstanceId = '' } = {}) => {
+  const pack = getEvidencePack(frameworkState)
+  if (!Array.isArray(pack.evidenceObjects) || !pack.evidenceObjects.length
+    || !Object.keys(frameworkState.sections || {}).length) return { facts: [], omitted: [], contradictions: [] }
+  const ledger = composeFacts({ frameworkState, truthBinding })
+  return { facts: ledger.facts, omitted: ledger.omissions,
+    contradictions: getUnresolvedDiscoveryContradictions(pack, runtimeInstanceId) }
+}
+
 export const buildOutcomeStudioEvidenceComposition = ({
   runtimeInstance = {},
   frameworkState = runtimeInstance.framework_state || {},

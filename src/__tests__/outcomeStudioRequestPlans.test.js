@@ -3,6 +3,8 @@ import { jest } from '@jest/globals'
 import mongoose from 'mongoose'
 import { OutcomeKnowledgeCompositionPlan, RuntimeInstance, AuditLog, Customer, Tenant, FrameworkPackage } from '../models/index.js'
 import { getRuntimeOutcomePlanningEvidence, RUNTIME_STATE_V2_COLLECTIONS } from '../services/runtimeStateRepository.js'
+import { getRuntimeOutcomeEvidenceContractSnapshot } from '../services/runtimeStateRepository.js'
+import { readRuntimeEvidenceToMeaningContract } from '../services/outcomeRuntimeEvidenceToMeaningService.js'
 import encryption from '../services/fieldEncryptionService.js'
 import { OUTCOME_KCP_OPERATIONS } from '../constants/outcomeGovernedQuality.js'
 import { buildOutcomeKnowledgeCompositionPlanCandidate } from '../services/outcomeKnowledgeCompositionPlanService.js'
@@ -336,6 +338,22 @@ describe('prompt-only planning contract', () => {
     expect(state.rows).toHaveLength(0); expect(state.audits).toHaveLength(0)
   })
 
+  it('does not replace the decision purpose with a later proof-check focus instruction', () => {
+    const prompt = 'Create a Commercial Strategy and Decision Paper for Parlon using only the same accepted governed evidence summaries. Preserve source-presented Expressed Reality and claim-specific Qualified Reality for quantified, comparative, causal, outcome-style, proactive, transformational, and cost-related statements. Apply Framework proof-check only to quantified outcome measures, not general stakeholder imperatives or positioning.'
+    const resolution = {
+      selectedOutputType: { key: 'commercial-strategy-and-decision-paper', label: 'Commercial Strategy and Decision Paper' },
+      audience: { label: 'Executive leadership' },
+      purpose: { label: 'Decision or recommendation' },
+    }
+
+    expect(inferOutcomeStudioRequestIntent({ prompt, resolution, deliverables: [resolution.selectedOutputType] }))
+      .toMatchObject({
+        outcome: 'Create a Commercial Strategy and Decision Paper for Parlon using only the same accepted governed evidence summaries',
+        decisionPurpose: 'Decision or recommendation',
+        audience: ['Parlon'],
+      })
+  })
+
   it('collects genuinely missing facts without writes, then confirms once with a persisted Clarification receipt', async () => {
     const state = fixture(), first = await start(state)
     expect(first.status).toBe('CLARIFICATION_REQUIRED')
@@ -351,7 +369,7 @@ describe('prompt-only planning contract', () => {
     expect(state.rows).toHaveLength(0); expect(state.audits).toHaveLength(0)
     expect(state.deps.OutcomeSession.findOne).not.toHaveBeenCalled()
     const saved = await confirm(state, preview)
-    expect(saved).toMatchObject({ status: 'SAVED', execution: { canExecute: true }, plan: { planVersion: 1,
+    expect(saved).toMatchObject({ status: 'SAVED', execution: { canExecute: false }, plan: { planVersion: 1,
       clarificationReceipt: { stageKey: 'CLARIFICATION', status: 'PASSED', requestId: saved.requestId } } })
     expect(saved.plan).not.toHaveProperty('payload')
     expect(JSON.stringify(saved)).not.toContain(String(ids.tenant))
@@ -544,6 +562,31 @@ describe('isolated real planning orchestration persistence', () => {
     const projected = await getRuntimeOutcomePlanningEvidence(input)
     expect(projected.framework_state.sections).toEqual(sections)
     expect(projected.planningEvidence.stateVersion).toBe(runtime.stateVersion)
+    const identity = { runtimeInstanceId: runtime._id, tenantId: ids.tenant, customerId: ids.customer,
+      current: true, stateStatus: 'CURRENT', stateVersion: runtime.stateVersion, sourceStateVersion: runtime.stateVersion }
+    const evidenceCollection = mongoose.connection.collection(RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_OBJECTS)
+    await collection.updateOne({ runtimeInstanceId: runtime._id, sectionKey: 'customer_context' }, { $set: { 'sectionDetail.accepted.supportingEvidenceRefs': ['proof-evidence'] } })
+    await evidenceCollection.insertOne({ ...identity, evidenceObjectId: 'proof-evidence', sourceId: 'proof-source',
+      __v: 7, extractedFact: 'Stored exact excerpt.', currentness: 'CURRENT', classification: 'CUSTOMER_EVIDENCE',
+      attribution: 'Stored author', confidenceWarnings: ['Qualification'], permittedInterpretation: 'EXACT_STATEMENT_ONLY',
+      blockedStrongerClaim: ['No stronger inference'], proofDependency: [], proofOrderDisposition: 'PROOF_BEFORE_INTERPRETATION' })
+    await mongoose.connection.collection(RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_SOURCES).insertOne({
+      ...identity, sourceId: 'proof-source', label: 'Exact stored source', __v: 3 })
+    await evidenceCollection.insertMany(Array.from({ length: 852 }, (_, index) => ({ ...identity,
+      evidenceObjectId: 'unselected-' + index, sourceId: 'proof-source', extractedFact: 'Exact unselected fact.' })))
+    const session = await mongoose.startSession()
+    try {
+      await session.withTransaction(async () => {
+        const snapshot = await getRuntimeOutcomeEvidenceContractSnapshot({ ...input, session })
+        expect(snapshot.inventoryReceipt).toMatchObject({ completeness: 'COMPLETE', collections: { evidence: { totalCount: 853 } } })
+        expect(snapshot.inventoryReceipt.collections.evidence.pages).toHaveLength(6)
+        expect(snapshot.evidenceObjects).toHaveLength(1)
+        expect(await getRuntimeOutcomeEvidenceContractSnapshot({ ...input, session })).toEqual(snapshot)
+        expect(snapshot.evidenceObjects[0]).toMatchObject({ __v: 7, attribution: 'Stored author',
+          currentness: 'CURRENT', proofOrderDisposition: 'PROOF_BEFORE_INTERPRETATION' })
+        expect(snapshot.sourceRegistry[0]).toMatchObject({ __v: 3, label: 'Exact stored source' })
+      })
+    } finally { await session.endSession() }
     await collection.updateOne({ runtimeInstanceId: runtime._id, sectionKey: 'customer_context' }, { $set: { sourceStateVersion: 'runtime-revision:stale' } })
     await expect(getRuntimeOutcomePlanningEvidence(input)).rejects.toMatchObject({ status: 409 })
     expect(await RuntimeInstance.findById(runtime._id).lean()).toMatchObject({ framework_state: { sections: { decoy: expect.any(Object) } } })
@@ -554,7 +597,7 @@ describe('isolated real planning orchestration persistence', () => {
     const preview = await complete(state)
     expect(await persistedCounts()).toEqual(before)
     const saved = await confirm(state, preview)
-    expect(saved.execution.canExecute).toBe(true)
+    expect(saved.execution.canExecute).toBe(false)
     expect(await persistedCounts()).toEqual(before.map((count) => count + 1))
     const retry = await confirm(state, preview)
     expect(retry.plan.planId).toBe(saved.plan.planId)
@@ -564,7 +607,21 @@ describe('isolated real planning orchestration persistence', () => {
     expect(await persistedCounts()).toEqual(before.map((count) => count + 1))
     expect(await RuntimeInstance.findById(ids.runtime).lean()).toEqual(runtimeBefore)
     const row = await OutcomeKnowledgeCompositionPlan.findOne({ planId: saved.plan.planId }).lean()
+    const contract = readRuntimeEvidenceToMeaningContract(row)
+    expect(row.payload.evidenceToMeaning.contractHash).toBe(saved.plan.evidenceToMeaning.contractHash)
+    expect(JSON.parse(row.payload.evidenceToMeaning.contractJson)).toEqual(contract)
+    expect(contract.status).toBe('CLARIFICATION_REQUIRED')
+    expect(retrieved.plan.evidenceToMeaning.contractHash).toBe(contract.contractHash)
     expect((await AuditLog.findOne({ resourceId: row._id }).lean()).signature).toBeTruthy()
+  })
+  replica('SS-040 concurrent confirmation persists one exact contract and one audit', async () => {
+    const state = persistedFixture(), preview = await complete(state), before = await persistedCounts()
+    const [one, two] = await Promise.all([confirm(state, preview), confirm(state, preview)])
+    expect(one.plan.planId).toBe(two.plan.planId)
+    expect(one.plan.evidenceToMeaning.contractHash).toBe(two.plan.evidenceToMeaning.contractHash)
+    expect(await persistedCounts()).toEqual(before.map((count) => count + 1))
+    const row = await OutcomeKnowledgeCompositionPlan.findOne({ planId: one.plan.planId }).lean()
+    expect(readRuntimeEvidenceToMeaningContract(row).contractHash).toBe(one.plan.evidenceToMeaning.contractHash)
   })
   replica('distinct server-issued requests with identical answers persist separate histories', async () => {
     const state = persistedFixture(), before = await persistedCounts()

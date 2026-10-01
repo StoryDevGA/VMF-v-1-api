@@ -2419,6 +2419,34 @@ describe('Runtime Instance API', () => {
     expect(res.status).toBe(401)
   })
 
+  test('GET exact Outcome Studio revision consumption rejects unauthenticated requests before resolution', async () => {
+    const resolver = jest.spyOn(app.locals, 'discoveryContractRevisionResolver')
+    try {
+      const res = await request.get(
+        `/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/canonical-revisions/lock-snapshot-test-001/consumption`,
+      )
+      expect(res.status).toBe(401)
+      expect(resolver).not.toHaveBeenCalled()
+      expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
+    } finally {
+      resolver.mockRestore()
+    }
+  })
+
+  test('GET Discovery Contract readiness rejects unauthenticated requests before resolution', async () => {
+    const resolver = jest.spyOn(app.locals, 'discoveryContractReadinessResolver')
+    try {
+      const res = await request.get(
+        `/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/discovery-contract/readiness`,
+      )
+      expect(res.status).toBe(401)
+      expect(resolver).not.toHaveBeenCalled()
+      expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
+    } finally {
+      resolver.mockRestore()
+    }
+  })
+
   test('rejects unauthenticated large runtime document payloads before parsing the elevated body limit', async () => {
     const largePayload = JSON.stringify({
       documentSources: [
@@ -4309,6 +4337,7 @@ describe('Runtime Instance API', () => {
     const persistedFrameworkState = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state
     const persistedEvidencePack = persistedFrameworkState.evidence_pack
     const persistedGraph = persistedFrameworkState.intelligence_graph
+    const auditRef = res.headers['x-request-id']
     expect(persistedEvidencePack).toEqual(expect.objectContaining({
       inputComplete: true,
       evidenceReady: true,
@@ -4395,6 +4424,10 @@ describe('Runtime Instance API', () => {
       ],
     }))
     expect(persistedEvidencePack.sourceRegistry).toHaveLength(5)
+    expect(persistedEvidencePack.audit_refs).toContain(auditRef)
+    expect(persistedEvidencePack.sourceRegistry.every((source) => source.auditRef === auditRef)).toBe(true)
+    expect(persistedEvidencePack.evidenceObjects.every((evidence) => evidence.auditRef === auditRef)).toBe(true)
+    expect(persistedGraph.build.auditRef).toBe(auditRef)
     expect(persistedEvidencePack.sourceRegistry).toEqual(expect.arrayContaining([
       expect.objectContaining({
         sourceId: 'input_companyWebsite',
@@ -4485,6 +4518,7 @@ describe('Runtime Instance API', () => {
       action: 'RUNTIME_STATE_MUTATED',
       resourceType: 'RuntimeInstance',
       resourceId: RUNTIME_INSTANCE_ID,
+      requestId: auditRef,
       diff: expect.objectContaining({
         runtimePath: 'framework_state.evidence_pack',
         operation: 'WRITE',
@@ -6524,6 +6558,12 @@ describe('Runtime Instance API', () => {
     const persistedFrameworkState = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state
     const persistedEvidencePack = persistedFrameworkState.evidence_pack
     const persistedGraph = persistedFrameworkState.intelligence_graph
+    const auditRef = res.headers['x-request-id']
+    expect(persistedEvidencePack.audit_refs).toContain(auditRef)
+    expect(persistedEvidencePack.evidenceObjects
+      .filter((evidence) => evidence.reviewStatus === 'ACCEPTED')
+      .every((evidence) => evidence.auditRef === auditRef)).toBe(true)
+    expect(persistedGraph.build.auditRef).toBe(auditRef)
     expect(persistedEvidencePack).toEqual(expect.objectContaining({
       inputComplete: true,
       evidenceReady: true,
@@ -6565,6 +6605,7 @@ describe('Runtime Instance API', () => {
       action: 'RUNTIME_STATE_MUTATED',
       resourceType: 'RuntimeInstance',
       resourceId: RUNTIME_INSTANCE_ID,
+      requestId: auditRef,
       diff: expect.objectContaining({
         runtimePath: 'framework_state.evidence_pack',
         operation: 'WRITE',
@@ -7256,6 +7297,43 @@ describe('Runtime Instance API', () => {
     expect(RuntimeInstance.findOne).not.toHaveBeenCalled()
     expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
   })
+
+  test.each(['APPROVED', 'PUBLISHED', 'LOCKED'])(
+    'PATCH /api/v1/runtime-instances/:id/discovery-evidence/:evidenceObjectId/review rejects immutable %s runtimes without persistence',
+    async (lifecycleStage) => {
+      const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+        status: lifecycleStage === 'LOCKED' ? 'LOCKED' : 'ACTIVE',
+        lockedAt: lifecycleStage === 'LOCKED' ? new Date('2026-05-19T08:00:00.000Z') : null,
+        updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+        framework_state: {
+          lifecycle: { stage: lifecycleStage },
+          evidence_pack: makeReviewableDiscoveryEvidencePack(),
+          sections: {},
+          validation: {},
+          policy: {},
+          attachments: {},
+          artifacts: {},
+          lock: lifecycleStage === 'LOCKED' ? { state: 'LOCKED', locked: true } : { state: 'UNLOCKED', locked: false },
+        },
+      })
+      RuntimeInstance.findOne = jest.fn().mockResolvedValue(runtimeInstanceDoc)
+      RuntimeInstance.findOneAndUpdate = jest.fn()
+      const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+      const res = await request
+        .patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/discovery-evidence/evidence_companyWebsite_fixture/review`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          reviewStatus: 'REJECTED',
+          expectedUpdatedAt: '2026-05-19T08:01:00.000Z',
+        })
+
+      expect(res.status).toBe(409)
+      expect(res.body.error.details.reason).toBe('RUNTIME_MUTATION_NOT_EDITABLE')
+      expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+      expect(AuditLog.createLog).not.toHaveBeenCalled()
+    },
+  )
 
   test('PATCH /api/v1/runtime-instances/:id/discovery-evidence/:evidenceObjectId/review rejects stale writes before persisting', async () => {
     const evidencePack = makeReviewableDiscoveryEvidencePack()
@@ -21967,6 +22045,38 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     expect(OutcomeAsset.prototype.save).not.toHaveBeenCalled()
     expect(OutcomeAssetVersion.prototype.save).not.toHaveBeenCalled()
     expect(RuntimeGraphRelationship.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('Outcome Studio draft approval blocks a Foundation draft for a confirmed request plan', async () => {
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    const activeDraft = makeOutcomeDraftRecord()
+    const currentIteration = makeOutcomeDraftIterationRecord()
+    const session = makeOutcomeSessionRecord({
+      contextBindings: {
+        requestPlan: {
+          requestId: 'outcome_request_confirmed_fixture',
+          planId: 'outcome_kcp_confirmed_fixture',
+          planFingerprint: 'a'.repeat(64),
+        },
+      },
+    })
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(session))
+    OutcomeDraft.findOne.mockReturnValue(buildLeanQuery(activeDraft))
+    OutcomeDraftIteration.findOne.mockReturnValue(buildLeanQuery(currentIteration))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/drafts/${activeDraft.draftId}/approve`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('CONFLICT')
+    expectCustomerSafeOutcomeError(res)
+    expect(OutcomeAsset.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeAssetVersion.prototype.save).not.toHaveBeenCalled()
     expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 

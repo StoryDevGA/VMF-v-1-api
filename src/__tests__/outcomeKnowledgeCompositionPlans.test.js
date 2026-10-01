@@ -406,6 +406,20 @@ describe('Outcome Knowledge Composition Plan contract', () => {
     expect(candidate.gapCount).toBe(1)
   })
 
+  it('excludes non-accepted runtime sections from accepted locked truth and currentness', () => {
+    const runtime = makeRuntime()
+    runtime.framework_state.sections.unaccepted_placeholder = {
+      state: { status: 'DRAFT' },
+      accepted: null,
+    }
+    const candidate = buildCandidate({ runtime })
+    const plan = makePlanRecord(candidate)
+
+    expect(candidate.payload.lockedTruth.acceptedSections.map(({ stateSectionKey }) => stateSectionKey))
+      .not.toContain('unaccepted_placeholder')
+    expect(() => assertOutcomeKnowledgeCompositionPlanMatchesRuntime(plan, runtime)).not.toThrow()
+  })
+
   it('produces the same fingerprint for equivalent inputs and changes for governed identity changes', () => {
     const first = buildCandidate()
     const second = buildCandidate()

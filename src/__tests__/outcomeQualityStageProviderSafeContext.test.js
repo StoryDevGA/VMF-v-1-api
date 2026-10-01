@@ -24,7 +24,7 @@ const makeSafeRequest = () => buildOutcomeStudioProviderSafeRequest({
       refinement: false,
       outputTypeKey: 'WORKING_DRAFT',
       outputTypeLabel: 'Working Draft',
-      outputSchemaKey: 'fs-003-working-draft-v0-2',
+      outputSchemaKey: 'fs-003-working-draft-v0-3',
       requiredSections: ['sections', 'claims', 'decision logic', 'assumptions', 'gaps'],
       styleKey: 'executive-brief',
       styleLabel: 'Executive brief',
@@ -109,11 +109,20 @@ describe('Outcome quality-stage provider-safe context', () => {
     expect(context.truthSummaries[0].summary).toContain('_MIDDLE_')
     expect(context.truthSummaries[0].summary).toContain('_FINAL')
     expect(() => build({
-      truthSource: { acceptedTruth: [{ label: 'customer_context', content: 'x'.repeat(901) }] },
+      truthSource: { acceptedTruth: [{ label: 'customer_context', content: 'x'.repeat(1601) }] },
     })).toThrow()
     expect(() => build({
       truthSource: { acceptedTruth: [{ label: 'customer_context', content: 'Read https://example.com.' }] },
     })).toThrow()
+  })
+
+  it('preserves the full accepted truth summary used by the Working Draft provider', () => {
+    const content = `FIRST_${'a'.repeat(580)}_MIDDLE_${'b'.repeat(580)}_FINAL`
+    const context = build({
+      truthSource: { acceptedTruth: [{ label: 'customer_context', content }] },
+    })
+
+    expect(context.truthSummaries[0].summary).toBe(content)
   })
 
   it.each([

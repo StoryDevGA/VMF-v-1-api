@@ -847,7 +847,7 @@ const buildTruthBinding = ({
   return binding
 }
 
-const buildKnowledgeContextForComposition = ({
+export const buildKnowledgeContextForComposition = ({
   knowledgeContext,
   binding,
   outputType,

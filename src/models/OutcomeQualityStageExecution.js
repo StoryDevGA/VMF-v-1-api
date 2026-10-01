@@ -16,9 +16,16 @@ import {
   OUTCOME_RENDERED_EXPRESSION_RL_SCHEMA_VERSION,
   OUTCOME_RENDERED_EXPRESSION_SCHEMA_VERSION,
   OUTCOME_WORKING_DRAFT_SCHEMA_VERSION,
+  OUTCOME_WORKING_DRAFT_PROOF_DISPOSITIONS,
+  OUTCOME_WORKING_DRAFT_VALIDATION_STATUSES,
 } from '../constants/outcomeGovernedQuality.js'
 import { findOutcomeFrameworkGuidanceStageClaim } from '../utils/outcomeFrameworkGuidanceStageClaims.js'
 import { containsOutcomeWorkingDraftProhibitedStageClaim } from '../utils/outcomeWorkingDraftStageClaims.js'
+import {
+  OUTCOME_WORKING_DRAFT_MEANING_CLASSES,
+  OUTCOME_WORKING_DRAFT_PRIORITY_BASES,
+  OUTCOME_WORKING_DRAFT_PROOF_DEPENDENCIES,
+} from '../services/outcomeWorkingDraftMeaningBoundaryService.js'
 
 const sha256Pattern = /^[a-f0-9]{64}$/
 const contentHashPattern = /^sha256:[a-f0-9]{64}$/
@@ -78,6 +85,7 @@ const assignedPackSchema = new mongoose.Schema({
 }, nestedOptions)
 
 const consumerIntentSchema = new mongoose.Schema({
+  originalRequest: optionalText(4000),
   outcome: requiredText(4000),
   decisionPurpose: requiredText(4000),
   consumer: requiredText(500),
@@ -87,9 +95,17 @@ const consumerIntentSchema = new mongoose.Schema({
   channel: optionalText(1000),
   requirements: stringArray({ max: 50, itemMax: 2000 }),
   unresolvedGaps: stringArray({ max: 50, itemMax: 2000 }),
-}, nestedOptions)
+  outputTypeLabel: optionalText(500),
+  evidenceSource: optionalText(4000),
+  constraints: stringArray({ max: 50, itemMax: 2000 }),
+  resolutionBasis: { type: mongoose.Schema.Types.Mixed, required: true },
+  missingRequiredFields: stringArray({ max: 50, itemMax: 2000 }),
+  clarificationQuestions: stringArray({ max: 50, itemMax: 2000 }),
+  answeredClarificationQuestions: stringArray({ max: 50, itemMax: 2000 }),
+}, { ...nestedOptions, minimize: false })
 
 const inputSnapshotSchema = new mongoose.Schema({
+  requestBindingFingerprint: { type: String, lowercase: true, match: sha256Pattern },
   plan: {
     type: new mongoose.Schema({
       recordId: requiredText(180),
@@ -235,6 +251,9 @@ const schema = new mongoose.Schema({
   runtimeInstanceKey: { type: String, required: true, immutable: true, trim: true, lowercase: true, maxlength: 160 },
   knowledgeCompositionPlanRecordId: { type: mongoose.Schema.Types.ObjectId, ref: 'OutcomeKnowledgeCompositionPlan', required: true, immutable: true },
   planId: { type: String, required: true, immutable: true, trim: true, maxlength: 180 },
+  requestId: { type: String, immutable: true, trim: true, maxlength: 180 },
+  draftId: { type: String, immutable: true, trim: true, maxlength: 180 },
+  draftIterationId: { type: String, immutable: true, trim: true, maxlength: 180 },
   planVersion: { ...strictInteger({ min: 1 }), immutable: true },
   planFingerprint: { type: String, required: true, immutable: true, match: sha256Pattern },
   resolutionFingerprint: { type: String, required: true, immutable: true, match: sha256Pattern },
@@ -371,20 +390,33 @@ const outputShapeValid = ({ stageKey, output, input }) => {
         && Array.isArray(section.claims)
         && section.claims.length >= 1
         && section.claims.every((claim) => exactKeys(claim, [
-          'claimKey', 'statement', 'truthReferences', 'evidence',
+          'claimKey', 'statement', 'truthReferences', 'evidence', 'meaningClass', 'proofDependencies',
+          'validationStatus', 'proofDisposition', 'whatCanBeSaidNow', 'blockedStrongerClaim', 'evidenceRequiredToSubstantiate',
         ])
           && nonEmptyString(claim.claimKey)
           && nonEmptyString(claim.statement)
           && stringArrayValid(claim.truthReferences, { min: 1 })
-          && stringArrayValid(claim.evidence, { min: 1 })))
+          && stringArrayValid(claim.evidence, { min: 1 })
+          && OUTCOME_WORKING_DRAFT_MEANING_CLASSES.includes(claim.meaningClass)
+          && stringArrayValid(claim.proofDependencies)
+          && claim.proofDependencies.every((dependency) => OUTCOME_WORKING_DRAFT_PROOF_DEPENDENCIES.includes(dependency))
+          && OUTCOME_WORKING_DRAFT_VALIDATION_STATUSES.includes(claim.validationStatus)
+          && OUTCOME_WORKING_DRAFT_PROOF_DISPOSITIONS.includes(claim.proofDisposition)
+          && nonEmptyString(claim.whatCanBeSaidNow)
+          && nonEmptyString(claim.blockedStrongerClaim)
+          && stringArrayValid(claim.evidenceRequiredToSubstantiate, { min: 1 })
+          && claim.evidenceRequiredToSubstantiate.length <= 10))
     const decisionsValid = Array.isArray(output.decisionLogic)
       && output.decisionLogic.length >= 1
       && output.decisionLogic.every((decision) => exactKeys(decision, [
-        'decisionKey', 'rationale', 'priority', 'truthReferences',
+        'decisionKey', 'rationale', 'priority', 'priorityBasis', 'closureState', 'actionAuthorization', 'truthReferences',
       ])
         && nonEmptyString(decision.decisionKey)
         && nonEmptyString(decision.rationale)
         && nonEmptyString(decision.priority)
+        && OUTCOME_WORKING_DRAFT_PRIORITY_BASES.includes(decision.priorityBasis)
+        && decision.closureState === 'INCOMPLETE'
+        && decision.actionAuthorization === 'NONE'
         && stringArrayValid(decision.truthReferences, { min: 1 }))
     const provenanceValid = exactKeys(output.compositionProvenance, [
       'frameworkGuidanceStageExecutionId', 'frameworkGuidanceOutputFingerprint', 'planFingerprint',
@@ -511,11 +543,14 @@ const outputShapeValid = ({ stageKey, output, input }) => {
   const approvedDecisionLogicValid = Array.isArray(output.approvedMeaning?.decisionLogic)
     && output.approvedMeaning.decisionLogic.length >= 1
     && output.approvedMeaning.decisionLogic.every((decision) => exactKeys(decision, [
-      'decisionKey', 'rationale', 'priority', 'truthReferences',
+      'decisionKey', 'rationale', 'priority', 'priorityBasis', 'closureState', 'actionAuthorization', 'truthReferences',
     ])
       && nonEmptyString(decision.decisionKey)
       && nonEmptyString(decision.rationale)
       && nonEmptyString(decision.priority)
+      && OUTCOME_WORKING_DRAFT_PRIORITY_BASES.includes(decision.priorityBasis)
+      && decision.closureState === 'INCOMPLETE'
+      && decision.actionAuthorization === 'NONE'
       && stringArrayValid(decision.truthReferences, { min: 1 }))
   const decisionLogicFingerprint = hash(output.approvedMeaning?.decisionLogic)
   const expectedMeaningFingerprint = hash({
@@ -557,6 +592,9 @@ schema.pre('validate', function validateShape(next) {
   this.qualityRunId = String(this.qualityRunId || '').trim()
   this.runtimeInstanceKey = String(this.runtimeInstanceKey || '').trim().toLowerCase()
   this.planId = String(this.planId || '').trim()
+  if (this.get('requestId') !== undefined) this.requestId = String(this.get('requestId') || '').trim()
+  if (this.get('draftId') !== undefined) this.draftId = String(this.get('draftId') || '').trim()
+  if (this.get('draftIterationId') !== undefined) this.draftIterationId = String(this.get('draftIterationId') || '').trim()
   this.planFingerprint = String(this.planFingerprint || '').trim().toLowerCase()
   this.resolutionFingerprint = String(this.resolutionFingerprint || '').trim().toLowerCase()
   this.contextFingerprint = String(this.contextFingerprint || '').trim().toLowerCase()
@@ -673,6 +711,17 @@ schema.pre('validate', function validateShape(next) {
     planVersion: this.planVersion,
     planFingerprint: this.planFingerprint,
   }).slice(0, 40)}`
+  const requestFields = [this.get('requestId'), this.get('draftId'), this.get('draftIterationId')]
+  const requestBound = requestFields.some(Boolean) || Boolean(input?.requestBindingFingerprint)
+  const requestBinding = requestBound ? {
+    requestId: this.get('requestId'),
+    draftId: this.get('draftId'),
+    draftIterationId: this.get('draftIterationId'),
+  } : null
+  const requestBindingInvalid = requestBound && (
+    requestFields.some((value) => !value)
+    || input?.requestBindingFingerprint !== hash(requestBinding)
+  )
   const invalid = !input
     || !identity
     || providerConfigurationIdentityInvalid
@@ -694,6 +743,7 @@ schema.pre('validate', function validateShape(next) {
     || input.consumerIntentFingerprint !== hash(input.consumerIntent)
     || this.inputFingerprint !== hash(input)
     || this.qualityRunId !== expectedQualityRunId
+    || requestBindingInvalid
     || sourceInvalid
     || !Number.isFinite(duration)
     || duration < 0
@@ -729,6 +779,7 @@ schema.pre('validate', function validateShape(next) {
   if (invalid) return next(shapeError('Outcome quality stage governed shape is inconsistent.'))
 
   const expectedAttemptFingerprint = hash({
+    ...(requestBound ? { requestBinding } : {}),
     qualityRunId: this.qualityRunId,
     planId: this.planId,
     planVersion: this.planVersion,

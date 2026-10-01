@@ -88,6 +88,18 @@ const runtimeOutcomeReadinessGateQuerySchema = z.object({
     .datetime({ message: 'expectedRuntimeUpdatedAt must be an ISO timestamp' }),
 }).strict()
 
+const runtimeOutcomeCanonicalRevisionParamsSchema = runtimeInstanceIdSchema.extend({
+  runtimeInstanceId: z
+    .string({ required_error: 'runtimeInstanceId is required' })
+    .trim()
+    .regex(objectIdRegex, 'runtimeInstanceId must be an ObjectId'),
+  revisionId: z
+    .string({ required_error: 'revisionId is required' })
+    .trim()
+    .min(1, 'revisionId is required')
+    .max(180, 'revisionId must be 180 characters or fewer'),
+})
+
 const runtimeDiscoveryEvidenceParamsSchema = runtimeInstanceIdSchema.extend({
   evidenceObjectId: z
     .string({ required_error: 'evidenceObjectId is required' })
@@ -1334,6 +1346,15 @@ export const validateRuntimeOutcomeInstanceId = createParamsValidator(runtimeIns
   rootIssueKey: '_root',
   includeDetails: false,
 })
+
+export const validateRuntimeOutcomeCanonicalRevisionParams = createParamsValidator(
+  runtimeOutcomeCanonicalRevisionParamsSchema,
+  {
+    message: 'Invalid request parameters.',
+    rootIssueKey: '_root',
+    includeDetails: false,
+  },
+)
 
 export const validateRuntimeOutcomeReadinessGateQuery = createQueryValidator(runtimeOutcomeReadinessGateQuerySchema, {
   message: 'Invalid query parameters.',

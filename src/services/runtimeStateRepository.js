@@ -1,4 +1,5 @@
 import mongoose from 'mongoose'
+import { assembleOutcomeEvidenceInventory, snapshotHash } from '../utils/outcomeEvidenceSnapshot.js'
 
 import {
   isBoundedRuntimeSectionDetail,
@@ -1730,6 +1731,97 @@ const readRuntimeStateOutcomeHandoff = async ({
 }
 
 export const getRuntimeStateOutcomeHandoffReadiness = (args = {}) => readRuntimeStateOutcomeHandoff({ ...args, planningEvidence: false })
+
+// Internal contract snapshot: preserve stored evidence, rather than renderer summaries.
+// Existing repository owners enforce scope, state identity, session and byte limits.
+export const getRuntimeOutcomeEvidenceContractSnapshot = async ({ scopes, runtimeInstanceId, session = null } = {}) => {
+  const identity = await getRuntimeInstance({ scopes, runtimeInstanceId,
+    projection: RUNTIME_STATE_V2_CONTROL_PROJECTION, maxTimeMS: RUNTIME_STATE_V2_READ_MAX_TIME_MS, session })
+  if (!identity.stateVersion && !identity.runtimeStateVersion) {
+    const legacy = await getRuntimeInstance({ scopes, runtimeInstanceId,
+      projection: `${RUNTIME_STATE_V2_HANDOFF_CONTROL_PROJECTION} framework_state.evidence_pack`,
+      maxTimeMS: RUNTIME_STATE_V2_READ_MAX_TIME_MS, session })
+    if (legacy.stateVersion || legacy.runtimeStateVersion) throw createRuntimeStateError({
+      code: RUNTIME_STATE_V2_ERROR_CODES.STATE_VERSION_MIXED, message: 'Runtime storage identity changed.' })
+    const snapshot = legacy.framework_state?.evidence_pack || { evidenceObjects: [], sourceRegistry: [] }
+    assertSerializedPayloadSize(snapshot)
+    return JSON.parse(JSON.stringify(snapshot))
+  }
+  const control = await getControl({ scopes, runtimeInstanceId, includeHandoffEligibility: true, session })
+  const sectionProjection = { _id: 1, sectionKey: 1, customerId: 1, tenantId: 1, runtimeInstanceId: 1,
+    runtimeInstanceKey: 1, current: 1, stateVersion: 1, sourceStateVersion: 1,
+    'sectionDetail.accepted.supportingEvidenceRefs': 1 }
+  const readSections = () => readMany({ collectionName: RUNTIME_STATE_V2_COLLECTIONS.SECTIONS,
+    filter: buildChildFilter({ control, additional: { current: true } }), projection: sectionProjection,
+    sort: { sectionKey: 1 }, limit: RUNTIME_STATE_V2_SECTION_CATALOGUE_LIMIT + 1, session })
+  const sectionRows = await readSections()
+  if (sectionRows.length > RUNTIME_STATE_V2_SECTION_CATALOGUE_LIMIT) throw createRuntimeStateError({
+    code: RUNTIME_STATE_V2_ERROR_CODES.SECTION_CATALOGUE_LIMIT, message: 'Evidence snapshot section catalogue exceeded.' })
+  assertCurrentSectionRows(sectionRows)
+  if (sectionRows.length) assertStateVersions({ control, rows: sectionRows, requireSourceStateVersion: true })
+  const collectionName = (kind) => kind === 'evidence'
+    ? RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_OBJECTS : RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_SOURCES
+  const filter = (after = null) => buildChildFilter({ control, additional: {
+    ...buildCurrentStateFilter(), ...(after ? { _id: { $gt: after } } : {}) } })
+  const validateScope = (rows) => {
+    if (rows.some((row) => String(row.customerId) !== control.customerId
+      || String(row.tenantId) !== control.tenantId || String(row.runtimeInstanceId) !== control.id
+      || (row.runtimeInstanceKey && row.runtimeInstanceKey !== control.runtimeInstanceKey))) throw createRuntimeStateError({
+      code: 'OUTCOME_EVIDENCE_SCOPE_MISMATCH', message: 'Evidence snapshot record is outside the governed scope.' })
+  }
+  validateScope(sectionRows)
+  const assembled = await assembleOutcomeEvidenceInventory({
+    scope: { runtimeInstanceId: control.id, runtimeInstanceKey: control.runtimeInstanceKey,
+      customerId: control.customerId, tenantId: control.tenantId, stateVersion: control.stateVersion },
+    sections: sectionRows.map((row) => ({ sectionKey: row.sectionKey,
+      references: row.sectionDetail?.accepted?.supportingEvidenceRefs || [], storedSectionHash: snapshotHash(row) })),
+    contradictionReferences: (control.handoffFrameworkState?.evidence_pack?.discoveryHealth?.contradictionCandidates || [])
+      .flatMap((candidate) => candidate.evidenceObjectIds || []),
+    count: async (kind) => (await readCount({ collectionName: collectionName(kind), filter: filter(), session })).value,
+    readPage: (kind, after, limit) => readMany({ collectionName: collectionName(kind), filter: filter(after),
+      projection: {}, sort: { _id: 1 }, limit, session }),
+    validateRows: (kind, rows) => {
+      validateScope(rows)
+      assertStateVersions({ control, rows, requireSourceStateVersion: true })
+      if (kind === 'sources') assertCurrentEvidenceSourceRows(rows)
+      else if (rows.some((row) => row.current !== true || !normalizeText(row.evidenceObjectId)
+        || !normalizeText(row.sourceId))) throw createRuntimeStateError({
+        code: RUNTIME_STATE_V2_ERROR_CODES.SECTION_CURRENTNESS_INVALID, message: 'Evidence snapshot currentness or identity is invalid.' })
+    },
+  })
+  const { evidenceObjects, sourceRegistry } = assembled
+  const finalControl = await getControl({ scopes, runtimeInstanceId, includeHandoffEligibility: true, session })
+  if (snapshotHash(await readSections()) !== snapshotHash(sectionRows)
+    || snapshotHash(finalControl) !== snapshotHash(control)) throw createRuntimeStateError({
+    code: 'OUTCOME_EVIDENCE_SNAPSHOT_CONTROL_CHANGED', message: 'Governed evidence scope changed during read.',
+    details: { snapshotReceipt: { ...assembled.receipt, completeness: 'INCOMPLETE', reason: 'CONTROL_CHANGED' } } })
+
+  const evidenceIds = evidenceObjects.map((row) => normalizeText(row.evidenceObjectId))
+  const sourceIds = sourceRegistry.map((row) => normalizeText(row.sourceId))
+  if (evidenceIds.some((id) => !id) || new Set(evidenceIds).size !== evidenceIds.length
+    || sourceIds.some((id) => !id) || new Set(sourceIds).size !== sourceIds.length
+    || evidenceObjects.some((row) => !sourceIds.includes(normalizeText(row.sourceId)))) throw createRuntimeStateError({
+    code: RUNTIME_STATE_V2_ERROR_CODES.EVIDENCE_SOURCE_MISSING,
+    message: 'Evidence-to-Meaning source snapshot identities are incomplete or ambiguous.' })
+  if (evidenceObjects.some((row) => row.current !== true)) throw createRuntimeStateError({
+    code: RUNTIME_STATE_V2_ERROR_CODES.SECTION_CURRENTNESS_INVALID,
+    message: 'Evidence-to-Meaning evidence storage currentness is invalid.' })
+  if (sourceRegistry.length) assertCurrentEvidenceSourceRows(sourceRegistry)
+  for (const rows of [evidenceObjects, sourceRegistry]) if (rows.length) assertStateVersions({ control, rows,
+    missingMessage: 'Evidence-to-Meaning source state-version receipt is missing.', requireSourceStateVersion: true })
+  const snapshot = { ...control.handoffFrameworkState?.evidence_pack,
+    snapshotVersion: 'outcome-evidence-source-snapshot.v1', stateVersion: control.stateVersion,
+    inventoryReceipt: assembled.receipt, evidenceObjects, sourceRegistry }
+  try {
+    if (evidenceObjects.length > 500 || sourceRegistry.length > 500) throw new Error('projection count')
+    assertSerializedPayloadSize(snapshot)
+  } catch {
+    throw createRuntimeStateError({ code: 'OUTCOME_EVIDENCE_SNAPSHOT_PROJECTION_BOUND',
+      message: 'Complete evidence inventory cannot fit the governed section projection.',
+      details: { snapshotReceipt: { ...assembled.receipt, completeness: 'INCOMPLETE', reason: 'PROJECTION_BOUND' } } })
+  }
+  return JSON.parse(JSON.stringify(snapshot))
+}
 
 export const getRuntimeOutcomePlanningEvidence = async ({ scopes, runtimeInstanceId, session = null } = {}) => {
   const control = await getRuntimeInstance({ scopes, runtimeInstanceId,

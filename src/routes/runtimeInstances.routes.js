@@ -46,6 +46,8 @@ import {
   getRuntimeOutputRequest,
   getRuntimeOutcomeSession,
   getRuntimeOutcomeStudio,
+  getRuntimeDiscoveryContractReadiness,
+  getRuntimeOutcomeStudioCanonicalRevisionConsumption,
   getRuntimeOutcomeStudioReadiness,
   getRuntimeRenderer,
   getRuntimeStateBootstrap,
@@ -121,6 +123,7 @@ import {
   validateRuntimeOutcomeAssetVersionParams,
   validateRuntimeOutcomeDraftParams,
   validateRuntimeOutcomeInstanceId,
+  validateRuntimeOutcomeCanonicalRevisionParams,
   validateRuntimeOutcomeMessageParams,
   validateRuntimeOutcomeReadinessGateQuery,
   validateRuntimeOutputRequestParams,
@@ -277,6 +280,16 @@ router.post('/:runtimeInstanceId/outcome-studio/planning', vmfManagementRateLimi
 router.post('/:runtimeInstanceId/outcome-studio/requests/:requestId/plans', vmfManagementRateLimit, validateOutcomePlanningRequestParams, validateOutcomePlanningConfirmation, confirmRuntimeOutcomeRequestPlan)
 router.get('/:runtimeInstanceId/outcome-studio/requests/:requestId/plans/:planId', validateOutcomePlanningRequestParams, retrieveRuntimeOutcomeRequestPlan)
 router.get('/:runtimeInstanceId/outcome-studio/readiness', validateRuntimeOutcomeInstanceId, getRuntimeOutcomeStudioReadiness)
+router.get(
+  '/:runtimeInstanceId/discovery-contract/readiness',
+  validateRuntimeOutcomeInstanceId,
+  getRuntimeDiscoveryContractReadiness,
+)
+router.get(
+  '/:runtimeInstanceId/outcome-studio/canonical-revisions/:revisionId/consumption',
+  validateRuntimeOutcomeCanonicalRevisionParams,
+  getRuntimeOutcomeStudioCanonicalRevisionConsumption,
+)
 router.get(
   '/:runtimeInstanceId/outcome-studio/commercial-strategy-decision-paper/readiness',
   validateRuntimeOutcomeInstanceId,

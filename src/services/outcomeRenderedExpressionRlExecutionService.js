@@ -25,6 +25,7 @@ import {
 } from '../models/index.js'
 import { createGovernedReasoningExecution } from './governedReasoningRuntimeService.js'
 import {
+  assertOutcomeKnowledgeCompositionPlanIntegrity,
   assertLegacyOutcomeKnowledgeCompositionPlan,
   assertOutcomeKnowledgeCompositionPlanMatchesRuntime,
 } from './outcomeKnowledgeCompositionPlanService.js'
@@ -86,18 +87,35 @@ const bindingInvalid = (field) => error('OUTCOME_RENDERED_EXPRESSION_RL_BINDING_
 const historyInvalid = (field) => error('OUTCOME_RENDERED_EXPRESSION_RL_STAGE_HISTORY_INVALID', 'Rendered-expression RL stage history is not eligible.', field)
 const lineageInvalid = (field) => error('OUTCOME_RENDERED_EXPRESSION_RL_LINEAGE_INVALID', 'Rendered-expression RL lineage is incomplete.', field)
 
-const assertCurrentPlan = ({ selectedPlan, latestPlan, runtime, runtimeInstanceId, expectedPlanFingerprint }) => {
+const planScope = (requestBinding) => requestBinding
+  ? { requestId: requestBinding.requestId }
+  : { requestId: { $exists: false } }
+
+const stageScope = (requestBinding) => requestBinding
+  ? {
+      requestId: requestBinding.requestId,
+      draftId: requestBinding.draftId,
+      draftIterationId: requestBinding.draftIterationId,
+    }
+  : { requestId: { $exists: false } }
+
+const assertCurrentPlan = ({ selectedPlan, latestPlan, runtime, runtimeInstanceId, expectedPlanFingerprint, requestBinding }) => {
   let selected
   let latest
   try {
-    selected = assertLegacyOutcomeKnowledgeCompositionPlan(selectedPlan)
-    latest = assertLegacyOutcomeKnowledgeCompositionPlan(latestPlan)
+    selected = requestBinding
+      ? assertOutcomeKnowledgeCompositionPlanIntegrity(selectedPlan)
+      : assertLegacyOutcomeKnowledgeCompositionPlan(selectedPlan)
+    latest = requestBinding
+      ? assertOutcomeKnowledgeCompositionPlanIntegrity(latestPlan)
+      : assertLegacyOutcomeKnowledgeCompositionPlan(latestPlan)
     assertOutcomeKnowledgeCompositionPlanMatchesRuntime(selected, runtime)
   } catch {
     throw bindingInvalid('planIntegrity')
   }
   if (toId(selected.runtimeInstanceId) !== toId(runtimeInstanceId)
     || lower(selected.planFingerprint) !== lower(expectedPlanFingerprint)
+    || (requestBinding && text(selected.requestId) !== requestBinding.requestId)
     || toId(selected._id || selected.id) !== toId(latest._id || latest.id)
     || lower(selected.planFingerprint) !== lower(latest.planFingerprint)) throw bindingInvalid('currentPlan')
   return selected
@@ -265,6 +283,7 @@ const persistFailure = async ({
   actorUserId, createStage, expectedPlanFingerprint, failureCode, grrExecutionId = '',
   grrRuntimeArtifactId = '', latestRl, plan, providerDescriptor, retryable, runtimeInstanceId,
   runtimeVersion, source, stageDeps, startedAt,
+  requestBinding,
 }) => {
   const failureLineage = buildOutcomeRenderedExpressionRlFailureLineage({ latestRl, source })
   const args = {
@@ -291,6 +310,7 @@ const persistFailure = async ({
     },
     startedAt,
     completedAt: new Date().toISOString(),
+    requestBinding,
   }
   const candidate = buildOutcomeQualityStageExecutionCandidate(args)
   return createStage({
@@ -300,6 +320,7 @@ const persistFailure = async ({
     ...args,
     expectedAttemptFingerprint: candidate.attemptFingerprint,
     actorUserId,
+    requestBinding,
     deps: stageDeps,
   })
 }
@@ -313,6 +334,7 @@ export const executeOutcomeRenderedExpressionRl = async ({
   providerDescriptor,
   runtimeInstanceId,
   scopes,
+  requestBinding,
   deps = {},
 } = {}) => {
   if (!mongoose.isValidObjectId(actorUserId)
@@ -336,17 +358,17 @@ export const executeOutcomeRenderedExpressionRl = async ({
   }
   ;(deps.assertOutcomeQualityStageTransactionSupport || assertOutcomeQualityStageTransactionSupport)(deps.mongoose || mongoose)
   const [selectedPlan, latestPlan, runtime] = await Promise.all([
-    execQuery(models.OutcomeKnowledgeCompositionPlan.findOne({ _id: planRecordId, runtimeInstanceId, requestId: { $exists: false } })),
-    readLatest(models.OutcomeKnowledgeCompositionPlan, { runtimeInstanceId, requestId: { $exists: false } }, { planVersion: -1 }),
+    execQuery(models.OutcomeKnowledgeCompositionPlan.findOne({ _id: planRecordId, runtimeInstanceId, ...planScope(requestBinding) })),
+    readLatest(models.OutcomeKnowledgeCompositionPlan, { runtimeInstanceId, ...planScope(requestBinding) }, { planVersion: -1 }),
     execQuery(models.RuntimeInstance.findOne({ _id: runtimeInstanceId })),
   ])
-  const plan = assertCurrentPlan({ selectedPlan, latestPlan, runtime, runtimeInstanceId, expectedPlanFingerprint })
+  const plan = assertCurrentPlan({ selectedPlan, latestPlan, runtime, runtimeInstanceId, expectedPlanFingerprint, requestBinding })
   const [sourceRecord, latestRl] = await Promise.all([
     readLatest(models.OutcomeQualityStageExecution, {
-      runtimeInstanceId, planId: plan.planId, stageKey: OUTCOME_QUALITY_STAGES.OUTPUT_SHAPING,
+      runtimeInstanceId, planId: plan.planId, ...stageScope(requestBinding), stageKey: OUTCOME_QUALITY_STAGES.OUTPUT_SHAPING,
     }),
     readLatest(models.OutcomeQualityStageExecution, {
-      runtimeInstanceId, planId: plan.planId, stageKey: OUTCOME_QUALITY_STAGES.RENDERED_EXPRESSION_RL,
+      runtimeInstanceId, planId: plan.planId, ...stageScope(requestBinding), stageKey: OUTCOME_QUALITY_STAGES.RENDERED_EXPRESSION_RL,
     }),
   ])
   const source = assertSource({ source: sourceRecord, plan, runtimeInstanceId })
@@ -424,6 +446,7 @@ export const executeOutcomeRenderedExpressionRl = async ({
       actorUserId, createStage, expectedPlanFingerprint, failureCode: reason, plan,
       latestRl, providerDescriptor, retryable: RETRYABLE_PROVIDER_REASONS.has(reason), runtimeInstanceId,
       runtimeVersion, source, stageDeps: deps.stageDeps || {}, startedAt,
+      requestBinding,
     })
     return { idempotent: failure.idempotent, grr: null, stage: failure.execution }
   }
@@ -443,6 +466,7 @@ export const executeOutcomeRenderedExpressionRl = async ({
       failureCode: 'RENDERED_EXPRESSION_RL_REQUIRED_CHANGE', grrExecutionId, grrRuntimeArtifactId,
       latestRl, plan, providerDescriptor, retryable: false, runtimeInstanceId, runtimeVersion, source,
       stageDeps: deps.stageDeps || {}, startedAt,
+      requestBinding,
     })
     return { idempotent: failure.idempotent, grr: { executionId: grrExecutionId, runtimeArtifactId: grrRuntimeArtifactId }, stage: failure.execution }
   }
@@ -466,6 +490,7 @@ export const executeOutcomeRenderedExpressionRl = async ({
     startedAt: toIso(grr.requestedAt),
     completedAt: toIso(grr.completedAt),
     deps: deps.postArlDeps || {},
+    requestBinding,
   })
   return { idempotent: result.idempotent, grr: { executionId: grrExecutionId, runtimeArtifactId: grrRuntimeArtifactId }, stage: result.stage }
 }

@@ -52,6 +52,7 @@ const {
   getRuntimeStateGraphProjection,
   getRuntimeStateOutcomeHandoffReadiness,
   getRuntimeOutcomePlanningEvidence,
+  getRuntimeOutcomeEvidenceContractSnapshot,
   getRuntimeStateRendererSections,
   getRuntimeStateSectionSummary,
   listRuntimeStateEvidenceObjects,
@@ -171,6 +172,61 @@ beforeEach(() => {
 
 afterAll(() => {
   collectionSpy.mockRestore()
+})
+
+describe('SS-040 complete inventory with bounded section projection', () => {
+  const scoped = { customerId: CUSTOMER_ID, tenantId: TENANT_ID, runtimeInstanceId: RUNTIME_ID,
+    runtimeInstanceKey: 'runtime-one', stateVersion: 'runtime-revision:1', sourceStateVersion: 'runtime-revision:1', current: true }
+  const setup = (size) => {
+    const rows = Array.from({ length: size }, (_, index) => ({ ...scoped, _id: String(index).padStart(6, '0'),
+      evidenceObjectId: 'evidence-' + index, sourceId: 'source-1', extractedFact: 'Exact stored excerpt.',
+      validationStatus: 'UNVALIDATED', proofDependency: [], proofOrderDisposition: 'UNRESOLVED' }))
+    const sources = [{ ...scoped, _id: 'source-row', sourceId: 'source-1', sourceType: 'WEBSITE',
+      sourceRef: 'https://acme.example', acquisitionStatus: 'ACQUIRED', lineageRef: 'stored-source' }]
+    const sectionRows = [{ ...scoped, _id: 'section-row', sectionKey: 'section_1_executive_summary',
+      sectionDetail: { accepted: { supportingEvidenceRefs: size ? ['evidence-0'] : [] } } }]
+    for (const [name, values] of [[RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_OBJECTS, rows],
+      [RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_SOURCES, sources], [RUNTIME_STATE_V2_COLLECTIONS.SECTIONS, sectionRows]]) {
+      collections.set(name, { countDocuments: jest.fn().mockResolvedValue(values.length),
+        find: jest.fn((filter) => {
+          const after = filter.$and?.flatMap((clause) => clause._id?.$gt ? [clause._id.$gt] : []).at(0)
+            || filter._id?.$gt
+          let pageSize = 150
+          const cursor = makeCursor([])
+          cursor.limit.mockImplementation((value) => { pageSize = value; return cursor })
+          cursor.toArray.mockImplementation(async () => values.filter((row) => !after || row._id > after).slice(0, pageSize))
+          return cursor
+        }) })
+    }
+    return rows
+  }
+  test.each([499, 500, 501, 853])('reads complete %i inventory under one session with bounded exact projection', async (size) => {
+    const rows = setup(size); const session = { id: 'snapshot-session' }
+    const result = await getRuntimeOutcomeEvidenceContractSnapshot({ scopes: SCOPES, runtimeInstanceId: RUNTIME_ID, session })
+    expect(result.inventoryReceipt).toMatchObject({ completeness: 'COMPLETE', collections: { evidence: { totalCount: size } } })
+    expect(result.evidenceObjects).toEqual([rows[0]])
+    expect(result.evidenceObjects[0]).not.toHaveProperty('currentness')
+    const collection = collections.get(RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_OBJECTS)
+    expect(collection.find).toHaveBeenCalledWith(expect.objectContaining({ $and: expect.any(Array) }), expect.objectContaining({ session, projection: {} }))
+    expect(collection.countDocuments).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({ session }))
+    for (const call of collection.find.mock.results) expect(call.value.limit).toHaveBeenCalledWith(150)
+  })
+  test('rejects absent source mapping without legacy fallback', async () => {
+    const rows = setup(1); rows[0].sourceId = 'missing-source'
+    await expect(getRuntimeOutcomeEvidenceContractSnapshot({ scopes: SCOPES, runtimeInstanceId: RUNTIME_ID })).rejects.toMatchObject({
+      code: 'OUTCOME_EVIDENCE_SNAPSHOT_SOURCE_REFERENCE_MISSING', details: { snapshotReceipt: { completeness: 'INCOMPLETE' } } })
+  })
+  test('rejects tenant/runtime mismatch before returning selected records', async () => {
+    const rows = setup(501); rows[500].tenantId = 'other-tenant'
+    await expect(getRuntimeOutcomeEvidenceContractSnapshot({ scopes: SCOPES, runtimeInstanceId: RUNTIME_ID })).rejects.toMatchObject({
+      code: 'OUTCOME_EVIDENCE_SNAPSHOT_OUTCOME_EVIDENCE_SCOPE_MISMATCH' })
+  })
+  test('empty inventory remains complete without invented evidence', async () => {
+    setup(0)
+    const result = await getRuntimeOutcomeEvidenceContractSnapshot({ scopes: SCOPES, runtimeInstanceId: RUNTIME_ID })
+    expect(result.evidenceObjects).toEqual([])
+    expect(result.inventoryReceipt.collections.evidence.totalCount).toBe(0)
+  })
 })
 
 describe('runtime State Storage V2 repository', () => {

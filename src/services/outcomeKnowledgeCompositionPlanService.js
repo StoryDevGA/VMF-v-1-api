@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import mongoose from 'mongoose'
+import { buildRuntimeEvidenceToMeaningReceipt, readRuntimeEvidenceToMeaningContract } from './outcomeRuntimeEvidenceToMeaningService.js'
 
 import {
   OUTCOME_ACCEPTED_TRUTH_IDENTITY_CONTRACT_VERSION,
@@ -478,7 +479,9 @@ const buildLockedTruthManifest = (runtime = {}, { identityMode = 'MARKED_V1' } =
   }
   const missingIds = Object.entries(requiredIds).filter(([, value]) => !value).map(([key]) => key)
   const marked = identityMode === 'MARKED_V1'
-  const acceptedSections = Object.entries(sections).map(([outerStateSectionKey, section]) => {
+  const acceptedSections = Object.entries(sections)
+    .filter(([, section]) => upper(section?.state?.status) === 'ACCEPTED')
+    .map(([outerStateSectionKey, section]) => {
     const accepted = section?.accepted || {}
     const stateSectionKey = lower(outerStateSectionKey)
     const sectionKey = marked ? lower(accepted.sectionKey) : stateSectionKey
@@ -493,10 +496,10 @@ const buildLockedTruthManifest = (runtime = {}, { identityMode = 'MARKED_V1' } =
       sourceActionKey: upper(accepted.sourceActionKey),
       sourceGeneratedAt: toIso(accepted.sourceGeneratedAt),
     }
-  }).sort((left, right) => (
-    left.sectionKey.localeCompare(right.sectionKey)
-    || text(left.stateSectionKey).localeCompare(text(right.stateSectionKey))
-  ))
+    }).sort((left, right) => (
+      left.sectionKey.localeCompare(right.sectionKey)
+      || text(left.stateSectionKey).localeCompare(text(right.stateSectionKey))
+    ))
   const identityLockedTruth = marked
     ? { acceptedTruthIdentityContractVersion: OUTCOME_ACCEPTED_TRUTH_IDENTITY_CONTRACT_VERSION }
     : {}
@@ -785,6 +788,7 @@ export const assertOutcomeKnowledgeCompositionPlanIntegrity = (value) => {
     || !SHA256_PATTERN.test(lower(plan.contextFingerprint))) {
     throw resolutionInvalid({ field: 'identityOrFingerprint' })
   }
+  if (payload.evidenceToMeaning) readRuntimeEvidenceToMeaningContract(plan)
   if (hashSemanticFingerprintValue(payload) !== lower(plan.planFingerprint)) {
     throw fingerprintMismatch({ field: 'planFingerprint' })
   }
@@ -1031,7 +1035,7 @@ export const buildOutcomeKnowledgeCompositionPlanForRuntime = async ({
     resolveBinding({ query }),
     resolveContext({ query }),
   ])
-  return buildOutcomeKnowledgeCompositionPlanCandidate({
+  const candidate = buildOutcomeKnowledgeCompositionPlanCandidate({
     runtime,
     binding,
     context: contextResult?.context,
@@ -1039,6 +1043,12 @@ export const buildOutcomeKnowledgeCompositionPlanForRuntime = async ({
     requestScope,
     requestAssociation,
   })
+  if (requestScope) {
+    candidate.payload.evidenceToMeaning = await buildRuntimeEvidenceToMeaningReceipt({
+      runtime, binding, context: contextResult?.context, candidate, scopes, session, deps })
+    candidate.planFingerprint = hashSemanticFingerprintValue(candidate.payload)
+  }
+  return candidate
 }
 
 const currentTopologyType = (mongooseClient) => {

@@ -4,6 +4,7 @@ import logger from '../config/logger.js'
 import {
   OUTCOME_QUALITY_STAGE_OUTPUT_TYPES,
   OUTCOME_RENDERED_EXPRESSION_RL_PROVIDER_CONFIG_VERSION,
+  OUTCOME_RENDERED_EXPRESSION_RL_PROVIDER_RESPONSE_SCHEMA_NAME,
   OUTCOME_RENDERED_EXPRESSION_RL_SCHEMA_VERSION,
 } from '../constants/outcomeGovernedQuality.js'
 import { assertOutcomeRenderedExpressionRlProviderSafeContext } from './outcomeRenderedExpressionRlProviderSafeContextService.js'
@@ -205,7 +206,7 @@ export const createOpenAiOutcomeRenderedExpressionRlProviderAdapter = ({
       text: {
         format: {
           type: 'json_schema',
-          name: 'fs_003_rendered_expression_rl_v0_2',
+          name: OUTCOME_RENDERED_EXPRESSION_RL_PROVIDER_RESPONSE_SCHEMA_NAME,
           strict: true,
           schema: outputJsonSchema(),
         },
@@ -292,7 +293,12 @@ export const createOpenAiOutcomeRenderedExpressionRlProviderAdapter = ({
       limitations: [...context.candidate.visibleGaps],
       metadata: {
         configurationVersion: OUTCOME_RENDERED_EXPRESSION_RL_PROVIDER_CONFIG_VERSION,
-        responseSchema: { strict: true, parsed: true },
+        responseSchema: {
+          name: OUTCOME_RENDERED_EXPRESSION_RL_PROVIDER_RESPONSE_SCHEMA_NAME,
+          version: OUTCOME_RENDERED_EXPRESSION_RL_SCHEMA_VERSION,
+          strict: true,
+          parsed: true,
+        },
         requestIdentity,
         httpRequestId: safeId(httpRequestId),
         responseId,

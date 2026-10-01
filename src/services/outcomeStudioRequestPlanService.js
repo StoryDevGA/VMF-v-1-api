@@ -1,3 +1,4 @@
+import { projectRuntimeEvidenceToMeaningReadiness, readCurrentRuntimeEvidenceSnapshotReadiness } from './outcomeRuntimeEvidenceToMeaningService.js'
 import { createHmac, randomUUID } from 'node:crypto'
 import mongoose from 'mongoose'
 import env from '../config/env.js'
@@ -88,21 +89,27 @@ const receiptProjection = (plan = {}) => {
   if (!receipt || receipt.stageKey !== 'CLARIFICATION' || receipt.status !== 'PASSED') return null
   return { ...receipt, confirmedBy: id(plan.createdBy), executedAt: plan.createdAt || '' }
 }
-const planProjection = (result) => ({
-  planId: result.plan.planId, requestId: result.plan.requestId, planVersion: result.plan.planVersion,
-  status: result.plan.status, outputTypeKey: result.plan.requestedOutputTypeKey,
-  intent: intentProjection(result.plan.payload.consumerIntent),
-  clarificationReceipt: receiptProjection(result.plan),
-  outputContract: {
-    outputType: result.plan.payload.governedContext?.outputType || null,
-    outputSchema: result.plan.payload.governedContext?.outputSchema || null,
-    style: result.plan.payload.governedContext?.style || null,
-    selectedPacks: result.plan.payload.resolution?.selectedPacks || [],
-  },
-  runtimeIntegrity: result.plan.payload.planningEvidence || null,
-  currentness: { current: false, evidenceStatus: 'NOT_REVALIDATED', latestInRequest: result.currentness.latestInRequest === true },
-  execution: receiptProjection(result.plan) ? readyExecution : execution, idempotent: result.idempotent === true,
-})
+const planProjection = (result) => {
+  const evidenceToMeaning = projectRuntimeEvidenceToMeaningReadiness(result.plan)
+  const clarificationReceipt = receiptProjection(result.plan)
+  return {
+    planId: result.plan.planId, requestId: result.plan.requestId, planVersion: result.plan.planVersion,
+    status: result.plan.status, outputTypeKey: result.plan.requestedOutputTypeKey,
+    intent: intentProjection(result.plan.payload.consumerIntent),
+    clarificationReceipt,
+    outputContract: {
+      outputType: result.plan.payload.governedContext?.outputType || null,
+      outputSchema: result.plan.payload.governedContext?.outputSchema || null,
+      style: result.plan.payload.governedContext?.style || null,
+      selectedPacks: result.plan.payload.resolution?.selectedPacks || [],
+    },
+    runtimeIntegrity: result.plan.payload.planningEvidence || null,
+    currentness: { current: false, evidenceStatus: 'NOT_REVALIDATED', latestInRequest: result.currentness.latestInRequest === true },
+    evidenceToMeaning,
+    execution: clarificationReceipt && evidenceToMeaning.canExecute
+      ? readyExecution : execution, idempotent: result.idempotent === true,
+  }
+}
 
 const firstSentence = (value) => text(value).split(/(?<=[.!?])\s+/)[0]?.replace(/[.!?]+$/, '') || ''
 const matchGroup = (value, expression) => text(expression.exec(value)?.[1]).replace(/[.!?]+$/, '')
@@ -113,9 +120,9 @@ const inferAudience = (prompt, resolution) => {
   return label ? { value: [label], source: basis.PROMPT_AND_METADATA } : { value: [], source: '' }
 }
 const inferDecisionPurpose = (prompt, resolution) => {
-  const focused = matchGroup(prompt, /\bfocus(?:ing)?\s+on\s+(.+?)(?=\.\s*(?:preserv(?:e|ing)|ensure|keep)\b|$)/i)
+  const focused = matchGroup(prompt, /(?:^|[.!?]\s+)focus(?:ing)?\s+on\s+(.+?)(?=\.\s*(?:preserv(?:e|ing)|ensure|keep)\b|[.!?]|$)/i)
   if (focused) return { value: focused, source: basis.PROMPT }
-  const explicit = matchGroup(prompt, /\bto\s+(.+?)(?=[.!?]|$)/i)
+  const explicit = matchGroup(firstSentence(prompt), /\bto\s+(.+?)$/i)
   if (explicit) return { value: explicit, source: basis.PROMPT }
   const label = text(resolution?.purpose?.label)
   return label ? { value: label, source: basis.PROMPT_AND_METADATA } : { value: '', source: '' }
@@ -234,7 +241,8 @@ export const planOutcomeStudioRequest = async ({ actorUserId, runtimeInstanceId,
   const candidate = await (deps.buildKcpCandidate || buildOutcomeKnowledgeCompositionPlanForRuntime)({ actorUserId, scopes,
     runtimeInstanceId: auth.scope.runtimeInstanceId, requestScope, requestAssociation,
     consumerIntent: state.intent, expectedRuntimeUpdatedAt: evidence.updatedAt, deps: scopedDeps(deps) })
-  if (candidate.status === 'BLOCKED') return respond({ ...state, phase: 'BLOCKED' }, deps, { blockers: ['KNOWLEDGE_COMPOSITION_BLOCKED'] })
+  if (candidate.status === 'BLOCKED') return respond({ ...state, phase: 'BLOCKED' }, deps, {
+    blockers: ['KNOWLEDGE_COMPOSITION_BLOCKED'], evidenceToMeaning: projectRuntimeEvidenceToMeaningReadiness(candidate) })
   state.intent.selectedSchema = candidate.payload?.governedContext?.outputSchema || null
   state.intent.selectedKnowledgePacks = (candidate.payload?.resolution?.selectedPacks || []).map((pack) => ({
     packKey: pack.packKey,
@@ -244,7 +252,9 @@ export const planOutcomeStudioRequest = async ({ actorUserId, runtimeInstanceId,
   }))
   state = { ...state, phase: 'CONFIRMATION_REQUIRED', expectedPlanFingerprint: candidate.planFingerprint,
     expectedRuntimeUpdatedAt: new Date(evidence.updatedAt).toISOString() }
-  return respond(state, deps, { planStatus: candidate.status, message: 'Confirm these inferred facts to save the governed request plan.' })
+  return respond(state, deps, { planStatus: candidate.status,
+    evidenceToMeaning: projectRuntimeEvidenceToMeaningReadiness(candidate),
+    message: 'Confirm these inferred facts to save the governed request plan.' })
 }
 
 export const confirmOutcomeStudioRequestPlan = async ({ actorUserId, runtimeInstanceId, scopes, requestId, payload = {}, deps = {} } = {}) => {
@@ -269,6 +279,8 @@ export const retrieveOutcomeStudioRequestPlan = async ({ actorUserId, runtimeIns
   const sessionId = result.plan.payload.requestAssociation?.sessionId || ''
   await authorize({ actorUserId, runtimeInstanceId, scopes, sessionId, deps, write: false })
   const projectedPlan = planProjection(result)
+  projectedPlan.currentSnapshotReadiness = await readCurrentRuntimeEvidenceSnapshotReadiness({
+    runtimeInstanceId: auth.scope.runtimeInstanceId, scopes, deps })
   return respond({ actorUserId: id(actorUserId), scope: auth.scope, sessionId, requestId,
     intent: result.plan.payload.consumerIntent, phase: 'SAVED', field: '', planId, planVersion: result.plan.planVersion,
     planFingerprint: result.plan.planFingerprint, execution: projectedPlan.execution }, deps, { plan: projectedPlan })

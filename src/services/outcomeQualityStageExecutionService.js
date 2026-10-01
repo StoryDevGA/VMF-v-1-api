@@ -1,3 +1,5 @@
+import { assertRuntimeEvidenceToMeaningReady, readRuntimeEvidenceToMeaningProviderProjection } from './outcomeRuntimeEvidenceToMeaningService.js'
+import { assertEvidenceToMeaningBoundedProviderOutput } from './outcomeEvidenceToMeaningProviderService.js'
 import { createHash, randomUUID } from 'node:crypto'
 import mongoose from 'mongoose'
 
@@ -18,6 +20,8 @@ import {
   OUTCOME_RENDERED_EXPRESSION_RL_SCHEMA_VERSION,
   OUTCOME_RENDERED_EXPRESSION_SCHEMA_VERSION,
   OUTCOME_WORKING_DRAFT_SCHEMA_VERSION,
+  OUTCOME_WORKING_DRAFT_VALIDATION_STATUSES,
+  OUTCOME_WORKING_DRAFT_PROOF_DISPOSITIONS,
 } from '../constants/outcomeGovernedQuality.js'
 import {
   OutcomeKnowledgeCompositionPlan,
@@ -27,11 +31,17 @@ import {
 import { containsOutcomeWorkingDraftProhibitedStageClaim } from '../utils/outcomeWorkingDraftStageClaims.js'
 import auditService from './auditService.js'
 import {
+  assertOutcomeKnowledgeCompositionPlanIntegrity,
   assertLegacyOutcomeKnowledgeCompositionPlan,
   assertOutcomeKnowledgeCompositionPlanMatchesRuntime,
 } from './outcomeKnowledgeCompositionPlanService.js'
 import { findOutcomeFrameworkGuidanceStageClaim } from '../utils/outcomeFrameworkGuidanceStageClaims.js'
 import { buildExpressionOnlyRevisionSection } from '../utils/outcomeRenderedExpressionRevision.js'
+import {
+  assertOutcomeWorkingDraftMeaningBoundary,
+  OUTCOME_WORKING_DRAFT_MEANING_CLASSES,
+  OUTCOME_WORKING_DRAFT_PROOF_DEPENDENCIES,
+} from './outcomeWorkingDraftMeaningBoundaryService.js'
 
 const TRANSACTION_TOPOLOGIES = new Set(['ReplicaSetWithPrimary', 'Sharded'])
 const SHA256_PATTERN = /^[a-f0-9]{64}$/
@@ -56,8 +66,13 @@ const WORKING_DRAFT_SECTION_KEYS = Object.freeze([
   'order', 'sectionKey', 'title', 'content', 'claims', 'truthReferences',
   'contributingActivationIds', 'assumptions', 'gaps',
 ])
-const WORKING_DRAFT_CLAIM_KEYS = Object.freeze(['claimKey', 'statement', 'truthReferences', 'evidence'])
-const DECISION_LOGIC_KEYS = Object.freeze(['decisionKey', 'rationale', 'priority', 'truthReferences'])
+const WORKING_DRAFT_CLAIM_KEYS = Object.freeze([
+  'claimKey', 'statement', 'truthReferences', 'evidence', 'meaningClass', 'proofDependencies',
+  'validationStatus', 'proofDisposition', 'whatCanBeSaidNow', 'blockedStrongerClaim', 'evidenceRequiredToSubstantiate',
+])
+const DECISION_LOGIC_KEYS = Object.freeze([
+  'decisionKey', 'rationale', 'priority', 'priorityBasis', 'closureState', 'actionAuthorization', 'truthReferences',
+])
 const COMPOSITION_PROVENANCE_KEYS = Object.freeze([
   'frameworkGuidanceStageExecutionId', 'frameworkGuidanceOutputFingerprint', 'planFingerprint',
 ])
@@ -415,7 +430,21 @@ const normalizeSourceStageExecution = ({ value, plan, stageKey }) => {
   return normalized
 }
 
-const buildStageInputSnapshot = (plan, stage, sourceStageExecution) => {
+const normalizeRequestBinding = (value) => {
+  if (value === undefined || value === null) return null
+  const normalized = {
+    requestId: text(value?.requestId),
+    draftId: text(value?.draftId),
+    draftIterationId: text(value?.draftIterationId),
+  }
+  if (Object.values(normalized).some((item) => !item)) {
+    throw invalid('Outcome quality stage request binding is invalid.')
+  }
+  return normalized
+}
+
+const buildStageInputSnapshot = (plan, stage, sourceStageExecution, requestBinding) => {
+  const evidenceProjection = plan.payload.evidenceToMeaning ? readRuntimeEvidenceToMeaningProviderProjection(plan) : null
   const selectedPacks = Array.isArray(plan.payload?.resolution?.selectedPacks)
     ? plan.payload.resolution.selectedPacks
     : []
@@ -459,7 +488,18 @@ const buildStageInputSnapshot = (plan, stage, sourceStageExecution) => {
     plan,
     stageKey: stage.stageKey,
   })
+  if (requestBinding && sourceStageExecution && (
+    text(sourceStageExecution.requestId) !== requestBinding.requestId
+    || text(sourceStageExecution.draftId) !== requestBinding.draftId
+    || text(sourceStageExecution.draftIterationId) !== requestBinding.draftIterationId
+  )) throw predecessorInvalid({ field: 'requestBinding' })
   return {
+    ...(evidenceProjection ? { evidenceToMeaning: { contractVersion: evidenceProjection.contractVersion,
+      contractId: evidenceProjection.contractId, contractHash: evidenceProjection.contractHash,
+      projectionHash: evidenceProjection.projectionHash } } : {}),
+    ...(requestBinding ? {
+      requestBindingFingerprint: hashOutcomeQualityStageValue(requestBinding),
+    } : {}),
     plan: {
       recordId: toId(plan._id || plan.id),
       planId: text(plan.planId),
@@ -600,7 +640,7 @@ const normalizeFrameworkGuidanceOutput = (value, inputSnapshot) => {
   return normalized
 }
 
-const normalizeWorkingDraftOutput = (value, inputSnapshot, sourceStageExecution) => {
+const normalizeWorkingDraftOutput = (value, inputSnapshot, sourceStageExecution, evidenceProjection = null) => {
   if (!hasExactKeys(value, WORKING_DRAFT_OUTPUT_KEYS)) throw invalid('Working Draft output shape is invalid.')
   assertNoForbiddenKeys(value, 'output')
   if (upper(value.outputType) !== OUTCOME_QUALITY_STAGE_OUTPUT_TYPES.WORKING_DRAFT
@@ -617,7 +657,9 @@ const normalizeWorkingDraftOutput = (value, inputSnapshot, sourceStageExecution)
   if (!sameOrderedValues(visibleGaps, inputSnapshot.visibleGaps)) {
     throw stageBindingInvalid({ field: 'visibleGaps' })
   }
-  const allowedTruth = inputSnapshot.lockedTruth.acceptedSections.map((section) => section.sectionKey)
+  const allowedTruth = evidenceProjection
+    ? [...new Set(evidenceProjection.customerClaims.flatMap((claim) => claim.sectionKeys))]
+    : inputSnapshot.lockedTruth.acceptedSections.map((section) => section.sectionKey)
   const allowedActivations = [...new Set(source.outputSnapshot.sections
     .flatMap((section) => section.contributingActivationIds || []))]
   if (!Array.isArray(value.sections) || value.sections.length < 1 || value.sections.length > 20) {
@@ -667,6 +709,54 @@ const normalizeWorkingDraftOutput = (value, inputSnapshot, sourceStageExecution)
         evidence: boundedStringArray(claim.evidence, {
           field: `output.sections[${index}].claims[${claimIndex}].evidence`, min: 1, max: 20, itemMax: 2000,
         }),
+        meaningClass: (() => {
+          const value = boundedText(claim.meaningClass, {
+            field: `output.sections[${index}].claims[${claimIndex}].meaningClass`, min: 1, max: 40,
+          })
+          if (!OUTCOME_WORKING_DRAFT_MEANING_CLASSES.includes(value)) {
+            throw invalid('Working Draft claim meaning class is invalid.', { index, claimIndex })
+          }
+          return value
+        })(),
+        proofDependencies: (() => {
+          const value = boundedStringArray(claim.proofDependencies, {
+            field: `output.sections[${index}].claims[${claimIndex}].proofDependencies`,
+            max: OUTCOME_WORKING_DRAFT_PROOF_DEPENDENCIES.length,
+            itemMax: 40,
+          })
+          if (value.some((dependency) => !OUTCOME_WORKING_DRAFT_PROOF_DEPENDENCIES.includes(dependency))) {
+            throw invalid('Working Draft claim proof dependency is invalid.', { index, claimIndex })
+          }
+          return value
+        })(),
+        validationStatus: (() => {
+          const value = boundedText(claim.validationStatus, {
+            field: `output.sections[${index}].claims[${claimIndex}].validationStatus`, min: 1, max: 50,
+          })
+          if (!OUTCOME_WORKING_DRAFT_VALIDATION_STATUSES.includes(value)) {
+            throw invalid('Working Draft claim validation status is invalid.', { index, claimIndex })
+          }
+          return value
+        })(),
+        proofDisposition: (() => {
+          const value = boundedText(claim.proofDisposition, {
+            field: `output.sections[${index}].claims[${claimIndex}].proofDisposition`, min: 1, max: 50,
+          })
+          if (!OUTCOME_WORKING_DRAFT_PROOF_DISPOSITIONS.includes(value)) {
+            throw invalid('Working Draft claim proof disposition is invalid.', { index, claimIndex })
+          }
+          return value
+        })(),
+        whatCanBeSaidNow: boundedText(claim.whatCanBeSaidNow, {
+          field: `output.sections[${index}].claims[${claimIndex}].whatCanBeSaidNow`, min: 1, max: 2000,
+        }),
+        blockedStrongerClaim: boundedText(claim.blockedStrongerClaim, {
+          field: `output.sections[${index}].claims[${claimIndex}].blockedStrongerClaim`, min: 1, max: 2000,
+        }),
+        evidenceRequiredToSubstantiate: boundedStringArray(claim.evidenceRequiredToSubstantiate, {
+          field: `output.sections[${index}].claims[${claimIndex}].evidenceRequiredToSubstantiate`,
+          min: 1, max: 10, itemMax: 2000,
+        }),
       }
     })
     if (new Set(claims.map((claim) => claim.claimKey)).size !== claims.length
@@ -715,6 +805,9 @@ const normalizeWorkingDraftOutput = (value, inputSnapshot, sourceStageExecution)
       decisionKey,
       rationale: boundedText(decision.rationale, { field: `output.decisionLogic[${index}].rationale`, min: 1, max: 4000 }),
       priority: boundedText(decision.priority, { field: `output.decisionLogic[${index}].priority`, min: 1, max: 100 }).toUpperCase(),
+      priorityBasis: boundedText(decision.priorityBasis, { field: `output.decisionLogic[${index}].priorityBasis`, min: 1, max: 40 }).toUpperCase(),
+      closureState: boundedText(decision.closureState, { field: `output.decisionLogic[${index}].closureState`, min: 1, max: 40 }).toUpperCase(),
+      actionAuthorization: boundedText(decision.actionAuthorization, { field: `output.decisionLogic[${index}].actionAuthorization`, min: 1, max: 40 }).toUpperCase(),
       truthReferences,
     }
   })
@@ -764,6 +857,22 @@ const normalizeWorkingDraftOutput = (value, inputSnapshot, sourceStageExecution)
     revisionHistory,
     assumptions: boundedStringArray(value.assumptions, { field: 'output.assumptions', max: 20, itemMax: 2000 }),
     visibleGaps,
+  }
+  try {
+    if (evidenceProjection) assertEvidenceToMeaningBoundedProviderOutput({ projection: evidenceProjection, output: normalized })
+    else assertOutcomeWorkingDraftMeaningBoundary({
+      output: normalized,
+      evidence: {
+        acceptedTruthReferences: allowedTruth,
+        frameworkGuidanceClaims: [],
+        unsupportedClaims: [],
+        proofDependencyVocabulary: [...OUTCOME_WORKING_DRAFT_PROOF_DEPENDENCIES],
+      },
+    })
+  } catch (error) {
+    throw invalid('Working Draft meaning boundary is invalid.', {
+      field: error?.details?.field || 'output.meaningBoundary',
+    })
   }
   if (containsOutcomeWorkingDraftProhibitedStageClaim(normalized)) {
     throw invalid('Working Draft output claims ARL approval or a later governed stage.')
@@ -1092,15 +1201,18 @@ const normalizeFailure = (value) => {
   }
 }
 
-const validatePlan = (value, { runtimeInstanceId, expectedPlanFingerprint }) => {
+const validatePlan = (value, { runtimeInstanceId, expectedPlanFingerprint, requestBinding }) => {
   let plan
   try {
-    plan = assertLegacyOutcomeKnowledgeCompositionPlan(value)
+    plan = requestBinding
+      ? assertOutcomeKnowledgeCompositionPlanIntegrity(value)
+      : assertLegacyOutcomeKnowledgeCompositionPlan(value)
   } catch (error) {
     throw kcpInvalid({ causeCode: error?.code || '' })
   }
   if (toId(plan.runtimeInstanceId) !== toId(runtimeInstanceId)
-    || lower(plan.planFingerprint) !== lower(expectedPlanFingerprint)) {
+    || lower(plan.planFingerprint) !== lower(expectedPlanFingerprint)
+    || (requestBinding && text(plan.requestId) !== requestBinding.requestId)) {
     throw kcpInvalid({ field: 'scopeOrFingerprint' })
   }
   if (![OUTCOME_KCP_STATUSES.READY, OUTCOME_KCP_STATUSES.READY_WITH_GAPS].includes(plan.status)) {
@@ -1124,8 +1236,14 @@ export const buildOutcomeQualityStageExecutionCandidate = ({
   executionIdentity,
   startedAt,
   completedAt,
+  requestBinding,
 } = {}) => {
-  const validatedPlan = validatePlan(plan, { runtimeInstanceId, expectedPlanFingerprint })
+  const normalizedRequestBinding = normalizeRequestBinding(requestBinding)
+  const validatedPlan = validatePlan(plan, {
+    runtimeInstanceId,
+    expectedPlanFingerprint,
+    requestBinding: normalizedRequestBinding,
+  })
   const normalizedStageKey = upper(stageKey)
   if (!Object.prototype.hasOwnProperty.call(STAGE_ORDERS, normalizedStageKey)) {
     throw stageNotSupported({ stageKey: normalizedStageKey })
@@ -1173,7 +1291,7 @@ export const buildOutcomeQualityStageExecutionCandidate = ({
   if (!Number.isFinite(durationMs) || durationMs > 86_400_000) {
     throw invalid('Outcome quality stage duration is invalid.')
   }
-  const inputSnapshot = buildStageInputSnapshot(validatedPlan, stage, sourceStageExecution)
+  const inputSnapshot = buildStageInputSnapshot(validatedPlan, stage, sourceStageExecution, normalizedRequestBinding)
   assertNoForbiddenKeys(inputSnapshot, 'input')
   const inputFingerprint = hashOutcomeQualityStageValue(inputSnapshot)
   let normalizedOutput
@@ -1181,7 +1299,8 @@ export const buildOutcomeQualityStageExecutionCandidate = ({
     if (normalizedStageKey === OUTCOME_QUALITY_STAGES.FRAMEWORK_GUIDANCE) {
       normalizedOutput = normalizeFrameworkGuidanceOutput(output, inputSnapshot)
     } else if (normalizedStageKey === OUTCOME_QUALITY_STAGES.WORKING_DRAFT) {
-      normalizedOutput = normalizeWorkingDraftOutput(output, inputSnapshot, sourceStageExecution)
+      normalizedOutput = normalizeWorkingDraftOutput(output, inputSnapshot, sourceStageExecution,
+        validatedPlan.payload.evidenceToMeaning ? readRuntimeEvidenceToMeaningProviderProjection(validatedPlan) : null)
     } else if (normalizedStageKey === OUTCOME_QUALITY_STAGES.ARL_MEANING_REVIEW) {
       normalizedOutput = normalizeArlMeaningReviewOutput(output, inputSnapshot, sourceStageExecution)
     } else if (normalizedStageKey === OUTCOME_QUALITY_STAGES.OUTCOME_NARRATIVE_PLAN) {
@@ -1201,6 +1320,7 @@ export const buildOutcomeQualityStageExecutionCandidate = ({
   const attemptNumber = latestAttemptNumber + 1
   const qualityRunId = buildQualityRunId(validatedPlan)
   const attemptFingerprint = hashOutcomeQualityStageValue({
+    ...(normalizedRequestBinding ? { requestBinding: normalizedRequestBinding } : {}),
     qualityRunId,
     planId: validatedPlan.planId,
     planVersion: validatedPlan.planVersion,
@@ -1246,6 +1366,7 @@ export const buildOutcomeQualityStageExecutionCandidate = ({
     runtimeInstanceKey: validatedPlan.runtimeInstanceKey,
     knowledgeCompositionPlanRecordId: toId(validatedPlan._id || validatedPlan.id),
     planId: validatedPlan.planId,
+    ...(normalizedRequestBinding || {}),
     planVersion: Number(validatedPlan.planVersion),
     planFingerprint: lower(validatedPlan.planFingerprint),
     resolutionFingerprint: lower(validatedPlan.resolutionFingerprint),
@@ -1284,14 +1405,18 @@ export const assertOutcomeQualityStageTransactionSupport = (mongooseClient = mon
     || !TRANSACTION_TOPOLOGIES.has(currentTopologyType(mongooseClient))) throw transactionRequired()
 }
 
-const readPlan = async ({ model, planRecordId, runtimeInstanceId, session = null }) => {
-  let query = model.findOne({ _id: planRecordId, runtimeInstanceId, requestId: { $exists: false } })
+const planScope = (requestBinding) => requestBinding
+  ? { requestId: requestBinding.requestId }
+  : { requestId: { $exists: false } }
+
+const readPlan = async ({ model, planRecordId, runtimeInstanceId, requestBinding, session = null }) => {
+  let query = model.findOne({ _id: planRecordId, runtimeInstanceId, ...planScope(requestBinding) })
   if (session && typeof query.session === 'function') query = query.session(session)
   return typeof query.lean === 'function' ? query.lean() : query
 }
 
-const readLatestPlan = async ({ model, runtimeInstanceId, session = null }) => {
-  let query = model.findOne({ runtimeInstanceId, requestId: { $exists: false } }).sort({ planVersion: -1 })
+const readLatestPlan = async ({ model, runtimeInstanceId, requestBinding, session = null }) => {
+  let query = model.findOne({ runtimeInstanceId, ...planScope(requestBinding) }).sort({ planVersion: -1 })
   if (session && typeof query.session === 'function') query = query.session(session)
   return typeof query.lean === 'function' ? query.lean() : query
 }
@@ -1302,11 +1427,13 @@ const readRuntime = async ({ model, runtimeInstanceId, session = null }) => {
   return typeof query.lean === 'function' ? query.lean() : query
 }
 
-const assertCurrentKcpAndRuntime = ({ selectedPlan, latestPlan, runtime, runtimeInstanceId, expectedPlanFingerprint }) => {
-  const selected = validatePlan(selectedPlan, { runtimeInstanceId, expectedPlanFingerprint })
+const assertCurrentKcpAndRuntime = ({ selectedPlan, latestPlan, runtime, runtimeInstanceId, expectedPlanFingerprint, requestBinding }) => {
+  const selected = validatePlan(selectedPlan, { runtimeInstanceId, expectedPlanFingerprint, requestBinding })
   let latest
   try {
-    latest = assertLegacyOutcomeKnowledgeCompositionPlan(latestPlan)
+    latest = requestBinding
+      ? assertOutcomeKnowledgeCompositionPlanIntegrity(latestPlan)
+      : assertLegacyOutcomeKnowledgeCompositionPlan(latestPlan)
   } catch (error) {
     throw kcpInvalid({ field: 'latestPlan', causeCode: error?.code || '' })
   }
@@ -1326,19 +1453,27 @@ const assertCurrentKcpAndRuntime = ({ selectedPlan, latestPlan, runtime, runtime
   return selected
 }
 
-const readLatestStageAttempt = async ({ model, runtimeInstanceId, planId, stageKey, session }) => {
-  let query = model.findOne({ runtimeInstanceId, planId, stageKey }).sort({ attemptNumber: -1 })
+const stageScope = (requestBinding) => requestBinding
+  ? {
+      requestId: requestBinding.requestId,
+      draftId: requestBinding.draftId,
+      draftIterationId: requestBinding.draftIterationId,
+    }
+  : { requestId: { $exists: false } }
+
+const readLatestStageAttempt = async ({ model, runtimeInstanceId, planId, stageKey, requestBinding, session }) => {
+  let query = model.findOne({ runtimeInstanceId, planId, stageKey, ...stageScope(requestBinding) }).sort({ attemptNumber: -1 })
   if (session && typeof query.session === 'function') query = query.session(session)
   return typeof query.lean === 'function' ? query.lean() : query
 }
 
-const readStageAttemptByExecutionId = async ({ model, runtimeInstanceId, planId, stageExecutionId, session = null }) => {
-  let query = model.findOne({ runtimeInstanceId, planId, stageExecutionId })
+const readStageAttemptByExecutionId = async ({ model, runtimeInstanceId, planId, stageExecutionId, requestBinding, session = null }) => {
+  let query = model.findOne({ runtimeInstanceId, planId, stageExecutionId, ...stageScope(requestBinding) })
   if (session && typeof query.session === 'function') query = query.session(session)
   return typeof query.lean === 'function' ? query.lean() : query
 }
 
-const readSourceStageAttempt = async ({ model, runtimeInstanceId, planId, stageKey, session = null }) => {
+const readSourceStageAttempt = async ({ model, runtimeInstanceId, planId, stageKey, requestBinding, session = null }) => {
   const stageOrder = STAGE_ORDERS[upper(stageKey)]
   if (!stageOrder || stageOrder === 1) return null
   return readLatestStageAttempt({
@@ -1346,6 +1481,7 @@ const readSourceStageAttempt = async ({ model, runtimeInstanceId, planId, stageK
     runtimeInstanceId,
     planId,
     stageKey: OUTCOME_QUALITY_STAGE_SEQUENCE[stageOrder - 2],
+    requestBinding,
     session,
   })
 }
@@ -1364,6 +1500,11 @@ export const serializeOutcomeQualityStageExecution = (value) => {
     runtimeInstanceKey: execution.runtimeInstanceKey,
     knowledgeCompositionPlanRecordId: toId(execution.knowledgeCompositionPlanRecordId),
     planId: execution.planId,
+    ...(execution.requestId ? {
+      requestId: execution.requestId,
+      draftId: execution.draftId,
+      draftIterationId: execution.draftIterationId,
+    } : {}),
     planVersion: execution.planVersion,
     planFingerprint: execution.planFingerprint,
     resolutionFingerprint: execution.resolutionFingerprint,
@@ -1410,6 +1551,11 @@ const auditStageExecution = async ({ audit, session, execution, actorUserId }) =
         stageExecutionId: execution.stageExecutionId,
         qualityRunId: execution.qualityRunId,
         planId: execution.planId,
+        ...(execution.requestId ? {
+          requestId: execution.requestId,
+          draftId: execution.draftId,
+          draftIterationId: execution.draftIterationId,
+        } : {}),
         planVersion: execution.planVersion,
         planFingerprint: execution.planFingerprint,
         stageKey: execution.stageKey,
@@ -1544,9 +1690,12 @@ export const createOutcomeQualityStageExecution = async ({
   completedAt,
   expectedAttemptFingerprint,
   actorUserId,
+  scopes,
   remediationSourceStageExecutionId = '',
+  requestBinding,
   deps = {},
 } = {}) => {
+  const normalizedRequestBinding = normalizeRequestBinding(requestBinding)
   if (!mongoose.isValidObjectId(planRecordId)
     || !mongoose.isValidObjectId(runtimeInstanceId)
     || !mongoose.isValidObjectId(actorUserId)
@@ -1566,8 +1715,8 @@ export const createOutcomeQualityStageExecution = async ({
   let initialSourceStage
   try {
     [initialPlan, initialLatestPlan, initialRuntime] = await Promise.all([
-      readPlan({ model: planModel, planRecordId, runtimeInstanceId }),
-      readLatestPlan({ model: planModel, runtimeInstanceId }),
+      readPlan({ model: planModel, planRecordId, runtimeInstanceId, requestBinding: normalizedRequestBinding }),
+      readLatestPlan({ model: planModel, runtimeInstanceId, requestBinding: normalizedRequestBinding }),
       readRuntime({ model: runtimeModel, runtimeInstanceId }),
     ])
   } catch {
@@ -1580,6 +1729,7 @@ export const createOutcomeQualityStageExecution = async ({
     runtime: initialRuntime,
     runtimeInstanceId,
     expectedPlanFingerprint,
+    requestBinding: normalizedRequestBinding,
   })
   try {
     initialSourceStage = toPlain(await readSourceStageAttempt({
@@ -1587,6 +1737,7 @@ export const createOutcomeQualityStageExecution = async ({
       runtimeInstanceId,
       planId: initialCurrentPlan.planId,
       stageKey,
+      requestBinding: normalizedRequestBinding,
     }))
   } catch {
     throw persistenceFailed()
@@ -1606,6 +1757,7 @@ export const createOutcomeQualityStageExecution = async ({
     executionIdentity,
     startedAt,
     completedAt,
+    requestBinding: normalizedRequestBinding,
   })
   if (initialCandidate.attemptFingerprint !== lower(expectedAttemptFingerprint)) {
     throw fingerprintMismatch({ expectedAttemptFingerprint, actualAttemptFingerprint: initialCandidate.attemptFingerprint })
@@ -1622,8 +1774,8 @@ export const createOutcomeQualityStageExecution = async ({
     }
     await session.withTransaction(async () => {
       const [persistedPlan, latestPlan, lockedRuntime] = await Promise.all([
-        readPlan({ model: planModel, planRecordId, runtimeInstanceId, session }),
-        readLatestPlan({ model: planModel, runtimeInstanceId, session }),
+        readPlan({ model: planModel, planRecordId, runtimeInstanceId, requestBinding: normalizedRequestBinding, session }),
+        readLatestPlan({ model: planModel, runtimeInstanceId, requestBinding: normalizedRequestBinding, session }),
         readRuntime({ model: runtimeModel, runtimeInstanceId, session }),
       ])
       if (!persistedPlan || !latestPlan || !lockedRuntime) throw kcpInvalid({ field: 'recordOrFreshnessEvidence' })
@@ -1633,12 +1785,17 @@ export const createOutcomeQualityStageExecution = async ({
         runtime: lockedRuntime,
         runtimeInstanceId,
         expectedPlanFingerprint,
+        requestBinding: normalizedRequestBinding,
       })
+      if (currentPlan.payload.evidenceToMeaning || currentPlan.payload.requestId) {
+        await assertRuntimeEvidenceToMeaningReady({ plan: currentPlan, scopes, session, deps })
+      }
       const transactionSourceStage = toPlain(await readSourceStageAttempt({
         model: stageModel,
         runtimeInstanceId,
         planId: currentPlan.planId,
         stageKey,
+        requestBinding: normalizedRequestBinding,
         session,
       }))
       const candidate = buildOutcomeQualityStageExecutionCandidate({
@@ -1656,6 +1813,7 @@ export const createOutcomeQualityStageExecution = async ({
         executionIdentity,
         startedAt,
         completedAt,
+        requestBinding: normalizedRequestBinding,
       })
       if (candidate.attemptFingerprint !== initialCandidate.attemptFingerprint
         || candidate.attemptFingerprint !== lower(expectedAttemptFingerprint)) {
@@ -1667,6 +1825,7 @@ export const createOutcomeQualityStageExecution = async ({
         runtimeInstanceId,
         planId: candidate.planId,
         stageKey: candidate.stageKey,
+        requestBinding: normalizedRequestBinding,
         session,
       }))
       const remediationStage = remediationSourceStageExecutionId
@@ -1675,6 +1834,7 @@ export const createOutcomeQualityStageExecution = async ({
             runtimeInstanceId,
             planId: currentPlan.planId,
             stageExecutionId: remediationSourceStageExecutionId,
+            requestBinding: normalizedRequestBinding,
             session,
           }))
         : null
@@ -1733,6 +1893,7 @@ export const createOutcomeQualityStageExecution = async ({
       await auditStageExecution({ audit, session, execution: created, actorUserId })
     })
   } catch (error) {
+    if (error?.code === 'EVIDENCE_TO_MEANING_CLARIFICATION_REQUIRED') throw error
     if (Object.values(OUTCOME_QUALITY_STAGE_ERROR_CODES).includes(error?.code)) throw error
     if (isWriteConflict(error)) throw versionConflict({ conflict: true })
     throw persistenceFailed()

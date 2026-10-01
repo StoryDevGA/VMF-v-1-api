@@ -79,7 +79,7 @@ const makeResponse = ({ body = makeProviderBody(), status = 200 } = {}) => ({
 const validConfig = (overrides = {}) => ({
   outcomeStudioProviderEnabled: true,
   outcomeStudioProviderKey: 'openai',
-  outcomeStudioProviderModel: 'approved-test-model',
+  outcomeStudioProviderModel: 'gpt-5.2',
   outcomeStudioProviderApiKey: 'test-secret-not-real',
   outcomeStudioProviderTimeoutMs: 5000,
   outcomeStudioProviderMaxRetries: 2,
@@ -179,6 +179,20 @@ describe('Outcome Studio Development/Test provider configuration', () => {
     })
   })
 
+  test('remains fail-closed for an unsupported governed model', () => {
+    const runtime = buildOutcomeStudioProviderRuntime({
+      config: validConfig({ outcomeStudioProviderModel: 'approved-test-model' }),
+    })
+
+    expect(runtime).toEqual({
+      deps: { executionMode: 'LIVE_TEST' },
+      status: {
+        configured: false,
+        reason: 'PROVIDER_CONFIGURATION_UNSUPPORTED_MODEL',
+      },
+    })
+  })
+
   test.each([
     ['application production', { appEnv: 'production', isAppProduction: true }],
     ['staging', { appEnv: 'staging' }],
@@ -205,9 +219,12 @@ describe('Outcome Studio Development/Test provider configuration', () => {
       configured: true,
       reason: 'LIVE_TEST_PROVIDER_CONFIGURED',
       providerKey: 'openai',
-      model: 'approved-test-model',
+      model: 'gpt-5.2',
     })
     expect(runtime.deps.providerAdapter).toEqual(expect.any(Function))
+    expect(runtime.deps.frameworkGuidanceProviderAdapterFactory).toEqual(expect.any(Function))
+    expect(runtime.deps.workingDraftProviderAdapterFactory).toEqual(expect.any(Function))
+    expect(runtime.deps.renderedExpressionRlProviderAdapterFactory).toEqual(expect.any(Function))
   })
 
   test('builds the exact LIVE_TEST descriptor only for complete non-production configuration', () => {
@@ -220,19 +237,23 @@ describe('Outcome Studio Development/Test provider configuration', () => {
       configured: true,
       reason: 'LIVE_TEST_PROVIDER_CONFIGURED',
       providerKey: 'openai',
-      model: 'approved-test-model',
+      model: 'gpt-5.2',
     })
     expect(runtime.deps).toEqual({
       executionMode: 'LIVE_TEST',
+      arlMeaningReviewProviderAdapterFactory: expect.any(Function),
+      frameworkGuidanceProviderAdapterFactory: expect.any(Function),
       providerAdapter: expect.any(Function),
       providerDescriptor: {
         providerKey: 'openai',
-        model: 'approved-test-model',
+        model: 'gpt-5.2',
         providerMode: 'LIVE_TEST',
         environment: 'TEST',
         safeContextPolicyKey: 'OUTCOME_STUDIO_PROVIDER_SAFE_CONTEXT_V1',
         failurePosture: 'FAIL_CLOSED',
       },
+      renderedExpressionRlProviderAdapterFactory: expect.any(Function),
+      workingDraftProviderAdapterFactory: expect.any(Function),
     })
     expect(JSON.stringify(runtime)).not.toContain('test-secret-not-real')
   })

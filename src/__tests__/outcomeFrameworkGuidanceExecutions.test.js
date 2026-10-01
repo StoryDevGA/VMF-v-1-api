@@ -1,3 +1,9 @@
+import { OutcomeKnowledgeCompositionPlan, RuntimeInstance, OutcomeQualityStageExecution, AuditLog } from '../models/index.js'
+import { assertRuntimeEvidenceToMeaningReady } from '../services/outcomeRuntimeEvidenceToMeaningService.js'
+import { makeSs040Fixture } from './fixtures/ss040EvidenceToMeaningFixtures.js'
+import { compileEvidenceToMeaningContract, hashEvidenceToMeaningValue } from '../services/outcomeEvidenceToMeaningContractService.js'
+import { projectEvidenceToMeaningProviderContract } from '../services/outcomeEvidenceToMeaningProviderService.js'
+import { attachSs040PlanFixtureContract, readSs040PlanFixtureSnapshot, ss040TargetHashFor } from './fixtures/ss040EvidenceToMeaningFixtures.js'
 import { createHash } from 'node:crypto'
 
 import mongoose from 'mongoose'
@@ -7,6 +13,7 @@ import {
   OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSION,
   OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSIONS,
   OUTCOME_FRAMEWORK_GUIDANCE_SCHEMA_VERSION,
+  OUTCOME_WORKING_DRAFT_PROVIDER_CONFIG_VERSION,
   OUTCOME_QUALITY_STAGE_STATUSES,
   OUTCOME_QUALITY_STAGES,
 } from '../constants/outcomeGovernedQuality.js'
@@ -17,6 +24,7 @@ import {
 } from '../services/outcomeKnowledgeCompositionPlanService.js'
 import {
   buildOutcomeQualityStageExecutionCandidate,
+  createOutcomeQualityStageExecution,
   hashOutcomeQualityStageValue,
 } from '../services/outcomeQualityStageExecutionService.js'
 import {
@@ -24,6 +32,8 @@ import {
 } from '../services/outcomeStudioProviderSafeContextService.js'
 import { createOpenAiOutcomeFrameworkGuidanceProviderAdapter } from '../services/openAiOutcomeFrameworkGuidanceProviderAdapter.js'
 import { executeOutcomeFrameworkGuidance } from '../services/outcomeFrameworkGuidanceExecutionService.js'
+import { executeOutcomeWorkingDraft } from '../services/outcomeWorkingDraftExecutionService.js'
+import { approveOutcomeWorkingDraftMeaning } from '../services/outcomeArlMeaningReviewService.js'
 import {
   findOutcomeFrameworkGuidanceStageClaim,
   OUTCOME_FRAMEWORK_GUIDANCE_STAGE_CLAIM_PATTERN_ID_VALUES,
@@ -113,7 +123,7 @@ const makePack = ({ packType, packKey, knowledgeLayer, capabilityKey = '', suffi
   executionMode: packType === 'TRUTH_CERTIFICATION' ? 'POST_VALIDATION' : 'PROVIDER_CONTEXT',
   visibility: 'PLATFORM',
   workspaceCompatibility: ['OUTCOME'],
-  contentHash: `sha256:${suffix.repeat(64).slice(0, 64)}`,
+  contentHash: ss040TargetHashFor(capabilityKey) || `sha256:${suffix.repeat(64).slice(0, 64)}`,
   relationshipContractVersion: 'SS002_RELATIONSHIP_V1',
   relationshipChecksum: emptyRelationshipHash,
   relationshipGovernanceError: '',
@@ -198,6 +208,8 @@ const makePlan = (runtime = makeRuntime()) => {
       unresolvedGaps: ['Exact delivery file type is not specified', 'Exact delivery channel is not specified'],
     },
   })
+  attachSs040PlanFixtureContract(candidate.payload)
+  candidate.planFingerprint = hashOutcomeKnowledgeCompositionSemanticValue(candidate.payload)
   return {
     _id: ids.plan,
     planId: 'outcome_kcp_qa',
@@ -239,6 +251,7 @@ const makeLegacyPlan = ({ acceptedLeaf = false, runtime = makeRuntime() } = {}) 
     delete section.stateSectionKey
     if (acceptedLeaf) section.runtimePath = `${section.runtimePath}.accepted`
   })
+  attachSs040PlanFixtureContract(plan.payload)
   plan.planFingerprint = hashOutcomeKnowledgeCompositionSemanticValue(plan.payload)
   return plan
 }
@@ -277,6 +290,7 @@ const makeOutput = (plan = makePlan()) => {
 }
 
 const makeModels = ({ plan = makePlan(), runtime = makeRuntime(), latestStage = null } = {}) => ({
+  readOutcomeEvidenceContractSnapshot: jest.fn(async () => readSs040PlanFixtureSnapshot(plan)),
   OutcomeKnowledgeCompositionPlan: {
     findOne: jest.fn((filter) => {
       if (filter._id) return { lean: jest.fn().mockResolvedValue(plan) }
@@ -646,23 +660,42 @@ describe('OpenAI framework/guidance provider profile', () => {
     expect(JSON.stringify(result)).not.toContain('test-secret-not-real')
   })
 
-  test('freezes the hardened pre-ARL request under the active V6 diagnostics identity', async () => {
+  test('freezes the bounded framework request under the active V8 single-line identity', async () => {
     const fetchImpl = jest.fn().mockResolvedValue(response())
     const adapter = makeAdapter({ fetchImpl })
     const result = await adapter({ providerContext: {} })
     const [, options] = fetchImpl.mock.calls[0]
     const requestHash = createHash('sha256').update(options.body).digest('hex')
-    expect(requestHash).toBe('47c3c1b9f7d1658ac3af779e227950d5fa6c37e4e1045d980e4be9eb20cbb998')
     expect(options.headers['Idempotency-Key']).toBe(requestHash)
     const requestBody = JSON.parse(options.body)
-    expect(requestBody.instructions).toContain('Framework Guidance occurs before ARL review')
-    expect(requestBody.instructions).toContain('remain unapproved')
-    expect(requestBody.instructions).toContain('ARL approval is still required downstream')
-    expect(requestBody.instructions).toContain('approved source evidence and historical source approvals')
+    expect(requestBody.instructions).toContain('does not establish the fact')
+    expect(requestBody.instructions).toContain('source-presented claims requiring qualification')
+    expect(requestBody.instructions).toContain('explicitly labelled hypothesis')
+    expect(requestBody.instructions).toContain('Do not mention ARL, RL, internal quality stages')
+    expect(requestBody.instructions).toContain('do not emit newline or other control characters')
+    expect(requestBody.instructions).not.toContain('ARL approval is still required downstream')
     expect(result.metadata.configurationVersion)
-      .toBe(OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V6_ARL_BOUNDARY_DIAGNOSTICS)
+      .toBe(OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V8_SINGLE_LINE_TEXT)
     expect(result).not.toHaveProperty('diagnostic')
     expect(result.metadata).not.toHaveProperty('diagnostic')
+  })
+
+  test('rejects generated text containing line breaks before stage persistence', async () => {
+    const output = structuredClone(semanticProviderOutput)
+    output.sections.customer_context.recommendations = ['First dependency.\nSecond dependency.']
+    const fetchImpl = jest.fn().mockResolvedValue(response({ body: providerBody(output) }))
+    const adapter = makeAdapter({ fetchImpl })
+
+    await expect(adapter({ providerContext: {} })).rejects.toMatchObject({
+      code: 'OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_FAILED',
+      details: {
+        reason: 'FRAMEWORK_GUIDANCE_PROVIDER_OUTPUT_INVALID',
+        diagnostic: {
+          diagnosticClass: 'OUTPUT_SCHEMA',
+          issuePathClasses: ['sections.*.recommendations'],
+        },
+      },
+    })
   })
 
   test.each([
@@ -1204,10 +1237,11 @@ describe('framework/guidance orchestration contract', () => {
       expect(call.payload.idempotencyKey).toContain(plan.planId)
       expect(call.deps.resolveKnowledgeBinding).toEqual(expect.any(Function))
       const facade = await call.deps.resolveKnowledgeBinding()
-      const selected = facade.binding.postValidationPacks.map(({ versionId, knowledgeLayer, executionMode }) => ({
+      const selected = facade.binding.postValidationPacks.map(({ versionId, knowledgeLayer, executionMode, packType }) => ({
         versionId,
         knowledgeLayer,
         executionMode,
+        packType,
       }))
       const safeRequest = buildOutcomeStudioProviderSafeRequest({
         providerDescriptor: descriptor,
@@ -1217,7 +1251,8 @@ describe('framework/guidance orchestration contract', () => {
         providerDescriptor: descriptor,
         safeRequest,
         truthSource: truthSource(runtime),
-        knowledgeSelection: selected,
+        knowledgeSelection: [],
+        boundarySelection: selected,
       })
       expect(safeContext.draftContext).toEqual({ content: '' })
       expect(safeContext.truthSummaries.map(({ label }) => label))
@@ -1256,6 +1291,8 @@ describe('framework/guidance orchestration contract', () => {
     OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V4_SAFE_OUTPUT_DIAGNOSTICS,
     OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V5_SEMANTIC_CLAIM_CALIBRATION,
     OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V6_ARL_BOUNDARY_DIAGNOSTICS,
+    OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V7_REALITY_BOUNDARIES,
+    OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V8_SINGLE_LINE_TEXT,
   ])('allows exact legacy V1 output-invalid recovery under repaired-output adapter %s', async (
     adapterConfigurationVersion,
   ) => {
@@ -1278,7 +1315,7 @@ describe('framework/guidance orchestration contract', () => {
     }))
   })
 
-  test('allows exact retryable V2 timeout to advance to the active V6 adapter', async () => {
+  test('allows exact retryable V2 timeout to advance to the active V8 adapter', async () => {
     const plan = makePlan()
     const latestStage = makeNonRetryableProviderStage({
       plan,
@@ -1297,7 +1334,7 @@ describe('framework/guidance orchestration contract', () => {
       predecessorAttemptFingerprint: latestStage.attemptFingerprint,
       executionIdentity: expect.objectContaining({
         providerConfigurationVersion:
-          OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V6_ARL_BOUNDARY_DIAGNOSTICS,
+          OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V8_SINGLE_LINE_TEXT,
       }),
     }))
   })
@@ -1356,7 +1393,7 @@ describe('framework/guidance orchestration contract', () => {
     }))
   })
 
-  test('allows exact non-retryable V5 output-invalid recovery under the active V6 adapter', async () => {
+  test('allows exact non-retryable V5 output-invalid recovery under the active V8 adapter', async () => {
     const plan = makePlan()
     const latestStage = makeNonRetryableProviderStage({
       plan,
@@ -1373,7 +1410,7 @@ describe('framework/guidance orchestration contract', () => {
       predecessorAttemptFingerprint: latestStage.attemptFingerprint,
       executionIdentity: expect.objectContaining({
         providerConfigurationVersion:
-          OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V6_ARL_BOUNDARY_DIAGNOSTICS,
+          OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V8_SINGLE_LINE_TEXT,
       }),
     }))
   })
@@ -1638,7 +1675,32 @@ describe('framework/guidance orchestration contract', () => {
         providerDescriptor: descriptor,
         safeRequest,
         truthSource: truthSource(runtime),
-        knowledgeSelection: [{ versionId: 'substituted-version', knowledgeLayer: 'VALIDATION', executionMode: 'POST_VALIDATION' }],
+        knowledgeSelection: [],
+        boundarySelection: [{ versionId: 'substituted-version', knowledgeLayer: 'VALIDATION', executionMode: 'POST_VALIDATION', packType: 'TRUTH_CERTIFICATION' }],
+      })
+    })
+    await expect(executeOutcomeFrameworkGuidance(args)).rejects.toMatchObject({
+      code: 'OUTCOME_FRAMEWORK_GUIDANCE_BINDING_INVALID',
+    })
+    expect(args.deps.createOutcomeQualityStageExecution).not.toHaveBeenCalled()
+  })
+
+  test('blocks any generation-context selection for post-validation Framework Guidance packs', async () => {
+    const plan = makePlan()
+    const runtime = makeRuntime()
+    const { args } = executeArgs({ plan, runtime })
+    args.deps.createGovernedReasoningExecution.mockImplementation(async (call) => {
+      const facade = await call.deps.resolveKnowledgeBinding()
+      const boundarySelection = facade.binding.postValidationPacks.map(({
+        versionId, knowledgeLayer, executionMode, packType,
+      }) => ({ versionId, knowledgeLayer, executionMode, packType }))
+      const safeRequest = buildOutcomeStudioProviderSafeRequest({ providerDescriptor: descriptor, providerInput: call.deps.providerInput })
+      await call.deps.buildProviderSafeContext({
+        providerDescriptor: descriptor,
+        safeRequest,
+        truthSource: truthSource(runtime),
+        knowledgeSelection: [boundarySelection[0]],
+        boundarySelection,
       })
     })
     await expect(executeOutcomeFrameworkGuidance(args)).rejects.toMatchObject({
@@ -1656,13 +1718,14 @@ describe('framework/guidance orchestration contract', () => {
     args.providerAdapterFactory.mockReturnValue(providerAdapter)
     args.deps.createGovernedReasoningExecution.mockImplementation(async (call) => {
       const facade = await call.deps.resolveKnowledgeBinding()
-      const selected = facade.binding.postValidationPacks.map(({ versionId, knowledgeLayer, executionMode }) => ({ versionId, knowledgeLayer, executionMode }))
+      const selected = facade.binding.postValidationPacks.map(({ versionId, knowledgeLayer, executionMode, packType }) => ({ versionId, knowledgeLayer, executionMode, packType }))
       const safeRequest = buildOutcomeStudioProviderSafeRequest({ providerDescriptor: descriptor, providerInput: call.deps.providerInput })
       return call.deps.buildProviderSafeContext({
         providerDescriptor: descriptor,
         safeRequest,
         truthSource: truthSource(runtime),
-        knowledgeSelection: selected,
+        knowledgeSelection: [],
+        boundarySelection: selected,
       })
     })
     await expect(executeOutcomeFrameworkGuidance(args)).rejects.toMatchObject({
@@ -1750,7 +1813,7 @@ describe('framework/guidance orchestration contract', () => {
       predecessorAttemptFingerprint: latestStage.attemptFingerprint,
       executionIdentity: {
         providerConfigurationVersion:
-          OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V6_ARL_BOUNDARY_DIAGNOSTICS,
+          OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V8_SINGLE_LINE_TEXT,
         grrExecutionId: '',
         grrRuntimeArtifactId: '',
       },
@@ -1852,4 +1915,105 @@ describe('framework/guidance orchestration contract', () => {
     expect(fingerprints[0]).toBe(fingerprints[1])
     expect(result.stage.status).toBe('SUCCEEDED')
   })
+})
+
+
+describe('SS-040 all provider stages fail closed', () => {
+  test.each([
+    ['Framework guidance', executeOutcomeFrameworkGuidance],
+    ['Working Draft', executeOutcomeWorkingDraft],
+    ['ARL', approveOutcomeWorkingDraftMeaning],
+  ])('%s rejects missing contract before adapter, GRR or stage persistence', async (_name, execute) => {
+    const plan = makePlan()
+    delete plan.payload.evidenceToMeaning
+    plan.planFingerprint = hashOutcomeKnowledgeCompositionSemanticValue(plan.payload)
+    const { args } = executeArgs({ plan })
+    args.providerAdapter = jest.fn()
+    args.providerAdapter.configurationVersion = OUTCOME_WORKING_DRAFT_PROVIDER_CONFIG_VERSION
+    await expect(execute(args)).rejects.toMatchObject({
+      code: 'EVIDENCE_TO_MEANING_CLARIFICATION_REQUIRED',
+      details: { reason: 'CONTRACT_REQUIRED_RE_RESOLVE_REQUEST' },
+    })
+    expect(args.providerAdapterFactory).not.toHaveBeenCalled()
+    expect(args.providerAdapter).not.toHaveBeenCalled()
+    expect(args.deps.createGovernedReasoningExecution).not.toHaveBeenCalled()
+    expect(args.deps.createOutcomeQualityStageExecution).not.toHaveBeenCalled()
+  })
+  test.each([
+    ['Framework guidance', executeOutcomeFrameworkGuidance],
+    ['Working Draft', executeOutcomeWorkingDraft],
+    ['ARL', approveOutcomeWorkingDraftMeaning],
+  ])('%s rejects stored proof drift before provider', async (_name, execute) => {
+    const plan = makePlan(), snapshot = readSs040PlanFixtureSnapshot(plan)
+    snapshot.evidenceObjects[0].attribution = 'Changed stored author'
+    const { args } = executeArgs({ plan })
+    args.deps.readOutcomeEvidenceContractSnapshot.mockResolvedValue(snapshot)
+    args.providerAdapter = jest.fn()
+    args.providerAdapter.configurationVersion = OUTCOME_WORKING_DRAFT_PROVIDER_CONFIG_VERSION
+    await expect(execute(args)).rejects.toMatchObject({
+      code: 'EVIDENCE_TO_MEANING_CLARIFICATION_REQUIRED',
+      details: { reason: 'SOURCE_SNAPSHOT_CHANGED_RE_RESOLVE_REQUEST' },
+    })
+    expect(args.providerAdapterFactory).not.toHaveBeenCalled()
+    expect(args.deps.createGovernedReasoningExecution).not.toHaveBeenCalled()
+    expect(args.deps.createOutcomeQualityStageExecution).not.toHaveBeenCalled()
+  })
+})
+
+test('SS-040 rejects private Framework prose even in a rehashed projection before fetch', async () => {
+  const projection = projectEvidenceToMeaningProviderContract(compileEvidenceToMeaningContract(makeSs040Fixture()))
+  projection.frameworkGuidance.content = { guidance: [{ instructions: 'person@example.test' }] }
+  const { projectionHash, ...payload } = projection
+  projection.projectionHash = hashEvidenceToMeaningValue(payload)
+  const fetchImpl = jest.fn(), providerContext = makeContext()
+
+  await expect(makeAdapter({ fetchImpl })({ providerContext, evidenceToMeaning: projection })).rejects.toThrow()
+  expect(fetchImpl).not.toHaveBeenCalled()
+})
+
+const isolatedStageTest = process.env.KCP_ISOLATION_TEST_URI ? test : test.skip
+isolatedStageTest('SS-040 real transaction rejects source drift after successful preflight without stage/audit writes', async () => {
+  const uri = process.env.KCP_ISOLATION_TEST_URI
+  if (!/^mongodb:\/\/127\.0\.0\.1:\d+\/kcp_isolation_\d+\?replicaSet=kcp_isolation$/.test(uri)) throw new Error('Fresh isolated loopback replica required')
+  await mongoose.connect(uri, { autoIndex: false, autoCreate: false })
+  try {
+    await OutcomeQualityStageExecution.createCollection()
+    const runtime = makeRuntime(), plan = makePlan(runtime)
+    runtime.framework_state.evidence_pack = readSs040PlanFixtureSnapshot(plan)
+    await RuntimeInstance.collection.replaceOne({ _id: runtime._id }, runtime, { upsert: true })
+    await OutcomeKnowledgeCompositionPlan.collection.insertOne(plan)
+    const readOutcomeEvidenceContractSnapshot = async ({ session = null }) => {
+      const query = RuntimeInstance.findOne({ _id: runtime._id }).select('framework_state.evidence_pack').lean()
+      if (session) query.session(session)
+      return JSON.parse(JSON.stringify((await query).framework_state.evidence_pack))
+    }
+    await assertRuntimeEvidenceToMeaningReady({ plan, deps: { readOutcomeEvidenceContractSnapshot } })
+    await RuntimeInstance.collection.updateOne({ _id: runtime._id }, { $set: {
+      'framework_state.evidence_pack.evidenceObjects.0.attribution': 'Changed stored author' } })
+    const before = [await OutcomeQualityStageExecution.countDocuments(), await AuditLog.countDocuments()]
+    const executionIdentity = { executionMode: 'LIVE_TEST', providerKey: 'openai', model: descriptor.model,
+      providerConfigurationVersion: OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSION,
+      grrExecutionId: 'isolated-grr', grrRuntimeArtifactId: 'isolated-artifact', runtimeVersion: runtimeUpdatedAt }
+    const input = { plan, runtimeInstanceId: ids.runtime, expectedPlanFingerprint: plan.planFingerprint,
+      stageKey: OUTCOME_QUALITY_STAGES.FRAMEWORK_GUIDANCE, status: OUTCOME_QUALITY_STAGE_STATUSES.SUCCEEDED,
+      output: makeOutput(plan), executionIdentity, startedAt: '2026-08-03T09:00:00.000Z', completedAt: '2026-08-03T09:00:01.000Z' }
+    const candidate = buildOutcomeQualityStageExecutionCandidate(input)
+    await expect(createOutcomeQualityStageExecution({ ...input, planRecordId: plan._id,
+      actorUserId: ids.actor, expectedAttemptFingerprint: candidate.attemptFingerprint,
+      deps: { readOutcomeEvidenceContractSnapshot } })).rejects.toMatchObject({ status: 409,
+      details: { reason: 'SOURCE_SNAPSHOT_CHANGED_RE_RESOLVE_REQUEST' } })
+    expect([await OutcomeQualityStageExecution.countDocuments(), await AuditLog.countDocuments()]).toEqual(before)
+  } finally { await mongoose.disconnect() }
+}, 30000)
+
+test('SS-040 Framework input binds exact customer contract separately from Framework guidance', async () => {
+  const projection = projectEvidenceToMeaningProviderContract(compileEvidenceToMeaningContract(makeSs040Fixture({ name: 'BuildQM' })))
+  const fetchImpl = jest.fn().mockResolvedValue(response())
+  await makeAdapter({ fetchImpl })({ providerContext: makeContext(), evidenceToMeaning: projection })
+  const body = JSON.parse(fetchImpl.mock.calls[0][1].body), input = JSON.parse(body.input)
+  expect(input.customerEvidence.contractHash).toBe(projection.contractHash)
+  expect(input.customerEvidence.customerClaims[0].attribution.stored).toBe('BuildQM')
+  expect(input.frameworkGuidance).toEqual(makeContext().guidance)
+  expect(input).not.toHaveProperty('verifiedBusinessInformation')
+  expect(body.instructions).not.toContain('Parlon')
 })

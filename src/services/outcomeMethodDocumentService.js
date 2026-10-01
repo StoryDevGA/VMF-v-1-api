@@ -15,6 +15,9 @@ const CHUNK_CHARS = 8000
 const BOUNDARIES = { ARL: 'GENERATION_CONTEXT', RL: 'POST_GENERATION_VALIDATION' }
 const DOCUMENT_KEYS = ['contractVersion', 'role', 'boundary', 'source', 'chunks']
 const SOURCE_KEYS = ['packId', 'packKey', 'versionId', 'semanticVersion', 'contentHash', 'contentFormat']
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARACTER_PATTERN = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u
+const SENSITIVE_CONTENT_PATTERN = /\b(?:mongodb(?:\+srv)?|postgres(?:ql)?|redis):\/\/|\bsk-[A-Za-z0-9_-]{16,}|-----BEGIN [^-]*PRIVATE KEY-----|\bbearer\s+[A-Za-z0-9._~+\x2F-]{16,}|\b(?:api[_ -]?key|password|secret)\s*[:=]\s*["']?\S{8,}/i
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
   && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key))
 const hash = (value) => `sha256:${createHash('sha256').update(value, 'utf8').digest('hex')}`
@@ -27,9 +30,9 @@ const reject = (field) => {
 }
 const assertText = (content) => {
   if (typeof content !== 'string' || !content.trim() || !content.isWellFormed()
-    || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(content)
+    || CONTROL_CHARACTER_PATTERN.test(content)
     || Buffer.byteLength(content, 'utf8') > MAX_METHOD_DOCUMENT_BYTES
-    || /\b(?:mongodb(?:\+srv)?|postgres(?:ql)?|redis):\/\/|\bsk-[A-Za-z0-9_-]{16,}|-----BEGIN [^-]*PRIVATE KEY-----|\bbearer\s+[A-Za-z0-9._~+\/-]{16,}|\b(?:api[_ -]?key|password|secret)\s*[:=]\s*["']?\S{8,}/i.test(content)) reject('methodDocument.content')
+    || SENSITIVE_CONTENT_PATTERN.test(content)) reject('methodDocument.content')
 }
 
 export const readOutcomeMethodDocument = (document) => document.chunks.map((chunk) => chunk.text).join('')

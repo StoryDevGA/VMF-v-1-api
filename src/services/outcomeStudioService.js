@@ -15,6 +15,7 @@ import {
   OUTCOME_STUDIO_DRAFT_DISCARD_BLOCKER_REASONS,
   OUTCOME_STUDIO_DRAFT_STATUSES,
   OUTCOME_STUDIO_EXPORT_FORMATS,
+  OUTCOME_STUDIO_GOVERNED_PHASE,
   OUTCOME_STUDIO_RENDER_FORMATS,
   OUTCOME_STUDIO_RENDER_OUTPUT_STATUSES,
   OUTCOME_STUDIO_MESSAGE_ROLES,
@@ -47,6 +48,7 @@ import {
   OutcomeDraftIteration,
   OutcomeMessage,
   OutcomeKnowledgeCompositionPlan,
+  OutcomeQualityStageExecution,
   OutcomeSession,
   TruthSignature,
 } from '../models/index.js'
@@ -154,6 +156,18 @@ import {
 } from './outcomeStudioResolutionService.js'
 import { buildOutcomeStudioLiveComposition, resolveOutcomeStudioCompositionInputs } from './outcomeStudioLiveCompositionBridgeService.js'
 import { buildOutcomeStudioProviderRuntime } from '../config/outcomeStudioProvider.js'
+import { executeOutcomeFrameworkGuidance } from './outcomeFrameworkGuidanceExecutionService.js'
+import { executeOutcomeWorkingDraft } from './outcomeWorkingDraftExecutionService.js'
+import { approveOutcomeWorkingDraftMeaning } from './outcomeArlMeaningReviewService.js'
+import {
+  createOutcomeNarrativePlan,
+  createOutcomeShapedCandidate,
+} from './outcomePostArlQualityChainService.js'
+import { executeOutcomeRenderedExpressionRl } from './outcomeRenderedExpressionRlExecutionService.js'
+import {
+  OUTCOME_QUALITY_STAGE_SEQUENCE,
+  OUTCOME_QUALITY_STAGE_STATUSES,
+} from '../constants/outcomeGovernedQuality.js'
 import {
   assertOutcomeStudioOutputContractResolution,
   completeOutcomeStudioOutputContractResolution,
@@ -163,6 +177,7 @@ import {
 const normalizeText = (value) => String(value ?? '').trim()
 const normalizeToken = (value) => normalizeText(value).toUpperCase()
 const normalizeCapabilityKey = (value) => normalizeText(value).toLowerCase()
+const OUTCOME_GOVERNED_EXECUTION_SEQUENCE = Object.freeze(OUTCOME_QUALITY_STAGE_SEQUENCE.slice(0, 6))
 const projectApprovedOutcomeTitle = ({ outputTypeLabel = '', title = '' } = {}) => {
   const normalizedLabel = normalizeText(outputTypeLabel)
   const normalizedTitle = normalizeText(title)
@@ -2249,13 +2264,89 @@ const indexUniqueExecutionChecks = (checks = []) => {
   return { indexed, malformed }
 }
 
+export const buildGovernedQualityChainApprovalReadiness = ({
+  draft = {},
+  iteration = null,
+  requestPlan = null,
+} = {}) => {
+  const safeDraft = toPlainObject(draft)
+  const safeIteration = iteration ? toPlainObject(iteration) : null
+  const chain = safeIteration?.lineageSummary?.governedQualityChain
+    || safeDraft.lineageSummary?.governedQualityChain
+  const requestPlanIdentityMatches = !requestPlan
+    ? true
+    : Boolean(
+      normalizeText(chain?.requestId)
+      && normalizeText(chain?.planId)
+      && normalizeText(chain?.planFingerprint)
+      && normalizeText(requestPlan.requestId)
+      && normalizeText(requestPlan.planId)
+      && normalizeText(requestPlan.planFingerprint)
+      && normalizeText(chain.requestId) === normalizeText(requestPlan.requestId)
+      && normalizeText(chain.planId) === normalizeText(requestPlan.planId)
+      && normalizeText(chain.planFingerprint).toLowerCase()
+        === normalizeText(requestPlan.planFingerprint).toLowerCase(),
+    )
+  const stages = Array.isArray(chain?.stages) ? chain.stages : []
+  const valid = requestPlanIdentityMatches
+    && chain?.contractVersion === 'outcome-studio.governed-quality-chain.v1'
+    && chain?.status === 'PASSED'
+    && Boolean(normalizeText(chain?.requestId))
+    && Boolean(normalizeText(chain?.planId))
+    && Boolean(normalizeText(chain?.planFingerprint))
+    && normalizeText(chain?.draftId) === normalizeText(safeDraft.draftId)
+    && normalizeText(chain?.draftIterationId) === normalizeText(safeDraft.currentIterationId)
+    && (!safeIteration || normalizeText(chain?.draftIterationId) === normalizeText(safeIteration.draftIterationId))
+    && stages.length === OUTCOME_GOVERNED_EXECUTION_SEQUENCE.length
+    && stages.every((stage, index) => (
+      stage?.stageKey === OUTCOME_GOVERNED_EXECUTION_SEQUENCE[index]
+      && Number(stage?.stageOrder) === index + 1
+      && stage?.status === OUTCOME_QUALITY_STAGE_STATUSES.SUCCEEDED
+      && Boolean(normalizeText(stage?.stageExecutionId))
+      && Boolean(normalizeText(stage?.attemptFingerprint))
+      && Boolean(normalizeText(stage?.outputFingerprint))
+      && (index === 0 || normalizeText(stage?.predecessorStageExecutionId)
+        === normalizeText(stages[index - 1]?.stageExecutionId))
+      && (index === 0 || normalizeText(stage?.predecessorAttemptFingerprint).toLowerCase()
+        === normalizeText(stages[index - 1]?.attemptFingerprint).toLowerCase())
+      && (![0, 1, 2, 5].includes(index)
+        || (Boolean(normalizeText(stage?.grrExecutionId))
+          && Boolean(normalizeText(stage?.grrRuntimeArtifactId))))
+    ))
+  return {
+    contractVersion: OUTCOME_EXECUTION_APPROVAL_READINESS_CONTRACT_VERSION,
+    status: valid ? 'PASSED' : 'BLOCKED',
+    approvalAvailable: valid,
+    blockerReason: valid
+      ? ''
+      : requestPlan && !requestPlanIdentityMatches
+        ? 'OUTCOME_GOVERNED_QUALITY_CHAIN_NOT_CURRENT'
+        : 'OUTCOME_GOVERNED_QUALITY_CHAIN_INCOMPLETE',
+    message: valid
+      ? 'All six governed quality stages passed for this exact draft version.'
+      : 'Approval is blocked until all six governed quality stages pass for this exact draft version.',
+    expectedPackCount: 0,
+    passedPackCount: 0,
+    requiredRuntimeCheckCount: OUTCOME_GOVERNED_EXECUTION_SEQUENCE.length,
+    passedRuntimeCheckCount: valid ? OUTCOME_GOVERNED_EXECUTION_SEQUENCE.length : 0,
+  }
+}
+
 const buildOutcomeExecutionApprovalReadiness = ({
   draft = {},
   iteration = null,
   knowledgePackBinding = null,
+  requestPlan = null,
 } = {}) => {
   const safeDraft = toPlainObject(draft)
   const safeIteration = iteration ? toPlainObject(iteration) : null
+  if (normalizeText(safeIteration?.phase || safeDraft.phase) === OUTCOME_STUDIO_GOVERNED_PHASE) {
+    return buildGovernedQualityChainApprovalReadiness({
+      draft: safeDraft,
+      iteration: safeIteration,
+      requestPlan,
+    })
+  }
   const draftId = normalizeText(safeDraft.draftId)
   const currentIterationId = normalizeText(safeDraft.currentIterationId)
   const currentIterationNumber = Number(safeDraft.currentIterationNumber || 0)
@@ -2744,7 +2835,7 @@ const sanitizePersistedRequestPlan = (contextBindings = {}) => {
     planFingerprint: normalizeText(requestPlan.planFingerprint),
     clarificationReceiptId: normalizeText(requestPlan.clarificationReceiptId),
   }
-  return projected.requestId && projected.planId ? projected : null
+  return Object.values(projected).some(Boolean) ? projected : null
 }
 
 const sanitizePersistedClarificationReceipt = (contextBindings = {}) => {
@@ -2954,6 +3045,32 @@ const sanitizeApprovedBaselineLineage = (lineage = {}) => {
   }
 }
 
+const sanitizeGovernedQualityChainLineage = (lineage = {}) => {
+  const chain = lineage.governedQualityChain
+  if (!chain || typeof chain !== 'object' || !Array.isArray(chain.stages)) return null
+  return {
+    contractVersion: normalizeText(chain.contractVersion),
+    status: normalizeToken(chain.status),
+    requestId: normalizeText(chain.requestId),
+    planId: normalizeText(chain.planId),
+    planFingerprint: normalizeText(chain.planFingerprint),
+    draftId: normalizeText(chain.draftId),
+    draftIterationId: normalizeText(chain.draftIterationId),
+    stages: chain.stages.map((stage) => ({
+      stageKey: normalizeToken(stage?.stageKey),
+      stageOrder: Number(stage?.stageOrder || 0),
+      status: normalizeToken(stage?.status),
+      stageExecutionId: normalizeText(stage?.stageExecutionId),
+      attemptFingerprint: normalizeText(stage?.attemptFingerprint),
+      outputFingerprint: normalizeText(stage?.outputFingerprint),
+      predecessorStageExecutionId: normalizeText(stage?.predecessorStageExecutionId),
+      predecessorAttemptFingerprint: normalizeText(stage?.predecessorAttemptFingerprint),
+      grrExecutionId: normalizeText(stage?.grrExecutionId),
+      grrRuntimeArtifactId: normalizeText(stage?.grrRuntimeArtifactId),
+    })),
+  }
+}
+
 const buildOutcomeAssetLineageSummary = (lineage = {}) => {
   const summary = {
     sourceOutputAssetId: normalizeText(lineage.sourceOutputAssetId),
@@ -3008,6 +3125,8 @@ const buildOutcomeAssetLineageSummary = (lineage = {}) => {
   if (draftApproval) summary.draftApproval = draftApproval
   const approvedBaseline = sanitizeApprovedBaselineLineage(lineage)
   if (approvedBaseline) summary.approvedBaseline = approvedBaseline
+  const governedQualityChain = sanitizeGovernedQualityChainLineage(lineage)
+  if (governedQualityChain) summary.governedQualityChain = governedQualityChain
   return summary
 }
 
@@ -7249,17 +7368,576 @@ export const createRuntimeOutcomeMessage = async ({
   return serializeCustomerOutcomeMessage(message)
 }
 
+const buildDeterministicOutcomeUuid = (value) => {
+  const hex = createHash('sha256').update(value).digest('hex').slice(0, 32).split('')
+  hex[12] = '4'
+  hex[16] = ((Number.parseInt(hex[16], 16) & 0x3) | 0x8).toString(16)
+  return `${hex.slice(0, 8).join('')}-${hex.slice(8, 12).join('')}-${hex.slice(12, 16).join('')}-${hex.slice(16, 20).join('')}-${hex.slice(20).join('')}`
+}
+
+export const buildGovernedQualityChainManifest = ({ plan, requestBinding, stages }) => {
+  if (!Array.isArray(stages) || stages.length !== OUTCOME_GOVERNED_EXECUTION_SEQUENCE.length) {
+    throw createOutcomeStudioError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Outcome Studio cannot finalise an incomplete governed quality chain.',
+      reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_RESPONSE_GENERATION_BLOCKED,
+      details: { blockerReason: 'OUTCOME_QUALITY_CHAIN_INCOMPLETE' },
+    })
+  }
+  const normalizedStages = stages.map((stage, index) => {
+    const expectedStageKey = OUTCOME_GOVERNED_EXECUTION_SEQUENCE[index]
+    if (stage?.status !== OUTCOME_QUALITY_STAGE_STATUSES.SUCCEEDED
+      || stage?.stageKey !== expectedStageKey
+      || Number(stage?.stageOrder) !== index + 1
+      || normalizeText(stage?.requestId) !== requestBinding.requestId
+      || normalizeText(stage?.draftId) !== requestBinding.draftId
+      || normalizeText(stage?.draftIterationId) !== requestBinding.draftIterationId
+      || normalizeText(stage?.planId) !== normalizeText(plan.planId)
+      || normalizeText(stage?.planFingerprint).toLowerCase() !== normalizeText(plan.planFingerprint).toLowerCase()
+      || (index > 0 && normalizeText(stage?.inputSnapshot?.sourceStage?.stageExecutionId)
+        !== normalizeText(stages[index - 1]?.stageExecutionId))
+      || (index > 0 && normalizeText(stage?.inputSnapshot?.sourceStage?.attemptFingerprint).toLowerCase()
+        !== normalizeText(stages[index - 1]?.attemptFingerprint).toLowerCase())
+      || (index > 0 && normalizeText(stage?.predecessorStageExecutionId)
+        !== normalizeText(stages[index - 1]?.stageExecutionId))
+      || (index > 0 && normalizeText(stage?.predecessorAttemptFingerprint).toLowerCase()
+        !== normalizeText(stages[index - 1]?.attemptFingerprint).toLowerCase())) {
+      throw createOutcomeStudioError({
+        status: 409,
+        code: 'CONFLICT',
+        message: `Outcome Studio ${expectedStageKey} evidence is incomplete or does not match its predecessor.`,
+        reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_RESPONSE_GENERATION_BLOCKED,
+        details: { blockerReason: 'OUTCOME_QUALITY_CHAIN_LINEAGE_INVALID', stageKey: expectedStageKey },
+      })
+    }
+    return {
+      stageKey: expectedStageKey,
+      stageOrder: index + 1,
+      status: stage.status,
+      stageExecutionId: normalizeText(stage.stageExecutionId),
+      attemptFingerprint: normalizeText(stage.attemptFingerprint).toLowerCase(),
+      outputFingerprint: normalizeText(stage.outputFingerprint).toLowerCase(),
+      predecessorStageExecutionId: normalizeText(stage.predecessorStageExecutionId),
+      predecessorAttemptFingerprint: normalizeText(stage.predecessorAttemptFingerprint).toLowerCase(),
+      grrExecutionId: normalizeText(stage.executionIdentity?.grrExecutionId),
+      grrRuntimeArtifactId: normalizeText(stage.executionIdentity?.grrRuntimeArtifactId),
+    }
+  })
+  return {
+    contractVersion: 'outcome-studio.governed-quality-chain.v1',
+    status: 'PASSED',
+    requestId: requestBinding.requestId,
+    planId: normalizeText(plan.planId),
+    planFingerprint: normalizeText(plan.planFingerprint).toLowerCase(),
+    draftId: requestBinding.draftId,
+    draftIterationId: requestBinding.draftIterationId,
+    stages: normalizedStages,
+  }
+}
+
+const buildGovernedDraftCustomerContent = (shapedStage) => {
+  const output = shapedStage?.outputSnapshot || {}
+  const title = normalizeText(output.title) || 'Governed Outcome'
+  const limitations = Array.isArray(output.visibleGaps)
+    ? output.visibleGaps.map(normalizeText).filter(Boolean)
+    : []
+  const sections = Array.isArray(output.sections) ? output.sections.map((section, index) => ({
+    key: normalizeText(section?.sectionKey) || `section-${index + 1}`,
+    label: normalizeText(section?.heading) || `Section ${index + 1}`,
+    body: [normalizeText(section?.body), normalizeText(section?.qualification)].filter(Boolean).join('\n\n'),
+  })) : []
+  const markdown = [
+    `# ${title}`,
+    ...sections.flatMap((section) => [`## ${section.label}`, section.body]),
+  ].filter(Boolean).join('\n\n')
+  return { title, customerContent: { markdown, sections }, limitations }
+}
+
+export const persistGovernedQualityDraft = async ({
+  actorUserId,
+  auditRequest,
+  knowledgePackBinding,
+  plan,
+  requestBinding,
+  runtimeInstance,
+  serializedMessage,
+  serializedSession,
+  stages,
+}) => {
+  const runtimeInstanceId = runtimeInstance._id || runtimeInstance.id
+  const qualityChain = buildGovernedQualityChainManifest({ plan, requestBinding, stages })
+  const responseMessageId = `outcome_message_${buildDeterministicOutcomeUuid(`SS-033:RESPONSE:${qualityChain.requestId}:${qualityChain.planId}`)}`
+  const readExistingResult = async () => {
+    const [existingMessage, existingDraft, existingIteration] = await Promise.all([
+      OutcomeMessage.findOne({ runtimeInstanceId, messageId: responseMessageId }),
+      OutcomeDraft.findOne({ runtimeInstanceId, draftId: requestBinding.draftId }),
+      OutcomeDraftIteration.findOne({
+        runtimeInstanceId,
+        draftId: requestBinding.draftId,
+        draftIterationId: requestBinding.draftIterationId,
+      }),
+    ])
+    if (!existingMessage && !existingDraft && !existingIteration) return null
+    const persistedChain = sanitizeGovernedQualityChainLineage(
+      toPlainObject(existingIteration)?.lineageSummary || {},
+    )
+    const expectedChain = sanitizeGovernedQualityChainLineage({ governedQualityChain: qualityChain })
+    if (!existingMessage || !existingDraft || !existingIteration
+      || normalizeText(existingMessage.phase) !== OUTCOME_STUDIO_GOVERNED_PHASE
+      || normalizeText(existingDraft.phase) !== OUTCOME_STUDIO_GOVERNED_PHASE
+      || normalizeText(existingIteration.phase) !== OUTCOME_STUDIO_GOVERNED_PHASE
+      || JSON.stringify(persistedChain) !== JSON.stringify(expectedChain)) {
+      throw createOutcomeStudioError({
+        status: 409,
+        code: 'CONFLICT',
+        message: 'Outcome Studio found an incomplete governed draft persistence result.',
+        reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_RESPONSE_GENERATION_BLOCKED,
+        details: { blockerReason: 'OUTCOME_GOVERNED_DRAFT_PERSISTENCE_INCOMPLETE' },
+      })
+    }
+    return {
+      message: serializeCustomerOutcomeMessage(existingMessage),
+      draft: serializeCustomerOutcomeDraft(existingDraft, { currentIteration: existingIteration }),
+      draftIteration: serializeCustomerOutcomeDraftIteration(existingIteration, {
+        draft: existingDraft,
+        knowledgePackBinding: existingDraft.knowledgePackBinding,
+      }),
+    }
+  }
+  const existingResult = await readExistingResult()
+  if (existingResult) return existingResult
+
+  const generatedAt = new Date().toISOString()
+  const runtimeScope = getRuntimeScope(runtimeInstance)
+  const shapedStage = stages[4]
+  const rlStage = stages[5]
+  const { title, customerContent, limitations } = buildGovernedDraftCustomerContent(shapedStage)
+  assertOutcomeCustomerLanguage({
+    action: 'create this governed draft',
+    customerContent,
+    limitations,
+    title,
+  })
+  const outputTypeCapabilityKey = normalizeCapabilityKey(plan.requestedOutputTypeKey)
+  const outputTypeKey = normalizeToken(
+    plan.payload?.governedContext?.outputType?.key
+    || serializedMessage.outputContractResolution?.selectedOutputType?.key
+    || serializedSession.sourceOutputTypeKey
+    || plan.requestedOutputTypeKey,
+  )
+  const outputTypeLabel = normalizeText(
+    plan.payload?.consumerIntent?.outputTypeLabel
+    || serializedMessage.outputContractResolution?.selectedOutputType?.label
+    || serializedSession.requestedOutputTypeLabel
+    || serializedSession.sourceOutputTypeLabel
+    || title,
+  )
+  const sourceOutputAssetId = normalizeText(
+    serializedSession.sourceOutputAssetId || serializedSession.sourceOutput?.outputAssetId,
+  )
+  const validationSummary = buildOutcomeAssetPostValidationSnapshot({
+    asset: { outcomeAssetId: requestBinding.draftId, outputTypeKey },
+    customerContent,
+    knowledgePackBinding,
+    limitations,
+    truthSignature: serializedSession.truthSignature,
+    validatedAt: generatedAt,
+    version: { outcomeAssetVersionId: requestBinding.draftIterationId, outputTypeKey },
+  })
+  if (!isOutcomePostValidationAllowed(validationSummary)) {
+    throw buildCustomerContentReviewError({ action: 'create this governed draft' })
+  }
+  validationSummary.validationScope = 'OUTCOME_DRAFT_ITERATION'
+  const lineageSummary = {
+    sourceOutputAssetId,
+    sourceOutputTypeKey: outputTypeKey,
+    sourceOutputTypeLabel: outputTypeLabel,
+    generatedAt,
+    grrExecutionId: normalizeText(rlStage.executionIdentity?.grrExecutionId),
+    grrRuntimeArtifactId: normalizeText(rlStage.executionIdentity?.grrRuntimeArtifactId),
+    grrProviderMode: 'LIVE_TEST',
+    governedQualityChain: qualityChain,
+  }
+  const responseMessage = new OutcomeMessage({
+    messageId: responseMessageId,
+    sessionId: serializedSession.sessionId,
+    ...runtimeScope,
+    workspaceType: DEFAULT_OUTCOME_WORKSPACE_TYPE,
+    contractVersion: OUTCOME_STUDIO_CONTRACT_VERSION,
+    phase: OUTCOME_STUDIO_GOVERNED_PHASE,
+    role: OUTCOME_STUDIO_MESSAGE_ROLES.ASSISTANT,
+    status: OUTCOME_STUDIO_MESSAGE_STATUSES.GENERATED,
+    responseStatus: OUTCOME_STUDIO_RESPONSE_STATUSES.RESPONSE_GENERATED,
+    prompt: customerContent.markdown,
+    requestedOutputTypeKey: outputTypeCapabilityKey,
+    requestedOutputTypeLabel: outputTypeLabel,
+    sourceOutputSnapshot: serializedSession.sourceOutput,
+    truthSignature: serializedSession.truthSignature,
+    knowledgePackBinding,
+    contextBindings: { governedQualityChain: qualityChain },
+    submittedBy: actorUserId,
+    submittedAt: generatedAt,
+  })
+  const outcomeDraft = new OutcomeDraft({
+    draftId: requestBinding.draftId,
+    sessionId: serializedSession.sessionId,
+    ...runtimeScope,
+    workspaceType: DEFAULT_OUTCOME_WORKSPACE_TYPE,
+    assetType: DEFAULT_OUTCOME_ASSET_TYPE,
+    contractVersion: OUTCOME_STUDIO_CONTRACT_VERSION,
+    phase: OUTCOME_STUDIO_GOVERNED_PHASE,
+    status: OUTCOME_STUDIO_DRAFT_STATUSES.ACTIVE,
+    outputTypeKey,
+    outputTypeCapabilityKey,
+    outputTypeLabel,
+    title,
+    sourceOutputAssetId,
+    truthSignature: serializedSession.truthSignature,
+    truthSignatureId: serializedSession.truthSignatureId || serializedSession.truthSignature?.truthSignatureId,
+    knowledgePackBinding,
+    currentIterationId: requestBinding.draftIterationId,
+    currentIterationNumber: 1,
+    contextBindings: { governedQualityChain: qualityChain },
+    lineageSummary,
+    validationSummary,
+    limitations,
+    createdBy: actorUserId,
+  })
+  const outcomeDraftIteration = new OutcomeDraftIteration({
+    draftIterationId: requestBinding.draftIterationId,
+    draftId: requestBinding.draftId,
+    iterationNumber: 1,
+    sessionId: serializedSession.sessionId,
+    ...runtimeScope,
+    workspaceType: DEFAULT_OUTCOME_WORKSPACE_TYPE,
+    assetType: DEFAULT_OUTCOME_ASSET_TYPE,
+    contractVersion: OUTCOME_STUDIO_CONTRACT_VERSION,
+    phase: OUTCOME_STUDIO_GOVERNED_PHASE,
+    iterationType: OUTCOME_STUDIO_DRAFT_ITERATION_TYPES.INITIAL,
+    status: OUTCOME_STUDIO_DRAFT_ITERATION_STATUSES.CURRENT,
+    outputTypeKey,
+    outputTypeCapabilityKey,
+    outputTypeLabel,
+    title,
+    sourceMessageId: serializedMessage.messageId,
+    responseMessageId,
+    truthSignatureId: serializedSession.truthSignatureId || serializedSession.truthSignature?.truthSignatureId,
+    grrExecutionId: normalizeText(rlStage.executionIdentity?.grrExecutionId),
+    grrRuntimeArtifactId: normalizeText(rlStage.executionIdentity?.grrRuntimeArtifactId),
+    customerContent,
+    validationSummary,
+    lineageSummary,
+    limitations,
+    generatedBy: actorUserId,
+    generatedAt,
+  })
+  const persistedHere = { message: false, draft: false, iteration: false, sourceMessage: false }
+  const persist = async (dbSession = null) => {
+    const saveOptions = dbSession ? { session: dbSession } : undefined
+    await responseMessage.save(saveOptions)
+    if (!dbSession) persistedHere.message = true
+    await outcomeDraft.save(saveOptions)
+    if (!dbSession) persistedHere.draft = true
+    await outcomeDraftIteration.save(saveOptions)
+    if (!dbSession) persistedHere.iteration = true
+    await OutcomeMessage.updateOne(
+      { runtimeInstanceId, messageId: serializedMessage.messageId },
+      { $set: { responseStatus: OUTCOME_STUDIO_RESPONSE_STATUSES.RESPONSE_GENERATED } },
+      dbSession ? { session: dbSession } : undefined,
+    )
+    if (!dbSession) persistedHere.sourceMessage = true
+    await logOutcomeMessageAudit({
+      action: auditService.AUDIT_ACTIONS.OUTCOME_RESPONSE_GENERATED,
+      auditRequest,
+      dbSession,
+      runtimeInstance,
+      message: responseMessage,
+      summary: 'Outcome Studio governed quality-chain response generated.',
+      diff: {
+        actorUserId,
+        requestId: qualityChain.requestId,
+        planId: qualityChain.planId,
+        messageId: serializedMessage.messageId,
+        responseMessageId,
+        draftId: requestBinding.draftId,
+        draftIterationId: requestBinding.draftIterationId,
+        qualityStageExecutionIds: qualityChain.stages.map((stage) => stage.stageExecutionId),
+      },
+    })
+    await logOutcomeDraftGeneratedAudit({
+      auditRequest,
+      dbSession,
+      runtimeInstance,
+      draft: outcomeDraft,
+      summary: 'Outcome Studio governed quality-chain draft generated.',
+      diff: {
+        actorUserId,
+        requestId: qualityChain.requestId,
+        planId: qualityChain.planId,
+        draftId: requestBinding.draftId,
+        draftIterationId: requestBinding.draftIterationId,
+        qualityStageExecutionIds: qualityChain.stages.map((stage) => stage.stageExecutionId),
+      },
+    })
+  }
+  if (canUseMongoTransaction()) {
+    const dbSession = await mongoose.startSession()
+    let transactionError = null
+    try {
+      await dbSession.withTransaction(async () => persist(dbSession))
+    } catch (error) {
+      transactionError = error
+    } finally {
+      await dbSession.endSession()
+    }
+    if (transactionError) {
+      if (transactionError?.code === 11000) {
+        const winner = await readExistingResult()
+        if (winner) return winner
+      }
+      throw transactionError
+    }
+  } else {
+    try {
+      await persist()
+    } catch (error) {
+      if (error?.code === 11000) {
+        const winner = await readExistingResult()
+        if (winner) return winner
+      }
+      if (persistedHere.iteration) {
+        await OutcomeDraftIteration.deleteOne({ draftIterationId: requestBinding.draftIterationId })
+      }
+      if (persistedHere.draft) await OutcomeDraft.deleteOne({ draftId: requestBinding.draftId })
+      if (persistedHere.message) await OutcomeMessage.deleteOne({ messageId: responseMessageId })
+      if (persistedHere.sourceMessage) {
+        await OutcomeMessage.updateOne(
+          { runtimeInstanceId, messageId: serializedMessage.messageId },
+          { $set: { responseStatus: serializedMessage.responseStatus } },
+        )
+      }
+      throw error
+    }
+  }
+  return {
+    message: serializeCustomerOutcomeMessage(responseMessage),
+    draft: serializeCustomerOutcomeDraft(outcomeDraft, { currentIteration: outcomeDraftIteration }),
+    draftIteration: serializeCustomerOutcomeDraftIteration(outcomeDraftIteration, {
+      draft: outcomeDraft,
+      knowledgePackBinding,
+    }),
+  }
+}
+
+export const executeRequestScopedQualityCheckpoint = async ({
+  actorUserId,
+  auditRequest,
+  arlMeaningReviewProviderAdapterFactory,
+  frameworkGuidanceProviderAdapterFactory,
+  knowledgePackBinding,
+  providerDescriptor,
+  renderedExpressionRlProviderAdapterFactory,
+  requestPlan,
+  runtimeInstance,
+  runtimeInstanceId,
+  scopes,
+  serializedMessage,
+  serializedSession,
+  workingDraftProviderAdapterFactory,
+  deps = {},
+}) => {
+  const requestId = normalizeText(requestPlan?.requestId)
+  const planId = normalizeText(requestPlan?.planId)
+  const planFingerprint = normalizeText(requestPlan?.planFingerprint).toLowerCase()
+  if (!requestId || !planId || !/^[a-f0-9]{64}$/.test(planFingerprint)) {
+    throw createOutcomeStudioError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Outcome Studio request plan binding is incomplete.',
+      reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_RESPONSE_GENERATION_BLOCKED,
+      details: { blockerReason: 'OUTCOME_REQUEST_PLAN_BINDING_INCOMPLETE' },
+    })
+  }
+  if (typeof frameworkGuidanceProviderAdapterFactory !== 'function'
+    || typeof workingDraftProviderAdapterFactory !== 'function'
+    || typeof arlMeaningReviewProviderAdapterFactory !== 'function'
+    || typeof renderedExpressionRlProviderAdapterFactory !== 'function') {
+    throw buildDraftingServiceUnavailableError()
+  }
+  const plan = deps.findPlan
+    ? await deps.findPlan({ runtimeInstanceId, requestId, planId, planFingerprint })
+    : await OutcomeKnowledgeCompositionPlan.findOne({
+        runtimeInstanceId,
+        requestId,
+        planId,
+        planFingerprint,
+      }).lean()
+  if (!plan) {
+    throw createOutcomeStudioError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Outcome Studio could not resolve the exact confirmed request plan.',
+      reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_RESPONSE_GENERATION_BLOCKED,
+      details: { blockerReason: 'OUTCOME_REQUEST_PLAN_NOT_CURRENT', requestId, planId },
+    })
+  }
+  ;(deps.assertPlan || assertOutcomeKnowledgeCompositionPlanIntegrity)(plan)
+  const requestBinding = {
+    requestId,
+    draftId: `outcome_draft_${buildDeterministicOutcomeUuid(`SS-033:DRAFT:${requestId}:${planId}`)}`,
+    draftIterationId: `outcome_draft_iteration_${buildDeterministicOutcomeUuid(`SS-033:ITERATION:1:${requestId}:${planId}`)}`,
+  }
+  const stageIdentity = {
+    actorUserId,
+    auditRequest,
+    expectedPlanFingerprint: planFingerprint,
+    planRecordId: toIdString(plan._id || plan.id),
+    providerDescriptor,
+    requestBinding,
+    runtimeInstanceId,
+    scopes,
+  }
+  const frameworkGuidance = await (deps.executeFrameworkGuidance || executeOutcomeFrameworkGuidance)({
+    ...stageIdentity,
+    providerAdapterFactory: frameworkGuidanceProviderAdapterFactory,
+  })
+  if (frameworkGuidance.stage?.status !== 'SUCCEEDED') {
+    throw createOutcomeStudioError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Outcome Studio Framework Guidance did not complete.',
+      reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_RESPONSE_GENERATION_BLOCKED,
+      details: {
+        blockerReason: frameworkGuidance.stage?.failure?.failureCode || 'FRAMEWORK_GUIDANCE_INCOMPLETE',
+        requestId,
+        planId,
+        stageExecutionId: frameworkGuidance.stage?.stageExecutionId || '',
+      },
+    })
+  }
+  const workingDraft = await (deps.executeWorkingDraft || executeOutcomeWorkingDraft)({
+    ...stageIdentity,
+    providerAdapter: workingDraftProviderAdapterFactory(),
+  })
+  if (workingDraft.stage?.status !== 'SUCCEEDED') {
+    throw createOutcomeStudioError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Outcome Studio Working Draft did not complete.',
+      reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_RESPONSE_GENERATION_BLOCKED,
+      details: {
+        blockerReason: workingDraft.stage?.failure?.failureCode || 'WORKING_DRAFT_INCOMPLETE',
+        requestId,
+        planId,
+        stageExecutionId: workingDraft.stage?.stageExecutionId || '',
+      },
+    })
+  }
+  const arlReview = await (deps.approveWorkingDraftMeaning || approveOutcomeWorkingDraftMeaning)({
+    ...stageIdentity,
+    providerAdapter: arlMeaningReviewProviderAdapterFactory(),
+  })
+  if (arlReview.stage?.status !== 'SUCCEEDED') {
+    throw createOutcomeStudioError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Outcome Studio ARL Meaning Review requires resolution before the quality chain can continue.',
+      reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_RESPONSE_GENERATION_BLOCKED,
+      details: {
+        blockerReason: arlReview.stage?.failure?.failureCode || 'ARL_MEANING_REVIEW_INCOMPLETE',
+        requestId,
+        planId,
+        stageExecutionId: arlReview.stage?.stageExecutionId || '',
+      },
+    })
+  }
+  const narrativePlan = await (deps.createNarrativePlan || createOutcomeNarrativePlan)(stageIdentity)
+  if (narrativePlan.stage?.status !== 'SUCCEEDED') {
+    throw createOutcomeStudioError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Outcome Studio Narrative Plan did not complete.',
+      reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_RESPONSE_GENERATION_BLOCKED,
+      details: {
+        blockerReason: narrativePlan.stage?.failure?.failureCode || 'OUTCOME_NARRATIVE_PLAN_INCOMPLETE',
+        requestId,
+        planId,
+        stageExecutionId: narrativePlan.stage?.stageExecutionId || '',
+      },
+    })
+  }
+  const shapedCandidate = await (deps.createShapedCandidate || createOutcomeShapedCandidate)({
+    ...stageIdentity,
+    title: workingDraft.stage?.outputSnapshot?.title,
+  })
+  if (shapedCandidate.stage?.status !== 'SUCCEEDED') {
+    throw createOutcomeStudioError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Outcome Studio Output Shaping did not complete.',
+      reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_RESPONSE_GENERATION_BLOCKED,
+      details: {
+        blockerReason: shapedCandidate.stage?.failure?.failureCode || 'OUTPUT_SHAPING_INCOMPLETE',
+        requestId,
+        planId,
+        stageExecutionId: shapedCandidate.stage?.stageExecutionId || '',
+      },
+    })
+  }
+  const renderedExpressionRl = await (deps.executeRenderedExpressionRl || executeOutcomeRenderedExpressionRl)({
+    ...stageIdentity,
+    providerAdapter: renderedExpressionRlProviderAdapterFactory(),
+  })
+  if (renderedExpressionRl.stage?.status !== 'SUCCEEDED') {
+    throw createOutcomeStudioError({
+      status: 409,
+      code: 'CONFLICT',
+      message: 'Outcome Studio Rendered-Expression Review requires resolution before finalisation.',
+      reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_RESPONSE_GENERATION_BLOCKED,
+      details: {
+        blockerReason: renderedExpressionRl.stage?.failure?.failureCode || 'RENDERED_EXPRESSION_RL_INCOMPLETE',
+        requestId,
+        planId,
+        stageExecutionId: renderedExpressionRl.stage?.stageExecutionId || '',
+      },
+    })
+  }
+  return (deps.persistGovernedQualityDraft || persistGovernedQualityDraft)({
+    actorUserId,
+    auditRequest,
+    knowledgePackBinding,
+    plan,
+    requestBinding,
+    runtimeInstance,
+    serializedMessage,
+    serializedSession,
+    stages: [
+      frameworkGuidance.stage,
+      workingDraft.stage,
+      arlReview.stage,
+      narrativePlan.stage,
+      shapedCandidate.stage,
+      renderedExpressionRl.stage,
+    ],
+  })
+}
+
 export const generateRuntimeOutcomeResponse = async ({
   actorUserId,
   auditRequest,
+  arlMeaningReviewProviderAdapterFactory,
   allowReadyWithGaps = false,
   executionMode,
+  frameworkGuidanceProviderAdapterFactory,
   providerAdapter,
   providerDescriptor,
+  renderedExpressionRlProviderAdapterFactory,
   runtimeInstanceId,
   scopes,
   sessionId,
   messageId,
+  workingDraftProviderAdapterFactory,
 } = {}) => {
   const runtimeInstance = await assertOutcomeSessionMutationPermission({
     actorUserId,
@@ -7419,6 +8097,31 @@ export const generateRuntimeOutcomeResponse = async ({
     await authorizeOutcomeStudioLiveTestExecution({
       providerDescriptor: liveTestConfiguration.providerDescriptor,
       stage: 'PRE_IDEMPOTENCY',
+    })
+  }
+  if (serializedSession.requestPlan) {
+    const requestKnowledgePackBinding = buildSessionKnowledgePackBinding(
+      knowledgeContextResult.reasoningBinding,
+      generatedAt,
+    )
+    return executeRequestScopedQualityCheckpoint({
+      actorUserId,
+      auditRequest,
+      arlMeaningReviewProviderAdapterFactory,
+      frameworkGuidanceProviderAdapterFactory,
+      knowledgePackBinding: requestKnowledgePackBinding,
+      providerDescriptor: liveTestConfiguration.providerDescriptor,
+      renderedExpressionRlProviderAdapterFactory,
+      requestPlan: serializedSession.requestPlan,
+      runtimeInstance,
+      runtimeInstanceId: runtimeObjectId,
+      scopes,
+      serializedMessage: {
+        ...serializedMessage,
+        outputContractResolution: generationOutputContractResolution,
+      },
+      serializedSession,
+      workingDraftProviderAdapterFactory,
     })
   }
   const isDraftRefinement = requestResolution?.intent?.refinement === true
@@ -8718,10 +9421,56 @@ export const approveRuntimeOutcomeDraft = async ({
     runtimeInstanceId: runtimeObjectId,
     sessionId: serializedSession.sessionId,
   })
+  const currentDraftPhase = normalizeText(currentDraftIteration.phase || activeDraft.phase)
+  const confirmedRequestPlan = serializedSession.requestPlan
+  const governedQualityChainRequired = Boolean(
+    (confirmedRequestPlan?.requestId && confirmedRequestPlan?.planId)
+      || currentDraftPhase === OUTCOME_STUDIO_GOVERNED_PHASE,
+  )
+  if (governedQualityChainRequired) {
+    const chain = currentDraftIteration.lineageSummary?.governedQualityChain
+      || activeDraft.lineageSummary?.governedQualityChain
+    if (currentDraftPhase !== OUTCOME_STUDIO_GOVERNED_PHASE || !chain) {
+      throw buildOutcomeDraftApprovalBlockedError({
+        blockerReason: 'OUTCOME_GOVERNED_QUALITY_CHAIN_NOT_CURRENT',
+        currentIterationId: normalizeText(activeDraft.currentIterationId),
+        draftId: activeDraft.draftId,
+        sessionId: serializedSession.sessionId,
+      })
+    }
+    const persistedStages = await OutcomeQualityStageExecution.find({
+      runtimeInstanceId: runtimeObjectId,
+      requestId: normalizeText(chain?.requestId),
+      planId: normalizeText(chain?.planId),
+      draftId: normalizeText(activeDraft.draftId),
+      draftIterationId: normalizeText(currentDraftIteration.draftIterationId),
+    }).sort({ stageOrder: 1 }).lean()
+    const recordedStages = Array.isArray(chain?.stages) ? chain.stages : []
+    const persistedChainMatches = persistedStages.length === OUTCOME_GOVERNED_EXECUTION_SEQUENCE.length
+      && recordedStages.length === OUTCOME_GOVERNED_EXECUTION_SEQUENCE.length
+      && persistedStages.every((stage, index) => (
+        stage.stageKey === OUTCOME_GOVERNED_EXECUTION_SEQUENCE[index]
+        && stage.status === OUTCOME_QUALITY_STAGE_STATUSES.SUCCEEDED
+        && normalizeText(stage.stageExecutionId) === normalizeText(recordedStages[index]?.stageExecutionId)
+        && normalizeText(stage.attemptFingerprint).toLowerCase()
+          === normalizeText(recordedStages[index]?.attemptFingerprint).toLowerCase()
+        && normalizeText(stage.outputFingerprint).toLowerCase()
+          === normalizeText(recordedStages[index]?.outputFingerprint).toLowerCase()
+      ))
+    if (!persistedChainMatches) {
+      throw buildOutcomeDraftApprovalBlockedError({
+        blockerReason: 'OUTCOME_GOVERNED_QUALITY_CHAIN_NOT_CURRENT',
+        currentIterationId: normalizeText(activeDraft.currentIterationId),
+        draftId: activeDraft.draftId,
+        sessionId: serializedSession.sessionId,
+      })
+    }
+  }
   const approvalReadiness = buildOutcomeExecutionApprovalReadiness({
     draft: activeDraft,
     iteration: currentDraftIteration,
     knowledgePackBinding: activeDraft.knowledgePackBinding,
+    requestPlan: confirmedRequestPlan,
   })
   if (!approvalReadiness.approvalAvailable) {
     throw buildOutcomeDraftApprovalBlockedError({
@@ -8940,7 +9689,7 @@ export const approveRuntimeOutcomeDraft = async ({
     workspaceType: DEFAULT_OUTCOME_WORKSPACE_TYPE,
     assetType: DEFAULT_OUTCOME_ASSET_TYPE,
     contractVersion: OUTCOME_STUDIO_CONTRACT_VERSION,
-    phase: OUTCOME_STUDIO_PHASE,
+    phase: normalizeText(activeDraft.phase) || OUTCOME_STUDIO_PHASE,
     status: OUTCOME_STUDIO_ASSET_STATUSES.GENERATED,
     outputTypeKey,
     outputTypeCapabilityKey,
@@ -8976,7 +9725,7 @@ export const approveRuntimeOutcomeDraft = async ({
     workspaceType: DEFAULT_OUTCOME_WORKSPACE_TYPE,
     assetType: DEFAULT_OUTCOME_ASSET_TYPE,
     contractVersion: OUTCOME_STUDIO_CONTRACT_VERSION,
-    phase: OUTCOME_STUDIO_PHASE,
+    phase: normalizeText(activeDraft.phase) || OUTCOME_STUDIO_PHASE,
     versionNumber,
     status: OUTCOME_STUDIO_ASSET_VERSION_STATUSES.CURRENT,
     outputTypeKey,
@@ -10789,5 +11538,6 @@ export const updateRuntimeOutcomeSessionFromLatestTruth = async ({
 
 export const __testables = Object.freeze({
   buildConfirmedPlanMessageLookup,
+  buildGovernedDraftCustomerContent,
   buildSafetyGates,
 })

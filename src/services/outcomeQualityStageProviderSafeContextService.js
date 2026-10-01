@@ -14,7 +14,7 @@ import {
 import { hashOutcomeQualityStageValue } from './outcomeQualityStageExecutionService.js'
 
 const MAX_SOURCE_CANDIDATE_BYTES = 120000
-const MAX_TRUTH_SUMMARY_LENGTH = 900
+const MAX_TRUTH_SUMMARY_LENGTH = 1600
 const REFERENCE_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,178}[a-z0-9])?$/
 const CONTROL_PATTERN = /[\u0000-\u001F\u007F]/
 const EMAIL_PATTERN = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i
@@ -46,10 +46,10 @@ const CONTEXT_KEYS = Object.freeze([
 
 const applicationGuidance = Object.freeze({
   businessInstructions: Object.freeze([
-    'Create one Working Draft from the supplied verified truth and complete framework-guidance meaning. Preserve qualifications, uncertainty, assumptions and visible gaps.',
+    'Create one Working Draft from the supplied accepted truth summaries and complete framework-guidance meaning. Preserve qualifications, uncertainty, assumptions and visible gaps.',
   ]),
   reasoningGuidance: Object.freeze([
-    'Translate the supplied analytical meaning into coherent decision-ready draft sections without adding facts or claiming approval.',
+    'Translate the supplied analytical meaning into coherent bounded draft sections. Summary omissions do not prove real-world absence. Source-presented claims remain explicitly qualified, and proposed priorities remain hypotheses unless accepted truth explicitly orders them.',
   ]),
   outputSchema: Object.freeze([
     'Return versioned Working Draft sections, evidence-bound claims, decision logic, assumptions and visible gaps using only supplied semantic reference keys.',
@@ -61,7 +61,7 @@ const applicationGuidance = Object.freeze({
     'Every accepted truth reference and every supplied framework-guidance section must remain materially represented. Required gaps stay visible.',
   ]),
   prohibitedOutputBoundaries: Object.freeze([
-    'Meaning remains unapproved at Working Draft. Do not claim ARL approval, rendered-expression review, publication or final completion.',
+    'Do not mention internal quality stages or approval sequencing in business content, and do not claim approval, publication or final completion.',
   ]),
 })
 

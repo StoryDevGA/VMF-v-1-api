@@ -1,3 +1,6 @@
+import { assertRuntimeEvidenceToMeaningReady, runtimeEvidenceStageDependencies,
+  readRuntimeEvidenceToMeaningProviderProjection } from './outcomeRuntimeEvidenceToMeaningService.js'
+import { assertEvidenceToMeaningBoundedProviderOutput } from './outcomeEvidenceToMeaningProviderService.js'
 import mongoose from 'mongoose'
 
 import {
@@ -6,9 +9,11 @@ import {
   OUTCOME_QUALITY_STAGE_STATUSES,
   OUTCOME_QUALITY_STAGES,
   OUTCOME_QUALITY_STAGE_OUTPUT_TYPES,
+  OUTCOME_WORKING_DRAFT_PROOF_DISPOSITIONS,
   OUTCOME_WORKING_DRAFT_PROVIDER_CONFIG_VERSION,
   OUTCOME_WORKING_DRAFT_PROVIDER_CONFIG_VERSIONS,
   OUTCOME_WORKING_DRAFT_SCHEMA_VERSION,
+  OUTCOME_WORKING_DRAFT_VALIDATION_STATUSES,
 } from '../constants/outcomeGovernedQuality.js'
 import { OUTCOME_STUDIO_PROVIDER_SAFE_CONTEXT_POLICY } from '../constants/outcomeStudioReadiness.js'
 import {
@@ -24,6 +29,11 @@ import {
   buildOutcomeQualityStageProviderSafeContext,
 } from './outcomeQualityStageProviderSafeContextService.js'
 import {
+  assertOutcomeWorkingDraftMeaningBoundary,
+  OUTCOME_WORKING_DRAFT_PROOF_DEPENDENCIES,
+} from './outcomeWorkingDraftMeaningBoundaryService.js'
+import {
+  assertOutcomeKnowledgeCompositionPlanIntegrity,
   assertLegacyOutcomeKnowledgeCompositionPlan,
   assertOutcomeKnowledgeCompositionPlanMatchesRuntime,
 } from './outcomeKnowledgeCompositionPlanService.js'
@@ -41,19 +51,20 @@ const STABLE_KEY_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,138}[a-z0-9])?$/
 const CONTROL_PATTERN = /[\u0000-\u001F\u007F]/
 const MULTILINE_CONTROL_PATTERN = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/
 const URL_PATTERN = /https?:\/\/\S+/gi
-const MAX_PROVIDER_TRUTH_SUMMARY_LENGTH = 900
+const MAX_PROVIDER_TRUTH_SUMMARY_LENGTH = 1600
 const SUCCESS_STATUS = OUTCOME_QUALITY_STAGE_STATUSES.SUCCEEDED
 const PROVIDER_RETRYABLE_REASONS = new Set([
   'WORKING_DRAFT_PROVIDER_REQUEST_FAILED',
   'WORKING_DRAFT_PROVIDER_TIMEOUT',
   'WORKING_DRAFT_PROVIDER_NETWORK_FAILED',
   'WORKING_DRAFT_PROVIDER_TRANSIENT_FAILURE',
+  'WORKING_DRAFT_PROVIDER_INCOMPLETE',
+  'WORKING_DRAFT_PROVIDER_OUTPUT_INVALID',
 ])
 const PROVIDER_NON_RETRYABLE_REASONS = new Set([
   'WORKING_DRAFT_PROVIDER_REJECTED',
   'WORKING_DRAFT_PROVIDER_REFUSED',
   'WORKING_DRAFT_PROVIDER_RESPONSE_INVALID',
-  'WORKING_DRAFT_PROVIDER_OUTPUT_INVALID',
   'WORKING_DRAFT_PROVIDER_OUTPUT_TOO_LARGE',
 ])
 const PROVIDER_FAILURE_REASONS = new Set([
@@ -80,8 +91,13 @@ const PROVIDER_SECTION_KEYS = Object.freeze([
   'assumptions',
   'gaps',
 ])
-const PROVIDER_CLAIM_KEYS = Object.freeze(['claimKey', 'statement', 'truthReferences', 'evidence'])
-const DECISION_LOGIC_KEYS = Object.freeze(['decisionKey', 'rationale', 'priority', 'truthReferences'])
+const PROVIDER_CLAIM_KEYS = Object.freeze([
+  'claimKey', 'statement', 'truthReferences', 'evidence', 'meaningClass', 'proofDependencies',
+  'validationStatus', 'proofDisposition', 'whatCanBeSaidNow', 'blockedStrongerClaim', 'evidenceRequiredToSubstantiate',
+])
+const DECISION_LOGIC_KEYS = Object.freeze([
+  'decisionKey', 'rationale', 'priority', 'priorityBasis', 'closureState', 'actionAuthorization', 'truthReferences',
+])
 const PROVIDER_INPUT_KEYS = Object.freeze(['customerPrompt', 'currentDraftMarkdown', 'request'])
 const PROVIDER_INPUT_REQUEST_KEYS = Object.freeze([
   'intentType',
@@ -194,11 +210,14 @@ const sameSet = (left, right) => (
 
 const execQuery = async (query) => (typeof query?.lean === 'function' ? query.lean() : query)
 
-const readSelectedPlan = ({ model, planRecordId, runtimeInstanceId }) => execQuery(
-  model.findOne({ _id: planRecordId, runtimeInstanceId, requestId: { $exists: false } }),
+const planScope = (requestBinding) => requestBinding
+  ? { requestId: requestBinding.requestId }
+  : { requestId: { $exists: false } }
+const readSelectedPlan = ({ model, planRecordId, runtimeInstanceId, requestBinding }) => execQuery(
+  model.findOne({ _id: planRecordId, runtimeInstanceId, ...planScope(requestBinding) }),
 )
-const readLatestPlan = ({ model, runtimeInstanceId }) => {
-  const query = model.findOne({ runtimeInstanceId, requestId: { $exists: false } })
+const readLatestPlan = ({ model, runtimeInstanceId, requestBinding }) => {
+  const query = model.findOne({ runtimeInstanceId, ...planScope(requestBinding) })
   return execQuery(typeof query?.sort === 'function' ? query.sort({ planVersion: -1 }) : query)
 }
 const readRuntime = ({ model, runtimeInstanceId }) => execQuery(model.findOne({ _id: runtimeInstanceId }))
@@ -213,18 +232,23 @@ const readGrrArtifact = ({ model, runtimeInstanceId, executionId, runtimeArtifac
   model.findOne({ runtimeInstanceId, executionId, runtimeArtifactId }),
 )
 
-const assertCurrentPlan = ({ selectedPlan, latestPlan, runtime, runtimeInstanceId, expectedPlanFingerprint }) => {
+const assertCurrentPlan = ({ selectedPlan, latestPlan, runtime, runtimeInstanceId, expectedPlanFingerprint, requestBinding }) => {
   let selected
   let latest
   try {
-    selected = assertLegacyOutcomeKnowledgeCompositionPlan(selectedPlan)
-    latest = assertLegacyOutcomeKnowledgeCompositionPlan(latestPlan)
+    selected = requestBinding
+      ? assertOutcomeKnowledgeCompositionPlanIntegrity(selectedPlan)
+      : assertLegacyOutcomeKnowledgeCompositionPlan(selectedPlan)
+    latest = requestBinding
+      ? assertOutcomeKnowledgeCompositionPlanIntegrity(latestPlan)
+      : assertLegacyOutcomeKnowledgeCompositionPlan(latestPlan)
     assertOutcomeKnowledgeCompositionPlanMatchesRuntime(selected, runtime)
   } catch (error) {
     throw bindingInvalid({ causeCode: error?.code || '' })
   }
   if (toId(selected.runtimeInstanceId) !== toId(runtimeInstanceId)
     || lower(selected.planFingerprint) !== lower(expectedPlanFingerprint)
+    || (requestBinding && text(selected.requestId) !== requestBinding.requestId)
     || toId(selected._id || selected.id) !== toId(latest._id || latest.id)
     || text(selected.planId) !== text(latest.planId)
     || Number(selected.planVersion) !== Number(latest.planVersion)
@@ -298,7 +322,7 @@ const buildProviderInput = ({ plan }) => {
       refinement: false,
       outputTypeKey: 'WORKING_DRAFT',
       outputTypeLabel: 'Working Draft',
-      outputSchemaKey: 'fs-003-working-draft-v0-2',
+      outputSchemaKey: 'fs-003-working-draft-v0-3',
       requiredSections: ['sections', 'claims', 'decisionLogic', 'assumptions', 'visibleGaps'],
       styleKey: 'governed-working-draft',
       styleLabel: 'Governed Working Draft',
@@ -370,7 +394,10 @@ const normalizeProviderOutput = ({ value, plan }) => {
     || typeof value.draftVersion !== 'number'
     || !Number.isInteger(value.draftVersion)
     || value.draftVersion < 1) throw invalid({ field: 'providerOutput.identity' })
-  const allowedTruth = plan.payload.lockedTruth.acceptedSections.map((section) => lower(section.sectionKey))
+  const evidenceProjection = readRuntimeEvidenceToMeaningProviderProjection(plan)
+  const allowedTruth = evidenceProjection
+    ? [...new Set(evidenceProjection.customerClaims.flatMap((claim) => claim.sectionKeys))]
+    : plan.payload.lockedTruth.acceptedSections.map((section) => lower(section.sectionKey))
   const visibleGaps = boundedStringArray(value.visibleGaps, { field: 'providerOutput.visibleGaps', max: 50, itemMax: 2000 })
   if (JSON.stringify(visibleGaps) !== JSON.stringify(buildOutcomeQualityVisibleGaps(plan))) {
     throw bindingInvalid({ field: 'providerOutput.visibleGaps' })
@@ -412,6 +439,42 @@ const normalizeProviderOutput = ({ value, plan }) => {
           truthReferences: claimTruth,
           evidence: boundedStringArray(claim.evidence, {
             field: `providerOutput.sections[${index}].claims[${claimIndex}].evidence`, min: 1, max: 20, itemMax: 2000,
+          }),
+          meaningClass: boundedText(claim.meaningClass, {
+            field: `providerOutput.sections[${index}].claims[${claimIndex}].meaningClass`, min: 1, max: 40,
+          }),
+          proofDependencies: boundedStringArray(claim.proofDependencies, {
+            field: `providerOutput.sections[${index}].claims[${claimIndex}].proofDependencies`,
+            max: OUTCOME_WORKING_DRAFT_PROOF_DEPENDENCIES.length,
+            itemMax: 40,
+          }),
+          validationStatus: (() => {
+            const value = boundedText(claim.validationStatus, {
+              field: `providerOutput.sections[${index}].claims[${claimIndex}].validationStatus`, min: 1, max: 50,
+            })
+            if (!OUTCOME_WORKING_DRAFT_VALIDATION_STATUSES.includes(value)) {
+              throw invalid({ field: `providerOutput.sections[${index}].claims[${claimIndex}].validationStatus` })
+            }
+            return value
+          })(),
+          proofDisposition: (() => {
+            const value = boundedText(claim.proofDisposition, {
+              field: `providerOutput.sections[${index}].claims[${claimIndex}].proofDisposition`, min: 1, max: 50,
+            })
+            if (!OUTCOME_WORKING_DRAFT_PROOF_DISPOSITIONS.includes(value)) {
+              throw invalid({ field: `providerOutput.sections[${index}].claims[${claimIndex}].proofDisposition` })
+            }
+            return value
+          })(),
+          whatCanBeSaidNow: boundedText(claim.whatCanBeSaidNow, {
+            field: `providerOutput.sections[${index}].claims[${claimIndex}].whatCanBeSaidNow`, min: 1, max: 2000,
+          }),
+          blockedStrongerClaim: boundedText(claim.blockedStrongerClaim, {
+            field: `providerOutput.sections[${index}].claims[${claimIndex}].blockedStrongerClaim`, min: 1, max: 2000,
+          }),
+          evidenceRequiredToSubstantiate: boundedStringArray(claim.evidenceRequiredToSubstantiate, {
+            field: `providerOutput.sections[${index}].claims[${claimIndex}].evidenceRequiredToSubstantiate`,
+            min: 1, max: 10, itemMax: 2000,
           }),
         }
       })
@@ -455,10 +518,13 @@ const normalizeProviderOutput = ({ value, plan }) => {
       decisionKey: lower(decision.decisionKey),
       rationale: boundedText(decision.rationale, { field: `providerOutput.decisionLogic[${index}].rationale`, min: 1, max: 4000 }),
       priority: upper(decision.priority),
+      priorityBasis: upper(decision.priorityBasis),
+      closureState: upper(decision.closureState),
+      actionAuthorization: upper(decision.actionAuthorization),
       truthReferences,
     }
   })
-  return {
+  const output = {
     outputType: OUTCOME_QUALITY_STAGE_OUTPUT_TYPES.WORKING_DRAFT,
     schemaVersion: OUTCOME_WORKING_DRAFT_SCHEMA_VERSION,
     draftVersion: value.draftVersion,
@@ -468,6 +534,24 @@ const normalizeProviderOutput = ({ value, plan }) => {
     assumptions: boundedStringArray(value.assumptions, { field: 'providerOutput.assumptions', max: 20, itemMax: 2000 }),
     visibleGaps,
   }
+  try {
+    if (evidenceProjection) assertEvidenceToMeaningBoundedProviderOutput({ projection: evidenceProjection, output })
+    else assertOutcomeWorkingDraftMeaningBoundary({
+      output,
+      evidence: {
+        acceptedTruthReferences: allowedTruth,
+        frameworkGuidanceClaims: [],
+        unsupportedClaims: [],
+        proofDependencyVocabulary: [...OUTCOME_WORKING_DRAFT_PROOF_DEPENDENCIES],
+      },
+    })
+  } catch (error) {
+    throw bindingInvalid({
+      field: error?.details?.field || 'providerOutput.meaningBoundary',
+      reason: error?.details?.message || 'Working Draft meaning boundary is invalid.',
+    })
+  }
+  return output
 }
 
 export const buildWorkingDraftStageOutputFromProviderOutput = ({ providerOutput, plan, sourceStage }) => {
@@ -517,6 +601,7 @@ const providerFailure = (error) => error?.code === 'OUTCOME_WORKING_DRAFT_PROVID
   && PROVIDER_FAILURE_REASONS.has(error?.details?.reason)
 
 const persistProviderFailure = async ({
+  scopes,
   actorUserId,
   createStage,
   error,
@@ -529,8 +614,12 @@ const persistProviderFailure = async ({
   sourceStage,
   stageDeps,
   startedAt,
+  requestBinding,
 }) => {
   const reason = error.details.reason
+  const validationField = text(error.details.validationField)
+  const validationRule = text(error.details.validationRule)
+  const providerStatusReason = text(error.details.providerStatusReason)
   const args = {
     plan,
     runtimeInstanceId,
@@ -546,7 +635,11 @@ const persistProviderFailure = async ({
     status: OUTCOME_QUALITY_STAGE_STATUSES.FAILED,
     failure: {
       failureCode: reason,
-      safeReason: 'The governed Working Draft provider did not complete this attempt.',
+      safeReason: reason === 'WORKING_DRAFT_PROVIDER_OUTPUT_INVALID' && validationField
+        ? `The governed Working Draft provider output failed validation at ${validationField}${validationRule ? ` (${validationRule})` : ''}.`
+        : providerStatusReason
+          ? `The governed Working Draft provider did not complete this attempt (${providerStatusReason}).`
+          : 'The governed Working Draft provider did not complete this attempt.',
       retryable: PROVIDER_RETRYABLE_REASONS.has(reason),
     },
     executionIdentity: {
@@ -560,6 +653,7 @@ const persistProviderFailure = async ({
     },
     startedAt,
     completedAt: new Date().toISOString(),
+    requestBinding,
   }
   const candidate = buildOutcomeQualityStageExecutionCandidate({
     ...args,
@@ -572,7 +666,9 @@ const persistProviderFailure = async ({
     ...args,
     expectedAttemptFingerprint: candidate.attemptFingerprint,
     actorUserId,
+    requestBinding,
     deps: stageDeps,
+    scopes,
   })
   return { idempotent: result.idempotent, grr: null, stage: result.execution }
 }
@@ -636,6 +732,7 @@ export const executeOutcomeWorkingDraft = async ({
   providerDescriptor,
   runtimeInstanceId,
   scopes,
+  requestBinding,
   deps = {},
 } = {}) => {
   if (!mongoose.isValidObjectId(actorUserId)
@@ -666,8 +763,8 @@ export const executeOutcomeWorkingDraft = async ({
   assertStageTopology(mongooseClient)
 
   const [selectedPlan, latestPlan, runtime] = await Promise.all([
-    readSelectedPlan({ model: models.OutcomeKnowledgeCompositionPlan, planRecordId, runtimeInstanceId }),
-    readLatestPlan({ model: models.OutcomeKnowledgeCompositionPlan, runtimeInstanceId }),
+    readSelectedPlan({ model: models.OutcomeKnowledgeCompositionPlan, planRecordId, runtimeInstanceId, requestBinding }),
+    readLatestPlan({ model: models.OutcomeKnowledgeCompositionPlan, runtimeInstanceId, requestBinding }),
     readRuntime({ model: models.RuntimeInstance, runtimeInstanceId }),
   ])
   if (!selectedPlan || !latestPlan || !runtime) throw bindingInvalid({ field: 'recordOrRuntime' })
@@ -677,7 +774,10 @@ export const executeOutcomeWorkingDraft = async ({
     runtime,
     runtimeInstanceId,
     expectedPlanFingerprint,
+    requestBinding,
   })
+  await assertRuntimeEvidenceToMeaningReady({ plan, scopes, deps })
+  const evidenceToMeaning = readRuntimeEvidenceToMeaningProviderProjection(plan)
   const [frameworkGuidanceSource, latestWorkingDraft] = await Promise.all([
     readLatestStage({
       model: models.OutcomeQualityStageExecution,
@@ -742,7 +842,11 @@ export const executeOutcomeWorkingDraft = async ({
       },
       deps: {
         executionMode: 'LIVE_TEST',
-        providerAdapter,
+        providerAdapter: ({ providerContext }) => providerAdapter({
+          providerContext,
+          providerAttemptIdentity: bindingFingerprint,
+          ...(evidenceToMeaning ? { evidenceToMeaning } : {}),
+        }),
         providerDescriptor,
         providerInput,
         resolveKnowledgeBinding: async () => knowledgeFacade,
@@ -762,6 +866,7 @@ export const executeOutcomeWorkingDraft = async ({
   } catch (error) {
     if (!providerFailure(error)) throw error
     return persistProviderFailure({
+      scopes,
       actorUserId,
       createStage,
       error,
@@ -772,8 +877,9 @@ export const executeOutcomeWorkingDraft = async ({
       runtimeInstanceId,
       runtimeVersion,
       sourceStage,
-      stageDeps: { ...(deps.stageDeps || {}), latestWorkingDraft },
+      stageDeps: { ...runtimeEvidenceStageDependencies(deps), latestWorkingDraft },
       startedAt,
+      requestBinding,
     })
   }
 
@@ -818,6 +924,7 @@ export const executeOutcomeWorkingDraft = async ({
     },
     startedAt: requestedAt,
     completedAt,
+    requestBinding,
   }
   const candidate = buildOutcomeQualityStageExecutionCandidate(stageArgs)
   const stageResult = await createStage({
@@ -827,7 +934,9 @@ export const executeOutcomeWorkingDraft = async ({
     ...stageArgs,
     expectedAttemptFingerprint: candidate.attemptFingerprint,
     actorUserId,
-    deps: deps.stageDeps || {},
+    requestBinding,
+    deps: runtimeEvidenceStageDependencies(deps),
+    scopes,
   })
   return {
     idempotent: stageResult.idempotent,

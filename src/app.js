@@ -9,6 +9,10 @@ import correlationEnricher from './middleware/correlationEnricher.js'
 import performanceMonitor from './middleware/performanceMonitor.js'
 import errorHandler from './middleware/errorHandler.js'
 import { generalApiRateLimit } from './middleware/rateLimits.js'
+import {
+  resolveLockedRuntimeDiscoveryContractRevision,
+  resolveRuntimeDiscoveryContractReadiness,
+} from './services/discoveryContractRuntimeService.js'
 import healthRoutes from './routes/health.routes.js'
 import monitoringRoutes from './routes/monitoring.routes.js'
 import authRoutes from './routes/auth.routes.js'
@@ -48,6 +52,8 @@ import logger from './config/logger.js'
 const app = express()
 const outcomeStudioProviderRuntime = buildOutcomeStudioProviderRuntime()
 app.locals.outcomeStudioReasoningDeps = outcomeStudioProviderRuntime.deps
+app.locals.discoveryContractRevisionResolver = resolveLockedRuntimeDiscoveryContractRevision
+app.locals.discoveryContractReadinessResolver = resolveRuntimeDiscoveryContractReadiness
 
 if (env.outcomeStudioProviderEnabled && !outcomeStudioProviderRuntime.status.configured) {
   logger.warn(

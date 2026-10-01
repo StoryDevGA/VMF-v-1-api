@@ -7,6 +7,7 @@ import {
   OUTCOME_QUALITY_STAGE_STATUSES,
   OUTCOME_QUALITY_STAGES,
   OUTCOME_RENDERED_EXPRESSION_RL_PROVIDER_CONFIG_VERSION,
+  OUTCOME_RENDERED_EXPRESSION_RL_PROVIDER_RESPONSE_SCHEMA_NAME,
   OUTCOME_RENDERED_EXPRESSION_RL_SCHEMA_VERSION,
   OUTCOME_RENDERED_EXPRESSION_SCHEMA_VERSION,
 } from '../constants/outcomeGovernedQuality.js'
@@ -303,6 +304,12 @@ describe('Rendered-expression RL provider boundary', () => {
     expect(result.metadata).toEqual(expect.objectContaining({
       responseId: 'resp_rl_qa_1',
       storeRequested: false,
+      responseSchema: {
+        name: OUTCOME_RENDERED_EXPRESSION_RL_PROVIDER_RESPONSE_SCHEMA_NAME,
+        version: OUTCOME_RENDERED_EXPRESSION_RL_SCHEMA_VERSION,
+        strict: true,
+        parsed: true,
+      },
       tokenUsage: { inputTokens: 100, outputTokens: 200, totalTokens: 300 },
     }))
   })

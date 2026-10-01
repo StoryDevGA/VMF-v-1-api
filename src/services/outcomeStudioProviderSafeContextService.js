@@ -22,6 +22,7 @@ const MAX_SELECTED_VERSIONS = 48
 const MAX_PACK_CONTENT_LENGTH = 200000
 const MAX_PACK_NON_EMPTY_LINES = 2500
 const MAX_GUIDANCE_ENTRIES = 12
+const MAX_PROVIDER_TRUTH_SUMMARY_LENGTH = 1600
 
 const PROVIDER_INPUT_KEYS = Object.freeze(['customerPrompt', 'currentDraftMarkdown', 'request'])
 const REQUEST_KEYS = Object.freeze([
@@ -417,6 +418,11 @@ const containsDirectIdentifier = (value) => OBJECT_ID_PATTERN.test(value) || UUI
 const withoutDirectIdentifiers = (value) => value
   .replace(new RegExp(UUID_PATTERN.source, 'gi'), ' ')
   .replace(new RegExp(OBJECT_ID_PATTERN.source, 'gi'), ' ')
+export const assertOutcomeSelectedDocumentPrivacy = (content) => {
+  if (typeof content !== 'string' || !content.trim() || hasMalformedUtf16(content)
+    || CONTROL_PATTERN.test(content) || containsDirectPiiOrCredential(withoutDirectIdentifiers(content))) fail()
+  return content
+}
 export const assertOutcomeMethodDocumentPrivacy = (document) => {
   assertOutcomeMethodDocument(document)
   if (containsDirectPiiOrCredential(withoutDirectIdentifiers(readOutcomeMethodDocument(document)))) fail()
@@ -1410,7 +1416,11 @@ const projectTruthSummaries = (truthSource) => {
     const customerSafeContent = item.content.replace(new RegExp(URL_PATTERN.source, 'gi'), ' ')
     return {
       label: boundText(item.label, 160, 144),
-      summary: boundText(customerSafeContent, 900, 810),
+      summary: boundText(
+        customerSafeContent,
+        MAX_PROVIDER_TRUTH_SUMMARY_LENGTH,
+        MAX_PROVIDER_TRUTH_SUMMARY_LENGTH - 160,
+      ),
     }
   }).filter((item) => item.label && item.summary)
 }
@@ -2082,7 +2092,7 @@ export const assertOutcomeStudioProviderSafeContext = (providerContext) => {
       || !safeToken(item.label)
       || typeof item.summary !== 'string'
       || !item.summary.trim()
-      || item.summary.length > 900) fail()
+      || item.summary.length > MAX_PROVIDER_TRUTH_SUMMARY_LENGTH) fail()
     assertSafeRawString(item.label)
     assertSafeRawString(item.summary)
   }

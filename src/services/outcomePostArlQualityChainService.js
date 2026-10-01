@@ -17,6 +17,7 @@ import {
 } from '../models/index.js'
 import { buildExpressionOnlyRevisionSection } from '../utils/outcomeRenderedExpressionRevision.js'
 import {
+  assertOutcomeKnowledgeCompositionPlanIntegrity,
   assertLegacyOutcomeKnowledgeCompositionPlan,
   assertOutcomeKnowledgeCompositionPlanMatchesRuntime,
 } from './outcomeKnowledgeCompositionPlanService.js'
@@ -63,7 +64,19 @@ const readLatest = ({ model, filter, sort }) => {
   return execQuery(typeof query?.sort === 'function' ? query.sort(sort) : query)
 }
 
-const readBoundState = async ({ actorUserId, expectedPlanFingerprint, planRecordId, runtimeInstanceId, scopes, deps }) => {
+const planScope = (requestBinding) => requestBinding
+  ? { requestId: requestBinding.requestId }
+  : { requestId: { $exists: false } }
+
+const stageScope = (requestBinding) => requestBinding
+  ? {
+      requestId: requestBinding.requestId,
+      draftId: requestBinding.draftId,
+      draftIterationId: requestBinding.draftIterationId,
+    }
+  : { requestId: { $exists: false } }
+
+const readBoundState = async ({ actorUserId, expectedPlanFingerprint, planRecordId, runtimeInstanceId, scopes, requestBinding, deps }) => {
   if (!mongoose.isValidObjectId(actorUserId)
     || !mongoose.isValidObjectId(planRecordId)
     || !mongoose.isValidObjectId(runtimeInstanceId)
@@ -75,17 +88,22 @@ const readBoundState = async ({ actorUserId, expectedPlanFingerprint, planRecord
     GovernedRuntimeArtifact: deps.GovernedRuntimeArtifact || GovernedRuntimeArtifact,
   }
   const [selectedPlan, latestPlan, runtime] = await Promise.all([
-    execQuery(models.OutcomeKnowledgeCompositionPlan.findOne({ _id: planRecordId, runtimeInstanceId, requestId: { $exists: false } })),
-    readLatest({ model: models.OutcomeKnowledgeCompositionPlan, filter: { runtimeInstanceId, requestId: { $exists: false } }, sort: { planVersion: -1 } }),
+    execQuery(models.OutcomeKnowledgeCompositionPlan.findOne({ _id: planRecordId, runtimeInstanceId, ...planScope(requestBinding) })),
+    readLatest({ model: models.OutcomeKnowledgeCompositionPlan, filter: { runtimeInstanceId, ...planScope(requestBinding) }, sort: { planVersion: -1 } }),
     execQuery(models.RuntimeInstance.findOne({ _id: runtimeInstanceId })),
   ])
   let plan
   try {
-    plan = assertLegacyOutcomeKnowledgeCompositionPlan(selectedPlan)
-    const latest = assertLegacyOutcomeKnowledgeCompositionPlan(latestPlan)
+    plan = requestBinding
+      ? assertOutcomeKnowledgeCompositionPlanIntegrity(selectedPlan)
+      : assertLegacyOutcomeKnowledgeCompositionPlan(selectedPlan)
+    const latest = requestBinding
+      ? assertOutcomeKnowledgeCompositionPlanIntegrity(latestPlan)
+      : assertLegacyOutcomeKnowledgeCompositionPlan(latestPlan)
     assertOutcomeKnowledgeCompositionPlanMatchesRuntime(plan, runtime)
     if (toId(plan._id || plan.id) !== toId(latest._id || latest.id)
       || lower(plan.planFingerprint) !== lower(expectedPlanFingerprint)) throw new Error('stale')
+    if (requestBinding && text(plan.requestId) !== requestBinding.requestId) throw new Error('request mismatch')
   } catch {
     throw fail('The current Knowledge Composition Plan is unavailable or stale.')
   }
@@ -302,13 +320,14 @@ const persistStage = async ({
   planRecordId,
   runtimeInstanceId,
   scopes,
+  requestBinding,
   stageKey,
   startedAt,
   completedAt,
   deps = {},
 }) => {
   const { models, plan, runtime } = await readBoundState({
-    actorUserId, expectedPlanFingerprint, planRecordId, runtimeInstanceId, scopes, deps,
+    actorUserId, expectedPlanFingerprint, planRecordId, runtimeInstanceId, scopes, requestBinding, deps,
   })
   const order = OUTCOME_QUALITY_STAGE_SEQUENCE.indexOf(stageKey) + 1
   if (order < 4 || order > 6) throw fail('Only post-ARL stages 4 to 6 are supported.')
@@ -316,12 +335,12 @@ const persistStage = async ({
   const [sourceRecord, existing] = await Promise.all([
     readLatest({
       model: models.OutcomeQualityStageExecution,
-      filter: { runtimeInstanceId, planId: plan.planId, stageKey: sourceKey },
+      filter: { runtimeInstanceId, planId: plan.planId, ...stageScope(requestBinding), stageKey: sourceKey },
       sort: { attemptNumber: -1 },
     }),
     readLatest({
       model: models.OutcomeQualityStageExecution,
-      filter: { runtimeInstanceId, planId: plan.planId, stageKey },
+      filter: { runtimeInstanceId, planId: plan.planId, ...stageScope(requestBinding), stageKey },
       sort: { attemptNumber: -1 },
     }),
   ])
@@ -364,6 +383,7 @@ const persistStage = async ({
     executionIdentity: identity,
     startedAt: start,
     completedAt: completion,
+    requestBinding,
   }
   const candidate = buildOutcomeQualityStageExecutionCandidate(args)
   const createStage = deps.createOutcomeQualityStageExecution || createOutcomeQualityStageExecution
@@ -374,6 +394,7 @@ const persistStage = async ({
     ...args,
     expectedAttemptFingerprint: candidate.attemptFingerprint,
     actorUserId,
+    requestBinding,
     deps: deps.stageDeps || {},
   })
   return { idempotent: result.idempotent, stage: result.execution }
@@ -384,12 +405,12 @@ export const createOutcomeNarrativePlan = async (args = {}) => {
   const [arlStage, workingDraftStage] = await Promise.all([
     readLatest({
       model: bound.models.OutcomeQualityStageExecution,
-      filter: { runtimeInstanceId: args.runtimeInstanceId, planId: bound.plan.planId, stageKey: OUTCOME_QUALITY_STAGES.ARL_MEANING_REVIEW },
+      filter: { runtimeInstanceId: args.runtimeInstanceId, planId: bound.plan.planId, ...stageScope(args.requestBinding), stageKey: OUTCOME_QUALITY_STAGES.ARL_MEANING_REVIEW },
       sort: { attemptNumber: -1 },
     }),
     readLatest({
       model: bound.models.OutcomeQualityStageExecution,
-      filter: { runtimeInstanceId: args.runtimeInstanceId, planId: bound.plan.planId, stageKey: OUTCOME_QUALITY_STAGES.WORKING_DRAFT },
+      filter: { runtimeInstanceId: args.runtimeInstanceId, planId: bound.plan.planId, ...stageScope(args.requestBinding), stageKey: OUTCOME_QUALITY_STAGES.WORKING_DRAFT },
       sort: { attemptNumber: -1 },
     }),
   ])
@@ -410,6 +431,7 @@ export const createOutcomeShapedCandidate = async (args = {}) => {
     filter: {
       runtimeInstanceId: args.runtimeInstanceId,
       planId: bound.plan.planId,
+      ...stageScope(args.requestBinding),
       stageKey: OUTCOME_QUALITY_STAGES.OUTCOME_NARRATIVE_PLAN,
     },
     sort: { attemptNumber: -1 },
@@ -427,17 +449,17 @@ export const createOutcomeShapedCandidateRevision = async (args = {}) => {
   const [narrativePlanStage, priorCandidateStage, failedRlStage] = await Promise.all([
     readLatest({
       model: bound.models.OutcomeQualityStageExecution,
-      filter: { runtimeInstanceId: args.runtimeInstanceId, planId: bound.plan.planId, stageKey: OUTCOME_QUALITY_STAGES.OUTCOME_NARRATIVE_PLAN },
+      filter: { runtimeInstanceId: args.runtimeInstanceId, planId: bound.plan.planId, ...stageScope(args.requestBinding), stageKey: OUTCOME_QUALITY_STAGES.OUTCOME_NARRATIVE_PLAN },
       sort: { attemptNumber: -1 },
     }),
     readLatest({
       model: bound.models.OutcomeQualityStageExecution,
-      filter: { runtimeInstanceId: args.runtimeInstanceId, planId: bound.plan.planId, stageKey: OUTCOME_QUALITY_STAGES.OUTPUT_SHAPING },
+      filter: { runtimeInstanceId: args.runtimeInstanceId, planId: bound.plan.planId, ...stageScope(args.requestBinding), stageKey: OUTCOME_QUALITY_STAGES.OUTPUT_SHAPING },
       sort: { attemptNumber: -1 },
     }),
     readLatest({
       model: bound.models.OutcomeQualityStageExecution,
-      filter: { runtimeInstanceId: args.runtimeInstanceId, planId: bound.plan.planId, stageKey: OUTCOME_QUALITY_STAGES.RENDERED_EXPRESSION_RL },
+      filter: { runtimeInstanceId: args.runtimeInstanceId, planId: bound.plan.planId, ...stageScope(args.requestBinding), stageKey: OUTCOME_QUALITY_STAGES.RENDERED_EXPRESSION_RL },
       sort: { attemptNumber: -1 },
     }),
   ])
@@ -482,6 +504,7 @@ export const createOutcomeShapedCandidateRevision = async (args = {}) => {
     executionIdentity,
     startedAt: completedAt,
     completedAt,
+    requestBinding: args.requestBinding,
   }
   const candidate = buildOutcomeQualityStageExecutionCandidate(candidateArgs)
   const createStage = args.deps?.createOutcomeQualityStageExecution || createOutcomeQualityStageExecution
@@ -491,6 +514,7 @@ export const createOutcomeShapedCandidateRevision = async (args = {}) => {
     expectedAttemptFingerprint: candidate.attemptFingerprint,
     actorUserId: args.actorUserId,
     remediationSourceStageExecutionId: failedRlStage.stageExecutionId,
+    requestBinding: args.requestBinding,
     deps: args.deps?.stageDeps || {},
   })
   return { idempotent: result.idempotent, stage: result.execution }

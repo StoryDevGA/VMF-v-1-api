@@ -1,3 +1,5 @@
+import { assertRuntimeEvidenceToMeaningReady, runtimeEvidenceStageDependencies,
+  readRuntimeEvidenceToMeaningProviderProjection } from './outcomeRuntimeEvidenceToMeaningService.js'
 import mongoose from 'mongoose'
 
 import {
@@ -17,6 +19,7 @@ import {
   resolveLiveTestConfiguration,
 } from './governedReasoningRuntimeService.js'
 import {
+  assertOutcomeKnowledgeCompositionPlanIntegrity,
   assertLegacyOutcomeKnowledgeCompositionPlan,
   assertOutcomeKnowledgeCompositionPlanMatchesRuntime,
   resolveOutcomeAcceptedTruthSectionIdentity,
@@ -67,6 +70,8 @@ const REPAIRED_OUTPUT_PROVIDER_CONFIG_VERSIONS = new Set([
   OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V4_SAFE_OUTPUT_DIAGNOSTICS,
   OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V5_SEMANTIC_CLAIM_CALIBRATION,
   OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V6_ARL_BOUNDARY_DIAGNOSTICS,
+  OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V7_REALITY_BOUNDARIES,
+  OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V8_SINGLE_LINE_TEXT,
 ])
 
 const text = (value) => String(value ?? '').trim()
@@ -114,11 +119,14 @@ const lineageInvalid = (details) => appError(
 
 const execQuery = async (query) => (typeof query?.lean === 'function' ? query.lean() : query)
 
-const readSelectedPlan = ({ model, planRecordId, runtimeInstanceId }) => execQuery(
-  model.findOne({ _id: planRecordId, runtimeInstanceId, requestId: { $exists: false } }),
+const planScope = (requestBinding) => requestBinding
+  ? { requestId: requestBinding.requestId }
+  : { requestId: { $exists: false } }
+const readSelectedPlan = ({ model, planRecordId, runtimeInstanceId, requestBinding }) => execQuery(
+  model.findOne({ _id: planRecordId, runtimeInstanceId, ...planScope(requestBinding) }),
 )
-const readLatestPlan = ({ model, runtimeInstanceId }) => {
-  const query = model.findOne({ runtimeInstanceId, requestId: { $exists: false } })
+const readLatestPlan = ({ model, runtimeInstanceId, requestBinding }) => {
+  const query = model.findOne({ runtimeInstanceId, ...planScope(requestBinding) })
   return execQuery(typeof query?.sort === 'function' ? query.sort({ planVersion: -1 }) : query)
 }
 const readRuntime = ({ model, runtimeInstanceId }) => execQuery(model.findOne({ _id: runtimeInstanceId }))
@@ -131,18 +139,23 @@ const readLatestStage = ({ model, runtimeInstanceId, planId }) => {
   return execQuery(typeof query?.sort === 'function' ? query.sort({ attemptNumber: -1 }) : query)
 }
 
-const assertCurrentPlan = ({ selectedPlan, latestPlan, runtime, runtimeInstanceId, expectedPlanFingerprint }) => {
+const assertCurrentPlan = ({ selectedPlan, latestPlan, runtime, runtimeInstanceId, expectedPlanFingerprint, requestBinding }) => {
   let selected
   let latest
   try {
-    selected = assertLegacyOutcomeKnowledgeCompositionPlan(selectedPlan)
-    latest = assertLegacyOutcomeKnowledgeCompositionPlan(latestPlan)
+    selected = requestBinding
+      ? assertOutcomeKnowledgeCompositionPlanIntegrity(selectedPlan)
+      : assertLegacyOutcomeKnowledgeCompositionPlan(selectedPlan)
+    latest = requestBinding
+      ? assertOutcomeKnowledgeCompositionPlanIntegrity(latestPlan)
+      : assertLegacyOutcomeKnowledgeCompositionPlan(latestPlan)
     assertOutcomeKnowledgeCompositionPlanMatchesRuntime(selected, runtime)
   } catch (error) {
     throw bindingInvalid({ causeCode: error?.code || '' })
   }
   if (toId(selected.runtimeInstanceId) !== toId(runtimeInstanceId)
     || lower(selected.planFingerprint) !== lower(expectedPlanFingerprint)
+    || (requestBinding && text(selected.requestId) !== requestBinding.requestId)
     || toId(selected._id || selected.id) !== toId(latest._id || latest.id)
     || text(selected.planId) !== text(latest.planId)
     || Number(selected.planVersion) !== Number(latest.planVersion)
@@ -343,7 +356,7 @@ const buildServerOwnedProviderInput = (plan) => {
   }
 }
 
-const buildPreflightCandidate = ({ plan, runtimeInstanceId, expectedPlanFingerprint, latest, runtimeVersion }) => buildOutcomeQualityStageExecutionCandidate({
+const buildPreflightCandidate = ({ plan, runtimeInstanceId, expectedPlanFingerprint, latest, runtimeVersion, requestBinding }) => buildOutcomeQualityStageExecutionCandidate({
   plan,
   runtimeInstanceId,
   expectedPlanFingerprint,
@@ -368,6 +381,7 @@ const buildPreflightCandidate = ({ plan, runtimeInstanceId, expectedPlanFingerpr
   },
   startedAt: runtimeVersion,
   completedAt: runtimeVersion,
+  requestBinding,
 })
 
 const assertRetryHistory = (
@@ -413,10 +427,26 @@ const assertRetryHistory = (
       === OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V5_SEMANTIC_CLAIM_CALIBRATION
     && providerConfigurationVersion
       === OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V6_ARL_BOUNDARY_DIAGNOSTICS
+  const realityBoundaryRecovery = recoverableOutputInvalidFailure
+    && [
+      OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V5_SEMANTIC_CLAIM_CALIBRATION,
+      OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V6_ARL_BOUNDARY_DIAGNOSTICS,
+    ].includes(predecessorProviderConfigurationVersion)
+    && [
+      OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V7_REALITY_BOUNDARIES,
+      OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V8_SINGLE_LINE_TEXT,
+    ].includes(providerConfigurationVersion)
+  const singleLineTextRecovery = recoverableOutputInvalidFailure
+    && predecessorProviderConfigurationVersion
+      === OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V7_REALITY_BOUNDARIES
+    && providerConfigurationVersion
+      === OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V8_SINGLE_LINE_TEXT
   const providerContractRecovery = legacyProviderContractRecovery
     || safeOutputDiagnosticsRecovery
     || semanticClaimCalibrationRecovery
     || arlBoundaryDiagnosticsRecovery
+    || realityBoundaryRecovery
+    || singleLineTextRecovery
   if (!RETRYABLE_STAGE_STATUSES.has(latest.status)
     || (latest.failure?.retryable !== true && !providerContractRecovery)
     || !text(latest.stageExecutionId)
@@ -465,6 +495,7 @@ const providerFailure = (error) => error?.code === 'OUTCOME_FRAMEWORK_GUIDANCE_P
   && PROVIDER_FAILURE_REASONS.has(error?.details?.reason)
 
 const persistProviderFailure = async ({
+  scopes,
   error,
   plan,
   runtimeInstanceId,
@@ -477,6 +508,7 @@ const persistProviderFailure = async ({
   actorUserId,
   createStage,
   stageDeps,
+  requestBinding,
 }) => {
   const completedAt = new Date().toISOString()
   const failureReason = error.details.reason
@@ -505,6 +537,7 @@ const persistProviderFailure = async ({
     },
     startedAt,
     completedAt,
+    requestBinding,
   }
   const candidate = buildOutcomeQualityStageExecutionCandidate(args)
   const result = await createStage({
@@ -514,7 +547,9 @@ const persistProviderFailure = async ({
     ...args,
     expectedAttemptFingerprint: candidate.attemptFingerprint,
     actorUserId,
+    requestBinding,
     deps: stageDeps,
+    scopes,
   })
   return { idempotent: result.idempotent, grr: null, stage: result.execution }
 }
@@ -528,6 +563,7 @@ export const executeOutcomeFrameworkGuidance = async ({
   providerDescriptor,
   runtimeInstanceId,
   scopes,
+  requestBinding,
   deps = {},
 } = {}) => {
   if (!mongoose.isValidObjectId(actorUserId)
@@ -552,8 +588,8 @@ export const executeOutcomeFrameworkGuidance = async ({
     || assertOutcomeQualityStageTransactionSupport
   assertStageTopology(mongooseClient)
   const [selectedPlan, latestPlan, runtime] = await Promise.all([
-    readSelectedPlan({ model: models.OutcomeKnowledgeCompositionPlan, planRecordId, runtimeInstanceId }),
-    readLatestPlan({ model: models.OutcomeKnowledgeCompositionPlan, runtimeInstanceId }),
+    readSelectedPlan({ model: models.OutcomeKnowledgeCompositionPlan, planRecordId, runtimeInstanceId, requestBinding }),
+    readLatestPlan({ model: models.OutcomeKnowledgeCompositionPlan, runtimeInstanceId, requestBinding }),
     readRuntime({ model: models.RuntimeInstance, runtimeInstanceId }),
   ])
   if (!selectedPlan || !latestPlan || !runtime) throw bindingInvalid({ field: 'recordOrRuntime' })
@@ -563,7 +599,10 @@ export const executeOutcomeFrameworkGuidance = async ({
     runtime,
     runtimeInstanceId,
     expectedPlanFingerprint,
+    requestBinding,
   })
+  await assertRuntimeEvidenceToMeaningReady({ plan, scopes, deps })
+  const evidenceToMeaning = readRuntimeEvidenceToMeaningProviderProjection(plan)
   const latest = toPlain(await readLatestStage({
     model: models.OutcomeQualityStageExecution,
     runtimeInstanceId,
@@ -584,6 +623,7 @@ export const executeOutcomeFrameworkGuidance = async ({
     expectedPlanFingerprint,
     latest,
     runtimeVersion,
+    requestBinding,
   })
   const outputContract = {
     truthReferenceKeys: binding.truthReferenceKeys,
@@ -602,11 +642,17 @@ export const executeOutcomeFrameworkGuidance = async ({
     providerDescriptor,
   )
   const knowledgeFacade = buildKnowledgeBindingFacade({ plan, binding })
-  const expectedKnowledgeSelection = binding.packs.map(({ versionId, knowledgeLayer, executionMode }) => ({
+  const expectedBoundarySelection = binding.packs.map(({ versionId, knowledgeLayer, executionMode, packType }) => ({
     versionId,
     knowledgeLayer,
     executionMode,
+    ...(packType ? { packType } : {}),
   }))
+  const providerSafeKnowledgeSelection = expectedBoundarySelection.map(({
+    versionId,
+    knowledgeLayer,
+    executionMode,
+  }) => ({ versionId, knowledgeLayer, executionMode }))
   const expectedPackBindings = binding.packs.map(({ versionId, contentHash, knowledgeLayer, executionMode }) => ({
     versionId,
     contentHash,
@@ -638,7 +684,8 @@ export const executeOutcomeFrameworkGuidance = async ({
       },
       deps: {
         executionMode: 'LIVE_TEST',
-        providerAdapter,
+        providerAdapter: evidenceToMeaning
+          ? (args) => providerAdapter({ ...args, evidenceToMeaning }) : providerAdapter,
         providerDescriptor,
         providerInput,
         resolveKnowledgeBinding: async () => knowledgeFacade,
@@ -647,15 +694,18 @@ export const executeOutcomeFrameworkGuidance = async ({
           safeRequest,
           truthSource,
           knowledgeSelection,
+          boundarySelection,
         }) => {
-          if (JSON.stringify(knowledgeSelection) !== JSON.stringify(expectedKnowledgeSelection)) {
+          if (!Array.isArray(knowledgeSelection)
+            || knowledgeSelection.length !== 0
+            || JSON.stringify(boundarySelection) !== JSON.stringify(expectedBoundarySelection)) {
             throw bindingInvalid({ field: 'grrKnowledgeSelection' })
           }
           return buildOutcomeFrameworkGuidanceProviderSafeContext({
             providerDescriptor: currentProviderDescriptor,
             safeRequest,
             truthSource,
-            knowledgeSelection,
+            knowledgeSelection: providerSafeKnowledgeSelection,
             expectedTruthBindings: binding.truthBindings,
             expectedPackBindings,
             truthReferenceKeys: binding.truthReferenceKeys,
@@ -669,6 +719,7 @@ export const executeOutcomeFrameworkGuidance = async ({
   } catch (error) {
     if (!providerFailure(error)) throw error
     return persistProviderFailure({
+      scopes,
       error,
       plan,
       runtimeInstanceId,
@@ -680,7 +731,8 @@ export const executeOutcomeFrameworkGuidance = async ({
       startedAt,
       actorUserId,
       createStage,
-      stageDeps: deps.stageDeps || {},
+      stageDeps: runtimeEvidenceStageDependencies(deps),
+      requestBinding,
     })
   }
   const artifact = grrExecution?.artifact
@@ -720,6 +772,7 @@ export const executeOutcomeFrameworkGuidance = async ({
     },
     startedAt: requestedAt,
     completedAt,
+    requestBinding,
   }
   const candidate = buildOutcomeQualityStageExecutionCandidate(stageArgs)
   const stageResult = await createStage({
@@ -729,7 +782,9 @@ export const executeOutcomeFrameworkGuidance = async ({
     ...stageArgs,
     expectedAttemptFingerprint: candidate.attemptFingerprint,
     actorUserId,
-    deps: deps.stageDeps || {},
+    requestBinding,
+    deps: runtimeEvidenceStageDependencies(deps),
+    scopes,
   })
   return {
     idempotent: stageResult.idempotent,
