@@ -856,7 +856,7 @@ const formatDocumentAssetLabel = (value) => String(value || DOCUMENT_ASSET_TYPES
   .map((part) => `${part.charAt(0).toUpperCase()}${part.slice(1)}`)
   .join(' ')
 
-const normalizeDocumentFileName = (value) => {
+export const normalizeDocumentFileName = (value) => {
   const trimmed = String(value || '').trim()
   const fileName = trimmed.split(/[\\/]+/).filter(Boolean).pop() || ''
   return fileName.slice(0, 255)
@@ -893,7 +893,7 @@ const getUnsupportedPowerPointMessage = (fileName = '') => {
   return ''
 }
 
-const decodeDocumentBuffer = (documentSource = {}) => {
+export const decodeDocumentBuffer = (documentSource = {}) => {
   const textContent = String(documentSource?.textContent || '').trim()
   if (textContent) {
     return Buffer.from(textContent, 'utf8')
@@ -1057,7 +1057,12 @@ const assertWebsiteDomainBoundary = ({ requestedUrl, finalUrl }) => {
   }
 }
 
+const assertWebsiteAcquisitionActive = (signal) => {
+  if (signal?.aborted) throw new Error('Website acquisition timed out.')
+}
+
 const readWebsiteResponseText = async (response, { signal } = {}) => {
+  assertWebsiteAcquisitionActive(signal)
   const maxCharacters = WEBSITE_ACQUISITION_LIMITS.maxContentCharacters
   if (!response?.body?.getReader) {
     const contentLength = Number(response?.headers?.get?.('content-length'))
@@ -1065,6 +1070,7 @@ const readWebsiteResponseText = async (response, { signal } = {}) => {
       throw new Error('Website acquisition response exceeds the supported size limit.')
     }
     const text = String(await response.text())
+    assertWebsiteAcquisitionActive(signal)
     return {
       text: text.slice(0, maxCharacters),
       truncated: text.length > maxCharacters,
@@ -1077,6 +1083,12 @@ const readWebsiteResponseText = async (response, { signal } = {}) => {
   const decoder = new TextDecoder()
   let text = ''
   let truncated = false
+  const cancelOnAbort = () => {
+    try {
+      Promise.resolve(reader.cancel?.()).catch(() => {})
+    } catch { /* Cancellation must not extend the acquisition deadline. */ }
+  }
+  signal?.addEventListener('abort', cancelOnAbort, { once: true })
 
   try {
     while (true) {
@@ -1084,6 +1096,7 @@ const readWebsiteResponseText = async (response, { signal } = {}) => {
         throw new Error('Website acquisition timed out.')
       }
       const { done, value } = await reader.read()
+      assertWebsiteAcquisitionActive(signal)
       if (done) break
       const decodedChunk = decoder.decode(value, { stream: true })
       const remainingCharacters = maxCharacters - text.length
@@ -1117,6 +1130,7 @@ const readWebsiteResponseText = async (response, { signal } = {}) => {
       charactersRead: text.length,
     }
   } finally {
+    signal?.removeEventListener('abort', cancelOnAbort)
     reader.releaseLock?.()
   }
 }
@@ -1125,8 +1139,10 @@ const fetchWebsiteWithGovernedRedirects = async ({ normalizedUrl, signal }) => {
   let currentUrl = normalizedUrl
 
   for (let redirectCount = 0; redirectCount <= WEBSITE_ACQUISITION_LIMITS.maxRedirects; redirectCount += 1) {
+    assertWebsiteAcquisitionActive(signal)
     const currentParsedUrl = new URL(currentUrl)
     await assertWebsiteResolvesPublicly(currentParsedUrl.hostname)
+    assertWebsiteAcquisitionActive(signal)
 
     let response
     try {
@@ -1144,6 +1160,7 @@ const fetchWebsiteWithGovernedRedirects = async ({ normalizedUrl, signal }) => {
         : 'Website acquisition could not fetch the requested website.')
     }
 
+    assertWebsiteAcquisitionActive(signal)
     const status = Number(response?.status)
     if (status >= 300 && status < 400) {
       const location = response.headers?.get?.('location')
@@ -1153,6 +1170,7 @@ const fetchWebsiteWithGovernedRedirects = async ({ normalizedUrl, signal }) => {
       const nextUrl = new URL(location, currentUrl).toString()
       assertWebsiteDomainBoundary({ requestedUrl: normalizedUrl, finalUrl: nextUrl })
       await assertWebsiteResolvesPublicly(new URL(nextUrl).hostname)
+      assertWebsiteAcquisitionActive(signal)
       currentUrl = nextUrl
       continue
     }
@@ -1343,6 +1361,16 @@ const extractPdfOperatorFallbackText = (buffer) => {
   return sanitizeFact(extractedParts.filter(Boolean).join(' '))
 }
 
+const initiatePdfCleanup = (resource, method) => {
+  try {
+    Promise.resolve(resource?.[method]?.()).catch(() => {})
+  } catch { /* Cleanup must not extend an expired extraction deadline. */ }
+}
+
+const assertPdfExtractionActive = (ref, message) => {
+  if (ref.cancelled) throw new Error(message)
+}
+
 const extractPdfJsTextWithoutTimeout = async (buffer, documentRef = {}) => {
   const document = await loadPdfDocument(buffer)
   documentRef.current = document
@@ -1351,12 +1379,16 @@ const extractPdfJsTextWithoutTimeout = async (buffer, documentRef = {}) => {
   const maxPages = Math.min(pageCount, DOCUMENT_ACQUISITION_LIMITS.maxPdfTextPages)
 
   try {
+    assertPdfExtractionActive(documentRef, PDF_TEXT_TIMEOUT_ERROR)
     for (let pageNumber = 1; pageNumber <= maxPages; pageNumber += 1) {
+      assertPdfExtractionActive(documentRef, PDF_TEXT_TIMEOUT_ERROR)
       const page = await document.getPage(pageNumber)
+      assertPdfExtractionActive(documentRef, PDF_TEXT_TIMEOUT_ERROR)
       const textContent = await page.getTextContent({
         disableCombineTextItems: false,
         normalizeWhitespace: true,
       })
+      assertPdfExtractionActive(documentRef, PDF_TEXT_TIMEOUT_ERROR)
       const lines = []
       let currentLine = ''
       let currentY = null
@@ -1399,8 +1431,9 @@ const extractPdfJsText = async (buffer) => {
     promise: extractPdfJsTextWithoutTimeout(buffer, documentRef),
     timeoutMs: DOCUMENT_ACQUISITION_LIMITS.pdfTextTimeoutMs,
     timeoutMessage: PDF_TEXT_TIMEOUT_ERROR,
-    onTimeout: async () => {
-      await documentRef.current?.destroy?.()
+    onTimeout: () => {
+      documentRef.cancelled = true
+      initiatePdfCleanup(documentRef.current, 'destroy')
     },
   })
 }
@@ -1424,7 +1457,7 @@ const renderPdfPageToPngBuffer = async (page) => {
   return canvas.toBuffer('image/png')
 }
 
-const createPdfOcrWorker = async () => {
+const createPdfOcrWorker = async (workerRef) => {
   const worker = await createOcrWorker('eng', 1, {
     cacheMethod: 'none',
     corePath: PDF_OCR_CORE_PATH,
@@ -1432,12 +1465,15 @@ const createPdfOcrWorker = async () => {
     workerPath: PDF_OCR_WORKER_PATH,
   })
 
+  workerRef.current = worker
+  assertPdfExtractionActive(workerRef, PDF_OCR_TIMEOUT_ERROR)
   await worker.setParameters({
     preserve_interword_spaces: '1',
     tessedit_pageseg_mode: OCR_PAGE_SEGMENTATION_MODES.AUTO,
     user_defined_dpi: '300',
   })
 
+  assertPdfExtractionActive(workerRef, PDF_OCR_TIMEOUT_ERROR)
   return worker
 }
 
@@ -1445,25 +1481,26 @@ const extractPdfOcrTextWithoutTimeout = async (buffer, workerRef = {}) => {
   const document = await loadPdfDocument(buffer, {
     canvasFactory: new PdfOcrCanvasFactory(),
   })
+  workerRef.document = document
   const pageCount = Number(document?.numPages || 0)
   const maxPages = Math.min(pageCount, DOCUMENT_ACQUISITION_LIMITS.maxPdfOcrPages)
   const pageTexts = []
   const pageConfidences = []
 
-  if (maxPages <= 0) {
-    await document.destroy?.()
-    throw new Error(PDF_OCR_NO_READABLE_TEXT_ERROR)
-  }
-
   let worker
   try {
-    worker = await createPdfOcrWorker()
-    workerRef.current = worker
+    assertPdfExtractionActive(workerRef, PDF_OCR_TIMEOUT_ERROR)
+    if (maxPages <= 0) throw new Error(PDF_OCR_NO_READABLE_TEXT_ERROR)
+    worker = await createPdfOcrWorker(workerRef)
+    assertPdfExtractionActive(workerRef, PDF_OCR_TIMEOUT_ERROR)
 
     for (let pageNumber = 1; pageNumber <= maxPages; pageNumber += 1) {
       const page = await document.getPage(pageNumber)
+      assertPdfExtractionActive(workerRef, PDF_OCR_TIMEOUT_ERROR)
       const imageBuffer = await renderPdfPageToPngBuffer(page)
+      assertPdfExtractionActive(workerRef, PDF_OCR_TIMEOUT_ERROR)
       const { data } = await worker.recognize(imageBuffer)
+      assertPdfExtractionActive(workerRef, PDF_OCR_TIMEOUT_ERROR)
       const pageText = normalizeDocumentExtractionText(data?.text || '')
 
       if (pageText) pageTexts.push(pageText)
@@ -1472,9 +1509,14 @@ const extractPdfOcrTextWithoutTimeout = async (buffer, workerRef = {}) => {
       }
     }
   } finally {
+    const currentWorker = worker || workerRef.current
     workerRef.current = null
-    await worker?.terminate?.()
-    await document.destroy?.()
+    try {
+      await currentWorker?.terminate?.()
+    } finally {
+      workerRef.document = null
+      await document.destroy?.()
+    }
   }
 
   const text = getReadableDocumentExtractionText(pageTexts.join('\n'))
@@ -1508,8 +1550,10 @@ const extractPdfOcrText = async (buffer) => {
     promise: extractPdfOcrTextWithoutTimeout(buffer, workerRef),
     timeoutMs: DOCUMENT_ACQUISITION_LIMITS.pdfOcrTimeoutMs,
     timeoutMessage: PDF_OCR_TIMEOUT_ERROR,
-    onTimeout: async () => {
-      await workerRef.current?.terminate?.()
+    onTimeout: () => {
+      workerRef.cancelled = true
+      initiatePdfCleanup(workerRef.current, 'terminate')
+      initiatePdfCleanup(workerRef.document, 'destroy')
     },
   })
 }
@@ -2061,10 +2105,11 @@ const buildWebsiteEvidenceObjects = ({
     })
 }
 
-export const acquireWebsiteDiscoveryEvidence = async ({
+const acquireWebsiteDiscoveryEvidenceWithinDeadline = async ({
   acquisitionProfile,
   acquiredAt,
   websiteUrl,
+  signal,
 } = {}) => {
   const normalizedUrl = normalizeDiscoveryWebsiteUrl(websiteUrl)
 
@@ -2072,19 +2117,14 @@ export const acquireWebsiteDiscoveryEvidence = async ({
     throw new Error('Website acquisition is not available in this runtime.')
   }
 
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), WEBSITE_ACQUISITION_LIMITS.timeoutMs)
-
   let response
   try {
     response = await fetchWebsiteWithGovernedRedirects({
       normalizedUrl,
-      signal: controller.signal,
+      signal,
     })
   } catch (err) {
     throw new Error(err?.message || 'Website acquisition could not fetch the requested website.')
-  } finally {
-    clearTimeout(timeout)
   }
 
   const finalUrl = response?.url || normalizedUrl
@@ -2104,7 +2144,8 @@ export const acquireWebsiteDiscoveryEvidence = async ({
     charactersRead,
     text: html,
     truncated: contentTruncated,
-  } = await readWebsiteResponseText(response, { signal: controller.signal })
+  } = await readWebsiteResponseText(response, { signal })
+  assertWebsiteAcquisitionActive(signal)
   const segments = extractHtmlSegments(html, { acquisitionProfile })
   if (segments.length === 0) {
     throw new Error('Website acquisition did not find extractable customer website text.')
@@ -2130,7 +2171,7 @@ export const acquireWebsiteDiscoveryEvidence = async ({
     label: 'Website Source',
     url: normalizedUrl,
     finalUrl,
-    valueHash: `sha256:${hashValue({ html })}`,
+    valueHash: `sha256:${crypto.createHash('sha256').update(JSON.stringify({ html })).digest('hex')}`,
     status: 'ACQUIRED',
     capturedAt: acquiredAt,
     acquisitionProfile,
@@ -2168,11 +2209,26 @@ export const acquireWebsiteDiscoveryEvidence = async ({
   }
 }
 
+export const acquireWebsiteDiscoveryEvidence = async (options = {}) => {
+  const controller = new AbortController()
+  return withTimeout({
+    promise: acquireWebsiteDiscoveryEvidenceWithinDeadline({ ...options, signal: controller.signal }),
+    timeoutMs: WEBSITE_ACQUISITION_LIMITS.timeoutMs,
+    timeoutMessage: 'Website acquisition timed out.',
+    onTimeout: () => controller.abort(),
+  })
+}
+
 export const ingestUploadedDocumentDiscoveryEvidence = async ({
   acquisitionProfile,
   capturedAt,
   documentSources = [],
+  batchOutcomes = false,
 } = {}) => {
+  if (batchOutcomes && (!Array.isArray(documentSources)
+    || documentSources.length > DOCUMENT_ACQUISITION_LIMITS.maxDocuments)) {
+    throw new Error('Document acquisition requires at most five inputs.')
+  }
   const candidateDocuments = Array.isArray(documentSources)
     ? documentSources.slice(0, DOCUMENT_ACQUISITION_LIMITS.maxDocuments)
     : []
@@ -2189,9 +2245,10 @@ export const ingestUploadedDocumentDiscoveryEvidence = async ({
     sources: [],
     sourceRegistry: [],
     evidenceObjects: [],
+    ...(batchOutcomes ? { itemOutcomes: [] } : {}),
   }
 
-  for (const [index, documentSource] of candidateDocuments.entries()) {
+  const processDocument = async (documentSource, index) => {
     const fileName = normalizeDocumentFileName(documentSource?.fileName)
     const mimeType = String(documentSource?.mimeType || '').trim().toLowerCase().split(';')[0]
     const assetType = normalizeDocumentAssetType(documentSource?.assetType)
@@ -2222,12 +2279,15 @@ export const ingestUploadedDocumentDiscoveryEvidence = async ({
     }
 
     const extraction = await extractDocumentText({ buffer, documentType })
+    if (batchOutcomes && !String(extraction.text || '').trim()) {
+      throw new Error('Document extraction did not return readable text.')
+    }
     const segments = extractDocumentSegments(extraction.text, {
       documentType,
       prioritizeQuality: extraction.extractionMethod === 'PDF_OCR',
     })
 
-    if (segments.length === 0) {
+    if (segments.length === 0 && !batchOutcomes) {
       throw new Error(`Uploaded document ${fileName} did not produce reviewable evidence.`)
     }
 
@@ -2247,7 +2307,7 @@ export const ingestUploadedDocumentDiscoveryEvidence = async ({
       sourceId,
     })
 
-    if (evidenceObjects.length === 0) {
+    if (evidenceObjects.length === 0 && !batchOutcomes) {
       throw new Error(`Uploaded document ${fileName} did not produce reviewable evidence.`)
     }
 
@@ -2315,6 +2375,20 @@ export const ingestUploadedDocumentDiscoveryEvidence = async ({
     result.sources.push(source)
     result.sourceRegistry.push(sourceRegistryEntry)
     result.evidenceObjects.push(...evidenceObjects)
+    return { inputIndex: index, status: 'SUCCEEDED', sourceId, documentHash,
+      evidenceObjectIds: evidenceObjects.map(item => item.evidenceObjectId),
+      evidenceObjectCount: evidenceObjects.length, extractionMethod: source.extractionMethod }
+  }
+  for (const [index, documentSource] of candidateDocuments.entries()) {
+    try {
+      const outcome = await processDocument(documentSource, index)
+      if (batchOutcomes) result.itemOutcomes.push(outcome)
+    } catch (error) {
+      if (!batchOutcomes) throw error
+      result.itemOutcomes.push({ inputIndex: index, status: 'FAILED',
+        reason: 'DOCUMENT_EXTRACTION_FAILED',
+        message: 'Document extraction failed. Choose a supported readable file and retry.' })
+    }
   }
 
   return result
@@ -2567,6 +2641,8 @@ export const buildDiscoverySourceRegistry = ({
       lastAcquisitionAt: String(source?.lastAcquisitionAt || source?.dateAdded || capturedAt || '').trim(),
       lineageRef: String(source?.lineageRef || `lineage:${sourceId}`).trim(),
       acquisitionProfile: String(source?.acquisitionProfile || '').trim(),
+      ...(source?.contentHash !== undefined ? { contentHash: source.contentHash } : {}),
+      ...(source?.processingReceipt !== undefined ? { processingReceipt: structuredClone(source.processingReceipt) } : {}),
       ...(source?.fieldKey ? { fieldKey: String(source.fieldKey).trim() } : {}),
       ...(source?.url ? { url: String(source.url).trim() } : {}),
       ...(source?.finalUrl ? { finalUrl: String(source.finalUrl).trim() } : {}),

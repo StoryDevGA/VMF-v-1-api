@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto'
 import { assertOutcomeEvidenceInventory } from '../utils/outcomeEvidenceSnapshot.js'
 import { assertOutcomeSelectedTargetSelection } from './outcomeSelectedTargetService.js'
+import { isEvidenceToDraftV2, enrichDraftClaim, draftClaimDeficits, buildDraftSectionLedger,
+  buildDraftInventoryDisposition } from './outcomeEvidenceToDraftContractService.js'
 
 export const EVIDENCE_TO_MEANING_CONTRACT_VERSION = 'evidence-to-meaning.v1'
 const text = (value) => typeof value === 'string' ? value.trim() : ''
@@ -29,8 +31,8 @@ const clone = (value) => JSON.parse(JSON.stringify(canonical(value)))
 const sorted = (values) => [...values].sort(compare)
 const sectionKey = (heading) => text(heading).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
 const exactKeys = (value, keys) => plain(value) && equal(sorted(Object.keys(value)), sorted(keys))
-const uniqueRecords = (records, identity, field) => {
-  if (!Array.isArray(records) || records.length > 500) invalid(field)
+const uniqueRecords = (records, identity, field, v2 = false) => {
+  if (!Array.isArray(records) || (!v2 && records.length > 500)) invalid(field)
   const map = new Map()
   for (const record of records) {
     const id = identity(record)
@@ -55,8 +57,8 @@ const normalizeInput = (input) => {
   const result = clone(input)
   const snapshot = result.sourceSnapshot
   if (Buffer.byteLength(JSON.stringify(result)) > 1000000 || !plain(snapshot)) invalid('input.bounds')
-  const evidence = uniqueRecords(snapshot.evidenceObjects, (item) => text(item.evidenceObjectId), 'evidenceObjects')
-  const sources = uniqueRecords(snapshot.sourceRegistry, sourceIdentity, 'sourceRegistry')
+  const evidence = uniqueRecords(snapshot.evidenceObjects, (item) => text(item.evidenceObjectId), 'evidenceObjects', isEvidenceToDraftV2(input))
+  const sources = uniqueRecords(snapshot.sourceRegistry, sourceIdentity, 'sourceRegistry', isEvidenceToDraftV2(input))
   snapshot.evidenceObjects = [...evidence.values()].sort((a, b) => compare(a.evidenceObjectId, b.evidenceObjectId))
   snapshot.sourceRegistry = [...sources.values()].sort((a, b) => compare(sourceIdentity(a), sourceIdentity(b)))
   const ledger = result.composition?.businessFactLedger
@@ -125,15 +127,17 @@ const supportDeficits = (claim, claimsByEvidence, cache, visiting) => {
 }
 
 export const compileEvidenceToMeaningContract = (rawInput) => {
+  const v2 = isEvidenceToDraftV2(rawInput)
   let input
   const errors = []
   let claims = []
   let sections = []
   try {
     input = normalizeInput(rawInput)
+    if (v2 && !input.sourceSnapshot.inventoryReceipt) invalid('sourceSnapshot.INVENTORY_RECEIPT_REQUIRED')
     try { assertOutcomeEvidenceInventory(input.sourceSnapshot) } catch (error) { invalid('sourceSnapshot.' + (error.code || 'INVENTORY_INVALID')) }
     if (input.sourceSnapshot.readError) invalid(`sourceSnapshot.${input.sourceSnapshot.readError.code}`)
-    if (input.sourceSnapshot.inventoryReceipt?.sectionReadiness === 'UNRESOLVED') invalid('sourceSnapshot.SECTION_REFERENCE_UNRESOLVED')
+    if (!v2 && input.sourceSnapshot.inventoryReceipt?.sectionReadiness === 'UNRESOLVED') invalid('sourceSnapshot.SECTION_REFERENCE_UNRESOLVED')
     if (input.composition.targetReadError) invalid(`selectedTarget.${input.composition.targetReadError.code}`)
     if (input.composition.businessFactLedger.projectionError) invalid(`businessFactLedger.${input.composition.businessFactLedger.projectionError.code}`)
     if (input.composition.providerCompatibility?.status === 'CLARIFICATION_REQUIRED') {
@@ -145,6 +149,7 @@ export const compileEvidenceToMeaningContract = (rawInput) => {
       || !plain(composition.truthBinding) || !plain(composition.outputBinding)
       || !Array.isArray(composition.outputBinding.lineage?.versionIds)
       || !Array.isArray(composition.outputBinding.lineage?.contentHashes)) invalid('composition.lineage')
+    if (v2 && sourceSnapshot.inventoryReceipt.scope.runtimeInstanceId !== composition.runtimeBinding.runtimeInstanceId) invalid('sourceSnapshot.RUNTIME_SCOPE_MISMATCH')
     const target = selectedTarget.receipt
     for (const identity of Object.values(target.contractIdentity)) {
       if (!composition.outputBinding.lineage.versionIds.includes(identity.selection.versionId)
@@ -157,9 +162,9 @@ export const compileEvidenceToMeaningContract = (rawInput) => {
       || text(composition.requestBinding.requestedOutputTypeKey) !== text(composition.outputBinding.outputTypeKey)
       || !equal(composition.outputBinding.requiredSections.map(sectionKey), target.targetSections.required.map((item) => item.targetSectionKey))
       || !equal((composition.outputBinding.optionalSections || []).map(sectionKey), target.targetSections.optional.map((item) => item.targetSectionKey))) invalid('selectedTarget.outputBinding')
-    const evidence = uniqueRecords(sourceSnapshot.evidenceObjects, (item) => text(item.evidenceObjectId), 'evidenceObjects')
-    const sources = uniqueRecords(sourceSnapshot.sourceRegistry, sourceIdentity, 'sourceRegistry')
-    const facts = uniqueRecords(composition.businessFactLedger.facts, (item) => text(item.evidenceObjectId), 'facts')
+    const evidence = uniqueRecords(sourceSnapshot.evidenceObjects, (item) => text(item.evidenceObjectId), 'evidenceObjects', v2)
+    const sources = uniqueRecords(sourceSnapshot.sourceRegistry, sourceIdentity, 'sourceRegistry', v2)
+    const facts = uniqueRecords(composition.businessFactLedger.facts, (item) => text(item.evidenceObjectId), 'facts', v2)
     for (const [id, fact] of facts) {
       const stored = evidence.get(id)
       const source = sources.get(text(stored?.sourceId))
@@ -177,14 +182,18 @@ export const compileEvidenceToMeaningContract = (rawInput) => {
     }
     if (new Set(claims.map((claim) => claim.claimKey)).size !== claims.length) invalid('claimKeys')
     claims.sort((a, b) => compare(a.claimKey, b.claimKey))
+    const storedPlacementActive = v2 && sourceSnapshot.evidenceObjects.some((row) => Object.hasOwn(row, 'draftPlacement'))
+    if (v2) claims = claims.map((claim) => enrichDraftClaim(claim, evidence.get(claim.evidenceReference), sources.get(claim.sourceReference), input))
     const claimsByEvidence = new Map(claims.map((claim) => [claim.evidenceReference, claim]))
     // Shared proof paths are evaluated once per compilation; visiting rejects cycles.
     const deficitsByEvidence = new Map()
     const visitingEvidence = new Set()
-    const deficitsFor = (claim) => supportDeficits(claim, claimsByEvidence, deficitsByEvidence, visitingEvidence)
+    const deficitsFor = (claim) => v2
+      ? draftClaimDeficits(claim, claimsByEvidence, deficitsByEvidence, visitingEvidence)
+      : supportDeficits(claim, claimsByEvidence, deficitsByEvidence, visitingEvidence)
     const all = [...target.targetSections.required.map((item) => ({ ...item, required: true })),
       ...target.targetSections.optional.map((item) => ({ ...item, required: false }))]
-    for (const claim of claims) {
+    for (const claim of storedPlacementActive ? [] : claims) {
       if (!claim.sectionKeys.length || new Set(claim.sectionKeys).size !== claim.sectionKeys.length
         || claim.sectionKeys.some((key) => !text(key) || !all.some((item) => item.targetSectionKey === key))) {
         invalid(`${claim.evidenceReference}.sectionMapping`)
@@ -209,6 +218,7 @@ export const compileEvidenceToMeaningContract = (rawInput) => {
         status: reasons.length ? section.required ? 'UNRESOLVED' : 'OMITTED' : 'SUPPORTED',
         omissionPermitted: !section.required }
     })
+    if (v2) sections = buildDraftSectionLedger({ input, claims, all, deficitsFor })
     const ordered = []
     const visited = new Set()
     const visit = (claim) => {
@@ -244,9 +254,10 @@ export const compileEvidenceToMeaningContract = (rawInput) => {
     }
   }
   const deficits = sections.filter((section) => section.required && section.status !== 'SUPPORTED')
-  const status = errors.length || deficits.length ? 'CLARIFICATION_REQUIRED' : 'READY'
+  const readyStatus = v2 ? 'READY_TO_DRAFT' : 'READY'
+  const status = errors.length || deficits.length ? 'CLARIFICATION_REQUIRED' : readyStatus
   const payload = {
-    contractVersion: EVIDENCE_TO_MEANING_CONTRACT_VERSION, status, inputs: input,
+    contractVersion: v2 ? 'evidence-to-draft.v2' : EVIDENCE_TO_MEANING_CONTRACT_VERSION, status, inputs: input,
     fingerprints: {
       request: hashEvidenceToMeaningValue(input.composition?.requestBinding || {}),
       runtime: hashEvidenceToMeaningValue({ runtime: input.composition?.runtimeBinding || {}, truth: input.composition?.truthBinding || {} }),
@@ -255,17 +266,18 @@ export const compileEvidenceToMeaningContract = (rawInput) => {
       composition: hashEvidenceToMeaningValue(input.composition || {}),
     },
     customerClaims: claims, sectionLedger: sections,
+    ...(v2 ? buildDraftInventoryDisposition(input, claims, sections) : {}),
     frameworkGuidance: { label: 'FRAMEWORK_GUIDANCE_ONLY', content: input.composition?.frameworkIntelligence || null },
     lineage: { packs: input.composition?.outputBinding?.lineage || {}, truth: input.composition?.truthBinding || {} },
     restrictions: ['EXACT_STATEMENT_ONLY', 'NO_INVENTED_VALIDATION', 'NO_STRONGER_CLAIM', 'PRESERVE_ATTRIBUTION_QUALIFICATION_PROOF_ORDER'],
-    clarification: { version: 'evidence-to-meaning-clarification.v1', required: status !== 'READY',
-      code: status === 'READY' ? '' : 'EVIDENCE_TO_MEANING_CLARIFICATION_REQUIRED',
+    clarification: { version: v2 ? 'evidence-to-draft-clarification.v2' : 'evidence-to-meaning-clarification.v1', required: status !== readyStatus,
+      code: status === readyStatus ? '' : 'EVIDENCE_TO_MEANING_CLARIFICATION_REQUIRED',
       firstBoundary: errors[0]?.field || deficits[0]?.targetSectionKey || '', errors, affectedSections: deficits,
       missingFields: errors.map((error) => error.field),
       questions: [...errors.map((error) => ({ field: error.field,
         question: `Correct the governed source mapping or metadata at ${error.field}; re-read the source and recompile.`, reasons: [error.code] })),
-      ...deficits.map((section) => ({ sectionKey: section.targetSectionKey,
-        question: `Provide admissible customer evidence and stored proof metadata for ${section.heading}.`, reasons: section.reasons }))] },
+      ...deficits.flatMap((section) => v2 ? section.clarificationQuestions || [] : [{ sectionKey: section.targetSectionKey,
+        question: `Provide admissible customer evidence and stored proof metadata for ${section.heading}.`, reasons: section.reasons }])] },
   }
   const contractHash = hashEvidenceToMeaningValue(payload)
   return { ...payload, contractId: `etm_${contractHash}`, contractHash }
@@ -281,7 +293,7 @@ export const assertEvidenceToMeaningContract = (contract) => {
 
 export const validateEvidenceToMeaningGeneratedClaims = ({ contract, claims }) => {
   assertEvidenceToMeaningContract(contract)
-  if (contract.status !== 'READY' || !Array.isArray(claims)) invalid('generatedClaims.readiness')
+  if (!['READY', 'READY_TO_DRAFT'].includes(contract.status) || !Array.isArray(claims)) invalid('generatedClaims.readiness')
   const keys = new Set(contract.sectionLedger.filter((section) => section.status === 'SUPPORTED').flatMap((section) => section.claimKeys))
   const expected = contract.customerClaims.filter((claim) => keys.has(claim.claimKey))
   if (claims.length !== expected.length || claims.some((claim, index) => !exactKeys(claim, Object.keys(expected[index]))

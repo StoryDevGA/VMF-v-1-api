@@ -476,6 +476,9 @@ const normalizeProviderOutput = ({ parsed, truthReferenceKeys, visibleGaps, evid
       })
     }
     referencedTruth.push(...sectionTruth)
+    if (evidenceToMeaning?.contractVersion === 'evidence-to-draft-provider.v2' && !unique(section.claims.map((claim) => claim.claimKey))) {
+      throw invalidProviderOutput({ validationField: `sections[${sectionIndex}].claims[].claimKey`, validationRule: 'DUPLICATE_CLAIM_KEY' })
+    }
     section.claims.forEach((claim, claimIndex) => {
       claimKeys.push(claim.claimKey)
       const claimTruth = claim.truthReferences.map(lower)
@@ -510,7 +513,7 @@ const normalizeProviderOutput = ({ parsed, truthReferenceKeys, visibleGaps, evid
   if (!unique(sectionKeys)) {
     throw invalidProviderOutput({ validationField: 'sections[].sectionKey', validationRule: 'DUPLICATE_SECTION_KEY' })
   }
-  if (!unique(claimKeys)) {
+  if (evidenceToMeaning?.contractVersion !== 'evidence-to-draft-provider.v2' && !unique(claimKeys)) {
     throw invalidProviderOutput({ validationField: 'sections[].claims[].claimKey', validationRule: 'DUPLICATE_CLAIM_KEY' })
   }
   if (!sameSet(referencedTruth, allowedTruth)) {

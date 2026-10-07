@@ -123,6 +123,37 @@ const commonKeys = [
   'current', 'createdAt', 'updatedAt',
 ]
 
+test('document mapping preserves explicit processing provenance and filename fallback without inferring a receipt', () => {
+  const legacy = makeLegacy()
+  const source = legacy.evidencePack.sourceRegistry[0]
+  source.sourceType = 'UPLOADED_DOCUMENT'; delete source.url
+  source.fileName = 'synthetic.txt'; source.contentHash = hash('c')
+  source.processingReceipt = { contractVersion: 'document-processing-receipt.v1',
+    runId: '123e4567-e89b-42d3-a456-426614174000', inputIndex: 0, contentHash: hash('c') }
+  let row = createRuntimeStateLegacySourceRowSet(makeInput(legacy)).rows.evidenceSources[0]
+  expect(row).toMatchObject({ sourceRef: 'synthetic.txt', contentHash: hash('c'), processingReceipt: source.processingReceipt })
+  source.sourceRef = 'canonical-reference'
+  expect(createRuntimeStateLegacySourceRowSet(makeInput(legacy)).rows.evidenceSources[0].sourceRef).toBe('canonical-reference')
+  delete source.processingReceipt
+  row = createRuntimeStateLegacySourceRowSet(makeInput(legacy)).rows.evidenceSources[0]
+  expect(row).not.toHaveProperty('processingReceipt')
+})
+
+test.each(['null', 'extra', 'version', 'run', 'index', 'hash', 'kind'])('document mapper rejects malformed %s receipt', mode => {
+  const legacy = makeLegacy(), source = legacy.evidencePack.sourceRegistry[0]
+  source.sourceType = 'UPLOADED_DOCUMENT'
+  source.processingReceipt = { contractVersion: 'document-processing-receipt.v1',
+    runId: '123e4567-e89b-42d3-a456-426614174000', inputIndex: 0, contentHash: hash('c') }
+  if (mode === 'null') source.processingReceipt = null
+  if (mode === 'extra') source.processingReceipt.unknown = true
+  if (mode === 'version') source.processingReceipt.contractVersion = 'unknown'
+  if (mode === 'run') source.processingReceipt.runId = 'not-a-run'
+  if (mode === 'index') source.processingReceipt.inputIndex = '0'
+  if (mode === 'hash') source.processingReceipt.contentHash = 'wrong'
+  if (mode === 'kind') source.sourceType = 'WEBSITE'
+  expect(() => createRuntimeStateLegacySourceRowSet(makeInput(legacy))).toThrow()
+})
+
 const expectStringFields = (value, fields) => {
   for (const field of fields) expect(typeof value[field]).toBe('string')
 }

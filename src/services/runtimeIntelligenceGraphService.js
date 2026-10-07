@@ -901,6 +901,7 @@ const createGraphContext = ({ builtAt }) => ({
   intelligenceByEvidenceId: new Map(),
   sectionTruthBySectionKey: new Map(),
   sourceNodeBySourceId: new Map(),
+  recordedSourceTypes: new Map(),
   consumerNodeBySectionKey: new Map(),
   warnings: [],
 })
@@ -1094,10 +1095,15 @@ const addReasoningConsumers = ({ context, frameworkPackage, frameworkState, runt
   })
 }
 
-const addSourceNode = ({ context, source, sourceIdFallback, sourceTypeFallback = 'UNKNOWN' }) => {
+const addSourceNode = ({ context, source, sourceIdFallback, sourceTypeFallback = 'UNKNOWN', recordedSource = true }) => {
   const sourceId = String(source?.sourceId || source?.sectionDocumentId || source?.lineageRef || sourceIdFallback || '').trim()
   if (!sourceId) return null
   const sourceType = normalizeToken(source?.sourceType || source?.type || sourceTypeFallback)
+  if (recordedSource) {
+    const types = context.recordedSourceTypes.get(sourceId) || new Set()
+    types.add(sourceType)
+    context.recordedSourceTypes.set(sourceId, types)
+  }
   const nodeId = buildNodeId(RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.SOURCE, sourceId)
   const label = safeLabel(source?.label || source?.fileName || source?.url || source?.fieldKey || sourceId, 'Source')
 
@@ -1385,6 +1391,7 @@ const addDiscoveryEvidence = ({ context, evidencePack }) => {
     if (sourceId && !context.sourceNodeBySourceId.has(sourceId)) {
       addSourceNode({
         context,
+        recordedSource: false,
         source: {
           sourceId,
           sourceType: evidenceObject.sourceType || evidenceObject.acquisitionMethod || 'DISCOVERY_EVIDENCE',
@@ -1435,6 +1442,7 @@ const addSectionEvidence = ({ context, frameworkState }) => {
       if (sourceId && !context.sourceNodeBySourceId.has(sourceId)) {
         addSourceNode({
           context,
+          recordedSource: false,
           source: {
             sourceId,
             sourceType: evidenceObject.sourceType || 'SECTION_UPLOADED_DOCUMENT',
@@ -1721,6 +1729,11 @@ const addPublishedAndCanonicalTruth = ({ context, frameworkState, runtimeInstanc
 }
 
 const calculateCoverage = (context) => {
+  const sourceFacts = new Map(RUNTIME_INTELLIGENCE_GRAPH_DOMAINS.map(domain => [domain, { sources: new Map(), unresolved: 0 }]))
+  const sourceReferences = new Map()
+  for (const nodeId of context.sourceNodeBySourceId.values()) sourceReferences.set(nodeId, (sourceReferences.get(nodeId) || 0) + 1)
+  const validSourceId = value => typeof value === 'string' && value.length > 0 && value.length <= 240 && value === value.trim()
+    && !Array.from(value).some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)
   const domainCounts = RUNTIME_INTELLIGENCE_GRAPH_DOMAINS.reduce((acc, domain) => ({
     ...acc,
     [domain]: {
@@ -1759,11 +1772,24 @@ const calculateCoverage = (context) => {
       row.acceptedEvidenceCount += 1
       if (record.graphQualityState === GRAPH_QUALITY_STATES.CONNECTED) {
         row.connectedEvidenceCount += 1
+        const facts = sourceFacts.get(record.domain), sourceId = record.evidenceObject.sourceId
+        const nodeId = validSourceId(sourceId) ? context.sourceNodeBySourceId.get(sourceId) : undefined
+        const sourceNode = context.nodes.get(nodeId), evidenceNode = context.nodes.get(record.nodeId)
+        if (!sourceNode || sourceNode.nodeType !== RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES.SOURCE
+          || sourceNode.sourceId !== sourceId || sourceNode.customerVisible !== true || evidenceNode?.customerVisible !== true
+          || sourceReferences.get(nodeId) !== 1 || context.recordedSourceTypes.get(sourceId)?.size !== 1) facts.unresolved++
+        else facts.sources.set(sourceId, sourceNode.sourceType)
       }
     }
   }
 
   const domains = Object.values(domainCounts).map((row) => {
+    const facts = sourceFacts.get(row.domain), types = new Map()
+    let unknownSourceTypeCount = 0
+    for (const type of facts.sources.values()) {
+      if (typeof type !== 'string' || type === 'UNKNOWN' || !/^[A-Z][A-Z0-9_]{0,99}$/.test(type)) unknownSourceTypeCount++
+      else types.set(type, (types.get(type) || 0) + 1)
+    }
     let state = 'MISSING'
     if (row.connectedEvidenceCount >= 2) state = 'STRONG'
     else if (row.connectedEvidenceCount === 1) state = 'ADEQUATE'
@@ -1772,6 +1798,11 @@ const calculateCoverage = (context) => {
     return {
       ...row,
       state,
+      sourceFacts: { contractVersion: 'dig-connected-source-facts.v1', basis: 'RECORDED_CONNECTED_ACCEPTED_EVIDENCE',
+        resolvedSourceCount: facts.sources.size, unresolvedEvidenceCount: facts.unresolved,
+        sourceCompleteness: facts.unresolved === 0 ? 'COMPLETE' : 'PARTIAL', unknownSourceTypeCount,
+        typeCompleteness: types.size <= 12 ? 'COMPLETE' : 'PARTIAL',
+        sourceTypeCounts: types.size <= 12 ? [...types.keys()].sort().map(sourceType => ({ sourceType, count: types.get(sourceType) })) : null },
     }
   })
   const coveredDomainCount = domains.filter((row) => row.connectedEvidenceCount > 0).length

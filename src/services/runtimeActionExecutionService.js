@@ -1,4 +1,6 @@
 import mongoose from 'mongoose'
+import { lookupAcquisitionRequest, startAcquisitionRun, executeAcquisitionBuild, withAcquisitionTransaction,
+  recordAcquisitionTerminal, readCommittedAcquisition, handleAcquisitionFailure, bindAcquisitionSourceProcessing } from './acquisitionRunService.js'
 import { assertCustomerSectionTarget, buildRuntimeManagedSourceReceipt } from './runtimeManagedSectionService.js'
 import { FrameworkPackage, RuntimeInstance } from '../models/index.js'
 import { RUNTIME_TYPES } from '../models/RuntimeInstance.js'
@@ -1319,11 +1321,10 @@ const logRuntimeActionExecuted = async ({
 
   try {
     if (auditRequest) {
-      await auditService.logFromRequest(auditRequest, auditPayload, auditOptions)
-      return
+      return await auditService.logFromRequest(auditRequest, auditPayload, auditOptions)
     }
 
-    await auditService.log(auditPayload, auditOptions)
+    return await auditService.log(auditPayload, auditOptions)
   } catch (err) {
     throw buildActionError({
       status: 500,
@@ -1477,6 +1478,7 @@ const rollbackRuntimeAction = async ({
 }
 
 const persistActionWithAudit = async ({
+  acquisitionContext = null,
   action,
   actionedAt,
   actorUserId,
@@ -1517,12 +1519,10 @@ const persistActionWithAudit = async ({
   const stateMutationTimestamp = updatedAtBefore || new Date()
 
   if (mongoose.connection.readyState === 1) {
-    const session = await mongoose.startSession()
     let updatedRuntimeInstance = null
     let graphLifecycle = null
     let sourceRollover = null
-    try {
-      await session.withTransaction(async () => {
+    const persist = async (session) => {
         updatedRuntimeInstance = await atomicPersistRuntimeAction({
           actorUserId,
           expectedUpdatedAt,
@@ -1575,7 +1575,7 @@ const persistActionWithAudit = async ({
             reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_STATE_VERSION_REQUIRED,
           })
         }
-        await logRuntimeActionExecuted({
+        const saveAudit = await logRuntimeActionExecuted({
           action,
           actionedAt,
           actorUserId,
@@ -1597,9 +1597,16 @@ const persistActionWithAudit = async ({
           sourceRollover,
           session,
         })
-      })
-    } finally {
-      await session.endSession()
+        if (acquisitionContext) await recordAcquisitionTerminal({ context: acquisitionContext,
+          pack: nextFrameworkState.evidence_pack, outputStateVersion: nextStateVersion, saveAudit, session })
+    }
+    if (acquisitionContext) {
+      acquisitionContext.rootPersistenceStarted = true
+      await withAcquisitionTransaction(persist, acquisitionContext)
+    } else {
+      const session = await mongoose.startSession()
+      try { await session.withTransaction(() => persist(session)) }
+      finally { await session.endSession() }
     }
     const finalized = await finalizeRuntimeStateGraphSourceMutation({
       actorUserId,
@@ -1609,6 +1616,9 @@ const persistActionWithAudit = async ({
     })
     return finalized.runtimeInstance
   }
+
+  if (acquisitionContext) throw buildActionError({ status: 503, code: 'SERVICE_UNAVAILABLE',
+    message: 'Acquisition transactional storage is unavailable.', reason: 'ACQUISITION_STORAGE_UNAVAILABLE' })
 
   const updatedRuntimeInstance = await atomicPersistRuntimeAction({
     actorUserId,
@@ -1722,6 +1732,10 @@ export const executeRuntimeAction = async ({
     feature: getFeatureForRuntimeType(runtimeInstance.runtimeType),
   })
 
+  const acquisitionContext = DISCOVERY_BUILD_ACTIONS.has(normalizedActionKey)
+    ? await lookupAcquisitionRequest({ runtimeInstance, payload, actorUserId, actionKey: normalizedActionKey, auditRequest }) : null
+  if (acquisitionContext?.replay) return { acquisitionRun: acquisitionContext.replay }
+
   assertExpectedUpdatedAt({ runtimeInstance, expectedUpdatedAt })
 
   const renderer = await getRuntimeRenderer({ scopes, runtimeInstanceId })
@@ -1774,6 +1788,9 @@ export const executeRuntimeAction = async ({
     runtimeInstance,
   })
   let resolvedTransition = transition
+  let acquiredPack
+  try {
+  if (acquisitionContext) await startAcquisitionRun(acquisitionContext, payload?.inputs || previousFrameworkState.evidence_pack?.inputs || {})
   if (isGenerationAction(normalizedActionKey)) {
     resolvedTransition = await applyRuntimeSectionGeneration({
       actionKey: normalizedActionKey,
@@ -1783,12 +1800,18 @@ export const executeRuntimeAction = async ({
       runtimeInstance,
     })
   } else if (isDiscoveryAction(normalizedActionKey)) {
-    resolvedTransition = await applyRuntimeDiscoveryAction({
+    const build = () => applyRuntimeDiscoveryAction({
       actionKey: normalizedActionKey,
       actorUserId,
       payload,
       runtimeInstance,
     })
+    resolvedTransition = acquisitionContext ? await executeAcquisitionBuild(acquisitionContext, build) : await build()
+    if (acquisitionContext) acquiredPack = resolvedTransition.nextFrameworkState.evidence_pack
+    if (acquisitionContext) {
+      bindAcquisitionSourceProcessing(acquisitionContext, acquiredPack)
+      acquiredPack.acquisition.runId = acquisitionContext.runId
+    }
   }
   resolvedTransition = rebuildRuntimeIntelligenceGraphForAction({
     actionKey: normalizedActionKey,
@@ -1800,6 +1823,7 @@ export const executeRuntimeAction = async ({
   })
 
   const updatedRuntimeInstance = await persistActionWithAudit({
+    acquisitionContext,
     action,
     actionedAt: resolvedTransition.actionedAt,
     actorUserId,
@@ -1826,7 +1850,7 @@ export const executeRuntimeAction = async ({
       : null,
   })
 
-  return {
+  const response = {
     runtimeInstance: {
       id: toIdString(updatedRuntimeInstance._id),
       runtimeInstanceKey: updatedRuntimeInstance.runtimeInstanceKey,
@@ -1865,6 +1889,12 @@ export const executeRuntimeAction = async ({
       } } : {}),
       ...(resolvedTransition.discoveryResult ? { discovery: resolvedTransition.discoveryResult } : {}),
     },
+  }
+  if (acquisitionContext) response.acquisitionRun = await readCommittedAcquisition(acquisitionContext)
+  return response
+  } catch (error) {
+    if (acquisitionContext) return handleAcquisitionFailure(acquisitionContext, error, acquiredPack)
+    throw error
   }
 }
 

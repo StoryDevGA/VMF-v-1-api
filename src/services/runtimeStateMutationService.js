@@ -1,4 +1,8 @@
 import { resolveRuntimeUIContractKey } from './runtimeDisplayBindingService.js'
+import { acquisitionContradictionReviewEpoch, preserveDiscoveryEvidenceDecisions } from './discoveryEvidenceContinuityService.js'
+import { assertRetainedWebsiteMaterial, reconcileWebsiteMaterial } from './discoveryWebsiteMaterialService.js'
+import { lookupAcquisitionRequest, startAcquisitionRun, executeAcquisitionBuild, withAcquisitionTransaction,
+  recordAcquisitionTerminal, readCommittedAcquisition, handleAcquisitionFailure, bindAcquisitionSourceProcessing } from './acquisitionRunService.js'
 import crypto from 'node:crypto'
 import { assertCustomerSectionTarget, assertRuntimeManagedCustomerWrite, isRuntimeManagedSection } from './runtimeManagedSectionService.js'
 import mongoose from 'mongoose'
@@ -19,6 +23,9 @@ import {
   DISCOVERY_CONTRADICTION_DISPOSITIONS,
   getDiscoveryContradictionReview,
   isBoundedContradictionReviewHistory,
+  DISCOVERY_CONTRADICTION_REQUEST_KEY_PATTERN,
+  contradictionReviewRequestHash,
+  readContradictionReviewReplay,
 } from './discoveryContradictionReviewService.js'
 import UIContract, { UI_CONTRACT_STATUSES } from '../models/UIContract.js'
 import {
@@ -1069,7 +1076,7 @@ const normalizeDiscoveryWebsiteSources = (values = []) => {
   }, [])
 }
 
-const normalizeDiscoveryInputs = (inputs = {}) => {
+export const normalizeDiscoveryInputs = (inputs = {}) => {
   const normalizedInputs = DISCOVERY_INPUT_KEYS.reduce((normalized, key) => {
     const value = String(inputs?.[key] ?? '').trim()
     if (value) normalized[key] = value
@@ -1085,6 +1092,15 @@ const normalizeDiscoveryInputs = (inputs = {}) => {
     explicitWebsiteSources,
     normalizedInputs,
   }
+}
+
+export const planDiscoveryAcquisition = ({ inputs, acquisitionProfile, previousEvidencePack } = {}) => {
+  const { explicitWebsiteSources, normalizedInputs } = normalizeDiscoveryInputs(inputs)
+  const profile = normalizeDiscoveryAcquisitionProfile({ acquisitionProfile, previousEvidencePack })
+  const missingInputKeys = REQUIRED_DISCOVERY_INPUT_KEYS.filter(key => !normalizedInputs[key])
+  return { normalizedInputs, profile, missingInputKeys, inputComplete: missingInputKeys.length === 0,
+    websiteSources: profile === DISCOVERY_ACQUISITION_PROFILES.ENHANCED && explicitWebsiteSources.length === 0
+      ? [normalizedInputs.companyWebsite].filter(Boolean) : explicitWebsiteSources }
 }
 
 const buildFailedWebsiteSource = ({
@@ -1150,6 +1166,7 @@ const acquireSubmittedWebsiteSources = async ({
     evidenceObjects: [],
     acquiredSourceCount: 0,
     failedSourceCount: 0,
+    itemOutcomes: [],
   }
 
   for (const websiteUrl of websiteSources) {
@@ -1181,6 +1198,13 @@ const acquireSubmittedWebsiteSources = async ({
     if (Array.isArray(result.evidenceObjects)) {
       acquisitionResults.evidenceObjects.push(...result.evidenceObjects)
     }
+    acquisitionResults.itemOutcomes.push({
+      inputIndex: acquisitionResults.itemOutcomes.length,
+      status: result.source.status === 'ACQUIRED' ? 'SUCCEEDED' : 'FAILED',
+      sourceId: result.source.sourceId,
+      evidenceObjectCount: result.evidenceObjects?.length || 0,
+      ...(result.source.status === 'FAILED' ? { reason: 'WEBSITE_ACQUISITION_FAILED' } : {}),
+    })
   }
 
   return acquisitionResults
@@ -1194,6 +1218,22 @@ const buildWebsiteAcquisitionFailureDetails = (sourceRegistry = []) =>
       failureReasonCode: String(source?.failureReasonCode || 'WEBSITE_ACQUISITION_FAILED').trim(),
       failureReason: String(source?.failureReason || 'Website acquisition failed.').trim(),
     }))
+
+// Only builder rejection sites use this: extraction facts are not a saved result.
+// Project safe fields rather than returning document hashes, object IDs or content.
+const buildAcquisitionErrorOutcomes = (websiteItems = [], documentItems = [], briefComplete) => ({
+  contractVersion: 'acquisition-error-outcomes.v1',
+  canonicalSaved: false,
+  briefComplete,
+  websiteItems,
+  documentItems: documentItems.map(item => ({
+    inputIndex: item.inputIndex,
+    status: item.status,
+    ...(item.sourceId ? { sourceId: item.sourceId } : {}),
+    evidenceObjectCount: item.status === 'FAILED' ? 0 : item.evidenceObjectCount,
+    ...(item.status === 'FAILED' ? { reason: 'DOCUMENT_EXTRACTION_FAILED' } : {}),
+  })),
+})
 
 const mergeDiscoveryEntriesByKey = (keyName, ...entryGroups) => {
   const entriesByKey = new Map()
@@ -1216,12 +1256,8 @@ export const buildDiscoveryEvidencePack = async ({
   reason = 'BUILD_EVIDENCE_PACK',
   runtimeInstance,
 }) => {
-  const contradictionReviewEpoch = crypto.randomUUID()
-  const {
-    explicitWebsiteSources,
-    normalizedInputs,
-  } = normalizeDiscoveryInputs(inputs)
-  const profile = normalizeDiscoveryAcquisitionProfile({ acquisitionProfile, previousEvidencePack })
+  const contradictionReviewEpoch = acquisitionContradictionReviewEpoch(previousEvidencePack.contradictionReviewEpoch)
+  const { normalizedInputs, profile, websiteSources, missingInputKeys, inputComplete } = planDiscoveryAcquisition({ inputs, acquisitionProfile, previousEvidencePack })
   const profileConfig = DISCOVERY_ACQUISITION_PROFILE_CONFIG[profile]
   const inputEvidenceKeys = DISCOVERY_INPUT_KEYS.filter((key) => Boolean(normalizedInputs[key]))
   const inputKeys = [
@@ -1231,8 +1267,6 @@ export const buildDiscoveryEvidencePack = async ({
       ? [DISCOVERY_WEBSITE_SOURCE_INPUT_KEY]
       : []),
   ]
-  const missingInputKeys = REQUIRED_DISCOVERY_INPUT_KEYS.filter((key) => !normalizedInputs[key])
-  const inputComplete = missingInputKeys.length === 0
   const refreshedAt = new Date().toISOString()
   const inputHash = hashDiscoveryValue(normalizedInputs)
   const frameworkPackage = await resolvePackageForAdvance(runtimeInstance?.packageId)
@@ -1255,7 +1289,7 @@ export const buildDiscoveryEvidencePack = async ({
     capturedAt: refreshedAt,
     acquisitionProfile: profile,
   }))
-  const inputEvidenceObjects = normalizeDiscoveryEvidenceObjects({
+  let inputEvidenceObjects = normalizeDiscoveryEvidenceObjects({
     acquisitionProfile: profile,
     createdAt: refreshedAt,
     evidenceObjects: buildDiscoveryEvidenceObjectsFromSources({
@@ -1272,43 +1306,12 @@ export const buildDiscoveryEvidencePack = async ({
     acquiredSourceCount: 0,
     failedSourceCount: 0,
   }
-  if (
-    profile === DISCOVERY_ACQUISITION_PROFILES.STANDARD
-    && inputComplete
-    && explicitWebsiteSources.length > 0
-  ) {
+  if (inputComplete && websiteSources.length > 0) {
     submittedWebsiteAcquisition = await acquireSubmittedWebsiteSources({
       acquisitionProfile: profile,
       capturedAt: refreshedAt,
-      websiteSources: explicitWebsiteSources,
+      websiteSources,
     })
-  }
-  if (profile === DISCOVERY_ACQUISITION_PROFILES.ENHANCED && inputComplete) {
-    const enhancedWebsiteSources = explicitWebsiteSources.length > 0
-      ? explicitWebsiteSources
-      : [normalizedInputs.companyWebsite].filter(Boolean)
-    submittedWebsiteAcquisition = await acquireSubmittedWebsiteSources({
-      acquisitionProfile: profile,
-      capturedAt: refreshedAt,
-      websiteSources: enhancedWebsiteSources,
-    })
-    if (submittedWebsiteAcquisition.evidenceObjects.length === 0) {
-      throw buildMutationError({
-        status: 422,
-        code: 'VALIDATION_FAILED',
-        message: 'Enhanced Acquisition could not acquire website evidence.',
-        reason: RUNTIME_INSTANCE_ERROR_REASONS.WEBSITE_ACQUISITION_FAILED,
-        details: {
-          acquisitionProfile: profile,
-          companyWebsite: normalizedInputs.companyWebsite || '',
-          acquisitionStatus: 'FAILED',
-          acquisitionError: submittedWebsiteAcquisition.failedSourceCount > 0
-            ? 'Website acquisition failed for all submitted website sources.'
-            : 'Website acquisition did not produce reviewable evidence.',
-          websiteSourceFailures: buildWebsiteAcquisitionFailureDetails(submittedWebsiteAcquisition.sourceRegistry),
-        },
-      })
-    }
   }
   let documentAcquisition = {
     sources: [],
@@ -1321,6 +1324,7 @@ export const buildDiscoveryEvidencePack = async ({
         acquisitionProfile: profile,
         capturedAt: refreshedAt,
         documentSources,
+        batchOutcomes: true,
       })
     } catch (err) {
       throw buildMutationError({
@@ -1332,10 +1336,60 @@ export const buildDiscoveryEvidencePack = async ({
           acquisitionProfile: profile,
           acquisitionStatus: 'FAILED',
           acquisitionError: err?.message || 'Document ingestion failed.',
+          ...(err?.itemOutcomes ? { documentItemOutcomes: err.itemOutcomes } : {}),
+          acquisitionOutcomes: buildAcquisitionErrorOutcomes(submittedWebsiteAcquisition.itemOutcomes, err?.itemOutcomes, inputComplete),
         },
       })
     }
   }
+  const documentItems = documentAcquisition.itemOutcomes || []
+  const freshDocumentSuccess = documentItems.some(item => item.status === 'SUCCEEDED')
+  const freshWebsiteSuccess = submittedWebsiteAcquisition.acquiredSourceCount > 0
+  const failureDetails = {
+    acquisitionProfile: profile, acquisitionStatus: 'FAILED',
+    websiteSourceFailures: buildWebsiteAcquisitionFailureDetails(submittedWebsiteAcquisition.sourceRegistry),
+    ...(documentItems.length ? { documentItemOutcomes: documentItems } : {}),
+    acquisitionOutcomes: buildAcquisitionErrorOutcomes(submittedWebsiteAcquisition.itemOutcomes, documentItems, inputComplete),
+  }
+  let websiteMaterial
+  try {
+    websiteMaterial = reconcileWebsiteMaterial({ previousEvidencePack, fresh: submittedWebsiteAcquisition })
+  } catch (error) {
+    if (error.details?.reason !== 'ACQUISITION_CONTINUITY_BLOCKED') throw error
+    throw buildMutationError({ status: 409, code: 'CONFLICT', message: error.message,
+      reason: 'ACQUISITION_CONTINUITY_BLOCKED', details: failureDetails })
+  }
+  if (profile === DISCOVERY_ACQUISITION_PROFILES.ENHANCED && inputComplete
+    && !freshWebsiteSuccess && !freshDocumentSuccess) {
+    throw buildMutationError({ status: 422, code: 'VALIDATION_FAILED',
+      message: 'Enhanced Acquisition could not acquire website evidence.',
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.WEBSITE_ACQUISITION_FAILED,
+      details: { ...failureDetails, companyWebsite: normalizedInputs.companyWebsite || '',
+        acquisitionError: submittedWebsiteAcquisition.failedSourceCount > 0
+          ? 'Website acquisition failed for all submitted website sources.'
+          : 'Website acquisition did not produce reviewable evidence.' } })
+  }
+  if (documentItems.length && !freshDocumentSuccess && !freshWebsiteSuccess) {
+    throw buildMutationError({ status: 422, code: 'VALIDATION_FAILED',
+      message: 'Document ingestion could not produce governed evidence.',
+      reason: RUNTIME_INSTANCE_ERROR_REASONS.DOCUMENT_INGESTION_FAILED,
+      details: { ...failureDetails, acquisitionError: 'Document ingestion failed for every submitted document.' } })
+  }
+  const freshSources = [...inputSources, ...submittedWebsiteAcquisition.sources, ...documentAcquisition.sources]
+  const reconciledEvidence = preserveDiscoveryEvidenceDecisions({
+    previousEvidencePack,
+    sources: freshSources,
+    evidenceObjects: normalizeDiscoveryEvidenceObjects({
+      acquisitionProfile: profile, createdAt: refreshedAt, sources: freshSources,
+      evidenceObjects: [...inputEvidenceObjects, ...submittedWebsiteAcquisition.evidenceObjects, ...documentAcquisition.evidenceObjects],
+    }),
+  })
+  inputEvidenceObjects = reconciledEvidence.filter(item => item.acquisitionMethod === 'CUSTOMER_PROVIDED_INPUT')
+  submittedWebsiteAcquisition.evidenceObjects = reconciledEvidence.filter(item => item.acquisitionMethod === 'WEBSITE_ACQUISITION')
+  websiteMaterial.evidenceObjects = [...websiteMaterial.evidenceObjects.filter(item =>
+    !submittedWebsiteAcquisition.sources.some(source => source.status === 'ACQUIRED' && source.sourceId === item.sourceId)),
+  ...submittedWebsiteAcquisition.evidenceObjects]
+  documentAcquisition.evidenceObjects = reconciledEvidence.filter(item => item.acquisitionMethod === 'DOCUMENT_INGESTION')
   const previousDocumentSources = Array.isArray(previousEvidencePack?.lineage?.sources)
     ? previousEvidencePack.lineage.sources.filter((source) =>
         source?.type === 'UPLOADED_DOCUMENT' || source?.sourceType === 'UPLOADED_DOCUMENT',
@@ -1366,7 +1420,7 @@ export const buildDiscoveryEvidencePack = async ({
   )
   const sources = [
     ...inputSources,
-    ...submittedWebsiteAcquisition.sources,
+    ...websiteMaterial.sources,
     ...documentSourcesForPack,
   ]
   const evidenceObjects = normalizeDiscoveryEvidenceObjects({
@@ -1374,12 +1428,19 @@ export const buildDiscoveryEvidencePack = async ({
     createdAt: refreshedAt,
     evidenceObjects: [
       ...inputEvidenceObjects,
-      ...submittedWebsiteAcquisition.evidenceObjects,
+      ...websiteMaterial.evidenceObjects,
       ...documentEvidenceObjectsForPack,
     ],
     inputs: normalizedInputs,
     sources,
   })
+  try {
+    assertRetainedWebsiteMaterial({ retainedEvidence: websiteMaterial.retainedEvidence, evidenceObjects })
+  } catch (error) {
+    if (error.details?.reason !== 'ACQUISITION_CONTINUITY_BLOCKED') throw error
+    throw buildMutationError({ status: 409, code: 'CONFLICT', message: error.message,
+      reason: 'ACQUISITION_CONTINUITY_BLOCKED', details: failureDetails })
+  }
   const inputSourceRegistry = buildDiscoverySourceRegistry({
     capturedAt: refreshedAt,
     evidenceObjects: inputEvidenceObjects,
@@ -1387,9 +1448,13 @@ export const buildDiscoveryEvidencePack = async ({
   })
   const sourceRegistry = [
     ...inputSourceRegistry,
-    ...submittedWebsiteAcquisition.sourceRegistry,
+    ...websiteMaterial.sourceRegistry,
     ...documentRegistryForPack,
-  ]
+  ].map(source => {
+    const summary = buildDiscoveryEvidenceReviewSummary(evidenceObjects.filter(item => item.sourceId === source.sourceId))
+    return { ...source, acceptedEvidenceObjects: summary.acceptedEvidenceCount,
+      rejectedEvidenceObjects: summary.rejectedEvidenceCount, pendingEvidenceObjects: summary.pendingReviewCount }
+  })
   const websiteAcquisitionEvidenceObjects = submittedWebsiteAcquisition.evidenceObjects
   const evidenceReady = inputComplete
     && (
@@ -1458,7 +1523,8 @@ export const buildDiscoveryEvidencePack = async ({
   const websiteAcquisitionSourceCount = Number(submittedWebsiteAcquisition.sources.length)
   const websiteAcquisitionFailureCount = Number(submittedWebsiteAcquisition.failedSourceCount || 0)
   const websiteAcquisitionAcquiredCount = Number(submittedWebsiteAcquisition.acquiredSourceCount || 0)
-  const primaryWebsiteAcquisitionSource = submittedWebsiteAcquisition.sources[0] || null
+  const primaryWebsiteAcquisitionSource = websiteMaterial.sources.find(source =>
+    source.sourceId === websiteMaterial.items[0]?.sourceId) || null
   const acquisition = {
     profile,
     label: profileConfig.label,
@@ -1488,6 +1554,7 @@ export const buildDiscoveryEvidencePack = async ({
             acquiredSourceCount: websiteAcquisitionAcquiredCount,
             failedSourceCount: websiteAcquisitionFailureCount,
             evidenceProduced: websiteAcquisitionEvidenceObjects.length,
+            latestAttempt: { contractVersion: 'website-acquisition-outcomes.v1', items: websiteMaterial.items },
             ...(primaryWebsiteAcquisitionSource
               ? {
                   sourceId: primaryWebsiteAcquisitionSource.sourceId,
@@ -1498,12 +1565,20 @@ export const buildDiscoveryEvidencePack = async ({
           },
         }
       : {}),
-    ...(documentEvidenceObjectsForPack.length > 0
+    ...(documentSourcesForPack.length > 0 || documentItems.length > 0
       ? {
           documentAcquisition: {
-            status: 'ACQUIRED',
+            status: documentItems.some(item => item.status === 'FAILED')
+              ? (freshDocumentSuccess ? 'PARTIAL' : 'FAILED') : 'ACQUIRED',
             sourceCount: documentSourcesForPack.length,
             evidenceProduced: documentEvidenceObjectsForPack.length,
+            ...(documentAcquisition.itemOutcomes?.length ? { latestAttempt: {
+              contractVersion: 'document-extraction-outcomes.v1',
+              inputCount: documentAcquisition.itemOutcomes.length,
+              succeededCount: documentAcquisition.itemOutcomes.filter(item => item.status === 'SUCCEEDED').length,
+              failedCount: documentAcquisition.itemOutcomes.filter(item => item.status === 'FAILED').length,
+              items: documentAcquisition.itemOutcomes,
+            } } : {}),
           },
         }
       : {}),
@@ -2782,11 +2857,10 @@ const logRuntimeStateMutated = async ({
 
   try {
     if (auditRequest) {
-      await auditService.logFromRequest(auditRequest, auditPayload, auditOptions)
-      return
+      return await auditService.logFromRequest(auditRequest, auditPayload, auditOptions)
     }
 
-    await auditService.log(auditPayload, auditOptions)
+    return await auditService.log(auditPayload, auditOptions)
   } catch (err) {
     throw buildMutationError({
       status: 500,
@@ -2948,6 +3022,7 @@ const rollbackRuntimeStateMutation = async ({
 }
 
 const persistMutationWithAudit = async ({
+  acquisitionContext = null,
   actorUserId,
   additionalDiff = {},
   auditRequest,
@@ -2991,12 +3066,10 @@ const persistMutationWithAudit = async ({
   const stateMutationTimestamp = updatedAtBefore || new Date()
 
   if (mongoose.connection.readyState === 1) {
-    const session = await mongoose.startSession()
     let updatedRuntimeInstance = null
     let graphLifecycle = null
     let sourceRollover = null
-    try {
-      await session.withTransaction(async () => {
+    const persist = async (session) => {
         updatedRuntimeInstance = await atomicPersistRuntimeState({
           actorUserId,
           expectedUpdatedAt,
@@ -3047,7 +3120,7 @@ const persistMutationWithAudit = async ({
             reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_STATE_VERSION_REQUIRED,
           })
         }
-        await logRuntimeStateMutated({
+        const saveAudit = await logRuntimeStateMutated({
           actorUserId,
           additionalDiff: {
             ...additionalDiff,
@@ -3069,9 +3142,16 @@ const persistMutationWithAudit = async ({
           updatedAtBefore,
           session,
         })
-      })
-    } finally {
-      await session.endSession()
+        if (acquisitionContext) await recordAcquisitionTerminal({ context: acquisitionContext,
+          pack: nextValue, outputStateVersion: nextStateVersion, saveAudit, session })
+    }
+    if (acquisitionContext) {
+      acquisitionContext.rootPersistenceStarted = true
+      await withAcquisitionTransaction(persist, acquisitionContext)
+    } else {
+      const session = await mongoose.startSession()
+      try { await session.withTransaction(() => persist(session)) }
+      finally { await session.endSession() }
     }
     const finalized = await finalizeRuntimeStateGraphSourceMutation({
       actorUserId,
@@ -3081,6 +3161,9 @@ const persistMutationWithAudit = async ({
     })
     return finalized.runtimeInstance
   }
+
+  if (acquisitionContext) throw buildMutationError({ status: 503, code: 'SERVICE_UNAVAILABLE',
+    message: 'Acquisition transactional storage is unavailable.', reason: 'ACQUISITION_STORAGE_UNAVAILABLE' })
 
   const updatedRuntimeInstance = await atomicPersistRuntimeState({
     actorUserId,
@@ -3436,6 +3519,10 @@ export const updateRuntimeDiscoveryInputs = async ({
     scopes,
   })
 
+  const acquisitionContext = await lookupAcquisitionRequest({ runtimeInstance, payload, actorUserId,
+    actionKey: 'SAVE_DISCOVERY_INPUTS', auditRequest })
+  if (acquisitionContext?.replay) return { acquisitionRun: acquisitionContext.replay }
+
   assertRuntimeEditable(runtimeInstance)
   assertExpectedUpdatedAt({ runtimeInstance, expectedUpdatedAt })
 
@@ -3445,7 +3532,10 @@ export const updateRuntimeDiscoveryInputs = async ({
   const updatedAtBefore = runtimeInstance.updatedAt instanceof Date
     ? runtimeInstance.updatedAt.toISOString()
     : runtimeInstance.updatedAt
-  const builtEvidencePack = await buildDiscoveryEvidencePack({
+  let builtEvidencePack
+  try {
+  if (acquisitionContext) await startAcquisitionRun(acquisitionContext, payload?.inputs || {})
+  const build = () => buildDiscoveryEvidencePack({
     acquisitionProfile: payload?.acquisitionProfile,
     actorUserId,
     documentSources: payload?.documentSources,
@@ -3454,6 +3544,11 @@ export const updateRuntimeDiscoveryInputs = async ({
     reason: 'SAVE_DISCOVERY_INPUTS',
     runtimeInstance,
   })
+  builtEvidencePack = acquisitionContext ? await executeAcquisitionBuild(acquisitionContext, build) : await build()
+  if (acquisitionContext) {
+    bindAcquisitionSourceProcessing(acquisitionContext, builtEvidencePack)
+    builtEvidencePack.acquisition.runId = acquisitionContext.runId
+  }
   const nextEvidencePack = attachDiscoveryRegistrationAuditRef(
     builtEvidencePack,
     auditRequest?.requestId,
@@ -3476,6 +3571,7 @@ export const updateRuntimeDiscoveryInputs = async ({
   })
 
   const updatedRuntimeInstance = await persistMutationWithAudit({
+    acquisitionContext,
     actorUserId,
     additionalDiff: graphRebuild.auditDiff,
     auditRequest,
@@ -3491,11 +3587,17 @@ export const updateRuntimeDiscoveryInputs = async ({
     updatedAtBefore,
   })
 
-  return buildDiscoveryMutationResponse({
+  const response = buildDiscoveryMutationResponse({
     runtimeInstance: updatedRuntimeInstance,
     evidencePack: nextEvidencePack,
     previousEvidencePack,
   })
+  if (acquisitionContext) response.acquisitionRun = await readCommittedAcquisition(acquisitionContext)
+  return response
+  } catch (error) {
+    if (acquisitionContext) return handleAcquisitionFailure(acquisitionContext, error, builtEvidencePack)
+    throw error
+  }
 }
 
 export const acceptRuntimeDiscovery = async ({
@@ -3702,11 +3804,22 @@ export const getRuntimeDiscoveryContradictions = async ({ actorUserId, runtimeIn
     current: true, stateVersion, sourceStateVersion: stateVersion, evidenceObjectId: { $in: ids },
   }).select('evidenceObjectId sourceId sourceType lineageRef extractedFact reviewStatus validationStatus')
     .limit(17).maxTimeMS(2000).lean() : []
-  let canReview = getEvidencePackStateFlag(pack, 'evidenceReady') && !getEvidencePackNeedsRefresh(pack)
-  try { assertRuntimeEditable(runtimeInstance) } catch { canReview = false }
+  let canAcquire = true
+  try { assertRuntimeEditable(runtimeInstance) } catch { canAcquire = false }
+  const canReview = canAcquire && getEvidencePackStateFlag(pack, 'evidenceReady') && !getEvidencePackNeedsRefresh(pack)
   const result = {
+    contractVersion: 'intelligence-review-actions.v1',
+    control: {
+      id: toIdString(runtimeInstance._id),
+      runtimeInstanceKey: runtimeInstance.runtimeInstanceKey,
+      customerId: toIdString(runtimeInstance.customerId),
+      tenantId: toIdString(runtimeInstance.tenantId),
+      stateVersion,
+    },
     runtimeUpdatedAt: runtimeInstance.updatedAt,
     canReview,
+    canReviewEvidence: canReview,
+    canAcquire,
     candidates: candidates.map((candidate) => ({
       ...candidate,
       ...getDiscoveryContradictionReview(candidate, evidenceObjects, pack.contradictionReviews, toIdString(runtimeInstance._id), pack.contradictionReviewEpoch),
@@ -3721,14 +3834,39 @@ export const getRuntimeDiscoveryContradictions = async ({ actorUserId, runtimeIn
 export const reviewRuntimeDiscoveryContradiction = async ({
   actorUserId, auditRequest, contradictionId, scopes, runtimeInstanceId, payload = {},
 } = {}) => {
-  const { expectedUpdatedAt, expectedEvidencePairHash, disposition, confirm } = payload
+  const { expectedUpdatedAt, expectedEvidencePairHash, disposition, confirm, requestKey } = payload
   const rationale = typeof payload.rationale === 'string' ? payload.rationale.trim() : ''
   if (!toIdString(actorUserId) || confirm !== true || !DISCOVERY_CONTRADICTION_DISPOSITIONS.includes(disposition)
-    || rationale.length < 10 || rationale.length > 2000 || !/^sha256:[a-f0-9]{64}$/.test(expectedEvidencePairHash || '')) {
+    || rationale.length < 10 || rationale.length > 2000 || !/^sha256:[a-f0-9]{64}$/.test(expectedEvidencePairHash || '')
+    || requestKey !== undefined && (typeof requestKey !== 'string' || !DISCOVERY_CONTRADICTION_REQUEST_KEY_PATTERN.test(requestKey))) {
     throw contradictionReviewError('CONTRADICTION_REVIEW_INVALID', 'An explicit reviewer decision, rationale and evidence-pair hash are required.', 422)
   }
   const runtimeInstance = await resolveRuntimeInstanceForMutation({ actorUserId, runtimeInstanceId, scopes })
   assertRuntimeEditable(runtimeInstance)
+  const requestPayloadHash = requestKey === undefined ? '' : contradictionReviewRequestHash({
+    actorUserId: toIdString(actorUserId), runtimeInstanceId: toIdString(runtimeInstance._id), contradictionId,
+    expectedUpdatedAt, expectedEvidencePairHash, disposition, rationale, confirm,
+  })
+  if (requestKey !== undefined) {
+    if (!requestPayloadHash) throw contradictionReviewError('CONTRADICTION_REVIEW_INVALID', 'The original decision timestamp is required.', 422)
+    const pack = runtimeInstance.framework_state?.evidence_pack || {}
+    const replay = readContradictionReviewReplay(pack.contradictionReviews === undefined ? [] : pack.contradictionReviews, {
+      requestKey, requestPayloadHash, actorUserId: toIdString(actorUserId),
+      runtimeInstanceId: toIdString(runtimeInstance._id), contradictionId,
+    })
+    if (replay.error) throw contradictionReviewError(replay.error, 'This request identity cannot verify the original decision. Inspect the recorded history before retrying.')
+    if (replay.review) {
+      const candidates = pack.discoveryHealth?.contradictionCandidates
+      const matching = Array.isArray(candidates) ? candidates.filter(candidate => candidate?.contradictionId === contradictionId) : []
+      const current = matching.length === 1 ? getDiscoveryContradictionReview(matching[0], pack.evidenceObjects,
+        pack.contradictionReviews, toIdString(runtimeInstance._id), pack.contradictionReviewEpoch) : null
+      return { review: replay.review, runtimeUpdatedAt: runtimeInstance.updatedAt,
+        replay: true, requiresRefresh: true,
+        receiptCurrentness: current?.latestReview?.reviewId === replay.review.reviewId
+          && current.reviewStatus === replay.review.disposition ? 'CURRENT' : 'HISTORICAL',
+        currentReviewStatus: current?.reviewStatus || 'STALE' }
+    }
+  }
   assertExpectedUpdatedAt({ runtimeInstance, expectedUpdatedAt })
   const previousFrameworkState = cloneValue(runtimeInstance.framework_state || {})
   const pack = previousFrameworkState.evidence_pack || {}
@@ -3752,6 +3890,7 @@ export const reviewRuntimeDiscoveryContradiction = async ({
     reviewEpoch: pack.contradictionReviewEpoch || '',
     reviewedBy: toIdString(actorUserId), reviewedAt: new Date().toISOString(),
     reviewedStateVersion: requireCanonicalRuntimeStateVersion(runtimeInstance),
+    ...(requestKey === undefined ? {} : { requestKey, requestPayloadHash, requestExpectedUpdatedAt: expectedUpdatedAt }),
   }
   const contradictionReviews = [...reviews, review]
   if (!isBoundedContradictionReviewHistory(contradictionReviews)) {

@@ -1,5 +1,6 @@
 import { isIP } from 'node:net'
 import { z } from 'zod'
+import { acquisitionRequestKeySchema } from './acquisitionRun.validator.js'
 import {
   DISCOVERY_ACQUISITION_PROFILE_ERROR_MESSAGE,
   ENABLED_DISCOVERY_ACQUISITION_PROFILES,
@@ -420,6 +421,8 @@ const discoveryAcquisitionProfileSchema = z
   )
 
 const updateDiscoveryInputsSchema = z.object({
+  requestKey: acquisitionRequestKeySchema.optional(),
+  predecessorRunId: acquisitionRequestKeySchema.optional(),
   inputs: discoveryInputsSchema,
   acquisitionProfile: discoveryAcquisitionProfileSchema,
   documentSources: z.array(z.object({
@@ -615,6 +618,7 @@ const resetRuntimeDiscoverySchema = z.object({
 }).strict()
 
 const reviewRuntimeDiscoveryContradictionSchema = z.object({
+  requestKey: acquisitionRequestKeySchema.optional(),
   expectedUpdatedAt: expectedUpdatedAtSchema,
   expectedEvidencePairHash: z.string().regex(/^sha256:[a-f0-9]{64}$/),
   disposition: z.enum(['NOT_CONTRADICTORY', 'CONFIRMED', 'REOPENED']),
@@ -658,6 +662,8 @@ const acceptRuntimeSectionSchema = z.object({
 }).strict()
 
 const executeRuntimeActionSchema = z.object({
+  requestKey: acquisitionRequestKeySchema.optional(),
+  predecessorRunId: acquisitionRequestKeySchema.optional(),
   expectedUpdatedAt: expectedUpdatedAtSchema,
   inputs: discoveryInputsSchema.optional(),
   acquisitionProfile: discoveryAcquisitionProfileSchema,
@@ -737,6 +743,11 @@ const getSectionKeyFromRuntimePath = (runtimePath) => {
 }
 
 const buildExecuteRuntimeActionSchema = (actionKey) => executeRuntimeActionSchema.superRefine((data, ctx) => {
+  if (!DISCOVERY_INPUT_RUNTIME_ACTIONS.has(actionKey)) {
+    for (const key of ['requestKey', 'predecessorRunId']) if (data[key] !== undefined) ctx.addIssue({
+      code: z.ZodIssueCode.custom, path: [key], message: `${key} is only supported for acquisition actions.`,
+    })
+  }
   const hasRuntimePath = data.runtimePath !== undefined
   const hasSectionKey = data.sectionKey !== undefined
   const hasInputs = data.inputs !== undefined

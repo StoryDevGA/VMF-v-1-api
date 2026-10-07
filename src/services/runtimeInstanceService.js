@@ -197,6 +197,23 @@ export const RUNTIME_INSTANCE_RENDERER_PROJECTION = [
   'framework_state.evidence_pack.accepted',
   'framework_state.evidence_pack.acquisitionProfile',
   'framework_state.evidence_pack.acquisition.profile',
+  'framework_state.evidence_pack.acquisition.status',
+  'framework_state.evidence_pack.acquisition.websiteAcquisition.status',
+  'framework_state.evidence_pack.acquisition.websiteAcquisition.sourceCount',
+  'framework_state.evidence_pack.acquisition.websiteAcquisition.acquiredSourceCount',
+  'framework_state.evidence_pack.acquisition.websiteAcquisition.failedSourceCount',
+  'framework_state.evidence_pack.acquisition.websiteAcquisition.latestAttempt.contractVersion',
+  'framework_state.evidence_pack.acquisition.websiteAcquisition.latestAttempt.items.inputIndex',
+  'framework_state.evidence_pack.acquisition.websiteAcquisition.latestAttempt.items.status',
+  'framework_state.evidence_pack.acquisition.websiteAcquisition.latestAttempt.items.sourceId',
+  'framework_state.evidence_pack.acquisition.websiteAcquisition.latestAttempt.items.evidenceObjectCount',
+  'framework_state.evidence_pack.acquisition.websiteAcquisition.latestAttempt.items.retainedPrior',
+  'framework_state.evidence_pack.acquisition.websiteAcquisition.latestAttempt.items.retainedEvidenceObjectCount',
+  'framework_state.evidence_pack.acquisition.websiteAcquisition.latestAttempt.items.reason',
+  'framework_state.evidence_pack.acquisition.documentAcquisition.latestAttempt.contractVersion',
+  'framework_state.evidence_pack.acquisition.documentAcquisition.latestAttempt.items.inputIndex',
+  'framework_state.evidence_pack.acquisition.documentAcquisition.latestAttempt.items.status',
+  'framework_state.evidence_pack.acquisition.documentAcquisition.latestAttempt.items.evidenceObjectCount',
   'framework_state.evidence_pack.acquisition.coverage',
   'framework_state.evidence_pack.acquisition.confidence',
   'framework_state.evidence_pack.acquisition.completedAt',
@@ -382,7 +399,7 @@ const getRolePermissions = (role) =>
     ? role.permissions.map((permission) => normalizeToken(permission)).filter(Boolean)
     : []
 
-const loadPermissionGrantingRoles = async ({ roleKeys, permission, session }) => {
+const loadPermissionGrantingRoles = async ({ roleKeys, permission, session, maxTimeMS, readBudget }) => {
   const uniqueRoleKeys = [
     ...new Set(roleKeys.map((roleKey) => normalizeToken(roleKey)).filter(Boolean)),
   ]
@@ -391,6 +408,8 @@ const loadPermissionGrantingRoles = async ({ roleKeys, permission, session }) =>
   const roleQuery = Role.find({ key: { $in: uniqueRoleKeys } })
     .select('key scope permissions isActive')
     .lean()
+  if (maxTimeMS !== undefined) roleQuery.maxTimeMS(maxTimeMS)
+  if (readBudget) roleQuery.setOptions(readBudget())
   const roleRows = await (session ? roleQuery.session(session) : roleQuery)
 
   const roleByKey = new Map(
@@ -448,12 +467,16 @@ const hasCustomerRuntimePermission = async ({
   tenantId,
   permission,
   session,
+  maxTimeMS,
+  readBudget,
 }) => {
   const customerBucket = getCustomerBucket(scopes, customerId)
   if (!hasBucketPermission(customerBucket, permission)) return false
 
   const roleKeys = getBucketRoleKeys(customerBucket)
-  const permissionGrantingRoles = await loadPermissionGrantingRoles({ roleKeys, permission, session })
+  const permissionGrantingRoles = await loadPermissionGrantingRoles({ roleKeys, permission, session, maxTimeMS, readBudget })
+  // Topology preserves legacy role placement, but cannot restore a revoked grant.
+  if (permissionGrantingRoles.length === 0) return false
 
   if (permissionGrantingRoles.some((role) => normalizeToken(role.scope) === 'CUSTOMER')) {
     return true
@@ -466,6 +489,8 @@ const hasCustomerRuntimePermission = async ({
 
   if (hasTenantScopedCustomerRole && hasCustomerScopedTenantAdminRole) {
     const tenantQuery = Tenant.findById(tenantId)
+    if (maxTimeMS !== undefined) tenantQuery.maxTimeMS(maxTimeMS)
+    if (readBudget) tenantQuery.setOptions(readBudget())
     const tenant = await (session ? tenantQuery.session(session) : tenantQuery)
 
     if (
@@ -484,11 +509,13 @@ const hasCustomerRuntimePermission = async ({
   }
 
   const customerQuery = Customer.findById(customerId)
+  if (maxTimeMS !== undefined) customerQuery.maxTimeMS(maxTimeMS)
+  if (readBudget) customerQuery.setOptions(readBudget())
   const customer = await (session ? customerQuery.session(session) : customerQuery)
   return customer?.topology === 'SINGLE_TENANT'
 }
 
-export const assertRuntimePermission = async ({ actorUserId, scopes, customerId, tenantId, permission, session }) => {
+export const assertRuntimePermission = async ({ actorUserId, scopes, customerId, tenantId, permission, session, maxTimeMS, readBudget }) => {
   const normalizedPermission = normalizeToken(permission)
   const resolved = getResolvedPermissionsSnapshot(scopes)
 
@@ -505,6 +532,8 @@ export const assertRuntimePermission = async ({ actorUserId, scopes, customerId,
     tenantId,
     permission: normalizedPermission,
     session,
+    maxTimeMS,
+    readBudget,
   })) return
 
   throw createRuntimeInstanceError({
@@ -516,10 +545,12 @@ export const assertRuntimePermission = async ({ actorUserId, scopes, customerId,
   })
 }
 
-export const assertFeatureEntitlement = async ({ customerId, customer, feature, session }) => {
+export const assertFeatureEntitlement = async ({ customerId, customer, feature, session, maxTimeMS, readBudget }) => {
   const entitlementContext = await resolveCustomerFeatureEntitlements({
     customerId,
     customer,
+    maxTimeMS,
+    readBudget,
     ...(session ? { session } : {}),
   })
 
@@ -549,15 +580,22 @@ export const assertFeatureEntitlement = async ({ customerId, customer, feature, 
   }
 }
 
-export const assertCustomerTenantContext = async ({ customerId, tenantId, session }) => {
-  const [customer, tenant] = session
+export const assertCustomerTenantContext = async ({ customerId, tenantId, session, maxTimeMS, readBudget }) => {
+  const customerQuery = Customer.findById(customerId), tenantQuery = Tenant.findById(tenantId)
+  if (maxTimeMS !== undefined) { customerQuery.maxTimeMS(maxTimeMS); tenantQuery.maxTimeMS(maxTimeMS) }
+  const [customer, tenant] = readBudget
     ? [
-        await Customer.findById(customerId).session(session),
-        await Tenant.findById(tenantId).session(session),
+        await customerQuery.setOptions(readBudget()).session(session),
+        await tenantQuery.setOptions(readBudget()).session(session),
+      ]
+    : session
+    ? [
+        await customerQuery.session(session),
+        await tenantQuery.session(session),
       ]
     : await Promise.all([
-        Customer.findById(customerId),
-        Tenant.findById(tenantId),
+        customerQuery,
+        tenantQuery,
       ])
 
   if (!customer) {
@@ -1045,7 +1083,7 @@ export const serializeRuntimeInstanceSummary = (runtimeInstance) => {
     runtimeMode: plain.runtimeMode || '',
     name: plain.name || '',
     description: plain.description || '',
-    lockedAt: plain.lockedAt || null,
+    lockedAt: plain.lockedAt ?? null,
     lockedBy: plain.lockedBy ? toIdString(plain.lockedBy) : null,
     lockedReason: plain.lockedReason || '',
     createdAt: plain.createdAt || null,
@@ -1507,6 +1545,8 @@ export const getRuntimeInstance = async ({
   tenantId: scopedTenantId,
   projection = '',
   maxTimeMS,
+  metadataMaxTimeMS,
+  readBudget,
   session = null,
 } = {}) => {
   let effectiveCustomerId = scopedCustomerId
@@ -1550,6 +1590,7 @@ export const getRuntimeInstance = async ({
     }
     query.maxTimeMS(normalizedMaxTimeMS)
   }
+  if (readBudget) query.setOptions(readBudget())
   const runtimeInstance = await query.lean()
 
   if (!runtimeInstance) {
@@ -1571,14 +1612,18 @@ export const getRuntimeInstance = async ({
     tenantId,
     permission: runtimeInstance.runtimeType === RUNTIME_TYPES.DEAL_ANALYSIS ? 'DEAL_VIEW' : 'VMF_VIEW',
     session,
+    maxTimeMS: metadataMaxTimeMS,
+    readBudget,
   })
 
-  const { customer } = await assertCustomerTenantContext({ customerId, tenantId, session })
+  const { customer } = await assertCustomerTenantContext({ customerId, tenantId, session, maxTimeMS: metadataMaxTimeMS, readBudget })
   await assertFeatureEntitlement({
     customerId,
     customer,
     feature: getFeatureForRuntimeType(runtimeInstance.runtimeType),
     session,
+    maxTimeMS: metadataMaxTimeMS,
+    readBudget,
   })
 
   return serializeRuntimeInstance(runtimeInstance)

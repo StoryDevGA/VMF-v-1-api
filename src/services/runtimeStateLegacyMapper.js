@@ -239,13 +239,22 @@ const mapSources = ({ manifest, common }) => {
     const sourceId = normalizeString(rawSourceId, { required: true })
     const sourceType = ownString(value, ['sourceType'], { required: true, casing: 'upper' })
     const title = ownString(value, ['title', 'label'], { defaultValue: '' })
-    const sourceRef = ownString(value, ['sourceRef', 'url', 'fileRef'], { defaultValue: '' })
+    const sourceRef = ownString(value, ['sourceRef', 'url', 'fileRef', ...(sourceType === 'UPLOADED_DOCUMENT' ? ['fileName'] : [])], { defaultValue: '' })
     const hashKey = firstOwn(value, ['contentHash', 'sourceHash'])
     const contentHash = hashKey ? normalizeHash(value[hashKey]) : undefined
     const acquisitionStatus = ownString(value, ['acquisitionStatus'], { casing: 'upper' })
     const acquisitionProfile = ownString(value, ['acquisitionProfile'])
     const lineageRef = ownString(value, ['lineageRef', 'lineage'])
     const reviewStatus = ownString(value, ['reviewStatus'], { casing: 'upper' })
+    const processingReceipt = value.processingReceipt
+    if (processingReceipt !== undefined && (!exactKeys(processingReceipt, ['contractVersion', 'runId', 'inputIndex', 'contentHash'])
+      || sourceType !== 'UPLOADED_DOCUMENT'
+      || processingReceipt.contractVersion !== 'document-processing-receipt.v1'
+      || typeof processingReceipt.runId !== 'string'
+      || !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(processingReceipt.runId)
+      || !Number.isInteger(processingReceipt.inputIndex) || processingReceipt.inputIndex < 0 || processingReceipt.inputIndex > 4
+      || typeof processingReceipt.contentHash !== 'string' || !SHA256_PATTERN.test(processingReceipt.contentHash)))
+      inputFailure('Document processing receipt mapping is invalid.')
     if ([sourceId, sourceType, title, sourceRef, contentHash, acquisitionStatus,
       acquisitionProfile, lineageRef, reviewStatus].includes(null)) inputFailure('Source mapping is invalid.')
     const row = {
@@ -255,6 +264,7 @@ const mapSources = ({ manifest, common }) => {
       title,
       sourceRef,
       contentHash,
+      ...(processingReceipt !== undefined ? { processingReceipt: structuredClone(processingReceipt) } : {}),
       acquisitionStatus,
       acquisitionProfile,
       lineageRef,

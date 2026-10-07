@@ -52,6 +52,13 @@ const stringArray = ({ min = 0, max, itemMax }) => ({
     message: 'Array length is outside the governed boundary.',
   },
 })
+const receiptString = {
+  type: String, required: true,
+  set(value) {
+    if (typeof value !== 'string') throw new mongoose.Error.CastError('String', value, 'evidenceToMeaning')
+    return value
+  },
+}
 
 const acceptedSectionSchema = new mongoose.Schema({
   sectionKey: { ...requiredText(140), lowercase: true, match: stableKeyPattern },
@@ -105,6 +112,34 @@ const consumerIntentSchema = new mongoose.Schema({
 }, { ...nestedOptions, minimize: false })
 
 const inputSnapshotSchema = new mongoose.Schema({
+  workingDraftReferenceLedger: {
+    type: new mongoose.Schema({
+      version: { ...receiptString, enum: ['working-draft-reference-ledger.v1'] },
+      contractId: { ...receiptString, match: /^etm_[a-f0-9]{64}$/ },
+      contractHash: { ...receiptString, match: sha256Pattern },
+      projectionHash: { ...receiptString, match: sha256Pattern },
+      fingerprint: { ...receiptString, match: sha256Pattern },
+      targetSectionKeys: { type: [{ ...receiptString, match: stableKeyPattern }], required: true, default: undefined },
+      claims: { type: [new mongoose.Schema({
+        claimKey: { ...receiptString, match: stableKeyPattern },
+        sourceSectionKeys: { type: [{ ...receiptString, match: stableKeyPattern }], required: true, default: undefined },
+        targetSectionKeys: { type: [{ ...receiptString, match: stableKeyPattern }], required: true, default: undefined },
+      }, nestedOptions)], required: true, default: undefined },
+    }, nestedOptions),
+    default: undefined,
+    validate: { validator: (value) => value !== null, message: 'Working Draft reference ledger cannot be null.' },
+  },
+  evidenceToMeaning: {
+    type: new mongoose.Schema({
+      contractVersion: { ...receiptString, enum: ['evidence-to-meaning-provider.v1', 'evidence-to-draft-provider.v2'] },
+      contractId: { ...receiptString, match: /^etm_[a-f0-9]{64}$/,
+        validate: { validator(value) { return value === `etm_${this.contractHash}` }, message: 'Evidence contract identity must match its hash.' } },
+      contractHash: { ...receiptString, match: sha256Pattern },
+      projectionHash: { ...receiptString, match: sha256Pattern },
+    }, nestedOptions),
+    default: undefined,
+    validate: { validator: (value) => value !== null, message: 'Evidence lineage receipt cannot be null.' },
+  },
   requestBindingFingerprint: { type: String, lowercase: true, match: sha256Pattern },
   plan: {
     type: new mongoose.Schema({
@@ -638,7 +673,38 @@ schema.pre('validate', function validateShape(next) {
     ? output?.contributingActivationIds || []
     : output?.sections?.flatMap((section) => section.contributingActivationIds || []) || []
   const acceptedSections = input?.lockedTruth?.acceptedSections || []
-  const expectedTruth = acceptedSections.map((section) => section.sectionKey)
+  const lockedSourceTruth = acceptedSections.map((section) => section.sectionKey)
+  const referenceLedger = input?.workingDraftReferenceLedger
+  const canonicalKeys = (keys) => Array.isArray(keys) && keys.length > 0
+    && keys.every((key) => typeof key === 'string' && stableKeyPattern.test(key))
+    && JSON.stringify(keys) === JSON.stringify([...new Set(keys)].sort())
+  const ledgerSources = acceptedSections.map((section) => input?.lockedTruth?.acceptedTruthIdentityContractVersion
+    === OUTCOME_ACCEPTED_TRUTH_IDENTITY_CONTRACT_VERSION ? section.stateSectionKey : section.sectionKey)
+  const ledgerPayload = referenceLedger ? Object.fromEntries(Object.entries(referenceLedger).filter(([key]) => key !== 'fingerprint')) : null
+  const referenceLedgerInvalid = referenceLedger !== undefined && (
+    !referenceLedger || this.stageKey !== OUTCOME_QUALITY_STAGES.WORKING_DRAFT
+    || input?.evidenceToMeaning?.contractVersion !== 'evidence-to-draft-provider.v2'
+    || referenceLedger.version !== 'working-draft-reference-ledger.v1'
+    || ['contractId', 'contractHash', 'projectionHash'].some((key) => referenceLedger[key] !== input.evidenceToMeaning[key])
+    || referenceLedger.fingerprint !== hash(ledgerPayload)
+    || Buffer.byteLength(JSON.stringify(referenceLedger)) > 120000
+    || !canonicalKeys(referenceLedger.targetSectionKeys)
+    || !Array.isArray(referenceLedger.claims) || referenceLedger.claims.length < 1
+    || !canonicalKeys(referenceLedger.claims.map((claim) => claim.claimKey))
+    || referenceLedger.claims.some((claim) => !canonicalKeys(claim.sourceSectionKeys)
+      || !canonicalKeys(claim.targetSectionKeys)
+      || claim.sourceSectionKeys.some((key) => !ledgerSources.includes(key)))
+    || !sameSet(referenceLedger.targetSectionKeys, referenceLedger.claims.flatMap((claim) => claim.targetSectionKeys))
+    || (succeeded && (output?.sections?.some((section) => section.claims?.some((claim) => {
+      const admitted = referenceLedger.claims.find((row) => row.claimKey === claim.claimKey)
+      return !admitted || !admitted.targetSectionKeys.includes(section.sectionKey)
+        || new Set(claim.truthReferences || []).size !== claim.truthReferences?.length
+        || !sameSet(claim.truthReferences, admitted.targetSectionKeys)
+    })) || referenceLedger.claims.some((claim) => claim.targetSectionKeys.some((key) =>
+      output?.sections?.filter((section) => section.sectionKey === key)
+        .flatMap((section) => section.claims || []).filter((row) => row.claimKey === claim.claimKey).length !== 1))))
+  )
+  const expectedTruth = referenceLedger && !referenceLedgerInvalid ? referenceLedger.targetSectionKeys : lockedSourceTruth
   const acceptedTruthMarkerPresent = Boolean(input?.lockedTruth)
     && Object.prototype.hasOwnProperty.call(input.lockedTruth, 'acceptedTruthIdentityContractVersion')
   const markedAcceptedTruth = input?.lockedTruth?.acceptedTruthIdentityContractVersion
@@ -723,6 +789,7 @@ schema.pre('validate', function validateShape(next) {
     || input?.requestBindingFingerprint !== hash(requestBinding)
   )
   const invalid = !input
+    || referenceLedgerInvalid
     || !identity
     || providerConfigurationIdentityInvalid
     || input.plan?.recordId !== String(this.knowledgeCompositionPlanRecordId || '')

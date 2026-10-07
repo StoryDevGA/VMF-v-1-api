@@ -493,7 +493,26 @@ const buildStageInputSnapshot = (plan, stage, sourceStageExecution, requestBindi
     || text(sourceStageExecution.draftId) !== requestBinding.draftId
     || text(sourceStageExecution.draftIterationId) !== requestBinding.draftIterationId
   )) throw predecessorInvalid({ field: 'requestBinding' })
+  let workingDraftReferenceLedger
+  if (stage.stageKey === OUTCOME_QUALITY_STAGES.WORKING_DRAFT
+    && evidenceProjection?.contractVersion === 'evidence-to-draft-provider.v2') {
+    const admittedSources = acceptedSections.map((section) => markedIdentity ? section.stateSectionKey : section.sectionKey)
+    const claims = evidenceProjection.customerClaims.map((claim) => {
+      if (!Array.isArray(claim.sourceSectionKeys) || !claim.sourceSectionKeys.length
+        || claim.sourceSectionKeys.some((key) => !admittedSources.includes(key))) {
+        throw stageBindingInvalid({ field: 'workingDraftReferenceLedger.sourceSectionKeys' })
+      }
+      return { claimKey: claim.claimKey, sourceSectionKeys: [...claim.sourceSectionKeys].sort(),
+        targetSectionKeys: [...claim.sectionKeys].sort() }
+    }).sort((left, right) => left.claimKey < right.claimKey ? -1 : left.claimKey > right.claimKey ? 1 : 0)
+    const ledger = { version: 'working-draft-reference-ledger.v1',
+      contractId: evidenceProjection.contractId, contractHash: evidenceProjection.contractHash,
+      projectionHash: evidenceProjection.projectionHash, claims,
+      targetSectionKeys: [...new Set(claims.flatMap((claim) => claim.targetSectionKeys))].sort() }
+    workingDraftReferenceLedger = { ...ledger, fingerprint: hashOutcomeQualityStageValue(ledger) }
+  }
   return {
+    ...(workingDraftReferenceLedger ? { workingDraftReferenceLedger } : {}),
     ...(evidenceProjection ? { evidenceToMeaning: { contractVersion: evidenceProjection.contractVersion,
       contractId: evidenceProjection.contractId, contractHash: evidenceProjection.contractHash,
       projectionHash: evidenceProjection.projectionHash } } : {}),

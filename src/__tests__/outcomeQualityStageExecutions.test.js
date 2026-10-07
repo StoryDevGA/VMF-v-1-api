@@ -20,6 +20,13 @@ import {
   OUTCOME_WORKING_DRAFT_SCHEMA_VERSION,
 } from '../constants/outcomeGovernedQuality.js'
 import OutcomeQualityStageExecution from '../models/OutcomeQualityStageExecution.js'
+import { attachSs040PlanFixtureContract, ss040TargetHashFor } from './fixtures/ss040EvidenceToMeaningFixtures.js'
+import { freezeSs041Snapshot } from './fixtures/outcomeEvidenceToDraftFixtures.js'
+import { compileEvidenceToMeaningContract } from '../services/outcomeEvidenceToMeaningContractService.js'
+import { EVIDENCE_TO_DRAFT_INPUT_VERSION } from '../services/outcomeEvidenceToDraftContractService.js'
+import { EVIDENCE_TO_MEANING_PROVIDER_VERSION, EVIDENCE_TO_DRAFT_PROVIDER_VERSION } from '../services/outcomeEvidenceToMeaningProviderService.js'
+import { readRuntimeEvidenceToMeaningProviderProjection } from '../services/outcomeRuntimeEvidenceToMeaningService.js'
+import { buildWorkingDraftStageOutputFromProviderOutput } from '../services/outcomeWorkingDraftExecutionService.js'
 import {
   assertOutcomeKnowledgeCompositionPlanIntegrity,
   buildOutcomeKnowledgeCompositionPlanCandidate,
@@ -186,10 +193,10 @@ const makeContext = () => ({
   lineage: { activationIds: ['activation-executive-brief'] },
 })
 
-const makePlan = (intentOverrides = {}, runtime = makeRuntime()) => {
+const makePlan = (intentOverrides = {}, runtime = makeRuntime(), binding = makeBinding()) => {
   const candidate = buildOutcomeKnowledgeCompositionPlanCandidate({
     runtime,
-    binding: makeBinding(),
+    binding,
     context: makeContext(),
     consumerIntent: {
       outcome: 'One Governed Executive Brief',
@@ -676,6 +683,223 @@ const refreshStageRecordFingerprints = (record) => {
     executionIdentity: record.executionIdentity,
   })
 }
+
+describe('strict evidence lineage receipt at the quality-stage model boundary', () => {
+  const receipt = (contractVersion = EVIDENCE_TO_DRAFT_PROVIDER_VERSION) => ({ contractVersion,
+    contractId: `etm_${'a'.repeat(64)}`, contractHash: 'a'.repeat(64), projectionHash: 'b'.repeat(64) })
+  const document = (value) => new OutcomeQualityStageExecution({
+    stageExecutionId: 'outcome_quality_stage_lineage_validation', ...value, createdBy: ids.actor,
+  })
+  it.each([EVIDENCE_TO_MEANING_PROVIDER_VERSION, EVIDENCE_TO_DRAFT_PROVIDER_VERSION])('accepts exact %s receipt in an actual service-built candidate', async (version) => {
+    const candidate = buildSuccess()
+    candidate.inputSnapshot.evidenceToMeaning = receipt(version)
+    refreshStageRecordFingerprints(candidate)
+    const value = document(candidate)
+    await expect(value.validate()).resolves.toBeUndefined()
+    expect(value.toObject().inputSnapshot.evidenceToMeaning).toEqual(receipt(version))
+    expect(hashOutcomeQualityStageValue(value.toObject().inputSnapshot)).toBe(candidate.inputFingerprint)
+  })
+  it('preserves receipt-absent legacy bytes and fingerprints without supplying a default', async () => {
+    const candidate = buildSuccess()
+    const before = JSON.stringify(candidate.inputSnapshot)
+    const value = document(candidate)
+    await expect(value.validate()).resolves.toBeUndefined()
+    expect(Object.hasOwn(value.toObject().inputSnapshot, 'evidenceToMeaning')).toBe(false)
+    expect(JSON.stringify(candidate.inputSnapshot)).toBe(before)
+    expect(hashOutcomeQualityStageValue(value.toObject().inputSnapshot)).toBe(candidate.inputFingerprint)
+  })
+  it.each([
+    ['null', null], ['empty', {}], ['missing projection', { ...receipt(), projectionHash: undefined }],
+    ['unknown version', { ...receipt(), contractVersion: 'unknown' }],
+    ['compiler v1 instead of provider version', { ...receipt(), contractVersion: 'evidence-to-meaning.v1' }],
+    ['compiler v2 instead of provider version', { ...receipt(), contractVersion: 'evidence-to-draft.v2' }],
+    ['uppercase contract hash', { ...receipt(), contractHash: 'A'.repeat(64) }],
+    ['uppercase projection hash', { ...receipt(), projectionHash: 'B'.repeat(64) }],
+    ['malformed hash', { ...receipt(), projectionHash: 'bad' }],
+    ['identity mismatch', { ...receipt(), contractId: `etm_${'c'.repeat(64)}` }],
+    ['raw object', { ...receipt(), contractHash: { evidenceObjects: [] } }],
+    ['string-coercible object', { ...receipt(), contractHash: { toString: () => 'a'.repeat(64) } }],
+    ['extra field', { ...receipt(), rawEvidence: [] }],
+  ])('rejects %s before persistence', async (_label, value) => {
+    const candidate = buildSuccess()
+    candidate.inputSnapshot.evidenceToMeaning = value
+    refreshStageRecordFingerprints(candidate)
+    await expect(document(candidate).validate()).rejects.toBeInstanceOf(mongoose.Error.ValidationError)
+  })
+  it('rejects lineage tampering when the original input fingerprint is retained', async () => {
+    const candidate = buildSuccess()
+    candidate.inputSnapshot.evidenceToMeaning = receipt()
+    refreshStageRecordFingerprints(candidate)
+    candidate.inputSnapshot.evidenceToMeaning.projectionHash = 'c'.repeat(64)
+    await expect(document(candidate).validate()).rejects.toBeInstanceOf(mongoose.Error.ValidationError)
+  })
+  it('rejects removing a receipt while retaining its original input fingerprint', async () => {
+    const candidate = buildSuccess()
+    candidate.inputSnapshot.evidenceToMeaning = receipt()
+    refreshStageRecordFingerprints(candidate)
+    delete candidate.inputSnapshot.evidenceToMeaning
+    await expect(document(candidate).validate()).rejects.toBeInstanceOf(mongoose.Error.ValidationError)
+  })
+  it.each([EVIDENCE_TO_MEANING_PROVIDER_VERSION, EVIDENCE_TO_DRAFT_PROVIDER_VERSION])('uses actual projector and candidate writer for %s without manual receipt injection', async (version) => {
+    const binding = makeBinding()
+    Object.values(binding.selectedByLayer).flat().forEach((pack) => {
+      if (['executive-brief', 'executive-brief-schema'].includes(pack.capabilityKey)) pack.contentHash = ss040TargetHashFor(pack.capabilityKey)
+    })
+    const plan = makePlan({}, makeRuntime(), binding)
+    attachSs040PlanFixtureContract(plan.payload)
+    const input = JSON.parse(plan.payload.evidenceToMeaning.contractJson).inputs
+    input.composition.providerCompatibility = { contractVersion: version, status: 'READY' }
+    if (version === EVIDENCE_TO_DRAFT_PROVIDER_VERSION) {
+      input.composition.contractVersion = EVIDENCE_TO_DRAFT_INPUT_VERSION
+      input.sourceSnapshot.evidenceObjects.forEach((row) => Object.assign(row, {
+        claimStatus: 'SOURCE_PRESENTED', sourceLocation: 'source-1#synthetic-storage-regression',
+        scope: { organisation: 'Explicit synthetic storage regression' }, time: { from: '2026-01-01', to: '2026-10-01' },
+        materiality: 'SOURCE_RECORDED', proofOrderDisposition: 'NOT_ESTABLISHED', proofRequirementCodes: ['ATTRIBUTION'],
+      }))
+      await freezeSs041Snapshot(input, { scopeOverride: { tenantId: String(plan.tenantId),
+        customerId: String(plan.customerId), runtimeInstanceId: String(plan.runtimeInstanceId) } })
+    }
+    const contract = compileEvidenceToMeaningContract(input)
+    expect(['READY', 'READY_TO_DRAFT']).toContain(contract.status)
+    plan.payload.evidenceToMeaning = { contractVersion: contract.contractVersion, contractId: contract.contractId,
+      contractHash: contract.contractHash, contractJson: JSON.stringify(contract) }
+    plan.planFingerprint = hashOutcomeKnowledgeCompositionSemanticValue(plan.payload)
+    const projection = readRuntimeEvidenceToMeaningProviderProjection(plan)
+    expect(projection.contractVersion).toBe(version)
+    const candidate = buildSuccess({ plan })
+    const expected = Object.fromEntries(['contractVersion', 'contractId', 'contractHash', 'projectionHash'].map((field) => [field, projection[field]]))
+    expect(candidate.inputSnapshot.evidenceToMeaning).toEqual(expected)
+    const value = document(candidate)
+    await expect(value.validate()).resolves.toBeUndefined()
+    expect(value.toObject().inputSnapshot.evidenceToMeaning).toEqual(expected)
+    expect(hashOutcomeQualityStageValue(value.toObject().inputSnapshot)).toBe(candidate.inputFingerprint)
+  })
+})
+
+const makePlacedWorkingDraft = async ({ placement = 'explicit' } = {}) => {
+  const binding = makeBinding()
+  Object.values(binding.selectedByLayer).flat().forEach((pack) => {
+    if (['executive-brief', 'executive-brief-schema'].includes(pack.capabilityKey)) pack.contentHash = ss040TargetHashFor(pack.capabilityKey)
+  })
+  const runtime = makeRuntime()
+  if (placement !== 'explicit') {
+    runtime.framework_state.sections['executive-summary'] = makeSection('executive-summary', '3')
+  }
+  const plan = makePlan({}, runtime, binding)
+  attachSs040PlanFixtureContract(plan.payload)
+  const input = JSON.parse(plan.payload.evidenceToMeaning.contractJson).inputs
+  input.composition.contractVersion = EVIDENCE_TO_DRAFT_INPUT_VERSION
+  input.composition.providerCompatibility = { contractVersion: EVIDENCE_TO_DRAFT_PROVIDER_VERSION, status: 'READY' }
+  input.sourceSnapshot.evidenceObjects.forEach((row) => Object.assign(row, {
+    claimStatus: 'SOURCE_PRESENTED', sourceLocation: 'source-1#synthetic-reference-regression',
+    scope: { organisation: 'Explicit synthetic reference regression' }, time: { from: '2026-01-01', to: '2026-10-01' },
+    materiality: 'SOURCE_RECORDED', proofOrderDisposition: 'NOT_ESTABLISHED', proofRequirementCodes: ['ATTRIBUTION'],
+  }))
+  if (placement === 'mixed') {
+    input.sourceSnapshot.evidenceObjects.push({ ...input.sourceSnapshot.evidenceObjects[0],
+      evidenceObjectId: 'evidence-implicit', lineageRef: 'lineage:source-1:implicit' })
+    input.composition.businessFactLedger.facts.push({ ...input.composition.businessFactLedger.facts[0],
+      evidenceObjectId: 'evidence-implicit', factId: 'fact-implicit',
+      provenance: { ...input.composition.businessFactLedger.facts[0].provenance, lineageRef: 'lineage:source-1:implicit' } })
+  }
+  input.composition.businessFactLedger.facts.forEach((fact) => {
+    if (placement === 'implicit' || fact.evidenceObjectId === 'evidence-implicit') return
+    input.sourceSnapshot.evidenceObjects.find((row) => row.evidenceObjectId === fact.evidenceObjectId).draftPlacement = {
+      version: 'evidence-to-draft-placement.v1', targetReceiptFingerprint: input.selectedTarget.receiptFingerprint,
+      sourceSectionKeys: ['customer_context'], targetSectionKeys: [...fact.sectionKeys],
+    }
+    fact.sectionKeys = ['customer_context']
+  })
+  await freezeSs041Snapshot(input, { scopeOverride: { tenantId: String(plan.tenantId), customerId: String(plan.customerId),
+    runtimeInstanceId: String(plan.runtimeInstanceId) }, sourceSections: [
+    ...new Set(input.composition.businessFactLedger.facts.flatMap((fact) => fact.sectionKeys)),
+  ].map((sectionKey) => ({ sectionKey, references: input.composition.businessFactLedger.facts
+    .filter((fact) => fact.sectionKeys.includes(sectionKey)).map((fact) => fact.evidenceObjectId) })) })
+  const contract = compileEvidenceToMeaningContract(input)
+  expect(contract.status).toBe('READY_TO_DRAFT')
+  plan.payload.evidenceToMeaning = { contractVersion: contract.contractVersion, contractId: contract.contractId,
+    contractHash: contract.contractHash, contractJson: JSON.stringify(contract) }
+  plan.planFingerprint = hashOutcomeKnowledgeCompositionSemanticValue(plan.payload)
+  const projection = readRuntimeEvidenceToMeaningProviderProjection(plan)
+  const source = makeFrameworkGuidanceSource(plan)
+  const providerOutput = { outputType: 'WORKING_DRAFT', schemaVersion: OUTCOME_WORKING_DRAFT_SCHEMA_VERSION,
+    draftVersion: 1, title: 'Working Draft',
+    sections: projection.sectionLedger.filter((row) => row.status === 'SUPPORTED').map((row, index) => ({
+      order: index + 1, sectionKey: row.targetSectionKey, title: row.heading,
+      content: projection.claimProjections.filter((claim) => row.claimKeys.includes(claim.claimKey)).map((claim) => claim.statement).join(' '),
+      claims: projection.claimProjections.filter((claim) => row.claimKeys.includes(claim.claimKey)),
+      truthReferences: [row.targetSectionKey], assumptions: [], gaps: buildOutcomeQualityVisibleGaps(plan),
+    })), decisionLogic: projection.decisionProjections, assumptions: [], visibleGaps: buildOutcomeQualityVisibleGaps(plan) }
+  const output = buildWorkingDraftStageOutputFromProviderOutput({ providerOutput, plan, sourceStage: source })
+  return { plan, projection, source, output, candidate: buildWorkingDraft({ plan, sourceStageExecution: source, output }) }
+}
+
+describe('Working Draft v2 input-owned target reference authority', () => {
+  const document = (candidate) => new OutcomeQualityStageExecution({ ...candidate,
+    stageExecutionId: 'outcome_quality_stage_reference_regression', createdBy: ids.actor })
+  const refresh = (candidate) => {
+    candidate.outputFingerprint = hashOutcomeQualityStageValue(candidate.outputSnapshot)
+    refreshStageRecordFingerprints(candidate)
+  }
+  it('derives source/target ledger from genuine compiler, projector and normalizer before model validation', async () => {
+    const { candidate, projection } = await makePlacedWorkingDraft()
+    const ledger = candidate.inputSnapshot.workingDraftReferenceLedger
+    expect(ledger.claims[0].sourceSectionKeys).toEqual(['customer_context'])
+    expect(ledger.targetSectionKeys).toEqual([...new Set(projection.customerClaims.flatMap((claim) => claim.sectionKeys))].sort())
+    expect(ledger.targetSectionKeys).not.toContain('customer_context')
+    expect(ledger.projectionHash).toBe(projection.projectionHash)
+    await expect(document(candidate).validate()).resolves.toBeUndefined()
+  })
+  it.each(['implicit', 'mixed'])('preserves inventory source membership for %s identity placement through native stage validation', async (placement) => {
+    const { candidate, projection } = await makePlacedWorkingDraft({ placement })
+    const identity = projection.customerClaims.find((claim) => placement === 'implicit' || claim.evidenceReference === 'evidence-implicit')
+    expect(identity.sourceSectionKeys).toEqual(['executive-summary'])
+    expect(identity.sectionKeys).toEqual(['executive-summary'])
+    expect(identity).not.toHaveProperty('draftPlacement')
+    const ledger = candidate.inputSnapshot.workingDraftReferenceLedger
+    expect(ledger.claims.find((claim) => claim.claimKey === identity.claimKey).sourceSectionKeys).toEqual(['executive-summary'])
+    if (placement === 'mixed') expect(ledger.claims.some((claim) => claim.sourceSectionKeys.includes('customer_context'))).toBe(true)
+    await expect(document(candidate).validate()).resolves.toBeUndefined()
+  })
+  it.each([
+    ['null ledger', (row) => { row.inputSnapshot.workingDraftReferenceLedger = null }],
+    ['empty ledger', (row) => { row.inputSnapshot.workingDraftReferenceLedger = {} }],
+    ['extra field', (row) => { row.inputSnapshot.workingDraftReferenceLedger.rawEvidence = [] }],
+    ['receipt mismatch', (row) => { row.inputSnapshot.workingDraftReferenceLedger.projectionHash = 'a'.repeat(64) }],
+    ['fingerprint mismatch', (row) => { row.inputSnapshot.workingDraftReferenceLedger.fingerprint = 'a'.repeat(64) }],
+    ['missing target', (row) => { row.inputSnapshot.workingDraftReferenceLedger.targetSectionKeys = [] }],
+    ['duplicate claim', (row) => { row.inputSnapshot.workingDraftReferenceLedger.claims.push(row.inputSnapshot.workingDraftReferenceLedger.claims[0]) }],
+    ['source identity alias', (row) => { row.inputSnapshot.workingDraftReferenceLedger.claims[0].sourceSectionKeys = ['customer-context'] }],
+    ['unknown target output', (row) => { row.outputSnapshot.sections[0].truthReferences = ['invented-target'] }],
+    ['wrong claim identity', (row) => { row.outputSnapshot.sections[0].claims[0].claimKey = 'invented-claim' }],
+    ['duplicate output claim reference', (row) => { row.outputSnapshot.sections[0].claims[0].truthReferences.push(row.outputSnapshot.sections[0].claims[0].truthReferences[0]) }],
+    ['missing claim placement', (row) => { row.outputSnapshot.sections[0].claims = [] }],
+    ['legacy version flag', (row) => { row.inputSnapshot.evidenceToMeaning.contractVersion = EVIDENCE_TO_MEANING_PROVIDER_VERSION }],
+  ])('rejects %s even with recomputed stage fingerprints', async (_label, mutate) => {
+    const { candidate } = await makePlacedWorkingDraft()
+    mutate(candidate)
+    const ledger = candidate.inputSnapshot.workingDraftReferenceLedger
+    if (ledger && ledger.fingerprint !== 'a'.repeat(64)) {
+      const { fingerprint: _fingerprint, ...payload } = ledger
+      ledger.fingerprint = hashOutcomeQualityStageValue(payload)
+    }
+    refresh(candidate)
+    await expect(document(candidate).validate()).rejects.toBeInstanceOf(mongoose.Error.ValidationError)
+  })
+  it('rejects removing authority from target-key output and keeps historical source-key output unchanged', async () => {
+    const { candidate } = await makePlacedWorkingDraft()
+    delete candidate.inputSnapshot.workingDraftReferenceLedger
+    refresh(candidate)
+    await expect(document(candidate).validate()).rejects.toBeInstanceOf(mongoose.Error.ValidationError)
+    await expect(document(buildWorkingDraft()).validate()).resolves.toBeUndefined()
+  })
+  it('rejects a ledger on Framework Guidance without modifying its source-reference contract', async () => {
+    const { candidate, source } = await makePlacedWorkingDraft()
+    source.inputSnapshot.workingDraftReferenceLedger = candidate.inputSnapshot.workingDraftReferenceLedger
+    refresh(source)
+    await expect(document(source).validate()).rejects.toBeInstanceOf(mongoose.Error.ValidationError)
+  })
+})
 
 const makeQuery = (value) => {
   const query = {

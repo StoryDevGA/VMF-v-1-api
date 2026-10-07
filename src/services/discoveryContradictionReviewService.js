@@ -5,6 +5,39 @@ export const DISCOVERY_CONTRADICTION_DISPOSITIONS = ['NOT_CONTRADICTORY', 'CONFI
 export const DISCOVERY_CONTRADICTION_HISTORY_MAX_BYTES = 128 * 1024
 const text = (value) => typeof value === 'string' ? value.trim() : ''
 const token = (value) => text(value).toUpperCase()
+export const DISCOVERY_CONTRADICTION_REQUEST_KEY_PATTERN = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/
+
+export const contradictionReviewRequestHash = ({ actorUserId, runtimeInstanceId, contradictionId,
+  expectedUpdatedAt, expectedEvidencePairHash, disposition, rationale, confirm }) => {
+  if (typeof expectedUpdatedAt !== 'string' || !Number.isFinite(Date.parse(expectedUpdatedAt))) return ''
+  return createHash('sha256').update(JSON.stringify({
+    contractVersion: DISCOVERY_CONTRADICTION_REVIEW_CONTRACT,
+    actorUserId: text(actorUserId), runtimeInstanceId: text(runtimeInstanceId), contradictionId: text(contradictionId),
+    expectedUpdatedAt: new Date(expectedUpdatedAt).toISOString(), expectedEvidencePairHash,
+    disposition, rationale: text(rationale), confirm,
+  })).digest('hex')
+}
+
+// Retry identity lives in the existing bounded decision history. It does not
+// establish that an old receipt remains a current disposition or readiness grant.
+export const readContradictionReviewReplay = (reviews, request) => {
+  if (!isBoundedContradictionReviewHistory(reviews)
+    || reviews.some(review => !review || typeof review !== 'object' || Array.isArray(review) || !text(review.contradictionId))) return { error: 'CONTRADICTION_REVIEW_LIMIT' }
+  const matches = reviews.filter(review => review?.requestKey === request.requestKey)
+  if (matches.length === 0) return { review: null }
+  if (matches.length !== 1) return { error: 'CONTRADICTION_REVIEW_REQUEST_CONFLICT' }
+  const [review] = matches
+  const storedHash = contradictionReviewRequestHash({ actorUserId: review.reviewedBy,
+    runtimeInstanceId: review.runtimeInstanceId, contradictionId: review.contradictionId,
+    expectedUpdatedAt: review.requestExpectedUpdatedAt, expectedEvidencePairHash: review.evidencePairHash,
+    disposition: review.disposition, rationale: review.rationale, confirm: true })
+  if (review.contractVersion !== DISCOVERY_CONTRADICTION_REVIEW_CONTRACT || !text(review.reviewId)
+    || !Number.isFinite(Date.parse(review.reviewedAt)) || !storedHash
+    || storedHash !== review.requestPayloadHash || storedHash !== request.requestPayloadHash
+    || review.runtimeInstanceId !== request.runtimeInstanceId || review.reviewedBy !== request.actorUserId
+    || review.contradictionId !== request.contradictionId) return { error: 'CONTRADICTION_REVIEW_REQUEST_CONFLICT' }
+  return { review }
+}
 
 export const isBoundedContradictionReviewHistory = (reviews) => Array.isArray(reviews)
   && reviews.length <= 1000

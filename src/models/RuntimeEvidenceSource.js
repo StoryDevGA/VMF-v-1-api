@@ -7,6 +7,13 @@ import {
   scopedVersionIndex,
 } from './runtimeStateSchemas.js'
 
+const processingReceiptSchema = new mongoose.Schema({
+  contractVersion: { type: String, required: true, enum: ['document-processing-receipt.v1'] },
+  runId: { type: String, required: true, match: /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/ },
+  inputIndex: { type: Number, required: true, min: 0, max: 4, validate: Number.isInteger },
+  contentHash: { ...sha256Field(), required: true },
+}, { _id: false, strict: 'throw' })
+
 const runtimeEvidenceSourceSchema = createRuntimeStateSchema({
   collection: 'runtime_evidence_sources',
   fields: {
@@ -36,6 +43,8 @@ const runtimeEvidenceSourceSchema = createRuntimeStateSchema({
       default: '',
     },
     contentHash: sha256Field(),
+    processingReceipt: { type: processingReceiptSchema, default: undefined,
+      validate: function (value) { return value === undefined || Boolean(value && this.sourceType === 'UPLOADED_DOCUMENT') } },
     acquisitionStatus: {
       type: String,
       trim: true,

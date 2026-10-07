@@ -25,6 +25,20 @@ const commonFields = () => ({
   migrationReceiptId: objectId,
 })
 
+test.each(['null', 'run', 'index', 'hash', 'version', 'kind', 'extra'])('native source schema rejects malformed %s document receipt', mode => {
+  const receipt = { contractVersion: 'document-processing-receipt.v1',
+    runId: '123e4567-e89b-42d3-a456-426614174000', inputIndex: 0, contentHash }
+  if (mode === 'run') receipt.runId = 'bad'
+  if (mode === 'index') receipt.inputIndex = 5
+  if (mode === 'hash') receipt.contentHash = 'bad'
+  if (mode === 'version') receipt.contractVersion = 'unknown'
+  if (mode === 'extra') receipt.unknown = true
+  const source = new RuntimeEvidenceSource({ ...commonFields(), sourceId: 'document-one',
+    sourceType: mode === 'kind' ? 'WEBSITE' : 'UPLOADED_DOCUMENT',
+    contentHash, processingReceipt: mode === 'null' ? null : receipt })
+  expect(source.validateSync()).toBeDefined()
+})
+
 const validDocuments = () => ({
   section: new RuntimeStateSection({
     ...commonFields(),

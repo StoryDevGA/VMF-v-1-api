@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { makeSs040Fixture } from './fixtures/ss040EvidenceToMeaningFixtures.js'
+import { makeSs041Fixture, freezeSs041Snapshot } from './fixtures/outcomeEvidenceToDraftFixtures.js'
 import { compileEvidenceToMeaningContract, hashEvidenceToMeaningValue } from '../services/outcomeEvidenceToMeaningContractService.js'
 import { projectEvidenceToMeaningProviderContract } from '../services/outcomeEvidenceToMeaningProviderService.js'
 import { describe, expect, jest, test } from '@jest/globals'
@@ -922,6 +923,20 @@ describe('SS-040 contract-bound Working Draft provider mode', () => {
       claims: projection.claimProjections.filter((claim) => section.claimKeys.includes(claim.claimKey)),
       truthReferences: section.sourceSectionKeys, assumptions: [], gaps: makeContext().sourceCandidate.visibleGaps,
     })), decisionLogic: projection.decisionProjections, assumptions: [], visibleGaps: makeContext().sourceCandidate.visibleGaps,
+  })
+  test('SS-041 preserves exact shared placements across sections while rejecting within-section duplicates', async () => {
+    const input = await makeSs041Fixture({ required: ['Executive Summary', 'Evidence Boundary'] })
+    input.composition.businessFactLedger.facts[0].sectionKeys = ['executive-summary', 'evidence-boundary']
+    await freezeSs041Snapshot(input)
+    const projection = projectEvidenceToMeaningProviderContract(compileEvidenceToMeaningContract(input))
+    const output = exactOutput(projection)
+    output.sections.forEach((section) => { section.truthReferences = [...new Set(section.claims.flatMap((claim) => claim.truthReferences))] })
+    const fetchImpl = jest.fn().mockResolvedValue(response({ body: responseBody(output) }))
+    const result = await makeAdapter({ fetchImpl })({ providerContext: makeContext(), evidenceToMeaning: projection })
+    expect(result.output.sections[0].claims[0].claimKey).toBe(result.output.sections[1].claims[0].claimKey)
+    output.sections[0].claims.push(output.sections[0].claims[0])
+    const invalidFetch = jest.fn().mockResolvedValue(response({ body: responseBody(output) }))
+    await expect(makeAdapter({ fetchImpl: invalidFetch })({ providerContext: makeContext(), evidenceToMeaning: projection })).rejects.toMatchObject({ code: 'OUTCOME_WORKING_DRAFT_PROVIDER_FAILED' })
   })
   test('sends exact bounded evidence separately from guidance without a customer-specific phrase requirement', async () => {
     const projection = ready(), output = exactOutput(projection)

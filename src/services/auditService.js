@@ -92,6 +92,7 @@ export const AUDIT_ACTIONS = Object.freeze({
   RUNTIME_RELEASE_ROLLED_BACK: 'RUNTIME_RELEASE_ROLLED_BACK',
   RUNTIME_REVISION_CREATED: 'RUNTIME_REVISION_CREATED',
   RUNTIME_ACTION_EXECUTED: 'RUNTIME_ACTION_EXECUTED',
+  RUNTIME_ACQUISITION_RECORDED: 'RUNTIME_ACQUISITION_RECORDED',
   RUNTIME_STATE_MUTATED: 'RUNTIME_STATE_MUTATED',
   TRUTH_QUALITY_EVALUATED: 'TRUTH_QUALITY_EVALUATED',
   OUTPUT_REQUEST_CREATED: 'OUTPUT_REQUEST_CREATED',
@@ -516,6 +517,8 @@ const buildAuditSummary = ({ action, resourceType, resourceId, diff, display }) 
       return clampSummary(`${actorLabel} superseded Outcome Studio TEST reference ${targetLabel}`)
     case AUDIT_ACTIONS.RUNTIME_ACTION_EXECUTED:
       return clampSummary(`${actorLabel} executed runtime action for ${targetLabel}`)
+    case AUDIT_ACTIONS.RUNTIME_ACQUISITION_RECORDED:
+      return clampSummary(`${actorLabel} recorded acquisition execution for ${targetLabel}`)
     case AUDIT_ACTIONS.RUNTIME_STATE_MUTATED:
       return clampSummary(`${actorLabel} updated runtime state for ${targetLabel}`)
     case AUDIT_ACTIONS.TRUTH_QUALITY_EVALUATED:

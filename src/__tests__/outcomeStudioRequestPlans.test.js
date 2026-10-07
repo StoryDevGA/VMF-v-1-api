@@ -8,7 +8,7 @@ import { readRuntimeEvidenceToMeaningContract } from '../services/outcomeRuntime
 import encryption from '../services/fieldEncryptionService.js'
 import { OUTCOME_KCP_OPERATIONS } from '../constants/outcomeGovernedQuality.js'
 import { buildOutcomeKnowledgeCompositionPlanCandidate } from '../services/outcomeKnowledgeCompositionPlanService.js'
-import { buildOutcomePlanningRuntimeEvidence } from '../services/outcomeFrameworkHandoffService.js'
+import { buildOutcomePlanningRuntimeEvidence, OUTCOME_PLANNING_EVIDENCE_VERSIONS } from '../services/outcomeFrameworkHandoffService.js'
 import { inferOutcomeStudioRequestIntent, planOutcomeStudioRequest, confirmOutcomeStudioRequestPlan, retrieveOutcomeStudioRequestPlan } from '../services/outcomeStudioRequestPlanService.js'
 const ids = {
   runtime: new mongoose.Types.ObjectId('6a6c8115bb9cebc18a1eca9c'),
@@ -308,6 +308,21 @@ const complete = async (state, initial) => {
 const confirm = (state, result) => confirmOutcomeStudioRequestPlan({ ...args(state, { continuation: result.continuation, confirm: true }), requestId: result.requestId })
 
 describe('prompt-only planning contract', () => {
+  it('pins new v2 state through confirmation and keeps old sealed continuations on v1', async () => {
+    const current = fixture(), preview = await complete(current)
+    const sealed = JSON.parse(encryption.decrypt(preview.continuation, receiptKey))
+    expect(sealed.planningEvidenceVersion).toBe(OUTCOME_PLANNING_EVIDENCE_VERSIONS.V2)
+    await confirm(current, preview)
+    expect(current.deps.readKcpRuntimeEvidence.mock.calls.every(([value]) => value.planningEvidenceVersion === OUTCOME_PLANNING_EVIDENCE_VERSIONS.V2)).toBe(true)
+    const historical = fixture(), started = await start(historical)
+    const oldState = JSON.parse(encryption.decrypt(started.continuation, receiptKey))
+    delete oldState.planningEvidenceVersion
+    const old = await complete(historical, { ...started, continuation: encryption.encrypt(JSON.stringify(oldState), receiptKey) })
+    await confirm(historical, old)
+    expect(historical.deps.readKcpRuntimeEvidence.mock.calls.every(([value]) => value.planningEvidenceVersion === OUTCOME_PLANNING_EVIDENCE_VERSIONS.V1)).toBe(true)
+    const bad = { ...sealed, planningEvidenceVersion: 'unknown' }
+    await expect(confirm(current, { ...preview, continuation: encryption.encrypt(JSON.stringify(bad), receiptKey) })).rejects.toMatchObject({ code: 'OUTCOME_PLANNING_RECEIPT_INVALID' })
+  })
   it('infers the exact Parlon request and reaches confirmation without unnecessary questions or writes', async () => {
     const prompt = 'Create a Commercial Strategy and Decision Paper for Parlon leadership using the current governed Parlon evidence base. Focus on how Parlon should move from a coherent replacement proposition to a repeatable, evidence-backed buying decision system. Preserve all evidence boundaries, claim restrictions and governance gates.'
     const resolution = {
@@ -391,6 +406,35 @@ describe('prompt-only planning contract', () => {
     expect(amended).toMatchObject({ status: 'CONFIRMATION_REQUIRED',
       intent: { audience: ['Board'], decisionPurpose: 'decide the next investment step using the current governed evidence base' } })
     expect(state.rows).toHaveLength(0); expect(state.audits).toHaveLength(0)
+  })
+  it.each(['SAVED', 'CONFIRMATION_REQUIRED'])('re-resolution clears inherited READY execution from %s before new clarification', async (phase) => {
+    const state = fixture()
+    const preview = await complete(state)
+    const previous = phase === 'SAVED' ? await confirm(state, preview) : preview
+    const sealed = JSON.parse(encryption.decrypt(previous.continuation, receiptKey))
+    // Supported saved requests carry READY; a new clarification must never reuse it.
+    sealed.execution = { status: 'READY', canExecute: true, reason: 'CLARIFICATION_CONFIRMED' }
+    const before = { plans: state.rows.length, audits: state.audits.length }
+    const re = await planOutcomeStudioRequest(args(state, {
+      action: 'RE_RESOLVE', continuation: encryption.encrypt(JSON.stringify(sealed), receiptKey),
+      prompt: 'Prepare an executive brief',
+    }))
+    expect(re).toMatchObject({ status: 'CLARIFICATION_REQUIRED', requestId: previous.requestId,
+      execution: { status: 'BLOCKED', canExecute: false, reason: 'REQUEST_EXECUTION_NOT_ENABLED' } })
+    expect(re.question).toBe(phase === 'SAVED' ? 'Which output type do you want? Use its name.' : 'What decision should this output support?')
+    const nextState = JSON.parse(encryption.decrypt(re.continuation, receiptKey))
+    expect(nextState.execution).toEqual(re.execution)
+    if (phase === 'SAVED') expect(nextState).toMatchObject({ operation: 'RE_RESOLUTION',
+      expectedCurrentPlanVersion: sealed.planVersion, sourcePlanId: sealed.planId,
+      sourcePlanFingerprint: sealed.planFingerprint, reResolutionReason: 'Prepare an executive brief' })
+    const next = await planOutcomeStudioRequest(args(state, { continuation: re.continuation,
+      prompt: phase === 'SAVED' ? 'Prepare an executive brief' : 'Support the bounded decision' }))
+    expect(next).toMatchObject({ status: 'CLARIFICATION_REQUIRED', requestId: previous.requestId,
+      execution: { status: 'BLOCKED', canExecute: false } })
+    expect({ plans: state.rows.length, audits: state.audits.length }).toEqual(before)
+    expect(state.deps.assertRuntimePermission).toHaveBeenCalledWith(expect.objectContaining({
+      actorUserId: ids.actor, permission: 'VMF_UPDATE',
+    }))
   })
   it('samples the clock once per seal even when each sample advances', async () => {
     const state = fixture(); let clock = 100000
@@ -490,6 +534,25 @@ describe('prompt-only planning contract', () => {
 describe('canonical planning section classification', () => {
   const pkg = () => ({ packageKey: makeRuntime().packageKey, version: makeRuntime().packageVersion,
     sections: ['customer_context', 'output_requirements'].map((sectionKey) => ({ sectionKey, runtimePath: `framework_state.sections.${sectionKey}`, required: true, sectionMode: 'GUIDED' })) })
+  it('opts in to exact canonical boundaries only for v2 and rejects unknown versions', () => {
+    const args = { runtimeInstance: makeRuntime(), frameworkPackage: pkg(), handoff: {
+      claimBoundaries: [{ claimType: 'quantified', policyVersion: 'source-policy', status: 'source-status' }],
+    } }
+    const legacy = buildOutcomePlanningRuntimeEvidence(args)
+    expect(legacy).toEqual(buildOutcomePlanningRuntimeEvidence({ ...args, planningEvidenceVersion: OUTCOME_PLANNING_EVIDENCE_VERSIONS.V1 }))
+    expect(legacy.planningEvidence.contractVersion).toBe('outcome-planning-evidence.v1')
+    expect(legacy.planningEvidence.frameworkHandoff).not.toHaveProperty('claimBoundaries')
+    const next = buildOutcomePlanningRuntimeEvidence({ ...args, planningEvidenceVersion: OUTCOME_PLANNING_EVIDENCE_VERSIONS.V2 })
+    expect(next.planningEvidence.contractVersion).toBe('outcome-planning-evidence.v2')
+    expect(next.planningEvidence.frameworkHandoff.claimBoundaries).toEqual(args.handoff.claimBoundaries)
+    expect(next.planningEvidence.frameworkHandoff.claimBoundaries).not.toBe(args.handoff.claimBoundaries)
+    delete next.planningEvidence.frameworkHandoff.claimBoundaries
+    next.planningEvidence.contractVersion = 'outcome-planning-evidence.v1'
+    expect(JSON.stringify(next)).toBe(JSON.stringify(legacy))
+    const absent = buildOutcomePlanningRuntimeEvidence({ ...args, handoff: {}, planningEvidenceVersion: OUTCOME_PLANNING_EVIDENCE_VERSIONS.V2 })
+    expect(absent.planningEvidence.frameworkHandoff).not.toHaveProperty('claimBoundaries')
+    expect(() => buildOutcomePlanningRuntimeEvidence({ ...args, planningEvidenceVersion: 'unknown' })).toThrow()
+  })
   it('projects declared customer truth and binds storage version without changing legacy inputs', () => {
     const runtime = makeRuntime(), before = structuredClone(runtime)
     const projected = buildOutcomePlanningRuntimeEvidence({ runtimeInstance: { ...runtime, stateVersion: 'rsv2:test' }, frameworkPackage: pkg() })

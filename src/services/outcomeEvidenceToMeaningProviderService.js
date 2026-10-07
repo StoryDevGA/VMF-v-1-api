@@ -4,6 +4,7 @@ import { assertOutcomeSelectedDocumentPrivacy } from './outcomeStudioProviderSaf
 import { OUTCOME_WORKING_DRAFT_PROOF_DEPENDENCIES } from './outcomeWorkingDraftMeaningBoundaryService.js'
 
 export const EVIDENCE_TO_MEANING_PROVIDER_VERSION = 'evidence-to-meaning-provider.v1'
+export const EVIDENCE_TO_DRAFT_PROVIDER_VERSION = 'evidence-to-draft-provider.v2'
 const same = (left, right) => hashEvidenceToMeaningValue(left) === hashEvidenceToMeaningValue(right)
 const fail = (contract, field) => { throw Object.assign(new Error('The selected draft schema needs clarification before generation.'), {
   status: 409, code: 'EVIDENCE_TO_MEANING_CLARIFICATION_REQUIRED', details: {
@@ -36,11 +37,12 @@ const assertProjectionPrivacy = (value, contract, field = '') => {
 
 export const projectEvidenceToMeaningProviderContract = (contract) => {
   assertEvidenceToMeaningContract(contract)
-  if (contract.status !== 'READY') fail(contract, 'contract.readiness')
+  const v2 = contract.contractVersion === 'evidence-to-draft.v2'
+  if (contract.status !== (v2 ? 'READY_TO_DRAFT' : 'READY')) fail(contract, 'contract.readiness')
   const claims = supportedClaims(contract)
   validateEvidenceToMeaningGeneratedClaims({ contract, claims })
   const sectionClaimOrder = contract.sectionLedger.filter((section) => section.status === 'SUPPORTED').flatMap((section) => section.claimKeys)
-  if (!same(sectionClaimOrder, claims.map((claim) => claim.claimKey))) fail(contract, 'selectedSchema.proofOrder')
+  if (!v2 && !same(sectionClaimOrder, claims.map((claim) => claim.claimKey))) fail(contract, 'selectedSchema.proofOrder')
   const claimProjections = claims.map((claim) => {
     const stored = contract.inputs.sourceSnapshot.evidenceObjects.find((item) => item.evidenceObjectId === claim.evidenceReference)
     const field = `claims.${claim.claimKey}`
@@ -48,22 +50,25 @@ export const projectEvidenceToMeaningProviderContract = (contract) => {
       || stored.evidenceRequiredToSubstantiate.length > 10) fail(contract, `${field}.evidenceRequiredToSubstantiate`)
     if (!Array.isArray(claim.blockedStrongerClaim) || claim.blockedStrongerClaim.length !== 1) fail(contract, `${field}.blockedStrongerClaim`)
     if (claim.attribution.stored !== null && typeof claim.attribution.stored !== 'string') fail(contract, `${field}.attribution`)
-    if (claim.proofDependency.some((dependency) => !OUTCOME_WORKING_DRAFT_PROOF_DEPENDENCIES.includes(dependency))) fail(contract, `${field}.proofDependency`)
+    const codes = v2 ? claim.proofRequirementCodes : claim.proofDependency
+    if (!Array.isArray(codes) || codes.some((dependency) => !OUTCOME_WORKING_DRAFT_PROOF_DEPENDENCIES.includes(dependency))) fail(contract, `${field}.proofRequirementCodes`)
     const evidence = [content(claim.statement, contract, `${field}.statement`),
       content(claim.attribution.sourceLabel, contract, `${field}.sourceLabel`),
       ...(claim.attribution.stored === null ? [] : [content(claim.attribution.stored, contract, `${field}.attribution`)]),
       ...claim.qualification.map((value) => content(value, contract, `${field}.qualification`))]
     if (evidence.length > 20) fail(contract, `${field}.evidence`)
     return { claimKey: claim.claimKey, statement: claim.statement, truthReferences: claim.sectionKeys,
-      evidence, meaningClass: 'QUALIFIED', proofDependencies: claim.proofDependency,
-      validationStatus: 'SOURCE_REPORTED_VALIDATED', proofDisposition: 'SOURCE_SPECIFIED',
+      evidence, meaningClass: 'QUALIFIED', proofDependencies: codes,
+      validationStatus: !v2 || claim.validationStatus === 'VALIDATED' ? 'SOURCE_REPORTED_VALIDATED' : 'SOURCE_REPORTED_REQUIRES_VALIDATION',
+      proofDisposition: v2 && claim.proofOrderDisposition === 'NOT_ESTABLISHED' ? 'NOT_ESTABLISHED' : 'SOURCE_SPECIFIED',
       whatCanBeSaidNow: claim.statement,
       blockedStrongerClaim: content(claim.blockedStrongerClaim[0], contract, `${field}.blockedStrongerClaim`),
       evidenceRequiredToSubstantiate: stored.evidenceRequiredToSubstantiate.map((value) => content(value, contract, `${field}.evidenceRequiredToSubstantiate`)) }
   })
-  const projection = { contractVersion: EVIDENCE_TO_MEANING_PROVIDER_VERSION,
+  const projection = { contractVersion: v2 ? EVIDENCE_TO_DRAFT_PROVIDER_VERSION : EVIDENCE_TO_MEANING_PROVIDER_VERSION,
     contractId: contract.contractId, contractHash: contract.contractHash, fingerprints: contract.fingerprints,
-    sectionLedger: contract.sectionLedger, customerClaims: claims, claimProjections,
+    sectionLedger: v2 ? contract.sectionLedger.map((section) => section.status === 'OPTIONAL'
+      ? { ...section, status: 'OMITTED', readinessStatus: 'OPTIONAL' } : section) : contract.sectionLedger, customerClaims: claims, claimProjections,
     frameworkGuidance: contract.frameworkGuidance,
     decisionProjections: claimProjections.map((claim) => ({ decisionKey: `decision_${claim.claimKey}`,
       rationale: claim.statement, priority: 'NOT_ESTABLISHED', priorityBasis: 'NOT_ESTABLISHED',
@@ -81,13 +86,26 @@ export const assertEvidenceToMeaningProviderClaims = ({ contract, output }) => {
 
 export const assertEvidenceToMeaningProviderProjection = (projection) => {
   const { projectionHash, ...payload } = projection || {}
-  if (payload.contractVersion !== EVIDENCE_TO_MEANING_PROVIDER_VERSION
+  if (![EVIDENCE_TO_MEANING_PROVIDER_VERSION, EVIDENCE_TO_DRAFT_PROVIDER_VERSION].includes(payload.contractVersion)
     || payload.contractId !== `etm_${payload.contractHash}`
     || hashEvidenceToMeaningValue(payload) !== projectionHash
     || !Array.isArray(payload.customerClaims) || !Array.isArray(payload.claimProjections)
     || !Array.isArray(payload.sectionLedger) || !Array.isArray(payload.decisionProjections)
     || Buffer.byteLength(JSON.stringify(projection)) > 120000) fail(payload, 'providerProjection.integrity')
   assertProjectionPrivacy(payload, payload)
+  if (payload.contractVersion === EVIDENCE_TO_DRAFT_PROVIDER_VERSION) {
+    const keys = payload.customerClaims.map((claim) => claim.claimKey)
+    const sections = payload.sectionLedger.filter((section) => section.status === 'SUPPORTED')
+    if (new Set(keys).size !== keys.length || !same(keys, payload.claimProjections.map((claim) => claim.claimKey))
+      || new Set(payload.sectionLedger.map((section) => section.targetSectionKey)).size !== payload.sectionLedger.length
+      || payload.sectionLedger.some((section) => section.status !== 'SUPPORTED' && (section.status !== 'OMITTED' || section.readinessStatus !== 'OPTIONAL' || !section.omissionPermitted))
+      || sections.some((section) => !section.claimKeys.length || new Set(section.claimKeys).size !== section.claimKeys.length
+        || section.claimKeys.some((key) => !keys.includes(key)))
+      || payload.customerClaims.some((claim) => !same(claim.sectionKeys,
+        sections.filter((section) => section.claimKeys.includes(claim.claimKey)).map((section) => section.targetSectionKey).sort()))) {
+      fail(payload, 'providerProjection.claimSectionIdentity')
+    }
+  }
   return projection
 }
 
@@ -97,10 +115,14 @@ export const assertEvidenceToMeaningProviderRequestSize = ({ projection, request
 
 export const assertEvidenceToMeaningBoundedProviderOutput = ({ projection, output }) => {
   assertEvidenceToMeaningProviderProjection(projection)
+  const v2 = projection.contractVersion === EVIDENCE_TO_DRAFT_PROVIDER_VERSION
+  if (v2) assertProjectionPrivacy(output, projection, 'generatedOutput')
   const claims = output?.sections?.flatMap((section) => section.claims || [])
-  if (!same(claims, projection.claimProjections)) fail(projection, 'generatedClaims.mappingOrMeaning')
+  const expectedClaims = v2 ? projection.sectionLedger.filter((section) => section.status === 'SUPPORTED')
+    .flatMap((section) => section.claimKeys.map((key) => projection.claimProjections.find((claim) => claim.claimKey === key))) : projection.claimProjections
+  if (!same(claims, expectedClaims)) fail(projection, 'generatedClaims.mappingOrMeaning')
   if (output.decisionLogic && !same(output.decisionLogic, projection.decisionProjections)) fail(projection, 'generatedDecisionLogic.mappingOrMeaning')
-  if (output.assumptions?.length || output.sections.some((section) => section.assumptions?.length)) fail(projection, 'generatedAssumptions.unsupported')
+  if (!Array.isArray(output?.sections) || output.assumptions?.length || output.sections.some((section) => section.assumptions?.length)) fail(projection, 'generatedAssumptions.unsupported')
   if (output.title !== undefined && output.title !== 'Working Draft') fail(projection, 'generatedTitle.unsupported')
   const sections = projection.sectionLedger.filter((section) => section.status === 'SUPPORTED')
   if (output.sections.length !== sections.length) fail(projection, 'generatedSections.coverage')

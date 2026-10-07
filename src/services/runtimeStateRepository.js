@@ -1,4 +1,14 @@
 import mongoose from 'mongoose'
+import { graphNeighbourhoodSelectionSchema } from '../validators/graphNeighbourhood.validator.js'
+import { RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES } from './runtimeIntelligenceGraphService.js'
+import { readSourceProcessingSummary } from './sourceProcessingSummary.js'
+import { projectIntelligenceEvidenceInventory } from './intelligenceEvidenceInventory.js'
+import { projectStoredDiscoveryHealth } from './intelligenceDiscoveryHealth.js'
+import { projectRecordedLockBasis } from './intelligenceLockBasis.js'
+import { projectStoredContradictionHistory } from './intelligenceContradictionHistory.js'
+import { contradictionHistorySelectionSchema } from '../validators/contradictionHistory.validator.js'
+import { findingSelectionSchema } from '../validators/intelligenceFinding.validator.js'
+import { projectStoredFindings, storedFindingEvidenceIds } from './intelligenceFindingRead.js'
 import { assembleOutcomeEvidenceInventory, snapshotHash } from '../utils/outcomeEvidenceSnapshot.js'
 
 import {
@@ -14,6 +24,7 @@ import {
   buildFrameworkOutcomeHandoffV2ParityDigest,
   resolveFrameworkOutcomeStudioHandoff,
   buildOutcomePlanningRuntimeEvidence,
+  OUTCOME_PLANNING_EVIDENCE_VERSIONS,
 } from './outcomeFrameworkHandoffService.js'
 import { resolveRuntimeStateVersion } from './runtimeStateVersionService.js'
 
@@ -28,6 +39,7 @@ export const RUNTIME_STATE_V2_COLLECTIONS = Object.freeze({
 export const RUNTIME_STATE_V2_ERROR_CODES = Object.freeze({
   INVALID_SECTION_KEY: 'RUNTIME_STATE_V2_INVALID_SECTION_KEY',
   INVALID_PAGE: 'RUNTIME_STATE_V2_INVALID_PAGE',
+  INVALID_QUERY: 'RUNTIME_STATE_V2_INVALID_QUERY',
   CONTROL_SCOPE_REQUIRED: 'RUNTIME_STATE_V2_CONTROL_SCOPE_REQUIRED',
   CONTROL_INVALID: 'RUNTIME_STATE_V2_CONTROL_INVALID',
   STORAGE_UNAVAILABLE: 'RUNTIME_STATE_V2_STORAGE_UNAVAILABLE',
@@ -104,6 +116,20 @@ const RUNTIME_STATE_V2_HANDOFF_CONTROL_PROJECTION = [
   'framework_state.evidence_pack.contradictionReviews',
   'framework_state.evidence_pack.contradictionReviewEpoch',
   'framework_state.sections.output_requirements',
+].join(' ')
+
+const DISCOVERY_HEALTH_CONTROL_PROJECTION = [RUNTIME_STATE_V2_CONTROL_PROJECTION,
+  ...['state', 'blockerReasons', 'warningReasons', 'assessedAt']
+    .map(field => `framework_state.evidence_pack.discoveryHealth.readiness.${field}`),
+  'framework_state.evidence_pack.needsRefresh', 'framework_state.evidence_pack.needs_refresh',
+].join(' ')
+
+const RECORDED_LOCK_CONTROL_PROJECTION = [RUNTIME_STATE_V2_CONTROL_PROJECTION,
+  ...['state', 'locked', 'lockVersion', 'lockedAt', 'lockedBy',
+    'snapshot.snapshotId', 'snapshot.snapshotHash', 'snapshot.snapshotAt', 'snapshot.contractVersion', 'snapshot.actionKey',
+    'replayAnchor.replayAnchorId', 'replayAnchor.replayAnchorHash', 'replayAnchor.relationship',
+    'replayAnchor.runtimeInstanceId', 'replayAnchor.runtimeInstanceKey', 'replayAnchor.lockSnapshotId', 'replayAnchor.lockSnapshotHash']
+    .map(field => `framework_state.lock.${field}`),
 ].join(' ')
 
 const RUNTIME_STATE_V2_CHILD_PROJECTION = Object.freeze({
@@ -192,6 +218,7 @@ const RUNTIME_STATE_V2_EVIDENCE_SOURCE_PROJECTION = Object.freeze({
   title: 1,
   sourceRef: 1,
   contentHash: 1,
+  processingReceipt: 1,
   acquisitionStatus: 1,
   acquisitionProfile: 1,
   lineageRef: 1,
@@ -210,6 +237,8 @@ const RUNTIME_STATE_V2_GRAPH_ELEMENT_PROJECTION = Object.freeze({
   sourceStateVersion: 1,
   current: 1,
   isCurrent: 1,
+  status: 1,
+  stateStatus: 1,
   snapshotId: 1,
   graphVersion: 1,
   elementType: 1,
@@ -373,11 +402,12 @@ const assertSerializedPayloadSize = (value) => {
   return serializedPayloadBytes
 }
 
-const withBoundedReadReceipt = (payload, source) => {
+const withBoundedReadReceipt = (payload, source, receiptFields = {}) => {
   const serializedPayloadBytes = assertSerializedPayloadSize(payload)
   const result = {
     ...payload,
     readReceipt: {
+      ...receiptFields,
       source,
       serializedPayloadBytes,
       maxSerializedPayloadBytes: RUNTIME_STATE_V2_MAX_SERIALIZED_READ_BYTES,
@@ -463,14 +493,22 @@ const readMany = async ({
   limit,
   maxTimeMS = RUNTIME_STATE_V2_READ_MAX_TIME_MS,
   session = null,
+  batchSize = null,
+  readBudget,
+  collation,
 }) => {
   const collection = getCollection(collectionName)
   try {
-    const boundedMaxTimeMS = requireReadMaxTimeMS(maxTimeMS)
+    const nativeBudget = readBudget ? readBudget() : {}
+    const boundedMaxTimeMS = requireReadMaxTimeMS(nativeBudget.maxTimeMS ?? maxTimeMS)
+    if (batchSize !== null && (!Number.isInteger(batchSize) || batchSize <= 0 || batchSize > limit)) throw new Error('Cursor batch bound is invalid.')
     let cursor = collection.find(filter, {
       projection,
       maxTimeMS: boundedMaxTimeMS,
       ...(session ? { session } : {}),
+      ...(batchSize === null ? {} : { batchSize }),
+      ...nativeBudget,
+      ...(collation ? { collation } : {}),
     })
     if (typeof cursor.maxTimeMS !== 'function') throw new Error('Cursor maxTimeMS is unavailable.')
     cursor = cursor.maxTimeMS(boundedMaxTimeMS)
@@ -505,6 +543,7 @@ const readCount = async ({
   limit = null,
   maxTimeMS = RUNTIME_STATE_V2_READ_MAX_TIME_MS,
   session = null,
+  readBudget,
 }) => {
   const collection = getCollection(collectionName)
   if (typeof collection.countDocuments !== 'function') {
@@ -524,6 +563,7 @@ const readCount = async ({
       maxTimeMS: boundedMaxTimeMS,
       ...(boundedLimit === null ? {} : { limit: boundedLimit }),
       ...(session ? { session } : {}),
+      ...(readBudget ? readBudget() : {}),
     })
     return {
       value: count,
@@ -539,18 +579,30 @@ const readCount = async ({
   }
 }
 
-const getControl = async ({ scopes, runtimeInstanceId, includeHandoffEligibility = false, session = null }) => {
+const getControl = async ({ scopes, runtimeInstanceId, includeHandoffEligibility = false, includeDiscoveryHealth = false, includeRecordedLockBasis = false, includeContradictionHistory = false, includeFindings = false, session = null,
+  maxTimeMS = RUNTIME_STATE_V2_READ_MAX_TIME_MS, metadataMaxTimeMS, readBudget } = {}) => {
   const scope = getControlScope(scopes)
   const runtime = await getRuntimeInstance({
     scopes,
     runtimeInstanceId,
     customerId: scope.customerId,
     tenantId: scope.tenantId,
-    maxTimeMS: RUNTIME_STATE_V2_READ_MAX_TIME_MS,
+    maxTimeMS,
+    ...(metadataMaxTimeMS === undefined ? {} : { metadataMaxTimeMS }),
     session,
-    projection: includeHandoffEligibility
+    readBudget,
+    projection: includeFindings
+      ? { ...Object.fromEntries(RUNTIME_STATE_V2_CONTROL_PROJECTION.split(' ').map(path => [path, 1])),
+        'framework_state.evidence_pack.discoveryHealth.contradictionCandidates': { $slice: 9 },
+        'framework_state.evidence_pack.contradictionReviews': { $slice: 1001 },
+        'framework_state.evidence_pack.contradictionReviewEpoch': 1 }
+      : includeContradictionHistory
+      ? { ...Object.fromEntries(RUNTIME_STATE_V2_CONTROL_PROJECTION.split(' ').map(path => [path, 1])),
+        'framework_state.evidence_pack.contradictionReviews': { $slice: 1001 } }
+      : includeHandoffEligibility
       ? RUNTIME_STATE_V2_HANDOFF_CONTROL_PROJECTION
-      : RUNTIME_STATE_V2_CONTROL_PROJECTION,
+      : includeDiscoveryHealth ? DISCOVERY_HEALTH_CONTROL_PROJECTION
+        : includeRecordedLockBasis ? RECORDED_LOCK_CONTROL_PROJECTION : RUNTIME_STATE_V2_CONTROL_PROJECTION,
   })
   assertSerializedPayloadSize(runtime)
   if (!runtime || typeof runtime !== 'object') {
@@ -575,7 +627,7 @@ const getControl = async ({ scopes, runtimeInstanceId, includeHandoffEligibility
     executionStatus: normalizeText(runtime.executionStatus),
     runtimeMode: normalizeText(runtime.runtimeMode),
     name: normalizeText(runtime.name),
-    lockedAt: runtime.lockedAt || null,
+    lockedAt: runtime.lockedAt ?? null,
     lockedBy: normalizeText(runtime.lockedBy),
     revision: {
       revisionNumber: Number(runtime.revision?.revisionNumber || 0),
@@ -583,6 +635,7 @@ const getControl = async ({ scopes, runtimeInstanceId, includeHandoffEligibility
     stateVersion: buildStateVersion(runtime),
     updatedAt: runtime.updatedAt || null,
     source: 'runtime_state_v2.control_projection',
+    ...(includeDiscoveryHealth ? { discoveryHealthProjection: projectStoredDiscoveryHealth(runtime.framework_state?.evidence_pack) } : {}),
     ...(includeHandoffEligibility
       ? {
           handoffFrameworkState: {
@@ -600,6 +653,10 @@ const getControl = async ({ scopes, runtimeInstanceId, includeHandoffEligibility
         }
       : {}),
   }
+  if (includeRecordedLockBasis) control.recordedLockBasisProjection = projectRecordedLockBasis(runtime.framework_state?.lock, control)
+  if (includeContradictionHistory) control.contradictionHistoryRecords = runtime.framework_state?.evidence_pack?.contradictionReviews
+  if (includeFindings) control.storedFindings = { candidates: runtime.framework_state?.evidence_pack?.discoveryHealth?.contradictionCandidates,
+    reviews: runtime.framework_state?.evidence_pack?.contradictionReviews, reviewEpoch: runtime.framework_state?.evidence_pack?.contradictionReviewEpoch }
   if (includeHandoffEligibility && runtime.framework_state?.evidence_pack?.discoveryHealth) {
     const discoveryHealth = runtime.framework_state.evidence_pack.discoveryHealth
     control.handoffFrameworkState.evidence_pack.discoveryHealth = {
@@ -786,10 +843,25 @@ const serializeRendererSection = (row, stateVersion) => {
   }
 }
 
+const graphProvenanceId = (value) => {
+  if (typeof value !== 'string') return ''
+  const id = value.trim()
+  return id && id.length <= 240 && !PHYSICAL_STORAGE_TOKEN_PATTERN.test(id)
+    && !Array.from(id).some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)
+    ? id : ''
+}
+
 const serializeGraphNode = (row) => {
+  if (row.attributes?.customerVisible === false) return { nodeId: normalizeText(row.elementKey), customerVisible: false }
   const attributes = row.attributes && typeof row.attributes === 'object'
     ? sanitizeNestedProjectionValue(row.attributes)
     : {}
+  // Preserve recorded identities, never sanitizer sentinels or node-ID-derived guesses.
+  const visible = attributes.customerVisible !== false
+  const sourceId = visible && ['SOURCE', 'EVIDENCE'].includes(attributes.nodeType)
+    ? graphProvenanceId(row.attributes?.sourceId) : ''
+  const evidenceObjectId = visible && attributes.nodeType === 'EVIDENCE'
+    ? graphProvenanceId(row.attributes?.evidenceObjectId) : ''
   return {
     nodeId: normalizeText(row.elementKey),
     nodeType: normalizeText(attributes.nodeType),
@@ -797,6 +869,8 @@ const serializeGraphNode = (row) => {
     entityDisplayName: normalizeText(attributes.entityDisplayName),
     label: normalizeText(row.label),
     customerVisible: attributes.customerVisible !== false,
+    ...(sourceId ? { sourceId } : {}),
+    ...(evidenceObjectId ? { evidenceObjectId } : {}),
     ...(attributes.sectionKey ? { sectionKey: normalizeText(attributes.sectionKey) } : {}),
     ...(attributes.consumerType ? { consumerType: normalizeText(attributes.consumerType) } : {}),
     ...(attributes.frameworkKey ? { frameworkKey: normalizeText(attributes.frameworkKey) } : {}),
@@ -811,6 +885,8 @@ const serializeGraphNode = (row) => {
 }
 
 const serializeGraphEdge = (row) => {
+  if (row.attributes?.customerVisible === false) return { edgeId: normalizeText(row.elementKey),
+    fromNodeId: normalizeText(row.fromElementKey), toNodeId: normalizeText(row.toElementKey), customerVisible: false }
   const attributes = row.attributes && typeof row.attributes === 'object'
     ? sanitizeNestedProjectionValue(row.attributes)
     : {}
@@ -985,6 +1061,15 @@ const serializeEvidenceSource = (row, stateVersion) => {
   const sourceType = normalizeText(row.sourceType).toUpperCase()
   const sourceRef = truncateSummary(row.sourceRef, 2000)
   const acquisitionStatus = normalizeText(row.acquisitionStatus)
+  const receipt = row.processingReceipt
+  if (receipt !== undefined && (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)
+    || Object.keys(receipt).length !== 4
+    || sourceType !== 'UPLOADED_DOCUMENT' || receipt.contractVersion !== 'document-processing-receipt.v1'
+    || typeof receipt.runId !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(receipt.runId)
+    || !Number.isInteger(receipt.inputIndex) || receipt.inputIndex < 0 || receipt.inputIndex > 4
+    || typeof receipt.contentHash !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(receipt.contentHash)))
+    throw createRuntimeStateError({ code: RUNTIME_STATE_V2_ERROR_CODES.STORAGE_UNAVAILABLE,
+      status: 503, message: 'The recorded document processing provenance is invalid.' })
   return {
     sourceId: normalizeText(row.sourceId),
     sourceType,
@@ -994,6 +1079,7 @@ const serializeEvidenceSource = (row, stateVersion) => {
     ...(sourceType === 'WEBSITE' && sourceRef ? { url: sourceRef } : {}),
     ...(sourceType === 'UPLOADED_DOCUMENT' && sourceRef ? { fileName: sourceRef } : {}),
     contentHash: normalizeText(row.contentHash),
+    ...(row.processingReceipt !== undefined ? { processingReceipt: structuredClone(row.processingReceipt) } : {}),
     acquisitionStatus,
     status: acquisitionStatus,
     acquisitionProfile: normalizeText(row.acquisitionProfile),
@@ -1214,6 +1300,205 @@ export const getRuntimeStateSectionSummary = async ({ scopes, runtimeInstanceId,
   }, 'runtime_state_v2.section_summary')
 }
 
+const normalizeRegistryQuery = (value, maxLength = 240) => {
+  if (typeof value !== 'string' || value.length > maxLength) {
+    throw createRuntimeStateError({ code: RUNTIME_STATE_V2_ERROR_CODES.INVALID_QUERY,
+      status: 400, message: 'Source and evidence query values must be bounded literal strings.' })
+  }
+  return value.trim()
+}
+
+const literalSearchFilter = (search, fields) => search
+  ? { $or: fields.map((field) => ({
+      [field]: { $regex: search.replace(/[.*+?^$(){}|[\]\\]/g, '\\$&'), $options: 'i' },
+    })) }
+  : {}
+
+const withLiteralSearch = (filter, search, fields) => search
+  ? { ...filter, $and: [...filter.$and, literalSearchFilter(search, fields)] }
+  : filter
+
+const isPaginationScalar = value => typeof value === 'number'
+  || (typeof value === 'string' && /^\d+$/.test(value))
+
+const invalidCurrentMarker = {
+  $or: [
+    { $eq: ['$current', false] }, { $eq: ['$isCurrent', false] },
+    ...['stateStatus', 'status'].map(field => ({ $and: [
+      { $ne: [{ $trim: { input: { $ifNull: [`$${field}`, ''] } } }, ''] },
+      { $ne: [{ $toUpper: { $trim: { input: { $ifNull: [`$${field}`, ''] } } } }, 'CURRENT'] },
+    ] })),
+  ],
+}
+
+export const getRuntimeStateSourceSummary = async ({ scopes, runtimeInstanceId } = {}) => {
+  const deadline = Date.now() + 6000
+  const workDeadline = deadline - 500
+  const readBudget = () => {
+    const remaining = workDeadline - Date.now()
+    if (remaining <= 0) throw createRuntimeStateError({
+      code: RUNTIME_STATE_V2_ERROR_CODES.STORAGE_UNAVAILABLE, status: 503,
+      message: 'The source summary exceeded its bounded request budget.',
+    })
+    const timeoutMS = Math.min(2000, remaining)
+    return { timeoutMS, maxTimeMS: timeoutMS }
+  }
+  const session = await mongoose.startSession()
+  try {
+    // Transaction-wide CSOT overrides native query limits; budget each operation.
+    session.startTransaction({ readConcern: { level: 'snapshot' }, readPreference: 'primary', maxCommitTimeMS: 2000 })
+    const control = await getControl({ scopes, runtimeInstanceId, session,
+      metadataMaxTimeMS: 2000, readBudget })
+    const result = await readSourceProcessingSummary({ session, deadline: workDeadline, readBudget, control,
+      sourceFilter: buildChildFilter({ control, additional: buildCurrentStateFilter() }),
+      validateSources: rows => {
+        const identities = rows.map(row => normalizeText(row.sourceId))
+        if (identities.some(id => !id) || new Set(identities).size !== rows.length)
+          throw createRuntimeStateError({ code: RUNTIME_STATE_V2_ERROR_CODES.EVIDENCE_DUPLICATE,
+            message: 'The source summary requires unique current source identities.' })
+        if (rows.length) {
+          assertCurrentEvidenceSourceRows(rows)
+          assertStateVersions({ control, rows, requireSourceStateVersion: true })
+        }
+      } })
+    readBudget()
+    await session.commitTransaction({ timeoutMS: readBudget().timeoutMS })
+    readBudget()
+    return result
+  } catch (error) {
+    if (session.inTransaction()) {
+      await session.abortTransaction({ timeoutMS: Math.max(1, Math.min(2000, deadline - Date.now())) })
+    }
+    if (error.status && error.code) throw error
+    throw createRuntimeStateError({ code: RUNTIME_STATE_V2_ERROR_CODES.STORAGE_UNAVAILABLE,
+      status: 503, message: 'The source summary could not complete its bounded read. Refresh.' })
+  } finally { await session.endSession() }
+}
+
+export const listRuntimeStateSources = async ({
+  scopes, runtimeInstanceId, page = 1, pageSize = 25,
+  search = '', sourceId = '', sourceType = '',
+} = {}) => {
+  const normalizedPage = isPaginationScalar(page) ? Number(page) : NaN
+  const normalizedPageSize = isPaginationScalar(pageSize) ? Number(pageSize) : NaN
+  if (!isPaginationScalar(page) || !isPaginationScalar(pageSize)
+    || !Number.isInteger(normalizedPage) || normalizedPage < 1 || normalizedPage > MAX_EVIDENCE_PAGE
+    || !Number.isInteger(normalizedPageSize) || normalizedPageSize < 1 || normalizedPageSize > 50) {
+    throw createRuntimeStateError({ code: RUNTIME_STATE_V2_ERROR_CODES.INVALID_PAGE,
+      status: 400, message: 'Source page and page size must be bounded positive integers.' })
+  }
+  const query = normalizeRegistryQuery(search)
+  const selectedId = normalizeRegistryQuery(sourceId)
+  const selectedType = normalizeRegistryQuery(sourceType, 100).toUpperCase()
+  const deadline = Date.now() + 6000
+  const remainingQueryTime = () => {
+    const remaining = Math.min(RUNTIME_STATE_V2_READ_MAX_TIME_MS, deadline - Date.now())
+    if (remaining <= 0) throw createRuntimeStateError({
+      code: RUNTIME_STATE_V2_ERROR_CODES.STORAGE_UNAVAILABLE, status: 503,
+      message: 'The source read exceeded its bounded request budget.',
+    })
+    return remaining
+  }
+  const control = await getControl({ scopes, runtimeInstanceId })
+  const runtimeIdentity = { runtimeInstanceId: control.id, runtimeInstanceKey: control.runtimeInstanceKey }
+  const filter = withLiteralSearch(buildChildFilter({ control, additional: {
+    ...buildCurrentStateFilter(),
+    ...(selectedId ? { sourceId: selectedId } : {}),
+    ...(selectedType ? { sourceType: selectedType } : {}),
+  } }), query, ['sourceId', 'title', 'sourceRef', 'sourceType'])
+  const maxTimeMS = remainingQueryTime()
+  const [rows, count] = await Promise.all([
+    readMany({ collectionName: RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_SOURCES,
+      filter, projection: RUNTIME_STATE_V2_EVIDENCE_SOURCE_PROJECTION,
+      sort: { sourceId: 1, _id: 1 }, skip: (normalizedPage - 1) * normalizedPageSize,
+      limit: normalizedPageSize, maxTimeMS }),
+    readCount({ collectionName: RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_SOURCES,
+      filter, limit: RUNTIME_STATE_V2_EVIDENCE_COUNT_LIMIT, maxTimeMS }),
+  ])
+  if (selectedId && rows.length === 0) throw createRuntimeStateError({
+    code: RUNTIME_STATE_V2_ERROR_CODES.EVIDENCE_SOURCE_MISSING, status: 404,
+    message: 'The selected source is unavailable in this revision.',
+  })
+  const sourceIds = rows.map(row => normalizeText(row.sourceId))
+  if (sourceIds.some(value => !value) || new Set(sourceIds).size !== rows.length) {
+    throw createRuntimeStateError({ code: RUNTIME_STATE_V2_ERROR_CODES.EVIDENCE_SOURCE_MISSING,
+      message: 'The source registry contains invalid or duplicate current identities.' })
+  }
+  if (rows.length) {
+    if (rows.some(row => Object.entries(runtimeIdentity).some(([field, expected]) =>
+      row[field] !== undefined && String(row[field]) !== expected))) throw createRuntimeStateError({
+      code: RUNTIME_STATE_V2_ERROR_CODES.EVIDENCE_SOURCE_MISSING,
+      message: 'The source registry contains a contradictory runtime identity.',
+    })
+    assertCurrentEvidenceSourceRows(rows)
+    assertStateVersions({ control, rows, requireSourceStateVersion: true,
+      missingMessage: 'The source registry has no consistent state-version receipt.' })
+  }
+  let contributions = []
+  if (sourceIds.length) {
+    try {
+      const collection = getCollection(RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_OBJECTS)
+      contributions = await collection.aggregate([
+        { $match: buildChildFilter({ control, additional: {
+          ...buildCurrentStateFilter(), sourceId: { $in: sourceIds },
+        } }) },
+        { $group: { _id: '$sourceId', count: { $sum: 1 },
+          invalidRuntimeIdentityCount: { $sum: { $cond: [{ $or: Object.entries(runtimeIdentity).map(([field, expected]) => ({
+            $and: [{ $ne: [{ $type: `$${field}` }, 'missing'] },
+              { $ne: [{ $convert: { input: `$${field}`, to: 'string', onError: null, onNull: null } }, expected] }],
+          })) }, 1, 0] } },
+          invalidCurrentCount: { $sum: { $cond: [invalidCurrentMarker, 1, 0] } },
+          versions: { $addToSet: '$stateVersion' },
+          sourceVersions: { $addToSet: '$sourceStateVersion' } } },
+        { $limit: sourceIds.length },
+      ], { maxTimeMS: remainingQueryTime() }).toArray()
+      assertSerializedPayloadSize(contributions)
+    } catch (_error) {
+      throw createRuntimeStateError({ code: RUNTIME_STATE_V2_ERROR_CODES.STORAGE_UNAVAILABLE,
+        status: 503, message: 'Source contribution counts could not complete the bounded read.' })
+    }
+    for (const row of contributions) {
+      if (!Number.isSafeInteger(row.invalidRuntimeIdentityCount) || row.invalidRuntimeIdentityCount !== 0)
+        throw createRuntimeStateError({ code: RUNTIME_STATE_V2_ERROR_CODES.EVIDENCE_SOURCE_MISSING,
+          message: 'Source contributions contain an invalid or contradictory runtime identity.' })
+      if (row.invalidCurrentCount > 0) throw createRuntimeStateError({
+        code: RUNTIME_STATE_V2_ERROR_CODES.EVIDENCE_SOURCE_CURRENTNESS_INVALID,
+        message: 'Source contributions contain contradictory currentness markers.',
+      })
+      if (!sourceIds.includes(row._id) || !Number.isInteger(row.count) || row.count < 0
+        || row.versions?.length !== 1 || row.sourceVersions?.length !== 1) {
+        throw createRuntimeStateError({ code: RUNTIME_STATE_V2_ERROR_CODES.STATE_VERSION_MIXED,
+          message: 'Source contributions do not have a consistent version basis.' })
+      }
+      assertStateVersions({ control,
+        rows: [{ stateVersion: row.versions[0], sourceStateVersion: row.sourceVersions[0] }],
+        requireSourceStateVersion: true,
+        missingMessage: 'Source contributions have no state-version receipt.' })
+    }
+  }
+  const countsBySource = new Map(contributions.map(row => [row._id, row.count]))
+  const total = count.capped ? null : count.value
+  return withBoundedReadReceipt({
+    control, contractVersion: 'intelligence-source-registry.v1',
+    scope: { customerId: control.customerId, tenantId: control.tenantId,
+      runtimeInstanceId: control.id, runtimeInstanceKey: control.runtimeInstanceKey },
+    stateVersion: control.stateVersion, currency: 'AS_READ', readAt: new Date().toISOString(),
+    sourceRegistry: rows.map(row => {
+      const contribution = countsBySource.get(row.sourceId) ?? 0
+      const capped = contribution >= RUNTIME_STATE_V2_EVIDENCE_COUNT_LIMIT
+      return { ...serializeEvidenceSource(row, control.stateVersion),
+        evidenceObjectCount: capped ? null : contribution,
+        evidenceCountCapped: capped, evidenceCountLimit: RUNTIME_STATE_V2_EVIDENCE_COUNT_LIMIT }
+    }),
+    page: normalizedPage, pageSize: normalizedPageSize, total,
+    totalCapped: count.capped, countLimit: count.limit,
+    totalPages: total === null ? null : Math.max(1, Math.ceil(total / normalizedPageSize)),
+    hasMore: total === null ? null : normalizedPage * normalizedPageSize < total,
+    completeness: count.capped ? 'PARTIAL' : 'COMPLETE',
+    search: query, source: 'runtime_state_v2.source_registry',
+  }, 'runtime_state_v2.source_registry')
+}
+
 export const listRuntimeStateEvidenceObjects = async ({
   scopes,
   runtimeInstanceId,
@@ -1221,10 +1506,14 @@ export const listRuntimeStateEvidenceObjects = async ({
   pageSize = 25,
   reviewStatus = '',
   acceptanceState = '',
+  sourceId = '',
+  evidenceObjectId = '',
+  search = '',
 } = {}) => {
-  const normalizedPage = Number(page)
-  const normalizedPageSize = Number(pageSize)
-  if (!Number.isInteger(normalizedPage) || normalizedPage < 1
+  const normalizedPage = isPaginationScalar(page) ? Number(page) : NaN
+  const normalizedPageSize = isPaginationScalar(pageSize) ? Number(pageSize) : NaN
+  if (!isPaginationScalar(page) || !isPaginationScalar(pageSize)
+    || !Number.isInteger(normalizedPage) || normalizedPage < 1
     || normalizedPage > MAX_EVIDENCE_PAGE
     || !Number.isInteger(normalizedPageSize) || normalizedPageSize < 1 || normalizedPageSize > 50) {
     throw createRuntimeStateError({
@@ -1234,15 +1523,20 @@ export const listRuntimeStateEvidenceObjects = async ({
     })
   }
 
+  const selectedSourceId = normalizeRegistryQuery(sourceId)
+  const selectedEvidenceId = normalizeRegistryQuery(evidenceObjectId)
+  const query = normalizeRegistryQuery(search)
   const control = await getControl({ scopes, runtimeInstanceId })
-  const filter = buildChildFilter({
+  const filter = withLiteralSearch(buildChildFilter({
     control,
     additional: {
       ...buildCurrentStateFilter(),
+      ...(selectedSourceId ? { sourceId: selectedSourceId } : {}),
+      ...(selectedEvidenceId ? { evidenceObjectId: selectedEvidenceId } : {}),
       ...(normalizeText(reviewStatus) ? { reviewStatus: normalizeText(reviewStatus).toUpperCase() } : {}),
       ...(normalizeText(acceptanceState) ? { acceptanceState: normalizeText(acceptanceState).toUpperCase() } : {}),
     },
-  })
+  }), query, ['evidenceObjectId', 'sourceId', 'title', 'summary', 'extractedFact'])
   const [rows, totalReceipt] = await Promise.all([
     readMany({
       collectionName: RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_OBJECTS,
@@ -1257,7 +1551,28 @@ export const listRuntimeStateEvidenceObjects = async ({
       limit: RUNTIME_STATE_V2_EVIDENCE_COUNT_LIMIT,
     }),
   ])
-  if (rows.length === 0 && normalizedPage === 1) {
+  if (rows.length === 0 && selectedEvidenceId) {
+    throw createRuntimeStateError({ code: RUNTIME_STATE_V2_ERROR_CODES.EVIDENCE_MISSING,
+      status: 404, message: 'The selected evidence is unavailable for this source and revision.' })
+  }
+  if (rows.length === 0 && selectedSourceId) {
+    const selectedSources = await readMany({
+      collectionName: RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_SOURCES,
+      filter: buildChildFilter({ control, additional: {
+        ...buildCurrentStateFilter(), sourceId: selectedSourceId,
+      } }),
+      projection: RUNTIME_STATE_V2_EVIDENCE_SOURCE_PROJECTION, limit: 2,
+    })
+    if (selectedSources.length !== 1) throw createRuntimeStateError({
+      code: RUNTIME_STATE_V2_ERROR_CODES.EVIDENCE_SOURCE_MISSING, status: 404,
+      message: 'The selected source is unavailable in this revision.',
+    })
+    assertCurrentEvidenceSourceRows(selectedSources)
+    assertStateVersions({ control, rows: selectedSources, requireSourceStateVersion: true,
+      missingMessage: 'The selected source has no consistent state-version receipt.' })
+  }
+  if (rows.length === 0 && normalizedPage === 1 && !query && !selectedSourceId
+    && !normalizeText(reviewStatus) && !normalizeText(acceptanceState)) {
     throw createRuntimeStateError({
       code: RUNTIME_STATE_V2_ERROR_CODES.EVIDENCE_MISSING,
       message: 'Runtime State Storage V2 evidence is unavailable.',
@@ -1341,8 +1656,8 @@ export const listRuntimeStateEvidenceObjects = async ({
   }, 'runtime_state_v2.evidence_page')
 }
 
-export const getRuntimeStateGraphManifest = async ({ scopes, runtimeInstanceId } = {}) => {
-  const control = await getControl({ scopes, runtimeInstanceId })
+const readRuntimeStateGraphManifest = async ({ scopes, runtimeInstanceId, session, readBudget } = {}) => {
+  const control = await getControl({ scopes, runtimeInstanceId, session, metadataMaxTimeMS: 2000, readBudget })
   const rows = await readMany({
     collectionName: RUNTIME_STATE_V2_COLLECTIONS.GRAPH_SNAPSHOTS,
     filter: buildChildFilter({
@@ -1351,6 +1666,9 @@ export const getRuntimeStateGraphManifest = async ({ scopes, runtimeInstanceId }
     }),
     sort: { updatedAt: -1, createdAt: -1 },
     limit: 1,
+    batchSize: 1,
+    session,
+    readBudget,
   })
   const row = rows[0]
   if (!row) {
@@ -1429,28 +1747,205 @@ export const getRuntimeStateGraphManifest = async ({ scopes, runtimeInstanceId }
   }, 'runtime_state_v2.graph_manifest')
 }
 
-export const getRuntimeStateGraphProjection = async ({ scopes, runtimeInstanceId } = {}) => {
-  const manifestResult = await getRuntimeStateGraphManifest({ scopes, runtimeInstanceId })
+const withRuntimeSnapshotRead = async (read, unavailableMessage = 'The current graph could not complete its bounded read. Refresh to retry.') => {
+  const deadline = Date.now() + 6000
+  const workDeadline = deadline - 500
+  const unavailable = () => createRuntimeStateError({ code: RUNTIME_STATE_V2_ERROR_CODES.STORAGE_UNAVAILABLE,
+    status: 503, message: unavailableMessage })
+  const readBudget = () => {
+    const remaining = workDeadline - Date.now()
+    if (remaining <= 0) throw unavailable()
+    const timeoutMS = Math.min(2000, remaining)
+    return { timeoutMS, maxTimeMS: timeoutMS }
+  }
+  let session, result, failure
+  try {
+    readBudget()
+    session = await mongoose.startSession()
+    readBudget()
+    session.startTransaction({ readConcern: { level: 'snapshot' }, readPreference: 'primary', maxCommitTimeMS: 2000 })
+    const { readReceipt: _previousReceipt, ...payload } = await read({ session, readBudget })
+    result = withBoundedReadReceipt({ ...payload, currency: 'AS_READ', readAt: new Date().toISOString() },
+      payload.source, { maxTimeMS: 2000, requestTimeoutMS: 6000, workTimeoutMS: 5500, cleanupReserveMS: 500 })
+    await session.commitTransaction({ timeoutMS: readBudget().timeoutMS })
+    readBudget()
+  } catch (error) {
+    failure = error.status && error.code ? error : unavailable()
+    if (session?.inTransaction()) {
+      try { await session.abortTransaction({ timeoutMS: Math.max(1, Math.min(2000, deadline - Date.now())) }) }
+      catch { failure = unavailable() }
+    }
+  } finally {
+    if (session) {
+      try { await session.endSession() }
+      catch { failure = unavailable() }
+    }
+  }
+  if (failure) throw failure
+  readBudget()
+  return result
+}
+
+export const getRuntimeStateDiscoveryHealth = async (args = {}) => withRuntimeSnapshotRead(async options => {
+  const { discoveryHealthProjection, ...control } = await getControl({ ...args, ...options,
+    includeHandoffEligibility: false, includeDiscoveryHealth: true, metadataMaxTimeMS: 2000 })
+  return { contractVersion: 'intelligence-discovery-health.v1', control,
+    discoveryHealth: discoveryHealthProjection, source: 'runtime_state_v2.discovery_health' }
+}, 'The recorded Discovery Health assessment could not complete its bounded read. Refresh to retry.')
+
+export const getRuntimeStateLockBasis = async (args = {}) => withRuntimeSnapshotRead(async options => {
+  const { recordedLockBasisProjection, ...control } = await getControl({ ...args, ...options,
+    includeHandoffEligibility: false, includeDiscoveryHealth: false, includeRecordedLockBasis: true, metadataMaxTimeMS: 2000 })
+  return { contractVersion: 'intelligence-lock-basis.v1', control,
+    lockBasis: recordedLockBasisProjection, source: 'runtime_state_v2.lock_basis' }
+}, 'The recorded lock basis could not complete its bounded read. Refresh to retry.')
+
+export const getRuntimeStateContradictionHistory = async (args = {}) => {
+  const selection = contradictionHistorySelectionSchema.safeParse({ findingId: args.findingId,
+    ...(args.page === undefined ? {} : { page: args.page }), ...(args.pageSize === undefined ? {} : { pageSize: args.pageSize }) })
+  if (!selection.success) throw createRuntimeStateError({ code: RUNTIME_STATE_V2_ERROR_CODES.INVALID_QUERY,
+    status: 422, message: 'Select an exact finding and a bounded history page.' })
+  return withRuntimeSnapshotRead(async options => {
+    const { contradictionHistoryRecords, ...control } = await getControl({ ...args, ...options,
+      includeContradictionHistory: true, metadataMaxTimeMS: 2000 })
+    return { contractVersion: 'intelligence-contradiction-history.v1', control,
+      history: projectStoredContradictionHistory(contradictionHistoryRecords, control.id, selection.data),
+      source: 'runtime_state_v2.contradiction_history' }
+  }, 'Recorded contradiction decisions could not complete their bounded read. Refresh to retry.')
+}
+
+export const getRuntimeStateFindings = async (args = {}) => {
+  const selection = findingSelectionSchema.safeParse(Object.fromEntries(['search', 'type', 'population', 'sort', 'page', 'pageSize']
+    .filter(field => args[field] !== undefined).map(field => [field, args[field]])))
+  if (!selection.success) throw createRuntimeStateError({ code: RUNTIME_STATE_V2_ERROR_CODES.INVALID_QUERY,
+    status: 422, message: 'Select a bounded literal finding search and supported inspection filters.' })
+  return withRuntimeSnapshotRead(async options => {
+    const { storedFindings, ...control } = await getControl({ ...args, ...options, includeFindings: true, metadataMaxTimeMS: 2000 })
+    const ids = selection.data.type === 'CONTRADICTION' ? storedFindingEvidenceIds(storedFindings) : null
+    const rows = ids?.length ? await readMany({ collectionName: RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_OBJECTS,
+      filter: buildChildFilter({ control, additional: { ...buildCurrentStateFilter(), evidenceObjectId: { $in: ids } } }),
+      projection: { ...RUNTIME_STATE_V2_HANDOFF_CONTRADICTION_EVIDENCE_PROJECTION, sourceHash: 1, migrationReceiptId: 1,
+        status: 1, stateStatus: 1, isCurrent: 1, customerVisible: 1, private: 1, visibility: 1, accessLevel: 1 },
+      sort: { evidenceObjectId: 1, _id: 1 }, limit: ids.length + 1, batchSize: ids.length + 1, ...options }) : []
+    if (rows.length) { assertCurrentEvidenceSourceRows(rows); assertStateVersions({ control, rows, requireSourceStateVersion: true }) }
+    return { contractVersion: 'intelligence-finding-read.v1', control,
+      findings: projectStoredFindings({ stored: storedFindings, evidenceRows: rows, control, selection: selection.data }),
+      source: 'runtime_state_v2.stored_findings' }
+  }, 'Stored findings could not complete their bounded read. Refresh to retry.')
+}
+
+export const getRuntimeStateGraphManifest = async (args = {}) => withRuntimeSnapshotRead(
+  options => readRuntimeStateGraphManifest({ ...args, ...options }),
+)
+
+const readRuntimeStateGraphProjection = async ({ scopes, runtimeInstanceId, session, readBudget, neighbourhood = null } = {}) => {
+  const manifestResult = await readRuntimeStateGraphManifest({ scopes, runtimeInstanceId, session, readBudget })
   const { control, manifest } = manifestResult
+  const hasInvalidCurrency = row => row.current === false || row.isCurrent === false
+    || [row.status, row.stateStatus].some(value => normalizeText(value) && normalizeText(value).toUpperCase() !== 'CURRENT')
+  const totalNodeCount = manifest.counts?.nodeCount
+  const totalEdgeCount = manifest.counts?.edgeCount
+  if (![totalNodeCount, totalEdgeCount].every(value => Number.isSafeInteger(value) && value >= 0)) {
+    throw createRuntimeStateError({ code: RUNTIME_STATE_V2_ERROR_CODES.GRAPH_ELEMENTS_INVALID,
+      message: 'Runtime State Storage V2 graph totals are unavailable or invalid.' })
+  }
   const elementFilter = {
     ...buildCurrentStateFilter(),
     snapshotId: manifest.snapshotId,
     graphVersion: manifest.graphVersion,
     stateVersion: manifest.stateVersion,
   }
+  const collation = neighbourhood ? { locale: 'simple' } : undefined
+  let incidentFilter = {}
+  const elementQuery = (additional, incident = false) => {
+    const filter = buildChildFilter({ control, additional: { ...elementFilter, ...additional } })
+    return incident ? { ...filter, $and: [...filter.$and, incidentFilter] } : filter
+  }
+  const readElements = (additional, incident = false) => readMany({
+    collectionName: RUNTIME_STATE_V2_COLLECTIONS.GRAPH_ELEMENTS,
+    filter: elementQuery(additional, incident),
+    projection: RUNTIME_STATE_V2_GRAPH_ELEMENT_PROJECTION,
+    sort: { elementKey: 1 }, limit: 2, batchSize: 2, session, readBudget, collation,
+  })
+  const validKey = value => typeof value === 'string' && value === value.trim() && value.length > 0
+    && value.length <= 240 && !Array.from(value).some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)
+  const assertNeighbourhoodRows = rows => {
+    if (rows.some(row => !validKey(row.elementKey) || hasInvalidCurrency(row)
+      || row.snapshotId !== manifest.snapshotId || row.graphVersion !== manifest.graphVersion)) {
+      throw createRuntimeStateError({ code: RUNTIME_STATE_V2_ERROR_CODES.GRAPH_ELEMENTS_INVALID,
+        message: 'The selected graph neighbourhood has an invalid recorded basis.' })
+    }
+    if (rows.length) assertStateVersions({ control, rows,
+      errorCode: RUNTIME_STATE_V2_ERROR_CODES.GRAPH_ELEMENTS_INVALID, requireSourceStateVersion: true,
+      missingMessage: 'The selected graph neighbourhood has no state-version receipt.' })
+  }
+  let evidenceSelection = null
+  if (neighbourhood) {
+    if (neighbourhood.graphHash !== manifest.graphHash) throw createRuntimeStateError({
+      code: RUNTIME_STATE_V2_ERROR_CODES.GRAPH_NOT_CURRENT,
+      message: 'The selected graph basis has changed. Refresh before continuing.' })
+    const selectedRows = await readElements(neighbourhood.evidenceObjectId
+      ? { elementType: 'NODE', 'attributes.nodeType': 'EVIDENCE', 'attributes.scope': 'GLOBAL',
+          'attributes.evidenceObjectId': neighbourhood.evidenceObjectId }
+      : { elementType: 'NODE', elementKey: neighbourhood.nodeId })
+    assertNeighbourhoodRows(selectedRows)
+    if (selectedRows.length > 1) throw createRuntimeStateError({ code: RUNTIME_STATE_V2_ERROR_CODES.GRAPH_ELEMENTS_INVALID,
+      message: 'The selected graph object is not uniquely current.' })
+    const selected = selectedRows[0]
+    if (!selected || selected.attributes?.customerVisible === false
+      || !Object.values(RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES).includes(selected.attributes?.nodeType)) {
+      throw createRuntimeStateError({ code: RUNTIME_STATE_V2_ERROR_CODES.GRAPH_IDENTITY_INVALID, status: 404,
+        message: 'The selected graph object is unavailable.' })
+    }
+    if (neighbourhood.evidenceObjectId) {
+      if (selected.attributes?.nodeType !== 'EVIDENCE' || selected.attributes?.scope !== 'GLOBAL'
+        || serializeGraphNode(selected).evidenceObjectId !== neighbourhood.evidenceObjectId) {
+        throw createRuntimeStateError({ code: RUNTIME_STATE_V2_ERROR_CODES.GRAPH_ELEMENTS_INVALID,
+          message: 'The selected graph evidence has no exact recorded canonical identity.' })
+      }
+      evidenceSelection = { evidenceObjectId: neighbourhood.evidenceObjectId, nodeId: selected.elementKey, scope: 'GLOBAL' }
+      neighbourhood = { ...neighbourhood, nodeId: selected.elementKey }
+    }
+    incidentFilter = neighbourhood.mode === 'Lineage' ? { toElementKey: neighbourhood.nodeId }
+      : neighbourhood.mode === 'Impact' ? { fromElementKey: neighbourhood.nodeId }
+        : { $or: [{ fromElementKey: neighbourhood.nodeId }, { toElementKey: neighbourhood.nodeId }] }
+    if (neighbourhood.afterEdgeKey) {
+      const cursorRows = await readElements({ elementType: 'EDGE', elementKey: neighbourhood.afterEdgeKey }, true)
+      assertNeighbourhoodRows(cursorRows)
+      if (cursorRows.length !== 1) throw createRuntimeStateError({ code: RUNTIME_STATE_V2_ERROR_CODES.INVALID_QUERY,
+        status: 400, message: 'The graph continuation does not belong to this selection and direction.' })
+    }
+  }
   const edgeRows = await readMany({
     collectionName: RUNTIME_STATE_V2_COLLECTIONS.GRAPH_ELEMENTS,
-    filter: buildChildFilter({
-      control,
-      additional: { ...elementFilter, elementType: 'EDGE' },
-    }),
+    filter: elementQuery({ elementType: 'EDGE',
+      ...(neighbourhood?.afterEdgeKey ? { elementKey: { $gt: neighbourhood.afterEdgeKey } } : {}) }, Boolean(neighbourhood)),
     projection: RUNTIME_STATE_V2_GRAPH_ELEMENT_PROJECTION,
-    sort: { relationshipType: 1, elementKey: 1 },
+    sort: neighbourhood ? { elementKey: 1 } : { relationshipType: 1, elementKey: 1 },
     limit: RUNTIME_STATE_V2_GRAPH_EDGE_LIMIT,
+    batchSize: RUNTIME_STATE_V2_GRAPH_EDGE_LIMIT,
+    session,
+    readBudget,
+    collation,
   })
-  const totalNodeCount = Number(manifest.counts?.nodeCount || 0)
-  const totalEdgeCount = Number(manifest.counts?.edgeCount || 0)
-  if (edgeRows.length === 0 && totalEdgeCount > 0) {
+  if (neighbourhood) {
+    assertNeighbourhoodRows(edgeRows)
+    const incident = row => neighbourhood.mode === 'Lineage' ? row.toElementKey === neighbourhood.nodeId
+      : neighbourhood.mode === 'Impact' ? row.fromElementKey === neighbourhood.nodeId
+        : row.fromElementKey === neighbourhood.nodeId || row.toElementKey === neighbourhood.nodeId
+    if (edgeRows.some((row, index) => !incident(row) || !validKey(row.fromElementKey) || !validKey(row.toElementKey)
+      || Buffer.compare(Buffer.from(row.elementKey), Buffer.from(index ? edgeRows[index - 1].elementKey : neighbourhood.afterEdgeKey || '')) <= 0)) {
+      throw createRuntimeStateError({ code: RUNTIME_STATE_V2_ERROR_CODES.GRAPH_ELEMENTS_INVALID,
+        message: 'The selected graph relationships have invalid direction, identity or order.' })
+    }
+  }
+  const edgeKeys = edgeRows.map(row => normalizeText(row.elementKey))
+  if (edgeRows.length > totalEdgeCount || edgeKeys.some(key => !key) || new Set(edgeKeys).size !== edgeKeys.length
+    || edgeRows.some(hasInvalidCurrency)) {
+    throw createRuntimeStateError({ code: RUNTIME_STATE_V2_ERROR_CODES.GRAPH_ELEMENTS_INVALID,
+      message: 'Runtime State Storage V2 graph edges have invalid identity, currency or totals.' })
+  }
+  if (!neighbourhood && edgeRows.length === 0 && totalEdgeCount > 0) {
     throw createRuntimeStateError({
       code: RUNTIME_STATE_V2_ERROR_CODES.GRAPH_ELEMENTS_INVALID,
       message: 'Runtime State Storage V2 graph edges are incomplete.',
@@ -1472,10 +1967,10 @@ export const getRuntimeStateGraphProjection = async ({ scopes, runtimeInstanceId
       message: 'Runtime State Storage V2 graph edges disagree with the current manifest.',
     })
   }
-  const nodeKeys = [...new Set(edgeRows.flatMap((row) => [
+  const nodeKeys = [...new Set([...(neighbourhood ? [neighbourhood.nodeId] : []), ...edgeRows.flatMap((row) => [
     normalizeText(row.fromElementKey),
     normalizeText(row.toElementKey),
-  ]))]
+  ])])]
   if (nodeKeys.some((key) => !key)) {
     throw createRuntimeStateError({
       code: RUNTIME_STATE_V2_ERROR_CODES.GRAPH_ELEMENTS_INVALID,
@@ -1496,9 +1991,15 @@ export const getRuntimeStateGraphProjection = async ({ scopes, runtimeInstanceId
         projection: RUNTIME_STATE_V2_GRAPH_ELEMENT_PROJECTION,
         sort: { elementKey: 1 },
         limit: nodeKeys.length,
+        batchSize: nodeKeys.length,
+        session,
+        readBudget,
+        collation,
       })
     : []
-  if (nodeRows.length !== nodeKeys.length
+  if (neighbourhood) assertNeighbourhoodRows(nodeRows)
+  if (nodeRows.length > totalNodeCount || nodeRows.some(hasInvalidCurrency)
+    || nodeRows.length !== nodeKeys.length
     || new Set(nodeRows.map((row) => normalizeText(row.elementKey))).size !== nodeKeys.length) {
     throw createRuntimeStateError({
       code: RUNTIME_STATE_V2_ERROR_CODES.GRAPH_ELEMENTS_INVALID,
@@ -1563,9 +2064,31 @@ export const getRuntimeStateGraphProjection = async ({ scopes, runtimeInstanceId
         edgeLimit: RUNTIME_STATE_V2_GRAPH_EDGE_LIMIT,
         nodeLimit: RUNTIME_STATE_V2_GRAPH_EDGE_LIMIT * 2,
       },
+      ...(neighbourhood ? { neighbourhood: {
+        version: 1, nodeId: neighbourhood.nodeId, mode: neighbourhood.mode, depth: 1,
+        completenessBasis: 'RECORDED_ONE_HOP_EDGES',
+        direction: { Journey: 'BOTH', Lineage: 'INCOMING', Impact: 'OUTGOING' }[neighbourhood.mode],
+        ...(evidenceSelection ? { evidenceSelection } : {}),
+        afterEdgeKey: neighbourhood.afterEdgeKey || null,
+        nextAfterEdgeKey: edgeRows.length === RUNTIME_STATE_V2_GRAPH_EDGE_LIMIT ? edgeRows.at(-1).elementKey : null,
+        continuation: edgeRows.length === RUNTIME_STATE_V2_GRAPH_EDGE_LIMIT ? 'MAY_HAVE_MORE' : 'EXHAUSTED',
+        complete: !neighbourhood.afterEdgeKey && edgeRows.length < RUNTIME_STATE_V2_GRAPH_EDGE_LIMIT,
+      } } : {}),
     },
-    source: 'runtime_state_v2.graph_projection',
-  }, 'runtime_state_v2.graph_projection')
+    source: neighbourhood ? 'runtime_state_v2.graph_neighbourhood' : 'runtime_state_v2.graph_projection',
+  }, neighbourhood ? 'runtime_state_v2.graph_neighbourhood' : 'runtime_state_v2.graph_projection')
+}
+
+export const getRuntimeStateGraphProjection = async (args = {}) => withRuntimeSnapshotRead(
+  options => readRuntimeStateGraphProjection({ ...args, ...options }),
+)
+
+export const getRuntimeStateGraphNeighbourhood = async ({ scopes, runtimeInstanceId, ...query } = {}) => {
+  const selection = graphNeighbourhoodSelectionSchema.safeParse(query)
+  if (!selection.success) throw createRuntimeStateError({ code: RUNTIME_STATE_V2_ERROR_CODES.INVALID_QUERY,
+    status: 400, message: 'The graph selection requires bounded identities, mode and graph basis.' })
+  return withRuntimeSnapshotRead(options => readRuntimeStateGraphProjection({ scopes, runtimeInstanceId,
+    ...options, neighbourhood: selection.data }))
 }
 
 const readRuntimeStateOutcomeHandoff = async ({
@@ -1577,6 +2100,7 @@ const readRuntimeStateOutcomeHandoff = async ({
   requestedOutputTypeKey = '',
   outputContractState = 'CANDIDATE',
   planningEvidence = false,
+  planningEvidenceVersion = OUTCOME_PLANNING_EVIDENCE_VERSIONS.V1,
   session = null,
 } = {}) => {
   const control = await getControl({ scopes, runtimeInstanceId, includeHandoffEligibility: true, session })
@@ -1713,7 +2237,7 @@ const readRuntimeStateOutcomeHandoff = async ({
   })
   const handoff = handoffResolution?.handoff
   if (planningEvidence) return buildOutcomePlanningRuntimeEvidence({
-    runtimeInstance, frameworkPackage: handoffResolution?.frameworkPackage, handoff,
+    runtimeInstance, frameworkPackage: handoffResolution?.frameworkPackage, handoff, planningEvidenceVersion,
   })
   if (!handoff || typeof handoff !== 'object') {
     throw createRuntimeStateError({
@@ -1734,9 +2258,10 @@ export const getRuntimeStateOutcomeHandoffReadiness = (args = {}) => readRuntime
 
 // Internal contract snapshot: preserve stored evidence, rather than renderer summaries.
 // Existing repository owners enforce scope, state identity, session and byte limits.
-export const getRuntimeOutcomeEvidenceContractSnapshot = async ({ scopes, runtimeInstanceId, session = null } = {}) => {
+export const getRuntimeOutcomeEvidenceContractSnapshot = async ({ scopes, runtimeInstanceId, session = null, boundedInventoryRead = false, readBudget } = {}) => {
+  const metadataOptions = boundedInventoryRead ? { metadataMaxTimeMS: RUNTIME_STATE_V2_READ_MAX_TIME_MS, readBudget } : {}
   const identity = await getRuntimeInstance({ scopes, runtimeInstanceId,
-    projection: RUNTIME_STATE_V2_CONTROL_PROJECTION, maxTimeMS: RUNTIME_STATE_V2_READ_MAX_TIME_MS, session })
+    projection: RUNTIME_STATE_V2_CONTROL_PROJECTION, maxTimeMS: RUNTIME_STATE_V2_READ_MAX_TIME_MS, session, ...metadataOptions })
   if (!identity.stateVersion && !identity.runtimeStateVersion) {
     const legacy = await getRuntimeInstance({ scopes, runtimeInstanceId,
       projection: `${RUNTIME_STATE_V2_HANDOFF_CONTROL_PROJECTION} framework_state.evidence_pack`,
@@ -1747,13 +2272,14 @@ export const getRuntimeOutcomeEvidenceContractSnapshot = async ({ scopes, runtim
     assertSerializedPayloadSize(snapshot)
     return JSON.parse(JSON.stringify(snapshot))
   }
-  const control = await getControl({ scopes, runtimeInstanceId, includeHandoffEligibility: true, session })
+  const control = await getControl({ scopes, runtimeInstanceId, includeHandoffEligibility: true, session, ...metadataOptions })
   const sectionProjection = { _id: 1, sectionKey: 1, customerId: 1, tenantId: 1, runtimeInstanceId: 1,
     runtimeInstanceKey: 1, current: 1, stateVersion: 1, sourceStateVersion: 1,
     'sectionDetail.accepted.supportingEvidenceRefs': 1 }
   const readSections = () => readMany({ collectionName: RUNTIME_STATE_V2_COLLECTIONS.SECTIONS,
     filter: buildChildFilter({ control, additional: { current: true } }), projection: sectionProjection,
-    sort: { sectionKey: 1 }, limit: RUNTIME_STATE_V2_SECTION_CATALOGUE_LIMIT + 1, session })
+    sort: { sectionKey: 1 }, limit: RUNTIME_STATE_V2_SECTION_CATALOGUE_LIMIT + 1, session, readBudget,
+    ...(boundedInventoryRead ? { batchSize: RUNTIME_STATE_V2_SECTION_CATALOGUE_LIMIT + 1 } : {}) })
   const sectionRows = await readSections()
   if (sectionRows.length > RUNTIME_STATE_V2_SECTION_CATALOGUE_LIMIT) throw createRuntimeStateError({
     code: RUNTIME_STATE_V2_ERROR_CODES.SECTION_CATALOGUE_LIMIT, message: 'Evidence snapshot section catalogue exceeded.' })
@@ -1777,12 +2303,13 @@ export const getRuntimeOutcomeEvidenceContractSnapshot = async ({ scopes, runtim
       references: row.sectionDetail?.accepted?.supportingEvidenceRefs || [], storedSectionHash: snapshotHash(row) })),
     contradictionReferences: (control.handoffFrameworkState?.evidence_pack?.discoveryHealth?.contradictionCandidates || [])
       .flatMap((candidate) => candidate.evidenceObjectIds || []),
-    count: async (kind) => (await readCount({ collectionName: collectionName(kind), filter: filter(), session })).value,
+    count: async (kind) => (await readCount({ collectionName: collectionName(kind), filter: filter(), session, readBudget })).value,
     readPage: (kind, after, limit) => readMany({ collectionName: collectionName(kind), filter: filter(after),
-      projection: {}, sort: { _id: 1 }, limit, session }),
+      projection: {}, sort: { _id: 1 }, limit, session, readBudget, ...(boundedInventoryRead ? { batchSize: limit } : {}) }),
     validateRows: (kind, rows) => {
       validateScope(rows)
       assertStateVersions({ control, rows, requireSourceStateVersion: true })
+      if (boundedInventoryRead && kind === 'evidence') assertCurrentEvidenceSourceRows(rows)
       if (kind === 'sources') assertCurrentEvidenceSourceRows(rows)
       else if (rows.some((row) => row.current !== true || !normalizeText(row.evidenceObjectId)
         || !normalizeText(row.sourceId))) throw createRuntimeStateError({
@@ -1790,7 +2317,7 @@ export const getRuntimeOutcomeEvidenceContractSnapshot = async ({ scopes, runtim
     },
   })
   const { evidenceObjects, sourceRegistry } = assembled
-  const finalControl = await getControl({ scopes, runtimeInstanceId, includeHandoffEligibility: true, session })
+  const finalControl = await getControl({ scopes, runtimeInstanceId, includeHandoffEligibility: true, session, ...metadataOptions })
   if (snapshotHash(await readSections()) !== snapshotHash(sectionRows)
     || snapshotHash(finalControl) !== snapshotHash(control)) throw createRuntimeStateError({
     code: 'OUTCOME_EVIDENCE_SNAPSHOT_CONTROL_CHANGED', message: 'Governed evidence scope changed during read.',
@@ -1813,7 +2340,6 @@ export const getRuntimeOutcomeEvidenceContractSnapshot = async ({ scopes, runtim
     snapshotVersion: 'outcome-evidence-source-snapshot.v1', stateVersion: control.stateVersion,
     inventoryReceipt: assembled.receipt, evidenceObjects, sourceRegistry }
   try {
-    if (evidenceObjects.length > 500 || sourceRegistry.length > 500) throw new Error('projection count')
     assertSerializedPayloadSize(snapshot)
   } catch {
     throw createRuntimeStateError({ code: 'OUTCOME_EVIDENCE_SNAPSHOT_PROJECTION_BOUND',
@@ -1823,11 +2349,47 @@ export const getRuntimeOutcomeEvidenceContractSnapshot = async ({ scopes, runtim
   return JSON.parse(JSON.stringify(snapshot))
 }
 
-export const getRuntimeOutcomePlanningEvidence = async ({ scopes, runtimeInstanceId, session = null } = {}) => {
+export const getRuntimeStateEvidenceInventory = async ({ scopes, runtimeInstanceId } = {}) => {
+  const deadline = Date.now() + 6000
+  const workDeadline = deadline - 500
+  const readBudget = () => {
+    const remaining = workDeadline - Date.now()
+    if (remaining <= 0) throw new Error('Inventory request deadline exceeded.')
+    const timeoutMS = Math.min(2000, remaining)
+    return { timeoutMS, maxTimeMS: timeoutMS }
+  }
+  const session = await mongoose.startSession()
+  try {
+    // Manual transaction keeps the supported per-operation CSOT independent.
+    session.startTransaction({ readConcern: { level: 'snapshot' }, readPreference: 'primary', maxCommitTimeMS: 2000 })
+    // Require V2 before the existing internal reader can select legacy storage.
+    const control = await getControl({ scopes, runtimeInstanceId, session, metadataMaxTimeMS: 2000, readBudget })
+    const snapshot = await getRuntimeOutcomeEvidenceContractSnapshot({ scopes, runtimeInstanceId, session, boundedInventoryRead: true, readBudget })
+    readBudget()
+    const result = projectIntelligenceEvidenceInventory({ snapshot, control, readAt: new Date().toISOString() })
+    await session.commitTransaction({ timeoutMS: readBudget().timeoutMS })
+    readBudget()
+    return result
+  } catch (error) {
+    if (session.inTransaction()) {
+      await session.abortTransaction({ timeoutMS: Math.max(1, Math.min(2000, deadline - Date.now())) })
+    }
+    if ([401, 403, 404, 422].includes(error.status)) throw error
+    throw createRuntimeStateError({ code: 'INTELLIGENCE_EVIDENCE_INVENTORY_UNAVAILABLE', status: 503,
+      message: 'The current evidence inventory could not complete its bounded read. Refresh.',
+      details: { reason: /^OUTCOME_EVIDENCE_SNAPSHOT_[A-Z_]+$/.test(error.code || '') ? error.code : 'INVENTORY_READ_UNAVAILABLE' } })
+  } finally { await session.endSession() }
+}
+
+export const getRuntimeOutcomePlanningEvidence = async ({ scopes, runtimeInstanceId, session = null,
+  planningEvidenceVersion = OUTCOME_PLANNING_EVIDENCE_VERSIONS.V1 } = {}) => {
+  if (!Object.values(OUTCOME_PLANNING_EVIDENCE_VERSIONS).includes(planningEvidenceVersion)) {
+    throw createRuntimeStateError({ code: 'OUTCOME_PLANNING_TRUTH_BLOCKED', message: 'Planning evidence version is invalid.' })
+  }
   const control = await getRuntimeInstance({ scopes, runtimeInstanceId,
     projection: RUNTIME_STATE_V2_CONTROL_PROJECTION, maxTimeMS: RUNTIME_STATE_V2_READ_MAX_TIME_MS, session })
   if (control.stateVersion || control.runtimeStateVersion) {
-    return readRuntimeStateOutcomeHandoff({ scopes, runtimeInstanceId, planningEvidence: true, session })
+    return readRuntimeStateOutcomeHandoff({ scopes, runtimeInstanceId, planningEvidence: true, session, planningEvidenceVersion })
   }
   // Legacy is selected only by absence of V2 identity; never a failed-V2 fallback.
   const runtime = await getRuntimeInstance({ scopes, runtimeInstanceId,
@@ -1837,7 +2399,7 @@ export const getRuntimeOutcomePlanningEvidence = async ({ scopes, runtimeInstanc
   const resolved = await resolveFrameworkOutcomeStudioHandoff({ runtimeInstance: { ...runtime, _id: runtime.id }, scopes,
     boundedDependencyPolicy: FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_READ_POLICY })
   return buildOutcomePlanningRuntimeEvidence({ runtimeInstance: { ...runtime, _id: runtime.id },
-    frameworkPackage: resolved.frameworkPackage, handoff: resolved.handoff })
+    frameworkPackage: resolved.frameworkPackage, handoff: resolved.handoff, planningEvidenceVersion })
 }
 
 export const __testables = Object.freeze({

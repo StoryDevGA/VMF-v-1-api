@@ -6,7 +6,10 @@ import { projectOutcomeStudioBusinessFactLedger, buildIntermediateReasoningManif
 import { resolveOutcomeStudioCompositionInputs, buildKnowledgeContextForComposition } from './outcomeStudioLiveCompositionBridgeService.js'
 import { loadOutcomeKnowledgePackVersionContent } from './outcomeKnowledgePackRegistryService.js'
 import { getRuntimeOutcomeEvidenceContractSnapshot } from './runtimeStateRepository.js'
-import { projectEvidenceToMeaningProviderContract, EVIDENCE_TO_MEANING_PROVIDER_VERSION } from './outcomeEvidenceToMeaningProviderService.js'
+import { projectEvidenceToMeaningProviderContract, EVIDENCE_TO_MEANING_PROVIDER_VERSION,
+  EVIDENCE_TO_DRAFT_PROVIDER_VERSION } from './outcomeEvidenceToMeaningProviderService.js'
+import { EVIDENCE_TO_DRAFT_INPUT_VERSION } from './outcomeEvidenceToDraftContractService.js'
+import { OUTCOME_PLANNING_EVIDENCE_VERSIONS } from './outcomeFrameworkHandoffService.js'
 
 const json = (value) => JSON.parse(JSON.stringify(value))
 const same = (left, right) => hashEvidenceToMeaningValue(left) === hashEvidenceToMeaningValue(right)
@@ -25,6 +28,15 @@ const error = (reason, contract = null) => Object.assign(new Error('Clarificatio
 // Recovery is derived from the validated immutable receipt; historical bytes/hashes never change.
 const projectPersistedEvidenceClarification = (contract) => {
   const original = contract.clarification
+  const targetError = contract.inputs?.composition?.targetReadError
+  if (targetError && typeof targetError.field === 'string' && /^[A-Za-z][A-Za-z0-9_.-]{0,159}$/.test(targetError.field)) {
+    const field = targetError.field
+    return { ...original, missingFields: [field], questions: [{ field, missingInput: field,
+      reasons: ['SELECTED_TARGET_BINDING_UNRESOLVED'],
+      question: `Resolve the governed input "${field}" before confirming a new request plan.`,
+      nextAction: 'Resolve the governed output binding and re-resolve the request.',
+    }] }
+  }
   if (original.firstBoundary !== 'sourceSnapshot.SECTION_REFERENCE_UNRESOLVED') return original
   const coverage = contract.inputs.sourceSnapshot.inventoryReceipt.sectionCoverage
   const receipt = contract.inputs.sourceSnapshot.inventoryReceipt
@@ -83,6 +95,8 @@ export const buildRuntimeEvidenceToMeaningReceipt = async ({ runtime, binding, c
     const resolved = await resolveOutcomeStudioCompositionInputs({ binding, knowledgeContext: context,
       requestedOutputTypeKey: candidate.payload.consumerIntent.requestedOutputTypeKey,
       requestedFormat: candidate.payload.consumerIntent.format || '',
+      ...(candidate.payload.planningEvidence?.contractVersion === OUTCOME_PLANNING_EVIDENCE_VERSIONS.V2
+        ? { frameworkHandoff: candidate.payload.planningEvidence.frameworkHandoff } : {}),
       loadPackContent: (args) => (deps.loadPackContent || loadOutcomeKnowledgePackVersionContent)({ ...args, session }) })
     const composedContext = buildKnowledgeContextForComposition({ knowledgeContext: context, binding, ...resolved,
       loadedPacks: [resolved.outputType, resolved.schema, resolved.arl, resolved.rl].filter(Boolean) })
@@ -113,19 +127,19 @@ export const buildRuntimeEvidenceToMeaningReceipt = async ({ runtime, binding, c
   }
   const intent = json(candidate.payload.consumerIntent)
   const input = json({ composition: {
-    contractVersion: 'outcome-studio.evidence-to-meaning-input.v1',
+    contractVersion: EVIDENCE_TO_DRAFT_INPUT_VERSION,
     runtimeBinding: candidate.payload.runtime, truthBinding: truthProjection(candidate.payload),
     outputPlanBinding: outputPlanProjection(candidate.payload),
     requestBinding: { ...intent, requestId: candidate.payload.requestId || '' },
     outputBinding, businessFactLedger, targetReadError, frameworkIntelligence,
   }, selectedTarget, sourceSnapshot, request: { audience: intent.audience || [], format: intent.format || '' } })
   let contract = compileEvidenceToMeaningContract(input)
-  if (contract.status === 'READY') {
+  if (contract.status === 'READY_TO_DRAFT') {
     try {
       projectEvidenceToMeaningProviderContract(contract)
-      input.composition.providerCompatibility = { contractVersion: EVIDENCE_TO_MEANING_PROVIDER_VERSION, status: 'READY' }
+      input.composition.providerCompatibility = { contractVersion: EVIDENCE_TO_DRAFT_PROVIDER_VERSION, status: 'READY' }
     } catch (failure) {
-      input.composition.providerCompatibility = { contractVersion: EVIDENCE_TO_MEANING_PROVIDER_VERSION,
+      input.composition.providerCompatibility = { contractVersion: EVIDENCE_TO_DRAFT_PROVIDER_VERSION,
         status: 'CLARIFICATION_REQUIRED', missingFields: failure.details?.clarification?.missingFields || ['providerCompatibility'] }
     }
     contract = compileEvidenceToMeaningContract(input)
@@ -143,6 +157,11 @@ export const readRuntimeEvidenceToMeaningContract = (plan, { required = true } =
       || typeof receipt.contractJson !== 'string' || Buffer.byteLength(receipt.contractJson) > 2000000) throw new Error('shape')
     contract = assertEvidenceToMeaningContract(JSON.parse(receipt.contractJson))
     const payload = plan.payload
+    if (contract.contractVersion === 'evidence-to-draft.v2') {
+      const scope = contract.inputs.sourceSnapshot?.inventoryReceipt?.scope
+      if (scope && ['tenantId', 'customerId', 'runtimeInstanceId'].some((field) =>
+        plan[field] && String(plan[field]) !== scope[field])) throw new Error('scopeBinding')
+    }
     if (contract.contractId !== receipt.contractId || contract.contractHash !== receipt.contractHash
       || contract.contractVersion !== receipt.contractVersion
       || !same(contract.inputs.composition.runtimeBinding, payload.runtime)
@@ -168,7 +187,8 @@ export const readRuntimeEvidenceToMeaningProviderProjection = (plan) => {
   const contract = readRuntimeEvidenceToMeaningContract(plan)
   const policy = contract.inputs.composition.providerCompatibility
   if (!policy && !plan.payload.requestId) return null // Unscoped legacy contracts retain their existing provider representation.
-  if (policy?.contractVersion !== EVIDENCE_TO_MEANING_PROVIDER_VERSION || policy?.status !== 'READY') {
+  const expectedVersion = contract.contractVersion === 'evidence-to-draft.v2' ? EVIDENCE_TO_DRAFT_PROVIDER_VERSION : EVIDENCE_TO_MEANING_PROVIDER_VERSION
+  if (policy?.contractVersion !== expectedVersion || policy?.status !== 'READY') {
     throw error('PROVIDER_CONTRACT_REQUIRED_RE_RESOLVE_REQUEST', contract)
   }
   return projectEvidenceToMeaningProviderContract(contract)
@@ -178,10 +198,14 @@ const snapshotReadinessSummary = (snapshot) => {
   const receipt = snapshot?.inventoryReceipt
   return receipt ? {
     completeness: receipt.completeness, totalEvidenceCount: receipt.collections?.evidence?.totalCount ?? null,
+    totalSourceCount: receipt.collections?.sources?.totalCount ?? null,
+    snapshotVersion: snapshot.snapshotVersion || receipt.version || '', stateVersion: snapshot.stateVersion || receipt.scope?.stateVersion || '',
     projectedEvidenceCount: receipt.selectedEvidenceIds?.length ?? 0, overallHash: receipt.overallHash || '',
     reason: receipt.reason || '', sectionReadiness: receipt.sectionReadiness || 'NOT_ASSESSED',
     unresolvedSectionReferenceCount: (receipt.sectionCoverage || [])
       .reduce((count, section) => count + (section.missingReferences || []).length, 0),
+    unresolvedReferences: (receipt.sectionCoverage || []).flatMap((section) =>
+      (section.missingReferences || []).map((missingReference) => ({ sourceSectionKey: section.sectionKey, missingReference }))),
   } : { completeness: 'NOT_ASSESSED', reason: 'INVENTORY_RECEIPT_REQUIRED' }
 }
 const snapshotFailureReasons = new Set([
@@ -216,7 +240,7 @@ export const projectRuntimeEvidenceToMeaningReadiness = (plan) => {
   const contract = readRuntimeEvidenceToMeaningContract(plan, { required: false })
   if (!contract) return { status: 'CLARIFICATION_REQUIRED', canExecute: false,
     clarification: error('CONTRACT_REQUIRED_RE_RESOLVE_REQUEST').details.clarification }
-  if (contract.status === 'READY') {
+  if (['READY', 'READY_TO_DRAFT'].includes(contract.status)) {
     try {
       if (plan.payload.requestId) readRuntimeEvidenceToMeaningProviderProjection(plan)
       else projectEvidenceToMeaningProviderContract(contract)
@@ -227,14 +251,16 @@ export const projectRuntimeEvidenceToMeaningReadiness = (plan) => {
     }
   }
   return { contractVersion: contract.contractVersion, contractId: contract.contractId,
-    contractHash: contract.contractHash, status: contract.status, canExecute: contract.status === 'READY',
+    contractHash: contract.contractHash, status: contract.status, canExecute: ['READY', 'READY_TO_DRAFT'].includes(contract.status),
     fingerprints: contract.fingerprints, sectionLedger: contract.sectionLedger, clarification: projectPersistedEvidenceClarification(contract),
-    snapshotReadiness: snapshotReadinessSummary(contract.inputs.sourceSnapshot) }
+    snapshotReadiness: snapshotReadinessSummary(contract.inputs.sourceSnapshot),
+    ...(contract.contradictionLedger ? { contradictionLedger: contract.contradictionLedger.map(({ candidateId, evidenceReferences, disposition, affectedSectionKeys, dimensions }) =>
+      ({ candidateId, evidenceReferences, disposition, affectedSectionKeys, dimensions })) } : {}) }
 }
 
 export const assertRuntimeEvidenceToMeaningReady = async ({ plan, scopes, session = null, deps = {} }) => {
   const contract = readRuntimeEvidenceToMeaningContract(plan)
-  if (contract.status !== 'READY') throw error(contract.clarification.firstBoundary, contract)
+  if (!['READY', 'READY_TO_DRAFT'].includes(contract.status)) throw error(contract.clarification.firstBoundary, contract)
   projectEvidenceToMeaningProviderContract(contract)
   if (plan.payload.requestId) readRuntimeEvidenceToMeaningProviderProjection(plan)
   let current

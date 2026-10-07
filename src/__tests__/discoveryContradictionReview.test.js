@@ -4,6 +4,8 @@ import {
   getDiscoveryContradictionReview,
   getUnresolvedDiscoveryContradictions,
   isBoundedContradictionReviewHistory,
+  contradictionReviewRequestHash,
+  readContradictionReviewReplay,
 } from '../services/discoveryContradictionReviewService.js'
 
 const evidence = [
@@ -23,6 +25,33 @@ const status = (reviews = [], objects = evidence, runtimeId = 'runtime-a') =>
   getDiscoveryContradictionReview(candidate, objects, reviews, runtimeId).reviewStatus
 
 describe('human contradiction review', () => {
+  const retryRequest = (change = {}) => {
+    const request = { actorUserId: 'human-reviewer', runtimeInstanceId: 'runtime-a', contradictionId: candidate.contradictionId,
+      expectedUpdatedAt: '2026-09-03T08:00:00.000Z', expectedEvidencePairHash: makeReview().evidencePairHash,
+      disposition: 'NOT_CONTRADICTORY', rationale: makeReview().rationale, confirm: true, ...change }
+    return { ...request, requestKey: '55555555-5555-4555-8555-555555555555', requestPayloadHash: contradictionReviewRequestHash(request) }
+  }
+  const retryReview = () => ({ ...makeReview(), requestKey: retryRequest().requestKey,
+    requestExpectedUpdatedAt: retryRequest().expectedUpdatedAt, requestPayloadHash: retryRequest().requestPayloadHash })
+  test('recovers the original receipt at a full valid history row limit without appending', () => {
+    const review = retryReview(), rows = [review, ...Array.from({ length: 999 }, () => ({ contradictionId: 'other' }))]
+    expect(readContradictionReviewReplay(rows, retryRequest())).toEqual({ review })
+    expect(rows).toHaveLength(1000)
+  })
+  test.each(['actorUserId', 'runtimeInstanceId', 'contradictionId', 'expectedUpdatedAt', 'expectedEvidencePairHash', 'disposition', 'rationale', 'confirm'])('request hash binds %s', field => {
+    const value = field === 'expectedUpdatedAt' ? '2026-09-03T08:00:01.000Z' : field === 'confirm' ? false : 'different'
+    expect(readContradictionReviewReplay([retryReview()], retryRequest({ [field]: value }))).toEqual({ error: 'CONTRADICTION_REVIEW_REQUEST_CONFLICT' })
+  })
+  test.each([{ requestPayloadHash: '0'.repeat(64) }, { requestExpectedUpdatedAt: 'bad' }, { rationale: 'tampered' }, { reviewId: '' }])('rejects tampered recorded retry proof %j', change => {
+    expect(readContradictionReviewReplay([{ ...retryReview(), ...change }], retryRequest()).error).toBe('CONTRADICTION_REVIEW_REQUEST_CONFLICT')
+  })
+  test('rejects duplicate retry identities and invalid history rather than choosing a receipt', () => {
+    expect(readContradictionReviewReplay([retryReview(), retryReview()], retryRequest()).error).toBe('CONTRADICTION_REVIEW_REQUEST_CONFLICT')
+    expect(readContradictionReviewReplay([retryReview(), null], retryRequest()).error).toBe('CONTRADICTION_REVIEW_LIMIT')
+    expect(readContradictionReviewReplay(Array(1001).fill(retryReview()), retryRequest()).error).toBe('CONTRADICTION_REVIEW_LIMIT')
+    expect(readContradictionReviewReplay([], retryRequest())).toEqual({ review: null })
+    expect(contradictionReviewRequestHash({ expectedUpdatedAt: 'bad' })).toBe('')
+  })
   test('requires an explicit current decision and preserves original records', () => {
     const original = structuredClone(evidence)
     expect(status()).toBe('UNREVIEWED')

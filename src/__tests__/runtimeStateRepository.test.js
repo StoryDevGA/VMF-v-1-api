@@ -35,6 +35,7 @@ await jest.unstable_mockModule('../services/outcomeFrameworkHandoffService.js', 
   FRAMEWORK_OUTCOME_HANDOFF_V2_PARITY_CONTRACT_VERSION,
   buildFrameworkOutcomeHandoffV2ParityDigest,
   buildOutcomePlanningRuntimeEvidence,
+  OUTCOME_PLANNING_EVIDENCE_VERSIONS: { V1: 'outcome-planning-evidence.v1', V2: 'outcome-planning-evidence.v2' },
 }))
 
 const {
@@ -56,6 +57,7 @@ const {
   getRuntimeStateRendererSections,
   getRuntimeStateSectionSummary,
   listRuntimeStateEvidenceObjects,
+  listRuntimeStateSources,
   __testables,
 } = await import('../services/runtimeStateRepository.js')
 
@@ -135,6 +137,12 @@ const collectionSpy = jest.spyOn(mongoose.connection, 'collection').mockImplemen
   return collection
 })
 
+const graphSessionSpy = jest.spyOn(mongoose, 'startSession').mockImplementation(async () => {
+  let active = false
+  return { startTransaction: () => { active = true }, inTransaction: () => active,
+    commitTransaction: async () => { active = false }, abortTransaction: async () => { active = false }, endSession: async () => {} }
+})
+
 beforeEach(() => {
   getRuntimeInstance.mockReset()
   buildOutcomePlanningRuntimeEvidence.mockClear()
@@ -172,6 +180,169 @@ beforeEach(() => {
 
 afterAll(() => {
   collectionSpy.mockRestore()
+  graphSessionSpy.mockRestore()
+})
+
+describe('SS-042 bounded canonical source reads', () => {
+  const input = { scopes: SCOPES, runtimeInstanceId: RUNTIME_ID }
+  const setup = (count = 36, contribution = 853) => {
+    const sources = collections.get(RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_SOURCES)
+    sources.countDocuments = jest.fn().mockResolvedValue(count)
+    const evidence = collections.get(RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_OBJECTS)
+    evidence.aggregate = jest.fn().mockReturnValue({
+      toArray: jest.fn().mockResolvedValue([{ _id: 'source-1', count: contribution,
+        invalidRuntimeIdentityCount: 0,
+        versions: ['runtime-revision:1'], sourceVersions: ['runtime-revision:1'] }]),
+    })
+    return { sources, evidence }
+  }
+  test('projects recorded document receipt and filename without a verified processing count', async () => {
+    const { sources } = setup(1, 0)
+    const receipt = { contractVersion: 'document-processing-receipt.v1',
+      runId: '123e4567-e89b-42d3-a456-426614174000', inputIndex: 0, contentHash: `sha256:${'a'.repeat(64)}` }
+    sources.find.mockReturnValue(makeCursor([{ sourceId: 'source-1', sourceType: 'UPLOADED_DOCUMENT',
+      sourceRef: 'synthetic.txt', contentHash: receipt.contentHash, processingReceipt: receipt,
+      current: true, stateStatus: 'CURRENT', stateVersion: 'runtime-revision:1', sourceStateVersion: 'runtime-revision:1' }]))
+    const result = await listRuntimeStateSources(input)
+    expect(result.sourceRegistry[0]).toMatchObject({ sourceRef: 'synthetic.txt', fileName: 'synthetic.txt', processingReceipt: receipt })
+    expect(result).not.toHaveProperty('documentsProcessed')
+  })
+  test.each([null, { raw: 'unexpected storage material' }, { contractVersion: 'wrong' }])('rejects malformed stored processing receipt without exposing its content', async processingReceipt => {
+    const { sources } = setup(1, 0)
+    sources.find.mockReturnValue(makeCursor([{ sourceId: 'source-1', sourceType: 'UPLOADED_DOCUMENT', processingReceipt,
+      current: true, stateStatus: 'CURRENT', stateVersion: 'runtime-revision:1', sourceStateVersion: 'runtime-revision:1' }]))
+    await expect(listRuntimeStateSources(input)).rejects.toMatchObject({ status: 503,
+      code: RUNTIME_STATE_V2_ERROR_CODES.STORAGE_UNAVAILABLE })
+  })
+  test('reads source-first with one scoped aggregate and real contribution totals', async () => {
+    const { sources, evidence } = setup()
+    const result = await listRuntimeStateSources({ ...input, page: 2, pageSize: 10 })
+    expect(result).toMatchObject({ total: 36, totalPages: 4, hasMore: true,
+      completeness: 'COMPLETE', currency: 'AS_READ',
+      sourceRegistry: [{ sourceId: 'source-1', evidenceObjectCount: 853 }] })
+    const cursor = sources.find.mock.results[0].value
+    expect(cursor.skip).toHaveBeenCalledWith(10)
+    expect(cursor.limit).toHaveBeenCalledWith(10)
+    expect(evidence.find).not.toHaveBeenCalled()
+    expect(evidence.aggregate).toHaveBeenCalledTimes(1)
+    const [pipeline, options] = evidence.aggregate.mock.calls[0]
+    expect(pipeline[0].$match).toMatchObject({ sourceId: { $in: ['source-1'] },
+      $and: expect.any(Array), $or: expect.any(Array) })
+    expect(pipeline.at(-1)).toEqual({ $limit: 1 })
+    expect(options.maxTimeMS).toBeLessThanOrEqual(2000)
+    expect(result.readReceipt.fullLegacyFrameworkStateFetched).toBe(false)
+  })
+  test.each([
+    { runtimeInstanceId: '64b000000000000000000099' }, { runtimeInstanceKey: 'wrong-revision' },
+    { runtimeInstanceId: null }, { runtimeInstanceKey: '' },
+  ])('rejects contradictory present source identity before returning content: %j', async identity => {
+    const { sources, evidence } = setup(1, 0)
+    sources.find.mockReturnValue(makeCursor([{ sourceId: 'source-1', title: 'Not returned',
+      runtimeInstanceId: RUNTIME_ID, runtimeInstanceKey: 'runtime-one', ...identity,
+      current: true, stateVersion: 'runtime-revision:1', sourceStateVersion: 'runtime-revision:1' }]))
+    await expect(listRuntimeStateSources(input)).rejects.toMatchObject({
+      code: RUNTIME_STATE_V2_ERROR_CODES.EVIDENCE_SOURCE_MISSING,
+    })
+    expect(evidence.aggregate).not.toHaveBeenCalled()
+  })
+  test('preserves missing runtime ID compatibility when the recorded runtime key matches', async () => {
+    const { sources } = setup(1, 0)
+    sources.find.mockReturnValue(makeCursor([{ sourceId: 'source-1', runtimeInstanceKey: 'runtime-one',
+      current: true, stateVersion: 'runtime-revision:1', sourceStateVersion: 'runtime-revision:1' }]))
+    expect(await listRuntimeStateSources(input)).toMatchObject({ completeness: 'COMPLETE', sourceRegistry: [{ sourceId: 'source-1' }] })
+  })
+  test.each([1, undefined, -1, '0'])('rejects invalid contribution identity count %j', async invalidRuntimeIdentityCount => {
+    const { evidence } = setup(1, 0)
+    evidence.aggregate.mockReturnValue({ toArray: jest.fn().mockResolvedValue([
+      { _id: 'source-1', count: 1, invalidRuntimeIdentityCount,
+        versions: ['runtime-revision:1'], sourceVersions: ['runtime-revision:1'] },
+    ]) })
+    await expect(listRuntimeStateSources(input)).rejects.toMatchObject({
+      code: RUNTIME_STATE_V2_ERROR_CODES.EVIDENCE_SOURCE_MISSING,
+    })
+  })
+  test('applies literal search before paging without replacing scope or currentness', async () => {
+    const { sources } = setup()
+    await listRuntimeStateSources({ ...input, search: 'a.*[$]' })
+    const filter = sources.find.mock.calls[0][0]
+    expect(filter.$or).toContainEqual({ current: true })
+    expect(filter.$and).toHaveLength(4)
+    expect(JSON.stringify(filter.$and.slice(0, 3))).toContain(CUSTOMER_ID)
+    expect(JSON.stringify(filter.$and.slice(0, 3))).toContain(TENANT_ID)
+    expect(filter.$and[3].$or[0]).toEqual({
+      sourceId: { $regex: 'a\\.\\*\\[\\$\\]', $options: 'i' },
+    })
+    expect(sources.countDocuments.mock.calls[0][0]).toEqual(filter)
+  })
+  test.each([{ search: {} }, { search: ['one'] }, { sourceId: 1 },
+    { sourceType: 'x'.repeat(101) }, { search: 'x'.repeat(241) }, { pageSize: 51 },
+    { page: ['1'] }, { page: true }, { pageSize: {} }])(
+    'rejects malformed bounded queries before storage: %j', async query => {
+      await expect(listRuntimeStateSources({ ...input, ...query })).rejects.toMatchObject({ status: 400 })
+      expect(getRuntimeInstance).not.toHaveBeenCalled()
+    })
+  test('does not fabricate capped totals or navigation', async () => {
+    setup(1001, 1001)
+    const result = await listRuntimeStateSources(input)
+    expect(result).toMatchObject({ total: null, totalCapped: true, totalPages: null,
+      hasMore: null, completeness: 'PARTIAL',
+      sourceRegistry: [{ evidenceObjectCount: null, evidenceCountCapped: true }] })
+  })
+  test('returns a verified empty registry without reading evidence', async () => {
+    const { sources, evidence } = setup(0)
+    sources.find.mockReturnValue(makeCursor([]))
+    expect(await listRuntimeStateSources(input)).toMatchObject({ total: 0, sourceRegistry: [],
+      completeness: 'COMPLETE', hasMore: false })
+    expect(evidence.aggregate).not.toHaveBeenCalled()
+    await expect(listRuntimeStateSources({ ...input, sourceId: 'unknown' })).rejects.toMatchObject({ status: 404 })
+  })
+  test('fails closed on aggregate failure instead of zero contributions', async () => {
+    const { evidence } = setup()
+    evidence.aggregate.mockReturnValue({ toArray: jest.fn().mockRejectedValue(new Error('timeout')) })
+    await expect(listRuntimeStateSources(input)).rejects.toMatchObject({
+      status: 503, code: RUNTIME_STATE_V2_ERROR_CODES.STORAGE_UNAVAILABLE,
+    })
+  })
+  test('rejects mixed contribution versions', async () => {
+    const { evidence } = setup()
+    evidence.aggregate.mockReturnValue({ toArray: jest.fn().mockResolvedValue([
+      { _id: 'source-1', count: 2, invalidRuntimeIdentityCount: 0, versions: ['runtime-revision:1', 'stale'],
+        sourceVersions: ['runtime-revision:1'] },
+    ]) })
+    await expect(listRuntimeStateSources(input)).rejects.toMatchObject({
+      code: RUNTIME_STATE_V2_ERROR_CODES.STATE_VERSION_MIXED,
+    })
+  })
+  test('returns typed empty evidence search and rejects missing exact pairs', async () => {
+    const evidence = collections.get(RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_OBJECTS)
+    evidence.countDocuments = jest.fn().mockResolvedValue(0)
+    expect(await listRuntimeStateEvidenceObjects({ ...input, search: 'off-page needle' }))
+      .toMatchObject({ evidenceObjects: [], total: 0, pageReceipt: { result: 'EMPTY_PAGE' } })
+    const filter = evidence.find.mock.calls[0][0]
+    expect(filter.$and).toHaveLength(4)
+    expect(filter.$or).toContainEqual({ current: true })
+    await expect(listRuntimeStateEvidenceObjects({ ...input, sourceId: 'wrong',
+      evidenceObjectId: 'exact' })).rejects.toMatchObject({ status: 404 })
+  })
+  test('distinguishes a valid empty source from an unknown source', async () => {
+    const evidence = collections.get(RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_OBJECTS)
+    evidence.countDocuments = jest.fn().mockResolvedValue(0)
+    expect(await listRuntimeStateEvidenceObjects({ ...input, sourceId: 'source-1' }))
+      .toMatchObject({ total: 0, evidenceObjects: [] })
+    collections.get(RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_SOURCES).find.mockReturnValue(makeCursor([]))
+    await expect(listRuntimeStateEvidenceObjects({ ...input, sourceId: 'unknown' }))
+      .rejects.toMatchObject({ status: 404 })
+  })
+  test('rejects contradictory contribution currentness', async () => {
+    const { evidence } = setup()
+    evidence.aggregate.mockReturnValue({ toArray: jest.fn().mockResolvedValue([
+      { _id: 'source-1', count: 2, invalidCurrentCount: 1, invalidRuntimeIdentityCount: 0,
+        versions: ['runtime-revision:1'], sourceVersions: ['runtime-revision:1'] },
+    ]) })
+    await expect(listRuntimeStateSources(input)).rejects.toMatchObject({
+      code: RUNTIME_STATE_V2_ERROR_CODES.EVIDENCE_SOURCE_CURRENTNESS_INVALID,
+    })
+  })
 })
 
 describe('SS-040 complete inventory with bounded section projection', () => {
@@ -1132,6 +1303,10 @@ describe('runtime State Storage V2 repository', () => {
     })
     expect(result.source).toBe('runtime_state_v2.graph_manifest')
     expect(result.readReceipt).toEqual({
+      maxTimeMS: 2000,
+      requestTimeoutMS: 6000,
+      workTimeoutMS: 5500,
+      cleanupReserveMS: 500,
       source: 'runtime_state_v2.graph_manifest',
       serializedPayloadBytes: expect.any(Number),
       maxSerializedPayloadBytes: RUNTIME_STATE_V2_MAX_SERIALIZED_READ_BYTES,
@@ -1474,7 +1649,7 @@ describe('runtime State Storage V2 repository', () => {
     expect(result.stateVersion).toBe('runtime-revision:1')
     expect(buildOutcomePlanningRuntimeEvidence).toHaveBeenCalledWith({ runtimeInstance: expect.objectContaining({
       framework_state: expect.objectContaining({ sections: {} }),
-    }), frameworkPackage, handoff: { status: 'BLOCKED' } })
+    }), frameworkPackage, handoff: { status: 'BLOCKED' }, planningEvidenceVersion: 'outcome-planning-evidence.v1' })
     for (const [call] of getRuntimeInstance.mock.calls) {
       expect(call.projection.split(' ')).not.toContain('framework_state')
       expect(call.projection.split(' ')).not.toContain('framework_state.sections')

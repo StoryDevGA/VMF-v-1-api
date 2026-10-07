@@ -88,9 +88,17 @@ import {
   getRuntimeStateControl,
   getRuntimeStateGraphManifest as readRuntimeStateGraphManifest,
   getRuntimeStateGraphProjection as readRuntimeStateGraphProjection,
+  getRuntimeStateGraphNeighbourhood as readRuntimeStateGraphNeighbourhood,
   getRuntimeStateOutcomeHandoffReadiness as readRuntimeStateOutcomeHandoffReadiness,
   getRuntimeStateSectionSummary as readRuntimeStateSectionSummary,
   listRuntimeStateEvidenceObjects,
+  listRuntimeStateSources,
+  getRuntimeStateSourceSummary as readRuntimeStateSourceSummary,
+  getRuntimeStateDiscoveryHealth as readRuntimeStateDiscoveryHealth,
+  getRuntimeStateLockBasis as readRuntimeStateLockBasis,
+  getRuntimeStateContradictionHistory as readRuntimeStateContradictionHistory,
+  getRuntimeStateFindings as readRuntimeStateFindings,
+  getRuntimeStateEvidenceInventory as readRuntimeStateEvidenceInventory,
 } from '../services/runtimeStateRepository.js'
 
 const buildRuntimeInstanceErrorResponse = (req, err) => ({
@@ -485,6 +493,54 @@ export const getRuntimeStateEvidencePage = async (req, res, next) => sendRuntime
     pageSize: req.query.pageSize,
     reviewStatus: req.query.reviewStatus,
     acceptanceState: req.query.acceptanceState,
+    sourceId: req.query.sourceId,
+    evidenceObjectId: req.query.evidenceObjectId,
+    search: req.query.search,
+  }),
+})
+
+export const getRuntimeStateSourceSummary = async (req, res, next) => sendRuntimeStateRead({
+  req, res, next,
+  read: () => readRuntimeStateSourceSummary({ scopes: getRuntimeStateRequestScopes(req),
+    runtimeInstanceId: req.params.runtimeInstanceId }),
+})
+
+export const getRuntimeStateEvidenceInventory = async (req, res, next) => sendRuntimeStateRead({
+  req, res, next,
+  read: () => readRuntimeStateEvidenceInventory({ scopes: getRuntimeStateRequestScopes(req),
+    runtimeInstanceId: req.params.runtimeInstanceId }),
+})
+
+export const getRuntimeStateDiscoveryHealth = async (req, res, next) => sendRuntimeStateRead({
+  req, res, next,
+  read: () => readRuntimeStateDiscoveryHealth({ scopes: getRuntimeStateRequestScopes(req),
+    runtimeInstanceId: req.params.runtimeInstanceId }),
+})
+
+export const getRuntimeStateLockBasis = async (req, res, next) => sendRuntimeStateRead({
+  req, res, next,
+  read: () => readRuntimeStateLockBasis({ scopes: getRuntimeStateRequestScopes(req),
+    runtimeInstanceId: req.params.runtimeInstanceId }),
+})
+
+export const getRuntimeStateContradictionHistory = async (req, res, next) => sendRuntimeStateRead({
+  req, res, next,
+  read: () => readRuntimeStateContradictionHistory({ scopes: getRuntimeStateRequestScopes(req),
+    runtimeInstanceId: req.params.runtimeInstanceId, findingId: req.query.findingId,
+    page: req.query.page, pageSize: req.query.pageSize }),
+})
+
+export const getRuntimeStateFindings = async (req, res, next) => sendRuntimeStateRead({ req, res, next,
+  read: () => readRuntimeStateFindings({ scopes: getRuntimeStateRequestScopes(req), runtimeInstanceId: req.params.runtimeInstanceId,
+    ...Object.fromEntries(['search', 'type', 'population', 'sort', 'page', 'pageSize'].map(field => [field, req.query[field]])) }),
+})
+
+export const getRuntimeStateSourceRegistry = async (req, res, next) => sendRuntimeStateRead({
+  req, res, next,
+  read: () => listRuntimeStateSources({
+    scopes: getRuntimeStateRequestScopes(req), runtimeInstanceId: req.params.runtimeInstanceId,
+    page: req.query.page, pageSize: req.query.pageSize, search: req.query.search,
+    sourceId: req.query.sourceId, sourceType: req.query.sourceType,
   }),
 })
 
@@ -505,6 +561,16 @@ export const getRuntimeStateGraphProjection = async (req, res, next) => sendRunt
   read: () => readRuntimeStateGraphProjection({
     scopes: getRuntimeStateRequestScopes(req),
     runtimeInstanceId: req.params.runtimeInstanceId,
+  }),
+})
+
+export const getRuntimeStateGraphNeighbourhood = async (req, res, next) => sendRuntimeStateRead({
+  req, res, next,
+  read: () => readRuntimeStateGraphNeighbourhood({
+    scopes: getRuntimeStateRequestScopes(req), runtimeInstanceId: req.params.runtimeInstanceId,
+    nodeId: req.query.nodeId, evidenceObjectId: req.query.evidenceObjectId,
+    mode: req.query.mode, graphHash: req.query.graphHash,
+    ...(req.query.afterEdgeKey ? { afterEdgeKey: req.query.afterEdgeKey } : {}),
   }),
 })
 

@@ -61,6 +61,9 @@ import {
   resolveOutcomeStudioKnowledgeContext,
 } from './outcomeStudioKnowledgeContextService.js'
 import { assertOutcomeKnowledgeCompositionPlanIntegrity } from './outcomeKnowledgeCompositionPlanService.js'
+import { readRuntimeEvidenceToMeaningContract, assertRuntimeEvidenceToMeaningReady } from './outcomeRuntimeEvidenceToMeaningService.js'
+import { hashEvidenceToMeaningValue } from './outcomeEvidenceToMeaningContractService.js'
+import { projectOutcomeSelectedTargetBinding } from './outcomeSelectedTargetService.js'
 import {
   FRAMEWORK_OUTCOME_HANDOFF_BLOCKER_CODES,
   FRAMEWORK_OUTCOME_HANDOFF_STATUSES,
@@ -5288,6 +5291,45 @@ const buildConversationState = (readiness) => ({
   allowedActions: [],
 })
 
+const resolveRequestPlanEvidenceCompositionCheck = async ({ activeSession, runtimeScope, selectedTarget, scopes, deps = {} }) => {
+  const binding = activeSession?.requestPlan
+  if (!binding) return null
+  const blocked = (reason, clarification = null) => ({ passed: false, reason,
+    message: clarification?.questions?.[0]?.question || 'Re-resolve the confirmed request against current governed evidence before drafting.',
+    ...(clarification ? { clarification } : {}) })
+  try {
+    if (!binding.requestId || !binding.planId || !binding.planFingerprint
+      || ['tenantId', 'customerId', 'runtimeInstanceId'].some((key) => !runtimeScope?.[key])) return blocked('EVIDENCE_TO_MEANING_PLAN_SCOPE_INVALID')
+    const filter = { ...Object.fromEntries(['tenantId', 'customerId', 'runtimeInstanceId'].map((key) => [key, runtimeScope[key]])),
+      requestId: binding.requestId, planId: binding.planId, planFingerprint: binding.planFingerprint }
+    const plan = await (deps.findPlan || ((query) => OutcomeKnowledgeCompositionPlan.findOne(query).lean()))(filter)
+    if (!plan) return blocked('EVIDENCE_TO_MEANING_PLAN_NOT_CURRENT')
+    const contract = readRuntimeEvidenceToMeaningContract(plan, { required: false })
+    if (contract?.contractVersion !== 'evidence-to-draft.v2') return null
+    if (['tenantId', 'customerId', 'runtimeInstanceId'].some((key) => toIdString(plan[key]) !== toIdString(runtimeScope[key]))
+      || plan.requestId !== binding.requestId || plan.planId !== binding.planId || plan.planFingerprint !== binding.planFingerprint) return blocked('EVIDENCE_TO_MEANING_PLAN_SCOPE_INVALID')
+    ;(deps.assertPlan || assertOutcomeKnowledgeCompositionPlanIntegrity)(plan)
+    const latestFilter = { ...filter }; delete latestFilter.planId; delete latestFilter.planFingerprint
+    const latest = await (deps.findLatestPlan || ((query) => OutcomeKnowledgeCompositionPlan.findOne(query).sort({ planVersion: -1, createdAt: -1 }).lean()))(latestFilter)
+    if (!latest || latest.planId !== plan.planId || latest.planFingerprint !== plan.planFingerprint) return blocked('EVIDENCE_TO_MEANING_PLAN_NOT_CURRENT')
+    if (hashEvidenceToMeaningValue(contract.inputs.selectedTarget?.receipt) !== hashEvidenceToMeaningValue(selectedTarget)) return blocked('EVIDENCE_TO_MEANING_OUTPUT_CONTRACT_CHANGED')
+    await assertRuntimeEvidenceToMeaningReady({ plan, scopes, deps })
+    return { passed: true, reason: 'EVIDENCE_TO_DRAFT_READY', contractHash: contract.contractHash }
+  } catch (failure) {
+    return blocked('EVIDENCE_TO_MEANING_CLARIFICATION_REQUIRED', failure.details?.clarification)
+  }
+}
+
+const buildDraftProviderCompositionCheck = ({ engineEnabled, provider }) => !engineEnabled
+  ? { passed: false, reason: 'DRAFTING_ENGINE_DISABLED', message: 'Draft generation is blocked because the governed drafting engine is disabled.' }
+  : provider.configured
+    ? { passed: true }
+    : { passed: false, reason: provider.reason, message: provider.reason === 'PRODUCTION_NOT_AUTHORIZED'
+      ? 'Draft generation is blocked because live drafting is not authorized in this environment.'
+      : provider.reason === 'PROVIDER_DISABLED'
+        ? 'Draft generation is blocked because the drafting provider is disabled.'
+        : 'Draft generation is blocked because the drafting provider configuration is incomplete.' }
+
 const buildOutcomeStudioProjection = async ({
   assets = [],
   outputLab,
@@ -5376,7 +5418,7 @@ const buildOutcomeStudioProjection = async ({
         frameworkVersion: outputLab.runtimeScope.packageVersion,
         resolution: activeSession.outputContract,
       })
-      await resolveOutcomeStudioCompositionInputs({
+      const compositionInputs = await resolveOutcomeStudioCompositionInputs({
         binding: resolved.reasoningBinding,
         knowledgeContext: resolved.context,
         requestedOutputTypeKey,
@@ -5387,23 +5429,23 @@ const buildOutcomeStudioProjection = async ({
       const evidenceReadiness = frameworkHandoff?.evidenceReadiness
         || frameworkHandoff?.customerSafe?.evidenceReadiness
         || {}
-      if (Number(evidenceReadiness.unresolvedContradictionCount || 0) > 0) {
+      const selectedTarget = activeSession.requestPlan ? projectOutcomeSelectedTargetBinding({ contract: {
+        outputType: { ...compositionInputs.outputType, actualContentHash: compositionInputs.outputType.contentHash },
+        schema: { ...compositionInputs.schema, actualContentHash: compositionInputs.schema.contentHash },
+        schemaProjection: compositionInputs.schemaProjection } }).receipt : null
+      const requestCompositionCheck = await resolveRequestPlanEvidenceCompositionCheck({
+        activeSession, runtimeScope: outputLab.runtimeScope, selectedTarget, scopes })
+      if (requestCompositionCheck?.passed === false) {
+        compositionCheck = requestCompositionCheck
+      } else if (!requestCompositionCheck && Number(evidenceReadiness.unresolvedContradictionCount || 0) > 0) {
         compositionCheck = {
           passed: false,
           reason: 'COMPOSITION_CONTRADICTION_UNRESOLVED',
-          message: `Draft generation is blocked because ${Number(evidenceReadiness.unresolvedContradictionCount)} governed evidence contradictions remain unresolved.`,
+          message: `Draft generation is blocked because ${Number(evidenceReadiness.unresolvedContradictionCount)} governed evidence contradiction candidates require review.`,
         }
       } else {
         const provider = buildOutcomeStudioProviderRuntime().status
-        compositionCheck = !isOutcomeStudioGrrEnabled()
-          ? { passed: false, reason: 'DRAFTING_ENGINE_DISABLED', message: 'Draft generation is blocked because the governed drafting engine is disabled.' }
-          : provider.configured
-            ? { passed: true }
-            : { passed: false, reason: provider.reason, message: provider.reason === 'PRODUCTION_NOT_AUTHORIZED'
-              ? 'Draft generation is blocked because live drafting is not authorized in this environment.'
-              : provider.reason === 'PROVIDER_DISABLED'
-                ? 'Draft generation is blocked because the drafting provider is disabled.'
-                : 'Draft generation is blocked because the drafting provider configuration is incomplete.' }
+        compositionCheck = buildDraftProviderCompositionCheck({ engineEnabled: isOutcomeStudioGrrEnabled(), provider })
       }
     } catch (error) {
       const reason = normalizeToken(error.reason || error.code)
@@ -11537,6 +11579,8 @@ export const updateRuntimeOutcomeSessionFromLatestTruth = async ({
 }
 
 export const __testables = Object.freeze({
+  buildDraftProviderCompositionCheck,
+  resolveRequestPlanEvidenceCompositionCheck,
   buildConfirmedPlanMessageLookup,
   buildGovernedDraftCustomerContent,
   buildSafetyGates,

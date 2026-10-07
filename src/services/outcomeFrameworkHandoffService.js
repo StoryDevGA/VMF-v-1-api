@@ -16,6 +16,9 @@ import {
 export const FRAMEWORK_OUTCOME_HANDOFF_CONTRACT_VERSION =
   'ss-011.framework-to-outcome-studio.evidence-to-knowledge.v1'
 export const FRAMEWORK_OUTCOME_HANDOFF_POLICY_VERSION = 'ss-011.claim-boundary-policy.v1'
+export const OUTCOME_PLANNING_EVIDENCE_VERSIONS = Object.freeze({
+  V1: 'outcome-planning-evidence.v1', V2: 'outcome-planning-evidence.v2',
+})
 
 export const FRAMEWORK_OUTCOME_HANDOFF_STATUSES = Object.freeze({
   READY: 'READY',
@@ -946,10 +949,12 @@ const buildBlockedHandoff = ({
 
 // Internal planning evidence only: package declarations classify sections, never
 // hardcoded names or a filter which silently drops unaccepted customer truth.
-export const buildOutcomePlanningRuntimeEvidence = ({ runtimeInstance, frameworkPackage, handoff = null }) => {
+export const buildOutcomePlanningRuntimeEvidence = ({ runtimeInstance, frameworkPackage, handoff = null,
+  planningEvidenceVersion = OUTCOME_PLANNING_EVIDENCE_VERSIONS.V1 }) => {
   const runtime = runtimeInstance
   const sections = frameworkPackage?.sections
   const fail = () => { throw Object.assign(new Error('Canonical planning evidence is unavailable.'), { status: 409, code: 'OUTCOME_PLANNING_TRUTH_BLOCKED' }) }
+  if (!Object.values(OUTCOME_PLANNING_EVIDENCE_VERSIONS).includes(planningEvidenceVersion)) fail()
   if (!runtime || !Array.isArray(sections) || !sections.length
     || normalizeText(frameworkPackage.packageKey) !== normalizeText(runtime.packageKey)
     || normalizeText(frameworkPackage.version) !== normalizeText(runtime.packageVersion)) fail()
@@ -997,10 +1002,13 @@ export const buildOutcomePlanningRuntimeEvidence = ({ runtimeInstance, framework
     ...runtime, _id: runtime._id || runtime.id,
     framework_state: { ...state, sections: truthSections },
     planningEvidence: {
-      contractVersion: 'outcome-planning-evidence.v1',
+      contractVersion: planningEvidenceVersion,
       stateVersion: normalizeText(runtime.stateVersion || runtime.runtimeStateVersion),
       packageKey: runtime.packageKey, packageVersion: runtime.packageVersion,
       frameworkHandoff: {
+        ...(planningEvidenceVersion === OUTCOME_PLANNING_EVIDENCE_VERSIONS.V2
+          && handoff && Object.hasOwn(handoff, 'claimBoundaries')
+          ? { claimBoundaries: JSON.parse(JSON.stringify(handoff.claimBoundaries)) } : {}),
         outputAssetId: handoffHash ? `framework_handoff_${handoffHash.replace(/^sha256:/i, '')}` : '',
         handoffId: normalizeText(handoff?.handoffId),
         handoffHash,

@@ -39,7 +39,7 @@ const normalizeCustomerTopology = (value) => {
     : null
 }
 
-const resolveCustomerContext = async ({ customerId, customer = null, session } = {}) => {
+const resolveCustomerContext = async ({ customerId, customer = null, session, maxTimeMS, readBudget } = {}) => {
   const normalizedCustomerId = toIdString(customerId || customer?._id || customer?.id)
   if (!normalizedCustomerId) return null
 
@@ -74,6 +74,8 @@ const resolveCustomerContext = async ({ customerId, customer = null, session } =
   const customerQuery = Customer.findById(normalizedCustomerId).select(
     '_id topology vmfPolicy defaultTenantId status isServiceProvider licenseLevelId entitlements governance',
   )
+  if (maxTimeMS !== undefined) customerQuery.maxTimeMS(maxTimeMS)
+  if (readBudget) customerQuery.setOptions(readBudget())
   const customerDoc = await (session ? customerQuery.session(session) : customerQuery)
 
   if (!customerDoc) return null
@@ -92,7 +94,7 @@ const resolveCustomerContext = async ({ customerId, customer = null, session } =
   }
 }
 
-const resolveLicenseLevelEntitlements = async (licenseLevelId, session) => {
+const resolveLicenseLevelEntitlements = async (licenseLevelId, session, maxTimeMS, readBudget) => {
   const normalizedLicenseLevelId = toIdString(licenseLevelId)
   if (!normalizedLicenseLevelId) {
     return {
@@ -119,6 +121,8 @@ const resolveLicenseLevelEntitlements = async (licenseLevelId, session) => {
   const licenseQuery = LicenseLevel.findById(normalizedLicenseLevelId).select(
     '_id isActive featureEntitlements homeExperience',
   )
+  if (maxTimeMS !== undefined) licenseQuery.maxTimeMS(maxTimeMS)
+  if (readBudget) licenseQuery.setOptions(readBudget())
   const licenseLevel = await (session ? licenseQuery.session(session) : licenseQuery)
 
   if (!licenseLevel) {
@@ -140,11 +144,11 @@ const resolveLicenseLevelEntitlements = async (licenseLevelId, session) => {
   }
 }
 
-export const resolveCustomerFeatureEntitlements = async ({ customerId, customer = null, session } = {}) => {
-  const customerContext = await resolveCustomerContext({ customerId, customer, session })
+export const resolveCustomerFeatureEntitlements = async ({ customerId, customer = null, session, maxTimeMS, readBudget } = {}) => {
+  const customerContext = await resolveCustomerContext({ customerId, customer, session, maxTimeMS, readBudget })
   if (!customerContext) return null
 
-  const licenseContext = await resolveLicenseLevelEntitlements(customerContext.licenseLevelId, session)
+  const licenseContext = await resolveLicenseLevelEntitlements(customerContext.licenseLevelId, session, maxTimeMS, readBudget)
 
   if (licenseContext.licenseLevelId && licenseContext.licenseLevelActive !== true) {
     return {

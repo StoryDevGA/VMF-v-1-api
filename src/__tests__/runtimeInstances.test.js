@@ -1933,6 +1933,15 @@ const installDefaultRuntimeStateCollections = () => {
 }
 
 beforeAll(async () => {
+  // This mounted legacy suite isolates acquisition persistence explicitly.
+  // Real Run/index/transaction/race proof lives in acquisitionRun.integration.test.js.
+  await jest.unstable_mockModule('../services/acquisitionRunService.js', () => ({
+    // This fixture does not prove processing receipt binding or Run persistence.
+    bindAcquisitionSourceProcessing: jest.fn((_context, pack) => pack),
+    lookupAcquisitionRequest: jest.fn().mockResolvedValue(null), startAcquisitionRun: jest.fn(),
+    executeAcquisitionBuild: jest.fn(), withAcquisitionTransaction: jest.fn(), recordAcquisitionTerminal: jest.fn(),
+    readCommittedAcquisition: jest.fn(), handleAcquisitionFailure: jest.fn(), getAcquisitionRuns: jest.fn(), getAcquisitionRun: jest.fn(),
+  }))
   mockRedisClient = {
     set: jest.fn(),
     setex: jest.fn(),
@@ -5335,11 +5344,12 @@ describe('Runtime Instance API', () => {
 
     expect(persistedEvidencePack.evidence.source).toBe('DISCOVERY_INPUTS_AND_DOCUMENT_INGESTION')
     expect(persistedEvidencePack.acquisition).toEqual(expect.objectContaining({
-      documentAcquisition: {
+      documentAcquisition: expect.objectContaining({
         status: 'ACQUIRED',
         sourceCount: 1,
         evidenceProduced: documentEvidenceObjects.length,
-      },
+        latestAttempt: expect.objectContaining({ inputCount: 1, succeededCount: 1, failedCount: 0 }),
+      }),
       confidence: expect.objectContaining({
         level: 'SOURCE_BACKED',
         basis: expect.arrayContaining(['UPLOADED_DOCUMENT_INGESTION']),
@@ -5861,13 +5871,303 @@ describe('Runtime Instance API', () => {
         reviewStatus: 'PENDING',
       }),
     ]))
-    expect(persistedEvidencePack.acquisition.documentAcquisition).toEqual({
+    expect(persistedEvidencePack.acquisition.documentAcquisition).toEqual(expect.objectContaining({
       status: 'ACQUIRED',
       sourceCount: 2,
       evidenceProduced: documentEvidenceObjects.length,
-    })
+      latestAttempt: expect.objectContaining({ inputCount: 1, succeededCount: 1, failedCount: 0 }),
+    }))
     expect(persistedEvidencePack.evidence.source).toBe('DISCOVERY_INPUTS_AND_DOCUMENT_INGESTION')
     expect(JSON.stringify(persistedEvidencePack)).not.toContain('textContent')
+  })
+
+  test.each([
+    ['legacy', 'partial'], ['action', 'partial'], ['legacy', 'zero'], ['action', 'zero'],
+  ])('%s acquisition preserves %s document item outcomes through the shared builder', async (entry, scenario) => {
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: { lifecycle: { stage: 'DRAFT' }, evidence_pack: {}, sections: {},
+        validation: {}, readiness: {}, policy: {}, attachments: {}, artifacts: {} },
+    })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('BUILD_EVIDENCE_PACK')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord(), makeEvidencePackRuntimePathRecord()]))
+    RuntimePathRegistry.findOne.mockReturnValue(buildLeanQuery(makeEvidencePackRuntimePathRecord()))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({ actions: [makeUIAction('BUILD_EVIDENCE_PACK')] })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('BUILD_EVIDENCE_PACK')]))
+    const documentSources = scenario === 'zero'
+      ? [{ fileName: 'short.txt', mimeType: 'text/plain', textContent: 'abc' }]
+      : [
+          { fileName: 'first.txt', mimeType: 'text/plain', textContent: 'The synthetic business provides workflow monitoring services to test customers.' },
+          { fileName: 'invalid.exe', mimeType: 'application/octet-stream', textContent: 'Private invalid content' },
+          { fileName: 'third.txt', mimeType: 'text/plain', textContent: 'The synthetic customer requires reliable evidence review before making decisions.' },
+        ]
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+    const operation = entry === 'legacy'
+      ? request.patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/discovery-inputs`)
+      : request.post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/BUILD_EVIDENCE_PACK`)
+    const res = await operation.set('Authorization', `Bearer ${token}`).send({
+      expectedUpdatedAt: '2026-05-19T08:00:00.000Z', acquisitionProfile: 'STANDARD', documentSources,
+      inputs: { companyWebsite: 'https://acme.example', companyName: 'Acme', marketRegion: 'UK', targetOffer: 'Synthetic service', websiteSources: [] },
+    })
+    expect(res.status).toBe(200)
+    const pack = RuntimeInstance.findOneAndUpdate.mock.calls.at(-1)[1].$set.framework_state.evidence_pack
+    const documents = pack.sourceRegistry.filter(item => item.sourceType === 'UPLOADED_DOCUMENT')
+    expect(documents).toHaveLength(scenario === 'zero' ? 1 : 2)
+    expect(pack.acquisition.documentAcquisition.latestAttempt).toMatchObject({
+      contractVersion: 'document-extraction-outcomes.v1', inputCount: scenario === 'zero' ? 1 : 3,
+      succeededCount: scenario === 'zero' ? 1 : 2, failedCount: scenario === 'zero' ? 0 : 1,
+    })
+    if (scenario === 'zero') {
+      expect(documents[0].evidenceProduced).toBe(0)
+      expect(pack.evidenceObjects.filter(item => item.acquisitionMethod === 'DOCUMENT_INGESTION')).toEqual([])
+    } else {
+      expect(pack.acquisition.documentAcquisition.status).toBe('PARTIAL')
+      expect(pack.acquisition.documentAcquisition.latestAttempt.items.map(item => item.status)).toEqual(['SUCCEEDED', 'FAILED', 'SUCCEEDED'])
+    }
+    expect(JSON.stringify(pack)).not.toContain('Private invalid content')
+  })
+
+  test.each([
+    ['legacy', 'ACCEPTED', false], ['action', 'ACCEPTED', false],
+    ['legacy', 'REJECTED', false], ['action', 'REJECTED', false],
+    ['legacy', 'ACCEPTED', true], ['action', 'ACCEPTED', true],
+  ])('%s acquisition continuity preserves only unchanged %s decisions (changed=%s)', async (entry, status, changed) => {
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({
+      workflowBindings: [makeWorkflowBinding('BUILD_EVIDENCE_PACK')],
+    }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord(), makeEvidencePackRuntimePathRecord()]))
+    RuntimePathRegistry.findOne.mockReturnValue(buildLeanQuery(makeEvidencePackRuntimePathRecord()))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({ actions: [makeUIAction('BUILD_EVIDENCE_PACK')] })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('BUILD_EVIDENCE_PACK')]))
+    const inputs = { companyWebsite: 'https://acme.example', companyName: 'Synthetic company', marketRegion: 'UK',
+      targetOffer: 'Synthetic service', websiteSources: [] }
+    const document = { fileName: 'continuity.txt', mimeType: 'text/plain',
+      textContent: 'The synthetic business provides workflow monitoring services to test customers in the United Kingdom.' }
+    const { buildDiscoveryEvidencePack } = await import('../services/runtimeStateMutationService.js')
+    const basis = makeRuntimeInstanceDocument({ updatedAt: new Date('2026-05-19T08:00:00.000Z') })
+    const previous = await buildDiscoveryEvidencePack({ acquisitionProfile: 'STANDARD', inputs,
+      documentSources: [document], runtimeInstance: basis, actorUserId: CUSTOMER_ADMIN_ID })
+    previous.contradictionReviewEpoch = '22d6ffef-f0da-4ab9-b382-879ea3c81838'
+    previous.evidenceObjects = previous.evidenceObjects.map(item => ({ ...item, reviewStatus: status,
+      acceptedBy: status === 'ACCEPTED' ? CUSTOMER_ADMIN_ID : '',
+      acceptanceTimestamp: status === 'ACCEPTED' ? '2026-05-19T07:00:00.000Z' : '',
+      rejectedBy: status === 'REJECTED' ? CUSTOMER_ADMIN_ID : '',
+      rejectionTimestamp: status === 'REJECTED' ? '2026-05-19T07:00:00.000Z' : '',
+      auditRef: 'recorded-human-review', auditRefs: ['registration', 'recorded-human-review'],
+    }))
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({ updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: { lifecycle: { stage: 'DRAFT' }, evidence_pack: previous, sections: {},
+        validation: {}, readiness: {}, policy: {}, attachments: {}, artifacts: {} } })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+    const operation = entry === 'legacy'
+      ? request.patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/discovery-inputs`)
+      : request.post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/BUILD_EVIDENCE_PACK`)
+    const res = await operation.set('Authorization', `Bearer ${token}`).send({
+      expectedUpdatedAt: '2026-05-19T08:00:00.000Z', acquisitionProfile: 'STANDARD',
+      inputs: changed ? { ...inputs, companyName: 'Changed synthetic company' } : inputs,
+      documentSources: [changed ? { ...document, textContent: 'The changed synthetic business supplies accounting services to different test customers.' } : document],
+    })
+    expect(res.status).toBe(200)
+    const pack = RuntimeInstance.findOneAndUpdate.mock.calls.at(-1)[1].$set.framework_state.evidence_pack
+    expect(pack.contradictionReviewEpoch).toBe(previous.contradictionReviewEpoch)
+    const currentDocumentId = pack.acquisition.documentAcquisition.latestAttempt.items[0].sourceId
+    const currentDocument = pack.evidenceObjects.filter(item => item.sourceId === currentDocumentId)
+    expect(currentDocument.length).toBeGreaterThan(0)
+    expect(currentDocument.every(item => item.reviewStatus === (changed ? 'PENDING' : status))).toBe(true)
+    expect(pack.evidenceObjects.find(item => item.sourceId === 'input_companyName').reviewStatus)
+      .toBe(changed ? 'PENDING' : status)
+    const registry = pack.sourceRegistry.find(item => item.sourceId === currentDocumentId)
+    expect(registry.pendingEvidenceObjects).toBe(changed ? currentDocument.length : 0)
+    expect(registry.acceptedEvidenceObjects).toBe(!changed && status === 'ACCEPTED' ? currentDocument.length : 0)
+    expect(registry.rejectedEvidenceObjects).toBe(!changed && status === 'REJECTED' ? currentDocument.length : 0)
+    if (!changed) expect(currentDocument[0].auditRef).toBe('recorded-human-review')
+  })
+
+  test.each(['legacy', 'action'].flatMap(entry => ['STANDARD', 'ENHANCED'].flatMap(profile =>
+    ['partial', 'failed-web-document-success', 'removed-input', 'failed-only-success', 'changed-content', 'both-failed-retained', 'bad-retained-audit', 'duplicate-id-before', 'duplicate-id-after', 'duplicate-id-zero-document']
+      .map(scenario => [entry, profile, scenario]))))('%s %s website material continuity: %s', async (entry, profile, scenario) => {
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({ workflowBindings: [makeWorkflowBinding('BUILD_EVIDENCE_PACK')] }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord(), makeEvidencePackRuntimePathRecord()]))
+    RuntimePathRegistry.findOne.mockReturnValue(buildLeanQuery(makeEvidencePackRuntimePathRecord()))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({ actions: [makeUIAction('BUILD_EVIDENCE_PACK')] })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('BUILD_EVIDENCE_PACK')]))
+    mockEnhancedWebsiteFetch({ ok: scenario !== 'failed-only-success', status: scenario === 'failed-only-success' ? 503 : 200 })
+    const initialFetch = globalThis.fetch
+    globalThis.fetch = jest.fn(async url => ({ ...await initialFetch(url), url }))
+    const inputs = { companyWebsite: 'https://acme.example/', companyName: 'Synthetic business', marketRegion: 'UK', targetOffer: 'Synthetic service',
+      websiteSources: scenario === 'failed-only-success' ? ['https://acme.example/'] : ['https://acme.example/', 'https://second.example/'] }
+    const { buildDiscoveryEvidencePack } = await import('../services/runtimeStateMutationService.js')
+    const basis = makeRuntimeInstanceDocument({ updatedAt: new Date('2026-05-19T08:00:00.000Z') })
+    const previous = await buildDiscoveryEvidencePack({ acquisitionProfile: scenario === 'failed-only-success' ? 'STANDARD' : profile,
+      inputs, runtimeInstance: basis, actorUserId: CUSTOMER_ADMIN_ID })
+    previous.lineage.sources = previous.lineage.sources.map(item => item.type === 'WEBSITE_ACQUISITION'
+      ? { ...item, auditRef: 'prior-website-registration', auditRefs: ['prior-website-registration'] } : item)
+    previous.evidenceObjects = previous.evidenceObjects.map(item => item.acquisitionMethod === 'WEBSITE_ACQUISITION'
+      ? { ...item, reviewStatus: 'ACCEPTED', acceptedBy: CUSTOMER_ADMIN_ID, acceptanceTimestamp: '2026-05-19T07:00:00.000Z',
+          auditRef: 'prior-website-review', auditRefs: ['prior-website-review'] } : item)
+    if (scenario === 'bad-retained-audit') previous.evidenceObjects.find(item => item.acquisitionMethod === 'WEBSITE_ACQUISITION').auditRefs.push('prior-website-review')
+    if (scenario.startsWith('duplicate-id-')) {
+      const collision = { ...previous.evidenceObjects.find(item => item.acquisitionMethod === 'WEBSITE_ACQUISITION'),
+        acquisitionMethod: 'CUSTOMER_PROVIDED_INPUT', sourceId: 'input_companyName' }
+      if (scenario.endsWith('before')) previous.evidenceObjects.unshift(collision)
+      else previous.evidenceObjects.push(collision)
+    }
+    const priorWeb = previous.evidenceObjects.filter(item => item.acquisitionMethod === 'WEBSITE_ACQUISITION')
+    const firstSource = previous.lineage.sources.find(item => item.url === 'https://acme.example/' && item.type === 'WEBSITE_ACQUISITION')
+    const previousBytes = JSON.stringify(previous)
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({ updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: { lifecycle: { stage: 'DRAFT' }, evidence_pack: previous, sections: {}, validation: {}, readiness: {}, policy: {}, attachments: {}, artifacts: {} } })
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    mockEnhancedWebsiteFetch({ ok: true, status: 200 })
+    const successfulFetch = globalThis.fetch
+    mockEnhancedWebsiteFetch({ html: '<html><p>The changed synthetic company supplies accounting services to different test customers in the United Kingdom.</p></html>' })
+    const changedFetch = globalThis.fetch
+    globalThis.fetch = jest.fn(async url => ['failed-web-document-success', 'both-failed-retained'].includes(scenario) || ['partial', 'bad-retained-audit'].includes(scenario) && url.includes('acme.example')
+      ? { ok: false, status: 503, url, headers: { get: () => 'text/html' } }
+      : { ...await (scenario === 'changed-content' && url.includes('acme.example') ? changedFetch(url) : successfulFetch(url)), url })
+    const operation = entry === 'legacy' ? request.patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/discovery-inputs`)
+      : request.post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/BUILD_EVIDENCE_PACK`)
+    const res = await operation.set('Authorization', `Bearer ${await getAccessTokenForUser(makeCustomerAdmin())}`).send({
+      expectedUpdatedAt: '2026-05-19T08:00:00.000Z', acquisitionProfile: profile,
+      inputs: scenario === 'removed-input' ? { ...inputs, websiteSources: ['https://second.example/'] } : inputs,
+      ...(scenario === 'failed-web-document-success' ? { documentSources: [{ fileName: 'synthetic.txt', mimeType: 'text/plain',
+        textContent: 'The synthetic business provides workflow monitoring services to test customers in the United Kingdom.' }] } : {}),
+      ...(scenario === 'both-failed-retained' ? { documentSources: [{ fileName: 'invalid.exe', textContent: 'Synthetic invalid file' }] } : {}),
+      ...(scenario === 'duplicate-id-zero-document' ? { documentSources: [{ fileName: 'short.txt', mimeType: 'text/plain', textContent: 'abc' }] } : {}),
+    })
+    if (scenario === 'both-failed-retained') {
+      expect(res.status).toBe(422)
+      expect(res.body.error.details.acquisitionOutcomes).toEqual({
+        contractVersion: 'acquisition-error-outcomes.v1', canonicalSaved: false, briefComplete: true,
+        websiteItems: [0, 1].map(inputIndex => ({ inputIndex, status: 'FAILED', sourceId: expect.stringMatching(/^website_failed_/),
+          evidenceObjectCount: 0, reason: 'WEBSITE_ACQUISITION_FAILED' })),
+        documentItems: [{ inputIndex: 0, status: 'FAILED', evidenceObjectCount: 0, reason: 'DOCUMENT_EXTRACTION_FAILED' }],
+      })
+      expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+      expect(JSON.stringify(previous)).toBe(previousBytes)
+      return
+    }
+    if (scenario === 'bad-retained-audit' || scenario.startsWith('duplicate-id-')) {
+      expect(res.status).toBe(409)
+      expect(res.body.error.details.reason).toBe('ACQUISITION_CONTINUITY_BLOCKED')
+      const outcomes = res.body.error.details.acquisitionOutcomes
+      expect(outcomes.contractVersion).toBe('acquisition-error-outcomes.v1')
+      expect(outcomes.canonicalSaved).toBe(false)
+      expect(outcomes.documentItems).toEqual(scenario === 'duplicate-id-zero-document'
+        ? [{ inputIndex: 0, status: 'SUCCEEDED', sourceId: expect.stringMatching(/^document_/), evidenceObjectCount: 0 }] : [])
+      expect(outcomes.websiteItems).toHaveLength(2)
+      expect(outcomes.websiteItems.map(item => item.status)).toEqual(scenario === 'bad-retained-audit' ? ['FAILED', 'SUCCEEDED'] : ['SUCCEEDED', 'SUCCEEDED'])
+      expect(outcomes.websiteItems.map(item => item.inputIndex)).toEqual([0, 1])
+      expect(outcomes.websiteItems.filter(item => item.status === 'SUCCEEDED').every(item => item.evidenceObjectCount > 0)).toBe(true)
+      for (const item of outcomes.websiteItems) {
+        expect(Object.keys(item).sort()).toEqual((item.status === 'FAILED'
+          ? ['inputIndex', 'status', 'sourceId', 'evidenceObjectCount', 'reason']
+          : ['inputIndex', 'status', 'sourceId', 'evidenceObjectCount']).sort())
+      }
+      expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+      expect(JSON.stringify(previous)).toBe(previousBytes)
+      for (const action of ['RUNTIME_STATE_MUTATED', 'RUNTIME_ACTION_EXECUTED'])
+        expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({ action }))
+      return
+    }
+    expect(res.status).toBe(200)
+    const pack = RuntimeInstance.findOneAndUpdate.mock.calls.at(-1)[1].$set.framework_state.evidence_pack
+    const webSources = pack.lineage.sources.filter(item => item.type === 'WEBSITE_ACQUISITION')
+    const webRegistry = pack.sourceRegistry.filter(item => item.sourceType === 'WEBSITE' && !item.fieldKey)
+    expect(webSources).toHaveLength(scenario === 'failed-only-success' ? 1 : 2)
+    expect(webRegistry).toHaveLength(webSources.length)
+    expect(new Set(webSources.map(item => item.sourceId)).size).toBe(webSources.length)
+    const attempt = pack.acquisition.websiteAcquisition.latestAttempt
+    expect(attempt.contractVersion).toBe('website-acquisition-outcomes.v1')
+    expect(attempt.items).toHaveLength(scenario === 'removed-input' || scenario === 'failed-only-success' ? 1 : 2)
+    if (scenario === 'failed-only-success') {
+      expect(webSources[0].sourceId).not.toContain('website_failed_')
+      expect(pack.evidenceObjects.filter(item => item.acquisitionMethod === 'WEBSITE_ACQUISITION').every(item => item.reviewStatus === 'PENDING')).toBe(true)
+    } else if (scenario === 'changed-content') {
+      expect(pack.evidenceObjects.filter(item => item.sourceId === firstSource.sourceId).every(item => item.reviewStatus === 'PENDING')).toBe(true)
+      expect(webSources.find(item => item.sourceId === firstSource.sourceId).valueHash).not.toBe(firstSource.valueHash)
+      expect(pack.evidenceObjects.filter(item => item.acquisitionMethod === 'WEBSITE_ACQUISITION' && item.sourceId !== firstSource.sourceId).every(item => item.reviewStatus === 'ACCEPTED')).toBe(true)
+    } else {
+      expect(pack.evidenceObjects.filter(item => item.acquisitionMethod === 'WEBSITE_ACQUISITION').map(item => [item.evidenceObjectId, item.reviewStatus, item.auditRef]))
+        .toEqual(priorWeb.map(item => [item.evidenceObjectId, 'ACCEPTED', 'prior-website-review']))
+      if (scenario !== 'removed-input') expect(attempt.items[0]).toMatchObject({ status: 'FAILED', retainedPrior: true, evidenceObjectCount: 0,
+        retainedEvidenceObjectCount: priorWeb.filter(item => item.sourceId === firstSource.sourceId).length })
+      expect(webSources.find(item => item.sourceId === firstSource.sourceId)).toEqual(firstSource)
+      expect(webRegistry.every(item => item.acquisitionStatus === 'ACQUIRED')).toBe(true)
+    }
+    if (scenario === 'failed-web-document-success') {
+      expect(pack.acquisition.documentAcquisition.latestAttempt.items[0].status).toBe('SUCCEEDED')
+      expect(pack.acquisition.websiteAcquisition.evidenceProduced).toBe(0)
+      if (profile === 'ENHANCED') expect(pack.evidenceReady).toBe(false)
+    }
+    expect(JSON.stringify(previous)).toBe(previousBytes)
+  })
+
+  test.each(['legacy', 'action'].flatMap(entry => ['STANDARD', 'ENHANCED'].flatMap(profile =>
+    ['web-failed-document-succeeded', 'web-succeeded-document-failed', 'both-failed',
+      'web-failed-zero-facts', 'prior-lineage', 'prior-registry', 'web-partial-document-failed']
+      .map(scenario => [entry, profile, scenario]))))('%s %s combined acquisition outcomes: %s', async (entry, profile, scenario) => {
+    const webFailed = ['web-failed-document-succeeded', 'both-failed', 'web-failed-zero-facts', 'prior-lineage', 'prior-registry'].includes(scenario)
+    mockEnhancedWebsiteFetch({ ok: !webFailed, status: webFailed ? 503 : 200 })
+    if (scenario === 'web-partial-document-failed') {
+      const successfulFetch = globalThis.fetch
+      globalThis.fetch = jest.fn(async url => url.includes('unavailable.example')
+        ? { ok: false, status: 503, url, headers: { get: () => 'text/html' } }
+        : successfulFetch(url))
+    }
+    const previous = scenario === 'prior-lineage'
+      ? { lineage: { sources: [{ sourceId: 'prior-site', type: 'WEBSITE_ACQUISITION' }] },
+          evidenceObjects: [{ evidenceObjectId: 'prior-approved', sourceId: 'prior-site', reviewStatus: 'ACCEPTED' }] }
+      : scenario === 'prior-registry' ? { sourceRegistry: [{ sourceId: 'prior-site', sourceType: 'WEBSITE' }] } : {}
+    const runtimeInstanceDoc = makeRuntimeInstanceDocument({ updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: { lifecycle: { stage: 'DRAFT' }, evidence_pack: previous, sections: {},
+        validation: {}, readiness: {}, policy: {}, attachments: {}, artifacts: {} } })
+    const previousBytes = JSON.stringify(runtimeInstanceDoc.framework_state.evidence_pack)
+    mockRuntimeInstanceForActionExecution({ document: runtimeInstanceDoc })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({ workflowBindings: [makeWorkflowBinding('BUILD_EVIDENCE_PACK')] }))
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord(), makeEvidencePackRuntimePathRecord()]))
+    RuntimePathRegistry.findOne.mockReturnValue(buildLeanQuery(makeEvidencePackRuntimePathRecord()))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({ actions: [makeUIAction('BUILD_EVIDENCE_PACK')] })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('BUILD_EVIDENCE_PACK')]))
+    const documentFailed = ['web-succeeded-document-failed', 'both-failed', 'web-partial-document-failed'].includes(scenario)
+    const documentSources = [{ fileName: documentFailed ? 'bad.exe' : 'synthetic.txt',
+      mimeType: documentFailed ? 'application/octet-stream' : 'text/plain',
+      textContent: scenario === 'web-failed-zero-facts' ? 'abc'
+        : 'The synthetic business provides workflow monitoring services to test customers in the United Kingdom.' }]
+    const operation = entry === 'legacy' ? request.patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/discovery-inputs`)
+      : request.post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/BUILD_EVIDENCE_PACK`)
+    const res = await operation.set('Authorization', `Bearer ${await getAccessTokenForUser(makeCustomerAdmin())}`).send({
+      expectedUpdatedAt: '2026-05-19T08:00:00.000Z', acquisitionProfile: profile, documentSources,
+      inputs: { companyWebsite: 'https://acme.example', companyName: 'Synthetic business', marketRegion: 'UK', targetOffer: 'Synthetic service',
+        websiteSources: scenario === 'web-partial-document-failed' ? ['https://acme.example/', 'https://unavailable.example/'] : ['https://acme.example/'] },
+    })
+    const blocked = scenario.startsWith('prior-')
+    if (scenario === 'both-failed' || blocked) {
+      expect(res.status).toBe(blocked ? 409 : 422)
+      expect(res.body.error.details.documentItemOutcomes[0].status).toBe(documentFailed ? 'FAILED' : 'SUCCEEDED')
+      expect(res.body.error.details.websiteSourceFailures).toHaveLength(1)
+      if (blocked) expect(res.body.error.details.reason).toBe('ACQUISITION_CONTINUITY_BLOCKED')
+      expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+      expect(JSON.stringify(runtimeInstanceDoc.framework_state.evidence_pack)).toBe(previousBytes)
+      for (const action of ['RUNTIME_STATE_MUTATED', 'RUNTIME_ACTION_EXECUTED'])
+        expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({ action }))
+      return
+    }
+    expect(res.status).toBe(200)
+    const pack = RuntimeInstance.findOneAndUpdate.mock.calls.at(-1)[1].$set.framework_state.evidence_pack
+    const documents = pack.sourceRegistry.filter(item => item.sourceType === 'UPLOADED_DOCUMENT')
+    expect(documents).toHaveLength(documentFailed ? 0 : 1)
+    expect(pack.acquisition.documentAcquisition.latestAttempt.items[0].status).toBe(documentFailed ? 'FAILED' : 'SUCCEEDED')
+    expect(pack.acquisition.documentAcquisition.status).toBe(documentFailed ? 'FAILED' : 'ACQUIRED')
+    expect(pack.acquisition.websiteAcquisition.status).toBe(scenario === 'web-partial-document-failed' ? 'PARTIAL' : webFailed ? 'FAILED' : 'ACQUIRED')
+    if (documentFailed) expect(pack.acquisition.documentAcquisition.sourceCount).toBe(0)
+    if (profile === 'ENHANCED' && webFailed) expect(pack.evidenceReady).toBe(false)
+    if (scenario === 'web-failed-zero-facts') expect(documents[0].evidenceProduced).toBe(0)
+    expect(pack.evidenceObjects.every(item => item.reviewStatus === 'PENDING')).toBe(true)
   })
 
   test('PATCH /api/v1/runtime-instances/:id/discovery-inputs fails closed for unsupported document types', async () => {
@@ -5912,7 +6212,8 @@ describe('Runtime Instance API', () => {
     expect(res.body.error.details).toEqual(expect.objectContaining({
       reason: 'DOCUMENT_INGESTION_FAILED',
       acquisitionStatus: 'FAILED',
-      acquisitionError: 'Uploaded document must be PDF, PPTX, DOCX, or TXT.',
+      acquisitionError: 'Document ingestion failed for every submitted document.',
+      documentItemOutcomes: [expect.objectContaining({ inputIndex: 0, status: 'FAILED', reason: 'DOCUMENT_EXTRACTION_FAILED' })],
     }))
     expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
     expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
@@ -6941,6 +7242,13 @@ describe('Runtime Instance API', () => {
       const res = await get(f)
       expect(res.status).toBe(200)
       expect(res.body.data.canReview).toBe(true)
+      expect(res.body.data.canReviewEvidence).toBe(true)
+      expect(res.body.data.canAcquire).toBe(true)
+      expect(res.body.data.contractVersion).toBe('intelligence-review-actions.v1')
+      expect(res.body.data.control).toEqual({
+        id: RUNTIME_INSTANCE_ID, runtimeInstanceKey: f.root.runtimeInstanceKey,
+        customerId: CUSTOMER_ID, tenantId: TENANT_ID, stateVersion: f.root.stateVersion,
+      })
       expect(res.body.data.candidates).toHaveLength(1)
       expect(res.body.data.candidates[0]).toEqual(expect.objectContaining({
         contradictionId: f.candidate.contradictionId, evidencePairHash: f.body.expectedEvidencePairHash,
@@ -6973,6 +7281,18 @@ describe('Runtime Instance API', () => {
       assertNoWrite()
     })
 
+    test('GET permits acquisition before evidence is ready while review remains unavailable', async () => {
+      const f = await prepareGet()
+      f.root.framework_state.evidence_pack.evidenceReady = false
+      f.root.framework_state.evidence_pack.state.evidenceReady = false
+      const res = await get(f)
+      expect(res.status).toBe(200)
+      expect(res.body.data.canAcquire).toBe(true)
+      expect(res.body.data.canReview).toBe(false)
+      expect(res.body.data.canReviewEvidence).toBe(false)
+      assertNoWrite()
+    })
+
     test('GET reads locked pairs but denies review without changing history', async () => {
       const f = await prepareGet()
       f.root.status = 'LOCKED'
@@ -6980,6 +7300,8 @@ describe('Runtime Instance API', () => {
       const res = await get(f)
       expect(res.status).toBe(200)
       expect(res.body.data.canReview).toBe(false)
+      expect(res.body.data.canReviewEvidence).toBe(false)
+      expect(res.body.data.canAcquire).toBe(false)
       expect(res.body.data.candidates[0].evidence).toHaveLength(2)
       expect(res.body.data.candidates[0].evidencePairHash).toBe(f.body.expectedEvidencePairHash)
       expect(f.root.framework_state.evidence_pack.contradictionReviews).toEqual([])
@@ -7013,7 +7335,7 @@ describe('Runtime Instance API', () => {
       assertNoWrite()
     })
 
-    test.each(['discovery-reset', 'discovery-inputs'])('%s rotates epoch and retains decisions without reviving an identical pair', async (boundary) => {
+    test.each(['discovery-reset', 'discovery-inputs'])('%s retains history and respects reset versus acquisition epoch semantics', async (boundary) => {
       const f = await prepare()
       // Keep this route regression focused on evidence history rather than section reset behavior.
       f.getStored().framework_state.sections = {}
@@ -7037,14 +7359,21 @@ describe('Runtime Instance API', () => {
         .send({ ...body, expectedUpdatedAt: f.getStored().updatedAt.toISOString() })
       expect(res.status).toBe(200)
       const after = f.getStored().framework_state.evidence_pack
-      expect(after.contradictionReviewEpoch).toMatch(/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/)
-      expect(after.contradictionReviewEpoch).not.toBe(beforePack.contradictionReviewEpoch)
+      if (boundary === 'discovery-reset') {
+        expect(after.contradictionReviewEpoch).toMatch(/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/)
+        expect(after.contradictionReviewEpoch).not.toBe(beforePack.contradictionReviewEpoch)
+      } else expect(after.contradictionReviewEpoch).toBe(beforePack.contradictionReviewEpoch || '')
       expect(JSON.stringify(after.contradictionReviews)).toBe(history)
       // Re-evaluate identical original bytes against the actual persisted epoch; do not restore evidence.
       const replay = getDiscoveryContradictionReview(f.candidate, originalPair, after.contradictionReviews,
         RUNTIME_INSTANCE_ID, after.contradictionReviewEpoch)
-      expect(replay.reviewStatus).toBe('STALE')
-      expect(replay.evidencePairHash).not.toBe(f.body.expectedEvidencePairHash)
+      expect(replay.reviewStatus).toBe(boundary === 'discovery-reset' ? 'STALE' : 'NOT_CONTRADICTORY')
+      if (boundary === 'discovery-reset') expect(replay.evidencePairHash).not.toBe(f.body.expectedEvidencePairHash)
+      else expect(replay.evidencePairHash).toBe(f.body.expectedEvidencePairHash)
+      // The replacement acquisition does not contain this old pair, so it cannot
+      // project a current disposition for missing evidence despite retaining history.
+      expect(getDiscoveryContradictionReview(f.candidate, after.evidenceObjects, after.contradictionReviews,
+        RUNTIME_INSTANCE_ID, after.contradictionReviewEpoch).reviewStatus).toBe('STALE')
       expect(globalThis.fetch).not.toHaveBeenCalled()
       expect(RuntimeInstance.findOneAndUpdate).toHaveBeenCalledTimes(2)
       expect(AuditLog.createLog).toHaveBeenCalledTimes(2)
@@ -7132,11 +7461,43 @@ describe('Runtime Instance API', () => {
       }))
     })
 
+    test('same request identity recovers a saved contradiction decision without another state or audit write', async () => {
+      const f = await prepare(), body = { ...f.body, requestKey: '55555555-5555-4555-8555-555555555555' }
+      const first = await send(f, body)
+      expect(first.status).toBe(200)
+      const before = JSON.stringify(f.getStored()), writes = RuntimeInstance.findOneAndUpdate.mock.calls.length,
+        audits = AuditLog.createLog.mock.calls.length
+      const replay = await send(f, body)
+      expect(replay.status).toBe(200)
+      expect(replay.body.data).toMatchObject({ review: { reviewId: first.body.data.review.reviewId },
+        replay: true, requiresRefresh: true, receiptCurrentness: 'CURRENT', currentReviewStatus: 'NOT_CONTRADICTORY' })
+      expect(JSON.stringify(f.getStored())).toBe(before)
+      expect(RuntimeInstance.findOneAndUpdate).toHaveBeenCalledTimes(writes)
+      expect(AuditLog.createLog).toHaveBeenCalledTimes(audits)
+      f.getStored().framework_state.evidence_pack.contradictionReviewEpoch = '66666666-6666-4666-8666-666666666666'
+      const historical = await send(f, body)
+      expect(historical.body.data).toMatchObject({ replay: true, receiptCurrentness: 'HISTORICAL', currentReviewStatus: 'STALE' })
+      expect(RuntimeInstance.findOneAndUpdate).toHaveBeenCalledTimes(writes)
+    })
+
+    test.each([{ rationale: 'Another explicit rationale for the decision.' }, { disposition: 'CONFIRMED' },
+      { expectedUpdatedAt: '2026-05-19T08:02:00.000Z' }])('rejects reuse of a request identity with changed payload %j', async patch => {
+      const f = await prepare(), body = { ...f.body, requestKey: '55555555-5555-4555-8555-555555555555' }
+      expect((await send(f, body)).status).toBe(200)
+      const writes = RuntimeInstance.findOneAndUpdate.mock.calls.length, audits = AuditLog.createLog.mock.calls.length
+      const result = await send(f, { ...body, ...patch })
+      expect(result.status).toBe(409)
+      expect(result.body.error.details.reason).toBe('CONTRADICTION_REVIEW_REQUEST_CONFLICT')
+      expect(RuntimeInstance.findOneAndUpdate).toHaveBeenCalledTimes(writes)
+      expect(AuditLog.createLog).toHaveBeenCalledTimes(audits)
+    })
+
     test.each([
       ['unconfirmed', { confirm: false }], ['short rationale', { rationale: 'short' }],
       ['long rationale', { rationale: 'x'.repeat(2001) }], ['bad hash', { expectedEvidencePairHash: 'sha256:bad' }],
       ['bad disposition', { disposition: 'DISMISSED' }], ['injected actor', { reviewedBy: SUPER_ADMIN_ID }],
       ['missing timestamp', { expectedUpdatedAt: undefined }],
+      ['malformed request identity', { requestKey: 'not-a-uuid' }],
     ])('rejects malformed request: %s', async (_label, patch) => {
       const f = await prepare()
       const res = await send(f, { ...f.body, ...patch })

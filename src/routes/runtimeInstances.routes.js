@@ -1,6 +1,14 @@
 import express, { Router } from 'express'
 import authJwt from '../middleware/authJwt.js'
 import loadScopes from '../middleware/loadScopes.js'
+import { readReviewCompletion, recordReviewCompletion } from '../controllers/reviewCompletion.controller.js'
+import { readAcquisitionRuns, readAcquisitionRun } from '../controllers/acquisitionRun.controller.js'
+import { getRuntimeStateSourceSummary, getRuntimeStateEvidenceInventory, getRuntimeStateDiscoveryHealth, getRuntimeStateLockBasis, getRuntimeStateContradictionHistory, getRuntimeStateFindings } from '../controllers/runtimeInstance.controller.js'
+import { validateContradictionHistoryQuery } from '../validators/contradictionHistory.validator.js'
+import { validateIntelligenceFindingQuery } from '../validators/intelligenceFinding.validator.js'
+import { validateAcquisitionRunScope, validateAcquisitionRunParams } from '../validators/acquisitionRun.validator.js'
+import { validateReviewCompletionBody, validateReviewCompletionScope } from '../validators/reviewCompletion.validator.js'
+import { validateGraphNeighbourhoodQuery } from '../validators/graphNeighbourhood.validator.js'
 import { planRuntimeOutcomeRequest, confirmRuntimeOutcomeRequestPlan, retrieveRuntimeOutcomeRequestPlan } from '../controllers/runtimeInstance.controller.js'
 import { validateOutcomePlanningBody, validateOutcomePlanningConfirmation, validateOutcomePlanningRequestParams } from '../validators/runtimeInstance.validator.js'
 import { documentIngestionRateLimit, vmfManagementRateLimit } from '../middleware/rateLimits.js'
@@ -52,8 +60,10 @@ import {
   getRuntimeRenderer,
   getRuntimeStateBootstrap,
   getRuntimeStateEvidencePage,
+  getRuntimeStateSourceRegistry,
   getRuntimeStateGraphManifest,
   getRuntimeStateGraphProjection,
+  getRuntimeStateGraphNeighbourhood,
   getRuntimeStateOutcomeHandoffReadiness,
   getRuntimeStateSectionSummary,
   getRuntimeTruthQuality,
@@ -170,8 +180,20 @@ router.post('/', validateCreateRuntimeInstance, createRuntimeInstance)
 router.get('/:runtimeInstanceId/state/bootstrap', validateRuntimeInstanceId, getRuntimeStateBootstrap)
 router.get('/:runtimeInstanceId/state/sections/:sectionKey', validateRuntimeInstanceId, getRuntimeStateSectionSummary)
 router.get('/:runtimeInstanceId/state/evidence', validateRuntimeInstanceId, getRuntimeStateEvidencePage)
+router.get('/:runtimeInstanceId/state/sources', validateRuntimeInstanceId, getRuntimeStateSourceRegistry)
+router.get('/:runtimeInstanceId/state/source-summary', validateRuntimeInstanceId, validateReviewCompletionScope, getRuntimeStateSourceSummary)
+router.get('/:runtimeInstanceId/state/evidence-inventory', validateRuntimeInstanceId, validateReviewCompletionScope, getRuntimeStateEvidenceInventory)
+router.get('/:runtimeInstanceId/state/discovery-health', validateRuntimeInstanceId, validateReviewCompletionScope, getRuntimeStateDiscoveryHealth)
+router.get('/:runtimeInstanceId/state/lock-basis', validateRuntimeInstanceId, validateReviewCompletionScope, getRuntimeStateLockBasis)
+router.get('/:runtimeInstanceId/state/contradiction-history', validateRuntimeInstanceId, validateContradictionHistoryQuery, getRuntimeStateContradictionHistory)
+router.get('/:runtimeInstanceId/state/findings', validateRuntimeInstanceId, validateIntelligenceFindingQuery, getRuntimeStateFindings)
+router.get('/:runtimeInstanceId/review-completion', validateRuntimeInstanceId, validateReviewCompletionScope, readReviewCompletion)
+router.get('/:runtimeInstanceId/acquisition-runs', validateRuntimeInstanceId, validateAcquisitionRunScope, readAcquisitionRuns)
+router.get('/:runtimeInstanceId/acquisition-runs/:runId', validateAcquisitionRunParams, validateAcquisitionRunScope, readAcquisitionRun)
+router.post('/:runtimeInstanceId/review-completion', validateRuntimeInstanceId, validateReviewCompletionScope, validateReviewCompletionBody, recordReviewCompletion)
 router.get('/:runtimeInstanceId/state/graph-manifest', validateRuntimeInstanceId, getRuntimeStateGraphManifest)
 router.get('/:runtimeInstanceId/state/graph-projection', validateRuntimeInstanceId, getRuntimeStateGraphProjection)
+router.get('/:runtimeInstanceId/state/graph-neighbourhood', validateRuntimeInstanceId, validateGraphNeighbourhoodQuery, getRuntimeStateGraphNeighbourhood)
 router.get(
   '/:runtimeInstanceId/state/outcome-handoff/readiness',
   validateRuntimeInstanceId,

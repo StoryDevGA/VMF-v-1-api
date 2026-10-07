@@ -6,6 +6,7 @@ import encryption from './fieldEncryptionService.js'
 import { OutcomeSession } from '../models/index.js'
 import { assertRuntimePermission, getRuntimeInstance } from './runtimeInstanceService.js'
 import { getRuntimeOutcomePlanningEvidence, RUNTIME_STATE_V2_CONTROL_PROJECTION } from './runtimeStateRepository.js'
+import { OUTCOME_PLANNING_EVIDENCE_VERSIONS } from './outcomeFrameworkHandoffService.js'
 import { resolveOutcomeStudioKnowledgePackBinding } from './outcomeKnowledgePackRegistryService.js'
 import { projectOutcomeStudioDeliverableDiscovery } from './outcomeStudioKnowledgeContextService.js'
 import { resolveOutcomeStudioConversationOutputContract } from './outcomeStudioOutputContractResolutionService.js'
@@ -50,13 +51,17 @@ const open = (receipt, deps) => {
     if (state.purpose !== PURPOSE || state.version !== VERSION || !UUID.test(state.requestId)
       || !Number.isSafeInteger(state.expiresAt) || !Number.isSafeInteger(state.issuedAt)
       || state.issuedAt > now(deps) || state.expiresAt <= now(deps) || state.expiresAt - state.issuedAt !== TTL_MS) throw new Error('claims')
+    if (state.planningEvidenceVersion !== undefined
+      && !Object.values(OUTCOME_PLANNING_EVIDENCE_VERSIONS).includes(state.planningEvidenceVersion)) throw new Error('planning version')
     return state
   } catch { throw failure('OUTCOME_PLANNING_RECEIPT_INVALID', 403) }
 }
 const controlReader = ({ runtimeInstanceId, scopes }) => getRuntimeInstance({ runtimeInstanceId, scopes,
   projection: RUNTIME_STATE_V2_CONTROL_PROJECTION, maxTimeMS: 2000 })
-const scopedDeps = (deps) => ({ ...deps, readRuntimeControl: deps.readRuntimeControl || controlReader,
-  readKcpRuntimeEvidence: deps.readKcpRuntimeEvidence || getRuntimeOutcomePlanningEvidence })
+const scopedDeps = (deps, planningEvidenceVersion = OUTCOME_PLANNING_EVIDENCE_VERSIONS.V1) => ({
+  ...deps, readRuntimeControl: deps.readRuntimeControl || controlReader,
+  readKcpRuntimeEvidence: (args) => (deps.readKcpRuntimeEvidence || getRuntimeOutcomePlanningEvidence)({ ...args, planningEvidenceVersion }),
+})
 const authorize = async ({ actorUserId, runtimeInstanceId, scopes, sessionId = '', state, deps, write = true }) => {
   if (!mongoose.isValidObjectId(actorUserId)) throw failure('OUTCOME_PLANNING_UNAUTHORIZED', 401)
   const runtime = await (deps.readRuntimeControl || controlReader)({ runtimeInstanceId, scopes })
@@ -187,15 +192,16 @@ export const planOutcomeStudioRequest = async ({ actorUserId, runtimeInstanceId,
   const prompt = text(payload.prompt)
   if (!prompt || prompt.length > 2000) throw failure('OUTCOME_PLANNING_ANSWER_REQUIRED', 422)
   let state = previous || { actorUserId: id(actorUserId), scope: auth.scope, sessionId: auth.sessionId,
-    requestId: randomUUID(), intent: {}, operation: 'INITIAL', expectedCurrentPlanVersion: 0, phase: 'CLARIFICATION_REQUIRED', field: 'requestedOutputTypeKey' }
+    requestId: randomUUID(), intent: {}, operation: 'INITIAL', expectedCurrentPlanVersion: 0, phase: 'CLARIFICATION_REQUIRED', field: 'requestedOutputTypeKey',
+    planningEvidenceVersion: OUTCOME_PLANNING_EVIDENCE_VERSIONS.V2 }
   if (payload.action === 'RE_RESOLVE') {
     if (!previous || !['CONFIRMATION_REQUIRED', 'SAVED'].includes(previous.phase)) {
       throw failure('OUTCOME_PLANNING_PREDECESSOR_REQUIRED')
     }
     if (previous.phase === 'CONFIRMATION_REQUIRED') {
-      state = { ...previous, phase: 'CLARIFICATION_REQUIRED', field: 'requestedOutputTypeKey', intent: {} }
+      state = { ...previous, phase: 'CLARIFICATION_REQUIRED', field: 'requestedOutputTypeKey', intent: {}, execution }
     } else {
-      state = { ...previous, phase: 'CLARIFICATION_REQUIRED', field: 'requestedOutputTypeKey', intent: {},
+      state = { ...previous, phase: 'CLARIFICATION_REQUIRED', field: 'requestedOutputTypeKey', intent: {}, execution,
         operation: 'RE_RESOLUTION', expectedCurrentPlanVersion: previous.planVersion,
         sourcePlanId: previous.planId, sourcePlanFingerprint: previous.planFingerprint, reResolutionReason: prompt }
       return respond(state, deps)
@@ -234,13 +240,13 @@ export const planOutcomeStudioRequest = async ({ actorUserId, runtimeInstanceId,
     || Object.keys(questions).find((field) => state.intent[field] === undefined) || ''
   if (state.field) return respond({ ...state, phase: 'CLARIFICATION_REQUIRED' }, deps)
   state.intent.unresolvedGaps = []
-  const evidence = await (deps.readKcpRuntimeEvidence || getRuntimeOutcomePlanningEvidence)({ runtimeInstanceId, scopes })
+  const evidence = await scopedDeps(deps, state.planningEvidenceVersion).readKcpRuntimeEvidence({ runtimeInstanceId, scopes })
   state.intent.runtimeIntegrity = evidence.planningEvidence || null
   const requestScope = { ...auth.scope, requestId: state.requestId }
   const requestAssociation = { sessionId: state.sessionId || '' }
   const candidate = await (deps.buildKcpCandidate || buildOutcomeKnowledgeCompositionPlanForRuntime)({ actorUserId, scopes,
     runtimeInstanceId: auth.scope.runtimeInstanceId, requestScope, requestAssociation,
-    consumerIntent: state.intent, expectedRuntimeUpdatedAt: evidence.updatedAt, deps: scopedDeps(deps) })
+    consumerIntent: state.intent, expectedRuntimeUpdatedAt: evidence.updatedAt, deps: scopedDeps(deps, state.planningEvidenceVersion) })
   if (candidate.status === 'BLOCKED') return respond({ ...state, phase: 'BLOCKED' }, deps, {
     blockers: ['KNOWLEDGE_COMPOSITION_BLOCKED'], evidenceToMeaning: projectRuntimeEvidenceToMeaningReadiness(candidate) })
   state.intent.selectedSchema = candidate.payload?.governedContext?.outputSchema || null
@@ -265,7 +271,7 @@ export const confirmOutcomeStudioRequestPlan = async ({ actorUserId, runtimeInst
     requestScope: { ...auth.scope, requestId }, requestAssociation: { sessionId: state.sessionId || '' },
     consumerIntent: state.intent, expectedRuntimeUpdatedAt: state.expectedRuntimeUpdatedAt, expectedPlanFingerprint: state.expectedPlanFingerprint,
     operation: state.operation, expectedCurrentPlanVersion: state.expectedCurrentPlanVersion,
-    sourcePlanId: state.sourcePlanId || '', sourcePlanFingerprint: state.sourcePlanFingerprint || '', reResolutionReason: state.reResolutionReason || '', deps: scopedDeps(deps) })
+    sourcePlanId: state.sourcePlanId || '', sourcePlanFingerprint: state.sourcePlanFingerprint || '', reResolutionReason: state.reResolutionReason || '', deps: scopedDeps(deps, state.planningEvidenceVersion) })
   const projectedPlan = planProjection(result)
   return respond({ ...state, phase: 'SAVED', planId: result.plan.planId, planVersion: result.plan.planVersion,
     planFingerprint: result.plan.planFingerprint, execution: projectedPlan.execution }, deps, { plan: projectedPlan })
