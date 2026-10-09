@@ -1031,6 +1031,7 @@ describe('runtime State Storage V2 repository', () => {
       lineageRef: 'framework_state.evidence_pack.evidenceObjects[0]',
       sourceType: 'WEBSITE',
       extractedFact: 'A bounded extracted fact.',
+      sourceLocation: { fieldPath: 'customer.observation', url: 'https://acme.example#finding' },
       validationStatus: 'VALID',
       confidence: { level: 'HIGH', score: 0.9, basis: ['source-backed'] },
       materiality: 'HIGH',
@@ -1059,6 +1060,7 @@ describe('runtime State Storage V2 repository', () => {
       lineageRef: 'framework_state.evidence_pack.evidenceObjects[0]',
       sourceType: 'WEBSITE',
       extractedFact: 'A bounded extracted fact.',
+      sourceLocation: { fieldPath: 'customer.observation', url: 'https://acme.example#finding' },
       validationStatus: 'VALID',
       confidence: { level: 'HIGH', score: 0.9, basis: ['source-backed'] },
       materiality: 'HIGH',
@@ -1081,6 +1083,11 @@ describe('runtime State Storage V2 repository', () => {
       expect.objectContaining({ maxTimeMS: RUNTIME_STATE_V2_READ_MAX_TIME_MS }),
     )
     expect(JSON.stringify(result)).not.toMatch(/runtime_(?:instances|section_states|evidence_sources|evidence_objects|graph_snapshots|graph_elements)/)
+  })
+
+  test.each([42, ['invalid'], 'x'.repeat(8193)])('rejects malformed persisted source locations on customer evidence reads: %#', sourceLocation => {
+    expect(() => __testables.serializeEvidenceObject({ evidenceObjectId: 'fixture-evidence', sourceLocation }, 'fixture-revision'))
+      .toThrow('The recorded source location is invalid.')
   })
 
   test('fails closed when page evidence does not have matching current source lineage', async () => {

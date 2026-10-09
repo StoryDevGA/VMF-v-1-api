@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { discoveryPolicySchema } from '../services/discoveryPolicyContract.js'
 import { validateRuntimeManagedSectionDeclarations } from '../services/runtimeManagedSectionContract.js'
 import {
   createBodyValidator,
@@ -531,6 +532,7 @@ const createFrameworkPackageSchema = z.object({
   assignedCustomerIds: customerIdListSchema.default([]),
   sections: sectionsSchema.default([]),
   reasoningArtefacts: reasoningArtefactsSchema.default([]),
+  discoveryPolicy: discoveryPolicySchema.optional(),
   runtimeSettings: runtimeSettingsSchema.default({
     enablePreviewMode: true,
     enableRuntimeValidation: true,
@@ -632,6 +634,7 @@ const updateFrameworkPackageSchema = z.object({
   assignedCustomerIds: customerIdListSchema.optional(),
   sections: sectionsSchema.optional(),
   reasoningArtefacts: reasoningArtefactsSchema.optional(),
+  discoveryPolicy: discoveryPolicySchema.optional(),
   runtimeSettings: runtimeSettingsSchema.optional(),
   executionModel: executionModelSchema.optional(),
   validationConfig: deprecatedFrameworkPackageFieldSchema(DEPRECATED_FRAMEWORK_PACKAGE_FIELD_MESSAGES.validationConfig),

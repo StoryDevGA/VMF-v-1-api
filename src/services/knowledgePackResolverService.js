@@ -477,6 +477,7 @@ const assertNoBlockedPacksActive = ({ blockedEntries, candidatesByRef }) => {
 export const resolveKnowledgePackManifest = async ({
   manifest,
   query = {},
+  session = null,
 } = {}) => {
   const manifestStatus = normalizeToken(manifest?.status)
   if (!BINDABLE_MANIFEST_STATUSES.has(manifestStatus)) {
@@ -506,15 +507,16 @@ export const resolveKnowledgePackManifest = async ({
   const packTypes = [...new Set([...entries, ...blockedEntries].map((entry) => entry.packType).filter(Boolean))]
   const packKeys = [...new Set([...entries, ...blockedEntries].map((entry) => entry.packKey).filter(Boolean))]
 
-  const activations = packTypes.length && packKeys.length
-    ? await KnowledgePackActivation.find({
+  const activationQuery = packTypes.length && packKeys.length
+    ? KnowledgePackActivation.find({
       packType: { $in: packTypes },
       packKey: { $in: packKeys },
       scopeKey: { $in: scopeKeys },
     })
       .sort({ activatedAt: -1 })
-      .lean()
-    : []
+    : null
+  if (session && activationQuery) activationQuery.session(session)
+  const activations = activationQuery ? await activationQuery.lean() : []
   const candidatesByRef = buildActivationCandidatesByRef({ activations })
   assertNoBlockedPacksActive({ blockedEntries, candidatesByRef })
 
@@ -531,9 +533,10 @@ export const resolveKnowledgePackManifest = async ({
   const selectedVersionIds = [...new Set(
     [...selectedActivationsByRef.values()].map((activation) => activation.versionId).filter(Boolean),
   )]
-  const versions = selectedVersionIds.length
-    ? await KnowledgePackVersion.find({ versionId: { $in: selectedVersionIds } }).lean()
-    : []
+  const versionQuery = selectedVersionIds.length
+    ? KnowledgePackVersion.find({ versionId: { $in: selectedVersionIds } }) : null
+  if (session && versionQuery) versionQuery.session(session)
+  const versions = versionQuery ? await versionQuery.lean() : []
   const versionsById = new Map(
     versions.map(serializeVersion).filter(Boolean).map((version) => [version.versionId, version]),
   )

@@ -1,4 +1,5 @@
 import fs from 'fs'
+import { inspectDiscoveryPolicy } from '../services/discoveryPolicyContract.js'
 import crypto from 'node:crypto'
 import path from 'path'
 import { fileURLToPath, pathToFileURL } from 'url'
@@ -2494,6 +2495,16 @@ const validateFrameworkPackageSectionSkillBindings = ({
 const validateFrameworkPackages = (records, indexes, notes) => {
   for (const frameworkPackage of records) {
     const source = `Framework Package ${frameworkPackage.packageKey}`
+    const policyReport = inspectDiscoveryPolicy(frameworkPackage.discoveryPolicy)
+    for (const error of policyReport.errors) {
+      notes.push({ level: 'error', source, message: `${error.path}: ${error.message}` })
+    }
+    for (const reference of policyReport.unresolvedReferences) {
+      notes.push({
+        level: String(frameworkPackage.status || '').toUpperCase() === 'DRAFT' ? 'warning' : 'error',
+        source, message: `${reference.path} (${reference.mappingKey}): ${reference.question}`,
+      })
+    }
     if (
       (isV320FrameworkPackage(frameworkPackage) || [V3_1_6_PACKAGE_KEY, V3_1_7_PACKAGE_KEY, V3_1_8_PACKAGE_KEY]
         .map(normalizeToken)

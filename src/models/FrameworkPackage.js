@@ -1,4 +1,5 @@
 import mongoose from 'mongoose'
+import { discoveryPolicySchema, assertInstalledDiscoveryPolicySnapshot, fenceInstalledDiscoveryPolicy } from '../services/discoveryPolicyContract.js'
 import { validateRuntimeManagedSectionDeclarations } from '../services/runtimeManagedSectionContract.js'
 import {
   DEPRECATED_FRAMEWORK_PACKAGE_FIELD_MESSAGES,
@@ -775,6 +776,9 @@ const frameworkPackageDependencyLockSchema = new mongoose.Schema(
       default: [],
     },
     uiContractSnapshot: { type: mongoose.Schema.Types.Mixed, default: undefined },
+    discoveryPolicy: { type: mongoose.Schema.Types.Mixed, default: undefined },
+    discoveryPolicyHash: { type: String, default: undefined },
+    discoveryPolicyBindings: { type: mongoose.Schema.Types.Mixed, default: undefined },
   },
   { _id: false },
 )
@@ -966,6 +970,7 @@ const frameworkPackageSchema = new mongoose.Schema(
     assignedCustomerIds: [customerIdField],
     sections: [frameworkPackageSectionSchema],
     reasoningArtefacts: [frameworkPackageReasoningArtefactSchema],
+    discoveryPolicy: { type: mongoose.Schema.Types.Mixed, default: undefined },
     runtimeSettings: {
       type: frameworkPackageRuntimeSettingsSchema,
       default: () => ({}),
@@ -1157,6 +1162,13 @@ frameworkPackageSchema.statics.findActiveByFrameworkKey = function findActiveByF
 }
 
 frameworkPackageSchema.pre('validate', function normalizeFrameworkPackage(next) {
+  if (this.discoveryPolicy !== undefined) {
+    const parsed = discoveryPolicySchema.safeParse(this.discoveryPolicy)
+    if (!parsed.success) this.invalidate('discoveryPolicy', parsed.error.message)
+    else {
+      if (this.isNew || this.isModified('discoveryPolicy')) this.discoveryPolicy = parsed.data
+    }
+  }
   try { validateRuntimeManagedSectionDeclarations(this) } catch (error) {
     this.invalidate('sections', error.message)
   }
@@ -1450,6 +1462,22 @@ frameworkPackageSchema.pre('validate', function normalizeFrameworkPackage(next) 
   }
 
   next()
+})
+
+const checkpointTelemetryOnly = (doc) => {
+  const fields = ['lastCheckpointStatus', 'lastCheckpointAt', 'lastCheckpointResult', 'updatedAt', 'updatedBy']
+  return !doc.isNew && !doc.isModified('status') && doc.modifiedPaths().every(path =>
+    fields.some(field => path === field || path.startsWith(`${field}.`)))
+}
+frameworkPackageSchema.pre('validate', async function validateInstalledPolicy() {
+  if (this.discoveryPolicy === undefined || !isReadyFrameworkPackageStatus(this.status) || checkpointTelemetryOnly(this)) return
+  try { await assertInstalledDiscoveryPolicySnapshot(this, { session: this.$session() }) }
+  catch (error) { this.invalidate('discoveryPolicy', error.message) }
+})
+frameworkPackageSchema.pre('save', async function fenceInstalledPolicy() {
+  if (this.discoveryPolicy !== undefined && isReadyFrameworkPackageStatus(this.status) && !checkpointTelemetryOnly(this)) {
+    await fenceInstalledDiscoveryPolicy(this, { session: this.$session() })
+  }
 })
 
 const FrameworkPackage = mongoose.model('FrameworkPackage', frameworkPackageSchema)

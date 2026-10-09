@@ -1,4 +1,6 @@
 import express, { Router } from 'express'
+import { recordRuntimeSourceVerification } from '../controllers/runtimeInstance.controller.js'
+import { validateRecordSourceVerification, validateSourceVerificationParams } from '../validators/runtimeInstance.validator.js'
 import authJwt from '../middleware/authJwt.js'
 import loadScopes from '../middleware/loadScopes.js'
 import { readReviewCompletion, recordReviewCompletion } from '../controllers/reviewCompletion.controller.js'
@@ -214,6 +216,8 @@ router.patch(
   reviewRuntimeDiscoveryEvidence,
 )
 router.patch('/:runtimeInstanceId/discovery-reset', validateRuntimeInstanceId, validateResetRuntimeDiscovery, resetRuntimeDiscovery)
+router.patch('/:runtimeInstanceId/discovery-sources/:sourceId/verification',
+  validateSourceVerificationParams, validateRecordSourceVerification, recordRuntimeSourceVerification)
 router.post(
   '/:runtimeInstanceId/intelligence-graph/rebuild',
   validateRuntimeInstanceId,

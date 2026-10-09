@@ -1,0 +1,249 @@
+[
+  {
+    "id": "T01",
+    "evidence_id": "EVID-SYN-T01",
+    "revision": "sha256:723ea857bb4a4be62ee21701057c3c257389713db59fc0d38b2b06db6b681edb",
+    "current_revision": "sha256:723ea857bb4a4be62ee21701057c3c257389713db59fc0d38b2b06db6b681edb",
+    "provenance_refs": [
+      "synthetic:QMF:T01"
+    ],
+    "direction": "SUPPORTS",
+    "expected_assessment_result": "STRONG",
+    "expected_result_status": "COMPLETE",
+    "expected_evidence_direction": "SUPPORTS",
+    "reasons": [
+      "Synthetic evidence case T01; provenance is test-only"
+    ],
+    "source_reliability": "STRONG",
+    "relevance": "STRONG",
+    "specificity": "STRONG",
+    "independence": "STRONG"
+  },
+  {
+    "id": "T02",
+    "evidence_id": "EVID-SYN-T02",
+    "revision": "sha256:cedb2129328bd00f824187a2bd2f04674a353b9c131787c29f38f60696d61516",
+    "current_revision": "sha256:cedb2129328bd00f824187a2bd2f04674a353b9c131787c29f38f60696d61516",
+    "provenance_refs": [
+      "synthetic:QMF:T02"
+    ],
+    "direction": "SUPPORTS",
+    "expected_assessment_result": "MODERATE",
+    "expected_result_status": "COMPLETE",
+    "expected_evidence_direction": "SUPPORTS",
+    "reasons": [
+      "Synthetic evidence case T02; provenance is test-only"
+    ],
+    "source_reliability": "MODERATE",
+    "relevance": "STRONG",
+    "specificity": "MODERATE",
+    "independence": "MODERATE"
+  },
+  {
+    "id": "T03",
+    "evidence_id": "EVID-SYN-T03",
+    "revision": "sha256:6a3af1fab74a649088957095480961c2fd234b349fea40c8f9578829c9fde3d6",
+    "current_revision": "sha256:6a3af1fab74a649088957095480961c2fd234b349fea40c8f9578829c9fde3d6",
+    "provenance_refs": [
+      "synthetic:QMF:T03"
+    ],
+    "direction": "SUPPORTS",
+    "expected_assessment_result": "WEAK",
+    "expected_result_status": "COMPLETE",
+    "expected_evidence_direction": "SUPPORTS",
+    "reasons": [
+      "Synthetic evidence case T03; provenance is test-only"
+    ],
+    "source_reliability": "WEAK",
+    "relevance": "WEAK",
+    "specificity": "WEAK",
+    "independence": "WEAK"
+  },
+  {
+    "id": "T04",
+    "evidence_id": "EVID-SYN-T04",
+    "revision": "sha256:7e2719b79b1cf50846b4aa019f2c971551e2bedefe299e3fea78cca4a97c5db6",
+    "current_revision": "sha256:7e2719b79b1cf50846b4aa019f2c971551e2bedefe299e3fea78cca4a97c5db6",
+    "provenance_refs": [
+      "synthetic:QMF:T04"
+    ],
+    "direction": "CONTRADICTS",
+    "expected_assessment_result": "STRONG",
+    "expected_result_status": "COMPLETE",
+    "expected_evidence_direction": "CONTRADICTS",
+    "reasons": [
+      "Synthetic evidence case T04; provenance is test-only"
+    ],
+    "source_reliability": "STRONG",
+    "relevance": "STRONG",
+    "specificity": "STRONG",
+    "independence": "STRONG"
+  },
+  {
+    "id": "T05",
+    "evidence_id": "EVID-SYN-T05",
+    "revision": "sha256:540c01a7619636350ce20ab53c42ae14a4914598a7de749eb03d041acce6c772",
+    "current_revision": "sha256:540c01a7619636350ce20ab53c42ae14a4914598a7de749eb03d041acce6c772",
+    "provenance_refs": [
+      "synthetic:QMF:T05"
+    ],
+    "direction": "MIXED",
+    "expected_assessment_result": "MODERATE",
+    "expected_result_status": "COMPLETE",
+    "expected_evidence_direction": "MIXED",
+    "reasons": [
+      "Synthetic evidence case T05; provenance is test-only"
+    ],
+    "source_reliability": "MODERATE",
+    "relevance": "STRONG",
+    "specificity": "MODERATE",
+    "independence": "MODERATE"
+  },
+  {
+    "id": "T06",
+    "evidence_id": "EVID-SYN-T06",
+    "revision": "sha256:b1aec4def3136b43a73f8477cf77e799256f2bb1acd138316a9635bac227446d",
+    "current_revision": "sha256:b1aec4def3136b43a73f8477cf77e799256f2bb1acd138316a9635bac227446d",
+    "provenance_refs": [
+      "synthetic:QMF:T06"
+    ],
+    "direction": "MIXED",
+    "expected_assessment_result": "CONTRADICTORY",
+    "expected_result_status": "COMPLETE",
+    "expected_evidence_direction": "MIXED",
+    "reasons": [
+      "Synthetic evidence case T06; provenance is test-only"
+    ],
+    "source_reliability": "STRONG",
+    "relevance": "STRONG",
+    "specificity": "STRONG",
+    "independence": "STRONG",
+    "incompatible_conflict": true,
+    "contradiction_refs": [
+      "synthetic:QMF:T06:assertion-A",
+      "synthetic:QMF:T06:assertion-B"
+    ]
+  },
+  {
+    "id": "T07",
+    "evidence_id": "EVID-SYN-T07",
+    "revision": "sha256:90364aa409292700e13e04fbdc3b757a9dbb78557f1d5ace6c7df0f7ed6e85c9",
+    "current_revision": "sha256:90364aa409292700e13e04fbdc3b757a9dbb78557f1d5ace6c7df0f7ed6e85c9",
+    "provenance_refs": [
+      "synthetic:QMF:T07"
+    ],
+    "direction": "NEUTRAL",
+    "expected_assessment_result": "INSUFFICIENT",
+    "expected_result_status": "COMPLETE",
+    "expected_evidence_direction": "NEUTRAL",
+    "reasons": [
+      "Synthetic evidence case T07; provenance is test-only"
+    ],
+    "source_reliability": "STRONG",
+    "relevance": "INSUFFICIENT",
+    "specificity": "MODERATE",
+    "independence": "STRONG"
+  },
+  {
+    "id": "T08",
+    "evidence_id": "EVID-SYN-T08",
+    "revision": "sha256:509b80e155d291a74c77ff6feb4da694d1a8308ddc509e516b88c2165e301557",
+    "current_revision": "sha256:509b80e155d291a74c77ff6feb4da694d1a8308ddc509e516b88c2165e301557",
+    "provenance_refs": [
+      "synthetic:QMF:T08"
+    ],
+    "direction": "SUPPORTS",
+    "expected_assessment_result": "INSUFFICIENT",
+    "expected_result_status": "UNRESOLVED",
+    "expected_evidence_direction": "UNRESOLVED",
+    "reasons": [
+      "Synthetic evidence case T08; provenance is test-only"
+    ],
+    "source_reliability": "STRONG",
+    "relevance": "STRONG",
+    "specificity": "MODERATE",
+    "independence": "UNRESOLVED"
+  },
+  {
+    "id": "T09",
+    "evidence_id": "EVID-SYN-T09",
+    "revision": "sha256:37ee82b54c5b80a29ca5c2120126fe7451c72df2483cf0ce3e3e436929b0530f",
+    "current_revision": "sha256:38668aa7bdc5278b0915f0d1be555fd8a0aa7474b244cbab06dc641801675449",
+    "provenance_refs": [
+      "synthetic:QMF:T09"
+    ],
+    "direction": "SUPPORTS",
+    "expected_assessment_result": "INSUFFICIENT",
+    "expected_result_status": "UNRESOLVED",
+    "expected_evidence_direction": "UNRESOLVED",
+    "reasons": [
+      "Synthetic evidence case T09; provenance is test-only"
+    ],
+    "source_reliability": "STRONG",
+    "relevance": "STRONG",
+    "specificity": "STRONG",
+    "independence": "STRONG",
+    "recompute_required": true
+  },
+  {
+    "id": "T10",
+    "evidence_id": "",
+    "revision": "sha256:c5bf40f2bcc94764b7eb29d897e8f10e85f364349619910f6935776fe5c9bcbe",
+    "current_revision": "sha256:c5bf40f2bcc94764b7eb29d897e8f10e85f364349619910f6935776fe5c9bcbe",
+    "provenance_refs": [
+      "synthetic:QMF:T10"
+    ],
+    "direction": "SUPPORTS",
+    "expected_assessment_result": null,
+    "expected_result_status": "INVALID",
+    "expected_evidence_direction": "UNRESOLVED",
+    "reasons": [
+      "Synthetic evidence case T10; provenance is test-only"
+    ],
+    "source_reliability": "STRONG",
+    "relevance": "BAD_ENUM",
+    "specificity": "MODERATE",
+    "independence": "STRONG"
+  },
+  {
+    "id": "T11",
+    "evidence_id": "EVID-SYN-T11",
+    "revision": "sha256:71a97fb2bd2e45a02bd7c169936793f5f60b273668086a8550e74660806fd7cd",
+    "current_revision": "sha256:71a97fb2bd2e45a02bd7c169936793f5f60b273668086a8550e74660806fd7cd",
+    "provenance_refs": [
+      "synthetic:QMF:T11:interview-original",
+      "synthetic:QMF:T11:duplicate-same-lineage"
+    ],
+    "direction": "SUPPORTS",
+    "expected_assessment_result": "INSUFFICIENT",
+    "expected_result_status": "COMPLETE",
+    "expected_evidence_direction": "SUPPORTS",
+    "reasons": [
+      "Synthetic evidence case T11; provenance is test-only"
+    ],
+    "source_reliability": "STRONG",
+    "relevance": "MODERATE",
+    "specificity": "MODERATE",
+    "independence": "INSUFFICIENT"
+  },
+  {
+    "id": "T12",
+    "evidence_id": "EVID-SYN-T12",
+    "revision": "sha256:d622af408060eae1fd1bcf6defd449379cc74a06a4e109dd2e30a6fa3efb5d0d",
+    "current_revision": "sha256:d622af408060eae1fd1bcf6defd449379cc74a06a4e109dd2e30a6fa3efb5d0d",
+    "provenance_refs": [
+      "synthetic:QMF:T12"
+    ],
+    "direction": "NEUTRAL",
+    "expected_assessment_result": "WEAK",
+    "expected_result_status": "COMPLETE",
+    "expected_evidence_direction": "NEUTRAL",
+    "reasons": [
+      "Synthetic evidence case T12; provenance is test-only"
+    ],
+    "source_reliability": "STRONG",
+    "relevance": "WEAK",
+    "specificity": "STRONG",
+    "independence": "STRONG"
+  }
+]

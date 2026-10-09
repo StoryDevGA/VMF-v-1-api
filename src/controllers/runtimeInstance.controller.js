@@ -41,6 +41,7 @@ import {
   resetRuntimeDiscovery as resetRuntimeDiscoveryRecord,
   reviewAllRuntimeSectionEvidence as reviewAllRuntimeSectionEvidenceRecord,
   reviewRuntimeDiscoveryEvidence as reviewRuntimeDiscoveryEvidenceRecord,
+  recordRuntimeSourceVerification as recordRuntimeSourceVerificationRecord,
   getRuntimeDiscoveryContradictions as getRuntimeDiscoveryContradictionsRecord,
   reviewRuntimeDiscoveryContradiction as reviewRuntimeDiscoveryContradictionRecord,
   reviewRuntimeSectionEvidence as reviewRuntimeSectionEvidenceRecord,
@@ -785,6 +786,18 @@ export const reviewRuntimeDiscoveryEvidence = async (req, res, next) => {
       return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
     }
     return next(err)
+  }
+}
+
+export const recordRuntimeSourceVerification = async (req, res, next) => {
+  try {
+    const data = await recordRuntimeSourceVerificationRecord({ actorUserId: req.context?.userId || req.userId,
+      auditRequest: req, scopes: req.scopes, runtimeInstanceId: req.params.runtimeInstanceId,
+      sourceId: req.params.sourceId, payload: req.body })
+    return res.status(200).json({ data, meta: { requestId: req.requestId, version: 'v1' } })
+  } catch (error) {
+    if (error?.status && error?.code) return res.status(error.status).json(buildRuntimeInstanceErrorResponse(req, error))
+    return next(error)
   }
 }
 

@@ -26,6 +26,18 @@ const canonical = (value) => {
 }
 export const hashEvidenceToMeaningValue = (value) => createHash('sha256')
   .update(JSON.stringify(canonical(value))).digest('hex')
+// Consumption fences advance __v without changing the material evidence basis.
+// Preserve the original contract/hash and compare against its exact frozen row.
+export const matchesEvidenceToMeaningFrozenRecord = ({ current, frozen, expectedHash }) => {
+  if (hashEvidenceToMeaningValue(current) === expectedHash) return true
+  if (!frozen || hashEvidenceToMeaningValue(frozen) !== expectedHash
+    || !Number.isSafeInteger(frozen.__v) || frozen.__v < 0
+    || !Number.isSafeInteger(current.__v) || current.__v < frozen.__v) return false
+  const currentMaterial = { ...current }, frozenMaterial = { ...frozen }
+  delete currentMaterial.__v
+  delete frozenMaterial.__v
+  return hashEvidenceToMeaningValue(currentMaterial) === hashEvidenceToMeaningValue(frozenMaterial)
+}
 const equal = (left, right) => hashEvidenceToMeaningValue(left) === hashEvidenceToMeaningValue(right)
 const clone = (value) => JSON.parse(JSON.stringify(canonical(value)))
 const sorted = (values) => [...values].sort(compare)

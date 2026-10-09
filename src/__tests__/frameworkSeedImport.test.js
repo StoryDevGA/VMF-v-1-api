@@ -78,6 +78,28 @@ const runSeedGuard = (args = []) =>
 
 const loadR3Bundle = () => loadSeedBundle(r3SeedDir, '3.1.1')
 
+describe('Discovery Policy importer boundary', () => {
+  const policy = () => ({ contractVersion: 'framework-package-discovery-policy-v1', policyKey: 'synthetic-policy', policyVersion: '1.0.0', evidencePolicy: { ownerMappings: [{ mappingKey: 'synthetic-evidence', vmfCapabilityRef: 'unverified-capability', ownerRuntime: 'unverified-owner', resultType: 'unverified-result' }] } })
+  test.each(['VMF', 'WEBSITE_ANALYSIS'])('preserves a %s draft with explicit unresolved diagnostics', (frameworkKey) => {
+    const { frameworkPackages, notes } = validateR3CrossReferences(({ frameworkPackages: packages }) => {
+      Object.assign(packages[0], { frameworkKey, status: 'DRAFT', discoveryPolicy: policy() })
+    })
+    expect(JSON.parse(JSON.stringify(frameworkPackages[0])).discoveryPolicy).toEqual(policy())
+    expect(notes.filter((note) => note.message.includes('discoveryPolicy'))).toEqual([expect.objectContaining({ level: 'warning', message: expect.stringContaining('synthetic-evidence') })])
+  })
+  test.each(['VALIDATED', 'ACTIVE', 'DEPRECATED'])('rejects unresolved governed %s import', (status) => {
+    const { notes } = validateR3CrossReferences(({ frameworkPackages }) => Object.assign(frameworkPackages[0], { status, discoveryPolicy: policy() }))
+    expect(notes.filter((note) => note.message.includes('discoveryPolicy'))).toEqual([expect.objectContaining({ level: 'error' })])
+  })
+  test('rejects unknown policy fields and leaves legacy packages absent', () => {
+    const legacy = validateR3CrossReferences()
+    expect(legacy.frameworkPackages[0]).not.toHaveProperty('discoveryPolicy')
+    expect(legacy.notes.filter((note) => note.message.includes('discoveryPolicy'))).toEqual([])
+    const { notes } = validateR3CrossReferences(({ frameworkPackages }) => { frameworkPackages[0].discoveryPolicy = { ...policy(), verified: true } })
+    expect(notes.some((note) => note.level === 'error' && note.message.includes('discoveryPolicy'))).toBe(true)
+  })
+})
+
 const findBundleRecords = (bundle, fileName) =>
   bundle.find((step) => String(step.fileName || '').endsWith(fileName))?.records || []
 

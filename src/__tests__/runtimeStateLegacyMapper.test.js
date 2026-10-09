@@ -110,6 +110,22 @@ const capture = (callback) => {
   throw new Error('Expected mapper failure.')
 }
 
+test.each(['source-1#page-2', { fieldPath: 'source.customer.name', page: 2 }])('preserves supplied source location and includes it in canonical evidence identity: %j', sourceLocation => {
+  const legacy = makeLegacy()
+  const baseline = createRuntimeStateLegacySourceRowSet(makeInput(legacy)).rows.evidenceObjects[0]
+  legacy.evidencePack.evidenceObjects[0].sourceLocation = sourceLocation
+  const located = createRuntimeStateLegacySourceRowSet(makeInput(legacy)).rows.evidenceObjects[0]
+  expect(located.sourceLocation).toEqual(sourceLocation)
+  expect(located.sourceHash).not.toBe(baseline.sourceHash)
+  expect(baseline).not.toHaveProperty('sourceLocation')
+})
+
+test.each([42, ['invented-location'], 'x'.repeat(8193)])('rejects invalid or oversized source-location representation: %#', sourceLocation => {
+  const legacy = makeLegacy()
+  legacy.evidencePack.evidenceObjects[0].sourceLocation = sourceLocation
+  expect(() => createRuntimeStateLegacySourceRowSet(makeInput(legacy))).toThrow()
+})
+
 const expectCode = (callback, code, reason) => {
   const error = capture(callback)
   expect(error.code).toBe(code)

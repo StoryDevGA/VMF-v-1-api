@@ -1,4 +1,5 @@
 import mongoose from 'mongoose'
+import { sourceVerificationContextSchema } from '../services/sourceVerificationContext.js'
 
 import {
   createRuntimeStateSchema,
@@ -43,6 +44,8 @@ const runtimeEvidenceSourceSchema = createRuntimeStateSchema({
       default: '',
     },
     contentHash: sha256Field(),
+    verificationContext: { type: mongoose.Schema.Types.Mixed, default: undefined,
+      validate: (value) => value === undefined || sourceVerificationContextSchema.safeParse(value).success },
     processingReceipt: { type: processingReceiptSchema, default: undefined,
       validate: function (value) { return value === undefined || Boolean(value && this.sourceType === 'UPLOADED_DOCUMENT') } },
     acquisitionStatus: {

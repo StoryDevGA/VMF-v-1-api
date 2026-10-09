@@ -1,4 +1,5 @@
 import mongoose from 'mongoose'
+import { installedDiscoveryPolicyDetails, assertInstalledDiscoveryPolicySnapshot, fenceInstalledDiscoveryPolicy } from '../discoveryPolicyContract.js'
 import { assertRuntimeCertificationTransaction, loadRuntimeCertificationPackage, verifyRuntimeReleaseCertification } from '../runtimeReleaseCertificationCaptureService.js'
 import FrameworkPackage, { FRAMEWORK_PACKAGE_STATUSES } from '../../models/FrameworkPackage.js'
 import RuntimeActivationSnapshot, {
@@ -113,9 +114,11 @@ export const normalizeRuntimeActivationReadiness = ({
   frameworkPackage,
   checkpoint = null,
   activeDeployment = null,
+  installedPolicyReport,
 } = {}) => {
   const packageStatus = normalizeStatus(frameworkPackage?.status)
   const checkpointStatus = normalizeStatus(checkpoint?.status || frameworkPackage?.lastCheckpointStatus)
+  const discoveryPolicyDetails = installedDiscoveryPolicyDetails(frameworkPackage || {}, installedPolicyReport)
   const runtimeVerdict = frameworkPackage?.runtimeVerdict || null
   const runtimeVerdictResult = normalizeStatus(runtimeVerdict?.result || runtimeVerdict?.decision)
   const runtimeVerdictDependencyLockState = normalizeStatus(runtimeVerdict?.dependencyLockState)
@@ -146,6 +149,13 @@ export const normalizeRuntimeActivationReadiness = ({
   }
 
   const requirements = [
+    ...(frameworkPackage?.discoveryPolicy === undefined ? [] : [{
+      key: 'discoveryPolicy',
+      status: Object.keys(discoveryPolicyDetails).length ? 'FAIL' : 'PASS',
+      reason: Object.keys(discoveryPolicyDetails).length
+        ? 'DISCOVERY_POLICY_MAPPING_UNVERIFIED' : 'DISCOVERY_POLICY_ENVELOPE_VALID',
+      message: Object.values(discoveryPolicyDetails).join(' ') || 'Discovery Policy envelope is valid.',
+    }]),
     buildFrameworkPackageActivationStatusRequirement(frameworkPackage),
     {
       key: 'checkpoint',
@@ -263,11 +273,21 @@ export const getRuntimeActivationReadiness = async ({
     session,
   })
 
+  let installedPolicyReport, policyError
+  try { installedPolicyReport = await assertInstalledDiscoveryPolicySnapshot(packageRecord, { session }) }
+  catch (error) { policyError = error }
   const readiness = normalizeRuntimeActivationReadiness({
     frameworkPackage: packageRecord,
     checkpoint,
     activeDeployment,
+    installedPolicyReport,
   })
+  if (policyError) {
+    readiness.ready = false
+    readiness.status = 'BLOCKED'
+    readiness.blockingReasons.push(policyError.code)
+    readiness.requirements.push({ key: 'discoveryPolicyBinding', status: 'FAIL', reason: policyError.code, message: policyError.message })
+  }
   try {
     readiness.certificationBinding = await verifyRuntimeReleaseCertification({ frameworkPackage: packageRecord, session })
     readiness.requirements.push({ key: 'certificationBinding', status: 'PASS',
@@ -306,6 +326,7 @@ export const registerRuntimeActivation = async ({
   session,
 } = {}) => {
   assertRuntimeCertificationTransaction(session)
+  await fenceInstalledDiscoveryPolicy(frameworkPackage, { session })
   const normalizedPackageStatusAtActivation = normalizeStatus(packageStatusAtActivation)
   if (![FRAMEWORK_PACKAGE_STATUSES.VALIDATED, FRAMEWORK_PACKAGE_STATUSES.ACTIVE]
     .includes(normalizedPackageStatusAtActivation)) {

@@ -1,5 +1,6 @@
 import Ajv from 'ajv'
 import { RUNTIME_VALIDATION_CODES, buildRuntimeValidationIssue } from './runtimeValidationCodes.js'
+import { isVE02ResultContract, validateVE02EvidenceAssessmentResult } from './ve02EvidenceAssessmentResultContract.js'
 
 const isPlainObject = (value) => Boolean(value && typeof value === 'object' && !Array.isArray(value))
 
@@ -25,7 +26,10 @@ const buildOutputIssuePath = (error = {}) => {
   return basePath
 }
 
-export const validateRuntimeOutputContract = ({ outputContract, payload }) => {
+export const validateRuntimeOutputContract = ({ outputContract, payload }, { ve02Context } = {}) => {
+  if (isVE02ResultContract({ outputContract, payload })) {
+    return validateVE02EvidenceAssessmentResult({ payload, context: ve02Context })
+  }
   if (!isPlainObject(outputContract) || Object.keys(outputContract).length === 0) {
     return []
   }

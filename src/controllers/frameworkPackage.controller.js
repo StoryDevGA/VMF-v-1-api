@@ -1,4 +1,5 @@
 import mongoose from 'mongoose'
+import { inspectDiscoveryPolicy, inspectInstalledDiscoveryPolicy, installedDiscoveryPolicyDetails, captureInstalledDiscoveryPolicy, discoveryPolicySnapshot } from '../services/discoveryPolicyContract.js'
 import { isDeepStrictEqual } from 'node:util'
 import FrameworkPackage, {
   FRAMEWORK_PACKAGE_CUSTOMER_ACCESS_MODES,
@@ -96,6 +97,7 @@ const ACTIVE_PACKAGE_ACCESS_METADATA_FIELDS = new Set([
 ])
 
 const STRUCTURAL_LOCK_FIELDS = Object.freeze([
+  'discoveryPolicy',
   'frameworkKey',
   'version',
   'packageKey',
@@ -204,6 +206,7 @@ const CHECKPOINT_CATEGORY_BY_FIELD = Object.freeze({
 })
 
 const FRAMEWORK_PACKAGE_AUDITED_FIELDS = Object.freeze([
+  'discoveryPolicy',
   'frameworkKey',
   'frameworkName',
   'version',
@@ -418,7 +421,7 @@ const ensureValidationBindingKeys = (bindings = []) => {
 
 const serializeFrameworkPackage = (
   frameworkPackage,
-  { fallbackUpdatedBy = null, checkpointRunByFallback = null } = {},
+  { fallbackUpdatedBy = null, checkpointRunByFallback = null, discoveryPolicyReport = null } = {},
 ) => {
   const plain = typeof frameworkPackage?.toJSON === 'function'
     ? frameworkPackage.toJSON()
@@ -454,6 +457,7 @@ const serializeFrameworkPackage = (
   }
 
   plain.validationBindings = ensureValidationBindingKeys(plain.validationBindings)
+  plain.discoveryPolicySummary = discoveryPolicyReport || inspectDiscoveryPolicy(plain.discoveryPolicy)
 
   return plain
 }
@@ -751,6 +755,15 @@ const getStructuralLockComparableValue = (field, value) => {
 }
 
 const validateStructuralLocks = (frameworkPackage, payload = {}) => {
+  if (frameworkPackage.status !== FRAMEWORK_PACKAGE_STATUSES.DRAFT
+    && Object.hasOwn(payload, 'discoveryPolicy')
+    && !isDeepStrictEqual(cloneAuditValue(frameworkPackage.discoveryPolicy), cloneAuditValue(payload.discoveryPolicy))) {
+    return {
+      discoveryPolicy: 'Discovery Policy can only be edited on a persisted draft package.',
+      _message: 'Discovery Policy can only be edited on a persisted draft package.',
+      _reason: 'DISCOVERY_POLICY_STRUCTURE_LOCKED',
+    }
+  }
   if (frameworkPackage.status === FRAMEWORK_PACKAGE_STATUSES.ACTIVE) {
     return {
       _message: ACTIVE_PACKAGE_EDIT_MESSAGE,
@@ -799,13 +812,14 @@ export const validateDeprecatedFrameworkPackageFields = (payload = {}) => {
   return details
 }
 
-const validateFrameworkPackageReadiness = ({
+const validateFrameworkPackageReadiness = async (frameworkPackage, session) => {
+  const {
   status,
   packageKey,
   sections = [],
   reasoningArtefacts,
   uiContractKey = '',
-}) => {
+  } = frameworkPackage
   const details = {}
   try {
     validateReasoningArtefactDeclarations({
@@ -816,6 +830,7 @@ const validateFrameworkPackageReadiness = ({
     details.reasoningArtefacts = `${error.reason || error.code || 'CONTRACT_INVALID'}: ${error.message}`
   }
   if (!isReadyFrameworkPackageStatus(status)) return details
+  Object.assign(details, installedDiscoveryPolicyDetails(frameworkPackage, await inspectInstalledDiscoveryPolicy(frameworkPackage, { session })))
 
   if (!normalizeKeyValue(packageKey)) {
     details.packageKey = 'Package key is required before validation.'
@@ -2026,6 +2041,7 @@ export const buildDependencyLockSnapshot = ({
   actorUserId,
   lockedAt,
   status = 'PASS',
+  discoveryPolicyCapture = {},
 }) => {
   const lockedAtDate = lockedAt instanceof Date ? lockedAt : new Date(lockedAt)
   if (Number.isNaN(lockedAtDate.getTime())) {
@@ -2049,6 +2065,8 @@ export const buildDependencyLockSnapshot = ({
     packageKey: frameworkPackage.packageKey,
     packageVersion: frameworkPackage.version,
     references: buildDependencyLockReferences({ dependencies, lockedAt }),
+    ...discoveryPolicySnapshot(frameworkPackage.discoveryPolicy),
+    ...discoveryPolicyCapture,
     ...(dependencies?.uiContract ? { uiContractSnapshot: buildUIContractSnapshot({ dependencies }) } : {}),
   }
 
@@ -2183,12 +2201,16 @@ const prepareFrameworkPackageDependencyLock = async ({
   const dependencies = await fetchFrameworkPackageDependencies(frameworkPackage, session)
   const issueDetails = buildDependencyLockIssueDetails(dependencies)
   const status = Object.keys(issueDetails).length > 0 ? 'FAIL' : 'PASS'
+  const policyReport = await inspectInstalledDiscoveryPolicy(frameworkPackage, { session })
+  const policyDetails = installedDiscoveryPolicyDetails(frameworkPackage, policyReport)
+  Object.assign(issueDetails, policyDetails)
   const snapshot = buildDependencyLockSnapshot({
     frameworkPackage,
     dependencies,
     actorUserId,
     lockedAt,
-    status,
+    status: Object.keys(issueDetails).length ? 'FAIL' : status,
+    discoveryPolicyCapture: Object.keys(policyDetails).length ? {} : captureInstalledDiscoveryPolicy(frameworkPackage, policyReport),
   })
 
   return {
@@ -2360,6 +2382,16 @@ const resolveUIContractIntegrity = ({ frameworkPackage, uiContract }) => {
 
 const buildFrameworkPackageIntegrity = async (frameworkPackage, session) => {
   const checks = []
+  const policyReport = await inspectInstalledDiscoveryPolicy(frameworkPackage, { session })
+  const policyDetails = installedDiscoveryPolicyDetails(frameworkPackage, policyReport)
+  checks.push(buildIntegrityCheck({
+    key: 'discoveryPolicy.contract', group: 'Discovery Policy Integrity',
+    severity: Object.keys(policyDetails).length ? 'FAIL' : 'PASS',
+    message: Object.keys(policyDetails).length
+      ? Object.entries(policyDetails).map(([path, message]) => `${path}: ${message}`).join(' ')
+      : policyReport.status === 'LEGACY_FALLBACK' ? 'Discovery Policy is absent; legacy behaviour applies.' : 'Discovery Policy envelope is valid.',
+    field: 'discoveryPolicy',
+  }))
   const frameworkKey = String(frameworkPackage.frameworkKey || '').trim().toUpperCase()
   const readyStatus = isReadyFrameworkPackageStatus(frameworkPackage.status)
   const sections = getStructuralSections(frameworkPackage.sections)
@@ -2479,7 +2511,7 @@ const buildFrameworkPackageIntegrity = async (frameworkPackage, session) => {
     field: 'workflowBindings',
   }))
 
-  const dependencies = await fetchFrameworkPackageDependencies(frameworkPackage)
+  const dependencies = await fetchFrameworkPackageDependencies(frameworkPackage, session)
   checks.push(...buildDependencyResolutionIntegrityChecks(dependencies))
 
   const dependencyIssueDetails = buildDependencyLockIssueDetails(dependencies)
@@ -2592,7 +2624,7 @@ const runFrameworkPackageCheckpoint = async ({
   if (session) { for (const operation of operations) results.push(await operation()) }
   else results.push(...await Promise.all(operations.map((operation) => operation())))
   const [integrity, registryDetails, dependencyLockResult] = results
-  const readinessDetails = validateFrameworkPackageReadiness(checkpointPackage)
+  const readinessDetails = await validateFrameworkPackageReadiness(checkpointPackage, session)
   const stateContractDetails = validateFrameworkPackageStateContract(checkpointPackage)
   const extraIssues = mapDetailsToCheckpointIssues({
     ...readinessDetails,
@@ -2677,6 +2709,7 @@ const buildPackageGovernanceSnapshot = ({
     isDefault: Boolean(frameworkPackage?.isDefault),
     uiContractKey: frameworkPackage?.uiContractKey || '',
     reasoningArtefacts: cloneAuditValue(frameworkPackage?.reasoningArtefacts || []),
+    ...discoveryPolicySnapshot(frameworkPackage?.discoveryPolicy),
     stateModelKey: frameworkPackage?.stateModelKey || '',
     stateModelVersion: frameworkPackage?.stateModelVersion || '',
     stateBindingMode: frameworkPackage?.stateBindingMode || '',
@@ -2783,6 +2816,23 @@ const logPackageValidationGovernanceEvents = async (
   }
 }
 
+const persistCheckpointTelemetry = async ({ req, frameworkPackage, checkpoint, eventKeys, diff }) => {
+  const write = async (session) => {
+    persistFrameworkPackageCheckpointMetadata({ frameworkPackage, checkpoint })
+    await frameworkPackage.save(session ? { session } : {})
+    await logPackageValidationGovernanceEvents(req, eventKeys, {
+      frameworkPackage, checkpoint, diff, session, throwOnError: Boolean(session),
+    })
+  }
+  if (frameworkPackage.discoveryPolicy === undefined) await write(null)
+  else {
+    const session = await mongoose.startSession()
+    try { await session.withTransaction(() => write(session)) }
+    finally { await session.endSession() }
+  }
+  await populateFrameworkPackage(frameworkPackage)
+}
+
 export const listFrameworkPackages = async (req, res, next) => {
   try {
     const pageNum = Math.max(1, Number(req.query.page) || 1)
@@ -2846,7 +2896,7 @@ export const createFrameworkPackage = async (req, res, next) => {
       return sendValidationFailed(res, req, accessRuleDetails)
     }
 
-    const readinessDetails = validateFrameworkPackageReadiness(canonicalPackagePayload)
+    const readinessDetails = await validateFrameworkPackageReadiness(canonicalPackagePayload)
     if (Object.keys(readinessDetails).length > 0) {
       return sendValidationFailed(res, req, readinessDetails)
     }
@@ -2973,6 +3023,7 @@ export const createFrameworkPackage = async (req, res, next) => {
         assignedCustomerIds: frameworkPackage.assignedCustomerIds,
         sections: frameworkPackage.sections,
         reasoningArtefacts: frameworkPackage.reasoningArtefacts,
+        ...(frameworkPackage.discoveryPolicy === undefined ? {} : { discoveryPolicy: cloneAuditValue(frameworkPackage.discoveryPolicy) }),
         runtimeSettings: frameworkPackage.runtimeSettings,
         executionModel: frameworkPackage.executionModel,
         validationBindings: frameworkPackage.validationBindings,
@@ -3078,7 +3129,8 @@ export const getFrameworkPackage = async (req, res, next) => {
     })
 
     return res.status(200).json({
-      data: serializeFrameworkPackage(frameworkPackage, { checkpointRunByFallback }),
+      data: serializeFrameworkPackage(frameworkPackage, { checkpointRunByFallback,
+        discoveryPolicyReport: await inspectInstalledDiscoveryPolicy(frameworkPackage) }),
       meta: { requestId: req.requestId, version: 'v1' },
     })
   } catch (err) {
@@ -3175,7 +3227,7 @@ export const cloneFrameworkPackage = async (req, res, next) => {
     }
 
     const stateContractDetails = validateFrameworkPackageStateContract(clonedPackagePayload)
-    const readinessDetails = validateFrameworkPackageReadiness(clonedPackagePayload)
+    const readinessDetails = await validateFrameworkPackageReadiness(clonedPackagePayload)
     if (Object.keys(readinessDetails).length > 0) {
       return sendValidationFailed(res, req, readinessDetails)
     }
@@ -3221,6 +3273,7 @@ export const cloneFrameworkPackage = async (req, res, next) => {
         status: clonedPackage.status,
         derivedFromPackageId: clonedPackage.derivedFromPackageId,
         reasoningArtefacts: clonedPackage.reasoningArtefacts,
+        ...(clonedPackage.discoveryPolicy === undefined ? {} : { discoveryPolicy: cloneAuditValue(clonedPackage.discoveryPolicy) }),
       },
     })
 
@@ -3510,11 +3563,15 @@ export const updateFrameworkPackage = async (req, res, next) => {
       })
     }
 
-    const readinessDetails = validateFrameworkPackageReadiness({
+    const readinessDetails = await validateFrameworkPackageReadiness({
+      _id: frameworkPackage._id,
+      frameworkKey: frameworkPackage.frameworkKey,
+      version: canonicalPackagePayload.version || frameworkPackage.version,
       status: nextStatus,
       packageKey: nextPackageKey,
       sections: nextSections,
       reasoningArtefacts: nextReasoningArtefacts,
+      discoveryPolicy: canonicalPackagePayload.discoveryPolicy === undefined ? frameworkPackage.discoveryPolicy : canonicalPackagePayload.discoveryPolicy,
       uiContractKey: nextUiContractKey,
     })
     if (Object.keys(readinessDetails).length > 0) {
@@ -3651,6 +3708,20 @@ export const updateFrameworkPackage = async (req, res, next) => {
     const isDemotedFromValidated = previousStatus === FRAMEWORK_PACKAGE_STATUSES.VALIDATED
       && nextStatus === FRAMEWORK_PACKAGE_STATUSES.DRAFT
 
+    const persistUpdateAudit = async (session) => {
+      if (!Object.keys(diff).length) return
+      await auditService.logFromRequest(req, {
+        action: diff.status?.to === FRAMEWORK_PACKAGE_STATUSES.VALIDATED
+          ? auditService.AUDIT_ACTIONS.FRAMEWORK_PACKAGE_VALIDATED
+          : auditService.AUDIT_ACTIONS.FRAMEWORK_PACKAGE_UPDATED,
+        resourceType: auditService.RESOURCE_TYPES.FrameworkPackage,
+        resourceId: frameworkPackage._id,
+        scope: { frameworkKey: frameworkPackage.frameworkKey },
+        display: { resourceLabel: buildFrameworkPackageLabel(frameworkPackage) },
+        diff,
+      }, session ? { session, throwOnError: true } : undefined)
+    }
+    let updateAuditPersisted = false
     frameworkPackage.updatedBy = actorUserId
     if (isDemotedFromValidated) {
       // When demoting a package from VALIDATED to DRAFT, recompute dependency locks it owned.
@@ -3683,27 +3754,24 @@ export const updateFrameworkPackage = async (req, res, next) => {
       } finally {
         await session.endSession()
       }
+    } else if (frameworkPackage.discoveryPolicy !== undefined
+      && frameworkPackage.status === FRAMEWORK_PACKAGE_STATUSES.VALIDATED) {
+      const session = await mongoose.startSession()
+      try {
+        await session.withTransaction(async () => {
+          await frameworkPackage.save({ session })
+          await persistUpdateAudit(session)
+        })
+        updateAuditPersisted = true
+      } finally {
+        await session.endSession()
+      }
     } else {
       await frameworkPackage.save()
     }
     await populateFrameworkPackage(frameworkPackage)
 
-    if (Object.keys(diff).length > 0) {
-      const auditAction = diff.status?.to === FRAMEWORK_PACKAGE_STATUSES.VALIDATED
-        ? auditService.AUDIT_ACTIONS.FRAMEWORK_PACKAGE_VALIDATED
-        : auditService.AUDIT_ACTIONS.FRAMEWORK_PACKAGE_UPDATED
-
-      await auditService.logFromRequest(req, {
-        action: auditAction,
-        resourceType: auditService.RESOURCE_TYPES.FrameworkPackage,
-        resourceId: frameworkPackage._id,
-        scope: {
-          frameworkKey: frameworkPackage.frameworkKey,
-        },
-        display: { resourceLabel: buildFrameworkPackageLabel(frameworkPackage) },
-        diff,
-      })
-    }
+    if (!updateAuditPersisted) await persistUpdateAudit()
 
     return res.status(200).json({
       data: serializeFrameworkPackage(frameworkPackage, {
@@ -3825,19 +3893,11 @@ export const runFrameworkPackageCheckpointEndpoint = async (req, res, next) => {
     })
 
     if (req.body?.persist === true) {
-      persistFrameworkPackageCheckpointMetadata({
-        frameworkPackage,
-        checkpoint: checkpointRun.checkpoint,
-      })
-      await frameworkPackage.save()
-      await populateFrameworkPackage(frameworkPackage)
-      await logPackageValidationGovernanceEvent(req, (
+      await persistCheckpointTelemetry({ req, frameworkPackage, checkpoint: checkpointRun.checkpoint, eventKeys: [(
         checkpointRun.checkpoint.status === FRAMEWORK_PACKAGE_CHECKPOINT_STATUSES.FAIL
           ? 'CHECKPOINT_FAILED'
           : 'CHECKPOINT_PASSED'
-      ), {
-        frameworkPackage,
-        checkpoint: checkpointRun.checkpoint,
+      )],
         diff: {
           checkpoint: summarizeCheckpointForAudit(checkpointRun.checkpoint),
           persisted: true,
@@ -3982,15 +4042,8 @@ export const validateFrameworkPackage = async (req, res, next) => {
     })
 
     if (checkpointRun.checkpoint.status === FRAMEWORK_PACKAGE_CHECKPOINT_STATUSES.FAIL) {
-      persistFrameworkPackageCheckpointMetadata({
-        frameworkPackage,
-        checkpoint: checkpointRun.checkpoint,
-      })
-      await frameworkPackage.save()
-      await populateFrameworkPackage(frameworkPackage)
-      await logPackageValidationGovernanceEvents(req, ['CHECKPOINT_FAILED', 'VALIDATION_FAILED'], {
-        frameworkPackage,
-        checkpoint: checkpointRun.checkpoint,
+      await persistCheckpointTelemetry({ req, frameworkPackage, checkpoint: checkpointRun.checkpoint,
+        eventKeys: ['CHECKPOINT_FAILED', 'VALIDATION_FAILED'],
         diff: {
           lastCheckpointStatus: {
             from: previousCheckpointStatus,
@@ -4011,15 +4064,8 @@ export const validateFrameworkPackage = async (req, res, next) => {
     }
 
     if (previousStatus === FRAMEWORK_PACKAGE_STATUSES.ACTIVE) {
-      persistFrameworkPackageCheckpointMetadata({
-        frameworkPackage,
-        checkpoint: checkpointRun.checkpoint,
-      })
-      await frameworkPackage.save()
-      await populateFrameworkPackage(frameworkPackage)
-      await logPackageValidationGovernanceEvents(req, ['CHECKPOINT_PASSED', 'VALIDATION_PASSED'], {
-        frameworkPackage,
-        checkpoint: checkpointRun.checkpoint,
+      await persistCheckpointTelemetry({ req, frameworkPackage, checkpoint: checkpointRun.checkpoint,
+        eventKeys: ['CHECKPOINT_PASSED', 'VALIDATION_PASSED'],
         diff: {
           status: {
             from: previousStatus,
@@ -4059,6 +4105,13 @@ export const validateFrameworkPackage = async (req, res, next) => {
 
     session = await mongoose.startSession()
     await session.withTransaction(async () => {
+      const currentPolicyReport = await inspectInstalledDiscoveryPolicy(frameworkPackage, { session })
+      const currentPolicyCapture = captureInstalledDiscoveryPolicy(frameworkPackage, currentPolicyReport)
+      dependencyLockResult.snapshot = buildDependencyLockSnapshot({
+        frameworkPackage, dependencies: dependencyLockResult.dependencies, actorUserId,
+        lockedAt: dependencyLockResult.lockedAt, status: dependencyLockResult.snapshot.status,
+        discoveryPolicyCapture: currentPolicyCapture,
+      })
       persistFrameworkPackageCheckpointMetadata({
         frameworkPackage,
         checkpoint: checkpointRun.checkpoint,

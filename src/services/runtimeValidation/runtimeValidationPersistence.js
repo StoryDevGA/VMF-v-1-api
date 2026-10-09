@@ -152,7 +152,14 @@ export const persistRuntimeValidationAudit = async (validationResult, {
   certificationBinding,
   certificationDependencySnapshot,
   certificationDependencyLockObservation,
+  ve02Receipt,
+  existingVE02ReceiptAudit,
 } = {}) => {
+  if (ve02Receipt && (!session?.inTransaction() || validationResult.mode !== 'STRICT'
+    || validationResult.result !== 'ALLOW' || validationResult.isPackageLevelValidation)) {
+    throw buildRuntimeVerdictPersistenceError('VE02 consumption requires a successful scoped transaction.')
+  }
+  if (ve02Receipt && existingVE02ReceiptAudit) return existingVE02ReceiptAudit
   if (validationResult.isPackageLevelValidation) assertRuntimeCertificationTransaction(session)
   if (validationResult.isPackageLevelValidation && (!session || capturedPackage === undefined)) {
     throw buildRuntimeVerdictPersistenceError('Package certification requires captured transaction inputs.')
@@ -185,6 +192,7 @@ export const persistRuntimeValidationAudit = async (validationResult, {
   const severity = getHighestRuntimeValidationSeverity(validationResult.issues)
 
   const auditPayload = {
+    ...(ve02Receipt ? { ve02Receipt } : {}),
     validationCode: firstIssueCode,
     severity,
     operationType: validationResult.operationType,

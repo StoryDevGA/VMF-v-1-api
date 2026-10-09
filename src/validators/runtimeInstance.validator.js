@@ -1,5 +1,6 @@
 import { isIP } from 'node:net'
 import { z } from 'zod'
+import { sourceVerificationFactsSchema } from '../services/sourceVerificationContext.js'
 import { acquisitionRequestKeySchema } from './acquisitionRun.validator.js'
 import {
   DISCOVERY_ACQUISITION_PROFILE_ERROR_MESSAGE,
@@ -644,6 +645,16 @@ const reviewRuntimeDiscoveryEvidenceSchema = z.object({
       message: 'reviewStatus must be PENDING, ACCEPTED, or REJECTED',
     }),
 }).strict()
+
+export const validateRecordSourceVerification = createBodyValidator(z.object({
+  expectedUpdatedAt: expectedUpdatedAtSchema,
+  expectedSourceFingerprint: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+  facts: sourceVerificationFactsSchema,
+}).strict(), { message: 'Request validation failed.', rootIssueKey: '_root' })
+
+export const validateSourceVerificationParams = createParamsValidator(runtimeInstanceIdSchema.extend({
+  sourceId: z.string().trim().min(1).max(240),
+}).strict())
 
 const acceptRuntimeSectionSchema = z.object({
   expectedUpdatedAt: expectedUpdatedAtSchema,

@@ -2177,6 +2177,25 @@ beforeEach(async () => {
 })
 
 describe('Runtime Instance API', () => {
+  test.each(['SAVE_DISCOVERY_INPUTS', 'BUILD_EVIDENCE_PACK', 'REFRESH_EVIDENCE_PACK', 'ACCEPT_EVIDENCE'])('unverified package policy blocks %s before evidence work', async (actionKey) => {
+    const acquisition = await import('../services/acquisitionRunService.js')
+    acquisition.lookupAcquisitionRequest.mockClear()
+    acquisition.executeAcquisitionBuild.mockClear()
+    const document = makeRuntimeInstanceDocument({ updatedAt: new Date('2026-05-19T08:00:00.000Z') })
+    mockRuntimeInstanceForActionExecution({ document })
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({ discoveryPolicy: { contractVersion: 'framework-package-discovery-policy-v1', policyKey: 'unverified', policyVersion: '1.0.0' } }))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+    const res = await request.post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/${actionKey}`)
+      .set('Authorization', `Bearer ${token}`).send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('DISCOVERY_POLICY_CAPTURED_BINDING_MISMATCH')
+    expect(res.body.error.details).not.toHaveProperty('unresolvedReferences')
+    expect(acquisition.lookupAcquisitionRequest).not.toHaveBeenCalled()
+    expect(acquisition.executeAcquisitionBuild).not.toHaveBeenCalled()
+    expect(document.save).not.toHaveBeenCalled()
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
   test('lists a distinct customer Framework Package through the generic catalogue path', async () => {
     const token = await getAccessTokenForUser(makeCustomerAdmin())
     const websitePackage = makeFrameworkPackage({

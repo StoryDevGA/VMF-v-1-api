@@ -627,6 +627,95 @@ beforeEach(() => {
 })
 
 describe('Framework Package Routes', () => {
+  const unresolvedPolicy = () => ({ contractVersion: 'framework-package-discovery-policy-v1', policyKey: 'policy-test', policyVersion: '1.0.0', sectionMapping: { mode: 'proposal', algorithm: 'proposal', requireMappingReceipt: true, rules: [] } })
+
+  test.each(['checkpoint', 'validate'])('%s exposes unresolved policy without promoting the draft', async (action) => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const doc = makeFrameworkPackageDoc({ status: 'DRAFT', discoveryPolicy: unresolvedPolicy() })
+    FrameworkPackage.findById.mockResolvedValue(doc)
+    const res = await request.post(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/${action}`)
+      .set('Authorization', `Bearer ${token}`).send(action === 'checkpoint' ? { mode: 'FULL', persist: false } : {})
+    expect(res.status).toBe(action === 'checkpoint' ? 200 : 422)
+    const checkpoint = action === 'checkpoint' ? res.body.data : res.body.error.checkpoint
+    expect(checkpoint.status).toBe('FAIL')
+    expect(checkpoint.errors).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'discoveryPolicy' })]))
+    expect(doc.status).toBe('DRAFT')
+    if (action === 'checkpoint') expect(doc.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'FRAMEWORK_PACKAGE_VALIDATED' }))
+  })
+
+  test('activation rechecks unresolved policy despite previously certified evidence', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const doc = makeFrameworkPackageDoc({ certificationFixture: true, status: 'VALIDATED', discoveryPolicy: unresolvedPolicy() })
+    const previousHydrate = FrameworkPackage.hydrate
+    installCertifiedPackageLookups(doc)
+    let res
+    try {
+      res = await request.post(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/activate`)
+        .set('Authorization', `Bearer ${token}`).send({})
+    } finally {
+      FrameworkPackage.hydrate = previousHydrate
+    }
+    expect(res.status).toBe(422)
+    expect(res.body.error.checkpoint.status).toBe('FAIL')
+    expect(res.body.error.checkpoint.errors).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'discoveryPolicy' })]))
+    expect(doc.status).toBe('VALIDATED')
+    expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'FRAMEWORK_PACKAGE_ACTIVATED' }))
+  })
+
+  test.each(['VALIDATED', 'ACTIVE', 'DEPRECATED'])('policy changes cannot bypass persisted %s lifecycle through status demotion', async (status) => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const doc = makeFrameworkPackageDoc({ status })
+    FrameworkPackage.findById.mockResolvedValue(doc)
+    const res = await request.patch(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}`)
+      .set('Authorization', `Bearer ${token}`).send({ status: 'DRAFT', discoveryPolicy: unresolvedPolicy() })
+    expect(res.status).toBe(409)
+    expect(res.body.error.details.reason).toBe('DISCOVERY_POLICY_STRUCTURE_LOCKED')
+    expect(doc.save).not.toHaveBeenCalled()
+  })
+
+  test('safe metadata rejects Discovery Policy before mutation', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const doc = makeFrameworkPackageDoc({ status: 'ACTIVE' })
+    FrameworkPackage.findById.mockResolvedValue(doc)
+    const res = await request.patch(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/safe-metadata`)
+      .set('Authorization', `Bearer ${token}`).send({ discoveryPolicy: unresolvedPolicy() })
+    expect(res.status).toBe(422)
+    expect(doc.save).not.toHaveBeenCalled()
+  })
+
+  test('draft create stores unresolved policy without authored governance proof', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    mockFindOneSelect(null)
+    const res = await request.post('/api/v1/super-admin/runtime-control/framework-packages')
+      .set('Authorization', `Bearer ${token}`).send({ frameworkKey: 'VMF', frameworkName: 'VMF', version: '2.4.1', packageKey: 'vmf-2-4-1', discoveryPolicy: unresolvedPolicy() })
+    expect(res.status).toBe(201)
+    expect(res.body.data.discoveryPolicy).toEqual(unresolvedPolicy())
+    expect(res.body.data.discoveryPolicySummary.status).toBe('UNRESOLVED')
+    const createdAudit = AuditLog.createLog.mock.calls.map(([entry]) => entry).find((entry) => entry.action === 'FRAMEWORK_PACKAGE_CREATED')
+    expect(createdAudit.diff.discoveryPolicy).toEqual(unresolvedPolicy())
+    expect(createdAudit.diff).not.toHaveProperty('discoveryPolicySummary')
+  })
+
+  test('status validation checks persisted policy omitted from PATCH', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    const doc = makeFrameworkPackageDoc({ status: 'DRAFT', discoveryPolicy: unresolvedPolicy() })
+    FrameworkPackage.findById.mockResolvedValue(doc)
+    const res = await request.patch(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}`)
+      .set('Authorization', `Bearer ${token}`).send({ status: 'VALIDATED' })
+    expect(res.status).toBe(422)
+    expect(res.body.error.details).toHaveProperty(['discoveryPolicy.sectionMapping'])
+    expect(doc.save).not.toHaveBeenCalled()
+  })
+
+  test('integrity reports missing mapping with its exact group', async () => {
+    const token = await getAccessTokenForUser(makeFakeUser())
+    FrameworkPackage.findById.mockResolvedValue(makeFrameworkPackageDoc({ status: 'DRAFT', discoveryPolicy: unresolvedPolicy() }))
+    const res = await request.get(`/api/v1/super-admin/runtime-control/framework-packages/${FRAMEWORK_PACKAGE_ID}/integrity`)
+      .set('Authorization', `Bearer ${token}`)
+    expect(res.status).toBe(200)
+    expect(res.body.data.checks.find((row) => row.key === 'discoveryPolicy.contract')).toMatchObject({ severity: 'FAIL', field: 'discoveryPolicy' })
+  })
   test.each(['get', 'post'])('display binding %s requires authentication', async (method) => {
     const res = await request[method]('/api/v1/super-admin/runtime-control/framework-packages/website/ui-contract-display-binding')
     expect(res.status).toBe(401)
@@ -855,6 +944,8 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
         derivedFromPackageId: 'pkg-source-230',
       }),
     }))
+    const createdAudit = AuditLog.createLog.mock.calls.map(([entry]) => entry).find((entry) => entry.action === 'FRAMEWORK_PACKAGE_CREATED')
+    expect(createdAudit.diff).not.toHaveProperty('discoveryPolicy')
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'FRAMEWORK_PACKAGE_VALIDATED',
       resourceType: 'FrameworkPackage',
@@ -1634,6 +1725,7 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
       version: '2.3.1',
       packageKey: 'vmf-2-3-1',
       packageName: 'VMF 2.3.1',
+      discoveryPolicy: unresolvedPolicy(),
       status: 'ACTIVE',
       versionStatus: 'ACTIVE',
       isDefault: true,
@@ -1736,6 +1828,11 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
       uiContractKey: 'vmf-ui-contract-v1',
     }))
     expectFrameworkPackageCloneReleaseFieldsCleared(res.body.data)
+    expect(res.body.data.discoveryPolicy).toEqual(unresolvedPolicy())
+    expect(sourcePackage.discoveryPolicy).toEqual(unresolvedPolicy())
+    const clonedAudit = AuditLog.createLog.mock.calls.map(([entry]) => entry).find((entry) => entry.action === 'FRAMEWORK_PACKAGE_CLONED')
+    expect(clonedAudit.diff.discoveryPolicy).toEqual(unresolvedPolicy())
+    expect(clonedAudit.diff).not.toHaveProperty('discoveryPolicySummary')
     expect(res.body.data.sections).toEqual(expect.arrayContaining([
       expect.objectContaining({
         sectionKey: 'customer_problem',
@@ -1797,6 +1894,8 @@ test('POST /api/v1/super-admin/runtime-control/framework-packages returns 422 fo
       versionStatus: frameworkPackageCloneParity.cloneResult.versionStatus,
       derivedFromPackageId: ACTIVE_FRAMEWORK_PACKAGE_ID,
     }))
+    const clonedAudit = AuditLog.createLog.mock.calls.map(([entry]) => entry).find((entry) => entry.action === 'FRAMEWORK_PACKAGE_CLONED')
+    expect(clonedAudit.diff).not.toHaveProperty('discoveryPolicy')
   })
 
   test.each(frameworkPackageCloneParity.ineligibleSourceStatuses)(

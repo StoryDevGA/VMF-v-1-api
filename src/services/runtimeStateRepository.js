@@ -1,4 +1,6 @@
 import mongoose from 'mongoose'
+import { isValidEvidenceSourceLocation } from '../models/RuntimeEvidenceObject.js'
+import { sourceMaterialFingerprint, sourceVerificationContextSchema } from './sourceVerificationContext.js'
 import { graphNeighbourhoodSelectionSchema } from '../validators/graphNeighbourhood.validator.js'
 import { RUNTIME_INTELLIGENCE_GRAPH_NODE_TYPES } from './runtimeIntelligenceGraphService.js'
 import { readSourceProcessingSummary } from './sourceProcessingSummary.js'
@@ -155,6 +157,7 @@ const RUNTIME_STATE_V2_CHILD_PROJECTION = Object.freeze({
   lineageRef: 1,
   sourceType: 1,
   extractedFact: 1,
+  sourceLocation: 1,
   validationStatus: 1,
   confidence: 1,
   materiality: 1,
@@ -219,6 +222,7 @@ const RUNTIME_STATE_V2_EVIDENCE_SOURCE_PROJECTION = Object.freeze({
   sourceRef: 1,
   contentHash: 1,
   processingReceipt: 1,
+  verificationContext: 1,
   acquisitionStatus: 1,
   acquisitionProfile: 1,
   lineageRef: 1,
@@ -312,6 +316,7 @@ const RUNTIME_STATE_V2_HANDOFF_CONTRADICTION_EVIDENCE_PROJECTION = Object.freeze
   sourceType: 1,
   lineageRef: 1,
   extractedFact: 1,
+  sourceLocation: 1,
   reviewStatus: 1,
   acceptanceState: 1,
   validationStatus: 1,
@@ -1034,7 +1039,11 @@ const assertCurrentEvidenceSourceRows = (rows) => {
   })
 }
 
-const serializeEvidenceObject = (row, stateVersion) => ({
+const serializeEvidenceObject = (row, stateVersion) => {
+  if (!isValidEvidenceSourceLocation(row.sourceLocation)) throw createRuntimeStateError({
+    code: RUNTIME_STATE_V2_ERROR_CODES.STORAGE_UNAVAILABLE, status: 503,
+    message: 'The recorded source location is invalid.' })
+  return {
   evidenceObjectId: normalizeText(row.evidenceObjectId || row._id),
   sourceId: normalizeText(row.sourceId),
   lineageRef: truncateSummary(row.lineageRef, 1000),
@@ -1042,6 +1051,7 @@ const serializeEvidenceObject = (row, stateVersion) => ({
   sourceStateVersion: normalizeText(row.sourceStateVersion),
   sourceType: normalizeText(row.sourceType),
   extractedFact: truncateSummary(row.extractedFact, 8000),
+  ...(row.sourceLocation !== undefined ? { sourceLocation: row.sourceLocation } : {}),
   reviewStatus: normalizeText(row.reviewStatus),
   acceptanceState: normalizeText(row.acceptanceState),
   validationStatus: normalizeText(row.validationStatus),
@@ -1055,9 +1065,13 @@ const serializeEvidenceObject = (row, stateVersion) => ({
   contentHash: normalizeText(row.contentHash),
   createdAt: row.createdAt || null,
   updatedAt: row.updatedAt || null,
-})
+  }
+}
 
 const serializeEvidenceSource = (row, stateVersion) => {
+  if (row.verificationContext !== undefined && !sourceVerificationContextSchema.safeParse(row.verificationContext).success)
+    throw createRuntimeStateError({ code: RUNTIME_STATE_V2_ERROR_CODES.STORAGE_UNAVAILABLE,
+      status: 503, message: 'The recorded source review is invalid.' })
   const sourceType = normalizeText(row.sourceType).toUpperCase()
   const sourceRef = truncateSummary(row.sourceRef, 2000)
   const acquisitionStatus = normalizeText(row.acquisitionStatus)
@@ -1072,6 +1086,7 @@ const serializeEvidenceSource = (row, stateVersion) => {
       status: 503, message: 'The recorded document processing provenance is invalid.' })
   return {
     sourceId: normalizeText(row.sourceId),
+    materialFingerprint: sourceMaterialFingerprint(row),
     sourceType,
     type: sourceType,
     label: truncateSummary(row.title, 1000),
@@ -1080,6 +1095,7 @@ const serializeEvidenceSource = (row, stateVersion) => {
     ...(sourceType === 'UPLOADED_DOCUMENT' && sourceRef ? { fileName: sourceRef } : {}),
     contentHash: normalizeText(row.contentHash),
     ...(row.processingReceipt !== undefined ? { processingReceipt: structuredClone(row.processingReceipt) } : {}),
+    ...(row.verificationContext !== undefined ? { verificationContext: structuredClone(row.verificationContext) } : {}),
     acquisitionStatus,
     status: acquisitionStatus,
     acquisitionProfile: normalizeText(row.acquisitionProfile),

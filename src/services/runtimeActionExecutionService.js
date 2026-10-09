@@ -1,4 +1,6 @@
 import mongoose from 'mongoose'
+import { resolveInstalledPackageDiscoveryPolicy, summarizeDiscoveryPolicyResolution,
+  permitsLocalDiscoveryCandidateAcquisition, fenceInstalledDiscoveryPolicy } from './discoveryPolicyContract.js'
 import { lookupAcquisitionRequest, startAcquisitionRun, executeAcquisitionBuild, withAcquisitionTransaction,
   recordAcquisitionTerminal, readCommittedAcquisition, handleAcquisitionFailure, bindAcquisitionSourceProcessing } from './acquisitionRunService.js'
 import { assertCustomerSectionTarget, buildRuntimeManagedSourceReceipt } from './runtimeManagedSectionService.js'
@@ -1479,6 +1481,7 @@ const rollbackRuntimeAction = async ({
 
 const persistActionWithAudit = async ({
   acquisitionContext = null,
+  localDiscoveryPackage = null,
   action,
   actionedAt,
   actorUserId,
@@ -1523,6 +1526,16 @@ const persistActionWithAudit = async ({
     let graphLifecycle = null
     let sourceRollover = null
     const persist = async (session) => {
+        if (localDiscoveryPackage) {
+          const currentPackage = await FrameworkPackage.findById(localDiscoveryPackage._id).session(session)
+          const resolution = await resolveInstalledPackageDiscoveryPolicy({ frameworkPackage: currentPackage, runtimeInstance, session })
+          if (!permitsLocalDiscoveryCandidateAcquisition({ frameworkPackage: currentPackage, resolution })
+            || resolution.policyHash !== localDiscoveryPackage.dependencyLock.discoveryPolicyHash) {
+            throw buildActionError({ status: 409, code: 'CONFLICT', message: 'Discovery binding changed during evidence acquisition.',
+              reason: resolution.reason || 'DISCOVERY_POLICY_CAPTURED_BINDING_MISMATCH' })
+          }
+          await fenceInstalledDiscoveryPolicy(currentPackage, { session })
+        }
         updatedRuntimeInstance = await atomicPersistRuntimeAction({
           actorUserId,
           expectedUpdatedAt,
@@ -1617,7 +1630,7 @@ const persistActionWithAudit = async ({
     return finalized.runtimeInstance
   }
 
-  if (acquisitionContext) throw buildActionError({ status: 503, code: 'SERVICE_UNAVAILABLE',
+  if (acquisitionContext || localDiscoveryPackage) throw buildActionError({ status: 503, code: 'SERVICE_UNAVAILABLE',
     message: 'Acquisition transactional storage is unavailable.', reason: 'ACQUISITION_STORAGE_UNAVAILABLE' })
 
   const updatedRuntimeInstance = await atomicPersistRuntimeAction({
@@ -1732,14 +1745,6 @@ export const executeRuntimeAction = async ({
     feature: getFeatureForRuntimeType(runtimeInstance.runtimeType),
   })
 
-  const acquisitionContext = DISCOVERY_BUILD_ACTIONS.has(normalizedActionKey)
-    ? await lookupAcquisitionRequest({ runtimeInstance, payload, actorUserId, actionKey: normalizedActionKey, auditRequest }) : null
-  if (acquisitionContext?.replay) return { acquisitionRun: acquisitionContext.replay }
-
-  assertExpectedUpdatedAt({ runtimeInstance, expectedUpdatedAt })
-
-  const renderer = await getRuntimeRenderer({ scopes, runtimeInstanceId })
-  const action = resolveRendererAction({ renderer, actionKey: normalizedActionKey })
   const frameworkPackage = await FrameworkPackage.findById(runtimeInstance.packageId)
   if (!frameworkPackage) {
     throw buildActionError({
@@ -1751,6 +1756,24 @@ export const executeRuntimeAction = async ({
     })
   }
 
+  let localDiscoveryPackage = null
+  if (isDiscoveryAction(normalizedActionKey)) {
+    const policyResolution = await resolveInstalledPackageDiscoveryPolicy({ frameworkPackage, runtimeInstance })
+    const candidateAcquisition = DISCOVERY_BUILD_ACTIONS.has(normalizedActionKey)
+      && permitsLocalDiscoveryCandidateAcquisition({ frameworkPackage, resolution: policyResolution })
+    if (policyResolution.status !== 'LEGACY_FALLBACK' && !candidateAcquisition) throw buildActionError({
+      status: 409, code: 'CONFLICT', message: 'Discovery configuration is awaiting verification. Ask your administrator to review this package.',
+      reason: policyResolution.reason, details: { actionKey: normalizedActionKey, discoveryPolicy: summarizeDiscoveryPolicyResolution(policyResolution) },
+    })
+    if (candidateAcquisition) localDiscoveryPackage = frameworkPackage
+  }
+  const acquisitionContext = DISCOVERY_BUILD_ACTIONS.has(normalizedActionKey)
+    ? await lookupAcquisitionRequest({ runtimeInstance, payload, actorUserId, actionKey: normalizedActionKey, auditRequest }) : null
+  if (acquisitionContext?.replay) return { acquisitionRun: acquisitionContext.replay }
+
+  assertExpectedUpdatedAt({ runtimeInstance, expectedUpdatedAt })
+  const renderer = await getRuntimeRenderer({ scopes, runtimeInstanceId })
+  const action = resolveRendererAction({ renderer, actionKey: normalizedActionKey })
   const runtimeGate = getRuntimeActionStateGate({
     actionKey: normalizedActionKey,
     frameworkPackage,
@@ -1824,6 +1847,7 @@ export const executeRuntimeAction = async ({
 
   const updatedRuntimeInstance = await persistActionWithAudit({
     acquisitionContext,
+    localDiscoveryPackage,
     action,
     actionedAt: resolvedTransition.actionedAt,
     actorUserId,
@@ -1890,6 +1914,7 @@ export const executeRuntimeAction = async ({
       ...(resolvedTransition.discoveryResult ? { discovery: resolvedTransition.discoveryResult } : {}),
     },
   }
+
   if (acquisitionContext) response.acquisitionRun = await readCommittedAcquisition(acquisitionContext)
   return response
   } catch (error) {

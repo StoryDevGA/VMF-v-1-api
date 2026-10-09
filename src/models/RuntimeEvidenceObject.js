@@ -5,7 +5,15 @@ import {
   sha256Field,
   scopedCurrentIndex,
   scopedVersionIndex,
+  isBoundedSafeJson,
 } from './runtimeStateSchemas.js'
+
+export const isValidEvidenceSourceLocation = (value) => {
+  if (value === undefined || value === null) return true
+  if (typeof value !== 'string' && (typeof value !== 'object' || Array.isArray(value)
+    || ![Object.prototype, null].includes(Object.getPrototypeOf(value)))) return false
+  return isBoundedSafeJson(value, { maxDepth: 6, maxEntries: 100, maxBytes: 8192 })
+}
 
 const confidenceSchema = new mongoose.Schema({
   level: {
@@ -58,6 +66,11 @@ const runtimeEvidenceObjectSchema = createRuntimeStateSchema({
       trim: true,
       maxlength: 1000,
       default: '',
+    },
+    sourceLocation: {
+      type: mongoose.Schema.Types.Mixed,
+      default: undefined,
+      validate: { validator: isValidEvidenceSourceLocation, message: 'Invalid or oversized source location.' },
     },
     extractedFact: {
       type: String,

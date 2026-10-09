@@ -6,6 +6,7 @@ import { lookupAcquisitionRequest, startAcquisitionRun, executeAcquisitionBuild,
 import crypto from 'node:crypto'
 import { assertCustomerSectionTarget, assertRuntimeManagedCustomerWrite, isRuntimeManagedSection } from './runtimeManagedSectionService.js'
 import mongoose from 'mongoose'
+import { recordSourceReview, sourceMaterialFingerprint, sourceVerificationFactsSchema, preserveSourceRecordedReviews } from './sourceVerificationContext.js'
 import FrameworkPackage from '../models/FrameworkPackage.js'
 import RuntimePathRegistry, {
   RUNTIME_PATH_REGISTRY_DATA_TYPES,
@@ -1446,11 +1447,11 @@ export const buildDiscoveryEvidencePack = async ({
     evidenceObjects: inputEvidenceObjects,
     sources: inputSources,
   })
-  const sourceRegistry = [
+  const sourceRegistry = preserveSourceRecordedReviews([
     ...inputSourceRegistry,
     ...websiteMaterial.sourceRegistry,
     ...documentRegistryForPack,
-  ].map(source => {
+  ], previousEvidencePack.sourceRegistry).map(source => {
     const summary = buildDiscoveryEvidenceReviewSummary(evidenceObjects.filter(item => item.sourceId === source.sourceId))
     return { ...source, acceptedEvidenceObjects: summary.acceptedEvidenceCount,
       rejectedEvidenceObjects: summary.rejectedEvidenceCount, pendingEvidenceObjects: summary.pendingReviewCount }
@@ -3933,6 +3934,41 @@ export const reviewRuntimeDiscoveryContradiction = async ({
     expectedUpdatedAt, updatedAtBefore: runtimeInstance.updatedAt,
   })
   return { review, runtimeUpdatedAt: updated.updatedAt, unresolvedContradictionCount: unresolvedCount }
+}
+
+export const recordRuntimeSourceVerification = async ({ actorUserId, auditRequest, scopes,
+  runtimeInstanceId, sourceId, payload } = {}) => {
+  const runtimeInstance = await resolveRuntimeInstanceForMutation({ actorUserId, runtimeInstanceId, scopes })
+  assertRuntimeEditable(runtimeInstance)
+  assertExpectedUpdatedAt({ runtimeInstance, expectedUpdatedAt: payload?.expectedUpdatedAt })
+  if (mongoose.connection.readyState !== 1) throw buildMutationError({ status: 503,
+    code: 'SERVICE_UNAVAILABLE', message: 'Source review requires transactional storage.' })
+  const previousFrameworkState = cloneValue(runtimeInstance.framework_state || {})
+  const previousPack = previousFrameworkState.evidence_pack || {}
+  const sources = Array.isArray(previousPack.sourceRegistry) ? previousPack.sourceRegistry : []
+  const matching = sources.filter((source) => source.sourceId === sourceId)
+  if (matching.length !== 1) throw buildMutationError({ status: 404, code: 'NOT_FOUND',
+    message: 'The source was not found in the current registry.' })
+  const source = matching[0]
+  if (sourceMaterialFingerprint(source) !== payload?.expectedSourceFingerprint) throw buildMutationError({
+    status: 409, code: 'CONFLICT', message: 'The source changed. Reload it before recording a review.' })
+  const parsed = sourceVerificationFactsSchema.safeParse(payload?.facts)
+  if (!parsed.success) throw buildMutationError({ status: 422, code: 'VALIDATION_FAILED',
+    message: 'Source review facts are invalid.' })
+  const verificationContext = recordSourceReview({ source, facts: parsed.data, actorUserId: toIdString(actorUserId) })
+  const sourceRegistry = sources.map((entry) => entry.sourceId === sourceId ? { ...entry, verificationContext } : entry)
+  const nextPack = { ...previousPack, sourceRegistry,
+    ...(isPlainObject(previousPack.acquisition) ? { acquisition: { ...previousPack.acquisition, sourceRegistry } } : {}) }
+  await assertRuntimeEvidencePackWritable({ frameworkKey: runtimeInstance.frameworkKey, value: nextPack })
+  const updated = await persistMutationWithAudit({ actorUserId, auditRequest, runtimeInstance,
+    previousFrameworkState, previousUpdatedBy: runtimeInstance.updatedBy,
+    nextFrameworkState: { ...previousFrameworkState, evidence_pack: nextPack },
+    runtimePath: `${DISCOVERY_EVIDENCE_PACK_PATH}.sourceRegistry`,
+    previousValue: source, nextValue: sourceRegistry.find((entry) => entry.sourceId === sourceId),
+    additionalDiff: { sourceVerification: { sourceId, status: verificationContext.status } },
+    expectedUpdatedAt: payload.expectedUpdatedAt,
+    updatedAtBefore: runtimeInstance.updatedAt instanceof Date ? runtimeInstance.updatedAt.toISOString() : runtimeInstance.updatedAt })
+  return { sourceId, verificationContext, stateVersion: updated.stateVersion, updatedAt: updated.updatedAt }
 }
 
 export const reviewRuntimeDiscoveryEvidence = async ({

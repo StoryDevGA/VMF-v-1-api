@@ -1,4 +1,5 @@
 import { resolveRuntimeUIContractKey } from './runtimeDisplayBindingService.js'
+import { resolveInstalledPackageDiscoveryPolicy, summarizeDiscoveryPolicyResolution } from './discoveryPolicyContract.js'
 import { randomUUID } from 'node:crypto'
 import mongoose from 'mongoose'
 import {
@@ -2629,6 +2630,7 @@ export const getRuntimeRenderer = async ({
       routeKey: runtimeInstance.id,
     },
     package: {
+      discoveryPolicy: summarizeDiscoveryPolicyResolution(await resolveInstalledPackageDiscoveryPolicy({ frameworkPackage, runtimeInstance })),
       packageId: toIdString(frameworkPackage._id || frameworkPackage.id),
       packageKey: frameworkPackage.packageKey,
       packageName: frameworkPackage.packageName,

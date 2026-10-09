@@ -14,6 +14,7 @@ import {
   resolveDiscoveryPolicy,
 } from './discoveryContractReadinessService.js'
 import FrameworkPackage from '../models/FrameworkPackage.js'
+import { resolvePackageDiscoveryPolicy, resolveInstalledPackageDiscoveryPolicy, summarizeDiscoveryPolicyResolution } from './discoveryPolicyContract.js'
 import { getRuntimeInstance } from './runtimeInstanceService.js'
 
 const normalizeText = (value) => String(value ?? '').trim()
@@ -89,6 +90,9 @@ const buildRuntimeDiscoveryContractReadiness = async ({
     contract,
     rebuildGraph: false,
   })
+  proof.package_discovery_policy = summarizeDiscoveryPolicyResolution(
+    await resolveInstalledPackageDiscoveryPolicy({ frameworkPackage, runtimeInstance }),
+  )
 
   return {
     runtimeInstanceId: normalizeText(runtimeInstance.id || runtimeInstance._id),
@@ -151,6 +155,27 @@ export const evaluateDiscoveryContractRuntime = ({
   discoveryQuestions = [],
 } = {}) => {
   const evidencePack = isObject(frameworkState.evidence_pack) ? frameworkState.evidence_pack : {}
+  const packagePolicyResolution = resolvePackageDiscoveryPolicy({ frameworkPackage, runtimeInstance })
+  if (!frameworkPackage || frameworkPackage.discoveryPolicy !== undefined) {
+    const canonicalReadiness = buildCanonicalRevisionReadiness({
+      ...contract,
+      runtime_instance_id: normalizeText(runtimeInstance.id || runtimeInstance._id),
+      source_state_version: contract.source_state_version || runtimeInstance.stateVersion,
+      storylineos_package: { package_id: toIdString(runtimeInstance.packageId), package_key: runtimeInstance.packageKey, package_version: runtimeInstance.packageVersion },
+      discoveryPolicy: { ...packagePolicyResolution, status: 'UNRESOLVED', identity: { frameworkKey: runtimeInstance.frameworkKey, packageKey: runtimeInstance.packageKey, packageVersion: runtimeInstance.packageVersion } },
+    })
+    const arlReadinessSummary = buildArlReadinessSummary({ canonicalReadiness, graphSnapshot: canonicalReadiness.graph_snapshot, identityResolved: false })
+    return {
+      contract_version: DISCOVERY_READINESS_CONTRACT_VERSION,
+      package_discovery_policy: summarizeDiscoveryPolicyResolution(packagePolicyResolution),
+      source_registry: Array.isArray(evidencePack.sourceRegistry) ? evidencePack.sourceRegistry : [],
+      evidence_snapshot: canonicalReadiness.evidence_snapshot,
+      runtime_intelligence_graph: { ...canonicalReadiness.graph_snapshot, rebuilt: false, analysisSkipped: true },
+      section_coverage: [], canonical_revision_readiness: canonicalReadiness,
+      arl_readiness_summary: arlReadinessSummary,
+      latest_summary: projectLatestReadinessSummary(canonicalReadiness, arlReadinessSummary),
+    }
+  }
   const evaluatedAt = normalizeTimestamp(
     contract.evaluated_at ||
       evidencePack.refreshedAt ||
@@ -467,6 +492,7 @@ export const evaluateDiscoveryContractRuntime = ({
 
   return {
     contract_version: DISCOVERY_READINESS_CONTRACT_VERSION,
+    package_discovery_policy: summarizeDiscoveryPolicyResolution(packagePolicyResolution),
     source_registry: sourceRegistry.map((source) => ({
       source_id: source.sourceId,
       source_type: source.sourceType,

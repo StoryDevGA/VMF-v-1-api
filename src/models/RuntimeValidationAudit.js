@@ -1,4 +1,5 @@
 import mongoose from 'mongoose'
+import { ve02ProducerBindingSchema } from '../services/runtimeValidation/ve02LocalAssessorRegistration.js'
 
 export const RUNTIME_VALIDATION_AUDIT_RESULTS = Object.freeze({
   PASS: 'PASS',
@@ -104,6 +105,26 @@ const runtimeValidationSummarySchema = new mongoose.Schema(
 
 const runtimeValidationAuditSchema = new mongoose.Schema(
   {
+    // Consumption history, not an evidence assessment or truth store.
+    // Supplied only by the server after exact scoped contract verification.
+    ve02Receipt: {
+      type: new mongoose.Schema({
+        customerId: { type: mongoose.Schema.Types.ObjectId, required: true },
+        tenantId: { type: mongoose.Schema.Types.ObjectId, required: true },
+        runtimeInstanceId: { type: mongoose.Schema.Types.ObjectId, required: true },
+        resultId: { type: String, required: true, maxlength: 240 },
+        payloadHash: { type: String, required: true, match: /^[a-f0-9]{64}$/ },
+        payload: { type: mongoose.Schema.Types.Mixed, required: true },
+        evidenceRevisionRef: { type: String, required: true },
+        activationId: { type: String, required: true },
+        versionId: { type: String, required: true },
+        contentHash: { type: String, required: true },
+        consumerVersion: { type: String, required: true },
+        producerBinding: { type: mongoose.Schema.Types.Mixed, default: undefined,
+          validate: value => value === undefined || ve02ProducerBindingSchema.safeParse(value).success },
+      }, { _id: false, strict: 'throw' }),
+      default: undefined,
+    },
     certificationBinding: {
       type: new mongoose.Schema({
         version: { type: String, required: true, enum: ['runtime-release-certification.v1'] },
@@ -259,6 +280,11 @@ runtimeValidationAuditSchema.index({ workspaceId: 1, frameworkKey: 1, createdAt:
 runtimeValidationAuditSchema.index({ frameworkKey: 1, operationType: 1, createdAt: -1 })
 runtimeValidationAuditSchema.index({ status: 1, severity: 1, createdAt: -1 })
 runtimeValidationAuditSchema.index({ result: 1, createdAt: -1 })
+runtimeValidationAuditSchema.index({
+  've02Receipt.customerId': 1, 've02Receipt.tenantId': 1,
+  've02Receipt.runtimeInstanceId': 1, 've02Receipt.resultId': 1,
+}, { unique: true, name: 'unique_ve02_consumption_result',
+  partialFilterExpression: { 've02Receipt.resultId': { $type: 'string' } } })
 
 const RuntimeValidationAudit = mongoose.model('RuntimeValidationAudit', runtimeValidationAuditSchema)
 
