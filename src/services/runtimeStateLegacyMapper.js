@@ -336,9 +336,11 @@ const mapEvidence = ({ manifest, common, sourceIds }) => {
     const contentHash = hasOwn(value, 'contentHash') ? normalizeHash(value.contentHash) : undefined
     const truthHash = hasOwn(value, 'truthHash') ? normalizeHash(value.truthHash) : undefined
     const lineageHash = hasOwn(value, 'lineageHash') ? normalizeHash(value.lineageHash) : undefined
+    const unknownMaterialityScore = materiality === 'UNKNOWN' && value.materialityScore === null
     if ([evidenceObjectId, sourceId, sourceType, lineageRef, extractedFact,
       reviewStatus, acceptanceState, validationStatus, confidence, materiality,
-      materialityScore, title, summary, contentHash, truthHash, lineageHash].includes(null)) {
+      ...(unknownMaterialityScore ? [] : [materialityScore]),
+      title, summary, contentHash, truthHash, lineageHash].includes(null)) {
       inputFailure('Evidence mapping is invalid.')
     }
     const row = {

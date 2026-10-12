@@ -9,6 +9,9 @@ import {
 } from './runtimeStateSchemas.js'
 
 const NODE_ATTRIBUTE_KEYS = [
+  'truthHash',
+  'acceptedAt',
+  'acceptedBy',
   'consumerType',
   'coverageDomain',
   'customerVisible',

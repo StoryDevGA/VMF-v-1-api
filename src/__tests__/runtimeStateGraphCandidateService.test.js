@@ -1,4 +1,5 @@
 import { jest } from '@jest/globals'
+import { attachRuntimeIntelligenceGraphAuditRef } from '../services/discoveryAuditReferenceService.js'
 
 import {
   hashRuntimeIntelligenceGraphValue,
@@ -127,6 +128,37 @@ const expectInvalid = (graph) => expect(() => buildCandidate(graph)).toThrow(exp
 }))
 
 describe('Runtime State V2 graph candidate service', () => {
+  test('accepts the actual mutation audit decorator and preserves its reference without changing graph identity', () => {
+    const graph = makeGraph()
+    const before = JSON.stringify(graph)
+    const auditRef = 'f456ae4d-f83b-4b3e-811d-fdbe82416bfd'
+    const decorated = attachRuntimeIntelligenceGraphAuditRef(graph, auditRef)
+    const result = buildCandidate(decorated)
+    expect(result.snapshot.metadata.build.auditRef).toBe(auditRef)
+    expect(result.snapshot.graphHash).toBe(graph.graphHash)
+    expect(result.snapshot.snapshotId).toBe(buildCandidate(graph).snapshot.snapshotId)
+    expect(result.counts).toEqual(buildCandidate(graph).counts)
+    expect(JSON.stringify(graph)).toBe(before)
+    expect(decorated.build.auditRef).toBe(auditRef)
+  })
+
+  test.each([null, undefined, 12, {}, [], '', ' ', ' audit-reference', 'audit-reference '])(
+    'rejects a malformed optional build audit reference: %j', auditRef => {
+      const graph = makeGraph()
+      graph.build.auditRef = auditRef
+      expectInvalid(graph)
+    },
+  )
+
+  test('retains required build fields and rejects unknown fields on audit-decorated graphs', () => {
+    const graph = attachRuntimeIntelligenceGraphAuditRef(makeGraph(), 'audit-reference')
+    graph.build.extra = true
+    expectInvalid(graph)
+    delete graph.build.extra
+    delete graph.build.builtAt
+    expectInvalid(graph)
+  })
+
   test('maps one authentic logical graph into validated V2 snapshot and element candidates', () => {
     const graph = makeGraph()
     const before = JSON.stringify(graph)

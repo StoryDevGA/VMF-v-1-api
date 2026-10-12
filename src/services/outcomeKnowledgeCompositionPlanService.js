@@ -27,6 +27,10 @@ import { resolveOutcomeStudioKnowledgePackBinding } from './outcomeKnowledgePack
 import { resolveOutcomeStudioKnowledgeContext } from './outcomeStudioKnowledgeContextService.js'
 import { assertRuntimePermission } from './runtimeInstanceService.js'
 import { isSelectableResolverPack } from '../utils/knowledgePackPredicates.js'
+import { hasOutcomeAudienceRequest, resolveOutcomeAudienceRequest, projectOutcomeAudienceResolution,
+  projectOutcomeRequestSelectedLayers } from './outcomeAudienceRequestResolutionService.js'
+import { hasOutcomeCompositionRequest, resolveOutcomeCompositionRequest,
+  projectOutcomeCompositionResolution } from './outcomeCompositionRequestResolutionService.js'
 
 const TRANSACTION_TOPOLOGIES = new Set(['ReplicaSetWithPrimary', 'Sharded'])
 const SHA256_PATTERN = /^[a-f0-9]{64}$/
@@ -550,6 +554,10 @@ const buildConsumerIntent = (consumerIntent = {}, binding = {}) => {
     decisionPurpose: text(consumerIntent.decisionPurpose),
     consumer: text(consumerIntent.consumer),
     audience: [...new Set((consumerIntent.audience || []).map(text).filter(Boolean))],
+    ...(hasOutcomeAudienceRequest(consumerIntent)
+      ? { audienceResolution: resolveOutcomeAudienceRequest(consumerIntent.audience) } : {}),
+    ...(hasOutcomeCompositionRequest(consumerIntent)
+      ? { compositionResolution: resolveOutcomeCompositionRequest(consumerIntent.compositionResolution.mappings) } : {}),
     requestedOutputTypeKey: lower(
       consumerIntent.requestedOutputTypeKey
       || binding.resolution?.request?.requestedOutputTypeKey,
@@ -593,7 +601,7 @@ const buildRequestPlanningEvidence = (planningEvidence, intent) => planningEvide
   },
 }) : null
 
-const buildClarificationReceipt = ({ intent, requestScope, planningEvidence } = {}) => {
+const buildClarificationReceipt = ({ intent, requestScope, planningEvidence, requestedPackResolution = {} } = {}) => {
   if (!requestScope) return null
   const requestHash = hashSemanticFingerprintValue(intent.originalRequest)
   const intentFingerprint = hashSemanticFingerprintValue(intent)
@@ -603,11 +611,12 @@ const buildClarificationReceipt = ({ intent, requestScope, planningEvidence } = 
     contractVersion: 'outcome-studio.clarification-execution-receipt.v1',
     receiptId: `outcome_clarification_${hashSemanticFingerprintValue(receiptIdentity).slice(0, 32)}`,
     stageKey: 'CLARIFICATION',
-    status: 'PASSED',
+    status: Object.values(requestedPackResolution).some((entry) => entry.blockers.length) ? 'BLOCKED' : 'PASSED',
     ...receiptIdentity,
     explicitInferredDefaultedFields: canonicalize(intent.resolutionBasis || {}),
     questionsAnswered: canonicalize(intent.answeredClarificationQuestions || []),
     missingRequiredFields: canonicalize(intent.missingRequiredFields || []),
+    ...requestedPackResolution,
   }
 }
 
@@ -679,6 +688,22 @@ export const buildOutcomeKnowledgeCompositionPlanCandidate = ({
   }
   const resolution = projectResolution(binding)
   const governedContext = projectContext(context)
+  const selectedResolution = { ...resolution, selectedPacks: packEvidence.selectedPacks }
+  const requestedPackResolution = {
+    ...(hasOutcomeAudienceRequest(intent)
+      ? { audienceResolution: projectOutcomeAudienceResolution(intent, selectedResolution) } : {}),
+    ...(hasOutcomeCompositionRequest(intent)
+      ? { compositionResolution: projectOutcomeCompositionResolution(intent, selectedResolution) } : {}),
+  }
+  const requestedPackGapCount = Object.values(requestedPackResolution)
+    .reduce((count, entry) => count + entry.blockers.length, 0)
+  if (hasOutcomeAudienceRequest(intent) || hasOutcomeCompositionRequest(intent)) {
+    resolution.selectedByLayer = projectOutcomeRequestSelectedLayers(packEvidence.selectedPacks)
+    governedContext.audiencePacks = resolution.selectedByLayer.AUDIENCE || []
+    if (hasOutcomeCompositionRequest(intent)) {
+      governedContext.compositionPacks = requestedPackResolution.compositionResolution.selectedPacks
+    }
+  }
   if (requestScope) {
     // Mixed payload persistence minimizes empty objects. Represent absent optional
     // style explicitly so the saved payload retains its approved fingerprint.
@@ -689,6 +714,7 @@ export const buildOutcomeKnowledgeCompositionPlanCandidate = ({
     governedContext.contextId = hashSemanticFingerprintValue(semanticContext)
   }
   const requiredGap = hasRequiredGap(resolution)
+    || requestedPackGapCount > 0
     || governedContext.status !== 'READY'
     || governedContext.available !== true
     || Boolean(governedContext.blockerReason)
@@ -734,7 +760,8 @@ export const buildOutcomeKnowledgeCompositionPlanCandidate = ({
     },
     lockedTruth,
     consumerIntent: intent,
-    ...(requestScope ? { clarificationReceipt: buildClarificationReceipt({ intent, requestScope, planningEvidence }) } : {}),
+    ...(requestScope ? { clarificationReceipt: buildClarificationReceipt({ intent, requestScope, planningEvidence,
+      requestedPackResolution }) } : {}),
     resolution: {
       ...resolution,
       resolutionFingerprint,
@@ -754,6 +781,7 @@ export const buildOutcomeKnowledgeCompositionPlanCandidate = ({
     selectedPackCount: packEvidence.selectedPacks.length,
     consideredPackCount: packEvidence.consideredPacks.length,
     gapCount: intent.unresolvedGaps.length
+      + requestedPackGapCount
       + resolution.warnings.length
       + governedContext.warnings.length
       + resolution.missingDependencies.length
@@ -1030,6 +1058,10 @@ export const buildOutcomeKnowledgeCompositionPlanForRuntime = async ({
     packageVersion: runtime.packageVersion,
     workspaceType: 'OUTCOME',
     requestedOutputTypeKey: lower(consumerIntent?.requestedOutputTypeKey),
+    ...(hasOutcomeAudienceRequest(consumerIntent)
+      ? { audienceKeys: resolveOutcomeAudienceRequest(consumerIntent.audience).audienceKeys } : {}),
+    ...(hasOutcomeCompositionRequest(consumerIntent)
+      ? resolveOutcomeCompositionRequest(consumerIntent.compositionResolution.mappings).request : {}),
   }
   const [{ binding }, contextResult] = await Promise.all([
     resolveBinding({ query }),

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 
 import { describe, expect, test } from '@jest/globals'
 import mongoose from 'mongoose'
+import { applyDiscoveryEvidenceReview } from '../services/discoveryIntelligenceService.js'
 
 import {
   RUNTIME_STATE_V2_MAPPING_ERROR_CODES,
@@ -138,6 +139,48 @@ const commonKeys = [
   'stateVersion', 'sourceStateVersion', 'sourceHash', 'migrationReceiptId',
   'current', 'createdAt', 'updatedAt',
 ]
+
+test('maps an actual rejected discovery decision without inventing materiality or losing evidence', () => {
+  const legacy = makeLegacy()
+  const original = legacy.evidencePack.evidenceObjects[0]
+  const reviewed = applyDiscoveryEvidenceReview({
+    actorUserId: '64b7f7a4e1e5f8320c000005',
+    evidenceObjectId: original.evidenceObjectId,
+    evidenceObjects: [original],
+    reviewStatus: 'REJECTED',
+    reviewedAt: migrationTimestamp,
+  })
+  expect(reviewed.found).toBe(true)
+  legacy.evidencePack.evidenceObjects = reviewed.evidenceObjects
+  const rows = createRuntimeStateLegacySourceRowSet(makeInput(legacy)).rows.evidenceObjects
+  expect(rows).toHaveLength(1)
+  expect(rows[0]).toMatchObject({
+    evidenceObjectId: 'evidence-1', sourceId: 'source-1', extractedFact: 'Fact',
+    reviewStatus: 'REJECTED', validationStatus: 'REJECTED',
+    materiality: 'UNKNOWN', materialityScore: null,
+  })
+})
+
+test.each([['UNKNOWN', undefined], ['UNKNOWN', 0], ['MATERIAL', 0]])(
+  'preserves valid materiality score boundaries: %s %s', (materiality, materialityScore) => {
+    const legacy = makeLegacy()
+    Object.assign(legacy.evidencePack.evidenceObjects[0], { materiality, materialityScore })
+    if (materialityScore === undefined) delete legacy.evidencePack.evidenceObjects[0].materialityScore
+    expect(createRuntimeStateLegacySourceRowSet(makeInput(legacy)).rows.evidenceObjects[0])
+      .toMatchObject({ materiality, materialityScore })
+  },
+)
+
+test.each([['MATERIAL', null], [undefined, null], ['UNKNOWN', '0'],
+  ['UNKNOWN', NaN], ['UNKNOWN', Infinity], ['UNKNOWN', -0.1], ['UNKNOWN', 1.1]])(
+  'rejects malformed materiality score despite unknown-score compatibility: %s %s',
+  (materiality, materialityScore) => {
+    const legacy = makeLegacy()
+    Object.assign(legacy.evidencePack.evidenceObjects[0], { materiality, materialityScore })
+    if (materiality === undefined) delete legacy.evidencePack.evidenceObjects[0].materiality
+    expect(() => createRuntimeStateLegacySourceRowSet(makeInput(legacy))).toThrow()
+  },
+)
 
 test('document mapping preserves explicit processing provenance and filename fallback without inferring a receipt', () => {
   const legacy = makeLegacy()

@@ -319,6 +319,7 @@ export const RUNTIME_INTELLIGENCE_GRAPH_BUILD_TRIGGERS = Object.freeze({
   SECTION_EVIDENCE_UPDATED: 'SECTION_EVIDENCE_UPDATED',
   SECTION_EVIDENCE_ACCEPTED: 'SECTION_EVIDENCE_ACCEPTED',
   SECTION_EVIDENCE_REVIEWED: 'SECTION_EVIDENCE_REVIEWED',
+  SECTION_INPUT_UPDATED: 'SECTION_INPUT_UPDATED',
   SECTION_GENERATED: 'SECTION_GENERATED',
   SECTION_TRUTH_ACCEPTED: 'SECTION_TRUTH_ACCEPTED',
   PUBLISH_COMPLETED: 'PUBLISH_COMPLETED',
@@ -1013,6 +1014,16 @@ const buildRuntimeGraphSourceHash = ({ frameworkPackage, frameworkState, runtime
 const getRuntimeSections = (frameworkState = {}) =>
   isPlainObject(frameworkState.sections) ? frameworkState.sections : {}
 
+const getRuntimeSectionStateKey = (packageSection = {}) => {
+  const runtimePath = String(packageSection.runtimePath || '').trim()
+  const prefix = 'framework_state.sections.'
+  if (runtimePath.startsWith(prefix)) {
+    const stateKey = runtimePath.slice(prefix.length).trim()
+    if (stateKey && !stateKey.includes('.')) return stateKey
+  }
+  return normalizeKey(packageSection.sectionKey || packageSection.key)
+}
+
 const getPackageSections = ({ frameworkPackage, frameworkState }) => {
   const packageSections = Array.isArray(frameworkPackage?.sections) ? frameworkPackage.sections : []
   if (packageSections.length > 0) return packageSections
@@ -1484,7 +1495,8 @@ const addSectionTruthNodes = ({ context, frameworkPackage, frameworkState, runti
 
   getPackageSections({ frameworkPackage, frameworkState }).forEach((packageSection) => {
     const sectionKey = normalizeKey(packageSection.sectionKey || packageSection.key)
-    const sectionValue = sections[sectionKey]
+    const stateSectionKey = getRuntimeSectionStateKey(packageSection)
+    const sectionValue = sections[stateSectionKey]
     const accepted = getSectionAcceptedTruth(sectionValue)
     const acceptedAt = accepted.acceptedAt || accepted.acceptanceTimestamp || ''
     const truthHash = getAcceptedTruthHash(accepted)
@@ -1549,6 +1561,7 @@ const addSectionTruthNodes = ({ context, frameworkPackage, frameworkState, runti
     for (const [evidenceNodeId, intelligenceNodeId] of context.intelligenceByEvidenceId.entries()) {
       const record = context.evidenceRecords.get(evidenceNodeId)
       const supportsSection = record?.sectionKey === sectionKey
+        || record?.sectionKey === stateSectionKey
         || scopedEvidenceObjectIds.has(String(record?.evidenceObject?.evidenceObjectId || '').trim())
 
       if (!supportsSection) continue

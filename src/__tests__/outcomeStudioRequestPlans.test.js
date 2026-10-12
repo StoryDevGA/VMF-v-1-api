@@ -288,6 +288,15 @@ const fixture = () => {
   const packs = requestPacks()
   state.binding.availableOutputTypes = [{ status: 'READY', capabilityKey: 'executive-brief', outputType: packs.outputType, outputSchema: packs.outputSchema }]
   Object.assign(state.deps, {
+    resolveBinding: jest.fn(async ({ query }) => {
+      if (!query.audienceKeys?.length || state.binding.selectedByLayer.AUDIENCE) return { binding: state.binding }
+      const audiences = query.audienceKeys.map((capabilityKey) => makePack({ packType: 'AUDIENCE',
+        packKey: capabilityKey.replace(/[^a-z0-9-]/gi, '-'), knowledgeLayer: 'AUDIENCE', capabilityKey, suffix: 'c' }))
+      return { binding: { ...state.binding, selectedByLayer: { ...state.binding.selectedByLayer, AUDIENCE: audiences },
+        lineage: { activationIds: [...state.binding.lineage.activationIds, ...audiences.map((pack) => pack.activationId)],
+          versionIds: [...state.binding.lineage.versionIds, ...audiences.map((pack) => pack.versionId)],
+          contentHashes: [...state.binding.lineage.contentHashes, ...audiences.map((pack) => pack.contentHash)] } } }
+    }),
     receiptSecret: secret,
     readRuntimeControl: jest.fn(async () => state.runtime),
     readKcpRuntimeEvidence: jest.fn(async () => state.runtime),
@@ -308,6 +317,64 @@ const complete = async (state, initial) => {
 const confirm = (state, result) => confirmOutcomeStudioRequestPlan({ ...args(state, { continuation: result.continuation, confirm: true }), requestId: result.requestId })
 
 describe('prompt-only planning contract', () => {
+  it('keeps Executive Team separate from Channel and carries requested optional layers through confirmation', async () => {
+    const state = fixture()
+    const channel = makePack({ packType: 'CHANNEL', packKey: 'linkedin-post-channel', knowledgeLayer: 'CHANNEL', capabilityKey: 'linkedin-post-channel', suffix: 'b' })
+    state.binding.selectedByLayer.CHANNEL = [channel]
+    state.binding.lineage.activationIds.push(channel.activationId)
+    state.binding.lineage.versionIds.push(channel.versionId)
+    state.binding.lineage.contentHashes.push(channel.contentHash)
+    let result = await planOutcomeStudioRequest(args(state, { prompt: 'Prepare an executive brief for the Executive Team on LinkedIn.' }))
+    expect(result.intent.audience).toEqual(['Executive Team'])
+    result = await planOutcomeStudioRequest(args(state, { prompt: 'Support an executive decision', continuation: result.continuation }))
+    expect(state.deps.resolveContext.mock.calls.every(([value]) => value.query.channelKey === 'linkedin-post-channel')).toBe(true)
+    expect(result).toMatchObject({ planStatus: 'READY', compositionResolution: { blockers: [],
+      selectedPacks: [expect.objectContaining({ capabilityKey: 'linkedin-post-channel', contentHash: channel.contentHash })] },
+      evidenceToMeaning: { canExecute: false } })
+    const saved = await confirm(state, result)
+    expect(saved.plan.clarificationReceipt.compositionResolution).toEqual(result.clarificationReceipt.compositionResolution)
+    expect(state.rows[0].payload.governedContext.compositionPacks).toEqual(result.compositionResolution.selectedPacks)
+    expect(saved.plan.execution.canExecute).toBe(false)
+  })
+  it.each(['missing', 'ambiguous'])('exposes the requested Audience %s blocker without saving a plan', async (kind) => {
+    const state = fixture()
+    const selector = { knowledgeLayer: 'AUDIENCE', capabilityKey: 'executive-leadership-team' }
+    state.binding.status = kind === 'ambiguous' ? 'AMBIGUOUS' : 'BLOCKED'
+    if (kind === 'ambiguous') state.binding.ambiguousCandidates = [{ selector, requiredBy: 'REQUESTED_AUDIENCE', candidates: [] }]
+    else state.binding.missingDependencies = [{ selector, requirement: 'REQUIRED', reason: 'REQUESTED_CAPABILITY_MISSING', requiredBy: 'REQUESTED_AUDIENCE' }]
+    state.deps.resolveBinding = jest.fn(async ({ query }) => ({ binding: query.audienceKeys?.length
+      ? state.binding : { ...state.binding, status: 'READY', missingDependencies: [], ambiguousCandidates: [] } }))
+    let result = await planOutcomeStudioRequest(args(state, { prompt: 'Prepare an executive brief for the Executive Team.' }))
+    result = await planOutcomeStudioRequest(args(state, { prompt: 'Support an executive decision', continuation: result.continuation }))
+    const code = kind === 'ambiguous' ? 'REQUESTED_AUDIENCE_AMBIGUOUS' : 'REQUESTED_AUDIENCE_UNAVAILABLE'
+    expect(result).toMatchObject({ status: 'BLOCKED', blockers: [code], execution: { canExecute: false },
+      audienceResolution: { blockers: [{ code, capabilityKey: selector.capabilityKey }] } })
+    expect(state.rows).toHaveLength(0)
+    expect(state.audits).toHaveLength(0)
+  })
+  it('carries Audience selection through preview, confirmed receipt and downstream plan without clearing evidence blockers', async () => {
+    const state = fixture()
+    const audience = makePack({ packType: 'AUDIENCE', packKey: 'executive-leadership-team', knowledgeLayer: 'AUDIENCE',
+      capabilityKey: 'executive-leadership-team', suffix: 'c' })
+    state.binding.selectedByLayer.AUDIENCE = [audience]
+    state.binding.lineage.activationIds.push(audience.activationId)
+    state.binding.lineage.versionIds.push(audience.versionId)
+    state.binding.lineage.contentHashes.push(audience.contentHash)
+    let preview = await planOutcomeStudioRequest(args(state, { prompt: 'Prepare an executive brief for the Executive Team.' }))
+    preview = await planOutcomeStudioRequest(args(state, { prompt: 'Support an executive decision', continuation: preview.continuation }))
+    expect(preview).toMatchObject({ status: 'CONFIRMATION_REQUIRED', planStatus: 'READY', intent: { audience: ['Executive Team'] },
+      evidenceToMeaning: { canExecute: false }, audienceResolution: { blockers: [] },
+      selectedByLayer: { AUDIENCE: [expect.objectContaining({ activationId: audience.activationId, versionId: audience.versionId,
+        scopeType: 'GLOBAL', scopeKey: 'GLOBAL', contentHash: audience.contentHash })] } })
+    expect(state.deps.resolveBinding.mock.calls.some(([value]) => value.query.audienceKeys?.[0] === audience.capabilityKey)).toBe(true)
+    expect(state.deps.resolveContext.mock.calls.every(([value]) => value.query.audienceKeys?.[0] === audience.capabilityKey)).toBe(true)
+    const saved = await confirm(state, preview)
+    expect(saved.plan.clarificationReceipt.audienceResolution).toEqual(preview.clarificationReceipt.audienceResolution)
+    expect(saved.plan.outputContract.selectedByLayer.AUDIENCE).toEqual(preview.selectedByLayer.AUDIENCE)
+    expect(state.rows[0].payload.governedContext.audiencePacks).toEqual(preview.selectedByLayer.AUDIENCE)
+    expect(saved.plan.evidenceToMeaning.canExecute).toBe(false)
+    expect(saved.plan.execution.canExecute).toBe(false)
+  })
   it('pins new v2 state through confirmation and keeps old sealed continuations on v1', async () => {
     const current = fixture(), preview = await complete(current)
     const sealed = JSON.parse(encryption.decrypt(preview.continuation, receiptKey))

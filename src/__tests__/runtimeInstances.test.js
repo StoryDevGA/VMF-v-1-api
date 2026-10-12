@@ -15256,6 +15256,19 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
   })
 
   test('PATCH /api/v1/runtime-instances/:id/data archives generated and accepted truth when section input changes', async () => {
+    const preservedSection = {
+      input: 'Unchanged value drivers.',
+      accepted: {
+        content: 'Accepted value drivers truth.',
+        acceptedAt: '2026-05-19T08:02:00.000Z',
+        acceptedBy: CUSTOMER_ADMIN_ID,
+        truthHash: 'sha256:preserved-value-drivers',
+      },
+    }
+    FrameworkPackage.findById.mockResolvedValue(makeRendererFrameworkPackage({ sections: [
+      { sectionKey: 'customer_problem', runtimePath: 'framework_state.sections.customer_problem', required: true },
+      { sectionKey: 'value_drivers', runtimePath: 'framework_state.sections.value_drivers', required: true },
+    ] }))
     const runtimeInstanceDoc = makeRuntimeInstanceDocument({
       updatedAt: new Date('2026-05-19T08:00:00.000Z'),
       framework_state: {
@@ -15278,6 +15291,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
           },
         }),
         sections: {
+          value_drivers: preservedSection,
           customer_problem: {
             input: 'Proposal creation is slow.',
             generated: {
@@ -15380,6 +15394,23 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       previousValue: 'Proposal creation is slow.',
       value: 'Proposal teams lack a shared story.',
     }))
+    const persistedState = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state
+    expect(persistedState.sections.value_drivers).toEqual(preservedSection)
+    expect(persistedState.evidence_pack).toEqual(runtimeInstanceDoc.framework_state.evidence_pack)
+    const graph = persistedState.intelligence_graph
+    expect(graph.validation.status).toBe('VALID')
+    expect(graph.build.trigger).toBe('SECTION_INPUT_UPDATED')
+    expect(graph.nodes.some(node => node.nodeType === 'SECTION_TRUTH' && node.sectionKey === 'customer_problem')).toBe(false)
+    expect(graph.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ nodeType: 'SECTION_TRUTH', sectionKey: 'value_drivers' }),
+      expect.objectContaining({ nodeType: 'EVIDENCE' }),
+    ]))
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({ diff: expect.objectContaining({
+      runtimePath: 'framework_state.sections.customer_problem',
+      buildTrigger: 'SECTION_INPUT_UPDATED',
+      autoRebuilt: true,
+      nextGraphHash: graph.graphHash,
+    }) }))
   })
 
   test('PATCH /api/v1/runtime-instances/:id/data archives legacy section-key truth when writing a runtime-path state key', async () => {

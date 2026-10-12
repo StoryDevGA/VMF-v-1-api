@@ -39,6 +39,7 @@ const SNAPSHOT_METADATA_KEYS = new Set([
 ])
 const NODE_CONSUMED_KEYS = new Set(['nodeId', 'label', 'summary'])
 const NODE_ATTRIBUTE_KEYS = new Set([
+  'truthHash', 'acceptedAt', 'acceptedBy',
   'consumerType', 'coverageDomain', 'customerVisible', 'entityDefinitionKey',
   'entityDisplayName', 'evidenceObjectId', 'frameworkKey', 'graphQualityState',
   'lockVersion', 'lockedAt', 'lockedBy', 'metadata', 'nodeType', 'packageKey',
@@ -172,7 +173,13 @@ const assertGraphIdentity = ({ graph, authority }) => {
 }
 
 const assertGraphIntegrity = (graph) => {
-  assertExactKeys(graph.build, BUILD_KEYS, 'Logical graph build evidence is invalid.')
+  const hasAuditRef = isPlainRecord(graph.build) && Object.hasOwn(graph.build, 'auditRef')
+  const buildKeys = hasAuditRef ? new Set([...BUILD_KEYS, 'auditRef']) : BUILD_KEYS
+  assertExactKeys(graph.build, buildKeys, 'Logical graph build evidence is invalid.')
+  if (hasAuditRef && (typeof graph.build.auditRef !== 'string'
+    || !graph.build.auditRef || graph.build.auditRef !== graph.build.auditRef.trim())) {
+    inputFailure('Logical graph build audit reference is invalid.')
+  }
   if (graph.artifactType !== RUNTIME_INTELLIGENCE_GRAPH_ARTIFACT_TYPE
     || graph.graphVersion !== RUNTIME_INTELLIGENCE_GRAPH_VERSION
     || typeof graph.runtimeInstanceId !== 'string'

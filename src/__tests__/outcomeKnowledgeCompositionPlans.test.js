@@ -10,6 +10,8 @@ import {
   OUTCOME_QUALITY_STAGES,
 } from '../constants/outcomeGovernedQuality.js'
 import OutcomeKnowledgeCompositionPlan from '../models/OutcomeKnowledgeCompositionPlan.js'
+import { resolveOutcomeAudienceRequest } from '../services/outcomeAudienceRequestResolutionService.js'
+import { inferOutcomeCompositionRequest } from '../services/outcomeCompositionRequestResolutionService.js'
 import {
   assertOutcomeKnowledgeCompositionPlanIntegrity,
   assertOutcomeKnowledgeCompositionPlanMatchesRuntime,
@@ -316,6 +318,32 @@ const makePersistenceDeps = ({ latest = null, auditError = null, saveError = nul
 }
 
 describe('Outcome Knowledge Composition Plan contract', () => {
+  it.each([
+    ['Audience', { audience: ['Executive Team'], audienceResolution: resolveOutcomeAudienceRequest(['Executive Team']) },
+      'audienceResolution', 'REQUESTED_AUDIENCE_UNAVAILABLE'],
+    ['Visual System', { compositionResolution: inferOutcomeCompositionRequest('Visual system: brand.v2.') },
+      'compositionResolution', 'REQUESTED_VISUAL_SYSTEM_UNAVAILABLE'],
+    ['conflicting Channels', { compositionResolution: inferOutcomeCompositionRequest('Channel: LinkedIn post, email.') },
+      'compositionResolution', 'REQUESTED_CHANNEL_AMBIGUOUS'],
+  ])('blocks unresolved requested %s even when binding and context report READY', (_name, fields, receiptField, code) => {
+    const candidate = buildOutcomeKnowledgeCompositionPlanCandidate({ runtime: makeRuntime(), binding: makeBinding(),
+      context: makeContext(), consumerIntent: { ...consumerIntent(), ...fields },
+      requestScope: { requestId: 'd2f029cf-56dc-402b-9421-1bf20c6e07c4', runtimeInstanceId: ids.runtime,
+        tenantId: ids.tenant, customerId: ids.customer } })
+    expect(candidate.status).toBe('BLOCKED')
+    expect(candidate.payload.clarificationReceipt.status).toBe('BLOCKED')
+    expect(candidate.payload.clarificationReceipt[receiptField].blockers)
+      .toContainEqual(expect.objectContaining({ code }))
+    expect(() => assertOutcomeKnowledgeCompositionPlanIntegrity({ ...makePlanRecord(candidate),
+      requestId: candidate.payload.requestId })).toThrow('Knowledge Composition Plan resolution evidence is invalid.')
+  })
+  it('preserves legacy plan integrity without adding Audience request metadata', () => {
+    const candidate = buildCandidate()
+    expect(candidate.payload.consumerIntent).not.toHaveProperty('audienceResolution')
+    expect(candidate.payload.resolution).not.toHaveProperty('selectedByLayer')
+    expect(candidate.payload.governedContext).not.toHaveProperty('audiencePacks')
+    expect(() => assertOutcomeKnowledgeCompositionPlanIntegrity(makePlanRecord(candidate))).not.toThrow()
+  })
   const renamedArlBinding = () => {
     const binding = makeBinding()
     const arl = binding.mandatorySafeguards.find((pack) => pack.packType === 'ARL')

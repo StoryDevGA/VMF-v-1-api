@@ -418,7 +418,41 @@ export const resolveRequestSpecificKnowledgePacks = ({
 
   const selectBest = ({ pool, selector, requiredBy }) => {
     const safeSelector = toSafeSelector(selector)
-    const matches = pool.filter((pack) => selectorMatches(pack, safeSelector))
+    const matches = pool.filter((pack) => {
+      if (!selectorMatches(pack, safeSelector)) return false
+      if (requiredBy === 'REQUESTED_CHANNEL') {
+        // Channel rendition requires declarations from the selected output and
+        // its schemas. Use governed activation relationships, not source prose
+        // or fixture-only compatibility fields.
+        const outputs = [...selectedDynamic.values()].filter((candidate) => (
+          candidate.knowledgeLayer === 'OUTPUT_TYPE'
+          && candidate.capabilityKey === normalizeLowerKey(request.requestedOutputTypeKey)
+        ))
+        const schemas = [...selectedDynamic.values()].filter((candidate) => candidate.knowledgeLayer === 'OUTPUT_SCHEMA')
+        const declaresChannel = (candidate) => candidate.dependencyReferences.some((reference) => (
+          reference.relationshipType === KNOWLEDGE_PACK_RELATIONSHIP_TYPES.COMPATIBLE_WITH
+          && reference.targetKnowledgeAssetId === pack.knowledgeAssetId
+          && (!reference.targetPackType || reference.targetPackType === pack.packType)
+          && (!reference.targetKnowledgeLayer || reference.targetKnowledgeLayer === pack.knowledgeLayer)
+          && semanticVersionSatisfies(pack.semanticVersion, reference.versionConstraint)
+        ))
+        if (outputs.length !== 1 || !schemas.length || ![...outputs, ...schemas].every(declaresChannel)) {
+          exclude(pack, 'OUTPUT_CONTRACT_CHANNEL_INCOMPATIBLE', safeSelector)
+          return false
+        }
+      }
+      if (['AUDIENCE', 'CHANNEL', 'STYLE', 'LANGUAGE', 'VISUAL_SYSTEM', 'INDUSTRY'].includes(safeSelector.knowledgeLayer)
+        && request.requestedOutputTypeKey) {
+        const output = dynamicPool.find((candidate) => candidate.knowledgeLayer === 'OUTPUT_TYPE'
+          && candidate.capabilityKey === normalizeLowerKey(request.requestedOutputTypeKey))
+        if (hasDirectCompatibility(pack, { capabilityKey: request.requestedOutputTypeKey,
+          knowledgeAssetId: output?.knowledgeAssetId }) === false) {
+          exclude(pack, 'OUTPUT_TYPE_INCOMPATIBLE', safeSelector)
+          return false
+        }
+      }
+      return true
+    })
     if (matches.length === 0) return { type: 'MISSING', selector: safeSelector }
 
     const ranked = [...matches].sort((left, right) =>

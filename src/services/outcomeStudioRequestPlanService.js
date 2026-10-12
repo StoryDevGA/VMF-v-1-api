@@ -12,6 +12,10 @@ import { projectOutcomeStudioDeliverableDiscovery } from './outcomeStudioKnowled
 import { resolveOutcomeStudioConversationOutputContract } from './outcomeStudioOutputContractResolutionService.js'
 import { buildOutcomeKnowledgeCompositionPlanForRuntime, createOutcomeKnowledgeCompositionPlan,
   getOutcomeRequestKnowledgeCompositionPlan } from './outcomeKnowledgeCompositionPlanService.js'
+import { hasOutcomeAudienceRequest, resolveOutcomeAudienceRequest, projectOutcomeAudienceResolution,
+  projectOutcomeRequestSelectedPack, projectOutcomeRequestSelectedLayers } from './outcomeAudienceRequestResolutionService.js'
+import { hasOutcomeCompositionRequest, inferOutcomeCompositionRequest, resolveOutcomeCompositionRequest,
+  projectOutcomeCompositionResolution } from './outcomeCompositionRequestResolutionService.js'
 
 const PURPOSE = 'outcome-studio.request-planning'
 const VERSION = 1
@@ -82,7 +86,7 @@ const authorize = async ({ actorUserId, runtimeInstanceId, scopes, sessionId = '
 const intentProjection = (intent = {}) => Object.fromEntries(
   ['originalRequest', 'outcome', 'decisionPurpose', 'consumer', 'audience', 'requestedOutputTypeKey', 'outputTypeLabel',
     'evidenceSource', 'constraints', 'format', 'channel', 'requirements', 'resolutionBasis', 'missingRequiredFields',
-    'clarificationQuestions', 'answeredClarificationQuestions', 'selectedSchema', 'selectedKnowledgePacks', 'runtimeIntegrity']
+    'clarificationQuestions', 'answeredClarificationQuestions', 'selectedSchema', 'selectedKnowledgePacks', 'runtimeIntegrity', 'audienceResolution', 'compositionResolution']
     .filter((field) => intent[field] !== undefined).map((field) => [field, intent[field]]))
 const respond = (state, deps, extra = {}) => ({
   status: state.phase, requestId: state.requestId, continuation: seal(state, deps),
@@ -107,6 +111,8 @@ const planProjection = (result) => {
       outputSchema: result.plan.payload.governedContext?.outputSchema || null,
       style: result.plan.payload.governedContext?.style || null,
       selectedPacks: result.plan.payload.resolution?.selectedPacks || [],
+      ...(hasOutcomeAudienceRequest(result.plan.payload.consumerIntent) || hasOutcomeCompositionRequest(result.plan.payload.consumerIntent)
+        ? { selectedByLayer: projectOutcomeRequestSelectedLayers(result.plan.payload.resolution?.selectedPacks) } : {}),
     },
     runtimeIntegrity: result.plan.payload.planningEvidence || null,
     currentness: { current: false, evidenceStatus: 'NOT_REVALIDATED', latestInRequest: result.currentness.latestInRequest === true },
@@ -119,7 +125,7 @@ const planProjection = (result) => {
 const firstSentence = (value) => text(value).split(/(?<=[.!?])\s+/)[0]?.replace(/[.!?]+$/, '') || ''
 const matchGroup = (value, expression) => text(expression.exec(value)?.[1]).replace(/[.!?]+$/, '')
 const inferAudience = (prompt, resolution) => {
-  const explicit = matchGroup(prompt, /\bfor\s+(.+?)(?=\s+(?:using|to|with|focus(?:ing)?\s+on|preserv(?:e|ing))\b|[.!?]|$)/i)
+  const explicit = matchGroup(prompt, /\bfor\s+(.+?)(?=\s+(?:using|to|with|in|on|via|focus(?:ing)?\s+on|preserv(?:e|ing))\b|[.!?,;]|$)/i)
   if (explicit) return { value: [explicit.replace(/^(?:the|a|an)\s+/i, '')], source: basis.PROMPT }
   const label = text(resolution?.audience?.label)
   return label ? { value: [label], source: basis.PROMPT_AND_METADATA } : { value: [], source: '' }
@@ -151,6 +157,7 @@ export const inferOutcomeStudioRequestIntent = ({ prompt, resolution, deliverabl
   const purpose = inferDecisionPurpose(originalRequest, resolution)
   const evidence = inferEvidenceSource(originalRequest)
   const constraints = inferConstraints(originalRequest)
+  const compositionResolution = inferOutcomeCompositionRequest(originalRequest)
   const outcome = firstSentence(originalRequest)
   const format = outputTypeKey ? 'document' : ''
   const intent = {
@@ -159,12 +166,14 @@ export const inferOutcomeStudioRequestIntent = ({ prompt, resolution, deliverabl
     decisionPurpose: purpose.value,
     consumer: audience.value[0] || '',
     audience: audience.value,
+    ...(audience.value.length ? { audienceResolution: resolveOutcomeAudienceRequest(audience.value) } : {}),
+    ...(compositionResolution.mappings.length ? { compositionResolution } : {}),
     requestedOutputTypeKey: outputTypeKey,
     outputTypeLabel,
     evidenceSource: evidence.value,
     constraints,
     format,
-    channel: '',
+    channel: compositionResolution.mappings.find((entry) => entry.layer === 'CHANNEL')?.phrase || '',
     requirements: constraints,
     unresolvedGaps: [],
     resolutionBasis: {
@@ -174,7 +183,7 @@ export const inferOutcomeStudioRequestIntent = ({ prompt, resolution, deliverabl
       evidenceSource: evidence.source,
       constraints: constraints.length ? basis.PROMPT : basis.OPTIONAL_UNSPECIFIED,
       format: format ? basis.OUTPUT_TYPE_DEFAULT : '',
-      channel: basis.OPTIONAL_UNSPECIFIED,
+      channel: compositionResolution.mappings.some((entry) => entry.layer === 'CHANNEL') ? basis.PROMPT : basis.OPTIONAL_UNSPECIFIED,
     },
   }
   intent.missingRequiredFields = [
@@ -229,6 +238,13 @@ export const planOutcomeStudioRequest = async ({ actorUserId, runtimeInstanceId,
       ? [...new Set(answer.split(';').map(text).filter(Boolean))] : answer
     if (state.field === 'audience' && !state.intent.audience.length) throw failure('OUTCOME_PLANNING_ANSWER_REQUIRED', 422)
     if (state.field === 'audience' && !state.intent.consumer) state.intent.consumer = state.intent.audience[0]
+    if (state.field === 'audience') state.intent.audienceResolution = resolveOutcomeAudienceRequest(state.intent.audience)
+    if (state.field === 'channel') {
+      const cues = (state.intent.compositionResolution?.mappings || []).filter((entry) => entry.layer !== 'CHANNEL')
+      if (answer) cues.push({ layer: 'CHANNEL', phrase: answer })
+      if (cues.length) state.intent.compositionResolution = resolveOutcomeCompositionRequest(cues)
+      else delete state.intent.compositionResolution
+    }
     state.intent.resolutionBasis = { ...(state.intent.resolutionBasis || {}), [state.field]: basis.PROMPT }
   }
   state.intent.missingRequiredFields = Object.keys(questions)
@@ -239,6 +255,9 @@ export const planOutcomeStudioRequest = async ({ actorUserId, runtimeInstanceId,
   state.field = state.intent.missingRequiredFields[0]
     || Object.keys(questions).find((field) => state.intent[field] === undefined) || ''
   if (state.field) return respond({ ...state, phase: 'CLARIFICATION_REQUIRED' }, deps)
+  if (state.intent.compositionResolution?.blockers.length) return respond({ ...state, phase: 'BLOCKED' }, deps, {
+    blockers: state.intent.compositionResolution.blockers.map((entry) => entry.code),
+    compositionResolution: state.intent.compositionResolution })
   state.intent.unresolvedGaps = []
   const evidence = await scopedDeps(deps, state.planningEvidenceVersion).readKcpRuntimeEvidence({ runtimeInstanceId, scopes })
   state.intent.runtimeIntegrity = evidence.planningEvidence || null
@@ -247,10 +266,18 @@ export const planOutcomeStudioRequest = async ({ actorUserId, runtimeInstanceId,
   const candidate = await (deps.buildKcpCandidate || buildOutcomeKnowledgeCompositionPlanForRuntime)({ actorUserId, scopes,
     runtimeInstanceId: auth.scope.runtimeInstanceId, requestScope, requestAssociation,
     consumerIntent: state.intent, expectedRuntimeUpdatedAt: evidence.updatedAt, deps: scopedDeps(deps, state.planningEvidenceVersion) })
+  const audienceResolution = projectOutcomeAudienceResolution(state.intent, candidate.payload?.resolution)
+  const compositionResolution = projectOutcomeCompositionResolution(state.intent, candidate.payload?.resolution)
   if (candidate.status === 'BLOCKED') return respond({ ...state, phase: 'BLOCKED' }, deps, {
-    blockers: ['KNOWLEDGE_COMPOSITION_BLOCKED'], evidenceToMeaning: projectRuntimeEvidenceToMeaningReadiness(candidate) })
+    blockers: audienceResolution?.blockers.length || compositionResolution?.blockers.length
+      ? [...(audienceResolution?.blockers || []), ...(compositionResolution?.blockers || [])].map((entry) => entry.code)
+      : ['KNOWLEDGE_COMPOSITION_BLOCKED'],
+    ...(audienceResolution ? { audienceResolution } : {}),
+    ...(compositionResolution ? { compositionResolution } : {}),
+    evidenceToMeaning: projectRuntimeEvidenceToMeaningReadiness(candidate) })
   state.intent.selectedSchema = candidate.payload?.governedContext?.outputSchema || null
-  state.intent.selectedKnowledgePacks = (candidate.payload?.resolution?.selectedPacks || []).map((pack) => ({
+  state.intent.selectedKnowledgePacks = (candidate.payload?.resolution?.selectedPacks || []).map((pack) => hasOutcomeAudienceRequest(state.intent) || hasOutcomeCompositionRequest(state.intent)
+    ? projectOutcomeRequestSelectedPack(pack) : ({
     packKey: pack.packKey,
     label: pack.label,
     versionId: pack.versionId,
@@ -259,6 +286,12 @@ export const planOutcomeStudioRequest = async ({ actorUserId, runtimeInstanceId,
   state = { ...state, phase: 'CONFIRMATION_REQUIRED', expectedPlanFingerprint: candidate.planFingerprint,
     expectedRuntimeUpdatedAt: new Date(evidence.updatedAt).toISOString() }
   return respond(state, deps, { planStatus: candidate.status,
+    ...(audienceResolution ? { audienceResolution,
+      selectedByLayer: projectOutcomeRequestSelectedLayers(candidate.payload?.resolution?.selectedPacks),
+      clarificationReceipt: candidate.payload?.clarificationReceipt } : {}),
+    ...(compositionResolution ? { compositionResolution,
+      selectedByLayer: projectOutcomeRequestSelectedLayers(candidate.payload?.resolution?.selectedPacks),
+      clarificationReceipt: candidate.payload?.clarificationReceipt } : {}),
     evidenceToMeaning: projectRuntimeEvidenceToMeaningReadiness(candidate),
     message: 'Confirm these inferred facts to save the governed request plan.' })
 }

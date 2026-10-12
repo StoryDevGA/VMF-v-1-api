@@ -3460,11 +3460,24 @@ export const mutateRuntimeState = async ({
     runtimePath,
   })
 
+  const graphRebuild = /^framework_state\.sections\.[^.]+$/.test(runtimePath)
+    ? await rebuildRuntimeIntelligenceGraphForMutation({
+        actorUserId,
+        buildTrigger: RUNTIME_INTELLIGENCE_GRAPH_BUILD_TRIGGERS.SECTION_INPUT_UPDATED,
+        frameworkPackage: writePackage,
+        nextFrameworkState,
+        previousFrameworkState,
+        runtimeInstance,
+      })
+    : null
+
   const updatedRuntimeInstance = await persistMutationWithAudit({
     actorUserId,
+    additionalDiff: graphRebuild?.auditDiff,
     auditRequest,
     runtimeInstance,
-    nextFrameworkState,
+    nextFrameworkState: graphRebuild?.nextFrameworkState || nextFrameworkState,
+    rebuiltIntelligenceGraph: graphRebuild?.graph,
     previousFrameworkState,
     previousUpdatedBy,
     runtimePath,

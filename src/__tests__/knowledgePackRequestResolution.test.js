@@ -6,6 +6,9 @@ import {
 } from '../services/knowledgePackRequestResolutionService.js'
 import { buildKnowledgePackRelationshipChecksum } from '../services/knowledgePackRelationshipContract.js'
 import { resolveKnowledgePackBoundary } from '../constants/knowledgeRuntime.js'
+import { resolveOutcomeAudienceRequest, projectOutcomeAudienceResolution } from '../services/outcomeAudienceRequestResolutionService.js'
+import { resolveOutcomeCompositionRequest, projectOutcomeCompositionResolution,
+  inferOutcomeCompositionRequest } from '../services/outcomeCompositionRequestResolutionService.js'
 
 const RESOLVED_AT = '2026-07-14T12:00:00.000Z'
 const GLOBAL_SCOPE = [{ scopeType: 'GLOBAL', scopeKey: 'GLOBAL', precedence: 0 }]
@@ -164,6 +167,205 @@ const resolve = (overrides = {}) => resolveRequestSpecificKnowledgePacks({
 })
 
 describe('resolveRequestSpecificKnowledgePacks', () => {
+  const compositionCases = [
+    ['CHANNEL', 'LinkedIn post', 'linkedin-post-channel'], ['STYLE', 'strategic advisory style', 'strategic-advisory-style'],
+    ['LANGUAGE', 'English', 'english'], ['VISUAL_SYSTEM', 'visual truth preservation rules', 'visual-truth-preservation-rules'],
+    ['INDUSTRY', 'financial-services', 'financial-services'],
+  ]
+  test.each(compositionCases)('%s uses governed optional resolution and preserves metadata', (layer, phrase, key) => {
+    const compositionResolution = resolveOutcomeCompositionRequest([{ layer, phrase }])
+    const pack = makePack({ packType: layer, packKey: key, knowledgeLayer: layer, capabilityKey: key })
+    const candidatesWith = (extra) => {
+      const candidates = makeOutputCandidates({ extra })
+      if (layer === 'CHANNEL') for (const candidate of candidates.slice(0, 2)) {
+        setRelationships(candidate, [...candidate.dependencyReferences, compatibleWith(pack.knowledgeAssetId), compatibleWith('DUPLICATE-ASSET')])
+      }
+      return candidates
+    }
+    const result = resolve({ candidates: candidatesWith([pack]),
+      request: { workspaceType: 'OUTCOME', requestedOutputTypeKey: 'board-summary', ...compositionResolution.request } })
+    expect(result.status).toBe('READY')
+    const receipt = projectOutcomeCompositionResolution({ compositionResolution },
+      { ...result, selectedPacks: Object.values(result.selectedByLayer).flat() })
+    expect(receipt).toMatchObject({ blockers: [], selectedPacks: [expect.objectContaining({ knowledgeLayer: layer,
+      capabilityKey: key, versionId: pack.versionId, activationId: pack.activationId, contentHash: pack.contentHash, scopeType: 'GLOBAL' })] })
+    expect(JSON.stringify(receipt)).not.toContain('must never leak')
+    const unrequested = resolve({ candidates: candidatesWith([pack]) })
+    expect(Object.values(unrequested.selectedByLayer).flat().some((selected) => selected.activationId === pack.activationId)).toBe(false)
+    for (const negative of [[], [{ ...pack, status: 'INACTIVE' }], [{ ...pack, workspaceCompatibility: ['RUNTIME'] }],
+      [{ ...pack, compatibleOutputTypes: ['wrong-output'] }]]) {
+      const blocked = resolve({ candidates: candidatesWith(negative),
+        request: { workspaceType: 'OUTCOME', requestedOutputTypeKey: 'board-summary', ...compositionResolution.request } })
+      expect(blocked.status).toBe('BLOCKED')
+      expect(projectOutcomeCompositionResolution({ compositionResolution },
+        { ...blocked, selectedPacks: Object.values(blocked.selectedByLayer).flat() }).blockers)
+        .toContainEqual(expect.objectContaining({ code: `REQUESTED_${layer}_UNAVAILABLE`, capabilityKey: key }))
+    }
+    const duplicate = resolve({ candidates: candidatesWith([pack, { ...pack, activationId: 'duplicate-optional',
+      packId: 'duplicate-pack', versionId: 'duplicate-version', knowledgeAssetId: 'DUPLICATE-ASSET' }]),
+      request: { workspaceType: 'OUTCOME', requestedOutputTypeKey: 'board-summary', ...compositionResolution.request } })
+    expect(duplicate.status).toBe('AMBIGUOUS')
+    expect(projectOutcomeCompositionResolution({ compositionResolution }, duplicate).blockers)
+      .toContainEqual(expect.objectContaining({ code: `REQUESTED_${layer}_AMBIGUOUS` }))
+  })
+  test('Channel compatibility uses selected governed output and schema declarations, not fixture-only metadata', () => {
+    const channel = makePack({ packType: 'CHANNEL', packKey: 'linkedin-post-channel', knowledgeLayer: 'CHANNEL',
+      capabilityKey: 'linkedin-post-channel', knowledgeAssetId: 'CHN-001' })
+    const candidates = makeOutputCandidates({ extra: [channel] })
+    const request = { workspaceType: 'OUTCOME', requestedOutputTypeKey: 'board-summary', channelKey: 'linkedin-post-channel' }
+    const check = () => resolve({ candidates, request })
+    expect(check().status).toBe('BLOCKED')
+    for (const candidate of candidates.slice(0, 2)) {
+      setRelationships(candidate, [...candidate.dependencyReferences, compatibleWith('CHN-001')])
+    }
+    expect(check()).toMatchObject({ status: 'READY', selectedByLayer: { CHANNEL: [expect.objectContaining({ knowledgeAssetId: 'CHN-001' })] } })
+    for (const index of [0, 1]) {
+      const original = candidates[index].dependencyReferences
+      for (const declaration of [null, compatibleWith('CHN-OTHER'), compatibleWith('CHN-001', { minimumVersionInclusive: '2.0.0' })]) {
+        setRelationships(candidates[index], [...original.filter((entry) => entry.relationshipType !== 'COMPATIBLE_WITH'),
+          ...(declaration ? [declaration] : [])])
+        const blocked = check()
+        expect(blocked.status).toBe('BLOCKED')
+        expect(blocked.selectedByLayer.CHANNEL).toBeUndefined()
+        expect(blocked.excludedCandidates).toContainEqual(expect.objectContaining({ reason: 'OUTPUT_CONTRACT_CHANNEL_INCOMPATIBLE' }))
+      }
+      setRelationships(candidates[index], original)
+    }
+    // A lower-ranked output declaration cannot authorize the selected version.
+    const oldOutput = { ...candidates[0], activationId: 'older-output', semanticVersion: '0.1.0' }
+    candidates.unshift(oldOutput)
+    setRelationships(candidates[1], candidates[1].dependencyReferences.filter((entry) => entry.relationshipType !== 'COMPATIBLE_WITH'))
+    expect(check().status).toBe('BLOCKED')
+  })
+  test('composition cue parser uses explicit constructions and ignores negated or incidental mentions', () => {
+    expect(inferOutcomeCompositionRequest('Create a LinkedIn post for the Executive Team in English using strategic advisory style.'))
+      .toMatchObject({ request: { channelKey: 'linkedin-post-channel', languageKey: 'english', requestedStyleKey: 'strategic-advisory-style' } })
+    expect(inferOutcomeCompositionRequest('Prepare a paper for Executive Team on LinkedIn.')).toMatchObject({ request: { channelKey: 'linkedin-post-channel' } })
+    expect(inferOutcomeCompositionRequest('Create a paper on LinkedIn market adoption for the Executive Team.').mappings).toEqual([])
+    expect(inferOutcomeCompositionRequest('Create a paper for the Executive Team in English and French.').blockers)
+      .toMatchObject([{ code: 'REQUESTED_LANGUAGE_AMBIGUOUS', capabilityKeys: ['english', 'french'] }])
+    expect(inferOutcomeCompositionRequest('Language: English and French.').blockers)
+      .toMatchObject([{ code: 'REQUESTED_LANGUAGE_AMBIGUOUS' }])
+    expect(inferOutcomeCompositionRequest('Create a paper in English, French and Spanish.').blockers)
+      .toMatchObject([{ code: 'REQUESTED_LANGUAGE_AMBIGUOUS', capabilityKeys: ['english', 'french', 'spanish'] }])
+    expect(inferOutcomeCompositionRequest('Prepare a paper on LinkedIn and email.').blockers)
+      .toMatchObject([{ code: 'REQUESTED_CHANNEL_AMBIGUOUS', capabilityKeys: ['linkedin-post-channel', 'email'] }])
+    expect(inferOutcomeCompositionRequest('Use visual truth preservation rules.').request.visualSystemKey).toBe('visual-truth-preservation-rules')
+    expect(inferOutcomeCompositionRequest('Prepare a paper using visual system brand-a for the financial-services industry.').request)
+      .toMatchObject({ visualSystemKey: 'brand-a', industryKeys: ['financial-services'] })
+    for (const prompt of ['Discuss LinkedIn competitors.', 'Do not use LinkedIn.', 'Prepare a paper, not on LinkedIn.',
+      'Prepare a paper without using strategic advisory style.', 'Prepare a paper. Channel: none.']) {
+      expect(inferOutcomeCompositionRequest(prompt).mappings).toEqual([])
+    }
+    expect(inferOutcomeCompositionRequest('Channel: LinkedIn post; style: strategic-advisory-style; language: english; visual system: exact-visual; industry: exact-industry.').request)
+      .toEqual({ channelKey: 'linkedin-post-channel', requestedStyleKey: 'strategic-advisory-style', languageKey: 'english', visualSystemKey: 'exact-visual', industryKeys: ['exact-industry'] })
+    expect(resolveOutcomeCompositionRequest([{ layer: 'CHANNEL', phrase: 'LinkedIn post' }, { layer: 'CHANNEL', phrase: 'linkedin-post-channel' }]).blockers).toEqual([])
+    expect(resolveOutcomeCompositionRequest([{ layer: 'CHANNEL', phrase: 'linkedin' }, { layer: 'CHANNEL', phrase: 'email' }]).blockers)
+      .toMatchObject([{ code: 'REQUESTED_CHANNEL_AMBIGUOUS' }])
+    expect(resolveOutcomeCompositionRequest([{ layer: 'STYLE', phrase: 'unsupported style phrase' }]).mappings[0].basis).toBe('UNRESOLVED')
+  })
+  test.each([
+    ['Language: English, French.', 'LANGUAGE', ['english', 'french']],
+    ['Channel: linkedin, email.', 'CHANNEL', ['linkedin', 'email']],
+    ['Style: style-a, style-b.', 'STYLE', ['style-a', 'style-b']],
+    ['Visual system: visual-a, visual-b.', 'VISUAL_SYSTEM', ['visual-a', 'visual-b']],
+  ])('named comma lists block conflicting singleton cues: %s', (prompt, layer, keys) => {
+    const result = inferOutcomeCompositionRequest(prompt)
+    expect(result.blockers).toEqual([expect.objectContaining({ code: `REQUESTED_${layer}_AMBIGUOUS`, capabilityKeys: keys })])
+    expect(result.request).toEqual({})
+  })
+  test('named list delimiters retain multi-industry keys, deduplication and next-layer boundaries', () => {
+    expect(inferOutcomeCompositionRequest('Industry: sector-a, sector-b.').request).toEqual({ industryKeys: ['sector-a', 'sector-b'] })
+    expect(inferOutcomeCompositionRequest('Channel: , LinkedIn post, linkedin-post-channel, .'))
+      .toMatchObject({ request: { channelKey: 'linkedin-post-channel' }, blockers: [] })
+    expect(inferOutcomeCompositionRequest('Channel: linkedin, language: English, and style: strategic-advisory-style.').request)
+      .toEqual({ channelKey: 'linkedin', languageKey: 'english', requestedStyleKey: 'strategic-advisory-style' })
+  })
+  test('canonical LinkedIn cues preserve wording and natural provenance through receipt reconstruction', () => {
+    const natural = inferOutcomeCompositionRequest('Prepare a paper on LinkedIn.')
+    expect(natural.mappings).toEqual([{ layer: 'CHANNEL', phrase: 'LinkedIn', capabilityKey: 'linkedin-post-channel',
+      basis: 'CONTROLLED_ALIAS', source: 'NATURAL_CONSTRUCTION' }])
+    expect(resolveOutcomeCompositionRequest(natural.mappings)).toEqual(natural)
+    expect(projectOutcomeCompositionResolution({ compositionResolution: natural }).request.channelKey).toBe('linkedin-post-channel')
+    expect(inferOutcomeCompositionRequest('Channel: linkedin-post-channel.').mappings[0].basis).toBe('EXACT_CAPABILITY_KEY')
+    expect(inferOutcomeCompositionRequest('Channel: linkedin.').request.channelKey).toBe('linkedin')
+    expect(resolveOutcomeCompositionRequest([{ layer: 'CHANNEL', phrase: 'LinkedIn' }]).request.channelKey).toBe('linkedin')
+  })
+  test('named clauses preserve dotted exact keys and stop at sentence or clause boundaries', () => {
+    const result = inferOutcomeCompositionRequest('Language: en.gb; Visual system: brand.v2. Prepare the paper.')
+    expect(result.request).toEqual({ languageKey: 'en.gb', visualSystemKey: 'brand.v2' })
+    expect(result.mappings.every((entry) => entry.basis === 'EXACT_CAPABILITY_KEY')).toBe(true)
+    expect(inferOutcomeCompositionRequest('Channel: channel.v1.').request).toEqual({ channelKey: 'channel.v1' })
+    expect(inferOutcomeCompositionRequest('Language: en.gb, or language: fr.fr.').blockers)
+      .toMatchObject([{ code: 'REQUESTED_LANGUAGE_AMBIGUOUS', capabilityKeys: ['en.gb', 'fr.fr'] }])
+  })
+  test('coordinated negation suppresses optional cues across commas and long clauses', () => {
+    expect(inferOutcomeCompositionRequest('Do not use language: English, or channel: LinkedIn post.').mappings).toEqual([])
+    expect(inferOutcomeCompositionRequest('Do not use language: en.gb, or channel: LinkedIn post.').mappings).toEqual([])
+    expect(inferOutcomeCompositionRequest('Do not use language: en.gb. Channel: LinkedIn post.').request)
+      .toEqual({ channelKey: 'linkedin-post-channel' })
+    expect(inferOutcomeCompositionRequest('Prepare a paper without using strategic advisory style, on LinkedIn.').mappings).toEqual([])
+    expect(inferOutcomeCompositionRequest(`Do not ${'include any optional guidance '.repeat(4)}channel: LinkedIn post.`).mappings).toEqual([])
+    expect(inferOutcomeCompositionRequest('Do not use channel: LinkedIn post; Language: english.').request)
+      .toEqual({ languageKey: 'english' })
+  })
+  test.each(['on LinkedIn, email', 'via LinkedIn, or email', 'through email, and LinkedIn'])(
+    'natural Channel lists preserve every requested cue and block conflicts: %s', (channels) => {
+      const result = inferOutcomeCompositionRequest(`Prepare a paper for Executive Team ${channels}.`)
+      expect(result.request).toEqual({})
+      expect(result.blockers).toEqual([expect.objectContaining({ code: 'REQUESTED_CHANNEL_AMBIGUOUS' })])
+      expect(new Set(result.mappings.map((entry) => entry.capabilityKey))).toEqual(new Set(['linkedin-post-channel', 'email']))
+      expect(result.mappings.every((entry) => entry.source === 'NATURAL_CONSTRUCTION')).toBe(true)
+    })
+  const audiencePack = (overrides = {}) => makePack({ packType: 'AUDIENCE', packKey: 'executive-leadership-team',
+    knowledgeLayer: 'AUDIENCE', capabilityKey: 'executive-leadership-team', ...overrides })
+  const resolveAudience = (packs, audience = ['Executive Team']) => {
+    const audienceResolution = resolveOutcomeAudienceRequest(audience)
+    const result = resolve({ candidates: makeOutputCandidates({ extra: packs }),
+      request: { workspaceType: 'OUTCOME', requestedOutputTypeKey: 'board-summary', audienceKeys: audienceResolution.audienceKeys } })
+    return { result, receipt: projectOutcomeAudienceResolution({ audience, audienceResolution },
+      { ...result, selectedPacks: Object.values(result.selectedByLayer).flat() }) }
+  }
+  test('governed Audience aliases preserve wording and select exactly one canonical pack', () => {
+    const { result, receipt } = resolveAudience([audiencePack()])
+    expect(result.status).toBe('READY')
+    expect(result.selectedByLayer.AUDIENCE).toHaveLength(1)
+    expect(receipt).toMatchObject({ audienceKeys: ['executive-leadership-team'], blockers: [],
+      mappings: [{ phrase: 'Executive Team', basis: 'CONTROLLED_ALIAS' }],
+      selectedPacks: [{ packId: 'kp-audience-executive-leadership-team', semanticVersion: '1.0.0', scopeType: 'GLOBAL', scopeKey: 'GLOBAL' }] })
+    expect(JSON.stringify(receipt)).not.toContain('must never leak')
+  })
+  test('exact capability keys precede aliases and remain exact rather than label matches', () => {
+    expect(resolveOutcomeAudienceRequest(['executive-team', 'Executive Team', 'executive-leadership-team']))
+      .toMatchObject({ audienceKeys: ['executive-team', 'executive-leadership-team'],
+        mappings: [{ basis: 'EXACT_CAPABILITY_KEY' }, { basis: 'CONTROLLED_ALIAS' }, { basis: 'EXACT_CAPABILITY_KEY' }] })
+    expect(resolveAudience([audiencePack()], ['executive-team']).receipt.blockers[0].code).toBe('REQUESTED_AUDIENCE_UNAVAILABLE')
+  })
+  test.each([
+    ['missing', () => []],
+    ['inactive', () => [audiencePack({ status: 'INACTIVE' })]],
+    ['wrong workspace', () => [audiencePack({ workspaceCompatibility: ['RUNTIME'] })]],
+    ['wrong output', () => [audiencePack({ compatibleOutputTypes: ['unrelated-output'] })]],
+  ])('requested Audience fails closed when %s', (_name, packs) => {
+    const { result, receipt } = resolveAudience(packs())
+    expect(result.status).toBe('BLOCKED')
+    expect(result.selectedByLayer.AUDIENCE).toBeUndefined()
+    expect(receipt.blockers).toEqual([{ code: 'REQUESTED_AUDIENCE_UNAVAILABLE', knowledgeLayer: 'AUDIENCE',
+      capabilityKey: 'executive-leadership-team', reason: 'NO_ACTIVE_COMPATIBLE_UNIQUE_PACK' }])
+  })
+  test('duplicate compatible Audience candidates produce a specific ambiguity blocker', () => {
+    const { result, receipt } = resolveAudience([audiencePack(), audiencePack({ activationId: 'duplicate-audience', packKey: 'another-executive-pack' })])
+    expect(result.status).toBe('AMBIGUOUS')
+    expect(result.selectedByLayer.AUDIENCE).toBeUndefined()
+    expect(receipt.blockers[0].code).toBe('REQUESTED_AUDIENCE_AMBIGUOUS')
+  })
+  test('unknown phrases fail closed and unrequested optional Audience remains unselected', () => {
+    expect(resolveAudience([audiencePack()], ['Executive leadership people']).receipt.blockers[0].code).toBe('REQUESTED_AUDIENCE_UNAVAILABLE')
+    const { result, receipt } = resolveAudience([audiencePack()], [])
+    expect(result.status).toBe('READY')
+    expect(result.selectedByLayer.AUDIENCE).toBeUndefined()
+    expect(receipt).toMatchObject({ audienceKeys: [], selectedPacks: [], blockers: [] })
+  })
   test('projects explicit mandatory bindability after selecting eligible raw activations', () => {
     const mandatorySafeguards = makeMandatorySafeguards().map(({ runtimeBindable, ...pack }) => pack)
     const result = resolve({ mandatorySafeguards })
