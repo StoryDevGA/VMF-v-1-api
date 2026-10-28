@@ -1,5 +1,6 @@
 import { randomUUID, createHash } from 'node:crypto'
 import mongoose from 'mongoose'
+import { assertNormalOutcomeRuntime } from './syntheticOutcomeIsolationService.js'
 import {
   FrameworkPackage,
   RuntimeInstance,
@@ -155,6 +156,7 @@ const resolveRuntimeInstance = async ({
     permission,
   })
 
+  assertNormalOutcomeRuntime(runtimeInstance)
   const { customer } = await assertCustomerTenantContext({ customerId, tenantId })
   await assertFeatureEntitlement({
     customerId,

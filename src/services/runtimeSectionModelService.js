@@ -179,6 +179,37 @@ const stableStringify = (value) => {
 export const hashSectionInput = (input) =>
   crypto.createHash('sha256').update(stableStringify(input)).digest('hex')
 
+// Display-only cache: the reviewed generated payload remains authoritative.
+export const compactSectionInsightDisplay = ({ intelligence, generated } = {}) => {
+  const insight = intelligence?.displayProjection?.generatedInsight
+  if (!isPlainObject(insight) || Object.hasOwn(insight, 'sectionsReference')
+    || !Array.isArray(insight.sections) || !Array.isArray(generated?.sections)
+    || JSON.stringify(insight.sections) !== JSON.stringify(generated.sections)) return intelligence
+  const sectionsReference = { kind: 'GENERATED_SECTIONS_V1', hash: hashSectionInput(generated.sections) }
+  if (JSON.stringify(sectionsReference).length >= JSON.stringify(insight.sections).length) return intelligence
+  const { sections, ...rest } = insight
+  return { ...intelligence, displayProjection: { ...intelligence.displayProjection,
+    generatedInsight: { ...rest, sectionsReference } } }
+}
+
+export const restoreSectionInsightDisplay = ({ intelligence, generated } = {}) => {
+  const insight = intelligence?.displayProjection?.generatedInsight
+  if (!isPlainObject(insight) || !Object.hasOwn(insight, 'sectionsReference')) return intelligence
+  const ref = insight.sectionsReference
+  if (!isPlainObject(ref) || Object.keys(ref).length !== 2
+    || !Object.hasOwn(ref, 'kind') || !Object.hasOwn(ref, 'hash')
+    || ref.kind !== 'GENERATED_SECTIONS_V1' || typeof ref.hash !== 'string' || !/^[a-f0-9]{64}$/.test(ref.hash)
+    || Object.hasOwn(insight, 'sections') || !Array.isArray(generated?.sections)
+    || ref.hash !== hashSectionInput(generated.sections)) {
+    throw Object.assign(new Error('Section display reference is invalid.'), {
+      status: 409, code: 'SECTION_DISPLAY_REFERENCE_INVALID',
+    })
+  }
+  const { sectionsReference, ...rest } = insight
+  return { ...intelligence, displayProjection: { ...intelligence.displayProjection,
+    generatedInsight: { ...rest, sections: cloneSectionValue(generated.sections) } } }
+}
+
 const summarizeInput = (input) => {
   if (input === null || input === undefined || input === '') return 'No customer input supplied.'
   if (typeof input === 'string') return input.trim()
@@ -559,6 +590,7 @@ export const getAcceptedDiscoveryEvidenceObjects = (evidencePack = {}) => {
     createdAt: evidencePack.refreshedAt,
     evidenceObjects: evidencePack.evidenceObjects,
     inputs: evidencePack.inputs,
+    sourceRegistry: evidencePack.sourceRegistry || evidencePack.acquisition?.sourceRegistry,
     sources: evidencePack.lineage?.sources || [],
   })
 
@@ -792,81 +824,76 @@ const buildTheme = ({
 
 const extractEvidenceThemes = ({
   acceptedEvidenceObjects = [],
-  category,
+  acceptedSectionEvidenceObjects = [],
+  factualCustomerContext = [],
   dependencyTruths,
-  inputSummary,
-  sectionEvidenceSummary,
-  scopedEvidenceSummary,
   seedProfile,
 }) => {
   const themes = []
   const targetOffer = normalizeEvidenceString(seedProfile.targetOffer)
-  const notes = normalizeEvidenceString(seedProfile.notes)
   const marketRegion = normalizeEvidenceString(seedProfile.marketRegion)
   const evidenceText = [
     ...acceptedEvidenceObjects.map((evidenceObject) => normalizeEvidenceString(evidenceObject.extractedFact)),
-    normalizeEvidenceString(seedProfile.companyName),
-    normalizeEvidenceString(seedProfile.companyWebsite),
-    marketRegion,
-    targetOffer,
-    notes,
-    sectionEvidenceSummary,
-    scopedEvidenceSummary,
-    inputSummary,
+    ...acceptedSectionEvidenceObjects.map((evidenceObject) => normalizeEvidenceString(evidenceObject.extractedFact)),
+    ...factualCustomerContext,
     ...dependencyTruths.map((dependency) => dependency.content),
   ].join(' ').toLowerCase()
 
-  if (/\b(ai|automation|automated|assist|assisted|native)\b/.test(evidenceText)) {
+  if (/\b(ai|automation|automated|assist|assisted)\b/.test(evidenceText)) {
     pushUniqueTheme(themes, buildTheme({
       key: 'workflow_automation',
-      label: category === 'VALUE_DRIVERS' ? 'Reduced manual workflow overhead' : 'Workflow automation and assistance',
-      description: 'The accepted context supports a theme around reducing manual effort through assisted or automated workflow execution.',
+      label: 'Automation and assistance context',
+      description: 'The evidence or stated factual context mentions automation or assistance. Review its meaning and qualifications; no implemented capability or efficiency benefit is inferred.',
+      confidence: 'LOW',
     }))
   }
 
   if (/\b(govern|governed|governance|framework|runtime|accepted truth|validation|controlled)\b/.test(evidenceText)) {
     pushUniqueTheme(themes, buildTheme({
       key: 'governed_execution',
-      label: category === 'VALUE_DRIVERS' ? 'Governed execution and risk control' : 'Governed framework execution',
-      description: 'The accepted context supports a theme around controlled, framework-bound execution.',
+      label: 'Governance and control context',
+      description: 'The evidence or stated factual context mentions governance or control. Review the stated scope; this does not establish execution authority or an operating control framework.',
+      confidence: 'LOW',
     }))
   }
 
-  if (/\b(narrative|story|message|messaging|proposal|output|content|commercial)\b/.test(evidenceText)) {
+  if (/\b(document|drafting|narrative|story|message|messaging|proposal|output|content|commercial)\b/.test(evidenceText)) {
     pushUniqueTheme(themes, buildTheme({
       key: 'structured_output',
-      label: category === 'VALUE_DRIVERS' ? 'Faster structured narrative creation' : 'Structured commercial output creation',
-      description: 'The accepted context supports a theme around creating structured customer-facing material.',
+      label: 'Document and output context',
+      description: 'The evidence or stated factual context mentions documents, narratives or outputs. Their audience, use and status remain limited to what the sources state.',
+      confidence: 'LOW',
     }))
   }
 
   if (/\b(slow|speed|faster|time|manual|effort|efficiency|reduce|reduced|cycle)\b/.test(evidenceText)) {
     pushUniqueTheme(themes, buildTheme({
       key: 'speed_efficiency',
-      label: category === 'VALUE_DRIVERS' ? 'Improved speed-to-output' : 'Efficiency and speed-to-output',
-      description: 'The accepted context supports a theme around reducing friction in the section workflow.',
-      source: inputSummary ? 'CUSTOMER_CONTEXT' : 'DETERMINISTIC_DERIVATION',
+      label: 'Timing and effort context',
+      description: 'The evidence or stated factual context mentions timing, effort or efficiency. No reduction in friction, quantified improvement or achieved benefit is inferred.',
+      confidence: 'LOW',
     }))
   }
 
-  if (/\b(consistent|consistency|reuse|reusable|standard|shared|repeatable)\b/.test(evidenceText)) {
+  if (/\b(consistent|consistency|reuse|reusable|standard|repeatable)\b/.test(evidenceText)) {
     pushUniqueTheme(themes, buildTheme({
       key: 'consistency_reuse',
-      label: category === 'VALUE_DRIVERS' ? 'More consistent reusable commercial outputs' : 'Consistency and reuse',
-      description: 'The accepted context supports a theme around reuse and consistency of governed section truth.',
+      label: 'Consistency and reuse context',
+      description: 'The evidence or stated factual context mentions consistency or reuse. Review its qualifications; repeatability or achieved reuse is not inferred.',
+      confidence: 'LOW',
     }))
   }
 
   if (/\b(platform|enterprise|software|system|workspace|product)\b/.test(evidenceText) || targetOffer) {
     pushUniqueTheme(themes, buildTheme({
       key: 'offer_context',
-      label: category === 'VALUE_DRIVERS' ? 'Offer-led customer value' : 'Offer-led business context',
+      label: 'Offer context',
       description: targetOffer
         ? `The accepted target offer gives this section a bounded offer context: ${targetOffer}.`
-        : 'The accepted context identifies an offer or platform context for this section.',
+        : 'The evidence mentions an offer or platform context; no commercial validation is inferred.',
       source: targetOffer ? 'DISCOVERY_EVIDENCE' : 'DETERMINISTIC_DERIVATION',
       supportLevel: targetOffer ? 'DIRECT' : 'DERIVED',
-      confidence: targetOffer ? 'HIGH' : 'MEDIUM',
+      confidence: targetOffer ? 'HIGH' : 'LOW',
     }))
   }
 
@@ -1177,11 +1204,27 @@ const getProfileEvidenceSemanticFamilies = (text = '') => {
 const hasUnconfirmedProfileEvidenceQualifier = (text = '') =>
   /\b(?:require|requires|required|requiring|need|needs|needed|needing)\s+(?:further\s+)?(?:corroboration|confirmation|validation|verification)\b|\bmust\s+be\s+(?:corroborated|confirmed|validated|verified)\b/i.test(text)
 
+const isProfileContrastInstruction = (text = '') =>
+  /^\s*(?:please\s+)?(?:distinguish|differentiate)\b/i.test(text)
+
+const PROFILE_SECTION_TITLE_PATTERN = Object.values(CURRENT_SECTION_INTERPRETATION_PROFILES)
+  .map((profile) => profile.key.replaceAll('-', '\\s+'))
+  .join('|')
+const PROFILE_SECTION_GENERATION_INSTRUCTION_PATTERN = new RegExp(
+  `^\\s*(?:please\\s+)?(?:write|draft|generate|create|prepare|produce)\\s+(?:(?:the|an?)\\s+)?(?:${PROFILE_SECTION_TITLE_PATTERN})\\b`,
+  'i',
+)
+const PROFILE_INDEPENDENT_PERSON_FACT_BOUNDARY = /\s+and\s+(?=[A-Z][a-z]+(?:[-'][A-Z]?[a-z]+)?\s+[A-Z][a-z]+(?:[-'][A-Z]?[a-z]+)?\s+is\s+(?:(?:the|an?)\s+)?(?:buyer|owner|sponsor|stakeholder|approver|decision maker|user|audience|reader|recipient)\b)/
+
 const splitIndependentProfileClauses = (candidate = '') => {
-  if (hasUnconfirmedProfileEvidenceQualifier(candidate)) return [candidate]
+  // Keep a directive's alternatives under their governor, rather than inventing facts from its list.
+  if (isProfileContrastInstruction(candidate)) return [candidate]
+  const independentClauses = candidate.split(/\s+\b(?:but|while|whereas)\b\s+/i)
+  if (independentClauses.length > 1) return independentClauses.flatMap(splitIndependentProfileClauses)
+  if (isNegatedOrUnconfirmedProfileFact(candidate)) return [candidate]
 
   const clauses = candidate
-    .split(/\s*(?:,|\band\b|\bbut\b|\bwhile\b|\bwhereas\b)\s*/i)
+    .split(/\s*(?:,|\band\b)\s*/i)
     .map((clause) => clause.trim())
     .filter(Boolean)
   if (clauses.length < 2) return [candidate]
@@ -1334,7 +1377,12 @@ const buildProfileEvidenceCandidates = ({
     const limit = PROFILE_EVIDENCE_SOURCE_LIMITS[sourceClass] || 0
     values.slice(0, limit).forEach((value, sourceIndex) => {
       const boundedSourceSentence = value.slice(0, 400)
-      const fragments = fragment ? splitIndependentProfileClauses(value) : [value]
+      const isSectionGenerationInstruction = sourceClass === 'EXPLICIT_SECTION_INPUT'
+        && PROFILE_SECTION_GENERATION_INSTRUCTION_PATTERN.test(value)
+      const fragments = !fragment ? [value] : isSectionGenerationInstruction
+        ? value.split(PROFILE_INDEPENDENT_PERSON_FACT_BOUNDARY)
+          .flatMap((clause, index) => index === 0 ? [clause] : splitIndependentProfileClauses(clause))
+        : splitIndependentProfileClauses(value)
       fragments.forEach((text) => {
         const boundedText = text.slice(0, 400)
         const normalizedText = normalizeSimilarityText(boundedText)
@@ -1543,6 +1591,9 @@ const classifyProfileEvidenceCandidates = (candidates = []) => {
 
   candidates.forEach((candidate) => {
     const text = candidate.text
+    if (candidate.sourceClass === 'EXPLICIT_SECTION_INPUT'
+      && PROFILE_SECTION_GENERATION_INSTRUCTION_PATTERN.test(text)) return
+    if (isProfileContrastInstruction(text)) return
     const outputGapProjection = buildOutputGapProjection(candidate)
     if (outputGapProjection) {
       add('OUTPUT_GAP', outputGapProjection)
@@ -1661,11 +1712,11 @@ const classifyProfileEvidenceCandidates = (candidates = []) => {
 }
 
 const SECTION_PROFILE_THEME_SUBJECTS = Object.freeze({
-  workflow_automation: 'assisted or automated ways of working',
-  governed_execution: 'controlled and repeatable business activity',
-  structured_output: 'consistent creation of customer-facing material',
-  speed_efficiency: 'reduced friction and faster delivery',
-  consistency_reuse: 'reusable and consistent outputs',
+  workflow_automation: 'the stated automation or assistance context',
+  governed_execution: 'the stated governance or control context',
+  structured_output: 'the stated document and output context',
+  speed_efficiency: 'the stated timing or effort context',
+  consistency_reuse: 'the stated consistency or reuse context',
   offer_context: 'the accepted offer context',
   market_region: 'the stated market and regional setting',
   accepted_upstream_truth: 'conclusions already accepted in preceding sections',
@@ -1755,7 +1806,7 @@ const buildProfileGeneratedSections = ({
     dependencyTruths.length > 0
       ? `Accepted dependency truth coverage: ${dependencyTruths.length} upstream section(s).`
       : '',
-    `Supporting source coverage: ${supportingEvidence.length} item(s) across ${sourceClassCount} source type(s).`,
+    `Supporting context coverage: ${supportingEvidence.length} display entry/entries across ${sourceClassCount} context category/categories; these counts do not represent independent sources or consumed evidence objects.`,
   ].filter(Boolean)
 
   const sectionsBySemanticType = {
@@ -2219,14 +2270,30 @@ const buildSectionIntelligenceParts = ({
     frameworkPackage,
     frameworkState,
   })
+  const profileQualifications = interpretationProfile
+    ? buildProfileInputQualifications(inputSummary)
+    : []
+  const profileEvidenceCandidates = interpretationProfile
+    ? buildProfileEvidenceCandidates({
+      acceptedEvidenceObjects: projectedAcceptedEvidenceObjects,
+      acceptedSectionEvidenceObjects,
+      dependencyTruths,
+      inputSummary,
+      profileQualifications,
+      scopedEvidenceSummary,
+      seedProfile,
+    })
+    : []
+  const profileFacts = interpretationProfile
+    ? classifyProfileEvidenceCandidates(profileEvidenceCandidates)
+    : {}
   const themes = extractEvidenceThemes({
     acceptedEvidenceObjects: projectedAcceptedEvidenceObjects,
-    category,
+    acceptedSectionEvidenceObjects,
+    factualCustomerContext: [...new Set(Object.values(profileFacts).flat()
+      .filter(candidate => candidate.sourceClass === 'EXPLICIT_SECTION_INPUT')
+      .map(candidate => candidate.text))],
     dependencyTruths,
-    inputSummary,
-    sectionEvidenceSummary,
-    sectionExecutionContract,
-    scopedEvidenceSummary,
     seedProfile,
   })
   const discoveryAccepted = isDiscoveryEvidenceAccepted(evidencePack)
@@ -2252,23 +2319,6 @@ const buildSectionIntelligenceParts = ({
     scopedEvidenceSummary,
     seedProfile,
   })
-  const profileQualifications = interpretationProfile
-    ? buildProfileInputQualifications(inputSummary)
-    : []
-  const profileEvidenceCandidates = interpretationProfile
-    ? buildProfileEvidenceCandidates({
-      acceptedEvidenceObjects: projectedAcceptedEvidenceObjects,
-      acceptedSectionEvidenceObjects,
-      dependencyTruths,
-      inputSummary,
-      profileQualifications,
-      scopedEvidenceSummary,
-      seedProfile,
-    })
-    : []
-  const profileFacts = interpretationProfile
-    ? classifyProfileEvidenceCandidates(profileEvidenceCandidates)
-    : {}
   const generationBoundaries = buildGenerationBoundaries({
     category,
     dependencySectionKeys,
@@ -2372,7 +2422,7 @@ const buildIntelligenceFromParts = ({
   return {
     sourceProjection: {
       summary: parts.themes.length > 0
-        ? 'Accepted Intelligence Hub evidence has been interpreted into section-relevant evidence themes.'
+        ? 'Accepted evidence and stated factual context identify topics for review; these are not verified goals, benefits or execution authority.'
         : 'Accepted Intelligence Hub evidence is not yet sufficient to project section themes.',
       themes: parts.themes,
       generatedAt: parts.generatedAt,
@@ -2409,11 +2459,11 @@ const buildIntelligenceFromParts = ({
       suggestedFromDiscovery: {
         title: 'Evidence Themes',
         summary: parts.discoveryAccepted && parts.themes.length > 0
-          ? 'The available accepted evidence supports these section-relevant themes.'
+          ? 'Review these context topics and their qualifications; a topic label does not establish a goal, benefit or execution authority.'
           : 'This section needs more accepted evidence before themes can be projected safely.',
         bullets: evidenceThemeBullets,
         evidenceScope: parts.discoveryAccepted
-          ? 'Derived from accepted Intelligence Hub evidence and current section dependencies.'
+          ? 'Derived from admitted evidence, accepted dependencies and stated factual customer context; topic labels require review.'
           : 'Intelligence Hub evidence is not yet accepted.',
       },
       generatedInsight: generated

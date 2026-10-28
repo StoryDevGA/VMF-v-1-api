@@ -1,3 +1,4 @@
+import { storedControlledReplayBindingDigest } from '../services/controlledReplayContract.js'
 import { describe, expect, test } from '@jest/globals'
 import { recordSourceReview, resolveSourceRecordedReview, sourceMaterialFingerprint,
   sourceVerificationFactsSchema, preserveSourceRecordedReviews } from '../services/sourceVerificationContext.js'
@@ -56,4 +57,39 @@ describe('recorded source review boundaries', () => {
     const native = { ...source, sourceStateVersion: 'native', sourceHash: `sha256:${'b'.repeat(64)}` }
     expect(sourceMaterialFingerprint(legacy)).toBe(sourceMaterialFingerprint(native))
   })
+})
+
+// Explicitly authored metadata witness, not a capture or native authorization receipt.
+const metadataDescriptor = (native = { customerId: '1'.repeat(24), tenantId: '2'.repeat(24), runtimeInstanceId: '3'.repeat(24), runtimeInstanceKey: 'runtime-one' }) => {
+  const fixture = { fixtureId: 'ss049-ac8-long-page-r1', fixtureVersion: 1,
+    fixtureFileSha256: '7b7fe9a7819a71a25a043a73d7de1f9ed5b2689c36332ca981e65d7422771fd9',
+    htmlSha256: '7f89c175b0da167969061551865ee67ad42b793283e61aecaec9f84aadc35777', sourceUrl: 'https://controlled-context.example/case-study' }
+  const binding = { contractVersion: 'controlled-replay-binding.v1', bindingId: 'synthetic-metadata-only', bindingVersion: 1,
+    classification: 'CONTROLLED_SYNTHETIC_REPLAY', environment: 'DEVELOPMENT_TEST',
+    scope: Object.fromEntries(['customerId', 'tenantId', 'runtimeInstanceId'].map(key => [key, String(native[key])])),
+    revisionId: native.runtimeInstanceKey, basisStateVersion: 'rsv2:11111111-1111-4111-8111-111111111111',
+    actorUserId: '4'.repeat(24), authorityRef: 'synthetic:authority', isolationRef: 'synthetic:isolation', fixture }
+  return { binding, provenance: { contractVersion: 'controlled-replay-provenance.v1', classification: 'CONTROLLED_SYNTHETIC_REPLAY',
+    operation: 'CONTROLLED_HTML_REPLAY_CAPTURE', adapter: 'controlled-html-replay-v1', bindingId: binding.bindingId,
+    bindingVersion: 1, bindingDigest: storedControlledReplayBindingDigest(binding), ...fixture } }
+}
+
+test('descriptor binds source review material while descriptor-absent fingerprint stays exact', () => {
+  const plain = { sourceId: 'synthetic-source', sourceType: 'WEBSITE', title: 'Synthetic planning assertion',
+    sourceRef: 'https://controlled-context.example/case-study', contentHash: `sha256:${'a'.repeat(64)}`, lineageRef: 'lineage:synthetic-source' }
+  expect(sourceMaterialFingerprint(plain)).toBe('sha256:96c28e5af884ca02af591430de131ea47e2b6b6932ec94d6a6c85c903b05d3df')
+  const descriptor = metadataDescriptor(), metadata = { ...plain, controlledReplayProvenance: descriptor }
+  expect(sourceMaterialFingerprint(metadata)).not.toBe(sourceMaterialFingerprint(plain))
+  const verificationContext = recordSourceReview({ source: metadata, facts, actorUserId: 'reviewer-1', reviewedAt: '2026-10-19T12:00:00.000Z' })
+  expect(resolveSourceRecordedReview({ ...metadata, verificationContext })).toEqual(verificationContext)
+  const changed = metadataDescriptor(); changed.binding.authorityRef = 'synthetic:changed'
+  changed.provenance.bindingDigest = storedControlledReplayBindingDigest(changed.binding)
+  expect(resolveSourceRecordedReview({ ...metadata, controlledReplayProvenance: changed, verificationContext })).toBeNull()
+  expect(preserveSourceRecordedReviews([plain], [{ ...metadata, verificationContext }])[0].verificationContext).toBeUndefined()
+  expect(preserveSourceRecordedReviews([metadata], [{ ...metadata, verificationContext }])[0].verificationContext).toEqual(verificationContext)
+  let called = false
+  const unsafe = Object.defineProperty({ ...plain }, 'controlledReplayProvenance', { enumerable: true,
+    get() { called = true; return descriptor } })
+  expect(() => sourceMaterialFingerprint(unsafe)).toThrow('Controlled replay metadata is invalid')
+  expect(called).toBe(false)
 })

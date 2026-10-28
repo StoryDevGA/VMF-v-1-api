@@ -1,15 +1,34 @@
 import express, { Router } from 'express'
+import { readSyntheticTestDisposition, saveSyntheticTestDisposition, readSyntheticTestCompletion,
+  saveSyntheticTestCompletion } from '../controllers/syntheticTestDisposition.controller.js'
+import { validateSyntheticTestDispositionBody } from '../validators/syntheticTestDisposition.validator.js'
+import { inspectIsolatedSyntheticOutcomeEndpoint, planIsolatedSyntheticOutcomeEndpoint, confirmIsolatedSyntheticOutcomePlanEndpoint,
+  executeIsolatedSyntheticOutcomeEndpoint, readIsolatedSyntheticOutcomeEndpoint, completeIsolatedSyntheticOutcomeEndpoint } from '../controllers/isolatedSyntheticOutcome.controller.js'
+import { validateIsolatedSyntheticScope, validateIsolatedSyntheticPlan, validateIsolatedSyntheticConfirm,
+  validateIsolatedSyntheticExecute, validateIsolatedSyntheticRequestParams, validateIsolatedSyntheticComplete } from '../validators/isolatedSyntheticOutcome.validator.js'
+import { preflightOutcomeSuccessor, confirmRuntimeOutcomeSuccessor, createRuntimeOutcomeSuccessor,
+  readRuntimeOutcomeSuccessor, compareRuntimeOutcomeSuccessor, reconcileRuntimeOutcomeSuccessor,
+  previewRuntimeOutcomeSelectedVersion, readRuntimeOutcomeSuccessorByKey } from '../controllers/outcomeSuccessor.controller.js'
+import { validateOutcomeSuccessorQuery, validateOutcomeSuccessorPreflightQuery, validateOutcomeSuccessorOperationParams,
+  validateOutcomeSuccessorConfirmation, validateOutcomeSuccessorCreation,
+  validateOutcomeSuccessorReconciliation, validateOutcomeSuccessorReadbackQuery,
+  validateOutcomeSuccessorVersionParams } from '../validators/runtimeInstance.validator.js'
 import { recordRuntimeSourceVerification } from '../controllers/runtimeInstance.controller.js'
+import { recordRuntimeEvidenceDraftQualification } from '../controllers/runtimeInstance.controller.js'
+import { validateEvidenceDraftQualification } from '../validators/runtimeInstance.validator.js'
 import { validateRecordSourceVerification, validateSourceVerificationParams } from '../validators/runtimeInstance.validator.js'
 import authJwt from '../middleware/authJwt.js'
 import loadScopes from '../middleware/loadScopes.js'
-import { readReviewCompletion, recordReviewCompletion } from '../controllers/reviewCompletion.controller.js'
+import { readReviewCompletion, recordReviewCompletion, readPublishedDispositionRecovery, recordSupplementalPublishedDisposition,
+  readSupplementalFindingReview, recordSupplementalFinding, readRuntimeProductAuthority, recordRuntimeProductAuthority,
+  readEvidenceSnapshotRecovery, recordEvidenceSnapshotRecovery } from '../controllers/reviewCompletion.controller.js'
 import { readAcquisitionRuns, readAcquisitionRun } from '../controllers/acquisitionRun.controller.js'
 import { getRuntimeStateSourceSummary, getRuntimeStateEvidenceInventory, getRuntimeStateDiscoveryHealth, getRuntimeStateLockBasis, getRuntimeStateContradictionHistory, getRuntimeStateFindings } from '../controllers/runtimeInstance.controller.js'
 import { validateContradictionHistoryQuery } from '../validators/contradictionHistory.validator.js'
 import { validateIntelligenceFindingQuery } from '../validators/intelligenceFinding.validator.js'
 import { validateAcquisitionRunScope, validateAcquisitionRunParams } from '../validators/acquisitionRun.validator.js'
-import { validateReviewCompletionBody, validateReviewCompletionScope } from '../validators/reviewCompletion.validator.js'
+import { validateReviewCompletionBody, validateReviewCompletionScope, validatePublishedDispositionBody,
+  validateSupplementalFindingBody, validateRuntimeProductAuthorityBody, validateSnapshotRecoveryBody } from '../validators/reviewCompletion.validator.js'
 import { validateGraphNeighbourhoodQuery } from '../validators/graphNeighbourhood.validator.js'
 import { planRuntimeOutcomeRequest, confirmRuntimeOutcomeRequestPlan, retrieveRuntimeOutcomeRequestPlan } from '../controllers/runtimeInstance.controller.js'
 import { validateOutcomePlanningBody, validateOutcomePlanningConfirmation, validateOutcomePlanningRequestParams } from '../validators/runtimeInstance.validator.js'
@@ -190,9 +209,27 @@ router.get('/:runtimeInstanceId/state/lock-basis', validateRuntimeInstanceId, va
 router.get('/:runtimeInstanceId/state/contradiction-history', validateRuntimeInstanceId, validateContradictionHistoryQuery, getRuntimeStateContradictionHistory)
 router.get('/:runtimeInstanceId/state/findings', validateRuntimeInstanceId, validateIntelligenceFindingQuery, getRuntimeStateFindings)
 router.get('/:runtimeInstanceId/review-completion', validateRuntimeInstanceId, validateReviewCompletionScope, readReviewCompletion)
+router.get('/:runtimeInstanceId/synthetic-outcome', validateRuntimeInstanceId, validateIsolatedSyntheticScope, inspectIsolatedSyntheticOutcomeEndpoint)
+router.post('/:runtimeInstanceId/synthetic-outcome/plan', vmfManagementRateLimit, validateRuntimeInstanceId, validateIsolatedSyntheticScope, validateIsolatedSyntheticPlan, planIsolatedSyntheticOutcomeEndpoint)
+router.post('/:runtimeInstanceId/synthetic-outcome/requests/:requestId/confirm', vmfManagementRateLimit, validateIsolatedSyntheticRequestParams, validateIsolatedSyntheticScope, validateIsolatedSyntheticConfirm, confirmIsolatedSyntheticOutcomePlanEndpoint)
+router.post('/:runtimeInstanceId/synthetic-outcome/execute', vmfManagementRateLimit, validateRuntimeInstanceId, validateIsolatedSyntheticScope, validateIsolatedSyntheticExecute, executeIsolatedSyntheticOutcomeEndpoint)
+router.post('/:runtimeInstanceId/synthetic-outcome/complete', vmfManagementRateLimit, validateRuntimeInstanceId, validateIsolatedSyntheticScope, validateIsolatedSyntheticComplete, completeIsolatedSyntheticOutcomeEndpoint)
+router.get('/:runtimeInstanceId/synthetic-outcome/run', validateRuntimeInstanceId, validateIsolatedSyntheticScope, readIsolatedSyntheticOutcomeEndpoint)
+router.get('/:runtimeInstanceId/synthetic-test-disposition', validateRuntimeInstanceId, validateReviewCompletionScope, readSyntheticTestDisposition)
+router.post('/:runtimeInstanceId/synthetic-test-disposition', validateRuntimeInstanceId, validateReviewCompletionScope, validateSyntheticTestDispositionBody, saveSyntheticTestDisposition)
+router.get('/:runtimeInstanceId/synthetic-test-completion', validateRuntimeInstanceId, validateReviewCompletionScope, readSyntheticTestCompletion)
+router.post('/:runtimeInstanceId/synthetic-test-completion', validateRuntimeInstanceId, validateReviewCompletionScope, validateReviewCompletionBody, saveSyntheticTestCompletion)
 router.get('/:runtimeInstanceId/acquisition-runs', validateRuntimeInstanceId, validateAcquisitionRunScope, readAcquisitionRuns)
 router.get('/:runtimeInstanceId/acquisition-runs/:runId', validateAcquisitionRunParams, validateAcquisitionRunScope, readAcquisitionRun)
 router.post('/:runtimeInstanceId/review-completion', validateRuntimeInstanceId, validateReviewCompletionScope, validateReviewCompletionBody, recordReviewCompletion)
+router.get('/:runtimeInstanceId/published-disposition-recovery', validateRuntimeInstanceId, validateReviewCompletionScope, readPublishedDispositionRecovery)
+router.post('/:runtimeInstanceId/published-disposition-recovery', validateRuntimeInstanceId, validateReviewCompletionScope, validatePublishedDispositionBody, recordSupplementalPublishedDisposition)
+router.get('/:runtimeInstanceId/supplemental-finding-review', validateRuntimeInstanceId, validateReviewCompletionScope, readSupplementalFindingReview)
+router.post('/:runtimeInstanceId/supplemental-finding-review', validateRuntimeInstanceId, validateReviewCompletionScope, validateSupplementalFindingBody, recordSupplementalFinding)
+router.get('/:runtimeInstanceId/product-authority', validateRuntimeInstanceId, validateReviewCompletionScope, readRuntimeProductAuthority)
+router.post('/:runtimeInstanceId/product-authority', validateRuntimeInstanceId, validateReviewCompletionScope, validateRuntimeProductAuthorityBody, recordRuntimeProductAuthority)
+router.get('/:runtimeInstanceId/evidence-snapshot-recovery', validateRuntimeInstanceId, validateReviewCompletionScope, readEvidenceSnapshotRecovery)
+router.post('/:runtimeInstanceId/evidence-snapshot-recovery', validateRuntimeInstanceId, validateReviewCompletionScope, validateSnapshotRecoveryBody, recordEvidenceSnapshotRecovery)
 router.get('/:runtimeInstanceId/state/graph-manifest', validateRuntimeInstanceId, getRuntimeStateGraphManifest)
 router.get('/:runtimeInstanceId/state/graph-projection', validateRuntimeInstanceId, getRuntimeStateGraphProjection)
 router.get('/:runtimeInstanceId/state/graph-neighbourhood', validateRuntimeInstanceId, validateGraphNeighbourhoodQuery, getRuntimeStateGraphNeighbourhood)
@@ -216,6 +253,8 @@ router.patch(
   reviewRuntimeDiscoveryEvidence,
 )
 router.patch('/:runtimeInstanceId/discovery-reset', validateRuntimeInstanceId, validateResetRuntimeDiscovery, resetRuntimeDiscovery)
+router.patch('/:runtimeInstanceId/discovery-evidence/:evidenceObjectId/draft-qualification',
+  validateRuntimeDiscoveryEvidenceParams, validateEvidenceDraftQualification, recordRuntimeEvidenceDraftQualification)
 router.patch('/:runtimeInstanceId/discovery-sources/:sourceId/verification',
   validateSourceVerificationParams, validateRecordSourceVerification, recordRuntimeSourceVerification)
 router.post(
@@ -464,5 +503,24 @@ router.post('/:runtimeInstanceId/release-adoption', validateRuntimeInstanceId, v
 router.post('/:runtimeInstanceId/release-adoption/rollback', validateRuntimeInstanceId, validateRollbackRuntimeRelease, rollbackRuntimeRelease)
 router.get('/:runtimeInstanceId/renderer', validateRuntimeInstanceId, getRuntimeRenderer)
 router.get('/:runtimeInstanceId', validateRuntimeInstanceId, getRuntimeInstance)
+
+const successorVersionPath = '/:runtimeInstanceId/outcome-studio/assets/:outcomeAssetId/versions/:outcomeAssetVersionId'
+const successorOperationPath = '/:runtimeInstanceId/outcome-studio/successor-operations/:operationId'
+router.get(`${successorVersionPath}/successor/preflight`, validateOutcomeSuccessorVersionParams,
+  validateOutcomeSuccessorPreflightQuery, preflightOutcomeSuccessor)
+router.get(`${successorVersionPath}/successor/operation-by-key`, validateOutcomeSuccessorVersionParams,
+  validateOutcomeSuccessorReadbackQuery, readRuntimeOutcomeSuccessorByKey)
+router.post(`${successorVersionPath}/successor/confirmation`, validateOutcomeSuccessorVersionParams,
+  validateOutcomeSuccessorQuery, validateOutcomeSuccessorConfirmation, confirmRuntimeOutcomeSuccessor)
+router.post(`${successorVersionPath}/successor`, validateOutcomeSuccessorVersionParams,
+  validateOutcomeSuccessorQuery, validateOutcomeSuccessorCreation, createRuntimeOutcomeSuccessor)
+router.get(`${successorVersionPath}/preview`, validateOutcomeSuccessorVersionParams,
+  validateOutcomeSuccessorQuery, previewRuntimeOutcomeSelectedVersion)
+router.get(successorOperationPath, validateOutcomeSuccessorOperationParams,
+  validateOutcomeSuccessorQuery, readRuntimeOutcomeSuccessor)
+router.get(`${successorOperationPath}/compare`, validateOutcomeSuccessorOperationParams,
+  validateOutcomeSuccessorQuery, compareRuntimeOutcomeSuccessor)
+router.post(`${successorOperationPath}/reconcile`, validateOutcomeSuccessorOperationParams,
+  validateOutcomeSuccessorQuery, validateOutcomeSuccessorReconciliation, reconcileRuntimeOutcomeSuccessor)
 
 export default router

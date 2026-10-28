@@ -10,6 +10,7 @@ import {
   scopedVersionIndex,
 } from './runtimeStateSchemas.js'
 import { RUNTIME_STATE_V2_CANONICAL_ALGORITHM } from '../services/runtimeStateCanonicalSerializer.js'
+import { validateSectionHistoryReferences } from '../services/runtimeSectionHistoryContract.js'
 
 export const RUNTIME_SECTION_DETAIL_ROOT_KEYS = Object.freeze([
   'input',
@@ -62,7 +63,8 @@ export const isBoundedRuntimeSectionDetail = (value) => {
     allowedForbiddenKeys: ['content', 'body', 'text'],
   })) return false
 
-  return Object.keys(value).length === RUNTIME_SECTION_DETAIL_ROOT_KEYS.length
+  return validateSectionHistoryReferences(value)
+    && Object.keys(value).length === RUNTIME_SECTION_DETAIL_ROOT_KEYS.length
     && RUNTIME_SECTION_DETAIL_ROOT_KEYS.every((key) => Object.hasOwn(value, key))
 }
 

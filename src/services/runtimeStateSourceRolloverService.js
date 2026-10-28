@@ -8,6 +8,8 @@ import RuntimeStateMigrationReceipt, {
 } from '../models/RuntimeStateMigrationReceipt.js'
 import RuntimeStateSection from '../models/RuntimeStateSection.js'
 import { createRuntimeStateLegacySourceRowSet } from './runtimeStateLegacyMapper.js'
+import { normalizeRuntimeSectionObject } from './runtimeSectionModelService.js'
+import { createSectionHistoryReadContext, createSectionHistoryProjectors, getSectionHistoryRowKey } from './runtimeSectionHistoryContract.js'
 import {
   buildRuntimeStateNativeInitialFrameworkState,
   isRuntimeStateNativeInitialFrameworkState,
@@ -40,10 +42,12 @@ const scopeFilter = (scope) => ({
   runtimeInstanceKey: scope.runtimeInstanceKey,
 })
 
-const executeFind = async (model, filter, { session, limit }) => {
+const executeFind = async (model, filter, { session, limit, maxTimeMS = 2000, readBudget }) => {
   let query = model.find(filter)
   if (typeof query?.session === 'function') query = query.session(session)
   if (typeof query?.limit === 'function') query = query.limit(limit)
+  if (typeof query?.maxTimeMS === 'function') query = query.maxTimeMS(maxTimeMS)
+  if (readBudget && typeof query?.setOptions === 'function') query = query.setOptions(readBudget())
   if (typeof query?.lean === 'function') query = query.lean()
   return query
 }
@@ -93,13 +97,14 @@ const buildSourceRowSet = ({
   runtimeInstance,
   stateVersion,
   rowSetBuilder,
+  sectionDetailProjector,
 }) => rowSetBuilder({
   legacyInput: buildLegacyInput({ frameworkState, runtimeInstance, stateVersion }),
   scope: scopeFromRuntime(runtimeInstance),
   stateVersion,
   migrationReceiptId,
   migrationTimestamp,
-})
+}, { sectionDetailProjector })
 
 const FAMILY_SPECS = Object.freeze([
   { key: 'sections', identityKey: 'sectionKey', modelKey: 'RuntimeStateSection' },
@@ -249,6 +254,40 @@ export const stageRuntimeStateSourceRollover = async ({
   const canonicalNextFrameworkState = nativeInitialization
     ? normalizeRuntimeStateNativeSections(nextFrameworkState)
     : nextFrameworkState
+  const sectionCount = Object.keys(previousFrameworkState.sections || {}).length
+  if (sectionCount > 2000) fail('Runtime V2 section history source count exceeds its bound.')
+  const observedSections = await executeFind(models.RuntimeStateSection, {
+    ...scopeFilter(scope), current: true,
+  }, { session, limit: sectionCount + 1 })
+  if (observedSections.length !== sectionCount) fail('Runtime V2 current section count does not match the source.')
+  const historyContext = createSectionHistoryReadContext({ session,
+    readRows: (filter, options) => executeFind(models.RuntimeStateSection, filter, options) })
+  const verifiedHistory = await historyContext.verify(observedSections)
+  const projectors = new Map()
+  const projector = mode => (detail, { sectionKey, common }) => {
+    const observed = observedSections.filter(row => row.sectionKey === sectionKey)
+    if (mode === 'previous' && (observed.length !== 1 || observed[0].sourceHash !== common.sourceHash
+      || observed[0].stateVersion !== common.stateVersion)) fail('Runtime V2 section canonical source does not match its predecessor.')
+    if (!projectors.has(sectionKey)) {
+      const matches = observed
+      if (matches.length !== 1) fail('Runtime V2 section history predecessor is not unique.')
+      const row = matches[0]
+      if (normalizeIdentity(row.stateVersion) !== normalizeIdentity(expectedStateVersion)
+        || normalizeIdentity(row.sourceStateVersion) !== normalizeIdentity(expectedStateVersion)
+        || normalizeIdentity(row.migrationReceiptId) !== normalizeIdentity(receipt.receiptId)
+        || Object.entries(scopeFilter(scope)).some(([key, value]) => normalizeIdentity(row[key]) !== normalizeIdentity(value))
+        || row.projectionReceipt?.stateVersion !== row.stateVersion
+        || row.projectionReceipt?.sourceHash !== row.sourceHash
+        || row.projectionReceipt?.logicalPath !== `framework_state.sections.${sectionKey}`) {
+        fail('Runtime V2 section history predecessor lineage is inconsistent.')
+      }
+      projectors.set(sectionKey, createSectionHistoryProjectors({ observedRow: { ...row,
+        sectionDetail: normalizeRuntimeSectionObject({ value: row.sectionDetail, sectionKey,
+          runtimePath: `framework_state.sections.${sectionKey}`, initializedAt: timestamp }) },
+      resolvedRecords: verifiedHistory.get(getSectionHistoryRowKey(row)) }))
+    }
+    return projectors.get(sectionKey)[mode](detail)
+  }
   const previousRows = buildSourceRowSet({
     frameworkState: previousFrameworkState,
     migrationReceiptId: receipt.receiptId,
@@ -256,6 +295,7 @@ export const stageRuntimeStateSourceRollover = async ({
     runtimeInstance,
     stateVersion: expectedStateVersion,
     rowSetBuilder,
+    sectionDetailProjector: projector('previous'),
   })
   const nextRows = buildSourceRowSet({
     frameworkState: canonicalNextFrameworkState,
@@ -264,12 +304,14 @@ export const stageRuntimeStateSourceRollover = async ({
     runtimeInstance,
     stateVersion: nextStateVersion,
     rowSetBuilder,
+    sectionDetailProjector: (detail, context) => observedSections.some(row => row.sectionKey === context.sectionKey)
+      ? projector('next')(detail, context) : detail,
   })
 
   const previousSourceHashes = new Map()
   for (const spec of FAMILY_SPECS) {
     const expected = previousRows.rows[spec.key]
-    const observed = await executeFind(models[spec.modelKey], {
+    const observed = spec.key === 'sections' ? observedSections : await executeFind(models[spec.modelKey], {
       ...scopeFilter(scope),
       current: true,
     }, { session, limit: expected.length + 1 })

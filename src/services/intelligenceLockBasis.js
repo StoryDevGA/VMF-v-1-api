@@ -17,8 +17,8 @@ const time = value => {
 
 // These are recorded lock metadata only. The lock producer does not persist the
 // hashed snapshot body or an evidence/source membership-and-version receipt.
-export function projectRecordedLockBasis(lock, control) {
-  const frozenInventory = { available: false, completeness: 'UNAVAILABLE', reason: 'FROZEN_MEMBERSHIP_NOT_RECORDED' }
+export function projectRecordedLockBasis(lock, control, verifiedInventory) {
+  const frozenInventory = verifiedInventory || { available: false, completeness: 'UNAVAILABLE', reason: 'FROZEN_MEMBERSHIP_NOT_RECORDED' }
   const unavailable = (reason, locked = null) => ({ available: false, reason, locked,
     snapshot: null, replay: { available: false, reason: 'LOCK_BASIS_UNAVAILABLE', anchor: null }, frozenInventory })
   const rootLockedAt = time(control?.lockedAt)

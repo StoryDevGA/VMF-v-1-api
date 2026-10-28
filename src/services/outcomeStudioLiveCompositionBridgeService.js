@@ -1,4 +1,5 @@
 import { parse as parseYaml } from 'yaml'
+import { assertStyleOverlaySourceEligibility, STYLE_OVERLAY_POLICY_VERSION } from './styleOverlayPolicy.js'
 
 import {
   FRAMEWORK_OUTCOME_CLAIM_TYPES,
@@ -933,6 +934,16 @@ export const resolveOutcomeStudioCompositionInputs = async ({
     loadSelectedContent({ selection: arlSelection, binding, loadPackContent }),
     rlSelection ? loadSelectedContent({ selection: rlSelection, binding, loadPackContent }) : null,
   ])
+  // Historical plans keep their original contract and fingerprints. New policy
+  // plans verify the exact active style content before composition can proceed.
+  const usesStyleOverlay = binding.resolution?.styleOverlayPolicy === STYLE_OVERLAY_POLICY_VERSION
+  const style = usesStyleOverlay && styleSelection
+    ? await loadSelectedContent({ selection: styleSelection, binding, loadPackContent }) : null
+  const styleOverlayReceipt = style ? assertStyleOverlaySourceEligibility({
+    style: style.selection, outputType: outputType.selection, schema: schema.selection,
+    audienceKeys: binding.resolution?.request?.audienceKeys || [], format: requestedFormat,
+    loaded: { ...style.selection, available: true, status: 'ACTIVE', content: style.content },
+  }) : null
   const outputStructure = resolveOutputStructure({
     content: outputType.content,
     selection: outputType.selection,
@@ -966,7 +977,7 @@ export const resolveOutcomeStudioCompositionInputs = async ({
     arl: arlDocument,
     frameworkHandoff,
   })
-  return { outputType, schema, arl, rl, styleSelection, outputStructure, schemaProjection, methodGuidance, methodPackBindings, methodDocumentReceipts, methodBoundaryReceipts, governanceConstraints }
+  return { outputType, schema, arl, rl, styleSelection, ...(style ? { style, styleOverlayReceipt } : {}), outputStructure, schemaProjection, methodGuidance, methodPackBindings, methodDocumentReceipts, methodBoundaryReceipts, governanceConstraints }
 }
 
 export const buildOutcomeStudioLiveComposition = async ({
@@ -1054,7 +1065,7 @@ export const buildOutcomeStudioLiveComposition = async ({
       : '',
   }
 
-  const { outputType, schema, arl, rl, styleSelection, outputStructure, schemaProjection, methodGuidance, methodPackBindings, methodDocumentReceipts, methodBoundaryReceipts, governanceConstraints } = await resolveOutcomeStudioCompositionInputs({
+  const { outputType, schema, arl, rl, style, styleOverlayReceipt, styleSelection, outputStructure, schemaProjection, methodGuidance, methodPackBindings, methodDocumentReceipts, methodBoundaryReceipts, governanceConstraints } = await resolveOutcomeStudioCompositionInputs({
     binding, knowledgeContext, requestedOutputTypeKey, requestedFormat, frameworkHandoff, loadPackContent,
   })
   const projectedFrameworkState = getFrameworkStateProjection({ frameworkState, frameworkHandoff })
@@ -1080,7 +1091,7 @@ export const buildOutcomeStudioLiveComposition = async ({
         outputStructure,
         schemaProjection,
         styleSelection,
-        loadedPacks: [outputType, schema, arl, rl].filter(Boolean),
+        loadedPacks: [outputType, schema, arl, rl, style].filter(Boolean),
       }),
       requestedOutputTypeKey,
       userPrompt,
@@ -1111,6 +1122,7 @@ export const buildOutcomeStudioLiveComposition = async ({
     methodPackBindings,
     methodDocumentReceipts,
     methodBoundaryReceipts,
+    ...(styleOverlayReceipt ? { styleOverlayReceipt } : {}),
     governanceConstraints,
     readiness,
     readinessSources: {
@@ -1124,8 +1136,8 @@ export const buildOutcomeStudioLiveComposition = async ({
       outputTypeVersion: outputType.selection.semanticVersion,
       outputSchemaVersion: schema.selection.semanticVersion,
       styleVersion: styleSelection?.semanticVersion || knowledgeContext.style?.version,
-      versionIds: unique([outputType, schema, arl, rl].filter(Boolean).map((pack) => pack.selection.versionId)),
-      contentHashes: unique([outputType, schema, arl, rl].filter(Boolean).map((pack) => pack.contentHash)),
+      versionIds: unique([outputType, schema, arl, rl, style].filter(Boolean).map((pack) => pack.selection.versionId)),
+      contentHashes: unique([outputType, schema, arl, rl, style].filter(Boolean).map((pack) => pack.contentHash)),
     },
   }
 }

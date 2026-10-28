@@ -1,4 +1,8 @@
 import mongoose from 'mongoose'
+import { readContradictionReviewBasis } from './contradictionReviewBasis.js'
+import FrameworkPackage from '../models/FrameworkPackage.js'
+import AuditLog from '../models/AuditLog.js'
+import { readPostLockEvidenceIntakeCapability } from './postLockEvidenceIntakeCapabilityService.js'
 import { isValidEvidenceSourceLocation } from '../models/RuntimeEvidenceObject.js'
 import { sourceMaterialFingerprint, sourceVerificationContextSchema } from './sourceVerificationContext.js'
 import { graphNeighbourhoodSelectionSchema } from '../validators/graphNeighbourhood.validator.js'
@@ -7,11 +11,18 @@ import { readSourceProcessingSummary } from './sourceProcessingSummary.js'
 import { projectIntelligenceEvidenceInventory } from './intelligenceEvidenceInventory.js'
 import { projectStoredDiscoveryHealth } from './intelligenceDiscoveryHealth.js'
 import { projectRecordedLockBasis } from './intelligenceLockBasis.js'
+import { EVIDENCE_SNAPSHOT_INTERNAL_READ, membershipJson, evidenceMaterialHash } from './runtimeEvidenceSnapshotContract.js'
+import { PUBLISHED_DISPOSITION_POLICY } from '../constants/publishedDispositionRecoveryPolicy.js'
+import { readVerifiedRuntimeEvidenceSnapshot, projectPublicEvidenceSnapshotInventory } from './runtimeEvidenceSnapshotService.js'
+import { buildDirectSyntheticRevisionLineage, buildSuccessorSyntheticRevisionLineage,
+  SYNTHETIC_SUCCESSOR_IDENTITY as syntheticSuccessor } from './syntheticOutcomeIsolationService.js'
 import { projectStoredContradictionHistory } from './intelligenceContradictionHistory.js'
+import { isBoundedContradictionReviewHistory } from './discoveryContradictionReviewService.js'
 import { contradictionHistorySelectionSchema } from '../validators/contradictionHistory.validator.js'
 import { findingSelectionSchema } from '../validators/intelligenceFinding.validator.js'
 import { projectStoredFindings, storedFindingEvidenceIds } from './intelligenceFindingRead.js'
 import { assembleOutcomeEvidenceInventory, snapshotHash } from '../utils/outcomeEvidenceSnapshot.js'
+import { assertSourceEvidenceMetadataPairs, validateEvidenceSupport, validateSourceCapture } from './sourceEvidenceContract.js'
 
 import {
   isBoundedRuntimeSectionDetail,
@@ -19,6 +30,7 @@ import {
   RUNTIME_SECTION_DETAIL_FORBIDDEN_KEYS,
 } from '../models/RuntimeStateSection.js'
 import { isBoundedSafeJson } from '../models/runtimeStateSchemas.js'
+import { createSectionHistoryReadContext } from './runtimeSectionHistoryContract.js'
 import { getRuntimeInstance } from './runtimeInstanceService.js'
 import {
   FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_READ_POLICY,
@@ -71,6 +83,7 @@ export const RUNTIME_STATE_V2_MAX_SERIALIZED_READ_BYTES = 512 * 1024
 export const RUNTIME_STATE_V2_GRAPH_EDGE_LIMIT = 48
 
 export const RUNTIME_STATE_V2_CONTROL_PROJECTION = [
+  'controlledReplayIsolation',
   '_id',
   'runtimeInstanceKey',
   'customerId',
@@ -127,6 +140,10 @@ const DISCOVERY_HEALTH_CONTROL_PROJECTION = [RUNTIME_STATE_V2_CONTROL_PROJECTION
 ].join(' ')
 
 const RECORDED_LOCK_CONTROL_PROJECTION = [RUNTIME_STATE_V2_CONTROL_PROJECTION,
+  'lockedEvidenceSnapshot', 'revision.rootRuntimeId', 'revision.rootRuntimeInstanceKey',
+  ...['parentRuntimeId', 'parentRuntimeInstanceKey', 'createdFromRevision', 'derivedFromPublishSnapshotId', 'derivedFromPublishSnapshotHash',
+    'derivedFromLockSnapshotId', 'derivedFromLockSnapshotHash', 'derivedFromReplayAnchorId', 'derivedFromReplayAnchorHash'].map(field => `revision.${field}`),
+  'framework_state.publish.snapshot.snapshotId', 'framework_state.publish.snapshot.snapshotHash',
   ...['state', 'locked', 'lockVersion', 'lockedAt', 'lockedBy',
     'snapshot.snapshotId', 'snapshot.snapshotHash', 'snapshot.snapshotAt', 'snapshot.contractVersion', 'snapshot.actionKey',
     'replayAnchor.replayAnchorId', 'replayAnchor.replayAnchorHash', 'replayAnchor.relationship',
@@ -158,6 +175,8 @@ const RUNTIME_STATE_V2_CHILD_PROJECTION = Object.freeze({
   sourceType: 1,
   extractedFact: 1,
   sourceLocation: 1,
+  evidenceSupport: 1,
+  controlledReplayProvenance: 1,
   validationStatus: 1,
   confidence: 1,
   materiality: 1,
@@ -179,6 +198,7 @@ const RUNTIME_STATE_V2_CHILD_PROJECTION = Object.freeze({
 
 const RUNTIME_STATE_V2_SELECTED_SECTION_PROJECTION = Object.freeze({
   ...RUNTIME_STATE_V2_CHILD_PROJECTION,
+  legacyPath: 1,
   sectionDetail: 1,
 })
 
@@ -196,7 +216,7 @@ const RUNTIME_STATE_V2_RENDERER_SECTION_PROJECTION = Object.freeze({
   ...Object.fromEntries([
     'input', 'state', 'review', 'dependencies', 'lineage', 'validation',
     'additionalEvidence', 'evidenceObjects',
-    'revisions.revisionNumber', 'revisions.replacedAt', 'revisions.reason',
+    'revisions.revisionNumber', 'revisions.replacedAt', 'revisions.reason', 'revisions.historyReference',
     'accepted.revisions.revisionNumber', 'accepted.revisions.replacedAt', 'accepted.revisions.reason',
   ].map((path) => [`sectionDetail.${path}`, 1])),
   ...Object.fromEntries([
@@ -222,6 +242,8 @@ const RUNTIME_STATE_V2_EVIDENCE_SOURCE_PROJECTION = Object.freeze({
   sourceRef: 1,
   contentHash: 1,
   processingReceipt: 1,
+  sourceCapture: 1,
+  controlledReplayProvenance: 1,
   verificationContext: 1,
   acquisitionStatus: 1,
   acquisitionProfile: 1,
@@ -421,7 +443,7 @@ const withBoundedReadReceipt = (payload, source, receiptFields = {}) => {
     },
   }
   assertSerializedPayloadSize(result)
-  return result
+  return copyControlledReplayIsolationWitness(payload, result)
 }
 
 const buildObjectIdCandidates = (value) => {
@@ -584,6 +606,59 @@ const readCount = async ({
   }
 }
 
+const HISTORY_CONTROL_PROJECTION = [RUNTIME_STATE_V2_CONTROL_PROJECTION,
+  ...['parentRuntimeId', 'parentRuntimeInstanceKey', 'rootRuntimeId', 'rootRuntimeInstanceKey', 'createdFromRevision']
+    .map(field => `revision.${field}`),
+].join(' ')
+
+// A copied decision remains the ancestor's record. Only native ancestry and an
+// exact retained source record can authorize its historical read, never current review.
+const readInheritedContradictionRecords = async ({ runtime, reviews, scopes, session, readBudget, maxTimeMS }) => {
+  if (!isBoundedContradictionReviewHistory(reviews)) return []
+  const currentId = String(runtime.id || runtime._id)
+  const foreign = reviews.filter(review => review && review.runtimeInstanceId !== currentId)
+  if (!foreign.length) return []
+  const revision = runtime.revision || {}, parentId = String(revision.parentRuntimeId || ''), rootId = String(revision.rootRuntimeId || '')
+  const validId = id => /^[a-f0-9]{24}$/.test(id)
+  const need = condition => {
+    if (!condition) throw createRuntimeStateError({ code: RUNTIME_STATE_V2_ERROR_CODES.CONTROL_INVALID,
+      message: 'The original contradiction decision ancestry could not be verified.' })
+  }
+  need(validId(parentId) && validId(rootId) && parentId !== currentId && rootId !== currentId
+    && [2, 3].includes(revision.revisionNumber)
+    && revision.createdFromRevision === revision.revisionNumber - 1
+    && foreign.every(review => [parentId, rootId].includes(review.runtimeInstanceId)))
+  const ancestors = new Map()
+  for (const id of [...new Set([parentId, rootId])]) {
+    readBudget?.()
+    const ancestor = await getRuntimeInstance({ scopes, runtimeInstanceId: id,
+      customerId: String(runtime.customerId), tenantId: String(runtime.tenantId), session, readBudget,
+      maxTimeMS, metadataMaxTimeMS: maxTimeMS,
+      projection: { ...Object.fromEntries(HISTORY_CONTROL_PROJECTION.split(' ').map(path => [path, 1])),
+        'framework_state.evidence_pack.contradictionReviews': { $slice: 1001 } } })
+    readBudget?.()
+    assertSerializedPayloadSize(ancestor)
+    need(String(ancestor?.id || ancestor?._id) === id
+      && ['customerId', 'tenantId', 'workspaceId', 'runtimeType', 'frameworkKey', 'packageId', 'packageKey', 'packageVersion',
+        'dependencyLockId', 'activationId', 'deploymentId'].every(key => String(ancestor[key] || '') === String(runtime[key] || '')))
+    const retained = ancestor.framework_state?.evidence_pack?.contradictionReviews
+    need(retained === undefined || isBoundedContradictionReviewHistory(retained))
+    ancestors.set(id, ancestor)
+  }
+  const parent = ancestors.get(parentId), root = ancestors.get(rootId)
+  need(parent.runtimeInstanceKey === revision.parentRuntimeInstanceKey
+    && parent.revision?.revisionNumber === revision.revisionNumber - 1
+    && root.runtimeInstanceKey === revision.rootRuntimeInstanceKey && root.revision?.revisionNumber === 1
+    && (revision.revisionNumber === 2 && parentId === rootId || revision.revisionNumber === 3 && parentId !== rootId
+      && parent.revision?.createdFromRevision === 1
+      && String(parent.revision?.parentRuntimeId) === rootId
+      && parent.revision?.parentRuntimeInstanceKey === root.runtimeInstanceKey
+      && String(parent.revision?.rootRuntimeId) === rootId
+      && parent.revision?.rootRuntimeInstanceKey === root.runtimeInstanceKey))
+  return foreign.flatMap(review => (ancestors.get(review.runtimeInstanceId).framework_state?.evidence_pack?.contradictionReviews || [])
+    .filter(record => record.runtimeInstanceId === review.runtimeInstanceId && record.reviewId === review.reviewId))
+}
+
 const getControl = async ({ scopes, runtimeInstanceId, includeHandoffEligibility = false, includeDiscoveryHealth = false, includeRecordedLockBasis = false, includeContradictionHistory = false, includeFindings = false, session = null,
   maxTimeMS = RUNTIME_STATE_V2_READ_MAX_TIME_MS, metadataMaxTimeMS, readBudget } = {}) => {
   const scope = getControlScope(scopes)
@@ -596,13 +671,14 @@ const getControl = async ({ scopes, runtimeInstanceId, includeHandoffEligibility
     ...(metadataMaxTimeMS === undefined ? {} : { metadataMaxTimeMS }),
     session,
     readBudget,
+    ...(includeRecordedLockBasis ? { internalEvidenceSnapshotToken: EVIDENCE_SNAPSHOT_INTERNAL_READ } : {}),
     projection: includeFindings
-      ? { ...Object.fromEntries(RUNTIME_STATE_V2_CONTROL_PROJECTION.split(' ').map(path => [path, 1])),
+      ? { ...Object.fromEntries(HISTORY_CONTROL_PROJECTION.split(' ').map(path => [path, 1])),
         'framework_state.evidence_pack.discoveryHealth.contradictionCandidates': { $slice: 9 },
         'framework_state.evidence_pack.contradictionReviews': { $slice: 1001 },
         'framework_state.evidence_pack.contradictionReviewEpoch': 1 }
       : includeContradictionHistory
-      ? { ...Object.fromEntries(RUNTIME_STATE_V2_CONTROL_PROJECTION.split(' ').map(path => [path, 1])),
+      ? { ...Object.fromEntries(HISTORY_CONTROL_PROJECTION.split(' ').map(path => [path, 1])),
         'framework_state.evidence_pack.contradictionReviews': { $slice: 1001 } }
       : includeHandoffEligibility
       ? RUNTIME_STATE_V2_HANDOFF_CONTROL_PROJECTION
@@ -618,6 +694,7 @@ const getControl = async ({ scopes, runtimeInstanceId, includeHandoffEligibility
   }
 
   const control = {
+    ...(Object.hasOwn(runtime, 'controlledReplayIsolation') ? { controlledReplayIsolation: runtime.controlledReplayIsolation } : {}),
     id: normalizeText(runtime.id),
     runtimeInstanceKey: normalizeKey(runtime.runtimeInstanceKey),
     customerId: normalizeText(runtime.customerId),
@@ -658,8 +735,34 @@ const getControl = async ({ scopes, runtimeInstanceId, includeHandoffEligibility
         }
       : {}),
   }
-  if (includeRecordedLockBasis) control.recordedLockBasisProjection = projectRecordedLockBasis(runtime.framework_state?.lock, control)
+  if (includeRecordedLockBasis) {
+    let frozenInventory
+    const internal = runtime.__evidenceSnapshotControl
+    if (internal?.pointer) {
+      try {
+        frozenInventory = projectPublicEvidenceSnapshotInventory(await readVerifiedRuntimeEvidenceSnapshot({ runtime: internal.runtime, pointer: internal.pointer, session, readBudget }))
+      } catch (error) {
+        if (error.code !== 'RUNTIME_EVIDENCE_MEMBERSHIP_INVALID') throw error
+        frozenInventory = { available: false, completeness: 'UNAVAILABLE', reason: error.details?.reason || 'FROZEN_MEMBERSHIP_INVALID' }
+      }
+    }
+    control.recordedLockBasisProjection = projectRecordedLockBasis(runtime.framework_state?.lock, control, frozenInventory)
+    control.outsideSnapshotIntakeProjection = await readPostLockEvidenceIntakeCapability({
+      lockBasis: control.recordedLockBasisProjection, runtime: internal?.runtime || runtime, session, readBudget,
+      readPackage: ({ runtime: selected }) => readMany({ collectionName: FrameworkPackage.collection.name,
+        filter: { _id: new mongoose.Types.ObjectId(selected.packageId), frameworkKey: selected.frameworkKey,
+          packageKey: selected.packageKey, version: selected.packageVersion },
+        projection: { _id: 1, frameworkKey: 1, packageKey: 1, version: 1, discoveryPolicy: 1,
+          'dependencyLock.snapshotId': 1, 'dependencyLock.snapshotHash': 1, 'dependencyLock.hash': 1,
+          'dependencyLock.discoveryPolicy': 1, 'dependencyLock.discoveryPolicyHash': 1 },
+        limit: 2, batchSize: 2, maxTimeMS: 2000, session, readBudget }),
+    })
+  }
   if (includeContradictionHistory) control.contradictionHistoryRecords = runtime.framework_state?.evidence_pack?.contradictionReviews
+  if (includeContradictionHistory || includeFindings) control.inheritedContradictionRecords = await readInheritedContradictionRecords({
+    runtime, reviews: runtime.framework_state?.evidence_pack?.contradictionReviews, scopes, session, readBudget,
+    maxTimeMS: metadataMaxTimeMS ?? maxTimeMS,
+  })
   if (includeFindings) control.storedFindings = { candidates: runtime.framework_state?.evidence_pack?.discoveryHealth?.contradictionCandidates,
     reviews: runtime.framework_state?.evidence_pack?.contradictionReviews, reviewEpoch: runtime.framework_state?.evidence_pack?.contradictionReviewEpoch }
   if (includeHandoffEligibility && runtime.framework_state?.evidence_pack?.discoveryHealth) {
@@ -699,7 +802,7 @@ const getControl = async ({ scopes, runtimeInstanceId, includeHandoffEligibility
       message: 'Runtime State Storage V2 requires a control state-version receipt.',
     })
   }
-  return control
+  return copyControlledReplayIsolationWitness(runtime, control)
 }
 
 const buildChildFilter = ({ control, additional = {} }) => ({
@@ -1040,18 +1143,24 @@ const assertCurrentEvidenceSourceRows = (rows) => {
 }
 
 const serializeEvidenceObject = (row, stateVersion) => {
+  const draftQualification = assertEvidenceDraftQualification({ evidence: row })
   if (!isValidEvidenceSourceLocation(row.sourceLocation)) throw createRuntimeStateError({
     code: RUNTIME_STATE_V2_ERROR_CODES.STORAGE_UNAVAILABLE, status: 503,
     message: 'The recorded source location is invalid.' })
   return {
   evidenceObjectId: normalizeText(row.evidenceObjectId || row._id),
+  ...projectControlledReplayProvenance(row, row),
   sourceId: normalizeText(row.sourceId),
   lineageRef: truncateSummary(row.lineageRef, 1000),
   stateVersion,
   sourceStateVersion: normalizeText(row.sourceStateVersion),
   sourceType: normalizeText(row.sourceType),
   extractedFact: truncateSummary(row.extractedFact, 8000),
+  ...(draftQualification ? { draftQualification } : {}),
   ...(row.sourceLocation !== undefined ? { sourceLocation: row.sourceLocation } : {}),
+  evidenceSupport: row.evidenceSupport !== undefined ? validateEvidenceSupport(row.evidenceSupport,
+    { sourceId: row.sourceId }) : null,
+  evidenceSupportAvailability: row.evidenceSupport !== undefined ? 'RECORDED' : 'NOT_RECORDED',
   reviewStatus: normalizeText(row.reviewStatus),
   acceptanceState: normalizeText(row.acceptanceState),
   validationStatus: normalizeText(row.validationStatus),
@@ -1087,6 +1196,7 @@ const serializeEvidenceSource = (row, stateVersion) => {
   return {
     sourceId: normalizeText(row.sourceId),
     materialFingerprint: sourceMaterialFingerprint(row),
+    ...projectControlledReplayProvenance(row, row),
     sourceType,
     type: sourceType,
     label: truncateSummary(row.title, 1000),
@@ -1094,6 +1204,9 @@ const serializeEvidenceSource = (row, stateVersion) => {
     ...(sourceType === 'WEBSITE' && sourceRef ? { url: sourceRef } : {}),
     ...(sourceType === 'UPLOADED_DOCUMENT' && sourceRef ? { fileName: sourceRef } : {}),
     contentHash: normalizeText(row.contentHash),
+    sourceCapture: row.sourceCapture !== undefined ? validateSourceCapture(row.sourceCapture,
+      { sourceId: row.sourceId, contentHash: row.contentHash }) : null,
+    sourceCaptureAvailability: row.sourceCapture !== undefined ? 'RECORDED' : 'NOT_RECORDED',
     ...(row.processingReceipt !== undefined ? { processingReceipt: structuredClone(row.processingReceipt) } : {}),
     ...(row.verificationContext !== undefined ? { verificationContext: structuredClone(row.verificationContext) } : {}),
     acquisitionStatus,
@@ -1265,7 +1378,14 @@ export const getRuntimeStateControl = async ({ scopes, runtimeInstanceId } = {})
   'runtime_state_v2.control_projection',
 )
 
-export const getRuntimeStateSectionSummary = async ({ scopes, runtimeInstanceId, sectionKey } = {}) => {
+export const getRuntimeStateSectionSummary = async ({ scopes, runtimeInstanceId, sectionKey, historyRevision } = {}) => {
+  const historySelected = historyRevision !== undefined
+  if (historySelected && !(typeof historyRevision === 'number' && Number.isInteger(historyRevision)
+    && historyRevision >= 0 && historyRevision < 100)
+    && !(typeof historyRevision === 'string' && /^(?:0|[1-9]\d?)$/.test(historyRevision))) {
+    throw createRuntimeStateError({ code: RUNTIME_STATE_V2_ERROR_CODES.INVALID_QUERY,
+      status: 400, message: 'A bounded logical history revision index is required.' })
+  }
   const normalizedSectionKey = normalizeKey(sectionKey)
   if (!/^[a-z0-9][a-z0-9_-]{0,119}$/.test(normalizedSectionKey)) {
     throw createRuntimeStateError({
@@ -1309,6 +1429,33 @@ export const getRuntimeStateSectionSummary = async ({ scopes, runtimeInstanceId,
     missingMessage: 'The selected Runtime State Storage V2 section has no state-version receipt.',
     requireSourceStateVersion: true,
   })
+  if (historySelected) {
+    const revisionIndex = Number(historyRevision)
+    if (String(rows[0].runtimeInstanceId) !== String(control.id)
+      || rows[0].runtimeInstanceKey !== control.runtimeInstanceKey
+      || String(rows[0].customerId) !== String(control.customerId)
+      || String(rows[0].tenantId) !== String(control.tenantId)
+      || rows[0].sectionKey !== normalizedSectionKey) {
+      throw createRuntimeStateError({ code: RUNTIME_STATE_V2_ERROR_CODES.SECTION_DETAIL_INVALID,
+        message: 'The selected section history owner does not match the runtime scope.' })
+    }
+    // Validate the current bounded owner before resolving one historical body.
+    serializeSelectedSection(rows[0], stateVersion)
+    const historyReader = createSectionHistoryReadContext({
+      readRows: (filter, options) => readMany({
+        collectionName: RUNTIME_STATE_V2_COLLECTIONS.SECTIONS,
+        projection: RUNTIME_STATE_V2_SELECTED_SECTION_PROJECTION,
+        filter, limit: 2, ...options,
+      }),
+    })
+    const revision = await historyReader.resolve(rows[0], revisionIndex)
+    return withBoundedReadReceipt({ control,
+      section: serializeSectionSummary(rows[0], stateVersion),
+      history: { revisionIndex,
+        reference: rows[0].sectionDetail.revisions[revisionIndex]?.historyReference ?? null,
+        revision }, source: 'runtime_state_v2.section_history',
+    }, 'runtime_state_v2.section_history')
+  }
   return withBoundedReadReceipt({
     control,
     section: serializeSelectedSection(rows[0], stateVersion),
@@ -1642,6 +1789,9 @@ export const listRuntimeStateEvidenceObjects = async ({
       requireSourceStateVersion: true,
     })
   }
+  assertSourceEvidenceMetadataPairs({ sources: sourceRows, evidenceObjects: rows })
+  assertControlledReplayProvenancePairs({ sources: sourceRows, evidenceObjects: rows })
+  rows.forEach(row => assertEvidenceDraftQualification({ evidence: row, source: sourceRows.find(source => source.sourceId === row.sourceId) }))
   const sourceRegistry = sourceRows.map((row) => serializeEvidenceSource(row, stateVersion))
   const pageReceipt = rows.length === 0
     ? {
@@ -1810,10 +1960,10 @@ export const getRuntimeStateDiscoveryHealth = async (args = {}) => withRuntimeSn
 }, 'The recorded Discovery Health assessment could not complete its bounded read. Refresh to retry.')
 
 export const getRuntimeStateLockBasis = async (args = {}) => withRuntimeSnapshotRead(async options => {
-  const { recordedLockBasisProjection, ...control } = await getControl({ ...args, ...options,
+  const { recordedLockBasisProjection, outsideSnapshotIntakeProjection, ...control } = await getControl({ ...args, ...options,
     includeHandoffEligibility: false, includeDiscoveryHealth: false, includeRecordedLockBasis: true, metadataMaxTimeMS: 2000 })
   return { contractVersion: 'intelligence-lock-basis.v1', control,
-    lockBasis: recordedLockBasisProjection, source: 'runtime_state_v2.lock_basis' }
+    lockBasis: { ...recordedLockBasisProjection, outsideSnapshotIntake: outsideSnapshotIntakeProjection }, source: 'runtime_state_v2.lock_basis' }
 }, 'The recorded lock basis could not complete its bounded read. Refresh to retry.')
 
 export const getRuntimeStateContradictionHistory = async (args = {}) => {
@@ -1822,10 +1972,10 @@ export const getRuntimeStateContradictionHistory = async (args = {}) => {
   if (!selection.success) throw createRuntimeStateError({ code: RUNTIME_STATE_V2_ERROR_CODES.INVALID_QUERY,
     status: 422, message: 'Select an exact finding and a bounded history page.' })
   return withRuntimeSnapshotRead(async options => {
-    const { contradictionHistoryRecords, ...control } = await getControl({ ...args, ...options,
+    const { contradictionHistoryRecords, inheritedContradictionRecords, ...control } = await getControl({ ...args, ...options,
       includeContradictionHistory: true, metadataMaxTimeMS: 2000 })
     return { contractVersion: 'intelligence-contradiction-history.v1', control,
-      history: projectStoredContradictionHistory(contradictionHistoryRecords, control.id, selection.data),
+      history: projectStoredContradictionHistory(contradictionHistoryRecords, control.id, selection.data, inheritedContradictionRecords),
       source: 'runtime_state_v2.contradiction_history' }
   }, 'Recorded contradiction decisions could not complete their bounded read. Refresh to retry.')
 }
@@ -1836,7 +1986,7 @@ export const getRuntimeStateFindings = async (args = {}) => {
   if (!selection.success) throw createRuntimeStateError({ code: RUNTIME_STATE_V2_ERROR_CODES.INVALID_QUERY,
     status: 422, message: 'Select a bounded literal finding search and supported inspection filters.' })
   return withRuntimeSnapshotRead(async options => {
-    const { storedFindings, ...control } = await getControl({ ...args, ...options, includeFindings: true, metadataMaxTimeMS: 2000 })
+    const { storedFindings, inheritedContradictionRecords, ...control } = await getControl({ ...args, ...options, includeFindings: true, metadataMaxTimeMS: 2000 })
     const ids = selection.data.type === 'CONTRADICTION' ? storedFindingEvidenceIds(storedFindings) : null
     const rows = ids?.length ? await readMany({ collectionName: RUNTIME_STATE_V2_COLLECTIONS.EVIDENCE_OBJECTS,
       filter: buildChildFilter({ control, additional: { ...buildCurrentStateFilter(), evidenceObjectId: { $in: ids } } }),
@@ -1844,8 +1994,11 @@ export const getRuntimeStateFindings = async (args = {}) => {
         status: 1, stateStatus: 1, isCurrent: 1, customerVisible: 1, private: 1, visibility: 1, accessLevel: 1 },
       sort: { evidenceObjectId: 1, _id: 1 }, limit: ids.length + 1, batchSize: ids.length + 1, ...options }) : []
     if (rows.length) { assertCurrentEvidenceSourceRows(rows); assertStateVersions({ control, rows, requireSourceStateVersion: true }) }
+    const reviewBasis = ids?.length ? await readContradictionReviewBasis({ control, candidates: storedFindings.candidates,
+      reviews: storedFindings.reviews, reviewEpoch: storedFindings.reviewEpoch, evidenceRows: rows, ...options }) : null
     return { contractVersion: 'intelligence-finding-read.v1', control,
-      findings: projectStoredFindings({ stored: storedFindings, evidenceRows: rows, control, selection: selection.data }),
+      findings: projectStoredFindings({ stored: storedFindings, evidenceRows: rows, control, selection: selection.data,
+        inheritedRecords: inheritedContradictionRecords, reviewBasis }),
       source: 'runtime_state_v2.stored_findings' }
   }, 'Stored findings could not complete their bounded read. Refresh to retry.')
 }
@@ -2233,6 +2386,7 @@ const readRuntimeStateOutcomeHandoff = async ({
       },
     },
   }
+  copyControlledReplayIsolationWitness(control, runtimeInstance)
   const handoffResolution = await resolveFrameworkOutcomeStudioHandoff({
     runtimeInstance,
     scopes,
@@ -2277,7 +2431,8 @@ export const getRuntimeStateOutcomeHandoffReadiness = (args = {}) => readRuntime
 export const getRuntimeOutcomeEvidenceContractSnapshot = async ({ scopes, runtimeInstanceId, session = null, boundedInventoryRead = false, readBudget } = {}) => {
   const metadataOptions = boundedInventoryRead ? { metadataMaxTimeMS: RUNTIME_STATE_V2_READ_MAX_TIME_MS, readBudget } : {}
   const identity = await getRuntimeInstance({ scopes, runtimeInstanceId,
-    projection: RUNTIME_STATE_V2_CONTROL_PROJECTION, maxTimeMS: RUNTIME_STATE_V2_READ_MAX_TIME_MS, session, ...metadataOptions })
+    projection: RECORDED_LOCK_CONTROL_PROJECTION, internalEvidenceSnapshotToken: EVIDENCE_SNAPSHOT_INTERNAL_READ,
+    maxTimeMS: RUNTIME_STATE_V2_READ_MAX_TIME_MS, session, ...metadataOptions })
   if (!identity.stateVersion && !identity.runtimeStateVersion) {
     const legacy = await getRuntimeInstance({ scopes, runtimeInstanceId,
       projection: `${RUNTIME_STATE_V2_HANDOFF_CONTROL_PROJECTION} framework_state.evidence_pack`,
@@ -2289,6 +2444,87 @@ export const getRuntimeOutcomeEvidenceContractSnapshot = async ({ scopes, runtim
     return JSON.parse(JSON.stringify(snapshot))
   }
   const control = await getControl({ scopes, runtimeInstanceId, includeHandoffEligibility: true, session, ...metadataOptions })
+  let verifiedMembership
+  const parentId = PUBLISHED_DISPOSITION_POLICY.scope.runtimeInstanceId
+  const controlledChild = control.id !== parentId && [identity.revision?.parentRuntimeId, identity.revision?.rootRuntimeId]
+    .some(id => String(id || '') === parentId)
+  if (control.id === parentId || controlledChild) {
+    const internal = identity.__evidenceSnapshotControl
+    if (!internal?.pointer) throw createRuntimeStateError({ code: 'OUTCOME_EVIDENCE_FROZEN_MEMBERSHIP_REQUIRED', message: 'Verified frozen membership is required.' })
+    const readSignedChild = async (selected, onVerifiedMembership) => {
+      const native = selected?.runtime, pointer = selected?.pointer
+      if (native?.status !== 'LOCKED' || !pointer) throw createRuntimeStateError({
+        code: 'OUTCOME_EVIDENCE_DIRECT_REVISION_INVALID', message: 'A locked native revision basis is required.' })
+      let auditVerified = false
+      const frozen = await readVerifiedRuntimeEvidenceSnapshot({ runtime: native, pointer, session, readBudget,
+        deps: { readAudit: async (auditId, options) => {
+          const rows = await readMany({ collectionName: 'auditlogs', filter: { _id: new mongoose.Types.ObjectId(auditId),
+            resourceId: new mongoose.Types.ObjectId(native._id || native.id), action: 'RUNTIME_ACTION_EXECUTED', resourceType: 'RuntimeInstance',
+            'scope.customerId': new mongoose.Types.ObjectId(native.customerId), 'scope.tenantId': new mongoose.Types.ObjectId(native.tenantId),
+            'scope.runtimeInstanceId': new mongoose.Types.ObjectId(native._id || native.id), 'scope.runtimeInstanceKey': native.runtimeInstanceKey },
+          projection: {}, limit: 2, session: options.session, readBudget: options.readBudget })
+          assertSerializedPayloadSize(rows)
+          if (rows.length !== 1 || AuditLog.hydrate(rows[0]).verifySignature() !== true) throw createRuntimeStateError({
+            code: 'OUTCOME_EVIDENCE_DIRECT_REVISION_AUDIT_INVALID', message: 'The child lock audit signature could not be verified.' })
+          auditVerified = true
+          return rows[0]
+        }, ...(onVerifiedMembership ? { onVerifiedMembership: proof => {
+          if (!auditVerified) throw createRuntimeStateError({ code: 'OUTCOME_EVIDENCE_DIRECT_REVISION_AUDIT_INVALID',
+            message: 'The child lock audit signature is required.' })
+          onVerifiedMembership(proof)
+        } } : {}) } })
+      if (!auditVerified) throw createRuntimeStateError({ code: 'OUTCOME_EVIDENCE_DIRECT_REVISION_AUDIT_INVALID',
+        message: 'The child lock audit signature is required.' })
+      return frozen
+    }
+    let immediateBasis
+    if (controlledChild) {
+      if (internal.runtime?.status !== 'LOCKED') throw createRuntimeStateError({ code: 'OUTCOME_EVIDENCE_DIRECT_REVISION_INVALID', message: 'A locked direct revision is required.' })
+      const parent = await getRuntimeInstance({ scopes, runtimeInstanceId: parentId,
+        projection: RECORDED_LOCK_CONTROL_PROJECTION, internalEvidenceSnapshotToken: EVIDENCE_SNAPSHOT_INTERNAL_READ,
+        maxTimeMS: RUNTIME_STATE_V2_READ_MAX_TIME_MS, session, readBudget, ...metadataOptions })
+      const parentInternal = parent?.__evidenceSnapshotControl
+      if (parentInternal?.runtime?.status !== 'LOCKED' || !parentInternal.pointer) throw createRuntimeStateError({
+        code: 'OUTCOME_EVIDENCE_DIRECT_REVISION_INVALID', message: 'The original locked parent basis is required.' })
+      const verified = await readVerifiedRuntimeEvidenceSnapshot({ runtime: parentInternal.runtime, pointer: parentInternal.pointer, session, readBudget })
+      const parentBasis = { snapshotId: verified.snapshotId, membershipHash: verified.membershipHash, basisStateVersion: verified.basisStateVersion,
+        lockSnapshotId: verified.lockSnapshotId, lockSnapshotHash: verified.lockSnapshotHash, counts: verified.counts,
+        correctionReceiptId: verified.serializationCorrection?.receiptId, correctionBodyHash: verified.serializationCorrection?.bodyHash }
+      if (control.id === syntheticSuccessor.runtimeInstanceId) {
+        const direct = await getRuntimeInstance({ scopes, runtimeInstanceId: syntheticSuccessor.parentRuntimeInstanceId,
+          projection: RECORDED_LOCK_CONTROL_PROJECTION, internalEvidenceSnapshotToken: EVIDENCE_SNAPSHOT_INTERNAL_READ,
+          maxTimeMS: RUNTIME_STATE_V2_READ_MAX_TIME_MS, session, readBudget, ...metadataOptions })
+        const directInternal = direct?.__evidenceSnapshotControl, directFrozen = await readSignedChild(directInternal)
+        if (directFrozen.serializationCorrection) throw createRuntimeStateError({ code: 'OUTCOME_EVIDENCE_DIRECT_REVISION_INVALID',
+          message: 'The immediate parent must have its own frozen revision basis.' })
+        try {
+          const lineage = buildDirectSyntheticRevisionLineage({ runtime: directInternal.runtime, parentRuntime: parentInternal.runtime, parentBasis })
+          immediateBasis = { snapshotId: directFrozen.snapshotId, membershipHash: directFrozen.membershipHash,
+            basisStateVersion: directFrozen.basisStateVersion, lockSnapshotId: directFrozen.lockSnapshotId,
+            lockSnapshotHash: directFrozen.lockSnapshotHash, counts: directFrozen.counts, lineage }
+          buildSuccessorSyntheticRevisionLineage({ runtime: internal.runtime, parentRuntime: directInternal.runtime, parentBasis: immediateBasis })
+        } catch {
+          throw createRuntimeStateError({ code: 'OUTCOME_EVIDENCE_DIRECT_REVISION_INVALID', message: 'The native successor revision lineage changed.' })
+        }
+      } else {
+        try { buildDirectSyntheticRevisionLineage({ runtime: internal.runtime, parentRuntime: parentInternal.runtime, parentBasis }) }
+        catch { throw createRuntimeStateError({ code: 'OUTCOME_EVIDENCE_DIRECT_REVISION_INVALID', message: 'The native direct revision lineage changed.' }) }
+      }
+    }
+    if (controlledChild) {
+      const own = await readSignedChild(internal, proof => { verifiedMembership = proof })
+      if (immediateBasis && (own.serializationCorrection
+        || !['snapshotId', 'basisStateVersion', 'lockSnapshotId'].every(key => own[key] !== immediateBasis[key]
+          && own[key] !== immediateBasis.lineage.parentBasis[key]))) throw createRuntimeStateError({
+        code: 'OUTCOME_EVIDENCE_DIRECT_REVISION_INVALID', message: 'The successor must retain its own immutable lock basis.' })
+    } else {
+      await readVerifiedRuntimeEvidenceSnapshot({ runtime: internal.runtime, pointer: internal.pointer, session, readBudget,
+        deps: { onVerifiedMembership: proof => { verifiedMembership = proof } } })
+    }
+    if (!verifiedMembership) throw createRuntimeStateError({ code: 'OUTCOME_EVIDENCE_FROZEN_MEMBERSHIP_REQUIRED', message: 'Verified frozen membership is required.' })
+    if (controlledChild && verifiedMembership.publishedFinding !== undefined) throw createRuntimeStateError({
+      code: 'OUTCOME_EVIDENCE_DIRECT_REVISION_INVALID', message: 'A successor cannot inherit the original parent finding receipt.' })
+  }
   const sectionProjection = { _id: 1, sectionKey: 1, customerId: 1, tenantId: 1, runtimeInstanceId: 1,
     runtimeInstanceKey: 1, current: 1, stateVersion: 1, sourceStateVersion: 1,
     'sectionDetail.accepted.supportingEvidenceRefs': 1 }
@@ -2312,17 +2548,47 @@ export const getRuntimeOutcomeEvidenceContractSnapshot = async ({ scopes, runtim
       code: 'OUTCOME_EVIDENCE_SCOPE_MISMATCH', message: 'Evidence snapshot record is outside the governed scope.' })
   }
   validateScope(sectionRows)
+  const inventoryRows = { evidence: new Map(), sources: new Map() }
+  const inventoryScope = { runtimeInstanceId: control.id, runtimeInstanceKey: control.runtimeInstanceKey,
+    customerId: control.customerId, tenantId: control.tenantId, stateVersion: control.stateVersion }
+  const frozenMembership = verifiedMembership ? { snapshotId: identity.__evidenceSnapshotControl.pointer.snapshotId,
+    membershipHash: identity.__evidenceSnapshotControl.pointer.membershipHash, body: membershipJson(verifiedMembership.body) } : null
+  const supplementalFinding = verifiedMembership?.publishedFinding ? { ...verifiedMembership.publishedFinding,
+    snapshotMembershipHash: frozenMembership.membershipHash, scope: inventoryScope } : null
+  const recorded = verifiedMembership?.recordedReviewCompletion
+  const packReview = recorded ? control.handoffFrameworkState?.evidence_pack?.contradictionReviews
+    ?.find(review => review.reviewId === recorded.link.reviewId) : null
+  const recordedReviewCompletion = recorded ? { ...recorded, contractVersion: 'outcome-recorded-review-completion.v1',
+    scope: inventoryScope, snapshotId: frozenMembership.snapshotId, snapshotMembershipHash: frozenMembership.membershipHash,
+    contradictionId: packReview?.contradictionId, evidencePairHash: packReview?.evidencePairHash,
+    reviewEpoch: packReview?.reviewEpoch } : null
+  if (supplementalFinding) {
+    const pack = control.handoffFrameworkState?.evidence_pack
+    if (snapshotHash(pack?.discoveryHealth?.contradictionCandidates || []) !== snapshotHash([supplementalFinding.candidate])
+      || pack?.contradictionReviewEpoch !== supplementalFinding.reviewEpoch || Object.hasOwn(pack || {}, 'contradictionReviews')) {
+      throw createRuntimeStateError({ code: 'OUTCOME_EVIDENCE_SUPPLEMENTAL_FINDING_STALE', message: 'The finding population or original history changed.' })
+    }
+  }
   const assembled = await assembleOutcomeEvidenceInventory({
-    scope: { runtimeInstanceId: control.id, runtimeInstanceKey: control.runtimeInstanceKey,
-      customerId: control.customerId, tenantId: control.tenantId, stateVersion: control.stateVersion },
-    sections: sectionRows.map((row) => ({ sectionKey: row.sectionKey,
-      references: row.sectionDetail?.accepted?.supportingEvidenceRefs || [], storedSectionHash: snapshotHash(row) })),
+    scope: inventoryScope,
+    ...(frozenMembership ? { frozenMembership, supplementalFinding, ...(recordedReviewCompletion ? { recordedReviewCompletion } : {}) } : {}),
+    sections: sectionRows.map((row) => {
+      const observed = verifiedMembership?.observed.sections.find(section => String(section._id) === String(row._id))
+      if (verifiedMembership && (!observed || observed.sectionKey !== row.sectionKey
+        || snapshotHash(observed.sectionDetail?.accepted?.supportingEvidenceRefs || []) !== snapshotHash(row.sectionDetail?.accepted?.supportingEvidenceRefs || []))) {
+        throw createRuntimeStateError({ code: 'OUTCOME_EVIDENCE_FROZEN_SECTION_CHANGED', message: 'Frozen section references changed.' })
+      }
+      return { sectionKey: row.sectionKey,
+        references: row.sectionDetail?.accepted?.supportingEvidenceRefs || [], storedSectionHash: snapshotHash(row),
+        ...(observed ? { storageId: String(row._id), materialHash: evidenceMaterialHash(observed) } : {}) }
+    }),
     contradictionReferences: (control.handoffFrameworkState?.evidence_pack?.discoveryHealth?.contradictionCandidates || [])
       .flatMap((candidate) => candidate.evidenceObjectIds || []),
     count: async (kind) => (await readCount({ collectionName: collectionName(kind), filter: filter(), session, readBudget })).value,
     readPage: (kind, after, limit) => readMany({ collectionName: collectionName(kind), filter: filter(after),
       projection: {}, sort: { _id: 1 }, limit, session, readBudget, ...(boundedInventoryRead ? { batchSize: limit } : {}) }),
     validateRows: (kind, rows) => {
+      for (const row of rows) inventoryRows[kind].set(String(row._id), row)
       validateScope(rows)
       assertStateVersions({ control, rows, requireSourceStateVersion: true })
       if (boundedInventoryRead && kind === 'evidence') assertCurrentEvidenceSourceRows(rows)
@@ -2332,6 +2598,12 @@ export const getRuntimeOutcomeEvidenceContractSnapshot = async ({ scopes, runtim
         code: RUNTIME_STATE_V2_ERROR_CODES.SECTION_CURRENTNESS_INVALID, message: 'Evidence snapshot currentness or identity is invalid.' })
     },
   })
+  assertSourceEvidenceMetadataPairs({ sources: [...inventoryRows.sources.values()],
+    evidenceObjects: [...inventoryRows.evidence.values()] })
+  assertControlledReplayProvenancePairs({ sources: [...inventoryRows.sources.values()],
+    evidenceObjects: [...inventoryRows.evidence.values()] })
+  for (const row of inventoryRows.evidence.values()) assertEvidenceDraftQualification({ evidence: row,
+    source: [...inventoryRows.sources.values()].find(source => source.sourceId === row.sourceId) })
   const { evidenceObjects, sourceRegistry } = assembled
   const finalControl = await getControl({ scopes, runtimeInstanceId, includeHandoffEligibility: true, session, ...metadataOptions })
   if (snapshotHash(await readSections()) !== snapshotHash(sectionRows)
@@ -2352,7 +2624,15 @@ export const getRuntimeOutcomeEvidenceContractSnapshot = async ({ scopes, runtim
   if (sourceRegistry.length) assertCurrentEvidenceSourceRows(sourceRegistry)
   for (const rows of [evidenceObjects, sourceRegistry]) if (rows.length) assertStateVersions({ control, rows,
     missingMessage: 'Evidence-to-Meaning source state-version receipt is missing.', requireSourceStateVersion: true })
-  const snapshot = { ...control.handoffFrameworkState?.evidence_pack,
+  const stored = control.handoffFrameworkState?.evidence_pack || {}
+  const selectedReviewIds = (stored.discoveryHealth?.contradictionCandidates || []).flatMap(c => c.evidenceObjectIds || [])
+  const contradictionReviewBasis = selectedReviewIds.length ? await readContradictionReviewBasis({ control,
+    candidates: stored.discoveryHealth.contradictionCandidates, reviews: stored.contradictionReviews,
+    reviewEpoch: stored.contradictionReviewEpoch, evidenceRows: evidenceObjects.filter(e => selectedReviewIds.includes(e.evidenceObjectId)),
+    sourceRows: sourceRegistry.filter(s => evidenceObjects.some(e => e.sourceId === s.sourceId && selectedReviewIds.includes(e.evidenceObjectId))),
+    session, readBudget }) : null
+  const snapshot = { ...stored,
+    ...(contradictionReviewBasis ? { contradictionReviewBasis } : {}),
     snapshotVersion: 'outcome-evidence-source-snapshot.v1', stateVersion: control.stateVersion,
     inventoryReceipt: assembled.receipt, evidenceObjects, sourceRegistry }
   try {
@@ -2412,9 +2692,10 @@ export const getRuntimeOutcomePlanningEvidence = async ({ scopes, runtimeInstanc
     projection: `${RUNTIME_STATE_V2_HANDOFF_CONTROL_PROJECTION} framework_state.sections`, maxTimeMS: RUNTIME_STATE_V2_READ_MAX_TIME_MS, session })
   assertSerializedPayloadSize(runtime)
   if (runtime.stateVersion || runtime.runtimeStateVersion) throw createRuntimeStateError({ code: RUNTIME_STATE_V2_ERROR_CODES.STATE_VERSION_MIXED, message: 'Runtime storage identity changed.' })
-  const resolved = await resolveFrameworkOutcomeStudioHandoff({ runtimeInstance: { ...runtime, _id: runtime.id }, scopes,
+  const planningRuntime = copyControlledReplayIsolationWitness(runtime, { ...runtime, _id: runtime.id })
+  const resolved = await resolveFrameworkOutcomeStudioHandoff({ runtimeInstance: planningRuntime, scopes,
     boundedDependencyPolicy: FRAMEWORK_OUTCOME_HANDOFF_BOUNDED_READ_POLICY })
-  return buildOutcomePlanningRuntimeEvidence({ runtimeInstance: { ...runtime, _id: runtime.id },
+  return buildOutcomePlanningRuntimeEvidence({ runtimeInstance: planningRuntime,
     frameworkPackage: resolved.frameworkPackage, handoff: resolved.handoff, planningEvidenceVersion })
 }
 
@@ -2433,3 +2714,6 @@ export const __testables = Object.freeze({
   serializeSectionSummary,
   serializeEvidenceObject,
 })
+import { assertEvidenceDraftQualification } from './evidenceDraftQualification.js'
+import { projectControlledReplayProvenance, assertControlledReplayProvenancePairs } from './controlledReplayContract.js'
+import { copyControlledReplayIsolationWitness } from './controlledReplayIsolationService.js'

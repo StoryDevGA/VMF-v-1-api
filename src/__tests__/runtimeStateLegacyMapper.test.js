@@ -1,8 +1,15 @@
+import { storedControlledReplayBindingDigest } from '../services/controlledReplayContract.js'
 import { createHash } from 'node:crypto'
 
 import { describe, expect, test } from '@jest/globals'
 import mongoose from 'mongoose'
-import { applyDiscoveryEvidenceReview } from '../services/discoveryIntelligenceService.js'
+import { applyDiscoveryEvidenceReview, ingestUploadedDocumentDiscoveryEvidence, normalizeDiscoveryEvidenceObjects,
+  buildDiscoverySourceRegistry } from '../services/discoveryIntelligenceService.js'
+import { buildRuntimeSectionEvidenceQualifications } from '../services/runtimeSectionEvidenceQualificationService.js'
+import { evidenceMaterialHash } from '../services/runtimeEvidenceSnapshotContract.js'
+import RuntimeEvidenceObject from '../models/RuntimeEvidenceObject.js'
+import RuntimeEvidenceSource from '../models/RuntimeEvidenceSource.js'
+import { buildRuntimeIntelligenceGraphForFrameworkState } from '../services/runtimeIntelligenceGraphService.js'
 
 import {
   RUNTIME_STATE_V2_MAPPING_ERROR_CODES,
@@ -16,6 +23,18 @@ import {
 } from '../services/runtimeStateCanonicalSerializer.js'
 
 const hash = (character) => `sha256:${character.repeat(64)}`
+
+test('trusted section projection changes only typed detail while full canonical source hashes stay exact', () => {
+  const input = makeInput(), original = JSON.stringify(input)
+  const plain = createRuntimeStateLegacySourceRowSet(input)
+  const projected = createRuntimeStateLegacySourceRowSet(input, { sectionDetailProjector: detail => ({
+    ...detail, metrics: { ...detail.metrics, projectionWitness: true },
+  }) })
+  expect(projected.sourceSetHash).toBe(plain.sourceSetHash)
+  expect(projected.rows.sections.map(row => row.sourceHash)).toEqual(plain.rows.sections.map(row => row.sourceHash))
+  expect(projected.rows.sections.every(row => row.sectionDetail.metrics.projectionWitness)).toBe(true)
+  expect(JSON.stringify(input)).toBe(original)
+})
 const stateVersion = 'rsv2:123e4567-e89b-42d3-a456-426614174000'
 const migrationTimestamp = '2026-08-26T12:00:00.000Z'
 
@@ -111,6 +130,127 @@ const capture = (callback) => {
   throw new Error('Expected mapper failure.')
 }
 
+describe('Accepted section-truth graph producer through legacy mapping', () => {
+  const produce = (acceptedOverrides = {}) => {
+    const legacy = makeLegacy()
+    Object.assign(legacy.sections.accepted.accepted, {
+      acceptedAt: migrationTimestamp, acceptedBy: 'historical-reviewer', ...acceptedOverrides,
+    })
+    legacy.intelligenceGraph = buildRuntimeIntelligenceGraphForFrameworkState({
+      runtimeInstance: { ...makeInput().scope, _id: makeInput().scope.runtimeInstanceId,
+        runtimeType: 'VALUE_NARRATIVE', frameworkId: '64b7f7a4e1e5f8320c000005' },
+      frameworkPackage: { frameworkKey: 'FIXTURE', packageKey: 'fixture', version: '1',
+        sections: [{ sectionKey: 'accepted', runtimePath: 'framework_state.sections.accepted' }] },
+      frameworkState: { sections: legacy.sections, evidence_pack: legacy.evidencePack },
+      builtAt: migrationTimestamp,
+    })
+    return legacy
+  }
+  const truth = legacy => legacy.intelligenceGraph.nodes.find(node => node.nodeType === 'SECTION_TRUTH')
+
+  test('preserves real producer lineage, original canonical hashes and all five row families', () => {
+    const legacy = produce(), before = JSON.stringify(legacy)
+    const canonical = createRuntimeStateCanonicalMappingManifest(legacy).serializerResult
+    const result = createRuntimeStateLegacyRowSet(makeInput(legacy))
+    const node = result.rows.graphElements.find(row => row.elementKey === truth(legacy).nodeId)
+    expect(node.attributes).toMatchObject({ truthHash: hash('a'), acceptedAt: migrationTimestamp,
+      acceptedBy: 'historical-reviewer', nodeType: 'SECTION_TRUTH' })
+    expect(result.rows.graphSnapshots[0].sourceHash).toBe(canonical.domains.intelligenceGraph.sourceHash)
+    expect(node.sourceHash).toBe(canonical.domains.intelligenceGraph.sourceHash)
+    expect(result.sourceSetHash).toBe(canonical.sourceSetHash)
+    for (const family of ['sections', 'evidenceSources', 'evidenceObjects', 'graphSnapshots', 'graphElements']) {
+      expect(result.rows[family].length).toBeGreaterThan(0)
+    }
+    expect(JSON.stringify(legacy)).toBe(before)
+  })
+
+  test.each([
+    ['time-only', { truthHash: '', contentHash: '', acceptedBy: '' }, '', migrationTimestamp, ''],
+    ['hash-only', { acceptedAt: '', acceptedBy: '' }, hash('a'), null, ''],
+    ['native Date', { acceptedAt: new Date(migrationTimestamp) }, hash('a'), migrationTimestamp, 'historical-reviewer'],
+  ])('preserves %s producer values without manufacturing lineage', (_name, overrides, truthHash, acceptedAt, acceptedBy) => {
+    const legacy = produce(overrides)
+    const result = createRuntimeStateLegacyRowSet(makeInput(legacy))
+    const node = result.rows.graphElements.find(row => row.elementKey === truth(legacy).nodeId)
+    expect(node.attributes).toMatchObject({ truthHash, acceptedAt, acceptedBy })
+  })
+
+  test('preserves an existing historical graph hash token without rewriting source material', () => {
+    const legacy = produce()
+    truth(legacy).truthHash = 'historical-hash-token'
+    const result = createRuntimeStateLegacyRowSet(makeInput(legacy))
+    expect(result.rows.graphElements.find(row => row.elementKey === truth(legacy).nodeId).attributes.truthHash)
+      .toBe('historical-hash-token')
+  })
+
+  test.each([
+    ['hash object', node => { node.truthHash = {} }],
+    ['hash null', node => { node.truthHash = null }],
+    ['actor object', node => { node.acceptedBy = {} }],
+    ['actor null', node => { node.acceptedBy = null }],
+    ['time object', node => { node.acceptedAt = {} }],
+    ['time number', node => { node.acceptedAt = 123 }],
+    ['time boolean', node => { node.acceptedAt = true }],
+    ['time malformed', node => { node.acceptedAt = 'not-a-time' }],
+    ['time empty', node => { node.acceptedAt = '' }],
+    ['unknown fourth field', node => { node.acceptedReason = 'unowned' }],
+    ['wrong node type', node => { node.nodeType = 'EVIDENCE' }],
+    ['missing node type', node => { delete node.nodeType }],
+  ])('rejects %s rather than dropping graph material', (_name, mutate) => {
+    const legacy = produce()
+    mutate(truth(legacy))
+    const error = capture(() => createRuntimeStateLegacyRowSet(makeInput(legacy)))
+    expect(error.code).toBe(RUNTIME_STATE_V2_MAPPING_ERROR_CODES.INPUT_INVALID)
+    expect(error.message).toBe('Node mapping is invalid.')
+  })
+})
+
+describe('Source capture and support through actual native mapping and models', () => {
+  const produce = () => ingestUploadedDocumentDiscoveryEvidence({ batchOutcomes: true, acquisitionProfile: 'STANDARD',
+    capturedAt: migrationTimestamp, documentSources: [{ fileName: 'qualified.txt', mimeType: 'text/plain',
+      textContent: 'The fictional pilot reviewer has not provided support and has not approved the trial.' }] })
+  const native = product => createRuntimeStateLegacySourceRowSet(makeInput(makeLegacy({ evidencePack: {
+    sourceRegistry: product.sourceRegistry, evidenceObjects: product.evidenceObjects,
+  } })))
+  test('maps real producer metadata and model validation without manufacturing defaults', async () => {
+    const product = await produce(), result = native(product)
+    const source = result.rows.evidenceSources[0], evidence = result.rows.evidenceObjects[0]
+    expect(source.sourceCapture).toEqual(product.sourceRegistry[0].sourceCapture)
+    expect(evidence.evidenceSupport).toEqual(product.evidenceObjects[0].evidenceSupport)
+    expect(new RuntimeEvidenceSource(source).validateSync()).toBeUndefined()
+    expect(new RuntimeEvidenceObject(evidence).validateSync()).toBeUndefined()
+    const legacy = createRuntimeStateLegacySourceRowSet(makeInput())
+    expect(Object.hasOwn(legacy.rows.evidenceSources[0], 'sourceCapture')).toBe(false)
+    expect(Object.hasOwn(legacy.rows.evidenceObjects[0], 'evidenceSupport')).toBe(false)
+  })
+  test('rejects raw types before nested model casting and rejects local owner mismatch', async () => {
+    const mapped = native(await produce()), source = mapped.rows.evidenceSources[0], evidence = mapped.rows.evidenceObjects[0]
+    for (const mutate of [value => { value.textLength = '55' }, value => { value.captureReceipt.inputIndex = '0' },
+      value => { value.adapter = 12 }, value => { value.sourceId = 'other' }]) {
+      const changed = JSON.parse(JSON.stringify(source)); mutate(changed.sourceCapture)
+      expect(new RuntimeEvidenceSource(changed).validateSync()).toBeDefined()
+    }
+    for (const mutate of [value => { value.start = String(value.start) }, value => { value.exactExcerpt = 55 },
+      value => { value.sourceId = 'other' }]) {
+      const changed = JSON.parse(JSON.stringify(evidence)); mutate(changed.evidenceSupport)
+      expect(new RuntimeEvidenceObject(changed).validateSync()).toBeDefined()
+    }
+    const getter = () => { throw new Error('untrusted getter executed') }
+    const changed = JSON.parse(JSON.stringify(source))
+    Object.defineProperty(changed.sourceCapture, 'textLength', { get: getter, enumerable: true })
+    expect(new RuntimeEvidenceSource(changed).validateSync()).toBeDefined()
+  })
+  test('requires the source-first admitted capture map rather than a copied-looking support receipt', async () => {
+    const product = await produce(); delete product.sourceRegistry[0].sourceCapture
+    expect(() => native(product)).toThrow()
+    const changed = await produce(); changed.evidenceObjects[0].evidenceSupport.captureTextHash = hash('f')
+    expect(() => native(changed)).toThrow()
+    const original = await produce(), before = structuredClone(original)
+    native(original)
+    expect(original).toEqual(before)
+  })
+})
+
 test.each(['source-1#page-2', { fieldPath: 'source.customer.name', page: 2 }])('preserves supplied source location and includes it in canonical evidence identity: %j', sourceLocation => {
   const legacy = makeLegacy()
   const baseline = createRuntimeStateLegacySourceRowSet(makeInput(legacy)).rows.evidenceObjects[0]
@@ -186,6 +326,7 @@ test('document mapping preserves explicit processing provenance and filename fal
   const legacy = makeLegacy()
   const source = legacy.evidencePack.sourceRegistry[0]
   source.sourceType = 'UPLOADED_DOCUMENT'; delete source.url
+  delete legacy.evidencePack.evidenceObjects[0].sourceType
   source.fileName = 'synthetic.txt'; source.contentHash = hash('c')
   source.processingReceipt = { contractVersion: 'document-processing-receipt.v1',
     runId: '123e4567-e89b-42d3-a456-426614174000', inputIndex: 0, contentHash: hash('c') }
@@ -201,6 +342,7 @@ test('document mapping preserves explicit processing provenance and filename fal
 test.each(['null', 'extra', 'version', 'run', 'index', 'hash', 'kind'])('document mapper rejects malformed %s receipt', mode => {
   const legacy = makeLegacy(), source = legacy.evidencePack.sourceRegistry[0]
   source.sourceType = 'UPLOADED_DOCUMENT'
+  delete legacy.evidencePack.evidenceObjects[0].sourceType
   source.processingReceipt = { contractVersion: 'document-processing-receipt.v1',
     runId: '123e4567-e89b-42d3-a456-426614174000', inputIndex: 0, contentHash: hash('c') }
   if (mode === 'null') source.processingReceipt = null
@@ -938,5 +1080,139 @@ describe('SS-014 pure legacy-to-V2 mapper', () => {
     first.rows.sections[0].summary = 'mutated-result'
     legacy.sections.accepted.accepted.summary = 'mutated-input'
     expect(createRuntimeStateLegacyRowSet(makeInput(makeLegacy())).rows.sections[0].summary).toBe('Accepted summary')
+  })
+})
+
+// Explicitly authored metadata witness, not a capture or native authorization receipt.
+const metadataDescriptor = (native = { customerId: '1'.repeat(24), tenantId: '2'.repeat(24), runtimeInstanceId: '3'.repeat(24), runtimeInstanceKey: 'runtime-one' }) => {
+  const fixture = { fixtureId: 'ss049-ac8-long-page-r1', fixtureVersion: 1,
+    fixtureFileSha256: '7b7fe9a7819a71a25a043a73d7de1f9ed5b2689c36332ca981e65d7422771fd9',
+    htmlSha256: '7f89c175b0da167969061551865ee67ad42b793283e61aecaec9f84aadc35777', sourceUrl: 'https://controlled-context.example/case-study' }
+  const binding = { contractVersion: 'controlled-replay-binding.v1', bindingId: 'synthetic-metadata-only', bindingVersion: 1,
+    classification: 'CONTROLLED_SYNTHETIC_REPLAY', environment: 'DEVELOPMENT_TEST',
+    scope: Object.fromEntries(['customerId', 'tenantId', 'runtimeInstanceId'].map(key => [key, String(native[key])])),
+    revisionId: native.runtimeInstanceKey, basisStateVersion: 'rsv2:11111111-1111-4111-8111-111111111111',
+    actorUserId: '4'.repeat(24), authorityRef: 'synthetic:authority', isolationRef: 'synthetic:isolation', fixture }
+  return { binding, provenance: { contractVersion: 'controlled-replay-provenance.v1', classification: 'CONTROLLED_SYNTHETIC_REPLAY',
+    operation: 'CONTROLLED_HTML_REPLAY_CAPTURE', adapter: 'controlled-html-replay-v1', bindingId: binding.bindingId,
+    bindingVersion: 1, bindingDigest: storedControlledReplayBindingDigest(binding), ...fixture } }
+}
+
+describe('stored controlled descriptor through maintained native transport', () => {
+  const metadataProduct = () => {
+    const scope = { ...makeInput().scope, runtimeInstanceKey: 'runtime-one' }, descriptor = metadataDescriptor(scope)
+    const source = { sourceId: 'metadata-source', sourceType: 'WEBSITE', label: 'Synthetic source assertion',
+      url: descriptor.binding.fixture.sourceUrl, acquisitionStatus: 'NOT_ATTEMPTED', controlledReplayProvenance: descriptor }
+    const evidence = { evidenceObjectId: 'metadata-evidence', sourceId: source.sourceId,
+      extractedFact: 'The synthetic trial has not started and has no measured benefit.', reviewStatus: 'PENDING',
+      acquisitionMethod: 'CUSTOMER_PROVIDED_INPUT', controlledReplayProvenance: descriptor }
+    const objects = normalizeDiscoveryEvidenceObjects({ sources: [source], sourceRegistry: [source], evidenceObjects: [evidence] })
+    const sourceRegistry = buildDiscoverySourceRegistry({ sourceRegistry: [source], evidenceObjects: objects })
+    return { scope, descriptor, sourceRegistry, evidenceObjects: objects }
+  }
+  test('normalizer, registry, mapper, models and qualification retain exact descriptor without receipt or authenticity', () => {
+    const product = metadataProduct(), input = makeInput(makeLegacy({ evidencePack: product }))
+    const mapped = createRuntimeStateLegacySourceRowSet(input), source = mapped.rows.evidenceSources[0], evidence = mapped.rows.evidenceObjects[0]
+    expect(source.controlledReplayProvenance).toEqual(product.descriptor)
+    expect(evidence.controlledReplayProvenance).toEqual(product.descriptor)
+    expect(source.stateVersion).not.toBe(product.descriptor.binding.basisStateVersion)
+    expect(new RuntimeEvidenceSource(source).validateSync()).toBeUndefined()
+    expect(new RuntimeEvidenceObject(evidence).validateSync()).toBeUndefined()
+    expect(source.sourceCapture).toBeUndefined(); expect(evidence.evidenceSupport).toBeUndefined()
+    const qualified = buildRuntimeSectionEvidenceQualifications({ sourceRegistry: [source], lineageSources: [source],
+      evidenceObjects: [evidence], admittedEvidenceIds: [evidence.evidenceObjectId] })
+    expect(qualified.sources[0]).toMatchObject({ controlledReplayProvenance: product.descriptor,
+      sourceReview: { status: 'NOT_RECORDED', authenticity: null } })
+    expect(qualified.evidence[0]).toMatchObject({ controlledReplayProvenance: product.descriptor, reviewStatus: 'PENDING' })
+    const { controlledReplayProvenance: ignored, ...absent } = evidence
+    expect(ignored).toEqual(product.descriptor)
+    expect(evidenceMaterialHash(absent)).not.toBe(evidenceMaterialHash(evidence))
+  })
+  test('raw typed metadata, pair/drop and actual native revision mismatches fail before casting or inheritance', () => {
+    const product = metadataProduct(), mapped = createRuntimeStateLegacySourceRowSet(makeInput(makeLegacy({ evidencePack: product })))
+    for (const Model of [RuntimeEvidenceSource, RuntimeEvidenceObject]) {
+      const row = Model === RuntimeEvidenceSource ? mapped.rows.evidenceSources[0] : mapped.rows.evidenceObjects[0]
+      for (const change of [d => { d.binding.bindingVersion = '1' }, d => { d.provenance.enabled = true },
+        d => { d.binding.scope.tenantId = 'f'.repeat(24) }]) {
+        const descriptor = JSON.parse(JSON.stringify(product.descriptor)); change(descriptor)
+        expect(new Model({ ...row, controlledReplayProvenance: descriptor }).validateSync()).toBeDefined()
+      }
+      expect(new Model({ ...row, runtimeInstanceKey: 'other' }).validateSync()).toBeDefined()
+      const getter = () => { throw new Error('getter must not run') }
+      const unsafe = Object.defineProperty({}, 'binding', { get: getter, enumerable: true })
+      expect(new Model({ ...row, controlledReplayProvenance: unsafe }).validateSync()).toBeDefined()
+    }
+    delete product.evidenceObjects[0].controlledReplayProvenance
+    expect(() => createRuntimeStateLegacySourceRowSet(makeInput(makeLegacy({ evidencePack: product })))).toThrow()
+  })
+})
+
+describe('registered source type and selected section reference materialization', () => {
+  test.each([undefined, '', '  ', ' website '])('projects registered type for absent, blank or matching object type %p', type => {
+    const input = makeInput()
+    if (type === undefined) delete input.legacyInput.evidencePack.evidenceObjects[0].sourceType
+    else input.legacyInput.evidencePack.evidenceObjects[0].sourceType = type
+    const before = JSON.stringify(input)
+    const result = createRuntimeStateLegacySourceRowSet(input)
+    expect(result.rows.evidenceObjects[0].sourceType).toBe('WEBSITE')
+    expect(JSON.stringify(input)).toBe(before)
+    expect(result.sourceSetHash).toBe(createRuntimeStateCanonicalMappingManifest(input.legacyInput).serializerResult.sourceSetHash)
+  })
+
+  test.each(['UPLOADED_DOCUMENT', 42, null, {}, []].map(type => ({ type })))('rejects conflicting or malformed object type $type', ({ type }) => {
+    const input = makeInput()
+    input.legacyInput.evidencePack.evidenceObjects[0].sourceType = type
+    expect(() => createRuntimeStateLegacySourceRowSet(input)).toThrow()
+  })
+
+  test('rejects absent and ambiguous source registry instead of guessing a type', () => {
+    for (const mode of ['absent', 'duplicate']) {
+      const input = makeInput()
+      delete input.legacyInput.evidencePack.evidenceObjects[0].sourceType
+      if (mode === 'absent') input.legacyInput.evidencePack.sourceRegistry = []
+      else input.legacyInput.evidencePack.sourceRegistry.push({ ...input.legacyInput.evidencePack.sourceRegistry[0] })
+      expect(() => createRuntimeStateLegacySourceRowSet(input)).toThrow()
+    }
+  })
+
+  test('uses selected accepted support references, preserving context tokens and generated history', () => {
+    const input = makeInput(), section = input.legacyInput.sections.accepted
+    delete section.accepted.evidenceRefs
+    section.accepted.supportingEvidenceRefs = [' evidence-1 ', 'section_input', 'scoped_view', 'source-1']
+    section.generated.supportingEvidenceRefs = ['not-selected']
+    const before = JSON.stringify(input)
+    const result = createRuntimeStateLegacySourceRowSet(input)
+    const row = result.rows.sections.find(s => s.sectionKey === 'accepted')
+    expect(row.evidenceRefs).toEqual(['evidence-1', 'section_input', 'scoped_view', 'source-1'])
+    expect(row.sectionDetail.generated.supportingEvidenceRefs).toEqual(['not-selected'])
+    expect(result.rows.sections.find(s => s.sectionKey === 'legacy').evidenceRefs).toEqual([])
+    expect(JSON.stringify(input)).toBe(before)
+  })
+
+  test('projects generated support only when no accepted payload exists', () => {
+    const input = makeInput()
+    input.legacyInput.sections.generated.generated.supportingEvidenceRefs = ['evidence-1']
+    expect(createRuntimeStateLegacySourceRowSet(input).rows.sections.find(s => s.sectionKey === 'generated').evidenceRefs).toEqual(['evidence-1'])
+  })
+
+  test('accepts normalized equal explicit and support references without altering source hashes', () => {
+    const input = makeInput()
+    input.legacyInput.sections.accepted.accepted.supportingEvidenceRefs = ['evidence-1']
+    const result = createRuntimeStateLegacySourceRowSet(input)
+    expect(result.rows.sections.find(s => s.sectionKey === 'accepted').evidenceRefs).toEqual(['evidence-1'])
+    expect(result.sourceSetHash).toBe(createRuntimeStateCanonicalMappingManifest(input.legacyInput).serializerResult.sourceSetHash)
+  })
+
+  test.each([[], ['other'], ['evidence-1', 'source-1']].map(refs => ({ refs })))('rejects conflicting selected support references $refs', ({ refs }) => {
+    const input = makeInput()
+    input.legacyInput.sections.accepted.accepted.supportingEvidenceRefs = refs
+    expect(() => createRuntimeStateLegacySourceRowSet(input)).toThrow()
+  })
+
+  test.each([null, 'evidence-1', [42], [''], ['  '], Array(1), Array(10001).fill('evidence-1')].map(refs => ({ refs })))('rejects malformed selected support references case %#', ({ refs }) => {
+    const input = makeInput()
+    delete input.legacyInput.sections.accepted.accepted.evidenceRefs
+    input.legacyInput.sections.accepted.accepted.supportingEvidenceRefs = refs
+    expect(() => createRuntimeStateLegacySourceRowSet(input)).toThrow()
   })
 })

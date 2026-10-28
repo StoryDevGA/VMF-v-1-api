@@ -1,5 +1,7 @@
 import { normalizeDiscoveryWebsiteUrl } from './discoveryIntelligenceService.js'
 import { isDeepStrictEqual } from 'node:util'
+import { assertSourceEvidenceMetadataPairs } from './sourceEvidenceContract.js'
+import { assertControlledReplayProvenancePairs } from './controlledReplayContract.js'
 
 const website = row => row?.type === 'WEBSITE_ACQUISITION'
   || row?.sourceType === 'WEBSITE' && !row.fieldKey
@@ -24,6 +26,24 @@ const indexed = rows => {
     urls.set(url, row); ids.add(row.sourceId)
   }
   return urls
+}
+const assertCaptureContinuity = (sources, registry, evidenceObjects) => {
+  try {
+    assertSourceEvidenceMetadataPairs({ sources, evidenceObjects })
+    assertSourceEvidenceMetadataPairs({ sources: [...registry.values()], evidenceObjects })
+    assertControlledReplayProvenancePairs({ sources, evidenceObjects })
+    assertControlledReplayProvenancePairs({ sources: [...registry.values()], evidenceObjects })
+  } catch (error) {
+    if (error?.code === 'SOURCE_EVIDENCE_CONTRACT_INVALID' || error?.details?.reason === 'CONTROLLED_REPLAY_CONTRACT_INVALID') conflict()
+    throw error
+  }
+  for (const source of sources) {
+    const entry = registry.get(requestedUrl(source))
+    if (!isDeepStrictEqual(source.controlledReplayProvenance, entry.controlledReplayProvenance)) conflict()
+    if ((source.sourceCapture !== undefined || entry.sourceCapture !== undefined)
+      && (!isDeepStrictEqual(source.sourceCapture, entry.sourceCapture)
+        || !isDeepStrictEqual(source.contentHash, entry.contentHash))) conflict()
+  }
 }
 
 // Reuse canonical website records, retaining their original version and decisions.
@@ -62,6 +82,8 @@ export const reconcileWebsiteMaterial = ({ previousEvidencePack = {}, fresh } = 
       || row.acquisitionMethod !== 'WEBSITE_ACQUISITION') conflict()
     freshEvidenceIds.add(row.evidenceObjectId)
   }
+  assertCaptureContinuity(oldSources, registry, oldEvidence)
+  assertCaptureContinuity(fresh.sources, currentRegistry, fresh.evidenceObjects)
   const sources = new Map(before), sourceRegistry = new Map(registry), replaced = new Set()
   const items = []
   for (const [url, source] of current) {
@@ -98,7 +120,7 @@ export const reconcileWebsiteMaterial = ({ previousEvidencePack = {}, fresh } = 
 export const assertRetainedWebsiteMaterial = ({ retainedEvidence, evidenceObjects }) => {
   const fields = ['sourceId', 'extractedFact', 'acquisitionMethod', 'acquisitionProfile', 'lineageRef',
     'sourceUrl', 'reviewStatus', 'acceptedBy', 'acceptanceTimestamp', 'rejectedBy', 'rejectionTimestamp', 'auditRef',
-    'category', 'coverageArea', 'confidence', 'createdAt', 'extractionTimestamp', 'auditRefs']
+    'category', 'coverageArea', 'confidence', 'createdAt', 'extractionTimestamp', 'auditRefs', 'evidenceSupport', 'controlledReplayProvenance']
   const current = new Map(evidenceObjects.map(row => [row.evidenceObjectId, row]))
   const counts = cardinalities(evidenceObjects, 'evidenceObjectId')
   for (const prior of retainedEvidence) {

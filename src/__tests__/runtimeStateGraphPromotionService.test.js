@@ -309,6 +309,11 @@ describe('Runtime State V2 graph promotion', () => {
     expect(harness.db.elements[0].current).toBe(true)
     expect(harness.db.audits).toHaveLength(1)
     expect(harness.db.audits[0].payload.diff.operation).toBe('V2_GRAPH_REBUILD_PROMOTED')
+    expect(harness.db.audits[0].payload.diff.rootUpdatedAtTransition).toEqual({
+      contractVersion: 'runtime-graph-root-currentness.v1',
+      before: '2026-08-28T10:00:00.000Z',
+      after: '2026-08-28T12:00:00.000Z',
+    })
     expect(harness.auditSessions[0]).toBe(harness.sessions[0])
     expect(harness.operationSessions.length).toBeGreaterThan(0)
     expect(harness.operationSessions.every(({ session }) => session === harness.sessions[0])).toBe(true)

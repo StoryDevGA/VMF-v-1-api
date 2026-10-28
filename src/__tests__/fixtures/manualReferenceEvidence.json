@@ -1,0 +1,205 @@
+{
+  "fixtureKind": "manual_reference_fixture",
+  "generatedByApplication": false,
+  "scope": "SUPPLIED_CER_DOCUMENT_ONLY_NOT_LIVE_WEB_CAPTURE",
+  "logicalIdentity": "NÉVÉ-CER-001",
+  "originalDocxSha256": "aa1a56698e1f970700eae085560b85a9141e71fb548ab6c98533e46b9be9966e",
+  "normalizedTextSha256": "sha256:7774593126b71f7ec8b1bcffb82c53034dae1d8e721f00b8e8e973f6fdea60f3",
+  "textNormalization": "CRLF_TO_LF",
+  "capturedAt": "2026-10-14T16:35:04.502Z",
+  "reportedResearchDate": "2026-10-04",
+  "baselineRestriction": "PUBLIC_STRUCTURAL_LAYER_ONLY_INTERNAL_TRUTH_UNRESOLVED",
+  "underlyingWebCapture": null,
+  "missingSpecificSourceUrlIds": [
+    "E024"
+  ],
+  "sharedUnderlyingUrls": [
+    {
+      "url": "https://neve.studio/paid-media/",
+      "evidenceIds": [
+        "E011",
+        "E033"
+      ]
+    },
+    {
+      "url": "https://neve.studio/terms/",
+      "evidenceIds": [
+        "E013",
+        "E034"
+      ]
+    }
+  ],
+  "records": [
+    {
+      "id": "E001",
+      "sourceClass": "REG",
+      "sourceReference": "https://find-and-update.company-information.service.gov.uk/company/11073818"
+    },
+    {
+      "id": "E002",
+      "sourceClass": "REG",
+      "sourceReference": "https://find-and-update.company-information.service.gov.uk/company/11073818/filing-history"
+    },
+    {
+      "id": "E003",
+      "sourceClass": "REG",
+      "sourceReference": "https://find-and-update.company-information.service.gov.uk/company/11073818/officers"
+    },
+    {
+      "id": "E004",
+      "sourceClass": "REG",
+      "sourceReference": "https://find-and-update.company-information.service.gov.uk/company/11073818/persons-with-significant-control"
+    },
+    {
+      "id": "E005",
+      "sourceClass": "FP",
+      "sourceReference": "https://neve.studio/"
+    },
+    {
+      "id": "E006",
+      "sourceClass": "FP",
+      "sourceReference": "https://neve.studio/about/"
+    },
+    {
+      "id": "E007",
+      "sourceClass": "FP",
+      "sourceReference": "https://neve.studio/founders/ and https://neve.studio/our-story/"
+    },
+    {
+      "id": "E008",
+      "sourceClass": "FP",
+      "sourceReference": "https://neve.studio/strategy/"
+    },
+    {
+      "id": "E009",
+      "sourceClass": "FP",
+      "sourceReference": "https://neve.studio/consultancy/ and https://neve.studio/expertise/"
+    },
+    {
+      "id": "E010",
+      "sourceClass": "FP",
+      "sourceReference": "https://neve.studio/creative/"
+    },
+    {
+      "id": "E011",
+      "sourceClass": "FP",
+      "sourceReference": "https://neve.studio/paid-media/"
+    },
+    {
+      "id": "E012",
+      "sourceClass": "FP",
+      "sourceReference": "https://neve.studio/product-photography/ ; https://neve.studio/video/ ; https://neve.studio/animation/"
+    },
+    {
+      "id": "E013",
+      "sourceClass": "FP",
+      "sourceReference": "https://neve.studio/terms/ ; https://neve.studio/contact/"
+    },
+    {
+      "id": "E014",
+      "sourceClass": "FP",
+      "sourceReference": "https://neve.studio/clients/"
+    },
+    {
+      "id": "E015",
+      "sourceClass": "FP/CASE",
+      "sourceReference": "https://neve.studio/category/projects/"
+    },
+    {
+      "id": "E016",
+      "sourceClass": "CASE",
+      "sourceReference": "https://neve.studio/google-pixel-bold-dunks-colourway-creations/"
+    },
+    {
+      "id": "E017",
+      "sourceClass": "CASE",
+      "sourceReference": "https://neve.studio/wild-nutrition-food-grown-video-case-study/"
+    },
+    {
+      "id": "E018",
+      "sourceClass": "CASE",
+      "sourceReference": "https://neve.studio/w7-cosmetics-case-study/"
+    },
+    {
+      "id": "E019",
+      "sourceClass": "CASE",
+      "sourceReference": "https://neve.studio/prime-time-lager-beer-but-better-campaign/"
+    },
+    {
+      "id": "E020",
+      "sourceClass": "CASE",
+      "sourceReference": "https://neve.studio/kao-winter-2023-photography-video-case-study/"
+    },
+    {
+      "id": "E021",
+      "sourceClass": "CASE",
+      "sourceReference": "https://neve.studio/bouncepad-go-photography-video-case-study/"
+    },
+    {
+      "id": "E022",
+      "sourceClass": "CASE",
+      "sourceReference": "https://neve.studio/passenger-e-commerce-clothing-model-photography-case-study/"
+    },
+    {
+      "id": "E023",
+      "sourceClass": "EXT/FP-platform",
+      "sourceReference": "https://uk.linkedin.com/company/neve-studios-ltd"
+    },
+    {
+      "id": "E024",
+      "sourceClass": "EXT/FP-platform",
+      "sourceReference": "LinkedIn public job surface"
+    },
+    {
+      "id": "E025",
+      "sourceClass": "REV",
+      "sourceReference": "https://uk.trustpilot.com/review/neve.studio"
+    },
+    {
+      "id": "E026",
+      "sourceClass": "EXT/HIST",
+      "sourceReference": "https://www.basebordon.co.uk/5-minutes-with-neve-studios/"
+    },
+    {
+      "id": "E027",
+      "sourceClass": "EXT/HIST",
+      "sourceReference": "https://www.basebordon.co.uk/neve-studios-strategic-content-specialists/"
+    },
+    {
+      "id": "E028",
+      "sourceClass": "EXT",
+      "sourceReference": "https://linktr.ee/nevestudios"
+    },
+    {
+      "id": "E029",
+      "sourceClass": "EXT/RESTRICTED",
+      "sourceReference": "https://bringo.co.uk/company/4284279"
+    },
+    {
+      "id": "E030",
+      "sourceClass": "FP",
+      "sourceReference": "https://neve.studio/team/"
+    },
+    {
+      "id": "E031",
+      "sourceClass": "FP",
+      "sourceReference": "https://neve.studio/freelancers/"
+    },
+    {
+      "id": "E032",
+      "sourceClass": "FP",
+      "sourceReference": "https://neve.studio/automation/"
+    },
+    {
+      "id": "E033",
+      "sourceClass": "FP",
+      "sourceReference": "https://neve.studio/paid-media/"
+    },
+    {
+      "id": "E034",
+      "sourceClass": "FP",
+      "sourceReference": "https://neve.studio/terms/"
+    }
+  ],
+  "text": "Névé Studios — Customer Evidence Register v1.0\nCanonical identity: NÉVÉ-CER-001\nLifecycle state: REPOSITORY VERIFIED — REGISTERED CUSTOMER EVIDENCE\nProject: Névé Studios\nProject class: VMF Customer Runtime Execution Project\nRetrieval/currentness baseline: public-source intake retrieved 4 October 2026 unless a source item is explicitly historical.\nSource lineage: Névé Studios — VMF Customer Intake & Evidence Plan v0.1 — WORKING SAVE POINT, repository-verified project-local control record, and the public sources identified below.\nAUTHORITY AND EPISTEMIC BOUNDARY\nThis register records evidence and provenance. It does not convert public information, first-party claims, third-party commentary, hypotheses, assumptions or interpretations into customer-confirmed fact. Customer fact, observation, interpretation, supported pattern, hypothesis, assumption, contradiction and unresolved information remain distinct.\nEVIDENCE CLASS LEGEND\nREG = formal public registry; FP = first-party public statement; CASE = first-party case/proof claim; EXT = independent or external public surface; REV = review platform; HIST = historical source.\nConfidence is consequence-relative. Registry evidence is high for filed visibility subject to registrar caveats. First-party evidence is generally moderate-high for what Névé publicly states, but lower for whether outcomes or operating consequences are independently true. Case-study outcome/economic claims remain restricted unless independently evidenced.\nREGISTERED EVIDENCE\nE001 | REG | Companies House overview | https://find-and-update.company-information.service.gov.uk/company/11073818 | Direct public filing surface. Supports legal identity NEVE STUDIOS LTD, company number 11073818, active private company, advertising-agency SIC and registered-office role. Reliability: high for filed-state visibility; restriction: Companies House states it does not verify accuracy of filed information. | Retrieval/currentness: 4 Oct 2026 unless historical by source\nE002 | REG | Companies House filing history | https://find-and-update.company-information.service.gov.uk/company/11073818/filing-history | Direct filing chronology. Supports current filing continuity, micro-company accounts and confirmation statements. Reliability: high for filing existence; financial interpretation remains restricted until the exact accounts are consumed directly. | Retrieval/currentness: 4 Oct 2026 unless historical by source\nE003 | REG | Companies House officers | https://find-and-update.company-information.service.gov.uk/company/11073818/officers | Direct filing surface. Three active directors are visible: Thomas James Archer, Stuart Martin Dudleston and William Oliver Stedman. Reliability: high for filed officer state, subject to registrar non-verification caveat. | Retrieval/currentness: 4 Oct 2026 unless historical by source\nE004 | REG | Companies House persons with significant control | https://find-and-update.company-information.service.gov.uk/company/11073818/persons-with-significant-control | Direct filing surface. The same three individuals are active PSCs, each filed in the >25% to <=50% share and voting-rights band. This does not establish operating or engagement-specific decision rights. | Retrieval/currentness: 4 Oct 2026 unless historical by source\nE005 | FP | Official homepage | https://neve.studio/ | Direct first-party statement. Public positioning: boutique creative agency specialising in strategy, creative development and content production; offer surfaces include strategy, production, channel creative and consultancy, with generative-AI/upskilling language. Strong evidence of public proposition; not independent proof of outcomes. | Retrieval/currentness: 4 Oct 2026 unless historical by source\nE006 | FP | About | https://neve.studio/about/ | Direct first-party statement. Describes evolution from photography/video studio to broader creative agency with in-house production, strategy, campaign development, content production and consultancy. States value comes from combined disciplines working to a commercial objective and multi-channel reuse from one creative investment. | Retrieval/currentness: 4 Oct 2026 unless historical by source\nE007 | FP | Founders / story | https://neve.studio/founders/ and https://neve.studio/our-story/ | Direct first-party history. Founders describe origins as freelance photographers/videographers, an early shared client engagement, and later expansion in response to demand for campaign development, consultancy and paid media. Strong for self-described history; operating consequences remain unvalidated. | Retrieval/currentness: 4 Oct 2026 unless historical by source\nE008 | FP | Strategy | https://neve.studio/strategy/ | Direct first-party service and commercial statement. Says strategy begins from commercial reality, supports consultancy/workshops and promotes in-housing; also publishes project and retainer payment mechanics. Strong for offer/terms visibility. | Retrieval/currentness: 4 Oct 2026 unless historical by source\nE009 | FP | Consultancy / Expertise | https://neve.studio/consultancy/ and https://neve.studio/expertise/ | Direct first-party statement. Consultancy spans marketing/creative strategy, social/content production and generative AI, with team upskilling, goal alignment and accountability; delivery can be one-off or retained. Strong for current public service surface. | Retrieval/currentness: 4 Oct 2026 unless historical by source\nE010 | FP | Channel Creative | https://neve.studio/creative/ | Direct first-party statement. Claims most services are delivered in-house with specialist external help where required, while overall management remains internal. Supports mixed core-team/specialist-network operating model as a public assertion. | Retrieval/currentness: 4 Oct 2026 unless historical by source\nE011 | FP | Paid Media | https://neve.studio/paid-media/ | Direct first-party commercial statement. Retained paid-media engagements are described as twelve-month contracts with management fees tied to ad budget and written adjustments as spend changes. Strong for published commercial mechanics, not for actual client mix or profitability. | Retrieval/currentness: 4 Oct 2026 unless historical by source\nE012 | FP | Production surfaces | https://neve.studio/product-photography/ ; https://neve.studio/video/ ; https://neve.studio/animation/ | Direct first-party operating/pricing statements. Evidence includes in-house production claims, external specialist use, published unit/hour/day pricing, turnaround mechanics, booking/deposit controls, product storage/logistics and expedited service. Currentness varies by page and service; several legacy-style clauses require customer confirmation before operational promotion. | Retrieval/currentness: 4 Oct 2026 unless historical by source\nE013 | FP | Terms and contact | https://neve.studio/terms/ ; https://neve.studio/contact/ | Direct first-party contractual and conversion surface. Terms cover production, campaign development, consultancy and auditing, proposal acceptance, initial payments, written briefs and deadline dependencies. Contact flow states enquiry, quote or video call, then booking. Strong evidence of published contracting path; actual practice unknown. | Retrieval/currentness: 4 Oct 2026 unless historical by source\nE014 | FP | Clients | https://neve.studio/clients/ | Direct first-party proof surface. Displays named client logos across consumer-brand categories and testimonials. Evidence of public association claims only; logos/testimonials are not independent validation of scope, currentness, outcomes or buyer acceptance. | Retrieval/currentness: 4 Oct 2026 unless historical by source\nE015 | FP/CASE | Project archive | https://neve.studio/category/projects/ | Direct first-party portfolio surface. Current accessible archive includes Google Pixel, Wild Nutrition, W7 Cosmetics, Prime Time, Varis, Kao, Bouncepad, More or Less, Passenger and Glasbury River Cottage. Archive pagination/search accessibility is incomplete, so this is not asserted to be exhaustive. | Retrieval/currentness: 4 Oct 2026 unless historical by source\nE016 | CASE | Google Pixel | https://neve.studio/google-pixel-bold-dunks-colourway-creations/ | First-party delivery case. Describes work with Media Futures Group and Ogilvy, creative development, testing/dry-runs, storyboards, fixed budget/tight timing, specialist commissioned crew and in-house post-production, with assets signed off and reused across channels. Strong operational proof claim; no independent business-outcome metric. | Retrieval/currentness: 4 Oct 2026 unless historical by source\nE017 | CASE | Wild Nutrition | https://neve.studio/wild-nutrition-food-grown-video-case-study/ | First-party case. Describes strategic and production work for an integrated campaign and long-lived reuse. It asserts long-term positive ROI but publishes no supporting economic calculation. Delivery claim: moderate; ROI claim: unvalidated/restricted. | Retrieval/currentness: 4 Oct 2026 unless historical by source\nE018 | CASE | W7 Cosmetics | https://neve.studio/w7-cosmetics-case-study/ | First-party case. Describes continuing relationship from an Amazon-focused initial brief into broader social/content work and asserts higher/significantly boosted engagement without quantified measures. Delivery relationship is supported as first-party claim; outcome magnitude remains unvalidated. | Retrieval/currentness: 4 Oct 2026 unless historical by source\nE019 | CASE | Prime Time | https://neve.studio/prime-time-lager-beer-but-better-campaign/ | First-party integrated campaign case tied to a Waitrose listing. Materially useful because it explicitly says final sales data had not yet been received and direct ROI could not yet be drawn; anecdotal success is separated from quantified proof. Supports evidence-discipline distinction between activity and economic proof. | Retrieval/currentness: 4 Oct 2026 unless historical by source\nE020 | CASE | Kao winter campaign | https://neve.studio/kao-winter-2023-photography-video-case-study/ | First-party case with detailed planning, production, team structure and creative execution. It says the client was happy and attributes part of gift-set sales success to campaign content, but no counterfactual or quantified attribution is provided. Operational proof moderate; causal/economic proof restricted. | Retrieval/currentness: 4 Oct 2026 unless historical by source\nE021 | CASE | Bouncepad Go | https://neve.studio/bouncepad-go-photography-video-case-study/ | First-party case with unusually detailed planning/production/post-production hours, crew composition, multi-format deliverables and revision handling. Strong evidence of a documented project operating model; no independent commercial outcome evidence. | Retrieval/currentness: 4 Oct 2026 unless historical by source\nE022 | CASE | Passenger Clothing | https://neve.studio/passenger-e-commerce-clothing-model-photography-case-study/ | First-party case describing a local ongoing relationship and a one-day catalogue shoot. Public page contains an apparent metadata/content inconsistency where the Client field reads “Big Drop Brewing Co” despite the case being Passenger. Preserve as a source-quality contradiction; do not repair by assumption. | Retrieval/currentness: 4 Oct 2026 unless historical by source\nE023 | EXT/FP-platform | LinkedIn company page | https://uk.linkedin.com/company/neve-studios-ltd | Company-controlled external platform. Reinforces current positioning as a boutique creative agency and production studio, evolution from production, broader digital strategy/paid media/automation and an emphasis on growth, process and technology. Headcount metadata is platform/self-reported and not authoritative. | Retrieval/currentness: 4 Oct 2026 unless historical by source\nE024 | EXT/FP-platform | Current Account Manager vacancy | LinkedIn public job surface | Time-bounded hiring evidence. Role owns retained/project client relationships, account growth, retainer profitability, proposals, CRM/pipeline/forecast hygiene, scope creep and margin erosion visibility, reporting to the Managing Director. Useful as evidence of intended operating responsibilities; it does not prove those areas are currently failing. Public metadata says Part-time while body says full-time, so employment-type metadata is contradictory. | Retrieval/currentness: 4 Oct 2026 unless historical by source\nE025 | REV | Trustpilot | https://uk.trustpilot.com/review/neve.studio | Claimed profile with a small set of overwhelmingly positive older reviews, commonly mentioning quality, communication, responsiveness, collaboration and turnaround. Restriction: no recent review history and Trustpilot itself warns reviews may not be representative. Historical corroboration only. | Retrieval/currentness: 4 Oct 2026 unless historical by source\nE026 | EXT/HIST | BASE Bordon interview | https://www.basebordon.co.uk/5-minutes-with-neve-studios/ | Third-party-hosted interview with Névé. Corroborates founding story, evolution, Covid-era product-photography demand and expansion in video/animation. Historical and participant-sourced, so current operating model must not be inferred solely from it. | Retrieval/currentness: 4 Oct 2026 unless historical by source\nE027 | EXT/HIST | BASE Bordon historical member profile | https://www.basebordon.co.uk/neve-studios-strategic-content-specialists/ | Historical third-party-hosted profile. Shows earlier photography/video and “Flow” framing plus ambition to scale. Useful as evolution evidence, not current-positioning authority. | Retrieval/currentness: 4 Oct 2026 unless historical by source\nE028 | EXT | Linktree social directory | https://linktr.ee/nevestudios | Public directory links Instagram and TikTok and uses an older “photography & video studio” descriptor. Useful for social-surface discovery and temporal positioning drift; underlying social pages were not fully inspectable through Search, so social-content intake remains incomplete. | Retrieval/currentness: 4 Oct 2026 unless historical by source\nE029 | EXT/RESTRICTED | Public company-data aggregator | https://bringo.co.uk/company/4284279 | Surface exposes balance-sheet-derived figures and an employee count. Not promoted into customer fact because the exact filed accounts were not independently consumed from the underlying filing in this pass. Retained only as a pointer for later direct verification. | Retrieval/currentness: 4 Oct 2026 unless historical by source\nE030 | FP | Official team page | https://neve.studio/team/ | Current public team surface names Stuart Dudleston (Managing Director), Tom Archer (Commercial Director), Will Stedman (Creative Director), Julie Archer (Finance), Steve Boulter (Producer), Jena Gregory (Junior Creative Producer), Harry Whatrup (Retoucher) and Finley (Extra Junior Creative). This is strong evidence of the named public team surface but not a verified total headcount or employment status for each individual. | Retrieval/currentness: 4 Oct 2026 unless historical by source\nE031 | FP | Freelancer roster | https://neve.studio/freelancers/ | Direct first-party operating surface openly recruits regional photographers, videographers, editors, animators, retouchers and other creatives, capturing primary/secondary skills and standard day rate. Strengthens evidence for a managed specialist-network model; actual usage, spend, dependency and quality-control mechanics remain unknown. | Retrieval/currentness: 4 Oct 2026 unless historical by source\nE032 | FP | Email marketing & automation | https://neve.studio/automation/ | Direct first-party service/commercial surface describes CRM setup, segmentation, workflow management, email design, testing, performance analysis and optional retained delivery. Indicative public pricing includes £1–5k + VAT for smaller campaigns, larger campaigns generally above £5k + VAT, and retainers from £1,500 + VAT per month. These are published offer mechanics, not realized revenue or margin. | Retrieval/currentness: 4 Oct 2026 unless historical by source\nE033 | FP | Paid media pricing | https://neve.studio/paid-media/ | Direct first-party pricing surface publishes setup fees and management-fee percentages by ad-budget tier: small accounts £1,440 + VAT setup plus 20% of monthly ad budget; medium £2,160 + VAT plus 15%; large £2,880 + VAT plus 10%, subject to the stated budget bands. This is strong evidence of public pricing design; actual client economics and return claims remain unvalidated. | Retrieval/currentness: 4 Oct 2026 unless historical by source\nE034 | FP | Terms of Service detail | https://neve.studio/terms/ | Direct contractual surface requires written proposal/quotation acceptance, non-refundable initial payments for ad-hoc services, written briefs, client cooperation, fee changes for scope changes, and sets cancellation/IP/licensing provisions. Useful for commercial-constraint and operating-design discovery later; it does not prove how often these clauses are invoked in practice. | Retrieval/currentness: 4 Oct 2026 unless historical by source\nDIRECT OBSERVATIONS\nO1. The current website repeatedly frames the business around commercial objectives/results rather than production craft alone.\nO2. The proposition is broad and integrated: strategy, campaign development, production, channel adaptation, consultancy, paid media/automation and AI/upskilling are all visible publicly.\nO3. Case studies are operationally detailed and often include crew, process, timing, formats and execution trade-offs; quantified customer-business outcomes are much less common.\nO4. The delivery model publicly combines an in-house core with external specialists/freelancers where needed, while retaining central management.\nO5. The commercial model visibly mixes project work, retained engagements, paid-media management and production pricing.\nO6. The current Account Manager vacancy places explicit emphasis on retained/project client ownership, account growth, CRM/pipeline accuracy, scope, profitability and margin erosion.\nO7. Public review evidence is positive but old and small-sample.\nO8. Some public pages contain content drift or metadata inconsistencies, indicating that website content should not be treated as a perfectly synchronized operational source.\nSUPPORTED PATTERNS / INTERPRETATIONS\nP1. Supported pattern — Up-value-chain evolution. Multiple independent/public surfaces support a shift from production-only origins toward integrated strategic/creative/commercial partnership. Confidence: moderate-high for the direction of public evolution; internal economics and success of the shift remain unknown.\nP2. Supported pattern — Integration as differentiation. Névé repeatedly presents strategy + production + multi-channel reuse + central control as the source of value, and case studies show integrated planning/production behaviour. Confidence: moderate for operating pattern; low-moderate for causal customer value without measured outcomes.\nP3. Supported pattern — Flexible capacity model. Public pages show an in-house core plus specialist suppliers/freelancers and an overflow roster. Confidence: moderate for model existence; utilization/capacity economics unknown.\nP4. Supported pattern — Commercialization beyond one-off production. Retainers, paid-media management, consultancy and account-growth responsibilities are visible. Confidence: moderate for offer/intent; actual revenue mix, retention and profitability unknown.\nP5. Supported pattern — Proof is stronger on delivery than on outcomes. The portfolio supports capability/execution claims; outcome, attribution and ROI evidence is frequently unquantified or explicitly incomplete. Confidence: high for the public proof-surface pattern.\nHYPOTHESES — NOT CUSTOMER FACT\nH1. The transition to a broader integrated agency may create a scaling challenge around account ownership, scope control, forecasting and margin discipline. Basis: current Account Manager role + broader service surface. Discriminator: management data and founder/customer interviews.\nH2. The breadth of “creative agency + production studio + consultancy + paid media + automation/AI” may create a category/value-translation challenge for buyers. Basis: multiple public labels and service families. Discriminator: win/loss evidence, website conversion, prospect interviews and sales-call evidence.\nH3. Public outcome-proof depth may lag the strength of the commercial-results positioning, potentially constraining premium strategic/consulting conversations. Basis: detailed case execution but sparse quantified business outcomes. Discriminator: underlying case metrics, proposals, buyer feedback, win/loss.\nH4. A mixed in-house/specialist model may be a strength for flexibility but could create capacity, quality-control or margin trade-offs as the business grows. No public evidence currently establishes that this is a problem.\nH5. Current hiring may indicate growth, capability build-out or replacement; public evidence does not establish which.\nASSUMPTIONS EXPLICITLY PROHIBITED\nA1. Do not infer revenue, profit, gross margin, cash position or growth rate from public marketing activity or unverified aggregators.\nA2. Do not infer urgency, strategic priority, buyer intent, budget or willingness to change from a job advert or website copy.\nA3. Do not infer decision authority from director/PSC status, job title or founder status for any future engagement decision.\nA4. Do not infer client concentration, retainer share, retention/churn, utilization, capacity pressure or project profitability.\nA5. Do not infer that a case-study outcome was caused by Névé unless attribution evidence exists.\nCONTRADICTIONS / SOURCE-QUALITY ISSUES\nC1. Passenger case page names Passenger throughout but presents “Big Drop Brewing Co” in the Client field. Classification: material public-page metadata/content inconsistency; unresolved.\nC2. Névé currently calls itself a creative agency, while the Product Photography page uses wording equivalent to “we’re not an agency, outsourcing your project overseas.” Likely intended to distinguish direct in-house delivery from an outsourcing agency, but the literal category wording is inconsistent. Preserve; do not normalize silently.\nC3. Small-project up-front-payment thresholds vary across service pages. This may be service-specific or stale content; requires confirmation before treating as a single company-wide rule.\nC4. LinkedIn vacancy body says full-time while LinkedIn employment-type metadata says part-time. Treat the body/platform metadata conflict as unresolved.\nC5. LinkedIn company-size range, “discover all employees” count and the official-site named-team surface do not provide a trustworthy current headcount. Actual headcount remains unknown.\nC6. Historical BASE descriptions emphasize photography/video while current official positioning is much broader. Classification: temporal evolution, not a present contradiction.\nC7. Repeated public payment examples use “September 31st,” which is not a valid calendar date. Classification: website-content quality defect. It does not by itself establish a wider process or governance problem.\nUNKNOWNS / EVIDENCE GAPS\nU1. Current strategic objectives and the founders’ agreed priorities.\nU2. Revenue, gross margin, operating profit/cash economics and service-line economics.\nU3. Revenue mix by production, strategy/consultancy, retainers, paid media and other services.\nU4. Customer concentration, repeat/retainer share, churn, expansion and account health.\nU5. Pipeline, lead sources, conversion, win/loss, sales-cycle length and reasons for loss.\nU6. Delivery capacity, utilization, freelancer dependency, cycle time, rework, scope creep and project-level margin.\nU7. Current CRM/project-management stack, data quality and actual forecasting process.\nU8. Current use of AI/automation internally versus client-facing consultancy claims.\nU9. Measured outcomes and attribution behind major case studies.\nU10. Buyer perception of Névé’s category, differentiation and proof.\nU11. Formal decision rights for growth, offer design, investment, hiring, pricing, technology and external advisory work.\nU12. Any live commercial opportunity involving the user/VMF; none is evidenced in this intake.\nCURRENT VALIDATION STATUS\nFormal/filed facts may be accepted only as filed-state visibility. First-party proposition, service, commercial and case evidence may be accepted only as evidence of public assertion or observable public surface. No internal operating, causal, economic, buyer-intent, urgency, decision-authority or live-deal truth is validated by this register alone.\nPOST-WRITE VERIFICATION REQUIREMENT\nRepository verification requires exact document identity, registered parent folder, native Google Docs MIME, complete content readback and no competing canonical evidence register."
+}

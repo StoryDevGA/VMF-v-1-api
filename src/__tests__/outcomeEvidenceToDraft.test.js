@@ -1,12 +1,14 @@
 import { describe, test, expect, jest } from '@jest/globals'
 import { readFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { resolve } from 'node:path'
 import { makeSs040Fixture } from './fixtures/ss040EvidenceToMeaningFixtures.js'
 import { makeSs041Fixture, freezeSs041Snapshot } from './fixtures/outcomeEvidenceToDraftFixtures.js'
 import { compileEvidenceToMeaningContract, assertEvidenceToMeaningContract, hashEvidenceToMeaningValue } from '../services/outcomeEvidenceToMeaningContractService.js'
 import { projectEvidenceToMeaningProviderContract, assertEvidenceToMeaningProviderClaims,
-  assertEvidenceToMeaningProviderProjection } from '../services/outcomeEvidenceToMeaningProviderService.js'
+  assertEvidenceToMeaningProviderProjection, expandEvidenceToMeaningProviderClaims } from '../services/outcomeEvidenceToMeaningProviderService.js'
 import { projectRuntimeEvidenceToMeaningReadiness, assertRuntimeEvidenceToMeaningReady,
-  projectRuntimeEvidenceOutputPlanBinding } from '../services/outcomeRuntimeEvidenceToMeaningService.js'
+  projectRuntimeEvidenceOutputPlanBinding, readRuntimeEvidenceToMeaningContract } from '../services/outcomeRuntimeEvidenceToMeaningService.js'
 import { getDiscoveryContradictionReview } from '../services/discoveryContradictionReviewService.js'
 import { executeRequestScopedQualityCheckpoint, __testables as studio } from '../services/outcomeStudioService.js'
 
@@ -15,6 +17,169 @@ const outputFor = (projection) => ({ title: 'Working Draft', assumptions: [], de
     const claims = section.claimKeys.map((key) => projection.claimProjections.find((claim) => claim.claimKey === key))
     return { sectionKey: section.targetSectionKey, title: section.heading, claims, content: claims.map((claim) => claim.statement).join(' '), assumptions: [] }
   }) })
+describe('v2 provider restriction representation', () => {
+  const contractFor = async restrictions => {
+    const input = await makeSs041Fixture({ required: ['Executive Summary'] })
+    input.sourceSnapshot.evidenceObjects[0].blockedStrongerClaim = restrictions
+    await freezeSs041Snapshot(input)
+    return compileEvidenceToMeaningContract(input)
+  }
+  test('keeps all restrictions verbatim in the bounded scalar and original array', async () => {
+    const restrictions = ['No trial execution.', 'No measured benefit or financial proof.']
+    const contract = await contractFor(restrictions)
+    expect(contract.status).toBe('READY_TO_DRAFT')
+    const projection = projectEvidenceToMeaningProviderContract(contract)
+    expect(projection.claimProjections[0].blockedStrongerClaim).toBe(restrictions.join('\n'))
+    expect(expandEvidenceToMeaningProviderClaims(projection)[0].blockedStrongerClaim).toEqual(restrictions)
+    expect(assertEvidenceToMeaningProviderProjection(projection)).toBe(projection)
+    const legacy = JSON.parse(JSON.stringify(projection))
+    legacy.customerClaims = expandEvidenceToMeaningProviderClaims(projection)
+    legacy.sectionLedger = legacy.sectionLedger.map(({ omissionsRef, ...section }) => ({ ...section, omissions: legacy.omissionDictionary[omissionsRef] }))
+    for (const key of ['omissionRepresentationVersion', 'omissionDictionary', 'claimMetadataRepresentationVersion', 'claimMetadataDictionary']) delete legacy[key]
+    const { projectionHash, ...body } = legacy
+    legacy.projectionHash = hashEvidenceToMeaningValue(body)
+    expect(assertEvidenceToMeaningProviderProjection(legacy)).toBe(legacy)
+    expect(expandEvidenceToMeaningProviderClaims(legacy)).toEqual(contract.customerClaims)
+    const corrupt = JSON.parse(JSON.stringify(projection)); corrupt.customerClaims[0].statement = 'Changed inline statement'
+    expect(() => expandEvidenceToMeaningProviderClaims(corrupt)).toThrow()
+  })
+  test.each([Array(11).fill('Do not execute.'), ['x'.repeat(1100), 'y'.repeat(1100)]])('does not raise count or scalar size limits', async restrictions => {
+    const contract = await contractFor(restrictions)
+    expect(() => projectEvidenceToMeaningProviderContract(contract)).toThrow()
+  })
+  test('v1 still rejects multiple scalar restrictions', () => {
+    const input = makeSs040Fixture()
+    input.sourceSnapshot.evidenceObjects[0].blockedStrongerClaim = ['First restriction.', 'Second restriction.']
+    expect(() => projectEvidenceToMeaningProviderContract(compileEvidenceToMeaningContract(input))).toThrow()
+  })
+  const cached = process.env.VMF_R3_HANDOFF_CANDIDATE
+  ;(cached ? test : test.skip)('native immutable R3 cache proves metadata/review and qualification handoff without admitting rejected facts', () => {
+    const original = JSON.parse(readFileSync(cached, 'utf8'))
+    const input = original.inputs
+    delete input.composition.providerCompatibility
+    const unchanged = JSON.stringify(input.sourceSnapshot)
+    const contract = compileEvidenceToMeaningContract(input)
+    expect(contract.status).toBe('READY_TO_DRAFT')
+    expect(contract.customerClaims).toHaveLength(12)
+    const projection = projectEvidenceToMeaningProviderContract(contract)
+    expect(assertEvidenceToMeaningProviderProjection(projection)).toBe(projection)
+    expect(Buffer.byteLength(JSON.stringify(projection))).toBeLessThanOrEqual(120000)
+    expect(expandEvidenceToMeaningProviderClaims(projection)).toEqual(contract.customerClaims)
+    expect(projection.sectionLedger.map(section => projection.omissionDictionary[section.omissionsRef]))
+      .toEqual(contract.sectionLedger.map(section => section.omissions))
+    for (const kind of ['missing-ref', 'changed-body', 'extra-entry', 'ambiguous']) {
+      const changed = JSON.parse(JSON.stringify(projection))
+      if (kind === 'missing-ref') changed.customerClaims[0].metadataRef = '0'.repeat(64)
+      if (kind === 'changed-body') Object.values(changed.claimMetadataDictionary)[0].scope = 'changed'
+      if (kind === 'extra-entry') changed.claimMetadataDictionary['0'.repeat(64)] = Object.values(changed.claimMetadataDictionary)[0]
+      if (kind === 'ambiguous') changed.customerClaims[0].scope = 'ambiguous'
+      const { projectionHash, ...body } = changed
+      changed.projectionHash = hashEvidenceToMeaningValue(body)
+      expect(() => assertEvidenceToMeaningProviderProjection(changed)).toThrow()
+    }
+    for (const claim of contract.customerClaims) {
+      expect(projection.claimProjections.find(row => row.claimKey === claim.claimKey).evidenceRequiredToSubstantiate)
+        .toEqual(claim.evidenceRequiredToSubstantiate)
+    }
+    expect(JSON.stringify(input.sourceSnapshot)).toBe(unchanged)
+    for (const kind of ['missing-witness', 'review-hash', 'epoch']) {
+      const changed = JSON.parse(JSON.stringify(input))
+      if (kind === 'missing-witness') delete changed.sourceSnapshot.inventoryReceipt.recordedReviewCompletion
+      if (kind === 'review-hash') changed.sourceSnapshot.inventoryReceipt.recordedReviewCompletion.link.reviewHash = '0'.repeat(64)
+      if (kind === 'epoch') changed.sourceSnapshot.contradictionReviewEpoch = 'stale'
+      if (kind === 'missing-witness') expect(compileEvidenceToMeaningContract(changed).status).toBe('CLARIFICATION_REQUIRED')
+      else expect(() => compileEvidenceToMeaningContract(changed)).toThrow()
+    }
+  })
+})
+describe('oversized blocked-v2 global diagnostic serialization', () => {
+  const makeLarge = async (evidenceCount = 35, sectionCount = 14) => {
+    const input = await makeSs041Fixture({ required: Array.from({ length: sectionCount }, (_, i) => 'Output Section ' + i) })
+    const evidence = input.sourceSnapshot.evidenceObjects[0]
+    const fact = input.composition.businessFactLedger.facts.find(row => row.evidenceObjectId === evidence.evidenceObjectId)
+    input.sourceSnapshot.evidenceObjects = Array.from({ length: evidenceCount }, (_, i) => {
+      const row = { ...structuredClone(evidence), evidenceObjectId: 'large-evidence-' + i }
+      for (const key of ['claimStatus', 'independentValidation', 'sourceLocation', 'scope', 'time', 'materiality', 'proofRequirementCodes',
+        'proofOrder', 'proofOrderDisposition', 'evidenceRequiredToSubstantiate', 'attribution', 'permittedInterpretation', 'blockedStrongerClaim']) delete row[key]
+      return row
+    })
+    input.composition.businessFactLedger.facts = input.sourceSnapshot.evidenceObjects.map(row => ({ ...structuredClone(fact), evidenceObjectId: row.evidenceObjectId, sectionKeys: ['customer_context'] }))
+    input.composition.businessFactLedger.omitted = []
+    await freezeSs041Snapshot(input, { sourceSections: [{ sectionKey: 'customer_context', references: input.sourceSnapshot.evidenceObjects.map(row => row.evidenceObjectId) }] })
+    return input
+  }
+  const ungrouped = contract => {
+    const copy = structuredClone(contract)
+    copy.clarification.questions = copy.clarification.affectedSections.flatMap(section => section.clarificationQuestions || [])
+    const { contractId, contractHash, ...payload } = copy
+    const hash = hashEvidenceToMeaningValue(payload)
+    return { ...payload, contractId: 'etm_' + hash, contractHash: hash }
+  }
+  const expectConservation = (before, after) => {
+    expect(after.inputs).toEqual(before.inputs)
+    expect(after.customerClaims).toEqual(before.customerClaims)
+    expect(after.sectionLedger).toEqual(before.sectionLedger)
+    expect(after.clarification.affectedSections).toEqual(before.clarification.affectedSections)
+    expect(after.fingerprints).toEqual(before.fingerprints)
+    expect(after.status).toBe('CLARIFICATION_REQUIRED')
+    for (const question of before.clarification.questions) {
+      const group = after.clarification.questions.find(group => group.sourceSectionKey === question.sourceSectionKey
+        && group.missingReference === question.missingReference && group.missingInput === question.missingInput
+        && group.nextAction === question.nextAction && JSON.stringify([...group.reasons].sort()) === JSON.stringify([...question.reasons].sort())
+        && (group.affectedFields || [group.field]).includes(question.field))
+      expect(group).toBeDefined()
+      expect(group.affectedSectionKeys || [group.sectionKey]).toContain(question.sectionKey)
+    }
+    expect(after.clarification.questions.flatMap(group => group.affectedFields || [group.field]).sort())
+      .toEqual([...new Set(before.clarification.questions.map(question => question.field))].sort())
+  }
+  test('groups only duplicate global diagnostics while conserving every exact section question and identity', async () => {
+    const input = await makeLarge(), unchanged = JSON.stringify(input), contract = compileEvidenceToMeaningContract(input)
+    const original = ungrouped(contract)
+    expect(Buffer.byteLength(JSON.stringify(original))).toBeGreaterThan(2000000)
+    expect(Buffer.byteLength(JSON.stringify(contract))).toBeLessThanOrEqual(2000000)
+    expect(contract.clarification.questions.length).toBeLessThan(original.clarification.questions.length)
+    expectConservation(original, contract)
+    expect(contract.clarification.questions.filter(row => row.affectedFields).every(row => row.question.includes('all affected output sections'))).toBe(true)
+    expect(JSON.stringify(input)).toBe(unchanged)
+    expect(assertEvidenceToMeaningContract(contract)).toBe(contract)
+    expect(compileEvidenceToMeaningContract(input)).toEqual(contract)
+    const changed = structuredClone(contract); changed.clarification.questions[0].affectedFields.pop()
+    expect(() => assertEvidenceToMeaningContract(changed)).toThrow()
+  })
+  test('keeps genuine unique oversized diagnostics intact instead of truncating to the reader cap', async () => {
+    const contract = compileEvidenceToMeaningContract(await makeLarge(500, 1))
+    expect(contract.status).toBe('CLARIFICATION_REQUIRED')
+    expect(Buffer.byteLength(JSON.stringify(contract))).toBeGreaterThan(2000000)
+    expect(contract.clarification.questions.every(row => !row.affectedFields)).toBe(true)
+    expect(contract.clarification.questions).toEqual(contract.sectionLedger.flatMap(section => section.clarificationQuestions))
+    expect(assertEvidenceToMeaningContract(contract)).toBe(contract)
+    expect(() => readRuntimeEvidenceToMeaningContract({ payload: { evidenceToMeaning: {
+      contractVersion: contract.contractVersion, contractId: contract.contractId,
+      contractHash: contract.contractHash, contractJson: JSON.stringify(contract),
+    } } })).toThrow(expect.objectContaining({ details: expect.objectContaining({ reason: 'CONTRACT_INTEGRITY_OR_BINDING_INVALID' }) }))
+  })
+  const cachedPath = process.env.VMF_OUTCOME_DIAGNOSTIC_CANDIDATE
+  ;(cachedPath ? test : test.skip)('cached real blocked candidate becomes readable with all original diagnostics and authority intact', () => {
+    const expected = 'C:/Dev/StoryLineOS/VMF-Evidence/ss-044/2026-10-16-contract-diagnostic-boundary/native-candidate-private.json'
+    expect(resolve(cachedPath).toLowerCase()).toBe(resolve(expected).toLowerCase())
+    const bytes = readFileSync(cachedPath)
+    expect(createHash('sha256').update(bytes).digest('hex')).toBe('3f6b9a9db57fe04c50592bc918dc517f2dd1a6d91fd3c1a32ee76414eab332d0')
+    const candidate = JSON.parse(bytes.toString('utf8')), receipt = candidate.payload.evidenceToMeaning
+    const original = JSON.parse(receipt.contractJson), before = JSON.stringify(candidate)
+    expect(Buffer.byteLength(receipt.contractJson)).toBe(2375715)
+    const compiled = compileEvidenceToMeaningContract(original.inputs)
+    expectConservation(original, compiled)
+    expect(compiled.clarification.questions).toHaveLength(35)
+    expect(compiled.clarification.questions.flatMap(row => row.affectedFields)).toHaveLength(490)
+    expect(Buffer.byteLength(JSON.stringify(compiled))).toBeLessThanOrEqual(2000000)
+    expect(compiled.sectionLedger.some(row => row.reasons.includes('DRAFT_PLACEMENT_REQUIRED'))).toBe(true)
+    const plan = { ...candidate, payload: { ...candidate.payload, evidenceToMeaning: { contractVersion: compiled.contractVersion,
+      contractId: compiled.contractId, contractHash: compiled.contractHash, contractJson: JSON.stringify(compiled) } } }
+    expect(readRuntimeEvidenceToMeaningContract(plan)).toEqual(compiled)
+    expect(JSON.stringify(candidate)).toBe(before)
+  })
+})
 const ss041PlanFixture = async (options = {}) => {
   const input = await makeSs041Fixture(options)
   const payload = { runtime: input.composition.runtimeBinding, lockedTruth: input.composition.truthBinding,
@@ -52,7 +217,9 @@ describe('PO readiness diagnostics preserve saved authority', () => {
     input.composition.businessFactLedger.facts.forEach((fact) => { fact.sectionKeys = ['customer_context'] })
     const contract = compileEvidenceToMeaningContract(input)
     expect(contract.status).toBe('CLARIFICATION_REQUIRED')
-    expect(contract.clarification.firstBoundary).toMatch(/sectionMapping/)
+    expect(contract.sectionLedger.some(section => section.reasons.includes('DRAFT_PLACEMENT_REQUIRED'))).toBe(true)
+    expect(contract.clarification.firstBoundary).not.toMatch(/sectionMapping/)
+    expect(contract.sectionLedger.every(section => section.status !== 'SUPPORTED')).toBe(true)
   })
 })
 

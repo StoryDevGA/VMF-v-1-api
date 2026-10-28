@@ -1,4 +1,7 @@
 import mongoose from 'mongoose'
+import { attachNativeControlledReplayIsolation, assertNoControlledReplayIsolation, controlledReplayIsolationCas,
+  controlledReplayIsolationWrite, controlledReplayIsolationAudit, controlledReplayIsolationRollback } from './controlledReplayIsolationService.js'
+import { resolveControlledReplayAcquisition, assertControlledReplayCurrent } from './controlledReplayAcquisitionService.js'
 import { resolveInstalledPackageDiscoveryPolicy, summarizeDiscoveryPolicyResolution,
   permitsLocalDiscoveryCandidateAcquisition, fenceInstalledDiscoveryPolicy } from './discoveryPolicyContract.js'
 import { lookupAcquisitionRequest, startAcquisitionRun, executeAcquisitionBuild, withAcquisitionTransaction,
@@ -49,7 +52,8 @@ import {
   invalidateRuntimeSectionEvidence,
   normalizeRuntimeSectionObject,
 } from './runtimeSectionModelService.js'
-import { buildReasonedGeneratedSection } from './runtimeSectionReasoningService.js'
+import { buildReasonedGeneratedSection, prepareRuntimeSectionEvidenceQualificationContext } from './runtimeSectionReasoningService.js'
+import { buildRuntimeSectionReasoningProviderRuntime, compareSectionProviderContext } from '../config/runtimeSectionReasoningProvider.js'
 import { resolveSectionExecutionContract } from './sectionExecutionContractService.js'
 import { executeSectionValidationRules } from './sectionValidationExecutorService.js'
 import {
@@ -75,6 +79,10 @@ import {
   stageRuntimeStateGraphSourceMutation,
 } from './runtimeStateGraphSourceMutationService.js'
 import { stageRuntimeStateSourceRollover } from './runtimeStateSourceRolloverService.js'
+import { randomUUID } from 'node:crypto'
+import { prepareRuntimeEvidenceSnapshot, persistRuntimeEvidenceSnapshot } from './runtimeEvidenceSnapshotService.js'
+import { verifyPublishedDispositionForLock } from './publishedDispositionRecoveryService.js'
+import { isSyntheticRevisionTestRuntime } from '../constants/syntheticRevisionTestPolicy.js'
 
 const buildActionError = ({
   status,
@@ -272,6 +280,9 @@ const buildRegenerationEligibility = ({
   runtimeInstance,
   section,
   sectionObject,
+  sectionExecutionContract,
+  actionKey,
+  generatedAt,
 } = {}) => {
   const reasons = []
   const currentInputHash = hashSectionInput(input)
@@ -285,12 +296,45 @@ const buildRegenerationEligibility = ({
     runtimeInstance,
     section,
   })
-  const currentEvidenceHash = normalizeActionString(currentIntelligence?.boundedContext?.evidenceHash)
+  const qualification = prepareRuntimeSectionEvidenceQualificationContext({ actionKey, dependencySectionKeys,
+    frameworkPackage, frameworkState, input, runtimeInstance, section, sectionExecutionContract, generatedAt })
+  const currentEvidenceHash = normalizeActionString(qualification?.branch === 'VMF' ? qualification.coverage.allEvidenceHash
+    : qualification?.branch === 'PACKAGE' ? qualification.base.generated.evidenceHash : currentIntelligence?.boundedContext?.evidenceHash)
   const previousEvidenceHash = normalizeActionString(previousGenerated?.evidenceHash)
   const currentSectionEvidenceHash = normalizeActionString(currentIntelligence?.boundedContext?.sectionEvidenceHash)
   const previousSectionEvidenceHash = normalizeActionString(previousGenerated?.sectionEvidenceHash)
   const currentDependencyHash = normalizeActionString(currentIntelligence?.boundedContext?.dependencyHash)
   const previousDependencyHash = normalizeActionString(previousGenerated?.dependencyHash)
+  const generator = previousGenerated?.generator || {}
+  const previousEvidenceQualificationHash = generator.evidenceQualificationHash ?? null
+  const previousEvidenceQualificationContractVersion = generator.evidenceQualificationContractVersion ?? null
+  let providerContextChange = null
+  let providerRuntime
+  if (qualification) {
+    const hasHash = Object.hasOwn(generator, 'evidenceQualificationHash')
+    const hasVersion = Object.hasOwn(generator, 'evidenceQualificationContractVersion')
+    if ((hasHash || hasVersion) && (!hasHash || !hasVersion
+      || typeof previousEvidenceQualificationHash !== 'string' || !/^[a-f0-9]{64}$/.test(previousEvidenceQualificationHash)
+      || previousEvidenceQualificationContractVersion !== qualification.evidenceQualificationContractVersion)) {
+      throw buildActionError({ status: 409, code: 'SECTION_EVIDENCE_QUALIFICATION_RECEIPT_INVALID',
+        message: 'The previous section qualification receipt is invalid.', reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_ACTION_NOT_AVAILABLE })
+    }
+    const expectedMode = qualification.branch === 'PACKAGE' ? 'GOVERNED_PACKAGE_REASONING' : 'GOVERNED_PROVIDER_SECTION_REASONING'
+    if (generator.mode === expectedMode) {
+      providerRuntime = buildRuntimeSectionReasoningProviderRuntime()
+      try {
+        providerContextChange = compareSectionProviderContext({ previousProvider: generator.provider, currentRuntime: providerRuntime })
+      } catch (error) {
+        throw buildActionError({ status: 409, code: error.code,
+          message: 'The section provider context is invalid or unavailable.', reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_ACTION_NOT_AVAILABLE })
+      }
+      if (providerContextChange.changed) reasons.push('SECTION_PROVIDER_CONTEXT_CHANGED')
+    }
+    if (generator.mode === expectedMode && ((!hasHash && !hasVersion)
+      || previousEvidenceQualificationHash !== qualification.evidenceQualificationHash)) {
+      reasons.push('EVIDENCE_QUALIFICATION_CONTEXT_CHANGED')
+    }
+  }
 
   if (forceRegenerateReason) reasons.push('FORCED_REGENERATE_REASON')
 
@@ -364,6 +408,7 @@ const buildRegenerationEligibility = ({
   }
 
   return {
+    providerRuntime,
     canRegenerate: reasons.length > 0,
     currentInputHash,
     currentEvidenceHash,
@@ -373,6 +418,14 @@ const buildRegenerationEligibility = ({
     previousEvidenceHash,
     previousSectionEvidenceHash,
     previousDependencyHash,
+    currentEvidenceQualificationHash: qualification?.evidenceQualificationHash ?? null,
+    currentEvidenceQualificationContractVersion: qualification?.evidenceQualificationContractVersion ?? null,
+    previousEvidenceQualificationHash,
+    previousEvidenceQualificationContractVersion,
+    ...(providerContextChange ? {
+      previousProviderContext: providerContextChange.previousProviderContext,
+      currentProviderContext: providerContextChange.currentProviderContext,
+    } : {}),
     forceRegenerateReason,
     invalidatedDependencySectionKeys: timestampInvalidatedSectionKeys,
     reasons: [...new Set(reasons)],
@@ -704,6 +757,7 @@ const applyRuntimeSectionGeneration = async ({
       ? archivedGenerated
       : null
   let regenerationEligibility = null
+  let providerRuntime
 
   if (normalizedActionKey === RUNTIME_ACTION_KEYS.GENERATE_SECTION && !hasRuntimeValue(currentGenerated) && hasRuntimeValue(archivedGenerated)) {
     throw buildActionError({
@@ -750,7 +804,8 @@ const applyRuntimeSectionGeneration = async ({
   }
 
   if (normalizedActionKey === RUNTIME_ACTION_KEYS.REGENERATE_SECTION) {
-    regenerationEligibility = buildRegenerationEligibility({
+    // Resolve once: eligibility, writer and signed audit must use the same allocation.
+    const { providerRuntime: resolvedProviderRuntime, ...eligibility } = buildRegenerationEligibility({
       dependencySectionKeys: targetDependencySectionKeys,
       frameworkPackage,
       frameworkState: nextFrameworkState,
@@ -760,7 +815,12 @@ const applyRuntimeSectionGeneration = async ({
       runtimeInstance,
       section: target.section,
       sectionObject,
+      sectionExecutionContract,
+      actionKey: normalizedActionKey,
+      generatedAt: actionedAt,
     })
+    providerRuntime = resolvedProviderRuntime
+    regenerationEligibility = eligibility
 
     if (regenerationEligibility.canRegenerate !== true) {
       throw buildActionError({
@@ -780,6 +840,7 @@ const applyRuntimeSectionGeneration = async ({
   }
 
   const { generated, intelligence } = await buildReasonedGeneratedSection({
+    providerRuntime,
     actionKey: normalizedActionKey,
     actorUserId: toIdString(actorUserId),
     dependencySectionKeys: targetDependencySectionKeys,
@@ -960,6 +1021,14 @@ const applyRuntimeSectionGeneration = async ({
             previousEvidenceHash: regenerationEligibility.previousEvidenceHash,
             previousSectionEvidenceHash: regenerationEligibility.previousSectionEvidenceHash,
             previousDependencyHash: regenerationEligibility.previousDependencyHash,
+            currentEvidenceQualificationHash: regenerationEligibility.currentEvidenceQualificationHash,
+            currentEvidenceQualificationContractVersion: regenerationEligibility.currentEvidenceQualificationContractVersion,
+            previousEvidenceQualificationHash: regenerationEligibility.previousEvidenceQualificationHash,
+            previousEvidenceQualificationContractVersion: regenerationEligibility.previousEvidenceQualificationContractVersion,
+            ...(regenerationEligibility.currentProviderContext ? {
+              previousProviderContext: regenerationEligibility.previousProviderContext,
+              currentProviderContext: regenerationEligibility.currentProviderContext,
+            } : {}),
             reasons: regenerationEligibility.reasons,
           }
         : null,
@@ -977,6 +1046,8 @@ const applyRuntimeDiscoveryAction = async ({
   actorUserId,
   payload,
   runtimeInstance,
+  controlledContext,
+  acquisitionExecution,
 }) => {
   const normalizedActionKey = normalizeRuntimeActionToken(actionKey)
   const previousFrameworkState = cloneRuntimeActionValue(runtimeInstance.framework_state || {})
@@ -994,6 +1065,8 @@ const applyRuntimeDiscoveryAction = async ({
       previousEvidencePack,
       reason: normalizedActionKey,
       runtimeInstance,
+      controlledContext,
+      acquisitionExecution,
     })
   }
 
@@ -1008,6 +1081,7 @@ const applyRuntimeDiscoveryAction = async ({
         createdAt: previousEvidencePack.refreshedAt || actionedAt,
         evidenceObjects: previousEvidencePack.evidenceObjects,
         inputs: previousEvidencePack.inputs,
+        sourceRegistry: previousEvidencePack.sourceRegistry || previousEvidencePack.acquisition?.sourceRegistry,
         sources: previousEvidencePack.lineage?.sources || [],
       }),
     })
@@ -1116,6 +1190,7 @@ const applyRuntimeDiscoveryAction = async ({
 }
 
 const buildActionAuditPayload = ({
+  isolationDiff = {},
   action,
   actionedAt,
   actorUserId,
@@ -1132,6 +1207,9 @@ const buildActionAuditPayload = ({
   intelligenceGraphResult,
   graphLifecycle,
   sourceRollover,
+  evidenceMembershipSnapshot,
+  publishedDispositionRecovery,
+  syntheticTestCompletion,
   nextRuntimeUpdate = {},
   previousRuntimeStatus,
   previousLockedAt,
@@ -1147,6 +1225,11 @@ const buildActionAuditPayload = ({
     runtimeInstanceKey: runtimeInstance.runtimeInstanceKey,
   },
   diff: {
+    ...isolationDiff,
+    ...(evidenceMembershipSnapshot ? { evidenceMembershipSnapshot } : {}),
+    ...(publishedDispositionRecovery ? { publishedDispositionRecovery } : {}),
+    ...(syntheticTestCompletion ? syntheticTestCompletion.route === 'RECORDED_NATIVE_REVIEW_COMPLETION'
+      ? { recordedReviewCompletion: syntheticTestCompletion } : { syntheticTestCompletion } : {}),
     actionKey: normalizeRuntimeActionToken(action?.actionKey),
     governedAction: normalizeRuntimeActionToken(action?.governedAction || action?.actionKey),
     policyKey: action?.policyKey || '',
@@ -1273,6 +1356,7 @@ const buildActionAuditPayload = ({
 })
 
 const logRuntimeActionExecuted = async ({
+  isolationDiff = {},
   action,
   actionedAt,
   actorUserId,
@@ -1290,12 +1374,16 @@ const logRuntimeActionExecuted = async ({
   intelligenceGraphResult,
   graphLifecycle,
   sourceRollover,
+  evidenceMembershipSnapshot,
+  publishedDispositionRecovery,
+  syntheticTestCompletion,
   nextRuntimeUpdate,
   previousRuntimeStatus,
   previousLockedAt,
   session = null,
 }) => {
   const auditPayload = buildActionAuditPayload({
+    isolationDiff,
     action,
     actionedAt,
     actorUserId,
@@ -1312,6 +1400,9 @@ const logRuntimeActionExecuted = async ({
     intelligenceGraphResult,
     graphLifecycle,
     sourceRollover,
+    evidenceMembershipSnapshot,
+    publishedDispositionRecovery,
+    syntheticTestCompletion,
     nextRuntimeUpdate,
     previousRuntimeStatus,
     previousLockedAt,
@@ -1412,10 +1503,14 @@ const atomicPersistRuntimeAction = async ({
       _id: runtimeInstance._id,
       updatedAt: expectedUpdatedAtDate,
       stateVersion: expectedStateVersion,
+      ...controlledReplayIsolationCas(runtimeInstance),
+      ...(nextRuntimeUpdate.status === 'LOCKED' ? { customerId: runtimeInstance.customerId,
+        tenantId: runtimeInstance.tenantId, runtimeInstanceKey: runtimeInstance.runtimeInstanceKey } : {}),
     },
     {
       $set: {
         framework_state: nextFrameworkState,
+        ...controlledReplayIsolationWrite(runtimeInstance, nextFrameworkState, session),
         executionStatus: nextExecutionStatus,
         updatedBy: actorUserId || runtimeInstance.updatedBy || null,
         ...nextRuntimeUpdate,
@@ -1457,6 +1552,7 @@ const rollbackRuntimeAction = async ({
       _id: runtimeInstance._id,
       updatedAt: rollbackUpdatedAt,
       stateVersion: nextStateVersion || updatedRuntimeInstance?.stateVersion,
+      ...controlledReplayIsolationCas(updatedRuntimeInstance),
     },
     {
       $set: {
@@ -1468,7 +1564,9 @@ const rollbackRuntimeAction = async ({
         lockedBy: previousLockedBy || null,
         lockedReason: previousLockedReason || '',
         updatedBy: previousUpdatedBy || null,
+        ...(controlledReplayIsolationRollback(runtimeInstance).$set || {}),
       },
+      ...(controlledReplayIsolationRollback(runtimeInstance).$unset ? { $unset: controlledReplayIsolationRollback(runtimeInstance).$unset } : {}),
     },
     {
       new: true,
@@ -1520,12 +1618,21 @@ const persistActionWithAudit = async ({
     })
   }
   const stateMutationTimestamp = updatedAtBefore || new Date()
+  const isolationDiff = controlledReplayIsolationAudit(runtimeInstance, nextFrameworkState)
+  const freezeEvidence = normalizeRuntimeActionToken(action?.actionKey) === RUNTIME_ACTION_KEYS.LOCK_RECORD
+  const evidenceSnapshotId = freezeEvidence ? `evidence_snapshot_${randomUUID()}` : null
 
   if (mongoose.connection.readyState === 1) {
     let updatedRuntimeInstance = null
     let graphLifecycle = null
     let sourceRollover = null
     const persist = async (session) => {
+        if (freezeEvidence && session?.inTransaction?.() !== true) throw buildActionError({
+          status: 503, code: 'SERVICE_UNAVAILABLE', message: 'Lock evidence membership requires transactional storage.', reason: 'LOCK_MEMBERSHIP_TRANSACTION_REQUIRED',
+        })
+        const publishedDispositionRecovery = freezeEvidence ? await verifyPublishedDispositionForLock(runtimeInstance, session) : null
+        const syntheticTestCompletion = freezeEvidence && isSyntheticRevisionTestRuntime(runtimeInstance)
+          ? await (await import('./syntheticRevisionTestService.js')).verifySyntheticRevisionForLock(runtimeInstance, session) : null
         if (localDiscoveryPackage) {
           const currentPackage = await FrameworkPackage.findById(localDiscoveryPackage._id).session(session)
           const resolution = await resolveInstalledPackageDiscoveryPolicy({ frameworkPackage: currentPackage, runtimeInstance, session })
@@ -1588,7 +1695,44 @@ const persistActionWithAudit = async ({
             reason: RUNTIME_INSTANCE_ERROR_REASONS.RUNTIME_STATE_VERSION_REQUIRED,
           })
         }
+        let preparedEvidence
+        if (freezeEvidence) {
+          const lockedRuntime = await RuntimeInstance.collection.findOne({
+            _id: runtimeInstance._id, customerId: runtimeInstance.customerId, tenantId: runtimeInstance.tenantId,
+            runtimeInstanceKey: runtimeInstance.runtimeInstanceKey, stateVersion: nextStateVersion,
+          }, { session })
+          const lockPackage = await FrameworkPackage.findById(runtimeInstance.packageId).session(session)
+          const lockPolicy = await resolveInstalledPackageDiscoveryPolicy({ frameworkPackage: lockPackage, runtimeInstance: lockedRuntime, session })
+          const dependency = lockPackage?.dependencyLock
+          const dependencyHash = dependency?.snapshotHash || dependency?.hash
+          if (!['LEGACY_FALLBACK', 'CONFIGURED_LOCAL'].includes(lockPolicy.status)
+            || lockPackage?.status !== 'ACTIVE' || dependency?.status !== 'PASS'
+            || !Array.isArray(dependency?.references) || dependency.references.length === 0
+            || !dependency?.snapshotId || dependency.snapshotId !== lockedRuntime?.dependencyLockId
+            || dependency.snapshotId !== lockedRuntime?.evidence?.dependencySnapshotId
+            || typeof dependencyHash !== 'string' || !dependencyHash.trim()
+            || dependencyHash !== lockedRuntime?.evidence?.dependencySnapshotHash
+            || ['packageId', 'packageKey', 'packageVersion', 'dependencyLockId', 'activationId', 'deploymentId']
+              .some(key => String(lockedRuntime?.[key] || '') !== String(runtimeInstance?.[key] || ''))) {
+            throw buildActionError({ status: 409, code: 'CONFLICT', message: 'The installed lock package binding could not be verified.',
+              reason: lockPolicy.reason || 'LOCK_MEMBERSHIP_PACKAGE_INVALID' })
+          }
+          if (lockPolicy.status === 'CONFIGURED_LOCAL') await fenceInstalledDiscoveryPolicy(lockPackage, { session })
+          preparedEvidence = await prepareRuntimeEvidenceSnapshot({ runtime: lockedRuntime, session, snapshotId: evidenceSnapshotId })
+          const pointerWrite = await RuntimeInstance.collection.updateOne({
+            _id: runtimeInstance._id, customerId: runtimeInstance.customerId, tenantId: runtimeInstance.tenantId,
+            runtimeInstanceKey: runtimeInstance.runtimeInstanceKey, stateVersion: nextStateVersion,
+            status: 'LOCKED', lockedAt: lockedRuntime.lockedAt,
+            'framework_state.lock.snapshot.snapshotId': preparedEvidence.pointer.lockSnapshotId,
+            'framework_state.lock.snapshot.snapshotHash': preparedEvidence.pointer.lockSnapshotHash,
+            lockedEvidenceSnapshot: { $exists: false },
+          }, { $set: { lockedEvidenceSnapshot: preparedEvidence.pointer } }, { session })
+          if (pointerWrite.modifiedCount !== 1) throw buildActionError({ status: 409, code: 'CONFLICT',
+            message: 'Lock evidence membership conflicts with the saved lock.', reason: 'LOCK_MEMBERSHIP_CONFLICT' })
+        }
         const saveAudit = await logRuntimeActionExecuted({
+          isolationDiff: { ...isolationDiff, ...(isSyntheticRevisionTestRuntime(runtimeInstance)
+            ? { syntheticTestStateTransition: { from: previousStateVersion, to: nextStateVersion } } : {}) },
           action,
           actionedAt,
           actorUserId,
@@ -1608,8 +1752,12 @@ const persistActionWithAudit = async ({
           intelligenceGraphResult,
           graphLifecycle,
           sourceRollover,
+          ...(preparedEvidence ? { evidenceMembershipSnapshot: { ...preparedEvidence.pointer, counts: preparedEvidence.body.counts } } : {}),
+          ...(publishedDispositionRecovery ? { publishedDispositionRecovery } : {}),
+          ...(syntheticTestCompletion ? { syntheticTestCompletion } : {}),
           session,
         })
+        if (preparedEvidence) await persistRuntimeEvidenceSnapshot({ prepared: preparedEvidence, actorUserId, audit: saveAudit, session })
         if (acquisitionContext) await recordAcquisitionTerminal({ context: acquisitionContext,
           pack: nextFrameworkState.evidence_pack, outputStateVersion: nextStateVersion, saveAudit, session })
     }
@@ -1630,6 +1778,8 @@ const persistActionWithAudit = async ({
     return finalized.runtimeInstance
   }
 
+  if (freezeEvidence) throw buildActionError({ status: 503, code: 'SERVICE_UNAVAILABLE',
+    message: 'Lock evidence membership requires transactional storage.', reason: 'LOCK_MEMBERSHIP_TRANSACTION_REQUIRED' })
   if (acquisitionContext || localDiscoveryPackage) throw buildActionError({ status: 503, code: 'SERVICE_UNAVAILABLE',
     message: 'Acquisition transactional storage is unavailable.', reason: 'ACQUISITION_STORAGE_UNAVAILABLE' })
 
@@ -1646,6 +1796,7 @@ const persistActionWithAudit = async ({
 
   try {
     await logRuntimeActionExecuted({
+      isolationDiff,
       action,
       actionedAt,
       actorUserId,
@@ -1738,6 +1889,9 @@ export const executeRuntimeAction = async ({
     permission: 'VMF_UPDATE',
   })
 
+  const controlledContext = await resolveControlledReplayAcquisition({ payload, runtimeInstance,
+    actorUserId, actionKey: normalizedActionKey })
+
   const { customer } = await assertCustomerTenantContext({ customerId, tenantId })
   await assertFeatureEntitlement({
     customerId,
@@ -1745,6 +1899,8 @@ export const executeRuntimeAction = async ({
     feature: getFeatureForRuntimeType(runtimeInstance.runtimeType),
   })
 
+  await attachNativeControlledReplayIsolation(runtimeInstance)
+  if (!controlledContext) assertNoControlledReplayIsolation(runtimeInstance)
   const frameworkPackage = await FrameworkPackage.findById(runtimeInstance.packageId)
   if (!frameworkPackage) {
     throw buildActionError({
@@ -1768,8 +1924,9 @@ export const executeRuntimeAction = async ({
     if (candidateAcquisition) localDiscoveryPackage = frameworkPackage
   }
   const acquisitionContext = DISCOVERY_BUILD_ACTIONS.has(normalizedActionKey)
-    ? await lookupAcquisitionRequest({ runtimeInstance, payload, actorUserId, actionKey: normalizedActionKey, auditRequest }) : null
+    ? await lookupAcquisitionRequest({ runtimeInstance, payload, actorUserId, actionKey: normalizedActionKey, auditRequest, controlledContext }) : null
   if (acquisitionContext?.replay) return { acquisitionRun: acquisitionContext.replay }
+  if (controlledContext) assertControlledReplayCurrent(controlledContext, runtimeInstance, payload)
 
   assertExpectedUpdatedAt({ runtimeInstance, expectedUpdatedAt })
   const renderer = await getRuntimeRenderer({ scopes, runtimeInstanceId })
@@ -1828,6 +1985,8 @@ export const executeRuntimeAction = async ({
       actorUserId,
       payload,
       runtimeInstance,
+      controlledContext,
+      acquisitionExecution: acquisitionContext,
     })
     resolvedTransition = acquisitionContext ? await executeAcquisitionBuild(acquisitionContext, build) : await build()
     if (acquisitionContext) acquiredPack = resolvedTransition.nextFrameworkState.evidence_pack
@@ -1926,5 +2085,7 @@ export const executeRuntimeAction = async ({
 const runtimeActionExecutionService = {
   executeRuntimeAction,
 }
+
+export const __testables = Object.freeze({ applyRuntimeSectionGeneration })
 
 export default runtimeActionExecutionService

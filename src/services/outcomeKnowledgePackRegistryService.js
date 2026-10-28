@@ -1,6 +1,7 @@
 import crypto from 'node:crypto'
 import { assertKnowledgePackImportMetadata } from './knowledgePackImportMetadataService.js'
 import mongoose from 'mongoose'
+import { assertStyleOverlaySourceEligibility } from './styleOverlayPolicy.js'
 import {
   KnowledgePack,
   KnowledgePackActivation,
@@ -2089,7 +2090,7 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
   ]
   const unboundRequiredPacks = requiredPacks.filter((pack) => pack.runtimeBindable !== true)
   if (requestSpecific) {
-    const requestResolution = resolveRequestSpecificKnowledgePacks({
+    const resolutionInputs = {
       mandatorySafeguards: mandatoryCandidates,
       candidates: [...activeActivationByPackKey.values()].filter(
         (activation) => !OUTCOME_STUDIO_REQUIRED_PACKS
@@ -2107,7 +2108,28 @@ export const resolveOutcomeStudioKnowledgePacks = async ({
         resolvedAt,
       },
       scopeCandidates,
-    })
+    }
+    let requestResolution = resolveRequestSpecificKnowledgePacks(resolutionInputs)
+    const selectedStyles = requestResolution.selectedByLayer?.STYLE || []
+    if (selectedStyles.length) {
+      const validatedStyles = new Map()
+      for (const style of selectedStyles) {
+        try {
+          const loaded = await loadOutcomeKnowledgePackVersionContent({ packId: style.packId, versionId: style.versionId })
+          const receipt = assertStyleOverlaySourceEligibility({ style,
+            outputType: requestResolution.selectedByLayer.OUTPUT_TYPE?.[0],
+            schema: requestResolution.selectedByLayer.OUTPUT_SCHEMA?.[0], audienceKeys, loaded })
+          validatedStyles.set(style.activationId, { styleConstraints: receipt.constraints })
+        } catch (error) {
+          validatedStyles.set(style.activationId, { styleConstraintError: error.details?.reason || error.code || 'STYLE_SOURCE_UNAVAILABLE' })
+        }
+      }
+      // Never silently substitute an unverified style after a selected source fails.
+      requestResolution = resolveRequestSpecificKnowledgePacks({ ...resolutionInputs,
+        candidates: resolutionInputs.candidates.map(pack => normalizeToken(pack.packType) === 'STYLE'
+          ? { ...pack, ...(validatedStyles.get(pack.activationId) || { styleConstraintError: 'STYLE_SOURCE_NOT_VALIDATED' }) }
+          : pack) })
+    }
     const selectedMethodCandidates = [
       ...requestResolution.providerContextPacks,
       ...requestResolution.preValidationPacks,

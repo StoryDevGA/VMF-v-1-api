@@ -640,6 +640,10 @@ const projectResolution = (binding = {}) => ({
   mode: text(binding.mode),
   policyKey: text(binding.policyKey),
   policyVersion: text(binding.policyVersion),
+  ...(binding.resolution?.styleOverlayPolicy ? {
+    styleOverlayPolicy: text(binding.resolution.styleOverlayPolicy),
+    styleOverlayReceipts: canonicalize(binding.resolution.styleOverlayReceipts || []),
+  } : {}),
   request: canonicalize(binding.resolution?.request || {}),
   scopeCandidates: canonicalize(binding.resolution?.scopeCandidates || []),
   dependencyGraph: canonicalize(binding.dependencyGraph || {}),

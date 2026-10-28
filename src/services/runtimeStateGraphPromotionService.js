@@ -336,6 +336,13 @@ const executeAttempt = async ({ candidate, actorUserId, models, audit, mongooseI
     })
     transactionStarted = true
 
+    const rootBeforePromotion = await findOne(models.RuntimeInstance, {
+      ...rootFilter(scope), stateVersion: candidate.stateVersion,
+    }, { session })
+    if (!rootBeforePromotion || !Number.isFinite(new Date(rootBeforePromotion.updatedAt).getTime())) {
+      fail(RUNTIME_STATE_V2_GRAPH_PROMOTION_ERROR_CODES.SOURCE_OBSOLETE)
+    }
+
     const rootResult = await models.RuntimeInstance.updateOne({
       ...rootFilter(scope),
       stateVersion: candidate.stateVersion,
@@ -440,6 +447,11 @@ const executeAttempt = async ({ candidate, actorUserId, models, audit, mongooseI
         },
         diff: {
           operation: 'V2_GRAPH_REBUILD_PROMOTED',
+          rootUpdatedAtTransition: {
+            contractVersion: 'runtime-graph-root-currentness.v1',
+            before: new Date(rootBeforePromotion.updatedAt).toISOString(),
+            after: new Date(promotedRoot.updatedAt).toISOString(),
+          },
           previousSnapshotId: previousSnapshot?.snapshotId || null,
           newSnapshotId: candidate.snapshot.snapshotId,
           sourceStateVersion: candidate.stateVersion,

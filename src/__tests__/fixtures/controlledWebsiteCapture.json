@@ -1,0 +1,9 @@
+{
+  "fixtureKind": "CONTROLLED_SYNTHETIC_WEBSITE_RESPONSE",
+  "generatedByApplication": false,
+  "scope": "OFFLINE_ADAPTER_TEST_ONLY_NOT_CUSTOMER_EVIDENCE_OR_LIVE_CAPTURE",
+  "url": "https://controlled-capture.example/",
+  "capturedAt": "2026-10-19T10:00:00.000Z",
+  "html": "<html><h1>Controlled synthetic company provides workflow monitoring 😀.</h1><p>The synthetic business supplies reporting services to test customers in Ireland.</p></html>",
+  "captureText": "  Controlled synthetic company provides workflow monitoring 😀.  The synthetic business supplies reporting services to test customers in Ireland.  "
+}

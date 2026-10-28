@@ -50,6 +50,27 @@ test('optional keyed history recomputes original proof, not just hash shape', ()
   for (const change of [{ rationale: 'Different explanation.' }, { requestPayloadHash: 'b'.repeat(64) }, { requestKey: undefined },
     { requestExpectedUpdatedAt: '2026-10-06' }]) expect(projectStoredContradictionHistory([{ ...review, ...change }], runtimeId, selection).available).toBe(false)
 })
+
+test('copied ancestor history requires the exact retained original record and original request identity', () => {
+  const review = keyed(), childId = '64b000000000000000000099', before = JSON.stringify(review)
+  expect(projectStoredContradictionHistory([review], childId, selection).reason).toBe('HISTORY_RECORD_INVALID')
+  const value = projectStoredContradictionHistory([review], childId, selection, [JSON.parse(JSON.stringify(review))])
+  expect(value).toMatchObject({ available: true, currentness: 'NOT_ASSESSED', records: [{ runtimeInstanceId: runtimeId }] })
+  expect(JSON.stringify(review)).toBe(before)
+  for (const retained of [[], [{ ...review, rationale: 'Changed original explanation.' }], [review, review],
+    [review, { ...review, rationale: 'Changed original explanation.' }]]) {
+    expect(projectStoredContradictionHistory([review], childId, selection, retained).available).toBe(false)
+  }
+  const retagged = { ...review, runtimeInstanceId: childId }
+  expect(projectStoredContradictionHistory([retagged], childId, selection).reason).toBe('HISTORY_REQUEST_PROOF_INVALID')
+})
+
+test('mixed inherited and newly appended current decisions preserve record order and ownership', () => {
+  const childId = '64b000000000000000000099', inherited = keyed(), own = row({ runtimeInstanceId: childId })
+  const value = projectStoredContradictionHistory([inherited, own], childId, selection, [inherited])
+  expect(value.total).toBe(2)
+  expect(value.records.map(record => record.runtimeInstanceId)).toEqual([childId, runtimeId])
+})
 test.each([{ page: 0 }, { page: 1001 }, { pageSize: 21 }, { page: 1.5 }, { findingId: ' ' }, { search: 'ignored' }])('rejects unsupported selection %j', change => {
   expect(contradictionHistorySelectionSchema.safeParse({ ...selection, ...change }).success).toBe(false)
 })

@@ -12,6 +12,7 @@ import {
 
 const moduleRequire = createRequire(import.meta.url)
 let sectionReasoningResultTransform = null
+let sectionReasoningProviderBoundary = null
 const { createCanvas } = moduleRequire('@napi-rs/canvas')
 
 beforeAll(() => {
@@ -683,6 +684,255 @@ const makeRuntimeInstanceDocument = (overrides = {}) => {
   }
 
   return document
+}
+
+const makePublishedLockMembershipFixture = () => makeRuntimeInstanceDocument({
+      updatedAt: new Date('2026-05-19T08:00:00.000Z'),
+      framework_state: {
+        lifecycle: {
+          stage: 'PUBLISHED',
+          publishedAt: '2026-05-19T08:00:00.000Z',
+          publishedBy: CUSTOMER_ADMIN_ID,
+        },
+        sections: {
+          customer_problem: {
+            input: 'Proposal creation is slow.',
+            generated: {
+              content: 'Customer Problem: Proposal creation is slow.',
+              generatedAt: '2026-05-19T07:58:00.000Z',
+            },
+            accepted: {
+              content: 'Customer Problem: Proposal creation is slow.',
+              acceptedAt: '2026-05-19T07:59:00.000Z',
+              acceptedBy: CUSTOMER_ADMIN_ID,
+              sourceGeneratedAt: '2026-05-19T07:58:00.000Z',
+            },
+            review: { status: 'ACCEPTED' },
+            state: { status: 'ACCEPTED' },
+          },
+        },
+        validation: {
+          runtime_required_sections: {
+            is_valid: true,
+            status: 'PASSED',
+          },
+        },
+        readiness: {
+          state: 'PUBLISHED',
+          published: true,
+          ready: true,
+          validationState: 'PASSED',
+        },
+        publish: {
+          state: 'PUBLISHED',
+          published: true,
+          publishedAt: '2026-05-19T08:00:00.000Z',
+          publishedBy: CUSTOMER_ADMIN_ID,
+          publishVersion: 1,
+          outputEligible: true,
+          sourceApproval: {
+            approvedAt: '2026-05-19T07:55:00.000Z',
+            approvedBy: CUSTOMER_ADMIN_ID,
+          },
+          evidence: {
+            activationId: 'activation-vmf-2-3-1-001',
+            deploymentId: 'deployment-vmf-global-production-001',
+            dependencySnapshotId: 'dep-lock-vmf-standard-2-3-1',
+            dependencySnapshotHash: 'hash-vmf-standard-2-3-1',
+          },
+          snapshot: {
+            snapshotId: 'runtime-truth-publish-value-narrative-439111-existing',
+            snapshotHash: 'existing-publish-snapshot-hash',
+            snapshotAt: '2026-05-19T08:00:00.000Z',
+            contractVersion: 'runtime-truth-snapshot-v1',
+          },
+          outputEligibility: {
+            state: 'PUBLISH_ELIGIBLE',
+            outputEligible: true,
+            canonicalOutputEligible: false,
+          },
+        },
+        lock: {},
+        policy: {},
+        attachments: {},
+        artifacts: {},
+      },
+    })
+
+// Offline transaction simulation uses actual rollover/membership owners. It is
+// not evidence of MongoDB commit/rollback or installed indexes.
+const withLockMembershipTransaction = async (runtime, work, { auditFailure = false, packageFailure = null, unknownCommit = false } = {}) => {
+  const Section = (await import('../models/RuntimeStateSection.js')).default
+  const Source = (await import('../models/RuntimeEvidenceSource.js')).default
+  const Evidence = (await import('../models/RuntimeEvidenceObject.js')).default
+  const Receipt = (await import('../models/RuntimeStateMigrationReceipt.js')).default
+  const Graph = (await import('../models/RuntimeGraphSnapshot.js')).default
+  const Element = (await import('../models/RuntimeGraphElement.js')).default
+  const Snapshot = (await import('../models/RuntimeEvidenceSnapshot.js')).default
+  const { createRuntimeStateLegacySourceRowSet } = await import('../services/runtimeStateLegacyMapper.js')
+  const restores = [], replace = (object, key, value) => {
+    const old = object[key]; restores.push(() => { object[key] = old }); object[key] = value
+  }
+  const descriptor = Object.getOwnPropertyDescriptor(mongoose.connection, 'readyState')
+  const staged = [], committed = [], order = []
+  let active = false, saved, savedAudit
+  const snapshots = [], readQueries = [], faults = {}
+  const session = { inTransaction: () => active, endSession: jest.fn(), withTransaction: jest.fn(async callback => {
+    active = true
+    try {
+      await callback(); committed.push(...staged)
+      if (unknownCommit) {
+        const error = new Error('Controlled uncertain transaction response after simulated persistence')
+        error.errorLabels = ['UnknownTransactionCommitResult']
+        throw error
+      }
+    } finally { staged.length = 0; active = false }
+  }), startTransaction: jest.fn(() => { active = true }), commitTransaction: jest.fn(async () => { active = false }),
+  abortTransaction: jest.fn(async () => { active = false }) }
+  const receipt = { receiptId: '64b000000000000000000004', operationType: 'LEGACY_BASELINE', status: 'VERIFIED', verifiedAt: runtime.updatedAt }
+  runtime.framework_state.evidence_pack ||= { sourceRegistry: [], evidenceObjects: [] }
+  runtime.framework_state.intelligence_graph ||= { nodes: [], edges: [], graphVersion: runtime.stateVersion }
+  runtime.revision ||= { revisionNumber: 1 }
+  const nativeRows = createRuntimeStateLegacySourceRowSet({
+    legacyInput: { rawBsonBytes: 1000, sections: runtime.framework_state.sections,
+      evidencePack: runtime.framework_state.evidence_pack, intelligenceGraph: runtime.framework_state.intelligence_graph },
+    scope: { customerId: runtime.customerId, tenantId: runtime.tenantId, runtimeInstanceId: runtime._id, runtimeInstanceKey: runtime.runtimeInstanceKey },
+    stateVersion: runtime.stateVersion, migrationReceiptId: receipt.receiptId, migrationTimestamp: new Date(runtime.updatedAt).toISOString(),
+  }).rows
+  const allRows = Object.fromEntries(Object.entries(nativeRows).map(([kind, rows]) => [kind, rows.map(row => ({ ...row, current: true }))]))
+  replace(Receipt, 'find', jest.fn(() => buildLeanQuery([receipt])))
+  for (const [kind, model] of [['sections', Section], ['evidenceSources', Source], ['evidenceObjects', Evidence]]) {
+    replace(model, 'find', jest.fn(() => buildLeanQuery(allRows[kind].filter(row => row.current))))
+    replace(model, 'insertMany', jest.fn(async (rows, options) => {
+      expect(options.session).toBe(session); order.push('rollover'); staged.push(kind)
+      const inserted = rows.map((row, index) => ({ ...row, _id: new mongoose.Types.ObjectId(String(index + 100).padStart(24, '0')) }))
+      allRows[kind].push(...inserted); return inserted
+    }))
+    replace(model, 'updateMany', jest.fn(async (filter, update, options) => {
+      expect(options.session).toBe(session)
+      const matches = allRows[kind].filter(row => row.stateVersion === filter.stateVersion && row.current === filter.current)
+      matches.forEach(row => Object.assign(row, update.$set)); return { modifiedCount: matches.length }
+    }))
+  }
+  replace(Graph, 'find', jest.fn(() => buildLeanQuery([])))
+  replace(Element, 'findOne', jest.fn(() => buildLeanQuery(null)))
+  replace(RuntimeInstance, 'findOneAndUpdate', jest.fn(async (filter, update, options) => {
+    expect(options.session).toBe(session); expect(filter.customerId).toBe(runtime.customerId)
+    order.push('root'); staged.push('root')
+    saved = makeRuntimeInstanceDocument({ ...runtime, ...update.$set, updatedAt: new Date('2026-05-19T08:01:00Z') })
+    return saved
+  }))
+  if (unknownCommit) replace(RuntimeInstance, 'findOne', jest.fn(() => {
+    const value = saved || runtime, promise = Promise.resolve(value)
+    const query = { select: jest.fn().mockReturnThis(), session: jest.fn().mockReturnThis(),
+      setOptions: jest.fn().mockReturnThis(), maxTimeMS: jest.fn().mockReturnThis(), lean: async () => value,
+      then: promise.then.bind(promise), catch: promise.catch.bind(promise) }
+    return query
+  }))
+  if (unknownCommit) {
+    const boundedQuery = value => {
+      const promise = Promise.resolve(value)
+      const query = { select: jest.fn().mockReturnThis(), session: jest.fn().mockReturnThis(),
+        setOptions: jest.fn().mockReturnThis(), maxTimeMS: jest.fn().mockReturnThis(), lean: jest.fn().mockReturnThis(),
+        then: promise.then.bind(promise), catch: promise.catch.bind(promise) }
+      return query
+    }
+    replace(Role, 'find', jest.fn(() => boundedQuery(buildDefaultRoleRows())))
+    replace(Customer, 'findById', jest.fn(() => boundedQuery(makeCustomer())))
+    replace(Tenant, 'findById', jest.fn(() => boundedQuery(makeTenant())))
+  }
+  replace(RuntimeInstance.collection, 'findOne', jest.fn(async (_filter, options) => {
+    expect(options.session).toBe(session); return options.projection ? { framework_state: saved.framework_state } : saved
+  }))
+  replace(RuntimeInstance.collection, 'updateOne', jest.fn(async (filter, update, options) => {
+    expect(options.session).toBe(session); expect(options).not.toHaveProperty('timestamps')
+    expect(filter.stateVersion).toBe(saved.stateVersion); expect(filter.lockedEvidenceSnapshot).toEqual({ $exists: false })
+    order.push('pointer'); staged.push('pointer'); Object.assign(saved, update.$set)
+    // Use the actual model's pointer cast/toObject boundary. Jest's process-global
+    // structuredClone creates foreign-realm objects, unlike this native model branch.
+    if (unknownCommit) saved.lockedEvidenceSnapshot = new RuntimeInstance({ lockedEvidenceSnapshot: update.$set.lockedEvidenceSnapshot }).lockedEvidenceSnapshot
+    return { modifiedCount: 1 }
+  }))
+  replace(FrameworkPackage, 'findById', jest.fn(() => {
+    const result = Promise.resolve(makeRendererFrameworkPackage({ workflowBindings: [makeWorkflowBinding('LOCK_RECORD')] }))
+    result.session = () => {
+      const pack = makeRendererFrameworkPackage({ workflowBindings: [makeWorkflowBinding('LOCK_RECORD')] })
+      if (packageFailure === 'status') pack.status = 'DRAFT'
+      if (packageFailure === 'dependency-status') pack.dependencyLock.status = 'FAIL'
+      if (packageFailure === 'references') pack.dependencyLock.references = []
+      if (packageFailure === 'missing-hash') { delete pack.dependencyLock.snapshotHash; delete pack.dependencyLock.hash }
+      if (packageFailure === 'hash') pack.dependencyLock.snapshotHash = 'different'
+      if (packageFailure === 'id') pack.dependencyLock.snapshotId = 'different'
+      if (packageFailure === 'activation') saved.activationId = 'different'
+      return Promise.resolve(pack)
+    }; return result
+  }))
+  const matches = (row, filter) => Object.entries(filter).every(([key, expected]) => {
+    const actual = key.split('.').reduce((value, field) => value?.[field], row)
+    return expected?.$in ? expected.$in.some(item => String(item) === String(actual)) : String(expected) === String(actual)
+  })
+  replace(mongoose.connection, 'db', { collection: name => ({ find: (filter, options) => {
+    expect(options.session).toBe(session)
+    if (faults.readFailure) throw new Error('Controlled storage read unavailable')
+    readQueries.push({ name, filter, options })
+    if (faults.budgetExceeded && name === 'runtime_evidence_snapshots') {
+      const now = Date.now()
+      replace(Date, 'now', jest.fn(() => now + 10000))
+    }
+    expect(options.maxTimeMS).toBeGreaterThan(0); expect(options.maxTimeMS).toBeLessThanOrEqual(2000)
+    const kind = { runtime_section_states: 'sections', runtime_evidence_sources: 'evidenceSources', runtime_evidence_objects: 'evidenceObjects' }[name]
+    const rows = name === 'runtime_evidence_snapshots' ? snapshots : allRows[kind]
+    const cursor = { sort: () => cursor, limit: () => cursor, toArray: async () => rows.filter(row => matches(row, filter)) }
+    return cursor
+  }, findOne: async (filter, options) => {
+    expect(name).toBe('auditlogs'); expect(options.session).toBe(session)
+    readQueries.push({ name, filter, options })
+    return savedAudit && matches(savedAudit, filter) ? savedAudit : null
+  } }) })
+  const existingNativeCollection = mongoose.connection.collection.bind(mongoose.connection)
+  if (unknownCommit) replace(mongoose.connection, 'collection', jest.fn(name => {
+    if (name !== FrameworkPackage.collection.name) return existingNativeCollection(name)
+    expect(name).toBe(FrameworkPackage.collection.name)
+    return { find: (filter, options) => {
+      expect(filter).toEqual({ _id: new mongoose.Types.ObjectId(saved.packageId), frameworkKey: saved.frameworkKey,
+        packageKey: saved.packageKey, version: saved.packageVersion })
+      expect(options).toMatchObject({ session, batchSize: 2, maxTimeMS: expect.any(Number) })
+      readQueries.push({ name, filter, options })
+      const pack = makeRendererFrameworkPackage({ workflowBindings: [makeWorkflowBinding('LOCK_RECORD')] })
+      const cursor = { maxTimeMS: value => { expect(value).toBeLessThanOrEqual(2000); return cursor },
+        limit: value => { expect(value).toBe(2); return cursor }, toArray: async () => {
+          if (faults.packageLookup === 'missing') return []
+          if (faults.packageLookup === 'ambiguous') return [pack, pack]
+          return matches(pack, filter) ? [pack] : []
+        } }
+      return cursor
+    } }
+  }))
+  replace(AuditLog, 'createLog', jest.fn(async (event, options) => {
+    expect(options.session).toBe(session); order.push('audit')
+    if (auditFailure) throw new Error('audit unavailable')
+    staged.push('audit')
+    const dto = { ...event, id: '64b000000000000000000010', signatureVersion: 1 }
+    savedAudit = { ...dto, _id: new mongoose.Types.ObjectId(dto.id) }
+    return dto
+  }))
+  replace(Snapshot, 'create', jest.fn(async (documents, options) => {
+    expect(options.session).toBe(session); order.push('membership'); staged.push('membership')
+    expect(new Snapshot(documents[0]).validateSync()).toBeUndefined()
+    snapshots.push(...documents); return documents
+  }))
+  replace(mongoose, 'startSession', jest.fn().mockResolvedValue(session))
+  Object.defineProperty(mongoose.connection, 'readyState', { configurable: true, value: 1 })
+  const writeCounts = () => [RuntimeInstance.findOneAndUpdate, RuntimeInstance.collection.updateOne, AuditLog.createLog, Snapshot.create,
+    ...[Section, Source, Evidence].flatMap(model => [model.insertMany, model.updateMany])].map(mock => mock.mock.calls.length)
+  const selectRestrictedActor = user => replace(User, 'findById', jest.fn(id => buildUserQueryChain(id === user._id ? user : null)))
+  try { await work({ session, committed, staged, order, Snapshot, rows: allRows, saved: () => saved,
+    snapshots, audit: () => savedAudit, removeAudit: () => { savedAudit = null }, readQueries, faults, writeCounts, selectRestrictedActor }) }
+  finally {
+    restores.reverse().forEach(restore => restore())
+    if (descriptor) Object.defineProperty(mongoose.connection, 'readyState', descriptor)
+    else delete mongoose.connection.readyState
+  }
 }
 
 const makeLockedPublishedRuntimeInstance = (overrides = {}) => makeRuntimeInstanceDocument({
@@ -1960,7 +2210,8 @@ beforeAll(async () => {
   await jest.unstable_mockModule('../services/runtimeSectionReasoningService.js', () => ({
     ...realSectionReasoning,
     buildReasonedGeneratedSection: async (args) => {
-      const result = await realSectionReasoning.buildReasonedGeneratedSection(args)
+      const result = await realSectionReasoning.buildReasonedGeneratedSection(sectionReasoningProviderBoundary
+        ? { ...args, providerRuntime: sectionReasoningProviderBoundary } : args)
       return sectionReasoningResultTransform ? sectionReasoningResultTransform(result) : result
     },
   }))
@@ -2028,8 +2279,19 @@ beforeAll(async () => {
 beforeEach(async () => {
   FrameworkPackageDisplayBinding.findOne = jest.fn(() => ({ session() { return this }, lean: async () => null }))
   sectionReasoningResultTransform = null
+  sectionReasoningProviderBoundary = null
   await performanceCacheService.resetForTests()
   RuntimeEvidenceObject.find = jest.fn()
+  // These ordinary runtime fixtures contain no controlled-replay provenance rows.
+  // Model the bounded native classification read explicitly; failures are not caught.
+  const NativeSource = (await import('../models/RuntimeEvidenceSource.js')).default
+  const noControlledRows = filter => {
+    expect(filter.controlledReplayProvenance).toEqual({ $exists: true })
+    expect(filter.current).toBe(true)
+    return { ...buildLeanQuery(null), limit: jest.fn().mockReturnThis() }
+  }
+  NativeSource.findOne = jest.fn(noControlledRows)
+  RuntimeEvidenceObject.findOne = jest.fn(noControlledRows)
   globalThis.fetch = originalFetch
   globalThis.__STORYLINEOS_DISCOVERY_DNS_LOOKUP__ = originalDiscoveryDnsLookup
   app.locals.outcomeStudioReasoningDeps = { executionMode: 'LEGACY' }
@@ -6950,6 +7212,63 @@ describe('Runtime Instance API', () => {
     }))
   })
 
+  test('discovery acceptance preserves exact disposed contradiction review through the mounted route', async () => {
+    const { normalizeDiscoveryEvidenceObjects, buildDiscoverySourceRegistry, buildDiscoveryHealth } =
+      await import('../services/discoveryIntelligenceService.js')
+    const { getDiscoveryContradictionReview, DISCOVERY_CONTRADICTION_REVIEW_CONTRACT } =
+      await import('../services/discoveryContradictionReviewService.js')
+    const pack = makeReadyDiscoveryEvidencePack()
+    const epoch = '11111111-1111-4111-8111-111111111111'
+    pack.evidenceObjects = normalizeDiscoveryEvidenceObjects({
+      evidenceObjects: [0, 1].map(i => makeDiscoveryEvidenceObject({
+        evidenceObjectId: 'evidence_acceptance_' + i, category: 'Proof', coverageArea: 'Proof',
+        extractedFact: i ? 'The synthetic trial is not authorized.' : 'The synthetic trial is authorized.',
+        reviewStatus: 'ACCEPTED', acceptedBy: CUSTOMER_ADMIN_ID,
+        acceptanceTimestamp: pack.refreshedAt, auditRef: 'existing-human-review',
+      })), sources: pack.lineage.sources, inputs: pack.inputs,
+      createdAt: pack.refreshedAt, acquisitionProfile: 'STANDARD',
+    })
+    pack.sourceRegistry = buildDiscoverySourceRegistry({ capturedAt: pack.refreshedAt,
+      evidenceObjects: pack.evidenceObjects, sources: pack.lineage.sources })
+    pack.contradictionReviewEpoch = epoch
+    pack.contradictionReviews = []
+    pack.discoveryHealth = buildDiscoveryHealth({ evidenceObjects: pack.evidenceObjects,
+      sourceRegistry: pack.sourceRegistry, contradictionReviewEpoch: epoch, runtimeInstanceId: RUNTIME_INSTANCE_ID })
+    const candidate = pack.discoveryHealth.contradictionCandidates[0]
+    expect(candidate).toBeDefined()
+    const pair = getDiscoveryContradictionReview(candidate, pack.evidenceObjects, [], RUNTIME_INSTANCE_ID, epoch).evidencePairHash
+    const review = { contractVersion: DISCOVERY_CONTRADICTION_REVIEW_CONTRACT,
+      contradictionId: candidate.contradictionId, runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      evidencePairHash: pair, reviewEpoch: epoch, reviewId: '22222222-2222-4222-8222-222222222222',
+      disposition: 'NOT_CONTRADICTORY', rationale: 'These are independent synthetic statement scopes.',
+      reviewedBy: CUSTOMER_ADMIN_ID, reviewedAt: pack.refreshedAt }
+    pack.contradictionReviews = [review]
+    candidate.reviewStatus = 'NOT_CONTRADICTORY'
+    const doc = makeRuntimeInstanceDocument({ updatedAt: new Date('2026-05-19T08:01:00.000Z'),
+      framework_state: { lifecycle: { stage: 'DRAFT' }, evidence_pack: pack, sections: {} } })
+    RuntimeInstance.findOne = jest.fn().mockResolvedValue(doc)
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({
+      ...doc, ...(update?.$set || {}), updatedAt: new Date('2026-05-19T08:02:00.000Z') }))
+    RuntimePathRegistry.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeEvidencePackRuntimePathRecord()))
+    const res = await request.patch('/api/v1/runtime-instances/' + RUNTIME_INSTANCE_ID + '/discovery-acceptance')
+      .set('Authorization', 'Bearer ' + await getAccessTokenForUser(makeCustomerAdmin()))
+      .send({ expectedUpdatedAt: doc.updatedAt.toISOString() })
+    expect(res.status).toBe(200)
+    const saved = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state.evidence_pack
+    expect(saved.accepted).toBe(true)
+    expect(saved.evidenceObjects).toEqual(pack.evidenceObjects)
+    expect(saved.sourceRegistry).toEqual(pack.sourceRegistry)
+    expect(saved.contradictionReviewEpoch).toBe(epoch)
+    expect(saved.contradictionReviews).toEqual([review])
+    expect(getDiscoveryContradictionReview(saved.discoveryHealth.contradictionCandidates[0],
+      saved.evidenceObjects, saved.contradictionReviews, RUNTIME_INSTANCE_ID, epoch))
+      .toMatchObject({ evidencePairHash: pair, reviewStatus: 'NOT_CONTRADICTORY' })
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'RUNTIME_STATE_MUTATED', resourceId: RUNTIME_INSTANCE_ID,
+      diff: expect.objectContaining({ nextValue: expect.objectContaining({ contradictionReviewEpoch: epoch }) }),
+    }))
+  })
+
   test('PATCH /api/v1/runtime-instances/:id/discovery-acceptance projects only accepted Evidence Objects into scoped GSIL views', async () => {
     const evidencePack = makeReviewableDiscoveryEvidencePack({
       evidenceObjects: [
@@ -11790,10 +12109,17 @@ Use short professional sections and evidence-led headings.
 Keep uncertainty, qualifications, and unsupported-claim boundaries visible.
 `
 
-  const renderingStyleExecutableYaml = `
+  const renderingStyleTokenOnlyYaml = `
 tokens:
   accentColor: '#2c7db9'
   calloutBackground: '#eef6fb'
+`
+
+  const renderingStyleExecutableYaml = `${renderingStyleTokenOnlyYaml}
+# Executive Style
+guidance: |
+  Use concise, neutral business language and decision-oriented headings.
+  Keep uncertainty and qualifications visible without adding business facts.
 `
 
   const visualSystemExecutableYaml = `
@@ -11912,11 +12238,21 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       TRUTH_CERTIFICATION: 'VALIDATION',
       OUTPUT_TYPE_DEFINITION: 'OUTPUT_TYPE',
     }
-    let activations = makeRequestReadyOutcomeKnowledgePackActivations(options).map((activation) => (
-      options.providerSafeContent === true && !activation.knowledgeLayer
-        ? { ...activation, knowledgeLayer: layerByPackType[activation.packType] }
-        : activation
-    ))
+    const purposeByPackType = {
+      ARL: 'GOVERNANCE',
+      RL: 'GOVERNANCE',
+      OUTPUT_SCHEMA: 'OUTPUT',
+      TRUTH_CERTIFICATION: 'VALIDATION',
+      OUTPUT_TYPE_DEFINITION: 'OUTPUT',
+      STYLE: 'STYLE',
+      VISUAL_SYSTEM: 'VISUAL',
+    }
+    // Metadata readiness is independent of executable provider content.
+    let activations = makeRequestReadyOutcomeKnowledgePackActivations(options).map((activation) => ({
+      ...activation,
+      knowledgeLayer: activation.knowledgeLayer || layerByPackType[activation.packType],
+      purposeCategory: activation.purposeCategory || purposeByPackType[activation.packType],
+    }))
     if (options.includeExportMetadataRules === true) {
       const validationDependencyReferences = [
         'certification-levels',
@@ -12005,7 +12341,8 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
             : version.knowledgeLayer === 'OUTPUT_TYPE'
                 ? outputTypeExecutableMarkdown
               : version.knowledgeLayer === 'STYLE'
-                  ? renderingStyleExecutableYaml
+                  ? (Object.hasOwn(options, 'styleContentOverride') && typeof options.styleContentOverride === 'string'
+                    ? options.styleContentOverride : renderingStyleExecutableYaml)
                   : version.knowledgeLayer === 'VISUAL_SYSTEM'
                     ? visualSystemExecutableYaml
                   : ({
@@ -12043,6 +12380,63 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     })
     return activations
   }
+
+  test('ready Knowledge Pack fixtures preserve metadata without inventing executable content', () => {
+    const activations = mockRequestReadyOutcomeKnowledgePacks()
+    const versions = makeOutcomeKnowledgePackVersions(activations)
+    for (const activation of activations) {
+      expect(activation.knowledgeLayer).toEqual(expect.any(String))
+      expect(activation.knowledgeLayer).not.toBe('')
+      expect(activation.purposeCategory).not.toBe('SYSTEM')
+      const version = versions.find((candidate) => candidate.versionId === activation.versionId)
+      expect(version.knowledgeLayer).toBe(activation.knowledgeLayer)
+      expect(version.purposeCategory).toBe(activation.purposeCategory)
+      expect(version.content).toBeUndefined()
+      expect(version.contentHash).toBe(activation.contentHash)
+    }
+  })
+
+  test.each(['MISSING_LAYER', 'SYSTEM_PURPOSE'])(
+    'actual Knowledge Registry rejects explicitly invalid ready-fixture metadata: %s',
+    async (invalidMetadata) => {
+      const activations = mockRequestReadyOutcomeKnowledgePacks()
+      const invalid = activations.map((activation) => (
+        invalidMetadata === 'MISSING_LAYER' && activation.packType === 'ARL'
+          ? { ...activation, knowledgeLayer: '' }
+          : invalidMetadata === 'SYSTEM_PURPOSE' && activation.knowledgeLayer === 'OUTPUT_TYPE'
+            ? { ...activation, purposeCategory: 'SYSTEM' }
+            : activation
+      ))
+      const versions = makeOutcomeKnowledgePackVersions(invalid)
+      KnowledgePackActivation.find.mockReturnValue(buildRuntimeInstanceFindChain(invalid))
+      KnowledgePackVersion.find.mockImplementation((query = {}) => buildRuntimeInstanceFindChain(
+        versions.filter((version) => !query.versionId?.$in || query.versionId.$in.includes(version.versionId)),
+      ))
+      const { resolveOutcomeStudioKnowledgePackBinding } = await import('../services/outcomeKnowledgePackRegistryService.js')
+      const result = await resolveOutcomeStudioKnowledgePackBinding({
+        query: { customerId: CUSTOMER_ID, tenantId: TENANT_ID, workspaceType: 'OUTCOME',
+          ...(invalidMetadata === 'MISSING_LAYER' ? {
+            requestedOutputTypeKey: 'executive-brief', requestedStyleKey: 'executive-brief-style',
+          } : {}) },
+      })
+      if (invalidMetadata === 'MISSING_LAYER') expect(result.binding.status).toBe('BLOCKED')
+      else {
+        const rejected = invalid.find((activation) => activation.knowledgeLayer === 'OUTPUT_TYPE')
+        expect(result.binding.blockedPacks).toEqual(expect.arrayContaining([
+          expect.objectContaining({ activationId: rejected.activationId, blockedReason: 'SYSTEM_ONLY_PACK' }),
+        ]))
+        expect(result.binding.activePacks.some((pack) => pack.activationId === rejected.activationId)).toBe(false)
+      }
+      expect(result.binding.blockedPacks).toEqual(expect.arrayContaining([
+        expect.objectContaining({ blockedReason: invalidMetadata === 'MISSING_LAYER'
+          ? 'VERSION_LAYER_EVIDENCE_MISMATCH' : 'SYSTEM_ONLY_PACK' }),
+      ]))
+      expect(GovernedReasoningExecution.prototype.save).not.toHaveBeenCalled()
+      expect(GovernedRuntimeArtifact.prototype.save).not.toHaveBeenCalled()
+      expect(OutcomeDraft.prototype.save).not.toHaveBeenCalled()
+      expect(AuditLog.createLog).not.toHaveBeenCalled()
+    },
+  )
 
   const makeOutcomeSessionRecord = (overrides = {}) => ({
     _id: 'b37f1f77bcf86cd799439111',
@@ -15803,6 +16197,9 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
         restore.push(() => { object[key] = previous })
         object[key] = replacement
       }
+      const logger = (await import('../config/logger.js')).default
+      const graphError = jest.spyOn(logger, 'error')
+      restore.push(() => graphError.mockRestore())
       const descriptor = Object.getOwnPropertyDescriptor(mongoose.connection, 'readyState')
       const order = []
       const staged = []
@@ -15813,6 +16210,10 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
         }),
         endSession: jest.fn(),
       }
+      // Graph promotion owns a later session; this source-only fixture does not
+      // implement its explicit transaction API and must not count its cleanup
+      // as a second cleanup of the committed source transaction.
+      const graphSession = { endSession: jest.fn() }
       const runtime = makeRuntimeInstanceDocument({
         updatedAt: new Date('2026-05-19T08:00:00.000Z'),
         framework_state: {
@@ -15886,6 +16287,8 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
         return buildLeanQuery([])
       }))
       replace(Element, 'findOne', jest.fn(() => buildLeanQuery(null)))
+      replace(Snapshot, 'insertMany', jest.fn())
+      replace(Element, 'insertMany', jest.fn())
       AuditLog.createLog = jest.fn(async (event, options) => {
         expect(options.session).toBe(session)
         expect(event.action).toBe('RUNTIME_STATE_MUTATED')
@@ -15894,7 +16297,9 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
         staged.push('audit')
         return event
       })
-      replace(mongoose, 'startSession', jest.fn().mockResolvedValue(session))
+      replace(mongoose, 'startSession', jest.fn()
+        .mockResolvedValueOnce(session)
+        .mockResolvedValue(graphSession))
       Object.defineProperty(mongoose.connection, 'readyState', { configurable: true, value: 1 })
       try {
         const token = await getAccessTokenForUser(makeCustomerAdmin())
@@ -15904,6 +16309,17 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
             value, expectedUpdatedAt: runtime.updatedAt.toISOString() })
         expect(res.status).toBe(failure === 'success' ? 200 : ['cas', 'missing', 'malformed'].includes(failure) ? 409 : 500)
         expect(session.endSession).toHaveBeenCalledTimes(1)
+        expect(mongoose.startSession).toHaveBeenCalledTimes(failure === 'success' ? 2 : 1)
+        expect(graphSession.endSession).toHaveBeenCalledTimes(failure === 'success' ? 1 : 0)
+        expect(Snapshot.insertMany).not.toHaveBeenCalled()
+        expect(Element.insertMany).not.toHaveBeenCalled()
+        if (failure === 'success') {
+          expect(graphError).toHaveBeenCalledWith(expect.objectContaining({
+            err: expect.objectContaining({ code: 'RUNTIME_STATE_V2_GRAPH_PROMOTION_TRANSACTION_FAILED' }),
+            runtimeInstanceId: String(runtime._id),
+            stateVersion: newVersion,
+          }), 'runtime V2 graph promotion failed after committed source mutation')
+        } else expect(graphError.mock.calls.filter(([, message]) => message === 'runtime V2 graph promotion failed after committed source mutation')).toEqual([])
         expect(session.withTransaction).toHaveBeenCalledTimes(1)
         expect(staged).toEqual([])
         expect(committed).toEqual(failure === 'success' ? ['root', 'children', 'audit'] : [])
@@ -18070,7 +18486,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     expect(AuditLog.createLog).not.toHaveBeenCalled()
   })
 
-  test('LOCK_RECORD freezes a published runtime as canonical truth', async () => {
+  test.each([null, 'status', 'dependency-status', 'references', 'missing-hash', 'hash', 'id', 'activation'])('LOCK_RECORD freezes exact membership or rejects changed package %s', async packageFailure => {
     const runtimeInstanceDoc = makeRuntimeInstanceDocument({
       updatedAt: new Date('2026-05-19T08:00:00.000Z'),
       framework_state: {
@@ -18159,11 +18575,20 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     }))
     const token = await getAccessTokenForUser(makeCustomerAdmin())
 
+    await withLockMembershipTransaction(runtimeInstanceDoc, async ({ committed, order, Snapshot, saved }) => {
     const res = await request
       .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/LOCK_RECORD`)
       .set('Authorization', `Bearer ${token}`)
       .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
 
+    if (packageFailure) {
+      expect(res.status).toBe(409)
+      expect(committed).toEqual([])
+      expect(Snapshot.create).not.toHaveBeenCalled()
+      expect(AuditLog.createLog).not.toHaveBeenCalled()
+      return
+    }
+    if (res.status !== 200) throw new Error(JSON.stringify(res.body))
     expect(res.status).toBe(200)
     const persistedSet = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set
     expect(persistedSet).toEqual(expect.objectContaining({
@@ -18220,6 +18645,11 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       executionStatus: 'COMPLETE',
       lockedAt: expect.any(String),
     }))
+    expect(committed).toContain('membership')
+    expect(order.indexOf('pointer')).toBeGreaterThan(order.indexOf('rollover'))
+    expect(order.slice(-2)).toEqual(['audit', 'membership'])
+    expect(Snapshot.create.mock.calls[0][0][0].basisStateVersion).toBe(saved().stateVersion)
+    expect(res.body.data.runtimeInstance).not.toHaveProperty('lockedEvidenceSnapshot')
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
       diff: expect.objectContaining({
         actionKey: 'LOCK_RECORD',
@@ -18230,7 +18660,116 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
           nextGraphHash: persistedGraph.graphHash,
         }),
       }),
-    }))
+    }), expect.objectContaining({ session: expect.any(Object) }))
+    }, { packageFailure })
+  })
+
+  describe('unknown LOCK outcome passive exact winner readback', () => {
+    test.each(['complete', 'missing-snapshot', 'missing-audit', 'material', 'pointer', 'audit-actor', 'audit-time', 'audit-scope', 'revision', 'storage', 'budget', 'missing-package', 'ambiguous-package'])('%s never redispatches or invents a verified winner', async corruption => {
+      const runtime = makePublishedLockMembershipFixture()
+      mockRuntimeInstanceForActionExecution({ document: runtime })
+      RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+      UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({ actions: [makeUIAction('LOCK_RECORD')] })))
+      WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('LOCK_RECORD')]))
+      const token = await getAccessTokenForUser(makeCustomerAdmin())
+      await withLockMembershipTransaction(runtime, async ({ committed, snapshots, audit, removeAudit, rows, saved, writeCounts, readQueries, faults, session }) => {
+        const unknown = await request.post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/LOCK_RECORD`)
+          .set('Authorization', `Bearer ${token}`).send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+        expect(unknown.status).toBe(500)
+        expect(unknown.body.error.code).toBe('INTERNAL_ERROR')
+        expect(unknown.body.data).toBeUndefined()
+        expect(committed.slice(-3)).toEqual(['pointer', 'audit', 'membership'])
+        expect(session.withTransaction).toHaveBeenCalledTimes(1)
+        expect(snapshots).toHaveLength(1)
+        const produced = snapshots[0]
+        if (corruption === 'missing-snapshot') snapshots.length = 0
+        if (corruption === 'missing-audit') removeAudit()
+        if (corruption === 'material') rows.sections.find(row => row.current).sectionDetail.accepted.content = 'Tampered persisted material'
+        if (corruption === 'pointer') saved().lockedEvidenceSnapshot.membershipHash = 'f'.repeat(64)
+        if (corruption === 'audit-actor') audit().actorUserId = REGULAR_USER_ID
+        if (corruption === 'audit-time') audit().diff.actionedAt = '2026-05-19T08:03:00.000Z'
+        if (corruption === 'audit-scope') audit().scope.tenantId = OTHER_TENANT_ID
+        if (corruption === 'revision') saved().revision.revisionNumber = 2
+        if (corruption === 'storage') faults.readFailure = true
+        if (corruption === 'budget') faults.budgetExceeded = true
+        if (corruption === 'missing-package') faults.packageLookup = 'missing'
+        if (corruption === 'ambiguous-package') faults.packageLookup = 'ambiguous'
+        const beforeWrites = writeCounts()
+        const beforeMaterial = JSON.stringify({ root: saved(), rows, snapshots, audit: audit() })
+        const readback = await request.get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/state/lock-basis`)
+          .query({ customerId: CUSTOMER_ID, tenantId: TENANT_ID }).set('Authorization', `Bearer ${token}`)
+        if (corruption === 'complete') {
+          expect(readback.status).toBe(200)
+          expect(readback.body.data.lockBasis.frozenInventory.reason).toBeNull()
+          expect(readback.body.data.lockBasis.frozenInventory).toMatchObject({ available: true, completeness: 'VERIFIED',
+            snapshotId: produced.snapshotId, membershipHash: produced.membershipHash, basisStateVersion: produced.basisStateVersion,
+            lockSnapshotId: produced.lockSnapshotId, lockSnapshotHash: produced.lockSnapshotHash,
+            revisionNumber: produced.revisionNumber, counts: produced.body.counts })
+          expect(readback.body.data.currency).toBe('AS_READ')
+          expect(readback.body.data.lockBasis.outsideSnapshotIntake).toMatchObject({ available: false,
+            reason: 'POST_LOCK_POLICY_NOT_RECORDED', policy: { status: 'NOT_RECORDED' },
+            frozenBasis: { available: true, snapshotId: produced.snapshotId, membershipHash: produced.membershipHash },
+            registrationAvailable: false, dispositionAvailable: false, impactApplicationAvailable: false })
+          expect(readback.body.data.readReceipt).toMatchObject({ bounded: true, maxTimeMS: 2000, requestTimeoutMS: 6000,
+            fullLegacyFrameworkStateFetched: false })
+          expect(readQueries.some(query => query.name === 'runtime_section_states' && !Object.hasOwn(query.filter, 'current') && query.filter._id.$in.length)).toBe(true)
+          expect(session.startTransaction).toHaveBeenCalledWith(expect.objectContaining({ readConcern: { level: 'snapshot' }, readPreference: 'primary' }))
+        } else if (['storage', 'budget'].includes(corruption)) expect(readback.status).toBe(503)
+        else if (['missing-package', 'ambiguous-package'].includes(corruption)) {
+          expect(readback.status).toBe(409)
+          expect(readback.body.error.details.reason).toBe('POST_LOCK_POLICY_BINDING_UNVERIFIED')
+          expect(readback.body.data).toBeUndefined()
+        }
+        else {
+          expect(readback.status).toBe(200)
+          expect(readback.body.data.lockBasis.frozenInventory.available).toBe(false)
+          expect(readback.body.data.lockBasis.frozenInventory.completeness).toBe('UNAVAILABLE')
+          expect(readback.body.data.lockBasis.frozenInventory.reason).toBe({
+            'missing-snapshot': 'SNAPSHOT_MISSING_OR_AMBIGUOUS', 'missing-audit': 'AUDIT_LINK_INVALID',
+            material: 'MEMBER_MATERIAL_CHANGED', pointer: 'POINTER_BINDING_INVALID', 'audit-actor': 'AUDIT_LINK_INVALID',
+            'audit-time': 'AUDIT_LINK_INVALID', 'audit-scope': 'AUDIT_LINK_INVALID', revision: 'ROOT_REVISION_MISSING',
+          }[corruption])
+        }
+        expect(JSON.stringify(readback.body)).not.toMatch(/lockedEvidenceSnapshot|__evidenceSnapshotControl|lockAuditId|"materialHash":|sectionDetail/)
+        expect(writeCounts()).toEqual(beforeWrites)
+        expect(JSON.stringify({ root: saved(), rows, snapshots, audit: audit() })).toBe(beforeMaterial)
+        expect(session.withTransaction).toHaveBeenCalledTimes(1)
+      }, { unknownCommit: true })
+    })
+    test.each(['unauthenticated', 'other-customer', 'other-tenant'])('restricted %s cannot read the produced winner', async actorCase => {
+      const runtime = makePublishedLockMembershipFixture()
+      mockRuntimeInstanceForActionExecution({ document: runtime })
+      RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+      UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({ actions: [makeUIAction('LOCK_RECORD')] })))
+      WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('LOCK_RECORD')]))
+      const ownerToken = await getAccessTokenForUser(makeCustomerAdmin())
+      await withLockMembershipTransaction(runtime, async ({ writeCounts, readQueries, snapshots, saved, rows, audit, selectRestrictedActor }) => {
+        const unknown = await request.post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/LOCK_RECORD`)
+          .set('Authorization', `Bearer ${ownerToken}`).send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
+        expect(unknown.status).toBe(500)
+        expect(snapshots).toHaveLength(1)
+        const beforeWrites = writeCounts(), beforeReads = readQueries.length
+        const beforeMaterial = JSON.stringify({ root: saved(), rows, snapshots, audit: audit() })
+        const read = request.get(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/state/lock-basis`)
+          .query({ customerId: CUSTOMER_ID, tenantId: TENANT_ID })
+        if (actorCase !== 'unauthenticated') {
+          const restricted = actorCase === 'other-customer'
+            ? makeRegularUser({ memberships: [{ customerId: OTHER_CUSTOMER_ID, roles: ['CUSTOMER_ADMIN'] }], tenantMemberships: [], vmfGrants: [] })
+            : makeRegularUser({ memberships: [{ customerId: CUSTOMER_ID, roles: ['USER'] }],
+              tenantMemberships: [{ customerId: CUSTOMER_ID, tenantId: OTHER_TENANT_ID, roles: ['TENANT_ADMIN'] }], vmfGrants: [] })
+          selectRestrictedActor(restricted)
+          const token = await getAccessTokenForUser(restricted)
+          read.set('Authorization', `Bearer ${token}`)
+        }
+        const denied = await read
+        expect(denied.status).toBe(actorCase === 'unauthenticated' ? 401 : 403)
+        expect(denied.body.data).toBeUndefined()
+        expect(JSON.stringify(denied.body)).not.toContain(snapshots[0].snapshotId)
+        expect(readQueries).toHaveLength(beforeReads)
+        expect(writeCounts()).toEqual(beforeWrites)
+        expect(JSON.stringify({ root: saved(), rows, snapshots, audit: audit() })).toBe(beforeMaterial)
+      }, { unknownCommit: true })
+    })
   })
 
   test('Output Lab readiness blocks published runtimes without canonical lock eligibility', async () => {
@@ -19358,13 +19897,43 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     const runtimeInstance = makeOutputLabReadyRuntime()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
     RuntimeOutputAsset.find.mockReturnValue(buildRuntimeInstanceFindChain([makeRuntimeOutputAsset()]))
-    mockRequestReadyOutcomeKnowledgePacks()
+    const nativeActivations = mockRequestReadyOutcomeKnowledgePacks()
     FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage({
       visibility: 'CUSTOMER_VISIBLE',
     }))
     FrameworkPackage.find.mockReturnValue(buildRuntimeInstanceFindChain([makeOutputLabFrameworkPackage({
       visibility: 'CUSTOMER_VISIBLE',
     })]))
+    const nativeVersions = makeOutcomeKnowledgePackVersions(nativeActivations)
+    const { resolveOutcomeStudioKnowledgeContext } = await import('../services/outcomeStudioKnowledgeContextService.js')
+    const expectedContext = await resolveOutcomeStudioKnowledgeContext({ query: {
+      tenantId: runtimeInstance.tenantId, customerId: runtimeInstance.customerId,
+      runtimeInstanceId: runtimeInstance._id || runtimeInstance.id, runtimeInstanceKey: runtimeInstance.runtimeInstanceKey,
+      runtimeType: runtimeInstance.runtimeType, frameworkKey: runtimeInstance.frameworkKey,
+      packageKey: runtimeInstance.packageKey, packageVersion: runtimeInstance.packageVersion,
+      projectId: runtimeInstance.projectId || null, outcomeId: runtimeInstance.outcomeId || null,
+      environmentKey: 'PRODUCTION', workspaceType: 'OUTCOME', requestedOutputTypeKey: 'executive-brief',
+      resolvedAt: '2026-06-05T10:10:00.000Z',
+    } })
+    const expectedBinding = expectedContext.reasoningBinding
+    expect(expectedBinding.status).toBe('READY')
+    const packIdentity = (pack) => ({ packKey: pack.packKey, activationId: String(pack.activationId),
+      versionId: pack.versionId, semanticVersion: pack.semanticVersion, schemaVersion: pack.schemaVersion,
+      contentHash: pack.contentHash })
+    const sortedIdentities = (packs) => packs.map(packIdentity).sort((a, b) => a.versionId.localeCompare(b.versionId))
+    const nativeIdentity = (pack) => {
+      const activation = nativeActivations.find((row) => row.versionId === pack.versionId)
+      const version = nativeVersions.find((row) => row.versionId === pack.versionId)
+      expect(activation).toBeDefined()
+      expect(version).toBeDefined()
+      return { packKey: version.packKey, activationId: String(activation.activationId), versionId: version.versionId,
+        semanticVersion: version.semanticVersion, schemaVersion: version.schemaVersion, contentHash: version.contentHash }
+    }
+    const expectedActiveIdentities = expectedBinding.activePacks.map(nativeIdentity).sort((a, b) => a.versionId.localeCompare(b.versionId))
+    expect(sortedIdentities(expectedBinding.activePacks)).toEqual(expectedActiveIdentities)
+    expect(new Set(expectedActiveIdentities.map((pack) => pack.versionId)).size).toBe(expectedActiveIdentities.length)
+    expect(expectedBinding.resolution.activeCount).toBe(expectedBinding.requiredPacks.filter((pack) => pack.runtimeBindable === true).length)
+    expect(expectedBinding.resolution.requiredCount).toBe(expectedBinding.requiredPacks.length)
     const token = await getAccessTokenForUser(makeCustomerAdmin())
 
     const readinessRes = await request
@@ -19376,7 +19945,6 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       state: 'READY',
       canStartSession: true,
       canReason: false,
-      summary: 'A session can start, but draft generation is not currently available.',
       blockerCount: 0,
     }))
     expect(readinessRes.body.data.safetyGates).toEqual(expect.objectContaining({
@@ -19386,6 +19954,10 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       blockedCount: 1,
       totalCount: 5,
     }))
+    const draftingGate = readinessRes.body.data.safetyGates.gates.find((gate) => gate.key === 'check-5')
+    expect(draftingGate).toEqual({ key: 'check-5', label: 'Drafting service', status: 'BLOCKED',
+      message: 'Draft generation is blocked because executable Knowledge Pack composition has not been established; resolved metadata alone is insufficient.' })
+    expect(readinessRes.body.data.summary).toBe(draftingGate.message)
 
     const sessionRes = await request
       .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions`)
@@ -19481,9 +20053,9 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
         resolutionSource: 'KNOWLEDGE_PACK_REGISTRY',
         policyKey: 'outcome-studio-v1-required-packs',
         policyVersion: '2.0.0',
-        activeCount: 2,
-        resolvedCount: 5,
-        requiredCount: 2,
+        activeCount: expectedBinding.resolution.activeCount,
+        resolvedCount: expectedBinding.resolution.resolvedCount,
+        requiredCount: expectedBinding.requiredPacks.length,
         activePacks: expect.arrayContaining([
           expect.objectContaining({
             packCategory: 'PLATFORM',
@@ -19500,8 +20072,37 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       decisionBindings: [],
     }))
     expect(OutcomeSession.deleteOne).not.toHaveBeenCalled()
-    expect(RuntimeGraphRelationship.prototype.save).toHaveBeenCalledTimes(6)
+    const savedKnowledgeBinding = savedOutcomeSession.contextBindings.knowledgeBindings
+    expect(sortedIdentities(savedKnowledgeBinding.activePacks)).toEqual(expectedActiveIdentities)
+    expect(sortedIdentities(savedKnowledgeBinding.requiredPacks)).toEqual(
+      expectedBinding.requiredPacks.map(nativeIdentity).sort((a, b) => a.versionId.localeCompare(b.versionId)),
+    )
+    for (const key of ['resolutionSource', 'policyKey', 'policyVersion', 'manifestId', 'manifestKey', 'manifestVersion']) {
+      expect(savedKnowledgeBinding[key]).toBe(String(expectedBinding[key] || '').trim())
+    }
+    expect(savedKnowledgeBinding.resolution.activeCount).toBe(expectedBinding.resolution.activeCount)
+    expect(savedKnowledgeBinding.resolution.requiredCount).toBe(expectedBinding.resolution.requiredCount)
+    expect(sortedIdentities(savedOutcomeSession.knowledgePackBinding.activePacks)).toEqual(expectedActiveIdentities)
+    expect(RuntimeGraphRelationship.prototype.save).toHaveBeenCalledTimes(expectedActiveIdentities.length + 1)
     const savedSessionRelationships = RuntimeGraphRelationship.prototype.save.mock.contexts
+    expect(new Set(savedSessionRelationships.map((edge) => String(edge._id))).size).toBe(savedSessionRelationships.length)
+    const packEdges = savedSessionRelationships.filter((edge) => edge.relationshipType === 'SESSION_BOUND_TO_PACK')
+    expect(savedSessionRelationships.filter((edge) => edge.relationshipType === 'SESSION_BOUND_TO_TRUTH')).toHaveLength(1)
+    expect(packEdges.map((edge) => ({ packKey: edge.targetNode.nodeId,
+      semanticVersion: edge.evidence.semanticVersion, contentHash: edge.evidence.contentHash,
+    })).sort((a, b) => a.packKey.localeCompare(b.packKey))).toEqual(expectedActiveIdentities.map((pack) => ({
+      packKey: pack.packKey, semanticVersion: pack.semanticVersion, contentHash: pack.contentHash,
+    })).sort((a, b) => a.packKey.localeCompare(b.packKey)))
+    for (const edge of savedSessionRelationships) {
+      expect(String(edge.tenantId)).toBe(TENANT_ID)
+      expect(String(edge.customerId)).toBe(CUSTOMER_ID)
+      expect(String(edge.runtimeInstanceId)).toBe(RUNTIME_INSTANCE_ID)
+      expect(String(edge.createdBy)).toBe(CUSTOMER_ADMIN_ID)
+      expect(edge.workspaceType).toBe('OUTCOME')
+      expect(edge.sourceNode.toObject()).toEqual(expect.objectContaining({
+        nodeType: 'WORKSPACE_SESSION', nodeId: sessionRes.body.data.sessionId, recordModel: 'OutcomeSession',
+      }))
+    }
     expect(savedSessionRelationships[0]).toEqual(expect.objectContaining({
       relationshipId: expect.stringMatching(/^rt_graph_rel_/),
       relationshipType: 'SESSION_BOUND_TO_TRUTH',
@@ -19558,9 +20159,9 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
         truthSignatureId: persistedTruthSignatureId,
         truthSignatureStatus: 'PROJECTED',
         knowledgePackBindingStatus: 'READY',
-        activeKnowledgePackCount: 2,
-        requiredKnowledgePackCount: 2,
-        runtimeGraphRelationshipCount: 6,
+        activeKnowledgePackCount: expectedBinding.resolution.activeCount,
+        requiredKnowledgePackCount: expectedBinding.requiredPacks.length,
+        runtimeGraphRelationshipCount: savedSessionRelationships.length,
       }),
     }))
     expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({
@@ -19589,12 +20190,21 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
           resolutionSource: 'KNOWLEDGE_PACK_REGISTRY',
           policyKey: 'outcome-studio-v1-required-packs',
           policyVersion: '2.0.0',
-          activeCount: 2,
-          resolvedCount: 5,
-          requiredCount: 2,
+          activeCount: expectedBinding.resolution.activeCount,
+          resolvedCount: expectedBinding.resolution.resolvedCount,
+          requiredCount: expectedBinding.requiredPacks.length,
         }),
       }),
     }))
+    const bindingAudit = AuditLog.createLog.mock.calls.map(([audit]) => audit)
+      .find((audit) => audit.action === 'KNOWLEDGE_PACK_BOUND_TO_SESSION')
+    expect(bindingAudit.scope).toEqual(expect.objectContaining({ customerId: CUSTOMER_ID, tenantId: TENANT_ID,
+      runtimeInstanceId: RUNTIME_INSTANCE_ID, outcomeSessionId: sessionRes.body.data.sessionId }))
+    expect(sortedIdentities(bindingAudit.diff.knowledgePackBinding.activePacks)).toEqual(expectedActiveIdentities)
+    const requiredVersionIds = new Set(expectedBinding.requiredPacks.map((pack) => pack.versionId))
+    expect(sortedIdentities(bindingAudit.diff.knowledgePackBinding.activePacks.filter((pack) => requiredVersionIds.has(pack.versionId))))
+      .toEqual(expectedBinding.requiredPacks.map(nativeIdentity).sort((left, right) => left.versionId.localeCompare(right.versionId)))
+    expect(bindingAudit.diff.runtimeGraphRelationshipCount).toBe(packEdges.length)
   })
 
   test('Outcome Studio session creation rolls back the session when binding audit persistence fails', async () => {
@@ -19679,8 +20289,15 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     RuntimeOutputAsset.find.mockReturnValue(buildRuntimeInstanceFindChain([makeRuntimeOutputAsset()]))
     mockRequestReadyOutcomeKnowledgePacks()
     FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
-    RuntimeGraphRelationship.prototype.save = jest.fn(async () => {
-      throw new Error('relationship store unavailable')
+    const attemptedRelationships = []
+    RuntimeGraphRelationship.prototype.save = jest.fn(async function saveRelationship() {
+      attemptedRelationships.push(this)
+      const nativeSession = OutcomeSession.prototype.save.mock.contexts[0]
+      const finalPack = nativeSession.knowledgePackBinding.activePacks.at(-1)
+      if (this.relationshipType === 'SESSION_BOUND_TO_PACK' && this.targetNode.nodeId === finalPack.packKey) {
+        throw new Error('relationship store unavailable')
+      }
+      return this
     })
     const token = await getAccessTokenForUser(makeCustomerAdmin())
 
@@ -19698,15 +20315,42 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     expectCustomerSafeOutcomeError(res)
     expect(TruthSignature.prototype.save).toHaveBeenCalledTimes(1)
     expect(OutcomeSession.prototype.save).toHaveBeenCalledTimes(1)
-    expect(RuntimeGraphRelationship.prototype.save).toHaveBeenCalledTimes(1)
+    const nativeSession = OutcomeSession.prototype.save.mock.contexts[0]
+    const nativeTruth = TruthSignature.prototype.save.mock.contexts[0]
+    const boundPacks = nativeSession.knowledgePackBinding.activePacks
+    expect(boundPacks.length).toBeGreaterThan(0)
+    expect(new Set(boundPacks.map((pack) => pack.packKey)).size).toBe(boundPacks.length)
+    expect(RuntimeGraphRelationship.prototype.save).toHaveBeenCalledTimes(boundPacks.length + 1)
+    const truthEdges = attemptedRelationships.filter((edge) => edge.relationshipType === 'SESSION_BOUND_TO_TRUTH')
+    const packEdges = attemptedRelationships.filter((edge) => edge.relationshipType === 'SESSION_BOUND_TO_PACK')
+    expect(truthEdges).toHaveLength(1)
+    expect(truthEdges[0].targetNode.toObject()).toEqual(expect.objectContaining({
+      nodeType: 'TRUTH_SIGNATURE', nodeId: nativeTruth.truthSignatureId, recordModel: 'TruthSignature',
+    }))
+    expect(packEdges.map((edge) => ({ packKey: edge.targetNode.nodeId,
+      semanticVersion: edge.evidence.semanticVersion, contentHash: edge.evidence.contentHash,
+    })).sort((a, b) => a.packKey.localeCompare(b.packKey))).toEqual(boundPacks.map((pack) => ({
+      packKey: pack.packKey, semanticVersion: pack.semanticVersion, contentHash: pack.contentHash,
+    })).sort((a, b) => a.packKey.localeCompare(b.packKey)))
+    for (const edge of attemptedRelationships) {
+      expect(String(edge.tenantId)).toBe(TENANT_ID)
+      expect(String(edge.customerId)).toBe(CUSTOMER_ID)
+      expect(String(edge.runtimeInstanceId)).toBe(RUNTIME_INSTANCE_ID)
+      expect(String(edge.createdBy)).toBe(CUSTOMER_ADMIN_ID)
+      expect(edge.workspaceType).toBe('OUTCOME')
+      expect(edge.sourceNode.toObject()).toEqual(expect.objectContaining({
+        nodeType: 'WORKSPACE_SESSION', nodeId: nativeSession.sessionId, recordModel: 'OutcomeSession',
+      }))
+    }
     const relationshipRollbackFilter = RuntimeGraphRelationship.deleteMany.mock.calls[0][0]
-    expect(relationshipRollbackFilter._id.$in).toHaveLength(6)
-    expect(OutcomeSession.deleteOne).toHaveBeenCalledWith({
-      _id: expect.anything(),
-    })
-    expect(TruthSignature.deleteOne).toHaveBeenCalledWith({
-      _id: expect.anything(),
-    })
+    const attemptedIds = attemptedRelationships.map((edge) => String(edge._id)).sort()
+    expect(new Set(attemptedIds).size).toBe(attemptedRelationships.length)
+    expect(Object.keys(relationshipRollbackFilter)).toEqual(['_id'])
+    expect(Object.keys(relationshipRollbackFilter._id)).toEqual(['$in'])
+    expect(relationshipRollbackFilter._id.$in.map(String).sort()).toEqual(attemptedIds)
+    expect(RuntimeGraphRelationship.deleteMany).toHaveBeenCalledTimes(1)
+    expect(OutcomeSession.deleteOne).toHaveBeenCalledWith({ _id: nativeSession._id })
+    expect(TruthSignature.deleteOne).toHaveBeenCalledWith({ _id: nativeTruth._id })
     expect(AuditLog.createLog).not.toHaveBeenCalledWith(expect.objectContaining({
       action: 'OUTCOME_SESSION_CREATED',
     }))
@@ -19818,7 +20462,37 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     const session = makeOutcomeSessionRecord()
     RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
     OutcomeSession.findOne.mockReturnValue(buildLeanQuery(session))
-    mockRequestReadyOutcomeKnowledgePacks()
+    const nativeActivations = mockRequestReadyOutcomeKnowledgePacks()
+    const nativeVersions = makeOutcomeKnowledgePackVersions(nativeActivations)
+    const { resolveOutcomeStudioKnowledgeContext } = await import('../services/outcomeStudioKnowledgeContextService.js')
+    const expectedContext = await resolveOutcomeStudioKnowledgeContext({ query: {
+      tenantId: runtimeInstance.tenantId, customerId: runtimeInstance.customerId,
+      runtimeInstanceId: runtimeInstance._id || runtimeInstance.id, runtimeInstanceKey: runtimeInstance.runtimeInstanceKey,
+      runtimeType: runtimeInstance.runtimeType, frameworkKey: runtimeInstance.frameworkKey,
+      packageKey: runtimeInstance.packageKey, packageVersion: runtimeInstance.packageVersion,
+      projectId: runtimeInstance.projectId || null, outcomeId: runtimeInstance.outcomeId || null,
+      environmentKey: 'PRODUCTION', workspaceType: 'OUTCOME', requestedOutputTypeKey: 'executive-brief',
+      resolvedAt: '2026-06-05T10:10:00.000Z',
+    } })
+    const expectedBinding = expectedContext.reasoningBinding
+    expect(expectedBinding.status).toBe('READY')
+    const packIdentity = (pack) => ({ packKey: pack.packKey, activationId: String(pack.activationId),
+      versionId: pack.versionId, semanticVersion: pack.semanticVersion, schemaVersion: pack.schemaVersion,
+      contentHash: pack.contentHash })
+    const sortedIdentities = (packs) => packs.map(packIdentity).sort((a, b) => a.versionId.localeCompare(b.versionId))
+    const nativeIdentity = (pack) => {
+      const activation = nativeActivations.find((row) => row.versionId === pack.versionId)
+      const version = nativeVersions.find((row) => row.versionId === pack.versionId)
+      expect(activation).toBeDefined()
+      expect(version).toBeDefined()
+      return { packKey: version.packKey, activationId: String(activation.activationId), versionId: version.versionId,
+        semanticVersion: version.semanticVersion, schemaVersion: version.schemaVersion, contentHash: version.contentHash }
+    }
+    const expectedActiveIdentities = expectedBinding.activePacks.map(nativeIdentity).sort((a, b) => a.versionId.localeCompare(b.versionId))
+    expect(sortedIdentities(expectedBinding.activePacks)).toEqual(expectedActiveIdentities)
+    expect(new Set(expectedActiveIdentities.map((pack) => pack.versionId)).size).toBe(expectedActiveIdentities.length)
+    expect(expectedBinding.resolution.activeCount).toBe(expectedBinding.requiredPacks.filter((pack) => pack.runtimeBindable === true).length)
+    expect(expectedBinding.resolution.requiredCount).toBe(expectedBinding.requiredPacks.length)
     const token = await getAccessTokenForUser(makeCustomerAdmin())
 
     const res = await request
@@ -19869,10 +20543,21 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
         currentness: 'CURRENT',
       }),
       knowledgeBindings: expect.objectContaining({
-        activeCount: 5,
-        requiredCount: 5,
+        activeCount: expectedBinding.resolution.activeCount,
+        resolvedCount: expectedBinding.resolution.resolvedCount,
+        requiredCount: expectedBinding.requiredPacks.length,
       }),
     }))
+    const savedKnowledgeBinding = savedOutcomeMessage.contextBindings.knowledgeBindings
+    expect(sortedIdentities(savedKnowledgeBinding.activePacks)).toEqual(expectedActiveIdentities)
+    expect(sortedIdentities(savedKnowledgeBinding.requiredPacks)).toEqual(
+      expectedBinding.requiredPacks.map(nativeIdentity).sort((a, b) => a.versionId.localeCompare(b.versionId)),
+    )
+    for (const key of ['resolutionSource', 'policyKey', 'policyVersion', 'manifestId', 'manifestKey', 'manifestVersion']) {
+      expect(savedKnowledgeBinding[key]).toBe(String(expectedBinding[key] || '').trim())
+    }
+    expect(savedKnowledgeBinding.resolution.activeCount).toBe(expectedBinding.resolution.activeCount)
+    expect(savedKnowledgeBinding.resolution.requiredCount).toBe(expectedBinding.resolution.requiredCount)
     expect(OutcomeMessage.deleteOne).not.toHaveBeenCalled()
     expect(RuntimeOutputAsset.find).not.toHaveBeenCalled()
     expect(KnowledgePackActivation.find).toHaveBeenCalled()
@@ -20342,7 +21027,10 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     const guardrailsStage = res.body.data.draft.governanceEvidence.stages
       .find((stage) => stage.key === 'GUARDRAILS')
     expect(guardrailsStage.knowledgePacks.length).toBeGreaterThan(0)
-    expect(guardrailsStage.knowledgePacks)
+    expect(guardrailsStage.knowledgePacks.some((pack) => pack.boundary === 'POST_GENERATION_VALIDATION')).toBe(false)
+    const validationStage = res.body.data.draft.governanceEvidence.stages
+      .find((stage) => stage.key === 'VALIDATION')
+    expect(validationStage.knowledgePacks)
       .toEqual(expect.arrayContaining([
         expect.objectContaining({
           packKey: 'rendering-layer',
@@ -20466,6 +21154,51 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       expect(OutcomeDraftIteration.prototype.save).not.toHaveBeenCalled()
     },
   )
+
+  test('synthetic STYLE fixture preserves valid rendering tokens and meaningful neutral guidance', async () => {
+    const { parseDocument } = await import('yaml')
+    const document = parseDocument(renderingStyleExecutableYaml)
+    expect(document.errors).toEqual([])
+    expect(document.toJS()).toEqual({
+      tokens: { accentColor: '#2c7db9', calloutBackground: '#eef6fb' },
+      guidance: 'Use concise, neutral business language and decision-oriented headings.\nKeep uncertainty and qualifications visible without adding business facts.\n',
+    })
+    expect(parseDocument(renderingStyleTokenOnlyYaml).toJS()).toEqual({
+      tokens: { accentColor: '#2c7db9', calloutBackground: '#eef6fb' },
+    })
+  })
+
+  test('native legacy generation keeps token-only STYLE unconsumed and approval blocked', async () => {
+    const providerDescriptor = makeOutcomeStudioLiveTestProviderDescriptor()
+    app.locals.outcomeStudioReasoningDeps = { executionMode: 'LIVE_TEST', providerDescriptor,
+      providerAdapter: makeOutcomeStudioLiveProviderAdapter() }
+    mockOutcomeStudioLiveTestReadiness(providerDescriptor)
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(makeOutputLabReadyRuntime()))
+    FrameworkPackage.findById.mockResolvedValue(makeOutputLabFrameworkPackage())
+    mockRequestReadyOutcomeKnowledgePacks({ providerSafeContent: true, styleContentOverride: renderingStyleTokenOnlyYaml })
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    OutcomeMessage.findOne.mockReturnValue(buildLeanQuery(makeOutcomeMessageRecord()))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+    const res = await request.post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/messages/out_msg_existing_fixture/generate-response`)
+      .set('Authorization', `Bearer ${token}`).send({})
+    expect(res.status).toBe(200)
+    expect(res.body.data.draft.approvalAvailable).toBe(false)
+    expect(res.body.data.draft.approvalReadiness).toEqual(expect.objectContaining({
+      status: 'BLOCKED', blockerReason: 'EXECUTION_PACK_NOT_PASSED',
+    }))
+    const savedIteration = OutcomeDraftIteration.prototype.save.mock.contexts[0]
+    const style = savedIteration.lineageSummary.componentExecutionEvidence.packs
+      .find((pack) => pack.versionId === 'kpv-executive-brief-style-1-0-0')
+    expect(style).toEqual(expect.objectContaining({
+      status: 'NOT_SUPPLIED', projectionDisposition: 'NO_SAFE_GUIDANCE', suppliedEntryCount: 0,
+      contentHash: `sha256:${createHash('sha256').update(renderingStyleTokenOnlyYaml).digest('hex')}`,
+    }))
+    const rl = savedIteration.lineageSummary.componentExecutionEvidence.packs
+      .find((pack) => pack.versionId === 'kpv-rendering-layer-1-0-0')
+    expect(rl).toEqual(expect.objectContaining({ status: 'PASSED', receiptType: 'POST_VALIDATION' }))
+    expect(OutcomeAsset.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeAssetVersion.prototype.save).not.toHaveBeenCalled()
+  })
 
   test('Outcome Studio response generation persists a governed assistant response and first draft iteration', async () => {
     const providerDescriptor = makeOutcomeStudioLiveTestProviderDescriptor()
@@ -20614,6 +21347,14 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     const savedOutcomeDraft = OutcomeDraft.prototype.save.mock.contexts[0]
     expect(OutcomeDraftIteration.prototype.save).toHaveBeenCalledTimes(1)
     const savedOutcomeDraftIteration = OutcomeDraftIteration.prototype.save.mock.contexts[0]
+    const actualStyleReceipt = savedOutcomeDraftIteration.lineageSummary.componentExecutionEvidence.packs
+      .find((pack) => pack.versionId === 'kpv-executive-brief-style-1-0-0')
+    expect(actualStyleReceipt).toEqual(expect.objectContaining({
+      status: 'PASSED',
+      contentHash: `sha256:${createHash('sha256').update(renderingStyleExecutableYaml).digest('hex')}`,
+    }))
+    expect(actualStyleReceipt.projectedEntryCount).toBeGreaterThan(0)
+    expect(actualStyleReceipt.suppliedEntryCount).toBeGreaterThan(0)
     expect(savedOutcomeDraft.workspaceType).toBe('OUTCOME')
     expect(savedOutcomeDraft.assetType).toBe('OUTCOME_NARRATIVE')
     expect(savedOutcomeDraft.draftId).toBe(res.body.data.draft.draftId)
@@ -22486,6 +23227,28 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     expect(res.status).toBe(409)
     expect(res.body.error.code).toBe('CONFLICT')
     expectCustomerSafeOutcomeError(res)
+    expect(OutcomeAsset.prototype.save).not.toHaveBeenCalled()
+    expect(OutcomeAssetVersion.prototype.save).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+
+  test('Outcome Studio draft approval requires transaction topology for a governed-phase draft', async () => {
+    const runtimeInstance = makeOutputLabReadyRuntime()
+    const activeDraft = makeOutcomeDraftRecord({ phase: 'GOVERNED_QUALITY_CHAIN' })
+    const currentIteration = makeOutcomeDraftIterationRecord({ phase: 'GOVERNED_QUALITY_CHAIN' })
+    RuntimeInstance.findOne = jest.fn().mockReturnValue(buildLeanQuery(runtimeInstance))
+    OutcomeSession.findOne.mockReturnValue(buildLeanQuery(makeOutcomeSessionRecord()))
+    OutcomeDraft.findOne.mockReturnValue(buildLeanQuery(activeDraft))
+    OutcomeDraftIteration.findOne.mockReturnValue(buildLeanQuery(currentIteration))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+    const res = await request
+      .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/outcome-studio/sessions/out_sess_existing_fixture/drafts/${activeDraft.draftId}/approve`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({})
+    expect(res.status).toBe(503)
+    expect(res.body.error.code).toBe('OUTCOME_ACTION_FAILED')
+    expectCustomerSafeOutcomeError(res)
+    expect(OutcomeDraft.updateOne).not.toHaveBeenCalled()
     expect(OutcomeAsset.prototype.save).not.toHaveBeenCalled()
     expect(OutcomeAssetVersion.prototype.save).not.toHaveBeenCalled()
     expect(AuditLog.createLog).not.toHaveBeenCalled()
@@ -25282,7 +26045,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     expect(persisted).toHaveLength(1)
     expect(persisted[0].stylePackReceipt).toEqual(expect.objectContaining({
       packKey: 'executive-brief-style',
-      tokens: expect.objectContaining({ accentColor: '#2c7db9' }),
+      tokens: { accentColor: '#2c7db9', calloutBackground: '#eef6fb' },
     }))
     expect(persisted[0].visualSystemPackReceipt.allowedComponents).toContain('CALLOUT')
     expect(persisted[0]).not.toHaveProperty('customerContent')
@@ -28064,22 +28827,22 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       }
     }
 
-    expect(pairwiseScores).toEqual([
-      { pair: 'customer_context:strategic_objectives', score: 0.136842 },
-      { pair: 'customer_context:current_state_assessment', score: 0.142857 },
-      { pair: 'customer_context:stakeholder_register', score: 0.136842 },
-      { pair: 'customer_context:evidence_register', score: 0.130952 },
-      { pair: 'customer_context:output_requirements', score: 0.140845 },
-      { pair: 'strategic_objectives:current_state_assessment', score: 0.142857 },
-      { pair: 'strategic_objectives:stakeholder_register', score: 0.326316 },
-      { pair: 'strategic_objectives:evidence_register', score: 0.132653 },
-      { pair: 'strategic_objectives:output_requirements', score: 0.2125 },
-      { pair: 'current_state_assessment:stakeholder_register', score: 0.142857 },
-      { pair: 'current_state_assessment:evidence_register', score: 0.125 },
-      { pair: 'current_state_assessment:output_requirements', score: 0.171875 },
-      { pair: 'stakeholder_register:evidence_register', score: 0.087379 },
-      { pair: 'stakeholder_register:output_requirements', score: 0.182927 },
-      { pair: 'evidence_register:output_requirements', score: 0.108108 },
+    expect(pairwiseScores.map(({ pair }) => pair)).toEqual([
+      'customer_context:strategic_objectives',
+      'customer_context:current_state_assessment',
+      'customer_context:stakeholder_register',
+      'customer_context:evidence_register',
+      'customer_context:output_requirements',
+      'strategic_objectives:current_state_assessment',
+      'strategic_objectives:stakeholder_register',
+      'strategic_objectives:evidence_register',
+      'strategic_objectives:output_requirements',
+      'current_state_assessment:stakeholder_register',
+      'current_state_assessment:evidence_register',
+      'current_state_assessment:output_requirements',
+      'stakeholder_register:evidence_register',
+      'stakeholder_register:output_requirements',
+      'evidence_register:output_requirements',
     ])
   })
 
@@ -28246,7 +29009,7 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     expect(output).not.toContain('casey lee')
     expect(output).not.toContain('12 hours per proposal')
 
-    expect(evidence).toMatch(/evidence coverage|supporting source coverage/)
+    expect(evidence).toMatch(/evidence coverage|supporting context coverage/)
     expect(evidence).not.toContain('alex morgan')
     expect(evidence).not.toContain('two-page pdf')
 
@@ -28791,6 +29554,160 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
       expect(generated.content).not.toMatch(/Objective ownership:|Format or length:/)
       expect(generated.content).toMatch(/confirm|check|verify|identify|record|attach/)
     })
+  })
+
+  test.each([
+    'Distinguish the sourced decision question from an adopted organisational strategy, committed target, execution plan, approval or success measure; do not invent these where this section\'s evidence does not establish them.',
+    'Please differentiate between a decision question, a 20 percent objective and a current baseline of 12 hours.',
+    'Distinguish a draft from a final PDF, the CFO audience and an approved delivery channel.',
+    'No objectives, targets and success metrics have been established.',
+    'Do not invent objectives, current capability and executive sponsors.',
+    'Objectives, current capability and success measures remain unknown.',
+    'Objectives, current capability and success measures require corroboration.',
+  ])('current profiles retain the governor of qualified lists: %s', suppliedDetails => {
+    const frameworkPackage = makeRendererFrameworkPackage({ packageKey: 'vmf-standard-3-1-2', version: '3.1.2',
+      sections: currentSectionProfileFixtures.map(makeCurrentProfileSection) })
+    const frameworkState = { evidence_pack: makeReadyDiscoveryEvidencePack({ accepted: true,
+      inputs: { companyName: 'Controlled Fixture', targetOffer: 'Internal trial', notes: suppliedDetails },
+      state: { status: 'ACCEPTED', inputComplete: true, evidenceReady: true, accepted: true, needsRefresh: false } }),
+    sections: Object.fromEntries(currentSectionProfileFixtures.map(fixture => [fixture.sectionKey, ''])) }
+    const before = structuredClone(frameworkState)
+    const runtimeInstance = makeRuntimeInstanceDocument({ packageKey: 'vmf-standard-3-1-2', packageVersion: '3.1.2', framework_state: frameworkState })
+    currentSectionProfileFixtures.filter(fixture => fixture.sectionKey !== 'evidence_register').forEach(fixture => {
+      const { generated, intelligence } = buildEnrichedGeneratedSection({ actionKey: 'GENERATE_SECTION', actorUserId: CUSTOMER_ADMIN_ID,
+        dependencySectionKeys: [], frameworkPackage, frameworkState, input: suppliedDetails, runtimeInstance,
+        section: makeCurrentProfileSection(fixture), sectionExecutionContract: makeCurrentProfileExecutionContract(fixture),
+        generatedAt: '2026-07-28T10:00:00.000Z' })
+      expect(generated.content).not.toMatch(/Desired outcome or measure:|Objective ownership:|Current baseline or capability:|Format or length:|Audience or recipient:/)
+      expect(generated.inputHash).toBe(hashSectionInput(suppliedDetails))
+      expect(intelligence.supportingEvidence.some(item => item.summary === suppliedDetails)).toBe(true)
+    })
+    expect(frameworkState).toEqual(before)
+  })
+
+  test.each(['but', 'while', 'whereas'])('current profiles retain an independent affirmative clause after %s', conjunction => {
+    const fixture = currentSectionProfileFixtures.find(item => item.sectionKey === 'current_state_assessment')
+    const suppliedDetails = `No sponsor, targets and success measures are confirmed, ${conjunction} the current baseline is 12 hours per proposal.`
+    const frameworkPackage = makeRendererFrameworkPackage({ packageKey: 'vmf-standard-3-1-2', version: '3.1.2', sections: [makeCurrentProfileSection(fixture)] })
+    const frameworkState = { evidence_pack: makeReadyDiscoveryEvidencePack({ accepted: true,
+      inputs: { companyName: 'Controlled Fixture', targetOffer: 'Internal trial', notes: suppliedDetails },
+      state: { status: 'ACCEPTED', inputComplete: true, evidenceReady: true, accepted: true, needsRefresh: false } }), sections: { current_state_assessment: '' } }
+    const { generated } = buildEnrichedGeneratedSection({ actionKey: 'GENERATE_SECTION', actorUserId: CUSTOMER_ADMIN_ID,
+      dependencySectionKeys: [], frameworkPackage, frameworkState, input: suppliedDetails,
+      runtimeInstance: makeRuntimeInstanceDocument({ packageKey: 'vmf-standard-3-1-2', packageVersion: '3.1.2', framework_state: frameworkState }),
+      section: makeCurrentProfileSection(fixture), sectionExecutionContract: makeCurrentProfileExecutionContract(fixture), generatedAt: '2026-07-28T10:00:00.000Z' })
+    expect(generated.content).toContain('Current baseline or capability: the current baseline is 12 hours per proposal.')
+    expect(generated.content).not.toContain('success measures are confirmed')
+  })
+
+  test.each(['procedural', 'source mentions', 'factual input'])('current profiles ground full theme metadata in %s', scenario => {
+    const fixture = currentSectionProfileFixtures.find(item => item.sectionKey === 'strategic_objectives')
+    const frameworkPackage = makeCurrentProfileFrameworkPackage(fixture)
+    const input = scenario === 'factual input'
+      ? 'The current baseline is manual document drafting and Success means consistent outputs.'
+      : 'Write native output consistently. Do not invent automated efficiency or customer-facing reuse benefits. Distinguish objectives from committed targets and success measures.'
+    const fact = scenario === 'source mentions'
+      ? 'No automated drafting, efficiency improvement or reusable output has been established.'
+      : 'This fictional controlled scenario considers a bounded internal document-drafting trial; access review remains outstanding and the source does not authorize execution.'
+    const frameworkState = { evidence_pack: makeReadyDiscoveryEvidencePack({ accepted: true,
+      inputs: scenario === 'factual input' ? {} : { targetOffer: 'Bounded internal document-drafting trial', marketRegion: 'Synthetic internal review' },
+      evidenceObjects: scenario === 'factual input' ? [] : [{ evidenceObjectId: 'bounded_trial', sourceId: 'controlled_source',
+        category: 'Value Drivers', coverageArea: 'Decision Context', reviewStatus: 'ACCEPTED', extractedFact: fact }],
+      state: { accepted: true, needsRefresh: false } }), sections: { strategic_objectives: '' } }
+    const before = structuredClone(frameworkState)
+    const result = buildEnrichedGeneratedSection({ actionKey: 'GENERATE_SECTION', actorUserId: CUSTOMER_ADMIN_ID,
+      dependencySectionKeys: [], frameworkPackage, frameworkState, input,
+      runtimeInstance: makeRuntimeInstanceDocument({ packageKey: frameworkPackage.packageKey, packageVersion: frameworkPackage.version, framework_state: frameworkState }),
+      section: makeCurrentProfileSection(fixture), sectionExecutionContract: makeCurrentProfileExecutionContract(fixture), generatedAt: '2026-07-28T10:00:00.000Z' })
+    const projection = result.intelligence.sourceProjection
+    expect(result.generated.truthEligibility.eligible).toBe(true)
+    expect(projection.themes.length).toBeGreaterThan(0)
+    expect(projection.summary).toContain('topics for review')
+    expect(result.intelligence.displayProjection.suggestedFromDiscovery.summary).toContain('does not establish')
+    expect(result.intelligence.displayProjection.suggestedFromDiscovery.evidenceScope).toContain('stated factual customer context')
+    if (scenario === 'procedural') {
+      expect(projection.themes.map(theme => theme.key)).not.toEqual(expect.arrayContaining(['workflow_automation']))
+      expect(projection.themes.map(theme => theme.key)).not.toContain('consistency_reuse')
+      expect(JSON.stringify({ generated: result.generated, projection, display: result.intelligence.displayProjection.suggestedFromDiscovery }))
+        .not.toMatch(/customer-facing material|reducing manual effort|reduced friction and faster delivery|reuse and consistency of governed section truth/)
+    }
+    if (scenario === 'source mentions') {
+      expect(projection.themes.map(theme => theme.key)).toEqual(expect.arrayContaining(['workflow_automation', 'speed_efficiency', 'consistency_reuse']))
+      projection.themes.filter(theme => theme.supportLevel !== 'DIRECT').forEach(theme => {
+        expect(theme.confidence).toBe('LOW')
+        expect(theme.description).toMatch(/Review|review|remain|inferred/)
+      })
+    }
+    if (scenario === 'factual input') {
+      expect(projection.themes.map(theme => theme.key)).toContain('consistency_reuse')
+      expect(result.generated.content).toContain('Desired outcome or measure: Success means consistent outputs.')
+    }
+    expect(result.intelligence.supportingEvidence.some(item => item.summary === input)).toBe(true)
+    expect(frameworkState).toEqual(before)
+  })
+
+  test.each([
+    ...['Write', 'Draft', 'Generate', 'Create', 'Prepare', 'Produce'].map(verb =>
+      [`${verb} command`, `${verb} Stakeholder Register as an attributed account of only the actors, roles and positions established by the native supplied evidence.`, null]),
+    ['polite command', 'Please create the Stakeholder Register as an attributed account.', null],
+    ['secondary command', 'Generate Evidence Register and include Alex Morgan as buyer.', null],
+    ...currentSectionProfileFixtures.map(({ label }) =>
+      [`${label} and fact`, `Generate ${label} and Alex Morgan is the buyer.`, 'Alex Morgan']),
+    ...['. ', '; '].map(separator =>
+      [`separate fact ${separator}`, `Write Stakeholder Register${separator}Alex Morgan is the buyer.`, 'Alex Morgan']),
+    ['verb-like actual name', 'Write Morgan is the buyer.', 'Write Morgan'],
+  ])('current profiles separate authored section instructions from person facts: %s', (_, input, expectedPerson) => {
+    const fixture = currentSectionProfileFixtures.find(item => item.sectionKey === 'stakeholder_register')
+    const frameworkPackage = makeCurrentProfileFrameworkPackage(fixture)
+    const frameworkState = { evidence_pack: makeReadyDiscoveryEvidencePack({ accepted: true,
+      evidenceObjects: [{ evidenceObjectId: 'controlled_fact', sourceId: 'controlled_document',
+        category: 'Value Drivers', coverageArea: 'Decision Context', reviewStatus: 'ACCEPTED',
+        extractedFact: 'The fictional pilot reviewer has not approved the bounded internal document-drafting trial.' }],
+      state: { accepted: true, needsRefresh: false } }), sections: { stakeholder_register: '' } }
+    const before = structuredClone(frameworkState)
+    const result = buildEnrichedGeneratedSection({ actionKey: 'GENERATE_SECTION', actorUserId: CUSTOMER_ADMIN_ID,
+      dependencySectionKeys: [], frameworkPackage, frameworkState, input,
+      runtimeInstance: makeRuntimeInstanceDocument({ packageKey: frameworkPackage.packageKey,
+        packageVersion: frameworkPackage.version, framework_state: frameworkState }),
+      section: makeCurrentProfileSection(fixture), sectionExecutionContract: makeCurrentProfileExecutionContract(fixture),
+      generatedAt: '2026-07-28T10:00:00.000Z' })
+    expect(result.generated.truthEligibility.eligible).toBe(true)
+    if (expectedPerson) {
+      expect(result.generated.content).toContain(`Named participant and role: ${expectedPerson}`)
+      expect(result.generated.content).toContain('buyer')
+    } else expect(result.generated.content).not.toContain('Named participant and role:')
+    expect(result.generated.content).not.toContain('Write Stakeholder —')
+    expect(result.intelligence.supportingEvidence.some(item => item.summary === input)).toBe(true)
+    expect(frameworkState).toEqual(before)
+  })
+
+  test('current profiles distinguish evidence inventory from mixed supporting context counts', () => {
+    const fixture = currentSectionProfileFixtures.find(item => item.sectionKey === 'evidence_register')
+    const frameworkPackage = makeCurrentProfileFrameworkPackage(fixture)
+    const evidenceObjects = [{ evidenceObjectId: 'controlled_fact', sourceId: 'controlled_document',
+      category: 'Value Drivers', coverageArea: 'Decision Context', reviewStatus: 'ACCEPTED',
+      extractedFact: 'The fictional reviewer is considering an internal drafting trial.' }]
+    const frameworkState = { evidence_pack: makeReadyDiscoveryEvidencePack({ accepted: true,
+      evidenceObjects, state: { accepted: true, needsRefresh: false } }), sections: { evidence_register: '' } }
+    const before = structuredClone(frameworkState)
+    const result = buildEnrichedGeneratedSection({ actionKey: 'GENERATE_SECTION', actorUserId: CUSTOMER_ADMIN_ID,
+      dependencySectionKeys: [], frameworkPackage, frameworkState, input: 'Preserve source qualifications.',
+      runtimeInstance: makeRuntimeInstanceDocument({ packageKey: frameworkPackage.packageKey,
+        packageVersion: frameworkPackage.version, framework_state: frameworkState }),
+      section: makeCurrentProfileSection(fixture), sectionExecutionContract: makeCurrentProfileExecutionContract(fixture),
+      generatedAt: '2026-07-28T10:00:00.000Z' })
+    const supporting = result.intelligence.supportingEvidence
+    expect(supporting.map(item => item.sourceType)).toEqual(expect.arrayContaining([
+      'DISCOVERY_EVIDENCE_OBJECT', 'USER_CONTEXT', 'DISCOVERY',
+    ]))
+    expect(supporting.length).toBeGreaterThan(evidenceObjects.length)
+    expect(result.generated.content).toContain('Accepted discovery evidence coverage: 1 reviewed item(s).')
+    expect(result.generated.content).toContain(`Supporting context coverage: ${supporting.length} display entry/entries across 3 context category/categories; these counts do not represent independent sources or consumed evidence objects.`)
+    expect(result.generated.content).not.toContain('Supporting source coverage:')
+    expect(supporting.find(item => item.sourceType === 'DISCOVERY_EVIDENCE_OBJECT')).toMatchObject({
+      refKey: 'controlled_fact', summary: evidenceObjects[0].extractedFact,
+    })
+    expect(frameworkState).toEqual(before)
   })
 
   test('current profile contract compatibility fails closed for every incomplete or mismatched owner field', () => {
@@ -32460,37 +33377,19 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     })
     const token = await getAccessTokenForUser(makeCustomerAdmin())
 
+    await withLockMembershipTransaction(runtimeInstanceDoc, async ({ committed, Snapshot }) => {
     const res = await request
       .post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/LOCK_RECORD`)
       .set('Authorization', `Bearer ${token}`)
       .send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z' })
 
+    if (res.status !== 500) throw new Error(JSON.stringify(res.body))
     expect(res.status).toBe(500)
     expect(res.body.error.code).toBe('RUNTIME_ACTION_AUDIT_FAILED')
-    expect(RuntimeInstance.findOneAndUpdate).toHaveBeenCalledTimes(2)
-    expect(RuntimeInstance.findOneAndUpdate.mock.calls[1]).toEqual([
-      {
-        _id: RUNTIME_INSTANCE_ID,
-        updatedAt: new Date('2026-05-19T08:01:00.000Z'),
-        stateVersion: expect.any(String),
-      },
-      {
-        $set: {
-          framework_state: publishedFrameworkState,
-          stateVersion: 'rsv2:00000000-0000-4000-8000-000000000001',
-          executionStatus: 'IDLE',
-          status: 'ACTIVE',
-          lockedAt: null,
-          lockedBy: null,
-          lockedReason: '',
-          updatedBy: CUSTOMER_ADMIN_ID,
-        },
-      },
-      {
-        new: true,
-        runValidators: true,
-      },
-    ])
+    expect(RuntimeInstance.findOneAndUpdate).toHaveBeenCalledTimes(1)
+    expect(committed).toEqual([])
+    expect(Snapshot.create).not.toHaveBeenCalled()
+    }, { auditFailure: true })
   })
 
   test('renders a runtime workspace from package sections, runtime paths, UI Contract, workflow policy, and framework_state', async () => {
@@ -35001,5 +35900,799 @@ Truth Quality Dimensions; Certification Levels; Blocking Rules; Runtime Warning 
     expect(RuntimePathRegistry.find).not.toHaveBeenCalled()
     expect(UIContract.findOne).not.toHaveBeenCalled()
     expect(WorkflowPolicy.find).not.toHaveBeenCalled()
+  })
+})
+
+describe('editable synthetic evidence qualification transport', () => {
+  const body = () => ({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z',
+    expectedEvidenceFingerprint: `sha256:${'a'.repeat(64)}`, expectedSourceFingerprint: `sha256:${'b'.repeat(64)}`,
+    expectedTargetFingerprint: 'c'.repeat(64), requestedOutputTypeKey: 'commercial-strategy-decision-paper',
+    requestedFormat: 'MARKDOWN', targetSectionKeys: ['decision-requested'], rationale: 'Controlled source-presented test only.',
+    facts: { claimStatus: 'SOURCE_PRESENTED', classification: 'CUSTOMER_EVIDENCE', currentness: 'CURRENT',
+      sourceLocation: 'Controlled source paragraph 1', scope: 'Disposable synthetic test only.', time: 'At the captured source version.',
+      attribution: 'Controlled source', permittedStatement: 'A bounded proposal is under review.',
+      permittedInterpretation: 'EXACT_STATEMENT_ONLY', confidenceWarnings: ['Not independently established.'],
+      blockedStrongerClaim: ['Trial execution is authorised.'], proofDependency: [], proofOrderDisposition: 'NOT_ESTABLISHED',
+      proofOrder: [], proofRequirementCodes: [], evidenceRequiredToSubstantiate: ['An actual access review and decision.'] } })
+  const send = async payload => {
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+    return request.patch(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/discovery-evidence/evidence-review-1/draft-qualification`)
+      .set('Authorization', `Bearer ${token}`).send(payload)
+  }
+  test('mounted route rejects unknown approval/status fields before mutation', async () => {
+    const response = await send({ ...body(), reviewStatus: 'ACCEPTED' })
+    expect(response.status).toBe(422)
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+  test('mounted route rejects an asserted independently established claim', async () => {
+    const payload = body(); payload.facts.claimStatus = 'ESTABLISHED'
+    const response = await send(payload)
+    expect(response.status).toBe(422)
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+  test('mounted route rejects caller dependency injection before reaching native writer', async () => {
+    const response = await send({ ...body(), deps: { connection: { name: 'test', readyState: 1 } } })
+    expect(response.status).toBe(422)
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+  test('ordinary editable customer runtime gains no synthetic author permission', async () => {
+    const document = makeRuntimeInstanceDocument({ updatedAt: new Date('2026-05-19T08:00:00.000Z') })
+    mockRuntimeInstanceForActionExecution({ document })
+    const response = await send(body())
+    expect(response.status).toBe(403)
+    expect(response.body.error.code).toBe('DRAFT_QUALIFICATION_SCOPE_DENIED')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+  test('a locked runtime is rejected by the ordinary lifecycle gate', async () => {
+    const document = makeLockedPublishedRuntimeInstance({ updatedAt: new Date('2026-05-19T08:00:00.000Z') })
+    mockRuntimeInstanceForActionExecution({ document })
+    const response = await send(body())
+    expect(response.status).toBe(409)
+    expect(response.body.error.details.reason).toBe('RUNTIME_MUTATION_NOT_EDITABLE')
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+})
+
+describe('actual editable qualification writer with external effect seams', () => {
+  const setup = async () => {
+    const { PUBLISHED_DISPOSITION_POLICY: policy } = await import('../constants/publishedDispositionRecoveryPolicy.js')
+    const helper = await import('../services/evidenceDraftQualification.js')
+    const { sourceMaterialFingerprint } = await import('../services/sourceVerificationContext.js')
+    const { makeSs041Fixture } = await import('./fixtures/outcomeEvidenceToDraftFixtures.js')
+    const { recordRuntimeEvidenceDraftQualification: write } = await import('../services/runtimeStateMutationService.js')
+    const selectedTarget = (await makeSs041Fixture()).selectedTarget
+    const actor = policy.originalUpdatedBy, stateVersion = 'rsv2:123e4567-e89b-42d3-a456-426614174000'
+    const evidence = { evidenceObjectId: 'writer-evidence', sourceId: 'writer-source', lineageRef: 'lineage:writer-evidence',
+      extractedFact: 'This disposable synthetic proposal is subject to an access review.', reviewStatus: 'ACCEPTED', validationStatus: 'UNVALIDATED' }
+    const source = { sourceId: evidence.sourceId, sourceType: 'USER_INPUT', title: 'Explicit synthetic source', lineageRef: 'lineage:writer-source' }
+    const section = (key, refs) => ({ input: 'Original input', accepted: { content: 'Original accepted passage.', supportingEvidenceRefs: refs },
+      generated: { content: 'Original generated passage.' }, state: { status: 'ACCEPTED' },
+      lineage: { sectionKey: key, runtimePath: `framework_state.sections.${key}` } })
+    const runtime = { _id: '6ad000000000000000000002', runtimeInstanceKey: 'synthetic-r2-writer-unit',
+      customerId: policy.scope.customerId, tenantId: policy.scope.tenantId, frameworkKey: 'VMF', packageId: '6ad000000000000000000003',
+      packageKey: 'unit-vmf', packageVersion: '3.1.7', dependencyLockId: 'unit-lock', activationId: 'unit-activation', deploymentId: 'unit-deployment',
+      runtimeType: 'VALUE_NARRATIVE', status: 'ACTIVE', executionStatus: 'IDLE', stateVersion, updatedAt: new Date('2026-10-18T10:00:00.000Z'), updatedBy: actor,
+      revision: { revisionNumber: 2, parentRuntimeId: policy.scope.runtimeInstanceId, rootRuntimeId: policy.scope.runtimeInstanceId },
+      framework_state: { lifecycle: { stage: 'DRAFT' }, lock: { locked: false }, publish: { published: false },
+        evidence_pack: { accepted: true, state: { accepted: true }, sourceRegistry: [source], evidenceObjects: [evidence] },
+        sections: { source_section: section('source_section', [evidence.evidenceObjectId]),
+          lineage_only: section('lineage_only', [evidence.lineageRef]), downstream: section('downstream', []) },
+        readiness: { ready: true, submittedForReview: true }, validation: { old: true } } }
+    const root = { ...runtime, _id: policy.scope.runtimeInstanceId, status: 'LOCKED' }
+    const native = [[{ ...evidence, sourceStateVersion: stateVersion }], [{ ...source, sourceStateVersion: stateVersion }],
+      Object.entries(runtime.framework_state.sections).map(([sectionKey, value]) => ({ sectionKey,
+        sectionDetail: { accepted: JSON.parse(JSON.stringify(value.accepted)) }, sourceStateVersion: stateVersion }))]
+    const facts = { claimStatus: 'SOURCE_PRESENTED', classification: 'CUSTOMER_EVIDENCE', currentness: 'CURRENT',
+      sourceLocation: 'Explicit synthetic source paragraph1', scope: 'Disposable synthetic proposal only', time: 'At recorded source capture',
+      attribution: source.title, permittedStatement: evidence.extractedFact, permittedInterpretation: 'EXACT_STATEMENT_ONLY',
+      confidenceWarnings: ['Source-presented; independent evidence remains absent.'], blockedStrongerClaim: ['No permission to execute or claim benefits.'],
+      proofDependency: [], proofOrderDisposition: 'NOT_ESTABLISHED', proofOrder: [], proofRequirementCodes: [], evidenceRequiredToSubstantiate: ['Actual access approval.'] }
+    const payload = { expectedUpdatedAt: runtime.updatedAt.toISOString(), expectedEvidenceFingerprint: helper.evidenceDraftMaterialFingerprint(evidence),
+      expectedSourceFingerprint: sourceMaterialFingerprint(source), expectedTargetFingerprint: selectedTarget.receiptFingerprint,
+      requestedOutputTypeKey: 'unit-selected-output', requestedFormat: 'MARKDOWN', targetSectionKeys: [selectedTarget.receipt.targetSections.required[0].targetSectionKey],
+      facts, rationale: 'Record exact synthetic source qualifications without approval.' }
+    const deps = { env: { nodeEnv: 'test', appEnv: 'development' }, connection: { name: 'test', readyState: 1 },
+      resolveRuntimeInstanceForMutation: jest.fn(async () => runtime), readRoot: jest.fn(async () => root), readNativeState: jest.fn(async () => native),
+      resolveTarget: jest.fn(async () => selectedTarget), resolvePackage: jest.fn(async () => ({ sections: [
+        { sectionKey: 'source_section', runtimePath: 'framework_state.sections.source_section' },
+        { sectionKey: 'lineage_only', runtimePath: 'framework_state.sections.lineage_only' },
+        { sectionKey: 'downstream', runtimePath: 'framework_state.sections.downstream', dependsOnSectionKeys: ['source_section'] },
+      ] })), assertWritable: jest.fn(async () => {}),
+      rebuildGraph: jest.fn(async ({ nextFrameworkState }) => ({ nextFrameworkState, graph: null, auditDiff: { unitGraphEffect: true } })),
+      persist: jest.fn(async () => ({ stateVersion: 'unit-next-state', updatedAt: '2026-10-18T10:01:00.000Z' })) }
+    const args = { actorUserId: actor, runtimeInstanceId: runtime._id, evidenceObjectId: evidence.evidenceObjectId,
+      auditRequest: { requestId: 'writer-unit' }, scopes: { testSelectedScope: true }, payload, deps }
+    return { write, args, deps, runtime, root, native, evidence, source, selectedTarget }
+  }
+
+  const bindingSetup = async () => {
+    const f = await setup()
+    const helper = await import('../services/evidenceDraftQualification.js')
+    const reviewOwner = await import('../services/discoveryContradictionReviewService.js')
+    const parentId = '6ad4b3cab439648c0f316453', parentKey = 'ss044-disposable-synthetic-20261013-r1-rev-2-0f316453'
+    const snapshot = { snapshotId: 'runtime-truth-lock-record-ss044-disposable-synthetic-20261013-r1-rev-2-0f316453-adc4fa6d05b5258a',
+      snapshotHash: 'adc4fa6d05b5258a34bef5cd46d37ca8769d828e48d2e144197733ef402a562c' }
+    const publish = { snapshotId: 'runtime-truth-publish-ss044-disposable-synthetic-20261013-r1-rev-2-0f316453-196c67237448d626',
+      snapshotHash: '196c67237448d626a152089dcbc48024a968548bd6efee754c4a6924690add38' }
+    const replay = { replayAnchorId: 'runtime-replay-anchor-ee832b96a2e1654f',
+      replayAnchorHash: 'ee832b96a2e1654fa161802a74d6d15dab5be7b6d49d1bba4edb4de99d5b0a9b' }
+    f.runtime.workspaceId = 'unit-workspace'
+    const parent = { ...JSON.parse(JSON.stringify(f.runtime)), _id: parentId, runtimeInstanceKey: parentKey,
+      status: 'LOCKED', stateVersion: 'rsv2:98b09889-c96a-4a5a-81c8-1495cafc9047',
+      framework_state: { lock: { locked: true, snapshot, replayAnchor: replay }, publish: { snapshot: publish } } }
+    f.runtime.runtimeInstanceKey = 'synthetic-r3-binding-unit'
+    f.runtime.revision = { ...f.runtime.revision, revisionNumber: 3, createdFromRevision: 2, parentRuntimeId: parentId,
+      parentRuntimeInstanceKey: parentKey, derivedFromPublishSnapshotId: publish.snapshotId, derivedFromPublishSnapshotHash: publish.snapshotHash,
+      derivedFromLockSnapshotId: snapshot.snapshotId, derivedFromLockSnapshotHash: snapshot.snapshotHash,
+      derivedFromReplayAnchorId: replay.replayAnchorId, derivedFromReplayAnchorHash: replay.replayAnchorHash }
+    f.deps.readBindingParent = jest.fn(async () => parent)
+    f.evidence.draftQualification = helper.recordEvidenceDraftQualification({ evidence: f.evidence, source: f.source,
+      sourceSectionKeys: ['old_source_section'], selectedTarget: f.selectedTarget,
+      targetSectionKeys: f.args.payload.targetSectionKeys, facts: f.args.payload.facts, actorUserId: f.args.actorUserId,
+      authoredAt: '2026-10-19T10:00:00.000Z' })
+    f.native[0][0].draftQualification = JSON.parse(JSON.stringify(f.evidence.draftQualification))
+    f.args.payload.mode = 'REVALIDATE_BINDING'
+    f.args.payload.expectedQualificationFingerprint = helper.evidenceDraftQualificationFingerprint(f.evidence.draftQualification)
+    for (const section of Object.values(f.runtime.framework_state.sections)) {
+      section.revisions = [{ generated: { content: 'Historical generated body' }, accepted: { content: 'Historical accepted body' },
+        archivedAt: '2026-10-18T09:00:00.000Z' }]
+    }
+    const pack = f.runtime.framework_state.evidence_pack
+    const other = { ...f.evidence, evidenceObjectId: 'writer-pair-evidence', extractedFact: 'A second neutral source statement.', reviewStatus: 'PENDING' }
+    delete other.draftQualification
+    pack.evidenceObjects.push(other)
+    const candidate = { contradictionId: 'unit-contradiction', evidenceObjectIds: [f.evidence.evidenceObjectId, other.evidenceObjectId],
+      domain: 'unit', severity: 'WARNING', basis: 'Synthetic fixture pair' }
+    const epoch = '123e4567-e89b-42d3-a456-426614174000'
+    const pair = reviewOwner.getDiscoveryContradictionReview(candidate, pack.evidenceObjects, [], parentId, epoch).evidencePairHash
+    pack.contradictionReviewEpoch = epoch
+    pack.discoveryHealth = { contradictionCandidates: [candidate] }
+    pack.contradictionReviews = [{ contractVersion: reviewOwner.DISCOVERY_CONTRADICTION_REVIEW_CONTRACT,
+      contradictionId: candidate.contradictionId, reviewId: 'unit-review', reviewedBy: f.args.actorUserId,
+      reviewedAt: '2026-10-19T10:00:00.000Z', rationale: 'Recorded synthetic parent finding only.',
+      runtimeInstanceId: parentId, reviewEpoch: epoch, evidencePairHash: pair, disposition: 'NOT_CONTRADICTORY' }]
+    const inspectReview = state => reviewOwner.getDiscoveryContradictionReview(candidate, state.evidence_pack.evidenceObjects,
+      state.evidence_pack.contradictionReviews, f.runtime._id, epoch)
+    expect(reviewOwner.getDiscoveryContradictionReview(candidate, pack.evidenceObjects, pack.contradictionReviews, parentId, epoch).reviewStatus).toBe('NOT_CONTRADICTORY')
+    expect(inspectReview(f.runtime.framework_state).reviewStatus).toBe('STALE')
+    return { ...f, parent, helper, inspectReview }
+  }
+  test('binding-only R3 writer preserves full truth/history and actual native qualification preparation while invalidating pack readiness', async () => {
+    const f = await bindingSetup(), before = JSON.stringify(f.runtime), oldEnvelope = JSON.parse(JSON.stringify(f.evidence.draftQualification))
+    const { prepareRuntimeSectionEvidenceQualificationContext } = await import('../services/runtimeSectionReasoningService.js')
+    const { hashSectionInput } = await import('../services/runtimeSectionModelService.js')
+    const prepare = frameworkState => prepareRuntimeSectionEvidenceQualificationContext({ actionKey: 'REGENERATE_SECTION',
+      frameworkPackage: { frameworkKey: 'VMF', packageKey: 'unit-vmf', version: '3.1.7', sections: [
+        { sectionKey: 'stakeholder-register', runtimePath: 'framework_state.sections.stakeholder_register' }] }, frameworkState,
+      section: { sectionKey: 'stakeholder-register', runtimePath: 'framework_state.sections.stakeholder_register' },
+      sectionExecutionContract: { reasoningArtefacts: [] } })
+    const previousPrepared = prepare(f.runtime.framework_state)
+    expect(previousPrepared.branch).toBe('VMF')
+    const result = await f.write(f.args)
+    const saved = f.deps.persist.mock.calls[0][0], next = saved.nextFrameworkState
+    expect(result).toMatchObject({ requiresRegeneration: false, authoritative: false, affectedSectionKeys: [] })
+    expect(f.deps.readBindingParent).toHaveBeenCalledWith(f.parent._id)
+    expect(next.sections).toEqual(f.runtime.framework_state.sections)
+    for (const [key, section] of Object.entries(f.runtime.framework_state.sections)) {
+      expect(next.sections[key].generated).toEqual(section.generated)
+      expect(next.sections[key].accepted).toEqual(section.accepted)
+      expect(next.sections[key].revisions).toEqual(section.revisions)
+    }
+    // Native acceptance is deliberately reset; isolate metadata under identical controls only in this pure probe.
+    const sameControlProbe = JSON.parse(JSON.stringify(next))
+    sameControlProbe.evidence_pack.accepted = f.runtime.framework_state.evidence_pack.accepted
+    sameControlProbe.evidence_pack.state = JSON.parse(JSON.stringify(f.runtime.framework_state.evidence_pack.state))
+    const nextPrepared = prepare(sameControlProbe)
+    expect(nextPrepared.branch).toBe('VMF')
+    expect(nextPrepared.evidenceQualifications).toEqual(previousPrepared.evidenceQualifications)
+    expect(nextPrepared.evidenceQualificationHash).toBe(previousPrepared.evidenceQualificationHash)
+    expect(nextPrepared.admittedEvidenceIds).toEqual(previousPrepared.admittedEvidenceIds)
+    expect(nextPrepared.coverage.evidence).toEqual(previousPrepared.coverage.evidence)
+    expect(nextPrepared.declarations).toEqual(previousPrepared.declarations)
+    expect(hashSectionInput(nextPrepared.evidenceQualifications)).toBe(previousPrepared.evidenceQualificationHash)
+    expect(result.draftQualification.facts).toEqual(oldEnvelope.facts)
+    expect(result.draftQualification.binding.sourceSectionKeys).toEqual(['source_section'])
+    expect(next.evidence_pack).toMatchObject({ accepted: false, state: { accepted: false } })
+    expect(next.readiness).toMatchObject({ state: 'DRAFT', ready: false, submittedForReview: false })
+    expect(next.validation).toEqual({})
+    expect(next.evidence_pack.contradictionReviews).toEqual(f.runtime.framework_state.evidence_pack.contradictionReviews)
+    expect(f.inspectReview(next).reviewStatus).toBe('STALE')
+    expect(saved.previousValue).toEqual(oldEnvelope)
+    expect(saved.nextValue).toEqual(result.draftQualification)
+    expect(saved.additionalDiff.evidenceDraftQualification).toMatchObject({ mode: 'REVALIDATE_BINDING',
+      previousFingerprint: f.args.payload.expectedQualificationFingerprint,
+      nextFingerprint: f.helper.evidenceDraftQualificationFingerprint(result.draftQualification),
+      previousSourceSectionKeys: ['old_source_section'], sourceSectionKeys: ['source_section'], invalidatedSectionKeys: [], independentValidation: false })
+    expect(JSON.stringify(f.runtime)).toBe(before)
+  })
+  test.each([
+    ['R2 mode is denied', f => { f.runtime.revision.revisionNumber = 2 }],
+    ['locked R3', f => { f.runtime.framework_state.lock.locked = true }],
+    ['wrong parent', f => { f.runtime.revision.parentRuntimeId = RUNTIME_INSTANCE_ID }],
+    ['wrong parent state', f => { f.parent.stateVersion = 'rsv2:123e4567-e89b-42d3-a456-426614174000' }],
+    ['wrong parent lock hash', f => { f.parent.framework_state.lock.snapshot.snapshotHash = 'a'.repeat(64) }],
+    ['wrong root', f => { f.runtime.revision.rootRuntimeId = RUNTIME_INSTANCE_ID }],
+    ['ordinary package', f => { f.parent.packageVersion = 'another' }],
+    ['workspace mismatch', f => { f.parent.workspaceId = 'another-workspace' }],
+    ['wrong createdFrom', f => { f.runtime.revision.createdFromRevision = 1 }],
+    ['wrong publish anchor', f => { f.runtime.revision.derivedFromPublishSnapshotHash = 'a'.repeat(64) }],
+    ['wrong replay anchor', f => { f.runtime.revision.derivedFromReplayAnchorHash = 'a'.repeat(64) }],
+    ['changed facts', f => { f.args.payload.facts.scope = 'Different scope' }],
+    ['changed target section', f => { f.args.payload.targetSectionKeys = ['unknown-target'] }],
+    ['changed source', f => { f.source.title += ' Changed' }],
+    ['changed evidence', f => { f.evidence.extractedFact += ' Changed' }],
+    ['stale previous envelope', f => { f.args.payload.expectedQualificationFingerprint = 'a'.repeat(64) }],
+    ['stale CAS', f => { f.args.payload.expectedUpdatedAt = '2026-10-18T09:59:00.000Z' }],
+    ['native membership mismatch', f => { f.native[2][0].sectionDetail.accepted.supportingEvidenceRefs = [] }],
+    ['target context changed', f => { f.deps.resolveTarget.mockResolvedValueOnce(f.selectedTarget).mockResolvedValueOnce({ ...f.selectedTarget, receiptFingerprint: 'a'.repeat(64) }) }],
+    ['no-op binding', f => {
+      f.evidence.draftQualification.binding.sourceSectionKeys = ['source_section']
+      f.args.payload.expectedQualificationFingerprint = f.helper.evidenceDraftQualificationFingerprint(f.evidence.draftQualification)
+    }],
+  ])('binding-only writer rejects %s without persisting', async (_name, alter) => {
+    const f = await bindingSetup(); alter(f)
+    const before = JSON.stringify(f.runtime)
+    await expect(f.write(f.args)).rejects.toBeDefined()
+    expect(f.deps.persist).not.toHaveBeenCalled()
+    expect(JSON.stringify(f.runtime)).toBe(before)
+  })
+  test.each(['readBindingParent', 'readNativeState', 'resolveTarget', 'assertWritable', 'rebuildGraph', 'persist'])(
+    'binding-only writer propagates rejected %s dependency', async owner => {
+      const f = await bindingSetup(), failure = new Error('Binding dependency rejected: ' + owner)
+      f.deps[owner].mockRejectedValue(failure)
+      await expect(f.write(f.args)).rejects.toBe(failure)
+      expect(f.deps.persist).toHaveBeenCalledTimes(owner === 'persist' ? 1 : 0)
+    })
+  test.each(['missing', 'facts', 'binding', 'author'])(
+    'binding-only writer rejects divergent native previous qualification: %s', async variant => {
+      const f = await bindingSetup(), before = JSON.stringify(f.runtime)
+      const native = f.native[0][0]
+      if (variant === 'missing') delete native.draftQualification
+      if (variant === 'facts') native.draftQualification.facts.confidenceWarnings.push('Different native warning.')
+      if (variant === 'binding') native.draftQualification.binding.sourceSectionKeys = ['different_native_section']
+      if (variant === 'author') native.draftQualification.authoredAt = '2026-10-19T11:00:00.000Z'
+      await expect(f.write(f.args)).rejects.toMatchObject({ status: 409, code: 'DRAFT_QUALIFICATION_STALE' })
+      expect(f.deps.resolveTarget).not.toHaveBeenCalled()
+      expect(f.deps.persist).not.toHaveBeenCalled()
+      expect(JSON.stringify(f.runtime)).toBe(before)
+    })
+  test('actual writer validates source/target and invalidates exact native membership plus conservative lineage truth', async () => {
+    const f = await setup(), before = JSON.stringify(f.runtime)
+    const result = await f.write(f.args)
+    expect(result).toMatchObject({ authoritative: false, requiresRegeneration: true, stateVersion: 'unit-next-state',
+      affectedSectionKeys: ['lineage_only', 'source_section'] })
+    expect(result.draftQualification.binding.sourceSectionKeys).toEqual(['source_section'])
+    expect(f.deps.resolveRuntimeInstanceForMutation).toHaveBeenCalledWith({ actorUserId: f.args.actorUserId, runtimeInstanceId: f.runtime._id, scopes: f.args.scopes })
+    expect(f.deps.readNativeState).toHaveBeenCalledWith({ currentScope: expect.objectContaining({ runtimeInstanceId: f.runtime._id,
+      runtimeInstanceKey: f.runtime.runtimeInstanceKey, customerId: f.runtime.customerId, tenantId: f.runtime.tenantId, current: true, stateVersion: f.runtime.stateVersion }),
+    evidenceObjectId: f.evidence.evidenceObjectId, sourceId: f.source.sourceId })
+    expect(f.deps.resolveTarget).toHaveBeenCalledTimes(2)
+    for (const [targetArgs] of f.deps.resolveTarget.mock.calls) {
+      expect(targetArgs).toEqual({ runtime: f.runtime, scopes: f.args.scopes,
+        requestedOutputTypeKey: f.args.payload.requestedOutputTypeKey, requestedFormat: 'MARKDOWN' })
+    }
+    expect(f.deps.persist).toHaveBeenCalledTimes(1)
+    const saved = f.deps.persist.mock.calls[0][0], state = saved.nextFrameworkState
+    expect(saved.expectedUpdatedAt).toBe(f.args.payload.expectedUpdatedAt)
+    expect(saved.runtimeInstance).toBe(f.runtime)
+    expect(f.deps.readRoot).toHaveBeenCalledWith(f.runtime.revision.rootRuntimeId)
+    expect(f.deps.assertWritable).toHaveBeenCalledWith({ frameworkKey: f.runtime.frameworkKey, value: state.evidence_pack })
+    expect(state.evidence_pack.evidenceObjects[0]).toMatchObject({ extractedFact: f.evidence.extractedFact, reviewStatus: 'ACCEPTED', validationStatus: 'UNVALIDATED' })
+    expect(state.evidence_pack.accepted).toBe(false)
+    expect(state.readiness).toMatchObject({ state: 'DRAFT', ready: false, submittedForReview: false })
+    expect(state.validation).toEqual({})
+    for (const key of ['source_section', 'lineage_only']) {
+      expect(state.sections[key].state).toMatchObject({ needsRegeneration: true, acceptedInvalidationReason: 'SECTION_EVIDENCE_CHANGED' })
+      expect(state.sections[key].review.invalidationReason).toBe('SECTION_EVIDENCE_CHANGED')
+    }
+    expect(state.sections.downstream.state).toMatchObject({ needsRegeneration: true, dependencyStatus: 'DEPENDENCY_CONTEXT_INVALIDATED' })
+    expect(state.sections.source_section.accepted.content).toBe('Original accepted passage.')
+    expect(saved.previousFrameworkState.sections.source_section.state).toEqual({ status: 'ACCEPTED' })
+    expect(saved.additionalDiff.evidenceDraftQualification).toMatchObject({ sourceSectionKeys: ['source_section'], invalidatedSectionKeys: ['lineage_only', 'source_section'], independentValidation: false })
+    expect(JSON.stringify(f.runtime)).toBe(before)
+  })
+  test.each([false, true])('uses actual graph and mapper with canonical source validation, changed=%s', async changed => {
+    const f = await setup()
+    const { buildRuntimeIntelligenceGraphForFrameworkState } = await import('../services/runtimeIntelligenceGraphService.js')
+    const { createRuntimeStateLegacyRowSet } = await import('../services/runtimeStateLegacyMapper.js')
+    f.runtime.framework_state.evidence_pack.lineage = { sources: [{ sourceId: f.source.sourceId,
+      type: 'USER_PROVIDED_INPUT', fieldKey: 'companyName' }] }
+    const before = JSON.stringify(f.runtime)
+    f.deps.rebuildGraph.mockImplementation(async ({ nextFrameworkState, frameworkPackage }) => {
+      if (changed) nextFrameworkState.evidence_pack.sourceRegistry[0].title = 'Changed canonical source'
+      const graph = buildRuntimeIntelligenceGraphForFrameworkState({ runtimeInstance: f.runtime, frameworkPackage,
+        frameworkState: nextFrameworkState, builtAt: '2026-10-18T10:01:00.000Z' })
+      expect(graph.validation.status).toBe('VALID')
+      const mapped = createRuntimeStateLegacyRowSet({ legacyInput: { rawBsonBytes: 4096,
+        sections: nextFrameworkState.sections, evidencePack: nextFrameworkState.evidence_pack, intelligenceGraph: graph },
+        scope: { runtimeInstanceId: f.runtime._id, runtimeInstanceKey: f.runtime.runtimeInstanceKey,
+          customerId: f.runtime.customerId, tenantId: f.runtime.tenantId }, stateVersion: f.runtime.stateVersion,
+        migrationReceiptId: '6ad000000000000000000004', migrationTimestamp: '2026-10-18T10:01:00.000Z' })
+      expect(mapped.rows.evidenceObjects[0].draftQualification).toEqual(nextFrameworkState.evidence_pack.evidenceObjects[0].draftQualification)
+      return { nextFrameworkState: { ...nextFrameworkState, intelligence_graph: graph }, graph, auditDiff: {} }
+    })
+    if (changed) {
+      await expect(f.write(f.args)).rejects.toMatchObject({ code: 'EVIDENCE_DRAFT_QUALIFICATION_INVALID' })
+      expect(f.deps.persist).not.toHaveBeenCalled()
+    } else {
+      const result = await f.write(f.args)
+      expect(result.draftQualification.facts.permittedStatement).toBe(f.evidence.extractedFact)
+      expect(f.deps.persist).toHaveBeenCalledTimes(1)
+      expect(f.deps.persist.mock.calls[0][0].rebuiltIntelligenceGraph.validation.status).toBe('VALID')
+    }
+    expect(JSON.stringify(f.runtime)).toBe(before)
+  })
+  test('binds actual mapped storage membership while preserving different package lineage invalidation', async () => {
+    const f = await setup()
+    const { createRuntimeStateLegacySourceRowSet } = await import('../services/runtimeStateLegacyMapper.js')
+    const { assembleOutcomeEvidenceInventory } = await import('../utils/outcomeEvidenceSnapshot.js')
+    const { projectEvidenceDraftQualification } = await import('../services/evidenceDraftQualification.js')
+    const canonicalKeys = { source_section: 'package-source', lineage_only: 'package-provenance', downstream: 'package-dependent' }
+    for (const [stateKey, section] of Object.entries(f.runtime.framework_state.sections)) {
+      section.lineage.sectionKey = canonicalKeys[stateKey]
+    }
+    f.deps.resolvePackage.mockResolvedValue({ sections: Object.entries(canonicalKeys).map(([stateKey, sectionKey]) => ({
+      sectionKey, runtimePath: `framework_state.sections.${stateKey}`,
+      ...(stateKey === 'downstream' ? { dependsOnSectionKeys: ['package-source'] } : {}),
+    })) })
+    const input = { legacyInput: { rawBsonBytes: 4096, sections: f.runtime.framework_state.sections,
+      evidencePack: f.runtime.framework_state.evidence_pack, intelligenceGraph: { graphVersion: 'graph-v1', nodes: [], edges: [] } },
+      scope: { runtimeInstanceId: f.runtime._id, runtimeInstanceKey: f.runtime.runtimeInstanceKey,
+        customerId: f.runtime.customerId, tenantId: f.runtime.tenantId }, stateVersion: f.runtime.stateVersion,
+      migrationReceiptId: '6ad000000000000000000004', migrationTimestamp: '2026-10-18T10:00:00.000Z' }
+    f.native[2] = createRuntimeStateLegacySourceRowSet(input).rows.sections
+    expect(f.native[2].find(row => row.sectionKey === 'source_section').sectionDetail.lineage.sectionKey).toBe('package-source')
+    const before = JSON.stringify(f.runtime)
+    const result = await f.write(f.args)
+    expect(result.draftQualification.binding.sourceSectionKeys).toEqual(['source_section'])
+    expect(result.affectedSectionKeys).toEqual(['package-provenance', 'package-source'])
+    const saved = f.deps.persist.mock.calls[0][0]
+    expect(saved.additionalDiff.evidenceDraftQualification).toMatchObject({ sourceSectionKeys: ['source_section'],
+      invalidatedSectionKeys: ['package-provenance', 'package-source'] })
+    for (const stateKey of ['source_section', 'lineage_only']) {
+      expect(saved.nextFrameworkState.sections[stateKey].state.needsRegeneration).toBe(true)
+      expect(saved.nextFrameworkState.sections[stateKey].lineage.sectionKey).toBe(canonicalKeys[stateKey])
+      expect(saved.nextFrameworkState.sections[stateKey].accepted.content).toBe('Original accepted passage.')
+    }
+    expect(saved.nextFrameworkState.sections.downstream.state.dependencyStatus).toBe('DEPENDENCY_CONTEXT_INVALIDATED')
+    const bodies = { evidence: [{ ...f.native[0][0], _id: '6ad000000000000000000005' }],
+      sources: [{ ...f.native[1][0], _id: '6ad000000000000000000006' }] }
+    const inventory = await assembleOutcomeEvidenceInventory({ scope: { ...input.scope, stateVersion: input.stateVersion },
+      sections: f.native[2].map(row => ({ sectionKey: row.sectionKey, references: row.sectionDetail.accepted.supportingEvidenceRefs })),
+      readPage: async kind => bodies[kind], count: async kind => bodies[kind].length, validateRows: () => {} })
+    const sourceSectionKeys = inventory.receipt.sectionCoverage.filter(section => section.evidenceIds.includes(f.evidence.evidenceObjectId)).map(section => section.sectionKey)
+    expect(sourceSectionKeys).toEqual(['source_section'])
+    expect(projectEvidenceDraftQualification({ evidence: { ...f.evidence, draftQualification: result.draftQualification },
+      source: f.source, sourceSectionKeys, selectedTarget: f.selectedTarget }).draftPlacement.sourceSectionKeys).toEqual(['source_section'])
+    expect(JSON.stringify(f.runtime)).toBe(before)
+  })
+  test.each([
+    ['punctuation alias in native storage', f => { f.native[2][0].sectionKey = 'source-section' }],
+    ['lineage-only provenance is not membership', f => {
+      f.runtime.framework_state.sections.source_section.accepted.supportingEvidenceRefs = [f.evidence.lineageRef]
+      f.native[2][0].sectionDetail.accepted.supportingEvidenceRefs = [f.evidence.lineageRef]
+    }],
+  ])('rejects %s without granting source placement membership', async (_name, mutate) => {
+    const f = await setup()
+    mutate(f)
+    await expect(f.write(f.args)).rejects.toMatchObject({ status: 409, code: 'DRAFT_QUALIFICATION_SOURCE_UNMAPPED' })
+    expect(f.deps.resolveTarget).not.toHaveBeenCalled()
+    expect(f.deps.persist).not.toHaveBeenCalled()
+  })
+  test.each([
+    ['stale updatedAt', f => { f.args.payload.expectedUpdatedAt = '2026-10-18T09:59:00.000Z' }, 409],
+    ['source fingerprint', f => { f.args.payload.expectedSourceFingerprint = 'sha256:' + 'a'.repeat(64) }, 409],
+    ['evidence fingerprint', f => { f.args.payload.expectedEvidenceFingerprint = 'sha256:' + 'a'.repeat(64) }, 409],
+    ['native evidence parity', f => { f.native[0][0].extractedFact += ' Changed' }, 409],
+    ['native section parity', f => { f.native[2][0].sectionDetail.accepted.supportingEvidenceRefs = [] }, 409],
+    ['wrong initial target', f => { f.args.payload.expectedTargetFingerprint = 'a'.repeat(64) }, 409],
+    ['changed second target', f => { f.deps.resolveTarget.mockResolvedValueOnce(f.selectedTarget).mockResolvedValueOnce({ ...f.selectedTarget, receiptFingerprint: 'a'.repeat(64) }) }, 409],
+    ['proof cycle', f => { f.args.payload.facts.proofDependency = [f.evidence.evidenceObjectId] }, 409],
+    ['locked child', f => { f.runtime.framework_state.lock.locked = true }, 409],
+    ['published child', f => { f.runtime.framework_state.lifecycle.stage = 'PUBLISHED' }, 409],
+    ['wrong actor', f => { f.args.actorUserId = CUSTOMER_ADMIN_ID }, 403],
+    ['production environment', f => { f.deps.env.appEnv = 'production' }, 403],
+    ['wrong database', f => { f.deps.connection.name = 'customer-production' }, 403],
+    ['wrong customer', f => { f.runtime.customerId = OTHER_CUSTOMER_ID }, 403],
+    ['original R1 identity', f => { f.runtime._id = f.runtime.revision.rootRuntimeId }, 403],
+    ['missing locked root', f => { f.deps.readRoot.mockResolvedValue(null) }, 403],
+    ['wrong parent', f => { f.runtime.revision.parentRuntimeId = RUNTIME_INSTANCE_ID }, 403],
+    ['changed package anchor', f => { f.root.packageVersion = 'changed' }, 403],
+    ['unavailable transaction', f => { f.deps.connection.readyState = 0 }, 503],
+    ['caller deps', f => { f.args.payload.deps = { persist: true } }, 422],
+  ])('actual writer rejects %s before persist', async (_label, alter, status) => {
+    const f = await setup(); alter(f)
+    await expect(f.write(f.args)).rejects.toMatchObject({ status })
+    expect(f.deps.persist).not.toHaveBeenCalled()
+  })
+  test.each(['permission owner', 'writable owner', 'graph owner', 'persistence or audit owner'])('propagates rejected %s without success', async owner => {
+    const f = await setup(), failure = new Error('Exact dependency rejection: ' + owner)
+    const key = { 'permission owner': 'resolveRuntimeInstanceForMutation', 'writable owner': 'assertWritable', 'graph owner': 'rebuildGraph',
+      'persistence or audit owner': 'persist' }[owner]
+    f.deps[key].mockRejectedValue(failure)
+    await expect(f.write(f.args)).rejects.toBe(failure)
+    expect(f.deps.persist).toHaveBeenCalledTimes(key === 'persist' ? 1 : 0)
+    expect(f.runtime.framework_state.evidence_pack.evidenceObjects[0].draftQualification).toBeUndefined()
+  })
+})
+
+describe('qualification-aware native REGENERATE owner', () => {
+  const setup = async (receipt, { legacy = false } = {}) => {
+    const declarations = [{ artefactKey: 'qualificationBrief', label: 'Brief', purpose: 'Bounded interpretation.', required: true,
+      lifecycleStage: 'GENERATED', sectionKeys: ['customer_problem'], workflowActionKeys: ['GENERATE_SECTION', 'REGENERATE_SECTION'],
+      sourcePath: 'sectionIntelligence.qualificationBrief', writePath: 'framework_state.sections.customer_problem.generated.reasoningArtefacts.qualificationBrief',
+      schema: { type: 'object', additionalProperties: false, required: ['value'], properties: { value: { type: 'string', minLength: 1 } } },
+      validation: { maxBytes: 4096 }, handoff: { eligible: false } }]
+    const pack = makeRendererFrameworkPackage({ ...(legacy ? { version: '3.1.5' } : { reasoningArtefacts: declarations }),
+      workflowBindings: [makeWorkflowBinding('REGENERATE_SECTION')] })
+    if (legacy) pack.dependencyLock.packageVersion = pack.version
+    RuntimeDeployment.findOne.mockReturnValue(buildLeanQuery(makeRuntimeDeployment({ frameworkVersion: pack.version })))
+    RuntimeActivationSnapshot.findOne.mockReturnValue(buildLeanQuery(makeRuntimeActivationSnapshot({ frameworkVersion: pack.version })))
+    FrameworkPackage.findById.mockResolvedValue(pack)
+    RuntimePathRegistry.find.mockReturnValue(buildLeanQuery([makeRuntimePathRecord()]))
+    UIContract.findOne.mockReturnValue(buildLeanQuery(makeUIContract({ actions: [makeUIAction('REGENERATE_SECTION')] })))
+    WorkflowPolicy.find.mockReturnValue(buildLeanQuery([makeActionWorkflowPolicy('REGENERATE_SECTION')]))
+    const assetText = 'Use accepted evidence and preserve uncertainty.'
+    RuntimeSkill.find.mockReturnValue(buildLeanQuery([makeSectionRuntimeSkill({ referenceAssets: [{ assetId: 'asset-qualification-guide',
+      status: 'ACTIVE', isRuntimeAccessible: true }] })]))
+    const { RuntimeSupportAsset } = await import('../models/index.js')
+    RuntimeSupportAsset.find = jest.fn().mockReturnValue(buildLeanQuery([{ assetKey: 'qualification-guide', assetType: 'TXT', mimeType: 'text/plain',
+      content: assetText, byteLength: Buffer.byteLength(assetText), contentHash: createHash('sha256').update(assetText).digest('hex') }]))
+    const input = 'Preserve the current decision context.'
+    const state = { lifecycle: { stage: 'DRAFT' }, evidence_pack: makeReviewableDiscoveryEvidencePack({ accepted: true,
+      evidenceObjects: [makeDiscoveryEvidenceObject({ reviewStatus: 'ACCEPTED', validationStatus: 'VALIDATED' }),
+        makeDiscoveryEvidenceObject({ evidenceObjectId: 'evidence_offer', sourceId: 'input_targetOffer', reviewStatus: 'ACCEPTED',
+          validationStatus: 'VALIDATED', extractedFact: 'The proposal platform supports shared decision context.' })],
+      state: { status: 'ACCEPTED', inputComplete: true, evidenceReady: true, accepted: true, needsRefresh: false } }),
+    sections: { customer_problem: { input, generated: null, accepted: null, revisions: [], state: { status: 'GENERATED' } } },
+    validation: {}, readiness: {}, policy: {}, attachments: {}, artifacts: {} }
+    const { resolveSectionExecutionContract } = await import('../services/sectionExecutionContractService.js')
+    const { prepareRuntimeSectionEvidenceQualificationContext, buildReasonedGeneratedSection } = await import('../services/runtimeSectionReasoningService.js')
+    const section = pack.sections[0]
+    const contract = await resolveSectionExecutionContract({ frameworkPackage: pack, section })
+    const prepared = prepareRuntimeSectionEvidenceQualificationContext({ actionKey: 'REGENERATE_SECTION', frameworkPackage: pack,
+      frameworkState: state, input, section, sectionExecutionContract: contract, runtimeInstance: {}, generatedAt: '2026-05-19T07:55:00.000Z' })
+    const refs = prepared.admittedEvidenceIds.slice(0, 1)
+    const intelligence = { sectionSummary: 'Accepted evidence describes a decision context.', sectionNarrative: 'The proposal platform supports a shared decision context.',
+      commercialInterpretation: 'Preserve the stated context.', strategicTensions: [{ signal: 'Review uncertainty.', interpretation: 'Remain qualified.', evidenceRefs: refs }],
+      supportedClaims: [{ claim: 'A proposal platform is stated.', interpretation: 'Source-backed statement.', evidenceRefs: refs }], representedClaims: [],
+      restrictedClaims: [{ claim: 'Benefits are proven.', interpretation: 'Not established.', evidenceRefs: refs }],
+      evidenceBoundaries: [{ boundary: 'Benefits are unknown.', rationale: 'No measured proof.', evidenceRefs: refs }], contradictionSignals: [], alternativeInterpretations: [],
+      decisionRelevance: 'Review the stated context.', downstreamHandoffSignals: [{ signal: 'Preserve uncertainty.', relevance: 'Bounded context.', evidenceRefs: refs }],
+      sourceTraceability: refs, validationGaps: [], fxGxAssessmentSignals: ['FX', 'GX'].map(dimension => ({ dimension, signal: 'Remain qualified.', interpretation: 'No measured proof.', evidenceRefs: refs })),
+      arlRlReviewChangeRationale: ['ARL_MEANING', 'RL_REPRESENTATION', 'CHANGE_RATIONALE'].map(reviewKey => ({ reviewKey, rationale: 'Preserve source qualification.', evidenceRefs: refs })) }
+    const output = legacy ? intelligence : { qualificationBrief: { value: 'Evidence-bound unit provider output.' } }
+    const provider = jest.fn().mockResolvedValue({ output, metadata: {} })
+    sectionReasoningProviderBoundary = { status: { configured: true }, providerAdapter: provider,
+      providerDescriptor: { providerKey: 'unit-boundary', model: 'unit-model', providerMode: 'UNIT_TEST' } }
+    const previous = (await buildReasonedGeneratedSection({ actionKey: 'GENERATE_SECTION', frameworkPackage: pack, frameworkState: state,
+      input, section, sectionExecutionContract: contract, runtimeInstance: {}, generatedAt: '2026-05-19T07:55:00.000Z' })).generated
+    provider.mockClear()
+    if (receipt !== 'current') {
+      delete previous.generator.evidenceQualificationHash
+      delete previous.generator.evidenceQualificationContractVersion
+      Object.assign(previous.generator, receipt || {})
+    }
+    state.sections.customer_problem.generated = previous
+    const doc = makeRuntimeInstanceDocument({ updatedAt: new Date('2026-05-19T08:00:00.000Z'), framework_state: state,
+      packageKey: pack.packageKey, packageVersion: pack.version })
+    mockRuntimeInstanceForActionExecution({ document: doc })
+    RuntimeInstance.findOneAndUpdate = jest.fn(async (_filter, update) => makeRuntimeInstanceDocument({ ...doc,
+      ...(update?.$set || {}), updatedAt: new Date('2026-05-19T08:01:00.000Z') }))
+    const token = await getAccessTokenForUser(makeCustomerAdmin())
+    const dispatch = () => request.post(`/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/actions/REGENERATE_SECTION`)
+      .set('Authorization', `Bearer ${token}`).send({ expectedUpdatedAt: '2026-05-19T08:00:00.000Z', sectionKey: 'customer_problem' })
+    return { dispatch, provider, previous, prepared, doc, state }
+  }
+  test('legacy matching governed mode missing both fields has genuine qualification change and archives old payload', async () => {
+    const { dispatch, provider, previous, prepared } = await setup()
+    const original = JSON.stringify(previous)
+    const result = await dispatch()
+    expect(result.status).toBe(200)
+    expect(provider).toHaveBeenCalledTimes(1)
+    const next = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state.sections.customer_problem
+    expect(JSON.stringify(next.revisions[0].generated)).toBe(original)
+    expect(next.accepted).toBeNull()
+    expect(next.generated.generator.evidenceQualificationHash).toBe(prepared.evidenceQualificationHash)
+    expect(next.generated.generator.evidenceQualificationContractVersion).toBe(prepared.evidenceQualificationContractVersion)
+    expect(AuditLog.createLog).toHaveBeenCalledWith(expect.objectContaining({ diff: expect.objectContaining({ generation: expect.objectContaining({
+      regeneration: expect.objectContaining({ reasons: ['EVIDENCE_QUALIFICATION_CONTEXT_CHANGED'],
+        currentEvidenceQualificationHash: prepared.evidenceQualificationHash, previousEvidenceQualificationHash: null }) }) }) }))
+  })
+  test('same qualified current context still rejects unchanged before provider and writes', async () => {
+    const { dispatch, provider } = await setup('current')
+    const result = await dispatch()
+    expect(result.status).toBe(409)
+    expect(result.body.error.message).toContain('no section context changed')
+    expect(provider).not.toHaveBeenCalled()
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+  test('real VMF writer to native guard rejects same qualified full-coverage context', async () => {
+    const { dispatch, provider, previous, prepared } = await setup('current', { legacy: true })
+    expect(previous.generator.mode).toBe('GOVERNED_PROVIDER_SECTION_REASONING')
+    expect(previous.evidenceHash).toBe(prepared.coverage.allEvidenceHash)
+    const result = await dispatch()
+    expect(result.status).toBe(409)
+    expect(result.body.error.message).toContain('no section context changed')
+    expect(provider).not.toHaveBeenCalled()
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+    expect(AuditLog.createLog).not.toHaveBeenCalled()
+  })
+  test('real VMF predecessor without old qualification permits context upgrade and exact history', async () => {
+    const { dispatch, provider, previous, prepared } = await setup(undefined, { legacy: true })
+    const oldHash = hashSectionInput(previous)
+    const result = await dispatch()
+    expect(result.body.error).toBeUndefined()
+    expect(result.status).toBe(200)
+    expect(provider).toHaveBeenCalledTimes(1)
+    const next = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state.sections.customer_problem
+    expect(hashSectionInput(next.revisions[0].generated)).toBe(oldHash)
+    expect(next.generated.generator.evidenceQualificationHash).toBe(prepared.evidenceQualificationHash)
+    expect(AuditLog.createLog.mock.calls[0][0].diff.generation.regeneration.reasons).toEqual(['EVIDENCE_QUALIFICATION_CONTEXT_CHANGED'])
+  })
+  test('actual current qualification-only change yields new digest without force or changed input', async () => {
+    const { dispatch, provider, prepared, doc, previous } = await setup('current')
+    const sourceId = prepared.evidenceQualifications.evidence[0].sourceId
+    const source = doc.framework_state.evidence_pack.sourceRegistry.find(row => row.sourceId === sourceId)
+    expect(source).toBeDefined()
+    source.acquisitionProfile = 'ENHANCED'
+    const result = await dispatch()
+    expect(result.status).toBe(200)
+    expect(provider).toHaveBeenCalledTimes(1)
+    const next = RuntimeInstance.findOneAndUpdate.mock.calls[0][1].$set.framework_state.sections.customer_problem
+    expect(next.generated.inputHash).toBe(previous.inputHash)
+    expect(next.generated.evidenceHash).toBe(previous.evidenceHash)
+    expect(next.generated.generator.evidenceQualificationHash).not.toBe(prepared.evidenceQualificationHash)
+    expect(next.revisions[0].generated).toEqual(previous)
+    expect(AuditLog.createLog.mock.calls[0][0].diff.generation.regeneration.reasons).toEqual(['EVIDENCE_QUALIFICATION_CONTEXT_CHANGED'])
+  })
+  test.each([
+    { evidenceQualificationHash: 'a'.repeat(64) },
+    { evidenceQualificationContractVersion: 'section-evidence-qualification.v1' },
+    { evidenceQualificationHash: 'invalid', evidenceQualificationContractVersion: 'section-evidence-qualification.v1' },
+    { evidenceQualificationHash: 'a'.repeat(64), evidenceQualificationContractVersion: 'unknown.v2' },
+  ])('partial or malformed previous qualification fails closed: %j', async receipt => {
+    const { dispatch, provider } = await setup(receipt)
+    const result = await dispatch()
+    expect(result.status).toBe(409)
+    expect(result.body.error.code).toBe('SECTION_EVIDENCE_QUALIFICATION_RECEIPT_INVALID')
+    expect(provider).not.toHaveBeenCalled()
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+  })
+  test('real fact change remains distinct from qualification context change', async () => {
+    const { dispatch, provider, doc } = await setup('current')
+    doc.framework_state.evidence_pack.evidenceObjects[1].extractedFact = 'The proposal platform supports a bounded current decision review.'
+    const result = await dispatch()
+    expect(result.status).toBe(200)
+    expect(provider).toHaveBeenCalledTimes(1)
+    expect(AuditLog.createLog.mock.calls[0][0].diff.generation.regeneration.reasons).toEqual(['DISCOVERY_EVIDENCE_CHANGED'])
+  })
+  test.each([['UNRECOGNIZED_MODE', true], ['DETERMINISTIC_TEMPLATE', true], ['UNRECOGNIZED_MODE', false], ['DETERMINISTIC_TEMPLATE', false]])(
+    'nonprovider predecessor %s receipt=%s gains no qualification-only permission', async (mode, withReceipt) => {
+    const { dispatch, provider } = await setup({ mode, ...(withReceipt ? { evidenceQualificationHash: 'a'.repeat(64),
+      evidenceQualificationContractVersion: 'section-evidence-qualification.v1' } : {}) })
+    const result = await dispatch()
+    expect(result.status).toBe(409)
+    expect(provider).not.toHaveBeenCalled()
+    expect(RuntimeInstance.findOneAndUpdate).not.toHaveBeenCalled()
+  })
+})
+
+// Actual app middleware/router/controller/repository over in-memory HTTP streams.
+// Storage/session models below are effects seams, not Mongo/JWT deployment proof.
+describe('inherited review mounted security without listeners', () => {
+  const parentId = 'a27f1f77bcf86cd799439190'
+  const rootId = 'a27f1f77bcf86cd799439191'
+  const inMemoryGet = async (path, accessToken) => {
+    const { IncomingMessage, ServerResponse } = await import('node:http')
+    const { Duplex } = await import('node:stream')
+    const chunks = []
+    const socket = new Duplex({ read() {}, write(chunk, _encoding, done) { chunks.push(Buffer.from(chunk)); done() } })
+    Object.defineProperty(socket, 'remoteAddress', { value: '127.0.0.1' })
+    const req = new IncomingMessage(socket)
+    req.method = 'GET'
+    req.url = path
+    req.httpVersion = '1.1'
+    req.httpVersionMajor = 1
+    req.httpVersionMinor = 1
+    req.headers = { host: 'memory.test', authorization: `Bearer ${accessToken}`, connection: 'close' }
+    req.rawHeaders = ['Host', 'memory.test', 'Authorization', `Bearer ${accessToken}`]
+    const res = new ServerResponse(req)
+    res.assignSocket(socket)
+    try {
+      return await new Promise((resolve, reject) => {
+        res.once('error', reject)
+        res.once('finish', () => {
+          try {
+            const raw = Buffer.concat(chunks).toString('utf8')
+            const boundary = raw.indexOf('\r\n\r\n')
+            expect(boundary).toBeGreaterThan(0)
+            resolve({ status: res.statusCode, body: JSON.parse(raw.slice(boundary + 4)) })
+          } catch (error) { reject(error) }
+        })
+        req.push(null)
+        app.handle(req, res, reject)
+      })
+    } finally { socket.destroy() }
+  }
+  const installInheritedMountedFixture = async (fault) => {
+    const { getDiscoveryContradictionReview, contradictionReviewRequestHash } =
+      await import('../services/discoveryContradictionReviewService.js')
+    const user = makeCustomerAdmin({ memberships: [
+      { customerId: CUSTOMER_ID, roles: ['CUSTOMER_ADMIN'] },
+      { customerId: OTHER_CUSTOMER_ID, roles: ['CUSTOMER_ADMIN'] },
+    ] })
+    User.findById = jest.fn(() => buildUserQueryChain(user))
+    Role.find = jest.fn(() => {
+      const rows = buildDefaultRoleRows()
+      const query = { select: jest.fn().mockReturnThis(), lean: jest.fn().mockReturnThis(),
+        maxTimeMS: jest.fn().mockReturnThis(), setOptions: jest.fn().mockReturnThis(),
+        session: jest.fn().mockReturnThis(), then: (resolve, reject) => Promise.resolve(rows).then(resolve, reject) }
+      return query
+    })
+    Customer.findById = jest.fn(id => ({
+      ...buildLeanQuery(makeCustomer({ _id: String(id), id: String(id) })),
+      then: resolve => Promise.resolve(makeCustomer({ _id: String(id), id: String(id) })).then(resolve),
+      session() { return this }, setOptions() { return this },
+    }))
+    Tenant.findById = jest.fn(id => {
+      const tenant = makeTenant({ _id: String(id), id: String(id),
+        customerId: String(id) === OTHER_TENANT_ID ? OTHER_CUSTOMER_ID : CUSTOMER_ID })
+      return { ...buildLeanQuery(tenant), then: resolve => Promise.resolve(tenant).then(resolve),
+        session() { return this }, setOptions() { return this } }
+    })
+    const candidate = { contradictionId: 'contradiction-mounted-copy', domain: 'Scope', severity: 'LOW',
+      basis: 'Two recorded statements', evidenceObjectIds: ['mounted-fact-a', 'mounted-fact-b'] }
+    const runtime = makeRuntimeInstance({ revision: { revisionNumber: 3, createdFromRevision: 2,
+      parentRuntimeId: parentId, parentRuntimeInstanceKey: 'mounted-parent',
+      rootRuntimeId: rootId, rootRuntimeInstanceKey: 'mounted-root' } })
+    const evidence = candidate.evidenceObjectIds.map((id, index) => ({
+      _id: new mongoose.Types.ObjectId(`b27f1f77bcf86cd79943910${index}`),
+      customerId: CUSTOMER_ID, tenantId: TENANT_ID, runtimeInstanceId: RUNTIME_INSTANCE_ID,
+      runtimeInstanceKey: runtime.runtimeInstanceKey, evidenceObjectId: id, sourceId: `mounted-source-${index}`,
+      sourceType: 'DOCUMENT', lineageRef: '', extractedFact: `Recorded mounted statement ${index}`,
+      reviewStatus: 'ACCEPTED', current: true, stateVersion: runtime.stateVersion,
+      sourceStateVersion: runtime.stateVersion, sourceHash: `sha256:${'a'.repeat(64)}`,
+      migrationReceiptId: 'b27f1f77bcf86cd799439199',
+    }))
+    const pair = getDiscoveryContradictionReview(candidate, evidence, [], RUNTIME_INSTANCE_ID, '')
+    const review = { contractVersion: 'discovery-contradiction-review-v1',
+      reviewId: '11111111-1111-4111-8111-111111111111', runtimeInstanceId: parentId,
+      contradictionId: candidate.contradictionId, evidencePairHash: pair.evidencePairHash,
+      disposition: 'NOT_CONTRADICTORY', rationale: 'Original scoped parent explanation.', reviewEpoch: '',
+      reviewedBy: CUSTOMER_ADMIN_ID, reviewedAt: '2026-10-06T10:00:00.000Z',
+      reviewedStateVersion: 'rsv2:recorded-parent', requestKey: '22222222-2222-4222-8222-222222222222',
+      requestExpectedUpdatedAt: '2026-10-06T09:00:00.000Z' }
+    review.requestPayloadHash = contradictionReviewRequestHash({ actorUserId: review.reviewedBy,
+      runtimeInstanceId: parentId, contradictionId: review.contradictionId,
+      expectedUpdatedAt: review.requestExpectedUpdatedAt, expectedEvidencePairHash: review.evidencePairHash,
+      disposition: review.disposition, rationale: review.rationale, confirm: true })
+    runtime.framework_state.evidence_pack = { contradictionReviewEpoch: '', contradictionReviews: [review],
+      discoveryHealth: { contradictionCandidates: [candidate] } }
+    const parent = makeRuntimeInstance({ _id: parentId, id: parentId, runtimeInstanceKey: 'mounted-parent',
+      revision: { revisionNumber: 2, createdFromRevision: 1, parentRuntimeId: rootId,
+        parentRuntimeInstanceKey: 'mounted-root', rootRuntimeId: rootId, rootRuntimeInstanceKey: 'mounted-root' },
+      framework_state: { evidence_pack: { contradictionReviews: [JSON.parse(JSON.stringify(review))] } } })
+    const root = makeRuntimeInstance({ _id: rootId, id: rootId, runtimeInstanceKey: 'mounted-root',
+      revision: { revisionNumber: 1, createdFromRevision: null, parentRuntimeId: null,
+        parentRuntimeInstanceKey: '', rootRuntimeId: null, rootRuntimeInstanceKey: '' }, framework_state: {} })
+    if (fault === 'foreign-customer') parent.customerId = OTHER_CUSTOMER_ID
+    if (fault === 'foreign-tenant') parent.tenantId = OTHER_TENANT_ID
+    const ancestorQueries = []
+    const sourceModel = (await import('../models/RuntimeEvidenceSource.js')).default
+    const noControlledProvenance = filter => {
+      expect(String(filter.customerId)).toBe(CUSTOMER_ID)
+      expect(String(filter.tenantId)).toBe(TENANT_ID)
+      expect(filter.current).toBe(true)
+      expect(filter.controlledReplayProvenance).toEqual({ $exists: true })
+      return { ...buildLeanQuery(null), limit: jest.fn().mockReturnThis(),
+        session: jest.fn().mockReturnThis(), setOptions: jest.fn().mockReturnThis() }
+    }
+    sourceModel.findOne = jest.fn(noControlledProvenance)
+    RuntimeEvidenceObject.findOne = jest.fn(noControlledProvenance)
+    RuntimeInstance.findOne = jest.fn(filter => {
+      expect(filter.$and).toHaveLength(3)
+      const [identity, customer, tenant] = filter.$and
+      const id = String(identity.$or[0]._id)
+      expect(identity).toEqual({ $or: [{ _id: id }, { runtimeInstanceKey: id }] })
+      expect(customer).toEqual({ customerId: CUSTOMER_ID })
+      expect(tenant).toEqual({ tenantId: TENANT_ID })
+      expect([RUNTIME_INSTANCE_ID, parentId, rootId]).toContain(id)
+      if (id !== RUNTIME_INSTANCE_ID) ancestorQueries.push(filter)
+      const value = id === RUNTIME_INSTANCE_ID ? runtime : id === parentId ? parent : root
+      return { select: jest.fn().mockReturnThis(), maxTimeMS: jest.fn().mockReturnThis(),
+        session: jest.fn().mockReturnThis(), setOptions: jest.fn().mockReturnThis(),
+        lean: jest.fn(async () => {
+          if (id === parentId && fault === 'rejected-ancestor') throw new Error('Rejected scoped ancestor storage promise')
+          return String(value.customerId) === String(customer.customerId) && String(value.tenantId) === String(tenant.tenantId) ? value : null
+        }) }
+    })
+    const originalCollection = mongoose.connection.collection
+    const evidenceQueries = []
+    mongoose.connection.collection = function collection(name) {
+      if (name !== 'runtime_evidence_objects') return originalCollection.call(this, name)
+      return { find: (filter, options) => {
+        evidenceQueries.push({ filter, options })
+        expect(filter).toEqual({
+          $and: [
+            { $or: [{ runtimeInstanceId: RUNTIME_INSTANCE_ID },
+              { runtimeInstanceId: new mongoose.Types.ObjectId(RUNTIME_INSTANCE_ID) },
+              { runtimeInstanceKey: runtime.runtimeInstanceKey }] },
+            { $or: [{ customerId: CUSTOMER_ID }, { customerId: new mongoose.Types.ObjectId(CUSTOMER_ID) }] },
+            { $or: [{ tenantId: TENANT_ID }, { tenantId: new mongoose.Types.ObjectId(TENANT_ID) }] },
+          ],
+          $or: [{ stateStatus: 'CURRENT' }, { status: 'CURRENT' }, { current: true }, { isCurrent: true }],
+          evidenceObjectId: { $in: candidate.evidenceObjectIds },
+        })
+        const cursor = { sort: () => cursor, skip: () => cursor, limit: () => cursor, batchSize: () => cursor,
+          maxTimeMS: () => cursor, toArray: async () => evidence }
+        return cursor
+      } }
+    }
+    let inTransaction = false
+    const session = { startTransaction: jest.fn(() => { inTransaction = true }),
+      inTransaction: () => inTransaction,
+      commitTransaction: jest.fn(async () => { inTransaction = false }),
+      abortTransaction: jest.fn(async () => { inTransaction = false }), endSession: jest.fn(async () => {}) }
+    const startSession = jest.spyOn(mongoose, 'startSession').mockResolvedValue(session)
+    return { user, review, candidate, ancestorQueries, evidenceQueries, session,
+      restore: () => { startSession.mockRestore(); mongoose.connection.collection = originalCollection } }
+  }
+  test.each(['history', 'findings'].flatMap(route => ['valid', 'rejected-ancestor', 'foreign-customer', 'foreign-tenant']
+    .map(fault => [route, fault])))('%s uses mounted auth and rejects unsafe inherited reads: %s', async (route, fault) => {
+    const { Server, Socket } = await import('node:net')
+    const listen = jest.spyOn(Server.prototype, 'listen').mockImplementation(() => { throw new Error('No listener permitted') })
+    const connect = jest.spyOn(Socket.prototype, 'connect').mockImplementation(() => { throw new Error('No connection permitted') })
+    let fixture
+    try {
+      fixture = await installInheritedMountedFixture(fault)
+      const token = await getAccessTokenForUser(fixture.user)
+      const selection = route === 'history'
+        ? `contradiction-history?findingId=${fixture.candidate.contradictionId}&page=1&pageSize=10`
+        : 'findings?type=CONTRADICTION&population=DETECTED&sort=ID_ASC&page=1&pageSize=4'
+      const path = `/api/v1/runtime-instances/${RUNTIME_INSTANCE_ID}/state/${selection}&customerId=${CUSTOMER_ID}&tenantId=${TENANT_ID}`
+      const response = await inMemoryGet(path, token)
+      expect({ response, ancestorCount: fixture.ancestorQueries.length }).toMatchObject({ ancestorCount: expect.any(Number), response: expect.objectContaining({ status: fault === 'valid' ? 200 : fault === 'rejected-ancestor' ? 503 : 404 }) })
+      expect(fixture.ancestorQueries.length).toBeGreaterThan(0)
+      for (const filter of fixture.ancestorQueries) expect(filter).toEqual({
+        $and: [{ $or: [{ _id: expect.any(String) }, { runtimeInstanceKey: expect.any(String) }] },
+          { customerId: CUSTOMER_ID }, { tenantId: TENANT_ID }],
+      })
+      if (fault === 'valid') {
+        expect(response.status).toBe(200)
+        const result = response.body.data[route]
+        expect(result.available).toBe(true)
+        expect(result.total).toBe(1)
+        expect(result.records).toHaveLength(1)
+        if (route === 'history') expect(result.records[0]).toEqual(fixture.review)
+        else expect(result.records[0]).toMatchObject({ reviewStatus: 'STALE', latestReview: fixture.review })
+        expect(response.body.data.control).toMatchObject({ id: RUNTIME_INSTANCE_ID,
+          customerId: CUSTOMER_ID, tenantId: TENANT_ID })
+        expect(response.body.data.control).not.toHaveProperty('inheritedContradictionRecords')
+        expect(fixture.session.commitTransaction).toHaveBeenCalledTimes(1)
+      } else {
+        expect(response.status).toBe(fault === 'rejected-ancestor' ? 503 : 404)
+        expect(response.body.error.code).toBe(fault === 'rejected-ancestor'
+          ? 'RUNTIME_STATE_V2_STORAGE_UNAVAILABLE' : 'NOT_FOUND')
+        expect(response.body).not.toHaveProperty('data')
+        expect(JSON.stringify(response.body)).not.toContain(fixture.review.rationale)
+        expect(JSON.stringify(response.body)).not.toContain(fixture.review.reviewId)
+        expect(fixture.session.abortTransaction).toHaveBeenCalledTimes(1)
+        expect(fixture.session.commitTransaction).not.toHaveBeenCalled()
+        expect(fixture.evidenceQueries).toHaveLength(0)
+      }
+      expect(listen).not.toHaveBeenCalled()
+      expect(connect).not.toHaveBeenCalled()
+    } finally {
+      fixture?.restore()
+      listen.mockRestore()
+      connect.mockRestore()
+    }
   })
 })

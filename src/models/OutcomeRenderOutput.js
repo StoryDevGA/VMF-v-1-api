@@ -1,4 +1,5 @@
 import mongoose from 'mongoose'
+import { assertNoSyntheticRenderRecordInsertion } from '../services/syntheticRenderArtifactContract.js'
 import {
   OUTCOME_STUDIO_RENDER_FORMATS,
   OUTCOME_STUDIO_RENDER_OUTPUT_STATUSES,
@@ -133,6 +134,7 @@ outcomeRenderOutputSchema.index({
 })
 
 outcomeRenderOutputSchema.pre('validate', function normalizeOutcomeRenderOutput(next) {
+  try { assertNoSyntheticRenderRecordInsertion(this) } catch (error) { return next(error) }
   this.renderOutputId = String(this.renderOutputId || '').trim()
   this.outcomeAssetId = String(this.outcomeAssetId || '').trim()
   this.outcomeAssetVersionId = String(this.outcomeAssetVersionId || '').trim()
@@ -144,6 +146,12 @@ outcomeRenderOutputSchema.pre('validate', function normalizeOutcomeRenderOutput(
   next()
 })
 
+outcomeRenderOutputSchema.pre('save', function guardSyntheticRenderSave(next) {
+  try { assertNoSyntheticRenderRecordInsertion(this); next() } catch (error) { next(error) }
+})
+outcomeRenderOutputSchema.pre('insertMany', function guardSyntheticRenderInsert(next, records) {
+  try { for (const record of records) assertNoSyntheticRenderRecordInsertion(record); next() } catch (error) { next(error) }
+})
 const OutcomeRenderOutput = mongoose.model('OutcomeRenderOutput', outcomeRenderOutputSchema)
 
 export default OutcomeRenderOutput

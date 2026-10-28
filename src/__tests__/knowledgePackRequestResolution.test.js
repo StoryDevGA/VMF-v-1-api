@@ -167,6 +167,16 @@ const resolve = (overrides = {}) => resolveRequestSpecificKnowledgePacks({
 })
 
 describe('resolveRequestSpecificKnowledgePacks', () => {
+  test('new style policy permits a missing positive pair while explicit legacy reconstruction keeps its former gate', () => {
+    const candidates = makeOutputCandidates()
+    const selectedStyle = candidates.find(pack => pack.packType === 'STYLE')
+    selectedStyle.compatibleOutputTypes = ['unrelated-output']
+    const request = { workspaceType: 'OUTCOME', requestedOutputTypeKey: 'board-summary', requestedStyleKey: 'executive' }
+    expect(resolve({ candidates, request }).status).toBe('READY')
+    expect(resolve({ candidates, request, styleOverlayPolicy: 'ss-002-v1' }).status).toBe('BLOCKED')
+    selectedStyle.styleConstraintError = 'STYLE_SOURCE_HASH_MISMATCH'
+    expect(resolve({ candidates, request }).status).toBe('BLOCKED')
+  })
   const compositionCases = [
     ['CHANNEL', 'LinkedIn post', 'linkedin-post-channel'], ['STYLE', 'strategic advisory style', 'strategic-advisory-style'],
     ['LANGUAGE', 'English', 'english'], ['VISUAL_SYSTEM', 'visual truth preservation rules', 'visual-truth-preservation-rules'],
@@ -193,7 +203,9 @@ describe('resolveRequestSpecificKnowledgePacks', () => {
     const unrequested = resolve({ candidates: candidatesWith([pack]) })
     expect(Object.values(unrequested.selectedByLayer).flat().some((selected) => selected.activationId === pack.activationId)).toBe(false)
     for (const negative of [[], [{ ...pack, status: 'INACTIVE' }], [{ ...pack, workspaceCompatibility: ['RUNTIME'] }],
-      [{ ...pack, compatibleOutputTypes: ['wrong-output'] }]]) {
+      ...(layer === 'STYLE' ? [[{ ...pack, styleConstraints: { contractVersion: 'style-overlay.constraints.v1',
+        incompatibleOutputTypes: ['board-summary'], incompatibleAudienceKeys: [], requiredRendererCapabilities: [] } }]]
+        : [[{ ...pack, compatibleOutputTypes: ['wrong-output'] }]])]) {
       const blocked = resolve({ candidates: candidatesWith(negative),
         request: { workspaceType: 'OUTCOME', requestedOutputTypeKey: 'board-summary', ...compositionResolution.request } })
       expect(blocked.status).toBe('BLOCKED')
@@ -462,7 +474,7 @@ describe('resolveRequestSpecificKnowledgePacks', () => {
     const result = resolve()
 
     expect(result.status).toBe('READY')
-    expect(result.policyVersion).toBe('ss-002-v1')
+    expect(result.policyVersion).toBe('ss-002-v1+style-overlay.default-compatible.v1')
     expect(result.request).toEqual({
       workspaceType: 'OUTCOME',
       requestedOutputTypeKey: 'board-summary',

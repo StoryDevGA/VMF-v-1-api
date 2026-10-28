@@ -4,6 +4,7 @@ import {
   buildCustomerContextReasoningCoverage,
   buildReasonedGeneratedSection,
   buildVmfSectionReasoningCoverage,
+  prepareRuntimeSectionEvidenceQualificationContext,
   VMF_SECTION_REASONING_CONTRACT_VERSION,
 } from '../services/runtimeSectionReasoningService.js'
 import {
@@ -24,6 +25,9 @@ import {
   buildFrameworkOutcomeStudioHandoff,
 } from '../services/outcomeFrameworkHandoffService.js'
 import { __testables as repositoryTestables } from '../services/runtimeStateRepository.js'
+import { recordSourceReview } from '../services/sourceVerificationContext.js'
+import { buildRuntimeSectionEvidenceQualifications, SECTION_CLAIM_BOUNDARY_INSTRUCTION,
+  SECTION_CLAIM_BOUNDARY_POLICY } from '../services/runtimeSectionEvidenceQualificationService.js'
 
 const makeEvidence = (index) => ({
   evidenceObjectId: `evidence_${index}`,
@@ -1043,5 +1047,321 @@ describe('VMF Customer Context section reasoning', () => {
     })
     expect(fetchImpl).toHaveBeenCalledTimes(2)
     expect(sleep).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('qualification transport preserves native admission and hashes', () => {
+  const run = async ({ packagePath = false, registry = [], evidence = [makeEvidence(1), makeEvidence(2), makeEvidence(3)], adapter } = {}) => {
+    const frameworkPackage = makeFrameworkPackage()
+    const declaration = { artefactKey: 'qualificationBrief', label: 'Brief', purpose: 'Qualified interpretation.', required: true,
+      lifecycleStage: 'GENERATED', sectionKeys: ['customer-context'], workflowActionKeys: ['GENERATE_SECTION'],
+      sourcePath: 'sectionIntelligence.qualificationBrief',
+      writePath: 'framework_state.sections.customer_context.generated.reasoningArtefacts.qualificationBrief',
+      schema: { type: 'object', additionalProperties: false, required: ['value'], properties: { value: { type: 'string', minLength: 1 } } },
+      validation: { maxBytes: 4096 }, handoff: { eligible: false } }
+    const contract = { ...makeExecutionContract(), ...(packagePath ? { reasoningArtefacts: [declaration] } : {}) }
+    const providerAdapter = adapter || jest.fn().mockResolvedValue({ output: packagePath ? { qualificationBrief: { value: 'Bounded declared output.' } } : makeOutput(), metadata: {} })
+    const state = { evidence_pack: { accepted: true, evidenceObjects: evidence, sourceRegistry: registry,
+      lineage: { sources: registry.map(row => ({ sourceId: row.sourceId, type: 'USER_PROVIDED_WEBSITE', status: 'USER_PROVIDED' })) } } }
+    const before = structuredClone(state)
+    const args = { actionKey: 'GENERATE_SECTION', actorUserId: 'actor', frameworkPackage,
+      frameworkState: state, generatedAt: '2026-10-13T00:00:00.000Z', input: 'Author a decision context.',
+      providerRuntime: { status: { configured: true }, providerAdapter }, runtimeInstance: {},
+      section: { sectionKey: 'customer-context', runtimePath: 'framework_state.sections.customer_context' }, sectionExecutionContract: contract }
+    const prepared = prepareRuntimeSectionEvidenceQualificationContext(args)
+    const generated = await buildReasonedGeneratedSection(args)
+    expect(state).toEqual(before)
+    return { generated: generated.generated, call: providerAdapter.mock.calls[0][0], providerAdapter, prepared }
+  }
+  test.each([false, true])('actual provider path package=%s receives qualified admitted records and binds digest', async packagePath => {
+    const registry = [1, 2, 3].map(n => ({ sourceId: `source_${n}`, sourceType: 'WEBSITE', acquisitionStatus: 'CAPTURED' }))
+    const evidence = [1, 2, 3].map(n => ({ ...makeEvidence(n), acquisitionMethod: 'CUSTOMER_PROVIDED_INPUT',
+      confidence: { level: 'USER_PROVIDED', score: 65, basis: ['DETERMINISTIC_DISCOVERY_INPUT'] } }))
+    const result = await run({ packagePath, registry, evidence })
+    const qualifications = result.call.providerContext.evidenceQualifications
+    expect(qualifications.claimBoundaryPolicy).toEqual(SECTION_CLAIM_BOUNDARY_POLICY)
+    expect(qualifications.evidence.map(row => row.evidenceObjectId).sort()).toEqual([...result.call.allowedEvidenceIds].sort())
+    expect(qualifications.evidence[0].acquisitionMethod).toBe('CUSTOMER_PROVIDED_INPUT')
+    expect(qualifications.sources[0]).toEqual(expect.objectContaining({ recordedSourceType: 'WEBSITE', recordedAcquisitionStatus: 'CAPTURED',
+      recordedLineageSourceType: 'USER_PROVIDED_WEBSITE', sourceReview: { status: 'NOT_RECORDED', authenticity: null } }))
+    expect(result.generated.generator.evidenceQualificationHash).toBe(hashSectionInput(qualifications))
+    expect(result.generated.generator.evidenceQualificationContractVersion).toBe('section-evidence-qualification.v1')
+    const source = registry[0]
+    source.verificationContext = recordSourceReview({ source, actorUserId: 'actor', facts: { authenticity: 'UNVERIFIED',
+      sourceOrigin: 'User authored input', organizationRelationship: 'Internal', independenceGroup: 'same',
+      supportingReference: 'Source record', rationale: 'No external corroboration.' } })
+    const changed = await run({ packagePath, registry, evidence })
+    expect(changed.generated.evidenceHash).toBe(result.generated.evidenceHash)
+    expect(changed.generated.inputHash).toBe(result.generated.inputHash)
+    expect(changed.generated.boundedContextHash).not.toBe(result.generated.boundedContextHash)
+    expect(changed.generated.generator.evidenceQualificationHash).not.toBe(result.generated.generator.evidenceQualificationHash)
+    expect(changed.call.allowedEvidenceIds).toEqual(result.call.allowedEvidenceIds)
+  })
+  test('empty represented claims remains valid; qualification does not relax unknown refs', () => {
+    const output = makeOutput(); output.representedClaims = []
+    expect(validateRuntimeSectionIntelligence(output, { allowedEvidenceIds: ['evidence_1', 'evidence_2', 'evidence_3'] }).representedClaims).toEqual([])
+    output.supportedClaims[0].evidenceRefs = ['unknown']
+    expect(() => validateRuntimeSectionIntelligence(output, { allowedEvidenceIds: ['evidence_1', 'evidence_2', 'evidence_3'] })).toThrow()
+  })
+  test.each([false, true])('ambiguous actual registry stops package=%s before provider', async packagePath => {
+    const adapter = jest.fn()
+    await expect(run({ packagePath, adapter, registry: [{ sourceId: 'source_1', sourceType: 'WEBSITE' },
+      { sourceId: 'source_1', sourceType: 'UPLOADED_DOCUMENT' }] })).rejects.toMatchObject({ code: 'SECTION_EVIDENCE_QUALIFICATION_INVALID' })
+    expect(adapter).not.toHaveBeenCalled()
+  })
+  test('shared preparation preserves declared ten-record subset versus full VMF admission', async () => {
+    const evidence = Array.from({ length: 14 }, (_, index) => makeEvidence(index + 1))
+    const legacy = await run({ evidence })
+    const declared = await run({ evidence, packagePath: true })
+    expect(legacy.prepared.admittedEvidenceIds).toHaveLength(14)
+    expect(declared.prepared.admittedEvidenceIds).toHaveLength(10)
+    for (const result of [legacy, declared]) {
+      expect(result.prepared.admittedEvidenceIds).toEqual(result.call.allowedEvidenceIds)
+      expect(result.prepared.evidenceQualificationHash).toBe(result.generated.generator.evidenceQualificationHash)
+    }
+    expect(prepareRuntimeSectionEvidenceQualificationContext({ frameworkPackage: { frameworkKey: 'OTHER', sections: [] },
+      section: { sectionKey: 'plain', runtimePath: 'framework_state.sections.plain' } })).toBeNull()
+  })
+
+  test('PACKAGE service sends every selected full passage through the real adapter without expanding admission', async () => {
+    const evidence = Array.from({ length: 14 }, (_, index) => makeEvidence(index + 1))
+    evidence[0].extractedFact = `  ${evidence[0].extractedFact} 漢\n${'Exact retained passage. '.repeat(800)} Access review remains outstanding.  `
+    evidence.push({ ...makeEvidence(15), reviewStatus: 'PENDING', extractedFact: 'Excluded pending statement.' })
+    const fetchImpl = jest.fn().mockResolvedValue({ ok: true, headers: { get: () => 'request' }, json: async () => ({
+      id: 'response', status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text',
+        text: JSON.stringify({ qualificationBrief: { value: 'Bounded interpretation, with uncertainty retained.' } }) }] }],
+    }) })
+    const adapter = jest.fn(createOpenAiRuntimeSectionReasoningAdapter({ apiKey: 'test-key', model: 'test-model', maxRetries: 0, fetchImpl }))
+    const result = await run({ packagePath: true, evidence, adapter })
+    const body = JSON.parse(fetchImpl.mock.calls[0][1].body), wire = JSON.parse(body.input)
+    const expected = result.call.allowedEvidenceIds.map(id => {
+      const row = evidence.find(item => item.evidenceObjectId === id)
+      return { evidenceObjectId: id, sourceId: row.sourceId, extractedFact: row.extractedFact }
+    })
+    expect(expected).toHaveLength(10)
+    expect(wire.evidence).toEqual(expected)
+    expect(wire.evidence).toEqual(result.prepared.evidence)
+    expect(wire.evidence.find(row => row.evidenceObjectId === 'evidence_1').extractedFact).toBe(evidence[0].extractedFact)
+    expect(wire.evidenceQualifications).toEqual(result.prepared.evidenceQualifications)
+    expect(wire.evidence.map(row => row.evidenceObjectId).sort()).toEqual(wire.evidenceQualifications.evidence.map(row => row.evidenceObjectId).sort())
+    expect(body.input).not.toContain('Excluded pending statement')
+    expect(body.store).toBe(false)
+    expect(body.text.format.strict).toBe(true)
+    expect(body.text.format.schema.properties).toHaveProperty('qualificationBrief')
+    expect(body.instructions).toContain(SECTION_CLAIM_BOUNDARY_INSTRUCTION)
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expect(result.generated.evidenceHash).toBe(result.prepared.base.generated.evidenceHash)
+    expect(result.generated.reasoningArtefactReceipts.qualificationBrief.evidenceHash).toBe(result.generated.evidenceHash)
+  })
+
+  test('PACKAGE passage changes bind the shared preparation/writer hash beyond the capped supporting references', async () => {
+    const evidence = Array.from({ length: 14 }, (_, index) => makeEvidence(index + 1))
+    const first = await run({ packagePath: true, evidence })
+    const id = first.prepared.admittedEvidenceIds.find(value => !first.generated.supportingEvidenceRefs.includes(value))
+    expect(id).toBeDefined()
+    const changed = structuredClone(evidence)
+    changed.find(row => row.evidenceObjectId === id).extractedFact += ' Exact later qualification remains unknown.'
+    const second = await run({ packagePath: true, evidence: changed })
+    expect(second.prepared.admittedEvidenceIds).toEqual(first.prepared.admittedEvidenceIds)
+    expect(second.prepared.evidenceQualificationHash).toBe(first.prepared.evidenceQualificationHash)
+    expect(second.generated.inputHash).toBe(first.generated.inputHash)
+    expect(second.generated.dependencyHash).toBe(first.generated.dependencyHash)
+    expect(second.generated.evidenceHash).not.toBe(first.generated.evidenceHash)
+    expect(second.generated.evidenceHash).toBe(second.prepared.base.generated.evidenceHash)
+    expect(second.generated.boundedContextHash).not.toBe(first.generated.boundedContextHash)
+  })
+
+  test.each([42, {}])('PACKAGE invalid selected native passage %j rejects before adapter', async extractedFact => {
+    const adapter = jest.fn()
+    await expect(run({ packagePath: true, evidence: [{ ...makeEvidence(1), extractedFact }], adapter }))
+      .rejects.toMatchObject({ status: 409, code: 'SECTION_REASONING_EVIDENCE_INVALID' })
+    expect(adapter).not.toHaveBeenCalled()
+  })
+
+  test.each([null, '   '])('PACKAGE native projection omits empty passage %j instead of fabricating evidence', async extractedFact => {
+    const result = await run({ packagePath: true, evidence: [{ ...makeEvidence(1), extractedFact }] })
+    expect(result.prepared.admittedEvidenceIds).toEqual([])
+    expect(result.call.providerContext.evidence).toEqual([])
+  })
+
+  test('PACKAGE empty custom evidence remains empty without inventing passages', async () => {
+    const result = await run({ packagePath: true, evidence: [] })
+    expect(result.call.allowedEvidenceIds).toEqual([])
+    expect(result.call.providerContext.evidence).toEqual([])
+  })
+
+  test('oversized PACKAGE passages fail under the existing adapter cap before fetch', async () => {
+    const fetchImpl = jest.fn()
+    const adapter = jest.fn(createOpenAiRuntimeSectionReasoningAdapter({ apiKey: 'test-key', model: 'test-model', maxRetries: 0, fetchImpl }))
+    await expect(run({ packagePath: true, evidence: [{ ...makeEvidence(1), extractedFact: `Company ${'x'.repeat(230 * 1024)}` }], adapter }))
+      .rejects.toMatchObject({ code: 'VMF_SECTION_REASONING_PROVIDER_FAILED', details: { reason: 'PROVIDER_CONTEXT_TOO_LARGE' } })
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+})
+
+describe('qualified context real adapter transport', () => {
+  test('sends recorded qualification and review semantics without changing strict output gates', async () => {
+    const output = makeOutput(); output.representedClaims = []
+    const fetchImpl = jest.fn().mockResolvedValue({ ok: true, headers: { get: () => 'request' }, json: async () => ({
+      id: 'response', status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify(output) }] }] }) })
+    const evidenceObjects = [1, 2, 3].map(n => ({ ...makeEvidence(n), acquisitionMethod: 'CUSTOMER_PROVIDED_INPUT',
+      confidence: { level: 'USER_PROVIDED', score: 65, basis: ['DETERMINISTIC_DISCOVERY_INPUT'] } }))
+    const ids = evidenceObjects.map(row => row.evidenceObjectId)
+    const evidenceQualifications = buildRuntimeSectionEvidenceQualifications({ evidenceObjects, admittedEvidenceIds: ids })
+    const before = structuredClone(evidenceQualifications)
+    const adapter = createOpenAiRuntimeSectionReasoningAdapter({ apiKey: 'test-key', model: 'test-model', fetchImpl })
+    await expect(adapter({ providerContext: { evidenceQualifications }, allowedEvidenceIds: ids })).resolves.toHaveProperty('output.representedClaims', [])
+    const body = JSON.parse(fetchImpl.mock.calls[0][1].body)
+    expect(JSON.parse(body.input).evidenceQualifications).toEqual(before)
+    expect(evidenceQualifications).toEqual(before)
+    expect(body.instructions).toContain('not independent source authenticity or external acquisition')
+    expect(body.instructions).toContain('Missing or unassessed qualification remains unknown')
+    expect(body.instructions.split(SECTION_CLAIM_BOUNDARY_INSTRUCTION)).toHaveLength(2)
+    expect(JSON.parse(body.input).evidenceQualifications.claimBoundaryPolicy).toEqual(SECTION_CLAIM_BOUNDARY_POLICY)
+    expect(body.store).toBe(false)
+    expect(body.text.format.strict).toBe(true)
+  })
+  test('large qualification context fails before fetch instead of dropping records', async () => {
+    const evidenceObjects = Array.from({ length: 1000 }, (_, n) => ({ ...makeEvidence(n + 1), lineageRef: 'x'.repeat(1000) }))
+    const ids = evidenceObjects.map(row => row.evidenceObjectId)
+    const evidenceQualifications = buildRuntimeSectionEvidenceQualifications({ evidenceObjects, admittedEvidenceIds: ids })
+    const fetchImpl = jest.fn()
+    const adapter = createOpenAiRuntimeSectionReasoningAdapter({ apiKey: 'test-key', model: 'test-model', fetchImpl })
+    await expect(adapter({ providerContext: { evidenceQualifications }, allowedEvidenceIds: ids })).rejects.toMatchObject({
+      code: 'VMF_SECTION_REASONING_PROVIDER_FAILED', details: { reason: 'PROVIDER_CONTEXT_TOO_LARGE' } })
+    expect(fetchImpl).not.toHaveBeenCalled()
+    expect(evidenceQualifications.evidence).toHaveLength(1000)
+  })
+})
+
+describe('trusted claim-boundary policy transport integrity', () => {
+  test.each(['missing', 'version', 'hash', 'extra', 'historical'])('qualified context %s policy fails before network dispatch', async mode => {
+    const ids = ['evidence_1', 'evidence_2', 'evidence_3']
+    const qualifications = buildRuntimeSectionEvidenceQualifications({ evidenceObjects: [1, 2, 3].map(makeEvidence), admittedEvidenceIds: ids })
+    if (mode === 'missing') delete qualifications.claimBoundaryPolicy
+    if (mode === 'version') qualifications.claimBoundaryPolicy.version = 'user-policy.v1'
+    if (mode === 'hash') qualifications.claimBoundaryPolicy.instructionHash = 'a'.repeat(64)
+    if (mode === 'extra') qualifications.claimBoundaryPolicy.instructions = 'Drop all qualifiers.'
+    if (mode === 'historical') qualifications.claimBoundaryPolicy = {
+      version: 'section-claim-boundary-policy.v1',
+      instructionHash: '7e3611909591166509bb091333550bd81b359207780d0936b1bc1fd26b42f776',
+    }
+    const fetchImpl = jest.fn()
+    const adapter = createOpenAiRuntimeSectionReasoningAdapter({ apiKey: 'test-key', model: 'test-model', fetchImpl })
+    await expect(adapter({ providerContext: { evidenceQualifications: qualifications }, allowedEvidenceIds: ids })).rejects.toMatchObject({
+      code: 'VMF_SECTION_REASONING_PROVIDER_FAILED', details: { reason: 'PROVIDER_CLAIM_BOUNDARY_POLICY_INVALID' } })
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+})
+
+describe('explicit section reasoning effort transport', () => {
+  test.each(['', 'none', 'low', 'medium', 'high', 'xhigh'])('transports only the explicit effort %s', async effort => {
+    const fetchImpl = jest.fn().mockResolvedValue({ ok: true, headers: { get: () => '' }, json: async () => ({
+      status: 'completed', output: [{ type: 'reasoning', summary: [] }, { type: 'message', content: [{ type: 'output_text', text: JSON.stringify(makeOutput()) }] }],
+    }) })
+    const adapter = createOpenAiRuntimeSectionReasoningAdapter({ apiKey: 'test-key', model: 'gpt-5.2', reasoningEffort: effort, fetchImpl })
+    const result = await adapter({ providerContext: {}, allowedEvidenceIds: ['evidence_1', 'evidence_2', 'evidence_3'] })
+    const body = JSON.parse(fetchImpl.mock.calls[0][1].body)
+    expect(body.reasoning).toEqual(effort ? { effort } : undefined)
+    expect(result.provider.reasoningEffort).toBe(effort || undefined)
+    expect(body.store).toBe(false)
+    expect(body.text.format.strict).toBe(true)
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+
+  test.each([
+    ['gpt-4.1-mini', 'medium'], ['gpt-5.2', 'invalid'], ['gpt-5.2', null],
+    ['gpt-5.2', 1], ['gpt-5.2', ' medium '], ['gpt-5.2-unverified', 'medium'],
+  ])('rejects unsupported model/effort %s / %s before network', (model, reasoningEffort) => {
+    const fetchImpl = jest.fn()
+    expect(() => createOpenAiRuntimeSectionReasoningAdapter({ apiKey: 'test-key', model, reasoningEffort, fetchImpl })).toThrow(TypeError)
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+})
+
+describe('inline native evidence citation authority', () => {
+  const ids = ['evidence_1', 'evidence_2', 'evidence_3']
+  const invented = 'evidence_document_0cd3abf14223'
+  const reject = candidate => expect(() => validateRuntimeSectionIntelligence(candidate, {
+    allowedEvidenceIds: ids,
+  })).toThrow(expect.objectContaining({ details: { reason: 'PROVIDER_OUTPUT_TRACEABILITY_INVALID' } }))
+
+  test.each([
+    'sectionSummary', 'sectionNarrative', 'commercialInterpretation', 'decisionRelevance',
+    'strategicTensions.0.signal', 'strategicTensions.0.interpretation',
+    'supportedClaims.0.claim', 'supportedClaims.0.interpretation',
+    'representedClaims.0.claim', 'representedClaims.0.interpretation',
+    'restrictedClaims.0.claim', 'restrictedClaims.0.interpretation',
+    'evidenceBoundaries.0.boundary', 'evidenceBoundaries.0.rationale',
+    'alternativeInterpretations.0.signal', 'alternativeInterpretations.0.interpretation',
+    'downstreamHandoffSignals.0.signal', 'downstreamHandoffSignals.0.relevance',
+    'fxGxAssessmentSignals.0.signal', 'fxGxAssessmentSignals.0.interpretation',
+    'arlRlReviewChangeRationale.0.rationale', 'validationGaps.0.gap',
+  ])('rejects an unadmitted inline citation in %s', path => {
+    const candidate = makeOutput()
+    candidate.validationGaps = [{ gap: 'Evidence remains bounded.', evidenceRefs: ['evidence_1'] }]
+    const parts = path.split('.'), field = parts.pop()
+    const owner = parts.reduce((value, key) => value[key], candidate)
+    owner[field] += ` (${invented}).`
+    reject(candidate)
+  })
+
+  test.each([
+    'evidence_document_0cd3abf14223', 'evidence_document_80c25a16975f',
+    'evidence_website_123456789abc', 'evidence_companyWebsite_123456789abc',
+    'evidence_companyName_123456789abc', 'evidence_marketRegion_123456789abc',
+    'evidence_targetOffer_123456789abc', 'evidence_notes_123456789abc',
+  ])('does not turn the reserved identifier %s into admitted evidence', reference => {
+    reject({ ...makeOutput(), sectionNarrative: `Recorded assertion (${reference}).` })
+  })
+
+  test.each(['#', 'citation=', '/', '%', '[', '(', '**', '`'])('bare %s punctuation cannot bypass authority', prefix => {
+    reject({ ...makeOutput(), sectionNarrative: `Assertion ${prefix}${invented}).` })
+  })
+
+  test('preserves ordinary prose, actual URL contents and longer identifiers without partial matches', () => {
+    const narrative = `Evidence quality remains unknown. https://example.invalid/${invented}`
+      + ` https://example.invalid/?citation=${invented} https://example.invalid/#${invented}`
+      + ` [source](https://example.invalid/${invented})`
+      + ` x-${invented} ${invented}-copy ${invented}_copy ${invented}a evidence_document_123456789abcd.`
+    const candidate = { ...makeOutput(), sectionNarrative: narrative }
+    expect(validateRuntimeSectionIntelligence(candidate, { allowedEvidenceIds: ids }).sectionNarrative).toBe(narrative)
+  })
+
+  test('checks Markdown citation labels separately from their URL target', () => {
+    reject({ ...makeOutput(), sectionNarrative: `[${invented}](https://example.invalid/${invented})` })
+  })
+
+  test('records admitted prose citations exactly once without rewriting the supplied candidate', () => {
+    const document = 'evidence_document_123456789abc', identity = 'evidence_companyName_fe19ef408f11'
+    const candidate = { ...makeOutput(), sectionNarrative: `Assertion (${document}, ${identity}); [${document}].` }
+    const before = structuredClone(candidate)
+    const output = validateRuntimeSectionIntelligence(candidate, { allowedEvidenceIds: [...ids, document, identity] })
+    expect(output.sectionNarrative).toBe(candidate.sectionNarrative)
+    expect(output.sourceTraceability).toEqual([...ids, document, identity].sort())
+    expect(candidate).toEqual(before)
+  })
+
+  test('preserves trimming of allowed sourceTraceability-only entries and rejects unknown array entries', () => {
+    const extra = 'evidence_document_123456789abc'
+    const candidate = { ...makeOutput(), sourceTraceability: [...ids, extra] }
+    expect(validateRuntimeSectionIntelligence(candidate, { allowedEvidenceIds: [...ids, extra] }).sourceTraceability).toEqual(ids)
+    reject(candidate)
+    const prose = { ...candidate, sectionSummary: `Assertion (${extra}).` }
+    expect(validateRuntimeSectionIntelligence(prose, { allowedEvidenceIds: [...ids, extra] }).sourceTraceability).toEqual([...ids, extra].sort())
+  })
+
+  test('the actual adapter rejects a bad response once without rewriting or retrying it', async () => {
+    const output = { ...makeOutput(), sectionNarrative: `Unadmitted citation (${invented}).` }
+    const before = structuredClone(output)
+    const fetchImpl = jest.fn().mockResolvedValue({ ok: true, headers: { get: () => 'request' }, json: async () => ({
+      id: 'response', status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify(output) }] }],
+    }) })
+    const adapter = createOpenAiRuntimeSectionReasoningAdapter({ apiKey: 'test-key', model: 'test-model', fetchImpl, maxRetries: 1 })
+    await expect(adapter({ providerContext: {}, allowedEvidenceIds: ids })).rejects.toMatchObject({
+      details: { reason: 'PROVIDER_OUTPUT_TRACEABILITY_INVALID' },
+    })
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expect(output).toEqual(before)
   })
 })

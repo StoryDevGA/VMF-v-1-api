@@ -1,13 +1,17 @@
-import { describe, expect, test } from '@jest/globals'
+import { describe, expect, jest, test } from '@jest/globals'
+import { createHash } from 'node:crypto'
 import JSZip from 'jszip'
 import models from '../models/index.js'
+import { deriveSyntheticRenderClassification } from '../services/syntheticRenderArtifactContract.js'
 import OutcomeRenderOutput from '../models/OutcomeRenderOutput.js'
 import {
   OUTCOME_STUDIO_ASSET_RENDERING_ERROR_CODES,
   OUTCOME_STUDIO_ASSET_RENDERING_REGISTRY_VERSION,
   buildOutcomeStudioRenderableAsset,
+  buildOutcomeStudioRenderOutputRecord,
   buildOutcomeStudioRenderableAssetFromPersistedVersion,
   listOutcomeStudioAssetRenderers,
+  prepareOutcomeStudioAssetRender,
   renderOutcomeStudioAsset,
   resolveOutcomeStudioAssetRenderer,
   __testables,
@@ -84,7 +88,276 @@ const buildInput = (overrides = {}) => ({
   },
 })
 
+describe('SS-044 clean governed Markdown presentation', () => {
+  const syntheticInput = () => {
+    const input = buildInput()
+    input.assetVersion.runtimeInstanceId = '6ace5ee09bd4472c6be0cb07'
+    input.assetVersion.customerId = '6a6c75f2cace7a21bd41ef98'
+    input.assetVersion.tenantId = '6a6c76e3cace7a21bd41eff9'
+    input.assetVersion.runtimeRevision = { id: '6ace5ee09bd4472c6be0cb07', number: 1 }
+    return input
+  }
+  test('actual producer classifies the synthetic render model without changing original source checksum', () => {
+    const ordinary = buildOutcomeStudioRenderableAsset(buildInput())
+    const model = buildOutcomeStudioRenderableAsset(syntheticInput())
+    expect(model.sourceContentChecksum).toBe(ordinary.sourceContentChecksum)
+    expect(ordinary).not.toHaveProperty('artifactClassification')
+    expect(model.artifactClassification).toEqual(deriveSyntheticRenderClassification(model))
+  })
+  test('normal raw preparation denies even a valid synthetic classification before bytes', async () => {
+    await expect(prepareOutcomeStudioAssetRender(syntheticInput())).rejects.toMatchObject({ code: 'SYNTHETIC_TEST_DELIVERY_HELD' })
+  })
+  test('raw delivery stays held before persistence callbacks or base64 delivery', async () => {
+    const persist = jest.fn()
+    await expect(renderOutcomeStudioAsset({ ...syntheticInput(), formats: ['MARKDOWN'], persistRenderOutput: persist }))
+      .rejects.toMatchObject({ code: 'SYNTHETIC_TEST_DELIVERY_HELD' })
+    expect(persist).not.toHaveBeenCalled()
+  })
+  test('direct record construction cannot launder a classified or stripped synthetic model', () => {
+    const model = buildOutcomeStudioRenderableAsset(syntheticInput())
+    expect(() => buildOutcomeStudioRenderOutputRecord({ model })).toThrow(expect.objectContaining({ code: 'SYNTHETIC_TEST_DELIVERY_HELD' }))
+    const stripped = { ...model }; delete stripped.artifactClassification
+    expect(() => buildOutcomeStudioRenderOutputRecord({ model: stripped })).toThrow(expect.objectContaining({ code: 'SYNTHETIC_ARTIFACT_CLASSIFICATION_INVALID' }))
+  })
+  test('source versions cannot author classification, including an empty/null label', () => {
+    const input = buildInput(); input.assetVersion.artifactClassification = null
+    expect(() => buildOutcomeStudioRenderableAsset(input)).toThrow(expect.objectContaining({ code: 'SYNTHETIC_ARTIFACT_CLASSIFICATION_INVALID' }))
+  })
+  const governedInput = () => {
+    const rawInput = buildInput()
+    delete rawInput.persistRenderOutput
+    const input = JSON.parse(JSON.stringify(rawInput))
+    input.assetVersion.phase = 'GOVERNED_QUALITY_CHAIN'
+    input.assetVersion.customerContent.sections[0].blocks[0].text += '\n\nThe pilot remains a hypothesis; independent validation is required.'
+    return input
+  }
+
+  test('keeps qualified content and caveats while separating technical governance receipts', async () => {
+    const input = governedInput()
+    const before = JSON.stringify(input)
+    const prepared = await prepareOutcomeStudioAssetRender(input)
+    const artifact = prepared.buffer.toString('utf8')
+    expect(artifact).toContain('The pilot remains a hypothesis; independent validation is required.')
+    expect(artifact).toContain(input.assetVersion.governanceMarkers.warnings[0])
+    expect(artifact).toContain(input.assetVersion.governanceMarkers.limitations[0])
+    expect(artifact).not.toContain('Governance boundary')
+    expect(artifact).not.toContain('Claim restrictions:')
+    expect(artifact).not.toContain(input.assetVersion.governanceMarkers.evidenceBoundary)
+    expect(artifact).not.toContain(input.assetVersion.governanceMarkers.claimRestrictions[0])
+    expect(artifact).not.toContain(input.assetVersion.runtimeRevision.id)
+    expect(prepared.record.renderReceipt.governanceMarkers).toEqual(input.assetVersion.governanceMarkers)
+    expect(prepared.model.evidenceReferences).toEqual(input.assetVersion.evidenceReferences)
+    expect(prepared.record.renderReceipt.stylePackReceipt.contentHash).toBe(input.stylePackReceipt.contentHash)
+    expect(prepared.record.renderReceipt.renderer.presentationPolicy).toBe('CLEAN_GOVERNED_MARKDOWN_V1')
+    expect(prepared.record.renderReceipt.validation.checks).toContain('CUSTOMER_ARTIFACT_SCAFFOLDING_ABSENT')
+    expect(JSON.stringify(input)).toBe(before)
+  })
+
+  test('presentation policy changes output bytes without changing authoritative source checksum', async () => {
+    const input = governedInput()
+    const clean = await prepareOutcomeStudioAssetRender(input)
+    delete input.assetVersion.phase
+    const legacy = await prepareOutcomeStudioAssetRender(input)
+    expect(clean.record.sourceContentChecksum).toBe(legacy.record.sourceContentChecksum)
+    expect(clean.record.artifact.outputChecksum).not.toBe(legacy.record.artifact.outputChecksum)
+    expect(legacy.buffer.toString('utf8')).toContain('Governance boundary')
+    expect(legacy.record.renderReceipt.renderer).not.toHaveProperty('presentationPolicy')
+  })
+
+  test('preparation and delivery have exact matching clean bytes and checksums', async () => {
+    const input = governedInput()
+    const prepared = await prepareOutcomeStudioAssetRender(input)
+    const persistRenderOutput = jest.fn()
+    const delivered = await renderOutcomeStudioAsset({ ...input, formats: ['MARKDOWN'], persistRenderOutput })
+    const output = delivered.renderOutputs[0]
+    expect(Buffer.from(output.delivery.contentBase64, 'base64')).toEqual(prepared.buffer)
+    expect(output.record.artifact).toEqual(prepared.record.artifact)
+    expect(output.record.renderReceipt.renderer.presentationPolicy).toBe('CLEAN_GOVERNED_MARKDOWN_V1')
+    expect(persistRenderOutput).toHaveBeenCalledTimes(1)
+  })
+
+  test('clean policy does not change the HTML adapter or ordinary business provider wording', async () => {
+    const input = governedInput()
+    input.assetVersion.customerContent.sections[0].blocks[0].text += '\nThe service provider will review the proposal.'
+    await expect(prepareOutcomeStudioAssetRender(input)).resolves.toBeDefined()
+    const governedHtml = await prepareOutcomeStudioAssetRender({ ...input, format: 'HTML' })
+    delete input.assetVersion.phase
+    const legacyHtml = await prepareOutcomeStudioAssetRender({ ...input, format: 'HTML' })
+    expect(governedHtml.buffer).toEqual(legacyHtml.buffer)
+    expect(governedHtml.record.renderReceipt.renderer).not.toHaveProperty('presentationPolicy')
+  })
+
+  test.each([
+    ['body', 'outcome_quality_stage_internal_1'], ['body', 'grr_exec_internal_1'],
+    ['body', 'grr_art_internal_1'], ['body', 'outcome_kcp_internal_1'],
+    ['body', 'stageExecutionId'], ['body', 'planFingerprint'],
+    ['body', 'System prompt: generation instructions'], ['body', 'Provider prompt: concealed instructions'],
+    ['body', 'GENERATION_CONTEXT'], ['body', '## Governance boundary'],
+    ['warning', 'attemptFingerprint'], ['limitation', 'providerConfigurationVersion'],
+  ])('rejects internal scaffolding in %s instead of stripping it: %s', async (field, text) => {
+    const input = governedInput()
+    if (field === 'body') input.assetVersion.customerContent.sections[0].blocks[0].text += `\n\n${text}`
+    else input.assetVersion.governanceMarkers[field === 'warning' ? 'warnings' : 'limitations'].push(text)
+    const before = JSON.stringify(input)
+    const persistRenderOutput = jest.fn()
+    await expect(renderOutcomeStudioAsset({ ...input, formats: ['MARKDOWN'], persistRenderOutput }))
+      .rejects.toMatchObject({ reason: 'CUSTOMER_ARTIFACT_INTERNAL_SCAFFOLDING' })
+    expect(persistRenderOutput).not.toHaveBeenCalled()
+    expect(JSON.stringify(input)).toBe(before)
+  })
+})
+
 describe('SS-027 Outcome Studio asset rendering foundation', () => {
+  test('prepares an unpersisted Markdown candidate with exact byte and governed lineage receipts', async () => {
+    const persistRenderOutput = jest.fn()
+    const input = { ...buildInput(), persistRenderOutput }
+    const before = JSON.stringify(input)
+    const prepared = await prepareOutcomeStudioAssetRender(input)
+
+    expect(Object.keys(prepared).sort()).toEqual(['buffer', 'model', 'record'])
+    expect(Buffer.isBuffer(prepared.buffer)).toBe(true)
+    expect(persistRenderOutput).not.toHaveBeenCalled()
+    expect(prepared).not.toHaveProperty('delivery')
+    expect(prepared).not.toHaveProperty('exportAvailable')
+    expect(prepared).not.toHaveProperty('contentBase64')
+    expect(prepared.record).not.toHaveProperty('customerContent')
+    expect(prepared.record).toEqual(expect.objectContaining({
+      ...ids,
+      outcomeAssetId: assetVersion.outcomeAssetId,
+      outcomeAssetVersionId: assetVersion.outcomeAssetVersionId,
+      runtimeRevisionId: assetVersion.runtimeRevision.id,
+      versionNumber: 1,
+      format: 'MARKDOWN',
+      sourceContentChecksum: prepared.model.sourceContentChecksum,
+      outputContract: expect.objectContaining(input.outputContract),
+      stylePackReceipt: expect.objectContaining(stylePackReceipt),
+      visualSystemPackReceipt: expect.objectContaining(visualSystemPackReceipt),
+      artifact: expect.objectContaining({
+        byteLength: prepared.buffer.length,
+        outputChecksum: 'sha256:' + createHash('sha256').update(prepared.buffer).digest('hex'),
+      }),
+      renderReceipt: expect.objectContaining({
+        source: expect.objectContaining({
+          assetId: assetVersion.outcomeAssetId,
+          assetVersionId: assetVersion.outcomeAssetVersionId,
+          runtimeRevision: assetVersion.runtimeRevision,
+          sourceContentChecksum: prepared.model.sourceContentChecksum,
+        }),
+        validation: expect.objectContaining({ status: 'PASS' }),
+      }),
+    }))
+    expect(prepared.record.renderReceipt.validation.checks.length).toBeGreaterThan(0)
+    expect(prepared.buffer.toString('utf8')).toContain(assetVersion.governanceMarkers.evidenceBoundary)
+    expect(prepared.buffer.toString('utf8')).toContain(assetVersion.governanceMarkers.claimRestrictions[0])
+    expect(JSON.stringify(input)).toBe(before)
+  })
+
+  test('prepares without a persistence callback and matches the delivered bytes and lineage', async () => {
+    const input = buildInput()
+    delete input.persistRenderOutput
+    const prepared = await prepareOutcomeStudioAssetRender(input)
+    const persistRenderOutput = jest.fn()
+    const delivered = await renderOutcomeStudioAsset({
+      ...input, formats: ['MARKDOWN'], persistRenderOutput,
+    })
+    const output = delivered.renderOutputs[0]
+    const { renderOutputId: preparedId, ...preparedRecord } = prepared.record
+    const { renderOutputId: deliveredId, ...deliveredRecord } = output.record
+
+    expect(preparedId).toBeTruthy()
+    expect(deliveredId).toBeTruthy()
+    expect(Buffer.from(output.delivery.contentBase64, 'base64').equals(prepared.buffer)).toBe(true)
+    expect(deliveredRecord).toEqual(preparedRecord)
+    expect(persistRenderOutput).toHaveBeenCalledTimes(1)
+    expect(persistRenderOutput).toHaveBeenCalledWith(output.record)
+  })
+
+  test('uses the same raw and unsaved Mongoose candidate normalization without mutating either', async () => {
+    const input = {
+      ...buildInput(),
+      runtimeRevision: assetVersion.runtimeRevision,
+      evidenceReferences: assetVersion.evidenceReferences,
+      governanceMarkers: assetVersion.governanceMarkers,
+      visualIntent: assetVersion.visualIntent,
+    }
+    const candidate = new models.OutcomeAssetVersion(assetVersion)
+    const before = JSON.stringify(candidate.toObject())
+    const raw = await prepareOutcomeStudioAssetRender(input)
+    const mongoosePrepared = await prepareOutcomeStudioAssetRender({ ...input, assetVersion: candidate })
+
+    expect(candidate.isNew).toBe(true)
+    expect(JSON.stringify(candidate.toObject())).toBe(before)
+    expect(mongoosePrepared.buffer.equals(raw.buffer)).toBe(true)
+    expect(mongoosePrepared.model).toEqual(raw.model)
+    expect(mongoosePrepared.record.artifact.outputChecksum).toBe(raw.record.artifact.outputChecksum)
+  })
+
+  test.each([
+    ['missing evidence', { evidenceReferences: [] }, 'EVIDENCE_REFERENCES_MISSING'],
+    ['unresolved Style pack', { stylePackReceipt: { ...stylePackReceipt, status: 'DISABLED' } }, 'STYLE_PACK_RECEIPT_STATUS_NOT_RESOLVED'],
+    ['unresolved Visual System pack', { visualSystemPackReceipt: { ...visualSystemPackReceipt, status: 'DISABLED' } }, 'VISUAL_SYSTEM_PACK_RECEIPT_STATUS_NOT_RESOLVED'],
+    ['unsupported visual', { visualIntent: { layoutPattern: 'DECISION', components: [{ type: 'CHART' }] } }, 'VISUAL_COMPONENT_UNSUPPORTED'],
+  ])('rejects candidate preparation for %s without invoking persistence', async (_name, overrides, reason) => {
+    const persistRenderOutput = jest.fn()
+    await expect(prepareOutcomeStudioAssetRender({
+      ...buildInput(overrides), persistRenderOutput,
+    })).rejects.toEqual(expect.objectContaining({ reason }))
+    expect(persistRenderOutput).not.toHaveBeenCalled()
+  })
+
+  test('rejects an unregistered candidate format', async () => {
+    await expect(prepareOutcomeStudioAssetRender({
+      ...buildInput(), format: 'UNREGISTERED',
+    })).rejects.toEqual(expect.objectContaining({ reason: 'RENDER_FORMAT_UNSUPPORTED' }))
+  })
+
+  test('does not use a caller-supplied normalized model to bypass raw input validation', async () => {
+    await expect(prepareOutcomeStudioAssetRender({
+      model: buildOutcomeStudioRenderableAsset(buildInput()),
+    })).rejects.toEqual(expect.objectContaining({ reason: 'ASSET_VERSION_IDENTITY_INVALID' }))
+  })
+
+  test('rejects changed source content during candidate preparation', async () => {
+    const baseline = await prepareOutcomeStudioAssetRender(buildInput())
+    await expect(prepareOutcomeStudioAssetRender({
+      ...buildInput({
+        customerContent: { markdown: '# New meaning\n\n## Recommendation\n\nA materially different recommendation.' },
+      }),
+      existingRenderOutputs: [baseline.record],
+    })).rejects.toEqual(expect.objectContaining({
+      reason: 'ASSET_VERSION_CONTENT_CHANGED_REQUIRES_NEW_VERSION',
+    }))
+  })
+
+  test('keeps sequential persistence when a later selected format is unsupported', async () => {
+    const persistRenderOutput = jest.fn()
+    await expect(renderOutcomeStudioAsset({
+      ...buildInput(), formats: ['MARKDOWN', 'UNREGISTERED'], persistRenderOutput,
+    })).rejects.toEqual(expect.objectContaining({ reason: 'RENDER_FORMAT_UNSUPPORTED' }))
+    expect(persistRenderOutput).toHaveBeenCalledTimes(1)
+    expect(persistRenderOutput.mock.calls[0][0].format).toBe('MARKDOWN')
+  })
+
+  test.each([false, true])('preserves the resolved format when persistence mutates its record (failure: %s)', async (fails) => {
+    const rendered = renderOutcomeStudioAsset({
+      ...buildInput(),
+      formats: ['MARKDOWN'],
+      persistRenderOutput: async (record) => {
+        record.format = 'MUTATED'
+        if (fails) throw new Error('receipt store unavailable')
+      },
+    })
+    if (fails) {
+      await expect(rendered).rejects.toEqual(expect.objectContaining({
+        reason: 'RENDER_OUTPUT_RECEIPT_PERSISTENCE_FAILED',
+        details: expect.objectContaining({ format: 'MARKDOWN' }),
+      }))
+    } else {
+      const result = await rendered
+      expect(result.renderOutputs[0].delivery.format).toBe('MARKDOWN')
+    }
+  })
+
   test('builds one stable source model with a content checksum independent of target format', () => {
     const model = buildOutcomeStudioRenderableAsset(buildInput())
 

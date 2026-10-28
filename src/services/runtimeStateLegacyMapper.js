@@ -1,4 +1,6 @@
 import mongoose from 'mongoose'
+import { validateSourceCapture, validateEvidenceSupport } from './sourceEvidenceContract.js'
+import { assertEvidenceDraftQualification, preserveEvidenceDraftQualification } from './evidenceDraftQualification.js'
 
 import RuntimeEvidenceObject from '../models/RuntimeEvidenceObject.js'
 import RuntimeEvidenceSource from '../models/RuntimeEvidenceSource.js'
@@ -162,7 +164,7 @@ const normalizeInput = (input) => {
   return { scope, stateVersion, migrationReceiptId, migrationTimestamp: input.migrationTimestamp }
 }
 
-const mapSections = ({ manifest, common }) => {
+const mapSections = ({ manifest, common, sectionDetailProjector }) => {
   const normalizedKeys = new Set()
   return manifest.map(({ sectionKey: rawSectionKey, value }) => {
     const sectionKey = normalizeString(rawSectionKey, { required: true, casing: 'lower' })
@@ -188,23 +190,30 @@ const mapSections = ({ manifest, common }) => {
     const contentHashKey = firstOwn(projection, ['contentHash'])
     const truthHash = truthHashKey ? normalizeHash(projection[truthHashKey], { optional: false }) : ''
     const contentHash = contentHashKey ? normalizeHash(projection[contentHashKey], { optional: false }) : ''
-    let evidenceRefs = []
-    if (hasOwn(projection, 'evidenceRefs')) {
-      if (!Array.isArray(projection.evidenceRefs)
-        || Object.keys(projection.evidenceRefs).length !== projection.evidenceRefs.length
-        || !projection.evidenceRefs.every((item) => typeof item === 'string')) {
+    const referenceLists = ['evidenceRefs', 'supportingEvidenceRefs'].filter(key => hasOwn(projection, key)).map(key => {
+      const refs = projection[key]
+      if (!Array.isArray(refs) || refs.length > 10000
+        || Object.keys(refs).length !== refs.length
+        || !refs.every((item) => typeof item === 'string' && item.trim().length > 0)) {
         inputFailure('Section mapping is invalid.')
       }
-      evidenceRefs = projection.evidenceRefs.map((item) => item.trim())
+      return refs.map(item => item.trim())
+    })
+    if (referenceLists.length === 2
+      && JSON.stringify(referenceLists[0]) !== JSON.stringify(referenceLists[1])) {
+      inputFailure('Section reference mappings disagree.')
     }
+    const evidenceRefs = referenceLists[0] || []
     if ([summary, truthStatus, truthHash, contentHash].includes(null)) inputFailure('Section mapping is invalid.')
     const legacyPath = `framework_state.sections.${sectionKey}`
-    const sectionDetail = clonePlain(normalizeRuntimeSectionObject({
+    const normalizedDetail = clonePlain(normalizeRuntimeSectionObject({
       value,
       sectionKey,
       runtimePath: legacyPath,
       initializedAt: common.updatedAt,
     }))
+    const sectionDetail = sectionDetailProjector
+      ? sectionDetailProjector(normalizedDetail, { sectionKey, common }) : normalizedDetail
     const row = {
       ...common,
       sectionKey,
@@ -262,8 +271,11 @@ const mapSources = ({ manifest, common }) => {
       sourceId,
       sourceType,
       title,
+      ...projectControlledReplayProvenance(value, common),
       sourceRef,
       contentHash,
+      ...(hasOwn(value, 'sourceCapture') ? { sourceCapture: validateSourceCapture(value.sourceCapture,
+        { sourceId, contentHash }) } : {}),
       ...(processingReceipt !== undefined ? { processingReceipt: structuredClone(processingReceipt) } : {}),
       ...(value.verificationContext !== undefined ? { verificationContext: structuredClone(value.verificationContext) } : {}),
       acquisitionStatus,
@@ -303,13 +315,17 @@ const normalizeConfidence = (value) => {
   return { level, score, basis: basis.map((item) => item.trim()) }
 }
 
-const mapEvidence = ({ manifest, common, sourceIds }) => {
+const mapEvidence = ({ manifest, common, sourceIds, sources }) => {
   const rows = manifest.map(({ evidenceObjectId: rawEvidenceObjectId, sourceId: rawSourceId, value }) => {
     if (!isPlainRecord(value)) inputFailure('Evidence mapping is invalid.')
     const evidenceObjectId = normalizeString(rawEvidenceObjectId, { required: true })
     const sourceId = normalizeString(rawSourceId, { required: true })
     if (!sourceIds.has(sourceId)) inputFailure('Evidence mapping is invalid.')
-    const sourceType = ownString(value, ['sourceType'], { casing: 'upper' })
+    const recordedSourceType = ownString(value, ['sourceType'], { casing: 'upper' })
+    const sourceType = sources.get(sourceId).sourceType
+    if (recordedSourceType === null || (recordedSourceType && recordedSourceType !== sourceType)) {
+      inputFailure('Evidence mapping is invalid.')
+    }
     const lineageRef = ownString(value, ['lineageRef', 'lineage'])
     const extractedFact = ownString(value, ['extractedFact', 'fact'], { defaultValue: '' })
     const reviewStatus = ownString(value, ['reviewStatus'], { defaultValue: '', casing: 'upper' })
@@ -348,9 +364,15 @@ const mapEvidence = ({ manifest, common, sourceIds }) => {
       evidenceObjectId,
       sourceId,
       sourceType,
+      ...projectControlledReplayProvenance(value, common),
       lineageRef,
       extractedFact,
       ...(hasOwn(value, 'sourceLocation') ? { sourceLocation: value.sourceLocation } : {}),
+      ...(hasOwn(value, 'evidenceSupport') ? { evidenceSupport: (() => {
+        const source = sources.get(sourceId)
+        if (!source?.sourceCapture) inputFailure('Evidence support source capture is missing.')
+        return validateEvidenceSupport(value.evidenceSupport, { sourceId, sourceCapture: source.sourceCapture })
+      })() } : {}),
       reviewStatus,
       acceptanceState,
       validationStatus,
@@ -363,8 +385,11 @@ const mapEvidence = ({ manifest, common, sourceIds }) => {
       truthHash,
       lineageHash,
     }
-    validateDto(RuntimeEvidenceObject, row, 'evidence')
-    return row
+    const qualified = preserveEvidenceDraftQualification(value, row)
+    assertControlledReplayProvenancePairs({ sources: [sources.get(sourceId)], evidenceObjects: [qualified], native: common })
+    assertEvidenceDraftQualification({ evidence: qualified, source: sources.get(sourceId) })
+    validateDto(RuntimeEvidenceObject, qualified, 'evidence')
+    return qualified
   })
   assertUnique(rows.map(({ evidenceObjectId }) => evidenceObjectId), 'Evidence mapping is invalid.')
   return rows
@@ -446,7 +471,19 @@ const copyAttributes = (value, consumed, allowed, familyReason) => {
 }
 
 const normalizeNodeAttributes = (value, consumed) => {
-  const attributes = copyAttributes(value, consumed, NODE_ATTRIBUTE_KEYS, 'Node mapping is invalid.')
+  const sectionTruthKeys = ['truthHash', 'acceptedAt', 'acceptedBy']
+  const allowed = value.nodeType === 'SECTION_TRUTH'
+    ? new Set([...NODE_ATTRIBUTE_KEYS, ...sectionTruthKeys])
+    : NODE_ATTRIBUTE_KEYS
+  const attributes = copyAttributes(value, consumed, allowed, 'Node mapping is invalid.')
+  for (const key of sectionTruthKeys) {
+    if (!hasOwn(attributes, key)) continue
+    const field = attributes[key]
+    const valid = key === 'acceptedAt'
+      ? field === null || (typeof field === 'string' && Number.isFinite(Date.parse(field)))
+      : typeof field === 'string'
+    if (!valid) inputFailure('Node mapping is invalid.')
+  }
   if (!hasOwn(attributes, 'scope') || isPlainRecord(attributes.scope)) return attributes
   const scope = normalizeString(attributes.scope, { required: true, casing: 'upper' })
   if (!['GLOBAL', 'SECTION'].includes(scope)) inputFailure('Node mapping is invalid.')
@@ -575,7 +612,7 @@ const createMappingContext = (input) => {
   return { authority, serializerResult, mappingManifest }
 }
 
-const createSourceRows = ({ authority, serializerResult, mappingManifest }) => {
+const createSourceRows = ({ authority, serializerResult, mappingManifest }, { sectionDetailProjector } = {}) => {
   const sectionCommon = commonRow({
     ...authority,
     sourceHash: serializerResult.domains.sections.sourceHash,
@@ -588,21 +625,22 @@ const createSourceRows = ({ authority, serializerResult, mappingManifest }) => {
     ...authority,
     sourceHash: serializerResult.domains.intelligenceGraph.sourceHash,
   })
-  const sections = mapSections({ manifest: mappingManifest.sections, common: sectionCommon })
+  const sections = mapSections({ manifest: mappingManifest.sections, common: sectionCommon, sectionDetailProjector })
   const evidenceSources = mapSources({ manifest: mappingManifest.evidenceSources, common: evidenceCommon })
   const sourceIds = new Set(evidenceSources.map(({ sourceId }) => sourceId))
   const evidenceObjects = mapEvidence({
     manifest: mappingManifest.evidenceObjects,
     common: evidenceCommon,
     sourceIds,
+    sources: new Map(evidenceSources.map(row => [row.sourceId, row])),
   })
   return { evidenceObjects, evidenceSources, sections }
 }
 
-export const createRuntimeStateLegacySourceRowSet = (input) => {
+export const createRuntimeStateLegacySourceRowSet = (input, options = {}) => {
   const context = createMappingContext(input)
   const { authority, serializerResult } = context
-  const { evidenceObjects, evidenceSources, sections } = createSourceRows(context)
+  const { evidenceObjects, evidenceSources, sections } = createSourceRows(context, options)
   return {
     schemaVersion: 'ss014-v2-source-row-set-v1',
     algorithm: serializerResult.algorithm,
@@ -617,10 +655,10 @@ export const createRuntimeStateLegacySourceRowSet = (input) => {
   }
 }
 
-export const createRuntimeStateLegacyRowSet = (input) => {
+export const createRuntimeStateLegacyRowSet = (input, options = {}) => {
   const context = createMappingContext(input)
   const { authority, serializerResult, mappingManifest } = context
-  const { evidenceObjects, evidenceSources, sections } = createSourceRows(context)
+  const { evidenceObjects, evidenceSources, sections } = createSourceRows(context, options)
   const graphCommon = commonRow({
     ...authority,
     sourceHash: serializerResult.domains.intelligenceGraph.sourceHash,
@@ -648,3 +686,4 @@ export const createRuntimeStateLegacyRowSet = (input) => {
     },
   }
 }
+import { projectControlledReplayProvenance, assertControlledReplayProvenancePairs } from './controlledReplayContract.js'

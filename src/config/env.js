@@ -122,6 +122,7 @@ const env = {
   ),
   vmfSectionReasoningProviderKey: process.env.VMF_SECTION_REASONING_PROVIDER_KEY || '',
   vmfSectionReasoningProviderModel: process.env.VMF_SECTION_REASONING_PROVIDER_MODEL || '',
+  vmfSectionReasoningProviderReasoningEffort: process.env.VMF_SECTION_REASONING_PROVIDER_REASONING_EFFORT || '',
   vmfSectionReasoningProviderApiKey:
     process.env.VMF_SECTION_REASONING_PROVIDER_API_KEY || process.env.OPENAI_API_KEY || '',
   vmfSectionReasoningProviderTimeoutMs: toPositiveNumber(

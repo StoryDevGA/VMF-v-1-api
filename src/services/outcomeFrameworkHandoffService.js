@@ -81,6 +81,7 @@ const FRAMEWORK_PACKAGE_BOUNDED_PROJECTION = [
 ].join(' ')
 
 const RUNTIME_STATE_V2_CONTROL_PROJECTION_FIELDS = Object.freeze([
+  'controlledReplayIsolation',
   '_id',
   'runtimeInstanceKey',
   'customerId',
@@ -998,7 +999,7 @@ export const buildOutcomePlanningRuntimeEvidence = ({ runtimeInstance, framework
   const handoffHash = normalizeText(handoff?.currentness?.handoffHash)
   const handoffContext = handoff?.knowledgeResolution?.context || {}
   const canonicalEligibility = handoff?.canonicalEligibility || getCanonicalOutputEligibility(state)
-  return {
+  return copyControlledReplayIsolationWitness(runtime, {
     ...runtime, _id: runtime._id || runtime.id,
     framework_state: { ...state, sections: truthSections },
     planningEvidence: {
@@ -1048,7 +1049,7 @@ export const buildOutcomePlanningRuntimeEvidence = ({ runtimeInstance, framework
         runtimeManagedCompletion: section.runtimeManagedCompletion || null })),
       runtimeManaged: managed,
     },
-  }
+  })
 }
 
 export const buildFrameworkOutcomeStudioHandoff = ({
@@ -1493,3 +1494,4 @@ export default {
   resolveFrameworkOutcomeStudioHandoff,
   validateFrameworkOutcomeStudioHandoff,
 }
+import { copyControlledReplayIsolationWitness } from './controlledReplayIsolationService.js'

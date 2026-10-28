@@ -197,3 +197,9 @@ export const buildExpressionOnlyRevisionSection = (section = {}) => {
 }
 
 export default { buildExpressionOnlyRevisionSection, isInternalRenderedExpressionText }
+
+export { OUTCOME_READABLE_EXPRESSION_PROFILE_VERSION, buildReadableExpressionSection } from './outcomeReadableExpressionProfile.js'
+export { OUTCOME_PRESENTATION_EXPRESSION_PROFILE_VERSION, buildPresentationExpressionSection } from './outcomePresentationExpressionProfile.js'
+export { OUTCOME_STRUCTURED_EXPRESSION_PROFILE_VERSION, buildStructuredExpressionSection } from './outcomeStructuredExpressionProfile.js'
+export { OUTCOME_COMMERCIAL_EXPRESSION_PROFILE_VERSION, OUTCOME_COMMERCIAL_CANDIDATE_TYPE, buildCommercialOutputContract, assertCommercialOutputContract, getCommercialDiagramApplicability, buildCommercialExpressionSection } from './outcomeCommercialExpressionProfile.js'
+export { OUTCOME_COMMERCIAL_READABLE_EXPRESSION_PROFILE_VERSION, buildReadableCommercialExpressionSection } from './outcomeReadableCommercialExpressionProfile.js'

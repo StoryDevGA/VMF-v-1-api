@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { generateChecksum } from './governanceAudit/checksumService.js'
+import { projectControlledReplayProvenance } from './controlledReplayContract.js'
 
 const text = (max) => z.string().trim().min(1).max(max)
 export const sourceVerificationFactsSchema = z.object({
@@ -31,6 +32,7 @@ export const sourceMaterialFingerprint = (source) => `sha256:${generateChecksum(
   contentHash: String(source.contentHash ??
     (Object.hasOwn(source, 'sourceStateVersion') || Object.hasOwn(source, 'migrationReceiptId') ? '' : source.sourceHash) ?? '').trim(),
   lineageRef: String(source.lineageRef ?? source.lineage ?? '').trim(),
+  ...projectControlledReplayProvenance(source),
 })}`
 
 export const resolveSourceRecordedReview = (source) => {

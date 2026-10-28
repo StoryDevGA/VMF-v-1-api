@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { readContradictionReviewBasis, reconcileContradictionReviewBasis } from './contradictionReviewBasis.js'
 import mongoose from 'mongoose'
 import RuntimeInstance from '../models/RuntimeInstance.js'
 import RuntimeEvidenceObject from '../models/RuntimeEvidenceObject.js'
@@ -124,7 +125,7 @@ const compile = async (runtime, session, deadline, readBudget) => {
         }
         const semanticHash = snapshotHash(kind === 'evidence' ? { evidence: semanticEvidence(row), decision } : semanticSource(row))
         semantic[kind].set(id, { id, basisHash: semanticHash, ...(kind === 'evidence' ? { status: row.reviewStatus } : {}) })
-        if (kind === 'evidence' && candidateIds.has(id)) facts.set(id, semanticEvidence(row))
+        if (kind === 'evidence' && candidateIds.has(id)) facts.set(id, row)
         const { extractedFact, ...compact } = row
         return { ...compact, semanticHash }
       })
@@ -145,8 +146,12 @@ const compile = async (runtime, session, deadline, readBudget) => {
       fail('REVIEW_READ_UNAVAILABLE', 'The complete review population could not be verified. Refresh to retry.', 503)
     throw error
   })
+  const basisArgs = { control: runtime, candidates, reviews, reviewEpoch: pack.contradictionReviewEpoch,
+    evidenceRows: [...facts.values()], session, readBudget: readBudget || (() => ({ maxTimeMS: remaining(deadline) })) }
+  const basis = candidateIds.size ? await readContradictionReviewBasis(basisArgs) : null
+  const reviewRows = basis ? reconcileContradictionReviewBasis({ ...basisArgs, basis }) : [...facts.values()]
   const contradictions = candidates.map((candidate) => {
-    const result = getDiscoveryContradictionReview(candidate, [...facts.values()], reviews,
+    const result = getDiscoveryContradictionReview(candidate, reviewRows, reviews,
       key(scope.runtimeInstanceId), pack.contradictionReviewEpoch ?? '')
     if (!result.evidencePairHash) fail('REVIEW_POPULATION_UNKNOWN', 'A finding evidence basis cannot be verified.')
     return { id: candidate.contradictionId, evidencePairHash: result.evidencePairHash,
@@ -172,6 +177,7 @@ const compile = async (runtime, session, deadline, readBudget) => {
       decisionCount: expectedEvidence + contradictions.length, complete,
       reason: refreshNeeded ? 'EVIDENCE_REFRESH_REQUIRED' : complete ? 'ALL_MANDATORY_DECISIONS_DISPOSED' : 'OUTSTANDING_DECISIONS' } }
 }
+export { compile as compileReviewPopulation }
 const publicReceipt = (receipt, populationHash) => ({ receiptId: receipt.receiptId, completedAt: receipt.completedAt,
   actorUserId: key(receipt.actorUserId), authority: receipt.authority, rationale: receipt.rationale,
   populationHash: receipt.populationHash, populationPolicy: receipt.populationPolicy,

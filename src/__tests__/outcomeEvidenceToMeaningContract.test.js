@@ -1,7 +1,28 @@
 import { describe, test, expect } from '@jest/globals'
+import { createHash } from 'node:crypto'
+import { makeSs041Fixture, freezeSs041Snapshot } from './fixtures/outcomeEvidenceToDraftFixtures.js'
 import { compileEvidenceToMeaningContract, assertEvidenceToMeaningContract,
   validateEvidenceToMeaningGeneratedClaims } from '../services/outcomeEvidenceToMeaningContractService.js'
 import { makeSs040Fixture, ss040ScenarioFixtures } from './fixtures/ss040EvidenceToMeaningFixtures.js'
+
+describe('ordinary contract serialization remains byte-identical', () => {
+  test('preserves captured pre-edit v1, ready v2 and small blocked-v2 receipt hashes and bytes', async () => {
+    const blocked = await makeSs041Fixture()
+    delete blocked.sourceSnapshot.evidenceObjects[0].claimStatus
+    await freezeSs041Snapshot(blocked)
+    const cases = [
+      [makeSs040Fixture(), 8706, '835966cec413293a94a949140cc9ba6f50d6c45cde0a61b82b335c453b558d2d'],
+      [await makeSs041Fixture(), 12923, '5ecb87ad794375694bb243f7542b93e5162c4d14d752842009db9cee213b26e3'],
+      [blocked, 14961, '0140a18cc254d2c95d0bdd0b6824ff18f737b499d640541c694f37796cdba59b'],
+    ]
+    for (const [input, bytes, hash] of cases) {
+      const contract = compileEvidenceToMeaningContract(input), serialized = JSON.stringify(contract)
+      expect(Buffer.byteLength(serialized)).toBe(bytes)
+      expect(createHash('sha256').update(serialized).digest('hex')).toBe(hash)
+      expect(assertEvidenceToMeaningContract(contract)).toBe(contract)
+    }
+  })
+})
 
 describe('SS-040 frozen cross-scenario Evidence-to-Meaning candidate', () => {
   test('compiles a 500-claim shared proof DAG and rejects downstream cyclic or invalid proof', () => {

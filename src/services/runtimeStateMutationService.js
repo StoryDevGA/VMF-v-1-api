@@ -1,9 +1,18 @@
 import { resolveRuntimeUIContractKey } from './runtimeDisplayBindingService.js'
-import { acquisitionContradictionReviewEpoch, preserveDiscoveryEvidenceDecisions } from './discoveryEvidenceContinuityService.js'
+import { readContradictionReviewBasis, reconcileContradictionReviewBasis } from './contradictionReviewBasis.js'
+import { acceptanceContradictionReviewEpoch, acquisitionContradictionReviewEpoch, preserveDiscoveryEvidenceDecisions } from './discoveryEvidenceContinuityService.js'
 import { assertRetainedWebsiteMaterial, reconcileWebsiteMaterial } from './discoveryWebsiteMaterialService.js'
+import { assertResolvedControlledReplay, buildResolvedControlledReplay } from './controlledReplayAcquisitionService.js'
 import { lookupAcquisitionRequest, startAcquisitionRun, executeAcquisitionBuild, withAcquisitionTransaction,
   recordAcquisitionTerminal, readCommittedAcquisition, handleAcquisitionFailure, bindAcquisitionSourceProcessing } from './acquisitionRunService.js'
 import crypto from 'node:crypto'
+import env from '../config/env.js'
+import { PUBLISHED_DISPOSITION_POLICY } from '../constants/publishedDispositionRecoveryPolicy.js'
+import { evidenceDraftQualificationRequestSchema, draftQualificationFactsSchema, evidenceDraftMaterialFingerprint,
+  evidenceDraftQualificationFingerprint, recordEvidenceDraftQualification,
+  revalidateEvidenceDraftQualification } from './evidenceDraftQualification.js'
+import { buildRuntimeSectionEvidenceQualifications } from './runtimeSectionEvidenceQualificationService.js'
+import { OUTCOME_SELECTED_TARGET_CONTRACT_VERSION } from '../constants/outcomeSelectedTarget.js'
 import { assertCustomerSectionTarget, assertRuntimeManagedCustomerWrite, isRuntimeManagedSection } from './runtimeManagedSectionService.js'
 import mongoose from 'mongoose'
 import { recordSourceReview, sourceMaterialFingerprint, sourceVerificationFactsSchema, preserveSourceRecordedReviews } from './sourceVerificationContext.js'
@@ -19,6 +28,8 @@ import RuntimeInstance, {
   RUNTIME_TYPES,
 } from '../models/RuntimeInstance.js'
 import RuntimeEvidenceObject from '../models/RuntimeEvidenceObject.js'
+import RuntimeEvidenceSource from '../models/RuntimeEvidenceSource.js'
+import RuntimeStateSection from '../models/RuntimeStateSection.js'
 import {
   DISCOVERY_CONTRADICTION_REVIEW_CONTRACT,
   DISCOVERY_CONTRADICTION_DISPOSITIONS,
@@ -53,6 +64,8 @@ import {
 } from './runtimeInstanceService.js'
 import {
   buildRuntimeSectionRevision,
+  compactSectionInsightDisplay,
+  restoreSectionInsightDisplay,
   getRuntimeSectionAccepted,
   getRuntimeSectionGenerated,
   getRuntimeSectionInput,
@@ -987,7 +1000,7 @@ const buildSectionRootWriteValue = ({
       invalidationReason: 'SECTION_INPUT_CHANGED',
     },
     intelligence: {
-      ...(sectionObject.intelligence || {}),
+      ...restoreSectionInsightDisplay({ intelligence: sectionObject.intelligence || {}, generated: previousGenerated }),
       invalidation: {
         reason: 'SECTION_INPUT_CHANGED',
         invalidatedAt,
@@ -1256,7 +1269,46 @@ export const buildDiscoveryEvidencePack = async ({
   previousEvidencePack = {},
   reason = 'BUILD_EVIDENCE_PACK',
   runtimeInstance,
+  controlledContext,
+  acquisitionExecution,
 }) => {
+  if (controlledContext !== undefined) {
+    const controlled = assertResolvedControlledReplay(controlledContext)
+    if (!acquisitionExecution?.runId || !acquisitionExecution?.executionAttemptId)
+      throw buildMutationError({ status: 409, code: 'CONFLICT', reason: 'CONTROLLED_REPLAY_RUN_REQUIRED', message: 'Controlled capture requires its maintained Run.' })
+    const profile = acquisitionProfile || 'STANDARD'
+    if (!['STANDARD', 'ENHANCED'].includes(profile)) throw new Error('Controlled acquisition profile is invalid.')
+    const refreshedAt = new Date().toISOString()
+    const produced = buildResolvedControlledReplay({ context: controlled, acquisitionProfile: profile,
+      runId: acquisitionExecution.runId, attemptId: acquisitionExecution.executionAttemptId, capturedAt: refreshedAt })
+    const sources = [produced.source]
+    const evidenceObjects = normalizeDiscoveryEvidenceObjects({ acquisitionProfile: profile, createdAt: refreshedAt,
+      sources, sourceRegistry: [produced.sourceRegistryEntry], evidenceObjects: produced.evidenceObjects })
+    const sourceRegistry = buildDiscoverySourceRegistry({ capturedAt: refreshedAt, sources,
+      sourceRegistry: [produced.sourceRegistryEntry], evidenceObjects })
+    const reviewSummary = buildDiscoveryEvidenceReviewSummary(evidenceObjects)
+    const coverage = buildDiscoveryCoverageSummary({ evidenceObjectCount: evidenceObjects.length, evidenceReady: true,
+      inputKeys: [], missingInputKeys: [], pendingReviewCount: reviewSummary.pendingReviewCount,
+      rejectedEvidenceCount: 0, sourceCount: 1 })
+    const contradictionReviewEpoch = acquisitionContradictionReviewEpoch(previousEvidencePack.contradictionReviewEpoch)
+    const discoveryHealth = buildDiscoveryHealth({ contradictionReviewEpoch, runtimeInstanceId: toIdString(runtimeInstance?._id),
+      acquisitionProfile: profile, coverage, evidenceObjects, lastAcquisitionDate: refreshedAt, sourceRegistry })
+    const compact = { summary: 'Controlled synthetic fixture assertions captured for review; independently unverified.',
+      confidence: 'SOURCE_ASSERTION', sourceRefs: sources.map(source => source.sourceId), refreshedAt, acquisitionProfile: profile }
+    return { acquisitionProfile: profile, contradictionReviewEpoch, inputs: {}, inputComplete: true, evidenceReady: true,
+      accepted: false, needsRefresh: false, refreshedAt, evidenceObjects, sourceRegistry, discoveryHealth,
+      state: { status: 'EVIDENCE_READY', inputComplete: true, evidenceReady: true, accepted: false, needsRefresh: false,
+        buildCompletedAt: refreshedAt, lastError: null, acquisitionProfile: profile },
+      acquisition: { profile, status: 'EVIDENCE_READY', sourceRegistry, coverage, discoveryHealth, requestedAt: refreshedAt,
+        completedAt: refreshedAt, controlledReplay: { contractVersion: 'controlled-acquisition-run.v1',
+          sourceId: produced.source.sourceId, evidenceObjectIds: evidenceObjects.map(row => row.evidenceObjectId) } },
+      evidence: { source: 'CONTROLLED_HTML_REPLAY', sourceRefs: compact.sourceRefs, sourceCount: 1,
+        acquisitionProfile: profile, builtAt: refreshedAt, reviewSummary, coverage },
+      summaries: { compact }, scoped_views: {}, discovery: {}, lineage: { sources,
+        builder: { mode: 'CONTROLLED_SYNTHETIC_REPLAY', version: 'controlled-acquisition-planner.v1', adapter: 'controlled-html-replay-v1', acquisitionProfile: profile } },
+      revisions: [...(previousEvidencePack.revisions || []), { revisionId: `controlled-${acquisitionExecution.runId}`, createdAt: refreshedAt,
+        createdBy: toIdString(actorUserId), reason, evidenceHash: hashDiscoveryValue({ sourceRegistry, evidenceObjects }), acquisitionProfile: profile }] }
+  }
   const contradictionReviewEpoch = acquisitionContradictionReviewEpoch(previousEvidencePack.contradictionReviewEpoch)
   const { normalizedInputs, profile, websiteSources, missingInputKeys, inputComplete } = planDiscoveryAcquisition({ inputs, acquisitionProfile, previousEvidencePack })
   const profileConfig = DISCOVERY_ACQUISITION_PROFILE_CONFIG[profile]
@@ -1424,6 +1476,11 @@ export const buildDiscoveryEvidencePack = async ({
     ...websiteMaterial.sources,
     ...documentSourcesForPack,
   ]
+  const inputSourceRegistry = buildDiscoverySourceRegistry({
+    capturedAt: refreshedAt,
+    evidenceObjects: inputEvidenceObjects,
+    sources: inputSources,
+  })
   const evidenceObjects = normalizeDiscoveryEvidenceObjects({
     acquisitionProfile: profile,
     createdAt: refreshedAt,
@@ -1433,6 +1490,7 @@ export const buildDiscoveryEvidencePack = async ({
       ...documentEvidenceObjectsForPack,
     ],
     inputs: normalizedInputs,
+    sourceRegistry: [...inputSourceRegistry, ...websiteMaterial.sourceRegistry, ...documentRegistryForPack],
     sources,
   })
   try {
@@ -1442,11 +1500,6 @@ export const buildDiscoveryEvidencePack = async ({
     throw buildMutationError({ status: 409, code: 'CONFLICT', message: error.message,
       reason: 'ACQUISITION_CONTINUITY_BLOCKED', details: failureDetails })
   }
-  const inputSourceRegistry = buildDiscoverySourceRegistry({
-    capturedAt: refreshedAt,
-    evidenceObjects: inputEvidenceObjects,
-    sources: inputSources,
-  })
   const sourceRegistry = preserveSourceRecordedReviews([
     ...inputSourceRegistry,
     ...websiteMaterial.sourceRegistry,
@@ -1953,7 +2006,7 @@ const resetDiscoveryDependentSections = ({
       validation: {},
       confidence: {},
       intelligence: {
-        ...(sectionObject.intelligence || {}),
+        ...restoreSectionInsightDisplay({ intelligence: sectionObject.intelligence || {}, generated }),
         invalidation: {
           reason: 'DISCOVERY_RESET',
           resetReason,
@@ -2690,6 +2743,8 @@ const resolveRuntimeInstanceForMutation = async ({ actorUserId, runtimeInstanceI
     feature: getFeatureForRuntimeType(runtimeType),
   })
 
+  await attachNativeControlledReplayIsolation(runtimeInstance)
+  assertNoControlledReplayIsolation(runtimeInstance)
   return runtimeInstance
 }
 
@@ -2967,10 +3022,12 @@ const atomicPersistRuntimeState = async ({
       _id: runtimeInstance._id,
       updatedAt: expectedUpdatedAtDate,
       stateVersion: expectedStateVersion,
+      ...controlledReplayIsolationCas(runtimeInstance),
     },
     {
       $set: {
         framework_state: nextFrameworkState,
+        ...controlledReplayIsolationWrite(runtimeInstance, nextFrameworkState, session),
         stateVersion: nextStateVersion,
         updatedBy: actorUserId || runtimeInstance.updatedBy || null,
       },
@@ -3005,13 +3062,16 @@ const rollbackRuntimeStateMutation = async ({
       _id: runtimeInstance._id,
       updatedAt: rollbackUpdatedAt,
       stateVersion: nextStateVersion || updatedRuntimeInstance?.stateVersion,
+      ...controlledReplayIsolationCas(updatedRuntimeInstance),
     },
     {
       $set: {
         framework_state: previousFrameworkState,
         stateVersion: previousStateVersion,
         updatedBy: previousUpdatedBy || null,
+        ...(controlledReplayIsolationRollback(runtimeInstance).$set || {}),
       },
+      ...(controlledReplayIsolationRollback(runtimeInstance).$unset ? { $unset: controlledReplayIsolationRollback(runtimeInstance).$unset } : {}),
     },
     {
       new: true,
@@ -3065,6 +3125,7 @@ const persistMutationWithAudit = async ({
     })
   }
   const stateMutationTimestamp = updatedAtBefore || new Date()
+  additionalDiff = { ...additionalDiff, ...controlledReplayIsolationAudit(runtimeInstance, nextFrameworkState) }
 
   if (mongoose.connection.readyState === 1) {
     let updatedRuntimeInstance = null
@@ -3641,12 +3702,12 @@ export const acceptRuntimeDiscovery = async ({
   assertDiscoveryEvidenceAcceptable(previousEvidencePack)
 
   const acceptedAt = new Date().toISOString()
-  const contradictionReviewEpoch = crypto.randomUUID()
   const previousEvidenceObjects = normalizeDiscoveryEvidenceObjects({
     acquisitionProfile: previousEvidencePack.acquisition?.profile || previousEvidencePack.acquisitionProfile,
     createdAt: previousEvidencePack.refreshedAt || acceptedAt,
     evidenceObjects: previousEvidencePack.evidenceObjects,
     inputs: previousEvidencePack.inputs,
+    sourceRegistry: previousEvidencePack.sourceRegistry || previousEvidencePack.acquisition?.sourceRegistry,
     sources: previousEvidencePack.lineage?.sources || [],
   })
   const acceptedEvidenceObjects = acceptPendingDiscoveryEvidenceObjects({
@@ -3678,9 +3739,8 @@ export const acceptRuntimeDiscovery = async ({
         rejectedEvidenceCount: reviewSummary.rejectedEvidenceCount,
       })
     : null
-  const discoveryHealth = buildDiscoveryHealth({
+  const healthInput = {
     acquisitionProfile: previousEvidencePack.acquisition?.profile || previousEvidencePack.acquisitionProfile,
-    contradictionReviewEpoch,
     contradictionReviews: previousEvidencePack.contradictionReviews,
     runtimeInstanceId: toIdString(runtimeInstance._id),
     coverage: {
@@ -3690,7 +3750,14 @@ export const acceptRuntimeDiscovery = async ({
     evidenceObjects: acceptedEvidenceObjects,
     lastAcquisitionDate: previousEvidencePack.refreshedAt || acceptedAt,
     sourceRegistry,
-  })
+  }
+  const currentHealth = buildDiscoveryHealth({ ...healthInput,
+    contradictionReviewEpoch: previousEvidencePack.contradictionReviewEpoch })
+  const contradictionReviewEpoch = acceptanceContradictionReviewEpoch({ previousEvidencePack,
+    evidenceObjects: acceptedEvidenceObjects, sourceRegistry,
+    candidates: currentHealth.contradictionCandidates, runtimeInstanceId: toIdString(runtimeInstance._id) })
+  const discoveryHealth = contradictionReviewEpoch === previousEvidencePack.contradictionReviewEpoch
+    ? currentHealth : buildDiscoveryHealth({ ...healthInput, contradictionReviewEpoch })
   const acquisitionEffectiveness = buildDiscoveryAcquisitionEffectiveness({
     acquisitionProfile: previousEvidencePack.acquisition?.profile || previousEvidencePack.acquisitionProfile,
     discoveryHealth,
@@ -3816,8 +3883,12 @@ export const getRuntimeDiscoveryContradictions = async ({ actorUserId, runtimeIn
     runtimeInstanceId: runtimeInstance._id, runtimeInstanceKey: runtimeInstance.runtimeInstanceKey,
     customerId: runtimeInstance.customerId, tenantId: runtimeInstance.tenantId,
     current: true, stateVersion, sourceStateVersion: stateVersion, evidenceObjectId: { $in: ids },
-  }).select('evidenceObjectId sourceId sourceType lineageRef extractedFact reviewStatus validationStatus')
+  }).select('customerId tenantId runtimeInstanceId runtimeInstanceKey current isCurrent status stateStatus stateVersion sourceStateVersion evidenceObjectId sourceId sourceType lineageRef extractedFact reviewStatus validationStatus')
     .limit(17).maxTimeMS(2000).lean() : []
+  const basisArgs = { control: runtimeInstance, candidates, reviews: pack.contradictionReviews,
+    reviewEpoch: pack.contradictionReviewEpoch, evidenceRows: evidenceObjects }
+  const reviewBasis = ids.length ? await readContradictionReviewBasis(basisArgs) : null
+  const reviewEvidence = reviewBasis ? reconcileContradictionReviewBasis({ ...basisArgs, basis: reviewBasis }) : evidenceObjects
   let canAcquire = true
   try { assertRuntimeEditable(runtimeInstance) } catch { canAcquire = false }
   const canReview = canAcquire && getEvidencePackStateFlag(pack, 'evidenceReady') && !getEvidencePackNeedsRefresh(pack)
@@ -3836,7 +3907,11 @@ export const getRuntimeDiscoveryContradictions = async ({ actorUserId, runtimeIn
     canAcquire,
     candidates: candidates.map((candidate) => ({
       ...candidate,
-      ...getDiscoveryContradictionReview(candidate, evidenceObjects, pack.contradictionReviews, toIdString(runtimeInstance._id), pack.contradictionReviewEpoch),
+      ...(() => {
+        const review = getDiscoveryContradictionReview(candidate, reviewEvidence, pack.contradictionReviews, toIdString(runtimeInstance._id), pack.contradictionReviewEpoch)
+        return { ...review, evidence: review.evidence.map(e => ({ ...e,
+          sourceType: evidenceObjects.find(row => row.evidenceObjectId === e.evidenceObjectId).sourceType || '' })) }
+      })(),
     })),
   }
   if (Buffer.byteLength(JSON.stringify(result), 'utf8') > 512 * 1024) {
@@ -3949,6 +4024,221 @@ export const reviewRuntimeDiscoveryContradiction = async ({
   return { review, runtimeUpdatedAt: updated.updatedAt, unresolvedContradictionCount: unresolvedCount }
 }
 
+const resolveEditableDraftTarget = async ({ runtime, scopes, requestedOutputTypeKey, requestedFormat }) => {
+  const [{ resolveOutcomeStudioKnowledgePackBinding }, { resolveOutcomeStudioKnowledgeContext },
+    { resolveOutcomeStudioCompositionInputs }, { projectOutcomeSelectedTargetBinding },
+    { resolveFrameworkOutcomeStudioHandoff }] = await Promise.all([
+    import('./outcomeKnowledgePackRegistryService.js'), import('./outcomeStudioKnowledgeContextService.js'),
+    import('./outcomeStudioLiveCompositionBridgeService.js'), import('./outcomeSelectedTargetService.js'),
+    import('./outcomeFrameworkHandoffService.js'),
+  ])
+  const query = { customerId: runtime.customerId, tenantId: runtime.tenantId,
+    runtimeInstanceId: runtime._id, runtimeInstanceKey: runtime.runtimeInstanceKey,
+    runtimeType: runtime.runtimeType, frameworkKey: runtime.frameworkKey,
+    packageKey: runtime.packageKey, packageVersion: runtime.packageVersion,
+    workspaceType: 'OUTCOME', requestedOutputTypeKey }
+  const [{ binding }, contextResult] = await Promise.all([
+    resolveOutcomeStudioKnowledgePackBinding({ query }), resolveOutcomeStudioKnowledgeContext({ query }),
+  ])
+  if (!contextResult?.context?.available || !['READY', 'READY_WITH_GAPS'].includes(binding?.status)) {
+    throw buildMutationError({ status: 409, code: 'DRAFT_QUALIFICATION_TARGET_UNAVAILABLE',
+      message: 'Resolve the governed output type and schema before placing evidence.' })
+  }
+  const handoffResolution = await resolveFrameworkOutcomeStudioHandoff({ runtimeInstance: runtime, scopes,
+    packBinding: binding, knowledgeContext: contextResult.context, knowledgeContextResult: contextResult,
+    requestedOutputTypeKey, outputContractState: 'CANDIDATE' })
+  if (!handoffResolution?.frameworkPackage || !handoffResolution.handoff
+    || handoffResolution.handoff.blockers?.some(blocker => blocker.code === 'HANDOFF_RESOLUTION_FAILED')) {
+    throw buildMutationError({ status: 409, code: 'DRAFT_QUALIFICATION_TARGET_UNAVAILABLE',
+      message: 'Resolve the governed output type and schema before placing evidence.' })
+  }
+  const resolved = await resolveOutcomeStudioCompositionInputs({ binding, knowledgeContext: contextResult.context,
+    requestedOutputTypeKey, requestedFormat, frameworkHandoff: handoffResolution.handoff })
+  const target = projectOutcomeSelectedTargetBinding({ contract: {
+    outputType: { ...resolved.outputType, actualContentHash: resolved.outputType.contentHash },
+    schema: { ...resolved.schema, actualContentHash: resolved.schema.contentHash }, schemaProjection: resolved.schemaProjection,
+  } })
+  return { contractVersion: OUTCOME_SELECTED_TARGET_CONTRACT_VERSION,
+    receipt: target.receipt, receiptFingerprint: target.receiptFingerprint }
+}
+
+// Authoring records a source-presented interpretation, never acceptance or
+// independent verification. The ordinary mutation transaction owns persistence.
+const bindingRecoveryParent = Object.freeze({ id: '6ad4b3cab439648c0f316453',
+  key: 'ss044-disposable-synthetic-20261013-r1-rev-2-0f316453',
+  stateVersion: 'rsv2:98b09889-c96a-4a5a-81c8-1495cafc9047',
+  lockHash: 'adc4fa6d05b5258a34bef5cd46d37ca8769d828e48d2e144197733ef402a562c' })
+export const recordRuntimeEvidenceDraftQualification = async ({ actorUserId, auditRequest, scopes,
+  runtimeInstanceId, evidenceObjectId, payload, deps = {} } = {}) => {
+  const request = evidenceDraftQualificationRequestSchema.safeParse(payload)
+  if (!request.success) throw buildMutationError({ status: 422, code: 'VALIDATION_FAILED', message: 'Draft qualification request is invalid.' })
+  payload = request.data
+  const bindingOnly = payload.mode === 'REVALIDATE_BINDING'
+  const runtime = await (deps.resolveRuntimeInstanceForMutation || resolveRuntimeInstanceForMutation)({ actorUserId, runtimeInstanceId, scopes })
+  assertRuntimeEditable(runtime)
+  assertExpectedUpdatedAt({ runtimeInstance: runtime, expectedUpdatedAt: payload?.expectedUpdatedAt })
+  const policy = PUBLISHED_DISPOSITION_POLICY
+  const environment = deps.env || env, connection = deps.connection || mongoose.connection
+  const denied = () => { throw buildMutationError({ status: 403, code: 'DRAFT_QUALIFICATION_SCOPE_DENIED',
+    message: 'Draft qualification is restricted to the editable controlled synthetic successor.' }) }
+  if (!['development', 'test'].includes(environment.nodeEnv) || environment.appEnv !== 'development'
+    || !/^(test|ss044_[a-f0-9]{32})$/.test(connection.name || '')
+    || toIdString(actorUserId) !== policy.originalUpdatedBy
+    || runtime.revision?.revisionNumber !== (bindingOnly ? 3 : 2)
+    || toIdString(runtime.revision?.parentRuntimeId) !== (bindingOnly ? bindingRecoveryParent.id : policy.scope.runtimeInstanceId)
+    || toIdString(runtime.revision?.rootRuntimeId) !== policy.scope.runtimeInstanceId
+    || toIdString(runtime._id) === policy.scope.runtimeInstanceId
+    || ['customerId', 'tenantId'].some(key => toIdString(runtime[key]) !== policy.scope[key])) denied()
+  if (connection.readyState !== 1) throw buildMutationError({ status: 503,
+    code: 'SERVICE_UNAVAILABLE', message: 'Draft qualification requires transactional storage.' })
+  const root = await (deps.readRoot || (id => RuntimeInstance.findById(id)
+    .select('_id customerId tenantId frameworkKey packageId packageKey packageVersion dependencyLockId activationId deploymentId status').maxTimeMS(2000).lean()))(policy.scope.runtimeInstanceId)
+  if (!root || root.status !== 'LOCKED' || ['customerId', 'tenantId', 'frameworkKey', 'packageId', 'packageKey',
+    'packageVersion', 'dependencyLockId', 'activationId', 'deploymentId'].some(key => String(root[key] ?? '') !== String(runtime[key] ?? ''))) denied()
+  if (bindingOnly) {
+    const parent = await (deps.readBindingParent || (id => RuntimeInstance.findOne({ _id: id,
+      customerId: runtime.customerId, tenantId: runtime.tenantId }).select('_id runtimeInstanceKey customerId tenantId workspaceId runtimeType frameworkKey packageId packageKey packageVersion dependencyLockId activationId deploymentId revision stateVersion status framework_state.lock framework_state.publish.snapshot').maxTimeMS(2000).lean()))(bindingRecoveryParent.id)
+    const parentLock = parent?.framework_state?.lock || {}, parentPublish = parent?.framework_state?.publish?.snapshot || {}
+    const replay = parentLock.replayAnchor || parentLock.anchor || {}
+    const derived = { derivedFromPublishSnapshotId: parentPublish.snapshotId, derivedFromPublishSnapshotHash: parentPublish.snapshotHash,
+      derivedFromLockSnapshotId: parentLock.snapshot?.snapshotId, derivedFromLockSnapshotHash: parentLock.snapshot?.snapshotHash,
+      derivedFromReplayAnchorId: replay.replayAnchorId || replay.anchorId || replay.id,
+      derivedFromReplayAnchorHash: replay.replayAnchorHash || replay.anchorHash || replay.hash }
+    if (!parent || toIdString(parent._id) !== bindingRecoveryParent.id || parent.runtimeInstanceKey !== bindingRecoveryParent.key
+      || parent.stateVersion !== bindingRecoveryParent.stateVersion || parent.status !== 'LOCKED' || parentLock.locked !== true
+      || parentLock.snapshot?.snapshotHash !== bindingRecoveryParent.lockHash || parent.revision?.revisionNumber !== 2
+      || toIdString(parent.revision?.rootRuntimeId) !== policy.scope.runtimeInstanceId
+      || toIdString(parent.revision?.parentRuntimeId) !== policy.scope.runtimeInstanceId
+      || runtime.revision.createdFromRevision !== 2 || runtime.revision.parentRuntimeInstanceKey !== parent.runtimeInstanceKey
+      || runtime.runtimeType !== 'VALUE_NARRATIVE'
+      || ['customerId', 'tenantId', 'runtimeType', 'frameworkKey', 'packageId', 'packageKey', 'packageVersion',
+        'dependencyLockId', 'activationId', 'deploymentId', 'workspaceId'].some(key => String(parent[key] ?? '') !== String(runtime[key] ?? ''))
+      || Object.entries(derived).some(([key, value]) => !value || runtime.revision[key] !== value)) denied()
+  }
+  const parsed = draftQualificationFactsSchema.safeParse(payload?.facts)
+  if (!parsed.success) throw buildMutationError({ status: 422, code: 'VALIDATION_FAILED', message: 'Draft qualifications are invalid.' })
+  const previousFrameworkState = cloneValue(runtime.framework_state || {})
+  const pack = previousFrameworkState.evidence_pack || {}
+  const matches = (pack.evidenceObjects || []).filter(row => row.evidenceObjectId === evidenceObjectId)
+  if (matches.length !== 1) throw buildMutationError({ status: 404, code: 'NOT_FOUND', message: 'A unique evidence object is required.' })
+  const evidence = matches[0]
+  const sources = (pack.sourceRegistry || []).filter(row => row.sourceId === evidence.sourceId)
+  if (sources.length !== 1) throw buildMutationError({ status: 409, code: 'DRAFT_QUALIFICATION_SOURCE_UNAVAILABLE',
+    message: 'A unique registered source is required.' })
+  const source = sources[0]
+  if (evidenceDraftMaterialFingerprint(evidence) !== payload.expectedEvidenceFingerprint
+    || sourceMaterialFingerprint(source) !== payload.expectedSourceFingerprint) throw buildMutationError({
+    status: 409, code: 'DRAFT_QUALIFICATION_STALE', message: 'The evidence or source changed. Reload before qualifying it.' })
+  const currentScope = { customerId: runtime.customerId, tenantId: runtime.tenantId, runtimeInstanceId: runtime._id,
+    runtimeInstanceKey: runtime.runtimeInstanceKey, stateVersion: runtime.stateVersion, current: true }
+  const [nativeEvidence, nativeSources, nativeSections] = await (deps.readNativeState || (async ({ currentScope, evidenceObjectId, sourceId }) => Promise.all([
+    RuntimeEvidenceObject.find({ ...currentScope, evidenceObjectId }).limit(2).maxTimeMS(2000).lean(),
+    RuntimeEvidenceSource.find({ ...currentScope, sourceId }).limit(2).maxTimeMS(2000).lean(),
+    RuntimeStateSection.find(currentScope).limit(51).maxTimeMS(2000).lean(),
+  ])))({ currentScope, evidenceObjectId, sourceId: evidence.sourceId })
+  if (nativeEvidence.length !== 1 || nativeSources.length !== 1 || nativeSections.length > 50
+    || evidenceDraftMaterialFingerprint(nativeEvidence[0]) !== payload.expectedEvidenceFingerprint
+    || sourceMaterialFingerprint(nativeSources[0]) !== payload.expectedSourceFingerprint
+    || (bindingOnly && (nativeEvidence[0].draftQualification === undefined
+      || evidenceDraftQualificationFingerprint(nativeEvidence[0].draftQualification) !== payload.expectedQualificationFingerprint))
+    || [...nativeEvidence, ...nativeSources, ...nativeSections].some(row => row.sourceStateVersion !== runtime.stateVersion)) {
+    throw buildMutationError({ status: 409, code: 'DRAFT_QUALIFICATION_STALE', message: 'Native evidence membership no longer matches the editable source.' })
+  }
+  const sections = Object.entries(previousFrameworkState.sections || {}).map(([stateKey, value]) => {
+    const sectionKey = value?.lineage?.sectionKey || stateKey
+    const section = normalizeRuntimeSectionObject({ value, sectionKey, runtimePath: value?.lineage?.runtimePath || `framework_state.sections.${stateKey}` })
+    const references = getRuntimeSectionAccepted(section)?.supportingEvidenceRefs || []
+    return { stateKey, sectionKey, section, references: Array.isArray(references) ? references : Object.values(references) }
+  })
+  const affected = sections.filter(row => row.references.some(ref => [evidenceObjectId, evidence.sourceId].includes(ref)))
+  // Provenance references invalidate truth conservatively, but never grant
+  // placement membership: the native inventory only resolves evidence/source IDs.
+  const invalidationAffected = sections.filter(row => row.references.some(ref =>
+    [evidenceObjectId, evidence.sourceId, ...(evidence.lineageRef ? [evidence.lineageRef] : [])].includes(ref)))
+  const sourceSectionKeys = [...new Set(affected.map(row => row.stateKey))].sort()
+  if (nativeSections.some(row => row.sectionDetail?.accepted?.supportingEvidenceRefs !== undefined
+    && !Array.isArray(row.sectionDetail.accepted.supportingEvidenceRefs))) throw buildMutationError({ status: 409,
+    code: 'DRAFT_QUALIFICATION_SOURCE_UNMAPPED', message: 'Native section references are invalid.' })
+  const nativeSectionKeys = [...new Set(nativeSections.filter(row =>
+    (row.sectionDetail?.accepted?.supportingEvidenceRefs || []).some(ref =>
+      [evidenceObjectId, evidence.sourceId].includes(ref))).map(row => row.sectionKey))].sort()
+  if (!sourceSectionKeys.length || JSON.stringify(sourceSectionKeys) !== JSON.stringify(nativeSectionKeys)) throw buildMutationError({ status: 409, code: 'DRAFT_QUALIFICATION_SOURCE_UNMAPPED',
+    message: 'Bind this evidence through its native section context before placing it.' })
+  const visited = new Set(), visiting = new Set()
+  const checkProof = id => {
+    if (visiting.has(id)) throw buildMutationError({ status: 409, code: 'DRAFT_QUALIFICATION_PROOF_UNRESOLVED', message: 'Proof dependency cycles are blocking.' })
+    if (visited.has(id)) return
+    visiting.add(id)
+    const rows = pack.evidenceObjects.filter(row => row.evidenceObjectId === id)
+    const facts = id === evidenceObjectId ? parsed.data : rows.length === 1 ? rows[0].draftQualification?.facts : null
+    if (!facts || !draftQualificationFactsSchema.safeParse(facts).success) throw buildMutationError({ status: 409,
+      code: 'DRAFT_QUALIFICATION_PROOF_UNRESOLVED', message: 'Proof dependencies must be qualified native evidence.' })
+    facts.proofDependency.forEach(checkProof)
+    visiting.delete(id); visited.add(id)
+  }
+  checkProof(evidenceObjectId)
+  const targetArgs = { runtime, scopes, requestedOutputTypeKey: payload.requestedOutputTypeKey, requestedFormat: payload.requestedFormat }
+  const selectedTarget = await (deps.resolveTarget || resolveEditableDraftTarget)(targetArgs)
+  if (selectedTarget.receiptFingerprint !== payload.expectedTargetFingerprint) throw buildMutationError({
+    status: 409, code: 'DRAFT_QUALIFICATION_TARGET_CHANGED', message: 'The selected output contract changed.' })
+  const authoredAt = new Date().toISOString()
+  const draftQualification = (bindingOnly ? revalidateEvidenceDraftQualification : recordEvidenceDraftQualification)({
+    evidence, source, sourceSectionKeys, selectedTarget, expectedQualificationFingerprint: payload.expectedQualificationFingerprint,
+    targetSectionKeys: payload.targetSectionKeys, facts: parsed.data, actorUserId: toIdString(actorUserId), authoredAt })
+  const nextPack = { ...pack, accepted: false, state: { ...pack.state, accepted: false },
+    evidenceObjects: pack.evidenceObjects.map(row => row.evidenceObjectId === evidenceObjectId ? { ...row, draftQualification } : row) }
+  const nextFrameworkState = { ...previousFrameworkState, evidence_pack: nextPack,
+    sections: { ...previousFrameworkState.sections },
+    validation: {}, readiness: { ...previousFrameworkState.readiness, state: 'DRAFT', ready: false, submittedForReview: false } }
+  if (bindingOnly) {
+    const admittedEvidenceIds = pack.evidenceObjects.filter(row => row.reviewStatus === 'ACCEPTED').map(row => row.evidenceObjectId)
+    const qualificationContext = evidenceObjects => buildRuntimeSectionEvidenceQualifications({ evidenceObjects,
+      sourceRegistry: pack.sourceRegistry, lineageSources: pack.lineage?.sources || [], admittedEvidenceIds })
+    if (hashSectionInput(qualificationContext(pack.evidenceObjects)) !== hashSectionInput(qualificationContext(nextPack.evidenceObjects))) {
+      throw buildMutationError({ status: 409, code: 'DRAFT_QUALIFICATION_CONTEXT_CHANGED',
+        message: 'Binding revalidation cannot change section reasoning context.' })
+    }
+  }
+  const frameworkPackage = await (deps.resolvePackage || resolvePackageForAdvance)(runtime.packageId)
+  if (!frameworkPackage) throw buildMutationError({ status: 409, code: 'DRAFT_QUALIFICATION_PACKAGE_UNAVAILABLE', message: 'The governing package is unavailable.' })
+  const dependencyInvalidations = []
+  for (const row of bindingOnly ? [] : invalidationAffected) {
+    nextFrameworkState.sections[row.stateKey] = applyAcceptedSectionEvidenceInvalidation({ actorUserId,
+      invalidatedAt: authoredAt, nextSection: cloneValue(row.section), sectionObject: row.section })
+    dependencyInvalidations.push(...applyAcceptedTruthDependencyInvalidations({ actorUserId, acceptedAt: authoredAt,
+      frameworkPackage, frameworkState: nextFrameworkState, upstreamSectionKey: row.sectionKey,
+      upstreamRuntimePath: row.section.lineage?.runtimePath || `framework_state.sections.${row.stateKey}` }))
+  }
+  await (deps.assertWritable || assertRuntimeEvidencePackWritable)({ frameworkKey: runtime.frameworkKey, value: nextPack })
+  const rebuilt = await (deps.rebuildGraph || rebuildRuntimeIntelligenceGraphForMutation)({ actorUserId,
+    buildTrigger: RUNTIME_INTELLIGENCE_GRAPH_BUILD_TRIGGERS.EVIDENCE_REVIEWED,
+    frameworkPackage, runtimeInstance: runtime, nextFrameworkState, previousFrameworkState })
+  if (bindingOnly && (hashSectionInput(rebuilt.nextFrameworkState.sections) !== hashSectionInput(previousFrameworkState.sections)
+    || hashSectionInput(rebuilt.nextFrameworkState.evidence_pack.evidenceObjects) !== hashSectionInput(nextPack.evidenceObjects)
+    || hashSectionInput(rebuilt.nextFrameworkState.evidence_pack.sourceRegistry) !== hashSectionInput(pack.sourceRegistry))) {
+    throw buildMutationError({ status: 409, code: 'DRAFT_QUALIFICATION_CONTEXT_CHANGED',
+      message: 'Binding revalidation must preserve section truth, evidence and sources.' })
+  }
+  const rechecked = await (deps.resolveTarget || resolveEditableDraftTarget)(targetArgs)
+  if (rechecked.receiptFingerprint !== selectedTarget.receiptFingerprint) throw buildMutationError({ status: 409,
+    code: 'DRAFT_QUALIFICATION_TARGET_CHANGED', message: 'The output contract changed during qualification.' })
+  const updated = await (deps.persist || persistMutationWithAudit)({ actorUserId, auditRequest, runtimeInstance: runtime,
+    previousFrameworkState, previousUpdatedBy: runtime.updatedBy,
+    nextFrameworkState: rebuilt.nextFrameworkState, rebuiltIntelligenceGraph: rebuilt.graph,
+    runtimePath: `${DISCOVERY_EVIDENCE_PACK_PATH}.evidenceObjects`, previousValue: evidence.draftQualification || null,
+    nextValue: draftQualification, expectedUpdatedAt: payload.expectedUpdatedAt, updatedAtBefore: runtime.updatedAt,
+    additionalDiff: { ...rebuilt.auditDiff, ...buildDependencyInvalidationAuditDiff(dependencyInvalidations),
+      evidenceDraftQualification: { evidenceObjectId, rationale: payload.rationale, sourceSectionKeys,
+        ...(bindingOnly ? { mode: payload.mode, previousFingerprint: payload.expectedQualificationFingerprint,
+          nextFingerprint: evidenceDraftQualificationFingerprint(draftQualification),
+          previousSourceSectionKeys: evidence.draftQualification.binding.sourceSectionKeys } : {}),
+        invalidatedSectionKeys: bindingOnly ? [] : [...new Set(invalidationAffected.map(row => row.sectionKey))].sort(),
+        classification: 'NON_AUTHORITATIVE_SYNTHETIC_DEV_TEST', independentValidation: false } } })
+  return { evidenceObjectId, draftQualification, stateVersion: updated.stateVersion, updatedAt: updated.updatedAt,
+    affectedSectionKeys: bindingOnly ? [] : [...new Set(invalidationAffected.map(row => row.sectionKey))].sort(),
+    requiresRegeneration: !bindingOnly, authoritative: false }
+}
+
 export const recordRuntimeSourceVerification = async ({ actorUserId, auditRequest, scopes,
   runtimeInstanceId, sourceId, payload } = {}) => {
   const runtimeInstance = await resolveRuntimeInstanceForMutation({ actorUserId, runtimeInstanceId, scopes })
@@ -4021,6 +4311,7 @@ export const reviewRuntimeDiscoveryEvidence = async ({
     createdAt: previousEvidencePack.refreshedAt || reviewedAt,
     evidenceObjects: previousEvidencePack.evidenceObjects,
     inputs: previousEvidencePack.inputs,
+    sourceRegistry: previousEvidencePack.sourceRegistry || previousEvidencePack.acquisition?.sourceRegistry,
     sources: previousEvidencePack.lineage?.sources || [],
   })
   const reviewResult = applyDiscoveryEvidenceReview({
@@ -5166,6 +5457,7 @@ export const getRuntimeDiscoveryEvidence = async ({
     createdAt: evidencePack.refreshedAt,
     evidenceObjects: evidencePack.evidenceObjects,
     inputs: evidencePack.inputs,
+    sourceRegistry: evidencePack.sourceRegistry || acquisition.sourceRegistry,
     sources: evidencePack.lineage?.sources || [],
   })
   const evidenceObjects = accepted
@@ -5471,6 +5763,8 @@ export const acceptRuntimeSection = async ({
       lastAcceptedAt: acceptedAt,
     },
   }
+  const acceptedSection = nextFrameworkState.sections[target.stateSectionKey]
+  acceptedSection.intelligence = compactSectionInsightDisplay({ intelligence: acceptedSection.intelligence, generated })
   const dependencyInvalidations = applyAcceptedTruthDependencyInvalidations({
     acceptedAt,
     actorUserId,
@@ -5547,4 +5841,8 @@ const runtimeStateMutationService = {
   updateRuntimeDiscoveryInputs,
 }
 
+export const __testables = Object.freeze({ buildSectionRootWriteValue, resetDiscoveryDependentSections })
+
 export default runtimeStateMutationService
+import { attachNativeControlledReplayIsolation, assertNoControlledReplayIsolation, controlledReplayIsolationCas,
+  controlledReplayIsolationWrite, controlledReplayIsolationAudit, controlledReplayIsolationRollback } from './controlledReplayIsolationService.js'

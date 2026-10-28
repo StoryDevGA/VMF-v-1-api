@@ -1,3 +1,6 @@
+import { verifyNativeAuthorisedArlReview, readAuthorisedArlProof, unresolvedAuthorisedArlProof } from './outcomeArlTransportRecoveryService.js'
+import { isOutcomeArlTransportRecovery } from './outcomeArlTransportRecoveryService.js'
+import { isFreshArlAfterCompositionRevision } from './outcomeWorkingDraftCompositionService.js'
 import { assertRuntimeEvidenceToMeaningReady, runtimeEvidenceStageDependencies,
   readRuntimeEvidenceToMeaningProviderProjection } from './outcomeRuntimeEvidenceToMeaningService.js'
 import { assertEvidenceToMeaningBoundedProviderOutput } from './outcomeEvidenceToMeaningProviderService.js'
@@ -210,6 +213,7 @@ const executeRequestArl = async ({
   scopes,
   sourceStage,
   existingArl,
+  authorisedReview,
   deps,
 }) => {
   const configVersion = OUTCOME_ARL_MEANING_REVIEW_PROVIDER_CONFIG_VERSION
@@ -246,7 +250,10 @@ const executeRequestArl = async ({
     selection: pack,
     loadPackContent: deps.loadPackContent || loadOutcomeKnowledgePackVersionContent,
   })
-  if (existingArl) {
+  const authorisedProof = authorisedReview ? await verifyNativeAuthorisedArlReview({ ...authorisedReview, actorUserId, runtimeInstanceId, plan, source: sourceStage, latest: existingArl, deps }) : null
+  const compositionReview = Boolean(authorisedProof) || isFreshArlAfterCompositionRevision({ latest: existingArl, source: sourceStage })
+    || isOutcomeArlTransportRecovery({ latest: existingArl, source: sourceStage, configurationVersion: configVersion })
+  if (existingArl && !compositionReview) {
     if (existingArl.planFingerprint !== plan.planFingerprint
       || existingArl.predecessorStageExecutionId !== sourceStage.stageExecutionId
       || existingArl.predecessorAttemptFingerprint !== sourceStage.attemptFingerprint
@@ -321,7 +328,7 @@ const executeRequestArl = async ({
   }
   const startedAt = new Date().toISOString()
   let grr
-  let failure
+  let failure, transportReceipt
   try {
     grr = await (deps.createGovernedReasoningExecution || createGovernedReasoningExecution)({
       actorUserId,
@@ -333,13 +340,13 @@ const executeRequestArl = async ({
         requestedOutputTypeKey: 'arl-meaning-review',
         requestedStyleKey: 'meaning-review',
         executionIntent: 'Review the immutable Working Draft meaning without applying changes.',
-        idempotencyKey: `ARL_MEANING_REVIEW:${plan.planId}:v${plan.planVersion}:${bindingFingerprint.slice(0, 24)}`,
+        idempotencyKey: authorisedProof ? readAuthorisedArlProof(authorisedProof).grrIdempotencyKey : `ARL_MEANING_REVIEW:${plan.planId}:v${plan.planVersion}:${bindingFingerprint.slice(0, 24)}`,
         workspaceType: 'PLATFORM',
         manifestId: plan.planId,
       },
       deps: {
         executionMode: 'LIVE_TEST',
-        providerAdapter,
+        providerAdapter: input => providerAdapter({ ...input, ...(authorisedProof ? { authorisedReviewProof: authorisedProof } : {}), onRequestPrepared: receipt => { transportReceipt = receipt } }),
         providerDescriptor,
         providerInput,
         resolveKnowledgeBinding: async () => knowledgeFacade,
@@ -357,12 +364,19 @@ const executeRequestArl = async ({
       },
     })
   } catch (cause) {
-    if (cause?.code !== 'OUTCOME_ARL_MEANING_REVIEW_PROVIDER_FAILED') throw cause
+    if (cause?.code !== 'OUTCOME_ARL_MEANING_REVIEW_PROVIDER_FAILED'
+      && !(authorisedProof && cause?.code === 'ARL_AUTHORISED_REVIEW_INVALID')) throw cause
     failure = {
       failureCode: cause.details?.reason || 'ARL_MEANING_REVIEW_PROVIDER_REQUEST_FAILED',
       safeReason: 'ARL meaning review could not be completed.',
-      retryable: /_(TIMEOUT|NETWORK_FAILED|TRANSIENT_FAILURE|REQUEST_FAILED)$/.test(cause.details?.reason || ''),
+      retryable: !authorisedProof && /_(TIMEOUT|NETWORK_FAILED|TRANSIENT_FAILURE|REQUEST_FAILED)$/.test(cause.details?.reason || ''),
     }
+  }
+  if (authorisedProof && !grr && readAuthorisedArlProof(authorisedProof).responseState === 'FRESH') {
+    throw Object.assign(new Error('The completed authorised response could not be used as an ARL review.'), {
+      status: 409, code: 'ARL_AUTHORISED_REVIEW_UNRESOLVED', details: { reason: 'COMPLETED_RESPONSE_UNUSABLE',
+        authorisedReview: readAuthorisedArlProof(authorisedProof) },
+    })
   }
   let output
   if (grr) {
@@ -382,14 +396,16 @@ const executeRequestArl = async ({
     runtimeInstanceId,
     expectedPlanFingerprint,
     stageKey: OUTCOME_QUALITY_STAGES.ARL_MEANING_REVIEW,
-    expectedLatestAttemptNumber: 0,
-    predecessorStageExecutionId: sourceStage.stageExecutionId,
-    predecessorAttemptFingerprint: sourceStage.attemptFingerprint,
+    expectedLatestAttemptNumber: compositionReview ? existingArl.attemptNumber : 0,
+    predecessorStageExecutionId: compositionReview ? existingArl.stageExecutionId : sourceStage.stageExecutionId,
+    predecessorAttemptFingerprint: compositionReview ? existingArl.attemptFingerprint : sourceStage.attemptFingerprint,
     sourceStageExecution: sourceStage,
     status: failure ? OUTCOME_QUALITY_STAGE_STATUSES.FAILED : OUTCOME_QUALITY_STAGE_STATUSES.SUCCEEDED,
     ...(failure ? { failure } : { output }),
     executionIdentity: {
       executionMode: 'LIVE_TEST',
+      ...(transportReceipt ? { transportReceipt } : {}),
+      ...(authorisedProof ? { authorisedReview: unresolvedAuthorisedArlProof(authorisedProof) } : {}),
       providerKey: lower(providerDescriptor.providerKey),
       providerConfigurationVersion: configVersion,
       model: text(providerDescriptor.model),
@@ -426,6 +442,7 @@ export const approveOutcomeWorkingDraftMeaning = async ({
   requestBinding,
   providerAdapter,
   providerDescriptor,
+  authorisedReview,
   deps = {},
 } = {}) => {
   if (!mongoose.isValidObjectId(actorUserId)
@@ -492,6 +509,7 @@ export const approveOutcomeWorkingDraftMeaning = async ({
       scopes,
       sourceStage,
       existingArl,
+      authorisedReview,
       deps,
     })
   }

@@ -1,19 +1,22 @@
 import mongoose from 'mongoose'
+import { createControlledReplayProvenanceSchema, validateStoredControlledReplayProvenance } from '../services/controlledReplayContract.js'
 
 export const ACQUISITION_RUN_VERSION = 'acquisition-run.v1'
 export const ACQUISITION_PLANNER_VERSION = 'discovery-acquisition-planner.v1'
+export const CONTROLLED_ACQUISITION_RUN_VERSION = 'controlled-acquisition-run.v1'
+export const CONTROLLED_ACQUISITION_PLANNER_VERSION = 'controlled-acquisition-planner.v1'
 export const ACQUISITION_TERMINAL_STATES = ['SUCCEEDED', 'PARTIALLY_SUCCEEDED', 'FAILED']
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/
 const text = maxlength => ({ type: String, required: true, maxlength, immutable: true })
 const id = ref => ({ type: mongoose.Schema.Types.ObjectId, ref, required: true, immutable: true })
 const hash = { ...text(64), match: /^[a-f0-9]{64}$/ }
 const inputSchema = new mongoose.Schema({
-  kind: { ...text(12), enum: ['BRIEF', 'WEBSITE', 'DOCUMENT'] },
+  kind: { ...text(12), enum: ['BRIEF', 'WEBSITE', 'DOCUMENT', 'CONTROLLED'] },
   inputIndex: { type: Number, required: true, min: 0, max: 9, immutable: true },
   contentHash: hash,
 }, { _id: false, strict: 'throw' })
 const outcomeSchema = new mongoose.Schema({
-  kind: { type: String, required: true, enum: ['BRIEF', 'WEBSITE', 'DOCUMENT'] },
+  kind: { type: String, required: true, enum: ['BRIEF', 'WEBSITE', 'DOCUMENT', 'CONTROLLED'] },
   inputIndex: { type: Number, required: true, min: 0, max: 9 },
   status: { type: String, required: true, enum: ['SUCCEEDED', 'FAILED', 'UNATTEMPTED'] },
   sourceId: { type: String, maxlength: 160, match: /^[A-Za-z0-9_-]+$/ },
@@ -27,8 +30,10 @@ const schema = new mongoose.Schema({
   runId: { ...text(36), match: uuid }, requestKey: { ...text(36), match: uuid },
   executionAttemptId: { ...text(36), match: uuid },
   requestFingerprint: hash, plannerFingerprint: hash,
-  contractVersion: { ...text(80), enum: [ACQUISITION_RUN_VERSION] },
-  plannerVersion: { ...text(80), enum: [ACQUISITION_PLANNER_VERSION] },
+  contractVersion: { ...text(80), enum: [ACQUISITION_RUN_VERSION, CONTROLLED_ACQUISITION_RUN_VERSION] },
+  plannerVersion: { ...text(80), enum: [ACQUISITION_PLANNER_VERSION, CONTROLLED_ACQUISITION_PLANNER_VERSION] },
+  controlledReplayProvenance: { type: createControlledReplayProvenanceSchema(mongoose), default: undefined, immutable: true,
+    set: value => value === undefined ? undefined : validateStoredControlledReplayProvenance(value) },
   actorUserId: id('User'), authority: { ...text(80), enum: ['VMF_UPDATE'] },
   actionKey: { ...text(80), enum: ['SAVE_DISCOVERY_INPUTS', 'BUILD_EVIDENCE_PACK', 'REFRESH_EVIDENCE_PACK'] },
   acquisitionProfile: { ...text(40), enum: ['STANDARD', 'ENHANCED'] },
@@ -57,13 +62,26 @@ schema.index({ customerId: 1, tenantId: 1, runtimeInstanceId: 1, runId: 1 },
   { unique: true, name: 'unique_scoped_acquisition_run' })
 schema.pre('validate', function () {
   const terminal = ACQUISITION_TERMINAL_STATES.includes(this.status)
+  const controlled = this.contractVersion === CONTROLLED_ACQUISITION_RUN_VERSION
+  if (controlled) {
+    try {
+      const descriptor = validateStoredControlledReplayProvenance(this.controlledReplayProvenance?.toObject(), {
+        customerId: String(this.customerId), tenantId: String(this.tenantId), runtimeInstanceId: String(this.runtimeInstanceId),
+        runtimeInstanceKey: this.runtimeInstanceKey })
+      if (this.plannerVersion !== CONTROLLED_ACQUISITION_PLANNER_VERSION || !['BUILD_EVIDENCE_PACK', 'REFRESH_EVIDENCE_PACK'].includes(this.actionKey)
+        || String(this.actorUserId) !== descriptor.binding.actorUserId || this.basisStateVersion !== descriptor.binding.basisStateVersion
+        || this.inputs?.length !== 1 || this.inputs[0].kind !== 'CONTROLLED' || this.inputs[0].inputIndex !== 0
+        || this.inputs[0].contentHash !== descriptor.binding.fixture.htmlSha256) throw new Error('Controlled Run identity mismatch.')
+    } catch { this.invalidate('controlledReplayProvenance', 'Controlled Run metadata must bind its exact execution.') }
+  } else if (this.plannerVersion !== ACQUISITION_PLANNER_VERSION || this.controlledReplayProvenance !== undefined
+    || this.inputs?.some(item => item.kind === 'CONTROLLED')) this.invalidate('inputs', 'Legacy acquisition grammar must remain unchanged.')
   const counts = new Map()
   for (const item of this.inputs || []) {
     const index = counts.get(item.kind) || 0
     if (item.inputIndex !== index || !Number.isSafeInteger(item.inputIndex)) this.invalidate('inputs', 'Input identities are not complete.')
     counts.set(item.kind, index + 1)
   }
-  if (counts.get('BRIEF') !== 1 || (counts.get('WEBSITE') || 0) > 10 || (counts.get('DOCUMENT') || 0) > 5)
+  if (!controlled && (counts.get('BRIEF') !== 1 || (counts.get('WEBSITE') || 0) > 10 || (counts.get('DOCUMENT') || 0) > 5))
     this.invalidate('inputs', 'Acquisition inputs exceed the existing contract.')
   if (this.active === terminal || terminal !== Boolean(this.completedAt)) this.invalidate('status', 'Terminal and active state disagree.')
   if (this.status !== 'QUEUED' && (!this.startedAt || !this.startAuditId || !this.startAuditSignatureVersion))

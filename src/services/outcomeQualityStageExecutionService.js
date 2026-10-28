@@ -1,3 +1,7 @@
+import { buildDecisionLedCommercialExpressionSection, OUTCOME_COMMERCIAL_DECISION_LED_EXPRESSION_PROFILE_VERSION } from '../utils/outcomeDecisionLedCommercialExpressionProfile.js'
+import { assertAuthorisedArlReceipt, isAuthorisedArlRetry, verifyNativeAuthorisedArlReview } from './outcomeArlTransportRecoveryService.js'
+import { assertOutcomeArlTransportReceipt, isOutcomeArlTransportRecovery } from './outcomeArlTransportRecoveryService.js'
+import { WORKING_DRAFT_COMPOSITION_VERSIONS, isWorkingDraftCompositionIdentity, isWorkingDraftCompositionRevision, isFreshArlAfterCompositionRevision } from './outcomeWorkingDraftCompositionService.js'
 import { assertRuntimeEvidenceToMeaningReady, readRuntimeEvidenceToMeaningProviderProjection } from './outcomeRuntimeEvidenceToMeaningService.js'
 import { assertEvidenceToMeaningBoundedProviderOutput } from './outcomeEvidenceToMeaningProviderService.js'
 import { createHash, randomUUID } from 'node:crypto'
@@ -20,6 +24,7 @@ import {
   OUTCOME_RENDERED_EXPRESSION_RL_SCHEMA_VERSION,
   OUTCOME_RENDERED_EXPRESSION_SCHEMA_VERSION,
   OUTCOME_WORKING_DRAFT_SCHEMA_VERSION,
+  OUTCOME_WORKING_DRAFT_PROVIDER_CONFIG_VERSIONS,
   OUTCOME_WORKING_DRAFT_VALIDATION_STATUSES,
   OUTCOME_WORKING_DRAFT_PROOF_DISPOSITIONS,
 } from '../constants/outcomeGovernedQuality.js'
@@ -36,7 +41,12 @@ import {
   assertOutcomeKnowledgeCompositionPlanMatchesRuntime,
 } from './outcomeKnowledgeCompositionPlanService.js'
 import { findOutcomeFrameworkGuidanceStageClaim } from '../utils/outcomeFrameworkGuidanceStageClaims.js'
-import { buildExpressionOnlyRevisionSection } from '../utils/outcomeRenderedExpressionRevision.js'
+import { buildExpressionOnlyRevisionSection, buildReadableExpressionSection, buildPresentationExpressionSection, buildStructuredExpressionSection, OUTCOME_READABLE_EXPRESSION_PROFILE_VERSION, OUTCOME_PRESENTATION_EXPRESSION_PROFILE_VERSION, OUTCOME_STRUCTURED_EXPRESSION_PROFILE_VERSION } from '../utils/outcomeRenderedExpressionRevision.js'
+import { buildCommercialExpressionSection, assertCommercialOutputContract, getCommercialDiagramApplicability, OUTCOME_COMMERCIAL_CANDIDATE_TYPE, OUTCOME_COMMERCIAL_EXPRESSION_PROFILE_VERSION } from '../utils/outcomeCommercialExpressionProfile.js'
+import { buildReadableCommercialExpressionSection, OUTCOME_COMMERCIAL_READABLE_EXPRESSION_PROFILE_VERSION } from '../utils/outcomeReadableCommercialExpressionProfile.js'
+import { buildGovernedCommercialExpressionSection, OUTCOME_COMMERCIAL_GOVERNED_EXPRESSION_PROFILE_VERSION } from '../utils/outcomeGovernedCommercialExpressionProfile.js'
+import { buildCommercialStyleValidationReceipt } from './commercialOutputReviewContract.js'
+import { loadOutcomeKnowledgePackVersionContent } from './outcomeKnowledgePackRegistryService.js'
 import {
   assertOutcomeWorkingDraftMeaningBoundary,
   OUTCOME_WORKING_DRAFT_MEANING_CLASSES,
@@ -297,9 +307,13 @@ const sameOrderedValues = (left, right) => JSON.stringify(left) === JSON.stringi
 const sameSet = (left, right) => sameOrderedValues([...new Set(left)].sort(), [...new Set(right)].sort())
 
 const normalizeExecutionIdentity = (value, { succeeded, stageKey }) => {
-  if (!hasExactKeys(value, EXECUTION_IDENTITY_KEYS)) throw invalid('Outcome quality stage execution identity is invalid.')
+  if (!hasExactKeys(value, [...EXECUTION_IDENTITY_KEYS, ...(Object.hasOwn(value || {}, 'transportReceipt') ? ['transportReceipt'] : []), ...(Object.hasOwn(value || {}, 'authorisedReview') ? ['authorisedReview'] : [])])) throw invalid('Outcome quality stage execution identity is invalid.')
+  if (Object.hasOwn(value, 'transportReceipt') && (stageKey !== 'ARL_MEANING_REVIEW' || !value.providerConfigurationVersion?.endsWith('_V7_EXACT_TRANSPORT'))) throw invalid('ARL transport receipt scope is invalid.')
+  if (Object.hasOwn(value, 'authorisedReview') && (stageKey !== 'ARL_MEANING_REVIEW' || (succeeded && value.authorisedReview.responseState !== 'FRESH'))) throw invalid('Authorised ARL scope is invalid.')
   const generatedStageSucceeded = succeeded && PROVIDER_REQUIRED_STAGES.has(stageKey)
   const result = {
+    ...(Object.hasOwn(value, 'transportReceipt') ? { transportReceipt: assertOutcomeArlTransportReceipt(value.transportReceipt, { succeeded }) } : {}),
+    ...(Object.hasOwn(value, 'authorisedReview') ? { authorisedReview: assertAuthorisedArlReceipt(value.authorisedReview, { terminal: true }) } : {}),
     executionMode: boundedText(value.executionMode, { field: 'executionIdentity.executionMode', min: 1, max: 80 }).toUpperCase(),
     providerKey: boundedText(value.providerKey, {
       field: 'executionIdentity.providerKey',
@@ -337,6 +351,7 @@ const normalizeExecutionIdentity = (value, { succeeded, stageKey }) => {
         .includes(result.providerConfigurationVersion))) {
     throw invalid('Outcome quality stage provider configuration identity is invalid.')
   }
+  if (stageKey === 'ARL_MEANING_REVIEW' && value.providerConfigurationVersion?.endsWith('_V7_EXACT_TRANSPORT') && !value.transportReceipt) throw invalid('ARL transport receipt is required.')
   return result
 }
 
@@ -660,7 +675,7 @@ const normalizeFrameworkGuidanceOutput = (value, inputSnapshot) => {
 }
 
 const normalizeWorkingDraftOutput = (value, inputSnapshot, sourceStageExecution, evidenceProjection = null) => {
-  if (!hasExactKeys(value, WORKING_DRAFT_OUTPUT_KEYS)) throw invalid('Working Draft output shape is invalid.')
+  if (!hasExactKeys(value, [...WORKING_DRAFT_OUTPUT_KEYS, ...(Object.hasOwn(value || {}, 'compositionVersion') ? ['compositionVersion'] : []), ...(Object.hasOwn(value || {}, 'compositionRevision') ? ['compositionRevision'] : [])])) throw invalid('Working Draft output shape is invalid.')
   assertNoForbiddenKeys(value, 'output')
   if (upper(value.outputType) !== OUTCOME_QUALITY_STAGE_OUTPUT_TYPES.WORKING_DRAFT
     || value.schemaVersion !== OUTCOME_WORKING_DRAFT_SCHEMA_VERSION
@@ -770,6 +785,7 @@ const normalizeWorkingDraftOutput = (value, inputSnapshot, sourceStageExecution,
           field: `output.sections[${index}].claims[${claimIndex}].whatCanBeSaidNow`, min: 1, max: 2000,
         }),
         blockedStrongerClaim: boundedText(claim.blockedStrongerClaim, {
+            allowLineBreaks: evidenceProjection?.contractVersion === 'evidence-to-draft-provider.v2',
           field: `output.sections[${index}].claims[${claimIndex}].blockedStrongerClaim`, min: 1, max: 2000,
         }),
         evidenceRequiredToSubstantiate: boundedStringArray(claim.evidenceRequiredToSubstantiate, {
@@ -865,7 +881,13 @@ const normalizeWorkingDraftOutput = (value, inputSnapshot, sourceStageExecution,
     }
     return normalized
   })
+  if (Object.hasOwn(value, 'compositionRevision') && (!WORKING_DRAFT_COMPOSITION_VERSIONS.includes(value.compositionVersion)
+    || !hasExactKeys(value.compositionRevision, ['draftStageExecutionId', 'draftOutputFingerprint', 'arlStageExecutionId', 'arlAttemptFingerprint'])
+    || !['draftStageExecutionId', 'arlStageExecutionId'].every(key => /^outcome_quality_stage_[a-f0-9-]{36}$/.test(value.compositionRevision[key]))
+    || !['draftOutputFingerprint', 'arlAttemptFingerprint'].every(key => SHA256_PATTERN.test(value.compositionRevision[key])))) throw invalid('Working Draft composition revision is invalid.')
   const normalized = {
+    ...(Object.hasOwn(value, 'compositionVersion') ? { compositionVersion: value.compositionVersion } : {}),
+    ...(Object.hasOwn(value, 'compositionRevision') ? { compositionRevision: { ...value.compositionRevision } } : {}),
     outputType: OUTCOME_QUALITY_STAGE_OUTPUT_TYPES.WORKING_DRAFT,
     schemaVersion: OUTCOME_WORKING_DRAFT_SCHEMA_VERSION,
     draftVersion: value.draftVersion,
@@ -1051,8 +1073,13 @@ const normalizeNarrativePlanOutput = (value, inputSnapshot, sourceStageExecution
   }
 }
 
-const normalizeRenderedExpressionOutput = (value, inputSnapshot, sourceStageExecution) => {
-  const revision = hasExactKeys(value, RENDERED_EXPRESSION_REVISION_OUTPUT_KEYS)
+const normalizeRenderedExpressionOutput = (value, inputSnapshot, sourceStageExecution, plan, styleSource) => {
+  const governedStyle = [OUTCOME_COMMERCIAL_GOVERNED_EXPRESSION_PROFILE_VERSION, OUTCOME_COMMERCIAL_DECISION_LED_EXPRESSION_PROFILE_VERSION].includes(value?.expressionProfileVersion)
+  const commercial = hasExactKeys(value, [...RENDERED_EXPRESSION_REVISION_OUTPUT_KEYS, 'expressionProfileVersion', 'outputContract', 'diagramApplicability', ...(governedStyle ? ['styleValidationReceipt'] : [])])
+    && [OUTCOME_COMMERCIAL_EXPRESSION_PROFILE_VERSION, OUTCOME_COMMERCIAL_READABLE_EXPRESSION_PROFILE_VERSION, OUTCOME_COMMERCIAL_GOVERNED_EXPRESSION_PROFILE_VERSION, OUTCOME_COMMERCIAL_DECISION_LED_EXPRESSION_PROFILE_VERSION].includes(value.expressionProfileVersion)
+  const readableRevision = hasExactKeys(value, [...RENDERED_EXPRESSION_REVISION_OUTPUT_KEYS, 'expressionProfileVersion'])
+    && [OUTCOME_READABLE_EXPRESSION_PROFILE_VERSION, OUTCOME_PRESENTATION_EXPRESSION_PROFILE_VERSION, OUTCOME_STRUCTURED_EXPRESSION_PROFILE_VERSION].includes(value.expressionProfileVersion)
+  const revision = commercial || readableRevision || hasExactKeys(value, RENDERED_EXPRESSION_REVISION_OUTPUT_KEYS)
   if (!revision && !hasExactKeys(value, RENDERED_EXPRESSION_OUTPUT_KEYS)) throw invalid('Rendered-expression candidate shape is invalid.')
   assertNoForbiddenKeys(value, 'output')
   const source = toPlain(sourceStageExecution)
@@ -1060,8 +1087,12 @@ const normalizeRenderedExpressionOutput = (value, inputSnapshot, sourceStageExec
     || value.schemaVersion !== OUTCOME_RENDERED_EXPRESSION_SCHEMA_VERSION
     || text(value.narrativePlanStageExecutionId) !== text(source?.stageExecutionId)
     || lower(value.narrativePlanOutputFingerprint) !== lower(source?.outputFingerprint)
-    || upper(value.candidateType) !== 'EXECUTIVE_BRIEF') throw predecessorInvalid({ field: 'narrativePlanIdentity' })
+    || upper(value.candidateType) !== (commercial ? OUTCOME_COMMERCIAL_CANDIDATE_TYPE : 'EXECUTIVE_BRIEF')) throw predecessorInvalid({ field: 'narrativePlanIdentity' })
   const planSections = source.outputSnapshot.sections || []
+  if (commercial) {
+    try { assertCommercialOutputContract(value.outputContract, { plan }) } catch { throw stageBindingInvalid({ field: 'outputContract' }) }
+    if (value.diagramApplicability !== getCommercialDiagramApplicability(planSections)) throw stageBindingInvalid({ field: 'diagramApplicability' })
+  }
   const sections = boundedArray(value.sections, { field: 'output.sections', min: 1, max: 20 })
     .map((section, index) => {
       const planned = planSections[index]
@@ -1072,7 +1103,21 @@ const normalizeRenderedExpressionOutput = (value, inputSnapshot, sourceStageExec
         || !STABLE_KEY_PATTERN.test(lower(section.elementId))
         || !hasExactKeys(section.diagram, RENDERED_DIAGRAM_KEYS)
         || typeof section.diagram.present !== 'boolean') throw invalid('Rendered-expression section is invalid.', { index })
-      const expectedExpression = revision
+      const expectedExpression = commercial
+        ? (value.expressionProfileVersion === OUTCOME_COMMERCIAL_DECISION_LED_EXPRESSION_PROFILE_VERSION
+          ? buildDecisionLedCommercialExpressionSection(planned, { sections: planSections })
+          : value.expressionProfileVersion === OUTCOME_COMMERCIAL_GOVERNED_EXPRESSION_PROFILE_VERSION
+          ? buildGovernedCommercialExpressionSection(planned, { sections: planSections })
+          : value.expressionProfileVersion === OUTCOME_COMMERCIAL_READABLE_EXPRESSION_PROFILE_VERSION
+          ? buildReadableCommercialExpressionSection(planned, { sections: planSections })
+          : buildCommercialExpressionSection(planned, { sections: planSections }))
+        : readableRevision && value.expressionProfileVersion === OUTCOME_STRUCTURED_EXPRESSION_PROFILE_VERSION
+        ? buildStructuredExpressionSection(planned, { sections: planSections })
+        : readableRevision && value.expressionProfileVersion === OUTCOME_PRESENTATION_EXPRESSION_PROFILE_VERSION
+        ? buildPresentationExpressionSection(planned, { sections: planSections })
+        : readableRevision
+        ? buildReadableExpressionSection(planned, { sections: planSections })
+        : revision
         ? buildExpressionOnlyRevisionSection(planned)
         : {
             heading: text(planned.heading),
@@ -1123,6 +1168,7 @@ const normalizeRenderedExpressionOutput = (value, inputSnapshot, sourceStageExec
   const visibleGaps = boundedStringArray(value.visibleGaps, { field: 'output.visibleGaps', max: 50, itemMax: 2000 })
   if (!sameOrderedValues(visibleGaps, inputSnapshot.visibleGaps)) throw stageBindingInvalid({ field: 'visibleGaps' })
   const revisionMetadata = revision ? {
+    ...(commercial || readableRevision ? { expressionProfileVersion: value.expressionProfileVersion } : {}),
     candidateVersion: value.candidateVersion,
     revisionScope: upper(value.revisionScope),
     revisionOfStageExecutionId: text(value.revisionOfStageExecutionId),
@@ -1143,18 +1189,26 @@ const normalizeRenderedExpressionOutput = (value, inputSnapshot, sourceStageExec
     || !SHA256_PATTERN.test(revisionMetadata.rlFindingFingerprint))) {
     throw invalid('Rendered-expression revision lineage is invalid.')
   }
+  const styleValidationReceipt = governedStyle ? buildCommercialStyleValidationReceipt({ contract: value.outputContract,
+    outputAssetId: plan.payload.resolution.selectedPacks.find(pack => pack.packType === 'OUTPUT_TYPE_DEFINITION' && pack.packKey === value.outputContract.outputTypeKey)?.knowledgeAssetId,
+    styleSource, title: value.title, sections, audienceKeys: plan.payload.resolution.request?.audienceKeys || [] }) : null
+  if (governedStyle && hashOutcomeQualityStageValue(styleValidationReceipt) !== hashOutcomeQualityStageValue(value.styleValidationReceipt)) {
+    throw stageBindingInvalid({ field: 'styleValidationReceipt' })
+  }
   return {
     outputType: OUTCOME_QUALITY_STAGE_OUTPUT_TYPES.RENDERED_EXPRESSION,
     schemaVersion: OUTCOME_RENDERED_EXPRESSION_SCHEMA_VERSION,
     narrativePlanStageExecutionId: source.stageExecutionId,
     narrativePlanOutputFingerprint: lower(source.outputFingerprint),
-    candidateType: 'EXECUTIVE_BRIEF',
+    candidateType: commercial ? OUTCOME_COMMERCIAL_CANDIDATE_TYPE : 'EXECUTIVE_BRIEF',
+    ...(commercial ? { outputContract: canonicalize(value.outputContract), diagramApplicability: value.diagramApplicability } : {}),
     title: boundedText(value.title, { field: 'output.title', min: 1, max: 255 }),
     sections,
     truthReferences,
     contributingActivationIds,
     visibleGaps,
     ...revisionMetadata,
+    ...(styleValidationReceipt ? { styleValidationReceipt } : {}),
   }
 }
 
@@ -1241,6 +1295,7 @@ const validatePlan = (value, { runtimeInstanceId, expectedPlanFingerprint, reque
 }
 
 export const buildOutcomeQualityStageExecutionCandidate = ({
+  styleSource,
   plan,
   runtimeInstanceId,
   expectedPlanFingerprint,
@@ -1325,7 +1380,7 @@ export const buildOutcomeQualityStageExecutionCandidate = ({
     } else if (normalizedStageKey === OUTCOME_QUALITY_STAGES.OUTCOME_NARRATIVE_PLAN) {
       normalizedOutput = normalizeNarrativePlanOutput(output, inputSnapshot, sourceStageExecution)
     } else if (normalizedStageKey === OUTCOME_QUALITY_STAGES.OUTPUT_SHAPING) {
-      normalizedOutput = normalizeRenderedExpressionOutput(output, inputSnapshot, sourceStageExecution)
+      normalizedOutput = normalizeRenderedExpressionOutput(output, inputSnapshot, sourceStageExecution, validatedPlan, styleSource)
     } else {
       normalizedOutput = normalizeRenderedExpressionRlOutput(output, inputSnapshot, sourceStageExecution)
     }
@@ -1335,6 +1390,8 @@ export const buildOutcomeQualityStageExecutionCandidate = ({
     succeeded,
     stageKey: normalizedStageKey,
   })
+  if (normalizedStageKey === 'WORKING_DRAFT' && normalizedOutput?.compositionVersion
+    && !isWorkingDraftCompositionIdentity({ version: normalizedOutput.compositionVersion, configurationVersion: normalizedExecutionIdentity.providerConfigurationVersion })) throw invalid('Working Draft composition identity is invalid.')
   const outputFingerprint = succeeded ? hashOutcomeQualityStageValue(normalizedOutput) : ''
   const attemptNumber = latestAttemptNumber + 1
   const qualityRunId = buildQualityRunId(validatedPlan)
@@ -1693,6 +1750,54 @@ const isFreshRlReviewAfterExpressionRevision = ({ candidate, latest, source }) =
   && source?.outputFingerprint !== latest.inputSnapshot?.sourceStage?.outputFingerprint
 )
 
+// Shared persisted-history validation uses exactly the writer's retry eligibility.
+export const assertOutcomeQualityStageRetryLineage = ({ candidate, latest, source, remediation }) => {
+  if (Number(latest?.attemptNumber || 0) === 0) {
+    const sourceStage = candidate.inputSnapshot.sourceStage
+    const firstStage = candidate.stageKey === OUTCOME_QUALITY_STAGES.FRAMEWORK_GUIDANCE
+    if ((firstStage && (candidate.predecessorStageExecutionId || candidate.predecessorAttemptFingerprint))
+      || (!firstStage && (!sourceStage
+        || candidate.predecessorStageExecutionId !== sourceStage.stageExecutionId
+        || candidate.predecessorAttemptFingerprint !== sourceStage.attemptFingerprint))) {
+      throw predecessorInvalid({ expectedLatestAttemptNumber: 0 })
+    }
+  } else {
+    const expressionRevision = isExpressionOnlyShapingRevision({
+      candidate,
+      latest,
+      remediation: remediation,
+    })
+    const freshRlReview = isFreshRlReviewAfterExpressionRevision({
+      candidate,
+      latest,
+      source: source,
+    })
+    const compositionRevision = candidate.stageKey === 'WORKING_DRAFT'
+      && [OUTCOME_WORKING_DRAFT_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V43_EVIDENCE_BOUND_COMPOSITION, OUTCOME_WORKING_DRAFT_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V44_READER_FACING_ATTRIBUTION, OUTCOME_WORKING_DRAFT_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V45_DECISION_GATE_WORDING, OUTCOME_WORKING_DRAFT_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V46_SEPARATE_INPUT_ATTRIBUTION, OUTCOME_WORKING_DRAFT_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V47_METADATA_PRESENTATION, OUTCOME_WORKING_DRAFT_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V48_DOCUMENT_SCOPED_QUALIFICATIONS, OUTCOME_WORKING_DRAFT_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V49_COMPLETE_EVIDENCE_REFERENCE, OUTCOME_WORKING_DRAFT_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V50_HOLISTIC_COMPOSITION, OUTCOME_WORKING_DRAFT_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V51_DESCRIPTIVE_DECISION_CONTEXT].includes(candidate.executionIdentity?.providerConfigurationVersion)
+      && isWorkingDraftCompositionRevision({ latest, remediation, revision: candidate.outputSnapshot?.compositionRevision || { draftStageExecutionId: latest.stageExecutionId, draftOutputFingerprint: latest.outputFingerprint, arlStageExecutionId: remediation?.stageExecutionId, arlAttemptFingerprint: remediation?.attemptFingerprint } })
+      && (candidate.status === 'FAILED' || isWorkingDraftCompositionIdentity({ version: candidate.outputSnapshot?.compositionVersion, configurationVersion: candidate.executionIdentity.providerConfigurationVersion }))
+      && candidate.inputSnapshot.sourceStage?.stageExecutionId === latest.inputSnapshot?.sourceStage?.stageExecutionId
+      && candidate.inputSnapshot.sourceStage?.outputFingerprint === latest.inputSnapshot?.sourceStage?.outputFingerprint
+    const freshArl = candidate.stageKey === 'ARL_MEANING_REVIEW' && (isFreshArlAfterCompositionRevision({ latest, source })
+      || isOutcomeArlTransportRecovery({ latest, source, configurationVersion: candidate.executionIdentity?.providerConfigurationVersion }) || isAuthorisedArlRetry({ candidate, latest, source }))
+    if (latest.status === OUTCOME_QUALITY_STAGE_STATUSES.SUCCEEDED && !expressionRevision && !compositionRevision) {
+      throw retryNotAllowed({ stageExecutionId: latest.stageExecutionId })
+    }
+    if ((!expressionRevision && !freshRlReview && !compositionRevision && !freshArl
+        && !latest.failure?.retryable
+        && !isProviderOutputContractRecovery({ latest, candidate }))
+      || (!expressionRevision && !freshRlReview
+        && latest.stageExecutionId !== candidate.predecessorStageExecutionId)
+      || latest.attemptFingerprint !== candidate.predecessorAttemptFingerprint
+      || latest.qualityRunId !== candidate.qualityRunId
+      || (!expressionRevision && !freshRlReview && !freshArl && latest.inputFingerprint !== candidate.inputFingerprint)
+      || latest.planFingerprint !== candidate.planFingerprint) {
+      throw predecessorInvalid({ stageExecutionId: latest.stageExecutionId })
+    }
+  }
+
+}
+
 export const createOutcomeQualityStageExecution = async ({
   planRecordId,
   runtimeInstanceId,
@@ -1762,6 +1867,11 @@ export const createOutcomeQualityStageExecution = async ({
     throw persistenceFailed()
   }
   const initialCandidate = buildOutcomeQualityStageExecutionCandidate({
+    styleSource: [OUTCOME_COMMERCIAL_GOVERNED_EXPRESSION_PROFILE_VERSION, OUTCOME_COMMERCIAL_DECISION_LED_EXPRESSION_PROFILE_VERSION].includes(output?.expressionProfileVersion)
+      ? await (deps.loadPackContent || loadOutcomeKnowledgePackVersionContent)({
+          packId: output.outputContract?.packs?.find(pack => pack.packType === 'STYLE')?.packId,
+          versionId: output.outputContract?.packs?.find(pack => pack.packType === 'STYLE')?.versionId,
+        }) : undefined,
     plan: initialCurrentPlan,
     runtimeInstanceId,
     expectedPlanFingerprint,
@@ -1818,6 +1928,11 @@ export const createOutcomeQualityStageExecution = async ({
         session,
       }))
       const candidate = buildOutcomeQualityStageExecutionCandidate({
+        styleSource: [OUTCOME_COMMERCIAL_GOVERNED_EXPRESSION_PROFILE_VERSION, OUTCOME_COMMERCIAL_DECISION_LED_EXPRESSION_PROFILE_VERSION].includes(output?.expressionProfileVersion)
+          ? await (deps.loadPackContent || loadOutcomeKnowledgePackVersionContent)({
+              packId: output.outputContract?.packs?.find(pack => pack.packType === 'STYLE')?.packId,
+              versionId: output.outputContract?.packs?.find(pack => pack.packType === 'STYLE')?.versionId, session,
+            }) : undefined,
         plan: currentPlan,
         runtimeInstanceId,
         expectedPlanFingerprint,
@@ -1868,41 +1983,15 @@ export const createOutcomeQualityStageExecution = async ({
       if (actualLatestAttemptNumber !== expectedLatestAttemptNumber) {
         throw versionConflict({ expectedLatestAttemptNumber, actualLatestAttemptNumber })
       }
-      if (actualLatestAttemptNumber === 0) {
-        const sourceStage = candidate.inputSnapshot.sourceStage
-        const firstStage = candidate.stageKey === OUTCOME_QUALITY_STAGES.FRAMEWORK_GUIDANCE
-        if ((firstStage && (candidate.predecessorStageExecutionId || candidate.predecessorAttemptFingerprint))
-          || (!firstStage && (!sourceStage
-            || candidate.predecessorStageExecutionId !== sourceStage.stageExecutionId
-            || candidate.predecessorAttemptFingerprint !== sourceStage.attemptFingerprint))) {
-          throw predecessorInvalid({ expectedLatestAttemptNumber: 0 })
-        }
-      } else {
-        const expressionRevision = isExpressionOnlyShapingRevision({
-          candidate,
-          latest,
-          remediation: remediationStage,
-        })
-        const freshRlReview = isFreshRlReviewAfterExpressionRevision({
-          candidate,
-          latest,
-          source: transactionSourceStage,
-        })
-        if (latest.status === OUTCOME_QUALITY_STAGE_STATUSES.SUCCEEDED && !expressionRevision) {
-          throw retryNotAllowed({ stageExecutionId: latest.stageExecutionId })
-        }
-        if ((!expressionRevision && !freshRlReview
-            && !latest.failure?.retryable
-            && !isProviderOutputContractRecovery({ latest, candidate }))
-          || (!expressionRevision && !freshRlReview
-            && latest.stageExecutionId !== candidate.predecessorStageExecutionId)
-          || latest.attemptFingerprint !== candidate.predecessorAttemptFingerprint
-          || latest.qualityRunId !== candidate.qualityRunId
-          || (!expressionRevision && !freshRlReview && latest.inputFingerprint !== candidate.inputFingerprint)
-          || latest.planFingerprint !== candidate.planFingerprint) {
-          throw predecessorInvalid({ stageExecutionId: latest.stageExecutionId })
-        }
+      if (candidate.executionIdentity.authorisedReview) {
+        const r = candidate.executionIdentity.authorisedReview
+        await verifyNativeAuthorisedArlReview({ claimEventId: r.claimEventId, claimBodyHash: r.claimBodyHash,
+          actorUserId, runtimeInstanceId, plan: currentPlan, source: transactionSourceStage, latest, session,
+          readBudget: deps.readBudget, deps, terminalReceipt: r, artifactId: candidate.executionIdentity.grrRuntimeArtifactId })
       }
+      assertOutcomeQualityStageRetryLineage({
+        candidate, latest, source: transactionSourceStage, remediation: remediationStage,
+      })
       created = new stageModel({
         stageExecutionId: `outcome_quality_stage_${randomUUID()}`,
         ...candidate,

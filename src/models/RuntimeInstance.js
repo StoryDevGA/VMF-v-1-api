@@ -267,6 +267,12 @@ const runtimeRevisionSchema = new mongoose.Schema(
 
 const runtimeInstanceSchema = new mongoose.Schema(
   {
+    controlledReplayIsolation: { type: createControlledReplayIsolationSchema(mongoose), default: undefined,
+      set: value => value === undefined ? undefined : validateControlledReplayIsolation(value),
+      validate: { validator: function (value) {
+        if (value === undefined) return true
+        try { validateControlledReplayIsolation(value, this); return true } catch { return false }
+      }, message: 'Invalid controlled replay isolation marker.' } },
     runtimeInstanceKey: {
       type: String,
       required: true,
@@ -295,6 +301,17 @@ const runtimeInstanceSchema = new mongoose.Schema(
       maxlength: 160,
       default: '',
       index: true,
+    },
+    lockedEvidenceSnapshot: {
+      type: new mongoose.Schema({
+        contractVersion: { type: String, required: true, enum: ['runtime-evidence-membership.v1'] },
+        snapshotId: { type: String, required: true, maxlength: 240 },
+        membershipHash: { type: String, required: true, match: /^[a-f0-9]{64}$/ },
+        basisStateVersion: { type: String, required: true, maxlength: 100 },
+        lockSnapshotId: { type: String, required: true, maxlength: 240 },
+        lockSnapshotHash: { type: String, required: true, match: /^[a-f0-9]{64}$/ },
+      }, { _id: false, strict: 'throw' }),
+      default: undefined,
     },
     runtimeType: {
       type: String,
@@ -464,6 +481,7 @@ const runtimeInstanceSchema = new mongoose.Schema(
         ret.id = String(ret._id)
         delete ret._id
         delete ret.__v
+        delete ret.lockedEvidenceSnapshot
         return ret
       },
     },
@@ -530,3 +548,4 @@ runtimeInstanceSchema.pre('validate', function normalizeRuntimeInstance(next) {
 const RuntimeInstance = mongoose.model('RuntimeInstance', runtimeInstanceSchema)
 
 export default RuntimeInstance
+import { createControlledReplayIsolationSchema, validateControlledReplayIsolation } from '../services/controlledReplayIsolationService.js'

@@ -2554,6 +2554,37 @@ name: Statement of Work
       activationId: style.activationId,
     }))
   })
+  test.each(['allowed', 'excluded', 'unavailable', 'changed-hash'])('request-specific styles use the exact source and do not substitute on failure: %s', async mode => {
+    const relationships = [runtimeDependency('OUTPUT_SCHEMA', 'paper-schema'), runtimeDependency('STYLE', 'advisory')]
+    const output = makeActivation({ packCategory: 'OUTCOME', purposeCategory: 'OUTPUT', packType: 'OUTPUT_TYPE_DEFINITION', packKey: 'paper' },
+      { knowledgeLayer: 'OUTPUT_TYPE', capabilityKey: 'paper', workspaceCompatibility: ['OUTCOME'],
+        dependencyReferences: relationships, relationshipChecksum: relationshipChecksum(relationships) })
+    const schema = makeActivation({ packCategory: 'OUTCOME', purposeCategory: 'OUTPUT', packType: 'OUTPUT_SCHEMA', packKey: 'paper-schema' },
+      { knowledgeLayer: 'OUTPUT_SCHEMA', capabilityKey: 'paper-schema', workspaceCompatibility: ['OUTCOME'], dependencyReferences: [] })
+    const content = JSON.stringify({ styleConstraints: { contractVersion: 'style-overlay.constraints.v1',
+      incompatibleOutputTypes: mode === 'excluded' ? ['paper'] : [], incompatibleAudienceKeys: [], requiredRendererCapabilities: [] } })
+    const style = makeActivation({ packCategory: 'CONTEXT', purposeCategory: 'STYLE', packType: 'STYLE', packKey: 'advisory' },
+      { knowledgeLayer: 'STYLE', capabilityKey: 'advisory', workspaceCompatibility: ['OUTCOME'], dependencyReferences: [],
+        contentHash: `sha256:${crypto.createHash('sha256').update(content).digest('hex')}`, contentFormat: 'JSON' })
+    const safeguards = makeAllRequiredActivations().map(pack => ({ ...pack,
+      knowledgeLayer: pack.packType === 'ARL' ? 'FRAMEWORK' : pack.packType === 'RL' ? 'COMMUNICATION_PATTERN'
+        : pack.packType === 'OUTPUT_SCHEMA' ? 'OUTPUT_SCHEMA' : pack.packType === 'OUTPUT_TYPE_DEFINITION' ? 'OUTPUT_TYPE' : 'VALIDATION',
+      capabilityKey: pack.packType === 'ARL' ? 'arl' : pack.packKey, workspaceCompatibility: ['OUTCOME'] }))
+    const activations = [...safeguards, output, schema, style]
+    const versions = activations.map(activation => makeVersionForActivation(activation, { status: 'ACTIVE',
+      knowledgeLayer: activation.knowledgeLayer, capabilityKey: activation.capabilityKey,
+      workspaceCompatibility: activation.workspaceCompatibility }))
+    const selectedVersion = { ...versions.find(version => version.versionId === style.versionId),
+      content: mode === 'changed-hash' ? content + ' ' : content, contentFormat: 'JSON' }
+    KnowledgePackActivation.find.mockReturnValue(buildFindChain(activations))
+    KnowledgePackVersion.find.mockReturnValue(buildFindChain(versions))
+    KnowledgePackVersion.findOne.mockReturnValue(buildVersionFindOneChain(mode === 'unavailable' ? null : selectedVersion))
+    const binding = await resolveOutcomeStudioKnowledgePacks({ frameworkKey: 'VMF', runtimeType: 'VALUE_NARRATIVE',
+      workspaceType: 'OUTCOME', requestedOutputTypeKey: 'paper', requestedStyleKey: 'advisory' })
+    expect(binding.status).toBe(mode === 'allowed' ? 'READY' : 'BLOCKED')
+    if (mode === 'allowed') expect(binding.resolution.styleOverlayReceipts[0]).toMatchObject({ style: { versionId: style.versionId }, rlApproved: false })
+    else expect(binding.selectedByLayer.STYLE || []).toHaveLength(0)
+  })
 
   test.each([
     [{ packType: 'RL' }, {}, 'VERSION_METHOD_ROLE_MISMATCH'],
@@ -2642,6 +2673,13 @@ name: Statement of Work
       style,
       systemPack,
     ]
+    // This test also selects STYLE: supply its exact active source, rather than
+    // relying on the old relationship path skipping the content prerequisite.
+    style.contentHash = buildTestContentHash(DEFAULT_SOURCE_DOCUMENT_TEXT)
+    KnowledgePackVersion.findOne.mockReturnValue(buildVersionFindOneChain(makeVersionForActivation(style, {
+      status: 'ACTIVE', knowledgeLayer: style.knowledgeLayer, capabilityKey: style.capabilityKey,
+      workspaceCompatibility: style.workspaceCompatibility,
+    })))
     KnowledgePackActivation.find.mockReturnValue(buildFindChain(activations))
     KnowledgePackVersion.find.mockReturnValue(buildFindChain(
       activations.map((activation) => makeVersionForActivation(activation, {

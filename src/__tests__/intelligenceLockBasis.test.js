@@ -21,6 +21,17 @@ test('projects recorded snapshot and matching anchor without original-body or me
   delete lock.privateBody; delete lock.replayAnchor.privateBody
   expect(JSON.stringify(lock)).toBe(before)
 })
+test('projects supplied verified membership counts distinctly from current inventory without raw records', () => {
+  const frozen = { available: true, completeness: 'VERIFIED', reason: null, contractVersion: 'runtime-evidence-membership.v1',
+    snapshotId: 'evidence_snapshot_123e4567-e89b-42d3-a456-426614174000', membershipHash: 'c'.repeat(64),
+    basisStateVersion: 'rsv2:123e4567-e89b-42d3-a456-426614174000', lockSnapshotId: fixture().snapshot.snapshotId,
+    lockSnapshotHash: snapshotHash, revisionNumber: 2, counts: { sources: 19, evidence: 853, sections: 5 },
+    verification: { basis: 'EXACT_PERSISTED_MEMBERSHIP', materialHashAlgorithm: 'sha256-canonical-json-housekeeping-excluded.v1', auditLinkVerified: true } }
+  const projected = projectRecordedLockBasis(fixture(), { ...control, revision: { revisionNumber: 2 }, currentSourceCount: 2 }, frozen)
+  expect(projected.frozenInventory).toEqual(frozen)
+  expect(projected.frozenInventory.membershipHash).not.toBe(projected.snapshot.snapshotHash)
+  expect(projected).not.toHaveProperty('currentSourceCount')
+})
 test.each([undefined, null, {}, { locked: false }, { state: 'UNLOCKED' }])('no recorded lock is not a fabricated snapshot %#', lock => {
   expect(projectRecordedLockBasis(lock, { ...control, lockedAt: null })).toMatchObject({ available: false, reason: 'LOCK_NOT_RECORDED', locked: false, snapshot: null })
 })

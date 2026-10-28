@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { getUnresolvedDiscoveryContradictions } from './discoveryContradictionReviewService.js'
 import { hasCurrentIndividualPackMetadataGuidance } from './outcomeStudioIndividualContractService.js'
+import { isOutcomeContextMetadataReference } from '../utils/outcomeEvidenceSnapshot.js'
 
 export const OUTCOME_STUDIO_EVIDENCE_COMPOSITION_CONTRACT =
   'outcome-studio.evidence-to-composition.v1'
@@ -738,6 +739,13 @@ const composeFacts = ({ frameworkState, truthBinding }) => {
     sourceRegistryById.set(sourceId, source)
   }
   const sectionKeysByEvidenceId = new Map()
+  // Membership is provenance, not fact admission. Only the explicit references
+  // below can select a fact; authored bindings must also match native coverage.
+  const authoredSectionKeys = new Map(evidenceObjects.filter(row => Object.hasOwn(row, 'draftQualification'))
+    .map(row => [row, Object.entries(sections).filter(([, section]) => {
+      const refs = section?.accepted?.supportingEvidenceRefs
+      return Array.isArray(refs) && refs.some(ref => ref === row.evidenceObjectId || ref === row.sourceId)
+    }).map(([sectionKey]) => sectionKey).sort()]))
   const references = []
   const omissions = []
   const omissionReasonCounts = {}
@@ -760,6 +768,10 @@ const composeFacts = ({ frameworkState, truthBinding }) => {
           sectionKeys: [normalizedSectionKey],
           reason: 'INVALID_REFERENCE',
         })
+        continue
+      }
+      if (isOutcomeContextMetadataReference(evidencePack, sectionKey, reference)) {
+        addOmission({ omissions, omissionReasonCounts, reference, sectionKeys: [normalizedSectionKey], reason: 'CONTEXT_METADATA' })
         continue
       }
       const resolution = resolveReference({ reference, byEvidenceId, bySourceId })
@@ -796,12 +808,18 @@ const composeFacts = ({ frameworkState, truthBinding }) => {
 
   const factsByEvidenceId = new Map()
   for (const reference of references) {
-    const evidence = reference.resolution.evidence
+    const rawEvidence = reference.resolution.evidence
+    const authored = projectEvidenceDraftQualification({ evidence: rawEvidence,
+      source: sourceRegistryById.get(rawEvidence.sourceId),
+      sourceSectionKeys: authoredSectionKeys.get(rawEvidence)
+        || [...(sectionKeysByEvidenceId.get(rawEvidence.evidenceObjectId) || [])] })
+    const evidence = authored ? { ...rawEvidence, ...authored } : rawEvidence
     const evidenceObjectId = reference.evidenceObjectId
     if (factsByEvidenceId.has(evidenceObjectId)) continue
     const reviewStatus = normalizeToken(evidence.reviewStatus)
     const validationStatus = normalizeToken(evidence.validationStatus)
-    const sectionKeys = [...(sectionKeysByEvidenceId.get(evidenceObjectId) || [])].sort()
+    const sectionKeys = authored ? [...authored.draftPlacement.sourceSectionKeys].sort()
+      : [...(sectionKeysByEvidenceId.get(evidenceObjectId) || [])].sort()
     if (reviewStatus !== 'ACCEPTED') {
       addOmission({ omissions, omissionReasonCounts, reference: evidenceObjectId, sectionKeys, reason: 'EVIDENCE_NOT_ACCEPTED' })
       factsByEvidenceId.set(evidenceObjectId, { omitted: true })
@@ -987,3 +1005,4 @@ export const __testables = Object.freeze({
   buildIntermediateReasoningManifest,
   getAcceptedFrameworkIntelligence,
 })
+import { projectEvidenceDraftQualification } from './evidenceDraftQualification.js'

@@ -108,6 +108,8 @@ export const AUDIT_ACTIONS = Object.freeze({
   OUTCOME_DRAFT_GENERATED: 'OUTCOME_DRAFT_GENERATED',
   OUTCOME_DRAFT_REFINED: 'OUTCOME_DRAFT_REFINED',
   OUTCOME_DRAFT_REVISED_FROM_APPROVED: 'OUTCOME_DRAFT_REVISED_FROM_APPROVED',
+  OUTCOME_SUCCESSOR_REQUESTED: 'OUTCOME_SUCCESSOR_REQUESTED',
+  OUTCOME_SUCCESSOR_COMPLETED: 'OUTCOME_SUCCESSOR_COMPLETED',
   OUTCOME_DRAFT_APPROVED: 'OUTCOME_DRAFT_APPROVED',
   OUTCOME_DRAFT_DISCARDED: 'OUTCOME_DRAFT_DISCARDED',
   ASSET_GENERATED: 'ASSET_GENERATED',
@@ -543,6 +545,10 @@ const buildAuditSummary = ({ action, resourceType, resourceId, diff, display }) 
       return clampSummary(`${actorLabel} refined Outcome Studio draft ${targetLabel}`)
     case AUDIT_ACTIONS.OUTCOME_DRAFT_REVISED_FROM_APPROVED:
       return clampSummary(`${actorLabel} reopened Outcome Studio approved output ${targetLabel} as a new draft`)
+    case AUDIT_ACTIONS.OUTCOME_SUCCESSOR_REQUESTED:
+      return clampSummary(`${actorLabel} requested an Outcome Studio successor from ${targetLabel}`)
+    case AUDIT_ACTIONS.OUTCOME_SUCCESSOR_COMPLETED:
+      return clampSummary(`${actorLabel} completed a governed Outcome Studio successor from ${targetLabel}`)
     case AUDIT_ACTIONS.OUTCOME_DRAFT_DISCARDED:
       return clampSummary(`${actorLabel} discarded Outcome Studio draft ${targetLabel}`)
     case AUDIT_ACTIONS.ASSET_GENERATED:

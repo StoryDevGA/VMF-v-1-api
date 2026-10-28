@@ -444,3 +444,27 @@ export const permitsLocalDiscoveryCandidateAcquisition = ({ frameworkPackage, re
     && resolution.resolvedReferences.every(row => /^discoveryPolicy\.evidencePolicy\.ownerMappings\.\d+$/.test(row.path))
     && resolution.unresolvedReferences?.length === 0
 }
+
+// Read-only declaration/capture inspection. No registered post-lock producer is
+// supported here; a schema-valid policy or VE02 binding cannot enable intake.
+export const inspectPostLockImplementationCapability = ({ frameworkPackage, runtimeInstance } = {}) => {
+  const unavailable = (status, reason, blockedBy = [reason], identity = {}) => ({
+    available: false, reason, blockedBy, policy: { status, ...identity },
+  })
+  const value = frameworkPackage?.discoveryPolicy
+  if (value === undefined) return unavailable('NOT_RECORDED', 'POST_LOCK_POLICY_NOT_RECORDED')
+  const parsed = discoveryPolicySchema.safeParse(value)
+  if (!parsed.success) return unavailable('INVALID', 'POST_LOCK_POLICY_INVALID')
+  const policy = parsed.data
+  if (!policy.postLockDiscoveryPolicy) return unavailable('NOT_RECORDED', 'POST_LOCK_POLICY_NOT_RECORDED')
+  const resolution = resolvePackageDiscoveryPolicy({ frameworkPackage, runtimeInstance })
+  const captured = resolution.reason === 'DISCOVERY_POLICY_MAPPING_UNVERIFIED'
+    && runtimeInstance?.evidence?.dependencySnapshotId === frameworkPackage.dependencyLock?.snapshotId
+  const identity = captured ? { policyKey: policy.policyKey, policyVersion: policy.policyVersion, policyHash: resolution.policyHash } : {}
+  if (!policy.postLockDiscoveryPolicy.enabled) return unavailable('DISABLED', 'POST_LOCK_POLICY_DISABLED',
+    captured ? ['POST_LOCK_POLICY_DISABLED'] : ['POST_LOCK_POLICY_DISABLED', 'POST_LOCK_POLICY_BINDING_UNVERIFIED'], identity)
+  return captured
+    ? unavailable('DECLARED_UNVERIFIED', 'POST_LOCK_IMPLEMENTATION_MAPPING_UNVERIFIED', undefined, identity)
+    : unavailable('DECLARED_UNVERIFIED', 'POST_LOCK_POLICY_BINDING_UNVERIFIED',
+      ['POST_LOCK_POLICY_BINDING_UNVERIFIED', 'POST_LOCK_IMPLEMENTATION_MAPPING_UNVERIFIED'])
+}

@@ -30,6 +30,7 @@ import RuntimeGraphRelationship from './RuntimeGraphRelationship.js'
 import RuntimeStateSection from './RuntimeStateSection.js'
 import RuntimeEvidenceSource from './RuntimeEvidenceSource.js'
 import RuntimeEvidenceObject from './RuntimeEvidenceObject.js'
+import RuntimeEvidenceSnapshot from './RuntimeEvidenceSnapshot.js'
 import RuntimeGraphSnapshot from './RuntimeGraphSnapshot.js'
 import RuntimeGraphElement from './RuntimeGraphElement.js'
 import RuntimeStateMigrationReceipt from './RuntimeStateMigrationReceipt.js'
@@ -43,6 +44,7 @@ import OutcomeSession from './OutcomeSession.js'
 import OutcomeMessage from './OutcomeMessage.js'
 import OutcomeKnowledgeCompositionPlan from './OutcomeKnowledgeCompositionPlan.js'
 import OutcomeQualityStageExecution from './OutcomeQualityStageExecution.js'
+import OutcomeSuccessorOperation from './OutcomeSuccessorOperation.js'
 import KnowledgePack from './KnowledgePack.js'
 import KnowledgePackVersion from './KnowledgePackVersion.js'
 import KnowledgePackActivation from './KnowledgePackActivation.js'
@@ -88,6 +90,7 @@ export {
   RuntimeStateSection,
   RuntimeEvidenceSource,
   RuntimeEvidenceObject,
+  RuntimeEvidenceSnapshot,
   RuntimeGraphSnapshot,
   RuntimeGraphElement,
   RuntimeStateMigrationReceipt,
@@ -101,6 +104,7 @@ export {
   OutcomeMessage,
   OutcomeKnowledgeCompositionPlan,
   OutcomeQualityStageExecution,
+  OutcomeSuccessorOperation,
   KnowledgePack,
   KnowledgePackVersion,
   KnowledgePackActivation,
@@ -147,6 +151,7 @@ export default {
   RuntimeStateSection,
   RuntimeEvidenceSource,
   RuntimeEvidenceObject,
+  RuntimeEvidenceSnapshot,
   RuntimeGraphSnapshot,
   RuntimeGraphElement,
   RuntimeStateMigrationReceipt,
@@ -160,6 +165,7 @@ export default {
   OutcomeMessage,
   OutcomeKnowledgeCompositionPlan,
   OutcomeQualityStageExecution,
+  OutcomeSuccessorOperation,
   KnowledgePack,
   KnowledgePackVersion,
   KnowledgePackActivation,

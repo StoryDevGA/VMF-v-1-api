@@ -567,6 +567,8 @@ export const createRuntimeRevision = async ({
     expectedUpdatedAt: payload.expectedUpdatedAt,
   })
   assertSourceCanCreateRevision(sourceRuntimeInstance)
+  await attachNativeControlledReplayIsolation(sourceRuntimeInstance)
+  assertNoControlledReplayIsolation(sourceRuntimeInstance)
 
   const frameworkPackage = await resolveQueryValue(FrameworkPackage.findById(sourceRuntimeInstance.packageId))
   if (!frameworkPackage) {
@@ -598,3 +600,4 @@ export const createRuntimeRevision = async ({
 export default {
   createRuntimeRevision,
 }
+import { attachNativeControlledReplayIsolation, assertNoControlledReplayIsolation } from './controlledReplayIsolationService.js'

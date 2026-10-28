@@ -1,6 +1,8 @@
 import { describe, test, expect, jest } from '@jest/globals'
 import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
+import { resolveFrameworkOutcomeStudioHandoff } from '../services/outcomeFrameworkHandoffService.js'
+import { projectOutcomeSelectedTargetBinding } from '../services/outcomeSelectedTargetService.js'
 
 import {
   buildOutcomeStudioLiveComposition,
@@ -258,6 +260,72 @@ describe('Outcome Studio live composition bridge', () => {
     expect(input.loadPackContent).toHaveBeenCalledTimes(4)
     expect(input.buildComposition).not.toHaveBeenCalled()
     expect(result).not.toHaveProperty('receipt')
+  })
+  test.each(['allowed', 'excluded', 'unavailable'])('prospective style source is checked before composition: %s', async mode => {
+    const input = makeInput({ requestedFormat: 'MARKDOWN', buildComposition: jest.fn() })
+    const binding = input.knowledgeContextResult.reasoningBinding
+    binding.resolution = { styleOverlayPolicy: 'style-overlay.default-compatible.v1', request: { audienceKeys: [] } }
+    const style = binding.selectedByLayer.STYLE[0]
+    const content = JSON.stringify({ styleConstraints: { contractVersion: 'style-overlay.constraints.v1',
+      incompatibleOutputTypes: mode === 'excluded' ? ['executive-brief'] : [], incompatibleAudienceKeys: [],
+      requiredRendererCapabilities: ['CALLOUT'] } })
+    style.packType = 'STYLE'; style.contentFormat = 'JSON'
+    style.contentHash = `sha256:${createHash('sha256').update(content).digest('hex')}`
+    binding.lineage.contentHashes = [...binding.lineage.contentHashes, style.contentHash]
+    const loader = input.loadPackContent
+    input.loadPackContent = jest.fn(identity => identity.packId === style.packId
+      ? mode === 'unavailable' ? Promise.reject(new Error('source unavailable')) : Promise.resolve({ ...style, available: true, content })
+      : loader(identity))
+    const promise = resolveOutcomeStudioCompositionInputs({ ...input, binding, knowledgeContext: input.knowledgeContextResult.context })
+    if (mode === 'allowed') {
+      const result = await promise
+      expect(result.styleOverlayReceipt).toMatchObject({ rlApproved: false, contentValidated: false,
+        style: { versionId: style.versionId }, renderer: { format: 'MARKDOWN' } })
+    } else await expect(promise).rejects.toThrow()
+    expect(input.buildComposition).not.toHaveBeenCalled()
+  })
+
+  test('resolves an editable target through the actual canonical handoff without upgrading readiness', async () => {
+    const input = makeInput({ outputTypeContent: capturedDecisionType, schemaContent: capturedDecisionSchema,
+      schemaFormat: 'MARKDOWN', buildComposition: jest.fn() })
+    const binding = input.knowledgeContextResult.reasoningBinding
+    const context = input.knowledgeContextResult.context
+    context.style = null
+    binding.selectedByLayer.COMMUNICATION_PATTERN = []
+    for (const [layer, content] of [['OUTPUT_TYPE', capturedDecisionType], ['OUTPUT_SCHEMA', capturedDecisionSchema]]) {
+      binding.selectedByLayer[layer][0].contentHash = `sha256:${createHash('sha256').update(content).digest('hex')}`
+    }
+    binding.lineage.contentHashes = Object.values(binding.selectedByLayer).flat().map(pack => pack.contentHash)
+    const frameworkPackage = { _id: 'editable-package', packageKey: 'fixture', version: '1.0.0', sections: [] }
+    const runtimeInstance = { _id: 'editable-runtime', runtimeInstanceKey: 'editable-runtime', status: 'ACTIVE',
+      packageId: frameworkPackage._id, packageKey: 'fixture', packageVersion: '1.0.0', framework_state: {} }
+    const before = JSON.stringify(runtimeInstance)
+    const canonical = await resolveFrameworkOutcomeStudioHandoff({ runtimeInstance, frameworkPackage,
+      packBinding: binding, knowledgeContext: context, requestedOutputTypeKey: input.requestedOutputTypeKey,
+      outputContractState: 'CANDIDATE' })
+    expect(canonical.frameworkPackage).toBe(frameworkPackage)
+    expect(canonical.handoff.status).toBe('BLOCKED')
+    expect(canonical.handoff.blockers.some(blocker => blocker.code === 'HANDOFF_RESOLUTION_FAILED')).toBe(false)
+    expect(canonical.handoff.runtimeIntegrity.outputContract).toMatchObject({ state: 'CANDIDATE', confirmed: false })
+    const args = { ...input, binding, knowledgeContext: context }
+    const resolved = await resolveOutcomeStudioCompositionInputs({ ...args, frameworkHandoff: canonical.handoff })
+    const target = projectOutcomeSelectedTargetBinding({ contract: {
+      outputType: { ...resolved.outputType, actualContentHash: resolved.outputType.contentHash },
+      schema: { ...resolved.schema, actualContentHash: resolved.schema.contentHash }, schemaProjection: resolved.schemaProjection,
+    } })
+    expect(target.receipt.targetSections.required).toHaveLength(14)
+    expect(target.receipt.contractIdentity.outputType.actualContentHash).toBe(binding.selectedByLayer.OUTPUT_TYPE[0].contentHash)
+    expect(target.receipt.contractIdentity.schema.actualContentHash).toBe(binding.selectedByLayer.OUTPUT_SCHEMA[0].contentHash)
+    for (const frameworkHandoff of [undefined, { ...canonical.handoff, claimBoundaries: canonical.handoff.claimBoundaries.slice(0, 4) }]) {
+      await expect(resolveOutcomeStudioCompositionInputs({ ...args, frameworkHandoff })).rejects.toMatchObject({
+        reason: OUTCOME_STUDIO_LIVE_COMPOSITION_BLOCKERS.GOVERNANCE_CONSTRAINTS_INVALID,
+        details: { field: 'frameworkHandoff.claimBoundaries' },
+      })
+    }
+    expect(canonical.handoff.status).toBe('BLOCKED')
+    expect(canonical.handoff.runtimeIntegrity.outputContract.confirmed).toBe(false)
+    expect(JSON.stringify(runtimeInstance)).toBe(before)
+    expect(input.buildComposition).not.toHaveBeenCalled()
   })
 
   test('readiness fails closed on the same content identity mismatch as generation', async () => {

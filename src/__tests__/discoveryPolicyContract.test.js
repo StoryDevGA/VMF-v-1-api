@@ -1,12 +1,46 @@
 import { describe, expect, test } from '@jest/globals'
 import FrameworkPackage from '../models/FrameworkPackage.js'
 import { discoveryPolicySchema, inspectDiscoveryPolicy, discoveryPolicyReadinessDetails, discoveryPolicySnapshot, resolvePackageDiscoveryPolicy,
-  permitsLocalDiscoveryCandidateAcquisition } from '../services/discoveryPolicyContract.js'
+  permitsLocalDiscoveryCandidateAcquisition, inspectPostLockImplementationCapability } from '../services/discoveryPolicyContract.js'
 import { normalizeRuntimeActivationReadiness } from '../services/runtimeActivation/runtimeActivationService.js'
 
 const identity = () => ({ contractVersion: 'framework-package-discovery-policy-v1', policyKey: 'discovery-test', policyVersion: '1.0.0' })
 const policy = () => ({ ...identity(), evidencePolicy: { ownerMappings: [{ mappingKey: 'evidence', vmfCapabilityRef: 'unconfirmed-evidence', ownerRuntime: 'unconfirmed-owner', resultType: 'unconfirmed-result' }] } })
 const packageInput = (status = 'DRAFT') => ({ frameworkKey: 'TEST', frameworkName: 'Test', version: '1.0.0', packageKey: 'test-1-0-0', status, createdBy: '507f1f77bcf86cd799439011', updatedBy: '507f1f77bcf86cd799439011', discoveryPolicy: policy() })
+
+describe('post-lock policy declarations never establish implemented intake', () => {
+  const bound = enabled => {
+    const value = { ...identity(), postLockDiscoveryPolicy: { enabled, mutateLockedRevision: false,
+      references: [{ mappingKey: 'outside', vmfCapabilityRef: 'VE02', ownerRuntime: 'VE02', implementationRef: 'unverified' }] } }
+    const pack = { ...packageInput(), _id: '507f1f77bcf86cd799439011', discoveryPolicy: value,
+      dependencyLock: { ...discoveryPolicySnapshot(value), snapshotId: 'dependency-1', snapshotHash: 'a'.repeat(64) } }
+    return { frameworkPackage: pack, runtimeInstance: { packageId: pack._id, frameworkKey: pack.frameworkKey, packageKey: pack.packageKey,
+      packageVersion: pack.version, dependencyLockId: 'dependency-1', evidence: { dependencySnapshotId: 'dependency-1', dependencySnapshotHash: 'a'.repeat(64) } } }
+  }
+  test.each([true, false])('actual enabled=%s captured policy remains unavailable without modifying its source', enabled => {
+    const input = bound(enabled), before = JSON.stringify(input)
+    const result = inspectPostLockImplementationCapability(input)
+    expect(result).toMatchObject({ available: false, policy: { status: enabled ? 'DECLARED_UNVERIFIED' : 'DISABLED',
+      policyHash: input.frameworkPackage.dependencyLock.discoveryPolicyHash } })
+    expect(result.reason).toBe(enabled ? 'POST_LOCK_IMPLEMENTATION_MAPPING_UNVERIFIED' : 'POST_LOCK_POLICY_DISABLED')
+    expect(JSON.stringify(input)).toBe(before)
+    expect(permitsLocalDiscoveryCandidateAcquisition({ frameworkPackage: input.frameworkPackage,
+      resolution: { status: 'CONFIGURED_LOCAL', resolvedReferences: [], unresolvedReferences: [] } })).toBe(false)
+  })
+  test.each(['absent', 'post-absent', 'invalid', 'capture', 'snapshot', 'package'])('actual %s mismatch cannot display captured identity or enable intake', kind => {
+    const input = bound(true)
+    if (kind === 'absent') delete input.frameworkPackage.discoveryPolicy
+    if (kind === 'post-absent') delete input.frameworkPackage.discoveryPolicy.postLockDiscoveryPolicy
+    if (kind === 'invalid') input.frameworkPackage.discoveryPolicy.postLockDiscoveryPolicy.mutateLockedRevision = true
+    if (kind === 'capture') delete input.frameworkPackage.dependencyLock.discoveryPolicy
+    if (kind === 'snapshot') input.runtimeInstance.evidence.dependencySnapshotHash = 'wrong'
+    if (kind === 'package') input.runtimeInstance.packageVersion = 'wrong'
+    const result = inspectPostLockImplementationCapability(input)
+    expect(result.available).toBe(false)
+    expect(result.policy).not.toHaveProperty('policyKey')
+    expect(result.policy).not.toHaveProperty('policyHash')
+  })
+})
 
 describe('installed local candidate acquisition boundary', () => {
   const resolution = { status: 'CONFIGURED_LOCAL', resolvedReferences: [{ path: 'discoveryPolicy.evidencePolicy.ownerMappings.0' }], unresolvedReferences: [] }

@@ -5,6 +5,7 @@ import {
   hashSectionInput,
 } from './runtimeSectionModelService.js'
 import { requiresVmfSectionReasoning } from './sectionExecutionContractService.js'
+import { buildRuntimeSectionEvidenceQualifications, SECTION_EVIDENCE_QUALIFICATION_VERSION } from './runtimeSectionEvidenceQualificationService.js'
 import { VMF_SECTION_REASONING_CONTRACT_VERSION } from '../constants/runtimeSectionReasoningContract.js'
 import {
   buildReasoningArtefactOutputs,
@@ -182,41 +183,78 @@ const providerConfigurationError = (status) => {
   return error
 }
 
+export const prepareRuntimeSectionEvidenceQualificationContext = (args = {}) => {
+  const { actionKey, frameworkPackage, frameworkState = {}, section, sectionExecutionContract } = args
+  const sectionKey = text(section?.sectionKey || section?.key).toLowerCase()
+  const runtimePath = text(section?.runtimePath).toLowerCase()
+  const declarations = Array.isArray(sectionExecutionContract?.reasoningArtefacts)
+    ? validateReasoningArtefactDeclarations({ frameworkPackage, declarations: sectionExecutionContract.reasoningArtefacts })
+    : resolvePackageReasoningArtefacts({ frameworkPackage, sectionKey, actionKey })
+  const legacy = requiresVmfSectionReasoning({ frameworkPackage, sectionKey, runtimePath })
+  if (!declarations.length && !legacy) return null
+  const evidencePack = frameworkState.evidence_pack || frameworkState.evidencePack || {}
+  let base, coverage, admittedEvidenceIds, evidenceObjects
+  if (declarations.length) {
+    base = buildEnrichedGeneratedSection(args)
+    admittedEvidenceIds = (base.generated.evidenceProjection?.included || []).map(row => text(row.evidenceObjectId)).filter(Boolean)
+    evidenceObjects = evidencePack.evidenceObjects || []
+  } else {
+    const acceptedIds = new Set(getAcceptedDiscoveryEvidenceObjects(evidencePack).map(row => text(row.evidenceObjectId)))
+    evidenceObjects = (Array.isArray(evidencePack.evidenceObjects) ? evidencePack.evidenceObjects : [])
+      .filter(row => acceptedIds.has(text(row?.evidenceObjectId)))
+    coverage = buildVmfSectionReasoningCoverage({ evidenceObjects, sectionKey })
+    if (coverage.includedCount !== acceptedIds.size) {
+      const error = new Error('Accepted evidence could not be resolved completely to its stored records.')
+      error.status = 409
+      error.code = 'VMF_SECTION_REASONING_EVIDENCE_MISSING'
+      throw error
+    }
+    admittedEvidenceIds = coverage.evidence.map(row => row.evidenceObjectId)
+  }
+  const evidenceQualifications = buildRuntimeSectionEvidenceQualifications({ evidenceObjects,
+    sourceRegistry: evidencePack.sourceRegistry || [], lineageSources: evidencePack.lineage?.sources || [], admittedEvidenceIds })
+  let evidence
+  if (declarations.length) {
+    // Qualification validation above resolves unique native owners; never substitute summary text for their passages.
+    const records = new Map(evidenceObjects.filter(row => row).map(row => [text(row.evidenceObjectId), row]))
+    evidence = admittedEvidenceIds.map(evidenceObjectId => {
+      const record = records.get(evidenceObjectId)
+      if (typeof record?.extractedFact !== 'string' || !record.extractedFact.trim()) {
+        throw Object.assign(new Error('Selected section evidence has no valid passage.'), {
+          status: 409, code: 'SECTION_REASONING_EVIDENCE_INVALID',
+        })
+      }
+      return { evidenceObjectId, sourceId: text(record.sourceId), extractedFact: record.extractedFact }
+    })
+    base = { ...base, generated: { ...base.generated, evidenceHash: hashSectionInput({
+      version: 'package-selected-evidence-v1', baseEvidenceHash: base.generated.evidenceHash, evidence,
+    }) } }
+  }
+  return { branch: declarations.length ? 'PACKAGE' : 'VMF', declarations, base, coverage, admittedEvidenceIds,
+    ...(declarations.length ? { evidence } : {}),
+    evidenceQualifications, evidenceQualificationHash: hashSectionInput(evidenceQualifications),
+    evidenceQualificationContractVersion: SECTION_EVIDENCE_QUALIFICATION_VERSION }
+}
+
 const buildPackageReasonedGeneratedSection = async ({
-  actionKey,
-  actorUserId,
-  dependencySectionKeys = [],
   frameworkPackage,
-  frameworkState = {},
   generatedAt,
   input,
   providerRuntime,
-  runtimeInstance,
   section,
   sectionExecutionContract,
   declarations,
+  preparedContext,
 } = {}) => {
   const runtime = providerRuntime || buildRuntimeSectionReasoningProviderRuntime()
   if (runtime?.status?.configured !== true || typeof runtime.providerAdapter !== 'function') {
     throw providerConfigurationError(runtime?.status)
   }
-  const base = buildEnrichedGeneratedSection({
-    actionKey,
-    actorUserId,
-    dependencySectionKeys,
-    frameworkPackage,
-    frameworkState,
-    generatedAt,
-    input,
-    runtimeInstance,
-    section,
-    sectionExecutionContract,
-  })
-  const evidenceIds = Array.isArray(base.generated.evidenceProjection?.included)
-    ? base.generated.evidenceProjection.included.map((item) => text(item?.evidenceObjectId)).filter(Boolean)
-    : []
+  const { base, admittedEvidenceIds: evidenceIds, evidenceQualifications, evidenceQualificationHash, evidence } = preparedContext
   const providerResult = await runtime.providerAdapter({
     providerContext: {
+      evidenceQualifications,
+      evidence,
       contractVersion: REASONING_ARTEFACT_CONTRACT_VERSION,
       framework: {
         frameworkKey: text(frameworkPackage?.frameworkKey),
@@ -257,6 +295,7 @@ const buildPackageReasonedGeneratedSection = async ({
   })
   const generated = {
     ...base.generated,
+    boundedContextHash: hashSectionInput({ boundedContextHash: base.generated.boundedContextHash, evidenceQualificationHash, evidence }),
     // Package-declared artefacts may be authored against the existing
     // sectionIntelligence envelope. Preserve that source location alongside
     // the canonical reasoningArtefacts projection so generation, readiness,
@@ -274,6 +313,8 @@ const buildPackageReasonedGeneratedSection = async ({
       provider: runtime.providerDescriptor || providerResult.provider,
       reasoningArtefactKeys: declarations.map((declaration) => declaration.artefactKey),
       providerMetadata: providerResult.metadata,
+      evidenceQualificationHash,
+      evidenceQualificationContractVersion: SECTION_EVIDENCE_QUALIFICATION_VERSION,
     },
   }
   return {
@@ -300,14 +341,10 @@ export const buildReasonedGeneratedSection = async ({
 } = {}) => {
   const sectionKey = text(section?.sectionKey || section?.key).toLowerCase()
   const runtimePath = text(section?.runtimePath).toLowerCase()
-  const declaredArtefacts = Array.isArray(sectionExecutionContract?.reasoningArtefacts)
-    ? validateReasoningArtefactDeclarations({
-      frameworkPackage,
-      declarations: sectionExecutionContract.reasoningArtefacts,
-    })
-    : resolvePackageReasoningArtefacts({ frameworkPackage, sectionKey, actionKey })
-  const requiresLegacyVmfReasoning = requiresVmfSectionReasoning({ frameworkPackage, sectionKey, runtimePath })
-  if (declaredArtefacts.length > 0) {
+  const preparedContext = prepareRuntimeSectionEvidenceQualificationContext({ actionKey, actorUserId, dependencySectionKeys,
+    frameworkPackage, frameworkState, generatedAt, input, runtimeInstance, section, sectionExecutionContract })
+  const declaredArtefacts = preparedContext?.declarations || []
+  if (preparedContext?.branch === 'PACKAGE') {
     return buildPackageReasonedGeneratedSection({
       actionKey,
       actorUserId,
@@ -321,9 +358,10 @@ export const buildReasonedGeneratedSection = async ({
       section,
       sectionExecutionContract,
       declarations: declaredArtefacts,
+      preparedContext,
     })
   }
-  if (!requiresLegacyVmfReasoning) {
+  if (!preparedContext) {
     return buildEnrichedGeneratedSection({
       actionKey,
       actorUserId,
@@ -342,29 +380,14 @@ export const buildReasonedGeneratedSection = async ({
     ? sectionExecutionContract.runtimeSupportAssets
     : []
   if (supportAssets.length === 0) throw providerConfigurationError({ reason: 'RUNTIME_SUPPORT_ASSETS_MISSING' })
-  const evidencePack = frameworkState.evidence_pack || frameworkState.evidencePack || {}
-  const acceptedEvidenceIds = new Set(getAcceptedDiscoveryEvidenceObjects(evidencePack)
-    .map((item) => text(item.evidenceObjectId)))
-  // Use the shared acceptance gate, but not its derived validation labels.
-  // Reasoning must see the original stored facts and validation status.
-  const acceptedEvidenceObjects = (Array.isArray(evidencePack.evidenceObjects) ? evidencePack.evidenceObjects : [])
-    .filter((item) => acceptedEvidenceIds.has(text(item?.evidenceObjectId)))
-  const coverage = buildVmfSectionReasoningCoverage({
-    evidenceObjects: acceptedEvidenceObjects,
-    sectionKey,
-  })
-  if (coverage.includedCount !== acceptedEvidenceIds.size) {
-    const error = new Error('Accepted evidence could not be resolved completely to its stored records.')
-    error.status = 409
-    error.code = 'VMF_SECTION_REASONING_EVIDENCE_MISSING'
-    throw error
-  }
+  const { coverage, evidenceQualifications, evidenceQualificationHash } = preparedContext
   const runtime = providerRuntime || buildRuntimeSectionReasoningProviderRuntime()
   if (runtime?.status?.configured !== true || typeof runtime.providerAdapter !== 'function') {
     throw providerConfigurationError(runtime?.status)
   }
 
   const providerContext = {
+    evidenceQualifications,
     contractVersion: VMF_SECTION_REASONING_CONTRACT_VERSION,
     framework: {
       frameworkKey: text(frameworkPackage?.frameworkKey),
@@ -422,6 +445,7 @@ export const buildReasonedGeneratedSection = async ({
     inputHash: base.generated.inputHash,
     dependencyHash: base.generated.dependencyHash,
     sectionContractHash: sectionExecutionContract.sectionContractHash,
+    evidenceQualificationHash,
   })
   const generated = {
     ...base.generated,
@@ -482,6 +506,8 @@ export const buildReasonedGeneratedSection = async ({
       provider: runtime.providerDescriptor || providerResult.provider,
       supportAssetHashes: assetHashes,
       providerMetadata: providerResult.metadata,
+      evidenceQualificationHash,
+      evidenceQualificationContractVersion: SECTION_EVIDENCE_QUALIFICATION_VERSION,
     },
   }
   const citedEvidenceIds = new Set(sectionIntelligence.sourceTraceability)

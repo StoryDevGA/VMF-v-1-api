@@ -1,3 +1,4 @@
+import { isWorkingDraftCompositionRevision } from './outcomeWorkingDraftCompositionService.js'
 import { assertRuntimeEvidenceToMeaningReady, runtimeEvidenceStageDependencies,
   readRuntimeEvidenceToMeaningProviderProjection } from './outcomeRuntimeEvidenceToMeaningService.js'
 import { assertEvidenceToMeaningBoundedProviderOutput } from './outcomeEvidenceToMeaningProviderService.js'
@@ -388,7 +389,7 @@ const buildKnowledgeFacade = ({ plan }) => ({
 })
 
 const normalizeProviderOutput = ({ value, plan }) => {
-  if (!hasExactPlainKeys(value, PROVIDER_OUTPUT_KEYS)
+  if (!hasExactPlainKeys(value, [...PROVIDER_OUTPUT_KEYS, ...(Object.hasOwn(value || {}, 'compositionVersion') ? ['compositionVersion'] : [])])
     || upper(value.outputType) !== OUTCOME_QUALITY_STAGE_OUTPUT_TYPES.WORKING_DRAFT
     || value.schemaVersion !== OUTCOME_WORKING_DRAFT_SCHEMA_VERSION
     || typeof value.draftVersion !== 'number'
@@ -470,6 +471,7 @@ const normalizeProviderOutput = ({ value, plan }) => {
             field: `providerOutput.sections[${index}].claims[${claimIndex}].whatCanBeSaidNow`, min: 1, max: 2000,
           }),
           blockedStrongerClaim: boundedText(claim.blockedStrongerClaim, {
+            allowLineBreaks: evidenceProjection?.contractVersion === 'evidence-to-draft-provider.v2',
             field: `providerOutput.sections[${index}].claims[${claimIndex}].blockedStrongerClaim`, min: 1, max: 2000,
           }),
           evidenceRequiredToSubstantiate: boundedStringArray(claim.evidenceRequiredToSubstantiate, {
@@ -525,6 +527,7 @@ const normalizeProviderOutput = ({ value, plan }) => {
     }
   })
   const output = {
+    ...(Object.hasOwn(value, 'compositionVersion') ? { compositionVersion: value.compositionVersion } : {}),
     outputType: OUTCOME_QUALITY_STAGE_OUTPUT_TYPES.WORKING_DRAFT,
     schemaVersion: OUTCOME_WORKING_DRAFT_SCHEMA_VERSION,
     draftVersion: value.draftVersion,
@@ -554,7 +557,7 @@ const normalizeProviderOutput = ({ value, plan }) => {
   return output
 }
 
-export const buildWorkingDraftStageOutputFromProviderOutput = ({ providerOutput, plan, sourceStage }) => {
+export const buildWorkingDraftStageOutputFromProviderOutput = ({ providerOutput, plan, sourceStage, compositionRevision }) => {
   const normalized = normalizeProviderOutput({ value: providerOutput, plan })
   const sourceSections = sourceStage.outputSnapshot.sections || []
   const sourceActivationIds = [...new Set(sourceSections.flatMap((section) => section.contributingActivationIds || []))]
@@ -570,6 +573,7 @@ export const buildWorkingDraftStageOutputFromProviderOutput = ({ providerOutput,
       ...section,
       contributingActivationIds: activationsForTruth(section.truthReferences),
     })),
+    ...(compositionRevision ? { compositionRevision } : {}),
     compositionProvenance: {
       frameworkGuidanceStageExecutionId: sourceStage.stageExecutionId,
       frameworkGuidanceOutputFingerprint: lower(sourceStage.outputFingerprint),
@@ -667,6 +671,7 @@ const persistProviderFailure = async ({
     expectedAttemptFingerprint: candidate.attemptFingerprint,
     actorUserId,
     requestBinding,
+    ...(stageDeps.compositionRevision ? { remediationSourceStageExecutionId: stageDeps.compositionRevision.arlStageExecutionId } : {}),
     deps: stageDeps,
     scopes,
   })
@@ -709,6 +714,7 @@ const assertExistingSuccessLineage = async ({ latest, models, providerDescriptor
     providerOutput: artifact.generatedOutput,
     plan,
     sourceStage,
+    compositionRevision: latest.outputSnapshot?.compositionRevision,
   })
   if (hashOutcomeQualityStageValue(rehydratedOutput) !== lower(latest.outputFingerprint)) {
     throw lineageInvalid({ field: 'artifactOutputFingerprint' })
@@ -733,6 +739,7 @@ export const executeOutcomeWorkingDraft = async ({
   runtimeInstanceId,
   scopes,
   requestBinding,
+  compositionRevision,
   deps = {},
 } = {}) => {
   if (!mongoose.isValidObjectId(actorUserId)
@@ -799,7 +806,12 @@ export const executeOutcomeWorkingDraft = async ({
     sourceStage,
     runtimeInstanceId,
   })
-  if (latestWorkingDraft?.status === SUCCESS_STATUS) {
+  if (compositionRevision) {
+    const arl = await readLatestStage({ model: models.OutcomeQualityStageExecution, runtimeInstanceId, planId: plan.planId, stageKey: OUTCOME_QUALITY_STAGES.ARL_MEANING_REVIEW })
+    if (!isWorkingDraftCompositionRevision({ latest: latestWorkingDraft, remediation: arl, revision: compositionRevision })
+      || evidenceToMeaning?.contractVersion !== 'evidence-to-draft-provider.v2') throw stageHistoryInvalid({ field: 'compositionRevision' })
+  }
+  if (latestWorkingDraft?.status === SUCCESS_STATUS && !compositionRevision) {
     return assertExistingSuccessLineage({
       latest: latestWorkingDraft,
       models,
@@ -877,7 +889,7 @@ export const executeOutcomeWorkingDraft = async ({
       runtimeInstanceId,
       runtimeVersion,
       sourceStage,
-      stageDeps: { ...runtimeEvidenceStageDependencies(deps), latestWorkingDraft },
+      stageDeps: { ...runtimeEvidenceStageDependencies(deps), latestWorkingDraft, compositionRevision },
       startedAt,
       requestBinding,
     })
@@ -897,6 +909,7 @@ export const executeOutcomeWorkingDraft = async ({
     providerOutput: generatedOutput,
     plan,
     sourceStage,
+    compositionRevision,
   })
   const stageArgs = {
     plan,
@@ -935,6 +948,7 @@ export const executeOutcomeWorkingDraft = async ({
     expectedAttemptFingerprint: candidate.attemptFingerprint,
     actorUserId,
     requestBinding,
+    ...(compositionRevision ? { remediationSourceStageExecutionId: compositionRevision.arlStageExecutionId } : {}),
     deps: runtimeEvidenceStageDependencies(deps),
     scopes,
   })

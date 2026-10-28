@@ -1,4 +1,7 @@
 import { getReviewCompletion, completeReview } from '../services/reviewCompletionService.js'
+import { inspectPublishedDispositionRecovery, recordPublishedDispositionRecovery } from '../services/publishedDispositionRecoveryService.js'
+import { inspectSupplementalFindingReview, recordSupplementalFindingReview } from '../services/supplementalFindingReviewService.js'
+import { inspectRuntimeProductAuthority, importRuntimeProductAuthority } from '../services/runtimeProductAuthorityService.js'
 import { buildRuntimeStateRequestScopes } from './runtimeInstance.controller.js'
 
 const handle = (operation) => async (req, res, next) => {
@@ -17,3 +20,11 @@ const handle = (operation) => async (req, res, next) => {
 }
 export const readReviewCompletion = handle(getReviewCompletion)
 export const recordReviewCompletion = handle(completeReview)
+export const readPublishedDispositionRecovery = handle(inspectPublishedDispositionRecovery)
+export const recordSupplementalPublishedDisposition = handle(recordPublishedDispositionRecovery)
+export const readSupplementalFindingReview = handle(inspectSupplementalFindingReview)
+export const recordSupplementalFinding = handle(recordSupplementalFindingReview)
+export const readRuntimeProductAuthority = handle(inspectRuntimeProductAuthority)
+export const recordRuntimeProductAuthority = handle(importRuntimeProductAuthority)
+export const readEvidenceSnapshotRecovery = handle(async args => (await import('../services/runtimeEvidenceSnapshotRecoveryService.js')).inspectRuntimeEvidenceSnapshotRecovery(args))
+export const recordEvidenceSnapshotRecovery = handle(async args => (await import('../services/runtimeEvidenceSnapshotRecoveryService.js')).recordRuntimeEvidenceSnapshotRecovery(args))

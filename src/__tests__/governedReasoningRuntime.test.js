@@ -447,6 +447,41 @@ const makeLiveDeps = (overrides = {}) => {
 }
 
 describe('Governed Reasoning Runtime models and service', () => {
+  test('SS044 callback remains historical only after real scoped orphan probes deny or prove absence', async () => {
+    const { default: Source } = await import('../models/RuntimeEvidenceSource.js')
+    const { default: Evidence } = await import('../models/RuntimeEvidenceObject.js')
+    const native = makeRuntimeInstance({ _id: '6ace5ee09bd4472c6be0cb07', runtimeInstanceKey: 'ss044-disposable-synthetic-20261013-r1',
+      stateVersion: 'historical-native-basis' })
+    let present = true
+    const probe = value => ({ select() { return this }, maxTimeMS() { return this }, limit() { return this }, lean: async () => value })
+    const first = jest.spyOn(Source, 'findOne').mockImplementation(() => probe(present ? { _id: 'controlled-orphan' } : null))
+    const second = jest.spyOn(Evidence, 'findOne').mockImplementation(() => probe(null))
+    const historical = new Error('Historical callback reached after absence check')
+    const authorizeRuntime = jest.fn(async () => { throw historical })
+    const deps = makeDeps({ resolveRuntimeInstance: jest.fn(async () => native), authorizeRuntime })
+    const run = () => createGovernedReasoningExecution({ actorUserId: ACTOR_ID, runtimeInstanceId: native._id, scopes: {}, deps,
+      payload: { outputTypeKey: 'CUSTOMER_PROPOSAL', executionIntent: 'Historical boundary test' } })
+    try {
+      await expect(run()).rejects.toMatchObject({ details: { reason: 'CONTROLLED_REPLAY_ISOLATED' } })
+      expect(authorizeRuntime).not.toHaveBeenCalled(); expect(deps.providerAdapter).not.toHaveBeenCalled()
+      expect(first).toHaveBeenCalledWith(expect.objectContaining({ runtimeInstanceId: native._id, customerId: native.customerId,
+        tenantId: native.tenantId, runtimeInstanceKey: native.runtimeInstanceKey, stateVersion: native.stateVersion, current: true }))
+      present = false
+      await expect(run()).rejects.toBe(historical)
+      expect(authorizeRuntime).toHaveBeenCalledTimes(1); expect(deps.resolveFrameworkPackage).not.toHaveBeenCalled()
+      expect(first).toHaveBeenCalledTimes(2); expect(second).toHaveBeenCalledTimes(2)
+    } finally { first.mockRestore(); second.mockRestore() }
+  })
+  test('new replay marker cannot enter the historical SS044 authorization callback or provider', async () => {
+    const authorizeRuntime = jest.fn(async () => ({ classification: 'NON_AUTHORITATIVE_SYNTHETIC_DEV_TEST',
+      authoritative: false, runEventId: 'historical', runBodyHash: 'a'.repeat(64) }))
+    const deps = makeDeps({ resolveRuntimeInstance: jest.fn(async () => makeRuntimeInstance({ controlledReplayIsolation: {} })), authorizeRuntime })
+    await expect(createGovernedReasoningExecution({ actorUserId: ACTOR_ID, runtimeInstanceId: RUNTIME_INSTANCE_ID, scopes: {},
+      deps, payload: { outputTypeKey: 'CUSTOMER_PROPOSAL', executionIntent: 'Synthetic metadata denial test' } }))
+      .rejects.toMatchObject({ details: { reason: 'CONTROLLED_REPLAY_ISOLATED' } })
+    expect(authorizeRuntime).not.toHaveBeenCalled(); expect(deps.providerAdapter).not.toHaveBeenCalled()
+    expect(deps.resolveFrameworkPackage).not.toHaveBeenCalled(); expect(deps.logAudit).not.toHaveBeenCalled()
+  })
   let originalProviderMode
 
   beforeEach(() => {

@@ -1,5 +1,6 @@
 import { getDiscoveryContradictionReview, DISCOVERY_CONTRADICTION_REQUEST_KEY_PATTERN } from './discoveryContradictionReviewService.js'
 import { projectStoredContradictionHistory } from './intelligenceContradictionHistory.js'
+import { reconcileContradictionReviewBasis } from './contradictionReviewBasis.js'
 
 const text = (value, maximum = 240) => typeof value === 'string' && value === value.trim() && value.length > 0 && value.length <= maximum
   && !Array.from(value).some(c => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127)
@@ -14,7 +15,7 @@ export const storedFindingEvidenceIds = stored => Array.isArray(stored?.candidat
 
 // Project persisted detections and canonical dispositions. This is not a detector
 // or a complete four-type findings register; absent contracts never become zero.
-export function projectStoredFindings({ stored, evidenceRows, control, selection }) {
+export function projectStoredFindings({ stored, evidenceRows, control, selection, inheritedRecords = [], reviewBasis }) {
   const unavailable = reason => ({ available: false, completeness: 'UNAVAILABLE', reason, ...selection,
     total: null, totalPages: null, records: [], populations: null, allTypesCompleteness: 'UNAVAILABLE', detectionPolicy })
   if (selection.type !== 'CONTRADICTION') return unavailable('CANONICAL_FINDING_TYPE_UNAVAILABLE')
@@ -26,7 +27,7 @@ export function projectStoredFindings({ stored, evidenceRows, control, selection
   if (candidates.some(visibilityConflict) || evidenceRows.some(visibilityConflict)) return unavailable('UNVERIFIED_VISIBILITY_CONTRACT')
   if (typeof stored.reviewEpoch !== 'string' || stored.reviewEpoch !== '' && !DISCOVERY_CONTRADICTION_REQUEST_KEY_PATTERN.test(stored.reviewEpoch))
     return unavailable('REVIEW_EPOCH_UNAVAILABLE')
-  const history = projectStoredContradictionHistory(stored.reviews, control.id, { findingId: '__validation__', page: 1, pageSize: 1 })
+  const history = projectStoredContradictionHistory(stored.reviews, control.id, { findingId: '__validation__', page: 1, pageSize: 1 }, inheritedRecords)
   if (!history.available) return unavailable(history.reason)
   if (evidenceRows.length !== ids.length || new Set(evidenceRows.map(r => r.evidenceObjectId)).size !== ids.length
     || evidenceRows.some(r => !ids.includes(r.evidenceObjectId) || !text(r.sourceId)
@@ -39,13 +40,18 @@ export function projectStoredFindings({ stored, evidenceRows, control, selection
       || r.validationStatus !== undefined && !optionalText(r.validationStatus, 80)))
     return unavailable('EVIDENCE_BASIS_UNAVAILABLE')
   const records = []
+  const reviewRows = reviewBasis ? reconcileContradictionReviewBasis({ control, candidates, reviews: stored.reviews,
+    reviewEpoch: stored.reviewEpoch, evidenceRows, basis: reviewBasis }) : evidenceRows
   for (const candidate of candidates) {
-    const review = getDiscoveryContradictionReview(candidate, evidenceRows, stored.reviews, control.id, stored.reviewEpoch)
+    const review = getDiscoveryContradictionReview(candidate, reviewRows, stored.reviews, control.id, stored.reviewEpoch)
     if (!review.evidencePairHash) return unavailable('EVIDENCE_PAIR_UNAVAILABLE')
-    const recorded = projectStoredContradictionHistory(stored.reviews, control.id, { findingId: candidate.contradictionId, page: 1, pageSize: 1 })
+    const recorded = projectStoredContradictionHistory(stored.reviews, control.id, { findingId: candidate.contradictionId, page: 1, pageSize: 1 }, inheritedRecords)
+    if (recorded.records[0]?.runtimeInstanceId !== undefined && recorded.records[0].runtimeInstanceId !== control.id
+      && review.reviewStatus !== 'STALE') return unavailable('HISTORY_RECORD_INVALID')
     records.push({ findingId: candidate.contradictionId, type: 'CONTRADICTION', domain: candidate.domain,
       severity: candidate.severity, basis: candidate.basis, evidencePairHash: review.evidencePairHash,
-      reviewStatus: review.reviewStatus, evidence: review.evidence, latestReview: recorded.records[0] ?? null,
+      reviewStatus: review.reviewStatus, evidence: review.evidence.map(e => ({ ...e,
+        sourceType: evidenceRows.find(row => row.evidenceObjectId === e.evidenceObjectId).sourceType || '' })), latestReview: recorded.records[0] ?? null,
       priority: { available: false, reason: 'GOVERNED_PRIORITY_NOT_RECORDED' }, consequences: 'UNAVAILABLE' })
   }
   const open = r => !['NOT_CONTRADICTORY', 'CONFIRMED'].includes(r.reviewStatus)

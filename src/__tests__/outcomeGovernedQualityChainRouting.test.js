@@ -1,3 +1,4 @@
+import { makeRequestScopedQualityChain, makeRemediatedRequestScopedQualityChain } from './fixtures/outcomeQualityStageFixtures.js'
 import { describe, expect, jest, test } from '@jest/globals'
 
 import {
@@ -9,7 +10,7 @@ import {
 } from '../constants/outcomeGovernedQuality.js'
 import { assertStrictProviderResponseSchema } from '../services/governedReasoningRuntimeService.js'
 import { OUTCOME_STUDIO_GOVERNED_PHASE } from '../constants/runtimeOutcomeStudio.js'
-import { OutcomeDraft, OutcomeDraftIteration, OutcomeMessage } from '../models/index.js'
+import { OutcomeDraft, OutcomeDraftIteration, OutcomeMessage, OutcomeQualityStageExecution } from '../models/index.js'
 import {
   buildGovernedQualityChainApprovalReadiness,
   buildGovernedQualityChainManifest,
@@ -27,35 +28,9 @@ const requestBinding = {
   draftId: 'outcome_draft_8d91bfbd-6670-4cfe-807b-a6d41bd4181e',
   draftIterationId: 'outcome_draft_iteration_5eebbe35-cfba-47d0-883f-e0cb408c1905',
 }
-const plan = {
-  planId: 'outcome_kcp_8abedafd-8555-4342-be49-76ab906a26f6',
-  planFingerprint: 'a'.repeat(64),
-}
 const executionSequence = OUTCOME_QUALITY_STAGE_SEQUENCE.slice(0, 6)
-
-const makeStages = () => executionSequence.map((stageKey, index) => ({
-  requestId: requestBinding.requestId,
-  draftId: requestBinding.draftId,
-  draftIterationId: requestBinding.draftIterationId,
-  planId: plan.planId,
-  planFingerprint: plan.planFingerprint,
-  stageKey,
-  stageOrder: index + 1,
-  status: OUTCOME_QUALITY_STAGE_STATUSES.SUCCEEDED,
-  stageExecutionId: `outcome_quality_stage_${index + 1}`,
-  attemptFingerprint: String(index + 1).repeat(64),
-  outputFingerprint: String(index + 2).repeat(64),
-  predecessorStageExecutionId: index ? `outcome_quality_stage_${index}` : '',
-  predecessorAttemptFingerprint: index ? String(index).repeat(64) : '',
-  inputSnapshot: index ? { sourceStage: {
-    stageExecutionId: `outcome_quality_stage_${index}`,
-    attemptFingerprint: String(index).repeat(64),
-  } } : {},
-  executionIdentity: [0, 1, 2, 5].includes(index) ? {
-    grrExecutionId: `grr_exec_${index + 1}`,
-    grrRuntimeArtifactId: `grr_art_${index + 1}`,
-  } : {},
-}))
+const { plan } = makeRequestScopedQualityChain(requestBinding)
+const makeStages = () => makeRequestScopedQualityChain(requestBinding).stages
 
 describe('SS-033 governed quality-chain finalisation gate', () => {
   test('routes a controlled ARL-pass fixture through stages 4-6 before draft persistence', async () => {
@@ -182,8 +157,25 @@ describe('SS-033 governed quality-chain finalisation gate', () => {
       requestBinding,
       stages: makeStages().slice(0, 5),
     })).toThrow(expect.objectContaining({
-      details: expect.objectContaining({ blockerReason: 'OUTCOME_QUALITY_CHAIN_INCOMPLETE' }),
+      details: expect.objectContaining({ reason: 'OUTCOME_RESPONSE_GENERATION_BLOCKED', blockerReason: 'OUTCOME_QUALITY_CHAIN_INCOMPLETE' }),
     }))
+  })
+
+  test('approval readiness uses exact semantic parents for a remediated chain', () => {
+    const fixture = makeRemediatedRequestScopedQualityChain(requestBinding)
+    const manifest = buildGovernedQualityChainManifest({ plan: fixture.plan, requestBinding,
+      stages: fixture.recordedStages, stageHistory: fixture.stages })
+    const readiness = () => buildGovernedQualityChainApprovalReadiness({
+      draft: { draftId: requestBinding.draftId, currentIterationId: requestBinding.draftIterationId,
+        lineageSummary: { governedQualityChain: manifest } },
+      iteration: { draftIterationId: requestBinding.draftIterationId, lineageSummary: { governedQualityChain: manifest } },
+    })
+    expect(readiness().approvalAvailable).toBe(true)
+    manifest.stages[5].sourceAttemptFingerprint = 'f'.repeat(64)
+    expect(readiness().approvalAvailable).toBe(false)
+    manifest.stages[5].sourceAttemptFingerprint = fixture.recordedStages[4].attemptFingerprint
+    manifest.stages[5].sourceStageExecutionId = ''
+    expect(readiness().approvalAvailable).toBe(false)
   })
 
   test('blocks finalisation when predecessor lineage is not exact', () => {
@@ -191,7 +183,7 @@ describe('SS-033 governed quality-chain finalisation gate', () => {
     stages[4].inputSnapshot.sourceStage.stageExecutionId = 'outcome_quality_stage_unrelated'
     expect(() => buildGovernedQualityChainManifest({ plan, requestBinding, stages }))
       .toThrow(expect.objectContaining({
-        details: expect.objectContaining({ blockerReason: 'OUTCOME_QUALITY_CHAIN_LINEAGE_INVALID' }),
+        details: expect.objectContaining({ reason: 'OUTCOME_RESPONSE_GENERATION_BLOCKED', blockerReason: 'OUTCOME_QUALITY_CHAIN_LINEAGE_INVALID' }),
       }))
   })
 
@@ -316,9 +308,10 @@ describe('SS-033 governed quality-chain finalisation gate', () => {
       .toThrow(expect.objectContaining({ code: 'GRR_LIVE_TEST_PROVIDER_RESULT_INVALID' }))
   })
 
-  test('returns the exact persisted governed result on an idempotent final-draft retry', async () => {
-    const stages = makeStages()
-    const manifest = buildGovernedQualityChainManifest({ plan, requestBinding, stages })
+  test.each([false, true])('returns the exact persisted governed result with remediation history %s', async (remediated) => {
+    const fixture = remediated ? makeRemediatedRequestScopedQualityChain(requestBinding) : makeRequestScopedQualityChain(requestBinding)
+    const stages = fixture.recordedStages || fixture.stages
+    const manifest = buildGovernedQualityChainManifest({ plan: fixture.plan, requestBinding, stages, stageHistory: fixture.stages })
     const message = {
       messageId: 'outcome_message_existing',
       sessionId: 'outcome_session_existing',
@@ -349,13 +342,17 @@ describe('SS-033 governed quality-chain finalisation gate', () => {
     const messageRead = jest.spyOn(OutcomeMessage, 'findOne').mockResolvedValue(message)
     const draftRead = jest.spyOn(OutcomeDraft, 'findOne').mockResolvedValue(draft)
     const iterationRead = jest.spyOn(OutcomeDraftIteration, 'findOne').mockResolvedValue(iteration)
+    const stageRead = jest.spyOn(OutcomeQualityStageExecution, 'find').mockReturnValue({
+      sort: () => ({ lean: async () => fixture.stages }),
+    })
+    const sourceHistory = JSON.stringify(fixture.stages)
     try {
       const result = await persistGovernedQualityDraft({
         actorUserId: '6a7100000000000000000001',
         knowledgePackBinding: {},
-        plan,
+        plan: fixture.plan,
         requestBinding,
-        runtimeInstance: { _id: '6a7100000000000000000002' },
+        runtimeInstance: fixture.runtime,
         serializedMessage: {},
         serializedSession: {},
         stages,
@@ -365,24 +362,46 @@ describe('SS-033 governed quality-chain finalisation gate', () => {
         draft: expect.objectContaining({ draftId: requestBinding.draftId }),
         draftIteration: expect.objectContaining({ draftIterationId: requestBinding.draftIterationId }),
       }))
+      if (remediated) expect(stageRead).toHaveBeenCalledWith({
+        runtimeInstanceId: fixture.runtime._id, customerId: fixture.plan.customerId, tenantId: fixture.plan.tenantId,
+        requestId: requestBinding.requestId, planId: fixture.plan.planId,
+        draftId: requestBinding.draftId, draftIterationId: requestBinding.draftIterationId,
+      })
+      else expect(stageRead).not.toHaveBeenCalled()
+      expect(JSON.stringify(fixture.stages)).toBe(sourceHistory)
     } finally {
       messageRead.mockRestore()
       draftRead.mockRestore()
       iterationRead.mockRestore()
+      stageRead.mockRestore()
+    }
+  })
+
+  test('rejects an incomplete persisted remediation history before any draft write', async () => {
+    const fixture = makeRemediatedRequestScopedQualityChain(requestBinding)
+    const stageRead = jest.spyOn(OutcomeQualityStageExecution, 'find').mockReturnValue({
+      sort: () => ({ lean: async () => fixture.recordedStages }),
+    })
+    const messageRead = jest.spyOn(OutcomeMessage, 'findOne')
+    try {
+      await expect(persistGovernedQualityDraft({
+        actorUserId: '6a7100000000000000000001', knowledgePackBinding: {},
+        plan: fixture.plan, requestBinding, runtimeInstance: fixture.runtime,
+        serializedMessage: {}, serializedSession: {}, stages: fixture.recordedStages,
+      })).rejects.toMatchObject({
+        status: 409, code: 'CONFLICT', details: {
+          reason: 'OUTCOME_RESPONSE_GENERATION_BLOCKED', blockerReason: 'OUTCOME_QUALITY_CHAIN_LINEAGE_INVALID',
+        },
+      })
+      expect(messageRead).not.toHaveBeenCalled()
+    } finally {
+      stageRead.mockRestore()
+      messageRead.mockRestore()
     }
   })
 
   test('reconciles a concurrent duplicate final-draft write to the committed winner', async () => {
     const stages = makeStages()
-    stages[4].outputSnapshot = {
-      title: 'Parlon decision brief',
-      sections: [{
-        sectionKey: 'summary',
-        heading: 'Summary',
-        body: 'This is a bounded summary of the accepted information.',
-        qualification: 'Commercial conclusions remain subject to the stated evidence limits.',
-      }],
-    }
     const manifest = buildGovernedQualityChainManifest({ plan, requestBinding, stages })
     const winnerMessage = {
       messageId: 'outcome_message_winner',
@@ -427,7 +446,7 @@ describe('SS-033 governed quality-chain finalisation gate', () => {
         actorUserId: '6a7100000000000000000001',
         auditRequest: {},
         knowledgePackBinding: { status: 'READY', activeCount: 1, requiredCount: 1 },
-        plan: { ...plan, requestedOutputTypeKey: 'commercial-strategy-and-decision-paper' },
+        plan,
         requestBinding,
         runtimeInstance: {
           _id: '6a7100000000000000000002',

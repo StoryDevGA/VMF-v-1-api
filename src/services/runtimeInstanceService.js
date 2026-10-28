@@ -1,5 +1,6 @@
 import { selectRuntimeDisplayPin } from './runtimeDisplayBindingService.js'
 import mongoose from 'mongoose'
+import { EVIDENCE_SNAPSHOT_INTERNAL_READ } from './runtimeEvidenceSnapshotContract.js'
 import {
   AuditLog,
   Customer,
@@ -974,6 +975,7 @@ export const serializeRuntimeInstance = (runtimeInstance) => {
       ? runtimeInstance.toObject()
       : { ...runtimeInstance }
   delete plain.runtimeCapacitySlot
+  delete plain.lockedEvidenceSnapshot
 
   const id = toIdString(plain.id || plain._id)
 
@@ -1548,6 +1550,7 @@ export const getRuntimeInstance = async ({
   metadataMaxTimeMS,
   readBudget,
   session = null,
+  internalEvidenceSnapshotToken = null,
 } = {}) => {
   let effectiveCustomerId = scopedCustomerId
   let effectiveTenantId = scopedTenantId
@@ -1575,7 +1578,28 @@ export const getRuntimeInstance = async ({
     customerId: effectiveCustomerId,
     tenantId: effectiveTenantId,
   }))
-  if (projection && typeof query?.select === 'function') query.select(projection)
+  if (projection && typeof query?.select === 'function') {
+    const required = ['_id', 'runtimeInstanceKey', 'customerId', 'tenantId', 'runtimeType', 'stateVersion', 'runtimeStateVersion',
+      'revision.rootRuntimeId', 'revision.parentRuntimeId', 'controlledReplayIsolation']
+    const coveredByParent = (path, paths) => paths.some(parent => path.startsWith(`${parent}.`))
+    if (typeof projection === 'string') {
+      const tokens = projection.split(/\s+/).filter(Boolean)
+      const hidesRequired = token => required.some(key => key === token.slice(1) || key.startsWith(`${token.slice(1)}.`))
+      query.select(tokens.every(token => token.startsWith('-'))
+        ? tokens.filter(token => !hidesRequired(token)).join(' ')
+        : [...new Set([...tokens, ...required])]
+          .filter(token => !token.startsWith('-') || !hidesRequired(token))
+          .filter(token => token.startsWith('-') || !coveredByParent(token, [...tokens, ...required].filter(path => !path.startsWith('-'))))
+          .join(' '))
+    } else {
+      const includes = Object.values(projection).some(value => value !== 0)
+      const selected = { ...projection, ...Object.fromEntries(required.map(key => [key, 1])) }
+      const includedPaths = Object.keys(selected).filter(key => selected[key] !== 0)
+      query.select(includes ? Object.fromEntries(Object.entries(selected)
+        .filter(([key, value]) => value === 0 || !coveredByParent(key, includedPaths)))
+        : Object.fromEntries(Object.entries(projection).filter(([key]) => !required.some(path => key === path || path.startsWith(`${key}.`)))))
+    }
+  }
   if (session && typeof query?.session === 'function') query.session(session)
   if (maxTimeMS !== undefined) {
     const normalizedMaxTimeMS = Number(maxTimeMS)
@@ -1626,7 +1650,16 @@ export const getRuntimeInstance = async ({
     readBudget,
   })
 
-  return serializeRuntimeInstance(runtimeInstance)
+  const result = serializeRuntimeInstance(runtimeInstance)
+  await attachNativeControlledReplayIsolation(result, { session, readBudget, maxTimeMS: metadataMaxTimeMS ?? maxTimeMS ?? 2000 })
+  if (internalEvidenceSnapshotToken === EVIDENCE_SNAPSHOT_INTERNAL_READ) {
+    const pointer = runtimeInstance.lockedEvidenceSnapshot
+    result.__evidenceSnapshotControl = {
+      ...(pointer ? { pointer: typeof pointer.toObject === 'function' ? pointer.toObject() : structuredClone(pointer) } : {}),
+      runtime: copyControlledReplayIsolationWitness(result, { ...result, _id: result.id }),
+    }
+  }
+  return result
 }
 
 const runtimeInstanceService = {
@@ -1638,3 +1671,4 @@ const runtimeInstanceService = {
 }
 
 export default runtimeInstanceService
+import { attachNativeControlledReplayIsolation, copyControlledReplayIsolationWitness } from './controlledReplayIsolationService.js'

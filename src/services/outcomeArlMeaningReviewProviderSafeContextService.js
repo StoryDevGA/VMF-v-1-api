@@ -1,3 +1,4 @@
+import { WORKING_DRAFT_COMPOSITION_VERSIONS, WORKING_DRAFT_READER_COMPOSITION_VERSION, WORKING_DRAFT_DESCRIPTIVE_COMPOSITION_VERSION } from './outcomeWorkingDraftCompositionService.js'
 import {
   OUTCOME_ARL_MEANING_REVIEW_PROVIDER_SAFE_CONTEXT_VERSION,
   OUTCOME_WORKING_DRAFT_PROOF_DISPOSITIONS,
@@ -76,7 +77,8 @@ const guidance = {
 }
 
 const assertCandidate = (candidate) => {
-  if (!exact(candidate, ['title', 'sections', 'decisionLogic', 'assumptions', 'visibleGaps'])
+  if ((Object.hasOwn(candidate || {}, 'compositionVersion') && !WORKING_DRAFT_COMPOSITION_VERSIONS.includes(candidate.compositionVersion))
+    || !exact(candidate, ['title', 'sections', 'decisionLogic', 'assumptions', 'visibleGaps', ...(Object.hasOwn(candidate || {}, 'compositionVersion') ? ['compositionVersion'] : [])])
     || !string(candidate.title, 255) || !array(candidate.sections, 20)
     || !array(candidate.decisionLogic, 30) || !strings(candidate.assumptions, 20)
     || !strings(candidate.visibleGaps)) fail()
@@ -136,6 +138,7 @@ export const assertOutcomeArlMeaningReviewProviderSafeContext = (value) => {
     safeguards: value.safeguards,
   })
   assertCandidate(value.candidate)
+  if ([WORKING_DRAFT_READER_COMPOSITION_VERSION, WORKING_DRAFT_DESCRIPTIVE_COMPOSITION_VERSION].includes(value.candidate.compositionVersion) && !value.evidenceToMeaning) fail()
   if (value.evidenceToMeaning) {
     assertEvidenceToMeaningProviderProjection(value.evidenceToMeaning)
     assertEvidenceToMeaningBoundedProviderOutput({ projection: value.evidenceToMeaning, output: value.candidate })
@@ -171,6 +174,7 @@ export const buildOutcomeArlMeaningReviewProviderSafeContext = ({
     || output?.outputType !== 'WORKING_DRAFT' || output.schemaVersion !== OUTCOME_WORKING_DRAFT_SCHEMA_VERSION
     || source.outputFingerprint !== hashOutcomeQualityStageValue(output)) fail()
   const candidate = {
+    ...(Object.hasOwn(output, 'compositionVersion') ? { compositionVersion: output.compositionVersion } : {}),
     title: output.title,
     sections: output.sections.map(({ order, sectionKey, title, content, claims, truthReferences, assumptions, gaps }) => ({
       order,

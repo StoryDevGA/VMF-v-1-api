@@ -1,8 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto'
 import JSZip from 'jszip'
+import { deriveSyntheticRenderClassification, assertSyntheticRenderDeliveryHeld,
+  assertNoAuthoredRenderClassification } from './syntheticRenderArtifactContract.js'
 import {
   OUTCOME_STUDIO_RENDER_FORMATS,
   OUTCOME_STUDIO_RENDER_OUTPUT_STATUSES,
+  OUTCOME_STUDIO_GOVERNED_PHASE,
 } from '../constants/runtimeOutcomeStudio.js'
 import { renderProfessionalDocumentCandidate } from './professionalDocumentCandidateRenderer.js'
 import { renderProfessionalPdfCandidate } from './professionalPdfCandidateRenderer.js'
@@ -350,6 +353,7 @@ export const buildOutcomeStudioRenderableAsset = ({
   visualSystemPackReceipt,
 } = {}) => {
   if (!isPlainObject(assetVersion)) failInput('ASSET_VERSION_INVALID')
+  assertNoAuthoredRenderClassification(assetVersion)
   const assetId = normalizeText(assetVersion.outcomeAssetId || assetVersion.assetId)
   const assetVersionId = normalizeText(assetVersion.outcomeAssetVersionId || assetVersion.assetVersionId)
   const versionNumber = Number(assetVersion.versionNumber)
@@ -399,7 +403,7 @@ export const buildOutcomeStudioRenderableAsset = ({
     evidenceReferences,
     governanceMarkers,
   })
-  return Object.freeze({
+  const model = {
     modelVersion: OUTCOME_STUDIO_ASSET_RENDERING_CONTRACT_VERSION,
     assetId,
     assetVersionId,
@@ -432,8 +436,11 @@ export const buildOutcomeStudioRenderableAsset = ({
       visualSystem: cloneJson(visualSystem),
     },
     sourceContentChecksum,
+    governedCustomerArtifact: assetVersion.phase === OUTCOME_STUDIO_GOVERNED_PHASE,
     llmRole: 'LAYOUT_AND_COMPONENT_INTENT_ONLY',
-  })
+  }
+  const artifactClassification = deriveSyntheticRenderClassification(model, { source: assetVersion, runtimeRevision })
+  return Object.freeze(artifactClassification ? { ...model, artifactClassification } : model)
 }
 
 const registryEntries = Object.freeze({
@@ -584,6 +591,25 @@ const buildGovernanceMarkdown = (model, visualResolution = {}) => {
 const renderMarkdown = (model, visualResolution = {}) => {
   const output = `${model.markdown}${buildGovernanceMarkdown(model, visualResolution)}`
   assertSafeMarkdown(output)
+  return output
+}
+
+const CLEAN_MARKDOWN_POLICY = 'CLEAN_GOVERNED_MARKDOWN_V1'
+const renderGovernedCustomerMarkdown = (model) => {
+  const output = [
+    model.markdown,
+    ...(model.governanceMarkers.warnings.length
+      ? ['', '## Warnings', '', ...model.governanceMarkers.warnings.map((item) => `- ${item}`)] : []),
+    ...(model.governanceMarkers.limitations.length
+      ? ['', '## Limitations', '', ...model.governanceMarkers.limitations.map((item) => `- ${item}`)] : []),
+  ].join('\n')
+  assertSafeMarkdown(output)
+  if (/\b(?:outcome_quality_stage_|grr_exec_|grr_art_|outcome_kcp_)[a-z0-9_-]+\b/i.test(output)
+    || /\b(?:planFingerprint|attemptFingerprint|predecessorAttemptFingerprint|stageExecutionId|providerConfigurationVersion|inputSnapshot|outputSnapshot)\b/.test(output)
+    || /\b(?:system prompt|provider prompt|GENERATION_CONTEXT|SAFE_CONTEXT)\b/i.test(output)
+    || /^\s*#{1,6}\s+Governance boundary\b/im.test(output)) {
+    failInput('CUSTOMER_ARTIFACT_INTERNAL_SCAFFOLDING')
+  }
   return output
 }
 
@@ -859,6 +885,7 @@ export const buildOutcomeStudioRenderOutputRecord = ({
   validationChecks,
   renderOutputId = `outcome_render_output_${randomUUID()}`,
 } = {}) => {
+  assertSyntheticRenderDeliveryHeld(model)
   const artifact = {
     filename: `${filenamePart(model.title)}-v${model.versionNumber}.${renderer.extension}`,
     mimeType: renderer.mimeType,
@@ -874,6 +901,8 @@ export const buildOutcomeStudioRenderOutputRecord = ({
     supportedComponents: [...renderer.supportedComponents],
     selectionReason: renderer.selectionReason,
     outputContract: cloneJson(renderer.outputContract),
+    ...(model.governedCustomerArtifact && renderer.format === OUTCOME_STUDIO_RENDER_FORMATS.MARKDOWN
+      ? { presentationPolicy: CLEAN_MARKDOWN_POLICY } : {}),
   }
   const renderReceipt = {
     contractVersion: OUTCOME_STUDIO_ASSET_RENDERING_CONTRACT_VERSION,
@@ -951,7 +980,7 @@ const assertExistingRenderOutputsMatchSource = (model, existingRenderOutputs = [
   }
 }
 
-export const renderOutcomeStudioAsset = async ({
+const buildRenderPreparationModel = ({
   assetVersion,
   runtimeRevision,
   outputContract,
@@ -961,17 +990,8 @@ export const renderOutcomeStudioAsset = async ({
   evidenceReferences,
   governanceMarkers,
   visualIntent,
-  formats = Object.values(OUTCOME_STUDIO_RENDER_FORMATS),
-  persistRenderOutput = null,
   existingRenderOutputs = [],
 } = {}) => {
-  if (typeof persistRenderOutput !== 'function') {
-    throw createRenderingError({
-      code: OUTCOME_STUDIO_ASSET_RENDERING_ERROR_CODES.RECEIPT_PERSISTENCE_REQUIRED,
-      reason: 'RENDER_OUTPUT_RECEIPT_PERSISTENCE_REQUIRED',
-      message: 'A receipt persistence callback is required before governed delivery.',
-    })
-  }
   const model = assetVersion && typeof assetVersion.toObject === 'function'
     ? buildOutcomeStudioRenderableAssetFromPersistedVersion({
       assetVersion,
@@ -997,32 +1017,63 @@ export const renderOutcomeStudioAsset = async ({
       visualSystemPackReceipt,
     })
   assertExistingRenderOutputsMatchSource(model, existingRenderOutputs)
+  return model
+}
+
+const prepareRenderFromModel = async ({ model, format }) => {
+  assertSyntheticRenderDeliveryHeld(model)
+  const renderer = resolveOutcomeStudioAssetRenderer({ format, outputContract: model.outputContract })
+  const visualResolution = resolveVisualComponents(model, renderer)
+  const cleanMarkdown = model.governedCustomerArtifact && renderer.format === OUTCOME_STUDIO_RENDER_FORMATS.MARKDOWN
+  const markdown = cleanMarkdown ? renderGovernedCustomerMarkdown(model) : renderMarkdown(model, visualResolution)
+  let rendered
+  try {
+    rendered = await renderArtifact(model, renderer, markdown, visualResolution)
+    validateArtifact({ renderer, buffer: rendered.buffer })
+  } catch (cause) {
+    if (cause?.name === 'OutcomeStudioAssetRenderingError') throw cause
+    throw createRenderingError({
+      code: OUTCOME_STUDIO_ASSET_RENDERING_ERROR_CODES.RENDER_FAILED,
+      reason: 'RENDERER_EXECUTION_FAILED',
+      message: 'The governed Outcome Studio render failed.',
+      details: { format: renderer.format },
+      cause,
+    })
+  }
+  const record = buildOutcomeStudioRenderOutputRecord({
+    model,
+    renderer,
+    visualResolution,
+    buffer: rendered.buffer,
+    validationChecks: [...rendered.validationChecks, ...(cleanMarkdown ? ['CUSTOMER_ARTIFACT_SCAFFOLDING_ABSENT'] : [])],
+  })
+  return { model, record, buffer: rendered.buffer }
+}
+
+// READY/PASS in this unpersisted candidate describes artifact validation only.
+// Callers must commit the receipt with its source version before any delivery.
+export const prepareOutcomeStudioAssetRender = async ({
+  format = OUTCOME_STUDIO_RENDER_FORMATS.MARKDOWN,
+  ...inputs
+} = {}) => prepareRenderFromModel({ model: buildRenderPreparationModel(inputs), format })
+
+export const renderOutcomeStudioAsset = async ({
+  formats = Object.values(OUTCOME_STUDIO_RENDER_FORMATS),
+  persistRenderOutput = null,
+  ...inputs
+} = {}) => {
+  if (typeof persistRenderOutput !== 'function') {
+    throw createRenderingError({
+      code: OUTCOME_STUDIO_ASSET_RENDERING_ERROR_CODES.RECEIPT_PERSISTENCE_REQUIRED,
+      reason: 'RENDER_OUTPUT_RECEIPT_PERSISTENCE_REQUIRED',
+      message: 'A receipt persistence callback is required before governed delivery.',
+    })
+  }
+  const model = buildRenderPreparationModel(inputs)
   const renderOutputs = []
   for (const format of formats) {
-    const renderer = resolveOutcomeStudioAssetRenderer({ format, outputContract: model.outputContract })
-    const visualResolution = resolveVisualComponents(model, renderer)
-    const markdown = renderMarkdown(model, visualResolution)
-    let rendered
-    try {
-      rendered = await renderArtifact(model, renderer, markdown, visualResolution)
-      validateArtifact({ renderer, buffer: rendered.buffer })
-    } catch (cause) {
-      if (cause?.name === 'OutcomeStudioAssetRenderingError') throw cause
-      throw createRenderingError({
-        code: OUTCOME_STUDIO_ASSET_RENDERING_ERROR_CODES.RENDER_FAILED,
-        reason: 'RENDERER_EXECUTION_FAILED',
-        message: 'The governed Outcome Studio render failed.',
-        details: { format: renderer.format },
-        cause,
-      })
-    }
-    const record = buildOutcomeStudioRenderOutputRecord({
-      model,
-      renderer,
-      visualResolution,
-      buffer: rendered.buffer,
-      validationChecks: rendered.validationChecks,
-    })
+    const { record, buffer } = await prepareRenderFromModel({ model, format })
+    const renderedFormat = record.format
     try {
       await persistRenderOutput(record)
     } catch (cause) {
@@ -1030,18 +1081,18 @@ export const renderOutcomeStudioAsset = async ({
         code: OUTCOME_STUDIO_ASSET_RENDERING_ERROR_CODES.RECEIPT_PERSISTENCE_FAILED,
         reason: 'RENDER_OUTPUT_RECEIPT_PERSISTENCE_FAILED',
         message: 'The render receipt could not be recorded, so the output is unavailable.',
-        details: { format: renderer.format },
+        details: { format: renderedFormat },
         cause,
       })
     }
     renderOutputs.push({
       record,
       delivery: {
-        format: renderer.format,
+        format: renderedFormat,
         filename: record.artifact.filename,
         mimeType: record.artifact.mimeType,
         encoding: 'base64',
-        contentBase64: rendered.buffer.toString('base64'),
+        contentBase64: buffer.toString('base64'),
         exportAvailable: true,
       },
     })

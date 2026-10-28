@@ -49,6 +49,7 @@ import {
   RUNTIME_INSTANCE_RENDERER_PROJECTION,
 } from './runtimeInstanceService.js'
 import { getRuntimeStateRendererSections } from './runtimeStateRepository.js'
+import { isSectionHistoryReference, validateSectionHistoryReferences } from './runtimeSectionHistoryContract.js'
 import { evaluateRuntimeSectionTruthReadiness } from './runtimeSectionTruthReadinessService.js'
 import { isRuntimeManagedSection } from './runtimeManagedSectionService.js'
 import {
@@ -61,6 +62,7 @@ import {
   getRuntimeSectionState,
   hashSectionInput,
   isRuntimeSectionObject,
+  restoreSectionInsightDisplay,
 } from './runtimeSectionModelService.js'
 import {
   acceptPendingDiscoveryEvidenceObjects,
@@ -597,6 +599,7 @@ export const buildDiscoveryProjection = (frameworkState = {}, { includeInputValu
     createdAt: evidencePack.refreshedAt,
     evidenceObjects: evidencePack.evidenceObjects,
     inputs: evidencePack.inputs,
+    sourceRegistry: evidencePack.sourceRegistry || acquisition.sourceRegistry,
     sources: lineageSources,
   })
   const evidenceObjects = accepted
@@ -790,6 +793,8 @@ const buildSectionCompareProjection = ({ accepted, generated, input, revisions }
   const hasPreviousGeneratedRevision = Array.isArray(revisions) && revisions.some((revision) =>
     hasProjectionValue(revision?.generated?.content ?? revision?.generated),
   )
+  const historyAvailable = hasPreviousGeneratedRevision || (Array.isArray(revisions)
+    && revisions.some(revision => isSectionHistoryReference(revision?.historyReference)))
   let state = 'NO_GENERATED_CONTENT'
   let summary = 'No generated content is available for comparison.'
 
@@ -818,6 +823,7 @@ const buildSectionCompareProjection = ({ accepted, generated, input, revisions }
     hasGenerated,
     hasAccepted,
     hasPreviousGeneratedRevision,
+    historyAvailable,
   }
 }
 
@@ -1708,9 +1714,11 @@ export const buildRendererSections = ({
     })
     const sectionInput = getRuntimeSectionInput(rawSectionValue)
     const validationMessages = buildSectionValidationMessages({ frameworkState, validationKeys })
-    const persistedIntelligence = isRuntimeSectionObject(rawSectionValue) && isProjectionObject(rawSectionValue.intelligence)
+    const persistedDisplay = isRuntimeSectionObject(rawSectionValue) && isProjectionObject(rawSectionValue.intelligence)
       ? rawSectionValue.intelligence
       : {}
+    const persistedIntelligence = projectionScope === 'RENDERER_SUMMARY' ? persistedDisplay
+      : restoreSectionInsightDisplay({ intelligence: persistedDisplay, generated: sectionGenerated })
     const projectedEnrichment = projectionScope === 'RENDERER_SUMMARY' ? {} : buildSectionIntelligenceDisplayProjection({
       dependencySectionKeys,
       frameworkPackage,
@@ -1778,8 +1786,14 @@ export const buildRendererSections = ({
       revisions: sectionRevisions.map((revision) => ({
         revisionNumber: revision.revisionNumber,
         replacedAt: revision.replacedAt,
-        generated: revision.generated || null,
-        accepted: revision.accepted || null,
+        ...(isSectionHistoryReference(revision.historyReference)
+          && validateSectionHistoryReferences({ revisions: [revision] })
+          ? {
+              ...(Object.hasOwn(revision, 'generated') ? { generated: null } : {}),
+              ...(Object.hasOwn(revision, 'accepted') ? { accepted: null } : {}),
+              historyReference: { ...revision.historyReference },
+            }
+          : { generated: revision.generated || null, accepted: revision.accepted || null }),
       })),
       acceptedRevisions: sectionAcceptedRevisions.map((revision) => ({
         revisionNumber: revision.revisionNumber,

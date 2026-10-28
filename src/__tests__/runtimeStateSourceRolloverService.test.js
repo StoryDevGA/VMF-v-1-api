@@ -1,6 +1,7 @@
 import { describe, expect, jest, test } from '@jest/globals'
 
 import { stageRuntimeStateSourceRollover } from '../services/runtimeStateSourceRolloverService.js'
+import { createRuntimeStateLegacySourceRowSet } from '../services/runtimeStateLegacyMapper.js'
 
 const ids = {
   customerId: '64b000000000000000000001',
@@ -19,11 +20,22 @@ const runtimeInstance = {
   runtimeInstanceKey: 'value-narrative-fixture',
   stateVersion: previousStateVersion,
   framework_state: {
-    sections: { customer_context: {} },
+    sections: { customer_context: {}, objectives: {} },
     evidence_pack: { sources: [], evidenceObjects: [] },
     intelligence_graph: { nodes: [], edges: [] },
   },
 }
+test('private frozen membership pointer does not enter the native source hash or roll over sourceVersion', () => {
+  const map = root => createRuntimeStateLegacySourceRowSet({ legacyInput: { rawBsonBytes: 1000,
+    sections: root.framework_state.sections, evidencePack: { sourceRegistry: [], evidenceObjects: [] },
+    intelligenceGraph: { ...root.framework_state.intelligence_graph, graphVersion: nextStateVersion } },
+  scope: { customerId: ids.customerId, tenantId: ids.tenantId, runtimeInstanceId: ids.runtimeInstanceId, runtimeInstanceKey: root.runtimeInstanceKey }, stateVersion: nextStateVersion,
+  migrationReceiptId: ids.receiptId, migrationTimestamp: '2026-10-14T12:00:00.000Z' })
+  const before = map(runtimeInstance)
+  const after = map({ ...runtimeInstance, lockedEvidenceSnapshot: { snapshotId: 'private-membership', membershipHash: 'a'.repeat(64) } })
+  expect(after.rows).toEqual(before.rows)
+  expect(after.rows.sections.every(row => row.stateVersion === nextStateVersion && row.sourceStateVersion === nextStateVersion)).toBe(true)
+})
 
 const sourceHash = (family, version) => `sha256:${String(family + version).padEnd(64, '0').slice(0, 64)}`
 
@@ -116,6 +128,45 @@ const execute = (dependencies) => stageRuntimeStateSourceRollover({
 })
 
 describe('runtimeStateSourceRolloverService', () => {
+  test('real mapper compacts only retained history and rejects changed previous material before inserts', async () => {
+    const generated = { content: 'current', parts: Array.from({ length: 6 }, () => 'p'.repeat(7000)) }
+    const section = { input: 'Original source', generated, accepted: null,
+      revisions: Array.from({ length: 30 }, (_, index) => ({ revisionNumber: index + 1,
+        replacedAt: '2026-10-18T00:00:00.000Z', generated: { content: `${index}${'h'.repeat(6500)}` } })) }
+    const root = { ...runtimeInstance, framework_state: { sections: { customer_context: section },
+      evidence_pack: { sourceRegistry: [], evidenceObjects: [] }, intelligence_graph: { graphVersion: previousStateVersion, nodes: [], edges: [] } } }
+    const scope = { customerId: ids.customerId, tenantId: ids.tenantId, runtimeInstanceId: ids.runtimeInstanceId,
+      runtimeInstanceKey: root.runtimeInstanceKey }
+    const old = createRuntimeStateLegacySourceRowSet({ legacyInput: { rawBsonBytes: 1000,
+      sections: root.framework_state.sections, evidencePack: root.framework_state.evidence_pack,
+      intelligenceGraph: root.framework_state.intelligence_graph }, scope, stateVersion: previousStateVersion,
+    migrationReceiptId: ids.receiptId, migrationTimestamp: '2026-08-28T20:00:00.000Z' }).rows.sections
+    const original = JSON.stringify(root)
+    const next = { ...root.framework_state, sections: { customer_context: { ...section,
+      revisions: [...section.revisions, { revisionNumber: 31, replacedAt: '2026-10-19T00:00:00.000Z', generated }] } } }
+    const make = () => ({ RuntimeStateMigrationReceipt: { find: jest.fn().mockResolvedValue([{
+      receiptId: ids.receiptId, verifiedAt: new Date('2026-08-28T20:00:00.000Z'),
+    }]) }, RuntimeStateSection: { find: jest.fn().mockResolvedValue(old.map(row => ({ ...row, current: true }))),
+      insertMany: jest.fn(async rows => rows), updateMany: jest.fn(async () => ({ modifiedCount: 1 })) },
+    RuntimeEvidenceSource: { find: jest.fn().mockResolvedValue([]) }, RuntimeEvidenceObject: { find: jest.fn().mockResolvedValue([]) } })
+    const dependencies = make()
+    await stageRuntimeStateSourceRollover({ runtimeInstance: root, expectedStateVersion: previousStateVersion,
+      nextStateVersion, nextFrameworkState: next, mutationTimestamp: '2026-10-19T00:00:00.000Z', session, dependencies })
+    const inserted = dependencies.RuntimeStateSection.insertMany.mock.calls[0][0][0]
+    expect(inserted.sectionDetail.revisions).toHaveLength(31)
+    expect(inserted.sectionDetail.revisions.every(record => record.historyReference)).toBe(true)
+    expect(inserted.sectionDetail.revisions[30].historyReference).toMatchObject({ index: -1, hasGenerated: true, hasAccepted: false })
+    expect(Buffer.byteLength(JSON.stringify(inserted.sectionDetail))).toBeLessThan(256 * 1024)
+    expect(JSON.stringify(root)).toBe(original)
+    const tampered = make()
+    tampered.RuntimeStateSection.find.mockResolvedValue(old.map(row => ({ ...row, current: true,
+      sectionDetail: { ...row.sectionDetail, input: 'Changed stored material' } })))
+    await expect(stageRuntimeStateSourceRollover({ runtimeInstance: root, expectedStateVersion: previousStateVersion,
+      nextStateVersion, nextFrameworkState: next, mutationTimestamp: '2026-10-19T00:00:00.000Z', session,
+      dependencies: tampered })).rejects.toMatchObject({ code: 'RUNTIME_SECTION_HISTORY_INVALID' })
+    expect(tampered.RuntimeStateSection.insertMany).not.toHaveBeenCalled()
+  })
+
   test('accepts native initialization lineage and canonicalizes the empty previous state', async () => {
     const nativeRuntime = {
       ...runtimeInstance,
@@ -161,7 +212,7 @@ describe('runtimeStateSourceRolloverService', () => {
         evidencePack: { sourceRegistry: [], evidenceObjects: [] },
         intelligenceGraph: { graphVersion: previousStateVersion, nodes: [], edges: [] },
       }),
-    }))
+    }), { sectionDetailProjector: expect.any(Function) })
   })
 
   test('uses strict persisted native state after the initialization version advances', async () => {
@@ -217,7 +268,7 @@ describe('runtimeStateSourceRolloverService', () => {
         evidencePack: populatedState.evidence_pack,
         intelligenceGraph: populatedState.intelligence_graph,
       }),
-    }))
+    }), { sectionDetailProjector: expect.any(Function) })
   })
 
   test('immutably rolls all section and evidence families to one next version with added and removed identities', async () => {
@@ -316,7 +367,7 @@ describe('runtimeStateSourceRolloverService', () => {
     expect(dependencies.RuntimeEvidenceObject.insertMany).not.toHaveBeenCalled()
   })
 
-  test('fails before child reads or writes when canonical source projection is invalid', async () => {
+  test('fails before writes after bounded section prefetch when canonical source projection is invalid', async () => {
     const dependencies = makeDependencies()
     dependencies.createRuntimeStateLegacySourceRowSet.mockImplementation(() => {
       throw Object.assign(new Error('invalid source projection'), { code: 'SS014_V2_MAPPING_INPUT_INVALID' })
@@ -325,7 +376,8 @@ describe('runtimeStateSourceRolloverService', () => {
     await expect(execute(dependencies)).rejects.toMatchObject({
       code: 'SS014_V2_MAPPING_INPUT_INVALID',
     })
-    expect(dependencies.RuntimeStateSection.find).not.toHaveBeenCalled()
+    expect(dependencies.RuntimeStateSection.find).toHaveBeenCalledTimes(1)
+    expect(dependencies.RuntimeEvidenceSource.find).not.toHaveBeenCalled()
     expect(dependencies.RuntimeStateSection.insertMany).not.toHaveBeenCalled()
   })
 })

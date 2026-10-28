@@ -1,6 +1,10 @@
 import { hashEvidenceToMeaningValue } from './outcomeEvidenceToMeaningContractService.js'
+import { reconcileContradictionReviewBasis } from './contradictionReviewBasis.js'
 import { getDiscoveryContradictionReview } from './discoveryContradictionReviewService.js'
 import { OUTCOME_WORKING_DRAFT_PROOF_DEPENDENCIES } from './outcomeWorkingDraftMeaningBoundaryService.js'
+import { assertOutcomeSupplementalFinding, assertOutcomeRecordedFinding, isOutcomeContextMetadataReference,
+  isOutcomeSourceMetadataReference } from '../utils/outcomeEvidenceSnapshot.js'
+import { projectEvidenceDraftQualification } from './evidenceDraftQualification.js'
 
 export const EVIDENCE_TO_DRAFT_INPUT_VERSION = 'outcome-studio.evidence-to-draft-input.v2'
 export const EVIDENCE_TO_DRAFT_PLACEMENT_VERSION = 'evidence-to-draft-placement.v1'
@@ -73,7 +77,12 @@ const applyStoredDraftPlacement = (claim, stored, input) => {
 }
 
 // These values come exclusively from the stored evidence, never legacy ACCEPTED.
-export const enrichDraftClaim = (claim, stored, source, input) => applyStoredDraftPlacement({ ...claim,
+export const enrichDraftClaim = (claim, stored, source, input) => {
+  const sourceSectionKeys = input?.sourceSnapshot?.inventoryReceipt?.sectionCoverage
+    ?.filter(section => section.evidenceIds.includes(stored.evidenceObjectId)).map(section => section.sectionKey)
+  const authored = projectEvidenceDraftQualification({ evidence: stored, source, sourceSectionKeys, selectedTarget: input?.selectedTarget })
+  if (authored) stored = { ...stored, ...authored }
+  return applyStoredDraftPlacement({ ...claim,
   evidenceClass: claim.classification,
   claimStatus: token(stored.claimStatus) || 'UNRESOLVED',
   independentValidation: stored.independentValidation ?? 'UNRESOLVED',
@@ -85,6 +94,7 @@ export const enrichDraftClaim = (claim, stored, source, input) => applyStoredDra
   evidenceRequiredToSubstantiate: stored.evidenceRequiredToSubstantiate ?? 'UNRESOLVED',
   permittedStatement: Object.prototype.hasOwnProperty.call(stored, 'permittedStatement') ? stored.permittedStatement : claim.statement,
 }, stored, input)
+}
 
 export const draftClaimDeficits = (claim, byEvidence, cache, visiting) => {
   if (cache.has(claim.evidenceReference)) return cache.get(claim.evidenceReference)
@@ -123,9 +133,25 @@ export const draftClaimDeficits = (claim, byEvidence, cache, visiting) => {
 
 const contradictionLedger = (input, claims, all) => {
   const snapshot = input.sourceSnapshot || {}
-  const evidence = snapshot.evidenceObjects || []
+  const rawEvidence = snapshot.evidenceObjects || []
   const sources = snapshot.sourceRegistry || []
+  const evidence = rawEvidence.map(row => {
+    const sourceSectionKeys = snapshot.inventoryReceipt?.sectionCoverage
+      ?.filter(section => section.evidenceIds.includes(row.evidenceObjectId)).map(section => section.sectionKey)
+    const authored = projectEvidenceDraftQualification({ evidence: row, source: sources.find(source => source.sourceId === row.sourceId),
+      sourceSectionKeys, selectedTarget: input.selectedTarget })
+    return authored ? { ...row, ...authored } : row
+  })
+  const supplemental = assertOutcomeSupplementalFinding(snapshot)
+  const recorded = assertOutcomeRecordedFinding(snapshot)
   const candidates = snapshot.discoveryHealth?.contradictionCandidates || input.composition?.businessFactLedger?.contradictions || []
+  const originalReviewRows = snapshot.contradictionReviewBasis ? reconcileContradictionReviewBasis({
+    control: { ...snapshot.inventoryReceipt.scope, id: snapshot.inventoryReceipt.scope.runtimeInstanceId },
+    candidates, reviews: snapshot.contradictionReviews, reviewEpoch: snapshot.contradictionReviewEpoch,
+    evidenceRows: rawEvidence.filter(e => candidates.some(c => c.evidenceObjectIds?.includes(e.evidenceObjectId))),
+    sourceRows: (snapshot.sourceRegistry || []).filter(s => rawEvidence.some(e => e.sourceId === s.sourceId
+      && candidates.some(c => c.evidenceObjectIds?.includes(e.evidenceObjectId)))),
+    basis: snapshot.contradictionReviewBasis }) : rawEvidence
   return candidates.map((candidate) => {
     const refs = candidate.evidenceObjectIds || []
     const pair = refs.length === 2 && new Set(refs).size === 2 ? refs.map((id) => evidence.find((row) => row.evidenceObjectId === id)) : []
@@ -145,18 +171,29 @@ const contradictionLedger = (input, claims, all) => {
           && (dates[0][1] < dates[1][0] || dates[1][1] < dates[0][0])) disposition = 'NOT_COMPARABLE'
       }
     }
-    const review = getDiscoveryContradictionReview(candidate, evidence, snapshot.contradictionReviews,
+    const review = getDiscoveryContradictionReview(candidate, originalReviewRows, snapshot.contradictionReviews,
       snapshot.inventoryReceipt?.scope?.runtimeInstanceId || '', snapshot.contradictionReviewEpoch)
     // Legacy review hashes omit SS-041 dimensions. Retain their receipt as
     // information; they cannot certify the v2 comparison or override reopening.
     if (['CONFIRMED', 'REOPENED', 'STALE'].includes(review.reviewStatus)) disposition = 'UNRESOLVED'
+    const formalReview = supplemental && review.reviewStatus === 'UNREVIEWED' && same(supplemental.candidate, candidate) ? supplemental : null
+    if (formalReview) disposition = 'NOT_CONTRADICTORY'
+    // A current native decision resolves this exact relationship only. The v2
+    // dimensions above must independently be known and remain visible unchanged.
+    const recordedReview = recorded && review.reviewStatus === 'NOT_CONTRADICTORY'
+      && recorded.contradictionId === candidate.contradictionId && recorded.evidencePairHash === review.evidencePairHash
+      && recorded.link.reviewId === review.latestReview?.reviewId && Object.values(dimensions).every(value => value === 'KNOWN')
+      ? recorded : null
+    if (recordedReview) disposition = 'NOT_CONTRADICTORY'
     const mapped = sort(claims.filter((claim) => refs.includes(claim.evidenceReference)).flatMap((claim) => claim.sectionKeys))
     const exactMapping = refs.length === 2 && refs.every((id) => claims.some((claim) => claim.evidenceReference === id && claim.sectionKeys.length))
     return { candidateId: candidate.contradictionId || 'UNRESOLVED', candidate,
       evidenceReferences: refs, disposition, dimensions, sourceReview: review,
+      ...(formalReview ? { supplementalReview: formalReview } : {}),
+      ...(recordedReview ? { recordedReviewCompletion: recordedReview } : {}),
       affectedSectionKeys: exactMapping ? mapped : all.filter((section) => section.required).map((section) => section.targetSectionKey),
       provenance: pair.filter(Boolean).map((row) => ({ evidenceReference: row.evidenceObjectId,
-        sourceReference: row.sourceId, evidenceHash: hashEvidenceToMeaningValue(row),
+        sourceReference: row.sourceId, evidenceHash: hashEvidenceToMeaningValue(rawEvidence.find(raw => raw.evidenceObjectId === row.evidenceObjectId)),
         scope: row.scope ?? 'UNRESOLVED', time: row.time ?? 'UNRESOLVED', materiality: row.materiality ?? 'UNRESOLVED' })) }
   }).sort((a, b) => a.candidateId < b.candidateId ? -1 : a.candidateId > b.candidateId ? 1 : 0)
 }
@@ -165,7 +202,8 @@ export const buildDraftSectionLedger = ({ input, claims, all, deficitsFor }) => 
   const contradictions = contradictionLedger(input, claims, all)
   const snapshot = input.sourceSnapshot
   const ledger = input.composition.businessFactLedger
-  const storedPlacementActive = snapshot.evidenceObjects.some((row) => Object.hasOwn(row, 'draftPlacement'))
+  // V2 must retain unplaced source deficits even when no declaration exists.
+  const storedPlacementActive = true
   const coverageRows = snapshot.inventoryReceipt.sectionCoverage
   const sourceKeysFor = (claim) => claim.sourceSectionKeys || claim.sectionKeys
   const targetsForSource = (sourceKey) => sort([
@@ -190,7 +228,11 @@ export const buildDraftSectionLedger = ({ input, claims, all, deficitsFor }) => 
     const unmapped = bindings.filter((reference) => !(storedPlacementActive ? sourceClaims : candidates)
       .some((claim) => claim.sectionKeys.length && (storedPlacementActive ? resolvesReference(claim, reference) : claim.evidenceReference === reference))
       && !omissions.some((entry) => entry.reference === reference) && !missing.includes(reference))
-    const unresolvedOmissions = omissions.filter((entry) => entry.reason !== 'EVIDENCE_NOT_VALIDATED'
+    const unresolvedOmissions = omissions.filter((entry) => !(entry.reason === 'CONTEXT_METADATA'
+      && (entry.sectionKeys || []).some(sourceKey => isOutcomeContextMetadataReference(snapshot, sourceKey, entry.reference))))
+      .filter(entry => !(entry.reason === 'SOURCE_ONLY_REFERENCE_NOT_A_FACT' && entry.sectionKeys?.length
+        && entry.sectionKeys.every(sourceKey => isOutcomeSourceMetadataReference(snapshot, sourceKey, entry.reference))))
+      .filter((entry) => entry.reason !== 'EVIDENCE_NOT_VALIDATED'
       || !(storedPlacementActive ? claims.filter((claim) => claim.sectionKeys.length && !deficitsFor(claim).length) : supported)
         .some((claim) => claim.evidenceReference === entry.reference))
     const blockers = contradictions.filter((entry) => entry.disposition === 'UNRESOLVED' && entry.affectedSectionKeys.includes(key))

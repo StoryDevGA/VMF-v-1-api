@@ -1,5 +1,15 @@
+import { OUTCOME_COMMERCIAL_DECISION_LED_EXPRESSION_PROFILE_VERSION } from '../utils/outcomeDecisionLedCommercialExpressionProfile.js'
+import { assertAuthorisedArlReceipt } from '../services/outcomeArlTransportRecoveryService.js'
+import { assertOutcomeArlTransportReceipt } from '../services/outcomeArlTransportRecoveryService.js'
 import { createHash } from 'node:crypto'
 import mongoose from 'mongoose'
+import { OUTCOME_READABLE_EXPRESSION_PROFILE_VERSION, OUTCOME_PRESENTATION_EXPRESSION_PROFILE_VERSION, OUTCOME_STRUCTURED_EXPRESSION_PROFILE_VERSION } from '../utils/outcomeRenderedExpressionRevision.js'
+import { assertCommercialOutputContract, getCommercialDiagramApplicability, OUTCOME_COMMERCIAL_CANDIDATE_TYPE, OUTCOME_COMMERCIAL_EXPRESSION_PROFILE_VERSION } from '../utils/outcomeCommercialExpressionProfile.js'
+import { OUTCOME_COMMERCIAL_READABLE_EXPRESSION_PROFILE_VERSION } from '../utils/outcomeReadableCommercialExpressionProfile.js'
+import { OUTCOME_COMMERCIAL_GOVERNED_EXPRESSION_PROFILE_VERSION } from '../utils/outcomeGovernedCommercialExpressionProfile.js'
+import { WORKING_DRAFT_COMPOSITION_VERSIONS, isWorkingDraftCompositionIdentity } from '../services/outcomeWorkingDraftCompositionService.js'
+import { resolveOutcomeAudienceRequest } from '../services/outcomeAudienceRequestResolutionService.js'
+import { resolveOutcomeCompositionRequest } from '../services/outcomeCompositionRequestResolutionService.js'
 
 import {
   OUTCOME_ACCEPTED_TRUTH_IDENTITY_CONTRACT_VERSION,
@@ -92,6 +102,18 @@ const assignedPackSchema = new mongoose.Schema({
 }, nestedOptions)
 
 const consumerIntentSchema = new mongoose.Schema({
+  audienceResolution: { type: mongoose.Schema.Types.Mixed, default: undefined,
+    validate: { validator(value) {
+      try { return value && Array.isArray(value.mappings) && value.mappings.length <= 50
+        && Buffer.byteLength(JSON.stringify(value)) <= 16384
+        && hash(value) === hash(resolveOutcomeAudienceRequest(this.audience)) } catch { return false }
+    }, message: 'Audience request resolution must match the canonical request.' } },
+  compositionResolution: { type: mongoose.Schema.Types.Mixed, default: undefined,
+    validate: { validator(value) {
+      try { return value && Array.isArray(value.mappings) && value.mappings.length <= 50
+        && Buffer.byteLength(JSON.stringify(value)) <= 16384
+        && hash(value) === hash(resolveOutcomeCompositionRequest(value.mappings)) } catch { return false }
+    }, message: 'Composition request resolution must match the canonical request.' } },
   originalRequest: optionalText(4000),
   outcome: requiredText(4000),
   decisionPurpose: requiredText(4000),
@@ -264,6 +286,8 @@ const failureSchema = new mongoose.Schema({
 }, nestedOptions)
 
 const executionIdentitySchema = new mongoose.Schema({
+  transportReceipt: { type: mongoose.Schema.Types.Mixed, default: undefined },
+  authorisedReview: { type: mongoose.Schema.Types.Mixed, default: undefined },
   executionMode: requiredText(80),
   providerKey: { ...optionalText(140), lowercase: true, match: /^(?:[a-z0-9](?:[a-z0-9._-]{0,138}[a-z0-9])?)?$/ },
   providerConfigurationVersion: {
@@ -482,7 +506,15 @@ const outputShapeValid = ({ stageKey, output, input }) => {
       && exactKeys(output, [
         'outputType', 'schemaVersion', 'draftVersion', 'title', 'sections', 'decisionLogic',
         'compositionProvenance', 'revisionHistory', 'assumptions', 'visibleGaps',
+        ...(Object.hasOwn(output, 'compositionVersion') ? ['compositionVersion'] : []),
+        ...(Object.hasOwn(output, 'compositionRevision') ? ['compositionRevision'] : []),
       ])
+      && (!Object.hasOwn(output, 'compositionVersion') || (WORKING_DRAFT_COMPOSITION_VERSIONS.includes(output.compositionVersion)
+        && input.evidenceToMeaning?.contractVersion === 'evidence-to-draft-provider.v2'))
+      && (!Object.hasOwn(output, 'compositionRevision') || (WORKING_DRAFT_COMPOSITION_VERSIONS.includes(output.compositionVersion)
+        && exactKeys(output.compositionRevision, ['draftStageExecutionId', 'draftOutputFingerprint', 'arlStageExecutionId', 'arlAttemptFingerprint'])
+        && ['draftStageExecutionId', 'arlStageExecutionId'].every(key => /^outcome_quality_stage_[a-f0-9-]{36}$/.test(output.compositionRevision[key]))
+        && ['draftOutputFingerprint', 'arlAttemptFingerprint'].every(key => sha256Pattern.test(output.compositionRevision[key]))))
   }
   if (stageKey === OUTCOME_QUALITY_STAGES.OUTCOME_NARRATIVE_PLAN) {
     return output.outputType === OUTCOME_QUALITY_STAGE_OUTPUT_TYPES.OUTCOME_NARRATIVE_PLAN
@@ -514,12 +546,58 @@ const outputShapeValid = ({ stageKey, output, input }) => {
       'remediationSourceStageExecutionId', 'remediationSourceAttemptFingerprint',
       'remediationFailureCode', 'rlFindingFingerprint',
     ]
-    const revision = exactKeys(output, revisionKeys)
+    let commercial = false
+    const governedStyle = [OUTCOME_COMMERCIAL_GOVERNED_EXPRESSION_PROFILE_VERSION, OUTCOME_COMMERCIAL_DECISION_LED_EXPRESSION_PROFILE_VERSION].includes(output.expressionProfileVersion)
+    if (exactKeys(output, [...revisionKeys, 'expressionProfileVersion', 'outputContract', 'diagramApplicability', ...(governedStyle ? ['styleValidationReceipt'] : [])])
+      && [OUTCOME_COMMERCIAL_EXPRESSION_PROFILE_VERSION, OUTCOME_COMMERCIAL_READABLE_EXPRESSION_PROFILE_VERSION, OUTCOME_COMMERCIAL_GOVERNED_EXPRESSION_PROFILE_VERSION, OUTCOME_COMMERCIAL_DECISION_LED_EXPRESSION_PROFILE_VERSION].includes(output.expressionProfileVersion)) {
+      try {
+        assertCommercialOutputContract(output.outputContract)
+        commercial = JSON.stringify(output.sections.map((section) => section.sectionKey)) === JSON.stringify(output.outputContract.sections)
+          && output.diagramApplicability === getCommercialDiagramApplicability(output.sections)
+        if (governedStyle) {
+          const receipt = output.styleValidationReceipt
+          const descriptorKeys = ['packType', 'packId', 'packKey', 'versionId', 'semanticVersion', 'contentHash']
+          const constraints = receipt?.constraints
+          commercial = commercial && exactKeys(receipt, ['policyVersion', 'status', 'outputType', 'schema', 'style', 'outputAssetId',
+            'constraints', 'constraintsHash', 'audienceKeys', 'renderer', 'contentValidated', 'rlApproved',
+            'contractVersion', 'selectedPacks', 'paperFingerprint', 'validation'])
+            && receipt.policyVersion === 'style-overlay.default-compatible.v1'
+            && receipt.contractVersion === 'commercial-style-validation.v1'
+            && receipt.status === 'ELIGIBLE_PENDING_CONTENT_AND_RL_VALIDATION'
+            && receipt.contentValidated === false && receipt.rlApproved === false
+            && /^[A-Z][A-Z0-9-]+$/.test(receipt.outputAssetId)
+            && hash(receipt.selectedPacks) === hash(output.outputContract.packs)
+            && ['outputType', 'schema', 'style'].every((key, index) => exactKeys(receipt[key], descriptorKeys)
+              && hash(receipt[key]) === hash(output.outputContract.packs[index]))
+            && exactKeys(constraints, ['contractVersion', 'incompatibleOutputTypes', 'incompatibleAudienceKeys', 'requiredRendererCapabilities'])
+            && constraints.contractVersion === 'style-overlay.constraints.v1'
+            && ['incompatibleOutputTypes', 'incompatibleAudienceKeys', 'requiredRendererCapabilities'].every(key => stringArrayValid(constraints[key]))
+            && sha256Pattern.test(receipt.constraintsHash || '')
+            && sha256Pattern.test(receipt.paperFingerprint || '')
+            && receipt.paperFingerprint === createHash('sha256').update(JSON.stringify({ title: output.title, sections: output.sections })).digest('hex')
+            && stringArrayValid(receipt.audienceKeys)
+            && exactKeys(receipt.renderer, ['format', 'adapterKey', 'templateKey', 'supportedComponents'])
+            && receipt.renderer.format === 'MARKDOWN'
+            && receipt.renderer.adapterKey === 'outcome-studio-governed-markdown-adapter'
+            && receipt.renderer.templateKey === 'outcome-studio-markdown.v1'
+            && stringArrayValid(receipt.renderer.supportedComponents, { min: 1 })
+            && exactKeys(receipt.validation, ['sectionOrder', 'meaningAttributionAndQualifications', 'audience', 'renderer', 'accessibilityAndVisualQuality'])
+            && receipt.validation.sectionOrder === 'PRESERVED'
+            && receipt.validation.meaningAttributionAndQualifications === 'EXACT_SAVED_NARRATIVE_RECIPE'
+            && receipt.validation.audience === 'EXPLICIT_EXCLUSIONS_CHECKED'
+            && receipt.validation.renderer === 'REGISTERED_CAPABILITIES_CHECKED'
+            && receipt.validation.accessibilityAndVisualQuality === 'REQUIRES_RL'
+        }
+      } catch { commercial = false }
+    }
+    const readableRevision = exactKeys(output, [...revisionKeys, 'expressionProfileVersion'])
+      && [OUTCOME_READABLE_EXPRESSION_PROFILE_VERSION, OUTCOME_PRESENTATION_EXPRESSION_PROFILE_VERSION, OUTCOME_STRUCTURED_EXPRESSION_PROFILE_VERSION].includes(output.expressionProfileVersion)
+    const revision = commercial || readableRevision || exactKeys(output, revisionKeys)
     return output.outputType === OUTCOME_QUALITY_STAGE_OUTPUT_TYPES.RENDERED_EXPRESSION
       && output.schemaVersion === OUTCOME_RENDERED_EXPRESSION_SCHEMA_VERSION
       && output.narrativePlanStageExecutionId === input.sourceStage?.stageExecutionId
       && output.narrativePlanOutputFingerprint === input.sourceStage?.outputFingerprint
-      && output.candidateType === 'EXECUTIVE_BRIEF'
+      && output.candidateType === (commercial ? OUTCOME_COMMERCIAL_CANDIDATE_TYPE : 'EXECUTIVE_BRIEF')
       && nonEmptyString(output.title)
       && Array.isArray(output.sections)
       && output.sections.length >= 1
@@ -646,6 +724,17 @@ schema.pre('validate', function validateShape(next) {
   const failure = plain(this.failure)
   const identity = plain(this.executionIdentity)
   const providerConfigurationVersion = String(identity?.providerConfigurationVersion || '').trim()
+  if (this.stageKey === 'WORKING_DRAFT' && output?.compositionVersion && !isWorkingDraftCompositionIdentity({ version: output.compositionVersion, configurationVersion: providerConfigurationVersion })) return next(shapeError('Working Draft composition identity is invalid.'))
+  try {
+    if (identity.authorisedReview !== undefined) {
+      if (this.stageKey !== 'ARL_MEANING_REVIEW' || (this.status === 'SUCCEEDED' && identity.authorisedReview.responseState !== 'FRESH')) throw new TypeError()
+      assertAuthorisedArlReceipt(identity.authorisedReview, { terminal: true })
+    }
+    if (identity.transportReceipt !== undefined) {
+      if (this.stageKey !== 'ARL_MEANING_REVIEW' || !providerConfigurationVersion.endsWith('_V7_EXACT_TRANSPORT')) throw new TypeError()
+      assertOutcomeArlTransportReceipt(identity.transportReceipt, { succeeded: this.status === 'SUCCEEDED' })
+    } else if (this.stageKey === 'ARL_MEANING_REVIEW' && providerConfigurationVersion.endsWith('_V7_EXACT_TRANSPORT')) throw new TypeError()
+  } catch { return next(shapeError('ARL transport receipt is invalid.')) }
   const allowedProviderConfigurationVersions = OUTCOME_QUALITY_STAGE_PROVIDER_CONFIG_VERSIONS[this.stageKey] || []
   const providerConfigurationIdentityInvalid = Boolean(identity?.providerKey)
     !== Boolean(providerConfigurationVersion)
@@ -807,6 +896,7 @@ schema.pre('validate', function validateShape(next) {
     || acceptedTruthIdentityInvalid
     || new Set(expectedTruth).size !== expectedTruth.length
     || new Set(expectedActivations).size !== expectedActivations.length
+    || !input.consumerIntent
     || input.consumerIntentFingerprint !== hash(input.consumerIntent)
     || this.inputFingerprint !== hash(input)
     || this.qualityRunId !== expectedQualityRunId

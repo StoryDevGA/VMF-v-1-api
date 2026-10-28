@@ -20,6 +20,7 @@ import {
   normalizeKnowledgePackRelationships,
   semanticVersionSatisfies,
 } from './knowledgePackRelationshipContract.js'
+import { STYLE_OVERLAY_POLICY_VERSION, evaluateStyleOverlayEligibility, normalizeStyleOverlayConstraints } from './styleOverlayPolicy.js'
 
 const POLICY_VERSION = 'ss-002-v1'
 const DEFAULT_MAX_DEPTH = 10
@@ -129,6 +130,8 @@ const toSafePack = (value = {}) => {
     visibility: normalizeToken(value.visibility),
     contentHash: normalizeText(value.contentHash),
     activatedAt: normalizeText(value.activatedAt),
+    ...(value.styleConstraints !== undefined ? { styleConstraints: value.styleConstraints } : {}),
+    ...(value.styleConstraintError ? { styleConstraintError: String(value.styleConstraintError) } : {}),
   }
 
   if (typeof value.runtimeBindable === 'boolean') {
@@ -332,7 +335,9 @@ export const resolveRequestSpecificKnowledgePacks = ({
   scopeCandidates = [],
   maxDepth = DEFAULT_MAX_DEPTH,
   candidatesAreSafe = false,
+  styleOverlayPolicy = STYLE_OVERLAY_POLICY_VERSION,
 } = {}) => {
+  if (![POLICY_VERSION, STYLE_OVERLAY_POLICY_VERSION].includes(styleOverlayPolicy)) throw new TypeError('Style overlay policy version is invalid.')
   const scopePrecedence = buildScopePrecedence(scopeCandidates)
   const requestedWorkspaceType = normalizeWorkspaceType(request.workspaceType)
   const depthLimit = normalizeDepth(maxDepth)
@@ -364,6 +369,23 @@ export const resolveRequestSpecificKnowledgePacks = ({
       if (!isActivePack(pack)) {
         exclude(pack, 'NOT_ACTIVE')
         return false
+      }
+      if (pack.knowledgeLayer === 'STYLE' && styleOverlayPolicy === STYLE_OVERLAY_POLICY_VERSION) {
+        try {
+          if (pack.styleConstraintError) throw new TypeError('Style source constraints are unavailable.')
+          const constraints = normalizeStyleOverlayConstraints(pack.styleConstraints)
+          const output = candidates.find(candidate => normalizeToken(candidate.knowledgeLayer) === 'OUTPUT_TYPE'
+            && normalizeLowerKey(candidate.capabilityKey) === normalizeLowerKey(request.requestedOutputTypeKey))
+          if (constraints.incompatibleOutputTypes.some(value => [output?.knowledgeAssetId, output?.capabilityKey, output?.packKey]
+            .filter(Boolean).some(key => key.toLowerCase() === value.toLowerCase()))
+            || constraints.incompatibleAudienceKeys.some(value => normalizeLowerKeyList(request.audienceKeys).includes(value.toLowerCase()))) {
+            exclude(pack, 'STYLE_EXPLICITLY_INCOMPATIBLE')
+            return false
+          }
+        } catch {
+          exclude(pack, 'STYLE_CONSTRAINTS_INVALID')
+          return false
+        }
       }
       if (!scopePrecedence.has(pack.scopeKey)) {
         exclude(pack, 'SCOPE_NOT_ELIGIBLE')
@@ -441,7 +463,25 @@ export const resolveRequestSpecificKnowledgePacks = ({
           return false
         }
       }
+      if (safeSelector.knowledgeLayer === 'STYLE' && styleOverlayPolicy === STYLE_OVERLAY_POLICY_VERSION) {
+        try {
+          if (pack.styleConstraintError) throw new TypeError('Style source constraints are unavailable.')
+          const constraints = normalizeStyleOverlayConstraints(pack.styleConstraints)
+          const output = dynamicPool.find(candidate => candidate.knowledgeLayer === 'OUTPUT_TYPE'
+            && candidate.capabilityKey === normalizeLowerKey(request.requestedOutputTypeKey))
+          if (constraints.incompatibleOutputTypes.some(value => [output?.knowledgeAssetId, output?.capabilityKey, output?.packKey]
+            .filter(Boolean).some(key => key.toLowerCase() === value.toLowerCase()))
+            || constraints.incompatibleAudienceKeys.some(value => normalizeLowerKeyList(request.audienceKeys).includes(value.toLowerCase()))) {
+            exclude(pack, 'STYLE_EXPLICITLY_INCOMPATIBLE', safeSelector)
+            return false
+          }
+        } catch {
+          exclude(pack, 'STYLE_CONSTRAINTS_INVALID', safeSelector)
+          return false
+        }
+      }
       if (['AUDIENCE', 'CHANNEL', 'STYLE', 'LANGUAGE', 'VISUAL_SYSTEM', 'INDUSTRY'].includes(safeSelector.knowledgeLayer)
+        && !(safeSelector.knowledgeLayer === 'STYLE' && styleOverlayPolicy === STYLE_OVERLAY_POLICY_VERSION)
         && request.requestedOutputTypeKey) {
         const output = dynamicPool.find((candidate) => candidate.knowledgeLayer === 'OUTPUT_TYPE'
           && candidate.capabilityKey === normalizeLowerKey(request.requestedOutputTypeKey))
@@ -1130,7 +1170,13 @@ export const resolveRequestSpecificKnowledgePacks = ({
 
   return {
     status,
-    policyVersion: POLICY_VERSION,
+    policyVersion: styleOverlayPolicy === STYLE_OVERLAY_POLICY_VERSION ? `${POLICY_VERSION}+${STYLE_OVERLAY_POLICY_VERSION}` : POLICY_VERSION,
+    ...(styleOverlayPolicy === STYLE_OVERLAY_POLICY_VERSION ? { styleOverlayPolicy: STYLE_OVERLAY_POLICY_VERSION,
+      styleOverlayReceipts: (selectedByLayer.STYLE || []).map(style => {
+        const outputType = selectedByLayer.OUTPUT_TYPE?.[0], schema = selectedByLayer.OUTPUT_SCHEMA?.[0]
+        return outputType && schema ? evaluateStyleOverlayEligibility({ style, outputType, schema,
+          audienceKeys: normalizeLowerKeyList(request.audienceKeys) }) : null
+      }).filter(Boolean) } : {}),
     request: {
       workspaceType: requestedWorkspaceType,
       requestedOutputTypeKey,

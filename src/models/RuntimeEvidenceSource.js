@@ -1,5 +1,8 @@
 import mongoose from 'mongoose'
 import { sourceVerificationContextSchema } from '../services/sourceVerificationContext.js'
+import { validateSourceCapture } from '../services/sourceEvidenceContract.js'
+import { createControlledReplayProvenanceSchema, validateStoredControlledReplayProvenance,
+  controlledReplayProvenanceForRow } from '../services/controlledReplayContract.js'
 
 import {
   createRuntimeStateSchema,
@@ -15,9 +18,26 @@ const processingReceiptSchema = new mongoose.Schema({
   contentHash: { ...sha256Field(), required: true },
 }, { _id: false, strict: 'throw' })
 
+const captureReceiptSchema = new mongoose.Schema({
+  contractVersion: String, operation: String, status: String, runId: String, attemptId: String, inputIndex: Number,
+}, { _id: false, strict: 'throw' })
+const sourceCaptureSchema = new mongoose.Schema({
+  contractVersion: String, sourceId: String, originalContentHash: String, captureTextHash: String,
+  textLength: Number, coordinateSystem: String, captureScope: String, adapter: String,
+  extractionMethod: String, capturedAt: String, captureReceipt: { type: captureReceiptSchema, default: undefined },
+}, { _id: false, strict: 'throw' })
+
 const runtimeEvidenceSourceSchema = createRuntimeStateSchema({
   collection: 'runtime_evidence_sources',
   fields: {
+    controlledReplayProvenance: { type: createControlledReplayProvenanceSchema(mongoose), default: undefined,
+      set: value => value === undefined ? undefined : validateStoredControlledReplayProvenance(
+        value instanceof mongoose.Document ? value.toObject() : value), validate: {
+        validator: function (value) {
+          if (value === undefined) return true
+          try { controlledReplayProvenanceForRow(this.toObject({ depopulate: true }), this); return true } catch { return false }
+        }, message: 'Invalid stored controlled replay provenance.',
+      } },
     sourceId: {
       type: String,
       required: true,
@@ -44,6 +64,15 @@ const runtimeEvidenceSourceSchema = createRuntimeStateSchema({
       default: '',
     },
     contentHash: sha256Field(),
+    sourceCapture: { type: sourceCaptureSchema, default: undefined,
+      set: value => value === undefined ? undefined : validateSourceCapture(
+        value instanceof mongoose.Document ? value.toObject() : value), validate: {
+      validator: function (value) {
+        if (value === undefined) return true
+        try { validateSourceCapture(value instanceof mongoose.Document ? value.toObject() : value,
+          { sourceId: this.sourceId, contentHash: this.contentHash }); return true } catch { return false }
+      }, message: 'Invalid recorded source capture.',
+    } },
     verificationContext: { type: mongoose.Schema.Types.Mixed, default: undefined,
       validate: (value) => value === undefined || sourceVerificationContextSchema.safeParse(value).success },
     processingReceipt: { type: processingReceiptSchema, default: undefined,

@@ -1,9 +1,122 @@
 import {
   buildOutcomeStudioEvidenceComposition,
+  projectOutcomeStudioBusinessFactLedger,
   OUTCOME_STUDIO_COMPOSITION_BLOCKERS,
 } from '../services/outcomeStudioEvidenceCompositionService.js'
 import { assertOutcomeStudioProviderSafeValue } from '../services/outcomeStudioProviderSafeContextService.js'
 import { DISCOVERY_CONTRADICTION_REVIEW_CONTRACT, getDiscoveryContradictionReview } from '../services/discoveryContradictionReviewService.js'
+import { createHash } from 'node:crypto'
+import { recordEvidenceDraftQualification, assertEvidenceDraftQualification } from '../services/evidenceDraftQualification.js'
+import { sourceMaterialFingerprint } from '../services/sourceVerificationContext.js'
+import { assembleOutcomeEvidenceInventory, assertOutcomeEvidenceInventory } from '../utils/outcomeEvidenceSnapshot.js'
+import { enrichDraftClaim } from '../services/outcomeEvidenceToDraftContractService.js'
+import { makeSs041Fixture } from './fixtures/outcomeEvidenceToDraftFixtures.js'
+
+const qualifiedMembershipFixture = async (sourceSectionKeys = ['customer_context', 'strategic_objectives']) => {
+  const input = makeInput(), frameworkState = input.frameworkState
+  frameworkState.sections.strategic_objectives = { accepted: { supportingEvidenceRefs: ['source-1'] } }
+  const evidence = frameworkState.evidence_pack.evidenceObjects[0], source = frameworkState.evidence_pack.sourceRegistry[0]
+  const selectedTarget = (await makeSs041Fixture()).selectedTarget
+  evidence.draftQualification = recordEvidenceDraftQualification({ evidence, source, sourceSectionKeys, selectedTarget,
+    targetSectionKeys: [selectedTarget.receipt.targetSections.required[0].targetSectionKey], actorUserId: '64b7f7a4e1e5f8320c000001',
+    authoredAt: '2026-10-20T07:00:00.000Z', facts: {
+      claimStatus: 'SOURCE_PRESENTED', classification: 'CUSTOMER_EVIDENCE', currentness: 'CURRENT',
+      sourceLocation: 'synthetic-source#statement-1', scope: 'Controlled synthetic statement only', time: 'Native synthetic scenario currentness only',
+      attribution: 'Synthetic recorded source', permittedStatement: evidence.extractedFact, permittedInterpretation: 'EXACT_STATEMENT_ONLY',
+      confidenceWarnings: ['Independent proof remains absent.'], blockedStrongerClaim: ['No executed trial or proven benefit.'],
+      proofDependency: [], proofOrderDisposition: 'NOT_ESTABLISHED', proofOrder: [], proofRequirementCodes: [],
+      evidenceRequiredToSubstantiate: ['Independent approval and measured outcomes.'],
+    } })
+  return { frameworkState, evidence, source, selectedTarget }
+}
+
+const inventoryForMembership = async fixture => {
+  const scope = { customerId: 'synthetic-customer', tenantId: 'synthetic-tenant', runtimeInstanceId: 'synthetic-runtime', stateVersion: 'synthetic-state' }
+  const rows = {
+    evidence: fixture.frameworkState.evidence_pack.evidenceObjects.map((row, index) => ({ ...row, ...scope, _id: `evidence-${index}` })),
+    sources: fixture.frameworkState.evidence_pack.sourceRegistry.map((row, index) => ({ ...row, ...scope, _id: `source-${index}` })),
+  }
+  const result = await assembleOutcomeEvidenceInventory({ scope,
+    sections: Object.entries(fixture.frameworkState.sections).map(([sectionKey, section]) => ({ sectionKey,
+      references: section.accepted?.supportingEvidenceRefs || [] })),
+    readPage: async (kind, after, size) => rows[kind].filter(row => after === null || row._id > after).slice(0, size),
+    count: async kind => rows[kind].length,
+    validateRows: (kind, batch) => batch.forEach(row => {
+      expect(row.sourceId).toBe(fixture.source.sourceId)
+      if (kind === 'evidence') assertEvidenceDraftQualification({ evidence: row, source: fixture.source })
+      else expect(sourceMaterialFingerprint(row)).toBe(sourceMaterialFingerprint(fixture.source))
+    }),
+  })
+  const snapshot = { evidenceObjects: result.evidenceObjects, sourceRegistry: result.sourceRegistry, inventoryReceipt: result.receipt }
+  assertOutcomeEvidenceInventory(snapshot)
+  return snapshot
+}
+
+describe('authored source membership without source-container fact admission', () => {
+  test('matches actual inventory provenance and strict placement after explicit evidence admission', async () => {
+    const f = await qualifiedMembershipFixture(), sourceSnapshot = await inventoryForMembership(f)
+    const ledger = projectOutcomeStudioBusinessFactLedger({ frameworkState: f.frameworkState })
+    expect(ledger.facts).toHaveLength(1)
+    const fact = ledger.facts[0], nativeKeys = sourceSnapshot.inventoryReceipt.sectionCoverage
+      .filter(section => section.evidenceIds.includes(f.evidence.evidenceObjectId)).map(section => section.sectionKey).sort()
+    expect(fact.sectionKeys).toEqual(nativeKeys)
+    expect(ledger.omitted).toContainEqual({ reference: 'source-1', sectionKeys: ['strategic_objectives'], reason: 'SOURCE_ONLY_REFERENCE_NOT_A_FACT' })
+    const claim = enrichDraftClaim({ evidenceReference: fact.evidenceObjectId, sectionKeys: fact.sectionKeys,
+      classification: 'CUSTOMER_EVIDENCE', statement: fact.statement }, f.evidence, f.source, { sourceSnapshot, selectedTarget: f.selectedTarget })
+    expect(claim.draftPlacementStatus).toBe('VALIDATED')
+    expect(claim.sectionKeys).toEqual(f.evidence.draftQualification.binding.targetSectionKeys)
+    expect(claim.independentValidation).toBe('UNRESOLVED')
+  })
+
+  test('never admits a fact when only source containers are referenced', async () => {
+    const f = await qualifiedMembershipFixture()
+    f.frameworkState.sections.customer_context.accepted.supportingEvidenceRefs = ['source-1']
+    const ledger = projectOutcomeStudioBusinessFactLedger({ frameworkState: f.frameworkState })
+    expect(ledger.facts).toEqual([])
+    expect(ledger.omitted).toHaveLength(2)
+    expect(ledger.omitted.every(row => row.reason === 'SOURCE_ONLY_REFERENCE_NOT_A_FACT')).toBe(true)
+  })
+
+  test('retains ambiguous-source omission and admits no second source member', async () => {
+    const f = await qualifiedMembershipFixture()
+    f.frameworkState.evidence_pack.evidenceObjects.push(makeEvidence({ evidenceObjectId: 'evidence-2', extractedFact: 'A different source statement.' }))
+    const snapshot = await inventoryForMembership(f)
+    const ledger = projectOutcomeStudioBusinessFactLedger({ frameworkState: f.frameworkState })
+    expect(ledger.facts.map(fact => fact.evidenceObjectId)).toEqual(['evidence-1'])
+    expect(ledger.facts[0].sectionKeys).toEqual(snapshot.inventoryReceipt.sectionCoverage
+      .filter(section => section.evidenceIds.includes('evidence-1')).map(section => section.sectionKey).sort())
+    expect(ledger.omitted).toContainEqual({ reference: 'source-1', sectionKeys: ['strategic_objectives'], reason: 'SOURCE_REFERENCE_AMBIGUOUS' })
+  })
+
+  test.each([' source-1 ', 'ｓｏｕｒｃｅ-1'])('does not grant authored membership through a source identity alias: %s', async reference => {
+    const f = await qualifiedMembershipFixture(['customer_context'])
+    f.frameworkState.sections.strategic_objectives.accepted.supportingEvidenceRefs = [reference]
+    const snapshot = await inventoryForMembership(f)
+    const ledger = projectOutcomeStudioBusinessFactLedger({ frameworkState: f.frameworkState })
+    expect(ledger.facts).toHaveLength(1)
+    expect(ledger.facts[0].sectionKeys).toEqual(['customer_context'])
+    expect(snapshot.inventoryReceipt.sectionCoverage.find(section => section.sectionKey === 'strategic_objectives').evidenceIds).toEqual([])
+  })
+
+  test.each(['binding', 'source', 'evidence', 'statement'])('keeps strict authored %s validation', async change => {
+    const f = await qualifiedMembershipFixture()
+    if (change === 'binding') f.evidence.draftQualification.binding.sourceSectionKeys = ['customer_context']
+    if (change === 'source') f.source.label = 'Different registered source material'
+    if (change === 'evidence') f.evidence.extractedFact = 'Changed statement'
+    if (change === 'statement') f.evidence.draftQualification.facts.permittedStatement = 'A stronger unrecorded claim'
+    expect(() => projectOutcomeStudioBusinessFactLedger({ frameworkState: f.frameworkState }))
+      .toThrow(expect.objectContaining({ code: 'EVIDENCE_DRAFT_QUALIFICATION_INVALID' }))
+  })
+
+  test('preserves the exact pre-edit unqualified ledger bytes and fact identity', () => {
+    const input = makeInput()
+    input.frameworkState.sections.strategic_objectives = { accepted: { supportingEvidenceRefs: ['source-1'] } }
+    const ledger = projectOutcomeStudioBusinessFactLedger({ frameworkState: input.frameworkState, truthBinding: { currentness: 'CURRENT' } })
+    expect(ledger.facts[0].sectionKeys).toEqual(['customer_context'])
+    expect(ledger.facts[0].factId).toBe('fact_33f5802732192f05edd1b389')
+    expect(createHash('sha256').update(JSON.stringify(ledger)).digest('hex')).toBe('c0e23d5c4104ce622ec01de6d011d8e0eed21947e9d2188effac75e5af51e461')
+  })
+})
 
 const makeEvidence = (overrides = {}) => ({
   evidenceObjectId: 'evidence-1',

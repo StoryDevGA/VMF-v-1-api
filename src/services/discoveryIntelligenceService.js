@@ -9,6 +9,8 @@ import * as pdfjs from 'pdfjs-dist/build/pdf.mjs'
 import { DISCOVERY_ACQUISITION_PROFILES } from '../constants/discoveryAcquisitionProfiles.js'
 import { buildSectionEvidenceProjection } from './sectionEvidenceProjectionService.js'
 import { getDiscoveryContradictionReview } from './discoveryContradictionReviewService.js'
+import { assertSourceEvidenceMetadataPairs, buildEvidenceSupport, buildSourceCapture,
+  sourceEvidenceHash, validateEvidenceSupport, validateSourceCapture } from './sourceEvidenceContract.js'
 
 const moduleRequire = createRequire(import.meta.url)
 const { createCanvas } = moduleRequire('@napi-rs/canvas')
@@ -1186,7 +1188,35 @@ const extractHtmlMatch = (html, pattern) => {
   return sanitizeFact(stripHtmlToText(match?.[1] || ''))
 }
 
-const extractHtmlSegments = (html, { acquisitionProfile } = {}) => {
+const extractLongWebsiteContexts = (html, captureText, profileLimits) => {
+  const visible = html.replace(/<(script|style|noscript)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, ' ')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+  const seen = new Set()
+  const contexts = Array.from(visible.matchAll(/<p\b[^>]*>([\s\S]*?)<\/p\s*>/gi))
+    .map(match => ({ kind: 'body', text: sanitizeFact(stripHtmlToText(match[1])), exactSegment: stripHtmlToText(match[1]),
+      unsupported: /<\/?(?:p|div|section|article|table|thead|tbody|tr|td|th|ul|ol|li|blockquote|h[1-6])\b/i.test(match[1]) }))
+    .filter(segment => segment.text.length > 260 && isGovernedDiscoveryEvidenceFact(segment.text))
+    .filter(segment => {
+      const key = segment.text.toLowerCase()
+      if (seen.has(key)) return false
+      seen.add(key); return true
+    }).slice(0, profileLimits.maxCandidateSegments)
+  const ranges = contexts.slice(0, profileLimits.maxEvidenceObjects).map(segment => {
+    if (segment.unsupported) throw new Error('Website contextual extraction cannot select nested paragraph structure.')
+    const start = captureText.indexOf(segment.exactSegment)
+    if (start < 0 || captureText.indexOf(segment.exactSegment, start + 1) !== -1) {
+      throw new Error('Website contextual extraction requires a unique exact capture paragraph.')
+    }
+    return { start, end: start + segment.exactSegment.length }
+  })
+  let bodyText = captureText
+  for (const { start, end } of ranges.sort((a, b) => b.start - a.start)) {
+    bodyText = bodyText.slice(0, start) + '\n'.repeat(end - start) + bodyText.slice(end)
+  }
+  return { contexts, bodyText }
+}
+
+const extractHtmlSegments = (html, { acquisitionProfile, recordSourceCapture = false } = {}) => {
   const sourceHtml = String(html || '')
   const profileLimits = getWebsiteAcquisitionProfileLimits(acquisitionProfile)
   const title = extractHtmlMatch(sourceHtml, /<title[^>]*>([\s\S]*?)<\/title>/i)
@@ -1199,13 +1229,17 @@ const extractHtmlSegments = (html, { acquisitionProfile } = {}) => {
   )
   const headingMatches = Array.from(sourceHtml.matchAll(/<h[1-3][^>]*>([\s\S]*?)<\/h[1-3]>/gi))
     .map((match) => sanitizeFact(stripHtmlToText(match[1])))
-  const bodySegments = stripHtmlToText(sourceHtml)
+  const captureText = stripHtmlToText(sourceHtml)
+  const { contexts, bodyText } = recordSourceCapture
+    ? extractLongWebsiteContexts(sourceHtml, captureText, profileLimits) : { contexts: [], bodyText: captureText }
+  const bodySegments = bodyText
     .split(/[.!?\n\r]+/)
     .map(sanitizeFact)
     .filter((segment) => segment.length >= 24 && segment.length <= 260)
     .filter(isGovernedDiscoveryEvidenceFact)
 
   const segments = [
+    ...contexts,
     title ? { kind: 'title', text: title } : null,
     description ? { kind: 'description', text: description } : null,
     ...headingMatches.map((text) => ({ kind: 'heading', text })),
@@ -1214,12 +1248,13 @@ const extractHtmlSegments = (html, { acquisitionProfile } = {}) => {
     .filter((segment) => isGovernedDiscoveryEvidenceFact(segment.text))
 
   const seen = new Set()
-  return segments.filter((segment) => {
+  const unique = segments.filter((segment) => {
     const key = segment.text.toLowerCase()
     if (seen.has(key)) return false
     seen.add(key)
     return true
   })
+  return contexts.length ? unique.slice(0, profileLimits.maxCandidateSegments) : unique
 }
 
 const classifyWebsiteSegment = (segment) => {
@@ -1237,7 +1272,7 @@ const classifyWebsiteSegment = (segment) => {
   }
 }
 
-const extractDocumentSegments = (text, { documentType = '', prioritizeQuality = false } = {}) => {
+const extractDocumentSegments = (text, { documentType = '', prioritizeQuality = false, retainCaptureSegment = false } = {}) => {
   const sourceText = normalizeDocumentExtractionText(text)
   if (!sourceText) return []
   const isPresentationText = String(documentType || '').trim().toUpperCase() === 'PPTX'
@@ -1264,6 +1299,7 @@ const extractDocumentSegments = (text, { documentType = '', prioritizeQuality = 
     })
     .map((segment, index) => ({
       index,
+      exactSegment: segment,
       quality: getDocumentEvidenceSegmentQuality(segment),
     }))
     .filter((segment) => segment.quality.reviewable)
@@ -1278,6 +1314,7 @@ const extractDocumentSegments = (text, { documentType = '', prioritizeQuality = 
     .map((segment, index) => ({
       kind: index === 0 ? 'summary' : 'body',
       text: segment.quality.text,
+      ...(retainCaptureSegment ? { exactSegment: segment.exactSegment } : {}),
     }))
 }
 
@@ -2007,6 +2044,8 @@ const buildDocumentEvidenceObjects = ({
   fileName,
   segments,
   sourceId,
+  sourceCapture,
+  captureText,
 } = {}) => segments
   .map((segment) => ({
     ...segment,
@@ -2025,6 +2064,8 @@ const buildDocumentEvidenceObjects = ({
       acquisitionProfile,
     })
 
+    const evidenceSupport = sourceCapture ? buildEvidenceSupport({ sourceCapture, captureText,
+      exactSegment: segment.exactSegment }) : undefined
     return {
       evidenceObjectId: `evidence_document_${evidenceHash}`,
       sourceId,
@@ -2056,6 +2097,7 @@ const buildDocumentEvidenceObjects = ({
       documentAssetType: assetType,
       extractionMethod,
       ingestionMode: extraction?.ingestionMode || 'TEXT_NATIVE',
+      ...(evidenceSupport ? { evidenceSupport } : {}),
     }
   })
 
@@ -2065,6 +2107,8 @@ const buildWebsiteEvidenceObjects = ({
   finalUrl,
   sourceId,
   segments,
+  sourceCapture,
+  captureText,
 } = {}) => {
   const profileLimits = getWebsiteAcquisitionProfileLimits(acquisitionProfile)
   return segments
@@ -2077,9 +2121,15 @@ const buildWebsiteEvidenceObjects = ({
         extractedFact,
         acquisitionProfile,
       })
+      const evidenceSupport = sourceCapture ? buildEvidenceSupport({ sourceCapture, captureText,
+        exactSegment: segment.exactSegment ?? segment.text }) : undefined
+      if (segment.exactSegment !== undefined && !evidenceSupport) {
+        throw new Error('Website contextual extraction requires a unique exact capture paragraph.')
+      }
 
       return {
         evidenceObjectId: `evidence_website_${evidenceHash}`,
+        ...(evidenceSupport ? { evidenceSupport } : {}),
         sourceId,
         category: classification.category,
         coverageArea: classification.coverageArea,
@@ -2105,12 +2155,135 @@ const buildWebsiteEvidenceObjects = ({
     })
 }
 
+// Separate producer; only the private parser/classifier is shared with live website acquisition.
+export const buildControlledReplayEvidenceFromDecodedHtml = ({ html, descriptor, acquisitionProfile,
+  runId, attemptId, capturedAt } = {}) => {
+  const controlledReplayProvenance = validateStoredControlledReplayProvenance(descriptor)
+  if (typeof html !== 'string' || !html.isWellFormed()
+    || sourceEvidenceHash(html) !== `sha256:${descriptor.binding.fixture.htmlSha256}`)
+    throw new Error('Controlled HTML does not match its immutable fixture.')
+  const segments = extractHtmlSegments(html, { acquisitionProfile, recordSourceCapture: true })
+  const sourceId = `controlled_${hashValue({ bindingDigest: descriptor.provenance.bindingDigest,
+    runId, attemptId })}`
+  const captureText = stripHtmlToText(html)
+  const sourceCapture = buildSourceCapture({ sourceId, originalContentHash: sourceEvidenceHash(html), captureText,
+    adapter: 'controlled-html-replay-v1', extractionMethod: 'DECODED_HTML_STRIPPED_TEXT',
+    operation: 'CONTROLLED_HTML_REPLAY_CAPTURE', runId, attemptId, inputIndex: 0, capturedAt })
+  const evidenceObjects = segments.slice(0, getWebsiteAcquisitionProfileLimits(acquisitionProfile).maxEvidenceObjects).map(segment => {
+    const classification = classifyWebsiteSegment(segment)
+    const extractedFact = sanitizeFact(`Controlled synthetic ${segment.kind}: ${segment.text}`)
+    const evidenceHash = hashValue({ sourceId, extractedFact, acquisitionProfile })
+    const evidenceSupport = buildEvidenceSupport({ captureText, sourceCapture, exactSegment: segment.exactSegment ?? segment.text })
+    if (segment.exactSegment !== undefined && !evidenceSupport) throw new Error('Controlled context has no unique capture span.')
+    return { evidenceObjectId: `evidence_controlled_${evidenceHash}`, sourceId, ...classification,
+      extractedFact, ...(evidenceSupport ? { evidenceSupport } : {}), controlledReplayProvenance,
+      confidence: { level: 'SOURCE_BACKED', score: 72, basis: ['CONTROLLED_SYNTHETIC_FIXTURE', 'DETERMINISTIC_TEXT_EXTRACTION'] },
+      createdAt: capturedAt, extractionTimestamp: capturedAt, reviewStatus: DISCOVERY_EVIDENCE_REVIEW_STATUSES.PENDING,
+      acquisitionMethod: 'CONTROLLED_HTML_REPLAY', acceptedBy: '', acceptanceTimestamp: '', rejectedBy: '',
+      rejectionTimestamp: '', auditRef: '', lineageRef: `lineage:${sourceId}:${evidenceHash}`,
+      acquisitionProfile, sourceUrl: descriptor.binding.fixture.sourceUrl }
+  })
+  if (!evidenceObjects.length) throw new Error('Controlled fixture produced no reviewable evidence.')
+  const source = { sourceId, type: 'CONTROLLED_HTML_REPLAY', sourceType: 'WEBSITE', label: 'Controlled synthetic HTML fixture',
+    status: 'AVAILABLE', acquisitionStatus: 'CAPTURED', url: descriptor.binding.fixture.sourceUrl,
+    contentHash: sourceCapture.originalContentHash, valueHash: sourceCapture.originalContentHash,
+    sourceCapture, controlledReplayProvenance, capturedAt, acquisitionProfile,
+    evidenceProduced: evidenceObjects.length, lineageRef: `lineage:${sourceId}`, adapter: 'controlled-html-replay-v1' }
+  const sourceRegistryEntry = { ...source, dateAdded: capturedAt, lastAcquisitionAt: capturedAt }
+  assertSourceEvidenceMetadataPairs({ sources: [source], evidenceObjects })
+  assertControlledReplayProvenancePairs({ sources: [source], evidenceObjects })
+  return { source, sourceRegistryEntry, evidenceObjects }
+}
+
+export const buildWebsiteDiscoveryEvidenceFromDecodedHtml = ({
+  html, normalizedUrl, finalUrl, acquisitionProfile, acquiredAt,
+  recordSourceCapture = false, contentTruncated, charactersRead, characterLimit,
+} = {}) => {
+  if (typeof recordSourceCapture !== 'boolean') throw new Error('Website source capture mode must be a boolean.')
+  if (typeof html !== 'string') throw new Error('Website decoded HTML must be a string.')
+  const segments = extractHtmlSegments(html, { acquisitionProfile, recordSourceCapture })
+  if (segments.length === 0) {
+    throw new Error('Website acquisition did not find extractable customer website text.')
+  }
+
+  const sourceId = `website_${hashValue({ normalizedUrl })}`
+  if (recordSourceCapture && (contentTruncated || !html.isWellFormed())) {
+    throw new Error('Website source capture requires complete valid decoded response text.')
+  }
+  const captureText = recordSourceCapture ? stripHtmlToText(html) : undefined
+  const sourceCapture = recordSourceCapture ? buildSourceCapture({ sourceId,
+    originalContentHash: sourceEvidenceHash(html), captureText, adapter: 'website-html-fetch-v1',
+    extractionMethod: 'DECODED_HTML_STRIPPED_TEXT', operation: 'WEBSITE_DECODED_TEXT_CAPTURE',
+    capturedAt: acquiredAt, inputIndex: 0 }) : undefined
+  const evidenceObjects = buildWebsiteEvidenceObjects({
+    acquisitionProfile,
+    acquiredAt,
+    finalUrl,
+    sourceId,
+    segments,
+    sourceCapture,
+    captureText,
+  })
+
+  if (evidenceObjects.length === 0) {
+    throw new Error('Website acquisition did not produce reviewable evidence.')
+  }
+
+  const source = {
+    sourceId,
+    type: 'WEBSITE_ACQUISITION',
+    sourceType: 'WEBSITE',
+    label: 'Website Source',
+    url: normalizedUrl,
+    finalUrl,
+    valueHash: `sha256:${crypto.createHash('sha256').update(JSON.stringify({ html })).digest('hex')}`,
+    status: 'ACQUIRED',
+    capturedAt: acquiredAt,
+    acquisitionProfile,
+    evidenceProduced: evidenceObjects.length,
+    lineageRef: `lineage:${sourceId}`,
+    adapter: 'website-html-fetch-v1',
+    ...(sourceCapture ? { sourceCapture, contentHash: sourceCapture.originalContentHash } : {}),
+    pageCount: 1,
+    contentTruncated,
+    contentCharactersRead: charactersRead,
+    contentCharacterLimit: characterLimit,
+  }
+
+  const sourceRegistryEntry = {
+    sourceId,
+    sourceType: 'WEBSITE',
+    label: 'Website Source',
+    status: 'AVAILABLE',
+    dateAdded: acquiredAt,
+    acquisitionStatus: 'ACQUIRED',
+    evidenceProduced: evidenceObjects.length,
+    lastAcquisitionAt: acquiredAt,
+    lineageRef: `lineage:${sourceId}`,
+    acquisitionProfile,
+    url: normalizedUrl,
+    finalUrl,
+    contentTruncated,
+    ...(sourceCapture ? { sourceCapture: validateSourceCapture(sourceCapture), contentHash: sourceCapture.originalContentHash } : {}),
+    contentCharactersRead: charactersRead,
+    contentCharacterLimit: characterLimit,
+  }
+
+  return {
+    source,
+    sourceRegistryEntry,
+    evidenceObjects,
+  }
+}
+
 const acquireWebsiteDiscoveryEvidenceWithinDeadline = async ({
   acquisitionProfile,
   acquiredAt,
   websiteUrl,
+  recordSourceCapture = false,
   signal,
 } = {}) => {
+  if (typeof recordSourceCapture !== 'boolean') throw new Error('Website source capture mode must be a boolean.')
   const normalizedUrl = normalizeDiscoveryWebsiteUrl(websiteUrl)
 
   if (typeof globalThis.fetch !== 'function') {
@@ -2134,6 +2307,11 @@ const acquireWebsiteDiscoveryEvidenceWithinDeadline = async ({
     throw new Error(`Website acquisition failed with HTTP ${response?.status || 'error'}.`)
   }
 
+  if (recordSourceCapture && (Number(response.status) === 206
+    || String(response.headers?.get?.('content-range') || '').trim())) {
+    throw new Error('Website source capture requires a complete response; partial responses are not supported.')
+  }
+
   const contentType = String(response.headers?.get?.('content-type') || '').toLowerCase()
   if (contentType && !/(text\/html|application\/xhtml\+xml|text\/plain)/i.test(contentType)) {
     throw new Error('Website acquisition only supports HTML or plain text pages in this sprint.')
@@ -2146,67 +2324,10 @@ const acquireWebsiteDiscoveryEvidenceWithinDeadline = async ({
     truncated: contentTruncated,
   } = await readWebsiteResponseText(response, { signal })
   assertWebsiteAcquisitionActive(signal)
-  const segments = extractHtmlSegments(html, { acquisitionProfile })
-  if (segments.length === 0) {
-    throw new Error('Website acquisition did not find extractable customer website text.')
-  }
-
-  const sourceId = `website_${hashValue({ normalizedUrl })}`
-  const evidenceObjects = buildWebsiteEvidenceObjects({
-    acquisitionProfile,
-    acquiredAt,
-    finalUrl,
-    sourceId,
-    segments,
+  return buildWebsiteDiscoveryEvidenceFromDecodedHtml({
+    html, normalizedUrl, finalUrl, acquisitionProfile, acquiredAt, recordSourceCapture,
+    contentTruncated, charactersRead, characterLimit,
   })
-
-  if (evidenceObjects.length === 0) {
-    throw new Error('Website acquisition did not produce reviewable evidence.')
-  }
-
-  const source = {
-    sourceId,
-    type: 'WEBSITE_ACQUISITION',
-    sourceType: 'WEBSITE',
-    label: 'Website Source',
-    url: normalizedUrl,
-    finalUrl,
-    valueHash: `sha256:${crypto.createHash('sha256').update(JSON.stringify({ html })).digest('hex')}`,
-    status: 'ACQUIRED',
-    capturedAt: acquiredAt,
-    acquisitionProfile,
-    evidenceProduced: evidenceObjects.length,
-    lineageRef: `lineage:${sourceId}`,
-    adapter: 'website-html-fetch-v1',
-    pageCount: 1,
-    contentTruncated,
-    contentCharactersRead: charactersRead,
-    contentCharacterLimit: characterLimit,
-  }
-
-  const sourceRegistryEntry = {
-    sourceId,
-    sourceType: 'WEBSITE',
-    label: 'Website Source',
-    status: 'AVAILABLE',
-    dateAdded: acquiredAt,
-    acquisitionStatus: 'ACQUIRED',
-    evidenceProduced: evidenceObjects.length,
-    lastAcquisitionAt: acquiredAt,
-    lineageRef: `lineage:${sourceId}`,
-    acquisitionProfile,
-    url: normalizedUrl,
-    finalUrl,
-    contentTruncated,
-    contentCharactersRead: charactersRead,
-    contentCharacterLimit: characterLimit,
-  }
-
-  return {
-    source,
-    sourceRegistryEntry,
-    evidenceObjects,
-  }
 }
 
 export const acquireWebsiteDiscoveryEvidence = async (options = {}) => {
@@ -2282,9 +2403,11 @@ export const ingestUploadedDocumentDiscoveryEvidence = async ({
     if (batchOutcomes && !String(extraction.text || '').trim()) {
       throw new Error('Document extraction did not return readable text.')
     }
+    const recordsSourceCapture = batchOutcomes && ['TXT', 'DOCX'].includes(documentType)
     const segments = extractDocumentSegments(extraction.text, {
       documentType,
       prioritizeQuality: extraction.extractionMethod === 'PDF_OCR',
+      retainCaptureSegment: recordsSourceCapture,
     })
 
     if (segments.length === 0 && !batchOutcomes) {
@@ -2297,6 +2420,10 @@ export const ingestUploadedDocumentDiscoveryEvidence = async ({
       documentHash,
       index,
     })}`
+    const captureText = normalizeDocumentExtractionText(extraction.text)
+    const sourceCapture = recordsSourceCapture ? buildSourceCapture({ sourceId,
+      originalContentHash: documentHash, captureText, adapter: extraction.adapter,
+      extractionMethod: extraction.extractionMethod, capturedAt, inputIndex: index }) : undefined
     const evidenceObjects = buildDocumentEvidenceObjects({
       acquisitionProfile,
       assetType,
@@ -2305,6 +2432,8 @@ export const ingestUploadedDocumentDiscoveryEvidence = async ({
       fileName,
       segments,
       sourceId,
+      sourceCapture,
+      captureText,
     })
 
     if (evidenceObjects.length === 0 && !batchOutcomes) {
@@ -2340,6 +2469,7 @@ export const ingestUploadedDocumentDiscoveryEvidence = async ({
       pendingEvidenceObjects: evidenceObjects.length,
       lineageRef: `lineage:${sourceId}`,
       adapter: extraction.adapter || `document-${documentType.toLowerCase()}-text-extraction-v1`,
+      ...(sourceCapture ? { sourceCapture, contentHash: documentHash } : {}),
       ...buildAdditionalExtractionMetadata(extraction),
     }
     const sourceRegistryEntry = {
@@ -2369,6 +2499,7 @@ export const ingestUploadedDocumentDiscoveryEvidence = async ({
       extractionMethod: extraction.extractionMethod || 'TEXT_NATIVE',
       uploadedAt: capturedAt,
       adapter: extraction.adapter || `document-${documentType.toLowerCase()}-text-extraction-v1`,
+      ...(sourceCapture ? { sourceCapture: validateSourceCapture(sourceCapture), contentHash: documentHash } : {}),
       ...buildAdditionalExtractionMetadata(extraction),
     }
 
@@ -2412,6 +2543,7 @@ const buildSourceRegistryEntryFromLineage = ({
   return {
     sourceId,
     sourceType: inputConfig.sourceType || source.sourceType || source.type || 'DISCOVERY_NOTES',
+    ...projectControlledReplayProvenance(source),
     label: inputConfig.label || source.label || fieldKey || sourceId,
     status: 'AVAILABLE',
     dateAdded: source.capturedAt || capturedAt || '',
@@ -2429,6 +2561,8 @@ const buildSourceRegistryEntryFromLineage = ({
     ...(source.assetType ? { assetType: source.assetType } : {}),
     ...(Number.isFinite(Number(source.sizeBytes)) ? { sizeBytes: Number(source.sizeBytes) } : {}),
     ...(source.documentHash ? { documentHash: source.documentHash } : {}),
+    ...(source.sourceCapture !== undefined ? { contentHash: source.contentHash,
+      sourceCapture: validateSourceCapture(source.sourceCapture, { sourceId, contentHash: source.contentHash }) } : {}),
     ...(source.documentId ? { documentId: source.documentId } : {}),
     ...(source.documentStatus ? { documentStatus: source.documentStatus } : {}),
     ...(source.ingestionMode ? { ingestionMode: source.ingestionMode } : {}),
@@ -2503,6 +2637,7 @@ export const normalizeDiscoveryEvidenceObjects = ({
   createdAt,
   evidenceObjects,
   inputs,
+  sourceRegistry,
   sources,
 } = {}) => {
   const candidateObjects = Array.isArray(evidenceObjects) && evidenceObjects.length > 0
@@ -2514,7 +2649,7 @@ export const normalizeDiscoveryEvidenceObjects = ({
         sources,
       })
 
-  return candidateObjects
+  const normalizedObjects = candidateObjects
     .map((evidenceObject) => {
       const evidenceObjectId = String(evidenceObject?.evidenceObjectId || '').trim()
       const sourceId = String(evidenceObject?.sourceId || '').trim()
@@ -2533,6 +2668,7 @@ export const normalizeDiscoveryEvidenceObjects = ({
       const normalizedEvidenceObject = {
         evidenceObjectId,
         sourceId,
+        ...projectControlledReplayProvenance(evidenceObject),
         category: evidenceObject.category || DISCOVERY_EVIDENCE_CATEGORIES.COMPANY,
         coverageArea: evidenceObject.coverageArea || evidenceObject.category || 'Company',
         extractedFact,
@@ -2569,10 +2705,25 @@ export const normalizeDiscoveryEvidenceObjects = ({
         ...(evidenceObject.sourceUrl ? { sourceUrl: String(evidenceObject.sourceUrl).trim() } : {}),
         ...(evidenceObject.sourceFileName ? { sourceFileName: String(evidenceObject.sourceFileName).trim() } : {}),
         ...(evidenceObject.documentAssetType ? { documentAssetType: String(evidenceObject.documentAssetType).trim() } : {}),
+        ...(evidenceObject.evidenceSupport !== undefined ? { evidenceSupport: validateEvidenceSupport(
+          evidenceObject.evidenceSupport, { sourceId }) } : {}),
       }
-      return withGraphReadyEvidenceMetadata(normalizedEvidenceObject)
+      const normalized = preserveEvidenceDraftQualification(evidenceObject, withGraphReadyEvidenceMetadata(normalizedEvidenceObject))
+      if (Object.hasOwn(evidenceObject, 'draftQualification')) {
+        const matches = Array.isArray(sourceRegistry) ? sourceRegistry.filter(row => row.sourceId === normalized.sourceId) : []
+        assertEvidenceDraftQualification({ evidence: normalized, source: matches.length === 1 ? matches[0] : null })
+      }
+      return normalized
     })
     .filter(Boolean)
+  assertSourceEvidenceMetadataPairs({ sources: Array.isArray(sources) ? sources : [], evidenceObjects: normalizedObjects })
+  assertControlledReplayProvenancePairs({ sources: Array.isArray(sourceRegistry) ? sourceRegistry : Array.isArray(sources) ? sources : [],
+    evidenceObjects: normalizedObjects })
+  if (Array.isArray(sourceRegistry) && Array.isArray(sources)) {
+    assertControlledReplayProvenancePairs({ sources, evidenceObjects: normalizedObjects })
+    assertControlledReplayProvenancePairs({ sources: sourceRegistry, evidenceObjects: sources })
+  }
+  return normalizedObjects
 }
 
 export const buildDiscoveryEvidenceReviewSummary = (evidenceObjects = []) => {
@@ -2615,8 +2766,12 @@ export const buildDiscoverySourceRegistry = ({
           source,
         }))
         .filter(Boolean)
+  assertControlledReplayProvenancePairs({ sources: registry, evidenceObjects })
+  if (existingRegistry.length && sources.length) assertControlledReplayProvenancePairs({
+    sources: registry, evidenceObjects: sources,
+  })
 
-  return registry.map((source) => {
+  const normalizedRegistry = registry.map((source) => {
     const sourceId = String(source?.sourceId || '').trim()
     const sourceEvidenceObjects = evidenceObjects.filter((evidenceObject) =>
       evidenceObject?.sourceId === sourceId,
@@ -2627,6 +2782,7 @@ export const buildDiscoverySourceRegistry = ({
     return {
       sourceId,
       sourceType: String(source?.sourceType || source?.type || 'DISCOVERY_NOTES').trim(),
+      ...projectControlledReplayProvenance(source),
       label: String(source?.label || sourceId || '').trim(),
       status: String(source?.status || 'AVAILABLE').trim().toUpperCase(),
       dateAdded: String(source?.dateAdded || source?.capturedAt || capturedAt || '').trim(),
@@ -2644,6 +2800,8 @@ export const buildDiscoverySourceRegistry = ({
       ...(source?.contentHash !== undefined ? { contentHash: source.contentHash } : {}),
       ...(source?.processingReceipt !== undefined ? { processingReceipt: structuredClone(source.processingReceipt) } : {}),
       ...(source?.verificationContext !== undefined ? { verificationContext: structuredClone(source.verificationContext) } : {}),
+      ...(source?.sourceCapture !== undefined ? { sourceCapture: validateSourceCapture(source.sourceCapture,
+        { sourceId, contentHash: source.contentHash }) } : {}),
       ...(source?.title !== undefined ? { title: source.title } : {}),
       ...(source?.sourceRef !== undefined ? { sourceRef: source.sourceRef } : {}),
       ...(source?.fieldKey ? { fieldKey: String(source.fieldKey).trim() } : {}),
@@ -2671,6 +2829,8 @@ export const buildDiscoverySourceRegistry = ({
       pendingEvidenceObjects: reviewSummary.pendingReviewCount,
     }
   }).filter((source) => source.sourceId)
+  assertSourceEvidenceMetadataPairs({ sources: normalizedRegistry, evidenceObjects })
+  return normalizedRegistry
 }
 
 export const applyDiscoveryEvidenceReview = ({
@@ -3244,3 +3404,6 @@ export const summarizeDiscoveryIntelligence = ({
     sourceRegistry,
   }),
 })
+import { preserveEvidenceDraftQualification, assertEvidenceDraftQualification } from './evidenceDraftQualification.js'
+import { projectControlledReplayProvenance, assertControlledReplayProvenancePairs,
+  validateStoredControlledReplayProvenance } from './controlledReplayContract.js'

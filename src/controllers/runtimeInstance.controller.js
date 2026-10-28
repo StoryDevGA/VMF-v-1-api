@@ -8,6 +8,7 @@ import {
 } from '../services/runtimeInstanceService.js'
 import { createRuntimeRevision as createRuntimeRevisionRecord } from '../services/runtimeRevisionService.js'
 import logger from '../config/logger.js'
+import { assertNormalOutcomeRuntime } from '../services/syntheticOutcomeIsolationService.js'
 import { planOutcomeStudioRequest, confirmOutcomeStudioRequestPlan, retrieveOutcomeStudioRequestPlan } from '../services/outcomeStudioRequestPlanService.js'
 import {
   adoptRuntimeRelease as adoptRuntimeReleaseRecord,
@@ -42,6 +43,7 @@ import {
   reviewAllRuntimeSectionEvidence as reviewAllRuntimeSectionEvidenceRecord,
   reviewRuntimeDiscoveryEvidence as reviewRuntimeDiscoveryEvidenceRecord,
   recordRuntimeSourceVerification as recordRuntimeSourceVerificationRecord,
+  recordRuntimeEvidenceDraftQualification as recordRuntimeEvidenceDraftQualificationRecord,
   getRuntimeDiscoveryContradictions as getRuntimeDiscoveryContradictionsRecord,
   reviewRuntimeDiscoveryContradiction as reviewRuntimeDiscoveryContradictionRecord,
   reviewRuntimeSectionEvidence as reviewRuntimeSectionEvidenceRecord,
@@ -480,6 +482,7 @@ export const getRuntimeStateSectionSummary = async (req, res, next) => sendRunti
     scopes: getRuntimeStateRequestScopes(req),
     runtimeInstanceId: req.params.runtimeInstanceId,
     sectionKey: req.params.sectionKey,
+    historyRevision: req.query.historyRevision,
   }),
 })
 
@@ -640,6 +643,7 @@ export const createGovernedReasoningExecution = async (req, res, next) => {
       runtimeInstanceId: req.params.runtimeInstanceId,
       scopes: req.scopes,
     })
+    assertNormalOutcomeRuntime(execution)
 
     return res.status(201).json({
       data: execution,
@@ -660,6 +664,7 @@ export const getGovernedReasoningExecution = async (req, res, next) => {
       runtimeInstanceId: req.params.runtimeInstanceId,
       scopes: req.scopes,
     })
+    assertNormalOutcomeRuntime(execution)
 
     return res.status(200).json({
       data: execution,
@@ -786,6 +791,18 @@ export const reviewRuntimeDiscoveryEvidence = async (req, res, next) => {
       return res.status(err.status).json(buildRuntimeInstanceErrorResponse(req, err))
     }
     return next(err)
+  }
+}
+
+export const recordRuntimeEvidenceDraftQualification = async (req, res, next) => {
+  try {
+    const data = await recordRuntimeEvidenceDraftQualificationRecord({ actorUserId: req.context?.userId || req.userId,
+      auditRequest: req, scopes: req.scopes, runtimeInstanceId: req.params.runtimeInstanceId,
+      evidenceObjectId: req.params.evidenceObjectId, payload: req.body })
+    return res.status(200).json({ data, meta: { requestId: req.requestId, version: 'v1' } })
+  } catch (error) {
+    if (error?.status && error?.code) return res.status(error.status).json(buildRuntimeInstanceErrorResponse(req, error))
+    return next(error)
   }
 }
 

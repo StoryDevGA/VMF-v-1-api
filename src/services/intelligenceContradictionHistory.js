@@ -1,6 +1,7 @@
 import { DISCOVERY_CONTRADICTION_DISPOSITIONS, DISCOVERY_CONTRADICTION_REVIEW_CONTRACT,
   DISCOVERY_CONTRADICTION_REQUEST_KEY_PATTERN, contradictionReviewRequestHash,
   isBoundedContradictionReviewHistory } from './discoveryContradictionReviewService.js'
+import { isDeepStrictEqual } from 'node:util'
 
 const text = (value, maximum = 240) => typeof value === 'string' && value === value.trim()
   && value.length > 0 && value.length <= maximum
@@ -14,7 +15,7 @@ const requestFields = ['requestKey', 'requestPayloadHash', 'requestExpectedUpdat
 
 // Existing append-only decision records, never a current disposition or a full
 // finding/audit/recalculation register. No evidence or graph payload is required.
-export function projectStoredContradictionHistory(reviews, runtimeId, selection) {
+export function projectStoredContradictionHistory(reviews, runtimeId, selection, inheritedRecords = []) {
   const unavailable = reason => ({ available: false, completeness: 'UNAVAILABLE', reason,
     findingId: selection.findingId, records: [], total: null, page: selection.page,
     pageSize: selection.pageSize, totalPages: null, basis: 'RECORDED_DECISIONS', currentness: 'NOT_ASSESSED',
@@ -23,10 +24,14 @@ export function projectStoredContradictionHistory(reviews, runtimeId, selection)
   if (!isBoundedContradictionReviewHistory(reviews)) return unavailable('HISTORY_INVALID_OR_OVER_LIMIT')
   const reviewIds = new Set()
   for (const review of reviews) {
+    const originals = Array.isArray(inheritedRecords) && review ? inheritedRecords.filter(record =>
+      record?.runtimeInstanceId === review.runtimeInstanceId && record.reviewId === review.reviewId) : []
     if (!review || typeof review !== 'object' || Array.isArray(review)
       || review.contractVersion !== DISCOVERY_CONTRADICTION_REVIEW_CONTRACT
       || typeof review.reviewId !== 'string' || !DISCOVERY_CONTRADICTION_REQUEST_KEY_PATTERN.test(review.reviewId)
-      || reviewIds.has(review.reviewId) || review.runtimeInstanceId !== runtimeId
+      || reviewIds.has(review.reviewId) || (review.runtimeInstanceId !== runtimeId
+        && (!actor(review.runtimeInstanceId) || !Array.isArray(inheritedRecords)
+          || originals.length !== 1 || !isDeepStrictEqual(originals[0], review)))
       || !text(review.contradictionId) || !/^sha256:[a-f0-9]{64}$/.test(review.evidencePairHash || '')
       || !DISCOVERY_CONTRADICTION_DISPOSITIONS.includes(review.disposition)
       || typeof review.rationale !== 'string' || review.rationale !== review.rationale.trim()
@@ -39,7 +44,7 @@ export function projectStoredContradictionHistory(reviews, runtimeId, selection)
     if (present.length && (present.length !== requestFields.length
       || !DISCOVERY_CONTRADICTION_REQUEST_KEY_PATTERN.test(review.requestKey)
       || !time(review.requestExpectedUpdatedAt)
-      || contradictionReviewRequestHash({ actorUserId: review.reviewedBy, runtimeInstanceId: runtimeId,
+      || contradictionReviewRequestHash({ actorUserId: review.reviewedBy, runtimeInstanceId: review.runtimeInstanceId,
         contradictionId: review.contradictionId, expectedUpdatedAt: review.requestExpectedUpdatedAt,
         expectedEvidencePairHash: review.evidencePairHash, disposition: review.disposition,
         rationale: review.rationale, confirm: true }) !== review.requestPayloadHash)) return unavailable('HISTORY_REQUEST_PROOF_INVALID')

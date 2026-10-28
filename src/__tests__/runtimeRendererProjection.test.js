@@ -3,9 +3,70 @@ import { buildDiscoveryProjection, buildRendererFrameworkState, buildRendererSec
 import { __testables } from '../services/runtimeStateRepository.js'
 import { evaluateRuntimeSectionTruthReadiness } from '../services/runtimeSectionTruthReadinessService.js'
 import { getRuntimeActionStateGate } from '../services/runtimeActionPolicyService.js'
-import { hashSectionInput } from '../services/runtimeSectionModelService.js'
+import { hashSectionInput, compactSectionInsightDisplay } from '../services/runtimeSectionModelService.js'
 
 describe('runtime renderer persistence projection', () => {
+  it.each(['generated-only', 'present-null-accepted', 'invalid-reference'])('retains bounded history selection without promoting a truth baseline: %s', scenario => {
+    const reference = { version: 'runtime-section-history.v1',
+      stateVersion: 'rsv2:11111111-1111-4111-8111-111111111111', sourceHash: `sha256:${'a'.repeat(64)}`,
+      index: -1, hash: scenario === 'invalid-reference' ? 'invalid' : 'b'.repeat(64),
+      hasGenerated: true, hasAccepted: scenario === 'present-null-accepted' }
+    const revision = { revisionNumber: 1, replacedAt: '2026-10-19T12:00:00.000Z', generated: null,
+      ...(reference.hasAccepted ? { accepted: null } : {}), historyReference: reference }
+    const detail = { input: 'Current context', generated: null, accepted: null,
+      state: { status: 'DRAFT' }, revisions: [revision] }
+    const render = (raw, projectionScope) => buildRendererSections({
+      frameworkState: { sections: { context: raw } },
+      frameworkPackage: { sections: [{ sectionKey: 'context', runtimePath: 'framework_state.sections.context' }] },
+      runtimeInstance: { status: 'ACTIVE', executionStatus: 'IDLE', runtimeType: 'VALUE_NARRATIVE' },
+      discovery: { accepted: true }, mutationAccess: { allowed: true }, uiContract: { sections: [] },
+      configWarnings: [], projectionScope,
+      runtimePathRecords: new Map([['framework_state.sections.context', { allowedOperations: ['READ', 'WRITE'], dataType: 'OBJECT' }]]),
+    })
+    const before = JSON.stringify(detail), full = render(detail)[0]
+    const summary = render(compactSection(detail), 'RENDERER_SUMMARY')[0]
+    expect(summary.revisions).toEqual(full.revisions)
+    expect(full.compare).toMatchObject({ historyAvailable: scenario !== 'invalid-reference', hasPreviousGeneratedRevision: false })
+    expect(full.generated).toBeNull()
+    expect(full.accepted).toBeNull()
+    if (scenario === 'invalid-reference') expect(full.revisions[0]).not.toHaveProperty('historyReference')
+    else {
+      expect(full.revisions[0]).toEqual(revision)
+      expect(Object.hasOwn(full.revisions[0], 'accepted')).toBe(reference.hasAccepted)
+    }
+    expect(JSON.stringify(detail)).toBe(before)
+  })
+
+  it.each([true, false])('restores a compact display before the existing full renderer/redaction: editable=%s', allowed => {
+    const generated = { content: 'Reviewed narrative', summary: 'Reviewed summary', generatedAt: '2026-10-15T10:00:00.000Z',
+      inputHash: hashSectionInput('Request'), sections: [{ heading: 'Meaning', body: 'Reviewed bounded meaning. '.repeat(30) }] }
+    const detail = { input: 'Request', generated, accepted: { ...generated }, state: {},
+      intelligence: { displayProjection: { generatedInsight: { title: 'Generated Insight', summary: generated.summary, sections: generated.sections } } } }
+    const compact = structuredClone(detail)
+    compact.intelligence = compactSectionInsightDisplay(compact)
+    expect(compact.intelligence.displayProjection.generatedInsight).toHaveProperty('sectionsReference')
+    const render = (raw, projectionScope) => buildRendererSections({
+      frameworkState: { sections: { context: raw } },
+      frameworkPackage: { sections: [{ sectionKey: 'context', runtimePath: 'framework_state.sections.context' }] },
+      runtimeInstance: { status: 'ACTIVE', executionStatus: 'IDLE', runtimeType: 'VALUE_NARRATIVE' },
+      discovery: { accepted: true }, mutationAccess: { allowed }, uiContract: { sections: [] }, configWarnings: [], projectionScope,
+      runtimePathRecords: new Map([['framework_state.sections.context', { allowedOperations: ['READ', 'WRITE'], dataType: 'OBJECT' }]]),
+    })
+    const before = structuredClone(compact)
+    const result = render(compact)
+    expect(result).toEqual(render(detail))
+    const insight = result[0].intelligence.displayProjection.generatedInsight
+    expect(insight.sections).toEqual(allowed ? generated.sections : [])
+    expect(insight).not.toHaveProperty('sectionsReference')
+    expect(compact).toEqual(before)
+    const summary = render(compactSection(compact), 'RENDERER_SUMMARY')
+    expect(summary[0].intelligence).not.toHaveProperty('displayProjection')
+    expect(JSON.stringify(summary)).not.toContain('sectionsReference')
+    const malformed = structuredClone(compact)
+    malformed.intelligence.displayProjection.generatedInsight.sectionsReference.hash = 'a'.repeat(64)
+    expect(() => render(malformed)).toThrow(expect.objectContaining({ code: 'SECTION_DISPLAY_REFERENCE_INVALID' }))
+  })
+
   const compactSection = (detail) => {
     const include = (value, paths) => {
       if (paths.some((path) => path.length === 0)) return value

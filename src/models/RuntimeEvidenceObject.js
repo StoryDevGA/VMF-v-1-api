@@ -1,4 +1,8 @@
 import mongoose from 'mongoose'
+import { validateEvidenceSupport } from '../services/sourceEvidenceContract.js'
+import { createControlledReplayProvenanceSchema, validateStoredControlledReplayProvenance,
+  controlledReplayProvenanceForRow } from '../services/controlledReplayContract.js'
+import { assertEvidenceDraftQualification } from '../services/evidenceDraftQualification.js'
 
 import {
   createRuntimeStateSchema,
@@ -39,15 +43,36 @@ const confidenceSchema = new mongoose.Schema({
   },
 }, { _id: false, strict: 'throw' })
 
+const evidenceSupportSchema = new mongoose.Schema({
+  contractVersion: String, sourceId: String, originalContentHash: String, captureTextHash: String,
+  coordinateSystem: String, start: Number, end: Number, exactExcerpt: String, excerptHash: String,
+  statementOrigin: String, epistemicType: String, supportStatus: String,
+  restrictions: { type: [String], default: undefined },
+}, { _id: false, strict: 'throw' })
+
 const runtimeEvidenceObjectSchema = createRuntimeStateSchema({
   collection: 'runtime_evidence_objects',
   fields: {
+    controlledReplayProvenance: { type: createControlledReplayProvenanceSchema(mongoose), default: undefined,
+      set: value => value === undefined ? undefined : validateStoredControlledReplayProvenance(
+        value instanceof mongoose.Document ? value.toObject() : value), validate: {
+        validator: function (value) {
+          if (value === undefined) return true
+          try { controlledReplayProvenanceForRow(this.toObject({ depopulate: true }), this); return true } catch { return false }
+        }, message: 'Invalid stored controlled replay provenance.',
+      } },
     evidenceObjectId: {
       type: String,
       required: true,
       trim: true,
       maxlength: 240,
     },
+    draftQualification: { type: mongoose.Schema.Types.Mixed, default: undefined, validate: {
+      validator: function (value) {
+        if (value === undefined) return true
+        try { assertEvidenceDraftQualification({ evidence: this.toObject({ depopulate: true }) }); return true } catch { return false }
+      }, message: 'Invalid authored evidence qualification.',
+    } },
     sourceId: {
       type: String,
       required: true,
@@ -72,6 +97,15 @@ const runtimeEvidenceObjectSchema = createRuntimeStateSchema({
       default: undefined,
       validate: { validator: isValidEvidenceSourceLocation, message: 'Invalid or oversized source location.' },
     },
+    evidenceSupport: { type: evidenceSupportSchema, default: undefined,
+      set: value => value === undefined ? undefined : validateEvidenceSupport(
+        value instanceof mongoose.Document ? value.toObject() : value), validate: {
+      validator: function (value) {
+        if (value === undefined) return true
+        try { validateEvidenceSupport(value instanceof mongoose.Document ? value.toObject() : value,
+          { sourceId: this.sourceId }); return true } catch { return false }
+      }, message: 'Invalid recorded evidence support.',
+    } },
     extractedFact: {
       type: String,
       trim: true,

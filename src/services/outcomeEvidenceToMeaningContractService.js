@@ -43,6 +43,34 @@ const clone = (value) => JSON.parse(JSON.stringify(canonical(value)))
 const sorted = (values) => [...values].sort(compare)
 const sectionKey = (heading) => text(heading).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
 const exactKeys = (value, keys) => plain(value) && equal(sorted(Object.keys(value)), sorted(keys))
+const sealContract = payload => {
+  const contractHash = hashEvidenceToMeaningValue(payload)
+  return { ...payload, contractId: `etm_${contractHash}`, contractHash }
+}
+const groupGlobalDraftQuestions = questions => {
+  const groups = new Map(), ordered = []
+  for (const question of questions) {
+    if (!exactKeys(question, ['sourceSectionKey', 'missingReference', 'missingInput', 'reasons', 'nextAction', 'sectionKey', 'field', 'question'])
+      || ['sourceSectionKey', 'missingInput', 'nextAction', 'sectionKey', 'field', 'question'].some(key => !text(question[key]))
+      || typeof question.missingReference !== 'string' || !Array.isArray(question.reasons)
+      || question.reasons.some(reason => !text(reason))) { ordered.push({ question }); continue }
+    const key = hashEvidenceToMeaningValue({ sourceSectionKey: question.sourceSectionKey,
+      missingReference: question.missingReference, missingInput: question.missingInput,
+      reasons: sorted([...new Set(question.reasons)]), nextAction: question.nextAction })
+    if (!groups.has(key)) { const group = { members: [] }; groups.set(key, group); ordered.push(group) }
+    groups.get(key).members.push(question)
+  }
+  return ordered.map(group => {
+    if (group.question) return group.question
+    const first = group.members[0]
+    if (group.members.length === 1) return first
+    return { ...first,
+      question: `Provide or reconcile ${first.missingReference ? `the governed reference "${first.missingReference}" and its stored claim metadata` : 'admissible customer evidence'} for all affected output sections. Missing: ${first.missingInput}.`,
+      affectedSectionKeys: sorted([...new Set(group.members.map(question => question.sectionKey))]),
+      affectedFields: sorted([...new Set(group.members.map(question => question.field))]),
+    }
+  })
+}
 const uniqueRecords = (records, identity, field, v2 = false) => {
   if (!Array.isArray(records) || (!v2 && records.length > 500)) invalid(field)
   const map = new Map()
@@ -80,7 +108,12 @@ const normalizeInput = (input) => {
   ledger.omitted.sort((a, b) => compare(`${a.reference}:${a.reason}`, `${b.reference}:${b.reason}`))
   return result
 }
-const buildClaim = ({ evidence, source, fact = null }) => {
+const buildClaim = ({ evidence, source, fact = null, input }) => {
+  const rawEvidence = evidence
+  const sourceSectionKeys = input?.sourceSnapshot?.inventoryReceipt?.sectionCoverage
+    ?.filter(section => section.evidenceIds.includes(evidence.evidenceObjectId)).map(section => section.sectionKey)
+  const authored = projectEvidenceDraftQualification({ evidence, source, sourceSectionKeys, selectedTarget: input?.selectedTarget })
+  if (authored) evidence = { ...evidence, ...authored }
   const evidenceId = text(evidence.evidenceObjectId)
   const sourceId = sourceIdentity(source)
   const statement = statementOf(evidence)
@@ -92,7 +125,7 @@ const buildClaim = ({ evidence, source, fact = null }) => {
     || text(fact.provenance?.lineageRef) !== text(evidence.lineageRef)
     || !equal(fact.qualification, warnings)
     || (text(evidence.currentness) && token(fact.currentness) !== token(evidence.currentness)))) invalid(`${evidenceId}.ledgerMapping`)
-  const evidenceHash = hashEvidenceToMeaningValue(evidence)
+  const evidenceHash = hashEvidenceToMeaningValue(rawEvidence)
   const sourceHash = hashEvidenceToMeaningValue(source)
   const claimKey = `claim_${hashEvidenceToMeaningValue({ evidenceId, sourceId, statement, evidenceHash, sourceHash }).slice(0, 32)}`
   return {
@@ -101,7 +134,7 @@ const buildClaim = ({ evidence, source, fact = null }) => {
     validationStatus: token(evidence.validationStatus) || 'UNKNOWN',
     reviewStatus: token(evidence.reviewStatus) || 'UNKNOWN',
     attribution: { stored: evidence.attribution ?? null, sourceType: source.sourceType || source.type || '',
-      sourceLabel: source.label || source.filename || source.name || '', storedSourceHash: source.sourceHash || source.hash || '' },
+      sourceLabel: source.label || source.filename || source.name || (authored ? source.title : '') || '', storedSourceHash: source.sourceHash || source.hash || '' },
     currentness: token(evidence.currentness) || 'UNKNOWN',
     permittedInterpretation: evidence.permittedInterpretation ?? 'UNRESOLVED',
     qualification: warnings, blockedStrongerClaim: evidence.blockedStrongerClaim ?? 'UNRESOLVED',
@@ -181,20 +214,19 @@ export const compileEvidenceToMeaningContract = (rawInput) => {
       const stored = evidence.get(id)
       const source = sources.get(text(stored?.sourceId))
       if (!stored || !source) invalid(`${id}.mapping`)
-      claims.push(buildClaim({ evidence: stored, source, fact }))
+      claims.push(buildClaim({ evidence: stored, source, fact, input }))
     }
     for (const omitted of composition.businessFactLedger.omitted) {
       if (omitted.reason !== 'EVIDENCE_NOT_VALIDATED') continue
       const stored = evidence.get(text(omitted.reference))
       const source = sources.get(text(stored?.sourceId))
       if (!stored || !source || facts.has(omitted.reference)) invalid(`${omitted.reference}.mapping`)
-      const claim = buildClaim({ evidence: stored, source })
+      const claim = buildClaim({ evidence: stored, source, input })
       claim.sectionKeys = sorted(omitted.sectionKeys || [])
       claims.push(claim)
     }
     if (new Set(claims.map((claim) => claim.claimKey)).size !== claims.length) invalid('claimKeys')
     claims.sort((a, b) => compare(a.claimKey, b.claimKey))
-    const storedPlacementActive = v2 && sourceSnapshot.evidenceObjects.some((row) => Object.hasOwn(row, 'draftPlacement'))
     if (v2) claims = claims.map((claim) => enrichDraftClaim(claim, evidence.get(claim.evidenceReference), sources.get(claim.sourceReference), input))
     const claimsByEvidence = new Map(claims.map((claim) => [claim.evidenceReference, claim]))
     // Shared proof paths are evaluated once per compilation; visiting rejects cycles.
@@ -205,7 +237,7 @@ export const compileEvidenceToMeaningContract = (rawInput) => {
       : supportDeficits(claim, claimsByEvidence, deficitsByEvidence, visitingEvidence)
     const all = [...target.targetSections.required.map((item) => ({ ...item, required: true })),
       ...target.targetSections.optional.map((item) => ({ ...item, required: false }))]
-    for (const claim of storedPlacementActive ? [] : claims) {
+    for (const claim of v2 ? [] : claims) {
       if (!claim.sectionKeys.length || new Set(claim.sectionKeys).size !== claim.sectionKeys.length
         || claim.sectionKeys.some((key) => !text(key) || !all.some((item) => item.targetSectionKey === key))) {
         invalid(`${claim.evidenceReference}.sectionMapping`)
@@ -291,8 +323,12 @@ export const compileEvidenceToMeaningContract = (rawInput) => {
       ...deficits.flatMap((section) => v2 ? section.clarificationQuestions || [] : [{ sectionKey: section.targetSectionKey,
         question: `Provide admissible customer evidence and stored proof metadata for ${section.heading}.`, reasons: section.reasons }])] },
   }
-  const contractHash = hashEvidenceToMeaningValue(payload)
-  return { ...payload, contractId: `etm_${contractHash}`, contractHash }
+  const contract = sealContract(payload)
+  // Preserve every ordinary receipt byte. Only redundant global diagnostics
+  // change; exact per-section questions remain in both authoritative ledgers.
+  return v2 && status === 'CLARIFICATION_REQUIRED' && Buffer.byteLength(JSON.stringify(contract)) > 2000000
+    ? sealContract({ ...payload, clarification: { ...payload.clarification, questions: groupGlobalDraftQuestions(payload.clarification.questions) } })
+    : contract
 }
 
 export const assertEvidenceToMeaningContract = (contract) => {
@@ -312,3 +348,4 @@ export const validateEvidenceToMeaningGeneratedClaims = ({ contract, claims }) =
     || !equal(claim, expected[index]))) invalid('generatedClaims.mappingOrMeaning')
   return claims
 }
+import { projectEvidenceDraftQualification } from './evidenceDraftQualification.js'

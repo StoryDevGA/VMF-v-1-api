@@ -162,6 +162,7 @@ describe('package-declared reasoning artefact runtime contract', () => {
   test('sends package artefact keys, rather than source-path suffixes, to the strict provider schema', async () => {
     const frameworkPackage = packageWith([
       declaration('riskNarrative', { sourcePath: 'sectionIntelligence.customRiskSignal' }),
+      { ...declaration('riskSummary'), validation: { ...declaration('riskSummary').validation, maxBytes: 2048 } },
     ], 'CUSTOM')
     const declarations = validateReasoningArtefactDeclarations({ frameworkPackage })
     const fetchImpl = jest.fn().mockResolvedValue({
@@ -172,7 +173,7 @@ describe('package-declared reasoning artefact runtime contract', () => {
         status: 'completed',
         output: [{ type: 'message', content: [{
           type: 'output_text',
-          text: JSON.stringify({ riskNarrative: { value: 'Strict schema output.' } }),
+          text: JSON.stringify({ riskNarrative: { value: 'Strict schema output.' }, riskSummary: { value: 'Bounded summary.' } }),
         }] }],
       }),
     })
@@ -189,6 +190,56 @@ describe('package-declared reasoning artefact runtime contract', () => {
     const requestBody = JSON.parse(fetchImpl.mock.calls[0][1].body)
     expect(requestBody.text.format.schema.properties).toHaveProperty('riskNarrative')
     expect(requestBody.text.format.schema.properties).not.toHaveProperty('customRiskSignal')
+    expect(requestBody.text.format.schema.properties.riskNarrative).toEqual(declarations[0].schema)
+    expect(requestBody.text.format.schema.properties.riskSummary).toEqual(declarations[1].schema)
+    expect(requestBody.instructions).toContain('UTF-8 bytes of JSON.stringify(value), including JSON syntax and escaped characters')
+    expect(requestBody.instructions).toContain('Budgets by artefact key: {"riskNarrative":4096,"riskSummary":2048}')
+    expect(requestBody.instructions).toContain('Planning targets by artefact key: {"riskNarrative":2048,"riskSummary":1024}')
+    expect(requestBody.instructions).toContain('Advisory prose word targets by artefact key: {"riskNarrative":170,"riskSummary":85}')
+    expect(requestBody.instructions).toContain('Word targets are planning guidance, not acceptance limits or a guarantee of byte fit')
+    expect(requestBody.instructions).toContain('advisory drafting targets')
+    expect(requestBody.instructions).toContain('the declared hard budgets remain the acceptance limits')
+    expect(requestBody.instructions).toContain('never merge distinct claims or omit required fields, relevant exact evidence references, qualifications or uncertainty')
+    expect(requestBody.instructions).toContain('preserving required fields, exact evidence references, qualifications and uncertainty')
+    expect(JSON.parse(requestBody.input)).toEqual({ section: { sectionKey: 'customer-context' } })
+    expect(declarations.map(item => item.validation.maxBytes)).toEqual([4096, 2048])
+  })
+
+  test.each([
+    { schema: { type: 'object', additionalProperties: false, required: ['count'], properties: { count: { type: 'integer' } } }, value: { count: 1 } },
+    { schema: { type: 'object', additionalProperties: false, required: ['value', 'note'], properties: { value: { type: 'string' }, note: { type: 'string' } } }, value: { value: 'Claim.', note: 'Qualified.' } },
+  ])('does not impose prose word targets on structured or multi-field package schemas: %j', async ({ schema, value }) => {
+    const declarations = validateReasoningArtefactDeclarations({ frameworkPackage: packageWith([
+      { ...declaration('structured'), schema },
+    ], 'CUSTOM') })
+    const providerContext = { section: { sectionKey: 'customer-context' }, preservedContext: 'Evidence remains complete.' }
+    const fetchImpl = jest.fn().mockResolvedValue({ ok: true, headers: { get: () => 'provider-request' },
+      json: async () => ({ id: 'provider-response', status: 'completed', output: [{ type: 'message',
+        content: [{ type: 'output_text', text: JSON.stringify({ structured: value }) }] }] }) })
+    const adapter = createOpenAiRuntimeSectionReasoningAdapter({ apiKey: 'test-key', model: 'test-model', fetchImpl, maxRetries: 0 })
+    await expect(adapter({ providerContext, reasoningArtefactDeclarations: declarations })).resolves.toMatchObject({ output: { structured: value } })
+    const requestBody = JSON.parse(fetchImpl.mock.calls[0][1].body)
+    expect(requestBody.instructions).toContain('Advisory prose word targets by artefact key: {}')
+    expect(requestBody.text.format.schema.properties.structured).toEqual(schema)
+    expect(JSON.parse(requestBody.input)).toEqual(providerContext)
+    expect(declarations[0].validation.maxBytes).toBe(4096)
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+
+  test.each([4096, 4097])('real package adapter enforces the serialized UTF-8 artefact byte boundary at %i', async bytes => {
+    const declarations = validateReasoningArtefactDeclarations({ frameworkPackage: packageWith([declaration('riskNarrative')], 'CUSTOM') })
+    const value = { value: `"${'é'.repeat(2041)}${bytes === 4097 ? 'x' : ''}` }
+    expect(Buffer.byteLength(JSON.stringify(value), 'utf8')).toBe(bytes)
+    const fetchImpl = jest.fn().mockResolvedValue({ ok: true, headers: { get: () => 'provider-request' },
+      json: async () => ({ id: 'provider-response', status: 'completed', output: [{ type: 'message',
+        content: [{ type: 'output_text', text: JSON.stringify({ riskNarrative: value }) }] }] }) })
+    const adapter = createOpenAiRuntimeSectionReasoningAdapter({ apiKey: 'test-key', model: 'test-model', fetchImpl, maxRetries: 0 })
+    const result = adapter({ providerContext: { section: { sectionKey: 'customer-context' } }, reasoningArtefactDeclarations: declarations })
+    if (bytes === 4096) await expect(result).resolves.toMatchObject({ output: { riskNarrative: value } })
+    else await expect(result).rejects.toMatchObject({ code: 'REASONING_ARTEFACT_CONTRACT_INVALID', reason: 'REASONING_ARTEFACT_TOO_LARGE',
+      details: { artefactKey: 'riskNarrative', byteLength: 4097, maxBytes: 4096 } })
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expect(value.value).toBe(`"${'é'.repeat(2041)}${bytes === 4097 ? 'x' : ''}`)
   })
 
   test('rejects malformed, duplicate and conflicting package declarations', () => {

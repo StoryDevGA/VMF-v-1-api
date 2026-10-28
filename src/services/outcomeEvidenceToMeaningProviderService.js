@@ -1,3 +1,4 @@
+import { WORKING_DRAFT_COMPOSITION_VERSIONS, composeEvidenceBoundWorkingDraftSections, workingDraftReaderHeading } from './outcomeWorkingDraftCompositionService.js'
 import { assertEvidenceToMeaningContract, hashEvidenceToMeaningValue,
   validateEvidenceToMeaningGeneratedClaims } from './outcomeEvidenceToMeaningContractService.js'
 import { assertOutcomeSelectedDocumentPrivacy } from './outcomeStudioProviderSafeContextService.js'
@@ -35,6 +36,22 @@ const assertProjectionPrivacy = (value, contract, field = '') => {
   }
 }
 
+const expandProviderClaims = projection => {
+  if (projection.contractVersion !== EVIDENCE_TO_DRAFT_PROVIDER_VERSION) return projection.customerClaims
+  const dictionary = projection.claimMetadataDictionary
+  if (projection.claimMetadataRepresentationVersion !== 'claim-metadata.dictionary.v1'
+    || !dictionary || typeof dictionary !== 'object' || Array.isArray(dictionary)) fail(projection, 'providerProjection.claimMetadataDictionary')
+  const refs = [...new Set(projection.customerClaims.map(row => row.metadataRef))].sort()
+  if (!same(refs, Object.keys(dictionary).sort()) || Object.entries(dictionary).some(([key, row]) => !row
+    || Object.keys(row).sort().join(',') !== 'blockedStrongerClaim,qualification,scope,time'
+    || hashEvidenceToMeaningValue(row) !== key)) fail(projection, 'providerProjection.claimMetadataDictionary')
+  return projection.customerClaims.map(row => {
+    if (['scope', 'time', 'qualification', 'blockedStrongerClaim'].some(key => Object.hasOwn(row, key))) fail(projection, 'providerProjection.claimMetadataAmbiguity')
+    const { metadataRef, ...claim } = row
+    return { ...claim, ...dictionary[metadataRef] }
+  })
+}
+
 export const projectEvidenceToMeaningProviderContract = (contract) => {
   assertEvidenceToMeaningContract(contract)
   const v2 = contract.contractVersion === 'evidence-to-draft.v2'
@@ -46,9 +63,12 @@ export const projectEvidenceToMeaningProviderContract = (contract) => {
   const claimProjections = claims.map((claim) => {
     const stored = contract.inputs.sourceSnapshot.evidenceObjects.find((item) => item.evidenceObjectId === claim.evidenceReference)
     const field = `claims.${claim.claimKey}`
-    if (!Array.isArray(stored?.evidenceRequiredToSubstantiate) || !stored.evidenceRequiredToSubstantiate.length
-      || stored.evidenceRequiredToSubstantiate.length > 10) fail(contract, `${field}.evidenceRequiredToSubstantiate`)
-    if (!Array.isArray(claim.blockedStrongerClaim) || claim.blockedStrongerClaim.length !== 1) fail(contract, `${field}.blockedStrongerClaim`)
+    const requirements = v2 ? claim.evidenceRequiredToSubstantiate : stored?.evidenceRequiredToSubstantiate
+    if (!Array.isArray(requirements) || !requirements.length
+      || requirements.length > 10) fail(contract, `${field}.evidenceRequiredToSubstantiate`)
+    if (!Array.isArray(claim.blockedStrongerClaim) || !claim.blockedStrongerClaim.length
+      || claim.blockedStrongerClaim.length > (v2 ? 10 : 1)) fail(contract, `${field}.blockedStrongerClaim`)
+    const blockedStrongerClaim = claim.blockedStrongerClaim.map(value => content(value, contract, `${field}.blockedStrongerClaim`)).join('\n')
     if (claim.attribution.stored !== null && typeof claim.attribution.stored !== 'string') fail(contract, `${field}.attribution`)
     const codes = v2 ? claim.proofRequirementCodes : claim.proofDependency
     if (!Array.isArray(codes) || codes.some((dependency) => !OUTCOME_WORKING_DRAFT_PROOF_DEPENDENCIES.includes(dependency))) fail(contract, `${field}.proofRequirementCodes`)
@@ -62,13 +82,31 @@ export const projectEvidenceToMeaningProviderContract = (contract) => {
       validationStatus: !v2 || claim.validationStatus === 'VALIDATED' ? 'SOURCE_REPORTED_VALIDATED' : 'SOURCE_REPORTED_REQUIRES_VALIDATION',
       proofDisposition: v2 && claim.proofOrderDisposition === 'NOT_ESTABLISHED' ? 'NOT_ESTABLISHED' : 'SOURCE_SPECIFIED',
       whatCanBeSaidNow: claim.statement,
-      blockedStrongerClaim: content(claim.blockedStrongerClaim[0], contract, `${field}.blockedStrongerClaim`),
-      evidenceRequiredToSubstantiate: stored.evidenceRequiredToSubstantiate.map((value) => content(value, contract, `${field}.evidenceRequiredToSubstantiate`)) }
+      blockedStrongerClaim: content(blockedStrongerClaim, contract, `${field}.blockedStrongerClaim`),
+      evidenceRequiredToSubstantiate: requirements.map((value) => content(value, contract, `${field}.evidenceRequiredToSubstantiate`)) }
   })
+  // Share exact repeated omission arrays; preserve order and content in the
+  // dictionary, while retaining every section's binding. No truncation.
+  const omissionDictionary = {}
+  const claimMetadataDictionary = {}
+  const customerClaims = v2 ? claims.map(claim => {
+    const { scope, time, qualification, blockedStrongerClaim, ...row } = claim
+    const metadata = { scope, time, qualification, blockedStrongerClaim }
+    const metadataRef = hashEvidenceToMeaningValue(metadata)
+    claimMetadataDictionary[metadataRef] = metadata
+    return { ...row, metadataRef }
+  }) : claims
+  const sectionLedger = v2 ? contract.sectionLedger.map(section => {
+    const { omissions, ...row } = section
+    const omissionsRef = hashEvidenceToMeaningValue(omissions)
+    omissionDictionary[omissionsRef] = omissions
+    return { ...row, omissionsRef, ...(section.status === 'OPTIONAL' ? { status: 'OMITTED', readinessStatus: 'OPTIONAL' } : {}) }
+  }) : contract.sectionLedger
   const projection = { contractVersion: v2 ? EVIDENCE_TO_DRAFT_PROVIDER_VERSION : EVIDENCE_TO_MEANING_PROVIDER_VERSION,
     contractId: contract.contractId, contractHash: contract.contractHash, fingerprints: contract.fingerprints,
-    sectionLedger: v2 ? contract.sectionLedger.map((section) => section.status === 'OPTIONAL'
-      ? { ...section, status: 'OMITTED', readinessStatus: 'OPTIONAL' } : section) : contract.sectionLedger, customerClaims: claims, claimProjections,
+    sectionLedger, ...(v2 ? { omissionRepresentationVersion: 'section-omissions.dictionary.v1', omissionDictionary } : {}),
+    customerClaims, claimProjections,
+    ...(v2 ? { claimMetadataRepresentationVersion: 'claim-metadata.dictionary.v1', claimMetadataDictionary } : {}),
     frameworkGuidance: contract.frameworkGuidance,
     decisionProjections: claimProjections.map((claim) => ({ decisionKey: `decision_${claim.claimKey}`,
       rationale: claim.statement, priority: 'NOT_ESTABLISHED', priorityBasis: 'NOT_ESTABLISHED',
@@ -94,6 +132,19 @@ export const assertEvidenceToMeaningProviderProjection = (projection) => {
     || Buffer.byteLength(JSON.stringify(projection)) > 120000) fail(payload, 'providerProjection.integrity')
   assertProjectionPrivacy(payload, payload)
   if (payload.contractVersion === EVIDENCE_TO_DRAFT_PROVIDER_VERSION) {
+    const normalized = ['omissionRepresentationVersion', 'omissionDictionary', 'claimMetadataRepresentationVersion', 'claimMetadataDictionary']
+      .some(key => Object.hasOwn(payload, key))
+    if (normalized) {
+      expandProviderClaims(payload)
+      const references = new Set(payload.sectionLedger.map(section => section.omissionsRef))
+      if (payload.omissionRepresentationVersion !== 'section-omissions.dictionary.v1'
+        || !payload.omissionDictionary || typeof payload.omissionDictionary !== 'object' || Array.isArray(payload.omissionDictionary)
+        || !same([...references].sort(), Object.keys(payload.omissionDictionary).sort())
+        || payload.sectionLedger.some(section => Object.hasOwn(section, 'omissions'))
+        || Object.entries(payload.omissionDictionary).some(([key, rows]) => !Array.isArray(rows)
+          || hashEvidenceToMeaningValue(rows) !== key)) fail(payload, 'providerProjection.omissionDictionary')
+    } else if (payload.sectionLedger.some(section => !Array.isArray(section.omissions) || Object.hasOwn(section, 'omissionsRef'))
+      || payload.customerClaims.some(claim => Object.hasOwn(claim, 'metadataRef'))) fail(payload, 'providerProjection.legacyMetadataShape')
     const keys = payload.customerClaims.map((claim) => claim.claimKey)
     const sections = payload.sectionLedger.filter((section) => section.status === 'SUPPORTED')
     if (new Set(keys).size !== keys.length || !same(keys, payload.claimProjections.map((claim) => claim.claimKey))
@@ -109,6 +160,11 @@ export const assertEvidenceToMeaningProviderProjection = (projection) => {
   return projection
 }
 
+export const expandEvidenceToMeaningProviderClaims = projection => {
+  assertEvidenceToMeaningProviderProjection(projection)
+  return projection.claimMetadataRepresentationVersion ? expandProviderClaims(projection) : projection.customerClaims
+}
+
 export const assertEvidenceToMeaningProviderRequestSize = ({ projection, requestBody, maxBytes = 200000 }) => {
   if (Buffer.byteLength(JSON.stringify(requestBody)) > maxBytes) fail(projection, 'providerContext.requestSize')
 }
@@ -121,6 +177,9 @@ export const assertEvidenceToMeaningBoundedProviderOutput = ({ projection, outpu
   const expectedClaims = v2 ? projection.sectionLedger.filter((section) => section.status === 'SUPPORTED')
     .flatMap((section) => section.claimKeys.map((key) => projection.claimProjections.find((claim) => claim.claimKey === key))) : projection.claimProjections
   if (!same(claims, expectedClaims)) fail(projection, 'generatedClaims.mappingOrMeaning')
+  const composed = Object.hasOwn(output, 'compositionVersion')
+  if (composed && (!v2 || !WORKING_DRAFT_COMPOSITION_VERSIONS.includes(output.compositionVersion))) fail(projection, 'generatedComposition.version')
+  const composedSections = composed ? composeEvidenceBoundWorkingDraftSections(projection, output.compositionVersion) : null
   if (output.decisionLogic && !same(output.decisionLogic, projection.decisionProjections)) fail(projection, 'generatedDecisionLogic.mappingOrMeaning')
   if (!Array.isArray(output?.sections) || output.assumptions?.length || output.sections.some((section) => section.assumptions?.length)) fail(projection, 'generatedAssumptions.unsupported')
   if (output.title !== undefined && output.title !== 'Working Draft') fail(projection, 'generatedTitle.unsupported')
@@ -128,10 +187,10 @@ export const assertEvidenceToMeaningBoundedProviderOutput = ({ projection, outpu
   if (output.sections.length !== sections.length) fail(projection, 'generatedSections.coverage')
   for (let index = 0; index < sections.length; index += 1) {
     const expected = sections[index], actual = output.sections[index]
-    if (actual.sectionKey !== expected.targetSectionKey || actual.title !== expected.heading
+    if (actual.sectionKey !== expected.targetSectionKey || actual.title !== workingDraftReaderHeading(expected, output.compositionVersion)
       || !same(actual.claims.map((claim) => claim.claimKey), expected.claimKeys)
       || (output.visibleGaps && !same(actual.gaps || [], output.visibleGaps))
-      || actual.content !== actual.claims.map((claim) => claim.statement).join(' ')) fail(projection, 'generatedSections.mappingOrMeaning')
+      || actual.content !== (composed ? composedSections[index].content : actual.claims.map((claim) => claim.statement).join(' '))) fail(projection, 'generatedSections.mappingOrMeaning')
   }
   return projection
 }

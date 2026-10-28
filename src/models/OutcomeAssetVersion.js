@@ -22,6 +22,51 @@ const normalizeNullableString = (value) => {
   return normalized || null
 }
 
+const immutableVersionError = () => Object.assign(
+  new Error('Persisted Outcome asset version content and lineage are immutable.'),
+  { code: 'OUTCOME_ASSET_VERSION_IMMUTABLE', status: 409 },
+)
+const lifecyclePaths = new Set(['status', 'updatedAt', '__v'])
+const assertDocumentVersionImmutable = (document) => {
+  if (!document.isNew && document.modifiedPaths().some((path) => !lifecyclePaths.has(path))) {
+    throw immutableVersionError()
+  }
+  if (!document.isNew && !Object.values(OUTCOME_STUDIO_ASSET_VERSION_STATUSES).includes(String(document.status || '').trim().toUpperCase())) {
+    throw immutableVersionError()
+  }
+}
+const plainObject = (value) => Boolean(value && typeof value === 'object'
+  && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype)
+const exactLegacyTruthFilter = (filter) => {
+  const keys = ['runtimeInstanceId', 'sessionId', 'status', 'publishedAt', 'lineageSummary.draftApproval']
+  return plainObject(filter) && Object.keys(filter).length === keys.length
+    && keys.every((key) => Object.hasOwn(filter, key))
+    && /^(?:[a-f0-9]{24})$/i.test(String(filter.runtimeInstanceId || ''))
+    && typeof filter.sessionId === 'string' && Boolean(filter.sessionId.trim())
+    && filter.status === OUTCOME_STUDIO_ASSET_VERSION_STATUSES.CURRENT
+    && filter.publishedAt === null
+    && plainObject(filter['lineageSummary.draftApproval'])
+    && Object.keys(filter['lineageSummary.draftApproval']).length === 1
+    && filter['lineageSummary.draftApproval'].$exists === false
+}
+const legacyTruthPaths = new Set([
+  'truthSignature', 'lineageSummary.truthSignatureStatus', 'lineageSummary.truthSignatureCurrentness', 'updatedAt',
+])
+const assertVersionUpdate = ({ operation, filter, update, options = {} }) => {
+  if (options.upsert || !plainObject(update) || Object.keys(update).some((key) => !['$set', '$setOnInsert'].includes(key))
+    || !plainObject(update.$set) || !Object.keys(update.$set).length
+    || (update.$setOnInsert && (!plainObject(update.$setOnInsert)
+      || Object.keys(update.$setOnInsert).some((path) => path !== 'createdAt')))) throw immutableVersionError()
+  const paths = Object.keys(update.$set)
+  if (Object.hasOwn(update.$set, 'status') && !Object.values(OUTCOME_STUDIO_ASSET_VERSION_STATUSES).includes(update.$set.status)) {
+    throw immutableVersionError()
+  }
+  if (paths.every((path) => path === 'status' || path === 'updatedAt')) return
+  if (operation === 'updateMany' && exactLegacyTruthFilter(filter)
+    && paths.every((path) => legacyTruthPaths.has(path))) return
+  throw immutableVersionError()
+}
+
 const outcomeAssetVersionSchema = new mongoose.Schema(
   {
     outcomeAssetVersionId: {
@@ -263,6 +308,11 @@ outcomeAssetVersionSchema.index({
 })
 
 outcomeAssetVersionSchema.pre('validate', function normalizeOutcomeAssetVersion(next) {
+  try { assertDocumentVersionImmutable(this) } catch (error) { return next(error) }
+  if (!this.isNew) {
+    this.status = String(this.status || '').trim().toUpperCase()
+    return next()
+  }
   this.outcomeAssetVersionId = String(this.outcomeAssetVersionId || '').trim()
   this.outcomeAssetId = String(this.outcomeAssetId || '').trim()
   this.parentVersionId = String(this.parentVersionId || '').trim()
@@ -292,6 +342,33 @@ outcomeAssetVersionSchema.pre('validate', function normalizeOutcomeAssetVersion(
     ? this.limitations.map((item) => String(item || '').trim()).filter(Boolean)
     : []
   next()
+})
+
+outcomeAssetVersionSchema.pre('save', function guardPersistedVersion(next) {
+  try { assertDocumentVersionImmutable(this); next() } catch (error) { next(error) }
+})
+for (const operation of ['updateOne', 'updateMany', 'findOneAndUpdate']) {
+  outcomeAssetVersionSchema.pre(operation, function guardVersionUpdate(next) {
+    try {
+      assertVersionUpdate({ operation, filter: this.getFilter(), update: this.getUpdate(), options: this.getOptions() })
+      next()
+    } catch (error) { next(error) }
+  })
+}
+for (const operation of ['replaceOne', 'findOneAndReplace']) {
+  outcomeAssetVersionSchema.pre(operation, function rejectVersionReplacement(next) { next(immutableVersionError()) })
+}
+outcomeAssetVersionSchema.pre('bulkWrite', function guardVersionBulkWrite(next, operations) {
+  try {
+    for (const operation of operations) {
+      const [type] = Object.keys(operation)
+      if (['insertOne', 'deleteOne', 'deleteMany'].includes(type) && Object.keys(operation).length === 1) continue
+      if (!['updateOne', 'updateMany'].includes(type) || Object.keys(operation).length !== 1) throw immutableVersionError()
+      const { filter, update, ...options } = operation[type]
+      assertVersionUpdate({ operation: type, filter, update, options })
+    }
+    next()
+  } catch (error) { next(error) }
 })
 
 const OutcomeAssetVersion = mongoose.model('OutcomeAssetVersion', outcomeAssetVersionSchema)

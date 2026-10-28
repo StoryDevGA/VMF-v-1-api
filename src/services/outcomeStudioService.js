@@ -1,3 +1,4 @@
+import { assertNormalOutcomeRuntime } from './syntheticOutcomeIsolationService.js'
 import { createHash, randomUUID } from 'node:crypto'
 import mongoose from 'mongoose'
 import { parse as parseYaml } from 'yaml'
@@ -60,6 +61,11 @@ import {
   projectOutcomeStudioDeliverableDiscovery,
   resolveOutcomeStudioKnowledgeContext,
 } from './outcomeStudioKnowledgeContextService.js'
+import { governedApprovalScope, governedApprovalSourceFingerprint, governedFinalisationConflict, prepareGovernedOutcomeApprovalRender, readCommittedGovernedApproval, readGovernedApprovalState } from './outcomeGovernedFinalisationService.js'
+import { assertOutcomeQualityStageTransactionSupport, hashOutcomeQualityStageValue } from './outcomeQualityStageExecutionService.js'
+import { validateOutcomeGovernedQualityChain, loadOutcomeGovernedQualityChainStyleSource } from './outcomeGovernedQualityChainValidationService.js'
+import { requireOutcomeSuccessorSessionClaim, assertOutcomeSuccessorExecutionClaim, projectOutcomeSuccessorLineage,
+  sanitizeOutcomeSuccessorLineage, assertOutcomeSuccessorApprovedDraftBinding } from './outcomeSuccessorOperationService.js'
 import { assertOutcomeKnowledgeCompositionPlanIntegrity } from './outcomeKnowledgeCompositionPlanService.js'
 import { readRuntimeEvidenceToMeaningContract, assertRuntimeEvidenceToMeaningReady } from './outcomeRuntimeEvidenceToMeaningService.js'
 import { hashEvidenceToMeaningValue } from './outcomeEvidenceToMeaningContractService.js'
@@ -496,7 +502,7 @@ const buildDraftingServiceUnavailableError = () =>
     },
   })
 
-const projectOutcomeCustomerContent = (value = {}) => {
+export const projectOutcomeCustomerContent = (value = {}) => {
   const source = value && typeof value === 'object' ? value : {}
   const markdown = normalizeText(source.markdown)
   const sections = Array.isArray(source.sections)
@@ -2308,9 +2314,9 @@ export const buildGovernedQualityChainApprovalReadiness = ({
       && Boolean(normalizeText(stage?.stageExecutionId))
       && Boolean(normalizeText(stage?.attemptFingerprint))
       && Boolean(normalizeText(stage?.outputFingerprint))
-      && (index === 0 || normalizeText(stage?.predecessorStageExecutionId)
+      && (index === 0 || normalizeText(stage?.sourceStageExecutionId || stage?.predecessorStageExecutionId)
         === normalizeText(stages[index - 1]?.stageExecutionId))
-      && (index === 0 || normalizeText(stage?.predecessorAttemptFingerprint).toLowerCase()
+      && (index === 0 || normalizeText(stage?.sourceAttemptFingerprint || stage?.predecessorAttemptFingerprint).toLowerCase()
         === normalizeText(stages[index - 1]?.attemptFingerprint).toLowerCase())
       && (![0, 1, 2, 5].includes(index)
         || (Boolean(normalizeText(stage?.grrExecutionId))
@@ -2866,6 +2872,7 @@ const serializeOutcomeSession = (session, options = {}) => {
   const knowledgePackBinding = sanitizePersistedKnowledgePackBinding(plain.knowledgePackBinding || {})
   const requestPlan = sanitizePersistedRequestPlan(plain.contextBindings || {})
   const clarificationReceipt = sanitizePersistedClarificationReceipt(plain.contextBindings || {})
+  const successor = sanitizeOutcomeSuccessorLineage(plain.contextBindings?.successor)
   return {
     sessionId: normalizeText(plain.sessionId),
     contractVersion: normalizeText(plain.contractVersion || OUTCOME_STUDIO_CONTRACT_VERSION),
@@ -2891,6 +2898,7 @@ const serializeOutcomeSession = (session, options = {}) => {
     outputContractResolution: getPersistedOutputContractResolution(plain.contextBindings || {}),
     ...(requestPlan ? { requestId: requestPlan.requestId, requestPlan } : {}),
     ...(clarificationReceipt ? { clarificationReceipt } : {}),
+    ...(successor ? { successor } : {}),
     prompt: normalizeText(plain.prompt),
     startedBy: toIdString(plain.startedBy),
     startedAt: normalizeDateValue(plain.startedAt),
@@ -2937,6 +2945,7 @@ const serializeOutcomeSessionSummary = (session, options = {}) => {
     outputContract: serialized.outputContractResolution,
     ...(serialized.requestPlan ? { requestId: serialized.requestId, requestPlan: serialized.requestPlan } : {}),
     ...(serialized.clarificationReceipt ? { clarificationReceipt: serialized.clarificationReceipt } : {}),
+    ...(serialized.successor ? { successor: serialized.successor } : {}),
     informationStatus: buildCustomerInformationStatus(serialized.truthSignature),
     businessGuidance: buildCustomerBusinessGuidance(serialized.knowledgePackBinding),
     governanceEvidence: buildCustomerGovernanceEvidence({
@@ -3067,6 +3076,8 @@ const sanitizeGovernedQualityChainLineage = (lineage = {}) => {
       attemptFingerprint: normalizeText(stage?.attemptFingerprint),
       outputFingerprint: normalizeText(stage?.outputFingerprint),
       predecessorStageExecutionId: normalizeText(stage?.predecessorStageExecutionId),
+      sourceStageExecutionId: normalizeText(stage?.sourceStageExecutionId),
+      sourceAttemptFingerprint: normalizeText(stage?.sourceAttemptFingerprint),
       predecessorAttemptFingerprint: normalizeText(stage?.predecessorAttemptFingerprint),
       grrExecutionId: normalizeText(stage?.grrExecutionId),
       grrRuntimeArtifactId: normalizeText(stage?.grrRuntimeArtifactId),
@@ -3076,6 +3087,7 @@ const sanitizeGovernedQualityChainLineage = (lineage = {}) => {
 
 const buildOutcomeAssetLineageSummary = (lineage = {}) => {
   const summary = {
+    ...(lineage.successor ? { successor: sanitizeOutcomeSuccessorLineage(lineage.successor) } : {}),
     sourceOutputAssetId: normalizeText(lineage.sourceOutputAssetId),
     sourceOutputTypeKey: normalizeToken(lineage.sourceOutputTypeKey),
     sourceOutputTypeLabel: normalizeText(lineage.sourceOutputTypeLabel),
@@ -3415,6 +3427,7 @@ const serializeCustomerOutcomeDraft = (draft, options = {}) => {
   })
   return {
     draftId: serialized.draftId,
+    ...(serialized.lineageSummary?.successor ? { successor: serialized.lineageSummary.successor } : {}),
     sessionId: serialized.sessionId,
     status: serialized.status,
     outputTypeKey: serialized.outputTypeKey,
@@ -3472,6 +3485,7 @@ const serializeCustomerOutcomeDraftIteration = (iteration, options = {}) => {
   })
   return {
     draftIterationId: serialized.draftIterationId,
+    ...(serialized.lineageSummary?.successor ? { successor: serialized.lineageSummary.successor } : {}),
     draftId: serialized.draftId,
     previousIterationId: serialized.previousIterationId,
     iterationNumber: serialized.iterationNumber,
@@ -3504,6 +3518,7 @@ const serializeCustomerOutcomeAssetVersion = (version, options = {}) => {
   const customerReady = !isNonCustomerReadyGeneration(toPlainObject(version))
   return {
     outcomeAssetVersionId: serialized.outcomeAssetVersionId,
+    ...(serialized.lineageSummary?.successor ? { successor: serialized.lineageSummary.successor } : {}),
     outcomeAssetId: serialized.outcomeAssetId,
     sessionId: serialized.sessionId,
     versionNumber: serialized.versionNumber,
@@ -3793,6 +3808,7 @@ const findActiveOutcomeDraftForApproval = async ({
   draftId = '',
   runtimeInstanceId,
   sessionId = '',
+  allowGovernedApproved = false,
 } = {}) => {
   const query = OutcomeDraft.findOne({
     runtimeInstanceId,
@@ -3816,7 +3832,8 @@ const findActiveOutcomeDraftForApproval = async ({
   }
 
   const draftStatus = normalizeToken(draft.status)
-  if (draftStatus !== OUTCOME_STUDIO_DRAFT_STATUSES.ACTIVE) {
+  if (draftStatus !== OUTCOME_STUDIO_DRAFT_STATUSES.ACTIVE
+    && !(allowGovernedApproved && draftStatus === OUTCOME_STUDIO_DRAFT_STATUSES.APPROVED && draft.phase === OUTCOME_STUDIO_GOVERNED_PHASE)) {
     throw buildOutcomeDraftApprovalBlockedError({
       blockerReason: draftStatus === OUTCOME_STUDIO_DRAFT_STATUSES.APPROVED
         ? 'OUTCOME_DRAFT_ALREADY_APPROVED'
@@ -6196,6 +6213,7 @@ const assertOutcomeSessionMutationPermission = async ({
     tenantId: runtimeInstance.tenantId,
     permission: runtimeType === 'DEAL_ANALYSIS' ? 'DEAL_UPDATE' : 'VMF_UPDATE',
   })
+  assertNormalOutcomeRuntime(runtimeInstance)
   return runtimeInstance
 }
 
@@ -6271,6 +6289,7 @@ export const getRuntimeOutcomeSession = async ({
   sessionId,
 } = {}) => {
   const runtimeInstance = await getRuntimeInstance({ runtimeInstanceId, scopes })
+  assertNormalOutcomeRuntime(runtimeInstance)
   const runtimeObjectId = runtimeInstance._id || runtimeInstance.id
   const currentEvidence = buildRuntimeTruthEvidence(runtimeInstance)
   const session = await findOutcomeSessionForRuntime({
@@ -6308,6 +6327,7 @@ export const listRuntimeOutcomeSessionAssets = async ({
   sessionId,
 } = {}) => {
   const runtimeInstance = await getRuntimeInstance({ runtimeInstanceId, scopes })
+  assertNormalOutcomeRuntime(runtimeInstance)
   const runtimeObjectId = runtimeInstance._id || runtimeInstance.id
   const currentEvidence = buildRuntimeTruthEvidence(runtimeInstance)
   await findOutcomeSessionForRuntime({
@@ -6328,6 +6348,7 @@ export const getRuntimeOutcomeAsset = async ({
   scopes,
 } = {}) => {
   const runtimeInstance = await getRuntimeInstance({ runtimeInstanceId, scopes })
+  assertNormalOutcomeRuntime(runtimeInstance)
   const runtimeObjectId = runtimeInstance._id || runtimeInstance.id
   const currentEvidence = buildRuntimeTruthEvidence(runtimeInstance)
   const asset = await findOutcomeAssetForRuntime({
@@ -6354,6 +6375,7 @@ export const getRuntimeOutcomeAssetVersion = async ({
   scopes,
 } = {}) => {
   const runtimeInstance = await getRuntimeInstance({ runtimeInstanceId, scopes })
+  assertNormalOutcomeRuntime(runtimeInstance)
   const runtimeObjectId = runtimeInstance._id || runtimeInstance.id
   const currentEvidence = buildRuntimeTruthEvidence(runtimeInstance)
   await findOutcomeAssetForRuntime({
@@ -6377,6 +6399,7 @@ export const getRuntimeOutcomeAssetPreview = async ({
   scopes,
 } = {}) => {
   const runtimeInstance = await getRuntimeInstance({ runtimeInstanceId, scopes })
+  assertNormalOutcomeRuntime(runtimeInstance)
   const runtimeObjectId = runtimeInstance._id || runtimeInstance.id
   const asset = await findOutcomeAssetForRuntime({
     detailsRuntimeInstanceId: runtimeInstanceId,
@@ -6435,6 +6458,7 @@ export const getRuntimeOutcomeDraftPreview = async ({
   sessionId,
 } = {}) => {
   const runtimeInstance = await getRuntimeInstance({ runtimeInstanceId, scopes })
+  assertNormalOutcomeRuntime(runtimeInstance)
   const runtimeObjectId = runtimeInstance._id || runtimeInstance.id
   const session = await findOutcomeSessionForRuntime({
     detailsRuntimeInstanceId: runtimeInstanceId,
@@ -6525,6 +6549,7 @@ export const getRuntimeOutcomeDraftCompare = async ({
   sessionId,
 } = {}) => {
   const runtimeInstance = await getRuntimeInstance({ runtimeInstanceId, scopes })
+  assertNormalOutcomeRuntime(runtimeInstance)
   const runtimeObjectId = runtimeInstance._id || runtimeInstance.id
   const session = await findOutcomeSessionForRuntime({
     detailsRuntimeInstanceId: runtimeInstanceId,
@@ -6670,14 +6695,18 @@ export const createRuntimeOutcomeSession = async ({
   payload = {},
   runtimeInstanceId,
   scopes,
+  successorOperation,
+  deps = {},
 } = {}) => {
-  const runtimeInstance = await assertOutcomeSessionMutationPermission({
+  const runtimeInstance = await (deps.assertMutationPermission || assertOutcomeSessionMutationPermission)({
     actorUserId,
     runtimeInstanceId,
     scopes,
   })
+  assertNormalOutcomeRuntime(runtimeInstance)
 
   let confirmedPlan = null
+  let successor = null
   const requestedPlanId = normalizeText(payload?.planId)
   const requestedRequestId = normalizeText(payload?.requestId)
   if (requestedPlanId || requestedRequestId) {
@@ -6696,6 +6725,9 @@ export const createRuntimeOutcomeSession = async ({
       throw createOutcomeStudioError({ status: 404, code: 'NOT_FOUND',
         message: 'The confirmed request plan was not found for this runtime.', reason: 'OUTCOME_CONFIRMED_PLAN_NOT_FOUND' })
     }
+    const claimedSuccessor = await requireOutcomeSuccessorSessionClaim({ runtime: runtimeInstance,
+      requestId: requestedRequestId, planId: requestedPlanId, successorOperation })
+    if (claimedSuccessor) successor = sanitizeOutcomeSuccessorLineage(projectOutcomeSuccessorLineage(claimedSuccessor))
     assertOutcomeKnowledgeCompositionPlanIntegrity(confirmedPlan)
     if (confirmedPlan.payload?.clarificationReceipt?.status !== 'PASSED'
       || confirmedPlan.payload?.clarificationReceipt?.stageKey !== 'CLARIFICATION'
@@ -6711,6 +6743,10 @@ export const createRuntimeOutcomeSession = async ({
       'contextBindings.requestPlan.planId': requestedPlanId,
     }).lean()
     if (existingSession) {
+      if (successor && JSON.stringify(sanitizeOutcomeSuccessorLineage(existingSession.contextBindings?.successor)) !== JSON.stringify(successor)) {
+        throw createOutcomeStudioError({ status: 409, code: 'CONFLICT', message: 'The saved successor session has invalid lineage.',
+          reason: 'OUTCOME_SUCCESSOR_RESULT_LINEAGE_INVALID' })
+      }
       const initialMessageLookup = buildConfirmedPlanMessageLookup({
         planId: requestedPlanId,
         requestId: requestedRequestId,
@@ -6734,6 +6770,10 @@ export const createRuntimeOutcomeSession = async ({
       }
       return serializeCustomerOutcomeSession(existingSession)
     }
+  }
+  if (successorOperation && !confirmedPlan) {
+    throw createOutcomeStudioError({ status: 409, code: 'CONFLICT', message: 'A successor requires its exact confirmed plan.',
+      reason: 'OUTCOME_SUCCESSOR_EXECUTION_CLAIM_REQUIRED' })
   }
   const sessionPayload = confirmedPlan ? {
     ...payload,
@@ -6873,6 +6913,7 @@ export const createRuntimeOutcomeSession = async ({
       truthSignature,
     }),
     outputContractResolution,
+    ...(successor ? { successor } : {}),
     ...(confirmedPlan ? { requestPlan: {
       requestId: requestedRequestId,
       planId: requestedPlanId,
@@ -6967,6 +7008,7 @@ export const createRuntimeOutcomeSession = async ({
       }),
       outputContractResolution,
       requestPlan: { ...contextBindings.requestPlan },
+      ...(successor ? { successor } : {}),
     },
     submittedBy: actorUserId,
     submittedAt: boundAt,
@@ -7182,6 +7224,7 @@ export const createRuntimeOutcomeMessage = async ({
     runtimeInstanceId,
     scopes,
   })
+  assertNormalOutcomeRuntime(runtimeInstance)
   const runtimeObjectId = runtimeInstance._id || runtimeInstance.id
   const session = await findOutcomeSessionForRuntime({
     detailsRuntimeInstanceId: runtimeInstanceId,
@@ -7417,42 +7460,19 @@ const buildDeterministicOutcomeUuid = (value) => {
   return `${hex.slice(0, 8).join('')}-${hex.slice(8, 12).join('')}-${hex.slice(12, 16).join('')}-${hex.slice(16, 20).join('')}-${hex.slice(20).join('')}`
 }
 
-export const buildGovernedQualityChainManifest = ({ plan, requestBinding, stages }) => {
-  if (!Array.isArray(stages) || stages.length !== OUTCOME_GOVERNED_EXECUTION_SEQUENCE.length) {
+export const buildGovernedQualityChainManifest = ({ plan, requestBinding, stages, stageHistory = stages, styleSource }) => {
+  let accepted
+  try {
+    accepted = validateOutcomeGovernedQualityChain({ plan, requestBinding, stages: stageHistory, recordedStages: stages, styleSource })
+  } catch (error) {
     throw createOutcomeStudioError({
-      status: 409,
-      code: 'CONFLICT',
-      message: 'Outcome Studio cannot finalise an incomplete governed quality chain.',
+      status: 409, code: 'CONFLICT', message: error.message,
       reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_RESPONSE_GENERATION_BLOCKED,
-      details: { blockerReason: 'OUTCOME_QUALITY_CHAIN_INCOMPLETE' },
+      details: error.details,
     })
   }
-  const normalizedStages = stages.map((stage, index) => {
+  const normalizedStages = accepted.map((stage, index) => {
     const expectedStageKey = OUTCOME_GOVERNED_EXECUTION_SEQUENCE[index]
-    if (stage?.status !== OUTCOME_QUALITY_STAGE_STATUSES.SUCCEEDED
-      || stage?.stageKey !== expectedStageKey
-      || Number(stage?.stageOrder) !== index + 1
-      || normalizeText(stage?.requestId) !== requestBinding.requestId
-      || normalizeText(stage?.draftId) !== requestBinding.draftId
-      || normalizeText(stage?.draftIterationId) !== requestBinding.draftIterationId
-      || normalizeText(stage?.planId) !== normalizeText(plan.planId)
-      || normalizeText(stage?.planFingerprint).toLowerCase() !== normalizeText(plan.planFingerprint).toLowerCase()
-      || (index > 0 && normalizeText(stage?.inputSnapshot?.sourceStage?.stageExecutionId)
-        !== normalizeText(stages[index - 1]?.stageExecutionId))
-      || (index > 0 && normalizeText(stage?.inputSnapshot?.sourceStage?.attemptFingerprint).toLowerCase()
-        !== normalizeText(stages[index - 1]?.attemptFingerprint).toLowerCase())
-      || (index > 0 && normalizeText(stage?.predecessorStageExecutionId)
-        !== normalizeText(stages[index - 1]?.stageExecutionId))
-      || (index > 0 && normalizeText(stage?.predecessorAttemptFingerprint).toLowerCase()
-        !== normalizeText(stages[index - 1]?.attemptFingerprint).toLowerCase())) {
-      throw createOutcomeStudioError({
-        status: 409,
-        code: 'CONFLICT',
-        message: `Outcome Studio ${expectedStageKey} evidence is incomplete or does not match its predecessor.`,
-        reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_RESPONSE_GENERATION_BLOCKED,
-        details: { blockerReason: 'OUTCOME_QUALITY_CHAIN_LINEAGE_INVALID', stageKey: expectedStageKey },
-      })
-    }
     return {
       stageKey: expectedStageKey,
       stageOrder: index + 1,
@@ -7461,6 +7481,8 @@ export const buildGovernedQualityChainManifest = ({ plan, requestBinding, stages
       attemptFingerprint: normalizeText(stage.attemptFingerprint).toLowerCase(),
       outputFingerprint: normalizeText(stage.outputFingerprint).toLowerCase(),
       predecessorStageExecutionId: normalizeText(stage.predecessorStageExecutionId),
+      sourceStageExecutionId: normalizeText(stage.inputSnapshot?.sourceStage?.stageExecutionId),
+      sourceAttemptFingerprint: normalizeText(stage.inputSnapshot?.sourceStage?.attemptFingerprint),
       predecessorAttemptFingerprint: normalizeText(stage.predecessorAttemptFingerprint).toLowerCase(),
       grrExecutionId: normalizeText(stage.executionIdentity?.grrExecutionId),
       grrRuntimeArtifactId: normalizeText(stage.executionIdentity?.grrRuntimeArtifactId),
@@ -7478,7 +7500,7 @@ export const buildGovernedQualityChainManifest = ({ plan, requestBinding, stages
   }
 }
 
-const buildGovernedDraftCustomerContent = (shapedStage) => {
+export const buildGovernedDraftCustomerContent = (shapedStage) => {
   const output = shapedStage?.outputSnapshot || {}
   const title = normalizeText(output.title) || 'Governed Outcome'
   const limitations = Array.isArray(output.visibleGaps)
@@ -7496,6 +7518,22 @@ const buildGovernedDraftCustomerContent = (shapedStage) => {
   return { title, customerContent: { markdown, sections }, limitations }
 }
 
+export const assertGovernedDraftMatchesShapedOutput = ({ draft, iteration, shapedStage }) => {
+  const accepted = buildGovernedDraftCustomerContent(shapedStage)
+  const contentHash = (content) => hashOutcomeQualityStageValue(projectOutcomeCustomerContent(content))
+  const list = (value) => Array.isArray(value) ? value.map(normalizeText).filter(Boolean) : []
+  if (!shapedStage || normalizeText(draft?.title) !== accepted.title || normalizeText(iteration?.title) !== accepted.title
+    || contentHash(iteration?.customerContent) !== contentHash(accepted.customerContent)
+    || (draft?.customerContent !== undefined && contentHash(draft.customerContent) !== contentHash(accepted.customerContent))
+    || [draft, iteration].some((record) => !record || !Array.isArray(record.limitations) || !Array.isArray(record.warnings)
+      || JSON.stringify(list(record.limitations)) !== JSON.stringify(accepted.limitations)
+      || JSON.stringify(list(record.warnings)) !== JSON.stringify([]))) {
+    throw createOutcomeStudioError({ status: 409, code: 'CONFLICT', message: 'The saved governed draft does not match its accepted shaped output.',
+      reason: 'OUTCOME_SUCCESSOR_RESULT_CONTENT_CHANGED' })
+  }
+  return accepted
+}
+
 export const persistGovernedQualityDraft = async ({
   actorUserId,
   auditRequest,
@@ -7508,7 +7546,25 @@ export const persistGovernedQualityDraft = async ({
   stages,
 }) => {
   const runtimeInstanceId = runtimeInstance._id || runtimeInstance.id
-  const qualityChain = buildGovernedQualityChainManifest({ plan, requestBinding, stages })
+  const successor = sanitizeOutcomeSuccessorLineage(serializedSession.successor)
+  if (successor) {
+    const operation = await assertOutcomeSuccessorExecutionClaim({ operationId: successor.operationId,
+      claimId: serializedSession.successorClaimId, runtimeInstanceId, requestId: plan.requestId, planId: plan.planId,
+      allowedStatuses: ['GENERATING'] })
+    if (JSON.stringify(sanitizeOutcomeSuccessorLineage(projectOutcomeSuccessorLineage(operation))) !== JSON.stringify(successor)) {
+      throw createOutcomeStudioError({ status: 409, code: 'CONFLICT', message: 'The successor lineage does not match its claimed operation.',
+        reason: 'OUTCOME_SUCCESSOR_RESULT_LINEAGE_INVALID' })
+    }
+  }
+  const stageHistory = stages.some((stage) => Number(stage.attemptNumber) > 1)
+    ? await OutcomeQualityStageExecution.find({
+        runtimeInstanceId, customerId: plan.customerId, tenantId: plan.tenantId,
+        requestId: requestBinding.requestId, planId: plan.planId,
+        draftId: requestBinding.draftId, draftIterationId: requestBinding.draftIterationId,
+      }).sort({ stageOrder: 1, attemptNumber: 1 }).lean()
+    : stages
+  const styleSource = await loadOutcomeGovernedQualityChainStyleSource({ plan, stages: stageHistory })
+  const qualityChain = buildGovernedQualityChainManifest({ plan, requestBinding, stages, stageHistory, styleSource })
   const responseMessageId = `outcome_message_${buildDeterministicOutcomeUuid(`SS-033:RESPONSE:${qualityChain.requestId}:${qualityChain.planId}`)}`
   const readExistingResult = async () => {
     const [existingMessage, existingDraft, existingIteration] = await Promise.all([
@@ -7600,6 +7656,7 @@ export const persistGovernedQualityDraft = async ({
     grrRuntimeArtifactId: normalizeText(rlStage.executionIdentity?.grrRuntimeArtifactId),
     grrProviderMode: 'LIVE_TEST',
     governedQualityChain: qualityChain,
+    ...(successor ? { successor } : {}),
   }
   const responseMessage = new OutcomeMessage({
     messageId: responseMessageId,
@@ -7617,7 +7674,7 @@ export const persistGovernedQualityDraft = async ({
     sourceOutputSnapshot: serializedSession.sourceOutput,
     truthSignature: serializedSession.truthSignature,
     knowledgePackBinding,
-    contextBindings: { governedQualityChain: qualityChain },
+    contextBindings: { governedQualityChain: qualityChain, ...(successor ? { successor } : {}) },
     submittedBy: actorUserId,
     submittedAt: generatedAt,
   })
@@ -7640,7 +7697,7 @@ export const persistGovernedQualityDraft = async ({
     knowledgePackBinding,
     currentIterationId: requestBinding.draftIterationId,
     currentIterationNumber: 1,
-    contextBindings: { governedQualityChain: qualityChain },
+    contextBindings: { governedQualityChain: qualityChain, ...(successor ? { successor } : {}) },
     lineageSummary,
     validationSummary,
     limitations,
@@ -7980,12 +8037,15 @@ export const generateRuntimeOutcomeResponse = async ({
   sessionId,
   messageId,
   workingDraftProviderAdapterFactory,
+  successorOperation,
+  deps = {},
 } = {}) => {
-  const runtimeInstance = await assertOutcomeSessionMutationPermission({
+  const runtimeInstance = await (deps.assertMutationPermission || assertOutcomeSessionMutationPermission)({
     actorUserId,
     runtimeInstanceId,
     scopes,
   })
+  assertNormalOutcomeRuntime(runtimeInstance)
   const runtimeObjectId = runtimeInstance._id || runtimeInstance.id
   const session = await findOutcomeSessionForRuntime({
     detailsRuntimeInstanceId: runtimeInstanceId,
@@ -7994,6 +8054,32 @@ export const generateRuntimeOutcomeResponse = async ({
   })
   const currentEvidence = buildRuntimeTruthEvidence(runtimeInstance)
   const serializedSession = serializeOutcomeSession(session, { currentEvidence })
+  if (!session.contextBindings?.successor && serializedSession.requestPlan) {
+    const expectedSuccessor = await requireOutcomeSuccessorSessionClaim({ runtime: runtimeInstance,
+      requestId: serializedSession.requestPlan.requestId, planId: serializedSession.requestPlan.planId,
+      successorOperation, allowedStatuses: ['GENERATING'] })
+    if (expectedSuccessor) throw createOutcomeStudioError({ status: 409, code: 'CONFLICT',
+      message: 'The successor session is missing its governed lineage.', reason: 'OUTCOME_SUCCESSOR_RESULT_LINEAGE_INVALID' })
+  }
+  if (session.contextBindings?.successor) {
+    const lineage = sanitizeOutcomeSuccessorLineage(session.contextBindings.successor)
+    if (!successorOperation || successorOperation.operationId !== lineage.operationId) {
+      throw createOutcomeStudioError({ status: 409, code: 'CONFLICT', message: 'Use the governed successor action to continue this request.',
+        reason: 'OUTCOME_SUCCESSOR_EXECUTION_CLAIM_REQUIRED' })
+    }
+    const operation = await assertOutcomeSuccessorExecutionClaim({ operationId: lineage.operationId,
+      claimId: successorOperation.claimId, runtimeInstanceId: runtimeObjectId, requestId: serializedSession.requestPlan?.requestId,
+      planId: serializedSession.requestPlan?.planId, allowedStatuses: ['GENERATING'] })
+    if (operation.refs?.sessionId !== session.sessionId || operation.refs?.messageId !== messageId
+      || JSON.stringify(sanitizeOutcomeSuccessorLineage(projectOutcomeSuccessorLineage(operation))) !== JSON.stringify(lineage)) {
+      throw createOutcomeStudioError({ status: 409, code: 'CONFLICT', message: 'The successor session does not match its claimed operation.',
+        reason: 'OUTCOME_SUCCESSOR_EXECUTION_CLAIM_REQUIRED' })
+    }
+    serializedSession.successorClaimId = successorOperation.claimId
+  } else if (successorOperation) {
+    throw createOutcomeStudioError({ status: 409, code: 'CONFLICT', message: 'The session has no governed successor binding.',
+      reason: 'OUTCOME_SUCCESSOR_EXECUTION_CLAIM_REQUIRED' })
+  }
 
   if (serializedSession.status !== OUTCOME_STUDIO_SESSION_STATUSES.ACTIVE) {
     throw createOutcomeStudioError({
@@ -9047,6 +9133,7 @@ export const reviseRuntimeOutcomeAsset = async ({
     runtimeInstanceId,
     scopes,
   })
+  assertNormalOutcomeRuntime(runtimeInstance)
   const runtimeObjectId = runtimeInstance._id || runtimeInstance.id
   const session = await findOutcomeSessionForRuntime({
     detailsRuntimeInstanceId: runtimeInstanceId,
@@ -9418,12 +9505,14 @@ export const approveRuntimeOutcomeDraft = async ({
   runtimeInstanceId,
   scopes,
   sessionId,
+  deps = {},
 } = {}) => {
-  const runtimeInstance = await assertOutcomeSessionMutationPermission({
+  const runtimeInstance = await (deps.assertMutationPermission || assertOutcomeSessionMutationPermission)({
     actorUserId,
     runtimeInstanceId,
     scopes,
   })
+  assertNormalOutcomeRuntime(runtimeInstance)
   const runtimeObjectId = runtimeInstance._id || runtimeInstance.id
   const session = await findOutcomeSessionForRuntime({
     detailsRuntimeInstanceId: runtimeInstanceId,
@@ -9457,55 +9546,47 @@ export const approveRuntimeOutcomeDraft = async ({
     draftId,
     runtimeInstanceId: runtimeObjectId,
     sessionId: serializedSession.sessionId,
+    allowGovernedApproved: true,
   })
+  const approvalScope = governedApprovalScope(runtimeInstance)
+  const serializeWinner = (winner) => ({
+    draft: serializeCustomerOutcomeDraft(winner.draft, { currentEvidence, currentIteration: winner.iteration }),
+    draftIteration: serializeCustomerOutcomeDraftIteration(winner.iteration, { draft: winner.draft, knowledgePackBinding: winner.version.knowledgePackBinding }),
+    asset: serializeOutcomeAssetSummary(winner.asset, { currentEvidence }),
+    assetVersion: serializeCustomerOutcomeAssetVersion(winner.version, { currentEvidence }),
+    renderOutput: projectRuntimeRenderOutput(winner.renderOutput), idempotent: true,
+  })
+  if (activeDraft.status === 'APPROVED' && activeDraft.phase === OUTCOME_STUDIO_GOVERNED_PHASE) {
+    const state = await readGovernedApprovalState({ scope: approvalScope, sessionId: serializedSession.sessionId, draftId })
+    const winner = await readCommittedGovernedApproval({ scope: approvalScope, sessionId: serializedSession.sessionId, draftId,
+      expectedChain: state.iteration.lineageSummary.governedQualityChain })
+    if (!winner) throw governedFinalisationConflict('OUTCOME_GOVERNED_APPROVAL_WINNER_INCOMPLETE')
+    return serializeWinner(winner)
+  }
   const currentDraftIteration = await findCurrentOutcomeDraftIterationForApproval({
     activeDraft,
     runtimeInstanceId: runtimeObjectId,
     sessionId: serializedSession.sessionId,
   })
+  await assertOutcomeSuccessorApprovedDraftBinding({ runtime: runtimeInstance, draft: activeDraft, iteration: currentDraftIteration })
   const currentDraftPhase = normalizeText(currentDraftIteration.phase || activeDraft.phase)
   const confirmedRequestPlan = serializedSession.requestPlan
   const governedQualityChainRequired = Boolean(
     (confirmedRequestPlan?.requestId && confirmedRequestPlan?.planId)
       || currentDraftPhase === OUTCOME_STUDIO_GOVERNED_PHASE,
   )
+  let governedApprovalState = null
   if (governedQualityChainRequired) {
-    const chain = currentDraftIteration.lineageSummary?.governedQualityChain
-      || activeDraft.lineageSummary?.governedQualityChain
-    if (currentDraftPhase !== OUTCOME_STUDIO_GOVERNED_PHASE || !chain) {
-      throw buildOutcomeDraftApprovalBlockedError({
-        blockerReason: 'OUTCOME_GOVERNED_QUALITY_CHAIN_NOT_CURRENT',
-        currentIterationId: normalizeText(activeDraft.currentIterationId),
-        draftId: activeDraft.draftId,
-        sessionId: serializedSession.sessionId,
-      })
+    if (currentDraftPhase !== OUTCOME_STUDIO_GOVERNED_PHASE) throw governedFinalisationConflict('OUTCOME_GOVERNED_QUALITY_CHAIN_NOT_CURRENT')
+    assertOutcomeQualityStageTransactionSupport()
+    governedApprovalState = await readGovernedApprovalState({ scope: approvalScope, sessionId: serializedSession.sessionId, draftId })
+    if (governedApprovalState.fingerprint !== governedApprovalSourceFingerprint({ session, draft: activeDraft, iteration: currentDraftIteration })) {
+      throw governedFinalisationConflict('OUTCOME_GOVERNED_APPROVAL_SOURCE_CHANGED')
     }
-    const persistedStages = await OutcomeQualityStageExecution.find({
-      runtimeInstanceId: runtimeObjectId,
-      requestId: normalizeText(chain?.requestId),
-      planId: normalizeText(chain?.planId),
-      draftId: normalizeText(activeDraft.draftId),
-      draftIterationId: normalizeText(currentDraftIteration.draftIterationId),
-    }).sort({ stageOrder: 1 }).lean()
-    const recordedStages = Array.isArray(chain?.stages) ? chain.stages : []
-    const persistedChainMatches = persistedStages.length === OUTCOME_GOVERNED_EXECUTION_SEQUENCE.length
-      && recordedStages.length === OUTCOME_GOVERNED_EXECUTION_SEQUENCE.length
-      && persistedStages.every((stage, index) => (
-        stage.stageKey === OUTCOME_GOVERNED_EXECUTION_SEQUENCE[index]
-        && stage.status === OUTCOME_QUALITY_STAGE_STATUSES.SUCCEEDED
-        && normalizeText(stage.stageExecutionId) === normalizeText(recordedStages[index]?.stageExecutionId)
-        && normalizeText(stage.attemptFingerprint).toLowerCase()
-          === normalizeText(recordedStages[index]?.attemptFingerprint).toLowerCase()
-        && normalizeText(stage.outputFingerprint).toLowerCase()
-          === normalizeText(recordedStages[index]?.outputFingerprint).toLowerCase()
-      ))
-    if (!persistedChainMatches) {
-      throw buildOutcomeDraftApprovalBlockedError({
-        blockerReason: 'OUTCOME_GOVERNED_QUALITY_CHAIN_NOT_CURRENT',
-        currentIterationId: normalizeText(activeDraft.currentIterationId),
-        draftId: activeDraft.draftId,
-        sessionId: serializedSession.sessionId,
-      })
+    const acceptedContent = buildGovernedDraftCustomerContent(governedApprovalState.stages[4]).customerContent
+    if (hashOutcomeQualityStageValue(projectOutcomeCustomerContent(currentDraftIteration.customerContent))
+      !== hashOutcomeQualityStageValue(projectOutcomeCustomerContent(acceptedContent))) {
+      throw governedFinalisationConflict('OUTCOME_GOVERNED_DRAFT_CONTENT_CHANGED')
     }
   }
   const approvalReadiness = buildOutcomeExecutionApprovalReadiness({
@@ -9788,6 +9869,25 @@ export const approveRuntimeOutcomeDraft = async ({
     generatedBy: actorUserId,
     generatedAt: approvedAt,
   })
+  let preparedRender = null
+  if (governedApprovalState) {
+    try {
+      preparedRender = await prepareGovernedOutcomeApprovalRender({ state: governedApprovalState, assetVersion: outcomeAssetVersion,
+        loadPackReceipt: deps.loadRenderingPackReceipt || loadRuntimeRenderingPackReceipt, prepareRender: deps.prepareRender })
+    } catch (error) {
+      throw mapAssetRenderingError(error, { format: 'MARKDOWN' })
+    }
+    lineageSummary.runtimeRevisionId = preparedRender.model.runtimeRevision.id
+    lineageSummary.runtimeRevisionNumber = preparedRender.model.runtimeRevision.number
+    lineageSummary.governedRender = { renderOutputId: preparedRender.record.renderOutputId, sourceContentChecksum: preparedRender.model.sourceContentChecksum,
+      outputChecksum: preparedRender.record.artifact.outputChecksum, format: 'MARKDOWN',
+      iterationContentFingerprint: hashOutcomeQualityStageValue(governedApprovalState.iteration.customerContent),
+      assetContentFingerprint: hashOutcomeQualityStageValue(outcomeAssetVersion.customerContent) }
+    outcomeAssetVersion.lineageSummary = { ...lineageSummary }
+    outcomeAssetVersion.renderingProfile = { ...renderingProfile, frozenOutputContract: preparedRender.model.outputContract }
+    if (!assetVersionIsAppend) outcomeAsset.lineageSummary = { ...lineageSummary }
+  }
+  let committedWinner = null
   const approvedDraft = {
     ...activeDraft,
     status: OUTCOME_STUDIO_DRAFT_STATUSES.APPROVED,
@@ -9815,9 +9915,25 @@ export const approveRuntimeOutcomeDraft = async ({
   let failureStage = 'write'
   let approvalClaimAcquired = false
   const persistApprovalAndAudit = async (dbSession = null) => {
+    await assertOutcomeSuccessorApprovedDraftBinding({ runtime: runtimeInstance, draft: activeDraft,
+      iteration: currentDraftIteration, session: dbSession })
     const saveOptions = dbSession ? { session: dbSession } : undefined
     const updateOptions = dbSession ? { session: dbSession } : undefined
+    if (governedApprovalState) {
+      const current = await readGovernedApprovalState({ scope: approvalScope, sessionId: serializedSession.sessionId, draftId, dbSession })
+      if (current.draft.status === 'APPROVED') {
+        committedWinner = await readCommittedGovernedApproval({ scope: approvalScope, sessionId: serializedSession.sessionId, draftId, dbSession,
+          expectedChain: governedApprovalState.iteration.lineageSummary.governedQualityChain })
+        if (!committedWinner) throw governedFinalisationConflict('OUTCOME_GOVERNED_APPROVAL_WINNER_INCOMPLETE')
+        return
+      }
+      committedWinner = null
+      if (current.fingerprint !== governedApprovalState.fingerprint || current.draft.status !== 'ACTIVE' || current.iteration.status !== 'CURRENT') {
+        throw governedFinalisationConflict('OUTCOME_GOVERNED_APPROVAL_SOURCE_CHANGED')
+      }
+    }
     const draftClaimFilter = {
+      ...(governedApprovalState ? approvalScope : {}),
       _id: activeDraft._id || activeDraft.id,
       status: OUTCOME_STUDIO_DRAFT_STATUSES.ACTIVE,
       currentIterationId: currentDraftIteration.draftIterationId,
@@ -9857,7 +9973,10 @@ export const approveRuntimeOutcomeDraft = async ({
         status: OUTCOME_STUDIO_DRAFT_ITERATION_STATUSES.APPROVED,
       },
     }
-    if (updateOptions) {
+    if (governedApprovalState) {
+      const iterationClaim = await OutcomeDraftIteration.updateOne({ ...iterationFilter, ...approvalScope }, iterationApprovalUpdate, updateOptions)
+      if (Number(iterationClaim.modifiedCount) !== 1) throw governedFinalisationConflict('OUTCOME_DRAFT_CURRENT_ITERATION_NOT_FOUND')
+    } else if (updateOptions) {
       await OutcomeDraftIteration.updateMany(iterationFilter, iterationApprovalUpdate, updateOptions)
     } else {
       await OutcomeDraftIteration.updateMany(iterationFilter, iterationApprovalUpdate)
@@ -9921,11 +10040,14 @@ export const approveRuntimeOutcomeDraft = async ({
         })
       }
     } else {
-      await outcomeAsset.save(saveOptions)
+      await (governedApprovalState ? new OutcomeAsset(outcomeAsset.toObject({ depopulate: true })) : outcomeAsset).save(saveOptions)
     }
-    await outcomeAssetVersion.save(saveOptions)
+    await (governedApprovalState ? new OutcomeAssetVersion(outcomeAssetVersion.toObject({ depopulate: true })) : outcomeAssetVersion).save(saveOptions)
+    if (preparedRender) await new OutcomeRenderOutput(preparedRender.record).save(saveOptions)
     try {
-      await saveRuntimeGraphRelationshipDocuments(assetRelationshipDocuments, { dbSession })
+      await saveRuntimeGraphRelationshipDocuments(governedApprovalState
+        ? assetRelationshipDocuments.map((doc) => new doc.constructor(doc.toObject({ depopulate: true })))
+        : assetRelationshipDocuments, { dbSession })
     } catch (err) {
       err.outcomeGraphRelationshipFailure = 'approvedAsset'
       throw err
@@ -9989,6 +10111,7 @@ export const approveRuntimeOutcomeDraft = async ({
           knowledgePackContentHashes: approvedKnowledgePackBinding.lineage.contentHashes,
           postValidation: buildOutcomePostValidationAuditSummary(postValidation),
           generatedBodyAvailable: true,
+          ...(preparedRender ? { governedRender: lineageSummary.governedRender } : {}),
           runtimeGraphRelationshipCount: assetRelationshipDocuments.length,
         },
       })
@@ -10005,6 +10128,11 @@ export const approveRuntimeOutcomeDraft = async ({
         await persistApprovalAndAudit(dbSession)
       })
     } catch (err) {
+      if (governedApprovalState) {
+        const winner = await readCommittedGovernedApproval({ scope: approvalScope, sessionId: serializedSession.sessionId, draftId,
+          expectedChain: governedApprovalState.iteration.lineageSummary.governedQualityChain })
+        if (winner) return serializeWinner(winner)
+      }
       if (err?.outcomeGraphRelationshipFailure === 'approvedAsset') {
         throw failGraphRelationshipClosed(err, {
           draftId: activeDraft.draftId,
@@ -10032,6 +10160,7 @@ export const approveRuntimeOutcomeDraft = async ({
       await dbSession.endSession()
     }
   } else {
+    if (governedApprovalState) assertOutcomeQualityStageTransactionSupport()
     try {
       await persistApprovalAndAudit()
     } catch (err) {
@@ -10119,7 +10248,9 @@ export const approveRuntimeOutcomeDraft = async ({
     }
   }
 
+  if (committedWinner) return serializeWinner(committedWinner)
   return {
+    ...(preparedRender ? { renderOutput: projectRuntimeRenderOutput(preparedRender.record), idempotent: false } : {}),
     draft: serializeCustomerOutcomeDraft(approvedDraft, {
       currentEvidence,
       currentIteration: approvedDraftIteration,
@@ -10147,6 +10278,7 @@ export const discardRuntimeOutcomeDraft = async ({
     runtimeInstanceId,
     scopes,
   })
+  assertNormalOutcomeRuntime(runtimeInstance)
   const runtimeObjectId = runtimeInstance._id || runtimeInstance.id
   const session = await findOutcomeSessionForRuntime({
     detailsRuntimeInstanceId: runtimeInstanceId,
@@ -10352,6 +10484,7 @@ export const publishRuntimeOutcomeAsset = async ({
     runtimeInstanceId,
     scopes,
   })
+  assertNormalOutcomeRuntime(runtimeInstance)
   const runtimeObjectId = runtimeInstance._id || runtimeInstance.id
   const asset = await findOutcomeAssetForRuntime({
     detailsRuntimeInstanceId: runtimeInstanceId,
@@ -10578,6 +10711,7 @@ export const exportRuntimeOutcomeAsset = async ({
   outcomeAssetId,
   runtimeInstanceId,
   scopes,
+  deps = {},
 } = {}) => {
   const normalizedFormat = normalizeToken(format)
   if (!Object.values(OUTCOME_STUDIO_EXPORT_FORMATS).includes(normalizedFormat)) {
@@ -10590,7 +10724,8 @@ export const exportRuntimeOutcomeAsset = async ({
     })
   }
 
-  const runtimeInstance = await getRuntimeInstance({ runtimeInstanceId, scopes })
+  const runtimeInstance = await (deps.getRuntimeInstance || getRuntimeInstance)({ runtimeInstanceId, scopes })
+  assertNormalOutcomeRuntime(runtimeInstance)
   const runtimeObjectId = runtimeInstance._id || runtimeInstance.id
   const asset = await findOutcomeAssetForRuntime({
     detailsRuntimeInstanceId: runtimeInstanceId,
@@ -10629,6 +10764,20 @@ export const exportRuntimeOutcomeAsset = async ({
     reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_ASSET_EXPORT_BLOCKED,
     records: [serializedVersion, serializedAsset],
   })
+  if (currentVersion.phase === OUTCOME_STUDIO_GOVERNED_PHASE) {
+    const rendered = await renderRuntimeOutcomeAsset({ actorUserId, auditRequest, format, outcomeAssetId, runtimeInstanceId, scopes, deps })
+    try {
+      await logOutcomeAssetExportAudit({ auditRequest, asset, runtimeInstance,
+        summary: 'Exported the exact completed governed Markdown output.',
+        diff: { actorUserId, outcomeAssetId, outcomeAssetVersionId: currentVersion.outcomeAssetVersionId,
+          format: normalizedFormat, renderOutputId: rendered.renderOutput.renderOutputId,
+          outputChecksum: rendered.renderOutput.artifact.outputChecksum, contentIncludedInAudit: false } })
+    } catch (error) {
+      throw failExportAuditClosed(error, { outcomeAssetId, outcomeAssetVersionId: currentVersion.outcomeAssetVersionId,
+        format: normalizedFormat, exportAvailable: false })
+    }
+    return rendered
+  }
   const exportKnowledgeContextResult = await resolveOutcomeStudioKnowledgeContext({
     query: {
       ...getRuntimeScope(runtimeInstance),
@@ -11086,6 +11235,7 @@ export const renderRuntimeOutcomeAsset = async ({
   outcomeAssetId,
   runtimeInstanceId,
   scopes,
+  deps = {},
 } = {}) => {
   const normalizedFormat = normalizeToken(format)
   if (!Object.values(OUTCOME_STUDIO_RENDER_FORMATS).includes(normalizedFormat)) {
@@ -11097,7 +11247,8 @@ export const renderRuntimeOutcomeAsset = async ({
     })
   }
 
-  const runtimeInstance = await getRuntimeInstance({ runtimeInstanceId, scopes })
+  const runtimeInstance = await (deps.getRuntimeInstance || getRuntimeInstance)({ runtimeInstanceId, scopes })
+  assertNormalOutcomeRuntime(runtimeInstance)
   const runtimeObjectId = runtimeInstance._id || runtimeInstance.id
   const asset = await findOutcomeAssetForRuntime({
     detailsRuntimeInstanceId: runtimeInstanceId,
@@ -11137,6 +11288,32 @@ export const renderRuntimeOutcomeAsset = async ({
     records: [serializedVersion, serializedAsset],
   })
 
+  if (currentVersion.phase === OUTCOME_STUDIO_GOVERNED_PHASE) {
+    if (normalizedFormat !== 'MARKDOWN') throw createAssetRenderingRuntimeError({ status: 422,
+      reason: OUTCOME_STUDIO_ERROR_REASONS.OUTCOME_ASSET_EXPORT_FORMAT_UNSUPPORTED,
+      message: 'This governed completion supports Markdown.', details: { exportAvailable: false, format: normalizedFormat } })
+    const scope = governedApprovalScope(runtimeInstance)
+    const draftId = currentVersion.lineageSummary?.draftApproval?.draftId
+    const state = await readGovernedApprovalState({ scope, sessionId: currentVersion.sessionId, draftId })
+    const winner = await readCommittedGovernedApproval({ scope, sessionId: currentVersion.sessionId, draftId,
+      expectedChain: state.iteration.lineageSummary.governedQualityChain })
+    if (!winner || winner.version.outcomeAssetVersionId !== currentVersion.outcomeAssetVersionId) {
+      throw governedFinalisationConflict('OUTCOME_GOVERNED_APPROVAL_WINNER_INCOMPLETE')
+    }
+    let prepared
+    try {
+      prepared = await prepareGovernedOutcomeApprovalRender({ state, assetVersion: currentVersion,
+        loadPackReceipt: deps.loadRenderingPackReceipt || loadRuntimeRenderingPackReceipt })
+    } catch (error) { throw mapAssetRenderingError(error, { format: normalizedFormat }) }
+    if (prepared.model.sourceContentChecksum !== winner.renderOutput.sourceContentChecksum
+      || prepared.record.artifact.outputChecksum !== winner.renderOutput.artifact.outputChecksum) {
+      throw governedFinalisationConflict('OUTCOME_GOVERNED_RENDER_RECEIPT_CHANGED')
+    }
+    return { format: 'MARKDOWN', filename: winner.renderOutput.artifact.filename,
+      mimeType: winner.renderOutput.artifact.mimeType, encoding: 'base64', contentBase64: prepared.buffer.toString('base64'),
+      exportAvailable: true, renderOutput: projectRuntimeRenderOutput(winner.renderOutput),
+      sourceContentChecksum: winner.renderOutput.sourceContentChecksum, contentIncludedInReceipt: false }
+  }
   const renderingProfile = buildRuntimeRenderingProfile({ currentVersion })
   if (!renderingProfile.visualSystemKey) {
     throw createAssetRenderingRuntimeError({
@@ -11267,6 +11444,7 @@ export const listRuntimeOutcomeAssetRenderOutputs = async ({
   scopes,
 } = {}) => {
   const runtimeInstance = await getRuntimeInstance({ runtimeInstanceId, scopes })
+  assertNormalOutcomeRuntime(runtimeInstance)
   const runtimeObjectId = runtimeInstance._id || runtimeInstance.id
   const asset = await findOutcomeAssetForRuntime({
     detailsRuntimeInstanceId: runtimeInstanceId,
@@ -11309,6 +11487,7 @@ export const updateRuntimeOutcomeSessionFromLatestTruth = async ({
     runtimeInstanceId,
     scopes,
   })
+  assertNormalOutcomeRuntime(runtimeInstance)
   const runtimeObjectId = runtimeInstance._id || runtimeInstance.id
   const session = await findOutcomeSessionForRuntime({
     detailsRuntimeInstanceId: runtimeInstanceId,

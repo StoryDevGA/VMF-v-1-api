@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto'
+import { assertEvidenceMembershipBody, membershipHash, evidenceMaterialHash } from '../services/runtimeEvidenceSnapshotContract.js'
+import { getDiscoveryContradictionReview } from '../services/discoveryContradictionReviewService.js'
 
 export const OUTCOME_EVIDENCE_SNAPSHOT_VERSION = 'outcome-evidence-inventory.v1'
 export const OUTCOME_EVIDENCE_PAGE_SIZE = 150
@@ -13,6 +15,89 @@ const fail = (reason, receipt) => { throw Object.assign(new Error('The governed 
 }) }
 const idsForReference = (reference, records) => records.filter((row) => row.id === reference
   || row.sourceReference === reference).map((row) => row.id)
+const frozenContexts = (receipt, section) => {
+  if (!receipt.frozenMembership) return []
+  const frozen = receipt.frozenMembership
+  const body = assertEvidenceMembershipBody(frozen.body)
+  if (membershipHash(body) !== frozen.membershipHash || !/^evidence_snapshot_[a-f0-9-]{36}$/.test(frozen.snapshotId)
+    || ['customerId', 'tenantId', 'runtimeInstanceId', 'runtimeInstanceKey'].some(key => body.scope[key] !== receipt.scope[key])
+    || body.basisStateVersion !== receipt.scope.stateVersion) fail('FROZEN_CONTEXT_INVALID', receipt)
+  const member = body.sections.find(row => row.sectionKey === section.sectionKey)
+  if (!member || section.storageId !== member.storageId || section.materialHash !== member.materialHash
+    || snapshotHash([...new Set(section.references)].sort()) !== snapshotHash(member.references.supportingEvidenceRefs || [])) fail('FROZEN_CONTEXT_INVALID', receipt)
+  return member.contextBindings?.references || []
+}
+export const isOutcomeContextMetadataReference = (snapshot, sectionKey, reference) => {
+  const receipt = snapshot?.inventoryReceipt
+  if (!receipt?.frozenMembership) return false
+  const section = receipt.sectionSnapshot.find(row => row.sectionKey === sectionKey)
+  return Boolean(section && frozenContexts(receipt, section).some(row => row.refKey === reference))
+}
+// A frozen registered note is provenance, never an implicit fact selection.
+// Keep its omission in the ledger; only independently sufficient claims may draft.
+export const isOutcomeSourceMetadataReference = (snapshot, sectionKey, reference) => {
+  const receipt = snapshot?.inventoryReceipt
+  if (!receipt?.frozenMembership || snapshot.evidenceObjects?.some(row => row.evidenceObjectId === reference)
+    || receipt.frozenMembership.body.evidence.some(row => row.evidenceObjectId === reference)) return false
+  const section = receipt.sectionSnapshot?.find(row => row.sectionKey === sectionKey)
+  if (!section?.references?.includes(reference)) return false
+  frozenContexts(receipt, section)
+  const sources = (snapshot.sourceRegistry || []).filter(row => row.sourceId === reference)
+  if (sources.length !== 1) return false
+  const source = sources[0], member = receipt.frozenMembership.body.sources.find(row => row.storageId === String(source._id))
+  return Boolean(source.sourceType === 'DISCOVERY_NOTES' && source.current === true && source.isCurrent !== false
+    && (!source.stateStatus || source.stateStatus === 'CURRENT') && (!source.status || source.status === 'CURRENT')
+    && ['customerId', 'tenantId', 'runtimeInstanceId', 'runtimeInstanceKey'].every(key => String(source[key]) === receipt.scope[key])
+    && source.stateVersion === receipt.scope.stateVersion && source.sourceStateVersion === receipt.scope.stateVersion
+    && member?.sourceId === reference && member.materialHash === evidenceMaterialHash(source))
+}
+// This witness is emitted only after the native signed lock consumer verifies
+// the recorded review/completion. It is not a VE02 or dimensional approval.
+export const assertOutcomeRecordedFinding = snapshot => {
+  const receipt = snapshot?.inventoryReceipt, record = receipt?.recordedReviewCompletion
+  if (!record) return null
+  const frozen = receipt.frozenMembership, link = record.link
+  const reviews = (snapshot.contradictionReviews || []).filter(row => row.reviewId === link?.reviewId)
+  const review = reviews[0]
+  if (!frozen || !record.scope || record.contractVersion !== 'outcome-recorded-review-completion.v1'
+    || snapshotHash(record.scope) !== snapshotHash(receipt.scope) || record.snapshotId !== frozen.snapshotId
+    || record.snapshotMembershipHash !== frozen.membershipHash || membershipHash(frozen.body) !== frozen.membershipHash
+    || link?.route !== 'RECORDED_NATIVE_REVIEW_COMPLETION' || link.classification !== 'NON_AUTHORITATIVE_SYNTHETIC_DEV_TEST'
+    || link.authoritative !== false || !link.completionId || !link.completionAuditId || !link.reviewAuditId
+    || !/^[a-f0-9]{24}$/.test(record.lockAuditId || '') || !/^[a-f0-9]{64}$/.test(record.lockAuditHash || '')
+    || !Number.isSafeInteger(record.lockAuditSignatureVersion) || record.lockAuditSignatureVersion < 1
+    || !/^[a-f0-9]{64}$/.test(link.populationHash || '') || !/^[a-f0-9]{64}$/.test(link.materialHash || '')
+    || !link.delegationReference || !/^[a-f0-9]{64}$/.test(link.delegationHash || '')
+    || reviews.length !== 1 || membershipHash(review) !== link.reviewHash
+    || review.runtimeInstanceId !== receipt.scope.runtimeInstanceId || review.disposition !== 'NOT_CONTRADICTORY'
+    || review.contradictionId !== record.contradictionId || review.evidencePairHash !== record.evidencePairHash
+    || review.reviewEpoch !== record.reviewEpoch || snapshot.contradictionReviewEpoch !== record.reviewEpoch
+    || frozen.body.basisStateVersion !== receipt.scope.stateVersion
+    || ['customerId', 'tenantId', 'runtimeInstanceId', 'runtimeInstanceKey'].some(key => frozen.body.scope[key] !== receipt.scope[key])) {
+    fail('RECORDED_FINDING_INVALID', receipt)
+  }
+  return record
+}
+export const assertOutcomeSupplementalFinding = snapshot => {
+  const receipt = snapshot?.inventoryReceipt, finding = receipt?.supplementalFinding
+  if (!finding) return null
+  const frozen = receipt.frozenMembership
+  const pair = getDiscoveryContradictionReview(finding.candidate, snapshot.evidenceObjects, null,
+    receipt.scope.runtimeInstanceId, finding.reviewEpoch)
+  if (!frozen || finding.disposition !== 'NOT_CONTRADICTORY'
+    || !/^[a-f0-9]{24}$/.test(finding.storageId || '') || !/^[a-f0-9]{24}$/.test(finding.auditId || '')
+    || !/^[a-f0-9]{64}$/.test(finding.bodyHash || '') || !Number.isSafeInteger(finding.auditSignatureVersion) || finding.auditSignatureVersion < 1
+    || !finding.receiptId || !finding.reviewerUserId || !Number.isFinite(Date.parse(finding.createdAt))
+    || !finding.authority?.receiptId || !/^[a-f0-9]{64}$/.test(finding.authority?.bodyHash || '')
+    || !finding.authority?.approvalReference || !finding.authority?.version || !/^[a-f0-9]{64}$/.test(finding.authority?.documentHash || '')
+    || !finding.rationale || finding.snapshotMembershipHash !== frozen.membershipHash
+    || snapshotHash(finding.scope) !== snapshotHash(receipt.scope)
+    || snapshotHash(snapshot.discoveryHealth?.contradictionCandidates || []) !== snapshotHash([finding.candidate])
+    || snapshot.contradictionReviewEpoch !== finding.reviewEpoch
+    || Object.hasOwn(snapshot, 'contradictionReviews')
+    || pair.evidencePairHash !== finding.evidencePairHash || snapshotHash(pair.evidence) !== snapshotHash(finding.evidence)) fail('SUPPLEMENTAL_FINDING_INVALID', receipt)
+  return finding
+}
 export const deriveSnapshotSelection = (receipt) => {
   const records = receipt.collections.evidence.records
   const selected = new Set(receipt.sectionCoverage.flatMap((section) => section.references
@@ -29,14 +114,16 @@ export const deriveSnapshotSelection = (receipt) => {
 }
 
 // Complete inventory is distinct from the bounded full-body section projection.
-export const assembleOutcomeEvidenceInventory = async ({ scope, sections, contradictionReferences = [],
+export const assembleOutcomeEvidenceInventory = async ({ scope, sections, contradictionReferences = [], frozenMembership, supplementalFinding, recordedReviewCompletion,
   readPage, count, validateRows, maxBytes = 512 * 1024 }) => {
   const receipt = { version: OUTCOME_EVIDENCE_SNAPSHOT_VERSION, pageSize: OUTCOME_EVIDENCE_PAGE_SIZE,
     scope, completeness: 'INCOMPLETE', collections: {},
     sectionSnapshot: sections, sectionSnapshotHash: snapshotHash(sections),
     sectionCoverage: sections.map((section) => ({ sectionKey: section.sectionKey,
       references: [...new Set(section.references)].sort() })).sort((a, b) => a.sectionKey < b.sectionKey ? -1 : a.sectionKey > b.sectionKey ? 1 : 0),
-    contradictionReferences: [...new Set(contradictionReferences)].sort() }
+    contradictionReferences: [...new Set(contradictionReferences)].sort(),
+    ...(frozenMembership ? { frozenMembership } : {}), ...(supplementalFinding ? { supplementalFinding } : {}),
+    ...(recordedReviewCompletion ? { recordedReviewCompletion } : {}) }
   const bodies = {}
   const scan = async (kind) => {
     const totalCount = await count(kind)
@@ -81,7 +168,8 @@ export const assembleOutcomeEvidenceInventory = async ({ scope, sections, contra
     if (receipt.collections.evidence.records.some((row) => !sourceIds.has(row.sourceReference))) fail('SOURCE_REFERENCE_MISSING', receipt)
     receipt.sectionCoverage = receipt.sectionCoverage.map((section) => ({ ...section,
       evidenceIds: [...new Set(section.references.flatMap((ref) => idsForReference(ref, receipt.collections.evidence.records)))].sort(),
-      missingReferences: section.references.filter((ref) => !idsForReference(ref, receipt.collections.evidence.records).length) }))
+      missingReferences: section.references.filter((ref) => !idsForReference(ref, receipt.collections.evidence.records).length
+        && !frozenContexts(receipt, receipt.sectionSnapshot.find(row => row.sectionKey === section.sectionKey)).some(binding => binding.refKey === ref)) }))
     receipt.sectionReadiness = receipt.sectionCoverage.some((section) => section.missingReferences.length)
       || receipt.contradictionReferences.some((ref) => !idsForReference(ref, receipt.collections.evidence.records).length)
       ? 'UNRESOLVED' : 'REFERENCES_RESOLVED'
@@ -137,7 +225,11 @@ export const assertOutcomeEvidenceInventory = (snapshot) => {
     if (!section.sectionKey || sectionKeys.has(section.sectionKey)) fail('SECTION_COVERAGE_INVALID', receipt)
     sectionKeys.add(section.sectionKey)
     const expected = [...new Set(section.references.flatMap((ref) => idsForReference(ref, receipt.collections.evidence.records)))].sort()
-    const missing = section.references.filter((ref) => !idsForReference(ref, receipt.collections.evidence.records).length)
+    const original = receipt.sectionSnapshot.find(row => row.sectionKey === section.sectionKey)
+    const contexts = frozenContexts(receipt, original)
+    if (contexts.some(binding => idsForReference(binding.refKey, receipt.collections.evidence.records).length)) fail('FROZEN_CONTEXT_INVALID', receipt)
+    const missing = section.references.filter((ref) => !idsForReference(ref, receipt.collections.evidence.records).length
+      && !contexts.some(binding => binding.refKey === ref))
     if (snapshotHash(missing) !== snapshotHash(section.missingReferences)
       || snapshotHash(expected) !== snapshotHash(section.evidenceIds)) fail('SECTION_COVERAGE_INVALID', receipt)
   }
@@ -156,6 +248,12 @@ export const assertOutcomeEvidenceInventory = (snapshot) => {
       if (String(row.customerId) !== receipt.scope.customerId || String(row.tenantId) !== receipt.scope.tenantId
         || String(row.runtimeInstanceId) !== receipt.scope.runtimeInstanceId || row.stateVersion !== receipt.scope.stateVersion) fail('SCOPE_MISMATCH', receipt)
       if (records.get(id)?.storageId !== String(row._id) || records.get(id)?.hash !== snapshotHash(row)) fail('PROJECTION_RECORD_CHANGED', receipt)
+      if (receipt.frozenMembership) {
+        const member = receipt.frozenMembership.body[kind].find(member => member.storageId === String(row._id))
+        if (!member || member.materialHash !== evidenceMaterialHash(row)) fail('FROZEN_CONTEXT_INVALID', receipt)
+      }
     })
   }
+  assertOutcomeSupplementalFinding(snapshot)
+  assertOutcomeRecordedFinding(snapshot)
 }

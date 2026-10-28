@@ -31,6 +31,7 @@ import {
   buildOutcomeStudioProviderSafeRequest,
 } from '../services/outcomeStudioProviderSafeContextService.js'
 import { createOpenAiOutcomeFrameworkGuidanceProviderAdapter } from '../services/openAiOutcomeFrameworkGuidanceProviderAdapter.js'
+import { buildGovernedReasoningProviderSelection, buildGovernedReasoningBoundarySelection } from '../services/governedReasoningRuntimeService.js'
 import { executeOutcomeFrameworkGuidance } from '../services/outcomeFrameworkGuidanceExecutionService.js'
 import { executeOutcomeWorkingDraft } from '../services/outcomeWorkingDraftExecutionService.js'
 import { approveOutcomeWorkingDraftMeaning } from '../services/outcomeArlMeaningReviewService.js'
@@ -191,10 +192,10 @@ const makeContext = () => ({
   lineage: { activationIds: ['activation-executive-brief'] },
 })
 
-const makePlan = (runtime = makeRuntime()) => {
+const makePlan = (runtime = makeRuntime(), binding = makeBinding()) => {
   const candidate = buildOutcomeKnowledgeCompositionPlanCandidate({
     runtime,
-    binding: makeBinding(),
+    binding,
     context: makeContext(),
     consumerIntent: {
       outcome: 'One Governed Executive Brief',
@@ -2016,4 +2017,54 @@ test('SS-040 Framework input binds exact customer contract separately from Frame
   expect(input.frameworkGuidance).toEqual(makeContext().guidance)
   expect(input).not.toHaveProperty('verifiedBusinessInformation')
   expect(body.instructions).not.toContain('Parlon')
+})
+
+
+describe('Framework Guidance assigned context and validation roles', () => {
+  const mixedPlan = () => {
+    const binding = makeBinding()
+    for (const type of ['AUDIENCE', 'VISUAL_SYSTEM']) {
+      const pack = makePack({ packType: type, packKey: type.toLowerCase().replaceAll('_', '-'), knowledgeLayer: type, suffix: 'a' })
+      binding.selectedByLayer[type] = [pack]
+      binding.lineage.activationIds.push(pack.activationId)
+      binding.lineage.versionIds.push(pack.versionId)
+      binding.lineage.contentHashes.push(pack.contentHash)
+    }
+    return makePlan(makeRuntime(), binding)
+  }
+  test('retains context and validator roles through real GRR selectors and complete safe projection', async () => {
+    const plan = mixedPlan(); mockPackVersions(plan)
+    const { args } = executeArgs({ plan })
+    args.deps.createGovernedReasoningExecution.mockImplementation(async call => {
+      const facade = await call.deps.resolveKnowledgeBinding()
+      expect(facade.binding.providerContextPacks.map(p => p.packType).sort()).toEqual(['AUDIENCE', 'VISUAL_SYSTEM'])
+      expect(facade.binding.postValidationPacks.every(p => p.knowledgeLayer === 'VALIDATION' && p.executionMode === 'POST_VALIDATION')).toBe(true)
+      expect(facade.binding.selectedByLayer.AUDIENCE[0].executionMode).toBe('PROVIDER_CONTEXT')
+      const knowledgeSelection = buildGovernedReasoningProviderSelection(facade.binding)
+      const boundarySelection = buildGovernedReasoningBoundarySelection(facade.binding)
+      expect(knowledgeSelection).toHaveLength(2)
+      expect(boundarySelection.every(p => p.knowledgeLayer === 'VALIDATION')).toBe(true)
+      const safe = { providerDescriptor: descriptor, truthSource: truthSource(),
+        safeRequest: buildOutcomeStudioProviderSafeRequest({ providerDescriptor: descriptor, providerInput: call.deps.providerInput }),
+        knowledgeSelection, boundarySelection }
+      await expect(call.deps.buildProviderSafeContext(safe)).resolves.toHaveProperty('guidance')
+      await expect(call.deps.buildProviderSafeContext({ ...safe, knowledgeSelection: [], boundarySelection: [...boundarySelection, ...knowledgeSelection] }))
+        .rejects.toMatchObject({ code: 'OUTCOME_FRAMEWORK_GUIDANCE_BINDING_INVALID' })
+      return makeSuccessGrr(plan)
+    })
+    await executeOutcomeFrameworkGuidance(args)
+    expect(args.deps.createOutcomeQualityStageExecution).toHaveBeenCalledTimes(1)
+  })
+  test('rejects assigned context with a missing or changed persisted version content hash', async () => {
+    const plan = mixedPlan(); mockPackVersions(plan, { hashOverride: 'sha256:' + 'f'.repeat(64) })
+    const { args } = executeArgs({ plan })
+    args.deps.createGovernedReasoningExecution.mockImplementation(async call => {
+      const facade = await call.deps.resolveKnowledgeBinding()
+      return call.deps.buildProviderSafeContext({ providerDescriptor: descriptor, truthSource: truthSource(),
+        safeRequest: buildOutcomeStudioProviderSafeRequest({ providerDescriptor: descriptor, providerInput: call.deps.providerInput }),
+        knowledgeSelection: buildGovernedReasoningProviderSelection(facade.binding), boundarySelection: buildGovernedReasoningBoundarySelection(facade.binding) })
+    })
+    await expect(executeOutcomeFrameworkGuidance(args)).rejects.toThrow()
+    expect(args.deps.createOutcomeQualityStageExecution).not.toHaveBeenCalled()
+  })
 })

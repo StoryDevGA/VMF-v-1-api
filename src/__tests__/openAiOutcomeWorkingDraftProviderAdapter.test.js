@@ -3,6 +3,7 @@ import { makeSs040Fixture } from './fixtures/ss040EvidenceToMeaningFixtures.js'
 import { makeSs041Fixture, freezeSs041Snapshot } from './fixtures/outcomeEvidenceToDraftFixtures.js'
 import { compileEvidenceToMeaningContract, hashEvidenceToMeaningValue } from '../services/outcomeEvidenceToMeaningContractService.js'
 import { projectEvidenceToMeaningProviderContract } from '../services/outcomeEvidenceToMeaningProviderService.js'
+import { WORKING_DRAFT_DESCRIPTIVE_COMPOSITION_VERSION, composeEvidenceBoundWorkingDraftSections } from '../services/outcomeWorkingDraftCompositionService.js'
 import { describe, expect, jest, test } from '@jest/globals'
 
 import {
@@ -14,6 +15,7 @@ import {
 } from '../constants/outcomeGovernedQuality.js'
 import { OUTCOME_STUDIO_PROVIDER_SAFEGUARDS } from '../services/outcomeStudioProviderSafeContextService.js'
 import { createOpenAiOutcomeWorkingDraftProviderAdapter } from '../services/openAiOutcomeWorkingDraftProviderAdapter.js'
+import { assertStrictProviderResponseSchema } from '../services/governedReasoningRuntimeService.js'
 
 const providerConfig = {
   apiKey: 'test-secret-not-real',
@@ -585,7 +587,7 @@ describe('createOpenAiOutcomeWorkingDraftProviderAdapter', () => {
       })), 'WORKING_DRAFT_PROVIDER_OUTPUT_TOO_LARGE'],
       ['multibyte oversized output', jest.fn().mockResolvedValue(response({
         body: responseBody(providerOutput(), {
-          output: [{ type: 'message', content: [{ type: 'output_text', text: 'é'.repeat(50001) }] }],
+          output: [{ type: 'message', content: [{ type: 'output_text', text: 'ÃƒÂ©'.repeat(50001) }] }],
         }),
       })), 'WORKING_DRAFT_PROVIDER_OUTPUT_TOO_LARGE'],
     ]
@@ -603,12 +605,12 @@ describe('createOpenAiOutcomeWorkingDraftProviderAdapter', () => {
     }
   })
 
-  test('preserves the safe Responses API incomplete reason', async () => {
+  test.each(['max_tokens', 'max_output_tokens', 'content_filter'])('preserves the safe Responses API incomplete reason %s', async reason => {
     const adapter = makeAdapter({
       fetchImpl: jest.fn().mockResolvedValue(response({
         body: responseBody(providerOutput(), {
           status: 'incomplete',
-          incomplete_details: { reason: 'max_tokens' },
+          incomplete_details: { reason },
           output: [],
         }),
       })),
@@ -618,7 +620,7 @@ describe('createOpenAiOutcomeWorkingDraftProviderAdapter', () => {
       code: 'OUTCOME_WORKING_DRAFT_PROVIDER_FAILED',
       details: {
         reason: 'WORKING_DRAFT_PROVIDER_INCOMPLETE',
-        providerStatusReason: 'max_tokens',
+        providerStatusReason: reason,
       },
     })
   })
@@ -914,6 +916,9 @@ describe('createOpenAiOutcomeWorkingDraftProviderAdapter', () => {
 
 
 describe('SS-040 contract-bound Working Draft provider mode', () => {
+  const compact = projection => ({ transportVersion: 'working-draft-claim-references.v10', projectionHash: projection.projectionHash,
+    sections: projection.sectionLedger.filter(row => row.status === 'SUPPORTED').map(row => ({ sectionKey: row.targetSectionKey, claimKeys: [...row.claimKeys] })),
+    decisionKeys: projection.decisionProjections.map(row => row.decisionKey) })
   const ready = () => projectEvidenceToMeaningProviderContract(compileEvidenceToMeaningContract(makeSs040Fixture({ name: 'CodeKarma' })))
   const exactOutput = (projection) => ({
     outputType: 'WORKING_DRAFT', schemaVersion: OUTCOME_WORKING_DRAFT_SCHEMA_VERSION, draftVersion: 1, title: 'Working Draft',
@@ -930,13 +935,56 @@ describe('SS-040 contract-bound Working Draft provider mode', () => {
     await freezeSs041Snapshot(input)
     const projection = projectEvidenceToMeaningProviderContract(compileEvidenceToMeaningContract(input))
     const output = exactOutput(projection)
+    output.compositionVersion = WORKING_DRAFT_DESCRIPTIVE_COMPOSITION_VERSION
+    output.sections.forEach((section, index) => { section.content = composeEvidenceBoundWorkingDraftSections(projection, WORKING_DRAFT_DESCRIPTIVE_COMPOSITION_VERSION)[index].content })
     output.sections.forEach((section) => { section.truthReferences = [...new Set(section.claims.flatMap((claim) => claim.truthReferences))] })
-    const fetchImpl = jest.fn().mockResolvedValue(response({ body: responseBody(output) }))
+    const wire = compact(projection)
+    wire.sections = wire.sections.map(({ sectionKey, claimKeys }) => ({ claimKeys, sectionKey }))
+    const fetchImpl = jest.fn().mockResolvedValue(response({ body: responseBody(wire) }))
     const result = await makeAdapter({ fetchImpl })({ providerContext: makeContext(), evidenceToMeaning: projection })
+    expect(result.output).toEqual(output)
+    const request = JSON.parse(fetchImpl.mock.calls[0][1].body)
+    expect(request.max_output_tokens).toBe(8000)
+    expect(request.text.format.name).toBe('fs_003_working_draft_claim_references_v10')
+    expect(result.metadata.wireRepresentation).toEqual({ version: wire.transportVersion, schemaName: request.text.format.name, projectionHash: projection.projectionHash })
+    expect(() => assertStrictProviderResponseSchema(result, 'WORKING_DRAFT')).not.toThrow()
+    expect(() => assertStrictProviderResponseSchema({ ...result, metadata: { ...result.metadata,
+      responseSchema: { ...result.metadata.responseSchema, name: request.text.format.name } } }, 'WORKING_DRAFT')).toThrow()
+    const again = await makeAdapter({ fetchImpl })({ providerContext: makeContext(), evidenceToMeaning: projection })
+    expect(again.metadata.requestIdentity).toBe(result.metadata.requestIdentity)
+    expect(fetchImpl.mock.calls[1][1].body).toBe(fetchImpl.mock.calls[0][1].body)
     expect(result.output.sections[0].claims[0].claimKey).toBe(result.output.sections[1].claims[0].claimKey)
-    output.sections[0].claims.push(output.sections[0].claims[0])
-    const invalidFetch = jest.fn().mockResolvedValue(response({ body: responseBody(output) }))
+    wire.sections[0].claimKeys.push(wire.sections[0].claimKeys[0])
+    const invalidFetch = jest.fn().mockResolvedValue(response({ body: responseBody(wire) }))
     await expect(makeAdapter({ fetchImpl: invalidFetch })({ providerContext: makeContext(), evidenceToMeaning: projection })).rejects.toMatchObject({ code: 'OUTCOME_WORKING_DRAFT_PROVIDER_FAILED' })
+  })
+  test.each([
+    ['stale projection', wire => { wire.projectionHash = 'a'.repeat(64) }],
+    ['unknown transport', wire => { wire.transportVersion = 'future' }],
+    ['extra payload', wire => { wire.approved = true }],
+    ['omitted section', wire => { wire.sections.pop() }],
+    ['reordered sections', wire => { wire.sections.reverse() }],
+    ['foreign claim', wire => { wire.sections[0].claimKeys[0] = 'foreign' }],
+    ['omitted claim', wire => { wire.sections[0].claimKeys.pop() }],
+    ['extra section field', wire => { wire.sections[0].content = 'approved' }],
+    ['omitted decision', wire => { wire.decisionKeys.pop() }],
+    ['duplicate decision', wire => { wire.decisionKeys.push(wire.decisionKeys[0]) }],
+  ])('rejects %s in compact v3 response without repairing it', async (_name, alter) => {
+    const projection = projectEvidenceToMeaningProviderContract(compileEvidenceToMeaningContract(await makeSs041Fixture({ required: ['Executive Summary', 'Evidence Boundary'] })))
+    const wire = compact(projection); alter(wire)
+    const fetchImpl = jest.fn().mockResolvedValue(response({ body: responseBody(wire) }))
+    await expect(makeAdapter({ fetchImpl })({ providerContext: makeContext(), evidenceToMeaning: projection })).rejects.toMatchObject({
+      code: 'OUTCOME_WORKING_DRAFT_PROVIDER_FAILED', details: { reason: 'WORKING_DRAFT_PROVIDER_OUTPUT_INVALID' },
+    })
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+  test('compact decoder reports only the exact failing field, without echoing returned data', async () => {
+    const projection = projectEvidenceToMeaningProviderContract(compileEvidenceToMeaningContract(await makeSs041Fixture()))
+    const wire = compact(projection); wire.sections[0].claimKeys = ['secret-not-a-real-claim']
+    const fetchImpl = jest.fn().mockResolvedValue(response({ body: responseBody(wire) }))
+    const error = await makeAdapter({ fetchImpl })({ providerContext: makeContext(), evidenceToMeaning: projection }).catch(value => value)
+    expect(error.details.validationField).toBe('claimReferences.sections[0].claimKeys')
+    expect(JSON.stringify(error)).not.toContain('secret-not-a-real-claim')
   })
   test('sends exact bounded evidence separately from guidance without a customer-specific phrase requirement', async () => {
     const projection = ready(), output = exactOutput(projection)

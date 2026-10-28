@@ -16,6 +16,8 @@ import {
 } from '../models/index.js'
 import {
   createGovernedReasoningExecution,
+  buildGovernedReasoningProviderSelection,
+  buildGovernedReasoningBoundarySelection,
   resolveLiveTestConfiguration,
 } from './governedReasoningRuntimeService.js'
 import {
@@ -228,8 +230,9 @@ const buildKcpBinding = ({ plan, runtime }) => {
     if (!pack
       || !text(pack.versionId)
       || !CONTENT_HASH_PATTERN.test(lower(pack.contentHash))
-      || upper(pack.knowledgeLayer) !== 'VALIDATION'
-      || upper(pack.executionMode) !== 'POST_VALIDATION'
+      || !(upper(pack.knowledgeLayer) === 'VALIDATION' && upper(pack.executionMode) === 'POST_VALIDATION'
+        || ['AUDIENCE', 'VISUAL_SYSTEM'].includes(upper(pack.packType))
+          && upper(pack.knowledgeLayer) === upper(pack.packType) && upper(pack.executionMode) === 'PROVIDER_CONTEXT')
       || !Array.isArray(pack.stageAssignments)
       || !pack.stageAssignments.map(upper).includes(OUTCOME_QUALITY_STAGES.FRAMEWORK_GUIDANCE)) {
       throw bindingInvalid({ field: 'assignedPack', activationId })
@@ -259,6 +262,9 @@ const buildKcpBinding = ({ plan, runtime }) => {
   if (new Set(packs.map(({ versionId }) => versionId)).size !== packs.length) {
     throw bindingInvalid({ field: 'assignedVersionIds' })
   }
+  if (!packs.some(pack => pack.knowledgeLayer === 'VALIDATION' && pack.executionMode === 'POST_VALIDATION')) {
+    throw bindingInvalid({ field: 'assignedValidationPack' })
+  }
   const acceptedSections = Array.isArray(plan.payload?.lockedTruth?.acceptedSections)
     ? plan.payload.lockedTruth.acceptedSections
     : []
@@ -280,6 +286,9 @@ const buildKcpBinding = ({ plan, runtime }) => {
 
 const buildKnowledgeBindingFacade = ({ plan, binding }) => {
   const packs = binding.packs.map((pack) => ({ ...pack }))
+  const validators = packs.filter(pack => pack.executionMode === 'POST_VALIDATION')
+  const context = packs.filter(pack => pack.executionMode === 'PROVIDER_CONTEXT')
+  const selectedByLayer = Object.groupBy(packs, pack => pack.knowledgeLayer)
   return {
     manifest: {
       sourceType: 'KNOWLEDGE_COMPOSITION_PLAN',
@@ -296,12 +305,12 @@ const buildKnowledgeBindingFacade = ({ plan, binding }) => {
       mode: 'KCP_STAGE_BINDING',
       requiredPacks: packs,
       optionalPacks: [],
-      validationPacks: packs,
-      providerContextPacks: [],
+      validationPacks: validators,
+      providerContextPacks: context,
       preValidationPacks: [],
-      postValidationPacks: packs,
+      postValidationPacks: validators,
       systemOnlyPacks: [],
-      selectedByLayer: { VALIDATION: packs },
+      selectedByLayer,
       dependencyGraph: plan.payload?.resolution?.dependencyGraph || {},
       resolution: {
         status: 'READY',
@@ -309,7 +318,7 @@ const buildKnowledgeBindingFacade = ({ plan, binding }) => {
         resolvedCount: packs.length,
         requiredCount: packs.length,
         optionalCount: 0,
-        validationCount: packs.length,
+        validationCount: validators.length,
         blockedCount: 0,
         requestedContextCategories: [],
         policyVersion: text(plan.payload?.resolution?.policyVersion),
@@ -642,13 +651,15 @@ export const executeOutcomeFrameworkGuidance = async ({
     providerDescriptor,
   )
   const knowledgeFacade = buildKnowledgeBindingFacade({ plan, binding })
-  const expectedBoundarySelection = binding.packs.map(({ versionId, knowledgeLayer, executionMode, packType }) => ({
+  const expectedKnowledgeSelection = buildGovernedReasoningProviderSelection(knowledgeFacade.binding)
+  const expectedBoundarySelection = buildGovernedReasoningBoundarySelection(knowledgeFacade.binding)
+  const fullSelection = binding.packs.map(({ versionId, knowledgeLayer, executionMode, packType }) => ({
     versionId,
     knowledgeLayer,
     executionMode,
     ...(packType ? { packType } : {}),
   }))
-  const providerSafeKnowledgeSelection = expectedBoundarySelection.map(({
+  const providerSafeKnowledgeSelection = fullSelection.map(({
     versionId,
     knowledgeLayer,
     executionMode,
@@ -697,7 +708,7 @@ export const executeOutcomeFrameworkGuidance = async ({
           boundarySelection,
         }) => {
           if (!Array.isArray(knowledgeSelection)
-            || knowledgeSelection.length !== 0
+            || JSON.stringify(knowledgeSelection) !== JSON.stringify(expectedKnowledgeSelection)
             || JSON.stringify(boundarySelection) !== JSON.stringify(expectedBoundarySelection)) {
             throw bindingInvalid({ field: 'grrKnowledgeSelection' })
           }

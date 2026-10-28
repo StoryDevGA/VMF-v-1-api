@@ -2,6 +2,7 @@ import { isIP } from 'node:net'
 import { z } from 'zod'
 import { sourceVerificationFactsSchema } from '../services/sourceVerificationContext.js'
 import { acquisitionRequestKeySchema } from './acquisitionRun.validator.js'
+import { controlledReplaySelectorSchema } from '../services/controlledReplayContract.js'
 import {
   DISCOVERY_ACQUISITION_PROFILE_ERROR_MESSAGE,
   ENABLED_DISCOVERY_ACQUISITION_PROFILES,
@@ -16,6 +17,7 @@ import {
 } from '../constants/runtimeOutcomeStudio.js'
 import { RUNTIME_INSTANCE_STATUSES, RUNTIME_TYPES } from '../models/RuntimeInstance.js'
 import { createBodyValidator, createParamsValidator, createQueryValidator } from './shared.js'
+import { evidenceDraftQualificationRequestSchema } from '../services/evidenceDraftQualification.js'
 
 const objectIdRegex = /^[a-f\d]{24}$/i
 const DOCUMENT_MAX_FILE_BYTES = 2_500_000
@@ -241,6 +243,10 @@ const createRuntimeInstanceSchema = z.object({
     .optional()
     .default(''),
 }).strict()
+
+export const validateEvidenceDraftQualification = createBodyValidator(evidenceDraftQualificationRequestSchema, {
+  message: 'Invalid evidence draft qualification.', rootIssueKey: '_root', includeDetails: false,
+})
 
 const createRuntimeRevisionSchema = z.object({
   expectedUpdatedAt: expectedUpdatedAtSchema,
@@ -673,6 +679,7 @@ const acceptRuntimeSectionSchema = z.object({
 }).strict()
 
 const executeRuntimeActionSchema = z.object({
+  controlledReplay: controlledReplaySelectorSchema.optional(),
   requestKey: acquisitionRequestKeySchema.optional(),
   predecessorRunId: acquisitionRequestKeySchema.optional(),
   expectedUpdatedAt: expectedUpdatedAtSchema,
@@ -754,6 +761,11 @@ const getSectionKeyFromRuntimePath = (runtimePath) => {
 }
 
 const buildExecuteRuntimeActionSchema = (actionKey) => executeRuntimeActionSchema.superRefine((data, ctx) => {
+  if (Object.hasOwn(data, 'controlledReplay') && (!['BUILD_EVIDENCE_PACK', 'REFRESH_EVIDENCE_PACK'].includes(actionKey)
+    || data.inputs !== undefined || data.documentSources !== undefined)) ctx.addIssue({
+    code: z.ZodIssueCode.custom, path: ['controlledReplay'],
+    message: 'Controlled replay is only supported as an unmixed evidence build or refresh selector.',
+  })
   if (!DISCOVERY_INPUT_RUNTIME_ACTIONS.has(actionKey)) {
     for (const key of ['requestKey', 'predecessorRunId']) if (data[key] !== undefined) ctx.addIssue({
       code: z.ZodIssueCode.custom, path: [key], message: `${key} is only supported for acquisition actions.`,
@@ -1421,6 +1433,32 @@ export const validateRuntimeOutcomeAssetVersionParams = createParamsValidator(ru
 })
 
 const planningReceipt = z.string().min(1).max(32768)
+const successorOptions = { message: 'Invalid governed successor request.', rootIssueKey: '_root', includeDetails: false }
+const successorId = z.string().trim().min(1).max(180)
+const successorObjectId = z.string().regex(objectIdRegex)
+const successorKey = z.string().regex(/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/)
+const successorScopeQuery = z.object({ customerId: successorObjectId.optional(), tenantId: successorObjectId.optional() }).strict()
+export const validateOutcomeSuccessorQuery = createQueryValidator(successorScopeQuery, successorOptions)
+export const validateOutcomeSuccessorPreflightQuery = createQueryValidator(successorScopeQuery.extend({
+  targetRuntimeInstanceId: successorObjectId.optional(),
+}).strict(), successorOptions)
+export const validateOutcomeSuccessorReadbackQuery = createQueryValidator(successorScopeQuery.extend({
+  targetRuntimeInstanceId: successorObjectId, idempotencyKey: successorKey,
+}).strict(), successorOptions)
+export const validateOutcomeSuccessorOperationParams = createParamsValidator(runtimeInstanceIdSchema.extend({
+  runtimeInstanceId: successorObjectId, operationId: successorId,
+}), successorOptions)
+export const validateOutcomeSuccessorVersionParams = createParamsValidator(runtimeOutcomeAssetVersionParamsSchema.extend({
+  runtimeInstanceId: successorObjectId,
+}), successorOptions)
+export const validateOutcomeSuccessorConfirmation = createBodyValidator(z.object({
+  targetRuntimeInstanceId: successorObjectId.optional(), idempotencyKey: successorKey,
+}).strict(), successorOptions)
+export const validateOutcomeSuccessorCreation = createBodyValidator(z.object({
+  confirm: z.literal(true), targetRuntimeInstanceId: successorObjectId, idempotencyKey: successorKey,
+  confirmationReceipt: planningReceipt,
+}).strict(), successorOptions)
+export const validateOutcomeSuccessorReconciliation = createBodyValidator(z.object({}).strict(), successorOptions)
 export const validateOutcomePlanningBody = createBodyValidator(z.object({
   prompt: z.string().trim().min(1).max(2000),
   continuation: planningReceipt.optional(),

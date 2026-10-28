@@ -1380,6 +1380,7 @@ const addDiscoveryEvidence = ({ context, evidencePack }) => {
     createdAt: refreshedAt,
     evidenceObjects: evidencePack.evidenceObjects,
     inputs: evidencePack.inputs,
+    sourceRegistry: evidencePack.sourceRegistry || evidencePack.acquisition?.sourceRegistry,
     sources: lineageSources,
   })
   const evidenceObjects = isEvidencePackAccepted(evidencePack)

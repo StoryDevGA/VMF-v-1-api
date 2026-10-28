@@ -79,6 +79,24 @@ test('full canonical history validation includes unrelated rows and original ret
   expect(read(f).available).toBe(true); review.requestPayloadHash = '0'.repeat(64); expect(read(f).reason).toBe('HISTORY_REQUEST_PROOF_INVALID')
   f.stored.reviews = [{ ...record(f, 1), reviewedBy: 'invalid' }]; expect(read(f).reason).toBe('HISTORY_RECORD_INVALID')
 })
+
+test('verified copied parent record stays STALE until a fresh own decision is appended', () => {
+  const f = fixture(), inherited = { ...record(f, 0), runtimeInstanceId: '64b000000000000000000099' }
+  inherited.requestKey = randomUUID(); inherited.requestExpectedUpdatedAt = '2026-10-06T09:00:00.000Z'
+  inherited.requestPayloadHash = contradictionReviewRequestHash({ actorUserId: inherited.reviewedBy,
+    runtimeInstanceId: inherited.runtimeInstanceId, contradictionId: inherited.contradictionId,
+    expectedUpdatedAt: inherited.requestExpectedUpdatedAt, expectedEvidencePairHash: inherited.evidencePairHash,
+    disposition: inherited.disposition, rationale: inherited.rationale, confirm: true })
+  f.stored.reviews = [inherited]
+  expect(read(f).reason).toBe('HISTORY_RECORD_INVALID')
+  const result = read({ ...f, inheritedRecords: [JSON.parse(JSON.stringify(inherited))] })
+  expect(result.records[0]).toMatchObject({ reviewStatus: 'STALE', latestReview: inherited })
+  const original = JSON.stringify(inherited)
+  f.stored.reviews.push(record(f, 0, 'REOPENED'))
+  expect(read({ ...f, inheritedRecords: [inherited] }).records[0]).toMatchObject({ reviewStatus: 'REOPENED',
+    latestReview: { runtimeInstanceId: control.id } })
+  expect(JSON.stringify(inherited)).toBe(original)
+})
 test('producer and history caps remain fail closed with no partial totals', () => {
   const f = fixture(); f.stored.candidates = Array(9).fill(f.stored.candidates[0]); expect(read(f).available).toBe(false)
   const g = fixture(); g.stored.reviews = Array(1001).fill(record(g, 0)); expect(read(g).available).toBe(false)

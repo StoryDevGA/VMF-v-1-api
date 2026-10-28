@@ -1,9 +1,13 @@
+import { resolveOutcomeAudienceRequest } from '../services/outcomeAudienceRequestResolutionService.js'
+import { resolveOutcomeCompositionRequest } from '../services/outcomeCompositionRequestResolutionService.js'
 import mongoose from 'mongoose'
+import { WORKING_DRAFT_COMPOSITION_VERSION, composeEvidenceBoundWorkingDraftSections } from '../services/outcomeWorkingDraftCompositionService.js'
 import { jest } from '@jest/globals'
 
 import {
   OUTCOME_ACCEPTED_TRUTH_IDENTITY_CONTRACT_VERSION,
   OUTCOME_ARL_MEANING_REVIEW_SCHEMA_VERSION,
+  OUTCOME_ARL_MEANING_REVIEW_PROVIDER_CONFIG_VERSIONS,
   OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSION,
   OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSIONS,
   OUTCOME_FRAMEWORK_GUIDANCE_SCHEMA_VERSION,
@@ -43,611 +47,44 @@ import {
   buildOutcomeNarrativePlanOutput,
   buildOutcomeShapedCandidateRevisionOutput,
   buildOutcomeShapedCandidateOutput,
+  createOutcomeNarrativePlan,
 } from '../services/outcomePostArlQualityChainService.js'
+import { AUTHORISED_ARL_APPROVAL, AUTHORISED_ARL_SCOPE, AUTHORISED_ARL_BODY,
+  authorisedArlRequestIdentity } from '../services/outcomeArlTransportRecoveryService.js'
 import {
+  OUTCOME_READABLE_EXPRESSION_PROFILE_VERSION,
   buildExpressionOnlyRevisionSection,
   isInternalRenderedExpressionText,
 } from '../utils/outcomeRenderedExpressionRevision.js'
 
-const ids = {
-  runtime: new mongoose.Types.ObjectId('6a6c8115bb9cebc18a1eca9c'),
-  tenant: new mongoose.Types.ObjectId('6a6b14eca737c717e99b8069'),
-  customer: new mongoose.Types.ObjectId('6a6b12fea737c717e99b7f6b'),
-  actor: new mongoose.Types.ObjectId('6a6b135ba737c717e99b7f8a'),
-  plan: new mongoose.Types.ObjectId('6a705569a7b760264f6a501f'),
-  stage: new mongoose.Types.ObjectId('6a7100000000000000000001'),
-}
+import {
+  ids,
+  makeSection,
+  makeRuntime,
+  makeBinding,
+  makePlan,
+  makeLegacyPlan,
+  makeOutput,
+  executionIdentity,
+  buildSuccess,
+  buildFailure,
+  internalExecutionIdentity,
+  workingDraftExecutionIdentity,
+  makeFrameworkGuidanceSource,
+  makeWorkingDraftOutput,
+  buildWorkingDraft,
+  makeWorkingDraftSource,
+  makeArlOutput,
+  buildArlReview,
+  makeArlSource,
+  buildNarrativePlan,
+  makeNarrativePlanSource,
+  buildShapedCandidate,
+  makeShapedCandidateSource,
+  buildRenderedExpressionRl,
+} from './fixtures/outcomeQualityStageFixtures.js'
 
-const runtimeUpdatedAt = '2026-08-02T18:59:29.591Z'
-const emptyRelationshipHash = '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945'
-
-const makeSection = (key, suffix) => ({
-  state: { status: 'ACCEPTED' },
-  accepted: {
-    sectionKey: key,
-    runtimePath: `framework_state.sections.${key}`,
-    truthHash: `sha256:${suffix.repeat(64).slice(0, 64)}`,
-    acceptedAt: '2026-08-01T20:00:00.000Z',
-    acceptedBy: ids.actor,
-    sourceActionKey: 'GENERATE_SECTION',
-    sourceGeneratedAt: '2026-08-01T19:59:00.000Z',
-  },
-})
-
-const makeRuntime = () => ({
-  _id: ids.runtime,
-  tenantId: ids.tenant,
-  customerId: ids.customer,
-  runtimeInstanceKey: 'value-narrative-ebc18a1eca9c',
-  runtimeType: 'VALUE_NARRATIVE',
-  frameworkKey: 'VMF',
-  packageKey: 'standard-package-vmf-3-1-3-rkm',
-  packageVersion: '3.1.3',
-  status: 'LOCKED',
-  updatedAt: new Date(runtimeUpdatedAt),
-  framework_state: {
-    sections: {
-      customer_context: makeSection('customer_context', 'a'),
-      strategic_objectives: makeSection('strategic_objectives', 'b'),
-    },
-    publish: { snapshot: { snapshotId: 'publish-qa', snapshotHash: 'c'.repeat(64) } },
-    lock: {
-      state: 'LOCKED',
-      locked: true,
-      lockedAt: '2026-08-02T18:59:29.533Z',
-      lockedBy: ids.actor,
-      publish: { snapshotId: 'publish-qa', snapshotHash: 'c'.repeat(64) },
-      snapshot: { snapshotId: 'lock-qa', snapshotHash: 'd'.repeat(64) },
-      anchor: { replayAnchorId: 'replay-qa', replayAnchorHash: 'e'.repeat(64) },
-      evidence: { dependencySnapshotId: 'dependency-qa', dependencySnapshotHash: 'f'.repeat(64) },
-      outputEligibility: { canonicalOutputEligible: true },
-    },
-  },
-})
-
-const makePack = ({ packType, packKey, knowledgeLayer, capabilityKey = '', suffix }) => ({
-  activationId: `activation-${packKey}`,
-  packId: `pack-${packKey}`,
-  versionId: `version-${packKey}`,
-  knowledgeAssetId: `QA-${packKey.toUpperCase()}`,
-  packCategory: packType === 'TRUTH_CERTIFICATION' ? 'PLATFORM' : 'OUTCOME',
-  purposeCategory: packType === 'TRUTH_CERTIFICATION' ? 'VALIDATION' : 'SYSTEM',
-  knowledgeLayer,
-  capabilityKey,
-  packType,
-  packKey,
-  label: packKey,
-  semanticVersion: '1.0.0',
-  schemaVersion: '1.0.0',
-  status: 'ACTIVE',
-  scopeType: 'GLOBAL',
-  scopeKey: 'GLOBAL',
-  executionMode: packType === 'TRUTH_CERTIFICATION' ? 'POST_VALIDATION' : 'PROVIDER_CONTEXT',
-  visibility: 'PLATFORM',
-  workspaceCompatibility: ['OUTCOME'],
-  contentHash: `sha256:${suffix.repeat(64).slice(0, 64)}`,
-  relationshipContractVersion: 'SS002_RELATIONSHIP_V1',
-  relationshipChecksum: emptyRelationshipHash,
-  relationshipGovernanceError: '',
-  dependencyReferences: [],
-})
-
-const mandatory = () => [
-  makePack({ packType: 'ARL', packKey: 'adaptive-reasoning-layer', knowledgeLayer: 'REASONING', suffix: '1' }),
-  makePack({ packType: 'TRUTH_CERTIFICATION', packKey: 'truth-certification-pack', knowledgeLayer: 'VALIDATION', suffix: '4' }),
-]
-
-const makeBinding = () => {
-  const safeguards = mandatory()
-  const expressionReview = makePack({ packType: 'RL', packKey: 'expression-review', knowledgeLayer: 'COMMUNICATION_PATTERN', suffix: '2' })
-  const blocking = makePack({ packType: 'TRUTH_CERTIFICATION', packKey: 'blocking-rules', knowledgeLayer: 'VALIDATION', suffix: '6' })
-  const outputType = makePack({ packType: 'OUTPUT_TYPE_DEFINITION', packKey: 'executive-brief', knowledgeLayer: 'OUTPUT_TYPE', capabilityKey: 'executive-brief', suffix: '7' })
-  const outputSchema = makePack({ packType: 'OUTPUT_SCHEMA', packKey: 'executive-brief-schema', knowledgeLayer: 'OUTPUT_SCHEMA', capabilityKey: 'executive-brief-schema', suffix: '8' })
-  const style = makePack({ packType: 'STYLE', packKey: 'executive-briefing-style', knowledgeLayer: 'STYLE', capabilityKey: 'executive-brief-style', suffix: '9' })
-  const selected = [...safeguards, expressionReview, blocking, outputType, outputSchema, style]
-  return {
-    status: 'READY',
-    mode: 'REQUEST_SPECIFIC',
-    policyKey: 'outcome-studio-v1-required-packs',
-    policyVersion: '2.0.0',
-    mandatorySafeguards: safeguards,
-    selectedByLayer: {
-      COMMUNICATION_PATTERN: [expressionReview],
-      VALIDATION: [blocking],
-      OUTPUT_TYPE: [outputType],
-      OUTPUT_SCHEMA: [outputSchema],
-      STYLE: [style],
-    },
-    excludedCandidates: [],
-    blockedPacks: [],
-    missingDependencies: [],
-    relationshipFailures: [],
-    ambiguousCandidates: [],
-    incompatibleCandidates: [],
-    warnings: [],
-    dependencyGraph: { nodes: [], edges: [], cycles: [], depthOverflows: [] },
-    lineage: {
-      activationIds: selected.map((pack) => pack.activationId),
-      versionIds: selected.map((pack) => pack.versionId),
-      contentHashes: selected.map((pack) => pack.contentHash),
-    },
-    resolution: {
-      request: { workspaceType: 'OUTCOME', requestedOutputTypeKey: 'executive-brief' },
-      scopeCandidates: [{ scopeKey: 'GLOBAL' }],
-    },
-  }
-}
-
-const makeContext = () => ({
-  contractVersion: 'outcome-studio-knowledge-context.v1',
-  contextId: 'context-qa',
-  status: 'READY',
-  available: true,
-  blockerReason: '',
-  requestedOutputTypeKey: 'executive-brief',
-  outputType: { key: 'executive-brief', label: 'Executive Brief', version: '1.0.0' },
-  outputSchema: { key: 'executive-brief-schema', label: 'Executive Brief Schema', version: '1.0.0' },
-  style: { key: 'executive-brief-style', label: 'Executive Briefing Style', version: '1.0.0' },
-  renderer: { rendererKey: 'current-document' },
-  warnings: [],
-  lineage: { activationIds: ['activation-executive-brief'] },
-})
-
-const makePlan = (intentOverrides = {}, runtime = makeRuntime(), binding = makeBinding()) => {
-  const candidate = buildOutcomeKnowledgeCompositionPlanCandidate({
-    runtime,
-    binding,
-    context: makeContext(),
-    consumerIntent: {
-      outcome: 'One Governed Executive Brief',
-      decisionPurpose: 'Support the executive sponsor decision with governed meaning.',
-      consumer: 'Quinn Fixture QA',
-      audience: ['Quinn Fixture QA', 'Riley Fixture QA'],
-      requestedOutputTypeKey: 'executive-brief',
-      format: 'Executive Brief with searchable and accessible text',
-      channel: '',
-      requirements: ['Editable structure where supported', 'Element-level lineage'],
-      unresolvedGaps: ['Exact delivery file type is not specified', 'Exact delivery channel is not specified'],
-      ...intentOverrides,
-    },
-  })
-  return {
-    _id: ids.plan,
-    planId: 'outcome_kcp_qa',
-    planVersion: 1,
-    contractVersion: candidate.payload.contractVersion,
-    operation: 'INITIAL',
-    status: candidate.status,
-    tenantId: ids.tenant,
-    customerId: ids.customer,
-    runtimeInstanceId: ids.runtime,
-    runtimeInstanceKey: 'value-narrative-ebc18a1eca9c',
-    runtimeType: 'VALUE_NARRATIVE',
-    frameworkKey: 'VMF',
-    packageKey: 'standard-package-vmf-3-1-3-rkm',
-    packageVersion: '3.1.3',
-    requestedOutputTypeKey: 'executive-brief',
-    publishSnapshotId: candidate.payload.lockedTruth.publishSnapshotId,
-    lockSnapshotId: candidate.payload.lockedTruth.lockSnapshotId,
-    replayAnchorId: candidate.payload.lockedTruth.replayAnchorId,
-    dependencySnapshotId: candidate.payload.lockedTruth.dependencySnapshotId,
-    planFingerprint: candidate.planFingerprint,
-    resolutionFingerprint: candidate.resolutionFingerprint,
-    contextFingerprint: candidate.contextFingerprint,
-    selectedPackCount: candidate.selectedPackCount,
-    consideredPackCount: candidate.consideredPackCount,
-    gapCount: candidate.gapCount,
-    payload: candidate.payload,
-    createdBy: ids.actor,
-    createdAt: new Date('2026-08-03T08:46:33.351Z'),
-  }
-}
-
-const makeLegacyPlan = () => {
-  const plan = makePlan()
-  plan.payload = structuredClone(plan.payload)
-  delete plan.payload.lockedTruth.acceptedTruthIdentityContractVersion
-  plan.payload.lockedTruth.acceptedSections.forEach((section) => {
-    section.sectionKey = section.stateSectionKey
-    delete section.stateSectionKey
-  })
-  plan.planFingerprint = hashOutcomeKnowledgeCompositionSemanticValue(plan.payload)
-  return plan
-}
-
-const makeOutput = (plan = makePlan()) => {
-  const assigned = plan.payload.stagePlan
-    .find((stage) => stage.stageKey === OUTCOME_QUALITY_STAGES.FRAMEWORK_GUIDANCE)
-    .assignedActivationIds
-  const truth = plan.payload.lockedTruth.acceptedSections.map((section) => section.sectionKey)
-  return {
-    outputType: OUTCOME_QUALITY_STAGE_OUTPUT_TYPES.FRAMEWORK_GUIDANCE_ANALYSIS,
-    schemaVersion: OUTCOME_FRAMEWORK_GUIDANCE_SCHEMA_VERSION,
-    title: 'Parlon Executive Brief Framework Analysis QA',
-    sections: [{
-      order: 1,
-      sectionKey: 'governed_position',
-      title: 'Governed position',
-      analysis: 'The accepted sections establish the bounded context for the executive decision.',
-      implications: ['Priorities must remain traceable to accepted truth.'],
-      recommendations: ['Use the evidence boundary when ranking the next actions.'],
-      qualification: 'No delivery file type or channel is inferred.',
-      truthReferences: truth,
-      contributingActivationIds: assigned,
-      assumptions: [],
-      gaps: [...plan.payload.consumerIntent.unresolvedGaps],
-    }],
-    decisionUsefulness: {
-      summary: 'The evidence supports a bounded executive decision discussion.',
-      priorities: ['Preserve the accepted evidence boundary.'],
-      materialRisks: ['Unspecified delivery details remain visible.'],
-      recommendedNextStep: 'Develop a Working Draft from this governed analysis after this stage is accepted.',
-    },
-    assumptions: [],
-    visibleGaps: buildOutcomeQualityVisibleGaps(plan),
-  }
-}
-
-const executionIdentity = (overrides = {}) => ({
-  executionMode: 'LIVE_TEST',
-  providerKey: 'openai',
-  providerConfigurationVersion: overrides.providerKey === ''
-    ? ''
-    : OUTCOME_FRAMEWORK_GUIDANCE_PROVIDER_CONFIG_VERSION,
-  model: 'qa-model',
-  grrExecutionId: 'grr_exec_qa',
-  grrRuntimeArtifactId: 'grr_art_qa',
-  runtimeVersion: 'grr.v1',
-  ...overrides,
-})
-
-const buildSuccess = (overrides = {}) => {
-  const plan = overrides.plan || makePlan()
-  return buildOutcomeQualityStageExecutionCandidate({
-    plan,
-    runtimeInstanceId: ids.runtime,
-    expectedPlanFingerprint: plan.planFingerprint,
-    stageKey: OUTCOME_QUALITY_STAGES.FRAMEWORK_GUIDANCE,
-    expectedLatestAttemptNumber: 0,
-    status: OUTCOME_QUALITY_STAGE_STATUSES.SUCCEEDED,
-    output: makeOutput(plan),
-    executionIdentity: executionIdentity(),
-    startedAt: '2026-08-03T09:00:00.000Z',
-    completedAt: '2026-08-03T09:00:01.250Z',
-    ...overrides,
-  })
-}
-
-const buildFailure = (status = OUTCOME_QUALITY_STAGE_STATUSES.FAILED, overrides = {}) => {
-  const plan = overrides.plan || makePlan()
-  return buildOutcomeQualityStageExecutionCandidate({
-    plan,
-    runtimeInstanceId: ids.runtime,
-    expectedPlanFingerprint: plan.planFingerprint,
-    stageKey: OUTCOME_QUALITY_STAGES.FRAMEWORK_GUIDANCE,
-    expectedLatestAttemptNumber: 0,
-    status,
-    failure: { failureCode: status, safeReason: 'The attempt did not succeed.', retryable: true },
-    executionIdentity: executionIdentity({ providerKey: '', model: '', grrExecutionId: '', grrRuntimeArtifactId: '' }),
-    startedAt: '2026-08-03T09:00:00.000Z',
-    completedAt: '2026-08-03T09:00:00.250Z',
-    ...overrides,
-  })
-}
-
-const internalExecutionIdentity = () => executionIdentity({
-  executionMode: 'INTERNAL_GOVERNED',
-  providerKey: '',
-  providerConfigurationVersion: '',
-  model: '',
-  grrExecutionId: '',
-  grrRuntimeArtifactId: '',
-  runtimeVersion: 'quality-chain.v1',
-})
-
-const workingDraftExecutionIdentity = () => executionIdentity({
-  providerConfigurationVersion: OUTCOME_WORKING_DRAFT_PROVIDER_CONFIG_VERSION,
-  runtimeVersion: 'working-draft.v1',
-})
-
-const makeFrameworkGuidanceSource = (plan = makePlan()) => {
-  const candidate = buildSuccess({ plan })
-  return {
-    _id: ids.stage,
-    stageExecutionId: 'outcome_quality_stage_framework_source',
-    createdBy: ids.actor,
-    createdAt: new Date('2026-08-03T09:00:02.000Z'),
-    ...candidate,
-  }
-}
-
-const makeWorkingDraftOutput = (plan, source) => {
-  const truthReferences = plan.payload.lockedTruth.acceptedSections.map((section) => section.sectionKey)
-  const contributingActivationIds = [...new Set(source.outputSnapshot.sections
-    .flatMap((section) => section.contributingActivationIds))]
-  return {
-    outputType: OUTCOME_QUALITY_STAGE_OUTPUT_TYPES.WORKING_DRAFT,
-    schemaVersion: OUTCOME_WORKING_DRAFT_SCHEMA_VERSION,
-    draftVersion: 1,
-    title: 'Parlon Executive Brief Working Draft QA',
-    sections: [{
-      order: 1,
-      sectionKey: 'executive_position',
-      title: 'Executive position',
-      content: 'The governed evidence supports a bounded executive decision with explicit qualifications.',
-      claims: [{
-        claimKey: 'claim_governed_position',
-        statement: 'The supplied summary presents Parlon as claiming this outcome; independent verification is not established in the supplied summaries.',
-        truthReferences,
-        evidence: ['All six accepted truth identities are retained in the draft lineage.'],
-        meaningClass: 'SOURCE_PRESENTED',
-        proofDependencies: [],
-        validationStatus: 'NOT_STATED',
-        proofDisposition: 'NOT_ESTABLISHED',
-        whatCanBeSaidNow: 'The supplied summary presents Parlon as claiming this outcome.',
-        blockedStrongerClaim: 'An achieved outcome is not established in the supplied summaries.',
-        evidenceRequiredToSubstantiate: ['Evidence identifying the measure, scope, baseline, method and measurement window.'],
-      }],
-      truthReferences,
-      contributingActivationIds,
-      assumptions: [],
-      gaps: [...plan.payload.consumerIntent.unresolvedGaps],
-    }],
-    decisionLogic: [{
-      decisionKey: 'preserve_evidence_boundary',
-      rationale: 'Interpretive placeholder: Source-presented framing: the supplied summary presents Parlon as expressing the claim. Recognition gap: recognition is not established in the supplied summaries. Understanding gap: measurement meaning is not established in the supplied summaries. Bounded interpretation now: the supplied summary presents Parlon as claiming this outcome. Qualified Reality: an achieved outcome is not established in the supplied summaries. Unresolved proof dependencies: Any proof questions not stated in accepted truth are author-added placeholders, not adopted Parlon requirements. Ordering is not established in the supplied evidence.',
-      priority: 'NOT_ESTABLISHED',
-      priorityBasis: 'NOT_ESTABLISHED',
-      closureState: 'INCOMPLETE',
-      actionAuthorization: 'NONE',
-      truthReferences,
-    }],
-    compositionProvenance: {
-      frameworkGuidanceStageExecutionId: source.stageExecutionId,
-      frameworkGuidanceOutputFingerprint: source.outputFingerprint,
-      planFingerprint: plan.planFingerprint,
-    },
-    revisionHistory: [{
-      version: 1,
-      summary: 'Initial governed Working Draft from successful Framework Guidance.',
-      sourceStageExecutionId: source.stageExecutionId,
-      sourceOutputFingerprint: source.outputFingerprint,
-    }],
-    assumptions: [],
-    visibleGaps: buildOutcomeQualityVisibleGaps(plan),
-  }
-}
-
-const buildWorkingDraft = (overrides = {}) => {
-  const plan = overrides.plan || makePlan()
-  const source = overrides.sourceStageExecution || makeFrameworkGuidanceSource(plan)
-  return buildOutcomeQualityStageExecutionCandidate({
-    plan,
-    runtimeInstanceId: ids.runtime,
-    expectedPlanFingerprint: plan.planFingerprint,
-    stageKey: OUTCOME_QUALITY_STAGES.WORKING_DRAFT,
-    expectedLatestAttemptNumber: 0,
-    predecessorStageExecutionId: source.stageExecutionId,
-    predecessorAttemptFingerprint: source.attemptFingerprint,
-    sourceStageExecution: source,
-    status: OUTCOME_QUALITY_STAGE_STATUSES.SUCCEEDED,
-    output: makeWorkingDraftOutput(plan, source),
-    executionIdentity: workingDraftExecutionIdentity(),
-    startedAt: '2026-08-03T09:01:00.000Z',
-    completedAt: '2026-08-03T09:01:00.500Z',
-    ...overrides,
-  })
-}
-
-const makeWorkingDraftSource = (plan = makePlan()) => {
-  const sourceStageExecution = makeFrameworkGuidanceSource(plan)
-  const candidate = buildWorkingDraft({ plan, sourceStageExecution })
-  return {
-    _id: new mongoose.Types.ObjectId('6a7100000000000000000002'),
-    stageExecutionId: 'outcome_quality_stage_working_draft_source',
-    createdBy: ids.actor,
-    createdAt: new Date('2026-08-03T09:01:01.000Z'),
-    ...candidate,
-  }
-}
-
-const makeArlOutput = (plan, source) => {
-  const truthReferences = plan.payload.lockedTruth.acceptedSections.map((section) => section.sectionKey)
-  const assigned = plan.payload.stagePlan
-    .find((stage) => stage.stageKey === OUTCOME_QUALITY_STAGES.ARL_MEANING_REVIEW)
-    .assignedActivationIds
-  const decisionLogicFingerprint = hashOutcomeQualityStageValue(source.outputSnapshot.decisionLogic)
-  const meaningFingerprint = hashOutcomeQualityStageValue({
-    workingDraftStageExecutionId: source.stageExecutionId,
-    workingDraftOutputFingerprint: source.outputFingerprint,
-    decisionLogicFingerprint,
-  })
-  const findings = [
-    'ANALYTICAL_STRENGTH',
-    'COHERENCE',
-    'PRIORITISATION',
-    'EVIDENCE_USE',
-    'DECISION_USEFULNESS',
-  ].map((dimension) => ({
-    findingKey: `${dimension.toLowerCase()}_confirmed`,
-    dimension,
-    severity: 'LOW',
-    finding: `${dimension.replaceAll('_', ' ')} is sufficient for the bounded decision.`,
-    requiredChange: false,
-    disposition: 'ACCEPTED_NO_CHANGE',
-    changeApplied: false,
-  }))
-  return {
-    outputType: OUTCOME_QUALITY_STAGE_OUTPUT_TYPES.ARL_MEANING_REVIEW,
-    schemaVersion: OUTCOME_ARL_MEANING_REVIEW_SCHEMA_VERSION,
-    workingDraftStageExecutionId: source.stageExecutionId,
-    workingDraftOutputFingerprint: source.outputFingerprint,
-    findings,
-    approvedMeaning: {
-      state: 'APPROVED',
-      version: 1,
-      workingDraftStageExecutionId: source.stageExecutionId,
-      workingDraftOutputFingerprint: source.outputFingerprint,
-      meaningSummary: 'The bounded executive position and its decision logic are approved for narrative planning.',
-      decisionLogic: source.outputSnapshot.decisionLogic,
-      meaningFingerprint,
-      decisionLogicFingerprint,
-    },
-    truthReferences,
-    contributingActivationIds: assigned,
-    visibleGaps: buildOutcomeQualityVisibleGaps(plan),
-  }
-}
-
-const buildArlReview = (overrides = {}) => {
-  const plan = overrides.plan || makePlan()
-  const source = overrides.sourceStageExecution || makeWorkingDraftSource(plan)
-  return buildOutcomeQualityStageExecutionCandidate({
-    plan,
-    runtimeInstanceId: ids.runtime,
-    expectedPlanFingerprint: plan.planFingerprint,
-    stageKey: OUTCOME_QUALITY_STAGES.ARL_MEANING_REVIEW,
-    expectedLatestAttemptNumber: 0,
-    predecessorStageExecutionId: source.stageExecutionId,
-    predecessorAttemptFingerprint: source.attemptFingerprint,
-    sourceStageExecution: source,
-    status: OUTCOME_QUALITY_STAGE_STATUSES.SUCCEEDED,
-    output: makeArlOutput(plan, source),
-    executionIdentity: internalExecutionIdentity(),
-    startedAt: '2026-08-03T09:02:00.000Z',
-    completedAt: '2026-08-03T09:02:00.500Z',
-    ...overrides,
-  })
-}
-
-const makeArlSource = (plan = makePlan()) => {
-  const workingDraftStage = makeWorkingDraftSource(plan)
-  const candidate = buildArlReview({ plan, sourceStageExecution: workingDraftStage })
-  return {
-    workingDraftStage,
-    arlStage: {
-      _id: new mongoose.Types.ObjectId('6a7100000000000000000003'),
-      stageExecutionId: 'outcome_quality_stage_arl_source',
-      createdBy: ids.actor,
-      createdAt: new Date('2026-08-03T09:02:01.000Z'),
-      ...candidate,
-    },
-  }
-}
-
-const buildNarrativePlan = (overrides = {}) => {
-  const plan = overrides.plan || makePlan()
-  const sources = overrides.sources || makeArlSource(plan)
-  const output = buildOutcomeNarrativePlanOutput({
-    plan,
-    arlStage: sources.arlStage,
-    workingDraftStage: sources.workingDraftStage,
-  })
-  return buildOutcomeQualityStageExecutionCandidate({
-    plan,
-    runtimeInstanceId: ids.runtime,
-    expectedPlanFingerprint: plan.planFingerprint,
-    stageKey: OUTCOME_QUALITY_STAGES.OUTCOME_NARRATIVE_PLAN,
-    expectedLatestAttemptNumber: 0,
-    predecessorStageExecutionId: sources.arlStage.stageExecutionId,
-    predecessorAttemptFingerprint: sources.arlStage.attemptFingerprint,
-    sourceStageExecution: sources.arlStage,
-    status: OUTCOME_QUALITY_STAGE_STATUSES.SUCCEEDED,
-    output,
-    executionIdentity: internalExecutionIdentity(),
-    startedAt: '2026-08-03T09:03:00.000Z',
-    completedAt: '2026-08-03T09:03:00.100Z',
-    ...overrides,
-  })
-}
-
-const makeNarrativePlanSource = (plan = makePlan()) => ({
-  _id: new mongoose.Types.ObjectId('6a7100000000000000000004'),
-  stageExecutionId: 'outcome_quality_stage_narrative_plan_source',
-  createdBy: ids.actor,
-  createdAt: new Date('2026-08-03T09:03:01.000Z'),
-  ...buildNarrativePlan({ plan }),
-})
-
-const buildShapedCandidate = (overrides = {}) => {
-  const plan = overrides.plan || makePlan()
-  const source = overrides.sourceStageExecution || makeNarrativePlanSource(plan)
-  const output = buildOutcomeShapedCandidateOutput({
-    plan,
-    narrativePlanStage: source,
-    title: 'Parlon Executive Brief',
-  })
-  return buildOutcomeQualityStageExecutionCandidate({
-    plan,
-    runtimeInstanceId: ids.runtime,
-    expectedPlanFingerprint: plan.planFingerprint,
-    stageKey: OUTCOME_QUALITY_STAGES.OUTPUT_SHAPING,
-    expectedLatestAttemptNumber: 0,
-    predecessorStageExecutionId: source.stageExecutionId,
-    predecessorAttemptFingerprint: source.attemptFingerprint,
-    sourceStageExecution: source,
-    status: OUTCOME_QUALITY_STAGE_STATUSES.SUCCEEDED,
-    output,
-    executionIdentity: internalExecutionIdentity(),
-    startedAt: '2026-08-03T09:04:00.000Z',
-    completedAt: '2026-08-03T09:04:00.100Z',
-    ...overrides,
-  })
-}
-
-const makeShapedCandidateSource = (plan = makePlan()) => ({
-  _id: new mongoose.Types.ObjectId('6a7100000000000000000005'),
-  stageExecutionId: 'outcome_quality_stage_shaped_candidate_source',
-  createdBy: ids.actor,
-  createdAt: new Date('2026-08-03T09:04:01.000Z'),
-  ...buildShapedCandidate({ plan }),
-})
-
-const buildRenderedExpressionRl = (overrides = {}) => {
-  const plan = overrides.plan || makePlan()
-  const source = overrides.sourceStageExecution || makeShapedCandidateSource(plan)
-  const assigned = plan.payload.stagePlan
-    .find((stage) => stage.stageKey === OUTCOME_QUALITY_STAGES.RENDERED_EXPRESSION_RL)
-    .assignedActivationIds
-  const output = {
-    outputType: OUTCOME_QUALITY_STAGE_OUTPUT_TYPES.RENDERED_EXPRESSION_RL,
-    schemaVersion: OUTCOME_RENDERED_EXPRESSION_RL_SCHEMA_VERSION,
-    candidateStageExecutionId: source.stageExecutionId,
-    candidateOutputFingerprint: source.outputFingerprint,
-    overallStatus: 'PASS',
-    findings: [
-      'STATEMENTS', 'HEADINGS', 'DIAGRAMS', 'HIERARCHY', 'QUALIFICATION', 'ACCESSIBILITY', 'BRAND_EXPRESSION',
-    ].map((dimension) => ({
-      dimension,
-      status: 'PASS',
-      finding: `${dimension.replaceAll('_', ' ')} conforms to the governed candidate contract.`,
-      requiredChange: false,
-    })),
-    truthReferences: [...source.outputSnapshot.truthReferences],
-    contributingActivationIds: [...assigned],
-    visibleGaps: [...source.outputSnapshot.visibleGaps],
-  }
-  return buildOutcomeQualityStageExecutionCandidate({
-    plan,
-    runtimeInstanceId: ids.runtime,
-    expectedPlanFingerprint: plan.planFingerprint,
-    stageKey: OUTCOME_QUALITY_STAGES.RENDERED_EXPRESSION_RL,
-    expectedLatestAttemptNumber: 0,
-    predecessorStageExecutionId: source.stageExecutionId,
-    predecessorAttemptFingerprint: source.attemptFingerprint,
-    sourceStageExecution: source,
-    status: OUTCOME_QUALITY_STAGE_STATUSES.SUCCEEDED,
-    output,
-    executionIdentity: executionIdentity({
-      providerConfigurationVersion: OUTCOME_RENDERED_EXPRESSION_RL_PROVIDER_CONFIG_VERSION,
-      runtimeVersion: 'rendered-expression-rl.v1',
-    }),
-    startedAt: '2026-08-03T09:05:00.000Z',
-    completedAt: '2026-08-03T09:05:00.500Z',
-    ...overrides,
-  })
-}
-
+const workingDraftExecutionIdentityForLegacyComposition = () => ({ ...workingDraftExecutionIdentity(), providerConfigurationVersion: OUTCOME_WORKING_DRAFT_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V43_EVIDENCE_BOUND_COMPOSITION })
 const clone = (value) => structuredClone(value)
 
 const makeFailedRlArtifact = (failedRl, findings) => ({
@@ -776,7 +213,7 @@ describe('strict evidence lineage receipt at the quality-stage model boundary', 
   })
 })
 
-const makePlacedWorkingDraft = async ({ placement = 'explicit' } = {}) => {
+const makePlacedWorkingDraft = async ({ placement = 'explicit', restrictions = null, composed = false, allLockedSources = false } = {}) => {
   const binding = makeBinding()
   Object.values(binding.selectedByLayer).flat().forEach((pack) => {
     if (['executive-brief', 'executive-brief-schema'].includes(pack.capabilityKey)) pack.contentHash = ss040TargetHashFor(pack.capabilityKey)
@@ -792,6 +229,7 @@ const makePlacedWorkingDraft = async ({ placement = 'explicit' } = {}) => {
   input.composition.providerCompatibility = { contractVersion: EVIDENCE_TO_DRAFT_PROVIDER_VERSION, status: 'READY' }
   input.sourceSnapshot.evidenceObjects.forEach((row) => Object.assign(row, {
     claimStatus: 'SOURCE_PRESENTED', sourceLocation: 'source-1#synthetic-reference-regression',
+    ...(restrictions ? { blockedStrongerClaim: restrictions } : {}),
     scope: { organisation: 'Explicit synthetic reference regression' }, time: { from: '2026-01-01', to: '2026-10-01' },
     materiality: 'SOURCE_RECORDED', proofOrderDisposition: 'NOT_ESTABLISHED', proofRequirementCodes: ['ATTRIBUTION'],
   }))
@@ -804,11 +242,14 @@ const makePlacedWorkingDraft = async ({ placement = 'explicit' } = {}) => {
   }
   input.composition.businessFactLedger.facts.forEach((fact) => {
     if (placement === 'implicit' || fact.evidenceObjectId === 'evidence-implicit') return
+    const sourceSectionKeys = allLockedSources
+      ? plan.payload.lockedTruth.acceptedSections.map((section) => section.stateSectionKey)
+      : ['customer_context']
     input.sourceSnapshot.evidenceObjects.find((row) => row.evidenceObjectId === fact.evidenceObjectId).draftPlacement = {
       version: 'evidence-to-draft-placement.v1', targetReceiptFingerprint: input.selectedTarget.receiptFingerprint,
-      sourceSectionKeys: ['customer_context'], targetSectionKeys: [...fact.sectionKeys],
+      sourceSectionKeys: [...sourceSectionKeys], targetSectionKeys: [...fact.sectionKeys],
     }
-    fact.sectionKeys = ['customer_context']
+    fact.sectionKeys = [...sourceSectionKeys]
   })
   await freezeSs041Snapshot(input, { scopeOverride: { tenantId: String(plan.tenantId), customerId: String(plan.customerId),
     runtimeInstanceId: String(plan.runtimeInstanceId) }, sourceSections: [
@@ -830,9 +271,64 @@ const makePlacedWorkingDraft = async ({ placement = 'explicit' } = {}) => {
       claims: projection.claimProjections.filter((claim) => row.claimKeys.includes(claim.claimKey)),
       truthReferences: [row.targetSectionKey], assumptions: [], gaps: buildOutcomeQualityVisibleGaps(plan),
     })), decisionLogic: projection.decisionProjections, assumptions: [], visibleGaps: buildOutcomeQualityVisibleGaps(plan) }
+  if (composed) {
+    providerOutput.compositionVersion = WORKING_DRAFT_COMPOSITION_VERSION
+    providerOutput.sections.forEach((section, index) => { section.content = composeEvidenceBoundWorkingDraftSections(projection)[index].content })
+  }
   const output = buildWorkingDraftStageOutputFromProviderOutput({ providerOutput, plan, sourceStage: source })
-  return { plan, projection, source, output, candidate: buildWorkingDraft({ plan, sourceStageExecution: source, output }) }
+  return { plan, projection, source, providerOutput, output, candidate: buildWorkingDraft({ plan, sourceStageExecution: source, output, ...(composed ? { executionIdentity: workingDraftExecutionIdentityForLegacyComposition() } : {}) }) }
 }
+
+describe('Working Draft exact v2 multiline restrictions', () => {
+  const restrictions = ['The source does not authorise trial execution.', 'Production use is not established.']
+  it('preserves approved restriction lines through both consumers and the real stage model', async () => {
+    const { candidate, projection } = await makePlacedWorkingDraft({ restrictions })
+    const expected = restrictions.join('\n')
+    expect(projection.claimProjections[0].blockedStrongerClaim).toBe(expected)
+    expect(candidate.outputSnapshot.sections[0].claims[0].blockedStrongerClaim).toBe(expected)
+    await expect(new OutcomeQualityStageExecution({ ...candidate, stageExecutionId: 'multiline-restriction-regression', createdBy: ids.actor }).validate()).resolves.toBeUndefined()
+  })
+  it.each([
+    ['flattened', value => value.replaceAll('\n', ' ')],
+    ['omitted restriction', value => value.split('\n')[0]],
+    ['NUL', value => value + '\u0000'],
+    ['vertical tab', value => value + '\u000b'],
+    ['DEL', value => value + '\u007f'],
+    ['over limit', () => 'x'.repeat(2001)],
+    ['leading whitespace', value => ' ' + value],
+  ])('rejects %s through both consumers without rewriting the approved restrictions', async (_name, mutate) => {
+    const { plan, source, providerOutput, output } = await makePlacedWorkingDraft({ restrictions })
+    const change = value => { const copy = clone(value); copy.sections[0].claims[0].blockedStrongerClaim = mutate(copy.sections[0].claims[0].blockedStrongerClaim); return copy }
+    expect(() => buildWorkingDraftStageOutputFromProviderOutput({ providerOutput: change(providerOutput), plan, sourceStage: source })).toThrow()
+    expect(() => buildWorkingDraft({ plan, sourceStageExecution: source, output: change(output) })).toThrow()
+  })
+  it('retains single-line restriction enforcement for non-v2 inputs in both consumers', () => {
+    const plan = makePlan(), source = makeFrameworkGuidanceSource(plan), output = makeWorkingDraftOutput(plan, source)
+    output.sections[0].claims[0].blockedStrongerClaim += '\nAnother restriction.'
+    expect(() => buildWorkingDraft({ plan, sourceStageExecution: source, output })).toThrow()
+    const providerOutput = Object.fromEntries(['outputType', 'schemaVersion', 'draftVersion', 'title', 'sections', 'decisionLogic', 'assumptions', 'visibleGaps'].map(key => [key, clone(output[key])]))
+    providerOutput.sections.forEach(section => { delete section.contributingActivationIds })
+    expect(() => buildWorkingDraftStageOutputFromProviderOutput({ providerOutput, plan, sourceStage: source })).toThrow()
+  })
+})
+
+describe('Working Draft composed real-model shape', () => {
+  it('accepts the exact marked v2 composition through both consumers and Mongoose', async () => {
+    const { candidate } = await makePlacedWorkingDraft({ composed: true })
+    expect(candidate.outputSnapshot.compositionVersion).toBe(WORKING_DRAFT_COMPOSITION_VERSION)
+    await expect(new OutcomeQualityStageExecution({ ...candidate, stageExecutionId: 'composition-model-check', createdBy: ids.actor }).validate()).resolves.toBeUndefined()
+  })
+  it.each([
+    ['unknown version', output => { output.compositionVersion = 'future' }],
+    ['null revision', output => { output.compositionRevision = null }],
+    ['extra revision', output => { output.compositionRevision = { approved: true } }],
+  ])('rejects %s without silently dropping it', async (_name, alter) => {
+    const { candidate } = await makePlacedWorkingDraft({ composed: true })
+    alter(candidate.outputSnapshot)
+    candidate.outputFingerprint = hashOutcomeQualityStageValue(candidate.outputSnapshot)
+    await expect(new OutcomeQualityStageExecution({ ...candidate, stageExecutionId: 'composition-model-reject', createdBy: ids.actor }).validate()).rejects.toThrow()
+  })
+})
 
 describe('Working Draft v2 input-owned target reference authority', () => {
   const document = (candidate) => new OutcomeQualityStageExecution({ ...candidate,
@@ -1320,6 +816,8 @@ describe('Outcome quality stage execution contract', () => {
       outputFingerprint: sources.workingDraftStage.outputFingerprint,
     })
     sources.arlStage.predecessorAttemptFingerprint = sources.workingDraftStage.attemptFingerprint
+    sources.arlStage.inputSnapshot.sourceStage.attemptFingerprint = sources.workingDraftStage.attemptFingerprint
+    sources.arlStage.inputSnapshot.sourceStage.outputFingerprint = sources.workingDraftStage.outputFingerprint
     sources.arlStage.outputSnapshot.workingDraftOutputFingerprint = sources.workingDraftStage.outputFingerprint
     sources.arlStage.outputSnapshot.approvedMeaning.workingDraftOutputFingerprint = sources.workingDraftStage.outputFingerprint
     sources.arlStage.outputSnapshot.approvedMeaning.meaningFingerprint = hashOutcomeQualityStageValue({
@@ -1450,6 +948,41 @@ describe('Outcome quality stage execution contract', () => {
       ...revisionCandidate,
       createdBy: ids.actor,
     }).validate()).resolves.toBeUndefined()
+
+    const readable = buildOutcomeShapedCandidateRevisionOutput({
+      failedRlStage: failedRl, narrativePlanStage: narrativePlan, plan,
+      priorCandidateStage: priorCandidate, rlArtifact: makeFailedRlArtifact(failedRl, findings),
+      expressionProfileVersion: OUTCOME_READABLE_EXPRESSION_PROFILE_VERSION,
+    })
+    const args = {
+      plan, runtimeInstanceId: ids.runtime, expectedPlanFingerprint: plan.planFingerprint,
+      stageKey: OUTCOME_QUALITY_STAGES.OUTPUT_SHAPING, expectedLatestAttemptNumber: 1,
+      predecessorStageExecutionId: priorCandidate.stageExecutionId,
+      predecessorAttemptFingerprint: priorCandidate.attemptFingerprint, sourceStageExecution: narrativePlan,
+      status: OUTCOME_QUALITY_STAGE_STATUSES.SUCCEEDED, output: readable,
+      executionIdentity: internalExecutionIdentity(), startedAt: '2026-08-03T09:06:00.000Z', completedAt: '2026-08-03T09:06:00.100Z',
+    }
+    const readableCandidate = buildOutcomeQualityStageExecutionCandidate(args)
+    expect(readableCandidate.outputSnapshot.expressionProfileVersion).toBe(OUTCOME_READABLE_EXPRESSION_PROFILE_VERSION)
+    expect(readableCandidate.outputSnapshot.title).toBe(priorCandidate.outputSnapshot.title)
+    await expect(new OutcomeQualityStageExecution({
+      stageExecutionId: 'outcome_quality_stage_readable_revision_model', ...readableCandidate, createdBy: ids.actor,
+    }).validate()).resolves.toBeUndefined()
+    for (const changed of [
+      { ...readable, expressionProfileVersion: 'unknown.v1' },
+      { ...readable, sections: readable.sections.map((section, index) => index ? section : { ...section, body: 'Changed claim.' }) },
+      { ...readable, unexpected: true },
+    ]) expect(() => buildOutcomeQualityStageExecutionCandidate({ ...args, output: changed })).toThrow()
+    expect(() => buildOutcomeShapedCandidateRevisionOutput({
+      failedRlStage: failedRl, narrativePlanStage: narrativePlan, plan,
+      priorCandidateStage: priorCandidate, rlArtifact: makeFailedRlArtifact(failedRl, findings),
+      title: 'Parlon Executive Brief', expressionProfileVersion: 'unknown.v1',
+    })).toThrow('profile is invalid')
+    expect(() => buildOutcomeShapedCandidateRevisionOutput({
+      failedRlStage: failedRl, narrativePlanStage: narrativePlan, plan,
+      priorCandidateStage: priorCandidate, rlArtifact: makeFailedRlArtifact(failedRl, findings),
+      title: 'Changed title', expressionProfileVersion: OUTCOME_READABLE_EXPRESSION_PROFILE_VERSION,
+    })).toThrow('cannot change the saved title')
   })
 
   it('translates the inherited governance heading without changing its decision purpose', () => {
@@ -2423,7 +1956,7 @@ describe('Outcome quality stage execution contract', () => {
 
   it('accepts provider configuration identity only for its owning quality stage', async () => {
     expect(OUTCOME_WORKING_DRAFT_PROVIDER_CONFIG_VERSION)
-      .toBe(OUTCOME_WORKING_DRAFT_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V40_CLAIM_EVIDENCE_BOUNDARIES)
+      .toBe(OUTCOME_WORKING_DRAFT_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V51_DESCRIPTIVE_DECISION_CONTEXT)
     const workingIdentity = executionIdentity({
       providerConfigurationVersion: OUTCOME_WORKING_DRAFT_PROVIDER_CONFIG_VERSION,
     })
@@ -3573,5 +3106,276 @@ describe('Outcome quality stage execution contract', () => {
       'runtimeInstanceKey', 'stageExecutionId', 'stageKey', 'stageOrder', 'startedAt', 'status', 'tenantId',
       'truthReferenceCount',
     ].sort())
+  })
+})
+
+
+describe('canonical request resolutions at actual stage model persistence boundary', () => {
+  const candidate = () => {
+    const value = buildSuccess(), intent = value.inputSnapshot.consumerIntent
+    intent.audienceResolution = resolveOutcomeAudienceRequest(intent.audience)
+    intent.compositionResolution = resolveOutcomeCompositionRequest([{ layer: 'STYLE', phrase: 'strategic-advisory-style' },
+      { layer: 'VISUAL_SYSTEM', phrase: 'executive-consulting-visual-style' }])
+    value.inputSnapshot.consumerIntentFingerprint = hashOutcomeQualityStageValue(intent)
+    refreshStageRecordFingerprints(value)
+    return value
+  }
+  const document = value => new OutcomeQualityStageExecution({ ...value, stageExecutionId: 'outcome_quality_stage_resolution', createdBy: ids.actor })
+  test('keeps both canonical resolution records and exact input fingerprint through Mongoose validation', async () => {
+    const value = candidate(), row = document(value)
+    await expect(row.validate()).resolves.toBeUndefined()
+    expect(row.toObject().inputSnapshot.consumerIntent).toEqual(value.inputSnapshot.consumerIntent)
+    expect(hashOutcomeQualityStageValue(row.toObject().inputSnapshot)).toBe(value.inputFingerprint)
+  })
+  test.each([
+    ['unknown version', intent => { intent.audienceResolution.contractVersion = 'unapproved' }],
+    ['extra resolution key', intent => { intent.compositionResolution.hiddenApproval = true }],
+    ['mismatched audience', intent => { intent.audienceResolution.audienceKeys = ['different'] }],
+    ['wrong composition key', intent => { intent.compositionResolution.request.requestedStyleKey = 'different' }],
+    ['null resolution', intent => { intent.audienceResolution = null }],
+    ['non-array mappings', intent => { intent.compositionResolution.mappings = {} }],
+    ['too many mappings', intent => { intent.compositionResolution = resolveOutcomeCompositionRequest(Array.from({ length: 51 }, () => ({ layer: 'STYLE', phrase: 'strategic-advisory-style' }))) }],
+    ['unknown intent key', intent => { intent.nonCanonicalApproval = true }],
+  ])('rejects resealed %s without weakening strict validation', async (_name, alter) => {
+    const value = candidate(); alter(value.inputSnapshot.consumerIntent)
+    value.inputSnapshot.consumerIntentFingerprint = hashOutcomeQualityStageValue(value.inputSnapshot.consumerIntent)
+    refreshStageRecordFingerprints(value)
+    await expect(document(value).validate()).rejects.toThrow()
+  })
+  test('rejects missing consumer intent as a governed validation error rather than hashing undefined', async () => {
+    const value = candidate(); delete value.inputSnapshot.consumerIntent
+    await expect(document(value).validate()).rejects.not.toMatchObject({ code: 'ERR_INVALID_ARG_TYPE' })
+  })
+})
+
+describe('Narrative exact source and same-stage ARL retry history', () => {
+  const authorisedSources = () => {
+    const plan = makePlan()
+    plan.runtimeInstanceId = AUTHORISED_ARL_SCOPE.runtimeInstanceId
+    const { arlStage, workingDraftStage } = makeArlSource()
+    for (const stage of [arlStage, workingDraftStage]) stage.runtimeInstanceId = plan.runtimeInstanceId
+    workingDraftStage.stageExecutionId = AUTHORISED_ARL_SCOPE.workingDraftId
+    workingDraftStage.attemptNumber = 12
+    const source = arlStage.inputSnapshot.sourceStage
+    Object.assign(source, { stageExecutionId: workingDraftStage.stageExecutionId, attemptNumber: 12 })
+    arlStage.outputSnapshot.workingDraftStageExecutionId = workingDraftStage.stageExecutionId
+    arlStage.outputSnapshot.approvedMeaning.workingDraftStageExecutionId = workingDraftStage.stageExecutionId
+    arlStage.outputSnapshot.approvedMeaning.meaningFingerprint = hashOutcomeQualityStageValue({
+      workingDraftStageExecutionId: workingDraftStage.stageExecutionId,
+      workingDraftOutputFingerprint: workingDraftStage.outputFingerprint,
+      decisionLogicFingerprint: arlStage.outputSnapshot.approvedMeaning.decisionLogicFingerprint,
+    })
+    arlStage.outputFingerprint = hashOutcomeQualityStageValue(arlStage.outputSnapshot)
+    const prior = clone(arlStage)
+    Object.assign(prior, { stageExecutionId: AUTHORISED_ARL_SCOPE.priorArlId, attemptNumber: 11,
+      status: 'FAILED', failure: { failureCode: 'ARL_MEANING_REVIEW_REQUIRED_CHANGE', retryable: false },
+      outputSnapshot: {}, outputFingerprint: '', attemptFingerprint: '3'.repeat(64) })
+    arlStage.stageExecutionId = 'outcome_quality_stage_authorised_arl12_fixture'
+    arlStage.attemptNumber = 12
+    arlStage.predecessorStageExecutionId = prior.stageExecutionId
+    arlStage.predecessorAttemptFingerprint = prior.attemptFingerprint
+    const claimEventId = '11111111-1111-4111-8111-111111111111', claimBodyHash = 'a'.repeat(64)
+    const requestIdentity = authorisedArlRequestIdentity(claimEventId, claimBodyHash, AUTHORISED_ARL_BODY.payloadSha256)
+    arlStage.executionIdentity.authorisedReview = {
+      contractVersion: 'authorised-arl-review.v1', claimEventId, claimBodyHash,
+      approvalReference: AUTHORISED_ARL_APPROVAL.reference, approvalSha256: AUTHORISED_ARL_APPROVAL.documentSha256,
+      discrepancyOutcome: 'DISCREPANCY', workingDraftStageExecutionId: workingDraftStage.stageExecutionId,
+      workingDraftOutputFingerprint: workingDraftStage.outputFingerprint,
+      workingDraftAttemptFingerprint: workingDraftStage.attemptFingerprint, workingDraftMaterialHash: 'e'.repeat(64),
+      priorArlStageExecutionId: prior.stageExecutionId, priorArlAttemptFingerprint: prior.attemptFingerprint,
+      priorArlMaterialHash: 'f'.repeat(64), priorResponseId: 'resp_prior_fixture',
+      requestPayloadSha256: AUTHORISED_ARL_BODY.payloadSha256, requestPayloadBytes: AUTHORISED_ARL_BODY.payloadBytes,
+      requestContextHash: AUTHORISED_ARL_BODY.contextHash, requestContextBytes: AUTHORISED_ARL_BODY.contextBytes,
+      transportVersion: AUTHORISED_ARL_BODY.transportVersion,
+      providerConfigurationVersion: OUTCOME_ARL_MEANING_REVIEW_PROVIDER_CONFIG_VERSIONS.OPENAI_RESPONSES_V7_EXACT_TRANSPORT,
+      methodFingerprint: '1b2e77dabcb15eac8da085cd4dfedc0807743ab3d93194cb57e2d0b57eb6186e',
+      requestIdentity, grrIdempotencyKey: `ARL_AUTHORISED_REVIEW:${requestIdentity}`,
+      responseState: 'FRESH', responseId: 'resp_new_fixture', unresolvedReason: '',
+    }
+    return { plan, arlStage, workingDraftStage, arlRetryPredecessor: prior }
+  }
+
+  it('accepts a verified authorised retry without changing its failed predecessor or exact draft', () => {
+    const args = authorisedSources(), before = JSON.stringify(args)
+    const output = buildOutcomeNarrativePlanOutput(args)
+    expect(output.arlStageExecutionId).toBe(args.arlStage.stageExecutionId)
+    expect(args.arlStage.predecessorStageExecutionId).toBe(AUTHORISED_ARL_SCOPE.priorArlId)
+    expect(args.arlRetryPredecessor.status).toBe('FAILED')
+    expect(JSON.stringify(args)).toBe(before)
+  })
+
+  it.each(['missing', 'runtimeInstanceId', 'customerId', 'tenantId', 'requestId', 'draftId', 'draftIterationId',
+    'qualityRunId', 'planId', 'planFingerprint', 'stageKey', 'stageOrder', 'attemptNumber', 'stageExecutionId', 'attemptFingerprint'])('rejects the %s prior ARL binding', (key) => {
+
+    const args = authorisedSources()
+    if (key === 'missing') args.arlRetryPredecessor = null
+    else args.arlRetryPredecessor[key] = typeof args.arlRetryPredecessor[key] === 'number' ? 99 : 'unrelated'
+    const before = JSON.stringify(args)
+    expect(() => buildOutcomeNarrativePlanOutput(args)).toThrow('ARL review history is not eligible')
+    expect(JSON.stringify(args)).toBe(before)
+  })
+
+  it.each(['missing', 'stageExecutionId', 'attemptFingerprint', 'outputFingerprint'])('rejects the %s actual draft source', (key) => {
+    const args = authorisedSources()
+    if (key === 'missing') delete args.arlStage.inputSnapshot.sourceStage
+    else args.arlStage.inputSnapshot.sourceStage[key] = 'unrelated'
+    expect(() => buildOutcomeNarrativePlanOutput(args)).toThrow('not bound to the Working Draft')
+  })
+
+  it.each(['workingDraftStageExecutionId', 'workingDraftOutputFingerprint'])('rejects changed approved meaning %s', (key) => {
+    const args = authorisedSources()
+    args.arlStage.outputSnapshot.approvedMeaning[key] = 'unrelated'
+    expect(() => buildOutcomeNarrativePlanOutput(args)).toThrow('not bound to the Working Draft')
+  })
+
+  it.each(['missing', 'extra', 'responseState', 'workingDraftOutputFingerprint', 'priorArlAttemptFingerprint'])('rejects %s authorised receipt without reopening semantic finality', (key) => {
+
+    const args = authorisedSources()
+    if (key === 'missing') delete args.arlStage.executionIdentity.authorisedReview
+    else args.arlStage.executionIdentity.authorisedReview[key] = 'invalid'
+    expect(() => buildOutcomeNarrativePlanOutput(args)).toThrow('ARL review history is not eligible')
+    expect(args.arlRetryPredecessor.failure.retryable).toBe(false)
+  })
+
+  it('retains direct predecessor rejection for first-attempt legacy ARL', () => {
+    const plan = makePlan(), sources = makeArlSource(plan)
+    sources.arlStage.predecessorStageExecutionId = 'unrelated'
+    expect(() => buildOutcomeNarrativePlanOutput({ plan, ...sources })).toThrow('ARL review history is not eligible')
+  })
+
+  it('reads the exact scoped prior ARL record before building a native retry Narrative', async () => {
+    const plan = makeLegacyPlan(), runtime = makeRuntime(), sources = makeArlSource(plan)
+    const prior = clone(sources.arlStage)
+    prior.status = 'FAILED'
+    prior.failure = { failureCode: 'ARL_MEANING_REVIEW_PROVIDER_TIMEOUT', retryable: true }
+    sources.arlStage.stageExecutionId = 'outcome_quality_stage_retry_arl_fixture'
+    sources.arlStage.attemptNumber = 2
+    sources.arlStage.predecessorStageExecutionId = prior.stageExecutionId
+    sources.arlStage.predecessorAttemptFingerprint = prior.attemptFingerprint
+    const createStage = jest.fn(async () => ({ idempotent: false, execution: { stageExecutionId: 'narrative_fixture' } }))
+    const stageModel = { findOne: jest.fn(filter => makeQuery(filter.stageExecutionId ? prior
+      : filter.stageKey === 'ARL_MEANING_REVIEW' ? sources.arlStage
+        : filter.stageKey === 'WORKING_DRAFT' ? sources.workingDraftStage : null)) }
+    await createOutcomeNarrativePlan({ actorUserId: String(ids.actor), runtimeInstanceId: String(ids.runtime),
+      planRecordId: String(ids.plan), expectedPlanFingerprint: plan.planFingerprint,
+      deps: { OutcomeKnowledgeCompositionPlan: { findOne: () => makeQuery(plan) },
+        RuntimeInstance: { findOne: () => makeQuery(runtime) }, OutcomeQualityStageExecution: stageModel,
+        assertRuntimePermission: jest.fn(), createOutcomeQualityStageExecution: createStage } })
+    expect(stageModel.findOne).toHaveBeenCalledWith({ runtimeInstanceId: String(ids.runtime),
+      planId: plan.planId, requestId: { $exists: false }, stageKey: 'ARL_MEANING_REVIEW',
+      stageExecutionId: prior.stageExecutionId })
+    expect(createStage).toHaveBeenCalledTimes(1)
+  })
+
+  it('forwards the current actor scopes to native Narrative stage persistence', async () => {
+    const plan = makeLegacyPlan(), runtime = makeRuntime(), sources = makeArlSource(plan)
+    const scopes = { customerIds: [String(ids.customer)], tenantIds: [String(ids.tenant)] }
+    const createStage = jest.fn(async () => ({ idempotent: false, execution: { stageExecutionId: 'narrative_fixture' } }))
+    const stageModel = { findOne: jest.fn(filter => makeQuery(filter.stageKey === 'ARL_MEANING_REVIEW'
+      ? sources.arlStage : filter.stageKey === 'WORKING_DRAFT' ? sources.workingDraftStage : null)) }
+    await createOutcomeNarrativePlan({ actorUserId: String(ids.actor), runtimeInstanceId: String(ids.runtime),
+      planRecordId: String(ids.plan), expectedPlanFingerprint: plan.planFingerprint, scopes,
+      deps: { OutcomeKnowledgeCompositionPlan: { findOne: () => makeQuery(plan) },
+        RuntimeInstance: { findOne: () => makeQuery(runtime) }, OutcomeQualityStageExecution: stageModel,
+        assertRuntimePermission: jest.fn(), createOutcomeQualityStageExecution: createStage } })
+    expect(createStage).toHaveBeenCalledWith(expect.objectContaining({ scopes, actorUserId: String(ids.actor) }))
+  })
+})
+
+describe('Narrative persisted claim-ledger source mapping', () => {
+  const fixture = async (options = {}) => {
+    const { plan, candidate, projection } = await makePlacedWorkingDraft({ allLockedSources: true, ...options })
+    const workingDraftStage = { ...candidate, stageExecutionId: 'outcome_quality_stage_placed_draft_fixture' }
+    const arlStage = { ...buildArlReview({ plan, sourceStageExecution: workingDraftStage }),
+      stageExecutionId: 'outcome_quality_stage_placed_arl_fixture' }
+    return { plan, workingDraftStage, arlStage, projection }
+  }
+  const refreshDraft = (args) => {
+    args.workingDraftStage.outputFingerprint = hashOutcomeQualityStageValue(args.workingDraftStage.outputSnapshot)
+    args.arlStage.inputSnapshot.sourceStage.outputFingerprint = args.workingDraftStage.outputFingerprint
+    args.arlStage.outputSnapshot.approvedMeaning.workingDraftOutputFingerprint = args.workingDraftStage.outputFingerprint
+  }
+  const resealLedger = (args) => {
+    const ledger = args.workingDraftStage.inputSnapshot.workingDraftReferenceLedger
+    if (ledger) {
+      const { fingerprint: _fingerprint, ...payload } = ledger
+      ledger.fingerprint = hashOutcomeQualityStageValue(payload)
+    }
+  }
+
+  it('maps persisted output targets through claims to canonical locked truth and passes the unchanged native writer/model', async () => {
+    const args = await fixture(), before = JSON.stringify(args)
+    const output = buildOutcomeNarrativePlanOutput(args)
+    const expected = args.plan.payload.lockedTruth.acceptedSections.map((section) => section.sectionKey).sort()
+    expect(output.sections[0].truthReferences).toEqual(expected)
+    expect(output.sections[0].truthReferences).not.toEqual(args.workingDraftStage.outputSnapshot.sections[0].truthReferences)
+    expect(output.sections[0].sectionKey).toBe(args.workingDraftStage.outputSnapshot.sections[0].sectionKey)
+    expect(output.sections[0].keyMessages[0]).toBe(args.workingDraftStage.outputSnapshot.sections[0].content)
+    const candidate = buildNarrativePlan({ plan: args.plan, sources: args, output })
+    await expect(new OutcomeQualityStageExecution({ ...candidate,
+      stageExecutionId: 'outcome_quality_stage_mapped_narrative_fixture', createdBy: ids.actor }).validate()).resolves.toBeUndefined()
+    expect(JSON.stringify(args)).toBe(before)
+  })
+
+  it('keeps direct-source legacy Narrative output unchanged', () => {
+    const plan = makePlan(), args = { plan, ...makeArlSource(plan) }
+    const output = buildOutcomeNarrativePlanOutput(args)
+    expect(output.sections.map((section) => section.truthReferences))
+      .toEqual(args.workingDraftStage.outputSnapshot.sections.map((section) => section.truthReferences))
+  })
+
+  it.each(['missing', 'null', 'version', 'fingerprint', 'contractId', 'contractHash', 'projectionHash', 'extra', 'duplicate claim',
+    'wrong source', 'wrong target', 'duplicate target'])('rejects %s ledger even if its fingerprint is recomputed', async (kind) => {
+    const args = await fixture(), ledger = args.workingDraftStage.inputSnapshot.workingDraftReferenceLedger
+    if (kind === 'missing') delete args.workingDraftStage.inputSnapshot.workingDraftReferenceLedger
+    else if (kind === 'null') args.workingDraftStage.inputSnapshot.workingDraftReferenceLedger = null
+    else if (kind === 'duplicate claim') ledger.claims.push(clone(ledger.claims[0]))
+    else if (kind === 'wrong source') ledger.claims[0].sourceSectionKeys = ['invented_source']
+    else if (kind === 'wrong target') ledger.claims[0].targetSectionKeys = ['invented-target']
+    else if (kind === 'duplicate target') ledger.targetSectionKeys.push(ledger.targetSectionKeys[0])
+    else ledger[kind] = 'changed'
+    if (kind !== 'fingerprint') resealLedger(args)
+    const before = JSON.stringify(args)
+    expect(() => buildOutcomeNarrativePlanOutput(args)).toThrow('persisted Working Draft claim ledger')
+    expect(JSON.stringify(args)).toBe(before)
+  })
+
+  it.each(['contractVersion', 'contractId', 'contractHash', 'projectionHash'])('rejects changed saved provider receipt %s', async (key) => {
+    const args = await fixture()
+    args.workingDraftStage.inputSnapshot.evidenceToMeaning[key] = 'changed'
+    expect(() => buildOutcomeNarrativePlanOutput(args)).toThrow('persisted Working Draft claim ledger')
+  })
+
+  it.each(['unknown claim', 'missing claim', 'duplicate claim', 'wrong claim target', 'wrong section target', 'wrong section references'])('rejects %s without silently filling missing lineage', async (kind) => {
+
+    const args = await fixture(), section = args.workingDraftStage.outputSnapshot.sections[0]
+    if (kind === 'unknown claim') section.claims[0].claimKey = 'claim_invented'
+    if (kind === 'missing claim') section.claims = []
+    if (kind === 'duplicate claim') section.claims.push(clone(section.claims[0]))
+    if (kind === 'wrong claim target') section.claims[0].truthReferences = ['invented-target']
+    if (kind === 'wrong section target') section.sectionKey = 'invented-target'
+    if (kind === 'wrong section references') section.truthReferences = ['invented-target']
+    refreshDraft(args)
+    expect(() => buildOutcomeNarrativePlanOutput(args)).toThrow('persisted Working Draft claim ledger')
+  })
+
+  it.each(['input state source', 'input truth hash', 'plan marker', 'missing source', 'ambiguous source', 'wrong ARL coverage'])('rejects %s identity or coverage', async (kind) => {
+
+    const args = await fixture()
+    const planRows = args.plan.payload.lockedTruth.acceptedSections
+    const inputRows = args.workingDraftStage.inputSnapshot.lockedTruth.acceptedSections
+    if (kind === 'input state source') inputRows[0].stateSectionKey = 'invented_source'
+    if (kind === 'input truth hash') inputRows[0].truthHash = inputRows[0].truthHash === 'sha256:' + 'a'.repeat(64)
+      ? 'sha256:' + 'b'.repeat(64) : 'sha256:' + 'a'.repeat(64)
+    if (kind === 'plan marker') args.plan.payload.lockedTruth.acceptedTruthIdentityContractVersion = 'unrecognised'
+    if (kind === 'missing source') { planRows[0].stateSectionKey = 'invented_source'; inputRows[0].stateSectionKey = 'invented_source' }
+    if (kind === 'ambiguous source') { planRows[0].stateSectionKey = planRows[1].stateSectionKey; inputRows[0].stateSectionKey = planRows[1].stateSectionKey }
+    if (kind === 'wrong ARL coverage') args.arlStage.outputSnapshot.truthReferences = [planRows[0].sectionKey]
+    expect(() => buildOutcomeNarrativePlanOutput(args)).toThrow('persisted Working Draft claim ledger')
+  })
+
+  it('rejects incomplete legitimate source coverage instead of assigning every locked section', async () => {
+    const args = await fixture({ allLockedSources: false })
+    expect(() => buildOutcomeNarrativePlanOutput(args)).toThrow('persisted Working Draft claim ledger')
   })
 })

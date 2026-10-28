@@ -1,5 +1,6 @@
 import { randomUUID, createHash } from 'node:crypto'
 import mongoose from 'mongoose'
+import { assertNormalOutcomeRuntime, isControlledSyntheticOutcomeRuntime } from './syntheticOutcomeIsolationService.js'
 import {
   FrameworkPackage,
   GovernedReasoningExecution,
@@ -231,6 +232,7 @@ const resolveRuntimeInstance = async ({
     feature: getFeatureForRuntimeType(runtimeInstance.runtimeType),
   })
 
+  await attachNativeControlledReplayIsolation(runtimeInstance)
   return runtimeInstance
 }
 
@@ -898,7 +900,7 @@ const assertLiveTestAuthorizationResult = (value, providerDescriptor) => {
   return value
 }
 
-const buildLiveTestEffectivePayload = ({ payload, safeRequest }) => ({
+export const buildLiveTestEffectivePayload = ({ payload, safeRequest }) => ({
   ...payload,
   outputTypeKey: safeRequest.businessRequest.outputTypeKey,
   requestedOutputTypeKey: safeRequest.businessRequest.requestedOutputTypeKey,
@@ -974,7 +976,7 @@ const buildPersistedProviderEvidence = ({ executionMode, providerDescriptor, pro
   return providerResult?.provider || {}
 }
 
-const buildLiveTestRequestFingerprint = ({
+export const buildLiveTestRequestFingerprint = ({
   payload,
   providerContextBindingFingerprint,
   providerContextContractVersion,
@@ -1857,6 +1859,18 @@ export const createGovernedReasoningExecution = async ({
         scopes,
         permission: 'VMF_UPDATE',
       })
+  let syntheticClassification = null
+  if (isControlledSyntheticOutcomeRuntime(runtimeInstance) && typeof deps.resolveRuntimeInstance === 'function') {
+    await attachNativeControlledReplayIsolation(runtimeInstance)
+  }
+  assertNoControlledReplayIsolation(runtimeInstance)
+  if (isControlledSyntheticOutcomeRuntime(runtimeInstance)) {
+    if (typeof deps.authorizeRuntime !== 'function') assertNormalOutcomeRuntime(runtimeInstance)
+    syntheticClassification = await deps.authorizeRuntime(runtimeInstance)
+    if (syntheticClassification?.classification !== 'NON_AUTHORITATIVE_SYNTHETIC_DEV_TEST'
+      || syntheticClassification.authoritative !== false || !syntheticClassification.runEventId
+      || !/^[a-f0-9]{64}$/.test(syntheticClassification.runBodyHash || '')) assertNormalOutcomeRuntime(runtimeInstance)
+  }
   let frameworkPackage
   let truthContext
   let manifest
@@ -1904,6 +1918,7 @@ export const createGovernedReasoningExecution = async ({
   } else {
     requestFingerprint = buildRequestFingerprint({ payload, runtimeInstance })
   }
+  if (syntheticClassification) requestFingerprint = hashSafeValue({ requestFingerprint, syntheticClassification })
   const existingExecution = await findExistingIdempotentExecution({
     idempotencyKey,
     providerDescriptor: liveTest.executionMode === 'LIVE_TEST' ? liveTest.providerDescriptor : null,
@@ -1996,6 +2011,7 @@ export const createGovernedReasoningExecution = async ({
       ],
     }
   }
+  if (syntheticClassification) executionEvidence = { ...executionEvidence, syntheticClassification }
   const warnings = [
     ...(Array.isArray(providerResult?.warnings) ? providerResult.warnings : []),
     ...(liveTest.executionMode === 'LIVE_TEST' ? [] : ['KNOWLEDGE_PACK_CONTENT_NOT_EXPOSED_V1']),
@@ -2066,7 +2082,7 @@ export const createGovernedReasoningExecution = async ({
     requestedOutputTypeKey: normalizeCapabilityKey(
       payload.requestedOutputTypeKey || payload.outputTypeKey,
     ),
-    artifactType: 'GOVERNED_REASONING_OUTPUT',
+    artifactType: syntheticClassification ? 'NON_AUTHORITATIVE_SYNTHETIC_DEV_TEST' : 'GOVERNED_REASONING_OUTPUT',
     status: GRR_ARTIFACT_STATUSES.GENERATED,
     contractVersion: GRR_CONTRACT_VERSION,
     generatedOutput: providerResult.output || {},
@@ -2077,6 +2093,7 @@ export const createGovernedReasoningExecution = async ({
     },
     markdown: providerResult.output?.markdown || '',
     lineageSummary: {
+      ...(syntheticClassification ? { syntheticClassification } : {}),
       executionId,
       manifest: knowledgeContext.manifest,
       knowledgeBinding: {
@@ -2186,6 +2203,7 @@ export const getGovernedReasoningExecution = async ({
     scopes,
     permission: 'VMF_VIEW',
   })
+  assertNormalOutcomeRuntime(runtimeInstance)
 
   const execution = await GovernedReasoningExecution.findOne({
     executionId,
@@ -2209,3 +2227,4 @@ export const getGovernedReasoningExecution = async ({
 
   return serializeExecution(execution, artifact)
 }
+import { attachNativeControlledReplayIsolation, assertNoControlledReplayIsolation } from './controlledReplayIsolationService.js'

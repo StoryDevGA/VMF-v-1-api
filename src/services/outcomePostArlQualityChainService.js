@@ -1,6 +1,10 @@
+import { buildDecisionLedCommercialExpressionSection, OUTCOME_COMMERCIAL_DECISION_LED_EXPRESSION_PROFILE_VERSION } from '../utils/outcomeDecisionLedCommercialExpressionProfile.js'
 import mongoose from 'mongoose'
+import { loadOutcomeKnowledgePackVersionContent } from './outcomeKnowledgePackRegistryService.js'
+import { buildCommercialStyleValidationReceipt } from './commercialOutputReviewContract.js'
 
 import {
+  OUTCOME_ACCEPTED_TRUTH_IDENTITY_CONTRACT_VERSION,
   OUTCOME_NARRATIVE_PLAN_SCHEMA_VERSION,
   OUTCOME_QUALITY_STAGE_OUTPUT_TYPES,
   OUTCOME_QUALITY_STAGE_SEQUENCE,
@@ -15,7 +19,10 @@ import {
   OutcomeQualityStageExecution,
   RuntimeInstance,
 } from '../models/index.js'
-import { buildExpressionOnlyRevisionSection } from '../utils/outcomeRenderedExpressionRevision.js'
+import { buildExpressionOnlyRevisionSection, buildReadableExpressionSection, buildPresentationExpressionSection, buildStructuredExpressionSection, OUTCOME_READABLE_EXPRESSION_PROFILE_VERSION, OUTCOME_PRESENTATION_EXPRESSION_PROFILE_VERSION, OUTCOME_STRUCTURED_EXPRESSION_PROFILE_VERSION } from '../utils/outcomeRenderedExpressionRevision.js'
+import { buildCommercialExpressionSection, buildCommercialOutputContract, getCommercialDiagramApplicability, OUTCOME_COMMERCIAL_CANDIDATE_TYPE, OUTCOME_COMMERCIAL_EXPRESSION_PROFILE_VERSION } from '../utils/outcomeCommercialExpressionProfile.js'
+import { buildReadableCommercialExpressionSection, OUTCOME_COMMERCIAL_READABLE_EXPRESSION_PROFILE_VERSION } from '../utils/outcomeReadableCommercialExpressionProfile.js'
+import { buildGovernedCommercialExpressionSection, OUTCOME_COMMERCIAL_GOVERNED_EXPRESSION_PROFILE_VERSION } from '../utils/outcomeGovernedCommercialExpressionProfile.js'
 import {
   assertOutcomeKnowledgeCompositionPlanIntegrity,
   assertLegacyOutcomeKnowledgeCompositionPlan,
@@ -24,11 +31,13 @@ import {
 import {
   buildOutcomeQualityVisibleGaps,
   buildOutcomeQualityStageExecutionCandidate,
+  assertOutcomeQualityStageRetryLineage,
   createOutcomeQualityStageExecution,
   hashOutcomeQualityStageValue,
   serializeOutcomeQualityStageExecution,
 } from './outcomeQualityStageExecutionService.js'
 import { assertRuntimePermission } from './runtimeInstanceService.js'
+import { readRuntimeEvidenceToMeaningProviderProjection } from './outcomeRuntimeEvidenceToMeaningService.js'
 
 const SHA256_PATTERN = /^[a-f0-9]{64}$/
 const REQUIRED_RL_DIMENSIONS = Object.freeze([
@@ -136,9 +145,76 @@ const assertSource = ({ plan, runtimeInstanceId, source, stageKey }) => {
   return stage
 }
 
-export const buildOutcomeNarrativePlanOutput = ({ plan, arlStage, workingDraftStage }) => {
+const buildNarrativeSourceReferences = ({ plan, draft, arl }) => {
+  const input = draft.inputSnapshot
+  const ledger = input?.workingDraftReferenceLedger
+  if (ledger === undefined && input?.evidenceToMeaning?.contractVersion !== 'evidence-to-draft-provider.v2') return null
+  try {
+    const projection = readRuntimeEvidenceToMeaningProviderProjection(plan)
+    if (!ledger || projection?.contractVersion !== 'evidence-to-draft-provider.v2'
+      || input?.evidenceToMeaning?.contractVersion !== projection.contractVersion
+      || ['contractId', 'contractHash', 'projectionHash'].some((key) => ledger[key] !== projection[key]
+        || input.evidenceToMeaning[key] !== projection[key])) throw new Error('receipt')
+    const claims = projection.customerClaims.map((claim) => ({ claimKey: claim.claimKey,
+      sourceSectionKeys: [...claim.sourceSectionKeys].sort(), targetSectionKeys: [...claim.sectionKeys].sort() }))
+      .sort((left, right) => left.claimKey < right.claimKey ? -1 : left.claimKey > right.claimKey ? 1 : 0)
+    const expected = { version: 'working-draft-reference-ledger.v1', contractId: projection.contractId,
+      contractHash: projection.contractHash, projectionHash: projection.projectionHash, claims,
+      targetSectionKeys: [...new Set(claims.flatMap((claim) => claim.targetSectionKeys))].sort() }
+    if (hashOutcomeQualityStageValue(ledger) !== hashOutcomeQualityStageValue({ ...expected,
+      fingerprint: hashOutcomeQualityStageValue(expected) })) throw new Error('ledger')
+    const locked = plan.payload.lockedTruth
+    const marked = locked.acceptedTruthIdentityContractVersion === OUTCOME_ACCEPTED_TRUTH_IDENTITY_CONTRACT_VERSION
+    if (locked.acceptedTruthIdentityContractVersion !== undefined && !marked
+      || input.lockedTruth?.acceptedTruthIdentityContractVersion !== locked.acceptedTruthIdentityContractVersion) throw new Error('identity marker')
+    const rows = locked.acceptedSections.map((row) => ({ sectionKey: row.sectionKey,
+      ...(marked ? { stateSectionKey: row.stateSectionKey } : {}), runtimePath: row.runtimePath, truthHash: row.truthHash }))
+      .sort((left, right) => left.sectionKey.localeCompare(right.sectionKey))
+    if (!rows.length || hashOutcomeQualityStageValue(rows) !== hashOutcomeQualityStageValue(input.lockedTruth.acceptedSections)) throw new Error('locked source')
+    const sourceKeys = new Map()
+    for (const row of rows) {
+      const key = marked ? row.stateSectionKey : row.sectionKey
+      if (!key || sourceKeys.has(key) || [...sourceKeys.values()].includes(row.sectionKey)) throw new Error('ambiguous identity')
+      sourceKeys.set(key, row.sectionKey)
+    }
+    const sameReferences = (actual, expectedKeys) => Array.isArray(actual) && actual.length > 0
+      && new Set(actual).size === actual.length
+      && hashOutcomeQualityStageValue([...actual].sort()) === hashOutcomeQualityStageValue([...new Set(expectedKeys)].sort())
+    const sections = draft.outputSnapshot.sections
+    if (!Array.isArray(sections) || new Set(sections.map((section) => section.sectionKey)).size !== sections.length) throw new Error('sections')
+    const result = new Map()
+    for (const section of sections) {
+      if (!ledger.targetSectionKeys.includes(section.sectionKey) || !Array.isArray(section.claims) || !section.claims.length
+        || new Set(section.claims.map((claim) => claim.claimKey)).size !== section.claims.length) throw new Error('section claims')
+      const admitted = section.claims.map((claim) => {
+        const match = ledger.claims.find((row) => row.claimKey === claim.claimKey)
+        if (!match || !match.targetSectionKeys.includes(section.sectionKey)
+          || !sameReferences(claim.truthReferences, match.targetSectionKeys)) throw new Error('claim placement')
+        return match
+      })
+      if (!sameReferences(section.truthReferences, admitted.flatMap((claim) => claim.targetSectionKeys))) throw new Error('target references')
+      const references = admitted.flatMap((claim) => claim.sourceSectionKeys.map((key) => {
+        if (!sourceKeys.has(key)) throw new Error('source unmapped')
+        return sourceKeys.get(key)
+      }))
+      result.set(section.sectionKey, [...new Set(references)].sort())
+    }
+    if (ledger.claims.some((claim) => claim.targetSectionKeys.some((key) =>
+      sections.filter((section) => section.sectionKey === key).flatMap((section) => section.claims)
+        .filter((row) => row.claimKey === claim.claimKey).length !== 1))
+      || !sameReferences([...new Set([...result.values()].flat())], rows.map((row) => row.sectionKey))
+      || !sameReferences(arl.outputSnapshot.truthReferences, rows.map((row) => row.sectionKey))) throw new Error('coverage')
+    return result
+  } catch {
+    throw fail('The persisted Working Draft claim ledger cannot resolve exact Narrative source references.')
+  }
+}
+
+export const buildOutcomeNarrativePlanOutput = ({ plan, arlStage, workingDraftStage, arlRetryPredecessor }) => {
   const arl = toPlain(arlStage)
   const draft = toPlain(workingDraftStage)
+  const prior = toPlain(arlRetryPredecessor)
+  const source = arl?.inputSnapshot?.sourceStage
   const meaningFingerprint = lower(arl?.outputSnapshot?.approvedMeaning?.meaningFingerprint)
   if (draft?.status !== OUTCOME_QUALITY_STAGE_STATUSES.SUCCEEDED
     || draft?.stageKey !== OUTCOME_QUALITY_STAGES.WORKING_DRAFT
@@ -146,13 +222,31 @@ export const buildOutcomeNarrativePlanOutput = ({ plan, arlStage, workingDraftSt
     || text(draft?.planId) !== text(plan?.planId)
     || lower(draft?.planFingerprint) !== lower(plan?.planFingerprint)
     || hashOutcomeQualityStageValue(draft?.outputSnapshot) !== lower(draft?.outputFingerprint)
-    || text(arl?.predecessorStageExecutionId) !== text(draft?.stageExecutionId)
-    || lower(arl?.predecessorAttemptFingerprint) !== lower(draft?.attemptFingerprint)
+    || text(source?.stageExecutionId) !== text(draft?.stageExecutionId)
+    || lower(source?.attemptFingerprint) !== lower(draft?.attemptFingerprint)
+    || lower(source?.outputFingerprint) !== lower(draft?.outputFingerprint)
     || !SHA256_PATTERN.test(meaningFingerprint)
     || text(arl?.outputSnapshot?.approvedMeaning?.workingDraftStageExecutionId) !== text(draft?.stageExecutionId)
     || lower(arl?.outputSnapshot?.approvedMeaning?.workingDraftOutputFingerprint) !== lower(draft?.outputFingerprint)) {
     throw fail('ARL approved meaning is not bound to the Working Draft.')
   }
+  try {
+    if (!Number.isSafeInteger(arl.attemptNumber) || arl.attemptNumber < 1
+      || ['runtimeInstanceId', 'customerId', 'tenantId', 'requestId', 'draftId', 'draftIterationId', 'qualityRunId']
+        .some((key) => text(arl[key]) !== text(draft[key]))) throw new Error('source cohort')
+    if (arl.attemptNumber > 1 && (!prior
+      || prior.stageKey !== OUTCOME_QUALITY_STAGES.ARL_MEANING_REVIEW
+      || prior.stageOrder !== 3
+      || prior.attemptNumber !== arl.attemptNumber - 1
+      || text(prior.stageExecutionId) !== text(arl.predecessorStageExecutionId)
+      || lower(prior.attemptFingerprint) !== lower(arl.predecessorAttemptFingerprint)
+      || ['runtimeInstanceId', 'customerId', 'tenantId', 'requestId', 'draftId', 'draftIterationId', 'qualityRunId', 'planId', 'planFingerprint']
+        .some((key) => text(prior[key]) !== text(arl[key])))) throw new Error('retry cohort')
+    assertOutcomeQualityStageRetryLineage({ candidate: arl, latest: arl.attemptNumber > 1 ? prior : null, source: draft })
+  } catch {
+    throw fail('ARL review history is not eligible for the exact Working Draft.')
+  }
+  const sourceReferences = buildNarrativeSourceReferences({ plan, draft, arl })
   const sections = (draft.outputSnapshot?.sections || []).map((section, index) => {
     const keyMessages = [section.content, ...(section.claims || []).map((claim) => claim.statement)]
       .flatMap((message) => splitNarrativeMessage(message))
@@ -167,7 +261,7 @@ export const buildOutcomeNarrativePlanOutput = ({ plan, arlStage, workingDraftSt
       heading: text(section.title),
       purpose: `Present the approved ${text(section.title).toLowerCase()} meaning for executive decision use.`,
       keyMessages,
-      truthReferences: [...section.truthReferences].map(lower),
+      truthReferences: sourceReferences ? sourceReferences.get(section.sectionKey) : [...section.truthReferences].map(lower),
       qualification: [...(section.assumptions || []), ...(section.gaps || [])].join(' '),
       diagramIntent: '',
     }
@@ -225,6 +319,8 @@ export const buildOutcomeShapedCandidateOutput = ({ plan, narrativePlanStage, ti
 }
 
 export const buildOutcomeShapedCandidateRevisionOutput = ({
+  styleSource,
+  expressionProfileVersion,
   failedRlStage,
   narrativePlanStage,
   plan,
@@ -232,8 +328,17 @@ export const buildOutcomeShapedCandidateRevisionOutput = ({
   rlArtifact,
   title,
 }) => {
+  const commercial = [OUTCOME_COMMERCIAL_EXPRESSION_PROFILE_VERSION, OUTCOME_COMMERCIAL_READABLE_EXPRESSION_PROFILE_VERSION, OUTCOME_COMMERCIAL_GOVERNED_EXPRESSION_PROFILE_VERSION, OUTCOME_COMMERCIAL_DECISION_LED_EXPRESSION_PROFILE_VERSION].includes(expressionProfileVersion)
+  const explicitProfile = commercial || [OUTCOME_READABLE_EXPRESSION_PROFILE_VERSION, OUTCOME_PRESENTATION_EXPRESSION_PROFILE_VERSION, OUTCOME_STRUCTURED_EXPRESSION_PROFILE_VERSION].includes(expressionProfileVersion)
+  if (expressionProfileVersion !== undefined && !explicitProfile) {
+    throw fail('Expression-only remediation profile is invalid.')
+  }
   const narrativePlan = toPlain(narrativePlanStage)
   const prior = toPlain(priorCandidateStage)
+  const revisionTitle = explicitProfile
+    ? prior?.outputSnapshot?.title : title
+  if (explicitProfile
+    && title !== undefined && title !== revisionTitle) throw fail('Expression-only remediation cannot change the saved title.')
   const failedRl = toPlain(failedRlStage)
   const artifact = toPlain(rlArtifact)
   const artifactOutput = artifact?.generatedOutput
@@ -274,20 +379,35 @@ export const buildOutcomeShapedCandidateRevisionOutput = ({
     || new Set(findingDimensions).size !== REQUIRED_RL_DIMENSIONS.length
     || REQUIRED_RL_DIMENSIONS.some((dimension) => !findingDimensions.includes(dimension))
     || !rlFindings.some((finding) => finding?.requiredChange === true && text(finding?.status).toUpperCase() === 'FAIL')
-    || !text(title)) throw fail('Expression-only remediation lineage is invalid.')
+    || !text(revisionTitle)) throw fail('Expression-only remediation lineage is invalid.')
   const output = narrativePlan.outputSnapshot
-  return {
+  const result = {
     outputType: OUTCOME_QUALITY_STAGE_OUTPUT_TYPES.RENDERED_EXPRESSION,
     schemaVersion: OUTCOME_RENDERED_EXPRESSION_SCHEMA_VERSION,
     narrativePlanStageExecutionId: narrativePlan.stageExecutionId,
     narrativePlanOutputFingerprint: lower(narrativePlan.outputFingerprint),
-    candidateType: 'EXECUTIVE_BRIEF',
-    title: text(title),
+    candidateType: commercial ? OUTCOME_COMMERCIAL_CANDIDATE_TYPE : 'EXECUTIVE_BRIEF',
+    ...(commercial ? { outputContract: buildCommercialOutputContract({ plan }), diagramApplicability: getCommercialDiagramApplicability(output.sections) } : {}),
+    title: text(revisionTitle),
     sections: output.sections.map((section, index) => {
-      const expression = buildExpressionOnlyRevisionSection(section)
+      const expression = commercial
+        ? (expressionProfileVersion === OUTCOME_COMMERCIAL_DECISION_LED_EXPRESSION_PROFILE_VERSION
+          ? buildDecisionLedCommercialExpressionSection(section, { sections: output.sections })
+          : expressionProfileVersion === OUTCOME_COMMERCIAL_GOVERNED_EXPRESSION_PROFILE_VERSION
+          ? buildGovernedCommercialExpressionSection(section, { sections: output.sections })
+          : expressionProfileVersion === OUTCOME_COMMERCIAL_READABLE_EXPRESSION_PROFILE_VERSION
+          ? buildReadableCommercialExpressionSection(section, { sections: output.sections })
+          : buildCommercialExpressionSection(section, { sections: output.sections }))
+        : expressionProfileVersion === OUTCOME_STRUCTURED_EXPRESSION_PROFILE_VERSION
+        ? buildStructuredExpressionSection(section, { sections: output.sections })
+        : expressionProfileVersion === OUTCOME_PRESENTATION_EXPRESSION_PROFILE_VERSION
+        ? buildPresentationExpressionSection(section, { sections: output.sections })
+        : expressionProfileVersion === OUTCOME_READABLE_EXPRESSION_PROFILE_VERSION
+        ? buildReadableExpressionSection(section, { sections: output.sections })
+        : buildExpressionOnlyRevisionSection(section)
       return {
         order: index + 1,
-        elementId: `executive_brief_${lower(section.sectionKey)}_${index + 1}`,
+        elementId: `${commercial ? 'commercial_strategy' : 'executive_brief'}_${lower(section.sectionKey)}_${index + 1}`,
         sectionKey: lower(section.sectionKey),
         heading: expression.heading,
         body: expression.body,
@@ -309,7 +429,15 @@ export const buildOutcomeShapedCandidateRevisionOutput = ({
     remediationSourceAttemptFingerprint: lower(failedRl.attemptFingerprint),
     remediationFailureCode: 'RENDERED_EXPRESSION_RL_REQUIRED_CHANGE',
     rlFindingFingerprint: hashOutcomeQualityStageValue(rlFindings),
+    ...(expressionProfileVersion ? { expressionProfileVersion } : {}),
   }
+  if ([OUTCOME_COMMERCIAL_GOVERNED_EXPRESSION_PROFILE_VERSION, OUTCOME_COMMERCIAL_DECISION_LED_EXPRESSION_PROFILE_VERSION].includes(expressionProfileVersion)) {
+    result.styleValidationReceipt = buildCommercialStyleValidationReceipt({ contract: result.outputContract,
+      outputAssetId: plan.payload.resolution.selectedPacks.find(pack => pack.packType === 'OUTPUT_TYPE_DEFINITION' && pack.packKey === result.outputContract.outputTypeKey)?.knowledgeAssetId,
+      styleSource, title: result.title, sections: result.sections,
+      audienceKeys: plan.payload.resolution.request?.audienceKeys || [] })
+  }
+  return result
 }
 
 const persistStage = async ({
@@ -394,6 +522,7 @@ const persistStage = async ({
     ...args,
     expectedAttemptFingerprint: candidate.attemptFingerprint,
     actorUserId,
+    scopes,
     requestBinding,
     deps: deps.stageDeps || {},
   })
@@ -420,7 +549,13 @@ export const createOutcomeNarrativePlan = async (args = {}) => {
     source: arlStage,
     stageKey: OUTCOME_QUALITY_STAGES.OUTCOME_NARRATIVE_PLAN,
   })
-  const output = buildOutcomeNarrativePlanOutput({ plan: bound.plan, arlStage: arl, workingDraftStage })
+  const arlRetryPredecessor = Number(arl.attemptNumber) > 1
+    ? await execQuery(bound.models.OutcomeQualityStageExecution.findOne({
+      runtimeInstanceId: args.runtimeInstanceId, planId: bound.plan.planId, ...stageScope(args.requestBinding),
+      stageKey: OUTCOME_QUALITY_STAGES.ARL_MEANING_REVIEW, stageExecutionId: arl.predecessorStageExecutionId,
+    }))
+    : null
+  const output = buildOutcomeNarrativePlanOutput({ plan: bound.plan, arlStage: arl, workingDraftStage, arlRetryPredecessor })
   return persistStage({ ...args, output, stageKey: OUTCOME_QUALITY_STAGES.OUTCOME_NARRATIVE_PLAN })
 }
 
@@ -446,6 +581,11 @@ export const createOutcomeShapedCandidate = async (args = {}) => {
 
 export const createOutcomeShapedCandidateRevision = async (args = {}) => {
   const bound = await readBoundState({ ...args, deps: args.deps || {} })
+  const stylePack = [OUTCOME_COMMERCIAL_GOVERNED_EXPRESSION_PROFILE_VERSION, OUTCOME_COMMERCIAL_DECISION_LED_EXPRESSION_PROFILE_VERSION].includes(args.expressionProfileVersion)
+    ? buildCommercialOutputContract({ plan: bound.plan }).packs.find(pack => pack.packType === 'STYLE') : null
+  const styleSource = stylePack ? await (args.deps?.loadPackContent || loadOutcomeKnowledgePackVersionContent)({
+    packId: stylePack.packId, versionId: stylePack.versionId,
+  }) : undefined
   const [narrativePlanStage, priorCandidateStage, failedRlStage] = await Promise.all([
     readLatest({
       model: bound.models.OutcomeQualityStageExecution,
@@ -473,6 +613,8 @@ export const createOutcomeShapedCandidateRevision = async (args = {}) => {
       }))
     : null
   const output = buildOutcomeShapedCandidateRevisionOutput({
+    styleSource,
+    expressionProfileVersion: args.expressionProfileVersion,
     failedRlStage,
     narrativePlanStage,
     plan: bound.plan,
@@ -491,6 +633,7 @@ export const createOutcomeShapedCandidateRevision = async (args = {}) => {
     runtimeVersion: new Date(bound.runtime.updatedAt).toISOString(),
   }
   const candidateArgs = {
+    styleSource,
     plan: bound.plan,
     runtimeInstanceId: args.runtimeInstanceId,
     expectedPlanFingerprint: args.expectedPlanFingerprint,
@@ -514,6 +657,7 @@ export const createOutcomeShapedCandidateRevision = async (args = {}) => {
     expectedAttemptFingerprint: candidate.attemptFingerprint,
     actorUserId: args.actorUserId,
     remediationSourceStageExecutionId: failedRlStage.stageExecutionId,
+    scopes: args.scopes,
     requestBinding: args.requestBinding,
     deps: args.deps?.stageDeps || {},
   })

@@ -199,6 +199,7 @@ export const evaluateDiscoveryContractRuntime = ({
     createdAt: evidencePack.refreshedAt || evidencePack.acceptedAt,
     evidenceObjects: evidencePack.evidenceObjects,
     inputs: evidencePack.inputs,
+    sourceRegistry: evidencePack.sourceRegistry || evidencePack.acquisition?.sourceRegistry,
     sources: lineageSources,
   })
   const rawEvidenceById = new Map(

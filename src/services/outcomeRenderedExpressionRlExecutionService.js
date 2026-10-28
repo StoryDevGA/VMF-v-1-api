@@ -1,6 +1,12 @@
 import mongoose from 'mongoose'
+import { createHash } from 'node:crypto'
+import { buildLiveTestEffectivePayload, buildLiveTestRequestFingerprint } from './governedReasoningRuntimeService.js'
+import { buildOutcomeStudioProviderSafeRequest } from './outcomeStudioProviderSafeContextService.js'
+import { normalizeOutcomeRenderedExpressionRlProviderOutput } from './openAiOutcomeRenderedExpressionRlProviderAdapter.js'
 import { loadOutcomeMethodDocument } from './outcomeMethodDocumentService.js'
 import { loadOutcomeKnowledgePackVersionContent } from './outcomeKnowledgePackRegistryService.js'
+import { assertCommercialOutputContract } from '../utils/outcomeCommercialExpressionProfile.js'
+import { COMMERCIAL_RL_CONTEXT_VERSION, loadCommercialReviewDocuments } from './commercialOutputReviewContract.js'
 
 import {
   OUTCOME_QUALITY_STAGE_OUTPUT_TYPES,
@@ -91,6 +97,16 @@ const planScope = (requestBinding) => requestBinding
   ? { requestId: requestBinding.requestId }
   : { requestId: { $exists: false } }
 
+const reviewIdentity = (source) => {
+  const commercial = source?.outputSnapshot?.candidateType === 'COMMERCIAL_STRATEGY_AND_DECISION_PAPER'
+  return {
+    commercial,
+    contextVersion: commercial ? COMMERCIAL_RL_CONTEXT_VERSION : OUTCOME_RENDERED_EXPRESSION_RL_PROVIDER_SAFE_CONTEXT_VERSION,
+    styleKey: commercial ? 'selected-output-expression-review' : 'executive-brief-review',
+    label: commercial ? 'Commercial Strategy and Decision Paper' : 'Executive Brief',
+  }
+}
+
 const stageScope = (requestBinding) => requestBinding
   ? {
       requestId: requestBinding.requestId,
@@ -167,7 +183,7 @@ const buildBinding = (plan) => {
   return { stage, pack }
 }
 
-export const buildOutcomeRenderedExpressionRlKnowledgeFacade = ({ plan, binding }) => {
+export const buildOutcomeRenderedExpressionRlKnowledgeFacade = ({ plan, binding, source }) => {
   const pack = { ...binding.pack }
   const layer = upper(pack.knowledgeLayer)
   const postValidationPacks = [pack]
@@ -206,7 +222,7 @@ export const buildOutcomeRenderedExpressionRlKnowledgeFacade = ({ plan, binding 
         policyVersion: text(plan.payload.resolution.policyVersion),
         request: {
           requestedOutputTypeKey: 'rendered-expression-rl',
-          requestedStyleKey: 'executive-brief-review',
+          requestedStyleKey: reviewIdentity(source).styleKey,
         },
       },
       lineage: {
@@ -219,8 +235,8 @@ export const buildOutcomeRenderedExpressionRlKnowledgeFacade = ({ plan, binding 
   }
 }
 
-const buildProviderInput = () => ({
-  customerPrompt: 'Review this Executive Brief rendered expression against the seven required RL dimensions.',
+export const buildOutcomeRenderedExpressionRlProviderInput = (source) => ({
+  customerPrompt: `Review this ${reviewIdentity(source).label} rendered expression against the seven required RL dimensions.`,
   currentDraftMarkdown: '',
   request: {
     intentType: 'RENDERED_EXPRESSION_RL',
@@ -229,10 +245,10 @@ const buildProviderInput = () => ({
     outputTypeLabel: 'Rendered-expression RL review',
     outputSchemaKey: 'fs-003-rendered-expression-rl-v0-2',
     requiredSections: [...REQUIRED_DIMENSIONS],
-    styleKey: 'executive-brief-review',
-    styleLabel: 'Executive Brief expression review',
+    styleKey: reviewIdentity(source).styleKey,
+    styleLabel: `${reviewIdentity(source).label} expression review`,
     requestedOutputTypeKey: 'rendered-expression-rl',
-    requestedStyleKey: 'executive-brief-review',
+    requestedStyleKey: reviewIdentity(source).styleKey,
     workspaceType: 'PLATFORM',
   },
 })
@@ -279,11 +295,11 @@ export const buildOutcomeRenderedExpressionRlFailureLineage = ({ latestRl, sourc
   }
 }
 
-const persistFailure = async ({
+export const persistOutcomeRenderedExpressionRlFailure = async ({
   actorUserId, createStage, expectedPlanFingerprint, failureCode, grrExecutionId = '',
   grrRuntimeArtifactId = '', latestRl, plan, providerDescriptor, retryable, runtimeInstanceId,
   runtimeVersion, source, stageDeps, startedAt,
-  requestBinding,
+  requestBinding, scopes, completedAt,
 }) => {
   const failureLineage = buildOutcomeRenderedExpressionRlFailureLineage({ latestRl, source })
   const args = {
@@ -296,7 +312,7 @@ const persistFailure = async ({
     status: OUTCOME_QUALITY_STAGE_STATUSES.FAILED,
     failure: {
       failureCode,
-      safeReason: 'Rendered-expression RL did not pass the exact Executive Brief candidate.',
+      safeReason: `Rendered-expression RL did not pass the exact ${reviewIdentity(source).label} candidate.`,
       retryable,
     },
     executionIdentity: {
@@ -309,7 +325,7 @@ const persistFailure = async ({
       runtimeVersion,
     },
     startedAt,
-    completedAt: new Date().toISOString(),
+    completedAt: completedAt || new Date().toISOString(),
     requestBinding,
   }
   const candidate = buildOutcomeQualityStageExecutionCandidate(args)
@@ -321,8 +337,62 @@ const persistFailure = async ({
     expectedAttemptFingerprint: candidate.attemptFingerprint,
     actorUserId,
     requestBinding,
+    scopes,
     deps: stageDeps,
   })
+}
+
+// Persistence-only recovery. This function has no provider adapter/factory or GRR executor.
+// The caller owns the signed journal fence and verifies immutable provider/audit hashes.
+export const assertSavedOutcomeRenderedExpressionRlFailure = ({ execution, artifact, source, plan, runtime, classification }) => {
+  assertSource({ source, plan, runtimeInstanceId: toId(runtime._id || runtime.id) })
+  const binding = buildBinding(plan)
+  const review = reviewIdentity(source)
+  if (review.commercial) assertCommercialOutputContract(source.outputSnapshot.outputContract, { plan })
+  const providerDescriptor = { providerKey: 'openai', model: text(execution.provider?.model), providerMode: 'LIVE_TEST',
+    environment: 'TEST', safeContextPolicyKey: OUTCOME_STUDIO_PROVIDER_SAFE_CONTEXT_POLICY, failurePosture: 'FAIL_CLOSED' }
+  const bindingFingerprint = hashOutcomeQualityStageValue({ targetStage: OUTCOME_QUALITY_STAGES.RENDERED_EXPRESSION_RL,
+    planFingerprint: plan.planFingerprint, sourceStageExecutionId: source.stageExecutionId,
+    sourceAttemptFingerprint: source.attemptFingerprint, sourceOutputFingerprint: source.outputFingerprint,
+    providerContextVersion: review.contextVersion })
+  const payload = { outputTypeKey: 'RENDERED_EXPRESSION_RL', requestedOutputTypeKey: 'rendered-expression-rl',
+    requestedStyleKey: review.styleKey, executionIntent: `Review the exact ${review.label} rendered expression without changing meaning.`,
+    idempotencyKey: `RENDERED_EXPRESSION_RL:${plan.planId}:v${plan.planVersion}:${bindingFingerprint.slice(0, 24)}`,
+    workspaceType: 'PLATFORM', manifestId: plan.planId }
+  const safeRequest = buildOutcomeStudioProviderSafeRequest({ providerDescriptor, providerInput: buildOutcomeRenderedExpressionRlProviderInput(source) })
+  const requestFingerprint = buildLiveTestRequestFingerprint({ payload: buildLiveTestEffectivePayload({ payload, safeRequest }),
+    providerContextBindingFingerprint: bindingFingerprint, providerContextContractVersion: review.contextVersion,
+    providerDescriptor, runtimeInstance: runtime, safeRequest })
+  const fingerprint = 'sha256:' + createHash('sha256').update(JSON.stringify({ requestFingerprint, syntheticClassification: classification })).digest('hex')
+  const generatedOutput = normalizeOutcomeRenderedExpressionRlProviderOutput(artifact.generatedOutput)
+  const same = (a, b) => hashOutcomeQualityStageValue(a) === hashOutcomeQualityStageValue(b)
+  const metadata = artifact.safeJson?.metadata
+  const times = [execution.requestedAt, execution.completedAt].map(toIso)
+  if (generatedOutput.overallStatus !== 'FAIL' || !same(generatedOutput, artifact.generatedOutput)
+    || !same(artifact.safeJson?.output, artifact.generatedOutput)
+    || execution.executionEvidence?.providerContextContractVersion !== review.contextVersion
+    || execution.requestFingerprint !== fingerprint || execution.executionEvidence?.requestFingerprint !== fingerprint
+    || execution.idempotencyKey !== payload.idempotencyKey || execution.knowledgeManifest?.manifestId !== plan.planId
+    || !same(execution.knowledgeBinding?.lineage?.activationIds, [binding.pack.activationId])
+    || !same(execution.knowledgeBinding?.lineage?.versionIds, [binding.pack.versionId])
+    || !same(execution.knowledgeBinding?.lineage?.contentHashes, [lower(binding.pack.contentHash)])
+    || !same(execution.provider, artifact.safeJson?.provider) || execution.provider?.providerKey !== 'openai'
+    || !providerDescriptor.model || execution.providerMode !== 'LIVE_TEST' || execution.provider?.liveProvider !== true
+    || metadata?.configurationVersion !== OUTCOME_RENDERED_EXPRESSION_RL_PROVIDER_CONFIG_VERSION
+    || metadata?.responseSchema?.version !== OUTCOME_RENDERED_EXPRESSION_RL_SCHEMA_VERSION
+    || metadata?.responseSchema?.strict !== true || metadata?.responseSchema?.parsed !== true
+    || !times[0] || !times[1] || times[0] > times[1] || times[1] > new Date().toISOString()) throw lineageInvalid('savedFailure')
+  return { providerDescriptor, startedAt: times[0], completedAt: times[1] }
+}
+export const persistSavedOutcomeRenderedExpressionRlFailure = async ({ execution, artifact, source, plan, runtime, classification,
+  actorUserId, scopes, requestBinding, deps = {} }) => {
+  const verified = assertSavedOutcomeRenderedExpressionRlFailure({ execution, artifact, source, plan, runtime, classification })
+  return persistOutcomeRenderedExpressionRlFailure({ ...verified, actorUserId, scopes, requestBinding,
+    createStage: deps.createOutcomeQualityStageExecution || createOutcomeQualityStageExecution,
+    expectedPlanFingerprint: plan.planFingerprint, failureCode: 'RENDERED_EXPRESSION_RL_REQUIRED_CHANGE',
+    grrExecutionId: execution.executionId, grrRuntimeArtifactId: artifact.runtimeArtifactId, latestRl: null,
+    plan, retryable: false, runtimeInstanceId: toId(runtime._id || runtime.id), runtimeVersion: toIso(runtime.updatedAt),
+    source, stageDeps: deps.stageDeps || {} })
 }
 
 export const executeOutcomeRenderedExpressionRl = async ({
@@ -372,6 +442,8 @@ export const executeOutcomeRenderedExpressionRl = async ({
     }),
   ])
   const source = assertSource({ source: sourceRecord, plan, runtimeInstanceId })
+  const review = reviewIdentity(source)
+  if (review.commercial) assertCommercialOutputContract(source.outputSnapshot.outputContract, { plan })
   if (latestRl) {
     if (latestRl.status === SUCCESS) {
       if (latestRl.predecessorStageExecutionId !== source.stageExecutionId
@@ -397,7 +469,7 @@ export const executeOutcomeRenderedExpressionRl = async ({
     sourceStageExecutionId: source.stageExecutionId,
     sourceAttemptFingerprint: source.attemptFingerprint,
     sourceOutputFingerprint: source.outputFingerprint,
-    providerContextVersion: OUTCOME_RENDERED_EXPRESSION_RL_PROVIDER_SAFE_CONTEXT_VERSION,
+    providerContextVersion: review.contextVersion,
   })
   const createGrr = deps.createGovernedReasoningExecution || createGovernedReasoningExecution
   const createStage = deps.createOutcomeQualityStageExecution || createOutcomeQualityStageExecution
@@ -410,8 +482,8 @@ export const executeOutcomeRenderedExpressionRl = async ({
       payload: {
         outputTypeKey: 'RENDERED_EXPRESSION_RL',
         requestedOutputTypeKey: 'rendered-expression-rl',
-        requestedStyleKey: 'executive-brief-review',
-        executionIntent: 'Review the exact Executive Brief rendered expression without changing meaning.',
+        requestedStyleKey: review.styleKey,
+        executionIntent: `Review the exact ${review.label} rendered expression without changing meaning.`,
         idempotencyKey: `RENDERED_EXPRESSION_RL:${plan.planId}:v${plan.planVersion}:${bindingFingerprint.slice(0, 24)}`,
         workspaceType: 'PLATFORM',
         manifestId: plan.planId,
@@ -420,8 +492,8 @@ export const executeOutcomeRenderedExpressionRl = async ({
         executionMode: 'LIVE_TEST',
         providerAdapter,
         providerDescriptor,
-        providerInput: buildProviderInput(),
-        resolveKnowledgeBinding: async () => buildOutcomeRenderedExpressionRlKnowledgeFacade({ plan, binding }),
+        providerInput: buildOutcomeRenderedExpressionRlProviderInput(source),
+        resolveKnowledgeBinding: async () => buildOutcomeRenderedExpressionRlKnowledgeFacade({ plan, binding, source }),
         buildProviderSafeContext: async ({ boundarySelection, ...args }) => buildOutcomeRenderedExpressionRlProviderSafeContext({
           ...args,
           methodDocument: await loadOutcomeMethodDocument({
@@ -431,9 +503,13 @@ export const executeOutcomeRenderedExpressionRl = async ({
           knowledgeSelection: boundarySelection,
           sourceStageExecution: source,
           targetStageKey: OUTCOME_QUALITY_STAGES.RENDERED_EXPRESSION_RL,
+          ...(review.commercial ? { outputContractDocuments: await loadCommercialReviewDocuments({
+            contract: source.outputSnapshot.outputContract,
+            loadPackContent: deps.loadPackContent || loadOutcomeKnowledgePackVersionContent,
+          }) } : {}),
         }),
         assertProviderSafeContext: assertOutcomeRenderedExpressionRlProviderSafeContext,
-        providerContextContractVersion: OUTCOME_RENDERED_EXPRESSION_RL_PROVIDER_SAFE_CONTEXT_VERSION,
+        providerContextContractVersion: review.contextVersion,
         providerContextBindingFingerprint: bindingFingerprint,
       },
       runtimeInstanceId,
@@ -442,11 +518,11 @@ export const executeOutcomeRenderedExpressionRl = async ({
   } catch (providerError) {
     const reason = providerError?.details?.reason
     if (providerError?.code !== 'OUTCOME_RENDERED_EXPRESSION_RL_PROVIDER_FAILED' || !PROVIDER_REASONS.has(reason)) throw providerError
-    const failure = await persistFailure({
+    const failure = await persistOutcomeRenderedExpressionRlFailure({
       actorUserId, createStage, expectedPlanFingerprint, failureCode: reason, plan,
       latestRl, providerDescriptor, retryable: RETRYABLE_PROVIDER_REASONS.has(reason), runtimeInstanceId,
       runtimeVersion, source, stageDeps: deps.stageDeps || {}, startedAt,
-      requestBinding,
+      requestBinding, scopes,
     })
     return { idempotent: failure.idempotent, grr: null, stage: failure.execution }
   }
@@ -461,12 +537,12 @@ export const executeOutcomeRenderedExpressionRl = async ({
     || grr?.provider?.providerMode !== 'LIVE_TEST'
     || grr?.provider?.liveProvider !== true) throw lineageInvalid('grrResult')
   if (upper(generatedOutput.overallStatus) !== 'PASS') {
-    const failure = await persistFailure({
+    const failure = await persistOutcomeRenderedExpressionRlFailure({
       actorUserId, createStage, expectedPlanFingerprint,
       failureCode: 'RENDERED_EXPRESSION_RL_REQUIRED_CHANGE', grrExecutionId, grrRuntimeArtifactId,
       latestRl, plan, providerDescriptor, retryable: false, runtimeInstanceId, runtimeVersion, source,
       stageDeps: deps.stageDeps || {}, startedAt,
-      requestBinding,
+      requestBinding, scopes,
     })
     return { idempotent: failure.idempotent, grr: { executionId: grrExecutionId, runtimeArtifactId: grrRuntimeArtifactId }, stage: failure.execution }
   }
